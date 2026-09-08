@@ -33,7 +33,7 @@ namespace {
 constexpr wchar_t kHighD83D = static_cast<wchar_t>(0xD83D);
 constexpr wchar_t kHighD83E = static_cast<wchar_t>(0xD83E);
 constexpr wchar_t kLowDE00 = static_cast<wchar_t>(0xDE00);
-constexpr wchar_t kLowDCA9 = static_cast<wchar_t>(0xDCA9);
+constexpr wchar_t kLowDD2A = static_cast<wchar_t>(0xDD2A);
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -82,9 +82,9 @@ TEST_CASE("代理对配对:连续两枚高代理,前一枚孤立交 U+FFFD,新�
     CHECK(second.cp == kReplacementCodePoint);
     REQUIRE(machine.pending_high.has_value());
     CHECK(*machine.pending_high == kHighD83E);
-    const auto third = machine.Feed(kLowDCA9);
+    const auto third = machine.Feed(kLowDD2A);
     CHECK(third.kind == SurrogateFeedResult::Kind::CodePoint);
-    CHECK(third.cp == U'\x1F629');  // 😩(D83E DCA9)
+    CHECK(third.cp == U'\x1F92A');  // 🤪(D83E DD2A:0x10000+(0x3E<<10)+0x12A)
 }
 
 TEST_CASE("代理对配对:Reset 勾销陈旧 pending,半截代理对不污染下一笔输入") {
@@ -99,11 +99,11 @@ TEST_CASE("代理对配对:Reset 勾销陈旧 pending,半截代理对不污染�
 }
 
 TEST_CASE("代理对配对:emoji 面板拆半逐键重放,码点流保真") {
-    // 流:D83D DE00 | 'a' | D83D 'b' | D83D D83E DE00 | 孤立 DCA9
-    // 账:😀 一次、'a' 一次、孤立高 FFFD 后 'b' 重放、孤立高 FFFD 后
-    //     😀 一次、孤立低 FFFD。
+    // 流:D83D DE00 | 'a' | D83D 'b' | D83D D83E DE00 | 孤立 DD2A
+    // 账:😀(U+1F600) 一次、'a' 一次、孤立高 FFFD 后 'b' 重放、孤立高
+    //     FFFD 后 D83E DE00 的配对值(U+1F800)一次、孤立低 FFFD。
     const std::vector<wchar_t> stream = {
-        kHighD83D, kLowDE00, U'a', kHighD83D, U'b', kHighD83D, kHighD83E, kLowDE00, kLowDCA9,
+        kHighD83D, kLowDE00, U'a', kHighD83D, U'b', kHighD83D, kHighD83E, kLowDE00, kLowDD2A,
     };
     std::vector<char32_t> delivered;
     SurrogatePairState machine;
@@ -121,7 +121,7 @@ TEST_CASE("代理对配对:emoji 面板拆半逐键重放,码点流保真") {
     }
     const std::vector<char32_t> expected = {
         U'\x1F600', U'a', kReplacementCodePoint, U'b',
-        kReplacementCodePoint, U'\x1F600', kReplacementCodePoint,
+        kReplacementCodePoint, U'\x1F800', kReplacementCodePoint,
     };
     REQUIRE(delivered.size() == expected.size());
     for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -280,12 +280,13 @@ TEST_CASE("UTF-8 首字节形状:ASCII/2/3/4 字节与非法首字节") {
 TEST_CASE("UTF-8 标量校验:超长/代理项/超范围一律不合法") {
     CHECK(IsValidUtf8Scalar(U'a', 0));
     CHECK(IsValidUtf8Scalar(U'\x00E9', 1));      // C3 A9
+    CHECK(IsValidUtf8Scalar(U'\x07FF', 1));      // 2 字节序列的合法上限
     CHECK_FALSE(IsValidUtf8Scalar(U'/', 1));     // C0 AF:超长
     CHECK(IsValidUtf8Scalar(U'\x4E2D', 2));      // E4 B8 AD
+    CHECK(IsValidUtf8Scalar(U'\x0800', 2));      // 0x800 起才用得上 3 字节
     CHECK_FALSE(IsValidUtf8Scalar(U'\xD800', 2));  // ED A0 80:代理项
     CHECK(IsValidUtf8Scalar(U'\x1F600', 3));     // F0 9F 98 80
     CHECK_FALSE(IsValidUtf8Scalar(U'\x110000', 3));  // F4 90 80 80:超范围
-    CHECK_FALSE(IsValidUtf8Scalar(U'\x0800', 1));    // 0x800 编不满 2 字节
 }
 
 // ---------------------------------------------------------------------------

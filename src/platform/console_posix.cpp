@@ -176,14 +176,16 @@ KeyInput ReadBracketedPaste(const std::atomic<bool>* cancel_flag) {
             break;
         }
         const auto total_left = deadline - now;
-        // 等待片 = min(空闲余量, 总时限余量, 取消切片),整数毫秒账
-        // (chrono 的异种 duration 进 initializer_list 推不出单一类型)。
+        // 等待片 = min(空闲余量, 总时限余量, 取消切片) 再垫到至少 1ms,整数
+        // 毫秒账(chrono 的异种 duration 进 initializer_list 推不出单一类型)。
+        // 切片取小是取消可达的根:25ms 一片,停止请求最迟下一片就被看见;
+        // 取成 max 会把整段空闲期限熬成一片,取消旗形同虚设(CI 看门狗册逮过)。
         const long long idle_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(idle_left).count();
         const long long total_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(total_left).count();
-        const long long wait_ms = std::max(
-            {1LL, std::min(idle_ms, total_ms), static_cast<long long>(kPasteCancelSliceMs)});
+        const long long wait_ms =
+            std::max(1LL, std::min({idle_ms, total_ms, static_cast<long long>(kPasteCancelSliceMs)}));
         const int byte = ReadByteSlice(static_cast<int>(wait_ms));
         if (byte == -2) {
             continue;  // 这一片没等到:回圈头查取消/总时限/空闲
