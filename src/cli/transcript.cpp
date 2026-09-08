@@ -4,6 +4,7 @@
 #include <map>
 #include <string_view>
 
+#include "cli/grapheme.hpp"  // SplitGraphemes:WrapPreviewLine 掐头按簇
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth / WrapToDisplayWidth / DisplayWidth
 #include "cli/markdown.hpp"
@@ -127,7 +128,8 @@ inline std::u32string SanitizePreviewLine(const std::u32string& line) {
 
 // 一条(已清洗的)逻辑行折成视觉行;巨长行先掐头(露尾只要末几行,头
 // 部折了也是白折):显示宽超过 reserve_cols 就从头上削到剩余约
-// reserve_cols 列。削在码点边界(u32string 天然安全),O(行长) 一次。
+// reserve_cols 列。削在字素簇边界(Unicode emoji 治理单 P1:不从
+// ZWJ 序列/组合序列中间起头,否则预览开头就是半个 emoji),O(行长) 一次。
 inline std::vector<std::u32string> WrapPreviewLine(const std::u32string& line, int wrap_width, int reserve_cols) {
     if (static_cast<int>(DisplayWidth(line)) <= reserve_cols) {
         return WrapToDisplayWidth(line, wrap_width);
@@ -136,9 +138,12 @@ inline std::vector<std::u32string> WrapPreviewLine(const std::u32string& line, i
     const std::size_t keep = static_cast<std::size_t>(reserve_cols);
     std::size_t seen = 0;
     std::size_t cut = 0;
-    while (cut < line.size() && seen + keep < total) {
-        seen += static_cast<std::size_t>(CharDisplayWidth(line[cut]));
-        ++cut;
+    for (const GraphemeCluster& cluster : SplitGraphemes(line)) {
+        if (seen + keep >= total) {
+            break;
+        }
+        seen += static_cast<std::size_t>(cluster.width);
+        cut = cluster.end;
     }
     return WrapToDisplayWidth(line.substr(cut), wrap_width);
 }

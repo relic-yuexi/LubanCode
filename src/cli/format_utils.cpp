@@ -1,6 +1,7 @@
 #include "cli/format_utils.hpp"
 
-#include "cli/line_editor.hpp"  // Utf8ToUtf32/CharDisplayWidth:WrapStatusRows 的宽度账
+#include "cli/grapheme.hpp"  // SplitUtf8Graphemes/SplitGraphemes:WrapStatusRows 的簇宽度账
+#include "cli/line_editor.hpp"  // Utf8ToUtf32:WrapStatusRows 的解码
 
 #include <algorithm>
 #include <cmath>
@@ -660,25 +661,29 @@ std::vector<std::string> WrapStatusRows(const std::string& utf8, int width) {
             i = end;
             continue;
         }
-        std::size_t bytes = 1;
-        if ((lead & 0xE0U) == 0xC0U) {
-            bytes = 2;
-        } else if ((lead & 0xF0U) == 0xE0U) {
-            bytes = 3;
-        } else if ((lead & 0xF8U) == 0xF0U) {
-            bytes = 4;
+        // Unicode emoji 治理单 P1:普通文本按字素簇切成单元(ZWJ 序列/
+        // 肤色/附标整簇一个 Unit),量宽与折行同 line_editor/terminal_frame
+        // 一把尺——同一段 emoji 不许两处两种几何。段切到下一个 ESC 字节
+        // 为止(裸 ESC 与 CSI 都由上面的转义分支接管);空格/全角空格都
+        // 是单码点簇,断点资格看簇首即够。
+        const std::size_t seg_end = utf8.find('\x1b', i + 1);
+        const std::size_t seg_len = (seg_end == std::string::npos ? utf8.size() : seg_end) - i;
+        const std::string_view seg = std::string_view(utf8).substr(i, seg_len);
+        for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(seg)) {
+            const std::u32string decoded = Utf8ToUtf32(std::string(seg.substr(glyph.begin, glyph.len)));
+            Unit unit;
+            unit.bytes = std::string(seg.substr(glyph.begin, glyph.len));
+            unit.width = glyph.width;  // 坏字节回退簇自带宽 1,与旧口径一致
+            if (!decoded.empty()) {
+                const std::vector<GraphemeCluster> clusters = SplitGraphemes(decoded);
+                if (!clusters.empty()) {
+                    unit.width = clusters.front().width;
+                }
+                unit.is_space = decoded[0] == U' ' || decoded[0] == U'　';
+            }
+            units.push_back(std::move(unit));
         }
-        bytes = (std::min)(bytes, utf8.size() - i);
-        const std::string chunk = utf8.substr(i, bytes);
-        const std::u32string decoded = Utf8ToUtf32(chunk);
-        Unit unit;
-        unit.bytes = chunk;
-        if (!decoded.empty()) {
-            unit.width = CharDisplayWidth(decoded[0]);
-            unit.is_space = decoded[0] == U' ' || decoded[0] == U'　';
-        }
-        units.push_back(std::move(unit));
-        i += bytes;
+        i += seg_len;
     }
     // 空格断点资格:其后紧跟收口符的空格不许当断点(收口符要跟上一个词)。
     for (std::size_t u = 0; u < units.size(); ++u) {

@@ -4,6 +4,7 @@
 #include <functional>
 
 #include "cli/divider.hpp"
+#include "cli/grapheme.hpp"
 
 namespace lubancode::cli {
 
@@ -86,8 +87,11 @@ int PlainDisplayWidth(const std::string& text) {
 
 // 状态行由调用方拼好、自带主题色(与队列/坞行"外包色"的 tinted 路不同),
 // 是最后一步落帧的行。宽度感知按约定在调用方,但渲染层给最后一道兜:
-// 超宽时按显示宽截断——CSI 转义序列不占宽、永不被劈,截在色段中间就补
-// 一枚 reset,别把开着的颜色漏到帧外;末列照铁律留白不写字。
+// 超宽时按显示宽截断——按字素簇下刀(Unicode emoji 治理单 P1:同一段
+// emoji 在 footer 与 composer 不许两种几何),CSI 转义序列不占宽、永不
+// 被劈,截在色段中间就补一枚 reset,别把开着的颜色漏到帧外;末列照铁律
+// 留白不写字。样式段(CSI)天然是簇边界:调用方拼行时样式总在词边界,
+// 极端输入下"样式插进簇中间"会把簇割开按两簇算,几何仍守界。
 std::string ClampAnsiRowToWidth(const std::string& row, int width) {
     if (width <= 1) {
         return row;
@@ -109,31 +113,20 @@ std::string ClampAnsiRowToWidth(const std::string& row, int width) {
             i = j;
             continue;
         }
-        // 解一个 UTF-8 码点,量宽。
-        const unsigned char lead = static_cast<unsigned char>(row[i]);
-        std::size_t len = 1;
-        char32_t cp = lead;
-        if ((lead & 0xE0U) == 0xC0U) {
-            cp = lead & 0x1FU;
-            len = 2;
-        } else if ((lead & 0xF0U) == 0xE0U) {
-            cp = lead & 0x0FU;
-            len = 3;
-        } else if ((lead & 0xF8U) == 0xF0U) {
-            cp = lead & 0x07U;
-            len = 4;
+        // 一段纯文本(到下一个 CSI 或串尾)按字素簇量宽收取。
+        const std::size_t seg_end = row.find("\x1b[", i + 1);
+        const std::size_t seg_len = (seg_end == std::string::npos ? row.size() : seg_end) - i;
+        for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(std::string_view(row).substr(i, seg_len))) {
+            if (used + glyph.width > limit) {
+                cut = true;
+                break;
+            }
+            out.append(row, i + glyph.begin, glyph.len);
+            used += glyph.width;
         }
-        for (std::size_t k = 1; k < len && i + k < row.size(); ++k) {
-            cp = (cp << 6) | (static_cast<unsigned char>(row[i + k]) & 0x3FU);
+        if (!cut) {
+            i += seg_len;
         }
-        const int w = lubancode::cli::CharDisplayWidth(cp);
-        if (used + w > limit) {
-            cut = true;
-            break;
-        }
-        out.append(row, i, len);
-        used += w;
-        i += len;
     }
     if (!cut) {
         return row;  // 没超宽:原样返回,不添一枚多余 reset。
