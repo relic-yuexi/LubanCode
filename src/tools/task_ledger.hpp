@@ -600,10 +600,12 @@ public:
     std::string DrainCompletionNotices();
 
     // ---- 后台递归的结果归父(P0-4)----
-    // 子任务线程收尾后调:delivery=ParentTaskInbox 且父仍活,则把结构化
-    // ChildCompletion 项排进父 mailbox(带"外来资料"来路声明),子任务的
-    // delivered 翻真,并唤醒等孩子的父。父已不活(看门狗强收的绝境)则
-    // 保持未送达,收场报告照列——不 reparent,不悄悄改投 main。
+    // 投递的常态入口是 FinalizeFromToolResult(deliver_to_parent=true):
+    // 终态翻页与投父邮箱同一个持锁段完成(回流锁缝单)。这个独立口留给
+    // 需要单独补投的调用方与测试:delivery=ParentTaskInbox 且父仍活,则把
+    // 结构化 ChildCompletion 项排进父 mailbox(带"外来资料"来路声明),
+    // 子任务的 delivered 翻真,并唤醒等孩子的父。父已不活(看门狗强收的
+    // 绝境)则保持未送达,收场报告照列——不 reparent,不悄悄改投 main。
     bool DeliverChildCompletion(const std::shared_ptr<TaskRecord>& child);
     // ChildCompletion 项的模型侧投影(来路声明 + 状态 + 结果),续投拼批
     // 与 mailbox 详情共用同一只 formatter(单子 §9.2)。
@@ -734,8 +736,13 @@ public:
     //(面板 x / 父轮 ESC 算用户中止)、清活度账、finalized 置位。看门狗已
     // 强制收账时只报收尾不翻账。watchdog 由调用方 join(线程句柄在
     // TaskRecord 上)。
+    // deliver_to_parent(回流锁缝单):后台嵌套任务线程收尾时置真——终态
+    // 翻页与投父邮箱在同一个持锁段内完成(NotifyStateChangeLocked 之前),
+    // 等孩子的父被叫醒时邮箱已喂饱,不再有"终态先于投递"的缝。其余调用方
+    // 缺省 false:前台/派工即败的结果经 Tool::Result 同步回调用者,不走
+    // mailbox,投了反而是父见两遍。
     void FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task, const std::string& result_content,
-                                bool cancelled_by_stop_signal);
+                                bool cancelled_by_stop_signal, bool deliver_to_parent = false);
     // 看门狗强制收账(墙钟绝境):状态翻 Failed/WallClockTimeout,force_
     // finalized 置位——任务线程晚到的收尾不得再翻回去。
     void ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task, int timeout_secs);
@@ -749,6 +756,12 @@ private:
     bool HasUndeliveredInboxLocked(const TaskRecord& task) const;
     std::size_t AliveChildCountLocked(int parent_task_id) const;
     void NotifyStateChangeLocked();
+    // DeliverChildCompletion 的锁内体(回流锁缝单):调用方须已持 mutex。
+    // 锁序与既有写口同向——台账锁 -> 父 inbox_mutex(SendMessage/
+    // SealOrContinueInbox/RestoreDrainedInbox 全是这个方向,无一例反向),
+    // 投递路径上不再拿别的锁,不成环。投完不自行 notify:由调用方在紧随
+    // 的 NotifyStateChangeLocked 里一并叫醒,保证 notify 落地时父邮箱已喂饱。
+    bool DeliverChildCompletionLocked(const std::shared_ptr<TaskRecord>& child);
     // agent_watch 的唤醒源(P1-0):监督可见修订动一笔就 ++ 并 notify。
     // 调用方须已持 mutex(谓词同锁读,无丢醒)。
     void NotifyWatchChangeLocked();

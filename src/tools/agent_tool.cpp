@@ -1844,11 +1844,17 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
             // 收尾前点一遍没送达的介入消息:任务都要结束了,排着的信没有下一个
             // 轮次边界可等——逐条列原文记进结果文本,不无声遗失。
             result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+            // 结果归父(P0-4 + 回流锁缝单):嵌套后台任务的完成进直接父
+            // mailbox。终态翻页与投递在 FinalizeFromToolResult 的同一个持锁段
+            // 里完成(deliver_to_parent)——notify 落地时父邮箱已喂饱,不再有
+            // "终态先于投递、父提前封账"的缝;main 根任务照旧由主回合
+            // DrainCompletionNotices 取,投递口对它天然空转。锁内投递失败只有
+            // 稳态原因(父真死/封账/去处不符),这里不再补第二把锁的显式
+            // 投递——退信(RestoreDrainedInbox)把 delivered 翻回 false 的微秒
+            // 窗里重投会造成父见两遍。
             coordinator_->ledger().FinalizeFromToolResult(task, result.content,
-                                                          task->cancel.load(std::memory_order_acquire));
-            // 结果归父(P0-4):嵌套后台任务的完成进直接父 mailbox,唤醒等孩子
-            // 的父;main 根任务照旧由主回合 DrainCompletionNotices 取。
-            coordinator_->ledger().DeliverChildCompletion(task);
+                                                          task->cancel.load(std::memory_order_acquire),
+                                                          /*deliver_to_parent=*/true);
         }));
 
     // §5.3 弃用提示:手写 JSON 给了旧预算键,随启动回执带回(空 = 没用)。

@@ -1237,40 +1237,60 @@ bool TaskLedger::DeliverChildCompletion(const std::shared_ptr<TaskRecord>& child
     if (child == nullptr) {
         return false;
     }
+    bool delivered = false;
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (IsAliveTaskState(child->snapshot.state) || child->snapshot.delivered ||
-            child->snapshot.delivery_target != TaskDeliveryTarget::ParentTaskInbox) {
-            return false;
+        delivered = DeliverChildCompletionLocked(child);
+        if (delivered) {
+            NotifyStateChangeLocked();  // WaitingChildren 的父当拍醒
         }
-        std::shared_ptr<TaskRecord> parent;
-        for (const auto& candidate : tasks_) {
-            if (candidate->snapshot.id == child->snapshot.parent_task_id) {
-                parent = candidate;
-                break;
-            }
-        }
-        if (parent == nullptr || !IsAliveTaskState(parent->snapshot.state) || parent->inbox_closed) {
-            // 父已不活(看门狗强收的绝境):保持未送达,收场报告照列——
-            // 不 reparent,不悄悄改投 main(单子 §8.2)。
-            return false;
-        }
-        child->snapshot.delivered = true;
-        {
-            std::lock_guard<std::mutex> inbox_lock(parent->inbox_mutex);
-            TaskRecord::InboxItem item;
-            item.text = FormatChildCompletion(child->snapshot);
-            item.source = TaskMessageSource::MainAgent;  // 与父侧 steering 同一条注入通道
-            item.kind = TaskMailboxKind::ChildCompletion;
-            item.child_task_id = child->snapshot.id;
-            parent->inbox.push_back(std::move(item));
-        }
-        // 孩子交付是父任务的 meaningful progress(单子 §6.3):指纹必变,
-        // 等孩子的静默计时归零。
-        RecordChildDeliveredLocked(parent);
-        NotifyStateChangeLocked();  // WaitingChildren 的父当拍醒
     }
-    Touch();
+    if (delivered) {
+        Touch();
+    }
+    return delivered;
+}
+
+bool TaskLedger::DeliverChildCompletionLocked(const std::shared_ptr<TaskRecord>& child) {
+    // 锁内体(回流锁缝单):调用方须已持 mutex。锁序核实过——全仓嵌套取锁
+    // 只有"台账锁 -> inbox_mutex"一个方向(SendMessage/SealOrContinueInbox/
+    // RestoreDrainedInbox/PendingMessages/HasUndeliveredInboxLocked 皆然,无
+    // 一例反向),这里只嵌父的 inbox_mutex,同向不成环;RecordChildDelivered
+    // Locked 走 RecordMeaningfulProgressLocked,至多 notify cv,不回头拿锁;
+    // FormatChildCompletion 是纯静态投影。投完不 notify——由调用方在紧随的
+    // NotifyStateChangeLocked 一并叫醒,notify 落地时父邮箱必已喂饱。
+    if (child == nullptr) {
+        return false;
+    }
+    if (IsAliveTaskState(child->snapshot.state) || child->snapshot.delivered ||
+        child->snapshot.delivery_target != TaskDeliveryTarget::ParentTaskInbox) {
+        return false;
+    }
+    std::shared_ptr<TaskRecord> parent;
+    for (const auto& candidate : tasks_) {
+        if (candidate->snapshot.id == child->snapshot.parent_task_id) {
+            parent = candidate;
+            break;
+        }
+    }
+    if (parent == nullptr || !IsAliveTaskState(parent->snapshot.state) || parent->inbox_closed) {
+        // 父已不活(看门狗强收的绝境):保持未送达,收场报告照列——
+        // 不 reparent,不悄悄改投 main(单子 §8.2)。
+        return false;
+    }
+    child->snapshot.delivered = true;
+    {
+        std::lock_guard<std::mutex> inbox_lock(parent->inbox_mutex);
+        TaskRecord::InboxItem item;
+        item.text = FormatChildCompletion(child->snapshot);
+        item.source = TaskMessageSource::MainAgent;  // 与父侧 steering 同一条注入通道
+        item.kind = TaskMailboxKind::ChildCompletion;
+        item.child_task_id = child->snapshot.id;
+        parent->inbox.push_back(std::move(item));
+    }
+    // 孩子交付是父任务的 meaningful progress(单子 §6.3):指纹必变,
+    // 等孩子的静默计时归零。
+    RecordChildDeliveredLocked(parent);
     return true;
 }
 
@@ -1666,7 +1686,8 @@ void TaskLedger::WaitForKeyChange(const std::shared_ptr<TaskRecord>& task) {
 }
 
 void TaskLedger::FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task,
-                                        const std::string& result_content, bool cancelled_by_stop_signal) {
+                                        const std::string& result_content, bool cancelled_by_stop_signal,
+                                        bool deliver_to_parent) {
     {
         std::lock_guard<std::mutex> lock(mutex);
         const agent::AgentHealthState health_before_finalize = task->progress.health;
@@ -1710,7 +1731,17 @@ void TaskLedger::FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task,
         // 正常收口也是健康翻页(P2 钩子要看见 Terminal)。
         EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::HealthChanged,
                                    health_before_finalize, agent::AgentHealthState::Terminal, "task.finalized");
-        NotifyStateChangeLocked();  // 等孩子的父与收柄口当拍醒
+        if (deliver_to_parent) {
+            // 回流锁缝(三犯并案):终态翻页与投父邮箱必须同锁完成。旧序里
+            // 投递是松锁后的下一把锁——父被收尾那记 notify 叫醒,见"活孩子
+            // 零+邮箱空"即封账收口,孩子的投递赶到时父已不活,结果永远未
+            // 送达。这里在 notify 之前投递,锁序 ledger->inbox 与既有写口
+            // 同向(见 DeliverChildCompletionLocked 的核实注释),notify
+            // 落地时父邮箱已喂饱,缝焊死。父真死(强收绝境)时投递自返
+            // false,未送达语义原样保留。
+            DeliverChildCompletionLocked(task);
+        }
+        NotifyStateChangeLocked();  // 等孩子的父与收柄口当拍醒——此刻邮箱已喂饱
     }
     if (task->watchdog.joinable()) {
         task->watchdog.join();
