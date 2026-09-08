@@ -1,6 +1,6 @@
 # 子代理回流锁缝：终态先于投递，父侧提前退场
 
-- 状态：调查已定案，待实现修复；本轮未改生产代码。
+- 状态：已实施（2026-09-09，分支 `worktree-agent-reflow-seam`；定案走甲——终态翻页与投父邮箱并入 FinalizeFromToolResult 同一持锁段，见文末实施纪要）。
 - 日期：2026-09-09
 - 级别：P1（后台子代理再派后台孩子时，父可能拿阶段小结收口、孩子结果落进未送达清单——真丢结果，不只是 CI 抖动）。
 - 升格来源：`todos/subagent_recursion时序抖动_回流等待常数界收敛.todo` 三犯并案侦查的结论（该单 §一"唤醒没在时限内送达"一句与实情不符：唤醒送达且被消费了，是父在"无活孩子"门上提前退场——立本单时已带正）。
@@ -35,3 +35,11 @@
 ## 四、边界
 
 只动 ledger 的收尾/投递/等待三角与对应测试；不碰 agent_tool 的派发合同、不碰 PR #5 的预留/闸文件、不顺带改唤醒识死。
+
+## 五、实施纪要（2026-09-09，甲落地）
+
+- **定案**：甲。锁序核实——全仓嵌套取锁只有"台账锁 -> inbox_mutex"一个方向（SendMessage/SealOrContinueInbox/RestoreDrainedInbox/PendingMessages/HasUndeliveredInboxLocked 皆然，无一例反向），投递并入收尾锁内只嵌父 inbox_mutex，同向不成环，不破不变量，甲可根治。
+- **改法**：`FinalizeFromToolResult` 加尾参 `deliver_to_parent`（缺省 false）：置真时在持锁段内、`NotifyStateChangeLocked()` 之前调新拆出的 `DeliverChildCompletionLocked`——notify 落地时父邮箱已喂饱。公开口 `DeliverChildCompletion` 改为锁内体的壳（自带 notify），语义不变。只有 agent_tool.cpp 后台线程收尾一处传 true；前台（delivered 注册即真）与派工即败（失败文本经启动回执同步回调用者，走邮箱会父见两遍）保持缺省。
+- **顺带删了旧显式投递**（agent_tool.cpp:1851 的 `DeliverChildCompletion` 跟投）：锁内投递的失败态除"delivered 被 RestoreDrainedInbox 翻回"外全是稳态（父真死/封账/去处不符，皆单向），跟投保护价值为零；退信微秒窗里重投反会造成父见两遍。公开投递口保留（测试钉其"父不活不改投 main"的合同）。
+- **测试**（tests/unit/agent/test_subagent_recursion.cpp 新增两册）：①竞态回归——白盒镜像生产续投环（取件/封账/WaitingChildren 条件变量等待），父线程先泊进等待，孩子 `FinalizeFromToolResult(deliver_to_parent=true)` 后线程多活 25ms（把三犯那拍调度抖放大成确定次序），断言父恰收一批 ChildCompletion（带"外来资料"声明）、delivered 真、root result 是最终结论；轮询看门狗（5s 不走完 CancelTask 叫醒）保测试不挂死；20 轮连跑。②父真死语义——父先收口孩子才收尾，锁内投递自返 false，保持未送达、不 reparent、不改投 main（main 三查询口摸不到嵌套账）。
+- **边界遵守**：看门狗强收（ForceFinalizeWallClock/NoProgress）路径未动——那条道上孩子终态仍先于（晚到的）投递，属"真死照旧"的既有语义，与唤醒识死同留后续；PR #5 文件集不相交。

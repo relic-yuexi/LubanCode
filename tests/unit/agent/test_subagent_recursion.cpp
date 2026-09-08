@@ -609,6 +609,143 @@ TEST_CASE("后台根->后台孩子:孩子结果进父 mailbox,父吸收后收口
     CHECK_FALSE(agent_tool.HasUndeliveredCompletions());
 }
 
+// ---------------------------------------------------------------------------
+// 回流锁缝(三犯并案 run 33988795509/34270604648/34281593474):终态先于
+// 投递,父侧提前退场。旧序里孩子的收尾是两把锁——FinalizeFromToolResult
+// 锁内翻终态并 notify,DeliverChildCompletion 是松锁后的下一把锁。父被
+// notify 叫醒,WaitForKeyChange 谓词见"活孩子零 + 邮箱空"即出等,
+// SealOrContinueInbox 当场封账收口;孩子的投递赶到时父已封账(inbox_
+// closed),delivered 永假,结果落进未送达清单。快机上孩子几乎必然先回
+// 锁,慢腿调度抖,父抢赢一回即定死——生产同病。
+//
+// 这里把那拍调度抖人为放大成确定次序:父线程先泊进 WaitingChildren,
+// 孩子收尾(FinalizeFromToolResult 带 deliver_to_parent:终态翻页与投父
+// 邮箱同一个持锁段完成)后线程多活 25ms——正是旧序里两把锁之间的缝。
+// 修复后 notify 落地时父邮箱已喂饱,这拍再长也插不进"终态先于投递"的
+// 窗口;若把投递退回松锁后(修复前的形状),父会在延迟拍里见空邮箱封账,
+// 下面 REQUIRE(absorbed.size() == 1) 稳定转红。
+// ---------------------------------------------------------------------------
+TEST_CASE("回流锁缝:终态与投递同锁,父等孩子不被空邮箱提前封账") {
+    for (int round = 0; round < 20; ++round) {
+        tools::TaskLedger ledger;
+        tools::SubagentGovernance governance;
+        std::string error;
+        tools::AgentTaskSnapshot parent_proto;
+        parent_proto.title = "父";
+        parent_proto.delivery_target = tools::TaskDeliveryTarget::MainTurnContext;
+        auto parent = ledger.TryRegisterChild(parent_proto, 1, governance, &error);
+        REQUIRE(parent != nullptr);
+        tools::AgentTaskSnapshot child_proto;
+        child_proto.title = "子";
+        child_proto.parent_task_id = parent->snapshot.id;
+        child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+        auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
+        REQUIRE(child != nullptr);
+        // 分型按 outcome(与既有册同款):起线程前在主线程写好,收尾只翻账。
+        child->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+
+        std::atomic<bool> parent_done{false};
+        std::vector<std::string> absorbed;  // 父吸收的续投正文(生产里是拼批再跑一轮)
+        std::thread parent_thread([&] {
+            // 镜像生产续投环(agent_tool.cpp 的 continuation 源):取件 ->
+            // 没件且没封账 -> WaitingChildren 等条件变量 -> 醒来再查一遍。
+            for (;;) {
+                bool sealed = false;
+                tools::DrainedInbox drained = ledger.SealOrContinueInbox(parent, sealed);
+                if (!drained.indices.empty()) {
+                    for (const auto& text : drained.texts) {
+                        absorbed.push_back(text);
+                    }
+                    continue;
+                }
+                if (sealed) {
+                    break;  // 没信也没活孩子:封账收口
+                }
+                ledger.SetLiveTaskState(parent, tools::AgentTaskState::WaitingChildren);
+                ledger.WaitForKeyChange(parent);
+                ledger.SetLiveTaskState(parent, tools::AgentTaskState::Running);
+                if (parent->cancel.load(std::memory_order_acquire) || parent->force_finalized) {
+                    break;  // 看门狗放倒的,不算正常走完
+                }
+            }
+            parent_done.store(true, std::memory_order_release);
+        });
+        // 让父先泊进 WaitingChildren(它封不了账:孩子还活着),再收孩子的尾
+        // ——这是三犯 CI 日志里的实际次序。
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::thread child_thread([&] {
+            // 修复点:终态翻页与投父邮箱在这一个调用里同一把锁完成。
+            ledger.FinalizeFromToolResult(child, "孩子的结论正文", /*cancelled_by_stop_signal=*/false,
+                                          /*deliver_to_parent=*/true);
+            // 旧缝的延迟拍:修复前 Finalize 与 Deliver 是两把锁,调度在中间
+            // 抖一下就是三犯指纹;修复后收尾与投递同锁,这一拍落在投递完成
+            // 之后,再长也改变不了父醒来时邮箱已喂饱的事实。
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        });
+        // 看门狗(沿 WaitForSettled 的轮询思路,测试自身不挂死):父 5s 还没
+        // 走完就 CancelTask 叫醒(谓词里的 cancel 门放行),join 后按"没走
+        // 猫道"收账。
+        for (int waited = 0; !parent_done.load(std::memory_order_acquire) && waited < 500; ++waited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const bool watchdog_fired = !parent_done.load(std::memory_order_acquire);
+        if (watchdog_fired) {
+            ledger.CancelTask(parent->snapshot.id);
+        }
+        parent_thread.join();
+        child_thread.join();
+        CHECK_FALSE(watchdog_fired);
+        // 父必收 ChildCompletion:恰一批、结构化投影、带"外来资料"来路声明。
+        REQUIRE(absorbed.size() == 1);
+        CHECK(absorbed[0].find("[子任务结果 #" + std::to_string(child->snapshot.id) + ":子") != std::string::npos);
+        CHECK(absorbed[0].find("外来资料") != std::string::npos);
+        CHECK(absorbed[0].find("孩子的结论正文") != std::string::npos);
+        CHECK(child->snapshot.delivered);
+        CHECK(child->snapshot.state == tools::AgentTaskState::Done);
+        // 父吸收完孩子后正常收口(镜像生产 Finalize),root result 是最终结论。
+        parent->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+        ledger.FinalizeFromToolResult(parent, "父的最终结论", false);
+        CHECK(parent->snapshot.state == tools::AgentTaskState::Done);
+        CHECK(parent->snapshot.result == "父的最终结论");
+    }
+}
+
+TEST_CASE("回流锁缝:父先真死,孩子收尾的锁内投递保持未送达,不改投 main") {
+    // "父已不活保持未送达"只在"父提前退场"这一假死场景被治,真死(看门狗
+    // 强收的绝境镜像:父先收口、孩子才收尾)照旧——锁内投递自返 false,
+    // 不 reparent、不悄悄改投 main(单子 §8.2)。
+    tools::TaskLedger ledger;
+    tools::SubagentGovernance governance;
+    std::string error;
+    tools::AgentTaskSnapshot parent_proto;
+    parent_proto.title = "父";
+    auto parent = ledger.TryRegisterChild(parent_proto, 1, governance, &error);
+    REQUIRE(parent != nullptr);
+    tools::AgentTaskSnapshot child_proto;
+    child_proto.title = "子";
+    child_proto.parent_task_id = parent->snapshot.id;
+    child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+    auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
+    REQUIRE(child != nullptr);
+
+    parent->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+    ledger.FinalizeFromToolResult(parent, "父已收口", false);
+    REQUIRE(parent->snapshot.state == tools::AgentTaskState::Done);
+
+    child->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+    ledger.FinalizeFromToolResult(child, "孩子的结论正文", false, /*deliver_to_parent=*/true);
+    CHECK_FALSE(child->snapshot.delivered);  // 父不活:保持未送达
+    // main 只收根的账:父(MainTurnContext)的结果照提,孩子的正文不跨级。
+    const std::string main_drained = ledger.DrainCompletionNotices();
+    CHECK(main_drained.find("父已收口") != std::string::npos);
+    CHECK(main_drained.find("孩子的结论正文") == std::string::npos);
+    CHECK_FALSE(ledger.HasUndeliveredCompletions());
+    CHECK(ledger.CompletionNoticeLines().empty());
+    // 显式投递口同样语义:父不活返回 false,不翻 delivered。
+    CHECK_FALSE(ledger.DeliverChildCompletion(child));
+    CHECK_FALSE(child->snapshot.delivered);
+}
+
 TEST_CASE("取消树:停后台根,后台孩子随树收 Cancelled/ParentCancelled") {
     // 根后端:派完后台孩子后交阶段结论,进 WaitingChildren;孩子后端喂完
     // 首段就挂住(还活着)。停根 -> 级联取消孩子 -> 两只各自收 Cancelled,
