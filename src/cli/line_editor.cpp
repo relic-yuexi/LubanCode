@@ -6,6 +6,7 @@
 #include <cctype>
 #include <utility>
 
+#include "cli/grapheme.hpp"
 #include "cli/i18n.hpp"
 
 namespace lubancode::cli {
@@ -345,38 +346,20 @@ std::string ApprovalModeStartSourceText(const ApprovalModeStart& start) {
 }
 
 int CharDisplayWidth(char32_t cp) {
-    // 见头文件注释:简易 East Asian Width 判定,不是完整的 Unicode 表,
-    // 覆盖最常用的 CJK 统一表意文字、假名、韩文音节、全角标点这些区段。
-    if (cp == 0) {
-        return 0;
-    }
-    if (cp < 0x1100) {
-        return 1;
-    }
-    const bool wide =
-        (cp >= 0x1100 && cp <= 0x115F) ||   // 韩文字母(Hangul Jamo)
-        cp == 0x2329 || cp == 0x232A ||
-        (cp >= 0x2E80 && cp <= 0x303E) ||   // CJK 部首、CJK 标点
-        (cp >= 0x3041 && cp <= 0x33FF) ||   // 平假名、片假名、CJK 兼容
-        (cp >= 0x3400 && cp <= 0x4DBF) ||   // CJK 扩展 A
-        (cp >= 0x4E00 && cp <= 0x9FFF) ||   // CJK 统一表意文字
-        (cp >= 0xA000 && cp <= 0xA4CF) ||   // 彝文
-        (cp >= 0xAC00 && cp <= 0xD7A3) ||   // 韩文音节
-        (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK 兼容表意文字
-        (cp >= 0xFF00 && cp <= 0xFF60) ||   // 全角字符
-        (cp >= 0xFFE0 && cp <= 0xFFE6) ||
-        (cp >= 0x1F300 && cp <= 0x1F64F) || // UI-A:emoji 常用区段(杂项符号和象形文字、表情),
-        (cp >= 0x1F680 && cp <= 0x1F6FF) || // 交通与地图符号,
-        (cp >= 0x1F900 && cp <= 0x1F9FF) || // 补充符号和象形文字,
-        (cp >= 0x1FA70 && cp <= 0x1FAFF) || // 符号和象形文字扩展 A——终端都按两列画
-        (cp >= 0x20000 && cp <= 0x3FFFD);   // CJK 扩展 B 及以上
-    return wide ? 2 : 1;
+    // 0.3x(Unicode emoji 治理单 P1):宽度口径迁去 grapheme.cpp 的共享
+    // 表(内嵌 Unicode 15.1),签名与老语义兼容——单码点的孤立占位宽。
+    // 注意组合附标/ZWJ/VS16/肤色现在计零宽;字素簇整簇列宽(旗帜配对、
+    // keycap、VS16 升宽)必须经 DisplayWidth/ClusterDisplayWidth,不能
+    // 拿本函数逐码点自算。
+    return GraphemeCodepointWidth(cp);
 }
 
 std::size_t DisplayWidth(const std::u32string& text) {
+    // 按扩展字素簇分段计宽:ZWJ 序列、肤色修饰、组合附标都并进所属簇,
+    // 👩‍💻 记 2 列而不是 5 列。这是"编辑/布局/量宽共用一把尺"的入口。
     std::size_t width = 0;
-    for (char32_t c : text) {
-        width += static_cast<std::size_t>(CharDisplayWidth(c));
+    for (const GraphemeCluster& cluster : SplitGraphemes(text)) {
+        width += static_cast<std::size_t>(cluster.width);
     }
     return width;
 }
@@ -456,13 +439,14 @@ std::u32string TruncateToDisplayWidth(const std::u32string& text, int max_width)
     }
     std::u32string out;
     int width = 0;
-    for (char32_t c : text) {
-        const int w = CharDisplayWidth(c);
-        if (width + w > max_width) {
-            break;  // 下一个字符会超宽,整个不要它——不切半个字宽
+    // 按字素簇取舍:下一个簇会超宽就整簇不要——组合附标、ZWJ、肤色永远
+    // 跟着基础字一起进出,不会在 👩‍💻 中间下刀、也不留孤儿 ZWJ 在尾巴。
+    for (const GraphemeCluster& cluster : SplitGraphemes(text)) {
+        if (width + cluster.width > max_width) {
+            break;
         }
-        out.push_back(c);
-        width += w;
+        out.append(text, cluster.begin, cluster.end - cluster.begin);
+        width += cluster.width;
     }
     return out;
 }
@@ -483,19 +467,19 @@ std::vector<std::u32string> WrapToDisplayWidth(const std::u32string& text, int m
         cur.clear();
         width = 0;
     };
-    for (char32_t c : text) {
-        if (c == U'\n') {
-            flush();  // 显式换行:原样尊重,断开一行
+    // 按字素簇累加:软换行不拆簇(附标/ZWJ/肤色跟基础字同行);恰满一行
+    // 之后的零宽附标照样收进当前行,不会被挤到下一行拆开。每簇至少一个
+    // 码点,循环必前进(零宽簇不会让行无限吞)。
+    for (const GraphemeCluster& cluster : SplitGraphemes(text)) {
+        if (text[cluster.begin] == U'\n') {
+            flush();  // 显式换行:原样尊重,断开一行('\n' 自成一簇)
             continue;
         }
-        const int w = CharDisplayWidth(c);
-        // 下一个字加进来会超宽、且当前行非空:先把当前行交出去,再开新行装它。
-        // 当前行为空时即便这个字比 max_width 还宽也照收(独占一行,不丢内容)。
-        if (width + w > max_width && !cur.empty()) {
+        if (width + cluster.width > max_width && !cur.empty()) {
             flush();
         }
-        cur.push_back(c);
-        width += w;
+        cur.append(text, cluster.begin, cluster.end - cluster.begin);
+        width += cluster.width;
     }
     if (!cur.empty()) {
         flush();
@@ -554,17 +538,17 @@ EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cur
         desired_start = max_start;
     }
 
-    // 把"窗口起点该在第几列"换算成"该从第几个码点开始"——不能砍在一个
-    // 宽字符中间。
+    // 把"窗口起点该在第几列"换算成"该从第几个码点开始"——按字素簇推进,
+    // 不砍在宽字/组合序列中间(起点落在簇内会看到半个 emoji)。
     std::size_t start_index = 0;
     std::size_t start_col = 0;
-    while (start_index < line.size()) {
-        const std::size_t w = static_cast<std::size_t>(CharDisplayWidth(line[start_index]));
+    for (const GraphemeCluster& cluster : SplitGraphemes(line)) {
+        const std::size_t w = static_cast<std::size_t>(cluster.width);
         if (start_col + w > desired_start) {
             break;
         }
         start_col += w;
-        ++start_index;
+        start_index = cluster.end;
     }
 
     EditLineWindow window;
@@ -776,8 +760,12 @@ void LineEditorCore::DeleteBackward() {    if (col_ > 0) {
                 return;
             }
         }
-        lines_[row_].erase(col_ - 1, 1);
-        --col_;
+        // 普通退格按整簇删(Unicode emoji 治理单 P1):光标前一簇整枚拿
+        // 走——👨‍👩‍👧‍👦 一次退干净,组合重音 é 不会只删掉不可独立显示
+        // 的重音留下裸 e。@ 词元整删在上面的前向扫描里,优先级更高。
+        const std::size_t prev = PrevGraphemeBoundary(lines_[row_], col_);
+        lines_[row_].erase(prev, col_ - prev);
+        col_ = prev;
         ResetHistoryBrowsing();
         return;
     }
@@ -1119,7 +1107,9 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             break;
         case KeyKind::Left:
             if (col_ > 0) {
-                --col_;
+                // 按整簇左移:光标从不在 👩‍💻 的七个码点中间停——一步跨
+                // 完一个用户看见的字(Unicode emoji 治理单 P1)。
+                col_ = PrevGraphemeBoundary(lines_[row_], col_);
             } else if (row_ > 0) {
                 // 行首再按左:跨过行边界,落到上一行行尾。
                 --row_;
@@ -1128,7 +1118,7 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             break;
         case KeyKind::Right:
             if (col_ < lines_[row_].size()) {
-                ++col_;
+                col_ = NextGraphemeBoundary(lines_[row_], col_);
             } else if (row_ + 1 < lines_.size()) {
                 // 行尾再按右:落到下一行行首。
                 ++row_;
@@ -1235,9 +1225,23 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
         case KeyKind::CtrlD:
             return BuildRenderState(false, false, true, false);
         case KeyKind::Delete:
-            // Del 键:composer 编辑暂不理会(队列浏览的"删当前项"在
-            // TurnInputListener 那条路上,不经过这里),显式空操作。
-            return BuildRenderState(false, false, false, false);
+            // Del 键向前删除(Unicode emoji 治理单 §9.4):此前是显式
+            // no-op,"Home 后按 Delete 没反应"不是 Unicode 问题而是按键
+            // 没实现。生来就按字素簇删——光标右侧一个完整簇(附标/ZWJ/
+            // 肤色跟基础字同进同出),ASCII 与 emoji 走同一把尺。行尾的
+            // Del 把下一行并上来(与 Backspace 在行首并上一行对称);
+            // 整个 composer 的末尾按了没东西可删,保持不动。
+            if (col_ < lines_[row_].size()) {
+                const std::size_t next = NextGraphemeBoundary(lines_[row_], col_);
+                lines_[row_].erase(col_, next - col_);
+            } else if (row_ + 1 < lines_.size()) {
+                lines_[row_] += lines_[row_ + 1];
+                lines_.erase(lines_.begin() + static_cast<std::ptrdiff_t>(row_) + 1);
+            } else {
+                return BuildRenderState(false, false, false, false);
+            }
+            ResetHistoryBrowsing();
+            break;
         case KeyKind::Esc: {
             // M10:空闲编辑态清空整个 composer 和提示区,跟非空 Ctrl+C 是同
             // 一个效果(cleared=true,留在同一次 ReadLine 里继续等下一下按
