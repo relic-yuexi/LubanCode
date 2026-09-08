@@ -1175,7 +1175,7 @@ TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens �
     // 无收尾交代:尾消息里不许出现应急交代文案。
     const auto& last_message = backend.captured_requests[1].messages.back();
     for (const auto& block : last_message.content) {
-        if (const auto* text = std::get_if<api::TextBlock>(block); text != nullptr) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
             CHECK(text->text.find("上下文将尽") == std::string::npos);
             CHECK(text->text.find("不再发起新的工具调用") == std::string::npos);
         }
@@ -1301,7 +1301,7 @@ TEST_CASE("预检封顶例外(§4.1): ConfigFile 显式预留不封顶,照旧走
     const auto& last_message = backend.captured_requests[1].messages.back();
     bool has_nudge = false;
     for (const auto& block : last_message.content) {
-        if (const auto* text = std::get_if<api::TextBlock>(block); text != nullptr &&
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr &&
             text->text.find("上下文将尽") != std::string::npos) {
             has_nudge = true;
         }
