@@ -22,6 +22,7 @@
 #include "platform/console.hpp"
 #include "platform/csi_keys.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -90,6 +91,40 @@ int ReadByteTimeout(int timeout_ms) {
     return b;
 }
 
+// 把一枚字节放回队头(Unicode/emoji 治理单 §3.5:UTF-8 坏续字节回退)。
+// 已从 stdin 真读出来的字节没有"塞回终端"一说,回压队列就是它的家——
+// 下一趟 ReadOne 优先从队列取,后续合法字符与取消键一个不吞。
+void UnreadByte(int b) {
+    PendingBytes().push_front(static_cast<unsigned char>(b));
+}
+
+// 粘贴正文循环专用的三态读:与 ReadByteTimeout 分开,EOF/错误(-1)必须
+// 与"这一片暂时没等到"(-2)分开——EOF 时循环该立刻按截断收场,免得
+// 对着 POLLHUP 空转到空闲期限耗尽。
+// 返回 >=0 = 字节值;-1 = EOF/错误;-2 = 这一片超时。
+int ReadByteSlice(int timeout_ms) {
+    auto& q = PendingBytes();
+    if (!q.empty()) {
+        const int b = q.front();
+        q.pop_front();
+        return b;
+    }
+    struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
+    const int pr = poll(&pfd, 1, timeout_ms);
+    if (pr <= 0) {
+        return -2;
+    }
+    unsigned char b = 0;
+    ssize_t n = 0;
+    do {
+        n = read(STDIN_FILENO, &b, 1);
+    } while (n < 0 && errno == EINTR);
+    if (n <= 0) {
+        return -1;
+    }
+    return b;
+}
+
 // 把 termios 调成逐键原始输入:关行缓冲、回显、信号键(Ctrl+C 变可读
 // 按键,对齐 Windows 关 ENABLE_PROCESSED_INPUT),关 ICRNL(回车原样给
 // \r);输出侧(OPOST)不动,std::cout 的 "\n" 照常工作。
@@ -114,28 +149,66 @@ void RestoreTermios(const struct termios* saved) {
 
 // CSI 序列解析:ESC [ 已读掉,收集参数字节直到终止字节(0x40~0x7e),翻成
 // 语义按键。认不出的序列整个吃掉、返回 None,不让参数字节漏成正文字符。
-KeyInput ReadBracketedPaste() {
+KeyInput ReadBracketedPaste(const std::atomic<bool>* cancel_flag) {
     constexpr std::string_view kEnd = "\x1b[201~";
-    std::string text;
-    while (true) {
-        const int byte = ReadByteBlocking();
+    // §3.5/§9.3:过去这圈 ReadByteBlocking 无总时限——缺了 ESC[201~ 就把
+    // 流里后续字节全当正文永远等下去,监听线程 Stop() 的 join() 也打不断。
+    // 三笔界分开:总时限(kBracketedPasteTotalMs)、空闲期限
+    // (kBracketedPasteIdleMs)、大小上限(kMaxPasteUnits);等待拆成
+    // kPasteCancelSliceMs 的片,片间看一眼停止请求。超限/EOF/停止退出后
+    // 已收正文保留交付并标 truncated,不自动提交。
+    PasteByteAccumulator pasted;
+    pasted.end_marker = kEnd;
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::milliseconds(kBracketedPasteTotalMs);
+    auto last_activity = start;
+    while (!pasted.finished()) {
+        if (cancel_flag != nullptr && cancel_flag->load(std::memory_order_acquire)) {
+            break;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        const auto idle_left =
+            std::chrono::milliseconds(kBracketedPasteIdleMs) - (now - last_activity);
+        if (idle_left <= std::chrono::milliseconds(0)) {
+            break;
+        }
+        const auto total_left = deadline - now;
+        // 等待片 = min(空闲余量, 总时限余量, 取消切片) 再垫到至少 1ms,整数
+        // 毫秒账(chrono 的异种 duration 进 initializer_list 推不出单一类型)。
+        // 切片取小是取消可达的根:25ms 一片,停止请求最迟下一片就被看见;
+        // 取成 max 会把整段空闲期限熬成一片,取消旗形同虚设(CI 看门狗册逮过)。
+        const long long idle_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(idle_left).count();
+        const long long total_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(total_left).count();
+        const long long wait_ms =
+            std::max(1LL, std::min({idle_ms, total_ms, static_cast<long long>(kPasteCancelSliceMs)}));
+        const int byte = ReadByteSlice(static_cast<int>(wait_ms));
+        if (byte == -2) {
+            continue;  // 这一片没等到:回圈头查取消/总时限/空闲
+        }
         if (byte < 0) {
-            break;
+            break;  // EOF/错误:按截断收场(已收正文保留)
         }
-        text.push_back(static_cast<char>(byte));
-        if (text.size() >= kEnd.size() &&
-            text.compare(text.size() - kEnd.size(), kEnd.size(), kEnd) == 0) {
-            text.resize(text.size() - kEnd.size());
-            break;
-        }
+        last_activity = std::chrono::steady_clock::now();
+        pasted.Feed(static_cast<char>(byte));
+    }
+
+    if (!pasted.done && pasted.text.empty()) {
+        // 半包一枚正文都没收到:当这趟粘贴没来过(None,调用方 continue)。
+        return KeyInput{};
     }
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
-    out.text = std::move(text);
+    out.text = std::move(pasted.text);
+    out.truncated = !pasted.done;
     return out;
 }
 
-KeyInput ParseCsi() {
+KeyInput ParseCsi(const std::atomic<bool>* cancel_flag) {
     std::string params;
     while (true) {
         const int b = ReadByteTimeout(50);
@@ -146,7 +219,7 @@ KeyInput ParseCsi() {
             // bracketed paste 要继续读后续字节,先拦;其余交给纯映射
             // (csi_keys.hpp,参数表在 Windows 上也能单测)。
             if (params == "200" && b == '~') {
-                return ReadBracketedPaste();
+                return ReadBracketedPaste(cancel_flag);
             }
             return MapCsiToKey(params, static_cast<char>(b));
         }
@@ -522,7 +595,10 @@ RawInputScope::~RawInputScope() {
 }
 
 std::optional<KeyInput> KeyReader::ReadOne() {
-    (void)pending_high_surrogate_;  // Windows 专用状态,这里闲置
+    (void)surrogate_pair_;  // Windows 专用状态(UTF-16 代理对),这里闲置
+    if (CancelRequested()) {
+        return KeyInput{};  // 停止请求已到:不开新的解析/粘贴等待,调用方自会收口
+    }
     const int b0 = ReadByteBlocking();
     if (b0 < 0) {
         return std::nullopt;
@@ -536,7 +612,7 @@ std::optional<KeyInput> KeyReader::ReadOne() {
             return out;
         }
         if (b1 == '[') {
-            return ParseCsi();
+            return ParseCsi(cancel_flag_);
         }
         if (b1 == 'O') {
             return ParseSs3();
@@ -620,33 +696,33 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         return KeyInput{};  // 其余控制字符(NUL/Ctrl+\ 那批)不映射
     }
 
-    // UTF-8 解码:终端天然给 UTF-8 字节,按首字节定长收继续字节。坏序列
-    // 按 None 丢弃,不往编辑器里塞半个字符。
-    char32_t cp = 0;
-    int extra = 0;
-    if (b0 < 0x80) {
-        cp = static_cast<char32_t>(b0);
-    } else if ((b0 & 0xe0) == 0xc0) {
-        cp = static_cast<char32_t>(b0 & 0x1f);
-        extra = 1;
-    } else if ((b0 & 0xf0) == 0xe0) {
-        cp = static_cast<char32_t>(b0 & 0x0f);
-        extra = 2;
-    } else if ((b0 & 0xf8) == 0xf0) {
-        cp = static_cast<char32_t>(b0 & 0x07);
-        extra = 3;
-    } else {
+    // UTF-8 解码:终端天然给 UTF-8 字节,按首字节定长收继续字节(50ms 等
+    // 续字节不变)。坏序列的回退(§3.5)分两手:
+    //   - 续字节位置来了非续字节:放回队头(UnreadByte)——它多半是紧随
+    //     其后的合法字符或取消键,旧路把它直接吞掉,坏一个序列赔一枚好键;
+    //   - 超时/EOF:前缀丢弃(None),取消键在下一趟照常读到;
+    //   - 收齐但不是合法 scalar value(超长/代理项/超范围):按 U+FFFD
+    //     可解释交付,与 Windows 侧孤立代理同口径,不往编辑器塞私货码点。
+    // 孤立续字节/非法首字节(0x80..0xBF、0xF8+)消费掉即可——放回只会让
+    // 下一趟原地再读一遍,死循环。
+    const Utf8LeadInfo lead = DecodeUtf8Lead(b0);
+    if (lead.extra < 0) {
         return KeyInput{};  // 孤立的继续字节/非法首字节
     }
-    for (int i = 0; i < extra; ++i) {
+    char32_t cp = lead.cp;
+    for (int i = 0; i < lead.extra; ++i) {
         const int bn = ReadByteTimeout(50);
-        if (bn < 0 || (bn & 0xc0) != 0x80) {
+        if (bn < 0) {
+            return KeyInput{};  // 断流/超时:前缀丢弃
+        }
+        if (!IsUtf8Continuation(bn)) {
+            UnreadByte(bn);  // 非续字节放回:后续合法字符与取消键不吞
             return KeyInput{};
         }
         cp = (cp << 6) | static_cast<char32_t>(bn & 0x3f);
     }
     out.kind = KeyInput::Kind::Char;
-    out.ch = cp;
+    out.ch = IsValidUtf8Scalar(cp, lead.extra) ? cp : kReplacementCodePoint;
     return out;
 }
 

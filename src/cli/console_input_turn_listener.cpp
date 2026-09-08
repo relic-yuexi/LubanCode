@@ -114,6 +114,11 @@ void TurnInputListener::ThreadMain() {
     // conhost 还会把它画到 footer 的物理光标处。
     platform::KeyListenScope listen_scope;
     platform::KeyReader key_reader;  // 跨事件状态(代理对配对)整条线程存活
+    // §9.3 停止可达:Stop() 置 stop_requested_ 后 join(),这枚旗让粘贴
+    // 半包那类长等待(有界,总时限 2s/空闲 1s)在每个等待切片上提前弃
+    // 等返回——join 不必干等满期限。受控反例:发 ESC[200~😀 后不发
+    // ESC[201~,再请求停止,监听线程须在有限时间收口。
+    key_reader.set_cancel_flag(&stop_requested_);
 
     // 会话层队列:监听线程只提交编辑动作,不拥有最终数据(见 queue_model.hpp)。
     SteeringQueue& steering = SessionSteeringQueue();
@@ -371,6 +376,19 @@ void TurnInputListener::ThreadMain() {
             continue;  // 读失败/EOF:跟老逻辑一样跳过,循环靠 stop_requested_ 退出
         }
         using PK = platform::KeyInput::Kind;
+
+        // §3.5/§9.3 半包恢复的"明确告知":这枚粘贴没等到结束标记(总时限/
+        // 空闲期限/大小上限/停止请求所致的截断),已收正文照常进编辑器、
+        // 不自动提交,但用户得知道截断发生过——静默少一截比等不到更坑。
+        // 文案先按中文字面落(i18n.cpp 归别的单,键表不在此扩)。
+        if (key->kind == PK::Paste && key->truncated) {
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            EraseStreamFooterLocked();
+            TermOut() << "\n"
+                      << theme_.error << "粘贴未收到结束标记,已保留已收部分(未提交)" << theme_.reset << "\n";
+            TermOut().flush();
+            RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着)
+        }
 
         // 取回键(Shift+←,备用 Ctrl+←):正文空、非编辑态、队列里有可取的
         // 条目,三者齐备才取最新一条;其余场合 Shift+Left 落到 MapKey 的缺省
