@@ -1667,6 +1667,184 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     return CommandFlow::Continue;
 }
 
+// ---------------------------------------------------------------------------
+// /context-window(ContextWindow交互面板单):同屏调当前模型的窗口预算与
+// 思考强度。面板本体(候选生成/状态机/TTY 宿主)在 cli/context_window_
+// panel;这里只做接线与应用。两项一起校验一起应用,不留半笔状态(§七)。
+// ---------------------------------------------------------------------------
+
+ContextWindowPanelValidation ValidateContextWindowPanelSelection(
+    const std::string& opened_provider, const std::string& opened_model,
+    const std::string& now_provider, const std::string& now_model,
+    const lubancode::cli::ContextWindowCandidates& window_now,
+    const lubancode::cli::ThinkEffortCapability& effort_now,
+    const lubancode::config::ModelCatalogEntry* entry_now,
+    lubancode::api::ReasoningHistoryMode think_history,
+    const ContextWindowPanelSelection& selection) {
+    ContextWindowPanelValidation out;
+    // 面板打开期间模型换了:拒绝提交,不能给新模型写旧选项(§七.4)。
+    if (opened_provider != now_provider || opened_model != now_model) {
+        out.error = "cmd.context_window.reject.model_changed";
+        out.error_arg0 = opened_provider + "/" + opened_model;
+        out.error_arg1 = now_provider + "/" + now_model;
+        return out;
+    }
+    if (selection.window_changed) {
+        bool present = false;
+        for (const std::size_t value : window_now.values) {
+            if (value == selection.window_tokens) {
+                present = true;
+                break;
+            }
+        }
+        if (!present) {
+            out.error = "cmd.context_window.reject.window_stale";
+            return out;
+        }
+    }
+    if (selection.effort_changed) {
+        if (effort_now.control != lubancode::cli::ThinkEffortControl::Adjustable ||
+            lubancode::cli::FindThinkEffortIndex(effort_now, selection.effort_value) ==
+                static_cast<std::size_t>(-1)) {
+            out.error = "cmd.context_window.reject.effort_stale";
+            return out;
+        }
+        // 关思考与 history all 的冲突拦截(与 HandleSlashThink 同一谓词,
+        // 单子 §5.3):可选保留的模型上,不能既关思考又要跨轮保留。
+        if (think_history == lubancode::api::ReasoningHistoryMode::All && entry_now != nullptr &&
+            lubancode::api::ReasoningHistorySupportFor(entry_now->reasoning) ==
+                lubancode::api::ReasoningHistorySupport::RequestControl &&
+            lubancode::api::ReasoningEffortIsOff(selection.effort_value, entry_now->reasoning)) {
+            out.error = "cmd.context_window.reject.history_conflict";
+            return out;
+        }
+    }
+    out.ok = true;
+    return out;
+}
+
+CommandFlow HandleSlashContextWindow(SlashDispatchContext& ctx,
+                                     const lubancode::cli::ParsedSlashCommand& parsed) {
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    if (!parsed.args.empty()) {
+        // 第一版不带参数(§二:不新增自定义输入框);带参数给一行用法。
+        TermOut() << tr("cmd.context_window.usage") << "\n";
+        return CommandFlow::Continue;
+    }
+    const std::string provider_at_open = *ctx.active_provider;
+    const std::string model_at_open = *ctx.current_model;
+    const lubancode::config::ModelCatalogEntry* entry_at_open =
+        ctx.model_catalog->FindByProviderAndSlug(provider_at_open, model_at_open);
+
+    lubancode::cli::ContextWindowPanelView view;
+    view.window = lubancode::cli::BuildContextWindowCandidates(
+        entry_at_open != nullptr ? entry_at_open->context_window_tokens : std::optional<std::size_t>{},
+        ctx.context_tracker->window_tokens());
+    view.effort = lubancode::cli::ResolveThinkEffortCapability(entry_at_open,
+                                                               ctx.config->provider_think_levels,
+                                                               *ctx.current_think);
+    // 标题:展示名优先,附 provider 与模型 ID——不同 provider 的同名模型须
+    // 能辨识,不让用户调错端点(§三)。
+    {
+        const std::string identity = provider_at_open + "/" + model_at_open;
+        const std::string display =
+            entry_at_open != nullptr && !entry_at_open->display_name.empty() &&
+                    entry_at_open->display_name != model_at_open
+                ? entry_at_open->display_name + "(" + identity + ")"
+                : identity;
+        view.model_title = trf("cw_panel.model_title", display);
+    }
+    // 初始索引:当前值所在(窗口/effort 候选都必含当前值;不在声明表就按
+    // 未验证档兜底)。找不到钳 0(防御,正常不会走到)。
+    for (std::size_t i = 0; i < view.window.values.size(); ++i) {
+        if (view.window.values[i] == view.window.current_window) {
+            view.window_index = i;
+            break;
+        }
+    }
+    const std::size_t effort_index =
+        lubancode::cli::FindThinkEffortIndex(view.effort, *ctx.current_think);
+    view.effort_index = effort_index == static_cast<std::size_t>(-1) ? 0 : effort_index;
+    view.original_window_index = view.window_index;
+    view.original_effort_index = view.effort_index;
+    view.focus = 0;  // 默认焦点在 Context Window(§三)
+
+    const lubancode::cli::ContextWindowPanelResult result =
+        lubancode::cli::RunContextWindowPanel(view, theme);
+    if (!result.opened) {
+        // 非交互环境不读键、不挂起(§三):短说明指向既有命令。
+        TermOut() << tr("cmd.context_window.non_tty") << "\n";
+        return CommandFlow::Continue;
+    }
+    if (!result.saved) {
+        TermOut() << tr("cmd.context_window.cancelled") << "\n";
+        return CommandFlow::Continue;
+    }
+
+    // 面板确认 → 选择值(不是索引)。不可调行不会产生变更(候选数 <= 1,
+    // 左右键无动作)。
+    ContextWindowPanelSelection selection;
+    selection.window_changed =
+        result.window_index != view.original_window_index && result.window_index < view.window.values.size();
+    if (selection.window_changed) {
+        selection.window_tokens = view.window.values[result.window_index];
+    }
+    selection.effort_changed = result.effort_index != view.original_effort_index &&
+                               result.effort_index < view.effort.options.size();
+    if (selection.effort_changed) {
+        selection.effort_value = view.effort.options[result.effort_index].value;
+    }
+    if (!selection.window_changed && !selection.effort_changed) {
+        return CommandFlow::Continue;  // 无变更:正常关闭,不打多余的话(§三)
+    }
+
+    // 应用前重新校验(§七.4):重查当前模型与最新候选。命令在主线单线程
+    // 跑、面板独占输入,身份理论上不会变;仍按合同对账,不拿旧面板的账
+    // 写新模型。
+    const lubancode::config::ModelCatalogEntry* entry_now =
+        ctx.model_catalog->FindByProviderAndSlug(*ctx.active_provider, *ctx.current_model);
+    const lubancode::cli::ContextWindowCandidates window_now = lubancode::cli::BuildContextWindowCandidates(
+        entry_now != nullptr ? entry_now->context_window_tokens : std::optional<std::size_t>{},
+        ctx.context_tracker->window_tokens());
+    const lubancode::cli::ThinkEffortCapability effort_now =
+        lubancode::cli::ResolveThinkEffortCapability(entry_now, ctx.config->provider_think_levels,
+                                                     *ctx.current_think);
+    const ContextWindowPanelValidation validation = ValidateContextWindowPanelSelection(
+        provider_at_open, model_at_open, *ctx.active_provider, *ctx.current_model, window_now,
+        effort_now, entry_now,
+        ctx.current_think_history != nullptr ? *ctx.current_think_history
+                                             : lubancode::api::ReasoningHistoryMode::ProviderDefault,
+        selection);
+    if (!validation.ok) {
+        TermOut() << theme.error << trf(validation.error, validation.error_arg0, validation.error_arg1)
+                  << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+
+    // 两项都过了才动手。窗口走 /context 同一只 tracker(下一轮发轮前对齐
+    // 进主 Agent,interactive_session.cpp 的发轮同步点);effort 走 /think
+    // 同一只 current_think,sync_request_policy 让下一份请求即时带上——
+    // 不是只改显示值(§七.5)。不向子代理广播,不改独立角色模型的预算。
+    if (selection.window_changed) {
+        ctx.context_tracker->set_window_tokens(selection.window_tokens);
+        TermOut() << trf("cmd.context.window_changed", selection.window_tokens) << "\n";
+        // 缩到当前占用之下:只提示压力,不清历史、不立即发压缩请求(§4.2)。
+        if (ctx.context_tracker->ShouldAutoCompact()) {
+            TermOut() << tr("cmd.context.compact_hint") << "\n";
+        }
+    }
+    if (selection.effort_changed) {
+        *ctx.current_think = selection.effort_value;
+        if (selection.effort_value.empty()) {
+            TermOut() << tr("cmd.context_window.effort_cleared") << "\n";
+        } else {
+            TermOut() << trf("cmd.think.switched", selection.effort_value) << "\n";
+        }
+    }
+    ctx.sync_request_policy();
+    return CommandFlow::Continue;
+}
+
 CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     // /compact presenter:接线全在本文件,材料包由 make_compact_inputs 装好。
     lubancode::app::RunCompactCommand(parsed.args, ctx.make_compact_inputs());

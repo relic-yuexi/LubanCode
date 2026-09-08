@@ -1,6 +1,6 @@
 # /context-window：当前模型上下文窗口与思考强度面板
 
-- 状态：待实现（本轮只落设计文档，不改生产代码）
+- 状态：已实施（2026-09-09，分支 `worktree-agent-context-window`；P0-P3 全落，真机交互冒烟与特定平台见"实施纪要"未验项）
 - 日期：2026-09-08
 - 级别：P1（模型配置体验与生效一致性）
 - 范围：slash 注册与派发、终端设置面板、当前模型能力解析、会话设置应用、测试与命令文档。
@@ -183,38 +183,38 @@ Enter Save          Esc Cancel
 
 ### P0：核实与定案
 
-- [ ] 确认保存范围：本会话，还是按 provider/model 持久化；明确模型切换与会话恢复行为。
-- [ ] 确认窗口规则：按声明上限过滤并补非标准当前值，未知能力时保守展示。
-- [ ] 核实目录、provider、环境配置与运行态的窗口和 effort 优先级，分清预算与能力上限。
-- [ ] 定位 slash、补全、帮助、输入所有权、现有设置面板与测试构建入口。
+- [x] 确认保存范围：本会话，还是按 provider/model 持久化；明确模型切换与会话恢复行为。（定案：只改当前会话、当前主模型，不写任何持久化配置；切模型走既有 ApplyModelCatalog/ComputeCatalogApplication 规则）
+- [x] 确认窗口规则：按声明上限过滤并补非标准当前值，未知能力时保守展示。（定案：按 §四合同落；常用 {200K,400K,1M} 过滤 + 声明值 + 当前值，去重排序；未知只显当前值标未验证；当前超限照实标异常）
+- [x] 核实目录、provider、环境配置与运行态的窗口和 effort 优先级，分清预算与能力上限。（窗口：ContextTracker 是运行态预算，目录 context_window_tokens 是声明上限，两语义分开；effort：目录 supported_think_levels 与 reasoning.supported_efforts 合并 → provider 配置声明（标未验证）→ 都没有 = Unknown）
+- [x] 定位 slash、补全、帮助、输入所有权、现有设置面板与测试构建入口。（见 §六；实施时全部重读核实，行号有漂移但落点无误）
 
 验收：待确认行为有明确结论，写明真实生效链路和改动文件，不以本单建议冒充用户批准。
 
 ### P1：候选生成与设置应用
 
-- [ ] 实现窗口候选生成、去重、非标准值与未知能力处理。
-- [ ] 实现思考候选生成、Default/Disabled/未验证状态、历史思考冲突校验。
-- [ ] 实现两项统一校验与会话应用，不改变旧命令的兼容行为。
-- [ ] 添加纯函数与应用层测试。
+- [x] 实现窗口候选生成、去重、非标准值与未知能力处理。（`BuildContextWindowCandidates`，src/cli/context_window_panel_core.cpp）
+- [x] 实现思考候选生成、Default/Disabled/未验证状态、历史思考冲突校验。（`ResolveThinkEffortCapability` 集中裁决 + `ValidateContextWindowPanelSelection` 复用 /think 的冲突谓词）
+- [x] 实现两项统一校验与会话应用，不改变旧命令的兼容行为。（`HandleSlashContextWindow`：两项一起校验过才动 tracker/current_think；旧命令代码零改动）
+- [x] 添加纯函数与应用层测试。（tests/unit/cli/test_context_window.cpp、tests/unit/app/test_context_window_command.cpp）
 
 验收：不同模型只出现合法候选，当前值不丢，取消无副作用，确认后主请求与状态显示一致。
 
 ### P2：终端面板与 slash 接线
 
-- [ ] 注册 `/context-window`，补全及帮助显示指定描述。
-- [ ] 实现 Model 标题、两项说明、左右值选择、Selected 与底部操作说明。
-- [ ] 实现上下/左右、Enter、Esc、Ctrl+C、输入结束与窄终端处理。
-- [ ] 接入主题、国际化与终端重绘机制；非 TTY 拒绝进入交互读键。
-- [ ] 添加按键状态与渲染测试。
+- [x] 注册 `/context-window`，补全及帮助显示指定描述。（en 描述 `Set context window for the current model`；帮助/补全同出 AllSlashCommands 一张表）
+- [x] 实现 Model 标题、两项说明、左右值选择、Selected 与底部操作说明。（`BuildContextWindowPanelFrame`；标题带 provider/模型 ID 辨识同名）
+- [x] 实现上下/左右、Enter、Esc、Ctrl+C、输入结束与窄终端处理。（`ContextWindowPanelCore` + TTY 宿主；Ctrl+C 按取消，EOF 取消；截行走 TruncateUtf8ToDisplayWidth）
+- [x] 接入主题、国际化与终端重绘机制；非 TTY 拒绝进入交互读键。（i18n 中英成对；非 TTY 打短说明指向 /context、/think）
+- [x] 添加按键状态与渲染测试。（test_context_window.cpp 的状态机/帧拼装各节）
 
-验收：面板可连续打开与退出，无残留焦点或重复输入，导航不泄漏给聊天输入框。
+验收：面板可连续打开与退出，无残留焦点或重复输入，导航不泄漏给聊天输入框。（单测钉状态机与帧；真终端连续开关冒烟未验，见实施纪要）
 
 ### P3：回归与文档
 
-- [ ] 更新现有命令参考和终端功能说明，写清本地预算不等于服务端扩容。
-- [ ] 验证 `/context`、`/think`、`/effort`、`/model` 行为兼容。
-- [ ] 运行相关单元测试与最小必要构建，再做交互终端冒烟。
-- [ ] 检查下一次请求确实使用所选 effort 和窗口预算；用测试替身或脱敏请求断言，未经授权不额外发付费真机请求。
+- [x] 更新现有命令参考和终端功能说明，写清本地预算不等于服务端扩容。（docs/reference/commands.md 与 docs/features/terminal/README.md）
+- [x] 验证 `/context`、`/think`、`/effort`、`/model` 行为兼容。（四个命令的代码路径零改动；既有测试全数保留，注册表 58 案对账更新）
+- [x] 运行相关单元测试与最小必要构建，再做交互终端冒烟。（远程 CI 全绿为准；交互终端冒烟未验，见实施纪要）
+- [x] 检查下一次请求确实使用所选 effort 和窗口预算；用测试替身或脱敏请求断言，未经授权不额外发付费真机请求。（effort 走 ctx.sync_request_policy()（/think 同步点）+ 窗口走发轮前 SetContextWindowTokens 同步点，链路为既有正门；真机脱敏请求断言未做，不发付费请求）
 
 验收：自动化结果与人工冒烟分开记录；没有测的终端、平台、模型明确标“未验”。
 
@@ -235,4 +235,17 @@ Enter Save          Esc Cancel
 
 调查时工作区已有 `src/cli/console_input.cpp`、`tests/unit/cli/test_bottom_chrome.cpp` 的未提交修改。本轮不碰它们；实施时先重读并保留，不能覆盖用户或其他任务的改动。
 
-本轮交付只包含本设计文档；功能代码、构建、测试与真机交互验证均未执行。
+2026-09-08 首轮只落了本设计文档；功能实现见下"实施纪要"。
+
+## 十一、实施纪要（2026-09-09）
+
+- 交付（分支 `worktree-agent-context-window`）：
+  - 新增 `src/cli/context_window_panel.hpp`（声明）、`src/cli/context_window_panel_core.cpp`（纯逻辑，归 lubancode_core）、`src/cli/context_window_panel.cpp`（TTY 宿主，归 lubancode_app）。
+  - `src/app/commands/session_commands.{hpp,cpp}`：`HandleSlashContextWindow` 分派位与 `ValidateContextWindowPanelSelection` 纯校验。
+  - `src/cli/slash_commands.{hpp,cpp}`、`src/app/commands/command_registry.cpp`：枚举/解析/帮助/补全/命令表（58 案）/效果分类（session_state）。
+  - `src/cli/i18n.cpp`：`cw_panel.*`、`cmd.context_window.*`、`slash.desc.context_window` 中英成对。
+  - 测试：新 `tests/unit/cli/test_context_window.cpp`（候选/裁决/状态机/帧）、`tests/unit/app/test_context_window_command.cpp`（应用校验）；改 `test_slash_commands.cpp`（解析与列表）、`test_command_registry.cpp`（57→58）、`test_queue_slash_boundary.cpp`（忙时不排队回归）。
+  - 文档：`docs/reference/commands.md`、`docs/features/terminal/README.md`（§17a）。
+- 定案记录：保存范围=本会话、当前主模型、零持久化；窗口候选与思考档位照 §四/§五 合同（详见 P0 勾注）；Disabled 仅声明可关（none 在声明表 / supports_toggle / 方言有开关）且目录未声明关不掉；Default 仅目录 default_think 解析得明确默认时标；effort 空串保留"未发送参数"态并在可调行内可选。
+- 与单子的差异：无（照 §二建议落，未另起炉灶）。未知能力的思考行按 §三"不可调节项"处理为不可调（不画箭头），比"两态可调"更保守。
+- 未验项（自动化测不了，留真机）：真终端里面板的开/关/连续重开与焦点残留（需真控制台）；窄终端长模型名的肉眼观感；下一份请求的脱敏请求体断言（不发付费请求，链路走既有 sync_request_policy/发轮同步点）；macOS/Windows 真机终端行为（CI 编译全绿 ≠ 交互验证）。
