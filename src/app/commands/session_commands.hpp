@@ -209,6 +209,55 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in);
 // auto 闸、cheap 失败回退 normal 修一次、分层压缩与 v2 事件。
 bool TryRunCompact(bool midturn, const CompactSessionInputs& in);
 
+// 唤醒识死的小账本(主会话输出预留占坑单 §4.3):预检反复走应急支
+//(封顶后仍装不下、收窄放行 + 收尾交代)的会话,历史真满——后台子代理
+// 完成回流不再自动另起一轮,否则新 Run 再爆再注收尾交代,模型只写交接
+// 不干活,死循环(事故单 §一的第三环)。计数只在"整轮收口时一次应急
+// 都没走过"才清零——应急步之前也有 PreRequest 压力通报,按通报清零
+// 永远攒不到阈值。用户显式输入照常开轮,不受这道闸影响。
+struct ContextExhaustionGate {
+    // 连续几次应急放行后暂停自动续轮(§4.3 建议 2:一次可能是偶发,
+    // 两次就是历史真满)。
+    static constexpr int kHoldThreshold = 2;
+
+    // 预检压力回调(与 HandleContextPressure 同源):只认
+    // PreflightExceeded + reserve_clamped(应急放行)这一种。
+    void NotePressure(const lubancode::agent::ContextPressure& pressure) {
+        if (pressure.phase == lubancode::agent::ContextPressure::Phase::PreflightExceeded &&
+            pressure.reserve_clamped) {
+            ++consecutive_releases_;
+            turn_had_release_ = true;
+        }
+    }
+
+    // 一轮收口(RunSessionTurn 尾):本轮没走过应急才算健康,清零并允许
+    // 重播通知;走过则保留累计,等 /compact 压掉历史或新会话后再清。
+    void NoteTurnFinished() {
+        if (!turn_had_release_) {
+            consecutive_releases_ = 0;
+            notice_shown_ = false;
+        }
+        turn_had_release_ = false;
+    }
+
+    // 是否暂停后台回流的自动续轮(上下文将尽的"待死"态)。
+    bool ShouldHoldAutoReflow() const { return consecutive_releases_ >= kHoldThreshold; }
+
+    // 通知只打一道(计数清零前不重播);返回 true = 这一遭该打。
+    bool ConsumeNotice() {
+        if (notice_shown_) {
+            return false;
+        }
+        notice_shown_ = true;
+        return true;
+    }
+
+private:
+    int consecutive_releases_ = 0;
+    bool turn_had_release_ = false;
+    bool notice_shown_ = false;
+};
+
 // AgentLoop 每次模型请求前的压力通报接线:PreRequest 安全点撞线就
 // mid-turn 收一次历史;HardTrim 真丢了东西就显式告警,不静默降级。
 void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, const CompactSessionInputs& in);

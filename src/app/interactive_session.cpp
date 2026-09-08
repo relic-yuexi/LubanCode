@@ -876,6 +876,9 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         };
     }
     const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
+    // 唤醒识死(§4.3):本轮一次应急都没走过的才算健康——连续计数清零;
+    // 走过的保留累计,后台回流据此暂停自动续轮(语义见 ContextExhaustionGate)。
+    context_exhaustion_gate_.NoteTurnFinished();
     // 记忆写入调度单 P0(§10.3):前台尾延迟的起点——回合收尾(RunTurn
     // 返回)到抽取返回的墙钟,量完在抽取调用后交给账本。
     const auto memory_tail_started =
@@ -1147,48 +1150,77 @@ void TerminalSessionController::Run() {
         if (session_agent_tool() != nullptr &&
             !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main()) &&
             session_agent_tool()->HasUndeliveredCompletions()) {
-            const bool viewing = lubancode::cli::CurrentAgentViewedTaskId() != 0;
-            std::string reflow_ids;
-            if (viewing) {
-                for (const int id : session_agent_tool()->UndeliveredCompletionTaskIds()) {
-                    if (!reflow_ids.empty()) {
-                        reflow_ids += " ";
+            if (context_exhaustion_gate_.ShouldHoldAutoReflow()) {
+                // 唤醒识死(主会话输出预留占坑单 §4.3):连续应急放行的会话,
+                // 历史真满——回流不再自动另起一轮(新 Run 只会再爆再注收尾
+                // 交代,模型只写交接不干活,死循环)。完成通知照出、goal 的
+                // 完成账照记,但去留交还用户:结果保留,用户下一次显式输入
+                // 的那轮照常捎带(RunTurn 开头的 DrainCompletionNotices)。
+                // 通知只打一道,健康轮清账前不重播;不 continue——落到下面
+                // 的主提示符,等用户显式输入(/compact 或新会话也在那)。
+                // goal 的完成账同一道闸:slash 空转会让本支反复进入,喂账
+                // 不幂等,按"一遭一喂"收口。
+                if (context_exhaustion_gate_.ConsumeNotice()) {
+                    goal_wiring_.NoteSubagentCompletion();
+                    const std::vector<std::string> notices = session_agent_tool()->CompletionNoticeLines();
+                    {
+                        auto& transcript = transcript_ui_.items();
+                        lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(
+                            static_cast<int>(transcript.size()) + 1, tr("session.context_exhaustion_hold"),
+                            lubancode::cli::TranscriptStatus::Blocked, notices);
+                        transcript.push_back(std::move(item));
                     }
-                    reflow_ids += "#" + std::to_string(id);
+                    // 查看态不打裸行(事件照进 main 台账,回 main 时可见),
+                    // 与完成通知同一档规矩。
+                    if (lubancode::cli::CurrentAgentViewedTaskId() == 0) {
+                        TermOut() << theme.error << tr("session.context_exhaustion_hold") << theme.reset << "\n";
+                        TermOut().flush();
+                    }
                 }
-            }
-            const std::vector<std::string> notices = session_agent_tool()->CompletionNoticeLines();
-            // goal 合流:子代理完成喂 goal 的证据/usage 账(没有活跃 goal
-            // 零影响);在 RunPeerTurn 之前记,证据落在"消化回流"那轮的
-            // 采证之前,checkpoint 引用得着。
-            goal_wiring_.NoteSubagentCompletion();
-            {
-                auto& transcript = transcript_ui_.items();
-                lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(
-                    static_cast<int>(transcript.size()) + 1, tr("agent_panel.completion_notice"),
-                    lubancode::cli::TranscriptStatus::Ok, notices);
-                // 短进度行走通知口(骨架拆解反弹·问题 2):终端画法在
-                // TerminalSessionNoticeSink,逐字节照旧;查看态(viewing)
-                // 不打裸行——事件照进 main 台账,静默轮零扰动。
-                if (!viewing) {
-                    lubancode::app::SessionNotice notice;
-                    notice.kind = lubancode::app::SessionNotice::Kind::SubagentCompletion;
-                    notice.title = item.title;
-                    notice.notes = notices;
-                    notice_sink().Emit(notice);
+            } else {
+                const bool viewing = lubancode::cli::CurrentAgentViewedTaskId() != 0;
+                std::string reflow_ids;
+                if (viewing) {
+                    for (const int id : session_agent_tool()->UndeliveredCompletionTaskIds()) {
+                        if (!reflow_ids.empty()) {
+                            reflow_ids += " ";
+                        }
+                        reflow_ids += "#" + std::to_string(id);
+                    }
                 }
-                transcript.push_back(std::move(item));
+                const std::vector<std::string> notices = session_agent_tool()->CompletionNoticeLines();
+                // goal 合流:子代理完成喂 goal 的证据/usage 账(没有活跃 goal
+                // 零影响);在 RunPeerTurn 之前记,证据落在"消化回流"那轮的
+                // 采证之前,checkpoint 引用得着。
+                goal_wiring_.NoteSubagentCompletion();
+                {
+                    auto& transcript = transcript_ui_.items();
+                    lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(
+                        static_cast<int>(transcript.size()) + 1, tr("agent_panel.completion_notice"),
+                        lubancode::cli::TranscriptStatus::Ok, notices);
+                    // 短进度行走通知口(骨架拆解反弹·问题 2):终端画法在
+                    // TerminalSessionNoticeSink,逐字节照旧;查看态(viewing)
+                    // 不打裸行——事件照进 main 台账,静默轮零扰动。
+                    if (!viewing) {
+                        lubancode::app::SessionNotice notice;
+                        notice.kind = lubancode::app::SessionNotice::Kind::SubagentCompletion;
+                        notice.title = item.title;
+                        notice.notes = notices;
+                        notice_sink().Emit(notice);
+                    }
+                    transcript.push_back(std::move(item));
+                }
+                RunSessionTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
+                               "若结论已够用,向用户简要汇报要点,不要重新摸排。",
+                               TurnSource::Incoming, /*autosend_failed=*/nullptr,
+                               /*silent=*/viewing, memory::QueryOrigin::BackgroundCompletion);
+                if (viewing) {
+                    // 坞行退场由 DrainCompletionNotices 的 TouchTasks + 下一帧带出;
+                    // toast 替那行留一句人话,几秒自收,不抢屏。
+                    lubancode::cli::ShowPanelToast(trf("agent_panel.reflow_toast", reflow_ids));
+                }
+                continue;
             }
-            RunSessionTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
-                           "若结论已够用,向用户简要汇报要点,不要重新摸排。",
-                           TurnSource::Incoming, /*autosend_failed=*/nullptr,
-                           /*silent=*/viewing, memory::QueryOrigin::BackgroundCompletion);
-            if (viewing) {
-                // 坞行退场由 DrainCompletionNotices 的 TouchTasks + 下一帧带出;
-                // toast 替那行留一句人话,几秒自收,不抢屏。
-                lubancode::cli::ShowPanelToast(trf("agent_panel.reflow_toast", reflow_ids));
-            }
-            continue;
         }
 
         std::string content;

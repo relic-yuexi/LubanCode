@@ -330,6 +330,8 @@ const Entry kZhCN[] = {
     {"agent_panel.view_header", "── 查看 {0} · {1} · Esc 回 main ──"},
     {"agent_panel.back_to_main", "已回主会话。"},
     {"agent_panel.completion_notice", "[后台子代理完成,结果交回主会话继续]"},
+    {"session.context_exhaustion_hold",
+     "[上下文将尽] 已暂停后台子代理结果的自动续轮(结果保留,随你的下一次输入捎带)。请 /compact 压缩上下文,或开新会话继续。"},
     {"agent_panel.reflow_toast", "子代理 {0} 已完成,结果已回流 main(查看态静默收货)"},
     {"agent_panel.denial_notice_title", "[后台子代理权限未放行,已被拒]"},
     // 监督提醒的独立标题(后台代理管控三连 bug 单,Bug A):疑似断流/空转/
@@ -2325,6 +2327,8 @@ const Entry kEn[] = {
     {"agent_panel.view_header", "── viewing {0} · {1} · Esc back to main ──"},
     {"agent_panel.back_to_main", "Back to the main session."},
     {"agent_panel.completion_notice", "[background agent finished; results handed back to main]"},
+    {"session.context_exhaustion_hold",
+     "[context nearly full] auto-continuation on background agent results is paused (results are kept and will ride along with your next message). Run /compact or start a new session."},
     {"agent_panel.reflow_toast", "Agent {0} finished; result delivered to main (silent while viewing)"},
     {"agent_panel.denial_notice_title", "[background agent permission not pre-approved; request denied]"},
     {"agent_panel.supervisor_notice_title", "[background agent supervision notice]"},

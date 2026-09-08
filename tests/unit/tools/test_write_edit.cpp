@@ -4,6 +4,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -277,4 +278,26 @@ TEST_CASE("edit_file: replace_all 传成字符串,返回 is_error,不抛异常")
     CHECK_NOTHROW(result = tool.execute(input));
     CHECK(result.is_error);
     CHECK(result.content.find("replace_all") != std::string::npos);
+}
+
+TEST_CASE("write_file 不观测取消旗:cancel 升着也整篇写完(空文件假设的钉子)") {
+    // 主会话输出预留占坑单 §五 P3 的验证结论钉在这:取消是协作式的,只在
+    // 轮/工具边界被观察,write_file 的工具体不读 ToolExecutionContext::
+    // cancel——ESC 掐不进"建文件"与"写内容"之间,不存在"取消窗口夹出空
+    // 文件"的通路(事故现场 write_file 压根没跑,轨迹零工具事件)。另:
+    // open(trunc) 与 write 两步对文件系统非原子,硬崩/断电可留空文件——
+    // 那是崩溃级原子的另一档事,修复另立小单(见 write_file.cpp 的标记)。
+    TempDir dir;
+    WriteFileTool tool;
+    std::atomic<bool> cancel{true};  // 旗预先升着:工具体照样整篇落盘
+    nlohmann::json input;
+    input["path"] = dir.Utf8Path("todo_pin.md");
+    const std::string body = "# 设计单" + std::string(1, '\n') + "正文一枚,足够长以示完整。" + std::string(1, '\n');
+    input["content"] = body;
+    const Tool::Result result = tool.execute(input, lubancode::tools::ToolExecutionContext{&cancel, ""});
+    CHECK_FALSE(result.is_error);
+    std::ifstream in(Utf8ToPath(dir.Utf8Path("todo_pin.md")), std::ios::binary);
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    CHECK(buffer.str() == body);
 }

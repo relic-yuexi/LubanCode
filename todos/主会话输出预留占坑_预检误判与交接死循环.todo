@@ -1,6 +1,6 @@
 # 主会话输出预留占坑：预检误判"上下文将尽"与交接死循环
 
-- 状态：调查已定案，待实现修复；本轮未改生产代码。
+- 状态：已实施（P1/P2/P3 与文档全落，branch worktree-agent-reserve-cap；真机项未验，见 §六）。
 - 日期：2026-09-09
 - 级别：P0（主会话在 256K 窗只用了一半时被误判"上下文将尽"，禁用工具调用，任务永远无法收尾）。
 - 事故现场：`~/.lubancode/workspaces/D--lubancode-4d95553f/sessions/20260908-152500-U3ESGR/`（2026-09-08，LubanCode 自家会话写 SessionTurnStepAction 设计单，三段交接后一事无成；只建了一个空 todo 文件）。
@@ -76,10 +76,13 @@
 
 ## 五、分期
 
-- [ ] P1：主会话预留封顶 + 实发值优雅降级 + 应急进闸收紧（§4.1），回归测试三态。
-- [ ] P2：取消记账真实来源（§4.2）。
-- [ ] P3：唤醒识死与通知（§4.3）；顺带验证空文件假设（write_file 两步原子性，若证实另立小单修）。
-- [ ] 文档：configuration 手册写明 `max_output_tokens` 三级解析与预留封顶口径；CHANGELOG 记用户可见变化（主会长会话不再被误判"上下文将尽"）。
+- [x] P1：主会话预留封顶 + 实发值优雅降级 + 应急进闸收紧（§4.1），回归测试三态。
+  落法：`MainSessionOutputReserveCap`（与子代理同尺 clamp(window/8, 8k, 32k)，窗未知 32k）戴在 loop 预检的估算预留上，固定账预检/projected/最终硬闸三处同源；实发 max_tokens 在最终硬闸处降级为 `window − 输入 − 协议余量`（下限自守 ≥ 8k），ConfigFile 显式值不收。测试：test_loop 预检三态册 + ConfigFile 例外册，test_runtime_profile 帽尺册，test_compact 双闸册组数按 32k 帽取齐。
+- [x] P2：取消记账真实来源（§4.2）。
+  落法：`LoopBoundaryRecorder::OnOutputCancelled` 增 `OutputCancelSource`（UserInterrupt/Internal/StreamError），loop 的 ESC 收口与 SampleModel 单发路沿途分类递入；轨迹规范名 `user_interrupt`/`internal_cancel`/`stream_error`（旧值原样保留），两桥（主/旁路）按来源落名，schema 注明取值集。测试：loop 侧真按键/无链两态 + 采样侧三态合同册。
+- [x] P3：唤醒识死与通知（§4.3）；顺带验证空文件假设（write_file 两步原子性，若证实另立小单修）。
+  落法：`ContextExhaustionGate`（阈值 2，只在"整轮零应急"收口清零——应急步之前也有 PreRequest 通报，按通报清零永远攒不到 2）挂 TerminalSessionController；回流路 ShouldHoldAutoReflow 时不再另起 Run，改打 `session.context_exhaustion_hold` 通知（中英在册，transcript 留账，只打一道），结果保留随用户下一次显式输入捎带。空文件假设验证结论：**取消窗口通路证伪**（取消是协作式，只在轮/工具边界被观察，write_file 工具体不读 cancel 旗，ESC 掐不进 open 与 write 之间；事故现场 write_file 压根没跑）；open(trunc)→write 对文件系统**非原子**（硬崩可留空文件）——已按约只立钉（test_write_edit 取消盲册）+ write_file.cpp 注释标记，崩溃级原子修复另立小单。
+- [x] 文档：configuration 手册写明 `max_output_tokens` 三级解析与预留封顶口径（新增"输出上限三级解析与预留封顶"一节）；CHANGELOG 随发版另记（本分支不动版本与 CHANGELOG）。
 
 ## 六、验收矩阵
 
@@ -93,3 +96,9 @@
 ## 七、本轮交付
 
 只此调查与修复设计单。验尸基于事故会话轨迹只读复核（事件序列、压力账、取消账）与源码对读（loop.cpp 预检闸、runtime_profile.hpp 帽、turn_listener 升旗路、interactive_session 回流路、sample_model 记账路），未改生产代码、未建测试、未编译。
+
+## 八、实施记录（2026-09-09）
+
+- 分支 `worktree-agent-reserve-cap`，三个分期各一笔提交（P3 笔内并文档与单子收口）；远程 CI 为编译器（本地未编译），成色见分支 CI。
+- §六验收矩阵中"事故现场复放"（同形状会话真机写完 todo 并 commit）属真机项，**未验**；其余各行有单测在册（预检三态、ConfigFile 例外、子代理帽回归沿用既有册、唤醒识死账本、取消三来源、write_file 取消盲）。
+- 子代理既有行为零变化的依据：BuildSubagentRuntimeProfile 的帽在 profile 层已把能力级声明收到帽内，loop 层新帽对"已 ≤ 帽"的值是空操作；ConfigFile 来源两侧都不收。

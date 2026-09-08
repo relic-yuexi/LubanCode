@@ -164,6 +164,16 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 `base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务。交互模式缺连接时会打开两项开场页：可直接添加 Provider，也可暂时跳过。跳过后 `/provider`、`/help` 等命令照常可用；发送普通消息时只提示先配置，不会拿空地址发请求。单发模式/管道模式仍直接报错，提示缺了哪些字段。
 
+### 输出上限三级解析与预留封顶
+
+`max_output_tokens`（模型单次响应最多生成多少 token）按三级解析，从低到高：**模型目录声明**（`models.json` 条目）< **provider 声明**（`providers[]` 条目）< **配置文件显式值**（顶层 `agent.max_output_tokens`，子代理另有 `subagent.max_output_tokens`）。三级都缺席 = unset：chat/responses 请求不带该字段、交服务端默认，anthropic wire 必填、由 client 落公开兜底。生效值与来源可在 `/config`、`/context` 与 agent 查看态里查到。
+
+**能力上限 ≠ 每次请求的输出预留**。目录/provider 声明的是"这个模型最多能给"；token 预检估算"下一请求放不放得下"时用的输出预留另有封顶——主会话与子代理同尺：`clamp(窗口/8, 8k, 32k)`，窗口未知按 32k。配置文件显式值不封顶：用户手笔，尊重原值。有了这顶帽，256k 窗 × 128k 目录声明的模型，输入过半不再被误判"上下文将尽"。
+
+请求实发的 `max_tokens` 字段另账处理：输入 + 声明上限超窗、而输入 + 封顶预留装得下时，实发值优雅降级为 `窗口 − 输入 − 协议余量`（下限 8k），模型照常调工具，不打收尾交代。只有封顶后仍装不下（历史真满）才走应急支：预留收窄放行 + 注入一次"请立即收尾"的交代；连续两轮应急放行的会话，后台子代理完成回流不再自动另起一轮，改为打一枚"上下文将尽"通知，请 `/compact` 或开新会话——用户显式输入不受影响。
+
+子代理侧同款帽子落在 profile 构造层（`BuildSubagentRuntimeProfile`）：继承的能力级声明超出 `clamp(窗口/8, 8k, 32k)` 的部分收窄，来源记 `subagent_default`；显式配置不收。Agent YAML 的 `runtime.max_output_tokens` 属配置文件一级，详见 [agents.md](agents.md)。
+
 ### 模型角色与 `/model roles`
 
 `normal` 管普通主会话，`cheap` 管压缩、记忆抽取、会话标题等小活，`lao` 管规划类任务。`/model roles` 会列出三档最终落到哪家 provider、哪个模型、哪档 effort，以及配置来源。
