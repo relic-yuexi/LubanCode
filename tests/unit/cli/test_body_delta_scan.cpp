@@ -9,6 +9,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -228,8 +229,6 @@ TEST_CASE("body delta: 超 16KiB 长块继续小 delta,扫描账是确定数(§9
 TEST_CASE("body delta: 预算内的正常块,扫描账随块线性(§9.5 计数型)") {
     BodyScanState state;
     std::string block;
-    std::string expected_scan = 0;
-    (void)expected_scan;
     std::uint64_t expected = 0;
     for (int i = 0; i < 100; ++i) {
         const std::string delta = "短行" + std::to_string(i) + "\n";
