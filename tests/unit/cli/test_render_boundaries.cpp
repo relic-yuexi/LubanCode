@@ -384,3 +384,91 @@ TEST_CASE("QueueInlineFrameDiff: 帧不变零输出(重铺同帧是 no-op)") {
     CHECK(stats.changed_rows == 0);
     CHECK_FALSE(stats.emitted);
 }
+
+// ---------------------------------------------------------------------------
+// 七、Unicode emoji 治理单 P1:字素簇宽度的独立预期值(期望值全部手写,
+// 不拿 DisplayWidthUtf8 自证——单子 §3.6 批评的"量宽函数自证"在这里堵死)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("独立列宽断言: emoji 序列按整簇计宽,期望值写死") {
+    CHECK(lubancode::cli::DisplayWidthUtf8("e\xCC\x81") == 1);  // e + 组合重音:一簇一列
+    // 👩‍💻 = 1F469 200D 1F4BB:一簇两列。
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x92\xBB") == 2);
+    // 👍🏽 = 1F44D 1F3FD:一簇两列。
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD") == 2);
+    // 👨‍👩‍👧‍👦:七码点一簇两列。
+    CHECK(lubancode::cli::DisplayWidthUtf8(
+              "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D"
+              "\xF0\x9F\x91\xA7\xE2\x80\x8D\xF0\x9F\x91\xA6") == 2);
+    // 1️⃣ = 0031 FE0F 20E3:keycap 两列。
+    CHECK(lubancode::cli::DisplayWidthUtf8("1\xEF\xB8\x8F\xE2\x88\xA3") == 2);
+    // ❤️ 两列;❤︎ 一列。
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xE2\x9D\xA4\xEF\xB8\x8F") == 2);
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xE2\x9D\xA4\xEF\xB8\x8E") == 1);
+    // 🇨🇳 旗帜两列。
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3") == 2);
+    // 孤立零宽:不占列。
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xCC\x81") == 0);  // 孤立重音
+    CHECK(lubancode::cli::DisplayWidthUtf8("\xE2\x80\x8D") == 0);  // 孤立 ZWJ
+}
+
+namespace {
+
+// 行首是不是"孤儿跟随者"的精确字节签名:ZWJ(E2 80 8D)、组合重音(CC 8x)、
+// VS15/16(EF B8 8E/8F)、肤色修饰(F0 9F 8F BB..BF)。折出来的行以这些
+// 开头,等于簇被拆开、跟随者被挤成了孤儿。
+bool StartsWithOrphanFollower(const std::string& line) {
+    const auto b = [&line](std::size_t i) {
+        return i < line.size() ? static_cast<unsigned char>(line[i]) : 0;
+    };
+    if (b(0) == 0xE2 && b(1) == 0x80 && b(2) == 0x8D) return true;   // ZWJ
+    if (b(0) == 0xCC && b(1) >= 0x80) return true;                     // 组合附标
+    if (b(0) == 0xEF && b(1) == 0xB8 && (b(2) == 0x8E || b(2) == 0x8F)) return true;  // VS15/16
+    if (b(0) == 0xF0 && b(1) == 0x9F && b(2) == 0x8F && b(3) >= 0xBB) return true;   // 肤色
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("WrapUtf8ToDisplayWidth: emoji 组合序列整簇折行,拼回原文") {
+    // 家庭组合(2 列)+ x(1 列)+ 家庭组合(2 列):max_width=4 → 两行,
+    // 第二行独占家庭组合,不拆簇、不留孤儿 ZWJ。
+    const std::string family =
+        "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D"
+        "\xF0\x9F\x91\xA7\xE2\x80\x8D\xF0\x9F\x91\xA6";
+    const std::string text = family + "x" + family;
+    const auto lines = WrapUtf8ToDisplayWidth(text, 4);
+    REQUIRE(lines.size() == 2);
+    CHECK(Join(lines) == text);
+    CHECK(AllLinesWithin(lines, 4));
+    for (const std::string& line : lines) {
+        CHECK_FALSE(StartsWithOrphanFollower(line));
+    }
+}
+
+TEST_CASE("WrapUtf8ToDisplayWidth: 恰满一行后的零宽附标不挤丢") {
+    // "x" + "中+重音"(簇宽 2):max_width=3 时重音跟"中"同行,不被挤成
+    // 下一行的孤儿(旧码点算法会把 0301 单独挤到第二行)。
+    const std::string text = "x\xE4\xB8\xAD\xCC\x81";
+    const auto lines = WrapUtf8ToDisplayWidth(text, 3);
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0] == text);
+}
+
+TEST_CASE("RenderMarkdown: emoji 组合序列进正文,窄窗守界不拆簇") {
+    const std::string family =
+        "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D"
+        "\xF0\x9F\x91\xA7\xE2\x80\x8D\xF0\x9F\x91\xA6";
+    const std::string text = "前缀 " + family + " 中缀 " + family + family + " 后缀";
+    const auto lines = RenderMarkdown(text, BuiltinTheme("plain"), 10);
+    CHECK(AllLinesWithin(lines, 9));
+    std::string joined;
+    for (const auto& line : lines) {
+        joined += StripAnsi(line);
+    }
+    // 内容一字不丢(折行剥掉的空格不算):家庭组合两枚都完整在场。
+    const std::size_t first = joined.find(family);
+    CHECK(first != std::string::npos);
+    const std::size_t second = joined.find(family, first + family.size());
+    CHECK(second != std::string::npos);
+}

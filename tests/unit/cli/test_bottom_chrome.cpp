@@ -18,6 +18,7 @@
 
 #include "cli/bottom_chrome.hpp"
 #include "cli/console_input.hpp"          // SetStatusLineData(资料行数据源)
+#include "cli/grapheme.hpp"  // SplitUtf8Graphemes:footer 截断/同几何测试的独立量宽
 #include "cli/console_input_internal.hpp"  // BoxChrome/BuildComposerModeLine/BuildStatusLine
 #include "cli/i18n.hpp"
 #include "cli/keymap.hpp"  // ActiveKeymap/BuildSceneHelpLines(改绑跟脚合同)
@@ -1245,4 +1246,131 @@ TEST_CASE("帮助入口改绑跟脚:速览右槽与帮助层同拍换键,流式�
     // input.shortcuts_hint 兜底生产路已删:翻译表里不得再有这枚 key
     //(tr 查不到时回退 key 本身)。留着它就是"另一条翻译硬补"的孤尾。
     CHECK(tr("input.shortcuts_hint") == "input.shortcuts_hint");
+}
+
+
+// ---------------------------------------------------------------------------
+// Unicode emoji 治理单 P1:footer 的 ANSI 安全截断与 composer/footer 同几何。
+// 期望列宽全部手写,不拿 DisplayWidthUtf8 自证。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 剥掉 ANSI 转义段(测试侧独立实现,不调生产 PlainDisplayWidth)。
+std::string StripAnsiLocal(const std::string& line) {
+    std::string plain;
+    for (std::size_t i = 0; i < line.size();) {
+        if (line[i] == '' && i + 1 < line.size() && line[i + 1] == '[') {
+            i += 2;
+            while (i < line.size()) {
+                const unsigned char ch = static_cast<unsigned char>(line[i++]);
+                if (ch >= 0x40U && ch <= 0x7EU) {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push_back(line[i++]);
+    }
+    return plain;
+}
+
+// 独立量宽:按共享字素分段器逐簇累加。被测的是"截断/布局几何",宽度
+// 期望值手写,不拿生产 DisplayWidthUtf8 自证。
+int TestVisibleWidth(const std::string& line) {
+    int width = 0;
+    for (const auto& glyph : lubancode::cli::SplitUtf8Graphemes(StripAnsiLocal(line))) {
+        width += glyph.width;
+    }
+    return width;
+}
+
+// 截断不拆簇的测试侧判据:剥 ANSI 后整串能被字素分段完整覆盖(每簇
+// 逐字节落在串内,没有半途劈开的残段)——分段器对坏字节按独立簇回退,
+// 劈开的簇会以"坏字节簇"或"孤儿跟随者开头"现形。
+bool StartsWithOrphanFollower(const std::string& plain) {
+    const auto b = [&plain](std::size_t i) {
+        return i < plain.size() ? static_cast<unsigned char>(plain[i]) : 0;
+    };
+    if (b(0) == 0xE2 && b(1) == 0x80 && b(2) == 0x8D) return true;  // ZWJ
+    if (b(0) == 0xCC && b(1) >= 0x80) return true;                   // 组合附标
+    if (b(0) == 0xEF && b(1) == 0xB8 && (b(2) == 0x8E || b(2) == 0x8F)) return true;
+    if (b(0) == 0xF0 && b(1) == 0x9F && b(2) == 0x8F && b(3) >= 0xBB) return true;  // 肤色
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("footer ANSI 截断: emoji 序列整簇下刀,截后不越界不劈簇") {
+    BottomChromeModel model;
+    // 状态行带主题色 + 四枚 👩‍💻(每簇 2 列,共 8 列):8 列窄窗 limit=7,
+    // 第四枚整簇截掉,截断记号 "." 落在 7 列内。
+    const std::string tech = "ð©âð»";
+    model.composer.prompt = "> ";
+    model.composer.editor = ComposerState({U""}, 0, 0);
+    model.composer.mode = ComposerMode::BusyQueue;
+    model.status_rows = {std::string("[36m") + tech + tech + tech + tech +
+                         std::string("[0m")};
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, BuiltinTheme("plain"), 8);
+    // 找带色的那行状态行(行序上在横线之上,不假定具体下标)。
+    const std::string* status = nullptr;
+    for (const auto& row : layout.frame.rows) {
+        if (row.text.find("[36m") != std::string::npos) {
+            status = &row.text;
+            break;
+        }
+    }
+    REQUIRE(status != nullptr);
+    // 截断守界:可见宽 ≤ 7(末列留白铁律)。
+    const std::string plain = StripAnsiLocal(*status);
+    CHECK(TestVisibleWidth(*status) <= 7);
+    // 截断不拆簇:三枚完整的 👩‍💻(6 列)+ 截断记号,第四枚整簇不要。
+    const std::size_t first_tech = plain.find(tech);
+    REQUIRE(first_tech != std::string::npos);
+    CHECK(plain.find(tech, first_tech + tech.size()) != std::string::npos);       // 第二枚
+    CHECK(plain.find(tech, first_tech + 2 * tech.size()) != std::string::npos);   // 第三枚
+    CHECK(plain.find(tech, first_tech + 3 * tech.size()) == std::string::npos);   // 第四枚截掉
+    CHECK_FALSE(StartsWithOrphanFollower(plain));
+}
+
+TEST_CASE("footer 与 composer 同几何: 同一段 emoji 两处量宽一致(写死列宽)") {
+    BottomChromeModel model;
+    const std::string tech = "ð©âð»";
+    model.composer.prompt = "> ";
+    model.composer.editor =
+        ComposerState({U"x" + std::u32string{0x1F469, 0x200D, 0x1F4BB} + U"y"}, 0, 5);
+    model.composer.mode = ComposerMode::Idle;
+    model.status_rows = {std::string("[36m") + "x" + tech + "y" + std::string("[0m")};
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, BuiltinTheme("plain"), 40);
+    int status_width = -1;
+    int composer_width = -1;
+    for (const auto& row : layout.frame.rows) {
+        const std::string& text = row.text;
+        if (text.find("[36m") != std::string::npos) {
+            status_width = TestVisibleWidth(text);
+        }
+        if (text.rfind("> x", 0) == 0) {
+            composer_width = TestVisibleWidth(text);
+        }
+    }
+    CHECK(status_width == 4);    // x(1) + 👩‍💻(2) + y(1),ANSI 不计
+    CHECK(composer_width == 6);  // "> "(2) + x(1) + 👩‍💻(2) + y(1)
+}
+
+TEST_CASE("composer 软换行: emoji 组合序列窄窗不拆(经 chrome 全链)") {
+    BottomChromeModel model;
+    const std::u32string family = {0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x200D, 0x1F466};
+    model.composer.prompt = "> ";
+    model.composer.editor = ComposerState({family + family}, 0, family.size() * 2);
+    model.composer.mode = ComposerMode::Idle;
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, BuiltinTheme("plain"), 8);
+    // 8 列:首行 "> "(2)后容 5 列,装一枚家庭组合(2)后第二枚(2)也装
+    // 得下(共 4);这里钉的是每行守界与不出现孤儿跟随者。
+    for (const auto& row : layout.frame.rows) {
+        if (row.text.find("ð") == std::string::npos) {
+            continue;
+        }
+        CHECK(TestVisibleWidth(row.text) <= 7);
+        CHECK_FALSE(StartsWithOrphanFollower(StripAnsiLocal(row.text)));
+    }
 }

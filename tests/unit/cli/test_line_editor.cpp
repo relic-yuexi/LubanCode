@@ -1833,3 +1833,250 @@ TEST_CASE("0.28.x LoadText:整段正文装进编辑区,光标落末尾,可继续
     CHECK(state.line == U"再来一段");
     CHECK(state.cursor_col == 4);
 }
+
+// ---------------------------------------------------------------------------
+// Unicode emoji 治理单 P1:字素簇级编辑(移动/删除/截断/折行/paste 原子)。
+// 期望值全部手写(簇数、列宽、原文),不拿 DisplayWidth 自证。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 逐码点喂一段夹具(模拟平台层把代理对合并成码点后的逐键输入)。
+void TypeCodepoints(LineEditorCore& editor, std::initializer_list<char32_t> cps) {
+    for (char32_t cp : cps) {
+        editor.HandleKey(KeyEvent::Char(cp));
+    }
+}
+
+// 夹具构造:不经任何被测函数。
+std::u32string Fixture(std::initializer_list<char32_t> cps) {
+    std::u32string out;
+    for (char32_t cp : cps) {
+        out.push_back(cp);
+    }
+    return out;
+}
+
+const std::u32string kFamily =
+    Fixture({0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x200D, 0x1F466});
+const std::u32string kTechnologist = Fixture({0x1F469, 0x200D, 0x1F4BB});
+const std::u32string kFlag = Fixture({0x1F1E8, 0x1F1F3});
+
+}  // namespace
+
+TEST_CASE("字素编辑: 左右移动按整簇,ZWJ 家庭组合一步跨过") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    // "a" + 👨‍👩‍👧‍👦(7 码点)+ "b":光标在末尾(9)。
+    TypeCodepoints(editor, {U'a', 0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x200D, 0x1F466, U'b'});
+    RenderState state = editor.CurrentRenderState();
+    CHECK(state.cursor == 9);
+    CHECK(state.cursor_display_col == 4);  // 1 + 2 + 1
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // 跨过 b
+    CHECK(state.cursor == 8);
+    CHECK(state.cursor_display_col == 3);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // 一步跨过整个家庭组合
+    CHECK(state.cursor == 1);
+    CHECK(state.cursor_display_col == 1);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // 跨过 a
+    CHECK(state.cursor == 0);
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Right));
+    CHECK(state.cursor == 1);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Right));  // 又一步跨回
+    CHECK(state.cursor == 8);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Right));
+    CHECK(state.cursor == 9);
+}
+
+TEST_CASE("字素编辑: Backspace 整簇删——家庭组合一次退干净,重音不剥皮") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeCodepoints(editor, {U'x', 0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x200D, 0x1F466});
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.line == U"x");
+    CHECK(state.cursor == 1);
+    CHECK(state.cursor_display_col == 1);
+
+    // e+组合重音:一次退格删掉整个字,不留裸 e、也不留孤儿重音。
+    LineEditorCore accents;
+    accents.BeginLine(true);
+    TypeCodepoints(accents, {U'e', 0x0301});
+    RenderState accent_state = accents.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(accent_state.line.empty());
+    CHECK(accent_state.cursor == 0);
+}
+
+TEST_CASE("字素编辑: 旗帜与肤色修饰各成一簇,退格整枚删") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeCodepoints(editor, {0x1F1E8, 0x1F1F3, 0x1F44D, 0x1F3FD});
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.line.size() == 2);  // 只剩 🇨🇳 两枚指示符
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.line.empty());
+}
+
+TEST_CASE("Delete 补齐(§9.4): ASCII 先行——Home 后 Del 删一个,行尾 Del 无操作") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "abc");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Home));
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Delete));
+    CHECK(state.line == U"bc");
+    CHECK(state.cursor == 0);
+
+    // 光标在行尾按 Del:没东西可删,内容不动。
+    editor.HandleKey(KeyEvent::Simple(KeyKind::End));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Delete));
+    CHECK(state.line == U"bc");
+    CHECK(state.cursor == 2);
+}
+
+TEST_CASE("Delete 补齐(§9.4): Unicode 生来按整簇向前删") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeCodepoints(editor, {U'a', 0x1F469, 0x200D, 0x1F4BB, U'b'});
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // 光标在 b 前
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // 光标在 👩‍💻 前
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Delete));
+    CHECK(state.line == U"ab");  // 整个 ZWJ 序列一次向前删干净
+    CHECK(state.cursor == 1);
+
+    // e+重音 + b:光标行首,Del 一次删掉带重音的整簇。
+    LineEditorCore accent_editor;
+    accent_editor.BeginLine(true);
+    TypeCodepoints(accent_editor, {U'e', 0x0301, U'b'});
+    accent_editor.HandleKey(KeyEvent::Simple(KeyKind::Home));
+    RenderState accent_state = accent_editor.HandleKey(KeyEvent::Simple(KeyKind::Delete));
+    CHECK(accent_state.line == U"b");
+}
+
+TEST_CASE("Delete 补齐(§9.4): 行尾 Del 把下一行并上来,与行首退格对称") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "ab");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "cd");
+    REQUIRE(editor.CurrentRenderState().lines.size() == 2);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    editor.HandleKey(KeyEvent::Simple(KeyKind::End));
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Delete));
+    CHECK(state.line == U"abcd");
+    REQUIRE(state.lines.size() == 1);
+}
+
+TEST_CASE("字素截断: TruncateToDisplayWidth 整簇取舍,ZWJ 序列不留孤儿") {
+    CHECK(TruncateToDisplayWidth(Fixture({U'a'}) + kTechnologist + Fixture({U'b'}), 2) ==
+          Fixture({U'a'}));
+    CHECK(TruncateToDisplayWidth(Fixture({U'a'}) + kTechnologist + Fixture({U'b'}), 3) ==
+          Fixture({U'a'}) + kTechnologist);
+    // 旗帜恰一簇:截在两枚指示符之间等于拆旗,整簇不要。
+    CHECK(TruncateToDisplayWidth(kFlag, 1).empty());
+    CHECK(TruncateToDisplayWidth(kFlag, 2) == kFlag);
+}
+
+TEST_CASE("字素折行: 恰满一行后的零宽附标不被挤到下一行成孤儿") {
+    // "x"(1) + "中+重音"(整簇 2 列):max_width=3 时旧算法把重音(按 1 列
+    // 计)挤到下一行成孤儿;按簇后 "x中́" 一行装下。
+    const std::u32string text = Fixture({U'x', U'中', 0x0301});
+    const auto lines = WrapToDisplayWidth(text, 3);
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0] == text);
+
+    // "e+重音"(1 列)与 CJK(2 列)混排:max_width=3 恰好两簇同行。
+    const auto pair = WrapToDisplayWidth(Fixture({U'e', 0x0301, U'中'}), 3);
+    REQUIRE(pair.size() == 1);
+    CHECK(pair[0] == Fixture({U'e', 0x0301, U'中'}));
+}
+
+TEST_CASE("字素折行: ZWJ 序列独占不拆,拼回原文") {
+    const std::u32string text = Fixture({U'a'}) + kFamily + Fixture({U'b'}) + kFamily;
+    const auto lines = WrapToDisplayWidth(text, 4);
+    // 行1: a(1)+家庭(2)+b(1)=4;行2: 家庭(2)。
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == Fixture({U'a'}) + kFamily + Fixture({U'b'}));
+    CHECK(lines[1] == kFamily);
+    std::u32string joined;
+    for (const auto& line : lines) {
+        joined += line;
+    }
+    CHECK(joined == text);  // 折行不丢内容:拼回逐码点相等
+}
+
+TEST_CASE("夹具进历史: emoji 序列提交后翻回,原文一字节不变") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeCodepoints(editor, {0x1F469, 0x200D, 0x1F4BB, U' ', 0x1F1E8, 0x1F1F3, U' ', U'e', 0x0301});
+    const RenderState submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    REQUIRE(submitted.submitted);
+    CHECK(submitted.line ==
+          Fixture({0x1F469, 0x200D, 0x1F4BB, U' ', 0x1F1E8, 0x1F1F3, U' ', U'e', 0x0301}));
+
+    editor.BeginLine(true);
+    const RenderState history = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(history.line == submitted.line);  // 历史原文不经任何规范化
+    // 历史里左右移动同样按簇。码点布局:👩‍💻[0,3) ' '[3] 🇨🇳[4,6) ' '[6]
+    // e+重音[7,9);每一下 Left 落在簇首:7 → 6 → 4 → 3 → 0。
+    const RenderState end_state = editor.HandleKey(KeyEvent::Simple(KeyKind::End));
+    CHECK(end_state.cursor == 9);
+    const RenderState left1 = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(left1.cursor == 7);  // 跨过 e+重音整簇
+    const RenderState left2 = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(left2.cursor == 6);
+    const RenderState left3 = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(left3.cursor == 4);  // 跨过旗帜
+    const RenderState left4 = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(left4.cursor == 3);
+    const RenderState left5 = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(left5.cursor == 0);  // 一步跨过 👩‍💻
+}
+
+TEST_CASE("paste 占位符原子: 折叠后左右键整枚跳、退格整段删,不被字素重构拆开") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    const std::string large(kLargePasteCharThreshold + 1, 'x');
+    const RenderState state = editor.HandleKey(KeyEvent::Paste(large));
+    REQUIRE(state.lines.size() == 1);
+    // 缓冲里只有一枚 token 码点(整段粘贴折叠成原子对象):光标紧跟其后,
+    // 兼容字段 line 展开成完整原文。
+    CHECK(state.cursor == 1);
+    REQUIRE(state.line.size() == kLargePasteCharThreshold + 1);
+
+    // token 是单码点,自成一体:左右移动整枚跳(光标 0 <-> 1)。
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(editor.CurrentRenderState().cursor == 0);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Right));
+    CHECK(editor.CurrentRenderState().cursor == 1);
+
+    // 退格一次:整枚 token 连同整段粘贴内容一起删掉。
+    const RenderState backspaced = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(backspaced.line.empty());
+
+    // 提交时占位符展开成完整原文(既有合同在字素重构后原样成立)。
+    LineEditorCore second;
+    second.BeginLine(true);
+    second.HandleKey(KeyEvent::Paste(large));
+    const RenderState submitted = second.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(submitted.submitted);
+    CHECK(Utf32ToUtf8(submitted.line) == large);
+}
+
+TEST_CASE("编辑行窗口: 窗口起点不落在 ZWJ 序列中间") {
+    // 超宽行 "aaaa" + 👩‍💻 + "bbbb...":按码点截窗口会砍进组合序列(起点
+    // 落在 200D 上,屏上从半个 emoji 开头);按簇后窗口从簇首(4)起。
+    std::u32string line = Fixture({U'a', U'a', U'a', U'a', 0x1F469, 0x200D, 0x1F4BB});
+    for (int i = 0; i < 20; ++i) {
+        line += U'b';
+    }
+    // 光标落在 👩‍💻 中间(码点 6):窗口让光标可见,起点必是簇首 4。
+    const EditLineWindow mid = ComputeEditLineWindow(line, 6, 5);
+    CHECK(mid.text == Fixture({0x1F469, 0x200D, 0x1F4BB, U'b', U'b', U'b'}));
+    CHECK(mid.cursor_display_col == 2);
+    // 光标在末尾:窗口随光标右移,起点落在 b 区的簇边界上,宽度守界。
+    const EditLineWindow tail = ComputeEditLineWindow(line, line.size(), 5);
+    CHECK(DisplayWidth(tail.text) <= 5);
+    CHECK(tail.text == Fixture({U'b', U'b', U'b', U'b', U'b'}));
+    CHECK(tail.cursor_display_col == 5);
+}
