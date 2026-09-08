@@ -452,7 +452,8 @@ TEST_CASE("BuildContextWindowPanelFrame: 当前值超限标异常;declined 标�
     view.original_window_index = 1;
     {
         const auto frame = cli::BuildContextWindowPanelFrame(view, 80);
-        CHECK(frame.lines[4].find("300000") != std::string::npos);
+        // 300000 是 1000 的整倍数,标签是 "300K"(K=1000 口径),不是原文数字。
+        CHECK(frame.lines[4].find("300K") != std::string::npos);
         CHECK(frame.lines[4].find(cli::tr("cw_panel.over_limit")) != std::string::npos);
     }
     view.effort.control = cli::ThinkEffortControl::NotSupported;
