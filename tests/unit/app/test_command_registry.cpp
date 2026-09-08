@@ -9,6 +9,8 @@
 //      55:多渠道单阶段 2 添 /channels、/channel 两案;
 //      56:端云协同可观测单 T1 添 /telemetry 一案(只读状态面);
 //      57:Token 账本单 A5 添 /insights 一案(跨会话洞察报告);
+//      58:ContextWindow 交互面板单添 /context-window 一案(同屏调窗口
+//         与思考强度的面板,本会话生效);
 //   2. 枚举无重复、无遗漏(死案 Image/NotSlash 也留名,handler 为空);
 //   3. 活案(有 handler)的名字与 cli::AllSlashCommands 的帮助面逐一对应
 //      ——已知差异如实记:/effort 是 /think 的别名(帮助面有、分派面归
@@ -40,6 +42,7 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
         lubancode::cli::SlashCommand::Worktree,   lubancode::cli::SlashCommand::Clear,
         lubancode::cli::SlashCommand::Context,    lubancode::cli::SlashCommand::Usage,
         lubancode::cli::SlashCommand::Insights,
+        lubancode::cli::SlashCommand::ContextWindow,
         lubancode::cli::SlashCommand::Compact,
         lubancode::cli::SlashCommand::Think,      lubancode::cli::SlashCommand::Skills,
         lubancode::cli::SlashCommand::Skill,      lubancode::cli::SlashCommand::Mcp,
@@ -69,9 +72,9 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
 
 }  // namespace
 
-TEST_CASE("命令注册表:57 案齐整,枚举可对") {
+TEST_CASE("命令注册表:58 案齐整,枚举可对") {
     const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
-    REQUIRE(table.size() == 57);
+    REQUIRE(table.size() == 58);
 
     SUBCASE("枚举逐一在表,无重复") {
         std::set<int> seen;

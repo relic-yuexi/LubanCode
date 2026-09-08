@@ -169,6 +169,32 @@ TEST_CASE("ParseSlashCommand: /effort 是 /think 的别名,解到同一个命令
     CHECK(parsed.args.empty());
 }
 
+TEST_CASE("ParseSlashCommand: /context-window 裸敲开面板,与 /context 不混") {
+    const auto parsed = cli::ParseSlashCommand("/context-window");
+    CHECK(parsed.command == cli::SlashCommand::ContextWindow);
+    CHECK(parsed.args.empty());
+    // 带参数(第一版不认):args 原样递给 handler 给短用法。
+    const auto with_args = cli::ParseSlashCommand("/context-window 200k");
+    CHECK(with_args.command == cli::SlashCommand::ContextWindow);
+    CHECK(with_args.args == "200k");
+    // 大小写不敏感;与 /context 占用分析仍是两个命令。
+    CHECK(cli::ParseSlashCommand("/Context-Window").command == cli::SlashCommand::ContextWindow);
+    CHECK(cli::ParseSlashCommand("/CONTEXT").command == cli::SlashCommand::Context);
+}
+
+TEST_CASE("AllSlashCommands: /context-window 在列表里,描述走 i18n 词条") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_context_window = false;
+    for (const auto& c : commands) {
+        if (c.name == "/context-window") {
+            has_context_window = true;
+            CHECK(c.description == cli::tr("slash.desc.context_window"));
+            CHECK(!c.description.empty());
+        }
+    }
+    CHECK(has_context_window);  // /help 与 Tab 补全同出这张表,不另造名单
+}
+
 TEST_CASE("ParseSlashCommand: /effort 带档位参数,大小写不敏感") {
     const auto parsed = cli::ParseSlashCommand("/Effort xhigh");
     CHECK(parsed.command == cli::SlashCommand::Think);

@@ -26,6 +26,7 @@
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
 #include "cli/slash_commands.hpp"  // ParsedSlashCommand(分派注册制)
+#include "cli/context_window_panel.hpp"  // /context-window 面板候选/校验材料(面板单)
 #include "app/hook_runtime.hpp"
 #include "app/model_router.hpp"
 #include "config/config.hpp"
@@ -335,6 +336,47 @@ struct SlashDispatchContext;
 CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+
+// ---------------------------------------------------------------------------
+// /context-window(ContextWindow交互面板单):同屏调当前模型的窗口预算与
+// 思考强度。面板本体在 cli/context_window_panel(纯 core + TTY 宿主);
+// 这里是分派位与应用校验。第一版只改当前会话、当前主模型,不写任何
+// 持久化配置;窗口走 /context 同一只 tracker,effort 走 /think 同一只
+// current_think,下一份请求经 sync_request_policy 生效。
+// ---------------------------------------------------------------------------
+
+// 面板确认后的选择(值,不是索引;应用前要过 ValidateContextWindow-
+// PanelSelection 的重新校验)。
+struct ContextWindowPanelSelection {
+    bool window_changed = false;
+    std::size_t window_tokens = 0;
+    bool effort_changed = false;
+    std::string effort_value;  // 新 effort;空串 = 未发送参数(Provider default)
+};
+
+// 应用校验的结果。error 为 i18n key(拒绝理由),ok 时为空;error_arg*
+// 是该 key 的占位参数(model_changed 的身份对),无参 key 留空。
+struct ContextWindowPanelValidation {
+    bool ok = false;
+    std::string error;
+    std::string error_arg0;
+    std::string error_arg1;
+};
+
+// 纯函数(单测钉):面板打开时的模型身份 vs 现在的身份、两项所选值是否
+// 仍在最新候选里、关思考是否与 history all 冲突(与 HandleSlashThink 的
+// 拦截同一谓词)。全过才允许应用——两项一起校验,不留半笔状态。
+ContextWindowPanelValidation ValidateContextWindowPanelSelection(
+    const std::string& opened_provider, const std::string& opened_model,
+    const std::string& now_provider, const std::string& now_model,
+    const lubancode::cli::ContextWindowCandidates& window_now,
+    const lubancode::cli::ThinkEffortCapability& effort_now,
+    const lubancode::config::ModelCatalogEntry* entry_now,
+    lubancode::api::ReasoningHistoryMode think_history,
+    const ContextWindowPanelSelection& selection);
+
+CommandFlow HandleSlashContextWindow(SlashDispatchContext& ctx,
+                                     const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashSessions(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
