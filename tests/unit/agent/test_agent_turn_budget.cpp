@@ -95,7 +95,7 @@ public:
         return true;
     }
     void OnOutputFailed(const std::string&, const std::string&) override {}
-    void OnOutputCancelled(const std::string&) override {}
+    void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
 };
 
 // 按脚本吐事件的假后端(与 test_turn_harness.cpp 同款):每调一次

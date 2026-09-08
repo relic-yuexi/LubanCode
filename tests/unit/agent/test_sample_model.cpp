@@ -197,6 +197,72 @@ TEST_CASE("外部取消链在场:直接吃外部旗,不看门狗也不误伤") {
     CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
 }
 
+// 取消来源的录音替身(§4.2 合同测试,不真按键):三来源各记各名。
+class CancelSourceRecorder final : public lubancode::agent::LoopBoundaryRecorder {
+public:
+    std::optional<lubancode::agent::OutputCancelSource> cancel_source;
+    int prepared_count = 0;
+    std::string OnRequestPrepared(const lubancode::api::Request&,
+                                  const lubancode::agent::RequestPreparedContext&) override {
+        return "req-" + std::to_string(++prepared_count);
+    }
+    void OnRequestSent(const std::string&) override {}
+    void OnUsageRecorded(const std::string&, const lubancode::api::Usage&, bool, const std::string&, int, bool,
+                         bool) override {}
+    bool OnOutputCompleted(const std::string&, const lubancode::api::Message&, const std::string&,
+                           const std::string&) override {
+        return true;
+    }
+    void OnOutputFailed(const std::string&, const std::string&) override {}
+    void OnOutputCancelled(const std::string&, lubancode::agent::OutputCancelSource source) override {
+        cancel_source = source;
+    }
+};
+
+TEST_CASE("取消记账(§4.2): 外部取消链升旗记 user_interrupt") {
+    BlockingBackend backend;
+    std::atomic<bool> cancel{false};
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.cancel = &cancel;
+    options.boundary_recorder = &recorder;
+    std::thread flip([&cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        cancel = true;
+    });
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    flip.join();
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::UserInterrupt);
+}
+
+TEST_CASE("取消记账(§4.2): 看门狗超时记 internal_cancel") {
+    BlockingBackend backend;
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.timeout_secs = 1;
+    options.boundary_recorder = &recorder;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::Internal);
+}
+
+TEST_CASE("取消记账(§4.2): 谁的旗都没升的取消分型记 stream_error") {
+    FailingBackend backend;  // 无取消链、无超时,却回了 Cancelled:伪取消形状
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.boundary_recorder = &recorder;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::StreamError);
+}
+
 TEST_CASE("output_schema 复检:过/不过两态,不影响 ok") {
     FullBackend ok_backend;
     ok_backend.reply = "{\"decision\": \"achieved\"}";

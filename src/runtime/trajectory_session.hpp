@@ -103,7 +103,7 @@ public:
                            const std::string& stop_reason,
                            const std::string& provider_response_id) override;
     void OnOutputFailed(const std::string& request_id, const std::string& reason) override;
-    void OnOutputCancelled(const std::string& request_id) override;
+    void OnOutputCancelled(const std::string& request_id, agent::OutputCancelSource source) override;
 
     // ---- ToolTrajectorySink(hub 在工具栅栏调) ----
     void OnToolTrace(const agent::ToolTraceEvent& event) override;
@@ -283,7 +283,7 @@ public:
                            const std::string& stop_reason,
                            const std::string& provider_response_id) override;
     void OnOutputFailed(const std::string& request_id, const std::string& reason) override;
-    void OnOutputCancelled(const std::string& request_id) override;
+    void OnOutputCancelled(const std::string& request_id, agent::OutputCancelSource source) override;
 
     // 诊断:最近一枚提交失败 receipts 的稳定码。
     std::vector<std::string> recent_errors() const { return recent_errors_; }

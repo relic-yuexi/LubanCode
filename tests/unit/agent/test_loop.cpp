@@ -803,6 +803,87 @@ TEST_CASE("ESC 打断:工具执行后才发现取消,正在跑的工具结果照
     CHECK(r1.content.find("打断") != std::string::npos);
 }
 
+// 取消来源的录音替身(§4.2 合同测试):prepared/sent/usage 全通,只把
+// OnOutputCancelled 的来源记下来。
+class CancelSourceRecorder final : public agent::LoopBoundaryRecorder {
+public:
+    std::optional<agent::OutputCancelSource> cancel_source;
+    int prepared_count = 0;
+    std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+        return "req-" + std::to_string(++prepared_count);
+    }
+    void OnRequestSent(const std::string&) override {}
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                         bool) override {}
+    bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                           const std::string&) override {
+        return true;
+    }
+    void OnOutputFailed(const std::string&, const std::string&) override {}
+    void OnOutputCancelled(const std::string&, agent::OutputCancelSource source) override {
+        cancel_source = source;
+    }
+};
+
+// 真按键的形状:取消分型回来时,交互层取消链确实升着(按键监听在流中途
+// 置位)——这是全库唯一合法升旗人。
+class KeyPressCancelBackend final : public api::Backend {
+public:
+    std::vector<api::Request> captured_requests;
+    std::atomic<bool>* flag = nullptr;
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request, const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>*) override {
+        captured_requests.push_back(request);
+        on_event(api::MessageStart{"msg", "model"});
+        flag->store(true);  // 监听线程这一拍升旗
+        return std::unexpected(api::Error{api::ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
+    }
+};
+
+TEST_CASE("取消记账(§4.2): 取消链真升起来才记 user_interrupt,链没升记 stream_error") {
+    // 甲:链升着 + 取消分型 → user_interrupt(真按键路)。
+    KeyPressCancelBackend backend;
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    std::atomic<bool> cancel_flag{false};
+    backend.flag = &cancel_flag;
+    CancelSourceRecorder recorder;
+    agent::TurnWiring callbacks;
+    callbacks.boundary_recorder = &recorder;
+    const auto result = loop.Run("问点啥", callbacks, &cancel_flag);
+    REQUIRE(result.has_value());
+    CHECK(result->cancelled);
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == agent::OutputCancelSource::UserInterrupt);
+
+    // 乙:同样的取消分型,但谁的旗都没升(粘包伪取消/流侧异常折成取消的
+    // 形状)→ stream_error,不冒充用户手笔。
+    FakeBackend flagless_backend;
+    flagless_backend.scripts = {{api::MessageStart{"msg", "model"}}};
+    flagless_backend.cancel_after_event_index = 0;
+    agent::Agent loop2(flagless_backend, registry,
+                       agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    std::atomic<bool> idle_flag{false};
+    CancelSourceRecorder recorder2;
+    agent::TurnWiring callbacks2;
+    callbacks2.boundary_recorder = &recorder2;
+    const auto result2 = loop2.Run("问点啥", callbacks2, &idle_flag);
+    REQUIRE(result2.has_value());
+    CHECK(result2->cancelled);
+    REQUIRE(recorder2.cancel_source.has_value());
+    CHECK(*recorder2.cancel_source == agent::OutputCancelSource::StreamError);
+}
+
+TEST_CASE("取消记账(§4.2): 三来源的轨迹规范名,user_interrupt 旧值原样保留") {
+    CHECK(std::string(agent::OutputCancelSourceText(agent::OutputCancelSource::UserInterrupt)) ==
+          "user_interrupt");
+    CHECK(std::string(agent::OutputCancelSourceText(agent::OutputCancelSource::Internal)) == "internal_cancel");
+    CHECK(std::string(agent::OutputCancelSourceText(agent::OutputCancelSource::StreamError)) == "stream_error");
+}
+
 TEST_CASE("没有取消:cancel 指针传了但没置位,行为跟不传一模一样") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("正常聊天")};
@@ -1074,7 +1155,7 @@ TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens �
             return true;
         }
         void OnOutputFailed(const std::string&, const std::string&) override {}
-        void OnOutputCancelled(const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
     } recorder;
     agent::TurnWiring turn_wiring;
     turn_wiring.boundary_recorder = &recorder;
@@ -1154,7 +1235,7 @@ TEST_CASE("预检应急(§4.1 收紧): 封顶后仍装不下才进应急,收尾�
             return true;
         }
         void OnOutputFailed(const std::string&, const std::string&) override {}
-        void OnOutputCancelled(const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
     } recorder;
     agent::TurnWiring turn_wiring;
     turn_wiring.boundary_recorder = &recorder;
@@ -1264,7 +1345,7 @@ TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场
             return true;
         }
         void OnOutputFailed(const std::string&, const std::string&) override {}
-        void OnOutputCancelled(const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
     } recorder;
     agent::TurnWiring turn_wiring;
     turn_wiring.boundary_recorder = &recorder;

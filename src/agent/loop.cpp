@@ -1685,13 +1685,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 }
 
                 // 轨迹边界:打断也是一枚明确收口(output.cancelled;usage
-                // 若报了先记 owner)。
+                // 若报了先记 owner)。取消来源说真话(§4.2):取消链真被
+                // 升起来才记 user_interrupt(全库升旗人就是交互层的按键
+                // 监听);链没升却回取消分型的,按流侧异常记账,不冤枉用户。
                 if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
                     wiring.boundary_recorder->OnUsageRecorded(
                         trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id,
                         step_prefix_account.cache_epoch, step_prefix_account.append_only,
                         assembler.cache_seen());
-                    wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id);
+                    const OutputCancelSource cancel_source =
+                        cancel != nullptr && cancel->load() ? OutputCancelSource::UserInterrupt
+                                                           : OutputCancelSource::StreamError;
+                    wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id, cancel_source);
                 }
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
             }
