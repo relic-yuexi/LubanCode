@@ -68,6 +68,30 @@ struct RequestPreparedContext {
     bool prefix_append_only = true;
 };
 
+// model.output.cancelled 的取消来源(主会话输出预留占坑单 §4.2):轨迹是
+// 验尸的账本,不许硬编码冤枉用户——真按键才记 user_interrupt。
+//   UserInterrupt —— 交互层取消链真被升起来(ESC/单击 Ctrl+C:监听线程
+//                   置 TurnRuntime::cancel,loop/采样把这枚旗递给 wire;
+//                   全库所有 wire transport 的 Cancelled 分型都以它为因)。
+//   Internal     —— 宿主自己掐的:采样超时看门狗(本地旗)一类内部取消。
+//   StreamError  —— 谁的旗都没升、wire 却回了取消分型:流侧异常被折成
+//                   取消收口,来源不明,如实记账、不冒充用户手笔。
+enum class OutputCancelSource { UserInterrupt, Internal, StreamError };
+
+// 取消来源的轨迹规范名(ModelOutputCancelled.reason 字段取值;新旧 stream
+// 同用):UserInterrupt 保持旧值 user_interrupt,既有事件零破坏。
+inline const char* OutputCancelSourceText(OutputCancelSource source) {
+    switch (source) {
+        case OutputCancelSource::UserInterrupt:
+            return "user_interrupt";
+        case OutputCancelSource::Internal:
+            return "internal_cancel";
+        case OutputCancelSource::StreamError:
+            return "stream_error";
+    }
+    return "stream_error";
+}
+
 // 轮次边界的轨迹记录口(P0-2 轨迹接线:AgentLoop 接 input/request/output
 // 边界)。AgentLoop 只在模型请求/输出这些边界上问宿主;落盘与状态机校验
 // 全在实现侧(TrajectoryRecorder),loop 不碰文件。语义:
@@ -119,7 +143,9 @@ public:
                                    const std::string& stop_reason,
                                    const std::string& provider_response_id) = 0;
     virtual void OnOutputFailed(const std::string& request_id, const std::string& reason) = 0;
-    virtual void OnOutputCancelled(const std::string& request_id) = 0;
+    // §4.2 取消记账说真话:来源由调用链沿途分类递入(真按键/内部取消/
+    // 流错误),实现侧如实落账——旧硬编码 user_interrupt 的冤枉账已废。
+    virtual void OnOutputCancelled(const std::string& request_id, OutputCancelSource source) = 0;
 };
 
 // 一轮的引擎接线(骨架拆解批二余款:Callbacks 肥结构退役)。控制半在这

@@ -96,6 +96,15 @@ Tool::Result WriteFileTool::execute(const nlohmann::json& input) {
         }
     }
 
+    // [非原子标记·主会话输出预留占坑单 §五 P3 验证结论] 下面这两步对文件
+    // 系统不是原子的:open(trunc) 先把文件截成零字节,write 再灌正文——
+    // 硬崩/断电夹在中间会留下空文件。但"取消窗口夹在中间"这条假设证伪:
+    // 取消是协作式的,只在轮/工具边界被观察,工具体不查取消旗(本函数
+    // 从不读 ToolExecutionContext::cancel),ESC 掐不进 open 与 write 之间
+    //——事故现场的空 todo 文件另有过手(write_file 根本没跑,轨迹零工具
+    // 事件)。真要崩溃级原子(临时文件 + rename),修复另立小单,不在
+    // 本单扩范围;现状由 tests/unit/tools/test_write_edit.cpp 的取消盲测
+    // 钉住。
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
         return {"打不开文件写(权限不够或者路径不对): " + path_str, true};

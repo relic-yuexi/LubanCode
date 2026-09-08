@@ -121,7 +121,17 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
         assistant.content = assembler.BuildMessage().content;
         if (!sent.has_value()) {
             if (sent.error().kind == api::ErrorKind::Cancelled) {
-                options.boundary_recorder->OnOutputCancelled(recorded_request_id);
+                // 取消来源说真话(主会话输出预留占坑单 §4.2):外部取消链真被
+                // 升起来才记 user_interrupt(全库升旗人就是交互层的按键监听);
+                // 本地看门狗超时(外部链不在场,超时才有权拉本地旗)记
+                // internal;谁的旗都没升却回取消分型的,按流侧异常记账。
+                OutputCancelSource cancel_source = OutputCancelSource::StreamError;
+                if (options.cancel != nullptr && options.cancel->load()) {
+                    cancel_source = OutputCancelSource::UserInterrupt;
+                } else if (options.cancel == nullptr && local_cancel.load()) {
+                    cancel_source = OutputCancelSource::Internal;
+                }
+                options.boundary_recorder->OnOutputCancelled(recorded_request_id, cancel_source);
             } else {
                 options.boundary_recorder->OnOutputFailed(recorded_request_id, sent.error().message);
             }

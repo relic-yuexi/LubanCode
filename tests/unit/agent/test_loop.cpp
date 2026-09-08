@@ -803,6 +803,87 @@ TEST_CASE("ESC 打断:工具执行后才发现取消,正在跑的工具结果照
     CHECK(r1.content.find("打断") != std::string::npos);
 }
 
+// 取消来源的录音替身(§4.2 合同测试):prepared/sent/usage 全通,只把
+// OnOutputCancelled 的来源记下来。
+class CancelSourceRecorder final : public agent::LoopBoundaryRecorder {
+public:
+    std::optional<agent::OutputCancelSource> cancel_source;
+    int prepared_count = 0;
+    std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+        return "req-" + std::to_string(++prepared_count);
+    }
+    void OnRequestSent(const std::string&) override {}
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                         bool) override {}
+    bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                           const std::string&) override {
+        return true;
+    }
+    void OnOutputFailed(const std::string&, const std::string&) override {}
+    void OnOutputCancelled(const std::string&, agent::OutputCancelSource source) override {
+        cancel_source = source;
+    }
+};
+
+// 真按键的形状:取消分型回来时,交互层取消链确实升着(按键监听在流中途
+// 置位)——这是全库唯一合法升旗人。
+class KeyPressCancelBackend final : public api::Backend {
+public:
+    std::vector<api::Request> captured_requests;
+    std::atomic<bool>* flag = nullptr;
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request, const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>*) override {
+        captured_requests.push_back(request);
+        on_event(api::MessageStart{"msg", "model"});
+        flag->store(true);  // 监听线程这一拍升旗
+        return std::unexpected(api::Error{api::ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
+    }
+};
+
+TEST_CASE("取消记账(§4.2): 取消链真升起来才记 user_interrupt,链没升记 stream_error") {
+    // 甲:链升着 + 取消分型 → user_interrupt(真按键路)。
+    KeyPressCancelBackend backend;
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    std::atomic<bool> cancel_flag{false};
+    backend.flag = &cancel_flag;
+    CancelSourceRecorder recorder;
+    agent::TurnWiring callbacks;
+    callbacks.boundary_recorder = &recorder;
+    const auto result = loop.Run("问点啥", callbacks, &cancel_flag);
+    REQUIRE(result.has_value());
+    CHECK(result->cancelled);
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == agent::OutputCancelSource::UserInterrupt);
+
+    // 乙:同样的取消分型,但谁的旗都没升(粘包伪取消/流侧异常折成取消的
+    // 形状)→ stream_error,不冒充用户手笔。
+    FakeBackend flagless_backend;
+    flagless_backend.scripts = {{api::MessageStart{"msg", "model"}}};
+    flagless_backend.cancel_after_event_index = 0;
+    agent::Agent loop2(flagless_backend, registry,
+                       agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    std::atomic<bool> idle_flag{false};
+    CancelSourceRecorder recorder2;
+    agent::TurnWiring callbacks2;
+    callbacks2.boundary_recorder = &recorder2;
+    const auto result2 = loop2.Run("问点啥", callbacks2, &idle_flag);
+    REQUIRE(result2.has_value());
+    CHECK(result2->cancelled);
+    REQUIRE(recorder2.cancel_source.has_value());
+    CHECK(*recorder2.cancel_source == agent::OutputCancelSource::StreamError);
+}
+
+TEST_CASE("取消记账(§4.2): 三来源的轨迹规范名,user_interrupt 旧值原样保留") {
+    CHECK(std::string(agent::OutputCancelSourceText(agent::OutputCancelSource::UserInterrupt)) ==
+          "user_interrupt");
+    CHECK(std::string(agent::OutputCancelSourceText(agent::OutputCancelSource::Internal)) == "internal_cancel");
+    CHECK(std::string(agent::OutputCancelSourceText(agent::OutputCancelSource::StreamError)) == "stream_error");
+}
+
 TEST_CASE("没有取消:cancel 指针传了但没置位,行为跟不传一模一样") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("正常聊天")};
@@ -1027,12 +1108,15 @@ std::string WordyText(std::size_t words) {
 
 }  // namespace
 
-TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次收尾交代(派工单 §四)") {
-    // 缩小版事故形状:窗口 32768,输出上限声明 16384(半扇窗),工具结果
-    // 16000 token——第二份请求 16000 + 16384 + 512 越窗,应急预留 2048
-    // (32768/16)装得下:请求照发,max_tokens 收窄,尾消息带收尾交代。
+TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens 降级,无收尾交代") {
+    // 缩小版事故形状:窗口 32768,输出上限声明 16384(半扇窗,能力级来源
+    // → 估算预留封顶到 8192 = clamp(32768/8, 8k, 32k)),工具结果 16000
+    // token——第二份请求 16000 + 8192 + 512 装得下:照常放行。声明上限
+    // 装不下,实发 max_tokens 优雅降级为 window − 输入 − 协议余量(约
+    // 16.2k,不低于 8k):不进应急支、不注收尾交代——窗还空着一截,任务
+    // 照常调工具。第一份请求(输入极小)声明装得下,原值照发。
     FakeBackend backend;
-    backend.scripts = {ToolUseScript("t1", "growing_tool"), TextOnlyScript("短交接:已查完,结论如上")};
+    backend.scripts = {ToolUseScript("t1", "growing_tool"), TextOnlyScript("继续,把结论写进文件")};
     tools::ToolRegistry registry;
     auto tool = std::make_unique<GrowingResultTool>();
     tool->results = {WordyText(16000)};
@@ -1041,6 +1125,87 @@ TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次
     agent::Agent loop(backend, registry,
                       agent::AgentProfile{.request{.model = "test-model"},
                                           .runtime{.max_output_tokens = 16384,
+                                                   .max_output_tokens_source =
+                                                       agent::OutputBudgetSource::ModelCatalog,
+                                                   .max_steps_per_turn = 25,
+                                                   .context_window_tokens = 32768},
+                                          .system_prompt = "sys"});
+    int preflight_events = 0;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) {
+        if (pressure.phase == agent::ContextPressure::Phase::PreflightExceeded) {
+            ++preflight_events;
+        }
+    };
+    loop.SetWiring(std::move(wiring));
+
+    class PressureRecorder final : public agent::LoopBoundaryRecorder {
+    public:
+        std::vector<agent::ContextPressure> pressure;
+        int prepared_count = 0;
+        void OnContextPressure(const agent::ContextPressure& value) override { pressure.push_back(value); }
+        std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+            return "req-" + std::to_string(++prepared_count);
+        }
+        void OnRequestSent(const std::string&) override {}
+        void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                             bool) override {}
+        bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                               const std::string&) override {
+            return true;
+        }
+        void OnOutputFailed(const std::string&, const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
+    } recorder;
+    agent::TurnWiring turn_wiring;
+    turn_wiring.boundary_recorder = &recorder;
+
+    const auto result = loop.Run("查一查", std::move(turn_wiring));
+    REQUIRE(result.has_value());  // 没死也没进应急,正常续跑
+    REQUIRE(backend.captured_requests.size() == 2);
+    // 第一份请求:输入极小,声明 16384 装得下——原值照发,不降级。
+    REQUIRE(backend.captured_requests[0].max_tokens.has_value());
+    CHECK(*backend.captured_requests[0].max_tokens == 16384);
+    // 第二份请求:封顶预留放行,实发值降到余量(≥ 8k 下限,< 声明值,
+    // 也不是应急的 2048)。
+    REQUIRE(backend.captured_requests[1].max_tokens.has_value());
+    CHECK(*backend.captured_requests[1].max_tokens >= 8192);
+    CHECK(*backend.captured_requests[1].max_tokens < 16384);
+    CHECK(*backend.captured_requests[1].max_tokens != 2048);
+    // 无收尾交代:尾消息里不许出现应急交代文案。
+    const auto& last_message = backend.captured_requests[1].messages.back();
+    for (const auto& block : last_message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+            CHECK(text->text.find("上下文将尽") == std::string::npos);
+            CHECK(text->text.find("不再发起新的工具调用") == std::string::npos);
+        }
+    }
+    // 预检没爆:无 PreflightExceeded 事件(应急的账),压力回调零发。
+    CHECK(preflight_events == 0);
+    CHECK(recorder.pressure.empty());
+}
+
+TEST_CASE("预检应急(§4.1 收紧): 封顶后仍装不下才进应急,收尾交代恰一道") {
+    // 历史真满的那一支:窗 32768、声明 16384(封顶到 8192),两轮工具各
+    // 13000 词——第三份请求约 26000 + 8192 + 512 越窗(封顶也救不了),
+    // 应急预留 2048(32768/16)装得下:请求照发,max_tokens 收窄,尾消息
+    // 带收尾交代(本 Run 恰一道)。肥预留的形状在上一案已化解,这里进的
+    // 才是"历史真满"的应急支。要两条各半攒:保命索按日常尺把单条超
+    // 25% 窗(8192)的工具结果截尾,单条 25000 词根本活不到预检;两条
+    // 各 13000 词(日常尺 6500,线内)原样进账。
+    FakeBackend backend;
+    backend.scripts = {ToolUseScript("t1", "growing_tool"), ToolUseScript("t2", "growing_tool"),
+                       TextOnlyScript("短交接:已查完,结论如上")};
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<GrowingResultTool>();
+    tool->results = {WordyText(13000), WordyText(13000)};
+    registry.Register(std::move(tool));
+
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 16384,
+                                                   .max_output_tokens_source =
+                                                       agent::OutputBudgetSource::ModelCatalog,
                                                    .max_steps_per_turn = 25,
                                                    .context_window_tokens = 32768},
                                           .system_prompt = "sys"});
@@ -1073,18 +1238,22 @@ TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次
             return true;
         }
         void OnOutputFailed(const std::string&, const std::string&) override {}
-        void OnOutputCancelled(const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
     } recorder;
     agent::TurnWiring turn_wiring;
     turn_wiring.boundary_recorder = &recorder;
 
     const auto result = loop.Run("查一查", std::move(turn_wiring));
     REQUIRE(result.has_value());  // 没死,收窄续跑
-    REQUIRE(backend.captured_requests.size() == 2);
+    REQUIRE(backend.captured_requests.size() == 3);
+    // 前两份请求装得下(第二份 13000 + 8192 + 512 线内,声明 16384 也装得
+    // 下——原值照发);第三份历史真满,应急收窄到 2048。
     REQUIRE(backend.captured_requests[1].max_tokens.has_value());
-    CHECK(*backend.captured_requests[1].max_tokens == 2048);
-    // 收尾交代进了第二份请求的尾消息(也随 durable history 留住)。
-    const auto& last_message = backend.captured_requests[1].messages.back();
+    CHECK(*backend.captured_requests[1].max_tokens == 16384);
+    REQUIRE(backend.captured_requests[2].max_tokens.has_value());
+    CHECK(*backend.captured_requests[2].max_tokens == 2048);
+    // 收尾交代进了第三份请求的尾消息(也随 durable history 留住)。
+    const auto& last_message = backend.captured_requests[2].messages.back();
     bool has_nudge = false;
     for (const auto& block : last_message.content) {
         if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr &&
@@ -1101,11 +1270,58 @@ TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次
     CHECK(recorder.pressure.front().reserve_clamped);
 }
 
+TEST_CASE("预检封顶例外(§4.1): ConfigFile 显式预留不封顶,照旧走应急支") {
+    // 用户手笔尊重原值(与子代理侧同款例外):同样 16000 输入 × 16384
+    // 声明,ConfigFile 来源不收帽——16000 + 16384 + 512 越窗,应急 2048
+    // 放行 + 收尾交代,与封顶前的老行为一字不差。用户明示要大预留,预检
+    // 照实爆给他看。
+    FakeBackend backend;
+    backend.scripts = {ToolUseScript("t1", "growing_tool"), TextOnlyScript("短交接:已查完,结论如上")};
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<GrowingResultTool>();
+    tool->results = {WordyText(16000)};
+    registry.Register(std::move(tool));
+
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 16384,
+                                                   .max_output_tokens_source =
+                                                       agent::OutputBudgetSource::ConfigFile,
+                                                   .max_steps_per_turn = 25,
+                                                   .context_window_tokens = 32768},
+                                          .system_prompt = "sys"});
+    int preflight_events = 0;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) {
+        if (pressure.phase == agent::ContextPressure::Phase::PreflightExceeded) {
+            ++preflight_events;
+        }
+    };
+    loop.SetWiring(std::move(wiring));
+
+    agent::TurnWiring turn_wiring;
+    const auto result = loop.Run("查一查", std::move(turn_wiring));
+    REQUIRE(result.has_value());  // 应急放行续跑
+    REQUIRE(backend.captured_requests.size() == 2);
+    REQUIRE(backend.captured_requests[1].max_tokens.has_value());
+    CHECK(*backend.captured_requests[1].max_tokens == 2048);
+    const auto& last_message = backend.captured_requests[1].messages.back();
+    bool has_nudge = false;
+    for (const auto& block : last_message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr &&
+            text->text.find("上下文将尽") != std::string::npos) {
+            has_nudge = true;
+        }
+    }
+    CHECK(has_nudge);
+    CHECK(preflight_events >= 1);
+}
+
 TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场保留说明") {
-    // 两轮工具把历史攒到 ~30800 token(窗 32768):第一份 15800 常规预留
-    // 刚好放行,第二份 15000 之后应急 2048 也装不下;但当前消息(第二份
-    // 工具结果 15000)自己装得下——报"自动压缩后仍装不下"那一支,且带
-    // "现场不丢"的续派指引。
+    // 两轮工具把历史攒到 ~30800 token(窗 32768):第二份之后封顶预留
+    // 8192 也越窗,应急 2048 仍装不下;但当前消息(第二份工具结果
+    // 15000)自己装得下——报"自动压缩后仍装不下"那一支,且带"现场
+    // 不丢"的续派指引。
     FakeBackend backend;
     backend.scripts = {ToolUseScript("t1", "growing_tool"), ToolUseScript("t2", "growing_tool"),
                        TextOnlyScript("不该走到这里")};
@@ -1136,7 +1352,7 @@ TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场
             return true;
         }
         void OnOutputFailed(const std::string&, const std::string&) override {}
-        void OnOutputCancelled(const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
     } recorder;
     agent::TurnWiring turn_wiring;
     turn_wiring.boundary_recorder = &recorder;

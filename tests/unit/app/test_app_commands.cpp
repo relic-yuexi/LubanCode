@@ -1097,3 +1097,64 @@ TEST_CASE("HandleCompactCommand: 手工压缩收窄时照常换账,反涨闸不�
     CHECK(compact_epoch == 1);
     CHECK(loop.History().size() < size_before);
 }
+
+// ---------------------------------------------------------------------------
+// 唤醒识死(主会话输出预留占坑单 §4.3):ContextExhaustionGate 纯账本,
+// 压力回调与轮收口两处记账,阈值 2。后台回流据此暂停自动续轮(终端接线
+// 在 TerminalSessionController::Run 的回流路,通知文案 session.context_
+// exhaustion_hold 中英在册)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ContextExhaustionGate: 两次应急放行后暂停自动续轮,健康轮清零") {
+    ContextExhaustionGate gate;
+    CHECK_FALSE(gate.ShouldHoldAutoReflow());
+
+    // PreRequest(健康通报)不清零:应急步之前也有它,按通报清零永远攒不到 2。
+    lubancode::agent::ContextPressure pre;
+    pre.phase = lubancode::agent::ContextPressure::Phase::PreRequest;
+    gate.NotePressure(pre);
+    CHECK_FALSE(gate.ShouldHoldAutoReflow());
+
+    // 第一次应急放行:未到阈值。
+    lubancode::agent::ContextPressure emergency;
+    emergency.phase = lubancode::agent::ContextPressure::Phase::PreflightExceeded;
+    emergency.reserve_clamped = true;
+    gate.NotePressure(emergency);
+    CHECK_FALSE(gate.ShouldHoldAutoReflow());
+    gate.NoteTurnFinished();  // 本轮走过应急:计数保留
+    CHECK_FALSE(gate.ShouldHoldAutoReflow());
+
+    // 第二次应急放行(跨轮累计):暂停自动续轮。
+    gate.NotePressure(pre);
+    gate.NotePressure(emergency);
+    CHECK(gate.ShouldHoldAutoReflow());
+    gate.NoteTurnFinished();
+    CHECK(gate.ShouldHoldAutoReflow());  // 走过应急的轮不清账
+
+    // 通知只打一道,清账前不重播。
+    CHECK(gate.ConsumeNotice());
+    CHECK_FALSE(gate.ConsumeNotice());
+
+    // 健康轮(整轮零应急)清账、允许重播。
+    gate.NoteTurnFinished();
+    CHECK_FALSE(gate.ShouldHoldAutoReflow());
+    CHECK(gate.ConsumeNotice());
+}
+
+TEST_CASE("ContextExhaustionGate: 只认 PreflightExceeded+reserve_clamped,其余通报不计数") {
+    ContextExhaustionGate gate;
+    // 预检爆了但没放行(clamped=false,稳定拒绝)不算应急放行;AfterHardTrim
+    // 一类通报也不算。
+    lubancode::agent::ContextPressure rejected;
+    rejected.phase = lubancode::agent::ContextPressure::Phase::PreflightExceeded;
+    rejected.reserve_clamped = false;
+    gate.NotePressure(rejected);
+    lubancode::agent::ContextPressure trimmed;
+    trimmed.phase = lubancode::agent::ContextPressure::Phase::AfterHardTrim;
+    trimmed.hard_truncated_results = true;
+    gate.NotePressure(trimmed);
+    gate.NoteTurnFinished();
+    CHECK_FALSE(gate.ShouldHoldAutoReflow());
+    // 阈值常数在册:建议值 2(事故单 §4.3)。
+    CHECK(ContextExhaustionGate::kHoldThreshold == 2);
+}
