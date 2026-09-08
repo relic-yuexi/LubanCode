@@ -584,8 +584,8 @@ TEST_CASE("native row cells: 旗帜双格打代理对,落盘 UTF-16 合法(§9.2
     // 只写高代理 → 落盘 UTF-16 非法。现在非 BMP 恒双格配对。
     const auto cells = BuildNativeRowCells("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3", 2);  // 🇨🇳
     REQUIRE(cells.size() == 2);
-    CHECK(cells[0].attr & kNativeCellLeading);
-    CHECK(cells[1].attr & kNativeCellTrailing);
+    CHECK((cells[0].attr & kNativeCellLeading) != 0);
+    CHECK((cells[1].attr & kNativeCellTrailing) != 0);
     const std::u16string utf16 = CellsToUtf16(cells);
     CHECK(Utf16WellFormed(utf16));
     CHECK(utf16.size() == 4);  // 两枚指示符各一对代理
@@ -608,7 +608,7 @@ TEST_CASE("native row cells: emoji 簇与混排整行,UTF-16 全程合法") {
     REQUIRE(cells.size() == 12);
     CHECK(cells[0].ch == U'x');
     CHECK(cells[1].ch == 0x1F469);  // 👩 簇首占格(簇跟随者报 lossy,见下)
-    CHECK(cells[1].attr & kNativeCellLeading);
+    CHECK((cells[1].attr & kNativeCellLeading) != 0);
     CHECK(cells[3].ch == U'中');
     CHECK(cells[5].ch == 0x1F600);
     CHECK(cells[7].ch == U' ');
