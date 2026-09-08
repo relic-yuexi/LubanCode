@@ -557,6 +557,11 @@ add_library(lubancode_engine STATIC
   src/cli/i18n.cpp
   src/cli/theme.cpp
   src/cli/line_editor.cpp
+  # Unicode emoji 治理单 P1:扩展字素簇(EGC)分段与终端列宽的唯一共享
+  # 实现(内嵌 Unicode 15.1 紧凑区间表,零第三方依赖)。line_editor 的
+  # 量宽/截断/折行、core 的 footer ANSI 截断/composer 折行/native 行
+  # cells/markdown 折行全吃它——同一段 emoji 不许两处两种几何。
+  src/cli/grapheme.cpp
   # 骨架拆解反弹·问题 6:worktree(git 房务原语)自 cli/ 迁 runtime/ 目录
   # (领域逻辑不归展示层抽屉),target 仍挂 engine——engine 的
   # tools/agent_tool、worktree_tool、subagent_isolation 都吃它,而 runtime

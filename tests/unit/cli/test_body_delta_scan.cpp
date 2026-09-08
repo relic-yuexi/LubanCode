@@ -9,6 +9,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -193,4 +194,47 @@ TEST_CASE("body delta: 超预算的长块退回只等空行收束,不逐行重�
     }
     // 预算 48 行:前 48 行逐行画,其后不再产增量步。
     CHECK(incremental == 48);
+}
+
+// ---------------------------------------------------------------------------
+// Unicode emoji 治理单 §9.5 第一条:超 16 KiB 后继续小 delta 的扫描账。
+// 只做计数型断言(时间型断言会 flaky,一律不做):扫描量由
+// BodyScanState::scanned_pending_bytes 摆上台面,预算帽限制的是重画次数、
+// 不限制扫描量,这笔账 P3 优化前是 O(delta 数 × 块字节),测试把它钉成
+// 可复测的常数,不宣称它快。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("body delta: 超 16KiB 长块继续小 delta,扫描账是确定数(§9.5 计数型)") {
+    BodyScanState state;
+    std::string block;
+    std::size_t copied = 0;  // 步骤 text 的复制量(测试侧累加)
+    const std::size_t kDeltas = 2000;
+    const std::string delta(16, 'x');  // 无空行、无换行的纯文字滴流
+    for (std::size_t i = 0; i < kDeltas; ++i) {
+        const auto steps = ScanBodyDelta(state, delta, block);
+        block += delta;
+        for (const auto& step : steps) {
+            copied += step.text.size();
+        }
+    }
+    // 块长到 32000 字节(超 16 KiB 预算后仍继续攒):第 k 笔的 pending 是
+    // 16k 字节,总扫描 = 16*(1+2+...+2000) = 16*2001000,确定值。
+    CHECK(state.scanned_pending_bytes == 16 * (kDeltas * (kDeltas + 1) / 2));
+    // 纯文字滴流不重画(无新行、无标记闭合):重画步的复制量为零,
+    // 复制只剩原样落笔段,总账恰等于全文(每字节恰好进过一次 piece)。
+    CHECK(copied == block.size());
+    CHECK(block.size() == 16 * kDeltas);
+}
+
+TEST_CASE("body delta: 预算内的正常块,扫描账随块线性(§9.5 计数型)") {
+    BodyScanState state;
+    std::string block;
+    std::uint64_t expected = 0;
+    for (int i = 0; i < 100; ++i) {
+        const std::string delta = "短行" + std::to_string(i) + "\n";
+        const auto steps = ScanBodyDelta(state, delta, block);
+        block += delta;
+        expected += block.size();
+    }
+    CHECK(state.scanned_pending_bytes == expected);
 }

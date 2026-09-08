@@ -4,6 +4,7 @@
 #include <cstddef>
 
 #include "cli/divider.hpp"
+#include "cli/grapheme.hpp"
 #include "cli/latex_math.hpp"
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8 / TruncateUtf8ToDisplayWidth / WrapUtf8ToDisplayWidth
 
@@ -379,24 +380,15 @@ std::string TruncatePlain(const std::string& text, int max_width) {
     return TruncateUtf8ToDisplayWidth(text, max_width - 1) + "\xE2\x80\xA6";
 }
 
-// 把一段 UTF-8 切成逐码点子串(同 console_input 里 FooterUtf8Glyphs 的思路):
-// 按首字节判定序列长,不校验续字节——给内部自己拼出来的字符串量宽/折行用,
-// 不是严格解码器。折行要逐字量宽,得先把多字节字拆成独立小块。
+// 把一段 UTF-8 切成逐字素簇子串(Unicode emoji 治理单 P1:glyph 从"码点"
+// 升格为"扩展字素簇"——ZWJ 序列/肤色修饰/组合附标不再被拆开,markdown
+// 折行与 line_editor/terminal_frame 同一把尺,同一段 emoji 不许两处两种
+// 几何)。分段由 grapheme.cpp 供数;坏的 UTF-8 序列按"一个坏字节一簇"回
+// 退,给内部自己拼出来的字符串量宽/折行用,不是严格解码器。
 std::vector<std::string> SplitUtf8Glyphs(const std::string& text) {
     std::vector<std::string> out;
-    for (std::size_t i = 0; i < text.size();) {
-        const unsigned char lead = static_cast<unsigned char>(text[i]);
-        std::size_t bytes = 1;
-        if ((lead & 0xE0U) == 0xC0U) {
-            bytes = 2;
-        } else if ((lead & 0xF0U) == 0xE0U) {
-            bytes = 3;
-        } else if ((lead & 0xF8U) == 0xF0U) {
-            bytes = 4;
-        }
-        bytes = (std::min)(bytes, text.size() - i);
-        out.push_back(text.substr(i, bytes));
-        i += bytes;
+    for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(text)) {
+        out.push_back(text.substr(glyph.begin, glyph.len));
     }
     return out;
 }

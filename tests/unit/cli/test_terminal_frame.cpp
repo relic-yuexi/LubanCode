@@ -499,3 +499,170 @@ TEST_CASE("footer resize:输入光标自身折行也计入反推") {
     CHECK(plan.rows_to_clear == 9);
     CHECK(plan.cursor_reflowed);
 }
+
+// ---------------------------------------------------------------------------
+// Unicode emoji 治理单 P1(§9.2):字素级 composer 折行 + native 行 cells 的
+// 编码单元映射。断言的是"实际 UTF-16 合法性",不只断言 cell 数。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 按 WriteNativeRow(console_win.cpp,禁改文件)的现行语义把 cells 重组回
+// UTF-16 码元流:BMP 码点一格一码元;非 BMP 码点按 trailing 旗标拆高/低
+// 代理。这是落盘字节的真实形状,合法性在这里验,不验 cell 计数。
+std::u16string CellsToUtf16(const std::vector<native_bits::NativeRowCell>& cells) {
+    std::u16string out;
+    for (const auto& cell : cells) {
+        if (cell.ch >= 0x10000) {
+            const std::uint32_t v = static_cast<std::uint32_t>(cell.ch) - 0x10000;
+            const bool trailing = (cell.attr & native_bits::kNativeCellTrailing) != 0;
+            out.push_back(static_cast<char16_t>(trailing ? (0xDC00 + (v & 0x3FF))
+                                                         : (0xD800 + (v >> 10))));
+        } else {
+            out.push_back(static_cast<char16_t>(cell.ch));
+        }
+    }
+    return out;
+}
+
+// UTF-16 合法性:高代理必紧跟低代理,低代理必有高代理在前(无孤立代理)。
+bool Utf16WellFormed(const std::u16string& text) {
+    bool expect_low = false;
+    for (const char16_t unit : text) {
+        if (expect_low) {
+            if (unit < 0xDC00 || unit > 0xDFFF) {
+                return false;  // 高代理后没跟低代理
+            }
+            expect_low = false;
+        } else if (unit >= 0xD800 && unit <= 0xDBFF) {
+            expect_low = true;
+        } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+            return false;  // 凭空出现低代理
+        }
+    }
+    return !expect_low;
+}
+
+}  // namespace
+
+TEST_CASE("LayoutComposerRows: ZWJ 序列整簇装行,不拆") {
+    // "a" + 👩‍💻 + "b":首行宽 3 恰好装 a+整簇,行尾 b 另起。
+    const std::u32string tech = {0x1F469, 0x200D, 0x1F4BB};
+    const auto layout = LayoutComposerRows({U"a" + tech + U"b"}, 0, 5, 3, 5);
+    REQUIRE(layout.rows.size() == 2);
+    CHECK(layout.rows[0].text == U"a" + tech);
+    CHECK(layout.rows[0].display_width == 3);
+    CHECK(layout.rows[1].text == U"b");
+}
+
+TEST_CASE("LayoutComposerRows: 恰满一行后的零宽附标不挤丢(§9.2 第三条)") {
+    // capacity=2:第一行恰装"中"(2 列);第二簇"中+重音"整簇两列,重音跟
+    // 随基础字进同一物理行,不会在容量到点时被丢掉或挤成下一行孤儿。
+    const std::u32string line = {U'中', U'中', 0x0301};
+    const auto layout = LayoutComposerRows({line}, 0, 3, 2, 2);
+    REQUIRE(layout.rows.size() == 2);
+    CHECK(layout.rows[0].text == U"中");
+    CHECK(layout.rows[1].text == std::u32string{U'中', 0x0301});
+    CHECK(layout.rows[1].display_width == 2);
+}
+
+TEST_CASE("LayoutComposerRows: 旗帜与家庭组合按整簇宽度折行") {
+    const std::u32string flag = {0x1F1E8, 0x1F1F3};
+    const std::u32string family = {0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x200D, 0x1F466};
+    // 旗帜(2)+家庭(2):首行宽 4 装两簇;第三个家庭另起。
+    const std::u32string line = flag + family + family;
+    const auto layout = LayoutComposerRows({line}, 0, line.size(), 4, 4);
+    REQUIRE(layout.rows.size() == 2);
+    CHECK(layout.rows[0].text == flag + family);
+    CHECK(layout.rows[0].display_width == 4);
+    CHECK(layout.rows[1].text == family);
+}
+
+TEST_CASE("native row cells: 旗帜双格打代理对,落盘 UTF-16 合法(§9.2 缺口)") {
+    using namespace lubancode::platform;
+    // 旧实现把每枚区域指示符量成一列:各占单格、无 trailing 旗标,
+    // WriteNativeRow 每格只写高代理 → 落盘两枚孤立高代理,UTF-16 非法。
+    // 现在旗帜整簇两格、ch=簇首指示符、leading/trailing 打一对代理——
+    // 合法配对(第二枚指示符不占独立格,是多码点簇在 cell 模型里的已知
+    // 显示降级,lossy 出参告发,调用方退 legacy 字节流路保真)。
+    const auto cells = BuildNativeRowCells("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3", 2);  // 🇨🇳
+    REQUIRE(cells.size() == 2);
+    CHECK((cells[0].attr & kNativeCellLeading) != 0);
+    CHECK((cells[1].attr & kNativeCellTrailing) != 0);
+    const std::u16string utf16 = CellsToUtf16(cells);
+    CHECK(Utf16WellFormed(utf16));
+    REQUIRE(utf16.size() == 2);  // 恰一对代理:高 D83C + 低 DDE8
+    CHECK(utf16[0] == 0xD83C);
+    CHECK(utf16[1] == 0xDDE8);
+    // 多码点簇(旗帜两码点)如实报 lossy。
+    bool lossy = false;
+    (void)BuildNativeRowCells("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3", 2, &lossy);
+    CHECK(lossy);
+}
+
+TEST_CASE("native row cells: 窄非 BMP 也双格,不再只写高代理") {
+    // U+1D11E(音乐记谱,量宽一列):编码上仍是代理对,CHAR_INFO 单格装
+    // 不下,原生路恒双格——这是 cell 模型的编码硬约束,不是量宽策略。
+    const auto cells = BuildNativeRowCells("\xF0\x9D\x84\x9E", 2);
+    REQUIRE(cells.size() == 2);
+    CHECK(CellsToUtf16(cells) == std::u16string{0xD834, 0xDD1E});
+    CHECK(Utf16WellFormed(CellsToUtf16(cells)));
+}
+
+TEST_CASE("native row cells: emoji 簇与混排整行,UTF-16 全程合法") {
+    using namespace lubancode::platform;
+    // "x" + 👩‍💻 + "中" + 😀,铺 12 格:簇宽账 1+2+2+2 = 7,尾部空格补齐。
+    const std::string row = "x\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x92\xBB\xE4\xB8\xAD\xF0\x9F\x98\x80";
+    const auto cells = BuildNativeRowCells(row, 12);
+    REQUIRE(cells.size() == 12);
+    CHECK(cells[0].ch == U'x');
+    CHECK(cells[1].ch == 0x1F469);  // 👩 簇首占格(簇跟随者报 lossy,见下)
+    CHECK((cells[1].attr & kNativeCellLeading) != 0);
+    CHECK(cells[3].ch == U'中');
+    CHECK(cells[5].ch == 0x1F600);
+    CHECK(cells[7].ch == U' ');
+    CHECK(Utf16WellFormed(CellsToUtf16(cells)));
+}
+
+TEST_CASE("native row cells: 多码点簇报 lossy,不静默丢附标(§9.2)") {
+    using namespace lubancode::platform;
+    // e+组合重音:单格装不下重音,lossy 告发(调用方退 legacy 字节流路)。
+    bool lossy = true;
+    const auto accent = BuildNativeRowCells("e\xCC\x81", 4, &lossy);
+    CHECK(lossy);
+    CHECK(accent[0].ch == U'e');
+    CHECK(Utf16WellFormed(CellsToUtf16(accent)));
+    // 肤色修饰同样装不下。
+    lossy = false;
+    const auto skin = BuildNativeRowCells("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD", 2, &lossy);  // 👍🏽
+    CHECK(lossy);
+    CHECK(skin[0].ch == 0x1F44D);
+    CHECK(Utf16WellFormed(CellsToUtf16(skin)));
+    // 纯 ASCII/单码点字不 lossy。
+    lossy = true;
+    (void)BuildNativeRowCells("ab", 4, &lossy);
+    CHECK_FALSE(lossy);
+    lossy = true;
+    (void)BuildNativeRowCells("\xF0\x9F\x98\x80", 2, &lossy);  // 单码点 😀
+    CHECK_FALSE(lossy);
+    // 空行(清行路)永不 lossy。
+    lossy = true;
+    (void)BuildNativeRowCells(std::string_view(), 4, &lossy);
+    CHECK_FALSE(lossy);
+}
+
+TEST_CASE("native row cells: 孤立零宽与坏代理的可见回退,UTF-16 仍合法") {
+    using namespace lubancode::platform;
+    // 孤立组合重音:不静默丢——占一格报 lossy。
+    bool lossy = false;
+    const auto lone = BuildNativeRowCells("\xCC\x81", 2, &lossy);
+    CHECK(lossy);
+    CHECK(lone[0].ch == 0x0301);
+    CHECK(Utf16WellFormed(CellsToUtf16(lone)));
+    // UTF-8 编出的孤立代理(ED A0 80 = U+D800):替换 U+FFFD,不落非法对。
+    lossy = false;
+    const auto bad = BuildNativeRowCells("\xED\xA0\x80", 2, &lossy);
+    CHECK(lossy);
+    CHECK(bad[0].ch == 0xFFFD);
+    CHECK(Utf16WellFormed(CellsToUtf16(bad)));
+}

@@ -253,6 +253,35 @@ TEST_CASE("ThinkingPreviewRows:CJK/emoji 折行不切半个宽字,拼回去不�
     CHECK(emoji_rows.back().find("tail") != std::string::npos);
 }
 
+TEST_CASE("ThinkingPreviewRows: 巨行掐头从字素簇边界起,不从半个组合序列中间起") {
+    // Unicode emoji 治理单 P1:WrapPreviewLine 的削头按整簇推进——120 枚
+    // 家庭组合(240 列)超预留列,掐头后每行都从完整簇开始,行首绝不见
+    // ZWJ/肤色修饰/组合附标这些孤儿跟随者。
+    const std::string family =
+        "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D"
+        "\xF0\x9F\x91\xA7\xE2\x80\x8D\xF0\x9F\x91\xA6";
+    std::string text;
+    for (int i = 0; i < 120; ++i) {
+        text += family;
+    }
+    const auto rows = ThinkingPreviewRows(text, 80, 3);
+    REQUIRE(rows.size() == 3);
+    for (const auto& row : rows) {
+        CHECK(VisibleWidth(row) <= 77);
+        REQUIRE_FALSE(row.empty());
+        const unsigned char b0 = static_cast<unsigned char>(row[0]);
+        const unsigned char b1 = row.size() > 1 ? static_cast<unsigned char>(row[1]) : 0;
+        const unsigned char b2 = row.size() > 2 ? static_cast<unsigned char>(row[2]) : 0;
+        const bool orphan_head = (b0 == 0xE2 && b1 == 0x80 && b2 == 0x8D) ||  // ZWJ
+                                 (b0 == 0xCC && b1 >= 0x80) ||                // 组合附标
+                                 (b0 == 0xF0 && b1 == 0x9F && b2 == 0x8F);    // 肤色修饰
+        CHECK_FALSE(orphan_head);
+        // 行文本要么以完整家庭组合开头(首行可能因掐头恰好从簇首起),
+        // 每行的字节数都是簇字节(25)的整数倍——没有半个簇混进来。
+        CHECK(row.size() % family.size() == 0);
+    }
+}
+
 TEST_CASE("ThinkingPreviewRows:控制字符与 ANSI 注入只当文字或被剥掉,不能操纵终端") {
     const std::string dirty = "\x1b[31m红字\x1b[0m\x07\b\x1b[2J清屏攻击\tTAB";
     const auto rows = ThinkingPreviewRows(dirty, 80, 3);

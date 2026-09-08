@@ -61,11 +61,23 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
 // ---------------------------------------------------------------------------
 // 把一行"UTF-8 正文 + SGR 配色"的 footer 行翻成按格排布的单元格:SGR 译
 // 成 16 色属性位(kNativeFg*/kNativeBg*;认 0/1/2/22、30-37/90-97、38/48
-// 的 5;N 与 2;R;G;B(近似到最近 16 色)、39/49,其余码忽略),宽字
-// (显示宽 2)占双格并打半格旗标,尾部补默认属性空格铺满 cell_count,
-// 超宽整字截断(不劈半个宽字)。纯函数,帧测试钉合同——WriteNativeRow
-// 只管落盘,"落什么"全在这里看得见、测得着。
-std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count);
+// 的 5;N 与 2;R;G;B(近似到最近 16 色)、39/49,其余码忽略),宽字/宽
+// 簇占双格并打半格旗标,尾部补默认属性空格铺满 cell_count,超宽整簇截断
+// (不劈半个宽字)。纯函数,帧测试钉合同——WriteNativeRow 只管落盘,
+// "落什么"全在这里看得见、测得着。
+//
+// Unicode emoji 治理单 P1(§9.2)的两条硬合同:
+//   1. 编码单元映射:conhost 的 CHAR_INFO 一格只装得下一个 UTF-16 码元,
+//      非 BMP 码点(含量宽为一列的孤立区域指示符、乐谱符号这类)必须
+//      leading/trailing 双格打代理对——单格非 BMP 会让 WriteNativeRow 只
+//      写高代理,产出非法 UTF-16。这是编码表示的硬约束,不是量宽策略。
+//   2. 多码点字素簇(ZWJ 序列/肤色/组合附标/keycap)装不进单格单码元的
+//      cell 模型:默认按"簇首码点占格"降级(宽账仍按整簇),utf16_lossy
+//      出参(可空)置 true 告发。PaintInlineFrameNativeRows 见 lossy 整体
+//      返回 false,调用方退 legacy 字节流路——那边 UTF-8 原文全保真,
+//      支持合成渲染的终端自己画,不静默丢附标(单子 §9.2 第二条)。
+std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count,
+                                                         bool* utf16_lossy = nullptr);
 
 // 行级双缓冲的原生直写版:diff 的账与 QueueInlineFrameDiff 同一把(没变
 // 的行一字不写),但每一脏行按坐标 WriteNativeRow 直写(字符+属性一次
