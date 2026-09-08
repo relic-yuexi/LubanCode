@@ -122,7 +122,7 @@ TEST_CASE("paste burst × 代理跨批:两批都够阈值,拼回发生在线头(
     const auto d2 = ClassifyTextBurst(batch2);
     REQUIRE(d2.is_paste);
     const auto carry2 = ApplySurrogateCarry(d2.text, carry1.pending_high);
-    REQUIRE(carry2.text.size() == 21);
+    REQUIRE(carry2.text.size() == 22);  // 拼回的高代理 + 21 单元批
     CHECK(carry2.text[0] == kHighD83D);
     CHECK(carry2.text[1] == kLowDE00);  // 😀 相邻还原
     CHECK(carry2.text.substr(2) == std::wstring(20, L'b'));
