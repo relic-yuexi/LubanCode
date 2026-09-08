@@ -8,6 +8,8 @@
 #include <doctest/doctest.h>
 
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
@@ -368,6 +370,51 @@ TEST_CASE("Compact: focus 非空时,请求的 system 指令里带上 重点保�
     CHECK(backend.captured_requests[0].system.find("重点保留:数据库连接字符串") != std::string::npos);
     // manifest 模板也进了指令,模型才知道要产出机器骨架。
     CHECK(backend.captured_requests[0].system.find("\"open_items\"") != std::string::npos);
+}
+
+TEST_CASE("Compact: 指令正文来自 compact-handoff 模块,用户目录可覆盖") {
+    // 嵌入版(空 prompts_dir):system 是模块的交接口吻([用户任务]/
+    // [工作状态])+ 机器合同(manifest 模板),旧六栏栏目头退场。
+    FakeBackend backend;
+    backend.script = SummaryScript(kGoodSummary);
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题 " + std::string(2400, 'x')));
+
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
+
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 1);
+    const std::string& system = backend.captured_requests[0].system;
+    CHECK(system.find("This is a history compaction request") != std::string::npos);
+    CHECK(system.find("[用户任务]") != std::string::npos);
+    CHECK(system.find("[工作状态]") != std::string::npos);
+    CHECK(system.find("## 任务目标") == std::string::npos);
+    CHECK(system.find("\"open_items\"") != std::string::npos);
+
+    // 用户覆盖:prompts_dir 指到临时目录,features/compact-handoff.md 换血。
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "luban_test_compact_prompt";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "features");
+    {
+        std::ofstream out((dir / "features" / "compact-handoff.md").string());
+        out << "定制压缩指令正文,USER-OVERRIDE-MARK 在此。\n";
+    }
+    FakeBackend overridden;
+    overridden.script = SummaryScript(kGoodSummary);
+    agent::CompactOptions options = PlainOptions();
+    options.prompts_dir = dir.string();
+
+    const auto overridden_result = agent::Compact(overridden, "test-model", history, options);
+
+    REQUIRE(overridden_result.has_value());
+    REQUIRE(overridden.captured_requests.size() == 1);
+    const std::string& overridden_system = overridden.captured_requests[0].system;
+    CHECK(overridden_system.find("USER-OVERRIDE-MARK") != std::string::npos);
+    CHECK(overridden_system.find("[用户任务]") == std::string::npos);
+    CHECK(overridden_system.find("\"open_items\"") != std::string::npos);  // 机器合同不随正文走
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("Compact: 后端失败时返回错误,不影响传入的原始 history") {
