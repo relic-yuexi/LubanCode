@@ -505,6 +505,10 @@ private:
     // 基类引用调用,将来 app-server 挂第二只 sink 不用回改这里。
     lubancode::app::TerminalSessionNoticeSink notice_sink_terminal_;
     lubancode::app::SessionNoticeSink& notice_sink();
+    // 唤醒识死(主会话输出预留占坑单 §4.3):连续应急放行的会话,后台
+    // 子代理完成回流不再自动另起一轮——上下文将尽的通知打一道,去留
+    // 交还用户;用户显式输入照常开轮。压力回调与轮收口两处记账。
+    ContextExhaustionGate context_exhaustion_gate_;
     // 状态面板拼装材料(骨架拆解反弹·问题 2):指针字段构造尾绑一次,
     // goal/loop 两枚每圈在 Run() 顶刷新,折数在 app/status_panel_assembly。
     lubancode::app::StatusPanelInputs status_inputs_;

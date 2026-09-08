@@ -102,6 +102,20 @@ inline int SubagentOutputReserveCap(std::size_t window_tokens) {
     return static_cast<int>(cap);
 }
 
+// 主会话预检估算用的输出预留封顶(主会话输出预留占坑单 §4.1):子代理
+// 侧同款病灶在主会话原样复发——模型目录/provider 声明的是能力上限
+//("最多能给"),不是每次请求的占坑预留;整份当预留去撞窗口,256K 窗 ×
+// 128K 目录上限,输入过半(约 124K)预检必爆,窗还空着一半。尺子与
+// SubagentOutputReserveCap 同一把:clamp(window/8, 8k, 32k);窗未知给
+// 32k;ConfigFile 显式值不收——用户手笔尊重原值(与子代理侧同款例外)。
+// 用法上有别:子代理的帽在 profile 构造时直接改写 max_output_tokens
+//(实发字段随帽走);主会话的帽只戴在预检"估算用的预留"上,实发
+// max_tokens 字段由 loop 的优雅降级另账(window − 输入 − 协议余量,
+// 下限 8k),不进收尾禁令——历史没满,任务照常推进。
+inline int MainSessionOutputReserveCap(std::size_t window_tokens) {
+    return SubagentOutputReserveCap(window_tokens);
+}
+
 // 一份不可变运行策略。AgentLoop 与子代理(AgentTool::RunTask)从这里拿
 // 全部预算类参数;调用方各声明自己覆盖什么,其余继承 main 的有效值。
 // model 不在这里(骨架拆解批四·病十一其一):请求整形归

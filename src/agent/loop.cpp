@@ -1014,6 +1014,25 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 不在目录/窗口查不到)落 kFallbackContextWindowTokens 兜底——字节轴
         // 裁剪拆除后,窗口未知不许再裸奔,下面的预检与保命索全按这只口。
         const std::size_t window_tokens = EffectiveContextWindowTokens(profile_);
+        // 主会话输出预留封顶(主会话输出预留占坑单 §4.1):能力级声明(模型
+        // 目录/provider)是"最多能给",不是"每次都要留足"——整份当估算预留
+        // 去撞窗口,256K 窗 × 128K 目录上限,输入过半(约 124K)预检必爆,
+        // 窗还空着一半(子代理侧 SubagentOutputReserveCap 同款前科,主会话
+        // 这条路当年漏戴)。帽只戴在"估算用的预留"上:下方固定账预检、
+        // projected 压力预估、最终硬闸三处吃同一份数;实发 max_tokens 字段
+        // 另账,在最终硬闸处优雅降级。ConfigFile 显式值不收——用户手笔,
+        // 尊重原值(与子代理侧 BuildSubagentRuntimeProfile 同款例外)。帽的
+        // 取尺走原始声明窗口(未知 = 0 → 给 32k),不走上面的有效兜底窗口。
+        const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
+        const std::size_t declared_output_reserve =
+            static_cast<std::size_t>(output_budget.reserve_for_estimate());
+        std::size_t estimate_output_reserve = declared_output_reserve;
+        if (profile_.max_output_tokens_source != OutputBudgetSource::ConfigFile &&
+            declared_output_reserve >
+                static_cast<std::size_t>(MainSessionOutputReserveCap(profile_.context_window_tokens))) {
+            estimate_output_reserve =
+                static_cast<std::size_t>(MainSessionOutputReserveCap(profile_.context_window_tokens));
+        }
         // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
         // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
         if (step_index == 0 && !context_.request_history().empty()) {
@@ -1025,8 +1044,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                       EstimateTextTokensForPreflight(tool.description, token_calibration) +
                                       EstimateTextTokensForPreflight(tool.input_schema.dump(), token_calibration);
             }
-            const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
-            const std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
+            // 预留吃上方封顶后的 estimate_output_reserve,不再各拿各的。
+            const std::size_t output_tokens = estimate_output_reserve;
             if (ExceedsContextWindow(fixed_input_tokens, output_tokens, window_tokens)) {
                 return std::unexpected(
                     "上下文预检未通过:当前消息与固定提示约 " + std::to_string(fixed_input_tokens) +
@@ -1090,11 +1109,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 默认上限拿不到准数,宁可早压不撞墙。输出预留单独保留:那是
             // 真会占窗口的空间;防"下一轮工具结果再涨"也靠它,不再对整段
             // 历史做倍率虚算(重复结果的去重由工作视图的结构压缩负责)。
-            const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
+            // projected 的输出预留一并吃封顶后的口径,与最终硬闸同一份——
+            // 虚算不再拿能力上限虚抬压力。
             std::size_t projected =
                 EstimateTextTokensForPreflight(request.system, token_calibration) +
                 EstimateHistoryTokensForPreflight(working_view.messages, token_calibration) +
-                static_cast<std::size_t>(output_budget.reserve_for_estimate());
+                estimate_output_reserve;
             for (const auto& tool : request.tools) {
                 projected += EstimateTextTokensForPreflight(tool.name, token_calibration) +
                              EstimateTextTokensForPreflight(tool.description, token_calibration) +
@@ -1174,23 +1194,24 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         std::size_t calibration_est_tokens = 0;
         std::size_t calibration_request_bytes = 0;
 
-        // token 窗口的最后一道硬闸。上面的压力回调已经有机会压缩；回来后
-        // 仍是“输入估算 + 输出预留 + 协议余量 > 窗口”时,先试应急预留
-        //(派工单 §四):当前消息自己装得下、只是常规预留太肥的,把本请求
-        // 的输出上限收窄到一个小而正的值放行——同任务继续跑,并注入一次
-        // 收尾交代。应急也装不下(当前消息本身过大/历史真满了)才就地报错。
-        // 尤其是当前单条用户消息本身过大时，摘要压多少遍也救不了，不能再
-        // 把同一份请求发给 provider 撞 500。窗口按上面的有效窗口算(未知
-        // 落兜底),永不跳过。
+        // token 窗口的最后一道硬闸。预留先经上方的封顶(能力上限不再整份
+        // 占坑),回来后仍是“输入估算 + 封顶预留 + 协议余量 > 窗口”的,才
+        // 是历史真满——先试应急预留(派工单 §四):当前消息自己装得下就把
+        // 本请求的输出上限收窄到一个小而正的值放行,同任务继续跑,并注入
+        // 一次收尾交代;应急也装不下(当前消息本身过大)才就地报错。封顶
+        // 预留装得下、只是声明上限装不下的,走下面的优雅降级:实发
+        // max_tokens 收到 window − 输入 − 协议余量,不进收尾禁令——窗还有
+        // 余量,任务照常调工具。尤其是当前单条用户消息本身过大时，摘要压
+        // 多少遍也救不了，不能再把同一份请求发给 provider 撞 500。窗口按
+        // 上面的有效窗口算(未知落兜底),永不跳过。
         {
-            const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             const std::size_t input_tokens =
                 EstimateRequestInputTokensForPreflight(request, token_calibration);
             const std::size_t current_turn_tokens = request.messages.empty()
                                                         ? 0
                                                         : EstimateMessageTokensForPreflight(request.messages.back(),
                                                                                             token_calibration);
-            std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
+            std::size_t output_tokens = estimate_output_reserve;
             // 三项账进可观测事件(派工单 §4.4):estimated_input + reserved_
             // output + protocol_margin,判定处当场发,不等问题发生后再翻账。
             const auto emit_preflight = [&](std::size_t used_reserve, bool clamped) {
@@ -1249,6 +1270,21 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                              : "。自动压缩后仍装不下；请开新会话、缩短输入，或调低输出上限。") +
                         " 现场不丢:已完成的工具结果与最后检查点已随任务保留,可据此续派同一任务。");
                 }
+            } else if (ExceedsContextWindow(input_tokens, declared_output_reserve, window_tokens)) {
+                // 实发 max_tokens 优雅降级(§4.1 另账):输入 + 声明上限超窗
+                // 而输入 + 封顶预留不超——能力上限是"最多能给",不是"每次
+                // 都要留足"。实发值收到 window − 输入 − 协议余量;下限自守
+                //(封顶预留装得下 ⇒ 余量 ≥ 帽 ≥ 8k,再低只可能出现在上面
+                // 的应急支)。不进收尾禁令、不发 PreflightExceeded——历史
+                // 没满,模型照常调工具;降级事实走日志,不进轨迹的应急账。
+                const std::size_t degraded = window_tokens - input_tokens - kContextPreflightHeadroomTokens;
+                request.max_tokens = static_cast<int>(degraded);
+                platform::LogSink::Instance().Info(
+                    "loop", "[context-preflight] estimated_input=" + std::to_string(input_tokens) +
+                                " declared_output=" + std::to_string(declared_output_reserve) +
+                                " protocol_margin=" + std::to_string(kContextPreflightHeadroomTokens) +
+                                " window=" + std::to_string(window_tokens) +
+                                " action=max_tokens_degraded to=" + std::to_string(degraded));
             }
         }
 
@@ -1649,13 +1685,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 }
 
                 // 轨迹边界:打断也是一枚明确收口(output.cancelled;usage
-                // 若报了先记 owner)。
+                // 若报了先记 owner)。取消来源说真话(§4.2):取消链真被
+                // 升起来才记 user_interrupt(全库升旗人就是交互层的按键
+                // 监听);链没升却回取消分型的,按流侧异常记账,不冤枉用户。
                 if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
                     wiring.boundary_recorder->OnUsageRecorded(
                         trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id,
                         step_prefix_account.cache_epoch, step_prefix_account.append_only,
                         assembler.cache_seen());
-                    wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id);
+                    const OutputCancelSource cancel_source =
+                        cancel != nullptr && cancel->load() ? OutputCancelSource::UserInterrupt
+                                                           : OutputCancelSource::StreamError;
+                    wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id, cancel_source);
                 }
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
             }

@@ -1325,6 +1325,9 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 接线(批四·病十二):压力钩进 AgentWiring;inbox 由 peer 钩在底下重灌。
     lubancode::agent::AgentWiring main_wiring;
     main_wiring.on_context_pressure = [this](const lubancode::agent::ContextPressure& pressure) {
+        // 唤醒识死记账(§4.3):应急放行累加,轮收口处判健康清零——计数
+        // 语义见 ContextExhaustionGate。
+        context_exhaustion_gate_.NotePressure(pressure);
         lubancode::app::HandleContextPressure(pressure, MakeCompactInputs());
     };
     main_agent->SetWiring(std::move(main_wiring));

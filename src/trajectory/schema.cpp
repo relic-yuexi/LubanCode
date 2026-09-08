@@ -199,6 +199,11 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ModelOutputFailed, "error_code", "s", false},
     {EventKind::ModelOutputFailed, "attempt", "u", false},
     {EventKind::ModelOutputFailed, "task_turn_index", "u", false},
+    // cancelled 的 reason 是封闭取值集(主会话输出预留占坑单 §4.2 取消
+    // 记账说真话):user_interrupt(真按键,旧值原样保留)/ internal_cancel
+    //(宿主内部取消,如采样超时看门狗)/ stream_error(取消分型但对不上
+    // 任何取消链)。规范名出自 agent::OutputCancelSourceText;更早的旁路
+    // 泛名 "cancelled" 只在旧 stream 里存在,读取方按未知值兜底。
     {EventKind::ModelOutputCancelled, "reason", "s", true},
     {EventKind::ModelOutputCancelled, "error_code", "s", false},
     {EventKind::ModelOutputCancelled, "task_turn_index", "u", false},

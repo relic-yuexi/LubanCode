@@ -555,8 +555,12 @@ void TrajectoryTurnBridge::OnOutputFailed(const std::string& request_id, const s
     }
 }
 
-void TrajectoryTurnBridge::OnOutputCancelled(const std::string& request_id) {
-    nlohmann::json payload = {{"reason", "user_interrupt"}};
+void TrajectoryTurnBridge::OnOutputCancelled(const std::string& request_id, agent::OutputCancelSource source) {
+    // 取消来源说真话(主会话输出预留占坑单 §4.2):真按键才记
+    // user_interrupt——旧硬编码的冤枉账已废,三来源各记各名(规范名
+    // 见 agent::OutputCancelSourceText;旧 stream 的 user_interrupt 值
+    // 原样保留,兼容不破)。
+    nlohmann::json payload = {{"reason", agent::OutputCancelSourceText(source)}};
     // 流中取消:permit 已消耗,attempted 保留(§6.4)——turn 坐标照带。
     if (const auto turn_it = request_turns_.find(request_id); turn_it != request_turns_.end()) {
         payload["task_turn_index"] = static_cast<std::uint64_t>(turn_it->second.task_turn_index);
@@ -1205,10 +1209,12 @@ void TrajectoryBypassBridge::OnOutputFailed(const std::string& request_id, const
     CloseTurn(false, false, reason);
 }
 
-void TrajectoryBypassBridge::OnOutputCancelled(const std::string& request_id) {
-    const auto receipt = Put(EventKind::ModelOutputCancelled, request_id, Actor::Model,
-                             Origin::ProviderModel, nlohmann::json{{"reason", "cancelled"}},
-                             Durability::ProcessCrash);
+void TrajectoryBypassBridge::OnOutputCancelled(const std::string& request_id, agent::OutputCancelSource source) {
+    // 同 §4.2:旁路取消也按真实来源落名(旧的泛名 "cancelled" 退役;字段
+    // 类型不变,旧 stream 照读)。
+    const auto receipt =
+        Put(EventKind::ModelOutputCancelled, request_id, Actor::Model, Origin::ProviderModel,
+            nlohmann::json{{"reason", agent::OutputCancelSourceText(source)}}, Durability::ProcessCrash);
     if (receipt.status != RecordReceipt::Status::Committed) {
         NoteError(receipt, "model.output.cancelled(bypass)");
     }
