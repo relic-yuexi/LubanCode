@@ -24376,7 +24376,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -29639,7 +29639,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -34675,7 +34675,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -41226,7 +41226,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
