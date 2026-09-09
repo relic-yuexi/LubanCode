@@ -1,8 +1,10 @@
 // workspace v2 manifest 读写与对账的实现(P0-1)。
 #include "workspace/manifest.hpp"
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
@@ -19,15 +21,18 @@ bool WriteTextFileAtomic(const fs::path& path, const std::string& content) {
     return platform::AtomicWriteFile(path, content).has_value();
 }
 
-std::string ReadTextFile(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return {};
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
+// Windows 瞬态文件语义的有界重试档(单位:次数 / 退避步长)。三案 CI 实测
+// (2026-09 run 34316108135、34335606083、34360062483,windows-msvc 腿):
+// 原子换名(MoveFileExW REPLACE)与防病毒/索引过滤驱动会让目标文件的
+// 元数据查询(fs::exists)与打开(ifstream 不带 FILE_SHARE_DELETE)短
+// 拒,拦截窗实测可达几十毫秒(坏读全是"10×2ms 重试耗尽"型;写侧 320
+// 次换名被拒 48-57 次)——不是微秒级换名窗本身。10 次×10ms=100ms 预算
+// 给足余量;正常路径首次即成,零等待零重试。POSIX rename 原子、无共享
+// 违例,下列瞬态恒不发生,重试路径零开销零行为变化。
+constexpr int kTransientReadAttempts = 10;
+constexpr int kTransientWriteAttempts = 10;
+constexpr std::chrono::milliseconds kTransientReadBackoff{10};
+constexpr std::chrono::milliseconds kTransientWriteBackoff{10};
 
 }  // namespace
 
@@ -107,12 +112,53 @@ std::optional<WorkspaceManifest> WorkspaceManifest::FromJson(const nlohmann::jso
 ManifestRead ReadWorkspaceManifest(const fs::path& workspace_dir) {
     ManifestRead read;
     const fs::path path = workspace_dir / "workspace.json";
-    std::error_code ec;
-    if (!fs::exists(path, ec) || ec) {
-        read.status = ManifestRead::Status::Missing;
+    // 探测/打开的瞬态失败有界重试(依据见 kTransientRead* 注释)。确定性
+    // 答案不重试、判据不动:查无此物(ec 清)立即 Missing;读出的内容
+    // parse 坏立即 Corrupt——撕裂 JSON 重读恒坏,该红就红。旧账:打不开
+    // 曾折成空串喂 parse,判成 Corrupt(schema.missing_field),并发开房
+    // 路零宽限直接落空,上列三案同根于此窗。
+    std::string text;
+    bool have_text = false;
+    std::string transient_code;
+    for (int attempt = 0;; ++attempt) {
+        std::error_code ec;
+        if (const bool present = fs::exists(path, ec); !ec) {
+            if (!present) {
+                read.status = ManifestRead::Status::Missing;  // 真没有:立即定案
+                return read;
+            }
+            if (std::ifstream file(path, std::ios::binary); file.is_open()) {
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                text = buffer.str();
+                have_text = true;
+                break;
+            }
+            transient_code = "read.open_failed";
+        } else {
+            transient_code = "read.probe_failed";
+        }
+        if (attempt >= kTransientReadAttempts) {
+            break;
+        }
+        std::this_thread::sleep_for(kTransientReadBackoff);
+    }
+    if (!have_text) {
+        // 重试耗尽:status 判据沿旧账(探测败按缺、打开败按坏),error_code
+        // 把"读不成"与"内容坏"分开——诊断不再冒充 schema 病。
+        if (transient_code == "read.open_failed") {
+            read.status = ManifestRead::Status::Corrupt;
+        } else {
+            read.status = ManifestRead::Status::Missing;
+        }
+        read.error_code = transient_code;
+        read.error_text = std::string(transient_code == "read.open_failed"
+                                          ? "workspace.json 打不开(重试耗尽): "
+                                          : "workspace.json 探测被拒(重试耗尽): ") +
+                          PathToUtf8(path);
         return read;
     }
-    const auto json = nlohmann::json::parse(ReadTextFile(path), nullptr, false);
+    const auto json = nlohmann::json::parse(text, nullptr, false);
     if (json.is_discarded() || !json.is_object()) {
         read.status = ManifestRead::Status::Corrupt;
         read.error_code = "schema.missing_field";
@@ -239,9 +285,19 @@ std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
             manifest.checkouts.push_back(std::move(checkout));
         }
     }
-    if (const auto written = WriteWorkspaceManifestAtomic(workspace_dir, manifest);
-        !written.has_value()) {
-        return std::unexpected(written.error());
+    // manifest 落盘:Windows 上原子换名会被并发读者的句柄短拒(MoveFileExW
+    // 对无 FILE_SHARE_DELETE 的打开方报错,identity 册 CI 实测 320 次换名
+    // 拒 48-57 次)。瞬态失败、整份重写幂等——有界重试,耗尽才如实落空
+    // (POSIX rename 原子,首次即成,重试路径零开销)。
+    for (int attempt = 0;; ++attempt) {
+        if (const auto written = WriteWorkspaceManifestAtomic(workspace_dir, manifest);
+            written.has_value()) {
+            break;
+        } else if (attempt >= kTransientWriteAttempts) {
+            return std::unexpected(written.error());
+        } else {
+            std::this_thread::sleep_for(kTransientWriteBackoff);
+        }
     }
     // 记账:房已开门、manifest 落盘,账本并这一笔(原子写)。失败不拦
     // 开张——账本是可重建缓存,房自描述在盘上,丢了靠重建/下次开张自愈。
