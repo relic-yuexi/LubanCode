@@ -363,7 +363,7 @@ TEST_CASE("applied 写盘失败:旧内存视图不被替换,后续受阻") {
     auto apply = begin.session->Apply(*writer, "摘要正文", 100, 50,
                                       nlohmann::json::object({}));
     REQUIRE(!apply.ok);
-    CHECK(apply.error_code == "v3writer.injected");
+    CHECK(apply.error.rfind("v3writer.injected", 0) == 0);
     // 旧内存视图未被新摘要替换:链仍是 system+user;句柄 broken,后续受阻。
     CHECK(writer->context().chain.size() == 2);
     CHECK(writer->broken());

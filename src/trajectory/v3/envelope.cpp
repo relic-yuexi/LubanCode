@@ -66,6 +66,20 @@ bool ParseEnumField(const nlohmann::json& json, const char* key, E (*from_name)(
     return true;
 }
 
+// 裸枚举字段重载(purpose/origin 等必填枚举,空值不落键)。
+template <typename E>
+bool ParseEnumField(const nlohmann::json& json, const char* key, E (*from_name)(std::string_view),
+                    E* out, std::string* error_code, std::string* message, const char* context) {
+    std::optional<E> parsed;
+    if (!ParseEnumField(json, key, from_name, &parsed, error_code, message, context)) {
+        return false;
+    }
+    if (parsed.has_value()) {
+        *out = *parsed;
+    }
+    return true;
+}
+
 void SetIfPresent(nlohmann::json* json, const char* key, const std::optional<std::string>& value) {
     if (value.has_value()) {
         (*json)[key] = *value;
