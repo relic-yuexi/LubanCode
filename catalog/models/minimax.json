@@ -33,7 +33,7 @@
     "minimax-m2": {
       "name": "MiniMax M2",
       "context_window": 205000,
-      "max_output": 205000,
+      "max_output": 131072,
       "capabilities": {
         "tools": true,
         "reasoning": true,
