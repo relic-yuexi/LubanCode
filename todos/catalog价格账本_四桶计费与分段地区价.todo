@@ -1,0 +1,52 @@
+# catalog 价格账本：四桶计费、分段价与地区价
+
+- 状态：设计立案，待实现。
+- 日期：2026-09-10
+- 级别：P2（/usage 与 Token 账本从 token 数变真金白银；估算是标定值不是承诺）。
+- 参照：用户样例（moonshot kimi-k2.6）：`pricing: { currency, perTokens: 1000000, input: 6.50, cachedInput: 1.10, output: 27.00, source, updatedAt }`。
+- 依赖：目录分片重构（v0.26.231，平台+端点+模型覆写形状已就位）；轨迹四桶 usage（input/cache_read/cache_creation/output，逐请求在档）。
+
+## 一、设计定案（2026-09-10 与用户对齐）
+
+1. **不做全局 cache 假设**：计费器按轨迹四桶逐桶乘价——有 cache_read 桶的厂家自然用 cachedInput 价，没有的桶根本不会出现。数据自解歧。
+2. **cache_creation 计费**：厂家文档写明（如 Anthropic 系 1.25×input）记 `cacheWrite`；没写按 input 价计，成本行标"估算"。
+3. **分段式（阶梯价）**：`tiers: [{ aboveContextTokens, input, output }]` 按当次请求的 context 水位逐笔选档；分段家多数无 cache 价，不虚设。
+4. **地区/中转差价**：价格挂**平台+端点层**（catalog 现形），同模型官方与中转各挂各价，公共模型池可带官方参考价、端点覆写。
+5. **未知价不算零**：没录价的模型成本行显"价格未知"，不冒充免费。
+6. **币种与分母**：currency（CNY/USD）+ perTokens（默认 1,000,000）随条目录；成本行按币种分列，不汇率折算。
+7. **来源可溯**：每条价必带 `source`（厂方文档 URL）+ `updatedAt`；生成器校验必填。
+
+## 二、schema（挂 models/*.json 与端点覆写层）
+
+```json
+"pricing": {
+  "currency": "CNY",
+  "perTokens": 1000000,
+  "input": 6.5,
+  "cachedInput": 1.1,
+  "cacheWrite": 8.125,
+  "output": 27.0,
+  "tiers": [{ "aboveContextTokens": 128000, "input": 14.0, "output": 27.0 }],
+  "source": "https://platform.kimi.com/docs/pricing/chat-k26",
+  "updatedAt": "2026-09-06"
+}
+```
+
+- 全块可选；`cachedInput`/`cacheWrite`/`tiers` 可再省；有 tiers 时与基础价并存（基础价=首档）。
+- 生成器（generate_provider_catalog.py）扩校验：数值非负、perTokens>0、source/updatedAt 必填、tier 单调；schema 同步 `catalog/source.schema.json`。
+
+## 三、计费器（纯函数，可单测）
+
+- 入：一笔请求的四桶 usage + context 水位 + 该模型定价；出：分桶金额 + 总额 + 置信标（精确/估算[cacheWrite 缺省或 tier 边界近似]/未知价）。
+- 汇总口：/usage 与 Token 账本按模型/会话/日聚合；goal 与子代理 usage 账同乘。
+- 展示：成本行带币种与"≈"标；价格未知聚合行单列。
+
+## 四、分期
+
+- [ ] P1：schema+生成器校验+计费器纯函数+册（四桶直乘、tier 选档、cacheWrite 缺省估算、未知价、端点覆写压池价）。
+- [ ] P2：/usage 与账本接线（成本行、聚合、估算标）；文档（catalog.md 维护节+configuration）。
+- [ ] P3：数据播种——只录有据可查的（source 必填）；2361 型不强求，按实际使用热度渐进；过期价（updatedAt 超 90 天）展示标"价可能过期"。
+
+## 五、边界
+
+不录价不发请求不查网验证真伪（source 溯源即可）；不做汇率折算；不动四桶 usage 记账本身；价格错漏由 source 可查可改，锅在维护数据不在代码。
