@@ -257,3 +257,49 @@ TEST_CASE("宽度策略表: 附标/ZWJ/VS/肤色单宽为零,孤立指示符一�
     CHECK(lubancode::cli::GraphemeCodepointWidth(U'a') == 1);
     CHECK(lubancode::cli::GraphemeCodepointWidth(0) == 0);
 }
+
+// ---------------------------------------------------------------------------
+// 五、宽表机器生成单:人工表 vs UCD 15.1 生成表的端点差异,逐条判生成表
+// 对(scripts/gen_unicode_tables.py 可重跑对账;期望值对照 UCD 数据写死,
+// 右侧不许出现被测函数)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("宽表机器生成: 人工表错收的四枚 SpacingMark 不再并入前簇") {
+    // U+0F7F/1112C/1D166/1D16D 在 UAX#29 是 SpacingMark(Mc),不是 Extend;
+    // 人工摘录时错收进表一,生成表按 GraphemeBreakProperty 摘出——自立
+    // 一簇、占一列(它们是 spacing 记号,零宽才是错账)。
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0F7F) == 1);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1112C) == 1);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1D166) == 1);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1D16D) == 1);
+    CHECK(ClusterCount(U32({0x0F40, 0x0F7F})) == 2);  // 藏文基字+RNAM BCAD 两簇
+}
+
+TEST_CASE("宽表机器生成: ZWNJ 并入前簇(GB9 口径),单宽零") {
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x200C) == 0);
+    CHECK(ClusterCount(U32({U'a', 0x200C, U'b'})) == 2);
+    CHECK(TotalWidth(U32({U'a', 0x200C, U'b'})) == 2);
+}
+
+TEST_CASE("宽表机器生成: 人工表漏收的附标端点补齐") {
+    // 老挝 0ECE(人工表止于 0ECD)、阿拉伯扩展 08CA(人工表起点误作
+    // 08D3,漏了 08CA..08D2 与 0898..089F)。
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0ECE) == 0);
+    CHECK(ClusterCount(U32({0x0EA1, 0x0ECE})) == 1);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x08CA) == 0);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0898) == 0);
+}
+
+TEST_CASE("宽表机器生成: 15.x 新进宽字补齐(无线/重等号/契丹小字/越南读法符/假名扩展B)") {
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1F6DC) == 2);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1F7F0) == 2);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x18D00) == 2);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x16FF0) == 2);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1AFF0) == 2);
+}
+
+TEST_CASE("宽表机器生成: 人工粗段裹进的未赋值码位按默认 N 摘出") {
+    // 全角区头 0xFF00、彝文尾 0xA4C7 未赋值,East_Asian_Width 默认 N。
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0xFF00) == 1);
+    CHECK(lubancode::cli::GraphemeCodepointWidth(0xA4C7) == 1);
+}
