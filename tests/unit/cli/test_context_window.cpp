@@ -71,22 +71,32 @@ TEST_CASE("BuildContextWindowCandidates: 常用档按已知上限过滤") {
         CHECK(out.values == std::vector<std::size_t>{8000, 16000, 32000, 64000, 128000,
                                                      200000, 256000, 400000, 512000});
     }
-    SUBCASE("1048576 上限:1M 档留有余量,原始上限不丢") {
-        const auto out = cli::BuildContextWindowCandidates(std::size_t{1048576}, std::size_t{1048576});
-        REQUIRE(out.values.size() == 11);
-        CHECK(out.values[out.values.size() - 2] == 1000000);
-        CHECK(out.values.back() == 1048576);
+    SUBCASE("1048576 上限:候选只有十进制预设档,1M 可选") {
+        const auto out = cli::BuildContextWindowCandidates(std::size_t{1048576}, std::size_t{512000});
+        // 用户定案(2026-09):声明上限只当过滤尺,厂商原数 1048576 不进
+        // 候选;1000000 <= 1048576,1M 档照常可选。改判 PR #13 的"原始上限
+        // 不丢"——旧册按补声明值立账,与新合同冲突,以新合同为准。
+        CHECK(out.limit_known);
         CHECK(out.declared_limit == 1048576);
+        CHECK(out.values == std::vector<std::size_t>{8000, 16000, 32000, 64000, 128000,
+                                                     200000, 256000, 400000, 512000, 1000000});
+        CHECK(std::find(out.values.begin(), out.values.end(), std::size_t{1048576}) ==
+              out.values.end());  // 候选无 1048576
+        CHECK_FALSE(out.current_over_limit);
+        CHECK_FALSE(out.unverified);
         CHECK(std::is_sorted(out.values.begin(), out.values.end()));
     }
-    SUBCASE("大于百万的上限:自动延伸 2M/4M,补真实上限") {
+    SUBCASE("大于百万的上限:自动延伸 2M/4M,声明原数不进候选") {
         const auto out = cli::BuildContextWindowCandidates(std::size_t{5000000}, std::size_t{1000000});
-        REQUIRE(out.values.size() == 13);
+        REQUIRE(out.values.size() == 12);
+        CHECK(out.values[9] == 1000000);
         CHECK(out.values[10] == 2000000);
-        CHECK(out.values[11] == 4000000);
-        CHECK(out.values.back() == 5000000);
+        CHECK(out.values.back() == 4000000);
+        CHECK(std::find(out.values.begin(), out.values.end(), std::size_t{5000000}) ==
+              out.values.end());  // 5000000 是声明值,不是档
     }
-    SUBCASE("小于 8K 的模型:补半窗口,保留真实上限") {
+    SUBCASE("小于 8K 的模型:补半窗口,当前值照实保留") {
+        // 4096 在候选是因为它是当前生效值(§4.2 第 4 条),不是声明补档。
         const auto out = cli::BuildContextWindowCandidates(std::size_t{4096}, std::size_t{4096});
         CHECK(out.values == std::vector<std::size_t>{2048, 4096});
     }
@@ -94,7 +104,10 @@ TEST_CASE("BuildContextWindowCandidates: 常用档按已知上限过滤") {
         const auto limit = std::numeric_limits<std::size_t>::max();
         const auto out = cli::BuildContextWindowCandidates(limit, std::size_t{1000000});
         REQUIRE_FALSE(out.values.empty());
-        CHECK(out.values.back() == limit);
+        // 声明值本身不进候选:最大候选是落在 (limit/2, limit] 的最后一档
+        // 倍增档,永远到不了 limit 本身。
+        CHECK(out.values.back() <= limit);
+        CHECK(out.values.back() > limit / 2);
         CHECK(out.values.front() > 0);
         CHECK(out.values.size() <= std::numeric_limits<std::size_t>::digits + 11);
         CHECK(std::is_sorted(out.values.begin(), out.values.end()));
@@ -137,6 +150,9 @@ TEST_CASE("BuildContextWindowCandidates: 零上限按未知处理,不生成零�
 }
 
 TEST_CASE("BuildContextWindowCandidates: 十进制档位标签可由配置解析器无损读回") {
+    // 声明原数不进候选后,该案候选全是整档;整档标签(200K/2M)可被
+    // ParseContextWindowTokens 无损读回。非整档真值的折算标签("1.05M")
+    // 只上屏,面板确认写回的是 token 值本身,不走标签解析。
     const auto out = cli::BuildContextWindowCandidates(std::size_t{2097152}, std::size_t{1000000});
     for (const auto value : out.values) {
         const auto parsed = config::ParseContextWindowTokens(cli::FormatContextWindowLabel(value));
@@ -149,13 +165,16 @@ TEST_CASE("BuildContextWindowCandidates: 十进制档位标签可由配置解析
     CHECK(cli::FormatContextWindowLabel(2000000) == "2M");
 }
 
-TEST_CASE("FormatContextWindowLabel: K=1000,M=1000000,真值不硬折") {
+TEST_CASE("FormatContextWindowLabel: K=1000,M=1000000,非整档十进制折算") {
     CHECK(cli::FormatContextWindowLabel(200000) == "200K");
     CHECK(cli::FormatContextWindowLabel(400000) == "400K");
     CHECK(cli::FormatContextWindowLabel(1000000) == "1M");
     CHECK(cli::FormatContextWindowLabel(128000) == "128K");
-    // 1048576 不是 1000 的整倍数:原样显示,不改写成 1M(§4.2 第 7 条)。
-    CHECK(cli::FormatContextWindowLabel(1048576) == "1048576");
+    // 用户定案:1048576 不再裸数上屏,按十进制 M 折算(四舍五入两位小
+    // 数,口径同状态行 FormatTokenCount);零头照 K 折,不足 1K 原样给数。
+    CHECK(cli::FormatContextWindowLabel(1048576) == "1.05M");
+    CHECK(cli::FormatContextWindowLabel(131072) == "131.1K");
+    CHECK(cli::FormatContextWindowLabel(4096) == "4.1K");
     CHECK(cli::FormatContextWindowLabel(105000) == "105K");
 }
 
@@ -432,7 +451,7 @@ TEST_CASE("BuildContextWindowPanelFrame: §三布局逐行对账") {
     // 焦点在窗口行:"> " 跟随焦点(§三),高亮配合文本标记不只靠颜色。
     CHECK(frame.lines[2].rfind("> ", 0) == 0);
     CHECK(frame.lines[2].find(cli::tr("cw_panel.context_label")) != std::string::npos);
-    CHECK(frame.lines[3] == "  " + cli::trf("cw_panel.context_limit", std::string("1000000")));
+    CHECK(frame.lines[3] == "  " + cli::trf("cw_panel.context_limit", std::string("1M")));
     // 可调且有多个候选才画 "< >"。
     CHECK(frame.lines[4] == "  < 200K >");
     CHECK(frame.lines[5].empty());
@@ -513,17 +532,58 @@ TEST_CASE("BuildContextWindowPanelFrame: 当前值超限标异常;declined 标�
     CHECK(frame.lines[8].find(cli::tr("cw_panel.not_supported")) != std::string::npos);
 }
 
-TEST_CASE("BuildContextWindowPanelFrame: 原始上限与十进制 1M 分别展示") {
+TEST_CASE("BuildContextWindowPanelFrame: 厂商 MiB 上限十进化,屏上无裸数") {
+    // 改判 PR #13 的"原始上限与十进制 1M 分别展示":用户定案(2026-09)
+    // 面板不见 1048576 这类厂商原数——上限行改十进制口径"≥1M",候选只有
+    // 十进制预设档(1M 可选),整帧行扫一遍都不含裸数。
     auto view = MakeView();
     view.window = cli::BuildContextWindowCandidates(std::size_t{1048576}, std::size_t{1000000});
     view.window_index = static_cast<std::size_t>(
         std::find(view.window.values.begin(), view.window.values.end(), 1000000) - view.window.values.begin());
     view.original_window_index = view.window_index;
     const auto frame = cli::BuildContextWindowPanelFrame(view, 100);
-    CHECK(frame.lines[3].find("1048576") != std::string::npos);
-    CHECK(frame.lines[3].find("1M=1000000") != std::string::npos);
+    CHECK(frame.lines[3].find("≥1M") != std::string::npos);
+    CHECK(frame.lines[3].find("1M=1000000") != std::string::npos);  // 口径说明仍在
     CHECK(frame.lines[4] == "  < 1M >");
     CHECK(frame.lines[10].find("1M") != std::string::npos);
+    for (const std::string& line : frame.lines) {
+        CHECK(line.find("1048576") == std::string::npos);  // 厂商原数不上屏
+    }
+}
+
+TEST_CASE("BuildContextWindowPanelFrame: 非整档上限 786432 只露 ≥512K,声明值不进候选") {
+    auto view = MakeView();
+    view.window = cli::BuildContextWindowCandidates(std::size_t{786432}, std::size_t{512000});
+    view.window_index = static_cast<std::size_t>(
+        std::find(view.window.values.begin(), view.window.values.end(), 512000) - view.window.values.begin());
+    view.original_window_index = view.window_index;
+    const auto frame = cli::BuildContextWindowPanelFrame(view, 100);
+    CHECK(frame.lines[3].find("≥512K") != std::string::npos);
+    CHECK(frame.lines[3].find("786432") == std::string::npos);
+    // 候选只有 <= 786432 的预设档:顶到 512K;786432 与 1000000 都不在。
+    CHECK(std::find(view.window.values.begin(), view.window.values.end(), std::size_t{786432}) ==
+          view.window.values.end());
+    CHECK(std::find(view.window.values.begin(), view.window.values.end(), std::size_t{1000000}) ==
+          view.window.values.end());
+    CHECK(view.window.values.back() == 512000);
+    CHECK(frame.lines[4] == "  < 512K >");
+}
+
+TEST_CASE("BuildContextWindowPanelFrame: 非整档当前值按十进制折算照实显示") {
+    // 当前生效值是真相,照实保留在候选(§4.2 第 4 条);上屏走十进制折
+    // 算("1.05M",与状态行同一口径),不打裸数字,超限标注逻辑不变。
+    auto view = MakeView();
+    view.window = cli::BuildContextWindowCandidates(std::size_t{1048576}, std::size_t{1048576});
+    view.window_index = view.window.values.size() - 1;  // 当前值(升序排尾)
+    view.original_window_index = view.window_index;
+    const auto frame = cli::BuildContextWindowPanelFrame(view, 100);
+    CHECK(view.window.values.back() == 1048576);
+    CHECK_FALSE(view.window.current_over_limit);  // 恰等于声明上限,不算超限
+    CHECK(frame.lines[4].find("1.05M") != std::string::npos);
+    CHECK(frame.lines[10].find("1.05M") != std::string::npos);
+    for (const std::string& line : frame.lines) {
+        CHECK(line.find("1048576") == std::string::npos);
+    }
 }
 
 TEST_CASE("BuildContextWindowPanelFrame: 窄终端按显示宽度截行,不溢出") {
