@@ -24484,7 +24484,7 @@
         "amazon/nova-2-lite": {
           "name": "Nova 2 Lite",
           "context_window": 1000000,
-          "max_output": 1000000,
+          "max_output": 65536,
           "capabilities": {
             "tools": true,
             "reasoning": true,
