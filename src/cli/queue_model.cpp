@@ -214,10 +214,20 @@ void SteeringQueue::ReturnToFront(QueuedMessage item) {
     std::lock_guard<std::mutex> lock(mutex_);
     item.delivery_attempts += 1;
     // 状态归位:自动发送失败不是条目本身的病(TargetGone/Failed 才是),
-    // 还回来的还是健康的 Queued,只是带上了"已试过一次"的账。
+    // 还回来的还是健康的 Queued,只是带上了"已试过一次"的账(returned
+    // 的落账就是 attempts 这一位)。
     item.state = QueueItemState::Queued;
     item.edit_open = false;
     item.delivery = immediate_ ? DeliveryMode::Immediate : DeliveryMode::AfterNextToolBoundary;
+    // P3:claim 流下条目还在队里(Claimed 窗口态)——原位翻回,不插副本
+    //(插副本是"取走即出队"时代的语义,会造双份);旧 Take* 口取出的
+    // 条目不在队里,照旧塞回队首。
+    for (auto& existing : items_) {
+        if (existing.id == item.id) {
+            existing = std::move(item);
+            return;
+        }
+    }
     items_.insert(items_.begin(), std::move(item));
 }
 

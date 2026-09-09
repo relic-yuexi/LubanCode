@@ -221,12 +221,14 @@ TEST_CASE("step_id 跨 Run 单调:两次 Run 三只 Step,号不重不裂;turn_id
     CHECK(turn.recorder.lines[0].step_id == "step-1");
     CHECK(turn.recorder.lines[1].step_id == "step-2");
     CHECK(turn.recorder.lines[2].step_id == "step-3");
-    // 多次 Run 缝同一只 Turn:turn_id 全程同一枚。
-    for (const auto& line : turn.recorder.lines) {
-        CHECK(line.turn_id == "turn-42");
-        CHECK(line.attempts == 1);  // 一次过(脚本不重试)
-        CHECK(line.stop_reason == "end_turn");
-        CHECK(line.api_duration_ms >= 0);
+    // 多次 Run 缝同一只 Turn:turn_id 全程同一枚;中间那步是 tool_use 收口
+    //(工具步),首尾两步 end_turn。
+    const char* expected_stop[3] = {"end_turn", "tool_use", "end_turn"};
+    for (std::size_t i = 0; i < turn.recorder.lines.size(); ++i) {
+        CHECK(turn.recorder.lines[i].turn_id == "turn-42");
+        CHECK(turn.recorder.lines[i].attempts == 1);  // 一次过(脚本不重试)
+        CHECK(turn.recorder.lines[i].stop_reason == expected_stop[i]);
+        CHECK(turn.recorder.lines[i].api_duration_ms >= 0);
     }
 }
 

@@ -52,7 +52,9 @@ public:
     // 落 ack 行。认不得的号安静忽略(幂等)。
     void Ack(std::uint64_t entry_id);
 
-    // 幂等键是否已在账上(pending 或 acked)。
+    // 幂等键是否已在账上(pending 或 acked)。进程内恒有效;重开账本后
+    // 只认 pending(已 ack 的行随压实出清——判重账不跨进程长存,跨进程
+    // 重放同一事件会再记一次,at-least-once 容许多投不丢投)。
     bool Contains(const std::string& event_id, const std::string& handler_definition_hash) const;
 
     // 尚未 ack 的条目数(诊断/测试;崩溃残留的待办)。

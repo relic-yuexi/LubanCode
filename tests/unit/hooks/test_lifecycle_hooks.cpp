@@ -183,9 +183,10 @@ TEST_CASE("outbox:重开账本——pending 留存,已 ack 压实出账") {
     REQUIRE(reopened != nullptr);
     CHECK(reopened->pending_count() == 1);
     CHECK(reopened->Contains("evt-keep", "hash-1"));
-    CHECK(reopened->Contains("evt-done", "hash-2"));  // 账面判重仍认,重放不增
+    // 已 ack 的键随压实出清:判重账不跨进程长存(有界增长),跨进程重放
+    // 同一事件会再记一次 pending——at-least-once 语义容许(多投不丢投)。
+    CHECK_FALSE(reopened->Contains("evt-done", "hash-2"));
     CHECK(reopened->RecordPending("evt-keep", "hash-1", "PostTurn") == 0);
-    CHECK(reopened->RecordPending("evt-done", "hash-2", "PostStep") == 0);
     CHECK(reopened->pending_count() == 1);
     // 新事件接着发号,不与旧号撞。
     const std::uint64_t fresh = reopened->RecordPending("evt-new", "hash-3", "PostSession");

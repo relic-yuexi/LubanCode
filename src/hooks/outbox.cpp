@@ -88,8 +88,18 @@ void HookOutbox::LoadAndCompact() {
             ++dropped_lines_;
         }
     }
-    // 账面重建:pending 行进 keys_/pending_;acked 只推高 next_id_ 防重号。
-    for (const auto& row : still_pending) {
+    // 已 ack 的 pending 行出账(内存与压实重写都滤掉):acked 只推高
+    // next_id_ 防重号。
+    std::vector<PendingLine> live;
+    live.reserve(still_pending.size());
+    for (auto& row : still_pending) {
+        if (acked.count(row.id) > 0) {
+            continue;
+        }
+        live.push_back(std::move(row));
+    }
+    // 账面重建:pending 行进 keys_/pending_。
+    for (const auto& row : live) {
         keys_[{row.event_id, row.handler_hash}] = row.id;
         pending_.insert(row.id);
         if (row.id >= next_id_) {
@@ -105,7 +115,7 @@ void HookOutbox::LoadAndCompact() {
     if (!rewrite.is_open()) {
         return;
     }
-    for (const auto& row : still_pending) {
+    for (const auto& row : live) {
         rewrite << nlohmann::json{{"kind", "pending"},
                                   {"id", row.id},
                                   {"event_id", row.event_id},
