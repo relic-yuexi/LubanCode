@@ -141,8 +141,9 @@ bool ContextTracker::ShouldAutoCompact() const {
     // 触发线(§〇.1 用户定案,2026-09-09):窗口×80% − 压缩提示词 4k −
     // 压缩结果预留 8k(200k 窗即 148k)。两笔算进账,摘要请求自己的指令与
     // 产出才有地方安放。与 loop 的 projected 双闸共用 agent::AutoCompact
-    // TriggerLine 同一只,两条路口径不漂移;窗口小到扣不动时线夹到 0。
-    return current_tokens_ >= agent::AutoCompactTriggerLine(window_tokens_);
+    // TriggerLine 同一只,两条路口径不漂移;窗口小到扣不动时线夹到 0
+    // ——但零占用不触发(空历史没有可压的东西)。
+    return current_tokens_ > 0 && current_tokens_ >= agent::AutoCompactTriggerLine(window_tokens_);
 }
 
 }  // namespace lubancode::cli

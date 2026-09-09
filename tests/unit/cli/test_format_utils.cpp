@@ -395,8 +395,8 @@ TEST_CASE("FormatContextBreakdown: 窗口为 0 不除零,百分比一律 0、条
     CHECK(CountOccurrences(lines[1], "█") == 0);
     CHECK(CountOccurrences(lines[1], "░") == 16);
     CHECK(lines[5].find(" 0%") != std::string::npos);
-    // 压缩线 0(80%)、剩余 0,不炸就是胜利。
-    CHECK(lines[6].find("0(80%)") != std::string::npos);
+    // 压缩线 0(80%-12k)、剩余 0,不炸就是胜利。
+    CHECK(lines[6].find("0(80%-12k)") != std::string::npos);
 }
 
 // ---- WrapStatusRows(P3-3 括号断行) --------------------------------------------------

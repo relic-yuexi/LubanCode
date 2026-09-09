@@ -686,9 +686,9 @@ TEST_CASE("阶段 5 评测: 30 题 × 10 次忠实模型——token 账与成功
             const RunMetrics metrics = RunOnce(task, clean, &note);
             ++total_runs;
             if (!metrics.compact_ok) {
-                if (std::getenv("LUBANCODE_COMPACT_EVAL_VERBOSE") != nullptr) {
-                    std::cout << "[compact-eval-reject] task=" << t << " seed=" << seed << " note=" << note << "\n";
-                }
+                // 拒收缘由无条件打进日志:这类失败一眼要能看出是哪道题、
+                // 拒在哪道门(只在拒收时打,平时零噪)。
+                std::cout << "[compact-eval-reject] task=" << t << " seed=" << seed << " note=" << note << "\n";
             }
             if (metrics.compact_ok) {
                 ++ok_runs;
