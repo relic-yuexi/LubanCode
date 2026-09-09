@@ -5,6 +5,7 @@
 #include <system_error>
 
 #include "hooks/hash.hpp"  // Sha256Hex:undo token 的 pre/post image 摘要
+#include "platform/atomic_write.hpp"  // 崩溃级原子落盘:临时文件写全 + 原子换名
 #include "platform/text_encoding.hpp"
 #include "tools/isolation.hpp"
 #include "tools/path_utils.hpp"
@@ -96,24 +97,32 @@ Tool::Result WriteFileTool::execute(const nlohmann::json& input) {
         }
     }
 
-    // [非原子标记·主会话输出预留占坑单 §五 P3 验证结论] 下面这两步对文件
-    // 系统不是原子的:open(trunc) 先把文件截成零字节,write 再灌正文——
-    // 硬崩/断电夹在中间会留下空文件。但"取消窗口夹在中间"这条假设证伪:
-    // 取消是协作式的,只在轮/工具边界被观察,工具体不查取消旗(本函数
-    // 从不读 ToolExecutionContext::cancel),ESC 掐不进 open 与 write 之间
-    //——事故现场的空 todo 文件另有过手(write_file 根本没跑,轨迹零工具
-    // 事件)。真要崩溃级原子(临时文件 + rename),修复另立小单,不在
-    // 本单扩范围;现状由 tests/unit/tools/test_write_edit.cpp 的取消盲测
-    // 钉住。
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) {
-        return {"打不开文件写(权限不够或者路径不对): " + path_str, true};
-    }
-    file.write(content.data(), static_cast<std::streamsize>(content.size()));
-    if (!file) {
+    // [崩溃级原子·write_file 原子写单] 落盘改走 platform::AtomicWriteFile:
+    // 先把整份内容写进临时文件,再原子换名(Windows MoveFileExW
+    // REPLACE_EXISTING|WRITE_THROUGH / POSIX rename)。任何时点硬崩/断电,
+    // 目标要么旧整份、要么新整份,绝无半截;新建文件同享此合同——不写
+    // 成,目标压根不出现,不留零字节残尸(事故现场那只空 todo 文件,正是
+    // open(trunc) 先截后写夹在中间的形状)。
+    // 临时件规矩归基建:落目标同目录(同卷才原子),名如 <目标>.<pid>-
+    // <序号>.tmp,失败路径删净;硬崩孤儿留在同目录,后缀可辨、无主无害,
+    // 本工具不越权收走别人的 tmp。档位取默认 AtomicVisibility:单子合同
+    // 是"非旧即新",进程崩后换名已在页缓存生效,目标即新文;断电至多翻
+    // 回旧文,仍非半截——要"成功必耐断电"再升 ProcessCrashDurability
+    // (fsync 档),不在本单。取消语义照旧协作式盲(工具体不读 cancel 旗,
+    // ESC 掐不进写盘),由下方取消盲测钉住。
+    const auto written = platform::AtomicWriteFile(path, content);
+    if (!written.has_value()) {
+        // 文案口径沿用 ofstream 时代:开不成/写不下两句原样;换名不成是
+        // 新通路,照同款人话补——三路失败目标都未动。
+        const std::string& code = written.error().code;
+        if (code == "atomic.tmp_open_failed") {
+            return {"打不开文件写(权限不够或者路径不对): " + path_str, true};
+        }
+        if (code == "atomic.replace_failed") {
+            return {"写文件失败(临时文件换名没换成,原文件保持原样): " + path_str, true};
+        }
         return {"写文件失败: " + path_str, true};
     }
-    file.close();
 
     // undo token(逐枚追踪单"本地文件条件式撤销"):超 kUndoPreimageCap
     // 不内联正文,token 标不可用——不拿半截原文冒充可恢复。
