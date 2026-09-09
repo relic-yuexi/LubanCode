@@ -114,39 +114,6 @@ PermissionHookResult EmitPermissionRequest(hooks::HookDispatcher* dispatcher, co
 bool HasToolHooks(const hooks::HookDispatcher* dispatcher);
 bool HasPermissionHooks(const hooks::HookDispatcher* dispatcher);
 
-// ---------------------------------------------------------------------------
-// 四层生命周期单 P2:Turn/Step 层分层事件的发射口(§四矩阵)。
-// 与工具族同规矩:payload 组装与归并映射归这里,发射本体走 dispatcher;
-// 空 dispatcher = 没配,一口不发,行为与从前逐字节一致。
-// ---------------------------------------------------------------------------
-
-// PreTurn:用户输入被接受后、首个 Step 构建前。可否决本 Turn(blocked =
-// 本轮不发模型,不算错误);additional_context 随本轮注入(调用方照
-// UserPromptSubmit 的口子拼进消息)。改输入的决策权不在此(见 P0 落差)。
-PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id,
-                       const std::string& user_input);
-
-// PostTurn:终局只观察(Stop 判续跑则本事件不触发——触发点在终局收口,
-// 由装配层保证恰好一次)。summary 载荷由调用方拼好递进,这里只封包。
-void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
-                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
-                  std::int64_t duration_ms, bool cancelled);
-
-// PreStep:每次 Step 请求构建前(steer 注入合批之后)。否决语义 = 终止本
-// Turn(blocked),不是跳过继续;additional_context 经 InjectIncoming 随本
-// Step 请求进史。
-PromptGate EmitPreStep(hooks::HookDispatcher* dispatcher, const std::string& step_id, const std::string& turn_id,
-                       int step_index);
-
-// PostStep:assistant 响应落账后、派生 Action 执行前。只观察;载荷带
-// Step 身份账(step_id/turn_id/attempts/API 耗时/stop reason)与 usage
-// 摘要——API 耗时与工具耗时(PostAction 侧)分账可证。
-void EmitPostStep(hooks::HookDispatcher* dispatcher, const api::UsageReport& report);
-
-// 装配层挂不挂 Turn/Step 层回调的判据。
-bool HasTurnHooks(const hooks::HookDispatcher* dispatcher);
-bool HasStepHooks(const hooks::HookDispatcher* dispatcher);
-
 // 纯映射:HookEventResult.permission -> ToolHookDecision(后台子代理的
 // DetachedHookSession 路径与主路径共用同一颗映射脑袋,deny 理由拼法一处定)。
 runtime::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged);
@@ -370,6 +337,39 @@ struct PromptGate {
 // "不可信参考资料"声明追加进消息尾部——声明原文与 RunTurn 一致。
 PromptGate ApplyUserPromptSubmit(hooks::HookDispatcher* dispatcher, const std::string& user_input,
                                  const std::string& background_notices, api::Message& message);
+
+// ---------------------------------------------------------------------------
+// 四层生命周期单 P2:Turn/Step 层分层事件的发射口(§四矩阵)。
+// 与工具族同规矩:payload 组装与归并映射归这里,发射本体走 dispatcher;
+// 空 dispatcher = 没配,一口不发,行为与从前逐字节一致。
+// ---------------------------------------------------------------------------
+
+// PreTurn:用户输入被接受后、首个 Step 构建前。可否决本 Turn(blocked =
+// 本轮不发模型,不算错误);additional_context 随本轮注入(调用方照
+// UserPromptSubmit 的口子拼进消息)。改输入的决策权不在此(见 P0 落差)。
+PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id,
+                       const std::string& user_input);
+
+// PostTurn:终局只观察(Stop 判续跑则本事件不触发——触发点在终局收口,
+// 由装配层保证恰好一次)。summary 载荷由调用方拼好递进,这里只封包。
+void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
+                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
+                  std::int64_t duration_ms, bool cancelled);
+
+// PreStep:每次 Step 请求构建前(steer 注入合批之后)。否决语义 = 终止本
+// Turn(blocked),不是跳过继续;additional_context 经 InjectIncoming 随本
+// Step 请求进史。
+PromptGate EmitPreStep(hooks::HookDispatcher* dispatcher, const std::string& step_id, const std::string& turn_id,
+                       int step_index);
+
+// PostStep:assistant 响应落账后、派生 Action 执行前。只观察;载荷带
+// Step 身份账(step_id/turn_id/attempts/API 耗时/stop reason)与 usage
+// 摘要——API 耗时与工具耗时(PostAction 侧)分账可证。
+void EmitPostStep(hooks::HookDispatcher* dispatcher, const api::UsageReport& report);
+
+// 装配层挂不挂 Turn/Step 层回调的判据。
+bool HasTurnHooks(const hooks::HookDispatcher* dispatcher);
+bool HasStepHooks(const hooks::HookDispatcher* dispatcher);
 
 // ---------------------------------------------------------------------------
 // TurnRuntime:一轮的聚合核

@@ -160,6 +160,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 **同名防混**:`max_turns` 这三个字在两个域里是两码事——**配置文件顶层**的 `max_turns` 是 `max_steps_per_turn`(每输入轮步数)的弃用别名;**Agent YAML `runtime.max_turns`**([agents.md](agents.md) 的 runtime 段)是任务总 turn 预算,跟 `subagent.default_max_turns` 同一层。两域同名不同物、极性相反(配置域里"新名是 steps、旧名 turns";Agent 定义域里"新名是 turns、旧名 steps"),各自解析互不串扰;写配置、读诊断都必须带上下文,别裸写 `max_turns`。
 
+**四层词表互注**(Session/Turn/Step/Action 生命周期单,词表全文在 `src/agent/turn_budget.hpp` 文件头):上述预算键计数的是 **model turn = 四层里的 Step**(一次宿主准入的逻辑模型请求);`max_steps_per_turn` 的 "step" 是 **input round**(一次用户输入触发的一次 Run)——兼容窗内保留旧义,与四层 Step 不是一层。**该单不改任何预算键**:旧键一律原名、原计数、原作用域,`max_steps` 一类别名键不引入,改名不改账。逐 Step 对数(同场景新旧读法预算消耗相等)因无新键而平凡成立。
+
 `/doctor agents` 列明两层各自的生效值与来源。
 
 `base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务。交互模式缺连接时会打开两项开场页：可直接添加 Provider，也可暂时跳过。跳过后 `/provider`、`/help` 等命令照常可用；发送普通消息时只提示先配置，不会拿空地址发请求。单发模式/管道模式仍直接报错，提示缺了哪些字段。

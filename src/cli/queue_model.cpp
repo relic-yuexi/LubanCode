@@ -76,7 +76,23 @@ std::string MessageTarget::short_label() const {
 // SteeringQueue
 // -----------------------------------------------------------------------
 
+namespace {
+
+// P3:可取走(claim)的判据——状态 Queued 且没带过期标注。带过期标注的
+// steer 不投(§五.5:用户没点头,不替用户拿主意);Claimed/TargetGone/
+// Failed 自然不在其列。
+bool it_is_claimable(const QueuedMessage& item) {
+    return item.state == QueueItemState::Queued && item.expiry_note.empty();
+}
+
+}  // namespace
+
 QueueId SteeringQueue::Enqueue(MessageTarget target, std::string text) {
+    return EnqueueWithIntent(std::move(target), std::move(text), QueueIntent::Steer, QueueDeadline::NextStep);
+}
+
+QueueId SteeringQueue::EnqueueWithIntent(MessageTarget target, std::string text, QueueIntent intent,
+                                         QueueDeadline deadline, std::string target_turn) {
     if (text.empty()) {
         return 0;
     }
@@ -90,6 +106,9 @@ QueueId SteeringQueue::Enqueue(MessageTarget target, std::string text) {
         item.target = target;
         item.text = text;
         item.delivery = immediate_ ? DeliveryMode::Immediate : DeliveryMode::AfterNextToolBoundary;
+        item.intent = intent;
+        item.deadline = deadline;
+        item.target_turn = std::move(target_turn);
         items_.push_back(item);
         delivered = item;  // 锁外再广播,观察器不得回调本队列
     }
@@ -117,6 +136,14 @@ bool SteeringQueue::RestoreFromArchive(std::vector<QueuedMessage> items) {
         max_id = std::max(max_id, item.id);
         // 回还过的条目(attempts>0)照旧不自动重发:存档记的是"等用户处置"
         // 的状态,resume 不该偷偷把死循环闸拆了。
+        // P3 断线对齐(§五.6):存档里仍是 Claimed 的条目 = 上次取走到落史
+        // 之间断了线。committed 的证据(出队+dequeued 事件)没有,不算消费
+        // ——归回 Queued 并记一笔,等用户处置;不重发已 committed 的(那些
+        // 根本不会出现在存档里,取走销账时已出队)。
+        if (item.state == QueueItemState::Claimed) {
+            item.state = QueueItemState::Queued;
+            item.note = "断线恢复:上次取走未落史,重新排队";
+        }
         items_.push_back(std::move(item));
     }
     next_id_ = max_id + 1;  // 后续新条目不与恢复的 id 撞号
@@ -156,7 +183,9 @@ std::vector<QueuedMessage> SteeringQueue::TakeDeliverable(MessageTarget target) 
             ++it;
             continue;
         }
-        if (it->target == target && it->state == QueueItemState::Queued && !it->edit_open) {
+        // P3:带过期标注的 steer 不投(取走类口同判;生产注入路已迁
+        // ClaimDeliverable,这里兜旧调用方与测试)。
+        if (it->target == target && it_is_claimable(*it) && !it->edit_open) {
             out.push_back(std::move(*it));
             it = items_.erase(it);
             continue;
@@ -172,7 +201,7 @@ std::optional<QueuedMessage> SteeringQueue::TakeFirstDeliverable(MessageTarget t
         if (IsQueuedSlashText(it->text)) {
             continue;  // slash 让路,规矩与 TakeDeliverable 同款
         }
-        if (it->target == target && it->state == QueueItemState::Queued && !it->edit_open) {
+        if (it->target == target && it_is_claimable(*it) && !it->edit_open) {
             std::optional<QueuedMessage> out = std::move(*it);
             items_.erase(it);
             return out;
@@ -195,7 +224,7 @@ void SteeringQueue::ReturnToFront(QueuedMessage item) {
 std::optional<QueuedMessage> SteeringQueue::TakeFirstAutoSendable(MessageTarget target) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = items_.begin(); it != items_.end(); ++it) {
-        if (it->target != target || it->state != QueueItemState::Queued || it->edit_open) {
+        if (it->target != target || !it_is_claimable(*it) || it->edit_open) {
             continue;
         }
         if (it->delivery_attempts >= kMaxAutoSendAttempts) {
@@ -211,7 +240,10 @@ std::optional<QueuedMessage> SteeringQueue::TakeFirstAutoSendable(MessageTarget 
 bool SteeringQueue::HasDeliverable(MessageTarget target) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return std::any_of(items_.begin(), items_.end(), [&](const QueuedMessage& item) {
-        return item.target == target && item.state == QueueItemState::Queued && !item.edit_open;
+        // P3:Claimed(送达中)也算"还没送完"——Esc 立即送的状态旗不许在
+        // 途中的条目上提前收掉。
+        return item.target == target && !item.edit_open &&
+               (item.state == QueueItemState::Queued || item.state == QueueItemState::Claimed);
     });
 }
 
@@ -219,14 +251,83 @@ bool SteeringQueue::HasAnyDeliverable() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return std::any_of(items_.begin(), items_.end(),
                        [](const QueuedMessage& item) {
-                           return item.state == QueueItemState::Queued && !item.edit_open;
+                           return !item.edit_open && (item.state == QueueItemState::Queued ||
+                                                      item.state == QueueItemState::Claimed);
                        });
+}
+
+std::vector<QueuedMessage> SteeringQueue::ClaimDeliverable(MessageTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<QueuedMessage> out;
+    for (auto& item : items_) {
+        // 与 TakeDeliverable 同规矩(slash 让路、Queued、非冻结),另加两条
+        // P3 门槛:Claimed 不重取(在途),过期 steer 不投(用户没点头)。
+        if (IsQueuedSlashText(item.text)) {
+            continue;
+        }
+        if (it_is_claimable(item) && item.target == target) {
+            item.state = QueueItemState::Claimed;
+            out.push_back(item);
+        }
+    }
+    return out;
+}
+
+int SteeringQueue::MarkCommitted(const std::vector<QueueId>& ids) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int committed = 0;
+    for (const QueueId id : ids) {
+        for (auto it = items_.begin(); it != items_.end(); ++it) {
+            if (it->id != id || it->state != QueueItemState::Claimed) {
+                continue;
+            }
+            items_.erase(it);  // committed = 出队;dequeued 轨迹事件由调用方记
+            ++committed;
+            break;
+        }
+    }
+    return committed;
+}
+
+bool SteeringQueue::MarkCommittedOne(QueueId id) {
+    return MarkCommitted({id}) == 1;
+}
+
+std::optional<QueuedMessage> SteeringQueue::ClaimFirstAutoSendable(MessageTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& item : items_) {
+        if (item.target != target || !it_is_claimable(item) || item.edit_open) {
+            continue;
+        }
+        if (item.delivery_attempts >= kMaxAutoSendAttempts) {
+            continue;  // 已试过一次、失败还回来的:不自动重发,留队等人
+        }
+        item.state = QueueItemState::Claimed;
+        return item;
+    }
+    return std::nullopt;
+}
+
+std::vector<QueueId> SteeringQueue::MarkExpiredUnconsumedSteers(const std::string& note) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<QueueId> marked;
+    for (auto& item : items_) {
+        if (item.intent != QueueIntent::Steer || item.state != QueueItemState::Queued) {
+            continue;
+        }
+        if (IsQueuedSlashText(item.text) || !item.expiry_note.empty()) {
+            continue;  // slash 是轮末账,不过期;已有标注的不重复打
+        }
+        item.expiry_note = note;
+        marked.push_back(item.id);
+    }
+    return marked;
 }
 
 std::optional<SteeringQueue::EditHandle> SteeringQueue::BeginEditLatest() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = items_.rbegin(); it != items_.rend(); ++it) {
-        if (!it->edit_open) {
+        if (!it->edit_open && it->state != QueueItemState::Claimed) {
             it->edit_open = true;
             EditHandle handle;
             handle.id = it->id;
@@ -242,7 +343,8 @@ std::optional<SteeringQueue::EditHandle> SteeringQueue::BeginEditLatest() {
 std::optional<SteeringQueue::EditHandle> SteeringQueue::BeginEdit(QueueId id) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& item : items_) {
-        if (item.id == id && !item.edit_open) {
+        // P3:Claimed(送达中)冻编辑——一边送旧文一边改写就是两本账。
+        if (item.id == id && !item.edit_open && item.state != QueueItemState::Claimed) {
             item.edit_open = true;
             EditHandle handle;
             handle.id = item.id;
@@ -271,10 +373,12 @@ SteeringQueue::CommitStatus SteeringQueue::CommitEdit(const EditHandle& handle, 
         item.edit_open = false;
         // 用户亲手改写过的就是一条新话:自动重试的旧账翻篇,终态标注一并
         // 作废(取走即消费单——不然失败/目标已结束的条目改完也永远不投
-        // 递,死在队里)。目标本身没改(改目标是另一码事,面板处置键的事)。
+        // 递,死在队里)。P3:过期标注同废——改写就是用户"要去留"的明示,
+        // 改完重新排队。目标本身没改(改目标是另一码事,面板处置键的事)。
         item.delivery_attempts = 0;
         item.state = QueueItemState::Queued;
         item.note.clear();
+        item.expiry_note.clear();
         return CommitStatus::Ok;
     }
     return CommitStatus::NotFound;
@@ -521,8 +625,16 @@ std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>
             case QueueItemState::Failed:
                 prefix += tr("queue.mark.failed");
                 break;
+            case QueueItemState::Claimed:
+                // P3:取走待注入的窗口态——条目还在队里,显示"送达中"。
+                prefix += tr("queue.mark.claimed");
+                break;
             case QueueItemState::Queued:
                 break;
+        }
+        if (!item.expiry_note.empty()) {
+            // P3(§五.5):过期 steer 不投递,标出来等用户去留。
+            prefix += tr("queue.mark.expired");
         }
         if (!item.target.is_main()) {
             prefix += trf("queue.mark.target", item.target.task_id);

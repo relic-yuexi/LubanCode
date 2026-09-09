@@ -509,6 +509,10 @@ private:
     // 子代理完成回流不再自动另起一轮——上下文将尽的通知打一道,去留
     // 交还用户;用户显式输入照常开轮。压力回调与轮收口两处记账。
     ContextExhaustionGate context_exhaustion_gate_;
+    // steer/followup 显式化(P3 §五.4):上一轮是否被取消收场。取消后的
+    // 第一圈会话泵默认不自动启动 followup 轮(明示一句),排队的 slash
+    // (本地命令,不算"轮")照常;新一轮开跑即翻篇。
+    bool last_turn_cancelled_ = false;
     // 状态面板拼装材料(骨架拆解反弹·问题 2):指针字段构造尾绑一次,
     // goal/loop 两枚每圈在 Run() 顶刷新,折数在 app/status_panel_assembly。
     lubancode::app::StatusPanelInputs status_inputs_;
