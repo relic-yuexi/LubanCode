@@ -54,8 +54,8 @@ struct Harness {
         user.origin = MessageOrigin::Human;
         user.message = nlohmann::json::object({{"role", "user"}, {"content", text}});
         WriteReceipt user_receipt = writer.AppendMessage(std::move(user), Durability::PowerLoss);
-        REQUIRE(writer->AdmitMessages({user_receipt.id}).status ==
-                WriteReceipt::Status::Committed);
+        WriteReceipt admitted = writer.AdmitMessages({user_receipt.id});
+        REQUIRE(admitted.status == WriteReceipt::Status::Committed);
         return {user_receipt.id, user_receipt.id};
     }
 };
@@ -169,7 +169,7 @@ TEST_CASE("八行全链一次成功:applied 唯一终态,链重接,恢复重建�
                 CHECK(line["payload"]["trigger"] == "manual");
                 CHECK(line["turnId"].is_string());
                 // 空闲手动:无 parentTurnId(或显式 null),不假称挂主 turn。
-                CHECK(!line.contains("parentTurnId") || line["parentTurnId"].is_null());
+                CHECK((!line.contains("parentTurnId") || line["parentTurnId"].is_null()));
             }
         }
         if (line.value("type", "") == "message" && line.value("purpose", "") == "compact" &&
