@@ -1281,7 +1281,7 @@
         "Qwen/Qwen3-VL-235B-A22B-Thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
