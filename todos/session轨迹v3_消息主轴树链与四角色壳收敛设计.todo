@@ -1,15 +1,163 @@
 # session 轨迹 v3：消息主轴树链与四角色壳收敛
 
-- 状态：设计立案，待实现（用户方向已定；与其正在修的 session 轨迹记录 bug 相邻但分层——bug 修现行 v2，本单定 v3 形状）。
-- 日期：2026-09-09
+- 状态：设计细化，待实现。§一记用户已明确的行为；§四给出字段与边界建议。本轮只改设计，不表示 v3 已实现。
+- 立案日期：2026-09-09；本次更新：2026-09-10。
 - 级别：P1（轨迹是回放/回测/验尸的地基，形状定错样样返工）。
 - 参照样板：`D:\kc-mini-for-interview\sessions\8dcf9aa4\8dcf9aa4.jsonl`（231 行，五类事件，已解剖，见 §二）。
-- 范围：`src/trajectory/**`（envelope/事件面）、`src/api/types.hpp`（Role 壳）、`src/agent/loop.cpp`（system 存档点）、replay/resume、相关测试与文档。
-- 不在本单：token 回测重跑（另单，待轨迹 bug 修复）；compact 行为本身（另单在途）；四家 wire 协议适配不动（收敛在接口壳层）。
+- 范围：轨迹格式、四角色消息、Turn/Step/Action 归属、工具状态与结果文件、上下文提交、请求组装、resume、历史显示及相关测试。
+- hook 属于同一记录范围：触发、运行、等待、失败、改写、后端选择、内部调用与结果采用均须有来源可查。
+- subagent 属于父工具调用与独立子会话的关联范围：子目录、子账、派生来源、结果交付和恢复规则见 §4.31-§4.33。
+- 重构口径：按新合同设计，不以旧结果、旧 schema、旧目录或旧状态机为约束。不安排旧档迁移、兼容读取或旧结果转换；现行代码仅作调查和复用参考。
+- 不在本单：token 回测重跑、摘要生成算法实现与阈值实测调参。本轮包含手动/自动触发及容量恢复设计，生产代码尚未改动；旧数据不参与本轮设计，也不因此自动删除。
 
 ## 一、用户定案（2026-09-09 原话方向）
 
 理想 session.jsonl：**最上是 system，然后 user、assistant……assistant 记 input/output/think token；特殊事件（如 compact）特殊标记但仍是一行 json，compact 的 prompt 也入档（一般作为 user），prev_turn_id 指向前文；整份 jsonl 构成一棵树**——易 replay，任何信息都读得到。
+
+### 1.1 本轮补定：原始文件只分两类行
+
+- 每行都是一份 JSON。顶层 `type` 只取 `message`、`event`，不另设 `request_metrics` 或 `tool_execution` 这类顶层类型；它们放进 event 的 `kind`。
+- `message` 存模型交互消息：外层放身份和关联字段，`message` 内放 `role`、`content`。四角色为 system/user/assistant/tool。
+- `event` 存发生过什么：切换 soul、请求 compact、校验、压缩生效等。事件本身不当作模型消息发送。
+- “message 会组装发送”指它有明确的请求用途与上下文归属，不表示把文件里全部 message 无差别拼接。旧 system、已压缩历史和 compact 内部问答都有档，但不全部重发。
+- 先沿用用户示例中的 `messageId`、`turnId` 等 camelCase 信封字段。工具结构字段采用 §4.15 的明确映射，同一个位置不并列两套别名；不设计 v2 转换器。
+
+### 1.2 启动与 system 变化
+
+- 每次启动会话，先建新 JSONL，首行写基础 system 消息。它的 `seq: 1`、`turnId: null`。
+- 加载或切换 soul：追加切换事件，再追加完整的新 system 消息；内存换用新版。旧消息不改、不删。
+- 其他设置若改了最终 system，也要留下变更缘由和新 system。只改温度等请求参数时，记配置事件，不凭空复制 system。
+- 同一文件中的 message/event 共用递增 `seq`。换 system、换 turn 都不归零。system 消息的 `turnId` 仍为 null。
+- 这项要求改变现行“首行 run.started”约束。v3 的首行 system 必须自带 session/run/schema 身份；启动事件可随后追加，不可套用 v2 首行校验。
+
+### 1.3 resume 与 compact 的用户场景
+
+- resume 后，前面的 user、assistant、tool 仍能向上滚动查看。哪段已压缩、当前模型还能看哪段，界面要分得清。
+- `/compact` 先记请求事件；真正发给压缩模型的 user prompt 必须按 message 留档，回合号不能误挂。
+- 收到压缩回复，按 assistant message 留档；随后校验所需内容，留下校验事件。
+- 校验通过并成功采用摘要，才记压缩完成。后续上下文为：当前 system + 生效摘要 + 保留的未完成 turn。此后新来的输入照常追加。
+- resume 后仍须显示各次压缩标记，包括 context 从多少 token 变成多少 token。不能只靠当时终端输出或内存中的“最近一次压缩”。
+
+### 1.4 操作过程与工具结果
+
+- 有过程的操作尽量记清开始、等待和结束；工具调用同样留完整过程。pending 不能只在内存中显示。
+- 工具大结果落 artifact；模型消息放受控预览，能显示开头、省略说明和结尾，并指向已保存的结果。
+- 工具结果须有结构字段，不只是一段带“退出码”的文本。命令至少交代 exit_code、output_bytes、truncated 和结果位置。
+- 新目录按 `sessions/<id>/<id>.jsonl` 与同目录 `artifacts/` 定；结果可含 `<结果ID>.stdout.txt`、`.stderr.txt`、`.json`。
+- 同一次工具调用以全局唯一身份关联各条追加记录，跨 step 不撞号。具体发行口、provider 原始号与重试规则见 §4.15。
+- `result_ref` 固定为数组，可引用多份结果文件；只有一份也用数组。预览中的 `full_output` 同样是路径数组。
+- 多文件预览的每段正文都要标明所属文件；有 stdout/stderr 等通道时一并标注。不能只列 full_output 数组，却让正文来源靠猜。
+- 每次工具调用初始预览及绝对上限为 **32 KiB（32768 字节）**，多文件共用。超限保存原文，预览按开头、`[中间内容已省略]`、结尾组织。说明文字计入上限，剩余正文预算由头尾均分，见 §4.17；容量恢复时可按 §4.38 降到 16/8/4 KiB。
+
+### 1.5 本轮追加决策：按大重构定型
+
+用户明确：“别管旧结果了，我们现在是大重构一样的了。”以下设计只要求新写入的数据满足新合同。新 runtime、协议适配和界面一并服从它，不用旧形状反过来裁剪新合同。
+
+### 1.6 2026-09-10：预览上限定为 32 KiB
+
+用户明确：“还是把默认预览放大到32KiB吧。就是单个tool的最大。再大就保存原文，给头尾节选了。”此处取代此前较小预算与按工具类别另定额度的建议。
+
+代码查阅可先用 LSP/grep 定位，再按范围读取实现。工具类型不改变本版单次调用的预览上限；完整结果、后续查阅和模型当前所见预览仍分开记录。
+
+### 1.7 hook 也是事件，改写过程必须能追溯
+
+用户明确要求 hook 入事件账，并以 search 经 hook 换底层实现为例。hook 不只打日志；它可以影响准入、参数、执行路由、结果与上下文。每次运行经过哪些 hook、实际采用哪些效果，都必须能从账里还原。
+
+hook 的运行过程记 event；只有实际要进入模型请求的内容才另记 message。不能把 hook 的 stdout、诊断日志或内部请求全当成用户/工具消息注入。
+
+### 1.8 slash 按实际效果留档
+
+用户明确区分：`/provider`、`/context-window` 这类纯显示操作，与向模型提供信息的 skill 调用。slash 输入和处理过程记 event；实际提供给模型的内容另记 message。
+
+不能仅按命令名称分两类。同一次 slash 可以打开面板、改变设置、追加上下文；每项效果各有记录。只显示面板时不添加模型消息，skill 展开后则须保存当次提供的正文。
+
+### 1.9 主对话记录与默认显示分开
+
+用户纠正：提供给模型的消息应算进主对话，只是有些不显示。skill 展开内容、compact 的 prompt/回复等都作为正式 message 纳入这份会话账，不降为 event 附件，也不因默认隐藏而从消息历史消失。
+
+本单把“主对话记录”“界面显示”“单次请求输入”分开说。此前“内部消息不混入主对话”的说法不准确；应改成“消息属于会话记录，界面可默认隐藏；是否用于某次请求由请求用途和选用关系决定”。
+
+### 1.10 compact 后必须接成完整消息链
+
+用户指出 JSON 示例缺少 pre 信息，要求摘要接 system，旧的未完成 turn 接摘要。seq 只管落盘顺序，turnId 只管归属，都不能代替前驱关系。以下 §4.30 补明确的上下文链节点与 prevMessageRef；同一条旧消息可在不同上下文版本中接不同前驱，正文和旧版链保持不变。
+
+### 1.11 subagent 单独建目录和会话账
+
+用户要求 subagent 作为工具调用，并有自己的目录与 session JSONL。父会话记录工具调用和结果，子会话记录自己的完整消息与事件；不能把子代理内部调用混记成父模型的调用。两份账通过明确的父工具身份和子会话引用连接。
+
+### 1.12 首次 query 后追加取标题 prompt
+
+用户明确：首次 query 到来后，在后面追加一条 prompt，要求根据指定信息取标题；从模型返回内容中提取标题，作为会话 title。取标题用到的 prompt 与模型产物均纳入消息记录，提取和采用结果用事件记录，不再只留一枚脱离来源的 title 字符串。
+
+### 1.13 异步 subagent 默认 followup，用户输入默认 steer
+
+用户明确：subagent 异步运行，其返回父会话的消息默认走 followup()；用户普通文本输入默认走 steer()。后续补定所有 slash 均走 followup，覆盖此前将 skill/slash 任务内容默认归入 steer 的表述。这是消息来源对应的入队方式，不是两种 JSONL 行类型，具体边界见 §4.35。
+
+### 1.14 首版 token 估算采用 bytes/4
+
+用户要求先用简单规则：Unicode 内容字节数除以 4，作为推测 token。这里将编码明确为 UTF-8，整数结果向上取整：estimatedTokens=ceil(utf8Bytes/4)。首版不加在线校准、RLS 或按语言分桶；具体计量对象、发送前时点和事件归属见 §4.36。
+
+### 1.15 slash 统一 followup，compact 区分手动与自动
+
+用户补定所有 slash 都走 followup，不走 steer，包括 /compact、skill 命令及纯显示命令。是否产生 message 仍按效果判断，不能因 followup 就把显示命令变成模型消息。后续 btw/fork 引入目标作用域：followup 排到对应上下文/新分支，不一概排进 main，见 §4.35、§4.57–§4.58。
+
+compact 的顶层 trigger 只分 manual/auto；阈值触发、发送前容量不足、provider 报 context_overflow 是 auto 的不同 reason。用户提出单个 turn 工具过多、assistant 回复过长的情形；后续采用 §1.16 的工具预览降档方案，取代此前提出但未确认的“摘要化当前 turn 前段”扩展。
+
+### 1.16 历史 tool 预览逐档缩小，最低 4 KiB
+
+用户确定：容量不足时，历史工具预览按每次调用上限 32 -> 16 -> 8 -> 4 KiB 逐档缩小，每档重新检查；4 KiB 仍不够就报错。原始结果留档，调用与结果保持完整配对，不靠删除工具消息腾空间。这里沿全文使用 KiB，分别为 32768、16384、8192、4096 字节。
+
+“工具完整”在这里指调用/结果结构与身份配对完整，不表示模型看到全部结果原文。配对正确和总容量足够是两项独立检查，不能保证服务端没有其他错误。具体派生版本、提交与恢复见 §4.38。
+
+### 1.17 token 估算作为内置 hook
+
+用户明确：hook 的目的之一，就是把功能放到确定的执行时点；token 估算可以实现成内置 hook。按此修正 §4.36：runtime 负责触发、顺序、输入快照及效果提交，内置 hook 实现估算逻辑；不在 runtime 里另留一条绕开 hook 的估算路径。
+
+### 1.18 模型 max_tokens 参与输出预留与 compact 时机
+
+用户要求考虑模型的最大生成 token 设置，并以 kimi-k2.6 默认 max_tokens=32768 为例。容量判断需采用本次请求实际生效的输出上限，不仅看输入估算；模型默认输出值、显式请求值和上下文窗口分别记录，见 §4.40。
+
+### 1.19 后续 compact 同时压缩当前旧摘要
+
+用户明确：compact 对旧摘要一视同仁。当前生效摘要与其后可压缩历史一起作为材料，生成一份新摘要；旧摘要没有永久保留特权。正常请求尽量保持已有前缀，末尾追加压缩指令；成功提交后新摘要替换旧摘要，不逐次叠加摘要。来源、缓存与失败边界见 §4.41。
+
+### 1.20 思考模式保留返回载荷，并随入选 assistant 回传
+
+用户要求：开启思考模式时，思考内容也要随历史 assistant 一起回传，不能在组装请求时只剩正文，影响缓存与连续推理。四角色只限定 role，不把 assistant 限成 role/content 两字段；模型实际返回的 reasoning 文本、签名和不透明块均须完整留档。目标接口支持范围、跨轮保留设置、compact 后签名有效性与计量规则见 §4.42。
+
+### 1.21 流式接收与完整 message 分开
+
+用户确认模型交互采用流式，提出何时拼成一行 JSON 的问题。本轮设计建议：边接收边显示并记录片段事件；当前一次模型响应结束后，组装并追加一条 assistant message。这里不等待整个 turn，也不把每个片段当独立 assistant。用户后续明确：SSE 中按 Esc，也将已收到内容组装成正式 assistant，标记中断，不只留草稿，见 §4.63。正常完成边界、分段落盘与异常恢复见 §4.43。
+
+### 1.22 assistant 消息自身记录 provider 与 model
+
+用户要求 assistant message 能直接看出来自哪个 provider、哪个模型。来源字段放在 JSONL 外层，与 requestId/messageId 同级；区分实际发送的模型名与服务端报告的模型名。每次生成固定当时来源，不能从会话当前设置倒推。字段与流式/fallback 边界见 §4.44。
+
+### 1.23 预设自动选 wire，自定义再选协议
+
+用户希望减少 provider 配置负担：现有预设优先采用 Anthropic 格式，OpenAI/Gemini 原生入口按各自协议，自定义 provider 再选择 wire。实现时把默认值写进经核对的具体端点配置；未确认支持 Anthropic 的端点不靠模型名称强切。现状、预设收敛与四角色转换边界见 §4.45-§4.46。
+
+### 1.24 消息挂点、有序 hook 池与按需加载
+
+用户提出：补 Pre/PostUser、Pre/PostAssistant 与 PostSystem，区分消息接纳与 turn 起止；steer 仍触发用户消息 hook。skill 触发、memory 召回可放 PostUser。hook 共用注册池，按次序执行；用户按同名覆盖接管内置 memory、搜索后端、token 估算。tool、skill、MCP、plugin 同时考虑缓存、加载成本与目录规模。具体挂点、替换与加载合同见 §4.47–§4.50；下述首版细则属于本轮设计建议，尚未实现。
+
+用户继续明确 MCP/Plugin 的动态方向：PostSystem 负责预加载登记；数量多时，像 skill 一样在 PostUser 按需求选择并加载，减少无关能力干扰。这里把“预加载登记”限定为宿主目录和必要基础能力，把任务所需连接、模块与模型披露放进按需路径；缓存是否保住取决于最终 wire 前缀，不能只凭挂点名称判断，详见 §4.49。
+
+### 1.25 用户长文本与图片输入
+
+用户补定：用户文本也有 32 KiB 上限，超限原文存文件；明确选择“最多发送 32 KiB 头尾预览和原文文件引用，全文按需读取”。超过 1000 个估算 token 时输入端折叠，发送时恢复允许发送的正文，不展开超限全文。图片在输入端显示附件/缩略图或 [图片]，不展示 base64；图片存档与 wire 传输分开，详见 §4.51–§4.52。
+
+### 1.26 后台脚本与 subagent 共用任务管理
+
+用户确定：后台任务按 subagent 类似方式考虑；subagent 独立跑 agent，后台脚本独立跑进程。共用启动、查询、等待、取消、结果交付和恢复合同；执行内容与原始账归属分开。进程任务不伪造 agent session、system 或模型 turn，具体设计见 §4.53–§4.54。
+
+### 1.27 todo、goal、loop、fork、btw 与断点恢复
+
+用户要求：todo 独立存档，compact 不破坏它；goal 在 compact/resume 后仍有效，持续推进至完成或确需用户介入。fork 从当前 turn 的进度开新 session；btw 在当前 session 内旁问，可追问、可显示，但不影响主线。resume 必须明确发哪些消息，最后一行 JSON 损坏允许删尾修复；工具逐项落账，前两项已完成时恢复从第三项继续。Esc 取消须区分已完成、执行中和未启动，不能统一假报失败。设计与现行差距见 §4.55–§4.62。
+
+### 1.28 SSE 按 Esc：已收内容落成 assistant
+
+用户明确要求：SSE 期间按 Esc，直接把已经收到的内容拼成 assistant。本条覆盖此前“用户取消仅保存草稿事件”的设计。流式片段仍留过程记录，停止后另存唯一的正式 assistant message，completionStatus=interrupted；正文保留，未收齐的调用/签名不伪造完整，具体见 §4.63。
 
 ## 二、样板解剖（kc-mini 8dcf9aa4，v1 envelope）
 
@@ -21,50 +169,2019 @@
 | input_queue | 5 | input.id、mode（followup/steer） | 队列入出成事件 |
 | compact_* | 5 | requestId 串链、readThroughSeq、retained/removedMessageIds | 压缩全链：prompt 全文（compact_input.instruction）、manifest、保留/移除清单 |
 
-## 三、现状病灶（探子已核，file:line 在案）
+## 三、现状核对（仅作重构参考，不构成兼容要求）
 
-1. **事件平铺**：v2 共 88 种 kind，消息动作塞 payload.content，主轴不显——回放要懂全部 88 种才能重建对话。
-2. **Role 二值**：`api::Role` 只有 User/Assistant（api/types.hpp:143）；system 是 Request 顶层字段（:213），tool 是两种 content block（:67-89）；chat wire 的 role 集合另有 system/tool（:548 注释自认）。四家 wire 的 system/tool 各揣各的形状，无公共壳。
-3. **system 不存档**：每回合 runtime 现铸（loop.cpp:966-968），resume-as-new 折叠不含 system——改了 SOUL.md 续旧场，新 prompt 糊上旧历史，行为偏离无据可查。
-4. 死码：MakeSessionSlug（session_utils.cpp:82-122）零 caller；旧档残留（schema_version=1、app-server-thread 命名）无迁移无清理。
+1. `src/trajectory/event.hpp:253` 的 v2 信封以事件为中心；`seq` 在 run 内递增。v3 要把 message 提到顶层，但不能为减少 kind 数量丢掉执行、审批、重试等事实。旧稿“回放要懂全部 88 种”说得过满，读者可按投影目的只处理相关事件。
+2. `src/api/types.hpp:143` 的 Role 仍只有 User/Assistant，system 另放 `Request::system`，tool result 放内容块。`RoleToString` 的二选一写法不能直接接新增角色，否则 System/Tool 会误走 assistant 分支。
+3. **纠正旧稿：system 已有存档。** `src/runtime/trajectory_session.cpp:347` 的 `BuildPreparedPayload` 写入 `system_ref` 正文，环境快照也存 system。缺口是明确的 system 消息版本、选用关系与恢复合同，不是完全没有正文。
+4. 同一 `BuildPreparedPayload` 的 `message_refs` 只加入最近 input 的事件号，不能证明完整请求消息顺序。v3 要存实际输入清单，不能靠 throughSeq 猜。
+5. `src/trajectory/replay.cpp:397` 的 `CompactApplied` 分支只更新 epoch 与新状态 hash，没有凭摘要和保留清单重建 effective conversation。`src/trajectory/session_manager.cpp:1426` 的 resume 又取这个投影；因此不能宣称现状已满足本单的 compact 后恢复。
+6. `src/app/commands/session_commands.cpp:1221` 一带已有手动 compact 请求/完成记录和 token 显示；完成记录发生在 compact 调用返回之后。v3 要把持久提交与内存换账顺序写死，不能只补几条日志。
+7. `src/runtime/trajectory_session.cpp:1051` 一带的旁路桥会新开 turn；源码明确写出“主 turn 尚开着会开失败”。v3 若采用 §4.6 的独立压缩回合，必须改状态机，不能只换一个 turnId。
+8. v2 的 usage 正文由 `model.usage.recorded` 独占，`schema.cpp` 拒绝 completed 再带 usage。v3 的 assistant 直接带 usage 要另定成功、失败、迟到三路的唯一归属，不能把两套账同时抄进新档。
+9. `MakeSessionSlug` 由 `MakeSessionId` 调用，旧稿“零 caller”不准确。是否连同外层函数退场，实施时查完整调用链；本单不据旧描述删码或删旧档。
 
 ## 四、v3 设计合同
 
-### 4.1 envelope：主轴+事件 双轨
+### 4.1 一份原始账，三项读取结果
 
-- **message 行**（主轴）：`role ∈ {system,user,assistant,tool}` 四值一等公民；assistant 行自带 usage（input/output/think/reasoning 明细）与 stop_reason；system 行**入档**（首行树根，resume 时以档内 system 为准重建，与 runtime 现铸不等时记 system.diverged 事件——SOUL.md 改动的偏离可查）。
-- **event 行**（旁枝）：特殊事件各一行 json，`parent` 字段挂树（turn_id/request_id/message_id/prev_* 按事件类型指认）；compact 全链照样板五事件（prompt 全文、manifest、retained/removed）。
-- **保留 v2 的哈希链与 durability 分档**（prev_hash/event_hash、ProcessCrash 落盘节奏）——kc-mini 没有，这是我们的长处，合流不推倒。
-- 兼容：v2 档读取不迁移（replay 认 schema_version 分代），新会话写 v3；旧档残留与死码（MakeSessionSlug、v1 档）清理入册。
+原始 JSONL 只追加。内存和界面都从这份账取事实，各自生成所需结果：
 
-### 4.2 四角色壳：接口层收敛
+| 读取结果 | 内容 | compact 后怎样处理 |
+| --- | --- | --- |
+| 历史时间线 | 全部会话消息、system 变更、compact 标记及可展开的内部记录 | 原文保留，标明哪些内容已由摘要替代 |
+| 当前模型上下文 | 当前选中的 system、摘要、保留消息、后续新输入 | 只采用最后一次成功提交的变换，排除 compact 内部问答 |
+| 单次请求输入 | 那一次请求实际采用的 system 和有序消息引用 | 固定不变；之后再 compact、换 soul 都不改它 |
 
-- `api::Role` 扩 System/Tool 四值**只在接口壳层**（trajectory/replay/组装），四家 wire 的请求构造各自拍平成自家形状（chat 拼 role 字符串、anthropic/responses 拍 content block、gemini 拍 functionResponse）——收敛的是"读账的人"，不是"发 wire 的码"；wire 适配零行为变更。
-- trajectory::ReplayMessage::Role（现三值）与 api::Role 对齐。
+这三项都是投影，不各写一份可以独立改写的事实账。resume 不能只把 effective conversation 交给界面，否则滚动历史就丢了；也不能把界面全史直接交给模型。
 
-### 4.3 request_metrics 行
+表中的完整历史包含默认隐藏的 message。显示规则只影响界面渲染，不决定消息归属，也不决定请求是否选用；详见 §4.28。
 
-- 每请求一行：估算值+来源（哪个尺）+实报 usage+prefix 指纹+throughSeq——**token 回测从此零重放**（喂 §关联单）。
+### 4.2 公共身份、顺序与用途
 
-### 4.4 树可读性验收
+| 字段 | 语义与规则 |
+| --- | --- |
+| `type` | 只取 message/event |
+| `seq` | 本 JSONL 的追加序号，从 1 连续递增；两类行共用；由单写者发号 |
+| `timestamp` | 记录时间，用于展示；回放顺序认 seq，不按时间戳排序 |
+| `sessionId` / `runId` | 所属会话与执行流；独立文件的 seq 不能互相比大小 |
+| `messageId` / `eventId` | 对应行的稳定身份；正文相同也可以是不同消息；重试提交同一身份不得重复入档 |
+| `turnId` | 所属回合；system 为 null；不能见到 user 角色就自行推断新回合 |
+| `stepId` | 一次逻辑模型请求步骤；请求重试仍归原 step |
+| `requestId` | 一次实际模型请求尝试；每次重试另发号，另记 attempt/retryOf |
+| `provider` / `model` | 模型生成的 assistant 必填：该次实际出站 provider 配置身份与 wire 模型名；不是会话当前设置，见 §4.44 |
+| `wire` | 该次实际使用的接口协议；与 provider/model 独立保存，见 §4.45 |
+| `responseModel` | 服务端报告的模型名，缺失为 null；不冒认已经核实底层部署，见 §4.44 |
+| `actionId` | 具体动作身份；工具声明、执行、结果沿用同一动作关联 |
+| `purpose` | 消息用途，至少区分 conversation、compact、context_summary；压缩请求另标 map/reduce 阶段 |
+| `compactId` | 一次压缩操作身份，贯穿请求、内部消息、校验、终态；多次模型尝试共用 |
 
-- 一只只读脚本（scripts/ 或 build/）：吃 v3 jsonl，重建对话树（turn→message→execution→event），可视化或纯文本倾倒——"什么信息都读取的到"的机械化验收。
-- replay 走 v3 重建 effective_conversation,与现行 v2 replay 输出逐字节对拍（同输入同史）。
+字段按行种类要求出现，不给所有记录硬塞 step/action。system 消息除 `turnId:null` 外，不冒认某次用户 turn。
+
+关系也各管一件事：`prevTurnId` 表示同一会话分支的上一轮；`parentTurnId` 表示内部回合的触发归属；消息前后关系用明确的消息引用。三者不能互相顶替。跨旧会话的引用至少含 sessionId/runId/消息或事件 ID，并校验源 hash，不能只存裸 seq。
+
+上下文前驱采用 §4.30 的链节点 `{messageRef, prevMessageRef}`，作用域为 `(contextId, contextRevision)`。不在不可变 message 上写死唯一的“当前前驱”；否则 compact 复用旧消息时无法改接而不改旧档。
+
+新合同采用单写者、哈希链与耐久分档；具体 hash 字段命名随 v3 schema 一并冻结。单写者控制 seq 和哈希，message/event 都进同一条链。ProcessCrash 与 PowerLoss 保留区别，不能把普通 flush 称为断电安全。
+
+### 4.3 system 版本切换
+
+顺序固定：基础 system 消息 -> 变更事件 -> 新 system 消息 -> 内存采用新版本。
+
+- 变更事件记原因、旧 system 引用和目标设置版本；新 system 消息回指变更事件。新版正文必须是拼装后的完整结果，不让恢复器读取今天的 SOUL 文件重新拼。
+- 新 system 消息成功落稳才成为当前版本。只落了变更事件就崩溃，仍采用旧版，变更显示“未完成”。
+- 设置变更本身成功、最终 system 字节未变：事件写清 `systemChanged:false`，不制造假版本。
+- compact 使用的专用 system 若不同，也按 system message 留档，但 `purpose:compact`、关联 compactId；它不切换主会话 system。
+- 不以“文件中最后一条 system”选主会话 system，要同时看用途和成功选用关系。
+- resume 启动先记录本次基础 system；导入旧场时，明确记录实际采用的旧 system 引用。若另换新设置，按切换流程追加，不能悄悄把新 system 套在旧请求上。
+- 默认沿用旧场生效 system 是原稿方向；怎样处理当前环境生成段、模型专用指令，仍须逐段对表，不能把权限、工作目录等运行条件当成提示词文本一并复活。
+
+### 4.4 请求输入必须能精确列出
+
+每次真正发送前，记录请求准备事件，至少带：
+
+- `requestId`、stepId、turnId、purpose、compactId（适用时）。
+- 当前 `contextRevision`、`systemMessageRef`、按实际输入顺序排列的 `inputMessageRefs`。
+- `readThroughSeq` 和对应 hash，说明读取哪个已提交前缀；它不能代替输入清单。
+- provider/model、参数与工具定义快照引用；实际发出的内容若经合并、截断、脱敏或协议降级，要记转换版本和可核对的输入指纹。
+
+所有引用目标先落稳，准备事件再落稳，模型请求才许发出。空数组、缺正文、找不到的引用不能用“从历史猜一份”填补。记录在档但尚未入选请求的用户输入，界面应可区分“已接收”和“模型已看见”。
+
+普通历史消息可以多次被请求引用，不因此再落一条副本。主会话历史若被拼成 compact 的材料字符串，这个新 prompt 本身是新的模型输入，须按其真实字符串留档，并回指材料来源。
+
+### 4.5 compact 状态与消息全链
+
+`compact.applied` 作为唯一成功终态，界面称“压缩完成”。不另造一个含糊的 completed，让读者分不清“模型答完了”还是“上下文已经换了”。
+
+| 次序 | 行类型 | 内容与作用 |
+| --- | --- | --- |
+| 1 | event / compact.requested | trigger=manual/auto、reason、compactId、要求快照；请求时版本仅作观察，执行时冻结源版本与压缩/保留范围 |
+| 2 | message / system（需要时） | 正常复用当前 system 引用；确需专用 system 时另存实际内容，不替换会话 system，缓存影响见 §4.41 |
+| 3 | message / user | 完整 compact prompt，含实际追加的指令与约束；已有材料沿原消息引用发送，不在 prompt 中重复粘贴，实际重组例外见 §4.41；purpose=compact |
+| 4 | event / model.request.prepared 等 | 准确列出本次压缩请求的 system 与输入消息；请求重试逐次留档 |
+| 5 | message / assistant | 压缩模型实际回复，purpose=compact；这是候选产物，尚未生效 |
+| 6 | event / compact.validation.completed | 校验通过与否、校验器版本、逐项检查结果、候选回复引用 |
+| 7 | message / user | 将要注入主会话的摘要消息，purpose=context_summary，origin=compact_runtime；暂不生效 |
+| 8 | event / compact.applied | 持久提交新上下文清单、摘要引用、保留清单、前后 token 和版本；成功后才换内存 |
+
+第 7 行和第 5 行不能混为一条：第 5 行是压缩模型的 assistant 输出；第 7 行是后续主模型要收到的 user 上下文摘要。二者角色、用途不同。第 7 行记 `sourceMessageRef` 指回候选产物；不重复计算模型 usage。正文大时可以复用经过校验的 blob，添加过前缀或删过 manifest 则保存实际注入文本。
+
+第 3 行可能不止一条：实际请求包含多条 user/assistant 材料时逐条按原角色留档，不能只抄首条 user。map/reduce 各份请求和回复都关联 compactId，分别列 step/request；最终只采用校验通过的结果。
+
+失败分清原因：模型请求失败记 compact.failed；用户取消记 compact.cancelled；输出校验不过、收益不足或源版本冲突记 compact.rejected。它们都是失败终态，不更新 contextRevision，不显示“压缩完成”。候选正文和失败检查仍可查看。
+
+### 4.6 compact 回合归属（本轮设计建议）
+
+采用独立内部回合，避免拿压缩模型的 user prompt 冒充下一轮真人输入：
+
+- 一次 compact 操作分配一个 `turnId`，如 `compact-turn-1`；`compact.requested` 同时建立这轮内部操作身份。本操作的 prompt、回复、校验与终态都归它。
+- `parentTurnId` 指触发压缩的主会话 turn。若空闲时手动执行，parentTurnId 为 null；另记来源上下文和命令事件，不假称上一轮仍在运行。
+- map/reduce 各自开 step；同一 step 的网络重试另开 requestId，不开新的真人 turn，也不换 compactId。
+- 主会话未完成的 turn 仍用原 ID。插话、后续工具结果仍归它；compact 完成不能顺手把它完成或重编号。
+- 注入摘要是宿主产物，不属于真人回合：摘要消息 `turnId:null`，用 compactId/sourceMessageRef 说明来源。实际发送事件归哪个主会话 turn，由请求记录明确指定。
+- `prevTurnId` 只串主会话分支中的前后回合；compact 内部回合通过 parentTurnId 挂接，不插进主会话的“上一轮”链。
+- 状态机须按 turnId 和用途管理内部回合，允许一个暂停推进的主 turn 与一个 compact 内部 turn 并存。v2 的“每流只能有一个 open turn”不能原样带进 v3。
+- 首版同一主上下文一次只运行一个 compact；额外触发先合并或拒收并留原因。map 子请求可并发，不能并发提交两份新上下文。
+
+这里的独立内部 turn 是设计建议，用户已确认的是“不记错归属”。实施前须与四层生命周期的完整类型合同对表，不能把建议写成既有实现。
+
+### 4.7 校验不能只看“回复里有几个标题”
+
+校验事件至少保存以下结果；通过检查不等于证明摘要完全没有事实遗漏：
+
+| 检查 | 所需证据 |
+| --- | --- |
+| 内容结构 | requirementsSnapshot 中声明的必需字段、类型、非空规则及 schema 版本 |
+| 引用存在 | 摘要、源消息、保留消息均能读取，hash 匹配，不跨错 session/run |
+| 覆盖范围 | 压缩与保留集合来自同一 sourceContextRevision；无重复、无无故漏项 |
+| 工具配对 | 压缩边界不劈开调用与结果；未完成 turn 保留完整消息结构，工具文本允许按 §4.38 生成更短预览，原档不改 |
+| 角色与用途 | compact prompt/回复属于会话历史但不误选入压缩后请求；摘要不会被认成真人新 turn |
+| 收益与容量 | 同一把尺、同一口径比较前后上下文；满足该次策略声明的最小收益，且后续请求预算合法 |
+| 源未变化 | 提交前再次核对 sourceContextRevision/stateHash，不能只相信开始时的快照 |
+
+`checks` 每项存 code、passed 和所需证据引用；失败存具体字段或引用位置，不只写一句 validation failed。摘要模型若没返回要求内容，保留回复，记录失败，再按策略重试；未通过的产物不能先塞进内存。
+
+### 4.8 compact 生效记录与原子切换
+
+`compact.applied` 的 payload 至少包括：
+
+| 字段 | 用途 |
+| --- | --- |
+| `sourceContextRevision` / `newContextRevision` | 明确从哪版变到哪版；一笔成功提交只前进一次 |
+| `oldStateHash` / `newStateHash` | 对 system 引用及有序上下文引用计算，算法带版本 |
+| `summaryMessageRef` / `validationEventRef` | 指向真正采用的摘要与通过的校验 |
+| `removedMessageRefs` / `retainedMessageRefs` | removed 只表示退出模型上下文，原档不删除 |
+| `protectedTurnIds` | 必须整轮保留消息结构的未完成 turn；无时为空；工具预览降档另有显式版本记录，不视为删除该 turn |
+| `contextId` / `contextChain` | 生效后的完整链节点，每项含 messageRef、prevMessageRef；由链确定 system、摘要和保留消息顺序，见 §4.30 |
+| `contextTokensBefore` / `contextTokensAfter` | 同一时点、同一估算口径的前后上下文数字 |
+| `tokenMetric` | 估算/实报来源、估算器版本、模型 scope、计量范围与可选校准版本 |
+| `trigger` / `compactId` | 供历史标记与诊断关联 |
+
+每次 compact 的集合约束：旧主会话消息（不含 system）由 removed 与 retained 两个互斥集合覆盖；新清单为生效摘要加有序 retained。后续 compact 必须将当前旧摘要纳入压缩材料；成功时旧摘要进入 removed，新摘要替换它，不再允许因其 purpose=context_summary 而永久 retained，也不叠出多份“此前摘要”。只针对当前有效链，已退出链的更早摘要仍留档，不重新拼回请求；详见 §4.41。
+
+contextChain 是这版前驱关系的唯一事实来源。systemMessageRef、effectiveMessageRefs 在读取时从链派生，不在同一 compact 提交中另存一份可独立变化的顺序。retainedMessageRefs 仍作为压缩范围证据，其顺序必须与新链中的保留部分一致。
+
+采用顺序：锁住上下文提交口 -> 核对源版本 -> 预先构造新内存视图并验预算 -> 摘要/引用落稳 -> applied 按 PowerLoss 档落稳 -> 发布预构造的内存视图 -> 放锁。
+
+- applied 前崩溃：旧上下文有效。即使已有回复、通过校验或摘要消息，也只算候选。
+- applied 后、内存发布前崩溃：resume 从 applied 重建新上下文。
+- applied 写盘失败：不得发布新内存视图；停下需要继续发送的路径，报告记录故障。
+- applied 已提交而内存发布失败：停止该运行，从已提交状态恢复；不能继续用旧视图发请求。
+- 持久提交成功后不再落一个拥有相同生效含义的 completed 事件，避免两个终态只写成一个。
+
+工具仍执行或用户仍发来消息时，可以继续记录接收/执行事实，但请求准备与上下文变换共用提交边界。旧版 compact 产物遇到主上下文已经改变，首版直接记 conflict 并拒绝，重新取源；不静默拼接新尾巴。反复冲突须合并触发或暂缓压缩，不能无限空转。
+
+压缩期间尚未纳入上下文的队列输入独立保留，之后按调度顺序注入。不能因它未在 retained 清单里就丢弃。
+
+### 4.9 生效后的请求形状
+
+以主 turn `T7` 尚未完成、前六轮被压缩为例：
+
+```text
+当前 system S2
+已生效摘要 Q1（user，context_summary）
+T7 已有 user / assistant / tool ...（身份、正文、顺序不变）
+其后按调度纳入的新消息
+```
+
+内部 compact prompt 和压缩模型回复仍在会话历史里，不在这份压缩后的有效上下文清单里。未完成工具结果尚未回来时，当前视图可以表达未完成状态，但不能绕过现有工具调度边界发出不合法请求。
+
+若执行手动 compact 时没有未完成 turn，protectedTurnIds 可以为空，后续形成 system + 摘要 + 新用户输入。若另单策略还要求保留最近已完成 turn，按显式 retained 清单保留，不能为满足文案把它假记成未完成。
+
+只有 system、没有历史，或按所选策略所有内容均受保护时，没有可供摘要化的历史；记录 no_eligible_history，不空调压缩模型。若阻塞来自容量且有历史工具结果，先按 §4.38 尝试预览降档；这可以在不生成摘要的情况下解围。降至 4 KiB 仍不够则报错，不能把预览缩短冒称模型摘要成功。
+
+### 4.10 resume：历史全在，当前上下文另算
+
+1. 本次启动创建新 JSONL，首行基础 system 照 §1.2 写。
+2. 校验旧场的合法前缀与源引用，记录 `resume.source.attached`，包括 source session/run、throughSeq、末 hash、选中分支、上下文版本和 system 引用。普通 resume 不改写源内容；用户明确允许的最终坏行修复是唯一例外，按 §4.60 执行，不能扩成删除中间坏记录。
+3. 历史读取器沿源引用加载旧消息和事件，再接新场记录。保留原 messageId/turnId，跨文件使用完整引用去重；相同文本不能作为去重依据。
+4. 上下文读取器按旧场成功的 compact.applied、context.tool_previews.reduced、system 切换和普通消息提交依次重建当前视图。不得只读取旧场末尾几行，不恢复已被摘要替代的原文，也不把已经降档的工具预览自动换回 32 KiB。
+5. 首次真正发送时再次落实际请求输入清单。resume 只读恢复不调用模型、不重执行工具、不重发旧消息给外部渠道。
+
+历史界面须支持：
+
+- 旧 user/assistant/tool 原文可滚动、可按需加载；默认可以折叠已压缩区段，展开后必须能读全。
+- 在每次成功 applied 的时间位置显示压缩标记；它压缩的来源范围另有引用，不能把标记插回过去并伪造发生顺序。
+- 标记可展开查看摘要、保留范围、压缩 prompt、回复和检查结果。内部 user 消息标成“压缩请求”，不能显示成用户亲口发言。
+- “已压缩”描述历史事件；“当前仍在上下文”根据正在查看的分支与上下文版本计算。多次压缩后不能靠永久布尔值判断。
+- “请求中 / 校验失败 / 已取消 / 已完成”据已落档事实显示，不能根据有没有摘要文本猜状态。
+- 大段工具输出、图片和其他附件按受校验的 blob/artifact 引用加载。只有 JSONL 而缺附件时，明确显示缺件；不能声称原文齐全。
+- 多次 resume 沿源链读取，检查环和引用错误；别重复显示同一祖先。源缺失时允许查看仍可验证的历史并报告缺口，精确上下文恢复应拒绝。
+- seq 只在所属文件有效，界面跨场拼接依据 resume 来源边和各自 seq，不按各文件同名 seq 或墙钟全局排序。
+
+可缓存时间线和上下文索引，加快翻页；缓存须绑定源 hash 与投影版本，可删除重建。被后继会话引用的旧场与附件在 GC 时须保留，或先生成自足导出包，不能删源后留下看似可 resume 的悬空索引。
+
+### 4.11 压缩前后 token 的显示口径
+
+示意文案：`上下文已压缩：148,200 -> 31,600 tokens（估算）`。数字只是示例，不是本仓实测。
+
+- 展示值读取该次 applied 的持久字段，不在 resume 时拿今天的 tokenizer 或模型重新算。
+- 首版按 §4.36 的输入 JSON 代理口径计量，包含 system、摘要、保留历史、工具定义等实际选定输入；不包含输出预留。provider 内部模板/隐藏协议开销及非文本媒体 token 不在 bytes/4 的完整覆盖范围内，不能把这份粗估宣称为精确 context token。
+- 前后使用同一个主模型 scope 和估算器快照；压缩模型可以不同，但不能用它的 prompt usage 充当压缩前后主上下文大小。
+- 估算显示“估算”；provider 实报 token 另列。缺失记未知，不记 0，不借下一请求 usage 倒填历史。
+- 新记录必须声明计量范围。确实无法计量时标未知，并写明原因；旧档恢复不在本单内。
+- 多次 compact 各显示各次数字。失败和取消只显示状态；候选前后估算可放详情，但不能展示成已压缩。
+
+### 4.12 四角色、usage 和重构边界
+
+- api::Role 与 ReplayMessage::Role 收敛四值时，逐处核对二选一分支、工具结果分组、thinking 签名、服务端工具块与富媒体。只加枚举不算实现。
+- assistant 的可回传内容不限于可见正文；reasoning_content、thinking/redacted 块、签名及块顺序按 §4.42 保存，不能因 UI 折叠或四角色归一而丢失。
+- 四家 adapter 直接按新的四角色合同组装合法请求；system 不重复、tool 不错变 assistant，调用与结果正确配对。测试对照新合同和各协议所需形状，不要求与旧实现逐字节一致。
+- 原稿 assistant 自带 usage 的方向保留。数值归属、失败请求、流中断、迟到 usage 与更正事件尚未冻结；实施前给出唯一 owner 表。request_metrics 若引用同一 usage，不能再作为第二份可累计事实。
+- request_metrics 统一为 event。记录发送前估算值/来源/输入特征、请求关联和 usage 引用；估算与实报不能混为同一字段。是否可免重放回测，取决于所需特征、完整请求与标签能否对齐，不先作保证。
+- 本单只实现 v3 读写和 v3 之间的 resume。新档自身缺件就报告缺件，不从当前环境补造过去。旧档迁移、读取和删除都不纳入本单。
+
+### 4.13 待继续敲定的合同
+
+这些不影响本轮已明确的用户场景，但不能带着空白直接开始全量实现：
+
+- 普通 user/assistant/tool 纳入 contextRevision 的统一提交口，以及工具并行返回、steer 插话的确定顺序。
+- assistant usage 的唯一归属及流中断/重试/迟到处理。
+- 独立 compact turn 与已有 Turn/Step/Action 类型及状态机对表。
+- system 段级恢复规则、跨模型切换和实际 wire 快照的保真范围。
+- 完整 v3 JSON Schema、引用格式、hash 规范、未知事件版本策略和多 stream 归属；新工具合同见 §4.14-§4.21，hook 合同见 §4.22-§4.24，slash 合同见 §4.25-§4.26，event 效果区分见 §4.27，消息显示合同见 §4.28，skill 渐进式披露见 §4.29，消息前驱与上下文链见 §4.30。
+- 流式事件与最终 assistant 的身份、片段合并、终态、落盘与恢复见 §4.43；批量刷盘阈值及故障耐受档位随 schema/存储合同冻结。
+- assistant 来源字段、请求/返回模型名及不可变配置引用见 §4.44；模型切换不改旧消息来源。
+- 预设默认协议与自定义 wire 选择见 §4.45；四角色到目标协议的字段/分组映射及现有实现缺口见 §4.46。
+- subagent 的父子身份、子目录、启动交接、结果交付与恢复验收见 §4.31-§4.33；具体工具 API 名称与 schema 一并冻结。
+- 首 query 追加标题 prompt 及提取采用见 §4.34；标题返回格式和请求调度方式仍需冻结。
+- 用户 steer 与子代理 followup 的队列、调度边界、回合归属和恢复合同见 §4.35；每次接纳数量与显式模式覆盖入口随 schema 冻结。
+- 首版 UTF-8 bytes/4 算法、请求准备时点及估算字段见 §4.36；各 adapter 的输入字段映射、非文本计量策略和预算余量配置须补齐 fixture，不能把代理估算当精确上界。
+- manual/auto 触发与安全执行边界见 §4.37；单个长 turn 按 §4.38 降低历史工具预览，最低 4 KiB 后报错；输入/输出超限及有限恢复见 §4.39。
+- 模型输出默认值、请求实际 max_tokens、发送容量与压缩提前量见 §4.40；每个 provider/model/mode 的字段映射、窗口及输出计数范围从带版本的模型配置解析。
+
+树结构用于说明来路；精确恢复靠引用、用途、上下文提交与请求输入清单共同约束。不能让一枚 parent 或 prevTurnId 承担所有语义。
+
+### 4.14 操作生命周期：等待、执行、终态
+
+event 是一次状态变化，不是反复覆盖的当前状态对象。同一操作可以有多条 event，各有自己的 eventId/seq，共用操作身份。生命周期按具体操作定义，不给所有事实硬造三段。
+
+| 事件 | status | 事实 |
+| --- | --- | --- |
+| `tool.execution.pending` | pending | 已接纳调用，等待执行条件；必须带 reason，如 queued/approval/dependency/backoff |
+| `tool.execution.started` | running | 已越过持久执行准入边界，即将交执行器；不是仅收到模型调用 |
+| `tool.execution.waiting` | pending | 执行已开始，当前在等外部条件；须带 reason 和可恢复的等待引用 |
+| `tool.execution.resumed` | running | 等待结束，继续同一次尝试 |
+| `tool.execution.finished` | done | 执行器报告成功结束；结果持久状态另列，不能据此推断模型已见结果 |
+| `tool.execution.failed` | failed | 已知失败，有明确错误码与证据 |
+| `tool.execution.cancelled` | cancelled | 已确认取消完成；区分执行前/执行中 |
+| `tool.execution.rejected` | rejected | 参数、权限或准入拒绝，没有执行 |
+| `tool.execution.unknown` | unknown | 启动后失联、崩溃或结果无法确认；不能当成确定失败 |
+
+kind 与 status 映射由 schema 固定，不能出现 finished + running。UI 可以合并展示，但原始账保留细分状态。
+
+- 常见顺序为 pending -> running -> done/failed；执行中确有等待才追加 waiting/resumed。快操作不假写“等了一阵”，可以接纳后直接 started。
+- 每次尝试最多一个执行终态；终态后的迟到响应另记观察/核验事件，不改旧终态，不自动再发一个 tool 消息。
+- 重试先记上一 attempt 的终态，再对 attempt+1 追加 pending/started；不能把已结束的尝试改回 pending。调用整体状态由尝试链、重试决策、结果持久状态和消息提交状态共同折叠，不能只取最后一行 status。
+- pending 是“在等”，running 是“在执行”。同为 pending，reason 和此前是否 started 决定恢复方式。
+- 只在状态、等待原因或有意义的进展变化时追加；不每秒刷一条 pending。按字节流输出的日志进 artifact，不把每个字符写成生命周期事件。
+- cancel_requested 只说明要求取消；确认停下才写 cancelled。远端请求超时、连接断开却不能证明对方已停时，写 unknown，并记录 timeout 原因。
+- 崩溃后看见 started 而无终态，只能知道“可能已执行”。started 是执行前栅栏，不能保证它与外部副作用原子发生。
+- compact 同样补 requested、必要的 pending、started、各请求阶段、validation.started/validation.completed，再到 applied 或失败终态。validation.completed 表示校验运行结束，passed 字段才说明检查是否通过。
+- usage、配置观察、来源引用等瞬时事实只记一条即可；配置切换这类有生效边界的操作则记 requested 和 applied/failed。不能为了凑三段伪造运行过程。
+
+耗时分栏：queuedAt/startedAt/finishedAt 用于展示，waitDurationMs 与 executionDurationMs 分开。执行耗时用单调时钟量，不能拿两台机器的墙钟相减；崩溃缺终点时留未知。
+
+### 4.15 工具调用身份与幂等
+
+用户要求的“全局唯一 tool_call_id”由宿主保障，不押在 provider 返回的 `call_9xK` 一定不重号上。
+
+| 身份 | 新合同 |
+| --- | --- |
+| `actionId` | 宿主统一发号；工具 Action 的稳定身份，与内部 tool_call_id 是同一个值，不再发第二个身份 |
+| `tool_call_id` | 工具 payload/工具消息中的调用键；等于信封 actionId。采用可跨会话/进程/step 使用的 UUID，存储提交时检查冲突 |
+| `provider_tool_call_id` | provider 原样返回的协议配对号；与来源 requestId、assistantMessageRef、块序一起存；不作全局主键 |
+| `stepId` | 声明该调用的 step；结果即使到下一 step 才发送，也仍归原 step |
+| `step_idx` | 可选展示坐标，明确从 0 起；不用它关联调用或判断唯一性 |
+| `attempt` | 同一逻辑调用的执行尝试，从 1 递增；每次尝试单独记状态、时间和结果 |
+| `result_id` | 每次已产出结果的唯一身份；不同 attempt、迟到观察和不同结果版本不得覆盖同一文件 |
+
+主消息、事件信封用 camelCase；工具 payload、结果描述和工具协议字段用 snake_case。`actionId == payload.tool_call_id` 若同时出现必须校验。这里只是两个结构位置间的映射，同一位置不存 action_id/toolCallId 等别名。
+
+- 模型完整声明调用后，宿主建立本地 ID 与 provider ID 映射；wire adapter 返回结果时还原该请求所需的 provider 号。原始 assistant 块与映射均可查。
+- 同一响应内两个块带相同 provider 号且无法无歧义配对，按协议错误拒收；跨请求重号由本地全局 ID 区分。流式参数尚未收全、JSON 未通过校验，不执行工具。
+- `tool_call_id` 是多条生命周期记录的聚合键，不是 JSONL 行的唯一键。行唯一性仍认 eventId/messageId，不能用同一 call ID 把 pending 行覆盖成 done。
+- 原始 args 的 owner 是 assistant 调用块。校验、hook 改写后实际执行的 effective_args 另存快照；工具名还须绑定注册来源、版本、cwd/执行目标等语义上下文，不能只存一个可能重名的 get_weather。
+
+不采用 `sha256(tool + args + turn_id)` 作为去重执行键。同一 turn 可以有意调用两次相同工具，例如两次查天气、两次追加文件；它们是两枚 Action，不能合并。
+
+建议幂等键为 `sha256(canonical({version, action_id, tool_identity, effective_args_hash, execution_scope_hash}))`：
+
+- 同一 Action 的传输重试复用 key，不把 attempt 算进去；tool/args/cwd/目标身份改变时，不能复用原意图。
+- 两次新声明的调用使用不同 action_id，即使参数相同也得到不同 key。参数指纹可以用于比较或显式缓存，但不能偷偷当执行去重。
+- hash 使用版本化的规范 JSON，不能把几段字符串无分隔拼起来。确认 key 后实际参数必须锁定；重试期间参数变了就重走准入，不能沿旧 key 发不同操作。
+- 幂等键只有下游支持并实际执行去重/查状态时才有外部保障。给 shell 命令本地算个 hash，不会让命令自动变得幂等。
+- 已向模型提交最终 tool 消息后，模型要求“再试一次”属于新调用，另发 ID，用 retryOf 关联前一次。只有尚未提交最终结果、由执行器按明确策略重试的尝试，才沿用原 Action、增加 attempt。
+
+### 4.16 新工具结果与目录合同
+
+```text
+sessions/<sessionId>/
+  <sessionId>.jsonl
+  artifacts/
+    <resultId>.json
+    <resultId>.stdout.txt
+    <resultId>.stderr.txt
+    <其他附件ID>.<ext>
+```
+
+`.json` 是该次结果的不可变描述文件，不是 pending -> done 反复改写的状态文件。状态变化只追加 JSONL。stdout/stderr 只对实际具备这两条输出通道的工具要求；天气、搜索、图片工具按 text/structured_content/图片等真实类型存放，不造空进程字段。
+
+新命令执行器默认分别捕获 stdout/stderr；有内容的通道分别落文件。明确捕获为空时，描述可写 bytes=0、capture_complete=true，不必造空文件。没有该通道与通道为空须分清。用户命令自行重定向或 PTY 天然合流时，明确用 combined，不能猜拆两流。
+
+结果描述至少包括以下字段；此表是新合同建议，完整 schema 待冻结：
+
+| 字段 | 语义 |
+| --- | --- |
+| `result_id` / `tool_call_id` / `attempt` | 归属身份，必须与引用它的事件一致 |
+| `result_kind` | process/text/structured/multimodal 等实际结果类型 |
+| `execution_event_ref` | 指向执行终态；执行状态以 JSONL 为准，结果文件不维护另一份可变状态 |
+| `preview_policy` / `capture_limits` | 当次采用的预览版本、头尾/通道预算、编码处理与捕获上限；准入时先留快照，结果文件只引用或保存相同值 |
+| `content` / `structured_content` | 结构化内容及有序富内容块；缺失、空对象和空数组不能混同 |
+| `outputs` | stdout/stderr/combined/report/image 等 typed refs；不限制只有两份文本 |
+| `outputs[].ref` | artifact ID、相对路径、sha256、bytes、media_type；路径只在 session 根内解析 |
+| `outputs[].output_bytes` | 实际观察到的原始输出字节数；另带 byte_count_kind=exact/lower_bound，不能把预览长度冒充全文长度 |
+| `outputs[].captured_bytes` | 实际保存的原始输出字节数；与原始文件引用 bytes 对账 |
+| `outputs[].capture_complete` | 对该次执行的实际输出是否收全并保存；false 时须有 capture_reason |
+| `outputs[].encoding` | 原始编码或 binary；另存解码文本时分别记引用和转换规则 |
+
+exit_code 在执行终态中结构化保存。非进程工具不适用时缺省；进程还没退出、退出情况未知时用 null 并注明原因，绝不能默认填 0。signal/termination_reason、工具级 is_error、协议错误各有字段。退出码非零由工具语义判成功或失败，例如搜索“没有命中”可以是正常结果，不全局一刀切。
+
+结果字节与描述采用先临时文件、再落稳、再发布不可变名称的顺序。执行器先记录已知执行终态，随后结果描述引用该终态；`tool.result.persisted.result_ref` 数组列出已落稳的结果描述和各份材料引用，并以 kind 区分 result_metadata/stdout/stderr/report/image 等。文件在同一提交批次发布；终态可以早于完整结果持久化，不能凭 done 就宣称文件可读。
+
+`result_ref` 固定为对象数组，不取单个对象或裸字符串。每项至少含 artifactId/kind/path/sha256/bytes/mediaType；同一文件只列一次，数组顺序固定。只有一份结果也写 `[ref]`，没有文件写 `[]`，不能拿空数组冒充落盘成功。结果描述中的 outputs 与这些引用从同一份材料清单生成，不各自改写。
+
+JSONL 内 path 相对所属 session；展示或交模型时由受控读取口解析。`full_output` 是完整可读材料的路径数组，由 result_ref 中的正文/报告等材料投影生成；不把内部 result_metadata 文件冒充输出正文。远端存储将来增加 backend/key/version/hash，不把会过期的签名 URL 当永久引用。首版按本地 artifact 完成闭环，不要求 S3。
+
+描述文件与正文都是 artifact；任何对正文的查阅均校验身份和 hash。外来 tool_call_id、文件名、URI 不能直接用于拼磁盘路径。被 resume 源链引用的结果须保留；缓存索引可重建，原始结果不能靠索引代替。
+
+### 4.17 全文收集与模型预览分开
+
+用户给出的下面这种显示格式可以保留，字段由结构化结果生成：
+
+```text
+exit_code: 0
+output_bytes: 850000
+truncated: true
+capture_complete: true
+full_output: ["sessions/<sessionId>/artifacts/<resultId>.stdout.txt", "sessions/<sessionId>/artifacts/<resultId>.stderr.txt"]
+
+[开头内容]
+[文件: sessions/<sessionId>/artifacts/<resultId>.stdout.txt | 通道: stdout]
+这里是 stdout 的开头节选。
+
+[中间内容已省略]
+
+[结尾内容]
+[文件: sessions/<sessionId>/artifacts/<resultId>.stderr.txt | 通道: stderr]
+这里是 stderr 的结尾节选。
+```
+
+这些数字和路径是形状示例。`truncated:true` 在这段预览中专指预览省略了正文；原始输出是否收全，由 capture_complete 说明。
+
+- 初始 `max_preview_bytes = 32768`，即 32 KiB；容量恢复档位为 16384/8192/4096，见 §4.38。按一次工具调用计，不按 result_ref 中的文件数计。计数对象是模型可见的最终文本预览，包括正文、文件/通道标记、状态、路径、省略提示和换行；不包括 JSONL 信封与 JSON 转义带来的存储开销。统一量 UTF-8 字节，字符数和 token 数不能顶替。
+- 未截断的完整渲染文本不超过 32768 字节时原样返回，truncated=false。超过时，先确保原文及材料清单已持久化，再生成有完整结果引用的头尾预览；捕获或落盘失败仍按既定不完整结果合同报告，不能冒称全文已保存。
+- 超限采用 head + omission marker + tail，省略标记必须实际写入模型可见文本，不能只在界面装饰。短输出不重复头尾、不插入假的省略标记。
+- 截断时先预留全部说明、必要文件标记、省略提示和换行的 UTF-8 字节数 M；正文可用 B = 32768 - M，头部最多 floor(B/2)，尾部最多 B-floor(B/2)。两端通常各略少于 16 KiB，不能各取满 16 KiB 后再追加说明。UTF-8 边界对齐可少取几个字节；最终渲染后再验一次总长，超限只缩正文或说明清单，不截坏路径或来源标记。
+- full_output 总是数组，零/一/多份保持同形；captured_output 也用数组。多份文件时按稳定通道次序组织为一份逻辑文本，保留通道/文件标记，再在全调用预算内生成预览；不能每份文件各截 32 KiB。
+- 每个展示片段前必须写出文件路径与适用通道，路径能对应 result_ref 中的唯一材料。不同目录下同名文件不能只显示 basename；展示名不能代替 artifact 身份。
+- 先选择带来源信息的头尾片段，再渲染文件标记。头尾跨文件时逐段补标记；尾段即使从文件中间开始，也必须重新标出来源。不能截完拼接文本后把来源标题截没，更不能把文件 A 的开头和文件 B 的结尾冒充同一文件。
+- 只展示了部分文件时，在文件清单或说明区明确标记“未展示正文”；全部材料仍能从 result_ref/full_output/captured_output 查到。省略提示描述预览省略，不暗示这些文件本身缺失。
+- 文件与通道标题计入这份 32 KiB 总预算，不因加了来源标记就给每份文件另开预算。
+- 极端情况下文件过多或路径过长，说明区本身也可能超限。先将完整文件清单保存为可按范围读取的 artifact；预览只列容纳得下的路径，追加 `output_index` 指向完整清单、`omitted_output_count` 说明尚未列出多少项。result_ref 保留全部引用，清单缩短不得静默进行。优先保住状态、完整清单入口和已展示片段的来源；必要时明确“正文预览已省略”，不能发出超限文本。清单读取自身仍受单次工具 32 KiB 上限约束。
+- `capture_complete:true` + `truncated:true`：全文在文件里，模型只看节选。这是长输出的正常成功路径。
+- `capture_complete:false`：至少一份材料没收全。完整材料列 full_output，部分材料列 captured_output，逐项注明 quota/io_error/connection_lost 等原因；全部不完整时 full_output 为 []。即使仍有开头和结尾，也不能称“完整结果”。
+- `output_bytes` 若仅是下界，显示“至少 N bytes”；stderr 与 stdout 分开计数，综合显示时明确合计范围。不能把 JSON 描述文件大小算进命令输出字节数。
+- exit_code=0 只说明进程退出状态；不代表捕获完整。进程被 timeout/cancel 收掉也不自动证明 capture_complete=false，须按管道是否收全判断，但终止原因必须保留。
+- 输出正文原样保存，预览生成器按版本固定 head/tail 规则、预算与选区。头尾不重叠，按 UTF-8 边界切；单行超长也受字节帽约束。
+- 多通道的名称、完整性与错误状态进入说明区；stdout/stderr 原文共用头尾预算。其余材料通过路径读取，不为每项另加正文预算，也不额外插一段超预算的 stderr 预览。
+- JSON 结果在预算内按合法 JSON 返回；超限用明确标记的文本节选或结构摘要，不把任意截断片段冒充完整 JSON。图片/音频/二进制保存 typed refs，按模型能力组装内容块，不硬套 head/tail 文本；32 KiB 约束文本预览，不用它代替多模态输入预算，也不把 base64 塞入预览绕过限额。
+- 原始字节编码不合法或不是 UTF-8 时，原字节另存 `.bin` 或明确编码文件；模型预览用可读转换，并记规则。不能清洗后仍声称 hash 对应未变的原字节。
+
+三个限额独立配置并随调用快照留档：内存缓冲上限、完整捕获上限、模型预览预算。必须边读边落盘、增量算 hash、维护有界头尾缓冲，不能先把 850 MB 装进内存再截成几行。
+
+达到预览预算只缩预览，不杀工具。达到完整捕获上限则按工具策略终止或停止保存并继续排空管道，明确 capture_reason；不能堵住子进程，也不能把无上限输出吃满磁盘。内存与捕获额度另以测试定值；文本预览默认及本版上限已定为 32 KiB。LSP、grep、按行读取和普通工具结果共用这道上限，不能由某个工具暗自放宽；需要更多内容时按范围另发调用。
+
+### 4.18 event、结果文件、tool message 各存什么
+
+| 位置 | 唯一职责 |
+| --- | --- |
+| assistant message | 模型声明的原始调用、参数和 provider 配对号；映射到宿主 Action |
+| tool execution events | 接纳、等待、实际入参、执行尝试、耗时、退出/错误/取消/未知状态 |
+| artifact 结果描述与正文 | 该次完整或部分结果、附件、完整性和编码信息 |
+| tool.result.persisted event | 证明特定结果文件已落稳，关联执行终态；不重复正文 |
+| role=tool message | 后续模型实际收到的预览文本和内容块；引用结果文件，保存预览策略和来源 |
+
+`result_preview` 是工具消息内容的概念名。原始 event 不再复制一份预览文本；在工具详情或导出中可由 toolMessageRef 展开成 `result_preview` 字段，并标明这是读取投影。
+
+真正存进 JSONL 的 tool 消息保存完整的模型预览版本，不能 resume 时按今天的截断规则重新生成。`message.tool_call_id` 使用本地全局调用号，由 wire adapter 映射到 provider 原始号；不把 artifact 描述当作消息自动全量注入。
+
+每次尝试可以有多个结果材料，但一次逻辑工具调用只产生一份最终结果，一次请求只能选用它的一条规范 tool 消息。§4.38 允许该消息有多个不可变预览版本，它们不是新执行结果，旧版/新版不能同时发送。内部失败重试不逐次回喂多个同 ID 的 tool 结果；下一请求的 inputMessageRefs 固定实际选用的版本。
+
+顺序固定：assistant 调用消息落稳 -> 接纳/等待 -> PreAction hook 与效果采用 -> 最终准入复核 -> effective_args/后端身份与 started 落稳 -> 执行并捕获 -> 执行终态落稳 -> 原始结果文件与 result.persisted 落稳 -> PostAction hook 与效果采用 -> 最终结果选用 -> 32 KiB 预览生成/复核 -> tool message 落稳 -> 纳入后续请求。未注册 hook 时省略对应阶段，不伪造 hook 运行。
+
+hook 改写产物另存结果版本，原始结果不覆盖。即使原工具失败而 hook 提供了可用替代结果，也须保留原失败与替代来源。每个最终 tool 消息以 `tool.result.selected` 引用所选结果及改写链；选用事件不重复结果正文，详见 §4.23。
+
+执行终态成功而结果存储失败：保留 done，追加 `tool.result.persist_failed`，写明 storage 状态；不能改称“工具没有执行”。需要时提交宿主生成的错误 tool 消息，明确“操作可能已成功，结果不可读”，并保持原调用配对。它不伪造原始结果，也不准自动再执行有副作用的工具。
+
+### 4.19 一次工具调用的 JSONL 形状示例
+
+以下只演示字段与追加顺序，省略 session/run/schema、hash 等公共字段，短 ID 也仅用于阅读；不是完整可提交 fixture。每行本身是合法 JSON。
+
+```jsonl
+{"type":"event","seq":20,"eventId":"e20","turnId":"T1","stepId":"S3","actionId":"A9","kind":"tool.execution.pending","status":"pending","payload":{"tool_call_id":"A9","attempt":1,"reason":"approval","assistantMessageRef":"M8"}}
+{"type":"event","seq":21,"eventId":"e21","turnId":"T1","stepId":"S3","actionId":"A9","kind":"tool.execution.started","status":"running","payload":{"tool_call_id":"A9","attempt":1,"effectiveArgsRef":"args-A9"}}
+{"type":"event","seq":22,"eventId":"e22","turnId":"T1","stepId":"S3","actionId":"A9","kind":"tool.execution.finished","status":"done","payload":{"tool_call_id":"A9","attempt":1,"exit_code":0,"executionDurationMs":1200}}
+{"type":"event","seq":23,"eventId":"e23","turnId":"T1","stepId":"S3","actionId":"A9","kind":"tool.result.persisted","payload":{"tool_call_id":"A9","attempt":1,"result_ref":[{"artifactId":"R9","kind":"result_metadata","path":"artifacts/R9.json"},{"artifactId":"R9-out","kind":"stdout","path":"artifacts/R9.stdout.txt"},{"artifactId":"R9-err","kind":"stderr","path":"artifacts/R9.stderr.txt"}],"executionEventRef":"e22"}}
+{"type":"event","seq":24,"eventId":"e24","turnId":"T1","stepId":"S3","actionId":"A9","kind":"tool.result.selected","payload":{"tool_call_id":"A9","attempt":1,"sourceResultEventRefs":["e23"],"hookEffectEventRefs":[],"effectiveOutcome":"done"}}
+{"type":"message","seq":25,"messageId":"M9","turnId":"T1","stepId":"S3","actionId":"A9","purpose":"conversation","resultSelectionRef":"e24","message":{"role":"tool","tool_call_id":"A9","content":"exit_code: 0\noutput_bytes: 850000\ntruncated: true\ncapture_complete: true\nfull_output: [\"sessions/example/artifacts/R9.stdout.txt\", \"sessions/example/artifacts/R9.stderr.txt\"]\n\n[开头内容]\n[文件: sessions/example/artifacts/R9.stdout.txt | 通道: stdout]\n这里是 stdout 的开头节选。\n\n[中间内容已省略]\n\n[结尾内容]\n[文件: sessions/example/artifacts/R9.stderr.txt | 通道: stderr]\n这里是 stderr 的结尾节选。"}}
+```
+
+若希望直接查出 `tool/args/status/result_ref/result_preview/ts/attempt`，读取器可以按 tool_call_id 折叠出用户示例那种对象。该对象是当前快照；原始 JSONL 仍保留所有状态行，不覆盖 pending，也不以快照取代事实账。
+
+### 4.20 并发、后台、取消与恢复
+
+- 并行工具按真实提交顺序得到 seq，分别携带声明块序和 Action ID。两枚工具参数相同也不能合并，结果绝不靠返回次序配对。
+- 同一工具批次的后续输入按 assistant 声明块序组装；完成事件仍按实际发生顺序追加。steer 在批次协议安全边界注入，保留原 turnId；实际 inputMessageRefs 固定最终顺序。
+- 审批拒绝、参数错误、未找到工具：没有 started，终态 rejected；仍生成明确的配对错误 tool 消息。空字符串成功输出和没有拿到结果须分清。
+- 后台启动工具完成的是“任务已持久接纳”。其 tool 消息回 taskId，并明确当前 pending/started 状态，Action 可以 done；排队收据不冒充进程已启动。后台任务另有 task.started/pending/completed/failed 事件，用完整 parentActionRef 关联，详见 §4.53。后台完成通知不能再伪装成同一调用的第二条最终 tool 消息。
+- 异步工具的 RPC 真正仍在等待最终结果时，Action 保持 pending/running。若 API 契约只返回任务收据，按上一条分开；不能拿 accepted 当后台任务 completed。
+- 流式输出是进展，只有结束后的受校验结果版本可以声称完整。运行中查看日志用明确的快照版本和字节范围，不让已引用的 artifact 在后台偷偷变长。
+- 执行器内部重试同 Action、attempt+1，保留每次失败证据。模型新调用、新 step 中有意再执行、改变参数后重发，另起 Action，用 retryOf 说明关系。
+- 调用 started 后崩溃无终态：恢复投影标 unknown。只读重放不补造结束时间、不重跑；后续核验用新的 recovery 事件追加结论并引用旧尝试。
+- 已有终态与受校验结果、尚无 tool 消息：先核对必需 hook 和 `tool.result.selected` 是否已提交。已选定结果时可补交消息，不重执行工具；只有原始结果而后处理未完成时，不能越过 hook 偷发原结果。预览规则使用当次已存策略版本；已提交消息绝不重生成。
+- 有结果文件却无 result.persisted：先核对写者、调用身份、终态和文件完整性，再显式追加恢复采用事件；不能看到文件名存在就当成功。
+- 迟到响应保存为独立 observation/result 版本。已发给模型的超时/错误消息不改；需要让模型知道新事实时，提交明确来源的新通知或新查询结果，不能重复消费原 tool_call_id。
+- 主会话已结束而后台任务继续时，由仍持有任务所有权的写者记录任务流；通过跨流来源引用展示。不能重开已封口的主流追加工具终态，也不能借此让两个 writer 同写文件。
+- Journal 写失败后，停止新的模型请求与工具派发；已启动的动作按能力取消或排空并保留可取得的证据。不能把落盘失败解释成副作用没发生。
+
+### 4.21 本轮工具验收矩阵
+
+| Case | 必须满足 |
+| --- | --- |
+| 同一 turn 两次同名同参调用 | 两枚全局 Action ID，不因 args hash 相同而漏执行 |
+| provider 跨 step 重复 call ID | 宿主调用不撞号；wire 配对仍还原正确原始号 |
+| 同一响应内重复且歧义的 provider ID | 协议拒绝，不执行错配调用 |
+| 同一 Action 内部重试 | attempt 递增、幂等意图稳定；各次结果不覆盖 |
+| 等审批/等依赖 | pending 原因、开始执行、最终状态可恢复查看 |
+| 无等待的快工具 | 不虚造 waiting；started 与终态归属一致 |
+| 850000 字节输出 | 全文可按 hash 读取；预览有头尾；bytes 不拿预览长度充数 |
+| result_ref 零/一/多项 | 始终是数组；文件各有类型和校验引用，无重复项 |
+| 多份完整/部分结果 | full_output/captured_output 均为数组，按实际完整性归类 |
+| 预览头尾来自不同文件 | 每段路径和通道明确，不能显示成同一文件的头尾 |
+| 头尾片段跨文件或从文件中间截入 | 每个片段重新标来源，不因截断丢掉标题 |
+| 不同目录同名文件/部分文件无预览 | 路径能唯一对应材料；未展示正文与文件缺失分清 |
+| 大 stdout 加短 stderr | 两个文件各自可查，整次调用连同说明区共用 32 KiB 预览预算 |
+| 完整渲染为 32767/32768/32769 字节 | 前两项不截断，后一项保存原文并生成节选；最终预览始终不超 32768 字节 |
+| 头尾预算与中文来源标记 | 先扣说明再均分，按 UTF-8 边界取字节，最终长度不因换行或标记而超限 |
+| 文件列表自身超限 | 有完整清单 artifact 入口和明确省略计数，不截坏路径，不默默少报文件 |
+| LSP/grep/按范围读文件 | 共用 32 KiB 单调用上限；查阅路径可继续取中间范围，不反复只拿同一份头尾 |
+| 超长单行/多字节字符 | 不越预览预算，不切出非法 UTF-8，不重复头尾 |
+| 二进制/结构化/图片结果 | 按真实类型持久化，消息投影不丢归属，不假填 exit_code |
+| 磁盘满/捕获超限 | capture_complete 与存储失败说真话，不标 full_output |
+| 仅预览超限 | 不误杀执行器，完整捕获仍继续到策略边界 |
+| 超时或取消但远端不知是否完成 | unknown，不自动重试副作用，不默认 exit_code=0 |
+| 执行成功、结果保存失败 | 保留成功执行事实，另报持久化失败，不假称未执行 |
+| done 后、结果提交前崩溃 | 恢复不重执行，不把不存在的结果当已保存 |
+| 最终结果选用后、tool 消息前崩溃 | 补交同调用结果一次，不重跑工具或 hook |
+| 三个工具逆序完成 | event seq 反映完成顺序，模型输入按声明顺序配对 |
+| 后台 spawn 后退出 | 启动 Action 和后台 task 状态各自正确；不重复最终 tool 消息 |
+| 迟到结果 | 新观察保留，旧消息不改，不重复原调用最终结果 |
+| resume 后看工具全文 | 从原消息引用追到原结果，预览不按新策略重算 |
+| 原始 artifact 被改或缺失 | 拒绝假称完整，明确报告 hash/缺件；不凭此重执行 |
+| 事件重复提交 | 同一 eventId 同内容幂等，同 ID 异内容拒收；共享 call ID 的不同事件仍全部保留 |
+
+### 4.22 hook 的身份、生命周期与效果
+
+同一套 hook 注册/调度合同支持内置函数、脚本、进程、插件和远端 handler；按 hookPoint 与能力声明分派，不为每个挂点另搭一套记录系统。消息挂点和同名替换见 §4.47–§4.48；完整 handler 载荷和扩展 effect schema 仍待冻结，下面的记录要求必须共用。
+
+内置功能也走此合同。runtime 在确定阶段发起 dispatch，内置 token 估算等 handler 执行功能并返回结果。内置与外部的区别在注册来源、能力和执行策略，不在于是否留调用记录；详见 §4.36。
+
+| 字段 | 记录内容 |
+| --- | --- |
+| `hookDispatchId` | 本次挂点触发身份，关联触发事件和当时匹配的 handler 清单 |
+| `hookInvocationId` | 一枚 handler 在本次触发中的调用身份，跨并发/重试可区分 |
+| `hookId` / `definitionHash` | handler 稳定身份与当时定义版本；不能 resume 时改读今天的脚本来解释昨天的行为 |
+| `hookPoint` / `handlerKind` | PreAction/PostAction 等挂点及实际实现类型 |
+| `turnId` / `stepId` / `actionId` | 继承触发对象的身份，未到对应层时不虚填；hook 不自行开真人回合 |
+| `attempt` / `retryOf` | handler 尝试与显式重试关系，区别于工具自身的 attempt |
+| `inputRef` / `outputRef` | handler 真实输入、结构化返回和大日志的已验证引用 |
+| `definitionOrder` / `failurePolicy` | 当时的运行顺序、失败处置和能力声明快照 |
+| `startedAt` / `finishedAt` / `durationMs` | handler 各次尝试的时间；等待耗时另外记录 |
+
+生命周期使用 `hook.dispatch.requested`、`hook.pending`（有等待时）、`hook.started`、`hook.completed/failed/cancelled/unknown`。禁用、无匹配、去重或被上游停止等未执行情况记 skipped 与原因；可以在 dispatch 结果中汇总未匹配项，不为每条无关配置刷一行。handler 正常返回 deny/rewrite 也属于 completed，decision/effects 说明它的决定，不能把业务拒绝混成脚本执行失败。
+
+`hook.completed` 只表示 handler 已返回，**不表示改写已采用**。修改先作为候选效果保存，runtime 验证后再记 `hook.effects.applied` 或 `hook.effects.rejected`：带输入版本/hash、输出版本/hash、效果类型、实际采用值引用、校验结果和原因。原内容留档。
+
+首批效果覆盖参数改写、后端选择、结果替换/补充/过滤、准入决定、上下文追加与 system 变更；新增效果须有版本化类型和作用对象。未知效果可作为原始返回保存，但不能静默执行；影响后续请求且读者不认识时，精确恢复必须报告缺口。
+
+- 模型声明 `search(query)` 的逻辑工具名和原 args 不改写；另记 hook 选定的实现、版本、配置/执行目标、effective_args 和因由。可以复用原 Action 身份，不能改写原 assistant 消息装作模型本就指定了这个后端。
+- 改参数或后端后重新验证 schema、工具能力、执行目标与准入。原先允许本地读取，不代表改成远端调用也自动获得同样授权；已允许的同一执行目标无需重复询问。
+- 能改同一对象的 handler 按 §4.48 决出的稳定顺序串行，后一枚读取前一枚已采用的版本。只观察的 handler 可并发。需要并行产候选时必须按预先声明的合并规则选用，冲突明报，不按谁最后返回就覆盖谁。
+- 异步观察 hook 不阻塞已提交结果；能影响本次输入、执行后端或最终 tool 消息的 hook 必须在对应提交边界前完成。晚到改写只记观察/新通知，不能追改已经发给模型的消息。
+- 失败处置必须随定义快照落档：阻止继续、保留原结果并警告、或采用指定替代策略。不能仅凭 handler 是否抛异常猜该怎样走；候选改写被拒绝时也记录实际处置。
+- hook 的 stdout/stderr/附件进 artifact，状态与引用进 event；不自动变成 role=tool 消息。hook 若追加模型上下文，实际注入文本须记为 origin=hook 的 message，或生成有来源引用的新 tool 结果版本；若改 system，沿 system 版本提交合同走。
+- hook 配置加载、启停、顺序、路由与失败策略变化要记配置事件，每次 dispatch 固定所用版本。同名 handler 定义变了，旧 invocation 仍指原版本。
+
+### 4.23 search 换后端与 PostAction 改写的时点
+
+按新合同区分两类操作，不让“换底层”遮住已经发生的执行：
+
+**执行前换实现：** PreAction 接到逻辑 search，选择 backend-B，实际只执行 B。账中记录原始声明 -> hook 效果采用 -> 最终后端/参数 -> B 的执行与结果。
+
+**执行后选另一份结果：** PostAction 已经拿到 backend-A 的原始结果，可以过滤/改写；也可以再调用 backend-B，形成替代结果。这时 A、B 都实际运行过，必须各自记账。原来那次执行不能事后改名成 B。
+
+```text
+assistant 声明 search，Action=A1
+原后端 backend-A 执行结束，原始结果 R1 落稳
+PostAction handler H1 开始
+  子执行 E2：调用 backend-B，等待、完成，结果 R2 落稳
+H1 返回候选：用 R2 替换 R1
+hook.effects.applied：采用 R2，保留 R1 来源
+tool.result.selected：最终结果、有效 outcome 与 H1 改写链
+生成不超过 32 KiB 的预览
+role=tool 消息：仍配对 A1，正文来自选定结果
+```
+
+- hook 发起的底层调用是宿主派生执行，使用独立 `executionId`，同时记录 parentActionId、hookInvocationId、来源与实际后端。它不冒充模型新声明的 tool_call，也不向 provider 多发一条同 ID 的最终 tool 结果。
+- 子执行同样记录 pending/started/terminal、有效参数、耗时、result_ref 数组和副作用边界，不能只记“hook 耗时 3 秒”就把里面的网络/工具调用藏掉。命令/远端 handler 的任意内部系统调用未必可见；至少记清可观测的执行入口及覆盖范围，不能声称已追踪所有内部动作。
+- hook 若调用模型，记录独立 requestId、用途、实际消息和 usage，关联该 invocation；这些消息同样属于会话记录，可默认隐藏，不自动选入后续主模型请求。hook 自身和它的子执行费用只在各自 owner 上记一次，汇总避免重复累加。
+- 原结果、hook 输出、新结果各有不可变引用。`tool.result.selected` 固定最终 sourceResultEventRefs、hookEffectEventRefs、effectiveOutcome 和所用策略版本；原工具 failed 而替代结果可用时，原失败仍保留，最终 effectiveOutcome 另行说明。
+- 无改写时也明确选择原结果；发生错误且没有可用原始材料时，选择宿主生成的配对错误结果。artifact 落稳不等于结果已选用，结果选用不等于消息已发送。
+- tool message 的 full_output 和头尾片段来自最终选定的材料；原始材料与中间版本仍能在 hook 详情中查看。不能预览来自 R2，full_output 却只指 R1。
+- PostAction 改写必须先于预览生成；预览之后的统一发送关口再次检查 32 KiB。追加上下文若走独立 message，也必须明确记账并参与请求总预算，不能暗接在预览后绕过限制。
+- 原执行耗时、hook 耗时、子执行耗时和整次 Action 从接纳到消息就绪的时长分开。父区间已经覆盖子执行，不能相加后再叫墙钟总耗时；并行 hook 的总等待也不能简单相加。
+- 原工具已完成而 hook 失败或超时：保留原执行事实，按已声明策略收口，不能重新执行原工具来“补一次”。hook 已造成外部副作用而结果未知时也不得盲重跑。
+- 原始结果已存、必需 PostAction 未完成就崩溃：resume 显示后处理未完成，不能直接把原结果冒充最终结果。是否重试 hook 要看其幂等/副作用合同；只读 replay 不执行 handler。
+- hook 效果已采用、消息尚未提交就崩溃：从选用记录和当时策略恢复；若仅采用效果尚未选用，按确定的版本链完成选择。已经提交的 message 保持不变。
+- hook 触发工具，工具又触发 hook 时，记录父子链与深度；注册策略明确允许哪些嵌套，设调用深度/次数和预算上限。达到上限记 rejected，不悄悄递归到进程挂死。
+- hook outbox、UI 运行列表和诊断日志都由同一事实账派生；异步重投通过持久身份去重，不能让 dispatcher、执行器与 UI 各写一份相同 completed。
+
+### 4.24 hook 验收场景
+
+| Case | 必须满足 |
+| --- | --- |
+| 无 handler / 禁用 / 不匹配 | 能查所用配置和跳过原因，不伪造执行 |
+| 内置函数/脚本/远端 handler | 同一事件合同，有实现身份、版本、输入输出和真实耗时 |
+| PreAction 改 search 后端 | 模型声明不变，实际执行身份与 args 可查，准入针对最终目标 |
+| PostAction 过滤或替换结果 | 原结果不改，改写链和最后采用版本齐全 |
+| PostAction 再调另一个搜索后端 | 两次执行都有账，子执行关联 handler 与原 Action，无重复最终 tool 消息 |
+| hook 返回 deny | handler 可正常 completed；拒绝效果与未执行工具状态分清 |
+| 两枚 hook 都改同一字段 | 明确顺序或确定合并规则，不靠完成先后决定结果 |
+| 等待/超时/取消/未知 | 状态和原因可恢复，失败处置可核对，不伪造已取消副作用 |
+| 原工具成功、hook 失败 | 原成功保留，按策略采用原结果或阻止提交，不重跑原工具 |
+| hook 输出超过 32 KiB | 原文落档，最终 tool 预览仍不超限，来源与全文路径一致 |
+| hook 注入 system/上下文 | 有 message 正文、origin、版本与实际请求引用；诊断日志不混入 |
+| hook 内部调用模型 | 消息入同一会话账；用途/请求/usage 可查，默认隐藏不影响恢复，不误选入后续请求 |
+| 后处理未完成时崩溃 | 不把原结果当最终结果，不擅自重跑副作用 handler |
+| 最终选用后崩溃/resume | 恢复选定结果和原预览策略，不重执行 hook，不读取新脚本替代旧事实 |
+| 异步 hook 晚返回 | 保留新观察，已提交 tool 消息不改 |
+| 递归 hook/重复投递 | 嵌套边、上限和去重有效，事实只提交一次 |
+
+### 4.25 slash 输入、效果与模型消息
+
+以下字段与事件名为设计建议，随 §4.13 一起冻结。
+
+| 当次效果 | event 留什么 | 何时写 message |
+| --- | --- | --- |
+| 纯显示，如打开 `/provider`、查看 `/context-window` | 原输入、命令身份、处理结果；需历史展示的数据或快照引用 | 不写；终端提示和面板正文不自动进入上下文 |
+| 改设置，如在面板中选定 provider | 实际选定值、变更前后版本、何时生效及关联命令 | 只改请求参数时不写；确实改变 system 时追加完整新版 system |
+| 提供信息，如调用 skill | 解析、加载、展开、排队、接纳或失败，关联实际消息 | 保存将交给模型的展开正文、参数替换结果与来源 |
+| 执行专门流程，如 `/compact` | 命令过程，以及所触发 compact 的关联引用 | 按该流程保存真实 prompt、回复与摘要，不把 slash 原文冒充压缩 prompt |
+
+- 接收 slash 时先追加 `command.received`，发行 `commandId`，保存原始输入、来源及接收时所在 turn。解析后另存解析结果和命令实现版本，不覆盖原文；未知命令、参数错误也有接收与拒绝记录。
+- 生命周期沿 §4.14：接收后可等待，再 started，最后 completed/failed/rejected/cancelled/unknown。只有真的等待才记 pending，并写原因；不为瞬时展示强凑等待。一次命令重试保留 commandId，区分 attempt。
+- 命令完成记录用 `effects[]` 描述本事件直接记录的效果，用 `effectRefs[]` 引用子流程已经记录的效果，格式见 §4.27。允许同时有展示、配置变更和上下文注入。已有配置、compact 或 hook 事件持有事实时，命令只引用，不再复制一份“已生效”账。部分效果已生效、后续失败时，保留已生效项并说明失败处；不能用一枚 failed 抹掉先前变化。
+- 打开选择面板与用户选定配置分开。面板已经打开，只代表展示请求完成；需确认客户端确实显示时另收展示回执。用户后来选定或取消，用关联 commandId 的独立交互事件记录，不能把“打开面板”当作“切换 provider 成功”。
+- slash 原文默认保存在 event，不自动再写一条 role=user。若某命令确实把原文交给模型，则照实保存那条 message。普通文本中出现斜杠、代码块里的命令，以及按输入规则转义成文本的 slash，都不误判成命令。
+- skill 按 §4.29 渐进式披露；每次保存当次实际提供给模型的内容，记录触发来源、skill 身份、版本或内容 hash、参数和材料引用。宿主直接注入时可作为 origin=skill 的 user 附加上下文；模型经工具读取时沿实际 tool message 留档，不再复制成 user。commandId 只在 slash 触发时关联；若明确定义为 system 扩展，则走 system 版本合同。
+- skill 名称、文件路径或 hash 不能代替正文快照。动态变量、当前目录等展开结果按当时值存；后续按需读取的参考文件另存实际读取内容及来源。不要求预先把整个 skill 目录都塞入 message。
+- skill 已发现、列在菜单、已选中、加载失败，都不等于正文已注入。正文完成持久化并经上下文提交口接纳后，才可进入当前视图；已排队尚未接纳的输入仍显示 pending。提交事件关联实际 messageId、目标 turn 与 contextRevision，防止同一输入重复接纳。
+- `commandId` 不代替 turnId，也不自动发行主 turn。所有 slash 按 followup 排队；纯显示操作执行时可无 turn，接收时正在运行的 turn 只记为触发来源。slash/skill 若形成新任务，在命令被消费时按调度规则确定目标，不注入当前 turn 作为 steer；模型自主加载 skill 则仍归原任务。system 的 turnId 仍为 null，compact 内部 turn 沿 §4.6。
+- 命令完成、上下文接纳、请求准备、请求发送分别留账。下一次请求的 `inputMessageRefs` 固定实际选用哪些消息；发送记录说明这些输入何时发出。不能凭 command.completed 就显示“模型已读取”。
+- slash 经 hook 改写、加载 skill 又触发 hook 时，串起 commandId、hookInvocationId 与最终 messageId。原输入、skill 原始展开内容、最终采用内容各自可查；最终消息不能靠恢复时重新跑 hook 来猜。
+- resume 重建命令历史与效果卡片；已发送消息按原文恢复，纯显示命令可折叠查看当时结果。只读 replay 不重新打开面板、不执行 slash、不重载当前 skill 文件替换旧正文，也不重复切换配置。
+- 接纳前崩溃，恢复为未接纳或待核查；接纳后崩溃，按提交引用恢复一次。外部副作用状态不明时沿 unknown 合同处理，不能因命令缺 completed 就自动重执行。
+
+### 4.26 slash 验收场景
+
+| Case | 必须满足 |
+| --- | --- |
+| `/provider` 只打开面板 | 有命令事件，无新增模型消息，无虚构配置变更 |
+| 打开面板后选择或取消 | 选择与打开分别留账，真实配置变更可追到来源；取消不改变配置 |
+| `/context-window` 查看占用 | 留当次展示结果及口径，旧结果不随今天的上下文重算；不注入模型 |
+| skill 带参数、动态变量 | 保存展开正文、参数、来源版本与实际 message 引用 |
+| skill 文件后来修改或删除 | 旧请求仍能从存档还原，不依赖当前文件 |
+| skill 已选但加载失败 | 有失败事件，无伪造注入或已读取状态 |
+| 一条 slash 同时展示和注入 | 两项效果分别可查，文本不会重复入模 |
+| 运行中调用 skill | slash 来源只走 followup，模型主动加载仍归当前任务，接收来源与最终 turn 分清 |
+| `/compact` 带附加要求 | 原命令可查，真实压缩 prompt 含要求，内部 turn 与主 turn 不串号 |
+| 未知命令、参数错误、文本含 slash | 前两者有拒绝原因；普通文本照常作为消息处理 |
+| hook 改写展开内容 | 原输入、改写链、最终消息与实际请求引用可闭合 |
+| 部分效果成功后失败 | 已提交效果保留，命令结果明确失败阶段，不谎报全未发生 |
+| 接纳前后崩溃、重复投递 | 恢复不漏输入、不重复注入，不擅自重跑外部副作用 |
+| 只读 resume/replay | 可看命令与旧正文，不重新执行命令或加载当前 skill 替换旧事实 |
+
+### 4.27 event 用 effects 区分是否产生 message
+
+本节是本轮字段建议：顶层仍只有 event/message。event 不再靠命令名称、正文关键词或一枚 `hasMessage` 布尔值判断效果，而用带类型的 `effects[]` 列明事实。
+
+| effects 项的 type | 说明 | 必需信息 |
+| --- | --- | --- |
+| `display` | 请求展示面板、统计或提示 | effectId、展示对象和结果/快照引用；请求展示与客户端已显示仍分清 |
+| `config` | 配置已经改变 | effectId、变更项及前后配置版本 |
+| `message` | 已生成并保存消息正文 | effectId、`messageRefs` 非空数组；正文仍只在 message 行 |
+| `context` | 已提交当前上下文变更 | effectId、目标上下文、操作、前后版本和精确消息引用；沿原有提交合同生效 |
+
+`effects[]` 只写本事件直接持有的效果。`effectRefs[]` 引用其他事件的 `{eventRef, effectId}`；引用链须向前、无环，跨文件按 §4.2 补齐身份与 hash。命令完成时引用 skill、hook、compact 子流程的效果，不重复声明它又生成了同一组消息。汇总按 effectId 去重。
+
+**先判断有没有 message 效果，再判断那些消息是否已被接纳。** 二者各管一件事：
+
+- `/provider` 仅打开面板、`/context-window` 仅显示统计：只有 display 效果。显示正文不冒充 message。
+- 切换模型/温度：通常只有 config 效果。若也重建了 system，则另外产生 message 效果，引用新版完整 system；是否成为当前 system 仍按 §4.3 判断。
+- skill 加载成功：message 效果引用展开后的消息；排队时尚未产生 context 效果。接纳事件再记 context 效果，明确追加到哪个上下文、哪个 turn。
+- compact 的 prompt、模型回复：各自有 message 效果，正式计入主对话记录，purpose 为 compact，界面默认隐藏正文。仅 `compact.applied` 提交压缩后的有效上下文；后续请求引用摘要与保留清单，不因这些问答在历史中有记录就全部重发。隐藏不是排除输入的依据。
+- hook 只改 search 后端：记录路由/配置等对应领域效果，不为此虚构 message。hook 确实生成上下文消息时，才加 message 项。上表不是封闭的效果类型全集；其他领域类型随 schema 注册，不能硬塞成 display。
+
+**effects 记已发生的事，不预报整条命令会怎样。** `command.received`、started、pending 当下可为 `effects:[]`；它只说明这条事件尚未记录效果。未知命令、等待用户选择、异步加载，都不能提前判成“不产生消息的命令”。
+
+命令整个生命周期是否产生消息，要沿 commandId 收集各阶段及子流程效果，得到 `pending / none / produced / unknown` 的派生结果：未结束且未产出是 pending；确认结束且无产出是 none；已有正文是 produced；缺少终态或有未核清的执行则标 unknown，并保留已知产出。无需再把这份汇总当独立事实写一遍。
+
+**message 效果表示生成，不表示引用、发送或重复生成。** `model.request.prepared` 的 inputMessageRefs 是使用已有消息，不能再登记一次 message 效果。一个事件可生成多条 message，也可同时产生显示或配置效果；数组顺序不能代替实际请求顺序。
+
+效果引用必须指向已经落稳的 message。消息信封用 `causedByEventRef` 指回先前触发事件，并带所属 commandId/hookInvocationId/compactId；后续效果事件列出实际产物，形成可核对的来源链。不能先声明“已经生成 M1”，再尝试写 M1。以下省略公共信封字段，仅展示关联：
+
+```json
+{
+  "type": "event",
+  "eventId": "E10",
+  "kind": "command.completed",
+  "commandId": "C1",
+  "effects": [
+    { "effectId": "F1", "type": "display", "view": "context-window", "snapshotRef": "context-snapshot-1" }
+  ],
+  "effectRefs": []
+}
+```
+
+以下仅演示 slash 触发、宿主直接注入 SKILL.md 指令这一种路径，按“开始 -> 正文 -> 产出记录 -> 排队或接纳”追加。它不表示加载整个 skill 目录，也不代表所有 skill 都使用 user 消息；工具读取与逐份资源加载见 §4.29：
+
+```json
+[
+  { "type": "event", "eventId": "E20", "kind": "skill.started", "commandId": "C2", "effects": [] },
+  { "type": "message", "messageId": "M20", "commandId": "C2", "causedByEventRef": "E20", "turnId": "T2", "purpose": "conversation", "origin": "skill", "display": { "mode": "hidden" }, "message": { "role": "user", "content": "当次 SKILL.md 指令正文及必要参数，不含尚未读取的参考文件" } },
+  { "type": "event", "eventId": "E21", "kind": "skill.expansion.completed", "commandId": "C2", "effects": [ { "effectId": "F2", "type": "message", "messageRefs": ["M20"] } ] },
+  { "type": "event", "eventId": "E22", "kind": "context.input.applied", "commandId": "C2", "turnId": "T2", "effects": [ { "effectId": "F3", "type": "context", "contextId": "main", "operation": "append", "beforeRevision": 7, "afterRevision": 8, "addedMessageRefs": ["M20"] } ] },
+  { "type": "event", "eventId": "E23", "kind": "command.completed", "commandId": "C2", "effects": [], "effectRefs": [ { "eventRef": "E21", "effectId": "F2" }, { "eventRef": "E22", "effectId": "F3" } ] }
+]
+```
+
+示例用 JSON 数组便于并列阅读，落盘仍是每个对象各占一行，不写外层数组。此例 T2 已确定，接纳位于合法调度边界；目标尚未确定时先保留排队事实，不把接收时所在 turn 填进最终 message。
+
+context 项沿所归属提交事件定义具体结构：append 明确有序 addedMessageRefs；compact 仍用完整 manifest、保留/移除清单和版本门禁，不能套 append。这里不另造一套提交账，也不改变首行 system 和 §4.3 的生效边界；已有 system 选用关系不可再次应用为一笔新变更。
+
+消息落盘后、效果事件写入前崩溃：正文仍保留，通过来源链核对产出；不能把缺效果事件解释成“从未生成”，也不能盲目重跑 skill/hook。恢复补记须引用原 message，标明恢复来源。效果记录本身不授予入模资格，接纳仍看相应上下文合同。
+
+校验至少覆盖：纯显示无 message 效果；messageRefs 非空且目标存在；context 引用消息确属目标用途；只有 message 效果但未接纳时不入主上下文；开始为空、后来产出不漏判；产出后失败仍保留产物；effectRefs 不悬空、不成环且汇总不重复；正文落稳但效果记录缺失时显式标缺口。
+
+### 4.28 消息归属、显示方式与请求选用
+
+正式 message 落入会话账，就属于该会话的完整消息历史。`purpose` 说明用途，`turnId` 说明回合，显示字段只管界面，三者不能互相代替。内部 turn 仍是同一会话内的关联回合，不等于把消息搬到另一份不参与恢复的对话账。
+
+这里的“该会话”有明确 sessionId。subagent 是独立子会话，正文属于子账；父界面可以展开读取子账，但不会因此把子消息加入父上下文。它与同一 session 内默认隐藏的 skill/compact 消息不同，见 §4.31。
+
+建议在 message 信封加入 `display: { "mode": "visible" }`，mode 取 `visible / collapsed / hidden`：
+
+- visible：默认显示正文。
+- collapsed：默认显示一条可展开的消息。
+- hidden：默认时间线不单独显示正文，详情或“显示内部消息”仍可查看。隐藏不等于删除、脱敏或权限隔离。
+
+display 与 purpose 一样放在信封，不塞进 provider 的 role/content 正文。新消息由写入侧给出显示方式，读取侧不靠 role=user 判断“这一定是真人输入”。界面临时展开或隐藏不修改原始 message。
+
+| 内容 | 属于主对话记录 | 默认显示建议 | 请求如何使用 |
+| --- | --- | --- | --- |
+| 真人输入和常规 assistant 回复 | 是 | visible | 按当前上下文与请求清单选用 |
+| skill 当次披露内容 | 是，沿实际 system/user/tool 载体记账 | hidden；相关操作卡片可查看详情 | 按层加载并接纳，不能因隐藏而漏发 |
+| compact prompt 和回复 | 是 | hidden；压缩卡片可查看详情 | 属于那次压缩交互；成功后后续请求采用摘要与保留消息 |
+| 生效摘要 | 是 | hidden；压缩标记可展开 | 参与压缩后的有效上下文 |
+| `/context-window` 纯显示结果 | 无新增 message，操作属于事件历史 | 由 display 效果展示 | 不凭界面文字生成模型输入 |
+
+验收须分别证明：隐藏 skill 仍可入模；可见旧消息在 compact 后未必继续入模；隐藏 compact 消息可从同一会话账完整恢复；切换显示模式不改变 inputMessageRefs、contextRevision 或请求 token 预算。压缩标记和失败状态仍按事件显示，隐藏正文不能顺带藏掉操作失败。
+
+这也限定 §4.27 的含义：message 效果表示“给会话账增加消息”，context 效果表示“改变有效上下文”。前者是否显示看 display，后者用于哪些请求看实际输入清单。三项分别判断，不再笼统写成“加不加主对话”。
+
+### 4.29 skill 渐进式披露与轨迹记录
+
+2026-09-10 核对 [Agent Skills 规范](https://agentskills.io/specification#progressive-disclosure) 与[客户端集成指南](https://agentskills.io/client-implementation/adding-skills-support)。规范分 metadata、instructions、resources 三层；具体事件字段、显示方式和记账规则是本项目设计，不是规范规定的 JSONL 格式。
+
+| 阶段 | 模型获得什么 | 本项目如何留账 |
+| --- | --- | --- |
+| catalog：发现 | 可用 skill 的名称、简介及必要定位信息 | 发现过程记 event；真正提供给模型的目录保存在其承载消息中，不把所有 SKILL.md 正文预先塞入 |
+| instructions：启用 | 选中 skill 的 SKILL.md 指令正文 | 记激活/读取过程，保存当次实际注入或工具返回的正文和来源；不自动递归展开引用 |
+| resource：按需取材 | 任务确实需要的参考文档、模板、数据，或脚本执行结果 | 每次读取/执行各自留过程与结果；只记录实际提供的内容，不把未读取的文件算作模型已见 |
+
+“完整保存当次内容”指完整留存那次真实消息，不是一次性加载整个 skill 包。SKILL.md 内的文件链接只是路径提示，不代表目标文件正文已经披露。宿主扫描或缓存文件，也不代表模型已经收到。
+
+- 首版按 §4.49 保留少量固定入口及有预算的小目录；完整目录存宿主索引，按需检索。固定目录可随初始 system 提供；后续发现不默认重写 system，而以隐藏上下文或工具结果披露。用户确实要求变更 system 时才沿 §4.3 追加新版。同一目录不重复注入。
+- 每次披露用事件关联 skill 身份、来源版本/hash、阶段 `catalog / instructions / resource`、资源路径及所读范围、实际 messageRefs。一次消息可以包含多项目录元数据；一个资源也可以分多次读取，不能强行设成“一 skill 一 message”。
+- slash 触发与模型主动选择都可启用 skill。保留各自 commandId 或 tool_call_id，不为模型主动读取虚构 slash；工具返回的正文继续走 role=tool 及工具配对合同。
+- 读取 SKILL.md 的工具结果已经产生 message 效果时，skill 激活事件用 effectRefs 引用它，不再复制正文或重复声明产出。origin/source 说明来自 skill，不能用来源替换真实消息角色。
+- 执行 scripts 中的程序不等于把源码发给模型。运行入口、版本和结果照工具合同留档；源码只有实际读取并提供时才算披露。模板可作为执行输入留 artifact，是否进入模型输入另看消息与请求记录。
+- SKILL.md 经工具读取仍受单次 32 KiB 预览限制。超限原文落档，按范围补读，逐次记录实际片段；只返回头尾时必须标明指令未完整提供，不能声称“已经完整加载”。是否分段或拒绝过大的入口由加载策略决定，不暗中截去中段继续当完整指令用。
+- 后续参考资料同样按需、按范围取；记录原文快照与实际预览，不能把 artifact 已保存误作模型已读全文。必要参数替换和 hook 改写保留最终发送文本及来源链。
+- 同一版本指令仍在有效上下文中时，重复启用可引用已有消息并记复用，不必重复注入。compact 后只剩摘要，不等于完整指令仍在；确需继续执行时明确保留或重新披露，并记录采用版本，不能靠历史上的 loaded 标志跳过。
+- display.mode 仍只管界面。目录、指令或资源消息可以默认隐藏，同时正常进入模型请求；渐进式披露决定何时提供内容，隐藏决定用户默认看不看正文，两者独立。
+
+验收补充：启动只披露目录；启用 A 不加载 B 正文；引用存在但未读取不算披露；工具读取不重复生成 user；脚本执行不自动披露源码；超限入口显示未完整提供；compact 后复用检查有效上下文；恢复按旧消息还原已披露内容，不自动读取当前版本或尚未用过的资源。
+
+### 4.30 前驱属于上下文版本，compact 显式改接
+
+此处补齐前面 JSON 示例省略的链信息。不能仅凭 seq 连消息：seq 说明谁先落盘，compact 后的有效顺序却会让新摘要出现在旧消息前面。也不能只靠 turnId 或 display.mode 推导顺序。
+
+消息正文只有一份；上下文链节点说明“这条消息在这一版接着谁”。建议固定以下结构：
+
+| 字段 | 语义 |
+| --- | --- |
+| `contextId` | 哪条有效上下文；主对话、compact 内部请求或分支不能混用同一个 head |
+| `contextRevision` | 该上下文版本；提交事件可用 sourceContextRevision/newContextRevision 表示前后版本 |
+| `contextChain[].messageRef` | 已落稳的消息身份；同一条链中不重复 |
+| `contextChain[].prevMessageRef` | 同一版链内的直接前驱；只有根节点为 null |
+
+不把 prevMessageRef 写成 message 本体上的全局唯一前驱。同一 M 在旧版接 A，在新版接 Q，二者都是真的；若只在 M 上写一个 pre，要么改旧档，要么无法表示新版。链节点由 `(contextId, contextRevision, messageRef)` 定位，首版不另发行 nodeId。
+
+举例：T7 尚未完成，已有 U7、A7、R7 三条消息，分别为 user、assistant 工具调用、tool 结果。旧上下文为：
+
+```text
+版本 7：S2 -> U1 -> A1 -> ... -> U6 -> A6 -> U7 -> A7 -> R7
+版本 8：S2 -> Q1 -> U7 -> A7 -> R7
+```
+
+Q1 为新摘要。只替换历史前段，T7 的三个 messageId、turnId、正文和内部顺序不变。尤其 U7：旧版前驱为 A6，新版前驱为 Q1。以下是 compact.applied 的链相关字段节选，完整事件仍须包含 §4.8 的校验、范围、hash 与 token 信息：
+
+```json
+{
+  "type": "event",
+  "kind": "compact.applied",
+  "contextId": "main",
+  "sourceContextRevision": 7,
+  "newContextRevision": 8,
+  "summaryMessageRef": "Q1",
+  "retainedMessageRefs": ["U7", "A7", "R7"],
+  "protectedTurnIds": ["T7"],
+  "contextChain": [
+    { "messageRef": "S2", "prevMessageRef": null },
+    { "messageRef": "Q1", "prevMessageRef": "S2" },
+    { "messageRef": "U7", "prevMessageRef": "Q1" },
+    { "messageRef": "A7", "prevMessageRef": "U7" },
+    { "messageRef": "R7", "prevMessageRef": "A7" }
+  ]
+}
+```
+
+这份数组按根到尾序列化，邻接项必须与 prevMessageRef 一致；两者冲突视为坏记录，不能任取一种顺序。根为当前选定的 system，其后的第一条为 Q1，再接 retained 的完整有序序列。有效列表可派生为 system=S2、input=[Q1,U7,A7,R7]。
+
+- **完整提交**：Q1 与所有引用先落稳，再将新链随 compact.applied 一起耐久提交；链中只要缺一个节点、引用或前驱，就不发布新版。写到一半不能先把内存 head 指向新摘要。
+- **追加消息**：普通上下文接纳事件记录源版本、旧尾引用和 `appendedChain`，首个新节点接旧尾，后续节点逐个相接；只有完成前驱校验才提交新版本。§4.27 的 addedMessageRefs 是简化示例，完整 schema 须带此追加链，不能靠文件尾推断。首行 system 初始化单节点链，prevMessageRef=null。
+- **切换 system**：沿 §4.3 的新版 system 落稳边界，发布新版本链，以新 system 为根，保留后续节点并重接其首节点。选用记录/消息信封须携带足够的源版本与链描述来重建；具体封装随 schema 冻结，不能暗改旧链或读取今天的设置猜前驱。
+- **并行与插话**：工具结果可按完成顺序落盘，接纳链仍按协议要求排列；一组节点先全部落稳再提交其链。新消息要接“所提交版本的尾”，不能接全文件最后一条 compact/hook 消息。源版本改变按冲突合同处理，不能静默接到旧尾。
+- **时间顺序**：U7 在 Q1 之前落盘，但新版链允许 U7 的前驱为 Q1。只要求链引用先于提交事件落稳，不要求前驱 message 的 seq 小于当前 message 的 seq。环检查按同一版节点关系判断。
+- **请求与显示**：请求从指定版本的链生成有序输入，记录准确 inputMessageRefs；重试引用固定准备快照。历史界面继续按账中时间与来源显示完整消息，不沿有效链隐藏所有已压缩旧史；display.hidden 节点同样可在有效链中。
+- **无未完成 turn**：新链为 system -> 摘要；不制造占位 user。连续 compact 时当前旧摘要参与生成新摘要，成功后退出有效链，按 §4.41 记录来源和替换。多个受保护 turn 按完整 retained 顺序接入，不只接第一轮。
+- **resume 与分支**：contextId 区分各分支，revision 在各自作用域内递增；复用旧消息时使用 §4.2 的完整跨 session/run 引用和 hash。重建指定版本的完整链，不混取另一个分支或新会话基础 system；缺引用时停止精确恢复并报告缺口。
+- **校验**：根唯一、根前驱 null、非根前驱存在、每节点至多一个后继、无环、无重复且全链连通；节点角色/用途与目标上下文匹配，retained 顺序及工具配对不变；hash 覆盖上下文身份、版本、消息内容身份及前驱关系。
+
+验收至少包含：旧 U7 不改即可改接 Q1；第二次压缩不沿旧摘要走错链；新摘要后接更早 seq 的旧消息；工具乱序落盘但按声明次序接纳；换 system 后摘要接新版根；applied 前后崩溃恢复各选正确版本；隐藏节点不断链；跨 session 缺件、错误前驱、双根、环与分叉在提交前拒绝。验收需比较链遍历结果与请求 inputMessageRefs，不能只证明各个 messageId 都存在。
+
+### 4.31 subagent：父工具调用与独立子会话
+
+调用 subagent 是父模型的一次工具 Action；真正运行的子代理有独立会话。父账只拥有调用、关联、观察与交付事实，子账拥有其内部模型、工具、hook、compact 和任务执行事实。工具 Action、委派任务与子 session 不是同一个身份。
+
+目录沿此前 `<sessionId>.jsonl` 命名，每个子会话拥有自己的 artifacts。以下 P1/C1/C2 均为示例 sessionId：
+
+```text
+sessions/P1/
+  P1.jsonl
+  artifacts/
+  subagents/
+    C1/
+      C1.jsonl
+      artifacts/
+      subagents/
+        C2/
+          C2.jsonl
+          artifacts/
+```
+
+每一层都是完整 session 布局，后代可递归创建；不能只在 subagents 下放一批共用 artifacts 的零散 JSONL。sessionId 全局唯一，路径由宿主根据身份生成，不能用任务名称直接作目录名。目录说明物理归档位置，父子关系仍以账中引用为准。
+
+| 身份/引用 | 语义 |
+| --- | --- |
+| 父 `tool_call_id` / actionId | 本次父工具调用；spawn、wait、send、cancel 若各自是工具调用，各有自己的 ID |
+| `taskId` | 一项委派工作，贯穿启动、等待、补充输入、完成及结果交付，不因一次 wait 超时换号 |
+| `childSessionRef` | 子 sessionId、runId、journalPath；目录位置不是身份的替代品 |
+| `parentActionRef` | 创建它的父 sessionId、runId、turnId、stepId、actionId 与声明消息引用 |
+| `spawnEventRef` | 父账中已经落稳的启动申请/预留记录，采用完整事件引用与 hash |
+| `childCheckpointRef` | 子账的固定 seq/hash 及所引用事件/消息，证明当时观察到哪个持久前缀 |
+
+子账首行仍是完整 system，seq=1、turnId=null，带自己的 session/run/schema 身份及上述派生来源；子 turn/step/action 均独立发行。系统身份、工具权限、模型设置、工作目录和可用 skill 按子代理实际配置留快照，不把“继承父配置”当作正文。
+
+父代理下达的任务在子账中形成真实 user 输入，origin 标明父代理委派，回指父工具有效参数/来源消息；它不是子会话里的真人输入。传入父上下文时，固定选取范围、源版本与真实提供内容：可用子消息包装或受校验的不可变内容引用，不能恢复时再读取父会话最新全史。默认不自动继承父账全部消息。
+
+父、子各自有 system 根和 contextChain。父工具声明通过 parentActionRef 派生子会话，这条边是会话来源关系，不是 prevMessageRef。子 system 的链前驱为 null；子摘要接子 system，父摘要接父 system。父消息链只接最终交给父模型的 tool 结果，不穿过子代理全部内部消息。
+
+### 4.32 启动、等待、交付与恢复
+
+**启动必须能核对两份账。** 文件夹已经存在，不代表子代理已启动；创建空文件也不算启动成功。建议采用以下顺序，事件名为 schema 草案：
+
+1. 父账记录工具接纳和 `subagent.spawn.requested`，持久预留 taskId、childSessionRef、attempt、parentActionRef、有效任务参数及配置来源。后续重投复用这一预留身份。
+2. 创建子目录，由子账唯一写者写入首行 system、初始化事件和任务输入；所有启动所需内容落稳，返回 childCheckpointRef。此时不能调用模型、执行工具或触发有副作用的任务 hook。
+3. 父账写入 `subagent.linked`，引用已准备好的子账检查点。子执行器确认这笔关联落稳后，才在子账记任务 started 并开始执行。linked 表示关联已经建立，started 才证明执行开始。
+4. 子账独立记录完整运行过程。父账可追加 `subagent.observed`，只保存源检查点和必要展示信息，不能代替子账原始事实。
+5. 子任务完成时，先在子账持久记录终态、被选用的最终答复和交付材料；父侧再核验、形成工具结果材料，沿 result.persisted、PostAction、result.selected 和 tool message 合同交付。
+
+这是可恢复的跨文件交接，不声称两份文件有一次原子写。初始化失败就在父账记 spawn.failed 和失败阶段，停止执行；不能回退成“借父 logger 继续运行”。父预留后崩溃、子准备后崩溃、linked 后未 started，都须按已有检查点恢复，不按目录是否为空猜状态。
+
+| 调用方式 | 父工具何时返回 | 最终答复怎么交付 |
+| --- | --- | --- |
+| 同步委派 | 等子任务明确完成、失败或按约定中断 | 原工具调用只回一条最终 tool 消息 |
+| 异步启动 | 关联落稳、任务已被接纳即可返回 taskId 与 childSessionRef 收据 | 子任务继续运行；通过独立 wait/result 工具取得结果，或按明确的通知接纳机制追加消息 |
+
+首版默认采用异步启动，完成报告通过 §4.35 的 followup 队列交付父代理。同步委派作为显式调用方式保留，不由默认 spawn 偷偷变成等待整个子任务结束。
+
+异步收据不是子任务完成；后续通知不能再次使用 spawn 的 tool_call_id 冒充第二条最终结果。wait 超时只结束此次等待，不自动结束子任务。父工具状态、子任务状态和交付状态分别记录；子任务 done 与父侧 delivered 可以相隔很久，也可以交付失败。
+
+- **结果与预览**：父侧保存选定报告的不可变材料或引用，result_ref 仍为数组，32 KiB 是每次父工具调用的总预览上限；一次返回多个子结果时共享额度。多份报告逐段标明来源。子内部各工具也各守自己的 32 KiB 限制。
+- **活文件与固定材料**：childSessionRef 用于打开子会话，不能把仍增长的子 JSONL 当作一份已完成的 full_output。若要导出轨迹，固定子账检查点并生成不可变快照；报告 full_output 指实际报告材料，不能拿子会话目录代替。
+- **完整来源**：父工具结果关联 taskId、childSessionRef、子终态事件、选用答复/报告及检查点。子内部失败重试、工具输出与 compact 全史从子账展开，不复制成父 assistant/tool 消息。子任务失败时可交付明确标注的部分结果，不能因此把子状态改成 done。
+- **继续交流**：向运行中的子代理补充输入时，发送侧记请求与 deliveryId，子侧持久接收后回执；子 user 消息保留来源。deliveryId 用于重复投递去重，接收成功、调度接纳、模型实际收到分别记录，不能只凭 send 返回就宣称执行完毕。
+- **重试与重启**：同一次启动尝试的重复投递只对应同一个子实例；新执行尝试须明确关联 retryOf/attempt。任务是否可重跑须核对原执行和副作用，不能因父侧超时就另起一个副本。子运行中的模型重试、工具重试仍由子会话内部记账。
+- **取消与退出**：cancel_requested 只表示请求已发，子执行器确认停止后才有 cancelled；无法确认则 unknown。启动时固定随父取消或允许独立运行的策略。父账封口后，后台子代理继续写自己的账；其后观察/交付写到仍活动的接收会话，不重开已封口父账。
+- **resume**：只读恢复仅打开父子账，不启动任务。主动续接先核验子实例是否仍活着及执行所有权，再关联已有实例或按策略处理 unknown。按“每次启动新账”规则恢复执行时另建子 session，通过 resumedFromSessionRef 关联旧子账，不能覆盖原文件；同一 taskId 的多个会话段必须有明确前后关系且不同时执行。
+- **父会话更换**：新父会话可以继续观察或获准接管旧子任务，另记接管关系和写者代次；子最初 parentActionRef 不改。旧子目录也不搬到新父目录，新父以完整引用定位。单纯读取引用不授予任务控制权。
+- **丢失与损坏**：父账存在、子账缺失时，界面标“子会话记录缺失”，可显示仍可核验的父结果，不能声称完整恢复。子账存在而父关联未完成时，按预留身份核验准备阶段，禁止自动作为正常运行子代理接管。
+- **计量**：子模型 usage 由子账拥有，父任务汇总按来源引用去重；父模型读子报告所花 token 是父请求自身开销，另记。父工具墙钟包含等待子任务的时间，不能再加子耗时算一次总墙钟；并行子任务也不能简单相加。
+- **父 compact**：可压缩父已完成委派的消息，但不能删除子账或断开 taskId/childSessionRef。运行中任务控制状态从事件恢复，给模型保留或重新提供必要任务收据；未完成父工具的配对仍受保护。子 compact 只修改子上下文版本。
+- **嵌套与并发**：多子代理各有独立目录、账与写者；后代关联直接创建它的父 Action，记录根 session 与深度，限制并发、递归和预算。不同文件 seq 不拼成全局顺序，跨会话进度通过来源检查点与因果边展示。
+
+### 4.33 subagent 验收场景
+
+| Case | 必须满足 |
+| --- | --- |
+| 同步委派正常完成 | 父一组工具调用/结果，子有独立首行 system、任务输入和完整执行账 |
+| 异步启动后等待 | 收据、运行终态、结果交付分开，原 spawn 无第二条 tool 结果 |
+| 多子代理并发、同名任务 | ID/目录/写者互不串，结果对应各自父工具身份 |
+| 子代理再派生子代理 | 直接父 Action、根 session 与深度齐全，消息前驱不跨错会话 |
+| 初始化/首行写盘失败 | 父记具体失败，子不执行，不借父账继续记内部调用 |
+| 子准备后父崩溃 | 能找到预留和子检查点，无关联提交不擅自执行 |
+| linked 后尚未 started 崩溃 | 关联与执行状态分清，按执行所有权恢复且不重复启动 |
+| 子完成后父交付前崩溃 | 从子终态与固定材料补交付，不重跑任务 |
+| wait 超时、连接断开 | 不伪造子失败/取消，不自动创建重复子代理 |
+| 补充输入重复投递 | deliveryId 去重，子消息与最终 turn 归属可核对 |
+| 报告超限、多文件 | 原文引用可查，每次父工具总预览不超过 32 KiB，来源标签齐全 |
+| 父退出而子独立运行 | 子账继续独立记录，父封口不被重开，之后交付有明确接收者 |
+| 父/子各自 compact | 各自 system/摘要/保留链正确，任务引用和工具配对不丢 |
+| 父 resume、子仍运行 | 只读不启动，主动接管须确认所有权，不把旧目录搬走 |
+| 子恢复新会话段 | 新 system、新 seq，与旧 session 及同一 taskId 可追溯，无双实例执行 |
+| 子账缺失、检查点 hash 不符 | 明确报告缺口，不宣称完整回放，不自动重跑补史 |
+| 父子费用汇总 | 子费用不重复计入，父读取报告的费用单独可查 |
+
+### 4.34 首次 query 的标题生成与采用
+
+按用户给出的顺序：第一条有效 query 落档 -> 追加取标题 prompt -> 模型返回标题信息 -> 提取、校验 -> 持久采用 -> 更新会话标题。开始会话但没有 query 时，不调用模型取题；纯显示 slash 不消耗“首条有效 query”的触发位置，skill 若形成真实任务输入则按接纳记录判断。
+
+- 标题 prompt 是独立 message，建议 role=user、origin=session_runtime、purpose=session_title、display.mode=hidden；内容明确引用首 query 及选定材料。首 query 原文不改，不能把附加指令直接改写进用户那条 message。
+- `title.requested` 固定 titleGenerationId、sourceQueryRef、当时选用的材料及源上下文版本。标题 prompt 在用于这次标题生成的 contextChain 中接在首 query 后，prevMessageRef 指向首 query；若有其他实际必需输入，必须按真实清单记录，不能画一条与请求不符的简图。
+- 取题属于首 query 触发的宿主流程，不发行一轮伪造的真人输入。message/request 都记录用途与来源。标题与任务答复同一回复返回，还是采用关联的独立 step/request，当前用户未指定，本轮不擅自定成某一种；落地前在 §4.13 冻结。也不因此另起 subagent 或另建 session。
+- 模型返回内容按真实 assistant message 留档。若整条回复专门供标题生成，默认隐藏；若同一回复还包含任务答复，只提取标题部分，保留正常任务正文显示，不能把整条 assistant 隐藏或从原档裁掉标题片段。
+- 标题提取记 `title.extracted`，关联 sourceResponseRef、所取字段/内容块、解析规则版本和候选值；校验记录空值、长度、控制字符及格式错误。优先约定明确的 title 字段或内容块，不能随意拿回复第一行当标题。具体返回格式仍待定。
+- 校验通过后记 `session.title.applied`，包含标题来源、旧值、新值、前后 titleRevision 及候选引用。该事件落稳后才更新界面/索引；配置效果可引用这笔事件。提取成功不等于已经采用，标题采用不代表用户任务完成。
+- 标题是会话元数据，变更不更换 sessionId、不重命名 JSONL 或目录、不重接消息链，也不单独改变 contextRevision。标题 prompt/message 的接纳按正常上下文合同处理；不得拿 display.hidden 当作自动删除指令或排除后续输入的依据。
+- 请求中、等待、失败、取消沿操作生命周期留账。失败可保留明确标注来源的临时本地标题，不能冒充模型生成成功；重试沿同一 titleGenerationId 分 attempt，不因第二条 query 到来就换掉原取题材料。
+- 同一来源 query 只触发一项自动取题工作；重复接收和 resume 先查已记录任务。已采用就直接恢复 title，只有候选则从候选继续校验/采用，不因缺 UI 状态重复调用模型。并发新标题或用户手动改名时，迟到结果须核对 titleRevision，过期候选留档但不覆盖当前标题。
+- 子会话的任务标题与主会话首 query 自动取题分开。父工具若已经提供子任务 title，子账按来源采用；不能仅因子账出现第一条 user 委派消息就额外触发一次自动取题。子代理是否允许再次自动命名由单独策略决定。
+
+验收覆盖：无 query 不取题；纯显示 slash 不误触发；首 query 原文未改；标题 prompt 和产物来源可追；标题隐藏不误藏任务回复；提取失败不采用；采用后恢复不重取；手动改名后迟到结果不覆盖；title 变化不移动父子 session 路径；正常任务不会因标题完成而提前结束。
+
+### 4.35 默认输入路由：普通文本 steer，slash 与后台报告按目标 followup
+
+用户确定默认路由；以下队列字段与调度细节为设计建议。这两种模式都只影响何时接纳输入，不改变消息角色、来源身份和独立会话归属，也不等于 abort/cancel。
+
+§4.58 补入 btw 后，队列必须带 targetSession/targetContext。下表“等待主 turn”适用于目标为 main 的 slash；/btw 的 followup 发往独立旁支，因此能在 main 忙时回答，既不是 main steer，也不占 main followup。/fork 是只读源检查点加新 session 创建，命令交给新分支控制队列，不向旧 main 注入任务。这个作用域限定取代此前“所有 slash 一律等待主 turn 停止”的表述，slash 仍不转换成 steer。
+
+| 来源 | 默认 mode | 父代理忙时 | 父代理已空闲且允许继续时 |
+| --- | --- | --- | --- |
+| 用户普通文本任务输入，不含 slash | `steer` | 在当前主 turn 的下一个协议安全边界接纳，指导后续步骤 | 创建正常新 turn 并处理 |
+| 目标为 main 的 slash，包括 /compact 与 skill 命令 | `followup` | 命令先持久入队，等主 turn 的 followup 边界再执行；不能展开后转成 steer | 消费命令，按实际效果执行或创建后续任务 |
+| subagent 异步交付给父代理的报告/通知 | `followup` | 排队，等当前主 turn 本来要结束且 steer 已处理时再接纳 | 无 steer 抢先时自动接纳，开始后续 turn |
+| 后台进程任务的完成/失败报告 | `followup` | 与子报告共用交付队列；进度日志默认仅供 UI 查看 | 会话允许继续时接纳；暂停或封口时只保存可交付事实 |
+| `/btw` 及旁问追问 | 目标为 btwContext 的 `followup` | 独立旁支排队、回答；main 按原节奏继续 | 同样只更新旁支 |
+| `/provider`、`/context-window` 等纯显示 slash | `followup` 命令 | 同样等待命令调度边界，执行只产生显示效果 | 执行命令，不凭空创建模型消息或真人 turn |
+
+安全边界指当前模型流式输出已经收口、已声明的工具调用获得配对结果并按协议接纳之后、下一模型请求发送之前。steer 不截断已发送请求，不自动取消正在运行的工具；真正停止走独立取消流程。followup 不在任意 step 结束时抢入；先确认主任务准备停止，内部 title/compact/hook 请求完成不能冒充这个停止边界。
+
+**队列事实先落账。** 输入接收事件记录 inputId、来源与完整内容或不可变 payloadRef；入队事件记录 mode、modeSource、队列序号、状态与目标会话。普通文本默认 steer、子代理默认 followup 记 modeSource=default；slash 的 followup 是本轮明确规则，不能用通用模式覆盖把它改成 steer。命令队列与模型输入接纳共用来源与顺序，但纯显示命令不因此生成 message。
+
+slash 原文接收/解析/入队可立即记录，真正命令效果等 followup 边界执行；/compact 在消费时取当时上下文，不能沿到达时的旧版本压缩。自动 compact 是 runtime 的发送前容量维护，不是 slash，不受“等主 turn 结束”的限制；否则会因需要压缩才能结束、又等结束才压缩而互等。
+
+- 子报告另带 deliveryId、taskId、childSessionRef、sourceResultRef/childCheckpointRef。子任务完成事实属于子账，父账入队事实属于父账；子 done、父 queued、父 admitted、请求 sent 是不同阶段。
+- 同一接收会话各队列 FIFO，以其单写者提交的队列序号排序，不比较父子机器的时间戳。安全边界先检查 steer；准备停止时再次检查 steer，再消费 followup。选择与接纳共用提交口，防止检查后插入新输入导致双重消费。
+- 优先级以接纳提交时为界：followup 尚未接纳时，已入队 steer 优先；followup 已进入请求后，晚到用户输入走下一安全边界，不能改已发送请求。每次接纳数量使用明确的调度策略快照，首版不得由碰巧到达的批大小决定。
+- 正在处理 T1 时接纳 steer，最终消息归 T1；原始用户接收时间与入队顺序保留。T1 确认结束后消费 followup，建议建立 T2，prevTurnId 指 T1，origin 标明 subagent；不是伪造真人发起 T2。触发委派的旧 turn 与当前实际接收 turn 分别记录，不能把迟到报告硬挂回已结束旧 turn。
+- 目标 turn 未确定时，队列先保存输入事实和材料引用；接纳时形成带最终 turnId 的 message，再用提交事件记录 inputId/deliveryId、messageRefs、目标版本和 §4.30 的 appendedChain。不得为了提前填 turnId 改旧 message；message 已落稳而接纳失败时保留为未接纳产物，恢复不重复消费。
+- 所有前驱在接纳时按实际目标版本确定。followup 即使在 compact 前到达，compact 后才接纳，也应接到新链尾部；不能用到达时的旧尾或创建子任务时的父消息作为当前 pre。
+- 队列项目与实际 message 可复用同一不可变内容材料，事件不再持有另一份可修改正文。用户等待中的输入可由队列事件显示；子通知以任务来源卡片显示。display.mode 不改变入队优先级。
+- 异步报告自动交付父模型时，采用来源明确的宿主 user 通知，origin=subagent，并绑定上述来源引用；不能复用已完成 spawn 的 tool_call_id。父模型显式调用 wait/result 时，返回的是该次调用配对的 tool 消息，角色按实际通道记录。
+- **wait 不等 followup 调度**：等待工具直接观察子任务的持久终态并完成自己的工具结果。不能要求主代理先消费 followup 才让 wait 返回，否则主代理等工具、通知等主代理停止，双方互等。
+- **两条交付路径去重**：同一结果用 deliveryId/sourceResultRef 关联。wait 已经接纳完整报告时，未接纳的自动 followup 记 superseded 并引用对应消息；自动 followup 已交付后再次 wait，可返回任务状态与原报告引用。每个 wait 调用仍须得到合法配对结果，不能以去重为由丢掉 tool 消息。
+- 子代理普通运行进度默认只更新事件/任务卡片，不让每条内部工具日志都排入 followup。确需交给父模型的中间报告使用独立 deliveryId；最终报告与中间报告分清，不能把最新进度当完成。
+- 多个子代理同时完成，分别持久入队，默认跟随当前队列次序；不因其中一个失败就丢弃其他报告。用户持续 steer 时 followup 可以继续等待，界面保留排队状态，不悄悄把子通知提升成 steer。
+- 父会话正常空闲可处理 followup；用户明确暂停、停止或会话已经封口时，只保存可交付事实，不能借自动 followup 恢复运行。父封口后子结果继续存子账，后续接收会话主动核验并入队，不重开旧父账。
+- resume 恢复未接纳队列、已经接纳的 deliveryId 和各自来源；只读 replay 不消费队列。主动继续时按当前执行所有权核验，再从持久队列推进，不能因内存队列空了就重发所有子报告。
+
+例如父 T1 正在执行一组工具：子 C1 完成先排 followup；用户随后补充要求排 steer；工具组收口后先把用户要求接入 T1；T1 按新要求继续，直到准备结束且 steer 已处理，再接子报告启动后续 turn。父有多个子任务时，同样按各报告实际入队与接纳记录还原，不靠终端打印先后猜。
+
+验收覆盖：忙时用户先于未接纳子报告；steer 不打断工具配对；空闲时 followup 能唤起后续处理；followup 不抢占每个 step；wait 无互等；自动报告与 wait 不重复注入；compact 前到达、之后接纳不断链；报告到达时的旧 turn 不覆盖最终 turn；重复投递/接纳前后崩溃不重发；暂停/封口不自动唤醒；多子任务同时返回不串身份。
+
+### 4.36 内置 token 估算 hook：最终请求输入就绪时执行
+
+公式固定为 `estimatedInputTokens = ceil(inputUtf8Bytes / 4)`；命名建议 `estimator=utf8_bytes_div4`、`estimatorVersion=1`。UTF-8 字节数不是字符数、Unicode code point 数或 UTF-16 code unit 数；不得把 Windows 宽字符串 length 直接除以 4。整数实现用除法和余数取整，避免先加 3 导致大整数溢出。
+
+计量包含本次实际回传的明文 reasoning，不能只扫描 content。签名或加密载荷的字节长度不能代表其内部思考 token；这类未知覆盖按 §4.42 显式标记，不能用 bytes/4 假称完整预算已验证。
+
+**先定计量对象。** 首版采用 `scope=model_input_json_utf8_v1`，以发送前最终模型输入快照为对象，作紧凑 JSON 序列化后计 UTF-8 字节：
+
+- 计入实际选用的 system、有序输入消息、工具声明/参数/结果、工具定义及提供给模型的输出格式 schema。已接纳的隐藏 skill、标题 prompt、子报告照算；未选中的旧 system、已压缩原文和仍排队的 followup 不算。
+- 由 adapter 从最终请求中选取模型输入字段，规范化成可复现快照；对象键顺序确定、无缩进，非 ASCII 直接编码为 UTF-8，字符串中的引号/换行等按 JSON 规则转义。工具 args 若最终是字符串则保持字符串，不擅自解析后改写。序列化规则带版本，计入必要 JSON 结构字节，因此这是输入 token 的代理值，不是把 JSON 字符串当成实际 tokenizer 输入。
+- 不计 JSONL 信封的 seq、timestamp、eventId、display 等记录字段，不计事件历史、未发送的 artifact 全文、网络 header、凭据或 max_output_tokens/temperature 等非输入设置。定义完整且可测试的 adapter 字段映射，不能直接把整条日志或整个 HTTP 请求体大小除以 4。
+- 非文本块保留类型与引用信息用于快照核对，但图片/音频/视频/文件内嵌二进制及其 base64 不参与 bytes/4，记录 `unestimatedModalities` 与 coverage。存在未计量媒体时 coverage=partial，不把媒体估算补 0。首版不承诺覆盖非文本预算；若发送门禁要求完整估算，必须有对应策略或明确拒绝，不能靠文本字节数判定一定装得下。
+
+实际输入有 128000 字节时，估算为 32000 token。最终对总字节数取整一次，不对每条消息分别 ceil 再相加。用于加速的字节缓存按内容 hash 与序列化版本绑定；首版可以直接全量计算，不先引入缓存校准或动态系数。
+
+**功能放内置 hook，挂点由 runtime 保证。** 逻辑名为 `context.token_estimate`，默认实现为 `builtin.token_estimate`；用户可按 §4.48 同名替换实现。最终发送估算挂在 `PreRequest` 的 estimate 阶段，处于 adapter 最终输入已经冻结之后。PreRequest 专管一次物理模型请求，PreStep 专管逻辑 step 开始；重试请求也须经过 PreRequest，不因仍属同一 step 而省略。两者都是 v3 合同，不声称现行实现已有完整挂点。执行次序为：
+
+```text
+接纳 steer/followup，确定本次上下文版本
+  -> 执行会改变输入的 PreStep/PreRequest hook，并采用效果
+  -> 完成 provider adapter 的输入变换，冻结本次输入快照
+  -> dispatcher 执行内置 token 估算 hook，返回 UTF-8 bytes/4 结果
+  -> hook 输出落稳，model.request.prepared 引用输入快照与估算结果
+  -> 内置容量判断 hook 消费估算，返回允许发送或要求恢复/拒绝的决定
+  -> runtime 按决定继续发送或调度 compact/工具预览降档
+  -> 请求发送、接收回复及 provider usage
+  -> PostStep 做统计/展示等后处理
+```
+
+PreTurn、PostStep 的展示刷新也可通过内置估算 hook 调用同一纯计算函数，并标明 measurementPurpose 与输入版本；它们不代替最终发送前估算。一个 turn 会经过多 step，工具结果和 hook 会持续改变输入；结束后的展示估算不能倒填本次请求的预测。provider 实际 usage 在收到时持久化，PostStep 只消费它做后处理。
+
+runtime 只负责通用调度、能力/结果校验和效果提交，不另实现一份 token 估算或容量策略。内置估算 hook 只读冻结快照；后续容量 hook 可消费估算并提出 recover/reject 等决定，不能在估算完成后偷偷改请求。确需改输入、工具定义、模型映射或 schema 时，返回重新准备决定，换输入版本，再经 hook 估算；不得使用旧 inputHash 的数字。
+
+建议最终请求路径的内置估算与容量 hook 注册为 required，并声明只读/效果能力、所在阶段、先后依赖和失败策略。按依赖确定“输入改写 -> 冻结 -> 估算 -> 容量判断”，不能靠随手填一个最大 priority 猜谁最后运行。未注册、被禁用、失败或返回结果与输入快照不匹配时，请求不得绕过检查直接发送；后续若替换估算实现，沿同一 hook 合同和版本记录替换。
+
+**调用过程和功能结果分别留档。** 内置 hook 照常记录 dispatch、started、completed/failed，确实等待才记 pending。不要为除法再造一套 token_estimation.started/completed，也不要因它快就省掉统一 hook 轨迹。hook.completed 的 outputRef 指向唯一的结构化估算结果；prepared 用 tokenEstimateRef 引用该输出，避免两处保存可独立变化的数值。本段取代此前将 tokenEstimate 正文内联 prepared 的示例。
+
+```json
+{
+  "type": "event",
+  "kind": "model.request.prepared",
+  "requestId": "REQ1",
+  "turnId": "T1",
+  "stepId": "STEP1",
+  "contextId": "main",
+  "contextRevision": 8,
+  "inputSnapshotRef": "INPUT1",
+  "tokenEstimateRef": {
+    "hookInvocationId": "H1",
+    "hookCompletedEventRef": "E-H1",
+    "outputRef": "EST1"
+  }
+}
+```
+
+EST1 保存的 hook 输出示例：
+
+```json
+{
+  "estimator": "utf8_bytes_div4",
+  "estimatorVersion": 1,
+  "measurementPurpose": "request_preflight",
+  "scope": "model_input_json_utf8_v1",
+  "encoding": "utf-8",
+  "rounding": "ceil",
+  "inputSnapshotRef": "INPUT1",
+  "inputHash": "sha256:<canonical-input-hash>",
+  "inputUtf8Bytes": 128000,
+  "estimatedInputTokens": 32000,
+  "coverage": "text_proxy",
+  "unestimatedModalities": []
+}
+```
+
+输入和输出引用均须先落稳；outputRef 的类型、内容 hash 和引用格式沿 §4.13 冻结。估算只产生结构化测量结果，不生成 role=user/tool 消息；容量 hook 的决定及采用结果走通用 hook 效果合同。两者可因不同职责分成两个内置 handler，不要求每次展示估算都执行容量恢复。
+
+prepared 表示准备出这份候选请求，不等于实际发送。容量检查拒绝时也保留预测记录，另记决策；只有 sent 记录才能证明发出。usage 后来按 requestId 关联，不能用实际 usage 改写当时的 estimatedInputTokens。单次请求重试仍有独立 requestId；输入相同可复用计算结果，但每次预测归属须明确。
+
+- **实报归属**：provider usage 在收到并确认时按 §4.12 的唯一 owner 合同记录，PostStep 只引用/汇总；不是等 PostStep 才允许持久化。失败、流中断或迟到 usage 分别留账，缺失不填 0。首版不拿实报自动调整除数 4，预测误差可留给后续回测。
+- **预算分开**：estimatedInputTokens 只估输入。内置容量 hook 按 §4.40 解析本次有效 max_tokens，作为输出预留，再加显式安全余量并核对模型限制；这些不暗乘进 bytes/4 的估算字段。这个公式不是精确值或可靠上界，仍须保留实际 context_overflow 的恢复路径。
+- **compact 前后**：通过同一内置估算 hook，对旧链/候选新链使用同版估算器、序列化规则及冻结的主模型配置，分别标明测量用途。compact 自身 prompt 的估算归其内部 requestId，不混进“主上下文从多少降到多少”。成功 applied 关联前后估算结果供展示，resume 不重算旧标记；工具预览降档候选同样复用此 hook。
+- **当前上下文显示**：/context-window 触发展示用途的内置估算 hook，或引用仍与当前快照匹配的已存输出，显示“估算”。普通 assistant/tool 接纳后可以刷新；最后请求的 input estimate 与当前已有上下文不是同一个时点，不把旧数字冒充最新占用，也不直接用累计 usage 当窗口大小。
+- **父子会话**：子代理自己的请求在子账估算；父输入只计算真正接纳的报告/收据，不能把子账累计 token 加进父 context。标题、compact、hook 内部模型请求同样按各自输入快照计算。
+
+验收包括：ASCII/汉字/emoji 的 UTF-8 计数和总量向上取整；JSON 转义与序列化版本可复现；隐藏输入计入、未接纳输入排除；工具定义计入而日志信封排除；PostAction/PreRequest 改写后重新计量；内置 handler 经统一 dispatcher 且顺序受约束；required hook 缺失/失败不能绕过；prepared 引用正确 hook 输出；32 KiB 预览只算实际预览而非原始大文件；媒体标 partial；prepared 未发送不冒认调用；估算与实报不覆盖；compact 同口径比较；子 usage 不串父预算。
+
+### 4.37 compact 触发与执行边界
+
+顶层只有 `trigger=manual/auto`。manual 来自 /compact 的 followup 命令；auto 的 reason 建议为 threshold、preflight_capacity、provider_context_overflow。overflow recovery 是自动压缩的原因，不再列第三类 trigger。
+
+手动触发通常会在主 turn 已停下时执行，此时可压缩范围往往更多；这不保证空间充足。用户可能临近上限才执行命令，上一条 assistant 可能很长，压缩请求还要增加指令和输出预算。manual 与 auto 均须检查压缩请求容量、候选摘要和后续普通请求容量，不能给 manual 免检。
+
+| 检查时点 | 可以做什么 | 不可以做什么 |
+| --- | --- | --- |
+| 每份最终 tool 预览/消息落稳后 | 更新估算，记录需要压缩的信号 | 在 PostAction 尚会改结果时拿原始 output_bytes 作最终估算 |
+| 某工具先完成、同批其他工具未结束 | 请求压缩并 pending，reason=waiting_tool_group | 把同一 assistant 声明的调用和结果拆开换上下文 |
+| 工具组收口、下一请求准备前 | 冻结源快照，检查候选范围，执行必要自动 compact | 等整个主 turn 结束才救容量 |
+| 最终 PreRequest | 用实际输入快照作强制容量检查 | 认为 PostAction 检查过就可以跳过 |
+| assistant 回复完整落稳后 | 刷新上下文估算，下一请求前检查 | 在未完成 JSON/tool call 或未闭合输出块里截一半当完整回复 |
+
+PostAction 可发压力信号，但不是自动 compact 的唯一 owner；最终结果选用、预览截取和 hook 改写都要先完成。runtime 合并同一上下文版本的重复信号，一次只运行一项 compact；等待原因、原始触发事件、源版本及采用结果可追溯。compact 期间新输入照常持久入队，不悄悄混进已冻结源快照。
+
+不能只看每个 tool 的 32 KiB 上限：10 个工具都到上限，仅预览就是 320 KiB，按 bytes/4 约 81920 token，尚未算 system、调用参数和其他输入。预算应给普通回复、整批预期结果和压缩指令留余量；最大批次、触发水位、输出预留及安全余量作为独立策略留档，不能把除数 4 当安全保证。
+
+本版粗估与返回结果无法给出严格上界，所以仍要有 §4.39 的容量恢复。对一次准备出的普通请求，若需要压缩则先暂停发送；压缩成功且新版本容量检查通过后重新准备，不能放行旧请求快照。
+
+### 4.38 只有一个长 turn 时：工具预览 32/16/8/4 KiB 降档
+
+本节采用用户新定方案，取代上一稿“摘要化当前 turn 已完成前段”的建议。未完成 turn 的用户输入、assistant 声明、工具结果及顺序全部保留；容量不足时只缩短历史工具结果的文本预览，不新增模型摘要，不删除工具调用或结果。
+
+```text
+正常初始预览上限：32 KiB/调用
+不足 -> 历史预览上限 16 KiB/调用 -> 检查整份请求
+不足 -> 历史预览上限  8 KiB/调用 -> 检查整份请求
+不足 -> 历史预览上限  4 KiB/调用 -> 检查整份请求
+仍不足 -> 记录容量错误并停止此次恢复
+```
+
+任一档够用就停止，不强行降到 4 KiB；没有实际变短的档位记 no_change 并跳过，不发送相同输入试运气。降档目标是在一次请求里被选用的全部已完成历史 tool 结果，包括刚收口、即将用于下一请求的整批结果。未完成结果不伪造，等工具组闭合后在安全边界统一检查。
+
+每档是单次逻辑工具调用全部文本预览的总上限，多文件、状态、路径数组、文件标签、省略提示、换行均计入。短于上限的内容不动；超长内容按 §4.17 扣除说明预算后，剩余字节由头尾均分。4 KiB 不是正文头尾各 2 KiB 再额外追加说明，UTF-8 字符边界与来源标签仍须完整。
+
+**来源与配对保持不变。** 重新生成预览时读取最初选定的不可变结果材料及策略版本，不拿上一档含省略号的预览当新原文，也不重跑工具或 PostAction hook。原始 result_ref、输出字节数、退出状态和捕获完整度不因降档而改变；只有预览版本、预算和截断状态变化。
+
+- assistant 工具声明、tool_call_id、调用顺序、参数与每项最终结果的对应关系保持不变。只能改普通可渲染文本结果内容，不能裁剪协议外壳、签名块或冒充完整 JSON；结构化正文放不下时生成合法的文本节选外壳。非文本结果另算，不能靠缩文字解除媒体限制。
+- 若说明/文件路径本身超出小档位，沿 §4.17 使用完整清单索引与明确的省略计数。必要来源信息仍无法装入 4 KiB 时记录 preview_unrepresentable，不能悄悄省掉来源或突破上限。
+- 预览变短会让模型看不到更多中段内容，但原始文件仍可按范围读取。skill 通过工具加载的正文也可能受影响，必须标明该版本未提供完整指令，不能沿旧 loaded 标志认定全文仍在当前上下文。
+
+**消息版本与上下文提交。** 原 message 不改写；为真正改变的预览追加新 messageId，保留原 turnId、stepId、actionId、tool_call_id 和结果选用引用，并用 sourceToolMessageRef/causedByEventRef 关联原消息与降档操作。新消息是同一工具结果的派生展示版本，origin=context_runtime；不增加工具执行次数或 provider 输出 usage。
+
+`context.tool_previews.reduced` 作为独立上下文提交事件，携带源/新 contextRevision、旧/新档位、replacementRefs、完整新 contextChain、输入 hash 与前后估算、配对校验引用。它属于 context 效果，不假称 compact.applied；同一次容量恢复可将它与后续真正摘要操作关联，但各有自己的成功边界。
+
+示例链为 `S -> U1 -> A1(call=X) -> R1_32`，降档后是 `S -> U1 -> A1(call=X) -> R1_16`。R1_32/R1_16 的 messageId 不同，二者 tool_call_id 均为 X，代表同一个执行结果；任何一次请求只选一个版本。若后面还有节点，其 prevMessageRef 同步指向新版结果，新链一次提交，旧链原样保留。
+
+- 每档候选先生成、计量和校验；选择首个满足当前预算目标的候选，消息与引用先落稳，再原子提交新链。仅有候选、没有提交时仍恢复旧版本；所有档均不合格则保留尝试事件，报错且不把最后候选伪装为可发送状态。
+- 当前上下文记录已采用的历史预览档位，普通后续请求不自动回升 32 KiB。新工具最初结果可按 32 KiB 留档，接入已降档上下文时按当前历史档位选用派生版本；恢复读取所采用版本，不重新用今天的规则截取。
+- 摘要真正成功并进入新的上下文版本后，若策略要恢复默认档位，必须另有明确变更并重新验容量；不能因普通消息到达就悄悄重新展开旧结果。父子会话的档位与版本各自独立。
+- 若 16 KiB 本地预测通过但服务端仍报容量错误，记录该输入已失败，从更低档继续；已到 4 KiB 则报错。同一源内容、档位与预算条件不变时不重复整条阶梯。每次实际重发都要对应更小、已提交且协议合法的输入。
+- 4 KiB 仍不够时保存容量分解：system、user/assistant、工具声明、tool 预览、工具定义、媒体未知项及输出预留；给出 context_capacity_exceeded 与最低档已到达的原因。保留历史、队列和原工具结果，不自动删 turn、重跑工具、无限重试或转入额外摘要算法。
+
+配对完整与容量足够必须分别校验。按本单粗估，200 条各 4 KiB 的工具预览已约 204800 token，尚未计入其他内容；工具数量很多或 assistant 本身过长时，降至 4 KiB 仍失败并不矛盾。服务端还有输入格式、模型能力和请求大小等检查，不能把“有对应 tool_call_id”当作发送一定成功的保证。
+
+验收包含：仅一个未完成 turn 也能靠降档缩小输入；16 KiB 已够就不继续降；所有内容短于档位时正确跳过；多文件总量/UTF-8/来源标签均合法；旧消息不可变而新请求只选新版；整组配对与前驱链不变；缺结果时不得虚构配对；4 KiB 失败明确停止；无压缩收益不重复请求；resume 恢复原档位和原预览；父子各自降档不串账。
+
+### 4.39 assistant 过长与 compact 失败的有限恢复
+
+assistant 回复过长确实可能导致 compact 失败，但至少有三种不同情况：
+
+| 情况 | 失败位置 | 处理建议 |
+| --- | --- | --- |
+| 普通 assistant 回复很长，加入旧历史后再加压缩 prompt 超出容量 | 压缩请求发送前或 provider 拒绝输入 | 按 §4.38 缩短可变工具预览后重查；4 KiB 仍不够则报错，不能假定工具缩短能解决 assistant 本身过大 |
+| 压缩模型生成摘要过长，被输出上限截断，或必需结构没有闭合 | 回复/摘要校验 | 保存原始部分回复，标 incomplete，不 applied；调整摘要目标/输出预留或拆分任务，有限重试 |
+| 摘要已完整，但摘要 + system + 必须保留尾部仍超预算，或几乎没缩小 | 候选新上下文校验 | 检查合法工具降档与受限的摘要长度调整；最低档仍无合法候选就报错，不以“有摘要文本”判成功 |
+
+一次普通响应能够返回，不代表将“旧输入 + 这份响应 + 新压缩指令”再次作为输入一定合法。普通请求输出预留、压缩请求输出上限、候选摘要目标长度分别配置，不能用同一个数字混算；压缩模型若与主模型不同，分别按各自限制检查。
+
+- **本轮恢复到 4 KiB 为止**：此前提出的长 turn 前段摘要、自动分块/map-reduce 等额外兜底不纳入这次最低档后的执行路径。它们若将来采用需另定策略；本版不在用户要求报错后继续发模型请求找别的办法。
+- **每份实际请求都检查容量**：压缩请求与最终主上下文分别预算，包含各自 system、指令、输入和输出预留。普通主请求装得下，不代表加上取摘要指令的请求也装得下。摘要输出截断与输入超限分开处置，不能靠降低工具预览修复已经截断的摘要。
+- **先落产物再校验**：保存 finishReason、是否被截断、解析结果和必需项检查；非空文本也可能只是半份摘要。不以回复有标题或合法 JSON 就保证信息完整，校验只能证明约定项目通过。
+- **超限恢复必须改变条件**：provider 明确 context_overflow 后，同一输入 hash 和相关配置不变时不再原样重试。后续普通请求必须基于严格更小且合法、已经提交的新上下文，并重新准备容量。单纯刷新 requestId、时间戳或重复 applied 不算进展。
+- **有限尝试**：按 compactId/容量恢复操作及源上下文状态记录尝试次数、候选尺寸、拒绝原因和总预算。预览最低档固定 4 KiB；摘要内容校验和网络瞬断等非容量重试沿独立有限规则，不与“最低档仍装不下”混为一谈。
+- **失败不改旧账**：compact 失败保留原上下文、候选和所有事件；若原视图已无法合法发送，则暂停继续推理并说明受阻原因。工具已完成的副作用不重执行，用户输入与子报告继续留队列；不能为了 compact 成功伪造工具结束或任务完成。
+- **手动也走同一检查**：/compact 的 followup 边界使当时主 turn 通常已结束，可压缩范围往往增大，但不跳过以上检查。若普通请求先碰到容量门禁，runtime 可先执行自动恢复；排队中的手动命令仍保留其身份，之后在当时版本上执行或记录已无需压缩，不冒称提前执行了 slash。
+
+验收覆盖：手动请求也可输入超限；单 tool 完成只记压力信号，整组闭合后才变换；普通 assistant 长回复导致压缩输入超限；摘要 length 截断不采用；工具最低档仍不足时明确停止；源状态无变化不无限重试；恢复成功后真实请求引用更小的新链；压缩失败不重跑工具、不丢 followup。
+
+### 4.40 输出上限：max_tokens 是每次请求的容量预算项
+
+2026-09-10 核对 [Kimi K2.6 官方指南](https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart)：该模型上下文标为 256K，max_tokens 默认 32768，与用户给出的参数表一致。[通用 Chat API](https://platform.kimi.ai/docs/api/chat)另将 max_tokens 标为旧字段，指向 max_completion_tokens；adapter 必须按实际 endpoint/model 合同映射，不能把通用页其他模型的默认值套到 K2.6。此处是当日文档依据，不替代部署时的模型配置和接口校验。
+
+需要分开的值如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `contextWindowTokens` | 目标模型/端点的上下文窗口，按配置保存准确整数，不只存含糊的 256K 字符串 |
+| `modelDefaultOutputTokens` | 未显式配置时采用的默认生成上限，例如 K2.6 为 32768；它不是模型支持的最大可配置值 |
+| `requestedMaxOutputTokens` | 用户或该用途配置请求的输出上限，未指定时为 null |
+| `effectiveMaxOutputTokens` | 经用途配置、模型配置及 adapter 解析后，本次真正采用的上限 |
+| `outputLimitSource` / `modelProfileRef` | 来源是显式配置、用途配置还是模型默认；关联当时配置版本 |
+| `wireOutputLimit` | 实际发送的参数名和值，或明确标 omitted；默认依赖不能在回放时用今天的配置补猜 |
+| `outputReserveTokens` | 本次为输出保留的容量；在输入输出共享窗口的合同下采用 effectiveMaxOutputTokens |
+| `safetyMarginTokens` | bytes/4 误差和未精确建模部分的策略余量，单列且带策略版本 |
+
+本项目对共享上下文窗口的首版发送检查为：
+
+```text
+I = estimatedInputTokens
+O = outputReserveTokens = effectiveMaxOutputTokens
+C = contextWindowTokens
+M = safetyMarginTokens
+
+inputBudgetTokens = C - O - M
+发送容量检查：I <= inputBudgetTokens
+```
+
+provider 若还有独立 input/output 上限、不同 reasoning 计数方式，adapter 另外校验对应合同；max_tokens 是否包含思考 token 必须在模型配置中声明，不凭可见正文长度推断，也不把已经含在 O 里的 reasoning 再预留一次。未知限制不得自动填 0。
+
+示例按窗口配置 C=262144、输出 O=32768 计算：不计安全余量时输入剩 229376 token，即 224K；若示例 M=4096，则输入预算为 225280。4096 只是算术示例，不是本轮已验证的推荐余量。模型卡使用过 262144 的上下文配置，实际端点仍取本次配置快照；不同供应方不能仅凭相同模型名共享限制。
+
+**与工具 32 KiB 分清。** max_tokens=32768 的单位是 token，直接作为输出预留，不能再除以 4；工具 32 KiB 的单位是 UTF-8 字节，按粗估约 8192 token。每工具 32/16/8/4 KiB 降档只缩 I，不自动缩 O。显式输出上限过大时也不能悄悄减小它来让门禁通过，应按配置校验或既定恢复规则报告。
+
+**自动 compact 要早于发送硬边界。** 本次请求装得下，只说明 I+O+M 满足本次窗口要求；回复和工具结果回来后，下一份压缩请求还要容纳这些新增内容、压缩指令和摘要输出。容量 hook 还应给出后续空间的预测，区分以下两项结果：
+
+- sendCapacity：按实际输入与本次 O 检查现在是否可发。
+- compactHeadroom：以本次潜在输出增长 O、按工具批策略估计的结果增长 T，以及压缩指令/模板变化，构造压缩输入容量预测；再加压缩请求自身的输出预留 Oc 和余量 Mc，与压缩模型窗口 Cc 比较。
+
+可表达为 `forecastCompactInput(I, O, T, compactProfile) + Oc + Mc <= Cc`。普通输入中已经包含的工具结果不重复计入 T；未来工具结果并不受 max_tokens 限制，O 不能代替 T。这里是提前量策略，不是严格上界；实际输出字节与 token 的关系、工具数量和媒体都可能有误差，返回后仍重新计量。
+
+当前发送检查通过而 compactHeadroom 不足时，可以提前触发自动压缩/预览降档，不必等当前输入挤到 C。若普通模型与压缩模型不同，分别读取配置、计量实际请求，不把主模型的 32768 默认值直接套给压缩模型。
+
+标题、compact、普通任务、hook 内部请求和子代理都记录各自 effectiveMaxOutputTokens。短标题可以由用途策略显式采用较小输出上限；摘要目标长度与 max_tokens 不同，后者只是允许生成的上限，不保证摘要会自然变短或完整。普通输出回来后，按真实消息和 usage 更新当前状态，不把预留的全部 O 当成实际新增 token。
+
+**hook 与记录归属。** 在最终 token 估算 hook 前，先解析并冻结 provider/model/mode、输出参数与相关配置；内置容量 hook 消费估算引用和这一配置快照，输出 inputBudgetTokens、headroom、决定及原因。结构化结果由该 hook 的 outputRef 持有，请求/恢复事件引用；首版不要在界面另算一套。即使输入字节不变，只要 max_tokens、模型窗口或预算策略变了，容量结果也必须失效重算。
+
+同一输入、输出设置和模型配置已经被 provider 拒绝容量后，仍沿 §4.38/§4.39 的有界恢复走更小合法视图；不能因预留考虑过 32768 就断言请求必然成功。默认值未知时需明确配置或报限制未知，不能用用户没传字段推断输出无需预留。
+
+验收补充：K2.6 未配置输出时解析为 32768；显式/用途配置覆盖默认且 wire 值一致；输出默认值不误当最大支持值；工具 KiB 不误当输出 token；只改 max_tokens 会重跑容量 hook；当前请求通过但下一压缩空间不足能提前触发；普通/压缩/子模型预算不串；预留不记成实际 usage；缺默认或未知媒体不能假称完整容量已验证。
+
+### 4.41 连续 compact：旧摘要同样压缩，正常输入保持已有前缀
+
+当前生效摘要不是 system，也不是永久保留块。每次真正生成新摘要，都把当前旧摘要和后续可压缩历史一起交给模型。只读当前有效链中的摘要，不把 Q0、Q1 等全部归档版本重新拼回；旧摘要所代表的早期原文也不因再次 compact 自动展开。
+
+```text
+第一次压缩后：S -> Q1 -> H -> R
+第二次压缩请求：S -> Q1 -> H -> R -> P2
+第二次压缩成功：S -> Q2 -> R
+第三次正常请求：S -> Q2 -> R -> 后续接纳消息
+```
+
+S 是当前 system；Q1 是当前旧摘要；H 是之后可压缩历史；R 是必须保留的完整尾部；P2 是新追加的压缩指令。Q2 合并 Q1 与 H。R 可以作为压缩时的参考上下文，但仍按原消息保留，不能在集合与 token 账里同时算成已移除历史。指令应明确压缩范围、保留范围，避免把 R 整段复制进 Q2。
+
+**缓存考虑落在两处。** 正常压缩请求复用 S、Q1、H、R 的原引用、角色、正文与顺序，只在末尾追加 P2；不先把 Q1 移走、改写或另包成一条大 user 材料消息。这样尽量保留上次请求已有的前缀。所用模型、工具定义与缓存相关配置也影响复用，不能只比较 messageId。输出上限、schema 等按实际压缩请求合同解析，不为缓存伪造请求用途。
+
+压缩成功后，Q2 替换 Q1，后续请求从摘要位置开始有了新前缀。设计不承诺这段继续命中旧缓存；新摘要在两次 compact 之间保持不变，后续消息向尾部追加。仅追加压缩 prompt 也不保证命中，实际结果以 provider usage 为准。此前缀判断依据 [Claude 缓存文档](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)所述的前缀匹配机制；不同 provider/endpoint 的缓存规则须按各自合同核对。
+
+专用压缩模型/system、容量恢复中的工具预览降档，或另经确认的材料裁剪，均可能改变前缀。这些情形按真实输入清单及转换记录留档，不称作“原前缀完全复用”。缓存是请求安排的考虑项，不代替工具配对、信息保留与容量检查。
+
+**记录与提交沿既有 compact 流程。** prepared 的 inputMessageRefs 必须包含实际读取的 Q1；compact.applied 的 removedMessageRefs 包含 Q1 与 H，summaryMessageRef 指向 Q2，contextChain 重接为 S -> Q2 -> R。已有源版本、请求输入清单和 removed/retained 足以表达这次关系，不另造一种摘要替换成功事件。Q1 和更早版本仍在 JSONL 中，resume 可展示历次摘要及 token 标记。
+
+只有 Q1、没有新增可压缩历史时，Q1 仍有压缩资格；不能因它是摘要就记 no_eligible_history。但仍须有触发依据并通过收益、内容与容量校验，不每个 step 都重压摘要。没有合法缩小空间时停止，不能靠反复总结同一内容空转。若完全没有摘要且其他消息均受保护，沿 §4.9 处理。
+
+压缩失败、取消、校验不通过或 applied 未落稳，Q1 继续生效；不能先清掉 Q1 再等待新摘要。内容校验应检查旧摘要中的仍有效约束、决定、未完成事项是否保留；后续明确更正按来源顺序采用，不把旧摘要当成比新用户指令更高的权限。校验通过仍不等于证明连续压缩没有信息损失。
+
+验收补充：第二次实际请求包含 Q1，第三次只读当前 Q2 而不带回归档 Q1；Q1 与新增历史共同形成 Q2；保留尾部不重复归入 removed；正常请求只追加 P2；前缀变化如实记录；只剩摘要仍可评估压缩收益；失败恢复 Q1；成功后只有一个生效摘要，历次原文与标记仍可查看。
+
+### 4.42 思考内容的保存、回传、缓存与压缩边界
+
+**应用合同。** 思考模式下，入选当前请求的 assistant 连同原有思考载荷一起回传；不能只挑 content/tool_calls 而漏掉 reasoning。只保存并回传 API 实际返回的字段或不透明载荷，不要求模型暴露未返回的内部思考，不编造缺失内容。UI 可折叠或隐藏思考，存储与发送不受显示开关影响。
+
+四角色保持 system/user/assistant/tool，不增加 reasoning 角色或第三种 JSONL 行。reasoning 属于原 assistant message；不能另造 user/system 消息粘贴思考，也不能用事件代替唯一正文。对 Kimi，message 内部可以是以下形状；这里只展示消息体，不是完整 JSONL 行，示意文字不是模型真实输出：
+
+```json
+{
+  "role": "assistant",
+  "content": "接下来检查调用方。",
+  "reasoning_content": "需要先核对函数定义与调用位置。",
+  "tool_calls": [
+    {
+      "id": "call_example_reasoning_1",
+      "type": "function",
+      "function": { "name": "search", "arguments": "{\"query\":\"targetFunction\"}" }
+    }
+  ]
+}
+```
+
+此字段形状不强套其他 provider。Claude 等接口用有序 content blocks，thinking、text、tool_use 之间的原始顺序及每块签名须完整保留。通用消息层须有可无损往返的原生字段/块载荷，具体类型在 §4.13 冻结；不要把所有块拼成一条 reasoning 字符串后丢掉原形。只回传接口允许的请求字段，usage、响应 header 等不因此塞进 message。
+
+**Kimi 的配置。** 2026-09-10 核对 [Kimi 思考模型指南](https://platform.kimi.com/docs/guide/use-thinking-models)：K2.6 的 thinking.type 默认 enabled；跨轮保留由 thinking.keep 控制，默认 null，all 才启用保留式思考。本项目按用户要求，在该模型开启思考的配置中同时采用 thinking.keep=all，并完整回传仍在有效链内的 assistant reasoning_content。参数与生效值写入请求配置快照；不能只传 enabled 就声称跨轮保留已经启用。其他模型/端点是否支持同名参数，由带版本的能力合同决定。
+
+[K2.6 快速指南](https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart)当前写的是：工具循环建议回传本轮 reasoning_content，不回传不报错但可能损害效果。因此“我们要求保留”是应用合同，不写成“所有模型不回传都会报错或必定缓存失效”。开启思考、客户端回传、服务端采用历史思考、缓存命中，是四件不同的事。
+
+**工具组与流式接收。** 下一请求应为 User -> Assistant(思考 + 正文 + 调用) -> 对应 Tool 结果，而不是 User -> Assistant(只剩正文 + 调用) -> Tool。流式 reasoning/text/signature 按 provider 的块 index 与 delta 规则组装；终态前的片段照实留过程，但不得当作完整且可回放的签名块。断流缺字段时记录不完整，不能补空串冒充有效签名，或重跑工具来补思考。
+
+**签名与不透明内容。** [Claude 工具流程](https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows)要求原样回传 assistant content；[思考指南](https://platform.claude.com/docs/en/build-with-claude/thinking)说明 thinking 可能只有空文本与 signature，redacted_thinking 也可能只有不透明 data。这些不因“没有可读正文”而删除，不解码、不改写、不重签。大载荷可沿既有 artifact 合同存原文、hash 与引用，发送前须读回真实载荷，不能把本地路径当 signature 发送。
+
+工具预览的 32/16/8/4 KiB 档位只裁 tool 结果，不适用于 assistant 思考或签名。容量不足不能偷偷截断思考，亦不能把摘要塞回 reasoning_content 冒充模型原始推理；须走显式上下文变换，并校验目标协议允许该变换。
+
+**缓存与前缀绑定。** 保留原字段和块顺序有助于保持请求前缀，缓存结果仍读取 provider usage，不能以本地 hash 相等宣告命中。切换思考模式、system、工具定义、模型或回传策略，须记录配置与输入变化，再估算并检查容量。
+
+缓存失配还不一定是唯一后果。[Claude 保留式思考文档](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking)说明，部分模型/账户合同会将思考块绑定到生成时的模型与前缀。故 §4.38 预览降档、§4.41 摘要替换或裁掉中间 step 后，即使保留了后续 assistant 的原签名，也要检查新前缀是否仍允许使用它。不能把“签名原样复制”当作“换前驱后仍有效”。
+
+provider adapter 须声明回传范围、必要参数、签名/前缀绑定与允许的上下文转换。支持的原生压缩或明确转换可按合同接入并留档；目标不允许保留原思考且没有已配置的合法路径时，停止发送并报告协议冲突，不静默删思考或原样重试。普通缓存失配本身不构成停止条件。跨 provider 的签名不能凭字段相似盲传，也不能一概认定兼容或不兼容。
+
+**compact 与 resume。** §4.41 的压缩请求输入包含所选 assistant 的完整可回传载荷；成功后，已移除 assistant 的思考随该消息一起退出有效链，原档保留。未完成尾部的思考随尾部保留，并通过上述前缀兼容检查。compact 模型自己产生的 reasoning 归内部 assistant；主会话摘要从经校验的摘要正文生成，不把内部 reasoning 或签名复制到新 user 摘要。resume 还原消息载荷、来源模型、思考配置与协议版本；缺件时报告，不能只靠可见正文声称精确恢复。
+
+**token 账。** 本次实际发送的明文 reasoning 按 UTF-8 bytes/4 纳入输入代理估算；若原生字段与解析副本共存，只按实际 wire 形状计一次。不透明 signature/data 保留在线路快照中，但不得用其编码长度推断内部 token；估算输出增加 unestimatedComponents 等明确覆盖说明，标 partial，交容量策略处理，未知不填 0。需要精确计量的端点可接 provider 计数能力，不能冒称首版 bytes/4 已解决所有载荷。
+
+Kimi 文档说明思考与正文共用 max_tokens 输出上限；32K 预留中已经包含思考，不另加一份 reasoning 预算。usage 中若 reasoning_tokens 是 completion_tokens 的子项，汇总只计一次；下一请求的输入以实际回传材料为准，不把数值 usage 当消息再次相加。provider 对历史思考的内部计数差异仍归模型配置，UI 不把代理估算冒称服务端精确值。
+
+验收补充：K2.6 enabled 同时解析 keep=all；跨 step/turn 回传 reasoning 字段；空正文带调用或签名不丢；流式签名组装与断流缺件可辨；块顺序与不透明载荷往返不变；隐藏显示不改请求；tool 降档不误裁 reasoning；compact 及降档后检查尾部签名兼容；内部压缩思考不混进 user 摘要；resume 不丢思考；实际回传明文计入估算；不透明载荷标未知；输出 reasoning 不重复计费。
+
+### 4.43 流式响应：片段记 event，结束或 Esc 后追加 assistant
+
+**三处同时推进。** 网络按流接收；内存按 provider 协议组装当前 assistant；界面收到增量便更新同一条回复。存储先记录片段事件，响应收齐后追加完整 message；用户 Esc 则按 §4.63 将接收边界之前的内容追加为 interrupted assistant。两者都是正式消息，完整程度不同。最终 message 是片段的确定性组装结果，历史显示和经协议校验的请求重放以它为准；片段事件用于进度、诊断和恢复，不能再作为额外 assistant 拼进请求。
+
+```text
+User message 落稳并接纳
+  -> 估算/容量检查 -> 发送 request R1
+  -> event: model.response.started
+  -> event: model.response.delta（思考/正文/工具参数/签名等增量）
+  -> event: model.response.delta（继续；界面持续更新）
+  -> event: model.response.completed（协议终态及片段范围已落稳）
+  -> message: Assistant1（完整组装，落稳后按上下文合同接纳）
+  -> Tool1 / Tool2 执行并各自保存结果
+  -> 估算/容量检查 -> 发送 request R2
+  -> R2 的流式事件 -> message: Assistant2
+```
+
+这是两个请求、两个 assistant message；不是等整个 User/Assistant/Tool/Tool/Assistant turn 结束才存一行。每一行 JSONL 都由结构化序列化器完整写出，正文换行转义；不得先写半行 JSON，等模型输出结束再回头补括号，也不原地修改旧行。
+
+**身份与组装。** 每次实际请求分配 requestId 和 streamId，响应开始时为目标 assistant 预留 messageId。事件用 eventId 作为行身份，payload 引用目标 messageId；最终 message 才以该 messageId 成为正式消息行。seq 仍由会话单写者在真正追加时分配，不能提前占住最终 message 的 seq。
+
+片段事件至少关联 requestId、streamId、turnId、stepId、目标 messageId，以及流内递增的片段序号、块/工具调用索引、增量类型与内容或不可变 artifact 引用。有多个响应候选时须另带 choiceIndex，不能把不同候选拼在一起；首版配置一个候选。流内次序用于组装，文件 seq 还可能穿插用户输入、hook 和子任务事件，两者不可混用。
+
+正文、reasoning、签名、工具名/ID/参数、块开始/结束分别按 adapter 规则合并。不是把收到的整段 SSE JSON 串直接连接成最终 JSON。使用现有 SDK accumulator 或结构化流解析器；网络 read chunk 不等于 SSE event，更不等于一个字符或一个 token，须处理 UTF-8 和帧边界。工具参数片段暂时不是合法 JSON 很正常；等调用完整后再解析、校验。
+
+**片段落盘策略。** 可把连续增量合成有序批次写一条 delta event，保存批次首尾序号与必要的块操作；批量阈值按时长/字节配置，不要求每个 token fsync。先刷出尾批和相关 artifact，再落终态及完整 message；重放无论怎样分批，必须得到同一消息内容和 hash。不按内容相同去重，模型可能真的连写两个相同片段；只有可靠身份/序号才能识别重复投递。
+
+显示可先于持久写入，但 UI 已显示不等于已落盘。崩溃最多能恢复最后持久水位以前的片段，缓冲区内尾部可能丢失；故障耐受档位与最大缓冲窗口须明确。写入队列有上限，持续写盘失败时停止接纳或取消流并报告，不无限堆内存、不静默丢片段后声称完整。started 后若确实等待首包、重连或其他资源，按原因记 pending/恢复；每收到一个 delta 不必再记一对 pending/resumed，网络 ping 也不冒充正文进展。
+
+**何时算结束。** 由目标协议的响应结束信号、finishReason 与块完整性共同判断；socket 关闭、HTTP 200、正文暂时不再增长，都不能单独证明响应完整。[Claude 流式文档](https://platform.claude.com/docs/en/build-with-claude/streaming)区分块结束、message_stop、流内错误和累计 usage；[Kimi Chat API](https://platform.kimi.com/docs/api/chat)沿自身流式响应合同解析，不能套另一家的停止信号。
+
+- 正常 stop/end_turn：片段收齐、结构和必需签名通过校验后，追加完整 assistant。是否结束主 turn 仍由调度器依据响应用途与停止原因判定。
+- tool_calls/tool_use：这条 assistant 响应收完，但 turn 还没结束。首版必须等完整 assistant 落稳后，才按 §4.19 执行工具；不因部分参数一时能解析就提前执行。
+- length/max_tokens：即便流正常结束，也要标明输出截断；可组装成合法消息结构时保存截断 assistant，不能宣称语义完成。是否能进入后续上下文另经协议校验；不自动执行截断调用，compact 候选仍按 §4.39 拒绝采用。
+- 用户 Esc：固定接收水位，将已收到内容保存为正式 interrupted assistant，沿 §4.63 接纳，不再只保留草稿；不伪造正常 stop 或自动派发工具。
+- 流内错误、断网：仍记录 failed 及已持久片段范围，界面显示部分回复和原因。没有完整响应或可信本地取消定稿记录时，按草稿恢复，默认不接入模型上下文；本轮 Esc 定案不自动扩展成所有网络故障都采用部分回复。
+- 实报 usage 可能在正文或停止原因之后到达；继续按协议收取，依 §4.12 归属追加，不倒改旧 message。累计 usage 快照不能逐包相加。缺 usage 不等于正文不完整；有 usage 也不证明正文/签名收齐。
+
+**崩溃与重试。** 只有片段、没有可信完成或本地取消定稿记录时，恢复成 interrupted 草稿；不把最后一个片段当结束信号。有已持久的 completed 或 cancelled 定稿记录及其声明范围内全部片段、但最终 message 尚未落稳时，可用所存 adapter 版本确定性补交同一 messageId：前者恢复正常结果，后者恢复正式 interrupted assistant，不重问模型；组装缺件则报告。message 已落稳但尚未接纳时，按原上下文提交合同恢复，不能追加副本或重复启动工具。
+
+网络重试是新的 requestId/streamId，沿原 stepId 记录 retryOf；旧流片段不得直接接到新流后面。只有 provider 明确支持且能校验游标与身份的续传，才可按其合同继续原响应，不能用文本前缀相同猜测续传成功。只读 resume/replay 不发请求、不执行工具。
+
+**与 hook/compact 的关系。** 流中可以更新显示估算与压力信号；用于下一请求的最终估算仍在完整 assistant 和所需工具结果接纳后执行。不得每个 delta 都触发 compact，或在签名/工具参数未收齐时裁掉当前 step。流中接到 steer/followup 按原队列合同落档，不能改写已发出的请求快照。compact/title/子代理模型响应沿同一流式记录规则，各归自己的用途与会话。
+
+验收补充：首字即时显示；片段分批不改变组装结果；文本/思考/签名/多工具交错不串块；UTF-8 与 SSE 跨网络包正常解析；最终 message 只出现一次且不重复渲染片段；收齐调用前工具零执行；流内错误不当成功；length 不冒充正常结束；Esc 保存正式 interrupted assistant，缺定稿证据的崩溃只恢复草稿；完成/取消定稿后补交不重请求；重试不拼接两次响应；累计 usage 不重复计；两次 assistant 响应各存一行，不等待整个 turn。
+
+### 4.44 assistant 来源：消息自带 provider/model，请求与返回分开
+
+模型生成的每条 assistant 都在 JSONL 外层保存下列来源。信息虽可从请求事件查到，消息仍保留常用来源字段，便于历史显示、导出与诊断；写入时必须与 requestId 指向的出站请求快照一致，不允许两处各自改值。
+
+| 字段 | 含义 |
+| --- | --- |
+| provider | 实际发送该次请求所用的本地 provider 配置稳定身份，例如 moonshot；不是 API 方言，也不凭模型名字猜厂商 |
+| wire | 实际出站协议：anthropic-messages / openai-responses / openai-chat-completions / google-generate-content；同一家 provider 可有多个协议入口 |
+| model | adapter 解析配置后真正发入请求的模型名；请求使用路由别名时，就如实保存那个别名 |
+| responseModel | 服务端在响应中报告的模型名；没有返回则为 null，不能用 model 补成已知响应事实 |
+| requestId | 生成这条消息的实际请求尝试；重试/fallback 各自归自己的请求，不指到最初失败的尝试 |
+| providerConfigRef / modelProfileRef | 当时出站配置与模型能力配置的不可变版本引用，绑定协议/adapter 版本、端点身份与思考等设置；不保存凭据 |
+
+以下是 JSONL 行的形状示例；ID 与正文仅作说明，文件中实际序列化为一行。其他既定来源、上下文接纳和完成状态字段按对应合同补齐：
+
+```json
+{
+  "type": "message",
+  "seq": 12,
+  "timestamp": "2026-09-10T04:59:25.314Z",
+  "messageId": "assistant-example-1",
+  "turnId": "turn-example-1",
+  "stepId": "step-example-1",
+  "requestId": "request-example-1",
+  "provider": "moonshot",
+  "wire": "openai-chat-completions",
+  "model": "kimi-k2.6",
+  "responseModel": "kimi-k2.6",
+  "providerConfigRef": "provider-config-example-1",
+  "modelProfileRef": "model-profile-example-1",
+  "message": {
+    "role": "assistant",
+    "content": "接下来检查调用方。",
+    "reasoning_content": "需要先核对函数定义与调用位置。"
+  }
+}
+```
+
+provider/model 是记录来源，不放入 message 正文，也不作为历史消息字段直接发给下一模型。下一请求的顶层 model 取那次请求配置；不能从历史 assistant 来源覆盖当前选用模型。来源信封不计入输入 token，也不加入 provider 缓存前缀。
+
+用户最初选择的模型别名、默认继承值与路由过程保存在请求配置及相关事件中；model 表示最后实际发送的值，responseModel 保留返回原值。两者不同不直接当错误，也不把返回值覆盖到 model。代理未暴露底层供应方时，provider 只能说明本地请求发往哪份 provider 配置；responseModel 也是服务端报告，不证明真正部署了哪个权重版本。未知事实保留未知。
+
+流式开始前即可固定 provider/model；responseModel 随响应元数据收取，最终 assistant 落盘时汇总。流中仅首包提供模型名时不能漏掉；反复出现的相同值不需要反复写配置切换事件。若同一流报告不同模型或服务端 fallback，保存各次报告与对应片段/阶段证据，不用“最后一个名字”冒充整条回复的单一实际来源。外层 responseModel 此时为 null，并从流事件引用查看多来源或冲突状态；具体聚合类型随 §4.13 冻结。
+
+客户端 fallback 另建 requestId/streamId 并记录新 provider/model，不能把原流片段和新流混成一条来源含糊的 assistant。响应来源元数据在消息落盘后才到达或得到更正时，以新的关联事件补充，不原地改消息；显示层可展示经核验的补充信息与原始记录。
+
+普通回复、compact 内部回复、取标题回复、hook 内部模型回复、子代理回复均沿同一规则，各记实际生成来源。主模型与摘要模型不同就分别记录。宿主派生的 user 摘要或 tool 报告通过 sourceMessageRef 等回指来源，不借主模型身份冒充生成者；若将来允许宿主生成 assistant，也必须明确 origin，并且不能伪填 provider/model 为一次不存在的调用。
+
+resume、历史回放及消息被后续模型再次阅读，都不改变旧 assistant 来源。切换 provider 配置、重命名展示名称或更新模型目录时，历史仍按所存身份与快照解析；只读展示可以使用现有别名，但须保留原值。思考签名的来源模型核验沿 §4.42，来源字段存在不代表已证明协议兼容。
+
+验收补充：每条真实模型 assistant 自带来源；请求别名与返回模型名均保留；响应缺名记 null；来源与出站快照一致；首包来源不丢；同流多来源可辨；客户端重试/fallback 不串账；compact/title/父子模型来源各自正确；resume 和切换模型后旧来源不变；来源信封不出现在 wire message、输入估算或缓存前缀中。
+
+### 4.45 provider 预设收敛：默认选择由目录承担
+
+2026-09-10 源码核对：src/cli/provider_wizard.cpp 的 RunProviderPresetWizard 已从预设带入 wire/base_url/model，通常只问密钥来源并进入确认页；自定义入口才走 Name/Wire/BaseUrl/Auth/Model 等完整步骤。ProviderConfigFromPreset（src/config/provider_catalog.cpp）直接采用 preset.wire。现状已经不是所有用户都必须手选协议，但目录把同一家服务的不同 wire 列成多项。
+
+当日 catalog/providers.json 包含 68 个预设入口：22 个 anthropic-messages、35 个 openai-chat-completions、9 个 openai-responses、2 个 google-generate-content。这是预设条目数量，不是 68 家独立服务商，也不表示做过全部真实端点验证。Moonshot、DeepSeek、DashScope、Zhipu/Z.AI、MiniMax 等已有独立 Anthropic 入口；现有基础名字多仍指 Chat 入口，不能声称现在已默认全部走 Anthropic。
+
+按用户意图采用以下新设计，尚未更改目录或向导实现：
+
+- 默认列表按服务商及实际产品入口展示；同地区、同计费产品的多种 wire 不再平铺成一堆近似名称。地区、Coding Plan 与按量端点仍须区分，它们可能使用不同地址、鉴权和模型范围。
+- OpenAI 原生预设采用其已声明的 Responses 入口，Gemini 原生预设采用 Generate Content。其他预设在目标模型、端点和所需能力已支持的范围内，优先 Anthropic；不以模型名包含 openai/gemini 判断路由协议。
+- 预设直接填入配套 wire、base URL、鉴权方式、模型与能力配置；用户不用再答 wire。其他已知协议入口可放高级设置；只有自定义或明确改协议时再选择。
+- 无已确认 Anthropic 入口的预设继续使用其已支持协议，不能把 Chat 地址只改个 wire 枚举就发送。首版不自动把用户请求逐个协议试发，以免重复调用、计费或执行服务端工具。
+- 自定义仍提供四种 wire；选项可以显示推荐顺序，但实际值必须明确保存。错误地址、模型或鉴权应给可定位的失败，不能无声换协议。
+
+“某模型有 Anthropic 接口”不能推出“所有托管它的 provider 都有”。例如 [DeepSeek 官方模型页](https://api-docs.deepseek.com/quick_start/pricing/)分别列出 OpenAI/Anthropic base URL；[百炼端点说明](https://help.aliyun.com/zh/model-studio/base-url)也按地区与产品列出不同协议地址。兼容范围由 provider + endpoint + model + wire 共同声明，包括思考回传、工具结果、流式终态、缓存与 usage；声明协议兼容不代表拥有 Claude 的全部特性。
+
+§4.44 的 assistant 来源因此增加 wire，与出站请求一致；不把 provider=anthropic 当作 wire=anthropic-messages 的同义词。目录更新只影响新解析出的配置，已保存请求与消息仍引用当时快照。
+
+### 4.46 四角色到 wire：已有转换器，但 v3 尚未贯通
+
+当日源码已经有四条实际后端路径：src/app/backend_stack.cpp 的 BuildBackend 按 config.wire 创建 Anthropic、Chat、Responses、Gemini backend。请求构造分别位于 src/api/anthropic/client.cpp、src/api/chat/request.cpp、src/api/responses/request.cpp、src/api/gemini/request.cpp。
+
+当前 api::Role 仍只有 User/Assistant（src/api/types.hpp）；system 单列在 Request，工具结果用 User 内的 ToolResultBlock 表达。故现有 wire 转换可以复用，但不是本单 system/user/assistant/tool 四角色 v3 已经实现。不能只新增两项枚举而保留“不是 User 就是 Assistant”的分支，否则新增 System/Tool 会走错路。
+
+v3 的目标映射如下，须由 adapter 结构化转换，不能简单改 role 字符串：
+
+| 内部含义 | Anthropic Messages | Chat Completions | Responses | Gemini Generate Content |
+| --- | --- | --- | --- | --- |
+| system | 当前有效 system 放顶层 system，避免再重复放进 messages | system 消息，按端点要求处理其他系统角色差异 | 顶层 instructions | systemInstruction |
+| user | user 的文本/内容块 | user 消息 | user input item | user contents/parts |
+| assistant 正文 | assistant 的 text 块 | assistant.content | assistant message item | model contents/parts |
+| assistant 工具调用 | assistant.content 的 tool_use | assistant.tool_calls | function_call item | model 的 functionCall part |
+| tool 结果 | user.content 的 tool_result | role=tool 与 tool_call_id | function_call_output item | 对应的 functionResponse part |
+
+工具结果从内部 tool 变成 Anthropic wire user，不代表它变成了真人输入；turnId、来源与 Action 仍取原始消息，不能从 wire role 倒推。相邻同组的两条 tool 可映射为一条 user 中的两个 tool_result，按稳定顺序排列并还原 provider 调用 ID；此时两个内部 messageRef 对应同一 wire message 的不同块。请求快照应保留这份映射，不能假定内外消息数量一一相等。
+
+```text
+内部：S -> U -> A(call1, call2) -> T1 -> T2 -> A2
+Anthropic：顶层 system=S
+           messages=[U, A(tool_use1, tool_use2),
+                     user(tool_result1, tool_result2), A2]
+```
+
+用户指出 Anthropic 没有 tool role，这一点与工具结果块的合同一致。[百炼 Anthropic 兼容页](https://help.aliyun.com/zh/model-studio/anthropic-api-messages)确实列出 user/assistant/system，并将工具结果定义为 user 中的 tool_result。[Claude API 参考](https://platform.claude.com/docs/en/api/messages/create)当日 role 枚举也列出 system，但同页说明仍写 system 使用顶层参数，存在文档口径差异；本单采用顶层 system 的公共路径，不把所有兼容端的 message-role 支持集合硬判成完全相同。中途 system 消息等扩展另按端点能力处理，不能藉此重复注入当前 system。
+
+思考转换同样依目标 wire：Kimi Chat 的 reasoning_content/thinking.keep 不能直接原封塞进 Anthropic 请求；使用 Anthropic 入口时需按该入口合同处理 thinking 块及保留规则。§4.42 的 K2.6 keep=all 专指支持该参数的 Chat 入口。签名、不透明块、媒体、原生服务端工具、错误结果和 usage 均须明确支持范围；兼容端可能返回空签名，不能套用 Claude 非空签名要求虚构内容。
+
+现有实现已有 ToolUseBlock/ToolResultBlock/ThinkingBlock 的序列化与流式测试；但 ContentBlock 当前没有专门的 redacted_thinking 原生类型，Anthropic 解析器也没有该类型的分支。§4.42 所要求的不透明块无损回传仍属待补能力，不得把“常规 thinking + 工具测试通过”扩大成“所有原生块已完整支持”。
+
+完整 v3 验收需要从真实 v3 JSONL 读取四角色，经上下文选取与 adapter 生成 wire，再把流式响应落回 v3；逐项核对 system 只注入一次、工具配对与分组、思考字段和块顺序、ID 映射、来源以及最终输入估算。现有两角色 Request 的构造测试和 HTTP/SSE 回环只能验证现有路径，不能替代这条 v3 验收。
+
+最后一道容量检查应吃 adapter 和 extra_body 等所有覆盖完成后的实际输入形状；现有 Anthropic BuildRequestJson 在尾部允许 extra_body 覆盖字段，接入 v3 时不能在它之前估完便直接放行。摘要、隐藏指令及来源字段分别按既定合同选取，事件信封不混入 wire。真实 provider 探测与本地 fixture 测试分开报告，不拿单端成功证明所有预设兼容。
+
+本轮验证：按当前源码执行 `cmake --build build/release --config Release --target lubancode_tests --parallel 4` 成功；随后 12 组聚焦 CTest 全通过：四种 wire 的 request/events 共 8 组，unit.api.wire_call_id_gate、integration.api.wire_replay、unit.config.provider_catalog、unit.config.provider_wizard。回环走本地 HTTP/SSE fixture，没有请求真实付费模型；未跑完整测试集，未实现或验证 v3 四角色端到端路径。文档 JSON 示例与格式检查通过。本轮只修改本 TODO，未切换现有 provider 默认 wire。
+
+### 4.47 消息挂点与 Turn/Step 挂点各管什么
+
+先收到输入，再排队，再接纳消息。只有接纳后，消息才参与对应上下文。`Pre/PostUser` 按内部消息来源触发，不能扫描 wire 的 role=user 来猜；Anthropic tool_result、skill 注入、compact 摘要都可能落在 wire 的 user 容器中。
+
+| 挂点 | 明确时点 | 常见用途与限制 |
+| --- | --- | --- |
+| `PreSystem` | system 候选组装后、版本提交前 | 合并 soul、固定规则；不原地改旧 system |
+| `PostSystem` | 新 system 版本已提交并成为当前根后 | 建立或更新能力目录视图；按 system 版本触发，不按请求触发 |
+| `PreUser` | 队列输入获得接纳机会后、正式 user 内容及接纳关系提交前 | 校验、规范化输入；原始输入事件仍保留；拒绝时不造已接纳消息 |
+| `PostUser` | user 消息与接纳关系落稳后、后续模型请求准备前 | skill 选择、memory 召回、追加隐藏上下文 |
+| `PreAssistant` | 当前流式响应收齐，或 Esc 固定接收内容后，正式 assistant 候选接纳前 | 检查完整性、格式与准入；允许标明 interrupted 的候选，不指“调用模型之前” |
+| `PostAssistant` | 正式 assistant 落账且接纳后、任何派生执行前 | 提取产物、观察回复、提出后续效果；每次接纳各一次，interrupted 不触发工具或自动续跑 |
+| `PreTurn / PostTurn` | turn 开始执行 / 确认终止 | 回合级准备与收尾；steer 不另开 turn，也不重复 PreTurn |
+| `PreStep / PostStep` | 逻辑 step 开始 / 本 step 响应处理结束 | step 级准备与统计；不靠它替代每条消息挂点；PostStep 的动作前后归属沿 step 合同，不在此暗改 |
+| `PreRequest` | 每次实际模型请求构建至发送前 | mutate、freeze、estimate、capacity 分阶段，重试和内部请求也经过 |
+| `PreAction / PostAction` | 实际工具执行前 / 执行结果收集后、最终 tool message 提交前 | 换后端、改参数、选择最终结果；沿 §4.23 |
+
+首版接纳顺序如下。首次输入先预留 turnId；只有确实接纳才建立回合事实。预留身份不等于 turn 已开始执行。
+
+```text
+首次普通输入 / 可以执行的 followup 消息：
+  received -> queued -> 预留 turnId -> PreUser
+  -> user 与接纳关系提交 -> PostUser（采用 skill/memory 上下文）
+  -> PreTurn（一次）-> PreStep -> PreRequest -> 发送
+
+同一 turn 的 steer：
+  received -> queued -> 当前 assistant 及其工具组全部配齐
+  -> PreUser -> user 与接纳关系提交 -> PostUser
+  -> 下一个 PreStep -> PreRequest -> 发送
+
+当前 step 返回：
+  stream 片段落 event -> 收齐候选 -> PreAssistant
+  -> 完整 assistant 落账并接纳 -> PostAssistant
+  -> 若声明了工具，逐项走 PreAction / 执行 / PostAction / tool message
+  -> 整组配齐后，才能采用等待中的上下文追加或接纳 steer
+```
+
+- 用户举的 `user -> tool -> tool -> user` 省略了发起调用的 assistant。正式链仍须有 `U1 -> A1(tool_calls) -> Tool1 -> Tool2 -> U2`；U1、U2 可共用 turnId，各自有一次 Pre/PostUser。
+- Pre/PostUser 挂点覆盖正式 user 接纳；首版 skill/memory handler 默认只匹配 `origin=human` 且用途为交互任务的输入。隐藏 hook 消息、内部 title/compact、子报告各有 origin/purpose，默认不命中这些 handler。角色、来源、用途、deliveryMode 均进入匹配条件；不能以“隐藏”代替来源判断。
+- slash 到达时只记接收/解析与 followup 入队。执行后若仅展示，则没有 user 接纳，没有 Pre/PostUser，也不凭空开 turn。若产出用户任务消息才走对应挂点；显式 skill slash 已披露正文时，PostUser 引用那次效果，不再加载一遍。命令效果是否含消息沿 §4.25。
+- 多条 steer 按队列规则逐条接纳，各有 invocation；某个 handler 可显式声明按 admissionBatch 聚合，但必须列出覆盖的 inputIds，不能默默少跑。每条消息的归属和追加位置仍明确。
+- PostUser 可以追加新的隐藏 user 上下文，不能改写已经落稳的用户原文。上下文带 sourceInputId、hookInvocationId、版本/hash、用途和披露引用。hook 追加消息默认不递归分派同一族上下文生产 hook；显式连锁另设深度/总次数限制。
+- PostUser 失败不撤销原 user。required 失败阻止后续发送；optional 按已登记策略跳过并留事件。恢复依据 admissionId、dispatchId 与已采用 effectIds 续跑，不能重复追加同一段 skill/memory。外部写入结果不明仍走 unknown 合同。
+- PreAssistant 不改模型原始回复、签名或 tool_calls。原始候选与流式事件始终留档；拒绝接纳时保留完整回复及拒绝原因，终结该响应处理，不派生工具。要改展示或生成新内容，另记派生结果，不冒充模型原话。
+- Pre/PostAssistant 不按 delta 执行。Esc 按 §4.63 保存并按合同接纳 interrupted assistant，handler 必须看到 completionStatus；无定稿证据的断流仍只有草稿事件。完整但 length 截断的候选带明确状态，沿 §4.43 决定是否可接纳。内部 title/compact 响应按 purpose 匹配，不能触发普通对话自动续跑。
+- PostAssistant 若见 tool_calls，其上下文效果只能先登记待采用；直到完整工具组配齐才入链。它若拒绝继续，不能带着未配对调用发送下一请求；须完成合法取消结果或暂停。长期记忆写入宜放 PostTurn 并引用证据，不能把每个中间 assistant 猜测直接当事实。
+- PreSystem 首次启动只允许无外部副作用的候选组装。首条持久记录仍是 seq=1 的完整 system；此前组装 hook 的过程可暂存，随后按真实时间追加启动事件。首行之前崩溃视为会话未建成，不能声称那段未落盘过程可恢复。后续 system 变更先记请求事件再执行。
+- PostSystem 不再次改写当前 system；确需新版本，提交独立变更请求，在安全边界执行并检查无变化/递归上限。只读 replay 不触发；resume 已有 system 不冒充新版本。进程恢复资源连接走独立恢复流程。
+
+### 4.48 一个注册池：同名选实现，依赖定次序
+
+分清三件事：`hookPoint` 是挂点，`name` 是逻辑功能名，`implementationRef/definitionHash` 是此次实现。覆写 `PostUser` 下的 `memory.recall`，只替换这枚功能，不删除同挂点的 `skill.resolve`。逻辑键采用 `(hookPoint, name)`，首次注册必填；不同用途不得共用这枚键。
+
+| 规则 | 首版合同 |
+| --- | --- |
+| 同名接管 | 内置作为默认项；用户配置中同键定义胜出，只执行获选实现。旧定义及来源仍可查；这是 v3 新规则，不沿用现行“来源相加” |
+| 覆盖层级 | builtin < 已启用扩展 < project < user < 显式 session 配置；project/扩展仅在既有信任范围内参与。session 层须由用户设置或其委托规则产生，不能让插件自称 session 来源抬高层级 |
+| 同层重名 | 不按文件扫描先后猜赢家；报冲突，要求配置点明所选实现。不同 hook 可共存，同键只能一项获选 |
+| 条件与替换 | 先按同名规则选实现，再对触发对象匹配条件。替代项未命中或失败不偷偷执行旧内置；如需 fallback，须显式声明并留采用记录 |
+| 顺序 | 阶段约束与 before/after 依赖优先；无依赖约束的就绪项按 priority 数值小者先，同值按逻辑键稳定排序。依赖引用逻辑键，替换后自动指向获选实现 |
+| 非法计划 | 循环依赖、缺失必需依赖、阶段倒置、返回合同不兼容均拒绝发布；optional 依赖须显式标明 |
+| 效果 | 改写者按计划串行，读取上一项已采用版本；只读且无依赖的观察者才可并发。handler 的完成次序不改变采用次序 |
+| required | required、输入输出合同和阶段属于功能槽位要求，替换实现不能自行解除。用户能换估算算法；不能通过返回任意 JSON 或删除 handler 绕过完整请求检查 |
+| 配置变更 | 生成新 registryRevision，安全边界切换。单次 dispatch 固定计划；一轮请求准备固定 registryRevision，中途变更留到下一次准备，不混用两版依赖 |
+
+示例是两层配置合并后的候选定义，不是两项都执行。数值和脚本路径只作说明；稳定 name 不带 builtin/user 前缀，来源放 source。
+
+```json
+[
+  {"hookPoint":"PostUser","name":"memory.recall","source":"builtin","priority":200,"implementationRef":"builtin.memory_recall_v1"},
+  {"hookPoint":"PostUser","name":"memory.recall","source":"user","priority":200,"implementationRef":"hooks/my_memory_recall.js"}
+]
+```
+
+首批逻辑槽位建议：`PostSystem/capabilities.catalog`、`PostUser/capabilities.resolve`、`PostUser/skill.resolve`、`PostUser/memory.recall`、`PreAction/search.backend`、`PreRequest/context.token_estimate`、`PreRequest/context.capacity_check`。capabilities.resolve 负责 MCP/Plugin 及其能力候选选择，skill.resolve 沿选定来源读取指令；需要其输出时声明依赖。skill 默认先解析，memory 后召回；若召回确实依赖 skill 效果，则声明依赖，不能只靠两项 priority 恰好排对。grep 后端替换照 §4.23 进入唯一执行入口。
+
+PreRequest 内依次为 mutate -> runtime 冻结 adapter 最终输入 -> estimate -> capacity。冻结是宿主提交边界，不是可覆盖算法；估算和容量策略均由获选 hook 实现。capacity 返回恢复决定后，runtime 调度 compact/预览降档，再从新输入准备；不能让 handler 递归调用同一 PreRequest 无限套娃。
+
+每个 dispatch 保存 registryRevision、获选逻辑键、实际定义/hash、稳定运行计划及替换来源。被覆盖项可在注册变更事件统一列出，不在每次 dispatch 为全部目录刷 skipped。按挂点和匹配索引找 handler，不为每条输入扫描所有插件；挂点有总时间/调用数/追加上下文字节预算，handler 自有 timeout、failurePolicy 与能力声明。
+
+必需上下文生产 hook 须在本次输入冻结前完成；耗时召回显示 pending。观察 hook 可后台跑。晚到结果不能插进已发送请求，须作为带因果引用的新 followup 等待接纳，或按显式取消策略丢弃。取消、重试、重复交付均沿原 invocation/effect 身份记录。
+
+### 4.49 tool、skill、MCP、plugin 的加载与缓存
+
+统一管理身份和发现入口，但不把四者当作同一种执行对象。tool 是可调用能力；skill 是指令与资源；MCP 提供连接和远端能力；plugin 打包工具、skill、hook 及其他资源。
+
+| 层次 | 做什么 | 何时做 |
+| --- | --- | --- |
+| 宿主发现 | 读取 manifest/元数据，建名称、描述、来源及版本索引 | PostSystem/capabilities.catalog 预加载登记，按 catalogRevision 复用；bootstrap 必需注册在挂点之前完成 |
+| 需求选择 | 结合已接纳输入、当前任务和显式配置，选 MCP/Plugin 及其具体能力 | PostUser/capabilities.resolve；普通输入与 steer 都经过 |
+| 模型披露 | 提供少量目录、检索命中、完整调用 schema 或选中 skill 正文 | 固定入口随初始请求；PostUser 按需追加，模型检索可补充 |
+| 后端就绪 | 加载选中插件模块、建立选中 MCP 连接、取得并核对实时能力 | PostUser 需要实时披露时启动，或延至首次检索/调用；允许有配置的预热，不默认全量启动 |
+| 执行 | 验证实际目标及参数，调用实现，保存结果 | 模型 Action 或明确授权的宿主操作，进入对应执行账 |
+
+PostSystem 适合安排轻量目录视图，不等于“把所有东西加载完”。hook 定义本身须在对应 dispatch 之前注册；插件 manifest 可提前声明挂点及延迟实现入口。一个插件若必须执行模块才能知道 hook 清单，就不能同时声称其 hook 零启动加载。运行中发现新 hook 只影响后续计划，不倒回补触发已结束挂点。
+
+**默认两段加载，任务相关披露。** PostSystem 管“有哪些”，PostUser 管“本次用哪些”。所有目录都可以在宿主索引中，但不把整个 MCP/Plugin 名单或全部 schema 放进 system。固定入口及必要基础规则在 system 候选组装和初始工具配置阶段确定；PostSystem 返回的目录不再自动造成一次 system 改写。
+
+```text
+system 已生效
+  -> PostSystem/capabilities.catalog
+  -> 读取 MCP 配置、Plugin manifest 和已有能力索引
+  -> 宿主保留目录版本；模型只见固定入口
+
+用户消息已接纳（含 steer）
+  -> PostUser/capabilities.resolve
+  -> 当前输入 + 未完成任务 + 显式点名/固定启用 + 已披露能力
+  -> 筛选相关 MCP/Plugin，再筛选其中具体能力
+  -> 必要时连接/加载，核对能力版本
+  -> 缺少哪些相关说明/schema，就以隐藏上下文追加哪些
+  -> skill/memory 等后续 handler -> PreRequest 完整预检 -> 发送
+
+模型执行中发现还缺能力
+  -> 固定 tool_search -> 按需连接/加载与披露 -> 固定 tool_invoke
+```
+
+- **选择不是只匹配最后一句**：输入含“继续”“按刚才的做”时，结合当前任务及未完成调用判断；显式点名优先，skill 声明的依赖也可参与选择。超限用户输入仍按 §4.51 使用预览及受记录的原文读取，不能把全部原文暗送选择模型。
+- **检索分两层**：先找相关 server/package，再找其中工具/skill；大目录在宿主检索、分页，不每条输入把完整目录交给另一个模型筛选。若选择 handler 本身调用模型，保存它自己的请求、usage、候选来源和预算，不能成为未记账的额外消耗。
+- **只披露相关能力**：命中一个 Plugin 不等于加载其全部说明或向模型披露全部工具。限制候选数、总披露字节、单次发现耗时与并发连接；低置信候选可只给简短定位，等模型搜索再展开。空命中记结果，不塞一段“本次无插件”到消息里。具体数值走配置，不在本轮臆定。
+- **相关性不等于可用性**：选择、加载就绪、模型已见、允许执行分别记录。MCP 连不上就标失败/不可用，不能注入“已就绪”的 schema；是否继续任务按 required/optional 策略。首次动态发现只有 server 级描述而无实时工具清单时，先完成有界连接查询，再披露实际命中。
+- **PostUser 主动披露不是 tool 返回**：没有模型 tool_call 时，说明/schema 进入 origin=hook 的隐藏 user message，携带 sourceInputId、来源版本及可验证 tool_ref；不得造孤立 tool message。完整 schema 真正接纳后才标为已披露。模型主动 search 则由配对 tool message 承载，二者不重复注入。
+- **先选能力，再按需激活扩展**：动态加载后贡献的 tool/skill 可供本次后续请求使用；新发现的 hook 不加入正在运行的 dispatch。选中插件的初始化由已注册的通用激活处理执行并留账，不能为了补跑新 hook 递归重开 PostUser。必需的估算、准入等槽位及用户明确固定启用的基础 hook 不参与任务相关性淘汰，须在所需挂点之前可用。
+- **漏选仍能补找**：PostUser 选择只是预取建议，不封死未选目录。固定 search/invoke 在 turn 中也能激活新需求，实际权限另行验证；任务不出现新 user 消息也不因此失去发现能力。新找到的后端仍遵守唯一 Action 执行入口。
+- **不每轮清空重装**：同源同版本的连接/模块可复用；相同指令/schema 若仍在当前有效上下文，不重复追加。任务换了，不再主动推荐无关能力；宿主可回收空闲连接，但不删历史消息来假装模型从未见过。确需撤销能力时另记状态与必要尾部通知，执行侧立即按当前状态校验。历史说明占用由正常 compact 处理，动态选择本身不能让模型遗忘旧文本。
+- **缓存约束落在请求上**：PostUser 的选择结果不得逐轮改顶层 tools、system 或旧消息；固定入口定义不带当前已选工具枚举。完整动态 schema 作为尾部内容，tool_invoke 参数保持固定的引用加 arguments 结构，真实 schema 由宿主校验。更换用户候选不重排早前披露；仅在字段确需改变时准备新版本，不宣称无损缓存。
+
+例如上一请求已有 `S + U1 + 能力说明A + A1`，下一条 U2 需要 B，就形成 `S + U1 + 能力说明A + A1 + U2 + 能力说明B`，顶层工具仍为同一组固定入口。不能将开头替换成“只含 B 的 tools/system”，也不能删去旧能力说明 A。这里保留可复用前缀，新增尾部仍需处理；TTL、模型/端点设置和服务端策略仍会影响实际命中。adapter 合并相邻 user 内容时也须保持原块与顺序，不能把动态内容重新归并进 system。
+
+- **工具入口**：首版保留少量常用工具及固定 `tool_search + tool_invoke` 定义。其余通过 search 披露 schema 与版本绑定的 tool_ref，invoke 解析后进入真实工具的唯一执行入口。发现多少工具，不默认向顶层 tools 追加多少 schema。provider 原生延迟引用作为能力配置中的可选路径；采用 Anthropic wire 本身不足以证明该端点支持。
+- **skill**：宿主索引可覆盖全部已发现条目；模型只接收预算内固定目录或检索结果。PostUser 处理显式点名及可判定触发，模型仍可主动检索/启用。激活才读 SKILL.md，引用材料再按需读；这延续 §4.29 的渐进披露，不能靠把全部正文塞入 system 来省一次搜索。
+- **memory**：PostUser 按当前输入召回，追加带证据/来源的有限上下文；空命中不造空消息。同一内容仍在有效上下文时可复用引用。长期存储缓存命中、召回命中、模型看见记忆三者各自记账；默认不每条用户输入重写 system。
+- **MCP**：本地配置可先给 server 定位与缓存目录，但实时 tools/list 要靠连接后的协商和查询；离线目录须标旧版本或未验证。同一 server 的并发首次使用合并初始化，设连接/发现超时和并发上限。大清单按分页及预算读取；变化后发布新版索引，旧请求引用不随之改写。不能因目录存在便假称 server 可用。
+- **plugin**：发现 manifest 与执行模块分开。模块只加载一次并可复用，活跃调用持有对应版本；卸载/升级不得破坏正在运行的 Action。一个包导出的 tool、skill、hook 分别注册，各有稳定身份和能力合同，不把整个包摊进模型输入。
+- **名称冲突**：能力 ID 带来源实例/命名空间，显示名可短；不同 MCP server 的同名工具不静默覆盖。hook 同名接管是 §4.48 的专门配置机制，不扩散为全部能力“后加载者获胜”。引用固定源实例、schema/content hash 及 session 范围；实际执行前重验，过期则明确重新发现，不能悄悄换同名后端。
+- **大目录预算**：分别限制宿主索引、启动扫描、模型固定目录/顶层 schema、单次检索结果、连接并发和 hook 注入总量；同时看数量与 UTF-8 字节。截到预算须带 hasMore/cursor 或明确未发现范围，不能报告“全部只有这些”。具体阈值除已定工具预览上限外留给配置与后续测量，不凭空声称已压测规模。
+- **schema 不可头尾裁剪后当完整定义**：search 结果总预算仍为单工具当前档位，默认 32 KiB，包含路径/说明/封装。先缩小命中数、分页，完整保留可调用条目的 schema；单项仍装不下则报 schema_too_large，不签发“已披露完整 schema”的引用。原文照常存 artifact。文件读取可以分段，不等于参数合同可以拿半截冒充完整。
+- **上下文与缓存分开**：宿主已加载模块/已缓存 schema，不代表当前模型输入仍包含它。compact 或 32/16/8/4 KiB 降档删去披露正文后，模型侧已披露状态须按新链重建；需要时重新提供完整 schema/指令，不能只回“前面已经给过”。宿主验证和权限校验仍依实际源版本执行。
+- **结构化结果降档**：对 search 等机器可读结果，降档优先生成满足总字节上限的合法分页 JSON；若只能给头尾原文节选，则明确它是文本预览，撤销受影响条目的完整披露标志。更换表示形式仍追加派生 tool message 并引用原结果，不能原地改旧消息。
+
+缓存目标是保留已发送前缀：固定工具定义与 system 的顺序和内容，动态 skill/memory/工具发现结果往当前合法消息尾部追加。不要把注册时间、目录扫描顺序、不断变化的 catalogRevision 或本地连接状态无故塞入 prompt。一次配置变更确实改变模型输入时，保存新版并接受相应前缀变化，不能为了缓存保留错误能力。
+
+2026-09-10 核对 [Claude prompt caching 文档](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)：其缓存覆盖 tools、system、messages 组成的前缀。这里采用稳定工具入口和尾部披露，是本项目设计；不保证各兼容 provider 都命中缓存。分开记录本地模块/目录缓存与 provider cache usage；没有服务端 usage，不报实测命中率。
+
+### 4.50 本轮代码核对与待验收边界
+
+2026-09-10 静态核对：`src/hooks/events.hpp` 有 UserPromptSubmit、Pre/PostTurn、Pre/PostStep 和工具挂点，尚无本节完整消息挂点；`src/hooks/types.hpp` 明写来源只排序、hooks 相加，不能称已有同名接管。`src/tools/deferred_tool_resolver.hpp` 已把 ProxyReference 列作推荐模式；`src/tools/tool_search.cpp` 已有单项 schema 32 KiB 检查，但单项检查不等于结果合计预算，也不能以会话 ledger 中 schema_expanded 代替当前上下文披露判断。
+
+`src/app/tool_runtime.cpp` 的 MCP 挂载路径调用 Initialize/ListTools，插件挂载调用 LoadDirectory；`src/tools/plugin_loader.cpp` 的扫描会打开动态模块。这证明“模型延迟披露”与“后端延迟启动”目前不能混说。本轮只补合同，未改这些生产路径，未运行新的行为测试。
+
+| 验收场景 | 必须满足 |
+| --- | --- |
+| 同 turn 两次 steer | 各触发 Pre/PostUser，turnId 不变；PreTurn 只一次，工具配对不破坏 |
+| 纯显示 slash / skill slash | 均等 followup；前者无 user hook，后者按实际消息接纳且不重复披露 |
+| memory 注入隐藏 user | 来源不是 human，不递归召回；准确关联触发输入 |
+| 流式 assistant + 工具组 | 不按 delta 跑消息 hook；追加上下文等工具组配齐 |
+| PostUser 失败后恢复 | 原 user 仍在，已采用效果不重复，required 未成功不发送 |
+| 同名用户接管内置 | 只跑用户实现，定义/hash 可追溯；未命中不暗跑旧实现 |
+| 循环依赖 / 同层重名 / 删除 required | 明报冲突或阻止发送，不能靠 priority 绕过冻结与容量检查 |
+| 运行中换 hook 或能力版本 | 在途计划保持原版，新计划安全发布；旧调用不指向新版实现 |
+| 大目录与首次启动 | 模型输入受预算约束；无需求的 MCP/插件不因扫描全启动 |
+| 多个近 32 KiB schema 命中 | 结果合计仍不超单工具预算；分页，JSON 完整，不冒认披露 |
+| compact / 预览降档后再次调用 | 按新上下文判断 schema/skill 是否仍完整可见，必要时重新披露 |
+| 首行 system / resume / 换 soul | 首行约定不变；只读恢复不跑 hook；新 system 只触发对应版本一次 |
+| 相同逻辑输入重复准备 | 工具顺序、schema、system 稳定；本地 cache 与 provider usage 分别核验 |
+| MCP/Plugin 从 A 切换需求到 B | PostUser 只补 B 的必要能力；tools/system 与此前消息不改，不删除 A 的旧披露 |
+| 用户只说“继续” / turn 内任务转向 | 前者沿当前任务解析；后者可由固定 search 补发现，不强等下一条 user |
+| PostUser 选中 Plugin 内一项能力 | 不全包披露；新 hook 不倒灌当前 dispatch，必需基础 hook 不因无关键词被移除 |
+| 动态选择未命中 / MCP 连接失败 | 可补检索；不可用能力不报已就绪；过程、失败处置和实际注入各自留账 |
+
+### 4.51 用户长文本：显示折叠、发送上限、原文存档分开
+
+首版统一使用 KiB 与 UTF-8 字节。上限 `userTextMaxBytes=32768` 按一次用户提交的全部文本合计，不按粘贴块、附件块或内部分拆消息各给一份。`composerFoldTokens=1000` 只管显示，用 `ceil(rawTextUtf8Bytes/4)` 判定，沿首版估算口径；这是纯文本 UI 估数，不含最终请求 JSON 开销，不代替 PreRequest 估算。
+
+| 原始文本 | 输入端默认显示 | 实际发送 |
+| --- | --- | --- |
+| 估算 <= 1000 token | 正文 | 完整正文 |
+| 估算 > 1000 token，且 <= 32768 字节 | `[文本 1 · 约 N token]` 附件式折叠，可展开编辑 | 完整正文，不发送占位标签冒充正文 |
+| > 32768 字节 | 折叠并标明超限、原文已保存；可查看全文及发送预览 | 总长 <= 32768 字节的来源说明、全文文件引用、头尾节选、省略提示 |
+
+阈值均为严格“大于”：4000 UTF-8 字节估算 1000 token，不强制折叠；4001 字节触发。32768 字节可完整发送；32769 字节走超限存档。文本折叠不删正文、不改变队列类型、不代表已调用模型。发送按钮解析编辑器内部块结构，不能用字符串替换把用户手打的 `[文本 1]` 当作附件引用。
+
+- 超限文本先完整保存为 `sessions/<id>/artifacts/<inputId>.input.txt`，校验字节数/hash 后再承认 input.received 持久化成功；事件使用原文引用，避免在 JSONL 再复制巨段正文。入队时同时固定输入块顺序、附件引用及 previewPolicyVersion。存盘失败保留草稿，显示失败，不接纳缺失原文的预览。
+- 单次输入包含多个粘贴块时，预算合计；保持文本及图片的相对顺序，不把图片夹着的两段文本重新拼成相邻。超限文本从有序文本序列取头尾，节选记录原 blockId 与字节范围；没有文本节选的图片位置用块关系保留。正文、文件名/块标签、路径、省略提示和换行共用 32 KiB；先留说明预算，再头尾均分，UTF-8 不切半字。多份来源按 tool 预览已有规则列清文件，清单过长另存索引。
+- 模型消息内保存本次实际允许发送的文本；完整原文通过外层 sourceRefs 指向 artifact，UI 可读取全文。消息的 full source 引用与图片 payload 引用使用不同用途：前者仅供溯源/按需读取，adapter 不自动展开成全文。请求快照列实际预览，不能把 1 MiB 原文误计为“已经发过”。
+- 显示折叠状态归 UI 投影，可保留默认显示元数据；展开历史不改变模型上下文。发送时展开折叠块，指恢复这条消息的实际 payload：预算内恢复全文，超限恢复预览。标题、resume、export 都明确区分原始输入与模型已见内容。
+- 32 KiB 限额可由内置 `PreUser/input.text_preview` hook 生成预览，用户可同名替换算法；槽位仍要求保全原文、正确引用并满足上限。PreUser 其他文本改写先完成，再做最终预览处理；runtime 校验最终文本字节数与来源，不能用优先级把后续追加藏到限额之外。PostUser 的 skill/memory 是独立来源，另有注入预算；不能复制原始输入到隐藏消息绕过本限额。
+- hook 的输入同时给原文引用与拟发送预览，必须声明读取范围。skill/memory 若确需读原文，用受记录的 artifact 读取；若内部调用模型，照自己的请求及容量合同记账。不能把宿主读过原文说成主模型看过全文。
+- 原文路径必须能由当前 session 的读取工具解析；只有远端磁盘路径而模型工具不可达时，先提供可用 artifact 读取入口，否则明确报缺能力。模型后续按范围读，读取结果继续受单工具 32 KiB 及恢复档位约束，不自动一次回填全文。多次读取仍可能累积到 context 上限，每次照常预检。
+- 普通文本仍默认 steer，slash 仍 followup。slash 分类根据原始输入及编辑器块语义判定，不能先截掉命令名/参数再解析；纯命令没有模型消息，模型文本上限不等于命令参数存储上限。超过整份输入的接收/磁盘硬额度时明确拒收并保留可恢复草稿，不只保存头尾便声称全文已落盘；具体资源硬额度另行配置。
+- 接纳、发送重试不得重新读用户原路径来改变原文。草稿重新编辑则形成新输入版本；已接纳内容沿不可变消息与派生引用规则处理。大文本到达于 tool 执行/compact 期间，先存档排队，安全边界才运行 Pre/PostUser。
+
+示意预览（实际内容和说明共用 32 KiB；不额外各给头尾 16 KiB）：
+
+```text
+用户输入已节选，原文 120000 字节。
+full_output: ["sessions/S1/artifacts/IN1.input.txt"]
+[IN1.input.txt 开头]
+...
+[中间内容已省略；完整输入可按范围读取]
+[IN1.input.txt 结尾]
+...
+```
+
+### 4.52 图片输入：原图引用进 message，编码交给 wire
+
+图片不是 base64 文本消息。内部使用带类型的图片块引用原图，图片与文字组成同一条 user 内容序列；不新增第五种 role，不把每张图片假作 tool 结果。剪贴板位图、拖入图片、附件选择、明确图片路径均先导入不可变 session artifact，再排队接纳；不能到发送时才读取可能已被改动的原文件。
+
+输入端建议终端显示 `[图片 1: screenshot.png]`，有图形界面时显示缩略图及文件名。可以打开预览、移除、重排、替换；正文与附件共享有序编辑模型。占位是 UI 表示，不进模型文本替代图片，也不声称这是 Codex 当前界面的精确复刻。纯图片允许提交，多个图片有稳定编号；未导入完成/失败的附件明确显示状态，默认阻止提交该份混合输入，不暗中丢图只发文字。
+
+消息形状示例（引用字段示意，精确公共 ref schema 仍由 §4.13 冻结）：
+
+```json
+{
+  "type": "message",
+  "seq": 12,
+  "timestamp": "2026-09-10T08:00:00.000Z",
+  "messageId": "U12",
+  "turnId": "T1",
+  "origin": "human",
+  "message": {
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "看看这张报错截图。"},
+      {
+        "type": "image",
+        "artifactRef": "sessions/S1/artifacts/IMG1.png",
+        "mimeType": "image/png",
+        "sha256": "<image-content-hash>",
+        "byteLength": 245760,
+        "width": 1440,
+        "height": 900
+      }
+    ]
+  }
+}
+```
+
+adapter 解析经过校验的图片引用，按最终 provider/model/endpoint 能力构建 wire。首版优先本地原图 -> base64 内联，不要求搭公开图床；可选上传文件复用须由具体端点能力开启。
+
+| wire | 原图内联时的内容块 | 其他方式 |
+| --- | --- | --- |
+| Anthropic Messages | `type=image`，`source={type:base64,media_type,data}` | 支持的端点可用 URL 或 Files API 的 file_id |
+| OpenAI Chat Completions | `type=image_url`，`image_url.url=data:<mime>;base64,...` | 支持的端点可用图片 URL；不把 Responses 的 file_id 字段直接塞过来 |
+| OpenAI Responses | `type=input_image`，`image_url=data:<mime>;base64,...` | 图片 URL，或 Files API 的 file_id |
+| Gemini generateContent | `parts[].inlineData={mimeType,data}` | 支持的文件 URI 通过 `fileData={mimeType,fileUri}`；不混入 Interactions API 字段 |
+
+字段依据 2026-09-10 核对的 [Anthropic Vision](https://platform.claude.com/docs/en/build-with-claude/vision)、[OpenAI Images and vision](https://developers.openai.com/api/docs/guides/images-vision)、[Gemini generateContent Part](https://ai.google.dev/api/generate-content#Part)。这些字段不代表所有兼容端点均支持图片、URL 或文件上传；能力随 providerConfig/modelProfile 与 endpoint 一起固定。
+
+- **原件与派生图**：保存真实字节、按解码验证的 MIME、尺寸、hash。缩放、旋转、格式转换另存派生图，记录 sourceRef、处理参数及版本；发送引用指向实际采用那张，不把缩略图冒充原图。按需生成 UI 缩略图，不把解码后的大位图常驻输入框。检查损坏文件、伪扩展名、解码像素上限及动画帧策略；不支持时明确拒绝或采用已声明转换。
+- **事件**：图片导入/校验/转换/上传沿 started、真正等待时 pending、completed/failed/cancelled 记录。本地导入完成不等于上传完成，也不等于 sent。文件和引用先落稳，再提交消息；界面展开、折叠不必逐次刷执行事件。图片导入不重复触发 Pre/PostUser，同一份混合输入只按一次用户接纳处理。
+- **尺寸与限额**：文本 32 KiB 只约束文本，图片单图字节、像素、数量、总原图字节及编码后请求体大小另算。base64 不是压缩，编码正文长度为 `4 * ceil(binaryBytes / 3)`，还要加 JSON 等封装。模型切换后重新检查目标端点限额；不把文本模型的图片输入悄悄改成 `[图片]` 发出。
+- **token 与 compact**：文本继续 bytes/4；图片走 provider/model 对应视觉估算 hook，输入包括实际图像尺寸、detail/分辨率设置和采用版本。无可靠策略时 coverage=partial，视觉预算 unknown；首版 bytes/4 不伪装成已支持完整多模态预算。发送前须有可用视觉预算策略，缺少则明确阻止并保留输入；不能把 base64 除以 4 或把图像计为零。compact 的材料若含图片，其目标模型也须支持；文本摘要不等于保留全部视觉细节。
+- **精确请求与日志**：JSONL、输入框、默认日志都只保存图片引用及描述，不复制 base64。请求快照用实际 payload artifact/hash、编码方式和 adapter 版本重建图片块；若保存完整 wire body，则单独 artifact 引用，不能把大正文回灌 JSONL。冻结输入前完成必要上传引用解析，冻结后不得悄悄换图。
+- **上传缓存**：本地原图是恢复依据；远端 file_id/URI 只是某 provider/endpoint/账号范围内的传输引用，带上传时间/有效状态。切换 provider 或引用失效时从原图重新上传并重新准备请求，不跨账号直接复用。相同图像保持稳定顺序和处理版本，减少无谓前缀变化；上传复用不等于命中模型 prompt cache。
+- **URL 输入**：首版显式附件 URL 先取快照再发送，保留来源 URL；普通正文中的网址不自动变图片。这样恢复不依赖网页后来是否换图。可选直接远端 URL 路径须标明不能仅凭 URL 证明历史图像内容；不能伪报已保存原图或精确重放。
+- **resume/导出**：还在有效上下文中的图片按原消息位置重新编码或使用有效远端引用，不另加重复图片消息。缺 artifact、hash 不符或模型不支持时显示缺口并阻止不完整发送；UI 显示破损附件，绝不回显 base64。自足导出带上正文原文和图片原件，垃圾回收遵守引用保留规则。
+- **当前实现边界**：`src/api/types.hpp` 现有用户 ImageBlock 直接持有 base64；四种 adapter 已有对应图片映射。这说明已有传输基础，不代表 v3 的 artifact 输入、长文本上限、编辑器折叠、视觉容量检查和恢复合同已经贯通。本轮未改 UI/运行时代码，未实测上传。
+
+本轮新增待验收：1000/1001 token 折叠边界，32768/32769 字节发送边界，中文/emoji 截取，多段粘贴合计预算，用户手打占位不误展开，超限原文不自动回填，存盘失败保留草稿，steer 中大输入只接纳一次，混合文本与图片顺序，纯图/多图，坏图与伪 MIME，图片数量/编码体积超限，模型切换不丢图，远端引用过期，resume 缺件，视觉预算缺失不能按文本估算放行。
+
+### 4.53 后台任务：统一管理，区分 agent 与 process
+
+一套任务管理合同，两个执行器。`taskKind=agent` 运行子 agent，沿 §4.31–§4.35 使用独立 session；`taskKind=process` 运行脚本/命令，使用独立任务事件账。这里的“后台”指不占住父模型当前工具调用直到任务结束，不自动承诺退出 LubanCode 后还能运行。
+
+| 项目 | agent 任务 | process 任务 |
+| --- | --- | --- |
+| 工作内容 | 独立模型循环、工具与上下文 | 固定命令/解释器、argv 或明确 shell 脚本、cwd、stdin |
+| 原始记录 | 子 session JSONL，包含 message/event | task JSONL，只包含 event；stdout/stderr/产物进 artifacts |
+| 身份 | taskId + childSessionRef | taskId + taskJournalRef + executionId |
+| 计量 | 子模型 usage、工具与耗时 | 排队/运行/收尾耗时、退出码、输出字节；不伪造模型 token 用量 |
+| 接受后续输入 | 子代理消息队列 | 只在声明支持时，通过显式 stdin/控制协议操作；普通 followup 不会自动变成 shell 输入 |
+| 父侧交付 | 启动收据 + 后续报告 | 启动收据 + 后续报告；同样走 followup 或独立 wait/result 工具 |
+
+父侧统一 list/status/wait/result/cancel 能力，界面可以统一列任务，再按 taskKind 展示详情。具体工具名可沿现有入口收敛，不要求为每类任务复制一组工具。进程不是另一个 agent，不提供假的 steer，也不为后台管理凭空创建 turn。
+
+目录建议沿父 session 归档，不改已有 subagents 布局：
+
+```text
+sessions/P1/
+  P1.jsonl
+  artifacts/
+  subagents/C1/
+    C1.jsonl
+    artifacts/
+  tasks/J1/
+    J1.jsonl
+    artifacts/
+      E1.stdout.0001.bin
+      E1.stderr.0001.bin
+      R1.stdout.txt
+      R1.stderr.txt
+      R1.json
+```
+
+J1 是全局唯一 taskId，E1 是一次执行身份，R1 是不可变结果身份；名字仅示意。task JSONL 的 seq 从 1 开始，首行是 `task.created` event。这不是 agent session，不能套用“首行 system”规则。父 session 与子 agent session 的首行约定照旧；所有 JSONL 顶层仍只用 message/event 两种类型。
+
+- **来源与所有权**：task.created 带 taskKind、taskId、taskJournalRef、rootSessionRef、parentActionRef、创建输入/命令引用、ownerId/ownerEpoch、运行与退出策略。用户界面直接启动时用 command/input 来源，parentActionRef 可空，不伪造模型调用。task 的本地 turnId/stepId 为空，父来源完整放引用；脚本不会继承父 seq 或占用父模型 step。
+- **执行快照**：保存实际 executable/argv 或 shell+脚本文本、cwd、执行平台、stdinRef、超时/资源/输出策略与配置引用。已选脚本保存版本/hash；后续工作区变化不改变“启动时执行了什么”的记录。环境变量按可回放配置引用与脱敏摘要留档，凭据不直接写 JSONL；缺少必要环境时明确不能精确重跑。
+- **启动交接**：父账先持久预留 taskId 与来源 -> 任务写者落 task.created/准备材料 -> 父账落 task.linked -> 执行器才获准启动副作用。排队时任务写 pending(reason=capacity 等)，启动收据可返回 accepted/pending。进程创建成功且持有真实句柄后才记 started；只生成 PID 字段或建目录不算启动。
+- **启动崩溃窗口**：落 task.start.requested/executionId 后才调用系统 spawn。若在 spawn 与 started 落账之间崩溃，通过执行器登记/监督者核对同一 executionId；证据不足标 unknown，禁止自动再起一份。跨文件交接和操作系统启动不是一个原子事务，不宣称脚本副作用天然 exactly-once。
+- **身份与重试**：taskId 贯穿管理与交付，executionId 区分每次真正启动，attempt/retryOf 显式记录。重复投递同一启动请求复用原任务；用户再次有意执行同命令创建新 taskId，不能用 command+args hash 吞掉。失败重跑须核对副作用，不能仅凭 wait 超时或日志没动静就重启。
+- **状态事实**：task.created -> pending（确有等待）-> started/running -> process.exited -> 输出收尾 -> completed/failed/cancelled。cancel_requested、timed_out 是原因/过程事实；终态须有停止证据及结果保存状态。无法确认活性/退出原因用 unknown 并保存最后已知状态，之后可追加核验恢复事件，不能倒改原事件。
+- **成功与产物**：退出码 0 只证明进程正常结束；任务若声明额外结果校验，还须通过该校验才 completed。未知退出码保持 null，信号终止单列 signal。产物保存失败与脚本失败分开记录，不把“脚本成功、结果未落稳”改说成完整可交付成功；可交付明确标注的失败/部分结果。
+- **job 与 service**：可声明 `runMode=job|service`。job 等有限工作结束；service 可以长期 running，ready 只是已声明探针/握手通过，不是 completed。默认 wait 等 terminal；明确 `until=ready` 才按 readiness 条件返回。服务必须有可解释的就绪条件，不能凭某行日志或端口存在就认定当前任务就绪。
+- **等待与执行时限**：waitTimeout 只结束本次等待；maxRuntime 控制进程寿命；启动/就绪时限和取消宽限另列。service 可显式无运行时限，但仍受并发和磁盘额度约束。不因后台收据已返回就丢掉运行超时策略。
+- **进程树**：执行器管理对应进程组/Job 和后代，不只记裸 PID；PID 可能复用。根进程退出时，后代与输出管道可能仍活着，按启动时确定的进程树归属和收尾策略核验；不能一见根 PID 消失就宣告整项任务结束。交互式 stdin/PTY 由显式能力声明控制；非交互任务默认明确关闭或提供 stdin，避免无提示地卡在询问。
+- **取消与父会话退出**：首版 process 默认由 session 持有，跨普通 turn 结束仍可运行；关闭所属 session 时取消其进程树。停止当前模型输出、取消一次 wait、取消后台任务是三种操作，不能相互冒充。启动快照另存 parentCancelPolicy/ownerExitPolicy；显式独立运行须先交给可持续存活的监督者并保存所有权移交，不能仅改一个 detached 标志就承诺跨进程生存。
+- **确认与接管**：cancel_requested 不等于 cancelled，终止失败保留错误与仍可能存活的状态。所有权接管使用代次/执行器校验，旧写者不得继续控制或写入同一任务账。父账封口后，独立监督者仍可写任务账，后续会话通过引用接管/观察；只读 resume 不启动、重跑、取消或消费通知。
+
+### 4.54 后台输出、通知、hook 与验收
+
+后台脚本不需要上下文链。原始 stdout/stderr 持续收集，父模型只获得启动收据、显式读取快照及可接纳的完成报告；日志每涨一段，不等于追加一条父消息。
+
+- **输出捕获**：stdout/stderr 分流，原始字节保留编码信息；跨通道无法证明真实写入总序时，只报告捕获顺序。执行器可写活动 spool，但对外引用须固定块、范围/检查点与 hash；分块封存后不可改写。最终文本预览可转换编码，记录转换与替代字符情况，原件不跟着洗掉。
+- **最终结果**：R1.json 记录 taskId、executionId、退出事实、capture_complete、输出字节、result_ref 数组和完整性。full_output 列不可变结果文件，不拿持续增长的日志或 task JSONL 冒充完成产物。无文本输出也返回明确状态，不把空日志当作任务不存在。
+- **预览**：result/output 工具、完成报告采用单份最多 32 KiB 文本预算，元信息、路径、每个文件标识和省略说明一起计入；多任务合并返回共用这次预算。大结果保留全文，头尾节选沿 §4.17；父上下文容量恢复继续用已定 32/16/8/4 KiB 策略。status/list 大列表分页，禁止通过任务摘要列表绕开输出预算。
+- **运行中读取**：返回 status、capturedThrough/checkpoint、通道/字节范围及本次快照引用，明确 incomplete。查询、wait、cancel 若由模型调用，各自有自己的 tool_call_id 和一份配对结果；查询工具成功不代表被查任务成功，wait timeout 也不变成脚本退出码。
+- **磁盘与保留**：预览缩小不停止捕获。完整捕获额度到顶时，按已声明策略停止捕获/终止进程，并记录 capture_complete=false 和原因；继续运行时仍排空管道，避免因没人读而堵死。不允许截断重写已引用文件，亦不按“只保留最近 N 项”删除仍被历史引用的原文。活动任务、已接纳报告和导出引用按 GC 合同保留。
+- **完成交付**：任务终态和不可变结果落稳后创建可交付记录；父侧按 deliveryId、taskId、executionId、sourceResultRef 持久入 followup 队列。忙时等待，正常空闲时可接纳；已暂停/封口不自行唤醒。接纳为 origin=background_task 的隐藏或任务式 user 通知，带最终接纳 turnId，不挂回启动时已结束的 turn，也不触发真人专用 PostUser handler。
+- **报告与等待去重**：启动收据只配对启动调用一次；最终结果不能复用其 tool_call_id。wait/result 直接观察持久任务状态，不等待 followup 消费。显式工具已交付同一份结果时，尚未接纳的自动报告 superseded；已经自动报告过，再查询仍须回合法工具结果，可用状态与原报告引用。去重记录持久化，不能只用内存 completed_reported 标志。
+- **进度与就绪**：默认更新任务事件/面板，不把 stdout 每行送进模型。进度可合并，终态与错误不可丢。service.ready 若需告诉父模型，独立 readiness deliveryId，不能当最终完成报告；后续退出另有 terminal deliveryId。批量任务完成按队列次序处理，可以有明确批处理策略，但保留每项来源与结果，不每条日志自动新开 turn。
+- **恢复与 compact**：父 compact 不删除任务控制信息；taskId、用途、状态及必要读取入口从任务索引恢复，在需要时重新提供有来源的简短上下文，不把全部日志重新塞回父输入。先核验任务是否仍由原执行器持有，找不到句柄/监督证据时用 unknown；不按 PID 猜测，不因重启后内存表空了就重新执行脚本。
+- **hook 时点**：父 PreAction 可改启动参数/执行后端；父 PostAction 处理启动收据，不能延迟到后台任务退出才算结束。独立任务使用同一 dispatcher 的 PreTask/PostTask：PreTask 在已关联且待真正执行前运行，PostTask 在任务终态及原始产物落稳后运行，taskId/executionId 是作用对象。决定任务成功与否的必需产物校验属于终态前收尾；PostTask 只校验/包装交付报告，另有 adopted 结果版本，不倒改任务终态。handler 失败不抹去进程真实退出事实，也不凭失败重跑脚本。任务写者负责这些 invocation 事件，不借已封口的父 writer。
+- **记录与功能分开**：runtime 必须记录任务进程事实；hook 可接管报告处理、通知策略等功能，不能阻止原始退出/失败事实留档。后台脚本本身不必包装成一枚 hook；hook 若启动后台进程，也要登记独立 task 并返回其引用，不能留下无归属的 shell 后台命令。
+- **既有前台调用转后台**：仅当工具合同支持且 UI/调用方明确选择时允许。复用同一 executionId 和输出捕获，记录转后台事件并交接所有权；原工具调用尚无最终结果时回一份任务收据，不重跑命令，也不为同一调用补第二份结果。
+- **并发和统计**：任务并发、排队、后端资源与输出额度按 owner/session 约束。没有排队事实不补 pending；短任务可以先结束、父收据后落账，仍须先保证收据配对接纳，再交付最终报告。排队、运行、收尾、报告等待分别计时；并行任务时长不直接相加冒作总墙钟。脚本自身若调用外部模型，其计量只有经受支持协议上报才记，否则 unknown，不能声称原生拥有子 agent usage。
+
+2026-09-10 静态核对：现有 `src/tools/background_tasks.hpp/.cpp` 是进程级注册表，使用内存递增 task_id 与 completed_reported，已支持句柄监控、进程树停止和运行时限；现有输出读取上限为 64 KiB，日志达到 8 MiB 后截断保留尾部，并有限额淘汰终态任务。`src/tools/background_output.cpp` 已把后台进程与子代理列进同一查询入口。上述行为不能当作 v3 的全局身份、持久任务账、不可变完整输出、32 KiB 预览和恢复交付已实现；本轮只记设计差距，不改旧实现。
+
+| 待验收场景 | 必须满足 |
+| --- | --- |
+| 后台启动后父继续调用模型 | 启动收据已配对；后台生命周期独立，不留下等待最终日志的孤立工具调用 |
+| 任务排队 / 极快结束 | pending 收据不冒称 started；结果即使已完成也不能越过收据交付次序 |
+| 父预留 / task 准备 / linked / spawn 后崩溃 | 按持久身份核对，未知执行不自动重跑，单写者不冲突 |
+| 同一命令重复投递 / 用户有意再运行 | 前者去重，后者新任务；不能用参数 hash 混为一谈 |
+| 多任务同时完成 | 各有身份、结果和交付记录，列表/汇总受预算限制 |
+| 输出很大 / 二进制 / 编码损坏 | 原件与文本预览分开；额度、转换和不完整状态明确 |
+| 读取运行日志后又追加输出 | 原读取快照不变，新查询有新检查点 |
+| wait 超时 / 取消 wait | 只结束等待；进程继续，除非另有明确取消决定 |
+| 服务 ready 后继续运行 | ready 与 terminal 分开，不自动报 completed |
+| 根进程退出、后代仍运行 | 按执行归属与树状态处理，不提前宣告整项完成 |
+| stop 失败 / PID 复用 / 监督者失联 | 不假报 cancelled，不误杀另一进程，不按旧 PID 接管 |
+| 自动报告与显式 result 同时到达 | 各工具配对完整，同一结果不重复注入；重启后仍去重 |
+| 父暂停、关闭、恢复或 compact | 遵守 ownerExitPolicy 与封口合同；引用可恢复，不自动重跑 |
+| PostTask 失败 / 产物落盘失败 | 保留实际退出事实，区分任务执行、报告生成与交付结果 |
+| 前台转后台 | executionId 不变，进程只起一次，原调用只回一次最终结果 |
+
+### 4.55 todo 与持久控制状态：独立文件，提交事件定版本
+
+todo 可以给 compact 加一道保护，但前提是它不靠模型摘要保存。首版将 todo、goal、loop 作为独立控制状态，正文保存为版本化 JSON 文件，session 的状态提交 event 指向实际生效版本。compact 只换 contextChain，不覆盖这些文件，也不让模型从摘要反推“真实待办”。
+
+```text
+sessions/S1/
+  S1.jsonl
+  state/
+    todo/rev-000001.json
+    todo/rev-000002.json
+    goals/G1/rev-000001.json
+    loops/L1/rev-000001.json
+  artifacts/
+```
+
+这些 JSON 是不可变状态快照，JSONL 仍只分 message/event。可另有便于 UI 查询的 current 索引，但它是可重建缓存，不能与提交事件争当真值。更新流程：校验 expectedRevision -> 写新快照并落稳 -> 在单写者提交口再次核对 expectedRevision -> 追加 state.*.applied（旧/新版本、hash、来源）并落稳 -> 发布内存。未 applied 的候选文件不生效；applied 已在、内存未更新时，resume 采用已提交版本。必须先提交状态，相关 todo_write 等工具才可返回成功。
+
+- **todo 内容**：稳定 todoId、条目原文、status、revision、来源及必要 evidenceRefs/依赖。不以数组下标作身份。当前做过什么与模型声称完成分开；todo 全打勾不自动证明 goal 验收通过。整表替换若保留，须带 expectedRevision 并明确删除项，防止模型基于旧摘要覆盖后来新增的待办。
+- **不随 compact 改状态**：压缩前固定 todo/goal/loop heads；成功时记录所见版本并验证状态没有被压缩过程改写。期间合法的独立状态更新仍可发生，提交时校验版本，重新准备控制状态投影或拒绝旧候选，不能把旧快照恢复回去。完成项、未完成项、用户约束原文均留档。
+- **模型还得看见**：独立文件保住数据，不等于模型记得。内置 `PreRequest/control_state.project` 位于 mutate 阶段；当前有效输入缺少最新必要状态时，追加来源明确的隐藏 user 控制状态消息，再冻结、估算。正常请求复用仍有效的同版投影，不每步重写 system 或重复贴全表。
+- **compact 后形状**：有效 system + 新摘要 + 必须保留的未完成 turn + 最新控制状态补充 + 后续输入，按实际采用顺序固定 refs。补充消息在完整工具组后的合法位置追加；不能插进未配齐的 tool_calls。摘要中提到旧状态时，以新投影明确说明采用哪一版，不悄悄删改旧消息。
+- **规模与保障**：活动条目、当前目标、阻塞项优先进入预算内投影；完整清单可通过状态读取工具分页查看。不能以“摘要漏了 todo”清空独立状态，也不能为了兜底每次塞入几万条完成项。关键约束本身超出预算时明确容量不足，不能截掉尾部却声称保护完整。
+- **作用域**：普通 resume 沿来源链接续原 todo/goal/loop 身份及版本，换启动日志不清状态、不重置预算；控制权只交给一个活动写者。fork 按 §4.57 复制快照并分配新身份；btw 只有只读快照，不更新主 todo。subagent 默认有自己的 todo，不能共享一枚可变主清单。
+- **状态损坏**：事件指向的快照缺失/hash 不符时报告缺口，不能用空清单或摘要猜测恢复；只有有完整变更证据时才可显式重建并校验。用户通过外部编辑更新需走导入校验和新版本提交，不把手改 current 缓存当已提交事实。
+
+### 4.56 goal 和 loop：持久目标与定时触发分开
+
+goal 管“要做到什么”，todo 管“分哪些步骤做”，loop 管“何时再次触发”。三者可相互引用，但不是同一个状态机。首版主上下文仍只有一个运行中的 main turn，自动调度与用户输入共用主运行入口。
+
+| 能力 | 持久状态 | 推进条件 |
+| --- | --- | --- |
+| goal | goalId、目标原文、验收要求、状态、checkpoint、证据、累计预算/usage、阻塞信息与待答问题 | 当前工作结束后评估；未完成且可推进时自动安排下一轮 |
+| loop | loopId、任务正文/固定来源、时区/周期、nextDue、启停状态、tickId、上次结果及误点处置 | 到期产生待执行 tick；到主线安全调度边界才启动 |
+| todo | 稳定条目与进度、证据/依赖、版本 | 显式工具或用户更新，不因一次摘要/定时触发自行变化 |
+
+- **goal 长期有效**：/goal 设定并提交目标后，agent 自主推进，无须每轮用户输入；每次新 iteration 带 goalId/iterationId，目标及验收要求来自已提交快照。compact、换进程、resume 不清目标、不归零已用预算、不将 pending question 变成已回答。
+- **目标与调度分开**：active 目标不等于此刻必须跑模型。暂停、等待用户、等待外部结果、预算耗尽、上下文无法恢复都能暂时停排新 iteration，目标仍保留。只有有依据的完成、显式撤销/替换等状态改变目标归宿；不能因为模型说“做完了”、todo 全勾上或进程退出码为 0 就直接完成 goal。
+- **目标评估 hook**：可用内置目标评估/续跑决策 hook 消费本轮 checkpoint 与证据，返回候选状态或调度决定；runtime 校验并提交状态，controller 创建后续工作。PostTurn 不递归调用模型，也不冒用同一个 turn 无限嵌套。主用户 steer 优先，显式命令/报告队列与 loop/goal 使用有记录的公平仲裁，goal 不得挤掉用户暂停或让 loop 永久饥饿。
+- **不盲跑**：状态仍可推进就继续；缺用户选择、凭据或外部条件时记录具体阻塞证据和恢复条件。重复无进展、错误重试与预算耗尽采用明确的有界策略，避免“长期目标”变成相同请求死循环。取消/暂停后不可通过 goal 自动续跑绕回去。
+- **loop 不是长进程**：每个 tick 有独立身份与实际 turn/执行引用，可触发 agent 工作，也可按明确配置启动脚本任务；调度者不代替 task 执行账。记录 scheduled、queued、started、finished/skipped 等真实阶段，不把定时器醒来算成工作完成。
+- **resume 定时器**：保存 nextDue、tickId、时区及调度规则版本，恢复后重新计算等待。首版错过多拍默认合并为至多一枚待执行 tick，记录遗漏次数，不重放离线期间全部拍子；已有 queued/running tick 先按身份核验，不能再起同一拍。文件型 prompt 如需每拍读新版，必须为每拍固定实际内容/hash，而非恢复时重读今天文件解释昨天执行。
+- **退出与恢复**：只读打开不启动 goal/loop。主动 resume 且恢复核验通过时，可继续此前 active 工作，无须每步确认；此前已 paused/awaiting_user 的状态保持。进程离线期间默认不执行 loop；需要离线继续必须显式交给独立调度宿主。正常关闭只保存目标和调度状态，未执行工作不假报完成。
+- **fork**：新分支继承目标/计划快照作为来路，分配新 goal/loop 身份；可运行项默认 paused，不让两个会话同时追同一目标或补同一 tick。已完成/撤销项保留其终态。用户在新分支明确启动后，预算和后续证据独立累计；原已花费只作继承来源，不再重复计费。
+
+### 4.57 fork：新 session，固定当前 turn 的分叉检查点
+
+这里的 fork 不是只复制当前 turn 的几行文字，也不是接管原执行器。它创建新 session，以当前 turn 所在的已提交上下文检查点为起点，带上该点有效 system、摘要/历史前缀和控制状态快照；源 session 继续走自己的路。
+
+- `fork.requested` 固定 sourceSession/run/contextRevision、sourceTurnRef、throughSeq/hash 和请求时的 forkPoint；新 session 首行仍是 system，随后记录 fork 来源、所选消息 refs、状态快照与新分支身份。原消息通过完整来源引用复用，不重写其 messageId；新消息、新 turn、新执行身份在新分支发行。
+- fork 的默认点是“当前已提交、协议合法的上下文前缀”，不是当前 turn 开头，也不是等原 turn 最终结束后的未来位置。当前 assistant 仍流式生成时不复制半条；它声明的工具组未配齐时，执行视图截到该 assistant 调用组之前，保留当前 user 及更早完整步骤。记录 excludedPendingBatchRefs 和实际检查点，UI 明示分叉到了哪里；不能复制两条结果再让新分支跑剩余副作用。
+- 原轨迹可完整按源检查点查看，但“可查看历史”和“新分支会发送的合法链”分别保存。已完成工具结果是历史事实，不在 fork 中重跑；正在执行的工具、子任务、后台进程、待消费主队列和活跃 loop tick 均不复制执行权。
+- 分叉时复制已提交 todo/goal/loop 快照，生成独立可变后续版本；不共享 current 文件。未完成条目保留为计划，并标明不能据继承状态认定原执行已迁移。原后台任务只可作为来源引用查看；确需控制须另走所有权移交，不能两个写者同时接管。
+- fork 创建可走独立控制事务，输入 followup 的目标为新 session；不会把 `/fork` 文本塞回源 main 或让其重开 turn。只读快照不取消源模型；默认先创建可打开的分支，后续运行由用户的新分支输入或明确启动命令驱动。
+- fork 只隔离会话数据，不自动隔离共享工作目录、文件或外部系统。新分支若要并行修改同一仓库，另明确工作目录/worktree 策略；不能把新 session 宣称成代码或副作用快照。
+
+### 4.58 btw：同 session 的独立旁支，不进入 main
+
+2026-09-10 打开核对 [Claude Code 交互文档的 /btw](https://code.claude.com/docs/en/interactive-mode#side-questions-with-btw)：可在主线运行时独立回答；使用已有对话，排除尚在生成的回复；无工具访问；后续 /btw 可引用早先旁问。搜索摘要仍有旧版“没有追问”的说法，以当次打开的正文为准。本项目采用可连续追问的旁支；持久记录方式是自己的设计，不照搬其终端临时内存保留策略。
+
+| 对象 | 本项目合同 |
+| --- | --- |
+| session | 与 main 共用 sessionId、JSONL 单写者及文件 seq，不创建子 session |
+| 上下文 | 独立 `contextId=btw/<id>`、baseContextRef、分支消息链和状态；主链 head/revision 不变 |
+| 消息 | 正常 user/assistant，purpose=btw，均带 contextId；流式片段照常记 event，完整回复照常记 message |
+| 回合 | 旁支使用自己的 turnId/stepId/requestId，sourceTurnRef 指向借用的 main turn；不能冒充主 turn 新 step |
+| UI | 单独旁问面板/浮层，显示问答并支持追问、关闭、重开；不插入主线消息列表冒充主回复 |
+
+- **固定基线**：首次旁问从 main 当前协议合法的持久前缀创建只读快照，工具配对规则与 fork 相同；主线正在写的 assistant 草稿和未配齐工具组不加入。它可借用主线当前任务背景，但不会等待完整主 turn 才回答。连续追问默认使用同一基线加旁支问答，避免主线同时变化使早先回答所据材料漂移。
+- **刷新与容量**：需要最新主线进度时，显式刷新/新建旁支，记录新的 baseContextRef。旁支也有自己的 token 估算、输出预留和上下文预算；容量不足只影响旁支，可按独立策略压缩旁支材料或明确拒绝，不能调用 main compact 腾空间。借用的原始消息和图片由固定 refs 保留，不因 main compact 而悬空。
+- **不会反向污染**：btw 请求/答复不进入 main 的 inputMessageRefs，不更新 main todo、goal、memory、system、能力选择或自动续跑状态，也不产生主线 followup。首版无工具执行，hook 仅开放旁支允许的纯计算/显示/请求校验；purpose=btw 不命中普通任务 skill/memory 注入和写入 hook。即便模型返回 tool_calls 也不派发。
+- **提交比较按作用域**：共用 JSONL 会让文件 seq/hash 随旁问增长，但 main 的输入与 compact 冲突检查比较 main contextRevision、选中 refs/hash 和相关状态版本，不能拿“整个文件尾 seq 变了”判定主上下文改变。只有主线依赖对象真正变化才重新准备，旁问记账本身不打断 main 请求或 compact。
+- **排队作用域**：`/btw <问题>` 路由为 targetContext=btw、mode=followup；旁支空闲即可处理，忙时只排在旁支后面。它不插 main steer，也不等 main followup。普通主输入仍 steer 到 main；旁问面板内追问明确投旁支，不靠文本内容猜路由。单个 session 的“只允许一个未完成 turn”在此明确限定为每个执行 context；main 仍单飞。
+- **隔离范围**：保证主线消息、上下文、任务状态和执行控制不被旁问修改；请求费用、网络、限流与机器资源仍可能共享，不能承诺物理耗时完全零影响。主请求优先，旁支设独立并发/预算，不因旁支失败取消或切换主模型；cache 命中仅据各自请求证据判断。
+- **取消与持久化**：旁问面板获得焦点时 Esc 只取消该旁支请求或关闭面板，不触发 main cancel。已落盘问答保留在旁支记录，清屏/关闭不是删除原始账；resume 可查看、可继续旁问，默认不会把旁问当主任务自动恢复。若用户要将回答用于主线，须显式提交一条有来源的新主输入，不能自动回流。
+
+### 4.59 resume：分别恢复执行状态、模型输入与历史索引
+
+resume 首先重建事实，不是把 JSONL 所有 message 按 seq 塞回模型。历史按需分页读取，发送输入只取所选 main contextChain。下表是必须区分的内存对象：
+
+| 恢复对象 | 进入内存做什么 | 是否直接发给模型 |
+| --- | --- | --- |
+| 来源检查点、事件/消息索引与历史页 | 查看、定位、验证来源 | 否 |
+| 当前有效 system、摘要、保留主消息和已接纳输入 | 重建选定 main 上下文 | 是，按链序与 wire 合同组装 |
+| 已选 tool 结果与预览版本、思考载荷、图片引用 | 恢复实际采用内容；图片发送时编码 | 是，但不自动回填超限全文或换回较大预览 |
+| 未完成 turn/step、完整 assistant 调用清单与逐项执行/结果状态 | 决定先恢复工具还是请求模型 | 控制状态不直接发；只发最终合法配对内容 |
+| todo/goal/loop 最新已提交快照与累计预算 | 恢复进度、目标、定时器和决策依据 | 经 §4.55 有预算的投影进入，不整份无条件粘贴 |
+| 待接纳 steer/followup、交付去重、后台任务/子会话引用 | 恢复队列、执行归属与后续调度 | 尚未接纳时不发 |
+| hook/工具/provider/model 配置版本及能力引用 | 恢复所用合同，核验接管与当前能力 | 只有实际模型输入字段进入，不把事件元数据塞入 prompt |
+| btw 分支与旧 compact/title 内部请求 | 供各自 UI/上下文恢复 | 不进 main |
+
+恢复顺序：锁定写者/检查源 -> 必要尾行修复 -> 按提交事件重建各版本 head -> 恢复 main 执行批次与队列 -> 核验 artifacts/配置/后台执行 -> 决定继续工具、保持暂停或允许准备模型请求。普通查看到此只显示状态；主动 resume 才推进获授权的未完成工作。
+
+用户举例 `A(tool1,tool2,tool3,tool4)`：若 tool1、tool2 均已有已选结果和完整 tool message，tool3、tool4 仅声明/排队且从未 started，则恢复原 turn/step/batch，按原调用身份继续 tool3、tool4。完成项不重跑，不让模型重新生成整组工具调用；恢复事件属于新启动日志，但引用旧声明和稳定 actionId。整组配齐后才运行下一次 PreRequest 和模型调用。
+
+- **每项及时落稳**：一枚工具执行结束 -> 保存原始结果 -> 完成必需 PostAction -> 提交 selected 结果 -> 追加该枚 tool message 及接纳记录。串行时做到这一步再派下一枚；不能等整组跑完才持久化工具结果。并行项各自落账，按完整声明清单和身份恢复“哪些未执行”，不能用最大完成序号猜进度。
+- **内存可持有未配齐批次，发送不可**：JSONL 可以已有 A、tool1、tool2，执行恢复器持有 tool3/4 待办；这还不是可发送请求。adapter 前置校验要求调用组配齐，或按显式取消合同生成真实的未执行结果后再发送。恢复本地工具并不需要先把半组消息发给服务器。
+- **结果尚未成 message**：有可信最终结果但消息未落时，只补结果选用/消息提交；PostAction 未完成时按原定义和去重记录恢复该阶段，不跳过，也不重跑实际工具。结果文件有而无提交事件，先核验并记恢复采用事实。
+- **仅 started 无结果**：先联系原执行器、任务/幂等服务查 executionId。证实完成则取原结果；仍运行则继续观察；证明从未执行才可按恢复政策执行。无法确认则 unknown 并阻止危险的自动重试/依赖执行，不能从第三项直接越过它。只读重放不合成假终态。
+- **配置已变**：保留原命令/参数/权限快照，继续前再核对当前有效准入、cwd、工具版本及必要 hook。权限撤销或后端不可用时暂停/拒绝，不能因“昨天通过了”自动执行新目标。无需重复询问已有授权且条件未变的操作。
+- **作用域接续**：恢复的是原未完成主 turn，其 PreTurn 不再执行一次；新 user steer 在工具组安全边界接纳。已暂停、等待用户或 Esc 取消的批次按对应状态恢复，不把所有 open turn 都当作应自动跑完。
+
+### 4.60 JSONL 尾行修复：允许删坏尾，不动合法历史
+
+用户明确授权的恢复策略：只有最后一条物理记录无法解析为完整 JSON，且此前所有记录均完整有效时，允许删除该坏尾行。它属于崩溃尾部修复，是 append-only 的受限例外；本轮只写此规则，不实际删除任何现存会话内容。
+
+1. 确认没有活跃 writer，取得独占恢复锁，固定文件身份、大小及已验证前缀末字节偏移。正在写的半行不当作损坏；无法排除活写者则等待或报冲突。
+2. 严格按 UTF-8 与 JSONL 逐行校验。仅最终坏行可修；中间坏行、seq/引用/hash 不一致、未知 schema、合法 JSON 但合同错误，均不当“半写入尾行”随手删除。
+3. 将坏尾原始字节、源路径、长度/hash 和恢复原因保存为独立修复材料，并先持久记录修复意图；截断源文件到最后完整行边界，落稳后记录 journal.tail_repaired。当前恢复日志关联修复记录和新的源检查点，保留原有合法行字节不变。
+4. 截断后再次验证前缀与各提交引用；若被删尾部对应的外部执行/状态仍有记录，按 unknown/待核验处理，不能把删尾解释成“那件事没有发生”。在验证通过前不发送新请求或工具。
+
+完整 JSON 只是缺最后换行时，保留该条记录；需要续写该流才补换行，记录边界规范化，不整条删除。多条损坏记录或中间损坏不逐条反复剥到看似正常；首条 system 都坏了则不能声称旧 session 可恢复。空白行不视为业务消息，不用宽松 parser 把畸形记录吞掉。
+
+修复只回退未完成记录，不重编号合法 seq、不复用旧 message/action 身份，不破坏已验证 checkpoint；完整记录的哈希和旧引用须仍可校验。修复意图/备份/完成之间崩溃时，按固定源 hash 和目标长度续做或认定已完成，不能第二次再删一行。只读 replay 默认报告可修复尾部而不写文件；主动 resume 执行上述正常修复。
+
+### 4.61 Esc：取消批次与关闭后续跑分开
+
+主线运行时 Esc 的首版语义为“停止当前主执行，允许用户改口”。先持久记 cancel.requested（scope、目标 turn/batch/request、原因），停发新模型请求与尚未启动的工具，暂停 main 自动续跑；当前执行按其真实状态收口。goal/loop 不得立刻再拉起模型，保存暂停原因和原目标/计划，用户明确继续或新的主任务输入后才按调度规则恢复。
+
+| 当前工具状态 | Esc 后的执行事实 | 配对 tool message |
+| --- | --- | --- |
+| 已完成且结果已落稳 | 保留真实成功/失败，不改成取消 | 复用原消息 |
+| 已结束，结果/后处理尚未落稳 | 完成必要结果保存，不能重跑 | 按实际结果补交；后处理失败明确标注 |
+| 正在执行且确认取消 | cancelled，标执行中取消及已有输出/副作用证据 | 明确“执行中取消”，不能声称从未执行 |
+| 已声明但从未启动 | cancelled，reason=cancelled_before_start，executed=false | 明确“用户取消，此工具未执行” |
+| 无法停止或无法确认结果 | 仍运行或 unknown，记取消失败/待核验 | 不假报失败/未执行；按下述不确定结果规则处理 |
+
+对尚未启动的调用，是给每个已声明 call 补一条“未执行”的协议结果，不是真的执行一遍失败。无进程的调用 exit_code=null；可以在 wire 上使用 is_error/error 内容表达拒绝或取消，但 JSONL 的业务状态必须细分，不将它们全压成 failed。
+
+- **配齐不等于立刻发送**：可以在本地把已知完成、取消、未执行的 tool 结果逐项落稳，令消息组完整，但 Esc 后保持停止，不为了把错误回服务器而再起模型。用户继续时才携合法链发下一请求。
+- **不确定结果**：无法确认停下的任务仍保留执行所有权与 pending/unknown 状态。默认暂停并核验；若后续选择结束等待、继续对话，则生成一条明确“结果未知，操作可能仍在运行”的来源可查结果/收据，不把未知改成失败。之后获得真实结果只追加观察或新通知，不能给旧 call 再回第二份结果；有副作用风险时不得自动重试同一操作。
+- **取消竞态**：请求取消与工具完成同时发生时，以执行器证据和实际结果为准；取消请求发过也可能得到真实成功。并行工具分别判断，不能看到一个取消便把所有结果改成未执行。已派发但尚未确认 started 的远端调用不能仅凭缺日志当作 never_started。
+- **流式 assistant**：尚未收齐时 Esc 将已收到内容保存为正式 interrupted assistant，详见 §4.63；不从半截 args 执行工具。该消息中已能确认完整声明的 tool_calls 按取消前未执行补齐，尚未完成的调用片段仅作原始材料保存，不能伪造可执行声明。
+- **取消后继续**：已经提交 cancelled_before_start 的 call 已有终结结果，resume 不再执行它。模型后续认为仍需执行时，发新 callId/Action 并引用取消来源。不能既告诉模型“第三项未执行并已取消”，又在后台偷偷续跑原第三项。
+- **关闭/崩溃后继续**：普通保存退出表示 suspend，或异常退出留下未完成执行；不把未启动尾部一律补成取消。若前两项已落稳、第三项未 started，主动 resume 就从第三项继续。退出时对正在执行进程采取的停止/移交行为另记真实结果，不能抹去已做工作；用户明确 cancel 才沿 Esc 取消批次合同处理。
+- **焦点与范围**：btw 面板 Esc 只管旁支；输入菜单/对话框 Esc 只关闭或拒绝该交互；任务详情里的取消只管指定 task。主线 Esc 不自动杀所有独立后台任务，按既定 parentCancelPolicy；session 真正关闭仍沿 ownerExitPolicy。UI 要显示当前停止范围，不能一键触发三套互不相干取消。
+- **落盘失败**：即时停止新的派发并尽力保存/排空已有结果；不能让持久化失败导致继续启动剩余工具。停止操作本身若来不及完整记账，下一次恢复只能按已有执行证据核验，不把缺失的 cancel 记录猜成成功或未发生。
+
+### 4.62 本轮现状核对与恢复验收
+
+2026-09-10 静态核对：`src/tools/todo_tool.cpp` 当前更新共享 TodoListState，`src/app/tool_runtime.cpp` 创建主/子 todo 状态；不能据此称 todo 已有本节独立版本文件与恢复提交口。`src/app/interactive_session_assembly.cpp` 会将活动 todo 文本传入 compact 校验，但这不能替代持久状态。
+
+`src/runtime/goal_compact.cpp` 有快照纯逻辑，`src/runtime/goal_coordinator.cpp` 有 fork 复制后暂停逻辑；`src/app/wirings/goal_session_wiring.cpp` 却明确说明旧恢复/compact 接线已删除，持久账迁到 trajectory 尚待接续，不能宣称生产 /goal 已满足完整 resume 要求。loop 已有 scheduler/tick driver，当前 Esc 接线会停止 loop；本节新设计改为保留计划并暂停自动调度，尚未改代码。
+
+`src/agent/loop.cpp` 当前按工具逐项记 trace，但整组 tool_results 汇成一条消息后才提交；Esc 会给未启动项补“该工具未执行”的错误块。v3 须改成逐项完整结果/message 落稳，恢复按调用清单与执行证据推进。当前 `src/trajectory/journal.cpp` 有尾部截断校验，不等于已实现本节允许删最后坏行的修复事务。本轮未找到完整 /btw 或 session fork 命令接线，不把 goal 的 fork 方法或操作系统 fork 当成已实现会话分叉。
+
+| 待验收 | 必须满足 |
+| --- | --- |
+| todo 更新后 compact / resume | 状态版本、条目原文及 ID 不变；模型缺投影时补充而非清空 |
+| compact 期间 todo/goal 有合法新提交 | 不用旧快照覆盖新状态，提交前核对版本 |
+| 状态文件落稳但 applied 丢失 / applied 已落而内存未更 | 前者未生效，后者恢复采用；工具成功回执不可提前 |
+| goal 跨多次 compact/resume | 目标、验收、证据、已用预算与待答问题保留，active 可续，paused 不自启 |
+| loop 错过多拍 / tick 执行中崩溃 | 不补跑全部旧拍，已有 tick 不重复执行，不清调度状态 |
+| fork 当前 turn 的中间步骤 | 新 session 来源明确，完整前缀可用，未完成工具不复制执行权 |
+| fork 带 goal/loop/todo | 状态副本独立，自动工作默认暂停，不重复原费用/副作用 |
+| main 运行中连续 btw | 旁支独立回答；main contextRevision/input refs/任务状态不变，旁支 Esc 不停 main |
+| main compact 时 btw 正在回答 | 旁支使用固定来源，不断引用，不将旁问加入主摘要材料 |
+| tool1/2 已落、tool3/4 未启动时退出 | resume 复用前两项结果，从第三项续跑原批次，不先发半组请求 |
+| 工具执行完成但 message 未落 | 核验结果与 hook 后补消息，真实工具不重执行 |
+| 工具只有 started / 并行结果非顺序到达 | 逐项核验，不按最大序号跳过未知项或重复副作用 |
+| 最后坏 JSON / 合法 JSON 无末尾换行 | 前者仅删坏尾并留修复证据，后者保留完整记录 |
+| 中间坏行 / 合法 JSON 合同错误 / 活写者 | 不自动截断；明确阻止不可信恢复 |
+| 修复自身崩溃后再 resume | 按修复意图核验，不能再删一条合法末行 |
+| Esc 时部分成功、部分运行、部分未启动 | 保留各自真实状态；未执行项配对但不假失败，不自动发新模型请求 |
+| Esc 取消后再次 resume | 已取消 call 不复活；要执行由新调用决定，goal/loop 不绕过暂停 |
+
+### 4.63 SSE 中 Esc：本地定稿为 interrupted assistant
+
+**用户定案是“收到多少，保存多少”。** Esc 不抹掉已经输出的正文，也不让它只存在于 event 草稿。当前 request/stream 只形成一条正式 assistant，仍使用响应开始时预留的 messageId、原 turnId/stepId/contextId，以及实际 provider/model 来源。`completionStatus=interrupted` 和 `stopReason=user_cancelled` 是外层状态，不往正文末尾冒加一段模型未说过的话。
+
+```text
+流式片段持续接收、显示、按批落 event
+  -> Esc：停新派发，串行固定接收水位 receivedThroughDelta
+  -> 取消网络读取，刷出水位内尚在缓冲区的完整语义片段
+  -> model.response.cancelled（含水位、组装版本及完整性记录）落稳
+  -> message: assistant（已收内容，completionStatus=interrupted）落稳
+  -> 可合法接纳的消息接入原上下文；工具调用按取消规则收口
+  -> 保持暂停；用户继续时才准备下一请求
+```
+
+示例仅展示纯文本情况；最后一句没写完也照实保留，不补句号或替模型续写：
+
+```json
+{
+  "type": "message",
+  "seq": 25,
+  "timestamp": "2026-09-10T09:00:00.000Z",
+  "messageId": "A7",
+  "turnId": "T1",
+  "stepId": "STEP3",
+  "contextId": "main",
+  "requestId": "REQ7",
+  "streamId": "STREAM7",
+  "provider": "configured-provider-id",
+  "wire": "anthropic",
+  "model": "requested-model-id",
+  "responseModel": null,
+  "completionStatus": "interrupted",
+  "stopReason": "user_cancelled",
+  "providerFinishReason": null,
+  "receivedThroughDelta": 18,
+  "message": {"role": "assistant", "content": "前两项已经核对，第三项需要先检查"}
+}
+```
+
+- **接收边界**：指 adapter 已解析并接纳的语义增量，不是尚未解析的半个 SSE JSON 帧或半个 UTF-8 字符。取消与网络回调共用串行提交边界，先到且被接纳的增量包括在水位内；定稿后的迟到正文不再修改这条 message，可另记迟到观察。不能让 UI 显示过的有效片段仍留缓冲而被正常 Esc 丢弃。
+- **完成与取消竞态**：provider 正常终态若已先被确认，按真实 completed 记录，Esc 只阻止后续工作；若本地取消先定稿，则按 interrupted 保存，迟到 stop 不另造第二条 assistant。不得把 user_cancelled 填成 provider 返回的 stop/end_turn。usage 独立接纳，缺失保持未知，取消不代表零消耗。
+- **完整 JSON 与部分回复分开**：保存的一行 JSON 必须语法完整；message 内的自然语言可以只有半句。它是正式 assistant 历史，不是新增 role，不因 interrupted 改成 user。纯文本正常接入有效链，下次继续可以回传这段实际收到的 assistant，不再一律排除。
+- **块级保全**：文本、明文思考、完整结构块按原 index/次序合并。尚不满足规范块形状的工具参数、签名和不透明片段，保存在消息关联的 `receivedBlocksRef` 与 `incompleteBlocks` 描述中，并可追到 delta 范围；不得为通过 JSON 校验补参数、伪造签名、改写思考或丢弃非文本片段。只有思考/调用片段、没有可见正文时也可保存正式 interrupted assistant 及原始块引用，UI 显示中断状态。
+- **工具调用**：只有名字、ID、参数和 provider 块完成证据均成立的声明才进入正式可配对 tool_calls；仅参数恰好可解析不够。Esc 时本批尚未派发的完整声明补 cancelled_before_start tool 结果，零真实执行。未完成声明保留为片段，不伪造 tool_call_id 或错误 tool 消息来配一个本不存在的完整调用。实际已派发工具仍按 §4.61 保存其真实结果。
+- **回传检查**：存成 assistant 不等于任何 wire 都接受其中的不完整块。普通文本可回传；完整调用须配齐取消结果；思考签名/不透明块未收齐时，沿 §4.42 保全原件并明确回传缺口，不静默删块换取发送。若需生成协议允许的派生视图，须有显式策略及来源记录；否则暂停并说明缺字段，不能伪造正常响应。
+- **hook 与内部产物**：PreAssistant 可验证 interrupted 候选，不能以“不是正常 stop”拒绝保存原始 assistant；是否接纳及 PostAssistant 调用沿消息合同。PostAssistant 看见 interrupted 后不得启动本批工具、继续 goal 或采用半份 compact/title 产物。主线、btw、子代理各在自己的作用域内收口，旁支 Esc 不改变 main。
+- **零内容与故障**：Esc 时若尚无任何文本/思考/调用内容，仅有连接或响应头事件，则只记取消，不凭空造一条空 assistant。正常取消会尽力刷出已接收内容；磁盘故障或进程硬崩溃不能承诺保存尚未落稳字节，保留可恢复材料并报告缺口，不假报保存成功。
+- **恢复与去重**：cancelled 定稿记录落稳、assistant 尚未落时，用其固定水位和全部片段补交同一 messageId；message 已落就复用，不重新拼一份不同版本，不重问模型。若只有 cancel.requested 而没有定稿水位，按未完成取消核验，不假装完整知道收到了哪里。UI 从流式条目切换到最终条目时沿同一 messageId 更新，不把 event 草稿和正式消息显示两遍。
+
+待验收：半句正文取消仍保存并可回传；只有思考的取消；半截工具参数不执行；完整调用取消后逐个配齐但不发送；缺签名可存档但不能冒称可回传；Esc/末尾 delta/正常 stop 竞态；取消时刷出缓冲尾批；零内容不造空回复；取消定稿与 message 之间崩溃可补交且不重复；btw 中断不影响 main；compact/title 半份产物不采用；usage 缺失不补零。
 
 ## 五、分期
 
-- [ ] P0：envelope v3 定稿（schema、四 role、树链字段表、哈希链承继）、样板逐字段映射表、死码/旧档清理清单。
-- [ ] P1：写入侧（session_manager/trajectory_session 落 v3;system 入档与 diverged 事件;request_metrics 行）。
-- [ ] P2：读取侧（replay 分代、resume 用档内 system、树重建脚本）。
-- [ ] P3：四角色壳（api::Role 扩值+wire 拍平点核对）、文档（trajectory schema 文档）、死码清理、旧档处置。
-- [ ] 测试：v2/v3 分代读写、树重建、system diverged、compact 链完整、request_metrics 与 usage 对账。
+- [x] 设计：确认原始 JSONL 两类行、启动首行 system、system 追加版本、seq 语义。
+- [x] 设计：补入 resume 历史显示、compact 全链、成功提交与 token 标记合同。
+- [x] 设计：按大重构去掉旧结果兼容约束；补入操作生命周期、全局调用身份、完整结果与模型预览、失败恢复和工具验收场景。
+- [x] 设计：2026-09-10 定单次工具文本预览上限 32 KiB，多文件共享，说明计入，超限保存原文并给头尾节选。
+- [x] 设计：hook 纳入同一事件账；区分执行前换后端与执行后替换结果，补效果采用、子执行、时间与崩溃恢复合同。
+- [x] 设计：slash 按当次效果留档；区分纯显示、配置变更与 skill 上下文注入，补原输入、正文快照、turn 归属与恢复合同。
+- [x] 设计：event 用 effects/effectRefs 区分消息产出与其他效果；消息生成、上下文采用、实际发送分别留账。
+- [x] 设计：纠正主对话归属与显示混用；隐藏消息仍入同一会话账，display 不控制模型输入。
+- [x] 设计：skill 按目录、指令、资源渐进式披露；沿实际消息载体记账，避免工具读取与宿主注入重复。
+- [x] 设计：补齐按上下文版本保存的 prevMessageRef；compact 显式接 system、摘要和旧未完成 turn，旧消息无需改写。
+- [x] 设计：subagent 作为父工具调用，另建子目录与子会话账；补父子引用、启动交接、异步收据、交付、恢复和独立上下文合同。
+- [x] 设计：首 query 后追加标题 prompt，模型产物留档，提取与采用标题留事件；返回格式和请求调度方式待冻结。
+- [x] 设计：subagent 默认异步并走 followup，用户普通文本默认 steer，所有 slash 统一 followup；补调度边界、队列持久化、回合归属、wait 去重与恢复。
+- [x] 设计：首版 UTF-8 bytes/4 由内置 hook 在最终输入冻结后估算；runtime 保证调用顺序，prepared 引用 hook 输出，实报另记，UI/compact 复用同一 handler。
+- [x] 设计：补 manual/auto 触发与安全边界；长 turn 按用户新定方案逐档降低历史工具预览，最低 4 KiB 后报错，取代未确认的前段摘要建议。
+- [x] 设计：模型有效 max_tokens 进入容量 hook 的输出预留，区分本次可发送与后续 compact 提前量，记录默认/显式来源及模型配置版本。
+- [x] 设计：当前旧摘要与后续历史一起压缩；正常压缩输入保持已有前缀并追加指令，成功后新摘要替换旧摘要，补来源、缓存与失败恢复边界。
+- [x] 设计：思考模式完整保存并按目标协议回传 assistant 思考载荷，K2.6 显式保留跨轮思考；补签名、流式、缓存、compact/resume 与 token 计量边界。
+- [x] 设计：流式片段以事件分批落盘并即时显示，当前响应收齐后追加完整 assistant；补完成/截断/断流、身份、工具执行边界和恢复规则。
+- [x] 设计：assistant 外层直接记录 provider、请求模型名、响应模型名和出站配置引用；补流式、fallback、内部请求与历史来源不变规则。
+- [x] 设计：核对预设/自定义现状，补已支持端点优先 Anthropic 的目录选择策略、assistant.wire、四角色转换表与现有两角色实现的差距。
+- [x] 设计：补消息挂点与 turn/step/request 边界、steer 的 PostUser、同名用户接管和确定执行顺序；补能力发现/披露/加载/执行、缓存与大目录预算合同及待验收场景。
+- [x] 设计：用户确认单次文本最多发送 32 KiB 预览及原文引用；补 1000 token 显示折叠、长文本源文件与消息分工、图片附件/wire 映射和多模态预算边界。
+- [x] 设计：后台进程与子代理共用任务管理和 followup 交付；补独立 task 事件账、启动交接、进程树、service 就绪、输出快照、取消/退出策略与恢复验收。
+- [x] 设计：补 todo/goal/loop 独立状态版本及 compact 守恒、fork 新 session、btw 同 session 独立上下文、resume 内存/发送清单、逐工具断点恢复、末行修复与 Esc 取消语义；新增对应待验收矩阵。
+- [x] 设计：按用户新定案，SSE 中 Esc 将已收内容落成正式 interrupted assistant，替换仅存草稿规则；补取消水位、块完整性、配对、hook、竞态与恢复去重。
+- [ ] P0：完成 §4.13，冻结 schema/引用/状态机/usage owner；产出可校验 fixture。
+- [ ] P1：写入侧支持两类行、system 版本、完整请求输入、compact 内部回合与原子提交；工具状态、分流捕获、结果持久化、hook 执行/效果采用/子执行、最终结果选用和预览消息统一接入；实现子会话独立写账、启动交接和结果交付。
+- [ ] P2：读取侧按 v3 解析；分别重建完整历史与当前上下文；实现带来源链的 resume。
+- [ ] P3：终端与 app-server/browser 显示旧史、摘要和历次压缩标记；支持详情与分页。
+- [ ] P4：四角色 adapter 合同测试、新 usage 消费方、schema 文档与下表验收。
+
+### 5.1 本轮新增验收用例（均待实现与执行）
+
+| Case | 必须满足 |
+| --- | --- |
+| 启动后不输入 | 第一条就是 system message，seq=1、turnId=null；退出不凭空造用户回合 |
+| 加载 soul | 旧 system -> 切换事件 -> 新 system；内存只选新版，旧请求仍指旧版 |
+| 切换事件后崩溃 | 旧 system 有效，变更显示未完成 |
+| 普通 resume | 旧 user/assistant/tool 能滚动查看，ID 和顺序不变 |
+| 一次 compact 成功 | requested、完整 prompt、回复、校验、摘要、applied 引用可闭合 |
+| 手动空闲 compact | 内部回合明确；没有未完成 turn 时不伪造 protected turn |
+| turn 中途自动 compact | 主 turn ID 不变，内部 turn 不冒充真人回合，状态机不因重叠丢账 |
+| map/reduce 与重试 | 每请求有完整输入与归属；最终摘要能追到采用的回复 |
+| prompt 有多条消息 | 不只存首条 user；压缩专用 system 不覆盖主 system |
+| 摘要缺必需字段 | 校验失败有详情；不 applied、不改内存、不显示完成 |
+| 工具组跨拟定边界 | 校验拒绝，未完成 turn 与工具配对保留 |
+| compact 期间插话/工具返回 | 队列不丢；源上下文改变则冲突拒收，不覆盖新消息 |
+| 回复之后崩溃 | 候选可查看，旧上下文仍有效 |
+| 校验通过/摘要落盘后崩溃 | 没有 applied 就不生效 |
+| applied 后、内存发布前崩溃 | resume 准确恢复新上下文 |
+| applied 写盘失败 | 旧内存视图不被新摘要替换，后续发送受阻 |
+| compact 后发新输入 | 实际输入为选中 system + 摘要 + 保留消息 + 新输入，不混入内部 compact 问答 |
+| compact 后 resume | 被压缩原文仍能查看；请求不重新携带全部旧史；token 标记仍在 |
+| 连续两次 compact | 第二次请求读入当前旧摘要并合并后续可压缩历史；成功后新摘要替换旧摘要；两处标记各有数字与范围 |
+| 只有旧摘要可压缩 | 可评估摘要重压，不误报无材料；收益不足则停止，不反复空转 |
+| resume 后再 resume | 来源链可遍历、无重复显示、seq 不跨文件混排 |
+| provider usage 缺失 | 不补 0，不把 compact 模型 usage 当主上下文前后数字 |
+| 空历史/全是受保护 turn | 明确拒绝或无可压缩项，不调用模型假压缩 |
+| 新档缺 blob/坏引用 | 可查看部分明确标缺口；不能宣称完整恢复 |
+| 只读 replay | 零模型调用、零工具重跑、零外部消息重发 |
+
+文档检查只证明文本格式与交叉引用基本齐全，不代替上述运行验收。
 
 ## 六、关联
 
-- token 回测重跑单（本仓 todos/）的样本痛点由 §4.3 直接消解。
-- 用户在修的 session 轨迹记录 bug：先行修 v2,本单不改其结论，只换代形状。
-- 四层生命周期单（已实施,0.26.225）的 turn_id/step_id/action_id 与本单树链对表——v3 的 parent 字段直接用那套 ID。
+- token 回测重跑单（本仓 todos/）：所需请求特征与标签按 §4.4、§4.12 对齐后，再判断哪些样本可直接回测。
+- 现行 session 轨迹 bug 修复另行推进；本单直接设计新的数据合同，不承担旧结果适配。
+- 四层生命周期单：沿用实际身份发行口；按 §4.6 对表内部 compact turn，不能用展示编号代替身份，也不能假定现行单 open turn 状态机已支持它。
 
 ## 七、边界
 
-不动四家 wire 协议适配的行为；不重写 compact 算法；不做 kc-mini 的整体搬运（它的 input_queue/compact 语义借形，字段按我们四层 ID 与哈希链家底重铸）。
+本轮只写设计，尚未改生产代码。后续按大重构实施，新 runtime、wire adapter、结果仓、恢复与显示都服从新合同；不承担旧数据兼容，不整搬 kc-mini，也不借本轮设计自动清理旧数据。
