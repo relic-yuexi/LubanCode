@@ -210,7 +210,8 @@ std::optional<Schema3Error> ValidateAppendedChain(std::string_view context,
     }
     for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
         const auto& expect = chain[i + 1]["prevMessageRef"];
-        if (expect.is_null() || expect.get<std::string>() != chain[i]["messageRef"]) {
+        if (expect.is_null() ||
+            chain[i]["messageRef"].get<std::string>() != expect.get<std::string>()) {
             return Err("schema3.chain_order_mismatch",
                        std::string(context) + " 追加链邻接与 prevMessageRef 不一致");
         }
