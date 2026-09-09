@@ -616,6 +616,17 @@ add_library(lubancode_engine STATIC
   # 评测 harness 的便携 JSONL(--output 落点),与 training exporter 共用
   # export_projection 中立投影层,不另造第二本历史。
   src/trajectory/harness_exporter.cpp
+  # session 轨迹 v3(P0 定稿冻结 + P1 写入侧核心,单子
+  # todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo):两类行
+  # (message/event)信封、语义校验(kind↔status/引用/链节点)、单写者
+  # 哈希链 writer(首行 system、system 版本链、请求输入留档、流式片段与
+  # assistant 定稿)、compact 全链状态机(八行/applied 唯一终态/原子
+  # 提交/失败三态)。v2 写入路径不动;schema 合同见
+  # docs/architecture/trajectory-v3-schema.md。
+  src/trajectory/v3/envelope.cpp
+  src/trajectory/v3/schema3.cpp
+  src/trajectory/v3/writer.cpp
+  src/trajectory/v3/compact.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。
