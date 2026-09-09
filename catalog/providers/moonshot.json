@@ -100,7 +100,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -127,7 +127,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -151,7 +151,7 @@
         "kimi-k2.7-code-highspeed": {
           "name": "Kimi K2.7 Code HighSpeed",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -296,7 +296,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -330,7 +330,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -357,7 +357,7 @@
         "kimi-k2.7-code-highspeed": {
           "name": "Kimi K2.7 Code HighSpeed",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,

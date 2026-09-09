@@ -32,7 +32,7 @@
         "DeepSeek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
