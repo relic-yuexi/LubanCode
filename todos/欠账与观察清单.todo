@@ -17,5 +17,8 @@
 
 ## 观察名单（暂不动手，复现两轮以上升级立单）
 
-- [ ] **subagent_recursion windows 抖动**（出处：run 33988795509 attempt 1，2026-09-06；二犯 run 34270604648，2026-09-09）——"后台根->后台孩子"四断言连坐（孩子结果未进父信箱），两案同码重跑皆绿；纯异步时序脸谱。**已两犯，按时序家族立案条件已足**（前四案：app_server 锁饥饿/ui_event_pump 常数界/lua 墙帽/rg 竞速窗）——立案动作：放宽回流等待的常数界或改轮询条件等待，单开小单。
+- [ ] **取消树册段错误的直接机制悬案**（出处：run 34307354040 PR 腿崩、同 commit push 孪生绿，2026-09-09；第二道不投闸 PR #10 收口后未复犯）——闸拔了时序温床，但哪条指针崩的没钉死；若再犯，先给 CI 加崩溃栈（coredump/atos）再战。
+- [ ] **嵌套子代理裸持父栈上 ToolRegistry\***（出处：回流锁缝单追查时的休眠发现，2026-09-09）——孩子线程经 base_registry 指向父任务 RunTask 栈上的 scoped registry，唯一护栏是"父不得先走"不变量，取消路径恰是破门。建议改共享所有权，小单。
+- [ ] **忙路 footer 光标钉回未用 NativeColumnForLogical**（出处：conhost 几何单销账移交，2026-09-09）——console_input_stream_footer.cpp 仍用逻辑列，采用映射是一行后续单；空闲路 RedrawEditArea 在 Windows 恒走 legacy 属设计现状非欠账。
+- [ ] **subagent_recursion windows 抖动**（出处：run 33988795509 attempt 1，2026-09-06；二犯 run 34270604648，2026-09-09）——真凶已破：生产回流锁缝（子代理回流锁缝单，v0.26.220 根治），非测试等待合同。留档备查，不再单独立案。
 - [ ] **cpr 驱动器 Windows 真控制台四幕**（出处：cpr 单验收移交）——真控制台跑 agent_stream_driver 四幕的实机抽验欠着。
