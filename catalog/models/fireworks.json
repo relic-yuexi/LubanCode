@@ -237,7 +237,7 @@
     "accounts/fireworks/models/kimi-k2p6": {
       "name": "Kimi K2.6",
       "context_window": 262144,
-      "max_output": 262144,
+      "max_output": 32768,
       "capabilities": {
         "tools": true,
         "reasoning": true,
@@ -294,7 +294,7 @@
     "accounts/fireworks/models/kimi-k2p7-code": {
       "name": "Kimi K2.7 Code",
       "context_window": 262144,
-      "max_output": 262144,
+      "max_output": 32768,
       "capabilities": {
         "tools": true,
         "reasoning": true,

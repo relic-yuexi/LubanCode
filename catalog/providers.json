@@ -5523,7 +5523,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -6600,7 +6600,7 @@
         "qwen3-vl-235b-a22b": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -7638,7 +7638,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -8715,7 +8715,7 @@
         "qwen3-vl-235b-a22b": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -9758,7 +9758,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -10835,7 +10835,7 @@
         "qwen3-vl-235b-a22b": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -12148,7 +12148,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -12553,7 +12553,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -13028,7 +13028,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -13281,7 +13281,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -13308,7 +13308,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -13332,7 +13332,7 @@
         "kimi-k2.7-code-highspeed": {
           "name": "Kimi K2.7 Code HighSpeed",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -13469,7 +13469,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -13503,7 +13503,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -13530,7 +13530,7 @@
         "kimi-k2.7-code-highspeed": {
           "name": "Kimi K2.7 Code HighSpeed",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -14357,7 +14357,7 @@
         "minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -14572,7 +14572,7 @@
         "minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -14780,7 +14780,7 @@
         "minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -14995,7 +14995,7 @@
         "minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -15546,7 +15546,7 @@
         "gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -17066,7 +17066,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -17958,7 +17958,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -19064,7 +19064,7 @@
         "accounts/fireworks/models/kimi-k2p6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -19121,7 +19121,7 @@
         "accounts/fireworks/models/kimi-k2p7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -19662,7 +19662,7 @@
         "accounts/fireworks/models/kimi-k2p6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -19719,7 +19719,7 @@
         "accounts/fireworks/models/kimi-k2p7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -20254,7 +20254,7 @@
         "accounts/fireworks/models/kimi-k2p6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -20311,7 +20311,7 @@
         "accounts/fireworks/models/kimi-k2p7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -21140,7 +21140,7 @@
         "deepseek/deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -21580,7 +21580,7 @@
         "google/gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -23608,7 +23608,7 @@
         "moonshotai/kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -23693,7 +23693,7 @@
         "moonshotai/kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -23720,7 +23720,7 @@
         "moonshotai/kimi-k2.7-code-highspeed": {
           "name": "Kimi K2.7 Code HighSpeed",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -23992,7 +23992,7 @@
         "minimax/minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -24376,7 +24376,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -24484,7 +24484,7 @@
         "amazon/nova-2-lite": {
           "name": "Nova 2 Lite",
           "context_window": 1000000,
-          "max_output": 1000000,
+          "max_output": 65536,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -25685,7 +25685,7 @@
         "deepseek-ai/DeepSeek-V3-0324": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -26180,7 +26180,7 @@
         "moonshotai/Kimi-K2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -26265,7 +26265,7 @@
         "moonshotai/Kimi-K2.7-Code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -26421,7 +26421,7 @@
         "MiniMaxAI/MiniMax-M2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -26934,7 +26934,7 @@
         "Qwen/Qwen3-VL-235B-A22B-Thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -29639,7 +29639,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -31408,7 +31408,7 @@
         "google/gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -33826,7 +33826,7 @@
         "moonshotai/kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -33860,7 +33860,7 @@
         "moonshotai/kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -33911,7 +33911,7 @@
         "moonshotai/kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -34278,7 +34278,7 @@
         "minimax/minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -34675,7 +34675,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -36049,7 +36049,7 @@
         "qwen/qwen3-vl-235b-a22b-thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -37920,7 +37920,7 @@
         "google/gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -40377,7 +40377,7 @@
         "moonshotai/kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -40411,7 +40411,7 @@
         "moonshotai/kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -40462,7 +40462,7 @@
         "moonshotai/kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -40829,7 +40829,7 @@
         "minimax/minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -41226,7 +41226,7 @@
         "nvidia/nemotron-3-nano-30b-a3b": {
           "name": "nemotron-3-nano-30b-a3b",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -42600,7 +42600,7 @@
         "qwen/qwen3-vl-235b-a22b-thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -44151,7 +44151,7 @@
         "moonshotai/kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -44213,7 +44213,7 @@
         "minimax/minimax-m2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -44613,7 +44613,7 @@
         "qwen/qwen3-vl-235b-a22b-thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -45088,7 +45088,7 @@
         "deepseek-ai/DeepSeek-V3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -45478,7 +45478,7 @@
         "moonshotai/Kimi-K2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -45512,7 +45512,7 @@
         "moonshotai/Kimi-K2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -45981,7 +45981,7 @@
         "Qwen/Qwen3-VL-235B-A22B-Thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -46157,7 +46157,7 @@
         "deepseek-ai/DeepSeek-V3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -46547,7 +46547,7 @@
         "moonshotai/Kimi-K2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -46581,7 +46581,7 @@
         "moonshotai/Kimi-K2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -47050,7 +47050,7 @@
         "Qwen/Qwen3-VL-235B-A22B-Thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -47220,7 +47220,7 @@
         "DeepSeek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -47970,7 +47970,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -48004,7 +48004,7 @@
         "kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -48056,7 +48056,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -48512,7 +48512,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -48546,7 +48546,7 @@
         "kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -48598,7 +48598,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -49048,7 +49048,7 @@
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -49082,7 +49082,7 @@
         "kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -49134,7 +49134,7 @@
         "kimi-k2.7-code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
