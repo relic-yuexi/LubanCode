@@ -32,10 +32,10 @@ namespace lubancode::cli {
 // 窗口候选(§四合同)
 // ---------------------------------------------------------------------------
 
-// 常用档位集合:200K / 400K / 1M(K=1000,M=1,000,000,与
-// config::ParseContextWindowTokens 同一口径)。按已知上限过滤后供选择。
+// 常用档位按十进制 token 计数(K=1000,M=1,000,000),与
+// config::ParseContextWindowTokens 同一口径。百万以上另按 2M/4M/8M…扩展。
 inline constexpr std::size_t kContextWindowCommonCandidates[] = {
-    200000, 400000, 1000000,
+    8000, 16000, 32000, 64000, 128000, 200000, 256000, 400000, 512000, 1000000,
 };
 
 // 窗口候选的裁决结果。values 升序去重,当前预算必在其中(哪怕超限——

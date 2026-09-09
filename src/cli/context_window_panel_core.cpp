@@ -51,16 +51,26 @@ ContextWindowCandidates BuildContextWindowCandidates(std::optional<std::size_t> 
     ContextWindowCandidates out;
     out.current_window = current_window;
     std::vector<std::size_t> values;
-    if (declared_limit.has_value()) {
+    // 0 不是有效的模型上限,按未知处理,不生成 0-token 候选。
+    if (declared_limit.has_value() && *declared_limit > 0) {
         out.limit_known = true;
         out.declared_limit = *declared_limit;
-        // 常用档按声明上限过滤(§4.2 第 2 条):128K 模型不该出现 200K 档。
+        // 小窗口也提供较低预算,所有新增档位均受声明上限约束。
         for (const std::size_t common : kContextWindowCommonCandidates) {
             if (common <= *declared_limit) {
                 values.push_back(common);
             }
         }
-        // 补非标准声明值(§4.2 第 3 条):512K 模型至少能显示自己的 512K。
+        // 大窗口自动延伸 2M/4M/8M…;先除再乘避免 size_t 溢出。
+        for (std::size_t common = 1000000; common <= *declared_limit / 2;) {
+            common *= 2;
+            values.push_back(common);
+        }
+        // 小于最小常用档的旧模型仍可缩小预算;1 token 已无更小正数。
+        if (values.empty() && *declared_limit > 1) {
+            values.push_back(*declared_limit / 2);
+        }
+        // 保留厂商声明的原始整数,1048576 不改写为 1000000。
         values.push_back(*declared_limit);
         out.current_over_limit = current_window > *declared_limit;
     } else {
@@ -406,7 +416,9 @@ ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelVie
     push(view.model_title);
     push("");
     push(std::string(view.focus == 0 ? "> " : "  ") + std::string(tr("cw_panel.context_label")));
-    push("  " + std::string(tr("cw_panel.context_desc")));
+    push(view.window.limit_known
+             ? "  " + trf("cw_panel.context_limit", std::to_string(view.window.declared_limit))
+             : "  " + std::string(tr("cw_panel.context_desc")));
     push(window_cyclable ? "  < " + window_value_text() + " >" : "  " + window_value_text());
     push("");
     push(std::string(view.focus == 1 ? "> " : "  ") + std::string(tr("cw_panel.effort_label")));

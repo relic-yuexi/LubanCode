@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## 未发布
+
+- `/context-window` 根据已知模型上限提供从 8K 到百万以上的预算档位，明确 `1M=1,000,000`，同时保留并展示厂商原始上限。
+- 模型目录补入 GPT-6 Astra、Claude Fable 5.1、GLM 5.3 Flash 等已核实条目，修正 GLM 5.3 输出上限；目录变更纳入 GitHub CI 的代码变更分类。
+
 ## [v0.26.225] - 2026-09-09
 
 - **会话有了四层账本：Session → Turn → Step → Action，每层配 Pre/Post Hook。** Turn 是你的一轮话（跨多次内部 Run，续跑不裂），Step 是一次模型请求（usage、耗时、重试明细都记这层），Action 是工具调用；三层各有稳定 ID（turn-N / step-N / action-N），断线恢复不重号。八枚新 Hook 落地：Pre/PostSession、Pre/PostTurn、Pre/PostStep，Pre/PostToolUse 升格为 Pre/PostAction（旧名永久别名，既有 hooks 配置零迁移）。Post 型观察事件先落 outbox 账再跑 handler（幂等键钉死，at-least-once）。排队消息显式分 steer（本轮下次请求前注入）与 followup（下轮种子）两路：没赶上的 steer 过期标注、明示于你、不改道；取消后不自动开新轮——程序不再替你拿主意。

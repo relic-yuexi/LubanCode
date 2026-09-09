@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "2026-08-26",
+  "revision": "2026-09-09",
   "providers": {
     "openai": {
       "name": "OpenAI",
@@ -20,6 +20,32 @@
       },
       "docs_url": "https://platform.openai.com/docs",
       "models": {
+        "gpt-6-astra": {
+          "name": "GPT-6 Astra",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": ["low", "medium", "high", "xhigh", "max"]
+              }
+            ],
+            "supportedEfforts": ["low", "medium", "high", "xhigh", "max"],
+            "dialect": {
+              "toggle": "none",
+              "effort_path": "reasoning.effort",
+              "verified": false
+            }
+          }
+        },
         "chatgpt-image-latest": {
           "name": "chatgpt-image-latest",
           "capabilities": {
@@ -1642,6 +1668,34 @@
             ]
           }
         },
+        "claude-fable-5-1": {
+          "name": "Claude Fable 5.1",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "high",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": ["low", "medium", "high", "xhigh", "max"]
+              }
+            ],
+            "supportedEfforts": ["low", "medium", "high", "xhigh", "max"],
+            "wireDialect": "effort",
+            "dialect": {
+              "toggle": "thinking_type",
+              "toggle_on": "adaptive",
+              "effort_path": "output_config.effort",
+              "verified": false
+            }
+          }
+        },
         "claude-fable-5": {
           "name": "Claude Fable 5",
           "context_window": 1000000,
@@ -2535,6 +2589,34 @@
         "tool_stream": true
       },
       "models": {
+        "glm-5.3-flash": {
+          "name": "GLM 5.3 Flash",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "max",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": ["low", "high", "max"]
+              }
+            ],
+            "supportedEfforts": ["low", "high", "max"],
+            "dialect": {
+              "toggle": "thinking_type",
+              "toggle_on": "enabled",
+              "effort_path": "reasoning_effort",
+              "verified": false
+            }
+          }
+        },
         "glm-5.2": {
           "name": "GLM-5.2",
           "context_window": 1048576,
@@ -2977,7 +3059,7 @@
         "glm-5.3": {
           "name": "GLM 5.3",
           "context_window": 1048576,
-          "max_output": 12800,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -3612,7 +3694,7 @@
         "glm-5.3": {
           "name": "GLM 5.3",
           "context_window": 1048576,
-          "max_output": 12800,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -4241,7 +4323,7 @@
         "glm-5.3": {
           "name": "GLM 5.3",
           "context_window": 1048576,
-          "max_output": 12800,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -4816,7 +4898,7 @@
         "glm-5.3": {
           "name": "GLM 5.3",
           "context_window": 1048576,
-          "max_output": 12800,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -4967,6 +5049,47 @@
         "tool_stream": true
       },
       "models": {
+        "glm-5.3": {
+          "name": "GLM 5.3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": ["low", "high", "max"]
+              }
+            ],
+            "supportedEfforts": ["low", "high", "max"]
+          }
+        },
+        "glm-5.3-flash": {
+          "name": "GLM 5.3 Flash",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": ["low", "high", "max"]
+              }
+            ],
+            "supportedEfforts": ["low", "high", "max"]
+          }
+        },
         "glm-5.2": {
           "name": "GLM-5.2",
           "context_window": 1048576,
