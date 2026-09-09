@@ -256,6 +256,26 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 
 第三方聚合页只能作线索。目录里的事实应以厂商正式文档为准。
 
+### 2026-09-09 模型资料核对
+
+本次用 [OpenRouter 公开模型列表](https://openrouter.ai/api/v1/models) 发现新增模型，再交叉核对原厂资料。没有发真实模型请求；新增条目的方言验证标记不冒充真机通过。
+
+| 目录条目 | 窗口 token | 最大输出 token | 依据 |
+| --- | ---: | ---: | --- |
+| `openai/gpt-6-astra` | 1,050,000 | 128,000 | [OpenAI 模型页](https://developers.openai.com/api/docs/models/gpt-6-astra.md)：`low/medium/high/xhigh/max`；不支持 `none`；工具调用使用 Responses。 |
+| `anthropic/claude-fable-5-1` | 1,000,000 | 128,000 | [Claude 模型页](https://platform.claude.com/docs/en/models/fable-5-1/overview.md)、[effort](https://platform.claude.com/docs/en/build-with-claude/effort.md)：五档 effort，默认 high，adaptive 始终开启。 |
+| `zai`、`zhipu` 的 `glm-5.3-flash` | 1,048,576 | 131,072 | [Z.ai 模型页](https://docs.z.ai/guides/vlm/glm-5.3-flash)、[API 参数](https://docs.z.ai/api-reference/llm/chat-completion.md)、[智谱参数](https://docs.bigmodel.cn/cn/guide/start/concept-param.md)、[官方模型配置](https://huggingface.co/zai-org/GLM-5.3-Flash/raw/main/config.json)：`low/high/max`，思考不可关闭。 |
+| `zhipu/glm-5.3`；已有四个 `zai*` 同名条目输出上限纠正 | 1,048,576 | 131,072 | 上述 API 参数、[官方模型配置](https://huggingface.co/zai-org/GLM-5.3/raw/main/config.json)；纠正旧值 12,800，不改已有窗口。 |
+
+边界：
+
+- 表中的 `provider/model` 是目录定位，不是全部原厂 API 的模型 ID 格式。
+- OpenRouter 的 GLM 顶层 `context_length`、`top_provider` 和原厂上限存在不同值，不能整表覆盖；本地 `1M=1,000,000` 档不改写厂商原始窗口。
+- `gpt-6-astra-pro` 在 OpenRouter 有记录，但本次未取得原厂同 ID 的可靠模型页；未加入 OpenAI 官方条目。`:batch` 变体也未作为普通原厂模型添加。
+- 本次新 GLM 条目先补常规 Chat 平台，不机械扩散至全部套餐和 Messages 变体；账户与端点的实际可用列表仍以服务端返回为准。
+- GPT-6 Astra 文档还给出最大输入 922,000；当前目录的 `context_window` 表达完整上下文，不是独立输入上限。输出预留仍按既有预算算法，1M 选择本身不构成不会超限的保证。
+- 新增窗口档位、目录解析与协议回归由 GitHub Actions 执行，本次不在本地编译或跑 CI。
+
 ## 11. 排错
 
 **`/provider refresh` 成功，菜单却没变**

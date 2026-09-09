@@ -631,7 +631,8 @@ const Entry kZhCN[] = {
     // 面板只改当前会话的窗口预算与思考强度;窗口是本地预算,不是服务端扩容。
     {"cw_panel.model_title", "模型: {0}"},
     {"cw_panel.context_label", "上下文窗口(Context Window)"},
-    {"cw_panel.context_desc", "模型一次能读入的最大上下文长度(本地预算)。"},
+    {"cw_panel.context_desc", "本地预算;模型上限未知。1K=1000,1M=1000000 token。"},
+    {"cw_panel.context_limit", "本地预算;已知上限 {0}。1K=1000,1M=1000000。"},
     {"cw_panel.effort_label", "思考强度(Thinking Effort)"},
     {"cw_panel.effort_desc", "回复前模型思考多深。"},
     {"cw_panel.selected", "当前选择: {0} 上下文 · {1} 思考"},
@@ -2653,7 +2654,8 @@ const Entry kEn[] = {
     // the window is a local budget, not a server-side capability upgrade.
     {"cw_panel.model_title", "Model: {0}"},
     {"cw_panel.context_label", "Context Window"},
-    {"cw_panel.context_desc", "Maximum context length the model reads at once (local budget)."},
+    {"cw_panel.context_desc", "Local budget; model limit unknown. 1K=1000, 1M=1000000 tokens."},
+    {"cw_panel.context_limit", "Local budget; known limit {0}. 1K=1000, 1M=1000000."},
     {"cw_panel.effort_label", "Thinking Effort"},
     {"cw_panel.effort_desc", "How much the model thinks before replying."},
     {"cw_panel.selected", "Selected: {0} context · {1} thinking"},

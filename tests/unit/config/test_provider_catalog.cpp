@@ -128,6 +128,57 @@ TEST_CASE("内置 GPT 5.6 与 GLM 5.3 各自声明不同 effort") {
     CHECK(glm->reasoning.supported_efforts == std::vector<std::string>{"low", "high", "max"});
 }
 
+TEST_CASE("provider catalog: 2026-09 新模型保留真实窗口与独立思考档位") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        config::embedded::kProviderCatalogJson, "<embedded>");
+    REQUIRE(catalog.has_value());
+
+    const auto* openai = catalog->FindProvider("openai");
+    REQUIRE(openai != nullptr);
+    const auto* astra = openai->FindModel("gpt-6-astra");
+    REQUIRE(astra != nullptr);
+    CHECK(astra->context_window_tokens == 1050000);
+    CHECK(astra->max_output_tokens == 128000);
+    CHECK(astra->reasoning.supported_efforts ==
+          std::vector<std::string>{"low", "medium", "high", "xhigh", "max"});
+    CHECK(astra->capabilities.at("off_unsupported"));
+    CHECK(astra->reasoning.dialect.effort_path == "reasoning.effort");
+    CHECK_FALSE(astra->reasoning.dialect.verified);
+    // OpenRouter 的 batch/Pro 名称不能冒充已核实的原厂 ID。
+    CHECK(openai->FindModel("gpt-6-astra:batch") == nullptr);
+
+    const auto* anthropic = catalog->FindProvider("anthropic");
+    REQUIRE(anthropic != nullptr);
+    const auto* fable = anthropic->FindModel("claude-fable-5-1");
+    REQUIRE(fable != nullptr);
+    CHECK(fable->context_window_tokens == 1000000);
+    CHECK(fable->max_output_tokens == 128000);
+    CHECK(fable->default_think == "high");
+    CHECK(fable->capabilities.at("off_unsupported"));
+    CHECK(fable->reasoning.supported_efforts ==
+          std::vector<std::string>{"low", "medium", "high", "xhigh", "max"});
+    CHECK(fable->reasoning.dialect.effort_path == "output_config.effort");
+
+    for (const auto* id : {"zai", "zhipu"}) {
+        const auto* provider = catalog->FindProvider(id);
+        REQUIRE(provider != nullptr);
+        const auto* flash = provider->FindModel("glm-5.3-flash");
+        REQUIRE(flash != nullptr);
+        CHECK(flash->context_window_tokens == 1048576);
+        CHECK(flash->max_output_tokens == 131072);
+        CHECK(flash->capabilities.at("image"));
+        CHECK(flash->capabilities.at("off_unsupported"));
+        CHECK(flash->reasoning.supported_efforts == std::vector<std::string>{"low", "high", "max"});
+    }
+    for (const auto* id : {"zai", "zai-anthropic", "zai-coding", "zai-coding-anthropic", "zhipu"}) {
+        const auto* provider = catalog->FindProvider(id);
+        REQUIRE(provider != nullptr);
+        const auto* glm = provider->FindModel("glm-5.3");
+        REQUIRE(glm != nullptr);
+        CHECK(glm->max_output_tokens == 131072);  // 不是旧目录的 12800。
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kimi 保留式思考单 P0:Moonshot 四枚模型不可混作一家(官方契约表逐行)。
 // K3/K2.7 固定 always,K2.6 默认 tool_episode,K2.5 固定 never;controls

@@ -40,6 +40,34 @@ std::string ToLowerAscii(const std::string& s) {
     return out;
 }
 
+// 已知上限的十进制口径(用户定案:厂商原数不上屏)。恰为十进制整档(能
+// 被 1000 整除)直接给档名("1M"/"400K");否则取不超过它的最大预设档
+// (含 2M/4M/8M… 扩展)冠 "≥":1048576 -> "≥1M"、786432 -> "≥512K"。连
+// 最小预设 8K 都够不着的旧窗口按千位折(4096 -> "≥4K");不足 1K 没档
+// 可表,只能原样给数。
+std::string FormatContextLimitHint(std::size_t tokens) {
+    if (tokens >= 1000 && tokens % 1000 == 0) {
+        return FormatContextWindowLabel(tokens);
+    }
+    std::size_t best = 0;
+    for (const std::size_t common : kContextWindowCommonCandidates) {
+        if (common <= tokens) {
+            best = common;
+        }
+    }
+    for (std::size_t common = 1000000; common <= tokens / 2;) {
+        common *= 2;
+        best = common;  // 进得了循环说明翻倍前 ≤ tokens/2,翻倍后必 ≤ tokens
+    }
+    if (best == 0) {
+        if (tokens < 1000) {
+            return std::to_string(tokens);
+        }
+        best = tokens / 1000 * 1000;  // <8K 的零头上限:按千位折
+    }
+    return "≥" + FormatContextWindowLabel(best);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -51,17 +79,27 @@ ContextWindowCandidates BuildContextWindowCandidates(std::optional<std::size_t> 
     ContextWindowCandidates out;
     out.current_window = current_window;
     std::vector<std::size_t> values;
-    if (declared_limit.has_value()) {
+    // 0 不是有效的模型上限,按未知处理,不生成 0-token 候选。
+    if (declared_limit.has_value() && *declared_limit > 0) {
         out.limit_known = true;
         out.declared_limit = *declared_limit;
-        // 常用档按声明上限过滤(§4.2 第 2 条):128K 模型不该出现 200K 档。
+        // 小窗口也提供较低预算,所有新增档位均受声明上限约束。
         for (const std::size_t common : kContextWindowCommonCandidates) {
             if (common <= *declared_limit) {
                 values.push_back(common);
             }
         }
-        // 补非标准声明值(§4.2 第 3 条):512K 模型至少能显示自己的 512K。
-        values.push_back(*declared_limit);
+        // 大窗口自动延伸 2M/4M/8M…;先除再乘避免 size_t 溢出。
+        for (std::size_t common = 1000000; common <= *declared_limit / 2;) {
+            common *= 2;
+            values.push_back(common);
+        }
+        // 小于最小常用档的旧模型仍可缩小预算;1 token 已无更小正数。
+        if (values.empty() && *declared_limit > 1) {
+            values.push_back(*declared_limit / 2);
+        }
+        // 声明上限只在幕后当过滤尺,本身不进候选(用户定案:面板只见 1M,
+        // 不见 1048576 这类厂商原数;非整档上限如 786432 顶到 512K 为止)。
         out.current_over_limit = current_window > *declared_limit;
     } else {
         // 能力未知(§4.2 第 6 条):保守展示,只有当前值,标未验证;不凭
@@ -92,8 +130,38 @@ std::string FormatContextWindowLabel(std::size_t tokens) {
     if (tokens >= 1000 && tokens % 1000 == 0) {
         return std::to_string(tokens / 1000) + "K";
     }
-    // 1048576 这类真值原样显示,不折成 1M(§4.2 第 7 条)。
-    return std::to_string(tokens);
+    if (tokens < 1000) {
+        return std::to_string(tokens);  // 不足 1K:没有 K/M 口径,原样给数
+    }
+    // 非整档真值(1048576 这类厂商 MiB 数、用户手设的零头)按十进制 K/M
+    // 折算上屏,不再打裸数字(用户定案);四舍五入、尾零省略,口径与状态
+    // 行的 cli::FormatTokenCount 同一把尺:1048576 -> "1.05M"、131072 ->
+    // "131.1K"、4096 -> "4.1K"。单位大写,与档名一致。
+    if (tokens >= 1000000) {
+        std::size_t hundredths = tokens / 10000;
+        if (tokens % 10000 >= 5000) {
+            ++hundredths;
+        }
+        std::string out = std::to_string(hundredths / 100);
+        const std::size_t frac = hundredths % 100;
+        if (frac != 0) {
+            out += '.';
+            out += static_cast<char>('0' + frac / 10);
+            if (frac % 10 != 0) {
+                out += static_cast<char>('0' + frac % 10);
+            }
+        }
+        return out + "M";
+    }
+    std::size_t tenths = tokens / 100;
+    if (tokens % 100 >= 50) {
+        ++tenths;
+    }
+    std::string out = std::to_string(tenths / 10);
+    if (tenths % 10 != 0) {
+        out += "." + std::to_string(tenths % 10);
+    }
+    return out + "K";
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +474,9 @@ ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelVie
     push(view.model_title);
     push("");
     push(std::string(view.focus == 0 ? "> " : "  ") + std::string(tr("cw_panel.context_label")));
-    push("  " + std::string(tr("cw_panel.context_desc")));
+    push(view.window.limit_known
+             ? "  " + trf("cw_panel.context_limit", FormatContextLimitHint(view.window.declared_limit))
+             : "  " + std::string(tr("cw_panel.context_desc")));
     push(window_cyclable ? "  < " + window_value_text() + " >" : "  " + window_value_text());
     push("");
     push(std::string(view.focus == 1 ? "> " : "  ") + std::string(tr("cw_panel.effort_label")));
