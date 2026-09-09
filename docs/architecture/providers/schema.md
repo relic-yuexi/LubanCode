@@ -14,8 +14,9 @@ LubanCode 没把“模型”写成一串散落各处的 `if model == ...`。它�
 
 | 层 | 管什么 | 典型载体 |
 | --- | --- | --- |
-| Provider catalog | 厂商预设、wire、默认模型、已知能力 | `catalog/providers.json` |
-| Provider schema | 目录允许哪些字段 | `catalog/providers.schema.json` |
+| Provider catalog 维护源 | 平台分片、公共模型池、端点声明、证据 | `catalog/providers/*.json`、`catalog/models/*.json`、`catalog/manifest.json` |
+| Provider catalog 发布产物 | 厂商预设、wire、默认模型、已知能力（schema v2，生成文件） | `catalog/providers.json` |
+| Provider schema | 目录允许哪些字段 | `catalog/source.schema.json`（维护层）、`catalog/providers.schema.json`（发布层） |
 | Local model catalog | 用户按 slug 覆盖模型元数据 | `~/.lubancode/models.json` |
 | Runtime config | 当前端点、密钥、模型、显式参数 | `~/.lubancode/config.json` 与项目配置 |
 | Model router | normal、cheap、lao 任务该发给谁 | `ModelRouterService` |
@@ -127,7 +128,9 @@ flowchart TB
 
 ### 构建时
 
-CMake 把 `catalog/providers.json` 生成 `embedded_provider_catalog.hpp`，编进 exe。故而断网也能走 `/provider add`。
+维护源是 `catalog/providers/` 平台分片 + `catalog/models/` 公共模型池 + `catalog/manifest.json`（合同见 `catalog/source.schema.json`）。`scripts/generate_provider_catalog.py` 把它们确定性合成 `catalog/providers.json`（`--check` 只读对账，CI、release 与 ctest 的 `catalog.consistency` 都挂了这道门）。CMake 再把这枚产物生成 `embedded_provider_catalog.hpp`，编进 exe。故而断网也能走 `/provider add`；构建只消费已提交产物，不新增 Python 依赖。
+
+多协议平台在维护源里是"平台 + 端点"形态：公共模型提到池（只收逐字段比对确认相同的），端点各自声明模型集合与覆写，合成时展开成旧 Provider 条目——旧 Provider ID、模型 ID 与字段值原样保留。维护层的 `evidence`（证据来源/日期/类型）与 `aliases` 记录在生成时剥除，不进发布产物。
 
 这枚快照不是用户配置。它只给向导默认值。用户选定后，程序把 provider 具体字段写进本地 config。往后目录更新，不会暗改已保存端点。
 
