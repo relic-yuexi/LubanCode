@@ -209,3 +209,7 @@ jobs:
         with:
           files: ${{ matrix.archive }}
           generate_release_notes: ${{ matrix.notes }}
+          # 内测通道(2026-09-09):tag 带 '-' 后缀(vX.Y.Z-beta.1 一类)按
+          # prerelease 发,不抢稳定版的 Latest 帽;正式 tag 照旧当 Latest。
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
