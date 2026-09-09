@@ -724,8 +724,9 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
         // mid-turn 评估用同一份,发轮前对齐一次。
         main_agent->SetContextWindowTokens(context_tracker.window_tokens());
-        // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。失败只
-        // 警告不拦——超大工具结果的保命索(token 轴口径)还在,不会真的爆掉;
+        // 自动压缩:发真正的用户输入前,占用超过触发线(窗口×80% − 4k 压缩
+        // 指令 − 8k 摘要预留,§〇.1 用户定案)就先压一压。失败只警告不拦
+        // ——超大工具结果的保命索(token 轴口径)还在,不会真的爆掉;
         // 工具循环中途的溢出由 loop 的压力通报(HandleContextPressure)另走
         // mid-turn 路。
         if (context_tracker.ShouldAutoCompact()) {

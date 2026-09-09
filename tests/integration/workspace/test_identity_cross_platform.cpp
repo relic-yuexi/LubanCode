@@ -201,6 +201,10 @@ TEST_CASE("跨平台: workspace.json 并发原子写——读侧永见整份,末
     // 截":任何一次成功打开的读必须是完整合法 JSON(version==2)。Windows
     // 的 MoveFileExW 换名有微窗,读者可能短暂打不开(打不开≠撕裂,重读即
     // 得)——失败重读一次,重读仍坏才算真坏;微窗次数单独记账留证。
+    // 分层:ReadWorkspaceManifest 生产侧已对"探测/打开"瞬态失败内建有界
+    // 重试(100ms 预算,run 34335606083/34360062483 三案的病根修复),
+    // 这层外层重试只兜内层耗尽的长拦截窗,并给瞬态留证;真坏(撕裂 JSON、
+    // 真丢文件)内外两层重试都救不回来,该红就红——判据不松。
     std::atomic<bool> stop{false};
     std::atomic<int> bad_reads{0};
     std::atomic<int> reads{0};

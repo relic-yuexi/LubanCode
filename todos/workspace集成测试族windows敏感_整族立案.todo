@@ -1,0 +1,66 @@
+# workspace 集成测试族 windows 敏感：整族立案
+
+- 状态：根因定案、修复已实施，windows 腿连跑零复犯待观察（见 §五纪要）。
+- 日期：2026-09-09
+- 级别：P2（CI 稳定性；三案两册皆同分支无关代码、重跑皆绿，纯环境/时序脸谱）。
+- 前科三案：
+  1. `integration.workspace.workspace_index_ledger`——run 34316108135（PR #8 windows 腿，2026-09-09），重跑绿。
+  2. `integration.workspace.identity_cross_platform`（test:262 `bad_reads != 0`）——run 34335606083（PR #11 windows 腿，2026-09-09），重跑绿。
+  3. 同册同断言二犯——run 34360062483（PR #14 windows 腿，2026-09-09），重跑绿（同腿 app_server_approval 一并红，另案挂号见 §三）。
+- 范围：`tests/integration/workspace/**`（identity_cross_platform、workspace_index_ledger 及同族册）、其共享夹具与临时目录设施；不改生产 workspace 逻辑（除非证据指向真病）。
+- 不在本单：app_server_approval 的 json null 异常（另册，见 §三）。
+
+## 一、病相
+
+- 三案全在 windows-msvc 腿、全在 workspace 集成族、全部与触发分支的代码零交集、全部重跑即绿。
+- 两册两种死法：index_ledger 是 `REQUIRE(registered.has_value())` 假 + SIGABRT；identity 是 `CHECK(bad_reads.load() == 0)` 失败（原子计数器读到非零——并发读窗真的开着）。
+
+## 二、侦查方向
+
+1. 族的公共设施先过一遍：共享的临时目录/家目录夹具、并发读写窗、Windows 文件语义（句柄占用、共享违例、路径大小写、UTF-8/UTF-16 转换、防病毒扫描器抢文件）。
+2. identity 册 `bad_reads` 的计数器在数什么：并发读者撞上写者的窗口真有多宽？CI 慢机（2 核 windows runner）调度抖动下命中率的量级估算。
+3. index_ledger 册的注册失败路径：什么环境错误会让 `registered` 落空且随后 SIGABRT——失败分支里有没有二次错误把断言信息吞了。
+4. 定位后按病开方：夹具加 retry/宽限、临时目录独占化、跳过防病毒目录、或断言改轮询条件等待（沿 WaitForSettled 先例）；**不许**用 sleep 拍脑袋糊。
+
+## 三、邻案挂号
+
+- `unit.app_server.app_server_approval`（test:772 json.exception.type_error.305 null 取下标）——run 34360062483 同腿新脸,与本族无关;若重跑仍红单独立案,若绿记观察名单。
+- 一眼结论（2026-09-09 侦查，不动手）：test:772 是 interrupt 硬时限册，`start["threadId"]` 取下标时 `HandleThreadStart` 返回了 null——审批悬停夹具的时序脸（turn 线程/事件轮询竞态），与 workspace 族的文件语义不同根，不是同轮环境脸。维持另案。
+
+## 四、验收
+
+- 三案指纹各自有根因结论（环境敏感性定位到具体设施）；
+- 修后 windows 腿连跑（CI 多次 or 矩阵重跑）零复犯；
+- 既有册断言语义不放松（改等待合同不改对错判据）。
+
+## 五、结案纪要（2026-09-09）
+
+### 根因（两案同根，钉在 `src/workspace/manifest.cpp`）
+
+生产 `ReadWorkspaceManifest` 的旧读路径把三类答案混作一团：
+
+1. `fs::exists` 撞 ec（Windows 元数据查询被换名/防病毒过滤驱动短拒）→ 判 Missing；
+2. ifstream 打不开（MSVC ifstream 不带 FILE_SHARE_DELETE，正被 `MoveFileExW(REPLACE)` 换名或被过滤驱动握住）→ 旧实现 `ReadTextFile` 把"打不开"折成**空串**喂 parse，`parse("")` discarded → 判 **Corrupt（code=schema.missing_field，与真坏 JSON 同脸）**；
+3. 真坏 JSON → Corrupt。
+
+且**零宽限**：`OpenOrRegisterWorkspace` 对 Corrupt 直接 unexpected。
+
+- **identity 册案（run 34335606083 / 34360062483）**：日志铁证——案二 corrupt=1 首坏 `code=schema.missing_field`（正是"打不开→空串→discarded"分支）；案三 missing=2 首坏 `code=`/`text=` 全空（正是 exists→Missing 分支不填诊断）。坏读全是"10×2ms 重试耗尽"型且每册仅 1-3 次，独立概率模型完全不符——须有状态拦截器（防病毒/索引过滤驱动握文件几十毫秒）解释；同册 `write_failures` 48-57/320 次换名被拒佐证并发句柄冲突真实高频。
+- **index_ledger 册案（run 34316108135）**：日志铁证 `cpp(418) REQUIRE(registered.has_value())` 假 + `cpp(369) SIGABRT`——418 行正在"同一路径 8 只手并发开房"段的**子线程** lambda 里。`OpenOrRegisterWorkspace` 的 unexpected 出自读 Corrupt 或写 `atomic.replace_failed`（两条路径同根 Windows 瞬态语义，identity 册同环境实测两条都高频）；子线程 REQUIRE 失败走异常无人接 → terminate → SIGABRT，错误串全被吞（日志只见断言不见错误）。
+
+### 修法
+
+1. **生产最小修（`src/workspace/manifest.cpp`，一处设施）**：`ReadWorkspaceManifest` 对探测/打开的瞬态失败有界重试（10×10ms=100ms，判据不动：真 miss 立即 Missing、真坏 JSON 立即 Corrupt 不重试；耗尽后 status 沿旧账、error_code 分出 `read.open_failed`/`read.probe_failed` 与内容坏分家）；`OpenOrRegisterWorkspace` 的 manifest 落盘失败有界重试（整份重写幂等，耗尽才落空）。POSIX rename 原子、无共享违例，重试路径零触发零开销。
+2. **测试夹具修（`test_workspace_index_ledger.cpp`）**：并发两段子线程断言记录化（atomic 计数 + 首错串），join 后主线程 `FAIL` 收口——判据不松（8/8 全成才过），失败时带错误串，诊断不再被 SIGABRT 吞。
+3. **`test_identity_cross_platform.cpp`**：判据与等待逻辑不动，注释补分层说明（生产内层挡瞬态，外层兜长窗+留证）。
+
+### 验收对照
+
+- 根因结论：三案同根，定位到 manifest 读写设施的"瞬态读失败折叠成内容坏 + 零宽限"——✅。
+- windows 连跑零复犯：修后 CI 一次绿是入场券；复犯本就低频（数十跑出一两次），零复犯须 windows 腿多轮连跑观察——**待观察**，PR 合并后由矩阵重跑兜。
+- 断言语义不放松：bad_reads==0、末态合法、8/8 全成、RoomCount 等判据原样；只改"怎么等"（内层重试/主线程收口）——✅。
+
+### 遗留
+
+- `workspace/index.cpp` 的 `ReadWorkspaceIndex` 同款裸读（打不开→空串→Corrupt）：不产生断言失败（Corrupt 走扫房重建自愈），本单不扩刀口；若日后账本重建类出现同脸红，同法内衬重试即可。
+- app_server_approval 另案（§三一眼结论已记）。

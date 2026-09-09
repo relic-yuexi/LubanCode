@@ -191,14 +191,20 @@ private:
         return body;
     }
 
-    // 从 system 指令里抠 "来源 turn tA-tB" 的 A。
+    // 从 system 指令里抠 "来源 turn tA-tB" 的 A。针串"来源 turn t"按字节
+    // 数定位(13 字节:来源 6 + 空格 + turn + 空格 + t)——老实现写死
+    // pos+11,落在 turn 号前的空格上,位数循环一位不进、恒走 fallback=1;
+    // 旧架构靠热区原文的真 turn 号把账兜住没露馅,末轮豁免后纠正轮进
+    // map、被错标 t1/t2,与原文撞成"覆盖倒序"。现在按针串长度起跳。
     static std::size_t RangeStartTurn(const std::string& system) {
-        const std::size_t pos = system.find("来源 turn t");
+        const std::string kNeedle = "来源 turn t";
+        const std::size_t pos = system.find(kNeedle);
         if (pos == std::string::npos) {
             return 1;
         }
         std::size_t value = 0;
-        for (std::size_t i = pos + 11; i < system.size() && system[i] >= '0' && system[i] <= '9'; ++i) {
+        for (std::size_t i = pos + kNeedle.size(); i < system.size() && system[i] >= '0' && system[i] <= '9';
+             ++i) {
             value = value * 10 + static_cast<std::size_t>(system[i] - '0');
         }
         return value == 0 ? 1 : value;
@@ -559,6 +565,18 @@ RunMetrics RunOnce(const EvalTask& task, const ModelFaults& faults, std::string*
         if (failure_note != nullptr) {
             *failure_note = result.error().message;
         }
+        // 拒收时附各 map 请求钉的 turn 标签(截到行尾),定位切分/标签问题
+        // 一眼可见;平时零噪。
+        for (const auto& request : backend.captured_requests) {
+            const std::size_t pin = request.system.find("来源 turn ");
+            if (pin != std::string::npos) {
+                const std::size_t line_end = request.system.find('\n', pin);
+                std::cout << "  [map-label] "
+                          << request.system.substr(
+                                 pin, (line_end == std::string::npos ? request.system.size() : line_end) - pin)
+                          << "\n";
+            }
+        }
         return metrics;
     }
     metrics.compact_ok = true;
@@ -686,9 +704,9 @@ TEST_CASE("阶段 5 评测: 30 题 × 10 次忠实模型——token 账与成功
             const RunMetrics metrics = RunOnce(task, clean, &note);
             ++total_runs;
             if (!metrics.compact_ok) {
-                if (std::getenv("LUBANCODE_COMPACT_EVAL_VERBOSE") != nullptr) {
-                    std::cout << "[compact-eval-reject] task=" << t << " seed=" << seed << " note=" << note << "\n";
-                }
+                // 拒收缘由无条件打进日志:这类失败一眼要能看出是哪道题、
+                // 拒在哪道门(只在拒收时打,平时零噪)。
+                std::cout << "[compact-eval-reject] task=" << t << " seed=" << seed << " note=" << note << "\n";
             }
             if (metrics.compact_ok) {
                 ++ok_runs;

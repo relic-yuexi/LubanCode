@@ -18,6 +18,7 @@
 #include "agent/context_events.hpp"  // 事件账:evidence_refs 的来源区间
 #include "agent/prompt_assembler.hpp"  // ModuleTextByPath:压缩指令正文取提示词模块
 #include "agent/sample_model.hpp"  // SampleModel 原语:两处采样的公共路(批一·病四)
+#include "platform/log_sink.hpp"   // LogSink:防线自愈的一行日志(§2.2)
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:摘要文本进历史前的编码关口
 
 namespace lubancode::agent {
@@ -949,72 +950,19 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
 // 四分区(阶段 1):TurnPartitionPlan 纯计算
 // ---------------------------------------------------------------------------
 
-TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& history,
-                                         std::size_t partition_count,
-                                         const TurnPartitionBudgets& budgets) {
-    TurnPartitionPlan plan;
-    plan.requested_partition_count = partition_count;
-    plan.compact_input_budget = CompactInputBudget(budgets.compact_model);
-    if (history.empty()) {
-        return plan;
-    }
+namespace {
 
-    // L1 工作视图(§3.3):分区按结构压缩后的稳定视图计量,长 ToolResult 按
-    // artifact 外置后的重量算,不拿 durable 里的全文虚算。CompressWorkingView
-    // 只重写 tool_result 的 content,消息条数与块序不动,视图与原 history
-    // 逐条对得上;临时 memo/stats/store——不落盘、不定形、不碰会话真账。
-    StructuralCompressionStats stats;
-    ResultViewMemo memo;
-    const std::vector<api::Message> working =
-        CompressWorkingView(history, budgets.structural, stats, memo, /*store=*/nullptr);
+// 按消息下标收齐全部工具原子组(§6.1,不带 turn 归属):一条 assistant 消息
+// (可含并行多枚 tool_use)加上按 tool_use_id 收齐的全部配对 result;use 无
+// result / result 早于 use = incomplete,result 配不上 use = 悬空。todo_write
+// 照样成组,天然随组走不劈开。BuildTurnPartitionPlan 与两把自愈尺
+// (HealTurnBoundariesOverToolGroups / HealMapChunkToolGroups)共用这一份账。
+struct CollectedToolGroups {
+    std::vector<ToolExchangeGroupInfo> groups;  // turn 字段未填,调用方自己归
+    std::size_t dangling_results = 0;
+};
 
-    // 旧 archive 剥离(§3.2):只在首条消息的第一枚文本块上找,与分层压缩
-    // 同一只。剥出的文本不算 turn、不占分区账,只作 final reduce 的基线。
-    for (const auto& block : history[0].content) {
-        if (!std::holds_alternative<api::TextBlock>(block)) {
-            continue;
-        }
-        if (auto split = SplitPriorArchive(std::get<api::TextBlock>(block).text)) {
-            plan.has_prior_archive = true;
-            plan.prior_archive_text = split->first;
-            plan.prior_archive_tokens = EstimateUtf8Tokens(plan.prior_archive_text);
-        }
-        break;
-    }
-
-    // 逐条 token:工作视图一把(分区用)、全量一把(对照外置收益)。每条至少
-    // 记 1,空壳消息不白占预算(与 BuildCompactedHistory 同一口径)。
-    std::vector<std::size_t> working_message_tokens(history.size());
-    std::vector<std::size_t> raw_message_tokens(history.size());
-    std::vector<std::size_t> externalized_message(history.size(), 0);
-    for (std::size_t i = 0; i < history.size(); ++i) {
-        working_message_tokens[i] = std::max<std::size_t>(1, EstimateMessageTokens(working[i]));
-        raw_message_tokens[i] = std::max<std::size_t>(1, EstimateMessageTokens(history[i]));
-        for (const auto& block : history[i].content) {
-            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
-                continue;
-            }
-            // 已外置 = 首次定形成 artifact 视图(头尾预览 + 可追回引用)。
-            const std::string& use_id = std::get<api::ToolResultBlock>(block).tool_use_id;
-            if (const auto it = memo.decisions.find(use_id);
-                it != memo.decisions.end() && it->second.kind == ResultViewKind::Artifact) {
-                externalized_message[i] += 1;
-            }
-        }
-    }
-
-    // 按 §二 切 turn。首枚 turn 头之前若有零散消息(旧档外壳、异常形状),
-    // 并入首 turn 记账——plan 的账要盖住整份 history,零散头没有自己的去处。
-    const std::vector<std::pair<std::size_t, std::size_t>> raw_ranges = SplitIntoTurns(history);
-    if (raw_ranges.empty()) {
-        return plan;  // 一条真正用户输入都没有:没有可分区的 turn
-    }
-    std::vector<std::pair<std::size_t, std::size_t>> turn_ranges = raw_ranges;
-    turn_ranges.front().first = 0;
-
-    // 工具原子组(§6.1):按 tool_use_id 收齐本 assistant 消息发出的全部
-    // 调用,不按"下一条 user 消息"猜配对;use 无 result = incomplete,
-    // result 配不上 use = 悬空。todo_write 照样成组,天然随组走不劈开。
+CollectedToolGroups CollectToolExchangeGroups(const std::vector<api::Message>& history) {
     std::map<std::string, std::size_t> result_message_of;
     for (std::size_t i = 0; i < history.size(); ++i) {
         for (const auto& block : history[i].content) {
@@ -1023,6 +971,7 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
             }
         }
     }
+    CollectedToolGroups out;
     std::set<std::string> matched_uses;
     for (std::size_t i = 0; i < history.size(); ++i) {
         if (history[i].role != api::Role::Assistant) {
@@ -1051,19 +1000,285 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
             matched_uses.insert(id);
             group.to_message = std::max(group.to_message, it->second + 1);
         }
-        // 所属 turn:assistant 消息落在哪枚 turn 的区间里。
-        for (std::size_t t = 0; t < turn_ranges.size(); ++t) {
-            if (i >= turn_ranges[t].first && i < turn_ranges[t].second) {
-                group.turn = t;
-                break;
-            }
-        }
-        plan.tool_groups.push_back(std::move(group));
+        out.groups.push_back(std::move(group));
     }
     for (const auto& [id, message_index] : result_message_of) {
         (void)message_index;
         if (matched_uses.count(id) == 0) {
-            plan.dangling_results += 1;
+            out.dangling_results += 1;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+std::size_t HealTurnBoundariesOverToolGroups(const std::vector<api::Message>& history,
+                                             std::vector<std::pair<std::size_t, std::size_t>>& turns) {
+    const CollectedToolGroups collected = CollectToolExchangeGroups(history);
+    std::size_t healed = 0;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (std::size_t t = 1; t < turns.size();) {
+            const std::size_t boundary = turns[t].first;
+            bool splits_group = false;
+            for (const auto& group : collected.groups) {
+                if (group.complete && group.from_message < boundary && boundary < group.to_message) {
+                    splits_group = true;
+                    break;
+                }
+            }
+            if (!splits_group) {
+                ++t;
+                continue;
+            }
+            // 界点并回前一轮:工具循环中途插进来的用户正文(steer 一类)归
+            // 当前进行中的 turn,不开新 turn——被劈的组整只随轮走。
+            turns[t - 1].second = turns[t].second;
+            turns.erase(turns.begin() + static_cast<std::ptrdiff_t>(t));
+            ++healed;
+            changed = true;
+        }
+    }
+    return healed;
+}
+
+MapChunkHealResult HealMapChunkToolGroups(const std::vector<api::Message>& history, std::size_t from,
+                                          std::size_t to) {
+    MapChunkHealResult result;
+    result.from = from = std::min(from, history.size());
+    result.to = to = std::min(to, history.size());
+    const std::size_t original_from = from;
+    const std::size_t original_to = to;
+
+    // 全史的 use/result 消息下标账(悬垂形状在这里现形)。
+    std::map<std::string, std::size_t> use_message_of;
+    std::map<std::string, std::size_t> result_message_of;
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        for (const auto& block : history[i].content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                use_message_of.emplace(use->id, i);
+            } else if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                       tool_result != nullptr) {
+                result_message_of.emplace(tool_result->tool_use_id, i);
+            }
+        }
+    }
+
+    // 迭代挪界:任一 id 的 use 与 result 被块界分在两侧,就把块界沿消息
+    // 粒度挪过去整只吞组(use 在块前往前接,result 在块后往后吞)。挪到不
+    // 再动为止;每轮至少收窄一次,轮数有界(块界只在 [0, history.size()] 里
+    // 单调张,至多挪 history.size() 轮)。
+    for (std::size_t round = 0; round <= history.size() + 1; ++round) {
+        bool moved = false;
+        for (const auto& [id, use_index] : use_message_of) {
+            const auto it = result_message_of.find(id);
+            if (it == result_message_of.end()) {
+                continue;  // 悬垂 use,下方终检点名
+            }
+            const std::size_t result_index = it->second;
+            if (result_index < use_index) {
+                continue;  // result 早于 use 的异常形状,终检点名
+            }
+            const bool use_in = use_index >= from && use_index < to;
+            const bool result_in = result_index >= from && result_index < to;
+            if (use_in == result_in) {
+                continue;  // 同侧(都在或都不在):块界没劈它
+            }
+            from = std::min(from, use_index);
+            to = std::max(to, result_index + 1);
+            moved = true;
+        }
+        for (const auto& [id, result_index] : result_message_of) {
+            if (use_message_of.count(id) > 0) {
+                continue;  // 上面按 use 侧对过账了
+            }
+            if (result_index >= from && result_index < to) {
+                result.ok = false;
+                result.note = "悬空 tool_result(" + id + ")全史无对应 tool_use,块界挪不动";
+                return result;
+            }
+        }
+        if (!moved) {
+            break;
+        }
+    }
+
+    // 终检:块内每对 use/result 都在,且没有悬垂/悬空/倒挂。
+    for (const auto& [id, use_index] : use_message_of) {
+        const bool use_in = use_index >= from && use_index < to;
+        const auto it = result_message_of.find(id);
+        if (it == result_message_of.end()) {
+            if (use_in) {
+                result.ok = false;
+                result.note = "悬垂 tool_use(" + id + ")全史无配对 tool_result,块界挪不动";
+                return result;
+            }
+            continue;
+        }
+        if (it->second < use_index) {
+            if (use_in || (it->second >= from && it->second < to)) {
+                result.ok = false;
+                result.note = "tool_result(" + id + ")早于 tool_use,异常形状";
+                return result;
+            }
+            continue;
+        }
+        const bool result_in = it->second >= from && it->second < to;
+        if (use_in != result_in) {
+            result.ok = false;
+            result.note = "工具组(" + id + ")跨块界且界挪不动,异常形状";
+            return result;
+        }
+    }
+
+    result.ok = true;
+    result.from = from;
+    result.to = to;
+    if (from != original_from || to != original_to) {
+        result.note = "map 块界自愈:[" + std::to_string(original_from) + "," + std::to_string(original_to) +
+                      ") -> [" + std::to_string(from) + "," + std::to_string(to) + ")(被劈工具组整只吞并)";
+    }
+    return result;
+}
+
+bool IsStandaloneArchiveMessage(const api::Message& message) {
+    if (message.role != api::Role::User) {
+        return false;
+    }
+    bool saw_text = false;
+    for (const auto& block : message.content) {
+        const auto* text = std::get_if<api::TextBlock>(&block);
+        if (text == nullptr) {
+            return false;  // 夹着非文本块(图片/工具结果):不是纯存档,从严不认
+        }
+        if (saw_text || TrimWhitespace(text->text).empty()) {
+            return false;  // 多枚文本块/空壳:从严不认
+        }
+        saw_text = true;
+        const auto split = SplitPriorArchive(text->text);
+        if (!split.has_value() || !split->second.empty()) {
+            return false;  // 不是存档开头,或存档后还跟着用户正文(并入式旧档)
+        }
+    }
+    return saw_text;
+}
+
+std::optional<std::string> TakeStandaloneArchiveHead(std::vector<api::Message>& messages) {
+    if (messages.size() < 2 || !IsStandaloneArchiveMessage(messages.front())) {
+        return std::nullopt;
+    }
+    std::string archive_text;
+    for (const auto& block : messages.front().content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+            archive_text += text->text;
+        }
+    }
+    messages.erase(messages.begin());
+    return archive_text;
+}
+
+TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& history,
+                                         std::size_t partition_count,
+                                         const TurnPartitionBudgets& budgets) {
+    TurnPartitionPlan plan;
+    plan.requested_partition_count = partition_count;
+    plan.compact_input_budget = CompactInputBudget(budgets.compact_model);
+    if (history.empty()) {
+        return plan;
+    }
+
+    // L1 工作视图(§3.3):分区按结构压缩后的稳定视图计量,长 ToolResult 按
+    // artifact 外置后的重量算,不拿 durable 里的全文虚算。CompressWorkingView
+    // 只重写 tool_result 的 content,消息条数与块序不动,视图与原 history
+    // 逐条对得上;临时 memo/stats/store——不落盘、不定形、不碰会话真账。
+    StructuralCompressionStats stats;
+    ResultViewMemo memo;
+    const std::vector<api::Message> working =
+        CompressWorkingView(history, budgets.structural, stats, memo, /*store=*/nullptr);
+
+    // 旧 archive 剥离(§3.2 + §〇.4):只在首条消息的第一枚文本块上找,与
+    // 分层压缩同一只。两形都认——
+    //   并入式(老形状):首条 user 文本 = 存档前缀 + 用户正文,剥出前半,
+    //     turn 照旧从首条起算,存档 token 从首 turn 账里扣;
+    //   独立存档头(§〇.4 新形状):整条消息都是存档,不算 turn、不进任何
+    //     分区(turn_base = 1,下标整体偏移),账全记在 prior_archive_*。
+    std::size_t turn_base = 0;
+    for (const auto& block : history[0].content) {
+        if (!std::holds_alternative<api::TextBlock>(block)) {
+            continue;
+        }
+        const std::string& text = std::get<api::TextBlock>(block).text;
+        if (IsStandaloneArchiveMessage(history[0])) {
+            plan.has_prior_archive = true;
+            plan.prior_archive_text = text;
+            plan.prior_archive_tokens = EstimateUtf8Tokens(plan.prior_archive_text);
+            turn_base = 1;
+        } else if (auto split = SplitPriorArchive(text)) {
+            plan.has_prior_archive = true;
+            plan.prior_archive_text = split->first;
+            plan.prior_archive_tokens = EstimateUtf8Tokens(plan.prior_archive_text);
+        }
+        break;
+    }
+
+    // 逐条 token:工作视图一把(分区用)、全量一把(对照外置收益)。每条至少
+    // 记 1,空壳消息不白占预算(与 BuildCompactedHistory 同一口径)。
+    std::vector<std::size_t> working_message_tokens(history.size());
+    std::vector<std::size_t> raw_message_tokens(history.size());
+    std::vector<std::size_t> externalized_message(history.size(), 0);
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        working_message_tokens[i] = std::max<std::size_t>(1, EstimateMessageTokens(working[i]));
+        raw_message_tokens[i] = std::max<std::size_t>(1, EstimateMessageTokens(history[i]));
+        for (const auto& block : history[i].content) {
+            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
+                continue;
+            }
+            // 已外置 = 首次定形成 artifact 视图(头尾预览 + 可追回引用)。
+            const std::string& use_id = std::get<api::ToolResultBlock>(block).tool_use_id;
+            if (const auto it = memo.decisions.find(use_id);
+                it != memo.decisions.end() && it->second.kind == ResultViewKind::Artifact) {
+                externalized_message[i] += 1;
+            }
+        }
+    }
+
+    // 按 §二 切 turn(独立存档头之后的那段史)。首枚 turn 头之前若有零散
+    // 消息(旧档外壳、异常形状),并入首 turn 记账——plan 的账要盖住整份
+    // history,零散头没有自己的去处。
+    const std::vector<std::pair<std::size_t, std::size_t>> raw_ranges = SplitIntoTurns(
+        std::vector<api::Message>(history.begin() + static_cast<std::ptrdiff_t>(turn_base), history.end()));
+    if (raw_ranges.empty()) {
+        return plan;  // 一条真正用户输入都没有:没有可分区的 turn
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> turn_ranges = raw_ranges;
+    for (auto& range : turn_ranges) {
+        range.first += turn_base;
+        range.second += turn_base;
+    }
+    turn_ranges.front().first = turn_base;
+
+    // §2.1 turn 界归属(steer 归当前进行中的 turn):公共尺 SplitIntoTurns
+    // 判出的界点若把工具原子组劈在两侧(带正文的 steer 消息插在 tool_result
+    // 之间),这里后处理并回——热区/事件账/episode 用的公共语义一行不动,
+    // 只在 compact 规划器内收口。
+    plan.healed_turn_boundaries = HealTurnBoundariesOverToolGroups(history, turn_ranges);
+
+    // 工具原子组(§6.1):按 tool_use_id 收齐本 assistant 消息发出的全部
+    // 调用,不按"下一条 user 消息"猜配对;use 无 result = incomplete,
+    // result 配不上 use = 悬空。todo_write 照样成组,天然随组走不劈开。
+    const CollectedToolGroups collected = CollectToolExchangeGroups(history);
+    plan.tool_groups = collected.groups;
+    plan.dangling_results = collected.dangling_results;
+    for (auto& group : plan.tool_groups) {
+        // 所属 turn:assistant 消息落在哪枚 turn 的区间里。
+        for (std::size_t t = 0; t < turn_ranges.size(); ++t) {
+            if (group.assistant_message >= turn_ranges[t].first &&
+                group.assistant_message < turn_ranges[t].second) {
+                group.turn = t;
+                break;
+            }
         }
     }
     plan.has_incomplete_tool_exchange =
@@ -1071,7 +1286,8 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
         std::any_of(plan.tool_groups.begin(), plan.tool_groups.end(),
                     [](const ToolExchangeGroupInfo& group) { return !group.complete; });
 
-    // turn 画像:token 按区间累加,首 turn 扣掉已剥离的旧 archive 账。
+    // turn 画像:token 按区间累加;并入式旧档(独立存档头整条不在 turn 里,
+    // 不扣)首 turn 扣掉已剥离的旧 archive 账。
     plan.turns.reserve(turn_ranges.size());
     for (std::size_t t = 0; t < turn_ranges.size(); ++t) {
         TurnInfo info;
@@ -1084,7 +1300,7 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
             info.raw_tokens += raw_message_tokens[i];
             info.externalized_results += externalized_message[i];
         }
-        if (t == 0) {
+        if (t == 0 && turn_base == 0) {
             info.working_tokens = info.working_tokens > plan.prior_archive_tokens
                                       ? info.working_tokens - plan.prior_archive_tokens
                                       : 0;
@@ -1101,34 +1317,39 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
         plan.turns.push_back(std::move(info));
     }
 
-    // 分区(§3.3):把有序 turns 切成 min(turn 数, partition_count) 份连续
-    // 分区,目标 token 大致相等。切口只落 turn 边界;每份至少一枚 turn。理
-    // 想切点取 total*k/parts,实际边界取前缀和最靠近理想点的那一枚 turn 边
-    // 界(整数账,不引浮点);并列取更早的边界,保证确定性。末份固定热区,
-    // 巨型末 turn 情形(§9.1)天然退成"热区只剩最后一枚 turn,较老的落进
-    // 前一份被总结"。
+    // 分区(§3.3 + 用户定案 §〇.2/§〇.3):**末轮豁免**——最近一枚 turn
+    // (唯一可能含未闭合工具交互的那轮)整只不动,自成末分区;其余 turn
+    // (冷区 = 末轮之前的全部历史)切成至多 partition_count-1 份连续分区,
+    // 目标 token 大致相等,切点只落 turn 边界。理想切点取冷区总量*k/parts,
+    // 实际边界取前缀和最靠近理想点的那一枚 turn 边界(整数账,不引浮点);
+    // 并列取更早的边界,保证确定性。冷区至少一份(有冷区时)——分区必须
+    // 无缝盖住全部 turn。
     const std::size_t turn_count = plan.turns.size();
     const std::size_t wanted = partition_count == 0 ? 1 : partition_count;
-    const std::size_t parts = std::min(turn_count, wanted);
-    plan.map_calls = parts > 0 ? parts - 1 : 0;
+    const std::size_t cold_turn_count = turn_count > 0 ? turn_count - 1 : 0;
+    const std::size_t cold_parts =
+        cold_turn_count == 0
+            ? std::size_t{0}
+            : std::max<std::size_t>(1, std::min(cold_turn_count, wanted > 0 ? wanted - 1 : 0));
+    plan.map_calls = cold_parts;
 
     std::vector<std::size_t> prefix(turn_count + 1, 0);
     for (std::size_t t = 0; t < turn_count; ++t) {
         prefix[t + 1] = prefix[t] + plan.turns[t].working_tokens;
     }
-    const std::size_t total = prefix[turn_count];
+    const std::size_t cold_total = cold_turn_count > 0 ? prefix[cold_turn_count] : 0;
     std::vector<std::size_t> bounds;
     bounds.push_back(0);
     std::size_t previous = 0;
-    for (std::size_t k = 1; k < parts; ++k) {
-        // 理想切点的第 k 份边界:prefix[b]*parts 最接近 total*k 的 b。
-        // 搜索域 [previous+1, turn_count-(parts-k)]:边界严格递增,且给后面
-        // 每份至少留一枚 turn。
-        const std::size_t ideal = total * k;
+    for (std::size_t k = 1; k < cold_parts; ++k) {
+        // 理想切点的第 k 份边界:prefix[b]*cold_parts 最接近 cold_total*k 的 b。
+        // 搜索域 [previous+1, cold_turn_count-(cold_parts-k)]:边界严格递增,
+        // 且给后面每份至少留一枚 turn。
+        const std::size_t ideal = cold_total * k;
         std::size_t best = previous + 1;
         std::size_t best_diff = std::numeric_limits<std::size_t>::max();
-        for (std::size_t b = previous + 1; b + (parts - k) <= turn_count; ++b) {
-            const std::size_t scaled = prefix[b] * parts;
+        for (std::size_t b = previous + 1; b + (cold_parts - k) <= cold_turn_count; ++b) {
+            const std::size_t scaled = prefix[b] * cold_parts;
             const std::size_t diff = scaled > ideal ? scaled - ideal : ideal - scaled;
             if (diff < best_diff) {
                 best = b;
@@ -1137,6 +1358,10 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
         }
         bounds.push_back(best);
         previous = best;
+    }
+    // 冷区上界(没有冷区时不立空段:bounds 直接 [0, turn_count] 一枚热区)。
+    if (cold_parts > 0) {
+        bounds.push_back(cold_turn_count);
     }
     bounds.push_back(turn_count);
 
@@ -1933,40 +2158,23 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
         }
         return {archive};
     }
-    // 热区 = 末分区的原文消息。分区盖住全部 turn,热区必是到尾的连续段。
+    // 热区 = 末分区(末轮豁免)的原文消息,原样照发。分区盖住全部 turn,
+    // 热区必是到尾的连续段。
     const TurnPartitionInfo& hot = plan.partitions.back();
     const std::size_t hot_from = plan.turns[hot.first_turn].from_message;
 
-    std::string archive_text;
-    for (const auto& block : archive.content) {
-        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
-            archive_text += text->text;
-        }
-    }
-
+    // §〇.4 拼接规:archive 自成头一条消息,不再并入热区首条 user 消息。
+    // durable history 里它顶在豁免轮前头(相邻两条 user 是历史形状,不是
+    // 请求形状);请求拼装时 TakeStandaloneArchiveHead 把它收编进 system
+    // 之后,角色交替不受扰,豁免轮与后续消息原样照发。
     std::vector<api::Message> new_history;
-    new_history.reserve(history.size() - hot_from);
+    new_history.reserve(history.size() - hot_from + 1);
+    new_history.push_back(archive);
     std::vector<std::size_t> kept_indices;
+    kept_indices.reserve(history.size() - hot_from);
     for (std::size_t i = hot_from; i < history.size(); ++i) {
-        api::Message message = history[i];
-        if (kept_indices.empty()) {
-            // 双账并入热区首条 user 消息开头:不单独成一条,相邻两条 user
-            // 违反角色交替(与老 BuildCompactedHistory 同一招)。热区首条
-            // 是 turn 头,必有 TextBlock(防御:没有就补一条)。
-            bool merged = false;
-            for (auto& block : message.content) {
-                if (auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
-                    text->text = archive_text + "\n\n" + text->text;
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) {
-                message.content.insert(message.content.begin(), api::TextBlock{archive_text});
-            }
-        }
         kept_indices.push_back(i);
-        new_history.push_back(std::move(message));
+        new_history.push_back(history[i]);
     }
     if (kept_indices_out != nullptr) {
         *kept_indices_out = std::move(kept_indices);
@@ -2066,6 +2274,14 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
                 ":压缩榨不出收益,拒绝空跑,历史未动。",
             0});
     }
+    if (result.plan.partitions.empty()) {
+        // 全史只剩一枚独立存档头(没有可分区的 turn):没有可压的正文,也
+        // 没有可保的轮——明确拒绝,不碰 partitions.back()(空向量)。
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api,
+            "整份历史只剩上一轮存档,没有可压缩的对话,拒绝空跑,历史未动。",
+            0});
+    }
     if (result.plan.has_incomplete_tool_exchange) {
         // 分区边界只落 turn 之间,工具原子组天然不跨区;不完整组只可能住在
         // 热区尾(mid-turn 安全点),热区保原文,天然不拆。这里不拦——
@@ -2155,18 +2371,46 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
     summaries.reserve(map_chunks.size());
     for (std::size_t c = 0; c < map_chunks.size(); ++c) {
         const MapChunk& chunk = map_chunks[c];
-        const std::size_t from_message = result.plan.turns[chunk.first_turn].from_message;
-        const std::size_t to_message = result.plan.turns[chunk.last_turn - 1].to_message;
+        std::size_t from_message = result.plan.turns[chunk.first_turn].from_message;
+        std::size_t to_message = result.plan.turns[chunk.last_turn - 1].to_message;
         std::vector<api::Message> messages(working.begin() + static_cast<std::ptrdiff_t>(from_message),
                                            working.begin() + static_cast<std::ptrdiff_t>(to_message));
-        const std::string turn_range = turn_range_label(chunk.first_turn, chunk.last_turn);
-        const std::string evidence_range = EventRangeForMessages(ledger, from_message, to_message);
-        // 防御:块内工具原子组必须完整(分区/再切都只落 turn 边界,这里
-        // 不该拦得到;拦到了就是切分 bug,明确失败好过静默劈开)。
+        std::string turn_range = turn_range_label(chunk.first_turn, chunk.last_turn);
+        std::string evidence_range = EventRangeForMessages(ledger, from_message, to_message);
+        // 防线(§2.2):块内工具原子组必须完整。分区/再切只落 turn 边界且
+        // turn 已过 §2.1 自愈,这里不该拦得到;拦到了就是新形状——先自愈
+        // 再拒:块界沿消息粒度挪移,把被劈的组整只吞进本块或让给下一块,
+        // 动作记一行日志。自愈也做不到(悬垂/悬空一类极端形状)才拒收,
+        // 文案指形,并带 kMapDefenseRejectMarker 标记——会话层凭它挂滞回,
+        // 本会话自动压缩不再立刻重试 map 路(手动 /compact 不受限)。
         if (!ToolPairsCompleteIn(messages)) {
-            return std::unexpected(api::Error{
-                api::ErrorKind::Api,
-                "map 块 " + turn_range + " 内工具原子组不完整(切分缺陷),该次 compact 拒绝,历史未动。", 0});
+            const auto healed = HealMapChunkToolGroups(working, from_message, to_message);
+            if (!healed.ok) {
+                return std::unexpected(api::Error{
+                    api::ErrorKind::Api,
+                    "map 块 " + turn_range + " 内工具原子组不完整(" + kMapDefenseRejectMarker + "):" +
+                        healed.note + ",该次 compact 拒绝,历史未动。可手动 /compact 或开新会话。",
+                    0});
+            }
+            platform::LogSink::Instance().Info("compact", "[map-defense] " + healed.note);
+            from_message = healed.from;
+            to_message = healed.to;
+            messages.assign(working.begin() + static_cast<std::ptrdiff_t>(from_message),
+                            working.begin() + static_cast<std::ptrdiff_t>(to_message));
+            // 挪过的块界回头重钉 turn 范围与事件范围,标签对得上实际覆盖。
+            std::size_t first_turn = chunk.first_turn;
+            std::size_t last_turn = chunk.last_turn;
+            for (std::size_t t = 0; t < result.plan.turns.size(); ++t) {
+                const TurnInfo& turn = result.plan.turns[t];
+                if (from_message >= turn.from_message && from_message < turn.to_message) {
+                    first_turn = t;
+                }
+                if (to_message > turn.from_message && to_message <= turn.to_message) {
+                    last_turn = t + 1;
+                }
+            }
+            turn_range = turn_range_label(first_turn, last_turn);
+            evidence_range = EventRangeForMessages(ledger, from_message, to_message);
         }
         const auto text =
             RequestSummaryText(backend, model, BuildTurnGroupMapInstruction(turn_range, evidence_range, options),

@@ -1,0 +1,70 @@
+# session 轨迹 v3：消息主轴树链与四角色壳收敛
+
+- 状态：设计立案，待实现（用户方向已定；与其正在修的 session 轨迹记录 bug 相邻但分层——bug 修现行 v2，本单定 v3 形状）。
+- 日期：2026-09-09
+- 级别：P1（轨迹是回放/回测/验尸的地基，形状定错样样返工）。
+- 参照样板：`D:\kc-mini-for-interview\sessions\8dcf9aa4\8dcf9aa4.jsonl`（231 行，五类事件，已解剖，见 §二）。
+- 范围：`src/trajectory/**`（envelope/事件面）、`src/api/types.hpp`（Role 壳）、`src/agent/loop.cpp`（system 存档点）、replay/resume、相关测试与文档。
+- 不在本单：token 回测重跑（另单，待轨迹 bug 修复）；compact 行为本身（另单在途）；四家 wire 协议适配不动（收敛在接口壳层）。
+
+## 一、用户定案（2026-09-09 原话方向）
+
+理想 session.jsonl：**最上是 system，然后 user、assistant……assistant 记 input/output/think token；特殊事件（如 compact）特殊标记但仍是一行 json，compact 的 prompt 也入档（一般作为 user），prev_turn_id 指向前文；整份 jsonl 构成一棵树**——易 replay，任何信息都读得到。
+
+## 二、样板解剖（kc-mini 8dcf9aa4，v1 envelope）
+
+| 类型 | 件数 | 树链字段 | 要点 |
+| --- | --- | --- | --- |
+| message | 93 | messageId、turnId（system=null 即树根）、queuedInputId→input_queue | role 四值 system/user/assistant/tool；assistant 自带 usage（prompt/completion/reasoning）与 finish_reason |
+| tool_execution | 82 | assistant_message_id、turn_id、step_id、tool_call_id、attempt、idempotency_key | 执行挂消息枝，attempt 在档 |
+| request_metrics | 46 | request 回指、throughSeq、requestPrefixHash | 每请求：估算值+estimationSource+实报值——回测数据天然在档 |
+| input_queue | 5 | input.id、mode（followup/steer） | 队列入出成事件 |
+| compact_* | 5 | requestId 串链、readThroughSeq、retained/removedMessageIds | 压缩全链：prompt 全文（compact_input.instruction）、manifest、保留/移除清单 |
+
+## 三、现状病灶（探子已核，file:line 在案）
+
+1. **事件平铺**：v2 共 88 种 kind，消息动作塞 payload.content，主轴不显——回放要懂全部 88 种才能重建对话。
+2. **Role 二值**：`api::Role` 只有 User/Assistant（api/types.hpp:143）；system 是 Request 顶层字段（:213），tool 是两种 content block（:67-89）；chat wire 的 role 集合另有 system/tool（:548 注释自认）。四家 wire 的 system/tool 各揣各的形状，无公共壳。
+3. **system 不存档**：每回合 runtime 现铸（loop.cpp:966-968），resume-as-new 折叠不含 system——改了 SOUL.md 续旧场，新 prompt 糊上旧历史，行为偏离无据可查。
+4. 死码：MakeSessionSlug（session_utils.cpp:82-122）零 caller；旧档残留（schema_version=1、app-server-thread 命名）无迁移无清理。
+
+## 四、v3 设计合同
+
+### 4.1 envelope：主轴+事件 双轨
+
+- **message 行**（主轴）：`role ∈ {system,user,assistant,tool}` 四值一等公民；assistant 行自带 usage（input/output/think/reasoning 明细）与 stop_reason；system 行**入档**（首行树根，resume 时以档内 system 为准重建，与 runtime 现铸不等时记 system.diverged 事件——SOUL.md 改动的偏离可查）。
+- **event 行**（旁枝）：特殊事件各一行 json，`parent` 字段挂树（turn_id/request_id/message_id/prev_* 按事件类型指认）；compact 全链照样板五事件（prompt 全文、manifest、retained/removed）。
+- **保留 v2 的哈希链与 durability 分档**（prev_hash/event_hash、ProcessCrash 落盘节奏）——kc-mini 没有，这是我们的长处，合流不推倒。
+- 兼容：v2 档读取不迁移（replay 认 schema_version 分代），新会话写 v3；旧档残留与死码（MakeSessionSlug、v1 档）清理入册。
+
+### 4.2 四角色壳：接口层收敛
+
+- `api::Role` 扩 System/Tool 四值**只在接口壳层**（trajectory/replay/组装），四家 wire 的请求构造各自拍平成自家形状（chat 拼 role 字符串、anthropic/responses 拍 content block、gemini 拍 functionResponse）——收敛的是"读账的人"，不是"发 wire 的码"；wire 适配零行为变更。
+- trajectory::ReplayMessage::Role（现三值）与 api::Role 对齐。
+
+### 4.3 request_metrics 行
+
+- 每请求一行：估算值+来源（哪个尺）+实报 usage+prefix 指纹+throughSeq——**token 回测从此零重放**（喂 §关联单）。
+
+### 4.4 树可读性验收
+
+- 一只只读脚本（scripts/ 或 build/）：吃 v3 jsonl，重建对话树（turn→message→execution→event），可视化或纯文本倾倒——"什么信息都读取的到"的机械化验收。
+- replay 走 v3 重建 effective_conversation,与现行 v2 replay 输出逐字节对拍（同输入同史）。
+
+## 五、分期
+
+- [ ] P0：envelope v3 定稿（schema、四 role、树链字段表、哈希链承继）、样板逐字段映射表、死码/旧档清理清单。
+- [ ] P1：写入侧（session_manager/trajectory_session 落 v3;system 入档与 diverged 事件;request_metrics 行）。
+- [ ] P2：读取侧（replay 分代、resume 用档内 system、树重建脚本）。
+- [ ] P3：四角色壳（api::Role 扩值+wire 拍平点核对）、文档（trajectory schema 文档）、死码清理、旧档处置。
+- [ ] 测试：v2/v3 分代读写、树重建、system diverged、compact 链完整、request_metrics 与 usage 对账。
+
+## 六、关联
+
+- token 回测重跑单（本仓 todos/）的样本痛点由 §4.3 直接消解。
+- 用户在修的 session 轨迹记录 bug：先行修 v2,本单不改其结论，只换代形状。
+- 四层生命周期单（已实施,0.26.225）的 turn_id/step_id/action_id 与本单树链对表——v3 的 parent 字段直接用那套 ID。
+
+## 七、边界
+
+不动四家 wire 协议适配的行为；不重写 compact 算法；不做 kc-mini 的整体搬运（它的 input_queue/compact 语义借形，字段按我们四层 ID 与哈希链家底重铸）。

@@ -10,6 +10,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -284,6 +285,16 @@ TEST_CASE("BuildCompactedHistory: mid-turn 巨轮超预算,按消息组从尾收
             new_history[i].role == api::Role::User && new_history[i + 1].role == api::Role::User;
         CHECK_FALSE(both_user);
     }
+}
+
+TEST_CASE("AutoCompactTriggerLine: 窗口×80% − 4k 压缩提示词 − 8k 摘要预留(§〇.1 对表)") {
+    // 用户定案的例:200k 窗 → 160k − 12k = 147712(约 148k 触发)。
+    CHECK(agent::AutoCompactTriggerLine(200000) == 160000 - 4096 - 8192);
+    // 小窗扣不动(80% 线不足 12288,即窗口 < 15360)时夹到 0。
+    CHECK(agent::AutoCompactTriggerLine(15000) == 0);
+    CHECK(agent::AutoCompactTriggerLine(16000) == 12800 - 12288);
+    CHECK(agent::AutoCompactTriggerLine(20000) == 16000 - 12288);
+    CHECK(agent::AutoCompactTriggerLine(0) == 0);
 }
 
 TEST_CASE("ShouldSkipCompactForHysteresis: 新增不足滞回带就跳过,攒足了才放行") {
@@ -931,10 +942,13 @@ TEST_CASE("AgentLoop: 预估虚算单独不触发 midturn 压缩——真实水�
     CHECK_FALSE(seen.front().projected_overflow);
 }
 
-TEST_CASE("AgentLoop: 真实水位过 60% 但 projected 未到 80% 参考线,不触发") {
-    // A 闸自己的钉:日常文本(floor ≈ 日常尺,不虚算)真实水位 64%,但
-    // projected 加上输出预留仍不到 80% 参考线——不压,留给 turn 间的
-    // ShouldAutoCompact 按真实 usage 收口。
+TEST_CASE("AgentLoop: 真实水位过 60% 但 projected 未到参考线,不触发") {
+    // A 闸自己的钉:日常文本(floor ≈ 日常尺,不虚算)真实水位 ~61%,但
+    // projected 加上输出预留仍不到参考线——不压,留给 turn 间的
+    // ShouldAutoCompact 按真实 usage 收口。参考线是 §〇.1 用户定案后的
+    // 窗口×80% − 4k − 8k(AutoCompactTriggerLine),窗口取得够大(128k)
+    // 才留得出"B 过线而 A 未到"的档:小窗上参考线被两笔预留压到 B 线之下,
+    // 双闸并成一闸。
     FakeBackend backend;
     backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
     tools::ToolRegistry registry;
@@ -945,11 +959,11 @@ TEST_CASE("AgentLoop: 真实水位过 60% 但 projected 未到 80% 参考线,不
     api::Message old_user;
     old_user.role = api::Role::User;
     std::string plain_words;
-    plain_words.reserve(84000);
-    for (int i = 0; i < 16800; ++i) plain_words += "word ";  // 84000 字节,两尺都记 21000
+    plain_words.reserve(330000);
+    for (int i = 0; i < 66000; ++i) plain_words += "word ";  // 330000 字节,两尺都记 82500
     old_user.content.push_back(api::TextBlock{std::move(plain_words)});
     loop.ReplaceHistory({std::move(old_user)});
-    loop.SetContextWindowTokens(32768);
+    loop.SetContextWindowTokens(131072);
     std::vector<agent::ContextPressure> seen;
     agent::AgentWiring wiring;
     wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
@@ -959,9 +973,10 @@ TEST_CASE("AgentLoop: 真实水位过 60% 但 projected 未到 80% 参考线,不
 
     REQUIRE_FALSE(seen.empty());
     REQUIRE(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
-    CHECK(seen.front().working_view_tokens >= 32768 * 60 / 100);  // 真实水位 ~64%
+    CHECK(seen.front().working_view_tokens >= 131072 * 60 / 100);  // 真实水位 ~63%
     CHECK(seen.front().working_view_overflow);
-    CHECK(seen.front().projected_tokens < 32768 * 80 / 100);  // 未到参考线
+    // 未到参考线:窗口×80%(104857)− 4k − 8k = 92569;projected ≈ 82500 + 2048。
+    CHECK(seen.front().projected_tokens < agent::AutoCompactTriggerLine(131072));
     CHECK_FALSE(seen.front().projected_overflow);
 }
 
@@ -996,6 +1011,73 @@ TEST_CASE("AgentLoop: 真实水位 ≥80% 该触发仍触发(双闸同开)") {
     CHECK(seen.front().working_view_overflow);
     CHECK(seen.front().projected_tokens >= 32768 * 80 / 100);
     CHECK(seen.front().projected_overflow);
+}
+
+TEST_CASE("AgentLoop: 独立存档头收编进 system,豁免轮原样照发(§〇.4 拼接规)") {
+    FakeBackend backend;
+    backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 2048},
+                                          .system_prompt = "sys"});
+    // 压缩后的历史形状(§〇.2/§〇.4):头一条独立存档,其后末轮豁免原样。
+    api::Message archive;
+    archive.role = api::Role::User;
+    archive.content.push_back(api::TextBlock{
+        "[对话存档,此前内容已压缩] 存档正文,不短。\n```json\n{\"goal\": \"目标\", \"constraints\": [], "
+        "\"open_items\": [], \"next_action\": \"下一步\"}\n```"});
+    loop.ReplaceHistory({archive, UserText("豁免轮的用户输入"), AssistantToolUse("hot_tool", "read_file"),
+                         UserToolResult("hot_tool", "豁免轮的工具结果"), AssistantText("豁免轮收束")});
+
+    REQUIRE(loop.Run("新问题", agent::TurnWiring{}).has_value());
+    REQUIRE(backend.captured_requests.size() == 1);
+    const auto& request = backend.captured_requests[0];
+
+    // system 带摘要,拼在原 system 之后;存档不再留在 messages 里。
+    const std::size_t sys_at = request.system.find("sys");
+    const std::size_t archive_at = request.system.find("对话存档");
+    REQUIRE(sys_at != std::string::npos);
+    REQUIRE(archive_at != std::string::npos);
+    CHECK(archive_at > sys_at);
+    bool archive_in_messages = false;
+    for (const auto& message : request.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block);
+                text != nullptr && text->text.find("对话存档") != std::string::npos) {
+                archive_in_messages = true;
+            }
+        }
+    }
+    CHECK_FALSE(archive_in_messages);
+
+    // messages 从豁免轮的 user 轮头起算,原样照发;工具对原样在。
+    REQUIRE_FALSE(request.messages.empty());
+    CHECK(request.messages.front().role == api::Role::User);
+    CHECK(std::get<api::TextBlock>(request.messages.front().content[0]).text.find("豁免轮的用户输入") !=
+          std::string::npos);
+    bool hot_use = false;
+    bool hot_result = false;
+    for (const auto& message : request.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr && use->id == "hot_tool") {
+                hot_use = true;
+            }
+            if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                tool_result != nullptr && tool_result->tool_use_id == "hot_tool") {
+                hot_result = true;
+            }
+        }
+    }
+    CHECK(hot_use);
+    CHECK(hot_result);
+
+    // 角色交替:存档收编后,请求里没有相邻两条 user。
+    for (std::size_t i = 0; i + 1 < request.messages.size(); ++i) {
+        const bool both_user =
+            request.messages[i].role == api::Role::User && request.messages[i + 1].role == api::Role::User;
+        CHECK_FALSE(both_user);
+    }
 }
 
 TEST_CASE("AgentLoop: 保命索真截了单条巨肥工具结果时,AfterHardTrim 通报") {
@@ -1433,11 +1515,15 @@ TEST_CASE("BuildTurnPartitionPlan: 17 枚等重 turn 默认四分,前三份 map,
     CheckPartitionInvariants(plan);
     CHECK(plan.partitions.size() == 4);
     CHECK(plan.map_calls == 3);
-    // 等重轮按 token 大致四等分:每份 4~5 枚 turn(17 = 4+4+4+5 一类切法)。
-    for (const auto& partition : plan.partitions) {
-        const std::size_t count = partition.last_turn - partition.first_turn;
-        CHECK(count >= 4);
-        CHECK(count <= 5);
+    // §〇.2 末轮豁免:末分区恰是最后一枚 turn(t17),整只不动。
+    CHECK(plan.partitions.back().is_hot);
+    CHECK(plan.partitions.back().first_turn == 16);
+    CHECK(plan.partitions.back().last_turn == 17);
+    // 冷区(t1..t16)按 token 大致三等分:每份 5~6 枚 turn(16 = 5+6+5 一类切法)。
+    for (std::size_t p = 0; p + 1 < plan.partitions.size(); ++p) {
+        const std::size_t count = plan.partitions[p].last_turn - plan.partitions[p].first_turn;
+        CHECK(count >= 5);
+        CHECK(count <= 6);
     }
     CHECK_FALSE(plan.has_prior_archive);
     CHECK(plan.WorthCompacting());
@@ -1564,6 +1650,252 @@ TEST_CASE("BuildTurnPartitionPlan: orphan tool_use 与悬空 result 都点名,�
         }
     }
     CHECK(saw_incomplete);
+}
+
+// ---------------------------------------------------------------------------
+// §2.1 turn 界归属:steer 正文插进工具循环,公共尺判它开新 turn,把工具
+// 原子组劈过轮界(v0.26.224-beta.1 真机事故形状)。修法在 compact 规划器
+// 内后处理收口:劈组界点并回进行中的 turn,公共语义一行不动。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 事故原形状:前情两轮 + 多工具批次被 steer 劈开 + 收尾轮(末轮豁免)。
+// steer 消息的正文照会话层排队投递的原样捏("[用户排队消息] ..." 前缀)。
+std::vector<api::Message> SteerAccidentHistory() {
+    std::vector<api::Message> history = UniformTurns(2);
+    history.push_back(UserText("跑构建,修到绿为止"));
+    api::Message parallel;
+    parallel.role = api::Role::Assistant;
+    parallel.content.push_back(api::ToolUseBlock{"s1", "run_command", nlohmann::json::object()});
+    parallel.content.push_back(api::ToolUseBlock{"s2", "run_command", nlohmann::json::object()});
+    history.push_back(parallel);
+    history.push_back(UserToolResult("s1", "结果一"));
+    history.push_back(UserText("[用户排队消息] 用户在上一只工具执行期间补了话"));
+    history.push_back(UserToolResult("s2", "结果二"));
+    history.push_back(AssistantText("构建绿了"));
+    history.push_back(UserText("收尾:总结一下"));
+    history.push_back(AssistantText("总结"));
+    return history;
+}
+
+// 某条正文所在的消息下标;找不到给 SIZE_MAX。
+std::size_t IndexOfText(const std::vector<api::Message>& history, const std::string& needle) {
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        for (const auto& block : history[i].content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block);
+                text != nullptr && text->text.find(needle) != std::string::npos) {
+                return i;
+            }
+        }
+    }
+    return std::numeric_limits<std::size_t>::max();
+}
+
+}  // namespace
+
+TEST_CASE("BuildTurnPartitionPlan: steer 劈组事故形状——界点并回进行中的 turn,组不劈") {
+    const std::vector<api::Message> history = SteerAccidentHistory();
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+
+    // 公共尺会切出 5 枚 turn(steer 自己开一枚);§2.1 后处理并回劈组界点。
+    CHECK(plan.healed_turn_boundaries == 1);
+    REQUIRE(plan.turns.size() == 4);
+    CheckPartitionInvariants(plan);
+
+    // 工具组整只住在同一枚 turn(steer 归当前进行中的 turn),区间盖到
+    // 最后一条配对 result。
+    const agent::ToolExchangeGroupInfo* group = nullptr;
+    for (const auto& candidate : plan.tool_groups) {
+        if (candidate.tool_use_ids.size() == 2) {
+            group = &candidate;
+        }
+    }
+    REQUIRE(group != nullptr);
+    CHECK(group->complete);
+    const agent::TurnInfo& turn = plan.turns[group->turn];
+    CHECK(group->from_message >= turn.from_message);
+    CHECK(group->to_message <= turn.to_message);
+    const std::size_t steer_index = IndexOfText(history, "用户排队消息");
+    REQUIRE(steer_index != std::numeric_limits<std::size_t>::max());
+    CHECK(steer_index >= turn.from_message);
+    CHECK(steer_index < turn.to_message);
+
+    // 末轮豁免(§〇.2):末分区恰是最后一枚 turn。
+    CHECK(plan.partitions.back().is_hot);
+    CHECK(plan.partitions.back().first_turn == plan.turns.size() - 1);
+    CHECK(plan.partitions.back().last_turn == plan.turns.size());
+}
+
+TEST_CASE("§2.1 变体:steer 各位置插入,组永不被劈") {
+    // 变体一:steer 插在 tool_use 与首个 result 之间。
+    {
+        std::vector<api::Message> history = UniformTurns(1);
+        history.push_back(UserText("开工"));
+        history.push_back(AssistantToolUse("v1", "read_file"));
+        history.push_back(UserText("[用户排队消息] 插在 use 与 result 之间"));
+        history.push_back(UserToolResult("v1", "结果"));
+        history.push_back(AssistantText("收束"));
+        history.push_back(UserText("下一轮"));
+        history.push_back(AssistantText("下一轮答"));
+        const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+        CHECK(plan.healed_turn_boundaries == 1);
+        REQUIRE(plan.turns.size() == 3);  // 前情 1 轮 + 并齐的事故轮 + 下一轮
+        REQUIRE(plan.tool_groups.size() == 1);
+        const auto& group = plan.tool_groups.front();
+        CHECK(group.complete);
+        const auto& turn = plan.turns[group.turn];
+        CHECK(group.from_message >= turn.from_message);
+        CHECK(group.to_message <= turn.to_message);
+        CHECK(IndexOfText(history, "插在 use 与 result 之间") >= turn.from_message);
+        CHECK(IndexOfText(history, "插在 use 与 result 之间") < turn.to_message);
+    }
+    // 变体二:一个组里连插两条 steer(result/steer/result/steer/result)。
+    {
+        std::vector<api::Message> history = UniformTurns(1);
+        api::Message parallel;
+        parallel.role = api::Role::Assistant;
+        parallel.content.push_back(api::ToolUseBlock{"w1", "run_command", nlohmann::json::object()});
+        parallel.content.push_back(api::ToolUseBlock{"w2", "run_command", nlohmann::json::object()});
+        parallel.content.push_back(api::ToolUseBlock{"w3", "run_command", nlohmann::json::object()});
+        history.push_back(parallel);
+        history.push_back(UserToolResult("w1", "结果一"));
+        history.push_back(UserText("[用户排队消息] 第一句插话"));
+        history.push_back(UserToolResult("w2", "结果二"));
+        history.push_back(UserText("[用户排队消息] 第二句插话"));
+        history.push_back(UserToolResult("w3", "结果三"));
+        history.push_back(AssistantText("收束"));
+        history.push_back(UserText("下一轮"));
+        history.push_back(AssistantText("下一轮答"));
+        const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+        CHECK(plan.healed_turn_boundaries == 2);
+        REQUIRE(plan.turns.size() == 2);
+        for (const auto& group : plan.tool_groups) {
+            CHECK(group.complete);
+        }
+    }
+    // 变体三:steer 落在两组之间(组一已收齐,组二尚未发起)——界点不劈
+    // 任何组,steer 照公共尺开新 turn,不并轮。
+    {
+        std::vector<api::Message> history = UniformTurns(1);
+        history.push_back(UserText("开工"));
+        history.push_back(AssistantToolUse("x1", "read_file"));
+        history.push_back(UserToolResult("x1", "结果"));
+        history.push_back(UserText("[用户排队消息] 两组之间的插话"));
+        history.push_back(AssistantToolUse("x2", "search"));
+        history.push_back(UserToolResult("x2", "结果"));
+        history.push_back(AssistantText("收束"));
+        history.push_back(UserText("下一轮"));
+        history.push_back(AssistantText("下一轮答"));
+        const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+        CHECK(plan.healed_turn_boundaries == 0);
+        // 公共尺语义不动:steer 仍是轮头。
+        const std::size_t steer_index = IndexOfText(history, "两组之间的插话");
+        bool is_turn_head = false;
+        for (const auto& turn : plan.turns) {
+            if (turn.from_message == steer_index) {
+                is_turn_head = true;
+            }
+        }
+        CHECK(is_turn_head);
+    }
+}
+
+TEST_CASE("HealMapChunkToolGroups: 块界沿消息粒度挪移吞组;悬垂/悬空指形拒收") {
+    // 完整块:原界不动,note 为空。
+    {
+        std::vector<api::Message> history{UserText("问"), AssistantToolUse("h1", "read_file"),
+                                          UserToolResult("h1", "结果")};
+        const auto healed = agent::HealMapChunkToolGroups(history, 1, 3);
+        CHECK(healed.ok);
+        CHECK(healed.from == 1);
+        CHECK(healed.to == 3);
+        CHECK(healed.note.empty());
+    }
+    // result 落在块外(块只含 use):往后吞整组。
+    {
+        std::vector<api::Message> history{UserText("问"), AssistantToolUse("h2", "read_file"),
+                                          UserToolResult("h2", "结果"), AssistantText("收")};
+        const auto healed = agent::HealMapChunkToolGroups(history, 1, 2);
+        CHECK(healed.ok);
+        CHECK(healed.from == 1);
+        CHECK(healed.to == 3);  // 吞进 result
+        CHECK(healed.note.find("自愈") != std::string::npos);
+    }
+    // use 落在块前(块只含 result):往前接整组。
+    {
+        std::vector<api::Message> history{UserText("问"), AssistantToolUse("h3", "read_file"),
+                                          UserToolResult("h3", "结果")};
+        const auto healed = agent::HealMapChunkToolGroups(history, 2, 3);
+        CHECK(healed.ok);
+        CHECK(healed.from == 1);  // 接回 use 所在的 assistant
+        CHECK(healed.to == 3);
+    }
+    // 一块两头各修一头:result 在块内 use 在块前(往前接),另一组同块内
+    // 本就齐整——块界两头一起挪到位。
+    {
+        std::vector<api::Message> history{AssistantToolUse("j1", "read_file"), UserToolResult("j1", "结果一"),
+                                          AssistantToolUse("j2", "search"), UserToolResult("j2", "结果二")};
+        const auto healed = agent::HealMapChunkToolGroups(history, 1, 4);
+        CHECK(healed.ok);
+        CHECK(healed.from == 0);  // j1 的 use 在块前:往前接回
+        CHECK(healed.to == 4);
+    }
+    // 悬垂 use(全史无 result):挪不动,指形拒收。
+    {
+        std::vector<api::Message> history{UserText("问"), AssistantToolUse("h5", "read_file")};
+        const auto healed = agent::HealMapChunkToolGroups(history, 1, 2);
+        CHECK_FALSE(healed.ok);
+        CHECK(healed.note.find("悬垂") != std::string::npos);
+        CHECK(healed.note.find("h5") != std::string::npos);
+    }
+    // 悬空 result(全史无 use):指形拒收。
+    {
+        std::vector<api::Message> history{UserText("问"), UserToolResult("h6", "没人认领")};
+        const auto healed = agent::HealMapChunkToolGroups(history, 1, 2);
+        CHECK_FALSE(healed.ok);
+        CHECK(healed.note.find("悬空") != std::string::npos);
+    }
+}
+
+TEST_CASE("独立存档头判定与收编:从严认形,并入式旧档不偷用户正文") {
+    const std::string standalone_text =
+        "[对话存档,此前内容已压缩] 存档正文\n```json\n{\"goal\": \"g\", \"open_items\": [], "
+        "\"next_action\": \"n\"}\n```";
+    // 独立存档:整条消息都是存档。
+    CHECK(agent::IsStandaloneArchiveMessage(UserText(standalone_text)));
+    // 并入式(存档后还跟着用户正文):不是独立存档,不许收编。
+    CHECK_FALSE(agent::IsStandaloneArchiveMessage(UserText(standalone_text + "\n\n用户自己的话")));
+    // 普通用户消息 / assistant 消息:不是。
+    CHECK_FALSE(agent::IsStandaloneArchiveMessage(UserText("普通提问")));
+    api::Message assistant = AssistantText(standalone_text);
+    CHECK_FALSE(agent::IsStandaloneArchiveMessage(assistant));
+    // 夹图片块的存档壳:从严不认(收编会连图一起偷走)。
+    api::Message with_image = UserText(standalone_text);
+    api::ImageBlock image;
+    with_image.content.push_back(image);
+    CHECK_FALSE(agent::IsStandaloneArchiveMessage(with_image));
+
+    // 收编口:头一条独立存档且其后还有消息 → 摘头返回正文;
+    // 只有存档一条(收编会让 messages 空)→ 不动;并入式 → 不动。
+    {
+        std::vector<api::Message> messages{UserText(standalone_text), UserText("豁免轮"), AssistantText("答")};
+        const auto head = agent::TakeStandaloneArchiveHead(messages);
+        REQUIRE(head.has_value());
+        CHECK((*head).find("对话存档") != std::string::npos);
+        REQUIRE(messages.size() == 2);
+        CHECK(std::get<api::TextBlock>(messages[0].content[0]).text == "豁免轮");
+    }
+    {
+        std::vector<api::Message> messages{UserText(standalone_text)};
+        CHECK_FALSE(agent::TakeStandaloneArchiveHead(messages).has_value());
+        CHECK(messages.size() == 1);
+    }
+    {
+        std::vector<api::Message> messages{UserText(standalone_text + "\n\n用户自己的话"), AssistantText("答")};
+        CHECK_FALSE(agent::TakeStandaloneArchiveHead(messages).has_value());
+        CHECK(messages.size() == 2);  // 一字未动
+    }
 }
 
 TEST_CASE("BuildTurnPartitionPlan: 旧存档剥出不算 turn,不占分区账") {
@@ -1806,6 +2138,81 @@ TEST_CASE("ParseTurnGroupSummary: 只收严格 JSON,Markdown/缺键全拒") {
                     .has_value());
 }
 
+TEST_CASE("防线拒收文案带稳定标记,极端形状一次都不发请求") {
+    // 冷区带悬垂 use 的历史(悬垂轮就是首枚冷轮,防线在第一块就拦):
+    // map 防线自愈不动 → 拒收,文案指形 + 标记,一次请求都不发。
+    std::vector<api::Message> history{UserText("第一轮:调用没回结果"),
+                                      AssistantToolUse("lost_1", "read_file"),  // 悬垂 use,住在冷区
+                                      UserText("第二轮:正常收尾"), AssistantText("收尾")};
+
+    DualLedgerBackend backend;  // 不备脚本:发了请求就是错
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find(agent::kMapDefenseRejectMarker) != std::string::npos);
+    CHECK(result.error().message.find("悬垂") != std::string::npos);
+    CHECK(backend.captured_requests.empty());
+}
+
+TEST_CASE("CompactTurnPartitioned: steer 劈组事故形状全链成功,块内组完整") {
+    const std::vector<api::Message> history = SteerAccidentHistory();
+    // 4 turn 档:冷区 t1-t3 各 map 一次,reduce 来源只引到 t4。
+    DualLedgerScript script;
+    script.goal_turn = "t1";
+    script.constraint_turn = "t2";
+    script.acceptance_turn = "t3";
+    script.addition_turn = "t3";
+    script.open_question_turn = "t4";
+    script.superseded_source_turn = "t1";
+    script.superseded_at_turn = "t3";
+    script.fact_evidence = "t3:e4";
+    script.tool_evidence = "t3:e5";
+    script.change_evidence = "t4";
+    script.failed_evidence = "t1:e0";
+    DualLedgerBackend backend = ReadyBackend(3, script);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 4);  // 3 map + 1 reduce
+
+    // 每个 map 块内 tool_use/tool_result 全配对(事故形状不再触发防线)。
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        std::map<std::string, bool> pairs;
+        bool dangling = false;
+        for (const auto& message : backend.captured_requests[i].messages) {
+            for (const auto& block : message.content) {
+                if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                    pairs[use->id] = false;
+                } else if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                           tool_result != nullptr) {
+                    if (pairs.count(tool_result->tool_use_id) == 0) {
+                        dangling = true;
+                    } else {
+                        pairs[tool_result->tool_use_id] = true;
+                    }
+                }
+            }
+        }
+        CHECK_FALSE(dangling);
+        for (const auto& [id, matched] : pairs) {
+            (void)id;
+            CHECK(matched);
+        }
+    }
+    // steer 正文归当前 turn 的摘要:它所在的轮(t3)进了某份 map 材料。
+    bool steer_mapped = false;
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        if (IndexOfText(backend.captured_requests[i].messages, "用户排队消息") !=
+            std::numeric_limits<std::size_t>::max()) {
+            steer_mapped = true;
+        }
+    }
+    CHECK(steer_mapped);
+    // 摘要 manifest 正常收账。
+    CHECK(result->manifest.goal == "实现上下文管理与压缩");
+    CHECK(result->metrics.hot_turns == 1);
+}
+
 TEST_CASE("CompactTurnPartitioned: 17 枚等重 turn 固定 3 次 map + 1 次 reduce") {
     const std::vector<api::Message> history = UniformTurns(17);
     const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
@@ -1932,7 +2339,7 @@ TEST_CASE("CompactTurnPartitioned: 工具重载夹具按 token 挪边界,原子�
 
 TEST_CASE("CompactTurnPartitioned: 单分区超预算只递归拆该分区,map 次数可多于 3") {
     // UniformTurns 每轮约 200 token;窗口给 900(输出预留 100、协议 0):
-    // 单枚 turn 装得下,两轮的分区超预算必须沿 turn 再切。
+    // 单枚 turn 装得下,多轮的分区超预算必须沿 turn 再切。
     const std::vector<api::Message> history = UniformTurns(8);
     agent::CompactOptions options;
     options.budget.window_tokens = 900;
@@ -1951,17 +2358,17 @@ TEST_CASE("CompactTurnPartitioned: 单分区超预算只递归拆该分区,map �
     script.open_question_turn = "t8";
     script.change_evidence = "t8";
     // 窗口 800 时 reduce 指令本身超预算:§9.4 会先两两归并 summaries
-    // (6→3→2→1 的归并请求与 map 同吃 map 脚本队列)再终稿 reduce——脚本
+    //(7→4→2→1 的归并请求与 map 同吃 map 脚本队列)再终稿 reduce——脚本
     // 多备 7 份。
     DualLedgerBackend backend = ReadyBackend(13, script);
     const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, options,
                                                       agent::StructuralCompressionOptions{});
     REQUIRE(result.has_value());
-    // 冷区只有 3 份(末份是热区,不 map):每份 2 turn 再切成单 turn 一块
-    // → map 块数 6 > 分区数-1 = 3。
-    CHECK(result->metrics.chunks == 6);
-    CHECK(result->metrics.reduce_passes == 3);  // 6→3→2→1
-    // map 指令(system 带"局部小结"且钉"来源 turn")的请求恰好 8 次,再切
+    // 冷区 3 份(t8 末轮豁免不 map):每份 2~3 turn 超预算再切成单 turn 一块
+    // → map 块数 7 > 分区数-1 = 3。
+    CHECK(result->metrics.chunks == 7);
+    CHECK(result->metrics.reduce_passes == 3);  // 7→4→2→1
+    // map 指令(system 带"局部小结"且钉"来源 turn")的请求恰好 7 次再切,
     // 出来的块都是单 turn 范围(tN,无 '-')。
     int single_turn_maps = 0;
     for (const auto& request : backend.captured_requests) {
@@ -1978,7 +2385,7 @@ TEST_CASE("CompactTurnPartitioned: 单分区超预算只递归拆该分区,map �
             }
         }
     }
-    CHECK(single_turn_maps == 6);
+    CHECK(single_turn_maps == 7);
 }
 
 TEST_CASE("CompactTurnPartitioned: 单 turn 超预算明确拒绝,一次请求都不发") {
@@ -2094,9 +2501,9 @@ TEST_CASE("CompactTurnPartitioned: 热区最后一轮纠正旧约束,新约 acti
     CHECK(reduce_body.find("改成:注释改用英文") != std::string::npos);
 }
 
-TEST_CASE("CompactTurnPartitioned: 新 history = [双账并入热区首条][热区原文],工具对不丢") {
+TEST_CASE("CompactTurnPartitioned: 新 history = [独立双账存档][末轮豁免原文],工具对不丢") {
     std::vector<api::Message> history = UniformTurns(10);
-    // 末轮带工具来回(热区里的 tool pair 必须原样在)。
+    // 末轮带工具来回(豁免轮里的 tool pair 必须原样在)。
     history.push_back(AssistantToolUse("hot_tool", "read_file"));
     history.push_back(UserToolResult("hot_tool", "热区读到的内容"));
 
@@ -2107,15 +2514,27 @@ TEST_CASE("CompactTurnPartitioned: 新 history = [双账并入热区首条][热�
     REQUIRE(result.has_value());
 
     const auto& new_history = result->new_history;
-    REQUIRE_FALSE(new_history.empty());
-    // 首条 = 双账存档并入热区第一条 user 消息:json 围栏与热区首问都在。
+    const std::size_t hot_from = plan.turns[plan.partitions.back().first_turn].from_message;
+    // §〇.4:首条 = 独立双账存档(自成一条,不再并入热区首条 user 消息)。
+    // durable history 里它与豁免轮轮头相邻两条 user 是历史形状,不是请求
+    // 形状——请求拼装时 TakeStandaloneArchiveHead 收编进 system(见 AgentLoop 册)。
+    REQUIRE(new_history.size() == history.size() - hot_from + 1);  // 豁免轮原文 + 存档 1 条
+    REQUIRE(new_history[0].role == api::Role::User);
+    REQUIRE(new_history[0].content.size() == 1);
     REQUIRE(std::holds_alternative<api::TextBlock>(new_history[0].content[0]));
     const std::string& first_text = std::get<api::TextBlock>(new_history[0].content[0]).text;
     CHECK(first_text.find("对话存档") != std::string::npos);
     CHECK(first_text.find("\"user_contract\"") != std::string::npos);
     CHECK(first_text.find("\"work_state\"") != std::string::npos);
     CHECK(first_text.find("```json") != std::string::npos);
-    // 热区原文在后面:末轮工具对原样保留。
+    CHECK(agent::IsStandaloneArchiveMessage(new_history[0]));
+    // 豁免轮原样跟在存档后:轮头 user 原文未被并入。
+    REQUIRE(new_history.size() > 1);
+    CHECK(new_history[1].role == api::Role::User);
+    const std::string& hot_head = std::get<api::TextBlock>(new_history[1].content[0]).text;
+    CHECK(hot_head.find("第 9 问") != std::string::npos);
+    CHECK(hot_head.find("对话存档") == std::string::npos);
+    // 豁免轮工具对原样保留。
     bool hot_tool_use = false;
     bool hot_tool_result = false;
     for (const auto& message : new_history) {
@@ -2132,13 +2551,19 @@ TEST_CASE("CompactTurnPartitioned: 新 history = [双账并入热区首条][热�
     }
     CHECK(hot_tool_use);
     CHECK(hot_tool_result);
-    // 角色交替:没有相邻两条 user。
-    for (std::size_t i = 0; i + 1 < new_history.size(); ++i) {
-        const bool both_user = new_history[i].role == api::Role::User && new_history[i + 1].role == api::Role::User;
-        CHECK_FALSE(both_user);
+    // 收编后的请求形状:存档摘走,豁免轮起头,没有相邻两条 user。
+    {
+        std::vector<api::Message> request_messages = new_history;
+        const auto archive_head = agent::TakeStandaloneArchiveHead(request_messages);
+        REQUIRE(archive_head.has_value());
+        CHECK(archive_head->find("对话存档") != std::string::npos);
+        for (std::size_t i = 0; i + 1 < request_messages.size(); ++i) {
+            const bool both_user =
+                request_messages[i].role == api::Role::User && request_messages[i + 1].role == api::Role::User;
+            CHECK_FALSE(both_user);
+        }
     }
-    // kept_indices 与新史对账:热区消息下标升序,条数对得上。
-    const std::size_t hot_from = plan.turns[plan.partitions.back().first_turn].from_message;
+    // kept_indices 与新史对账:豁免轮消息下标升序,条数对得上(不含存档那条)。
     REQUIRE(result->kept_indices.size() == history.size() - hot_from);
     CHECK(result->kept_indices.front() == hot_from);
     CHECK(result->kept_indices.back() == history.size() - 1);
@@ -2151,9 +2576,13 @@ TEST_CASE("CompactTurnPartitioned: 双账 JSON 可从新史首条认回(第二�
                                                       agent::StructuralCompressionOptions{});
     REQUIRE(result.has_value());
 
-    // 新史首条能被 BuildTurnPartitionPlan 剥出旧档(prior archive 不算 turn)。
+    // 新史首条能被 BuildTurnPartitionPlan 剥出旧档(prior archive 不算 turn):
+    // §〇.4 的独立存档头整条不进任何 turn——新史只剩旧豁免轮 1 枚 turn,
+    // 存档没有多造出一枚。
     const auto plan2 = agent::BuildTurnPartitionPlan(result->new_history, 4, agent::TurnPartitionBudgets{});
     CHECK(plan2.has_prior_archive);
+    REQUIRE(plan2.turns.size() == 1);
+    CHECK(plan2.turns[0].from_message == 1);  // 存档占 0 号,turn 从 1 号起
 
     // ParsePriorLedgers:新双账认成双账,字段往返无损。
     const auto ledgers = agent::ParsePriorLedgers(
@@ -2184,14 +2613,26 @@ TEST_CASE("CompactTurnPartitioned: 第二次压缩从旧双账接力,map 不吃�
     const auto first = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
                                                      agent::StructuralCompressionOptions{});
     REQUIRE(first.has_value());
-    // 接着攒 8 个新 turn(旧热区+新 turn 一起重新四分)。
+    // 接着攒 8 个新 turn(旧豁免轮+新 turn 一起重新分区;末轮豁免后第二次
+    // 的 turn 数 = 旧豁免轮 1 + 新 8 = 9,reduce 脚本的来源只准引到 t9)。
     std::vector<api::Message> grown = first->new_history;
     for (std::size_t i = 0; i < 8; ++i) {
         grown.push_back(UserText("新问 " + std::to_string(i) + " " + std::string(400, 'n')));
         grown.push_back(AssistantText("新答 " + std::to_string(i) + " " + std::string(400, 'm')));
     }
 
-    DualLedgerBackend backend2 = ReadyBackend(3);
+    DualLedgerScript second_script;
+    second_script.constraint_turn = "t2";
+    second_script.acceptance_turn = "t6";
+    second_script.addition_turn = "t7";
+    second_script.open_question_turn = "t8";
+    second_script.superseded_source_turn = "t1";
+    second_script.superseded_at_turn = "t7";
+    second_script.fact_evidence = "t3:e2";
+    second_script.tool_evidence = "t5:e4";
+    second_script.change_evidence = "t8";
+    second_script.failed_evidence = "t2:e1";
+    DualLedgerBackend backend2 = ReadyBackend(3, second_script);
     const auto second = agent::CompactTurnPartitioned(backend2, "test-model", grown, agent::CompactOptions{},
                                                       agent::StructuralCompressionOptions{});
     REQUIRE(second.has_value());
@@ -2211,10 +2652,11 @@ TEST_CASE("CompactTurnPartitioned: 第二次压缩从旧双账接力,map 不吃�
         std::get<api::TextBlock>(backend2.captured_requests.back().messages[0].content[0]).text;
     CHECK(reduce_body.find("上一轮压缩的总账") != std::string::npos);
     CHECK(reduce_body.find("user_contract") != std::string::npos);
-    // 第二次的 plan 认得旧档:不算 turn。
+    // 第二次的 plan 认得旧档:不算 turn(独立存档头整条不进)。
     CHECK(second->plan.has_prior_archive);
-    // 旧档没冒出新 turn:turn 数 = 旧热区 turn + 新 8 turn。
+    // 旧档没冒出新 turn:turn 数 = 旧豁免轮(末轮豁免恒 1)+ 新 8 turn。
     const std::size_t old_hot_turns = first->metrics.hot_turns;
+    CHECK(old_hot_turns == 1);
     CHECK(second->metrics.total_turns == old_hot_turns + 8);
 }
 
@@ -2304,16 +2746,20 @@ TEST_CASE("双账校验: 活动约束无来源,拒收") {
     RequireRejectedWith(script, "schema");
 }
 
-TEST_CASE("BuildCompactedHistory(plan): 热区整段保留,存档并入首条") {
+TEST_CASE("BuildCompactedHistory(plan): 末轮豁免整段保留,存档自成首条") {
     const std::vector<api::Message> history = UniformTurns(9);
     const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
-    api::Message archive = UserText("[对话存档,此前内容已压缩] 双账正文");
+    api::Message archive = UserText(
+        "[对话存档,此前内容已压缩] 双账正文\n```json\n{\"goal\": \"g\", \"open_items\": [], "
+        "\"next_action\": \"n\"}\n```");
     std::vector<std::size_t> kept;
     const auto new_history = agent::BuildCompactedHistory(history, archive, plan, &kept);
     const std::size_t hot_from = plan.turns[plan.partitions.back().first_turn].from_message;
-    REQUIRE(new_history.size() == history.size() - hot_from);
-    REQUIRE(kept.size() == new_history.size());
+    REQUIRE(new_history.size() == history.size() - hot_from + 1);  // 豁免轮原文 + 存档
+    REQUIRE(kept.size() == new_history.size() - 1);                // kept 不含存档那条
     CHECK(kept.front() == hot_from);
+    CHECK(kept.back() == history.size() - 1);
     const std::string& first = std::get<api::TextBlock>(new_history[0].content[0]).text;
     CHECK(first.find("双账正文") != std::string::npos);
+    CHECK(agent::IsStandaloneArchiveMessage(new_history[0]));
 }

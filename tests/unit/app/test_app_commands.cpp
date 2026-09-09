@@ -959,6 +959,101 @@ TEST_CASE("TryRunCompact: 压缩结果不降反升时拒收换账,历史一字�
     std::filesystem::remove_all(dir, ec);
 }
 
+TEST_CASE("TryRunCompact: map 防线拒收挂滞回旗,自动路不再重试;手动 /compact 解旗") {
+    const auto dir = TempDir("compact_map_hold");
+    lubancode::tools::ToolRegistry registry;
+    ScriptBackend compact_backend;
+    compact_backend.map_script = TurnGroupMapJsonScript();
+    compact_backend.reduce_script = DualLedgerJsonScript();
+    lubancode::agent::Agent loop(compact_backend, registry,
+                                 lubancode::agent::AgentProfile{.request{.model = "test-model"},
+                                                                .system_prompt = "sys"});
+    // §2.2 真机事故的死循环面:冷区首轮带悬垂 tool_use(组不完整且挪不动)
+    // → map 防线拒收。防线在第一块就拦,一次摘要请求都不该发。
+    {
+        std::vector<lubancode::api::Message> history;
+        lubancode::api::Message first;
+        first.role = lubancode::api::Role::User;
+        first.content.push_back(lubancode::api::TextBlock{"第一轮:调用没回结果"});
+        history.push_back(first);
+        lubancode::api::Message use;
+        use.role = lubancode::api::Role::Assistant;
+        use.content.push_back(lubancode::api::ToolUseBlock{"lost_1", "read_file", nlohmann::json::object()});
+        history.push_back(use);
+        lubancode::api::Message second;
+        second.role = lubancode::api::Role::User;
+        second.content.push_back(lubancode::api::TextBlock{"第二轮:正常收尾"});
+        history.push_back(second);
+        lubancode::api::Message done;
+        done.role = lubancode::api::Role::Assistant;
+        done.content.push_back(lubancode::api::TextBlock{"收尾"});
+        history.push_back(done);
+        loop.ReplaceHistory(std::move(history));
+    }
+
+    CompactSessionInputs in;
+    in.agent = &loop;
+    const lubancode::cli::Theme theme;
+    in.theme = &theme;
+    int compact_epoch = 0;
+    in.session_compact_epoch = &compact_epoch;
+    std::string last_compact_line;
+    in.last_compact_line = &last_compact_line;
+    CompactHysteresis hysteresis;
+    in.hysteresis = &hysteresis;
+    in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
+    lubancode::agent::ModelRoute route;
+    route.model = "test-model";
+    in.route_compact = [&compact_backend, &route]() {
+        lubancode::app::ModelRouterService::Routed routed;
+        routed.route = route;
+        routed.backend = &compact_backend;
+        return routed;
+    };
+    in.route_repair = in.route_compact;
+    in.normal_backend = &compact_backend;
+    const std::string current_model = "test-model";
+    in.current_model = &current_model;
+    in.record_usage = [](const lubancode::agent::ModelRole, const lubancode::agent::ModelRoute&,
+                         const lubancode::agent::BackgroundCallAccounting&) {};
+    in.record_fallback = [](lubancode::agent::TaskKind, lubancode::agent::ModelRole,
+                            lubancode::agent::ModelRole, const std::string&) {};
+
+    // 第一次:防线拒收(带稳定标记),滞回旗挂上,零请求。
+    CHECK_FALSE(TryRunCompact(/*midturn=*/true, in));
+    CHECK(hysteresis.map_path_held);
+    CHECK(hysteresis.armed);
+    CHECK(compact_backend.captured.empty());
+
+    // 攒足新内容(越过普通滞回带)再触发:普通滞回会放行,防线旗仍拦住
+    // 自动路——不多发一个请求(拒收 → 原史重发 → 预检再爆 → 再拒的死环,
+    // 就断在这)。
+    loop.ReplaceHistory([&loop]() {
+        std::vector<lubancode::api::Message> extended = loop.History();
+        lubancode::api::Message fresh;
+        fresh.role = lubancode::api::Role::User;
+        fresh.content.push_back(lubancode::api::TextBlock{std::string(24000, 'c')});
+        extended.push_back(fresh);
+        return extended;
+    }());
+    CHECK_FALSE(TryRunCompact(/*midturn=*/true, in));
+    CHECK(compact_backend.captured.empty());
+    CHECK(hysteresis.map_path_held);
+
+    // 手动 /compact 不受限:换一副干净历史,成功换账即解旗。
+    loop.ReplaceHistory(SyntheticMultiToolHistory());
+    lubancode::app::RunCompactCommand("", in);
+    CHECK_FALSE(hysteresis.map_path_held);
+    CHECK_FALSE(compact_backend.captured.empty());
+    CHECK(loop.History().size() < SyntheticMultiToolHistory().size());
+
+    // 旗解后自动路恢复:零进展仍会被普通滞回拦(不发请求),这条只验旗
+    // 不再是拦人的那道——这里不再断言放行(同视图无进展,该拦)。
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、session flush 都活着") {
     const auto dir = TempDir("compact_aftermath");
     lubancode::tools::ToolRegistry registry;
