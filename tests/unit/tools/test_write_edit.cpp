@@ -1,4 +1,6 @@
 // write_file:写新文件、自动建父目录、覆盖已有文件时的提示。
+//           崩溃级原子(临时文件写全 + 原子换名):写全无残尸、失败
+//           不留零 byte 残尸、陈年临时件不碍写不被收走。
 // edit_file:唯一命中替换、多处命中报错(报次数)、找不到报错、
 //           replace_all 全换、中文内容。
 
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "tools/edit_file.hpp"
 #include "tools/path_utils.hpp"
@@ -54,6 +57,21 @@ std::string ReadFileRaw(const std::string& utf8_path) {
     std::ostringstream oss;
     oss << file.rdbuf();
     return oss.str();
+}
+
+// 目录里所有带 .tmp 尾巴的文件名——write_file 原子写临时件的形状
+//(<目标>.<pid>-<序号>.tmp),成功/失败路径都该清干净。
+std::vector<std::string> TempLeftovers(const TempDir& dir) {
+    std::vector<std::string> found;
+    std::error_code ec;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(Utf8ToPath(dir.Utf8Path()), ec)) {
+        const std::string name = PathToUtf8(entry.path().filename());
+        if (name.find(".tmp") != std::string::npos) {
+            found.push_back(name);
+        }
+    }
+    return found;
 }
 
 }  // namespace
@@ -285,8 +303,8 @@ TEST_CASE("write_file 不观测取消旗:cancel 升着也整篇写完(空文件�
     // 轮/工具边界被观察,write_file 的工具体不读 ToolExecutionContext::
     // cancel——ESC 掐不进"建文件"与"写内容"之间,不存在"取消窗口夹出空
     // 文件"的通路(事故现场 write_file 压根没跑,轨迹零工具事件)。另:
-    // open(trunc) 与 write 两步对文件系统非原子,硬崩/断电可留空文件——
-    // 那是崩溃级原子的另一档事,修复另立小单(见 write_file.cpp 的标记)。
+    // 崩溃级原子(临时文件写全 + 原子换名)已由 write_file 原子写单修好,
+    // 见下方原子落盘三景;取消盲这枚钉子照旧钉着。
     TempDir dir;
     WriteFileTool tool;
     // 走基类引用调两参 execute(派生类的单参声明会把基类重载藏起来):
@@ -304,3 +322,102 @@ TEST_CASE("write_file 不观测取消旗:cancel 升着也整篇写完(空文件�
     buffer << in.rdbuf();
     CHECK(buffer.str() == body);
 }
+
+TEST_CASE("write_file: 原子落盘——写全换名,目录里无临时件残尸") {
+    // write_file 原子写单的三态验收之"新文完整"腿:覆盖路与新建路都
+    // 走"临时文件写全 → 原子换名",落成后目录里不该有任何 .tmp 尾巴。
+    TempDir dir;
+    WriteFileTool tool;
+    const std::string old_body(2048, 'o');
+    const std::string new_body(4096, 'n');  // 过一页的整份,半截一眼可辨
+    const std::string path = dir.Utf8Path("atomic.txt");
+
+    WriteFileRaw(path, old_body);
+    nlohmann::json input;
+    input["path"] = path;
+    input["content"] = new_body;
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(ReadFileRaw(path) == new_body);
+    CHECK(TempLeftovers(dir).empty());
+
+    const std::string fresh = dir.Utf8Path("fresh_atomic.txt");
+    nlohmann::json fresh_input;
+    fresh_input["path"] = fresh;
+    fresh_input["content"] = new_body;
+    const Tool::Result fresh_result = tool.execute(fresh_input);
+    CHECK_FALSE(fresh_result.is_error);
+    CHECK(ReadFileRaw(fresh) == new_body);
+    CHECK(TempLeftovers(dir).empty());
+}
+
+TEST_CASE("write_file: 临时文件打不开(超长文件名)——明确报错,目标不留残尸") {
+    // 三态验收之"明确错误"腿。故障注入沿用 atomic_write 册的最低成本
+    // 手法:文件名分量超长(300 字符),两平台 fopen 都开不动临时件
+    // (踩 atomic.tmp_open_failed 格)。老 ofstream 时代这句就是"打不开
+    // 文件写";换原子写后口径照旧,外加两条新保证:目标压根不出现
+    // (新建不留零字节残尸——事故现场那只空 todo 文件的形状),目录里
+    // 没有临时尾巴。
+    TempDir dir;
+    WriteFileTool tool;
+    const std::string long_name(300, 'n');
+    const std::string path = dir.Utf8Path(long_name);
+    nlohmann::json input;
+    input["path"] = path;
+    input["content"] = "写不进去的正文";
+    const Tool::Result result = tool.execute(input);
+    CHECK(result.is_error);
+    CHECK(result.content.find("打不开文件写") != std::string::npos);
+    std::error_code ec;
+    CHECK_FALSE(std::filesystem::exists(Utf8ToPath(path), ec));
+    CHECK(TempLeftovers(dir).empty());
+}
+
+TEST_CASE("write_file: 陈年临时件不碍写,也不被越权收走") {
+    // 孤儿规矩:模拟硬崩孤儿(同目录同前缀的 tmp 尾巴)留在现场——后续
+    // 写入照常落成;无主之物本工具不动,后缀可辨、无害,不替人扫尾。
+    TempDir dir;
+    WriteFileTool tool;
+    const std::string path = dir.Utf8Path("has_orphan.txt");
+    const std::string orphan1 = dir.Utf8Path("has_orphan.txt.tmp");
+    const std::string orphan2 = dir.Utf8Path("has_orphan.txt.99999-42.tmp");
+    WriteFileRaw(orphan1, "stale");
+    WriteFileRaw(orphan2, "stale-too");
+
+    nlohmann::json input;
+    input["path"] = path;
+    input["content"] = "新正文整份";
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(ReadFileRaw(path) == "新正文整份");
+    CHECK(ReadFileRaw(orphan1) == "stale");
+    CHECK(ReadFileRaw(orphan2) == "stale-too");
+    CHECK(TempLeftovers(dir).size() == 2);
+}
+
+#ifdef _WIN32
+TEST_CASE("write_file: 目标被占换名不成——旧文完好,无临时尾巴(Windows 专属)") {
+    // 三态验收的"旧文完好"腿。注入:目标被另一句柄占着(MSVC 文件流默
+    // 认不带 FILE_SHARE_DELETE),MoveFileExW 换不上去,踩 atomic.
+    // replace_failed 格。断言:报错点明"原文件保持原样",旧文一个字节
+    // 没动,临时件删净。POSIX rename 不看目标句柄,同一景在那两平台是
+    // 合法成功,不在此测。
+    TempDir dir;
+    WriteFileTool tool;
+    const std::string path = dir.Utf8Path("occupied.txt");
+    const std::string old_body = "旧文整份,一个字都不能少";
+    WriteFileRaw(path, old_body);
+    std::ifstream holder(Utf8ToPath(path), std::ios::binary);
+    REQUIRE(holder.is_open());
+
+    nlohmann::json input;
+    input["path"] = path;
+    input["content"] = "新文想换上来";
+    const Tool::Result result = tool.execute(input);
+    CHECK(result.is_error);
+    CHECK(result.content.find("原文件保持原样") != std::string::npos);
+    holder.close();
+    CHECK(ReadFileRaw(path) == old_body);
+    CHECK(TempLeftovers(dir).empty());
+}
+#endif

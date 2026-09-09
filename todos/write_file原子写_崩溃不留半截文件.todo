@@ -1,6 +1,6 @@
 # write_file 原子写：崩溃不留半截文件
 
-- 状态：待实现（预留封顶单 P3 验尸的遗腹：`open(trunc)→write` 硬崩级非原子，取消盲测试与注释标记已由该单打在 `src/tools/write_file.cpp`）。
+- 状态：已实施（2026-09-09；write_file 落盘改接既有基建 `platform::AtomicWriteFile`（临时文件写全+原子换名，未另起炉灶）；错误文案口径沿用，换名失败照同款人话补一句；测试册 `test_write_edit.cpp` 增原子四景——写全无残尸/超长名明确错误/陈年孤儿不碍写不被收走/Windows 换名不成旧文完好。待 CI 验收）。
 - 日期：2026-09-09
 - 级别：P2（用户文件完整性：写一半崩了，原文件已被截，新内容没落全——两头空）。
 - 范围：`src/tools/write_file.cpp`、既有原子写基建 `src/platform/atomic_write.hpp`（统一原子写收口审计 P1 的产物，先核能否直接复用）、`tests/unit/tools/test_write_edit.cpp`。
