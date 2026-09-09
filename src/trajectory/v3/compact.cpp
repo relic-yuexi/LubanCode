@@ -83,8 +83,9 @@ CompactSession::BeginOutcome CompactSession::Begin(V3Writer& writer, std::string
             outcome.info.requested.error_code + " " + outcome.info.requested.error_message;
         return outcome;
     }
-    outcome.session = CompactSession(outcome.info.compact_id, outcome.info.turn_id,
-                                     std::move(parent_turn_id), writer.context().revision);
+    outcome.session = std::make_unique<CompactSession>(
+        outcome.info.compact_id, outcome.info.turn_id, std::move(parent_turn_id),
+        writer.context().revision);
     outcome.session->trigger_ = std::string(trigger);
     return outcome;
 }

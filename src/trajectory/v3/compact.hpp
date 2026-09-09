@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -63,9 +64,10 @@ public:
 
     // 开场:compact.requested(trigger=manual/auto、reason、requirements快照)
     // 并建立内部回合。已有未终态 compact 时拒收(合并或拒收并留原因,§4.6)。
+    // session 用 unique_ptr:optional<自身> 在类体内是不完整类型,编不过。
     struct BeginOutcome {
         BeginResult info;
-        std::optional<CompactSession> session;  // began=false 时为空
+        std::unique_ptr<CompactSession> session;  // began=false 时为空
     };
     static BeginOutcome Begin(V3Writer& writer, std::string_view trigger,
                               std::string_view reason,
