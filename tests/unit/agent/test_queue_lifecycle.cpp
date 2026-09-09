@@ -12,6 +12,7 @@
 
 #include <doctest/doctest.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,14 +36,15 @@ std::vector<std::string> TextsOf(const std::vector<cli::QueuedMessage>& items) {
     return out;
 }
 
-cli::QueuedMessage* Find(SteeringQueue& queue, cli::QueueId id) {
-    auto snapshot = queue.Snapshot();
-    for (auto& item : snapshot) {
+// 按 id 取条目的快照副本(值语义——快照是临时 vector,指针出了表达式
+// 就是悬空,不许用)。
+std::optional<cli::QueuedMessage> Find(const SteeringQueue& queue, cli::QueueId id) {
+    for (const auto& item : queue.Snapshot()) {
         if (item.id == id) {
-            return &item;
+            return item;
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 }  // namespace
@@ -73,8 +75,8 @@ TEST_CASE("状态机:claim 留队不重取,commit 出队;claimed 冻编辑") {
     const auto claimed = queue.ClaimDeliverable(MessageTarget::Main());
     REQUIRE(claimed.size() == 2);
     CHECK(TextsOf(claimed) == std::vector<std::string>{"第一条", "第二条"});
-    auto* after_claim = Find(queue, a);
-    REQUIRE(after_claim != nullptr);
+    const auto after_claim = Find(queue, a);
+    REQUIRE(after_claim.has_value());
     CHECK(after_claim->state == QueueItemState::Claimed);
     CHECK(queue.size() == 2);  // 没出队:取走不等于消费
 
@@ -103,8 +105,8 @@ TEST_CASE("状态机:pump 取件 claim→commit;失败退回 = returned(Queued+a
     // 失败退回:returned 归 Queued、attempts+1、原 id 保留。
     const cli::QueueId head_id = head->id;
     queue.ReturnToFront(std::move(*head));
-    auto* returned = Find(queue, head_id);
-    REQUIRE(returned != nullptr);
+    const auto returned = Find(queue, head_id);
+    REQUIRE(returned.has_value());
     CHECK(returned->state == QueueItemState::Queued);
     CHECK(returned->delivery_attempts == 1);
     CHECK(queue.size() == 1);
@@ -139,8 +141,8 @@ TEST_CASE("过期:Turn 终局未消费的 steer 打标注,不再投,改写翻新
     CHECK(expired[0] == steer_id);
 
     // 过期的保持 Queued + 标注,不变 followup、不出队。
-    auto* expired_item = Find(queue, steer_id);
-    REQUIRE(expired_item != nullptr);
+    const auto expired_item = Find(queue, steer_id);
+    REQUIRE(expired_item.has_value());
     CHECK(expired_item->state == QueueItemState::Queued);
     CHECK(expired_item->expiry_note == "turn_end_no_next_step");
     CHECK(expired_item->intent == QueueIntent::Steer);
@@ -165,8 +167,8 @@ TEST_CASE("过期:Turn 终局未消费的 steer 打标注,不再投,改写翻新
     auto handle = queue.BeginEdit(steer_id);
     REQUIRE(handle.has_value());
     CHECK(queue.CommitEdit(*handle, "改写后的话") == SteeringQueue::CommitStatus::Ok);
-    auto* renewed = Find(queue, steer_id);
-    REQUIRE(renewed != nullptr);
+    const auto renewed = Find(queue, steer_id);
+    REQUIRE(renewed.has_value());
     CHECK(renewed->expiry_note.empty());
     const auto reclaimed = queue.ClaimDeliverable(MessageTarget::Main());
     REQUIRE(reclaimed.size() == 1);
