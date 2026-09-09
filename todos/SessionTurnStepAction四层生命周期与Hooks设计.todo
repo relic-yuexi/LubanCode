@@ -137,11 +137,19 @@
 
 ### P1：ID 与账目
 
-- [ ] `turn_id` / `step_id` / `action_id` 落地，续跑跨 Run 不裂不重号。
-- [ ] `StepUsageRecord` 扩展（§三.2），usage 归属链串通，unknown 不写零、不重复计。
-- [ ] Step 的 API 耗时与 Action 的工具耗时分账入账。
+- [x] `turn_id` / `step_id` / `action_id` 落地，续跑跨 Run 不裂不重号。
+- [x] `StepUsageRecord` 扩展（§三.2），usage 归属链串通，unknown 不写零、不重复计。
+- [x] Step 的 API 耗时与 Action 的工具耗时分账入账。
 
 验收：continuation 场景 ID 稳定；usage 汇总与逐条记录对得上；计费统计无重无漏。
+
+#### P1 实施纪要
+
+- ID 落法：turn_id=既有 canonical 号（`TurnWiring::turn_id` 新钉点，turn_runner 铸号处钉进，harness 续跑拷贝同号）；step_id=`Agent::NextStepId()`（Agent 域单调 "step-N"，loop 每次请求构建前铸）；action_id=既有 tool execution id（item-N/exec-N，正名不改号，词表立法）。
+- StepUsageRecord/UsageReport 各扩五字段（step_id/turn_id/attempts/api_duration_ms/stop_reason），事件流（TurnEventAdapter::OnUsage → terminal_turn_sink 还原）全程携带，旧事件行缺省空/0 不造号。
+- usage 归属链：trajectory v2 已有 request_id（"req-N"）作 Journal 主键，step_id 在运行账侧（StepUsageRecord/hooks payload）与之并行，不改 trajectory schema（§九边界）。unknown usage 靠 reported=false 说话，不写零不重复计——单测 `tests/unit/agent/test_step_lifecycle.cpp` 钉。
+- 分账：Step 的 API 耗时（api_duration_ms，首枚尝试发出→assistant 落账）入 StepUsageRecord；Action 的工具耗时=ToolTraceEvent.duration_ms（既有），两笔不混写。
+- 预算兼容：本单不加任何新预算键，`max_turns`/`turn_limit`/`subagent.default_max_turns`/`max_steps_per_turn` 原名原计数原作用域零改动（改名不改账红线；"逐 Step 对数"因无新键而平凡成立）。
 
 ### P2：Hook 分层
 

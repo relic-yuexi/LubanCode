@@ -966,6 +966,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
+        // 四层生命周期单 P1:Step 起——逻辑请求开始构建(steer 合批已在上头
+        // 收完),先铸稳定身份。step_id 在 Agent 域单调:主会话活整场、子代理
+        // 活一任务,续跑/接力跨 Run 不裂不重号;step_index 留作 Run 内展示
+        // 坐标(continuation 会重号,身份不认它)。
+        const std::string step_id = agent.NextStepId();
         // 皮上的会话级叠层就地生效(批四·病十一其三:五层请求改写后端
         // 退役):延迟索引段 -> 模型目录指令 -> 魂,拼装次序与从前传输层
         // 包装的次序一字不差(索引在前、指令居中、魂压轴)。从前这些改动
@@ -1644,6 +1649,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
             return attempt_result;
         };
+        // 四层生命周期单 P1:Step 的 API 耗时从首枚尝试发出起算(含恢复环
+        // 重试与退避),到 assistant 落账(usage 报告处)止——与 Action 的
+        // 工具耗时分账,两笔不混写。
+        const auto step_api_started = std::chrono::steady_clock::now();
         const auto send_result = api::RunRequestWithRecovery(run_one_attempt, recovery_hooks, cancel);
         if (trajectory_write_failed) {
             return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
@@ -1849,6 +1858,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             report.stable_prefix_messages = step_prefix_account.stable_prefix_messages;
             report.total_messages = step_prefix_account.total_messages;
             report.wire_common_prefix_bytes = step_prefix_account.wire_common_prefix_bytes;
+            // 四层生命周期单 P1:Step 身份/尝试/耗时随 usage 流水带出——
+            // StepUsageRecord 据此逐笔记账(attempts 用恢复环的 Started 计数,
+            // 首尝试即 1;api_duration 从首枚尝试发出到此刻的墙钟)。
+            report.step_id = step_id;
+            report.turn_id = wiring.turn_id;
+            report.attempts = recovery_attempts_used;
+            report.api_duration_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                       step_api_started)
+                    .count();
+            report.stop_reason = stop_reason;
             wiring.events->OnUsage(report);
         }
 

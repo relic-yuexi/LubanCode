@@ -138,6 +138,24 @@ struct StepUsageRecord {
     bool cache_reported = false;       // provider 是否明报 cache token 明细
     std::string epoch_break_reason;    // 空 = 本步没断 epoch
 
+    // ---- 四层生命周期单 P1:Step 身份、尝试与耗时明细 ----
+    // step_id/turn_id:稳定身份("step-N"/"turn-N")。step_id 在 Agent 域
+    //   单调跨 Run 不重号;step_index 只是 Run 内展示坐标,continuation 会
+    //   重号——两本账并存,身份认 id,排序认 index+id 组合。
+    // attempts:本 Step 物理尝试数(恢复环重试;1 = 一次过)。
+    // api_duration_ms:首枚尝试发出到 assistant 落账的墙钟——Step 的 API
+    //   耗时。与 Action 的工具耗时(tool trace 侧 execution 计时)分账,
+    //   两笔不许混写(单子 §三.4)。0 = 未计时(旧调用方)。
+    // stop_reason:本 Step 收口的模型 stop reason(空 = 没收口/没接)。
+    // usage 归属链:logical request ↔ attempt ↔ trajectory request("req-N",
+    //   v2 usage owner 主键)↔ Step(step_id)↔ owner——unknown usage 记
+    //   unknown(reported=false),不写零、不重复计(单子 §三.3)。
+    std::string step_id;
+    std::string turn_id;
+    int attempts = 0;
+    std::int64_t api_duration_ms = 0;
+    std::string stop_reason;
+
     std::int64_t total_input_tokens() const {
         return input_tokens + cache_read_tokens + cache_creation_tokens;
     }
@@ -172,6 +190,12 @@ struct TurnUsageStats {
         record.cache_creation_tokens = report.usage.cache_creation_tokens;
         record.output_tokens = report.usage.output_tokens;
         record.reasoning_tokens = report.usage.output_reasoning_tokens;
+        // 四层生命周期单 P1:Step 身份/尝试/耗时随流水落账(旧调用方缺省空/0)。
+        record.step_id = report.step_id;
+        record.turn_id = report.turn_id;
+        record.attempts = report.attempts;
+        record.api_duration_ms = report.api_duration_ms;
+        record.stop_reason = report.stop_reason;
         // 显式位是主路；聚合初始化的旧测试/旧调用方仍可由非零数字兼容。
         record.reported = report.reported_by_provider || report.reported();
         record.cache_reported = report.cache_reported_by_provider ||

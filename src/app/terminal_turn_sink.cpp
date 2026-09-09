@@ -148,6 +148,14 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
                 event.payload.value("stable_prefix_messages", static_cast<std::size_t>(0));
             report.total_messages = event.payload.value("total_messages", static_cast<std::size_t>(0));
             report.wire_common_prefix_bytes = event.payload.value("wire_common_prefix_bytes", std::int64_t{-1});
+            // 四层生命周期单 P1:Step 身份/尝试/耗时从事件 payload 还原
+            //(键由 TurnEventAdapter::OnUsage 填;旧事件行没有这些键,缺省
+            // 空/0,与"未接线"同貌,不造号)。
+            report.step_id = event.payload.value("step_id", std::string());
+            report.turn_id = event.payload.value("turn_id", std::string());
+            report.attempts = event.payload.value("attempts", 0);
+            report.api_duration_ms = event.payload.value("api_duration_ms", std::int64_t{0});
+            report.stop_reason = event.payload.value("stop_reason", std::string());
             const bool reported = event.payload.value("reported", report.reported());
             if (ingredients_.view_collector != nullptr) {
                 ingredients_.view_collector->OnUsage(report);

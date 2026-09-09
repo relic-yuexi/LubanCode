@@ -373,6 +373,13 @@ struct TurnWiring {
     // 硬闸只认 turn 账。TurnHarness(DriveTurn)每轮拷一份 wiring 并钉好
     // 这枚下标,调用方自己装配的 wiring 不设就是 0,行为不变。
     int input_round_index = 0;
+
+    // ---- 四层生命周期单 P1:本轮的 canonical Turn 身份 -----------------------
+    // 本 Run() 所属的 Turn 号("turn-N")。宿主(terminal 轮)从 session
+    // IdAuthority 发过号的用那枚;不设(子代理旧路/单测)为空,StepUsageRecord
+    // 的 turn_id 如实留空,不现造。多次 Run() 缝进同一只 Turn(Stop 续跑/
+    // 接力)时,调用方须把同一枚号钉进每次 Run 的 wiring——身份跨 Run 不裂。
+    std::string turn_id;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

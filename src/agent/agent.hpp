@@ -306,6 +306,16 @@ private:
         return "exec-" + std::to_string(++execution_counter_);
     }
 
+    // 四层生命周期单 P1:Step 稳定身份的发号。Agent 寿命域内单调——主会话
+    // Agent 活整场(session 域),子代理 Agent 活一任务(task 域),都天然
+    // 盖过任意多次 Run():续跑/接力(同一 Turn 内的多次 AgentLoop::Run)
+    // 与跨 input round 的多轮,step_id 都不裂不重号。Run 局部 step_index
+    // (loop 的 for 下标)照旧留作展示坐标,continuation 会重号是既有病,
+    // 身份一律认这里发的号。挂在 Agent 上而不是 session IdAuthority 上,
+    // 是要子代理与主会话各记各账(单子 §六.5),不共享一本号簿。
+    std::uint64_t step_counter_ = 0;
+    std::string NextStepId() { return "step-" + std::to_string(++step_counter_); }
+
     std::vector<api::ToolDefinition> BuildToolDefinitions() const;
 };
 

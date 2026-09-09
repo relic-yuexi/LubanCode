@@ -850,6 +850,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
     turn_event_stream.Start(canonical_turn_id);
     lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream,
                                                           turn_trajectory.get());
+    // 四层生命周期单 P1:本轮 canonical Turn 号钉进 wiring——本 Run 与
+    // harness 拷贝续跑的每只 Run 都带同一枚,StepUsageRecord.turn_id 跨
+    // Run 不裂。Stop 续跑环(TurnHarness)拷的就是这份 wiring,不用另钉。
+    wiring.turn_id = canonical_turn_id;
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(
