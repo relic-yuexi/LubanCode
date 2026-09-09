@@ -282,6 +282,18 @@ std::optional<lubancode::config::ConfigResult> RunInitialSetupWizard(
 class SessionHookScope {
 public:
     explicit SessionHookScope(lubancode::hooks::HookDispatcher* dispatcher) : dispatcher_(dispatcher) {
+        // 四层生命周期单 P2:PreSession——严格口径的会话实体创建(首输入
+        // 准入前)。resume/clear/compact 不触发(那些是旧 SessionStart 的
+        // 触发面,兼容保留);可否决开张(blocked = 不进首输入)。
+        if (dispatcher_ != nullptr && !dispatcher_->Empty() &&
+            dispatcher_->HasHandlersFor(lubancode::hooks::HookEvent::PreSession)) {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PreSession;
+            payload.fields["session_id"] = dispatcher_->context().session_id;
+            const auto merged = dispatcher_->Emit(lubancode::hooks::HookEvent::PreSession, payload);
+            pre_session_blocked_ = merged.blocked;
+            pre_session_block_reason_ = merged.block_reason;
+        }
         if (dispatcher_ == nullptr || dispatcher_->Empty() ||
             !dispatcher_->HasHandlersFor(lubancode::hooks::HookEvent::SessionStart)) {
             return;
@@ -295,6 +307,7 @@ public:
     ~SessionHookScope() {
         if (dispatcher_ == nullptr || dispatcher_->Empty() ||
             !dispatcher_->HasHandlersFor(lubancode::hooks::HookEvent::SessionEnd)) {
+            emit_post_session();
             return;
         }
         lubancode::hooks::HookPayload payload;
@@ -302,13 +315,35 @@ public:
         payload.fields["reason"] = "exit";
         payload.match_value = "exit";
         dispatcher_->Emit(lubancode::hooks::HookEvent::SessionEnd, payload);
+        emit_post_session();
     }
+
+    // PreSession 否决开张的查口(AskOnce/InteractiveLoop 进入前由宿主收口:
+    // 否决 = 本次进程不进会话,按用户可见的说明退出,不硬崩)。
+    bool pre_session_blocked() const { return pre_session_blocked_; }
+    const std::string& pre_session_block_reason() const { return pre_session_block_reason_; }
 
     SessionHookScope(const SessionHookScope&) = delete;
     SessionHookScope& operator=(const SessionHookScope&) = delete;
 
 private:
+    // PostSession:会话真正关闭时(进程收场)——严格口径,/clear 不发(它
+    // 是同一 Session 内换账)。advisory:硬杀(任务管理器/断电)时本析构
+    // 不跑,协议文档如实写明,不承诺必达。
+    void emit_post_session() {
+        if (dispatcher_ == nullptr || dispatcher_->Empty() ||
+            !dispatcher_->HasHandlersFor(lubancode::hooks::HookEvent::PostSession)) {
+            return;
+        }
+        lubancode::hooks::HookPayload payload;
+        payload.event = lubancode::hooks::HookEvent::PostSession;
+        payload.fields["session_id"] = dispatcher_->context().session_id;
+        dispatcher_->Emit(lubancode::hooks::HookEvent::PostSession, payload);
+    }
+
     lubancode::hooks::HookDispatcher* dispatcher_;
+    bool pre_session_blocked_ = false;
+    std::string pre_session_block_reason_;
 };
 
 // 致命退出的诊断尾行(P1-2):所有非零退出路径都要写足错误类别与会话
@@ -842,6 +877,17 @@ int RunCli(const std::vector<std::string>& args) {
     // 中途抛异常被下面 catch 住之后自然析构)时发。--config/--version/--help
     // 提前 return,走不到这里,不会触发。
     const SessionHookScope session_hook_scope(lubancode::app::HookRuntime());
+    // 四层生命周期单 P2:PreSession 否决开张——宿主收口成"用户可见的说
+    // 明 + 非零退出",不硬崩。SessionEnd/PostSession 照常在析构里发(开张
+    // 被否也是一场短会话的完整寿命,收尾账不缺)。
+    if (session_hook_scope.pre_session_blocked()) {
+        std::cerr << "PreSession 钩子否决开张: "
+                  << (session_hook_scope.pre_session_block_reason().empty()
+                          ? std::string("未给理由")
+                          : session_hook_scope.pre_session_block_reason())
+                  << "\n";
+        return 1;
+    }
 
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。

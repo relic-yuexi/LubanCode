@@ -46,6 +46,23 @@ enum class HookEvent {
     GoalEvaluated,
     GoalPaused,
     GoalCompleted,
+    // 四层生命周期单 P2:Session/Turn/Step 三层的分层事件(§四矩阵)。口径
+    // 与旧事件并存不串台:
+    //   Pre/PostSession —— 会话实体创建后/真正关闭时(进程起收),resume/
+    //     clear/compact 不触发;旧 SessionStart/End 保留原触发面(兼容)。
+    //   Pre/PostTurn —— 用户输入被接受后、首个 Step 前 / 终局(最终
+    //     assistant 落定且无续跑,恰好一次)。Stop 判续跑则 PostTurn 不触发。
+    //   Pre/PostStep —— 每次 Step 请求构建前(steer 合批后)/ assistant 响应
+    //     落账后、派生 Action 执行前。PreStep 否决=终止本 Turn。
+    // Action 层不另立枚举:PreAction/PostAction 是 PreToolUse/PostToolUse 的
+    // 升格别名——ParseHookEvent 认新名,枚举值与 wire 事件名共用旧名,既有
+    // 配置与脚本零迁移(见 ParseHookEvent 的别名表)。
+    PreSession,
+    PostSession,
+    PreTurn,
+    PostTurn,
+    PreStep,
+    PostStep,
 };
 
 // 配置键/协议字段里的规范名。
@@ -93,6 +110,18 @@ constexpr std::string_view ToString(HookEvent event) {
             return "GoalPaused";
         case HookEvent::GoalCompleted:
             return "GoalCompleted";
+        case HookEvent::PreSession:
+            return "PreSession";
+        case HookEvent::PostSession:
+            return "PostSession";
+        case HookEvent::PreTurn:
+            return "PreTurn";
+        case HookEvent::PostTurn:
+            return "PostTurn";
+        case HookEvent::PreStep:
+            return "PreStep";
+        case HookEvent::PostStep:
+            return "PostStep";
     }
     return "Unknown";
 }
@@ -141,6 +170,24 @@ constexpr bool ParseHookEvent(std::string_view name, HookEvent& out) {
         out = HookEvent::GoalPaused;
     } else if (name == "GoalCompleted") {
         out = HookEvent::GoalCompleted;
+    } else if (name == "PreSession") {
+        out = HookEvent::PreSession;
+    } else if (name == "PostSession") {
+        out = HookEvent::PostSession;
+    } else if (name == "PreTurn") {
+        out = HookEvent::PreTurn;
+    } else if (name == "PostTurn") {
+        out = HookEvent::PostTurn;
+    } else if (name == "PreStep") {
+        out = HookEvent::PreStep;
+    } else if (name == "PostStep") {
+        out = HookEvent::PostStep;
+    } else if (name == "PreAction" || name == "PreActionHook") {
+        // Action 层别名(四层单 §4.2):升格名指向既有枚举值,配置两写法
+        // 同效,wire 事件名保持 PreToolUse 不动——旧脚本零迁移。
+        out = HookEvent::PreToolUse;
+    } else if (name == "PostAction" || name == "PostActionHook") {
+        out = HookEvent::PostToolUse;
     } else {
         return false;
     }
@@ -193,6 +240,14 @@ constexpr bool EventHasMatcherField(HookEvent event) {
         // goal 单:iteration 起止没有匹配对象。
         case HookEvent::GoalIterationStart:
         case HookEvent::GoalIterationEnd:
+        // 四层单 P2:Session/Turn/Step 分层事件没有 matcher 字段(载荷里
+        // 各带 id,不按值筛)——matcher 只能缺省或 *。
+        case HookEvent::PreSession:
+        case HookEvent::PostSession:
+        case HookEvent::PreTurn:
+        case HookEvent::PostTurn:
+        case HookEvent::PreStep:
+        case HookEvent::PostStep:
             return false;
     }
     return false;
@@ -264,8 +319,73 @@ constexpr EventOutputCapabilities OutputCapabilities(HookEvent event) {
             // evaluator 与硬门槛)。GoalCompleted 失败不把 Achieved 改回
             // Active——can_block 恒 false 正是这条边界的类型化表达。
             return {false, false, true, false};
+        case HookEvent::PreSession:
+            // 四层单 §4.1:可注入会话级上下文、可否决开张(continue=false/
+            // exit 2 = 不进首输入)。
+            return {false, false, true, true};
+        case HookEvent::PostSession:
+            // 会话已关闭:只观察。advisory——硬杀(taskkill/断电)时本事件
+            // 不保证必达,协议文档如实写明。
+            return {false, false, false, false};
+        case HookEvent::PreTurn:
+            // 可否决本 Turn(不发模型);additional_context 随本轮注入。
+            // "改输入"的决策权仍在 UserPromptSubmit 既有口径(P0 落差清单
+            // 记录:updatedInput 暂不扩到本事件)。
+            return {false, false, true, true};
+        case HookEvent::PostTurn:
+            // 终局只观察(要干预走下一只 Turn 的 PreTurn/PreStep)。
+            return {false, false, false, false};
+        case HookEvent::PreStep:
+            // 可注入上下文(随本 Step 请求)、可否决本 Step——否决语义 =
+            // 终止本 Turn,不是跳过继续(§4.1)。
+            return {false, false, true, true};
+        case HookEvent::PostStep:
+            // 响应已落账:只观察(§4.1 矩阵:要干预走下一层 PreAction)。
+            // additional_context 不给——终局注入会造悬空 user 消息,反馈
+            // 想进模型走 PreStep/PreTurn。
+            return {false, false, false, false};
     }
     return {};
+}
+
+// 四层单 P2:这只事件是不是"Post 型观察事件"——durable outbox/ack 的
+// 记账范围(可靠 Post,§4.3)。判定标准:副作用/事实已发生、hook 只观察
+// 记账(外加给反馈),重放语义 at-least-once 有意义的事件。决策型事件
+// (Pre*、PermissionRequest、Stop、SubagentStop 续跑裁决)不入 outbox:
+// 它们的重放会再造决策,不是可靠投递的账。
+constexpr bool IsPostObservationEvent(HookEvent event) {
+    switch (event) {
+        case HookEvent::PostToolUse:   // = PostAction(别名)
+        case HookEvent::PostCompact:
+        case HookEvent::SessionEnd:
+        case HookEvent::SubagentStop:
+        case HookEvent::LoopTickEnd:
+        case HookEvent::LoopTaskStop:
+        case HookEvent::GoalIterationEnd:
+        case HookEvent::GoalEvaluated:
+        case HookEvent::GoalCompleted:
+        case HookEvent::PostSession:
+        case HookEvent::PostTurn:
+        case HookEvent::PostStep:
+            return true;
+        case HookEvent::SessionStart:
+        case HookEvent::UserPromptSubmit:
+        case HookEvent::PreToolUse:
+        case HookEvent::PermissionRequest:
+        case HookEvent::PreCompact:
+        case HookEvent::SubagentStart:
+        case HookEvent::Stop:
+        case HookEvent::LoopTaskCreate:
+        case HookEvent::LoopTickStart:
+        case HookEvent::GoalCreated:
+        case HookEvent::GoalIterationStart:
+        case HookEvent::GoalPaused:
+        case HookEvent::PreSession:
+        case HookEvent::PreTurn:
+        case HookEvent::PreStep:
+            return false;
+    }
+    return false;
 }
 
 }  // namespace lubancode::hooks

@@ -6,6 +6,8 @@
 #include <set>
 #include <thread>
 
+#include "hooks/events.hpp"
+#include "hooks/outbox.hpp"
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
 
@@ -18,6 +20,23 @@ using platform::ProcessResult;
 std::int64_t UnixNow() {
     return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+// "exit 2 / failure_policy=deny 能拉闸"的事件族(四层单 P2 扩员):旧两枚
+// (UserPromptSubmit/PreCompact)加上新 Pre 系(PreSession/PreTurn/PreStep)
+// ——都带 can_block,否决语义在各自装配层收口(本轮不发/终止本 Turn)。
+// Post 型与无决策权事件不在此列:副作用已发生,拦也拦不回。
+bool IsBlockablePromptEvent(HookEvent event) {
+    switch (event) {
+        case HookEvent::UserPromptSubmit:
+        case HookEvent::PreCompact:
+        case HookEvent::PreSession:
+        case HookEvent::PreTurn:
+        case HookEvent::PreStep:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // 单只 handler 的执行结果(Emit 的并发 worker 填,主线程按定义序收账)。
@@ -117,6 +136,7 @@ HookDispatcher::HookDispatcher(const HookDispatcher& other) {
     definitions_ = other.definitions_;
     trust_ = other.trust_;
     context_ = other.context_;
+    outbox_ = other.outbox_;  // 可靠 Post 的账本:拷贝沿用同一只(共享账)
     recent_ = other.recent_;
     last_record_ = other.last_record_;
 }
@@ -132,6 +152,7 @@ HookDispatcher& HookDispatcher::operator=(const HookDispatcher& other) {
     definitions_ = other.definitions_;
     trust_ = other.trust_;
     context_ = other.context_;
+    outbox_ = other.outbox_;
     recent_ = other.recent_;
     last_record_ = other.last_record_;
     return *this;
@@ -210,7 +231,7 @@ HookEventResult HookDispatcher::EmitWith(HookEvent event, const HookPayload& pay
 
 HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& payload, const HookContext& ctx,
                                          bool /*context_override*/) {
-    HookEventResult merged = RunEventCore(definitions_, event, payload, ctx);
+    HookEventResult merged = RunEventCore(definitions_, event, payload, ctx, outbox_.get());
     // ---- 落账:结果账(定义序)、每只定义的最近一次、会话级流水(新在头)。
     // 失败不只往 cerr 丢一行——先落账,UI 怎么呈由调用方定。跳过项(未
     // 信任/禁用/去重/async)同样入账:/hooks 的"最近结果"看得见它们。
@@ -227,11 +248,15 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
 // Emit/EmitDetached 共用的执行核:定义表参数化,不碰成员。主线程的 Emit 传
 // definitions_,后台执行器(EmitDetached)传只读快照——账本写不写由外层定。
 HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& definitions, HookEvent event,
-                                              const HookPayload& payload, const HookContext& ctx) {
+                                              const HookPayload& payload, const HookContext& ctx,
+                                              HookOutbox* outbox) {
     HookEventResult merged;
     const std::string hook_run_id = NextHookRunId();
     const std::string event_name(ToString(event));
     const EventOutputCapabilities caps = OutputCapabilities(event);
+    // 可靠 Post(四层单 §4.3):Post 型观察事件才记账——pending 先于执行
+    // 落盘,ack 在收工后。决策型事件不入账(重放会再造决策,不是投递)。
+    HookOutbox* const outbox_journal = (outbox != nullptr && IsPostObservationEvent(event)) ? outbox : nullptr;
 
     // 每条命中的定义一个账本槽(定义序:来源 -> 声明次序)。跳过项第一遍
     // 就填好,执行项第三遍回填——merged.records 与运行流水都按这个序落账,
@@ -306,6 +331,16 @@ HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& 
 
     // ---- 第二遍:并发执行。每只同步 handler 一条线程,收齐再归并——一只
     // hook 慢/挂不阻止另一只启动,总耗时接近最慢一只,不是全数相加。----
+    // 可靠 Post:先落 pending(幂等键 = hook_run_id + definition hash),
+    // handler 跑完(收工即 ack,成败不论)销账。判重命中(重放)记 0 号,
+    // Ack 安静跳过。
+    std::vector<std::uint64_t> outbox_entries(to_run.size(), 0);
+    if (outbox_journal != nullptr) {
+        for (std::size_t i = 0; i < to_run.size(); ++i) {
+            outbox_entries[i] =
+                outbox_journal->RecordPending(hook_run_id, to_run[i]->def->definition_hash, event_name);
+        }
+    }
     std::vector<HandlerRun> runs(to_run.size());
     std::vector<std::thread> workers;
     workers.reserve(to_run.size());
@@ -327,6 +362,11 @@ HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& 
     }
     for (auto& worker : workers) {
         worker.join();
+    }
+    if (outbox_journal != nullptr) {
+        for (const std::uint64_t entry : outbox_entries) {
+            outbox_journal->Ack(entry);
+        }
     }
 
     // ---- 第三遍:按定义序归并(不是完成序)。执行结果回填进各自槽位。----
@@ -432,7 +472,7 @@ HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& 
                           (!parsed.permission_reason.empty() ? parsed.permission_reason
                            : (record.detail.empty() ? std::string("未给理由") : record.detail));
                 }
-            } else if (caps.can_block && (event == HookEvent::UserPromptSubmit || event == HookEvent::PreCompact)) {
+            } else if (caps.can_block && IsBlockablePromptEvent(event)) {
                 merged.blocked = true;
                 if (merged.block_reason.empty()) {
                     merged.block_reason = record.detail.empty() ? "钩子以退出码 2 阻断" : record.detail;
@@ -466,8 +506,7 @@ HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& 
             if (permission_event && merged.permission == HookEventResult::Permission::None) {
                 merged.permission = HookEventResult::Permission::Deny;
                 merged.permission_reason = "钩子失败且 failure_policy=deny: " + record.outcome + " " + record.detail;
-            } else if (caps.can_block && !merged.blocked &&
-                       (event == HookEvent::UserPromptSubmit || event == HookEvent::PreCompact)) {
+            } else if (caps.can_block && !merged.blocked && IsBlockablePromptEvent(event)) {
                 merged.blocked = true;
                 merged.block_reason = "钩子失败且 failure_policy=deny: " + record.outcome;
             }

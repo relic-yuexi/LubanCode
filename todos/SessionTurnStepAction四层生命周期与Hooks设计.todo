@@ -153,12 +153,21 @@
 
 ### P2：Hook 分层
 
-- [ ] 八枚 Hook 按 §四矩阵落地；`Pre/PostToolUse` 别名兼容，旧配置零迁移。
-- [ ] Stop 与 PostTurn 边界：Stop 判续跑则 PostTurn 不触发，终局恰好一次。
-- [ ] `Pre/PostSession` 严格口径与旧 `SessionStart/End` 并存不串台。
-- [ ] durable outbox/ack 与幂等键；failure_policy 兼容风险清单落文档。
+- [x] 八枚 Hook 按 §四矩阵落地；`Pre/PostToolUse` 别名兼容，旧配置零迁移。
+- [x] Stop 与 PostTurn 边界：Stop 判续跑则 PostTurn 不触发，终局恰好一次。
+- [x] `Pre/PostSession` 严格口径与旧 `SessionStart/End` 并存不串台。
+- [x] durable outbox/ack 与幂等键；failure_policy 兼容风险清单落文档。
 
 验收：能力矩阵逐行有合同测试；幂等重放只记一次；deny 语义与旧版逐案对表。
+
+#### P2 实施纪要
+
+- 八 Hook 落法:Pre/PostSession 挂 cli_app 的 SessionHookScope 构造/析构(PreSession 否决开张→非零退出+人话);PreTurn 在 turn_runner 的 UserPromptSubmit 之后(否决=不发模型,号已预留);PostTurn 在 interactive_session 的 RunTurn 返回处(is_user_turn 恰好一次,Stop 续跑环在 RunTurn 肚内先收束);Pre/PostStep 经 TurnWiring::on_pre_step_hook/on_post_step_hook 进 AgentLoop(PreStep 否决=终止本 Turn,additional_context 经 InjectIncoming 随本 Step 请求;PostStep 只观察,拿整份 UsageReport)。
+- 别名表:配置键 `PreAction`/`PreActionHook`→枚举 PreToolUse,`PostAction`/`PostActionHook`→PostToolUse;wire 事件名保持旧名(stdin event 字段稳定),既有配置与脚本零迁移。
+- outbox 落法:`src/hooks/outbox.*` 新件,JSONL 追加(pending/ack 两行型),开张重放+压实(acked 出账);dispatcher 挂 SetOutbox 后,Post 型观察事件(IsPostObservationEvent)真跑前 RecordPending(幂等键=hook_run_id+definition_hash)、收工 Ack;hook_runtime 在有定义时挂 ~/.lubancode/hooks-outbox.jsonl,打不开降级零行为。at-least-once 如实写文档;自动重投不接线(未验清单)。
+- 拦截族扩员:exit 2/failure_policy=deny 的可拦事件从 UserPromptSubmit/PreCompact 扩到 PreSession/PreTurn/PreStep(IsBlockablePromptEvent);既有两枚语义逐字节不变。PostStep 按 §四矩阵收成纯观察(载荷要点无注入,终局注入会造悬空 user 消息)——落差清单更新。
+- failure_policy=deny 风险清单与 async=skipped 现状落 docs/features/extensions/hooks.md("async 与失败策略的现状");架构图同步 docs/architecture/hooks-flow.md。
+- 合同测试:tests/unit/hooks/test_lifecycle_hooks.cpp(事件面/别名/能力矩阵/outbox 幂等与重开压实/坏行容错)+ test_step_lifecycle.cpp 补 PreStep 否决与 PostStep 观察两景。
 
 ### P3：steer/followup 显式化与文档
 

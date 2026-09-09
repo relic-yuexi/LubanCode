@@ -876,6 +876,44 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         };
     }
     const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
+    // 四层生命周期单 P2:PostTurn——终局收口(恰好一次)。RunTurn 返回时
+    // Stop 续跑环已在其内收束:Stop 判续跑则此刻还没到(续跑轮跑完才回到
+    // 这里),终局即此处。取消/失败轮也是 Turn 的终局,照发(cancelled 带
+    // 真);PreTurn 否决的轮根本没进 RunTurn,不发。子代理的轮不经这里
+    //(各有各的账,SubagentStop 那族照旧)。
+    if (is_user_turn) {
+        lubancode::hooks::HookDispatcher* post_turn_dispatcher = lubancode::app::HookRuntime();
+        if (post_turn_dispatcher != nullptr && !post_turn_dispatcher->Empty() &&
+            post_turn_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PostTurn)) {
+            // 汇总从现账拼:Step 数 = usage 流水笔数;Action 数 = 本轮历史
+            // 段里的 tool_use 块数(一只 Action 一次工具调用);最终回复 =
+            // 本轮段末条 assistant 的首个文本块。
+            int turn_actions = 0;
+            std::string final_text;
+            const auto& history = main_agent->History();
+            for (std::size_t i = history_before; i < history.size(); ++i) {
+                if (history[i].role != lubancode::api::Role::Assistant) {
+                    continue;
+                }
+                for (const auto& block : history[i].content) {
+                    if (std::holds_alternative<lubancode::api::ToolUseBlock>(block)) {
+                        ++turn_actions;
+                    } else if (final_text.empty()) {
+                        if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
+                            final_text = text->text;
+                        }
+                    }
+                }
+            }
+            lubancode::runtime::EmitPostTurn(
+                post_turn_dispatcher, trace_turn_id, final_text, turn_usage.request_count(), turn_actions,
+                turn_usage.total_input_tokens(), turn_usage.output_tokens(),
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                      turn_started)
+                    .count(),
+                turn_result.cancelled);
+        }
+    }
     // 唤醒识死(§4.3):本轮一次应急都没走过的才算健康——连续计数清零;
     // 走过的保留累计,后台回流据此暂停自动续轮(语义见 ContextExhaustionGate)。
     context_exhaustion_gate_.NoteTurnFinished();

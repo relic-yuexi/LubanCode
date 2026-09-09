@@ -246,3 +246,57 @@ TEST_CASE("wiring 不钉 turn_id:StepUsageRecord 侧如实留空,不现造号") 
     CHECK(turn.recorder.lines[0].turn_id.empty());
     CHECK(turn.recorder.lines[0].step_id == "step-1");  // step 号与 turn 号分家
 }
+
+TEST_CASE("PreStep 否决:请求不出门,Run 按收场交账(不是错误,不跳过继续)") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("不该被看到")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+
+    RecordedTurn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.on_pre_step_hook = [](const std::string& step_id, const std::string& turn_id, int step_index) {
+        runtime::PromptGate gate;
+        gate.blocked = true;
+        gate.block_reason = "审计要求停";
+        // 挂点收到了三件身份账(P1 的 Step 身份 + Run 内坐标)。
+        CHECK(step_id == "step-1");
+        CHECK(turn_id == "turn-7");
+        CHECK(step_index == 0);
+        return gate;
+    };
+    wiring.turn_id = "turn-7";
+
+    const auto result = loop.Run("问", wiring);
+    REQUIRE(result.has_value());              // 否决不是错误
+    CHECK(result->steps_used == 0);           // 请求没发出,不算 Step
+    CHECK(backend.calls == 0);                // 模型零请求
+    CHECK(turn.recorder.lines.empty());       // 没有 usage 流水
+}
+
+TEST_CASE("PostStep 观察:响应落账后收到完整 UsageReport(含 API 耗时分账料)") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("答")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+
+    RecordedTurn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.turn_id = "turn-9";
+    std::vector<api::UsageReport> post_step_reports;
+    wiring.on_post_step_hook = [&post_step_reports](const api::UsageReport& report) {
+        post_step_reports.push_back(report);
+    };
+
+    REQUIRE(loop.Run("问", wiring).has_value());
+    REQUIRE(post_step_reports.size() == 1);
+    CHECK(post_step_reports[0].step_id == "step-1");
+    CHECK(post_step_reports[0].turn_id == "turn-9");
+    CHECK(post_step_reports[0].attempts == 1);
+    CHECK(post_step_reports[0].api_duration_ms >= 0);
+    CHECK(post_step_reports[0].stop_reason == "end_turn");
+}

@@ -461,6 +461,8 @@ add_library(lubancode_engine STATIC
   src/hooks/loader.cpp
   src/hooks/dispatcher.cpp
   src/hooks/detached.cpp
+  # 四层生命周期单 P2:可靠 Post 的 durable outbox/ack 账本。
+  src/hooks/outbox.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp

@@ -971,6 +971,24 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 活一任务,续跑/接力跨 Run 不裂不重号;step_index 留作 Run 内展示
         // 坐标(continuation 会重号,身份不认它)。
         const std::string step_id = agent.NextStepId();
+        // 四层生命周期单 P2:PreStep——请求构建前的准入口(§4.1:steer 注入
+        // 合批之后)。additional_context 先入史(末条 user 追加/另起,与
+        // inbox 来信同一规则),随本 Step 请求发走;blocked = 否决本 Step,
+        // 语义是终止本 Turn——按收场交账,不冒充错误,也不跳过继续。
+        if (wiring.on_pre_step_hook) {
+            const runtime::PromptGate step_gate = wiring.on_pre_step_hook(step_id, wiring.turn_id, step_index);
+            for (const std::string& context : step_gate.additional_context) {
+                api::Message injected;
+                injected.role = api::Role::User;
+                injected.content.push_back(api::TextBlock{context});
+                context_.InjectIncoming(std::move(injected));
+            }
+            if (step_gate.blocked) {
+                RunOutcome outcome{false, false, false, last_stop_reason, steps_used};
+                outcome.output_budget = budget_report;
+                return outcome;
+            }
+        }
         // 皮上的会话级叠层就地生效(批四·病十一其三:五层请求改写后端
         // 退役):延迟索引段 -> 模型目录指令 -> 魂,拼装次序与从前传输层
         // 包装的次序一字不差(索引在前、指令居中、魂压轴)。从前这些改动
@@ -1835,41 +1853,49 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
+        // 四层生命周期单 P1/P2:Step 的完整账(usage + 身份/尝试/耗时)拼成
+        // 一份 UsageReport——事件流(显示/台账侧)与 PostStep Hook 共用,
+        // 拼法一处定。events 空(静默轮)也拼:PostStep 有配置就发。
+        api::UsageReport report;
+        report.usage = assembler.usage();
+        report.step_index = step_index;
+        report.provider_response_id = stream_request_id;
+        report.model = stream_model;
+        report.cache_epoch = context_.cache_epoch();
+        report.epoch_break_reason = step_epoch_break_reason;
+        report.prefix_append_only = step_prefix_append_only;
+        // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
+        // 明报全零也是真,没报不许拿 0 冒充。
+        report.reported_by_provider = assembler.usage_seen();
+        report.cache_reported_by_provider = assembler.cache_seen();
+        // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
+        // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
+        // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。
+        report.epoch_first_request = !step_prefix_account.had_previous;
+        report.system_hash = step_prefix_account.system_hash;
+        report.tools_hash = step_prefix_account.tools_hash;
+        report.prefix_hash = step_prefix_account.prefix_hash;
+        report.stable_prefix_messages = step_prefix_account.stable_prefix_messages;
+        report.total_messages = step_prefix_account.total_messages;
+        report.wire_common_prefix_bytes = step_prefix_account.wire_common_prefix_bytes;
+        // 四层生命周期单 P1:Step 身份/尝试/耗时随 usage 流水带出——
+        // StepUsageRecord 据此逐笔记账(attempts 用恢复环的 Started 计数,
+        // 首尝试即 1;api_duration 从首枚尝试发出到此刻的墙钟)。
+        report.step_id = step_id;
+        report.turn_id = wiring.turn_id;
+        report.attempts = recovery_attempts_used;
+        report.api_duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                   step_api_started)
+                .count();
+        report.stop_reason = stop_reason;
         if (wiring.events != nullptr) {
-            api::UsageReport report;
-            report.usage = assembler.usage();
-            report.step_index = step_index;
-            report.provider_response_id = stream_request_id;
-            report.model = stream_model;
-            report.cache_epoch = context_.cache_epoch();
-            report.epoch_break_reason = step_epoch_break_reason;
-            report.prefix_append_only = step_prefix_append_only;
-            // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
-            // 明报全零也是真,没报不许拿 0 冒充。
-            report.reported_by_provider = assembler.usage_seen();
-            report.cache_reported_by_provider = assembler.cache_seen();
-            // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
-            // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
-            // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。
-            report.epoch_first_request = !step_prefix_account.had_previous;
-            report.system_hash = step_prefix_account.system_hash;
-            report.tools_hash = step_prefix_account.tools_hash;
-            report.prefix_hash = step_prefix_account.prefix_hash;
-            report.stable_prefix_messages = step_prefix_account.stable_prefix_messages;
-            report.total_messages = step_prefix_account.total_messages;
-            report.wire_common_prefix_bytes = step_prefix_account.wire_common_prefix_bytes;
-            // 四层生命周期单 P1:Step 身份/尝试/耗时随 usage 流水带出——
-            // StepUsageRecord 据此逐笔记账(attempts 用恢复环的 Started 计数,
-            // 首尝试即 1;api_duration 从首枚尝试发出到此刻的墙钟)。
-            report.step_id = step_id;
-            report.turn_id = wiring.turn_id;
-            report.attempts = recovery_attempts_used;
-            report.api_duration_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                       step_api_started)
-                    .count();
-            report.stop_reason = stop_reason;
             wiring.events->OnUsage(report);
+        }
+        // 四层生命周期单 P2:PostStep——assistant 响应落账后、派生 Action
+        // 执行前(§4.1)。只观察;API 耗时与 Action 的工具耗时在此分账可证。
+        if (wiring.on_post_step_hook) {
+            wiring.on_post_step_hook(report);
         }
 
         // 防御:stop_reason 说的是 end_turn(或者干脆是空的——终止帧丢了),
