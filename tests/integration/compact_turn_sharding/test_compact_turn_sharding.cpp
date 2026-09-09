@@ -559,6 +559,27 @@ RunMetrics RunOnce(const EvalTask& task, const ModelFaults& faults, std::string*
         if (failure_note != nullptr) {
             *failure_note = result.error().message;
         }
+        // 定位用:各 map 请求钉的 turn 标签 + reduce 材料正文(截尾)——
+        // 拒收时才打,平时零噪。
+        for (const auto& request : backend.captured_requests) {
+            const std::size_t pin = request.system.find("来源 turn ");
+            if (pin != std::string::npos) {
+                const std::size_t line_end = request.system.find('\n', pin);
+                std::cout << "  [map-label] "
+                          << request.system.substr(
+                                 pin, (line_end == std::string::npos ? request.system.size() : line_end) - pin)
+                          << "\n";
+            }
+        }
+        if (!backend.captured_requests.empty() && !backend.captured_requests.back().messages.empty()) {
+            std::string body;
+            for (const auto& block : backend.captured_requests.back().messages[0].content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                    body += text->text;
+                }
+            }
+            std::cout << "  [reduce-body] " << body.substr(0, 4000) << "\n";
+        }
         return metrics;
     }
     metrics.compact_ok = true;
