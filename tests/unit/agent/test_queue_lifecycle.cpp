@@ -96,7 +96,9 @@ TEST_CASE("状态机:claim 留队不重取,commit 出队;claimed 冻编辑") {
 
 TEST_CASE("状态机:pump 取件 claim→commit;失败退回 = returned(Queued+attempts)") {
     SteeringQueue queue;
-    queue.Enqueue(MessageTarget::Main(), "轮末话");
+    // 泵的取件范围是 slash 与显式 followup(§五.4/§五.5):普通 steer 缺省
+    // 不走泵。这里用 followup 走全状态机。
+    queue.EnqueueWithIntent(MessageTarget::Main(), "轮末话", QueueIntent::Followup, QueueDeadline::TurnEnd);
 
     auto head = queue.ClaimFirstAutoSendable(MessageTarget::Main());
     REQUIRE(head.has_value());
