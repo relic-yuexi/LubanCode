@@ -183,8 +183,13 @@ std::vector<QueuedMessage> SteeringQueue::TakeDeliverable(MessageTarget target) 
             ++it;
             continue;
         }
-        // P3:带过期标注的 steer 不投(取走类口同判;生产注入路已迁
-        // ClaimDeliverable,这里兜旧调用方与测试)。
+        // P3 两条(与 ClaimDeliverable 同界):followup 不从工具边界走
+        //(它等轮末泵另起新轮);带过期标注的 steer 不投(用户没点头)。
+        // 生产注入路已迁 ClaimDeliverable,这里兜旧调用方与测试。
+        if (it->intent == QueueIntent::Followup) {
+            ++it;
+            continue;
+        }
         if (it->target == target && it_is_claimable(*it) && !it->edit_open) {
             out.push_back(std::move(*it));
             it = items_.erase(it);
@@ -200,6 +205,9 @@ std::optional<QueuedMessage> SteeringQueue::TakeFirstDeliverable(MessageTarget t
     for (auto it = items_.begin(); it != items_.end(); ++it) {
         if (IsQueuedSlashText(it->text)) {
             continue;  // slash 让路,规矩与 TakeDeliverable 同款
+        }
+        if (it->intent == QueueIntent::Followup) {
+            continue;  // P3:followup 不从工具边界走,规矩与 TakeDeliverable 同款
         }
         if (it->target == target && it_is_claimable(*it) && !it->edit_open) {
             std::optional<QueuedMessage> out = std::move(*it);
