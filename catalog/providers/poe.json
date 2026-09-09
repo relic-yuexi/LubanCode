@@ -1,7 +1,14 @@
 {
   "platform": "poe",
-  "providers": {
-    "poe": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "poe",
       "name": "Poe",
       "description": "Poe OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -18,7 +25,17 @@
         "verified": false
       },
       "docs_url": "https://creator.poe.com/docs/external-applications/openai-compatible-api",
-      "models": {
+      "models": [
+        "Claude-Fable-5",
+        "Claude-Opus-4.6",
+        "Claude-Opus-4.7",
+        "Claude-Opus-4.8",
+        "Claude-Sonnet-4.6",
+        "Claude-Sonnet-5",
+        "Gemini-3.1-Pro",
+        "GPT-5.4"
+      ],
+      "endpoint_models": {
         "Claude-Fable-5": {
           "name": "Claude Fable 5",
           "context_window": 1000000,
@@ -307,43 +324,11 @@
             },
             "wireDialect": "effort"
           }
-        },
-        "GPT-5.4": {
-          "name": "GPT-5.4",
-          "context_window": 1050000,
-          "max_output": 128000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "none",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          }
         }
       }
     },
-    "poe-anthropic": {
+    {
+      "id": "poe-anthropic",
       "name": "Poe (Anthropic)",
       "description": "Poe Anthropic Messages API",
       "wire": "anthropic-messages",
@@ -366,7 +351,17 @@
         "x-api-key": "${LUBANCODE_API_KEY}",
         "anthropic-version": "2023-06-01"
       },
-      "models": {
+      "models": [
+        "Claude-Fable-5",
+        "Claude-Opus-4.6",
+        "Claude-Opus-4.7",
+        "Claude-Opus-4.8",
+        "Claude-Sonnet-4.6",
+        "Claude-Sonnet-5",
+        "Gemini-3.1-Pro",
+        "GPT-5.4"
+      ],
+      "endpoint_models": {
         "Claude-Fable-5": {
           "name": "Claude Fable 5",
           "context_window": 1000000,
@@ -676,41 +671,9 @@
               "effort_path": "output_config.effort"
             }
           }
-        },
-        "GPT-5.4": {
-          "name": "GPT-5.4",
-          "context_window": 1050000,
-          "max_output": 128000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "none",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          }
         }
       }
     }
-  }
+  ],
+  "models_ref": "models/poe.json"
 }

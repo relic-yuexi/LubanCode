@@ -1,0 +1,25 @@
+{
+  "owner": "qiniu",
+  "models": {
+    "mimo-v2-flash": {
+      "name": "MiMo-V2-Flash",
+      "context_window": 262144,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    }
+  }
+}

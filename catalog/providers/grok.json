@@ -1,7 +1,14 @@
 {
   "platform": "grok",
-  "providers": {
-    "grok": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "grok",
       "name": "Grok",
       "description": "Grok OpenAI Responses API",
       "wire": "openai-responses",
@@ -20,362 +27,37 @@
         "verified": false
       },
       "docs_url": "https://docs.x.ai/",
-      "models": {
-        "grok-2": {
-          "name": "Grok 2",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-3": {
-          "name": "Grok 3",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-3-fast": {
-          "name": "Grok 3 Fast",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-3-mini": {
-          "name": "Grok 3 Mini",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "high"
-            ]
-          }
-        },
-        "grok-3-mini-fast": {
-          "name": "Grok 3 Mini Fast",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "high"
-            ]
-          }
-        },
-        "grok-4": {
-          "name": "Grok 4",
-          "context_window": 256000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true
-          }
-        },
-        "grok-4.1": {
-          "name": "Grok 4.1",
-          "context_window": 256000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          }
-        },
-        "grok-4.1-fast": {
-          "name": "Grok 4.1 Fast Reasoning",
-          "context_window": 1000000,
-          "max_output": 1000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.1-fast-non-reasoning": {
-          "name": "Grok 4.1 Fast Non-Reasoning",
-          "context_window": 1000000,
-          "max_output": 1000000,
-          "capabilities": {
-            "tools": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20": {
-          "name": "Grok 4.20 (Reasoning)",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-0309-non-reasoning": {
-          "name": "Grok 4.20 (Non-Reasoning)",
-          "context_window": 1000000,
-          "max_output": 30000,
-          "capabilities": {
-            "tools": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-multi-agent": {
-          "name": "Grok 4.20 Multi-Agent",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          }
-        },
-        "grok-4.20-multi-agent-beta": {
-          "name": "Grok 4.20 Multi Agent Beta",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-non-reasoning": {
-          "name": "Grok 4.20 Non-Reasoning",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-non-reasoning-beta": {
-          "name": "Grok 4.20 Beta Non-Reasoning",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-reasoning-beta": {
-          "name": "Grok 4.20 Beta Reasoning",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.3": {
-          "name": "Grok 4.3",
-          "context_window": 1000000,
-          "max_output": 1000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "none",
-                  "low",
-                  "medium",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        },
-        "grok-4.5": {
-          "name": "Grok 4.5",
-          "context_window": 500000,
-          "max_output": 500000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "default_think": "high",
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "medium",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        },
-        "grok-4.6": {
-          "name": "Grok 4.6",
-          "context_window": 500000,
-          "max_output": 500000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          }
-        },
-        "grok-4-fast": {
-          "name": "Grok 4 Fast",
-          "context_window": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          }
-        },
-        "grok-beta": {
-          "name": "Grok Beta",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-build-0-1": {
-          "name": "Grok Build 0.1",
-          "context_window": 256000,
-          "max_output": 256000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-code-fast-1": {
-          "name": "Grok Code Fast 1",
-          "context_window": 256000,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-latest": {
-          "name": "xAI: Grok Latest",
-          "context_window": 500000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-voice-think-fast-1-0": {
-          "name": "Grok Voice Think Fast 1.0",
-          "capabilities": {
-            "audio-recognition": true,
-            "audio-generation": true
-          }
-        },
-        "grok-voice-think-fast-2-0": {
-          "name": "Grok Voice Think Fast 2.0",
-          "capabilities": {
-            "audio-recognition": true,
-            "audio-generation": true
-          }
-        }
-      }
+      "models": [
+        "grok-2",
+        "grok-3",
+        "grok-3-fast",
+        "grok-3-mini",
+        "grok-3-mini-fast",
+        "grok-4",
+        "grok-4.1",
+        "grok-4.1-fast",
+        "grok-4.1-fast-non-reasoning",
+        "grok-4.20",
+        "grok-4.20-0309-non-reasoning",
+        "grok-4.20-multi-agent",
+        "grok-4.20-multi-agent-beta",
+        "grok-4.20-non-reasoning",
+        "grok-4.20-non-reasoning-beta",
+        "grok-4.20-reasoning-beta",
+        "grok-4.3",
+        "grok-4.5",
+        "grok-4.6",
+        "grok-4-fast",
+        "grok-beta",
+        "grok-build-0-1",
+        "grok-code-fast-1",
+        "grok-latest",
+        "grok-voice-think-fast-1-0",
+        "grok-voice-think-fast-2-0"
+      ]
     },
-    "grok-chat": {
+    {
+      "id": "grok-chat",
       "name": "Grok (OpenAI-compatible)",
       "description": "Grok OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -394,360 +76,35 @@
         "verified": false
       },
       "docs_url": "https://docs.x.ai/",
-      "models": {
-        "grok-2": {
-          "name": "Grok 2",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-3": {
-          "name": "Grok 3",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-3-fast": {
-          "name": "Grok 3 Fast",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-3-mini": {
-          "name": "Grok 3 Mini",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "high"
-            ]
-          }
-        },
-        "grok-3-mini-fast": {
-          "name": "Grok 3 Mini Fast",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "high"
-            ]
-          }
-        },
-        "grok-4": {
-          "name": "Grok 4",
-          "context_window": 256000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true
-          }
-        },
-        "grok-4.1": {
-          "name": "Grok 4.1",
-          "context_window": 256000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          }
-        },
-        "grok-4.1-fast": {
-          "name": "Grok 4.1 Fast Reasoning",
-          "context_window": 1000000,
-          "max_output": 1000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.1-fast-non-reasoning": {
-          "name": "Grok 4.1 Fast Non-Reasoning",
-          "context_window": 1000000,
-          "max_output": 1000000,
-          "capabilities": {
-            "tools": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20": {
-          "name": "Grok 4.20 (Reasoning)",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-0309-non-reasoning": {
-          "name": "Grok 4.20 (Non-Reasoning)",
-          "context_window": 1000000,
-          "max_output": 30000,
-          "capabilities": {
-            "tools": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-multi-agent": {
-          "name": "Grok 4.20 Multi-Agent",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          }
-        },
-        "grok-4.20-multi-agent-beta": {
-          "name": "Grok 4.20 Multi Agent Beta",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-non-reasoning": {
-          "name": "Grok 4.20 Non-Reasoning",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-non-reasoning-beta": {
-          "name": "Grok 4.20 Beta Non-Reasoning",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.20-reasoning-beta": {
-          "name": "Grok 4.20 Beta Reasoning",
-          "context_window": 2000000,
-          "max_output": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-4.3": {
-          "name": "Grok 4.3",
-          "context_window": 1000000,
-          "max_output": 1000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "none",
-                  "low",
-                  "medium",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        },
-        "grok-4.5": {
-          "name": "Grok 4.5",
-          "context_window": 500000,
-          "max_output": 500000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "default_think": "high",
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "medium",
-                  "high"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        },
-        "grok-4.6": {
-          "name": "Grok 4.6",
-          "context_window": 500000,
-          "max_output": 500000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          }
-        },
-        "grok-4-fast": {
-          "name": "Grok 4 Fast",
-          "context_window": 2000000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          }
-        },
-        "grok-beta": {
-          "name": "Grok Beta",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-build-0-1": {
-          "name": "Grok Build 0.1",
-          "context_window": 256000,
-          "max_output": 256000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-code-fast-1": {
-          "name": "Grok Code Fast 1",
-          "context_window": 256000,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "grok-latest": {
-          "name": "xAI: Grok Latest",
-          "context_window": 500000,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          }
-        },
-        "grok-voice-think-fast-1-0": {
-          "name": "Grok Voice Think Fast 1.0",
-          "capabilities": {
-            "audio-recognition": true,
-            "audio-generation": true
-          }
-        },
-        "grok-voice-think-fast-2-0": {
-          "name": "Grok Voice Think Fast 2.0",
-          "capabilities": {
-            "audio-recognition": true,
-            "audio-generation": true
-          }
-        }
-      }
+      "models": [
+        "grok-2",
+        "grok-3",
+        "grok-3-fast",
+        "grok-3-mini",
+        "grok-3-mini-fast",
+        "grok-4",
+        "grok-4.1",
+        "grok-4.1-fast",
+        "grok-4.1-fast-non-reasoning",
+        "grok-4.20",
+        "grok-4.20-0309-non-reasoning",
+        "grok-4.20-multi-agent",
+        "grok-4.20-multi-agent-beta",
+        "grok-4.20-non-reasoning",
+        "grok-4.20-non-reasoning-beta",
+        "grok-4.20-reasoning-beta",
+        "grok-4.3",
+        "grok-4.5",
+        "grok-4.6",
+        "grok-4-fast",
+        "grok-beta",
+        "grok-build-0-1",
+        "grok-code-fast-1",
+        "grok-latest",
+        "grok-voice-think-fast-1-0",
+        "grok-voice-think-fast-2-0"
+      ]
     }
-  }
+  ],
+  "models_ref": "models/grok.json"
 }

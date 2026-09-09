@@ -1,7 +1,14 @@
 {
   "platform": "dmxapi",
-  "providers": {
-    "dmxapi": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "dmxapi",
       "name": "DMXAPI",
       "description": "DMXAPI OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -18,38 +25,15 @@
         "verified": false
       },
       "docs_url": "https://doc.dmxapi.cn/",
-      "models": {
-        "gemini-2.5-flash-image": {
-          "name": "Gemini 2.5-flash-image",
-          "context_window": 32768,
-          "capabilities": {
-            "reasoning": true,
-            "image": true,
-            "image-generation": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 24576,
-                "min": 0
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 24576,
-              "min": 0
-            },
-            "wireDialect": "budget"
-          }
-        },
+      "models": [
+        "gemini-2.5-flash-image",
+        "gemini-3.1-flash-image-preview",
+        "gpt-image-1.5",
+        "musesteamer-air-image",
+        "nano-banana",
+        "nano-banana-2"
+      ],
+      "endpoint_models": {
         "gemini-3.1-flash-image-preview": {
           "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
           "context_window": 131072,
@@ -85,20 +69,6 @@
             },
             "wireDialect": "effort"
           }
-        },
-        "gpt-image-1.5": {
-          "name": "GPT-IMAGE-1.5",
-          "capabilities": {
-            "image": true,
-            "image-generation": true,
-            "file_input": true
-          }
-        },
-        "musesteamer-air-image": {
-          "name": "MuseSteamer Air Image"
-        },
-        "nano-banana": {
-          "name": "Nano Banana"
         },
         "nano-banana-2": {
           "name": "Nano Banana 2",
@@ -140,7 +110,8 @@
         }
       }
     },
-    "dmxapi-anthropic": {
+    {
+      "id": "dmxapi-anthropic",
       "name": "DMXAPI (Anthropic)",
       "description": "DMXAPI Anthropic Messages API",
       "wire": "anthropic-messages",
@@ -163,38 +134,15 @@
         "x-api-key": "${LUBANCODE_API_KEY}",
         "anthropic-version": "2023-06-01"
       },
-      "models": {
-        "gemini-2.5-flash-image": {
-          "name": "Gemini 2.5-flash-image",
-          "context_window": 32768,
-          "capabilities": {
-            "reasoning": true,
-            "image": true,
-            "image-generation": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 24576,
-                "min": 0
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 24576,
-              "min": 0
-            },
-            "wireDialect": "budget"
-          }
-        },
+      "models": [
+        "gemini-2.5-flash-image",
+        "gemini-3.1-flash-image-preview",
+        "gpt-image-1.5",
+        "musesteamer-air-image",
+        "nano-banana",
+        "nano-banana-2"
+      ],
+      "endpoint_models": {
         "gemini-3.1-flash-image-preview": {
           "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
           "context_window": 131072,
@@ -233,20 +181,6 @@
               "effort_path": "output_config.effort"
             }
           }
-        },
-        "gpt-image-1.5": {
-          "name": "GPT-IMAGE-1.5",
-          "capabilities": {
-            "image": true,
-            "image-generation": true,
-            "file_input": true
-          }
-        },
-        "musesteamer-air-image": {
-          "name": "MuseSteamer Air Image"
-        },
-        "nano-banana": {
-          "name": "Nano Banana"
         },
         "nano-banana-2": {
           "name": "Nano Banana 2",
@@ -291,7 +225,8 @@
         }
       }
     },
-    "dmxapi-gemini": {
+    {
+      "id": "dmxapi-gemini",
       "name": "DMXAPI (Google)",
       "description": "DMXAPI Google Generate Content API",
       "wire": "google-generate-content",
@@ -307,38 +242,15 @@
         "verified": false
       },
       "docs_url": "https://doc.dmxapi.cn/",
-      "models": {
-        "gemini-2.5-flash-image": {
-          "name": "Gemini 2.5-flash-image",
-          "context_window": 32768,
-          "capabilities": {
-            "reasoning": true,
-            "image": true,
-            "image-generation": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 24576,
-                "min": 0
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 24576,
-              "min": 0
-            },
-            "wireDialect": "budget"
-          }
-        },
+      "models": [
+        "gemini-2.5-flash-image",
+        "gemini-3.1-flash-image-preview",
+        "gpt-image-1.5",
+        "musesteamer-air-image",
+        "nano-banana",
+        "nano-banana-2"
+      ],
+      "endpoint_models": {
         "gemini-3.1-flash-image-preview": {
           "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
           "context_window": 131072,
@@ -374,20 +286,6 @@
             },
             "wireDialect": "effort"
           }
-        },
-        "gpt-image-1.5": {
-          "name": "GPT-IMAGE-1.5",
-          "capabilities": {
-            "image": true,
-            "image-generation": true,
-            "file_input": true
-          }
-        },
-        "musesteamer-air-image": {
-          "name": "MuseSteamer Air Image"
-        },
-        "nano-banana": {
-          "name": "Nano Banana"
         },
         "nano-banana-2": {
           "name": "Nano Banana 2",
@@ -429,5 +327,6 @@
         }
       }
     }
-  }
+  ],
+  "models_ref": "models/dmxapi.json"
 }

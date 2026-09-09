@@ -1,7 +1,14 @@
 {
   "platform": "moonshot",
-  "providers": {
-    "moonshot": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "moonshot",
       "name": "Moonshot AI",
       "description": "Moonshot AI OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -18,7 +25,14 @@
         "verified": false
       },
       "docs_url": "https://platform.moonshot.cn/docs/",
-      "models": {
+      "models": [
+        "kimi-k2.6",
+        "kimi-k3",
+        "kimi-k2.5",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed"
+      ],
+      "endpoint_models": {
         "kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
@@ -160,7 +174,8 @@
         }
       }
     },
-    "moonshot-anthropic": {
+    {
+      "id": "moonshot-anthropic",
       "name": "Moonshot AI (Anthropic)",
       "description": "Moonshot AI Anthropic Messages API",
       "wire": "anthropic-messages",
@@ -183,7 +198,14 @@
         "x-api-key": "${LUBANCODE_API_KEY}",
         "anthropic-version": "2023-06-01"
       },
-      "models": {
+      "models": [
+        "kimi-k2.6",
+        "kimi-k3",
+        "kimi-k2.5",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed"
+      ],
+      "endpoint_models": {
         "kimi-k2.6": {
           "name": "Kimi K2.6",
           "context_window": 262144,
@@ -361,5 +383,5 @@
         }
       }
     }
-  }
+  ]
 }

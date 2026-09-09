@@ -1,0 +1,85 @@
+{
+  "owner": "stepfun",
+  "models": {
+    "step-1-32k": {
+      "name": "Step 1 (32K)",
+      "context_window": 32768,
+      "max_output": 32768,
+      "capabilities": {
+        "tools": true
+      }
+    },
+    "step-2-16k": {
+      "name": "Step 2 (16K)",
+      "context_window": 16384,
+      "max_output": 8192,
+      "capabilities": {
+        "tools": true
+      }
+    },
+    "step-3-5-flash": {
+      "name": "Step 3.5 Flash",
+      "context_window": 262144,
+      "max_output": 262114,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "image": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "supportedEfforts": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    "step-3-7-flash": {
+      "name": "Step 3.7 Flash",
+      "context_window": 262144,
+      "max_output": 256000,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "image": true,
+        "video": true,
+        "video-recognition": true,
+        "file_input": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "effort",
+            "values": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "supportedEfforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    }
+  }
+}

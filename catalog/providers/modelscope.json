@@ -1,7 +1,14 @@
 {
   "platform": "modelscope",
-  "providers": {
-    "modelscope": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "modelscope",
       "name": "ModelScope",
       "description": "ModelScope OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -18,150 +25,18 @@
         "verified": false
       },
       "docs_url": "https://modelscope.cn/docs/model-service/API-Inference/intro",
-      "models": {
-        "ZhipuAI/GLM-4.5": {
-          "name": "GLM-4.5",
-          "context_window": 131072,
-          "max_output": 98304,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        },
-        "ZhipuAI/GLM-4.6": {
-          "name": "GLM-4.6",
-          "context_window": 204800,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        },
-        "Qwen/Qwen3-235B-A22B-Thinking-2507": {
-          "name": "Qwen3 235B-A22B",
-          "context_window": 262144,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 81920,
-                "min": 1
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 81920,
-              "min": 1
-            }
-          }
-        },
-        "Qwen/Qwen3-235B-A22B-Instruct-2507": {
-          "name": "Qwen3 235B A22B Instruct 2507",
-          "context_window": 262144,
-          "max_output": 16384,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        },
-        "Qwen/Qwen3-30B-A3B-Thinking-2507": {
-          "name": "Qwen: Qwen3 30B A3B Thinking 2507",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 38912,
-                "min": 1024
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 38912,
-              "min": 1024
-            }
-          }
-        },
-        "Qwen/Qwen3-30B-A3B-Instruct-2507": {
-          "name": "Qwen: Qwen3 30B A3B Instruct 2507",
-          "context_window": 262144,
-          "capabilities": {
-            "tools": true,
-            "structured_output": true
-          }
-        },
-        "Qwen/Qwen3-Coder-30B-A3B-Instruct": {
-          "name": "Qwen3-Coder 30B-A3B Instruct",
-          "context_window": 262144,
-          "max_output": 65536,
-          "capabilities": {
-            "tools": true,
-            "structured_output": true
-          }
-        }
-      }
+      "models": [
+        "ZhipuAI/GLM-4.5",
+        "ZhipuAI/GLM-4.6",
+        "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "Qwen/Qwen3-30B-A3B-Thinking-2507",
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+      ]
     },
-    "modelscope-anthropic": {
+    {
+      "id": "modelscope-anthropic",
       "name": "ModelScope (Anthropic)",
       "description": "ModelScope Anthropic Messages API",
       "wire": "anthropic-messages",
@@ -184,148 +59,16 @@
         "x-api-key": "${LUBANCODE_API_KEY}",
         "anthropic-version": "2023-06-01"
       },
-      "models": {
-        "ZhipuAI/GLM-4.5": {
-          "name": "GLM-4.5",
-          "context_window": 131072,
-          "max_output": 98304,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        },
-        "ZhipuAI/GLM-4.6": {
-          "name": "GLM-4.6",
-          "context_window": 204800,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        },
-        "Qwen/Qwen3-235B-A22B-Thinking-2507": {
-          "name": "Qwen3 235B-A22B",
-          "context_window": 262144,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 81920,
-                "min": 1
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 81920,
-              "min": 1
-            }
-          }
-        },
-        "Qwen/Qwen3-235B-A22B-Instruct-2507": {
-          "name": "Qwen3 235B A22B Instruct 2507",
-          "context_window": 262144,
-          "max_output": 16384,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        },
-        "Qwen/Qwen3-30B-A3B-Thinking-2507": {
-          "name": "Qwen: Qwen3 30B A3B Thinking 2507",
-          "context_window": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 38912,
-                "min": 1024
-              },
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 38912,
-              "min": 1024
-            }
-          }
-        },
-        "Qwen/Qwen3-30B-A3B-Instruct-2507": {
-          "name": "Qwen: Qwen3 30B A3B Instruct 2507",
-          "context_window": 262144,
-          "capabilities": {
-            "tools": true,
-            "structured_output": true
-          }
-        },
-        "Qwen/Qwen3-Coder-30B-A3B-Instruct": {
-          "name": "Qwen3-Coder 30B-A3B Instruct",
-          "context_window": 262144,
-          "max_output": 65536,
-          "capabilities": {
-            "tools": true,
-            "structured_output": true
-          }
-        }
-      }
+      "models": [
+        "ZhipuAI/GLM-4.5",
+        "ZhipuAI/GLM-4.6",
+        "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "Qwen/Qwen3-30B-A3B-Thinking-2507",
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+      ]
     }
-  }
+  ],
+  "models_ref": "models/modelscope.json"
 }

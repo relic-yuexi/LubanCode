@@ -1,7 +1,14 @@
 {
   "platform": "vllm",
-  "providers": {
-    "vllm": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "vllm",
       "name": "vLLM (本地)",
       "description": "vLLM 本地推理服务 OpenAI 兼容 Chat API。base_url 写到 /v1,端口按本机部署改;无鉴权部署用 /provider 把 auth 切成 none。方言以 vLLM 0.27.1 + qwen3.8-27b 真机实测为准。",
       "wire": "openai-chat-completions",
@@ -22,7 +29,10 @@
         "verified": true
       },
       "docs_url": "https://docs.vllm.ai/",
-      "models": {
+      "models": [
+        "qwen3.8-27b"
+      ],
+      "endpoint_models": {
         "qwen3.8-27b": {
           "name": "Qwen3.8 27B (vLLM)",
           "description": "思考模型。开关只有 chat_template_kwargs.enable_thinking 真生效(顶层 enable_thinking 被端无视);思考增量字段叫 reasoning。",
@@ -42,7 +52,8 @@
         }
       }
     },
-    "vllm-anthropic": {
+    {
+      "id": "vllm-anthropic",
       "name": "vLLM (本地, Messages)",
       "description": "vLLM 本地推理服务 Anthropic 兼容层 /v1/messages。base_url 写根(不带 /v1);thinking.type=disabled 端上无效(思考关不掉),要关思考走 vllm(chat 面)。",
       "wire": "anthropic-messages",
@@ -57,7 +68,10 @@
         "verified": true
       },
       "docs_url": "https://docs.vllm.ai/",
-      "models": {
+      "models": [
+        "qwen3.8-27b"
+      ],
+      "endpoint_models": {
         "qwen3.8-27b": {
           "name": "Qwen3.8 27B (vLLM Messages)",
           "description": "思考块带 32 位 hex 假签(signature),回传原样带走;工具轮 thinking + tool_use 完整走得通。",
@@ -73,5 +87,5 @@
         }
       }
     }
-  }
+  ]
 }

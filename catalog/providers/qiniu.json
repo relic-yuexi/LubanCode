@@ -1,7 +1,14 @@
 {
   "platform": "qiniu",
-  "providers": {
-    "qiniu": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "qiniu",
       "name": "Qiniu",
       "description": "Qiniu OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -18,30 +25,12 @@
         "verified": false
       },
       "docs_url": "https://developer.qiniu.com/aitokenapi",
-      "models": {
-        "mimo-v2-flash": {
-          "name": "MiMo-V2-Flash",
-          "context_window": 262144,
-          "max_output": 65536,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        }
-      }
+      "models": [
+        "mimo-v2-flash"
+      ]
     },
-    "qiniu-anthropic": {
+    {
+      "id": "qiniu-anthropic",
       "name": "Qiniu (Anthropic)",
       "description": "Qiniu Anthropic Messages API",
       "wire": "anthropic-messages",
@@ -64,28 +53,10 @@
         "x-api-key": "${LUBANCODE_API_KEY}",
         "anthropic-version": "2023-06-01"
       },
-      "models": {
-        "mimo-v2-flash": {
-          "name": "MiMo-V2-Flash",
-          "context_window": 262144,
-          "max_output": 65536,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        }
-      }
+      "models": [
+        "mimo-v2-flash"
+      ]
     }
-  }
+  ],
+  "models_ref": "models/qiniu.json"
 }

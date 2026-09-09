@@ -1,5 +1,5 @@
 {
-  "source_schema_version": 1,
+  "source_schema_version": 2,
   "revision": "2026-09-09",
   "shards": [
     "providers/openai.json",

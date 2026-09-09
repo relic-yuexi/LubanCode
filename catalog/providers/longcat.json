@@ -1,7 +1,14 @@
 {
   "platform": "longcat",
-  "providers": {
-    "longcat": {
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "longcat",
       "name": "LongCat",
       "description": "LongCat OpenAI-compatible Chat API",
       "wire": "openai-chat-completions",
@@ -18,30 +25,12 @@
         "verified": false
       },
       "docs_url": "https://longcat.chat/platform/docs/zh/",
-      "models": {
-        "LongCat-2.0": {
-          "name": "LongCat-2.0",
-          "context_window": 1048576,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        }
-      }
+      "models": [
+        "LongCat-2.0"
+      ]
     },
-    "longcat-anthropic": {
+    {
+      "id": "longcat-anthropic",
       "name": "LongCat (Anthropic)",
       "description": "LongCat Anthropic Messages API",
       "wire": "anthropic-messages",
@@ -64,28 +53,10 @@
         "x-api-key": "${LUBANCODE_API_KEY}",
         "anthropic-version": "2023-06-01"
       },
-      "models": {
-        "LongCat-2.0": {
-          "name": "LongCat-2.0",
-          "context_window": 1048576,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "toggle"
-              }
-            ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ]
-          }
-        }
-      }
+      "models": [
+        "LongCat-2.0"
+      ]
     }
-  }
+  ],
+  "models_ref": "models/longcat.json"
 }
