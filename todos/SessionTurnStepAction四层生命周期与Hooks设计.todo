@@ -1,6 +1,6 @@
 # Session / Turn / Step / Action 四层生命周期与分层 Hooks 设计
 
-- 状态：待实现（本轮只落设计文档，不改生产代码）
+- 状态：实施中（P0 定案已落，P1-P3 分期推进）
 - 日期：2026-09-09
 - 级别：P1（执行模型的名词地基，牵动预算、队列、Hooks、usage 与轨迹多层账目）
 - 范围：agent loop 与 turn runtime 的层级语义、hooks 事件体系分层、steering 队列的 steer/followup 显式化、usage/trajectory 归属、术语词表立法、相关测试与文档。
@@ -103,13 +103,37 @@
 
 ### P0：定案与盘点（只读）
 
-- [ ] 复核 `SessionEnd` 实际触发面，定 `PostSessionHook` 映射。
-- [ ] 词表立法：turn_budget.hpp 词条扩 Session/Turn/Step/Action 四条 + 旧 "step"（input round 义）互注。
-- [ ] ID 方案定案：字段形状、持久化位置、断线恢复对齐规则。
-- [ ] 队列条目现状盘点：哪些入口会入队，今日有无事实上的 followup 用法。
-- [ ] Hook 能力矩阵逐行对既有 types.hpp 落差清单。
+- [x] 复核 `SessionEnd` 实际触发面，定 `PostSessionHook` 映射。
+- [x] 词表立法：turn_budget.hpp 词条扩 Session/Turn/Step/Action 四条 + 旧 "step"（input round 义）互注。
+- [x] ID 方案定案：字段形状、持久化位置、断线恢复对齐规则。
+- [x] 队列条目现状盘点：哪些入口会入队，今日有无事实上的 followup 用法。
+- [x] Hook 能力矩阵逐行对既有 types.hpp 落差清单。
 
 验收：每项有书面结论与真实生效链路，不以本单建议冒充用户批准。
+
+#### P0 定案纪要（2026-09-09 实施前只读复核，行号为当日快照）
+
+1. **SessionEnd 实际触发面（grep 全库仅两处）**：
+   - `src/app/cli_app.cpp:295-305` `SessionHookScope` 析构，reason=exit——只在真正进 AskOnce/InteractiveLoop 的进程上构造，硬杀（taskkill/断电）不跑，advisory（文件头注释自认）。
+   - `src/app/interactive_session_assembly.cpp:1581` `/clear`，reason=clear，紧跟着重发 SessionStart(source=clear)。
+   - SessionEnd **不在** resume、**不在** compact 上发。本单 §2.1 说"SessionStart 在 resume/clear/compact 也会重发"——resume/clear 属实（`--continue` resume-as-new 与 `/resume` 各一处 source=resume；clear 一处），**compact 不发 SessionStart**（它走 Pre/PostCompact，compact 路无 SessionStart 调用点）。
+   - **映射定案**：`PostSessionHook` 挂 SessionHookScope 析构（真关闭=进程收场），`/clear` 不发（clear 是同一 Session 内换账，不是关闭）；`PreSessionHook` 挂 SessionHookScope 构造（会话实体创建后、首输入准入前）。resume/clear/compact 一律不触发新口径（与 §八验收矩阵一致）。
+2. **词表立法**：P1 里落 turn_budget.hpp 文件头词条（见 §二映射），只加注不改账。
+3. **ID 方案定案**：
+   - `turn_id`：沿用既有 canonical turn id（`interactive_session.cpp:800` 从 `session_runtime_.ids().NextTurnId()` 发 "turn-N"；空号路 `turn_runner.cpp:748` 从 ProcessIdAuthority 现发）。一只 Turn = 一次 RunTurn 调用；Stop 续跑环（RunStopContinuation）在 RunTurn 肚里，同 turn_id 跨多次 AgentLoop::Run——正是"多次 Run 缝进同一只 Turn"的现成缝。
+   - `step_id`：Agent 实例内单调计数（"step-N"，新增 `Agent::NextStepId()`）。Agent 寿命=主会话全场/子代理一任务，跨 Run 不裂不重号；Run 局部 `step_index`（for 循环下标）留作展示，不改名不改义。
+   - `action_id`：沿用既有 tool execution id（`AgentWiring::execution_id_issuer` → IdAuthority::NextItemId "item-N"，旧路兜底 "exec-N"）。一次工具调用一只 execution，正名不改号。
+   - **持久化**：trajectory v2 已持久 request（"req-N" 主键）/call/turn 边界；step_id/action_id **不改 trajectory schema**（§九改动边界），经 UsageReport/StepUsageRecord 与 hooks payload 走运行账。断线恢复是 resume-as-new 开新场新号空间，无重号窗口；同场原地复活不存在（SessionManager 独占锁）。
+4. **队列条目现状盘点**：入队入口唯一——忙碌期流式 footer 的 Enter（`console_input_turn_listener.cpp:671`）+ resume 的 RestoreFromArchive 灌回。条目无 intent 字段；事实上两路归宿：工具边界注入（=steer 语义，`interactive_session_assembly.cpp:1012` TakeDeliverable→合成 user 消息随下一请求）与轮末会话泵自动发送（=followup 语义，`interactive_session.cpp:1075` TakeFirstAutoSendable→ProcessLine 起新轮）。**事实上的 followup 用法已存在**（泵的自动续轮），P3 只是把意图写进条目、立起两路边界，不是新造行为。
+5. **Hook 能力矩阵对 types.hpp（events.hpp OutputCapabilities + dispatcher）落差清单**：
+   - PreAction/PostAction：**零落差**——升格即 PreToolUse/PostToolUse 的别名（ParseHookEvent 认新名、枚举与 wire 事件名不动），OutputCapabilities {permission_decision,updated_input,additional_context,can_block}={t,t,t,t}/{f,f,t,f} 已覆盖矩阵行。
+   - PreSession：事件不存在；can_block+additional_context 的能力形状已有；载荷（session_id、配置快照）走 payload 自由字段，无 schema 落差。
+   - PostSession：只观察；会话统计（Turn/Step/usage 汇总）无现成单点账，首版带 session_id 与进程内可见的计数骨架，缺口如实记录。
+   - PreTurn：落差——"改输入"（updatedInput）当前仅 PreToolUse 认（events.hpp:208 注释）；PreTurn 首版给 additional_context+can_block（否决本 Turn），改输入仍走 UserPromptSubmit 既有口，落差写进文档不硬造。
+   - PostTurn：只观察；Turn 汇总从 TurnUsageStats+RunOutcome 现拼。
+   - PreStep/PostStep：落差——TurnWiring 无挂点，P2 加 on_pre_step_hook/on_post_step_hook；PreStep 否决=终止本 Turn（blocked 语义复用）。
+   - async=true：现状解析/展示/记录但不执行（skipped_async，dispatcher.hpp:15 注释）——如实记"未支持"，本单不实现（与单子 §4.3 一致）。
+   - failure_policy=deny：并非所有失败都压过此前 allow（归并 deny>ask>allow 只吃表态，失败按 policy 折算）——兼容风险清单落 P2 文档。
 
 ### P1：ID 与账目
 
