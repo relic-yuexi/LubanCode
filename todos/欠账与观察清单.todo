@@ -17,6 +17,7 @@
 
 ## 观察名单（暂不动手，复现两轮以上升级立单）
 
+- [ ] **workspace 集成册 windows 腿连环抽风**（出处：workspace_index_ledger run 34316108135、identity_cross_platform run 34335606083，2026-09-09 两案两只不同册）——同族不同册，各自重跑皆绿；workspace 集成测试对环境/时序敏感，再犯第三案就整族立案（查共享夹具/临时目录/并发读窗）。
 - [ ] **取消树册段错误的直接机制悬案**（出处：run 34307354040 PR 腿崩、同 commit push 孪生绿，2026-09-09；第二道不投闸 PR #10 收口后未复犯）——闸拔了时序温床，但哪条指针崩的没钉死；若再犯，先给 CI 加崩溃栈（coredump/atos）再战。
 - [ ] **嵌套子代理裸持父栈上 ToolRegistry\***（出处：回流锁缝单追查时的休眠发现，2026-09-09）——孩子线程经 base_registry 指向父任务 RunTask 栈上的 scoped registry，唯一护栏是"父不得先走"不变量，取消路径恰是破门。建议改共享所有权，小单。
 - [ ] **忙路 footer 光标钉回未用 NativeColumnForLogical**（出处：conhost 几何单销账移交，2026-09-09）——console_input_stream_footer.cpp 仍用逻辑列，采用映射是一行后续单；空闲路 RedrawEditArea 在 Windows 恒走 legacy 属设计现状非欠账。
