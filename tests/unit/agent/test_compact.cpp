@@ -290,8 +290,9 @@ TEST_CASE("BuildCompactedHistory: mid-turn 巨轮超预算,按消息组从尾收
 TEST_CASE("AutoCompactTriggerLine: 窗口×80% − 4k 压缩提示词 − 8k 摘要预留(§〇.1 对表)") {
     // 用户定案的例:200k 窗 → 160k − 12k = 147712(约 148k 触发)。
     CHECK(agent::AutoCompactTriggerLine(200000) == 160000 - 4096 - 8192);
-    // 小窗扣不动时夹到 0(那种窗口里任何占用都该压)。
-    CHECK(agent::AutoCompactTriggerLine(16000) == 0);
+    // 小窗扣不动(80% 线不足 12288,即窗口 < 15360)时夹到 0。
+    CHECK(agent::AutoCompactTriggerLine(15000) == 0);
+    CHECK(agent::AutoCompactTriggerLine(16000) == 12800 - 12288);
     CHECK(agent::AutoCompactTriggerLine(20000) == 16000 - 12288);
     CHECK(agent::AutoCompactTriggerLine(0) == 0);
 }
@@ -2576,11 +2577,12 @@ TEST_CASE("CompactTurnPartitioned: 双账 JSON 可从新史首条认回(第二�
     REQUIRE(result.has_value());
 
     // 新史首条能被 BuildTurnPartitionPlan 剥出旧档(prior archive 不算 turn):
-    // §〇.4 的独立存档头整条不进任何 turn——12 枚原 turn 之后的 plan2 还是
-    // 12 枚 turn,不多不少。
+    // §〇.4 的独立存档头整条不进任何 turn——新史只剩旧豁免轮 1 枚 turn,
+    // 存档没有多造出一枚。
     const auto plan2 = agent::BuildTurnPartitionPlan(result->new_history, 4, agent::TurnPartitionBudgets{});
     CHECK(plan2.has_prior_archive);
-    REQUIRE(plan2.turns.size() == 12);
+    REQUIRE(plan2.turns.size() == 1);
+    CHECK(plan2.turns[0].from_message == 1);  // 存档占 0 号,turn 从 1 号起
 
     // ParsePriorLedgers:新双账认成双账,字段往返无损。
     const auto ledgers = agent::ParsePriorLedgers(

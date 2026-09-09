@@ -2274,6 +2274,14 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
                 ":压缩榨不出收益,拒绝空跑,历史未动。",
             0});
     }
+    if (result.plan.partitions.empty()) {
+        // 全史只剩一枚独立存档头(没有可分区的 turn):没有可压的正文,也
+        // 没有可保的轮——明确拒绝,不碰 partitions.back()(空向量)。
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api,
+            "整份历史只剩上一轮存档,没有可压缩的对话,拒绝空跑,历史未动。",
+            0});
+    }
     if (result.plan.has_incomplete_tool_exchange) {
         // 分区边界只落 turn 之间,工具原子组天然不跨区;不完整组只可能住在
         // 热区尾(mid-turn 安全点),热区保原文,天然不拆。这里不拦——
