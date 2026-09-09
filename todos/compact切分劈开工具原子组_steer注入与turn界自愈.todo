@@ -1,0 +1,49 @@
+# compact 切分劈开工具原子组：steer 注入与 turn 界自愈
+
+- 状态：调查已定向，待实现修复；本轮未改生产代码。
+- 日期：2026-09-09
+- 级别：P0（自动压缩整链瘫痪：拒收 → 原史原样重发 → 预检再爆 → 再拒，死循环）。
+- 事故现场：v0.26.224-beta.1 内测真机——工具循环中途触发自动 compact，报"map 块 t1-t6 内工具原子组不完整(切分缺陷)，该次 compact 拒绝，历史未动"，随后按原历史继续发送（0.26.219 的降级救了请求，但 compact 永远成不了）。
+- 范围：`src/agent/compact.cpp`（turn 规划/分区/map 块切分/防线）、`src/agent/context.hpp`（IsUserTurnStart/SplitIntoTurns 的语义联动）、相关测试。
+- 不在本单：compact 重构总账（另有前置研究单）、摘要质量、热区策略。
+
+## 一、证据与定向
+
+1. 防线原文（compact.cpp:2161-2170）："分区/再切都只落 turn 边界,这里不该拦得到;拦到了就是切分 bug"——防线自己注释了前提：**turn 边界 ⇒ 工具组完整**。真机打脸：这个前提不成立。
+2. `IsUserTurnStart`（context.hpp:64-67）：user 角色且含 TextBlock/ImageBlock 即算新 turn 开头；注释明知"空壳 user 消息插在 tool_use 与 tool_result 之间会把工具原子组劈开"，所以空内容不算——**但带正文的 steer 消息照样算**。
+3. steer 注入点（interactive_session_assembly.cpp 一带）：工具结果之后、下一次模型请求之前。多工具批次（一次 assistant 多枚 tool_use、结果分多条 user 消息回来）里，steer 正文恰插在**两个 tool_result 之间**：判界函数见文字开新 turn → 同一批工具组劈过 turn 界 → map 块界落在 turn 界 → 防线拦截。
+4. 规划器账目（compact.cpp:1055-1101 一带）：`ToolExchangeGroupInfo` 只记一枚 `group.turn`（按某条消息落界），组跨 turn 时账面看不出；`has_incomplete_tool_exchange` 只认悬垂/组内缺件，不认"组被 turn 界劈开"。
+
+候选凶手不止 steer 一张脸，修复须以**形状**立法，不点名 steer：凡 turn 界把一枚 tool_use 与其任一 tool_result 分在两侧，即病。
+
+## 二、修复合同
+
+### 2.1 turn 界不劈组（主修）
+
+- 规划器在 `SplitIntoTurns` 结果上做后处理：任一界点若劈开工具组，**界点前移**到该组首个成员之前（即把开头落在组内的消息并入前一 turn）——工具循环里插入的用户正文（steer 一类）归**当前进行中的 turn**，不开新 turn。语义讲得通：轮是用户的一轮话，工具循环中途的插话是这轮的枝节。
+- `IsUserTurnStart`/`SplitIntoTurns` 是公共定义（热区、episode 切分共用户），改语义先核全部调用方；若公共语义不能动，就在 compact 规划器内做后处理收口，并在 context.hpp 注释里互注两把尺的分工。
+
+### 2.2 防线自愈（兜底）
+
+- map 块组装处（compact.cpp:2161 的防线）：拦到不完整块时**先自愈再拒**——把块界沿消息粒度前移/后延，把被劈的组整只吞进本块或让给下一块；自愈动作记一行日志。只有自愈也做不到（极端形状）才拒收，且拒收文案指明形状。
+- 死循环面：拒收后自动 compact 会随下一次预检再触发。防线拒收时**标记本会话本次不再自动重试 map 路径**（同滞回思路），改为提示用户手动 /compact 或换路（单发装得下时走单发）。取值口径沿 `kCompactHysteresisFloorTokens` 家族，不新造体系。
+
+### 2.3 测试
+
+- 事故形状复现册：assistant 多枚 tool_use → tool_result₁ → **user 正文（steer）** → tool_result₂ → assistant 收束；断言 turn 界不劈组、map 全链成功、摘要 manifest 正常。
+- 变体：steer 插在 tool_use 与首个 tool_result 之间；steer 后再开新批工具；界点恰落在组头/组尾；单 turn 多组相邻。
+- 自愈册：人为构造界点劈组（绕过主修的防御路径），断言块界挪移后成功、日志一行在案、拒收仅在极端形状。
+- 滞回册：防线拒收一次后，同会话自动 compact 不再立刻走 map 路（手动不受限）。
+- 既有 compact 册全绿（SplitIntoTurns 语义若动，热区/episode 册同步改判）。
+
+## 三、验收矩阵
+
+- 事故原形状（t1-t6 段含 steer 劈组）：自动 compact 成功，历史换账。
+- 无 steer 的普通工具循环：切分结果与旧版逐字节等价（不回归）。
+- steer 在循环各位置插入：组永不被劈；steer 正文归属当前 turn 的摘要。
+- 极端形状（自愈也失败）：拒收文案指形，滞回生效不刷屏。
+- 单发路（装得下）不受影响。
+
+## 四、边界
+
+不重写分区算法骨架（贪心装块照旧，只修界点归属与自愈）；不动 steer 注入点本身（那是 P3 队列的正面行为）；不碰保命索与热区预算。
