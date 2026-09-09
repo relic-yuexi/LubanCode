@@ -191,14 +191,20 @@ private:
         return body;
     }
 
-    // 从 system 指令里抠 "来源 turn tA-tB" 的 A。
+    // 从 system 指令里抠 "来源 turn tA-tB" 的 A。针串"来源 turn t"按字节
+    // 数定位(13 字节:来源 6 + 空格 + turn + 空格 + t)——老实现写死
+    // pos+11,落在 turn 号前的空格上,位数循环一位不进、恒走 fallback=1;
+    // 旧架构靠热区原文的真 turn 号把账兜住没露馅,末轮豁免后纠正轮进
+    // map、被错标 t1/t2,与原文撞成"覆盖倒序"。现在按针串长度起跳。
     static std::size_t RangeStartTurn(const std::string& system) {
-        const std::size_t pos = system.find("来源 turn t");
+        const std::string kNeedle = "来源 turn t";
+        const std::size_t pos = system.find(kNeedle);
         if (pos == std::string::npos) {
             return 1;
         }
         std::size_t value = 0;
-        for (std::size_t i = pos + 11; i < system.size() && system[i] >= '0' && system[i] <= '9'; ++i) {
+        for (std::size_t i = pos + kNeedle.size(); i < system.size() && system[i] >= '0' && system[i] <= '9';
+             ++i) {
             value = value * 10 + static_cast<std::size_t>(system[i] - '0');
         }
         return value == 0 ? 1 : value;
@@ -559,8 +565,8 @@ RunMetrics RunOnce(const EvalTask& task, const ModelFaults& faults, std::string*
         if (failure_note != nullptr) {
             *failure_note = result.error().message;
         }
-        // 定位用:各 map 请求钉的 turn 标签 + reduce 材料正文(截尾)——
-        // 拒收时才打,平时零噪。
+        // 拒收时附各 map 请求钉的 turn 标签(截到行尾),定位切分/标签问题
+        // 一眼可见;平时零噪。
         for (const auto& request : backend.captured_requests) {
             const std::size_t pin = request.system.find("来源 turn ");
             if (pin != std::string::npos) {
@@ -570,15 +576,6 @@ RunMetrics RunOnce(const EvalTask& task, const ModelFaults& faults, std::string*
                                  pin, (line_end == std::string::npos ? request.system.size() : line_end) - pin)
                           << "\n";
             }
-        }
-        if (!backend.captured_requests.empty() && !backend.captured_requests.back().messages.empty()) {
-            std::string body;
-            for (const auto& block : backend.captured_requests.back().messages[0].content) {
-                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
-                    body += text->text;
-                }
-            }
-            std::cout << "  [reduce-body] " << body.substr(0, 4000) << "\n";
         }
         return metrics;
     }
