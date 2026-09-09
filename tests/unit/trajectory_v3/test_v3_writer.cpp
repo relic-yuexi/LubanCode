@@ -88,7 +88,7 @@ TEST_CASE("开卷:首行 system,seq=1,turnId=null,不造空回合") {
     CHECK(second["payload"]["context"]["contextChain"].size() == 1);
 
     CHECK(writer->context().revision == 1);
-    CHECK(writer->context().system_message_ref == first["messageId"]);
+    CHECK(first["messageId"].get<std::string>() == writer->context().system_message_ref);
 }
 
 TEST_CASE("哈希链承继 v2:衔接、确定性、VerifyV3File 全绿") {
@@ -199,7 +199,8 @@ TEST_CASE("崩溃恢复:Continue 重放视图、尾行截断明报、发号续�
         std::ifstream in(harness.jsonl, std::ios::binary);
         std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         in.close();
-        REQUIRE(!data.empty() && data.back() == '\n');
+        REQUIRE(!data.empty());
+        REQUIRE(data.back() == '\n');
         data.pop_back();
         std::ofstream out(harness.jsonl, std::ios::binary | std::ios::trunc);
         out << data;
