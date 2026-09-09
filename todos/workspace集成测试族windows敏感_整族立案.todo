@@ -1,0 +1,33 @@
+# workspace 集成测试族 windows 敏感：整族立案
+
+- 状态：立案件查（观察名单"第三案即整族立案"的规矩已触发）。
+- 日期：2026-09-09
+- 级别：P2（CI 稳定性；三案两册皆同分支无关代码、重跑皆绿，纯环境/时序脸谱）。
+- 前科三案：
+  1. `integration.workspace.workspace_index_ledger`——run 34316108135（PR #8 windows 腿，2026-09-09），重跑绿。
+  2. `integration.workspace.identity_cross_platform`（test:262 `bad_reads != 0`）——run 34335606083（PR #11 windows 腿，2026-09-09），重跑绿。
+  3. 同册同断言二犯——run 34360062483（PR #14 windows 腿，2026-09-09），重跑中。
+- 范围：`tests/integration/workspace/**`（identity_cross_platform、workspace_index_ledger 及同族册）、其共享夹具与临时目录设施；不改生产 workspace 逻辑（除非证据指向真病）。
+- 不在本单：app_server_approval 的 json null 异常（另册，见 §三）。
+
+## 一、病相
+
+- 三案全在 windows-msvc 腿、全在 workspace 集成族、全部与触发分支的代码零交集、全部重跑即绿。
+- 两册两种死法：index_ledger 是 `REQUIRE(registered.has_value())` 假 + SIGABRT；identity 是 `CHECK(bad_reads.load() == 0)` 失败（原子计数器读到非零——并发读窗真的开着）。
+
+## 二、侦查方向
+
+1. 族的公共设施先过一遍：共享的临时目录/家目录夹具、并发读写窗、Windows 文件语义（句柄占用、共享违例、路径大小写、UTF-8/UTF-16 转换、防病毒扫描器抢文件）。
+2. identity 册 `bad_reads` 的计数器在数什么：并发读者撞上写者的窗口真有多宽？CI 慢机（2 核 windows runner）调度抖动下命中率的量级估算。
+3. index_ledger 册的注册失败路径：什么环境错误会让 `registered` 落空且随后 SIGABRT——失败分支里有没有二次错误把断言信息吞了。
+4. 定位后按病开方：夹具加 retry/宽限、临时目录独占化、跳过防病毒目录、或断言改轮询条件等待（沿 WaitForSettled 先例）；**不许**用 sleep 拍脑袋糊。
+
+## 三、邻案挂号
+
+- `unit.app_server.app_server_approval`（test:772 json.exception.type_error.305 null 取下标）——run 34360062483 同腿新脸,与本族无关;若重跑仍红单独立案,若绿记观察名单。
+
+## 四、验收
+
+- 三案指纹各自有根因结论（环境敏感性定位到具体设施）；
+- 修后 windows 腿连跑（CI 多次 or 矩阵重跑）零复犯；
+- 既有册断言语义不放松（改等待合同不改对错判据）。
