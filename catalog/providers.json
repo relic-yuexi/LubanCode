@@ -15546,7 +15546,7 @@
         "gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -31408,7 +31408,7 @@
         "google/gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -37920,7 +37920,7 @@
         "google/gemini-3.1-flash-lite-image": {
           "name": "Nano Banana 2 Lite",
           "context_window": 65536,
-          "max_output": 65536,
+          "max_output": 4096,
           "capabilities": {
             "tools": true,
             "reasoning": true,
