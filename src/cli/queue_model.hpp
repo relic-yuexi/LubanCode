@@ -216,10 +216,11 @@ public:
     std::optional<QueuedMessage> ClaimFirstAutoSendable(MessageTarget target);
     // 单条销账:泵的自动发送成功收场后 MarkCommittedOne(id)(committed)。
     bool MarkCommittedOne(QueueId id);
-    // steer 过期批注(§五.5):Turn 终局仍未消费的 steer(状态 Queued、
-    // 非slash、无既有标注)打上过期原因。回打上标注的条目 id——调用方
-    // 据此向用户明示(count)与落 NoteQueueExpired 轨迹事件。过期条目保持
-    // Queued,不再投递,用户改写(CommitEdit 清标注)或删除。
+    // steer 过期批注(§五.5):主会话 Turn 终局仍未消费的 steer(main 目标、
+    // 状态 Queued、非slash、无既有标注)打上过期原因。回打上标注的条目
+    // id——调用方据此向用户明示(count)与落 NoteQueueExpired 轨迹事件。
+    // 过期条目保持 Queued,不再投递,用户改写(CommitEdit 清标注)或删除。
+    // 子代理目标不在此列(门是任务 inbox,截止跟任务走,§六.5 各记各账)。
     std::vector<QueueId> MarkExpiredUnconsumedSteers(const std::string& note);
     // 出路二的失败退还(取走即消费单):ClaimFirstAutoSendable 拿去自动发送
     // 的那条,若那轮以请求失败收场,从这里塞回队首(attempts +1),原 id、

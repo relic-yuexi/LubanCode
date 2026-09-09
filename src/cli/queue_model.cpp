@@ -270,9 +270,13 @@ std::vector<QueuedMessage> SteeringQueue::ClaimDeliverable(MessageTarget target)
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<QueuedMessage> out;
     for (auto& item : items_) {
-        // 与 TakeDeliverable 同规矩(slash 让路、Queued、非冻结),另加两条
-        // P3 门槛:Claimed 不重取(在途),过期 steer 不投(用户没点头)。
+        // 与 TakeDeliverable 同规矩(slash 让路、Queued、非冻结),另加三条
+        // P3 门槛:工具边界缝是 steer 的正门(followup 不从这走——它等轮末
+        // 泵另起新轮);Claimed 不重取(在途);过期 steer 不投(用户没点头)。
         if (IsQueuedSlashText(item.text)) {
+            continue;
+        }
+        if (item.intent != QueueIntent::Steer) {
             continue;
         }
         if (it_is_claimable(item) && item.target == target) {
@@ -306,6 +310,12 @@ bool SteeringQueue::MarkCommittedOne(QueueId id) {
 std::optional<QueuedMessage> SteeringQueue::ClaimFirstAutoSendable(MessageTarget target) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& item : items_) {
+        // P3 泵的取件范围立界:排队的 slash(本地命令,轮末必达)与显式
+        // followup。非 slash 的 steer 一律不从泵走——它的门是工具边界缝;
+        // 没赶上就在 Turn 终局打过期标注等用户,不改道(§五.5)。
+        if (item.intent == QueueIntent::Steer && !IsQueuedSlashText(item.text)) {
+            continue;
+        }
         if (item.target != target || !it_is_claimable(item) || item.edit_open) {
             continue;
         }
@@ -322,6 +332,11 @@ std::vector<QueueId> SteeringQueue::MarkExpiredUnconsumedSteers(const std::strin
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<QueueId> marked;
     for (auto& item : items_) {
+        // 子代理目标不按主轮过期:它的门是任务 inbox(PumpSteeringToSubagents
+        // 现投),截止跟着那只任务走,不跟主会话的 Step 走(§六.5 各记各账)。
+        if (!item.target.is_main()) {
+            continue;
+        }
         if (item.intent != QueueIntent::Steer || item.state != QueueItemState::Queued) {
             continue;
         }
