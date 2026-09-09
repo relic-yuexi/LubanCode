@@ -168,7 +168,8 @@ TEST_CASE("八行全链一次成功:applied 唯一终态,链重接,恢复重建�
             if (line["kind"] == "compact.requested") {
                 CHECK(line["payload"]["trigger"] == "manual");
                 CHECK(line["turnId"].is_string());
-                CHECK(line["parentTurnId"].is_null());
+                // 空闲手动:无 parentTurnId(或显式 null),不假称挂主 turn。
+                CHECK(!line.contains("parentTurnId") || line["parentTurnId"].is_null());
             }
         }
         if (line.value("type", "") == "message" && line.value("purpose", "") == "compact" &&
@@ -181,7 +182,7 @@ TEST_CASE("八行全链一次成功:applied 唯一终态,链重接,恢复重建�
             CHECK(line["display"]["mode"] == "hidden");
         }
     }
-    CHECK(compact_lines == 7);  // requested/started/validation.2/applied = 5 事件 + prompt + 候选
+    CHECK(compact_lines == 5);  // requested/started/validation.started/validation.completed/applied
     CHECK(terminals == 1);
     V3VerifyReport report = VerifyV3File(harness.jsonl);
     CHECK(report.ok);

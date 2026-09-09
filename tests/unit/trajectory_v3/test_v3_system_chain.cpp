@@ -86,10 +86,11 @@ TEST_CASE("完整切换:三步齐,内存换根,旧请求仍指旧版") {
     REQUIRE(result.system_message.status == WriteReceipt::Status::Committed);
     REQUIRE(result.apply_event.status == WriteReceipt::Status::Committed);
 
-    // 内存换根:revision +1,链根为新 system,旧链节点保留重接。
+    // 内存换根:revision 前进(admit 一次 + 切换一次),链根为新 system,
+    // 旧链后续节点保留重接([新system, user])。
     CHECK(writer->context().system_message_ref == result.system_message.id);
     CHECK(writer->context().revision == revision_before + 2);
-    REQUIRE(writer->context().chain.size() == 3);
+    REQUIRE(writer->context().chain.size() == 2);
     CHECK(writer->context().chain[0].message_ref == result.system_message.id);
     CHECK(writer->context().chain[1].message_ref == user_receipt.id);
     CHECK(writer->context().chain[1].prev_message_ref == result.system_message.id);
@@ -115,7 +116,7 @@ TEST_CASE("完整切换:三步齐,内存换根,旧请求仍指旧版") {
         if (line.value("kind", "") == "context.system.applied") {
             ++applies;
             CHECK(line["payload"]["rootMessageRef"] == new_system_id);
-            CHECK(line["payload"]["contextChain"].size() == 3);
+            CHECK(line["payload"]["contextChain"].size() == 2);
         }
     }
     CHECK(change_events == 1);
