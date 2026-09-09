@@ -1,0 +1,1642 @@
+{
+  "platform": "openai",
+  "providers": {
+    "openai": {
+      "name": "OpenAI",
+      "description": "OpenAI OpenAI Responses API",
+      "wire": "openai-responses",
+      "base_url": "https://api.openai.com/v1",
+      "key_env": "OPENAI_API_KEY",
+      "default_model": "gpt-5.4",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://platform.openai.com/docs",
+      "models": {
+        "gpt-6-astra": {
+          "name": "GPT-6 Astra",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "dialect": {
+              "toggle": "none",
+              "effort_path": "reasoning.effort",
+              "verified": false
+            }
+          }
+        },
+        "chatgpt-image-latest": {
+          "name": "chatgpt-image-latest",
+          "capabilities": {
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          }
+        },
+        "gpt-3.5-turbo": {
+          "name": "GPT-3.5-turbo",
+          "context_window": 16385,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "gpt-3.5-turbo-16k": {
+          "name": "OpenAI: GPT-3.5 Turbo 16k",
+          "context_window": 16385,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "gpt-3.5-turbo-instruct": {
+          "name": "OpenAI: GPT-3.5 Turbo Instruct",
+          "context_window": 4095,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "gpt-4": {
+          "name": "GPT-4",
+          "context_window": 8192,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "file_input": true
+          }
+        },
+        "gpt-4.1": {
+          "name": "GPT-4.1",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-4.1-mini": {
+          "name": "GPT-4.1 mini",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-4.1-nano": {
+          "name": "GPT-4.1 nano",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-4-turbo": {
+          "name": "GPT-4 Turbo",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-4-turbo-preview": {
+          "name": "OpenAI: GPT-4 Turbo Preview",
+          "context_window": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "gpt-4o": {
+          "name": "GPT-4o",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-4o-mini": {
+          "name": "GPT-4o mini",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-4o-mini-search-preview": {
+          "name": "GPT 4o Mini Search Preview",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {}
+        },
+        "gpt-5": {
+          "name": "GPT-5",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5.1": {
+          "name": "GPT 5.1 Thinking",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5.1-codex": {
+          "name": "GPT-5.1-Codex",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5.1-codex-max": {
+          "name": "GPT 5.1 Codex Max",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.1-codex-mini": {
+          "name": "GPT-5.1 Codex mini",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5.2": {
+          "name": "GPT-5.2",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.2-chat": {
+          "name": "OpenAI: GPT-5.2 Chat",
+          "context_window": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-5.2-chat-latest": {
+          "name": "GPT-5.2 Chat",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "medium"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "medium"
+            ]
+          }
+        },
+        "gpt-5.2-codex": {
+          "name": "GPT-5.2-Codex",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.2-pro": {
+          "name": "GPT-5.2 Pro",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.3-chat-latest": {
+          "name": "GPT-5.3 Chat (latest)",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-5.3-codex": {
+          "name": "GPT-5.3 Codex",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.3-codex-spark": {
+          "name": "GPT-5.3 Codex Spark",
+          "context_window": 128000,
+          "max_output": 32000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.4": {
+          "name": "GPT-5.4",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "default_think": "high",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.4-image-2": {
+          "name": "OpenAI: GPT-5.4 Image 2",
+          "context_window": 272000,
+          "capabilities": {
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.4-mini": {
+          "name": "GPT-5.4 mini",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.4-nano": {
+          "name": "GPT-5.4 nano",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.4-pro": {
+          "name": "GPT-5.4 Pro",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.5": {
+          "name": "GPT-5.5",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.5-pro": {
+          "name": "GPT-5.5 Pro",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.6": {
+          "name": "GPT-5.6",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        },
+        "gpt-5.6-luna": {
+          "name": "GPT-5.6 Luna",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        },
+        "gpt-5.6-luna-pro": {
+          "name": "OpenAI: GPT-5.6 Luna Pro",
+          "context_window": 1050000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol (Global)",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        },
+        "gpt-5.6-sol-pro": {
+          "name": "OpenAI: GPT-5.6 Sol Pro",
+          "context_window": 1050000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6 Terra",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        },
+        "gpt-5.6-terra-pro": {
+          "name": "OpenAI: GPT-5.6 Terra Pro",
+          "context_window": 1050000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-5-codex": {
+          "name": "GPT-5-Codex",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5-image": {
+          "name": "OpenAI: GPT-5 Image",
+          "context_window": 400000,
+          "capabilities": {
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5-image-mini": {
+          "name": "OpenAI: GPT-5 Image Mini",
+          "context_window": 400000,
+          "capabilities": {
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5-mini": {
+          "name": "GPT-5 Mini",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5-nano": {
+          "name": "GPT-5 Nano",
+          "context_window": 400000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-5-pro": {
+          "name": "GPT-5 Pro",
+          "context_window": 400000,
+          "max_output": 272000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "high"
+            ]
+          }
+        },
+        "gpt-audio": {
+          "name": "OpenAI: GPT Audio",
+          "context_window": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "audio-recognition": true,
+            "audio-generation": true
+          }
+        },
+        "gpt-audio-mini": {
+          "name": "OpenAI: GPT Audio Mini",
+          "context_window": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "audio-recognition": true,
+            "audio-generation": true
+          }
+        },
+        "gpt-chat-latest": {
+          "name": "OpenAI: GPT Chat Latest",
+          "context_window": 400000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-image-1-5": {
+          "name": "gpt-image-1.5",
+          "capabilities": {
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          }
+        },
+        "gpt-image-1-mini": {
+          "name": "GPT-Image-1-Mini",
+          "capabilities": {
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          }
+        },
+        "gpt-latest": {
+          "name": "OpenAI GPT Latest",
+          "context_window": 1050000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-mini-latest": {
+          "name": "OpenAI GPT Mini Latest",
+          "context_window": 400000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gpt-oss-120b": {
+          "name": "GPT-OSS-120B",
+          "context_window": 131072,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-oss-120b-maas": {
+          "name": "GPT OSS 120B",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-oss-20b": {
+          "name": "GPT OSS 20B",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-oss-20b-maas": {
+          "name": "GPT OSS 20B",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-oss-safeguard-120b": {
+          "name": "GPT OSS Safeguard 120B",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "gpt-oss-safeguard-20b": {
+          "name": "GPT OSS Safeguard 20B",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "gpt-realtime-1-5": {
+          "name": "GPT-Realtime-1.5",
+          "capabilities": {
+            "realtime": true,
+            "audio-recognition": true,
+            "audio-generation": true
+          }
+        },
+        "gpt-realtime-2": {
+          "name": "GPT-REALTIME-2",
+          "capabilities": {
+            "realtime": true,
+            "audio-recognition": true,
+            "audio-generation": true
+          }
+        },
+        "gpt-realtime-2-1": {
+          "name": "GPT-Realtime-2.1",
+          "context_window": 128000,
+          "max_output": 32000,
+          "capabilities": {
+            "realtime": true,
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "audio-recognition": true,
+            "audio-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-realtime-mini": {
+          "name": "GPT-Realtime mini",
+          "capabilities": {
+            "realtime": true,
+            "audio-recognition": true,
+            "audio-generation": true
+          }
+        },
+        "o1": {
+          "name": "o1",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "o1-pro": {
+          "name": "o1-pro",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "o3": {
+          "name": "O3",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "o3-deep-research": {
+          "name": "O3-DEEP-RESEARCH",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "medium"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "medium"
+            ]
+          }
+        },
+        "o3-mini": {
+          "name": "O3-MINI",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "o3-pro": {
+          "name": "O3-PRO",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "o4-mini": {
+          "name": "O4-MINI",
+          "context_window": 200000,
+          "max_output": 100000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

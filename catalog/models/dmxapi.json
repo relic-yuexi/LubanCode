@@ -1,0 +1,50 @@
+{
+  "owner": "dmxapi",
+  "models": {
+    "gemini-2.5-flash-image": {
+      "name": "Gemini 2.5-flash-image",
+      "context_window": 32768,
+      "capabilities": {
+        "reasoning": true,
+        "image": true,
+        "image-generation": true,
+        "file_input": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "budget",
+            "max": 24576,
+            "min": 0
+          },
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ],
+        "thinkingTokenLimits": {
+          "max": 24576,
+          "min": 0
+        },
+        "wireDialect": "budget"
+      }
+    },
+    "gpt-image-1.5": {
+      "name": "GPT-IMAGE-1.5",
+      "capabilities": {
+        "image": true,
+        "image-generation": true,
+        "file_input": true
+      }
+    },
+    "musesteamer-air-image": {
+      "name": "MuseSteamer Air Image"
+    },
+    "nano-banana": {
+      "name": "Nano Banana"
+    }
+  }
+}

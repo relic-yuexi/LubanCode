@@ -1,0 +1,957 @@
+{
+  "platform": "anthropic",
+  "providers": {
+    "anthropic": {
+      "name": "Anthropic",
+      "description": "Anthropic Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.anthropic.com",
+      "key_env": "ANTHROPIC_API_KEY",
+      "default_model": "claude-sonnet-5",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://docs.anthropic.com/en/docs",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": {
+        "claude-3-haiku": {
+          "name": "Claude Haiku 3",
+          "context_window": 200000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "claude-fable-5-1": {
+          "name": "Claude Fable 5.1",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "high",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "toggle": "thinking_type",
+              "toggle_on": "adaptive",
+              "effort_path": "output_config.effort",
+              "verified": false
+            }
+          }
+        },
+        "claude-fable-5": {
+          "name": "Claude Fable 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-fable-latest": {
+          "name": "Anthropic: Claude Fable Latest",
+          "context_window": 1000000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-haiku-4-5": {
+          "name": "Claude Haiku 4.5",
+          "context_window": 200000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 64000,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 64000,
+              "min": 1024
+            },
+            "wireDialect": "budget"
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-haiku-latest": {
+          "name": "Anthropic Claude Haiku Latest",
+          "context_window": 200000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max",
+              "none"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-opus-4": {
+          "name": "Claude Opus 4",
+          "context_window": 200000,
+          "max_output": 32000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 32000,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32000,
+              "min": 1024
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "claude-opus-4-1": {
+          "name": "Claude Opus 4.1",
+          "context_window": 200000,
+          "max_output": 32000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 32000,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32000,
+              "min": 1024
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "claude-opus-4-5": {
+          "name": "Claude Opus 4.5",
+          "context_window": 200000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 64000,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "none"
+            ],
+            "thinkingTokenLimits": {
+              "max": 64000,
+              "min": 1024
+            },
+            "wireDialect": "budget"
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-opus-4-6": {
+          "name": "Claude Opus 4.6",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 128000,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max",
+              "none"
+            ],
+            "thinkingTokenLimits": {
+              "max": 128000,
+              "min": 1024
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-opus-4-6-v1": {
+          "name": "Claude Opus 4.6",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 128000,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max"
+            ],
+            "thinkingTokenLimits": {
+              "max": 128000,
+              "min": 1024
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-opus-4-7": {
+          "name": "Claude Opus 4.7",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 128000,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "none"
+            ],
+            "thinkingTokenLimits": {
+              "max": 128000,
+              "min": 1024
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-opus-4-7-fast": {
+          "name": "Anthropic: Claude Opus 4.7 (Fast)",
+          "context_window": 1000000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 128000,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max",
+              "none"
+            ],
+            "thinkingTokenLimits": {
+              "max": 128000,
+              "min": 1024
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-opus-4-8": {
+          "name": "Claude Opus 4.8",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "none"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-opus-4-8-fast": {
+          "name": "Claude Opus 4.8 (Fast)",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "none"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-opus-5": {
+          "name": "Claude Opus 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "default_think": "high",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-opus-5-fast": {
+          "name": "Claude Opus 5 (Fast)",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-opus-latest": {
+          "name": "Anthropic: Claude Opus Latest",
+          "context_window": 1000000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max",
+              "none"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-sonnet-4": {
+          "name": "Claude Sonnet 4",
+          "context_window": 1000000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 64000,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 64000,
+              "min": 1024
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "claude-sonnet-4-5": {
+          "name": "Claude Sonnet 4.5",
+          "context_window": 1000000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 64000,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 64000,
+              "min": 1024
+            },
+            "wireDialect": "budget"
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-sonnet-4-6": {
+          "name": "Claude Sonnet 4.6",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 64000,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max",
+              "none"
+            ],
+            "thinkingTokenLimits": {
+              "max": 64000,
+              "min": 1024
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
+          }
+        },
+        "claude-sonnet-5": {
+          "name": "Claude Sonnet 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "default_think": "medium",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "none"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "claude-sonnet-latest": {
+          "name": "Anthropic Claude Sonnet Latest",
+          "context_window": 1000000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "max",
+              "none"
+            ],
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        }
+      }
+    }
+  }
+}

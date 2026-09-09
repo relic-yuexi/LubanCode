@@ -1,0 +1,99 @@
+{
+  "platform": "mimo",
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "mimo",
+      "name": "Xiaomi MiMo",
+      "description": "Xiaomi MiMo OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "key_env": "MIMO_API_KEY",
+      "default_model": "mimo-v2-5-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://mimo.mi.com/docs/zh-CN",
+      "models": [
+        "mimo-v2-5",
+        "mimo-v2-5-pro",
+        "mimo-v2-5-pro-ultraspeed",
+        "mimo-v2-flash",
+        "mimo-v2-omni",
+        "mimo-v2-pro"
+      ]
+    },
+    {
+      "id": "mimo-anthropic",
+      "name": "Xiaomi MiMo (Anthropic)",
+      "description": "Xiaomi MiMo Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.xiaomimimo.com/anthropic",
+      "key_env": "MIMO_API_KEY",
+      "default_model": "mimo-v2-5-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://mimo.mi.com/docs/zh-CN",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "mimo-v2-5",
+        "mimo-v2-5-pro",
+        "mimo-v2-5-pro-ultraspeed",
+        "mimo-v2-flash",
+        "mimo-v2-omni",
+        "mimo-v2-pro"
+      ]
+    },
+    {
+      "id": "mimo-responses",
+      "name": "Xiaomi MiMo (OpenAI)",
+      "description": "Xiaomi MiMo OpenAI Responses API",
+      "wire": "openai-responses",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "key_env": "MIMO_API_KEY",
+      "default_model": "mimo-v2-5-pro",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://mimo.mi.com/docs/zh-CN",
+      "models": [
+        "mimo-v2-5",
+        "mimo-v2-5-pro",
+        "mimo-v2-5-pro-ultraspeed",
+        "mimo-v2-flash",
+        "mimo-v2-omni",
+        "mimo-v2-pro"
+      ]
+    }
+  ],
+  "models_ref": "models/mimo.json"
+}

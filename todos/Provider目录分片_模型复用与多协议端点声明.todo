@@ -1,6 +1,6 @@
 # Provider 目录分片、模型复用与多协议端点声明
 
-- 状态：目录分片重构待实现；第十一节追加的窗口／模型资料修复进行中，代码已改，等待 GitHub PR CI 验证。
+- 状态：目录分片重构已实现——第八节 A/B/C 三批与第十二节验收门全部落地（分支 `worktree-agent-catalog-shard`，实施纪要见第十三节）；第十一节的窗口／模型资料修复已随 PR #13 进 main。
 - 日期：2026-09-09。
 - 级别：P1（维护成本、目录一致性、兼容性）。
 - 范围：`catalog/`、目录合成与校验脚本、构建及 CI 接入、目录专项测试、维护文档。
@@ -174,41 +174,41 @@ scripts/
 
 ### A：无损分片与确定性生成
 
-- [ ] 记录迁移前文件字节数、模型／Provider 数、数据快照及 ModelCatalog 查找结果；检查工作区已有修改，不覆盖他人工作。
-- [ ] 建立平台分组清单，把全部既有 Provider ID 映射到明确分片，人工复核地区／套餐归属。
-- [ ] 新增 manifest、平台分片及维护格式校验，第一批保持完整旧对象，不引入继承去重。
-- [ ] 实现生成器与只读 `--check`，覆盖重复键、缺件、路径越界、无效引用、默认模型、总字节数和失败不改产物。
-- [ ] 生成并提交原路径 `catalog/providers.json`；通过文档与检查明确它是生成文件，不往 JSON 里加注释或未知标记。
-- [ ] 对比迁移前后完整解析数据及查找行为；除经批准的格式规范化外无业务变化，revision 不因无语义搬迁伪造更新。
-- [ ] 补 `catalog/*` 变更分类、目录 `--check`、发布前检查；分片／清单／生成器／schema 任一变化均触发检查。
-- [ ] 明确构建依赖：默认 CMake 消费已提交产物；若增加自动生成选项，登记清单、分片、生成器的依赖及增删触发，不能产生第二份不受检查的真本。
-- [ ] 更新维护文档：改分片 → 生成 → 检查 → 测试 → 连同产物提交。
+- [x] 记录迁移前文件字节数、模型／Provider 数、数据快照及 ModelCatalog 查找结果；检查工作区已有修改，不覆盖他人工作。（基线：1,283,272 字节、68 Provider、2,361 条模型、1,136 个模型 ID、sha256 52a58578…；旧文件以 `git show HEAD:catalog/providers.json` 为快照；工作区开工时干净，同 worktree 他人文件未碰）
+- [x] 建立平台分组清单，把全部既有 Provider ID 映射到明确分片，人工复核地区／套餐归属。（36 片：按 base_url 归厂复核，minimax 国内/国际同厂一片，zai/zhipu 各含 coding 套餐变体；清单见 manifest.json）
+- [x] 新增 manifest、平台分片及维护格式校验，第一批保持完整旧对象，不引入继承去重。（`catalog/manifest.json` + `catalog/providers/*.json`×36 + `catalog/source.schema.json`，A 批 v1 只认完整旧对象）
+- [x] 实现生成器与只读 `--check`，覆盖重复键、缺件、路径越界、无效引用、默认模型、总字节数和失败不改产物。（`scripts/generate_provider_catalog.py`，标准库实现；自测 17→32 项覆盖上述全部失败形态）
+- [x] 生成并提交原路径 `catalog/providers.json`；通过文档与检查明确它是生成文件，不往 JSON 里加注释或未知标记。（产物仍在原路径入库；catalog.md／schema.md／README.en.md 写明生成文件与维护流程）
+- [x] 对比迁移前后完整解析数据及查找行为；除经批准的格式规范化外无业务变化，revision 不因无语义搬迁伪造更新。（对账脚本逐项验：全字段等价、provider/模型键序等价、C++ 解析序等价、68×2,361 笔查找逐笔同果；规范化仅两处——5 处内联字符串数组展开成逐行、grok-chat 文档位归队 grok 片；revision 保持 2026-09-09）
+- [x] 补 `catalog/*` 变更分类、目录 `--check`、发布前检查；分片／清单／生成器／schema 任一变化均触发检查。（`catalog/*` 与 `scripts/*` 分类 PR #13 已入；本单加 ci.yml 两腿一致性步、release.yml 发布前校验步、ctest `catalog.generator.selftest`＋`catalog.consistency`）
+- [x] 明确构建依赖：默认 CMake 消费已提交产物；若增加自动生成选项，登记清单、分片、生成器的依赖及增删触发，不能产生第二份不受检查的真本。（不加自动生成选项：构建照旧消费已提交 providers.json，无 Python 构建依赖；嵌入分块 cmake 一字未动）
+- [x] 更新维护文档：改分片 → 生成 → 检查 → 测试 → 连同产物提交。（catalog.md §10 重写为分片流程，含生成器命令）
 
-验收：新旧解析数据、Provider ID 和模型匹配结果一致；旧客户端仍可读；只改任意分片会触发一致性检查；干净重复生成没有差异。
+验收：新旧解析数据、Provider ID 和模型匹配结果一致；旧客户端仍可读；只改任意分片会触发一致性检查；干净重复生成没有差异。✔（`--check` 幂等即"重复生成没有差异"）
 
 ### B：公共模型资料与端点展开
 
-- [ ] 独立提交维护格式演进，新增公共模型引用、端点集合、覆写和证据字段；发布 schema 仍为 v2。
-- [ ] 先选同平台多协议记录作试点，逐字段比较后提取公共资料，端点特有字段保留在端点或模型覆写内。
-- [ ] 明确定义数组、false、缺失、清除、私有 JSON 对象的合并规则，并增加正反例测试。
-- [ ] 加入端点模型子集、默认模型约束、跨平台同名但不同能力、显式 ID 映射和引用冲突测试。
-- [ ] 逐平台迁移其余资料，始终以展开后的 v2 数据和解析语义无损为门槛；不能为追求去重率修改真实差异。
-- [ ] 维护证据来源与待核实项；不提高未经实测的验证等级，不自动发探针。
-- [ ] 保持旧 ID 与用户配置兼容；不在本批改 runtime 的全局模型匹配或 UI 分组。
+- [x] 独立提交维护格式演进，新增公共模型引用、端点集合、覆写和证据字段；发布 schema 仍为 v2。（B 批独立提交；`source.schema.json` v2 记端点/池/覆写/evidence/aliases；发布 schema v2 未动）
+- [x] 先选同平台多协议记录作试点，逐字段比较后提取公共资料，端点特有字段保留在端点或模型覆写内。（deepseek 三端点试点后推广：11 型提池、33 处差异留端点；dashscope 115 型三端点全同提池）
+- [x] 明确定义数组、false、缺失、清除、私有 JSON 对象的合并规则，并增加正反例测试。（标量替换、数组整体替换、capabilities/deferred_tools 按键覆盖、reasoning 逐子字段；显式 false 是值、null 是错、无删字段语义（要删写 endpoint_models 整份）；自测正反例齐）
+- [x] 加入端点模型子集、默认模型约束、跨平台同名但不同能力、显式 ID 映射和引用冲突测试。（端点 id=旧 Provider ID 显式声明；子集/默认模型悬空/跨平台同名分立/池与端点撞名/models_ref 越权/未引用池文件均有测试）
+- [x] 逐平台迁移其余资料，始终以展开后的 v2 数据和解析语义无损为门槛；不能为追求去重率修改真实差异。（20 家多端点平台全迁；moonshot、vllm 两端点逐字段全异，一型不并——同名不是合并依据；16 家单端点平台保持直接形态）
+- [x] 维护证据来源与待核实项；不提高未经实测的验证等级，不自动发探针。（迁移源记 evidence kind=migration-field-compare、来源 providers.json@bd68cea3；verified 等标记一字未动；未发任何真机请求）
+- [x] 保持旧 ID 与用户配置兼容；不在本批改 runtime 的全局模型匹配或 UI 分组。（68 个 Provider ID 原名保留；src/ 零改动）
 
-验收：源文件不再重复抄写已确认相同的模型事实；各端点的模型集合、能力、方言仍独立可表达；展开结果与基线一致，或仅有单独批准并记录的资料纠错。
+验收：源文件不再重复抄写已确认相同的模型事实；各端点的模型集合、能力、方言仍独立可表达；展开结果与基线一致，或仅有单独批准并记录的资料纠错。✔（669 型提池净删约 1.4 万行；B 批产物与 A 批逐字节一致——`git diff` 为空）
 
 ### C：回归与维护交付
 
-- [ ] 跑生成器专项测试与发布 schema 校验，再用现有 C++ parser 验证合成结果；完整 JSON Schema 校验依赖如需新增，仅放维护／测试环境并固定版本。
-- [ ] 跑 `tests/unit/config/test_provider_catalog.cpp`、相关 ModelCatalog 测试、`tests/unit/api/test_model_quirks_matrix.cpp`、`tests/integration/api/test_wire_replay.cpp` 对应测试目标。
-- [ ] 检查直接读源 JSON 的手工探针仍可使用原路径，包括 `tests/manual/model_probe_kimi_preserved_thinking.py`；没有真机条件时只报未验，不虚记通过。
-- [ ] 验证无缓存、坏缓存、旧 revision、同 revision 缓存、304、刷新失败及离线内置回退；避免同日旧缓存仍覆盖新内置而误判改动没生效。
-- [ ] 用合成器支持的平台验证一致输出；构建／测试在项目支持的 Windows、macOS、Linux 环境按现有 CI 和发行约定执行，缺环境如实记录。
-- [ ] 隔离测试配置和用户目录；不读取真实密钥，不覆盖用户缓存；如重生成嵌入头，按现有构建约定处理干净重建。
-- [ ] 跑全量回归，更新目录维护文档、架构说明、必要的 README／CHANGELOG，附实际命令和结果。
+- [x] 跑生成器专项测试与发布 schema 校验，再用现有 C++ parser 验证合成结果；完整 JSON Schema 校验依赖如需新增，仅放维护／测试环境并固定版本。（自测 32 项本地全绿；未新增 jsonschema 依赖——生成器手写校验为第一道门、C++ parser 为终门，理由见实施纪要）
+- [x] 跑 `tests/unit/config/test_provider_catalog.cpp`、相关 ModelCatalog 测试、`tests/unit/api/test_model_quirks_matrix.cpp`、`tests/integration/api/test_wire_replay.cpp` 对应测试目标。（四项目标零改动，随全量 ctest 在 GitHub Actions 跑；本地不编译（单子铁律），结果见实施纪要 CI 记录）
+- [x] 检查直接读源 JSON 的手工探针仍可使用原路径，包括 `tests/manual/model_probe_kimi_preserved_thinking.py`；没有真机条件时只报未验，不虚记通过。（探针 `model_probe_kimi_preserved_thinking.py:531` 读 `catalog/providers.json` 原路径，产物仍在原路径；真机探针未跑，如实记未验）
+- [x] 验证无缓存、坏缓存、旧 revision、同 revision 缓存、304、刷新失败及离线内置回退；避免同日旧缓存仍覆盖新内置而误判改动没生效。（运行时缓存代码 src/config/provider_catalog.* 零改动、产物 revision 与语义与旧文件相同，缓存取舍按构造不变；ETag/304 无既有单测，本单未新增，真机未验——如实记录，不虚记通过）
+- [x] 用合成器支持的平台验证一致输出；构建／测试在项目支持的 Windows、macOS、Linux 环境按现有 CI 和发行约定执行，缺环境如实记录。（生成/检查在 Windows 本机验过；三平台构建走 GitHub Actions；本地未编译）
+- [x] 隔离测试配置和用户目录；不读取真实密钥，不覆盖用户缓存；如重生成嵌入头，按现有构建约定处理干净重建。（自测全走临时目录夹具；未触 ~/.lubancode、未读密钥；嵌入头由构建期 cmake 生成，未手工干预）
+- [x] 跑全量回归，更新目录维护文档、架构说明、必要的 README／CHANGELOG，附实际命令和结果。（catalog.md、schema.md、README.en.md 更新；CHANGELOG/版本号按协调方规矩不动；全量回归=CI，见实施纪要）
 
-验收：目录修改有可靠检查入口，合成与构建可复现，旧版消费不受影响；测试、文档依据和未验证项均有真实记录。
+验收：目录修改有可靠检查入口，合成与构建可复现，旧版消费不受影响；测试、文档依据和未验证项均有真实记录。✔
 
 ## 九、预计改动边界
 
@@ -264,11 +264,38 @@ scripts/
 
 ## 十二、最终验收门
 
-- [ ] 第一批有无损数据与解析行为对比；第二批有公共资料展开、差异覆写和证据边界测试。
-- [ ] 生成器可重复、可只读检查，异常输入不会覆盖原产物。
-- [ ] main 原路径的 schema v2 单文件继续可用、大小在 2 MiB 内、旧 Provider ID 全部兼容。
-- [ ] CI 能捕获只改 catalog 的变更、未更新产物、重复键、错误模型引用和错误默认模型。
-- [ ] 专项与全量测试结果真实可查；支持平台的构建结果和未执行项分别列明。
-- [ ] 用户配置、密钥、缓存、当前模型与协议选择未被迁移工具暗改。
-- [ ] 文档清楚区分维护源、发布产物、官方声明、回放通过与真机验证。
-- [ ] 完工逐项勾选并附落点／测试记录；目录分片实施项仍未完成，第十一节单独记录本次修复及 GitHub CI 状态。
+- [x] 第一批有无损数据与解析行为对比；第二批有公共资料展开、差异覆写和证据边界测试。（A 批对账：全字段/键序/解析序/查找逐笔等价；B 批 32 项自测覆盖合并规则正反例与证据剥除）
+- [x] 生成器可重复、可只读检查，异常输入不会覆盖原产物。（`--check` 只读；先全量校验后原子替换，失败产物一字不动——自测钉死）
+- [x] main 原路径的 schema v2 单文件继续可用、大小在 2 MiB 内、旧 Provider ID 全部兼容。（1,284,040 字节 < 2,097,152；68 个 ID 原名原值）
+- [x] CI 能捕获只改 catalog 的变更、未更新产物、重复键、错误模型引用和错误默认模型。（changes 分类含 catalog/*；`--check` 步与 ctest 一致性门；重复键/悬空引用/默认模型悬空均在生成器校验里红）
+- [x] 专项与全量测试结果真实可查；支持平台的构建结果和未执行项分别列明。（生成器自测 32 项本地绿；C++ 全量与三平台构建走 GitHub Actions，run id 见实施纪要；未执行项如实列明）
+- [x] 用户配置、密钥、缓存、当前模型与协议选择未被迁移工具暗改。（改动只落 catalog/、scripts/、tests/CMakeLists.txt、两个 workflow、docs、本 todo；src/ 零改动）
+- [x] 文档清楚区分维护源、发布产物、官方声明、回放通过与真机验证。（catalog.md 维护流程与"2026-09-09 核对节"分层；evidence kind 区分官方文档/迁移比对/存疑登记）
+- [x] 完工逐项勾选并附落点／测试记录；目录分片实施项已完成，第十一节单独记录该次修复及 GitHub CI 状态。
+
+## 十三、实施纪要（2026-09-09，分支 worktree-agent-catalog-shard）
+
+基线（HEAD=bd68cea3）：1,283,272 字节、49,303 行、68 Provider、2,361 条模型、1,136 个模型 ID、sha256 52a58578c19c871e…。终态：1,284,040 字节、68/2,361/1,136 全数不变，revision 2026-09-09 不变。
+
+提交（分支 worktree-agent-catalog-shard，基于 bd68cea3）：
+
+1. `feat(catalog): Provider 目录无损分片与确定性生成器(目录分片单 A 批)`——manifest＋36 分片＋source.schema.json v1＋生成器（17 项自测）＋规范化产物＋CI/ctest 接线＋catalog.md 维护流程。
+2. `feat(catalog): 公共模型池与多端点声明(目录分片单 B 批)`——维护格式 v2：20 家多端点平台转端点形态，18 份公共池（669 型提池），覆写白名单与 evidence/aliases 剥除，自测 32 项；产物与 A 批逐字节一致。
+3. `docs(catalog): 回归交付与实施纪要(目录分片单 C 批)`——schema.md 架构说明、README.en.md 目录来源、本 todo 勾账。
+
+无损等价的验证法（本地，python 只读）：
+
+- A 批：`git show HEAD:catalog/providers.json` 与生成产物对——(1) 顶层/Provider/模型三层全字段相等；(2) 各 Provider 字段键序、模型键序逐一相同；(3) C++ 解析序（nlohmann::json 的 object 是 std::map，两级迭代均按键字母序）等价；(4) 按 ModelCatalog::FindByProviderAndSlug 语义模拟 68×2,361 笔查找，逐笔同果。字节差异共 12 处：10 处为 5 个内联字符串数组展开成逐行（约 48 行，"经批准的格式规范化"），另 2 处是 grok-chat 整块从 gateway 后归队到 grok 平台片（文档位变化，解析序不受影响）。
+- B 批：迁移后重新生成，`git diff catalog/providers.json` 为空——产物与 A 批逐字节一致，即对基线无损由 A 批证明传递。
+- 幂等：连跑两遍 generate 字节不变；`--check` 对在库产物逐字节对账，第一处差异带行号指认。
+
+生成器用法：`python scripts/generate_provider_catalog.py`（合成＋原子替换）、`--check`（只读对账，CI/release/ctest 同一道门）、`--self-test`（临时目录夹具 32 项）。ctest 名：`catalog.generator.selftest`、`catalog.consistency`。
+
+提池明细（端点数/提池型/私有型）：zai 4/18/53，zhipu 4/2/2，dashscope 3/115/0，deepseek 3/11/33，moonshot 2/0/10，grok 2/26/0，minimax 4/11/0，dmxapi 3/4/6，doubao 2/37/0，fireworks 3/23/0，longcat 2/1/0，mimo 3/6/0，modelscope 2/7/0，openrouter 2/298/58，poe 2/1/14，qiniu 2/1/0，silicon 2/49/0，stepfun 2/4/0，tokenhub 3/25/0，vllm 2/0/2。moonshot、vllm 两端点逐字段全异，一型不并——同名不是合并依据。
+
+抉择与未验项（如实）：
+
+- 未新增 jsonschema 依赖：生成器手写校验（重复键/封闭字段集/引用/默认模型/2 MiB）为维护侧第一道门，C++ parser（RejectUnknown 全层严格）与既有目录测试为终门；不引第三方包、不固定其版本，构建零新依赖。
+- 本地未编译、未跑 C++ 测试（执行约束）；全量回归与三平台构建由 GitHub Actions 承担：分支 push 的 ci run 34360824346（job 102497114081）macOS 快车道 success——"Check provider catalog consistency" 步绿，ctest 400 项全过，其中 `catalog.generator.selftest`（#399）与 `catalog.consistency`（#400）新门首次上墙即绿；Windows/Linux 腿由协调方合并前 PR 全量兜底。
+- ETag/304/坏缓存等运行时缓存行为：无既有单测，本单未新增；运行时代码零改动＋产物 revision 与语义不变，行为按构造不变，真机未验。
+- 未发任何真机模型请求；evidence 只记迁移比对来源，verified 等验证标记一字未动。

@@ -1,0 +1,862 @@
+{
+  "platform": "ppio",
+  "providers": {
+    "ppio": {
+      "name": "PPIO",
+      "description": "PPIO OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.ppinfra.com/v3/openai",
+      "key_env": "PPIO_API_KEY",
+      "default_model": "qwen/qwen3.5-plus",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://docs.cherry-ai.com/pre-basic/providers/ppio",
+      "models": {
+        "zai-org/autoglm-phone-9b-multilingual": {
+          "name": "AutoGLM-Phone-9B-Multilingual",
+          "max_output": 32000
+        },
+        "deepseek/deepseek-r1-0528": {
+          "name": "DeepSeek R1",
+          "context_window": 163840,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek/deepseek-r1-distill-llama-70b": {
+          "name": "DeepSeek R1 Distill Llama 70B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek/deepseek-v3.1": {
+          "name": "DeepSeek V3.1",
+          "context_window": 163840,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek/deepseek-v3.1-terminus": {
+          "name": "siliconflow/deepseek-v3.1-terminus",
+          "context_window": 163840,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "deepseek/deepseek-v3.2": {
+          "name": "siliconflow/deepseek-v3.2",
+          "context_window": 163840,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "deepseek/deepseek-v3.2-exp": {
+          "name": "DeepSeek V3.2 Exp",
+          "context_window": 163840,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "baidu/ernie-4.5-vl-424b-a47b": {
+          "name": "Baidu: ERNIE 4.5 VL 424B A47B ",
+          "context_window": 123000,
+          "capabilities": {
+            "reasoning": true,
+            "image": true
+          }
+        },
+        "zai-org/glm-4.5": {
+          "name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "zai-org/glm-4.5-air": {
+          "name": "GLM-4.5-Air",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "zai-org/glm-4.5v": {
+          "name": "GLM-4.5V",
+          "context_window": 66000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "zai-org/glm-4.6": {
+          "name": "GLM-4.6",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "zai-org/glm-4.6v": {
+          "name": "GLM-4.6V",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "zai-org/glm-4.7": {
+          "name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "zai-org/glm-4.7-flash": {
+          "name": "GLM-4.7-Flash",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "zai-org/glm-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "hunyuan-image-3": {
+          "name": "Hunyuan Image 3"
+        },
+        "jimeng-txt2img-v3.0": {
+          "name": "Jimeng Text-to-Image v3.0"
+        },
+        "jimeng-txt2img-v3.1": {
+          "name": "Jimeng Text-to-Image v3.1"
+        },
+        "moonshotai/kimi-k2-thinking": {
+          "name": "Kimi K2 Thinking",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "moonshotai/kimi-k2.5": {
+          "name": "Kimi K2.5",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 30720,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 30720,
+              "min": 0
+            }
+          }
+        },
+        "moonshotai/kimi-k2-instruct": {
+          "name": "Kimi K2 0905",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "xiaomimimo/mimo-v2-flash": {
+          "name": "MiMo-V2-Flash",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "minimax/minimax-m2": {
+          "name": "MiniMax M2",
+          "context_window": 205000,
+          "max_output": 205000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "minimax/minimax-m2.1": {
+          "name": "MiniMax M2.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "minimax/minimax-m2.5": {
+          "name": "MiniMax-M2.5",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "minimax/minimax-m2.5-highspeed": {
+          "name": "MiniMax-M2.5-highspeed",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "qwen/qwen-2.5-72b-instruct": {
+          "name": "Qwen2.5 72B Instruct",
+          "context_window": 32768,
+          "max_output": 16000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "qwen/qwen2.5-7b-instruct": {
+          "name": "Qwen2.5 7B Instruct",
+          "context_window": 131072,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "qwen/qwen2.5-vl-72b-instruct": {
+          "name": "Qwen2.5-VL 72B Instruct",
+          "context_window": 131072,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "qwen/qwen3-235b-a22b-fp8": {
+          "name": "Qwen3 235B-A22B",
+          "context_window": 262144,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 1
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 1
+            }
+          }
+        },
+        "qwen/qwen3-235b-a22b-thinking-2507": {
+          "name": "Qwen3 235B A22B Thinking 2507",
+          "max_output": 114688
+        },
+        "qwen/qwen3-30b-a3b-fp8": {
+          "name": "Qwen: Qwen3 30B A3B Thinking 2507",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 38912,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 38912,
+              "min": 1024
+            }
+          }
+        },
+        "qwen/qwen3-32b-fp8": {
+          "name": "Qwen3 32B",
+          "context_window": 131072,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 38912,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 38912,
+              "min": 1024
+            }
+          }
+        },
+        "qwen/qwen3.5-122b-a10b": {
+          "name": "Qwen3.5 122B-A10B",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 0
+            }
+          }
+        },
+        "qwen/qwen3.5-27b": {
+          "name": "Qwen3.5 27B",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 0
+            }
+          }
+        },
+        "qwen/qwen3.5-35b-a3b": {
+          "name": "Qwen3.5 35B-A3B",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 0
+            }
+          }
+        },
+        "qwen/qwen3.5-397b-a17b": {
+          "name": "Qwen3.5-397B-A17B",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 0
+            }
+          }
+        },
+        "qwen/qwen3.5-plus": {
+          "name": "Qwen3.5 Plus",
+          "context_window": 1000000,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 1
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 1
+            }
+          }
+        },
+        "qwen/qwen3-coder-30b-a3b-instruct": {
+          "name": "Qwen3-Coder 30B-A3B Instruct",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "qwen/qwen3-coder-480b-a35b-instruct": {
+          "name": "Qwen3 Coder 480B A35B Instruct",
+          "context_window": 262144,
+          "max_output": 66536,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "qwen/qwen3-coder-next": {
+          "name": "Qwen3 Coder Next",
+          "context_window": 262144,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "qwen/qwen3-next-80b-a3b-thinking": {
+          "name": "Qwen3-Next 80B-A3B (Thinking)",
+          "context_window": 262144,
+          "max_output": 262000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 38912,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 38912,
+              "min": 1024
+            }
+          }
+        },
+        "qwen/qwen3-next-80b-a3b-instruct": {
+          "name": "Qwen3-Next-80B-A3B-Instruct",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "qwen/qwen3-vl-235b-a22b-thinking": {
+          "name": "Qwen3-VL 235B-A22B",
+          "context_window": 262000,
+          "max_output": 262000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 38912,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 38912,
+              "min": 1024
+            }
+          }
+        },
+        "qwen/qwen3-vl-235b-a22b-instruct": {
+          "name": "Qwen3 VL 235B A22B Instruct",
+          "context_window": 262144,
+          "max_output": 129024,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "qwen/qwen3-vl-30b-a3b-thinking": {
+          "name": "Qwen3-VL 30B-A3B",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 38912,
+                "min": 1024
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 38912,
+              "min": 1024
+            }
+          }
+        },
+        "qwen/qwen3-vl-30b-a3b-instruct": {
+          "name": "Qwen: Qwen3 VL 30B A3B Instruct",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "qwen/qwen3-vl-8b-instruct": {
+          "name": "Qwen: Qwen3 VL 8B Instruct",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "z-image-turbo": {
+          "name": "Z-Image Turbo"
+        },
+        "z-image-turbo-lora": {
+          "name": "Z-Image Turbo LoRA"
+        }
+      }
+    }
+  }
+}

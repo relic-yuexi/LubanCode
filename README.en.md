@@ -229,7 +229,7 @@ For multiple endpoints, run `/provider add`. The 68 presets open in a searchable
 
 Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. A successful `/provider switch work` also writes `active_provider`, so the next launch uses the same endpoint. The detailed [configuration guide](docs/reference/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
 
-The catalog source lives in [`catalog/providers.json`](catalog/providers.json), with its schema in [`catalog/providers.schema.json`](catalog/providers.schema.json). The executable embeds a snapshot and caches validated updates under `~/.lubancode/cache/`.
+The catalog is maintained as platform shards under [`catalog/providers/`](catalog/providers) with shared model pools in `catalog/models/`, then deterministically generated into [`catalog/providers.json`](catalog/providers.json) (schema: [`catalog/providers.schema.json`](catalog/providers.schema.json); run `python scripts/generate_provider_catalog.py --check` after editing shards). The executable embeds a snapshot of the generated file and caches validated updates under `~/.lubancode/cache/`.
 
 ## Project instructions
 

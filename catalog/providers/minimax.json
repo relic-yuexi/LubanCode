@@ -1,0 +1,166 @@
+{
+  "platform": "minimax",
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "description": "MiniMax OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.minimaxi.com/v1",
+      "key_env": "MINIMAX_API_KEY",
+      "default_model": "minimax-m3",
+      "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "adaptive",
+        "toggle_off": "disabled",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
+      "extra_body": {
+        "reasoning_split": true
+      },
+      "models": [
+        "minimax-01",
+        "minimax-m1",
+        "minimax-m2",
+        "minimax-m2-1",
+        "minimax-m2-1-lightning",
+        "minimax-m2-5",
+        "minimax-m2-5-highspeed",
+        "minimax-m2-7",
+        "minimax-m2-7-highspeed",
+        "minimax-m2-her",
+        "minimax-m3"
+      ]
+    },
+    {
+      "id": "minimax-anthropic",
+      "name": "MiniMax (Anthropic)",
+      "description": "MiniMax Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.minimaxi.com/anthropic",
+      "key_env": "MINIMAX_API_KEY",
+      "default_model": "minimax-m3",
+      "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
+      "extra_body": {
+        "reasoning_split": true
+      },
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "minimax-01",
+        "minimax-m1",
+        "minimax-m2",
+        "minimax-m2-1",
+        "minimax-m2-1-lightning",
+        "minimax-m2-5",
+        "minimax-m2-5-highspeed",
+        "minimax-m2-7",
+        "minimax-m2-7-highspeed",
+        "minimax-m2-her",
+        "minimax-m3"
+      ]
+    },
+    {
+      "id": "minimax-global",
+      "name": "minimax-global",
+      "description": "minimax-global OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.minimax.io/v1",
+      "key_env": "MINIMAX_API_KEY",
+      "default_model": "minimax-m3",
+      "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "adaptive",
+        "toggle_off": "disabled",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+      "extra_body": {
+        "reasoning_split": true
+      },
+      "models": [
+        "minimax-01",
+        "minimax-m1",
+        "minimax-m2",
+        "minimax-m2-1",
+        "minimax-m2-1-lightning",
+        "minimax-m2-5",
+        "minimax-m2-5-highspeed",
+        "minimax-m2-7",
+        "minimax-m2-7-highspeed",
+        "minimax-m2-her",
+        "minimax-m3"
+      ]
+    },
+    {
+      "id": "minimax-global-anthropic",
+      "name": "minimax-global (Anthropic)",
+      "description": "minimax-global Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.minimax.io/anthropic",
+      "key_env": "MINIMAX_API_KEY",
+      "default_model": "minimax-m3",
+      "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+      "extra_body": {
+        "reasoning_split": true
+      },
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "minimax-01",
+        "minimax-m1",
+        "minimax-m2",
+        "minimax-m2-1",
+        "minimax-m2-1-lightning",
+        "minimax-m2-5",
+        "minimax-m2-5-highspeed",
+        "minimax-m2-7",
+        "minimax-m2-7-highspeed",
+        "minimax-m2-her",
+        "minimax-m3"
+      ]
+    }
+  ],
+  "models_ref": "models/minimax.json"
+}

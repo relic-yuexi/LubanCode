@@ -1,0 +1,44 @@
+{
+  "platform": "sophnet",
+  "providers": {
+    "sophnet": {
+      "name": "SophNet",
+      "description": "SophNet OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://www.sophnet.com/api/open-apis/v1",
+      "key_env": "SOPHNET_API_KEY",
+      "default_model": "DeepSeek-R1-0528",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://sophnet.com/docs/component/introduce.html",
+      "models": {
+        "DeepSeek-R1-0528": {
+          "name": "DeepSeek R1",
+          "context_window": 163840,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "DeepSeek-v3": {
+          "name": "DeepSeek V3",
+          "context_window": 163840,
+          "max_output": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        }
+      }
+    }
+  }
+}

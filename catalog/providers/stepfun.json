@@ -1,0 +1,68 @@
+{
+  "platform": "stepfun",
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "stepfun",
+      "name": "StepFun",
+      "description": "StepFun OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.stepfun.com/v1",
+      "key_env": "STEPFUN_API_KEY",
+      "default_model": "step-3-7-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://platform.stepfun.com/docs/overview/concept",
+      "models": [
+        "step-1-32k",
+        "step-2-16k",
+        "step-3-5-flash",
+        "step-3-7-flash"
+      ]
+    },
+    {
+      "id": "stepfun-anthropic",
+      "name": "StepFun (Anthropic)",
+      "description": "StepFun Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.stepfun.com",
+      "key_env": "STEPFUN_API_KEY",
+      "default_model": "step-3-7-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://platform.stepfun.com/docs/overview/concept",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "step-1-32k",
+        "step-2-16k",
+        "step-3-5-flash",
+        "step-3-7-flash"
+      ]
+    }
+  ],
+  "models_ref": "models/stepfun.json"
+}

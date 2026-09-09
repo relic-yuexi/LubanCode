@@ -1,0 +1,934 @@
+{
+  "platform": "zai",
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "zai",
+      "name": "zai",
+      "description": "zai OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://docs.z.ai/",
+      "extra_body": {
+        "tool_stream": true
+      },
+      "models": [
+        "glm-5.3-flash",
+        "glm-5.2",
+        "glm-5.2-fast",
+        "glm-3-turbo",
+        "glm-4",
+        "glm-4.5",
+        "glm-4.5-air",
+        "glm-4.5-flash",
+        "glm-4.5v",
+        "glm-4.6",
+        "glm-4.6v",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-4.7-flashx",
+        "glm-4.7-maas",
+        "glm-4-air",
+        "glm-4-airx",
+        "glm-4-flash",
+        "glm-4-flashx",
+        "glm-4-long",
+        "glm-4-plus",
+        "glm-5",
+        "glm-5.1",
+        "glm-5.3",
+        "glm-5-maas",
+        "glm-5-turbo",
+        "glm-5v-turbo",
+        "glm-latest",
+        "glm-z1",
+        "glm-z1-air",
+        "glm-z1-airx",
+        "glm-z1-flash"
+      ],
+      "endpoint_models": {
+        "glm-5.3-flash": {
+          "name": "GLM 5.3 Flash",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "max",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ],
+            "dialect": {
+              "toggle": "thinking_type",
+              "toggle_on": "enabled",
+              "effort_path": "reasoning_effort",
+              "verified": false
+            }
+          }
+        },
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "zai-anthropic",
+      "name": "zai (Anthropic)",
+      "description": "zai Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://docs.z.ai/",
+      "extra_body": {
+        "tool_stream": true
+      },
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "glm-5.2",
+        "glm-5.2-fast",
+        "glm-3-turbo",
+        "glm-4",
+        "glm-4.5",
+        "glm-4.5-air",
+        "glm-4.5-flash",
+        "glm-4.5v",
+        "glm-4.6",
+        "glm-4.6v",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-4.7-flashx",
+        "glm-4.7-maas",
+        "glm-4-air",
+        "glm-4-airx",
+        "glm-4-flash",
+        "glm-4-flashx",
+        "glm-4-long",
+        "glm-4-plus",
+        "glm-5",
+        "glm-5.1",
+        "glm-5.3",
+        "glm-5-maas",
+        "glm-5-turbo",
+        "glm-5v-turbo",
+        "glm-latest",
+        "glm-z1",
+        "glm-z1-air",
+        "glm-z1-airx",
+        "glm-z1-flash"
+      ],
+      "endpoint_models": {
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "zai-coding",
+      "name": "智谱 GLM Coding Plan（国际）",
+      "description": "智谱 GLM Coding Plan（国际）, 订阅制 Coding Plan 端点",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://z.ai",
+      "extra_body": {
+        "tool_stream": true
+      },
+      "models": [
+        "glm-5.2",
+        "glm-5.2-fast",
+        "glm-3-turbo",
+        "glm-4",
+        "glm-4.5",
+        "glm-4.5-air",
+        "glm-4.5-flash",
+        "glm-4.5v",
+        "glm-4.6",
+        "glm-4.6v",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-4.7-flashx",
+        "glm-4.7-maas",
+        "glm-4-air",
+        "glm-4-airx",
+        "glm-4-flash",
+        "glm-4-flashx",
+        "glm-4-long",
+        "glm-4-plus",
+        "glm-5",
+        "glm-5.1",
+        "glm-5.3",
+        "glm-5-maas",
+        "glm-5-turbo",
+        "glm-5v-turbo",
+        "glm-latest",
+        "glm-z1",
+        "glm-z1-air",
+        "glm-z1-airx",
+        "glm-z1-flash"
+      ],
+      "endpoint_models": {
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "zai-coding-anthropic",
+      "name": "智谱 GLM Coding Plan（国际, Anthropic 兼容）",
+      "description": "智谱 GLM Coding Plan（国际, Anthropic 兼容）, 订阅制 Coding Plan 端点",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.z.ai/api/coding/anthropic",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://z.ai",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "glm-5.2",
+        "glm-5.2-fast",
+        "glm-3-turbo",
+        "glm-4",
+        "glm-4.5",
+        "glm-4.5-air",
+        "glm-4.5-flash",
+        "glm-4.5v",
+        "glm-4.6",
+        "glm-4.6v",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-4.7-flashx",
+        "glm-4.7-maas",
+        "glm-4-air",
+        "glm-4-airx",
+        "glm-4-flash",
+        "glm-4-flashx",
+        "glm-4-long",
+        "glm-4-plus",
+        "glm-5",
+        "glm-5.1",
+        "glm-5.3",
+        "glm-5-maas",
+        "glm-5-turbo",
+        "glm-5v-turbo",
+        "glm-latest",
+        "glm-z1",
+        "glm-z1-air",
+        "glm-z1-airx",
+        "glm-z1-flash"
+      ],
+      "endpoint_models": {
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        }
+      }
+    }
+  ],
+  "models_ref": "models/zai.json"
+}

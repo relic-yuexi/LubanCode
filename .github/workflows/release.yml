@@ -74,6 +74,14 @@ jobs:
         shell: bash
         run: bash scripts/check_docs.sh
 
+      # 目录一致性(Provider 目录分片单):发布前对账维护源与在库
+      # catalog/providers.json——发布构建不能代替目录检查,不合即红,不发半套。
+      - name: Check provider catalog consistency
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/generate_provider_catalog.py --check
+
       - name: Build static OpenSSL 3.3.2 (manylinux only)
         if: matrix.name == 'linux-x64'
         shell: bash

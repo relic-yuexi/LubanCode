@@ -1,0 +1,25 @@
+{
+  "owner": "longcat",
+  "models": {
+    "LongCat-2.0": {
+      "name": "LongCat-2.0",
+      "context_window": 1048576,
+      "max_output": 131072,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    }
+  }
+}

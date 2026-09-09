@@ -1,0 +1,190 @@
+{
+  "owner": "minimax",
+  "models": {
+    "minimax-01": {
+      "name": "MiniMax: MiniMax-01",
+      "context_window": 1000192,
+      "capabilities": {
+        "image": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m1": {
+      "name": "MiniMax: MiniMax M1",
+      "context_window": 1000000,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2": {
+      "name": "MiniMax M2",
+      "context_window": 205000,
+      "max_output": 205000,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-1": {
+      "name": "MiniMax M2.1",
+      "context_window": 204800,
+      "max_output": 131072,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-1-lightning": {
+      "name": "MiniMax M2.1 Lightning",
+      "context_window": 204800,
+      "max_output": 131072,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-5": {
+      "name": "MiniMax-M2.5",
+      "context_window": 204800,
+      "max_output": 131072,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-5-highspeed": {
+      "name": "MiniMax-M2.5-highspeed",
+      "context_window": 204800,
+      "max_output": 131072,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-7": {
+      "name": "MiniMax-M2.7",
+      "context_window": 204800,
+      "max_output": 131072,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "file_input": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-7-highspeed": {
+      "name": "MiniMax-M2.7-highspeed",
+      "context_window": 204800,
+      "max_output": 131100,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "file_input": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m2-her": {
+      "name": "MiniMax: MiniMax M2-her",
+      "context_window": 65536,
+      "capabilities": {},
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ]
+      }
+    },
+    "minimax-m3": {
+      "name": "MiniMax-M3",
+      "context_window": 1048576,
+      "max_output": 524288,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "image": true,
+        "video": true,
+        "video-recognition": true,
+        "file_input": true
+      },
+      "default_think": "auto",
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    }
+  }
+}

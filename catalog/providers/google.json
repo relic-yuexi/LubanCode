@@ -1,0 +1,1268 @@
+{
+  "platform": "google",
+  "providers": {
+    "gemini": {
+      "name": "Gemini",
+      "description": "Gemini Google Generate Content API",
+      "wire": "google-generate-content",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "key_env": "GEMINI_API_KEY",
+      "default_model": "gemini-3-flash",
+      "reasoning_dialect": {
+        "toggle": "include_thoughts",
+        "effort_path": "thinkingLevel",
+        "budget_path": "thinkingBudget",
+        "delta": "gemini_thought_part",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://ai.google.dev/gemini-api/docs",
+      "models": {
+        "deep-research-max-preview-04-2026": {
+          "name": "Deep Research Max Preview (Apr-21-2026)",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "video": true,
+            "image-generation": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          }
+        },
+        "deep-research-preview-04-2026": {
+          "name": "Deep Research Preview (Apr-21-2026)",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "video": true,
+            "image-generation": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          }
+        },
+        "gemini-2.5-computer-use-preview-10-2025": {
+          "name": "Gemini 2.5 Computer Use Preview 10-2025",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gemini-2.5-flash": {
+          "name": "Gemini 2.5 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-2.5-flash-image": {
+          "name": "Gemini 2.5-flash-image",
+          "context_window": 32768,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-2.5-flash-image-preview": {
+          "name": "Nano Banana Preview (Gemini 2.5 Flash Image Preview)",
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-2.5-flash-lite": {
+          "name": "Gemini 2.5 Flash-Lite",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 512
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 512
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-2.5-pro": {
+          "name": "Gemini 2.5 Pro",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-2.5-pro-preview": {
+          "name": "Google: Gemini 2.5 Pro Preview 06-05",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "audio-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-2.5-pro-preview-05-06": {
+          "name": "Google: Gemini 2.5 Pro Preview 05-06",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-3.1-flash-image": {
+          "name": "Nano Banana 2",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "image-generation": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-flash-image-preview": {
+          "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-flash-lite": {
+          "name": "Gemini 3.1 Flash Lite",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-flash-lite-image": {
+          "name": "Nano Banana 2 Lite",
+          "context_window": 65536,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-flash-lite-preview": {
+          "name": "Gemini 3.1 Flash Lite Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-flash-live-preview": {
+          "name": "Gemini 3.1 Flash Live Preview",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "audio-generation": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-pro-preview": {
+          "name": "Gemini 3.1 Pro Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.1-pro-preview-customtools": {
+          "name": "Gemini 3.1 Pro Preview Custom Tools",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.5-flash": {
+          "name": "Gemini 3.5 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.5-flash-lite": {
+          "name": "Gemini 3.5 Flash Lite",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.6-flash": {
+          "name": "Gemini 3.6 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3.7-flash": {
+          "name": "Gemini 3.7 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3-flash": {
+          "name": "Gemini 3 Flash",
+          "context_window": 1000000,
+          "max_output": 65000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3-flash-preview": {
+          "name": "Gemini 3 Flash Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3-pro-image": {
+          "name": "Nano Banana Pro (Gemini 3 Pro Image)",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-3-pro-image-preview": {
+          "name": "Gemini 3-pro-image-preview",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-flash-latest": {
+          "name": "Gemini Flash Latest",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-flash-lite-latest": {
+          "name": "Gemini Flash-Lite Latest",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 512
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 512
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-omni-flash-preview": {
+          "name": "Gemini Omni Flash Preview",
+          "context_window": 1000000,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "video-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-pro-latest": {
+          "name": "Google Gemini Pro Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 32768,
+                "min": 128
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 32768,
+              "min": 128
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gemini-robotics-er-1-6-preview": {
+          "name": "Gemini Robotics-ER 1.6 Preview",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "wireDialect": "budget"
+          }
+        },
+        "gemma-2-27b-it": {
+          "name": "Google: Gemma 2 27B",
+          "context_window": 8192,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "gemma-2-2b-it": {
+          "name": "Gemma 2 2b It",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "gemma-3-12b-it": {
+          "name": "Gemma 3 12B IT",
+          "context_window": 131072,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gemma-3-27b-it": {
+          "name": "Google Gemma 3 27B Instruct",
+          "context_window": 262144,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gemma-3-4b-it": {
+          "name": "Gemma 3 4B IT",
+          "context_window": 131072,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gemma-3n-e2b-it": {
+          "name": "Gemma 3n E2b It",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gemma-3n-e4b-it": {
+          "name": "Gemma 3n E4b It",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "gemma-4-26b-a4b-it": {
+          "name": "Gemma 4 26B A4B IT",
+          "context_window": 262144,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "gemma-4-31b-it": {
+          "name": "Gemma-4-31B-IT",
+          "context_window": 262144,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "lyria-3-clip-preview": {
+          "name": "Lyria 3 Clip Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "structured_output": true,
+            "image": true,
+            "audio-generation": true,
+            "file_input": true
+          }
+        },
+        "lyria-3-pro-preview": {
+          "name": "Lyria 3 Pro Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "structured_output": true,
+            "image": true,
+            "audio-generation": true,
+            "file_input": true
+          }
+        }
+      }
+    }
+  }
+}

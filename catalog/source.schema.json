@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/catalog/source.schema.json",
+  "title": "LubanCode provider catalog maintenance source (v2)",
+  "description": "维护格式 v2:catalog/manifest.json、catalog/providers/*.json 与 catalog/models/*.json 公共模型池的形状。合成器 scripts/generate_provider_catalog.py 把它们展开为发布格式 catalog/providers.json(providers.schema.json,schema v2)。维护字段(evidence/aliases)只住在这层,生成时剥除;发布产物不认识的一律在生成层消解。各层拒绝未知字段。",
+  "oneOf": [
+    { "$ref": "#/$defs/manifest" },
+    { "$ref": "#/$defs/shard" },
+    { "$ref": "#/$defs/modelsPool" }
+  ],
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_schema_version", "revision", "shards"],
+      "description": "维护清单:格式版本、发布 revision 与分片顺序。产物文档序 = manifest 分片顺序 × 片内序,不依赖目录遍历。",
+      "properties": {
+        "source_schema_version": { "const": 2 },
+        "revision": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "shards": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "显式有序分片表;路径钉在 catalog/providers/ 内,拒绝绝对路径、目录穿越与越界符号链接。catalog/providers/ 与 catalog/models/ 里没登记/没被引用的 JSON 文件会直接报错。",
+          "items": { "type": "string", "pattern": "^providers/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$" }
+        }
+      }
+    },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform"],
+      "description": "平台分片。恰选一种形态:providers(直接形态,整旧 Provider 对象,单端点平台用)或 endpoints(端点形态,多协议/地区/套餐平台用,公共模型提池)。",
+      "properties": {
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "description": "平台标识,须与文件名主干一致。"
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "providers": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "直接形态:完整旧 Provider 对象(发布 schema v2 原样)。",
+          "additionalProperties": { "$ref": "providers.schema.json#/$defs/provider" }
+        },
+        "models_ref": {
+          "type": "string",
+          "pattern": "^models/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$",
+          "description": "端点形态专用:指向本平台公共模型池 models/<platform>.json。命名空间按平台钉死,不共享、不跨平台引用。"
+        },
+        "endpoints": {
+          "type": "array",
+          "minItems": 1,
+          "description": "端点清单:每个端点展开为一条旧 Provider 条目,id 是旧 Provider ID,用户配置与 active_provider 认它,迁移不改名。",
+          "items": { "$ref": "#/$defs/endpoint" }
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "wire", "base_url", "key_env", "default_model", "models"],
+      "description": "端点:旧 Provider 的接入事实(wire、地址、鉴权、方言、平台限制)加显式模型集合。除 models 变有序 ID 表外,其余字段与发布格式同形同序;合成时 models 在原位展开成对象。",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "description": "旧 Provider ID,全局唯一。" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "wire": { "enum": ["anthropic-messages", "openai-responses", "openai-chat-completions", "google-generate-content"] },
+        "base_url": { "type": "string", "pattern": "^(https://|http://(localhost|127\\.0\\.0\\.1)([:/]|$))" },
+        "key_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "default_model": { "type": "string", "minLength": 1, "description": "必须属于本端点最终模型集合。" },
+        "model_reasoning_effort": { "type": "string" },
+        "native_web_search": { "type": "boolean" },
+        "stream_usage": { "type": "boolean" },
+        "reasoning_replay": { "enum": ["never", "tool_episode"] },
+        "reasoning_delta_field": { "type": "string", "minLength": 1 },
+        "reasoning_replay_field": { "type": "string", "minLength": 1 },
+        "reasoning_dialect": { "$ref": "providers.schema.json#/$defs/reasoning_dialect" },
+        "docs_url": { "type": "string", "pattern": "^https://" },
+        "extra_body": { "type": "object" },
+        "extra_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "models": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "端点模型集合,显式声明、允许子集;顺序即产物模型文档序。每个 ID 须恰来自公共池或 endpoint_models 一处。",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "endpoint_models": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "端点私有模型(池里没有或与其他端点不同),整份写全;与公共池撞同名是错——差异走 model_overrides。",
+          "additionalProperties": { "$ref": "#/$defs/maintenanceModel" }
+        },
+        "model_overrides": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "端点×模型覆写,按字段白名单合并:标量替换、数组整体替换、capabilities/deferred_tools 按键覆盖(不删键)、reasoning 逐子字段(controls/supportedEfforts/wireDialect 整体替换,dialect/thinkingTokenLimits 按键覆盖)。显式 false 是值不是缺失;null 是错;没有删字段语义——要删可选字段就写 endpoint_models 整份。",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" },
+              "context_window": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string" }] },
+              "max_output": { "type": "integer", "minimum": 1 },
+              "default_think": { "type": "string" },
+              "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } },
+              "deferred_tools": { "$ref": "providers.schema.json#/$defs/deferred_tools" },
+              "reasoning": { "$ref": "#/$defs/reasoningOverride" }
+            }
+          }
+        }
+      }
+    },
+    "reasoningOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "reasoning 覆写:controls/supportedEfforts/wireDialect 整体替换,dialect/thinkingTokenLimits 按键覆盖。",
+      "properties": {
+        "controls": { "$ref": "providers.schema.json#/$defs/reasoning/properties/controls" },
+        "supportedEfforts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "wireDialect": { "enum": ["effort", "budget"] },
+        "dialect": { "$ref": "providers.schema.json#/$defs/reasoning_dialect", "description": "按键覆盖,形状同 provider 级方言;与所在 wire 不匹配的组合由 C++ catalog parse 拦。" },
+        "thinkingTokenLimits": { "type": "object", "additionalProperties": false, "properties": { "min": { "type": "integer", "minimum": 0 }, "max": { "type": "integer", "minimum": 0 } } }
+      }
+    },
+    "modelsPool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "models"],
+      "description": "公共模型池:owner 与文件名主干一致,按平台命名空间隔离——同 ID 跨平台各写各的,同名不等于同物,绝不跨平台合并。池条目只收逐字段比对确认相同的事实。",
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "models": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/maintenanceModel" }
+        }
+      }
+    },
+    "maintenanceModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "description": "维护层模型条目:发布字段(providers.schema.json 的 model)加两枚维护字段;evidence/aliases 合成时剥除,不进产物。aliases 只是维护记录,runtime 不认识,别当已生效的映射。",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "context_window": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string" }] },
+        "max_output": { "type": "integer", "minimum": 1 },
+        "default_think": { "type": "string" },
+        "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "deferred_tools": { "$ref": "providers.schema.json#/$defs/deferred_tools" },
+        "reasoning": { "$ref": "providers.schema.json#/$defs/reasoning" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "aliases": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "description": "维护证据:来源、核对日期、类型分开记。kind 记 official-doc(官方文档)/migration-field-compare(迁移逐字段比对)/manual-declaration(手工声明)/recorded-unverified(存疑登记);不拿一个 true 冒充任何验证,不因整理提高 verified。",
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "checked": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "kind": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

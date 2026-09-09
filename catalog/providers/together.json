@@ -1,0 +1,232 @@
+{
+  "platform": "together",
+  "providers": {
+    "together": {
+      "name": "Together",
+      "description": "Together OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.together.ai/v1",
+      "key_env": "TOGETHER_API_KEY",
+      "default_model": "MiniMaxAI/MiniMax-M2.7",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://docs.together.ai/intro",
+      "models": {
+        "deepseek-ai/DeepSeek-V4-Pro": {
+          "name": "DeepSeek V4 Pro",
+          "context_window": 1048576,
+          "max_output": 393216,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high",
+                  "max",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high",
+              "max",
+              "xhigh"
+            ]
+          }
+        },
+        "zai-org/GLM-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "openai/gpt-oss-120b": {
+          "name": "GPT-OSS-120B",
+          "context_window": 131072,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "openai/gpt-oss-20b": {
+          "name": "GPT OSS 20B",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "moonshotai/Kimi-K2.6": {
+          "name": "Kimi K2.6",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 30720,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "thinkingTokenLimits": {
+              "max": 30720,
+              "min": 0
+            }
+          }
+        },
+        "MiniMaxAI/MiniMax-M2.7": {
+          "name": "MiniMax-M2.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          }
+        },
+        "Qwen/Qwen3.5-9B": {
+          "name": "Qwen: Qwen3.5-9B",
+          "context_window": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 0
+            }
+          }
+        },
+        "Qwen/Qwen3.6-Plus": {
+          "name": "Qwen3.6 Plus",
+          "context_window": 1000000,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 131072,
+                "min": 1
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 131072,
+              "min": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

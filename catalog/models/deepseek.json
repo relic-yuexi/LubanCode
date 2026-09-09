@@ -1,0 +1,280 @@
+{
+  "owner": "deepseek",
+  "models": {
+    "deepseek-v4-flash": {
+      "name": "DeepSeek V4 Flash",
+      "context_window": 1048576,
+      "max_output": 393216,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "default_think": "high",
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "effort",
+            "values": [
+              "none",
+              "high",
+              "max",
+              "low",
+              "xhigh"
+            ]
+          },
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "high",
+          "max",
+          "low",
+          "xhigh"
+        ]
+      }
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "name": "DeepSeek V4 Flash Vision Exp",
+      "context_window": 1048576,
+      "max_output": 393216,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "image": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "effort",
+            "values": [
+              "low",
+              "high",
+              "max",
+              "xhigh"
+            ]
+          },
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "low",
+          "high",
+          "max",
+          "xhigh",
+          "none"
+        ]
+      }
+    },
+    "deepseek-v4-pro": {
+      "name": "DeepSeek V4 Pro",
+      "context_window": 1048576,
+      "max_output": 393216,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "default_think": "high",
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "effort",
+            "values": [
+              "none",
+              "high",
+              "max",
+              "xhigh"
+            ]
+          },
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "high",
+          "max",
+          "xhigh"
+        ]
+      }
+    },
+    "deepseek-chat-v3-1": {
+      "name": "DeepSeek: DeepSeek V3.1",
+      "context_window": 163840,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v3-1": {
+      "name": "DeepSeek V3.1",
+      "context_window": 163840,
+      "max_output": 128000,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v3-1-maas": {
+      "name": "DeepSeek V3.1",
+      "context_window": 163840,
+      "max_output": 32768,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v3-1-terminus": {
+      "name": "siliconflow/deepseek-v3.1-terminus",
+      "context_window": 163840,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v3-2": {
+      "name": "siliconflow/deepseek-v3.2",
+      "context_window": 163840,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v3-2-exp": {
+      "name": "DeepSeek V3.2 Exp",
+      "context_window": 163840,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v3-2-maas": {
+      "name": "DeepSeek V3.2",
+      "context_window": 163840,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      }
+    },
+    "deepseek-v4-flash-latest": {
+      "name": "DeepSeek V4 Flash Latest",
+      "context_window": 1310720,
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "effort",
+            "values": [
+              "none",
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    }
+  }
+}

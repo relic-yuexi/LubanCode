@@ -1,0 +1,618 @@
+{
+  "platform": "deepseek",
+  "evidence": {
+    "source": "catalog/providers.json@bd68cea3",
+    "checked": "2026-09-09",
+    "kind": "migration-field-compare",
+    "note": "同平台多端点逐字段比对:相同模型提公共池,差异与私有模型留端点"
+  },
+  "endpoints": [
+    {
+      "id": "deepseek",
+      "name": "deepseek",
+      "description": "deepseek OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.deepseek.com/v1",
+      "key_env": "DEEPSEEK_API_KEY",
+      "default_model": "deepseek-v4-pro",
+      "model_reasoning_effort": "high",
+      "stream_usage": true,
+      "reasoning_replay": "tool_episode",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "tool_episode",
+        "verified": false
+      },
+      "docs_url": "https://platform.deepseek.com/api-docs/",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "deepseek-v4-pro",
+        "deepseek-chat-v3",
+        "deepseek-chat-v3-1",
+        "deepseek-r1",
+        "deepseek-r1-distill-llama-70b",
+        "deepseek-r1-distill-llama-8b",
+        "deepseek-r1-distill-qwen-1-5b",
+        "deepseek-r1-distill-qwen-14b",
+        "deepseek-r1-distill-qwen-32b",
+        "deepseek-r1-distill-qwen-7b",
+        "deepseek-v3",
+        "deepseek-v3-1",
+        "deepseek-v3-1-maas",
+        "deepseek-v3-1-terminus",
+        "deepseek-v3-2",
+        "deepseek-v3-2-exp",
+        "deepseek-v3-2-maas",
+        "deepseek-v4-flash-latest"
+      ],
+      "endpoint_models": {
+        "deepseek-chat": {
+          "name": "DeepSeek Chat",
+          "context_window": 1000000,
+          "max_output": 384000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-reasoner": {
+          "name": "DeepSeek Reasoner",
+          "context_window": 1000000,
+          "max_output": 384000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-chat-v3": {
+          "name": "DeepSeek: DeepSeek V3 0324",
+          "context_window": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1": {
+          "name": "DeepSeek R1",
+          "context_window": 163840,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-llama-70b": {
+          "name": "DeepSeek R1 Distill Llama 70B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-llama-8b": {
+          "name": "DeepSeek R1 Distill Llama 8B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-1-5b": {
+          "name": "DeepSeek R1 Distill Qwen 1.5B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-14b": {
+          "name": "DeepSeek R1 Distill Qwen 14B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-32b": {
+          "name": "DeepSeek R1 Distill Qwen 32B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-7b": {
+          "name": "DeepSeek R1 Distill Qwen 7B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-v3": {
+          "name": "DeepSeek V3",
+          "context_window": 163840,
+          "max_output": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "deepseek-responses",
+      "name": "deepseek (OpenAI)",
+      "description": "deepseek OpenAI Responses API",
+      "wire": "openai-responses",
+      "base_url": "https://api.deepseek.com/v1",
+      "key_env": "DEEPSEEK_API_KEY",
+      "default_model": "deepseek-v4-pro",
+      "model_reasoning_effort": "high",
+      "reasoning_replay": "tool_episode",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://platform.deepseek.com/api-docs/",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "deepseek-v4-pro",
+        "deepseek-chat-v3",
+        "deepseek-chat-v3-1",
+        "deepseek-r1",
+        "deepseek-r1-distill-llama-70b",
+        "deepseek-r1-distill-llama-8b",
+        "deepseek-r1-distill-qwen-1-5b",
+        "deepseek-r1-distill-qwen-14b",
+        "deepseek-r1-distill-qwen-32b",
+        "deepseek-r1-distill-qwen-7b",
+        "deepseek-v3",
+        "deepseek-v3-1",
+        "deepseek-v3-1-maas",
+        "deepseek-v3-1-terminus",
+        "deepseek-v3-2",
+        "deepseek-v3-2-exp",
+        "deepseek-v3-2-maas",
+        "deepseek-v4-flash-latest"
+      ],
+      "endpoint_models": {
+        "deepseek-chat": {
+          "name": "DeepSeek Chat",
+          "context_window": 1000000,
+          "max_output": 384000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "file_input": true
+          }
+        },
+        "deepseek-reasoner": {
+          "name": "DeepSeek Reasoner",
+          "context_window": 1000000,
+          "max_output": 384000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "file_input": true
+          }
+        },
+        "deepseek-chat-v3": {
+          "name": "DeepSeek: DeepSeek V3 0324",
+          "context_window": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "deepseek-r1": {
+          "name": "DeepSeek R1",
+          "context_window": 163840,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek-r1-distill-llama-70b": {
+          "name": "DeepSeek R1 Distill Llama 70B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek-r1-distill-llama-8b": {
+          "name": "DeepSeek R1 Distill Llama 8B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek-r1-distill-qwen-1-5b": {
+          "name": "DeepSeek R1 Distill Qwen 1.5B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek-r1-distill-qwen-14b": {
+          "name": "DeepSeek R1 Distill Qwen 14B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek-r1-distill-qwen-32b": {
+          "name": "DeepSeek R1 Distill Qwen 32B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek-r1-distill-qwen-7b": {
+          "name": "DeepSeek R1 Distill Qwen 7B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "deepseek-v3": {
+          "name": "DeepSeek V3",
+          "context_window": 163840,
+          "max_output": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        }
+      }
+    },
+    {
+      "id": "deepseek-anthropic",
+      "name": "deepseek (Anthropic)",
+      "description": "deepseek Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "key_env": "DEEPSEEK_API_KEY",
+      "default_model": "deepseek-v4-pro",
+      "model_reasoning_effort": "high",
+      "stream_usage": true,
+      "reasoning_replay": "tool_episode",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://platform.deepseek.com/api-docs/",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "deepseek-v4-pro",
+        "deepseek-chat-v3",
+        "deepseek-chat-v3-1",
+        "deepseek-r1",
+        "deepseek-r1-distill-llama-70b",
+        "deepseek-r1-distill-llama-8b",
+        "deepseek-r1-distill-qwen-1-5b",
+        "deepseek-r1-distill-qwen-14b",
+        "deepseek-r1-distill-qwen-32b",
+        "deepseek-r1-distill-qwen-7b",
+        "deepseek-v3",
+        "deepseek-v3-1",
+        "deepseek-v3-1-maas",
+        "deepseek-v3-1-terminus",
+        "deepseek-v3-2",
+        "deepseek-v3-2-exp",
+        "deepseek-v3-2-maas",
+        "deepseek-v4-flash-latest"
+      ],
+      "endpoint_models": {
+        "deepseek-chat": {
+          "name": "DeepSeek Chat",
+          "context_window": 1000000,
+          "max_output": 384000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-reasoner": {
+          "name": "DeepSeek Reasoner",
+          "context_window": 1000000,
+          "max_output": 384000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-chat-v3": {
+          "name": "DeepSeek: DeepSeek V3 0324",
+          "context_window": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1": {
+          "name": "DeepSeek R1",
+          "context_window": 163840,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-llama-70b": {
+          "name": "DeepSeek R1 Distill Llama 70B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-llama-8b": {
+          "name": "DeepSeek R1 Distill Llama 8B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-1-5b": {
+          "name": "DeepSeek R1 Distill Qwen 1.5B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-14b": {
+          "name": "DeepSeek R1 Distill Qwen 14B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-32b": {
+          "name": "DeepSeek R1 Distill Qwen 32B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-r1-distill-qwen-7b": {
+          "name": "DeepSeek R1 Distill Qwen 7B",
+          "context_window": 32768,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "deepseek-v3": {
+          "name": "DeepSeek V3",
+          "context_window": 163840,
+          "max_output": 163840,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "models_ref": "models/deepseek.json"
+}
