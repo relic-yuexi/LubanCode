@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <utility>
 
 #include "cli/grapheme.hpp"
 #include "cli/line_editor.hpp"
+#include "cli/terminal_port.hpp"
 
 namespace lubancode::cli {
 
@@ -348,6 +350,46 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
     return stats;
 }
 
+namespace {
+
+// 簇首码点解码:SplitUtf8Graphemes 吐出的簇首必是合法 UTF-8 序列(坏字节
+// 自立一簇),宽松折出码点与簇首序列的字节数。构建器、字节回退判定、光标
+// 列折算三处共用同一把,免得各写一份走了样。
+struct DecodedHead {
+    char32_t cp = 0;
+    std::size_t len = 1;  // 簇首 UTF-8 序列字节数
+};
+
+DecodedHead DecodeHeadCodepoint(std::string_view seg, std::size_t at) {
+    const unsigned char lead = static_cast<unsigned char>(seg[at]);
+    std::size_t len = 1;
+    char32_t cp = lead;
+    if ((lead & 0xE0U) == 0xC0U) {
+        cp = lead & 0x1FU;
+        len = 2;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+        cp = lead & 0x0FU;
+        len = 3;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+        cp = lead & 0x07U;
+        len = 4;
+    }
+    for (std::size_t k = 1; k < len && at + k < seg.size(); ++k) {
+        cp = (cp << 6) | (static_cast<unsigned char>(seg[at + k]) & 0x3FU);
+    }
+    return DecodedHead{cp, len};
+}
+
+// 这枚簇在原生 cell 模型里占几格:量宽两列的簇两格;非 BMP 恒两格打代理
+// 对(CHAR_INFO 一格一 UTF-16 码元的编码硬约束)——量宽一列的非 BMP 也
+// 两格,多出的一格由"逻辑列宽 vs 物理格数"分离账折算(NativeColumnFor
+// Logical),不许用它冒充量宽。
+int NativeCellWidth(const Utf8Grapheme& glyph, char32_t head_cp) {
+    return (glyph.width >= 2 || head_cp >= 0x10000) ? 2 : 1;
+}
+
+}  // namespace
+
 std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count,
                                                          bool* utf16_lossy) {
     std::vector<platform::NativeRowCell> cells;
@@ -366,8 +408,9 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
             *utf16_lossy = true;
         }
     };
+    int logical_used = 0;  // 已占逻辑列(VT 口径;cell_count 是逻辑预算)
     std::size_t i = 0;
-    while (i < utf8_text.size() && static_cast<int>(cells.size()) < cell_count) {
+    while (i < utf8_text.size()) {
         if (utf8_text[i] == '\x1b' && i + 1 < utf8_text.size() && utf8_text[i + 1] == '[') {
             // CSI 序列整段吃掉:只有 'm' 结尾的动属性,别的(光标/擦除类,
             // 正常不会出现在行文本里)一文不加、直接跳过。
@@ -394,26 +437,10 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
         const std::size_t seg_len = (seg_end == std::string_view::npos ? utf8_text.size() : seg_end) - i;
         const std::string_view seg = utf8_text.substr(i, seg_len);
         for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(seg)) {
-            // 簇首码点解码(占格的那一位);簇字节数比簇首序列长就是
-            // 多码点簇(ZWJ/肤色/附标跟随),cell 模型装不下,报 lossy。
-            const unsigned char lead = static_cast<unsigned char>(seg[glyph.begin]);
-            std::size_t len = 1;
-            char32_t cp = lead;
-            if ((lead & 0xE0U) == 0xC0U) {
-                cp = lead & 0x1FU;
-                len = 2;
-            } else if ((lead & 0xF0U) == 0xE0U) {
-                cp = lead & 0x0FU;
-                len = 3;
-            } else if ((lead & 0xF8U) == 0xF0U) {
-                cp = lead & 0x07U;
-                len = 4;
-            }
-            for (std::size_t k = 1; k < len && glyph.begin + k < seg.size(); ++k) {
-                cp = (cp << 6) | (static_cast<unsigned char>(seg[glyph.begin + k]) & 0x3FU);
-            }
-            if (glyph.len > len) {
-                mark_lossy();  // 跟随码点进不了 cell:调用方应退 VT 字节流路
+            const DecodedHead head = DecodeHeadCodepoint(seg, glyph.begin);
+            char32_t cp = head.cp;
+            if (glyph.len > head.len) {
+                mark_lossy();  // 多码点簇:跟随码点进不了 cell,字节回退路接手
             }
             if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
                 cp = 0xFFFD;  // 孤立代理/超范围:替换,保住 UTF-16 合法性
@@ -421,21 +448,21 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
             }
             if (glyph.width <= 0) {
                 // 孤立零宽簇:不静默丢(§9.2)——占一格画可见回退,但几何
-                // 与共享量宽分叉,报 lossy 让调用方退 VT 路。
+                // 与共享量宽分叉,报 lossy 让调用方走字节回退路。
                 mark_lossy();
-                if (static_cast<int>(cells.size()) + 1 > cell_count) {
-                    break;
+                if (static_cast<int>(cells.size()) >= cell_count) {
+                    break;  // 物理帽(零宽不耗逻辑预算,防无界生长)
                 }
                 cells.push_back(platform::NativeRowCell{cp, attr});
                 continue;
             }
-            // 非 BMP 恒两格打代理对(编码硬约束,头文件注释);量宽两列的
-            // 簇也是两格。量宽一列的非 BMP 在原生路多占一格,与 VT 路差
-            // 一列,是 cell 模型的已知差异,文档记档。
-            const int cell_width = (glyph.width >= 2 || cp >= 0x10000) ? 2 : 1;
-            if (static_cast<int>(cells.size()) + cell_width > cell_count) {
-                break;  // 放不下整簇就截断,不劈半个宽字
+            // 整簇截断按逻辑账判(与 VT 折行同一把尺):逻辑预算装不下整簇
+            // 才截,编码开销(窄非 BMP 多占的格)不劈行尾。
+            if (logical_used + glyph.width > cell_count) {
+                break;
             }
+            logical_used += glyph.width;
+            const int cell_width = NativeCellWidth(glyph, cp);
             if (cell_width == 2) {
                 cells.push_back(platform::NativeRowCell{
                     cp, static_cast<std::uint16_t>(attr | platform::kNativeCellLeading)});
@@ -446,22 +473,125 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
             }
         }
         i += seg_len;
+        if (logical_used >= cell_count) {
+            break;  // 逻辑预算满:后面的段装不进任何有宽簇,不再空转
+        }
     }
-    // 尾部补默认属性空格铺满清写宽度——直写整行(新文本 + 残段清空)一发
-    // 落盘,这就是"擦行 + 落字"合并成一次 WriteConsoleOutput 的那一步。
+    // 尾部补默认属性空格至少铺满逻辑清写宽度——直写整行(新文本 + 残段
+    // 清空)一发落盘,这就是"擦行 + 落字"合并成一次 WriteConsoleOutput 的
+    // 那一步。文本物理格数超出预算时(窄非 BMP 的编码开销)文本自身已盖
+    // 过清写区,不再补。已知边角:旧行窄非 BMP 更多时,其超出新行物理末
+    // 端的代理半格可能留残影,下一拍重画自愈(帧 diff 按逻辑账并清写区)。
     while (static_cast<int>(cells.size()) < cell_count) {
         cells.push_back(platform::NativeRowCell{U' ', 0});
     }
     return cells;
 }
 
+bool NativeRowNeedsByteFallback(std::string_view utf8_text) {
+    std::size_t i = 0;
+    while (i < utf8_text.size()) {
+        if (utf8_text[i] == '\x1b' && i + 1 < utf8_text.size() && utf8_text[i + 1] == '[') {
+            std::size_t j = i + 2;
+            while (j < utf8_text.size()) {
+                const unsigned char ch = static_cast<unsigned char>(utf8_text[j++]);
+                if (ch >= 0x40U && ch <= 0x7EU) {
+                    break;
+                }
+            }
+            i = j;
+            continue;
+        }
+        const std::size_t seg_end = utf8_text.find("\x1b[", i + 1);
+        const std::size_t seg_len = (seg_end == std::string_view::npos ? utf8_text.size() : seg_end) - i;
+        const std::string_view seg = utf8_text.substr(i, seg_len);
+        for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(seg)) {
+            const DecodedHead head = DecodeHeadCodepoint(seg, glyph.begin);
+            if (glyph.len > head.len) {
+                return true;  // 多码点簇:跟随码点进不了 cell
+            }
+            if ((head.cp >= 0xD800 && head.cp <= 0xDFFF) || head.cp > 0x10FFFF) {
+                return true;  // 坏代理/超范围:可见替换分叉几何
+            }
+            if (glyph.width <= 0) {
+                return true;  // 孤立零宽:占格与零宽几何分叉
+            }
+        }
+        i += seg_len;
+    }
+    return false;
+}
+
+int NativeColumnForLogical(std::string_view utf8_text, int logical_column) {
+    if (logical_column <= 0) {
+        return 0;
+    }
+    int logical = 0;
+    int physical = 0;
+    std::size_t i = 0;
+    while (i < utf8_text.size()) {
+        if (utf8_text[i] == '\x1b' && i + 1 < utf8_text.size() && utf8_text[i + 1] == '[') {
+            std::size_t j = i + 2;
+            while (j < utf8_text.size()) {
+                const unsigned char ch = static_cast<unsigned char>(utf8_text[j++]);
+                if (ch >= 0x40U && ch <= 0x7EU) {
+                    break;
+                }
+            }
+            i = j;
+            continue;  // 配色段不占列
+        }
+        const std::size_t seg_end = utf8_text.find("\x1b[", i + 1);
+        const std::size_t seg_len = (seg_end == std::string_view::npos ? utf8_text.size() : seg_end) - i;
+        const std::string_view seg = utf8_text.substr(i, seg_len);
+        for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(seg)) {
+            const DecodedHead head = DecodeHeadCodepoint(seg, glyph.begin);
+            if (glyph.width > 0) {
+                if (logical >= logical_column) {
+                    return physical;  // 光标落在这簇之前:到此为止
+                }
+                logical += glyph.width;
+                physical += NativeCellWidth(glyph, head.cp);
+            } else {
+                physical += 1;  // 零宽回退格(该行实际走字节路,防御记账)
+            }
+        }
+        i += seg_len;
+    }
+    return physical;  // 超出文本逻辑宽:按物理末尾算
+}
+
 bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& next, int origin_y,
-                                std::size_t* painted_rows) {
+                                std::size_t* painted_rows, std::size_t* byte_fallback_rows) {
     if (painted_rows != nullptr) {
         *painted_rows = 0;
     }
+    if (byte_fallback_rows != nullptr) {
+        *byte_fallback_rows = 0;
+    }
+    const std::vector<InlineRowChange> changes = ComputeInlineRowChanges(previous, next);
+    // 帧级判定(先定路再落笔):哪行直写、哪行字节回退,算清了才动笔。
+    // 字节回退行存在而非真 console(GetScreenInfo 探不到)时一字节不写、
+    // 整帧交 legacy——字节不落两遍。
+    const auto is_byte_row = [](const InlineRowChange& change) {
+        return change.write_x >= 0 && NativeRowNeedsByteFallback(change.text);
+    };
+    bool has_byte_rows = false;
+    for (const InlineRowChange& change : changes) {
+        if (is_byte_row(change)) {
+            has_byte_rows = true;
+            break;
+        }
+    }
+    if (has_byte_rows && !platform::GetScreenInfo().has_value()) {
+        return false;
+    }
     std::size_t written = 0;
-    for (const InlineRowChange& change : ComputeInlineRowChanges(previous, next)) {
+    std::size_t byte_written = 0;
+    for (const InlineRowChange& change : changes) {
+        if (is_byte_row(change)) {
+            continue;
+        }
         const int y = origin_y + static_cast<int>(change.row);
         const int clear_count = change.clear_end - change.clear_x;
         if (clear_count <= 0) {
@@ -486,25 +616,63 @@ bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& 
                 return false;
             }
         }
-        // 行文本含多码点字素簇/孤立零宽/坏代理时,cell 模型装不下整簇
-        // (BuildNativeRowCells 报 lossy):整帧退 legacy 字节流路——那边
-        // UTF-8 原文全保真,支持合成渲染的终端自己画,不静默丢附标
-        // (Unicode emoji 治理单 §9.2)。
         bool lossy = false;
         const std::vector<platform::NativeRowCell> cells =
             BuildNativeRowCells(change.text, change.clear_end - change.write_x, &lossy);
         if (lossy) {
-            return false;
+            return false;  // 防御:判定与构建器若走了样,整帧退 legacy
         }
         if (!platform::WriteNativeRow(change.write_x, y, cells.data(), static_cast<int>(cells.size()))) {
             return false;
         }
         ++written;
     }
+    // 字节回退行(cell 模型装不下的多码点簇/孤立零宽/坏代理)按 legacy
+    // 语义清行 + 落字:UTF-8 原文全保真,支持合成渲染的终端自己画,不静默
+    // 丢附标(Unicode emoji 治理单 §9.2)。光标会被挪到该行末——这是直写
+    // 路"不挪光标"合同的有界例外,只在装不下整簇的行发生;帧末由调用方
+    // 一笔 SetCursorPos 权威钉回。emoji 常驻 composer 时,别的脏行照直写,
+    // 不再整帧全量退字节路。
+    for (const InlineRowChange& change : changes) {
+        if (!is_byte_row(change)) {
+            continue;
+        }
+        const int y = origin_y + static_cast<int>(change.row);
+        const int clear_count = change.clear_end - change.clear_x;
+        if (change.hard_clear) {
+            platform::ClearRowHardFrom(change.clear_x, y, clear_count);
+        } else {
+            platform::ClearRowFrom(change.clear_x, y, clear_count);
+        }
+        if (change.write_x >= 0 && !change.text.empty()) {
+            platform::SetCursorPos(change.write_x, y);
+            TermOut() << change.text;
+            TermOut().flush();
+        }
+        ++byte_written;
+    }
     if (painted_rows != nullptr) {
-        *painted_rows = written;
+        *painted_rows = written + byte_written;
+    }
+    if (byte_fallback_rows != nullptr) {
+        *byte_fallback_rows = byte_written;
     }
     return true;
+}
+
+InlineFrameNativePlan PlanInlineFrameNativePaint(const InlineFrame* previous, const InlineFrame& next) {
+    InlineFrameNativePlan plan;
+    const std::size_t old_size = previous == nullptr ? 0 : previous->rows.size();
+    plan.compared_rows = (std::max)(old_size, next.rows.size());
+    for (const InlineRowChange& change : ComputeInlineRowChanges(previous, next)) {
+        ++plan.changed_rows;
+        if (change.write_x >= 0 && NativeRowNeedsByteFallback(change.text)) {
+            ++plan.byte_fallback_rows;
+        } else {
+            ++plan.native_rows;
+        }
+    }
+    return plan;
 }
 
 std::size_t WorkingHighlightGlyph(std::size_t beat, const std::vector<int>& glyph_widths) {

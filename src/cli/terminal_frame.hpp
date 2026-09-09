@@ -73,22 +73,55 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
 //      写高代理,产出非法 UTF-16。这是编码表示的硬约束,不是量宽策略。
 //   2. 多码点字素簇(ZWJ 序列/肤色/组合附标/keycap)装不进单格单码元的
 //      cell 模型:默认按"簇首码点占格"降级(宽账仍按整簇),utf16_lossy
-//      出参(可空)置 true 告发。PaintInlineFrameNativeRows 见 lossy 整体
-//      返回 false,调用方退 legacy 字节流路——那边 UTF-8 原文全保真,
-//      支持合成渲染的终端自己画,不静默丢附标(单子 §9.2 第二条)。
+//      出参(可空)置 true 告发。PaintInlineFrameNativeRows 见 lossy 把该
+//      行改走字节回退路——那边 UTF-8 原文全保真,支持合成渲染的终端自己
+//      画,不静默丢附标(单子 §9.2 第二条)。
+//
+// 逻辑列宽 vs 物理格数(conhost 原生几何分叉单):cell_count 是**逻辑列预
+// 算**(VT 口径的列,与布局/折行/光标同一把尺)。产出格数可以超出预算——
+// 每个"量宽一列的非 BMP"在 cell 模型恒占两格(编码硬约束),超出的格数
+// 恰等于这类字符的个数,NativeColumnForLogical 能把它折算回光标列;整簇
+// 截断只按逻辑账判(不为编码开销劈掉行尾),尾部空格至少铺满 cell_count。
 std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count,
                                                          bool* utf16_lossy = nullptr);
 
+// 这行 UTF-8 文本在原生 cell 模型里装不下、须走字节回退路吗?多码点簇/
+// 孤立零宽/坏代理为真;纯单码点(含窄非 BMP——它有代理对表示,几何账另
+// 算)为假。与 BuildNativeRowCells 的 utf16_lossy 同一把尺,纯函数。
+bool NativeRowNeedsByteFallback(std::string_view utf8_text);
+
+// 逻辑列 -> 原生路物理格列:同一段文字,原生路比 VT 路宽出的格数全来自
+// "量宽一列的非 BMP"(各多占一格)。光标要钉在与 VT 路相同的文字位置,
+// 列号就得带上这段差。logical_column 超出文本逻辑宽时按文本物理末尾返回
+// (防御);CSI 配色段不占列。两路一致性的尺:无窄非 BMP 的文本恒等值。
+int NativeColumnForLogical(std::string_view utf8_text, int logical_column);
+
+// 一帧在原生直写路上的分路账(纯函数,计数型断言的册):脏行里几行可原
+// 生直写、几行含 cell 模型装不下的簇须走字节回退。emoji 常驻 composer 而
+// 该行不脏时,byte_fallback_rows 为 0——退化与否按脏行内容判,不按帧里
+// 有没有 emoji 判,这是"不整帧全量"的判定核心。
+struct InlineFrameNativePlan {
+    std::size_t compared_rows = 0;
+    std::size_t changed_rows = 0;
+    std::size_t native_rows = 0;          // 脏行中可原生直写的行数
+    std::size_t byte_fallback_rows = 0;   // 脏行中须走字节回退的行数
+};
+InlineFrameNativePlan PlanInlineFrameNativePaint(const InlineFrame* previous, const InlineFrame& next);
+
 // 行级双缓冲的原生直写版:diff 的账与 QueueInlineFrameDiff 同一把(没变
-// 的行一字不写),但每一脏行按坐标 WriteNativeRow 直写(字符+属性一次
-// 落),**全程不挪光标**——藏光标/CUP 回/显光标那一串从帧序列里清出去
-// (8.1 高频轨迹实锤:conhost/WT 的 2026 实现只缓冲文本渲染,批内 CUP 照
-// 搬 buffer 光标)。返回 false = 原生路不可用(非真 console/写失败),调
-// 用方退 PaintInlineFrameLegacy 老路;painted_rows(可空)回带实际直写的
-// 脏行数,帧账审计用。光标末态由调用方一笔 SetCursorPos 权威钉回,本函数
-// 绝不碰光标。
+// 的行一字不写),脏行按坐标 WriteNativeRow 直写(字符+属性一次落)。
+// **帧级判定先于落笔**:哪行直写、哪行字节回退,先算清再动笔——直写行
+// 全程不挪光标(8.1 高频轨迹实锤:conhost/WT 的 2026 实现只缓冲文本渲染,
+// 批内 CUP 照搬 buffer 光标);字节回退行按 legacy 语义清行+落字(光标会
+// 被挪到该行末,这是 cell 模型装不下整簇时的有界例外),帧末仍由调用方
+// 一笔 SetCursorPos 权威钉回,本函数不补第二笔。非真 console(GetScreenInfo
+// 探不到)或有直写失败:一字节不写、返回 false,调用方退 PaintInlineFrame
+// Legacy 老路——字节不落两遍。painted_rows(可空)回带实际落笔的脏行数
+// (直写 + 字节回退,帧账审计用);byte_fallback_rows(可空)是其中字节
+// 路的行数。
 bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& next, int origin_y,
-                                std::size_t* painted_rows = nullptr);
+                                std::size_t* painted_rows = nullptr,
+                                std::size_t* byte_fallback_rows = nullptr);
 
 // ---------------------------------------------------------------------------
 // 思考活动条扫光(思考活动条扫光复活单):一轮砍掉的逐字高亮在原生直写
