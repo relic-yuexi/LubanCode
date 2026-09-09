@@ -161,9 +161,13 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
 // TryRunCompact。上次压缩收口(成功换账、反涨拒收或失败收场都算)时的
 // 压力口径估算记在 last_post_tokens;下次触发先问 ShouldSkipCompact-
 // ForHysteresis——新增不足滞回带就不压,同一 turn 无进展不得连压。
+// map_path_held(compact 切分劈开工具原子组单 §2.2):map 防线拒收一次后
+// 挂起,本会话自动压缩不再立刻重试 map 路(真机事故:拒收 → 原史重发 →
+// 预检再爆 → 再拒,死循环);手动 /compact 不受限,成功换账即解旗。
 struct CompactHysteresis {
     bool armed = false;                 // 本场是否已有一次压缩收口
     std::size_t last_post_tokens = 0;   // 上次收口时的压力口径估算
+    bool map_path_held = false;         // map 防线拒收后的滞回旗(自动路专用)
 };
 struct CompactSessionInputs {
     lubancode::agent::Agent* agent = nullptr;

@@ -226,11 +226,13 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
 // 四分区(Compact 四分区单·阶段 1):TurnPartitionPlan 纯计算,不起模型。
 //
 // §三《一次 compact 的完整算法》的切法,先按 turn 收齐、再照 L1 工作视图
-// 的 token 重量切成连续 partition_count 份:边界只落 turn 之间(工具原子组
-// 天然不被劈开——组永远住在一枚 turn 里),前 n-1 份是冷区 map 输入,末份
-// 是热区。plan 只算账:哪些 turn 进哪份、各占多少 token、哪些 ToolResult
-// 已外置成 artifact 视图、分区/单 turn 是否超压缩模型预算。真跑 map/reduce
-// 是阶段 2/3 的事,这里一次模型都不调。
+// 的 token 重量切:边界只落 turn 之间(工具原子组天然不被劈开——组永远住
+// 在一枚 turn 里)。用户定案(compact 切分劈开工具原子组单 §〇,2026-09-09)
+// 重排热区:**末轮豁免**——最近一枚 turn(唯一可能含未闭合工具交互的那轮)
+// 整只不动,自成末分区;其余 turn(冷区)按 token 平衡切成至多
+// partition_count-1 份,各 map 一次。plan 只算账:哪些 turn 进哪份、各占
+// 多少 token、哪些 ToolResult 已外置成 artifact 视图、分区/单 turn 是否超
+// 压缩模型预算。真跑 map/reduce 是阶段 2/3 的事,这里一次模型都不调。
 // ---------------------------------------------------------------------------
 
 // map 输入预算诊断时给压缩指令留的公开估算档(与 /context 预算总账、
@@ -278,21 +280,51 @@ struct TurnPartitionBudgets {
     CompactBudget compact_model{};              // 压缩模型自己的窗口(预算诊断)
 };
 
+// turn 界劈组自愈(§2.1,纯函数):公共尺 SplitIntoTurns 判出的界点若把
+// 一枚完整工具原子组劈在两侧(带正文的 steer 消息插在 tool_result 之间一
+// 类),把该界点并回前一轮——工具循环中途插进来的用户正文归**当前进行中
+// 的 turn**,不开新 turn。轮是用户的一轮话,循环中途的插话是这轮的枝节。
+// turns 就地改写(区间连续盖满不变);返回自愈掉的界点数(0 = 本就无劈组)。
+std::size_t HealTurnBoundariesOverToolGroups(const std::vector<api::Message>& history,
+                                             std::vector<std::pair<std::size_t, std::size_t>>& turns);
+
+// map 块工具组自愈(§2.2 兜底,纯函数):块 [from,to) 内 tool_use/tool_result
+// 配对不完整时,沿消息粒度挪块界——result 落在块外的往后吞整组,use 落在
+// 块前的往前接;挪完仍不完整(悬垂 use / 悬空 result,界挪不动)才判失败,
+// note 用人话指明形状。ok 时 from/to 是挪后的块界,note 记自愈动作(没动
+// 就说明本就完整,note 为空)。
+struct MapChunkHealResult {
+    bool ok = false;
+    std::size_t from = 0;
+    std::size_t to = 0;
+    std::string note;
+};
+MapChunkHealResult HealMapChunkToolGroups(const std::vector<api::Message>& history, std::size_t from,
+                                          std::size_t to);
+
+// map 防线拒收的稳定文案标记(§2.2):会话层(TryRunCompact)凭它认出
+// "防线拒收"与普通失败,拒收后挂滞回旗——本会话自动压缩不再立刻重试
+// map 路,手动 /compact 不受限。口径沿 kCompactHysteresisFloorTokens 一族
+// 的滞回思路,不新造配置体系。
+inline constexpr const char* kMapDefenseRejectMarker = "map 防线拒收";
+
 struct TurnPartitionPlan {
     // 旧 archive(§3.2):首条 user 文本以上一轮存档开头时剥出,不算 turn、
-    // 不占分区账,只作 final reduce 的既有基线。
+    // 不占分区账,只作 final reduce 的既有基线。独立存档头(§〇.4 新形状:
+    // 整条消息都是存档,不并入用户正文)同样剥出且整条不进任何 turn。
     bool has_prior_archive = false;
     std::string prior_archive_text;
     std::size_t prior_archive_tokens = 0;
 
     std::vector<TurnInfo> turns;             // 全部原始 turn,照原 history 顺序
-    std::vector<TurnPartitionInfo> partitions;  // P1..Pn,连续无缝盖住全部 turn
+    std::vector<TurnPartitionInfo> partitions;  // P1..Pn,连续无缝盖住全部 turn;末份=末轮豁免
     std::size_t requested_partition_count = kDefaultCompactPartitionCount;
     std::size_t map_calls = 0;  // 冷区 map 次数 = 分区数 - 1(0 = 没有冷区)
 
     std::vector<ToolExchangeGroupInfo> tool_groups;
     bool has_incomplete_tool_exchange = false;  // orphan tool_use / 悬空 result
     std::size_t dangling_results = 0;           // 配不上 use 的 result(异常形状)
+    std::size_t healed_turn_boundaries = 0;     // §2.1 自愈掉的劈组界点数(观测/测试)
 
     std::size_t total_working_tokens = 0;  // turns 合计(不含 prior archive)
     std::size_t total_raw_tokens = 0;      // 同口径的全量对照
@@ -307,9 +339,11 @@ struct TurnPartitionPlan {
     bool WorthCompacting() const { return partitions.size() > 1 || has_prior_archive; }
 };
 
-// 纯函数:剥旧 archive → 按 §二 切 turn → 按 L1 工作视图 token 平衡切成
-// min(turn 数, partition_count) 份连续分区(边界只落 turn 之间)→ 顺工具
-// 原子组、外置账与预算诊断。不调模型、不改 history、不落盘。
+// 纯函数:剥旧 archive(并入式与独立存档头两形都认)→ 按 §二 切 turn →
+// §2.1 后处理(HealTurnBoundariesOverToolGroups,劈组界点并回进行中的轮)
+// → 冷区(末轮之前的全部 turn)按 L1 工作视图 token 平衡切成至多
+// partition_count-1 份,末轮豁免自成末分区 → 顺工具原子组、外置账与预算
+// 诊断。不调模型、不改 history、不落盘。
 TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& history,
                                          std::size_t partition_count,
                                          const TurnPartitionBudgets& budgets);
@@ -469,13 +503,26 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
     const std::string& reasoning_effort = std::string(),
     BackgroundCallAccounting* accounting = nullptr);
 
-// 阶段 4 的新 history:热区 = plan 末分区的原文消息(不按固定 token 掐,
-// 分区本身就是按 token 平衡切出来的);archive 双账并入热区首条 user 消息
-// 开头(角色交替不破),其后热区消息原样。kept_indices 出参:热区消息在
-// 原 history 里的下标(升序,连续段)。
+// 阶段 4 的新 history(用户定案 §〇.2/§〇.4):热区 = plan 末分区(末轮
+// 豁免)的原文消息,原样照发;archive 双账**自成头一条消息**——不再并入
+// 热区首条 user 消息,请求拼装时由系统提示收编(TakeStandaloneArchiveHead,
+// 拼在 system 之后),角色交替不受扰:messages 从豁免轮的 user 轮头起算。
+// kept_indices 出参:热区消息在原 history 里的下标(升序,连续段;不含
+// archive 那条)。
 std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
                                                 const api::Message& archive, const TurnPartitionPlan& plan,
                                                 std::vector<std::size_t>* kept_indices = nullptr);
+
+// 独立存档头(§〇.4 拼接规):压缩产物自成历史头一条消息(角色 user,单枚
+// 文本块,以存档前缀起头、json 围栏收尾,剥出后无剩余正文)。判定从严:
+// 并入式的旧档(存档后面还跟着用户正文)不算——动它会偷走用户正文。
+bool IsStandaloneArchiveMessage(const api::Message& message);
+
+// 请求拼装侧的收编口:messages 头一条是独立存档且其后还有消息时,摘下头
+// 一条、返回存档正文(调用方拼进 system 之后);否则原样不动,返回
+// nullopt。durable history 里的存档消息照旧留存——持久档、/resume、下一次
+// 压缩剥旧档三处都不用改形状。
+std::optional<std::string> TakeStandaloneArchiveHead(std::vector<api::Message>& messages);
 
 // 从(压缩后历史的)首条 user 文本里剥出旧存档文本后,识别它carry的双账:
 // 新档是单枚 ```json 围栏里的 {"user_contract":...,"work_state":...};

@@ -2120,11 +2120,19 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 接线(批四·病十二):压力钩与收件口整份进 AgentWiring。
     agent::AgentWiring sub_wiring;
     if (context_window_tokens_ > 0) {
-        sub_wiring.on_context_pressure = [this, &sub_agent, &backend, &task_model, task](
+        // §2.2 滞回旗(compact 切分劈开工具原子组单):map 防线拒收过一次,
+        // 本任务不再自动重试 map 路——形状判定是确定性的,重试只会原样再拒
+        // (主会话由 CompactHysteresis.map_path_held 管,子代理没有那只活账,
+        // 这里就地立一只)。
+        auto map_hold = std::make_shared<bool>(false);
+        sub_wiring.on_context_pressure = [this, &sub_agent, &backend, &task_model, task, map_hold](
                                              const agent::ContextPressure& pressure) {
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
                 return;  // AfterHardTrim/PreflightExceeded 是纯通报:前者安全网丢的东西压缩救不回,
                          // 后者是最终闸的三项账(§4.4 可观测事件),这里不动作。
+            }
+            if (*map_hold) {
+                return;  // 防线拒收后的滞回:不再立刻重试 map 路
             }
             agent::CompactOptions options;  // 子代理没有守恒待办,双账只做结构校验
             // 与主会话同一条双账路(四分区单·阶段 2-4):turn 分区 map +
@@ -2149,6 +2157,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     event.text = std::move(archive_text);
                     ledger().AppendEventLocked(task, std::move(event));
                 }
+            } else if (compacted.error().message.find(agent::kMapDefenseRejectMarker) !=
+                       std::string::npos) {
+                *map_hold = true;  // 防线拒收:本任务自动路不再立刻重试 map 路
             }
             // 压缩失败:旧历史原样不动,超大工具结果的保命索(token 轴口径)
             // 仍在,不硬塞。

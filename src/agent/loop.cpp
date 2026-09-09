@@ -15,6 +15,7 @@
 #include <variant>
 
 #include "agent/agent.hpp"
+#include "agent/compact.hpp"  // TakeStandaloneArchiveHead:存档头收编进 system(§〇.4)
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
 #include "agent/prefix.hpp"
@@ -1118,7 +1119,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 两倍,叠加按真实口径标定的 80% 参考线,触发线实际落在真实水位
         // ~25%:用户真机 61.5k/256k(24%)被喊溢出,压完"没有冷区榨不出
         // 收益"空跑收场。
-        // 双闸(§二.B):projected 过 kProjectedOverflowPercent 参考线之外,
+        // 双闸(§二.B):projected 过参考线(§〇.1 用户定案后参考线 = 窗口×
+        // 80% − 压缩提示词 4k − 压缩结果预留 8k;AutoCompactTriggerLine 与
+        // ContextTracker 的 turn 间触发共用同一只,两路口径不漂移)之外,
         // 真实水位(同一副工作视图按日常尺 EstimateHistoryTokens,与 /context
         // 显示同一把)也须过 kRealOverflowPercent——虚算单独不触发;真实
         // 水位真到线上,该压的仍压。上层回调里可以同步做一次语义压缩
@@ -1151,8 +1154,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 单独偏科;没接线时 1.0,双闸既有单测的数字一字不动。
             const std::size_t working_view_tokens =
                 EstimateHistoryTokens(working_view.messages, token_calibration);
-            const std::size_t projected_line =
-                window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+            const std::size_t projected_line = AutoCompactTriggerLine(window_tokens);
             const std::size_t real_line =
                 window_tokens * static_cast<std::size_t>(kRealOverflowPercent) / 100;
             ContextPressure pressure;
@@ -1180,6 +1182,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 治本的一刀。
         for (auto& message : request.messages) {
             api::SanitizeMessage(message);
+        }
+        // §〇.4 拼接规(compact 切分劈开工具原子组单,用户定案 2026-09-09):
+        // 压缩产物自成历史头一条消息,请求拼装时收编进 system 之后——不再
+        // 并入热区首条 user 消息。收编后 messages 从末轮豁免的 user 轮头起
+        // 算,角色交替不受扰,豁免轮与后续消息原样照发。durable history 里
+        // 的存档消息原样留存(持久档、/resume、下一次压缩剥旧档都不改形状);
+        // 并入式的旧档不认(动它会偷走用户正文),照旧当普通消息发。
+        if (auto archive_head = TakeStandaloneArchiveHead(request.messages)) {
+            request.system += (request.system.empty() ? std::string() : "\n\n") + *archive_head;
         }
         // 工具结果图片回喂(工具结果图片回喂单):请求副本上把工具图从
         // artifact 落盘重灌成 base64,四家 wire 据此上原生图块。位置有讲
