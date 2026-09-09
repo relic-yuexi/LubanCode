@@ -139,12 +139,21 @@ struct V3Writer::Impl {
     // 调用方已持锁。失败不动状态(IoFailed 时置 broken)。
     WriteReceipt CommitMessage(MessageDraft draft, Durability durability) {
         WriteReceipt receipt;
+        // 预留 id(§4.43):沿用调用方预留;已占用拒收,不留重复行身份。
+        if (draft.message_id_override.has_value()) {
+            if (message_ids.count(*draft.message_id_override) > 0) {
+                receipt.error_code = "v3writer.duplicate_id";
+                receipt.error_message = "预留 messageId 已被占用: " + *draft.message_id_override;
+                return receipt;
+            }
+        }
         MessageLine line;
         line.session_id = session_id;
         line.run_id = run_id;
         line.seq = next_seq;
         line.timestamp = IsoTimestamp(Clock().WallMs());
-        line.message_id = NextId("msg", 0);
+        line.message_id = draft.message_id_override.has_value() ? *draft.message_id_override
+                                                                : NextId("msg", 0);
         line.turn_id = std::move(draft.turn_id);
         line.parent_turn_id = std::move(draft.parent_turn_id);
         line.step_id = std::move(draft.step_id);
@@ -433,9 +442,9 @@ void RestoreIdCounters(std::uint64_t (&counters)[7], const std::vector<nlohmann:
         const char* prefix;
         int slot;
     };
-    static const Prefix kPrefixes[] = {{"msg-", 0},     {"evt-", 1},      {"turn-", 2},
-                                       {"step-", 3},   {"request-", 4},  {"stream-", 5},
-                                       {"compact-", 6}};
+    static const Prefix kPrefixes[] = {{"msg-", 0},     {"evt-", 1},       {"turn-", 2},
+                                       {"step-", 3},   {"request-", 4},   {"stream-", 5},
+                                       {"compact-", 6}, {"compact-turn-", 2}};
     auto bump = [&](const std::string& id) {
         for (const auto& p : kPrefixes) {
             if (id.rfind(p.prefix, 0) != 0) {
@@ -845,6 +854,7 @@ WriteReceipt V3Writer::CompleteStreamResponse(
     // 2. 完整 assistant(预留 id 成行;来源与 usage 自带,§4.44/§4.12)。
     {
         MessageDraft assistant;
+        assistant.message_id_override = std::string(message_id);  // 预留 id 成行
         assistant.turn_id = std::string(turn_id);
         assistant.step_id = std::string(step_id);
         assistant.request_id = std::string(request_id);
@@ -906,6 +916,7 @@ WriteReceipt V3Writer::InterruptStreamResponse(
     // 正文保留,未收齐的调用/签名不伪造完整;usage 缺实报为 null 不补 0。
     {
         MessageDraft assistant;
+        assistant.message_id_override = std::string(message_id);  // 预留 id 成行
         assistant.turn_id = std::string(turn_id);
         assistant.step_id = std::string(step_id);
         assistant.request_id = std::string(request_id);
@@ -944,6 +955,10 @@ std::string V3Writer::NewEventId() {
 std::string V3Writer::NewTurnId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->NextId("turn", 2);
+}
+std::string V3Writer::NewCompactTurnId() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->NextId("compact-turn", 2);
 }
 std::string V3Writer::NewStepId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);

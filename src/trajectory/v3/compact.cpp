@@ -65,7 +65,7 @@ CompactSession::BeginOutcome CompactSession::Begin(V3Writer& writer, std::string
         return outcome;
     }
     outcome.info.compact_id = writer.NewCompactId();
-    outcome.info.turn_id = writer.NewTurnId();  // 独立内部回合(§4.6)
+    outcome.info.turn_id = writer.NewCompactTurnId();  // 独立内部回合,独立前缀不与主 turn 撞号(§4.6)
     EventDraft draft;
     draft.kind = EventKindV3::CompactRequested;
     draft.compact_id = outcome.info.compact_id;

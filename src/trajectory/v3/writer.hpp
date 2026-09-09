@@ -91,6 +91,10 @@ struct ContextView {
 // ---------------------------------------------------------------------------
 
 struct MessageDraft {
+    // 预留 messageId(§4.43:响应开始时预留,最终 message 以该 id 成行)。
+    // 有值且未被占用则沿用;已占用 Rejected(v3writer.duplicate_id);空则
+    // writer 发新号。
+    std::optional<std::string> message_id_override;
     std::optional<std::string> turn_id;  // system/摘要给 nullopt(落 null)
     std::optional<std::string> parent_turn_id;
     std::optional<std::string> step_id;
@@ -251,8 +255,10 @@ public:
 
     std::string NewMessageId();
     std::string NewEventId();
-    std::string NewTurnId();     // turn-<n>,内部回合同池发号(§4.6)
-    std::string NewStepId();     // step-<n>
+    std::string NewTurnId();          // turn-<n>,主会话回合
+    std::string NewCompactTurnId();   // compact-turn-<n>,内部回合独立前缀
+                                     // 不与主 turn 撞号(§4.6)
+    std::string NewStepId();          // step-<n>
     std::string NewRequestId();  // request-<n>
     std::string NewStreamId();   // stream-<n>
     std::string NewCompactId();  // compact-<n>

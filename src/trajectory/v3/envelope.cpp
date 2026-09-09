@@ -29,6 +29,29 @@ bool GetRequired(const nlohmann::json& json, const char* key, T* out, std::strin
     return false;
 }
 
+// uint64 必填:C++ int 赋值存成 number_integer(带符号),json 文本解析
+// 存 number_unsigned——两种非负整数都收,负数/非整数拒。
+bool GetRequiredU64(const nlohmann::json& json, const char* key, std::uint64_t* out,
+                    std::string* error_code, std::string* message, const char* context) {
+    auto it = json.find(key);
+    if (it == json.end() || it->is_null()) {
+        *error_code = "schema3.missing_field";
+        *message = std::string(context) + " 缺字段: " + key;
+        return false;
+    }
+    if (it->is_number_unsigned()) {
+        *out = it->get<std::uint64_t>();
+        return true;
+    }
+    if (it->is_number_integer() && it->get<std::int64_t>() >= 0) {
+        *out = static_cast<std::uint64_t>(it->get<std::int64_t>());
+        return true;
+    }
+    *error_code = "schema3.bad_type";
+    *message = std::string(context) + " 字段类型错: " + key;
+    return false;
+}
+
 bool GetOptionalString(const nlohmann::json& json, const char* key,
                        std::optional<std::string>* out) {
     auto it = json.find(key);
@@ -534,7 +557,7 @@ std::optional<MessageLine> MessageLine::FromJsonStrict(const nlohmann::json& jso
     if (!GetRequired<std::string>(json, "sessionId", &line.session_id, error_code, message,
                                   "message") ||
         !GetRequired<std::string>(json, "runId", &line.run_id, error_code, message, "message") ||
-        !GetRequired<std::uint64_t>(json, "seq", &line.seq, error_code, message, "message") ||
+        !GetRequiredU64(json, "seq", &line.seq, error_code, message, "message") ||
         !GetRequired<std::string>(json, "timestamp", &line.timestamp, error_code, message,
                                   "message") ||
         !GetRequired<std::string>(json, "messageId", &line.message_id, error_code, message,
@@ -711,7 +734,7 @@ std::optional<EventLine> EventLine::FromJsonStrict(const nlohmann::json& json,
     if (!GetRequired<std::string>(json, "sessionId", &line.session_id, error_code, message,
                                   "event") ||
         !GetRequired<std::string>(json, "runId", &line.run_id, error_code, message, "event") ||
-        !GetRequired<std::uint64_t>(json, "seq", &line.seq, error_code, message, "event") ||
+        !GetRequiredU64(json, "seq", &line.seq, error_code, message, "event") ||
         !GetRequired<std::string>(json, "timestamp", &line.timestamp, error_code, message,
                                   "event") ||
         !GetRequired<std::string>(json, "eventId", &line.event_id, error_code, message, "event") ||
