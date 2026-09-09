@@ -36,7 +36,9 @@
 
 只动 ledger 的收尾/投递/等待三角与对应测试；不碰 agent_tool 的派发合同、不碰 PR #5 的预留/闸文件、不顺带改唤醒识死。
 
-## 五、实施纪要（2026-09-09，甲落地）
+## 五、实施纪要（2026-09-09，甲落地）——附:取消流投递闸(同日补)
+
+- **取消树册 SIGSEGV 后续(PR #7 run 34307354040,同 commit 双 run 一绿一红,仅 macos-clang,windows 过)**:取消树册断言全过、崩在收尾段,doctest 只认当前册。侦查逐路径清了三笔——锁内投递的锁序/寿命全数站得住;PR #5 的 loop.cpp 六 hunk 全是 token 预检数学加 trajectory 专用口,该册零接线;PR #7 只动 write_file,零接线。段错误的直接机制未能钉死,但坐实一枚每-run 时序硬币:缝焊死后,取消流里"孩子的 Cancelled 完成件投进正在取消的父的邮箱"从旧缝的几乎必然落空变成五五开——落进的那一半正是崩溃 run 唯一新增状态。定案按合同拔硬币:挂停止信号(cancel 或 wall_stop)的父数学上不可能再吸收投递(泊等路醒来先查 cancel 即收;续投路 harness 领批后的 cancel/墙钟闸必退信),投它只余 RestoreDrainedInbox 反翻 delivered 的空转与一笔假事件。`DeliverChildCompletionLocked` 加第二道不投闸,孩子保持未送达、收场报告照列,与父真死同语义;正常回流(干净的父)一丝不减。回归册三臂钉死(取消级联父/墙钟软停父/干净父对照),取消树册从此与该缝的时序脱钩。分支 `worktree-agent-reflow-seam-fix`。
 
 - **定案**：甲。锁序核实——全仓嵌套取锁只有"台账锁 -> inbox_mutex"一个方向（SendMessage/SealOrContinueInbox/RestoreDrainedInbox/PendingMessages/HasUndeliveredInboxLocked 皆然，无一例反向），投递并入收尾锁内只嵌父 inbox_mutex，同向不成环，不破不变量，甲可根治。
 - **改法**：`FinalizeFromToolResult` 加尾参 `deliver_to_parent`（缺省 false）：置真时在持锁段内、`NotifyStateChangeLocked()` 之前调新拆出的 `DeliverChildCompletionLocked`——notify 落地时父邮箱已喂饱。公开口 `DeliverChildCompletion` 改为锁内体的壳（自带 notify），语义不变。只有 agent_tool.cpp 后台线程收尾一处传 true；前台（delivered 注册即真）与派工即败（失败文本经启动回执同步回调用者，走邮箱会父见两遍）保持缺省。
