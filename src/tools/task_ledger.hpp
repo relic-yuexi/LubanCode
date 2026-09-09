@@ -680,7 +680,8 @@ public:
     // 中止),等任务线程自己收账;收不动由 ForceFinalizeNoProgress 兜底。
     void RequestNoProgressStop(const std::shared_ptr<TaskRecord>& task);
     // 看门狗式强收(Failed/NoMeaningfulProgress):与 ForceFinalizeWallClock
-    // 同一骨架,部分结果照旧留在台账(CheckpointFallback 带得走)。
+    // 同一骨架,部分结果照旧留在台账(CheckpointFallback 带得走);终态
+    // 翻页与投父邮箱同锁并做(强收终态缝单,同上)。
     void ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task, int stale_rounds);
     // 监督通知(去重由监督器按 task+epoch+reason 把):主会话空闲拍取走。
     void PushSupervisorNotice(std::string notice);
@@ -744,7 +745,10 @@ public:
     void FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task, const std::string& result_content,
                                 bool cancelled_by_stop_signal, bool deliver_to_parent = false);
     // 看门狗强制收账(墙钟绝境):状态翻 Failed/WallClockTimeout,force_
-    // finalized 置位——任务线程晚到的收尾不得再翻回去。
+    // finalized 置位——任务线程晚到的收尾不得再翻回去。终态翻页与投父
+    // 邮箱(DeliverChildCompletionLocked)在同一持锁段完成(强收终态缝
+    // 单):notify 落地时父邮箱已喂饱,等孩子的父不会被"活孩子零+邮箱
+    // 空"的空门骗去提前封账;父真死时投递自返 false,未送达语义照旧。
     void ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task, int timeout_secs);
 
     // 后台任务"需确认工具被拒"的当场通知:任务线程推一行,主会话空闲拍

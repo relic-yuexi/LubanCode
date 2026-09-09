@@ -837,6 +837,210 @@ TEST_CASE("回流投递闸:父挂停止信号不投,取消级联不留半投的�
     CHECK(clean_parent->snapshot.state == tools::AgentTaskState::Done);
 }
 
+// ---------------------------------------------------------------------------
+// 看门狗强收道(强收终态缝单):强收触发时,终态翻页与投父邮箱必须在同一
+// 持锁段完成——正常收尾(FinalizeFromToolResult)已并锁根治,强收两闸
+// (ForceFinalizeWallClock/ForceFinalizeNoProgress)旧形状里锁内翻终态后只
+// notify 不投递。等孩子的父被那记 notify 叫醒,WaitForKeyChange 谓词见
+// "活孩子零 + 邮箱空"即出等,SealOrContinueInbox 当场封账收口;孩子的
+// 投递要等任务线程晚到走 FinalizeFromToolResult 才做,赶到时父已封账,
+// delivered 永假,结果落进未送达清单。两册各镜像一只强收入口(白盒直调
+// 台账的强收函数,即监督器 FireWallGrace/FireNoProgressGrace 的落点),
+// 并把"任务线程晚到收尾"那拍人为放大 25ms;修复后强收翻页处已并投递,
+// notify 落地时父邮箱已喂饱,这拍再长也插不进"终态先于投递"的窗口。若
+// 把投递从强收锁内退回(修复前的形状),父会在延迟拍里见空邮箱封账,下面
+// REQUIRE(absorbed.size() == 1) 稳定转红。
+// ---------------------------------------------------------------------------
+TEST_CASE("强收道回流:墙钟强收的终态翻页与投递同锁,父必收 ChildCompletion") {
+    for (int round = 0; round < 20; ++round) {
+        tools::TaskLedger ledger;
+        tools::SubagentGovernance governance;
+        std::string error;
+        tools::AgentTaskSnapshot parent_proto;
+        parent_proto.title = "父";
+        parent_proto.delivery_target = tools::TaskDeliveryTarget::MainTurnContext;
+        auto parent = ledger.TryRegisterChild(parent_proto, 1, governance, &error);
+        REQUIRE(parent != nullptr);
+        tools::AgentTaskSnapshot child_proto;
+        child_proto.title = "子";
+        child_proto.parent_task_id = parent->snapshot.id;
+        child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+        auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
+        REQUIRE(child != nullptr);
+
+        std::atomic<bool> parent_done{false};
+        std::vector<std::string> absorbed;  // 父吸收的续投正文(生产里拼批再跑一轮)
+        std::thread parent_thread([&] {
+            // 镜像生产续投环(agent_tool.cpp 的 continuation 源),与回流锁缝册
+            // 同一只环:取件 -> 没件也没封账 -> WaitingChildren 等条件变量 ->
+            // 醒来再查一遍。
+            for (;;) {
+                bool sealed = false;
+                tools::DrainedInbox drained = ledger.SealOrContinueInbox(parent, sealed);
+                if (!drained.indices.empty()) {
+                    for (const auto& text : drained.texts) {
+                        absorbed.push_back(text);
+                    }
+                    continue;
+                }
+                if (sealed) {
+                    break;  // 没信也没活孩子:封账收口
+                }
+                ledger.SetLiveTaskState(parent, tools::AgentTaskState::WaitingChildren);
+                ledger.WaitForKeyChange(parent);
+                ledger.SetLiveTaskState(parent, tools::AgentTaskState::Running);
+                if (parent->cancel.load(std::memory_order_acquire) || parent->force_finalized) {
+                    break;  // 看门狗放倒的,不算正常走完
+                }
+            }
+            parent_done.store(true, std::memory_order_release);
+        });
+        // 让父先泊进 WaitingChildren(孩子还活着,它封不了账),再触发强收
+        // ——监督器宽限期到点的实际次序。
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::thread child_thread([&] {
+            // 镜像监督器 FireWallGrace 的强收落点:任务线程还卡在后端里,
+            // 看门狗在台账锁内翻终态。修复点:翻页与投父邮箱在这个调用里
+            // 同一把锁完成。
+            ledger.ForceFinalizeWallClock(child, /*timeout_secs=*/10);
+            // 旧缝的延迟拍:强收后任务线程还卡着,晚到的收尾这拍之后才做。
+            // 修复前强收只 notify 不投递,父在这拍里见空邮箱封账退场;修复
+            // 后投递已在强收锁内落地,这一拍落在投递完成之后,再长也改变
+            // 不了父醒来时邮箱已喂饱的事实。
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            // 生产形状的晚到收尾:force_finalized 只报收尾不翻账,投递口
+            // 因 delivered 已真而幂等空转。
+            ledger.FinalizeFromToolResult(child, "任务线程晚到的收尾", /*cancelled_by_stop_signal=*/false,
+                                          /*deliver_to_parent=*/true);
+        });
+        // 看门狗(与回流锁缝册同款):父 5s 还没走完就 CancelTask 叫醒,join
+        // 后按"没走猫道"收账——测试不挂死。
+        for (int waited = 0; !parent_done.load(std::memory_order_acquire) && waited < 500; ++waited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const bool watchdog_fired = !parent_done.load(std::memory_order_acquire);
+        if (watchdog_fired) {
+            ledger.CancelTask(parent->snapshot.id);
+        }
+        parent_thread.join();
+        child_thread.join();
+        CHECK_FALSE(watchdog_fired);
+        // 父必收 ChildCompletion:恰一批、结构化投影、带"外来资料"来路声明,
+        // 状态行是强收那份(失败·墙钟超时),不是晚到收尾的正文。
+        REQUIRE(absorbed.size() == 1);
+        CHECK(absorbed[0].find("[子任务结果 #" + std::to_string(child->snapshot.id) + ":子") != std::string::npos);
+        CHECK(absorbed[0].find("外来资料") != std::string::npos);
+        CHECK(absorbed[0].find("状态:失败 · 墙钟超时") != std::string::npos);
+        CHECK(absorbed[0].find("任务线程晚到的收尾") == std::string::npos);
+        CHECK(child->snapshot.delivered);
+        // 强收那份终态不被晚到收尾翻案:分型保持墙钟。
+        CHECK(child->snapshot.state == tools::AgentTaskState::Failed);
+        CHECK(child->snapshot.outcome.reason == tools::TaskOutcomeReason::WallClockTimeout);
+        CHECK(child->force_finalized);
+        CHECK(child->finalized.load(std::memory_order_acquire));
+        // 父吸收完孩子后正常收口(镜像生产 Finalize)。
+        parent->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+        ledger.FinalizeFromToolResult(parent, "父的最终结论", false);
+        CHECK(parent->snapshot.state == tools::AgentTaskState::Done);
+        CHECK(parent->snapshot.result == "父的最终结论");
+        // main 只收父的账:孩子正文不跨级,drain 后未送达清单干净——强收
+        // 场景的投递真到位,不是落清单后没人管。
+        const std::string main_drained = ledger.DrainCompletionNotices();
+        CHECK(main_drained.find("父的最终结论") != std::string::npos);
+        CHECK(main_drained.find("[子任务结果 #") == std::string::npos);
+        CHECK(main_drained.find("任务线程晚到的收尾") == std::string::npos);
+        CHECK_FALSE(ledger.HasUndeliveredCompletions());
+        CHECK(ledger.UndeliveredCompletionTaskIds().empty());
+    }
+}
+
+TEST_CASE("强收道回流:空转强收的终态翻页与投递同锁,父必收 ChildCompletion") {
+    // 与墙钟闸同一只环(见上一册的形状说明),只换强收入口与分型断言:
+    // 监督器空转收口信号后宽限期内没收口,FireNoProgressGrace 落到
+    // ForceFinalizeNoProgress——同一处缝,同一副修法。
+    for (int round = 0; round < 20; ++round) {
+        tools::TaskLedger ledger;
+        tools::SubagentGovernance governance;
+        std::string error;
+        tools::AgentTaskSnapshot parent_proto;
+        parent_proto.title = "父";
+        parent_proto.delivery_target = tools::TaskDeliveryTarget::MainTurnContext;
+        auto parent = ledger.TryRegisterChild(parent_proto, 1, governance, &error);
+        REQUIRE(parent != nullptr);
+        tools::AgentTaskSnapshot child_proto;
+        child_proto.title = "子";
+        child_proto.parent_task_id = parent->snapshot.id;
+        child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+        auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
+        REQUIRE(child != nullptr);
+
+        std::atomic<bool> parent_done{false};
+        std::vector<std::string> absorbed;
+        std::thread parent_thread([&] {
+            for (;;) {
+                bool sealed = false;
+                tools::DrainedInbox drained = ledger.SealOrContinueInbox(parent, sealed);
+                if (!drained.indices.empty()) {
+                    for (const auto& text : drained.texts) {
+                        absorbed.push_back(text);
+                    }
+                    continue;
+                }
+                if (sealed) {
+                    break;
+                }
+                ledger.SetLiveTaskState(parent, tools::AgentTaskState::WaitingChildren);
+                ledger.WaitForKeyChange(parent);
+                ledger.SetLiveTaskState(parent, tools::AgentTaskState::Running);
+                if (parent->cancel.load(std::memory_order_acquire) || parent->force_finalized) {
+                    break;
+                }
+            }
+            parent_done.store(true, std::memory_order_release);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::thread child_thread([&] {
+            // 镜像监督器 FireNoProgressGrace 的强收落点。
+            ledger.ForceFinalizeNoProgress(child, /*stale_rounds=*/3);
+            // 旧缝的延迟拍:任务线程晚到的收尾这拍之后才做(形状见上一册)。
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            ledger.FinalizeFromToolResult(child, "任务线程晚到的收尾", /*cancelled_by_stop_signal=*/false,
+                                          /*deliver_to_parent=*/true);
+        });
+        for (int waited = 0; !parent_done.load(std::memory_order_acquire) && waited < 500; ++waited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const bool watchdog_fired = !parent_done.load(std::memory_order_acquire);
+        if (watchdog_fired) {
+            ledger.CancelTask(parent->snapshot.id);
+        }
+        parent_thread.join();
+        child_thread.join();
+        CHECK_FALSE(watchdog_fired);
+        REQUIRE(absorbed.size() == 1);
+        CHECK(absorbed[0].find("[子任务结果 #" + std::to_string(child->snapshot.id) + ":子") != std::string::npos);
+        CHECK(absorbed[0].find("外来资料") != std::string::npos);
+        CHECK(absorbed[0].find("状态:失败 · 空转收口") != std::string::npos);
+        CHECK(absorbed[0].find("任务线程晚到的收尾") == std::string::npos);
+        CHECK(child->snapshot.delivered);
+        // 强收那份终态不被晚到收尾翻案:分型保持空转收口,部分结果账照留。
+        CHECK(child->snapshot.state == tools::AgentTaskState::Failed);
+        CHECK(child->snapshot.outcome.reason == tools::TaskOutcomeReason::NoMeaningfulProgress);
+        CHECK(child->force_finalized);
+        CHECK(child->finalized.load(std::memory_order_acquire));
+        parent->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+        ledger.FinalizeFromToolResult(parent, "父的最终结论", false);
+        CHECK(parent->snapshot.state == tools::AgentTaskState::Done);
+        CHECK(parent->snapshot.result == "父的最终结论");
+        const std::string main_drained = ledger.DrainCompletionNotices();
+        CHECK(main_drained.find("父的最终结论") != std::string::npos);
+        CHECK(main_drained.find("[子任务结果 #") == std::string::npos);
+        CHECK(main_drained.find("任务线程晚到的收尾") == std::string::npos);
+        CHECK_FALSE(ledger.HasUndeliveredCompletions());
+        CHECK(ledger.UndeliveredCompletionTaskIds().empty());
+    }
+}
+
 TEST_CASE("取消树:停后台根,后台孩子随树收 Cancelled/ParentCancelled") {
     // 根后端:派完后台孩子后交阶段结论,进 WaitingChildren;孩子后端喂完
     // 首段就挂住(还活着)。停根 -> 级联取消孩子 -> 两只各自收 Cancelled,
