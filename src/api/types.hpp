@@ -361,6 +361,22 @@ struct UsageReport {
     // cached_tokens/cache hit 字段缺席时为 false，显示与耐久账据此写“未报缓存”。
     bool cache_reported_by_provider = false;
 
+    // ---- 四层生命周期单 P1:Step 身份与耗时账(附加字段,旧调用方缺省) ----
+    // step_id:Agent 域单调的稳定 Step 号("step-N"),跨 Run 不裂不重号;
+    //   与 step_index(Run 内 0-based 展示坐标)分家——continuation 后者重
+    //   号、前者不重。空 = 旧调用方/单测没接线,如实留空不造号。
+    // turn_id:本 Step 所属的 canonical Turn 号("turn-N");空 = 未接线。
+    // attempts:本 Step 的物理尝试数(恢复环 Started 相位计数,首尝试为 1;
+    //   provider 肚内连接重试不回这层,不另算)。
+    // api_duration_ms:首枚尝试发出到 assistant 落账的墙钟毫秒——Step 的
+    //   API 耗时,与 Action 的工具耗时(tool trace 侧)分账。0 = 未计。
+    // stop_reason:本 Step 收口的 stop reason(流错/取消路径不填,空如实)。
+    std::string step_id;
+    std::string turn_id;
+    int attempts = 0;
+    std::int64_t api_duration_ms = 0;
+    std::string stop_reason;
+
     // legacy 推断 helper(五项任一非零 = 报过):老 UI 流水(TurnUsageStats/
     // ContextTracker 面板)沿用。provider"明报全零"与"没报"靠它分不开,
     // 新账路不许再走这只。

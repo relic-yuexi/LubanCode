@@ -200,6 +200,112 @@ bool HasPermissionHooks(const hooks::HookDispatcher* dispatcher) {
            dispatcher->HasHandlersFor(hooks::HookEvent::PermissionRequest);
 }
 
+// ---- 四层生命周期单 P2:Turn/Step 层分层事件 -----------------------------------
+
+namespace {
+
+// 分层钩子附加上下文的前缀(与 UserPromptSubmit 的口子同款:来源标识
+// 单独成块,不串进用户正文)。
+constexpr const char* kPreTurnContextPrefix = "[PreTurn 钩子附加上下文,非用户手敲]\n";
+constexpr const char* kPreStepContextPrefix = "[PreStep 钩子附加上下文,非用户手敲]\n";
+
+}  // namespace
+
+PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id,
+                       const std::string& user_input) {
+    PromptGate gate;
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(hooks::HookEvent::PreTurn)) {
+        return gate;
+    }
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::PreTurn;
+    payload.fields["turn_id"] = turn_id;
+    payload.fields["prompt"] = user_input;
+    const auto merged = dispatcher->Emit(hooks::HookEvent::PreTurn, payload);
+    if (merged.blocked) {
+        gate.blocked = true;
+        gate.block_reason = merged.block_reason;
+        return gate;
+    }
+    for (const auto& ctx : merged.additional_context) {
+        gate.additional_context.push_back(kPreTurnContextPrefix + ctx);
+    }
+    return gate;
+}
+
+void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
+                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
+                  std::int64_t duration_ms, bool cancelled) {
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(hooks::HookEvent::PostTurn)) {
+        return;
+    }
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::PostTurn;
+    payload.fields["turn_id"] = turn_id;
+    payload.fields["last_assistant_message"] = final_text;
+    payload.fields["steps"] = steps;
+    payload.fields["actions"] = actions;
+    payload.fields["input_tokens"] = input_tokens;
+    payload.fields["output_tokens"] = output_tokens;
+    payload.fields["duration_ms"] = duration_ms;
+    payload.fields["cancelled"] = cancelled;
+    dispatcher->Emit(hooks::HookEvent::PostTurn, payload);
+}
+
+PromptGate EmitPreStep(hooks::HookDispatcher* dispatcher, const std::string& step_id, const std::string& turn_id,
+                       int step_index) {
+    PromptGate gate;
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(hooks::HookEvent::PreStep)) {
+        return gate;
+    }
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::PreStep;
+    payload.fields["step_id"] = step_id;
+    payload.fields["turn_id"] = turn_id;
+    payload.fields["step_index"] = step_index;
+    const auto merged = dispatcher->Emit(hooks::HookEvent::PreStep, payload);
+    if (merged.blocked) {
+        gate.blocked = true;
+        gate.block_reason = merged.block_reason;
+        return gate;
+    }
+    for (const auto& ctx : merged.additional_context) {
+        gate.additional_context.push_back(kPreStepContextPrefix + ctx);
+    }
+    return gate;
+}
+
+void EmitPostStep(hooks::HookDispatcher* dispatcher, const api::UsageReport& report) {
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(hooks::HookEvent::PostStep)) {
+        return;
+    }
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::PostStep;
+    payload.fields["step_id"] = report.step_id;
+    payload.fields["turn_id"] = report.turn_id;
+    payload.fields["step_index"] = report.step_index;
+    payload.fields["attempts"] = report.attempts;
+    payload.fields["api_duration_ms"] = report.api_duration_ms;
+    payload.fields["stop_reason"] = report.stop_reason;
+    payload.fields["model"] = report.model;
+    payload.fields["input_tokens"] = api::TotalInputTokens(report.usage);
+    payload.fields["output_tokens"] = report.usage.output_tokens;
+    payload.fields["usage_reported"] = report.reported_by_provider;
+    dispatcher->Emit(hooks::HookEvent::PostStep, payload);
+}
+
+bool HasTurnHooks(const hooks::HookDispatcher* dispatcher) {
+    return dispatcher != nullptr && !dispatcher->Empty() &&
+           (dispatcher->HasHandlersFor(hooks::HookEvent::PreTurn) ||
+            dispatcher->HasHandlersFor(hooks::HookEvent::PostTurn));
+}
+
+bool HasStepHooks(const hooks::HookDispatcher* dispatcher) {
+    return dispatcher != nullptr && !dispatcher->Empty() &&
+           (dispatcher->HasHandlersFor(hooks::HookEvent::PreStep) ||
+            dispatcher->HasHandlersFor(hooks::HookEvent::PostStep));
+}
+
 // ---- prompt 预处理 ------------------------------------------------------------
 
 PromptGate ApplyUserPromptSubmit(hooks::HookDispatcher* dispatcher, const std::string& user_input,

@@ -298,6 +298,17 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // runtime::Emit* 一处(turn_runtime.cpp),这里只接线。
     const bool has_tool_hooks = lubancode::runtime::HasToolHooks(hook_dispatcher);
     const bool has_permission_hooks = lubancode::runtime::HasPermissionHooks(hook_dispatcher);
+    // 四层生命周期单 P2:Step 层分层 Hook 的接线(与工具族同规矩——没配
+    // 就不设回调,行为与"没有 hooks 系统"逐字节一致)。
+    if (lubancode::runtime::HasStepHooks(hook_dispatcher)) {
+        wiring.on_pre_step_hook = [hook_dispatcher](const std::string& step_id, const std::string& turn_id,
+                                                    int step_index) {
+            return lubancode::runtime::EmitPreStep(hook_dispatcher, step_id, turn_id, step_index);
+        };
+        wiring.on_post_step_hook = [hook_dispatcher](const lubancode::api::UsageReport& report) {
+            lubancode::runtime::EmitPostStep(hook_dispatcher, report);
+        };
+    }
     // PreToolUse 的归并决策要在确认回调里继续用(allow 跳过用户确认、
     // ask 强制问一句)——确认回调的签名不带它,靠这个共享槽传:RunOneTool
     // 先跑 PreToolUse 再问确认,槽里的决策就是当前这次工具调用的。子代理
@@ -776,6 +787,24 @@ RunTurnResult RunTurn(TurnContext ctx) {
         prepared_input->message.content.push_back(lubancode::api::TextBlock{ctx});
     }
 
+    // 四层生命周期单 P2:PreTurn——用户输入被接受(UserPromptSubmit 之后)、
+    // 首个 Step 构建之前(§2.1)。可否决本 Turn(不发模型,不算错误,号已
+    // 预留不回滚);additional_context 与 UserPromptSubmit 的口子同款拼进
+    // 消息。改输入的决策权仍归 UserPromptSubmit(P0 落差清单记录在案)。
+    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
+        hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreTurn)) {
+        const lubancode::runtime::PromptGate pre_turn = lubancode::runtime::EmitPreTurn(
+            hook_dispatcher, canonical_turn_id, user_input);
+        if (pre_turn.blocked) {
+            TermErr() << theme.error << tr("error.prefix")
+                      << "PreTurn 钩子否决本轮: " << pre_turn.block_reason << theme.reset << "\n";
+            return RunTurnResult{0};
+        }
+        for (const std::string& ctx : pre_turn.additional_context) {
+            prepared_input->message.content.push_back(lubancode::api::TextBlock{ctx});
+        }
+    }
+
     // 安全点(轮起):后台子代理投递的 hooks 记录在这里归并落账。告警走
     // stderr(静默档也要让人看见降级),信息行只在非静默档打。
     for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
@@ -850,6 +879,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
     turn_event_stream.Start(canonical_turn_id);
     lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream,
                                                           turn_trajectory.get());
+    // 四层生命周期单 P1:本轮 canonical Turn 号钉进 wiring——本 Run 与
+    // harness 拷贝续跑的每只 Run 都带同一枚,StepUsageRecord.turn_id 跨
+    // Run 不裂。Stop 续跑环(TurnHarness)拷的就是这份 wiring,不用另钉。
+    wiring.turn_id = canonical_turn_id;
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(

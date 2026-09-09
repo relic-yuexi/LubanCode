@@ -1,6 +1,6 @@
 # Session / Turn / Step / Action 四层生命周期与分层 Hooks 设计
 
-- 状态：待实现（本轮只落设计文档，不改生产代码）
+- 状态：已实施（P0-P3 四期全落,2026-09-09;实施纪要见各期"实施纪要"节与本节末尾的收官账）
 - 日期：2026-09-09
 - 级别：P1（执行模型的名词地基，牵动预算、队列、Hooks、usage 与轨迹多层账目）
 - 范围：agent loop 与 turn runtime 的层级语义、hooks 事件体系分层、steering 队列的 steer/followup 显式化、usage/trajectory 归属、术语词表立法、相关测试与文档。
@@ -103,53 +103,113 @@
 
 ### P0：定案与盘点（只读）
 
-- [ ] 复核 `SessionEnd` 实际触发面，定 `PostSessionHook` 映射。
-- [ ] 词表立法：turn_budget.hpp 词条扩 Session/Turn/Step/Action 四条 + 旧 "step"（input round 义）互注。
-- [ ] ID 方案定案：字段形状、持久化位置、断线恢复对齐规则。
-- [ ] 队列条目现状盘点：哪些入口会入队，今日有无事实上的 followup 用法。
-- [ ] Hook 能力矩阵逐行对既有 types.hpp 落差清单。
+- [x] 复核 `SessionEnd` 实际触发面，定 `PostSessionHook` 映射。
+- [x] 词表立法：turn_budget.hpp 词条扩 Session/Turn/Step/Action 四条 + 旧 "step"（input round 义）互注。
+- [x] ID 方案定案：字段形状、持久化位置、断线恢复对齐规则。
+- [x] 队列条目现状盘点：哪些入口会入队，今日有无事实上的 followup 用法。
+- [x] Hook 能力矩阵逐行对既有 types.hpp 落差清单。
 
 验收：每项有书面结论与真实生效链路，不以本单建议冒充用户批准。
 
+#### P0 定案纪要（2026-09-09 实施前只读复核，行号为当日快照）
+
+1. **SessionEnd 实际触发面（grep 全库仅两处）**：
+   - `src/app/cli_app.cpp:295-305` `SessionHookScope` 析构，reason=exit——只在真正进 AskOnce/InteractiveLoop 的进程上构造，硬杀（taskkill/断电）不跑，advisory（文件头注释自认）。
+   - `src/app/interactive_session_assembly.cpp:1581` `/clear`，reason=clear，紧跟着重发 SessionStart(source=clear)。
+   - SessionEnd **不在** resume、**不在** compact 上发。本单 §2.1 说"SessionStart 在 resume/clear/compact 也会重发"——resume/clear 属实（`--continue` resume-as-new 与 `/resume` 各一处 source=resume；clear 一处），**compact 不发 SessionStart**（它走 Pre/PostCompact，compact 路无 SessionStart 调用点）。
+   - **映射定案**：`PostSessionHook` 挂 SessionHookScope 析构（真关闭=进程收场），`/clear` 不发（clear 是同一 Session 内换账，不是关闭）；`PreSessionHook` 挂 SessionHookScope 构造（会话实体创建后、首输入准入前）。resume/clear/compact 一律不触发新口径（与 §八验收矩阵一致）。
+2. **词表立法**：P1 里落 turn_budget.hpp 文件头词条（见 §二映射），只加注不改账。
+3. **ID 方案定案**：
+   - `turn_id`：沿用既有 canonical turn id（`interactive_session.cpp:800` 从 `session_runtime_.ids().NextTurnId()` 发 "turn-N"；空号路 `turn_runner.cpp:748` 从 ProcessIdAuthority 现发）。一只 Turn = 一次 RunTurn 调用；Stop 续跑环（RunStopContinuation）在 RunTurn 肚里，同 turn_id 跨多次 AgentLoop::Run——正是"多次 Run 缝进同一只 Turn"的现成缝。
+   - `step_id`：Agent 实例内单调计数（"step-N"，新增 `Agent::NextStepId()`）。Agent 寿命=主会话全场/子代理一任务，跨 Run 不裂不重号；Run 局部 `step_index`（for 循环下标）留作展示，不改名不改义。
+   - `action_id`：沿用既有 tool execution id（`AgentWiring::execution_id_issuer` → IdAuthority::NextItemId "item-N"，旧路兜底 "exec-N"）。一次工具调用一只 execution，正名不改号。
+   - **持久化**：trajectory v2 已持久 request（"req-N" 主键）/call/turn 边界；step_id/action_id **不改 trajectory schema**（§九改动边界），经 UsageReport/StepUsageRecord 与 hooks payload 走运行账。断线恢复是 resume-as-new 开新场新号空间，无重号窗口；同场原地复活不存在（SessionManager 独占锁）。
+4. **队列条目现状盘点**：入队入口唯一——忙碌期流式 footer 的 Enter（`console_input_turn_listener.cpp:671`）+ resume 的 RestoreFromArchive 灌回。条目无 intent 字段；事实上两路归宿：工具边界注入（=steer 语义，`interactive_session_assembly.cpp:1012` TakeDeliverable→合成 user 消息随下一请求）与轮末会话泵自动发送（=followup 语义，`interactive_session.cpp:1075` TakeFirstAutoSendable→ProcessLine 起新轮）。**事实上的 followup 用法已存在**（泵的自动续轮），P3 只是把意图写进条目、立起两路边界，不是新造行为。
+5. **Hook 能力矩阵对 types.hpp（events.hpp OutputCapabilities + dispatcher）落差清单**：
+   - PreAction/PostAction：**零落差**——升格即 PreToolUse/PostToolUse 的别名（ParseHookEvent 认新名、枚举与 wire 事件名不动），OutputCapabilities {permission_decision,updated_input,additional_context,can_block}={t,t,t,t}/{f,f,t,f} 已覆盖矩阵行。
+   - PreSession：事件不存在；can_block+additional_context 的能力形状已有；载荷（session_id、配置快照）走 payload 自由字段，无 schema 落差。
+   - PostSession：只观察；会话统计（Turn/Step/usage 汇总）无现成单点账，首版带 session_id 与进程内可见的计数骨架，缺口如实记录。
+   - PreTurn：落差——"改输入"（updatedInput）当前仅 PreToolUse 认（events.hpp:208 注释）；PreTurn 首版给 additional_context+can_block（否决本 Turn），改输入仍走 UserPromptSubmit 既有口，落差写进文档不硬造。
+   - PostTurn：只观察；Turn 汇总从 TurnUsageStats+RunOutcome 现拼。
+   - PreStep/PostStep：落差——TurnWiring 无挂点，P2 加 on_pre_step_hook/on_post_step_hook；PreStep 否决=终止本 Turn（blocked 语义复用）。
+   - async=true：现状解析/展示/记录但不执行（skipped_async，dispatcher.hpp:15 注释）——如实记"未支持"，本单不实现（与单子 §4.3 一致）。
+   - failure_policy=deny：并非所有失败都压过此前 allow（归并 deny>ask>allow 只吃表态，失败按 policy 折算）——兼容风险清单落 P2 文档。
+
 ### P1：ID 与账目
 
-- [ ] `turn_id` / `step_id` / `action_id` 落地，续跑跨 Run 不裂不重号。
-- [ ] `StepUsageRecord` 扩展（§三.2），usage 归属链串通，unknown 不写零、不重复计。
-- [ ] Step 的 API 耗时与 Action 的工具耗时分账入账。
+- [x] `turn_id` / `step_id` / `action_id` 落地，续跑跨 Run 不裂不重号。
+- [x] `StepUsageRecord` 扩展（§三.2），usage 归属链串通，unknown 不写零、不重复计。
+- [x] Step 的 API 耗时与 Action 的工具耗时分账入账。
 
 验收：continuation 场景 ID 稳定；usage 汇总与逐条记录对得上；计费统计无重无漏。
 
+#### P1 实施纪要
+
+- ID 落法：turn_id=既有 canonical 号（`TurnWiring::turn_id` 新钉点，turn_runner 铸号处钉进，harness 续跑拷贝同号）；step_id=`Agent::NextStepId()`（Agent 域单调 "step-N"，loop 每次请求构建前铸）；action_id=既有 tool execution id（item-N/exec-N，正名不改号，词表立法）。
+- StepUsageRecord/UsageReport 各扩五字段（step_id/turn_id/attempts/api_duration_ms/stop_reason），事件流（TurnEventAdapter::OnUsage → terminal_turn_sink 还原）全程携带，旧事件行缺省空/0 不造号。
+- usage 归属链：trajectory v2 已有 request_id（"req-N"）作 Journal 主键，step_id 在运行账侧（StepUsageRecord/hooks payload）与之并行，不改 trajectory schema（§九边界）。unknown usage 靠 reported=false 说话，不写零不重复计——单测 `tests/unit/agent/test_step_lifecycle.cpp` 钉。
+- 分账：Step 的 API 耗时（api_duration_ms，首枚尝试发出→assistant 落账）入 StepUsageRecord；Action 的工具耗时=ToolTraceEvent.duration_ms（既有），两笔不混写。
+- 预算兼容：本单不加任何新预算键，`max_turns`/`turn_limit`/`subagent.default_max_turns`/`max_steps_per_turn` 原名原计数原作用域零改动（改名不改账红线；"逐 Step 对数"因无新键而平凡成立）。
+
 ### P2：Hook 分层
 
-- [ ] 八枚 Hook 按 §四矩阵落地；`Pre/PostToolUse` 别名兼容，旧配置零迁移。
-- [ ] Stop 与 PostTurn 边界：Stop 判续跑则 PostTurn 不触发，终局恰好一次。
-- [ ] `Pre/PostSession` 严格口径与旧 `SessionStart/End` 并存不串台。
-- [ ] durable outbox/ack 与幂等键；failure_policy 兼容风险清单落文档。
+- [x] 八枚 Hook 按 §四矩阵落地；`Pre/PostToolUse` 别名兼容，旧配置零迁移。
+- [x] Stop 与 PostTurn 边界：Stop 判续跑则 PostTurn 不触发，终局恰好一次。
+- [x] `Pre/PostSession` 严格口径与旧 `SessionStart/End` 并存不串台。
+- [x] durable outbox/ack 与幂等键；failure_policy 兼容风险清单落文档。
 
 验收：能力矩阵逐行有合同测试；幂等重放只记一次；deny 语义与旧版逐案对表。
 
+#### P2 实施纪要
+
+- 八 Hook 落法:Pre/PostSession 挂 cli_app 的 SessionHookScope 构造/析构(PreSession 否决开张→非零退出+人话);PreTurn 在 turn_runner 的 UserPromptSubmit 之后(否决=不发模型,号已预留);PostTurn 在 interactive_session 的 RunTurn 返回处(is_user_turn 恰好一次,Stop 续跑环在 RunTurn 肚内先收束);Pre/PostStep 经 TurnWiring::on_pre_step_hook/on_post_step_hook 进 AgentLoop(PreStep 否决=终止本 Turn,additional_context 经 InjectIncoming 随本 Step 请求;PostStep 只观察,拿整份 UsageReport)。
+- 别名表:配置键 `PreAction`/`PreActionHook`→枚举 PreToolUse,`PostAction`/`PostActionHook`→PostToolUse;wire 事件名保持旧名(stdin event 字段稳定),既有配置与脚本零迁移。
+- outbox 落法:`src/hooks/outbox.*` 新件,JSONL 追加(pending/ack 两行型),开张重放+压实(acked 出账);dispatcher 挂 SetOutbox 后,Post 型观察事件(IsPostObservationEvent)真跑前 RecordPending(幂等键=hook_run_id+definition_hash)、收工 Ack;hook_runtime 在有定义时挂 ~/.lubancode/hooks-outbox.jsonl,打不开降级零行为。at-least-once 如实写文档;自动重投不接线(未验清单)。
+- 拦截族扩员:exit 2/failure_policy=deny 的可拦事件从 UserPromptSubmit/PreCompact 扩到 PreSession/PreTurn/PreStep(IsBlockablePromptEvent);既有两枚语义逐字节不变。PostStep 按 §四矩阵收成纯观察(载荷要点无注入,终局注入会造悬空 user 消息)——落差清单更新。
+- failure_policy=deny 风险清单与 async=skipped 现状落 docs/features/extensions/hooks.md("async 与失败策略的现状");架构图同步 docs/architecture/hooks-flow.md。
+- 合同测试:tests/unit/hooks/test_lifecycle_hooks.cpp(事件面/别名/能力矩阵/outbox 幂等与重开压实/坏行容错)+ test_step_lifecycle.cpp 补 PreStep 否决与 PostStep 观察两景。
+
 ### P3：steer/followup 显式化与文档
 
-- [ ] 队列条目 intent/target_turn/deadline 与状态机（§五）。
-- [ ] 未消费 steer 的 returned 处置与用户明示；取消后不自动续轮。
-- [ ] 文档：术语词表、hooks 参考、配置手册（预算键兼容窗）同步。
-- [ ] 既有 steer 注入路径回归（回显+合批行为不变）。
+- [x] 队列条目 intent/target_turn/deadline 与状态机（§五）。
+- [x] 未消费 steer 的 returned 处置与用户明示；取消后不自动续轮。
+- [x] 文档：术语词表、hooks 参考、配置手册（预算键兼容窗）同步。
+- [x] 既有 steer 注入路径回归（回显+合批行为不变）。
 
 验收：§八矩阵相关行全绿；既有注入行为回归零变化。
 
+#### P3 实施纪要
+
+- 数据面:QueuedMessage 加 intent(Steer/Followup,默认 Steer——既有用户排队一字不变)/target_turn/deadline(NextStep/TurnEnd)/expiry_note;QueueItemState 加 Claimed。状态机:queued→Claimed(ClaimDeliverable/ClaimFirstAutoSendable,留队窗口态、不重取、冻编辑)→committed(MarkCommitted:出队,随请求进史才销账,"取走不等于消费");returned=ReturnToFront(归 Queued 带 attempts,退回事实记 attempts 上);TargetGone/Failed 同旧。
+- 注入路径回归:工具边界缝(interactive_session_assembly 的 inbox)迁 Claim→MarkCommitted,回显(EchoDeliveredQueuedMessages)与合批([用户排队消息] 文本块、顺序保留)一字不变;旧 Take* 口保留并同守过期门槛,既有单测(test_queue_slash_boundary/test_queue_model)零改动过。
+- 未消费 steer:RunSessionTurn 尾(Turn 终局)MarkExpiredUnconsumedSteers 打过期标注 + NoteQueueExpired 轨迹 + 用户明示一行;过期条目保持 Queued 不投递(claim/take/pump 全让路),CommitEdit 改写即翻新(清标注)。**不改道成 followup**。
+- 取消闸:last_turn_cancelled_(轮尾记、轮头翻篇、泵首圈消费)——取消后的第一圈泵不自动发普通文字(followup),明示一行;排队的 slash 是本地命令不算"轮",照常执行。
+- 泵的取件范围立界:slash(轮末本地执行)+ 显式 followup;未消费 steer 不在范围(§五.5)。这是单子立的法,把旧"轮末自动把没赶上边界的话当新轮发"的行为收掉——明示+留在队里由用户决定,与"不替用户拿主意"同脾气。
+- 断线对齐:RestoreFromArchive 把 Claimed 归回 Queued 并记一笔("断线恢复:上次取走未落史");committed 的不会出现在存档(销账即出队+dequeued 事件)。
+- 文档:配置手册两道预算闸节补四层词表互注与"零改动"声明;development/naming.md 补身份规矩(id 不用 index、Action 别名、配置键零改动);词表(P1 落 turn_budget.hpp)与 hooks 参考(P2 落 hooks.md)已在前两期同步。
+
 ## 八、验收矩阵
 
-- Turn 跨多次 Run（Stop 续跑/接力）：turn_id 不裂、step_id 不重号、PostTurn 恰好一次。
-- Stop 要求继续：PostTurn 不触发；终局才触发。
-- resume/clear/compact：不触发 Pre/PostSession；旧 SessionStart 照发（兼容）。
-- 预算：新旧键同场景逐 Step 对数相等；task 级作用域不因改名漂移。
-- steer：下一 Step 前注入 committed；Turn 终局未消费的保持 queued + 过期标注 + 用户明示，不变 followup。
-- followup：PostTurn 后开新 Turn；取消后默认不自动开。
-- PostStep：在 usage 落账后、Action 前（API 耗时与工具耗时分账可证）。
-- PreAction deny 拦截生效；PostAction 失败不回滚不重跑。
-- outbox 幂等：同 `(event_id, handler_definition_hash)` 重放只记一次。
-- 子代理/后台任务：独立 Turn 各记各账，父 Action 可单向溯源。
-- 既有 `Pre/PostToolUse` 配置：别名路径行为逐案等价。
+收官勾账(2026-09-09;[t]=单测钉死,[c]=代码审读确证,[!]=未验,见下"未验清单"):
+
+- [t] Turn 跨多次 Run（Stop 续跑/接力）：turn_id 不裂、step_id 不重号、PostTurn 恰好一次。→ test_step_lifecycle(step_id 跨 Run 单调/turn_id 同枚)+ PostTurn 挂 RunTurn 收口恰一处[c]。
+- [c] Stop 要求继续：PostTurn 不触发；终局才触发。→ PostTurn 在 RunTurn 返回后发,Stop 续跑环在 RunTurn 肚内先收束,中间不触发。
+- [c] resume/clear/compact：不触发 Pre/PostSession；旧 SessionStart 照发（兼容）。→ Pre/PostSession 只挂 cli_app SessionHookScope 起/收;resume/clear/compact 路无调用点(P0 复核)。
+- [c] 预算：新旧键同场景逐 Step 对数相等；task 级作用域不因改名漂移。→ 本单零预算键改动,平凡成立(configuration.md 声明)。
+- [t] steer：下一 Step 前注入 committed；Turn 终局未消费的保持 queued + 过期标注 + 用户明示，不变 followup。→ test_queue_lifecycle(过期册)+ 既有 test_queue_slash_boundary(注入回归)。
+- [t] followup：PostTurn 后开新 Turn；取消后默认不自动开。→ test_queue_lifecycle(pump 册 followup 取件)+ 取消闸[c]。
+- [t] PostStep：在 usage 落账后、Action 前（API 耗时与工具耗时分账可证）。→ test_step_lifecycle(PostStep 观察,attempts/api_duration/stop_reason 齐)。
+- [c] PreAction deny 拦截生效；PostAction 失败不回滚不重跑。→ 别名共用 PreToolUse/PostToolUse 枚举,行为逐字节等价(test_lifecycle_hooks 别名册+既有 dispatcher 测试族)。
+- [t] outbox 幂等：同 `(event_id, handler_definition_hash)` 重放只记一次。→ test_lifecycle_hooks(outbox 三册)。
+- [c] 子代理/后台任务：独立 Turn 各记各账，父 Action 可单向溯源。→ 现状既有(trajectory 子账+AttachChildRun),本单未改;step_id 挂 Agent 域各记各账。
+- [t] 既有 `Pre/PostToolUse` 配置：别名路径行为逐案等价。→ 枚举同值,wire 事件名稳定,test_lifecycle_hooks(别名册)。
+
+### 未验清单(如实)
+
+- 真机交互路径:PreSession 否决开张的退出文案、PostTurn 的 Turn 汇总载荷、steer 过期的用户明示行、取消闸的明示行——单测钉的是纯函数/引擎面,真控制台观感未上机验。
+- outbox 的崩溃残留 pending 在真断电/taskkill 场景的账面(单测用重开模拟)。
+- PreStep additional_context 真注入链路(单测只钉了否决与观察两口;注入走 InjectIncoming 同 steer 缝,审读确证)。
+- Stop 续跑 + Pre/PostStep 的交织(续跑轮在 TurnHarness 拷 wiring,step hook 随 wiring 走,审读确证,无专门单测)。
 
 ## 九、改动边界
 
@@ -157,4 +217,13 @@
 
 ## 十、本轮交付与调查来源
 
-只交付本设计文档。调查起步自 2026-09-08 LubanCode 自家会话（两只只读子代理：执行层级与轨迹、队列注入与钩子），该会话中途因宿主上下文收口断裂、未产出文档；其结论经 Claude 会话逐条只读复核（turn_budget 词表、StepUsageRecord、events 枚举、SteeringQueue、注入缝五处引证核实无误）后落成本单。未改生产代码、未建测试、未编译、未推送。
+调查起步自 2026-09-08 LubanCode 自家会话（两只只读子代理：执行层级与轨迹、队列注入与钩子），该会话中途因宿主上下文收口断裂、未产出文档；其结论经 Claude 会话逐条只读复核（turn_budget 词表、StepUsageRecord、events 枚举、SteeringQueue、注入缝五处引证核实无误）后落成本单。
+
+### 收官账(2026-09-09 实施完毕)
+
+- 分支 `worktree-agent-lifecycle`(9 笔提交,自 origin/main 90f34f93 起),CI 绿(macos 快车道 success;中途一轮 test_plugin_lua_host 取消接线时序 flaky 与本单无关,重跑即绿)。
+- ID 形状:turn_id="turn-N"(session IdAuthority,既有 canonical 号新钉 TurnWiring::turn_id);step_id="step-N"(Agent 域计数,Agent::NextStepId);action_id=既有 execution_id(item-N/exec-N,正名不改号)。
+- 别名表:配置键 PreAction/PreActionHook→PreToolUse、PostAction/PostActionHook→PostToolUse;wire stdin 的 event 字段保持旧名;legacy 四键(pre_tool 等)照旧。
+- 幂等键实现:(hook_run_id, definition_hash)——dispatcher 每次 Emit 铸 hook_run_id,Post 型事件真跑 handler 前 RecordPending、收工 Ack;账本 ~/.lubancode/hooks-outbox.jsonl,重开压实。
+- 未验清单见 §八末;async=true 维持 skipped_async 现状,failure_policy=deny 风险清单落 hooks.md。
+- 未碰 `src/tools/task_ledger.*`(零文件,git diff 可证);未动版本号/vcpkg.json/CHANGELOG;未合并不开 PR。

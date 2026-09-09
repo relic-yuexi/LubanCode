@@ -1005,11 +1005,15 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         lubancode::agent::AgentWiring wiring = main_agent->wiring();
         wiring.inbox = [this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
             PumpSteeringToSubagents();
-            // 问题二(忙碌期排队的 /context 被当普通消息送模型):TakeDeliverable
+            // 问题二(忙碌期排队的 /context 被当普通消息送模型):取件口
             // 在队列层对 slash 条目让路——这里取到的只有普通文字,slash 留在
-            // 队列,由轮末会话泵(主循环 TakeFirstAutoSendable → ProcessLine)
+            // 队列,由轮末会话泵(主循环取件 → ProcessLine)
             // 本地执行,任何模型请求都见不到它。
-            const auto queued = SessionSteeringQueue().TakeDeliverable(lubancode::cli::MessageTarget::Main());
+            // P3 steer/followup 状态机:这里是 steer 的正门——ClaimDeliverable
+            // 把条目翻成 Claimed(留队、窗口态),注入消息成形、即将随下一次
+            // 请求进史时 MarkCommitted 销账(committed = 出队 + dequeued 事件,
+            // "与持久 history 关联完成才算消费")。
+            const auto queued = SessionSteeringQueue().ClaimDeliverable(lubancode::cli::MessageTarget::Main());
             if (!queued.empty()) {
                 // 取走即不再属于 footer 的活队列；若入队那一帧恰因终端隐藏/
                 // 屏幕查询失败没画出来，后续快照也不会再有机会显示它。先在
@@ -1017,16 +1021,19 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 lubancode::cli::EchoDeliveredQueuedMessages(queued, theme);
                 lubancode::api::Message inject;
                 inject.role = lubancode::api::Role::User;
+                std::vector<lubancode::cli::QueueId> claimed_ids;
                 for (const auto& item : queued) {
                     inject.content.push_back(lubancode::api::TextBlock{
                         "[用户排队消息] 用户在上一只工具执行期间补了话,按排队顺序接上,不另起新任务:\n" +
                         item.text});
+                    claimed_ids.push_back(item.id);
                 }
                 // 送走的即出档(路径二):快照事件行记当前活队列,已注入的
                 // 不在里头,resume 不复活已送出的消息。崩在这之后的半轮里,
                 // 消息本体也已在 history 落盘路上(PersistNewMessages)。
-                // P0-4 排队账(§5.5):注入消息已成形,dequeued 在这落锤
-                //(取走即消费,不会再退还)。
+                // P0-4 排队账(§5.5)/P3 状态机:注入消息已成形,committed 在
+                // 这落锤(Claimed→出队,不会再退还)。
+                SessionSteeringQueue().MarkCommitted(claimed_ids);
                 if (session_runtime_.trajectory() != nullptr) {
                     for (const auto& item : queued) {
                         session_runtime_.trajectory()->NoteQueueDequeued(

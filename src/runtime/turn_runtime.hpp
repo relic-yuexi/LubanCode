@@ -138,6 +138,24 @@ struct StepUsageRecord {
     bool cache_reported = false;       // provider 是否明报 cache token 明细
     std::string epoch_break_reason;    // 空 = 本步没断 epoch
 
+    // ---- 四层生命周期单 P1:Step 身份、尝试与耗时明细 ----
+    // step_id/turn_id:稳定身份("step-N"/"turn-N")。step_id 在 Agent 域
+    //   单调跨 Run 不重号;step_index 只是 Run 内展示坐标,continuation 会
+    //   重号——两本账并存,身份认 id,排序认 index+id 组合。
+    // attempts:本 Step 物理尝试数(恢复环重试;1 = 一次过)。
+    // api_duration_ms:首枚尝试发出到 assistant 落账的墙钟——Step 的 API
+    //   耗时。与 Action 的工具耗时(tool trace 侧 execution 计时)分账,
+    //   两笔不许混写(单子 §三.4)。0 = 未计时(旧调用方)。
+    // stop_reason:本 Step 收口的模型 stop reason(空 = 没收口/没接)。
+    // usage 归属链:logical request ↔ attempt ↔ trajectory request("req-N",
+    //   v2 usage owner 主键)↔ Step(step_id)↔ owner——unknown usage 记
+    //   unknown(reported=false),不写零、不重复计(单子 §三.3)。
+    std::string step_id;
+    std::string turn_id;
+    int attempts = 0;
+    std::int64_t api_duration_ms = 0;
+    std::string stop_reason;
+
     std::int64_t total_input_tokens() const {
         return input_tokens + cache_read_tokens + cache_creation_tokens;
     }
@@ -172,6 +190,12 @@ struct TurnUsageStats {
         record.cache_creation_tokens = report.usage.cache_creation_tokens;
         record.output_tokens = report.usage.output_tokens;
         record.reasoning_tokens = report.usage.output_reasoning_tokens;
+        // 四层生命周期单 P1:Step 身份/尝试/耗时随流水落账(旧调用方缺省空/0)。
+        record.step_id = report.step_id;
+        record.turn_id = report.turn_id;
+        record.attempts = report.attempts;
+        record.api_duration_ms = report.api_duration_ms;
+        record.stop_reason = report.stop_reason;
         // 显式位是主路；聚合初始化的旧测试/旧调用方仍可由非零数字兼容。
         record.reported = report.reported_by_provider || report.reported();
         record.cache_reported = report.cache_reported_by_provider ||
@@ -313,6 +337,39 @@ struct PromptGate {
 // "不可信参考资料"声明追加进消息尾部——声明原文与 RunTurn 一致。
 PromptGate ApplyUserPromptSubmit(hooks::HookDispatcher* dispatcher, const std::string& user_input,
                                  const std::string& background_notices, api::Message& message);
+
+// ---------------------------------------------------------------------------
+// 四层生命周期单 P2:Turn/Step 层分层事件的发射口(§四矩阵)。
+// 与工具族同规矩:payload 组装与归并映射归这里,发射本体走 dispatcher;
+// 空 dispatcher = 没配,一口不发,行为与从前逐字节一致。
+// ---------------------------------------------------------------------------
+
+// PreTurn:用户输入被接受后、首个 Step 构建前。可否决本 Turn(blocked =
+// 本轮不发模型,不算错误);additional_context 随本轮注入(调用方照
+// UserPromptSubmit 的口子拼进消息)。改输入的决策权不在此(见 P0 落差)。
+PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id,
+                       const std::string& user_input);
+
+// PostTurn:终局只观察(Stop 判续跑则本事件不触发——触发点在终局收口,
+// 由装配层保证恰好一次)。summary 载荷由调用方拼好递进,这里只封包。
+void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
+                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
+                  std::int64_t duration_ms, bool cancelled);
+
+// PreStep:每次 Step 请求构建前(steer 注入合批之后)。否决语义 = 终止本
+// Turn(blocked),不是跳过继续;additional_context 经 InjectIncoming 随本
+// Step 请求进史。
+PromptGate EmitPreStep(hooks::HookDispatcher* dispatcher, const std::string& step_id, const std::string& turn_id,
+                       int step_index);
+
+// PostStep:assistant 响应落账后、派生 Action 执行前。只观察;载荷带
+// Step 身份账(step_id/turn_id/attempts/API 耗时/stop reason)与 usage
+// 摘要——API 耗时与工具耗时(PostAction 侧)分账可证。
+void EmitPostStep(hooks::HookDispatcher* dispatcher, const api::UsageReport& report);
+
+// 装配层挂不挂 Turn/Step 层回调的判据。
+bool HasTurnHooks(const hooks::HookDispatcher* dispatcher);
+bool HasStepHooks(const hooks::HookDispatcher* dispatcher);
 
 // ---------------------------------------------------------------------------
 // TurnRuntime:一轮的聚合核

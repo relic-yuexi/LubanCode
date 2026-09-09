@@ -236,7 +236,14 @@ public:
                                        {"prefix_hash", report.prefix_hash},
                                        {"stable_prefix_messages", report.stable_prefix_messages},
                                        {"total_messages", report.total_messages},
-                                       {"wire_common_prefix_bytes", report.wire_common_prefix_bytes}};
+                                       {"wire_common_prefix_bytes", report.wire_common_prefix_bytes},
+                                       // 四层生命周期单 P1:Step 身份/尝试/耗时随事件
+                                       // 流带出(旧消费方缺省读不到,零破坏)。
+                                       {"step_id", report.step_id},
+                                       {"turn_id", report.turn_id},
+                                       {"attempts", report.attempts},
+                                       {"api_duration_ms", report.api_duration_ms},
+                                       {"stop_reason", report.stop_reason}};
         MarkSubordinate(event, subordinate);
         Emit(std::move(event));
     }

@@ -373,6 +373,25 @@ struct TurnWiring {
     // 硬闸只认 turn 账。TurnHarness(DriveTurn)每轮拷一份 wiring 并钉好
     // 这枚下标,调用方自己装配的 wiring 不设就是 0,行为不变。
     int input_round_index = 0;
+
+    // ---- 四层生命周期单 P1:本轮的 canonical Turn 身份 -----------------------
+    // 本 Run() 所属的 Turn 号("turn-N")。宿主(terminal 轮)从 session
+    // IdAuthority 发过号的用那枚;不设(子代理旧路/单测)为空,StepUsageRecord
+    // 的 turn_id 如实留空,不现造。多次 Run() 缝进同一只 Turn(Stop 续跑/
+    // 接力)时,调用方须把同一枚号钉进每次 Run 的 wiring——身份跨 Run 不裂。
+    std::string turn_id;
+
+    // ---- 四层生命周期单 P2:Step 层分层 Hook 的挂点 ---------------------------
+    // PreStep:每次 Step 请求构建前(steer 合批后)调用。blocked = 否决本
+    // Step,语义是终止本 Turn(不是跳过继续);additional_context 经
+    // InjectIncoming 随本 Step 请求进史。空 = 没配(单测/子代理旧路),
+    // 一处不调,行为与从前逐字节一致。
+    std::function<runtime::PromptGate(const std::string& step_id, const std::string& turn_id, int step_index)>
+        on_pre_step_hook;
+    // PostStep:assistant 响应落账后、其派生 Action 执行前调用(只观察)。
+    // 载荷 = 本步完整 UsageReport(含 step_id/turn_id/attempts/API 耗时/
+    // stop reason)。空 = 没配,一处不调。
+    std::function<void(const api::UsageReport&)> on_post_step_hook;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

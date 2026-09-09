@@ -21,6 +21,7 @@
 
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -32,6 +33,8 @@
 #include "hooks/types.hpp"
 
 namespace lubancode::hooks {
+
+class HookOutbox;
 
 class HookDispatcher {
 public:
@@ -66,6 +69,14 @@ public:
     // 发射一个事件。无命中(或全被跳过)也返回完整记录,决策字段保持
     // 缺省——调用方照常往下走,只把记录入账。
     HookEventResult Emit(HookEvent event, const HookPayload& payload);
+
+    // ---- 四层生命周期单 P2:可靠 Post 的 durable outbox --------------------
+    // 挂上后,Post 型观察事件(IsPostObservationEvent)每次 Emit 在真跑
+    // handler 前先落 pending 行、跑完落 ack 行,幂等键 (event_id=
+    // hook_run_id, handler_definition_hash)。空(默认)= 零行为,老路
+    // 一字不变。拷贝/移动沿用同一只 outbox(账本共享,I/O 自带互斥)。
+    void SetOutbox(std::shared_ptr<HookOutbox> outbox) { outbox_ = std::move(outbox); }
+    HookOutbox* outbox() const { return outbox_.get(); }
 
     // 带上下文覆写的发射:子代理(SubagentStart/Stop 与子代理内的工具
     // 事件)用——stdin JSON 里的 agent_id/agent_type/parent_agent_id 得是
@@ -137,8 +148,11 @@ private:
     static bool MatcherHits(const HookDefinition& def, const std::string& match_value);
 
     // Emit/EmitDetached 共用的执行核:定义表由参数带入,不碰成员。
+    // outbox 非空时对 Post 型观察事件记 pending/ack(可靠 Post);Emit-
+    // Detached 的后台路不传(账本只在主线程的 Emit 上记账)。
     static HookEventResult RunEventCore(const std::vector<HookDefinition>& definitions, HookEvent event,
-                                        const HookPayload& payload, const HookContext& ctx);
+                                        const HookPayload& payload, const HookContext& ctx,
+                                        HookOutbox* outbox = nullptr);
 
     HookEventResult EmitImpl(HookEvent event, const HookPayload& payload, const HookContext& ctx,
                              bool context_override);
@@ -146,6 +160,9 @@ private:
     std::vector<HookDefinition> definitions_;
     HookTrustStore trust_;
     HookContext context_;
+    // 可靠 Post 的账本(可选;空 = 没挂,零行为)。shared_ptr:拷贝语义
+    // 沿用同一只账本,主线程 Emit 记账,后台路不碰。
+    std::shared_ptr<HookOutbox> outbox_;
     std::deque<HookRunRecord> recent_;         // 新在头,容量 kRecentCap
     std::map<int, HookRunRecord> last_record_;  // definition id -> 最近一次
     static constexpr std::size_t kRecentCap = 100;

@@ -63,6 +63,12 @@ sequenceDiagram
 
 每次 Emit 都拿一个 `hook_run_id`。主代理、子代理另带 `agent_id` 与父子关系，免运行账串在一起。
 
+### 四层分层事件与 outbox(Session/Turn/Step/Action 生命周期单)
+
+事件面分四层:Session(进程起收,严格口径;resume/clear/compact 不触发,旧 SessionStart/End 保留兼容触发面)、Turn(`PreTurn` 在 UserPromptSubmit 之后、首个 Step 前;`PostTurn` 只在终局,Stop 判续跑则不触发)、Step(`PreStep` 在请求构建前、steer 合批后;`PostStep` 在响应落账后、派生 Action 执行前)、Action(`PreAction`/`PostAction` 是 `PreToolUse`/`PostToolUse` 的升格别名,同一枚事件)。触发点:Pre/PostSession 在 CLI 入口的 SessionHookScope;Pre/PostTurn 在 turn_runner 的轮装配;Pre/PostStep 经 `TurnWiring::on_pre_step_hook`/`on_post_step_hook` 挂进 AgentLoop。Step 载荷带稳定身份 `step_id`(Agent 域单调)与 `turn_id`(canonical 轮号)。
+
+Post 型观察事件(PostToolUse/PostSession/PostTurn/PostStep/SessionEnd 等)在有 hooks 定义时走 durable outbox:pending 行先于执行落盘(`~/.lubancode/hooks-outbox.jsonl`),handler 收工落 ack;幂等键 `(event_id=hook_run_id, handler_definition_hash)`,同键重放只记一次;下次开张压实已 ack 行。承诺 at-least-once,不承诺 exactly-once;自动重投不接线。
+
 ## 匹配与调度
 
 dispatcher 先按事件名筛，再拿 payload 的 `match_value` 过 matcher。工具事件匹配 `tool_name`；SessionStart 匹配 source；Compact 事件匹配 trigger。没有匹配字段的事件只认 `*`。

@@ -51,6 +51,8 @@ session
 
 同名异义要分家(turn 预算单):**配置文件顶层**的 `max_turns` 是 `max_steps_per_turn` 的弃用别名(每输入轮步数);**Agent YAML `runtime.max_turns`** 是任务总 turn(从接到任务到终态的逻辑模型请求总数,`subagent.default_max_turns` 同义层)。两处同名不同物,写文档与诊断时必须带上下文,别裸写 `max_turns`。
 
+四层词表(Session/Turn/Step/Action 生命周期单,全文在 `src/agent/turn_budget.hpp` 文件头)在此补三条身份规矩:**标识用 `*_id` 不用 `*_index`**——`turn_id`(canonical 轮号 `turn-N`)、`step_id`(Agent 域单调 `step-N`,续跑跨 Run 不重号;`step_index` 只是 Run 内展示坐标,continuation 会重号,对账认 id)、`action_id`(= 既有 tool execution id,`item-N`/`exec-N`)。**hooks 事件层的 Action 是 PreToolUse/PostToolUse 的升格别名**(`PreAction`/`PostAction` 配置键与旧键同效,wire 事件名保持旧名)。**配置键零改动**:该单不引入 `max_steps` 类别名键,旧键原名原账。
+
 ## 通用五条
 
 1. **名字先说领域,再说形态。** `assistant_message`、`tool_results`、`has_tool_use` 是好名字;跨分支、跨回调的 `data`、`info`、`value` 是坏名字。短函数里的 `result`、`out` 可留,一旦跨二十来行就补领域名,如 `send_result`、`trim_report`。

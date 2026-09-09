@@ -78,10 +78,28 @@ bool operator!=(const MessageTarget& a, const MessageTarget& b);
 // Immediate(实际投递仍只发生在安全点:打断收场后的会话泵)。
 enum class DeliveryMode { AfterNextToolBoundary, Immediate };
 
-// 活队列里的条目状态。已送达的条目直接出队(不留在活队列里);TargetGone
-// (子代理先结束,明确拒收、不改投 main)与 Failed(投递出错)留在原位、
-// 标注原因,等用户取回改写或删除——不吞掉。
-enum class QueueItemState { Queued, TargetGone, Failed };
+// ---- steer/followup 显式化(SessionTurnStepAction 四层单 P3)--------------
+// 条目意图:排队消息要么是"介入当前轮"的 steer(工具边界注入,随下一次
+// 模型请求进史),要么是"本轮之后另起一轮"的 followup(轮末会话泵当新
+// 输入发送)。既有用户排队一律 steer(默认值);followup 是给编程面留的
+// 显式通道,不共享一条糊涂账。
+enum class QueueIntent { Steer, Followup };
+// 截止:steer 到"当前 Turn 的下一 Step 构建前"为止(过了就过期,见
+// QueuedMessage::expiry_note);followup 到"Turn 终局"为止(轮末泵取走)。
+// 排队的 slash 命令天然是轮末账(本地执行),不按 steer 过期。
+enum class QueueDeadline { NextStep, TurnEnd };
+
+// 活队列里的条目状态。状态机(四层单 §五.2):
+//   queued → claimed(取走待注入)→ 出队(committed:随请求真正进史,
+//            伴随 dequeued 轨迹事件——"与持久 history 关联完成才算消费")
+//          → returned(没赶上/发送失败,ReturnToFront 回队:归 Queued、
+//            delivery_attempts+1,回还事实记在 attempts 上)
+//   终态异常:TargetGone(子代理先结束,明确拒收、不改投 main)与
+//            Failed(投递出错)留原位标原因,等用户处置——不吞掉。
+// claimed 是"取走未落史"的窗口态:条目留在队里(显示"送达中")、投递
+// 冻结,断线恢复时按持久账对齐——RestoreFromArchive 把 claimed 归回
+// queued(不重发已 committed 的:那些已出队+落了 dequeued 事件)。
+enum class QueueItemState { Queued, Claimed, TargetGone, Failed };
 
 struct QueuedMessage {
     QueueId id = 0;
@@ -92,6 +110,17 @@ struct QueuedMessage {
     std::string note;         // TargetGone/Failed 的原因说明(展示用)
     std::uint64_t version = 1;  // 编辑事务版本:每次成功改写 +1
     bool edit_open = false;   // 编辑事务开着:投递冻结(见文件头注释)
+    // steer/followup 显式化(P3):意图、目标轮与截止。target_turn 空 =
+    // 不指定(steer 认"当前轮的下一 Step");deadline 与 intent 同置
+    //(steer→NextStep,followup→TurnEnd)。
+    QueueIntent intent = QueueIntent::Steer;
+    std::string target_turn;
+    QueueDeadline deadline = QueueDeadline::NextStep;
+    // steer 过期标注(§五.5):Turn 终局仍未消费的 steer 不许悄悄改道成
+    // followup——保持 Queued、在这里记过期原因、向用户明示。带过期标注的
+    // 条目不再投递(取走类口跳过),用户取回改写(CommitEdit 清标注)或
+    // 删除,由用户决定去留。
+    std::string expiry_note;
     // slash 身份不落字段:忙碌期排队的完整斜杠命令,身份每次从正文现折
     // (IsQueuedSlashText,判法与 ProcessLine 同一颗 ParseSlashCommand)。
     // 好处是永远不漂——Shift+← 取回改写、存档落盘、resume 灌回,身份天然
@@ -140,6 +169,12 @@ public:
     // ---- 落队 / 查询 ----
     // 新消息入队(排队顺序 = 落队顺序)。空文本拒收,返回 0。
     QueueId Enqueue(MessageTarget target, std::string text);
+    // steer/followup 显式化(P3):带意图入队。intent 定归宿(steer=工具
+    // 边界注入,followup=轮末另起一轮),deadline 随 intent 缺省;target_
+    // turn 可空(steer 认"当前轮的下一 Step")。Enqueue(两参)等价于
+    // steer 缺省——既有用户排队行为一字不变。
+    QueueId EnqueueWithIntent(MessageTarget target, std::string text, QueueIntent intent,
+                              QueueDeadline deadline, std::string target_turn = std::string());
     // P0-4 轨迹观察口:enqueue/user_removed 两类终态安全的变化从这广播
     //(锁外回调,观察器不得回调本队列)。置空摘除。
     void SetChangeObserver(QueueChangeObserver observer);
@@ -165,10 +200,33 @@ public:
     // 只取队头一条(一次边界只送一条的场合;批量注入走 TakeDeliverable)。
     // 没有可投递的给 nullopt。slash 让路规矩与 TakeDeliverable 同款。
     std::optional<QueuedMessage> TakeFirstDeliverable(MessageTarget target);
-    // 出路二的失败退还(取走即消费单):TakeFirstDeliverable 拿去自动发送
+    // ---- steer 合批的取件/销账(P3 状态机)-----------------------------------
+    // ClaimDeliverable:把该目标可投递的 steer 条目(状态 Queued、非编辑
+    // 冻结、未过期、非 slash)翻成 Claimed——条目留在队里(窗口态,断线可
+    // 对账),返回副本供注入。与 TakeDeliverable 的差别只在"取走不等于
+    // 消费":消费要等 MarkCommitted(随请求真正进史)。
+    std::vector<QueuedMessage> ClaimDeliverable(MessageTarget target);
+    // MarkCommitted:注入消息已成形、即将随下一次请求进史——Claimed 条目
+    // 销账出队(这就是 committed;dequeued 轨迹事件由调用方在落锤点记)。
+    // 回销账成功的条数;认不得/非 Claimed 的跳过(幂等)。
+    int MarkCommitted(const std::vector<QueueId>& ids);
+    // ClaimFirstAutoSendable:轮末会话泵的取件(slash 与 followup;带过期
+    // 标注的 steer 不取)。Queued→Claimed,条目留队,返回副本。attempts
+    // 满的那条跳过(防死循环,规矩同旧 TakeFirstAutoSendable)。
+    std::optional<QueuedMessage> ClaimFirstAutoSendable(MessageTarget target);
+    // 单条销账:泵的自动发送成功收场后 MarkCommittedOne(id)(committed)。
+    bool MarkCommittedOne(QueueId id);
+    // steer 过期批注(§五.5):主会话 Turn 终局仍未消费的 steer(main 目标、
+    // 状态 Queued、非slash、无既有标注)打上过期原因。回打上标注的条目
+    // id——调用方据此向用户明示(count)与落 NoteQueueExpired 轨迹事件。
+    // 过期条目保持 Queued,不再投递,用户改写(CommitEdit 清标注)或删除。
+    // 子代理目标不在此列(门是任务 inbox,截止跟任务走,§六.5 各记各账)。
+    std::vector<QueueId> MarkExpiredUnconsumedSteers(const std::string& note);
+    // 出路二的失败退还(取走即消费单):ClaimFirstAutoSendable 拿去自动发送
     // 的那条,若那轮以请求失败收场,从这里塞回队首(attempts +1),原 id、
-    // 原状态都保住。队列在取走与还回之间又进了新条目也不碍事——塞在最前,
-    // 重发时它还是头一条。
+    // 原状态都保住(claimed 窗口随之关闭:returned = 回 Queued 带 attempts
+    // 账)。队列在取走与还回之间又进了新条目也不碍事——塞在最前,重发时
+    // 它还是头一条。
     void ReturnToFront(QueuedMessage item);
     // 会话泵的防死循环闸:队头这条还该不该自动发(状态健康、没冻、没超
     // 自动重试上限)。attempts 满了的那条跳过,泵往后找——找不着就轮空,

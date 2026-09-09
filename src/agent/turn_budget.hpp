@@ -18,6 +18,29 @@
 //                 不是用户合同。OnModelStepStarted/steps_used 这些名字照旧
 //                 服务旧路,不得再拿它替任务预算命名。
 //
+// ---- 四层生命周期单(SessionTurnStepAction)词条扩展,第三次正名 --------
+// 上面四条照旧;下四条自上而下加层,与旧词的互注钉在这,防第四次混战:
+//   Session       一次会话的完整寿命。resume/clear/compact 都是同一 Session
+//                 内的重整,不新开(resume-as-new 的轨迹场是账目换房,宿主
+//                 进程嘴里的一场会话没变)。子代理整条 task 各自独立成账,
+//                 经父侧 Action 关联,不并进主 Session。
+//   Turn          用户的一轮对话:从用户输入被接受起,到本轮最终 assistant
+//                 落定且无续跑止。一只 Turn ⊇ 一或多次 input round(多次
+//                 Agent::Run);Stop 续跑、接力触发都在 Turn 内。canonical
+//                 turn id("turn-N",session IdAuthority 发)就是这层的身份,
+//                 不得以单次 Run 的起止冒充 Turn 起止。
+//   Step          严格同义 model turn(上表):一次逻辑模型请求及其响应。
+//                 四层单起用稳定 step_id("step-N",Agent 域单调)作身份;
+//                 Run 局部 step_index 只是展示坐标——continuation/续跑会
+//                 重号,那是既有病,身份认 step_id。
+//   Action        工具调用的抽象:一次工具调用一只 Action,因果上归属生成
+//                 它的 Step,执行上独立计时。既有 tool execution id(item-N/
+//                 exec-N)就是这层的身份;hooks 侧 Pre/PostToolUse 升格为
+//                 Pre/PostAction(旧事件名永久别名),对象不变。
+//   旧键互注      max_steps_per_turn 的"step"=input round(兼容窗旧义),
+//                 与本表 Step(model turn)不是一层——写文档必须写全互注。
+//
+
 // 记账口径(设计单 §2.5/§3.2):
 //   turns_attempted  宿主准入并发出过的逻辑模型请求(API 错、流断也保留,
 //                    失败请求可能花钱,不能当没发生);

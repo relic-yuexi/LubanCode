@@ -689,6 +689,9 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
                                                bool* autosend_failed, bool silent,
                                                memory::QueryOrigin origin) {
     const TurnSource source = ingress.source;
+    // P3 取消闸(§五.4):新一轮开跑,上一轮的取消账翻篇——闸只压"取消后
+    // 的第一圈泵"。
+    last_turn_cancelled_ = false;
     // 终端老路只吃文本(渠道的媒体投影不进终端);取首个 TextBlock。
     std::string content;
     for (const auto& block : ingress.message.content) {
@@ -876,9 +879,65 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         };
     }
     const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
+    // 四层生命周期单 P2:PostTurn——终局收口(恰好一次)。RunTurn 返回时
+    // Stop 续跑环已在其内收束:Stop 判续跑则此刻还没到(续跑轮跑完才回到
+    // 这里),终局即此处。取消/失败轮也是 Turn 的终局,照发(cancelled 带
+    // 真);PreTurn 否决的轮根本没进 RunTurn,不发。子代理的轮不经这里
+    //(各有各的账,SubagentStop 那族照旧)。
+    if (is_user_turn) {
+        lubancode::hooks::HookDispatcher* post_turn_dispatcher = lubancode::app::HookRuntime();
+        if (post_turn_dispatcher != nullptr && !post_turn_dispatcher->Empty() &&
+            post_turn_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PostTurn)) {
+            // 汇总从现账拼:Step 数 = usage 流水笔数;Action 数 = 本轮历史
+            // 段里的 tool_use 块数(一只 Action 一次工具调用);最终回复 =
+            // 本轮段末条 assistant 的首个文本块。
+            int turn_actions = 0;
+            std::string final_text;
+            const auto& history = main_agent->History();
+            for (std::size_t i = history_before; i < history.size(); ++i) {
+                if (history[i].role != lubancode::api::Role::Assistant) {
+                    continue;
+                }
+                for (const auto& block : history[i].content) {
+                    if (std::holds_alternative<lubancode::api::ToolUseBlock>(block)) {
+                        ++turn_actions;
+                    } else if (final_text.empty()) {
+                        if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
+                            final_text = text->text;
+                        }
+                    }
+                }
+            }
+            lubancode::runtime::EmitPostTurn(
+                post_turn_dispatcher, trace_turn_id, final_text, turn_usage.request_count(), turn_actions,
+                turn_usage.total_input_tokens(), turn_usage.output_tokens(),
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                      turn_started)
+                    .count(),
+                turn_result.cancelled);
+        }
+    }
     // 唤醒识死(§4.3):本轮一次应急都没走过的才算健康——连续计数清零;
     // 走过的保留累计,后台回流据此暂停自动续轮(语义见 ContextExhaustionGate)。
     context_exhaustion_gate_.NoteTurnFinished();
+    // P3 steer/followup 显式化(§五.5):Turn 终局仍未消费的 steer 不许悄悄
+    // 改道成 followup——打过期标注、向用户明示、轨迹落 NoteQueueExpired,
+    // 条目保持 Queued 等用户去留(取回改写再排,或删除)。取消账同时记下
+    // (§五.4:取消后默认不自动续轮,泵会看这枚旗)。
+    last_turn_cancelled_ = turn_result.cancelled;
+    {
+        const std::vector<lubancode::cli::QueueId> expired =
+            SessionSteeringQueue().MarkExpiredUnconsumedSteers("turn_end_no_next_step");
+        if (!expired.empty()) {
+            TermOut() << theme.stats << trf("queue.steer_expired_head", expired.size()) << theme.reset << "\n";
+            if (session_runtime_.trajectory() != nullptr) {
+                for (const lubancode::cli::QueueId id : expired) {
+                    session_runtime_.trajectory()->NoteQueueExpired(lubancode::cli::QueueItemId(id),
+                                                                    "turn_end_no_next_step");
+                }
+            }
+        }
+    }
     // 记忆写入调度单 P0(§10.3):前台尾延迟的起点——回合收尾(RunTurn
     // 返回)到抽取返回的墙钟,量完在抽取调用后交给账本。
     const auto memory_tail_started =
@@ -1060,19 +1119,45 @@ void TerminalSessionController::Run() {
 
         // 0.28.x 会话泵:把流式期间排下的消息送上路。子代理目标先转投任务
         // inbox(SendTaskMessage 那套,共用面板定向介入的通道);main 目标取
-        // 队头自动发送——本轮没再调工具自然收尾的场合,队列紧接着成为下一
-        // 次请求的用户消息,不等用户再敲一下(规格)。用户自己的排队消息
-        // 优先于 peer 来信与子代理完成回流,所以泵挂在它们前头。
+        // 队头自动发送——泵的取件范围是排队的 slash(本地命令,轮末必达)
+        // 与显式 followup 条目(§五.4:PostTurn 后作为新 Turn 的种子)。
+        // 未消费的 steer 不在泵的范围里:Turn 终局它们已被打上过期标注
+        // (RunSessionTurn 尾),不许悄悄改道成 followup(§五.5)。
         //
-        // 取走即消费单(路径一):拿去自动发送的那条,若这一轮以请求失败
-        // 收场,原样还回队首并带"已试过一次"的账——同一条最多自动重试
-        // 一次,再失败留队列等用户手动(Shift+← 取回改写再排、或删掉),
-        // 错误文案旁明写一句"没送达,已回队",不再无声吞掉。
-        // 问题二:忙碌期排队的 slash 命令也被这只泵取走——ProcessLine 开头
-        // 先跑 ParseSlashCommand,于是它在这里本地执行(开 /context 面板那
-        // 类),不发模型;工具边界(TakeDeliverable)对它让路,故轮末必达。
+        // P3 取消闸(§五.4):上一轮是被打断收场的,默认不自动启动
+        // followup 轮——明示一句,不替用户拿主意;排队的 slash 是本地命令,
+        // 不算"轮",照常执行。
+        //
+        // 状态机(路径一):ClaimFirstAutoSendable 把条目翻成 Claimed(留队
+        // 窗口态)→ 成功收场 MarkCommittedOne(committed);以请求失败收场
+        // 则 ReturnToFront 原样还回队首并带"已试过一次"的账(returned)——
+        // 同一条最多自动重试一次,再失败留队列等用户手动(Shift+← 取回改写
+        // 再排、或删掉),错误文案旁明写一句"没送达,已回队",不再无声吞掉。
         PumpSteeringToSubagents();
-        if (auto head = SessionSteeringQueue().TakeFirstAutoSendable(lubancode::cli::MessageTarget::Main())) {
+        // P3 取消闸只管"取消后的第一圈泵":取走即清,后续圈不再压、不刷屏。
+        const bool suppress_followup_this_cycle = last_turn_cancelled_;
+        last_turn_cancelled_ = false;
+        bool pump_followup_suppressed = false;
+        if (suppress_followup_this_cycle) {
+            // 只压 followup/slash 里的"模型轮"那半:slash 照常,普通文字
+            // (followup)压下并明示。用快照判有没有可压的,避免空转打印。
+            const auto snapshot = SessionSteeringQueue().Snapshot();
+            for (const auto& item : snapshot) {
+                if (item.target.is_main() && item.state == lubancode::cli::QueueItemState::Queued &&
+                    item.expiry_note.empty() && !lubancode::cli::IsQueuedSlashText(item.text)) {
+                    pump_followup_suppressed = true;
+                    break;
+                }
+            }
+        }
+        if (pump_followup_suppressed) {
+            TermOut() << theme.stats << tr("queue.followup_suppressed") << theme.reset << "\n";
+        }
+        std::optional<lubancode::cli::QueuedMessage> head;
+        if (!pump_followup_suppressed) {
+            head = SessionSteeringQueue().ClaimFirstAutoSendable(lubancode::cli::MessageTarget::Main());
+        }
+        if (head.has_value()) {
             TermOut() << theme.prompt << "> " << theme.reset << head->text << "\n";
             peer_wiring_.SetStatus("busy");
             bool autosend_failed = false;
@@ -1090,11 +1175,15 @@ void TerminalSessionController::Run() {
                     preview.resize(preview_cut);
                 }
                 TermOut() << theme.error << trf("queue.autosend_returned", preview) << theme.reset << "\n";
-            } else if (session_runtime_.trajectory() != nullptr) {
-                // P0-4 排队账:泵的自动发送没有失败退还,dequeued 落锤
-                //(失败退还的那支不落——条目还在队里,账没终态)。
-                session_runtime_.trajectory()->NoteQueueDequeued(
-                    lubancode::cli::QueueItemId(head->id), "end_of_turn_delivery");
+            } else {
+                // P3 状态机:自动发送收场,committed 销账(出队);P0-4 排队
+                // 账的 dequeued 同锤落(失败退还的那支不落——条目还在队里,
+                // 账没终态)。
+                SessionSteeringQueue().MarkCommittedOne(head->id);
+                if (session_runtime_.trajectory() != nullptr) {
+                    session_runtime_.trajectory()->NoteQueueDequeued(
+                        lubancode::cli::QueueItemId(head->id), "end_of_turn_delivery");
+                }
             }
             if (flow == CommandFlow::Exit) {
                 break;

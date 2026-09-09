@@ -37,6 +37,41 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 | `SubagentStop` | 前台/后台子代理收口 | 无 | continue=false 要求再收口一轮(最多一次) |
 | `Stop` | 主回合正常收束 | 无 | continue=false 要求补跑一轮(最多一次) |
 
+### 分层事件(Session/Turn/Step/Action 四层生命周期)
+
+四层语义:**Session**(一次会话的完整寿命;resume/clear/compact 都是重整,不新开)> **Turn**(用户的一轮对话,从输入被接受到最终 assistant 落定且无续跑;Stop 续跑、接力都在 Turn 内)> **Step**(一次逻辑模型请求及其响应,= 词表的 model turn)> **Action**(一次工具调用)。
+
+| 事件 | 触发时机 | matcher 匹配字段 | 能做什么 |
+|---|---|---|---|
+| `PreSession` | 会话实体创建后、首输入准入前 | 无 | 追加上下文;continue=false/exit 2 否决开张(进程以说明退出) |
+| `PostSession` | 会话真正关闭(进程收场) | 无 | 只观察。advisory:硬杀(taskkill/断电)不保证必达 |
+| `PreTurn` | 用户输入被接受后(UserPromptSubmit 之后)、首个 Step 前 | 无 | 追加上下文;否决本 Turn(不发模型)。改输入仍走 UserPromptSubmit 的既有口径 |
+| `PostTurn` | 终局:最终 assistant 落定且无续跑(恰好一次) | 无 | 只观察。载荷带 Turn 汇总(step 数/action 数/usage/时长)。Stop 判续跑则本事件不触发 |
+| `PreStep` | 每次 Step 请求构建前(steer 注入合批之后) | 无 | 追加上下文(随本 Step 请求);否决 = 终止本 Turn,不是跳过继续 |
+| `PostStep` | assistant 响应落账后、派生 Action 执行前 | 无 | 只观察。载荷带 step_id/turn_id/attempts/API 耗时/stop reason/usage——API 耗时与工具耗时(PostAction 侧)分账 |
+| `PreAction` | **`PreToolUse` 的升格别名** | `tool_name` | 与 `PreToolUse` 同一枚事件:deny/ask/allow、`updatedInput` 改参 |
+| `PostAction` | **`PostToolUse` 的升格别名** | `tool_name` | 与 `PostToolUse` 同一枚事件:只追加反馈,不撤销副作用 |
+
+与旧事件的边界(不串台):
+
+- `Pre/PostSession` 是严格口径(只在进程起收触发);`SessionStart`/`SessionEnd` 保留原触发面(resume/clear 照发,兼容既有用户)。`/clear` 发 `SessionEnd(reason=clear)` 但**不**发 `PostSession`——clear 是同一 Session 内换账,不是关闭。
+- `Stop` 保留原位原义(每拍末尾的续跑裁决);`PostTurn` 只在终局触发。顺序:Stop 先跑,判续跑则 Turn 继续、PostTurn 不触发;终局恰好一次。
+- `UserPromptSubmit` 保留观察+阻断;改输入的决策权不迁往 `PreTurn`(两不发昏)。
+- 别名规则:配置里 `PreAction`/`PostAction`(或带 `Hook` 后缀的长写法)与 `PreToolUse`/`PostToolUse` 完全同效,同一枚事件、同一套能力;stdin JSON 的 `event` 字段保持旧名稳定,既有脚本零迁移。
+- Step 的稳定身份:`step_id`(会话/任务域单调,如 `step-3`,续跑跨 Run 不重号)与 `turn_id`(canonical 轮号,如 `turn-2`);`step_index` 只是单次 Run 内的展示坐标,续跑会重号,对账认 id。
+
+### 可靠 Post:outbox/ack
+
+Post 型观察事件(`PostToolUse`/`PostAction`、`PostCompact`、`SessionEnd`、`SubagentStop`、`LoopTickEnd`、`LoopTaskStop`、`GoalIterationEnd`/`GoalEvaluated`/`GoalCompleted`、`PostSession`、`PostTurn`、`PostStep`)在有 hooks 定义时启用 durable outbox(`~/.lubancode/hooks-outbox.jsonl`):事件先落 pending 行,handler 跑完落 ack 行销账;幂等键 `(event_id, handler_definition_hash)`——同键重放只记一次。账本在下次进程开张时压实(已 ack 的行出账,崩溃残留的 pending 留作待办)。对外部副作用的承诺是 **at-least-once,不承诺 exactly-once**;崩溃后的自动重投(重跑 handler)本期不接线,账面提供判重与待办查询。
+
+### async 与失败策略的现状(如实)
+
+- `async: true` 的 handler 本期**解析、展示、记录,但不执行**(运行记录记 `skipped_async`)——安全点投递未实现,不假装支持,也不拿 async handler 做权限决定。
+- `failure_policy: deny` 的兼容风险清单(迁移前必读):
+  - deny 只在"能拦"的事件上生效(权限类事件与可阻断的 UserPromptSubmit/PreCompact/PreSession/PreTurn/PreStep);Post 型事件上的 deny 无处发力,只留记录。
+  - 多只 handler 归并按表态走(deny > ask > allow):**此前已有 allow 表态时,后一只的 failure_policy=deny 失败只在"无任何表态"时才补一枚 deny**——不是所有失败都压过此前 allow。想要绝对优先,用 exit 2 的显式 deny。
+  - legacy adapter(`pre_tool` 等旧四类)恒 `warn` 语义,失败不拦(M9 行为不动)。
+
 ## 配置
 
 ```json
@@ -256,7 +291,9 @@ process.stdin.on("end", () => {
 - **大输出 spill 未实现**:additionalContext 目前直接进上下文(超大时截断标注),落盘+头尾预览后续接。
 - **嵌套后台(后台子代理再派后台子代理)不接 hooks**:那一层的工具表没有主会话的 hooks 通道。主会话直接派的后台子代理全支持(见"后台子代理的 hooks")。
 - **Stop/SubagentStop 续跑最多一次**,续跑轮没有输入监听(ESC 由外层兜底)。
-- **SessionEnd 非必达**:它是 advisory 收尾——正常退出、异常被接住时会发;进程被硬杀(taskkill / kill -9 / 断电)时析构不运行,事件不会发出。协议如实如此,不承诺必达。
+- **SessionEnd 非必达**:它是 advisory 收尾——正常退出、异常被接住时会发;进程被硬杀(taskkill / kill -9 / 断电)时析构不运行,事件不会发出。协议如实如此,不承诺必达。`PostSession` 同一 advisory 边界。
+- **outbox 自动重投不接线**:崩溃残留的 pending 行留账可查,但下次开张不会自动重跑 handler(外部副作用 at-least-once 的"重投"半边)——自动重跑失控风险大于收益,后续按事件粒度立单。
+- **分层事件的子代理侧未接线**:`Pre/PostTurn`、`Pre/PostStep` 目前只在主会话轮上触发;子代理/单发/workflow 节点的轮不走 RunTurn 装配,各自账面(SubagentStop 族)照旧。
 - **第二阶段事件**(PostToolUseFailure、PostToolBatch、StopFailure、Notification、TaskCreated/Completed、ConfigChange、InstructionsLoaded、WorktreeCreate/Remove 等)按真实产品能力补,先不造空壳。
 - **HTTP/MCP/prompt/agent 四类 handler** 暂不支持,`type` 只认 `command`(结构留了门)。
 

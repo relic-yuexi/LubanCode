@@ -1,8 +1,10 @@
 #include "app/hook_runtime.hpp"
 
 #include <memory>
+#include <utility>
 
 #include "cli/console_input.hpp"
+#include "hooks/outbox.hpp"
 #include "platform/paths.hpp"
 
 namespace lubancode::app {
@@ -48,6 +50,22 @@ std::vector<std::string> SetupHookRuntime(const config::ConfigResult& config_res
     context.permission_mode = HookPermissionModeText();
 
     const auto configured = dispatcher->Configure(loaded, std::move(trust), std::move(context));
+
+    // 四层生命周期单 P2:可靠 Post 的 durable outbox。只在真有 hooks 定义
+    // 时挂(没配 hooks 的用户零额外 I/O);账本打不开(目录建不出/盘只读)
+    // 降级为零行为,提示一行——outbox 是可靠性增强,不是硬闸。
+    if (!dispatcher->Empty()) {
+        const auto outbox_path = hooks::HookOutbox::DefaultPath();
+        if (outbox_path.has_value()) {
+            auto outbox = hooks::HookOutbox::Open(*outbox_path);
+            if (outbox != nullptr) {
+                dispatcher->SetOutbox(std::move(outbox));
+            } else {
+                state.startup_notices.push_back("hooks outbox 账本打开失败(" + outbox_path->string() +
+                                                "),可靠 Post 记账降级为内存账,不影响 hooks 执行。");
+            }
+        }
+    }
 
     if (configured.has_untrusted_project) {
         int untrusted = 0;
