@@ -43,20 +43,24 @@ inline constexpr std::size_t kContextWindowCommonCandidates[] = {
 struct ContextWindowCandidates {
     std::vector<std::size_t> values;
     bool limit_known = false;          // 目录声明了模型上限
-    std::size_t declared_limit = 0;    // 已知上限(limit_known 才有效)
+    std::size_t declared_limit = 0;    // 已知上限(limit_known 才有效;幕后过滤尺,不上屏原数)
     bool current_over_limit = false;   // 当前预算超已知上限(标异常)
     bool unverified = false;           // 能力未知:候选未经声明核实
     std::size_t current_window = 0;    // 进面板时的运行态预算(裁决时快照)
 };
 
 // 纯函数:声明上限(可空 = 未知)+ 运行态当前预算 → 候选列表。
-// 规则:常用档按上限过滤;补声明上限本身(非标准上限如 128K 能显示自己)
-// 与当前值;去重排序。当前值超限照实保留并标 current_over_limit。
+// 规则:候选只有十进制预设档——常用档按上限过滤,百万以上 2M/4M/8M… 扩
+// 展;声明上限只在幕后当过滤尺,本身不进候选(用户定案:面板只见 1M,
+// 不见 1048576 这类厂商原数,非整档上限如 786432 顶到 512K)。当前值照实
+// 保留在候选(§4.2 第 4/5 条,哪怕超限——标 current_over_limit,不悄悄
+// 夹档);去重排序。
 ContextWindowCandidates BuildContextWindowCandidates(std::optional<std::size_t> declared_limit,
                                                      std::size_t current_window);
 
-// 候选标签:200K / 400K / 1M / 128K;不整除 K/M 的真值(如 1048576)原样
-// 显示数字,不硬折成 1M(§4.2 第 7 条)。
+// 候选标签:整档 200K / 400K / 1M / 128K;非整档真值(1048576 这类厂商
+// MiB 数)按十进制 K/M 折算("1.05M"/"131.1K"),不打裸数字(用户定案,
+// 口径同 cli::FormatTokenCount 的四舍五入)。
 std::string FormatContextWindowLabel(std::size_t tokens);
 
 // ---------------------------------------------------------------------------
