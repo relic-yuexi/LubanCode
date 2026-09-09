@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.225] - 2026-09-09
+
+- **会话有了四层账本：Session → Turn → Step → Action，每层配 Pre/Post Hook。** Turn 是你的一轮话（跨多次内部 Run，续跑不裂），Step 是一次模型请求（usage、耗时、重试明细都记这层），Action 是工具调用；三层各有稳定 ID（turn-N / step-N / action-N），断线恢复不重号。八枚新 Hook 落地：Pre/PostSession、Pre/PostTurn、Pre/PostStep，Pre/PostToolUse 升格为 Pre/PostAction（旧名永久别名，既有 hooks 配置零迁移）。Post 型观察事件先落 outbox 账再跑 handler（幂等键钉死，at-least-once）。排队消息显式分 steer（本轮下次请求前注入）与 followup（下轮种子）两路：没赶上的 steer 过期标注、明示于你、不改道；取消后不自动开新轮——程序不再替你拿主意。
+
 ## [v0.26.224] - 2026-09-09
 
 - **写文件不再有半截风险。** write_file 落盘从"截断旧文件再写"改为"临时文件写全后原子换名"——任何时点崩溃或断电，目标文件要么是完整旧文、要么是完整新文，事故现场那种"新建即零字节残尸"的形状绝种。临时文件与目标同目录同卷保证换名原子，失败路径清理干净。
