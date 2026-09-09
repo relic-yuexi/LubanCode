@@ -4,7 +4,7 @@
 
 Provider 目录是一册“厂家与模型默认值”。它替向导备好地址、协议、模型、窗口和推理参数。密钥不在册内，用户配置也不让它暗改。
 
-仓库源文件是 `catalog/providers.json`，格式由 `catalog/providers.schema.json` 约束。构建时，目录嵌进可执行文件；断网照样能添加 Provider。
+维护源是 `catalog/providers/` 下的平台分片与 `catalog/manifest.json`，格式由 `catalog/source.schema.json` 约束。发布产物 `catalog/providers.json` 由 `scripts/generate_provider_catalog.py` 确定性合成，格式仍是 `catalog/providers.schema.json`（schema v2）——它是生成文件，禁止手改；`--check` 只读对账。构建时，目录嵌进可执行文件；断网照样能添加 Provider。
 
 若要追 OpenCode/Codex 参考边界、本地 `models.json`、三种 JSON Schema、能力画像与角色路由，读[模型、Provider 与 JSON Schema 深挖](../../architecture/providers/schema.md)。
 
@@ -245,16 +245,37 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 
 ## 10. 维护流程
 
+目录是"分片维护、确定性合成、单文件发布"。`catalog/providers.json` 是生成产物，别手改它。
+
+```text
+catalog/
+  manifest.json            # 维护格式版本、发布 revision、分片顺序
+  providers/<平台>.json     # 36 个平台分片:同平台的协议/地区/套餐变体归一处
+  models/<owner>.json      # 公共模型池(按需,见「公共模型与端点」)
+  source.schema.json       # 维护格式合同
+  providers.schema.json    # 发布格式合同(schema v2,旧客户端认的这份)
+  providers.json           # 合成产物,继续入库,禁止手改
+scripts/generate_provider_catalog.py   # 生成 / --check 对账 / --self-test 自测
+```
+
 添厂家或模型时：
 
 1. 查厂商官方 API 文档，确认端点、协议、模型 ID、窗口和推理参数。
-2. 改 `catalog/providers.json`，同时更新 `revision`。
-3. 确认 `default_model` 确实存在于同一 Provider 的 `models`。
-4. 不把临时活动模型、未经证实的参数写进稳定目录。
-5. 跑 provider catalog 专项测试，再跑全量测试。
-6. 若 schema 要添字段，先考虑旧版客户端如何回退。
+2. 改对应平台分片 `catalog/providers/<平台>.json`；厂家是新平台就新开分片并登记进 `catalog/manifest.json` 的 `shards`（顺序即产物顺序）。
+3. 资料有实质变化才更新 `manifest.json` 的 `revision`；纯搬迁、重排版不伪造新 revision。
+4. 跑 `python scripts/generate_provider_catalog.py` 重新合成，再跑 `--check` 对账（CI 与 ctest 的 `catalog.consistency` 也挂了同一道门）。
+5. 确认 `default_model` 在同一 Provider 的 `models` 里——生成器会拦悬空引用。
+6. 不把临时活动模型、未经证实的参数写进稳定目录。
+7. 跑 provider catalog 专项测试，再跑全量测试；分片、清单、生成器、schema、产物一起提交。
+8. 若 schema 要添字段，先考虑旧版客户端如何回退。
 
 第三方聚合页只能作线索。目录里的事实应以厂商正式文档为准。
+
+生成器先全量校验、后原子替换：重复 JSON 键、Provider ID 撞车、路径越界、未登记分片、默认模型悬空、产物超 2 MiB，任何一道不过都拒绝落盘，原产物不动；同一份维护源重复生成字节恒定。
+
+### 公共模型与端点（维护格式 v2）
+
+多协议平台（`deepseek` 三兄弟、`dashscope` 三兄弟这类）在分片里写成"平台 + 端点"形态：`models_ref` 指向 `catalog/models/<owner>.json` 公共模型池，端点各自声明模型集合与覆写。合成时按"公共模型 → 端点模型覆写"展开成旧 Provider 条目，端点 ID、模型 ID、能力、方言与旧产物逐字段一致。覆写按字段白名单合并：标量替换、数组整体替换、`capabilities` 按键覆盖（不删键）；显式 `false` 是值不是缺失；想给某端点删掉继承来的可选字段，就把整份模型写进该端点的 `endpoint_models`，不走覆写。维护层的 `evidence`（证据来源）与 `aliases`（别名记录）只在维护源里，不进发布产物——runtime 不认识别名，别把它当已生效的映射。
 
 ### 2026-09-09 模型资料核对
 

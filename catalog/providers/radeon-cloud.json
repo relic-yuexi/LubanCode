@@ -1,0 +1,264 @@
+{
+  "platform": "radeon-cloud",
+  "providers": {
+    "radeon-cloud": {
+      "name": "AMD GPU Cloud",
+      "description": "AMD GPU Cloud OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://developer.amd.com.cn/radeon/v1",
+      "key_env": "RADEON_CLOUD_API_KEY",
+      "default_model": "DeepSeek-V4-Flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://developer.amd.com.cn/radeon/",
+      "models": {
+        "DeepSeek-V4-Flash": {
+          "name": "DeepSeek V4 Flash",
+          "context_window": 1048576,
+          "max_output": 393216,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high",
+                  "max",
+                  "low",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high",
+              "max",
+              "low",
+              "xhigh"
+            ]
+          }
+        },
+        "DeepSeek-V4-Pro": {
+          "name": "DeepSeek V4 Pro",
+          "context_window": 1048576,
+          "max_output": 393216,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high",
+                  "max",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high",
+              "max",
+              "xhigh"
+            ]
+          }
+        },
+        "GLM-5.1": {
+          "name": "GLM-5.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "GLM-5.2": {
+          "name": "GLM-5.2",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "max",
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "max",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "xhigh"
+            ]
+          }
+        },
+        "gpt-oss-120b": {
+          "name": "GPT-OSS-120B",
+          "context_window": 131072,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "Kimi-K2.6": {
+          "name": "Kimi K2.6",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 30720,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "thinkingTokenLimits": {
+              "max": 30720,
+              "min": 0
+            }
+          }
+        },
+        "Qwen3.6-35B-A3B": {
+          "name": "Qwen3.6 35B-A3B",
+          "context_window": 262144,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

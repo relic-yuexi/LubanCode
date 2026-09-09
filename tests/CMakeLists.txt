@@ -362,6 +362,28 @@ else()
   message(STATUS "python 未找到: model_probe_kimi_preserved_thinking 探针靶子不注册")
 endif()
 
+# Provider 目录生成器(目录分片单第八节):自测 + 一致性对账进 ctest。改了
+# 分片/清单/生成器/schema 却没重新生成 catalog/providers.json,或维护源
+# 本身不合合同(重复键、路径越界、默认模型悬空、超 2 MiB……),这里先红,
+# 不必等发布。python3 优先:macos runner 没有 `python` 这个名字。
+find_program(LUBANCODE_CATALOG_PYTHON python3 python)
+if(LUBANCODE_CATALOG_PYTHON)
+  add_test(NAME catalog.generator.selftest
+    COMMAND "${LUBANCODE_CATALOG_PYTHON}"
+            "${CMAKE_SOURCE_DIR}/scripts/generate_provider_catalog.py" --self-test
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(catalog.generator.selftest PROPERTIES
+    LABELS "config;catalog" TIMEOUT 300)
+  add_test(NAME catalog.consistency
+    COMMAND "${LUBANCODE_CATALOG_PYTHON}"
+            "${CMAKE_SOURCE_DIR}/scripts/generate_provider_catalog.py" --check
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(catalog.consistency PROPERTIES
+    LABELS "config;catalog" TIMEOUT 60)
+else()
+  message(STATUS "python 未找到: provider 目录生成器检查不注册")
+endif()
+
 # 多行字符公式的视觉小样：直连正式渲染器，不进 ctest。
 add_executable(latex_box_experiment EXCLUDE_FROM_ALL manual/latex_box_experiment.cpp)
 target_link_libraries(latex_box_experiment PRIVATE lubancode_core)

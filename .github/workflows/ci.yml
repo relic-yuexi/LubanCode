@@ -97,6 +97,15 @@ jobs:
         shell: bash
         run: bash scripts/check_release.sh
 
+      # 目录一致性(Provider 目录分片单):维护源(分片/清单/生成器/schema)
+      # 与在库 catalog/providers.json 对账,不合即红——只改目录的提交也过这道
+      # 门,不必等 ctest 起完编译。python3 优先:各腿 runner 的名字不齐。
+      - name: Check provider catalog consistency
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/generate_provider_catalog.py --check
+
       # 随包 ripgrep(SearchTool 内置 Ripgrep 后端迁移单 P0-5):三平台各自
       # 按 committed manifest 下载固定版本资产、重算 SHA-256 对账、跑
       # --version 精确校版本——这一步既是集成测试的 rg 来源(LUBANCODE_
@@ -223,6 +232,12 @@ jobs:
 
       - name: Check release metadata
         run: bash scripts/check_release.sh
+
+      # 目录一致性:同 build-test 腿(manylinux 容器自带 python3)。
+      - name: Check provider catalog consistency
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/generate_provider_catalog.py --check
 
       - name: Fetch bundled ripgrep (manifest-pinned)
         run: bash scripts/fetch_ripgrep.sh --target rg-stage --platform linux-x64 --cache rg-cache

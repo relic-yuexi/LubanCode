@@ -1,0 +1,433 @@
+{
+  "platform": "dmxapi",
+  "providers": {
+    "dmxapi": {
+      "name": "DMXAPI",
+      "description": "DMXAPI OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://www.dmxapi.cn/v1",
+      "key_env": "DMXAPI_API_KEY",
+      "default_model": "gemini-2.5-flash-image",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://doc.dmxapi.cn/",
+      "models": {
+        "gemini-2.5-flash-image": {
+          "name": "Gemini 2.5-flash-image",
+          "context_window": 32768,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-3.1-flash-image-preview": {
+          "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gpt-image-1.5": {
+          "name": "GPT-IMAGE-1.5",
+          "capabilities": {
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          }
+        },
+        "musesteamer-air-image": {
+          "name": "MuseSteamer Air Image"
+        },
+        "nano-banana": {
+          "name": "Nano Banana"
+        },
+        "nano-banana-2": {
+          "name": "Nano Banana 2",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "video-recognition": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        }
+      }
+    },
+    "dmxapi-anthropic": {
+      "name": "DMXAPI (Anthropic)",
+      "description": "DMXAPI Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://www.dmxapi.cn",
+      "key_env": "DMXAPI_API_KEY",
+      "default_model": "gemini-2.5-flash-image",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://doc.dmxapi.cn/",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": {
+        "gemini-2.5-flash-image": {
+          "name": "Gemini 2.5-flash-image",
+          "context_window": 32768,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-3.1-flash-image-preview": {
+          "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        },
+        "gpt-image-1.5": {
+          "name": "GPT-IMAGE-1.5",
+          "capabilities": {
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          }
+        },
+        "musesteamer-air-image": {
+          "name": "MuseSteamer Air Image"
+        },
+        "nano-banana": {
+          "name": "Nano Banana"
+        },
+        "nano-banana-2": {
+          "name": "Nano Banana 2",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "video-recognition": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
+          }
+        }
+      }
+    },
+    "dmxapi-gemini": {
+      "name": "DMXAPI (Google)",
+      "description": "DMXAPI Google Generate Content API",
+      "wire": "google-generate-content",
+      "base_url": "https://www.dmxapi.cn/v1beta",
+      "key_env": "DMXAPI_API_KEY",
+      "default_model": "gemini-2.5-flash-image",
+      "reasoning_dialect": {
+        "toggle": "include_thoughts",
+        "effort_path": "thinkingLevel",
+        "budget_path": "thinkingBudget",
+        "delta": "gemini_thought_part",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://doc.dmxapi.cn/",
+      "models": {
+        "gemini-2.5-flash-image": {
+          "name": "Gemini 2.5-flash-image",
+          "context_window": 32768,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "budget"
+          }
+        },
+        "gemini-3.1-flash-image-preview": {
+          "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        },
+        "gpt-image-1.5": {
+          "name": "GPT-IMAGE-1.5",
+          "capabilities": {
+            "image": true,
+            "image-generation": true,
+            "file_input": true
+          }
+        },
+        "musesteamer-air-image": {
+          "name": "MuseSteamer Air Image"
+        },
+        "nano-banana": {
+          "name": "Nano Banana"
+        },
+        "nano-banana-2": {
+          "name": "Nano Banana 2",
+          "context_window": 131072,
+          "max_output": 65536,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "image-generation": true,
+            "video-recognition": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "high"
+                ]
+              },
+              {
+                "kind": "budget",
+                "max": 24576,
+                "min": 0
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "high"
+            ],
+            "thinkingTokenLimits": {
+              "max": 24576,
+              "min": 0
+            },
+            "wireDialect": "effort"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,625 @@
+{
+  "platform": "mistral",
+  "providers": {
+    "mistral": {
+      "name": "Mistral",
+      "description": "Mistral OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.mistral.ai/v1",
+      "key_env": "MISTRAL_API_KEY",
+      "default_model": "mistral-large-latest",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://docs.mistral.ai",
+      "models": {
+        "codestral": {
+          "name": "Codestral (latest)",
+          "context_window": 256000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "file_input": true
+          }
+        },
+        "codestral-latest": {
+          "name": "Codestral (latest)",
+          "context_window": 256000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "devstral": {
+          "name": "Devstral 2",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "devstral-2": {
+          "name": "Devstral 2",
+          "context_window": 256000,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "devstral-2-123b": {
+          "name": "Devstral 2 123B",
+          "context_window": 256000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "devstral-latest": {
+          "name": "Devstral 2",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "devstral-medium": {
+          "name": "Devstral Medium",
+          "context_window": 128000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "devstral-medium-latest": {
+          "name": "Devstral 2 (latest)",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "devstral-small": {
+          "name": "Devstral Small",
+          "context_window": 256000,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "image": true
+          }
+        },
+        "devstral-small-2": {
+          "name": "Devstral Small 2",
+          "context_window": 256000,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "image": true
+          }
+        },
+        "magistral-medium": {
+          "name": "Magistral Medium (latest)",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "magistral-medium-latest": {
+          "name": "Magistral Medium (latest)",
+          "context_window": 128000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "magistral-small": {
+          "name": "Magistral Small 2506",
+          "context_window": 128000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "ministral-14b": {
+          "name": "Ministral 14B",
+          "context_window": 262144,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "ministral-14b-instruct": {
+          "name": "Ministral 3 14B Instruct 2512",
+          "context_window": 262144,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "ministral-3-14b-instruct": {
+          "name": "Ministral 14B 3.0",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "ministral-3-3b-instruct": {
+          "name": "Ministral 3 3B",
+          "context_window": 256000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "ministral-3-8b-instruct": {
+          "name": "Ministral 3 8B",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "ministral-3b": {
+          "name": "Ministral 3B (latest)",
+          "context_window": 131072,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "ministral-3b-latest": {
+          "name": "Ministral 3B (latest)",
+          "context_window": 128000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ministral-8b": {
+          "name": "Ministral 8B (latest)",
+          "context_window": 262144,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "ministral-8b-latest": {
+          "name": "Ministral 8B (latest)",
+          "context_window": 128000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "mistral-7b-instruct-v0-3": {
+          "name": "Mistral-7B-Instruct-v0.3",
+          "context_window": 65536,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true
+          }
+        },
+        "mistral-large": {
+          "name": "Mistral Large 2.1",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-large-3": {
+          "name": "Mistral Large 3",
+          "context_window": 256000,
+          "max_output": 256000,
+          "capabilities": {
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-large-3-675b-instruct": {
+          "name": "Mistral Large 3 675B Instruct 2512",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-large-latest": {
+          "name": "Mistral Large (latest)",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-medium": {
+          "name": "Mistral Medium 3.1",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "mistral-medium-3": {
+          "name": "Mistral: Mistral Medium 3",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-medium-3-1": {
+          "name": "Mistral: Mistral Medium 3.1",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-medium-3-5": {
+          "name": "Mistral Medium Latest",
+          "context_window": 262144,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "mistral-medium-3-5-128b": {
+          "name": "Mistral Medium 3.5",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "mistral-medium-3-instruct": {
+          "name": "Mistral Medium 3",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "image": true,
+            "file_input": true
+          }
+        },
+        "mistral-medium-latest": {
+          "name": "Mistral Medium (latest)",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "mistral-nemo": {
+          "name": "Mistral Nemo",
+          "context_window": 131072,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "mistral-nemotron": {
+          "name": "Mistral nemotron",
+          "context_window": 128000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "mistral-saba": {
+          "name": "Mistral: Saba",
+          "context_window": 32768,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "file_input": true
+          }
+        },
+        "mistral-small": {
+          "name": "Mistral Small 4",
+          "context_window": 262144,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "mistral-small-24b-instruct": {
+          "name": "Mistral: Mistral Small 3",
+          "context_window": 32768,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "mistral-small-3-1-24b-instruct": {
+          "name": "Mistral: Mistral Small 3.1 24B",
+          "context_window": 128000,
+          "capabilities": {
+            "image": true
+          }
+        },
+        "mistral-small-3-2-24b-instruct": {
+          "name": "Mistral: Mistral Small 3.2 24B",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "mistral-small-4-119b": {
+          "name": "mistral-small-4-119b-2603",
+          "context_window": 128000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "mistral-small-latest": {
+          "name": "Mistral Small (latest)",
+          "context_window": 256000,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "high"
+            ]
+          }
+        },
+        "open-mistral-7b": {
+          "name": "Mistral 7B",
+          "context_window": 8000,
+          "max_output": 8000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "open-mixtral-8x22b": {
+          "name": "Mixtral 8x22B",
+          "context_window": 64000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "open-mixtral-8x7b": {
+          "name": "Mixtral 8x7B",
+          "context_window": 32000,
+          "max_output": 32000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "pixtral-12b": {
+          "name": "Pixtral 12B",
+          "context_window": 128000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "pixtral-large": {
+          "name": "Pixtral Large (25.02)",
+          "context_window": 128000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "image": true
+          }
+        },
+        "pixtral-large-latest": {
+          "name": "Pixtral Large (latest)",
+          "context_window": 128000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "voxtral-mini-3b": {
+          "name": "Voxtral Mini 3B 2507",
+          "context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "audio-recognition": true
+          }
+        },
+        "voxtral-small-24b": {
+          "name": "Voxtral Small 24B 2507",
+          "context_window": 32000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "audio-recognition": true,
+            "file_input": true
+          }
+        },
+        "voxtral-small-latest": {
+          "name": "Voxtral Small (latest)",
+          "context_window": 32000,
+          "max_output": 32000,
+          "capabilities": {
+            "tools": true,
+            "audio-recognition": true,
+            "file_input": true
+          }
+        }
+      }
+    }
+  }
+}

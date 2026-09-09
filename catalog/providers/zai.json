@@ -1,0 +1,2474 @@
+{
+  "platform": "zai",
+  "providers": {
+    "zai": {
+      "name": "zai",
+      "description": "zai OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://docs.z.ai/",
+      "extra_body": {
+        "tool_stream": true
+      },
+      "models": {
+        "glm-5.3-flash": {
+          "name": "GLM 5.3 Flash",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "max",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "off_unsupported": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ],
+            "dialect": {
+              "toggle": "thinking_type",
+              "toggle_on": "enabled",
+              "effort_path": "reasoning_effort",
+              "verified": false
+            }
+          }
+        },
+        "glm-5.2": {
+          "name": "GLM-5.2",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "max",
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "max",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "xhigh"
+            ]
+          }
+        },
+        "glm-5.2-fast": {
+          "name": "GLM 5.2 Fast",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "xhigh",
+              "none"
+            ]
+          }
+        },
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4.5": {
+          "name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-air": {
+          "name": "GLM-4.5-Air",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-flash": {
+          "name": "GLM-4.5-Flash",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5v": {
+          "name": "GLM-4.5V",
+          "context_window": 66000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6": {
+          "name": "GLM-4.6",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6v": {
+          "name": "GLM-4.6V",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7": {
+          "name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flash": {
+          "name": "GLM-4.7-Flash",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flashx": {
+          "name": "GLM-4.7-FlashX",
+          "context_window": 200000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-maas": {
+          "name": "GLM-4.7",
+          "context_window": 200000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "auto",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.1": {
+          "name": "GLM-5.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.3": {
+          "name": "GLM 5.3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        },
+        "glm-5-maas": {
+          "name": "GLM-5",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5-turbo": {
+          "name": "GLM-5-Turbo",
+          "context_window": 202800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5v-turbo": {
+          "name": "GLM-5V-Turbo",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "zai-anthropic": {
+      "name": "zai (Anthropic)",
+      "description": "zai Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://docs.z.ai/",
+      "extra_body": {
+        "tool_stream": true
+      },
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": {
+        "glm-5.2": {
+          "name": "GLM-5.2",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "max",
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "max",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "xhigh"
+            ]
+          }
+        },
+        "glm-5.2-fast": {
+          "name": "GLM 5.2 Fast",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "xhigh",
+              "none"
+            ]
+          }
+        },
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4.5": {
+          "name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-air": {
+          "name": "GLM-4.5-Air",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-flash": {
+          "name": "GLM-4.5-Flash",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5v": {
+          "name": "GLM-4.5V",
+          "context_window": 66000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6": {
+          "name": "GLM-4.6",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6v": {
+          "name": "GLM-4.6V",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7": {
+          "name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flash": {
+          "name": "GLM-4.7-Flash",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flashx": {
+          "name": "GLM-4.7-FlashX",
+          "context_window": 200000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-maas": {
+          "name": "GLM-4.7",
+          "context_window": 200000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "auto",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.1": {
+          "name": "GLM-5.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.3": {
+          "name": "GLM 5.3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        },
+        "glm-5-maas": {
+          "name": "GLM-5",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5-turbo": {
+          "name": "GLM-5-Turbo",
+          "context_window": 202800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5v-turbo": {
+          "name": "GLM-5V-Turbo",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "zai-coding": {
+      "name": "智谱 GLM Coding Plan（国际）",
+      "description": "智谱 GLM Coding Plan（国际）, 订阅制 Coding Plan 端点",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://z.ai",
+      "extra_body": {
+        "tool_stream": true
+      },
+      "models": {
+        "glm-5.2": {
+          "name": "GLM-5.2",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "max",
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "max",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "xhigh"
+            ]
+          }
+        },
+        "glm-5.2-fast": {
+          "name": "GLM 5.2 Fast",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "xhigh",
+              "none"
+            ]
+          }
+        },
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4.5": {
+          "name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-air": {
+          "name": "GLM-4.5-Air",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-flash": {
+          "name": "GLM-4.5-Flash",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5v": {
+          "name": "GLM-4.5V",
+          "context_window": 66000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6": {
+          "name": "GLM-4.6",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6v": {
+          "name": "GLM-4.6V",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7": {
+          "name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flash": {
+          "name": "GLM-4.7-Flash",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flashx": {
+          "name": "GLM-4.7-FlashX",
+          "context_window": 200000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-maas": {
+          "name": "GLM-4.7",
+          "context_window": 200000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "auto",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.1": {
+          "name": "GLM-5.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.3": {
+          "name": "GLM 5.3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        },
+        "glm-5-maas": {
+          "name": "GLM-5",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5-turbo": {
+          "name": "GLM-5-Turbo",
+          "context_window": 202800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5v-turbo": {
+          "name": "GLM-5V-Turbo",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "zai-coding-anthropic": {
+      "name": "智谱 GLM Coding Plan（国际, Anthropic 兼容）",
+      "description": "智谱 GLM Coding Plan（国际, Anthropic 兼容）, 订阅制 Coding Plan 端点",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.z.ai/api/coding/anthropic",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://z.ai",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": {
+        "glm-5.2": {
+          "name": "GLM-5.2",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "max",
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "max",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "xhigh"
+            ]
+          }
+        },
+        "glm-5.2-fast": {
+          "name": "GLM 5.2 Fast",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "high",
+                  "xhigh"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "high",
+              "xhigh",
+              "none"
+            ]
+          }
+        },
+        "glm-3-turbo": {
+          "name": "GLM-3-Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4": {
+          "name": "GLM-4",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4.5": {
+          "name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-air": {
+          "name": "GLM-4.5-Air",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5-flash": {
+          "name": "GLM-4.5-Flash",
+          "context_window": 131072,
+          "max_output": 98304,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.5v": {
+          "name": "GLM-4.5V",
+          "context_window": 66000,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6": {
+          "name": "GLM-4.6",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.6v": {
+          "name": "GLM-4.6V",
+          "context_window": 131072,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7": {
+          "name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flash": {
+          "name": "GLM-4.7-Flash",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-flashx": {
+          "name": "GLM-4.7-FlashX",
+          "context_window": 200000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4.7-maas": {
+          "name": "GLM-4.7",
+          "context_window": 200000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-4-air": {
+          "name": "GLM-4-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-airx": {
+          "name": "GLM-4-AirX",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-flash": {
+          "name": "GLM-4-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-flashx": {
+          "name": "GLM-4-FlashX",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-long": {
+          "name": "GLM-4-Long",
+          "context_window": 1024000,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-4-plus": {
+          "name": "GLM-4-Plus",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "glm-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "auto",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.1": {
+          "name": "GLM-5.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5.3": {
+          "name": "GLM 5.3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "default_think": "max",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        },
+        "glm-5-maas": {
+          "name": "GLM-5",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5-turbo": {
+          "name": "GLM-5-Turbo",
+          "context_window": 202800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-5v-turbo": {
+          "name": "GLM-5V-Turbo",
+          "context_window": 202752,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "glm-latest": {
+          "name": "Z.ai: GLM Latest",
+          "context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "glm-z1": {
+          "name": "GLM-Z1",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        },
+        "glm-z1-air": {
+          "name": "GLM-Z1-Air",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        },
+        "glm-z1-airx": {
+          "name": "GLM-Z1-AirX",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        },
+        "glm-z1-flash": {
+          "name": "GLM-Z1-Flash",
+          "context_window": 131072,
+          "capabilities": {
+            "reasoning": true
+          }
+        }
+      }
+    }
+  }
+}

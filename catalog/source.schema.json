@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/catalog/source.schema.json",
+  "title": "LubanCode provider catalog maintenance source (v1)",
+  "description": "维护格式 v1:catalog/manifest.json 与 catalog/providers/*.json 的形状。合成器 scripts/generate_provider_catalog.py 把它们展开为发布格式 catalog/providers.json(providers.schema.json,schema v2)。维护字段只住在这层;发布产物里不认识的一律在生成层消解。各层拒绝未知字段。",
+  "oneOf": [
+    { "$ref": "#/$defs/manifest" },
+    { "$ref": "#/$defs/shard" }
+  ],
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_schema_version", "revision", "shards"],
+      "description": "维护清单:格式版本、发布 revision 与分片顺序。产物文档序 = manifest 分片顺序 × 片内键序,不依赖目录遍历。",
+      "properties": {
+        "source_schema_version": { "const": 1 },
+        "revision": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "shards": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "显式有序分片表;路径钉在 catalog/providers/ 内,拒绝绝对路径、目录穿越与越界符号链接。",
+          "items": { "type": "string", "pattern": "^providers/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$" }
+        }
+      }
+    },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "providers"],
+      "description": "平台分片(v1 直接形态):同平台的协议、地区与套餐变体归同一文件,providers 值是完整的旧 Provider 对象(发布 schema v2 原样,不做继承去重)。",
+      "properties": {
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "description": "平台标识,须与文件名主干一致。"
+        },
+        "providers": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "providers.schema.json#/$defs/provider" }
+        }
+      }
+    }
+  }
+}

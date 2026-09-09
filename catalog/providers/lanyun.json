@@ -1,0 +1,262 @@
+{
+  "platform": "lanyun",
+  "providers": {
+    "lanyun": {
+      "name": "LANYUN",
+      "description": "LANYUN OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://maas-api.lanyun.net/v1",
+      "key_env": "LANYUN_API_KEY",
+      "default_model": "/maas/deepseek-ai/DeepSeek-V3.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://archive.lanyun.net/#/maas/",
+      "models": {
+        "deepseek-r1": {
+          "name": "DeepSeek R1",
+          "context_window": 163840,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek-v3.1": {
+          "name": "DeepSeek V3.1",
+          "context_window": 163840,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "/maas/deepseek-ai/DeepSeek-V3.2": {
+          "name": "siliconflow/deepseek-v3.2",
+          "context_window": 163840,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "deepseek-v3.2-exp": {
+          "name": "DeepSeek V3.2 Exp",
+          "context_window": 163840,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "/maas/zhipuai/GLM-4.7": {
+          "name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "/maas/zhipuai/GLM-5": {
+          "name": "GLM-5",
+          "context_window": 204800,
+          "max_output": 131100,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "kimi-k2": {
+          "name": "Kimi K2 Thinking",
+          "context_window": 262144,
+          "max_output": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "MiniMax-M2.1": {
+          "name": "MiniMax M2.1",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "/maas/minimax/MiniMax-M2.5": {
+          "name": "MiniMax-M2.5",
+          "context_window": 204800,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "/maas/qwen/Qwen2.5-72B-Instruct": {
+          "name": "Qwen2.5 72B Instruct",
+          "context_window": 131072,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "/maas/qwen/Qwen3-235B-A22B": {
+          "name": "Qwen3 235B-A22B",
+          "context_window": 262144,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 81920,
+                "min": 1
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 81920,
+              "min": 1
+            }
+          }
+        },
+        "qwen3-32b": {
+          "name": "Qwen3 32B",
+          "context_window": 131072,
+          "max_output": 16384,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              },
+              {
+                "kind": "budget",
+                "max": 38912,
+                "min": 1024
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ],
+            "thinkingTokenLimits": {
+              "max": 38912,
+              "min": 1024
+            }
+          }
+        },
+        "/maas/qwen/Qwen3-VL-32B-Instruct": {
+          "name": "Qwen: Qwen3 VL 32B Instruct",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "/maas/qwen/QwQ-32B": {
+          "name": "QwQ 32B",
+          "context_window": 131072,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "/maas/jieyue/step-3.5-flash": {
+          "name": "Step 3.5 Flash",
+          "context_window": 262144,
+          "max_output": 262114,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

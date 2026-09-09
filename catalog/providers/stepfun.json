@@ -1,0 +1,211 @@
+{
+  "platform": "stepfun",
+  "providers": {
+    "stepfun": {
+      "name": "StepFun",
+      "description": "StepFun OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.stepfun.com/v1",
+      "key_env": "STEPFUN_API_KEY",
+      "default_model": "step-3-7-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://platform.stepfun.com/docs/overview/concept",
+      "models": {
+        "step-1-32k": {
+          "name": "Step 1 (32K)",
+          "context_window": 32768,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "step-2-16k": {
+          "name": "Step 2 (16K)",
+          "context_window": 16384,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "step-3-5-flash": {
+          "name": "Step 3.5 Flash",
+          "context_window": 262144,
+          "max_output": 262114,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "step-3-7-flash": {
+          "name": "Step 3.7 Flash",
+          "context_window": 262144,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        }
+      }
+    },
+    "stepfun-anthropic": {
+      "name": "StepFun (Anthropic)",
+      "description": "StepFun Anthropic Messages API",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.stepfun.com",
+      "key_env": "STEPFUN_API_KEY",
+      "default_model": "step-3-7-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://platform.stepfun.com/docs/overview/concept",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": {
+        "step-1-32k": {
+          "name": "Step 1 (32K)",
+          "context_window": 32768,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "step-2-16k": {
+          "name": "Step 2 (16K)",
+          "context_window": 16384,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "step-3-5-flash": {
+          "name": "Step 3.5 Flash",
+          "context_window": 262144,
+          "max_output": 262114,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "step-3-7-flash": {
+          "name": "Step 3.7 Flash",
+          "context_window": 262144,
+          "max_output": 256000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

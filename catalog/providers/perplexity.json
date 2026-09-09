@@ -1,0 +1,103 @@
+{
+  "platform": "perplexity",
+  "providers": {
+    "perplexity": {
+      "name": "Perplexity",
+      "description": "Perplexity OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.perplexity.ai/v1",
+      "key_env": "PERPLEXITY_API_KEY",
+      "default_model": "sonar-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://docs.perplexity.ai/home",
+      "models": {
+        "sonar": {
+          "name": "Sonar",
+          "context_window": 128000,
+          "max_output": 8000,
+          "capabilities": {
+            "tools": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "sonar-deep-research": {
+          "name": "Perplexity Sonar Deep Research",
+          "context_window": 128000,
+          "max_output": 32768,
+          "capabilities": {
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "sonar-pro": {
+          "name": "Sonar Pro",
+          "context_window": 200000,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "sonar-reasoning-pro": {
+          "name": "Sonar Reasoning Pro",
+          "context_window": 128000,
+          "max_output": 8000,
+          "capabilities": {
+            "reasoning": true,
+            "image": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

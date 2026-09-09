@@ -1,0 +1,140 @@
+{
+  "platform": "baidu-cloud",
+  "providers": {
+    "baidu-cloud": {
+      "name": "Baidu Cloud",
+      "description": "Baidu Cloud OpenAI-compatible Chat API",
+      "wire": "openai-chat-completions",
+      "base_url": "https://qianfan.baidubce.com/v2",
+      "key_env": "BAIDU_CLOUD_API_KEY",
+      "default_model": "ernie-3.5-128k",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://cloud.baidu.com/doc/index.html",
+      "models": {
+        "ernie-3.5-128k": {
+          "name": "ERNIE 3.5 128K",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-3.5-8k": {
+          "name": "ERNIE 3.5 8K",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.0-8k": {
+          "name": "ERNIE 4.0 8K",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.0-turbo-128k": {
+          "name": "ERNIE 4.0 Turbo 128K",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.0-turbo-8k": {
+          "name": "ERNIE 4.0 Turbo 8K",
+          "context_window": 8192,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.5": {
+          "name": "ERNIE 4.5",
+          "context_window": 123904,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.5-a3b": {
+          "name": "ERNIE 4.5 A3B",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.5-a47b": {
+          "name": "ERNIE 4.5 A47B",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.5-turbo": {
+          "name": "ERNIE 4.5 Turbo",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true
+          }
+        },
+        "ernie-4.5-vl-424b-a47b": {
+          "name": "Baidu: ERNIE 4.5 VL 424B A47B ",
+          "context_window": 123000,
+          "capabilities": {
+            "reasoning": true,
+            "image": true
+          }
+        },
+        "ernie-5.0": {
+          "name": "ERNIE 5.0",
+          "context_window": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "ernie-character-8k": {
+          "name": "ERNIE Character 8K",
+          "context_window": 8192,
+          "capabilities": {}
+        },
+        "ernie-lite-8k": {
+          "name": "ERNIE Lite 8K",
+          "context_window": 8192,
+          "capabilities": {}
+        },
+        "ernie-speed-128k": {
+          "name": "ERNIE Speed 128K",
+          "context_window": 131072,
+          "capabilities": {}
+        },
+        "ernie-tiny-8k": {
+          "name": "ERNIE Tiny 8K",
+          "context_window": 8192,
+          "capabilities": {}
+        },
+        "ernie-x1.1-preview": {
+          "name": "ERNIE X1.1 Preview",
+          "context_window": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "ernie-x1-turbo": {
+          "name": "ERNIE X1 Turbo",
+          "context_window": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        }
+      }
+    }
+  }
+}
