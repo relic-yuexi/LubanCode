@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -78,6 +79,24 @@ agent::SupervisionThresholds FastThresholds() {
     return thresholds;
 }
 
+// 轮询条件等待(沿 WaitForSettled 先例):死线内等收账到 at_least 枚,超时
+// 明败不挂死。零投递三犯的教训——派发线程整批搬走队列后在锁外慢慢跑
+// 钩子,断言若不等地上的账,读到的就是硬零(REQUIRE(0==2) 两案同指纹)。
+bool WaitForReceived(std::mutex& received_mutex,
+                     std::vector<agent::AgentSupervisionEvent>& received, std::size_t at_least) {
+    for (int i = 0; i < 300; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(received_mutex);
+            if (received.size() >= at_least) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::lock_guard<std::mutex> lock(received_mutex);
+    return received.size() >= at_least;
+}
+
 }  // namespace
 
 TEST_CASE("AgentHealthHookBus:只读投递,坏钩子不杀总线不漏下一枚") {
@@ -100,6 +119,9 @@ TEST_CASE("AgentHealthHookBus:只读投递,坏钩子不杀总线不漏下一枚"
     bus.Publish(MakeEvent(agent::AgentSupervisionEventKind::RecoveryStarted, "network.error"));
     bus.Publish(MakeEvent(agent::AgentSupervisionEventKind::RecoverySucceeded, "transport.recovered"));
     bus.DrainForTest();
+    // 分食的另一半账在派发线程手里:它可能整批抢先搬走、此刻还在锁外跑
+    // 钩子,DrainForTest 空手而回。死线内等账对齐,断言语义不松一寸。
+    REQUIRE(WaitForReceived(received_mutex, received, 2));
     {
         std::lock_guard<std::mutex> lock(received_mutex);
         REQUIRE(received.size() == 2);
@@ -115,6 +137,87 @@ TEST_CASE("AgentHealthHookBus:只读投递,坏钩子不杀总线不漏下一枚"
         CHECK(saw_succeeded);
     }
     CHECK(thrower_hits.load() == 2);  // 坏钩子被叫过,但没杀总线
+}
+
+TEST_CASE("AgentHealthHookBus:持批在途时收账为零是合法态,放行后死线内账必对齐") {
+    // 零投递三犯回归(run 34364225415 两 attempt 同指纹):Publish 起派发线程,
+    // 线程把整批队列搬走、在锁外跑钩子;DrainForTest 晚一步就空手,断言再
+    // 抢在钩子前头即硬零。这里用门闩钩子把那次交叠放大成确定次序:批在
+    // 派发线程手里、收账钩子未轮到时,收账必为零;放行后一枚不丢,死线内
+    // 账对齐——等待合同从此不赌派发线程的时序。
+    runtime::AgentHealthHookBus bus;
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool gate_open = false;
+    bool gate_entered = false;
+    std::mutex received_mutex;
+    std::vector<agent::AgentSupervisionEvent> received;
+
+    // 头一枚钩子进门就闩上:派发线程持批卡在回调里(锁外),与断言线程
+    // 形成确定交叠;第二枚照常收账。
+    bus.Subscribe([&](const agent::AgentSupervisionEvent&) {
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            gate_entered = true;
+        }
+        gate_cv.notify_all();
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        gate_cv.wait(lock, [&] { return gate_open; });
+    });
+    bus.Subscribe([&](const agent::AgentSupervisionEvent& event) {
+        std::lock_guard<std::mutex> lock(received_mutex);
+        received.push_back(event);
+    });
+
+    bus.Publish(MakeEvent(agent::AgentSupervisionEventKind::RecoveryStarted, "gated"));
+    bool entered = false;
+    for (int i = 0; i < 300; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            if (gate_entered) {
+                entered = true;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(entered);  // 派发线程已吃进第一批、正卡在门闩钩子里
+
+    // 确定 CI 硬零现场:门闩只由本线程开,收账钩子此刻必未轮到——在途的
+    // 零不是丢事件,是批还在派发线程手里(旧断言把这一拍当成了终局)。
+    {
+        std::lock_guard<std::mutex> lock(received_mutex);
+        CHECK(received.empty());
+    }
+    // 派发线程忙时 Publish 只入队:两枚排进队列,一枚不许丢、不许触帽。
+    bus.Publish(MakeEvent(agent::AgentSupervisionEventKind::RecoverySucceeded, "queued"));
+    bus.Publish(MakeEvent(agent::AgentSupervisionEventKind::RecoveryExhausted, "queued"));
+    CHECK(bus.dropped_events() == 0);
+
+    // 放行:派发线程跑完手头一枚,回头把余批送达,总账三枚对齐。
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        gate_open = true;
+    }
+    gate_cv.notify_all();
+    REQUIRE(WaitForReceived(received_mutex, received, 3));
+    {
+        std::lock_guard<std::mutex> lock(received_mutex);
+        REQUIRE(received.size() == 3);
+        bool saw_started = false;
+        bool saw_succeeded = false;
+        bool saw_exhausted = false;
+        using Kind = agent::AgentSupervisionEventKind;
+        for (const auto& event : received) {
+            saw_started = saw_started || event.kind == Kind::RecoveryStarted;
+            saw_succeeded = saw_succeeded || event.kind == Kind::RecoverySucceeded;
+            saw_exhausted = saw_exhausted || event.kind == Kind::RecoveryExhausted;
+        }
+        CHECK(saw_started);
+        CHECK(saw_succeeded);
+        CHECK(saw_exhausted);
+    }
+    CHECK(bus.dropped_events() == 0);  // 全程队列未触帽
 }
 
 TEST_CASE("AgentHealthHookBus:下游挂住时队列有界,丢最老并计数") {
