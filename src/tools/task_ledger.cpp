@@ -1784,6 +1784,18 @@ void TaskLedger::ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task,
     AppendEventLocked(task, std::move(forced_event));
     EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::ForceFinalized, task->progress.health,
                                agent::AgentHealthState::Terminal, "wall_clock.force_finalized");
+    // 看门狗强收道的同款收口(强收终态缝单):终态翻页与投父邮箱在同一
+    // 持锁段完成,与 FinalizeFromToolResult 的正常收尾同款。旧序里强收只
+    // notify 不投递——等孩子的父被叫醒,谓词见"活孩子零+邮箱空"即出等,
+    // SealOrContinueInbox 当场封账退场;孩子的投递要等任务线程晚到走
+    // FinalizeFromToolResult 才做,赶到时父已封账,delivered 永假,结果落
+    // 未送达清单。这里在 notify 之前投递,锁序 ledger->inbox 与既有写口
+    // 同向(DeliverChildCompletionLocked 的核实注释),notify 落地时父邮箱
+    // 已喂饱。强收本义零改:墙钟阈值、宽限期、Failed/WallClockTimeout 分型
+    // 一概不动,投递只多翻一枚 delivered。父真死(强收绝境)时投递自返
+    // false,未送达语义原样保留;任务线程晚到的收尾再投时因 delivered 已
+    // 真而幂等空转。
+    DeliverChildCompletionLocked(task);
     NotifyStateChangeLocked();  // 强收也要叫醒等孩子的父,不许它在 cv 上挂到天荒地老
     Touch();
 }
@@ -1883,6 +1895,12 @@ void TaskLedger::ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task
     AppendEventLocked(task, std::move(forced_event));
     EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::ForceFinalized, task->progress.health,
                                agent::AgentHealthState::Terminal, "agent.no_meaningful_progress.finalized");
+    // 看门狗强收道的同款收口(强收终态缝单):与 ForceFinalizeWallClock 同
+    // 一处缝——旧序里空转强收只 notify 不投递,等孩子的父被叫醒即封账退
+    // 场,孩子的部分结果落未送达清单。这里在 notify 之前并投递,与正常
+    // 收尾(FinalizeFromToolResult)同锁同序;锁序 ledger->inbox 同向,父真
+    // 死自返 false。强收本义零改:空转阈值与部分结果保留一概不动。
+    DeliverChildCompletionLocked(task);
     NotifyStateChangeLocked();
     Touch();
 }
