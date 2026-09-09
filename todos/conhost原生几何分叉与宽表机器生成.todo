@@ -1,0 +1,31 @@
+# conhost 原生几何分叉与宽表机器生成
+
+- 状态：待实现（emoji 治理 P1 代理的两笔遗留，见治理单实施记录与交活报告）。
+- 日期：2026-09-09
+- 级别：P2（正确性分叉 + 数据可信度；非阻塞，但几何分叉在 emoji 常驻 composer 时有整帧退化的性能面）。
+- 范围：`src/cli/grapheme.{hpp,cpp}`、`src/cli/terminal_frame.{hpp,cpp}`、`src/platform/console_win.cpp` 原生输出路、`tests/unit/cli/test_grapheme.cpp`、`tests/unit/cli/test_terminal_frame.cpp`。
+- 不在本单：VT 路行为、编辑器语义（P1 已收）、性能的重画缓存大改（本单只治几何分叉与表来源）。
+
+## 一、两笔账
+
+### 1.1 conhost 原生路几何分叉
+
+现状：CHAR_INFO 一格一 UTF-16 码元，量宽一列的非 BMP（孤立指示符、U+1D11E 类）在原生路占两格，与 VT 路差一列；含多码点簇的 footer 行整帧退 legacy 重画（每帧全量，比行 diff 慢）。P1 的处置是 utf16_lossy 出参退 legacy——正确性保住了，分叉与性能账留本单。
+
+方向：核 native cell 数据模型能否带"逻辑列宽 vs 物理格数"分离账（编码格数照 CHAR_INFO 硬约束，几何对齐 VT 口径）；整帧退 legacy 的路径补帧级缓存或脏行判定，emoji 常驻 composer 时不再每帧全量。以册钉死：同输入在 VT/原生两路的最终光标位与折行一致。
+
+### 1.2 宽表机器生成
+
+现状：两张区间表（Grapheme_Extend 约 190 条、宽字约 90 条）人工摘录，个别生僻端点可能差一码位。
+
+方向：从 UCD 官方数据（Unicode 15.1，与现表同版本）机器生成两张表替换之——**接口与回退口径零变化**；生成脚本进 `scripts/`（一次性可重跑，来源 URL 与版本写死在脚本头）；生成表头注明 UCD 版本与生成日期；static_assert 递增把关沿用。差异清单（人工表 vs 生成表）逐条核过写进提交说明——有差异先判谁对，不许闷头替换。
+
+## 二、验收
+
+- 生成表替换后 test_grapheme 既有册零改全绿（口径未变的证明）；新增端点差异册钉生成表的修正。
+- 几何分叉册：两路同输入同几何；legacy 退化有帧级判定，emoji 常驻时不整帧全量（计数型断言）。
+- windows-msvc 腿全绿（原生路代码只在 Windows 编，本单命门腿）。
+
+## 三、边界
+
+不动 VT 路、不动编辑器、不引第三方依赖（UCD 数据经公开 URL 取文本，不进依赖清单）。
