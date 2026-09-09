@@ -296,6 +296,6 @@ scripts/
 抉择与未验项（如实）：
 
 - 未新增 jsonschema 依赖：生成器手写校验（重复键/封闭字段集/引用/默认模型/2 MiB）为维护侧第一道门，C++ parser（RejectUnknown 全层严格）与既有目录测试为终门；不引第三方包、不固定其版本，构建零新依赖。
-- 本地未编译、未跑 C++ 测试（执行约束）；全量回归与三平台构建由 GitHub Actions 承担，macOS 快车道结论见 CI 记录（run id 由完工报告补记）。
+- 本地未编译、未跑 C++ 测试（执行约束）；全量回归与三平台构建由 GitHub Actions 承担：分支 push 的 ci run 34360824346（job 102497114081）macOS 快车道 success——"Check provider catalog consistency" 步绿，ctest 400 项全过，其中 `catalog.generator.selftest`（#399）与 `catalog.consistency`（#400）新门首次上墙即绿；Windows/Linux 腿由协调方合并前 PR 全量兜底。
 - ETag/304/坏缓存等运行时缓存行为：无既有单测，本单未新增；运行时代码零改动＋产物 revision 与语义不变，行为按构造不变，真机未验。
 - 未发任何真机模型请求；evidence 只记迁移比对来源，verified 等验证标记一字未动。
