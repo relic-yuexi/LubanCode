@@ -404,7 +404,7 @@
     "moonshotai/Kimi-K2.5": {
       "name": "Kimi K2.5",
       "context_window": 262144,
-      "max_output": 262144,
+      "max_output": 32768,
       "capabilities": {
         "tools": true,
         "reasoning": true,
@@ -438,7 +438,7 @@
     "moonshotai/Kimi-K2.6": {
       "name": "Kimi K2.6",
       "context_window": 262144,
-      "max_output": 262144,
+      "max_output": 32768,
       "capabilities": {
         "tools": true,
         "reasoning": true,
