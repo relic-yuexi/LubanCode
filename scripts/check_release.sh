@@ -62,7 +62,16 @@ code_version=$(sed -n 's/.*kBundledRipgrepVersion[[:space:]]*=[[:space:]]*"\([0-
 
 tag=${1:-}
 if [ -n "$tag" ] && [ "$tag" != "v$version" ]; then
-    fail "tag $tag 与源码版本 v$version 不合"
+    # 预发布通道(内测):v$version-<尾巴> 放行(如 v0.26.224-beta.1)。
+    # release.yml 对含 '-' 的 tag 打 prerelease 旗、不碰 Latest 帽——稳定
+    # 版 Latest 与内测版并存,两不相扰。尾巴只许 [A-Za-z0-9.]。
+    case "$tag" in
+        "v$version-"*) ;;
+        *) fail "tag $tag 与源码版本 v$version 不合" ;;
+    esac
+    case "$tag" in
+        *"-"*[!A-Za-z0-9.-]*) fail "预发布后缀只许 [A-Za-z0-9.]: $tag" ;;
+    esac
 fi
 
 echo "release check passed: v$version${tag:+, tag=$tag}(随包 ripgrep $rg_version 三平台哈希钉住)"
