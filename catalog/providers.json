@@ -5523,7 +5523,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -7638,7 +7638,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -9758,7 +9758,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -12148,7 +12148,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -12553,7 +12553,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -13028,7 +13028,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -17066,7 +17066,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -17958,7 +17958,7 @@
         "deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -21140,7 +21140,7 @@
         "deepseek/deepseek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -25685,7 +25685,7 @@
         "deepseek-ai/DeepSeek-V3-0324": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -45088,7 +45088,7 @@
         "deepseek-ai/DeepSeek-V3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -46157,7 +46157,7 @@
         "deepseek-ai/DeepSeek-V3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -47220,7 +47220,7 @@
         "DeepSeek-v3": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
