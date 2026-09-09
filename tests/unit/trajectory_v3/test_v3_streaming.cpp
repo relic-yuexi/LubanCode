@@ -76,7 +76,7 @@ TEST_CASE("正常收齐:片段事件 + 唯一 assistant,来源自带,接纳进�
     Harness harness("complete");
     auto writer = harness.Start();
     REQUIRE(writer.has_value());
-    SeedUser(*writer);
+    harness.SeedUser(*writer);
 
     const std::string reserved = writer->NewMessageId();
     REQUIRE(writer
@@ -131,7 +131,7 @@ TEST_CASE("SSE 按 Esc:已收内容定稿 interrupted assistant,usage 缺实报�
     Harness harness("esc");
     auto writer = harness.Start();
     REQUIRE(writer.has_value());
-    SeedUser(*writer);
+    harness.SeedUser(*writer);
 
     const std::string reserved = writer->NewMessageId();
     REQUIRE(writer
@@ -181,7 +181,7 @@ TEST_CASE("中断时已收部分 usage 照实内联,不倒改旧 message") {
     Harness harness("partial-usage");
     auto writer = harness.Start();
     REQUIRE(writer.has_value());
-    SeedUser(*writer);
+    harness.SeedUser(*writer);
     const std::string reserved = writer->NewMessageId();
     writer->BeginStreamResponse("request-000001", "stream-000001", "turn-000001", "step-000001",
                                 reserved);
@@ -219,7 +219,7 @@ TEST_CASE("length 截断:completionStatus=truncated,不冒充正常完成") {
     Harness harness("truncated");
     auto writer = harness.Start();
     REQUIRE(writer.has_value());
-    SeedUser(*writer);
+    harness.SeedUser(*writer);
     const std::string reserved = writer->NewMessageId();
     writer->BeginStreamResponse("request-000001", "stream-000001", "turn-000001", "step-000001",
                                 reserved);
