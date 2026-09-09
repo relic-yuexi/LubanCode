@@ -43,10 +43,11 @@ bool GetOptionalString(const nlohmann::json& json, const char* key,
 }
 
 // 从 JSON 值解析枚举;null/缺键给 nullopt,非法值给错误。
+// from_name 返回 optional<E>(未知名给 nullopt)。
 template <typename E>
-bool ParseEnumField(const nlohmann::json& json, const char* key, E (*from_name)(std::string_view),
-                    std::optional<E>* out, std::string* error_code, std::string* message,
-                    const char* context) {
+bool ParseEnumField(const nlohmann::json& json, const char* key,
+                    std::optional<E> (*from_name)(std::string_view), std::optional<E>* out,
+                    std::string* error_code, std::string* message, const char* context) {
     auto it = json.find(key);
     if (it == json.end() || it->is_null()) {
         return true;
@@ -68,8 +69,9 @@ bool ParseEnumField(const nlohmann::json& json, const char* key, E (*from_name)(
 
 // 裸枚举字段重载(purpose/origin 等必填枚举,空值不落键)。
 template <typename E>
-bool ParseEnumField(const nlohmann::json& json, const char* key, E (*from_name)(std::string_view),
-                    E* out, std::string* error_code, std::string* message, const char* context) {
+bool ParseEnumField(const nlohmann::json& json, const char* key,
+                    std::optional<E> (*from_name)(std::string_view), E* out,
+                    std::string* error_code, std::string* message, const char* context) {
     std::optional<E> parsed;
     if (!ParseEnumField(json, key, from_name, &parsed, error_code, message, context)) {
         return false;
