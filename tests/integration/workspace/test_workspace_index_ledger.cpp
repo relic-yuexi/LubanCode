@@ -16,10 +16,12 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -370,6 +372,21 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
     const fs::path root = TempRoot("concurrent");
     const fs::path workspaces = root / "workspaces";
 
+    // 子线程不许用 doctest 断言:REQUIRE 失败走异常,子线程无人接就是
+    // std::terminate → SIGABRT(run 34316108135 的死法,连错误串都没能打
+    // 出来)。失败一律记到账上,join 后主线程统一断言收口——判据不松:
+    // 8 只全成才算过,失败时带首个错误串供诊断。
+    std::atomic<int> open_failures{0};
+    std::mutex failure_note_mutex;
+    std::string first_failure_note;
+    const auto note_failure = [&](const std::string& note) {
+        open_failures.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(failure_note_mutex);
+        if (first_failure_note.empty()) {
+            first_failure_note = note;
+        }
+    };
+
     // 8 条不同路径并发 miss:各生成各的门牌,最终账本收齐 8 笔。
     std::vector<fs::path> projects;
     for (int i = 0; i < 8; ++i) {
@@ -378,18 +395,29 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
     }
     std::vector<std::thread> openers;
     for (const fs::path& project : projects) {
-        openers.emplace_back([&workspaces, &project] {
+        openers.emplace_back([&] {
             std::error_code ec;
             fs::create_directories(workspaces, ec);  // 首开前根可能还没建
-            const auto identity = workspace::ResolveWorkspaceIdentity(project, {}).value();
+            const auto identity = workspace::ResolveWorkspaceIdentity(project, {});
+            if (!identity.has_value()) {
+                note_failure("identity 落空: " + project.generic_string());
+                return;
+            }
             fs::path dir;
             const auto registered =
-                workspace::OpenOrRegisterWorkspace(workspaces, identity, 1000, nullptr, &dir);
-            REQUIRE(registered.has_value());
+                workspace::OpenOrRegisterWorkspace(workspaces, *identity, 1000, nullptr, &dir);
+            if (!registered.has_value()) {
+                note_failure(registered.error());
+            }
         });
     }
     for (auto& opener : openers) {
         opener.join();
+    }
+    if (open_failures.load() > 0) {
+        FAIL(("异路径并发开房失败 " + std::to_string(open_failures.load()) + "/8,首个错误: " +
+              first_failure_note)
+                 .c_str());
     }
     CHECK(RoomCount(workspaces) == 8);
     // 账本解得开、收得齐(读-改-写可能丢笔,丢了的下一段验自愈)。
@@ -408,18 +436,31 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
     // 同一路径 8 只手并发:门牌纯函数,恒开同一间房,绝无二房。
     const fs::path same = root / "same-repo";
     MakeRepo(same);
+    open_failures.store(0);
+    first_failure_note.clear();
     std::vector<std::thread> same_openers;
     for (int i = 0; i < 8; ++i) {
-        same_openers.emplace_back([&workspaces, &same] {
-            const auto identity = workspace::ResolveWorkspaceIdentity(same, {}).value();
+        same_openers.emplace_back([&] {
+            const auto identity = workspace::ResolveWorkspaceIdentity(same, {});
+            if (!identity.has_value()) {
+                note_failure("identity 落空: " + same.generic_string());
+                return;
+            }
             fs::path dir;
             const auto registered =
-                workspace::OpenOrRegisterWorkspace(workspaces, identity, 2000, nullptr, &dir);
-            REQUIRE(registered.has_value());
+                workspace::OpenOrRegisterWorkspace(workspaces, *identity, 2000, nullptr, &dir);
+            if (!registered.has_value()) {
+                note_failure(registered.error());
+            }
         });
     }
     for (auto& opener : same_openers) {
         opener.join();
+    }
+    if (open_failures.load() > 0) {
+        FAIL(("同路径并发开房失败 " + std::to_string(open_failures.load()) + "/8,首个错误: " +
+              first_failure_note)
+                 .c_str());
     }
     CHECK(RoomCount(workspaces) == 9);
 }
