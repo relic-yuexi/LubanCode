@@ -1727,65 +1727,6 @@ TEST_CASE("BuildTurnPartitionPlan: steer 劈组事故形状——界点并回进
     CHECK(plan.partitions.back().last_turn == plan.turns.size());
 }
 
-TEST_CASE("CompactTurnPartitioned: steer 劈组事故形状全链成功,块内组完整") {
-    const std::vector<api::Message> history = SteerAccidentHistory();
-    // 4 turn 档:冷区 t1-t3 各 map 一次,reduce 来源只引到 t4。
-    DualLedgerScript script;
-    script.goal_turn = "t1";
-    script.constraint_turn = "t2";
-    script.acceptance_turn = "t3";
-    script.addition_turn = "t3";
-    script.open_question_turn = "t4";
-    script.superseded_source_turn = "t1";
-    script.superseded_at_turn = "t3";
-    script.fact_evidence = "t3:e4";
-    script.tool_evidence = "t3:e5";
-    script.change_evidence = "t4";
-    script.failed_evidence = "t1:e0";
-    DualLedgerBackend backend = ReadyBackend(3, script);
-    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
-                                                      agent::StructuralCompressionOptions{});
-    REQUIRE(result.has_value());
-    REQUIRE(backend.captured_requests.size() == 4);  // 3 map + 1 reduce
-
-    // 每个 map 块内 tool_use/tool_result 全配对(事故形状不再触发防线)。
-    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
-        std::map<std::string, bool> pairs;
-        bool dangling = false;
-        for (const auto& message : backend.captured_requests[i].messages) {
-            for (const auto& block : message.content) {
-                if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
-                    pairs[use->id] = false;
-                } else if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
-                           tool_result != nullptr) {
-                    if (pairs.count(tool_result->tool_use_id) == 0) {
-                        dangling = true;
-                    } else {
-                        pairs[tool_result->tool_use_id] = true;
-                    }
-                }
-            }
-        }
-        CHECK_FALSE(dangling);
-        for (const auto& [id, matched] : pairs) {
-            (void)id;
-            CHECK(matched);
-        }
-    }
-    // steer 正文归当前 turn 的摘要:它所在的轮(t3)进了某份 map 材料。
-    bool steer_mapped = false;
-    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
-        if (IndexOfText(backend.captured_requests[i].messages, "用户排队消息") !=
-            std::numeric_limits<std::size_t>::max()) {
-            steer_mapped = true;
-        }
-    }
-    CHECK(steer_mapped);
-    // 摘要 manifest 正常收账。
-    CHECK(result->manifest.goal == "实现上下文管理与压缩");
-    CHECK(result->metrics.hot_turns == 1);
-}
-
 TEST_CASE("§2.1 变体:steer 各位置插入,组永不被劈") {
     // 变体一:steer 插在 tool_use 与首个 result 之间。
     {
@@ -1915,22 +1856,6 @@ TEST_CASE("HealMapChunkToolGroups: 块界沿消息粒度挪移吞组;悬垂/悬�
         CHECK_FALSE(healed.ok);
         CHECK(healed.note.find("悬空") != std::string::npos);
     }
-}
-
-TEST_CASE("防线拒收文案带稳定标记,极端形状一次都不发请求") {
-    // 冷区带悬垂 use 的历史(悬垂轮就是首枚冷轮,防线在第一块就拦):
-    // map 防线自愈不动 → 拒收,文案指形 + 标记,一次请求都不发。
-    std::vector<api::Message> history{UserText("第一轮:调用没回结果"),
-                                      AssistantToolUse("lost_1", "read_file"),  // 悬垂 use,住在冷区
-                                      UserText("第二轮:正常收尾"), AssistantText("收尾")};
-
-    DualLedgerBackend backend;  // 不备脚本:发了请求就是错
-    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
-                                                      agent::StructuralCompressionOptions{});
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().message.find(agent::kMapDefenseRejectMarker) != std::string::npos);
-    CHECK(result.error().message.find("悬垂") != std::string::npos);
-    CHECK(backend.captured_requests.empty());
 }
 
 TEST_CASE("独立存档头判定与收编:从严认形,并入式旧档不偷用户正文") {
@@ -2211,6 +2136,81 @@ TEST_CASE("ParseTurnGroupSummary: 只收严格 JSON,Markdown/缺键全拒") {
         "{\"user_requirement_changes\": [\" \"], \"confirmed_facts\": [], \"tool_results\": [], \"files\": [], "
         "\"changes_made\": [], \"failed_attempts\": [], \"open_items\": [], \"next_step_candidates\": []}")
                     .has_value());
+}
+
+TEST_CASE("防线拒收文案带稳定标记,极端形状一次都不发请求") {
+    // 冷区带悬垂 use 的历史(悬垂轮就是首枚冷轮,防线在第一块就拦):
+    // map 防线自愈不动 → 拒收,文案指形 + 标记,一次请求都不发。
+    std::vector<api::Message> history{UserText("第一轮:调用没回结果"),
+                                      AssistantToolUse("lost_1", "read_file"),  // 悬垂 use,住在冷区
+                                      UserText("第二轮:正常收尾"), AssistantText("收尾")};
+
+    DualLedgerBackend backend;  // 不备脚本:发了请求就是错
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find(agent::kMapDefenseRejectMarker) != std::string::npos);
+    CHECK(result.error().message.find("悬垂") != std::string::npos);
+    CHECK(backend.captured_requests.empty());
+}
+
+TEST_CASE("CompactTurnPartitioned: steer 劈组事故形状全链成功,块内组完整") {
+    const std::vector<api::Message> history = SteerAccidentHistory();
+    // 4 turn 档:冷区 t1-t3 各 map 一次,reduce 来源只引到 t4。
+    DualLedgerScript script;
+    script.goal_turn = "t1";
+    script.constraint_turn = "t2";
+    script.acceptance_turn = "t3";
+    script.addition_turn = "t3";
+    script.open_question_turn = "t4";
+    script.superseded_source_turn = "t1";
+    script.superseded_at_turn = "t3";
+    script.fact_evidence = "t3:e4";
+    script.tool_evidence = "t3:e5";
+    script.change_evidence = "t4";
+    script.failed_evidence = "t1:e0";
+    DualLedgerBackend backend = ReadyBackend(3, script);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 4);  // 3 map + 1 reduce
+
+    // 每个 map 块内 tool_use/tool_result 全配对(事故形状不再触发防线)。
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        std::map<std::string, bool> pairs;
+        bool dangling = false;
+        for (const auto& message : backend.captured_requests[i].messages) {
+            for (const auto& block : message.content) {
+                if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                    pairs[use->id] = false;
+                } else if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                           tool_result != nullptr) {
+                    if (pairs.count(tool_result->tool_use_id) == 0) {
+                        dangling = true;
+                    } else {
+                        pairs[tool_result->tool_use_id] = true;
+                    }
+                }
+            }
+        }
+        CHECK_FALSE(dangling);
+        for (const auto& [id, matched] : pairs) {
+            (void)id;
+            CHECK(matched);
+        }
+    }
+    // steer 正文归当前 turn 的摘要:它所在的轮(t3)进了某份 map 材料。
+    bool steer_mapped = false;
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        if (IndexOfText(backend.captured_requests[i].messages, "用户排队消息") !=
+            std::numeric_limits<std::size_t>::max()) {
+            steer_mapped = true;
+        }
+    }
+    CHECK(steer_mapped);
+    // 摘要 manifest 正常收账。
+    CHECK(result->manifest.goal == "实现上下文管理与压缩");
+    CHECK(result->metrics.hot_turns == 1);
 }
 
 TEST_CASE("CompactTurnPartitioned: 17 枚等重 turn 固定 3 次 map + 1 次 reduce") {
