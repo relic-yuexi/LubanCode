@@ -765,6 +765,8 @@ private:
     // SealOrContinueInbox/RestoreDrainedInbox 全是这个方向,无一例反向),
     // 投递路径上不再拿别的锁,不成环。投完不自行 notify:由调用方在紧随
     // 的 NotifyStateChangeLocked 里一并叫醒,保证 notify 落地时父邮箱已喂饱。
+    // 两道不投闸:父不活/已封账(旧合同),父已挂停止信号(cancel 或
+    // wall_stop——取消级联里的父不可能再吸收投递,投了只余退信空转)。
     bool DeliverChildCompletionLocked(const std::shared_ptr<TaskRecord>& child);
     // agent_watch 的唤醒源(P1-0):监督可见修订动一笔就 ++ 并 notify。
     // 调用方须已持 mutex(谓词同锁读,无丢醒)。

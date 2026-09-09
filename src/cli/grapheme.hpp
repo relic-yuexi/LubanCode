@@ -6,9 +6,10 @@
 // 不动——不做 NFC/NFKC,不改用户原文一字节,只改移动/删除/截断/换行/
 // 量宽的裁决。
 //
-// 数据口径:Unicode 15.1(UCD 15.1 的 Grapheme_Cluster_Break 与 East Asian
-// Width / Emoji_Presentation 摘录,人工裁的紧凑表,见 grapheme.cpp 文件头
-// 的覆盖边界与回退说明)。不引 ICU 等第三方依赖。
+// 数据口径:Unicode 15.1(UCD 15.1 的 Grapheme_Cluster_Break=Extend 与
+// East Asian Width W/F + Emoji_Presentation 机器生成全量表,scripts/
+// gen_unicode_tables.py 可重跑,见 grapheme.cpp 文件头的来源与回退说明)。
+// 不引 ICU 等第三方依赖。
 //
 // 宽度策略(主流终端口径,独立测试钉死,不许拿本函数自证):
 //   - 组合附标、变体选择符(VS15/VS16)、ZWJ、肤色修饰:零宽,并入所属簇;

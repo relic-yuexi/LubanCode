@@ -1278,6 +1278,18 @@ bool TaskLedger::DeliverChildCompletionLocked(const std::shared_ptr<TaskRecord>&
         // 不 reparent,不悄悄改投 main(单子 §8.2)。
         return false;
     }
+    if (parent->cancel.load(std::memory_order_acquire) || parent->wall_stop.load(std::memory_order_acquire)) {
+        // 父已挂停止信号(取消树级联/面板 x/监督器软停)则不投:这样的父
+        // 数学上不可能再吸收任何完成件——泊在 WaitingChildren 的路,醒来
+        // 先查 cancel 即交白卷返回;续投路,harness 领批后的 cancel/墙钟闸
+        // 必把批退信(RestoreDrainedInbox 反把孩子的 delivered 翻回假),
+        // 只剩空转与一笔假 SteeringMessage。回流锁缝把投递并入收尾同锁后,
+        // 取消流里这记投递从"几乎必然落空"(旧缝)变成"五五开落进邮箱"——
+        // 落进的那一半恰是取消树册 SIGSEGV(PR #7 run 34307354040,同
+        // commit 双 run 一绿一红)唯一新增的每-run 时序变量,此处按合同拔
+        // 掉:孩子保持未送达、收场报告照列,与父真死同语义。
+        return false;
+    }
     child->snapshot.delivered = true;
     {
         std::lock_guard<std::mutex> inbox_lock(parent->inbox_mutex);

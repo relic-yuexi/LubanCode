@@ -948,6 +948,95 @@ TEST_CASE("强收道回流:空转强收的终态翻页与投递同锁,父必收 
         CHECK_FALSE(ledger.HasUndeliveredCompletions());
         CHECK(ledger.UndeliveredCompletionTaskIds().empty());
     }
+// 回流投递闸(取消树册 SIGSEGV 的收口,PR #7 run 34307354040 同 commit 双
+// run 一绿一红的后续):回流锁缝把投递并入收尾同锁后,取消流里"孩子的
+// Cancelled 完成件投进正在取消的父的邮箱"从旧缝的几乎必然落空变成五五
+// 开——落进的那一半是那只段错误唯一新增的每-run 时序变量。合同上拔掉:
+// 挂着停止信号(cancel 或 wall_stop)的父不可能再吸收任何投递(泊等路
+// 醒来先查 cancel 即收;续投路 harness 的 cancel/墙钟闸必退信),投它只
+// 余 RestoreDrainedInbox 反翻 delivered 的空转。三臂钉死:取消级联父不
+// 投、墙钟软停父不投、干净父照投(闸只拦停止信号,不拦正常回流)。
+// ---------------------------------------------------------------------------
+TEST_CASE("回流投递闸:父挂停止信号不投,取消级联不留半投的完成件") {
+    tools::TaskLedger ledger;
+    tools::SubagentGovernance governance;
+    std::string error;
+
+    // 臂一:取消树级联(取消树册的台账级形状)——父先挂 cancel,孩子随树
+    // 挂 cancel + cancelled_by_parent,孩子收尾走同锁投递。
+    tools::AgentTaskSnapshot parent_proto;
+    parent_proto.title = "取消中的父";
+    auto parent = ledger.TryRegisterChild(parent_proto, 1, governance, &error);
+    REQUIRE(parent != nullptr);
+    tools::AgentTaskSnapshot child_proto;
+    child_proto.title = "子";
+    child_proto.parent_task_id = parent->snapshot.id;
+    child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+    auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
+    REQUIRE(child != nullptr);
+    parent->cancel.store(true, std::memory_order_release);
+    child->cancel.store(true, std::memory_order_release);
+    child->cancelled_by_parent = true;
+
+    ledger.FinalizeFromToolResult(child, "孩子的结论正文", /*cancelled_by_stop_signal=*/true,
+                                  /*deliver_to_parent=*/true);
+    CHECK_FALSE(child->snapshot.delivered);  // 不投:保持未送达,收场报告照列
+    CHECK(ledger.PendingMessages(parent->snapshot.id).empty());
+    CHECK(child->snapshot.state == tools::AgentTaskState::Cancelled);
+    CHECK(child->snapshot.outcome.reason == tools::TaskOutcomeReason::ParentCancelled);
+    // 父侧照常收口:无活孩子即封账,不因跳过投递卡住。
+    bool sealed = false;
+    tools::DrainedInbox drained = ledger.SealOrContinueInbox(parent, sealed);
+    CHECK(drained.indices.empty());
+    CHECK(sealed);
+    parent->snapshot.outcome.status = tools::TaskOutcomeStatus::Stopped;
+    ledger.FinalizeFromToolResult(parent, "父随取消收口", /*cancelled_by_stop_signal=*/true);
+    CHECK(parent->snapshot.state == tools::AgentTaskState::Cancelled);
+
+    // 臂二:墙钟/空转软停(wall_stop,非用户取消)同拦。
+    tools::AgentTaskSnapshot soft_parent_proto;
+    soft_parent_proto.title = "软停的父";
+    auto soft_parent = ledger.TryRegisterChild(soft_parent_proto, 1, governance, &error);
+    REQUIRE(soft_parent != nullptr);
+    tools::AgentTaskSnapshot soft_child_proto;
+    soft_child_proto.title = "软停子";
+    soft_child_proto.parent_task_id = soft_parent->snapshot.id;
+    soft_child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+    auto soft_child = ledger.TryRegisterChild(soft_child_proto, 2, governance, &error);
+    REQUIRE(soft_child != nullptr);
+    soft_parent->wall_stop.store(true, std::memory_order_release);
+
+    soft_child->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+    ledger.FinalizeFromToolResult(soft_child, "软停子的结论", false, /*deliver_to_parent=*/true);
+    CHECK_FALSE(soft_child->snapshot.delivered);
+    CHECK(ledger.PendingMessages(soft_parent->snapshot.id).empty());
+
+    // 臂三(对照):干净的父照投——闸只拦停止信号,正常回流一丝不减。
+    tools::AgentTaskSnapshot clean_parent_proto;
+    clean_parent_proto.title = "干净的父";
+    auto clean_parent = ledger.TryRegisterChild(clean_parent_proto, 1, governance, &error);
+    REQUIRE(clean_parent != nullptr);
+    tools::AgentTaskSnapshot clean_child_proto;
+    clean_child_proto.title = "干净子";
+    clean_child_proto.parent_task_id = clean_parent->snapshot.id;
+    clean_child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
+    auto clean_child = ledger.TryRegisterChild(clean_child_proto, 2, governance, &error);
+    REQUIRE(clean_child != nullptr);
+
+    clean_child->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+    ledger.FinalizeFromToolResult(clean_child, "干净子的结论", false, /*deliver_to_parent=*/true);
+    CHECK(clean_child->snapshot.delivered);
+    const auto pending = ledger.PendingMessages(clean_parent->snapshot.id);
+    REQUIRE(pending.size() == 1);
+    CHECK(pending[0].find("干净子的结论") != std::string::npos);
+    bool clean_sealed = false;
+    tools::DrainedInbox clean_drained = ledger.SealOrContinueInbox(clean_parent, clean_sealed);
+    CHECK(clean_drained.indices.size() == 1);
+    CHECK_FALSE(clean_sealed);
+    clean_parent->snapshot.outcome.status = tools::TaskOutcomeStatus::Completed;
+    ledger.FinalizeFromToolResult(clean_parent, "干净父吸收完收口", false);
+    CHECK(clean_parent->snapshot.state == tools::AgentTaskState::Done);
+
 }
 
 TEST_CASE("取消树:停后台根,后台孩子随树收 Cancelled/ParentCancelled") {

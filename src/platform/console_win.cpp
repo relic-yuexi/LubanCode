@@ -728,23 +728,34 @@ bool WriteNativeRow(int x, int y, const NativeRowCell* cells, int cell_count) {
         if (attr == 0) {
             attr = default_attr;  // "默认属性"记号(构建器不动色的格子)
         }
-        if ((cell.attr & kNativeCellLeading) != 0) {
-            attr |= COMMON_LVB_LEADING_BYTE;
-        }
-        if ((cell.attr & kNativeCellTrailing) != 0) {
-            attr |= COMMON_LVB_TRAILING_BYTE;
-        }
-        buf[static_cast<std::size_t>(i)].Attributes = attr;
         // 星面码点(>BMP)按半格旗标拆代理对:前半格高代理、后半格低代理
-        //(footer 行全是 BMP 字符,这条只是别在罕见输入上画替换符的保险)。
+        //(P1 起 footer 行可含 emoji;量宽一列的非 BMP 也恒双格,几何账见
+        // terminal_frame 的"逻辑列宽 vs 物理格数"分离说明)。与缓冲区求交
+        // 裁掉右缘时,代理对可能被劈半:前半格落盘、后半格被裁——那一格
+        // 改铺空格并不打旗标,缓冲区里不许留孤立高代理(非法 UTF-16)。
         WCHAR wc;
+        bool lone_leading_clip = false;
         if (cell.ch >= 0x10000) {
-            const std::uint32_t v = static_cast<std::uint32_t>(cell.ch) - 0x10000;
-            wc = static_cast<WCHAR>((cell.attr & kNativeCellTrailing) != 0 ? (0xDC00 + (v & 0x3FF))
-                                                                            : (0xD800 + (v >> 10)));
+            if ((cell.attr & kNativeCellTrailing) == 0 && i + 1 >= count && count < cell_count) {
+                lone_leading_clip = true;  // 后半格被右缘裁掉
+                wc = L' ';
+            } else {
+                const std::uint32_t v = static_cast<std::uint32_t>(cell.ch) - 0x10000;
+                wc = static_cast<WCHAR>((cell.attr & kNativeCellTrailing) != 0 ? (0xDC00 + (v & 0x3FF))
+                                                                                : (0xD800 + (v >> 10)));
+            }
         } else {
             wc = static_cast<WCHAR>(cell.ch);
         }
+        if (!lone_leading_clip) {
+            if ((cell.attr & kNativeCellLeading) != 0) {
+                attr |= COMMON_LVB_LEADING_BYTE;
+            }
+            if ((cell.attr & kNativeCellTrailing) != 0) {
+                attr |= COMMON_LVB_TRAILING_BYTE;
+            }
+        }
+        buf[static_cast<std::size_t>(i)].Attributes = attr;
         buf[static_cast<std::size_t>(i)].Char.UnicodeChar = wc;
     }
     SMALL_RECT region{static_cast<SHORT>(write_x), static_cast<SHORT>(y),

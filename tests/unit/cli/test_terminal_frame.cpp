@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "cli/terminal_frame.hpp"
+#include "cli/terminal_port.hpp"
 #include "platform/console.hpp"
 
 using lubancode::cli::InlineFrame;
@@ -665,4 +667,162 @@ TEST_CASE("native row cells: 孤立零宽与坏代理的可见回退,UTF-16 仍�
     CHECK(lossy);
     CHECK(bad[0].ch == 0xFFFD);
     CHECK(Utf16WellFormed(CellsToUtf16(bad)));
+}
+
+// ---------------------------------------------------------------------------
+// conhost 原生几何分叉单:逻辑列宽 vs 物理格数分离账 + 字节回退的帧级判定
+// ---------------------------------------------------------------------------
+
+TEST_CASE("native row cells: 逻辑预算按 VT 口径,窄非 BMP 的编码开销不劈行尾") {
+    using namespace lubancode::platform;
+    // "ab" + U+1D11E(量宽一列的非 BMP)+ "c":逻辑 4 列、物理 5 格。旧账
+    // 把 cell_count 当物理帽,行尾 'c' 会被编码开销挤掉;分离账后逻辑预算
+    // 装得下就一个不丢,超出的格数恰等于窄非 BMP 的个数。
+    const std::string row = "ab\xF0\x9D\x84\x9E"
+                            "c";
+    const auto cells = BuildNativeRowCells(row, 4);
+    REQUIRE(cells.size() == 5);
+    CHECK(cells[0].ch == U'a');
+    CHECK(cells[1].ch == U'b');
+    CHECK(cells[2].ch == 0x1D11E);
+    CHECK((cells[2].attr & kNativeCellLeading) != 0);
+    CHECK(cells[3].ch == 0x1D11E);
+    CHECK((cells[3].attr & kNativeCellTrailing) != 0);
+    CHECK(cells[4].ch == U'c');
+    CHECK(Utf16WellFormed(CellsToUtf16(cells)));
+
+    // 逻辑未满时尾部照铺空格到逻辑预算(清写区一发盖满)。
+    const auto padded = BuildNativeRowCells("\xF0\x9D\x84\x9E", 4);
+    REQUIRE(padded.size() == 4);
+    CHECK((padded[1].attr & kNativeCellTrailing) != 0);
+    CHECK(padded[2].ch == U' ');
+    CHECK(padded[3].ch == U' ');
+}
+
+TEST_CASE("native row cells: 整簇截断按逻辑账判,与 VT 折行同一把尺") {
+    using namespace lubancode::platform;
+    // 预算 3:a + 𝄞(逻辑 1)+ c 逻辑恰满,物理 4 格全落;
+    // 预算 2:'c' 的逻辑装不下(2+1 > 2)才截——不是被编码开销挤掉。
+    const std::string row = "a\xF0\x9D\x84\x9E"
+                            "c";
+    const auto full = BuildNativeRowCells(row, 3);
+    REQUIRE(full.size() == 4);
+    CHECK(full[3].ch == U'c');
+    const auto cut = BuildNativeRowCells(row, 2);
+    REQUIRE(cut.size() == 3);  // a(1 格)+ 𝄞(代理对 2 格);逻辑 2 恰满
+    CHECK(cut[0].ch == U'a');
+    CHECK(cut[2].ch == 0x1D11E);
+    CHECK((cut[2].attr & kNativeCellTrailing) != 0);
+}
+
+TEST_CASE("native row needs byte fallback: 多码点簇要字节路,窄非 BMP 不要") {
+    using lubancode::cli::NativeRowNeedsByteFallback;
+    CHECK(NativeRowNeedsByteFallback("e\xCC\x81"));                          // 组合重音
+    CHECK(NativeRowNeedsByteFallback("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3"));  // 旗帜(两码点簇)
+    CHECK(NativeRowNeedsByteFallback("\xCC\x81"));                           // 孤立零宽
+    CHECK(NativeRowNeedsByteFallback("\xED\xA0\x80"));                       // 坏代理
+    CHECK_FALSE(NativeRowNeedsByteFallback("ab\xF0\x9D\x84\x9E"));           // 窄非 BMP:代理对装得下
+    CHECK_FALSE(NativeRowNeedsByteFallback("\xF0\x9F\x98\x80"));             // 单码点 emoji
+    CHECK_FALSE(NativeRowNeedsByteFallback("\x1b[36mC\x1b[0m"));             // 纯单码点带配色
+    CHECK_FALSE(NativeRowNeedsByteFallback(std::string_view()));
+}
+
+TEST_CASE("native column for logical: 两路末态光标钉在同一文字位置") {
+    using lubancode::cli::NativeColumnForLogical;
+    // 无窄非 BMP 的文本,原生路列号与 VT 路逻辑列必须恒等值(折行与末态
+    // 光标一致的册);宽字双格 = 逻辑两列,不产生差。
+    CHECK(NativeColumnForLogical("a\xE4\xB8\xAD"
+                                 "b",
+                                 4) == 4);
+    CHECK(NativeColumnForLogical("abc", 3) == 3);
+    CHECK(NativeColumnForLogical("abc", 0) == 0);
+    CHECK(NativeColumnForLogical("abc", 99) == 3);  // 超出按物理末尾(防御)
+    // 窄非 BMP 各多占一格:光标钉在与 VT 路相同的文字位置,列号带差。
+    CHECK(NativeColumnForLogical("\xF0\x9D\x84\x9E", 1) == 2);
+    CHECK(NativeColumnForLogical("a\xF0\x9D\x84\x9E"
+                                 "b",
+                                 2) == 3);  // a 与 𝄞 之后
+    CHECK(NativeColumnForLogical("a\xF0\x9D\x84\x9E"
+                                 "b",
+                                 1) == 1);  // 恰在 𝄞 之前
+    CHECK(NativeColumnForLogical("\x1b[36m\xF0\x9D\x84\x9E\x1b[0m", 1) == 2);  // 配色段不占列
+}
+
+TEST_CASE("几何分叉册: 同输入两路折行一致,末态光标同一文字位置") {
+    // 折行账两路共用 LayoutComposerRows(逻辑宽断行,不变式);光标账:
+    // VT 路列号 = 逻辑列,原生路 = NativeColumnForLogical 的折算列,差值
+    // 恰等于光标前窄非 BMP 的个数——同一文字位置,两种列号。
+    const std::u32string line = {U'a', U'b', 0x1D11E, U'c'};
+    const auto layout = LayoutComposerRows({line}, 0, line.size(), 3, 3);
+    REQUIRE(layout.rows.size() == 2);  // 逻辑 4 断成 3 + 1
+    CHECK(layout.rows[0].text == std::u32string{U'a', U'b', 0x1D11E});
+    CHECK(layout.rows[0].display_width == 3);
+    CHECK(layout.rows[1].text == std::u32string{U'c'});
+    // 行 0 逻辑满宽处:VT 列 3,原生物理列 4(𝄞 的代理对多占一格)。
+    const std::string row0 = "ab\xF0\x9D\x84\x9E";
+    CHECK(lubancode::cli::NativeColumnForLogical(row0, 3) == 4);
+    // 行 1("c")无窄非 BMP:两路末态光标列同为 1。
+    CHECK(lubancode::cli::NativeColumnForLogical("c", 1) == 1);
+}
+
+TEST_CASE("native frame plan: emoji 常驻而该行不脏,不整帧退字节路(计数型断言)") {
+    using lubancode::cli::PlanInlineFrameNativePaint;
+    InlineFrame previous{{InlineFrameRow{0, 24, false, "activity (10s)"},
+                          InlineFrameRow{0, 40, true, "rule"},
+                          InlineFrameRow{2, 10, false, "> ok"}},
+                         4, 2};
+    // 拍 A:只有活动行变——分路账全原生,零字节回退。
+    InlineFrame next_a = previous;
+    next_a.rows[0].text = "activity (11s)";
+    const auto plan_a = PlanInlineFrameNativePaint(&previous, next_a);
+    CHECK(plan_a.compared_rows == 3);
+    CHECK(plan_a.changed_rows == 1);
+    CHECK(plan_a.native_rows == 1);
+    CHECK(plan_a.byte_fallback_rows == 0);
+
+    // 拍 B:多码点簇进了输入行——只有那一行退字节路,同拍变脏的活动行
+    // 仍直写;不再整帧全量。
+    InlineFrame emoji = previous;
+    emoji.rows[0].text = "activity (12s)";
+    emoji.rows[2].text = "> \xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x92\xBB";  // 👩‍💻
+    const auto plan_b = PlanInlineFrameNativePaint(&previous, emoji);
+    CHECK(plan_b.changed_rows == 2);
+    CHECK(plan_b.byte_fallback_rows == 1);
+    CHECK(plan_b.native_rows == 1);
+
+    // 拍 C:emoji 常驻屏上、输入行纹丝不动,秒数照跳——字节回退为零。
+    InlineFrame next_c = emoji;
+    next_c.rows[0].text = "activity (13s)";
+    const auto plan_c = PlanInlineFrameNativePaint(&emoji, next_c);
+    CHECK(plan_c.changed_rows == 1);
+    CHECK(plan_c.byte_fallback_rows == 0);
+    CHECK(plan_c.native_rows == 1);
+}
+
+TEST_CASE("native frame paint: 非真 console 一字节不写整帧交 legacy,不落两遍") {
+    // 帧级判定先于落笔:管道环境(CTest 常态)GetScreenInfo 探不到控制台,
+    // 含字节回退行的帧直接 false,调用方退 PaintInlineFrameLegacy 单写一遍
+    // ——本函数不许先写半个帧再退。真 console 跑测试本体的情形用越界行
+    // 验"字节回退行落笔"的账(不涂屏,正文走改道流)。
+    InlineFrame previous{{InlineFrameRow{0, 10, false, "old"}}, 2, 0};
+    InlineFrame next{{InlineFrameRow{0, 10, false, "> \xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x92\xBB"}}, 2, 0};
+    std::size_t painted = 99;
+    std::size_t byte_rows = 99;
+    if (lubancode::platform::ProbeStdoutConsole().is_console) {
+        std::ostringstream captured;
+        lubancode::cli::TermPort().Redirect(&captured, nullptr);
+        CHECK(PaintInlineFrameNativeRows(&previous, next, 1000000, &painted, &byte_rows));
+        lubancode::cli::TermPort().Reset();
+        CHECK(painted == 1);
+        CHECK(byte_rows == 1);
+        CHECK(captured.str() == next.rows[0].text);
+    } else {
+        std::ostringstream captured;
+        lubancode::cli::TermPort().Redirect(&captured, nullptr);
+        CHECK_FALSE(PaintInlineFrameNativeRows(&previous, next, 5, &painted, &byte_rows));
+        lubancode::cli::TermPort().Reset();
+        CHECK(painted == 0);
+        CHECK(byte_rows == 0);
+        CHECK(captured.str().empty());
+    }
 }
