@@ -48,6 +48,12 @@ std::optional<Schema3Error> CheckRefField(std::string_view context, const nlohma
 std::optional<Schema3Error> ValidateContextChain(std::string_view context,
                                                  const std::vector<nlohmann::json>& chain);
 
+// 追加链片段(context.input.applied 的 appendedChain,§2.4):非空、
+// 首节点前驱非 null(追加必接旧尾)、无重复、邻接一致、无环连通;
+// 首节点前驱可指链外旧尾,不适用"根唯一"。
+std::optional<Schema3Error> ValidateAppendedChain(std::string_view context,
+                                                  const std::vector<nlohmann::json>& chain);
+
 // 从 payload 取链节点数组并校验(缺键/类型错给稳定码)。
 std::optional<Schema3Error> CheckContextChainField(std::string_view context,
                                                    const nlohmann::json& payload,

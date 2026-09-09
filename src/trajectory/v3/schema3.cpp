@@ -186,6 +186,38 @@ std::optional<Schema3Error> ValidateContextChain(std::string_view context,
     return std::nullopt;
 }
 
+std::optional<Schema3Error> ValidateAppendedChain(std::string_view context,
+                                                  const std::vector<nlohmann::json>& chain) {
+    if (chain.empty()) {
+        return Err("schema3.empty_chain", std::string(context) + " 追加链不能为空");
+    }
+    std::unordered_set<std::string> refs;
+    for (const auto& node : chain) {
+        if (!node.is_object() || !node.contains("messageRef") ||
+            !node["messageRef"].is_string() || !node.contains("prevMessageRef")) {
+            return Err("schema3.bad_chain_node",
+                       std::string(context) + " 追加链节点须为 {messageRef, prevMessageRef}");
+        }
+        if (!refs.insert(node["messageRef"].get<std::string>()).second) {
+            return Err("schema3.duplicate_chain_node",
+                       std::string(context) + " 追加链内 messageRef 重复");
+        }
+    }
+    // 首节点前驱非 null:追加必接旧尾(§4.30"首节点接旧尾")。
+    if (chain[0]["prevMessageRef"].is_null()) {
+        return Err("schema3.bad_append_root",
+                   std::string(context) + " 追加链首节点前驱应为旧尾,不为 null");
+    }
+    for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
+        const auto& expect = chain[i + 1]["prevMessageRef"];
+        if (expect.is_null() || expect.get<std::string>() != chain[i]["messageRef"]) {
+            return Err("schema3.chain_order_mismatch",
+                       std::string(context) + " 追加链邻接与 prevMessageRef 不一致");
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<Schema3Error> CheckContextChainField(std::string_view context,
                                                    const nlohmann::json& payload,
                                                    const char* key) {
@@ -404,8 +436,14 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
                            "context.input.applied payload 缺字段: " + std::string(key));
             }
         }
-        if (auto error = CheckContextChainField("context.input.applied", line.payload,
-                                                "appendedChain")) {
+        // appendedChain 是追加片段(首节点接旧尾),不适用"根唯一"的全链
+        // 校验;单独验非空/无重复/邻接一致。
+        const auto& appended = line.payload.at("appendedChain");
+        if (!appended.is_array()) {
+            return Err("schema3.bad_type", "appendedChain 应为数组");
+        }
+        if (auto error = ValidateAppendedChain("context.input.applied",
+                                               appended.get<std::vector<nlohmann::json>>())) {
             return error;
         }
         if (!line.payload["addedMessageRefs"].is_array()) {
