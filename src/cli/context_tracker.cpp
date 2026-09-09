@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "agent/context.hpp"  // AutoCompactTriggerLine:触发线公共尺(§〇.1)
+
 namespace lubancode::cli {
 
 ContextTracker::ContextTracker(std::size_t window_tokens) : window_tokens_(window_tokens) {}
@@ -136,8 +138,11 @@ bool ContextTracker::ShouldAutoCompact() const {
     if (window_tokens_ == 0) {
         return false;
     }
-    return static_cast<double>(current_tokens_) >=
-           static_cast<double>(window_tokens_) * (static_cast<double>(kAutoCompactThresholdPercent) / 100.0);
+    // 触发线(§〇.1 用户定案,2026-09-09):窗口×80% − 压缩提示词 4k −
+    // 压缩结果预留 8k(200k 窗即 148k)。两笔算进账,摘要请求自己的指令与
+    // 产出才有地方安放。与 loop 的 projected 双闸共用 agent::AutoCompact
+    // TriggerLine 同一只,两条路口径不漂移;窗口小到扣不动时线夹到 0。
+    return current_tokens_ >= agent::AutoCompactTriggerLine(window_tokens_);
 }
 
 }  // namespace lubancode::cli

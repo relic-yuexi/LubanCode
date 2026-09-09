@@ -64,6 +64,14 @@ std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history);
 // user 角色且内容里至少有一枚 TextBlock 或 ImageBlock;空内容不算——
 // 没有 text/image 就没有"用户说了话"的证据,不凭空开 turn(空壳 user
 // 消息若插在 tool_use 与 tool_result 之间,当成轮头会把工具原子组劈开)。
+//
+// 两把尺的分工(compact 切分劈开工具原子组单 §2.1):这一把是公共尺,
+// 热区(HotZoneStartIndex)、事件账、episode 切分共用户,语义钉死不动;
+// 它管"谁开了一轮话",不管"工具原子组完不完整"。带正文的 steer 消息
+// 在它眼里是新轮头——工具循环中途插话会把一枚工具原子组劈过轮界。compact
+// 规划器另有一把尺:BuildTurnPartitionPlan 调 HealTurnBoundariesOverTool
+// Groups 后处理,把劈组的界点并回进行中的轮(steer 归当前 turn),两把
+// 尺各司其职,互不改写。
 bool IsUserTurnStart(const api::Message& message);
 
 // 按上式把整份 history 切成连续 turn 区间:turns[i] = [from, to),首条
@@ -134,6 +142,29 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
 // projected 判定的默认参考线:估占窗口的百分比。80 与 ContextTracker 的
 // kAutoCompactThresholdPercent 同档——这是参考线,不是写死的唯一口径。
 constexpr int kProjectedOverflowPercent = 80;
+
+// ---------------------------------------------------------------------------
+// 自动压缩触发线的两笔预留(compact 切分劈开工具原子组单 §〇.1,用户定案
+// 2026-09-09):触发线 = 窗口×80% − 压缩提示词 4k − 压缩结果预留 8k。例:
+// 200k 窗即 148k 触发。两笔的账要算在触发线里——不扣这两笔,压到 80% 才
+// 动手,摘要请求自己的指令与产出就没地方安放。与 BuildContextBudgetPlan
+// 的口径分工核实过:那份算的是"压缩请求自身的输入预算"(窗口 − 输出预留
+// − 协议余量 − 压缩指令,按会话现场配置取数),这里的两笔是"触发时机"
+// 的固定档,各管各的账,不重复扣。
+// ---------------------------------------------------------------------------
+constexpr std::size_t kAutoCompactPromptReserveTokens = 4096;   // 压缩提示词
+constexpr std::size_t kAutoCompactSummaryReserveTokens = 8192;  // 压缩结果预留
+
+// 触发线(纯函数):窗口×kProjectedOverflowPercent% − 上述两笔。窗口小到
+// 扣不动(不足 15360 token 一类)时夹到 0——那种窗口里任何占用都该压,
+// 触发线为 0 即"始终该压"。ContextTracker 的 turn 间触发与 loop 的
+// projected 双闸共用这一只,两条路口径不漂移。
+inline std::size_t AutoCompactTriggerLine(std::size_t window_tokens) {
+    const std::size_t percent_line =
+        window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+    const std::size_t reserves = kAutoCompactPromptReserveTokens + kAutoCompactSummaryReserveTokens;
+    return percent_line > reserves ? percent_line - reserves : std::size_t{0};
+}
 
 // 真实水位闸(压缩触发失衡单 §二.B):projected 用的是"临出门"的保守
 // 托底尺(空白逐词计数),短词密集的工具输出能虚出日常尺的两倍——单看

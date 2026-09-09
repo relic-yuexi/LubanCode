@@ -260,9 +260,9 @@ TEST_CASE("FormatContextBreakdown: 三类正常,token 直传(统一口径),占�
     CHECK(lines[5].find(" 14%") != std::string::npos);
     CHECK(lines[5].find("实测") == std::string::npos);
 
-    // 自动压缩线 = 256000 * 80% = 204800。
+    // 自动压缩线(§〇.1 用户定案)= 256000 × 80% − 4k − 8k = 192512。
     CHECK(lines[6].find("自动压缩线") != std::string::npos);
-    CHECK(lines[6].find("204.8k(80%)") != std::string::npos);
+    CHECK(lines[6].find("192.5k(80%-12k)") != std::string::npos);
 
     // 剩余 = 256000 - 35000 = 221000。
     CHECK(lines[7].find("剩余") != std::string::npos);

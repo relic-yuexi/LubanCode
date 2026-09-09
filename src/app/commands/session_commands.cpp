@@ -328,11 +328,12 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                                          lubancode::cli::FormatTokenCount(plan.summary_target_budget))
                           << "\n";
             }
-            // 下一触发线:窗口的自动压缩线(kAutoCompactThresholdPercent)
-            // 与当前占用的差,迟滞/分道在各自层里另有账。
+            // 下一触发线:自动压缩线(§〇.1 用户定案:窗口×80% − 压缩提示词
+            // 4k − 压缩结果预留 8k,与 ShouldAutoCompact/projected 双闸同一只
+            // AutoCompactTriggerLine)与当前占用的差,迟滞/分道在各自层里另有账。
             const std::size_t window = context_tracker.window_tokens();
             if (window > 0) {
-                const std::size_t line = window * 80 / 100;  // 与 kAutoCompactThresholdPercent 同档
+                const std::size_t line = lubancode::agent::AutoCompactTriggerLine(window);
                 const auto used = static_cast<std::int64_t>(context_tracker.current_tokens());
                 TermOut() << "  " << trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
                                          used >= 0 ? lubancode::cli::FormatTokenCount(used) : std::string("0"),
@@ -1230,6 +1231,10 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
     // 分角色记账 + 状态栏短闪:压缩用了谁、前后多少,一行交代。
     in.record_usage(lubancode::agent::ModelRole::Cheap, compact_routed.route, compact_accounting);
     if (compact_result.applied) {
+        // §2.2:手动 /compact 不受 map 防线滞回旗限制,成功换账即解旗。
+        if (in.hysteresis != nullptr) {
+            in.hysteresis->map_path_held = false;
+        }
         out << theme.stats
             << trf("router.compact_flash", lubancode::cli::FormatTokenCount(compact_result.before_tokens),
                    lubancode::cli::FormatTokenCount(compact_result.after_tokens),
@@ -1272,6 +1277,13 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     auto& out = lubancode::cli::TermOut();
     lubancode::agent::Agent& loop = *in.agent;
     const lubancode::cli::Theme& theme = *in.theme;
+    // §2.2 滞回旗:map 防线拒收过一次,本会话自动路不再立刻重试 map 路
+    //(真机事故:拒收 → 原史重发 → 预检再爆 → 再拒,死循环)。拒收当时的
+    // 失败回执已把"手动 /compact 不受限"说清,这里静默收兵不刷屏;手动
+    // /compact 不走这条路,成功换账即解旗。
+    if (in.hysteresis != nullptr && in.hysteresis->map_path_held) {
+        return false;
+    }
     // 压缩路由(模型分工第一期):cheap 角色的有效值;跨 provider 拿不到
     // backend 就直接走 normal 修一次的路(同一只),失败再报,不静默截史。
     auto compact_routed = in.route_compact();
@@ -1341,7 +1353,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     // cheap 失败的回退(规格"失败与安全"):配了独立 cheap 路由(与 normal
     // 不同模型)、而压缩又没成(请求/校验任一环)时,先试 normal 修一次;
     // 仍失败旧史不动。回退要留痕:状态栏打一行,台账记一笔,不悄悄换人。
-    if (!result.has_value() && compact_routed.route.model != *in.current_model) {
+    // map 防线拒收(kMapDefenseRejectMarker)不修:那是确定性的形状判定,
+    // 与模型无关,换 normal 只会原样再拒一次。
+    const bool map_defense_reject =
+        !result.has_value() &&
+        result.error().message.find(lubancode::agent::kMapDefenseRejectMarker) != std::string::npos;
+    if (!result.has_value() && !map_defense_reject && compact_routed.route.model != *in.current_model) {
         const auto repair_routed = in.route_repair();
         const std::string reason = result.error().message;
         in.record_fallback(lubancode::agent::TaskKind::Compact, lubancode::agent::ModelRole::Cheap,
@@ -1381,6 +1398,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
         if (in.hysteresis != nullptr) {
             in.hysteresis->armed = true;
             in.hysteresis->last_post_tokens = before_tokens;
+            // §2.2:map 防线拒收挂滞回旗——本会话自动路不再立刻重试 map
+            // 路,提示只打这一遭(下次触发静默收兵)。
+            if (map_defense_reject) {
+                in.hysteresis->map_path_held = true;
+                out << theme.stats << tr("compact.map_hold") << theme.reset << "\n";
+            }
         }
         return false;
     }
@@ -1403,10 +1426,11 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     }
     loop.ReplaceHistory(new_history);
     const std::size_t after_tokens = new_tokens;  // 同一份历史,同一把尺,不重算
-    // 成功换账:滞回账记上收口点。
+    // 成功换账:滞回账记上收口点;map 防线的滞回旗一并翻篇。
     if (in.hysteresis != nullptr) {
         in.hysteresis->armed = true;
         in.hysteresis->last_post_tokens = after_tokens;
+        in.hysteresis->map_path_held = false;
     }
     // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
     out << theme.stats

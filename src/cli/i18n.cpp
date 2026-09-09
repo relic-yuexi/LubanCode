@@ -1448,6 +1448,7 @@ const Entry kZhCN[] = {
     {"compact.hard_trim_results", "[警告] 上下文发生有损截断:单条工具结果超过估算窗口的四分之一,被保命索截尾(不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
     {"compact.hysteresis_skip", "[compact] 跳过这次自动压缩:当前 ~{0} tokens,距上次压缩收口(~{1})没有足够新内容。"},
     {"compact.hysteresis_skip_tail", "(同一轮里反复压同一副历史榨不出空间;等新内容攒足再收,超大工具结果的保命索仍兜底。若当前工具循环本身过大,可 /compact 手动收束或开新会话。)"},
+    {"compact.map_hold", "[compact] map 防线拒收过一次,本会话自动压缩暂停重试;手动 /compact 不受限,成功即恢复。"},
     {"compact.grew_rejected", "[compact] 压缩结果 {0} → {1} 不降反升,已拒收,历史未动。"},
     {"compact.grew_rejected_tail", "(当前轮占大头,摘要换不瘦;继续按原历史发送,同一轮不再自动重试。完整流水在会话存档,可 /export 查看。)"},
 
@@ -1477,7 +1478,7 @@ const Entry kZhCN[] = {
     {"cmd.context.budget", "预算总账:窗口 {0} · 开销 {2} · 可压缩历史 {1}(统一估算口径)"},
     {"cmd.context.budget_detail", "  开销明细:system+模型指令 {0} · 工具声明 {1} · 热区 {2} · 输出预留 {3} · 压缩指令+协议 {4} · 估算误差边 {5}"},
     {"cmd.context.compact_budget", "压缩预算:单次压缩请求输入上限 {0} · 摘要产出目标 {1}(两只数不混用)"},
-    {"cmd.context.next_line", "下一触发线:{0}(窗口 80%) · 当前 {1} · {2}"},
+    {"cmd.context.next_line", "下一触发线:{0}(窗口×80% − 4k 压缩指令 − 8k 摘要预留) · 当前 {1} · {2}"},
     {"cmd.context.next_line_over", "已越线,下一轮发送前会自动压缩"},
     {"cmd.context.last_compact", "最近一次 compact:{0}"},
     {"cmd.context.compact_turns", "compact turn 策略:按 token 平衡 {0} 分;前 {1} 份 map,末份热区"},
@@ -3549,6 +3550,7 @@ const Entry kEn[] = {
     {"compact.hard_trim_results", "[warning] Lossy truncation: a single tool result exceeded a quarter of the estimated context window and was truncated by the safety net (not semantic compaction). The model can no longer see the cut text; the full ledger is still in the session file (/export to view)."},
     {"compact.hysteresis_skip", "[compact] Skipping this auto-compaction: ~{0} tokens now, not enough new content since the last compaction settled (~{1})."},
     {"compact.hysteresis_skip_tail", "(Re-compacting the same history within one turn yields no room; wait for new content. The oversized-tool-result safety net still applies. If the current tool loop itself is oversized, /compact manually or start a new session.)"},
+    {"compact.map_hold", "[compact] The map defense line rejected once; auto-compaction pauses retrying the map path for this session. Manual /compact is unrestricted and clears the hold on success."},
     {"compact.grew_rejected", "[compact] Compaction would grow history {0} -> {1}; rejected, history untouched."},
     {"compact.grew_rejected_tail", "(The current turn dominates, so a summary cannot shrink it; continuing with the original history, no auto retry within this turn. Full ledger in the session file via /export.)"},
 

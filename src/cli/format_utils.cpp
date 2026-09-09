@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <utility>
 
+#include "agent/context.hpp"       // AutoCompactTriggerLine:自动压缩线与触发同一只(§〇.1)
 #include "cli/context_tracker.hpp"  // kAutoCompactThresholdPercent
 #include "cli/i18n.hpp"
 
@@ -544,9 +545,15 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
         }
         lines.push_back(std::move(used_row));
     }
-    const std::size_t threshold_tokens = window_tokens * kAutoCompactThresholdPercent / 100;
+    // 自动压缩线(§〇.1 用户定案):窗口×80% − 压缩提示词 4k − 压缩结果
+    // 预留 8k,与 ContextTracker::ShouldAutoCompact / loop 的 projected 双闸
+    // 同一只 AutoCompactTriggerLine——显示的线就是真触发的那条线。
+    const std::size_t threshold_tokens = agent::AutoCompactTriggerLine(window_tokens);
     lines.push_back("  " + PadRightCols(label_threshold, label_cols) + TokenText(threshold_tokens) + "(" +
-                    std::to_string(kAutoCompactThresholdPercent) + "%)");
+                    std::to_string(kAutoCompactThresholdPercent) + "%-" +
+                    std::to_string((agent::kAutoCompactPromptReserveTokens +
+                                    agent::kAutoCompactSummaryReserveTokens) / 1024) +
+                    "k)");
     const std::size_t remaining = window_tokens > used ? window_tokens - used : 0;
     lines.push_back("  " + PadRightCols(label_remaining, label_cols) + TokenText(remaining));
     lines.push_back("  " + tr(have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est"));

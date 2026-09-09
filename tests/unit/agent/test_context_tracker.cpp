@@ -44,13 +44,21 @@ TEST_CASE("ContextTracker: 新一次 Update 整个覆盖上一次,不是累加")
     CHECK(tracker.current_tokens() == 120);
 }
 
-TEST_CASE("ContextTracker: 占用超过 80% 判定该自动压缩了") {
-    cli::ContextTracker tracker(1000);
-    tracker.Update(api::Usage{750, 50});  // 800/1000 = 80%,边界值,该触发
+TEST_CASE("ContextTracker: 占用过触发线(窗口×80% − 4k − 8k)判定该自动压缩了") {
+    // §〇.1 用户定案(2026-09-09):触发线把压缩提示词 4k 与压缩结果预留
+    // 8k 算进账——100k 窗即 80000 − 12288 = 67712 触发。
+    cli::ContextTracker tracker(100000);
+    tracker.Update(api::Usage{67662, 50});  // 67712/100000,恰过线,该触发
     CHECK(tracker.ShouldAutoCompact());
 
-    tracker.Update(api::Usage{700, 50});  // 750/1000 = 75%,不该触发
+    tracker.Update(api::Usage{67661, 50});  // 67711,差 1 token 不到线,不该触发
     CHECK_FALSE(tracker.ShouldAutoCompact());
+
+    // 小窗扣不动(1000 窗的 80% 线只有 800,盖不住 12k 预留)时线夹到 0:
+    // 任何占用都该压——那种窗口里本来就没有压缩的余地。
+    cli::ContextTracker tiny(1000);
+    tiny.Update(api::Usage{10, 0});
+    CHECK(tiny.ShouldAutoCompact());
 }
 
 TEST_CASE("ContextTracker: set_window_tokens 会话级临时改窗口大小") {
