@@ -131,6 +131,11 @@ public:
     // 边界数字与台账同一本账,不靠数 assistant message 猜。
     void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
                                int input_round_index) override;
+    // v3 流式边(轨迹 v3 §4.43):loop 在 SSE 消费点调(MessageStart 到 =
+    // 响应开始;文本/思考增量为片段)。v2 模式 no-op——v2 无流式事件账。
+    void OnResponseStarted(const std::string& request_id) override;
+    void OnStreamDelta(const std::string& request_id, const std::string& delta_type,
+                       const std::string& text) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
                          int cache_epoch = 0, bool prefix_append_only = true,
@@ -246,6 +251,21 @@ private:
     std::string V3RequestPrepared(const api::Request& request,
                                   const agent::RequestPreparedContext& ctx);
     void V3RequestSent(const std::string& request_id);
+    // ---- v3 流式三件套(§4.43/§4.63;接线点 1 的 D1 修复) ----
+    // 响应开始:预留 messageId + 发 streamId,落 model.response.started。
+    // 幂等;prepared 没落稳的请求不伪造流。
+    void V3ResponseStarted(const std::string& request_id);
+    // 片段进账:按类型攒批(4 KiB 窗口一批),批满即落 model.response.delta;
+    // 不足一批的尾巴由终态前统一放行。
+    void V3StreamDelta(const std::string& request_id, const std::string& delta_type,
+                       const std::string& text);
+    // 懒起流(非流式后端零片段路同样保 started 形状):返回 false = started
+    // 记不住,定稿不得继续(§4.4 同款耐久栅栏)。
+    bool V3EnsureStreamStarted(const std::string& request_id);
+    // 放行一只攒批尾巴(空批 no-op)。
+    void V3FlushStreamBatch(const std::string& request_id, bool reasoning);
+    // text + reasoning 两条攒批尾巴一并放行(终态前调)。
+    void V3FlushStreamBatches(const std::string& request_id);
     void V3UsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id);
     bool V3OutputCompleted(const std::string& request_id, const api::Message& assistant,

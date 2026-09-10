@@ -1564,11 +1564,29 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         if constexpr (std::is_same_v<T, api::MessageStart>) {
                             stream_request_id = e.id;
                             stream_model = e.model;
+                            // 轨迹边(轨迹 v3 §4.43):响应开始——v3 桥预留
+                            // messageId 并落 model.response.started。v2 桥与
+                            // 未接线会话 no-op,零行为。
+                            if (wiring.boundary_recorder != nullptr &&
+                                !trajectory_request_id.empty()) {
+                                wiring.boundary_recorder->OnResponseStarted(
+                                    trajectory_request_id);
+                            }
                         } else if constexpr (std::is_same_v<T, api::TextDelta>) {
-                            if (wiring.events != nullptr) {
+                            if (wiring.events != nullptr ||
+                                wiring.boundary_recorder != nullptr) {
                                 const std::string gated = text_delta_gate.Feed(e.text);
                                 if (!gated.empty()) {
-                                    wiring.events->OnTextDelta(gated);
+                                    if (wiring.events != nullptr) {
+                                        wiring.events->OnTextDelta(gated);
+                                    }
+                                    // 轨迹边(轨迹 v3 §4.43):正文片段进账
+                                    //(v3 桥攒批落 model.response.delta)。
+                                    if (wiring.boundary_recorder != nullptr &&
+                                        !trajectory_request_id.empty()) {
+                                        wiring.boundary_recorder->OnStreamDelta(
+                                            trajectory_request_id, "text", gated);
+                                    }
                                 }
                             }
                         } else if constexpr (std::is_same_v<T, api::ThinkingDelta>) {
@@ -1587,10 +1605,19 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 }
                                 budget_report.thinking_tail.erase(0, start);
                             }
-                            if (wiring.events != nullptr) {
+                            if (wiring.events != nullptr ||
+                                wiring.boundary_recorder != nullptr) {
                                 const std::string gated = thinking_delta_gate.Feed(e.text);
                                 if (!gated.empty()) {
-                                    wiring.events->OnThinkingDelta(gated);
+                                    if (wiring.events != nullptr) {
+                                        wiring.events->OnThinkingDelta(gated);
+                                    }
+                                    // 轨迹边(轨迹 v3 §4.43):思考片段进账。
+                                    if (wiring.boundary_recorder != nullptr &&
+                                        !trajectory_request_id.empty()) {
+                                        wiring.boundary_recorder->OnStreamDelta(
+                                            trajectory_request_id, "reasoning", gated);
+                                    }
                                 }
                             }
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
@@ -1665,17 +1692,31 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             },
                 cancel);
             // 流收口:闸里扣着的尾巴拼不齐就是坏字节,按 U+FFFD 放完——错误/
-            // 打断路径也要放,显示层与 history 的账对得上。
-            if (wiring.events != nullptr) {
+            // 打断路径也要放,显示层与 history 的账对得上。轨迹边同样吃尾巴
+            //(轨迹 v3 §4.43):收口前的最后一批片段先落账,终态事件才不越过
+            // 片段水位。
+            if (wiring.events != nullptr || wiring.boundary_recorder != nullptr) {
                 const std::string text_tail = text_delta_gate.Flush();
                 if (!text_tail.empty()) {
-                    wiring.events->OnTextDelta(text_tail);
+                    if (wiring.events != nullptr) {
+                        wiring.events->OnTextDelta(text_tail);
+                    }
+                    if (wiring.boundary_recorder != nullptr &&
+                        !trajectory_request_id.empty()) {
+                        wiring.boundary_recorder->OnStreamDelta(trajectory_request_id, "text",
+                                                                text_tail);
+                    }
                 }
-            }
-            if (wiring.events != nullptr) {
                 const std::string thinking_tail = thinking_delta_gate.Flush();
                 if (!thinking_tail.empty()) {
-                    wiring.events->OnThinkingDelta(thinking_tail);
+                    if (wiring.events != nullptr) {
+                        wiring.events->OnThinkingDelta(thinking_tail);
+                    }
+                    if (wiring.boundary_recorder != nullptr &&
+                        !trajectory_request_id.empty()) {
+                        wiring.boundary_recorder->OnStreamDelta(trajectory_request_id, "reasoning",
+                                                                thinking_tail);
+                    }
                 }
             }
             if (attempt_result.has_value() && stream_error) {
