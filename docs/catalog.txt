@@ -52,6 +52,7 @@ DOC architecture/memory/flow.md
 DOC architecture/providers/schema.md
 DOC architecture/query-data-flow.md
 DOC architecture/session-orchestration.md
+DOC architecture/trajectory-v3-schema.md
 DOC architecture/tool-calling-flow.md
 DOC architecture/tools/file-commands.md
 DOC architecture/workflow-runtime.md
