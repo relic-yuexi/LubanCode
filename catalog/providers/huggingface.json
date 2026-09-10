@@ -32,7 +32,7 @@
         "deepseek-ai/DeepSeek-V3-0324": {
           "name": "DeepSeek V3",
           "context_window": 163840,
-          "max_output": 163840,
+          "max_output": 8192,
           "capabilities": {
             "tools": true,
             "structured_output": true
@@ -527,7 +527,7 @@
         "moonshotai/Kimi-K2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -612,7 +612,7 @@
         "moonshotai/Kimi-K2.7-Code": {
           "name": "Kimi K2.7 Code",
           "context_window": 262144,
-          "max_output": 262144,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -768,7 +768,7 @@
         "MiniMaxAI/MiniMax-M2": {
           "name": "MiniMax M2",
           "context_window": 205000,
-          "max_output": 205000,
+          "max_output": 131072,
           "capabilities": {
             "tools": true,
             "reasoning": true,
@@ -1281,7 +1281,7 @@
         "Qwen/Qwen3-VL-235B-A22B-Thinking": {
           "name": "Qwen3-VL 235B-A22B",
           "context_window": 262000,
-          "max_output": 262000,
+          "max_output": 32768,
           "capabilities": {
             "tools": true,
             "reasoning": true,
