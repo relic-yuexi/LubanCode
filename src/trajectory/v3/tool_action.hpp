@@ -81,10 +81,10 @@ public:
 
     // 执行终态五型。每次尝试最多一个;来第二枚拒收(v3tool.already_terminal)。
     WriteReceipt Finish(V3Writer& writer, std::optional<std::int64_t> exit_code,
-                        std::optional<std::uint64_t> execution_duration_ms,
+                        std::optional<std::uint64_t> execution_duration_ms = std::nullopt,
                         Durability durability = Durability::PowerLoss);
     WriteReceipt Fail(V3Writer& writer, std::string error_code,
-                      std::optional<std::uint64_t> execution_duration_ms,
+                      std::optional<std::uint64_t> execution_duration_ms = std::nullopt,
                       Durability durability = Durability::PowerLoss);
     // phase: before_started(执行前取消,无 started)/during_execution。
     WriteReceipt Cancel(V3Writer& writer, std::string phase, std::string reason,
