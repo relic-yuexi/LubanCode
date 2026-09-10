@@ -693,5 +693,8 @@ TEST_CASE("效果:Lua 给的效果按挂点合同收口——PostUser 不收 inp
     CHECK(recall->effects[0].applied);
     CHECK(recall->effects[1].type == "input.rewrite");
     CHECK_FALSE(recall->effects[1].applied);  // PostUser 不能回写原 user
-    CHECK(outcome.adopted_input["sneaky"].is_null());
+    // contains 判键:const json 上 operator[] 查缺键是 nlohmann 的 UB(解引用
+    // end 迭代器,Release 下 JSON_ASSERT 为空)——MSVC 碰巧 null、gcc 读出
+    // 垃圾,不能这么写。
+    CHECK(!outcome.adopted_input.contains("sneaky"));
 }
