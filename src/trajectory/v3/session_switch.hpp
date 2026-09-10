@@ -29,8 +29,10 @@
 //      DTO;cli 不直接碰 reader.hpp 的 C++ 结构);app-server/browser 的
 //      旧史滚动、分页详情留后续棒。
 //
-// 判据(翻默认前须全绿):v3 Continue 全家福 + P2 读取侧矩阵全过;
-// 显示侧(P3)吃上 HistoryTimeline;api/wire 四角色(P4)合同测试绿。
+// 判据已核已翻(2026-09-11):v3 Continue 全家福 + P2 读取侧矩阵全过;
+// 显示侧(P3)吃上 HistoryTimeline;api/wire 四角色(P4)合同测试绿;
+// 端到端验收矩阵 25 行 209 断言全绿,D1/D2/D3 三缺陷修复合入。
+// 新会话默认写 v3;LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 显式回 v2。
 #pragma once
 
 #include <cstdint>

@@ -11,8 +11,12 @@
 namespace lubancode::trajectory::v3 {
 
 bool NewSessionV3WriteEnabled() {
+    // 2026-09-11 翻默认:判据四条全绿(v3 Continue 全家福、P2 读取侧矩阵、
+    // P3 显示侧吃上 HistoryTimeline、P4 wire 合同),端到端验收矩阵 25 行
+    // 209 断言全绿,D1/D2/D3 三缺陷修复合入——新会话默认写 v3 账。
+    // 显式逃生口:LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 回 v2(过渡期保命)。
     auto value = platform::GetEnvVar("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
-    return value.has_value() && *value == "1";
+    return !value.has_value() || *value != "0";
 }
 
 std::optional<nlohmann::json> ReadV3FirstLine(const std::filesystem::path& stream) {
