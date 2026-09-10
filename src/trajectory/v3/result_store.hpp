@@ -118,7 +118,7 @@ public:
     const std::filesystem::path& artifacts_dir() const { return artifacts_dir_; }
 
 private:
-    explicit ResultStore(std::filesystem::path artifacts_dir);
+    ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number);
     std::filesystem::path artifacts_dir_;
     // 下一枚 result 号:开仓时扫已有 res-*.json 取最大 +1。
     std::uint64_t next_result_number_ = 1;
