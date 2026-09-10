@@ -363,7 +363,7 @@ std::optional<Schema3Error> CheckToolPayload(std::string_view context, const Eve
     }
     if (require_attempt) {
         if (!line.payload.contains("attempt") ||
-            !line.payload["attempt"].is_number_unsigned() ||
+            !JsonIsNonNegativeInt(line.payload["attempt"]) ||
             line.payload["attempt"].get<std::uint64_t>() < 1) {
             return Err("schema3.bad_type",
                        std::string(context) + " payload.attempt 应为从 1 起的正整数(§4.15)");
@@ -418,7 +418,7 @@ std::optional<Schema3Error> CheckChildCheckpointRef(std::string_view context,
                            " 应为非空 string");
         }
     }
-    if (!it->contains("seq") || !(*it)["seq"].is_number_unsigned()) {
+    if (!it->contains("seq") || !JsonIsNonNegativeInt((*it)["seq"])) {
         return Err("schema3.bad_ref", std::string(context) + " childCheckpointRef.seq 应为非负整数");
     }
     if (!it->contains("lineHash") || !(*it)["lineHash"].is_string() ||
@@ -846,7 +846,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckChildSessionRef(kind_name, line.payload)) {
             return error;
         }
-        if (!line.payload.contains("attempt") || !line.payload["attempt"].is_number_unsigned() ||
+        if (!line.payload.contains("attempt") ||
+            !JsonIsNonNegativeInt(line.payload["attempt"]) ||
             line.payload["attempt"].get<std::uint64_t>() < 1) {
             return Err("schema3.bad_type", "subagent.spawn.requested.attempt 应为从 1 起(§4.32)");
         }
@@ -896,8 +897,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.payload["pairingCheckRefs"].is_array()) {
             return Err("schema3.bad_type", "pairingCheckRefs 应为数组");
         }
-        if (!line.payload["oldPreviewBudget"].is_number_unsigned() ||
-            !line.payload["newPreviewBudget"].is_number_unsigned() ||
+        if (!JsonIsNonNegativeInt(line.payload["oldPreviewBudget"]) ||
+            !JsonIsNonNegativeInt(line.payload["newPreviewBudget"]) ||
             line.payload["newPreviewBudget"].get<std::uint64_t>() >=
                 line.payload["oldPreviewBudget"].get<std::uint64_t>()) {
             return Err("schema3.bad_type",

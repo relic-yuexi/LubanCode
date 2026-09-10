@@ -288,7 +288,8 @@ TEST_CASE("PostAction 子执行:独立 actionId,payload 带父链与后端") {
     Harness harness("subexec");
     auto writer = harness.Start();
     REQUIRE(writer.has_value());
-    const std::string parent_action = "action-000001";
+    const std::string parent_action = writer->NewActionId();  // 父工具全局身份
+    CHECK(!parent_action.empty());
     auto session = HookDispatchSession::Dispatch(
         *writer, writer->NewHookDispatchId(), "PostAction", "turn-000001", "step-000001",
         parent_action, {Spec("hook-fallback-search")}, std::nullopt);

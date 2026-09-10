@@ -423,19 +423,27 @@ TEST_CASE("不可变名冲突:同名结果不允许覆盖(§4.15 result_id 不�
     StoreHarness harness("immutable");
     auto store = ResultStore::Open(harness.dir);
     REQUIRE(store.has_value());
-    auto again = ResultStore::Open(harness.dir);  // 同目录第二个实例:号池已前移
-    REQUIRE(again.has_value());
     ResultStore::PersistRequest request;
     request.result_kind = "text";
     request.tool_call_id = "action-000001";
     request.execution_event_ref = "evt-000003";
     request.outputs.push_back(Out("report", "first", 5));
-    REQUIRE(store->Persist(request).ok);  // res-000001
+    REQUIRE(store->Persist(request).ok);  // res-000001,同实例计数器已前移
 
-    // 用旧实例再 persist:目录里 res-000001.json 已存在 → 拒收。
+    // 预占下一枚不可变名:res-000002.json 已在(并发写者/残留),再落即撞车,
+    // 不许覆盖(POSIX rename 会静默覆盖,必须显式拒)。
+    {
+        std::ofstream occupy(harness.dir / "artifacts" / "res-000002.json",
+                             std::ios::binary | std::ios::trunc);
+        occupy << "occupied";
+    }
     request.outputs.clear();
     request.outputs.push_back(Out("report", "second", 6));
     auto clash = store->Persist(request);
     CHECK(!clash.ok);
     CHECK(clash.error.find("不可变名") != std::string::npos);
+    // 占位文件原样:没被覆盖。
+    std::ifstream check(harness.dir / "artifacts" / "res-000002.json");
+    std::string content((std::istreambuf_iterator<char>(check)), std::istreambuf_iterator<char>());
+    CHECK(content == "occupied");
 }
