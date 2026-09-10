@@ -10,8 +10,15 @@
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/settings_local.hpp"
+#include "runtime/session_service.hpp"
 
 namespace lubancode::app {
+
+// 单发场的开张请求折算(AppServer 接 v3 第一棒:CLI 路/服务路对照测试
+// 也吃这枚——证明单发入口与服务入口走同一条开张装配)。cwd_utf8 是
+// 身份裁决起点(AskOnce 递启动 cwd)。
+lubancode::runtime::SessionLaunchRequest BuildOneShotSessionRequest(
+    const lubancode::config::Config& config, const std::string& cwd_utf8);
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 // 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按

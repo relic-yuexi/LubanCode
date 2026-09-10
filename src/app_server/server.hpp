@@ -47,6 +47,7 @@
 #include "runtime/loop_scheduler.hpp"
 #include "runtime/session_command_service.hpp"
 #include "runtime/session_runtime.hpp"
+#include "runtime/session_service.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/registry.hpp"
 
@@ -102,7 +103,10 @@ struct ThreadRecord {
     // 与 scheduler 的 enabled 由装配层从 options.features_goal/loop 折。
     std::unique_ptr<runtime::goal::GoalCoordinator> goal_coordinator;
     std::unique_ptr<runtime::loop::LoopScheduler> loop_scheduler;
-    std::unique_ptr<runtime::SessionRuntime> session_runtime;
+    // AppServer 接 v3 第一棒:会话服务入口(开张/输入接纳/域命令/收口
+    // 三端同路)。SessionRuntime 由服务宿主,这里经 runtime()/trajectory()
+    // 取。
+    std::unique_ptr<runtime::SessionService> session_service;
 
     explicit ThreadRecord(std::string id)
         : thread_id(std::move(id)) {}
@@ -279,9 +283,11 @@ private:
     // 把回合从旧连接上摘下来)。Shutdown 的回合段就是它。
     void InterruptRunningTurns();
     // 整回合驱动(工作线程体):审批/ask_user 悬停、打断旗、终态分型。
+    // queued_input 是经 SessionService 接纳并出队的输入(AppServer 接 v3
+    // 第一棒:文本+图片在服务层落过账;空 = 防御路径)。
     void RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
-                             const std::string& turn_id, const std::string& text,
-                             const std::vector<nlohmann::json>& images);
+                             const std::string& turn_id,
+                             std::optional<runtime::SessionService::QueuedInput> queued_input);
 
     // browser 动作的审批询问(browser_service 的 ApprovalAsk 落点):
     // 挂到 thread 的悬起件上,取消旗贯通(动作取消即悬空收口 + 擦账)。

@@ -27,6 +27,12 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
     ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
     ledger_options.approval_mode = options_.approval_mode;
+    // AppServer 接 v3 第一棒:单发三料位 + v3 首行 system 从服务层递进
+    //(缺省即旧行为:launch_cwd 空/one_shot 假/Metadata/system 空)。
+    ledger_options.launch_cwd = options_.trajectory_launch_cwd;
+    ledger_options.one_shot = options_.trajectory_one_shot;
+    ledger_options.training_policy = options_.trajectory_training_policy;
+    ledger_options.v3_system_content = options_.trajectory_v3_system_content;
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));

@@ -65,7 +65,6 @@
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:单发一场的账本
 #include "trajectory/event.hpp"          // TrainingPolicyFromName:单发训练档解析
 #include "trajectory/harness_exporter.hpp"  // --output 收口导出(Harbor 派生 JSONL)
-#include "workspace/identity.hpp"        // ResolveWorkspaceIdentity:单发同四级裁决
 #include "cli/markdown.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/record_command.hpp"
@@ -121,6 +120,22 @@
 #include "platform/paths.hpp"
 
 namespace lubancode::app {
+
+// 单发场的开张请求折算(AppServer 接 v3 第一棒):料位与旧直开装配逐项
+// 对齐——launch_cwd/one_shot/training_policy 三样单发特有,其余缺省。
+lubancode::runtime::SessionLaunchRequest BuildOneShotSessionRequest(
+    const lubancode::config::Config& config, const std::string& cwd_utf8) {
+    lubancode::runtime::SessionLaunchRequest request;
+    request.cwd_utf8 = cwd_utf8;
+    request.lubancode_version = std::string(lubancode::app::kVersion);
+    request.one_shot = true;
+    request.launch_cwd = cwd_utf8;
+    if (const auto policy = lubancode::trajectory::TrainingPolicyFromName(config.oneshot_training_policy);
+        policy.has_value()) {
+        request.training_policy = *policy;
+    }
+    return request;
+}
 
 using lubancode::platform::CurrentDirUtf8;
 using lubancode::app::RunTurn;
@@ -409,35 +424,18 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 默认 exclude(实战派活含内部路径,不进训练集),配置
     // oneshot_training_policy 可改。开不出账即明败退出(交互会话同一条 §十七
     // 纪律),不回退"只答不落账"的旧路。
-    std::optional<lubancode::runtime::TrajectorySessionLedger> oneshot_ledger;
-    {
-        lubancode::runtime::TrajectorySessionLedger::Options ledger_options;
-        // P0-1:身份按四级裁决冻结(commondir→marker→config→cwd),与交互
-        // 会话同一把钥匙;裁决失败留空,由 Open 内的同款兜底接着裁。
-        const std::filesystem::path identity_home =
-            home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode)
-                                       : std::filesystem::path();
-        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
-            std::filesystem::current_path(), identity_home);
-        if (identity.has_value()) {
-            ledger_options.workspace_identity = std::move(*identity);
-        }
-        ledger_options.launch_cwd = CurrentDirUtf8();
-        ledger_options.lubancode_version = std::string(lubancode::app::kVersion);
-        ledger_options.one_shot = true;
-        if (const auto policy = lubancode::trajectory::TrainingPolicyFromName(
-                config.oneshot_training_policy);
-            policy.has_value()) {
-            ledger_options.training_policy = *policy;
-        }
-        auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(std::move(ledger_options));
-        if (!ledger.has_value()) {
-            std::cerr << "[trajectory] " << lubancode::cli::tr("oneshot.ledger_open_failed")
-                      << ledger.error() << "\n";
-            return 1;
-        }
-        oneshot_ledger.emplace(std::move(*ledger));
+    // AppServer 接 v3 第一棒:开张/输入接纳/收口改走 SessionService(与
+    // 终端、app-server 同一条服务路);ledger 直开的旧装配收进
+    // BuildOneShotSessionRequest + 服务,行为零变化。
+    const lubancode::runtime::SessionLaunchRequest launch_request =
+        lubancode::app::BuildOneShotSessionRequest(config, CurrentDirUtf8());
+    lubancode::runtime::SessionService oneshot_service(launch_request);
+    if (oneshot_service.runtime() == nullptr) {
+        std::cerr << "[trajectory] " << lubancode::cli::tr("oneshot.ledger_open_failed")
+                  << oneshot_service.launch_error() << "\n";
+        return 1;
     }
+    lubancode::runtime::TrajectorySessionLedger* oneshot_ledger = oneshot_service.trajectory();
     // P0-4 环境快照:与交互会话同一只取材件(§9.1);落不进账只是缺口
     //(replay 降档如实报),不拦问答。
     {
@@ -472,10 +470,25 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 的手测清单),这里只取 status,忽略 cancelled。管道/重定向下监听线程
     // 压根不起,会话层队列天然为空。
     std::vector<lubancode::cli::TranscriptItem> transcript;
+    // 输入接纳(AppServer 接 v3 第一棒):问题从服务路进出——先账
+    // (operations.jsonl)后回执,再由泵侧(这里就是 RunTurn 前的这一取)
+    // 出队。单发没有重发方,幂等键留空(每发必纳,§4.2 的"键可空"路)。
+    runtime::SessionService::InputRequest oneshot_input;
+    oneshot_input.text = question;
+    const auto input_receipt = oneshot_service.SubmitInput(oneshot_input);
+    if (!input_receipt.accepted) {
+        std::cerr << lubancode::cli::tr("error.prefix") << "oneshot 输入接纳失败: "
+                  << input_receipt.error_code << "\n";
+        return 1;
+    }
+    const std::string submitted_question =
+        oneshot_service.PopPendingInput()
+            .value_or(lubancode::runtime::SessionService::QueuedInput{question, {}, input_receipt.operation_id})
+            .text;
     // 批三:RunTurn 二十四参收成一只 TurnContext。
     lubancode::app::TurnContext turn;
     turn.loop = &loop;
-    turn.user_input = question;
+    turn.user_input = submitted_question;
     turn.auto_confirm = auto_confirm;
     turn.always_allowed_tools = &always_allowed_tools;
     turn.theme = theme;
@@ -507,7 +520,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 派工全接同一口,与交互会话同一套装配);单发的问题就是用户提问,
     // trigger=external_user。
     turn.trace_hub = &oneshot_trace_hub;
-    turn.trajectory_ledger = &*oneshot_ledger;
+    turn.trajectory_ledger = oneshot_ledger;
     turn.trajectory_trigger = "external_user";
     turn.trajectory_provider = bound_provider;
     turn.trajectory_wire = lubancode::config::ProviderWireName(config.wire);
@@ -516,7 +529,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 进程被 kill 走不到这行也不丢账——逐事件的 WAL 语义既有,恢复器按
     // Journal 可证事实收口。收口失败如实报,不拦退出码(问答结果已在)。
     const std::string oneshot_session_id = oneshot_ledger->session_id();
-    const lubancode::trajectory::CloseOutcome oneshot_close = oneshot_ledger->CloseSession("exit");
+    // 收口走服务(与终端/app-server 同一口;reason="exit" 是现行口径)。
+    const lubancode::trajectory::CloseOutcome oneshot_close = oneshot_service.Close("exit");
     if (!oneshot_close.error_code.empty()) {
         std::cerr << "[trajectory] " << lubancode::cli::tr("oneshot.ledger_close_failed")
                   << oneshot_close.error_code << ": " << oneshot_close.message << "\n";
