@@ -1,3 +1,7 @@
+## [v0.26.246] - 2026-09-11
+
+- **v3 场的 clear/export/verify 全通了,验收工具入库,AppServer 三端同路。**clear 八步 v3 折算(旧账 ended 带去向、新卷 started 带来源、未收口活动如实标);/export 与 /copy 走链投影(hidden 默认不导、坏账明报);/doctor 与 verify 吃 v3 子账树(孤儿边/mismatch 稳定码)。§5.1 验收工具两件(剧本化假 anthropic 后端+场景矩阵)入库,回归一条命令可复跑。AppServer 第一批:SessionService 统一终端/one-shot/app-server 三端入口——同一套调度/hook/容量/取消/持久规则;操作幂等先账后回执,回执到手即可在盘上验行。
+
 # 更新记录
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
