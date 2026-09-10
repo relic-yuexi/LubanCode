@@ -38,6 +38,7 @@ struct ProviderCatalogModel {
     std::string name;
     std::string description;
     std::optional<std::size_t> context_window_tokens;
+    std::optional<std::size_t> max_context_window_tokens;  // 模型上限窗口(≠一般使用窗口)
     std::optional<std::size_t> max_output_tokens;
     std::string default_think;
     std::map<std::string, bool> capabilities;

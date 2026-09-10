@@ -380,8 +380,9 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
                                                             const json& provider_dialect,
                                                             Wire wire) {
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
-    if (auto known = RejectUnknown(value, {"name", "description", "context_window", "max_output",
-                                           "default_think", "capabilities", "deferred_tools", "reasoning"},
+    if (auto known = RejectUnknown(value, {"name", "description", "context_window", "max_context_window",
+                                           "max_output", "default_think", "capabilities", "deferred_tools",
+                                           "reasoning"},
                                    where);
         !known.has_value()) return std::unexpected(known.error());
     ProviderCatalogModel model;
@@ -396,6 +397,12 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
     auto context = OptionalTokenCount(value, "context_window", where);
     if (!context.has_value()) return std::unexpected(context.error());
     model.context_window_tokens = *context;
+    // 上限窗口(codex 口径:context_window 是一般使用窗口,max_context_window
+    // 是模型极限,如 gpt-5.6 一般 272k、上限 872k)。容量判断吃一般窗口,
+    // 上限先入库备查;消费方(compact 恢复策略/模型切换建议)后续接。
+    auto max_context = OptionalTokenCount(value, "max_context_window", where);
+    if (!max_context.has_value()) return std::unexpected(max_context.error());
+    model.max_context_window_tokens = *max_context;
     auto output = OptionalTokenCount(value, "max_output", where);
     if (!output.has_value()) return std::unexpected(output.error());
     model.max_output_tokens = *output;

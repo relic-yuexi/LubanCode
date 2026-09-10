@@ -44,6 +44,10 @@ namespace v3 = ::lubancode::trajectory::v3;
 // 再开键(留白注记见 todos/P0新轨迹记录 P0-6 段)。
 constexpr std::uint64_t kJournalEmergencyReserveBytes = 16ULL * 1024 * 1024;
 
+// v3 流式片段的攒批窗口(§4.43 schema 冻结:250ms 或 4 KiB 先到为准——
+// 生产桥取字节窗,不引时钟依赖,终态前统一放行尾巴,两轴殊途同归)。
+constexpr std::size_t kV3StreamBatchBytes = 4096;
+
 // ---------------------------------------------------------------------------
 // TrajectoryTurnBridge
 // ---------------------------------------------------------------------------
@@ -107,6 +111,16 @@ struct V3TurnBooks {
         std::string model;                 // 本次请求实际模型(来源三件套用)
         std::optional<nlohmann::json> usage;  // provider 实报;缺报 nullopt
         bool output_committed = false;     // assistant 已成行(此后 usage 走 appended)
+        // 流式三件套的请求簿(§4.43,D1):started 懒起(响应开始才发号),
+        // 片段按类型攒批,终态前放行尾巴后走 Complete/Interrupt 收口。
+        std::string stream_id;             // 流身份(writer 发号,started 时定)
+        std::string reserved_message_id;   // started 时预留的 assistant messageId
+        bool stream_started = false;       // model.response.started 已落稳
+        std::string batch_text;            // 攒批:text(4 KiB 窗口一批)
+        std::string batch_reasoning;       // 攒批:reasoning
+        std::string received_text;         // 已收正文(中断定稿用,与批次同源)
+        std::string received_reasoning;    // 已收思考(中断定稿用)
+        std::uint64_t delta_seq = 0;       // 已落批次的末序号(接收水位)
     };
     std::map<std::string, Call> calls;      // key = provider tool_use id
     std::map<std::string, Request> requests;
@@ -573,6 +587,21 @@ void TrajectoryTurnBridge::OnRequestSentWithTurn(const std::string& request_id, 
     if (receipt.status != RecordReceipt::Status::Committed) {
         NoteError(receipt, "model.request.sent");
     }
+}
+
+void TrajectoryTurnBridge::OnResponseStarted(const std::string& request_id) {
+    if (V3Mode()) {
+        V3ResponseStarted(request_id);
+    }
+    // v2 无流式事件账:响应边界由 output 三态收口,这里零行为。
+}
+
+void TrajectoryTurnBridge::OnStreamDelta(const std::string& request_id, const std::string& delta_type,
+                                         const std::string& text) {
+    if (V3Mode()) {
+        V3StreamDelta(request_id, delta_type, text);
+    }
+    // v2 同上:片段账是 v3 §4.43 的概念,v2 不伪造。
 }
 
 void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
@@ -1228,6 +1257,86 @@ void TrajectoryTurnBridge::V3RequestSent(const std::string& request_id) {
     }
 }
 
+void TrajectoryTurnBridge::V3ResponseStarted(const std::string& request_id) {
+    V3EnsureStreamStarted(request_id);
+}
+
+bool TrajectoryTurnBridge::V3EnsureStreamStarted(const std::string& request_id) {
+    const auto it = v3_turn_->requests.find(request_id);
+    if (it == v3_turn_->requests.end()) {
+        return false;  // prepared 没落稳的请求,流不伪造
+    }
+    V3TurnBooks::Request& book = it->second;
+    if (book.stream_started) {
+        return true;  // 幂等:重放的 MessageStart 不重复起流
+    }
+    book.stream_id = v3_writer_->NewStreamId();
+    book.reserved_message_id = v3_writer_->NewMessageId();
+    const auto receipt =
+        v3_writer_->BeginStreamResponse(request_id, book.stream_id, turn_id_, book.step_id,
+                                        book.reserved_message_id,
+                                        trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.response.started");
+        return false;  // started 记不住,终态定稿不得越过(§4.4 同款栅栏)
+    }
+    book.stream_started = true;
+    return true;
+}
+
+void TrajectoryTurnBridge::V3StreamDelta(const std::string& request_id,
+                                         const std::string& delta_type, const std::string& text) {
+    const auto it = v3_turn_->requests.find(request_id);
+    if (it == v3_turn_->requests.end() || text.empty()) {
+        return;  // 簿没有的请求不记;空片段不造批次
+    }
+    // 片段到即流已开始:懒起流(防 OnStreamDelta 先于 OnResponseStarted 的
+    // 装配抖动,批次才有归属)。
+    if (!V3EnsureStreamStarted(request_id)) {
+        return;  // started 记不住,片段无处归属,不攒
+    }
+    V3TurnBooks::Request& book = it->second;
+    const bool reasoning = delta_type == "reasoning";
+    std::string& batch = reasoning ? book.batch_reasoning : book.batch_text;
+    std::string& received = reasoning ? book.received_reasoning : book.received_text;
+    received += text;
+    batch += text;
+    // 攒批(§4.43"片段以事件分批落盘"):批满即落,不足一批的尾巴由终态
+    // 前统一放行。
+    if (batch.size() >= kV3StreamBatchBytes) {
+        V3FlushStreamBatch(request_id, reasoning);
+    }
+}
+
+void TrajectoryTurnBridge::V3FlushStreamBatch(const std::string& request_id, bool reasoning) {
+    const auto it = v3_turn_->requests.find(request_id);
+    if (it == v3_turn_->requests.end()) {
+        return;
+    }
+    V3TurnBooks::Request& book = it->second;
+    std::string& batch = reasoning ? book.batch_reasoning : book.batch_text;
+    if (batch.empty() || !book.stream_started) {
+        return;  // 空批不落;流没起过就没有可归属的片段
+    }
+    const auto receipt = v3_writer_->AppendStreamDelta(
+        request_id, book.stream_id, book.reserved_message_id, book.delta_seq + 1,
+        reasoning ? "reasoning" : "text", nlohmann::json{{"text", batch}},
+        trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.response.delta");
+        return;  // 片段是观察账:记错不拦流,终态仍是栅栏
+    }
+    ++book.delta_seq;
+    batch.clear();
+}
+
+void TrajectoryTurnBridge::V3FlushStreamBatches(const std::string& request_id) {
+    V3FlushStreamBatch(request_id, /*reasoning=*/true);
+    V3FlushStreamBatch(request_id, /*reasoning=*/false);
+}
+
 void TrajectoryTurnBridge::V3UsageRecorded(const std::string& request_id, const api::Usage& usage,
                                             bool reported_by_provider,
                                             const std::string& provider_response_id) {
@@ -1270,6 +1379,14 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
     if (it == v3_turn_->requests.end() || it->second.output_committed) {
         return false;  // 请求簿没有/已收口:不重复成行
     }
+    V3TurnBooks::Request& req = it->second;
+    // 流式三件套(§4.43,D1):started 懒起(非流式后端零片段,同样保
+    // started+completed+assistant 的闭环形状)→ 放行攒批尾巴 → 收齐定稿
+    //(completed 事件 + 完整 assistant 以预留 id 成行 + 接纳,writer 一手包)。
+    if (!V3EnsureStreamStarted(request_id)) {
+        return false;  // started 记不住,不定稿——校验器只认三件套闭环
+    }
+    V3FlushStreamBatches(request_id);
     // 消息体:content(文本块)+ tool_calls(openai 形状——EffectiveConversation
     // FromV3 折叠认的形状,provider 号随块留档);thinking 块原样保(§4.42)。
     nlohmann::json content = nlohmann::json::array();
@@ -1294,40 +1411,26 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
     if (!tool_calls.empty()) {
         body["tool_calls"] = std::move(tool_calls);
     }
-    v3::MessageDraft draft;
-    draft.turn_id = turn_id_;
-    draft.step_id = it->second.step_id;
-    draft.request_id = request_id;
-    draft.purpose = v3::MessagePurpose::Conversation;
-    draft.origin = v3::MessageOrigin::SessionRuntime;
-    draft.display = v3::DisplayMode::Visible;
-    draft.message = std::move(body);
     // 来源三件套(§4.44):本次实际出站的 provider/wire/model,不从会话
-    // 当前设置倒推;responseModel 服务端没报就 null,不冒认。
-    draft.provider = identity_.provider;
-    draft.wire = identity_.wire;
-    draft.model = it->second.model;
-    draft.response_model = provider_response_id.empty() ? nlohmann::json(nullptr)
-                                                        : nlohmann::json(provider_response_id);
-    draft.usage = it->second.usage.has_value() ? *it->second.usage : nlohmann::json(nullptr);
-    if (stop_reason == "length" || stop_reason == "max_tokens") {
-        draft.completion_status = v3::CompletionStatus::Truncated;
-    }
-    const auto receipt =
-        v3_writer_->AppendMessage(std::move(draft), trajectory::Durability::ProcessCrash);
+    // 当前设置倒推;responseModel 服务端没报就 null,不冒认。length 截断
+    // 给 completion_status=truncated(§4.43)。
+    const auto receipt = v3_writer_->CompleteStreamResponse(
+        request_id, req.stream_id, turn_id_, req.step_id, req.reserved_message_id,
+        std::move(body), identity_.provider, identity_.wire, req.model,
+        provider_response_id.empty() ? nlohmann::json(nullptr)
+                                     : nlohmann::json(provider_response_id),
+        req.usage.has_value() ? *req.usage : nlohmann::json(nullptr),
+        stop_reason.empty() ? std::string("end_turn") : stop_reason,
+        v3::MessagePurpose::Conversation, std::nullopt,
+        stop_reason == "length" || stop_reason == "max_tokens"
+            ? std::optional<v3::CompletionStatus>(v3::CompletionStatus::Truncated)
+            : std::nullopt);
     V3NotifyCommitted(receipt);
     if (receipt.status != v3::WriteReceipt::Status::Committed) {
-        NoteV3Error(receipt, "assistant message");
+        NoteV3Error(receipt, "model.response.completed");
         return false;  // §7.4:输出记不住,不执行工具
     }
-    const auto admitted =
-        v3_writer_->AdmitMessages({receipt.id}, trajectory::Durability::ProcessCrash);
-    V3NotifyCommitted(admitted);
-    if (admitted.status != v3::WriteReceipt::Status::Committed) {
-        NoteV3Error(admitted, "context.input.applied(assistant)");
-        return false;
-    }
-    it->second.output_committed = true;
+    req.output_committed = true;
     // 声明本份输出的 tool call(§6.1 的 v3 版):actionId 由 writer 发号,
     // provider 号原样留档作配对键(FoldToolActions 按 providerToolCallId
     // 映射回 actionId)。这是 v3_turn_->calls 造册的唯一合法入口;同时
@@ -1373,13 +1476,47 @@ void TrajectoryTurnBridge::V3OutputFailed(const std::string& request_id, const s
 
 void TrajectoryTurnBridge::V3OutputCancelled(const std::string& request_id,
                                              agent::OutputCancelSource source) {
-    // 取消来源说真话(§4.2 纪律的 v3 版):真按键才记 user_interrupt。
+    // 流中断路(§4.63,D1):流已起过的请求,已收内容按 writer 既有合同定稿
+    // 成 interrupted assistant——cancelled 定稿事件(带接收水位)+ 正式
+    // message(预留 id 成行,completionStatus=interrupted)+ 接纳;未收齐
+    // 的调用/签名不伪造完整,usage 缺实报为 null 不补 0。定稿后迟到的
+    // usage 走 model.usage.appended(V3UsageRecorded 的 appended 路)。
+    const auto it = v3_turn_->requests.find(request_id);
+    if (it != v3_turn_->requests.end() && it->second.stream_started) {
+        V3TurnBooks::Request& book = it->second;
+        if (book.output_committed) {
+            return;  // 已收口(理论不到):不造第二终态
+        }
+        V3FlushStreamBatches(request_id);
+        nlohmann::json content = nlohmann::json::array();
+        if (!book.received_reasoning.empty()) {
+            content.push_back(nlohmann::json{{"type", "thinking"}, {"text", book.received_reasoning}});
+        }
+        if (!book.received_text.empty()) {
+            content.push_back(nlohmann::json{{"type", "text"}, {"text", book.received_text}});
+        }
+        nlohmann::json body = nlohmann::json{{"role", "assistant"}, {"content", std::move(content)}};
+        const auto receipt = v3_writer_->InterruptStreamResponse(
+            request_id, book.stream_id, turn_id_, book.step_id, book.reserved_message_id,
+            std::move(body), identity_.provider, identity_.wire, book.model,
+            /*received_through=*/book.delta_seq, book.usage);
+        V3NotifyCommitted(receipt);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            NoteV3Error(receipt, "model.response.cancelled");
+            return;
+        }
+        book.output_committed = true;
+        return;
+    }
+    // 流没起过的请求(发出即取消,一个片段没收到):裸 cancelled 事件,不
+    // 伪造流不伪造 assistant。取消来源说真话(§4.2 纪律的 v3 版):真按键
+    // 才记 user_interrupt。
     v3::EventDraft draft;
     draft.kind = v3::EventKindV3::ModelResponseCancelled;
     draft.status = v3::OpStatus::Cancelled;
     draft.request_id = request_id;
     draft.turn_id = turn_id_;
-    if (const auto it = v3_turn_->requests.find(request_id); it != v3_turn_->requests.end()) {
+    if (it != v3_turn_->requests.end()) {
         draft.step_id = it->second.step_id;
     }
     draft.payload = nlohmann::json{{"reason", agent::OutputCancelSourceText(source)}};

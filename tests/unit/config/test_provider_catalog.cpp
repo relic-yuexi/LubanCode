@@ -121,8 +121,11 @@ TEST_CASE("内置 GPT 5.6 与 GLM 5.3 各自声明不同 effort") {
     REQUIRE(catalog.has_value());
     const auto* terra = catalog->FindProvider("openai")->FindModel("gpt-5.6-terra");
     REQUIRE(terra != nullptr);
+    // codex 口径对齐(2026-09-11):none 档去除,sol/terra 系至 ultra。
     CHECK(terra->reasoning.supported_efforts ==
-          std::vector<std::string>{"none", "low", "medium", "high", "xhigh", "max"});
+          std::vector<std::string>{"low", "medium", "high", "xhigh", "max", "ultra"});
+    CHECK(terra->context_window_tokens == std::size_t{272000});
+    CHECK(terra->max_context_window_tokens == std::size_t{872000});
     const auto* glm = catalog->FindProvider("zai")->FindModel("glm-5.3");
     REQUIRE(glm != nullptr);
     CHECK(glm->reasoning.supported_efforts == std::vector<std::string>{"low", "high", "max"});
@@ -140,7 +143,8 @@ TEST_CASE("provider catalog: 2026-09 新模型保留真实窗口与独立思考�
     CHECK(astra->context_window_tokens == 1050000);
     CHECK(astra->max_output_tokens == 128000);
     CHECK(astra->reasoning.supported_efforts ==
-          std::vector<std::string>{"low", "medium", "high", "xhigh", "max"});
+          std::vector<std::string>{"low", "medium", "high", "xhigh", "max", "ultra"});
+    CHECK(astra->max_context_window_tokens == std::size_t{1050000});
     CHECK(astra->capabilities.at("off_unsupported"));
     CHECK(astra->reasoning.dialect.effort_path == "reasoning.effort");
     CHECK_FALSE(astra->reasoning.dialect.verified);

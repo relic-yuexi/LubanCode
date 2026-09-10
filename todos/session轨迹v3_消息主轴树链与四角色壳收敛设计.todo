@@ -1,7 +1,7 @@
 # session 轨迹 v3：消息主轴树链与四角色壳收敛
 
 - 状态：实现中。设计已冻结；P0–P4 五期、接线点 1 写侧开关、compact 运行时已并入 main（v0.26.234–244），四角色壳四家换骨推进中。余项：§5.1 端到端验收矩阵（验收单在跑）、翻默认、四角色差距 6/7/8 尾巴。§一记用户定案，§四给字段与边界合同。
-- 立案日期：2026-09-09；本次更新：2026-09-10。
+- 立案日期：2026-09-09；本次更新：2026-09-11（补 §4.67 Goal 模式设计；本节尚未实现）。
 - 级别：P1（轨迹是回放/回测/验尸的地基，形状定错样样返工）。
 - 参照样板：`D:\kc-mini-for-interview\sessions\8dcf9aa4\8dcf9aa4.jsonl`（231 行，五类事件，已解剖，见 §二）。
 - 范围：轨迹格式、四角色消息、Turn/Step/Action 归属、工具状态与结果文件、上下文提交、请求组装、resume、历史显示及相关测试。
@@ -1933,6 +1933,8 @@ sessions/S1/
 
 goal 管“要做到什么”，todo 管“分哪些步骤做”，loop 管“何时再次触发”。三者可相互引用，但不是同一个状态机。首版主上下文仍只有一个运行中的 main turn，自动调度与用户输入共用主运行入口。
 
+Goal 模式的命令、状态、验收、续跑事务与接线验收在 §4.67 展开；该节沿用本节及 §4.55 的持久控制状态合同。
+
 | 能力 | 持久状态 | 推进条件 |
 | --- | --- | --- |
 | goal | goalId、目标原文、验收要求、状态、checkpoint、证据、累计预算/usage、阻塞信息与待答问题 | 当前工作结束后评估；未完成且可推进时自动安排下一轮 |
@@ -2179,7 +2181,201 @@ AppServer 的 v3 接入设计另见 [AppServer 接入 Session v3](AppServer接�
 
 编排账只写事件，模型节点账遵守 system 首行与四角色合同。Store 从已提交的无损产物与编排事件恢复；compact 只改变对应模型 session 的有效链，不改变 workflow 图、已提交产物或预算。恢复依据具体 execution/outcome/output.commit，不能仅按 nodeId 或 node_completed 名称认成功。CLI、AppServer 和子流程复用 WorkflowService、Action 服务及 Session runtime；新 schema、接线与恢复验收均按关联单推进。
 
+### 4.67 Goal 模式：逐轮验收，沿 v3 持久续跑
+
+本节为 2026-09-11 新增设计，尚未实现。前文已落地的轨迹能力不代表 Goal 已接通。沿 §4.55–§4.56 定型，不受旧 goal schema 或状态枚举约束。
+
+#### 4.67.1 参照 Claude Code，明确取舍
+
+核对来源：[Claude Code 官方 Goal 文档](https://code.claude.com/docs/en/goal)，查阅日期 2026-09-11。以下仅述文档机制，未运行 Claude Code 长任务，不据此声称效果或成本。
+
+Claude Code 的 `/goal` 设完成条件，逐轮交给独立小模型验收；底层借用会话级 prompt Stop hook。验收器不调用工具，只读已提供材料，给出未达标、达标或无法满足及理由。后台任务未收口时延后验收。恢复可带回活动目标，但重置轮数、计时和 token 基线。详见上述官方页；这些细节随版本变化。
+
+LubanCode 采用“执行一轮—独立验收—带理由续跑”的骨架，接入自身 v3 合同：
+
+| 设计点 | LubanCode v3 决定 |
+| --- | --- |
+| 目标寿命 | 沿 session lineage 持久保存；compact、resume 不清目标、不重置预算 |
+| 验收 | 小模型给候选判词；宿主核对验收项、证据和版本后提交 |
+| Hook | 内置有序中间件承担策略；Session 服务持有状态提交与调度权 |
+| 后台工作 | 等相关 task 的可靠结果；用任务通知唤醒，有界巡检兜底 |
+| 失败 | 保存目标、证据和停因；区分待答、外部阻塞、预算不足与宿主故障 |
+| 权限 | 沿原权限、沙箱、取消和审批入口；Goal 只减少逐轮提示 |
+
+#### 4.67.2 用户入口与任务合同
+
+例：`/goal 修好 auth 模块；ctest -R auth 全过；不得删除或跳过测试`。接纳命令后即排首轮。模型查代码、修错、运行验证；收尾时写 checkpoint。验收若发现还有失败项，就把失败依据交给下一轮。用户无需反复输入“继续”。
+
+| 入口 | 效果 |
+| --- | --- |
+| `/goal <目标>` | 新建并启动；已有未收账目标时提示用 edit 或 clear，不暗中替换 |
+| `/goal`、`/goal status` | 显示目标、状态、停因、进展、最近判词、费用和预算；只显示，不添模型消息 |
+| `/goal pause` | 安全边界停止续排，保存目标；当前轮按正常收尾路径落账 |
+| `/goal resume` | 重新核对停因与预算；可推进才续排，不默认问题已回答 |
+| `/goal edit <目标>` | 安全边界提交新合同版本；沿原 goal 累计费用，相关旧证据重新判有效期 |
+| `/goal clear` | 撤销目标，废止未启动续跑；记录 cleared，不删历史与产物 |
+| Esc | 依 §4.61–§4.63 取消当前主执行并暂停自动续跑；不等同 clear |
+
+所有 slash 仍走 followup。它们先进入持久队列，在当前安全调度边界处理，早于自动 Goal 工作；长工具不能及时收口时可按 Esc。CLI、TUI、AppServer 调同一 GoalService，不各自实现循环。普通文本仍走 steer；补充指令可修正当前工作，涉及验收范围时须先提交合同修订。btw 输入不修改主目标。
+
+GoalContract 保存目标原文、来源输入引用、范围、约束、稳定 criterionId、验证方法和所需产物。每条必需验收项至少列清“看什么、怎样算过、证据来自哪里”。生成合同不能添加用户没要求的发布、发送或删除动作。清楚的要求由宿主校验后自动采用；只有实质歧义或确需用户选择时进入 awaiting_user。纯文字任务可引用交付 message/artifact 验收，不强迫每个目标都跑测试。
+
+预算写结构字段，不藏在“尽量二十轮内”这类自然语言里。首版建议默认最多 20 个工作轮、60 分钟活动时间、连续 3 轮无进展暂停；配置可改，创建时显示并冻结实际值。这些数值属于本设计建议，不冒认现行默认。用户明确给出的轮数、时间或 token 上限须反映到预算字段，不能悄悄放宽；未指定 token 额度时不凭空编一笔。
+
+#### 4.67.3 身份、状态与唯一写口
+
+一条主会话续接链最多一枚未收账 goal；btw 不建主 goal，fork 另发 goalId 并默认暂停。stateRevision 每次状态提交递增；contractRevision 只随验收合同变化。两者分开，避免一次 usage 更新使整份验收合同失效。
+
+快照至少保存：goalId、来源 session 引用、stateRevision、contractRevision、合同、lifecycle、phase、stopReason、当前 iterationId、checkpointRef、evidenceRefs、pendingQuestion、waitTaskRefs、预算与累计 usage、进展/错误计数、待办调度项及已采用 evaluationId。采用 §4.55 的不可变文件和 `state.goal.applied` 提交点。
+
+| lifecycle | 含义与出口 |
+| --- | --- |
+| preparing | 整理合同；通过校验后 active，缺关键选择则 awaiting_user |
+| active | 可推进；phase 再分 idle/queued/running/evaluating，不把“活动目标”误作“模型正跑” |
+| waiting | 等相关后台任务或明确外部信号；已登记唤醒条件，不空转模型 |
+| paused | 用户暂停、Esc、无进展或验收故障；保留停因，明确续跑后才恢复 |
+| awaiting_user | 缺具体回答或审批；保存 questionId/approvalId 与待续位置 |
+| blocked | 已证实当前条件下无法推进；保存 blockerKey、证据与解锁条件 |
+| budget_exhausted | 停排付费请求和新工作；显式增加预算且复核后可恢复，旧费用保留 |
+| suspended_by_policy | 功能/权限政策不允许运行；只读和 clear 仍可用 |
+| achieved / cleared / failed | 已验收、已撤销或明确不可恢复故障；不自动复活，新工作另建 goal |
+
+取消和暂停收尾用独立 stopRequested 标志表达。写盘失败先锁住内存执行门并报错；写不下 failed 事件时，不能宣称已经持久封账。恢复先验存储，再补恢复结论。
+
+GoalService/Coordinator 是唯一状态写口，命令、模型 checkpoint 和 Hook 都只交候选。状态转换必须校验当前 lifecycle、expectedStateRevision、contractRevision、来源及证据；单写者提交后才发布 UI 通知。模型无权直接写 achieved 或改预算。
+
+#### 4.67.4 一轮如何收尾、验收与续排
+
+一个 iteration 表示一份主工作轮及其收口处理，另有 iterationId；工作轮用独立 turnId。验收内部 turn 不增加工作轮计数，重试请求不冒充新 iteration。用户 steer 不另开轮；Goal active 时接纳的主工作轮也绑定 goal/iteration，避免用户插话形成漏账。状态查询、btw、compact、title 不触发 Goal 验收。
+
+1. **接纳**：持久接纳 `/goal`，提交初始快照与首轮调度意图。合同材料作为正式 message 进入首轮；纯状态查询不产生 user message。
+2. **执行**：主入口消费工作项。`PreRequest/control_state.project` 投影最新合同、checkpoint、剩余预算和待验项；调用、结果、usage 沿 v3 原路径留档。
+3. **收口**：工作轮完成且工具结果提交后，固定 checkpoint 和 evidence watermark。模型未调 goal_checkpoint 时由宿主合成，标 synthesized；不能因此漏验，也不能把自报完成当证据。
+4. **排验收**：内置 `PostTurn/goal.review` 只提出验收工作项；有相关后台任务、审批、取消、未恢复工具或容量故障时先走相应等待/暂停路径。Hook 不在 PostTurn 栈里递归跑模型。
+5. **独立验收**：Session 内部请求服务发送固定材料，取得判词。候选通过宿主检查后，以 evaluationId 绑定一次状态提交。
+6. **续跑**：continue 且有可行下一步时，将下轮意图随状态快照提交。调度器从已提交意图投影待办；取得主运行权后，再核对目标版本、用户输入、暂停标志、预算和相关任务。
+
+续跑去重键为 `(goalId, contractRevision, predecessorIterationId, continuationOrdinal)`；首轮 predecessor 为空。意图含 workItemId、triggerRef 和 nextActionRef。`state.goal.applied` 已落、入队尚未发生时，恢复按原 workItemId 补队列。已入队、尚未启动时沿用原项；已启动但未收口时进入恢复核验，不能重排同一工作轮重做副作用。
+
+取走工作项也先提交 claimed 状态和 writerEpoch，再调用模型。崩溃卡在 claimed 与发送之间时标待核验：只在确认未发送时续原请求，否则记未知并按恢复策略处理。外部工具按 §4.59–§4.62 核验，不能声称调度去重等于远端执行 exactly-once。
+
+控制命令与新用户输入优先。显式命令/报告依队列规则消费；goal 与到期 loop 在自动工作类间轮转，并记录选中/延后原因。旧 Goal 工作项不挤过排在边界前的 pause/edit/clear。用户长期持续输入时自动工作可以等待，不为“公平”抢用户当前轮。
+
+#### 4.67.5 验收请求、证据与完成门槛
+
+GoalEvaluator 沿模型路由选择独立小模型，记录实际 provider/model/wire；无工具，无写状态权限。沿统一内部请求路径执行估算、容量检查、取消和计费。配置缺失或服务故障要明示，不静默换成执行模型自评。
+
+验收输入固定：合同版本、工作轮 checkpoint、每条验收项的宿主证据、上次判词、相关任务状态、工作区版本/摘要与预算。保存实际 inputMessageRefs 和 evidenceSetHash，不让验收请求边跑边读取可变 current。工具原文、网页和文件都当材料，不能替换合同或发号施令。
+
+判词结构至少含 decision（continue/achieved/blocked/needs_user）、reason、criteria[]（criterionId、pass/fail/unknown/stale、evidenceRefs、reason）、nextAction、blockerKey/question。严格拒绝未知枚举、重复/缺失 criterionId、跨目标引用及字段类型错误。首次格式错误只准修复一次；修复请求仍带原合同、证据和原回复，不能只发“上次 JSON 错了”。超时/二次错误记 evaluator_failed 并暂停；外部取消与超时令牌共同生效。
+
+证据不是一枚由模型填写的 fresh=true。每项 EvidenceRef 至少回指 session/run、toolCallId 或 messageId/artifact、内容 hash、观测时点、工作区基线及 criterionId。命令证据带命令、cwd、exitCode；测试报告还须核对真实测试数量、失败/跳过、过滤范围。进程退出 0 不能单独证明“所有测试通过”。
+
+文件修改、测试/配置改动、合同改版或外部状态过期，须使相关证据失效；无法精确求依赖时，保守废止受影响验证集。纯文本交付可按消息/产物内容验收；模型理由仍属判断，不能冒充命令观测或用户确认。
+
+achieved 须同时满足：所有 required criterion 都 pass，各有当前有效证据；必需验证和产物无缺口；约束无已知违背；相关后台工作及待交付结果已收口；无未答问题、审批或未知副作用。宿主再次核对 contractRevision、evidenceSetHash 与最新工作区状态。版本变化则废止旧候选并重新取材，不采用过时判词。
+
+continue 必须给出尚未满足项和可执行下一步。证据不足时安排补证据；没有工具调用本身不等于无进展，写作任务同样可推进。宿主以验收状态变化、有效新证据、产物变化计算进展；只改措辞、重复运行同样失败命令或重复打勾不算。连续 3 轮无进展默认 paused。确需用户回答时立即 awaiting_user，不先空跑三轮；明显外部阻塞可立即 blocked，不要求反复撞墙。后台等待不计无进展轮数。
+
+#### 4.67.6 v3 落账与消息选用
+
+所有记录继续只取 `type: message|event`。不新增 goal_v1 顶层类型，不另造一份与 Session 争真值的可变 goal 日志。下表为新 kind/用途合同，需随实现补入 schema、writer、projector 与 validator。
+
+| 记录 | 内容与采用规则 |
+| --- | --- |
+| `state.goal.applied` | goalId、旧/新 stateRevision、contractRevision、snapshotRef/hash、causeRef；唯一状态生效点 |
+| `goal.checkpoint.recorded`、`goal.evidence.recorded` | 记录来源、正文引用和版本；本身不更改活动 head |
+| `goal.evaluation.requested/completed/rejected` | evaluationId、iterationId、材料版本、requestRefs、候选判词/拒绝原因；completed 不等于目标已完成 |
+| `goal.continuation.claimed/finished` | 工作项及真实 turnRef、writerEpoch；状态仍以相应 applied 为准，缺该事件可从快照补投影 |
+| `goal.wait.registered/resolved` | taskRefs、结果交付条件、通知去重键、巡检计划；等待计划是否生效仍看 applied |
+| `goal.usage.recorded` | 各 requestId 的归属及规范化计量来源；投影累计值，不重复计费 |
+| message：`purpose=goal_evaluation` | 验收实际 system/user/assistant，内部 contextId 和 turnId；parentTurnId 回指工作轮，默认折叠，不进入 main 输入链 |
+| message：`purpose=goal_continuation` | 真正交给执行模型的续跑 user 正文，标宿主来源与 workItemId；进入 main contextChain，不冒称用户亲口输入 |
+
+内部验收 system 的 turnId 仍为 null；它不触发主 system 切换。验收 assistant 照记 provider/model/usage。主请求、验收请求和 compact 请求各列精确 refs，不用 display 隐藏代替上下文隔离。控制状态补充继续沿 §4.55 的投影路径，不再添第二份重复目标提示。
+
+简化时序如下（只列 kind/引用，非完整 JSONL 样例）：
+
+```text
+slash 接纳 -> state.goal.applied(G1,r1,首轮意图)
+首轮 claimed/applied -> main turn T1 -> tool result/message -> checkpoint C1
+goal.evaluation.requested(E1,T1,contractRevision=1,evidenceSetHash=H1)
+内部验收 messages + model request 账 -> goal.evaluation.completed(E1,continue)
+state.goal.applied(G1,rN,采用 E1 + 下一轮意图 W2)
+主泵复核 -> claimed/applied(W2) -> goal_continuation message -> main turn T2
+验收 E2 全过 -> state.goal.applied(G1,rM,achieved,evidenceRefs)
+```
+
+采用判词与下一轮意图写在同一快照提交中，避免“continue 已生效却忘排下一轮”。候选文件落稳但 applied 未落时不生效；applied 已落但通知未发时，从提交事实重建 UI 和队列。迟到验收/后台结果留审计，不能使 cleared、achieved 或已改版目标复活。
+
+#### 4.67.7 预算、后台等待与错误边界
+
+Goal 费用覆盖归属它的主轮、验收、格式修复、重试、相关 compact/title 和子任务。用 `(sessionId, requestId)` 去重；父会话汇总子费用时引用子账，不把父工具结果再记成一次模型调用。btw 和无关 loop 另计；共享工作必须声明 ownerGoalId，不能两边各扣一次。
+
+保留 provider 原始 usage 和规范化计量。inputTotal 含缓存输入时不再加 cacheRead/cacheWrite，reasoning 属 outputTotal 子集时不再累加。费用按实际 provider 计价桶及价格版本计算。usage 缺失显示 unknown；发送前以 UTF-8 bytes/4 加输出上限预留，预留不是实报。收到真实用量后对账，不能把未知当 0。
+
+请求前和工具派发前检查预算；并发子任务共用预算预留，避免每个子任务各花整份余额。输出实际用量、缓存与取消延迟可能造成超额，须如实记 overrun；不能承诺 token 预估构成精确费用硬顶。达到限额就停新请求，连验收请求也不能豁免；可仅凭已有完备确定性证据封账，否则停在 budget_exhausted。
+
+时间分三笔：activeElapsed（累计执行/验收期间的时间，并发区间取并集）、waitingElapsed、离线间隔。默认 60 分钟约束 activeElapsed，暂停/等待/离线不占它；用户给出绝对 deadline 则连等待和离线一起约束。各次启动分段记账，resume 不拿新进程计时器归零旧余额。
+
+等待只覆盖与当前 Goal 验收有关的 taskRefs；无关长期进程不挡收尾。相关任务完成后，沿 §4.53–§4.54 先持久交付，再 followup 到主入口；多份通知合并唤醒，按 deliveryId 去重。验收不能把“后台启动成功”当任务完成。用户撤销时只取消该目标拥有且政策允许取消的任务；共享任务解除引用，迟到结果只留账。
+
+首版建议巡检按 30/60/120 分钟退避，同一等待阶段最多 3 次自动巡检；次数和 nextDue 入快照，重启不归零。到上限停巡检并通知一次，目标仍 waiting，真实结果到达仍能唤醒。纯等待不用另付模型请求；巡检确需模型时也计预算。无独立宿主时进程离线不巡检，恢复至多补一枚逾期检查。
+
+认证/余额/模型不可用等故障记录具体原因并暂停等待修复；可恢复网络错误走共享有界重试，不再叠 Goal 无限重试。上下文恢复走 §4.38–§4.41、§4.64；同一 context_overflow 只允许更小合法输入重试，仍装不下就暂停。不能借新 iteration 重发同一超限请求。
+
+#### 4.67.8 compact、resume、fork 与 Hook 扩展
+
+compact 只改变模型上下文。Goal 快照、证据、预算、问题和待办意图照旧；摘要无需承担恢复真值。compact 后重建有预算的最新控制状态投影，旧摘要所述目标版本不能覆盖它。
+
+主动 resume 先核验来源链、goal head/hash、usage watermark、单写者所有权和任务交付状态。active 可续，paused/awaiting_user/blocked/budget_exhausted 保持停态。evaluating 崩溃时已有完整候选就校验后只采用一次；只有半份回复则保留 interrupted，再决定是否在预算内重试。running 崩溃则按工具逐项核验，不只凭 iterationId 重跑。只读查看不执行也不修档。
+
+fork 复制合同与进度来路，另发 goalId，活动目标默认 paused；继承证据标待复核，原任务执行权和预算不带过去。新分支费用从显式启动后独立累计，原费用仅供来源展示。btw 不触发主 Goal Hook，也不改它的 head。
+
+内置 `PostTurn/goal.review` 与既有 `PreRequest/control_state.project` 进入同一中间件注册池。Lua 可按 `(hookPoint,name)` 替换策略、组织验收材料或返回候选下一步；模型调用只能经宿主内部请求服务调度并留账。校验与状态提交、权限、预算、取消、证据准入、去重仍归宿主，不因 overwrite 绕过。Hook 内部调用沿 §4.22 记来源；实际效果沿 hook.effects.applied 关联 state.goal.applied。
+
+GoalEvaluated/GoalCompleted 等通知在状态提交之后发出。通知失败只记通知失败，不撤回 achieved。MCP 提供外部能力；如用 MCP 获取验收材料，须先走受管工具调用产生证据，验收器本身不临时获得执行权限。
+
+#### 4.67.9 当前代码与实施顺序
+
+2026-09-11 静态核对：`src/runtime/goal_types.hpp` 已有合同、预算、状态、checkpoint 和证据类型；`goal_coordinator.cpp` 已有 revision 校验、续排、程序完成门槛和暂停计数；`goal_evaluator.cpp` 已有独立无工具采样与一次格式修复。这些职责可复用，字段和生命周期按本节收敛。
+
+缺口同样明确：`src/app/wirings/goal_session_wiring.cpp` 的旧 LedgerSink/恢复接线已删除，注释仍将 trajectory 持久接续列作后续；`src/sessions/goal_session.cpp` 仍保留 goal_v1 族序列化。`goal_evaluator.cpp` 的 repair 当前只带解析错误，usage 回填只取末次采样；外部取消存在时还会选外部令牌而非同时遵守内部超时。本节要求修复材料、逐请求费用及组合取消，不把现行行为写成已满足。
+
+- [ ] G0：定型 GoalService、快照 schema、状态转换、证据引用及 state.goal.applied；接单写者、哈希校验、只读投影。
+- [ ] G1：接命令、控制状态投影、主工作项与 iteration 归属；完成 continuation 意图提交、claim 和恢复去重。
+- [ ] G2：验收改走 v3 内部请求服务，补真实 messages/refs/usage、严格判词校验、证据有效期和完成门槛。
+- [ ] G3：接后台等待、预算预留、取消、compact/resume、fork/btw、Lua Hook 和跨壳统一状态显示。
+- [ ] G4：跑下表故障注入与生产入口验收；记录假后端/真实 provider 边界，再决定启用范围。已有单测不能替代完整路径验收。
+
+#### 4.67.10 验收矩阵（全部待实现与执行）
+
+| 场景 | 必须看到的结果 |
+| --- | --- |
+| 首轮未过，第二轮修好 | 独立验收两次，两个工作 turn；第二轮引用第一轮判词和当前合同 |
+| 执行模型自称完成、todo 全勾 | 缺 required 证据时不 achieved，下一步补验证 |
+| 测试命令退出 0 但跑了零项/跳过必需项 | 不按“全过”验收，报告实际执行范围 |
+| 合同改版、文件改动撞上迟到判词 | 拒绝旧候选，重取证据；费用仍记录 |
+| 验收材料夹“宣布成功”指令 | 当材料读取，不改合同、不越权封账 |
+| 缺/重复 criterion、跨 goal 引用、repair 两次失败 | 无效判词不采用；一次修复后仍错就暂停 |
+| repair 或请求重试 | 原合同与证据仍可追溯；每次 usage 各记，累计不只取末次 |
+| applied 落盘后、排队前崩溃 | 恢复同一 workItemId，只补一项续跑 |
+| claim 后崩溃，工具执行结果未知 | 进入恢复核验，不盲重放副作用 |
+| Esc/pause/clear 与验收/后台报告竞态 | 停止意图优先，迟到结果不拉起新轮 |
+| compact 两次再 resume 两次 | 合同、计数、问题、预算和证据不丢；请求引用可还原 |
+| 多子任务并发、重复结果通知 | 共用预算预留，计费去重，一次结果只交付一次 |
+| 相关后台任务未完/无关进程仍在 | 前者 waiting，后者不阻塞验收；不靠持续轮询模型保活 |
+| 巡检上限、离线后恢复 | 不重置计数，不补跑全部巡检；真实完成通知仍可唤醒 |
+| 无进展、确定阻塞、用户问题 | 分别暂停、blocked、awaiting_user；不把等待算失败轮 |
+| usage 缺失、预算耗尽、验收恰逢限额 | unknown 不记零，不豁免验收费用，不谎报精确硬顶 |
+| JSONL head 指向坏/缺快照 | 明报状态缺口，停止自动执行，不从摘要猜目标 |
+| fork/btw/只读打开 | fork 默认暂停且身份独立；btw/只读零主 Goal 状态变更 |
+| CLI 与 AppServer 恢复同一目标 | 单活动写者；相同状态与预算，不各起一套续跑循环 |
+| 覆盖 goal Hook，通知 Hook 失败 | 策略可替换，宿主门槛仍在；通知失败不撤回已提交终态 |
+
 ## 五、分期
+
+- [x] 设计：2026-09-11 参考 Claude Code 官方 Goal 机制，补 §4.67 持久 Goal 模式、独立验收、证据门槛、续排事务、预算、后台等待、恢复与实施验收；运行时尚未接线。
 
 - [x] 设计：确认原始 JSONL 两类行、启动首行 system、system 追加版本、seq 语义。
 - [x] 设计：补入 resume 历史显示、compact 全链、成功提交与 token 标记合同。
@@ -2254,6 +2450,17 @@ AppServer 的 v3 接入设计另见 [AppServer 接入 Session v3](AppServer接�
 - **D2（中，恢复语义）**：resume-as-new 只折直接源本账链：新场 `prepared.inputMessageRefs` 与实发不符（1 比 5）；二次 resume 祖先史退出模型上下文。`v3::ProjectResume` 链遍历 reader 已备，resume 路未接（§4.10 第 3-4 条）。
 - **O1**：首行 system 为空基础版，完整版首笔请求 prepare 时三步补入——不算病，读账须知。**O2**：终端重放不画 system 切换标记（库层 `completed=false` 有钉）。**O3**：blob 缺口标注无 CLI 消费面。
 - 17 行 compact 相关场景全部留第二轮（基线已含 compact 运行时 v0.26.244）。
+
+### 5.1.2 第二轮验收记录（2026-09-11，compact 17 行；基线 v0.26.246）
+
+手段同第一轮（真机 exe、临时 USERPROFILE、假后端剧本、校验器）；崩溃行用账本截断造现场。17 行 143 断言 142 过。
+
+- **过**：一次 compact 成功（引用五连闭合、专用 system、材料全量）、手动空闲（不伪造 protected）、turn 中途自动（主 turn 不变、内部 turn 独立前缀）、map/reduce 重试（恰三请求、终摘要可追）、prompt 多条消息（不只存首条）、摘要缺字段（校验详情、不 applied）、工具组跨边界（双保险+库层单测）、compact 期间插话（队列不丢、顺序主→压→插话）、回复后崩溃（候选可查、旧上下文有效）、校验后/applied 后崩溃（没有 applied 不生效；applied 后 resume 得新上下文）、compact 后 resume（原文可查、分界线带数字、实发=摘要+新输入不携旧史）、连续两次（第二场材料含旧摘要、新摘要替换不叠加、两处标记各有数字）、只有旧摘要（不误报无材料、收益不足拒收不空转）、空历史（明确拒绝零模型调用）。
+- **D3（中，接线未完，唯一红）**：compact applied 后同会话内存不换账——RunV3CompactBranch 只落账报数（session_commands.cpp 自认"换账属会话运行时"），压缩后同会话实发仍携全量旧史，token 收益不落地；账侧 prepared 已按新链引用，账实分离。修法：applied 落稳后由 v3 会话运行时把链投影 ReplaceHistory 进 loop（与 v2 同一安全点）。
+- **D1 范围提醒**：D1 修复（PR #37）只修生产桥 SSE 路径；compact 候选走 SampleModelV3CompactClient→WriteCandidate 直落 AppendMessage，不在该笔范围——D1 合并后 compact 候选仍红，需给压缩客户端补三件套。
+- 手段档（非缺陷）：applied 写盘失败真机不可注入（journal 长持句柄）、跨边界与全受保护终端不可达——三者库层单测都在。
+
+**§5.1 全表合计：25 行，24 过，1 缺（D3）；D1 在途罩着含 assistant 的账本校验器，D2 在修。**翻默认前置：D1（含 compact 候选延伸）、D2、D3 三笔修复合入且两轮验收复跑绿。
 
 - token 回测重跑单（本仓 todos/）：所需请求特征与标签按 §4.4、§4.12 对齐后，再判断哪些样本可直接回测。
 - 现行 session 轨迹 bug 修复另行推进；本单直接设计新的数据合同，不承担旧结果适配。

@@ -139,6 +139,20 @@ public:
         (void)input_round_index;
         OnRequestSent(request_id);
     }
+    // v3 流式边(轨迹 v3 §4.43):响应开始与片段批次。loop 在 SSE 消费点调
+    // ——MessageStart 到 = 响应开始;文本/思考增量过 UTF-8 闸后即片段
+    //(流收口的闸内尾巴同样放行)。默认 no-op——旁路桥与旧测试替身零改动;
+    // v3 主桥在实现里落 model.response.started / model.response.delta(攒
+    // 批),OnOutputCompleted 的实现据此走 CompleteStreamResponse 三件套
+    // 收口。delta_type 取 "text"|"reasoning"(与 v3 deltaType 同名)。一次
+    // 物理请求一条流;恢复重试另起新 request_id,流不跨请求拼接。
+    virtual void OnResponseStarted(const std::string& request_id) { (void)request_id; }
+    virtual void OnStreamDelta(const std::string& request_id, const std::string& delta_type,
+                               const std::string& text) {
+        (void)request_id;
+        (void)delta_type;
+        (void)text;
+    }
     virtual void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                  bool reported_by_provider, const std::string& provider_response_id,
                                  int cache_epoch = 0, bool prefix_append_only = true,

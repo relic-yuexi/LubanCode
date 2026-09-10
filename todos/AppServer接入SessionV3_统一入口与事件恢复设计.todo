@@ -242,7 +242,7 @@ resume 的三类恢复分别为：UI 历史索引、当前有效模型链、执�
 
 Workflow 的具体接入另见 [Workflow 接入 Session v3](Workflow接入SessionV3_编排账与节点恢复设计.todo)：AppServer 调同一 WorkflowService，run 概要读编排账，节点详情读独立 session。旧 workflow/query 的目录与 lastSeq 不直接当新事实源；新启动/恢复/取消、节点交互和复合游标按该单实施，不复制执行器到协议层。
 
-1. **统一服务入口与身份**：先收敛 SessionFactory/SessionRuntime/CommandService、输入队列、操作去重和单写者提交；终端、one-shot、AppServer 调同一路。无需等待整个 SDK 打包工程，但不能先在 server.cpp 复制一份新调度。
+1. **统一服务入口与身份**（PR #36，v0.26.246）：先收敛 SessionFactory/SessionRuntime/CommandService、输入队列、操作去重和单写者提交；终端、one-shot、AppServer 调同一路。无需等待整个 SDK 打包工程，但不能先在 server.cpp 复制一份新调度。
 2. **只读 v3 接线**：接 history/context/request/operation 查询、ProjectResume 结果展示、分页和来源链；支持 compact 标记、隐藏消息与工具多文件详情。纯读零执行。
 3. **输入与恢复闭环**：接 create/submit/command/interrupt/resume/continue、附件引用、审批恢复和 Lua hook；核对正式回执与落盘顺序。
 4. **可靠事件与断线**：持久 cursor、快照交接、增量偏移、背压、重复交付、WS 断线策略与宿主关闭；先单控制连接验通。
