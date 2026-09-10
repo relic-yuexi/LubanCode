@@ -1185,6 +1185,138 @@ TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens �
     CHECK(recorder.pressure.empty());
 }
 
+// ---------------------------------------------------------------------------
+// 差距清单 §8.2 第 8 条(loop 侧):最后一道容量检查吃 extra_body 覆盖后的
+// 有效输出上限;应急收窄穿透覆盖位。顺带 §8.2 第 7 条:拍平对照随
+// RequestPreparedContext 递给边界账。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 带 extra_body 覆盖面的假后端:模拟"用户在 provider 级 extra_body 里写了
+// max_tokens"的真实形状——GetEffectiveOutputLimit 报覆盖值,Force 把收窄
+// 写进请求级覆盖位(合并序最后,压过 provider 级),BuildWireMessageMap
+// 出一份可对账的拍平对照(差距 7 的 ctx 递送面)。
+class ExtraBodyOverrideBackend final : public FakeBackend {
+public:
+    std::optional<int> override_tokens;  // nullopt = 没有 extra_body 覆盖
+
+    api::Backend::EffectiveOutputLimit GetEffectiveOutputLimit(const api::Request& request) const override {
+        api::Backend::EffectiveOutputLimit out;
+        if (override_tokens.has_value()) {
+            out.tokens = *override_tokens;
+            out.overridden = true;
+            return out;
+        }
+        out.tokens = request.max_tokens;
+        return out;
+    }
+
+    void ForceMaxOutputTokensOverride(api::Request& request, int tokens) const override {
+        if (override_tokens.has_value()) {
+            request.extra_body["max_tokens"] = tokens;
+        }
+    }
+
+    std::optional<api::WireMessageMap> BuildWireMessageMap(const api::Request& request) const override {
+        api::WireMessageMap map;
+        map.container = "messages";
+        map.message_to_wire.assign(request.messages.size(), {});
+        for (std::size_t i = 0; i < request.messages.size(); ++i) {
+            map.message_to_wire[i] = {i};
+        }
+        map.wire_element_count = request.messages.size();
+        return map;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("预检(差距8): extra_body 覆盖输出上限——预留吃覆盖值,应急收窄穿透覆盖") {
+    // 窗 32768,profile 未声明输出上限(估算预留封顶 8192),输入极小:
+    // 老路 8192 + 输入 + 余量装得下,直接放行——wire 却带着 extra_body
+    // 覆盖的 32800,出门就撞墙(估在前、放行在后,差距清单 §8.2 第 8 条
+    // 的病灶)。新路:预留读覆盖后的有效值 32800,越窗进应急支,收窄到
+    // 2048 并穿透覆盖位(请求级 extra_body 压过 provider 级),窄值真出门。
+    ExtraBodyOverrideBackend backend;
+    backend.scripts = {TextOnlyScript("短交接")};
+    backend.override_tokens = 32800;
+    tools::ToolRegistry registry;
+
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_steps_per_turn = 1, .context_window_tokens = 32768},
+                                          .system_prompt = "sys"});
+
+    class Recorder final : public agent::LoopBoundaryRecorder {
+    public:
+        std::vector<std::optional<api::WireMessageMap>> prepared_maps;
+        std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext& ctx) override {
+            prepared_maps.push_back(ctx.wire_message_map);
+            return "req-1";
+        }
+        void OnRequestSent(const std::string&) override {}
+        void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                             bool) override {}
+        bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                               const std::string&) override {
+            return true;
+        }
+        void OnOutputFailed(const std::string&, const std::string&) override {}
+        void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
+    } recorder;
+    agent::TurnWiring turn_wiring;
+    turn_wiring.boundary_recorder = &recorder;
+
+    const auto result = loop.Run("查一查", std::move(turn_wiring));
+    REQUIRE(result.has_value());  // 应急放行:同任务续跑,不是死路
+    REQUIRE(backend.captured_requests.size() == 1);
+    const api::Request& sent = backend.captured_requests[0];
+    // 应急收窄(32768/16 → 2048)真写进了请求,且穿透覆盖位——只改
+    // Request::max_tokens 出不了门,extra_body 尾部合并会把 32800 压回去。
+    REQUIRE(sent.max_tokens.has_value());
+    CHECK(*sent.max_tokens == 2048);
+    REQUIRE(sent.extra_body.contains("max_tokens"));
+    CHECK(sent.extra_body.at("max_tokens") == 2048);
+    // 收尾交代注入了尾消息(应急支的账)。
+    bool saw_wrapup = false;
+    for (const auto& block : sent.messages.back().content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+            if (text->text.find("上下文将尽") != std::string::npos) {
+                saw_wrapup = true;
+            }
+        }
+    }
+    CHECK(saw_wrapup);
+    // 差距 7:拍平对照随 prepared 递到了边界账(backend 提供就有值)。
+    REQUIRE(recorder.prepared_maps.size() == 1);
+    REQUIRE(recorder.prepared_maps[0].has_value());
+    CHECK(recorder.prepared_maps[0]->container == "messages");
+    CHECK(recorder.prepared_maps[0]->wire_element_count == sent.messages.size());
+}
+
+TEST_CASE("预检(差距8): 无覆盖时预留照旧吃封顶估算,不造 extra_body 键") {
+    // 对照案:同一副形状但 backend 没有 extra_body 覆盖——预留走既有
+    // 封顶路(8192 装得下,放行),请求不带 max_tokens 字段(unset 交
+    // 服务端默认),extra_body 一个键不造:没有覆盖就没有写侧动作,
+    // 与从前逐字节一致。
+    ExtraBodyOverrideBackend backend;
+    backend.scripts = {TextOnlyScript("好")};
+    tools::ToolRegistry registry;
+
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_steps_per_turn = 1, .context_window_tokens = 32768},
+                                          .system_prompt = "sys"});
+    agent::TurnWiring turn_wiring;
+
+    const auto result = loop.Run("问一句", std::move(turn_wiring));
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 1);
+    CHECK_FALSE(backend.captured_requests[0].max_tokens.has_value());
+    CHECK(backend.captured_requests[0].extra_body.empty());
+}
+
 TEST_CASE("预检应急(§4.1 收紧): 封顶后仍装不下才进应急,收尾交代恰一道") {
     // 历史真满的那一支:窗 32768、声明 16384(封顶到 8192),两轮工具各
     // 13000 词——第三份请求约 26000 + 8192 + 512 越窗(封顶也救不了),

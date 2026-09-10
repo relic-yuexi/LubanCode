@@ -134,6 +134,10 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message, doubl
                            EstimateTextTokensForPreflight(b.content) + image_tokens;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                     return EstimateTextTokensForPreflight(b.text) + EstimateTextTokensForPreflight(b.signature);
+                } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
+                    // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
+                    // anthropic wire 原样回传,真占输入 token,按字节口径估。
+                    return EstimateTextTokensForPreflight(b.data);
                 } else {
                     return 0;
                 }
@@ -1246,6 +1250,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                                         : EstimateMessageTokensForPreflight(request.messages.back(),
                                                                                             token_calibration);
             std::size_t output_tokens = estimate_output_reserve;
+            // 差距清单 §8.2 第 8 条(单子 §1.18:容量判断采用本次请求实际
+            // 生效的输出上限):输出预留读 extra_body 覆盖后的有效值——
+            // wire 拼装的 extra_body 尾部合并发生在所有内置字段之后,用户
+            // 写在 extra_body 里的输出上限键(anthropic/chat 的 max_tokens、
+            // responses 的 max_output_tokens、gemini 的 generationConfig.
+            // maxOutputTokens)才是真正出门的值;估在前、放行在后,就是
+            // "覆盖前形状过了闸、覆盖后形状撞了墙"。用户手笔不受能力级
+            // 封顶(与 ConfigFile 同款例外),降级判定也认同一份——没有
+            // 覆盖时预留照旧吃封顶后的 estimate_output_reserve,占坑单
+            // §4.1 的帽不因此失效。
+            const api::Backend::EffectiveOutputLimit effective_output = backend_.GetEffectiveOutputLimit(request);
+            std::size_t declared_output_reserve_for_degrade = declared_output_reserve;
+            if (effective_output.overridden && effective_output.tokens.has_value()) {
+                output_tokens = static_cast<std::size_t>(*effective_output.tokens);
+                declared_output_reserve_for_degrade = output_tokens;
+            }
             // 三项账进可观测事件(派工单 §4.4):estimated_input + reserved_
             // output + protocol_margin,判定处当场发,不等问题发生后再翻账。
             const auto emit_preflight = [&](std::size_t used_reserve, bool clamped) {
@@ -1280,6 +1300,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     // 关键结果/未提交改动/后续建议)——durable handoff 的正文
                     // 由模型产出,同任务续跑而不是叫用户开新会话。
                     request.max_tokens = static_cast<int>(emergency);
+                    // 差距清单 §8.2 第 8 条写侧:extra_body 覆盖还在的话,窄值
+                    // 只写 Request::max_tokens 出不了门(尾部合并会把宽的覆盖
+                    // 值压回去),须写进合并序最后的请求级覆盖位。
+                    backend_.ForceMaxOutputTokensOverride(request, static_cast<int>(emergency));
                     output_tokens = emergency;
                     emit_preflight(output_tokens, /*clamped=*/true);
                     if (!context_wrapup_nudged) {
@@ -1304,15 +1328,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                              : "。自动压缩后仍装不下；请开新会话、缩短输入，或调低输出上限。") +
                         " 现场不丢:已完成的工具结果与最后检查点已随任务保留,可据此续派同一任务。");
                 }
-            } else if (ExceedsContextWindow(input_tokens, declared_output_reserve, window_tokens)) {
+            } else if (ExceedsContextWindow(input_tokens, declared_output_reserve_for_degrade, window_tokens)) {
                 // 实发 max_tokens 优雅降级(§4.1 另账):输入 + 声明上限超窗
                 // 而输入 + 封顶预留不超——能力上限是"最多能给",不是"每次
                 // 都要留足"。实发值收到 window − 输入 − 协议余量;下限自守
                 //(封顶预留装得下 ⇒ 余量 ≥ 帽 ≥ 8k,再低只可能出现在上面
                 // 的应急支)。不进收尾禁令、不发 PreflightExceeded——历史
                 // 没满,模型照常调工具;降级事实走日志,不进轨迹的应急账。
+                // extra_body 覆盖存在时降级判定认覆盖值(差距清单 §8.2 第 8
+                // 条):覆盖装得下就不降,降了窄值也照写侧规矩穿覆盖出门。
                 const std::size_t degraded = window_tokens - input_tokens - kContextPreflightHeadroomTokens;
                 request.max_tokens = static_cast<int>(degraded);
+                backend_.ForceMaxOutputTokensOverride(request, static_cast<int>(degraded));
                 platform::LogSink::Instance().Info(
                     "loop", "[context-preflight] estimated_input=" + std::to_string(input_tokens) +
                                 " declared_output=" + std::to_string(declared_output_reserve) +
@@ -1488,6 +1515,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 prepared_ctx.tools_hash = step_prefix_account.tools_hash;
                 prepared_ctx.cache_epoch = step_prefix_account.cache_epoch;
                 prepared_ctx.prefix_append_only = step_prefix_account.append_only;
+                // 差距清单 §8.2 第 7 条:内部消息序 -> wire 元素序的拍平
+                // 对照随请求快照递给边界账(四家真后端提供,桩后端 nullopt),
+                // v3 账 prepared 事件的 inputMessageRefs 对 wire 消息序靠它。
+                prepared_ctx.wire_message_map = backend_.BuildWireMessageMap(request);
                 trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
                 if (trajectory_request_id.empty()) {
                     // 轨迹账写盘失败,本枚请求不出门:归还预算 permit 名额

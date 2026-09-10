@@ -91,9 +91,21 @@ struct ToolResultBlock {
 // 模型的思考过程(extended thinking / reasoning)。text 是思考正文,
 // signature 是 Anthropic extended thinking 的签名——续会话重放历史时
 // thinking 块必须带 signature,否则第二轮会被服务端以 400 拒掉。
+// 兼容端可能回空签名:中立层照实保存、照实回传,不按 Claude 官方端
+// "签名非空"的要求虚构一枚(轨迹 v3 差距清单 §8.2 第 6 条)。
 struct ThinkingBlock {
     std::string text;
     std::string signature;
+};
+
+// 服务端加密/遮蔽的思考块(Anthropic 的 redacted_thinking,轨迹 v3 差距
+// 清单 §8.2 第 6 条、单子 §4.42"不透明块")。正文对客户端不可见,wire 上
+// 只有一段不透明 data——宿主只保存事实、无损回传,绝不在本地解、不压成
+// 普通文本再让下一轮猜回来。它没有 text 也没有 signature:chat/responses/
+// gemini 三家的思考回传路都吃不着它(不透明载荷没法翻成 reasoning 正文),
+// 只有 anthropic wire 认这个形状。
+struct RedactedThinkingBlock {
+    std::string data;  // wire 给的不透明载荷,原样保存原样回传
 };
 
 // 服务端执行的工具调用(动态工具 P3·Claude NativeReference)。Anthropic 的
@@ -118,7 +130,7 @@ struct ServerToolResultBlock {
 
 using ContentBlock =
     std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, ModelImageBlock,
-                 ServerToolUseBlock, ServerToolResultBlock>;
+                 ServerToolUseBlock, ServerToolResultBlock, RedactedThinkingBlock>;
 
 // 历史重放时模型输出图片的替身文案(四家 wire 共用):让模型记得自己
 // 出过一张图,但不把 base64 塞回请求。
@@ -445,6 +457,14 @@ struct ServerToolResult {
     nlohmann::json content = nlohmann::json::object();
 };
 
+// 服务端加密/遮蔽的思考块整块到齐(轨迹 v3 差距清单 §8.2 第 6 条)。
+// anthropic 流里 redacted_thinking 随 content_block_start 一次给完(只有
+// 不透明 data,没有增量、没有 signature),assembler 直接落
+// RedactedThinkingBlock,不开累积器。
+struct RedactedThinking {
+    std::string data;  // wire 给的不透明载荷
+};
+
 // 工具调用入参的增量片段(JSON 字符串,要靠调用方自己拼完整再解析)。
 struct ToolUseInputDelta {
     int index = 0;
@@ -505,7 +525,7 @@ struct StreamError {
 
 using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
                                  ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, ImageOutput,
-                                 ServerToolUseStart, ServerToolResult, StreamError>;
+                                 ServerToolUseStart, ServerToolResult, RedactedThinking, StreamError>;
 
 // ---------------------------------------------------------------------------
 // 错误
@@ -589,5 +609,47 @@ inline void MergeExtraBody(nlohmann::json& body, const nlohmann::json& source) {
         body[it.key()] = it.value();
     }
 }
+
+// ---------------------------------------------------------------------------
+// 内部消息 -> wire 元素的拍平对照(轨迹 v3 差距清单 §8.2 第 7 条)
+// ---------------------------------------------------------------------------
+
+// v3 账 model.request.prepared 的 inputMessageRefs 指内部消息;四家 wire 的
+// 拍平让内外数量不一一相等(schema §8.1 横切:同一份 5 条内部消息的对话,
+// anthropic 出 5 条 messages、chat 出 6 条、responses 出 7 个 input item、
+// gemini 出 7 条 contents)。验尸要逐条对上,靠这份对照:
+//   container —— wire 上装消息的容器名("messages"/"input"/"contents"),
+//                指明 message_to_wire 里的下标在哪个数组里数;
+//   message_to_wire[i] —— 第 i 条内部消息的内容落在 wire 的哪些元素下标
+//                (空 = 整条没落进容器:system 顶置到顶层字段、思考块被
+//                跳过后整条没剩东西等);多条内部消息可以指同一 wire 下标
+//                (chat 把 Request::system 与多条 System 消息拼成一条
+//                system 消息),一条内部消息也可以裂成多个下标(chat 把
+//                正文与工具结果分家、responses/gemini 逐块成元素)。
+//   wire_element_count —— 容器里的元素总数,对账用;与各家 BuildRequestJson
+//                实际产出的容器长度恒等(不等 = 拍平和表劈了)。
+// 这是拍平的只读影子:BuildRequestJson 的出口形状不动一分,各家的
+// BuildMessageWireMap 与它同一条拼装路产出这张表。
+struct WireMessageMap {
+    std::string container;
+    std::vector<std::vector<std::size_t>> message_to_wire;
+    std::size_t wire_element_count = 0;
+};
+
+// ---------------------------------------------------------------------------
+// extra_body 覆盖后的输出上限取数(轨迹 v3 差距清单 §8.2 第 8 条)
+// ---------------------------------------------------------------------------
+
+// 顶层整数键按 extra_body 覆盖序取数:provider 级先、请求级
+// (Request::extra_body)后,后者压前者——与 MergeExtraBody 的合并序同一
+// 套。键不在场/不是整数 = 没覆盖(nullopt),调用方用请求字段原值。
+// 差距清单 §8.2 第 8 条(单子 §1.18):wire 拼装的 extra_body 尾部合并发生
+// 在所有内置字段之后,用户写在 extra_body 里的输出上限键
+// (anthropic/chat:max_tokens;responses:max_output_tokens)才是真正出门
+// 的值——容量/估算侧的输出预留须认它,不认 Request::max_tokens 的覆盖
+// 前原值。gemini 的 generationConfig.maxOutputTokens 深一层,在它自家
+// backend 里取,不走这只(中立层不带厂商字眼)。
+std::optional<int> IntKeyFromExtraBody(const nlohmann::json& provider_extra_body,
+                                       const nlohmann::json& request_extra_body, const char* key);
 
 }  // namespace lubancode::api

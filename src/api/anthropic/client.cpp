@@ -82,8 +82,13 @@ json ContentBlockToJson(const ContentBlock& block) {
                 return j;
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                 // 续会话重放历史时 thinking 块必须带 signature,否则第二轮
-                // 会被服务端以 400 拒掉。
+                // 会被服务端以 400 拒掉。兼容端回的空签名照实回传(差距清单
+                // §8.2 第 6 条),不虚构非空签名。
                 return json{{"type", "thinking"}, {"thinking", b.text}, {"signature", b.signature}};
+            } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
+                // 加密思考块(差距清单 §8.2 第 6 条、单子 §4.42):不透明
+                // data 原样回传,无损续会话——不解、不压文本、不丢块。
+                return json{{"type", "redacted_thinking"}, {"data", b.data}};
             } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                 // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
                 return json{{"type", "text"}, {"text", ModelImageReplayText(b)}};
@@ -169,7 +174,10 @@ std::optional<json> BuildThinkingJson(const Request& request) {
 
 // 拼出 Anthropic Messages API 的请求体(stream: true 恒开,M1 只走流式)。
 // 声明在 client.hpp 里,单测用;线上代码路径(send_stream)也是调这个函数。
-json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body) {
+// wire_map 非空时,消息拍平的下标对照(差距清单 §8.2 第 7 条)随拼装
+// 同路产出——只观察、不影响出口 JSON 一个字节。
+json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body,
+                      WireMessageMap* wire_map) {
     json body;
     body["model"] = request.model;
     // max_tokens 是 anthropic 协议的必填字段:unset 时落公开兜底
@@ -214,7 +222,15 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     }
 
     json messages = json::array();
-    for (const auto& message : request.messages) {
+    // 拍平对照(差距清单 §8.2 第 7 条):anthropic 现行逐条对位——每条
+    // 非 System 内部消息恰落一条 wire 消息;System 顶置顶层 system,不占
+    // messages 位(对照表里是空)。
+    if (wire_map != nullptr) {
+        wire_map->container = "messages";
+        wire_map->message_to_wire.assign(request.messages.size(), {});
+    }
+    for (std::size_t message_index = 0; message_index < request.messages.size(); ++message_index) {
+        const auto& message = request.messages[message_index];
         // System 角色已顶置到顶层 system,对话流里一条不落(不重复注入)。
         if (message.role == Role::System) {
             continue;
@@ -225,7 +241,13 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
         }
         // Tool 角色折 user 容器(协议无 tool 角);逐条对位、相邻不合并
         // ——合同册钉死的现行拍平形状,换骨不换皮。
+        if (wire_map != nullptr) {
+            wire_map->message_to_wire[message_index].push_back(messages.size());
+        }
         messages.push_back(json{{"role", RoleToString(message.role)}, {"content", content}});
+    }
+    if (wire_map != nullptr) {
+        wire_map->wire_element_count = messages.size();
     }
     body["messages"] = messages;
 
@@ -312,6 +334,15 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     return body;
 }
 
+// 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
+// 产出(内部传指针共用,不另写影子逻辑),只读请求、不发网络。消息拍平
+// 与 native_web_search/extra_body 无关(那只动顶层键),签名只吃 request。
+WireMessageMap BuildMessageWireMap(const Request& request) {
+    WireMessageMap map;
+    BuildRequestJson(request, /*native_web_search=*/false, json::object(), &map);
+    return map;
+}
+
 bool ShouldRecoverTaggedThinking(const Request& request) {
     if (request.messages.size() < 2) {
         return false;
@@ -333,9 +364,14 @@ bool ShouldRecoverTaggedThinking(const Request& request) {
     if (assistant.role != Role::Assistant) {
         return false;
     }
-    const bool has_thinking =
-        std::any_of(assistant.content.begin(), assistant.content.end(),
-                    [](const ContentBlock& block) { return std::holds_alternative<ThinkingBlock>(block); });
+    // 思考块在场的判据把加密思考也算上(差距清单 §8.2 第 6 条):redacted_
+    // thinking 与 thinking 同为"这轮 assistant 在思考"的证据,工具续轮的
+    // 兼容门同样该开——门开了只多一道 <think> 探测,正规流零影响。
+    const bool has_thinking = std::any_of(assistant.content.begin(), assistant.content.end(),
+                                          [](const ContentBlock& block) {
+                                              return std::holds_alternative<ThinkingBlock>(block) ||
+                                                     std::holds_alternative<RedactedThinkingBlock>(block);
+                                          });
     const bool has_tool_use =
         std::any_of(assistant.content.begin(), assistant.content.end(),
                     [](const ContentBlock& block) { return std::holds_alternative<ToolUseBlock>(block); });
@@ -349,6 +385,34 @@ std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::
         else base[name] = value;
     }
     return base;
+}
+
+// 差距清单 §8.2 第 7 条:边界账对账用,自家拍平就是真值。
+std::optional<WireMessageMap> AnthropicBackend::BuildWireMessageMap(const Request& request) const {
+    return BuildMessageWireMap(request);
+}
+
+// 差距清单 §8.2 第 8 条:anthropic 的 max_tokens 必填——无 extra_body 覆盖
+// 时落公开兜底(与 BuildRequestJson 同一枚),估算侧拿到的永远是 wire 真
+// 带的值,不会是 nullopt。
+Backend::EffectiveOutputLimit AnthropicBackend::GetEffectiveOutputLimit(const Request& request) const {
+    EffectiveOutputLimit out;
+    if (const std::optional<int> overridden = IntKeyFromExtraBody(extra_body_, request.extra_body, "max_tokens");
+        overridden.has_value()) {
+        out.tokens = *overridden;
+        out.overridden = true;
+        return out;
+    }
+    out.tokens = request.max_tokens.value_or(kRequiredMaxOutputTokensFallback);
+    return out;
+}
+
+// 差距清单 §8.2 第 8 条写侧:extra_body 写过 max_tokens 才动请求级键,
+// 压过 provider 级;没写过不造键,出口形状与从前逐字节一致。
+void AnthropicBackend::ForceMaxOutputTokensOverride(Request& request, int tokens) const {
+    if (IntKeyFromExtraBody(extra_body_, request.extra_body, "max_tokens").has_value()) {
+        request.extra_body["max_tokens"] = tokens;
+    }
 }
 
 AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,

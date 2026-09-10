@@ -179,7 +179,7 @@ bool WantsKeepAll(const Request& request) {
 }  // namespace
 
 nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& extra_body,
-                                const ChatRequestOptions& options) {
+                                const ChatRequestOptions& options, WireMessageMap* wire_map) {
     json body{{"model", request.model}, {"stream", true}};
     // max_tokens 可省略(chat 协议):unset 就整个不带字段,交服务端/模型
     // 默认——vLLM 这类端的默认上限远大于旧版写死的 4096,reasoning 模型
@@ -189,6 +189,13 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
     }
 
     json messages = json::array();
+    // 拍平对照(差距清单 §8.2 第 7 条)先立骨架:第 7 条要的是"内部消息
+    // 序 -> wire 消息序",chat 的 system 是多源拼一条(Request::system +
+    // 多条 System 消息),正文与工具结果可一裂二,对照表按实际落点记。
+    if (wire_map != nullptr) {
+        wire_map->container = "messages";
+        wire_map->message_to_wire.assign(request.messages.size(), {});
+    }
     // 四角色换骨(v3 第二棒,差距清单 §8.2 第 2 条):System 角色消息是
     // 上下文根,按 Chat 协议落 system role 消息——这家的 system 是消息流
     // 里的一员,没有顶层参数(与 anthropic 的顶层 system、responses 的
@@ -198,10 +205,12 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
     // ——v3 §1.2 的 system 是 soul/规则文本,富块后续棒次需要再扩,这里
     // 不悄悄丢也不硬造。
     std::string system_text = request.system;
-    for (const auto& message : request.messages) {
+    for (std::size_t message_index = 0; message_index < request.messages.size(); ++message_index) {
+        const auto& message = request.messages[message_index];
         if (message.role != Role::System) {
             continue;
         }
+        bool contributed = false;
         for (const auto& block : message.content) {
             if (const auto* text = std::get_if<TextBlock>(&block);
                 text != nullptr && !text->text.empty()) {
@@ -209,7 +218,14 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
                     system_text += "\n";
                 }
                 system_text += text->text;
+                contributed = true;
             }
+        }
+        // 多源拼进同一条 system 消息(差距清单 §8.2 第 7 条的"两个内部
+        // messageRef 对应同一 wire message"):出过字的 System 消息都指
+        // 向 wire[0];没出过字的空壳如实记空。
+        if (wire_map != nullptr && contributed) {
+            wire_map->message_to_wire[message_index].push_back(0);
         }
     }
     if (!system_text.empty()) {
@@ -239,6 +255,9 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
             std::string text = JoinedText(message);
             const bool has_image = HasImage(message);
             if (!text.empty() || has_image) {
+                if (wire_map != nullptr) {
+                    wire_map->message_to_wire[message_index].push_back(messages.size());
+                }
                 messages.push_back(json{{"role", "user"},
                                         {"content", has_image ? TextAndImages(message) : json(text)}});
             }
@@ -253,6 +272,9 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
                     // 协议——图片字节不出门,追加一行明降级附注指路落盘
                     // 路径;没有图片块的结果一个字节不加,老钉子不红。
                     std::string content = result->content + ToolResultImageDegradedNote(*result);
+                    if (wire_map != nullptr) {
+                        wire_map->message_to_wire[message_index].push_back(messages.size());
+                    }
                     messages.push_back(json{{"role", "tool"},
                                             {"tool_call_id", result->tool_use_id},
                                             {"content", std::move(content)}});
@@ -300,7 +322,13 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         if (!tool_calls.empty()) {
             assistant["tool_calls"] = std::move(tool_calls);
         }
+        if (wire_map != nullptr) {
+            wire_map->message_to_wire[message_index].push_back(messages.size());
+        }
         messages.push_back(std::move(assistant));
+    }
+    if (wire_map != nullptr) {
+        wire_map->wire_element_count = messages.size();
     }
     body["messages"] = std::move(messages);
 
@@ -403,6 +431,16 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
     MergeExtraBody(body, extra_body);
     MergeExtraBody(body, request.extra_body);
     return body;
+}
+
+// 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
+// 产出(第四参传指针共用)。消息拍平与 options/extra_body 无关——
+// options 只动 assistant 消息内部字段,extra_body 只动顶层键,都动不了
+// messages 的条数与次序。
+WireMessageMap BuildMessageWireMap(const Request& request) {
+    WireMessageMap map;
+    BuildRequestJson(request, json::object(), ChatRequestOptions{}, &map);
+    return map;
 }
 
 }  // namespace lubancode::api::chat

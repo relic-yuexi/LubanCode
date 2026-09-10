@@ -59,6 +59,15 @@ std::optional<StreamEvent> HandleContentBlockStart(const json& data, bool parse_
         }
         return event;
     }
+    if (type == "redacted_thinking") {
+        // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条、单子 §4.42):整只
+        // (只有不透明 data)随 content_block_start 一次到齐,没有增量、
+        // 没有 signature。无损进历史、下一轮原样回传——不压文本、不解密、
+        // 不丢块。与 server_tool_search 无关,不设门:凡协议里真出现就认。
+        RedactedThinking event;
+        event.data = it->value("data", "");
+        return event;
+    }
     if (type != "tool_use") {
         // text / thinking 块的起始不单独发事件,文本内容靠后续
         // content_block_delta 里的 text_delta 一段段拼出来。

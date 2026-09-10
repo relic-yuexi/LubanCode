@@ -26,6 +26,10 @@ std::size_t BlockChars(const api::ContentBlock& block) {
                 return b.tool_use_id.size() + b.content.size();
             } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                 return b.text.size() + b.signature.size();
+            } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
+                // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
+                // 计字节,与 thinking 同位。
+                return b.data.size();
             } else {
                 return 0;
             }
@@ -268,6 +272,10 @@ std::size_t EstimateMessageTokens(const api::Message& message, double calibratio
                            image_tokens;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                     return EstimateUtf8Tokens(b.text) + EstimateUtf8Tokens(b.signature);
+                } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
+                    // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):载荷真上
+                    // wire,按默认尺折 token。
+                    return EstimateUtf8Tokens(b.data);
                 } else {
                     return 0;
                 }

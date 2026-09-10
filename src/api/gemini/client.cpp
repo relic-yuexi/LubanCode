@@ -94,4 +94,72 @@ std::string GeminiBackend::SerializeForDiagnostics(const Request& request) const
     return DumpRequestBody("gemini", BuildRequestJson(sanitized_request, extra_body_));
 }
 
+namespace {
+
+// gemini 的输出上限键深一层:extra_body.generationConfig.maxOutputTokens
+//(generationConfig 是它家唯一的深合并特例,覆盖序仍是 provider 级先、
+// 请求级后)。键不在场/非整数 = 没覆盖。
+std::optional<int> MaxOutputTokensOverride(const nlohmann::json& provider_extra,
+                                           const nlohmann::json& request_extra) {
+    std::optional<std::int64_t> value;
+    const auto apply = [&value](const nlohmann::json& source) {
+        if (!source.is_object()) {
+            return;
+        }
+        const auto it = source.find("generationConfig");
+        if (it == source.end() || !it->is_object()) {
+            return;
+        }
+        const auto sub = it->find("maxOutputTokens");
+        if (sub == it->end() || !sub->is_number_integer()) {
+            return;
+        }
+        value = sub->get<std::int64_t>();
+    };
+    apply(provider_extra);
+    apply(request_extra);
+    if (!value.has_value()) {
+        return std::nullopt;
+    }
+    constexpr std::int64_t kIntMax = 2147483647;
+    if (*value < 0) {
+        return 0;
+    }
+    return static_cast<int>(*value > kIntMax ? kIntMax : *value);
+}
+
+}  // namespace
+
+// 拍平对照(差距清单 §8.2 第 7 条):边界账对账用,自家拍平就是真值。
+std::optional<WireMessageMap> GeminiBackend::BuildWireMessageMap(const Request& request) const {
+    return BuildMessageWireMap(request);
+}
+
+// 差距清单 §8.2 第 8 条:gemini 的输出上限在 generationConfig.
+// maxOutputTokens(深一层),unset 交服务端默认,如实 nullopt。
+Backend::EffectiveOutputLimit GeminiBackend::GetEffectiveOutputLimit(const Request& request) const {
+    EffectiveOutputLimit out;
+    if (const std::optional<int> overridden = MaxOutputTokensOverride(extra_body_, request.extra_body);
+        overridden.has_value()) {
+        out.tokens = *overridden;
+        out.overridden = true;
+        return out;
+    }
+    out.tokens = request.max_tokens;
+    return out;
+}
+
+// 差距清单 §8.2 第 8 条写侧:extra_body 写过该键才动请求级覆盖位;写进
+// 请求级 generationConfig.maxOutputTokens(合并序最后的深合并层,压过
+// provider 级),没写过不造键。
+void GeminiBackend::ForceMaxOutputTokensOverride(Request& request, int tokens) const {
+    if (MaxOutputTokensOverride(extra_body_, request.extra_body).has_value()) {
+        if (!request.extra_body.contains("generationConfig") ||
+            !request.extra_body["generationConfig"].is_object()) {
+            request.extra_body["generationConfig"] = nlohmann::json::object();
+        }
+        request.extra_body["generationConfig"]["maxOutputTokens"] = tokens;
+    }
+}
+
 }  // namespace lubancode::api::gemini

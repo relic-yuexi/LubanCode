@@ -47,6 +47,10 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                 // responses wire 的 reasoning 是一次性的,不参与续会话重放。
                 // 这里给一个 reasoning 占位,调用方(BuildRequestJson)会跳过。
                 return json{{"type", "__thinking_skip__"}};
+            } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
+                // 加密思考块(差距清单 §8.2 第 6 条)同款一次性:不透明载荷
+                // 在这副 wire 上没有可回传的形状,占位由调用方跳过。
+                return json{{"type", "__thinking_skip__"}};
             } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                 // 模型输出图片的替身:历史里只有 artifact 引用,重放翻成
                 // 一句短文本标记(base64 绝不塞回请求,续聊不重放正文)。
@@ -102,7 +106,8 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
 
 }  // namespace
 
-nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body) {
+nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body,
+                                WireMessageMap* wire_map) {
     json body;
     body["model"] = request.model;
     // max_output_tokens 可省略(responses 协议):unset 交服务端默认
@@ -172,7 +177,15 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     }
 
     json input = json::array();
-    for (const auto& message : request.messages) {
+    // 拍平对照(差距清单 §8.2 第 7 条):responses 逐块成 item——一条内部
+    // 消息可裂成多个 item(正文 message + 每枚工具调用/结果各一个),
+    // 思考块(含加密思考)被跳过后整条没剩东西的就是空对照。
+    if (wire_map != nullptr) {
+        wire_map->container = "input";
+        wire_map->message_to_wire.assign(request.messages.size(), {});
+    }
+    for (std::size_t message_index = 0; message_index < request.messages.size(); ++message_index) {
+        const auto& message = request.messages[message_index];
         // System 角色已顶置进 instructions,input 里一条不落(不重复注入)。
         if (message.role == Role::System) {
             continue;
@@ -186,8 +199,12 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         }
         if (!has_image) {
             for (const auto& block : message.content) {
-                if (std::holds_alternative<ThinkingBlock>(block)) {
+                if (std::holds_alternative<ThinkingBlock>(block) ||
+                    std::holds_alternative<RedactedThinkingBlock>(block)) {
                     continue;  // 思考块不回传:responses wire 的 reasoning 是一次性的
+                }
+                if (wire_map != nullptr) {
+                    wire_map->message_to_wire[message_index].push_back(input.size());
                 }
                 input.push_back(ContentBlockToItem(block, message.role));
             }
@@ -200,6 +217,9 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         const auto flush_content = [&] {
             if (content.empty()) {
                 return;
+            }
+            if (wire_map != nullptr) {
+                wire_map->message_to_wire[message_index].push_back(input.size());
             }
             input.push_back(json{{"type", "message"}, {"role", WireRole(message.role)}, {"content", content}});
             content = json::array();
@@ -216,21 +236,33 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                                                {"image_url", "data:" + b.media_type + ";base64," + b.data}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                         // 思考块不回传:responses wire 的 reasoning 是一次性的
+                    } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
+                        // 加密思考块(差距清单 §8.2 第 6 条)同款一次性,
+                        // 不透明载荷没有可回传的形状。
                     } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                         // 图片引用翻短文本标记,与成组分支同规矩。
                         content.push_back(json{{"type", TextPartType(message.role)},
                                                {"text", ModelImageReplayText(b)}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_content();
+                        if (wire_map != nullptr) {
+                            wire_map->message_to_wire[message_index].push_back(input.size());
+                        }
                         input.push_back(ContentBlockToItem(block, message.role));
                     } else {
                         flush_content();
+                        if (wire_map != nullptr) {
+                            wire_map->message_to_wire[message_index].push_back(input.size());
+                        }
                         input.push_back(ContentBlockToItem(block, message.role));
                     }
                 },
                 block);
         }
         flush_content();
+    }
+    if (wire_map != nullptr) {
+        wire_map->wire_element_count = input.size();
     }
     body["input"] = input;
 
@@ -260,6 +292,15 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     MergeExtraBody(body, request.extra_body);
 
     return body;
+}
+
+// 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
+// 产出(第四参传指针共用)。消息拍平与 native_web_search/extra_body 无关
+//(那只动顶层键)。
+WireMessageMap BuildMessageWireMap(const Request& request) {
+    WireMessageMap map;
+    BuildRequestJson(request, /*native_web_search=*/false, json::object(), &map);
+    return map;
 }
 
 }  // namespace lubancode::api::responses
