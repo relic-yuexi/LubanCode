@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.242] - 2026-09-11
+
+- **v3 真的能写了:新会话写侧开关接线完成。**设 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1,新会话即写 v3 账——首行 system(seq=1)、消息/工具账/结果仓/子账全落 sessions/<id>/<id>.jsonl,resume 与 --continue 经链投影读回,/sessions 列表并列认两种场次。开关默认关:v2 路径一字不动。v3 场目录不写 v2 manifest(写多一枚就会被 resume 误判跳过);clear 老功能对 v3 场如实报"未支持"而非假装。至此 v3 从"读得回"到"写得进",下一步翻默认与端到端验收。
+
 ## [v0.26.241] - 2026-09-11
 
 - **消息内核升四角色,第一家 adapter 换骨完成。**Role 枚举追加 System(上下文根)与 Tool(工具结果独立消息,不再是伪装 user);Anthropic adapter 内部改走四角色:System 文本顶置顶层 system、Tool 逐条折 user 容器 tool_result、tagged thinking 认 Tool 尾巴。出口形状一字不变——同一对话新旧两路 dump 逐字节相等,18 案四家 wire 合同册原样绿。这是"agent 只换皮"架构的第一刀:内核统一四角色,协议差异全部收进 adapter。其余三家(OpenAI Chat/Responses、Gemini)后续逐家换。
