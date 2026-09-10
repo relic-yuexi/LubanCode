@@ -547,14 +547,16 @@ TEST_CASE("图片输入:turn/start 的 images 折进请求(阶段 3 冻结的字
 TEST_CASE("methods 冻结矩阵:能力表如实报接线面") {
     const nlohmann::json result = app_server::MakeInitializeResult("0.0.0-test", "linux");
     const nlohmann::json& caps = result["capabilities"];
-    // 接线的:握手三件 + thread 六件 + turn 两件 + workflow/query + trace/query
+    // 接线的:握手三件 + thread 八件 + turn 两件 + workflow/query + trace/query
     // (trace 已接线但历史上没进这张矩阵——goal 单合流批补账)+ goal 六件 +
     // loop 七件 + plan 三件 + browser 二十二件(可见调试阶段 3 的十八件 +
     // 多前端外壳阶段 B 的 browser/pause|resume 两件 + 阶段 C 的
     // browser/screencast/start|stop 两件,协议 1.1 additive)。
+    // thread/resume|thread/read 是轨迹 v3 P3 第二棒(协议 1.2)。
     const std::vector<std::string> expected_methods = {
         "initialize", "initialized",      "shutdown",     "thread/start", "thread/list",
         "thread/stop", "thread/archive",  "thread/unarchive", "thread/delete",
+        "thread/resume", "thread/read",
         "turn/start", "turn/interrupt",   "workflow/query", "trace/query",
         "goal/create", "goal/get",        "goal/edit",     "goal/pause",
         "goal/resume", "goal/clear",      "loop/create",   "loop/list",

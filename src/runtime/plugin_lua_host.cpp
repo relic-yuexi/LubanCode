@@ -5,6 +5,7 @@
 // DNS 安全都还是 transport 的账。
 #include "runtime/plugin_lua_host.hpp"
 
+#include <new>
 #include <utility>
 
 extern "C" {
@@ -51,6 +52,15 @@ int PushNoActiveToolCall(lua_State* L) {
     lua_pushnil(L);
     PushErrorTable(L, LuaHostErrorCode::NoActiveToolCall,
                    std::string(LuaHostErrorCodeDefaultMessage(LuaHostErrorCode::NoActiveToolCall)), 0, false);
+    return 2;
+}
+
+// LuaHook 单 P0-A:hook 调用作用域不配工具 Host API(§二:不能伪造 tool
+// call 来开权限)。nil + err(not_tool_context),零网络、零 Secret 解析。
+int PushNotToolContext(lua_State* L) {
+    lua_pushnil(L);
+    PushErrorTable(L, LuaHostErrorCode::NotToolContext,
+                   std::string(LuaHostErrorCodeDefaultMessage(LuaHostErrorCode::NotToolContext)), 0, false);
     return 2;
 }
 
@@ -355,9 +365,14 @@ int LuaHttpRequest(lua_State* L) {
     try {
         // §九第 3 步:顶层/调用外一票否决——先查 context,查不到就退,
         // transport/resolver 一根毛都不碰(假件计数器钉死为 0 的机关在此)。
+        // LuaHook 单 P0-A:hook 作用域同样一票否决(not_tool_context)——
+        // hook 不能借道工具 Host API 开权限。
         LuaCallContext* context = CurrentLuaCallContext(L);
         if (context == nullptr) {
             return PushNoActiveToolCall(L);
+        }
+        if (context->kind != LuaCallContext::Kind::Tool) {
+            return PushNotToolContext(L);
         }
         if (lua_gettop(L) < 1 || !lua_istable(L, 1)) {
             lua_pushnil(L);
@@ -396,10 +411,14 @@ int LuaHttpRequest(lua_State* L) {
 
 int LuaSecretsAvailable(lua_State* L) {
     try {
-        // 顶层零解析(§6.3):context 都没有就不碰 resolver。
+        // 顶层零解析(§6.3):context 都没有就不碰 resolver;hook 作用域
+        // 同拒(P0-A:hook 不开 Secret 能力)。
         LuaCallContext* context = CurrentLuaCallContext(L);
         if (context == nullptr) {
             return PushNoActiveToolCall(L);
+        }
+        if (context->kind != LuaCallContext::Kind::Tool) {
+            return PushNotToolContext(L);
         }
         if (lua_type(L, 1) != LUA_TSTRING) {
             lua_pushnil(L);
@@ -442,10 +461,13 @@ int LuaSecretsAvailable(lua_State* L) {
 
 int LuaSecretsRef(lua_State* L) {
     try {
-        // 顶层零解析:context 为空即退,resolver 一根毛不碰。
+        // 顶层零解析:context 为空即退,resolver 一根毛不碰;hook 作用域同拒。
         LuaCallContext* context = CurrentLuaCallContext(L);
         if (context == nullptr) {
             return PushNoActiveToolCall(L);
+        }
+        if (context->kind != LuaCallContext::Kind::Tool) {
+            return PushNotToolContext(L);
         }
         if (lua_type(L, 1) != LUA_TSTRING) {
             lua_pushnil(L);
@@ -565,12 +587,10 @@ std::expected<std::unique_ptr<LuaHostState>, std::string> LuaHostState::Load(Opt
         return std::unexpected(std::move(message));
     };
 
-    // §九第 1 步:开 Pure 库、注册 luban 模块。三道墙(内存帽/指令预算/
-    // hook)由 NewGuardedLuaState 落好,与 tools::LuaTool 同款。
-    luaL_openlibs(L);
-    if (options.profile.level == tools::LuaProfile::Level::Pure) {
-        tools::ApplyPureLuaProfile(L);
-    }
+    // §九第 1 步:按画像开库(Pure/Trusted 开全库按需关门;Whitelisted
+    // 是 LuaHook 单 P0-A 的 hook state——从零开显式白名单,§五)。三道墙
+    // (内存帽/指令预算+墙钟/hook)由 NewGuardedLuaState 落好。
+    tools::OpenLuaLibraries(L, options.profile);
     RegisterLuaHostModule(L);
 
     // §九第 2/3 步:context 为空跑顶层 chunk。脚本顶层调 luban.http.request
@@ -699,6 +719,471 @@ LuaHostState::CallResult LuaHostState::Call(const std::string& entry, const nloh
         lua_pop(lua_, 1);
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// LuaHook 单 P0-A:hook 中间件调用(handler(ctx, input, next))。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// next 槽:宿主续体 + 一次性/过期账。闭包经 userdata 持 shared_ptr(Lua GC
+// 管寿命);CallHook 收口时置 expired——同一 state 被复用时,脚本偷存的旧
+// next 只能拿到 hook.next.expired,不是悬垂指针。
+struct LuaHookNextSlot {
+    std::function<std::expected<LuaHostState::LuaHookDownstream, LuaHostState::LuaHookNextError>(
+        const std::optional<nlohmann::json>&)>
+        invoke;
+    bool consumed = false;
+    bool expired = false;
+    int calls = 0;
+};
+
+const char* kHookNextSlotMetatable = "luban.hook.nextslot";
+const char* kHookDenyMarker = "__luban_hook_deny";
+
+int HookNextSlotGc(lua_State* L) {
+    auto* holder = static_cast<std::shared_ptr<LuaHookNextSlot>*>(lua_touserdata(L, 1));
+    if (holder != nullptr) {
+        std::destroy_at(holder);
+    }
+    return 0;
+}
+
+// 协议违规:错误值是带稳定码的表(CallHook 据此分型,不解析文案)。
+int RaiseHookError(lua_State* L, std::string_view code, std::string_view message) {
+    lua_createtable(L, 0, 2);
+    lua_pushlstring(L, code.data(), code.size());
+    lua_setfield(L, -2, "code");
+    lua_pushlstring(L, message.data(), message.size());
+    lua_setfield(L, -2, "message");
+    return lua_error(L);
+}
+
+void PushDownstreamTable(lua_State* L, const LuaHostState::LuaHookDownstream& downstream) {
+    lua_createtable(L, 0, 4);
+    lua_pushlstring(L, downstream.status.data(), downstream.status.size());
+    lua_setfield(L, -2, "status");
+    tools::PushJsonToLua(L, downstream.value);
+    lua_setfield(L, -2, "value");
+    if (!downstream.code.empty()) {
+        lua_pushlstring(L, downstream.code.data(), downstream.code.size());
+        lua_setfield(L, -2, "code");
+    }
+    if (!downstream.message.empty()) {
+        lua_pushlstring(L, downstream.message.data(), downstream.message.size());
+        lua_setfield(L, -2, "message");
+    }
+}
+
+int HookNextClosure(lua_State* L) {
+    auto* holder = static_cast<std::shared_ptr<LuaHookNextSlot>*>(lua_touserdata(L, lua_upvalueindex(1)));
+    if (holder == nullptr || *holder == nullptr) {
+        return RaiseHookError(L, "hook.next.expired", "next 槽位已失效");
+    }
+    LuaHookNextSlot& slot = **holder;
+    ++slot.calls;
+    if (slot.expired) {
+        return RaiseHookError(L, "hook.next.expired", "next 已过终态(终态后/跨 invocation 调用一律拒绝)");
+    }
+    if (slot.consumed) {
+        return RaiseHookError(L, "hook.next.already_consumed", "next 至多调用一次;本次调用未执行下游");
+    }
+    if (!slot.invoke) {
+        return RaiseHookError(L, "hook.next.not_allowed", "本 handler 没有 next");
+    }
+    std::optional<nlohmann::json> candidate;
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+        if (!lua_istable(L, 1)) {
+            return RaiseHookError(L, "hook.next.bad_candidate", "next 的候选须是表或 nil");
+        }
+        std::string convert_error;
+        nlohmann::json converted = tools::LuaValueToJson(L, 1, 0, convert_error);
+        if (!convert_error.empty()) {
+            return RaiseHookError(L, "hook.next.bad_candidate", "候选转 JSON 失败: " + convert_error);
+        }
+        candidate = std::move(converted);
+    }
+    auto result = slot.invoke(candidate);
+    if (!result.has_value()) {
+        return RaiseHookError(L, result.error().code, result.error().message);
+    }
+    slot.consumed = true;
+    PushDownstreamTable(L, *result);
+    return 1;
+}
+
+// ctx.deny(code, message):返回拒绝标记表,handler 直接 return 即短路拒绝。
+int HookCtxDeny(lua_State* L) {
+    const char* code = luaL_optstring(L, 1, "input_rejected");
+    const char* message = luaL_optstring(L, 2, "");
+    lua_createtable(L, 0, 3);
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, kHookDenyMarker);
+    lua_pushstring(L, code);
+    lua_setfield(L, -2, "code");
+    lua_pushstring(L, message);
+    lua_setfield(L, -2, "message");
+    return 1;
+}
+
+// ctx 只读:改写落子即错(身份由宿主发行,Lua 只引用)。
+int HookCtxReadOnly(lua_State* L) {
+    return RaiseHookError(L, "hook.result.invalid", "ctx 是只读的(身份字段由宿主发行)");
+}
+
+// 造 ctx 表:meta 字段 + deny;封 __newindex 锁写。
+void PushHookCtxTable(lua_State* L, const nlohmann::json& meta) {
+    lua_createtable(L, 0, 8);
+    if (meta.is_object()) {
+        for (const auto& item : meta.items()) {
+            lua_pushlstring(L, item.key().data(), item.key().size());
+            tools::PushJsonToLua(L, item.value());
+            lua_rawset(L, -3);
+        }
+    }
+    lua_pushcfunction(L, HookCtxDeny);
+    lua_setfield(L, -2, "deny");
+    lua_createtable(L, 0, 2);
+    lua_pushcfunction(L, HookCtxReadOnly);
+    lua_setfield(L, -2, "__newindex");
+    lua_pushliteral(L, "luban.hook.ctx");
+    lua_setfield(L, -2, "__metatable");
+    lua_setmetatable(L, -2);
+}
+
+}  // namespace
+
+LuaHostState::LuaHookCallResult LuaHostState::CallHook(const std::string& entry, const LuaHookCall& call,
+                                                       LuaCallContext& context) {
+    LuaHookCallResult out;
+
+    // §4.1:嵌套 handler 不重入同一 state。next 续体里若再进同一 state,
+    // 这里拒绝(hook.lua.state_reentry),不拿互斥递归装作支持——
+    // call_mutex_ 恒非递归,重入若先去锁只会死锁;探针原子无锁快查,
+    // 在摸 mutex 之前就退。
+    if (hook_in_flight_.exchange(true)) {
+        out.error_code = "hook.lua.state_reentry";
+        out.message = "嵌套 handler 不重入同一 state(§4.1);给同一脚本的多个槽位各配独立实现";
+        return out;
+    }
+    struct InFlightRelease {
+        std::atomic<bool>& flag;
+        ~InFlightRelease() { flag.store(false); }
+    } in_flight{hook_in_flight_};
+
+    const std::lock_guard<std::mutex> lock(call_mutex_);
+    const int stack_base = lua_gettop(lua_);
+
+    const auto entry_it = entry_refs_.find(entry);
+    if (entry_it == entry_refs_.end()) {
+        out.error_code = "hook.lua.runtime_error";
+        out.message = "entry 未在加载时对账: " + entry;
+        return out;
+    }
+
+    // 预算:每次调用换一轮账(§8.4/§六)。墙钟从 profile 折;取消旗既给
+    // guard(指令 hook 查)又是 Host API 的取消真值。
+    if (guard_ != nullptr) {
+        guard_->instructions_used = 0;
+        guard_->budget_hit = false;
+        guard_->last_budget_kind = tools::LuaGuard::BudgetKind::None;
+        guard_->cancel = call.cancel;
+        guard_->wall_deadline = profile_.wall_budget > std::chrono::milliseconds(0)
+                                    ? std::chrono::steady_clock::now() + profile_.wall_budget
+                                    : std::chrono::steady_clock::time_point{};
+    }
+
+    auto slot = std::make_shared<LuaHookNextSlot>();
+    if (call.next) {
+        slot->invoke = call.next;
+    }
+
+    lua_rawgeti(lua_, LUA_REGISTRYINDEX, entry_it->second);  // handler
+    PushHookCtxTable(lua_, call.ctx_meta);                   // ctx
+    tools::PushJsonToLua(lua_, call.input);                  // input
+    {
+        // next 闭包的 upvalue:持 shared_ptr 的 userdata(__gc 释放引用,
+        // 不悬垂)。
+        void* ud = lua_newuserdatauv(lua_, sizeof(std::shared_ptr<LuaHookNextSlot>), 0);
+        if (ud == nullptr) {
+            lua_settop(lua_, stack_base);
+            out.error_code = "hook.lua.runtime_error";
+            out.message = "next 槽位分配失败";
+            return out;
+        }
+        new (ud) std::shared_ptr<LuaHookNextSlot>(slot);
+        if (luaL_newmetatable(lua_, kHookNextSlotMetatable) != 0) {
+            lua_pushcfunction(lua_, HookNextSlotGc);
+            lua_setfield(lua_, -2, "__gc");
+            lua_pushstring(lua_, kHookNextSlotMetatable);
+            lua_setfield(lua_, -2, "__name");
+        }
+        lua_setmetatable(lua_, -2);
+    }
+    lua_pushcclosure(lua_, HookNextClosure, 1);
+
+    ScopedLuaCallContext scope(lua_, &context);
+    if (lua_pcall(lua_, 3, 1, 0) != LUA_OK) {
+        slot->expired = true;
+        out.next_calls = slot->calls;
+        // 表错误带稳定码(hook.next.* 协议违规);串错误按预算分型。
+        if (lua_istable(lua_, -1)) {
+            lua_getfield(lua_, -1, "code");
+            const std::string code = lua_type(lua_, -1) == LUA_TSTRING ? StackString(lua_, -1) : std::string();
+            lua_pop(lua_, 1);
+            if (!code.empty()) {
+                lua_getfield(lua_, -1, "message");
+                const std::string message =
+                    lua_type(lua_, -1) == LUA_TSTRING ? StackString(lua_, -1) : std::string();
+                lua_pop(lua_, 1);
+                lua_settop(lua_, stack_base);
+                out.error_code = code;
+                out.message = message;
+                return out;
+            }
+            lua_settop(lua_, stack_base);
+            out.error_code = "hook.lua.runtime_error";
+            out.message = "(错误值是表但不带稳定码)";
+            return out;
+        }
+        std::string message = lua_tostring(lua_, -1) != nullptr ? lua_tostring(lua_, -1) : "(没有错误信息)";
+        lua_settop(lua_, stack_base);
+        if (guard_ != nullptr && guard_->budget_hit) {
+            using BudgetKind = tools::LuaGuard::BudgetKind;
+            switch (guard_->last_budget_kind) {
+                case BudgetKind::Instruction:
+                    out.error_code = "hook.lua.budget_instruction";
+                    break;
+                case BudgetKind::Memory:
+                    out.error_code = "hook.lua.budget_memory";
+                    break;
+                case BudgetKind::WallClock:
+                    out.error_code = "hook.lua.budget_wallclock";
+                    break;
+                case BudgetKind::None:
+                    break;
+            }
+        }
+        if (out.error_code.empty() && call.cancel != nullptr && call.cancel->load()) {
+            out.error_code = "hook.dispatch.cancelled";
+        }
+        if (out.error_code.empty()) {
+            out.error_code = "hook.lua.runtime_error";
+        }
+        out.message = std::move(message);
+        return out;
+    }
+
+    out.next_consumed = slot->consumed;
+    out.next_calls = slot->calls;
+    slot->expired = true;
+
+    switch (lua_type(lua_, -1)) {
+        case LUA_TNIL:
+            out.ok = true;  // 无返回 = 纯透传(已消费 next)或纯观察
+            break;
+        case LUA_TSTRING:
+        case LUA_TNUMBER:
+        case LUA_TBOOLEAN: {
+            std::string convert_error;
+            out.output = tools::LuaValueToJson(lua_, -1, 0, convert_error);
+            out.ok = convert_error.empty();
+            if (!out.ok) {
+                out.error_code = "hook.result.invalid";
+                out.message = convert_error;
+            }
+            break;
+        }
+        case LUA_TTABLE: {
+            // ctx.deny 的标记表:短路拒绝。
+            lua_getfield(lua_, -1, kHookDenyMarker);
+            const bool denied = lua_toboolean(lua_, -1) != 0;
+            lua_pop(lua_, 1);
+            if (denied) {
+                lua_getfield(lua_, -1, "code");
+                out.deny_code = StackString(lua_, -1);
+                lua_pop(lua_, 1);
+                lua_getfield(lua_, -1, "message");
+                out.deny_message = StackString(lua_, -1);
+                lua_pop(lua_, 1);
+                out.ok = true;
+                out.deny = true;
+                break;
+            }
+            lua_getfield(lua_, -1, "output");
+            if (!lua_isnil(lua_, -1)) {
+                std::string convert_error;
+                out.output = tools::LuaValueToJson(lua_, -1, 0, convert_error);
+                lua_pop(lua_, 1);
+                if (!convert_error.empty()) {
+                    lua_settop(lua_, stack_base);
+                    out.error_code = "hook.result.invalid";
+                    out.message = "output 字段: " + convert_error;
+                    break;
+                }
+            } else {
+                lua_pop(lua_, 1);
+            }
+            lua_getfield(lua_, -1, "effects");
+            if (!lua_isnil(lua_, -1)) {
+                if (!lua_istable(lua_, -1)) {
+                    lua_settop(lua_, stack_base);
+                    out.error_code = "hook.result.invalid";
+                    out.message = "effects 字段不是表";
+                    break;
+                }
+                const std::size_t count = lua_rawlen(lua_, -1);
+                for (std::size_t i = 1; i <= count; ++i) {
+                    lua_rawgeti(lua_, -1, static_cast<lua_Integer>(i));
+                    lua_getfield(lua_, -1, "type");
+                    if (lua_type(lua_, -1) != LUA_TSTRING) {
+                        out.error_code = "hook.result.invalid";
+                        out.message = "effects 项缺 type 字符串";
+                        lua_pop(lua_, 2);
+                        break;
+                    }
+                    lua_pop(lua_, 1);  // type(项本身转 JSON 时自带)
+                    std::string convert_error;
+                    nlohmann::json effect = tools::LuaValueToJson(lua_, -1, 0, convert_error);
+                    lua_pop(lua_, 1);  // 项
+                    if (!convert_error.empty()) {
+                        out.error_code = "hook.result.invalid";
+                        out.message = "效果项转 JSON 失败: " + convert_error;
+                        break;
+                    }
+                    out.effects.push_back(std::move(effect));
+                }
+                lua_pop(lua_, 1);  // effects 表
+                if (!out.error_code.empty()) {
+                    break;
+                }
+            } else {
+                lua_pop(lua_, 1);
+            }
+            out.ok = true;
+            break;
+        }
+        default:
+            out.error_code = "hook.result.invalid";
+            out.message = std::string("handler 返回了没法解释的类型: ") + lua_typename(lua_, lua_type(lua_, -1));
+            break;
+    }
+    lua_settop(lua_, stack_base);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Lua 声明 -> 中间件 Handler(每次 invocation 独立 state)。
+// ---------------------------------------------------------------------------
+
+std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
+    const hooks::middleware::LuaHandlerSpec& spec, const hooks::middleware::HandlerLimits& limits) {
+    // 物化即试编译(发布期把语法/对账错误顶出来,不带半个定义入池)。正文
+    // 留在闭包里缓存;invocation 各自再建 state——§4.1:活动调用独立 state,
+    // 脚本内存不跨调用保留,不缓存业务结果。
+    tools::LuaProfile profile = tools::LuaProfile::HookDefault();
+    profile.instruction_budget = limits.instruction_budget;
+    profile.memory_cap_bytes = limits.memory_cap_bytes;
+    profile.wall_budget = limits.wall_budget;
+
+    LuaHostState::Options probe;
+    probe.script = spec.script;
+    probe.chunk_name = spec.chunk_name.empty() ? "hook" : spec.chunk_name;
+    probe.entries = {spec.entry};
+    probe.profile = profile;
+    auto probe_state = LuaHostState::Load(probe);
+    if (!probe_state.has_value()) {
+        return std::unexpected(probe_state.error());
+    }
+
+    return hooks::middleware::Handler(
+        [spec, profile](const hooks::middleware::InvocationCtx& ctx, const nlohmann::json& input,
+                        hooks::middleware::NextCall& next)
+            -> std::expected<hooks::middleware::HandlerReturn, hooks::middleware::HandlerError> {
+            LuaHostState::Options options;
+            options.script = spec.script;
+            options.chunk_name = spec.chunk_name.empty() ? "hook" : spec.chunk_name;
+            options.entries = {spec.entry};
+            options.profile = profile;
+            auto state = LuaHostState::Load(options);
+            if (!state.has_value()) {
+                return std::unexpected(
+                    hooks::middleware::HandlerError{"hook.lua.compile_error", state.error()});
+            }
+
+            LuaCallContext::HookIdentity identity;
+            identity.dispatch_id = ctx.dispatch_id;
+            identity.invocation_id = ctx.invocation_id;
+            identity.hook_id = ctx.hook_id;
+            identity.hook_point = std::string(hooks::middleware::ToString(ctx.point));
+            identity.stage = std::string(hooks::middleware::ToString(ctx.stage));
+            identity.depth = ctx.depth;
+            LuaCallContext context = LuaCallContext::ForHook(std::move(identity));
+
+            LuaHostState::LuaHookCall call;
+            call.ctx_meta = nlohmann::json{{"dispatchId", ctx.dispatch_id},
+                                           {"invocationId", ctx.invocation_id},
+                                           {"hookId", ctx.hook_id},
+                                           {"hookPoint", identity.hook_point},
+                                           {"stage", identity.stage},
+                                           {"depth", ctx.depth},
+                                           {"registryRevision", ctx.registry_revision}};
+            call.input = input;
+            call.cancel = ctx.cancel;
+            call.next = [&next](const std::optional<nlohmann::json>& candidate)
+                -> std::expected<LuaHostState::LuaHookDownstream, LuaHostState::LuaHookNextError> {
+                const auto outcome = next.Call(candidate);
+                if (outcome.kind == hooks::middleware::DownstreamOutcome::Kind::Invalid) {
+                    LuaHostState::LuaHookNextError error;
+                    error.code = outcome.code;
+                    error.message = outcome.message;
+                    return std::unexpected(error);
+                }
+                LuaHostState::LuaHookDownstream downstream;
+                switch (outcome.kind) {
+                    case hooks::middleware::DownstreamOutcome::Kind::Value:
+                        downstream.status = "value";
+                        break;
+                    case hooks::middleware::DownstreamOutcome::Kind::Denied:
+                        downstream.status = "denied";
+                        break;
+                    case hooks::middleware::DownstreamOutcome::Kind::Failed:
+                        downstream.status = "failed";
+                        break;
+                    case hooks::middleware::DownstreamOutcome::Kind::Invalid:
+                        break;
+                }
+                downstream.value = outcome.value;
+                downstream.code = outcome.code;
+                downstream.message = outcome.message;
+                return downstream;
+            };
+
+            const auto result = (*state)->CallHook(spec.entry, call, context);
+            if (!result.ok) {
+                return std::unexpected(hooks::middleware::HandlerError{result.error_code, result.message});
+            }
+            hooks::middleware::HandlerReturn out;
+            out.output = result.output;
+            out.deny = result.deny;
+            out.deny_code = result.deny_code;
+            out.deny_message = result.deny_message;
+            for (const auto& raw : result.effects) {
+                hooks::middleware::EffectType type{};
+                const auto type_it = raw.find("type");
+                if (type_it == raw.end() || !type_it->is_string() ||
+                    !hooks::middleware::ParseEffectType(type_it->get_ref<const std::string&>(), type)) {
+                    return std::unexpected(hooks::middleware::HandlerError{
+                        "hook.result.invalid", "效果 type 不认识: " + (type_it == raw.end() ? "(缺)" : type_it->dump())});
+                }
+                hooks::middleware::Effect effect;
+                effect.type = type;
+                effect.payload = raw;
+                out.effects.push_back(std::move(effect));
+            }
+            return out;
+        });
 }
 
 }  // namespace lubancode::runtime

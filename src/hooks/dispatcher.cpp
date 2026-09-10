@@ -137,6 +137,7 @@ HookDispatcher::HookDispatcher(const HookDispatcher& other) {
     trust_ = other.trust_;
     context_ = other.context_;
     outbox_ = other.outbox_;  // 可靠 Post 的账本:拷贝沿用同一只(共享账)
+    middleware_ = other.middleware_;  // LuaHook P0-A:中间件核同样共享
     recent_ = other.recent_;
     last_record_ = other.last_record_;
 }
@@ -153,6 +154,7 @@ HookDispatcher& HookDispatcher::operator=(const HookDispatcher& other) {
     trust_ = other.trust_;
     context_ = other.context_;
     outbox_ = other.outbox_;
+    middleware_ = other.middleware_;
     recent_ = other.recent_;
     last_record_ = other.last_record_;
     return *this;

@@ -42,6 +42,8 @@ TEST_CASE("§11 错误码表:每枚码的稳定串与 retryable 各就各位") {
         {LuaHostErrorCode::HttpStatus, "http_status", false}, // 由 Lua 按 408/429/5xx 自判
         {LuaHostErrorCode::InvalidJson, "invalid_json", false},
         {LuaHostErrorCode::ConcurrencyLimit, "concurrency_limit", true},
+        // LuaHook 单 P0-A 追加(§11 只增不改):hook 调用作用域不配工具 Host API。
+        {LuaHostErrorCode::NotToolContext, "not_tool_context", false},
     };
     for (const Row& row : table) {
         CHECK(LuaHostErrorCodeName(row.code) == row.name);

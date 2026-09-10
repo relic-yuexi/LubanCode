@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "hooks/loader.hpp"
+#include "hooks/middleware.hpp"
 #include "hooks/protocol.hpp"
 #include "hooks/trust.hpp"
 #include "hooks/types.hpp"
@@ -117,6 +118,16 @@ public:
     // 调 AdoptExternalRecords 归并落账、刷 UI。同步决策(PreToolUse/
     // PermissionRequest)由快照执行给出,不静默绕过。
 
+    // ---- LuaHook 单 P0-A:中间件核接线缝 ----------------------------------
+    // 新核(builtin/lua 同名选实现、串行改写链)与老进程 hook 路并行:老
+    // Emit 一字不改;装配层(P0-B 接 PreUser/PostUser/PreRequest)把发布好
+    // 的 MiddlewareDispatcher 挂进来,各挂点逐个迁。空(默认)= 零行为,
+    // 既有会话的可观察行为不变。拷贝/移动沿用同一只核(shared_ptr)。
+    void SetMiddleware(std::shared_ptr<middleware::MiddlewareDispatcher> dispatcher) {
+        middleware_ = std::move(dispatcher);
+    }
+    middleware::MiddlewareDispatcher* middleware() const { return middleware_.get(); }
+
     // 主线程调用:拷一份当前定义表(含信任/禁用账)。后台执行器存着这份
     // 快照跑——会话中途 trust/disable 只影响之后新起的快照,不在跑的
     // 那份不追改(只读语义)。
@@ -160,6 +171,8 @@ private:
     std::vector<HookDefinition> definitions_;
     HookTrustStore trust_;
     HookContext context_;
+    // LuaHook 单 P0-A:中间件核(可选;空 = 零行为,老路径照旧)。
+    std::shared_ptr<middleware::MiddlewareDispatcher> middleware_;
     // 可靠 Post 的账本(可选;空 = 没挂,零行为)。shared_ptr:拷贝语义
     // 沿用同一只账本,主线程 Emit 记账,后台路不碰。
     std::shared_ptr<HookOutbox> outbox_;

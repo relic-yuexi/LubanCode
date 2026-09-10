@@ -66,6 +66,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `1.1`(阶段 B 注) | 用户输入路由与暂停(2026-08 起,additive):新增 `browser/pause`/`browser/resume` 方法与 `browser/paused`/`browser/resumed` 事件;`browser/status` 的 result 增可选布尔 `paused`;`browser/action/completed` 增稳定错误码 `browser.paused`。**owner 仲裁升级**:`owner` 由内核按连接与鉴权裁定(见《owner 仲裁》),外壳报的只是意向;`owner` 缺省值从写死 `user` 改为连接的裁定身份。老报文形状零改动。 |
 | `1.1`(阶段 C 注) | 镜像流(2026-08 起,additive):新增 `browser/screencast/start`/`browser/screencast/stop` 方法与 `browser/screencast/frame` 事件。只读、不问审批(与 `snapshot`/`screenshot` 同档);帧字节走同一条截图 artifact 链落盘,协议上只有引用与 `pageId`,绝不出现 base64。老报文形状零改动。 |
 | `1.1`(阶段 D 注) | 参考前端(2026-09 起):WS 端口的只读 HTTP artifact 口子 `GET /artifact/<内容寻址名>`(与 WS 同端口、同 token 门)——事件里只有引用,字节走这条口子,base64 仍永不进协议。承载面(与 `app_server/auth` 同级),不是协议方法面,报文形状零改动,不 bump 版本。 |
+| `1.2` | 旧史只读两法(轨迹 v3 P3,additive):`thread/resume` 与 `thread/read` 从留位转正。载荷 JSON 化 v3 显示投影(`kind=message\|compact_marker`,逐条带 `inCurrentContext`/`removedByCompacts`/`hidden` 等上下文状态标志);分页沿用 `trace/query` 的 `lastSeq` 游标语义。`hidden` 消息默认只回标志不回正文,`includeHidden: true` 才带(§4.28)。v2 旧账如实回 `sourceFormat: "v2"` + 空 `items`,不冒充。老方法老事件形状一字未动。 |
 
 ## 方法面
 
@@ -88,6 +89,8 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `thread/archive` | `threadId` | 搬进 `archive/`;成功发 `thread/updated`(state=archived)。开着的 thread 拒 `active_thread`。 |
 | `thread/unarchive` | `threadId` | 搬回根;成功发 `thread/updated`(state=active)。 |
 | `thread/delete` | `threadId, confirm` | 没带 `confirm` 拒 `confirmation_required`;带了真删,发 `thread/deleted`。 |
+| `thread/resume` | `threadId, lastSeq?, includeHidden?` | 只读**恢复视图预览**(轨迹 v3):resume 后模型上下文里有什么——当前链上的消息(`inCurrentContext`)+ 压缩标记,外加 `contextSummary`(链上消息数、压缩次数、最近 applied 后的持久 token 数)。零模型调用、零工具重跑、零消息重发;不推进任何执行。分页:`lastSeq`(0 = 全量,回 seq 大于它的条目)。v2 旧账回 `sourceFormat: "v2"` + 空 `items`。 |
+| `thread/read` | `threadId, lastSeq?, includeHidden?` | 只读**完整时间线详情**(轨迹 v3):全部消息与压缩标记合流(seq 升序),逐条带 `kind`(`message`/`compact_marker`)、`inCurrentContext`、`replacedByDerivation`、`removedByCompacts`、`hidden`;compact 条目带 `contextTokensBefore`/`contextTokensAfter` 与 removed/retained refs。`hidden` 消息默认只回标志不回正文(§4.28),`includeHidden: true` 才带 `content`。活 thread 从账本定位、冷 thread 经索引跨 workspace 定位(与 `trace/query` 同路)。 |
 
 搬删的错误码走 `error.data.reason`:SessionCommandService 的稳定串(`not_found`/`ambiguous`/`confirmation_required`/`path_outside_root`/`target_exists`/`io_error`)加协议侧的 `active_thread`。
 

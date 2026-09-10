@@ -2232,6 +2232,17 @@ struct TrajectorySessionLedger::Impl {
     std::optional<V3SessionBooks> v3_books;
     // T1 committed wake(§25.4):装配层挂 TelemetryService;默认空。
     telemetry::CommitObserver* telemetry_wake = nullptr;
+    // Ctrl+T 浮层 v3 分页缓存(P3 第二棒):最近一场的渲染行,绑定源流
+    // 路径与字节数——场没换、文件没长,翻页只切缓存,不重读重投(§4.10
+    // "缓存须绑定源 hash";字节数判据与 session_index 的 v3 指纹同款,
+    // append-only 账字节数变即内容变)。mutable:ReadTranscriptPage 是
+    // const 读面。
+    struct TranscriptCache {
+        std::filesystem::path stream;
+        std::uintmax_t bytes = 0;
+        std::vector<RestoredTranscriptLine> lines;
+    };
+    mutable std::optional<TranscriptCache> transcript_cache;
 };
 
 // §12.1 user-only 权限:workspace 层与 session 层目录都收紧;设不住须
@@ -4312,6 +4323,52 @@ std::vector<std::string> TrajectorySessionLedger::MakeTranscriptExcerpt(const st
         }
     }
     return {};
+}
+
+std::optional<RestoredTranscriptPage> TrajectorySessionLedger::ReadTranscriptPage(
+    const std::string& target_id, const std::optional<std::uint64_t>& before_seq,
+    const std::optional<std::uint64_t>& after_seq, std::size_t max_lines) const {
+    if (impl_ == nullptr) {
+        return std::nullopt;
+    }
+    // 定位源目录(活场直取,冷场经索引跨 workspace 找),再认 v3 流。
+    std::optional<std::filesystem::path> session_dir;
+    if (impl_->active != nullptr && target_id == this->session_id()) {
+        session_dir = impl_->active->session_dir();
+    } else {
+        trajectory::SessionIndexQuery query;
+        query.all_workspaces = true;
+        const auto page = trajectory::QueryWorkspaceSessions(workspaces_root(), query);
+        for (const auto& summary : page.entries) {
+            if (summary.session_id == target_id) {
+                session_dir = tools::Utf8ToPath(summary.session_dir);
+                break;
+            }
+        }
+    }
+    if (!session_dir.has_value()) {
+        return std::nullopt;  // 场找不着:调用方走 v2 老路(那里给空表)
+    }
+    const auto stream = FindV3HistoryStream(*session_dir);
+    if (!stream.has_value()) {
+        return std::nullopt;  // v2 场:照旧头尾截断,一字不变
+    }
+    // 渲染行缓存:场没换、字节数没变,直接切页(不重读不重投)。
+    std::error_code size_ec;
+    const std::uintmax_t bytes = std::filesystem::file_size(*stream, size_ec);
+    if (size_ec) {
+        return std::nullopt;
+    }
+    if (!impl_->transcript_cache.has_value() || impl_->transcript_cache->stream != *stream ||
+        impl_->transcript_cache->bytes != bytes) {
+        const RestoredHistoryView view = ProjectRestoredHistory(*stream);
+        Impl::TranscriptCache cache;
+        cache.stream = *stream;
+        cache.bytes = bytes;
+        cache.lines = RenderRestoredTranscriptLines(view);
+        impl_->transcript_cache = std::move(cache);
+    }
+    return SliceRestoredTranscript(impl_->transcript_cache->lines, before_seq, after_seq, max_lines);
 }
 
 std::string TrajectorySessionLedger::ArchiveSessionInWorkspace(const std::string& session_id) const {

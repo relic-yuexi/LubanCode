@@ -31,10 +31,13 @@ struct SessionPickerFeed {
     long long now_epoch = 0;                  // 相对时间的"现在"(测试可钉)
 };
 
-// Ctrl+T 转录浮层的按需取数:id -> 要显示的那段行(已按窗口裁好)。
-// 大文件按需读归这条回调:面板只在浮层开着且选中 id 变了时调一回,不是
-// 每键都读盘。返回第一行是标题行以下的内容(标题行面板自己拼)。
-using SessionTranscriptProvider = std::function<std::vector<std::string>(const std::string& session_id)>;
+// Ctrl+T 转录浮层的按需取数(P3 第二棒:游标分页):一问一页,翻页用
+// seq 游标衔接,不反复全量重读。首开(两游标皆空)与选中 id 变了取一
+// 回;之后只在滚动触边且"还有货"时再取(向旧 before_seq / 向新
+// after_seq)。v2 会话一页给全(接线层照旧头尾截断),游标恒空——翻页
+// 自然到头,画面与旧版一致。分页形状与滚动账见 session_picker.hpp。
+using SessionTranscriptProvider =
+    std::function<SessionTranscriptPage(const SessionTranscriptPageQuery& query)>;
 
 // 面板退出时把查询形状带出来:调用方(接线层)看见形状变了就重查
 // catalog、带着新数据再进面板(选中项按 id 留住);没变就是正常退出。

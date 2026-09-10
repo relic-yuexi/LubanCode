@@ -7,6 +7,6 @@
 
 namespace lubancode::app {
 
-inline constexpr std::string_view kVersion = "0.26.238";
+inline constexpr std::string_view kVersion = "0.26.240";
 
 }  // namespace lubancode::app

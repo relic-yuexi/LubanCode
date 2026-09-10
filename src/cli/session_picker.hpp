@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -48,6 +49,32 @@ enum class SessionPickerFocus { Search, Filter, Sort };
 // 查看态(第三步):紧凑/舒展只改画法;展开钉在"当前选中行";转录是
 // 一块独立浮层(看完原路回列表,选中行不动)。
 enum class SessionPickerLayout { Compact, Comfortable };
+
+// ---------------------------------------------------------------------------
+// Ctrl+T 转录浮层的游标分页(P3 第二棒):一页行 + 两个方向的"还有货"。
+// 取数归接线层(provider 回调,见 session_picker_panel.hpp);这里只有
+// 中立数据形状与滚动账。v3 会话按 seq 游标翻页(不反复全量重读);
+// v2 会话照旧头尾截断,一页给全,游标恒空(没有第二页)。
+// ---------------------------------------------------------------------------
+
+// 一页取数请求:两游标皆空 = 首开(从最新一页起);before_seq = 向更旧
+// 翻(取 seq 更小的最近一页);after_seq = 向更新翻。游标一次给一枚。
+struct SessionTranscriptPageQuery {
+    std::string session_id;
+    std::optional<std::uint64_t> before_seq;
+    std::optional<std::uint64_t> after_seq;
+    std::size_t max_lines = 40;  // 一页行数上限(0 = 不限)
+};
+
+// 一页转录行(旧→新,时间线原序)。lines 为空且无游标 = 没有可显示的
+// 转录(接线层给空态画面)。
+struct SessionTranscriptPage {
+    std::vector<std::string> lines;
+    bool has_older = false;
+    bool has_newer = false;
+    std::optional<std::uint64_t> oldest_seq;  // 本页首行 seq(向旧翻的游标)
+    std::optional<std::uint64_t> newest_seq;  // 本页末行 seq(向新翻的游标)
+};
 
 // 搜索命中规则:title/preview/id/cwd 四路,ASCII 不分大小写,中文按原字
 // (与 索引查询口径 同一口径;这里对着喂进来的行数据再筛
@@ -136,9 +163,71 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
 // 头尾若干行);这里只排版:标题行 + 内容行 + 底栏。滚动归接线层
 // (excerpt 已是当前窗口要显示的那段),浮层本身不记滚动账——看完
 // Esc 回列表,选中行原样。
+//
+// P3 第二棒:行可滚可翻页后,底栏多一枚位置提示(更旧/更新还有货);
+// hint 缺省 = 旧版定长摘要的画法(无滚动键提示),v2 会话不变样。
+struct SessionTranscriptScrollHint {
+    bool scrollable = false;  // 行已多于一屏(有滚动键提示)
+    bool has_older = false;   // 向上翻还有更旧的可取
+    bool has_newer = false;   // 向下翻还有更新的可取
+};
 SessionPickerFrame BuildSessionTranscriptFrame(const std::string& title_line,
                                                const std::vector<std::string>& excerpt_lines,
-                                               int width);
+                                               int width,
+                                               const SessionTranscriptScrollHint& hint = {});
+
+// 转录浮层的滚动账(P3 第二棒):已取回的行(旧→新)+ 视口位置 + 两个
+// 方向的"还有货"。面板层把 provider 取回的页喂进来(首开 LoadInitial,
+// 触边补页 AppendOlder/AppendNewer),滚动键经 HandleKey 挪视口;要不要
+// 补页由 NeedsOlderPage/NeedsNewerPage 暴露,取数(游标)归面板层。
+// 前插补页时滚动位平移(画面钉在原顶行,不跳);后接补页时若原本贴底,
+// 跟到新底。纯逻辑,测试钉在这层。
+class SessionTranscriptScroller {
+public:
+    // 首开:整页从最新端来(接线层首查不带游标),视口钉在页底(先看
+    // 最新的,与旧版"尾部摘要"顺眼一致)。空页也照收(空态画面)。
+    void LoadInitial(const SessionTranscriptPage& page);
+    // 换场/重开:清账。
+    void Reset();
+    // 视口行数变化(resize)。
+    void SetViewportRows(std::size_t rows);
+
+    // 滚动键(Up/Down/PageUp/PageDown/Home/End)挪视口;其余键返回
+    // false(面板层放行给 core,浮层里 core 自有落空规矩)。
+    bool HandleKey(KeyKind key);
+
+    // 触边且 provider 说还有货 → 该向该方向补一页(游标见 OlderCursor/
+    // NewerCursor;provider 回了空页就照喂 AppendXxx,账自会封口)。
+    bool NeedsOlderPage() const;
+    bool NeedsNewerPage() const;
+    std::optional<std::uint64_t> OlderCursor() const;
+    std::optional<std::uint64_t> NewerCursor() const;
+
+    // 前插/后接一页。空页封掉该方向的"还有货"(不再追问);前插后滚动
+    // 位平移 N(画面不跳),后接时若原本贴底则跟到新底。
+    void AppendOlder(const SessionTranscriptPage& page);
+    void AppendNewer(const SessionTranscriptPage& page);
+
+    // 已取回的全部行(旧→新)与视口首行下标。
+    const std::vector<std::string>& lines() const { return lines_; }
+    std::size_t scroll() const { return scroll_; }
+    // 当前视口要画的行(从 scroll_ 起切 viewport_rows 行)。
+    std::vector<std::string> VisibleLines() const;
+    // 画帧用的位置提示。
+    SessionTranscriptScrollHint hint() const;
+
+private:
+    void ClampScroll();
+    bool AtBottom() const;
+
+    std::vector<std::string> lines_;
+    bool has_older_ = false;
+    bool has_newer_ = false;
+    std::optional<std::uint64_t> oldest_seq_;
+    std::optional<std::uint64_t> newest_seq_;
+    std::size_t scroll_ = 0;      // 视口首行在 lines_ 里的下标
+    std::size_t viewport_rows_ = 1;
+};
 
 // 相对时间(now 距 updated 的差):<60s "just now"、<60m "Nm ago"、
 // <24h "Nh ago"、再久 "Nd ago"。相对时间只在渲染层算(单子"代码边界"
