@@ -84,6 +84,10 @@ bool HasToolUse(const Message& message) {
 // 一条"真正的用户输入"消息:role 是 User 且内容里有 Text/Image——区别于
 // 同样顶着 User 角色、全是 ToolResultBlock 的"把工具结果喂回去"中间消息。
 // (agent/context.cpp 等处的同名语义,这里独立一份,语义钉死在注释里。)
+// 四角色核对(v3 第二棒,§4.47):判据看内部消息角色,不扫 wire role 倒推
+// ——Tool 角色是独立的工具结果消息,不是新一轮用户输入,在此直接 false;
+// System 是上下文根,同样 false。旧式 User+ToolResultBlock 路径照旧不触发
+//(ToolResultBlock 不是 Text/Image)。
 bool IsUserTurnStart(const Message& message) {
     if (message.role != Role::User) {
         return false;
@@ -185,8 +189,31 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
     }
 
     json messages = json::array();
-    if (!request.system.empty()) {
-        messages.push_back(json{{"role", "system"}, {"content", request.system}});
+    // 四角色换骨(v3 第二棒,差距清单 §8.2 第 2 条):System 角色消息是
+    // 上下文根,按 Chat 协议落 system role 消息——这家的 system 是消息流
+    // 里的一员,没有顶层参数(与 anthropic 的顶层 system、responses 的
+    // instructions 分家,§4.46 目标表)。Request::system(现行两角色路径
+    // 的唯一入口)先行,System 消息按消息序接在其后("\n" 连接,空段
+    // 不造),多源拼成一条落 messages 首位。System 消息只取 TextBlock
+    // ——v3 §1.2 的 system 是 soul/规则文本,富块后续棒次需要再扩,这里
+    // 不悄悄丢也不硬造。
+    std::string system_text = request.system;
+    for (const auto& message : request.messages) {
+        if (message.role != Role::System) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<TextBlock>(&block);
+                text != nullptr && !text->text.empty()) {
+                if (!system_text.empty()) {
+                    system_text += "\n";
+                }
+                system_text += text->text;
+            }
+        }
+    }
+    if (!system_text.empty()) {
+        messages.push_back(json{{"role", "system"}, {"content", std::move(system_text)}});
     }
 
     // 回传策略裁决(方言优先,legacy 回落),tool_episode 才要算段标记。
@@ -198,7 +225,17 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
 
     for (std::size_t message_index = 0; message_index < request.messages.size(); ++message_index) {
         const auto& message = request.messages[message_index];
-        if (message.role == Role::User) {
+        // System 角色已折进首条 system 消息,对话流里一条不落(不重复注入)。
+        if (message.role == Role::System) {
+            continue;
+        }
+        // User 与 Tool 同路(四角色换骨):Tool 是独立的工具结果消息,不再
+        // 伪装 user——而 Chat wire 的拍平本就把 User 容器里的
+        // ToolResultBlock 拆成独立 role=tool 消息,两角殊途同归:正文/图片
+        // 落 user 消息,每枚 ToolResultBlock 各落一条 tool 消息
+        //(tool_call_id 配对)。只装工具结果的消息(JoinedText 空、无图)
+        // 不产 user 消息,空正文不造——与旧路逐字节同形。
+        if (message.role == Role::User || message.role == Role::Tool) {
             std::string text = JoinedText(message);
             const bool has_image = HasImage(message);
             if (!text.empty() || has_image) {

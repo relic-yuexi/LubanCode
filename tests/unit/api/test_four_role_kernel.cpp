@@ -1,21 +1,27 @@
-// 四角色内核第一棒(轨迹 v3·消息主轴,单子 §1.1/§4.46)。
+// 四角色内核(轨迹 v3·消息主轴,单子 §1.1/§4.46)。第一棒 Anthropic,
+// 第二棒 chat/responses/gemini 三家。
 //
 // 换骨不换皮:内部消息模型升四角色(system/user/assistant/tool 一等
-// 公民),wire 出口形状一字不变。本册钉三件事:
+// 公民),wire 出口形状一字不变。本册钉:
 //
 //   1. 内核件——api::Role 四枚枚举与 RoleToString 共用件的拍平语义;
-//   2. Anthropic 换骨——System 消息顶置顶层 system、Tool 角色折 user
-//      容器 tool_result 块、相邻不合并、ShouldRecoverTaggedThinking 认
-//      tool 角色(旧式 User+ToolResultBlock 共存同认);
-//   3. 总钉子——同一份对话用"两角色旧路"(Request::system + User 容器
+//   2. Anthropic 换骨(第一棒)——System 消息顶置顶层 system、Tool 角色
+//      折 user 容器 tool_result 块、相邻不合并、ShouldRecoverTaggedThinking
+//      认 tool 角色(旧式 User+ToolResultBlock 共存同认);
+//   3. chat/responses/gemini 换骨(第二棒,差距清单 §8.2 第 2/4/5 条)
+//      ——chat 的 System 落 system role 消息、Tool 直落 role=tool
+//      (tool_call_id 配对)、IsUserTurnStart 段判据按内部角色;responses
+//      的 System 顶置 instructions、Tool 折 function_call_output item
+//      (文本部件 input_text/output_text 只认 assistant 一角);gemini 的
+//      System 顶置 systemInstruction、Tool 折 role=user 的 functionResponse
+//      (ToolNameByUseId 对回表不扫角色,新旧同表同对);
+//   4. 总钉子——同一份对话用"两角色旧路"(Request::system + User 容器
 //      ToolResultBlock)与"四角色新路"(System 消息 + Tool 角色)分别
-//      组装,Anthropic 出口 JSON 逐字节相等。这就是"内里换骨、外观不变"
-//      的直接证据;红了说明换骨漏了或拍平变了。
+//      组装,四家出口 JSON 逐字节相等。这就是"内里换骨、外观不变"的
+//      直接证据;红了说明换骨漏了或拍平变了。
 //
 // 四家合同基线在 test_wire_role_contract.cpp(18 案,断言不动);本册只
-// 钉四角色新增面,不重复四家横切对照。chat/responses/gemini 三家本棒未
-// 换骨(仍走旧路),对 Tool/System 角色的行为不在此钉——钉了就是把未实现
-// 形状写死,下一棒逐家换时自己立册。
+// 钉四角色新增面,不重复四家横切对照。
 //
 // 断言纪律:json 缺键一律 contains() 判,禁止 const json 上 operator[]
 // 查缺键(nlohmann UB)。
@@ -26,6 +32,9 @@
 #include <vector>
 
 #include "api/anthropic/client.hpp"
+#include "api/chat/request.hpp"
+#include "api/gemini/request.hpp"
+#include "api/responses/request.hpp"
 #include "api/types.hpp"
 
 namespace api = lubancode::api;
@@ -334,4 +343,277 @@ TEST_CASE("换骨: ShouldRecoverTaggedThinking 末条 tool 角色触发,旧式 U
     // 各归各位,system 不该踩工具续轮的判定。
     api::Request system_tail = TaggedThinkingSkeleton(api::Role::System);
     CHECK_FALSE(api::anthropic::ShouldRecoverTaggedThinking(system_tail));
+}
+
+// ---------------------------------------------------------------------------
+// Chat 换骨(第二棒,差距清单 §8.2 第 2 条):System 落 system 消息、
+// Tool 直落 role=tool
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Chat 换骨: System 消息落 system role 消息,Request.system 先行按序接后") {
+    // Chat 协议没有顶层 system 参数:system 是消息流首条 system role 消息。
+    // 共存期拼接规矩与 Anthropic 第一棒同款——Request::system 先行,
+    // System 消息按消息序接后,"\n" 连接、空段不造,多源拼一条。
+    api::Request request;
+    request.model = "m";
+    request.system = "根系统提示";
+
+    api::Message first;
+    first.role = api::Role::System;
+    first.content.push_back(api::TextBlock{"第一段追加"});
+    request.messages.push_back(first);
+
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"问一句"});
+    request.messages.push_back(user);
+
+    api::Message second;
+    second.role = api::Role::System;
+    second.content.push_back(api::TextBlock{"换 soul 后的新版"});
+    second.content.push_back(api::TextBlock{"第二块同段"});
+    request.messages.push_back(second);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    const auto& messages = body.at("messages");
+    REQUIRE(messages.size() == 2);  // system 一条 + user 一条,System 不占对话位
+    CHECK(messages.at(0).at("role") == "system");
+    CHECK(messages.at(0).at("content") == "根系统提示\n第一段追加\n换 soul 后的新版\n第二块同段");
+    CHECK(messages.at(1).at("role") == "user");
+    CHECK(messages.at(1).at("content") == "问一句");
+    // system 只此一条,不重复注入。
+    int system_count = 0;
+    for (const auto& message : messages) {
+        if (message.at("role") == "system") {
+            ++system_count;
+        }
+    }
+    CHECK(system_count == 1);
+}
+
+TEST_CASE("Chat 换骨: system 与 System 消息都空时不产 system 消息") {
+    api::Request request;
+    request.model = "m";
+    api::Message empty_system;
+    empty_system.role = api::Role::System;  // 空正文:不造消息
+    request.messages.push_back(empty_system);
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"只此一条"});
+    request.messages.push_back(user);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    REQUIRE(body.at("messages").size() == 1);
+    CHECK(body.at("messages").at(0).at("role") == "user");
+}
+
+TEST_CASE("Chat 换骨: Tool 角色直落 role=tool 消息,tool_call_id 逐条配对") {
+    const auto body = api::chat::BuildRequestJson(FourRoleConversation());
+    const auto& messages = body.at("messages");
+    // 现行拍平形状(合同册 Chat 基线):S/U/A(calls)/T1/T2/A2 出 6 条——
+    // system 1 + user 1 + assistant 1 + tool 2 + assistant 1。Tool 角色
+    // 只装 ToolResultBlock 时 JoinedText 为空,不产 user 消息(空正文不造)。
+    REQUIRE(messages.size() == 6);
+    CHECK(messages.at(0).at("role") == "system");
+    CHECK(messages.at(1).at("role") == "user");
+    CHECK(messages.at(2).at("role") == "assistant");
+    CHECK(messages.at(3).at("role") == "tool");
+    CHECK(messages.at(3).at("tool_call_id") == "call_1");
+    CHECK(messages.at(3).at("content") == "#include <cstdio>\nint main() {}");
+    CHECK(messages.at(4).at("role") == "tool");
+    CHECK(messages.at(4).at("tool_call_id") == "call_2");
+    CHECK(messages.at(4).at("content") == "main.cpp api/ cli/");
+    CHECK(messages.at(5).at("role") == "assistant");
+}
+
+TEST_CASE("Chat 换骨: Tool 角色不启新交互段,tool_episode 段标记照旧生效") {
+    // IsUserTurnStart/SegmentToolUseFlags 的判据核对(差距清单 §8.2 第 2
+    // 条):按内部消息角色判定,不扫 wire role 倒推——Tool 角色的消息不是
+    // "真 user 输入",不把交互段切断。带 thinking 的工具段在 tool_episode
+    // 策略下,旧路(工具结果寄 User 容器)与新路(独立 Tool 角色)出口
+    // 逐字节相等;且两条路都要真回传了 reasoning_content——dump 相等若都
+    // 缺回传,判据就白钉了。
+    api::chat::ChatRequestOptions options;
+    options.reasoning_replay = api::chat::ReasoningReplayPolicy::ToolEpisode;
+
+    const auto legacy = api::chat::BuildRequestJson(TwoRoleConversation(), nlohmann::json::object(), options);
+    const auto four_role =
+        api::chat::BuildRequestJson(FourRoleConversation(), nlohmann::json::object(), options);
+    CHECK(four_role.dump() == legacy.dump());
+
+    REQUIRE(legacy.at("messages").at(2).contains("reasoning_content"));
+    CHECK(legacy.at("messages").at(2).at("reasoning_content") == "先想想从哪儿读");
+    REQUIRE(four_role.at("messages").at(2).contains("reasoning_content"));
+    CHECK(four_role.at("messages").at(2).at("reasoning_content") == "先想想从哪儿读");
+}
+
+TEST_CASE("Chat 换骨总钉子: 同一对话两角色旧路与四角色新路出口逐字节相等") {
+    const auto legacy = api::chat::BuildRequestJson(TwoRoleConversation());
+    const auto four_role = api::chat::BuildRequestJson(FourRoleConversation());
+    CHECK(four_role.dump() == legacy.dump());
+}
+
+// ---------------------------------------------------------------------------
+// Responses 换骨(第二棒,差距清单 §8.2 第 4 条):System 顶置
+// instructions、Tool 折 function_call_output
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Responses 换骨: System 消息顶置 instructions,input 里一条不落") {
+    const auto body = api::responses::BuildRequestJson(FourRoleConversation());
+    REQUIRE(body.contains("instructions"));
+    CHECK(body.at("instructions") == "你是鲁班,守规矩。");
+    // 上下文根不重复注入:input 里没有 system 角色的 message item。
+    for (const auto& item : body.at("input")) {
+        if (item.at("type") == "message") {
+            CHECK(item.at("role") != "system");
+        }
+    }
+}
+
+TEST_CASE("Responses 换骨: Request.system 先行,System 消息按序接后") {
+    api::Request request;
+    request.model = "m";
+    request.system = "根指令";
+
+    api::Message first;
+    first.role = api::Role::System;
+    first.content.push_back(api::TextBlock{"第一段追加"});
+    request.messages.push_back(first);
+
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"问一句"});
+    request.messages.push_back(user);
+
+    api::Message second;
+    second.role = api::Role::System;
+    second.content.push_back(api::TextBlock{"换 soul 后的新版"});
+    request.messages.push_back(second);
+
+    const auto body = api::responses::BuildRequestJson(request);
+    REQUIRE(body.contains("instructions"));
+    CHECK(body.at("instructions") == "根指令\n第一段追加\n换 soul 后的新版");
+    // System 消息不占 input 位。
+    REQUIRE(body.at("input").size() == 1);
+    CHECK(body.at("input").at(0).at("role") == "user");
+}
+
+TEST_CASE("Responses 换骨: Tool 角色折 function_call_output,文本块落 input_text") {
+    // 角色三元核对:TextPartType 只认 assistant 一角——Tool 角色的文本块
+    // 折 user 侧(input_text),不是 output_text;ToolResultBlock 照旧
+    // function_call_output item(协议形状与角色无关)。
+    api::Request request;
+    request.model = "m";
+
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ToolUseBlock{"call_x", "read_file", nlohmann::json::object()});
+    request.messages.push_back(assistant);
+
+    api::Message tool;
+    tool.role = api::Role::Tool;
+    tool.content.push_back(api::TextBlock{"附言"});
+    tool.content.push_back(api::ToolResultBlock{"call_x", "这是结果", false});
+    request.messages.push_back(tool);
+
+    const auto body = api::responses::BuildRequestJson(request);
+    const auto& input = body.at("input");
+    REQUIRE(input.size() == 3);
+    CHECK(input.at(0).at("type") == "function_call");
+    CHECK(input.at(0).at("call_id") == "call_x");
+    CHECK(input.at(1).at("type") == "message");
+    CHECK(input.at(1).at("role") == "user");
+    CHECK(input.at(1).at("content").at(0).at("type") == "input_text");
+    CHECK(input.at(1).at("content").at(0).at("text") == "附言");
+    CHECK(input.at(2).at("type") == "function_call_output");
+    CHECK(input.at(2).at("call_id") == "call_x");
+    CHECK(input.at(2).at("output") == "这是结果");
+}
+
+TEST_CASE("Responses 换骨总钉子: 同一对话两角色旧路与四角色新路出口逐字节相等") {
+    const auto legacy = api::responses::BuildRequestJson(TwoRoleConversation());
+    const auto four_role = api::responses::BuildRequestJson(FourRoleConversation());
+    CHECK(four_role.dump() == legacy.dump());
+}
+
+// ---------------------------------------------------------------------------
+// Gemini 换骨(第二棒,差距清单 §8.2 第 5 条):System 顶置
+// systemInstruction、Tool 折 role=user 的 functionResponse
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Gemini 换骨: System 消息顶置 systemInstruction,contents 里一条不落") {
+    const auto body = api::gemini::BuildRequestJson(FourRoleConversation());
+    REQUIRE(body.contains("systemInstruction"));
+    CHECK(body.at("systemInstruction").at("parts").at(0).at("text") == "你是鲁班,守规矩。");
+    // Gemini 的 contents 没有 system 这一角。
+    for (const auto& content : body.at("contents")) {
+        CHECK(content.at("role") != "system");
+    }
+}
+
+TEST_CASE("Gemini 换骨: Tool 角色折 role=user 的 functionResponse,函数名按历史对回") {
+    const auto body = api::gemini::BuildRequestJson(FourRoleConversation());
+    const auto& contents = body.at("contents");
+    // ToolNameByUseId 对回表不扫消息角色:Tool 角色消息携带的 tool_call_id
+    // 照旧从 assistant 的 ToolUseBlock 对回函数名。functionResponse 的
+    // role 经 WireRole 落位("user" 现行形状保持)。
+    REQUIRE(contents.size() == 7);
+    CHECK(contents.at(4).at("role") == "user");
+    CHECK(contents.at(4).at("parts").at(0).at("functionResponse").at("name") == "read_file");
+    CHECK(contents.at(4).at("parts").at(0).at("functionResponse").at("response").at("result") ==
+          "#include <cstdio>\nint main() {}");
+    CHECK(contents.at(5).at("role") == "user");
+    CHECK(contents.at(5).at("parts").at(0).at("functionResponse").at("name") == "list_dir");
+}
+
+TEST_CASE("Gemini 换骨: Tool 消息对不上号时退 id 当函数名") {
+    // 对回表认 tool 消息的防御面:上游少了那条 assistant 调用消息时,
+    // Tool 角色的 tool_call_id 对不上号,退回 id 本身当函数名——与旧路
+    //(User 容器)同一兜底,不悄悄丢结果。
+    api::Request request;
+    request.model = "m";
+    api::Message tool;
+    tool.role = api::Role::Tool;
+    tool.content.push_back(api::ToolResultBlock{"orphan_call", "孤儿结果", false});
+    request.messages.push_back(tool);
+
+    const auto body = api::gemini::BuildRequestJson(request);
+    const auto& contents = body.at("contents");
+    REQUIRE(contents.size() == 1);
+    CHECK(contents.at(0).at("role") == "user");
+    CHECK(contents.at(0).at("parts").at(0).at("functionResponse").at("name") == "orphan_call");
+    CHECK(contents.at(0).at("parts").at(0).at("functionResponse").at("response").at("result") == "孤儿结果");
+}
+
+TEST_CASE("Gemini 换骨总钉子: 同一对话两角色旧路与四角色新路出口逐字节相等") {
+    const auto legacy = api::gemini::BuildRequestJson(TwoRoleConversation());
+    const auto four_role = api::gemini::BuildRequestJson(FourRoleConversation());
+    CHECK(four_role.dump() == legacy.dump());
+}
+
+// ---------------------------------------------------------------------------
+// 混装换骨横切:正文与工具结果同框的内部消息,四家新旧两路出口逐字节相等
+// ---------------------------------------------------------------------------
+
+TEST_CASE("混装横切: 正文与结果同框的 Tool 消息,四家新旧两路出口逐字节相等") {
+    // 混装是最容易走岔的形状(一内变两外)。旧路:User 容器混装 Text +
+    // ToolResultBlock(合同册横切节钉过形状);新路:Tool 角色混装同样
+    // 的块。四家出口逐字节相等 = 角色一换,拍平纹丝不动。
+    api::Request legacy;
+    legacy.model = "m";
+    api::Message mixed;
+    mixed.role = api::Role::User;
+    mixed.content.push_back(api::TextBlock{"这是正文"});
+    mixed.content.push_back(api::ToolResultBlock{"call_x", "这是结果", false});
+    legacy.messages.push_back(mixed);
+
+    api::Request four_role = legacy;
+    four_role.messages.back().role = api::Role::Tool;
+
+    CHECK(api::anthropic::BuildRequestJson(four_role).dump() ==
+          api::anthropic::BuildRequestJson(legacy).dump());
+    CHECK(api::chat::BuildRequestJson(four_role).dump() == api::chat::BuildRequestJson(legacy).dump());
+    CHECK(api::responses::BuildRequestJson(four_role).dump() ==
+          api::responses::BuildRequestJson(legacy).dump());
+    CHECK(api::gemini::BuildRequestJson(four_role).dump() == api::gemini::BuildRequestJson(legacy).dump());
 }
