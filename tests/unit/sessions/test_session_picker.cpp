@@ -512,3 +512,134 @@ TEST_CASE("转录浮层帧: 标题/内容/空态/底栏") {
     }
     CHECK(empty_hint);
 }
+
+// ---------------------------------------------------------------------------
+// 转录浮层游标分页(P3 第二棒):SessionTranscriptScroller 滚动账 + 帧
+// 位置提示。取数(provider)归面板层,这里钉纯逻辑。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+SessionTranscriptPage MakePage(std::vector<std::string> lines, bool has_older, bool has_newer,
+                               std::optional<std::uint64_t> oldest,
+                               std::optional<std::uint64_t> newest) {
+    SessionTranscriptPage page;
+    page.lines = std::move(lines);
+    page.has_older = has_older;
+    page.has_newer = has_newer;
+    page.oldest_seq = oldest;
+    page.newest_seq = newest;
+    return page;
+}
+
+}  // namespace
+
+TEST_CASE("滚动账: 首开钉底,滚动键挪视口,非滚动键放行") {
+    SessionTranscriptScroller scroller;
+    scroller.SetViewportRows(3);
+    scroller.LoadInitial(MakePage({"a", "b", "c", "d", "e"}, true, false,
+                                  std::optional<std::uint64_t>{1},
+                                  std::optional<std::uint64_t>{5}));
+    // 首开钉底:先看最新的(c/d/e)。
+    CHECK(scroller.scroll() == 2);
+    auto visible = scroller.VisibleLines();
+    REQUIRE(visible.size() == 3);
+    CHECK(visible[0] == "c");
+
+    // ↓ 到底不动;↑ 逐行向上;PageUp 跳一页;Home 到顶。
+    CHECK(scroller.HandleKey(K::Down));
+    CHECK(scroller.scroll() == 2);
+    CHECK(scroller.HandleKey(K::Up));
+    CHECK(scroller.scroll() == 1);
+    CHECK(scroller.HandleKey(K::PageUp));
+    CHECK(scroller.scroll() == 0);
+    CHECK(scroller.HandleKey(K::Home));
+    CHECK(scroller.scroll() == 0);
+    // 顶上还有货:该向旧补页,游标 = 本页首行 seq。
+    CHECK(scroller.NeedsOlderPage());
+    CHECK(scroller.OlderCursor() == std::optional<std::uint64_t>{1});
+    CHECK_FALSE(scroller.NeedsNewerPage());
+
+    // 非滚动键放行(false:面板层交给 core 的浮层规矩)。
+    CHECK_FALSE(scroller.HandleKey(K::Enter));
+    CHECK_FALSE(scroller.HandleKey(K::Esc));
+    CHECK_FALSE(scroller.HandleKey(K::CtrlT));
+    CHECK_FALSE(scroller.HandleKey(K::Char));
+}
+
+TEST_CASE("滚动账: 触边补页——前插平移画面不跳,后接贴底跟随,空页封口") {
+    SessionTranscriptScroller scroller;
+    scroller.SetViewportRows(2);
+    scroller.LoadInitial(MakePage({"c", "d"}, true, false,
+                                  std::optional<std::uint64_t>{3},
+                                  std::optional<std::uint64_t>{4}));
+    CHECK(scroller.scroll() == 0);
+    scroller.HandleKey(K::Home);
+    // 向旧补一页(a/b):前插两行,滚动位平移 2,画面顶行还是 c。
+    scroller.AppendOlder(MakePage({"a", "b"}, false, false,
+                                  std::optional<std::uint64_t>{1},
+                                  std::optional<std::uint64_t>{2}));
+    REQUIRE(scroller.lines().size() == 4);
+    CHECK(scroller.scroll() == 2);
+    auto visible = scroller.VisibleLines();
+    REQUIRE(visible.size() == 2);
+    CHECK(visible[0] == "c");
+    CHECK_FALSE(scroller.NeedsOlderPage());  // has_older=false:方向封口
+
+    // 空页也封口:provider 回空 = 这个方向到头了。
+    scroller.AppendOlder(MakePage({}, true, false, std::nullopt, std::nullopt));
+    CHECK_FALSE(scroller.NeedsOlderPage());
+
+    // 贴底时后接新页:跟着到新底,翻到的行立即可见。
+    scroller.LoadInitial(MakePage({"c", "d"}, false, true,
+                                  std::optional<std::uint64_t>{3},
+                                  std::optional<std::uint64_t>{4}));
+    CHECK(scroller.NeedsNewerPage());  // 首开钉底 + has_newer → 该向新补
+    scroller.AppendNewer(MakePage({"e", "f"}, false, false,
+                                  std::optional<std::uint64_t>{5},
+                                  std::optional<std::uint64_t>{6}));
+    visible = scroller.VisibleLines();
+    REQUIRE(visible.size() == 2);
+    CHECK(visible[0] == "e");
+    CHECK(visible[1] == "f");
+    CHECK_FALSE(scroller.NeedsNewerPage());
+}
+
+TEST_CASE("滚动账: v2 定长摘要——无游标无第二页,不追问补页") {
+    SessionTranscriptScroller scroller;
+    scroller.SetViewportRows(40);  // 一屏装得下
+    scroller.LoadInitial(MakePage({"  user · 你好", "  assistant · 在"}, false, false,
+                                  std::nullopt, std::nullopt));
+    CHECK_FALSE(scroller.NeedsOlderPage());
+    CHECK_FALSE(scroller.NeedsNewerPage());
+    // 行不满一屏:hint 不带滚动提示,底栏走旧文案(v2 画面一字不变)。
+    CHECK_FALSE(scroller.hint().scrollable);
+    // Reset 清账(换场)。
+    scroller.Reset();
+    CHECK(scroller.lines().empty());
+    CHECK(scroller.scroll() == 0);
+}
+
+TEST_CASE("转录浮层帧: 位置提示底栏——可翻页时报两向还有货") {
+    SessionTranscriptScrollHint hint;
+    hint.scrollable = true;
+    hint.has_older = true;
+    hint.has_newer = false;
+    const auto frame = BuildSessionTranscriptFrame("转录 · x", {"  user · 你好"}, 80, hint);
+    bool has_scroll_footer = false;
+    for (const auto& line : frame.lines) {
+        if (line.find("pgup/pgdn") != std::string::npos) {
+            has_scroll_footer = true;
+        }
+    }
+    CHECK(has_scroll_footer);
+    // 不带 hint(缺省):旧底栏文案,没有翻页键提示。
+    const auto plain = BuildSessionTranscriptFrame("转录 · x", {"  user · 你好"}, 80);
+    bool plain_scroll_footer = false;
+    for (const auto& line : plain.lines) {
+        if (line.find("pgup/pgdn") != std::string::npos) {
+            plain_scroll_footer = true;
+        }
+    }
+    CHECK_FALSE(plain_scroll_footer);
+}

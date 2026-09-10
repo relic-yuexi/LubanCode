@@ -342,7 +342,8 @@ int SessionPickerScrollPercent(std::size_t selected, std::size_t total) {
 }
 
 SessionPickerFrame BuildSessionTranscriptFrame(const std::string& title_line,
-                                               const std::vector<std::string>& excerpt_lines, int width) {
+                                               const std::vector<std::string>& excerpt_lines,
+                                               int width, const SessionTranscriptScrollHint& hint) {
     (void)width;  // 宽度截断归终端层
     SessionPickerFrame frame;
     frame.lines.push_back(title_line);
@@ -360,7 +361,17 @@ SessionPickerFrame BuildSessionTranscriptFrame(const std::string& title_line,
     }
     frame.lines.push_back(std::string());
     frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
-    frame.lines.push_back(tr("picker.transcript.footer"));
+    // 底栏:可滚/可翻页时换成带位置提示的版本(v3 会话游标分页);定长
+    // 摘要(不滚动)保持旧文案,v2 会话画面一字不变。
+    if (hint.scrollable || hint.has_older || hint.has_newer) {
+        frame.lines.push_back(trf("picker.transcript.scroll_footer",
+                                  hint.has_older ? tr("picker.transcript.more_older")
+                                                 : tr("picker.transcript.no_more_older"),
+                                  hint.has_newer ? tr("picker.transcript.more_newer")
+                                                 : tr("picker.transcript.no_more_newer")));
+    } else {
+        frame.lines.push_back(tr("picker.transcript.footer"));
+    }
     frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
     return frame;
 }
@@ -484,6 +495,147 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
     frame.lines.push_back(status);
     frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
     return frame;
+}
+
+// ---------------------------------------------------------------------------
+// 转录浮层滚动账(P3 第二棒)
+// ---------------------------------------------------------------------------
+
+void SessionTranscriptScroller::LoadInitial(const SessionTranscriptPage& page) {
+    lines_ = page.lines;
+    has_older_ = page.has_older;
+    has_newer_ = page.has_newer;
+    oldest_seq_ = page.oldest_seq;
+    newest_seq_ = page.newest_seq;
+    scroll_ = 0;
+    ClampScroll();
+    if (!lines_.empty()) {
+        // 首开钉在页底:先看最新的(与旧版"尾部摘要"同一顺眼方向)。
+        scroll_ = lines_.size() > viewport_rows_ ? lines_.size() - viewport_rows_ : 0;
+    }
+}
+
+void SessionTranscriptScroller::Reset() {
+    lines_.clear();
+    has_older_ = false;
+    has_newer_ = false;
+    oldest_seq_.reset();
+    newest_seq_.reset();
+    scroll_ = 0;
+}
+
+void SessionTranscriptScroller::SetViewportRows(std::size_t rows) {
+    viewport_rows_ = rows == 0 ? 1 : rows;
+    ClampScroll();
+}
+
+void SessionTranscriptScroller::ClampScroll() {
+    if (lines_.size() <= viewport_rows_) {
+        scroll_ = 0;
+        return;
+    }
+    const std::size_t max_top = lines_.size() - viewport_rows_;
+    scroll_ = scroll_ > max_top ? max_top : scroll_;
+}
+
+bool SessionTranscriptScroller::AtBottom() const {
+    return lines_.empty() || scroll_ + viewport_rows_ >= lines_.size();
+}
+
+bool SessionTranscriptScroller::HandleKey(KeyKind key) {
+    switch (key) {
+        case KeyKind::Up:
+            if (scroll_ > 0) {
+                --scroll_;
+            }
+            return true;
+        case KeyKind::Down:
+            if (!AtBottom()) {
+                ++scroll_;
+            }
+            return true;
+        case KeyKind::PageUp:
+            scroll_ = scroll_ > viewport_rows_ ? scroll_ - viewport_rows_ : 0;
+            return true;
+        case KeyKind::PageDown:
+            if (!AtBottom()) {
+                scroll_ += viewport_rows_;
+                ClampScroll();
+            }
+            return true;
+        case KeyKind::Home:
+            scroll_ = 0;
+            return true;
+        case KeyKind::End:
+            if (!lines_.empty()) {
+                scroll_ = lines_.size() > viewport_rows_ ? lines_.size() - viewport_rows_ : 0;
+            }
+            return true;
+        default:
+            return false;  // 非滚动键:面板层放行给 core(浮层里 core 自有规矩)
+    }
+}
+
+bool SessionTranscriptScroller::NeedsOlderPage() const {
+    return scroll_ == 0 && has_older_ && oldest_seq_.has_value() && !lines_.empty();
+}
+
+bool SessionTranscriptScroller::NeedsNewerPage() const {
+    return AtBottom() && has_newer_ && newest_seq_.has_value() && !lines_.empty();
+}
+
+std::optional<std::uint64_t> SessionTranscriptScroller::OlderCursor() const {
+    return oldest_seq_;
+}
+
+std::optional<std::uint64_t> SessionTranscriptScroller::NewerCursor() const {
+    return newest_seq_;
+}
+
+void SessionTranscriptScroller::AppendOlder(const SessionTranscriptPage& page) {
+    if (page.lines.empty()) {
+        has_older_ = false;  // 空页:这个方向到头了,不再追问
+        return;
+    }
+    // 前插 N 行,滚动位平移 N:画面钉在原顶行,新取的旧行正好铺在上方。
+    const std::size_t grown = page.lines.size();
+    lines_.insert(lines_.begin(), page.lines.begin(), page.lines.end());
+    scroll_ += grown;
+    has_older_ = page.has_older;
+    oldest_seq_ = page.oldest_seq;
+    ClampScroll();
+}
+
+void SessionTranscriptScroller::AppendNewer(const SessionTranscriptPage& page) {
+    if (page.lines.empty()) {
+        has_newer_ = false;
+        return;
+    }
+    const bool was_bottom = AtBottom();
+    lines_.insert(lines_.end(), page.lines.begin(), page.lines.end());
+    has_newer_ = page.has_newer;
+    newest_seq_ = page.newest_seq;
+    if (was_bottom) {
+        // 原本贴底:跟着到新底,翻新页的行立即可见。
+        scroll_ = lines_.size() > viewport_rows_ ? lines_.size() - viewport_rows_ : 0;
+    }
+    ClampScroll();
+}
+
+std::vector<std::string> SessionTranscriptScroller::VisibleLines() const {
+    const std::size_t count = scroll_ < lines_.size()
+                                  ? (std::min)(viewport_rows_, lines_.size() - scroll_)
+                                  : 0;
+    return std::vector<std::string>(lines_.begin() + static_cast<std::ptrdiff_t>(scroll_),
+                                    lines_.begin() + static_cast<std::ptrdiff_t>(scroll_ + count));
+}
+
+SessionTranscriptScrollHint SessionTranscriptScroller::hint() const {
+    SessionTranscriptScrollHint hint;
+    hint.scrollable = lines_.size() > viewport_rows_;
+    hint.has_older = has_older_;
+    hint.has_newer = has_newer_;
+    return hint;
 }
 
 }  // namespace lubancode::cli

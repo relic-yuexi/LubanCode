@@ -9,6 +9,7 @@
 
 #include "platform/paths.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"
 
 namespace lubancode::runtime {
 
@@ -153,6 +154,143 @@ RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl
         view.items.push_back(std::move(out));
     }
     return view;
+}
+
+std::optional<std::filesystem::path> FindV3HistoryStream(const std::filesystem::path& session_dir) {
+    return trajectory::v3::FindV3SessionStream(session_dir);
+}
+
+// ---------------------------------------------------------------------------
+// 转录摘要行 + seq 游标分页(P3 第二棒)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// token 数加千位逗号(§4.11 示意口径:"148,200")。
+std::string FormatTranscriptTokenCount(std::uint64_t value) {
+    std::string digits = std::to_string(value);
+    std::string grouped;
+    for (std::size_t i = 0; i < digits.size(); ++i) {
+        const std::size_t from_end = digits.size() - i;
+        grouped += digits[i];
+        if (from_end > 1 && (from_end - 1) % 3 == 0) {
+            grouped += ',';
+        }
+    }
+    return grouped;
+}
+
+// 一条消息正文的第一行(转录摘要一行只摆一行,长文进详情档)。
+std::string FirstLineOf(const std::string& text) {
+    const std::size_t newline = text.find('\n');
+    return newline == std::string::npos ? text : text.substr(0, newline);
+}
+
+}  // namespace
+
+std::vector<RestoredTranscriptLine> RenderRestoredTranscriptLines(const RestoredHistoryView& view) {
+    std::vector<RestoredTranscriptLine> lines;
+    for (const auto& item : view.items) {
+        if (item.kind == RestoredHistoryItem::Kind::Compact) {
+            std::string text = "  ◆ 上下文已压缩";
+            if (item.compact.context_tokens_before > 0 || item.compact.context_tokens_after > 0) {
+                text += ":前 ~" + FormatTranscriptTokenCount(item.compact.context_tokens_before) +
+                        " → 后 ~" + FormatTranscriptTokenCount(item.compact.context_tokens_after) +
+                        " tokens";
+            }
+            lines.push_back(RestoredTranscriptLine{item.seq, std::move(text)});
+            continue;
+        }
+        // hidden 默认不渲染(§4.28:隐藏不等于删除,行表里没有这行)。
+        if (item.message.hidden) {
+            continue;
+        }
+        const api::Message& message = item.message.message;
+        std::string role;
+        std::string body;
+        bool only_tool_result = true;
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                only_tool_result = false;
+                if (body.empty()) {
+                    body = FirstLineOf(text->text);
+                }
+            } else if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
+                only_tool_result = false;
+                if (body.empty()) {
+                    body = "[工具] " + use->name;
+                }
+            } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                       result != nullptr && body.empty()) {
+                body = FirstLineOf(result->content);
+            }
+        }
+        role = message.role == api::Role::Assistant
+                   ? "assistant"
+                   : (only_tool_result ? "tool" : "user");
+        std::string text = "  " + role + " · " + body;
+        // 上下文状态注脚(§1.3"哪段已压缩、当前模型还能看哪段,界面要
+        // 分得清";§4.38 降档退链的原版另注)。
+        if (!item.message.removed_by_compacts.empty()) {
+            text += " · 已压缩";
+        }
+        if (item.message.replaced_by_derivation) {
+            text += " · 已降档";
+        }
+        lines.push_back(RestoredTranscriptLine{item.seq, std::move(text)});
+    }
+    return lines;
+}
+
+RestoredTranscriptPage SliceRestoredTranscript(const std::vector<RestoredTranscriptLine>& lines,
+                                                const std::optional<std::uint64_t>& before_seq,
+                                                const std::optional<std::uint64_t>& after_seq,
+                                                std::size_t max_lines) {
+    // 按游标定候选区间 [begin, end)(旧→新;游标一次只给一枚,两枚同给
+    // 不在合同里)。
+    std::size_t begin = 0;
+    std::size_t end = lines.size();
+    if (before_seq.has_value()) {
+        end = 0;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].seq < *before_seq) {
+                end = i + 1;
+            }
+        }
+    }
+    if (after_seq.has_value()) {
+        begin = lines.size();
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].seq > *after_seq) {
+                begin = i;
+                break;
+            }
+        }
+    }
+    RestoredTranscriptPage page;
+    if (begin >= end) {
+        page.has_older = end > 0;
+        page.has_newer = end < lines.size();
+        return page;
+    }
+    if (max_lines > 0 && end - begin > max_lines) {
+        if (after_seq.has_value()) {
+            // 向新翻:候选区间从头取最早的 max_lines 行。
+            end = begin + max_lines;
+        } else {
+            // 首开(取尾页)与向旧翻:候选区间从尾取最新的 max_lines 行。
+            begin = end - max_lines;
+        }
+    }
+    page.has_older = begin > 0;
+    page.has_newer = end < lines.size();
+    page.oldest_seq = lines[begin].seq;
+    page.newest_seq = lines[end - 1].seq;
+    page.lines.reserve(end - begin);
+    for (std::size_t i = begin; i < end; ++i) {
+        page.lines.push_back(lines[i].text);
+    }
+    return page;
 }
 
 }  // namespace lubancode::runtime

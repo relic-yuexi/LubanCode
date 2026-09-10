@@ -300,6 +300,42 @@ ParamsCheck CheckTraceQueryParams(const nlohmann::json& params, std::string& out
     return ParamsCheck{true};
 }
 
+ParamsCheck CheckThreadHistoryParams(const nlohmann::json& params, std::string_view method,
+                                      std::string& out_thread_id, std::uint64_t& out_last_seq,
+                                      bool& out_include_hidden) {
+    out_last_seq = 0;          // 缺省全量(与 trace/query 同口径)
+    out_include_hidden = false; // 缺省:hidden 消息只回标志不回正文(§4.28)
+    const ParamsCheck base = CheckParamsIsObject(params, method);
+    if (!base.ok) {
+        return base;
+    }
+    const ParamsCheck check = RequireString(params, "threadId", method, out_thread_id);
+    if (!check.ok) {
+        return check;
+    }
+    // lastSeq:可选非负整数,缺省 0 = 全量;返回大于它的条目(断线补账
+    // 口径,与 trace/query 一致,前端无感知差异)。
+    if (params.contains("lastSeq") && !params["lastSeq"].is_null()) {
+        const auto& value = params["lastSeq"];
+        if ((value.is_number_integer() && value.get<std::int64_t>() >= 0) || value.is_number_unsigned()) {
+            out_last_seq = static_cast<std::uint64_t>(value);
+        } else {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(method) + ": lastSeq 必须是非负整数"};
+        }
+    }
+    // includeHidden:可选布尔,缺省 false——hidden 消息(压缩问答、skill
+    // 披露等)只回 hidden=true 标志,正文省略;显式要 true 才带正文。
+    if (params.contains("includeHidden") && !params["includeHidden"].is_null()) {
+        if (!params["includeHidden"].is_boolean()) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(method) + ": includeHidden 必须是布尔"};
+        }
+        out_include_hidden = params["includeHidden"].get<bool>();
+    }
+    return ParamsCheck{};
+}
+
 ParamsCheck CheckWorkflowQueryParams(const nlohmann::json& params, std::string& out_run_id,
                                      std::uint64_t& out_last_seq) {
     out_last_seq = 0; // 缺省全量;调用方传入的旧值不沿用
@@ -454,7 +490,8 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodShutdown),        std::string(kMethodThreadStart),
         std::string(kMethodThreadList),      std::string(kMethodThreadStop),
         std::string(kMethodThreadArchive),   std::string(kMethodThreadUnarchive),
-        std::string(kMethodThreadDelete),    std::string(kMethodTurnStart),
+        std::string(kMethodThreadDelete),    std::string(kMethodThreadResume),
+        std::string(kMethodThreadRead),      std::string(kMethodTurnStart),
         std::string(kMethodTurnInterrupt),   std::string(kMethodWorkflowQuery),
         std::string(kMethodTraceQuery),
         // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)。
@@ -491,7 +528,6 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodBrowserScreencastStart),
         std::string(kMethodBrowserScreencastStop)};
     capabilities["pending"] = std::vector<std::string>{
-        std::string(kMethodThreadResume),    std::string(kMethodThreadRead),
         std::string(kMethodTurnSteer),       std::string(kMethodModelList),
         std::string(kMethodConfigRead),      std::string(kMethodWorkflowList)};
     // 审批与 ask_user 的反向请求:协议位占住,执行链等 Broker(另一条线)。

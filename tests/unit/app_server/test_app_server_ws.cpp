@@ -539,7 +539,7 @@ TEST_CASE("ws 承载:升级 → initialize → thread/turn → 事件带 seq") {
         client, [](const nlohmann::json& message) { return message.contains("id"); });
     REQUIRE(init.has_value());
     CHECK((*init)["id"] == 1);
-    CHECK((*init)["result"]["protocolVersion"] == "1.1");
+    CHECK((*init)["result"]["protocolVersion"].get<std::string>() == std::string(app_server::kProtocolVersion));
     client.SendText(R"({"method":"initialized"})");
 
     // thread/start:threadId 发事件 + 回响应。
@@ -692,7 +692,7 @@ TEST_CASE("ws 承载:token 门——错即断,对放行") {
         const auto init = WaitForMessage(
             client, [](const nlohmann::json& m) { return m.contains("id") && m["id"] == 1; });
         REQUIRE(init.has_value());
-        CHECK((*init)["result"]["protocolVersion"] == "1.1");
+        CHECK((*init)["result"]["protocolVersion"].get<std::string>() == std::string(app_server::kProtocolVersion));
         client.HardClose();
     }
     server_thread.join();

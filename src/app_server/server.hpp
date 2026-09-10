@@ -4,11 +4,13 @@
 //   - thread/start、thread/list、thread/stop(会话账,走 Trajectory Journal);
 //   - thread/archive、thread/unarchive、thread/delete(P9 收尾:走
 //     runtime::SessionCommandService,server 不另写扫盘路);
+//   - thread/resume、thread/read(轨迹 v3 P3 第二棒:只读旧史两法——
+//     恢复视图预览与完整时间线详情,经 runtime 显示投影,零调用零重跑);
 //   - turn/start(图片输入 + 文本;工具条目带中立 diff 行表;usage/
 //     context 进度事件);
 //   - turn/interrupt(阶段 2);
 //   - workflow/query(wf 线的 run 快照 + 增量事件出口);
-// 留位方法(resume/read/steer/model/list/config/read/workflow/list)回
+// 留位方法(steer/model/list/config/read/workflow/list)回
 // kErrMethodNotFound——名字认识、执行链没有。
 //
 // 审批反向请求(permission/request、user/ask)与打断:阶段 2 已接线。
