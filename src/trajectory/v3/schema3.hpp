@@ -63,4 +63,9 @@ std::optional<Schema3Error> CheckContextChainField(std::string_view context,
 // Tokens/cacheReadTokens/cacheWriteTokens)须为非负整数;缺子项省键。
 std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage);
 
+// artifactRef(§3.1 六键,结果仓):{artifactId,kind,path,sha256,bytes,
+// mediaType},kind ∈ result_metadata|stdout|stderr|combined|report|image|blob。
+std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
+                                                const nlohmann::json& ref);
+
 }  // namespace lubancode::trajectory::v3

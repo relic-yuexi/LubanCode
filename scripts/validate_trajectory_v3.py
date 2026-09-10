@@ -40,6 +40,7 @@ MESSAGE_KEYS = COMMON_KEYS | {
     "compactId", "purpose", "origin", "display", "message", "causedByEventRef",
     "sourceMessageRef", "systemMeta", "completionStatus", "provider", "wire",
     "model", "responseModel", "providerConfigRef", "modelProfileRef", "usage",
+    "resultSelectionRef", "sourceToolMessageRef",
 }
 EVENT_KEYS = COMMON_KEYS | {
     "eventId", "kind", "status", "turnId", "parentTurnId", "stepId", "requestId",
@@ -86,7 +87,7 @@ STATUSLESS_KINDS = {
     "context.tool_previews.reduced", "context.system.applied",
     "context.input.applied", "input.received", "input.enqueued",
     "input.admitted", "input.superseded", "resume.source.attached",
-    "subagent.observed", "subagent.spawn.failed", "command.received",
+    "subagent.observed", "command.received",
     "hook.dispatch.requested", "hook.skipped", "title.requested",
     "title.extracted", "session.title.applied", "tool.result.persisted",
     "tool.result.persist_failed", "tool.result.selected",
@@ -143,6 +144,69 @@ def is_ref(value) -> bool:
             and is_hex64(value["hash"])
         )
     return False
+
+
+ARTIFACT_KINDS = {
+    "result_metadata", "stdout", "stderr", "combined", "report", "image", "blob",
+}
+
+
+def is_artifact_ref(ref) -> bool:
+    """六键 artifactRef(§3.1):camelCase,kind 枚举,sha256 hex64,bytes 非负。"""
+    if not isinstance(ref, dict):
+        return False
+    for key in ("artifactId", "kind", "path", "sha256", "bytes", "mediaType"):
+        if key not in ref:
+            return False
+    return (
+        isinstance(ref["artifactId"], str) and bool(ref["artifactId"])
+        and isinstance(ref["kind"], str) and ref["kind"] in ARTIFACT_KINDS
+        and isinstance(ref["path"], str) and bool(ref["path"])
+        and isinstance(ref["sha256"], str) and is_hex64(ref["sha256"])
+        and isinstance(ref["bytes"], int) and not isinstance(ref["bytes"], bool)
+        and ref["bytes"] >= 0
+        and isinstance(ref["mediaType"], str)
+    )
+
+
+def require_payload(kind: str, payload: dict, keys: list[str]) -> None:
+    for key in keys:
+        if key not in payload:
+            raise ValidationError(f"{kind} payload 缺字段: {key}")
+
+
+def check_tool_payload(obj: dict, kind: str, payload: dict, require_attempt: bool) -> None:
+    """工具族公共:tool_call_id == 信封 actionId(§4.15);attempt 正整数。"""
+    if payload.get("tool_call_id") != obj.get("actionId"):
+        raise ValidationError(
+            f"{kind} payload.tool_call_id 须等于信封 actionId(§4.15)")
+    if require_attempt:
+        attempt = payload.get("attempt")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+            raise ValidationError(f"{kind} payload.attempt 应为从 1 起的正整数")
+
+
+def check_child_session_ref(kind: str, payload: dict) -> None:
+    ref = payload.get("childSessionRef")
+    if not isinstance(ref, dict):
+        raise ValidationError(f"{kind} payload.childSessionRef 应为 object")
+    for key in ("sessionId", "runId", "journalPath"):
+        if not isinstance(ref.get(key), str) or not ref[key]:
+            raise ValidationError(f"{kind} childSessionRef.{key} 应为非空 string(§4.31)")
+
+
+def check_child_checkpoint_ref(kind: str, payload: dict) -> None:
+    ref = payload.get("childCheckpointRef")
+    if not isinstance(ref, dict):
+        raise ValidationError(f"{kind} payload.childCheckpointRef 应为 object")
+    for key in ("sessionId", "runId"):
+        if not isinstance(ref.get(key), str) or not ref[key]:
+            raise ValidationError(f"{kind} childCheckpointRef.{key} 应为非空 string")
+    seq = ref.get("seq")
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+        raise ValidationError(f"{kind} childCheckpointRef.seq 应为非负整数")
+    if not isinstance(ref.get("lineHash"), str) or not is_hex64(ref["lineHash"]):
+        raise ValidationError(f"{kind} childCheckpointRef.lineHash 应为 64 位十六进制")
 
 
 class ValidationError(Exception):
@@ -234,6 +298,12 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                 raise ValidationError("tool 消息必带 turnId 与 actionId")
             if message.get("tool_call_id") != obj["actionId"]:
                 raise ValidationError("message.tool_call_id 须等于信封 actionId")
+            if not isinstance(message.get("content"), str):
+                raise ValidationError("tool 消息 content 应为 string(§1.2.1)")
+        # 降档派生消息(§4.38):origin 固定 context_runtime,不冒充新执行。
+        if "sourceToolMessageRef" in obj and obj.get("origin") != "context_runtime":
+            raise ValidationError(
+                "带 sourceToolMessageRef 的派生消息 origin 须为 context_runtime(§4.38)")
     else:
         if not isinstance(obj.get("eventId"), str):
             raise ValidationError("event 行缺 eventId")
@@ -267,12 +337,116 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             id_field = "commandId"
         elif kind.startswith("task."):
             id_field = "taskId"
+        elif kind.startswith("subagent."):
+            id_field = "actionId"
         elif kind in ("title.requested", "title.extracted", "session.title.applied"):
             id_field = "titleGenerationId"
         if id_field is not None and not isinstance(obj.get(id_field), str):
             raise ValidationError(f"{kind} 必带 {id_field}")
+        payload = obj.get("payload") or {}
+        if kind.startswith(("tool.execution.", "tool.result.")):
+            # 工具族载荷合同(§4.14-4.16/§4.19;与 C++ schema3 同口径)。
+            if kind == "tool.execution.pending":
+                check_tool_payload(obj, kind, payload, True)
+                require_payload(kind, payload, ["reason"])
+            elif kind == "tool.execution.started":
+                check_tool_payload(obj, kind, payload, True)
+                if not is_ref(payload.get("effectiveArgsRef")):
+                    raise ValidationError("started payload.effectiveArgsRef 应为合法引用")
+            elif kind == "tool.execution.waiting":
+                check_tool_payload(obj, kind, payload, True)
+                require_payload(kind, payload, ["reason"])
+                if not is_ref(payload.get("waitRef")):
+                    raise ValidationError("waiting payload.waitRef 应为可恢复等待引用")
+            elif kind == "tool.execution.resumed":
+                check_tool_payload(obj, kind, payload, True)
+            elif kind == "tool.execution.finished":
+                check_tool_payload(obj, kind, payload, True)
+                if "exit_code" in payload and payload["exit_code"] is not None \
+                        and not isinstance(payload["exit_code"], int):
+                    raise ValidationError("finished exit_code 应为整数或 null")
+            elif kind == "tool.execution.failed":
+                check_tool_payload(obj, kind, payload, True)
+                require_payload(kind, payload, ["error_code"])
+            elif kind == "tool.execution.cancelled":
+                check_tool_payload(obj, kind, payload, False)
+                if payload.get("phase") not in ("before_started", "during_execution"):
+                    raise ValidationError("cancelled.phase 应为 before_started|during_execution")
+            elif kind == "tool.execution.rejected":
+                check_tool_payload(obj, kind, payload, False)
+                require_payload(kind, payload, ["reason"])
+            elif kind == "tool.execution.unknown":
+                check_tool_payload(obj, kind, payload, True)
+                require_payload(kind, payload, ["reason"])
+            elif kind == "tool.result.persisted":
+                check_tool_payload(obj, kind, payload, True)
+                refs = payload.get("result_ref")
+                if not isinstance(refs, list) or not refs:
+                    raise ValidationError("persisted result_ref 应为非空数组(§4.16)")
+                for ref in refs:
+                    if not is_artifact_ref(ref):
+                        raise ValidationError("persisted result_ref 项不符六键 artifactRef")
+                paths = [ref["path"] for ref in refs]
+                if len(set(paths)) != len(paths):
+                    raise ValidationError("result_ref 同一文件只列一次")
+                if not is_ref(payload.get("executionEventRef")):
+                    raise ValidationError("persisted executionEventRef 应为合法引用")
+            elif kind == "tool.result.persist_failed":
+                check_tool_payload(obj, kind, payload, True)
+                require_payload(kind, payload, ["reason"])
+            elif kind == "tool.result.selected":
+                check_tool_payload(obj, kind, payload, False)
+                sources = payload.get("sourceResultEventRefs")
+                if not isinstance(sources, list) or not sources \
+                        or not all(is_ref(r) for r in sources):
+                    raise ValidationError("selected sourceResultEventRefs 应为非空引用数组")
+                hooks = payload.get("hookEffectEventRefs")
+                if not isinstance(hooks, list) or not all(is_ref(r) for r in hooks):
+                    raise ValidationError("selected hookEffectEventRefs 应为引用数组")
+                if payload.get("effectiveOutcome") not in (
+                        "done", "failed", "substituted", "error"):
+                    raise ValidationError(
+                        "selected effectiveOutcome 应为 done|failed|substituted|error")
+        elif kind.startswith("hook."):
+            # hook 载荷合同(§4.22-4.23)。
+            if kind == "hook.dispatch.requested":
+                require_payload(kind, payload, ["hookPoint"])
+            elif kind == "hook.started":
+                require_payload(kind, payload, ["hookInvocationId", "hookId", "handlerKind"])
+            elif kind == "hook.completed":
+                require_payload(kind, payload, ["hookInvocationId", "hookId"])
+            elif kind == "hook.failed":
+                require_payload(kind, payload, ["error_code"])
+            elif kind in ("hook.cancelled", "hook.unknown", "hook.skipped"):
+                require_payload(kind, payload, ["reason"])
+            elif kind == "hook.effects.applied":
+                require_payload(kind, payload, ["effectType"])
+            elif kind == "hook.effects.rejected":
+                require_payload(kind, payload, ["effectType", "reason"])
+        elif kind.startswith("subagent."):
+            # subagent 载荷合同(§4.31-4.32)。
+            require_payload(kind, payload, ["taskId"])
+            if kind == "subagent.spawn.requested":
+                check_child_session_ref(kind, payload)
+                attempt = payload.get("attempt")
+                if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                    raise ValidationError("spawn.requested attempt 应为从 1 起")
+            elif kind in ("subagent.linked", "subagent.observed"):
+                check_child_checkpoint_ref(kind, payload)
+            elif kind == "subagent.spawn.failed":
+                require_payload(kind, payload, ["phase", "reason"])
+        elif kind == "context.tool_previews.reduced":
+            # §4.38:独立上下文提交事件。
+            require_payload(kind, payload, [
+                "contextId", "beforeRevision", "afterRevision", "oldPreviewBudget",
+                "newPreviewBudget", "replacementRefs", "contextChain", "inputHash",
+                "estimatedTokensBefore", "estimatedTokensAfter", "pairingCheckRefs"])
+            if not payload["replacementRefs"]:
+                raise ValidationError("replacementRefs 应为非空数组")
+            old, new = payload["oldPreviewBudget"], payload["newPreviewBudget"]
+            if not isinstance(old, int) or not isinstance(new, int) or new >= old:
+                raise ValidationError("降档须 newPreviewBudget < oldPreviewBudget")
         if kind == "model.request.prepared":
-            payload = obj["payload"]
             for key in ("contextId", "contextRevision", "systemMessageRef",
                         "inputMessageRefs", "readThroughSeq", "readThroughHash"):
                 if key not in payload:
@@ -323,6 +497,14 @@ def validate_semantics(lines: list[dict]) -> list[str]:
         elif kind == "context.system.applied":
             chain = payload.get("contextChain", [])
             revision = payload.get("afterRevision", revision)
+        elif kind == "context.tool_previews.reduced":
+            # §4.38:降档提交携带完整新链(原 tool 节点换派生消息,后续重接)。
+            chain = payload.get("contextChain", [])
+            revision = payload.get("afterRevision", revision)
+            try:
+                validate_chain_nodes(chain, kind)
+            except ValidationError as error:
+                problems.append(str(error))
         elif kind == "context.input.applied":
             for node in payload.get("appendedChain", []):
                 if not chain or node.get("prevMessageRef") != chain[-1]["messageRef"]:

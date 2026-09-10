@@ -627,6 +627,17 @@ add_library(lubancode_engine STATIC
   src/trajectory/v3/schema3.cpp
   src/trajectory/v3/writer.cpp
   src/trajectory/v3/compact.cpp
+  # session 轨迹 v3 第二棒(P1 其余):工具操作生命周期账(actionId 全局
+  # 身份/attempt 重试链/幂等键/结果选用/tool 消息)、结果仓与 32 KiB 模型
+  # 预览(头尾节选/多文件共额/清单超限 output_index/UTF-8 边界)、hook
+  # 事件账(dispatch/invocation 分层、completed≠采用、效果 applied/rejected、
+  # 子执行派生账)、subagent 独立账(父 spawn 预留/子目录子会话/linked
+  # 检查点交接/observed/spawn.failed)、§4.38 预览降档提交
+  # (context.tool_previews.reduced + 派生 tool 消息)。
+  src/trajectory/v3/tool_action.cpp
+  src/trajectory/v3/result_store.cpp
+  src/trajectory/v3/hooks.cpp
+  src/trajectory/v3/subagent.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。

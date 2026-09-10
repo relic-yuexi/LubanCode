@@ -49,6 +49,42 @@ TEST_CASE("tool_round:一轮对话+工具,prepared 引用与链一致") {
     CHECK(report.context.chain[3].message_ref == "msg-000004");
 }
 
+TEST_CASE("hook_effects:PreAction 换后端 + PostAction 补充,效果采用分层") {
+    V3VerifyReport report = VerifyV3File(Fixture("hook_effects.jsonl"));
+    REQUIRE(report.ok);
+    CHECK(report.lines == 23);
+    CHECK(report.context.revision == 4);
+    REQUIRE(report.context.chain.size() == 4);
+    // 模型声明不改写:tool 消息仍配对原 action(§4.22)。
+    CHECK(report.context.chain[3].message_ref == "msg-000004");
+}
+
+TEST_CASE("preview_reduction:32->16 KiB 派生消息换链,revision 前移") {
+    V3VerifyReport report = VerifyV3File(Fixture("preview_reduction.jsonl"));
+    REQUIRE(report.ok);
+    CHECK(report.lines == 17);
+    CHECK(report.context.revision == 5);
+    REQUIRE(report.context.chain.size() == 4);
+    // 链尾是派生消息 R1_16(msg-000005),R1_32(msg-000004)退链仍在档(§4.38)。
+    CHECK(report.context.chain[3].message_ref == "msg-000005");
+    CHECK(report.context.chain[3].prev_message_ref.value_or("") == "msg-000003");
+    CHECK(report.context.preview_budget_bytes == 16384);
+}
+
+TEST_CASE("subagent 父子两账:各自成卷,链与身份不串") {
+    V3VerifyReport parent = VerifyV3File(Fixture("subagent_parent.jsonl"));
+    REQUIRE(parent.ok);
+    CHECK(parent.lines == 17);
+    CHECK(parent.context.revision == 4);
+
+    V3VerifyReport child = VerifyV3File(Fixture("subagent_child.jsonl"));
+    REQUIRE(child.ok);
+    CHECK(child.lines == 5);
+    REQUIRE(child.context.chain.size() == 2);  // 子 system 根 + 委派 user
+    CHECK(child.context.chain[0].prev_message_ref.has_value() == false);
+    CHECK(child.context.chain[1].message_ref == "msg-000002");
+}
+
 TEST_CASE("compact_full:八行全链,applied 后链重接为 system+摘要+保留") {
     V3VerifyReport report = VerifyV3File(Fixture("compact_full.jsonl"));
     REQUIRE(report.ok);
@@ -79,7 +115,8 @@ TEST_CASE("stream_interrupted:Esc 定稿 interrupted assistant,usage null") {
 TEST_CASE("fixture 全家福:C++ 写者能 Continue 每一份(读取侧地基)") {
     for (const char* name :
          {"startup.jsonl", "soul_switch.jsonl", "tool_round.jsonl", "compact_full.jsonl",
-          "stream_interrupted.jsonl"}) {
+          "stream_interrupted.jsonl", "hook_effects.jsonl", "preview_reduction.jsonl",
+          "subagent_parent.jsonl", "subagent_child.jsonl"}) {
         CAPTURE(name);
         auto writer = V3Writer::Continue(Fixture(name), V3WriterOptions{});
         REQUIRE(writer.has_value());

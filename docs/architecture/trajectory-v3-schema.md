@@ -1,6 +1,6 @@
 # session 轨迹 v3 schema(冻结稿)
 
-状态:P0 定稿冻结。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
+状态:P0 定稿冻结;P1 其余域(工具操作账/结果仓与预览/hook 事件账/subagent 独立账/预览降档)已按 §四 落地发行,字段随本稿冻结。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
 
 不承担旧数据兼容:新会话写 v3,v2 读取不迁移,v2→v3 无转换器(单子 §1.5/§七)。
 
@@ -141,7 +141,7 @@ idle
 
 ### 2.4 上下文链提交(§4.30)
 
-前驱属于 `(contextId, contextRevision)`,不在 message 上写全局唯一前驱。链节点 `{"messageRef","prevMessageRef"}`,只有根节点 prevMessageRef 为 null。四类提交事件各前进一次 revision:
+前驱属于 `(contextId, contextRevision)`,不在 message 上写全局唯一前驱。链节点 `{"messageRef","prevMessageRef"}`,只有根节点 prevMessageRef 为 null。五类提交事件各前进一次 revision:
 
 | 提交事件 | 场景 | 载荷 |
 | --- | --- | --- |
@@ -149,6 +149,7 @@ idle
 | `context.system.applied` | system 版本切换 | `beforeRevision`/`afterRevision`、`rootMessageRef`(新 system)、全量 `contextChain`(根换新 system,后续节点重接) |
 | `context.input.applied` | 普通消息接纳 | `beforeRevision`/`afterRevision`、`appendedChain`(首新节点接旧尾,后续逐个相接)、`addedMessageRefs` |
 | `compact.applied` | 压缩生效 | 全量 `contextChain`(见 2.3) |
+| `context.tool_previews.reduced` | 预览降档(§4.38) | 全量 `contextChain`(原 tool 节点换派生消息,后续重接);载荷见 §四 |
 
 校验:根唯一且前驱 null、非根前驱存在、每节点至多一个后继、无环、无重复、全链连通;数组按根到尾序列化且邻接项与 prevMessageRef 一致,冲突视为坏记录。压缩期间队列输入独立保留,不在 retained 里也不丢。
 
@@ -182,22 +183,24 @@ Durability 三档承继 v2:`Buffered`(只入 stdio 缓冲)/`ProcessCrash`(fflush
 
 普通 flush 不得称为断电安全;ProcessCrash 与 PowerLoss 保留区别(§4.2)。
 
-## 四、各域字段表(§4.14-4.34 挂点,P1 其余及后续棒次发行)
+## 四、各域字段表(§4.14-4.34 挂点)
 
-P0 只冻结字段与挂点,不实现:
+P1 其余域已发行(工具操作账 `tool_action.*`、结果仓与预览 `result_store.*`、hook 事件账 `hooks.*`、subagent `subagent.*`、降档 `writer::ReduceToolPreviews`);slash/skill/标题/队列/估算/容量/后台任务/todo 族留给后续棒次,字段仍按下列挂点冻结。
 
-- **工具**(§4.15-4.21):`actionId`(`== payload.tool_call_id`)、`provider_tool_call_id`、`attempt`、`result_id`、`effectiveArgsRef`、幂等键 `sha256(canonical({version,action_id,tool_identity,effective_args_hash,execution_scope_hash}))`;事件族 §2.1;result_ref 数组;预览 32 KiB 头尾规则;`tool.result.selected` 的 `sourceResultEventRefs`/`hookEffectEventRefs`/`effectiveOutcome`。
-- **hook**(§4.22-4.24):`hookDispatchId`/`hookInvocationId`/`hookId`/`definitionHash`/`hookPoint`/`handlerKind`/`inputRef`/`outputRef`/`definitionOrder`/`failurePolicy`;`hook.completed ≠ 改写已采用`,效果采用另记 `hook.effects.applied/rejected`。
-- **slash**(§4.25-4.26):`commandId` + `command.*` 生命周期;`effects[]`/`effectRefs[]`(§4.27)。
-- **skill**(§4.29):披露阶段 `catalog/instructions/resource` 事件,`messageRefs` 关联实际载体。
-- **subagent**(§4.31-4.33):`childSessionRef`、`parentActionRef`、`spawnEventRef`、`childCheckpointRef`、`taskId`;目录 `sessions/<id>/subagents/<child>/`。
-- **标题**(§4.34):`titleGenerationId`;返回格式定案:标题 prompt 要求模型输出单行 JSON `{"title":"..."}`,提取按解析规则版本 `title-extract-v1`;调度定案:独立 step,与首 query 同 turn。
-- **队列**(§4.35):`inputId`、`mode`(steer/followup)、`modeSource`、`deliveryId`;接纳数量定案:每安全边界一批 steer(逐条)与至多一条 followup,显式模式覆盖入口留给后续棒次。
-- **估算**(§4.36):`estimator=utf8_bytes_div4`、`estimatorVersion=1`、`scope=model_input_json_utf8_v1`;输出为 hook outputRef 结构(prepared 用 `tokenEstimateRef` 引用,不内联)。
-- **容量**(§4.40):`contextWindowTokens`/`modelDefaultOutputTokens`/`requestedMaxOutputTokens`/`effectiveMaxOutputTokens`/`outputLimitSource`/`wireOutputLimit`/`outputReserveTokens`/`safetyMarginTokens`。
-- **长文本/图片**(§4.51-4.52):用户文本 32 KiB 预览 + 原文 artifact;图片原图引用进 message,编码交给 wire。
-- **后台任务**(§4.53-4.54):`taskId` + `task.*` 事件,`parentActionRef` 关联。
-- **todo/goal/loop/fork/btw**(§4.55-4.58):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
+- **工具**(§4.15-4.21,已发行):`actionId`(`== payload.tool_call_id`,同时出现必校)、`provider_tool_call_id`、`attempt`(正整数,从 1 起)、`result_id`(结果仓 `res-<六位号>`)、`effectiveArgsRef`、幂等键 `sha256(canonical({version,action_id,tool_identity,effective_args_hash,execution_scope_hash}))`(不算 attempt);事件族 §2.1。载荷命名定案:`tool_call_id`/`attempt`/`reason`/`error_code`/`exit_code`/`phase` 用 snake_case(工具协议字段),`effectiveArgsRef`/`executionDurationMs`/`assistantMessageRef`/`waitRef`(可恢复等待引用)/`toolIdentity`/`idempotencyKey` 用 camelCase;`cancelled.phase ∈ before_started|during_execution`;`finished.exit_code` 缺省(非进程工具)或 null(退出未知),不默认 0。tool 消息新增可选键 `resultSelectionRef`(指向 `tool.result.selected`,§4.19 示例)。
+- **结果仓**(§4.16-4.17,已发行):目录 `sessions/<sessionId>/artifacts/`,`res-<六位号>.json` 为不可变描述(先临时文件、再落稳、再发布不可变名;POSIX rename 会静默覆盖,故显式查存在性)。描述文件 snake_case(`result_id`/`tool_call_id`/`attempt`/`result_kind`/`execution_event_ref`/`preview_policy`/`capture_limits`/`outputs[]`,outputs 项 `ref/output_bytes/byte_count_kind/captured_bytes/capture_complete/capture_reason/encoding`);JSONL 内 result_ref 六键 camelCase(§3.1)。预览:完整渲染 ≤ 预算原样返回;超限先留说明预算 M、正文 B=预算-M 头尾均分(floor(B/2)/余),UTF-8 边界对齐,头尾段各重标 `[文件: path | 通道: channel]`,未展示正文文件点名 `not_shown`;清单超限先存 `output_index` artifact 再列容纳得下的路径 + `omitted_output_count`;`full_output`/`captured_output` 恒为数组,全部不完整时 `full_output=[]`;4 KiB 仍装不下必要来源记 `preview_unrepresentable`。
+- **hook**(§4.22-4.24,已发行):`hookDispatchId`/`hookInvocationId`/`hookId`/`definitionHash`/`hookPoint`/`handlerKind`/`inputRef`/`outputRef`/`definitionOrder`/`failurePolicy`;`hook.completed ≠ 改写已采用`,效果采用另记 `hook.effects.applied`(载荷 `effectType` 必带,`inputRef`/`outputRef`/`appliedValueRef`/`validation` 可选)/`hook.effects.rejected`(`effectType`+`reason`)。子执行(§4.23):独立 `actionId` 的 `tool.execution.*` 链,pending 载荷带 `parentActionId`/`hookDispatchId`/`hookInvocationId`/`logicalTool`/`backend`。
+- **slash**(§4.25-4.26,后续棒次):`commandId` + `command.*` 生命周期;`effects[]`/`effectRefs[]`(§4.27)。
+- **skill**(§4.29,后续棒次):披露阶段 `catalog/instructions/resource` 事件,`messageRefs` 关联实际载体。
+- **subagent**(§4.31-4.33,已发行):目录 `sessions/<id>/subagents/<child>/<child>.jsonl`,每层完整布局,可递归。`childSessionRef`={sessionId,runId,journalPath};`childCheckpointRef`={sessionId,runId,seq,lineHash}(固定子账前缀);`parentActionRef` 含 declaredMessageRef;`taskId`。父账五步:spawn.requested(payload `taskId`/`childSessionRef`/`attempt`/`parentActionRef`/`taskArgs`/`configSnapshot`/`asyncStart`)→ 子账 bootstrap(首行 system 的 systemMeta 带派生来源 `cause:"subagent_spawn"`+`parentActionRef`+`taskId`+`spawnEventRef` 五键;委派任务为 origin=parent_agent 的 user;随后子账 `task.started`)→ linked(status=done,payload `taskId`+`childCheckpointRef`)→ observed → spawn.failed(`taskId`/`phase`/`reason`)。首版异步:linked 落稳即收据,收据 tool 消息明示 pending/started,不冒充子任务完成。
+- **标题**(§4.34,后续棒次):`titleGenerationId`;返回格式定案:标题 prompt 要求模型输出单行 JSON `{"title":"..."}`,提取按解析规则版本 `title-extract-v1`;调度定案:独立 step,与首 query 同 turn。
+- **队列**(§4.35,后续棒次):`inputId`、`mode`(steer/followup)、`modeSource`、`deliveryId`;接纳数量定案:每安全边界一批 steer(逐条)与至多一条 followup,显式模式覆盖入口留给后续棒次。
+- **估算**(§4.36,后续棒次):`estimator=utf8_bytes_div4`、`estimatorVersion=1`、`scope=model_input_json_utf8_v1`;输出为 hook outputRef 结构(prepared 用 `tokenEstimateRef` 引用,不内联)。
+- **容量**(§4.40,后续棒次):`contextWindowTokens`/`modelDefaultOutputTokens`/`requestedMaxOutputTokens`/`effectiveMaxOutputTokens`/`outputLimitSource`/`wireOutputLimit`/`outputReserveTokens`/`safetyMarginTokens`。
+- **降档**(§4.38,已发行):`context.tool_previews.reduced` 为独立上下文提交事件(§2.4 同类:携带完整新链),载荷定案 `{contextId, beforeRevision, afterRevision, oldPreviewBudget, newPreviewBudget, replacementRefs, contextChain, inputHash, estimatedTokensBefore, estimatedTokensAfter, pairingCheckRefs}`;只降不升(32768→16384→8192→4096,任一档够用就停)。派生 tool 消息:新 messageId、保留原 turnId/stepId/actionId/tool_call_id/resultSelectionRef,`origin=context_runtime`,`sourceToolMessageRef` 指原消息(该键出现时 origin 必为 context_runtime);原消息不改写,任何一次请求只选一个版本。当前档位记在上下文视图,普通后续请求不自动回升。
+- **长文本/图片**(§4.51-4.52,后续棒次):用户文本 32 KiB 预览 + 原文 artifact;图片原图引用进 message,编码交给 wire。
+- **后台任务**(§4.53-4.54,后续棒次):`taskId` + `task.*` 事件,`parentActionRef` 关联。
+- **todo/goal/loop/fork/btw**(§4.55-4.58,后续棒次):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
 
 ## 五、usage 唯一 owner 表(§4.12 定案)
 
@@ -226,5 +229,9 @@ P0 只冻结字段与挂点,不实现:
 | `tests/fixtures/trajectory_v3/tool_round.jsonl` | 一轮对话:user 接纳 -> `model.request.prepared`(inputMessageRefs) -> 流式片段 -> assistant(来源+usage) -> 工具生命周期(简版,字段示范) -> tool message 接纳 |
 | `tests/fixtures/trajectory_v3/compact_full.jsonl` | 八行全链一次成功 compact,compactId 贯穿,contextChain 重接 |
 | `tests/fixtures/trajectory_v3/stream_interrupted.jsonl` | delta 批次 -> `model.response.cancelled` -> interrupted assistant 定稿(usage:null) |
+| `tests/fixtures/trajectory_v3/hook_effects.jsonl` | 工具接纳 -> PreAction dispatch(started/completed/`effects.applied` 换后端) -> started(effectiveArgsRef+幂等键) -> finished -> result.persisted -> PostAction 过滤(`effects.applied` 补充) -> result.selected -> tool 消息(头尾节选预览)接纳 |
+| `tests/fixtures/trajectory_v3/preview_reduction.jsonl` | 一轮工具(R1_32 接纳) -> 派生消息 R1_16(origin=context_runtime、sourceToolMessageRef) -> `context.tool_previews.reduced` 换链提交(revision 5) |
+| `tests/fixtures/trajectory_v3/subagent_parent.jsonl` | 父账:assistant 声明 -> 工具接纳 -> `subagent.spawn.requested`(预留) -> started -> `subagent.linked`(检查点) -> finished -> result.persisted/selected -> 异步收据 tool 消息 -> observed 预备位 |
+| `tests/fixtures/trajectory_v3/subagent_child.jsonl` | 子账:首行 system(systemMeta 派生来源:parentActionRef/taskId/spawnEventRef 五键) -> session.started -> 委派 user(origin=parent_agent)接纳 -> `task.started` |
 
 校验:`python scripts/validate_trajectory_v3.py <file.jsonl>... [--rehash]`。逐行 schema 校验 + seq 连续 + 哈希链衔接 + 语义断言(system 链三态、compact 全链闭合、流式定稿唯一 assistant、usage 不补零)。`--rehash` 用于从无哈希的草稿生成合法链(fixtrue 维护用)。

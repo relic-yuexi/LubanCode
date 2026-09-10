@@ -493,6 +493,8 @@ nlohmann::json MessageLine::ToJson() const {
     json["message"] = message;
     SetIfPresent(&json, "causedByEventRef", caused_by_event_ref);
     SetIfPresent(&json, "sourceMessageRef", source_message_ref);
+    SetIfPresent(&json, "resultSelectionRef", result_selection_ref);
+    SetIfPresent(&json, "sourceToolMessageRef", source_tool_message_ref);
     if (system_meta.has_value()) {
         json["systemMeta"] = *system_meta;
     }
@@ -532,6 +534,7 @@ std::optional<MessageLine> MessageLine::FromJsonStrict(const nlohmann::json& jso
         "message",       "causedByEventRef", "sourceMessageRef", "systemMeta",
         "completionStatus", "provider",   "wire",            "model",
         "responseModel", "providerConfigRef", "modelProfileRef", "usage",
+        "resultSelectionRef", "sourceToolMessageRef",
         "prevHash",      "lineHash",
     };
     for (auto it = json.begin(); it != json.end(); ++it) {
@@ -586,11 +589,13 @@ std::optional<MessageLine> MessageLine::FromJsonStrict(const nlohmann::json& jso
         &line.source_message_ref, &line.provider,
         &line.wire,           &line.model,
         &line.provider_config_ref, &line.model_profile_ref,
+        &line.result_selection_ref, &line.source_tool_message_ref,
     };
     const char* optional_string_keys[] = {
         "parentTurnId",  "stepId",        "requestId",      "actionId",
         "compactId",     "causedByEventRef", "sourceMessageRef", "provider",
         "wire",          "model",         "providerConfigRef", "modelProfileRef",
+        "resultSelectionRef", "sourceToolMessageRef",
     };
     for (std::size_t i = 0; i < std::size(optional_string_keys); ++i) {
         if (!GetOptionalString(json, optional_string_keys[i], optional_string_fields[i])) {
