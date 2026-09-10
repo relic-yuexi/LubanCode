@@ -52,7 +52,8 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
     }
     if (in({K::HookDispatchRequested, K::HookPending, K::HookStarted, K::HookCompleted,
             K::HookFailed, K::HookCancelled, K::HookUnknown, K::HookSkipped,
-            K::HookEffectsApplied, K::HookEffectsRejected})) {
+            K::HookEffectsApplied, K::HookEffectsRejected, K::HookOutputProposed,
+            K::HookContinuationConsumed})) {
         return IdRequirement{"hookDispatchId", true};
     }
     if (in({K::CommandReceived, K::CommandPending, K::CommandStarted, K::CommandCompleted,
@@ -853,6 +854,24 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return error;
         }
         if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::HookOutputProposed) {
+        // §7.1:候选先存(proposed),不冒充 handler 已完成。phase ∈
+        // before_next/after_next/short_circuit;candidate 为候选正文(引用)。
+        for (const auto* key : {"hookInvocationId", "phase"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        const std::string phase = line.payload["phase"].get<std::string>();
+        if (phase != "before_next" && phase != "after_next" && phase != "short_circuit") {
+            return Err("schema3.bad_enum",
+                       "hook.output.proposed 的 phase 应为 before_next|after_next|short_circuit(§7.1)");
+        }
+    } else if (line.kind == K::HookContinuationConsumed) {
+        // §7.1:一次性执行权消费;不以消费记录冒充下游真的执行或完成。
+        if (auto error = CheckStringField(kind_name, line.payload, "hookInvocationId")) {
             return error;
         }
     } else if (line.kind == K::SubagentSpawnRequested) {

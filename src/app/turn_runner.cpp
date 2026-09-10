@@ -33,6 +33,7 @@
 #include "config/model_catalog.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/middleware_runtime.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
@@ -307,6 +308,30 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         };
         wiring.on_post_step_hook = [hook_dispatcher](const lubancode::api::UsageReport& report) {
             lubancode::runtime::EmitPostStep(hook_dispatcher, report);
+        };
+    }
+    // LuaHook 单 P0-B:PreRequest 中间件(§4.36,每次物理模型请求构建完成、
+    // 上 wire 前)。三入口共用 runtime::RunPreRequestMiddleware——CLI/one-shot
+    // 走这里的接线,app-server 走 AgentChannelEngine 的同一函数;没挂核或
+    // PreRequest 零注册 = 不设回调,loop 一处不调,行为与从前逐字节一致。
+    if (lubancode::runtime::HasPreRequestMiddleware(hook_dispatcher)) {
+        wiring.on_pre_request_hooks = [hook_dispatcher](const std::string& step_id, const std::string& turn_id,
+                                                        const nlohmann::json& frozen_request_snapshot,
+                                                        std::uint64_t context_window_tokens,
+                                                        std::uint64_t output_reserve_tokens) {
+            lubancode::runtime::MiddlewareHookContext context;
+            context.turn_id = turn_id;
+            context.step_id = step_id;
+            context.purpose = "interactive";
+            const lubancode::runtime::PreRequestStages stages = lubancode::runtime::RunPreRequestMiddleware(
+                hook_dispatcher, frozen_request_snapshot, context_window_tokens, output_reserve_tokens, context);
+            if (!stages.dispatched) {
+                return std::string();  // 空核(装配中途被摘):不拦,老路照旧
+            }
+            if (stages.decision == "allow") {
+                return std::string();
+            }
+            return "PreRequest 钩子拦下本次请求[" + stages.decision + "]: " + stages.reason;
         };
     }
     // PreToolUse 的归并决策要在确认回调里继续用(allow 跳过用户确认、
@@ -770,14 +795,45 @@ RunTurnResult RunTurn(TurnContext ctx) {
         hook_dispatcher->UpdateContext(std::move(turn_context));
     }
 
+    // LuaHook 单 P0-B:PreUser 中间件(§4.47 接纳顺序的首段)。经 SetMiddleware
+    // 接线缝走 P0-A 执行核;没挂核/零注册 = dispatched=false,一个字节不动。
+    // 阻断与老 UserPromptSubmit 同款收口(本轮不接纳,不算错误);改写被采
+    // 用时按工作版本重解析输入(@引用/附件随新文本重走 PrepareImageInput)。
+    // 三入口(CLI/one-shot/app-server)共用 runtime::RunPreUserMiddleware,
+    // 这里只是终端路的接线。
+    lubancode::runtime::MiddlewareHookContext middleware_context;
+    middleware_context.turn_id = canonical_turn_id;
+    middleware_context.origin = "human";
+    middleware_context.purpose = "interactive";
+    middleware_context.delivery_mode = "direct";
+    std::string effective_user_input = user_input;
+    const lubancode::runtime::PreUserGate pre_user = lubancode::runtime::RunPreUserMiddleware(
+        hook_dispatcher, user_input, middleware_context);
+    if (pre_user.blocked) {
+        TermErr() << theme.error << tr("error.prefix") << "PreUser 钩子阻断本轮: " << pre_user.block_reason
+                  << theme.reset << "\n";
+        return RunTurnResult{0};
+    }
+    if (pre_user.dispatched && pre_user.rewritten) {
+        effective_user_input = pre_user.prompt;
+        auto reparsed = lubancode::cli::PrepareImageInput(effective_user_input);
+        if (!reparsed.has_value()) {
+            TermErr() << theme.error << tr("error.prefix")
+                      << ImageInputErrorText(reparsed.error()) << theme.reset << "\n";
+            return RunTurnResult{1};
+        }
+        prepared_input = std::move(reparsed);
+    }
+
     // UserPromptSubmit:用户 prompt 送模型前。可阻断(continue=false/exit 2,
     // 这一轮不发模型、不算错误),可追加 developer context(原 prompt 不动,
     // 注入文本带来源标识单独成块,不串成一坨)。背景回流通知的"不可信参考
     // 资料"声明也走同一口(P3 起决策与组装在 runtime::ApplyUserPromptSubmit,
     // 这里只接阻断的收口与上屏)。此刻 hooks 上下文已带着本轮 canonical 号,
-    // prompt Hook 的 stdin payload 与后续工具/Stop 钩子挂同一轮。
+    // prompt Hook 的 stdin payload 与后续工具/Stop 钩子挂同一轮。老路保留给
+    // 未迁移挂点;PreUser 中间件(新核)已在上面跑过,两池互不重放。
     const lubancode::runtime::PromptGate gate = lubancode::runtime::ApplyUserPromptSubmit(
-        hook_dispatcher, user_input, background_results, prepared_input->message);
+        hook_dispatcher, effective_user_input, background_results, prepared_input->message);
     if (gate.blocked) {
         TermErr() << theme.error << tr("error.prefix") << "UserPromptSubmit 钩子阻断本轮: " << gate.block_reason
                   << theme.reset << "\n";
@@ -785,6 +841,26 @@ RunTurnResult RunTurn(TurnContext ctx) {
     }
     for (const std::string& ctx : gate.additional_context) {
         prepared_input->message.content.push_back(lubancode::api::TextBlock{ctx});
+    }
+    // PreUser 已采用的附加上下文(带来源前缀,单独成块;§4.47 追加隐藏
+    // 上下文不回写原 user)。
+    for (const std::string& ctx : pre_user.additional_context) {
+        prepared_input->message.content.push_back(
+            lubancode::api::TextBlock{"[PreUser 钩子附加上下文,非用户手敲]\n" + ctx});
+    }
+
+    // LuaHook 单 P0-B:PostUser(user 消息与接纳关系落稳后、模型请求准备前,
+    // §4.47)。追加带来源的隐藏上下文;required 失败阻断本轮(原 user 保留)。
+    const lubancode::runtime::PostUserAppend post_user = lubancode::runtime::RunPostUserMiddleware(
+        hook_dispatcher, effective_user_input, middleware_context);
+    if (post_user.blocked) {
+        TermErr() << theme.error << tr("error.prefix") << "PostUser 钩子阻断本轮: " << post_user.block_reason
+                  << theme.reset << "\n";
+        return RunTurnResult{0};
+    }
+    for (const std::string& ctx : post_user.context_appends) {
+        prepared_input->message.content.push_back(
+            lubancode::api::TextBlock{"[PostUser 钩子附加上下文,非用户手敲]\n" + ctx});
     }
 
     // 四层生命周期单 P2:PreTurn——用户输入被接受(UserPromptSubmit 之后)、
@@ -794,7 +870,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     if (hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
         hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreTurn)) {
         const lubancode::runtime::PromptGate pre_turn = lubancode::runtime::EmitPreTurn(
-            hook_dispatcher, canonical_turn_id, user_input);
+            hook_dispatcher, canonical_turn_id, effective_user_input);
         if (pre_turn.blocked) {
             TermErr() << theme.error << tr("error.prefix")
                       << "PreTurn 钩子否决本轮: " << pre_turn.block_reason << theme.reset << "\n";

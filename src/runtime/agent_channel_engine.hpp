@@ -25,6 +25,7 @@
 
 #include "agent/agent.hpp"
 #include "channel/channel_router.hpp"
+#include "hooks/dispatcher.hpp"
 #include "runtime/channel_session_host.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/turn_ingress.hpp"
@@ -41,6 +42,11 @@ public:
         std::string cwd;            // 会话目录(身份按它四级裁决,不认进程 cwd)
         std::string lubancode_version;
         channel::ToolRoutePolicy tools;  // binding 工具策略(fail closed 裁定用)
+        // LuaHook 单 P0-B:中间件核宿主(进程级 HookDispatcher,借用指针,须
+        // 活过引擎生命周期)。空 = 没装配,PreUser/PostUser/PreRequest 一处
+        // 不调,行为与从前逐字节一致。与 CLI/one-shot 共用同一 runtime 派发
+        // 点(Run*Middleware),渠道路不另接一套。
+        hooks::HookDispatcher* hook_dispatcher = nullptr;
     };
 
     // backend/registry 借用(须活过引擎生命周期);profile 按值收。

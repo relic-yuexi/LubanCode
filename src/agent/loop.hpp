@@ -392,6 +392,19 @@ struct TurnWiring {
     // 载荷 = 本步完整 UsageReport(含 step_id/turn_id/attempts/API 耗时/
     // stop reason)。空 = 没配,一处不调。
     std::function<void(const api::UsageReport&)> on_post_step_hook;
+
+    // ---- LuaHook 单 P0-B:PreRequest 中间件挂点(§4.36)----------------------
+    // 每次物理模型请求最终定形(预检/应急收窄之后)、上 wire 之前调用:
+    // frozen_request_snapshot = 最终输入的冻结快照(引擎拼好的那份,本批
+    // 不改请求本体),context_window_tokens/output_reserve_tokens 是容量
+    // 判断的两笔预算。返回空串 = 放行;非空 = 拦下本次请求的理由(整步明
+    // 败,按上下文预检未通过同款收口)。mutate 段采用改写时中间件路自会
+    // 报 reprepare——本批引擎不重建请求,明拦不暗发。空 = 没配,一处不调,
+    // 行为与从前逐字节一致。
+    std::function<std::string(const std::string& step_id, const std::string& turn_id,
+                              const nlohmann::json& frozen_request_snapshot, std::uint64_t context_window_tokens,
+                              std::uint64_t output_reserve_tokens)>
+        on_pre_request_hooks;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

@@ -612,6 +612,287 @@ const ToolActionSnapshot* FindActionSnapshot(const std::vector<ToolActionSnapsho
 }
 
 // ---------------------------------------------------------------------------
+// hook dispatch 折叠(LuaHook 单 P0-B):hook.* 事件 → 恢复视图。纯读。
+// ---------------------------------------------------------------------------
+
+std::vector<HookDispatchView> FoldHookDispatches(const V3Ledger& ledger) {
+    // dispatch_id -> 视图;started 序即 invocations 序。map 保落盘首见序稳定。
+    std::map<std::string, HookDispatchView> folded;
+    // (dispatch_id, invocation_id) -> invocations 下标。
+    std::map<std::pair<std::string, std::string>, std::size_t> invocation_index;
+
+    const auto dispatch_of = [&](const EventLine& event) -> HookDispatchView* {
+        if (!event.hook_dispatch_id.has_value()) {
+            return nullptr;
+        }
+        auto it = folded.find(*event.hook_dispatch_id);
+        return it == folded.end() ? nullptr : &it->second;
+    };
+    const auto invocation_of = [&](const EventLine& event) -> HookInvocationView* {
+        HookDispatchView* dispatch = dispatch_of(event);
+        if (dispatch == nullptr) {
+            return nullptr;
+        }
+        const auto it = event.payload.find("hookInvocationId");
+        if (it == event.payload.end() || !it->is_string()) {
+            return nullptr;
+        }
+        const auto found = invocation_index.find({*event.hook_dispatch_id, it->get<std::string>()});
+        return found == invocation_index.end() ? nullptr
+                                               : &dispatch->invocations[found->second];
+    };
+
+    for (const EventLine& event : ledger.events) {
+        using K = EventKindV3;
+        if (event.kind == K::HookDispatchRequested) {
+            if (!event.hook_dispatch_id.has_value()) {
+                continue;
+            }
+            HookDispatchView& view = folded[*event.hook_dispatch_id];
+            view.dispatch_id = *event.hook_dispatch_id;
+            view.requested = true;
+            view.turn_id = event.turn_id;
+            view.step_id = event.step_id;
+            view.action_id = event.action_id;
+            view.request_id = event.request_id;
+            if (auto point = JsonString(event.payload, "hookPoint")) {
+                view.hook_point = *point;
+            }
+            if (const auto matched = event.payload.find("matchedHandlers");
+                matched != event.payload.end() && matched->is_array()) {
+                for (const auto& handler : *matched) {
+                    HookHandlerSpec spec;
+                    if (auto value = JsonString(handler, "hookId")) {
+                        spec.hook_id = *value;
+                    }
+                    if (auto value = JsonString(handler, "definitionHash")) {
+                        spec.definition_hash = *value;
+                    }
+                    if (auto value = JsonString(handler, "handlerKind")) {
+                        spec.handler_kind = *value;
+                    }
+                    if (const auto order = handler.find("definitionOrder");
+                        order != handler.end() && order->is_number_integer()) {
+                        spec.definition_order = order->get<int>();
+                    }
+                    if (auto value = JsonString(handler, "failurePolicy")) {
+                        spec.failure_policy = *value;
+                    }
+                    view.matched_handlers.push_back(std::move(spec));
+                }
+            }
+            continue;
+        }
+        if (event.kind == K::HookSkipped) {
+            if (event.hook_dispatch_id.has_value()) {
+                HookDispatchView& view = folded[*event.hook_dispatch_id];
+                view.dispatch_id = *event.hook_dispatch_id;
+                view.skipped = true;
+                if (auto point = JsonString(event.payload, "hookPoint")) {
+                    view.hook_point = *point;
+                }
+                if (auto reason = JsonString(event.payload, "reason")) {
+                    view.skip_reason = *reason;
+                }
+                view.turn_id = event.turn_id;
+                view.step_id = event.step_id;
+                view.action_id = event.action_id;
+            }
+            continue;
+        }
+        if (event.kind == K::HookStarted) {
+            if (!event.hook_dispatch_id.has_value()) {
+                continue;
+            }
+            HookDispatchView& view = folded[*event.hook_dispatch_id];
+            HookInvocationView invocation;
+            if (const auto id = event.payload.find("hookInvocationId");
+                id != event.payload.end() && id->is_string()) {
+                invocation.invocation_id = id->get<std::string>();
+            }
+            if (auto value = JsonString(event.payload, "hookId")) {
+                invocation.hook_id = *value;
+            }
+            if (auto value = JsonString(event.payload, "handlerKind")) {
+                invocation.handler_kind = *value;
+            }
+            if (auto value = JsonString(event.payload, "definitionHash")) {
+                invocation.definition_hash = *value;
+            }
+            if (const auto order = event.payload.find("definitionOrder");
+                order != event.payload.end() && order->is_number_integer()) {
+                invocation.definition_order = order->get<int>();
+            }
+            invocation.status = "running";
+            if (view.dispatch_id.empty()) {
+                // started 先于 requested 落账(异常序):dispatch 骨架现造。
+                view.dispatch_id = *event.hook_dispatch_id;
+                view.requested = true;
+            }
+            invocation_index[{*event.hook_dispatch_id, invocation.invocation_id}] =
+                view.invocations.size();
+            view.invocations.push_back(std::move(invocation));
+            continue;
+        }
+        if (HookInvocationView* invocation = invocation_of(event);
+            invocation != nullptr && invocation->status == "running") {
+            switch (event.kind) {
+                case K::HookCompleted:
+                    invocation->status = "completed";
+                    invocation->terminal_event_id = event.event_id;
+                    if (auto value = JsonString(event.payload, "decision")) {
+                        invocation->decision = *value;
+                    }
+                    break;
+                case K::HookFailed:
+                    invocation->status = "failed";
+                    invocation->terminal_event_id = event.event_id;
+                    break;
+                case K::HookCancelled:
+                    invocation->status = "cancelled";
+                    invocation->terminal_event_id = event.event_id;
+                    break;
+                case K::HookUnknown:
+                    invocation->status = "unknown";
+                    invocation->terminal_event_id = event.event_id;
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (HookInvocationView* invocation = invocation_of(event); invocation != nullptr) {
+            switch (event.kind) {
+                case K::HookEffectsApplied:
+                case K::HookEffectsRejected: {
+                    HookEffectView effect;
+                    effect.applied = event.kind == K::HookEffectsApplied;
+                    if (auto value = JsonString(event.payload, "effectType")) {
+                        effect.effect_type = *value;
+                    }
+                    if (auto value = JsonString(event.payload, "reason")) {
+                        effect.reason = *value;
+                    }
+                    if (const auto applied = event.payload.find("appliedValueRef");
+                        applied != event.payload.end()) {
+                        effect.applied_value = *applied;
+                    }
+                    effect.event_id = event.event_id;
+                    invocation->effects.push_back(std::move(effect));
+                    break;
+                }
+                case K::HookOutputProposed: {
+                    std::string phase;
+                    nlohmann::json candidate;
+                    if (auto value = JsonString(event.payload, "phase")) {
+                        phase = *value;
+                    }
+                    if (const auto it = event.payload.find("candidate"); it != event.payload.end()) {
+                        candidate = *it;
+                    }
+                    invocation->outputs_proposed.emplace_back(std::move(phase), std::move(candidate));
+                    break;
+                }
+                case K::HookContinuationConsumed:
+                    invocation->continuation_consumed = true;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    // 折叠 dispatch 状态 + 恢复材料(工作版本/已采用 appends)。
+    for (auto& [dispatch_id, view] : folded) {
+        (void)dispatch_id;
+        if (view.skipped) {
+            view.folded_status = "skipped";
+            continue;
+        }
+        bool any_running = false;
+        bool any_failed = false;
+        bool any_cancelled = false;
+        bool any_unknown = false;
+        bool any_denied = false;
+        bool all_completed = true;
+        for (const HookInvocationView& invocation : view.invocations) {
+            if (invocation.status == "running") {
+                any_running = true;
+                all_completed = false;
+            }
+            if (invocation.status == "failed") {
+                any_failed = true;
+                all_completed = false;
+            }
+            if (invocation.status == "cancelled") {
+                any_cancelled = true;
+                all_completed = false;
+            }
+            if (invocation.status == "unknown") {
+                any_unknown = true;
+                all_completed = false;
+            }
+            if (invocation.decision.has_value() && *invocation.decision == "deny") {
+                any_denied = true;
+            }
+        }
+        if (view.invocations.empty()) {
+            // requested 而无 started:输入已排队、hook 未 started(§7.3 行 1)。
+            view.folded_status = "requested";
+        } else if (any_running) {
+            view.folded_status = "running";
+        } else if (any_unknown) {
+            view.folded_status = "unknown";
+        } else if (any_failed) {
+            view.folded_status = "failed";
+        } else if (any_cancelled) {
+            view.folded_status = "cancelled";
+        } else if (any_denied) {
+            view.folded_status = "denied";
+        } else if (all_completed) {
+            view.folded_status = "completed";
+        } else {
+            view.folded_status = "running";
+        }
+        // 工作版本:事件序里最后一枚 applied 的 input.rewrite 值。
+        for (const HookInvocationView& invocation : view.invocations) {
+            for (const HookEffectView& effect : invocation.effects) {
+                if (effect.applied && effect.effect_type == "input.rewrite" &&
+                    effect.applied_value.is_object()) {
+                    if (const auto prompt = effect.applied_value.find("prompt");
+                        prompt != effect.applied_value.end()) {
+                        view.adopted_working_input = effect.applied_value;
+                        view.has_adopted_working_input = true;
+                    }
+                }
+                if (effect.applied && effect.effect_type == "context.append") {
+                    if (const auto text = effect.applied_value.find("text");
+                        text != effect.applied_value.end() && text->is_string()) {
+                        view.adopted_context_appends.push_back(text->get<std::string>());
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<HookDispatchView> result;
+    result.reserve(folded.size());
+    for (auto& [dispatch_id, view] : folded) {
+        result.push_back(std::move(view));
+    }
+    return result;
+}
+
+const HookDispatchView* FindHookDispatch(const std::vector<HookDispatchView>& dispatches,
+                                         std::string_view dispatch_id) {
+    for (const auto& dispatch : dispatches) {
+        if (dispatch.dispatch_id == dispatch_id) {
+            return &dispatch;
+        }
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // result_preview 读取投影(§4.18)
 // ---------------------------------------------------------------------------
 

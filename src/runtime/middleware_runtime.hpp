@@ -1,0 +1,129 @@
+// 中间件挂点的统一 runtime 派发点(LuaHook 单 P0-B):PreUser/PostUser/
+// PreRequest(三段 mutate → freeze → estimate → capacity)经 HookDispatcher
+// ::SetMiddleware 的接线缝走 P0-A 执行核。CLI(turn_runner)、one-shot、
+// app-server(AgentChannelEngine)三入口共用本文件的函数,不许各接一套;
+// 老 Emit 路(UserPromptSubmit/PreTurn/PreStep 等)保留给未迁移挂点,一字
+// 不改。
+//
+// 零行为合同:dispatcher 为空或没挂中间件核(SetMiddleware 未调)时,本
+// 文件所有函数返回恒等结果(dispatched=false)——与迁移前逐字节等价,
+// 零注册 = 零改写。
+//
+// 事件账:调用方递 MiddlewareEventSink(实现见 runtime/middleware_v3_sink.hpp,
+// 经会话 V3Writer 落账,一个 writer);空 = 只拿 DispatchOutcome 的 UI/诊断
+// 投影,不落 v3 事件。
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "api/types.hpp"
+#include "hooks/dispatcher.hpp"
+#include "hooks/middleware.hpp"
+
+namespace lubancode::runtime {
+
+// 一次派发的触发语境(§4.47:origin/purpose/deliveryMode 进匹配条件,
+// 不扫描 wire role 猜来源;turn/step/action/request 继承触发对象身份,
+// 未到对应层不虚填)。
+struct MiddlewareHookContext {
+    std::optional<std::string> turn_id, step_id, action_id, request_id;
+    std::optional<std::string> origin;         // human/hook/skill/compact/…
+    std::optional<std::string> purpose;        // interactive/title/compact/…
+    std::optional<std::string> delivery_mode;  // direct/steer/followup/…
+    const std::atomic<bool>* cancel = nullptr; // Esc/父任务取消旗
+};
+
+// ---------------------------------------------------------------------------
+// PreUser(§4.47:队列输入获得接纳机会后、正式 user 内容提交前)
+// ---------------------------------------------------------------------------
+
+struct PreUserGate {
+    bool dispatched = false;   // 中间件核真跑了(空核/空注册 = false)
+    bool blocked = false;      // 业务 deny 或 required 失败:本轮不接纳
+    std::string block_code;    // deny_code 或错误码
+    std::string block_reason;  // 给用户看的理由
+    bool rewritten = false;    // 改写被采用(prompt 与进入时不同)
+    std::string prompt;        // 采用后的工作版本(未改写 = 原文)
+    // 已采用的 context.append 文本(计划序;带来源前缀由调用方拼)。
+    std::vector<std::string> additional_context;
+    // UI/诊断投影:计划序逐项账(含跳过项)。
+    hooks::middleware::DispatchOutcome outcome;
+};
+
+// user_text:候选副本入链;返回采用后的工作版本与准入。terminal = 宿主
+// 接纳位(§四:PreUser 的末端返回待接纳候选,正式接纳在调用方)。
+PreUserGate RunPreUserMiddleware(hooks::HookDispatcher* dispatcher, const std::string& user_text,
+                                 const MiddlewareHookContext& context,
+                                 hooks::middleware::MiddlewareEventSink* sink = nullptr);
+
+// ---------------------------------------------------------------------------
+// PostUser(§4.47:user 消息与接纳关系落稳后、模型请求准备前)
+// ---------------------------------------------------------------------------
+
+struct PostUserAppend {
+    bool dispatched = false;
+    bool blocked = false;  // required 失败/deny:原 user 保留,本轮不得发送
+    std::string block_code, block_reason;
+    std::vector<std::string> context_appends;  // 已采用(计划序)
+    hooks::middleware::DispatchOutcome outcome;
+};
+
+PostUserAppend RunPostUserMiddleware(hooks::HookDispatcher* dispatcher, const std::string& admitted_prompt,
+                                     const MiddlewareHookContext& context,
+                                     hooks::middleware::MiddlewareEventSink* sink = nullptr);
+
+// ---------------------------------------------------------------------------
+// PreRequest(§4.36:每次实际模型请求,mutate → freeze → estimate → capacity)
+// ---------------------------------------------------------------------------
+
+struct PreRequestStages {
+    bool dispatched = false;
+    // mutate 段:改写被采用 → 本批不重建请求(reprepare_required),调用方
+    // 按新输入版本重新准备(§4.36:确需改输入,换输入版本再经 hook 估算)。
+    bool reprepare_required = false;
+    nlohmann::json adopted_input;  // mutate 段收尾的工作版本(= 冻结快照)
+    // estimate 段:获选实现的结构化测量结果(EST1 形状;空 object = 没跑)。
+    nlohmann::json token_estimate;
+    // capacity 段:allow/recover/reject;estimate/capacity 失败时 reject
+    //(required 槽位失败,请求不得绕过检查直接发送)。
+    std::string decision;  // allow/recover/reject;空 = 没跑
+    std::string reason;
+    bool Allowed() const { return dispatched && decision == "allow"; }
+    hooks::middleware::DispatchOutcome mutate_outcome;
+    hooks::middleware::DispatchOutcome estimate_outcome;
+    hooks::middleware::DispatchOutcome capacity_outcome;
+};
+
+// request_snapshot:引擎冻结的最终模型输入快照(BuildRequestSnapshotJson
+// 的产物或等价形状);context_window_tokens/output_reserve_tokens 是容量
+// 判断的两笔预算(§4.36 预算分开:估算只估输入)。
+PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
+                                         const nlohmann::json& request_snapshot,
+                                         std::uint64_t context_window_tokens,
+                                         std::uint64_t output_reserve_tokens,
+                                         const MiddlewareHookContext& context,
+                                         hooks::middleware::MiddlewareEventSink* sink = nullptr);
+
+// api::Request → 冻结快照(§4.36 scope=model_input_json_utf8_v1 的计量
+// 对象:system、有序消息、工具定义与参数;非文本块保类型,媒体字节由
+// 估算器剥离并标 unestimatedModalities)。纯投影,不碰请求本体。
+nlohmann::json BuildRequestSnapshotJson(const api::Request& request);
+
+// 装配判据:中间件核在场且 PreRequest 有获选定义(loop 的 on_pre_request_
+// hooks 挂不挂看它;零注册 = 不挂,行为与从前逐字节一致)。
+bool HasPreRequestMiddleware(const hooks::HookDispatcher* dispatcher);
+
+// 装配判据:中间件核在场且任一消息挂点(PreUser/PostUser)有获选定义。
+bool HasUserMiddleware(const hooks::HookDispatcher* dispatcher);
+
+// UI 投影(LuaHook P0-B"一个事实账派生"):dispatch 结果 → 一行摘要 +
+// json 明细(hooks 面板/诊断用;不带正文,只有身份/结局/耗时)。
+nlohmann::json DescribeDispatchForUi(const hooks::middleware::DispatchOutcome& outcome);
+
+}  // namespace lubancode::runtime

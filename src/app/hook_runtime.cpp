@@ -1,11 +1,15 @@
 #include "app/hook_runtime.hpp"
 
+#include <filesystem>
 #include <memory>
 #include <utility>
 
 #include "cli/console_input.hpp"
+#include "config/config.hpp"
 #include "hooks/outbox.hpp"
 #include "platform/paths.hpp"
+#include "runtime/middleware_assembly.hpp"
+#include "tools/path_utils.hpp"
 
 namespace lubancode::app {
 
@@ -85,6 +89,25 @@ std::vector<std::string> SetupHookRuntime(const config::ConfigResult& config_res
     if (configured.definition_count > 0) {
         state.startup_notices.push_back("hooks 已装载 " + std::to_string(configured.definition_count) +
                                         " 条定义;/hooks 可查来源、命令、信任与最近运行记录。");
+    }
+
+    // LuaHook 单 P0-B:中间件核装配。内置槽位(§4.36 估算/容量,required)
+    // + 项目/用户 Lua 包 -> 发布 -> SetMiddleware(接线缝)。CLI、one-shot
+    // 与 app-server 共用这一只核:三入口的 PreUser/PostUser/PreRequest 都
+    // 从 runtime::Run*Middleware 走它,不许各接一套。发布失败不挂核(零
+    // 行为,老路径一字不变),提示报错。
+    {
+        runtime::MiddlewareAssemblyOptions middleware_options;
+        middleware_options.project_hooks_root =
+            std::filesystem::path(tools::Utf8ToPath(cwd)) / ".lubancode" / "hooks";
+        if (const auto home = config::HomeLubancodeDir(); home.has_value()) {
+            middleware_options.user_hooks_root = tools::Utf8ToPath(*home) / "hooks";
+        }
+        const runtime::MiddlewareAssemblyReport middleware_report =
+            runtime::AttachMiddlewareRegistry(*dispatcher, middleware_options);
+        for (const std::string& notice : middleware_report.notices) {
+            state.startup_notices.push_back(notice);
+        }
     }
 
     state.dispatcher = std::move(dispatcher);

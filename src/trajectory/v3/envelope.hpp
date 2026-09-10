@@ -116,6 +116,11 @@ enum class EventKindV3 {
     HookSkipped,
     HookEffectsApplied,
     HookEffectsRejected,
+    // LuaHook 单 P0-B(§7.1 洋葱前置两项语义):候选先存(proposed)与
+    // 一次性执行权消费(continuation.consumed)。两者都是事实记录,不携带
+    // status;proposed 不冒充 handler 已完成,consumed 不冒充下游已执行。
+    HookOutputProposed,
+    HookContinuationConsumed,
     CommandReceived,
     CommandPending,
     CommandStarted,

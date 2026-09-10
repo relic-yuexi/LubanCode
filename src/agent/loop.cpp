@@ -28,6 +28,7 @@
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "platform/wall_clock.hpp"     // trace 与计划动作须共用一枚墙钟
+#include "runtime/middleware_runtime.hpp"  // LuaHook P0-B:PreRequest 快照投影(§4.36)
 #include "runtime/plan_mode.hpp"       // kErrModeDenied:Plan 硬闸的稳定码
 #include "tools/instruction_scope.hpp"  // 闸文案两档前缀:握手/超预算的分账
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
@@ -1319,6 +1320,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 " protocol_margin=" + std::to_string(kContextPreflightHeadroomTokens) +
                                 " window=" + std::to_string(window_tokens) +
                                 " action=max_tokens_degraded to=" + std::to_string(degraded));
+            }
+        }
+
+        // LuaHook 单 P0-B:PreRequest 中间件(§4.36)。请求已定形(预检/应急
+        // 收窄完),按冻结快照跑 mutate→estimate→capacity;估算与容量都是
+        // 注册池里的获选实现(内置 required 槽位或用户同名替换),引擎不另
+        // 留绕开 hook 的估算路径。没配回调一处不调,行为与从前逐字节一致;
+        // 拦下即整步明败(与预检未通过同款收口),mutate 采用改写时报
+        // reprepare——本批不重建请求,明拦不暗发。
+        if (wiring.on_pre_request_hooks) {
+            const nlohmann::json frozen_snapshot = runtime::BuildRequestSnapshotJson(request);
+            const std::string pre_request_blocked = wiring.on_pre_request_hooks(
+                step_id, wiring.turn_id, frozen_snapshot, static_cast<std::uint64_t>(window_tokens),
+                static_cast<std::uint64_t>(estimate_output_reserve));
+            if (!pre_request_blocked.empty()) {
+                return std::unexpected(pre_request_blocked);
             }
         }
 
