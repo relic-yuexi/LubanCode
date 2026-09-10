@@ -876,8 +876,12 @@ WriteReceipt V3Writer::CompleteStreamResponse(
             return receipt;
         }
         // 3. 接纳进当前上下文(compact 内部回复不进 main 链,§4.8)。
+        // 返回 message 回执;接纳失败时带回接纳错误。
         if (purpose == MessagePurpose::Conversation) {
-            return impl_->AdmitLocked({receipt.id}, durability);
+            WriteReceipt admit = impl_->AdmitLocked({receipt.id}, durability);
+            if (admit.status != WriteReceipt::Status::Committed) {
+                return admit;
+            }
         }
         return receipt;
     }
@@ -938,7 +942,10 @@ WriteReceipt V3Writer::InterruptStreamResponse(
             return receipt;
         }
         if (purpose == MessagePurpose::Conversation) {
-            return impl_->AdmitLocked({receipt.id}, durability);
+            WriteReceipt admit = impl_->AdmitLocked({receipt.id}, durability);
+            if (admit.status != WriteReceipt::Status::Committed) {
+                return admit;
+            }
         }
         return receipt;
     }
