@@ -833,6 +833,12 @@ add_library(lubancode_runtime STATIC
   # (逐消息上下文状态标志 + CompactMarkerView 持久 token 字段);cli 与
   # app_server 都从这层拿,显示层不直接碰 reader.hpp 的 C++ 结构。
   src/runtime/trajectory_history_view.cpp
+  # 轨迹 v3 compact 运行时接线(compact 全链单):把已落库的 v3
+  # CompactSession 状态机接进会话运行时——manual/auto 触发、范围冻结、
+  # 发送前容量门禁与 §4.64 整轮回退(compact.range.retreated)、压缩请求
+  # 组装、模型采样(抽象 client)、必需内容校验、applied 原子提交。只依赖
+  # trajectory/v3 库,不认 api::Backend。
+  src/runtime/v3_compact_runtime.cpp
   # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
   src/runtime/goal_types.cpp
   # /goal 持久目标单:目标状态机唯一写口(命令面/预算闸/防空转/硬门槛/回放)。

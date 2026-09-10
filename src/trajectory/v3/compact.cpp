@@ -173,7 +173,8 @@ WriteReceipt CompactSession::WriteCandidate(V3Writer& writer, nlohmann::json ass
                                             std::string_view request_id,
                                             std::string_view step_id, std::string_view provider,
                                             std::string_view wire, std::string_view model,
-                                            nlohmann::json usage, Durability durability) {
+                                            nlohmann::json usage, Durability durability,
+                                            std::optional<CompletionStatus> completion_status) {
     MessageDraft draft;
     draft.turn_id = turn_id_;
     draft.parent_turn_id = parent_turn_id_;
@@ -183,6 +184,7 @@ WriteReceipt CompactSession::WriteCandidate(V3Writer& writer, nlohmann::json ass
     draft.purpose = MessagePurpose::Compact;
     draft.origin = MessageOrigin::CompactRuntime;
     draft.display = DisplayMode::Hidden;
+    draft.completion_status = completion_status;
     draft.message = std::move(assistant_message);
     draft.provider = std::string(provider);
     draft.wire = std::string(wire);

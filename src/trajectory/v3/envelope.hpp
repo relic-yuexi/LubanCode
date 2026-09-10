@@ -87,6 +87,7 @@ enum class EventKindV3 {
     CompactRequested,
     CompactPending,
     CompactStarted,
+    CompactRangeRetreated,
     CompactValidationStarted,
     CompactValidationCompleted,
     CompactApplied,

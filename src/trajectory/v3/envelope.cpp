@@ -257,6 +257,7 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::CompactRequested: return "compact.requested";
         case EventKindV3::CompactPending: return "compact.pending";
         case EventKindV3::CompactStarted: return "compact.started";
+        case EventKindV3::CompactRangeRetreated: return "compact.range.retreated";
         case EventKindV3::CompactValidationStarted: return "compact.validation.started";
         case EventKindV3::CompactValidationCompleted: return "compact.validation.completed";
         case EventKindV3::CompactApplied: return "compact.applied";
@@ -344,6 +345,7 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::CompactRequested,
             EventKindV3::CompactPending,
             EventKindV3::CompactStarted,
+            EventKindV3::CompactRangeRetreated,
             EventKindV3::CompactValidationStarted,
             EventKindV3::CompactValidationCompleted,
             EventKindV3::CompactApplied,
