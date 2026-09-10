@@ -84,6 +84,9 @@ struct ContextView {
     std::string system_message_ref;    // == chain.front().message_ref
     // 未完成 compact(无终态)按源上下文恢复,内部回合不冒充主链。
     std::vector<std::string> open_compact_ids;
+    // 当前已采用的历史工具预览档位(§4.38):默认 32 KiB;降档提交后取
+    // 事件里的新档;普通后续请求不自动回升。
+    std::uint64_t preview_budget_bytes = 32768;
 };
 
 // ---------------------------------------------------------------------------
@@ -107,6 +110,8 @@ struct MessageDraft {
     nlohmann::json message = nlohmann::json::object();
     std::optional<std::string> caused_by_event_ref;
     std::optional<std::string> source_message_ref;
+    std::optional<std::string> result_selection_ref;      // tool 消息(§4.19)
+    std::optional<std::string> source_tool_message_ref;   // 降档派生消息(§4.38)
     std::optional<nlohmann::json> system_meta;
     std::optional<CompletionStatus> completion_status;
     std::optional<std::string> provider;
@@ -177,6 +182,31 @@ public:
     // revision 一次 +1(一批一条提交事件,§4.30"一组节点先全部落稳再提交")。
     WriteReceipt AdmitMessages(std::vector<std::string> message_ids,
                                Durability durability = Durability::PowerLoss);
+
+    // ---- 工具预览降档(§4.38) ----
+
+    // 一次降档提交:为真正变短的预览各落一条派生 tool 消息(同 turn/step/
+    // action/tool_call_id 与选用引用,origin=context_runtime,
+    // sourceToolMessageRef 指原消息),再原子提交 context.tool_previews.
+    // reduced(完整新链:原消息节点换派生消息,后续节点重接)。
+    // 原消息不改写、不重跑工具;每档只降不升。
+    struct PreviewReplacement {
+        std::string original_message_id;              // 须已在当前链上(role=tool)
+        std::string new_content;                      // 该档位下的完整预览文本
+        std::optional<std::string> caused_by_event_ref;  // 触发降档的事件(可空)
+    };
+    struct ReduceToolPreviewsResult {
+        std::vector<WriteReceipt> replacement_messages;
+        WriteReceipt reduced_event;
+        bool ok = false;
+        std::string error;
+    };
+    ReduceToolPreviewsResult ReduceToolPreviews(
+        std::uint64_t new_budget_bytes, std::string_view input_hash,
+        std::uint64_t estimated_tokens_before, std::uint64_t estimated_tokens_after,
+        const std::vector<PreviewReplacement>& replacements,
+        const std::vector<std::string>& pairing_check_refs,
+        Durability durability = Durability::PowerLoss);
 
     // system 版本切换三步(§4.3):system.change -> 新 system 消息 ->
     // context.system.applied(链根换新 system,后续节点重接)。
@@ -262,6 +292,9 @@ public:
     std::string NewRequestId();  // request-<n>
     std::string NewStreamId();   // stream-<n>
     std::string NewCompactId();  // compact-<n>
+    std::string NewActionId();         // action-<n>,工具调用全局身份(§4.15)
+    std::string NewHookDispatchId();   // hookdispatch-<n>,挂点触发身份(§4.22)
+    std::string NewTaskId();           // task-<n>,委派任务身份(§4.31)
 
     // ---- 观测 ----
 

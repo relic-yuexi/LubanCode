@@ -179,6 +179,11 @@ struct MessageLine {
     nlohmann::json message = nlohmann::json::object();  // {"role": ..., ...}
     std::optional<std::string> caused_by_event_ref;
     std::optional<std::string> source_message_ref;
+    // tool 消息的选用回执(§4.18/§4.19):指向 tool.result.selected 事件,
+    // 声明"正文来自该次选定的结果版本"。
+    std::optional<std::string> result_selection_ref;
+    // 降档派生消息(§4.38)指回原 tool 消息:同一执行结果的更短预览版本。
+    std::optional<std::string> source_tool_message_ref;
     std::optional<nlohmann::json> system_meta;  // system 消息必填
     std::optional<CompletionStatus> completion_status;  // 缺省 complete
     // assistant 来源(§4.44):provider/wire/model 必填;responseModel 键

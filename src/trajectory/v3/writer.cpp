@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "trajectory/canonical_json.hpp"
@@ -88,7 +89,8 @@ struct V3Writer::Impl {
     std::string run_id;
     std::uint64_t next_seq = 1;
     std::string last_hash{std::string(kGenesisHash)};
-    std::uint64_t id_counters[7] = {0, 0, 0, 0, 0, 0, 0};  // msg/evt/turn/step/req/stream/compact
+    // msg/evt/turn/step/req/stream/compact/action/hookdispatch/task
+    std::uint64_t id_counters[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     ContextView context;
     std::unordered_set<std::string> message_ids;
     bool broken = false;
@@ -166,6 +168,8 @@ struct V3Writer::Impl {
         line.message = std::move(draft.message);
         line.caused_by_event_ref = std::move(draft.caused_by_event_ref);
         line.source_message_ref = std::move(draft.source_message_ref);
+        line.result_selection_ref = std::move(draft.result_selection_ref);
+        line.source_tool_message_ref = std::move(draft.source_tool_message_ref);
         line.system_meta = std::move(draft.system_meta);
         line.completion_status = draft.completion_status;
         line.provider = std::move(draft.provider);
@@ -369,6 +373,22 @@ std::string ApplyCommitEventToView(ContextView& view, const EventLine& line) {
         case K::ContextSystemApplied:
             return set_chain_from(line.payload.at("contextChain"),
                                   line.payload.at("afterRevision").get<std::uint64_t>());
+        case K::ContextToolPreviewsReduced: {
+            // §4.38:降档提交携带完整新链(原 tool 节点换派生消息,后续重接);
+            // 档位随之取事件里的新值,普通后续请求不自动回升。
+            std::string error = set_chain_from(
+                line.payload.at("contextChain"),
+                line.payload.at("afterRevision").get<std::uint64_t>());
+            if (!error.empty()) {
+                return error;
+            }
+            if (line.payload.contains("newPreviewBudget") &&
+                line.payload.at("newPreviewBudget").is_number_unsigned()) {
+                view.preview_budget_bytes =
+                    line.payload.at("newPreviewBudget").get<std::uint64_t>();
+            }
+            return std::string();
+        }
         case K::CompactApplied: {
             std::string error = set_chain_from(
                 line.payload.at("contextChain"),
@@ -437,14 +457,15 @@ std::optional<std::vector<std::string>> ReadRawLines(const std::filesystem::path
     return lines;
 }
 
-void RestoreIdCounters(std::uint64_t (&counters)[7], const std::vector<nlohmann::json>& lines) {
+void RestoreIdCounters(std::uint64_t (&counters)[10], const std::vector<nlohmann::json>& lines) {
     struct Prefix {
         const char* prefix;
         int slot;
     };
-    static const Prefix kPrefixes[] = {{"msg-", 0},     {"evt-", 1},       {"turn-", 2},
-                                       {"step-", 3},   {"request-", 4},   {"stream-", 5},
-                                       {"compact-", 6}, {"compact-turn-", 2}};
+    static const Prefix kPrefixes[] = {
+        {"msg-", 0},          {"evt-", 1},        {"turn-", 2},        {"step-", 3},
+        {"request-", 4},      {"stream-", 5},     {"compact-", 6},     {"action-", 7},
+        {"hookdispatch-", 8}, {"task-", 9},       {"compact-turn-", 2}};
     auto bump = [&](const std::string& id) {
         for (const auto& p : kPrefixes) {
             if (id.rfind(p.prefix, 0) != 0) {
@@ -469,7 +490,7 @@ void RestoreIdCounters(std::uint64_t (&counters)[7], const std::vector<nlohmann:
     for (const auto& line : lines) {
         for (const char* key :
              {"messageId", "eventId", "turnId", "parentTurnId", "stepId", "requestId",
-              "compactId"}) {
+              "compactId", "actionId", "hookDispatchId", "taskId"}) {
             auto it = line.find(key);
             if (it != line.end() && it->is_string()) {
                 bump(it->get<std::string>());
@@ -655,6 +676,149 @@ WriteReceipt V3Writer::AdmitMessages(std::vector<std::string> message_ids,
     }
     // 锁内构造追加链并提交;落稳后 CommitEvent 统一重放内存视图。
     return impl_->AdmitLocked(message_ids, durability);
+}
+
+V3Writer::ReduceToolPreviewsResult V3Writer::ReduceToolPreviews(
+    std::uint64_t new_budget_bytes, std::string_view input_hash,
+    std::uint64_t estimated_tokens_before, std::uint64_t estimated_tokens_after,
+    const std::vector<PreviewReplacement>& replacements,
+    const std::vector<std::string>& pairing_check_refs, Durability durability) {
+    ReduceToolPreviewsResult result;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->broken) {
+        result.reduced_event = WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "",
+                                            "v3writer.broken", "句柄已断,停止提交"};
+        return result;
+    }
+    if (replacements.empty()) {
+        result.error = "v3reducer.empty_replacements: 至少替换一条 tool 消息";
+        return result;
+    }
+    if (new_budget_bytes >= impl_->context.preview_budget_bytes) {
+        result.error = "v3reducer.not_a_reduction: 新档位须低于当前档位(只降不升,§4.38)";
+        return result;
+    }
+    // 源链上的原消息:从账上取身份(须为已在当前链上的 tool 消息),不凭
+    // 调用方复述——身份对不上宁可拒收,不造错链。
+    std::unordered_map<std::string, nlohmann::json> originals;
+    {
+        bool truncated = false;
+        auto raw_lines = ReadRawLines(impl_->journal.path(), &truncated);
+        if (!raw_lines.has_value() || truncated) {
+            result.error = "v3reducer.read_failed: 原账读不齐";
+            return result;
+        }
+        for (const auto& raw : *raw_lines) {
+            auto line = nlohmann::json::parse(raw, nullptr, false);
+            if (line.is_discarded() || line.at("type").get<std::string>() != "message") {
+                continue;
+            }
+            std::string ec, msg;
+            auto parsed = MessageLine::FromJsonStrict(line, &ec, &msg);
+            if (parsed.has_value() &&
+                parsed->message.value("role", "") == "tool") {
+                originals.emplace(line.at("messageId").get<std::string>(), line);
+            }
+        }
+    }
+    std::unordered_set<std::string> in_chain;
+    for (const auto& node : impl_->context.chain) {
+        in_chain.insert(node.message_ref);
+    }
+    // 1. 派生消息先落稳(不接纳;接纳由降档提交事件换链完成)。
+    std::vector<std::string> replacement_ids;
+    for (const auto& replacement : replacements) {
+        auto it = originals.find(replacement.original_message_id);
+        if (it == originals.end()) {
+            result.error = "v3reducer.original_not_tool: 原消息不在账上或不是 tool 消息: " +
+                           replacement.original_message_id;
+            return result;
+        }
+        if (in_chain.count(replacement.original_message_id) == 0) {
+            result.error = "v3reducer.original_not_in_chain: 原消息不在当前上下文链上: " +
+                           replacement.original_message_id;
+            return result;
+        }
+        const auto& original = it->second;
+        MessageDraft derived;
+        // 保留原 turnId/stepId/actionId/tool_call_id 与结果选用引用(§4.38)。
+        if (original.contains("turnId") && original.at("turnId").is_string()) {
+            derived.turn_id = original.at("turnId").get<std::string>();
+        }
+        if (original.contains("stepId") && original.at("stepId").is_string()) {
+            derived.step_id = original.at("stepId").get<std::string>();
+        }
+        if (original.contains("actionId") && original.at("actionId").is_string()) {
+            derived.action_id = original.at("actionId").get<std::string>();
+        }
+        derived.purpose = MessagePurpose::Conversation;
+        derived.origin = MessageOrigin::ContextRuntime;  // 派生展示版本,非新执行
+        derived.message = nlohmann::json::object(
+            {{"role", "tool"},
+             {"tool_call_id", derived.action_id.value_or(std::string())},
+             {"content", replacement.new_content}});
+        derived.caused_by_event_ref = replacement.caused_by_event_ref;
+        derived.source_tool_message_ref = replacement.original_message_id;
+        if (original.contains("resultSelectionRef") &&
+            original.at("resultSelectionRef").is_string()) {
+            derived.result_selection_ref = original.at("resultSelectionRef").get<std::string>();
+        }
+        WriteReceipt receipt = impl_->CommitMessage(std::move(derived), durability);
+        if (receipt.status != WriteReceipt::Status::Committed) {
+            result.replacement_messages.push_back(receipt);
+            result.error = "v3reducer.message_failed: " + receipt.error_code + " " +
+                           receipt.error_message;
+            return result;
+        }
+        result.replacement_messages.push_back(receipt);
+        replacement_ids.push_back(receipt.id);
+    }
+    // 2. 新链:原消息节点换派生消息,后续节点重接(§4.38 示例链)。
+    std::vector<ChainNode> new_chain;
+    std::unordered_map<std::string, std::string> swap;
+    for (std::size_t i = 0; i < replacements.size(); ++i) {
+        swap[replacements[i].original_message_id] = replacement_ids[i];
+    }
+    std::optional<std::string> prev;
+    for (const auto& node : impl_->context.chain) {
+        std::string ref = node.message_ref;
+        auto swapped = swap.find(ref);
+        if (swapped != swap.end()) {
+            ref = swapped->second;
+        }
+        new_chain.push_back(ChainNode{ref, prev});
+        prev = ref;
+    }
+    nlohmann::json replacement_refs = nlohmann::json::array();
+    for (const auto& id : replacement_ids) {
+        replacement_refs.push_back(id);
+    }
+    nlohmann::json pairing = nlohmann::json::array();
+    for (const auto& ref : pairing_check_refs) {
+        pairing.push_back(ref);
+    }
+    // 3. 原子提交 context.tool_previews.reduced(完整新链,revision +1)。
+    EventDraft draft;
+    draft.kind = EventKindV3::ContextToolPreviewsReduced;
+    draft.payload = nlohmann::json::object(
+        {{"contextId", impl_->context.context_id},
+         {"beforeRevision", impl_->context.revision},
+         {"afterRevision", impl_->context.revision + 1},
+         {"oldPreviewBudget", impl_->context.preview_budget_bytes},
+         {"newPreviewBudget", new_budget_bytes},
+         {"replacementRefs", replacement_refs},
+         {"contextChain", ChainToJson(new_chain)},
+         {"inputHash", std::string(input_hash)},
+         {"estimatedTokensBefore", estimated_tokens_before},
+         {"estimatedTokensAfter", estimated_tokens_after},
+         {"pairingCheckRefs", pairing}});
+    result.reduced_event = impl_->CommitEvent(std::move(draft), durability);
+    result.ok = result.reduced_event.status == WriteReceipt::Status::Committed;
+    if (!result.ok) {
+        result.error = "v3reducer.commit_failed: " + result.reduced_event.error_code + " " +
+                       result.reduced_event.error_message;
+    }
+    return result;
 }
 
 V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_content,
@@ -982,6 +1146,18 @@ std::string V3Writer::NewStreamId() {
 std::string V3Writer::NewCompactId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->NextId("compact", 6);
+}
+std::string V3Writer::NewActionId() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->NextId("action", 7);
+}
+std::string V3Writer::NewHookDispatchId() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->NextId("hookdispatch", 8);
+}
+std::string V3Writer::NewTaskId() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->NextId("task", 9);
 }
 
 const std::filesystem::path& V3Writer::path() const { return impl_->journal.path(); }

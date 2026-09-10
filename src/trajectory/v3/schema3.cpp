@@ -1,6 +1,7 @@
 // v3 语义校验实现。
 #include "trajectory/v3/schema3.hpp"
 
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -64,6 +65,11 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
     }
     if (in({K::TitleRequested, K::TitleExtracted, K::SessionTitleApplied})) {
         return IdRequirement{"titleGenerationId", true};
+    }
+    // subagent.* 挂父工具 Action(§4.31:spawn/wait/send/cancel 各自成调用)。
+    if (in({K::SubagentSpawnRequested, K::SubagentLinked, K::SubagentObserved,
+            K::SubagentSpawnFailed})) {
+        return IdRequirement{"actionId", true};
     }
     return std::nullopt;
 }
@@ -255,6 +261,177 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
 }
 
 // ---------------------------------------------------------------------------
+// P1 其余域的工具函数(工具结果/hook/subagent/降档)
+// ---------------------------------------------------------------------------
+
+// artifactRef(§3.1 六键):{artifactId,kind,path,sha256,bytes,mediaType};
+// kind ∈ result_metadata|stdout|stderr|combined|report|image|blob。
+std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
+                                                const nlohmann::json& ref) {
+    static const std::vector<std::string> kKinds = {
+        "result_metadata", "stdout", "stderr", "combined", "report", "image", "blob",
+    };
+    if (!ref.is_object()) {
+        return Err("schema3.bad_ref", std::string(context) + " artifactRef 应为 object");
+    }
+    for (const auto* key : {"artifactId", "kind", "path", "sha256", "bytes", "mediaType"}) {
+        if (!ref.contains(key)) {
+            return Err("schema3.missing_field",
+                       std::string(context) + " artifactRef 缺字段: " + key);
+        }
+    }
+    if (!ref["artifactId"].is_string() || ref["artifactId"].get<std::string>().empty() ||
+        !ref["path"].is_string() || ref["path"].get<std::string>().empty() ||
+        !ref["mediaType"].is_string()) {
+        return Err("schema3.bad_ref", std::string(context) + " artifactRef 字段类型错");
+    }
+    if (!ref["kind"].is_string() ||
+        std::find(kKinds.begin(), kKinds.end(), ref["kind"].get<std::string>()) == kKinds.end()) {
+        return Err("schema3.bad_enum", std::string(context) + " artifactRef.kind 未知");
+    }
+    if (!ref["sha256"].is_string() || !IsHex64(ref["sha256"].get<std::string>())) {
+        return Err("schema3.bad_ref", std::string(context) + " artifactRef.sha256 应为 64 位十六进制");
+    }
+    if (!JsonIsNonNegativeInt(ref["bytes"])) {
+        return Err("schema3.bad_ref", std::string(context) + " artifactRef.bytes 应为非负整数");
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+// result_ref 数组(§4.16):固定数组;每项六键 artifactRef;同文件不重复。
+std::optional<Schema3Error> CheckArtifactRefArray(std::string_view context,
+                                                  const nlohmann::json& payload,
+                                                  const char* key, bool allow_empty) {
+    auto it = payload.find(key);
+    if (it == payload.end()) {
+        return Err("schema3.missing_field", std::string(context) + " payload 缺字段: " + key);
+    }
+    if (!it->is_array()) {
+        return Err("schema3.bad_type", std::string(context) + " " + key + " 应为数组(空也写 [])");
+    }
+    if (it->empty() && !allow_empty) {
+        return Err("schema3.empty_result_refs", std::string(context) + " " + key + " 不能为空");
+    }
+    std::unordered_set<std::string> seen;
+    for (const auto& ref : *it) {
+        if (auto error = ValidateArtifactRef(context, ref)) {
+            return error;
+        }
+        if (!seen.insert(ref["path"].get<std::string>()).second) {
+            return Err("schema3.duplicate_artifact",
+                       std::string(context) + " 同一文件在 " + key + " 里只列一次");
+        }
+    }
+    return std::nullopt;
+}
+
+// 引用数组(如 sourceResultEventRefs/hookEffectEventRefs):每项须合法引用。
+std::optional<Schema3Error> CheckRefArray(std::string_view context,
+                                          const nlohmann::json& payload, const char* key,
+                                          bool allow_empty) {
+    auto it = payload.find(key);
+    if (it == payload.end()) {
+        return Err("schema3.missing_field", std::string(context) + " payload 缺字段: " + key);
+    }
+    if (!it->is_array()) {
+        return Err("schema3.bad_type", std::string(context) + " " + key + " 应为数组");
+    }
+    if (it->empty() && !allow_empty) {
+        return Err("schema3.empty_refs", std::string(context) + " " + key + " 不能为空");
+    }
+    for (const auto& ref : *it) {
+        if (!IsValidRef(ref)) {
+            return Err("schema3.bad_ref", std::string(context) + " " + key + " 内引用格式错");
+        }
+    }
+    return std::nullopt;
+}
+
+// 工具族公共:payload.tool_call_id == 信封 actionId(§4.15 映射必校);
+// attempt 正整数。
+std::optional<Schema3Error> CheckToolPayload(std::string_view context, const EventLine& line,
+                                             bool require_attempt) {
+    if (!line.action_id.has_value()) {
+        return Err("schema3.missing_field", std::string(context) + " 信封缺 actionId");
+    }
+    if (!line.payload.contains("tool_call_id") || !line.payload["tool_call_id"].is_string() ||
+        line.payload["tool_call_id"].get<std::string>() != *line.action_id) {
+        return Err("schema3.tool_call_id_mismatch",
+                   std::string(context) + " payload.tool_call_id 须等于信封 actionId(§4.15)");
+    }
+    if (require_attempt) {
+        if (!line.payload.contains("attempt") ||
+            !line.payload["attempt"].is_number_unsigned() ||
+            line.payload["attempt"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " payload.attempt 应为从 1 起的正整数(§4.15)");
+        }
+    }
+    return std::nullopt;
+}
+
+// payload 取必选非空 string。
+std::optional<Schema3Error> CheckStringField(std::string_view context,
+                                             const nlohmann::json& payload, const char* key) {
+    auto it = payload.find(key);
+    if (it == payload.end()) {
+        return Err("schema3.missing_field", std::string(context) + " payload 缺字段: " + key);
+    }
+    if (!it->is_string() || it->get<std::string>().empty()) {
+        return Err("schema3.bad_type", std::string(context) + " " + key + " 应为非空 string");
+    }
+    return std::nullopt;
+}
+
+// 子会话引用(§4.31):{sessionId, runId, journalPath} 三键。
+std::optional<Schema3Error> CheckChildSessionRef(std::string_view context,
+                                                 const nlohmann::json& payload) {
+    auto it = payload.find("childSessionRef");
+    if (it == payload.end() || !it->is_object()) {
+        return Err("schema3.missing_field",
+                   std::string(context) + " payload.childSessionRef 应为 object");
+    }
+    for (const auto* key : {"sessionId", "runId", "journalPath"}) {
+        if (!it->contains(key) || !(*it)[key].is_string() || (*it)[key].get<std::string>().empty()) {
+            return Err("schema3.bad_ref",
+                       std::string(context) + " childSessionRef." + std::string(key) +
+                           " 应为非空 string(§4.31)");
+        }
+    }
+    return std::nullopt;
+}
+
+// 子账检查点(§4.31):{sessionId, runId, seq, lineHash}——固定子账前缀。
+std::optional<Schema3Error> CheckChildCheckpointRef(std::string_view context,
+                                                    const nlohmann::json& payload) {
+    auto it = payload.find("childCheckpointRef");
+    if (it == payload.end() || !it->is_object()) {
+        return Err("schema3.missing_field",
+                   std::string(context) + " payload.childCheckpointRef 应为 object");
+    }
+    for (const auto* key : {"sessionId", "runId"}) {
+        if (!it->contains(key) || !(*it)[key].is_string() || (*it)[key].get<std::string>().empty()) {
+            return Err("schema3.bad_ref",
+                       std::string(context) + " childCheckpointRef." + std::string(key) +
+                           " 应为非空 string");
+        }
+    }
+    if (!it->contains("seq") || !(*it)["seq"].is_number_unsigned()) {
+        return Err("schema3.bad_ref", std::string(context) + " childCheckpointRef.seq 应为非负整数");
+    }
+    if (!it->contains("lineHash") || !(*it)["lineHash"].is_string() ||
+        !IsHex64((*it)["lineHash"].get<std::string>())) {
+        return Err("schema3.bad_ref",
+                   std::string(context) + " childCheckpointRef.lineHash 应为 64 位十六进制");
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
 // message 行
 // ---------------------------------------------------------------------------
 
@@ -330,8 +507,19 @@ std::optional<Schema3Error> ValidateMessageLine(const MessageLine& line) {
                 return Err("schema3.tool_call_id_mismatch",
                            "message.tool_call_id 须等于信封 actionId(§4.15)");
             }
+            // §1.2.1:tool content 为 string(模型可见的最终预览文本)。
+            if (!line.message.contains("content") || !line.message["content"].is_string()) {
+                return Err("schema3.bad_type", "tool 消息 content 应为 string(§1.2.1)");
+            }
             break;
         }
+    }
+    // 降档派生消息(§4.38):同执行结果的更短预览版本,origin 固定
+    // context_runtime,不冒充新执行、不增加工具次数。
+    if (line.source_tool_message_ref.has_value() &&
+        line.origin != MessageOrigin::ContextRuntime) {
+        return Err("schema3.bad_origin",
+                   "带 sourceToolMessageRef 的派生消息 origin 须为 context_runtime(§4.38)");
     }
     // 内部回合(compact)消息必带 compactId(§4.5)。
     if (line.purpose == MessagePurpose::Compact && !line.compact_id.has_value()) {
@@ -502,6 +690,218 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
                 return Err("schema3.missing_field",
                            "model.response.started payload 缺字段: " + std::string(key));
             }
+        }
+    } else if (line.kind == K::ToolExecutionPending) {
+        // §4.14:已接纳待执行,必须带 reason(queued/approval/dependency/backoff)。
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolExecutionStarted) {
+        // §4.15/§4.18:越过准入栅栏时 effective_args 已另存快照。
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "effectiveArgsRef", true)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolExecutionWaiting) {
+        // §2.2/§4.14:执行中等待外部条件,须带 reason 与可恢复等待引用。
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "waitRef", true)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolExecutionResumed) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolExecutionFinished) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        // exit_code:进程工具为整数;非进程工具缺省;退出未知为 null(§4.16)。
+        if (line.payload.contains("exit_code") && !line.payload["exit_code"].is_number_integer() &&
+            !line.payload["exit_code"].is_null()) {
+            return Err("schema3.bad_type", "tool.execution.finished.exit_code 应为整数或 null");
+        }
+    } else if (line.kind == K::ToolExecutionFailed) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "error_code")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolExecutionCancelled) {
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        // §4.14:区分执行前取消与执行中取消。
+        if (auto error = CheckStringField(kind_name, line.payload, "phase")) {
+            return error;
+        }
+        if (line.payload["phase"] != "before_started" &&
+            line.payload["phase"] != "during_execution") {
+            return Err("schema3.bad_enum",
+                       "cancelled.phase 应为 before_started|during_execution(§4.14)");
+        }
+    } else if (line.kind == K::ToolExecutionRejected) {
+        // 参数/权限/准入拒绝:没有执行,不必带 attempt。
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolExecutionUnknown) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolResultPersisted) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckArtifactRefArray(kind_name, line.payload, "result_ref", false)) {
+            return error;
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "executionEventRef", true)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolResultPersistFailed) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolResultSelected) {
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckRefArray(kind_name, line.payload, "sourceResultEventRefs", false)) {
+            return error;
+        }
+        if (auto error = CheckRefArray(kind_name, line.payload, "hookEffectEventRefs", true)) {
+            return error;
+        }
+        // §4.23:最终有效结果;hook 替代与宿主配对错误各有名目。
+        if (auto error = CheckStringField(kind_name, line.payload, "effectiveOutcome")) {
+            return error;
+        }
+        const std::string outcome = line.payload["effectiveOutcome"].get<std::string>();
+        if (outcome != "done" && outcome != "failed" && outcome != "substituted" &&
+            outcome != "error") {
+            return Err("schema3.bad_enum",
+                       "effectiveOutcome 应为 done|failed|substituted|error(§4.23)");
+        }
+    } else if (line.kind == K::HookDispatchRequested) {
+        if (auto error = CheckStringField(kind_name, line.payload, "hookPoint")) {
+            return error;
+        }
+    } else if (line.kind == K::HookStarted) {
+        for (const auto* key : {"hookInvocationId", "hookId", "handlerKind"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::HookCompleted) {
+        for (const auto* key : {"hookInvocationId", "hookId"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::HookFailed) {
+        if (auto error = CheckStringField(kind_name, line.payload, "error_code")) {
+            return error;
+        }
+    } else if (line.kind == K::HookCancelled || line.kind == K::HookUnknown ||
+               line.kind == K::HookSkipped) {
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::HookEffectsApplied) {
+        if (auto error = CheckStringField(kind_name, line.payload, "effectType")) {
+            return error;
+        }
+    } else if (line.kind == K::HookEffectsRejected) {
+        if (auto error = CheckStringField(kind_name, line.payload, "effectType")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::SubagentSpawnRequested) {
+        if (auto error = CheckStringField(kind_name, line.payload, "taskId")) {
+            return error;
+        }
+        if (auto error = CheckChildSessionRef(kind_name, line.payload)) {
+            return error;
+        }
+        if (!line.payload.contains("attempt") || !line.payload["attempt"].is_number_unsigned() ||
+            line.payload["attempt"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type", "subagent.spawn.requested.attempt 应为从 1 起(§4.32)");
+        }
+    } else if (line.kind == K::SubagentLinked) {
+        if (auto error = CheckStringField(kind_name, line.payload, "taskId")) {
+            return error;
+        }
+        if (auto error = CheckChildCheckpointRef(kind_name, line.payload)) {
+            return error;
+        }
+    } else if (line.kind == K::SubagentObserved) {
+        if (auto error = CheckStringField(kind_name, line.payload, "taskId")) {
+            return error;
+        }
+        if (auto error = CheckChildCheckpointRef(kind_name, line.payload)) {
+            return error;
+        }
+    } else if (line.kind == K::SubagentSpawnFailed) {
+        if (auto error = CheckStringField(kind_name, line.payload, "taskId")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "phase")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::ContextToolPreviewsReduced) {
+        // §4.38:独立上下文提交事件——源/新版本、旧/新档位、替换消息、
+        // 完整新链、输入 hash 与前后估算、配对校验引用。
+        for (const auto* key :
+             {"contextId", "beforeRevision", "afterRevision", "oldPreviewBudget",
+              "newPreviewBudget", "replacementRefs", "contextChain", "inputHash",
+              "estimatedTokensBefore", "estimatedTokensAfter", "pairingCheckRefs"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "context.tool_previews.reduced payload 缺字段: " + std::string(key));
+            }
+        }
+        if (auto error = CheckContextChainField(kind_name, line.payload)) {
+            return error;
+        }
+        if (!line.payload["replacementRefs"].is_array() ||
+            line.payload["replacementRefs"].empty()) {
+            return Err("schema3.bad_type", "replacementRefs 应为非空数组(§4.38)");
+        }
+        if (!line.payload["pairingCheckRefs"].is_array()) {
+            return Err("schema3.bad_type", "pairingCheckRefs 应为数组");
+        }
+        if (!line.payload["oldPreviewBudget"].is_number_unsigned() ||
+            !line.payload["newPreviewBudget"].is_number_unsigned() ||
+            line.payload["newPreviewBudget"].get<std::uint64_t>() >=
+                line.payload["oldPreviewBudget"].get<std::uint64_t>()) {
+            return Err("schema3.bad_type",
+                       "降档须 newPreviewBudget < oldPreviewBudget(§4.38 只降不升)");
         }
     }
     // pending 类必须带 reason(§4.14)。
