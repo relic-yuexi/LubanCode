@@ -422,7 +422,17 @@ public:
     // completed != 改写已采用:候选先存,验证后 applied/rejected。
     virtual void OnEffectApplied(const InvocationMeta&, std::string_view effect_type) {}
     virtual void OnEffectRejected(const InvocationMeta&, std::string_view effect_type, std::string_view reason) {}
+    // P0-B:带值的采用/拒绝账。与上面两条同点位同时发——值版给落账 sink
+    //(input.rewrite 的候选即工作版本、context.append 的文本);旧口保持
+    // P0-A 兼容,缺省实现零行为。
+    virtual void OnEffectSettled(const InvocationMeta&, std::string_view /*effect_type*/, bool /*applied*/,
+                                 std::string_view /*reason*/, const nlohmann::json& /*value*/) {}
     virtual void OnContinuationConsumed(const InvocationMeta&) {}
+    // 洋葱候选先存(LuaHook P0-B,§7.1):before_next(next 携带的改写候选,
+    // 含将被拒的)/after_next(已消费 next 后 handler 的返回值)/short_circuit
+    //(零 next 短路的返回值)。proposed 不冒充 handler 已完成。
+    virtual void OnOutputProposed(const InvocationMeta&, std::string_view /*phase*/,
+                                  const nlohmann::json& /*candidate*/) {}
 };
 
 // ---------------------------------------------------------------------------

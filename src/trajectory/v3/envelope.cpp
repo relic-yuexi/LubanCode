@@ -285,6 +285,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::HookSkipped: return "hook.skipped";
         case EventKindV3::HookEffectsApplied: return "hook.effects.applied";
         case EventKindV3::HookEffectsRejected: return "hook.effects.rejected";
+        case EventKindV3::HookOutputProposed: return "hook.output.proposed";
+        case EventKindV3::HookContinuationConsumed: return "hook.continuation.consumed";
         case EventKindV3::CommandReceived: return "command.received";
         case EventKindV3::CommandPending: return "command.pending";
         case EventKindV3::CommandStarted: return "command.started";
@@ -372,6 +374,8 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::HookSkipped,
             EventKindV3::HookEffectsApplied,
             EventKindV3::HookEffectsRejected,
+            EventKindV3::HookOutputProposed,
+            EventKindV3::HookContinuationConsumed,
             EventKindV3::CommandReceived,
             EventKindV3::CommandPending,
             EventKindV3::CommandStarted,

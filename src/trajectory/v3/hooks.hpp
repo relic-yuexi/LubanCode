@@ -52,6 +52,7 @@ public:
                                         std::optional<nlohmann::json> input_ref,
                                         Durability durability = Durability::ProcessCrash);
 
+
     // 无匹配/禁用/去重/上游停止:hook.skipped(reason)。可在 dispatch 结果
     // 中汇总未匹配项,不为每条无关配置刷一行(§4.22)。
     static WriteReceipt Skip(V3Writer& writer, std::string hook_dispatch_id,
@@ -119,6 +120,91 @@ private:
     std::optional<std::string> current_hook_id_;
     bool invocation_started_ = false;
     bool invocation_closed_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// 洋葱嵌套版 dispatch 台账(LuaHook 单 P0-B)。HookDispatchSession 的
+// "一次一枚 invocation"合同服务串行链;中间件执行核(P0-A)是洋葱模型,
+// handler i 在 next() 里跑下游时 invocation i+1 会在 i 收口之前 started/
+// completed——事件流是良嵌套的,不是并发。本类按显式 invocation_id 记账,
+// 允许多枚同时开张(nested),事件种类与 payload 合同与 HookDispatchSession
+// 同一套(§4.22/§7.1),另记 hook.output.proposed 与 hook.continuation.
+// consumed 两枚洋葱语义事件。
+// ---------------------------------------------------------------------------
+class NestedHookDispatchSession {
+public:
+    // 开张:hook.dispatch.requested(matchedHandlers 快照 + 输入引用)。
+    static NestedHookDispatchSession Open(V3Writer& writer, std::string hook_dispatch_id,
+                                          std::string hook_point,
+                                          std::optional<std::string> turn_id,
+                                          std::optional<std::string> step_id,
+                                          std::optional<std::string> action_id,
+                                          const std::vector<HookHandlerSpec>& handlers,
+                                          std::optional<nlohmann::json> input_ref,
+                                          Durability durability = Durability::ProcessCrash);
+
+    // 无匹配链项:hook.skipped(汇总一条,不为无关配置刷屏)。
+    static WriteReceipt WriteSkip(V3Writer& writer, std::string hook_dispatch_id,
+                                  std::string hook_point, std::string reason,
+                                  std::optional<std::string> turn_id,
+                                  std::optional<std::string> step_id,
+                                  std::optional<std::string> action_id,
+                                  Durability durability = Durability::ProcessCrash);
+
+    // 嵌套安全的 invocation 面:调用方显式带 invocation_id(中间件核的
+    // InvocationMeta 里已发行);同 dispatch 下多枚可同时开张。
+    WriteReceipt BeginInvocation(V3Writer& writer, std::string hook_invocation_id,
+                                 const HookHandlerSpec& spec,
+                                 Durability durability = Durability::ProcessCrash);
+    // hook_id 随行(schema:hook.completed 必带 hookId;调用方从 InvocationMeta 拿)。
+    WriteReceipt CompleteInvocation(V3Writer& writer, const std::string& hook_invocation_id,
+                                    const std::string& hook_id, std::optional<std::string> decision,
+                                    std::optional<nlohmann::json> output_ref,
+                                    std::optional<std::uint64_t> duration_ms,
+                                    Durability durability = Durability::PowerLoss);
+    WriteReceipt FailInvocation(V3Writer& writer, const std::string& hook_invocation_id,
+                                std::string error_code, std::optional<std::uint64_t> duration_ms,
+                                Durability durability = Durability::PowerLoss);
+    WriteReceipt CancelInvocation(V3Writer& writer, const std::string& hook_invocation_id,
+                                  std::string reason, Durability durability = Durability::PowerLoss);
+    // 恢复侧对账用:started 无终态的 invocation 可显式标 unknown(§4.22)。
+    WriteReceipt MarkInvocationUnknown(V3Writer& writer, const std::string& hook_invocation_id,
+                                       std::string reason, Durability durability = Durability::PowerLoss);
+
+    // 效果采用/拒绝(§4.22):completed ≠ 改写已采用。applied_value_ref 带
+    // 实际采用值(小候选内联;大引用交调用方)。
+    WriteReceipt ApplyEffect(V3Writer& writer, const std::string& hook_invocation_id,
+                             std::string effect_type,
+                             std::optional<nlohmann::json> applied_value_ref,
+                             Durability durability = Durability::PowerLoss);
+    WriteReceipt RejectEffect(V3Writer& writer, const std::string& hook_invocation_id,
+                              std::string effect_type, std::string reason,
+                              Durability durability = Durability::PowerLoss);
+
+    // ---- 洋葱两项语义(§7.1)----
+    // hook.output.proposed:before_next/after_next/short_circuit 候选先存,
+    // 不冒充 handler 已完成。
+    WriteReceipt OutputProposed(V3Writer& writer, const std::string& hook_invocation_id,
+                                std::string phase, nlohmann::json candidate_ref,
+                                Durability durability = Durability::ProcessCrash);
+    // hook.continuation.consumed:一次性执行权消费(已采用工作版本随
+    // applied 的 before_next 候选可查);不以消费记录冒充下游已执行。
+    WriteReceipt ContinuationConsumed(V3Writer& writer, const std::string& hook_invocation_id,
+                                      Durability durability = Durability::ProcessCrash);
+
+    const std::string& dispatch_id() const { return dispatch_id_; }
+
+private:
+    NestedHookDispatchSession(std::string dispatch_id, std::string hook_point,
+                              std::optional<std::string> turn_id, std::optional<std::string> step_id,
+                              std::optional<std::string> action_id);
+    EventDraft BaseDraft(EventKindV3 kind) const;
+
+    std::string dispatch_id_;
+    std::string hook_point_;
+    std::optional<std::string> turn_id_;
+    std::optional<std::string> step_id_;
+    std::optional<std::string> action_id_;
 };
 
 }  // namespace lubancode::trajectory::v3

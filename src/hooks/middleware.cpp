@@ -869,6 +869,21 @@ InvocationMeta MakeMeta(const InvocationCtx& ctx, const InvocationRecord& record
     return meta;
 }
 
+// 提案载荷(§7.1):after_next/short_circuit 提案带上返回值与效果清单——
+// 恢复侧据此判"handler 返回已保存、效果尚缺"(§7.3 行 5),补提交原返回
+// 而不重新运行 handler。
+nlohmann::json ProposalPayload(const HandlerReturn& result) {
+    nlohmann::json effects = nlohmann::json::array();
+    for (const Effect& effect : result.effects) {
+        effects.push_back(nlohmann::json{{"type", ToString(effect.type)}, {"payload", effect.payload}});
+    }
+    return nlohmann::json{{"output", result.output},
+                          {"deny", result.deny},
+                          {"denyCode", result.deny_code},
+                          {"denyMessage", result.deny_message},
+                          {"effects", std::move(effects)}};
+}
+
 DownstreamOutcome ToDownstream(const FrameResult& frame) {
     DownstreamOutcome out;
     out.kind = frame.kind == DispatchOutcome::Kind::Completed
@@ -903,6 +918,7 @@ void RecordEffect(DispatchState& state, InvocationRecord& record, const Invocati
         effect.applied = true;
         if (state.sink != nullptr) {
             state.sink->OnEffectApplied(meta, ToString(type));
+            state.sink->OnEffectSettled(meta, ToString(type), /*applied=*/true, {}, payload);
         }
     } else {
         effect.reject_reason = !point_allows
@@ -911,6 +927,7 @@ void RecordEffect(DispatchState& state, InvocationRecord& record, const Invocati
                                    : "观察者不许给改变链路走向的效果";
         if (state.sink != nullptr) {
             state.sink->OnEffectRejected(meta, ToString(type), effect.reject_reason);
+            state.sink->OnEffectSettled(meta, ToString(type), /*applied=*/false, effect.reject_reason, payload);
         }
     }
     record.effects.push_back(std::move(effect));
@@ -1074,6 +1091,11 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
                       const std::optional<nlohmann::json>& candidate) -> DownstreamOutcome {
         nlohmann::json effective_input = frame_input;
         if (candidate.has_value()) {
+            // 候选先存(§7.1):before_next 提案不冒充 handler 已完成;随后
+            // 按合同 applied/rejected。
+            if (state.sink != nullptr) {
+                state.sink->OnOutputProposed(meta, "before_next", *candidate);
+            }
             if (!InputRewriteAllowed(state.point, def.stage)) {
                 EffectRecord rejected;
                 rejected.type = std::string(ToString(EffectType::InputRewrite));
@@ -1083,6 +1105,8 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
                 record.effects.push_back(rejected);
                 if (state.sink != nullptr) {
                     state.sink->OnEffectRejected(meta, ToString(EffectType::InputRewrite), rejected.reject_reason);
+                    state.sink->OnEffectSettled(meta, ToString(EffectType::InputRewrite), /*applied=*/false,
+                                                rejected.reject_reason, *candidate);
                 }
                 // 拒绝 != 失败:按进入本 handler 的版本继续(实际处置已记录)。
             } else {
@@ -1093,6 +1117,8 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
                 record.effects.push_back(std::move(adopted));
                 if (state.sink != nullptr) {
                     state.sink->OnEffectApplied(meta, ToString(EffectType::InputRewrite));
+                    state.sink->OnEffectSettled(meta, ToString(EffectType::InputRewrite), /*applied=*/true, {},
+                                                *candidate);
                 }
                 effective_input = *candidate;
             }
@@ -1174,6 +1200,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         state.outcome.adopted_input = frame_input;
         MarkSkippedRemaining(state, chain_pos + 1, "skipped_short_circuit", "上游 " + record.key + " 短路");
         if (state.sink != nullptr) {
+            state.sink->OnOutputProposed(meta, "short_circuit", ProposalPayload(*result));
             state.sink->OnInvocationCompleted(
                 meta, denied ? std::optional<std::string>("deny") : std::optional<std::string>("short_circuit"),
                 record.duration_ms);
@@ -1189,6 +1216,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
     // 已消费 next:本帧后置加工。值可换,结局只许变严(不能洗掉下游 deny/失败)。
     record.outcome = "completed";
     if (state.sink != nullptr) {
+        state.sink->OnOutputProposed(meta, "after_next", ProposalPayload(*result));
         state.sink->OnInvocationCompleted(meta, result->deny ? std::optional<std::string>("deny") : std::nullopt,
                                           record.duration_ms);
     }

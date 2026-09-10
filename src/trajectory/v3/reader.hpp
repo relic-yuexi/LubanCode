@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include "trajectory/v3/envelope.hpp"
+#include "trajectory/v3/hooks.hpp"
 #include "trajectory/v3/writer.hpp"
 
 namespace lubancode::trajectory::v3 {
@@ -248,6 +249,64 @@ struct ToolActionSnapshot {
 std::vector<ToolActionSnapshot> FoldToolActions(const V3Ledger& ledger);
 const ToolActionSnapshot* FindActionSnapshot(const std::vector<ToolActionSnapshot>& snapshots,
                                              std::string_view action_id);
+
+// ---------------------------------------------------------------------------
+// hook dispatch 折叠(LuaHook 单 P0-B,§4.22/§7.1/§7.3):把 hook.* 事件
+// 折成"每 dispatch、每 invocation 干到哪一步"的恢复视图。纯读:不执行
+// 脚本、不连 MCP(§5.1 只读 replay 零调用零重跑)。
+// ---------------------------------------------------------------------------
+
+struct HookEffectView {
+    std::string effect_type;
+    bool applied = false;
+    std::string reason;              // rejected 的原因
+    nlohmann::json applied_value;    // applied 时随行的采用值(input.rewrite
+                                     // 的候选即工作版本;缺省 null)
+    std::string event_id;
+};
+
+struct HookInvocationView {
+    std::string invocation_id;
+    std::string hook_id;
+    std::string handler_kind;
+    std::string definition_hash;
+    int definition_order = 0;
+    // 折叠后:running/completed/failed/cancelled/unknown;started 事件缺
+    // 失的 matched 条目不出现在这里(skipped 由 dispatch 层汇总)。
+    std::string status;
+    std::optional<std::string> decision;
+    // 洋葱语义(§7.1):proposed 候选与 continuation 消费。
+    bool continuation_consumed = false;
+    std::vector<std::pair<std::string, nlohmann::json>> outputs_proposed;  // phase -> candidate
+    std::vector<HookEffectView> effects;  // 事件序
+    std::string terminal_event_id;        // completed/failed/cancelled/unknown 事件
+};
+
+struct HookDispatchView {
+    std::string dispatch_id;
+    std::string hook_point;
+    std::optional<std::string> turn_id, step_id, action_id, request_id;
+    bool requested = false;   // hook.dispatch.requested 在账
+    bool skipped = false;
+    std::string skip_reason;
+    std::vector<HookHandlerSpec> matched_handlers;  // requested 快照(§4.22:
+                                                    // resume 不改读今天的脚本)
+    std::vector<HookInvocationView> invocations;    // started 序
+    // 折叠状态:requested/skipped/completed/denied/failed/cancelled/unknown/
+    // running(dispatch 开着未收口)。
+    std::string folded_status;
+    // 恢复用:链上最近一次采用的 input.rewrite 候选(工作版本;无 = 原输入)。
+    bool has_adopted_working_input = false;
+    nlohmann::json adopted_working_input;
+    // 已采用的 context.append 文本(事件序;恢复时防重复注入的对账底)。
+    std::vector<std::string> adopted_context_appends;
+};
+
+// 折叠全部 hook dispatch(落盘序)。事件流是良嵌套洋葱序,折叠只看每枚
+// invocation 的 started/终态与效果事件,不依赖嵌套形状。
+std::vector<HookDispatchView> FoldHookDispatches(const V3Ledger& ledger);
+const HookDispatchView* FindHookDispatch(const std::vector<HookDispatchView>& dispatches,
+                                         std::string_view dispatch_id);
 
 // ---------------------------------------------------------------------------
 // result_preview 读取投影(§4.18)与 artifact 缺口

@@ -454,6 +454,13 @@ add_library(lubancode_engine STATIC
   # runtime 便是 engine 反向引用 runtime——GCC 单遍链接炸 undefined(CI
   # ubuntu 腿两轮实证);四件 cli/app 零依赖,居 engine 不破门。
   src/runtime/turn_runtime.cpp
+  # LuaHook 单 P0-B:PreUser/PostUser/PreRequest(三段 mutate→freeze→
+  # estimate→capacity)的统一 runtime 派发点——CLI/one-shot/app-server 三
+  # 入口共用;v3 事件账适配器(NestedHookDispatchSession)与 §7.3 恢复
+  # 判例同层。装配(lua 工厂)在 runtime 库的 middleware_assembly.cpp。
+  src/runtime/middleware_runtime.cpp
+  src/runtime/middleware_v3_sink.cpp
+  src/runtime/middleware_recovery.cpp
   src/runtime/plan_mode.cpp
   src/runtime/retry_backoff.cpp
   src/runtime/loop_scheduler.cpp
@@ -479,6 +486,10 @@ add_library(lubancode_engine STATIC
   # 至多一次 next/候选采用/短路/观察者并发);与老进程 hook 路并行,
   # 老路径一字不改。
   src/hooks/middleware.cpp
+  # LuaHook 单 P0-B:内置生产槽位(§4.36 估算/容量,required)+ hook 包
+  # 目录发现(§三:只读清单,entry 越界整包拒绝)。
+  src/hooks/middleware_builtins.cpp
+  src/hooks/middleware_loader.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
@@ -861,6 +872,9 @@ add_library(lubancode_runtime STATIC
   src/runtime/turn_ingress.cpp
   src/runtime/channel_session_host.cpp
   src/runtime/agent_channel_engine.cpp
+  # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
+  # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
+  src/runtime/middleware_assembly.cpp
   # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
