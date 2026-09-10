@@ -124,7 +124,9 @@ public:
         std::uint64_t max_total_bytes_per_package = 1024 * 1024;
     };
 
-    explicit HookStateStore(Limits limits = {}) : limits_(limits) {}
+    // 默认实参写显式构造:gcc 对默认实参语境的花括号聚合初始化报
+    // "could not convert brace-list"(MSVC 收),Limits{} 两家都收。
+    explicit HookStateStore(Limits limits = Limits{}) : limits_(limits) {}
 
     std::expected<nlohmann::json, HookApiError> Get(const std::string& package, const std::string& key) const;
     std::expected<bool, HookApiError> Set(const std::string& package, const std::string& key,
