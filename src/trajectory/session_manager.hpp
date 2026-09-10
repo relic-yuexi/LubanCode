@@ -26,6 +26,7 @@
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
 #include "trajectory/session_lock.hpp"
+#include "trajectory/v3/writer.hpp"  // ActiveSession 的 v3 主账写者(接线点 1)
 
 namespace lubancode::trajectory {
 
@@ -220,15 +221,23 @@ struct EventRef {
 // 一场活动 session 的轨迹侧句柄:目录 + main recorder + manifest + 独占
 // 锁。SessionRuntime(P0-2)从这里领 scoped sink;clear 换账整只换新,
 // 不原地清零复用旧 Recorder(§15.3)。
+//
+// 轨迹 v3 接线点 1(session_switch.hpp):v3 场以 v3_main 持写者,main
+// (v2 recorder)恒空——两类场互斥,认 active 的代码一律先看 v3_main 有无
+// 再碰 main。manifest 在 v3 场只是内存身份(session_id/main_run_id),不落
+// session.json(盘上身份在 v3 账首行)。
 struct ActiveSession {
     TrajectoryDirectory directory;
     std::optional<TrajectoryRecorder> main;  // 关柄后仍在,只是拒写
+    std::optional<v3::V3Writer> v3_main;     // v3 场的主账写者(与 main 互斥)
     SessionManifest manifest;
     SessionLock lock;
     SessionStatus status = SessionStatus::Preparing;
 
     std::filesystem::path session_dir() const { return directory.session_dir(); }
     const std::string& session_id() const { return manifest.session_id; }
+    // 这场是不是 v3 写侧(接线点 1 开关在建场时二选一的结果)。
+    bool is_v3() const { return v3_main.has_value(); }
 };
 
 struct ClearRequest {
@@ -464,6 +473,10 @@ struct SessionManagerOptions {
     // 递 RunKind::OneShot——manifest、run.started payload 与信封三处同源。
     RunKind main_run_kind = RunKind::MainSession;
     RecorderOptions recorder;
+    // v3 场(接线点 1 开关开)的首行基础 system 正文(§1.2)。空串合法:
+    // 建场时宿主还不知道最终 system,首行先立"此刻已知"的底,第一次
+    // 模型请求带上真 system 时走 §4.3 三步切换。恢复不重拼(§4.3)。
+    std::string v3_system_content;
 };
 
 class SessionManager {
@@ -551,6 +564,26 @@ private:
     EventScope MainBaseScope(const SessionManifest& manifest) const;
     // LatestResumableSessionId 的持锁内版本(ResumeAsNew 七步内用)。
     std::string LatestResumableSessionIdLocked();
+
+    // ---- 轨迹 v3 接线点 1 的写侧二选一(开关开时走这批) ----
+    // LaunchSession 的 v3 分支(调用方已持 mutex_ 且验过 active/boundary)。
+    std::expected<ActiveSession*, std::string> LaunchSessionV3Locked();
+    // 开一场 v3 新场:建目录 + 独占锁 + V3Writer::Start(首行 system +
+    // session.started)。lifecycle 账与 active 指针归调用方。
+    std::expected<ActiveSession, std::string> OpenV3SessionLocked(
+        const std::string& start_reason, const std::optional<std::string>& previous_session_id);
+    // Close 的 v3 分支(active 已验 running;调用方已持 mutex_):session.ended
+    // 封账,无 run terminal/session.json 可写。子代理换账(clear 八步)的
+    // v3 化不属接线点 1,v3 场上的 clear 在 Clear 口明拒。
+    CloseOutcome CloseV3Locked(const CloseRequest& request, ClearParticipant* participant);
+    // ResumeAsNew 第 5-7 步的 v3 分支(开关开时新场也是 v3):首行 system +
+    // session.started + resume.source.attached(五键指源末行,§4.10)。
+    // 源头五键由调用方从第 1-4 步的验账结果递进(v2/v3 源各取各的事实)。
+    ResumeOutcome ResumeAsNewV3Locked(const ResumeRequest& request, const std::string& source_id,
+                                      const std::string& previous_session_id,
+                                      const std::string& source_run_id,
+                                      const std::string& source_last_event_id,
+                                      std::uint64_t source_seq, ResumeOutcome outcome);
 
     // ---- 恢复器内部(RecoverWorkspace 持锁调用) ----
     // 换账新侧续办:空 preparing 开张(Start)或半开的续写(Continue),
