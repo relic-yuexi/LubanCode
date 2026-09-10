@@ -3,6 +3,7 @@
 #include "runtime/trajectory_history_view.hpp"
 
 #include <map>
+#include <set>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -58,19 +59,34 @@ bool ActionFailed(const std::vector<trajectory::v3::ToolActionSnapshot>& snapsho
     return false;
 }
 
-}  // namespace
-
-RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl) {
-    RestoredHistoryView view;
-    view.source_jsonl = platform::PathToUtf8(v3_jsonl);
-    auto ledger = trajectory::v3::ReadV3Ledger(v3_jsonl);
-    if (!ledger.has_value()) {
-        return view;  // 验卷不过:空 view,调用方按"无可显示旧史"处理
+// 一条消息行的完整来源键(链合流去重):跨场抄本的 sourceMessageRef
+// 已是 "<场>/<msg>";原生行用本场场名拼同形键。返回空串 = 无从取键。
+std::string SourceKeyOf(const trajectory::v3::V3Ledger& ledger,
+                        const trajectory::v3::MessageLine& line) {
+    if (line.source_message_ref.has_value()) {
+        const std::string& ref = *line.source_message_ref;
+        const std::size_t slash = ref.find('/');
+        if (slash != std::string::npos && slash > 0 &&
+            ref.compare(0, slash, ledger.session_id) != 0) {
+            return ref;  // 跨场抄本
+        }
     }
-    view.session_id = ledger->session_id;
-    const trajectory::v3::HistoryTimeline timeline = trajectory::v3::ProjectHistoryTimeline(*ledger);
+    return ledger.session_id + "/" + line.message_id;
+}
+
+// 一场账 → 显示 DTO 项(时间线原序)。keys 与 items 逐位对齐(压缩
+// 标记给空键,不去重);抄本(键带来源场名)的调用配对键原样沿用,
+// 原生行走 provider→action 映射。
+struct LedgerViewItems {
+    std::vector<RestoredHistoryItem> items;
+    std::vector<std::string> keys;
+};
+
+LedgerViewItems BuildLedgerViewItems(const trajectory::v3::V3Ledger& ledger) {
+    LedgerViewItems result;
+    const trajectory::v3::HistoryTimeline timeline = trajectory::v3::ProjectHistoryTimeline(ledger);
     const std::vector<trajectory::v3::ToolActionSnapshot> snapshots =
-        trajectory::v3::FoldToolActions(*ledger);
+        trajectory::v3::FoldToolActions(ledger);
     const std::map<std::string, std::string> call_to_action = ProviderCallToAction(snapshots);
 
     for (const auto& item : timeline.items) {
@@ -86,15 +102,20 @@ RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl
             out.compact.context_tokens_after = item.compact.context_tokens_after;
             out.compact.removed_message_refs = item.compact.removed_message_refs;
             out.compact.retained_message_refs = item.compact.retained_message_refs;
-            view.items.push_back(std::move(out));
+            result.items.push_back(std::move(out));
+            result.keys.emplace_back();
             continue;
         }
         if (item.kind != trajectory::v3::HistoryTimeline::Item::Kind::Message) {
             continue;  // system 切换/降档标记/其余事件:详情档后续棒,不进首版时间线
         }
-        const auto line = ledger->FindMessage(item.id);
+        const auto line = ledger.FindMessage(item.id);
         if (line == nullptr) {
             continue;
+        }
+        const std::string role = line->message.value("role", std::string("user"));
+        if (role == "system") {
+            continue;  // 上下文根不是会话正文,不进显示 DTO
         }
         RestoredMessageView& message = out.message;
         message.message_id = item.message.message_id;
@@ -104,12 +125,11 @@ RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl
         message.removed_by_compacts = item.message.removed_by_compacts;
         message.hidden = item.message.display == trajectory::v3::DisplayMode::Hidden;
 
-        const std::string role =
-            line->message.value("role", std::string("user"));
+        // 跨场抄本:调用键已带来源场名(在新账自配对),不走映射。
+        const std::string source_key = SourceKeyOf(ledger, *line);
+        const bool is_import_copy = line->source_message_ref.has_value() &&
+                                    *line->source_message_ref == source_key;
         api::Message& projected = message.message;
-        if (role == "system") {
-            continue;  // 上下文根不是会话正文,不进显示 DTO
-        }
         if (role == "assistant") {
             projected.role = api::Role::Assistant;
             if (line->message.contains("content")) {
@@ -122,13 +142,17 @@ RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl
                     }
                     api::ToolUseBlock use;
                     const std::string provider_id = call.value("id", std::string());
-                    const auto mapped = call_to_action.find(provider_id);
-                    use.id = mapped != call_to_action.end() ? mapped->second : provider_id;
+                    if (is_import_copy) {
+                        use.id = provider_id;
+                    } else {
+                        const auto mapped = call_to_action.find(provider_id);
+                        use.id = mapped != call_to_action.end() ? mapped->second : provider_id;
+                    }
                     if (call.contains("function") && call["function"].is_object()) {
                         use.name = call["function"].value("name", std::string());
-                        nlohmann::json arguments =
-                            nlohmann::json::parse(call["function"].value("arguments", std::string("{}")),
-                                                  nullptr, /*allow_exceptions=*/false);
+                        nlohmann::json arguments = nlohmann::json::parse(
+                            call["function"].value("arguments", std::string("{}")), nullptr,
+                            /*allow_exceptions=*/false);
                         use.input = arguments.is_discarded() ? nlohmann::json::object() : arguments;
                     }
                     projected.content.push_back(std::move(use));
@@ -151,8 +175,54 @@ RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl
             }
         }
         out.kind = RestoredHistoryItem::Kind::Message;
-        view.items.push_back(std::move(out));
+        result.items.push_back(std::move(out));
+        result.keys.push_back(source_key);
     }
+    return result;
+}
+
+}  // namespace
+
+RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl) {
+    RestoredHistoryView view;
+    view.source_jsonl = platform::PathToUtf8(v3_jsonl);
+    auto ledger = trajectory::v3::ReadV3Ledger(v3_jsonl);
+    if (!ledger.has_value()) {
+        return view;  // 验卷不过:空 view,调用方按"无可显示旧史"处理
+    }
+    view.session_id = ledger->session_id;
+    // 来源链祖先(§4.10 第 3 条:沿 resume.source.attached 读取,链护栏
+    // 归 ProjectResume——防环 + 深度封顶)。最老祖先在前;某级账读不动
+    // 只跳过该段(显示侧允许"仍可验证的历史 + 缺口"),不拦其余。
+    std::vector<const trajectory::v3::V3Ledger*> ancestors;  // 老 → 新
+    auto projection = trajectory::v3::ProjectResume(v3_jsonl);
+    if (projection.has_value()) {
+        for (auto step = projection->source_chain.rbegin();
+             step != projection->source_chain.rend(); ++step) {
+            if (step->ledger.has_value()) {
+                ancestors.push_back(&*step->ledger);
+                view.source_sessions.push_back(step->ledger->session_id);
+            }
+        }
+    }
+    view.source_sessions.push_back(ledger->session_id);
+    // 合流:祖先段(老 → 新)在前,直接源段在后;完整来源键去重——
+    // 祖先原装先到先得,后代账上的链史抄本让位;祖先缺失时抄本顶上,
+    // 不因缺源少画。seq 各段各自有效,不跨文件混排(§4.10)。
+    std::set<std::string> seen;
+    const auto merge = [&](const trajectory::v3::V3Ledger& segment) {
+        LedgerViewItems built = BuildLedgerViewItems(segment);
+        for (std::size_t i = 0; i < built.items.size(); ++i) {
+            if (!built.keys[i].empty() && !seen.insert(built.keys[i]).second) {
+                continue;  // 同一条史已画(祖先原装),不重复显示
+            }
+            view.items.push_back(std::move(built.items[i]));
+        }
+    };
+    for (const trajectory::v3::V3Ledger* ancestor : ancestors) {
+        merge(*ancestor);
+    }
+    merge(*ledger);
     return view;
 }
 

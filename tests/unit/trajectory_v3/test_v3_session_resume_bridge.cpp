@@ -162,7 +162,7 @@ TEST_CASE("v3 resume: 验卷+链投影出有效对话,新场照开,attached 记 
     CHECK(outcome.source_event_count == 25);
     CHECK(outcome.source_verified);
     CHECK(IsHex64(outcome.source_main_last_event_hash));
-    CHECK(outcome.replay_version == "v3-context-chain-1");
+    CHECK(outcome.replay_version == "v3-context-chain-2");
 
     // 有效对话只取本账链(§4.10):compact.applied 后的链 = 摘要 msg-000008
     // + 保留 msg-000004/000005 + 压缩后续问 msg-000009;被压缩原文
@@ -197,7 +197,7 @@ TEST_CASE("v3 resume: 验卷+链投影出有效对话,新场照开,attached 记 
     CHECK(events[0].at("payload").at("caused_by_event_ref").at("session_id").get<std::string>() ==
           v3_id);
     CHECK(events[1].at("kind").get<std::string>() == "resume.source.attached");
-    CHECK(events[1].at("payload").at("replay_version").get<std::string>() == "v3-context-chain-1");
+    CHECK(events[1].at("payload").at("replay_version").get<std::string>() == "v3-context-chain-2");
     // v3 源的悬空三道账不伪造(v2 折叠概念;执行状态恢复是后续棒)。
     CHECK(outcome.dangling_tools.empty());
 }

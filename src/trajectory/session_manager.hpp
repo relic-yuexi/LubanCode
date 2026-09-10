@@ -316,6 +316,11 @@ struct CloseOutcome {
 std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledger,
                                                        const v3::ModelContext& context);
 
+// resume 沿源链折算的产出(D2,§4.10 第 3-4 条):有效对话(链序:最老
+// 祖先 → 直接源)+ 逐位对应的新场抄本草稿。定义在 session_manager.cpp
+//(ResumeAsNewV3Locked 第 6.5 步消费;此处的 incomplete 类型只上指针)。
+struct V3ResumeFold;
+
 // 交互 /resume 的跨 session command 生命周期素材(§14.1:旧 main 写
 // requested 与 session terminal,新 main 在 run.started 之后写 command
 // terminal,qualified ref 指回旧 requested,两边同带 boundary_operation_id)。
@@ -344,6 +349,9 @@ struct ResumeOutcome {
     //   resume.source_not_found    指认的 source 不在(或没有可恢复场)
     //   resume.source_locked       source 仍被别的进程持写锁(§10.4 末段)
     //   resume.source_corrupt      hash chain/schema/父子边验不过(非截断)
+    //   resume.source_chain_broken v3 源的 resume 来源链验不过(祖先缺失/
+    //                               hash 对不上/环/超深,§4.10"精确上下文
+    //                               恢复应拒绝")
     //   resume.source_unsupported  折叠 fail-closed(未知关键事件/超前版本)
     //   resume.step<N>_failed      第 N 步落盘失败
     std::string error_code;
@@ -382,6 +390,9 @@ struct ResumeOutcome {
     // 第 6 步:resume.source.attached(+ 交互路跨 session command.completed)。
     std::string resume_attached_event_id;
     std::string command_completed_event_id;
+    // 第 6.5 步(v3 链折算导入,D2):沿源链折出的祖先+直接源有效对话
+    // 抄进新账并接纳进链的条数;0 = 无史可导(空会话/v2 源)。
+    std::size_t imported_history_count = 0;
     // 第 7 步:session.json running,active 指针已切;新 turn/request/call/
     // seq 全从新命名空间起号(recorder 新开,天然新号)。
     bool new_session_running = false;
@@ -592,11 +603,14 @@ private:
     // ResumeAsNew 第 5-7 步的 v3 分支(开关开时新场也是 v3):首行 system +
     // session.started + resume.source.attached(五键指源末行,§4.10)。
     // 源头五键由调用方从第 1-4 步的验账结果递进(v2/v3 源各取各的事实)。
+    // chain_fold 非空(v3 源)时第 6.5 步把链折算的祖先史抄进新账并接纳
+    // 进链(§4.10 第 3-5 条,D2);空(v2 源)不动——v2 源无链可遍历。
     ResumeOutcome ResumeAsNewV3Locked(const ResumeRequest& request, const std::string& source_id,
                                       const std::string& previous_session_id,
                                       const std::string& source_run_id,
                                       const std::string& source_last_event_id,
-                                      std::uint64_t source_seq, ResumeOutcome outcome);
+                                      std::uint64_t source_seq, ResumeOutcome outcome,
+                                      const V3ResumeFold* chain_fold);
 
     // ---- 恢复器内部(RecoverWorkspace 持锁调用) ----
     // 换账新侧续办:空 preparing 开张(Start)或半开的续写(Continue),

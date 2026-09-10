@@ -255,6 +255,28 @@ class Bench:
                 found.append(session_dir)
         return found
 
+    def sessions_owning(self, substr):
+        """substr 出现在"在场消息"(messageId 不带来源键 "/",非链史抄本)
+        的会话目录列表。D2 后新场账里有祖先史抄本,按纯文本找会把整条
+        链都找出来;判归属要认自己写的行。"""
+        found = []
+        for session_dir in self.session_dirs():
+            stream = self.ledger_path(session_dir)
+            if not stream.exists():
+                continue
+            owns = False
+            for row in self.read_lines(stream):
+                if row.get("type") != "message":
+                    continue
+                if "/" in row.get("messageId", ""):
+                    continue  # 链史抄本不算本场亲笔
+                if substr in json.dumps(row.get("message", {}), ensure_ascii=False):
+                    owns = True
+                    break
+            if owns:
+                found.append(session_dir)
+        return found
+
     def read_lines(self, stream):
         rows = []
         for raw in Path(stream).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -370,7 +392,7 @@ def scenario_s2(bench, check):
         ("", ("ledger", "新魂时代的回答-清泉石上")),
         ("/exit", ("exit",)),
     ])
-    stream = bench.sessions_with("新魂时代的回答-清泉石上")
+    stream = bench.sessions_owning("新魂时代的回答-清泉石上")
     check.check("S2 会话落账", bool(stream), "")
     if not stream:
         return
@@ -452,7 +474,7 @@ def scenario_s3(bench, check):
         ("", ("ledger", "system.change")),
         ("/exit", ("exit",)),
     ])
-    source_dirs = bench.sessions_with("崩溃前的回答-竹喧归浣")
+    source_dirs = bench.sessions_owning("崩溃前的回答-竹喧归浣")
     check.check("S3 源会话在", bool(source_dirs), "")
     if not source_dirs:
         return
@@ -483,7 +505,7 @@ def scenario_s3(bench, check):
         ("现在用什么身份回答", ("ledger", "崩溃后的回答-莲动下舟")),
         ("/exit", ("exit",)),
     ], continue_last=True)
-    resumed_dirs = bench.sessions_with("崩溃后的回答-莲动下舟")
+    resumed_dirs = bench.sessions_owning("崩溃后的回答-莲动下舟")
     check.check("S3 resume 成出新场", len(resumed_dirs) == 1, "%d 场" % len(resumed_dirs))
     check.check("S3 源账 resume 后一字未动",
                 sha256_file(source) == source_hash, "")
@@ -540,7 +562,7 @@ def scenario_s4(bench, check):
         ("帮我读一下 notes.txt", ("ledger", "工具时代的回答-肯与邻翁相对饮")),
         ("/exit", ("exit",)),
     ])
-    source_dirs = bench.sessions_with("工具时代的回答-肯与邻翁相对饮")
+    source_dirs = bench.sessions_owning("工具时代的回答-肯与邻翁相对饮")
     check.check("S4 源会话在", bool(source_dirs), "")
     if not source_dirs:
         return
@@ -569,7 +591,7 @@ def scenario_s4(bench, check):
     check.check("S4 重放按原序滚动 user->tool预览->assistant(时间线原序)",
                 all(pos >= 0 for pos in order) and order == sorted(order),
                 "find=%s" % order)
-    resumed_dirs = bench.sessions_with("resume 之后的回答-白日放歌须纵酒")
+    resumed_dirs = bench.sessions_owning("resume 之后的回答-白日放歌须纵酒")
     check.check("S4 resume 出新场", len(resumed_dirs) == 1, "")
     if resumed_dirs:
         rows = bench.read_lines(bench.ledger_path(resumed_dirs[0]))
@@ -592,15 +614,25 @@ def scenario_s4(bench, check):
                     and "notes 正文-隔篱呼取尽馀杯" in texts
                     and "继续说说" in texts,
                     "roles=%s" % roles)
-        # 记录账实差异:新场 prepared.inputMessageRefs 只列本账链
+        # D2 修复:源场史以来源键抄进新账并接纳进链——新场
+        # prepared.inputMessageRefs 与实发消息一致(修前 1 比 5)。
         if resumed_dirs:
             new_rows = bench.read_lines(bench.ledger_path(resumed_dirs[0]))
             prepared = find_rows(new_rows, type="event", kind="model.request.prepared")
             if prepared:
                 refs = prepared[0]["payload"].get("inputMessageRefs") or []
-                check.check("S4 记录:新场 prepared 只列本账链(账实分离在案)",
-                            len(refs) < len(msgs),
+                check.check("S4 新场 prepared.inputMessageRefs 与实发消息一致",
+                            len(refs) == len(msgs),
                             "prepared refs=%d, 实发 messages=%d" % (len(refs), len(msgs)))
+            imported = [row for row in new_rows
+                        if row.get("type") == "message"
+                        and "/" in row.get("messageId", "")]
+            check.check("S4 新场落链史抄本(来源键 messageId)",
+                        len(imported) == 4, "%d 条" % len(imported))
+            check.check("S4 抄本来源键指源场",
+                        all(row.get("sourceMessageRef", "").startswith(
+                                source_dirs[0].name + "/") for row in imported),
+                        "source=%s" % source_dirs[0].name)
     else:
         check.check("S4 请求可查", False, "requests=%d" % len(requests))
 
@@ -627,9 +659,9 @@ def scenario_s5(bench, check):
         ("/exit", ("exit",)),
     ], continue_last=True)
 
-    a_dir = bench.sessions_with("A场回答-蓬门今始为君开")
-    b_dir = bench.sessions_with("B场回答-盘飧市远无兼味")
-    c_dir = bench.sessions_with("C场回答-樽酒家贫只旧醅")
+    a_dir = bench.sessions_owning("A场回答-蓬门今始为君开")
+    b_dir = bench.sessions_owning("B场回答-盘飧市远无兼味")
+    c_dir = bench.sessions_owning("C场回答-樽酒家贫只旧醅")
     check.check("S5 三场齐(A/B/C)", a_dir and b_dir and c_dir,
                 "%d/%d/%d" % (len(a_dir), len(b_dir), len(c_dir)))
     if not (a_dir and b_dir and c_dir):
@@ -664,7 +696,8 @@ def scenario_s5(bench, check):
                 and ref_c.get("hash") == b_last.get("lineHash")
                 and ref_b.get("sessionId") != ref_c.get("sessionId"), "")
 
-    # 无重复显示:C 的重放里 B 的话一次、A 的话不重复出现在 C 场
+    # 无重复显示:C 的重放里 B 的话一次;祖先 A 沿链也画,恰一次(D2
+    # 显示侧:RestoredHistoryView 画链上祖先,时间线原序,不重复)。
     count_b = out_c.count("B场第一句")
     count_cb = out_c.count("B场回答-盘飧市远无兼味")
     check.check("S5 C 场重放无重复(B 用户话恰一次)",
@@ -672,8 +705,43 @@ def scenario_s5(bench, check):
     check.check("S5 C 场重放无重复(B 回答恰一次)",
                 count_cb == 1, "count=%d" % count_cb)
     count_a_in_c = out_c.count("A场第一句")
-    check.check("S5 C 场终端只重放直接源(B),不混排 A(记录:祖先史终端不显示)",
-                count_a_in_c == 0, "A 句出现 %d 次" % count_a_in_c)
+    count_a_ans_in_c = out_c.count("A场回答-蓬门今始为君开")
+    check.check("S5 C 场终端重放画链上祖先(A 句恰一次,不重复)",
+                count_a_in_c == 1, "A 句出现 %d 次" % count_a_in_c)
+    check.check("S5 C 场终端重放画链上祖先(A 回答恰一次)",
+                count_a_ans_in_c == 1, "A 回答出现 %d 次" % count_a_ans_in_c)
+
+    # D2:祖先史进新场模型上下文——C 场实发请求带 A、B 两场历史;
+    # C 场 prepared.inputMessageRefs 与实发一致,refs 含祖先来源键。
+    requests = bench.requests()
+    if len(requests) >= 3:
+        msgs = requests[2]["body"].get("messages", [])
+        texts = json.dumps(msgs, ensure_ascii=False)
+        check.check("S5 C 场请求含 A 场历史(D2:祖先史不退出上下文)",
+                    "A场第一句" in texts and "A场回答-蓬门今始为君开" in texts
+                    and "B场第一句" in texts and "C场第一句" in texts,
+                    "roles=%s" % [m.get("role") for m in msgs])
+        c_rows = bench.read_lines(bench.ledger_path(c_dir[0]))
+        prepared = find_rows(c_rows, type="event", kind="model.request.prepared")
+        if prepared:
+            refs = prepared[0]["payload"].get("inputMessageRefs") or []
+            check.check("S5 C 场 prepared.inputMessageRefs 与实发一致",
+                        len(refs) == len(msgs),
+                        "prepared refs=%d, 实发=%d" % (len(refs), len(msgs)))
+            with_source = [r for r in refs if isinstance(r, str) and "/" in r]
+            check.check("S5 C 场 prepared refs 含祖先来源键",
+                        len(with_source) >= 2, "%d 枚" % len(with_source))
+        # B 场账含 A 场链史抄本(来源键指 A)。
+        b_rows = bench.read_lines(bench.ledger_path(b_dir[0]))
+        b_imported = [row for row in b_rows
+                      if row.get("type") == "message" and "/" in row.get("messageId", "")]
+        check.check("S5 B 场落 A 场链史抄本",
+                    len(b_imported) == 2 and all(
+                        row.get("sourceMessageRef", "").startswith(a_dir[0].name + "/")
+                        for row in b_imported),
+                    "%d 条" % len(b_imported))
+    else:
+        check.check("S5 请求可查", False, "requests=%d" % len(requests))
 
     # seq 不跨文件混排:三本账各自从 1 连续(校验器钉);末行 seq == 行数
     for tag, directory in (("A", a_dir[0]), ("B", b_dir[0]), ("C", c_dir[0])):
@@ -698,7 +766,7 @@ def scenario_s6(bench, check):
         ("第二句问账", ("ledger", "不报账的回答-一行白鹭上青天")),
         ("/exit", ("exit",)),
     ])
-    dirs = bench.sessions_with("不报账的回答-一行白鹭上青天")
+    dirs = bench.sessions_owning("不报账的回答-一行白鹭上青天")
     check.check("S6 会话落账", bool(dirs), "")
     if not dirs:
         return
@@ -733,7 +801,7 @@ def scenario_s7(bench, check):
         ("读一下 notes.txt", ("ledger", "S7工具回合的回答-隔篱呼取尽馀杯")),
         ("/exit", ("exit",)),
     ])
-    source_dirs = bench.sessions_with("S7工具回合的回答-隔篱呼取尽馀杯")
+    source_dirs = bench.sessions_owning("S7工具回合的回答-隔篱呼取尽馀杯")
     check.check("S7 源会话在", bool(source_dirs), "")
     if not source_dirs:
         return
