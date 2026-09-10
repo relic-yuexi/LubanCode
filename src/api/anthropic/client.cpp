@@ -20,8 +20,13 @@ using nlohmann::json;
 
 namespace {
 
+// 四角色拍平(轨迹 v3 第一棒,§4.46 目标映射):wire 只有 user/assistant
+// 两角。assistant 直传;user 与 tool 都落 user 容器——tool 角色的
+// tool_result 块在协议里本就是 user 消息的内容块,相邻 tool 不合并
+// (合同册钉死的现行基线)。system 不落 messages:BuildRequestJson 的
+// 消息循环把它顶置到顶层 system;防御性到达这里也折 user,不造第三角。
 std::string RoleToString(Role role) {
-    return role == Role::User ? "user" : "assistant";
+    return role == Role::Assistant ? "assistant" : "user";
 }
 
 json ContentBlockToJson(const ContentBlock& block) {
@@ -173,8 +178,29 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     body["max_tokens"] = request.max_tokens.value_or(kRequiredMaxOutputTokensFallback);
     body["stream"] = true;
 
-    if (!request.system.empty()) {
-        body["system"] = request.system;
+    // 四角色换骨(v3 第一棒):System 角色消息是上下文根,不落 messages,
+    // 文本顶置进顶层 system(§4.46:当前有效 system 顶层一份,messages 里
+    // 不重复注入)。Request::system 是现行两角色路径的唯一 system 入口,
+    // 共存期它先行,System 消息按消息序接在其后("\n" 连接,空段不造)。
+    // System 消息只取 TextBlock——v3 §1.2 的 system 就是 soul/规则文本,
+    // 富块 system 后续棒次需要再扩,这里不悄悄丢也不硬造块数组。
+    std::string system_text = request.system;
+    for (const auto& message : request.messages) {
+        if (message.role != Role::System) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<TextBlock>(&block);
+                text != nullptr && !text->text.empty()) {
+                if (!system_text.empty()) {
+                    system_text += "\n";
+                }
+                system_text += text->text;
+            }
+        }
+    }
+    if (!system_text.empty()) {
+        body["system"] = std::move(system_text);
     }
 
     if (const auto thinking = BuildThinkingJson(request); thinking.has_value()) {
@@ -189,10 +215,16 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
 
     json messages = json::array();
     for (const auto& message : request.messages) {
+        // System 角色已顶置到顶层 system,对话流里一条不落(不重复注入)。
+        if (message.role == Role::System) {
+            continue;
+        }
         json content = json::array();
         for (const auto& block : message.content) {
             content.push_back(ContentBlockToJson(block));
         }
+        // Tool 角色折 user 容器(协议无 tool 角);逐条对位、相邻不合并
+        // ——合同册钉死的现行拍平形状,换骨不换皮。
         messages.push_back(json{{"role", RoleToString(message.role)}, {"content", content}});
     }
     body["messages"] = messages;
@@ -285,9 +317,15 @@ bool ShouldRecoverTaggedThinking(const Request& request) {
         return false;
     }
     const Message& tool_result_message = request.messages.back();
-    if (tool_result_message.role != Role::User ||
-        std::none_of(tool_result_message.content.begin(), tool_result_message.content.end(),
-                     [](const ContentBlock& block) { return std::holds_alternative<ToolResultBlock>(block); })) {
+    // 四角色换骨(v3 第一棒,差距清单 §8.2 第 3 条):末条是 tool 角色即
+    // 工具续轮;旧两角色路径(ToolResultBlock 寄 User 容器)共存同认,
+    // 两条路的判定都不许扫 wire role 倒推——这里看的是内部消息本身。
+    const bool carries_tool_result =
+        tool_result_message.role == Role::Tool ||
+        (tool_result_message.role == Role::User &&
+         std::any_of(tool_result_message.content.begin(), tool_result_message.content.end(),
+                     [](const ContentBlock& block) { return std::holds_alternative<ToolResultBlock>(block); }));
+    if (!carries_tool_result) {
         return false;
     }
 
