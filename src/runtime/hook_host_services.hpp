@@ -124,9 +124,10 @@ public:
         std::uint64_t max_total_bytes_per_package = 1024 * 1024;
     };
 
-    // 默认实参写显式构造:gcc 对默认实参语境的花括号聚合初始化报
-    // "could not convert brace-list"(MSVC 收),Limits{} 两家都收。
-    explicit HookStateStore(Limits limits = Limits{}) : limits_(limits) {}
+    // 不用类内默认实参:gcc 对"默认实参里引用本类 NSDMI"(Limits{} 值初始化
+    // 要成员先定义完)两连拒;拆成两个构造,MSVC/gcc 都干净。
+    HookStateStore() : limits_{} {}
+    explicit HookStateStore(Limits limits) : limits_(limits) {}
 
     std::expected<nlohmann::json, HookApiError> Get(const std::string& package, const std::string& key) const;
     std::expected<bool, HookApiError> Set(const std::string& package, const std::string& key,
