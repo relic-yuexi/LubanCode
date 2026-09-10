@@ -121,7 +121,9 @@ idle
  -> compact.started(冻结源上下文版本与压缩/保留范围)
  -> [专用 system message(purpose=compact,可选)] + compact prompt user message(purpose=compact,可多条)
  -> model.request.prepared(压缩请求,重试逐次留档)
- -> [model.request.sent] -> assistant 回复 message(purpose=compact,候选产物)
+ -> [model.request.sent] -> model.response.started(预留候选 messageId) ->
+    model.response.completed(候选定稿;非流式压缩客户端零 delta 批,§4.43) ->
+    assistant 回复 message(purpose=compact,候选产物,以预留 id 成行)
  -> compact.validation.started -> compact.validation.completed(passed 与 checks[])
  -> 摘要 user message(purpose=context_summary, origin=compact_runtime, turnId=null, sourceMessageRef 指回候选,暂不生效)
  -> compact.applied(唯一成功终态;PowerLoss 档)

@@ -175,7 +175,43 @@ WriteReceipt CompactSession::WriteCandidate(V3Writer& writer, nlohmann::json ass
                                             std::string_view wire, std::string_view model,
                                             nlohmann::json usage, Durability durability,
                                             std::optional<CompletionStatus> completion_status) {
+    // 流式三件套(D1 延伸,§4.43):started 预留 messageId+streamId →
+    // 零批 delta(压缩客户端同步整收,非流式后端同款零批)→ completed
+    // 定稿 + 完整 assistant 以预留 id 成行。与生产桥同一闭环语义,但
+    // 不借 CompleteStreamResponse 整包:那一路把 origin 定死 session_
+    // runtime 且不带 parentTurnId,会改掉候选行形状(内部回合纪律:
+    // origin=compact_runtime、parentTurnId 挂主 turn);compact 内部
+    // 回复也永不接纳进 main 链(§4.8),接纳半步本就用不上。
+    const std::string stream_id = writer.NewStreamId();
+    const std::string reserved_message_id = writer.NewMessageId();
+    const WriteReceipt started =
+        writer.BeginStreamResponse(request_id, stream_id, turn_id_, step_id,
+                                   reserved_message_id, Durability::ProcessCrash);
+    if (started.status != WriteReceipt::Status::Committed) {
+        return started;  // started 记不住,候选不得成行(§4.4 同款栅栏)
+    }
+    {
+        EventDraft done;
+        done.kind = EventKindV3::ModelResponseCompleted;
+        done.status = OpStatus::Done;
+        done.turn_id = turn_id_;
+        done.parent_turn_id = parent_turn_id_;
+        done.step_id = std::string(step_id);
+        done.request_id = std::string(request_id);
+        done.compact_id = compact_id_;
+        done.payload = nlohmann::json::object(
+            {{"requestId", std::string(request_id)},
+             {"streamId", stream_id},
+             {"messageId", reserved_message_id},
+             {"finishReason",
+              completion_status == CompletionStatus::Truncated ? "length" : "end_turn"}});
+        const WriteReceipt completed = writer.AppendEvent(std::move(done), durability);
+        if (completed.status != WriteReceipt::Status::Committed) {
+            return completed;  // 定稿记不住,assistant 不成行
+        }
+    }
     MessageDraft draft;
+    draft.message_id_override = reserved_message_id;  // 预留 id 成行(§4.43)
     draft.turn_id = turn_id_;
     draft.parent_turn_id = parent_turn_id_;
     draft.step_id = std::string(step_id);

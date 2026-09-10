@@ -259,6 +259,28 @@ TEST_CASE("手动空闲 compact 全链一次成功:八类行闭合,marker 字段
     REQUIRE(EventsOf(lines, "compact.validation.completed").size() == 1);
     REQUIRE(EventsOf(lines, "compact.applied").size() == 1);
 
+    // 候选三件套(D1 延伸):started/completed 恰各一,零 delta 批,
+    // 定稿 messageId 与候选 assistant 成行同一枚。
+    REQUIRE(EventsOf(lines, "model.response.started").size() == 1);
+    REQUIRE(EventsOf(lines, "model.response.completed").size() == 1);
+    CHECK(EventsOf(lines, "model.response.delta").empty());
+    {
+        const auto& started_row = *EventsOf(lines, "model.response.started").front();
+        const auto& completed_row = *EventsOf(lines, "model.response.completed").front();
+        CHECK(started_row["payload"]["messageId"] == completed_row["payload"]["messageId"]);
+        CHECK(completed_row["payload"]["finishReason"] == "end_turn");
+        bool candidate_finalized = false;
+        const std::string finalized_id = completed_row["payload"]["messageId"].get<std::string>();
+        for (const auto& line : lines) {
+            if (line.value("type", "") == "message" &&
+                line["message"].value("role", "") == "assistant" &&
+                line.value("purpose", "") == "compact") {
+                candidate_finalized = line.value("messageId", "") == finalized_id;
+            }
+        }
+        CHECK(candidate_finalized);
+    }
+
     const auto& requested = *EventsOf(lines, "compact.requested").front();
     CHECK(requested["payload"]["trigger"] == "manual");
     CHECK(requested["payload"]["reason"] == "user_command");
@@ -908,12 +930,13 @@ TEST_CASE("applied 写盘失败:摘要在档不生效,恢复后旧上下文仍�
     V3WriterOptions fail_options;
     int commits = 0;
     // 1 system,2 session.started,3 user,4 assistant,5 admit,6 requested,
-    // 7 started,8 专用 system,9 prompt,10 prepared,11 candidate,
-    // 12 validation.started,13 validation.completed,14 摘要,15 applied
-    //(注入失败)。
+    // 7 started,8 专用 system,9 prompt,10 prepared,11 response.started,
+    // 12 response.completed,13 candidate,14 validation.started,
+    // 15 validation.completed,16 摘要,17 applied(注入失败)。
+    //(候选走流式三件套,D1 延伸:11-13 三笔。)
     fail_options.inject_io_failure = [&commits]() -> std::optional<std::string> {
         ++commits;
-        return commits >= 15 ? std::optional<std::string>("io.injected") : std::nullopt;
+        return commits >= 17 ? std::optional<std::string>("io.injected") : std::nullopt;
     };
     {
         auto writer = harness.Start(fail_options);

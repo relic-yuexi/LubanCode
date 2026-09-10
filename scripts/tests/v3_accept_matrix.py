@@ -1199,14 +1199,17 @@ def scenario_c3(bench, check):
     B 闸又要真实水位(history-only)过 60% 窗——两头夹出"消息得 ~38k
     token(152KB)";固定账预检先于 compact 回调(设计如此:新消息本身
     装不下时压旧历史无济于事),所以不能把窗口压得更小。
+    (常数回 60000/152KB:固定提示估算涨到 ~12k 后,早前 51300/124KB 的
+    夹缝两头都过不去——硬闸差 453 token、B 闸差 220;docstring 原始配比
+    在现行数字下硬闸余 1247、B 闸余 2000,两头都宽。)
     """
     bench.start_backend([
         {"text": summary_reply("SUMMID"), "usage": {"input_tokens": 100, "output_tokens": 30}},
         {"text": "主回合回答-孤帆远影", "usage": {"input_tokens": 30, "output_tokens": 5}},
     ])
-    bench.write_config(window=51300)
+    bench.write_config(window=60000)
     out = bench.run_cli("c3", [
-        ("大消息-" + filler_ascii("c3user", 124000), ("ledger", "主回合回答-孤帆远影")),
+        ("大消息-" + filler_ascii("c3user", 152000), ("ledger", "主回合回答-孤帆远影")),
         ("/exit", ("exit",)),
     ])
     stream = bench.current_stream()
@@ -1639,8 +1642,14 @@ def scenario_c13(bench, check):
                     "compaction" not in system_text.lower()
                     and "压缩器" not in system_text, "")
         check.check("C13 新输入在场", "轻舟已过" in texts, "")
+        # 不混内部 compact 问答:压缩指令正文不在;候选(assistant 形)不在。
+        # 摘要与候选同文(种子串同现),按角色区分——摘要合法以 user 形
+        # 在场,不拿种子串一刀切误伤。
+        assistant_texts = json.dumps(
+            [m for m in body.get("messages", []) if m.get("role") == "assistant"],
+            ensure_ascii=False)
         check.check("C13 不混内部 compact 问答",
-                    "压缩范围" not in texts and "SUM13" not in texts, "")
+                    "压缩范围" not in texts and "SUM13" not in assistant_texts, "")
         has_summary = "SUM13" in texts
         has_original = "user13" in texts
         check.check("C13 实发=摘要+新输入(§4.30 合同)", has_summary and not has_original,

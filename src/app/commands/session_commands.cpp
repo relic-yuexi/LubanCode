@@ -399,8 +399,8 @@ std::function<std::unique_ptr<lubancode::agent::LoopBoundaryRecorder>()> Compact
 // v2 老路(HandleCompactCommand/TryRunCompact)一字不动;本场账本是 v3 卷
 // (ledger->v3_main_writer() 非空)时改走 runtime::RunV3Compact:范围从 v3
 // 链现算,压缩专用 system/材料/指令、候选、校验、applied 与 §4.64 回退
-// 事件全落 v3 账。loop 内存 history 的换账属 v3 会话运行时(接线点 1)的
-// 活——这里只落账与报数,不偷偷替它换。
+// 事件全落 v3 账。applied 落稳后由本分支取账本的链投影 ReplaceHistory
+// 换进 loop(D3,与 v2 换账同一安全点)——账实同链,token 收益落地。
 
 namespace {
 
@@ -631,6 +631,22 @@ bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
         out << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
     }
     if (result.applied) {
+        // D3(§5.1.2):applied 已按 PowerLoss 落稳(RunV3Compact 返回
+        // applied 即账本行持久化确认)——同一安全点把新链投影换进 loop
+        // 内存,对齐 v2 的 loop.ReplaceHistory 换账位。投影重读主卷验卷,
+        // 读回即确认;不携旧史、不携内部 compact 问答,后续实发与账侧
+        // prepared 引用同链。投影失败明说:内存保旧史,不装换过(账侧
+        // 已是新链,继续发会账实分离,交给人看)。
+        {
+            auto swapped = ledger->ProjectV3ContextHistory();
+            if (swapped.has_value()) {
+                in.agent->ReplaceHistory(std::move(*swapped));
+            } else {
+                out << theme.error << "compact 已记账生效,但内存换账失败(" << swapped.error()
+                    << ");本会话内存仍携旧史,建议 /resume 重开。"
+                    << theme.reset << "\n";
+            }
+        }
         if (in.hysteresis != nullptr) {
             in.hysteresis->armed = true;
             in.hysteresis->last_post_tokens = result.tokens_after;
