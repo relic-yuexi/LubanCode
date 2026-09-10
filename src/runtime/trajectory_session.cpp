@@ -1495,6 +1495,8 @@ struct TrajectorySessionLedger::Impl {
     // --continue 启动路的 resume 投影(没 resume 为空)。
     bool launch_resumed = false;
     std::vector<api::Message> launch_resume_history;
+    // v3 源的旧史显示投影(P3;v2 源/没 resume 为 nullopt)。
+    std::optional<RestoredHistoryView> launch_restored_view;
     // T1 committed wake(§25.4):装配层挂 TelemetryService;默认空。
     telemetry::CommitObserver* telemetry_wake = nullptr;
 };
@@ -1604,6 +1606,12 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                         projection.effective_conversation = resumed.effective_conversation;
                         return projection;
                     }());
+                // v3 源:旧史显示投影(P3 接线点 5)。验卷在 ResumeAsNew
+                // 已过,这里再读一次是纯读路径(文件小,OS 缓存兜着);
+                // 读不动给空 view,不拦 resume 本身。
+                if (resumed.source_is_v3) {
+                    impl.launch_restored_view = ProjectRestoredHistory(resumed.source_v3_stream);
+                }
                 TrajectorySessionLedger ledger;
                 ledger.impl_ = std::make_unique<Impl>(std::move(impl));
                 HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
@@ -2687,6 +2695,11 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     // 投影只需要 effective conversation;从 outcome 的引用直接翻。
     projection_state.effective_conversation = summary.outcome.effective_conversation;
     summary.history = ProjectHistoryFromReplay(projection_state);
+    // v3 源:旧史显示投影(P3 接线点 5)——含被压缩原文、hidden 标志与
+    // 压缩标记;调用方一次性铺滚动缓冲,不进 live 条目账。
+    if (summary.outcome.source_is_v3) {
+        summary.restored_view = ProjectRestoredHistory(summary.outcome.source_v3_stream);
+    }
     return summary;
 }
 
@@ -2713,6 +2726,10 @@ bool TrajectorySessionLedger::resumed_at_launch() const {
 
 std::vector<api::Message> TrajectorySessionLedger::LaunchResumeHistory() const {
     return impl_ != nullptr ? impl_->launch_resume_history : std::vector<api::Message>();
+}
+
+std::optional<RestoredHistoryView> TrajectorySessionLedger::LaunchRestoredHistoryView() const {
+    return impl_ != nullptr ? impl_->launch_restored_view : std::nullopt;
 }
 
 trajectory::ReplayReport TrajectorySessionLedger::FoldMainReplay() const {

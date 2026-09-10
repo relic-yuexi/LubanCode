@@ -37,6 +37,7 @@
 #include "api/types.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/tool_trajectory_sink.hpp"
+#include "runtime/trajectory_history_view.hpp"  // P3:RestoredHistoryView(v3 旧史显示投影)
 #include "telemetry/wake.hpp"
 #include "trajectory/directory.hpp"
 #include "trajectory/environment.hpp"
@@ -487,6 +488,10 @@ std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState
 struct TrajectoryResumeSummary {
     trajectory::ResumeOutcome outcome;  // 空 error_code = 成功
     std::vector<api::Message> history;  // 折叠出的有效对话(投影)
+    // v3 源(P3 显示侧)的旧史显示投影:含被压缩原文/hidden 标志/压缩
+    // 标记(持久 token 字段)。v2 源为 nullopt——v2 照旧走 history 渲染,
+    // 数据结构喂不进就不强求(单子 P3 第一棒口径)。
+    std::optional<RestoredHistoryView> restored_view;
 };
 
 // ---------------------------------------------------------------------------
@@ -653,6 +658,9 @@ public:
     bool resumed_at_launch() const;
     // 启动路 resume 折叠出的有效对话投影(没 resume 给空)。
     std::vector<api::Message> LaunchResumeHistory() const;
+    // 启动路 resume 的 v3 旧史显示投影(源是 v2/没 resume 给 nullopt)。
+    // 装配层用它一次性铺终端滚动缓冲,与 live 条目账分开。
+    std::optional<RestoredHistoryView> LaunchRestoredHistoryView() const;
 
     // 折叠本场 main.jsonl(纯读,writer 持句柄照读——journal 以共享读开)。
     // /export、/copy、session view 的数据源(§14.5:一律读 ReplayState)。

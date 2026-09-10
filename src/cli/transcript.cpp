@@ -1,5 +1,6 @@
 #include "cli/transcript.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <string_view>
@@ -509,6 +510,115 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
     return name + "(" + arg + ")";
 }
 
+namespace {
+
+// 一条恢复消息的正文渲染(user 背景块 / assistant 横幅 + Markdown / 工具
+// 配对卡)。两个 FormatRestoredHistory 入口(v2 api::Message 序列与 v3
+// RestoredHistoryView)共用同一颗 formatter——"live、恢复、重画必须同源";
+// hidden 过滤、压缩分界线与"有没有可见块"的裁断由各入口自己管。
+void AppendRestoredMessage(std::string& out, const api::Message& message, const Theme& theme,
+                           int width, const std::map<std::string, const api::ToolResultBlock*>& results) {
+    const auto separate = [&out] {
+        if (!out.empty() && out.back() != '\n') {
+            out += '\n';
+        }
+        if (!out.empty() && (out.size() < 2 || out[out.size() - 2] != '\n')) {
+            out += '\n';
+        }
+    };
+    const auto append_markdown = [&](const std::string& text) {
+        const auto lines = RenderMarkdown(text, theme, width);
+        for (const std::string& line : lines) {
+            out += line + "\n";
+        }
+    };
+
+    separate();
+    const bool assistant = message.role == api::Role::Assistant;
+    if (assistant) {
+        out += theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset + "\n";
+    } else {
+        // 用户消息:不印 "> 你" 标头,正文直接铺成背景块——与 live 提交、
+        // Ctrl+L 重画同一颗 formatter。只含工具结果的 user 消息不会走到
+        // 这里(入口的 has_visible_content 已挡);真用户文本逐块铺。
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                out += FormatUserPromptBlock(text->text, theme, width);
+            }
+        }
+    }
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            if (!assistant) {
+                continue;  // 用户文本已在上面铺成背景块,不另走 Markdown
+            }
+            append_markdown(text->text);
+            continue;
+        }
+        if (const auto* image = std::get_if<api::ImageBlock>(&block)) {
+            out += trf("cmd.resume.history.image", image->filename, image->width, image->height) + "\n";
+            continue;
+        }
+        const auto* use = std::get_if<api::ToolUseBlock>(&block);
+        if (use == nullptr) {
+            continue;
+        }
+        TranscriptItem item;
+        item.tool_name = use->name;
+        item.title = BuildToolTitle(use->name, use->input);
+        item.input_json = use->input.dump();
+        const auto found = results.find(use->id);
+        if (found == results.end()) {
+            item.status = TranscriptStatus::Error;
+            item.summary_lines = {tr("cmd.resume.history.tool_missing")};
+        } else {
+            const api::ToolResultBlock& result = *found->second;
+            item.status = result.is_error ? TranscriptStatus::Error : TranscriptStatus::Ok;
+            std::string first_line = result.content.substr(0, result.content.find('\n'));
+            if (first_line.empty()) {
+                first_line = result.is_error ? tr("cmd.resume.history.tool_error")
+                                             : tr("cmd.resume.history.tool_done");
+            }
+            const int line_count = CountLines(result.content);
+            if (line_count > 1) {
+                first_line += trf("cmd.resume.history.tool_more", line_count - 1);
+            }
+            item.summary_lines = {std::move(first_line)};
+            item.full_output = TruncateUtf8Bytes(result.content, kFullOutputCapBytes);
+        }
+        out += FormatTranscriptItem(item, theme, width);
+    }
+}
+
+// token 数加千位逗号(§4.11 示例口径:"148,200")。
+std::string FormatRestoredTokenCount(std::uint64_t value) {
+    std::string digits = std::to_string(value);
+    std::string grouped;
+    for (std::size_t i = 0; i < digits.size(); ++i) {
+        const std::size_t from_end = digits.size() - i;
+        grouped += digits[i];
+        if (from_end > 1 && (from_end - 1) % 3 == 0) {
+            grouped += ',';
+        }
+    }
+    return grouped;
+}
+
+// 一条消息里有没有可见块(文本/图片/工具调用;纯工具结果的 user 消息
+// 不算——结果随配对卡走,不另画一轮用户)。
+bool RestoredMessageHasVisibleContent(const api::Message& message) {
+    for (const auto& block : message.content) {
+        if (std::holds_alternative<api::TextBlock>(block) ||
+            std::holds_alternative<api::ImageBlock>(block) ||
+            std::holds_alternative<api::ToolUseBlock>(block)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 std::string FormatRestoredHistory(const std::vector<api::Message>& messages, const Theme& theme,
                                   int width, const std::vector<std::size_t>& compact_positions) {
     std::map<std::string, const api::ToolResultBlock*> results;
@@ -529,12 +639,6 @@ std::string FormatRestoredHistory(const std::vector<api::Message>& messages, con
             out += '\n';
         }
     };
-    const auto append_markdown = [&](const std::string& text) {
-        const auto lines = RenderMarkdown(text, theme, width);
-        for (const std::string& line : lines) {
-            out += line + "\n";
-        }
-    };
 
     std::size_t next_compact = 0;
     const auto emit_compact_notes = [&](std::size_t message_index) {
@@ -546,77 +650,66 @@ std::string FormatRestoredHistory(const std::vector<api::Message>& messages, con
     };
 
     for (std::size_t mi = 0; mi < messages.size(); ++mi) {
-        const auto& message = messages[mi];
         emit_compact_notes(mi);
-        bool has_visible_content = false;
-        for (const auto& block : message.content) {
-            has_visible_content = has_visible_content || std::holds_alternative<api::TextBlock>(block) ||
-                                  std::holds_alternative<api::ImageBlock>(block) ||
-                                  std::holds_alternative<api::ToolUseBlock>(block);
-        }
-        if (!has_visible_content) {
+        if (!RestoredMessageHasVisibleContent(messages[mi])) {
             continue;
         }
-
-        separate();
-        const bool assistant = message.role == api::Role::Assistant;
-        if (assistant) {
-            out += theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset + "\n";
-        } else {
-            // 用户消息:不再印一行 "> 你" 标头,正文直接铺成背景块——与
-            // live 提交、Ctrl+L 重画同一颗 formatter(单子"live、恢复、重画
-            // 必须同源")。只含工具结果的 user 消息不会走到这里(上面
-            // has_visible_content 已挡);真用户文本逐块铺,多块之间照旧
-            // 由 Markdown 自己排。
-            for (const auto& block : message.content) {
-                if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-                    out += FormatUserPromptBlock(text->text, theme, width);
-                }
-            }
-        }
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-                if (!assistant) {
-                    continue;  // 用户文本已在上面铺成背景块,不另走 Markdown
-                }
-                append_markdown(text->text);
-                continue;
-            }
-            if (const auto* image = std::get_if<api::ImageBlock>(&block)) {
-                out += trf("cmd.resume.history.image", image->filename, image->width, image->height) + "\n";
-                continue;
-            }
-            const auto* use = std::get_if<api::ToolUseBlock>(&block);
-            if (use == nullptr) {
-                continue;
-            }
-            TranscriptItem item;
-            item.tool_name = use->name;
-            item.title = BuildToolTitle(use->name, use->input);
-            item.input_json = use->input.dump();
-            const auto found = results.find(use->id);
-            if (found == results.end()) {
-                item.status = TranscriptStatus::Error;
-                item.summary_lines = {tr("cmd.resume.history.tool_missing")};
-            } else {
-                const api::ToolResultBlock& result = *found->second;
-                item.status = result.is_error ? TranscriptStatus::Error : TranscriptStatus::Ok;
-                std::string first_line = result.content.substr(0, result.content.find('\n'));
-                if (first_line.empty()) {
-                    first_line = result.is_error ? tr("cmd.resume.history.tool_error")
-                                                 : tr("cmd.resume.history.tool_done");
-                }
-                const int line_count = CountLines(result.content);
-                if (line_count > 1) {
-                    first_line += trf("cmd.resume.history.tool_more", line_count - 1);
-                }
-                item.summary_lines = {std::move(first_line)};
-                item.full_output = TruncateUtf8Bytes(result.content, kFullOutputCapBytes);
-            }
-            out += FormatTranscriptItem(item, theme, width);
-        }
+        AppendRestoredMessage(out, messages[mi], theme, width, results);
     }
     emit_compact_notes(messages.size());
+    return out;
+}
+
+std::string FormatRestoredHistory(const runtime::RestoredHistoryView& history, const Theme& theme,
+                                  int width) {
+    // 工具结果配对账(键=actionId,与 v2 入口的 call_id 同形)。
+    std::map<std::string, const api::ToolResultBlock*> results;
+    for (const auto& item : history.items) {
+        if (item.kind != runtime::RestoredHistoryItem::Kind::Message) {
+            continue;
+        }
+        for (const auto& block : item.message.message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                results[result->tool_use_id] = result;
+            }
+        }
+    }
+
+    std::string out;
+    const auto separate = [&out] {
+        if (!out.empty() && out.back() != '\n') {
+            out += '\n';
+        }
+        if (!out.empty() && (out.size() < 2 || out[out.size() - 2] != '\n')) {
+            out += '\n';
+        }
+    };
+
+    for (const auto& item : history.items) {
+        if (item.kind == runtime::RestoredHistoryItem::Kind::Compact) {
+            // 压缩分界线:插在 applied 的发生位置(时间线原序,不挪窝伪造
+            // 顺序);token 数字读持久字段,不在 resume 时重算(§4.11)。
+            separate();
+            if (item.compact.context_tokens_before > 0 || item.compact.context_tokens_after > 0) {
+                out += theme.stats +
+                       trf("cmd.resume.history.compact_tokens",
+                           FormatRestoredTokenCount(item.compact.context_tokens_before),
+                           FormatRestoredTokenCount(item.compact.context_tokens_after)) +
+                       theme.reset + "\n";
+            } else {
+                out += theme.stats + tr("cmd.resume.history.compact") + theme.reset + "\n";
+            }
+            continue;
+        }
+        // display.hidden:默认不渲染,不报错(§4.28"隐藏不等于删除")。
+        if (item.message.hidden) {
+            continue;
+        }
+        if (!RestoredMessageHasVisibleContent(item.message.message)) {
+            continue;
+        }
+        AppendRestoredMessage(out, item.message.message, theme, width, results);
+    }
     return out;
 }
 

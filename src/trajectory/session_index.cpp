@@ -19,6 +19,7 @@
 #include "workspace/index.hpp"  // 账本制:房门按 key 反查各房 manifest
 #include "trajectory/safety.hpp"
 #include "trajectory/session_manager.hpp"  // SessionStatusName(索引行状态)
+#include "trajectory/v3/session_switch.hpp"  // 接线点 2:v3 会话目录并列识别
 
 namespace lubancode::trajectory {
 namespace {
@@ -81,6 +82,96 @@ std::string FirstTextOfContent(const nlohmann::json& content) {
     return std::string();
 }
 
+// v3 会话单遍扫描(session_switch 接线点 2:并列识别,不迁移旧档)。
+// 摘要口径对齐 v2:event_count=总行数;message_count=会话消息(human
+// user + assistant);model=首个 model.request.prepared;状态按
+// session.ended 有无折 closed/incomplete(v3 无 manifest,活场无锁概念,
+// "incomplete" 如实)。标题/审批档是 v2 manifest 的账,v3 源留空。
+SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string& workspace_key,
+                          const std::string& session_id) {
+    SessionScan scan;
+    WorkspaceSessionSummary& summary = scan.summary;
+    summary.workspace_key = workspace_key;
+    summary.session_id = session_id;
+    summary.session_dir = platform::PathToUtf8(stream.parent_path());
+    summary.status = SessionStatusName(SessionStatus::Incomplete);
+
+    std::ifstream file(stream, std::ios::binary);
+    if (!file.is_open()) {
+        summary.damaged = true;
+        return scan;
+    }
+    std::string line;
+    std::uint64_t prompt_seq = 0;
+    bool tail_broken = false;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        const nlohmann::json row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (row.is_discarded() || !row.is_object()) {
+            tail_broken = true;
+            continue;
+        }
+        ++summary.event_count;  // v3 两类行都算,与 v2"总行数"同口径
+        const std::int64_t ts_ms =
+            v3::ParseV3TimestampMs(GetJsonString(row, "timestamp")).value_or(0);
+        if (summary.created_at_ms == 0 && ts_ms > 0) {
+            summary.created_at_ms = ts_ms;
+        }
+        if (ts_ms > 0) {
+            summary.updated_at_ms = ts_ms;
+        }
+        if (GetJsonString(row, "type") == "message") {
+            const nlohmann::json& body = row.contains("message") && row["message"].is_object()
+                                             ? row["message"]
+                                             : nlohmann::json::object();
+            const std::string role = GetJsonString(body, "role");
+            const std::string purpose = GetJsonString(row, "purpose");
+            const std::string content = body.contains("content") && body["content"].is_string()
+                                            ? body["content"].get<std::string>()
+                                            : std::string();
+            if (purpose != "conversation") {
+                continue;  // compact 内部问答/摘要不进摘要与提问历史
+            }
+            if (role == "user" && GetJsonString(row, "origin") == "human") {
+                ++summary.message_count;
+                if (!content.empty()) {
+                    if (summary.first_user_text.empty()) {
+                        summary.first_user_text = content;
+                    }
+                    ++prompt_seq;
+                    PromptHistoryLine prompt;
+                    prompt.workspace_key = workspace_key;
+                    prompt.session_id = session_id;
+                    prompt.text = content;
+                    prompt.ts_ms = ts_ms;
+                    prompt.seq = prompt_seq;
+                    scan.prompts.push_back(std::move(prompt));
+                }
+            } else if (role == "assistant") {
+                ++summary.message_count;
+            }
+        } else if (GetJsonString(row, "kind") == "model.request.prepared") {
+            if (summary.model.empty() && row.contains("payload") && row["payload"].is_object()) {
+                summary.model = GetJsonString(row["payload"], "model");
+            }
+        } else if (GetJsonString(row, "kind") == "session.ended") {
+            summary.status = SessionStatusName(SessionStatus::Closed);
+        }
+    }
+    if (tail_broken) {
+        summary.damaged = true;
+    }
+    if (summary.updated_at_ms == 0) {
+        summary.updated_at_ms = summary.created_at_ms;
+    }
+    return scan;
+}
+
 SessionScan ScanSession(const std::filesystem::path& session_dir, const std::string& workspace_key) {
     SessionScan scan;
     WorkspaceSessionSummary& summary = scan.summary;
@@ -90,6 +181,11 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
 
     const auto manifest = ReadSessionJson(session_dir);
     if (!manifest.has_value()) {
+        // 先认 v3(session_switch 接线点 2):<id>.jsonl 首行 schemaVersion==3
+        // 即 v3 会话,按 v3 摘要;认不出再走 v2 的损坏路径。
+        if (const auto v3_stream = v3::FindV3SessionStream(session_dir); v3_stream.has_value()) {
+            return ScanV3Session(*v3_stream, workspace_key, summary.session_id);
+        }
         // session.json 读不动:目录占位/写坏。照列(可被 doctor 盯上),
         // 标 damaged,不给假摘要。
         summary.damaged = true;
@@ -197,15 +293,20 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
 
 // 指纹:session.json 字节数 + mtime + main.jsonl 字节数。status 翻转
 //(running→closed→archived)只动 session.json,字节数可能不变,故加 mtime。
+// v3 会话无 session.json/main.jsonl,记 <id>.jsonl 字节数(append-only,
+// 字节数变即重扫);旧索引缺 v3_bytes 键按 0 读,首查触发一次重扫——
+// 索引是派生物,重建无损失。
 struct SessionFingerprint {
     std::uintmax_t session_json_bytes = 0;
     std::int64_t session_json_mtime_ms = 0;
     std::uintmax_t main_bytes = 0;
+    std::uintmax_t v3_bytes = 0;
 
     nlohmann::json ToJson() const {
         return nlohmann::json{{"session_json_bytes", session_json_bytes},
                               {"session_json_mtime_ms", session_json_mtime_ms},
-                              {"main_bytes", main_bytes}};
+                              {"main_bytes", main_bytes},
+                              {"v3_bytes", v3_bytes}};
     }
     static SessionFingerprint FromJson(const nlohmann::json& json) {
         SessionFingerprint fp;
@@ -220,6 +321,9 @@ struct SessionFingerprint {
         }
         if (json.contains("main_bytes") && json["main_bytes"].is_number_unsigned()) {
             fp.main_bytes = json["main_bytes"].get<std::uintmax_t>();
+        }
+        if (json.contains("v3_bytes") && json["v3_bytes"].is_number_unsigned()) {
+            fp.v3_bytes = json["v3_bytes"].get<std::uintmax_t>();
         }
         return fp;
     }
@@ -247,6 +351,13 @@ SessionFingerprint FingerprintOf(const std::filesystem::path& session_dir) {
     ec.clear();
     if (const auto size = std::filesystem::file_size(session_dir / "main.jsonl", ec); !ec) {
         fp.main_bytes = size;
+    }
+    // v3 会话:指纹记 <id>.jsonl 字节数(接线点 2)。
+    if (const auto v3_stream = v3::FindV3SessionStream(session_dir); v3_stream.has_value()) {
+        ec.clear();
+        if (const auto size = std::filesystem::file_size(*v3_stream, ec); !ec) {
+            fp.v3_bytes = size;
+        }
     }
     return fp;
 }
@@ -402,7 +513,8 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
         if (old_fp != old_fps.end() && old_row != old_rows.end() &&
             old_fp->second.session_json_bytes == fp.session_json_bytes &&
             old_fp->second.session_json_mtime_ms == fp.session_json_mtime_ms &&
-            old_fp->second.main_bytes == fp.main_bytes) {
+            old_fp->second.main_bytes == fp.main_bytes &&
+            old_fp->second.v3_bytes == fp.v3_bytes) {
             // 指纹没动:旧摘要照用(标题随提问行一起回填)。
             index.sessions.push_back(old_row->second);
             const auto prompts = old_prompts.find(session_id);

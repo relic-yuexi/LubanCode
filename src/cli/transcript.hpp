@@ -27,6 +27,7 @@
 
 #include "api/types.hpp"
 #include "cli/theme.hpp"
+#include "runtime/trajectory_history_view.hpp"  // RestoredHistoryView(v3 旧史显示投影)
 
 namespace lubancode::cli {
 
@@ -239,6 +240,14 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
 // tool_result 配成终态工具条目；只含工具结果的 user 消息不另画一轮用户。
 std::string FormatRestoredHistory(const std::vector<api::Message>& messages, const Theme& theme,
                                   int width, const std::vector<std::size_t>& compact_positions = {});
+
+// 同上的 v3 入口(P3 显示侧):吃 runtime 的 RestoredHistoryView——
+// 按时间线原序铺正文与压缩分界线(§4.10:标记插在 applied 的发生位置),
+// token 数字读 applied 持久字段(§4.11:resume 不重算);display.hidden
+// 的消息默认不渲染(§4.28:隐藏不等于删除,也不报错);被压缩原文
+//(removed_by_compacts)照常铺——"已压缩"说历史,不说删除。
+std::string FormatRestoredHistory(const runtime::RestoredHistoryView& history, const Theme& theme,
+                                  int width);
 
 // ---- 结果摘要小函数(每个都可单测) ------------------------------------
 

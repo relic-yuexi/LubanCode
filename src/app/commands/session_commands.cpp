@@ -1998,6 +1998,33 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
             return CommandFlow::Continue;
         }
         ctx.main_agent->RestoreSessionHistory(summary.history);
+        // 旧史重放(P3 显示侧):一次性铺进终端滚动缓冲——不进
+        // TranscriptUiController 的 live 条目账(旧史与 live 条目 id 账分
+        // 开,别把重放结果灌进 items_)。v3 源吃 RestoredHistoryView(压缩
+        // 分界线带 applied 持久 token 数字、被压缩原文照铺、display.hidden
+        // 默认不渲染);v2 源照旧吃有效对话投影(同渲染路,不强求压缩标记)。
+        {
+            const int resume_width = lubancode::cli::DetectConsoleWidth().value_or(80);
+            const std::string restored_text =
+                summary.restored_view.has_value()
+                    ? lubancode::cli::FormatRestoredHistory(*summary.restored_view, theme, resume_width)
+                    : lubancode::cli::FormatRestoredHistory(summary.history, theme, resume_width);
+            if (!restored_text.empty()) {
+                std::size_t restored_count = summary.history.size();
+                if (summary.restored_view.has_value()) {
+                    restored_count = 0;
+                    for (const auto& item : summary.restored_view->items) {
+                        if (item.kind == lubancode::runtime::RestoredHistoryItem::Kind::Message) {
+                            ++restored_count;
+                        }
+                    }
+                }
+                TermOut() << theme.stats
+                          << trf("cmd.resume.history.header", restored_count) << theme.reset << "\n";
+                TermOut() << restored_text;
+                TermOut() << theme.stats << tr("cmd.resume.history.end") << theme.reset << "\n";
+            }
+        }
         // 标题真值吃 replay 折叠(control.title.changed 的最后一条)。
         *ctx.session_title = summary.outcome.control.title.value_or(std::string());
         if (summary.outcome.approval_mode.has_value()) {
