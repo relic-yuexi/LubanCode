@@ -46,14 +46,42 @@
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/usage_gc.hpp"
+#include "trajectory/v3/result_store.hpp"  // V3SessionBooks 的结果仓(接线点 1)
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
 
 // ---------------------------------------------------------------------------
+// v3 写侧会话共享账(session_switch.hpp 接线点 1):v3 场由 Trajectory
+// SessionLedger 的 Impl 持有一份,v3 模式的轮桥(主会话/子代理)借指针
+// 共用——system 正文/设置版本跨轮延续,结果仓按 session 目录开一次。
+// V3Writer 自带 mutex 管单写者发号;这里的可变字段只在回合串行推进中
+// 改(与 v2"一只桥一轮"的纪律同门)。
+// ---------------------------------------------------------------------------
+
+struct V3SessionBooks {
+    trajectory::v3::V3Writer* writer = nullptr;          // 主账写者(ActiveSession::v3_main)
+    std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
+    std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
+    std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
+    // provider 调用号 -> v3 调用身份:轮桥声明 tool call 时登记(§4.15),
+    // 子代理五步的 parentActionRef 从这查(actionId/声明消息/turn/step)。
+    struct DeclaredAction {
+        std::string action_id;
+        std::string message_id;  // 声明它的 assistant 消息
+        std::string turn_id;
+        std::string step_id;
+    };
+    std::map<std::string, DeclaredAction> declared_actions;
+};
+
+// ---------------------------------------------------------------------------
 // 轮次边界桥:AgentLoop 的模型边界 + hub 的工具栅栏 -> trajectory 事件
 //    (hub 侧的抽象口在 tool_trajectory_sink.hpp;本类实现它)
 // ---------------------------------------------------------------------------
+
+// v3 模式轮桥的回合簿(定义在 trajectory_session.cpp;此处只占位)。
+struct V3TurnBooks;
 
 class TrajectoryTurnBridge : public agent::LoopBoundaryRecorder, public ToolTrajectorySink {
 public:
@@ -67,6 +95,12 @@ public:
 
     TrajectoryTurnBridge(trajectory::TrajectoryRecorder& recorder, trajectory::EventScope base_scope,
                          Identity identity);
+    // v3 写模式(接线点 1):v2 recorder 不在,主账是 V3Writer;v3_books 是
+    // 会话级共享账(system 正文/结果仓),由账本 Impl 持有。base_scope 只借
+    // workspace/session/run 三枚身份(wake 投递用),不进事件信封——v3 行
+    // 的身份在信封自己的 sessionId/runId。
+    TrajectoryTurnBridge(trajectory::v3::V3Writer* v3_writer, V3SessionBooks* v3_books,
+                         trajectory::EventScope identity_scope, Identity identity);
     ~TrajectoryTurnBridge() override;
 
     TrajectoryTurnBridge(const TrajectoryTurnBridge&) = delete;
@@ -197,6 +231,32 @@ private:
     void NoteError(const trajectory::RecordReceipt& receipt, const char* where);
     // P0-D:陌生 tool trace 的有界诊断。只记投影,不改 calls_,不落 canonical。
     void NoteUnownedToolTrace(const agent::ToolTraceEvent& event);
+
+    // ---- v3 写模式(接线点 1;V3Mode() 为假时一只方法都不进) ----
+    // v3 提交失败 → recent_errors/error_sink + 日志(v2 NoteError 的同款
+    // 漏斗,receipt 形状换成 v3::WriteReceipt)。
+    void NoteV3Error(const trajectory::v3::WriteReceipt& receipt, const char* where);
+    // v3 提交成功后的 committed wake(只投身份,不投正文)。
+    void V3NotifyCommitted(const trajectory::v3::WriteReceipt& receipt);
+    // system 对表(§4.3):请求携带的 system 与当前根不同 → 三步切换,
+    // 正文相同不动(不造假版本)。成功/无需切换回 true。
+    bool V3EnsureSystem(const std::string& system_content);
+    void V3RecordInput(const api::Message& user_message);
+    std::string V3RequestPrepared(const api::Request& request,
+                                  const agent::RequestPreparedContext& ctx);
+    void V3RequestSent(const std::string& request_id);
+    void V3UsageRecorded(const std::string& request_id, const api::Usage& usage,
+                         bool reported_by_provider, const std::string& provider_response_id);
+    bool V3OutputCompleted(const std::string& request_id, const api::Message& assistant,
+                           const std::string& stop_reason, const std::string& provider_response_id);
+    void V3OutputFailed(const std::string& request_id, const std::string& reason);
+    void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
+    void V3ToolTrace(const agent::ToolTraceEvent& event);
+    void V3ToolResultsCommitted(const api::Message& results);
+    // turn 收口:已声明未终态的 Action 补 cancelled(配对完整,不悬空)。
+    void V3CancelDanglingActions(const std::string& reason);
+    // v3 模式判定(空 = v2 原路)。
+    bool V3Mode() const { return v3_writer_ != nullptr; }
     std::string NextRequestId();
     std::string NextInputId();
     std::string NextOutputId();
@@ -218,7 +278,10 @@ private:
     // recorder 的 offload 上限管)。
     static nlohmann::json MessageToBlocks(const api::Message& message);
 
-    trajectory::TrajectoryRecorder& recorder_;
+    trajectory::TrajectoryRecorder* recorder_ = nullptr;  // v2 模式的主账(引用改指针:类要装得下 v3 模式)
+    trajectory::v3::V3Writer* v3_writer_ = nullptr;                   // v3 模式的主账
+    V3SessionBooks* v3_books_ = nullptr;                  // v3 会话共享账(system/结果仓)
+    std::unique_ptr<V3TurnBooks> v3_turn_;                // v3 回合簿(请求/调用),v2 模式为空
     trajectory::EventScope base_scope_;  // 身份四件 + 默认 actor/origin
     Identity identity_;
     std::string turn_id_;
@@ -541,6 +604,10 @@ public:
         // 单发账本配 Exclude(实战派活含内部路径,不进训练集),配置
         // oneshot_training_policy 可改。session 边界事件恒 Exclude,不在此列。
         trajectory::TrainingPolicy training_policy = trajectory::TrainingPolicy::Metadata;
+        // v3 场(接线点 1 开关开)的首行基础 system 正文。空串合法:建场时
+        // 宿主还不知道最终 system,第一次模型请求带上真 system 时走 §4.3
+        // 三步切换(旧 system -> change 事件 -> 新 system)。
+        std::string v3_system_content;
         // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。
@@ -787,6 +854,18 @@ private:
 
     // committed wake 的账本侧漏斗:main stream 上的提交经这投。
     void NotifyCommitted_() const;
+    // 接线点 1:active 是 v3 场时把 v3 共享账绑到当前主账写者(clear/
+    // resume 换场后 active 指针会换,books 必须跟着重绑,不然悬空);
+    // v2 场清掉。
+    void BindV3Books_();
+    // v3 新场沿用 v3 源场的生效 system(§4.10 默认):与基础版不同就按
+    // §4.3 三步切换,链根与实际发送同拍。v2 源没有 v3 system 概念,不调。
+    void AdoptSourceSystemV3_(const std::filesystem::path& source_stream);
+    // SpawnSubagent 的 v3 分支(父会话是 v3 场):v3::SubagentSpawn 五步
+    //(§4.32)开 subagents/<childSessionId>/<childSessionId>.jsonl。
+    std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure> SpawnSubagentV3(
+        const std::string& parent_call_id, const std::string& task_label,
+        const std::string& parent_run_id);
 
     // 会话级控制事件(compact 一族)的公共落账口(Host/CompactRuntime)。
     void PutControl_(trajectory::EventKind kind, nlohmann::json payload);
