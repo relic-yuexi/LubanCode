@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.241] - 2026-09-11
+
+- **消息内核升四角色,第一家 adapter 换骨完成。**Role 枚举追加 System(上下文根)与 Tool(工具结果独立消息,不再是伪装 user);Anthropic adapter 内部改走四角色:System 文本顶置顶层 system、Tool 逐条折 user 容器 tool_result、tagged thinking 认 Tool 尾巴。出口形状一字不变——同一对话新旧两路 dump 逐字节相等,18 案四家 wire 合同册原样绿。这是"agent 只换皮"架构的第一刀:内核统一四角色,协议差异全部收进 adapter。其余三家(OpenAI Chat/Responses、Gemini)后续逐家换。
+
 ## [v0.26.240] - 2026-09-10
 
 - **hook 升级成中间件体系,第一块执行核落地。**同键 (挂点,功能名) 按来源层级选唯一实现(内置<扩展<project<user<会话),不再"来源相加";阶段+依赖定序,dispatch 计划派发时冻结。13 挂点、8 类效果按挂点×阶段矩阵放行(PostUser 不收改写、估算段零效果),26 枚稳定错误码。Lua handler 每次调用独立 state、指令/内存/墙钟三预算、库走显式白名单,hook 上下文调 HTTP/密钥全拒零网络。本批纯底座:老 hook 路径零行为变化,生产挂点迁移归下一批。顺手修了 MSVC 的 Lua longjmp 坑(luaL_error 从无存活 C++ 对象的帧跳出直接 SEGV,两 TU 上 /EHa)。CI 还揪出一处测试断言踩 nlohmann UB(const json 缺键下标,MSVC 碰巧绿 gcc 红),已改 contains 判键。
