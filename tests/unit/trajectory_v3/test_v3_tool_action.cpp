@@ -259,7 +259,7 @@ TEST_CASE("payload.tool_call_id 须等于信封 actionId:错配拒收") {
     draft.payload = nlohmann::json::object({{"tool_call_id", "action-000099"},
                                             {"attempt", 1},
                                             {"reason", "queued"}});
-    WriteReceipt receipt = writer->AppendEvent(std::move(draft));
+    WriteReceipt receipt = writer->AppendEvent(std::move(draft), Durability::ProcessCrash);
     CHECK(receipt.status == WriteReceipt::Status::Rejected);
     CHECK(receipt.error_code == "schema3.tool_call_id_mismatch");
 }

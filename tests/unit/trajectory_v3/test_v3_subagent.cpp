@@ -105,7 +105,8 @@ TEST_CASE("五步交接:requested → 子账就绪 → linked → 子账独立�
          {"inputMessageRefs", nlohmann::json::array()},
          {"readThroughSeq", boot.child_writer->next_seq() - 1},
          {"readThroughHash", boot.child_writer->last_line_hash()}});
-    REQUIRE(boot.child_writer->AppendEvent(child_work).status == WriteReceipt::Status::Committed);
+    REQUIRE(boot.child_writer->AppendEvent(child_work, Durability::ProcessCrash).status ==
+            WriteReceipt::Status::Committed);
     ChildCheckpointRef later{boot.checkpoint.session_id, boot.checkpoint.run_id,
                               boot.child_writer->next_seq() - 1,
                               boot.child_writer->last_line_hash()};

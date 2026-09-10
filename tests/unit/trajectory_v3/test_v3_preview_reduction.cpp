@@ -68,7 +68,7 @@ std::string InstallToolRound(V3Writer& writer, const std::string& preview_text) 
     user.purpose = MessagePurpose::Conversation;
     user.origin = MessageOrigin::Human;
     user.message = nlohmann::json::object({{"role", "user"}, {"content", "查日志"}});
-    WriteReceipt user_receipt = writer.AppendMessage(std::move(user));
+    WriteReceipt user_receipt = writer.AppendMessage(std::move(user), Durability::PowerLoss);
     REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
     REQUIRE(writer.AdmitMessages({user_receipt.id}).status == WriteReceipt::Status::Committed);
 

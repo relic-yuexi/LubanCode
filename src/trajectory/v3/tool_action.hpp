@@ -69,7 +69,8 @@ public:
     // 越过执行准入栅栏:tool.execution.started(effectiveArgsRef + 工具身份
     // + 幂等键快照)。extra_payload 供 hook 子执行注入 parentActionId 等。
     WriteReceipt Start(V3Writer& writer, std::string effective_args_ref,
-                       ToolIdentity identity, std::optional<std::string> idempotency_key,
+                       ToolIdentity identity,
+                       std::optional<std::string> idempotency_key = std::nullopt,
                        nlohmann::json extra_payload = nlohmann::json::object(),
                        Durability durability = Durability::ProcessCrash);
 
