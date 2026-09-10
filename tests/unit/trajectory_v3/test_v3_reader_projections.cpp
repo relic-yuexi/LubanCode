@@ -16,6 +16,8 @@
 
 #include "platform/sha256.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/result_store.hpp"
+#include "trajectory/v3/tool_action.hpp"
 #include "trajectory/v3/writer.hpp"
 
 using namespace lubancode::trajectory::v3;
@@ -30,7 +32,7 @@ std::filesystem::path Fixture(const char* name) {
 std::string FileSha(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    return platform::Sha256Hex(data);
+    return lubancode::platform::Sha256Hex(data);
 }
 
 const HistoryTimeline::Item* FindMessageItem(const HistoryTimeline& timeline,
@@ -432,7 +434,7 @@ TEST_CASE("result_preview:真文件验 hash,坏 hash/缺件分得清") {
         REQUIRE(action.Finish(*writer, 0, 10).status == WriteReceipt::Status::Committed);
         // 真落两份 artifact:描述 + stdout。
         const std::string stdout_text = "hello\nworld\n";
-        good_sha = platform::Sha256Hex(stdout_text);
+        good_sha = lubancode::platform::Sha256Hex(stdout_text);
         std::filesystem::path artifacts = dir / "artifacts";
         std::filesystem::create_directories(artifacts, ec);
         std::filesystem::path stdout_file = artifacts / "res-000001.stdout.txt";
@@ -442,7 +444,7 @@ TEST_CASE("result_preview:真文件验 hash,坏 hash/缺件分得清") {
         }
         nlohmann::json metadata = nlohmann::json::object(
             {{"result_id", "res-000001"}, {"result_kind", "process"}});
-        const std::string metadata_sha = platform::Sha256Hex(metadata.dump());
+        const std::string metadata_sha = lubancode::platform::Sha256Hex(metadata.dump());
         {
             std::ofstream out(artifacts / "res-000001.json", std::ios::binary);
             out << metadata.dump();
