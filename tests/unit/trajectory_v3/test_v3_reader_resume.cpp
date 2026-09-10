@@ -372,6 +372,49 @@ TEST_CASE("来源链环:回指已访问的会话 → 标重复,不再下钻") {
     CHECK_FALSE(resume->source_chain[2].ledger.has_value());
 }
 
+TEST_CASE("来源链深度护栏: max_source_depth 封顶,截断步标 chain_depth_exceeded") {
+    SessionsRoot root("depth");
+    {
+        auto a = StartSession(root, "A");
+        REQUIRE(a.has_value());
+        InstallRound(*a, "turn-000001", "第一场", true);
+    }
+    {
+        auto b = StartSession(root, "B");
+        REQUIRE(b.has_value());
+        AttachSource(*b, ReadV3Ledger(root.Ledger("A")).value());
+        InstallRound(*b, "turn-000001", "第二场", true);
+    }
+    {
+        auto c = StartSession(root, "C");
+        REQUIRE(c.has_value());
+        AttachSource(*c, ReadV3Ledger(root.Ledger("B")).value());
+        InstallRound(*c, "turn-000001", "第三场", true);
+    }
+    // 默认护栏(64 级)放行整条链:C → B → A。
+    auto full = ProjectResume(root.Ledger("C"));
+    REQUIRE(full.has_value());
+    REQUIRE(full->source_chain.size() == 2);
+    CHECK(full->source_chain_ok);
+    // 深度封顶 1:只走到 B,截断步仍指明"本要去的祖先"(A),链标坏
+    //(§4.10 护栏:超长链不无限读账)。
+    auto capped = ProjectResume(root.Ledger("C"), nullptr, 1);
+    REQUIRE(capped.has_value());
+    REQUIRE(capped->source_chain.size() == 2);  // B + 截断步
+    CHECK(capped->source_chain[0].session_id == "B");
+    CHECK(capped->source_chain[0].check.ok);
+    CHECK(capped->source_chain[1].session_id == "A");
+    CHECK_FALSE(capped->source_chain[1].check.ok);
+    CHECK(capped->source_chain[1].check.reason == "chain_depth_exceeded");
+    CHECK_FALSE(capped->source_chain[1].ledger.has_value());
+    CHECK_FALSE(capped->source_chain_ok);
+    // 0 = 不设限(旧口径),照常走完。
+    auto unlimited = ProjectResume(root.Ledger("C"), nullptr, 0);
+    REQUIRE(unlimited.has_value());
+    CHECK(unlimited->source_chain_ok);
+    REQUIRE(unlimited->source_chain.size() == 2);
+}
+
 TEST_CASE("来源链坏引用:hash 对不上 → 链标坏,本账恢复不受影响") {
     SessionsRoot root("badhash");
     {

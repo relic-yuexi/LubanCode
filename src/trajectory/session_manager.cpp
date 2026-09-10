@@ -1661,6 +1661,252 @@ std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledge
     return conversation;
 }
 
+// ---------------------------------------------------------------------------
+// resume 沿源链折算(D2:§4.10 第 3-4 条)
+//
+// 有效对话不再只折直接源本账链,而是沿 resume.source.attached 链遍历
+// (reader 的 ProjectResume:逐级验五键、按场去重、防环、深度护栏),
+// 祖先场历史全部进新场模型上下文;折出的史同时落成新账抄本(第 6.5
+// 步),新场链自足——首笔请求的 prepared.inputMessageRefs 与实发消息
+// 一致,不再账实分离。链有缺口(祖先缺失/hash 对不上/环/超深)时
+// 精确恢复拒绝(§4.10"源缺失时……精确上下文恢复应拒绝")。
+// ---------------------------------------------------------------------------
+
+// 链折算的产出:有效对话(链序:最老祖先 → 直接源)+ 逐位对应的新场
+// 抄本草稿。ResumeAsNewV3Locked 的第 6.5 步消费(session_manager.hpp
+// 前向引用)。
+struct V3ResumeFold {
+    std::vector<ReplayMessage> conversation;
+    std::vector<v3::MessageDraft> imports;
+};
+
+namespace {
+
+// 折算失败:code ∈ {"corrupt"(源账读不动),"chain"(来源链验不过)}。
+struct V3FoldError {
+    std::string code;
+    std::string message;
+};
+
+// 一场账的 provider 调用号 → actionId 配对键(EffectiveConversation
+// FromV3 同源;链折算各段各建一份)。
+std::map<std::string, std::string> ProviderCallToActionMap(const v3::V3Ledger& ledger) {
+    std::map<std::string, std::string> mapping;
+    for (const auto& action : v3::FoldToolActions(ledger)) {
+        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+            mapping[*action.provider_tool_call_id] = action.tool_call_id;
+        }
+    }
+    return mapping;
+}
+
+// message 正文里的 text 块(string 或 blocks 数组两形,与
+// EffectiveConversationFromV3 同规则)。
+void AppendConversationText(const nlohmann::json& content, ReplayMessage* out) {
+    const auto append_text = [out](const nlohmann::json& text) {
+        out->blocks.push_back(nlohmann::json{{"type", "text"}, {"text", text}});
+    };
+    if (content.is_string()) {
+        append_text(content);
+        return;
+    }
+    if (!content.is_array()) {
+        return;
+    }
+    for (const auto& part : content) {
+        if (part.is_object() && part.value("type", std::string()) == "text" && part.contains("text")) {
+            append_text(part["text"]);
+        }
+    }
+}
+
+// 一枚链输入折成两件:有效对话消息 + 新场抄本草稿。键规则:
+//   对话配对键(call_id):多段链(有祖先)带来源场名("<场>/<action-N>",
+//     段间不撞);单源照旧裸键——现行 wire 形状不惊动。
+//   抄本键(messageId/turnId/actionId/requestId…/正文 tool_call_id):
+//     恒带来源场名——与写者发号空间(msg-000001 等)永不撞,且抄本在
+//     新账里自配对(新账没有祖先的工具事件账,provider 号配不出对)。
+// is_copy:本段账上的跨场抄本(sourceMessageRef 带跨场来源键)——
+// 键已带场名,原样沿用。
+std::expected<V3ResumeFold, V3FoldError> FoldV3ResumeChain(
+    const v3::V3Ledger& own, const std::filesystem::path& own_stream) {
+    auto projection = v3::ProjectResume(own_stream);
+    if (!projection.has_value()) {
+        return std::unexpected(V3FoldError{"corrupt", projection.error()});
+    }
+    if (!projection->source_chain_ok) {
+        std::string detail;
+        for (const auto& step : projection->source_chain) {
+            if (step.duplicate) {
+                detail = "来源链回环(重复场 " + step.session_id + ")";
+                break;
+            }
+            if (!step.check.ok) {
+                detail = "祖先 " + step.session_id + ": " + step.check.reason;
+                break;
+            }
+        }
+        return std::unexpected(
+            V3FoldError{"chain", detail.empty() ? "来源链验不过" : detail});
+    }
+    // 段序:最老祖先 → …… → 直接源(own)。ProjectResume 的 source_chain
+    // [0] 是直接源的 attached 目标(其父),倒序遍历即从老到新;祖先账
+    // 缺失(ledger 空)该段跳过——本账抄本(若有)顶上,不因缺源丢史。
+    std::vector<const v3::V3Ledger*> segments;
+    for (auto step = projection->source_chain.rbegin(); step != projection->source_chain.rend();
+         ++step) {
+        if (step->ledger.has_value()) {
+            segments.push_back(&*step->ledger);
+        }
+    }
+    segments.push_back(&own);
+
+    V3ResumeFold fold;
+    std::set<std::string> seen;  // 完整来源键("<场>/<msgId>")去重(§4.10)
+    const bool rename_keys = !projection->source_chain.empty();
+    for (const v3::V3Ledger* segment : segments) {
+        const v3::ModelContext context = segment == &own ? projection->model_context
+                                                         : v3::ProjectModelContext(*segment);
+        const std::map<std::string, std::string> call_to_action = ProviderCallToActionMap(*segment);
+        const std::string& session_id = segment->session_id;
+        for (const auto& input : context.inputs) {
+            const v3::MessageLine* line = segment->FindMessage(input.message_id);
+            if (line == nullptr) {
+                continue;  // 空引用不虚构(缺件归 reader 的 missing_refs 报)
+            }
+            // 来源键:跨场抄本的 sourceMessageRef 已是 "<场>/<msg>";原生
+            // 行用本场场名拼同形键。键相同 = 同一条史,先到先得。
+            bool is_copy = false;
+            std::string source_key;
+            if (line->source_message_ref.has_value()) {
+                const std::string& ref = *line->source_message_ref;
+                const std::size_t slash = ref.find('/');
+                if (slash != std::string::npos && slash > 0 &&
+                    ref.compare(0, slash, session_id) != 0) {
+                    is_copy = true;
+                    source_key = ref;
+                }
+            }
+            if (!is_copy) {
+                source_key = session_id + "/" + line->message_id;
+            }
+            if (!seen.insert(source_key).second) {
+                continue;  // 祖先已供原装,后代抄本让位(不重复显示/携带)
+            }
+
+            const std::string role = line->message.value("role", std::string("user"));
+            nlohmann::json body = line->message;  // 抄本正文(键改名在最后做)
+            // ---- 有效对话消息(内存/wire 用) ----
+            ReplayMessage message;
+            message.source_event_id = rename_keys ? source_key : line->message_id;
+            const auto wire_key = [&](const std::string& id) {
+                return rename_keys && !is_copy ? session_id + "/" + id : id;
+            };
+            const auto pair_id_of = [&](const nlohmann::json& call) {
+                const std::string provider_id = call.value("id", std::string());
+                const auto mapped = call_to_action.find(provider_id);
+                return mapped != call_to_action.end() ? mapped->second : provider_id;
+            };
+            if (role == "assistant") {
+                message.role = ReplayMessage::Role::Assistant;
+                if (body.contains("content")) {
+                    AppendConversationText(body["content"], &message);
+                }
+                if (body.contains("tool_calls") && body["tool_calls"].is_array()) {
+                    for (const auto& call : body["tool_calls"]) {
+                        if (!call.is_object()) {
+                            continue;
+                        }
+                        nlohmann::json block{{"type", "tool_call"}};
+                        block["call_id"] = wire_key(pair_id_of(call));
+                        if (call.contains("function") && call["function"].is_object()) {
+                            block["name"] = call["function"].value("name", std::string());
+                            nlohmann::json arguments = nlohmann::json::parse(
+                                call["function"].value("arguments", std::string("{}")), nullptr,
+                                /*allow_exceptions=*/false);
+                            block["arguments"] =
+                                arguments.is_discarded() ? nlohmann::json::object() : arguments;
+                        }
+                        message.blocks.push_back(std::move(block));
+                    }
+                }
+            } else if (role == "tool") {
+                message.role = ReplayMessage::Role::Tool;
+                message.call_id = wire_key(body.value("tool_call_id", std::string()));
+                if (body.contains("content")) {
+                    AppendConversationText(body["content"], &message);
+                }
+            } else {
+                // user / context_summary(摘要按 user 消息携带,同 v2 投影)。
+                message.role = ReplayMessage::Role::User;
+                if (body.contains("content")) {
+                    AppendConversationText(body["content"], &message);
+                }
+            }
+            fold.conversation.push_back(std::move(message));
+
+            // ---- 新场抄本草稿 ----
+            // 键恒带来源场名(与写者发号空间不撞);usage 不复制——唯一
+            // owner 在原场(§4.12),抄本缺实报记 null;正文里的调用键
+            // 同步改名,抄本在新账自配对。compactId/origin/display 等
+            // 原样照抄(历史事实,不冒充也不洗白)。
+            const auto import_key = [&](const std::string& id) {
+                return is_copy ? id : session_id + "/" + id;
+            };
+            if (role == "assistant" && body.contains("tool_calls") &&
+                body["tool_calls"].is_array()) {
+                for (auto& call : body["tool_calls"]) {
+                    if (call.is_object()) {
+                        call["id"] = import_key(pair_id_of(call));
+                    }
+                }
+            } else if (role == "tool") {
+                body["tool_call_id"] = import_key(body.value("tool_call_id", std::string()));
+            }
+            v3::MessageDraft draft;
+            draft.message_id_override = source_key;
+            if (line->turn_id.has_value()) {
+                draft.turn_id = import_key(*line->turn_id);
+            }
+            if (line->parent_turn_id.has_value()) {
+                draft.parent_turn_id = import_key(*line->parent_turn_id);
+            }
+            if (line->step_id.has_value()) {
+                draft.step_id = import_key(*line->step_id);
+            }
+            if (line->request_id.has_value()) {
+                draft.request_id = import_key(*line->request_id);
+            }
+            draft.compact_id = line->compact_id;            // 指祖先场的 compact,原样
+            draft.purpose = line->purpose;
+            draft.origin = line->origin;
+            draft.display = line->display;
+            draft.message = std::move(body);
+            if (role == "tool") {
+                draft.action_id = draft.message.value("tool_call_id", std::string());
+            } else {
+                draft.action_id = line->action_id;
+            }
+            draft.source_message_ref = source_key;          // 来源指认(抄本身份)
+            draft.source_tool_message_ref = line->source_tool_message_ref;  // 降档派生照指原版
+            if (role == "assistant") {
+                // 键必现、值 null(§4.12):usage 唯一 owner 在原场,抄本
+                // 不复制、不补 0。
+                draft.usage = nlohmann::json(nullptr);
+            }
+            draft.completion_status = line->completion_status;
+            draft.provider = line->provider;
+            draft.wire = line->wire;
+            draft.model = line->model;
+            draft.response_model = line->response_model;
+            fold.imports.push_back(std::move(draft));
+        }
+    }
+    return fold;
+}
+
+}  // namespace
+
 // 调用方须已持 mutex_(ResumeAsNew 七步内取默认源用,不再二次加锁)。
 std::string SessionManager::LatestResumableSessionIdLocked() {
     std::error_code ec;
@@ -1800,12 +2046,14 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     }
     // ---- 源格式分派(session_switch 接线点 2/3):两回路并存,按源目录
     // 格式走,不迁移旧档(§1.5)。main.jsonl 在即 v2(下方原路一字不动);
-    // <id>.jsonl 首行 schemaVersion==3 即 v3:ReadV3Ledger 验卷 +
-    // ProjectModelContext 链投影。悬空工具三道账与 checkpoint 是 v2 折叠
-    // 的概念,v3 源不伪造(执行状态恢复走 v3::ProjectResume 的后续棒)。
+    // <id>.jsonl 首行 schemaVersion==3 即 v3:ReadV3Ledger 验卷 + 沿源链
+    // 折算(FoldV3ResumeChain,D2)。悬空工具三道账与 checkpoint 是 v2
+    // 折叠的概念,v3 源不伪造(执行状态恢复走 v3::ProjectResume 的后续棒)。
     std::string source_last_event_id;
     std::string source_run_id;
     std::uint64_t source_seq = 0;
+    V3ResumeFold chain_fold;       // v3 源的链折算(第 6.5 步导入新场用)
+    bool has_chain_fold = false;
     if (const auto v3_stream = v3::FindV3SessionStream(source_dir); v3_stream.has_value()) {
         auto ledger = v3::ReadV3Ledger(*v3_stream);
         if (!ledger.has_value()) {
@@ -1827,15 +2075,25 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
             }
             source_seq = ledger->LastEntry()->seq;
         }
-        // 有效对话只取本账链(§4.10"请求不重携祖先全史");compact 内部
-        // 问答从未入链,天然排除。新档缺件如实报缺件,不从当前环境补造。
-        const v3::ModelContext context = v3::ProjectModelContext(*ledger);
-        outcome.effective_conversation = EffectiveConversationFromV3(*ledger, context);
+        // 有效对话沿 resume.source.attached 链折算(§4.10 第 3-4 条,D2):
+        // 祖先场历史全部进新场模型上下文;逐级验五键、按完整来源键去重、
+        // 防环、深度护栏。compact 内部问答从未入链,天然排除;被摘要替代
+        // 的原文不回潮(各段取各自 ModelContext 投影)。链有缺口时精确
+        // 恢复拒绝,不缺斤短两地续。
+        auto folded = FoldV3ResumeChain(*ledger, *v3_stream);
+        if (!folded.has_value()) {
+            return fail(folded.error().code == "chain" ? "resume.source_chain_broken"
+                                                       : "resume.source_corrupt",
+                        folded.error().message);
+        }
+        chain_fold = std::move(*folded);
+        has_chain_fold = true;
+        outcome.effective_conversation = chain_fold.conversation;
         ReplayState projection;
         projection.session_id = ledger->session_id;
         projection.run_id = ledger->run_id;
         projection.effective_conversation = outcome.effective_conversation;
-        outcome.replay_version = "v3-context-chain-1";
+        outcome.replay_version = "v3-context-chain-2";  // -2:链折算(D2)
         outcome.imported_state_hash = ComputeReplayStateHash(projection);
     } else {
         // 逐流验链 + 父子边交叉核(§3.9)。尾行截断是可恢复缺口:按已验证
@@ -1909,7 +2167,8 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     // 关 = 下方 v2 原路一字不动。源格式(v2/v3)与新场格式彼此独立。
     if (v3::NewSessionV3WriteEnabled()) {
         return ResumeAsNewV3Locked(request, source_id, previous_session_id, source_run_id,
-                                   source_last_event_id, source_seq, std::move(outcome));
+                                   source_last_event_id, source_seq, std::move(outcome),
+                                   has_chain_fold ? &chain_fold : nullptr);
     }
     SessionManifest manifest;
     manifest.schema_version = 2;
@@ -2053,7 +2312,8 @@ ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,
                                                   const std::string& previous_session_id,
                                                   const std::string& source_run_id,
                                                   const std::string& source_last_event_id,
-                                                  std::uint64_t source_seq, ResumeOutcome outcome) {
+                                                  std::uint64_t source_seq, ResumeOutcome outcome,
+                                                  const V3ResumeFold* chain_fold) {
     const auto fail = [&outcome](std::string code, std::string message) {
         outcome.error_code = std::move(code);
         outcome.message = std::move(message);
@@ -2106,6 +2366,34 @@ ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,
                         attached_receipt.error_message);
     }
     outcome.resume_attached_event_id = attached_receipt.id;
+
+    // 第 6.5 步(v3,D2):链折算的祖先+直接源有效对话抄进本账并接纳进
+    // 链(§4.10 第 3/5 条)。抄本 messageId/身份键带来源场名,与写者
+    // 发号空间不撞;usage 不复制(唯一 owner 在原场);一条
+    // context.input.applied 批量提交(§4.30)。此后本账链自足——首笔
+    // 请求的 prepared.inputMessageRefs 与实发消息逐位对得上。v2 源没有
+    // 链折算(chain_fold 空),不走这步,保持既有行为。
+    if (chain_fold != nullptr && !chain_fold->imports.empty()) {
+        std::vector<std::string> import_ids;
+        import_ids.reserve(chain_fold->imports.size());
+        for (const v3::MessageDraft& draft : chain_fold->imports) {
+            const auto receipt =
+                session->v3_main->AppendMessage(draft, Durability::ProcessCrash);
+            if (receipt.status != v3::WriteReceipt::Status::Committed) {
+                return fail("resume.step6_failed",
+                            "链史抄本落不了: " + receipt.error_code + " " + receipt.error_message);
+            }
+            import_ids.push_back(receipt.id);
+        }
+        const auto admitted =
+            session->v3_main->AdmitMessages(std::move(import_ids), Durability::PowerLoss);
+        if (admitted.status != v3::WriteReceipt::Status::Committed) {
+            return fail("resume.step6_failed",
+                        "链史接纳不进上下文: " + admitted.error_code + " " +
+                            admitted.error_message);
+        }
+        outcome.imported_history_count = chain_fold->imports.size();
+    }
 
     // 交互路的跨 session command.completed:旧场的 requested 只在旧场是 v2
     // 时才落得了(v3 场写不了 v2 requested),这里照实补终态(commandId

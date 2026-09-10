@@ -1143,7 +1143,8 @@ SubagentSessionNode WalkSessionTree(const std::filesystem::path& root_jsonl, int
 // ---------------------------------------------------------------------------
 
 std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem::path& jsonl,
-                                                           SourceLedgerResolver resolver) {
+                                                           SourceLedgerResolver resolver,
+                                                           int max_source_depth) {
     auto own = ReadV3Ledger(jsonl);
     if (!own.has_value()) {
         return std::unexpected(own.error());
@@ -1172,8 +1173,10 @@ std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem
 
     // 来源链:沿 resume.source.attached 回溯(直接源在前),逐级验 hash、
     // 去重、检环;祖先缺失只报缺口——本账链自足,精确上下文不受影响。
+    // 深度护栏:环靠 visited 拦,超长链(max_source_depth 级)到此为止。
     std::unordered_set<std::string> visited{own->session_id};
     V3Ledger current = std::move(*own);
+    int depth = 0;
     while (true) {
         // 取本账最后一枚 resume.source.attached(多次 resume 各有来源,
         // 最后一枚是最近的直接源)。
@@ -1186,6 +1189,21 @@ std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem
         if (attached == nullptr) {
             break;
         }
+        if (max_source_depth > 0 && depth >= max_source_depth) {
+            ResumeSourceStep step;
+            // 截断步仍指明"本要去的祖先",报缺口有头有脸。
+            if (auto source_ref = attached->payload.find("sourceRef");
+                source_ref != attached->payload.end() && source_ref->is_object()) {
+                step.session_id = source_ref->value("sessionId", std::string());
+                step.run_id = source_ref->value("runId", std::string());
+            }
+            step.check.ok = false;
+            step.check.reason = "chain_depth_exceeded";
+            projection.source_chain_ok = false;
+            projection.source_chain.push_back(std::move(step));
+            break;
+        }
+        ++depth;
         ResumeSourceStep step;
         auto source_ref = attached->payload.find("sourceRef");
         if (source_ref != attached->payload.end()) {
