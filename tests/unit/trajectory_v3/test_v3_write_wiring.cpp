@@ -29,6 +29,7 @@
 #include "api/types.hpp"
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "runtime/v3_compact_runtime.hpp"  // D3:RunV3Compact 驱动 applied
 #include "trajectory/journal.hpp"
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
@@ -770,4 +771,134 @@ TEST_CASE("开关读一次: 场开成 v3 后,环境变量翻回 0 不改本场�
     // 本场仍是纯 v3:v2 文件一枚不长,验卷过。
     CHECK_FALSE(std::filesystem::exists(ledger->session_dir() / "main.jsonl"));
     CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}
+
+// ---------------------------------------------------------------------------
+// D3(§5.1.2):compact applied 后的内存换账投影——ProjectV3ContextHistory
+// 重读主卷按链投影,返回"生效摘要 + 保留消息"(内部 compact 问答天然
+// 排除);压缩后新回合的 prepared 引用与投影同链(账实一致)。v2 场
+// 报错不换。
+// ---------------------------------------------------------------------------
+
+// 压缩模型桩:回一份带 manifest 围栏的合格摘要。
+class StubCompactClient : public lubancode::runtime::V3CompactModelClient {
+public:
+    lubancode::runtime::V3CompactModelReply Send(
+        const std::string& system, const std::vector<nlohmann::json>& messages) override {
+        (void)system;
+        (void)messages;
+        lubancode::runtime::V3CompactModelReply reply;
+        reply.ok = true;
+        reply.text = "# 交接摘要\n- 用户看了入口,工具读出了 main 函数。\n```json\n"
+                     "{\"goal\": \"看入口\", \"constraints\": [], \"open_items\": [], "
+                     "\"next_action\": \"继续\"}\n```\n";
+        reply.usage = nlohmann::json::object({{"inputTokens", 90}, {"outputTokens", 12}});
+        return reply;
+    }
+};
+
+TEST_CASE("D3: compact applied 后 ProjectV3ContextHistory 投影新链,prepared 同链") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("d3-swap");
+    TrajectorySessionLedger::Options options = LedgerOptions(root);
+    options.v3_system_content = "SYSTEM-BASE";
+    auto ledger = TrajectorySessionLedger::Open(options);
+    REQUIRE(ledger.has_value());
+    const std::filesystem::path stream = V3StreamOf(*ledger);
+    auto* writer = ledger->v3_main_writer();
+    REQUIRE(writer != nullptr);
+
+    // 一轮大块对话(材料给足体量,压缩才有收益)。
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge->BeginTurn("turn-1", "external_user");
+        bridge->RecordInput(UserMessage(std::string(6000, 'u')));
+        const std::string request_id =
+            bridge->OnRequestPrepared(MakeRequest("SYSTEM-REAL", {UserMessage(std::string(6000, 'u'))}),
+                                      PreparedContext());
+        REQUIRE_FALSE(request_id.empty());
+        bridge->OnRequestSent(request_id);
+        bridge->OnUsageRecorded(request_id, SampleUsage(), /*reported_by_provider=*/true,
+                                "resp-d3", 0, true, false);
+        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText(std::string(6000, 'a')),
+                                          "end_turn", "resp-d3"));
+        bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    }
+
+    // 全链压缩:applied 落稳(writer 内存链已换,账侧同卷)。
+    StubCompactClient client;
+    lubancode::runtime::V3CompactProfile profile;
+    profile.provider = "moonshot";
+    profile.wire = "openai-chat-completions";
+    profile.model = "kimi-k2.6";
+    profile.compact_window_tokens = 0;  // 门禁关:不掺容量变量
+    lubancode::runtime::V3CompactRunInput input;
+    input.trigger = "manual";
+    input.reason = "user_command";
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, profile,
+                                                          std::move(input));
+    REQUIRE(result.applied);
+
+    // 投影:摘要接 system,原对话退出模型上下文;内部 compact 问答不在。
+    auto projected = ledger->ProjectV3ContextHistory();
+    REQUIRE(projected.has_value());
+    REQUIRE(projected->size() == 1);  // 全量压缩:链 = system + 摘要
+    CHECK(projected->front().role == api::Role::User);
+    bool summary_text = false;
+    for (const auto& block : projected->front().content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            summary_text = text->text.find("交接摘要") != std::string::npos;
+        }
+    }
+    CHECK(summary_text);
+
+    // 压缩后新回合:prepared 的 inputMessageRefs 与投影同链(账实一致,
+    // C13 的账侧断言)。
+    std::string summary_ref = writer->context().chain[1].message_ref;
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge->BeginTurn("turn-2", "external_user");
+        bridge->RecordInput(UserMessage("新输入"));
+        const std::string request_id =
+            bridge->OnRequestPrepared(MakeRequest("SYSTEM-REAL", {UserMessage("新输入")}),
+                                      PreparedContext());
+        REQUIRE_FALSE(request_id.empty());
+        const auto rows = ReadLines(stream);
+        std::vector<std::string> refs;
+        for (const auto& row : rows) {
+            if (row.value("kind", "") == "model.request.prepared" &&
+                row.value("requestId", "") == request_id) {
+                for (const auto& ref : row["payload"]["inputMessageRefs"]) {
+                    refs.push_back(ref.get<std::string>());
+                }
+            }
+        }
+        REQUIRE(refs.size() == 2);
+        CHECK(refs[0] == summary_ref);  // 摘要在前,旧史不携
+        // 第二枚 = 新输入消息(账上刚落的 user 行)。
+        std::string new_user_ref;
+        for (const auto& row : rows) {
+            if (row.value("type", "") == "message" &&
+                row.value("purpose", "") == "conversation" &&
+                row.at("message").value("role", "") == "user" &&
+                row.at("message").at("content").dump().find("新输入") != std::string::npos) {
+                new_user_ref = row.value("messageId", "");
+            }
+        }
+        CHECK(refs[1] == new_user_ref);
+        // 不收口这一轮:assistant 未落,prepared 断言已足。
+    }
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}
+
+TEST_CASE("D3: v2 场 ProjectV3ContextHistory 报错不换") {
+    const auto root = FreshRoot("d3-v2");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    CHECK(ledger->v3_main_writer() == nullptr);
+    const auto projected = ledger->ProjectV3ContextHistory();
+    CHECK_FALSE(projected.has_value());
+    CHECK(projected.error().rfind("compact.swap.not_v3", 0) == 0);
 }

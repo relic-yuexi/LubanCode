@@ -4,10 +4,12 @@
 // 不换账、恢复按 applied 重建新上下文、并发第二场拒收。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -70,6 +72,18 @@ std::vector<nlohmann::json> ReadJsonLines(const std::filesystem::path& path) {
         }
     }
     return lines;
+}
+
+// 找指定 kind 的事件行(全部)。
+std::vector<const nlohmann::json*> EventsOfKind(const std::vector<nlohmann::json>& lines,
+                                                const std::string& kind) {
+    std::vector<const nlohmann::json*> found;
+    for (const auto& line : lines) {
+        if (line.value("kind", "") == kind) {
+            found.push_back(&line);
+        }
+    }
+    return found;
 }
 
 // 走完整链直到 Apply 就绪(prompt -> candidate -> validation)。
@@ -318,14 +332,15 @@ TEST_CASE("源版本冲突:提交前源变了,记 rejected 不静默拼接") {
 
 TEST_CASE("applied 写盘失败:旧内存视图不被替换,后续受阻") {
     // 注入点数准:1 system,2 started,3 user,4 admit,5 requested,6 freeze,
-    // 7 prompt,8 prepared,9 candidate,10 validation.started,
-    // 11 validation.completed,12 摘要落稳,13 applied 注入失败。
+    // 7 prompt,8 prepared,9 response.started,10 response.completed,
+    // 11 candidate,12 validation.started,13 validation.completed,
+    // 14 摘要落稳,15 applied 注入失败。(候选走流式三件套,D1 延伸。)
     Harness harness("iofail");
     V3WriterOptions fail_options;
     int count = 0;
     fail_options.inject_io_failure = [&count]() -> std::optional<std::string> {
         ++count;
-        return count >= 13 ? std::optional<std::string>("io.injected") : std::nullopt;
+        return count >= 15 ? std::optional<std::string>("io.injected") : std::nullopt;
     };
     auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
                                   "你是 LubanCode。", nlohmann::json::object(), fail_options,
@@ -340,8 +355,9 @@ TEST_CASE("applied 写盘失败:旧内存视图不被替换,后续受阻") {
     WriteReceipt user_receipt = writer->AppendMessage(std::move(user), Durability::PowerLoss);
     REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
     REQUIRE(writer->AdmitMessages({user_receipt.id}).status == WriteReceipt::Status::Committed);
-    // 5 requested + 6 freeze + 7 prompt + 8 prepared + 9 candidate +
-    // 10 validation.started + 11 validation.completed。
+    // 5 requested + 6 freeze + 7 prompt + 8 prepared + 9/10/11 候选三件套
+    //(response.started + response.completed + candidate)+
+    // 12 validation.started + 13 validation.completed。
     auto begin = CompactSession::Begin(*writer, "manual", "user_command", std::nullopt,
                                        nlohmann::json::object({}));
     REQUIRE(begin.info.began);
@@ -391,4 +407,155 @@ TEST_CASE("一场未收口,第二场拒收") {
                                         nlohmann::json::object({}));
     CHECK(!second.info.began);
     CHECK(second.info.error.rfind("compact.busy", 0) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// D1 延伸(§5.1.2):候选落账走流式三件套——started 预留 id + 零批 delta
+//(非流式压缩客户端)+ completed 定稿 + 完整 assistant 以预留 id 成行;
+// 候选行形状不变(origin=compact_runtime、parentTurnId、display=hidden),
+// 校验器认的闭环(started+completed+assistant)齐。
+// ---------------------------------------------------------------------------
+TEST_CASE("候选三件套:started/completed/candidate 闭环,形状不变") {
+    SUBCASE("完整候选:end_turn,零 delta,预留 id 成行") {
+        Harness harness("trio");
+        std::string candidate_id;
+        {
+            auto writer = harness.Start();
+            REQUIRE(writer.has_value());
+            auto seeded = harness.SeedTurn(*writer, "一轮。");
+            auto begin = CompactSession::Begin(*writer, "manual", "user_command", std::nullopt,
+                                               nlohmann::json::object({}));
+            REQUIRE(begin.info.began);
+            REQUIRE(begin.session
+                        ->Freeze(*writer, {seeded.first}, {}, {})
+                        .event.status == WriteReceipt::Status::Committed);
+            REQUIRE(writer
+                        ->PrepareRequest("request-000009", begin.session->turn_id(), "step-000009",
+                                         "compact", writer->context().system_message_ref,
+                                         {seeded.first},
+                                         nlohmann::json::object({{"provider", "moonshot"}}),
+                                         begin.session->compact_id())
+                        .status == WriteReceipt::Status::Committed);
+            const WriteReceipt candidate =
+                begin.session->WriteCandidate(
+                    *writer,
+                    nlohmann::json::object({{"role", "assistant"}, {"content", "# 摘要"}}),
+                    "request-000009", "step-000009", "moonshot", "openai-chat-completions",
+                    "kimi-k2.6", nlohmann::json(nullptr));
+            REQUIRE(candidate.status == WriteReceipt::Status::Committed);
+            candidate_id = candidate.id;
+        }
+        auto lines = ReadJsonLines(harness.jsonl);
+        // 三件套:started → completed 紧邻(零 delta 批)→ assistant 成行。
+        std::vector<std::string> kinds;
+        for (const auto& line : lines) {
+            if (!line.value("kind", "").empty()) {
+                kinds.push_back(line.value("kind", ""));
+            }
+        }
+        const auto started = std::find(kinds.begin(), kinds.end(), "model.response.started");
+        const auto completed = std::find(kinds.begin(), kinds.end(), "model.response.completed");
+        REQUIRE(started != kinds.end());
+        REQUIRE(completed != kinds.end());
+        CHECK(std::distance(started, completed) == 1);
+        CHECK(std::count(kinds.begin(), kinds.end(), "model.response.delta") == 0);
+        // 预留 id 成行:started/completed 的 messageId == 候选行 messageId。
+        REQUIRE(EventsOfKind(lines, "model.response.started").size() == 1);
+        REQUIRE(EventsOfKind(lines, "model.response.completed").size() == 1);
+        const auto& started_row = *EventsOfKind(lines, "model.response.started").front();
+        const auto& completed_row = *EventsOfKind(lines, "model.response.completed").front();
+        CHECK(started_row["payload"]["messageId"] == candidate_id);
+        CHECK(completed_row["payload"]["messageId"] == candidate_id);
+        CHECK(completed_row["payload"]["finishReason"] == "end_turn");
+        CHECK(completed_row.value("requestId", "") == "request-000009");
+        CHECK(!completed_row.value("compactId", "").empty());
+        // 候选行形状:内部回合纪律不因三件套破相。
+        for (const auto& line : lines) {
+            if (line.value("type", "") == "message" &&
+                line["message"].value("role", "") == "assistant" &&
+                line.value("purpose", "") == "compact") {
+                CHECK(line.value("origin", "") == "compact_runtime");
+                CHECK(line.value("display", nlohmann::json::object()).value("mode", "") ==
+                      "hidden");
+                CHECK(line.value("messageId", "") == candidate_id);
+                CHECK(line.contains("usage"));
+            }
+        }
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    }
+    SUBCASE("截断候选:finishReason=length,completionStatus=truncated") {
+        Harness harness("trio-trunc");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        auto seeded = harness.SeedTurn(*writer, "一轮。");
+        auto begin = CompactSession::Begin(*writer, "manual", "user_command", std::nullopt,
+                                           nlohmann::json::object({}));
+        REQUIRE(begin.info.began);
+        REQUIRE(begin.session->Freeze(*writer, {seeded.first}, {}, {}).event.status ==
+                WriteReceipt::Status::Committed);
+        REQUIRE(writer
+                    ->PrepareRequest("request-000009", begin.session->turn_id(), "step-000009",
+                                     "compact", writer->context().system_message_ref,
+                                     {seeded.first},
+                                     nlohmann::json::object({{"provider", "moonshot"}}),
+                                     begin.session->compact_id())
+                    .status == WriteReceipt::Status::Committed);
+        const WriteReceipt candidate =
+            begin.session->WriteCandidate(
+                *writer, nlohmann::json::object({{"role", "assistant"}, {"content", "半份"}}),
+                "request-000009", "step-000009", "moonshot", "openai-chat-completions",
+                "kimi-k2.6", nlohmann::json(nullptr), Durability::PowerLoss,
+                CompletionStatus::Truncated);
+        REQUIRE(candidate.status == WriteReceipt::Status::Committed);
+        auto lines = ReadJsonLines(harness.jsonl);
+        REQUIRE(EventsOfKind(lines, "model.response.completed").size() == 1);
+        const auto& completed_row = *EventsOfKind(lines, "model.response.completed").front();
+        CHECK(completed_row["payload"]["finishReason"] == "length");
+        for (const auto& line : lines) {
+            if (line.value("type", "") == "message" &&
+                line.value("messageId", "") == candidate.id) {
+                CHECK(line.value("completionStatus", "") == "truncated");
+            }
+        }
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    }
+    SUBCASE("turn 中途:三件套事件与候选行都带 parentTurnId") {
+        Harness harness("trio-midturn");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        auto seeded = harness.SeedTurn(*writer, "一轮。");
+        auto begin = CompactSession::Begin(*writer, "auto", "pre_send_overflow", "turn-000001",
+                                           nlohmann::json::object({}));
+        REQUIRE(begin.info.began);
+        REQUIRE(begin.session->parent_turn_id().has_value());
+        REQUIRE(begin.session->Freeze(*writer, {seeded.first}, {}, {}).event.status ==
+                WriteReceipt::Status::Committed);
+        REQUIRE(writer
+                    ->PrepareRequest("request-000009", begin.session->turn_id(), "step-000009",
+                                     "compact", writer->context().system_message_ref,
+                                     {seeded.first},
+                                     nlohmann::json::object({{"provider", "moonshot"}}),
+                                     begin.session->compact_id())
+                    .status == WriteReceipt::Status::Committed);
+        REQUIRE(begin.session
+                    ->WriteCandidate(
+                        *writer,
+                        nlohmann::json::object({{"role", "assistant"}, {"content", "# 摘要"}}),
+                        "request-000009", "step-000009", "moonshot", "openai-chat-completions",
+                        "kimi-k2.6", nlohmann::json(nullptr))
+                    .status == WriteReceipt::Status::Committed);
+        auto lines = ReadJsonLines(harness.jsonl);
+        REQUIRE(EventsOfKind(lines, "model.response.completed").size() == 1);
+        for (const auto& line : lines) {
+            if (line.value("kind", "") == "model.response.completed") {
+                CHECK(line.value("parentTurnId", "") == "turn-000001");
+            }
+            if (line.value("type", "") == "message" &&
+                line["message"].value("role", "") == "assistant" &&
+                line.value("purpose", "") == "compact") {
+                CHECK(line.value("parentTurnId", "") == "turn-000001");
+            }
+        }
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    }
 }

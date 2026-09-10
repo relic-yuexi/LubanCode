@@ -842,6 +842,16 @@ public:
     // 写者;当前主树尚无 v3 开卷路,恒 nullptr(分派门在,通路等接线)。
     trajectory::v3::V3Writer* v3_main_writer();
 
+    // ---- D3(§5.1.2):compact applied 后的内存换账投影 ----
+    // v3 会话专用:重读主卷验卷(读回即 applied 行的持久化确认)→
+    // ProjectModelContext 链投影(选中 system 之外的链序输入:生效摘要 +
+    // 保留消息)→ EffectiveConversationFromV3 + ProjectHistoryFromReplay
+    // 折成 api::Message——与 /resume、/export 同一份投影,不另造账。
+    // 调用方在 RunV3Compact 返回 applied(PowerLoss 落稳)后取走,
+    // ReplaceHistory 进 loop——v2 compact 换账的同一安全点。非 v3 场或
+    // 验卷不过:错误,调用方不换并明说。
+    std::expected<std::vector<api::Message>, std::string> ProjectV3ContextHistory() const;
+
     const std::string& session_id() const;
     std::filesystem::path session_dir() const;
     // T1 遥测注册用:本场 workspace 的假名 key(与 wake/cursor 同一口径)。

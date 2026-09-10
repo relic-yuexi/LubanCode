@@ -4014,6 +4014,25 @@ trajectory::v3::V3Writer* TrajectorySessionLedger::v3_main_writer() {
     return &*impl_->active->v3_main;
 }
 
+// D3(§5.1.2):compact applied 后的内存换账投影。重读主卷(共享读,
+// 不扰单写者)兼作 applied 行的持久化确认——验不过就不换,不拿内存
+// 视图顶账;投影与 /resume 的 v3 分支同一套(EffectiveConversation-
+// FromV3 公开共用),压缩后的实发形状与链引用天然一致。
+std::expected<std::vector<api::Message>, std::string>
+TrajectorySessionLedger::ProjectV3ContextHistory() const {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
+        return std::unexpected("compact.swap.not_v3: 内存换账投影只认 v3 主卷");
+    }
+    const auto ledger = v3::ReadV3Ledger(impl_->active->directory.v3_stream_path());
+    if (!ledger.has_value()) {
+        return std::unexpected("compact.swap.ledger_unreadable: " + ledger.error());
+    }
+    trajectory::ReplayState projection_state;
+    projection_state.effective_conversation =
+        trajectory::EffectiveConversationFromV3(*ledger, v3::ProjectModelContext(*ledger));
+    return ProjectHistoryFromReplay(projection_state);
+}
+
 std::uint64_t TrajectorySessionLedger::SpanEndSeq() {
     trajectory::TrajectoryRecorder* recorder = main();
     return recorder != nullptr ? recorder->next_seq() : 1;

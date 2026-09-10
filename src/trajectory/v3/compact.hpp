@@ -91,9 +91,15 @@ public:
                                     Durability durability = Durability::ProcessCrash);
 
     // 候选产物:压缩模型实际回复(assistant,purpose=compact;§4.5 行5)。
-    // 委托 writer 的流式便利或直接 AppendMessage;这里给一步式。
+    // 一步式内走流式三件套(D1 延伸,§4.43):started 预留 messageId+
+    // streamId → 零批 delta(压缩客户端同步整收,非流式同款保形状)→
+    // completed 定稿 + 完整 assistant 以预留 id 成行——校验器认的闭环
+    // (started+completed+assistant);候选行形状不变(origin=
+    // compact_runtime、parentTurnId、display=hidden),compact 内部回复
+    // 不接纳进 main 链(§4.8),故不走 CompleteStreamResponse 的整包路。
     // completion_status:压缩回复被输出上限截断时给 Truncated(§4.39 保存
-    // 原始部分回复、标 incomplete,不 applied);缺省按完整收尾。
+    // 原始部分回复、标 incomplete,不 applied;finishReason 落 length);
+    // 缺省按完整收尾。
     WriteReceipt WriteCandidate(V3Writer& writer, nlohmann::json assistant_message,
                                 std::string_view request_id, std::string_view step_id,
                                 std::string_view provider, std::string_view wire,
