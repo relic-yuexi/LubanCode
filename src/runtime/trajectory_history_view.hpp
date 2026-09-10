@@ -65,6 +65,10 @@ struct RestoredHistoryItem {
 struct RestoredHistoryView {
     std::string session_id;
     std::string source_jsonl;  // v3 账路径(诊断/详情档按需再读)
+    // 来源链场名(最老祖先 → 直接源;单场/链读不动时只有直接源)。
+    // 时间线 items 同序合流:祖先段在前,直接源段在后(§4.10"多次
+    // resume 沿源链读取……别重复显示同一祖先")。
+    std::vector<std::string> source_sessions;
     std::vector<RestoredHistoryItem> items;
 };
 
@@ -72,6 +76,12 @@ struct RestoredHistoryView {
 // ProjectHistoryTimeline 状态标志 + FoldToolActions 的调用配对(assistant
 // 调用块的 provider 号换成 actionId,与 tool 消息同键)。工具配对键与
 // 会话内 live 渲染无关——旧史一次性铺进滚动缓冲,不进 live 条目账。
+//
+// 来源链(§4.10 第 3 条):沿 resume.source.attached 把祖先场时间线也
+// 画出来(最老祖先在前、直接源在后,时间线原序);跨场完整来源键去重
+// ——后代账上的链史抄本让位给祖先原装,祖先缺失时抄本顶上。祖先账
+// 读不动只跳过该段,不拦可显示的其余历史。工具配对:原生行走
+// provider→action 映射;链史抄本的调用键已带来源场名,原样沿用。
 //
 // 读不动(验卷不过/非 v3 文件)给空 items:调用方按"没有可显示旧史"
 // 处理,不冒充、不抛错(§4.10"源缺失时报告缺口,不假称齐全")。

@@ -568,21 +568,24 @@ def validate_semantics(lines: list[dict]) -> list[str]:
     for target, count in finalized.items():
         if count > 1:
             problems.append(f"messageId {target} 定稿事件多于一次")
-    assistant_ids = [
-        obj["messageId"] for obj in lines
-        if obj.get("type") == "message" and obj.get("message", {}).get("role") == "assistant"
-    ]
-    for message_id in assistant_ids:
-        if message_id not in finalized:
-            problems.append(f"assistant {message_id} 无定稿事件")
-    # 中断的 assistant 必须带 completionStatus=interrupted。
+    # 中断的 assistant 必须带 completionStatus=interrupted;usage 键必现。
+    # resume 链史抄本(§4.10 第 3 条,D2)豁免定稿要求:sourceMessageRef
+    # 带跨场来源键("<场>/<msgId>")的 assistant 抄本,定稿事实在原场
+    # 账上,本场不伪造流式事件——凭来源指认豁免,无来源键照旧要求定稿。
     for obj in lines:
         if obj.get("type") != "message":
             continue
         if obj.get("message", {}).get("role") != "assistant":
             continue
+        message_id = obj.get("messageId")
         if "usage" not in obj:
-            problems.append(f"assistant {obj.get('messageId')} 缺 usage 键")
+            problems.append(f"assistant {message_id} 缺 usage 键")
+        if message_id in finalized:
+            continue
+        source_ref = obj.get("sourceMessageRef")
+        if isinstance(source_ref, str) and "/" in source_ref:
+            continue  # 链史抄本:定稿在原场
+        problems.append(f"assistant {message_id} 无定稿事件")
     return problems
 
 
@@ -682,6 +685,40 @@ def self_test() -> int:
     bad = dict(assistant); del bad["usage"]
     if not expect_fail(lambda: validate_line(bad, 3), "usage 键"):
         failures += 1
+    # semantics:resume 链史抄本豁免"无定稿事件"(§4.10 第 3 条,D2)——
+    # sourceMessageRef 带跨场来源键("<场>/<msgId>"),定稿在原场;无
+    # 来源键的 assistant 照旧被逮。
+    system_first = {
+        "type": "message", "schemaVersion": 3, "sessionId": "s", "runId": "r",
+        "seq": 1, "timestamp": "2026-09-10T00:00:00.000Z", "messageId": "msg-000001",
+        "turnId": None, "purpose": "conversation", "origin": "session_runtime",
+        "message": {"role": "system", "content": "sys"},
+        "systemMeta": {"cause": "initial"},
+        "prevHash": GENESIS_HASH, "lineHash": "0" * 64,
+    }
+    started = {
+        "type": "event", "schemaVersion": 3, "sessionId": "s", "runId": "r",
+        "seq": 2, "timestamp": "2026-09-10T00:00:00.000Z", "eventId": "evt-000001",
+        "kind": "session.started",
+        "payload": {"context": {"contextId": "main", "revision": 1,
+                                "contextChain": [{"messageRef": "msg-000001",
+                                                  "prevMessageRef": None}]}},
+        "prevHash": GENESIS_HASH, "lineHash": "0" * 64,
+    }
+    copied = dict(assistant)
+    copied.update({"seq": 3, "messageId": "old-session/msg-000002",
+                   "sourceMessageRef": "old-session/msg-000002"})
+    problems = validate_semantics([system_first, started, copied])
+    if any("无定稿事件" in problem for problem in problems):
+        failures += 1
+        print("self-test 误报: 链史抄本应豁免定稿 "
+              f"({[p for p in problems if '定稿' in p]})")
+    bare = dict(assistant)
+    bare.update({"seq": 3, "messageId": "msg-000002"})
+    problems = validate_semantics([system_first, started, bare])
+    if not any("无定稿事件" in problem for problem in problems):
+        failures += 1
+        print("self-test 漏报: 无来源键 assistant 未要求定稿")
     # 哈希链自洽:rehash 后重验通过。
     good = dict(base); good["lineHash"] = line_hash(GENESIS_HASH, base)
     if line_hash(GENESIS_HASH, base) == good["lineHash"]:

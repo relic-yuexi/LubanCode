@@ -441,7 +441,12 @@ using SourceLedgerResolver = std::function<std::filesystem::path(const std::stri
 // resume 三恢复(§4.59 表):历史索引/模型输入/执行状态各归各;
 // 沿 resume.source.attached 回溯来源链,逐级验 hash、去重、检环;
 // 祖先缺失只报缺口——本账链自足,精确上下文恢复不受影响。
-std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem::path& jsonl,
-                                                           SourceLedgerResolver resolver = nullptr);
+//
+// 链护栏两道(§4.10"检查环和引用错误"):sessionId 已见过标 duplicate 不
+// 再下钻(环);max_source_depth 封顶回溯级数,超深标
+// check.reason="chain_depth_exceeded" 停走(超长链不无限读账)。
+std::expected<ResumeProjection, std::string> ProjectResume(
+    const std::filesystem::path& jsonl, SourceLedgerResolver resolver = nullptr,
+    int max_source_depth = 64);
 
 }  // namespace lubancode::trajectory::v3
