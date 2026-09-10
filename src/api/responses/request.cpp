@@ -14,6 +14,15 @@ std::string WireRole(Role role) {
     return RoleToString(role, "assistant");
 }
 
+// 四角色换骨(v3 第二棒,差距清单 §8.2 第 4 条):文本部件的类型只认
+// assistant 一角——assistant 的正文是 output_text,其余(user、折 user
+// 侧的 tool)一律 input_text。System 不该到这层(BuildRequestJson 把它
+// 顶置进顶层 instructions),防御到达也折 input_text,与 WireRole 的
+// 折法一致,不造第三角。现行 User/Assistant 的输出一字不变。
+const char* TextPartType(Role role) {
+    return role == Role::Assistant ? "output_text" : "input_text";
+}
+
 // 没有图片的旧消息继续沿用逐块转 item 的写法，避免把既有请求形状悄悄
 // 合并。含图片时另走下面的成组分支，input_text 和 input_image 才能同框。
 json ContentBlockToItem(const ContentBlock& block, Role role) {
@@ -21,10 +30,9 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
         [role](const auto& b) -> json {
             using T = std::decay_t<decltype(b)>;
             if constexpr (std::is_same_v<T, TextBlock>) {
-                const char* text_type = role == Role::User ? "input_text" : "output_text";
                 return json{{"type", "message"},
                             {"role", WireRole(role)},
-                            {"content", json::array({json{{"type", text_type}, {"text", b.text}}})}};
+                            {"content", json::array({json{{"type", TextPartType(role)}, {"text", b.text}}})}};
             } else if constexpr (std::is_same_v<T, ImageBlock>) {
                 return json{{"type", "message"},
                             {"role", WireRole(role)},
@@ -44,8 +52,7 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                 // 一句短文本标记(base64 绝不塞回请求,续聊不重放正文)。
                 return json{{"type", "message"},
                             {"role", WireRole(role)},
-                            {"content", json::array({json{{"type", role == Role::User ? "input_text"
-                                                                                       : "output_text"},
+                            {"content", json::array({json{{"type", TextPartType(role)},
                                                        {"text", ModelImageReplayText(b)}}})}};
             } else if constexpr (std::is_same_v<T, ServerToolUseBlock>) {
                 // anthropic 原生工具搜索块(动态工具 P3)在 responses wire 的
@@ -53,13 +60,13 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                 return json{{"type", "message"},
                             {"role", WireRole(role)},
                             {"content", json::array({json{
-                                {"type", role == Role::User ? "input_text" : "output_text"},
+                                {"type", TextPartType(role)},
                                 {"text", "[服务端工具搜索(anthropic 原生): " + b.name + " 已由 provider 执行]"}}})}};
             } else if constexpr (std::is_same_v<T, ServerToolResultBlock>) {
                 return json{{"type", "message"},
                             {"role", WireRole(role)},
                             {"content", json::array({json{
-                                {"type", role == Role::User ? "input_text" : "output_text"},
+                                {"type", TextPartType(role)},
                                 {"text", "[服务端工具搜索结果(anthropic 原生): " + b.content.dump() + "]"}}})}};
             } else {
                 // 工具结果图片回喂(协议原生):function_call_output.output
@@ -106,8 +113,28 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     body["stream"] = true;
     body["store"] = false;  // 无状态:历史全靠自己带,跟 Anthropic 后端行为一致
 
-    if (!request.system.empty()) {
-        body["instructions"] = request.system;
+    // 四角色换骨(v3 第二棒,差距清单 §8.2 第 4 条):System 角色消息是
+    // 上下文根,顶置进顶层 instructions(§4.46 目标表),input 里一条不落。
+    // Request::system(现行两角色路径的唯一入口)先行,System 消息按消息序
+    // 接在其后("\n" 连接,空段不造)。System 消息只取 TextBlock——与
+    // anthropic/chat 两家同一取舍,富块 system 后续棒次需要再扩。
+    std::string instructions = request.system;
+    for (const auto& message : request.messages) {
+        if (message.role != Role::System) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<TextBlock>(&block);
+                text != nullptr && !text->text.empty()) {
+                if (!instructions.empty()) {
+                    instructions += "\n";
+                }
+                instructions += text->text;
+            }
+        }
+    }
+    if (!instructions.empty()) {
+        body["instructions"] = std::move(instructions);
     }
 
     // 推理参数(模型协议兼容实录矩阵单 P1 起按方言落线):
@@ -146,6 +173,10 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
 
     json input = json::array();
     for (const auto& message : request.messages) {
+        // System 角色已顶置进 instructions,input 里一条不落(不重复注入)。
+        if (message.role == Role::System) {
+            continue;
+        }
         bool has_image = false;
         for (const auto& block : message.content) {
             if (std::holds_alternative<ImageBlock>(block)) {
@@ -178,7 +209,7 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                 [&](const auto& b) {
                     using T = std::decay_t<decltype(b)>;
                     if constexpr (std::is_same_v<T, TextBlock>) {
-                        content.push_back(json{{"type", message.role == Role::User ? "input_text" : "output_text"},
+                        content.push_back(json{{"type", TextPartType(message.role)},
                                                {"text", b.text}});
                     } else if constexpr (std::is_same_v<T, ImageBlock>) {
                         content.push_back(json{{"type", "input_image"},
@@ -187,7 +218,7 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                         // 思考块不回传:responses wire 的 reasoning 是一次性的
                     } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                         // 图片引用翻短文本标记,与成组分支同规矩。
-                        content.push_back(json{{"type", message.role == Role::User ? "input_text" : "output_text"},
+                        content.push_back(json{{"type", TextPartType(message.role)},
                                                {"text", ModelImageReplayText(b)}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_content();

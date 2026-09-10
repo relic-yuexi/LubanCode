@@ -18,9 +18,12 @@ std::string WireRole(Role role) {
 
 // 工具结果回传(functionResponse)只认函数名,中立层 ToolResultBlock 里却
 // 只有 tool_use_id——先扫一遍全部历史,把 assistant 发起过的每次调用按
-// id 记下函数名,后面翻 ToolResultBlock 时对回来。历史里对不上号的(上游
-// 少给了那条 assistant 消息)退回用 id 本身当名字:请求不至于拼坏,服务端
-// 要真不认会以 400 说清楚,好过本地悄悄丢结果。
+// id 记下函数名,后面翻 ToolResultBlock 时对回来。四角色核对(v3 第二棒,
+// 差距清单 §8.2 第 5 条):表从 ToolUseBlock 建立、按 tool_use_id(四角色
+// 下就是独立 tool 消息携带的 tool_call_id)对回,不扫消息角色——User 容器
+// 旧路与 Tool 角色新路同表同对,无需分叉。历史里对不上号的(上游少给了
+// 那条 assistant 消息)退回用 id 本身当名字:请求不至于拼坏,服务端要真
+// 不认会以 400 说清楚,好过本地悄悄丢结果。
 std::map<std::string, std::string> ToolNameByUseId(const std::vector<Message>& messages) {
     std::map<std::string, std::string> names;
     for (const auto& message : messages) {
@@ -114,9 +117,30 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     json body;
 
     // 系统提示走 systemInstruction(角色外置),不掺进 contents——Gemini 的
-    // contents 里没有 system 这一角。
-    if (!request.system.empty()) {
-        body["systemInstruction"] = json{{"parts", json::array({json{{"text", request.system}}})}};
+    // contents 里没有 system 这一角。四角色换骨(v3 第二棒,差距清单 §8.2
+    // 第 5 条):System 角色消息是上下文根,与 Request::system(现行两角色
+    // 路径的唯一入口)同顶这里——Request::system 先行,System 消息按消息序
+    // 接在其后("\n" 连接,空段不造),多源拼一段 text,与 anthropic/chat/
+    // responses 三家同一拼接规矩。System 消息只取 TextBlock,富块 system
+    // 后续棒次需要再扩。
+    std::string system_text = request.system;
+    for (const auto& message : request.messages) {
+        if (message.role != Role::System) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<TextBlock>(&block);
+                text != nullptr && !text->text.empty()) {
+                if (!system_text.empty()) {
+                    system_text += "\n";
+                }
+                system_text += text->text;
+            }
+        }
+    }
+    if (!system_text.empty()) {
+        body["systemInstruction"] =
+            json{{"parts", json::array({json{{"text", std::move(system_text)}}})}};
     }
 
     json contents = json::array();
@@ -124,6 +148,11 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     const std::map<std::string, std::string> tool_names = ToolNameByUseId(request.messages);
 
     for (const auto& message : request.messages) {
+        // System 角色已顶置进 systemInstruction,contents 里一条不落
+        //(不重复注入)。
+        if (message.role == Role::System) {
+            continue;
+        }
         // 普通内容(文本/图片)攒成一条 content,工具块各自单独成条——
         // Gemini 的 parts 可以混装,但 functionCall/functionResponse 单独
         // 一条 content 语义最清楚,也不依赖服务端对混合 parts 的容忍度。
@@ -181,7 +210,11 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                             const std::string content = b.content + ToolResultImageDegradedNote(b);
                             function_response["response"] = FunctionResponseBody(b, content);
                         }
-                        contents.push_back(json{{"role", "user"},
+                        // 四角色换骨:role 按消息角色经 WireRole 落位,不硬
+                        // 编码——User 容器旧路与 Tool 角色新路都折 "user"
+                        //(协议 functionResponse 的 role=user 现行形状保持,
+                        // WireRole(Tool) 同值,出口一字不变)。
+                        contents.push_back(json{{"role", WireRole(message.role)},
                                                 {"parts", json::array(
                                                               {json{{"functionResponse",
                                                                      std::move(function_response)}}})}});
