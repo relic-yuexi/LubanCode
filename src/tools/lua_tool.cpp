@@ -48,6 +48,17 @@ LuaProfile TrustedDefaultImpl() {
     return profile;
 }
 
+// hook 中间件 state 的缺省画像(LuaHook 单 P0-A):白名单库 + 三道墙
+// (§六的 500ms 是待验证建议值,不是性能结论)。
+LuaProfile HookDefaultImpl() {
+    LuaProfile profile;
+    profile.level = LuaProfile::Level::Whitelisted;
+    profile.instruction_budget = 200'000'000;
+    profile.memory_cap_bytes = 256 * 1024 * 1024;
+    profile.wall_budget = std::chrono::milliseconds(500);
+    return profile;
+}
+
 // 底下的原生 allocator(realloc/free):lua_Alloc 契约:NULL 释放,osize
 // 只在 ptr!=NULL 时才有意义。包一层记账,超帽返回 NULL——Lua 把 NULL
 // 当 OOM 走 luaL_error,宿主堆不破。
@@ -61,6 +72,9 @@ void* GuardedAlloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
         return nullptr;
     }
     if (guard->memory_cap > 0 && guard->memory_used + nsize > guard->memory_cap) {
+        // 内存帽落锤:记账分型(预算错误的稳定码映射用)。
+        guard->budget_hit = true;
+        guard->last_budget_kind = LuaGuard::BudgetKind::Memory;
         return nullptr;  // Lua 把 NULL 当 OOM,luaL_error 走脚本错误,宿主不倒
     }
     void* next = std::realloc(ptr, nsize);
@@ -74,8 +88,8 @@ void* GuardedAlloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
     return next;
 }
 
-// instruction hook(LUA_MASKCOUNT):数指令、查取消、查预算。luaL_error 是
-// longjmp 路子,pcall 接得住——宿主栈不破。
+// instruction hook(LUA_MASKCOUNT):数指令、查取消、查预算、查墙钟。luaL_error
+// 是 longjmp 路子,pcall 接得住——宿主栈不破。
 // guard 的通道:lua_sethook 没有 ud 参数,hook 也不是 C closure(upvalue
 // 那条路不通),所以把 guard 塞进 registry 的固定 light userdata 键里。
 const char* kGuardRegistryKey = "lubancode.lua.guard";
@@ -95,17 +109,27 @@ void GuardHook(lua_State* L, lua_Debug*) {
     }
     if (guard->instruction_budget > 0 && guard->instructions_used >= guard->instruction_budget) {
         guard->budget_hit = true;
+        guard->last_budget_kind = LuaGuard::BudgetKind::Instruction;
         // luaL_error 走 lua_pushfstring,格式符只认 Lua 白名单(%d/%s/%f/%p/%I),
         // C 的 %llu 不行——预算数先拼进字符串再交。
         luaL_error(L, ("cpu 指令预算耗尽(约 " + std::to_string(guard->instruction_budget) +
                        " 条虚拟机指令):改小输入或拆小任务")
                           .c_str());
+        return;
+    }
+    // 墙钟(LuaHook 单 P0-A 第四道墙):只管本 state 跑野的脚本;阻塞
+    // Host API 的等待不在这拦(各 Host API 自己接 deadline/cancel)。
+    if (guard->wall_deadline != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() >= guard->wall_deadline) {
+        guard->budget_hit = true;
+        guard->last_budget_kind = LuaGuard::BudgetKind::WallClock;
+        luaL_error(L, "lua 墙钟预算耗尽(handler 自用时间到点):拆小任务或调大限额");
     }
 }
 
 }  // namespace
 
-// 造一枚带三道墙(allocator 内存帽/hook 指令预算/取消链)的 state。
+// 造一枚带三道墙(allocator 内存帽/hook 指令预算+墙钟/取消链)的 state。
 // 预算与帽由 profile 定;取消旗是每轮执行期才灌的,存 guard 里由 hook 查。
 // guard 的寿命:LuaTool 持 unique_ptr,state close 之后回调面消失,安全。
 // (阶段 3 起 runtime 侧的 Lua Host API 走同一枚构造——墙只此一份。)
@@ -121,7 +145,8 @@ lua_State* NewGuardedLuaState(const LuaProfile& profile, std::unique_ptr<LuaGuar
     lua_pushstring(L, kGuardRegistryKey);
     lua_pushlightuserdata(L, guard.get());
     lua_rawset(L, LUA_REGISTRYINDEX);
-    if (profile.instruction_budget > 0) {
+    // 墙钟也是指令 hook 查的:任一道时间墙立着,hook 就得挂。
+    if (profile.instruction_budget > 0 || profile.wall_budget > std::chrono::milliseconds(0)) {
         lua_sethook(L, GuardHook, LUA_MASKCOUNT, kHookStride);
     }
     guard_out = std::move(guard);
@@ -148,6 +173,58 @@ void ApplyPureLuaProfile(lua_State* L) {
         lua_setfield(L, -2, "loadlib");
     }
     lua_pop(L, 1);
+}
+
+void ApplyWhitelistLuaProfile(lua_State* L) {
+    // §五"Lua 库采用白名单":不从"开全库再减法"出发——那会漏(os.remove/
+    // rename、模块搜索器、coroutine 预算绕过都是现成教训)。从零只开:
+    //   base(去 dofile/loadfile) + string + table + math + utf8
+    //   os 只留时间四函数(clock/date/time/difftime)
+    // 不开:io、package(连带 require 与模块搜索器)、coroutine(新建线程
+    // 不继承指令 hook,预算可被绕)、debug、loadfile/dofile(文件口)。
+    // luaL_requiref 走 registry 的 LOADED 表,不依赖 package 全局。
+    luaL_requiref(L, LUA_GNAME, luaopen_base, 0);
+    lua_pop(L, 1);
+    // base 里的文件口:显式摘掉(load 保留——只编译字符串,不吃盘)。
+    lua_pushnil(L);
+    lua_setglobal(L, "dofile");
+    lua_pushnil(L);
+    lua_setglobal(L, "loadfile");
+    luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1);
+    lua_pop(L, 1);
+    luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
+    lua_pop(L, 1);
+    // os:开真表(glb=0),拷时间四函数到新表再挂全局——真表只留在
+    // LOADED 里,require 没开,脚本摸不回去。
+    luaL_requiref(L, LUA_OSLIBNAME, luaopen_os, 0);
+    lua_createtable(L, 0, 4);
+    for (const char* name : {"clock", "date", "time", "difftime"}) {
+        lua_getfield(L, -2, name);
+        if (lua_isfunction(L, -1) != 0) {
+            lua_setfield(L, -2, name);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    lua_setglobal(L, "os");
+    lua_pop(L, 1);  // 真 os 表
+}
+
+// 按画像开库的唯一入口:装载路径(LuaTool/LuaHostState)不再各自抄一份
+// luaL_openlibs(抄出来的第二份迟早和白名单漂移)。
+void OpenLuaLibraries(lua_State* L, const LuaProfile& profile) {
+    if (profile.level == LuaProfile::Level::Whitelisted) {
+        ApplyWhitelistLuaProfile(L);
+        return;
+    }
+    luaL_openlibs(L);
+    if (profile.level == LuaProfile::Level::Pure) {
+        ApplyPureLuaProfile(L);
+    }
 }
 
 namespace {
@@ -354,6 +431,7 @@ std::expected<std::unique_ptr<LuaTool>, std::string> LuaTool::LoadFromScript(
         return std::unexpected(std::move(message));
     };
 
+    // 工具插件照旧三档画像开库(Pure/Trusted;白名单档是 hook state 的)。
     luaL_openlibs(L);
     if (profile.level == LuaProfile::Level::Pure) {
         ApplyPureLuaProfile(L);
@@ -570,5 +648,6 @@ LuaScanResult LoadLuaPlugins(const std::filesystem::path& dir, const LuaProfile&
 
 LuaProfile LuaProfile::PureDefault() { return PureDefaultImpl(); }
 LuaProfile LuaProfile::TrustedDefault() { return TrustedDefaultImpl(); }
+LuaProfile LuaProfile::HookDefault() { return HookDefaultImpl(); }
 
 }  // namespace lubancode::tools

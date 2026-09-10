@@ -340,6 +340,18 @@ endif()
 # include(engine/runtime 里 include cli 终端件/app)由 tests/gate 层的守门
 # 测试(test_app_boundary_gate.cpp)在 CI 里钉死。
 # ---------------------------------------------------------------------------
+# MSVC + Lua 的 longjmp 坑(LuaHook 单 P0-A 实测):/EHsc 下,lua_error/
+# luaL_error 从"无存活 C++ 对象"的 C++ 帧 longjmp 会 terminate/SEGV
+# (GuardHook 取消分支与 next 闭包两处复现;同函数里有存活 std::string 的
+# 分支反而能过——帧展开信息有无之别)。/EHa 让 Lua 边界 TU 的帧始终带
+# 全量展开表,longjmp 走异步展开,不再看运气。只给这两个 TU 上,不全局
+# 放开(/EHa 会关掉一些编译器优化假设)。
+if(MSVC)
+  set_source_files_properties(
+    src/runtime/plugin_lua_host.cpp
+    src/tools/lua_tool.cpp
+    PROPERTIES COMPILE_OPTIONS "/EHa")
+endif()
 add_library(lubancode_engine STATIC
   ${_lubancode_platform_sources}
   src/platform/console_common.cpp
@@ -463,6 +475,10 @@ add_library(lubancode_engine STATIC
   src/hooks/detached.cpp
   # 四层生命周期单 P2:可靠 Post 的 durable outbox/ack 账本。
   src/hooks/outbox.cpp
+  # LuaHook 单 P0-A:中间件统一合同与执行核(同名选实现/不可变计划/
+  # 至多一次 next/候选采用/短路/观察者并发);与老进程 hook 路并行,
+  # 老路径一字不改。
+  src/hooks/middleware.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
