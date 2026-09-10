@@ -941,6 +941,7 @@ std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem
             projection.source_chain.push_back(std::move(step));
             break;
         }
+        step.ledger = *ancestor;  // 历史分页用副本;遍历游标另持
         step.check = VerifyCrossSessionRef(*step.ref, *ancestor);
         if (!step.check.ok) {
             projection.source_chain_ok = false;

@@ -241,12 +241,13 @@ TEST_CASE("模型上下文:降档后链上只选派生版本,同 action 不双�
     ModelContext context = ProjectModelContext(*ledger);
     CHECK(context.preview_budget_bytes == 16384);
     CHECK(context.duplicate_action_versions.empty());
-    REQUIRE(context.inputs.size() == 2);  // user + 派生 tool
-    CHECK(context.inputs[1].message_id == "msg-000005");
-    CHECK(context.inputs[1].derived_preview);
+    // 链:user + assistant + 派生 tool(原版 msg-000004 已退链)。
+    REQUIRE(context.inputs.size() == 3);
+    CHECK(context.inputs[2].message_id == "msg-000005");
+    CHECK(context.inputs[2].derived_preview);
     // 链上版本是 16 KiB 预览(短文本),不是原版。
-    std::string content = context.inputs[1].message.at("content").get<std::string>();
-    CHECK(context.inputs[1].message.at("tool_call_id") == "action-000001");
+    std::string content = context.inputs[2].message.at("content").get<std::string>();
+    CHECK(context.inputs[2].message.at("tool_call_id") == "action-000001");
     CHECK_FALSE(content.empty());
 }
 
@@ -394,21 +395,37 @@ TEST_CASE("工具折叠:attempt 重试链逐次留档(§4.14)") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("result_preview:选用链展开,消息正文即读取投影") {
-    auto ledger = ReadV3Ledger(Fixture("tool_round.jsonl"));
+    // subagent_parent 的 tool 消息带 resultSelectionRef:选用链完整。
+    auto ledger = ReadV3Ledger(Fixture("subagent_parent.jsonl"));
     REQUIRE(ledger.has_value());
     // 无 session_dir:引用链照展,artifact 全标缺口,不冒称完整。
     ResultPreviewProjection projection =
         ExpandResultPreview(*ledger, std::filesystem::path{}, "msg-000004");
-    CHECK(projection.result_selection_ref == "evt-000013");
+    CHECK(projection.result_selection_ref == "evt-000012");
     REQUIRE(projection.source_result_event_refs.size() == 1);
-    CHECK(projection.source_result_event_refs[0] == "evt-000012");
+    CHECK(projection.source_result_event_refs[0] == "evt-000011");
     CHECK_FALSE(projection.result_preview.empty());
-    CHECK(projection.result_preview.find("exit_code: 0") == 0);
+    CHECK(projection.result_preview.find("task accepted") == 0);
     REQUIRE(projection.result_refs.size() == 1);
-    CHECK(projection.result_refs[0].at("artifactId") == "R-000001");
+    CHECK(projection.result_refs[0].at("artifactId") == "res-000001");
     REQUIRE(projection.artifacts.size() == 1);
     CHECK(projection.artifacts[0].gap_reason == "missing_blob");
     CHECK_FALSE(projection.complete);  // §5.1"新档缺 blob 标缺口"
+}
+
+TEST_CASE("result_preview:无选用引用时按 actionId 回退收 persisted") {
+    // tool_round 的 tool 消息没写可选键 resultSelectionRef(早期形状):
+    // 读取回退按 actionId 收全部 persisted,引用照样闭合。
+    auto ledger = ReadV3Ledger(Fixture("tool_round.jsonl"));
+    REQUIRE(ledger.has_value());
+    ResultPreviewProjection projection =
+        ExpandResultPreview(*ledger, std::filesystem::path{}, "msg-000004");
+    CHECK(projection.result_selection_ref.empty());
+    REQUIRE(projection.result_refs.size() == 2);  // evt-000012 的 metadata + stdout
+    CHECK(projection.result_refs[0].at("artifactId") == "R-000001");
+    REQUIRE(projection.artifacts.size() == 2);
+    CHECK(projection.artifacts[0].gap_reason == "missing_blob");
+    CHECK_FALSE(projection.complete);
 }
 
 TEST_CASE("result_preview:真文件验 hash,坏 hash/缺件分得清") {
@@ -465,7 +482,8 @@ TEST_CASE("result_preview:真文件验 hash,坏 hash/缺件分得清") {
         WriteReceipt message = action.AppendToolMessage(*writer, "exit_code: 0\nhello",
                                                         action.selected_event_id());
         REQUIRE(message.status == WriteReceipt::Status::Committed);
-        tool_message_id = message.id;
+        // AppendToolMessage 的回执是接纳事件;tool 消息 id 取链尾。
+        tool_message_id = writer->context().chain.back().message_ref;
     }
     auto ledger = ReadV3Ledger(jsonl);
     REQUIRE(ledger.has_value());

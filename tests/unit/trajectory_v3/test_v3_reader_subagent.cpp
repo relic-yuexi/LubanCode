@@ -44,7 +44,9 @@ TEST_CASE("跨会话五键:验得过、错各归各(§3.1/§4.2)") {
     good.run_id = parent->run_id;
     good.seq = 10;
     good.id = "evt-000007";
-    good.hash = parent->events[9].line_hash;
+    const EventLine* spawn = parent->FindEvent("evt-000007");
+    REQUIRE(spawn != nullptr);
+    good.hash = spawn->line_hash;
     CrossSessionRefCheck check = VerifyCrossSessionRef(good, *parent);
     CHECK(check.ok);
 

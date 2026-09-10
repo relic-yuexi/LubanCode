@@ -146,7 +146,8 @@ TEST_CASE("普通 resume:三恢复各归各,历史 ID 与顺序不变") {
         WriteReceipt message =
             action.AppendToolMessage(*writer, "晴,26 度", action.selected_event_id());
         REQUIRE(message.status == WriteReceipt::Status::Committed);
-        tool_message_id = message.id;
+        // AppendToolMessage 的回执是接纳事件;tool 消息 id 取链尾。
+        tool_message_id = writer->context().chain.back().message_ref;
     }
     // 模拟 resume:新场 C 记 resume.source.attached → 读侧 ProjectResume。
     {
