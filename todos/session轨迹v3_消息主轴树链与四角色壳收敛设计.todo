@@ -2245,7 +2245,15 @@ AppServer 的 v3 接入设计另见 [AppServer 接入 Session v3](AppServer接�
 
 文档检查只证明文本格式与交叉引用基本齐全，不代替上述运行验收。
 
-## 六、关联
+### 5.1.1 第一轮验收记录（2026-09-11，非 compact 行；基线 v0.26.243 + 接线点 1）
+
+手段：Release 真机 exe、每场景独立临时 USERPROFILE、`LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1`、剧本化假 anthropic 后端（`scripts/tests/v3_accept_fake_backend.py`）、`scripts/tests/v3_accept_matrix.py` 管道驱动，账本全过 `validate_trajectory_v3.py`。八场景 81 断言：74 过，7 红全出同一枚 D1。
+
+- **过**：启动后不输入（账恰 3 行零用户回合）；加载 soul（system 三级递进、切换三步各闭合、内存选新版旧请求指旧版）；切换事件后崩溃（截断账等价崩溃现场，resume 五键指 change 行、旧 system 生效）；普通 resume（源账字节不动、请求带全旧史）；resume 后再 resume（三场链 hash 全验、无重复显示、seq 不混排）；provider usage 缺失（键必现值 null 不补 0）；新档缺 blob/坏引用（库层标缺口，恢复不宣称完整）；只读 replay（零模型调用零工具零新 blob）。
+- **D1（大，阻塞校验器）**：生产桥 `TrajectoryTurnBridge` 落 assistant 直接 `AppendMessage`，不走 `model.response.started/delta/completed` 三件套——writer/fixture/单测/校验器四边齐备，唯独生产接线缺。凡含 assistant 的生产账本校验器必红。修法：流式分批接进 SSE 消费路径，立单修。
+- **D2（中，恢复语义）**：resume-as-new 只折直接源本账链：新场 `prepared.inputMessageRefs` 与实发不符（1 比 5）；二次 resume 祖先史退出模型上下文。`v3::ProjectResume` 链遍历 reader 已备，resume 路未接（§4.10 第 3-4 条）。
+- **O1**：首行 system 为空基础版，完整版首笔请求 prepare 时三步补入——不算病，读账须知。**O2**：终端重放不画 system 切换标记（库层 `completed=false` 有钉）。**O3**：blob 缺口标注无 CLI 消费面。
+- 17 行 compact 相关场景全部留第二轮（基线已含 compact 运行时 v0.26.244）。
 
 - token 回测重跑单（本仓 todos/）：所需请求特征与标签按 §4.4、§4.12 对齐后，再判断哪些样本可直接回测。
 - 现行 session 轨迹 bug 修复另行推进；本单直接设计新的数据合同，不承担旧结果适配。
