@@ -63,6 +63,18 @@ public:
         bool trajectory_resume_at_launch = false;
         std::string trajectory_resume_source_session_id;
         ApprovalMode approval_mode = ApprovalMode::Default;
+        // 单发场(AppServer 接 v3 第一棒:单发开张从 SessionService 走,三
+        // 个料位从直开 TrajectorySessionLedger 的旧装配原样搬来;终端/
+        // app-server 沿缺省,行为零变化):
+        //   - trajectory_launch_cwd:manifest.launch_cwd(单发给值);
+        //   - trajectory_one_shot:main run 记 run_kind=one_shot,resume 候选
+        //     排除;
+        //   - trajectory_training_policy:轮桥与子账的默认档(单发配置可改)。
+        std::string trajectory_launch_cwd;
+        bool trajectory_one_shot = false;
+        trajectory::TrainingPolicy trajectory_training_policy = trajectory::TrainingPolicy::Metadata;
+        // v3 场(开关开时)的首行基础 system;空串合法 = §4.3 三步切换。
+        std::string trajectory_v3_system_content;
     };
 
     explicit SessionRuntime(Options options);

@@ -80,6 +80,7 @@
 #include "runtime/plan_mode.hpp"
 #include "runtime/secret_resolver.hpp"  // T2 遥测出口凭证(§15.4 唯一 owner)
 #include "runtime/session_runtime.hpp"
+#include "runtime/session_service.hpp"  // AppServer 接 v3 第一棒:开张折算三端同路
 #include "runtime/tool_trace_hub.hpp"
 #include "workspace/identity.hpp"  // P0-1:终端面 workspace 身份裁决
 // 持久目标单:goal 状态机(coordinator)、GoalContext 注入、终端排版。
@@ -492,36 +493,24 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       config_file_path(stack_.config_result.config_file_path),
       // P6:会话真账本体在 SessionRuntime(轨迹账本);wire_str 先落值,
       // runtime 的 Options 要吃它。P0-6:旧 sessions_dir 不再传。
-      session_runtime_([&] {
-          lubancode::runtime::SessionRuntime::Options runtime_options;
-          runtime_options.wire_name = lubancode::config::ProviderWireName(config.wire);
-          runtime_options.start_ts = lubancode::tools::NowIdTimestamp();
-          // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,恒开
-          // 轨迹账;开张失败在 ctor 后由 trajectory_open_error 报,Run()
-          // 入口据此失败启动,不回退旧 SessionStore。
-          // P0-1:终端面身份按四级裁决冻结(commondir→marker→config→cwd),
-          // 同仓子目录/linked worktree 同一把钥匙;裁决料整份递给 ledger,
-          // 账本不再各算各的 key。
-          {
-              const std::filesystem::path identity_home =
-                  home_lubancode.has_value()
-                      ? lubancode::tools::Utf8ToPath(*home_lubancode)
-                      : std::filesystem::path();
-              auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
-                  std::filesystem::current_path(), identity_home);
-              if (identity.has_value()) {
-                  runtime_options.trajectory_workspace_identity = std::move(*identity);
-              }
-          }
-          runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
-          runtime_options.approval_mode =
-              lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
-          // --continue(§10.4):启动路直接开 start_reason=resume 的新场,
-          // 不先造空 session;没有可恢复场回落普通开张(同旧路
-          // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
-          runtime_options.trajectory_resume_at_launch = options.continue_last;
-          return runtime_options;
-      }()),
+      // AppServer 接 v3 第一棒:开张折算(身份四级裁决 + Options 组装)
+      // 收进 SessionService::BuildRuntimeOptions——与 one-shot、app-server
+      // 同一条服务路;控制器仍按值持 runtime(成员序即寿命序),行为零变化。
+      session_runtime_(lubancode::runtime::SessionService::BuildRuntimeOptions(
+          [&] {
+              lubancode::runtime::SessionLaunchRequest launch_request;
+              launch_request.cwd_utf8 = CurrentDirUtf8();
+              launch_request.lubancode_version = std::string(lubancode::app::kVersion);
+              launch_request.wire_name = lubancode::config::ProviderWireName(config.wire);
+              launch_request.start_ts = lubancode::tools::NowIdTimestamp();
+              launch_request.approval_mode =
+                  lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
+              // --continue(§10.4):启动路直接开 start_reason=resume 的新场,
+              // 不先造空 session;没有可恢复场回落普通开张(同旧路
+              // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
+              launch_request.resume_at_launch = options.continue_last;
+              return launch_request;
+          }())),
       // 记忆写入调度单 P0:调度账本绑轨迹场(没开张 = 空,只记内存账)。
       // 列表序对齐声明序(紧跟 session_runtime_)。
       memory_turns_(session_runtime_.trajectory()),

@@ -724,6 +724,11 @@ public:
     // --continue 启动路开出来的场是不是 resume(装配层据此把折叠投影灌进
     // loop 的 history 并打"已恢复 N 条"一行)。
     bool resumed_at_launch() const;
+    // 启动路 resume 的直接来源场 id(manifest.previous_session_id;没
+    // resume 给空)。AppServer 接 v3 第一棒:SessionService 用它把来源场
+    // 的操作台账种进新场——新 sessionId 不洗掉旧意图(§4.2 沿来源链识
+    // 别原键)。
+    std::string launch_resume_source_session_id() const;
     // 启动路 resume 折叠出的有效对话投影(没 resume 给空)。
     std::vector<api::Message> LaunchResumeHistory() const;
     // 启动路 resume 的 v3 旧史显示投影(源是 v2/没 resume 给 nullopt)。

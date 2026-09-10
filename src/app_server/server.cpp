@@ -546,9 +546,9 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             {
                 std::lock_guard<std::mutex> lock(threads_mutex_);
                 const auto it = threads_.find(thread_id);
-                if (it != threads_.end() && it->second->session_runtime != nullptr &&
-                    it->second->session_runtime->trajectory() != nullptr) {
-                    session_dir = it->second->session_runtime->trajectory()->session_dir();
+                if (it != threads_.end() && it->second->session_service != nullptr &&
+                    it->second->session_service->trajectory() != nullptr) {
+                    session_dir = it->second->session_service->trajectory()->session_dir();
                 }
             }
             if (session_dir.empty() && !workspaces_dir_.empty()) {
@@ -642,9 +642,9 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             {
                 std::lock_guard<std::mutex> lock(threads_mutex_);
                 const auto it = threads_.find(thread_id);
-                if (it != threads_.end() && it->second->session_runtime != nullptr &&
-                    it->second->session_runtime->trajectory() != nullptr) {
-                    session_dir = it->second->session_runtime->trajectory()->session_dir();
+                if (it != threads_.end() && it->second->session_service != nullptr &&
+                    it->second->session_service->trajectory() != nullptr) {
+                    session_dir = it->second->session_service->trajectory()->session_dir();
                 }
             }
             if (session_dir.empty() && !workspaces_dir_.empty()) {
@@ -894,30 +894,24 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         loop_options.enabled = options_.features_loop;
         record->loop_scheduler = std::make_unique<runtime::loop::LoopScheduler>(loop_options);
     }
+    // AppServer 接 v3 第一棒:开张走 SessionService(终端/one-shot 同一条
+    // 服务路)。P0-1 的身份裁决规则原样收进服务:thread 身份按前端指定的
+    // cwd(record->cwd;空则 options_.cwd)四级裁决,不按 server 进程的
+    // current_path——前端外壳在各项目里起 thread,server 进程 cwd 跟项目
+    // 无关。
     {
-        runtime::SessionRuntime::Options runtime_options;
-        // P0-1:thread 身份按前端指定的 cwd(record->cwd;空则 options_.cwd)
-        // 四级裁决,不按 server 进程的 current_path——前端外壳在各项目里
-        // 起 thread,server 进程 cwd 跟项目无关。home 递进去做全局件止步。
-        const std::filesystem::path identity_cwd = lubancode::tools::Utf8ToPath(record->cwd);
-        const auto identity_home = lubancode::config::HomeLubancodeDir();
-        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
-            identity_cwd, identity_home.has_value()
-                             ? lubancode::tools::Utf8ToPath(*identity_home)
-                             : std::filesystem::path());
-        if (identity.has_value()) {
-            runtime_options.trajectory_workspace_identity = std::move(*identity);
-        }
-        runtime_options.lubancode_version = options_.lubancode_version;
+        runtime::SessionLaunchRequest launch_request;
+        launch_request.cwd_utf8 = record->cwd.empty() ? options_.cwd : record->cwd;
+        launch_request.lubancode_version = options_.lubancode_version;
         if (!workspaces_dir_.empty()) {
-            runtime_options.trajectory_workspaces_root = tools::Utf8ToPath(workspaces_dir_);
+            launch_request.workspaces_root = tools::Utf8ToPath(workspaces_dir_);
         }
-        record->session_runtime = std::make_unique<runtime::SessionRuntime>(std::move(runtime_options));
+        record->session_service = std::make_unique<runtime::SessionService>(std::move(launch_request));
     }
-    const runtime::TrajectorySessionLedger* ledger = record->session_runtime->trajectory();
+    const runtime::TrajectorySessionLedger* ledger = record->session_service->trajectory();
     if (ledger == nullptr) {
         // 开不出账 thread 明败,不回退旧写口(§十七失败合同)。
-        Diagnose("会话账开张失败,thread 不开: " + record->session_runtime->trajectory_open_error());
+        Diagnose("会话账开张失败,thread 不开: " + record->session_service->launch_error());
         out_error_code = "trajectory.open_failed";
         return nlohmann::json();
     }
@@ -1105,9 +1099,10 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
     }
     // P0-2:thread 停场即 session 封口(session.ended + session.json closed;
     // 收不回的执行记 unknown,不冒充 clean)。封不了只记账,不拦停场——
-    // 半开的场由恢复器按 Journal 事实收口。
-    if (record->session_runtime != nullptr && record->session_runtime->trajectory() != nullptr) {
-        const auto closed = record->session_runtime->trajectory()->CloseSession("thread_stop");
+    // 半开的场由恢复器按 Journal 事实收口。AppServer 接 v3 第一棒:收口
+    // 走 SessionService 同一口。
+    if (record->session_service != nullptr) {
+        const auto closed = record->session_service->Close("thread_stop");
         if (!closed.error_code.empty()) {
             Diagnose("thread 停场时会话封口失败(" + closed.error_code + "): " + thread_id);
         }
@@ -1134,6 +1129,30 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
         return nlohmann::json();
     }
 
+    // AppServer 接 v3 第一棒:输入先过 SessionService 接纳(§4.1/§4.2:
+    // 先账后回执、入队待泵)。协议 1.2 面没有 clientOperationId,幂等键
+    // 留空(每发必纳;2.0 开面后前端递键)。busy 的 CAS 拒收在前——
+    // 协议行为一字不动。
+    runtime::SessionService::InputRequest input;
+    input.text = text;
+    input.images.reserve(images.size());
+    for (const nlohmann::json& image : images) {
+        api::ImageBlock block;
+        block.media_type = image.value("mediaType", std::string());
+        block.data = image.value("data", std::string());
+        block.filename = image.value("filename", std::string());
+        block.width = image.value("width", 0);
+        block.height = image.value("height", 0);
+        input.images.push_back(std::move(block));
+    }
+    const auto input_receipt = record->session_service->SubmitInput(input);
+    if (!input_receipt.accepted) {
+        record->turn_running.store(false);  // 接纳都失败,回合没起
+        out_error_code = input_receipt.error_code.empty() ? "input_rejected" : input_receipt.error_code;
+        return nlohmann::json();
+    }
+    auto queued_input = record->session_service->PopPendingInput();
+
     // P9(显示系统剥离单):统一发号换 runtime::ProcessIdAuthority——
     // id_authority.hpp 定过的规矩:只此一家,不许各处再造第二套。
     const std::string turn_id = runtime::ProcessIdAuthority().NextTurnId();
@@ -1144,8 +1163,9 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
     if (record->turn_worker.joinable()) {
         record->turn_worker.join(); // 上一轮的尾巴(正常已收,防御)
     }
-    record->turn_worker = std::thread([this, record, thread_id, turn_id, text, images] {
-        RunTurnToCompletion(record, thread_id, turn_id, text, images);
+    record->turn_worker = std::thread([this, record, thread_id, turn_id,
+                                       queued_input = std::move(queued_input)]() mutable {
+        RunTurnToCompletion(record, thread_id, turn_id, std::move(queued_input));
     });
     return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}};
 }
@@ -1192,25 +1212,23 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
 // 答复(HandleInteractionResponse)与打断(HandleTurnInterrupt);悬停的
 // future 靠 promise 被读线程唤醒,事件泵不堵。
 void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
-                                 const std::string& turn_id, const std::string& text,
-                                 const std::vector<nlohmann::json>& images) {
+                                 const std::string& turn_id,
+                                 std::optional<runtime::SessionService::QueuedInput> queued_input) {
     EmitEventSafe(kEventTurnStarted, MakeTurnStartedParams(thread_id, turn_id));
 
-    // 用户消息:text + 图片(images 字段名与 api::ImageBlock 对齐,阶段 3
-    // 冻结)。图片原样入 history——下一轮、重放、会话恢复都带得上。
+    // 用户消息:服务层接纳过的输入(AppServer 接 v3 第一棒)——text +
+    // 图片(images 字段名与 api::ImageBlock 对齐,阶段 3 冻结;折算在
+    // 接纳口完成,与本处旧内联转换逐字段同源)。图片原样入 history——
+    // 下一轮、重放、会话恢复都带得上。
+    runtime::SessionService::QueuedInput input =
+        queued_input.value_or(runtime::SessionService::QueuedInput{});
     api::Message user_message;
     user_message.role = api::Role::User;
     // 入站用户文本:JSON parse 不校验 UTF-8,前端/代理可能带进坏串,
     // 进 history 前洗掉。
-    user_message.content.push_back(api::TextBlock{platform::SanitizeExternalText(text)});
-    for (const nlohmann::json& image : images) {
-        api::ImageBlock block;
-        block.media_type = image.value("mediaType", std::string());
-        block.data = image.value("data", std::string());
-        block.filename = image.value("filename", std::string());
-        block.width = image.value("width", 0);
-        block.height = image.value("height", 0);
-        user_message.content.push_back(std::move(block));
+    user_message.content.push_back(api::TextBlock{platform::SanitizeExternalText(input.text)});
+    for (const api::ImageBlock& block : input.images) {
+        user_message.content.push_back(block);
     }
 
     // 事件账:P9 起条目 id 与事件序号都从 runtime::ProcessIdAuthority 发
@@ -1393,13 +1411,13 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         std::optional<runtime::ToolTraceHub> trajectory_hub;
         std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
         runtime::TrajectorySessionLedger* trajectory_ledger =
-            record->session_runtime != nullptr ? record->session_runtime->trajectory() : nullptr;
+            record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
         if (trajectory_ledger != nullptr) {
             runtime::TrajectoryTurnBridge::Identity identity{std::string(), options_.session_wire,
                                                              "app_server"};
             trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
             if (trajectory_bridge != nullptr) {
-                trajectory_hub.emplace(record->session_runtime->ids());
+                trajectory_hub.emplace(record->session_service->runtime()->ids());
                 trajectory_hub->Install(loop, wiring, thread_id, turn_id);
                 trajectory_hub->AttachTrajectory(trajectory_bridge.get());
                 wiring.boundary_recorder = trajectory_bridge.get();
@@ -1592,34 +1610,17 @@ nlohmann::json Server::HandleTypedDomainCommand(const IncomingRequest& request, 
         return nlohmann::json();
     }
 
-    // 执行:goal/loop/plan 各交各的状态机(实例按 thread 起,读线程单碰)。
-    // P0-2 轨迹:TrajectoryCommandExecutor 包住 app-server 命令入口
-    //(§15.7)——flag 开的 thread 落 command lifecycle。
-    runtime::TrajectorySessionLedger* trajectory_ledger =
-        record->session_runtime != nullptr ? record->session_runtime->trajectory() : nullptr;
-    const std::string command_trajectory_id =
-        trajectory_ledger != nullptr ? trajectory_ledger->BeginCommand(method, method, "session_state")
-                                     : std::string();
-    static runtime::CommandService kDomainService(runtime::CommandService::Options{});
+    // 执行:goal/loop/plan 交 SessionService(AppServer 接 v3 第一棒:
+    // CommandService + 轨迹 command 包裹收进服务,与终端同一条路;实例按
+    // thread 起,读线程单碰)。方法名透传做落账标签,轨迹 command 事件
+    // 与旧实现逐字节同源。
     const auto now_ms = [] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
     }();
-    runtime::ClientReceipt receipt;
-    if (is_goal) {
-        receipt = kDomainService.HandleGoalCommand(command, record->goal_coordinator.get(),
-                                                   record->cwd, now_ms);
-    } else if (is_loop) {
-        receipt = kDomainService.HandleLoopCommand(command, record->loop_scheduler.get(), record->cwd,
-                                                   record->thread_id, now_ms);
-    } else {
-        receipt = kDomainService.HandlePlanCommand(command, record->session_runtime.get());
-    }
-    if (trajectory_ledger != nullptr) {
-        trajectory_ledger->EndCommand(command_trajectory_id, receipt.accepted,
-                                      receipt.accepted ? std::string() : receipt.error_code);
-    }
+    const runtime::ClientReceipt receipt = record->session_service->ExecuteDomainCommand(
+        method, command, record->goal_coordinator.get(), record->loop_scheduler.get(), record->cwd, now_ms);
     if (!receipt.accepted) {
         out_error = true;
         out_error_code = receipt.error_code;

@@ -89,6 +89,7 @@
 #include "runtime/event_sinks.hpp"
 #include "runtime/plan_mode.hpp"
 #include "runtime/session_runtime.hpp"
+#include "runtime/session_service.hpp"  // AppServer 接 v3 第一棒:收口三端同路
 #include "runtime/tool_trace_hub.hpp"
 // 持久目标单:goal 状态机(coordinator)、GoalContext 注入、终端排版。
 #include "app/commands/goal_commands.hpp"
@@ -1372,8 +1373,10 @@ void TerminalSessionController::Run() {
     // P0-3 轨迹:退出即封口(§14.5 /exit 与 EOF——收口活动流、run terminal、
     // session.ended、session.json closed)。封不干净标 incomplete,不写
     // clean closed;这里的账面结果不打扰终端,要看得走 /doctor trajectory。
+    // AppServer 接 v3 第一棒:收口走 SessionService 同一口(与 one-shot/
+    // app-server 共用;reason="exit" 现行口径)。
     if (session_runtime_.trajectory() != nullptr) {
-        (void)session_runtime_.trajectory()->CloseSession("exit");
+        (void)lubancode::runtime::SessionService::CloseRuntime(session_runtime_, "exit");
     }
 }
 

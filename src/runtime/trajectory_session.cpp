@@ -3734,6 +3734,13 @@ bool TrajectorySessionLedger::resumed_at_launch() const {
     return impl_ != nullptr && impl_->launch_resumed;
 }
 
+std::string TrajectorySessionLedger::launch_resume_source_session_id() const {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->launch_resumed) {
+        return std::string();
+    }
+    return impl_->active->manifest.previous_session_id.value_or(std::string());
+}
+
 std::vector<api::Message> TrajectorySessionLedger::LaunchResumeHistory() const {
     return impl_ != nullptr ? impl_->launch_resume_history : std::vector<api::Message>();
 }
