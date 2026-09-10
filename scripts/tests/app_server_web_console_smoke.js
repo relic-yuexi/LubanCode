@@ -8,7 +8,7 @@
 //
 // 一幕一幕:
 //   1. 起真 `lubancode app-server --app-server-ws <port>`(隔离 HOME +
-//      本地假 Anthropic 后端),参考前端内核连上、握手 1.1;
+//      本地假 Anthropic 后端),参考前端内核连上、握手 1.2;
 //   2. 聊天流(四件套之一):thread/start → turn/start → item/* →
 //      turn/completed,事件账(ConsoleState)里正文/usage 有账;
 //   3. artifact 字节口子(镜像的前置):预放的截图按名取字节(200/
@@ -210,7 +210,7 @@ async function main() {
     const state = new core.ConsoleState();
     state.attach(channel);
     const init = await channel.connect();
-    ok('握手:protocolVersion 1.1(承载同协议)', Boolean(init) && init.protocolVersion === '1.1',
+    ok('握手:protocolVersion 1.2(承载同协议)', Boolean(init) && init.protocolVersion === '1.2',
       JSON.stringify(init && init.protocolVersion));
     const methods = (init && init.capabilities && init.capabilities.methods) || [];
     ok('能力表:浏览器方法面在(browser/screencast/start|stop、browser/pause)',
@@ -269,7 +269,7 @@ async function main() {
         // 参考前端内核走首帧 token 门照样连得上。
         const gated = new core.ProtocolChannel({ port: gatePort, token: 'gate-t0ken', name: 'web-console-gated' });
         const gatedInit = await gated.connect();
-        ok('token 门:内核首帧 auth 过门,业务照常', Boolean(gatedInit) && gatedInit.protocolVersion === '1.1');
+        ok('token 门:内核首帧 auth 过门,业务照常', Boolean(gatedInit) && gatedInit.protocolVersion === '1.2');
         gated.notify('exit'); // 这台只验口子,收线
         gateChild.kill();
         gateChild = null;

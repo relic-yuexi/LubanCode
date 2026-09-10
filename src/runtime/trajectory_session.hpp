@@ -757,6 +757,13 @@ public:
     // /resume 选择器的 Ctrl+T 转录浮层。
     std::vector<std::string> MakeTranscriptExcerpt(const std::string& session_id,
                                                    std::size_t max_half) const;
+    // Ctrl+T 转录浮层的 v3 分页(P3 第二棒):v3 场按 seq 游标切页(首开
+    // 两游标皆空 = 尾页);投影渲染一次入缓存,绑定源文件字节数,变了才
+    // 重投——翻页不反复全量重读(§4.10 缓存须绑定源指纹)。非 v3 场(或
+    // 场找不着)给 nullopt,调用方走 v2 头尾截断老路,一字不变。
+    std::optional<RestoredTranscriptPage> ReadTranscriptPage(
+        const std::string& session_id, const std::optional<std::uint64_t>& before_seq,
+        const std::optional<std::uint64_t>& after_seq, std::size_t max_lines) const;
     // workspace 管理操作(任意场次;本进程 active 的那场仍走成员语义,
     // 先 close 再动)。回空 error_code = 成功。
     std::string ArchiveSessionInWorkspace(const std::string& session_id) const;

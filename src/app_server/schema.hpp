@@ -167,6 +167,14 @@ ParamsCheck CheckWorkflowQueryParams(const nlohmann::json& params, std::string& 
 ParamsCheck CheckTraceQueryParams(const nlohmann::json& params, std::string& out_thread_id,
                                    std::uint64_t& out_last_seq);
 
+// thread/resume|thread/read(轨迹 v3 P3 第二棒,只读旧史两法):threadId
+// 必填;lastSeq 可选(0 = 全量,回 seq 大于它的条目——与 trace/query 同
+// 口径);includeHidden 可选(缺省 false:hidden 消息只回 hidden 标志,
+// 正文省略,§4.28"隐藏不等于删除,正文默认不发全")。
+ParamsCheck CheckThreadHistoryParams(const nlohmann::json& params, std::string_view method,
+                                     std::string& out_thread_id, std::uint64_t& out_last_seq,
+                                     bool& out_include_hidden);
+
 // turn/interrupt:threadId(字符串)必填;turnId 可选(空 = 打断该 thread
 // 当前在跑的回合)。
 ParamsCheck CheckTurnInterruptParams(const nlohmann::json& params, std::string& out_thread_id,

@@ -199,8 +199,8 @@ TEST_CASE("留位方法名认识也照实回不认识(没接线就是不接线)"
         R"({"id":1,"method":"initialize","params":{}})" "\n"
         R"({"method":"initialized"})" "\n"
         R"({"id":2,"method":"turn/steer","params":{}})" "\n"
-        R"({"id":3,"method":"thread/resume","params":{}})" "\n"
-        R"({"id":4,"method":"model/list","params":{}})" "\n";
+        R"({"id":3,"method":"model/list","params":{}})" "\n"
+        R"({"id":4,"method":"config/read","params":{}})" "\n";
     connection->Run();
 
     REQUIRE(io.written.size() == 4);

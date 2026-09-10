@@ -654,6 +654,31 @@ std::vector<std::string> MakeTranscriptExcerpt(const lubancode::runtime::Traject
     return ledger->MakeTranscriptExcerpt(id, max_half);
 }
 
+// Ctrl+T 浮层的按页取数(P3 第二棒):v3 场走账本的 seq 游标分页
+//(ReadTranscriptPage:投影一次入缓存,翻页只切缓存;行带角色与上下文
+// 状态,压缩标记处插"前 ~N → 后 ~M tokens"摘要);v2 场照旧头尾截断
+// 一页给全(游标恒空,翻页自然到头,画面与旧版一字不变)。
+lubancode::cli::SessionTranscriptPage MakeTranscriptPage(
+    const lubancode::runtime::TrajectorySessionLedger* ledger,
+    const lubancode::cli::SessionTranscriptPageQuery& query) {
+    lubancode::cli::SessionTranscriptPage page;
+    if (ledger == nullptr) {
+        return page;
+    }
+    if (const auto v3 = ledger->ReadTranscriptPage(query.session_id, query.before_seq,
+                                                   query.after_seq, query.max_lines)) {
+        page.lines = std::move(v3->lines);
+        page.has_older = v3->has_older;
+        page.has_newer = v3->has_newer;
+        page.oldest_seq = v3->oldest_seq;
+        page.newest_seq = v3->newest_seq;
+        return page;
+    }
+    // v2/找不着:老路整段一次给(头尾各 kTranscriptHalfRows 行)。
+    page.lines = MakeTranscriptExcerpt(ledger, query.session_id, kTranscriptHalfRows);
+    return page;
+}
+
 }  // namespace
 
 // /resume 裸敲的全屏选择器(SessionPicker;P0-2 数据源换 workspace 索引):
@@ -721,10 +746,12 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
         }
         feed.total = page.entries.size();
         feed.now_epoch = now;
-        // Ctrl+T 转录浮层:按需读盘(选中 id 变了面板才回调这一回)。
-        lubancode::cli::SessionTranscriptProvider transcript = [ledger](const std::string& id) {
-            return MakeTranscriptExcerpt(ledger, id, kTranscriptHalfRows);
-        };
+        // Ctrl+T 转录浮层:按需读盘(选中 id 变了面板才回调;P3 第二棒起
+        // 翻页按 seq 游标补页,v3 场不反复全量重读)。
+        lubancode::cli::SessionTranscriptProvider transcript =
+            [ledger](const lubancode::cli::SessionTranscriptPageQuery& query) {
+                return MakeTranscriptPage(ledger, query);
+            };
         const auto result =
             lubancode::cli::RunSessionPickerPanel(feed, theme, scope, sort, keep_id, 12, transcript);
         if (!result.picked_id.has_value()) {

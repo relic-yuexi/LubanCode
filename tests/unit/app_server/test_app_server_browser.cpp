@@ -353,7 +353,9 @@ const char* kTinyPngBase64 =
 // ---------------------------------------------------------------------------
 
 TEST_CASE("协议:版本升 1.1,browser 方法进能力表,must_keep 分型") {
-    CHECK(app_server::kProtocolVersion == "1.1");
+    // 轨迹 v3 P3 第二棒起协议 1.2(旧史只读两法 additive);browser 面
+    // 冻结在 1.1 的形状不动,这里只钉"不低于 1.1"。
+    CHECK(app_server::kProtocolVersion >= "1.1");
     BrowserHarness harness;
     const std::optional<nlohmann::json> init = harness.FindResponse(1);
     REQUIRE(init.has_value());

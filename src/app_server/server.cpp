@@ -26,6 +26,7 @@
 #include "config/config.hpp"  // HomeLubancodeDir:P0-1 身份裁决的全局件止步
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
+#include "runtime/trajectory_history_view.hpp"  // 轨迹 v3 P3:thread/resume|read 的旧史投影(显示层不碰 reader.hpp)
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/trajectory_session.hpp"  // P0-2:app-server 同一口接 Trajectory
 #include "trajectory/session_index.hpp"    // P0-2:trace/query 冷回放的索引定位
@@ -117,6 +118,72 @@ api::Usage SumUsage(const std::vector<api::UsageReport>& reports) {
         total.output_reasoning_tokens += report.usage.output_reasoning_tokens;
     }
     return total;
+}
+
+// ---------------------------------------------------------------------------
+// 轨迹 v3 P3 第二棒:thread/resume|thread/read 的只读旧史载荷。
+// RestoredHistoryView(显示 DTO)→ 协议 JSON(camelCase);零模型调用、
+// 零工具重跑(§5.1"只读 replay"行)。hidden 消息默认只回标志不回正文
+//(§4.28"隐藏不等于删除,正文默认不发全"),includeHidden 显式要才带。
+// ---------------------------------------------------------------------------
+
+// api::Message 的内容块 → 协议 JSON。四角色投影后 role 只有 user/assistant
+//(tool 结果由 user 消息携带 toolResult 块);块形状与 api::ImageBlock 的
+// 现行 camelCase 口径对齐(images 不进旧史载荷,v3 blob 引用后续棒)。
+nlohmann::json RestoredContentToJson(const api::Message& message) {
+    nlohmann::json blocks = nlohmann::json::array();
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            blocks.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
+        } else if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
+            blocks.push_back(nlohmann::json{{"type", "tool_use"},
+                                            {"id", use->id},
+                                            {"name", use->name},
+                                            {"input", use->input.is_object() ? use->input
+                                                                             : nlohmann::json::object()}});
+        } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+            nlohmann::json item{{"type", "tool_result"},
+                                {"toolUseId", result->tool_use_id},
+                                {"isError", result->is_error},
+                                {"content", result->content}};
+            blocks.push_back(std::move(item));
+        }
+        // 图片等富媒体:旧史按需加载归 blob/artifact 引用(§4.10),首版
+        // 不进载荷,不塞 base64。
+    }
+    return blocks;
+}
+
+// 时间线一格 → 协议条目(kind=message|compact_marker)。include_hidden
+// 控 hidden 正文的去留(标志恒带)。
+nlohmann::json RestoredItemToJson(const runtime::RestoredHistoryItem& item, bool include_hidden) {
+    if (item.kind == runtime::RestoredHistoryItem::Kind::Compact) {
+        return nlohmann::json{{"kind", "compact_marker"},
+                              {"seq", item.seq},
+                              {"timestamp", item.timestamp},
+                              {"compactId", item.compact.compact_id},
+                              {"eventId", item.compact.event_id},
+                              {"contextTokensBefore", item.compact.context_tokens_before},
+                              {"contextTokensAfter", item.compact.context_tokens_after},
+                              {"removedMessageRefs", item.compact.removed_message_refs},
+                              {"retainedMessageRefs", item.compact.retained_message_refs}};
+    }
+    nlohmann::json entry{{"kind", "message"},
+                         {"seq", item.seq},
+                         {"timestamp", item.timestamp},
+                         {"messageId", item.message.message_id},
+                         {"role", item.message.message.role == api::Role::Assistant
+                                      ? "assistant"
+                                      : "user"},
+                         {"inCurrentContext", item.message.in_current_context},
+                         {"replacedByDerivation", item.message.replaced_by_derivation},
+                         {"removedByCompacts", item.message.removed_by_compacts},
+                         {"hidden", item.message.hidden}};
+    // hidden 正文默认省略:标志照发,前端知道"有这行、默认不显示"。
+    if (!item.message.hidden || include_hidden) {
+        entry["content"] = RestoredContentToJson(item.message.message);
+    }
+    return entry;
 }
 
 // ServerEvent -> app-server 协议事件的桥(骨架拆解批二:回合驱动的显示
@@ -544,6 +611,117 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
                                              {"count", executions.size()},
                                              {"executions", std::move(executions)}});
         });
+
+    // thread/resume|thread/read(轨迹 v3 P3 第二棒):只读旧史两法,骨架
+    // 与 trace/query 同一条——活 thread 从账本拿 session_dir,冷 thread
+    // 经索引跨 workspace 定位;分页沿用 lastSeq 游标(回 seq 大于它的条
+    // 目,缺省 0 = 全量)。零模型调用、零工具重跑、零外部消息重发
+    //(§5.1"只读 replay"):这两法子只回 v3 显示投影,不推进任何执行。
+    //   - thread/read:完整时间线(kind=message|compact_marker,含已压缩
+    //     原文与降档原版,逐条带上下文状态标志);
+    //   - thread/resume:恢复视图预览——只回当前上下文链上的消息
+    //     (inCurrentContext)与压缩标记,外加"现在上下文多大"的摘要,
+    //     前端画"resume 后模型看得到哪段"用。
+    // v2 旧账没有四角色/上下文投影:如实回 sourceFormat="v2" + 空 items,
+    // 不冒充(§4.10"源缺失时报告缺口,不假称齐全")。
+    const auto thread_history_handler =
+        [this](std::string_view method, bool resume_view) -> MethodHandler {
+        return [this, method, resume_view](const IncomingRequest& request, DispatchContext&)
+                   -> std::optional<nlohmann::json> {
+            std::string thread_id;
+            std::uint64_t last_seq = 0;
+            bool include_hidden = false;
+            const ParamsCheck base =
+                CheckThreadHistoryParams(request.params, method, thread_id, last_seq, include_hidden);
+            if (!base.ok) {
+                return MakeError(request.id, base.code, base.message);
+            }
+            // 源定位:活 thread 从账本,冷 thread 经索引(与 trace/query
+            // 同一条路,thread 的 cwd 各归各的 workspace)。
+            std::filesystem::path session_dir;
+            {
+                std::lock_guard<std::mutex> lock(threads_mutex_);
+                const auto it = threads_.find(thread_id);
+                if (it != threads_.end() && it->second->session_runtime != nullptr &&
+                    it->second->session_runtime->trajectory() != nullptr) {
+                    session_dir = it->second->session_runtime->trajectory()->session_dir();
+                }
+            }
+            if (session_dir.empty() && !workspaces_dir_.empty()) {
+                trajectory::SessionIndexQuery index_query;
+                index_query.all_workspaces = true;
+                const auto page = trajectory::QueryWorkspaceSessions(tools::Utf8ToPath(workspaces_dir_),
+                                                                    index_query);
+                for (const auto& summary : page.entries) {
+                    if (summary.session_id == thread_id) {
+                        session_dir = tools::Utf8ToPath(summary.session_dir);
+                        break;
+                    }
+                }
+            }
+            if (session_dir.empty()) {
+                return MakeError(request.id, kErrInvalidParams,
+                                 std::string(method) + ": 没有会话账(纯内存 thread 或未配置 workspaces 根)");
+            }
+            // v3 旧史投影(经 runtime DTO 层,不碰 reader.hpp);v2 场如实
+            // 报格式,空表不冒充。
+            const auto v3_stream = runtime::FindV3HistoryStream(session_dir);
+            if (!v3_stream.has_value()) {
+                return MakeResult(request.id,
+                                  nlohmann::json{{"threadId", thread_id},
+                                                 {"sourceFormat", "v2"},
+                                                 {"lastSeq", last_seq},
+                                                 {"count", 0},
+                                                 {"items", nlohmann::json::array()}});
+            }
+            const runtime::RestoredHistoryView view = runtime::ProjectRestoredHistory(*v3_stream);
+            nlohmann::json items = nlohmann::json::array();
+            // 水位记全时间线的最大 seq(与 trace/query 的 folded.max_seq 同
+            // 口径):哪怕本页被 lastSeq/恢复视图滤掉,下次增量也不会把
+            // 老条目重发一遍。
+            std::uint64_t max_seq = last_seq;
+            std::uint64_t in_context_messages = 0;
+            std::uint64_t compact_count = 0;
+            std::optional<std::uint64_t> latest_tokens_after;
+            for (const auto& item : view.items) {
+                max_seq = std::max(max_seq, item.seq);
+                if (item.kind == runtime::RestoredHistoryItem::Kind::Compact) {
+                    ++compact_count;
+                    latest_tokens_after = item.compact.context_tokens_after;
+                } else if (item.message.in_current_context) {
+                    ++in_context_messages;
+                }
+                if (resume_view &&
+                    item.kind != runtime::RestoredHistoryItem::Kind::Compact &&
+                    !item.message.in_current_context) {
+                    continue;  // 恢复视图只回当前链上的消息(§4.59)
+                }
+                if (item.seq <= last_seq) {
+                    continue;  // 增量口径:回大于 lastSeq 的条目
+                }
+                items.push_back(RestoredItemToJson(item, include_hidden));
+            }
+            nlohmann::json result{{"threadId", thread_id},
+                                  {"sessionId", view.session_id},
+                                  {"sourceFormat", "v3"},
+                                  {"lastSeq", max_seq},
+                                  {"count", items.size()},
+                                  {"items", std::move(items)}};
+            if (resume_view) {
+                // 恢复预览的上下文摘要:链上消息数、压缩次数与最近一次
+                // applied 后的持久 token 数(§4.11:读持久字段,不重算)。
+                result["contextSummary"] = nlohmann::json{
+                    {"inContextMessages", in_context_messages},
+                    {"compacts", compact_count},
+                    {"contextTokensAfter", latest_tokens_after.has_value()
+                                               ? nlohmann::json(*latest_tokens_after)
+                                               : nlohmann::json()}};
+            }
+            return MakeResult(request.id, std::move(result));
+        };
+    };
+    dispatcher.RegisterMethod(kMethodThreadRead, thread_history_handler(kMethodThreadRead, false));
+    dispatcher.RegisterMethod(kMethodThreadResume, thread_history_handler(kMethodThreadResume, true));
 
     // workflow/query(wf 线的事件出口:LoadSnapshotFromDisk +
     // BuildIncrementalEvents,server 只折协议形状)。

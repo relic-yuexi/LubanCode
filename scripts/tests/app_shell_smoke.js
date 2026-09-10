@@ -127,7 +127,12 @@ console.log('[2] 协议兼容声明 checkProtocolCompat');
   ok('范围含现役协议 1.1', core.checkProtocolCompat('1.1').ok === true,
     JSON.stringify(core.checkProtocolCompat('1.1')));
   ok('低版本判不合', core.checkProtocolCompat('1.0').ok === false);
-  ok('高版本判不合(没验过的不冒充兼容)', core.checkProtocolCompat('1.2').ok === false);
+  // 高版本探针从声明 max 动态推一档,内核 bump 兼容窗后本用例自动跟上,
+  // 不再硬编码具体版本号(1.2 曾是"假想未来版",max 升到 1.2 后翻车)。
+  const beyondMax = core.PROTOCOL_COMPAT.max.split('.').map(
+    (part, i) => (i === 1 ? String(parseInt(part, 10) + 1) : part)).join('.');
+  ok('高版本判不合(没验过的不冒充兼容)', core.checkProtocolCompat(beyondMax).ok === false,
+    beyondMax);
   ok('不报版本判不合', core.checkProtocolCompat(null).ok === false);
   ok('不合有人话提示', core.checkProtocolCompat('9.9').hint.indexOf('对齐') >= 0,
     core.checkProtocolCompat('9.9').hint);

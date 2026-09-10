@@ -42,7 +42,14 @@ namespace lubancode::app_server {
 //          同 token 门)。写参考前端时暴露的缝:事件里只有引用,Web 外壳
 //          没有取字节的口子就画不出图。与 app_server/auth 同属承载面,
 //          不是协议方法面,报文形状零改动,不 bump 版本。
-inline constexpr std::string_view kProtocolVersion = "1.1";
+//   1.2(轨迹 v3 P3 第二注,additive)—— thread/resume 与 thread/read
+//          从留位转正:两枚只读旧史方法(零模型调用、零工具重跑、零
+//          外部消息重发),载荷 JSON 化 v3 显示投影 RestoredHistoryView
+//          (kind=message|compact_marker,带 inCurrentContext 等上下文
+//          状态标志),分页沿用 trace/query 的 lastSeq 游标语义。v2 旧账
+//          无四角色/上下文投影,两法子如实回 sourceFormat="v2" + 空
+//          items,不冒充。新增方法不占老报文形状。
+inline constexpr std::string_view kProtocolVersion = "1.2";
 
 // jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):
 //   - 出站:不带。方法名/params/id 的形状自足,少一个字段少一分冗余;
@@ -84,15 +91,16 @@ inline constexpr std::string_view kMethodInitialized = "initialized"; // 通知
 inline constexpr std::string_view kMethodShutdown = "shutdown";
 inline constexpr std::string_view kMethodExit = "exit"; // 通知
 
-// thread:会话的创建、列举、停场、搬删。resume/read 留位,名字先留。
+// thread:会话的创建、列举、停场、搬删 + 旧史只读两法(轨迹 v3 P3:
+// resume=恢复视图预览,read=完整时间线详情;都是零调用的只读 replay)。
 inline constexpr std::string_view kMethodThreadStart = "thread/start";
 inline constexpr std::string_view kMethodThreadStop = "thread/stop";
 inline constexpr std::string_view kMethodThreadList = "thread/list";
 inline constexpr std::string_view kMethodThreadArchive = "thread/archive";
 inline constexpr std::string_view kMethodThreadUnarchive = "thread/unarchive";
 inline constexpr std::string_view kMethodThreadDelete = "thread/delete";
-inline constexpr std::string_view kMethodThreadResume = "thread/resume"; // 留位:存档恢复单
-inline constexpr std::string_view kMethodThreadRead = "thread/read";    // 留位:只读详情
+inline constexpr std::string_view kMethodThreadResume = "thread/resume"; // 只读:恢复视图预览
+inline constexpr std::string_view kMethodThreadRead = "thread/read";    // 只读:完整时间线详情
 
 // workflow:run 账的只读查询(阶段 4:wf 线的事件出口,快照 + 增量)。
 inline constexpr std::string_view kMethodWorkflowList = "workflow/list";   // 留位

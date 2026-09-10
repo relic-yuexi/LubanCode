@@ -11,12 +11,19 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "api/types.hpp"
 
 namespace lubancode::runtime {
+
+// v3 会话目录识别(session_switch 接线点 2 的显示层转发):session_dir
+// 没有 main.jsonl、却有 <id>.jsonl 且首行 schemaVersion==3 时回该流路径。
+// cli/app_server 从这层拿,不直接碰 trajectory::v3;识别不出给 nullopt,
+// 调用方按 v2 老路走,不猜。
+std::optional<std::filesystem::path> FindV3HistoryStream(const std::filesystem::path& session_dir);
 
 // 一条旧消息的显示投影:api 四角色正文 + 上下文状态三标志。hidden 是
 // display.hidden(§4.28"默认时间线不单独显示正文,不等于删除"):显示
@@ -68,5 +75,47 @@ struct RestoredHistoryView {
 // 读不动(验卷不过/非 v3 文件)给空 items:调用方按"没有可显示旧史"
 // 处理,不冒充、不抛错(§4.10"源缺失时报告缺口,不假称齐全")。
 RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl);
+
+// ---------------------------------------------------------------------------
+// P3 第二棒:转录摘要行 + seq 游标分页(Ctrl+T 浮层与 app-server
+// thread/read 共用的切片口径)。行是一次性渲染的派生物;翻页只切行,
+// 不反复全量重读账本(§4.10"可缓存时间线……缓存须绑定源 hash")。
+// ---------------------------------------------------------------------------
+
+// 一行转录摘要:seq 是行的时间线身份(压缩标记也有 seq),游标翻页用。
+struct RestoredTranscriptLine {
+    std::uint64_t seq = 0;
+    std::string text;
+};
+
+// 一页转录行(旧→新,时间线原序)。
+struct RestoredTranscriptPage {
+    std::vector<std::string> lines;
+    bool has_older = false;  // 本页之外还有更旧行可取
+    bool has_newer = false;  // 本页之外还有更新行可取
+    // 本页边界行的 seq(继续翻页的游标);空页给空。
+    std::optional<std::uint64_t> oldest_seq;
+    std::optional<std::uint64_t> newest_seq;
+};
+
+// 时间线 → 摘要行(seq 升序)。行规(§4.10/§4.28):
+//   - 消息行 "  <role> · <首行>":role 是四角色投影后的 user/assistant/
+//     tool;被压缩的行注"已压缩",降档退链的原版注"已降档"——"哪段
+//     已压缩、当前模型还能看哪段,界面要分得清"(§1.3);
+//   - 压缩标记处插一行 "  ◆ 上下文已压缩:前 ~N → 后 ~M tokens":数字
+//     读 compact.applied 持久字段,不重算(§4.11);没有数字给简版;
+//   - hidden 默认不渲染、不报错(§4.28"隐藏不等于删除"):详情/开关
+//     另算,行表里就是没有这行。
+std::vector<RestoredTranscriptLine> RenderRestoredTranscriptLines(const RestoredHistoryView& view);
+
+// seq 游标切页(lines 须 seq 升序;max_lines=0 不限):
+//   - 两游标皆空 = 首开:取时间线尾页(最新 max_lines 行);
+//   - before_seq:取 seq < before_seq 的最近 max_lines 行(向旧翻);
+//   - after_seq:取 seq > after_seq 的最早 max_lines 行(向新翻)。
+// has_older/has_newer 按剩余行如实算;边界游标取本页首末行。
+RestoredTranscriptPage SliceRestoredTranscript(const std::vector<RestoredTranscriptLine>& lines,
+                                                const std::optional<std::uint64_t>& before_seq,
+                                                const std::optional<std::uint64_t>& after_seq,
+                                                std::size_t max_lines);
 
 }  // namespace lubancode::runtime

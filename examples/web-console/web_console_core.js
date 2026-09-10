@@ -64,7 +64,7 @@
   // 只按声明里的版本验过,没验过的不冒充兼容。
   // -------------------------------------------------------------------------
 
-  const PROTOCOL_COMPAT = { min: '1.1', max: '1.1' };
+  const PROTOCOL_COMPAT = { min: '1.1', max: '1.2' };
 
   function compareVersions(a, b) {
     const pa = String(a || '').split('.');

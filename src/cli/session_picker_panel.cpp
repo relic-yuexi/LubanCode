@@ -114,19 +114,50 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         return entry == nullptr ? std::string() : entry->id;
     };
 
-    // 转录浮层的账:开着的浮层显示哪场的转录 + 已取回的行。选中 id 变了
-    // (或头一回开浮层)才回调 provider 读一回盘——浮层开着时浏览键本就
-    // 落空(HandleKey 拦了),选中不会动,天然不会每键读盘。
+    // 转录浮层的账(P3 第二棒:游标分页):开着的浮层显示哪场的转录 +
+    // 滚动账(已取回的行 + 视口位 + 两个方向"还有货")。选中 id 变了
+    // (或头一回开浮层)才回调 provider 取首页;之后滚动触边且"还有货"
+    // 时按游标补页——不是每键读盘。
     std::string transcript_for_id;
-    std::vector<std::string> transcript_lines;
+    SessionTranscriptScroller transcript_scroll;
+    // 视口行数跟屏走(resize 安全;draw 里每帧重探)。
+    std::size_t transcript_view_rows = 6;
+    // 一页取多少行:视口两屏(翻页键一跳就是一页,余量在屏里)。
+    const auto transcript_page_size = [&]() -> std::size_t {
+        return transcript_view_rows * 2;
+    };
     const auto refresh_transcript = [&](const std::string& id) {
+        transcript_for_id = id;
+        transcript_scroll.Reset();
         if (transcript_provider == nullptr || id.empty()) {
-            transcript_lines.clear();
-            transcript_for_id = id;
             return;
         }
-        transcript_lines = transcript_provider(id);
-        transcript_for_id = id;
+        SessionTranscriptPageQuery query;
+        query.session_id = id;
+        query.max_lines = transcript_page_size();
+        transcript_scroll.LoadInitial(transcript_provider(query));
+    };
+    // 触边补页:游标取一页喂滚动账(空页自会封口);取不到 provider
+    //(空回调)时滚动账的"还有货"本就不会置位,这里自然不进来。
+    const auto fetch_older_page = [&](const std::string& id) {
+        if (transcript_provider == nullptr) {
+            return;
+        }
+        SessionTranscriptPageQuery query;
+        query.session_id = id;
+        query.before_seq = transcript_scroll.OlderCursor();
+        query.max_lines = transcript_page_size();
+        transcript_scroll.AppendOlder(transcript_provider(query));
+    };
+    const auto fetch_newer_page = [&](const std::string& id) {
+        if (transcript_provider == nullptr) {
+            return;
+        }
+        SessionTranscriptPageQuery query;
+        query.session_id = id;
+        query.after_seq = transcript_scroll.NewerCursor();
+        query.max_lines = transcript_page_size();
+        transcript_scroll.AppendNewer(transcript_provider(query));
     };
 
     auto draw = [&]() {
@@ -142,13 +173,21 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
                 return BuildSessionPickerFrame(core, width);
             }
             const std::string id = selected_id_now();
+            const int viewport_height =
+                info->viewport_height > 0 ? info->viewport_height : info->height;
+            // 视口行数跟屏走:标题 + 空行×2 + 底栏占 4 行,再留 2 行余量
+            //(首帧不蹭滚动),单帧正好嵌进窗口。
+            transcript_view_rows =
+                viewport_height > 8 ? static_cast<std::size_t>(viewport_height - 6) : 6;
+            transcript_scroll.SetViewportRows(transcript_view_rows);
             if (id != transcript_for_id) {
                 refresh_transcript(id);
             }
             const std::string title =
                 id.empty() ? std::string(tr("picker.transcript.title"))
                            : trf("picker.transcript.title", id);
-            return BuildSessionTranscriptFrame(title, transcript_lines, width);
+            return BuildSessionTranscriptFrame(title, transcript_scroll.VisibleLines(), width,
+                                               transcript_scroll.hint());
         }();
 
         const int rows_needed = static_cast<int>(frame.lines.size()) + 2;
@@ -220,6 +259,26 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         }
         const std::optional<KeyEvent> mapped = MapPickerKey(*raw_key);
         if (!mapped.has_value()) {
+            continue;
+        }
+        // 转录浮层开着:滚动键(↑↓/翻页/首尾)先喂滚动账,触边且"还有
+        // 货"就按游标补一页;其余键放行给 core(Enter/Esc/Ctrl+T/Ctrl+E
+        // 那套收浮层/提交的规矩在 core 里,一字不动)。
+        if (core.state().transcript_open &&
+            transcript_scroll.HandleKey(mapped->kind)) {
+            const std::string id = selected_id_now();
+            if (transcript_scroll.NeedsOlderPage()) {
+                fetch_older_page(id);
+            }
+            if (transcript_scroll.NeedsNewerPage()) {
+                fetch_newer_page(id);
+            }
+            if (!core.state().submitted && !core.state().cancelled) {
+                if (!draw()) {
+                    clear();
+                    return result;
+                }
+            }
             continue;
         }
         const std::string keep_id = selected_id_now();
