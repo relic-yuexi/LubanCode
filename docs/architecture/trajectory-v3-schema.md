@@ -235,3 +235,57 @@ P1 其余域已发行(工具操作账 `tool_action.*`、结果仓与预览 `resu
 | `tests/fixtures/trajectory_v3/subagent_child.jsonl` | 子账:首行 system(systemMeta 派生来源:parentActionRef/taskId/spawnEventRef 五键) -> session.started -> 委派 user(origin=parent_agent)接纳 -> `task.started` |
 
 校验:`python scripts/validate_trajectory_v3.py <file.jsonl>... [--rehash]`。逐行 schema 校验 + seq 连续 + 哈希链衔接 + 语义断言(system 链三态、compact 全链闭合、流式定稿唯一 assistant、usage 不补零)。`--rehash` 用于从无哈希的草稿生成合法链(fixtrue 维护用)。
+
+## 八、四角色 wire 对照与现行差距(§4.46)
+
+v3 的 system/user/assistant/tool 四角色经 adapter 结构化转换到四家 wire,不简单改 role 字符串。目标映射(单子 §4.46 原表):
+
+| 内部含义 | Anthropic Messages | Chat Completions | Responses | Gemini Generate Content |
+| --- | --- | --- | --- | --- |
+| system | 顶层 `system` | `system` 消息 | 顶层 `instructions` | `systemInstruction` |
+| user | user 消息内容块 | `user` 消息 | user message item(`input_text`) | contents/parts(role=user) |
+| assistant 正文 | assistant content 的 text 块 | `assistant.content` | assistant message item(`output_text`) | contents/parts(role=model) |
+| assistant 工具调用 | assistant.content 的 `tool_use` | `assistant.tool_calls` | `function_call` item | model 的 `functionCall` part |
+| tool 结果 | user.content 的 `tool_result` | `role=tool` + `tool_call_id` | `function_call_output` item | `functionResponse` part(协议 role=user) |
+| thinking | thinking 块(带 signature) | 按方言回传策略(默认不回传) | 不回传(一次性) | 不回传(一次性) |
+
+工具结果从内部 tool 角色变成 Anthropic wire 的 user,不代表它变成真人输入:turnId、来源与 Action 仍取原始消息,不能从 wire role 倒推(§4.47 同理)。相邻同组两条 tool 可映射为一条 user 中的两个 `tool_result` 块,按稳定顺序排列并还原 provider 调用 ID;此时两个内部 messageRef 对应同一 wire message 的不同块——请求快照保留这份映射,不能假定内外消息数量一一相等。
+
+### 8.1 现行形状基线(两角色实现)
+
+现行 `api::Role` 只有 User/Assistant:system 单列 `Request::system`,工具结果是 User 消息内的 `ToolResultBlock`。四家现行拍平形状由合同测试册钉死:`tests/unit/api/test_wire_role_contract.cpp`(四家 × 形状矩阵 + 消息数量映射,只读现状不改 wire 行为)。要点:
+
+- **anthropic**(`src/api/anthropic/client.cpp`):内部消息逐条对位;tool 结果留在 user 容器的 `tool_result` 块,两条相邻 tool 结果各自成条(v3 目标允许同组合并成一条 user 的两个 `tool_result` 块——现行不合并,基线钉死);thinking 块带签名按原序保真回传。
+- **chat**(`src/api/chat/request.cpp`):tool 结果从 User 容器拍平成独立 `role=tool` 消息(`tool_call_id` 配对),已是目标形状;user 正文与工具结果混装时一条内部消息分裂成两条 wire;只装工具结果的 User 消息不产 user 消息(空正文不造);thinking 默认策略 Never 不回传。
+- **responses**(`src/api/responses/request.cpp`):逐块成 item;thinking 跳过(reasoning 一次性);工具调用/结果各成 `function_call`/`function_call_output` item,call_id 保真。
+- **gemini**(`src/api/gemini/request.cpp`):工具块各自单独成条 content;`functionResponse` 顶 role=user(协议只认函数名不认调用 id,函数名按历史 `tool_use_id` 对回);thinking 跳过。
+- **数量映射是常态不等**:同一份内部对话(system 顶层 + 消息 5 条:U→A(call×2)→T1→T2→A2),anthropic 出 5 条 messages、chat 出 6 条(含 system 消息)、responses 出 7 个 input item、gemini 出 7 条 contents(合同测试册横切节钉死)。
+
+### 8.2 差距清单(现行两角色实现 → 四角色壳要动的点)
+
+1. `api::Role` 扩 System/Tool(或 adapter 入口另设映射层)后,所有"不是 User 就是 Assistant"的二选一分支逐处核对,只加枚举不算实现:`api/types.hpp` 的 `RoleToString`、`src/api/anthropic/client.cpp` 的本地 `RoleToString`、responses/gemini 的 `WireRole`、chat 的 User/else 主分支、`src/api/assembler.cpp` 的角色判断。
+2. **chat**:独立 tool 角色消息直接落 `role=tool`(`tool_call_id` == actionId 配对);`IsUserTurnStart`/`SegmentToolUseFlags` 的"真 user 输入"判据按内部消息来源判定,不能扫 wire role 倒推(§4.47)。
+3. **anthropic**:独立 tool 角色映射回 user 容器 `tool_result` 块;相邻同组合并为一条 user(现行逐条);`ShouldRecoverTaggedThinking` 的"末条 user 含 tool_result"启发式改认 tool 角色。
+4. **responses**:`instructions` 与 `function_call_output` 形状已合目标;`ContentBlockToItem` 的 `input_text`/`output_text` 角色三元与独立 tool 消息对接。
+5. **gemini**:`ToolNameByUseId` 对回表改认独立 tool 消息的 `tool_call_id`;`functionResponse` 的 role=user 硬编码处按映射表落位。
+6. **thinking/redacted**:`ContentBlock` 无 `redacted_thinking` 原生类型,anthropic 解析器无该分支(§4.42 不透明块无损回传待补);兼容端可能返回空签名,不得按 Claude 非空签名要求虚构。
+7. **请求快照**:保留内部 messageRef ↔ wire message 的映射(两个内部 messageRef 可对应同一 wire message 的不同块)。
+8. **容量检查时点**:最后一道容量检查吃 adapter 与 extra_body 全部覆盖完成后的实际输入形状(anthropic 的 extra_body 尾部覆盖之后),不得在它之前估完便放行。
+
+四角色贯通的完整验收另需从真实 v3 JSONL 读取四角色 → 上下文选取 → adapter 生成 wire → 流式响应落回 v3 的端到端链路(P2 读取侧 + 后续棒次);本节与合同测试册是那条链路的对照基线,不是其替代。
+
+## 九、usage 消费方与取数口(§4.12)
+
+§五 owner 表冻结后,原各造各账的消费方按下表收敛取数。本节为 P4 盘点,**不实现消费**;折算钩子(键集 → `api::Usage` 口径)由 `tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp` 钉死,活口径锚点(`TotalInputTokens`、明报位)钉在 `tests/unit/api/test_wire_role_contract.cpp` 末节。
+
+| 消费方 | 现行取数 | v3 取数口 | 依赖 P2 读取侧 |
+| --- | --- | --- | --- |
+| `/usage` 命令(`src/app/commands/usage_commands.cpp`) | v2 Journal 的 UsageSample 流 | assistant message 的 `usage`(唯一可累计事实)+ `model.usage.appended`(失败/迟到/更正观察,不参与累计) | 是 |
+| token 账本五层聚合(`src/accounting/usage_aggregate.hpp`) | UsageSample(v2 事件投出) | sample 的 provider usage 改吃 v3 owner;估算栏吃 `model.request.prepared` 引用的 tokenEstimateRef(估算 hook,后续棒次) | 是 |
+| cost 估算(`src/accounting/cost_estimator`) | UsageSample + 价格表 | 随账本同源;compact/标题等内部请求的 usage 各入各账,不混主上下文 | 是 |
+| token 校准器(`src/agent/token_calibrator.hpp`) | 活事件流(`assembler.usage_seen()` + 请求字节账) | 实报侧:assistant `usage` 按完整输入口径(`TotalInputTokens`);本地侧:prepared 引用的估算与请求特征(§4.12:特征/标签对齐才谈得上免重放回测) | 回测/跨会话面是 |
+| 会话活账(`src/app/turn_usage_account.hpp`、`src/cli/context_tracker.hpp`) | `on_usage` 活事件流(UsageReport) | 活路径不变,不经文件;resume 后显示历史需读 v3 | 显示历史面是 |
+| compact 触发与 token 显示(§4.11) | 估算,不吃实报 | 估算 hook(后续棒次);provider usage 只做事后对照 | 否(估算 hook 另计) |
+| 前缀缓存守恒账(`src/agent/prefix.hpp`) | UsageReport 诊断字段(活路径) | 逐请求指纹照旧;跨会话对账需 v3 请求特征 + usage 对齐 | 跨会话面是 |
+
+规矩(§4.12/§五):request_metrics 统一为 event,引用同一 usage 时不得成为第二份可累计事实;估算与实报不混同一字段(prepared 只引用 `tokenEstimateRef`,不复制实报);provider 没报不补 0,不借下一请求倒填。
