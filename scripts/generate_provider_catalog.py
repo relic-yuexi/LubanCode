@@ -71,6 +71,7 @@ MODEL_REQUIRED = ("name",)
 MODEL_FIELDS = frozenset(MODEL_REQUIRED) | {
     "description",
     "context_window",
+    "max_context_window",
     "max_output",
     "default_think",
     "capabilities",
@@ -208,6 +209,10 @@ def validate_model(model_id, model, where, allow_maintenance=False):
         value = model["context_window"]
         if isinstance(value, bool) or not (isinstance(value, int) and value >= 1) and not isinstance(value, str):
             raise CatalogError("%s.context_window 必须是正整数或字符串" % where)
+    if "max_context_window" in model:
+        value = model["max_context_window"]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise CatalogError("%s.max_context_window 必须是 >= 1 的整数" % where)
     if "max_output" in model:
         value = model["max_output"]
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
