@@ -331,6 +331,10 @@ struct V3VerifyReport {
 // 四类提交事件重放链状态。失败给首错。
 V3VerifyReport VerifyV3File(const std::filesystem::path& path);
 
+// 重放一枚提交事件到视图(Continue/VerifyV3File/读取侧 P2 共用同一份
+// 链重放,单一事实来源)。返回错误码或空串。
+std::string ApplyCommitEventToView(ContextView& view, const EventLine& line);
+
 // 单行级:解析 + 校验 + 哈希衔接判定(prev_hash 给定,重算 lineHash)。
 // 给 fixture 测试与验卷共用。
 std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_view prev_hash,

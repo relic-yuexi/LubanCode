@@ -1,6 +1,6 @@
 # session 轨迹 v3 schema(冻结稿)
 
-状态:P0 定稿冻结;P1 其余域(工具操作账/结果仓与预览/hook 事件账/subagent 独立账/预览降档)已按 §四 落地发行,字段随本稿冻结。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
+状态:P0 定稿冻结;P1 其余域(工具操作账/结果仓与预览/hook 事件账/subagent 独立账/预览降档)已按 §四 落地发行,字段随本稿冻结;P2 读取侧(两份投影/工具快照折叠/result_preview 展开/跨会话五键验 hash/父子账遍历/带来源链 resume)已落地 `src/trajectory/v3/reader.hpp`,resume 载荷随 §四 增补冻结。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
 
 不承担旧数据兼容:新会话写 v3,v2 读取不迁移,v2→v3 无转换器(单子 §1.5/§七)。
 
@@ -200,6 +200,7 @@ P1 其余域已发行(工具操作账 `tool_action.*`、结果仓与预览 `resu
 - **降档**(§4.38,已发行):`context.tool_previews.reduced` 为独立上下文提交事件(§2.4 同类:携带完整新链),载荷定案 `{contextId, beforeRevision, afterRevision, oldPreviewBudget, newPreviewBudget, replacementRefs, contextChain, inputHash, estimatedTokensBefore, estimatedTokensAfter, pairingCheckRefs}`;只降不升(32768→16384→8192→4096,任一档够用就停)。派生 tool 消息:新 messageId、保留原 turnId/stepId/actionId/tool_call_id/resultSelectionRef,`origin=context_runtime`,`sourceToolMessageRef` 指原消息(该键出现时 origin 必为 context_runtime);原消息不改写,任何一次请求只选一个版本。当前档位记在上下文视图,普通后续请求不自动回升。
 - **长文本/图片**(§4.51-4.52,后续棒次):用户文本 32 KiB 预览 + 原文 artifact;图片原图引用进 message,编码交给 wire。
 - **后台任务**(§4.53-4.54,后续棒次):`taskId` + `task.*` 事件,`parentActionRef` 关联。
+- **resume**(§4.10/§4.59,P2 读取侧增补冻结):`resume.source.attached` payload 定案 `{sourceRef:{sessionId,runId,seq,id,hash}(五键指源末行,§3.1), contextRevision, systemMessageRef, branch}`。读取侧沿 `sourceRef` 逐级回溯来源链:每级验五键 hash、按 sessionId 去重、环标 duplicate;祖先账默认按 `sessions/<id>/<id>.jsonl` 解析。resume 本身不改写源内容(坏尾修复归 §4.60)。
 - **todo/goal/loop/fork/btw**(§4.55-4.58,后续棒次):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
 
 ## 五、usage 唯一 owner 表(§4.12 定案)

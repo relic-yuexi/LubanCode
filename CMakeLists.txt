@@ -638,6 +638,15 @@ add_library(lubancode_engine STATIC
   src/trajectory/v3/result_store.cpp
   src/trajectory/v3/hooks.cpp
   src/trajectory/v3/subagent.cpp
+  # session 轨迹 v3 第三棒(P2 读取侧):一份原始账三项读取结果——
+  # 历史时间线(全消息/系统切换/压缩标记滚动,标注已压缩/降档退链)、
+  # 当前模型上下文(链投影,排除 compact 内部问答)、单次请求输入回放
+  # (prepared 与 revision 链对表);按 actionId 折叠工具快照、result_preview
+  # 展开与 artifact 缺口实探、跨会话五键验 hash、父子账递归遍历、
+  # 带来源链的 resume(历史索引/模型输入/执行状态三恢复)。
+  # session_switch:新会话写 v3 的最小开关(默认关,接线点清单见头注)。
+  src/trajectory/v3/reader.cpp
+  src/trajectory/v3/session_switch.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。
