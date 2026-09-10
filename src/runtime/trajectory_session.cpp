@@ -3852,11 +3852,14 @@ void TrajectorySessionLedger::RecordCompactFailed(const std::string& reason) {
 }
 
 // v3 compact 运行时接线(compact 全链单):v3 会话的主写者取用口。
-// 接线点 1(新会话开 v3 卷)并进前,主树没有 v3 开卷路,恒 nullptr——
-// /compact 与自动压缩的分派门因此全部走 v2 老路,一字不动;接线点 1
-// 落地后此处改为返回开卷装配持有的 V3Writer。
+// 接线点 1 已并:开卷装配持有 ActiveSession::v3_main,active 是 v3 场
+// 即返回真写者,/compact 与自动压缩的分派门即刻通电;v2 场(或无活
+// 场)照旧返回 nullptr 走 v2 老路,一字不动。
 trajectory::v3::V3Writer* TrajectorySessionLedger::v3_main_writer() {
-    return nullptr;
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
+        return nullptr;
+    }
+    return &*impl_->active->v3_main;
 }
 
 std::uint64_t TrajectorySessionLedger::SpanEndSeq() {
