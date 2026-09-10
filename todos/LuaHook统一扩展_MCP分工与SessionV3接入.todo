@@ -300,12 +300,12 @@ fork 复用合法检查点和来源引用，不复制活动 VM、continuation �
 
 验收：内置与 Lua 混链可改参、后置、短路；a 正常执行一次、短路零次，重复 next 不增加次数。替换 memory.recall 后内置调用计数为零，skill.resolve 仍执行；替换估算器不改变冻结与容量判断的阶段边界。
 
-### P0-B：Session v3 接纳、提交与恢复
+### P0-B：Session v3 接纳、提交与恢复（PR #31，v0.26.245；估算/容量两枚 required 内置槽位已落，sink 已就绪）
 
-- [ ] 接 PreUser/PostUser 及请求各阶段，覆盖 CLI、one-shot、app-server 的统一入口。
-- [ ] 接 hook 事件、工作版本、continuation、消息/效果收据与 UI 投影，保持一个 writer。
-- [ ] 在每个持久化边界注入崩溃，验证补交、暂停、unknown 和已完成项不重跑。
-- [ ] 验证 steer/followup、compact、fork/btw、首行 system、Esc interrupted 和输出预留。
+- [x] 接 PreUser/PostUser 及请求各阶段，覆盖 CLI、one-shot、app-server 的统一入口。
+- [x] 接 hook 事件、工作版本、continuation、消息/效果收据与 UI 投影，保持一个 writer。
+- [x] 在每个持久化边界注入崩溃，验证补交、暂停、unknown 和已完成项不重跑。
+- [ ] 验证 steer/followup、compact、fork/btw、首行 system、Esc interrupted 和输出预留。（生产 V3Writer 句柄一行挂接与旁路请求切槽归 P1-C；compact 全链运行时另单已合 v0.26.244）
 
 验收：只读 replay 无脚本执行；恢复输入匹配最后合法链，无重复注入、工具漏配和跨作用域污染。
 
