@@ -150,18 +150,17 @@ TEST_CASE("父子账:嵌套递归,每层完整布局(§4.31)") {
              {"attempt", 1}});
         REQUIRE(parent->AppendEvent(std::move(spawn), Durability::PowerLoss).status ==
                 WriteReceipt::Status::Committed);
+        nlohmann::json checkpoint = nlohmann::json::object(
+            {{"sessionId", "C1"}, {"runId", "run-C1"}, {"seq", 2},
+             {"lineHash", std::string(64, '0')}});
         EventDraft linked;
         linked.kind = EventKindV3::SubagentLinked;
         linked.action_id = "action-000001";
         linked.task_id = "task-000001";
         linked.status = OpStatus::Done;
-        linked.payload = nlohmann::json::object(
-            {{"taskId", "task-000001"},
-             {"childCheckpointRef",
-              nlohmann::json::object({{"sessionId", "C1"},
-                                      {"runId", "run-C1"},
-                                      {"seq", 2},
-                                      {"lineHash", std::string(64, '0')})}});
+        linked.payload =
+            nlohmann::json::object({{"taskId", "task-000001"},
+                                    {"childCheckpointRef", checkpoint}});
         REQUIRE(parent->AppendEvent(std::move(linked), Durability::PowerLoss).status ==
                 WriteReceipt::Status::Committed);
     }
