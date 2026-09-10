@@ -180,4 +180,26 @@ std::vector<std::string> V3MiddlewareEventSink::recent_errors() const {
     return recent_errors_;
 }
 
+void BindMiddlewareSessionWriter(hooks::HookDispatcher* dispatcher, HookHostServiceCenter* services,
+                                 trajectory::v3::V3Writer* writer) {
+    if (dispatcher == nullptr) {
+        return;
+    }
+    // 子执行账(hook 工具桥的 v3 记账)与服务束共用同一枚写者指针。
+    if (services != nullptr) {
+        services->SetSubExecutionWriter(writer);
+    }
+    auto* current = dynamic_cast<V3MiddlewareEventSink*>(dispatcher->middleware_sink());
+    if (writer == nullptr) {
+        if (current != nullptr) {
+            dispatcher->SetMiddlewareSink(nullptr);
+        }
+        return;
+    }
+    if (current != nullptr && current->writer() == writer) {
+        return;  // 同一写者:幂等,不重建 sink
+    }
+    dispatcher->SetMiddlewareSink(std::make_shared<V3MiddlewareEventSink>(*writer));
+}
+
 }  // namespace lubancode::runtime

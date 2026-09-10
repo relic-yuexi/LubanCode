@@ -35,6 +35,9 @@
 #include "agent/loop.hpp"
 #include "agent/prompt_assembler.hpp"  // ModuleTextByPath:压缩专用 system 的正文模块
 #include "agent/sample_model.hpp"      // SampleModel:v3 压缩采样的路(攒流/usage 一份)
+#include "runtime/hook_host_services.hpp"  // LuaHook P1-C:DefaultHookServiceCenter
+#include "runtime/middleware_runtime.hpp"   // LuaHook P1-C:EstimateBypassRequestTokens
+#include "runtime/middleware_v3_sink.hpp"   // LuaHook P1-C:BindMiddlewareSessionWriter
 #include "runtime/v3_compact_runtime.hpp"  // RunV3Compact:v3 会话的 compact 全链
 #include <nlohmann/json.hpp>
 #include "app/commands/settings_commands.hpp"
@@ -618,6 +621,21 @@ bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
 
     lubancode::agent::BackgroundCallAccounting accounting;
     SampleModelV3CompactClient client(*routed.backend, routed.route, &accounting);
+    // LuaHook P0-B 遗留①(P1-C 补):compact 现场先把中间件事件账/子执行账
+    // 绑到本场 v3 主写者(空闲压缩不在轮内,轮起的那次绑定可能已过期);
+    // 遗留②:压缩请求的输入估算切到 PreRequest/estimate 槽位(§4.36
+    // "估算=内置 hook"覆盖旁路请求;purpose=compact 进匹配与事件账)。
+    {
+        lubancode::hooks::HookDispatcher* middleware_dispatcher = lubancode::app::HookRuntime();
+        lubancode::runtime::BindMiddlewareSessionWriter(
+            middleware_dispatcher, &lubancode::runtime::DefaultHookServiceCenter(), writer);
+        run_input.estimate = [middleware_dispatcher](const nlohmann::json& snapshot) {
+            lubancode::runtime::MiddlewareHookContext estimate_context;
+            estimate_context.purpose = "compact";
+            return lubancode::runtime::EstimateBypassRequestTokens(middleware_dispatcher, snapshot,
+                                                                   estimate_context);
+        };
+    }
     const lubancode::runtime::V3CompactRunResult result =
         lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(run_input));
 

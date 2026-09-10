@@ -33,7 +33,9 @@
 #include "config/model_catalog.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/hook_host_services.hpp"
 #include "runtime/middleware_runtime.hpp"
+#include "runtime/middleware_v3_sink.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
@@ -801,6 +803,14 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 用时按工作版本重解析输入(@引用/附件随新文本重走 PrepareImageInput)。
     // 三入口(CLI/one-shot/app-server)共用 runtime::RunPreUserMiddleware,
     // 这里只是终端路的接线。
+    //
+    // P0-B 遗留①(P1-C 补,一行通电):会话 v3 主写者挂进中间件事件账
+    //(V3MiddlewareEventSink)与 hook 工具桥的子执行账。每轮重绑——
+    // clear/resume 换场后写者指针会变;幂等(同写者不换 sink)。v2 场/
+    // 未开卷传 null 解绑。
+    lubancode::runtime::BindMiddlewareSessionWriter(
+        hook_dispatcher, &lubancode::runtime::DefaultHookServiceCenter(),
+        ctx.trajectory_ledger != nullptr ? ctx.trajectory_ledger->v3_main_writer() : nullptr);
     lubancode::runtime::MiddlewareHookContext middleware_context;
     middleware_context.turn_id = canonical_turn_id;
     middleware_context.origin = "human";

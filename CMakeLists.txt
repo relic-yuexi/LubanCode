@@ -881,6 +881,10 @@ add_library(lubancode_runtime STATIC
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp
+  # LuaHook 单 P1-C:hook 宿主能力束(受控文件/插件状态/context 候选/
+  # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
+  # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
+  src/runtime/hook_host_services.cpp
   # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument

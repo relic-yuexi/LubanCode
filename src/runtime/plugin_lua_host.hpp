@@ -35,6 +35,7 @@
 #include <nlohmann/json.hpp>
 
 #include "hooks/middleware.hpp"     // LuaHook 单 P0-A:中间件 handler 桥
+#include "runtime/hook_host_services.hpp"  // LuaHook 单 P1-C:hook 能力束(grants/服务)
 #include "runtime/plugin_http.hpp"  // PluginHttpCallSpec(宿主能力一揽子)
 #include "tools/lua_tool.hpp"       // LuaProfile/LuaGuard/Pure 画像与互转件
 
@@ -44,12 +45,14 @@ namespace lubancode::runtime {
 
 // ---------------------------------------------------------------------------
 // LuaCallContext:一次调用的动态作用域(§九第 5/6 步)。LuaHook 单 P0-A 起
-// 区分 tool/hook 两类(§二:不能伪造 tool call 来开权限):
-//   Kind::Tool —— 原语义,Host API(HTTP/Secret)只在这类作用域开放;
-//   Kind::Hook —— hook handler 的调用作用域:宿主只发行只读身份与取消
-//     旗,http seam 一律为空;调 luban.http.*/luban.secrets.* 只会拿
-//     not_tool_context。hook 自己的能力合同(受控文件/插件状态/工具桥)
-//     是 P1-C 的事,届时再挂。
+// 区分 tool/hook 两类(§二:不能伪造 tool call 来开权限);P1-C 起 hook
+// 形状带宿主能力束(§五受控口):
+//   Kind::Tool —— 原语义,工具 Host API(HTTP/Secret)只在这类作用域开放;
+//   Kind::Hook —— hook handler 的调用作用域:P0-A 时只带只读身份与取消
+//     旗;P1-C 起 ForHook 可递 per-invocation 的 LuaHookServices(HTTP 按
+//     hook 自己的权限与预算、受控文件、插件状态、context 候选、结构化
+//     日志、工具桥)。没授的口照旧拒(capability_not_granted),不是
+//     not_tool_context——hook 不借 tool call 的皮。
 // 缺省构造 = Tool(既有装配与测试零改动);ForHook 造 hook 形状。
 //
 // 寿命规矩:调用方(阶段 4 的 owner / 中间件工厂 / 本阶段测试)在 Call 外
@@ -61,8 +64,17 @@ struct LuaCallContext {
     Kind kind = Kind::Tool;
     PluginHttpCallSpec http;  // Tool 形状的全部宿主 seam(Hook 形状恒空)
 
+    // P1-C:hook 作用域的能力束(ForHook 递入;空 = 宿主没开任何口)。
+    // 生命周期 = 本次 invocation(MakeLuaHookHandler 的调用帧持有)。
+    LuaHookServices* hook_services = nullptr;
+
+    // P1-C:hook 作用域的取消旗(= invocation ctx 的那根;guard 与 HTTP/
+    // 工具桥共用同一真值,§8.4 同款纪律)。Tool 形状用 http.cancel。
+    const std::atomic<bool>* cancel = nullptr;
+
     // Hook 形状的只读身份(宿主发行,Lua 只引用;§四:ctx 携带 dispatch/
-    // invocation 身份与链位置)。
+    // invocation 身份与链位置;turn/step 继承触发对象身份,未到对应层
+    // 不虚填——P1-C 子执行记账用)。
     struct HookIdentity {
         std::string dispatch_id;
         std::string invocation_id;
@@ -70,6 +82,7 @@ struct LuaCallContext {
         std::string hook_point;  // "PreUser" 等
         std::string stage;       // "mutate"/"estimate"/"capacity"/"default"
         int depth = 0;           // 链上位置
+        std::optional<std::string> turn_id, step_id, action_id;
     };
     std::optional<HookIdentity> hook;
 
@@ -79,10 +92,11 @@ struct LuaCallContext {
         context.http = std::move(spec);
         return context;
     }
-    static LuaCallContext ForHook(HookIdentity identity) {
+    static LuaCallContext ForHook(HookIdentity identity, LuaHookServices* services = nullptr) {
         LuaCallContext context;
         context.kind = Kind::Hook;
         context.hook = std::move(identity);
+        context.hook_services = services;
         return context;
     }
 };
@@ -227,8 +241,13 @@ private:
 // 脚本内存不跨调用保留;已校验源码在定义里缓存,不缓存业务结果)。预算
 // 从定义的 limits 折成 LuaProfile(白名单库 + 指令/内存/墙钟三道墙)。
 // 给 MiddlewarePool::Options::lua_factory 用;P0-B 的装配层与测试直接拿。
+//
+// P1-C 第三参:center 非空时每枚 invocation 造一份宿主能力束(清单申请
+// ∩ grants;§五交集);luban.context.append 收的候选在 handler 正常返回
+// 后折成 ContextAppend 效果交执行核验用——Lua 仍不直接改 context。
 // ---------------------------------------------------------------------------
 std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
-    const hooks::middleware::LuaHandlerSpec& spec, const hooks::middleware::HandlerLimits& limits);
+    const hooks::middleware::LuaHandlerSpec& spec, const hooks::middleware::HandlerLimits& limits,
+    HookHostServiceCenter* services = nullptr);
 
 }  // namespace lubancode::runtime

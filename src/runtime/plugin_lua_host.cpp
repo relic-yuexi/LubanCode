@@ -55,13 +55,45 @@ int PushNoActiveToolCall(lua_State* L) {
     return 2;
 }
 
-// LuaHook 单 P0-A:hook 调用作用域不配工具 Host API(§二:不能伪造 tool
-// call 来开权限)。nil + err(not_tool_context),零网络、零 Secret 解析。
-int PushNotToolContext(lua_State* L) {
+// ---------------------------------------------------------------------------
+// P1-C:hook Host API 的 err 表与门槛。
+// ---------------------------------------------------------------------------
+
+// { code = "<hookapi_err 稳定串>", message = ... }(与 plugin_http 的 err
+// 表同形;hook 能力面的码走 hookapi_err 表)。
+int PushHookApiError(lua_State* L, std::string_view code, std::string message) {
     lua_pushnil(L);
-    PushErrorTable(L, LuaHostErrorCode::NotToolContext,
-                   std::string(LuaHostErrorCodeDefaultMessage(LuaHostErrorCode::NotToolContext)), 0, false);
+    lua_createtable(L, 0, 2);
+    lua_pushlstring(L, code.data(), code.size());
+    lua_setfield(L, -2, "code");
+    lua_pushlstring(L, message.data(), message.size());
+    lua_setfield(L, -2, "message");
     return 2;
+}
+
+int PushHookApiError(lua_State* L, const HookApiError& error) {
+    return PushHookApiError(L, error.code, error.message);
+}
+
+// 共用三重门:顶层无 context / tool 作用域 / hook 作用域没配能力束。
+// 通过时 *services_out 就位,返回 0;拒绝时已压 nil+err,返回值即 C 函数
+// 该 return 的栈值数。
+int GateHookApi(lua_State* L, const char* api, LuaHookServices** services_out) {
+    *services_out = nullptr;
+    LuaCallContext* context = CurrentLuaCallContext(L);
+    if (context == nullptr) {
+        return PushNoActiveToolCall(L);
+    }
+    if (context->kind != LuaCallContext::Kind::Hook) {
+        return PushHookApiError(L, hookapi_err::kNotHookContext,
+                                std::string(api) + " 只在 hook 调用作用域开放");
+    }
+    if (context->hook_services == nullptr) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted,
+                                std::string(api) + ":宿主未配 hook 能力束");
+    }
+    *services_out = context->hook_services;
+    return 0;
 }
 
 // 栈上字符串读成 std::string(不改栈)。
@@ -365,14 +397,23 @@ int LuaHttpRequest(lua_State* L) {
     try {
         // §九第 3 步:顶层/调用外一票否决——先查 context,查不到就退,
         // transport/resolver 一根毛都不碰(假件计数器钉死为 0 的机关在此)。
-        // LuaHook 单 P0-A:hook 作用域同样一票否决(not_tool_context)——
-        // hook 不能借道工具 Host API 开权限。
+        // LuaHook 单 P0-A:hook 作用域不借工具 Host API;P1-C(§五)起
+        // 换成 hook 自己的口:能力束授了 http 才走 hook_services->http
+        //(自己的权限与预算),没授照拒——不伪造 tool call 提权。
         LuaCallContext* context = CurrentLuaCallContext(L);
         if (context == nullptr) {
             return PushNoActiveToolCall(L);
         }
-        if (context->kind != LuaCallContext::Kind::Tool) {
-            return PushNotToolContext(L);
+        const PluginHttpCallSpec* http_spec = nullptr;
+        if (context->kind == LuaCallContext::Kind::Tool) {
+            http_spec = &context->http;
+        } else {
+            if (context->hook_services == nullptr || !context->hook_services->http_granted) {
+                return PushHookApiError(
+                    L, hookapi_err::kCapabilityNotGranted,
+                    "luban.http:hook 未获 http 能力(清单 capabilities 申请 ∩ 宿主授权的交集为空)");
+            }
+            http_spec = &context->hook_services->http;
         }
         if (lua_gettop(L) < 1 || !lua_istable(L, 1)) {
             lua_pushnil(L);
@@ -385,7 +426,7 @@ int LuaHttpRequest(lua_State* L) {
             PushErrorTable(L, request.error().code, request.error().message, 0, false);
             return 2;
         }
-        auto result = ExecutePluginHttp(*request, context->http);
+        auto result = ExecutePluginHttp(*request, *http_spec);
         if (!result.has_value()) {
             lua_pushnil(L);
             PushErrorTable(L, result.error());
@@ -411,14 +452,21 @@ int LuaHttpRequest(lua_State* L) {
 
 int LuaSecretsAvailable(lua_State* L) {
     try {
-        // 顶层零解析(§6.3):context 都没有就不碰 resolver;hook 作用域
-        // 同拒(P0-A:hook 不开 Secret 能力)。
+        // 顶层零解析(§6.3):context 都没有就不碰 resolver;P1-C 起 hook
+        // 作用域按自己的 http 授权开口(未授照拒)。
         LuaCallContext* context = CurrentLuaCallContext(L);
         if (context == nullptr) {
             return PushNoActiveToolCall(L);
         }
-        if (context->kind != LuaCallContext::Kind::Tool) {
-            return PushNotToolContext(L);
+        const PluginHttpCallSpec* http_spec = nullptr;
+        if (context->kind == LuaCallContext::Kind::Tool) {
+            http_spec = &context->http;
+        } else {
+            if (context->hook_services == nullptr || !context->hook_services->http_granted) {
+                return PushHookApiError(L, hookapi_err::kCapabilityNotGranted,
+                                        "luban.secrets:hook 未获 http/secrets 能力");
+            }
+            http_spec = &context->hook_services->http;
         }
         if (lua_type(L, 1) != LUA_TSTRING) {
             lua_pushnil(L);
@@ -427,7 +475,7 @@ int LuaSecretsAvailable(lua_State* L) {
         }
         const std::string id = StackString(L, 1);
         const SecretDeclaration* declaration = nullptr;
-        for (const SecretDeclaration& candidate : context->http.secrets) {
+        for (const SecretDeclaration& candidate : http_spec->secrets) {
             if (candidate.id == id) {
                 declaration = &candidate;
                 break;
@@ -438,14 +486,14 @@ int LuaSecretsAvailable(lua_State* L) {
             PushErrorTable(L, LuaHostErrorCode::SecretNotDeclared, "Secret 未声明: " + id, 0, false);
             return 2;
         }
-        if (context->http.secret_resolver == nullptr) {
+        if (http_spec->secret_resolver == nullptr) {
             lua_pushnil(L);
             PushErrorTable(L, LuaHostErrorCode::SecretMissing, "SecretResolver 未接线(宿主装配缺口)", 0, false);
             return 2;
         }
         // Describe 只查状态不取值(inspect/doctor 同款口);available/missing
         // 就是 Lua 能看到的全部。
-        const SecretStatus status = context->http.secret_resolver->Describe(*declaration);
+        const SecretStatus status = http_spec->secret_resolver->Describe(*declaration);
         lua_pushboolean(L, status.available ? 1 : 0);
         return 1;
     } catch (const std::exception&) {
@@ -461,13 +509,21 @@ int LuaSecretsAvailable(lua_State* L) {
 
 int LuaSecretsRef(lua_State* L) {
     try {
-        // 顶层零解析:context 为空即退,resolver 一根毛不碰;hook 作用域同拒。
+        // 顶层零解析:context 为空即退,resolver 一根毛不碰;P1-C 起 hook
+        // 作用域按自己的 http 授权开口(未授照拒)。
         LuaCallContext* context = CurrentLuaCallContext(L);
         if (context == nullptr) {
             return PushNoActiveToolCall(L);
         }
-        if (context->kind != LuaCallContext::Kind::Tool) {
-            return PushNotToolContext(L);
+        const PluginHttpCallSpec* http_spec = nullptr;
+        if (context->kind == LuaCallContext::Kind::Tool) {
+            http_spec = &context->http;
+        } else {
+            if (context->hook_services == nullptr || !context->hook_services->http_granted) {
+                return PushHookApiError(L, hookapi_err::kCapabilityNotGranted,
+                                        "luban.secrets:hook 未获 http/secrets 能力");
+            }
+            http_spec = &context->hook_services->http;
         }
         if (lua_type(L, 1) != LUA_TSTRING) {
             lua_pushnil(L);
@@ -476,7 +532,7 @@ int LuaSecretsRef(lua_State* L) {
         }
         const std::string id = StackString(L, 1);
         bool declared = false;
-        for (const SecretDeclaration& candidate : context->http.secrets) {
+        for (const SecretDeclaration& candidate : http_spec->secrets) {
             if (candidate.id == id) {
                 declared = true;
                 break;
@@ -502,6 +558,296 @@ int LuaSecretsRef(lua_State* L) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P1-C:hook 受控能力面(§五)。fs/state/context/log/tools 都走 GateHookApi
+// 三重门;真正的执法(路径授权/字节帽/原子写/限额/子执行记账/递归治理)
+// 在 hook_host_services.cpp 的宿主执行件里,这里只做 Lua 形状转换。
+// ---------------------------------------------------------------------------
+
+int LuaFsRead(lua_State* L) {
+    try {
+        LuaHookServices* services = nullptr;
+        if (const int pushed = GateHookApi(L, "luban.fs.read", &services)) {
+            return pushed;
+        }
+        if (!services->fs_granted) {
+            return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.fs:hook 未获 fs.read 能力");
+        }
+        if (lua_type(L, 1) != LUA_TSTRING) {
+            return PushHookApiError(L, hookapi_err::kFsBadPath, "path 须是字符串");
+        }
+        const auto content = ReadHookFsFile(*services, StackString(L, 1));
+        if (!content.has_value()) {
+            return PushHookApiError(L, content.error());
+        }
+        lua_pushlstring(L, content->data(), content->size());
+        return 1;
+    } catch (...) {
+        return PushHookApiError(L, hookapi_err::kFsIoError, "读文件时发生内部异常");
+    }
+}
+
+int LuaFsWrite(lua_State* L) {
+    try {
+        LuaHookServices* services = nullptr;
+        if (const int pushed = GateHookApi(L, "luban.fs.write", &services)) {
+            return pushed;
+        }
+        if (!services->fs_granted || services->fs.write_roots.empty()) {
+            return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.fs:hook 未获 fs.write 能力");
+        }
+        if (lua_type(L, 1) != LUA_TSTRING || lua_type(L, 2) != LUA_TSTRING) {
+            return PushHookApiError(L, hookapi_err::kFsBadPath, "write(path, content) 两个参数都须是字符串");
+        }
+        const auto written = WriteHookFsFile(*services, StackString(L, 1), StackString(L, 2));
+        if (!written.has_value()) {
+            return PushHookApiError(L, written.error());
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    } catch (...) {
+        return PushHookApiError(L, hookapi_err::kFsIoError, "写文件时发生内部异常");
+    }
+}
+
+int LuaFsList(lua_State* L) {
+    try {
+        LuaHookServices* services = nullptr;
+        if (const int pushed = GateHookApi(L, "luban.fs.list", &services)) {
+            return pushed;
+        }
+        if (!services->fs_granted) {
+            return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.fs:hook 未获 fs.read 能力");
+        }
+        if (lua_type(L, 1) != LUA_TSTRING) {
+            return PushHookApiError(L, hookapi_err::kFsBadPath, "path 须是字符串");
+        }
+        const auto entries = ListHookFsDir(*services, StackString(L, 1));
+        if (!entries.has_value()) {
+            return PushHookApiError(L, entries.error());
+        }
+        lua_createtable(L, static_cast<int>(entries->size()), 0);
+        for (std::size_t i = 0; i < entries->size(); ++i) {
+            lua_createtable(L, 0, 2);
+            lua_pushlstring(L, (*entries)[i].first.data(), (*entries)[i].first.size());
+            lua_setfield(L, -2, "name");
+            lua_pushboolean(L, (*entries)[i].second ? 1 : 0);
+            lua_setfield(L, -2, "dir");
+            lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+        }
+        return 1;
+    } catch (...) {
+        return PushHookApiError(L, hookapi_err::kFsIoError, "列目录时发生内部异常");
+    }
+}
+
+int LuaStateGet(lua_State* L) {
+    LuaHookServices* services = nullptr;
+    if (const int pushed = GateHookApi(L, "luban.state.get", &services)) {
+        return pushed;
+    }
+    if (services->state == nullptr) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.state:hook 未获 state 能力");
+    }
+    if (lua_type(L, 1) != LUA_TSTRING) {
+        return PushHookApiError(L, hookapi_err::kStateBadKey, "key 须是字符串");
+    }
+    const auto value = services->state->Get(services->package_id, StackString(L, 1));
+    if (!value.has_value()) {
+        return PushHookApiError(L, value.error());
+    }
+    tools::PushJsonToLua(L, *value);
+    return 1;
+}
+
+int LuaStateSet(lua_State* L) {
+    LuaHookServices* services = nullptr;
+    if (const int pushed = GateHookApi(L, "luban.state.set", &services)) {
+        return pushed;
+    }
+    if (services->state == nullptr) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.state:hook 未获 state 能力");
+    }
+    if (lua_type(L, 1) != LUA_TSTRING) {
+        return PushHookApiError(L, hookapi_err::kStateBadKey, "key 须是字符串");
+    }
+    std::string convert_error;
+    const nlohmann::json value = tools::LuaValueToJson(L, 2, 0, convert_error);
+    if (!convert_error.empty()) {
+        return PushHookApiError(L, hookapi_err::kStateBadValue, "value 转 JSON 失败: " + convert_error);
+    }
+    const auto stored = services->state->Set(services->package_id, StackString(L, 1), value);
+    if (!stored.has_value()) {
+        return PushHookApiError(L, stored.error());
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int LuaStateKeys(lua_State* L) {
+    LuaHookServices* services = nullptr;
+    if (const int pushed = GateHookApi(L, "luban.state.keys", &services)) {
+        return pushed;
+    }
+    if (services->state == nullptr) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.state:hook 未获 state 能力");
+    }
+    const std::vector<std::string> keys = services->state->Keys(services->package_id);
+    lua_createtable(L, static_cast<int>(keys.size()), 0);
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        lua_pushlstring(L, keys[i].data(), keys[i].size());
+        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+    }
+    return 1;
+}
+
+// context.append(text[, note]):候选先收,handler 正常返回后由宿主折成
+// ContextAppend 效果交执行核验用(§五:提交边界在宿主,Lua 不直接改 context)。
+int LuaContextAppend(lua_State* L) {
+    LuaHookServices* services = nullptr;
+    if (const int pushed = GateHookApi(L, "luban.context.append", &services)) {
+        return pushed;
+    }
+    if (!services->context_granted) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted,
+                                "luban.context:hook 未获 context 能力");
+    }
+    if (lua_type(L, 1) != LUA_TSTRING) {
+        return PushHookApiError(L, hookapi_err::kContextBadText, "text 须是字符串");
+    }
+    std::string note;
+    if (lua_gettop(L) >= 2 && lua_type(L, 2) == LUA_TSTRING) {
+        note = StackString(L, 2);
+    }
+    const std::string text = StackString(L, 1);
+    const std::string source =
+        services->package_id.empty() ? std::string("hook") : "hook:" + services->package_id;
+    const auto appended = services->context.Append(
+        text, note.empty() ? source : source + "/" + note);
+    if (appended.has_value()) {
+        return PushHookApiError(L, *appended);
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// log.event(level, fields):结构化日志;显示投影归宿主(截断在
+// SanitizeHookLogFields),不自动注入模型(§五)。
+int LuaLogEvent(lua_State* L) {
+    LuaHookServices* services = nullptr;
+    if (const int pushed = GateHookApi(L, "luban.log.event", &services)) {
+        return pushed;
+    }
+    if (!services->log) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted, "luban.log:hook 未获 log 能力");
+    }
+    const char* level = luaL_optstring(L, 1, "info");
+    const std::string level_text(level);
+    if (level_text != "info" && level_text != "warn" && level_text != "error") {
+        return PushHookApiError(L, hookapi_err::kLogBadFields, "level 只认 info/warn/error");
+    }
+    if (lua_gettop(L) < 2 || !lua_istable(L, 2)) {
+        return PushHookApiError(L, hookapi_err::kLogBadFields, "fields 须是一张表");
+    }
+    std::string convert_error;
+    nlohmann::json fields = tools::LuaValueToJson(L, 2, 0, convert_error);
+    if (!convert_error.empty() || !fields.is_object()) {
+        return PushHookApiError(L, hookapi_err::kLogBadFields,
+                                "fields 须是字符串键的表: " + convert_error);
+    }
+    fields["package"] = services->package_id;
+    services->log(level_text, SanitizeHookLogFields(fields));
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// tools.call(name, input):宿主桥(§5.1)。准入被拒 = nil+err(协议面);
+// 执行过(无论终态 finished/failed/cancelled/unknown)= 结果表,uncertain
+// 的终态照实报,不自动重试。
+int LuaToolsCall(lua_State* L) {
+    try {
+        LuaHookServices* services = nullptr;
+        if (const int pushed = GateHookApi(L, "luban.tools.call", &services)) {
+            return pushed;
+        }
+        if (services->tools == nullptr) {
+            return PushHookApiError(L, hookapi_err::kCapabilityNotGranted,
+                                    "luban.tools:hook 未获 tools 能力");
+        }
+        if (lua_type(L, 1) != LUA_TSTRING) {
+            return PushHookApiError(L, hookapi_err::kToolBadInput, "tool 名须是字符串");
+        }
+        if (lua_gettop(L) < 2 || !lua_istable(L, 2)) {
+            return PushHookApiError(L, hookapi_err::kToolBadInput, "input 须是一张表(JSON object)");
+        }
+        std::string convert_error;
+        nlohmann::json input = tools::LuaValueToJson(L, 2, 0, convert_error);
+        if (!convert_error.empty()) {
+            return PushHookApiError(L, hookapi_err::kToolBadInput, "input 转 JSON 失败: " + convert_error);
+        }
+        const LuaCallContext* context = CurrentLuaCallContext(L);
+        const std::string invocation_id =
+            context != nullptr && context->hook.has_value() ? context->hook->invocation_id : std::string();
+        const std::string dispatch_id =
+            context != nullptr && context->hook.has_value() ? context->hook->dispatch_id : std::string();
+        const std::string hook_id =
+            context != nullptr && context->hook.has_value() ? context->hook->hook_id : std::string();
+        // turn/step 继承触发对象身份(§4.22:未到对应层不虚填);parent
+        // action = 当前 hook 若挂在某 tool action 下(PreAction 族),否则空。
+        const std::optional<std::string> turn_id =
+            context != nullptr && context->hook.has_value() ? context->hook->turn_id : std::nullopt;
+        const std::optional<std::string> step_id =
+            context != nullptr && context->hook.has_value() ? context->hook->step_id : std::nullopt;
+        const std::optional<std::string> parent_action_id =
+            context != nullptr && context->hook.has_value() ? context->hook->action_id : std::nullopt;
+        const std::atomic<bool>* cancel = context != nullptr ? context->cancel : nullptr;
+        const auto result = services->tools->Call(StackString(L, 1), input, hook_id, dispatch_id,
+                                                  invocation_id, parent_action_id, turn_id, step_id,
+                                                  cancel);
+        if (!result.admitted) {
+            return PushHookApiError(L, result.error_code, result.message);
+        }
+        lua_createtable(L, 0, 6);
+        lua_pushlstring(L, result.status.data(), result.status.size());
+        lua_setfield(L, -2, "status");
+        lua_pushlstring(L, result.content.data(), result.content.size());
+        lua_setfield(L, -2, "content");
+        lua_pushboolean(L, result.is_error ? 1 : 0);
+        lua_setfield(L, -2, "isError");
+        lua_pushlstring(L, result.execution_id.data(), result.execution_id.size());
+        lua_setfield(L, -2, "executionId");
+        lua_pushboolean(L, result.content_truncated ? 1 : 0);
+        lua_setfield(L, -2, "contentTruncated");
+        tools::PushJsonToLua(L, result.details);
+        lua_setfield(L, -2, "details");
+        return 1;
+    } catch (...) {
+        return PushHookApiError(L, hookapi_err::kToolBadInput, "宿主执行工具时发生内部异常");
+    }
+}
+
+int LuaToolsList(lua_State* L) {
+    LuaHookServices* services = nullptr;
+    if (const int pushed = GateHookApi(L, "luban.tools.list", &services)) {
+        return pushed;
+    }
+    if (services->tools == nullptr) {
+        return PushHookApiError(L, hookapi_err::kCapabilityNotGranted,
+                                "luban.tools:hook 未获 tools 能力");
+    }
+    const auto listed = services->tools->ListAuthorized();
+    lua_createtable(L, static_cast<int>(listed.size()), 0);
+    for (std::size_t i = 0; i < listed.size(); ++i) {
+        lua_createtable(L, 0, 2);
+        lua_pushlstring(L, listed[i].first.data(), listed[i].first.size());
+        lua_setfield(L, -2, "name");
+        lua_pushlstring(L, listed[i].second.data(), listed[i].second.size());
+        lua_setfield(L, -2, "description");
+        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+    }
+    return 1;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -509,7 +855,7 @@ int LuaSecretsRef(lua_State* L) {
 // ---------------------------------------------------------------------------
 
 void RegisterLuaHostModule(lua_State* L) {
-    lua_createtable(L, 0, 2);  // luban
+    lua_createtable(L, 0, 7);  // luban
 
     lua_createtable(L, 0, 1);  // luban.http
     lua_pushcfunction(L, LuaHttpRequest);
@@ -522,6 +868,43 @@ void RegisterLuaHostModule(lua_State* L) {
     lua_pushcfunction(L, LuaSecretsRef);
     lua_setfield(L, -2, "ref");
     lua_setfield(L, -2, "secrets");
+
+    // P1-C(§五):hook 受控能力面。tool 作用域调这些只拿 not_hook_context;
+    // hook 作用域按能力束开口,没授的口 capability_not_granted。
+    lua_createtable(L, 0, 3);  // luban.fs
+    lua_pushcfunction(L, LuaFsRead);
+    lua_setfield(L, -2, "read");
+    lua_pushcfunction(L, LuaFsWrite);
+    lua_setfield(L, -2, "write");
+    lua_pushcfunction(L, LuaFsList);
+    lua_setfield(L, -2, "list");
+    lua_setfield(L, -2, "fs");
+
+    lua_createtable(L, 0, 3);  // luban.state
+    lua_pushcfunction(L, LuaStateGet);
+    lua_setfield(L, -2, "get");
+    lua_pushcfunction(L, LuaStateSet);
+    lua_setfield(L, -2, "set");
+    lua_pushcfunction(L, LuaStateKeys);
+    lua_setfield(L, -2, "keys");
+    lua_setfield(L, -2, "state");
+
+    lua_createtable(L, 0, 1);  // luban.context
+    lua_pushcfunction(L, LuaContextAppend);
+    lua_setfield(L, -2, "append");
+    lua_setfield(L, -2, "context");
+
+    lua_createtable(L, 0, 1);  // luban.log
+    lua_pushcfunction(L, LuaLogEvent);
+    lua_setfield(L, -2, "event");
+    lua_setfield(L, -2, "log");
+
+    lua_createtable(L, 0, 2);  // luban.tools
+    lua_pushcfunction(L, LuaToolsCall);
+    lua_setfield(L, -2, "call");
+    lua_pushcfunction(L, LuaToolsList);
+    lua_setfield(L, -2, "list");
+    lua_setfield(L, -2, "tools");
 
     lua_setglobal(L, "luban");
 }
@@ -1078,7 +1461,8 @@ LuaHostState::LuaHookCallResult LuaHostState::CallHook(const std::string& entry,
 // ---------------------------------------------------------------------------
 
 std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
-    const hooks::middleware::LuaHandlerSpec& spec, const hooks::middleware::HandlerLimits& limits) {
+    const hooks::middleware::LuaHandlerSpec& spec, const hooks::middleware::HandlerLimits& limits,
+    HookHostServiceCenter* services_center) {
     // 物化即试编译(发布期把语法/对账错误顶出来,不带半个定义入池)。正文
     // 留在闭包里缓存;invocation 各自再建 state——§4.1:活动调用独立 state,
     // 脚本内存不跨调用保留,不缓存业务结果。
@@ -1098,7 +1482,7 @@ std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
     }
 
     return hooks::middleware::Handler(
-        [spec, profile](const hooks::middleware::InvocationCtx& ctx, const nlohmann::json& input,
+        [spec, profile, services_center](const hooks::middleware::InvocationCtx& ctx, const nlohmann::json& input,
                         hooks::middleware::NextCall& next)
             -> std::expected<hooks::middleware::HandlerReturn, hooks::middleware::HandlerError> {
             LuaHostState::Options options;
@@ -1112,6 +1496,16 @@ std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
                     hooks::middleware::HandlerError{"hook.lua.compile_error", state.error()});
             }
 
+            // P1-C:per-invocation 能力束(清单申请 ∩ grants,§五交集);
+            // collector 不跨调用。center 为空 = 一枚不带宿主能力的空束
+            //(luban.* hook API 全部 capability_not_granted)。
+            const std::string package_id =
+                spec.package.empty() ? (spec.chunk_name.empty() ? std::string("hook") : spec.chunk_name)
+                                     : spec.package;
+            std::unique_ptr<LuaHookServices> services =
+                services_center != nullptr ? services_center->Build(spec.capabilities, ctx, package_id)
+                                           : nullptr;
+
             LuaCallContext::HookIdentity identity;
             identity.dispatch_id = ctx.dispatch_id;
             identity.invocation_id = ctx.invocation_id;
@@ -1119,7 +1513,11 @@ std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
             identity.hook_point = std::string(hooks::middleware::ToString(ctx.point));
             identity.stage = std::string(hooks::middleware::ToString(ctx.stage));
             identity.depth = ctx.depth;
-            LuaCallContext context = LuaCallContext::ForHook(std::move(identity));
+            identity.turn_id = ctx.turn_id;
+            identity.step_id = ctx.step_id;
+            identity.action_id = ctx.action_id;
+            LuaCallContext context = LuaCallContext::ForHook(std::move(identity), services.get());
+            context.cancel = ctx.cancel;  // guard(LuaGuard)、HTTP 与工具桥同一根真值
 
             LuaHostState::LuaHookCall call;
             call.ctx_meta = nlohmann::json{{"dispatchId", ctx.dispatch_id},
@@ -1128,7 +1526,8 @@ std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
                                            {"hookPoint", identity.hook_point},
                                            {"stage", identity.stage},
                                            {"depth", ctx.depth},
-                                           {"registryRevision", ctx.registry_revision}};
+                                           {"registryRevision", ctx.registry_revision},
+                                           {"package", package_id}};
             call.input = input;
             call.cancel = ctx.cancel;
             call.next = [&next](const std::optional<nlohmann::json>& candidate)
@@ -1181,6 +1580,19 @@ std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
                 effect.type = type;
                 effect.payload = raw;
                 out.effects.push_back(std::move(effect));
+            }
+            // P1-C:luban.context.append 收的候选折成 ContextAppend 效果
+            //(排在 handler 声明的效果之后,计划序稳定)。采用与否仍由
+            // 执行核按挂点/阶段合同裁决——Lua 不直接改 context(§五)。
+            if (services != nullptr) {
+                for (auto& entry : services->context.entries) {
+                    hooks::middleware::Effect effect;
+                    effect.type = hooks::middleware::EffectType::ContextAppend;
+                    effect.payload = nlohmann::json{{"type", "context.append"},
+                                                    {"text", std::move(entry.text)},
+                                                    {"source", std::move(entry.source)}};
+                    out.effects.push_back(std::move(effect));
+                }
             }
             return out;
         });

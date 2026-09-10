@@ -169,7 +169,7 @@ HttpExchangeResponse MakeJsonResponse() {
 // §6.1 模块形状:只描述分派,不抄第二份 schema
 // ---------------------------------------------------------------------------
 
-TEST_CASE("模块注册:luban 只有 http/secrets 两张子表,各就各位") {
+TEST_CASE("模块注册:luban 的子表各就各位(工具面 http/secrets + hook 面 fs/state/context/log/tools)") {
     FakeHttpTransport transport;
     CountingResolver resolver;
     auto plugin = LoadPlugin(R"lua(
@@ -187,8 +187,12 @@ TEST_CASE("模块注册:luban 只有 http/secrets 两张子表,各就各位") {
     context.http = MakeSpec(&transport, &resolver, &cancel);
     const auto result = (*plugin)->Call("search", nlohmann::json::object(), context);
     CHECK_FALSE(result.is_error);
-    // 没有第二份 schema/工具表——manifest 是唯一账本(阶段 4 接线)。
-    CHECK(result.content == "http=table,secrets=table");
+    // P1-C(§五):hook 受控能力面五张子表随模块注册(fs/state/context/
+    // log/tools);行为按调用作用域门控——tool 作用域调 hook 面 API 拿
+    // not_hook_context(P1-C 册里钉)。没有第二份 schema/工具表——manifest
+    // 是唯一账本(阶段 4 接线)。
+    CHECK(result.content ==
+          "context=table,fs=table,http=table,log=table,secrets=table,state=table,tools=table");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,17 @@
 #include "app/hook_runtime.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <utility>
+
+#include <nlohmann/json.hpp>
 
 #include "cli/console_input.hpp"
 #include "config/config.hpp"
 #include "hooks/outbox.hpp"
 #include "platform/paths.hpp"
+#include "runtime/hook_host_services.hpp"
 #include "runtime/middleware_assembly.hpp"
 #include "tools/path_utils.hpp"
 
@@ -97,12 +101,25 @@ std::vector<std::string> SetupHookRuntime(const config::ConfigResult& config_res
     // 从 runtime::Run*Middleware 走它,不许各接一套。发布失败不挂核(零
     // 行为,老路径一字不变),提示报错。
     {
+        // P1-C(§五):hook 宿主能力中心——生产缺省 grants 只开 state/log
+        // 两枚无害口,http/fs/tools 待 P1-D 配置面与作者文档落定后按包授权
+        // (清单没申请的照样不授)。会话 v3 主写者由每轮入口的
+        // BindMiddlewareSessionWriter 幂等换绑,这里只配一次进程级底座。
+        runtime::HookHostServiceCenter::Grants grants;
+        grants.state = std::make_shared<runtime::HookStateStore>();
+        grants.log = [](const std::string& level, const nlohmann::json& fields) {
+            // 显示投影首版:一行结构化 json 打到 stderr(不自动注入模型,§五)。
+            std::fprintf(stderr, "[hook:%s] %s\n", level.c_str(), fields.dump().c_str());
+        };
+        runtime::DefaultHookServiceCenter().SetGrants(std::move(grants));
+
         runtime::MiddlewareAssemblyOptions middleware_options;
         middleware_options.project_hooks_root =
             std::filesystem::path(tools::Utf8ToPath(cwd)) / ".lubancode" / "hooks";
         if (const auto home = config::HomeLubancodeDir(); home.has_value()) {
             middleware_options.user_hooks_root = tools::Utf8ToPath(*home) / "hooks";
         }
+        middleware_options.services = &runtime::DefaultHookServiceCenter();
         const runtime::MiddlewareAssemblyReport middleware_report =
             runtime::AttachMiddlewareRegistry(*dispatcher, middleware_options);
         for (const std::string& notice : middleware_report.notices) {

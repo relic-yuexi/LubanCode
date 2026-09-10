@@ -20,7 +20,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "hooks/dispatcher.hpp"
 #include "hooks/middleware.hpp"
+#include "runtime/hook_host_services.hpp"
 #include "trajectory/v3/hooks.hpp"
 #include "trajectory/v3/writer.hpp"
 
@@ -29,6 +31,9 @@ namespace lubancode::runtime {
 class V3MiddlewareEventSink final : public hooks::middleware::MiddlewareEventSink {
 public:
     explicit V3MiddlewareEventSink(trajectory::v3::V3Writer& writer) : writer_(&writer) {}
+
+    // 绑定的写者(BindMiddlewareSessionWriter 幂等判断用)。
+    trajectory::v3::V3Writer* writer() const { return writer_; }
 
     // ---- dispatch 层 ----
     void OnDispatchRequested(const hooks::middleware::DispatchMeta& meta,
@@ -73,5 +78,15 @@ private:
     std::map<std::string, std::shared_ptr<DispatchBook>> books_;
     std::vector<std::string> recent_errors_;
 };
+
+// ---------------------------------------------------------------------------
+// 生产通电(LuaHook P0-B 遗留①,P1-C 补):dispatcher 的中间件事件 sink 与
+// 服务中心的子执行账都绑到当前会话的 v3 主写者(参照 trajectory_session
+// 的 v3_main_writer() 取用口)。每轮入口幂等调用——clear/resume 换场后
+// 写者指针会变,换只新 sink,旧的不许留着指废账。writer=null 解绑(v2 场
+// /未开卷);services 可空(只绑 sink,不动子执行账)。
+// ---------------------------------------------------------------------------
+void BindMiddlewareSessionWriter(hooks::HookDispatcher* dispatcher, HookHostServiceCenter* services,
+                                 trajectory::v3::V3Writer* writer);
 
 }  // namespace lubancode::runtime

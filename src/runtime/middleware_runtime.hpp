@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <string>
 #include <vector>
@@ -121,6 +122,18 @@ bool HasPreRequestMiddleware(const hooks::HookDispatcher* dispatcher);
 
 // 装配判据:中间件核在场且任一消息挂点(PreUser/PostUser)有获选定义。
 bool HasUserMiddleware(const hooks::HookDispatcher* dispatcher);
+
+// compact 旁路请求的估算切槽(P1-C,接 P0-B 遗留②;§4.36"估算=内置
+// hook"第一次覆盖旁路请求):只跑 PreRequest/estimate 段(不改输入、不进
+// 容量判断),purpose 进匹配与事件账(调用方给 "compact")。用户同名替换
+// 的估算器对 compact 请求同样生效——旁路不再自带第二份公式。
+//   核未装配(装配失败的老路)→ 回落内置 bytes/4(与槽内置实现同一公式,
+//     不因装配失败换口径);
+//   核在场而估算段失败/形状不合 → 错误(fail closed,不假装核过)。
+// 返回 EST1 形状(estimatedInputTokens 等)。
+std::expected<nlohmann::json, std::string> EstimateBypassRequestTokens(
+    hooks::HookDispatcher* dispatcher, const nlohmann::json& request_snapshot,
+    const MiddlewareHookContext& context);
 
 // UI 投影(LuaHook P0-B"一个事实账派生"):dispatch 结果 → 一行摘要 +
 // json 明细(hooks 面板/诊断用;不带正文,只有身份/结局/耗时)。

@@ -572,7 +572,7 @@ TEST_CASE("ctx:改写 ctx 落子即拒(只读)") {
     CHECK(result.message.find("只读") != std::string::npos);
 }
 
-TEST_CASE("hook 上下文:调 luban.http/secrets 拿 not_tool_context,零网络零解析") {
+TEST_CASE("hook 上下文:未授 http 能力时调 luban.http/secrets 拒,零网络零解析") {
     FakeHttpTransport transport;
     HookTestResolver resolver;
     auto state = LoadHookState(R"lua(
@@ -587,14 +587,17 @@ TEST_CASE("hook 上下文:调 luban.http/secrets 拿 not_tool_context,零网络�
                                HookProfile());
     REQUIRE(state.has_value());
     LuaCallContext context = HookContext();
-    context.http.transport = &transport;  // 恶意装配:就算 seam 被塞进来也进不去
+    context.http.transport = &transport;  // 恶意装配:就算 seam 被塞进 Tool 形状也进不去
     context.http.secret_resolver = &resolver;
     LuaHostState::LuaHookCall call;
     call.input = nlohmann::json::object();
     const auto result = (*state)->CallHook("run", call, context);
     REQUIRE(result.ok);
-    CHECK(result.output["http_code"] == "not_tool_context");
-    CHECK(result.output["available_code"] == "not_tool_context");
+    // P1-C(§五受控口):hook 作用域不再一律 not_tool_context——按能力束
+    // 开口;未授(无 hook_services/http_granted)= capability_not_granted。
+    // 零网络零解析不变。
+    CHECK(result.output["http_code"] == "hook.capability_not_granted");
+    CHECK(result.output["available_code"] == "hook.capability_not_granted");
     CHECK(result.output["transport_nil"].get<bool>());  // ctx 上没有 http 字段
     CHECK(transport.call_count() == 0);
     CHECK(resolver.describe_count == 0);

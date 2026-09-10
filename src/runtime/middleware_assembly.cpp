@@ -17,9 +17,10 @@ MiddlewareAssemblyReport AttachMiddlewareRegistry(hooks::HookDispatcher& dispatc
     using hooks::middleware::MiddlewarePool;
     MiddlewareAssemblyReport report;
     MiddlewarePool::Options pool_options;
-    pool_options.lua_factory = [](const hooks::middleware::LuaHandlerSpec& spec,
-                                  const hooks::middleware::HandlerLimits& limits) {
-        return MakeLuaHookHandler(spec, limits);
+    HookHostServiceCenter* services = options.services;
+    pool_options.lua_factory = [services](const hooks::middleware::LuaHandlerSpec& spec,
+                                          const hooks::middleware::HandlerLimits& limits) {
+        return MakeLuaHookHandler(spec, limits, services);
     };
     MiddlewarePool pool(std::move(pool_options));
 

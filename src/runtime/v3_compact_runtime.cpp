@@ -448,6 +448,49 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return tokens;
     };
 
+    // P1-C(compact 旁路请求切槽):估算经宿主 PreRequest/estimate 槽位。
+    // 快照口径与主线请求同一 scope(system + 有序材料 + 指令);槽失败即
+    // 压缩收口(fail closed),不回落内置公式假装核过。input.estimate 为
+    // 空 = 旧路,一字不变。
+    const auto estimate_input_via_slot = [&](const ScopePlan& current, bool reference_included,
+                                             const std::string& instruction)
+        -> std::expected<std::uint64_t, std::string> {
+        if (!input.estimate) {
+            return estimate_input(current, reference_included, instruction);
+        }
+        nlohmann::json snapshot = nlohmann::json::object();
+        snapshot["system"] = special_system;
+        nlohmann::json messages = nlohmann::json::array();
+        const auto push_block_messages = [&messages](const std::vector<PlanBlock>& blocks) {
+            for (const auto& block : blocks) {
+                for (const MessageLine* line : block.messages) {
+                    messages.push_back(line->message);
+                }
+            }
+        };
+        push_block_messages(current.removed);
+        if (reference_included) {
+            push_block_messages(current.retained);
+        }
+        snapshot["messages"] = std::move(messages);
+        snapshot["instruction"] = instruction;
+        auto estimated = input.estimate(snapshot);
+        if (!estimated.has_value()) {
+            return std::unexpected(estimated.error());
+        }
+        const auto tokens_it = estimated->find("estimatedInputTokens");
+        if (tokens_it == estimated->end() || (!tokens_it->is_number_unsigned() &&
+                                               !tokens_it->is_number_integer())) {
+            return std::unexpected(
+                "compact.estimate_bad_shape: 估算槽产出缺 estimatedInputTokens");
+        }
+        const std::int64_t tokens = tokens_it->get<std::int64_t>();
+        if (tokens < 0) {
+            return std::unexpected("compact.estimate_bad_shape: estimatedInputTokens 为负");
+        }
+        return static_cast<std::uint64_t>(tokens);
+    };
+
     bool reference_included = true;
     const bool gate_active = profile.compact_window_tokens > 0;
     result.gate_checked = gate_active;
@@ -458,8 +501,14 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     int plan_revision = 0;
     if (gate_active) {
         while (true) {
-            const std::uint64_t input_tokens =
-                estimate_input(plan, reference_included, build_instruction(plan, reference_included));
+            const auto input_tokens_or =
+                estimate_input_via_slot(plan, reference_included,
+                                        build_instruction(plan, reference_included));
+            if (!input_tokens_or.has_value()) {
+                finish_rejected(input_tokens_or.error());
+                return result;
+            }
+            const std::uint64_t input_tokens = *input_tokens_or;
             const std::uint64_t budget =
                 profile.compact_window_tokens > profile.compact_output_reserve_tokens +
                                                      profile.compact_margin_tokens
@@ -520,8 +569,14 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
             retreated.turn_id = session.turn_id();
             retreated.parent_turn_id = input.parent_turn_id;
             retreated.compact_id = session.compact_id();
-            const std::uint64_t input_tokens_after =
-                estimate_input(plan, reference_included, build_instruction(plan, reference_included));
+            const auto input_tokens_after_or =
+                estimate_input_via_slot(plan, reference_included,
+                                        build_instruction(plan, reference_included));
+            if (!input_tokens_after_or.has_value()) {
+                finish_rejected(input_tokens_after_or.error());
+                return result;
+            }
+            const std::uint64_t input_tokens_after = *input_tokens_after_or;
             retreated.payload = nlohmann::json::object(
                 {{"planRevision", plan_revision},
                  {"sourceContextRevision", writer.context().revision},
@@ -585,6 +640,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     input_ids.push_back(prompt_receipt.id);
     const std::string request_id = writer.NewRequestId();
     const std::string step_id = writer.NewStepId();
+    // 快照里的估算与门禁同一口径(槽路再估一次);槽失败同路收口(fail
+    // closed),不拿旧数字顶包。
+    const auto prepared_tokens = estimate_input_via_slot(plan, reference_included, instruction);
+    if (!prepared_tokens.has_value()) {
+        finish_rejected(prepared_tokens.error());
+        return result;
+    }
     nlohmann::json provider_snapshot = nlohmann::json::object(
         {{"provider", profile.provider},
          {"wire", profile.wire},
@@ -592,8 +654,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
          {"outputReserveTokens", profile.compact_output_reserve_tokens},
          {"windowTokens", gate_active ? nlohmann::json(profile.compact_window_tokens)
                                       : nlohmann::json(nullptr)},
-         {"estimatedInputTokens",
-          estimate_input(plan, reference_included, instruction)}});
+         {"estimatedInputTokens", *prepared_tokens}});
     const WriteReceipt prepared = writer.PrepareRequest(
         request_id, session.turn_id(), step_id, "compact", special_system_receipt.id, input_ids,
         std::move(provider_snapshot), session.compact_id());

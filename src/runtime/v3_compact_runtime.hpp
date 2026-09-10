@@ -28,6 +28,8 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -120,6 +122,16 @@ struct V3CompactRunInput {
     std::string special_system;
     // /compact <重点>:重点保留一段(进指令,不进校验清单)。
     std::string focus;
+
+    // P1-C(compact 旁路请求切槽,§4.36/§7.2):压缩请求的输入估算经宿主
+    // 的 PreRequest/estimate 槽位——用户同名替换的估算器对 compact 请求同
+    // 样生效,旁路不再自带第二份公式。入参 = 模型输入快照({system,
+    // messages, instruction});出参 = EST1 形状(须含 estimatedInputTokens)。
+    // 空 = 旧路(消息级 bytes/4 合成;未接槽的调用方行为一字不变)。
+    // 槽失败 → 本次压缩按 estimate_failed 收口,不回落内置公式假装核过
+    //(§4.36 fail closed)。生产装配见 session_commands 的
+    // runtime::EstimateBypassRequestTokens。
+    std::function<std::expected<nlohmann::json, std::string>(const nlohmann::json&)> estimate;
 };
 
 struct V3CompactRunResult {
