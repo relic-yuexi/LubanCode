@@ -49,6 +49,7 @@
 #include "cli/session_picker.hpp"
 #include "cli/session_picker_panel.hpp"
 #include "cli/theme.hpp"
+#include "runtime/trajectory_history_view.hpp"  // /export 的 v3 时间线投影(收尾棒)
 #include "runtime/worktree.hpp"
 #include "platform/paths.hpp"
 #include "runtime/session_command_service.hpp"
@@ -2083,16 +2084,38 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
 }
 
 CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    // P0-3 轨迹档(§14.5:/export 一律读 ReplayState,不从旁路 history 或
-    // SessionStore 取数):折叠本场 main.jsonl 再投影导出。flag 关照旧路。
+    // P0-3 轨迹档(§14.5:/export 一律读账本投影,不从旁路 history 或
+    // SessionStore 取数)。轨迹 v3 收尾棒:v3 场(主账 <id>.jsonl)走显示
+    // 时间线投影(ReadV3Ledger + ProjectHistoryTimeline,经 runtime 适配层
+    // ProjectRestoredHistory/ProjectExportMessages)——hidden 默认不导
+    //(§4.28),压缩标记折成分界位、由既有 compact 文案渲染;v2 场照旧
+    // ReplayState 折叠投影,一字不动。
     if (ctx.trajectory != nullptr) {
-        const auto fold = ctx.trajectory->FoldMainReplay();
-        if (!fold.ok()) {
-            TermOut() << trf("cmd.resume.read_failed", fold.message) << "\n";
-            return CommandFlow::Continue;
+        std::vector<lubancode::api::Message> history;
+        std::vector<std::size_t> compact_positions;
+        lubancode::tools::ExportSessionHeader header;
+        const auto v3_stream =
+            lubancode::runtime::FindV3HistoryStream(ctx.trajectory->session_dir());
+        if (v3_stream.has_value()) {
+            const auto view = lubancode::runtime::ProjectRestoredHistory(*v3_stream);
+            const auto projection = lubancode::runtime::ProjectExportMessages(view);
+            history = std::move(projection.messages);
+            compact_positions = std::move(projection.compact_positions);
+            header.started_at = projection.started_at;
+            if (history.empty() && view.items.empty()) {
+                TermOut() << trf("cmd.resume.read_failed",
+                                 std::string("v3 主账读不动: ") + view.source_jsonl) << "\n";
+                return CommandFlow::Continue;
+            }
+        } else {
+            const auto fold = ctx.trajectory->FoldMainReplay();
+            if (!fold.ok()) {
+                TermOut() << trf("cmd.resume.read_failed", fold.message) << "\n";
+                return CommandFlow::Continue;
+            }
+            history = lubancode::runtime::ProjectHistoryFromReplay(fold.state);
+            header.cwd = fold.state.control.cwd.value_or(std::string());
         }
-        const std::vector<lubancode::api::Message> history =
-            lubancode::runtime::ProjectHistoryFromReplay(fold.state);
         if (history.empty()) {
             TermOut() << tr("cmd.export.empty") << "\n";
             return CommandFlow::Continue;
@@ -2103,11 +2126,10 @@ CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::P
             // P0-2:出档归 session exports/(单子 §三:导出统一放 exports/)。
             out_path = (ctx.trajectory->session_dir() / "exports" / (id + ".md")).generic_string();
         }
-        lubancode::tools::ExportSessionHeader header;
-        header.cwd = fold.state.control.cwd.value_or(std::string());
         const std::string& title = *ctx.session_title;
-        const std::string markdown = lubancode::tools::ExportSessionMarkdown(
-            header, history, id, /*max_result_lines=*/30, title);
+        const std::string markdown =
+            lubancode::tools::ExportSessionMarkdown(header, history, id, /*max_result_lines=*/30,
+                                                    title, compact_positions);
         const std::filesystem::path path(
             std::u8string(reinterpret_cast<const char8_t*>(out_path.data()), out_path.size()));
         std::error_code ec;

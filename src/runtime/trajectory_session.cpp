@@ -3748,13 +3748,27 @@ trajectory::ReplayReport TrajectorySessionLedger::FoldMainReplay() const {
         report.error_code = "replay.no_active_session";
         return report;
     }
-    // 接线点 1:v3 场没有 main.jsonl。折叠投影走 ReadV3Ledger 的链投影
-    //(/resume/--continue 已接);/export、/copy 一类 v2 折叠消费方本棒
-    // 如实报不可用,不伪造 v2 账。
+    // 接线点 1 收尾棒:v3 场没有 main.jsonl,折叠投影走 ReadV3Ledger +
+    // ProjectModelContext 链投影——与 /resume/--continue 同一份
+    //(EffectiveConversationFromV3 公开共用,/export、/copy 从这取数,不
+    // 各造各账)。ReplayState 只装身份与有效对话:turn/请求步/工具台账是
+    // v2 折叠概念,v3 不硬造;验卷不过如实报错,不折半本。
     if (impl_->active->is_v3()) {
         trajectory::ReplayReport report;
-        report.error_code = "replay.v3_main_unavailable";
-        report.message = "v3 会话的投影走 ReadV3Ledger 链投影(resume 已接);main.jsonl 折叠不适用";
+        const auto ledger = v3::ReadV3Ledger(impl_->active->directory.v3_stream_path());
+        if (!ledger.has_value()) {
+            report.error_code = "replay.v3_ledger_failed";
+            report.message = ledger.error();
+            return report;
+        }
+        report.state.session_id = ledger->session_id;
+        report.state.run_id = ledger->run_id;
+        report.state.effective_conversation =
+            trajectory::EffectiveConversationFromV3(*ledger, v3::ProjectModelContext(*ledger));
+        report.state.integrity.events_folded = ledger->lines;
+        if (const auto last = ledger->LastEntry(); last.has_value()) {
+            report.state.folded_seq = last->seq;
+        }
         return report;
     }
     return trajectory::FoldStreamReplay(impl_->active->directory.main_stream_path());
@@ -3766,17 +3780,11 @@ trajectory::SessionVerifyReport TrajectorySessionLedger::VerifySession() const {
         report.error_code = "verify.no_active_session";
         return report;
     }
-    // 接线点 1:v3 场验 v3 主账(与 writer::Continue/ReadV3Ledger 同一套
-    // 语义);子账树遍历(v3::WalkSessionTree)归后续棒。
+    // 接线点 1 收尾棒:v3 场走 VerifyV3SessionDir——主账 v3 卷整卷验链 +
+    // v3::WalkSessionTree 递归 subagents/ 子账树,折成与 v2 同形状的报告
+    //(此前只验主账,子账树归本棒接上)。
     if (impl_->active->is_v3()) {
-        trajectory::SessionVerifyReport report;
-        const auto verify = v3::VerifyV3File(impl_->active->directory.v3_stream_path());
-        report.ok = verify.ok;
-        if (!verify.ok) {
-            report.error_code = verify.error_code;
-            report.message = verify.message;
-        }
-        return report;
+        return trajectory::VerifyV3SessionDir(impl_->active->directory.session_dir());
     }
     return trajectory::VerifySessionDir(impl_->active->directory.session_dir());
 }

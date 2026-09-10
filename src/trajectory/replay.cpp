@@ -17,6 +17,8 @@
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/schema.hpp"
+#include "trajectory/v3/reader.hpp"          // WalkSessionTree:子账树遍历(收尾棒)
+#include "trajectory/v3/session_switch.hpp"  // FindV3SessionStream:v3 场并列识别
 
 namespace lubancode::trajectory {
 namespace {
@@ -1440,6 +1442,12 @@ SessionVerifyReport VerifySessionDir(const std::filesystem::path& session_dir) {
         report.message = "session 目录不存在";
         return report;
     }
+    // 轨迹 v3 收尾棒:main.jsonl 不在而 <id>.jsonl 首行 schemaVersion==3 =
+    // v3 场,走 v3 引擎(主账验链 + subagents/ 子账树递归);认不出再落
+    // 下方 v2 原路,一字不动。
+    if (const auto v3_stream = v3::FindV3SessionStream(session_dir); v3_stream.has_value()) {
+        return VerifyV3SessionDir(session_dir);
+    }
     // 采集 stream 清单:main + subagents + workflow/node + goal/loop(§3.1)。
     std::vector<std::filesystem::path> paths;
     const auto main_path = session_dir / "main.jsonl";
@@ -1588,6 +1596,151 @@ SessionVerifyReport VerifySessionDir(const std::filesystem::path& session_dir) {
 
     report.ok = all_ok;
     if (!all_ok && report.error_code.empty()) {
+        report.error_code = "verify.session_failed";
+    }
+    return report;
+}
+
+// ---------------------------------------------------------------------------
+// v3 场验账(轨迹 v3 收尾棒):主账 v3 卷 + WalkSessionTree 子账树 →
+// 与 v2 同形状的 SessionVerifyReport。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool V3LedgerEnded(const v3::V3Ledger& ledger) {
+    for (const auto& event : ledger.events) {
+        if (event.kind == v3::EventKindV3::SessionEnded) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string V3LastLineHash(const v3::V3Ledger& ledger) {
+    const auto last = ledger.LastEntry();
+    if (!last.has_value()) {
+        return std::string();
+    }
+    return last->is_message ? ledger.messages[last->index].line_hash
+                            : ledger.events[last->index].line_hash;
+}
+
+// ledger 传 WalkSessionTree 已验好的那份(不重读);空时补读一次只为拿
+// 错误详情,读得回算运气好(并发追加),照常折。
+VerifiedStream V3StreamEntry(const std::filesystem::path& session_dir, const std::filesystem::path& jsonl,
+                             const std::string& run_id, const std::string& parent_run_id,
+                             RunKind run_kind, const std::optional<v3::V3Ledger>& ledger) {
+    VerifiedStream stream;
+    std::error_code ec;
+    stream.relative_path = std::filesystem::relative(jsonl, session_dir, ec).generic_string();
+    if (stream.relative_path.empty() || ec) {
+        stream.relative_path = jsonl.filename().generic_string();  // 会话根之外:只报名字
+    }
+    stream.run_id = run_id;
+    stream.run_kind = run_kind;
+    stream.parent_run_id = parent_run_id;
+    if (!ledger.has_value()) {
+        const auto reread = v3::ReadV3Ledger(jsonl);
+        if (!reread.has_value()) {
+            stream.error_code = "child.unreadable";
+            stream.message = reread.error();
+            return stream;
+        }
+        stream.ok = true;
+        stream.events = reread->lines;
+        stream.last_event_hash = V3LastLineHash(*reread);
+        stream.run_terminal = V3LedgerEnded(*reread);
+        stream.terminal_kind = stream.run_terminal ? "session.ended" : std::string();
+        return stream;
+    }
+    stream.ok = true;
+    stream.events = ledger->lines;
+    stream.last_event_hash = V3LastLineHash(*ledger);
+    stream.run_terminal = V3LedgerEnded(*ledger);
+    stream.terminal_kind = stream.run_terminal ? "session.ended" : std::string();
+    return stream;
+}
+
+// 递归折子账树:每枚 child 落一条 stream(卷在即验)+ 一条父子边。
+void CollectV3ChildNodes(const v3::SubagentSessionNode& node, const std::filesystem::path& session_dir,
+                         SessionVerifyReport* report, bool* all_ok) {
+    for (const auto& child : node.children) {
+        ChildEdgeReport edge;
+        edge.child_run_id = child.run_id;
+        edge.parent_run_id = node.run_id;
+        edge.parent_call_id = child.parent_action_id;
+        edge.child_stream_found =
+            child.link_status != "child_missing" && std::filesystem::exists(child.jsonl_path);
+        if (child.ledger.has_value()) {
+            edge.child_has_terminal = V3LedgerEnded(*child.ledger);
+            edge.child_terminal_hash = V3LastLineHash(*child.ledger);
+            // 前台等效:父侧 linked 即派发引用;hash 核对的是子账实读末行。
+            edge.spawn_reference_found = child.link_status == "linked" ||
+                                         child.link_status == "spawn_failed";
+            edge.hash_matches = edge.spawn_reference_found;
+            edge.accepted_once = child.link_status == "linked";
+        }
+        if (child.link_status == "linked") {
+            if (!child.ledger.has_value()) {
+                edge.error_code = "child.unreadable";  // 防御:linked 却读不回子卷
+            } else if (!child.source_check.ok) {
+                edge.error_code = "edge.spawn_ref_mismatch";  // 首行 spawnEventRef 五键验不过
+            }
+        } else if (child.link_status == "spawn_failed") {
+            // 失败终态是诚实账:子卷缺失不算坏账,不缺边。
+        } else if (child.link_status == "not_linked") {
+            edge.error_code = "edge.not_linked";  // 声明派发没走到 linked,明报
+        } else if (child.link_status == "cycle") {
+            edge.error_code = "edge.cycle";
+        } else if (child.link_status == "child_missing") {
+            edge.error_code = "edge.child_stream_missing";  // 镜像 v2 孤儿码
+        } else if (child.link_status == "unreadable") {
+            edge.error_code = "child.unreadable";
+        }
+        if (!edge.error_code.empty()) {
+            *all_ok = false;
+        }
+        report->child_edges.push_back(std::move(edge));
+        if (edge.child_stream_found) {
+            VerifiedStream stream =
+                V3StreamEntry(session_dir, child.jsonl_path, child.run_id, node.run_id,
+                              RunKind::Subagent, child.ledger);
+            if (!stream.ok) {
+                *all_ok = false;
+            }
+            report->streams.push_back(std::move(stream));
+            report->run_kinds[child.run_id] = RunKindName(RunKind::Subagent);
+        }
+        CollectV3ChildNodes(child, session_dir, report, all_ok);
+    }
+}
+
+}  // namespace
+
+SessionVerifyReport VerifyV3SessionDir(const std::filesystem::path& session_dir) {
+    SessionVerifyReport report;
+    const auto stream = v3::FindV3SessionStream(session_dir);
+    if (!stream.has_value()) {
+        report.error_code = "verify.no_v3_stream";
+        report.message = "session 目录认不出 v3 主账(无 main.jsonl、<id>.jsonl 首行非 v3)";
+        return report;
+    }
+    const auto root = v3::WalkSessionTree(*stream);
+    // 主账:root 节点自己就是一次整卷验链(ReadV3Ledger 严格解析 + 语义
+    // 校验 + seq/哈希衔接 + 上下文链重放)。
+    VerifiedStream main = V3StreamEntry(session_dir, *stream, root.run_id, std::string(),
+                                        RunKind::MainSession, root.ledger);
+    bool all_ok = main.ok;
+    if (!main.ok) {
+        report.error_code = main.error_code;  // child.unreadable(主卷语境)
+        report.message = main.message;        // v3writer.* 详情
+    }
+    report.streams.push_back(std::move(main));
+    report.run_kinds[root.run_id] = RunKindName(RunKind::MainSession);
+    CollectV3ChildNodes(root, session_dir, &report, &all_ok);
+    report.ok = all_ok;
+    if (!report.ok && report.error_code.empty()) {
         report.error_code = "verify.session_failed";
     }
     return report;

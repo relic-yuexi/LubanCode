@@ -4,6 +4,8 @@
 
 #include "platform/paths.hpp"
 #include "trajectory/directory.hpp"
+#include "trajectory/v3/reader.hpp"          // WalkSessionTree:v3 子账树(收尾棒)
+#include "trajectory/v3/session_switch.hpp"  // FindV3SessionStream:v3 场并列识别
 #include "workspace/identity.hpp"
 #include "workspace/manifest.hpp"
 #include "workspace/storage_contracts.hpp"
@@ -23,6 +25,48 @@ StreamHealth CheckStream(const std::string& label, const std::filesystem::path& 
     health.verify = VerifyJournalFile(path);
     health.run_terminal = ScanStreamFacts(path).run_terminal;
     return health;
+}
+
+// 轨迹 v3 收尾棒:/doctor 的账面折叠认 v3 场。一份已验 v3 账(WalkSessionTree
+// 节点自带)折成 StreamHealth(JournalVerifyReport 形状),读不回的子卷重
+// 读一次拿错误详情,不吞不猜。
+bool V3LedgerHasEnded(const v3::V3Ledger& ledger) {
+    for (const auto& event : ledger.events) {
+        if (event.kind == v3::EventKindV3::SessionEnded) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void FillV3StreamHealth(const std::string& label, const std::filesystem::path& path,
+                        const std::optional<v3::V3Ledger>& ledger, StreamHealth* health) {
+    health->label = label;
+    health->path = path;
+    health->exists = true;
+    if (ledger.has_value()) {
+        health->verify.ok = true;
+        health->verify.events = ledger->lines;
+        health->run_terminal = V3LedgerHasEnded(*ledger);
+    } else {
+        health->verify.error_code = "child.unreadable";
+        const auto reread = v3::ReadV3Ledger(path);
+        if (!reread.has_value()) {
+            health->verify.message = reread.error();
+        }
+    }
+}
+
+void PushV3ChildHealth(const v3::SubagentSessionNode& node, std::vector<StreamHealth>* out) {
+    for (const auto& child : node.children) {
+        std::error_code ec;
+        if (std::filesystem::exists(child.jsonl_path, ec)) {
+            StreamHealth health;
+            FillV3StreamHealth("agent:" + child.session_id, child.jsonl_path, child.ledger, &health);
+            out->push_back(std::move(health));
+        }
+        PushV3ChildHealth(child, out);
+    }
 }
 
 void ScanDirForStreams(const std::filesystem::path& dir, const std::string& prefix,
@@ -53,6 +97,24 @@ SessionDoctorReport BuildSessionDoctorReport(const std::filesystem::path& sessio
         if (const auto status = SessionStatusFromName(manifest->status); status.has_value()) {
             report.status = *status;
         }
+    }
+
+    // 轨迹 v3 收尾棒:v3 场(无 main.jsonl,主账 <id>.jsonl)——主卷与
+    // subagents/ 子账树都从 WalkSessionTree 取(每个节点即一次整卷验链,
+    // ReadV3Ledger 同一套语义),不走下方 v2 的 journal 验账原路。
+    if (const auto v3_stream = v3::FindV3SessionStream(session_dir); v3_stream.has_value()) {
+        const auto root = v3::WalkSessionTree(*v3_stream);
+        StreamHealth main;
+        FillV3StreamHealth("main(v3)", *v3_stream, root.ledger, &main);
+        report.streams.push_back(std::move(main));
+        PushV3ChildHealth(root, &report.streams);
+        for (const auto& stream : report.streams) {
+            if (stream.exists && !stream.run_terminal) {
+                ++report.unterminated_stream_count;
+            }
+        }
+        report.capacity = ScanSessionCapacity(session_dir);
+        return report;
     }
 
     report.streams.push_back(CheckStream("main", session_dir / "main.jsonl"));

@@ -1027,13 +1027,6 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     if (!active_.has_value() || active_->status != SessionStatus::Running) {
         return fail("clear.no_active_session", "没有可换的 active running session");
     }
-    // 接线点 1 分期边界:clear 八步换账(v2 的 run terminal/session.json/
-    // 跨场 command 账)尚无 v3 对应物,明拒不硬造——v3 场先 /exit 封场
-    // 再开新场。开关关的 v2 场不受影响(下方原路一字不动)。
-    if (active_->is_v3()) {
-        return fail("clear.v3_unsupported",
-                    "v3 会话暂不走 clear 八步换账:先 exit/close 封场再开新场(随接线点 1 后续棒迁)");
-    }
     NullClearParticipant null_participant;
     if (participant == nullptr) {
         participant = &null_participant;
@@ -1045,6 +1038,11 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
         std::atomic<bool>& flag;
         ~Gate() { flag = false; }
     } gate{boundary_in_progress_};
+    // 接线点 1 收尾棒:v3 场走 clear 八步的 v3 折算(关当前场开新场,
+    // §3.3.1 语义同源);v2 原路(下方)一字不动。
+    if (active_->is_v3()) {
+        return ClearV3Locked(request, participant);
+    }
 
     ActiveSession& old = *active_;
     outcome.old_session_id = old.session_id();
@@ -1267,6 +1265,163 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     return outcome;
 }
 
+ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
+                                           ClearParticipant* participant) {
+    // v3 折算表(v2 八步 → v3 事实;无对应物的 outcome 字段留空,不伪造):
+    //   第 1 步  新目录+session.json → OpenV3SessionLocked 开新卷(首行
+    //           system + session.started,start_reason=clear,previous 指旧
+    //           场)+ lifecycle create_session(§3.2)。无 session.json——
+    //           盘上身份在账首行。
+    //   第 2 步  旧 main control.command.requested + session.clear_requested
+    //           → 旧账 command.received(§2.1 命令族,commandId 贯穿)。
+    //           v3 无 session.clear_requested 对应 kind,nextSessionId 改随
+    //           第 4 步 session.ended 载荷走。
+    //   第 3 步  停活收口(turn/queue/selection cancel 事件)→ 运行侧回调
+    //           照做;turn 收口账的 v3 对应(input.* 族)属后续棒,有活没
+    //           收口如实标 unknown,不冒充写过。
+    //   第 4 步  run terminal + session.ended → v3 无 run 概念:只落
+    //           session.ended(reason=clear, closeQuality, nextSessionId)。
+    //   第 5 步  旧 session.json 转 closed → 无 json 可翻,跳(账面即终态;
+    //           old_session_json_finalized 恒 false)。
+    //   第 6 步  新 main run.started + 跨场 command.completed → v3 无
+    //           run.started(首行身份在账上);跨场账照落 command.completed,
+    //           qualifiedRequestedRef 指旧场 command.received(与 resume
+    //           交互路同形)。
+    //   第 7 步  新 session.json running + 切指针 → 无 json;切 active、放
+    //           旧锁(§3.3.2 口径:没有活 writer 的场不攥独占锁)。
+    //   第 8 步  清内存 → participant->ResetInMemoryState()(v3_books 重绑
+    //           归运行侧 ClearSession;新场 system 回基础版,§4.3 首次请求
+    //           三步切换补真身)。
+    // 半路失败(第 4/6 步落不了):active 不切、旧锁不放;盘上半开的新场
+    // 按 v3 恢复器口径归后续棒续办(与 v2"恢复器续办"同语义,不硬造回滚)。
+    ClearOutcome outcome;
+    const auto fail = [&outcome](std::string code, std::string message) {
+        outcome.error_code = std::move(code);
+        outcome.message = std::move(message);
+        return outcome;
+    };
+    ActiveSession& old = *active_;
+    outcome.old_session_id = old.session_id();
+    outcome.old_main_run_id = old.manifest.main_run_id;
+    outcome.boundary_operation_id = NewStampId();
+
+    // ---- 第 1 步:开新 v3 场(先备好,旧账未动;失败则旧场照常可用)。
+    auto session = OpenV3SessionLocked("clear", old.session_id());
+    if (!session.has_value()) {
+        return fail("clear.step1_failed", session.error());
+    }
+    outcome.new_session_id = session->session_id();
+    outcome.new_main_run_id = session->manifest.main_run_id;
+    outcome.new_session_prepared = true;
+    const std::string create_op = NewStampId();
+    LifecycleIntent intent;
+    intent.operation_id = create_op;
+    intent.operation = LifecycleOperationName(LifecycleOperation::CreateSession);
+    intent.workspace_key = workspace_key_;
+    intent.session_id = session->session_id();
+    intent.requested_at_ms = clock_->WallMs();
+    intent.parameters["start_reason"] = "clear";
+    intent.parameters["previous_session_id"] = old.session_id();
+    intent.parameters["boundary_operation_id"] = outcome.boundary_operation_id;
+    intent.parameters["trajectory_format"] = "v3";
+    if (const auto intent_dir = lifecycle().WriteIntent(intent); !intent_dir.has_value()) {
+        return fail("clear.step1_failed", intent_dir.error());
+    }
+    LifecycleResult create_result;
+    create_result.operation_id = create_op;
+    create_result.status = "completed";
+    create_result.completed_at_ms = clock_->WallMs();
+    create_result.outcome["session_dir"] = platform::PathToUtf8(session->session_dir());
+    create_result.outcome["trajectory_format"] = "v3";
+    if (const auto written = lifecycle().WriteResult(create_result); !written.has_value()) {
+        return fail("clear.step1_failed", written.error());
+    }
+
+    // ---- 第 2 步:旧账 command.received(qualified requested 的 v3 对应)。
+    v3::EventDraft received;
+    received.kind = v3::EventKindV3::CommandReceived;
+    received.command_id = request.command_id;
+    received.payload = nlohmann::json{{"commandId", request.command_id},
+                                      {"commandName", "clear"},
+                                      {"actionName", "clear"},
+                                      {"effectClass", "session_boundary"},
+                                      {"boundaryOperationId", outcome.boundary_operation_id}};
+    const auto received_receipt = old.v3_main->AppendEvent(std::move(received), Durability::PowerLoss);
+    if (received_receipt.status != v3::WriteReceipt::Status::Committed) {
+        return fail("clear.step2_failed",
+                    "旧账 command.received 落不了: " + received_receipt.error_code + " " +
+                        received_receipt.error_message);
+    }
+    outcome.requested_event_id = received_receipt.id;
+
+    // ---- 第 3 步:运行侧收口(与 CloseV3Locked 同款;v3 无 turn 收口事件
+    // 可落,有活没收口如实标 unknown)。
+    bool unknown_present = false;
+    if (participant != nullptr) {
+        if (!participant->CancelActiveTurn().empty()) {
+            unknown_present = true;
+        }
+        unknown_present = !participant->CancelQueuedItems().empty() || unknown_present;
+        for (const ClearParticipant::ChildClosure& child : participant->CancelActiveChildren()) {
+            if (!child.terminal_written || child.unknown) {
+                unknown_present = true;
+            }
+        }
+    }
+    outcome.old_close_quality = unknown_present ? "incomplete" : "clean";
+
+    // ---- 第 4 步:旧场封账 session.ended(reason=clear;nextSessionId 随行)。
+    v3::EventDraft ended;
+    ended.kind = v3::EventKindV3::SessionEnded;
+    ended.payload = nlohmann::json{{"reason", "clear"},
+                                   {"closeQuality", outcome.old_close_quality},
+                                   {"nextSessionId", session->session_id()}};
+    const auto ended_receipt = old.v3_main->AppendEvent(std::move(ended), Durability::PowerLoss);
+    if (ended_receipt.status != v3::WriteReceipt::Status::Committed) {
+        return fail("clear.step4_failed",
+                    "旧账 session.ended 落不了: " + ended_receipt.error_code + " " +
+                        ended_receipt.error_message);
+    }
+    outcome.old_session_ended_event_id = ended_receipt.id;
+    outcome.old_session_ended_ref =
+        EventRef{old.session_id(), ended_receipt.id, ended_receipt.line_hash};
+    outcome.old_journal_sha256 = ended_receipt.line_hash;  // 封账行 hash(§8.3 同口径)
+    old.status = SessionStatus::Closed;  // 只住内存(v3 无 session.json 可翻)
+
+    // ---- 第 5 步:v3 无 session.json,跳——账面 session.ended 即终态。
+
+    // ---- 第 6 步:新场跨场 command.completed(qualifiedRequestedRef 指旧场
+    // command.received;与 resume 交互路同形)。
+    v3::EventDraft completed;
+    completed.kind = v3::EventKindV3::CommandCompleted;
+    completed.status = v3::OpStatus::Done;
+    completed.command_id = request.command_id;
+    completed.payload =
+        nlohmann::json{{"status", "completed"},
+                       {"qualifiedRequestedRef", nlohmann::json{{"sessionId", old.session_id()},
+                                                                {"eventId",
+                                                                 outcome.requested_event_id}}},
+                       {"boundaryOperationId", outcome.boundary_operation_id}};
+    const auto completed_receipt =
+        session->v3_main->AppendEvent(std::move(completed), Durability::PowerLoss);
+    if (completed_receipt.status != v3::WriteReceipt::Status::Committed) {
+        return fail("clear.step6_failed",
+                    "跨场 command.completed 落不了: " + completed_receipt.error_code + " " +
+                        completed_receipt.error_message);
+    }
+    outcome.new_command_completed_event_id = completed_receipt.id;
+
+    // ---- 第 7 步:切 active,放旧锁;旧写者随换值自然关柄。
+    old.lock.Release();
+    active_ = std::move(*session);
+    outcome.new_session_running = true;
+    outcome.active_switched = true;
+
+    // ---- 第 8 步:清内存(账本侧重绑/换场善后归运行侧 ClearSession)。
+    participant->ResetInMemoryState();
+    return outcome;
+}
+
 CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
                                             ClearParticipant* participant) {
     CloseOutcome outcome;
@@ -1423,13 +1578,13 @@ std::expected<void, std::string> SessionManager::UpdateApprovalMode(ApprovalMode
     return {};
 }
 
-namespace {
-
 // v3 链输入 → ReplayMessage(有效对话;§4.10:只取本账链,compact 内部
 // 问答/prompt 从未入链,天然排除)。工具配对键统一 actionId:assistant
 // 调用块的 provider 调用号经 FoldToolActions 换成 actionId,与 tool 消息
 // 的 tool_call_id 同键(§4.15 全局调用身份)。context_summary 是链上的
 // 生效摘要,按 user 消息进有效对话(§4.10"生效摘要 + 保留消息")。
+// (原住匿名命名空间;接线点 1 收尾棒起升为公开投影——resume 第 3 步与
+// FoldMainReplay 的 v3 分支[/export、/copy 的 ReplayState 取数口]共用。)
 std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledger,
                                                        const v3::ModelContext& context) {
     std::map<std::string, std::string> provider_call_to_action;
@@ -1505,8 +1660,6 @@ std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledge
     }
     return conversation;
 }
-
-}  // namespace
 
 // 调用方须已持 mutex_(ResumeAsNew 七步内取默认源用,不再二次加锁)。
 std::string SessionManager::LatestResumableSessionIdLocked() {

@@ -9,6 +9,7 @@
 // 不拿今天的 tokenizer 重算)。
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -75,6 +76,22 @@ struct RestoredHistoryView {
 // 读不动(验卷不过/非 v3 文件)给空 items:调用方按"没有可显示旧史"
 // 处理,不冒充、不抛错(§4.10"源缺失时报告缺口,不假称齐全")。
 RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl);
+
+// ---------------------------------------------------------------------------
+// /export 的 v3 投影(轨迹 v3 收尾棒):时间线 → markdown 导出的消息序与
+// 压缩分界位。hidden(display.hidden)默认不导出(§4.28"隐藏不等于删除",
+// 详情档另算),compact 内部问答/生效摘要天然排除在导出正文外,压缩标记
+// 折成"第 N 条消息之前"的分界位,由 ExportSessionMarkdown 的既有 compact
+// 文案渲染。started_at 取时间线首格时间戳(真实账面,不猜)。
+// ---------------------------------------------------------------------------
+
+struct V3ExportProjection {
+    std::vector<api::Message> messages;      // 可导出的消息序(时间线原序)
+    std::vector<std::size_t> compact_positions;  // 压缩分界位(升序,指向 messages 下标)
+    std::string started_at;                  // 时间线首格时间戳;空账为空
+};
+
+V3ExportProjection ProjectExportMessages(const RestoredHistoryView& view);
 
 // ---------------------------------------------------------------------------
 // P3 第二棒:转录摘要行 + seq 游标分页(Ctrl+T 浮层与 app-server

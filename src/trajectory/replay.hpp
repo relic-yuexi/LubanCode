@@ -322,7 +322,22 @@ struct SessionVerifyReport {
 
 // 扫一间 session 目录:main + subagents/* + workflows/*/workflow.jsonl 与
 // nodes/* + goals/* + loops/*,逐文件验 hash chain;再对每条父子边交叉核。
-// 不调模型、不执行工具;`trajectory verify` 的引擎体。
+// 不调模型、不执行工具;`trajectory verify` 的引擎体。v3 场(无 main.jsonl、
+// 主账 <id>.jsonl)内部分派到 VerifyV3SessionDir,消费方不换口。
 SessionVerifyReport VerifySessionDir(const std::filesystem::path& session_dir);
+
+// v3 场验账(轨迹 v3 收尾棒):主账 v3 卷逐行验链(ReadV3Ledger 同一套
+// 语义,含语义校验与上下文链重放)+ v3::WalkSessionTree 递归
+// subagents/<child>/<child>.jsonl 子账树,折成与 v2 同形状的
+// SessionVerifyReport(streams + child_edges)——/verify 与 /doctor 的
+// integrity gate 吃同一只报告,不另写消费。边核口径:
+//   linked            过;spawnEventRef 五键验不过 → edge.spawn_ref_mismatch
+//   spawn_failed      过(失败终态是诚实账,不缺子文件不算坏)
+//   not_linked        edge.not_linked(声明派发没走到 linked,明报)
+//   child_missing     edge.child_stream_missing(镜像 v2 孤儿码)
+//   unreadable        该子卷 stream 标坏(child.unreadable)+ 边错
+//   cycle             edge.cycle
+// 不调模型、不执行工具;session_dir 认不出 v3 流给 verify.no_v3_stream。
+SessionVerifyReport VerifyV3SessionDir(const std::filesystem::path& session_dir);
 
 }  // namespace lubancode::trajectory
