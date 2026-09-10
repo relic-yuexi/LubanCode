@@ -80,6 +80,8 @@ enum class LuaHostErrorCode {
     HttpStatus,             // http_status:HTTP 已到达,status 原样带回
     InvalidJson,            // invalid_json:请求 JSON 序列化或响应 JSON 解析失败
     ConcurrencyLimit,       // concurrency_limit:在途请求超宿主上限
+    NotToolContext,         // not_tool_context:LuaHook 单 P0-A——hook 调用上下文
+                            // 不开工具 Host API,不能伪造 tool call 提权(§二)
 };
 
 // 稳定串(§11 表的 code 列)。
