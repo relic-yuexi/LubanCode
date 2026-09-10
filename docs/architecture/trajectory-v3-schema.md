@@ -296,3 +296,19 @@ v3 的 system/user/assistant/tool 四角色经 adapter 结构化转换到四家 
 | 前缀缓存守恒账(`src/agent/prefix.hpp`) | UsageReport 诊断字段(活路径) | 逐请求指纹照旧;跨会话对账需 v3 请求特征 + usage 对齐 | 跨会话面是 |
 
 规矩(§4.12/§五):request_metrics 统一为 event,引用同一 usage 时不得成为第二份可累计事实;估算与实报不混同一字段(prepared 只引用 `tokenEstimateRef`,不复制实报);provider 没报不补 0,不借下一请求倒填。
+
+## 十、v2 事件在 v3 的未覆盖清单(接线点 1 收尾棒盘点)
+
+v3 写侧接线(接线点 1)后,v2 事件表里有一批在 §二 kind 全表里没有对应物、或对应 kind 的合同尚未发行的条目。写侧现状一律"静默不落"(不伪造行;`src/runtime/trajectory_session.cpp` 各早退处注记),本节把这批账摊开登记——新 kind 只许随 schema 版本追加,本清单不为补缺擅自加 kind:
+
+| v2 事件(v2 kind) | v3 对应 | 处置 |
+| --- | --- | --- |
+| 环境快照(`run.environment.captured`,§9.1:os/git/provider 快照) | 无 kind。v3 会话身份在账首行,环境重现(P0-4 取材件)不在 v3 目标内 | 不落;`CaptureEnvironment` 对 v3 场无写者,如实返回 no_recorder |
+| 手动/采纳标题(`control.title.changed`,/title 与自动采纳共用) | `title.requested`/`title.extracted`/`session.title.applied` 族在 §二表内,但绑定 `titleGenerationId`(§4.34 自动取题流,后续棒次),payload 定案未发行;手动改名没有生成身份,伪造 `titleGenerationId` 即造假 | 暂不落,归 §4.34 标题棒次一并接(届时手动改名按"标题来源=manual"入 `session.title.applied`) |
+| 审批档切换(`control.mode.changed`) | 无 kind。审批档是 v2 session.json/manifest 的账;v3 场只在内存生效(接线点 1 既定口径) | 不落;切档内存生效,`session.v3_approval_mode_memory_only` 如实回告 |
+| 容量预检(`context.pressure.recorded`) | 无 kind。v3 的容量/压缩账是 compact 一族(§4.40 容量字段后续棒次) | 不落 |
+| 任务 turn 账(sent 边界数字,§11.1) | 无 kind。`model.request.sent` 本身照落 | 不落 |
+| verification/恢复注记/迟到响应(`tool.verification.*`/`recovery.*`/迟到 mcp 响应) | 无 kind。v3 工具账是 `tool.execution.*`/`tool.result.*`(§四,已发行);verification 一族不在 v3 目标内 | 不落 |
+| `run.started`/run terminal/`session.clear_requested` | 无 run 概念:开场 = 首行 system + `session.started`;封口 = `session.ended`(clear 换账时 payload 带 `nextSessionId`);无 session.json | 已有对应(clear 八步的 v3 折算见 `SessionManager::ClearV3Locked`) |
+
+清点口径:凡写侧早退不落的,读取侧(两份投影/resume/verify)不因缺这些行报错——它们从未属于 v3 账;需要这些事实的消费方(`/doctor` 环境核对、标题真值回填)在 v3 场按"缺件"处理,不从当前环境补造过去(§4.12 同门)。

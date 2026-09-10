@@ -160,6 +160,26 @@ std::optional<std::filesystem::path> FindV3HistoryStream(const std::filesystem::
     return trajectory::v3::FindV3SessionStream(session_dir);
 }
 
+V3ExportProjection ProjectExportMessages(const RestoredHistoryView& view) {
+    V3ExportProjection projection;
+    for (const auto& item : view.items) {
+        if (item.kind == RestoredHistoryItem::Kind::Compact) {
+            // 压缩标记折成分界位:插在已收的第 N 条消息之前(ExportSessionMarkdown
+            // 的既有 compact 文案口径)。标记插在 applied 发生位,不挪位伪造顺序。
+            projection.compact_positions.push_back(projection.messages.size());
+            continue;
+        }
+        if (item.message.hidden) {
+            continue;  // display.hidden 默认不导(§4.28);详情/开关档另算
+        }
+        if (projection.started_at.empty()) {
+            projection.started_at = item.timestamp;
+        }
+        projection.messages.push_back(item.message.message);
+    }
+    return projection;
+}
+
 // ---------------------------------------------------------------------------
 // 转录摘要行 + seq 游标分页(P3 第二棒)
 // ---------------------------------------------------------------------------

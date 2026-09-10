@@ -26,7 +26,8 @@
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
 #include "trajectory/session_lock.hpp"
-#include "trajectory/v3/writer.hpp"  // ActiveSession 的 v3 主账写者(接线点 1)
+#include "trajectory/v3/reader.hpp"   // EffectiveConversationFromV3 的链投影入参
+#include "trajectory/v3/writer.hpp"   // ActiveSession 的 v3 主账写者(接线点 1)
 
 namespace lubancode::trajectory {
 
@@ -308,6 +309,13 @@ struct CloseOutcome {
 // resume-as-new(§10.4 七步)
 // ---------------------------------------------------------------------------
 
+// v3 链输入 → ReplayMessage(有效对话;§4.10:只取本账链,compact 内部
+// 问答/prompt 从未入链,天然排除)。工具配对键统一 actionId(§4.15)。
+// resume 的第 3 步与 /export、/copy 一类 ReplayState 消费方
+//(FoldMainReplay 的 v3 分支)共用这一份投影,不各造各账。
+std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledger,
+                                                       const v3::ModelContext& context);
+
 // 交互 /resume 的跨 session command 生命周期素材(§14.1:旧 main 写
 // requested 与 session terminal,新 main 在 run.started 之后写 command
 // terminal,qualified ref 指回旧 requested,两边同带 boundary_operation_id)。
@@ -573,9 +581,14 @@ private:
     std::expected<ActiveSession, std::string> OpenV3SessionLocked(
         const std::string& start_reason, const std::optional<std::string>& previous_session_id);
     // Close 的 v3 分支(active 已验 running;调用方已持 mutex_):session.ended
-    // 封账,无 run terminal/session.json 可写。子代理换账(clear 八步)的
-    // v3 化不属接线点 1,v3 场上的 clear 在 Clear 口明拒。
+    // 封账,无 run terminal/session.json 可写。
     CloseOutcome CloseV3Locked(const CloseRequest& request, ClearParticipant* participant);
+    // Clear 八步的 v3 折算(接线点 1 收尾棒;调用方已持 mutex_ 与串行闸):
+    // 关当前场(session.ended reason=clear)开新场(首行 system +
+    // session.started,start_reason=clear),旧场保留可 resume;v2 的
+    // run terminal/session.json/跨场 v2 事件账在 v3 无对应物,折算映射
+    // 见实现处逐条注记。
+    ClearOutcome ClearV3Locked(const ClearRequest& request, ClearParticipant* participant);
     // ResumeAsNew 第 5-7 步的 v3 分支(开关开时新场也是 v3):首行 system +
     // session.started + resume.source.attached(五键指源末行,§4.10)。
     // 源头五键由调用方从第 1-4 步的验账结果递进(v2/v3 源各取各的事实)。
