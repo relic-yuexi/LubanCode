@@ -85,7 +85,14 @@ TEST_CASE("root 不存在:零包零错(没配 hooks 的常态)") {
 TEST_CASE("entry 越界与绝对路径:整包拒绝,错误带包名") {
     LoaderHarness harness("escape");
     harness.MakePackage("traversal", harness.ManifestWithEntry("../../outside.lua"));
+    // is_absolute() 两平台语义不同:Windows 认盘符根(C:/x),POSIX 只认
+    // 前导斜杠(/x)——各喂各平台的绝对路径样本,C:/x 在 POSIX 只是相对
+    // 路径,断言就翻车(linux/macos CI 红过)。
+#if defined(_WIN32)
     harness.MakePackage("absolute", harness.ManifestWithEntry("C:/windows/system32/evil.lua"));
+#else
+    harness.MakePackage("absolute", harness.ManifestWithEntry("/etc/evil.lua"));
+#endif
     // 邻包照装:一包失败不连累别家。
     harness.MakePackage("healthy", harness.ManifestWithEntry("main.lua"));
 
