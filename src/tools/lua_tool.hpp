@@ -22,7 +22,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -36,23 +38,33 @@ struct lua_State;
 
 namespace lubancode::tools {
 
-// 每枚 state 一份的运行时账(指令/内存/取消)。原在 .cpp 藏着;Lua 受控
-// HTTP 单·阶段 3 起,runtime 侧的 Lua Host API 也要造带同款三道墙的
+// 每枚 state 一份的运行时账(指令/内存/墙钟/取消)。原在 .cpp 藏着;Lua
+// 受控 HTTP 单·阶段 3 起,runtime 侧的 Lua Host API 也要造带同款三道墙的
 // state,定义搬进头文件共用(字段就是账本,谁也不许另抄一份)。
+// LuaHook 单 P0-A 补第四道墙:墙钟截止点(§六"补墙钟")——指令 hook 每
+// 步长查一次;阻塞 C 函数(Host API)各自己接 deadline/cancel,不靠它。
 struct LuaGuard {
+    // 哪道墙先落锤(预算错误的稳定码映射用:hook.lua.budget_instruction/
+    // budget_memory/budget_wallclock)。
+    enum class BudgetKind : std::uint8_t { None, Instruction, Memory, WallClock };
+
     std::uint64_t instructions_used = 0;
     std::uint64_t instruction_budget = 0;   // 0 = 不设
     std::size_t memory_used = 0;
     std::size_t memory_cap = 0;             // 0 = 不设
+    std::chrono::steady_clock::time_point wall_deadline{};  // 零值 = 不设
     const std::atomic<bool>* cancel = nullptr;
     bool budget_hit = false;
+    BudgetKind last_budget_kind = BudgetKind::None;
 };
 
 // Lua 插件的运行画像(plugins 单「核心定案」A 节)。
 struct LuaProfile {
     enum class Level {
-        Pure,     // 缺省:关 os.execute/os.exit/io/package.loadlib
-        Trusted,  // 显式批准后全开(legacy 行为)
+        Pure,        // 缺省:开全库后关门(os.execute/os.exit/io/package.loadlib)
+        Trusted,     // 显式批准后全开(legacy 行为)
+        Whitelisted, // LuaHook 单 P0-A:hook state 专用——从零开显式白名单库
+                     // (§五"Lua 库采用白名单"),不开全库再减法
     };
     Level level = Level::Pure;
 
@@ -62,19 +74,34 @@ struct LuaProfile {
     // 内存帽(字节,allocator 记账口径):0 = 不设。超帽分配返回 NULL,
     // Lua 按 OOM 报错,不拖垮宿主堆。
     std::size_t memory_cap_bytes = 256 * 1024 * 1024;
+    // 墙钟预算(§六:handler 自用时间的待验证建议值 500ms):0 = 不设。
+    // 指令 hook 每步长查;只拦"跑野的脚本",阻塞 C 边界各 Host API 自己
+    // 接 deadline/cancel。
+    std::chrono::milliseconds wall_budget{0};
 
     static LuaProfile PureDefault();
     static LuaProfile TrustedDefault();
+    // hook 中间件 state 的缺省画像:白名单库 + 三道墙全开(指令/内存/
+    // 墙钟)。具体限额由定义的 limits 覆写。
+    static LuaProfile HookDefault();
 };
 
 // 宿主侧共用的 state 构造与转换件(Lua 受控 HTTP 单·阶段 3 起导出;
 // LuaTool 自己也走这些,不留第二份实现):
-//   NewGuardedLuaState  — allocator 内存帽 + instruction hook(预算/取消)
+//   NewGuardedLuaState  — allocator 内存帽 + instruction hook(预算/取消/墙钟)
 //   ApplyPureLuaProfile — pure 画像关门(os.execute/io/package.loadlib)
+//   ApplyWhitelistLuaProfile — 白名单画像(只开 base[string/table/math/
+//                         utf8 + os 的时间四函数;dofile/loadfile/io/package/
+//                         coroutine/debug 一概不开)——§五逐项审查后的名单
+//   OpenLuaLibraries   — 按画像开库的唯一入口(Pure/Trusted 开全库再按需
+//                         关门,Whitelisted 走白名单);装载路径不许再各自
+//                         luaL_openlibs 抄一份
 //   PushJsonToLua       — JSON -> lua 值(字符串按字节原样)
 //   LuaValueToJson      — lua 值 -> JSON(表按 1..n 连续整数判数组)
 lua_State* NewGuardedLuaState(const LuaProfile& profile, std::unique_ptr<LuaGuard>& guard_out);
 void ApplyPureLuaProfile(lua_State* L);
+void ApplyWhitelistLuaProfile(lua_State* L);
+void OpenLuaLibraries(lua_State* L, const LuaProfile& profile);
 void PushJsonToLua(lua_State* L, const nlohmann::json& value);
 nlohmann::json LuaValueToJson(lua_State* L, int index, int depth, std::string& error);
 

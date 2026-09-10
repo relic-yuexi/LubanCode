@@ -2,6 +2,18 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.242] - 2026-09-11
+
+- **v3 真的能写了:新会话写侧开关接线完成。**设 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1,新会话即写 v3 账——首行 system(seq=1)、消息/工具账/结果仓/子账全落 sessions/<id>/<id>.jsonl,resume 与 --continue 经链投影读回,/sessions 列表并列认两种场次。开关默认关:v2 路径一字不动。v3 场目录不写 v2 manifest(写多一枚就会被 resume 误判跳过);clear 老功能对 v3 场如实报"未支持"而非假装。至此 v3 从"读得回"到"写得进",下一步翻默认与端到端验收。
+
+## [v0.26.241] - 2026-09-11
+
+- **消息内核升四角色,第一家 adapter 换骨完成。**Role 枚举追加 System(上下文根)与 Tool(工具结果独立消息,不再是伪装 user);Anthropic adapter 内部改走四角色:System 文本顶置顶层 system、Tool 逐条折 user 容器 tool_result、tagged thinking 认 Tool 尾巴。出口形状一字不变——同一对话新旧两路 dump 逐字节相等,18 案四家 wire 合同册原样绿。这是"agent 只换皮"架构的第一刀:内核统一四角色,协议差异全部收进 adapter。其余三家(OpenAI Chat/Responses、Gemini)后续逐家换。
+
+## [v0.26.240] - 2026-09-10
+
+- **hook 升级成中间件体系,第一块执行核落地。**同键 (挂点,功能名) 按来源层级选唯一实现(内置<扩展<project<user<会话),不再"来源相加";阶段+依赖定序,dispatch 计划派发时冻结。13 挂点、8 类效果按挂点×阶段矩阵放行(PostUser 不收改写、估算段零效果),26 枚稳定错误码。Lua handler 每次调用独立 state、指令/内存/墙钟三预算、库走显式白名单,hook 上下文调 HTTP/密钥全拒零网络。本批纯底座:老 hook 路径零行为变化,生产挂点迁移归下一批。顺手修了 MSVC 的 Lua longjmp 坑(luaL_error 从无存活 C++ 对象的帧跳出直接 SEGV,两 TU 上 /EHa)。CI 还揪出一处测试断言踩 nlohmann UB(const json 缺键下标,MSVC 碰巧绿 gcc 红),已改 contains 判键。
+
 ## [v0.26.239] - 2026-09-10
 
 - **旧史能翻页了,远端也能查了。** Ctrl+T 会话浮层升级:打开钉在最新一页,向上翻自动按 seq 游标向旧补页(画面平移不跳),消息行带角色与状态注脚(已压缩/已降档),压缩处插"◆ 前 ~N → 后 ~M tokens";v2 老会话照旧头尾截断。app-server 协议升至 1.2:thread/read 分页回完整时间线(含是否在当前上下文等标志),thread/resume 回恢复视图;hidden 消息正文默认不发,显式 includeHidden 才带。配套把 web console 冒烟与前端兼容窗(1.1~1.2)跟上,高版本探针改为动态推导——协议再升版本,冒烟自己跟,不再翻车。

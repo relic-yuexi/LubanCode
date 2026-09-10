@@ -120,6 +120,17 @@ public:
         const std::filesystem::path& workspaces_root, const std::string& workspace_key,
         const SessionManifest& manifest);
 
+    // v3 会话目录(session_switch 接线点 1 的写侧落点;布局 §1.4/§4.31):
+    // sessions/<id>/ 只备 <id>.jsonl 的家——artifacts/(结果仓自建)、
+    // subagents/(子账五步自建)。不写 session.json、不落任何 v2 文件:
+    // v3 场的身份在账首行(sessionId/runId/schemaVersion),清单与恢复按
+    // 接线点 2 的规则认"无 main.jsonl 且 <id>.jsonl 首行 schemaVersion==3";
+    // 若在这里多落一枚 session.json,LatestResumable 会把它当 v2 场却又找
+    // 不到 main.jsonl,整场从 resume 候选里消失。session_id 已存在即失败。
+    static std::expected<TrajectoryDirectory, std::string> CreateSessionV3(
+        const std::filesystem::path& workspaces_root, const std::string& workspace_key,
+        const std::string& session_id);
+
     // 认领既有 session 目录(恢复器/管理操作用):只回填两段路径,不建
     // 目录、不验内容——写入合法性由锁与 Journal 状态机把门。
     static TrajectoryDirectory OpenExisting(const std::filesystem::path& session_dir);
@@ -142,6 +153,8 @@ public:
     const std::filesystem::path& session_dir() const { return session_dir_; }
     std::filesystem::path artifacts_root() const { return session_dir_ / "artifacts"; }
     std::filesystem::path main_stream_path() const { return session_dir_ / "main.jsonl"; }
+    // v3 主账流:sessions/<id>/<id>.jsonl(目录名即 session_id,§1.2)。
+    std::filesystem::path v3_stream_path() const;
 
 private:
     std::filesystem::path workspace_dir_;

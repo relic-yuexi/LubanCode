@@ -105,6 +105,8 @@ std::string_view LuaHostErrorCodeName(LuaHostErrorCode code) {
             return "invalid_json";
         case LuaHostErrorCode::ConcurrencyLimit:
             return "concurrency_limit";
+        case LuaHostErrorCode::NotToolContext:
+            return "not_tool_context";
     }
     return "network_failed";
 }
@@ -159,6 +161,8 @@ std::string LuaHostErrorCodeDefaultMessage(LuaHostErrorCode code) {
             return "JSON 序列化或解析失败";
         case LuaHostErrorCode::ConcurrencyLimit:
             return "在途请求超过宿主并发上限";
+        case LuaHostErrorCode::NotToolContext:
+            return "Host API 只在工具调用上下文开放;hook 调用上下文另走自己的能力合同,不能借道工具权限";
     }
     return "网络传输失败";
 }

@@ -236,11 +236,57 @@ std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateSessi
     return directory;
 }
 
+std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateSessionV3(
+    const std::filesystem::path& workspaces_root, const std::string& workspace_key,
+    const std::string& session_id) {
+    if (!IsValidSingleSegment(workspace_key) || !IsValidSingleSegment(session_id)) {
+        return std::unexpected("workspace_key/session_id 不是合法单段名");
+    }
+    if (session_id.size() < 8 || session_id.find('-') == std::string::npos) {
+        return std::unexpected("session_id 形状不合(YYYYMMDD-HHMMSS-XXXXXX)");
+    }
+    // 账本制反查房门与 v2 同一条路(不另立房规)。
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, workspace_key);
+    if (!room.has_value()) {
+        return std::unexpected(std::string(workspace::contracts::kErrWorkspaceNotFound) +
+                               ": 账本与各房 manifest 都找不到 workspace_key=" + workspace_key +
+                               ",v3 session 不能凭空开房");
+    }
+    const std::filesystem::path session_dir =
+        *room / "sessions" / platform::Utf8ToPath(session_id);
+    std::error_code ec;
+    if (std::filesystem::exists(session_dir, ec)) {
+        return std::unexpected("session 目录已存在,绝不复用 session_id: " +
+                               platform::PathToUtf8(session_dir));
+    }
+    // 只建 v3 会话要住的房间:<id>.jsonl 与 artifacts/(结果仓)、subagents/
+    //(子账五步)。v2 的 checkpoints/indexes/derived/exports/goals/loops/
+    // workflows 占位树一枚不建——workflow 编排账的 ReserveWorkflowRun 会
+    // 自建自己的目录(编排账不迁移,照旧 v2)。
+    for (const std::filesystem::path& sub : {session_dir / "artifacts", session_dir / "subagents"}) {
+        std::filesystem::create_directories(sub, ec);
+        if (ec) {
+            return std::unexpected("v3 session 目录建不起: " + platform::PathToUtf8(sub) + ": " +
+                                   ec.message());
+        }
+    }
+    TrajectoryDirectory directory;
+    directory.workspace_dir_ = *room;
+    directory.session_dir_ = session_dir;
+    return directory;
+}
+
 TrajectoryDirectory TrajectoryDirectory::OpenExisting(const std::filesystem::path& session_dir) {
     TrajectoryDirectory directory;
     directory.session_dir_ = session_dir;
     directory.workspace_dir_ = session_dir.parent_path().parent_path();
     return directory;
+}
+
+std::filesystem::path TrajectoryDirectory::v3_stream_path() const {
+    // 文件名 = 目录名(即 session_id)+ .jsonl;经 UTF-8 往返拿跨平台路径。
+    return session_dir_ /
+           platform::Utf8ToPath(platform::PathToUtf8(session_dir_.filename()) + ".jsonl");
 }
 
 std::expected<std::filesystem::path, std::string> TrajectoryDirectory::ReserveMainStream() const {

@@ -140,7 +140,20 @@ std::string ToolResultImageDegradedNote(const ToolResultBlock& result);
 // 消息
 // ---------------------------------------------------------------------------
 
-enum class Role { User, Assistant };
+// 四角色(轨迹 v3 第一棒,单子 §1.1/§4.46):agent 内核只认 system/user/
+// assistant/tool 四枚;wire 协议是皮,四家 adapter 在出口拍平。
+//   System —— 上下文根(v3 账同款语义:soul/固定规则,turnId 为 null,
+//             换版追加新消息、旧消息不改)。adapter 出口顶置到各家顶层
+//             字段(anthropic 顶层 system/chat system 消息/responses
+//             instructions/gemini systemInstruction),不落对话流。
+//   Tool —— 工具结果消息:不再是"伪装成 user 的消息"。ToolResultBlock
+//             照旧可寄在 User 容器里(旧两角色路径,共存编译,本棒不切换
+//             消费方);走 Tool 角色的消息在 anthropic 出口折回 user 容器
+//             的 tool_result 块——wire role 是皮,turnId/来源仍取内部消息,
+//             不能从 wire role 倒推(§4.47)。
+// 枚举值追加在尾部:现行序列化按名不按数值,User/Assistant 的既有取值
+// 一枚不动。
+enum class Role { User, Assistant, System, Tool };
 
 struct Message {
     Role role = Role::User;
@@ -548,8 +561,20 @@ inline std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string
 // Role -> wire 角色名。user 一角四家都叫 "user";另一角各家叫法不同
 // (anthropic/responses 叫 assistant,gemini 叫 model),由调用方给。chat
 // wire 不走这个(它的 role 集合另有 system/tool,直拼字符串)。
+//
+// 四角色拍平(差距清单 §8.2 第 1 条的共用件核对点):wire 容器没有
+// system/tool 这两角。System 是上下文根,由各家 adapter 顶置到自家顶层
+// 字段、不该走到这层;Tool 在四家 wire 里都折 user 一侧(anthropic 的
+// user.tool_result、gemini 的 role=user functionResponse、responses 的
+// function_call_output item)。经此函数到达的 System 属于未换骨 adapter
+// 的防御路径,同样折 user——比折到另一角少造一重假象;各家换骨时(后续
+// 棒次)在自家入口消除这条防御。现行两角色输入(User/Assistant)的输出
+// 一字不变。
 inline std::string RoleToString(Role role, std::string_view other_role) {
-    return role == Role::User ? std::string("user") : std::string(other_role);
+    if (role == Role::Assistant) {
+        return std::string(other_role);
+    }
+    return std::string("user");
 }
 
 // extra_body 顶层浅合并(wire 请求体拼装的共同收尾):source 是 object 才

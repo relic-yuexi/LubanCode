@@ -290,13 +290,13 @@ fork 复用合法检查点和来源引用，不复制活动 VM、continuation �
 
 ## 九、分批落地
 
-### P0-A：统一合同与执行核
+### P0-A：统一合同与执行核（PR #27，v0.26.240；src/hooks/middleware.*，测试 40 册）
 
-- [ ] 冻结清单、ctx/input/result/next、挂点阶段、合法效果及错误码。
-- [ ] 实现 builtin/lua 同名选实现、依赖顺序、required 与不可变 dispatch 计划。
-- [ ] 验证覆盖只替换同键功能、同层冲突、先选实现再匹配、无隐式 fallback、依赖随获选实现绑定及只读观察者并发。
-- [ ] 实现至多一次 next、候选采用、退栈、短路和跨 invocation 拒绝。
-- [ ] 验证独立 state、嵌套限制、指令/内存/墙钟和 Host API 取消，补 Lua 库白名单。
+- [x] 冻结清单、ctx/input/result/next、挂点阶段、合法效果及错误码。
+- [x] 实现 builtin/lua 同名选实现、依赖顺序、required 与不可变 dispatch 计划。
+- [x] 验证覆盖只替换同键功能、同层冲突、先选实现再匹配、无隐式 fallback、依赖随获选实现绑定及只读观察者并发。
+- [x] 实现至多一次 next、候选采用、退栈、短路和跨 invocation 拒绝。
+- [x] 验证独立 state、嵌套限制、指令/内存/墙钟和 Host API 取消，补 Lua 库白名单。
 
 验收：内置与 Lua 混链可改参、后置、短路；a 正常执行一次、短路零次，重复 next 不增加次数。替换 memory.recall 后内置调用计数为零，skill.resolve 仍执行；替换估算器不改变冻结与容量判断的阶段边界。
 

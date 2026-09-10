@@ -82,6 +82,11 @@ public:
     std::chrono::milliseconds block_ms{150};
     FakeHttpTransport inner;
     int cancelled_observed = 0;  // 在途段亲眼看到旗子置位的次数
+    // Execute 进场计数:取消接线的测试用它与置旗方做确定性握手——
+    // 不再赌"睡 50ms 时 transport 已在途"的时序(CI 负载下固定睡眠
+    // 会被拖长,旗子迟到,transport 先醒就走 inner 的 network_failed
+    // 路,macos 上两犯)。
+    std::atomic<int> entered{0};
     // 每笔 Execute 一枚。两路线程 join 完再读;记账本身自带锁——串行
     // 册若 mutex 失守、两路真并睡了,记账也不许 UB。
     std::vector<SleepWindow> sleep_windows;
@@ -89,6 +94,7 @@ public:
     std::expected<HttpExchangeResponse, HttpTransportError> Execute(
         const HttpExchangeRequest& request, const EffectiveHttpLimits& limits,
         const std::atomic<bool>* cancel) override {
+        entered.fetch_add(1, std::memory_order_release);
         const auto started = std::chrono::steady_clock::now();
         std::this_thread::sleep_for(block_ms);
         {
@@ -706,8 +712,12 @@ TEST_CASE("取消接线:在途 HTTP 中段置旗,transport 收口,Lua 拿 cancel
     std::atomic<bool> cancel{false};
     LuaCallContext context;
     context.http = MakeSpec(&transport, &resolver, &cancel);
-    std::thread canceller([&cancel] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 睡进在途段再置旗
+    std::thread canceller([&cancel, &transport] {
+        // 确定性握手:等 transport 亲口报"已进场",再置旗——旗子必落在
+        // 在途睡眠中段,醒来必见;快机慢机同一语义。
+        while (transport.entered.load(std::memory_order_acquire) < 1) {
+            std::this_thread::yield();
+        }
         cancel.store(true);
     });
     const auto result = (*plugin)->Call("search", nlohmann::json::object(), context);
