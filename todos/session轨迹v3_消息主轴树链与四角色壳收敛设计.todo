@@ -159,6 +159,16 @@ compact 的顶层 trigger 只分 manual/auto；阈值触发、发送前容量不
 
 用户明确要求：SSE 期间按 Esc，直接把已经收到的内容拼成 assistant。本条覆盖此前“用户取消仅保存草稿事件”的设计。流式片段仍留过程记录，停止后另存唯一的正式 assistant message，completionStatus=interrupted；正文保留，未收齐的调用/签名不伪造完整，具体见 §4.63。
 
+### 1.29 Hook 为中间件体系，首版对外实现采用 Lua
+
+用户进一步明确：这里的 Hook 已包含指定位置、执行顺序与 overwrite，属于中间件混合体系。挂点、阶段、逻辑功能名、实现覆盖、效果采用分别沿 §4.22、§4.47–§4.48 定义，不能退回“事件通知后跑一段脚本”的旧理解。
+
+首版由内置 C++ handler 与用户 Lua handler 共用注册池；对外 hook 脚本仅支持 Lua。其他语言生态和外部服务通过 MCP 接入，由获授权的 handler 经宿主工具执行入口使用。不在本轮并行建设 TS/Node、WASM、DLL/SO 或外置进程 hook 适配器。此处收窄实现范围，不削减排序、同名覆盖、中间件改写与 session 记录能力。具体落地见 `todos/LuaHook统一扩展_MCP分工与SessionV3接入.todo`。
+
+### 1.30 compact 请求撞窗：按 turn 后退，先让出约 8k token
+
+用户提出：压缩请求若超过模型窗口，可从最近一轮起往前退，最近几轮暂不压缩，以 turn 为单位让出约 8k token。这里采用“缩短本次摘要输入、原样保留连续尾部”的方向，不删除历史，不撤销工具执行。8k 作为首版建议的最小回退目标，具体单位暂取 8192 token；摘要输出与安全余量另算，不能保证每退一轮就够。请求错误分类、范围、重试和恢复见 §4.64。
+
 ## 二、样板解剖（kc-mini 8dcf9aa4，v1 envelope）
 
 | 类型 | 件数 | 树链字段 | 要点 |
@@ -653,7 +663,7 @@ hook 改写产物另存结果版本，原始结果不覆盖。即使原工具失
 
 ### 4.22 hook 的身份、生命周期与效果
 
-同一套 hook 注册/调度合同支持内置函数、脚本、进程、插件和远端 handler；按 hookPoint 与能力声明分派，不为每个挂点另搭一套记录系统。消息挂点和同名替换见 §4.47–§4.48；完整 handler 载荷和扩展 effect schema 仍待冻结，下面的记录要求必须共用。
+同一套 hook 注册/调度合同按 hookPoint、阶段、逻辑功能和能力声明分派，不为每个挂点另搭一套记录系统。按 §1.29，首版实现载体收为内置 C++ 与 Lua；外部工具通过 MCP 调用，进程/远端等其他 handler 适配不列本轮要求。消息挂点和同名替换见 §4.47–§4.48；完整 handler 载荷和扩展 effect schema 仍待冻结，下面的记录要求必须共用。
 
 内置功能也走此合同。runtime 在确定阶段发起 dispatch，内置 token 估算等 handler 执行功能并返回结果。内置与外部的区别在注册来源、能力和执行策略，不在于是否留调用记录；详见 §4.36。
 
@@ -1252,7 +1262,7 @@ assistant 回复过长确实可能导致 compact 失败，但至少有三种不�
 
 | 情况 | 失败位置 | 处理建议 |
 | --- | --- | --- |
-| 普通 assistant 回复很长，加入旧历史后再加压缩 prompt 超出容量 | 压缩请求发送前或 provider 拒绝输入 | 按 §4.38 缩短可变工具预览后重查；4 KiB 仍不够则报错，不能假定工具缩短能解决 assistant 本身过大 |
+| 普通 assistant 回复很长，加入旧历史后再加压缩 prompt 超出容量 | 压缩请求发送前或 provider 拒绝输入 | 先按 §4.64 从摘要输入尾部退出整轮，保留为后续原文；无可压缩前缀或回退仍无合法候选时按 §4.38 工具预览降档；4 KiB 仍不够则报错 |
 | 压缩模型生成摘要过长，被输出上限截断，或必需结构没有闭合 | 回复/摘要校验 | 保存原始部分回复，标 incomplete，不 applied；调整摘要目标/输出预留或拆分任务，有限重试 |
 | 摘要已完整，但摘要 + system + 必须保留尾部仍超预算，或几乎没缩小 | 候选新上下文校验 | 检查合法工具降档与受限的摘要长度调整；最低档仍无合法候选就报错，不以“有摘要文本”判成功 |
 
@@ -1337,7 +1347,7 @@ S 是当前 system；Q1 是当前旧摘要；H 是之后可压缩历史；R 是�
 
 压缩成功后，Q2 替换 Q1，后续请求从摘要位置开始有了新前缀。设计不承诺这段继续命中旧缓存；新摘要在两次 compact 之间保持不变，后续消息向尾部追加。仅追加压缩 prompt 也不保证命中，实际结果以 provider usage 为准。此前缀判断依据 [Claude 缓存文档](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)所述的前缀匹配机制；不同 provider/endpoint 的缓存规则须按各自合同核对。
 
-专用压缩模型/system、容量恢复中的工具预览降档，或另经确认的材料裁剪，均可能改变前缀。这些情形按真实输入清单及转换记录留档，不称作“原前缀完全复用”。缓存是请求安排的考虑项，不代替工具配对、信息保留与容量检查。
+§4.64 是正常全前缀请求撞窗时的明确例外：允许从摘要请求尾部退出整轮，留下更短的原消息前缀再追加压缩指令。退出的尾部仍在源上下文中，成功后原样接在摘要后。专用压缩模型/system、工具预览降档也可能改变前缀；这些情形按真实输入清单及转换记录留档，不称作“原前缀完全复用”。缓存是请求安排的考虑项，不代替工具配对、信息保留与容量检查。
 
 **记录与提交沿既有 compact 流程。** prepared 的 inputMessageRefs 必须包含实际读取的 Q1；compact.applied 的 removedMessageRefs 包含 Q1 与 H，summaryMessageRef 指向 Q2，contextChain 重接为 S -> Q2 -> R。已有源版本、请求输入清单和 removed/retained 足以表达这次关系，不另造一种摘要替换成功事件。Q1 和更早版本仍在 JSONL 中，resume 可展示历次摘要及 token 标记。
 
@@ -1617,7 +1627,7 @@ Anthropic：顶层 system=S
 ```json
 [
   {"hookPoint":"PostUser","name":"memory.recall","source":"builtin","priority":200,"implementationRef":"builtin.memory_recall_v1"},
-  {"hookPoint":"PostUser","name":"memory.recall","source":"user","priority":200,"implementationRef":"hooks/my_memory_recall.js"}
+  {"hookPoint":"PostUser","name":"memory.recall","source":"user","priority":200,"implementationRef":"hooks/my_memory_recall.lua"}
 ]
 ```
 
@@ -2109,6 +2119,53 @@ resume 首先重建事实，不是把 JSONL 所有 message 按 seq 塞回模型�
 - **恢复与去重**：cancelled 定稿记录落稳、assistant 尚未落时，用其固定水位和全部片段补交同一 messageId；message 已落就复用，不重新拼一份不同版本，不重问模型。若只有 cancel.requested 而没有定稿水位，按未完成取消核验，不假装完整知道收到了哪里。UI 从流式条目切换到最终条目时沿同一 messageId 更新，不把 event 草稿和正式消息显示两遍。
 
 待验收：半句正文取消仍保存并可回传；只有思考的取消；半截工具参数不执行；完整调用取消后逐个配齐但不发送；缺签名可存档但不能冒称可回传；Esc/末尾 delta/正常 stop 竞态；取消时刷出缓冲尾批；零内容不造空回复；取消定稿与 message 之间崩溃可补交且不重复；btw 中断不影响 main；compact/title 半份产物不采用；usage 缺失不补零。
+
+### 4.64 compact 输入超限：整轮回退与连续尾部保留
+
+本节补入用户提出的回退方向。范围只改本次摘要请求，成功提交仍沿 §4.6–§4.10。常规压缩按 §4.41 尽量复用已有前缀；本地预检发现压缩输入放不下，或 adapter 确认服务端输入超窗后，才缩短摘要输入。无需先明知超限地发一遍，拿到 400 才允许回退。
+
+**先分清失败发生在哪里。** 不能认定窗口报错只出在 compact；普通请求、compact、title、hook 内部请求和子代理请求都可能遇到。adapter 按 provider/profile、状态码、结构字段与明确错误内容分类，保留原始错误证据；不能把所有 400 或所有 SSE error 都归为 context_overflow。
+
+| 情况 | 分类与处理 |
+| --- | --- |
+| 输入本身超窗，例：明确的 prompt is too long | input_context_overflow；普通请求进入容量恢复，compact 请求进入本节整轮回退 |
+| 生成过程中到窗口边界，stop_reason=model_context_window_exceeded | output_context_exhausted；保存已收回复和真实停止原因；compact 产物按不完整候选留档，不直接采用 |
+| 达到 max_tokens | output_limit；不是输入超窗。核对摘要目标、输出预算与剩余窗口，再按有限内容重试策略处理 |
+| 413 request_too_large | request_bytes_exceeded；按实际编码字节、图片等载荷处理，不拿 8k 文本回退当通用解法 |
+| 工具配对、签名、参数格式、鉴权、限流、服务故障 | 分别走原错误路径，不触发内容删除或假压缩 |
+
+核对依据（2026-09-10）：[Anthropic context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows)区分输入超窗的 400 与 Claude 4.5 起生成到窗口边界的 stop_reason；不能把“input + max_tokens 超窗”一律理解为发送时报错。LubanCode 仍可采用更保守的输出预留门禁。[API errors](https://platform.claude.com/docs/en/api/errors)说明 413 属请求字节限制，且 HTTP 200 后仍可能收到流内错误。第三方兼容接口须按自己的 profile 核对，不从 wire=anthropic 推断完全相同行为。
+
+**回退的是摘要输入边界。** 设 S 为当前 system，Q 为已有摘要，H 为原计划压缩的历史，R 为原本就要保留的尾部。按当前 contextChain 顺序处理，不按 JSONL 最后几行、不按每条 role=user 切 turn；steer 和隐藏消息仍归原 turn。先把 R 中仅供参考的整轮从摘要输入移出，仍不足时从 H 最新一轮起依次移出，组成连续保留尾部 K。若 R 原本已不在摘要请求中，不能将它的大小重复算成新腾出的空间。
+
+```text
+原有效链：    S → Q → T1 → T2 → T3 → T4（未完成）
+常规摘要输入：S → Q → T1 → T2 → T3 → T4 → 压缩指令
+回退一次：    S → Q → T1 → T2 → T3 → 压缩指令
+仍不够再退：  S → Q → T1 → T2 → 压缩指令
+摘要成功后：  S → Q新 → T3 → T4
+```
+
+最后一种请求仅总结 Q、T1、T2；T3、T4 未参与该摘要，继续按原顺序和身份保留。Q 仍与早期历史一起压缩，既不展开其代表的旧原文，也不把 Q 搬到保留尾部逃过再压缩。没有 Q 且前缀为空时停止摘要尝试；只有 Q 时可以检查重压收益，不能发送空材料假取摘要。
+
+- **完整分组**：每个退出单元带走该 turn 已接纳的全部消息，包括 steer、隐藏上下文、assistant、tool 和必要思考载荷。当前未完成 turn 只有在流已收口、工具组已配齐时才能作为整体暂不送入摘要请求，不把它标成已完成。若边界还跨工具配对或协议依赖，就继续向前扩大保留范围；不得拆组凑足 8k。turnId=null 的摘要/上下文节点按固定材料清单归属，不能遗漏游离节点。
+- **8k 是回退目标**：首版建议 minRetreatTokens=8192，表示相对上次失败或预检不通过的摘要输入，至少让出约这么多 token。一次可退出多轮，整轮较大时允许超出目标；不是固定只退一轮，也不是截取最后 8192 token。每次移动边界后重组最终请求再估算，包含新指令、schema、工具定义和媒体，不能只累计正文长度。
+- **摘要输出另留空间**：摘要请求必须满足 Ic + Oc + Mc <= Cc。Ic 是回退后完整输入估算；Oc 是此次 compact 的有效输出预留，含其思考预算；Mc 是显式安全余量；Cc 是压缩模型窗口。回退到减少 8k 但仍不满足门禁，就继续按整轮扩大，不发请求碰运气。服务端若返回可靠的输入计数/超额数字，保存来源并用于加大回退量，不覆写原估算。bytes/4 和 8k 均不能证明真实容量一定足够。
+- **缩小摘要范围也要换指令**：压缩 prompt/校验清单只要求总结实际提供的前缀，不让模型编造未见的尾部进展。新的范围指令属于新 message，旧失败请求与 prompt 原样留档。后续用户修正仍留在 K 中；新摘要标清覆盖边界，恢复后按原顺序解释，不能让较早摘要压过较晚修正。todo/goal/loop 仍从独立状态恢复。
+- **前后两道容量门禁**：摘要请求装得下之后，还要检查主模型的 S + Q新 + K + 必需状态投影 + 本次待发送输入，并预留普通输出。只有候选整体严格变小、内容/协议校验通过且满足主请求预算，才允许 compact.applied。挪出摘要输入并不减小 K；K 本身过大时不能靠继续向前退来解决。
+- **单长 turn 与无收益**：无可压缩前缀，或保留尾部太大，转 §4.38 的 32→16→8→4 KiB 工具预览降档。降档成功若已足够，可直接恢复普通请求，不强求再做一次 compact。没有严格更小且合法的候选、最低档仍不足、system/assistant/媒体本身超限时，保存原因并停止。不得在此自动启用 turn 内摘要、删 assistant 或分块 map/reduce。
+- **签名与缓存**：短前缀仍尽量保留原顺序、正文和工具定义；签名/不透明载荷另经 adapter 验证。新摘要接回 K 后可能改变思考块前缀条件，沿 §4.42 检查，不靠配对完整推断签名合法。普通缓存未命中可以继续，协议不合法不能发送。
+
+**回退方案、请求尝试与主上下文分开记。** 建议增加 event.kind=compact.range.retreated，关联 compactId、内部 turnId/stepId、源 contextRevision、上次失败 requestId（本地预检时可为空）及新 planRevision；材料清单分别记录 summarizedMessageRefs、referenceMessageRefs、retainedMessageRefs 和本次退出的 turn/message 引用。退出引用不等于 removedMessageRefs，只有成功 applied 后，真正被摘要替代的前缀才进入 removed。
+
+每次记录 inputSnapshotRef、inputHash、provider/profile、回退目标、实际估算变化、输出预留、错误类别与原始错误引用。重发另发 requestId，并以 retryOf 指回前次请求；归同一 compact 工作及内部 turn，不挪用主 turn，也不因回退而重新接纳用户输入。范围计划与消息引用先持久化，再准备/发送下一次请求；不为回退每一步发布主 contextRevision。
+
+- started、确实等待时的 pending、每次请求终态及最终 compact 终态都留档。待网络重试记等待原因，范围即时计算不伪造 pending。没有响应正文的输入拒绝只记错误事件，不造空 assistant；收到部分摘要时保全流与候选，不能冒称正常结束或采用。
+- 容量重试由恢复调度统一计数；SDK 不得暗中原样重发已确认的输入超窗。固定源快照下边界只向前退，每次发送必须确实缩小摘要输入；no_change 候选跳过。首版建议同一恢复操作最多 3 次摘要容量尝试（含首次实际调用），沿 §4.39 还受总请求/耗时/费用预算约束；数值是待实现默认建议，不套用别的项目重试次数。
+- 预算耗尽、用户 Esc、候选过期或仍无空间时明确结束本次恢复；不能新建 compactId 把同一失败源的次数清零。普通请求恢复也沿源状态和失败指纹去重；真正接纳新内容/切换配置才重新评估，不能只靠事件 seq 增长重新计次。
+- 崩溃/resume 按已存计划、已试 hash 和剩余预算恢复；有完整候选先继续校验，不重复取摘要。只有 compact.applied 落稳才恢复新主链。失败前若另有独立工具预览降档已提交，则恢复那条合法链，不能回滚该笔成功变更。UI 保留所有原 turn，显示回退范围与失败/成功，不把准备成功冒充压缩完成。
+
+待验收：普通请求与摘要请求分别输入超窗；HTTP 200 后 SSE 报错；max_tokens 与窗口停止分开；413 不误触发文本压缩；单轮不足 8k 时退出多轮；整轮大于 8k 时不切开；已排除尾部不重复计量；steer 不另拆 turn；工具组/签名不合法时不发；只有旧摘要仍可重压；前缀为空不取摘要；摘要成功但接回尾部仍超窗不 applied；低档预览已够就停止恢复；错误原文、尝试次数与新输入 hash 可追；重复失败/崩溃不清零预算；取消不自动续跑；源版本变化时拒收旧摘要。
 
 ## 五、分期
 

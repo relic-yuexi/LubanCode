@@ -1,0 +1,336 @@
+# Hook 中间件体系：Lua 实现、MCP 能力与 Session v3 接入
+
+- 状态：待实现。本轮只定设计，未实现新 hook API，未运行新行为测试。
+- 日期：2026-09-10。
+- 级别：P1；调用去重、权限、取消、落账和恢复列为首批门槛。
+- 范围：内置 C++ 与 Lua 共用 hook 注册池、Lua Host API、MCP 工具调用桥、Session v3 接线、作者文档、生成模板及试跑校验。
+- 依赖：`todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`，重点为 §4.22–§4.30、§4.35–§4.38、§4.47–§4.50、§4.53–§4.63。
+- 重构口径：按新 session 管理系统设计；当前代码只供找接点、复用底座。不安排旧配置、旧轨迹或旧插件协议迁移。
+- 本轮不做：TS/Node hook、WASM hook、DLL/SO hook、外置进程 hook、多轮 JSON 行插件协议、完整通用 Extension SDK。
+
+## 一、用户定案与职责
+
+用户明确：hook 用 Lua 就够了，文档写好，用户可以直接让 LubanCode 制作；其他外部能力已有 MCP 承接。首版据此收窄，不并行建设多套 hook 语言和加载器。
+
+这里的 Hook 按 v3 §4.22、§4.47–§4.48 定义：它是一套带挂点、执行顺序、同名实现覆盖和效果提交的中间件体系，能承载核心功能。它既能观察事件，也能参与决定后续怎样执行。Lua 只是对外编写 handler 的语言，不能把整个体系缩成“事件来了跑一段 Lua”。
+
+### 1.1 五件事各有归属
+
+| 维度 | v3 合同 | 例子 |
+| --- | --- | --- |
+| 位置 | hookPoint 及阶段决定插入哪个已定义的执行时点 | PostUser；PreRequest/estimate；PreAction |
+| 功能 | `(hookPoint,name)` 标识逻辑功能槽位 | PostUser/memory.recall |
+| 实现覆盖 | 同键按来源层级选 implementationRef/definitionHash | 用户 Lua 接管内置 memory.recall，只跑获选项 |
+| 顺序 | 阶段、before/after 依赖优先；就绪项按 priority 排序 | skill.resolve 先于依赖它的 memory.recall |
+| 执行效果 | 按槽位合同改参、准入、选后端、加工结果或提交上下文候选 | search.backend 选 MCP 后端，原 Action 身份保留 |
+
+overwrite 在这里首先指“覆盖某个逻辑功能的实现”。它与新增一个 handler、调整先后、改写本次输入是三件不同的操作。v3 尚未冻结名为 `overwrite` 的布尔字段，本单不凭空要求作者多写一枚开关；实现选择按同键与配置层级完成。
+
+位置从 runtime 发布的挂点和阶段中选，不是脚本任意插入 C++ 行号。功能实现可替换，正式消息接纳、请求冻结、权限复核、身份发行和提交边界仍由宿主执行。
+
+### 1.2 Lua 与 MCP 在这套体系中的位置
+
+| 层 | 管什么 | 典型内容 |
+| --- | --- | --- |
+| C++ 宿主 | 执行时点、身份、准入、预算、取消、效果提交、session 管理 | 固定安全边界、调用调度、记录与恢复 |
+| 内置 C++ handler | 核心功能的默认实现，与 Lua 共用注册池 | token 估算、容量策略、默认能力发现 |
+| Lua handler | 在指定槽位新增或替换功能，参与有序中间件执行 | 改 prompt、拒绝输入、召回记忆、选搜索后端、加工结果 |
+| MCP | 接外部工具与服务；服务端自行选择实现语言和运行环境 | Python 数据处理、Node 服务、数据库和第三方系统 |
+
+Lua 需要外部能力时，通过宿主工具调用桥使用已注册 MCP 工具。MCP 不因此获得直接改 session 或接管 hook 调度的权限，Lua 也不另实现一套 MCP 客户端。
+
+MCP 服务若用 Node/Python，运行环境由该服务承担；LubanCode 核心不为 hook 内置 Node。部署该服务仍可能需要安装运行环境，不能把这笔成本说成凭协议消失了。
+
+内置与 Lua 共用 hook 语义，不要求把核心全部重写成 Lua。DLL/SO 作为内部开发方式另行按需要处理，本单不新增入口，也不据此删除现有工具插件。
+
+例如 `PreRequest/context.token_estimate` 可以从内置算法切成用户 Lua，仍在冻结之后、容量判断之前执行，仍按同一输出合同落账。MCP 是 handler 可使用的外部能力，不另注册成绕开这个计划的第二套 hook 调度器。
+
+## 二、代码证据与缺口
+
+以下为 2026-09-10 静态核对，不当作新接口的运行证明。
+
+| 代码落点 | 当前事实 | 重构任务 |
+| --- | --- | --- |
+| `src/runtime/plugin_lua_host.cpp:489`：`RegisterLuaHostModule` | 注册 `luban.http.request`、`luban.secrets.available/ref` | 复用现有网络与密钥能力，扩充受控 hook API |
+| `src/runtime/plugin_http.cpp`；`plugin_lua_manifest.cpp` | 有真实 HTTP transport、manifest Lua adapter 和取消接线 | 复用传输底座，给 hook 注入自己的调用身份、权限和预算 |
+| `src/runtime/plugin_lua_host.hpp`：`LuaCallContext` | 动态作用域仍以工具调用为中心；顶层调用无有效上下文 | 扩成明确区分 tool/hook 的执行上下文，不能伪造 tool call 来开权限 |
+| `src/runtime/plugin_lua_host.cpp:617`：`LuaHostState::Call` | per-state mutex 串行，`lua_pcall` 普通调用 | 新增中间件调用合同；不能直接拿互斥递归实现 next |
+| `src/tools/lua_tool.cpp:134`：`ApplyPureLuaProfile` | 开全库后移除 os.execute/os.exit/io/package.loadlib | 尚非完整沙箱；os.remove/rename、模块搜索器等需逐项审查，新 hook state 改为显式白名单 |
+| `src/tools/lua_tool.hpp`：`LuaGuard/LuaProfile` | 有内存帽、指令预算、取消旗 | 复用并补墙钟、嵌套预算及阻塞 Host API 取消 |
+| `src/hooks/dispatcher.hpp`；`types.hpp` | 当前 handler 并发执行、按定义序归并，来源相加 | 按 v3 改成同名选实现、稳定顺序、串行改写和统一记录 |
+| `src/app/turn_runner.cpp:752`；`src/runtime/turn_runtime.cpp:311` | 有 UserPromptSubmit 和 turn 身份接线 | 正式接纳移入统一 runtime，覆盖 CLI、one-shot、app-server |
+| `src/agent/context_manager.cpp:26` | durable/request 两份内存历史 | 消费 v3 已提交消息与 context 投影，插件不直接修改数组 |
+| `src/runtime/session_runtime.hpp`；`src/trajectory/session_manager.hpp` | 已有会话 owner、记录桥、锁和生命周期职责 | 按 v3 重构输入、恢复与关闭，复用职责而非旧数据合同 |
+| `src/mcp/mcp_tool.cpp:51`；`src/mcp/client.cpp:287` | McpTool 调用 Client::CallTool | Lua 通过宿主统一执行服务到达这里，不直调 Client 绕过准入和记录 |
+| `src/tools/deferred_tool_resolver.*`；`tool_search.cpp:453` | tool_invoke 是需要解引用的协议壳，其 execute 不是执行入口 | 提炼可供模型 Action 与 hook 子执行复用的调度服务，禁止直接调用壳的 execute |
+
+目前没有完整受控 `luban.fs` API，也没有本单所述的 Lua `next()` 和 hook 工具调用桥。文件操作不能靠打开全部标准库冒充完成。
+
+## 三、注册、清单与加载
+
+- 逻辑键为 `(hookPoint,name)`，实现为 builtin 或 lua。沿 v3 覆盖层级与信任规则，插件不能自报 source=session 提权。
+- 来源优先级固定为 builtin < 已启用扩展 < project < user < 显式 session 配置；此层级用来选实现，不能与执行 priority 混为一谈。
+- 先选实现再匹配 origin/purpose/deliveryMode；替代项未命中或失败不暗跑旧实现。required、阶段和结果合同属于功能槽位，替代脚本不能取消它们。
+- 阶段与 before/after 依赖优先；就绪项按 priority 小者先，同值按逻辑键稳定排序。同层重名、循环依赖、阶段倒置拒绝发布。
+- 定义元数据集中在一份 `hook.json`，Lua 返回 handler 表，不再复制清单。文件名和 schema 属本轮建议，在第一批冻结。
+- 目录发现仅读清单。脚本在首次使用或显式预热时编译；脚本顶层只构造函数和常量，不发网络、读写业务文件或修改状态。
+- 定义 hash 覆盖清单、入口和声明依赖；运行中改文件只影响下一 registryRevision。单次 dispatch 固定计划与脚本版本，未执行脚本的外部依赖也不能临时换成另一版。
+- 提供新版本校验后原子发布；失败保留当前有效版本并报告错误。在途调用持有旧版本，不在 reload 中强行销毁。
+
+建议目录形状：
+
+```text
+.lubancode/hooks/my-hook/
+  hook.json
+  main.lua
+  fixtures/
+    input.json
+    expected.json
+```
+
+清单示例仅作新合同草案：
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "prompt-normalize",
+  "version": "1.0.0",
+  "entry": "main.lua",
+  "hooks": [
+    {
+      "hookPoint": "PreUser",
+      "name": "prompt.normalize",
+      "handler": "normalize",
+      "priority": 100,
+      "after": [],
+      "match": {"origin": "human", "purpose": "interactive"},
+      "capabilities": ["prompt.read", "prompt.rewrite"],
+      "failurePolicy": "abort",
+      "replayPolicy": "manual",
+      "limits": {"activeTimeoutMs": 500}
+    }
+  ]
+}
+```
+
+用户级与项目级发现根沿配置与信任约定冻结。相对脚本路径以包根解析，越界和缺件拒绝；不依赖当前工作目录恰好在哪里。
+
+### 3.1 同名覆盖后的实际计划
+
+```text
+候选定义：
+  PostUser/skill.resolve  -> builtin.skill_resolve
+  PostUser/memory.recall  -> builtin.memory_recall
+  PostUser/memory.recall  -> user Lua my_memory_recall
+                           after: PostUser/skill.resolve
+
+配置解析后：
+  PostUser
+    -> skill.resolve  [内置]
+    -> memory.recall  [用户 Lua]
+
+被覆盖的 builtin.memory_recall 保留定义来源，不进入本次执行计划。
+```
+
+依赖指向逻辑键，覆盖后自动连到获选实现。同层同键重复报冲突；不同功能仍共存。用户 memory 未命中或失败，不暗中补跑内置 memory；若需要 fallback，显式声明并记录实际选用。
+
+改写 handler 串行，后项读取前项已采用版本。只读、无依赖且不参与本次准入或结果决定的观察 handler 可并发；是否能影响当前提交由槽位合同决定，不能让返回较晚的一项覆盖较早结果。
+
+## 四、Lua 中间件与挂点边界
+
+挂点、排序与同名覆盖来自 v3 已定设计；下面的 `ctx/input/next` 是落实这些能力的 Lua 接口草图，尚未实现，也不冒充 v3 已冻结的字段。观察 handler 可只返回观察结果，转换 handler 返回候选效果；需要围住下游处理时采用 next，不强迫每个功能都写一层洋葱包装。
+
+```lua
+return {
+  normalize = function(ctx, input, next)
+    local candidate = ctx.prompt.replace(input, normalize(input.prompt))
+    if should_block(candidate.prompt) then
+      return ctx.deny("input_rejected", "这次输入未通过检查")
+    end
+    local result = next(candidate)
+    return result
+  end
+}
+```
+
+`normalize`、`should_block` 为示意函数。交付的正式模板必须给出完整实现，不让用户照抄后才发现缺函数。
+
+- `ctx` 携带只读 session/run/context/revision、dispatch/invocation、触发输入、可空的 turn/step/action/request 身份，以及受控能力。宿主发行身份，Lua 只引用。
+- `input` 是挂点专用候选副本。修改本地 Lua table 不改变 session；候选必须经返回/next 和宿主校验才会采用。
+- next 至多调用一次；零次返回为短路。跨 invocation 保存 next、重复调用、终态后调用一律拒绝。脚本不能用 next 重试工具或模型。
+- 洋葱只围住一次明确阶段。PreUser 的末端返回待接纳候选；外层后置加工完、最终复核后才提交 user。它不围住真实模型调用。
+- PostUser 在 user 接纳后独立触发，可追加带来源的隐藏上下文，不能回写原 user。失败时原 user 仍保留，required 未成功不得继续发送。
+- PreRequest 分 mutate、freeze、estimate、capacity；freeze 由宿主掌握。外层后置不得修改已经冻结或发送的输入。
+- PreAction 在参数/后端候选退栈后再次准入，再真实执行；PostAction 加工已保存原始结果，随后选用、生成预览和提交唯一 tool message。
+- Pre/PostAssistant 遵守 v3 原始回复、签名、tool_calls 与 interrupted 规则，不把派生内容冒充模型原话。
+- 短路后未进入项记 skipped；外层可观察结果，但不能把 required deny 改成 allow。取消后只准清理，不再提交业务改写。
+
+### 4.1 Lua state、嵌套与异步
+
+首版优先保证调用边界：活动 invocation 使用独立 Lua state，嵌套 handler 不重入同一 state；脚本内存不跨调用保留，持久状态走宿主 API。缓存已校验源码/编译产物，不缓存用户业务结果充作脚本状态。编译产物限本机兼容运行时使用，不当作跨版本发布格式。
+
+这样不把当前 per-state mutex 改成递归锁来掩盖串用 ctx、预算和栈的问题。实例数、嵌套深度和总内存均有宿主上限；后续复用 VM 须验证清理与隔离，并用实测证明收益。
+
+耗时 Host API 放到可取消执行任务中；session writer 不被 Lua 或网络等待阻塞。首版 worker 可以同步等待 next/Host API，取消与 UI 由独立宿主调度推进；不要求一开始就实现任意 coroutine 持久恢复。
+
+## 五、开放宿主能力
+
+以下除 HTTP/Secret 底座外均为拟新增或待接 hook 的合同，API 名在首批冻结。
+
+| 能力 | 对脚本开放什么 | 宿主负责什么 |
+| --- | --- | --- |
+| prompt | 读候选、提交替换候选 | 来源、长度、附件完整性、正式接纳 |
+| context | 读取预算内快照，申请追加消息 | context 版本、安全点、来源和消息链提交 |
+| HTTP/Secret | 复用 luban.http 与 opaque secret 引用 | 网络策略、凭据注入、超时、取消、记录 |
+| 文件 | 受控 read/write/list/search | 授权根、规范路径、符号链接、字节帽、原子写与执行事实 |
+| 工具 | 查找/调用已授权工具，包括 MCP | 解引用、schema、权限、当前目标、子执行身份、结果与副作用 |
+| 插件状态 | 读写插件私有键或版本化对象 | plugin/session/context 作用域、限额、冲突、持久化和恢复 |
+| 日志/显示 | 提交结构化日志和提示 | artifact、截断、显示投影；不自动注入模型 |
+
+权限取清单申请、槽位允许和宿主授权的交集。默认不开放原始 SessionRuntime、ContextManager、writer、可变历史、宿主地址、任意 C 模块加载及 shell。
+
+Lua 库采用白名单。文件、网络和进程入口不靠脚本自行守约；审查 os、io、debug、loadfile/dofile、require/searchers、动态库入口及 coroutine 预算绕过。package 内纯 Lua 依赖通过受控解析加载，不能借搜索路径逃出定义包。
+
+提供更多能力与取消权限边界不是一回事。文件写入、外部工具调用和状态改变均走宿主执行服务；脚本不能先绕过宿主写完文件，再补一句“我执行了”。
+
+### 5.1 Lua 调 MCP
+
+路径为：Lua handler -> 宿主工具调用服务 -> 当前已注册工具解析/准入 -> MCP adapter/client -> 服务端。不另起 Python/TS hook 协议。
+
+- 记录独立 executionId、parentHookInvocationId、可选 parentActionId、实际 server/tool、参数、等待、终态、结果引用和错误。
+- 这是宿主派生执行，不能伪造模型 tool_call 或向 provider 塞入孤立 tool message。需要作为上下文使用时，由 hook 效果提交带来源的正式消息。
+- 模型调用与 hook 子执行共用准入和执行底座，来源与记录身份分开。当前 tool_invoke 壳不能直接拿来调用。
+- 同一逻辑工具又触发相同 hook 时检查调用 ancestry、深度与总次数；拒绝无界递归。不能为了避递归把所有权限检查也一并跳过。
+- discovery/连接受预算控制，目录登记不等于全启动；在途工具绑定原定义，调用前检查撤权、版本和可用性。
+- 超时或取消不证明远端未执行。结果未知记 unknown，不自动重试副作用。重试要有明确幂等合同与独立 attempt。
+
+## 六、预算、失败与关闭
+
+- 预算覆盖编译/加载、排队、Lua 指令、内存、Host API、输出与上下文注入总量。建议初始 handler 自用时间 500 ms、dispatch 自用总预算 5 s，均为待验证配置值，不是性能结论。
+- handler 自用时间累计前后置，不包含宿主确实执行 next 下游的等待；整段 operation 墙钟仍受上层截止点约束。NEXT、回调和网络重试不重置总预算。
+- Lua 指令 hook 不能中断任意阻塞 C 函数；每个 Host API 自己接 deadline/cancel。不能用 detach 一个仍持 Lua state 的线程实现假超时。
+- next 未消费，optional 纯转换失败且显式允许 pass_input 时，以进入本 handler 的版本继续一次；required 失败拒绝继续。
+- next 已消费，脚本崩溃不能再次执行下游。下游已完成时，显式 keep_downstream 可采用持久收据；required 后处理未完成则暂停/失败。
+- 业务 deny 与脚本错误分开。执行已完成、结果保存失败也分开；缺记录不能证明未执行。
+- Esc 取消对应 turn/context；clear/exit 停接新工作、取消并排空旧作用域、收齐已知事实，再封 session。reload 只换新计划，不销毁在途 VM。
+- 资源释放先让 Host API 返回、Lua 栈退出、worker 收口，再销毁 state。无法在关闭时核实外部执行，保留 incomplete/unknown。晚到结果不得写进当前新 session。
+
+## 七、Session v3 记录与恢复
+
+### 7.1 统一事实账
+
+顶层仍只有 message/event；session 内共用 seq，新文件首行完整 system。存放 `sessions/<id>/<id>.jsonl` 和同目录 artifacts。Lua 不直接写这份账。
+
+沿 v3 记录 hook.dispatch.requested、pending、started、completed/failed/cancelled/unknown 和 effects.applied/rejected。每次 dispatch 固定 registryRevision、definitionHash、顺序、输入、能力、失败策略及预算；UI 与诊断从此派生。
+
+洋葱前置先产出候选再执行 next，需补两项语义：
+
+- `hook.output.proposed` 保存 before_next/after_next/short_circuit 候选及引用，不冒充 handler 已完成。
+- `hook.continuation.consumed` 记录一次性执行权、已采用工作版本、下游位置与身份；不以消费记录冒充下游真的执行或完成。
+
+工作候选采用与正式 context 提交分开。效果记录带 targetKind、before/afterVersion；由其他事件持有的效果通过 effectRefs 引用，避免两份“已提交”事实。handler 正式返回才写 completed；它也不等于全部效果已获采用。
+
+次序为：候选/引用落稳 -> 校验与工作版本采用 -> continuation 消费落稳 -> 下游执行 -> 结果收据落稳 -> 外层后置 -> 最终选用 -> 正式消息与 context 接纳。任何日志故障都不能触发下游重复执行。
+
+原始输入、模型原始回复、原工具结果各自保留。改写内容、缓存答复、MCP 派生结果另标来源；不伪造 provider/model/usage。只显示的提示不造模型消息，实际注入正文须有 message 及精确选用关系。
+
+### 7.2 新 context 与作用域
+
+- 正式提交按 `(contextId,contextRevision)` 和有关输入/system 版本比较，不只看共享 JSONL seq；btw 写账不使 main 候选无故失效。
+- 普通用户输入默认 steer，slash/子报告按目标 followup；工具组配齐后接纳。消息 hook 按真实 origin/purpose 触发，不扫描 wire role 猜来源。
+- 用户文本及单工具预览沿 v3 32 KiB；超限保存全文，发受限预览及引用。工具预览可按 32/16/8/4 KiB 降档，仍不足则报错。
+- 所有输入改写在 freeze 前完成；最终 adapter 模型输入快照按 UTF-8 bytes/4 估算，并计实际输出预留。输入变化必须重新准备，不沿用旧 hash 的估算。
+- compact/降档提交新链，不重跑旧 user hook、不改旧消息。能力仍加载不代表模型仍见 schema；按新链恢复披露状态。
+- title/compact/btw 各走自己的 purpose/context；btw 不借 Lua 获得工具权限、改 main 状态或写长期记忆。
+
+### 7.3 恢复断点
+
+| 断点 | 恢复合同 |
+| --- | --- |
+| 输入已排队，hook 未 started | 按原输入/接纳身份推进，不重复发行真人回合 |
+| 候选已存、效果未提交 | 核验原版本与引用后补提交或拒绝，不悄悄改内存 |
+| next 已消费、下游结果不明 | 查执行收据或原执行器，无法核实则 unknown/暂停，不重调 |
+| 下游完成、Lua 后置未返回 | 保留原下游结果，按后处理恢复策略处理，不重跑工具/MCP |
+| handler 返回已保存、completed/效果尚缺 | 补提交原返回，不重新运行 Lua |
+| 最终效果采用、message/接纳尚缺 | 依预留身份补交一次，不再加前缀或重复召回 |
+| tool1/2 已有最终消息，3/4 从未 started | 恢复原批次，只推进待执行项；已完成 hook 不重跑 |
+| 定义或 artifact 缺失/hash 不符 | 明报缺口，不用今天脚本猜昨天产物 |
+
+只读 replay 不执行 Lua、不连接 MCP。主动 resume 先恢复事实和控制状态，再重核当前权限及未完成步骤。已采用效果按稳定 effectId 去重；Lua 栈和局部变量不自动持久恢复。
+
+默认 replayPolicy=manual；未有可靠终态就暂停。可选 pure_reexecute 仅针对允许的纯转换，使用原定义/输入，已消费 next 只返回原下游收据；重新提出的输入 hash 必须相同，效果按阶段/ordinal 去重。涉及未知外部副作用不得如此重跑。
+
+fork 复用合法检查点和来源引用，不复制活动 VM、continuation 或 MCP 执行权。btw 共用 writer 但作用域独立。插件持久状态经版本化宿主 API 恢复，不能把 Lua 全局表当 session 真账。
+
+## 八、让 LubanCode 帮用户制作 hook
+
+交付目标：用户描述“每次提问前查我的知识库”，LubanCode 能找到接口文档、生成清单和脚本、检查合同、拿固定输入试跑，再由既有启用/信任入口加载。
+
+### 8.1 文档与模板
+
+- 挂点手册：逐项列输入、返回、允许效果、来源、运行顺序、next、取消、恢复及禁用边界。
+- 中间件配置手册：分别教新增功能、同名 overwrite、before/after 排序、priority、条件匹配和 fallback；展示解析后的实际计划及获选来源，不能只列一组孤立回调样例。
+- Host API 手册：参数/返回 schema、稳定错误码、权限、限额和 session 归属；每个例子完整可跑。
+- 基础样例：prompt 清洗、业务拒绝、受控 HTTP 召回、PostAction 结果加工；另给同名替换内置 memory/估算器与显式依赖顺序的完整样例。
+- 一份 MCP 组合样例：Lua 调已注册知识库工具，保存派生执行，再提交隐藏上下文；包含取消/结果未知分支。
+- 发布官方 scaffold 和编写指引，供 LubanCode 按需读取。生成脚本只使用指定 API 版本，不能靠模型猜函数名。
+- 说明局部变量不跨调用、状态如何保存、同名替换如何生效、怎样查看改写前后与恢复记录。
+
+### 8.2 校验与试跑
+
+计划提供 validate/test 命令，具体命令名在实现批冻结：
+
+1. 静态检查清单、Lua 语法、handler 对账、依赖计划与能力申请。脚本可编译不等于行为已验证。
+2. 用真实 Lua runtime 跑 fixtures，宿主 HTTP/文件/工具默认使用 fake adapter；断言候选、效果、next 次数、顺序和错误。
+3. 注入取消、超时、非法效果、重复 next、版本冲突与落账失败，证明约束生效。
+4. 明确选择真实集成试跑时，沿已有授权和真实宿主执行口运行；不为校验默认访问外部服务或写业务文件。
+5. 报告区分静态通过、fake 测试通过、真实集成通过和未验项。通过后按既有配置/信任流程启用，不让生成器绕过授权。
+
+文档样例与 fixture 共用源或互相校验，API 改动同步更新。示例结果不得声称 MCP 一定可用，也不能把 fake 返回当外部实测。
+
+## 九、分批落地
+
+### P0-A：统一合同与执行核
+
+- [ ] 冻结清单、ctx/input/result/next、挂点阶段、合法效果及错误码。
+- [ ] 实现 builtin/lua 同名选实现、依赖顺序、required 与不可变 dispatch 计划。
+- [ ] 验证覆盖只替换同键功能、同层冲突、先选实现再匹配、无隐式 fallback、依赖随获选实现绑定及只读观察者并发。
+- [ ] 实现至多一次 next、候选采用、退栈、短路和跨 invocation 拒绝。
+- [ ] 验证独立 state、嵌套限制、指令/内存/墙钟和 Host API 取消，补 Lua 库白名单。
+
+验收：内置与 Lua 混链可改参、后置、短路；a 正常执行一次、短路零次，重复 next 不增加次数。替换 memory.recall 后内置调用计数为零，skill.resolve 仍执行；替换估算器不改变冻结与容量判断的阶段边界。
+
+### P0-B：Session v3 接纳、提交与恢复
+
+- [ ] 接 PreUser/PostUser 及请求各阶段，覆盖 CLI、one-shot、app-server 的统一入口。
+- [ ] 接 hook 事件、工作版本、continuation、消息/效果收据与 UI 投影，保持一个 writer。
+- [ ] 在每个持久化边界注入崩溃，验证补交、暂停、unknown 和已完成项不重跑。
+- [ ] 验证 steer/followup、compact、fork/btw、首行 system、Esc interrupted 和输出预留。
+
+验收：只读 replay 无脚本执行；恢复输入匹配最后合法链，无重复注入、工具漏配和跨作用域污染。
+
+### P1-C：Host API 与 MCP 组合
+
+- [ ] 将现有 HTTP/Secret 以 hook 身份接入，复用取消、权限和传输底座。
+- [ ] 实现受控文件、插件状态、context 候选与结构化日志入口。
+- [ ] 提炼统一工具执行服务，接 MCP 子执行记录、准入、结果引用及递归治理。
+- [ ] 验证真实服务超时、取消、断连和已执行但响应丢失；不自动重试副作用。
+
+验收：Lua 能完成“召回外部资料并追加上下文”，每次外部调用与采用效果均可追溯，无旁路 MCP Client 或裸文件写口。
+
+### P1-D：作者体验与生命周期收官
+
+- [ ] 交付完整作者文档、可运行样例、scaffold、validate/test 和面向 LubanCode 的生成指引。
+- [ ] 完成按需加载、版本热换、clear/exit 排空、迟到结果归属与资源回收。
+- [ ] 运行文档 fixtures 和相关集成测试，记录真实平台/服务边界。
+- [ ] 同步 v3 父单实施范围：首版对外 hook 仅 Lua，其他 handler 类型不再成为本轮交付要求。
+
+验收：用户能让 LubanCode 生成并校验一份 hook；可查执行顺序、改写来源、短路理由和 session 采用结果。真实服务与 fake 测试分别报。
+
+## 十、预计落点与验收边界
+
+预计新增 `src/hooks/middleware.*`、Lua hook adapter、清单 schema、fixture runner 及生成模板；实际命名随重构目录冻结。预计修改 `src/hooks/dispatcher.*`、Lua Host API/guard、runtime 统一执行服务、Session v3 schema/recorder/replay 与前端装配。MCP 复用 `src/mcp/`，不重建协议栈。
+
+重点测试覆盖 `tests/unit/hooks/`、`tests/unit/runtime/test_plugin_lua_host.cpp`、`tests/unit/trajectory/` 及 hook/MCP 集成路径。每批报告实际运行的测试，不拿旧工具 Lua 测试代替新 hook 验收；未验证平台与真实服务明确写未验。
+
+本单收官不要求 TS、WASM、native hook 或外置 hook 进程协议。需要其他语言生态的外部能力由 MCP 对接；有新需求时另定范围，不预先维护四套执行后端。
