@@ -224,6 +224,7 @@ std::vector<std::string> KindsOf(const std::vector<nlohmann::json>& rows) {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("开关关: 开场与回合流照走 v2,不长 v3 文件") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const auto root = FreshRoot("off");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());
@@ -751,6 +752,23 @@ TEST_CASE("开关开: RecoverWorkspace 认得 v3 场,原样保留不误删") {
 // 开关只在建场读一次:半程翻转环境变量不改本场格式
 // ---------------------------------------------------------------------------
 
+TEST_CASE("开关已翻默认: 环境变量未设时新会话写 v3(守门)") {
+    // ctest 全局注入 0 保 v2 老册;此处显式摘掉变量,钉产品默认语义——
+    // 翻默认(2026-09-11)的本义:未设=开,只有显式 0 才回 v2。
+#ifdef _WIN32
+    _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=");
+#else
+    unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
+    CHECK(lubancode::trajectory::v3::NewSessionV3WriteEnabled());
+#ifdef _WIN32
+    _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0");
+#else
+    setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0", 1);
+#endif
+    CHECK_FALSE(lubancode::trajectory::v3::NewSessionV3WriteEnabled());
+}
+
 TEST_CASE("开关读一次: 场开成 v3 后,环境变量翻回 0 不改本场写侧") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("open-once");
@@ -894,6 +912,7 @@ TEST_CASE("D3: compact applied 后 ProjectV3ContextHistory 投影新链,prepared
 }
 
 TEST_CASE("D3: v2 场 ProjectV3ContextHistory 报错不换") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const auto root = FreshRoot("d3-v2");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());

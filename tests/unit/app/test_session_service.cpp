@@ -100,6 +100,7 @@ std::filesystem::path V3StreamOf(const std::filesystem::path& session_dir) {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("服务开张:开关关走 v2 布局,v3 流一枚不长") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const auto root = FreshRoot("launch-v2");
     runtime::SessionService service(LaunchRequestOf(root));
     REQUIRE(service.runtime() != nullptr);
@@ -259,6 +260,7 @@ TEST_CASE("载荷 hash 同源:同一正文与图片,两条服务路算出同一 
 // ---------------------------------------------------------------------------
 
 TEST_CASE("恢复:v2 源 resume-at-launch 开新段,来源可查(§10.4)") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const auto root = FreshRoot("resume-v2");
     std::string source_id;
     {
@@ -365,6 +367,7 @@ TEST_CASE("恢复沿来源链识别原键:来源场的操作台账种进新场,�
 // ---------------------------------------------------------------------------
 
 TEST_CASE("三端同路:CLI 路(one-shot 折算)与服务路,开张/接纳/收口落账一致") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const auto cli_root = FreshRoot("same-road-cli");
     const auto service_root = FreshRoot("same-road-service");
 

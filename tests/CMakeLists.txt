@@ -212,7 +212,10 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
   endif()
   set_tests_properties("${test_name}" PROPERTIES
     LABELS "${test_kind};${test_domain};${test_kind}.${test_domain}"
-    TIMEOUT "${test_timeout}")
+    TIMEOUT "${test_timeout}"
+    # v3 写侧已翻默认(产品:未设=开);测试套显式钉 0 保住 v2 老册的
+    # 行为断言——v3 册自带 EnvGuard("1") 显式开,守门案钉"未设=开"。
+    ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
 endforeach()
 
 # 工具文案语言档端到端驱动(不进 ctest,验收手动跑):

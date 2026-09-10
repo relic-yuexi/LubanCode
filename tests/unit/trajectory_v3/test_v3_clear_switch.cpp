@@ -332,6 +332,7 @@ TEST_CASE("v3 clear: 运行侧没收口的活动如实标 incomplete") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("开关关: v2 clear 八步照旧走 main.jsonl 换账") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const auto root = FreshRoot("v2-regression");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());
