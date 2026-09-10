@@ -115,6 +115,13 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 block.tool_use_id = e.tool_use_id;
                 block.content = e.content;
                 content_.push_back(std::move(block));
+            } else if constexpr (std::is_same_v<T, RedactedThinking>) {
+                // 加密思考块整块到齐(轨迹 v3 差距清单 §8.2 第 6 条):前一块
+                // 先收尾,不透明载荷洗过编码关直接落历史——块序即流序,与
+                // thinking/text 块同位保序,下一轮原样回传。
+                FinalizeCurrent();
+                content_.push_back(
+                    RedactedThinkingBlock{platform::SanitizeExternalText(e.data)});
             } else if constexpr (std::is_same_v<T, MessageDone>) {
                 FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
                 stop_reason_ = e.stop_reason;

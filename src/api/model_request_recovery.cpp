@@ -32,6 +32,10 @@ std::string HistoryCommitHashOf(const Request& request) {
                         return b.text.size();
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                         return b.text.size() + b.signature.size();
+                    } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
+                        // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条)计入
+                        // 历史提交指纹——同一份历史换个载荷也算变了。
+                        return b.data.size();
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         return b.id.size() + b.name.size() + b.input.dump().size();
                     } else if constexpr (std::is_same_v<T, ToolResultBlock>) {

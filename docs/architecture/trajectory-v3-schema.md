@@ -277,6 +277,8 @@ v3 的 system/user/assistant/tool 四角色经 adapter 结构化转换到四家 
 7. **请求快照**:保留内部 messageRef ↔ wire message 的映射(两个内部 messageRef 可对应同一 wire message 的不同块)。
 8. **容量检查时点**:最后一道容量检查吃 adapter 与 extra_body 全部覆盖完成后的实际输入形状(anthropic 的 extra_body 尾部覆盖之后),不得在它之前估完便放行。
 
+第三棒(6/7/8 三条)落点:第 6 条——内核补 `RedactedThinkingBlock`(variant 尾部追加,只增不改),anthropic 解析器认 `redacted_thinking` 原生块(整块随 content_block_start 到齐),assembler 落事实块,anthropic wire 出口不透明 data 原样回传、空签名照实不虚构;chat 的 reasoning 回传与 responses/gemini 的一次性思考路都不吃它(载荷一个字节不出门),K2.6 回传路零回退。v2 会话档(runtime 侧 `MessageToBlocksJson` 的 get_if 链)尚未收录该块,resume 后不带回——归 runtime 在途 PR。第 7 条——`api::WireMessageMap`(container + message_to_wire + wire_element_count)由四家 `BuildMessageWireMap` 与 `BuildRequestJson` 同一条拼装路产出,经 `api::Backend::BuildWireMessageMap` 虚函数与 `RequestPreparedContext::wire_message_map` 挂上既有请求快照路径(schema 不动,无新事件 kind)。第 8 条——`Backend::GetEffectiveOutputLimit` 按 extra_body 覆盖序(provider 级先、请求级后;anthropic/chat 键 `max_tokens`、responses `max_output_tokens`、gemini `generationConfig.maxOutputTokens`)报有效上限,loop 最终硬闸的输出预留与降级判定认这份;应急/降级收窄经 `ForceMaxOutputTokensOverride` 写进请求级覆盖位,窄值真出门。钉子在 `tests/unit/api/test_four_role_kernel.cpp`(第三棒三节)与 `tests/unit/agent/test_loop.cpp`(差距 8 两案)。
+
 四角色贯通的完整验收另需从真实 v3 JSONL 读取四角色 → 上下文选取 → adapter 生成 wire → 流式响应落回 v3 的端到端链路(P2 读取侧 + 后续棒次);本节与合同测试册是那条链路的对照基线,不是其替代。
 
 ## 九、usage 消费方与取数口(§4.12)

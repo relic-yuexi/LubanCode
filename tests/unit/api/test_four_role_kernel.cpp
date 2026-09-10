@@ -1,5 +1,5 @@
 // 四角色内核(轨迹 v3·消息主轴,单子 §1.1/§4.46)。第一棒 Anthropic,
-// 第二棒 chat/responses/gemini 三家。
+// 第二棒 chat/responses/gemini 三家,第三棒差距清单尾巴 6/7/8 三条。
 //
 // 换骨不换皮:内部消息模型升四角色(system/user/assistant/tool 一等
 // 公民),wire 出口形状一字不变。本册钉:
@@ -19,6 +19,10 @@
 //      ToolResultBlock)与"四角色新路"(System 消息 + Tool 角色)分别
 //      组装,四家出口 JSON 逐字节相等。这就是"内里换骨、外观不变"的
 //      直接证据;红了说明换骨漏了或拍平变了。
+//   5. 第三棒(差距清单 §8.2 第 6/7/8 条)——thinking/redacted_thinking
+//      原生块的进出核对(§4.42 不透明块无损回传、空签名不虚构);内部
+//      消息序 -> wire 元素序的拍平对照(v3 账 prepared 的 inputMessageRefs
+//      对账用);容量取数口读 extra_body 覆盖后的有效输出上限。
 //
 // 四家合同基线在 test_wire_role_contract.cpp(18 案,断言不动);本册只
 // 钉四角色新增面,不重复四家横切对照。
@@ -32,9 +36,16 @@
 #include <vector>
 
 #include "api/anthropic/client.hpp"
+#include "api/anthropic/events.hpp"
+#include "api/assembler.hpp"
+#include "api/backend.hpp"
+#include "api/chat/client.hpp"
 #include "api/chat/request.hpp"
+#include "api/gemini/client.hpp"
 #include "api/gemini/request.hpp"
+#include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
+#include "api/sse_framing.hpp"
 #include "api/types.hpp"
 
 namespace api = lubancode::api;
@@ -616,4 +627,397 @@ TEST_CASE("混装横切: 正文与结果同框的 Tool 消息,四家新旧两路
     CHECK(api::responses::BuildRequestJson(four_role).dump() ==
           api::responses::BuildRequestJson(legacy).dump());
     CHECK(api::gemini::BuildRequestJson(four_role).dump() == api::gemini::BuildRequestJson(legacy).dump());
+}
+
+// ---------------------------------------------------------------------------
+// 差距 6(§8.2 第 6 条):thinking/redacted_thinking 原生块——解析、留档、
+// 四家进出;空签名不虚构,K2.6 回传路不回退
+// ---------------------------------------------------------------------------
+
+namespace {
+
+api::SseFrame RedactedFrame(std::string data_json) {
+    return api::SseFrame{"message", std::move(data_json)};
+}
+
+}  // namespace
+
+TEST_CASE("差距6: redacted_thinking 流入——解析器认原生块,assembler 落事实块") {
+    // 差距清单 §8.2 第 6 条:anthropic 解析器原先没有该分支,块被静默
+    // 跳过。现在 content_block_start 带 redacted_thinking 即映射出
+    // RedactedThinking(整块到齐,无增量),assembler 攒进 assistant
+    // content——块序即流序。
+    const auto event = api::anthropic::parse_event(RedactedFrame(
+        R"({"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"b3BhcXVlLXNlcmdl"}})"));
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<api::RedactedThinking>(*event));
+    CHECK(std::get<api::RedactedThinking>(*event).data == "b3BhcXVlLXNlcmdl");
+
+    // 流式拼装:thinking(空签名)在前、redacted 居中、正文收尾——顺序
+    // 原样落历史,不重排不丢块。
+    api::MessageAssembler assembler;
+    assembler.Feed(api::ThinkingDelta{"想一想", ""});
+    assembler.Feed(api::ContentBlockDone{0});
+    assembler.Feed(*event);
+    assembler.Feed(api::TextDelta{"正文来了"});
+    assembler.Feed(api::ContentBlockDone{2});
+    assembler.Feed(api::MessageDone{"end_turn", {}, false, false});
+    const api::Message message = assembler.BuildMessage();
+    REQUIRE(message.content.size() == 3);
+    REQUIRE(std::holds_alternative<api::ThinkingBlock>(message.content[0]));
+    REQUIRE(std::holds_alternative<api::RedactedThinkingBlock>(message.content[1]));
+    CHECK(std::get<api::RedactedThinkingBlock>(message.content[1]).data == "b3BhcXVlLXNlcmdl");
+    REQUIRE(std::holds_alternative<api::TextBlock>(message.content[2]));
+}
+
+TEST_CASE("差距6: Anthropic 出口 redacted_thinking 原样回传,空签名照实不虚构") {
+    // §4.42 不透明块无损回传:wire 给过的 data 一字不少地带回去;兼容端
+    // 回的空签名 thinking 块照实回传空串(差距清单 §8.2 第 6 条"不得按
+    // Claude 非空签名要求虚构"),既不造一枚假签名也不丢块。
+    api::Request request;
+    request.model = "m";
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想想", ""});  // 兼容端空签名
+    assistant.content.push_back(api::RedactedThinkingBlock{"b3BhcXVlLXNlcmdl"});
+    assistant.content.push_back(api::TextBlock{"结论"});
+    request.messages.push_back(assistant);
+
+    const auto body = api::anthropic::BuildRequestJson(request);
+    const auto& content = body.at("messages").at(0).at("content");
+    REQUIRE(content.size() == 3);
+    CHECK(content.at(0).at("type") == "thinking");
+    CHECK(content.at(0).at("signature") == "");  // 空签名照实,不虚构
+    CHECK(content.at(1).at("type") == "redacted_thinking");
+    CHECK(content.at(1).at("data") == "b3BhcXVlLXNlcmdl");
+    CHECK(content.at(1) == nlohmann::json({{"data", "b3BhcXVlLXNlcmdl"}, {"type", "redacted_thinking"}}));
+    CHECK(content.at(2).at("type") == "text");
+}
+
+TEST_CASE("差距6: chat/responses/gemini 三家加密思考块不出门") {
+    // 不透明载荷没有可回传的形状:chat 的 reasoning 回传只吃 ThinkingBlock
+    // 的正文(K2.6 跨轮保留路不掺加密块);responses 的 reasoning 与 gemini
+    // 的 thought 都是一次性,照旧跳过。红线:一个字节都不许漏到 wire。
+    api::Request request;
+    request.model = "m";
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"明文思考", "sig"});
+    assistant.content.push_back(api::RedactedThinkingBlock{"c2VjcmV0LWRhdGEK"});
+    assistant.content.push_back(api::TextBlock{"正文"});
+    request.messages.push_back(assistant);
+
+    // chat(Always 回传,K2.6 跨轮保留同款路):reasoning_content 只有明文
+    // 思考,加密载荷不混进去。
+    api::chat::ChatRequestOptions options;
+    options.reasoning_replay = api::chat::ReasoningReplayPolicy::Always;
+    const auto chat = api::chat::BuildRequestJson(request, nlohmann::json::object(), options);
+    REQUIRE(chat.at("messages").at(0).contains("reasoning_content"));
+    CHECK(chat.at("messages").at(0).at("reasoning_content") == "明文思考");
+    CHECK(chat.dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
+
+    // responses/gemini:思考块(明文与加密)都不回传。
+    CHECK(api::responses::BuildRequestJson(request).dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
+    CHECK(api::gemini::BuildRequestJson(request).dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
+    // 只装思考块的 assistant 在这两家不产任何元素(明文与加密同跳过)。
+    api::Request thinking_only;
+    thinking_only.model = "m";
+    api::Message silent;
+    silent.role = api::Role::Assistant;
+    silent.content.push_back(api::ThinkingBlock{"想", "sig"});
+    silent.content.push_back(api::RedactedThinkingBlock{"c2VjcmV0LWRhdGEK"});
+    thinking_only.messages.push_back(silent);
+    CHECK(api::responses::BuildRequestJson(thinking_only).at("input").size() == 0);
+    CHECK(api::gemini::BuildRequestJson(thinking_only).at("contents").size() == 0);
+}
+
+TEST_CASE("差距6: ShouldRecoverTaggedThinking 认加密思考为思考在场") {
+    // assistant(redacted_thinking + tool_use) -> 末条工具结果:与明文
+    // thinking 同为"这轮在思考"的证据,兼容门同开;正规流只多一道
+    // <think> 探测,零影响。
+    api::Request request;
+    request.model = "m";
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::RedactedThinkingBlock{"b3BhcXVlLXNlcmdl"});
+    assistant.content.push_back(api::ToolUseBlock{"c1", "read_file", nlohmann::json::object()});
+    request.messages.push_back(assistant);
+    api::Message tail;
+    tail.role = api::Role::Tool;
+    tail.content.push_back(api::ToolResultBlock{"c1", "结果", false});
+    request.messages.push_back(tail);
+    CHECK(api::anthropic::ShouldRecoverTaggedThinking(request));
+}
+
+// ---------------------------------------------------------------------------
+// 差距 7(§8.2 第 7 条):请求快照 messageRef↔wire 映射——四家拍平对照
+// ---------------------------------------------------------------------------
+
+TEST_CASE("差距7: anthropic 映射逐条对位,System 顶置顶层不占位") {
+    const auto map = api::anthropic::BuildMessageWireMap(FourRoleConversation());
+    CHECK(map.container == "messages");
+    REQUIRE(map.message_to_wire.size() == 6);  // S/U/A/T1/T2/A2
+    CHECK(map.message_to_wire[0].empty());     // System 顶置顶层 system
+    REQUIRE(map.message_to_wire[1].size() == 1);
+    CHECK(map.message_to_wire[1][0] == 0);
+    REQUIRE(map.message_to_wire[2].size() == 1);
+    CHECK(map.message_to_wire[2][0] == 1);
+    CHECK(map.message_to_wire[3] == std::vector<std::size_t>{2});
+    CHECK(map.message_to_wire[4] == std::vector<std::size_t>{3});
+    CHECK(map.message_to_wire[5] == std::vector<std::size_t>{4});
+    CHECK(map.wire_element_count == 5);
+}
+
+TEST_CASE("差距7: chat 映射 system 多源共指 wire[0],正文与工具结果一裂二") {
+    const auto map = api::chat::BuildMessageWireMap(FourRoleConversation());
+    CHECK(map.container == "messages");
+    REQUIRE(map.message_to_wire.size() == 6);
+    CHECK(map.message_to_wire[0] == std::vector<std::size_t>{0});  // System -> wire[0]
+    CHECK(map.message_to_wire[1] == std::vector<std::size_t>{1});
+    CHECK(map.message_to_wire[2] == std::vector<std::size_t>{2});
+    CHECK(map.message_to_wire[3] == std::vector<std::size_t>{3});
+    CHECK(map.message_to_wire[4] == std::vector<std::size_t>{4});
+    CHECK(map.message_to_wire[5] == std::vector<std::size_t>{5});
+    CHECK(map.wire_element_count == 6);
+
+    // "两个内部 messageRef 对应同一 wire message"(§八正文):Request::
+    // system 与多条 System 消息在 chat 拼成一条 system 消息——映射里
+    // 两条内部消息都指 wire[0];空壳 System 没出过字,如实记空。
+    api::Request request;
+    request.model = "m";
+    request.system = "根系统提示";
+    api::Message first;
+    first.role = api::Role::System;
+    first.content.push_back(api::TextBlock{"第一段"});
+    request.messages.push_back(first);
+    api::Message empty_system;
+    empty_system.role = api::Role::System;  // 空正文:没出过字
+    request.messages.push_back(empty_system);
+    api::Message second;
+    second.role = api::Role::System;
+    second.content.push_back(api::TextBlock{"第二段"});
+    request.messages.push_back(second);
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"问一句"});
+    request.messages.push_back(user);
+
+    const auto merged = api::chat::BuildMessageWireMap(request);
+    REQUIRE(merged.message_to_wire.size() == 4);
+    CHECK(merged.message_to_wire[0] == std::vector<std::size_t>{0});
+    CHECK(merged.message_to_wire[1].empty());
+    CHECK(merged.message_to_wire[2] == std::vector<std::size_t>{0});
+    CHECK(merged.message_to_wire[3] == std::vector<std::size_t>{1});
+    CHECK(merged.wire_element_count == 2);
+
+    // 混装一条(正文 + 工具结果)裂成两条 wire 消息:user 在前 tool 在后。
+    api::Request mixed_request;
+    mixed_request.model = "m";
+    api::Message mixed;
+    mixed.role = api::Role::Tool;
+    mixed.content.push_back(api::TextBlock{"附言"});
+    mixed.content.push_back(api::ToolResultBlock{"call_x", "结果", false});
+    mixed_request.messages.push_back(mixed);
+    const auto mixed_map = api::chat::BuildMessageWireMap(mixed_request);
+    REQUIRE(mixed_map.message_to_wire.size() == 1);
+    CHECK(mixed_map.message_to_wire[0] == (std::vector<std::size_t>{0, 1}));
+    CHECK(mixed_map.wire_element_count == 2);
+}
+
+TEST_CASE("差距7: responses/gemini 映射逐块裂元素,思考跳过后的空档如实") {
+    // S/U/A(thinking+text+call×2)/T1/T2/A2:responses 出 7 个 item,
+    // assistant 一条裂三个(正文 message + 两枚 function_call),thinking
+    // 跳过不占位;gemini 同数,assistant 正文一条 + functionCall 两条。
+    const auto responses = api::responses::BuildMessageWireMap(FourRoleConversation());
+    CHECK(responses.container == "input");
+    REQUIRE(responses.message_to_wire.size() == 6);
+    CHECK(responses.message_to_wire[0].empty());
+    CHECK(responses.message_to_wire[1] == std::vector<std::size_t>{0});
+    CHECK(responses.message_to_wire[2] == (std::vector<std::size_t>{1, 2, 3}));
+    CHECK(responses.message_to_wire[3] == std::vector<std::size_t>{4});
+    CHECK(responses.message_to_wire[4] == std::vector<std::size_t>{5});
+    CHECK(responses.message_to_wire[5] == std::vector<std::size_t>{6});
+    CHECK(responses.wire_element_count == 7);
+
+    const auto gemini = api::gemini::BuildMessageWireMap(FourRoleConversation());
+    CHECK(gemini.container == "contents");
+    REQUIRE(gemini.message_to_wire.size() == 6);
+    CHECK(gemini.message_to_wire[0].empty());
+    CHECK(gemini.message_to_wire[1] == std::vector<std::size_t>{0});
+    CHECK(gemini.message_to_wire[2] == (std::vector<std::size_t>{1, 2, 3}));
+    CHECK(gemini.message_to_wire[3] == std::vector<std::size_t>{4});
+    CHECK(gemini.message_to_wire[4] == std::vector<std::size_t>{5});
+    CHECK(gemini.message_to_wire[5] == std::vector<std::size_t>{6});
+    CHECK(gemini.wire_element_count == 7);
+
+    // 只剩思考块的消息(明文 + 加密都被跳过)在两家都不产元素:对照
+    // 记空,计数不涨。
+    api::Request thinking_only;
+    thinking_only.model = "m";
+    api::Message silent;
+    silent.role = api::Role::Assistant;
+    silent.content.push_back(api::ThinkingBlock{"想", "sig"});
+    silent.content.push_back(api::RedactedThinkingBlock{"c2VjcmV0LWRhdGEK"});
+    thinking_only.messages.push_back(silent);
+    const auto silent_responses = api::responses::BuildMessageWireMap(thinking_only);
+    REQUIRE(silent_responses.message_to_wire.size() == 1);
+    CHECK(silent_responses.message_to_wire[0].empty());
+    CHECK(silent_responses.wire_element_count == 0);
+    const auto silent_gemini = api::gemini::BuildMessageWireMap(thinking_only);
+    REQUIRE(silent_gemini.message_to_wire.size() == 1);
+    CHECK(silent_gemini.message_to_wire[0].empty());
+    CHECK(silent_gemini.wire_element_count == 0);
+}
+
+TEST_CASE("差距7: 横切钉子——四家映射的元素计数与实际出口容器长度恒等") {
+    // 表是拍平的只读影子:wire_element_count 对不上 BuildRequestJson 实际
+    // 产出的容器长度,就是拍平和表劈了。数量映射(5/6/7/7)与合同册
+    // 横切节同一副牌。
+    const api::Request request = FourRoleConversation();
+    const auto anthropic_map = api::anthropic::BuildMessageWireMap(request);
+    CHECK(anthropic_map.wire_element_count == api::anthropic::BuildRequestJson(request).at("messages").size());
+    const auto chat_map = api::chat::BuildMessageWireMap(request);
+    CHECK(chat_map.wire_element_count == api::chat::BuildRequestJson(request).at("messages").size());
+    const auto responses_map = api::responses::BuildMessageWireMap(request);
+    CHECK(responses_map.wire_element_count == api::responses::BuildRequestJson(request).at("input").size());
+    const auto gemini_map = api::gemini::BuildMessageWireMap(request);
+    CHECK(gemini_map.wire_element_count == api::gemini::BuildRequestJson(request).at("contents").size());
+
+    // 全部下标落在容器界内(验尸侧按表取元素不越界)。
+    const auto in_bounds = [](const api::WireMessageMap& map) {
+        for (const auto& indices : map.message_to_wire) {
+            for (const std::size_t index : indices) {
+                if (index >= map.wire_element_count) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    CHECK(in_bounds(anthropic_map));
+    CHECK(in_bounds(chat_map));
+    CHECK(in_bounds(responses_map));
+    CHECK(in_bounds(gemini_map));
+}
+
+// ---------------------------------------------------------------------------
+// 差距 8(§8.2 第 8 条):容量检查吃 extra_body 覆盖后的形状——取数口与
+// 四家 backend 的有效上限/写侧覆盖
+// ---------------------------------------------------------------------------
+
+TEST_CASE("差距8: IntKeyFromExtraBody 覆盖序——provider 先、请求级后,非整数不算") {
+    const nlohmann::json none;
+    const nlohmann::json provider = nlohmann::json{{"max_tokens", 4096}};
+    const nlohmann::json request_level = nlohmann::json{{"max_tokens", 8192}};
+    const nlohmann::json non_integer = nlohmann::json{{"max_tokens", "many"}};
+
+    CHECK_FALSE(api::IntKeyFromExtraBody(none, none, "max_tokens").has_value());
+    CHECK(api::IntKeyFromExtraBody(provider, none, "max_tokens") == 4096);
+    CHECK(api::IntKeyFromExtraBody(none, request_level, "max_tokens") == 8192);
+    CHECK(api::IntKeyFromExtraBody(provider, request_level, "max_tokens") == 8192);  // 请求级压 provider
+    CHECK_FALSE(api::IntKeyFromExtraBody(non_integer, none, "max_tokens").has_value());
+    CHECK(api::IntKeyFromExtraBody(provider, nlohmann::json{{"别的键", 1}}, "max_tokens") == 4096);
+}
+
+TEST_CASE("差距8: 四家 backend 有效上限——anthropic 必填兜底,键名各认各的") {
+    api::Request request;
+    request.model = "m";
+
+    // anthropic:max_tokens 必填——无覆盖时落公开兜底,不会是 nullopt。
+    const api::anthropic::AnthropicBackend anthropic_plain("https://a", "t");
+    const auto plain = anthropic_plain.GetEffectiveOutputLimit(request);
+    CHECK(plain.tokens == api::kRequiredMaxOutputTokensFallback);
+    CHECK_FALSE(plain.overridden);
+    request.max_tokens = 1024;
+    const auto declared = anthropic_plain.GetEffectiveOutputLimit(request);
+    CHECK(declared.tokens == 1024);
+    CHECK_FALSE(declared.overridden);
+
+    const api::anthropic::AnthropicBackend anthropic_override(
+        "https://a", "t", 1000, 30, false,
+        nlohmann::json{{"max_tokens", 12345}});
+    const auto overridden = anthropic_override.GetEffectiveOutputLimit(request);
+    REQUIRE(overridden.tokens.has_value());
+    CHECK(*overridden.tokens == 12345);  // 覆盖压过 request.max_tokens=1024
+    CHECK(overridden.overridden);
+
+    // chat:键名 max_tokens,unset 如实 nullopt。
+    const api::chat::ChatCompletionsBackend chat_plain("https://c", "t");
+    api::Request unset_request;
+    unset_request.model = "m";
+    const auto chat_unset = chat_plain.GetEffectiveOutputLimit(unset_request);
+    CHECK_FALSE(chat_unset.tokens.has_value());
+    CHECK_FALSE(chat_unset.overridden);
+    const api::chat::ChatCompletionsBackend chat_override(
+        "https://c", "t", 1000, 30,
+        nlohmann::json{{"max_tokens", 777}});
+    const auto chat_overridden = chat_override.GetEffectiveOutputLimit(unset_request);
+    REQUIRE(chat_overridden.tokens.has_value());
+    CHECK(*chat_overridden.tokens == 777);
+    CHECK(chat_overridden.overridden);
+
+    // responses:键名 max_output_tokens(不是 max_tokens)。
+    const api::responses::ResponsesBackend responses_override(
+        "https://r", "t", 1000, 30, false,
+        nlohmann::json{{"max_tokens", 555}});
+    const auto responses_wrong_key = responses_override.GetEffectiveOutputLimit(unset_request);
+    CHECK_FALSE(responses_wrong_key.overridden);  // 键名不对不算覆盖
+    const api::responses::ResponsesBackend responses_right(
+        "https://r", "t", 1000, 30, false,
+        nlohmann::json{{"max_output_tokens", 999}});
+    const auto responses_overridden = responses_right.GetEffectiveOutputLimit(unset_request);
+    REQUIRE(responses_overridden.tokens.has_value());
+    CHECK(*responses_overridden.tokens == 999);
+    CHECK(responses_overridden.overridden);
+
+    // gemini:键深一层(generationConfig.maxOutputTokens)。
+    const api::gemini::GeminiBackend gemini_plain("https://g", "t");
+    CHECK_FALSE(gemini_plain.GetEffectiveOutputLimit(unset_request).overridden);
+    const api::gemini::GeminiBackend gemini_override(
+        "https://g", "t", 1000, 30,
+        nlohmann::json{{"generationConfig", nlohmann::json{{"maxOutputTokens", 666}}}});
+    const auto gemini_overridden = gemini_override.GetEffectiveOutputLimit(unset_request);
+    REQUIRE(gemini_overridden.tokens.has_value());
+    CHECK(*gemini_overridden.tokens == 666);
+    CHECK(gemini_overridden.overridden);
+}
+
+TEST_CASE("差距8: ForceMaxOutputTokensOverride 只在有覆盖时落笔,不无中生有") {
+    // 写侧(应急/降级收窄穿透覆盖):extra_body 写过键,窄值落请求级
+    // 覆盖位(合并序最后,压过 provider 级);没写过键的请求一个键不造,
+    // 出口形状与从前逐字节一致。
+    api::Request request;
+    request.model = "m";
+    request.max_tokens = 2048;
+
+    const api::anthropic::AnthropicBackend plain("https://a", "t");
+    plain.ForceMaxOutputTokensOverride(request, 1024);
+    CHECK_FALSE(request.extra_body.contains("max_tokens"));  // 没覆盖不造键
+
+    const api::anthropic::AnthropicBackend overridden(
+        "https://a", "t", 1000, 30, false,
+        nlohmann::json{{"max_tokens", 12345}});
+    overridden.ForceMaxOutputTokensOverride(request, 1024);
+    REQUIRE(request.extra_body.contains("max_tokens"));
+    CHECK(request.extra_body.at("max_tokens") == 1024);
+    // 请求级原有覆盖同理被窄值压过。
+    api::Request request_level;
+    request_level.model = "m";
+    request_level.extra_body = nlohmann::json{{"max_tokens", 12345}};
+    plain.ForceMaxOutputTokensOverride(request_level, 512);
+    REQUIRE(request_level.extra_body.contains("max_tokens"));
+    CHECK(request_level.extra_body.at("max_tokens") == 512);
+
+    // gemini 的写侧走深一层的 generationConfig.maxOutputTokens。
+    const api::gemini::GeminiBackend gemini_plain("https://g", "t");
+    api::Request gemini_request;
+    gemini_request.model = "m";
+    gemini_plain.ForceMaxOutputTokensOverride(gemini_request, 256);
+    CHECK_FALSE(gemini_request.extra_body.contains("generationConfig"));
+    const api::gemini::GeminiBackend gemini_override(
+        "https://g", "t", 1000, 30,
+        nlohmann::json{{"generationConfig", nlohmann::json{{"maxOutputTokens", 666}}}});
+    gemini_override.ForceMaxOutputTokensOverride(gemini_request, 256);
+    REQUIRE(gemini_request.extra_body.contains("generationConfig"));
+    CHECK(gemini_request.extra_body.at("generationConfig").at("maxOutputTokens") == 256);
 }

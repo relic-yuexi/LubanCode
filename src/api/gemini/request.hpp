@@ -29,7 +29,15 @@ namespace lubancode::api::gemini {
 // 一层深合并(user 的子键压过内置子键,内置的 maxOutputTokens/
 // thinkingConfig 不被整块冲掉)，所以这一键必须深一层。
 nlohmann::json BuildRequestJson(const Request& request,
-                                const nlohmann::json& extra_body = nlohmann::json::object());
+                                const nlohmann::json& extra_body = nlohmann::json::object(),
+                                WireMessageMap* wire_map = nullptr);
+
+// 拍平对照(轨迹 v3 差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条
+// 拼装路产出(第三参传指针共用,不另写影子逻辑)。gemini 的工具块各自
+// 单独成条 content——一条内部消息可裂成多个 content(正文一条 + 每枚
+// 工具调用/结果各一条),思考块(含加密思考)跳过后整条没剩东西的是空
+// 对照。供 v3 账 model.request.prepared 的 inputMessageRefs 对账/验尸。
+WireMessageMap BuildMessageWireMap(const Request& request);
 
 // 流式端点:POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse。
 // model 带 "models/" 前缀(比如从 ListModels 原样抄来的名字)时剥掉,结尾

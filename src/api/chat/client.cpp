@@ -83,4 +83,31 @@ std::string ChatCompletionsBackend::SerializeForDiagnostics(const Request& reque
     return DumpRequestBody("chat", BuildRequestJson(sanitized_request, extra_body_, options_));
 }
 
+// 拍平对照(差距清单 §8.2 第 7 条):边界账对账用,自家拍平就是真值。
+std::optional<WireMessageMap> ChatCompletionsBackend::BuildWireMessageMap(const Request& request) const {
+    return BuildMessageWireMap(request);
+}
+
+// 差距清单 §8.2 第 8 条:chat 的 max_tokens 可省略——没有 extra_body 覆盖
+// 时如实 nullopt(交服务端默认),不落兜底。
+Backend::EffectiveOutputLimit ChatCompletionsBackend::GetEffectiveOutputLimit(const Request& request) const {
+    EffectiveOutputLimit out;
+    if (const std::optional<int> overridden = IntKeyFromExtraBody(extra_body_, request.extra_body, "max_tokens");
+        overridden.has_value()) {
+        out.tokens = *overridden;
+        out.overridden = true;
+        return out;
+    }
+    out.tokens = request.max_tokens;
+    return out;
+}
+
+// 差距清单 §8.2 第 8 条写侧:extra_body 写过 max_tokens 才动请求级键,
+// 没写过不造键,出口形状与从前逐字节一致。
+void ChatCompletionsBackend::ForceMaxOutputTokensOverride(Request& request, int tokens) const {
+    if (IntKeyFromExtraBody(extra_body_, request.extra_body, "max_tokens").has_value()) {
+        request.extra_body["max_tokens"] = tokens;
+    }
+}
+
 }  // namespace lubancode::api::chat

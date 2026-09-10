@@ -32,7 +32,15 @@ namespace lubancode::api::anthropic {
 // 返回之前,键冲突时 extra_body 的值整个覆盖掉前面算出来的值,不做深合并。
 // 默认空 object,等于不合并任何东西,现状行为零变化。
 nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false,
-                                 const nlohmann::json& extra_body = nlohmann::json::object());
+                                 const nlohmann::json& extra_body = nlohmann::json::object(),
+                                 WireMessageMap* wire_map = nullptr);
+
+// 内部消息序 -> wire messages 序的拍平对照(轨迹 v3 差距清单 §8.2 第 7
+// 条)。与 BuildRequestJson 同一条拼装路产出(第四参传指针即得,不另写
+// 影子逻辑):现行逐条对位——非 System 内部消息各落一条 wire 消息,
+// System 顶置顶层 system 对照表里是空。供 v3 账 model.request.prepared
+// 的 inputMessageRefs 对账/验尸,不假定内外数量一一相等。
+WireMessageMap BuildMessageWireMap(const Request& request);
 
 // 仅在“assistant(thinking + tool_use) -> user(tool_result)”这条续轮形状下
 // 开原始 think 标签兼容门。纯函数，给单测钉住，免得兼容范围日后悄悄放宽。
@@ -76,6 +84,12 @@ public:
 
     // 诊断模式的 wire 序列化(与 send_stream 同一条拼装路,见各 client.cpp)。
     std::string SerializeForDiagnostics(const Request& request) const override;
+
+    // 拍平对照与 extra_body 覆盖后的有效输出上限(差距清单 §8.2 第 7/8
+    // 条),语义见 api/backend.hpp 的虚函数注释。
+    std::optional<WireMessageMap> BuildWireMessageMap(const Request& request) const override;
+    EffectiveOutputLimit GetEffectiveOutputLimit(const Request& request) const override;
+    void ForceMaxOutputTokensOverride(Request& request, int tokens) const override;
 
 private:
     std::string base_url_;

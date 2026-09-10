@@ -55,6 +55,12 @@ public:
     // 诊断模式的 wire 序列化(与 send_stream 同一条拼装路,见 client.cpp)。
     std::string SerializeForDiagnostics(const Request& request) const override;
 
+    // 拍平对照与 extra_body 覆盖后的有效输出上限(差距清单 §8.2 第 7/8
+    // 条),语义见 api/backend.hpp 的虚函数注释。
+    std::optional<WireMessageMap> BuildWireMessageMap(const Request& request) const override;
+    EffectiveOutputLimit GetEffectiveOutputLimit(const Request& request) const override;
+    void ForceMaxOutputTokensOverride(Request& request, int tokens) const override;
+
 private:
     std::string base_url_;
     std::string auth_token_;

@@ -44,6 +44,10 @@ bool SameBlock(const api::ContentBlock& left, const api::ContentBlock& right) {
                 return l.id == r.id && l.name == r.name && l.input == r.input;
             } else if constexpr (std::is_same_v<T, api::ServerToolResultBlock>) {
                 return l.tool_use_id == r.tool_use_id && l.content == r.content;
+            } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
+                // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
+                // 逐字节比——载荷变了请求字节就变,追加律判定必须看得见。
+                return l.data == r.data;
             } else {
                 return l.text == r.text && l.signature == r.signature;
             }
@@ -145,6 +149,11 @@ void HashMixBlock(std::uint64_t& hash, const api::ContentBlock& block) {
                 HashMix(hash, "sr:");
                 HashMix(hash, b.tool_use_id);
                 HashMix(hash, b.content.dump());
+            } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
+                // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
+                // 无损回传,进指纹——块变了请求字节就变,追加律判定看得见。
+                HashMix(hash, "rt:");
+                HashMix(hash, b.data);
             } else {
                 HashMix(hash, "h:");
                 HashMix(hash, b.text);

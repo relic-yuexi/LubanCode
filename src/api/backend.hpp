@@ -32,6 +32,48 @@ public:
     // 返回空串 = 该 backend(trace/桩/后台派生类)不提供,诊断账记
     // "不可得"(-1),不冒充 0。
     virtual std::string SerializeForDiagnostics(const Request& request) const { (void)request; return {}; }
+
+    // 内部消息序 -> wire 元素序的拍平对照(轨迹 v3 差距清单 §8.2 第 7 条)。
+    // 供 v3 账 model.request.prepared 的 inputMessageRefs 与实际发出的 wire
+    // 消息序对账/验尸:内外消息数量不一一相等是常态(schema §8.1 横切),
+    // 不能假定逐条对位。AgentLoop 把结果随 RequestPreparedContext 递给
+    // 边界账。默认 nullopt = 该 backend(trace/桩/后台派生类)不提供,
+    // 消费方按"映射不可得"处理,不冒充。
+    virtual std::optional<WireMessageMap> BuildWireMessageMap(const Request& request) const {
+        (void)request;
+        return std::nullopt;
+    }
+
+    // extra_body 覆盖后的有效输出上限(轨迹 v3 差距清单 §8.2 第 8 条,
+    // 单子 §1.18"容量判断采用本次请求实际生效的输出上限")。
+    //   tokens —— wire 上真带的有效上限(覆盖后);nullopt = 请求与
+    //             extra_body 都没写(chat/responses/gemini 不带字段,交
+    //             服务端默认;anthropic 必填,由自家 client 落公开兜底,
+    //             不会是 nullopt)。
+    //   overridden —— provider 级或请求级 extra_body 真写过输出上限键。
+    //             真时容量侧的输出预留直接吃 tokens(用户手笔,不受能力
+    //             级封顶,与 ConfigFile 同款例外);假时 tokens 即
+    //             Request::max_tokens 原值,预留走既有封顶路(主会话
+    //             输出预留占坑单 §4.1 的帽不因此失效)。
+    // 默认原样返回(不提供覆盖面的 trace/桩后端,与从前一字不差)。
+    struct EffectiveOutputLimit {
+        std::optional<int> tokens;
+        bool overridden = false;
+    };
+    virtual EffectiveOutputLimit GetEffectiveOutputLimit(const Request& request) const {
+        return {request.max_tokens, false};
+    }
+
+    // 收窄后的输出上限写进请求级 extra_body 覆盖位(差距清单 §8.2 第 8 条
+    // 写侧):extra_body 写过输出上限键时,只改 Request::max_tokens 出不
+    // 了门——extra_body 尾部合并会把宽的覆盖值压回去,窄值必须写进合并
+    // 序最后的请求级键上(压过 provider 级)。自家 extra_body 没写过该键
+    // 的请求是 no-op:不无中生有造键,出口形状与从前逐字节一致。默认
+    // no-op(trace/桩后端)。
+    virtual void ForceMaxOutputTokensOverride(Request& request, int tokens) const {
+        (void)request;
+        (void)tokens;
+    }
 };
 
 }  // namespace lubancode::api

@@ -26,6 +26,14 @@ namespace lubancode::api::responses {
 // 在所有内置逻辑拼完之后、返回之前,键冲突时 extra_body 的值整个覆盖掉
 // 前面算出来的值,不做深合并。默认空 object,等于不合并任何东西。
 nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false,
-                                 const nlohmann::json& extra_body = nlohmann::json::object());
+                                 const nlohmann::json& extra_body = nlohmann::json::object(),
+                                 WireMessageMap* wire_map = nullptr);
+
+// 拍平对照(轨迹 v3 差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条
+// 拼装路产出(第四参传指针共用,不另写影子逻辑)。responses 逐块成
+// item——一条内部消息可裂成多个 item(正文 message + 每枚工具调用/
+// 结果各一个),思考块(含加密思考)跳过后整条没剩东西的是空对照。
+// 供 v3 账 model.request.prepared 的 inputMessageRefs 对账/验尸。
+WireMessageMap BuildMessageWireMap(const Request& request);
 
 }  // namespace lubancode::api::responses

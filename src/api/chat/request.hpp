@@ -56,9 +56,20 @@ struct ChatRequestOptions {
 };
 
 // 把中立请求翻成 OpenAI Chat Completions 兼容请求。extra_body 最后浅合并，
-// 供各家兼容端补 thinking、tool_stream 等私有字段。
+// 供各家兼容端补 thinking、tool_stream 等私有字段。wire_map 非空时随拼装
+// 同路产出"内部消息序 -> wire messages 序"的对照(差距清单 §8.2 第 7
+// 条),不影响出口 JSON 一个字节。
 nlohmann::json BuildRequestJson(const Request& request,
                                 const nlohmann::json& extra_body = nlohmann::json::object(),
-                                const ChatRequestOptions& options = {});
+                                const ChatRequestOptions& options = {},
+                                WireMessageMap* wire_map = nullptr);
+
+// 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路。
+// chat 的形状:Request::system 与多条 System 消息拼成 wire[0] 一条
+// system 消息(多个内部 messageRef 对同一 wire 消息);User/Tool 消息
+// 可一裂二(正文落 user、每枚 ToolResultBlock 各落一条 tool);只装
+// 工具结果的消息不产 user 消息;assistant 恒一条。供 v3 账 prepared
+// 事件对账/验尸。
+WireMessageMap BuildMessageWireMap(const Request& request);
 
 }  // namespace lubancode::api::chat

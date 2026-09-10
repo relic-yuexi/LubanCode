@@ -113,7 +113,7 @@ json ToolResultImageParts(const ToolResultBlock& result) {
 
 }  // namespace
 
-nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) {
+nlohmann::json BuildRequestJson(const Request& request, const json& extra_body, WireMessageMap* wire_map) {
     json body;
 
     // 系统提示走 systemInstruction(角色外置),不掺进 contents——Gemini 的
@@ -144,10 +144,18 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     }
 
     json contents = json::array();
+    // 拍平对照(差距清单 §8.2 第 7 条):gemini 的工具块各自单独成条
+    // content——一条内部消息可裂成多个 content,思考块(含加密思考)
+    // 跳过后整条没剩东西的是空对照。
+    if (wire_map != nullptr) {
+        wire_map->container = "contents";
+        wire_map->message_to_wire.assign(request.messages.size(), {});
+    }
 
     const std::map<std::string, std::string> tool_names = ToolNameByUseId(request.messages);
 
-    for (const auto& message : request.messages) {
+    for (std::size_t message_index = 0; message_index < request.messages.size(); ++message_index) {
+        const auto& message = request.messages[message_index];
         // System 角色已顶置进 systemInstruction,contents 里一条不落
         //(不重复注入)。
         if (message.role == Role::System) {
@@ -159,6 +167,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
         json parts = json::array();
         const auto flush_parts = [&] {
             if (!parts.empty()) {
+                if (wire_map != nullptr) {
+                    wire_map->message_to_wire[message_index].push_back(contents.size());
+                }
                 contents.push_back(json{{"role", WireRole(message.role)}, {"parts", std::move(parts)}});
                 parts = json::array();
             }
@@ -173,6 +184,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                         parts.push_back(json{{"inlineData", json{{"mimeType", b.media_type}, {"data", b.data}}}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                         // 思考不回传:Gemini 的 thought 一次性,续会话不重放。
+                    } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
+                        // 加密思考块(差距清单 §8.2 第 6 条)同款一次性:
+                        // 不透明载荷没有可回传的形状,跳过。
                     } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                         // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
                         parts.push_back(json{{"text", ModelImageReplayText(b)}});
@@ -186,6 +200,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                                                            "]"}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_parts();
+                        if (wire_map != nullptr) {
+                            wire_map->message_to_wire[message_index].push_back(contents.size());
+                        }
                         contents.push_back(
                             json{{"role", "model"},
                                  {"parts", json::array({json{{"functionCall",
@@ -214,6 +231,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                         // 编码——User 容器旧路与 Tool 角色新路都折 "user"
                         //(协议 functionResponse 的 role=user 现行形状保持,
                         // WireRole(Tool) 同值,出口一字不变)。
+                        if (wire_map != nullptr) {
+                            wire_map->message_to_wire[message_index].push_back(contents.size());
+                        }
                         contents.push_back(json{{"role", WireRole(message.role)},
                                                 {"parts", json::array(
                                                               {json{{"functionResponse",
@@ -223,6 +243,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                 block);
         }
         flush_parts();
+    }
+    if (wire_map != nullptr) {
+        wire_map->wire_element_count = contents.size();
     }
     body["contents"] = std::move(contents);
 
@@ -293,6 +316,15 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     merge_extra(request.extra_body);
 
     return body;
+}
+
+// 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
+// 产出(第三参传指针共用)。消息拍平与 extra_body 无关(那只动顶层键,
+// 含 generationConfig 的深一层特例)。
+WireMessageMap BuildMessageWireMap(const Request& request) {
+    WireMessageMap map;
+    BuildRequestJson(request, json::object(), &map);
+    return map;
 }
 
 std::string StreamUrl(const std::string& base_url, const std::string& model) {

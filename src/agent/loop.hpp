@@ -66,6 +66,12 @@ struct RequestPreparedContext {
     std::string tools_hash;
     int cache_epoch = 0;
     bool prefix_append_only = true;
+    // 内部消息序 -> wire 元素序的拍平对照(轨迹 v3 差距清单 §8.2 第 7
+    // 条):backend 提供(四家真后端)就有值,trace/桩后端缺省 nullopt。
+    // v3 账 model.request.prepared 的 inputMessageRefs 拿它对实际发出的
+    // wire 消息序——内外消息数量不一一相等是常态(schema §8.1 横切),
+    // 不能假定逐条对位。消费方按"不可得"处理,不冒充。
+    std::optional<api::WireMessageMap> wire_message_map;
 };
 
 // model.output.cancelled 的取消来源(主会话输出预留占坑单 §4.2):轨迹是

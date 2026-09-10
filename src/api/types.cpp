@@ -286,6 +286,11 @@ void SanitizeContentBlock(ContentBlock& block) {
                 // 名单 / error 文案)递归清洗,无损语义不变。
                 b.tool_use_id = platform::SanitizeExternalText(b.tool_use_id);
                 SanitizeJsonTree(b.content);
+            } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
+                // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
+                // 原样回传,坏串照样要洗——服务端或中转塞进来的坏 UTF-8
+                // 下一轮重放会 316。
+                b.data = platform::SanitizeExternalText(b.data);
             }
         },
         block);
@@ -321,6 +326,33 @@ void SanitizeRequest(Request& request) {
         SanitizeJsonTree(tool.input_schema);
     }
     SanitizeJsonTree(request.extra_body);
+}
+
+std::optional<int> IntKeyFromExtraBody(const nlohmann::json& provider_extra_body,
+                                       const nlohmann::json& request_extra_body, const char* key) {
+    std::optional<std::int64_t> value;
+    const auto apply = [&value, key](const nlohmann::json& source) {
+        if (!source.is_object()) {
+            return;
+        }
+        const auto it = source.find(key);
+        if (it == source.end() || !it->is_number_integer()) {
+            return;
+        }
+        value = it->get<std::int64_t>();
+    };
+    // 覆盖序 = 合并序:provider 级先、请求级后,后者压前者。
+    apply(provider_extra_body);
+    apply(request_extra_body);
+    if (!value.has_value()) {
+        return std::nullopt;
+    }
+    // int 域夹一下:配置里写天文数字不折成负数穿闸。
+    constexpr std::int64_t kIntMax = 2147483647;
+    if (*value < 0) {
+        return 0;
+    }
+    return static_cast<int>(*value > kIntMax ? kIntMax : *value);
 }
 
 }  // namespace lubancode::api

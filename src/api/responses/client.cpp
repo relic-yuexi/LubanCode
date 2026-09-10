@@ -138,4 +138,31 @@ std::string ResponsesBackend::SerializeForDiagnostics(const Request& request) co
     return DumpRequestBody("responses", BuildRequestJson(sanitized_request, native_web_search_, extra_body_));
 }
 
+// 拍平对照(差距清单 §8.2 第 7 条):边界账对账用,自家拍平就是真值。
+std::optional<WireMessageMap> ResponsesBackend::BuildWireMessageMap(const Request& request) const {
+    return BuildMessageWireMap(request);
+}
+
+// 差距清单 §8.2 第 8 条:responses 的输出上限键叫 max_output_tokens
+//(不是 max_tokens),unset 交服务端默认,如实 nullopt。
+Backend::EffectiveOutputLimit ResponsesBackend::GetEffectiveOutputLimit(const Request& request) const {
+    EffectiveOutputLimit out;
+    if (const std::optional<int> overridden =
+            IntKeyFromExtraBody(extra_body_, request.extra_body, "max_output_tokens");
+        overridden.has_value()) {
+        out.tokens = *overridden;
+        out.overridden = true;
+        return out;
+    }
+    out.tokens = request.max_tokens;
+    return out;
+}
+
+// 差距清单 §8.2 第 8 条写侧:同自家键名写请求级覆盖位,没写过不造键。
+void ResponsesBackend::ForceMaxOutputTokensOverride(Request& request, int tokens) const {
+    if (IntKeyFromExtraBody(extra_body_, request.extra_body, "max_output_tokens").has_value()) {
+        request.extra_body["max_output_tokens"] = tokens;
+    }
+}
+
 }  // namespace lubancode::api::responses
