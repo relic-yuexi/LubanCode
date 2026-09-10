@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.243] - 2026-09-11
+
+- **四家 adapter 全部换上四角色骨。**Chat(System 落 system role 消息,这家没顶层 system 参数)、Responses(System 顶置 instructions,六处角色三元收拢)、Gemini(System 顶置 systemInstruction,functionResponse 经 WireRole 落位)三家跟上 Anthropic。每家都有"同一对话新旧两路出口 dump 逐字节相等"的钉子案,18 案四家 wire 合同册从头到尾一行未改。协议差异自此全部收进 adapter 皮里,内核只有 system/user/assistant/tool 四张脸。差距清单余 thinking 原生块/快照映射/容量时点三笔尾巴。
+
 ## [v0.26.242] - 2026-09-11
 
 - **v3 真的能写了:新会话写侧开关接线完成。**设 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1,新会话即写 v3 账——首行 system(seq=1)、消息/工具账/结果仓/子账全落 sessions/<id>/<id>.jsonl,resume 与 --continue 经链投影读回,/sessions 列表并列认两种场次。开关默认关:v2 路径一字不动。v3 场目录不写 v2 manifest(写多一枚就会被 resume 误判跳过);clear 老功能对 v3 场如实报"未支持"而非假装。至此 v3 从"读得回"到"写得进",下一步翻默认与端到端验收。
