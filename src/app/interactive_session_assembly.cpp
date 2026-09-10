@@ -962,6 +962,34 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // 正式 discovery event 重建 DiscoveryLedger(单子 §9.2);compact
             // 那一路仍走 ReplaceHistory,引用账不丢(§9.3)。
             main_agent->RestoreSessionHistory(resumed);
+            // 旧史重放(P3 显示侧):与 /resume 同一颗 formatter,一次性铺
+            // 进终端滚动缓冲,不进 TranscriptUiController 的 live 条目账。
+            // v3 源吃 RestoredHistoryView(压缩分界线带 applied 持久 token
+            // 数字、被压缩原文照铺、display.hidden 默认不渲染);v2 源照旧
+            // 吃有效对话投影。
+            {
+                const int resume_width = lubancode::cli::DetectConsoleWidth().value_or(80);
+                const auto restored_view = session_runtime_.trajectory()->LaunchRestoredHistoryView();
+                const std::string restored_text =
+                    restored_view.has_value()
+                        ? lubancode::cli::FormatRestoredHistory(*restored_view, theme, resume_width)
+                        : lubancode::cli::FormatRestoredHistory(resumed, theme, resume_width);
+                if (!restored_text.empty()) {
+                    std::size_t restored_count = resumed.size();
+                    if (restored_view.has_value()) {
+                        restored_count = 0;
+                        for (const auto& item : restored_view->items) {
+                            if (item.kind == lubancode::runtime::RestoredHistoryItem::Kind::Message) {
+                                ++restored_count;
+                            }
+                        }
+                    }
+                    TermOut() << theme.stats
+                              << trf("cmd.resume.history.header", restored_count) << theme.reset << "\n";
+                    TermOut() << restored_text;
+                    TermOut() << theme.stats << tr("cmd.resume.history.end") << theme.reset << "\n";
+                }
+            }
             TermOut() << theme.banner
                       << trf("cmd.resume.restored", session_runtime_.trajectory()->session_id(),
                              resumed.size())

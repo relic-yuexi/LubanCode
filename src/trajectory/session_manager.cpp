@@ -14,6 +14,8 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"
+#include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "workspace/identity.hpp"
 #include "workspace/index.hpp"     // 账本制:构造期房门的初判
 #include "workspace/manifest.hpp"  // P0-1:RegisterCheckout 的登记体
@@ -1261,6 +1263,91 @@ std::expected<void, std::string> SessionManager::UpdateApprovalMode(ApprovalMode
     return {};
 }
 
+namespace {
+
+// v3 链输入 → ReplayMessage(有效对话;§4.10:只取本账链,compact 内部
+// 问答/prompt 从未入链,天然排除)。工具配对键统一 actionId:assistant
+// 调用块的 provider 调用号经 FoldToolActions 换成 actionId,与 tool 消息
+// 的 tool_call_id 同键(§4.15 全局调用身份)。context_summary 是链上的
+// 生效摘要,按 user 消息进有效对话(§4.10"生效摘要 + 保留消息")。
+std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledger,
+                                                       const v3::ModelContext& context) {
+    std::map<std::string, std::string> provider_call_to_action;
+    for (const auto& action : v3::FoldToolActions(ledger)) {
+        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+            provider_call_to_action[*action.provider_tool_call_id] = action.tool_call_id;
+        }
+    }
+    std::vector<ReplayMessage> conversation;
+    for (const auto& input : context.inputs) {
+        const nlohmann::json& body = input.message;
+        if (!body.is_object()) {
+            continue;
+        }
+        ReplayMessage message;
+        message.source_event_id = input.message_id;
+        const auto append_text = [&message](const nlohmann::json& content) {
+            if (content.is_string()) {
+                message.blocks.push_back(nlohmann::json{{"type", "text"}, {"text", content}});
+                return;
+            }
+            if (content.is_array()) {
+                for (const auto& part : content) {
+                    if (part.is_object() && part.value("type", std::string()) == "text" &&
+                        part.contains("text")) {
+                        message.blocks.push_back(
+                            nlohmann::json{{"type", "text"}, {"text", part["text"]}});
+                    }
+                }
+            }
+        };
+        const std::string role = body.value("role", std::string("user"));
+        if (role == "assistant") {
+            message.role = ReplayMessage::Role::Assistant;
+            if (body.contains("content")) {
+                append_text(body["content"]);
+            }
+            if (body.contains("tool_calls") && body["tool_calls"].is_array()) {
+                for (const auto& call : body["tool_calls"]) {
+                    if (!call.is_object()) {
+                        continue;
+                    }
+                    nlohmann::json block{{"type", "tool_call"}};
+                    const std::string provider_id = call.value("id", std::string());
+                    const auto mapped = provider_call_to_action.find(provider_id);
+                    block["call_id"] = mapped != provider_call_to_action.end() ? mapped->second
+                                                                               : provider_id;
+                    if (call.contains("function") && call["function"].is_object()) {
+                        block["name"] = call["function"].value("name", std::string());
+                        nlohmann::json arguments =
+                            nlohmann::json::parse(call["function"].value("arguments", std::string("{}")),
+                                                  nullptr, /*allow_exceptions=*/false);
+                        block["arguments"] =
+                            arguments.is_discarded() ? nlohmann::json::object() : arguments;
+                    }
+                    message.blocks.push_back(std::move(block));
+                }
+            }
+        } else if (role == "tool") {
+            message.role = ReplayMessage::Role::Tool;
+            message.call_id = body.value("tool_call_id", std::string());
+            if (body.contains("content")) {
+                append_text(body["content"]);
+            }
+        } else {
+            // user / context_summary(摘要按 user 消息携带,与 v2 投影同形)。
+            message.role = ReplayMessage::Role::User;
+            if (body.contains("content")) {
+                append_text(body["content"]);
+            }
+        }
+        conversation.push_back(std::move(message));
+    }
+    return conversation;
+}
+
+}  // namespace
+
 // 调用方须已持 mutex_(ResumeAsNew 七步内取默认源用,不再二次加锁)。
 std::string SessionManager::LatestResumableSessionIdLocked() {
     std::error_code ec;
@@ -1280,6 +1367,25 @@ std::string SessionManager::LatestResumableSessionIdLocked() {
         }
         const auto manifest = ReadSessionJson(entry.path());
         if (!manifest.has_value()) {
+            // v3 会话(session_switch 接线点 2):无 manifest,认
+            // <id>.jsonl 首行 schemaVersion==3;创建时间取首行 timestamp
+            //(ISO→ms),解析不动按最旧。one_shot 排除是 v2 manifest 的账,
+            // v3 源不适用。可恢复性随后由 ResumeAsNew 的验卷裁定。
+            if (const auto v3_stream = v3::FindV3SessionStream(entry.path()); v3_stream.has_value()) {
+                std::int64_t created = 0;
+                if (const auto first = v3::ReadV3FirstLine(*v3_stream); first.has_value()) {
+                    if (const auto stamp = first->find("timestamp");
+                        stamp != first->end() && stamp->is_string()) {
+                        if (auto ms = v3::ParseV3TimestampMs(stamp->get<std::string>())) {
+                            created = *ms;
+                        }
+                    }
+                }
+                if (created > best_created) {
+                    best_created = created;
+                    best = id;
+                }
+            }
             continue;
         }
         const auto status = SessionStatusFromName(manifest->status);
@@ -1379,61 +1485,99 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
             return fail("resume.source_locked", "source session 仍被别的进程持写锁");
         }
     }
-    // 逐流验链 + 父子边交叉核(§3.9)。尾行截断是可恢复缺口:按已验证
-    // 前缀续(§3.3.2);链断/坏行才是 corrupt。
-    const auto verify = VerifySessionDir(source_dir);
-    bool truncated_tail = false;
-    for (const auto& stream : verify.streams) {
-        if (stream.error_code == "verify.truncated_tail") {
-            truncated_tail = true;
+    // ---- 源格式分派(session_switch 接线点 2/3):两回路并存,按源目录
+    // 格式走,不迁移旧档(§1.5)。main.jsonl 在即 v2(下方原路一字不动);
+    // <id>.jsonl 首行 schemaVersion==3 即 v3:ReadV3Ledger 验卷 +
+    // ProjectModelContext 链投影。悬空工具三道账与 checkpoint 是 v2 折叠
+    // 的概念,v3 源不伪造(执行状态恢复走 v3::ProjectResume 的后续棒)。
+    std::string source_last_event_id;
+    if (const auto v3_stream = v3::FindV3SessionStream(source_dir); v3_stream.has_value()) {
+        auto ledger = v3::ReadV3Ledger(*v3_stream);
+        if (!ledger.has_value()) {
+            return fail("resume.source_corrupt", ledger.error());
         }
-    }
-    const bool corrupt = !verify.ok && !truncated_tail;
-    if (corrupt) {
-        return fail("resume.source_corrupt",
-                    verify.message.empty() ? verify.error_code : verify.message);
-    }
-    outcome.source_verified = true;
-    outcome.source_truncated_tail = truncated_tail;
-
-    // ---- 第 2/3 步:找最后一枚完整 checkpoint;没有便从头折叠。折叠出
-    // effective conversation、control state 与 state hash。
-    const auto main_stream = source_dir / "main.jsonl";
-    ReplayReport fold = FoldStreamReplay(main_stream);
-    if (fold.ok()) {
-        outcome.from_checkpoint = false;
-    } else if (fold.error_code == "replay.unsupported") {
-        return fail("resume.source_unsupported", fold.message);
+        outcome.source_verified = true;
+        outcome.source_is_v3 = true;
+        outcome.source_v3_stream = *v3_stream;
+        outcome.source_event_count = ledger->lines;
+        if (const auto last = ledger->LastEntry(); last.has_value()) {
+            if (last->is_message) {
+                source_last_event_id = ledger->messages[last->index].message_id;
+                outcome.source_main_last_event_hash = ledger->messages[last->index].line_hash;
+            } else {
+                source_last_event_id = ledger->events[last->index].event_id;
+                outcome.source_main_last_event_hash = ledger->events[last->index].line_hash;
+            }
+        }
+        // 有效对话只取本账链(§4.10"请求不重携祖先全史");compact 内部
+        // 问答从未入链,天然排除。新档缺件如实报缺件,不从当前环境补造。
+        const v3::ModelContext context = v3::ProjectModelContext(*ledger);
+        outcome.effective_conversation = EffectiveConversationFromV3(*ledger, context);
+        ReplayState projection;
+        projection.session_id = ledger->session_id;
+        projection.run_id = ledger->run_id;
+        projection.effective_conversation = outcome.effective_conversation;
+        outcome.replay_version = "v3-context-chain-1";
+        outcome.imported_state_hash = ComputeReplayStateHash(projection);
     } else {
-        return fail("resume.source_corrupt", fold.error_code + ": " + fold.message);
-    }
-    const auto checkpoint = FindLatestUsableCheckpoint(source_dir, "main", main_stream);
-    if (checkpoint.has_value()) {
-        ReplayState continued = checkpoint->folded;
-        std::string continue_error;
-        if (ContinueFoldFrom(main_stream, &continued, &continue_error)) {
-            fold.state = std::move(continued);
-            outcome.from_checkpoint = true;
-            outcome.checkpoint_seq = checkpoint->source_seq;
-            outcome.checkpoint_event_hash = checkpoint->source_event_hash;
+        // 逐流验链 + 父子边交叉核(§3.9)。尾行截断是可恢复缺口:按已验证
+        // 前缀续(§3.3.2);链断/坏行才是 corrupt。
+        const auto verify = VerifySessionDir(source_dir);
+        bool truncated_tail = false;
+        for (const auto& stream : verify.streams) {
+            if (stream.error_code == "verify.truncated_tail") {
+                truncated_tail = true;
+            }
         }
-        // 续折失败:checkpoint 缓存靠不住,退回整折(上面的 fold 还在)。
-    }
-    outcome.source_event_count = fold.state.integrity.events_folded;
-    outcome.source_main_last_event_hash = fold.state.integrity.last_event_hash;
-    outcome.replay_version = std::to_string(kReplayProjectionVersion);
-    outcome.imported_state_hash = ComputeReplayStateHash(fold.state);
-    outcome.effective_conversation = fold.state.effective_conversation;
-    outcome.control = fold.state.control;
-    if (source_manifest.has_value() && source_manifest->approval_mode.has_value()) {
-        outcome.approval_mode = source_manifest->approval_mode;
-    }
-    // 已完成的 child 只在 verifier 里核过 terminal hash;正文不进新 main
-    //(§10.4"不把正文灌进新 main.jsonl",effective history 只引用 source
-    // 事件——ReplayMessage 带的就是 source event id,不复制 child 细账)。
+        const bool corrupt = !verify.ok && !truncated_tail;
+        if (corrupt) {
+            return fail("resume.source_corrupt",
+                        verify.message.empty() ? verify.error_code : verify.message);
+        }
+        outcome.source_verified = true;
+        outcome.source_truncated_tail = truncated_tail;
 
-    // ---- 第 4 步:尾部悬空工具按三道账给明确状态;未知副作用不可重跑。
-    outcome.dangling_tools = CollectDanglingTools(fold.state);
+        // ---- 第 2/3 步:找最后一枚完整 checkpoint;没有便从头折叠。折叠出
+        // effective conversation、control state 与 state hash。
+        const auto main_stream = source_dir / "main.jsonl";
+        ReplayReport fold = FoldStreamReplay(main_stream);
+        if (fold.ok()) {
+            outcome.from_checkpoint = false;
+        } else if (fold.error_code == "replay.unsupported") {
+            return fail("resume.source_unsupported", fold.message);
+        } else {
+            return fail("resume.source_corrupt", fold.error_code + ": " + fold.message);
+        }
+        const auto checkpoint = FindLatestUsableCheckpoint(source_dir, "main", main_stream);
+        if (checkpoint.has_value()) {
+            ReplayState continued = checkpoint->folded;
+            std::string continue_error;
+            if (ContinueFoldFrom(main_stream, &continued, &continue_error)) {
+                fold.state = std::move(continued);
+                outcome.from_checkpoint = true;
+                outcome.checkpoint_seq = checkpoint->source_seq;
+                outcome.checkpoint_event_hash = checkpoint->source_event_hash;
+            }
+            // 续折失败:checkpoint 缓存靠不住,退回整折(上面的 fold 还在)。
+        }
+        outcome.source_event_count = fold.state.integrity.events_folded;
+        outcome.source_main_last_event_hash = fold.state.integrity.last_event_hash;
+        outcome.replay_version = std::to_string(kReplayProjectionVersion);
+        outcome.imported_state_hash = ComputeReplayStateHash(fold.state);
+        outcome.effective_conversation = fold.state.effective_conversation;
+        outcome.control = fold.state.control;
+        if (source_manifest.has_value() && source_manifest->approval_mode.has_value()) {
+            outcome.approval_mode = source_manifest->approval_mode;
+        }
+        // 已完成的 child 只在 verifier 里核过 terminal hash;正文不进新 main
+        //(§10.4"不把正文灌进新 main.jsonl",effective history 只引用 source
+        // 事件——ReplayMessage 带的就是 source event id,不复制 child 细账)。
+
+        // ---- 第 4 步:尾部悬空工具按三道账给明确状态;未知副作用不可重跑。
+        outcome.dangling_tools = CollectDanglingTools(fold.state);
+        source_last_event_id =
+            FormatEventId(fold.state.run_id, fold.state.integrity.events_folded);
+    }
 
     // ---- 第 5 步:建新 session 与新 main.jsonl,首条 run.started(resume)。
     std::string previous_session_id = request.previous_session_id;
@@ -1490,11 +1634,9 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     if (!previous_session_id.empty()) {
         start_extra["previous_session_id"] = previous_session_id;
     }
-    // source 末枚事件的 qualified ref(seq 折叠高水位)。
-    const std::string source_last_event_id =
-        FormatEventId(fold.state.run_id, fold.state.integrity.events_folded);
+    // source 末枚事件的 qualified ref(seq 折叠高水位;v3 源取末行实 id)。
     start_extra["caused_by_event_ref"] =
-        EventRef{source_id, source_last_event_id, fold.state.integrity.last_event_hash}.ToJson();
+        EventRef{source_id, source_last_event_id, outcome.source_main_last_event_hash}.ToJson();
     const auto started = recorder->WriteRunStarted(start_extra, Durability::PowerLoss);
     if (started.status != RecordReceipt::Status::Committed) {
         return fail("resume.step5_failed", "新 main run.started 落不了: " + started.error_code);

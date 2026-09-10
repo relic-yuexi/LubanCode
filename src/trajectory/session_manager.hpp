@@ -338,6 +338,11 @@ struct ResumeOutcome {
     std::string source_main_last_event_hash;
     std::uint64_t source_event_count = 0;
     bool source_truncated_tail = false;  // incomplete 前缀恢复(§3.3.2)
+    // v3 源(session_switch 接线点 2/3,两回路按源目录格式分派):有效
+    // 对话来自 ReadV3Ledger + ProjectModelContext 链投影,不是 v2 折叠;
+    // runtime 侧据此走 v3 显示投影(RestoredHistoryView)。
+    bool source_is_v3 = false;
+    std::filesystem::path source_v3_stream;  // v3 源的 <id>.jsonl 路径
 
     // ---- 七步各自的落盘证据 ----
     // 第 1 步:source 验账过(链+父子边)。

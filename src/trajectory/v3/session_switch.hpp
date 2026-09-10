@@ -11,28 +11,34 @@
 //      .jsonl 由首枚 run.started 提交事务独占建卷):开 = 在该处以
 //      V3Writer::Start 建 sessions/<id>/<id>.jsonl,关 = 现行 v2
 //      main.jsonl。这是唯一需要二选一的点。
-//   2. 会话清单与目录发现(读回路)
-//      src/trajectory/session_manager.cpp:SessionManager::CreateSession/
-//      ResumeSession/ListSessions 目前认 v2 目录布局(main.jsonl +
-//      manifest)。v3 会话须并列识别 sessions/<id>/<id>.jsonl + 首行
-//      schemaVersion==3。牵动产品读回路 → 记给 P3,不在 P2 动。
-//   3. resume 读回路
-//      session_manager.cpp ResumeSession 的 FoldStreamReplay/effective
-//      conversation 投影是 v2 专用;v3 resume 走本仓
-//      trajectory::v3::ProjectResume(历史索引/模型输入/执行状态三恢复)。
-//      两回路并存,按源目录格式分派,不迁移旧档(§1.5)。
+//   2. 会话清单与目录发现(读回路;P3 已接)
+//      src/trajectory/session_manager.cpp 与 session_index.cpp 并列识别
+//      sessions/<id>/<id>.jsonl(首行 schemaVersion==3),识别助手即本件
+//      的 FindV3SessionStream。两回路并存,按源目录格式分派。
+//   3. resume 读回路(P3 已接)
+//      v2 源照旧 FoldStreamReplay/effective conversation 投影;v3 源走
+//      ReadV3Ledger + ProjectModelContext 链投影(session_manager.cpp
+//      ResumeAsNew 内分派)。不迁移旧档(§1.5)。
 //   4. subagent/工作流子账
 //      src/runtime/trajectory_session.cpp 子账(subagents/<run>.jsonl)
 //      同样受开关管辖:开 = 子账走 v3::SubagentSpawn 五步;工作流
 //      workflow.jsonl 编排账不迁移(v3 只管 session 主账/子账)。
-//   5. 显示层(纯 P3)
-//      终端/app-server/browser 的旧史滚动、压缩标记、分页详情消费
-//      HistoryTimeline/CompactMarkerView 投影;隐藏消息(display.hidden)
-//      的展开规则也在此层,不进读写合同。
+//   5. 显示层(纯 P3,已接终端)
+//      终端 resume 重放吃 runtime 适配层的 RestoredHistoryView 投影
+//      (src/runtime/trajectory_history_view.hpp,HistoryTimeline → 显示
+//      DTO;cli 不直接碰 reader.hpp 的 C++ 结构);app-server/browser 的
+//      旧史滚动、分页详情留后续棒。
 //
 // 判据(翻默认前须全绿):v3 Continue 全家福 + P2 读取侧矩阵全过;
 // 显示侧(P3)吃上 HistoryTimeline;api/wire 四角色(P4)合同测试绿。
 #pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+
+#include <nlohmann/json.hpp>
 
 namespace lubancode::trajectory::v3 {
 
@@ -40,5 +46,25 @@ namespace lubancode::trajectory::v3 {
 // 其余任何值(含未设)关。每次调用现读,进程内不缓存——开关翻动只影响
 // 之后开的新会话。
 bool NewSessionV3WriteEnabled();
+
+// ---------------------------------------------------------------------------
+// 接线点 2 的目录发现助手(P3):v3 会话目录的并列识别。
+//
+// 认定规则:main.jsonl 在 = v2 布局(现行路一字不动);否则
+// sessions/<id>/<id>.jsonl 存在且首行 schemaVersion==3 = v3 会话。
+// 只读首行不整卷验链(验账归 ReadV3Ledger);识别不出给 nullopt,
+// 调用方按 v2/损坏老路走,不在识别处猜。
+// ---------------------------------------------------------------------------
+
+// v3 主账流路径:<session_dir>/<目录名>.jsonl 且首行 schemaVersion==3。
+std::optional<std::filesystem::path> FindV3SessionStream(const std::filesystem::path& session_dir);
+
+// v3 主账首行(已解析 JSON;打不开/空文件/坏 JSON 给 nullopt)。
+std::optional<nlohmann::json> ReadV3FirstLine(const std::filesystem::path& stream);
+
+// v3 信封行 timestamp(ISO-8601 UTC,"2026-09-10T08:35:01.002Z")→ epoch
+// 毫秒。认不动给 nullopt(排序回落最旧,不猜);只认 UTC 字面量,不做
+// 时区换算——writer 落的就是 UTC。
+std::optional<std::int64_t> ParseV3TimestampMs(const std::string& iso);
 
 }  // namespace lubancode::trajectory::v3
