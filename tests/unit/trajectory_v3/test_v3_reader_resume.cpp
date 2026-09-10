@@ -13,6 +13,7 @@
 
 #include "trajectory/v3/compact.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/result_store.hpp"
 #include "trajectory/v3/tool_action.hpp"
 #include "trajectory/v3/writer.hpp"
 
