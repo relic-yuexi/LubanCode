@@ -92,11 +92,14 @@ public:
 
     // 候选产物:压缩模型实际回复(assistant,purpose=compact;§4.5 行5)。
     // 委托 writer 的流式便利或直接 AppendMessage;这里给一步式。
+    // completion_status:压缩回复被输出上限截断时给 Truncated(§4.39 保存
+    // 原始部分回复、标 incomplete,不 applied);缺省按完整收尾。
     WriteReceipt WriteCandidate(V3Writer& writer, nlohmann::json assistant_message,
                                 std::string_view request_id, std::string_view step_id,
                                 std::string_view provider, std::string_view wire,
                                 std::string_view model, nlohmann::json usage,
-                                Durability durability = Durability::PowerLoss);
+                                Durability durability = Durability::PowerLoss,
+                                std::optional<CompletionStatus> completion_status = std::nullopt);
 
     // 校验(§4.7):started + completed(passed 与逐项 checks)。checks 每项
     // 至少 {code, passed};失败项另带证据引用。

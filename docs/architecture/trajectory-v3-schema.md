@@ -79,7 +79,7 @@
 | 上下文 | `context.system.applied`(system 版本链提交)、`context.input.applied`(普通消息接纳)、`context.tool_previews.reduced`(§4.38 降档,P1 其余发行) |
 | 模型请求 | `model.request.prepared`、`model.request.sent`、`model.request.failed` |
 | 模型响应 | `model.response.started`、`model.response.delta`、`model.response.completed`、`model.response.failed`、`model.response.cancelled`、`model.usage.appended`(迟到/更正/无消息请求的观察承载) |
-| compact | `compact.requested`、`compact.pending`、`compact.started`、`compact.validation.started`、`compact.validation.completed`、`compact.applied`、`compact.failed`、`compact.cancelled`、`compact.rejected` |
+| compact | `compact.requested`、`compact.pending`、`compact.started`、`compact.range.retreated`(§4.64 撞窗整轮回退,compact 运行时接线发行)、`compact.validation.started`、`compact.validation.completed`、`compact.applied`、`compact.failed`、`compact.cancelled`、`compact.rejected` |
 | 工具执行 | `tool.execution.pending`、`tool.execution.started`、`tool.execution.waiting`、`tool.execution.resumed`、`tool.execution.finished`、`tool.execution.failed`、`tool.execution.cancelled`、`tool.execution.rejected`、`tool.execution.unknown` |
 | 工具结果 | `tool.result.persisted`、`tool.result.persist_failed`、`tool.result.selected` |
 | hook | `hook.dispatch.requested`、`hook.pending`、`hook.started`、`hook.completed`、`hook.failed`、`hook.cancelled`、`hook.unknown`、`hook.skipped`、`hook.effects.applied`、`hook.effects.rejected` |
@@ -104,7 +104,7 @@
 | `.cancelled` | `cancelled` |
 | `.rejected` | `rejected` |
 | `.unknown` | `unknown` |
-| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`context.*.applied`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`) | 不携带 status 字段 |
+| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`) | 不携带 status 字段 |
 
 生命周期规则(§4.14):同一操作可以多条 event,各持自己的 eventId/seq,共用操作身份;每次尝试最多一个执行终态;终态后迟到响应另记观察事件不改旧终态;`pending` 是"在等"、`running` 是"在执行";崩溃后见 `started` 无终态只能判"可能已执行"。
 
@@ -114,6 +114,10 @@
 idle
  -> compact.requested(trigger=manual|auto, reason, compactId, requirementsSnapshot;建内部回合 turnId,parentTurnId 挂主 turn 或 null)
  -> [compact.pending]?(确有等待才记,带 reason)
+ -> [compact.range.retreated]*(§4.64 发送前门禁不通过:整轮回退摘要输入边界,
+    每次计划修订一枚,带 planRevision 与本次退出的 turn/message 引用;
+    退出引用不等于 removedMessageRefs,只有成功 applied 后被摘要替代的
+    前缀才进 removed;退空仍不过则记 rejected 收场,不发请求碰运气)
  -> compact.started(冻结源上下文版本与压缩/保留范围)
  -> [专用 system message(purpose=compact,可选)] + compact prompt user message(purpose=compact,可多条)
  -> model.request.prepared(压缩请求,重试逐次留档)

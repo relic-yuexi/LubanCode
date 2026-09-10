@@ -55,6 +55,7 @@ KINDS = {
     "model.response.started", "model.response.delta", "model.response.completed",
     "model.response.failed", "model.response.cancelled", "model.usage.appended",
     "compact.requested", "compact.pending", "compact.started",
+    "compact.range.retreated",
     "compact.validation.started", "compact.validation.completed", "compact.applied",
     "compact.failed", "compact.cancelled", "compact.rejected",
     "tool.execution.pending", "tool.execution.started", "tool.execution.waiting",
@@ -84,6 +85,7 @@ KIND_STATUS = {
 STATUSLESS_KINDS = {
     "session.started", "system.change", "model.request.prepared",
     "model.response.started", "model.response.delta", "compact.requested",
+    "compact.range.retreated",
     "context.tool_previews.reduced", "context.system.applied",
     "context.input.applied", "input.received", "input.enqueued",
     "input.admitted", "input.superseded", "resume.source.attached",

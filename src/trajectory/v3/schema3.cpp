@@ -31,9 +31,9 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
         }
         return false;
     };
-    if (in({K::CompactRequested, K::CompactPending, K::CompactStarted, K::CompactValidationStarted,
-            K::CompactValidationCompleted, K::CompactApplied, K::CompactFailed,
-            K::CompactCancelled, K::CompactRejected})) {
+    if (in({K::CompactRequested, K::CompactPending, K::CompactStarted, K::CompactRangeRetreated,
+            K::CompactValidationStarted, K::CompactValidationCompleted, K::CompactApplied,
+            K::CompactFailed, K::CompactCancelled, K::CompactRejected})) {
         return IdRequirement{"compactId", true};
     }
     if (in({K::ModelResponseStarted, K::ModelResponseDelta, K::ModelResponseCompleted,
@@ -596,6 +596,22 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.turn_id.has_value() || !line.step_id.has_value()) {
             return Err("schema3.missing_field",
                        "model.request.prepared 必带 turnId 与 stepId(§4.4)");
+        }
+    } else if (line.kind == K::CompactRangeRetreated) {
+        // §4.64 回退事件:计划修订号与本次退出的引用必须可追;退出引用
+        // 不等于 removedMessageRefs,只有成功 applied 后被摘要替代的前缀
+        // 才进 removed。
+        for (const auto* key : {"planRevision", "retreatedMessageRefs"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "compact.range.retreated payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["planRevision"].is_number_integer() ||
+            !line.payload["retreatedMessageRefs"].is_array()) {
+            return Err("schema3.bad_type",
+                       "compact.range.retreated 的 planRevision 应为整数、"
+                       "retreatedMessageRefs 应为数组");
         }
     } else if (line.kind == K::CompactApplied) {
         for (const auto* key :

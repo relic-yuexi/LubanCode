@@ -2831,6 +2831,14 @@ void TrajectorySessionLedger::RecordCompactFailed(const std::string& reason) {
     PutControl_(trajectory::EventKind::CompactFailed, nlohmann::json{{"reason", reason}});
 }
 
+// v3 compact 运行时接线(compact 全链单):v3 会话的主写者取用口。
+// 接线点 1(新会话开 v3 卷)并进前,主树没有 v3 开卷路,恒 nullptr——
+// /compact 与自动压缩的分派门因此全部走 v2 老路,一字不动;接线点 1
+// 落地后此处改为返回开卷装配持有的 V3Writer。
+trajectory::v3::V3Writer* TrajectorySessionLedger::v3_main_writer() {
+    return nullptr;
+}
+
 std::uint64_t TrajectorySessionLedger::SpanEndSeq() {
     trajectory::TrajectoryRecorder* recorder = main();
     return recorder != nullptr ? recorder->next_seq() : 1;

@@ -46,6 +46,7 @@
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/usage_gc.hpp"
+#include "trajectory/v3/writer.hpp"  // v3_main_writer:v3 compact 运行时分派门
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
@@ -739,6 +740,15 @@ public:
     void RecordCompactApplied(const std::string& old_state_hash, const std::string& new_state_hash,
                               std::uint64_t pre_tokens, std::uint64_t post_tokens, int new_epoch);
     void RecordCompactFailed(const std::string& reason);
+
+    // ---- v3 compact 运行时接线(compact 全链单) ----
+    // 账本的 v3 主写者:本场会话开卷走 v3(session_switch 接线点 1:
+    // LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS 开的新会话)时非空,v2 会话与
+    // 未开卷恒 nullptr。/compact 与自动压缩据此分派:v3 会话走
+    // v3_compact_runtime 的全链(compact 全链单),v2 会话照旧走本文件
+    // 的 RecordCompact* 老路,一字不动。接线点 1 并进后由开卷装配喂真
+    // 写者;当前主树尚无 v3 开卷路,恒 nullptr(分派门在,通路等接线)。
+    trajectory::v3::V3Writer* v3_main_writer();
 
     const std::string& session_id() const;
     std::filesystem::path session_dir() const;
