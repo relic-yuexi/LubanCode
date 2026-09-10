@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.244] - 2026-09-11
+
+- **v3 会话能压缩了:compact 运行时全链接通。**手动 /compact 与自动压缩(80% 水位、发送前门禁)两路触发;摘要请求全链一杆子到底——范围计划、容量门禁(输入+输出预留+安全余量)、校验、applied 原子提交。撞窗按整轮回退:一步至少让出 8k,不拆工具组,每步落 compact.range.retreated 事件(范围、前后估算、退出轮次全留账);退空或三步不够就拒绝,一次模型都不白调。主写者通电:v3 会话的压缩即刻走新链,v2 老路一字不动。§5.1 的 compact 相关九行场景(连续两次压缩、重压旧摘要、usage 缺失不补零、applied 失败不换旧视图等)全部有测试钉住。
+
 ## [v0.26.243] - 2026-09-11
 
 - **四家 adapter 全部换上四角色骨。**Chat(System 落 system role 消息,这家没顶层 system 参数)、Responses(System 顶置 instructions,六处角色三元收拢)、Gemini(System 顶置 systemInstruction,functionResponse 经 WireRole 落位)三家跟上 Anthropic。每家都有"同一对话新旧两路出口 dump 逐字节相等"的钉子案,18 案四家 wire 合同册从头到尾一行未改。协议差异自此全部收进 adapter 皮里,内核只有 system/user/assistant/tool 四张脸。差距清单余 thinking 原生块/快照映射/容量时点三笔尾巴。
