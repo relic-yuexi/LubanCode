@@ -2167,6 +2167,18 @@ resume 首先重建事实，不是把 JSONL 所有 message 按 seq 塞回模型�
 
 待验收：普通请求与摘要请求分别输入超窗；HTTP 200 后 SSE 报错；max_tokens 与窗口停止分开；413 不误触发文本压缩；单轮不足 8k 时退出多轮；整轮大于 8k 时不切开；已排除尾部不重复计量；steer 不另拆 turn；工具组/签名不合法时不发；只有旧摘要仍可重压；前缀为空不取摘要；摘要成功但接回尾部仍超窗不 applied；低档预览已够就停止恢复；错误原文、尝试次数与新输入 hash 可追；重复失败/崩溃不清零预算；取消不自动续跑；源版本变化时拒收旧摘要。
 
+### 4.65 AppServer 接 v3：共用会话入口与持久事件投影
+
+AppServer 的 v3 接入设计另见 [AppServer 接入 Session v3](AppServer接入SessionV3_统一入口与事件恢复设计.todo)。它作为协议宿主调用统一 Session 服务，不另管一套输入接纳、hook、compact、goal/loop 或消息写入。普通输入先持久入队，实际接纳再定 turn；所有 slash 仍按目标 followup。
+
+历史、当前有效链、单次请求快照分开查询；连接层 seq 不代替 v3 文件 seq，断线补账使用含来源和投影版本的 cursor。WS 断线、用户 Esc、正常关闭与主动 resume 分开，重连接入活会话不创建新段。只读查看不执行模型、工具或修复文件。上述协议名称、默认断线政策与分期属于新设计，未接线能力必须如实声明。
+
+### 4.66 Workflow 接 v3：编排事件与节点模型会话分开
+
+具体见 [Workflow 接入 Session v3](Workflow接入SessionV3_编排账与节点恢复设计.todo)。WorkflowRun 管图、依赖、节点执行实例、产物提交及恢复；llm/agent/skill 等模型节点使用独立 v3 session，纯工具/变换/控制节点不伪造 system 或模型消息。workflowRunId、nodeExecutionId、attempt 与 session/turn/step/action 分开关联。
+
+编排账只写事件，模型节点账遵守 system 首行与四角色合同。Store 从已提交的无损产物与编排事件恢复；compact 只改变对应模型 session 的有效链，不改变 workflow 图、已提交产物或预算。恢复依据具体 execution/outcome/output.commit，不能仅按 nodeId 或 node_completed 名称认成功。CLI、AppServer 和子流程复用 WorkflowService、Action 服务及 Session runtime；新 schema、接线与恢复验收均按关联单推进。
+
 ## 五、分期
 
 - [x] 设计：确认原始 JSONL 两类行、启动首行 system、system 追加版本、seq 语义。
@@ -2198,7 +2210,7 @@ resume 首先重建事实，不是把 JSONL 所有 message 按 seq 塞回模型�
 - [x] P0：完成 §4.13，冻结 schema/引用/状态机/usage owner；产出可校验 fixture。（PR #21，v0.26.234）
 - [x] P1：写入侧支持两类行、system 版本、完整请求输入、compact 内部回合与原子提交；工具状态、分流捕获、结果持久化、hook 执行/效果采用/子执行、最终结果选用和预览消息统一接入；实现子会话独立写账、启动交接和结果交付。（PR #21/#22，v0.26.234/235）
 - [x] P2：读取侧按 v3 解析；分别重建完整历史与当前上下文；实现带来源链的 resume。（PR #24，v0.26.237）
-- [ ] P3：终端与 app-server/browser 显示旧史、摘要和历次压缩标记；支持详情与分页。（接点已勘明：session_switch.hpp 头注释接线点 2/3/5；终端复活 cli/transcript.cpp FormatRestoredHistory，app-server 落 protocol.hpp 留位的 thread/resume 与 thread/read，分页照 trace/query 的 lastSeq 游标）
+- [ ] P3：终端与 app-server/browser 显示旧史、摘要和历次压缩标记；支持详情与分页。（session_switch.hpp 头注释接线点 2/3/5；终端复用 HistoryTimeline。AppServer 沿 §4.65 关联单接会话读面与来源游标，不把旧 trace/query 的进程 lastSeq 直接当 v3 文件游标；多端与常驻能力另按关联单分期。）
 - [x] P4：四角色 adapter 合同测试、新 usage 消费方、schema 文档与下表验收。（PR #23，v0.26.236）
 
 ### 5.1 本轮新增验收用例（均待实现与执行）

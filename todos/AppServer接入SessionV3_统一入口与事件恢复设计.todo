@@ -1,0 +1,271 @@
+# AppServer 接入 Session v3：统一入口、事件投影与断线恢复
+
+- 状态：设计待实现。本单梳理新协议与运行边界，不表示下列方法已经可调用。
+- 日期：2026-09-10。
+- 范围：AppServer 宿主、Session 入口、输入与命令、事件订阅、历史分页、恢复、取消、交互、附件及多端接入。
+- 依赖：`session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`、`LuaHook统一扩展_MCP分工与SessionV3接入.todo`、`LubanCore与CLI分离_核心库独立成宿主底座设计.todo`。
+- 接续：`多前端外壳与浏览器Tab_AppServer承载设计.todo` 提供已有 stdio/WS/browser 外壳底座。本单给 v3 新合同，不回头把旧协议 1.1 描述改成新能力已完成。
+- 重构按用户新合同推进，不要求旧客户端或旧轨迹兼容；本次不写生产代码、不迁移或删除旧档。
+
+## 一、职责与共用入口
+
+AppServer 是 Session runtime 的协议宿主。它接客户端命令、定位会话、调用中立服务，把结果与事件投影发回客户端。终端可以直接调用同一服务，不必为了统一行为绕一圈网络。
+
+```text
+终端 / one-shot ───────────────────┐
+                                  ↓
+Web / 桌面 / 远程壳 → AppServer → Session 服务入口
+                       │          ├─ 输入队列与命令调度
+                       │          ├─ Session / Context / Turn / Step / Action
+                       │          ├─ Hook、容量、compact、Provider adapter
+                       │          ├─ 交互、子代理、后台任务、todo/goal/loop
+                       │          └─ v3 Writer / Reader / ArtifactStore
+                       └← 事件订阅、历史查询、状态与请求快照
+```
+
+| 层 | 持有什么 | 不能另养什么 |
+| --- | --- | --- |
+| 前端 | 输入草稿、视图、分页位置、最后确认游标、待确认的 clientOperationId | 当前有效模型 messages、工具执行状态机、compact 算法 |
+| AppServer | 连接、认证上下文、会话绑定、订阅、协议编解码、有界出站队列 | 第二份 AgentLoop、独立 steer 队列、独立 goal/loop 真值、直接 JSONL 写口 |
+| Session 服务/runtime | 会话所有权、输入接纳、调度、取消、交互、效果校验和提交 | 终端键位、WebSocket 对象、前端组件 |
+| 内置/Lua handler | 在已定义槽位返回改写或决策，按计划执行 | 自发号、私改有效链、绕过宿主提交 |
+| v3 存储与投影 | 不可变消息/事件、artifact、有效上下文、历史与执行恢复 | UI 连接生命周期、再次执行工具 |
+| Provider adapter | 模型请求编码、流式块解析、模型错误分类 | 客户端协议、会话主权 |
+
+AppServer 只握 runtime 句柄；生命周期装配允许它创建/持有 runtime，但状态规则只在中立层执行。Gateway 的常驻进程、定时唤醒和节点管理另沿原设计；不因支持 WS 就宣称已有持久服务或多租户。
+
+## 二、当前代码与 v3 缺口
+
+以下为本轮静态核对，未重跑构建或真模型测试。主设计单已有 P0/P1/P2/P4 入仓记录；模块存在不等于 AppServer 全链已切换。
+
+| 落点 | 当前事实 | 接 v3 时的动作 |
+| --- | --- | --- |
+| `src/app_server/server.hpp:69` ThreadRecord | 持 turn_worker、取消旗、SessionRuntime、goal/loop 对象 | 转成会话服务绑定；状态与调度归统一 owner，不在两个入口各推进一遍 |
+| `server.cpp:941` AcceptTurnStart | turn_running CAS，忙时拒绝第二轮 | 改为提交输入；忙时持久入队，由 runtime 判 steer/followup 和 turn 归属 |
+| `protocol.hpp` / `schema.cpp` | 协议 1.1；thread/read、thread/resume、turn/steer 仍留位 | 新协议独立声明能力；未接线不标 supported |
+| `connection.cpp:39` / `protocol.hpp` | 出站事件 seq 来自进程发号 | 将传输顺序与 v3 持久游标分开，不能拿旧 seq 直接补新账 |
+| `outbox.cpp` | item/delta 按 itemId 拼接，采用末 seq | 合并要带完整流身份和偏移范围，能发现缺段、去重与重同步 |
+| `server.cpp:1583` ServeWsSession | 断线调用 InterruptRunningTurns；进程及 thread 可继续存在 | 断线、脱离、暂停、Esc、关闭拆成不同意图 |
+| `server.cpp:1640` EmitEventSafe | 没有活连接就不发事件 | 事实先持久化，连接只订阅投影；不能把唯一结果寄存在出站队列 |
+| `runtime/session_runtime.hpp` | 已管记录、部分状态与事件；尚非完整 SDK 门面 | 复用职责，补统一 SubmitInput/ExecuteCommand/Interrupt/Resume 入口 |
+| `trajectory/v3/reader.hpp` | 有 HistoryTimeline、ModelContext、CompactMarkerView、工具快照、ProjectResume | 接产品查询；分页、活账水位、索引与订阅衔接另补，不能整卷读入冒充分页完成 |
+| `trajectory/v3/session_switch.hpp` | 有开关与产品接点说明，默认尚未全线切换 | 本单只设计 v3 路径，不复制里面的旧档兼容方案；翻默认前验产品入口 |
+
+现有 reader 的请求核对也要按用途审查：普通请求、compact 内部请求、btw 各有自己的选定快照。§4.64 允许 compact 仅取前缀，不能拿主链全部消息与它强制相等。不得在 AppServer 内另写一套放宽校验绕过去。
+
+## 三、身份与协议版本
+
+首版建议 AppServer 新协议标为 `2.0`，轨迹 schema 仍为 `3`；二者独立演进。initialize 返回 protocolVersion、trajectorySchemaVersions、已支持方法、事件/投影版本、传输与附件限制、断线策略及实际能力。新报文采用标准 JSON-RPC 2.0 信封；这属于相对 1.1 的显式破坏，不暗中兼容，也不借版本号承诺未实现方法。
+
+JSON-RPC 收发报文不等于 session JSONL 行。轨迹顶层仍只有 message/event；一次 RPC 可产生零条、一条或多条业务事实，心跳、分页和订阅确认不必逐条写进主账。需要持久化的新输入/操作/控制事件须补齐 v3 kind、schema 和投影合同，不能临时塞任意 kind 绕过校验。前端到 AppServer 的事件流与 AppServer 到模型的 SSE 也是两条通道，各自有身份和错误边界。
+
+| 字段 | 含义与发行口 |
+| --- | --- |
+| rpc id | 一次连接上的请求/响应配对；不是幂等键，不等于模型 requestId |
+| connectionId / serverInstanceId | 连接与进程身份；重连/重启会变，不是会话身份 |
+| clientOperationId | 客户端提交一次业务意图的稳定键；超时重发仍用同一个 |
+| sessionId / runId | runtime/v3 发号；指向真实会话段及运行来源 |
+| contextId | main 或 btw 等旁支；不能仅凭 sessionId 打断所有上下文 |
+| inputId / commandId / operationId | 宿主接收、排队、执行这件事的身份；无 turn 的显示命令也可追踪 |
+| turnId / stepId / actionId | runtime 在实际接纳/执行边界发行；前端不预造 |
+| model requestId / streamId / messageId | 物理模型尝试、流、消息身份；AppServer 只转交 |
+| contextRevision / stateRevision | 有效上下文与控制状态各自的版本；不使用全文件最后 seq 代替 |
+| recordRef | v3 原始引用，含源 session/run/entry/seq/hash 等已有字段；不另造弱引用替换 |
+
+新协议统一用 session 命名空间，不同时保留另一套 thread 状态。UI 可以继续显示“会话/任务”名称。连接绑定旧来源、新 resume 段或子 session 都要指明真实身份，不能把连接 id 当 thread id。
+
+resume 创建新会话段时，返回新 sessionId、sourceSessionRef、运行状态与恢复结果。旧 turn/action 引用保留完整来源；goal/loop 等延续归属按主单恢复合同映射。重新连接仍活着的 runtime 只 attach，不创建新 system 或新 JSONL。服务进程启动但尚无会话时也不凭空开一份 agent 账；真正创建/恢复 agent session 时第一行才是 system。
+
+## 四、方法面：提交意图，查询投影
+
+以下名字是新协议建议，不冒充当前方法表。参数详细 schema 随实现冻结，但各方法的副作用边界先定。
+
+| 方法 | 作用 |
+| --- | --- |
+| initialize | 协商版本、限制和能力，不启动会话 |
+| session/create | 创建 agent session；基础 system 先落第一行，后续 bootstrap 按 v3 留档 |
+| session/list / session/read | 查询元数据与状态，纯读，不恢复执行、不跑 hook |
+| session/attach / session/detach | 绑定/离开活会话；attach 返回状态和可用游标，不等于 resume/continue |
+| session/resume | 检查历史、修复允许的坏尾、获取单写者所有权、创建新段并恢复；默认先 paused |
+| session/continue | 明确恢复执行；从既有检查点继续，绝不默认重跑已完成工具 |
+| session/close | 关闭目标会话及其会话所有任务，按持久策略收口；不关闭同进程其他会话 |
+| input/submit | 提交文本/附件，持久入队，默认路由由 runtime 决定 |
+| command/execute | UI 按钮或 slash 解析后的 typed 命令，共用 CommandService 和命令调度 |
+| operation/read | 按 clientOperationId/operationId 查是否接受、执行到哪一步、结果和错误 |
+| input/cancel | 撤销尚未接纳的输入；已接纳则返回 too_late，不假装从历史抹掉 |
+| context/interrupt | 精确表达用户 Esc；携带 contextId、预期 turnId/执行代次，过期不追打新回合 |
+| history/read / message/read | 分页历史与按需详情，支持隐藏项审计、压缩标记、原文来源 |
+| context/read / request/read | 查当前有效链与某次实际请求；prepared/sent/失败分别标清 |
+| events/subscribe / events/read / events/ack | 建订阅、按游标补账、确认客户端已处理水位；不推动 agent |
+| interaction/list / interaction/respond | 读取/回答审批与问询；答复需匹配目标、版本及权限 |
+| task/list / task/read / task/cancel | 统一子代理与后台进程管理；取消 wait 与取消 task 分开 |
+| artifact/upload/* / artifact/read | 受控上传、完成入库、分段读取及下载；不接受任意主机路径 |
+
+session/resume 可显式带 startExecution=true 合并“恢复后继续”的用户意图；回执仍分别交代 restored 与 execution_started，不能用一个 success 掩盖后者失败。浏览历史、补事件和 attach 都不暗开模型调用。
+
+### 4.1 普通输入、slash、按钮共用命令规则
+
+```text
+input/submit
+  → 检查传输形状、身份、目标、附件引用、幂等键
+  → runtime 持久记录接收/排队，返回 inputId（turnId 此时可为空）
+  → 安全边界接纳，发行或复用 turnId
+  → Pre/PostUser、skill/memory、请求构建
+  → PreRequest：改写 → 冻结 → 估算 → 容量判断
+  → 发送，或 compact / 工具预览降档
+```
+
+- 普通用户输入默认 steer：main 忙时接入同一 turn 的安全边界；空闲时开新 turn。忙不是直接拒绝输入的理由，但队列和资源上限仍可拒绝。
+- slash 原文先留档，宿主解析后按目标 followup。/btw 投旁支队列，/fork 创建分支，不能都卡在 main 的结束位置；/provider 等纯显示命令不凭空生成 message。
+- UI “压缩”按钮和 `/compact` 都生成同一种命令意图，按 main followup 排队。自动 compact 由容量流程触发，可在 turn 内安全边界执行；前端不能把 auto 标记当作抢跑手动命令的权限。
+- 前端不上传完整 messages 数组替换主上下文，不提交 system/assistant/tool 冒充自身输入，不自报 skill 已披露。兼容模型 API 的四角色只存在于 runtime/adapter 一侧。
+- 客户端身份和来源由连接认证决定，不能靠 payload 的 origin=human/parent_agent 获得来源权限。首条 query 取 title 也由 runtime 触发，前端只消费标题采用事件。
+
+### 4.2 持久回执与幂等
+
+RPC 返回 accepted 仅表示意图已持久接收。运行、消息接纳、模型发送、工具结束和操作完成都有独立事实；不在入队时预告 turn 已完成。
+
+建议所有业务写命令要求 clientOperationId。去重键作用于经认证主体、来源会话延续范围、操作类型和该 id，记录规范 payload hash。相同键同 payload 返回原操作；不同 payload 返回 operation_conflict。会话创建使用主体与 workspace 范围去重；恢复沿来源链识别原键，不能因新 sessionId 又执行一次旧意图。
+
+先保存操作意图，再执行副作用、保存结果回执。崩溃窗口里有意图而无结果时查原 operation 状态，不重新执行。网络超时不等于拒收；客户端先查 operation/read，或用同键重发。外部工具执行仍按其 action/attempt/幂等合同核验，不能把客户端去重说成外部副作用绝对恰好一次。
+
+概念报文（下列方法与字段为建议）：
+
+```json
+{"jsonrpc":"2.0","id":41,"method":"input/submit","params":{"sessionId":"S2","contextId":"main","clientOperationId":"OP-71","content":[{"type":"text","text":"继续检查恢复路径"}]}}
+```
+
+```json
+{"jsonrpc":"2.0","id":41,"result":{"accepted":true,"inputId":"I9","status":"queued","turnId":null,"operationId":"O9"}}
+```
+
+接纳后事件才给出 I9 对应 T1 或新 T2。事件可能先于 RPC 回包到达，前端按稳定业务 id 合并；不能要求网络回包次序决定业务状态。
+
+## 五、三类查询与事件游标
+
+### 5.1 查询各读各的
+
+| 查询 | 数据来源 | 展示含义 |
+| --- | --- | --- |
+| history/read | HistoryTimeline + 源会话链 | 全部历史、旧 system、工具版本与 compact 标记；hidden 默认折叠/隐藏，审计可查 |
+| context/read | 已提交 contextChain / ModelContext | 此刻选中 system、摘要、保留尾部、隐藏上下文；不代表已经发送 |
+| request/read | 固定请求快照、prepared/sent、provider/profile 与 usage | 某次请求实际选了哪些消息；发送前 hook 和 adapter 变换也能追踪 |
+
+执行快照另含 turn、tool、任务、待交互与队列状态。不得从“最后一条 assistant”猜执行结束。历史投影上的 inCurrentContext 必须带 contextId/contextRevision，翻页遇到 compact 后版本变化则刷新标记，不能沿旧布尔值显示。
+
+history/read 首版返回概要和 messageRef，正文/大 artifact 按需读。超过 1000 估算 token 的输入折叠；单次用户文本实际发送仍受 32 KiB 规则约束。隐藏是展示属性，模型是否读取由有效链决定。纯读不重跑输入 hook、token 算法或 compact 来补页面数字；缺旧 usage 标未知。
+
+### 5.2 文件 seq、订阅 cursor、传输顺序分开
+
+- v3 的 seq 由单文件 Writer 发行，message/event 共用。不同 session、子账、resume 段的 seq 不可全局比较；AppServer 不替原记录再发一遍 seq。
+- 订阅 cursor 是可验证的不透明令牌，至少封装投影版本、过滤范围和源水位。单账可用 session/run + record seq；一条原记录投影出多项时，还需 ordinal，或将同源项作为原子批交付。跨 resume 来源链使用固定来源清单及各账水位，不能只取全局 max(seq)。
+- transportSeq 只供同连接诊断，可不提供；重连不能拿它补账。客户端以 projectionItemId/messageId/eventId 及来源引用去重，不以文字相同判断重复。
+- 过滤 hidden、只订阅 main 等都会跳过一些原记录，seq 不连续不代表丢包。过滤变化重新建游标，不能沿旧范围默默跳过新可见内容。
+- 快照与订阅必须共用交接水位：先建立受控订阅并取得持久水位 W，返回截至 W 的一致快照，之后补送大于 W 的事实。初始化期间新增内容有界缓冲或从账回读；不能出现查询结束至订阅开始之间的空档。
+- 恢复采用至少一次交付；重复安全，缺口明报。events/ack 表示前端已处理到某水位，不表示工具执行或消息接纳，也不允许据此删除 session 原档。
+- cursor 过期、版本不同、源链变动或存档尾部修复后 hash 不匹配时，返回 cursor_invalid/resync_required 与可用检查点；不静默从最新位置开始。普通追加不让既有分页游标失效。
+
+历史向前翻页固定 upper watermark 和来源链版本；新消息通过订阅追加到当前页。limit 同时约束条目数和响应字节数，nextCursor 指向最后扫描位置，避免全是隐藏行时死循环。不能每翻一页都把全部 artifacts 或完整日志装入内存。
+
+读活账只读 Writer 公布的已提交字节边界/seq/hash，并将状态快照固定在同一水位；末尾尚在追加的半行不算损坏，不触发修复。当前全文件 ReadV3Ledger 接口需要补这层有界读取或已提交索引，不能把只读完整文件函数直接当活订阅后端。
+
+## 六、流式、慢前端与终态
+
+模型 SSE 由 adapter 解析，AppServer 消费中立块增量。流式对象带 session/context/turn/step/request/stream/message 身份，正文、思考、签名和工具参数分块处理。前端不读厂商原始 SSE，也不自行拼可执行 tool call。
+
+- messageId 先固定，增量按 blockId/index + offset/range 更新；最终 assistant 沿同一 id 替换流式视图。最后状态可以 complete/interrupted/truncated，不能将“流关闭”统一显示完成。
+- v3 流事件可分批持久化；为即时显示先推送的增量标 ephemeral，并携带 durableThrough 水位。它们不推进持久补账游标。崩溃后恢复最后持久材料，前端丢弃/覆盖超出水位的临时尾部，不能宣称每个屏幕字符都已落盘。
+- 正常 Esc 按主单 §4.63 固定接收水位、刷出已收语义片段、落正式 interrupted assistant。参数没收齐不执行，签名没收齐不伪造。最终消息先持久化，再发 durable 通知。
+- 增量合并只限同 session/context/request/stream/message/block 且偏移连续；不能跨流、跨失败重试拼接。合并包给出覆盖范围，不用最后 seq 伪装整段都只有一条来源。
+- 慢前端不能阻塞模型接收、工具结果保存或 Writer。出站队列有界，优先合并/淘汰可重建临时增量；需要重同步时停止这条订阅并明报或断线，重连从 durable cursor 补齐。终态、审批、context.applied 等先入持久源；不为“不丢”无限占内存。
+- 每个订阅独立背压。页面截图/镜像帧可以限频跳帧，不能套用到工具最终结果或审批事实。一次 AppServer push 超过大小限制时发概要及受控详情引用，不把 JSON 任意切片冒充完整报文。
+
+模型错误作为已接收操作的运行事件返回，保留 model requestId、provider 原始错误引用和分类。JSON-RPC 的 parse/params/auth 错误留在请求入口；不可让前端靠 RPC 请求失败猜模型是否已执行。compact.range.retreated、预览降档、validation、applied 各有状态，只有 applied 显示“压缩完成”。
+
+## 七、断线、Esc、暂停、恢复与关闭
+
+连接和执行生命周期分开。以下默认值是本单建议，initialize 与会话状态须如实返回实际采用策略。
+
+| 动作 | 首版建议 |
+| --- | --- |
+| 观察者断线/关闭页面 | 仅取消它的订阅，不改 agent 状态 |
+| 控制连接 WS 意外断开 | 默认 pause_at_safe_boundary：停止派发新模型请求/新工具；已在飞请求可收口、已启动工具按真实结果结束；未启动项保留 pending，重连后需明确 continue |
+| 配置了 continue_on_disconnect | 宿主进程仍活着且有执行所有权、预算时继续；无人可答的交互仍等待。此项须显式启用，不等于进程崩溃后也能运行 |
+| 用户 Esc | 精确取消目标 context 当前执行；SSE 定稿、已完成工具保留、未启动调用按取消配对；暂停该上下文自动推进 |
+| session/detach | 明确离开绑定，沿已声明 detachPolicy 执行；不默认伪装成 Esc |
+| stdio EOF / 宿主正常退出 | 本进程承载的会话保存并关闭，reason=host_shutdown/transport_lost；未启动项保留待恢复，不一律补 user_cancelled |
+| session/resume | 取得所有权、修复允许的坏尾、建新段、恢复三类内存，默认暂停；显式 startExecution 可接着跑 |
+| session/continue | 接回未完成执行；恢复原工具组剩余 pending 项，不重跑 done，不复活 Esc 已取消调用 |
+| session/close | 收口目标会话，保留档案；子任务按其生命周期策略结束或交接 |
+| server/shutdown | 有权限的宿主控制操作，关闭整个服务；普通会话客户端不能靠 exit 杀掉其他会话 |
+
+pause_at_safe_boundary 允许暂停时尚有未配齐的 pending 工具，期间不发送模型请求、不 compact、不接纳会破坏配对的新 steer。继续时先恢复该批。它不制造假工具结果来求闭合；未知执行结果仍需核验。WS 断线时已有完整 assistant 工具声明但未派发，就保留声明与 pending 清单。
+
+host_shutdown 要在有限时间内保存现有材料、确认已启动进程状态并释放所有权；来不及确认记 unknown，不伪造正常退出码。普通网络故障/宿主退出留下的流按主单故障恢复规则处理，不扩张成“所有断流都自动当用户 Esc”。持久运行/独立后台任务只有在托管方已接管后才能跨宿主退出继续，不能靠 detach 工作线程代替交接。
+
+resume 的三类恢复分别为：UI 历史索引、当前有效模型链、执行/队列/控制状态。启动不等于发送全部历史。前两项工具已提交、第三项 pending 就从第三项继续；第二项仅 started 则核验它，不越过或盲重跑。客户端重连只补显示，不能自己逐个补发 tool/start。
+
+只读 history/read 不修文件。允许的末行 JSON 修复只由获得独占写权的 resume 执行，带备份、修复意图与完成事实；中间坏行、合法 JSON 但语义/哈希错误不靠删行糊过去。源缺失时返回具体缺口和只读结果，不能假称恢复完整。
+
+## 八、多端、交互与会话隔离
+
+首版目标：同一操作者可多端观察，每个 session 同时一个控制者；真正多写者、多租户另做。未实现多连接订阅前 capabilities 必须标单连接，不能用此设计冒充现有 WS 已并发服务。
+
+- control.claim/release 使用服务端裁定的控制代次，写命令携带 controlRevision。旧端迟到命令、审批和 Esc 被拒为 stale_control；新端不会同时拥有执行写权。控制转移记录来源与原因，不能靠后连接者自动抢占。
+- 观察者离开不暂停。控制者离开沿上节策略处理；新控制者 attach 不自动继续旧任务。客户端消息排队顺序由 session 单写者提交顺序决定，不比较两台电脑的 timestamp。
+- interactionId 属于 runtime 的持久待交互对象，网络反向请求 rpc id 只是一次递送。重连通过 interaction/list 取回同一问题，以 interaction/respond 回答，匹配 action/attempt、参数 hash、权限和交互版本。
+- 首个合法答复提交后生效；重复同答复返回原结果，不同答复或迟到答复报冲突/过期。无客户端、超时、断线、取消分别留原因，不当作用户拒绝，更不默认放行。Esc 与批准竞态由单写者裁定，取消后批准不能启动旧 action。
+- AppServer 订阅/查历史不触发 PreUser/PostUser；只有正式输入接纳才触发。Lua hook 输出经宿主校验入账，协议不新增远端 eval Lua 或任意插入 system 的后门。模型/工具/skill/MCP 配置变化固定版本，下一安全边界生效。
+- 各 session 的 cwd、配置、语言、env、provider 凭据引用、工具能力、Lua 状态、取消源和预算独立。执行命令显式传 cwd，不为一场会话修改进程全局 cwd。
+- runtime 每个 session 单写者；main、btw 可有各自执行状态，但向同一 JSONL 的提交串行。跨进程主动恢复必须先核对现有 owner/锁；有活 owner 时优先 attach，不启动第二只 agent。
+- 相同身份多端不等于允许任意跨 workspace 读取；session、源链、子账和 artifact 查询都核对绑定范围。UI 的 hidden 不构成访问隔离，详细日志/思考/请求审计按已授权视图提供，凭据不随配置快照外发。
+
+## 九、附件、工具、旁支与控制状态
+
+附件先经过受控上传入库，返回不可变 artifactRef、hash、mime、字节数和图像尺寸，input/submit 再引用。大文本可走 text artifact，宿主从全文生成最多 32 KiB 预览与原文引用；不能让协议单包上限使用户无法提交本可落文件的长文本。上传未完成不能接纳，重复完成不产生新原件；未引用上传在明确保留期后回收，已引用原件不因连接断开删除。
+
+图片在界面显示缩略图/附件名。上传传输若用 base64 属附件传输细节，不进入聊天输入框或主 JSONL。实际模型 wire 在服务器按选中 profile 编码，客户端不传 provider file_id 充当跨账号通用附件。原文下载及多文件工具输出均按 artifactRef 解析，支持范围读取；server 文件路径只作来源标签，客户端不靠本机同名路径读远端文件。
+
+| 能力 | AppServer 视图与控制合同 |
+| --- | --- |
+| tool | actionId 下显示各 attempt、pending/start/结束、耗时、结果引用数组及当前预览；无独立执行权 |
+| subagent | 父工具收据 + taskId + childSessionRef；详情进入子账；最终报告 followup 由 runtime 交付，不由前端注入第二遍 |
+| 后台脚本 | taskKind=process，独立事件账和 artifacts；不造 system/turn，查询日志不等于主模型读取 |
+| todo / goal / loop | 查询当前已提交状态版本；UI 修改走同一领域命令和 expectedRevision；compact 不改这些原件 |
+| fork | typed 命令从合法源检查点创建新 session，返回 sourceRef 与新身份；不复制在飞执行权 |
+| btw | 同 session 的新 contextId；独立追问、取消与显示；不污染 main context、main 输入队列或任务状态 |
+| compact | 展示触发、等待、请求、回退范围、校验、采用及前后估算；上下文切换由 runtime 提交，前端不重接链 |
+
+主链、子账和后台任务各有水位，不把子 seq 填进父文件 cursor。首版父订阅只推父账任务投影，子详情显式订阅；如需聚合，采用复合 cursor。账面 token 与费用按唯一 usage owner 汇总，不能把父引用和子原账算两次。缺值保持未知。
+
+## 十、实施顺序与验收门槛
+
+Workflow 的具体接入另见 [Workflow 接入 Session v3](Workflow接入SessionV3_编排账与节点恢复设计.todo)：AppServer 调同一 WorkflowService，run 概要读编排账，节点详情读独立 session。旧 workflow/query 的目录与 lastSeq 不直接当新事实源；新启动/恢复/取消、节点交互和复合游标按该单实施，不复制执行器到协议层。
+
+1. **统一服务入口与身份**：先收敛 SessionFactory/SessionRuntime/CommandService、输入队列、操作去重和单写者提交；终端、one-shot、AppServer 调同一路。无需等待整个 SDK 打包工程，但不能先在 server.cpp 复制一份新调度。
+2. **只读 v3 接线**：接 history/context/request/operation 查询、ProjectResume 结果展示、分页和来源链；支持 compact 标记、隐藏消息与工具多文件详情。纯读零执行。
+3. **输入与恢复闭环**：接 create/submit/command/interrupt/resume/continue、附件引用、审批恢复和 Lua hook；核对正式回执与落盘顺序。
+4. **可靠事件与断线**：持久 cursor、快照交接、增量偏移、背压、重复交付、WS 断线策略与宿主关闭；先单控制连接验通。
+5. **多端观察与前端适配**：补并发连接、控制权转移、参考 Web 壳；随后再做常驻宿主、多用户与集群，不将后者塞进 P3 显示任务。
+
+| 场景 | 必须验到 |
+| --- | --- |
+| 启动服务/新建会话/重连/恢复 | 仅新建或主动恢复创建新段且首行 system；重连不重复建账 |
+| 同一输入回执丢失后重发 | 同 inputId/operationId，最多接纳一次；不同正文同键明确冲突 |
+| 空闲输入、忙时 steer、slash | turn 归属正确；slash followup；纯显示命令无模型消息 |
+| compact 或工具组中输入到来 | 持久排队；不混入已冻结请求；接纳时再运行 hook |
+| 同一用户意图走 CLI 与 AppServer | 相同调度、hook、容量、取消及持久规则；只展示不同 |
+| SSE 半句 Esc/半截工具参数/缺签名 | 原文存档，正式 interrupted 正确，不执行半调用、不假签名 |
+| WS 断线与真实 Esc | pause 保留 pending，Esc 取消后续；断线不被记录成用户取消 |
+| 快照同时有新消息/compact applied | 无订阅空档、无漏项；历史标记版本可刷新 |
+| 慢端、重连、重复 delta | 不拖住存储；按块偏移合并；终态替换同一消息；可补账 |
+| 多次 resume 与子账 seq 都从 1 开始 | 按来源游标恢复；无全局 max(seq) 漏历史 |
+| 两端回答审批/旧端迟到 Esc | 仅首个合法答复生效；旧控制代次不影响新回合 |
+| 工具 1/2 完成、3 pending 后退出 | 恢复从 3 继续；2 状态不明时先核验；已 Esc 取消项不复活 |
+| 摘要请求回退整轮 | 实际 request/read 显示所选前缀；接回尾部再验容量，失败不 applied |
+| btw 追问、子代理完成、后台报告 | 各有归属，main 不被旁支污染，报告不因重连重复交付 |
+| 长文本、多图、多工具文件 | 传输大小与模型预览预算分开；来源标签齐全；无原文隐式回填 |
+| 写盘失败、坏尾、缺 artifact、旧 cursor | 不假报 durable accepted；按独占修复/缺口/重同步合同处理 |
+| 不支持的方法或 schema | 明确能力缺失/版本错误，不凭空降级到旧轨迹或旧执行路 |
+
+验收应包含独立协议客户端的 stdio 与 WS 场景、假 provider 可控流、真实临时 JSONL/文件、断线/取消/写盘故障注入。库单测、协议夹具和完整运行分别报告；文档格式检查只证明本设计文本可读，不能替代接线验收。

@@ -1,0 +1,262 @@
+# Workflow 接入 Session v3：编排账、节点会话与可靠恢复
+
+- 状态：设计待实现。2026-09-10 沿当前源码检查；本单记录已见缺口与新合同，不把静态检查说成运行验证。
+- 范围：定义加载、图调度、节点执行、Store、产物提交、并发/循环/子流程、模型上下文、取消、恢复、Hook 和 AppServer。
+- 依赖：`session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`、`AppServer接入SessionV3_统一入口与事件恢复设计.todo`、`LuaHook统一扩展_MCP分工与SessionV3接入.todo`。
+- 重构按新合同推进，不要求旧 workflow journal、旧 node stream 或旧客户端兼容；本轮不改生产代码，不删旧档。
+- 现行用法与结构参考：`docs/features/workflows/README.md`、`docs/reference/workflow-schema.md`、`docs/architecture/workflow-runtime.md`。后者部分恢复描述尚未覆盖当前实现缺口，不能直接当作 v3 验收证明。
+
+## 一、定位：Workflow 管图，Session 管模型对话
+
+Workflow 定义步骤、依赖、输入映射、分支、循环、审批与产物。Session 负责一位 agent 的模型消息、工具、hook、容量与上下文。workflowRun、nodeExecution、agent session、turn、step、action 各有身份，不能把 workflow 节点直接叫作模型 step。
+
+```text
+主 Session / CLI / AppServer / 调度宿主
+                   ↓ 统一 WorkflowService
+             WorkflowRun 编排账
+              ├─ template / transform / switch：宿主计算
+              ├─ tool：统一 Action 执行服务
+              ├─ llm / agent / skill：独立 v3 Session
+              ├─ approval / ask_user：持久交互
+              ├─ parallel / map / loop / async：持久调度状态
+              └─ subflow：独立 WorkflowRun
+                   ↓
+            校验产物 → 提交 outputRef → 推进依赖
+```
+
+只有实际向模型发消息的节点才开 agent session。一个 workflow 若只读文件、变换 JSON、发通知，不需要伪造 system 和 assistant。编排事件本身不算模型上下文；父主线只接收明确选用的收据与报告，节点内部对话通过引用展开。
+
+## 二、源码核对：已有底座与必须修正的断口
+
+执行路径：`RunWorkflowById` → `BuildWorkflowExecutors` → `WorkflowRuntime::Run/RunWithStore` → 控制节点或 `NodeExecutor::Execute` → Store/journal/trajectory bridge。tool 复用 `RunOneTool`，agent 复用 `DriveTurn`，llm 复用 `SampleModel`。已有解析、校验、并发、循环、轨迹桥和测试，不能写成整个功能尚不存在。
+
+| 当前代码 | 静态发现 | v3 要求 |
+| --- | --- | --- |
+| `runtime.cpp:1402`；`workflow_commands.cpp:1557` | `RunJournal` 与 `trajectory_ledger` 可同时启用，恢复却读 definition/events/checkpoints 那条旧路径 | 一份编排事实源，索引/Store/旧式页面都由它投影；不让两本账分别决定成功 |
+| `journal.cpp:489` ReplayNodes；`runtime.cpp:520` 附近 | 所有 node_completed 都标 succeeded；失败路径也写 node_completed/outcome=error | 检查 outcome、产物验证和提交事件，不凭事件名字判成功 |
+| `runtime.cpp:1284` Resume | checkpoint 中 nodes 都先认成功；较新 journal 只补 precompleted 标志，未把较新 output 恢复进 Store | 状态、产物引用、依赖游标、预算一起恢复；不能“节点跳过了，输出却没有” |
+| `runtime.cpp:1340` RunWithStore | 恢复仍重新发 run id、重新起预算账户；loop 例外只能识别完整轮次 | 逻辑 run 身份延续，恢复段另发号，计数不归零；恢复到具体节点执行实例 |
+| `journal.cpp:340` / `452` | checkpoint 保存 Sanitized Store；最新检查点按最大文件名选取 | 恢复用无损受控数据与已提交 checkpointRef，不能用脱敏展示值或孤立文件恢复 |
+| `journal.cpp:427` | 旧读取路径允许跳过坏行 | 权威编排账验证连续 seq/hash/引用；仅末尾损坏可按独占修复合同处理 |
+| `runtime.cpp:540` 附近 | Store 先更新，随后 Append/RecordNodeCompleted；部分写入结果未进入调度门禁 | output 原件先落稳，提交事件成功后才更新可见 Store、放行后继 |
+| `runtime.cpp:307`；`store.hpp` | 已有 dispatch 序号防 stream 撞名，但 account/Store 主要按 node.id 索引，循环与 map 使用 overwrite | 定义节点与每次 execution 分开；历史产物不可覆盖，node.id 只能作为当前作用域快捷投影 |
+| `workflow_wiring.cpp:217` | 子流程只按 id 找定义；构造子 RuntimeOptions 未传父 cancel、trajectory、runs_root | 固定版本/hash、传播执行所有权、记录、取消与预算，不因进入 subflow 失去恢复能力 |
+| `host_executors.cpp:531` | llm 自己维护 messages；续问重建 assistant 时只加入 sampled.text | 接统一模型请求/消息服务，保留完整思考/签名/来源；所有请求经过 v3 容量流程 |
+| `definition.hpp:155`；`host_executors.cpp:658` 附近 | 有 output_schema 声明；本次执行链未见通用输出 schema 校验，JSON 解析失败可包 content 返回成功 | 明确解析与验证阶段；声明结构化输出时不能以 content 外壳冒充合格产物 |
+| `validator.cpp:243/325/356` | 检查副作用 idempotency_key 是否存在；本次 runtime/executor 检索未见把此字段解引用并传入实际执行 | 幂等键必须进入真实 action/远端调用，记录核验能力；只写 YAML 字段不算可安全重试 |
+| `server.cpp:833` HandleWorkflowQuery | 从旧 workflow_runs_dir 读取快照及 last_seq | 改查新 WorkflowService，使用源账游标，不推算跨账全局 seq |
+
+上述问题来自代码路径，不声称已经做过故障复现。已有测试覆盖顺序、并发、loop/retry 和开账失败；不能据此推断失败恢复、崩溃窗口或 v3 接线已覆盖。
+
+## 三、事实归属、目录与身份
+
+首版建议 workspace 下使用一处规范目录，WorkflowPathResolver 统一查找。父 session 只持引用，父 compact/resume 不搬 workflow 数据；独立 CLI 发起也无需为了放目录伪造父 agent session。
+
+```text
+workspaces/<workspaceId>/workflow-runs/<workflowRunId>/
+  definition.json                   不可变定义快照及 hash
+  bindings.json                     选定 prompt/skill/agent/schema/配置引用
+  segments/<segmentId>/workflow.jsonl  编排事件，单写者、追加
+  checkpoints/<checkpointId>.json    已提交水位对应的状态快照
+  outputs/<outputId>.json            无损结构化产物，含 artifact 引用
+  nodes/<nodeExecutionId>/
+    sessions/<sessionId>/<sessionId>.jsonl   仅模型节点；首行 system
+    sessions/<sessionId>/artifacts/
+    artifacts/                      直接工具及节点其他原件
+  subflows/                         子 run 引用/索引，不复制子事实
+```
+
+目录是建议落点，API 按身份与引用读取，不让客户端拼路径。源码原来的 run.started 首行 node stream 不能直接称为 v3 agent session；要转换其运行职责，按实际节点分类开账。
+
+- 主 session：记录命令/父 tool 调用、workflow 关联、收据和最终报告采用。每条父 tool call 只回一份配对结果，异步最终报告沿 followup 交付。
+- 编排账：只写 `type=event`，记录 workflow/node/分支/循环/产物采用与控制状态；不造 system。沿 v3 通用不可变信封、seq/hash/引用纪律，为 workflow 声明专用 ownerKind 与 schema 能力。它不是强行调用要求首行 system 的 agent Writer；需要先补受校验的事件账 writer profile，不能偷填假 session 字段。
+- 模型节点账：正常 v3 两类行和四角色，拥有独立 session/turn/step/action、system、有效链、usage 和 compact 记录。
+- 直接 tool 节点：action 的生命周期、结果采用归编排执行记录；预览和原件共用工具服务。没有模型声明就没有伪造 assistant/tool 配对。若后继模型读取结果，按其真正来源注入上下文；只有真实模型 tool call 才回 role=tool。
+- Store：已提交 inputs/outputs/控制事件的内存投影。checkpoint 是有水位的缓存；无损 outputs/artifacts 和编排提交记录足以重建，不另设一本可独立变化的成功账。
+
+| 身份 | 语义 |
+| --- | --- |
+| workflowId + definitionHash | 定义身份及本次实际版本，不取今天目录里同名文件代替 |
+| workflowRunId | 一次逻辑运行；普通暂停/恢复不换，显式重跑创建新 run 并标 retryOf/sourceRunRef |
+| orchestrationSegmentId | 编排进程恢复后新开的追加段；旧段只读，链接源水位，seq 从本段 1 起 |
+| nodeId | 定义里的节点，例 implement；本身不能唯一标识执行 |
+| nodeExecutionId | 此节点一次逻辑调用，先持久 reserve 再派发；包含可追溯的层级位置 |
+| invocationPath | 父 execution、loop iteration、map item key/index、branch、subflow 位置；重启按已存计划恢复 |
+| attemptId / attempt | 同一 execution 的重试；参数/目标变化另起 execution，不伪装原样重试 |
+| sessionId / turnId / stepId / requestId | 模型节点自身的 v3 身份，通过 nodeExecutionRef 关联；workflowRunId 不充当 turnId |
+| outputId / outputRevision | 不可变产物身份及明确采用版本；node.id 最新值仅为作用域投影 |
+
+seq 分账发行，跨账用引用和因果关系，不按时间戳串出假全序。源链、子 run、节点 session 由统一 resolver 查找并验 hash。只有一名 owner 能派发节点/写当前编排段，恢复先检查现有 owner，不能两进程同时 resume。
+
+## 四、定义、数据映射与版本固定
+
+启动先解析 YAML、归一化、校验图、能力、路径、输入 schema 和预算；保存完整定义与 hash，再接受执行。prompt、output_schema、自定义 agent、skill 版本及显式 subflow 绑定都留下不可变引用；仅有路径或版本字符串不足以复现。
+
+动态选择 MCP/skill 的机制继续按 v3 执行，但选中的实现、披露材料和实际调用参数要在对应节点请求中留档。不能一边承诺恢复旧版本，一边在 resume 时重读当前 SKILL.md。未被选择的资源无需提前全部加载；已选资源若不可用，明报阻塞或走定义允许的显式重新绑定，不能静默换同名实现。
+
+节点仅拿 input 映射选出的产物和明确授权上下文。已有“尚书分派私有任务”的意图保留，不广播全部主会话、全部 Store 或兄弟节点消息。输入快照固定上游 outputRefs 和 inputRevision；运行期间上游新版本不改变正在执行的请求。
+
+`${nodes.x.output}` 解析到当前调用作用域已提交的那次 execution，不解析到另一个 map item 或上一轮临时覆盖值。跨 iteration 的 previous/last/history 为显式引用。纯数据节点可读无损大 JSON，模型节点只按映射和容量规则取材料，不能把宿主内存大小等同于可发送上下文。
+
+定义级 GraphPatch 不因 v3 自动开放。首版图和绑定固定；自然语言生成/修改 workflow 属独立模型调用与定义审核流程，正式采用后才开 run。运行中确需换图应另定带 graphRevision 的事务；当前普通回边依旧拒绝，条件反复走 loop。
+
+## 五、节点执行与产物提交
+
+```text
+reserve nodeExecution 与输入快照
+ → 校验能力/权限/预算
+ → started（实际已派发）
+ → Execute：可等待、取消、失败，保全每次 attempt
+ → 原始输出及 artifact 落稳
+ → 解析 + output_schema + 定义要求的检查
+ → output.commit 事件落稳（引用输入、产物、校验及源执行）
+ → 发布 Store 版本
+ → 选定 outcome / edge，落调度决定
+ → 派发后继
+```
+
+候选非空、模型正常结束、JSON 能解析、工具退出码为 0，都不能分别代替节点的完整产物合同。没有 output_schema 的纯文本节点可按声明输出文本；声明 JSON schema 时解析失败、字段缺失、截断输出不能包装 content 后判成功。所有原始候选照常保留。
+
+output.commit 是“节点产物可供下游消费”的唯一依据，携带 nodeExecutionId、attemptId、resolvedInputRef、outputRef/hash、validationRef、预期 execution/inputRevision。提交失败不发布成功、不继续后继；Store 更新后进程退出可从 commit 重建。模型/工具已经完成而 commit 未落时，恢复从原候选继续校验，不重新执行。
+
+attempt.ended 可早于 output.commit，表示这次执行收口；UI 的 node.succeeded 必须等 commit。失败、skipped、cancelled、interrupted、unknown 都有明确 outcome；即便最终走 error 边成功结束整张图，原失败节点也不能改成 succeeded。run.succeeded 依据所走分支和最终 result 校验，不能要求所有定义节点都成功，也不能将一个成功节点当整图完成。
+
+编排提交与节点账是跨文件交接：父 reserve → 子 ready/绑定落稳 → 父 dispatched → 实际执行 → 子产物落稳 → 父 output.commit。使用固定身份、引用与可重试提交恢复缺步，不宣称多文件一次原子事务。子已开账但尚未派发不能开始副作用；最终产物已提交但 UI 未更新只补显示。
+
+输出敏感数据与展示脱敏分开。执行所需原件无损保存并按访问权限提供；凭据用 SecretRef，使用时重新验证授权，不把凭据值写入通用日志。UI/导出可生成脱敏版本，但不得将脱敏 Store 当作机器恢复源。确实不能持久保存的输入须声明恢复时重新获取，不能假称可完全复现。
+
+## 六、各类节点怎样接 v3
+
+| 节点 | 新执行合同 |
+| --- | --- |
+| agent | 一个 nodeExecution 对应独立 agent session 延续链；多 step、真实工具调用、steer、compact 均走 Session runtime |
+| llm | 独立轻量模型 session，默认不开工具循环；仍走完整请求、流式、思考回传、容量及消息持久化合同，不能直连 backend 绕过 |
+| skill | 显式选择 skill 并在节点模型 session 渐进披露；建议首版保留现有“无工具模型执行”语义，需要工具执行就声明 agent + skills，不根据正文暗升格 |
+| tool | 共用 Action 服务：PreAction、准入、真实执行、PostAction、原件和结果采用；origin=workflow，不冒充模型发起 |
+| approval / ask_user | 持久 InteractionBroker；问题、选择、待审产物 hash 和答复版本固定，重连恢复同一待交互对象 |
+| template / transform / switch / reduce | 宿主数据计算，记录输入/实现版本/输出/选路；不会为了写账多调用一次模型；transform 声明为纯函数时不得暗做外部副作用 |
+| subflow | 独立 workflowRunId 与 owner，显式输入、固定 definitionHash、父 nodeExecutionRef，共享约束并有独立事实账 |
+| checkpoint / end | 提交检查点或验证最终 result；只读已有产物，不伪造 agent 会话 |
+
+“llm 轻量”只是不跑工具循环，不能省掉 v3 PreRequest 和输出载荷。内部 input 的 origin=workflow_dispatch 与真人输入分开；Pre/PostUser 可按来源过滤，避免把每次节点调用当首个用户 query 触发主标题、默认 goal 或全部 memory 注入。主 session 的 goal/loop 状态也不自动复制给每个节点 agent。
+
+工具结果总预览仍是单 Action 32 KiB，可降 16/8/4 KiB，result_ref/full_output 数组及各文件标签保留。机器 Store 引用原始结构化产物，不能拿被头尾截断的 result_preview 解析 JSON。模型读取时按所选字段/分页/附件构造输入；大 schema 或必需数据放不下就明确报容量错误，不默默截成另一份业务输入。
+
+agent 最终输出引用实际选定的答复/产物，不能把所有 step 的说明正文拼成一个 JSON。执行途中形成的思考、工具草稿和被拒候选留在节点历史中，默认不注入父主线。最终汇总若需要模型整理，就在定义中声明 llm/agent 节点，记录这笔费用与消息。
+
+## 七、compact、缓存与工作流状态
+
+**compact 不改 workflow 的运行状态、Store 产物或依赖图。** 它只能改变某个模型 session 的有效上下文。
+
+- 父主 session compact：workflowRunRef、待交互和交付队列仍在持久控制状态中；需要继续提及 run 时，由统一上下文恢复机制补最小状态引用，不能依赖旧 assistant 里恰好写了 run id。
+- agent 节点 compact：只压本节点会话，完整消息/工具原件留档；nodeExecutionId、已完成 action、输入版本与 output.commit 不变。compact 失败不重启整节点，更不从 workflow entry 重跑。
+- llm 节点首次输入本身过大：没有历史可压，先缩小明示映射、分页或使用定义允许的预处理节点；不得自动总结原始业务输入后还声称执行了原输入。预处理若未定义，则容量错误并等待调整。
+- 节点多轮续问变长：适用统一容量 hook、主单 §4.38 预览降档和 §4.64 整轮回退。该节点自己的 turn 边界才用于回退，workflow 节点/iteration 不冒充 turn。
+- 独立节点请求分别固定 system、工具表、模型配置和实际输入。复用相同前缀可能降低费用，但不得为了缓存共享可变 messages、暴露兄弟节点私有输入或跳过权限；是否命中以 provider usage 为准。
+- loop history、Store 全量 JSON、工具原件不会因为存在而全部进入模型。模型只看声明输入映射与必需控制上下文；旧摘要照常参与该 session 的下一次 compact。
+
+## 八、并发、循环与 async
+
+### 8.1 并发隔离与 join
+
+每个 branch/map item 拥有独立 nodeExecution、输入快照和输出命名空间。图调度提交统一串行，worker 在锁外执行，通过结果消息请求提交；不在锁内等待模型或工具。并发许可、token/费用预留在派发前统一领取，不能每个 worker 都看到同一份剩余预算再一起越限。
+
+join 必须记录候选、选中结果、未采用分支与选路。首版建议保持当前“所有已启动分支收口后再判 join”行为，并将 earlyJoin=false 如实写进能力；不能称 any/quorum/race 已实现提前返回。后续若实现早收口，还须定义 loser 取消、未知副作用、资源回收和迟到结果隔离；所选结果落稳后不因更晚完成者覆盖。
+
+输出按定义顺序/itemKey 归并，不按线程完成顺序。允许并行调度不等于允许同时编辑同一文件；节点使用显式 workspace/worktree 或资源声明，冲突时排队/拒绝。v3 的工具记录能解释副作用，不能撤销并行写坏的文件。
+
+### 8.2 loop / map / foreach
+
+map 固定本次输入数组快照和每项身份；foreach 按顺序推进；loop 固定 iteration、previous/last/history 引用和 until 条件版本。每个 body 节点产物独立提交，再提交 iteration.completed 与条件结果，history 不以内存大数组覆写旧事实。
+
+同一轮 A 已成功、B 执行中崩溃：恢复先拿 A 的 output.commit，核验 B，继续 B 或后续项；不能只恢复最近完整 iteration 然后把本轮 A 重跑。边界还包含 map 已完成 item 集、parallel 分支状态、join 收据和未派发 ready 队列。
+
+Workflow 的 loop 属图内有界循环；用户 `/loop` 属会话定时触发，两者不共用 iteration 或调度状态。图的 max_steps/max_nodes、循环软帽/硬帽、节点重试、模型 step/token 预算各有计数并跨恢复延续。
+
+### 8.3 async 与后台任务
+
+现有 async 是“body 放工作线程，主图等待”，不是“提交后台任务后立即往下走”。v3 首版保留这一含义，状态写 waiting_io。若要真正后台工作，节点须显式使用 task.start 收据 + task.wait/结果依赖，复用统一任务服务；不能把线程 id 当可跨进程恢复的 taskId。
+
+取消 async 时向已启动 body 传取消，确认结束或记 unknown；线程未退不能假报已取消。独立后台任务需声明会话所有或宿主持久托管，按已建立所有权交接恢复，不以 detach C++ 线程代替后台服务。
+
+## 九、重试、预算、审批与取消
+
+- 模型请求网络重试、tool Action 重试、node attempt 重试、整张 workflow 重跑是四层。内层暂时错误先在本层处理；节点拥有完整子执行轨迹时先恢复子执行，不用 node retry 把已经完成的工具一起重跑。
+- 幂等键包含稳定 execution 意图、目标和实际输入；同一意图的 transport/attempt 重试复用，另一 iteration/item 默认是新意图。声明的 idempotency_key 必须解析、记录并被执行器采用；执行后端不支持幂等/查询时不能假承诺。
+- 工具 started 后响应丢失，即使错误名为 timeout/transient_network，也不能仅凭白名单重跑副作用。先 reconcile；未知则 node/run 进入 needs_reconciliation/paused，不伪造 failed=未执行。可重算的纯变换与无副作用模型调用另按有限策略处理。
+- 运行总预算汇总真实模型请求、工具、子 run、失败 attempts 和 compact 费用。保留父子唯一 usage owner，聚合引用不重复记账；失败 subflow 消耗也要计入，usage 缺失记未知，不当成零。
+- 每次 node 派发、模型请求、工具调用都有分层预算门。暂停不重置剩余次数；耗时应分别记录 activeDuration 与等待/墙钟政策，恢复按原政策计算，不通过重启延长硬截止时间。
+- approval 是对固定产物/操作的明确授权；approved 不自动替代后续工具权限。审核后产物 hash/输入版本改变，需重新评估审批范围。问询答复是结构化控制事实；有明确后续模型输入需求时再产生带来源的 message。
+- workflow.pause 停新派发，保存 in-flight/ready/interaction；workflow.cancel 精确取消目标 run 及其所有的子执行。父 main Esc 是否取消 workflow 由 foreground/显式任务所有权决定，焦点在一个节点时只中断该节点，不能全局传播到无关会话。
+- 模型节点中用户 Esc 沿 §4.63 保存正式 interrupted assistant，但节点产物不因此通过验证或提交成功。取消前已有 output.commit 的节点保持成功；未启动节点不伪造工具失败；未知执行继续核验。
+- 取消完成状态需区分调度已停、请求已停、外部进程已停。迟到结果可留候选/观察记录，不能让已取消 run 重新变成成功。显式取消后的重做另起 execution/run；普通 paused/crash resume 延续原执行。
+
+## 十、恢复与损坏处理
+
+恢复顺序：取单写者所有权 → 验定义和来源段链 → 找最后已提交 checkpoint → 重放其后全部编排提交 → 恢复 Store/调度/预算/交互 → 核验活任务和节点 session → 明确继续。
+
+checkpoint 文件先不可变落稳，再记录 checkpoint.committed(ref, hash, throughSeq, storeRevision)。孤立候选文件不生效；最新文件损坏可回到更早有效 checkpoint 并重放之后事件，不能跳过已提交事实。无 checkpoint 也应从 run.created 固定 inputsRef 及事件恢复，不把 inputs 初始化为空。
+
+| 断点 | 恢复动作 |
+| --- | --- |
+| reserve 后未 started | 确认未派发后继续原 execution，不能从目录存在猜已执行 |
+| started 后无结果 | 找原 task/session/action 核验，能接回就接回，副作用未知则暂停 |
+| 子模型/工具完成，父未采用 | 验已有候选/引用，继续输出校验与提交，不重跑子执行 |
+| output.commit 已落，Store 未更新 | 从 commit 恢复同一 outputRef，再推进后继 |
+| 较新节点完成，checkpoint 较旧 | 重放较新 commit 的状态和产物，不仅补 succeeded 布尔值 |
+| node failed 后走 error 边 | 原 outcome 保留，从已提交选路继续，不把 node_completed 当 success |
+| loop 某轮中段断开 | 恢复本轮各 execution，保留已完成前段及未完成尾部 |
+| 待审批时重启 | 恢复同一 interaction 与审查版本，不自动放行，不重复提问建新身份 |
+| run 完成、父通知未交付 | 用 deliveryId 补交原报告；不重新跑图或再回同一 tool call |
+| 旧 run 终态后显式重跑 | 新 workflowRunId，保留来源与用户意图，不把旧终态改回 running |
+
+坏尾修复沿 v3 单写者/备份/意图/完成规则，允许删最后一条无法解析的残缺行；中间坏行、hash 断链、缺失已提交 output 不能跳过后继续执行。只读 replay 报缺口，不做修复、不触发 hook、模型或工具。恢复核验不能重读当前版本脚本冒充当时产物。
+
+## 十一、Hook、输入路由与 AppServer
+
+建议增加 Pre/PostWorkflow、Pre/PostNode 挂点，复用内置 C++/Lua 注册池、顺序与效果提交合同。命名和 typed effect schema 属待实现扩展；Pre/PostAction 和模型 PreRequest 仍在统一执行服务，不因 workflow 包了一层重复触发。
+
+PreNode 可在许可范围改输入候选，正式派发前固定新版本并重新校验；PostNode 可产出派生结果，产物验证后才提交。外部副作用必须通过 Action 子执行服务留档。handler.completed 不等于 node.output.committed；恢复已经采用的效果不重跑 Lua。提交、单写者、预算和终态判断不能由脚本直接覆盖。
+
+- `/workflow run`、裸 workflow alias 和前端启动按钮归同一 CommandService，遵守 slash 按目标 followup。主 turn 未结束就排队；模型工具发起的 workflow 使用真实父 action，另按工具执行语义，不伪装 slash。
+- 前台 workflow 的等待输入/审批由 InteractionBroker 处理，不能把回答排在“等 workflow 结束”的 followup 后面形成互等。普通文本默认 steer，但必须有明确目标；发给节点时使用该 node session/context，未点名节点就留在父 main，不能广播给所有 worker。
+- 子代理/后台/workflow 最终报告在父侧按唯一 deliveryId followup。启动收据已配对完成的父 tool 不再回第二份结果。纯 UI 工作流命令若未声明给模型回馈，就只展示产物，不强塞主 messages。
+- run 恢复、暂停和取消是 typed 控制接口；slash 形式仍依命令队列规则执行，Esc 使用独立立即取消入口。不能用 workflow/pause 的网络名称改变所有 slash 的 followup 约定。
+
+AppServer 建议提供 workflow/list/read、workflow/start、workflow/pause/resume/cancel、workflow/node/read、workflow/events/read/subscribe。start 映射上述领域命令；resume 只恢复不默认执行，可显式 startExecution。节点 message/context/request 详情复用 Session API，UI 不读服务器文件。
+
+run 订阅只推编排概要与节点引用；节点详情另订阅其 session，子 run 另有 cursor。聚合视图使用复合来源游标，不能把旧 run journal lastSeq、父 session seq 和子 session seq 混用。WS 断线沿 AppServer 控制连接策略；恢复显示不自动恢复执行。
+
+UI 区分 pending、running、waiting_input/approval/io、retry_wait、paused、succeeded、failed、cancelled、unknown；节点正文与图状态分别更新。耗时从当前执行/等待阶段计算，不把上个节点思考时间算到新节点。workflow 输出与工具多文件预览一样有来源，点击可看原件。
+
+## 十二、实施次序与验收
+
+1. 固定新 WorkflowRun/NodeExecution/产物提交 schema 和目录 resolver；纠正恢复判据、单事实源、无损数据与 fail-closed 提交。
+2. 提炼 WorkflowService 与统一 executor 接口；tool 接 Action 服务，llm/agent/skill 接 v3 Session；CLI/AppServer 共用装配，补 subflow 全链。
+3. 落实例级 Store、节点中途恢复、loop/map/parallel checkpoint 与分层预算；补副作用 reconcile 和实际幂等传递。
+4. 接持久交互、取消/暂停、节点 steer、父报告交付、hook 与 compact；继而接 AppServer 图视图、分页和复合 cursor。
+5. 以独立协议客户端和可控 executor 做故障注入，再跑现有 workflow 回归；最后核对参考 workflow 与实际 CLI。早收口 join、动态图、多机调度另定阶段，不借 v3 顺手宣称完成。
+
+| 场景 | 验收要求 |
+| --- | --- |
+| 纯 template/tool 图 | 零伪造模型消息；工具记录与产物可追 |
+| agent/llm/skill 节点 | 独立 system 首行、正确 turn/request 身份、真实思考/来源与容量路径 |
+| 节点输出 schema 不合或模型被截断 | 保存候选，验证失败，不提交 success、不推进 success 边 |
+| node_completed/outcome=error 后 resume | 仍为失败或恢复已选 error 边，绝不误跳成成功 |
+| checkpoint 后有新产物提交 | 状态和输出同时恢复；下游引用可解析 |
+| 保存原件后崩溃/commit 后崩溃 | 前者继续验证，后者补内存；均不重跑副作用 |
+| journal/编排提交写失败 | 未落稳的节点不成功，后继零派发 |
+| 同轮 A 成功、B 工具执行中崩溃 | A 不重跑，B 查原执行；pending/unknown 分开 |
+| 相同 nodeId 多轮、多 item 并发 | execution/attempt/产物互不覆盖，汇总次序稳定 |
+| 子流程版本变化与中途取消 | 沿冻结定义执行，父取消与预算传入，子事实账可恢复 |
+| timeout 且副作用结果未知 | 不凭错误白名单自动重试；核验或阻塞 |
+| 相同副作用声明在重试/新 iteration | 重试复用意图键，新 iteration 新意图；后端实际收到所选 key |
+| 父或节点 compact | 仅对应模型链变化，workflow 状态/Store/执行进度不丢 |
+| llm 首次输入过大 | 无历史不假压缩，按显式映射策略处理或报错 |
+| loop/async/parallel 恢复 | 恢复实例与预算，不从完整上一轮盲重做；earlyJoin 能力如实 |
+| 两端回答审批、Esc 后迟到产物 | 审批仅一次采用；取消不被迟到结果反转 |
+| 父 session resume 后交付 workflow 结果 | 路由到当前合法接收者，deliveryId 去重，旧父 call 不重复配对 |
+| 配置 reload、缺失 artifact、坏中间行 | 不偷换定义/素材，不拿脱敏值或不完整账继续执行 |
+| CLI、AppServer、独立宿主同图同输入 | 同一执行与恢复规则，来源/持久状态一致，显示方式可不同 |
+
+这份检查未修改执行器、未运行模型或脚本工作流，也未重跑现有测试。实施时应新增上述故障用例；仅让旧顺序图通过，不能证明 v3 恢复已闭环。
