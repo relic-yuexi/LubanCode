@@ -70,6 +70,7 @@ DOC development/testing.md
 
 # 面试材料。路径从 interview/ 起算，不随发行包装走。
 INTERVIEW README.md
+INTERVIEW failure-and-recovery.md
 INTERVIEW deep-dives.md
 INTERVIEW portfolio.md
 INTERVIEW question-bank.md

@@ -95,3 +95,7 @@ eval/locomo/*
 !eval/locomo/paired_t1.md
 !eval/locomo/paired_five.md
 !eval/locomo/paired_r1.md
+
+# Local audit outputs: journals, artifacts and raw logs are regenerated, not committed.
+/.local-audits/
+/interview/audits/
