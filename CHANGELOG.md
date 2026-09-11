@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.251] - 2026-09-11
+
+- **Lua hook 能伸手拿外部能力了(P1-C)。**Host API 受控开放:luban.fs(授权根+双道防越界+原子写)、luban.state(按包隔离+限额)、luban.context.append(候选走执行核验用)、luban.log、luban.tools.call——权限=清单申请∩宿主授权,生产缺省只开 state/log。Lua 调 MCP 工具经宿主统一执行服务:准入→子执行按 v3 记账(hookexec 独立身份)→递归治理三帽→终态分型;超时/断连/取消/迟到响应四路恰一笔不重试。hook 事件从此进 v3 主账(V3Writer 三入口通电),compact 旁路估算切到 PreRequest 槽位。验收主句实测:Lua hook 召回外部资料并追加上下文,全链联账可查,无旁路 MCP Client、无裸文件写口。
+
 ## [v0.26.250] - 2026-09-11
 
 - **新会话默认写 v3 账了。**轨迹 v3 从设计到翻默认全程走完:schema 冻结→写入/读取/显示/四角色四期→写侧开关→compact 运行时→链恢复→内存换账,端到端验收矩阵 25 行 209 断言全绿,D1/D2/D3 三缺陷清零。现在起新会话,首行就是 system,消息/工具/压缩/子代理全落 sessions/<id>/<id>.jsonl;显式设 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 可回 v2(过渡期保命口)。v2 老档照常读,resume 链跨代衔接。测试套 437/437 全绿(ctest 层面钉 0 保 v2 老册断言,守门案钉"未设=开"的产品语义)。
