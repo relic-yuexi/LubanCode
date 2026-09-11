@@ -50,7 +50,7 @@ LubanCode 不让主循环直接拼四家 JSON。中间横着一层自家的数�
 | 事件层 | `ServerEvent`、item/turn id、usage、交互请求 | `TurnEventAdapter` / `EventSink` |
 | 界面层 | 文本增量、思考增量、工具状态、统计行 | 终端或 app-server 投影 |
 
-会话层只认两种角色：`User` 与 `Assistant`。工具结果在这层仍是一条 `User` 消息，只是内容块不是文字，而是 `ToolResultBlock`。等到协议层，Chat adapter 才把它翻成 `role: "tool"`。
+中立类型已支持 `System/User/Assistant/Tool` 四角色，v3 原账也按四角色保存。不过当前 AgentLoop 仍把一批工具结果放进 `User + ToolResultBlock` 过渡容器；以下内存例子保留这条真实路径。v3 写桥将结果拆成独立 tool 行，adapter 则翻成各家协议形状。此处是待收敛项，不是新版四角色合同的例外定义。
 
 这层中立结构很要紧。主循环只写一遍；换 provider 时，只换最外头的翻译法。
 
@@ -59,14 +59,14 @@ LubanCode 不让主循环直接拼四家 JSON。中间横着一层自家的数�
 ```mermaid
 sequenceDiagram
     accTitle: 两步工具回合
-    accDescr: 用户消息先触发模型工具调用，宿主执行并回填结果，再发第二次模型请求，收束后持久化本轮记录。
+    accDescr: 用户消息先触发模型工具调用，宿主执行并回填结果，再发第二次模型请求，执行期间逐步持久化消息与事件。
     actor User as 用户
     participant Session as Session / RunTurn
     participant Agent as Agent / AgentLoop
     participant Wire as 协议 Adapter
     participant API as 模型 API
     participant Tools as ToolRegistry
-    participant Store as SessionStore
+    participant Store as TrajectorySessionLedger / V3Writer
 
     User->>Session: 帮我看一下当前项目
     Session->>Agent: api::Message + TurnWiring
@@ -89,7 +89,7 @@ sequenceDiagram
     Wire-->>Agent: TextDelta / MessageDone
     Agent->>Agent: 追加最终 Assistant
     Agent-->>Session: RunOutcome
-    Session->>Store: 把本轮新增 history 逐条写进 JSONL
+    Session->>Store: 收束本轮（消息与事件已随执行落账）
     Note over Session,Store: turn 收口
 ```
 
@@ -591,25 +591,17 @@ api::Message{
 3  Assistant  Text("这是个 C++23 写的……")
 ```
 
-交互模式随后把这四条新增消息逐条 append + flush 到：
+这些是内存容器示例，不是 JSONL 行格式。默认新场写到：
 
 ```text
-<workspaces>/<workspace>/sessions/<id>/main.jsonl(P0-2 起唯一会话账)
+<workspaces>/<workspace>/sessions/<sessionId>/<sessionId>.jsonl
 ```
 
-文件首行是会话 meta，往后每行一条中立消息。上面的模拟落盘后，大致如下；`ts`、model 与工具正文按实值写：
+首行是正式 system message，`seq=1`；之后 `message/event` 两类行共用递增 seq 和哈希链。v3 工具结果是独立 tool 消息，执行状态、结果持久化与选用另落事件。完整字段和可校验夹具见 [v3 schema](trajectory-v3-schema.md)，不再用旧平铺 JSONL 示例代替。
 
-```jsonl
-{"version":1,"wire":"openai-chat-completions","model":"<当前模型>","cwd":"D:\\lubancode","started_at":"<时间>"}
-{"role":"user","content":[{"type":"text","text":"帮我看一下当前项目"}],"ts":"<时间>"}
-{"role":"assistant","content":[{"type":"tool_use","id":"call_01","name":"read_file","input":{"path":"README.md"}}],"ts":"<时间>"}
-{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_01","content":"     1\t# LubanCode\n     2\t...","is_error":false}],"ts":"<时间>"}
-{"role":"assistant","content":[{"type":"text","text":"这是个 C++23 写的终端 coding agent……"}],"ts":"<时间>"}
-```
+请求准备、发送、响应开始、增量批、响应终态随执行留账，收齐后追加完整 assistant。取消可定稿为 interrupted。既不是每个字符都 fsync，也不是等 RunTurn 返回才统一保存。
 
-存档用的是中立格式，不是某一家 wire 的原始 JSON。故而恢复以后还能切 provider，再由新 adapter 把同一份 history 翻出去。
-
-它不是每来一个 SSE 字符就写盘。要等这一轮 `RunTurn` 收口，才把新增的完整消息落下。成功、报错、ESC 打断都走这道收尾。
+恢复按原账投出当前上下文，由目标 adapter 翻成 wire。完整历史另供显示；切 provider 仍须尊重各协议对思考块与工具配对的约束。当前角色过渡与消费方缺口见 [Session v3](session-v3.md)。
 
 ## 下一句又怎样
 

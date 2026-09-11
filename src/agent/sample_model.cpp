@@ -37,7 +37,17 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
                                       .count();
             return blocked;
         }
-        options.boundary_recorder->OnRequestSent(recorded_request_id);
+        if (!options.boundary_recorder->OnRequestSent(recorded_request_id)) {
+            // 发送前写账硬闸(失败与恢复单 P1-C/FA-03):sent 记不住,采样停
+            // 在边界不发模型——与 prepared 同一道耐久栅栏。
+            SampleResult blocked;
+            blocked.ok = false;
+            blocked.error = api::Error{api::ErrorKind::Api, "轨迹账写盘失败,采样停在发送边界,未发模型", 0};
+            blocked.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - started)
+                                      .count();
+            return blocked;
+        }
     }
 
     // 看门狗(与旧六处同一形状:steady clock 差 + 100ms 轮询,到点拉本地

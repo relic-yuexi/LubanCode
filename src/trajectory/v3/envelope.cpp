@@ -314,6 +314,28 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::TaskFailed: return "task.failed";
         case EventKindV3::TaskCancelled: return "task.cancelled";
         case EventKindV3::StateGoalApplied: return "state.goal.applied";
+        case EventKindV3::WorkflowDefinitionLoaded: return "workflow.definition.loaded";
+        case EventKindV3::WorkflowSegmentOpened: return "workflow.segment.opened";
+        case EventKindV3::WorkflowInputsCommitted: return "workflow.inputs.committed";
+        case EventKindV3::WorkflowNodeReserved: return "workflow.node.reserved";
+        case EventKindV3::WorkflowNodeDispatched: return "workflow.node.dispatched";
+        case EventKindV3::WorkflowNodeWaiting: return "workflow.node.waiting";
+        case EventKindV3::WorkflowNodeRetrying: return "workflow.node.retrying";
+        case EventKindV3::WorkflowNodeCompleted: return "workflow.node.completed";
+        case EventKindV3::WorkflowNodeFailed: return "workflow.node.failed";
+        case EventKindV3::WorkflowNodeCancelled: return "workflow.node.cancelled";
+        case EventKindV3::WorkflowNodeSkipped: return "workflow.node.skipped";
+        case EventKindV3::WorkflowOutputCommitted: return "workflow.output.committed";
+        case EventKindV3::WorkflowCheckpointCommitted: return "workflow.checkpoint.committed";
+        case EventKindV3::WorkflowBranchStarted: return "workflow.branch.started";
+        case EventKindV3::WorkflowJoinCompleted: return "workflow.join.completed";
+        case EventKindV3::WorkflowLoopIterationStarted: return "workflow.loop.iteration.started";
+        case EventKindV3::WorkflowLoopIterationCompleted:
+            return "workflow.loop.iteration.completed";
+        case EventKindV3::WorkflowRunCompleted: return "workflow.run.completed";
+        case EventKindV3::WorkflowRunFailed: return "workflow.run.failed";
+        case EventKindV3::WorkflowRunCancelled: return "workflow.run.cancelled";
+
     }
     return "unknown";
 }
@@ -405,6 +427,27 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::TaskFailed,
             EventKindV3::TaskCancelled,
             EventKindV3::StateGoalApplied,
+            EventKindV3::WorkflowDefinitionLoaded,
+            EventKindV3::WorkflowSegmentOpened,
+            EventKindV3::WorkflowInputsCommitted,
+            EventKindV3::WorkflowNodeReserved,
+            EventKindV3::WorkflowNodeDispatched,
+            EventKindV3::WorkflowNodeWaiting,
+            EventKindV3::WorkflowNodeRetrying,
+            EventKindV3::WorkflowNodeCompleted,
+            EventKindV3::WorkflowNodeFailed,
+            EventKindV3::WorkflowNodeCancelled,
+            EventKindV3::WorkflowNodeSkipped,
+            EventKindV3::WorkflowOutputCommitted,
+            EventKindV3::WorkflowCheckpointCommitted,
+            EventKindV3::WorkflowBranchStarted,
+            EventKindV3::WorkflowJoinCompleted,
+            EventKindV3::WorkflowLoopIterationStarted,
+            EventKindV3::WorkflowLoopIterationCompleted,
+            EventKindV3::WorkflowRunCompleted,
+            EventKindV3::WorkflowRunFailed,
+            EventKindV3::WorkflowRunCancelled,
+
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {
             return std::string_view(EventKindV3Name(a)) < std::string_view(EventKindV3Name(b));
@@ -468,6 +511,27 @@ std::optional<OpStatus> RequiredStatusForKind(EventKindV3 kind) {
         case K::HookUnknown:
         case K::CommandUnknown:
             return OpStatus::Unknown;
+        // Workflow 编排族:suffix 照 §2.2 表(等待=pending、起跑=running、
+        // 收口/汇合=done、失败/取消同各档);definition.loaded/segment.opened/
+        // inputs.committed/node.reserved/node.dispatched/node.retrying/
+        // node.skipped/output.committed/checkpoint.committed 是事实记录,
+        // 走 default 不携带 status。
+        case K::WorkflowNodeWaiting:
+            return OpStatus::Pending;
+        case K::WorkflowBranchStarted:
+        case K::WorkflowLoopIterationStarted:
+            return OpStatus::Running;
+        case K::WorkflowNodeCompleted:
+        case K::WorkflowJoinCompleted:
+        case K::WorkflowLoopIterationCompleted:
+        case K::WorkflowRunCompleted:
+            return OpStatus::Done;
+        case K::WorkflowNodeFailed:
+        case K::WorkflowRunFailed:
+            return OpStatus::Failed;
+        case K::WorkflowNodeCancelled:
+        case K::WorkflowRunCancelled:
+            return OpStatus::Cancelled;
         default:
             return std::nullopt;
     }

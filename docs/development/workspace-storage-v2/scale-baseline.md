@@ -1,5 +1,7 @@
 # Workspace 量级基线(收官验收实测)
 
+> **V3-LEGACY-01/02：历史迁移快照，待归档清理。** 本页阶段、路径和行号只作旧版考据，不代表当前源码。新会话已默认写 v3，清理前须沿[当前清单](../v3-legacy-audit.md)重查调用方。
+
 - 日期:2026-09-04;单子:`todos/Workspace收官验收_跨平台攻击量级与E2E.todo` §一第 5 条。
 - 复现:`python scripts/workspace_scale_baseline.py <workspace_scale_driver 可执行>`(驱动源码 `tests/manual/workspace_scale_driver.cpp`,构建目标 `workspace_scale_driver`,EXCLUDE_FROM_ALL 须点名)。数字全部来自本机实跑,不拍预算。
 - 量什么:`/sessions` 与 resume 选择器的数据源 `QueryWorkspaceSessions`(冷 = 索引重建后首查,热 = 索引命中二查);生产召回路 `BuildTurnContext`(冷 = 新实例首召,热 = 同实例二召);单场 replay(`FoldStreamReplay` 折叠 + `VerifySessionDir` 整场验账);`/memory rebuild` 同一条路的索引重建;峰值内存(Windows PeakWorkingSet / Linux VmHWM)。

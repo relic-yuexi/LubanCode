@@ -479,3 +479,230 @@ TEST_CASE("selected 无消息:补消息,不重跑(§4.59 折叠态)") {
     CHECK(resume->execution.open_actions[0].folded_status == "selected_no_message");
     CHECK(resume->execution.open_actions[0].selected_event_ref.has_value());
 }
+
+// ---------------------------------------------------------------------------
+// P1-A(失败与恢复单 FA-01):恢复投影分别保留执行终态、结果保存状态与
+// 消息接纳状态——执行 done 但结果缺失也要列出恢复工作;补交不重跑、
+// 身份正文不变;消息未接纳不冒充有效上下文。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("done 缺结果: 执行终态在、结果链没立起来 → result_missing 列出缺口,补交后收口") {
+    SessionsRoot root("missresult");
+    {
+        auto writer = StartSession(root, "MR1");
+        REQUIRE(writer.has_value());
+        std::string assistant_id = InstallRound(*writer, "turn-000001", "跑一步", true);
+        ToolActionSession action = ToolActionSession::Admit(
+            *writer, "turn-000001", "step-000001", "action-000001", "queued", assistant_id,
+            "call_miss");
+        REQUIRE(action.Start(*writer, "args", ToolIdentity{"probe", "builtin", "1.0", ""})
+                    .status == WriteReceipt::Status::Committed);
+        REQUIRE(action.Finish(*writer, 0, 12).status == WriteReceipt::Status::Committed);
+        // 崩溃/仓打不开:执行终态落稳,结果链(persisted→selected→消息)
+        // 一节没有。
+    }
+    std::string terminal_event_id;
+    {
+        auto resume = ProjectResume(root.Ledger("MR1"));
+        REQUIRE(resume.has_value());
+        REQUIRE(resume->execution.open_actions.size() == 1);
+        const ToolActionSnapshot& snapshot = resume->execution.open_actions[0];
+        CHECK(snapshot.folded_status == "result_missing");
+        // 执行终态保留:done 不被缺口改写,也不冒充未执行。
+        REQUIRE_FALSE(snapshot.attempts.empty());
+        CHECK(snapshot.attempts.back().status == "done");
+        CHECK(snapshot.selected_event_ref == std::nullopt);
+        REQUIRE_FALSE(snapshot.attempts.back().event_ids.empty());
+        terminal_event_id = snapshot.attempts.back().event_ids.back();  // 执行终态事件
+        CHECK(resume->execution.turns_with_open_work.size() == 1);
+    }
+    // 补交(恢复动作,只补保存与接纳,不重跑):结果链补齐 → 折叠收口。
+    {
+        // json 缺键/身份不变的对账靠折叠重读;writer 续卷补全链。
+        auto writer = V3Writer::Continue(root.Ledger("MR1"));
+        REQUIRE(writer.has_value());
+        ToolActionSession action =
+            ToolActionSession::Reopen("turn-000001", "step-000001", "action-000001");
+        WriteReceipt persisted = action.PersistedResult(
+            *writer,
+            {MakeArtifactRef("res-000001", "result_metadata", "artifacts/res-000001.json",
+                             std::string(64, '3'), 64, "application/json")},
+            terminal_event_id);
+        REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+        WriteReceipt selected = action.SelectResult(*writer, {persisted.id}, {}, "done");
+        REQUIRE(selected.status == WriteReceipt::Status::Committed);
+        REQUIRE(action.AppendToolMessage(*writer, "补交的结果", selected.id).status ==
+                WriteReceipt::Status::Committed);
+    }
+    {
+        auto ledger = ReadV3Ledger(root.Ledger("MR1"));
+        REQUIRE(ledger.has_value());
+        std::vector<ToolActionSnapshot> all = FoldToolActions(*ledger);
+        const ToolActionSnapshot* snapshot = FindActionSnapshot(all, "action-000001");
+        REQUIRE(snapshot != nullptr);
+        CHECK(snapshot->folded_status == "done");  // 补交收口,不再是缺口
+        // 不重跑:执行事件只有一遍(started/finished 各一枚,attempt 恒 1)。
+        int started = 0;
+        int finished = 0;
+        for (const auto& attempt : snapshot->attempts) {
+            started += attempt.started ? 1 : 0;
+            if (attempt.status == "done") {
+                ++finished;
+            }
+        }
+        CHECK(started == 1);
+        CHECK(finished == 1);
+        REQUIRE(snapshot->attempts.size() == 1);
+        auto resume = ProjectResume(root.Ledger("MR1"));
+        REQUIRE(resume.has_value());
+        CHECK(resume->execution.open_actions.empty());
+    }
+    CHECK(VerifyV3File(root.Ledger("MR1")).ok);
+}
+
+TEST_CASE("selected_no_message 补交: 身份、正文不变,工具执行次数不增加") {
+    SessionsRoot root("selmsg");
+    const std::string body = "查询返回三行";
+    {
+        auto writer = StartSession(root, "SM1");
+        REQUIRE(writer.has_value());
+        std::string assistant_id = InstallRound(*writer, "turn-000001", "查一下", true);
+        ToolActionSession action = ToolActionSession::Admit(
+            *writer, "turn-000001", "step-000001", "action-000001", "queued", assistant_id,
+            "call_sel");
+        REQUIRE(action.Start(*writer, "args", ToolIdentity{"query", "builtin", "1.0", ""})
+                    .status == WriteReceipt::Status::Committed);
+        REQUIRE(action.Finish(*writer, 0, 8).status == WriteReceipt::Status::Committed);
+        WriteReceipt persisted = action.PersistedResult(
+            *writer,
+            {MakeArtifactRef("res-000001", "result_metadata", "artifacts/res-000001.json",
+                             std::string(64, '4'), 32, "application/json")},
+            action.last_event_id());
+        REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+        REQUIRE(action.SelectResult(*writer, {persisted.id}, {}, "done").status ==
+                WriteReceipt::Status::Committed);
+        // 崩溃:已选用,tool 消息未落。
+    }
+    {
+        auto resume = ProjectResume(root.Ledger("SM1"));
+        REQUIRE(resume.has_value());
+        REQUIRE(resume->execution.open_actions.size() == 1);
+        CHECK(resume->execution.open_actions[0].folded_status == "selected_no_message");
+    }
+    // 恢复补交:同 action 身份、同正文一次,不重跑。
+    {
+        auto writer = V3Writer::Continue(root.Ledger("SM1"));
+        REQUIRE(writer.has_value());
+        ToolActionSession action =
+            ToolActionSession::Reopen("turn-000001", "step-000001", "action-000001");
+        // 补交的正文必须与选用的结果一致(§4.20"补交同调用结果一次")。
+        REQUIRE(action.AppendToolMessage(*writer, body, std::nullopt).status ==
+                WriteReceipt::Status::Committed);
+    }
+    {
+        auto ledger = ReadV3Ledger(root.Ledger("SM1"));
+        REQUIRE(ledger.has_value());
+        std::vector<ToolActionSnapshot> all = FoldToolActions(*ledger);
+        const ToolActionSnapshot* snapshot = FindActionSnapshot(all, "action-000001");
+        REQUIRE(snapshot != nullptr);
+        CHECK(snapshot->folded_status == "done");
+        // 消息版本恰一份:补交不重复添加。
+        REQUIRE(snapshot->message_versions.size() == 1);
+        // 身份/正文不变:tool 消息本体仍是同一 action 配对、同一正文。
+        const MessageLine* message = ledger->FindMessage(snapshot->message_versions[0].message_id);
+        REQUIRE(message != nullptr);
+        CHECK(message->action_id.has_value());
+        CHECK(*message->action_id == "action-000001");
+        // json 缺键一律 contains()(平台坑清单)。
+        REQUIRE(message->message.contains("content"));
+        CHECK(message->message.value("content", std::string()) == body);
+        CHECK(message->message.value("tool_call_id", std::string()) == "action-000001");
+        // 工具执行次数不增加:attempt 仍 1,started 一枚。
+        REQUIRE(snapshot->attempts.size() == 1);
+        CHECK(snapshot->attempts[0].started);
+        CHECK(snapshot->attempts[0].status == "done");
+        auto resume = ProjectResume(root.Ledger("SM1"));
+        REQUIRE(resume.has_value());
+        CHECK(resume->execution.open_actions.empty());
+    }
+    CHECK(VerifyV3File(root.Ledger("SM1")).ok);
+}
+
+TEST_CASE("消息未接纳: tool 消息已写、接纳未成 → message_not_admitted,不冒充有效上下文") {
+    SessionsRoot root("notadmitted");
+    std::string raw_message_id;
+    {
+        auto writer = StartSession(root, "NA1");
+        REQUIRE(writer.has_value());
+        std::string assistant_id = InstallRound(*writer, "turn-000001", "跑个工具", true);
+        ToolActionSession action = ToolActionSession::Admit(
+            *writer, "turn-000001", "step-000001", "action-000001", "queued", assistant_id,
+            "call_na");
+        REQUIRE(action.Start(*writer, "args", ToolIdentity{"probe", "builtin", "1.0", ""})
+                    .status == WriteReceipt::Status::Committed);
+        REQUIRE(action.Finish(*writer, 0, 5).status == WriteReceipt::Status::Committed);
+        WriteReceipt persisted = action.PersistedResult(
+            *writer,
+            {MakeArtifactRef("res-000001", "result_metadata", "artifacts/res-000001.json",
+                             std::string(64, '5'), 16, "application/json")},
+            action.last_event_id());
+        REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+        WriteReceipt selected = action.SelectResult(*writer, {persisted.id}, {}, "done");
+        REQUIRE(selected.status == WriteReceipt::Status::Committed);
+        // 崩溃窗口:tool 消息本体写稳、context.input.applied(接纳)没写。
+        // 用裸 AppendMessage 复现(绕过 AppendToolMessage 的接纳步)。
+        MessageDraft draft;
+        draft.turn_id = "turn-000001";
+        draft.step_id = "step-000001";
+        draft.action_id = "action-000001";
+        draft.purpose = MessagePurpose::Conversation;
+        draft.origin = MessageOrigin::SessionRuntime;
+        draft.message = nlohmann::json::object(
+            {{"role", "tool"}, {"tool_call_id", "action-000001"}, {"content", "结果正文"}});
+        draft.result_selection_ref = selected.id;
+        WriteReceipt message = writer->AppendMessage(std::move(draft), Durability::PowerLoss);
+        REQUIRE(message.status == WriteReceipt::Status::Committed);
+        raw_message_id = message.id;
+    }
+    {
+        auto ledger = ReadV3Ledger(root.Ledger("NA1"));
+        REQUIRE(ledger.has_value());
+        std::vector<ToolActionSnapshot> all = FoldToolActions(*ledger);
+        const ToolActionSnapshot* snapshot = FindActionSnapshot(all, "action-000001");
+        REQUIRE(snapshot != nullptr);
+        CHECK(snapshot->folded_status == "message_not_admitted");
+        REQUIRE(snapshot->message_versions.size() == 1);
+        CHECK_FALSE(snapshot->message_versions[0].on_current_chain);  // 不在链上
+        // 模型输入里没有它:不冒充有效上下文。
+        ModelContext context = ProjectModelContext(*ledger);
+        bool in_inputs = false;
+        for (const auto& input : context.inputs) {
+            if (input.message_id == raw_message_id) {
+                in_inputs = true;
+            }
+        }
+        CHECK_FALSE(in_inputs);
+        auto resume = ProjectResume(root.Ledger("NA1"));
+        REQUIRE(resume.has_value());
+        REQUIRE(resume->execution.open_actions.size() == 1);
+        CHECK(resume->execution.open_actions[0].folded_status == "message_not_admitted");
+    }
+    // 补接纳(恢复动作):AdmitMessages 接上链 → 折叠收口为 done。
+    {
+        auto writer = V3Writer::Continue(root.Ledger("NA1"));
+        REQUIRE(writer.has_value());
+        REQUIRE(writer->AdmitMessages({raw_message_id}).status == WriteReceipt::Status::Committed);
+    }
+    {
+        auto ledger = ReadV3Ledger(root.Ledger("NA1"));
+        REQUIRE(ledger.has_value());
+        std::vector<ToolActionSnapshot> all = FoldToolActions(*ledger);
+        const ToolActionSnapshot* snapshot = FindActionSnapshot(all, "action-000001");
+        REQUIRE(snapshot != nullptr);
+        CHECK(snapshot->folded_status == "done");
+        auto resume = ProjectResume(root.Ledger("NA1"));
+        REQUIRE(resume.has_value());
+        CHECK(resume->execution.open_actions.empty());
+    }
+    CHECK(VerifyV3File(root.Ledger("NA1")).ok);
+}

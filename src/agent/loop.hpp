@@ -45,6 +45,7 @@
 #include "agent/permission_mode.hpp"  // 能力求交;值域=公共 ApprovalMode(on_tool_confirm_floored 的下限档)
 #include "agent/turn_budget.hpp"  // ModelTurnBudgetGate:任务级 turn 预算门(turn 预算单 P0-1)
 #include "api/model_request_recovery.hpp"  // ModelRequestAttempt/RequestAttemptPhase:P0-1 恢复账
+#include "runtime/tool_trajectory_sink.hpp"  // ToolResultsCommitReceipt:批次结果持久提交回执(P1-A)
 
 namespace lubancode::agent {
 
@@ -107,6 +108,11 @@ inline const char* OutputCancelSourceText(OutputCancelSource source) {
 //                        manifest/前缀账(Token 账本单 A1)。
 //   OnRequestSent     —— prepared 落稳后随发随记(prepared_event_id 由实现
 //                        侧在 OnRequestPrepared 里落好,这里只报发出去)。
+//                        返回 false = sent 这笔本地账没写稳(失败与恢复单
+//                        P1-C/FA-03):发送前的最后一道耐久闸,loop 不得进
+//                        backend_.send_stream——本地已知账写不动,就不再发
+//                        本次模型请求。事件语义只到"本地交给 transport",
+//                        不暗示已拿到远端收据。
 //   OnRequestSentWithTurn —— 同上,但带上任务级 turn 账(turn 预算单 §11.1,
 //                        P1-1):permit 提交(commit_sent)后、请求即将发出的
 //                        那枚边界,载荷含 task_turn_index(从 1 起)/turn_
@@ -129,15 +135,15 @@ public:
     // 不必为不可能触发的 AgentLoop 压力事件造假实现。
     virtual void OnContextPressure(const ContextPressure& pressure) { (void)pressure; }
     virtual std::string OnRequestPrepared(const api::Request& request, const RequestPreparedContext& ctx) = 0;
-    virtual void OnRequestSent(const std::string& request_id) = 0;
+    virtual bool OnRequestSent(const std::string& request_id) = 0;
     // 任务 turn 账随发随记(§11.1):turn_limit=0 表示任务不设帽(此时仍有
     // task_turn_index,input_round_index 照记);默认转发旧口。
-    virtual void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+    virtual bool OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
                                        int input_round_index) {
         (void)task_turn_index;
         (void)turn_limit;
         (void)input_round_index;
-        OnRequestSent(request_id);
+        return OnRequestSent(request_id);
     }
     // v3 流式边(轨迹 v3 §4.43):响应开始与片段批次。loop 在 SSE 消费点调
     // ——MessageStart 到 = 响应开始;文本/思考增量过 UTF-8 闸后即片段
@@ -351,6 +357,16 @@ struct TurnWiring {
     // 2. 本批五枚 tool result 全收齐、合并的 user 消息刚入 history:装配层
     //    append+flush user 消息,再为每枚写 result_committed 栅栏。
     std::function<void(const std::string& batch_id, const api::Message& tool_result_message)> on_tool_results_committed;
+    // ---- P1-A 升级口(失败与恢复单 FA-01):批次结果持久提交回执 ----------
+    // 与上面旧口同一触发点,但把持久提交的回执交回引擎:receipt.status ==
+    // Failed(有结果的"模型可见 tool 消息"没写稳)时,loop 撤回刚推进的
+    // 内存 history、本轮明败——结果已执行不可重做,不得拿内存里独有的
+    // 结果当已提交输入继续发请求。设了它,上面旧口不再被调(同一次触发
+    // 只走一只口,避免双写);不设 = 旧装配(子代理旧路/workflow 旧路),
+    // 行为与从前一字不差。
+    std::function<runtime::ToolResultsCommitReceipt(const std::string& batch_id,
+                                                    const api::Message& tool_result_message)>
+        on_tool_results_committed_receipt;
 
     // ---- token 估算校准(真实 usage 反推 byte 比率单)-----------------------
     // 会话级校准器((provider,model) 分桶,进程内共享;装配层指到

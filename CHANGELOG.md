@@ -2,6 +2,14 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.253] - 2026-09-11
+
+- **失败恢复三道闸(P1)。**工具结果提交回执化:仓打不开=Failed 时撤回内存历史、本轮明败、不发下一请求;metadata 失败=Degraded 缺口记码主账照落。错误结果往返不变:is_error 只写真值,effectiveOutcome 以回喂为准不从执行终态猜,replay/投影/checkpoint 三路还原。发送前写账硬闸:sent 记不住按 Api 错退出恢复环(不按网络重试),backend 零调用,预算按已 commit 与否归还。reader 补 result_missing/message_not_admitted 两档缺口态进 open_actions。
+
+## [v0.26.252] - 2026-09-11
+
+- **Workflow 有了 v3 编排账(第一棒)。**WorkflowRun/NodeExecution/产物提交 schema 冻结:事件账 writer profile(首行即事件、拒收 message 行、整卷验链续卷续号),20 枚 workflow.* kind 四处同步;目录 resolver(segments 分段恢复、outputs/checkpoints 无损+sha256 对账、孤立件不生效);恢复判据 fail-closed——只认 output.committed 判成功,error 绝不误跳,commit 后崩溃补内存不重跑,写失败后继零派发,图定义快照对 hash 防配置偷换,终态拒复活,预算底数不归零。纯 template 图零伪造模型消息。
+
 ## [v0.26.251] - 2026-09-11
 
 - **Lua hook 能伸手拿外部能力了(P1-C)。**Host API 受控开放:luban.fs(授权根+双道防越界+原子写)、luban.state(按包隔离+限额)、luban.context.append(候选走执行核验用)、luban.log、luban.tools.call——权限=清单申请∩宿主授权,生产缺省只开 state/log。Lua 调 MCP 工具经宿主统一执行服务:准入→子执行按 v3 记账(hookexec 独立身份)→递归治理三帽→终态分型;超时/断连/取消/迟到响应四路恰一笔不重试。hook 事件从此进 v3 主账(V3Writer 三入口通电),compact 旁路估算切到 PreRequest 槽位。验收主句实测:Lua hook 召回外部资料并追加上下文,全链联账可查,无旁路 MCP Client、无裸文件写口。

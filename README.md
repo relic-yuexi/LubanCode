@@ -43,7 +43,7 @@ LubanCode 把模型接到本地工具上。模型判断下一步，程序负责�
 
 ## 一场任务怎么跑
 
-你在仓库里唤起 `lubancode`，交代一件事。它先读项目指令，再把上下文与工具交给模型。模型要查，Harness 就查；要改，Harness 先过权限门；要跑测试，Harness 管住进程、超时与取消。回合结束，消息、工具、usage、轨迹各自落账，往后能续、能查、能导出。
+你在仓库里唤起 `lubancode`，交代一件事。它先读项目指令，再把上下文与工具交给模型。模型要查，Harness 就查；要改，Harness 先过权限门；要跑测试，Harness 管住进程、超时与取消。执行期间，消息与运行事件逐步写入同一份 v3 会话账，往后能续、能查、能导出。
 
 ```text
 你的任务 -> 项目指令 -> 模型 -> 工具/子代理/Workflow -> 验证 -> 会话与轨迹
@@ -97,7 +97,7 @@ Claude Code 与 Codex CLI 各有完整产品生态。Pi 用 TypeScript 写扩展
 - **一副能干活的终端。** 模型跑着，你照样输入；消息排队，子代理在望；Markdown、LaTeX、diff 与完整工具输出都看得见。
 - **法与魂分开。** `system_prompt.md` 管行为，`SOUL.md` 管口吻。换风格不必拆工作流的规矩。
 - **仓库级记忆。** 主工作树与 linked worktree 同一身份，教过的东西带得走；召回与写入都走 `/memory`。
-- **不止一份对话记录。** session 记对话，trajectory 记运行事实，usage 分 token，artifact 收大块内容。
+- **不止一份对话记录。** v3 会话账同存消息与运行事件，usage 记用量，artifact 收大块内容。
 - **不止一条扩展路。** Skills、Workflow、MCP、LSP、Lua、进程插件与 C ABI 插件，各有各的边界。
 
 ## 一眼看懂
@@ -110,7 +110,7 @@ Claude Code 与 Codex CLI 各有完整产品生态。Pi 用 TypeScript 写扩展
 | **代理工作流** | 子代理、三档角色模型、Plan 模式、待办清单、`ask_user`、`AGENTS.md`、隔离 worktree 与项目级权限。 |
 | **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、智能粘贴折叠、逐键编辑、折叠与聚焦、五档审批。 |
 | **提示词与记忆** | `system_prompt.md` 管行为，`SOUL.md` 管口吻；主工作树与 linked worktree 共用项目记忆。 |
-| **上下文与存档** | session 记对话，trajectory 记运行事实，usage 分 token，artifact 收大块内容；支持压缩、恢复与 Markdown 导出。 |
+| **上下文与存档** | v3 会话账同存消息与运行事件，usage 记用量，artifact 收大块内容；支持压缩、恢复与 Markdown 导出。 |
 | **界面语言** | 跟随系统；内置简体中文与英文；`/language` 即时切换；外部 JSON 语言包可添新语言。 |
 | **扩展与定制** | Skills、Workflow、MCP、LSP、Lua、进程插件、C ABI 插件、hooks、主题与 SOUL。 |
 

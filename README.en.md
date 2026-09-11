@@ -43,7 +43,7 @@ These frames came from the Windows Release binary connected to a local test prov
 
 ## The short version
 
-Start `lubancode` inside a repository and describe a task. It loads project instructions, assembles model context and tools, checks permissions before actions, manages processes and cancellation, and records messages, tool calls, usage, and trajectory data when the turn closes.
+Start `lubancode` inside a repository and describe a task. It loads project instructions, assembles model context and tools, checks permissions before actions, manages processes and cancellation, and appends messages and runtime events to one v3 session journal as execution advances.
 
 ```text
 task -> project instructions -> model -> tools/agents/workflows -> verification -> session + trajectory
@@ -111,7 +111,7 @@ Comparison scope: 2026-09-04, based on the [Claude Code overview](https://code.c
 | **Agent workflow** | Sub-agents, role-based model routes, Plan mode, todo tracking, `ask_user`, `AGENTS.md`, worktrees, and project permissions. |
 | **Terminal UX** | Incremental Markdown rendering, animated work status, a persistent queue, collapsed multiline paste, focused views and compact output. |
 | **Prompts and memory** | `system_prompt.md` governs behavior, `SOUL.md` governs voice; the main worktree and linked worktrees share one project memory. |
-| **Context and sessions** | Sessions store the conversation, trajectories store runtime facts, usage splits token counts, and artifacts hold large content; compaction, resume, and Markdown export. |
+| **Context and sessions** | The v3 session journal stores messages and runtime events together, usage records token counts, and artifacts hold large content; compaction, resume, and Markdown export. |
 | **Interface languages** | System-language detection, built-in Simplified Chinese and English, live `/language` switching, and external JSON language packs. |
 | **Extensibility** | Skills, workflows, MCP, LSP, Lua, process plugins, C ABI plugins, hooks, themes, and SOUL. |
 

@@ -2,22 +2,20 @@
 
 [文档首页](../../README.md) · [上下文压缩机制](../context/compaction.md) · [命令参考](../../reference/commands.md) · [项目记忆](../../architecture/memory/design.md) · [安全模型](../../development/security.md) · [测试手册](../../development/testing.md) · [架构说明](../../architecture/README.md)
 
-LubanCode 把三件事分开：**history** 是当前模型要看的对话，**session** 是磁盘上的事件账，**memory** 是跨会话召回的项目知识。三者互相引用，却不混成一团。
+LubanCode 留一份只追加的 v3 会话原账，再分别投出完整聊天历史与模型当前上下文。Memory 另管跨会话知识。字段和接线边界见 [Session v3](../../architecture/session-v3.md)。
 
 ## 一场会话有什么
 
-交互会话的持久账是 workspace trajectory Journal（P0-2 起唯一真账；旧平铺 JSONL 已随 P0-6 退场）：
+新会话默认写 v3。主账在 `~/.lubancode/workspaces/<workspace_key>/sessions/<sessionId>/<sessionId>.jsonl`，首行是 system 消息，往后只有两类行：
 
-```text
-run.started / session.json（场次 manifest）
-user / assistant message
-tool call / tool result
-usage
-compact marker
-title
-```
+- `message`：system、user、assistant、tool 正文，带稳定身份、用途与来源。
+- `event`：请求、工具执行、结果选用、hook、压缩等运行事实。
 
-每场会话一间目录：`~/.lubancode/workspaces/<workspace_key>/sessions/<session_id>/`，主账是 `main.jsonl`，子代理与 workflow 各有自己的 JSONL。逐行追加有两个好处：长会话不用反复重写整份 JSON；进程半途退出时，已 flush 的旧行仍可恢复。坏尾行可以报告并停在最后一条完整事件，不必让整场存档报废。
+两类行共用递增 seq 与哈希链。流式片段分批保存，完整 assistant 在响应收口时定稿，不等整轮结束才写账。完整工具结果放 `artifacts/`，子代理另建 `subagents/<child>/<child>.jsonl`。
+
+历史显示保留压缩前原文；当前上下文按已提交链选消息。二者不能混用。普通 flush 与断电落稳也分档，不把“写过文件”一概称作断电安全。
+
+旧 v2 场仍认 `main.jsonl` 与 `session.json`，读取按源格式分派。只有显式设 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 才让新场回到 v2；这是待清理的过渡开关，不是新版使用前提。
 
 ## 会话归哪间 workspace
 
@@ -36,12 +34,14 @@ title
 - **搜索**：输入即搜，命中标题、首句、session id 与目录；ASCII 不分大小写，中文按原字。搜索只筛内存，不因每敲一字重读盘。
 - **筛选与排序**：`Tab` 轮换 Search / Filter / Sort 焦点，`←/→` 改选项。Filter 认 `Cwd | All`；Sort 认 `Updated | Created`。
 - **浏览**：`↑/↓` 移动，`PageUp/PageDown` 翻页，`Home/End` 到头尾。换筛选后按 id 留住选中项，它消失了才落到最近一行。
-- **查看态**：`Ctrl+T` 看所选会话的转录（大文件按需读、取头尾各一段，`Esc`/`Ctrl+T` 收起回原行）；`Ctrl+E` 摊开选中场的长标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法，不动筛选与选中。
+- **查看态**：`Ctrl+T` 看所选会话的转录（v3 按 seq 游标翻页，v2 仍取头尾片段，`Esc`/`Ctrl+T` 收起回原行）；`Ctrl+E` 摊开选中场的长标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法，不动筛选与选中。
 - **恢复**：Enter 恢复所选场；Esc 原路返回，不改当前会话。台账里没有删除键——浏览不兼任碎纸机。
 
-恢复是 **resume-as-new**：先验源场账（hash 链、父子边），折叠出有效对话与控制态，再开一间新 session（`start_reason=resume`，manifest 反指源场）接管对话。源场 Journal 永不重开追加——旧账封口存档，新账接着写，两边以事件引用互指，不存在“续写旧文件”的路径。崩溃在场半路（回合规了没收口、尾行撕裂）也按同一套规矩：验得过的前缀照折，悬空工具分档如实标注，不冒充执行过。
+恢复是 **resume-as-new**：先验源场账（hash 链、父子边），折叠出有效对话与控制态，再开一间新 session（`start_reason=resume`，v3 通过来源引用反指源场；v2 仍用 manifest）接管对话。源场 Journal 永不重开追加——旧账封口存档，新账接着写，两边以事件引用互指，不存在“续写旧文件”的路径。崩溃在场半路（回合规了没收口、尾行撕裂）也按同一套规矩：验得过的前缀照折，悬空工具分档如实标注，不冒充执行过。
 
 ## 归档：日常收拾
+
+> **V3-GAP-09：** 归档与取消归档目前仍要求 `session.json`，默认 v3 场缺该文件会报 `session.not_found`。下列步骤仅说明旧 v2 场行为；新版生命周期待接线，见[清理清单](../../development/v3-legacy-audit.md)。
 
 不想要的场子先归档，转录仍留着：
 
@@ -59,6 +59,8 @@ lubancode unarchive <id>       # 取消归档,搬回可续聊状态
 
 ## 永久删除：另开明路
 
+> v3 边界：现有删除实现仍从 `main.jsonl` 取封口状态与末 hash，尚未完整改到 v3 主账。下列墓碑与封口保证属于旧路径，不据此承诺 v3 删除闭环。
+
 当真不要了，再显式删：
 
 ```text
@@ -75,7 +77,7 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 
 ## 标题
 
-`/title` 查看当前标题，`/title 新标题` 追加一条 title 事件。最后一条胜出。标题只管列表与导出展示，不改 id，也不重命名 JSONL。
+`/title` 查看或修改标题。v3 标题事件与持久恢复尚未接全，不能把内存改名当成已经写入 `session.title.applied`。标题不改 session id，也不重命名 JSONL；缺项见 [schema 第十节](../../architecture/trajectory-v3-schema.md)。
 
 ## Markdown 导出
 
@@ -84,7 +86,7 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 /export docs/session-review.md
 ```
 
-默认导到 sessions 目录的 `<id>.md`。导出按事件账生成：用户与助手正文、工具摘要、标题、压缩点都保留。项目记忆不混入导出；本轮临时召回包也不写入 history。
+默认导到当前会话目录的 `exports/<id>.md`。v3 导出按当前链投影生成，hidden 正文默认不导；它不是完整历史时间线导出。压缩前原文仍在 JSONL，可从历史视图查看。项目记忆不混入导出；本轮临时召回包也不写入 history。
 
 ## 上下文由什么组成
 
@@ -95,7 +97,7 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 3. 工具 schema：当前已挂载工具的名称、说明与 JSON Schema。
 4. 历史：用户、助手、工具调用与结果，以及压缩摘要。
 
-项目记忆命中内容先拼成本轮 `turn_context`，随尚未发送的用户消息尾部进入请求视图。它不进入永久 history，不随着内部工具来回越积越多；下一条外层用户消息再重算。
+现有 memory 路径把命中内容拼成本轮 `turn_context`，随尚未发送的用户消息尾部进入请求视图。它不进入永久 history，不随着内部工具来回越积越多；下一条外层用户消息再重算。召回持久桥仍依赖旧 recorder，默认 v3 场的完整接线见 [Session v3 边界](../../architecture/session-v3.md)。
 
 ## token 与缓存命中
 
@@ -118,28 +120,17 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 
 ## 自动压缩
 
-本节列用户可见行为。单次摘要、episode 切块、map/reduce、验收与回放的完整时序，见[上下文压缩机制](../context/compaction.md)。
+v3 的手动和自动压缩共用 `RunV3Compact`。先选范围、查容量，再生成候选、校验、提交 `compact.applied`。提交落稳后替换当前内存 history，同场下一请求便使用新摘要与保留消息。
 
-当历史逼近 `context_window`，主循环会把较旧内容压成摘要，保住最近消息与继续完成任务所需事实。压缩事件写进 session，恢复和导出时能看见边界。
+失败、取消或拒收不会采用候选。连续压缩会把旧摘要与后续历史一起纳入材料，新摘要取代旧摘要。超窗时按整轮退范围，不拆工具配对；退无可退便报错。压缩走 cheap 路由及其预算，未配时按路由规则回落 normal。
 
-`compact_model` 可指定更便宜或更擅长摘要的模型。留空沿用当前会话模型。压缩失败会保留原历史并报错，不拿半份摘要覆盖旧账。
-
-自动触发有两条：
-
-- **回合前**：上一回请求实测 usage 超过窗口 80%，下一条用户消息发送前收一次历史（老路径）。
-- **回合中**：每次模型请求前先估 projected（系统提示 + 工具定义 + 结构压缩后的工作视图历史 + 输出预留，统一 token 口径，与真正发出的请求同一本账），估过 80% 就在"工具结果已攒完、请求尚未发出"的安全点先收一次，不再等下一条用户消息——长工具循环中途回填大结果，下一次请求也不会撞墙。距上次压缩收口的新增内容不足滞回带（默认 4k token）时跳过，同一视图不连压。
-
-压缩模型自己的窗口单独算预算：输入估算超过 `compact_model 窗口 − 输出预留 − 协议余量` 时明确拒绝，不发这个注定装不下的请求，更不静默截史。压缩模型不在目录里、窗口未知时照常压缩，但输出会注明"未做窗口校验"。
-
-历史大到单次压缩装不下时走**分层压缩**：按任务阶段（episode）切块——每条外层用户输入（新要求/纠正）与每次 `todo_write`（plan 变化）都是显式的段界，块界永远落在轮边界上，tool use/result 不会被劈开。各块独立产出带来源事件号的局部小结（map），再归并成终稿存档与 manifest（reduce）；归并材料仍超预算就两两归并，直到装得下。上一轮的存档只作为归并时的参考输入，绝不进任何 map 块——局部摘要永远从原始消息来，阻断"摘要复印摘要"的递归失真。单轮巨型（整份历史都在最后一轮里）没法分层，按窗口预算明确拒绝。
-
-压缩事件写 `compact_v2`：回放语义与旧 `compact` 事件完全同型（archive + kept_from），另记 manifest、压缩序号（epoch）与指标（块数、归并轮次、前后 token、触发来源）。`/resume` 读到 v2 与 v1 走同一条重建路；老存档、老 compact 事件照常读。
+`/compact --dry-run` 在 v3 场尚未接线，会明报未执行。旧四分区双账算法仍供 v2 路径使用，不能拿它解释新版行为。详见[压缩指南](../context/compaction.md)。
 
 ## 观测账
 
-每次压缩的 `compact_v2` 事件里记：触发来源（manual / pre-turn / midturn）、实现路（local-single / local-hierarchical）、map 块数与 reduce 轮次、前后 token、终稿 manifest、以及本次输入的 `source_digest`（内容指纹）。每轮请求的结构压缩量（重复收敛、旧版覆盖、长结果外置）在 `AgentLoop` 内部记账，`/compact --dry-run` 可随时查看。
+压缩数字来自持久 `compact.applied` 及其请求、校验引用，历史分界线显示当时的前后 token，不在恢复时重算。模型实报与本地估算分列；缺 usage 不补零。
 
-近重复检索（MinHash/SimHash 找候选、再核关键差异行）与 embedding 召回证据是下一期的评估项：都只帮忙找候选、绝不判删除；`source_digest` 是将来"episode 关闭后台预计算局部摘要、正式触发按 digest 复用"的失效判据（同史同值、改一字即变，已有测试钉死）。达不到收益就关掉，不为算法名留功能。
+当前离线 `/usage` 读口仍枚举 v2 流，尚未完整接入 v3 主账与递归子账。终端活统计不能替代磁盘对账，也不能据空样本断言零消耗。迁移位置见[清理清单](../../development/v3-legacy-audit.md)。
 
 ## 压缩摘要的验收
 

@@ -53,6 +53,8 @@ DOC architecture/providers/schema.md
 DOC architecture/query-data-flow.md
 DOC architecture/session-orchestration.md
 DOC architecture/trajectory-v3-schema.md
+DOC architecture/session-v3.md
+DOC development/v3-legacy-audit.md
 DOC architecture/tool-calling-flow.md
 DOC architecture/tools/file-commands.md
 DOC architecture/workflow-runtime.md
@@ -67,9 +69,12 @@ DOC development/naming.md
 DOC development/search-ripgrep-migration.md
 DOC development/security.md
 DOC development/testing.md
+DOC development/v3-consumer-inventory.md
 
 # 面试材料。路径从 interview/ 起算，不随发行包装走。
 INTERVIEW README.md
+INTERVIEW failure-and-recovery.md
+INTERVIEW model-wire-abstraction.md
 INTERVIEW deep-dives.md
 INTERVIEW portfolio.md
 INTERVIEW question-bank.md
