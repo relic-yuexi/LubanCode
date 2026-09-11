@@ -1,7 +1,7 @@
 # session 轨迹 v3：消息主轴树链与四角色壳收敛
 
 - 状态：实现中（主体已完结 2026-09-11，v0.26.250）：P0–P4 五期、接线点 1、compact 运行时、D1/D2/D3 修复、四角色壳全落；§5.1 验收矩阵 25 行 209 断言全绿；翻默认已放行。余项：§4.67 Goal 模式 G0–G4（进行中）及其验收矩阵。关联单（AppServer 2.0 §4.65、Workflow §4.66、标题棒、wire_map 消费端）另计。
-- 立案日期：2026-09-09；本次更新：2026-09-11（补 §4.67 Goal 模式设计；本节尚未实现）。
+- 立案日期：2026-09-09；本次更新：2026-09-11（补 §4.67 Goal、§4.68 Loop、§4.69 btw、§4.70 调度边界及 §4.71 Memory；各节按自身实施记录验收，§4.71 为新增待实施设计）。
 - 级别：P1（轨迹是回放/回测/验尸的地基，形状定错样样返工）。
 - 参照样板：`D:\kc-mini-for-interview\sessions\8dcf9aa4\8dcf9aa4.jsonl`（231 行，五类事件，已解剖，见 §二）。
 - 范围：轨迹格式、四角色消息、Turn/Step/Action 归属、工具状态与结果文件、上下文提交、请求组装、resume、历史显示及相关测试。
@@ -1688,6 +1688,7 @@ system 已生效
 - **工具入口**：首版保留少量常用工具及固定 `tool_search + tool_invoke` 定义。其余通过 search 披露 schema 与版本绑定的 tool_ref，invoke 解析后进入真实工具的唯一执行入口。发现多少工具，不默认向顶层 tools 追加多少 schema。provider 原生延迟引用作为能力配置中的可选路径；采用 Anthropic wire 本身不足以证明该端点支持。
 - **skill**：宿主索引可覆盖全部已发现条目；模型只接收预算内固定目录或检索结果。PostUser 处理显式点名及可判定触发，模型仍可主动检索/启用。激活才读 SKILL.md，引用材料再按需读；这延续 §4.29 的渐进披露，不能靠把全部正文塞入 system 来省一次搜索。
 - **memory**：PostUser 按当前输入召回，追加带证据/来源的有限上下文；空命中不造空消息。同一内容仍在有效上下文时可复用引用。长期存储缓存命中、召回命中、模型看见记忆三者各自记账；默认不每条用户输入重写 system。
+- **Memory 完整合同**：作用域、事实有效期、读写分权、后台事务、冲突/遗忘与效果评测见 §4.71；本节只定按需加载位置。
 - **MCP**：本地配置可先给 server 定位与缓存目录，但实时 tools/list 要靠连接后的协商和查询；离线目录须标旧版本或未验证。同一 server 的并发首次使用合并初始化，设连接/发现超时和并发上限。大清单按分页及预算读取；变化后发布新版索引，旧请求引用不随之改写。不能因目录存在便假称 server 可用。
 - **plugin**：发现 manifest 与执行模块分开。模块只加载一次并可复用，活跃调用持有对应版本；卸载/升级不得破坏正在运行的 Action。一个包导出的 tool、skill、hook 分别注册，各有稳定身份和能力合同，不把整个包摊进模型输入。
 - **名称冲突**：能力 ID 带来源实例/命名空间，显示名可短；不同 MCP server 的同名工具不静默覆盖。hook 同名接管是 §4.48 的专门配置机制，不扩散为全部能力“后加载者获胜”。引用固定源实例、schema/content hash 及 session 范围；实际执行前重验，过期则明确重新发现，不能悄悄换同名后端。
@@ -1935,6 +1936,8 @@ goal 管“要做到什么”，todo 管“分哪些步骤做”，loop 管“�
 
 Goal 模式的命令、状态、验收、续跑事务与接线验收在 §4.67 展开；该节沿用本节及 §4.55 的持久控制状态合同。
 
+Loop 的周期、每拍事务、恢复、停用和验收在 §4.68 展开；与 Goal、btw 的调度及费用归属按 §4.70 收口。
+
 | 能力 | 持久状态 | 推进条件 |
 | --- | --- | --- |
 | goal | goalId、目标原文、验收要求、状态、checkpoint、证据、累计预算/usage、阻塞信息与待答问题 | 当前工作结束后评估；未完成且可推进时自动安排下一轮 |
@@ -1962,6 +1965,8 @@ Goal 模式的命令、状态、验收、续跑事务与接线验收在 §4.67 �
 - fork 只隔离会话数据，不自动隔离共享工作目录、文件或外部系统。新分支若要并行修改同一仓库，另明确工作目录/worktree 策略；不能把新 session 宣称成代码或副作用快照。
 
 ### 4.58 btw：同 session 的独立旁支，不进入 main
+
+交互命令、基线冻结、旁支请求、刷新、恢复与实施验收在 §4.69 展开；本节所定持久旁支和主线隔离继续有效。
 
 2026-09-10 打开核对 [Claude Code 交互文档的 /btw](https://code.claude.com/docs/en/interactive-mode#side-questions-with-btw)：可在主线运行时独立回答；使用已有对话，排除尚在生成的回复；无工具访问；后续 /btw 可引用早先旁问。搜索摘要仍有旧版“没有追问”的说法，以当次打开的正文为准。本项目采用可连续追问的旁支；持久记录方式是自己的设计，不照搬其终端临时内存保留策略。
 
@@ -2246,7 +2251,7 @@ GoalService/Coordinator 是唯一状态写口，命令、模型 checkpoint 和 H
 
 #### 4.67.4 一轮如何收尾、验收与续排
 
-一个 iteration 表示一份主工作轮及其收口处理，另有 iterationId；工作轮用独立 turnId。验收内部 turn 不增加工作轮计数，重试请求不冒充新 iteration。用户 steer 不另开轮；Goal active 时接纳的主工作轮也绑定 goal/iteration，避免用户插话形成漏账。状态查询、btw、compact、title 不触发 Goal 验收。
+一个 iteration 表示一份主工作轮及其收口处理，另有 iterationId；工作轮用独立 turnId。验收内部 turn 不增加工作轮计数，重试请求不冒充新 iteration。用户 steer 不另开轮；Goal active 时接纳的用户主工作轮也绑定 goal/iteration，避免用户插话形成漏账。独立 loop tick 依 §4.70 单列 owner，不因占用 main 就挂到 Goal。状态查询、btw、compact、title 不触发 Goal 验收。
 
 1. **接纳**：持久接纳 `/goal`，提交初始快照与首轮调度意图。合同材料作为正式 message 进入首轮；纯状态查询不产生 user message。
 2. **执行**：主入口消费工作项。`PreRequest/control_state.project` 投影最新合同、checkpoint、剩余预算和待验项；调用、结果、usage 沿 v3 原路径留档。
@@ -2373,7 +2378,471 @@ GoalEvaluated/GoalCompleted 等通知在状态提交之后发出。通知失败�
 | CLI 与 AppServer 恢复同一目标 | 单活动写者；相同状态与预算，不各起一套续跑循环 |
 | 覆盖 goal Hook，通知 Hook 失败 | 策略可替换，宿主门槛仍在；通知失败不撤回已提交终态 |
 
+### 4.68 Loop 模式：按时检查，逐拍留账
+
+本节为 2026-09-11 新增设计，尚未实现；细化 §4.56。这里的 loop 指会话定时任务，区别于 agent 单轮工具循环及 Workflow 图内循环。
+
+#### 4.68.1 Claude Code 参照与本项目范围
+
+当日核对 [Claude Code 定时任务官方文档](https://code.claude.com/docs/en/scheduled-tasks)：`/loop` 用于周期工作，忙时等到轮间再触发，错过多次不逐次追赶；恢复有任务类别及过期限制。固定周期与自定节奏的 loop 行为不同，不能一概说成“退出就丢”或“全部恢复”。这里取定时唤醒、轮间执行、错过合并三点；以下持久状态、周期默认值与恢复政策均为 LubanCode 设计。
+
+例：`/loop 5m 检查本分支 CI；有变化再告诉我；全绿后停止检查`。10:00 创建，首拍 10:05。main 忙到 10:17，只补一拍，记录合并了 10:05、10:10、10:15 三个时点；下一时点为 10:20。检查完成不代表整个编码任务通过 Goal 验收。
+
+首版用固定 interval，支持正整数 m/h/d，范围 1m–7d；省略间隔取 10m。暂不加入由模型每轮改间隔、完整 cron、自然语言日历或独立常驻服务。计划保存 scheduleKind、anchorAt、intervalMs、timezone、scheduleRevision；interval 按 UTC 实际时长前进，timezone 用于显示和来源说明，夏令时不改变“五分钟”长度。未来 calendar/cron 另立解析版本与夏令时规则，不能偷换 interval 含义。
+
+#### 4.68.2 命令、默认任务与停止条件
+
+| 入口 | 合同 |
+| --- | --- |
+| `/loop [间隔] <任务>` | 创建周期计划，显示 loopId、任务来源、首拍、到期时间及停用条件；默认到首拍才执行 |
+| `/loop`、`/loop 15m` | 使用项目/用户 loop.md 或内置维护任务；创建前显示实际来源及周期，不隐含新目标 |
+| `/loop list`、`/loop status <id>` | 查询所有计划或单项状态，不创建模型 turn |
+| `/loop pause <id>`、`/loop resume <id>` | 暂停/恢复该计划；resume 从当前时间加 interval 起新锚点，不追暂停期间的拍 |
+| `/loop stop <id>` | 取消计划并废止未启动 tick；运行中 tick 在安全边界收尾，急停用 Esc |
+| `/loop run <id>` | 立即请求额外一拍，原周期锚点不变；同一计划已有未收口 tick 时合并触发原因，不并发再开 |
+| `/loop edit <id> ...` | 新增设计入口；安全边界修改任务、周期或限额，带 expectedStateRevision，新 scheduleRevision 使旧未启动拍失效 |
+
+pause/resume/stop 可显式指定 all；多计划场景不能凭默认选中项误停别人。所有命令走 followup 控制队列；更改实际生效后才回成功。正文与命令同名时用 `--` 划开。自然语言若明确要求定期执行，可经同一结构化服务创建；普通“再检查一次”不建周期计划。
+
+默认任务来源依次为显式正文、受信项目 `.lubancode/loop.md`、用户级 `loop.md`、内置维护提示。创建时固定选择的来源，不能因文件后来出现/消失就自动换一份指令。内置维护范围限当前已授权任务、当前分支待办和验证；无待办就等待，不另起项目，不默认推送、发消息或删除。
+
+首版保留 loop.md 专用 25,000 UTF-8 字节上限，超限明确报错，不截掉指令尾部；普通用户长输入仍沿 §4.51。inline 正文固定快照；文件源标 readPolicy=per_tick，每拍在主入口取件时读一次并存全文/hash。文件修改次拍生效，同 tick 重试不重读；每次仍核对路径、工作区身份和信任范围。缺文件、权限不足或文件内容无法容纳时暂停并说明原因，不降级到内置维护提示。
+
+首版建议：每个 session 最多 8 项未收账计划，默认有效期 7 天；另支持明确 maxRuns、总 token/费用限额和每拍限额。创建/修改时校验 firstDue < expiresAt，间隔恰为 7d 时需显式延长有效期，不能创建永远跑不到首拍的计划。到期后不额外赠送“最后一拍”；expiredAt 是停发新工作门槛，运行中请求按取消/收尾规则结账，费用照记。续期须显式修改，resume 不重新送七天。
+
+没有停止条件的“每五分钟检查”持续到暂停、到期或额度用尽。含“全绿就停”等条件时，模型可通过 loop_control 提交 complete 候选，带本 tick 的证据引用；宿主核对条件和来源后提交 completed。Loop completed 只说明该计划停止，不能写 Goal achieved。条件含糊或需要选择时暂停待答，不靠下一拍反复询问。
+
+#### 4.68.3 状态、tick 身份与持久事务
+
+LoopService 复用现有 scheduler/driver 职责，状态写口仍归 Session 单写者。快照存于 `state/loops/<loopId>/rev-<n>.json`，以 `state.loop.applied` 生效。stateRevision 随状态提交增长；scheduleRevision 只随周期/任务定义变化。lifecycle 分 active、paused、awaiting_user、budget_exhausted、suspended_by_policy、completed、cancelled、expired、failed；tickPhase 另分 queued、claimed、running、waiting、finished、unknown，backoffUntil 独立保存。
+
+LoopSnapshot 至少含定义/来源、工作区身份、周期锚点、nextDue、expiresAt、累计 usage、runCount、合并计数、连败/拒绝计数、当前 tick 引用和待办意图。一个 loop 最多一枚未收口 tick；其后台任务没交付时也占该槽，不能主 turn 结束就认定该拍已结束。
+
+固定周期以 slotIndex 标识时点：scheduledAt=anchorAt+slotIndex×intervalMs。周期 tick 去重键为 `(loopId,scheduleRevision,slotIndex)`，其中 slotIndex 固定为创建该 tick 时首个未覆盖刻度，后续合并不改身份，只推进 coveredSlotRange 与覆盖水位；手动 run 用独立 commandId，不伪装周期刻度。tickId 是执行身份，seq 仍只是 JSONL 追加顺序；attempt、requestId、turnId 各有归属。
+
+1. 时钟只报告到期。单写者校验 lifecycle、有效期、预算和 slot watermark，把 coveredSlotRange、missedCount、tickId/workItemId、下次游标写进快照后提交 applied。
+2. Scheduler 从已提交意图投影队列。等待主入口期间，后来错过的时点可合入同一未启动 tick，记录原/新范围；执行前固定材料与调度版本。
+3. 主入口依公平规则 claim，重新核对暂停、取消、用户控制命令和 writerEpoch。读任务源并保存实际 prompt 后，提交 claimed 快照，再进入主工作 turn；消息为 `purpose=loop_tick`，标宿主来源、loopId、tickId。
+4. 工具、后台 task 和结果逐项留账。收口核对本拍是否仍有相关未完成工作，再提交 outcome、usage 引用和后续游标。请求正常返回只算本轮完成；所查部署/测试结果另外记录 success/failure/unknown。
+5. 当前 tick 收口后才允许下一拍。运行期间错过的时点默认合并为至多一枚待执行 tick，不按错过次数补执行；每次合并都推进覆盖游标，记录原因。
+
+相邻两次实际启动至少间隔 1 分钟。运行期间形成的补拍还须等 lastFinishedAt 加 1 分钟，保存 eligibleAfter；显式 run 也不绕过该下限。耗时超过周期时保留合并待办，避免任务一结束就紧接下一轮成为无间隔 Goal。轮间延后不改变原周期锚点。首版 jitter=0；如后续增加扰动，必须保存计划时点、扰动种子和实际 eligibleAt，不能让恢复随机换时间。
+
+新增 event kind 为 `loop.tick.due/claimed/finished`、`loop.tick.coalesced`、`loop.source.resolved`、`loop.control.requested`；均记录来源引用，只有 state.loop.applied 切换状态 head。applied 存在而队列/通知未更新时从原 workItemId 补投影；只有候选文件、没有 applied 时不执行。涉及外部工具的 claimed/running 未决 tick 沿恢复合同核验，不能靠“重放一个 tick”保证远端只执行一次。
+
+#### 4.68.4 恢复、失败、通知与预算
+
+主动 resume 核对状态 head/hash、来源链、工作区、writerEpoch 与计费水位。未过期 active 计划恢复；进程离线期间错过的时点按合并政策至多留一拍。显式暂停后的 `/loop resume` 按新锚点等下一拍，与崩溃恢复旧 active 计划分开。completed/cancelled/expired 不自启；只读查看不启动计时器、不写修复记录。
+
+进程运行中使用 steady clock 等待，持久时点用 UTC wall clock。系统时钟回拨不降低 slot watermark、不重发旧刻度；前跳或休眠唤醒按错过合并处理。clock jump 留事件和显示原因，不能让时间变化把已到期计划复活。fork 复制定义并另发 loopId，活动计划默认 paused；后台进程执行权不跟过去。
+
+限流/网络故障使用共享请求重试器，本 tick 首版至多 3 次总尝试，重试等待参考 Retry-After 并受每拍 deadline 限制。不存在 scheduler 三次再乘 provider 三次的九次重试。连续 5 拍 provider 失败默认暂停；权限拒绝不得作为网络重试，连续 3 拍同一拒绝暂停；缺凭据等已知待人工问题可立即暂停。业务检查为红属于观测结果，不一概当作 provider 连败。
+
+人工审批沿原权限入口，无人可答时保存 approvalId 和期限，逾期暂停；不能把工具拒绝算 succeeded 后每拍重复申请。Loop tick 内后台任务按 taskRef 等待/交付，通知去重；未收口的旧任务先核验，不能靠新一拍替它掩账。主线 Esc 暂停自动 Goal/Loop 并收口当前执行；loop stop、全会话 Esc、仅取消子任务各有 scope。
+
+每拍与整份计划都检查预算，模型、重试、相关 compact 与子任务费用按 requestId 去重；具体计量沿 §4.67.7。定时器醒来不算一次模型调用，只有真正接受的工作轮增加 runCount。maxRuns 用已 claim 的工作轮额度保守准入；崩溃未知轮不得白送重开。仅做结果等待不新增模型请求；模型巡检也要记账。
+
+默认通知政策为 meaningful_change：状态没变只留执行账，不刷用户提示；变化、完成、失败或需要输入时通知一次。通知带 tickId、观测依据、旧/新摘要 hash；用户要求每拍报告时才设 every_tick。通知是本地 UI/事件投影，向邮件、IM 等外发仍需相应授权。UI 显示下一拍、实际延迟、最近观测、停因、费用与有效期；不把“没通知”画成“没执行”。
+
+#### 4.68.5 代码差距与待验收
+
+静态核对：`src/runtime/loop_types.hpp` 已有 interval、single-flight、错过合并、到期和有界重试定义；`loop_scheduler.cpp` 有 PumpDueTick/FinishTick，仍使用 loop_task_v1 族事件。`loop_tick_driver.cpp` 承担单拍执行、审批及 loop_control 收口；`src/app/wirings/loop_session_wiring.cpp::StopAllForEsc` 当前调用 Stop，须改接本单“保留计划并暂停”合同。`src/runtime/session_work_scheduler.hpp` 已声明 Goal/Loop 公平仲裁；不能据此宣称 v3 快照提交、后台任务收口和重启恢复已经贯通。本轮在 src/tests 的 C++ 文件中未找到 btw 命令或运行时实现，见 §4.69。
+
+- [ ] L0：LoopSnapshot/schema/applied、固定周期计算、状态转换和 tick/workItem 身份。
+- [ ] L1：命令、来源快照、统一主入口、权限及每拍预算；移除旧族写账入口，不做旧档迁移。
+- [ ] L2：后台等待、错过合并、进程恢复、Esc、fork 和通知去重。
+- [ ] L3：假时钟、故障注入与真实 CLI/AppServer 入口验收；真实 provider 的长时运行单列证据。
+
+| 场景 | 验收要求（均待执行） |
+| --- | --- |
+| 5m 周期忙过三个时点 | 至多补一拍，范围/计数正确，下一时点沿原锚点 |
+| 上一拍连后台任务未完成 | 同 loop 不重叠，后来时点合并，不重新启动同一后台工作 |
+| 长任务持续超过周期 | 实际启动间隔受下限约束，不变成无间隔模型循环 |
+| applied/claim/发送/结果提交各处崩溃 | 原 tick/workItem 恢复或标 unknown，不重做已证实副作用 |
+| `/loop run` 与到期同时发生 | 合并原因并只开一拍，周期游标不漂移 |
+| edit/pause/stop 撞上已排 tick | 旧版未启动项失效，迟到结果不复活计划 |
+| loop.md 改动、消失、超限或跨工作区 | 每拍原文可追溯，同拍重试不换文；不静默换源 |
+| 过期、首次到期恰等 expiresAt、预算见底 | 参数校验或停排，不额外送一拍，不重置寿命/费用 |
+| 休眠、时钟前跳/回拨、进程离线 | 不重发已覆盖刻度，不补全部历史拍 |
+| 业务红、provider 错、审批拒绝 | 分开结果和重试政策；无双层重试放大 |
+| 默认通知与每拍通知 | 前者静默留账且变化只报一次，后者按明确配置报告 |
+| Goal 连跑与多 loop 同到期 | 用户控制优先，自动工作轮转，同 session 仅一枚 main turn |
+
+### 4.69 btw：旁问可追问，背景固定，问答留档
+
+本节为 2026-09-11 新增设计，尚未实现；细化 §4.58。
+
+#### 4.69.1 Claude Code 参照与交互
+
+当日重新打开 [Claude Code 交互文档 /btw 正文](https://code.claude.com/docs/en/interactive-mode#side-questions-with-btw)：旁问能在主轮执行时独立回答，无工具；后来旁问可带先前问答，当前正在生成的主回复不入旁问材料。终端与扩展面板的保存方式不同，不能套用搜索摘要里的旧版“不能追问”。本项目采用 §4.58 已定的持久旁支；不照搬临时内存窗口或固定保留二十组的策略。
+
+例：主线正在修 auth，用户问 `/btw 刚才为什么要加这一层锁？`。旁支借用已提交背景作答，主工具继续运行。用户追问“去掉会怎样”，仍留在旁支。回到主输入框说“换成另一种锁”，才属于主线 steer。
+
+| 入口/动作 | 效果 |
+| --- | --- |
+| `/btw <问题>` | 有选中旁支就追问；没有就从当前 main 合法前缀新建。入口显示所用旁支及基线时间 |
+| `/btw` | 打开最近旁支/选择面板；没有记录时显示输入框，不发空请求 |
+| `/btw --new <问题>` | 显式另建旁支、冻结新基线；旧问答保持可查 |
+| 面板内追问 | 显式 targetContext=btw/<id>，followup 到该旁支，不向 main steer |
+| 刷新背景 | 新建旁支并选用当前 main 基线；旧旁支保留，不换掉旧回答的来路 |
+| 关闭/重开 | 只改显示；关闭运行中面板也可继续接收，状态栏保留进行中提示 |
+| 清空当前旁问 | 停止该旁支续排并归档显示，下一问新建；原始 JSONL 不删除 |
+| 送入主线 | 用户明确选中内容、编写主任务指令后发送，带 sourceRefs 成为一条新主输入 |
+
+CLI 先支持 `/btw`、`--new` 及旁支选择/刷新/清空操作，GUI/AppServer 使用同一结构化动作。命令参数与问题正文用 `--` 分隔，不以自然语言猜面板操作。刷新若要引用旧回答，由用户明确选择附带内容；不把旧旁问整段混入新基线。
+
+Esc 按焦点解释：旁支正在生成时，第一次只取消该请求并保存 interrupted assistant；已空闲时关闭面板。按键事件消费后不向 main 冒泡。main 获焦点时 Esc 沿主线取消合同。关闭按钮与取消按钮分开，状态提示也分开，不能关闭后暗中清掉已排追问。
+
+#### 4.69.2 基线、四角色与请求组装
+
+首次新建时，在单写者提交边界取得 baseContextRef：源 session/run、main contextId/contextRevision、systemRef、按顺序列出的 messageRefs/链 hash、来源 turnRef、关键控制状态版本及 observedThroughSeq。只选主线当前有效合法前缀，不把完整 JSONL 都塞进去；已压缩历史仍可在 UI 查，但不能声称模型读到了全部原文。
+
+主 SSE 草稿与未配齐工具组不入基线。切点退到完整工具组之前，记 excludedPendingRefs 和原因；不等待 main 整轮结束，也不伪造失败 tool result 补齐。主线若尚无可用正文，只给已提交 system/背景和用户旁问，明确当前材料不足。
+
+旁支 input 形状为：借用基线 + 来源明确的旁问只读指令 + 该旁支已提交问答 + 本次问题。每条实际消息和派生载体都有明确 refs，按独立 contextChain 连接。只读指令属于旁支，不切换 main system；需要独立 system 时保存其来源和正文，turnId 仍为 null。provider 不支持当前历史形状时经 wire 合法化派生并留映射，仍无法合法发送就报旁支错误，不能偷偷删工具结果或重跑工具。
+
+所有 message 使用四角色合同和 `purpose=btw`，带 contextId、自己的 turnId/stepId/requestId；sourceTurnRef 只表示背景来路，不授权采用主轮工具。借用主线消息仍引用原身份，不把它们复制成新的用户输入或再触发 PostUser。未收齐回复、reasoning/signature 和图片引用沿 §4.42–§4.44、§4.52 处理，真实 provider/model/usage 照记。
+
+每次追问默认复用原基线；主线后来换模型、换 system、compact 或改 Goal，不自动改变旁支材料和推理配置。旁支可显式改模型，另记配置事件并重新核对 wire/上下文；不让旁支 provider fallback 回写 main。基线引用对象固定保留，main compact 不能回收仍有旁支引用的 artifact。源缺失/hash 不符时标损坏，不借今天主上下文冒充旧基线。
+
+首版旁支不支持 compact。仍执行独立估算、输出预留和合法容量恢复；满窗时停止本次请求，保留草稿输入与历史，提示新建/刷新旁支。新基线本身仍超限时明确拒绝，不能声称新建一定腾出空间。后续若实现旁支 compact，只作用于它的 contextId 和 refs，不触发 main compact。不能为了回答小问题缩小主任务窗口。
+
+#### 4.69.3 隔离、并发与中间件
+
+运行时按 `(sessionId,contextId)` 管活动 turn 和取消令牌；main 仍 single-flight，首版额外允许一枚 btw 请求并发。多旁支请求共享这个额外槽，排在旁支队列；不抢 Goal/Loop 的 main 工作槽，也不能绕过账户限流和预算。服务端不能并发时明确显示旁问等待，不取消 main 腾连接。
+
+btw 发送时 tools 为空/禁止调用，宿主派发器也按 context 权限拒绝任何模型 tool_calls。历史可含已完成工具记录，不等于赋予新工具权限。旁问不能创建 subagent、运行命令、读新文件、调用 MCP、更新 todo/goal/loop 或写长期 memory。问到现有材料以外的事实就说缺依据；确需调查时可显式转主线/新任务，首版不从旁问自动升级执行。
+
+Hook 注册池沿 purpose/context capability 过滤。btw 只允许纯计算、格式/容量校验、用量计量和旁支消息提交所需挂点；不执行主线 skill/memory 注入、能力加载、GoalReview、LoopControl 或动作型 Lua 效果。宿主在 effects commit 再验作用域，不能仅凭 handler 自称只读放行。
+
+btw 与 main 共用文件 seq 和哈希链，writer 串行落行即可；上下文提交分别核对各自 revision/refs。旁问增长文件尾部不使 main prepared/compact 候选失效。主线合法更新同样不作废已经冻结的旁支基线。跨作用域冲突仅在共享依赖或预算实际变化时处理，不能用 session 全局 currentTurn 指针替代两份运行状态。
+
+旁支 token/费用计入 session 总账并单列 btw；不计入 Goal/Loop 自身预算、工作轮数、无进展计数或验收次数。session 总额度仍共同约束，主线优先预留，UI 提示资源共享边界。是否命中缓存以服务端 usage 为准，不承诺“不影响主线耗时”或“免费问”。
+
+#### 4.69.4 事件、恢复与显式回流
+
+使用 `btwId` 标识旁支，contextId=btw/<btwId>。持久状态至少含 baseline、context head、selected model/configRef、生命周期、待输入队列引用、活动 requestRef、usage watermark 和归档状态；UI 焦点/面板位置只是显示缓存。
+
+新增 event kind：`btw.created`、`btw.archived`、`btw.refresh.requested`、`btw.promote.requested/applied`。旁支上下文采用仍走 v3 通用 context/输入提交协议；created 必须带完整基线引用及 hash。创建与首问入队用同一 operationId：基线提交后首问未入队就崩溃，恢复可识别未完成接纳，不重建第二个 btwId。事件与 messages 仍在原 session JSONL，不另建 subagent 目录。
+
+正常流式结束保存完整 assistant；Esc 收口沿 §4.63。进程崩溃时保留已落片段和待核验请求，主动 resume 默认恢复旁支历史及待续提示，不自动补付费请求。用户重开面板只读；明确追问/重试才取得旁支执行权。原已排但未执行的追问也需用户明确继续后消费，不因 main Goal 恢复顺带启动。
+
+“送入主线”要生成新的主 user message，保留选中旁问的 sourceRefs/hash 和用户本次指令；旁支旧 message 不直接改 purpose/contextId。主输入仍按 steer 接纳，若主线空闲则开新主轮，按普通授权、Goal 合同修订和预算规则处理。长内容走 §4.51 原文/预览合同；引用图片保存实际附件 refs。promote 操作绑定 commandId/queuedInputId，重放通知或重连不能重复投主输入。
+
+没有点“送入主线”或明确主输入，旁问里一句“就这么改”只留旁问，不能偷改代码。UI 应提醒此处不能执行，并提供转主线入口。fork 依 §4.57，若从旁支派生须显式选用其基线与问答；不复制源 session 的活动 main turn/Goal/Loop 执行权。
+
+#### 4.69.5 实施与验收
+
+本轮搜索 `src`、`tests` 的 C++ 文件未找到 btw/Btw 实现；现有设计与轨迹基础不能冒认成可用命令。实施先拆开每个 context 的活动轮、取消链和输入队列，再接 UI，避免面板出来了却仍共用主轮状态。
+
+- [ ] B0：BtwService、基线/引用 pin、per-context turn 与输入提交、只读能力门。
+- [ ] B1：独立模型请求、精确 input refs、流式/取消、费用与容量处理。
+- [ ] B2：CLI 面板及 AppServer 结构化入口，追问、新建、刷新、归档、恢复和显式回流。
+- [ ] B3：双请求假后端、交错落账与故障注入；真实 wire/provider 并发与 UI 焦点分别验收。
+
+| 场景 | 验收要求（均待执行） |
+| --- | --- |
+| main SSE 中发旁问 | 不等主 turn 完成；旁问无主草稿，main 继续接收 |
+| main 正有未配齐工具组 | 基线退到合法前缀，记录排除范围，不造 tool result |
+| 连续追问同时 main 改动/compact | 原旁支基线不漂移，刷新新建另一基线 |
+| 关闭、重开、清空、进程退出后 resume | 关闭不删账；已存问答可查，恢复不自动消费付费旁问 |
+| 面板 Esc 与主线 Esc | 各作用域取消；主线 Goal/Loop 不因旁支 Esc 暂停 |
+| 旁问模型输出 tool_calls / Lua 请求写状态 | 双重拒绝，main 文件/控制状态/工具调用计数不变 |
+| 旁问落行撞上 main compact 提交 | 全局 seq 增长不构成 main context 冲突，两个链均可重建 |
+| 旁支窗口满、provider 失败或限流 | 仅旁支失败/排队，不压缩/取消/切换 main |
+| 旁问查到缺失源引用或图片 | 明报材料缺口，不改借今天背景，原引用保持可诊断 |
+| 不同旁支同时提问 | 独立队列和取消令牌；最多一枚 btw 请求并发，main 单飞 |
+| “送入主线”重连/重试 | 用户明确发送后只接纳一条新主输入，旧旁支消息不改写 |
+| Goal/Loop 执行期间多次 btw | 旁支费用单列，不增加它们的 iteration/tick 或触发验收 |
+
+### 4.70 Goal、Loop、btw：共享底座，按来源分权
+
+本节为新增设计，统一 §4.56、§4.58、§4.67–§4.69 的接线边界。
+
+| 维度 | Goal | Loop | btw |
+| --- | --- | --- | --- |
+| 触发 | 上一工作轮验收后需继续 | 时点到达或显式 run | 用户发旁问/追问 |
+| 执行入口 | main 工作队列 | main 工作队列 | 独立 btw context 队列 |
+| 结束依据 | 完整验收与宿主证据门槛 | 当拍收口；计划另按停止条件/有效期收账 | 当次答复结束，旁支保留可追问 |
+| 持久真值 | state.goal.applied 与快照 | state.loop.applied 与快照 | 基线、输入提交、messages 与旁支 contextChain |
+| 主线影响 | 工作消息与控制状态进入 main | 当拍任务与执行结果进入 main | 默认不进入 main，显式回流另建输入 |
+| 恢复 | active 经核验可续，停态保持 | active 未过期按合并政策恢复 | 可查看，明确追问/重试才执行 |
+
+每个工作项声明 workKind、ownerGoalId/ownerLoopId/ownerBtwId、triggerRef、parentWorkRef 与预算归属。独立 LoopTick 的 ownerGoalId 为空，即便此刻 Goal active，也不据 main turn 完成就调用 GoalEvaluator。GoalContinuation 同理不多记 loop tick。模型内部 compact/title 继承发起工作 owner，btw 自有 owner；物理 session 汇总按 requestId 去重。
+
+显式关联例：Goal 正等 CI，用户加 loop 定期查 CI。计划保存 observesGoalId 及验收依赖引用，检查本身仍归 Loop；拿到新结果后持久交付给 Goal 的等待条件，Goal 在自己的入口决定是否验收/续跑。关联并不授权 loop 改 Goal 合同或续期预算。多个 tick 发现同一 CI 结果时按外部 runId/版本和 deliveryId 合并，不能反复唤醒 Goal。若 Goal 已终态，只存结果；绑定的临时检查计划按事先 stopWhenGoalTerminal 政策停用，无关 loop 不受影响。
+
+主 Session 只能一个活动执行写者，各 context 可有独立模型请求；所有控制提交串行过 writerEpoch。用户控制/输入优先于自动工作；Goal 与 Loop 按 §4.67.4 轮转，btw 占独立受限槽。主线 Esc 设 session 级自动续跑暂停门，旁支 Esc 不改它；修复或恢复一个子系统不能顺手解除其他子系统的显式停态。
+
+联合验收另补三项：Goal 等 CI + loop 观察 + btw 追问同时存在时，三份 owner/费用/上下文可逐笔对账；同一结果只唤醒一次 Goal；主线与旁支分别取消后，任何迟到判词、tick 或消息都不能越过相应暂停门。以上均待实现和执行。
+
+### 4.71 Memory：记得有来由，用时查新旧，纠错不留两套话
+
+本节为 2026-09-11 新增设计，尚未实现。收敛 [记忆写入调度](记忆写入调度_显式保存门控批处理与成本账.todo) 与 [记忆效果及在线评测](智能体记忆效果_个性化适配续接快照与在线评测.todo) 两单，并以本节为新 v3 接口合同。两单的旧配置兼容、旧续接格式和早期源码描述不约束本轮重构；不据此删除旧档或替换旧实验结果。
+
+#### 4.71.1 先分清记什么，再谈怎么找
+
+例：用户说“这个仓库以后用 pnpm”，存项目偏好及原话出处；在另一工作树看到 npm lockfile，不能凭这份文件偷偷把偏好改掉。测试显示“auth 用例需要 Redis”，记验证条件、命令和当时配置。第二天配置改了，先核对依赖，不能继续当作刚验过。用户说“刚才那条错了，现在用 bun”，应修订同一主题，旧版不再召回。
+
+当日核对 [Claude Code 官方 Memory 文档](https://code.claude.com/docs/en/memory)：人工指令与自动记忆分开，记忆采用索引与主题文件，详细主题按需读取。本项目借用可阅读、按主题组织和按需加载的方向；下面的作用域、版本、证据、写入事务和评测属于 LubanCode 设计，不据参照资料声称实测收益。
+
+| 信息 | 持久归宿 | 不允许混用 |
+| --- | --- | --- |
+| 用户/项目明确规则、权限与沙箱 | 既有配置、AGENTS/soul/规则链 | 自动 memory 不改规则文件，不提升权限 |
+| 当前任务、todo、Goal、Loop、未完工具 | Session v3、已提交控制状态和 task 账 | 不靠长期 memory 或摘要恢复执行权 |
+| 跨会话仍有用的偏好、反馈、事实、决策依据 | 本节 MemoryStore | 不把本轮推测、成功宣告或临时 CI 状态自动当长期事实 |
+| 排障经验、步骤提示 | 有条件和证据的 procedure_hint | 只是建议材料，不能自动注册工具/Skill/Hook |
+| 旧任务经过、原始输出、整份文档 | Session/artifact 或用户已有资料源 | memory 可存定位线索，不复制全场历史和整份资料 |
+
+首版保留 fact/preference/feedback，增加 decision 与 procedure_hint 两种明确类型。decision 区分 proposed/accepted/implemented：设计文档只能证明“已有此设计”，不能证明已实现；procedure_hint 写清前置条件、动作、观测和适用范围，不把一次成功泛化成通用规则。未经核验的推断留 candidate，默认不进正常召回。
+
+目标不定成“尽量多记”。要做到：用户少重复交代，稳定事实少重复查，旧事实不误导，成本可对账。单纯保存条数、召回率或模型声称 helpful 都不能代替这个目标。
+
+#### 4.71.2 作用域与身份：共享仓库，也要认工作树
+
+存储身份沿 `workspace::ResolveWorkspaceIdentity`，不另算路径 hash。项目层位于 `<home>/workspaces/<workspaceKey>/memory/`；用户层位于 `<home>/memory/user/`。同 Git common dir 的 worktree 可共享项目库，独立 clone 默认不同库；路径重命名、显式 workspace 身份迁移另走原身份服务，不靠标题相同合并。
+
+| scope | 适合内容 | 读取/写入边界 |
+| --- | --- | --- |
+| user | 用户明确要跨项目沿用的偏好、背景与反馈 | 单独全局授权；仅用户明确命令可提交，项目配置和自动抽取不能写 |
+| workspace | 此仓库通用约定、已确认架构决策 | 限 workspaceKey，可另带 path/subtree 适用条件 |
+| worktree | 未合并改动、当前工作树特有命令/环境 | 同时绑定 worktreeId，不泄漏给兄弟工作树 |
+| environment | 操作系统、工具版本、机器相关事实 | 绑定环境指纹，不能把 Windows 路径注入 Linux 任务当可执行命令 |
+
+worktree/environment 是项目层适用维度，不再各建一套独立画像库。branch 名、cwd 字符串只供显示，不独占身份判断。提交号、相关文件 digest、工具版本和验证环境决定事实是否可用；换分支后相同依赖仍可复用，依赖不明则按较保守基线处理。
+
+权限身份与 scope 分开：未来多用户宿主必须带 principalId/授权上下文，不能把 workspaceKey 当访问控制。跨作用域读写须经 MemoryService，Lua/MCP 不能靠拼路径绕过。用户只说“这里用 pnpm”，默认项目；“所有项目都用”才可能成为 user 候选，不能从一个仓库推断全局习惯。
+
+fork 新 session 不复制一套项目记忆库；工作目录不变时仍读共享已提交版本，新 worktree 的事实受适用条件约束。父子代理读取可以共享合法项目知识，默认不共享可变候选或自动写权，详见 §4.71.9。
+
+#### 4.71.3 一条记忆的字段与有效期
+
+一条记录只表达一项可独立修正的主张。例：“此项目用 pnpm”和“auth 测试需要 Redis”分开存，不能合成一篇不断膨胀的仓库总结。正文供人读，元数据供宿主校验。
+
+| 字段组 | 首版必需语义 |
+| --- | --- |
+| 身份 | memoryId、revision、schemaVersion、scope、workspaceKey/principalRef、contentHash |
+| 主张 | kind、title、claim、summary、实体/路径/符号标签、适用条件；semanticKey 为同主题线索，不充当无冲突保证 |
+| 来源 | sourceKind=user_statement/tool_observation/document/derived、sourceRefs、原话/观测的最小证据片段及 hash、producerRef |
+| 状态 | candidate/active/stale/conflict/superseded/archived/forgotten；只有 active 且通过本次检查才可正常召回 |
+| 时间 | createdAt、recordedAt、observedAt、validFrom/validTo、lastVerifiedAt、expiresAt；未知为 null，不用写盘时间补事实发生时间 |
+| 验证 | evidenceRefs、verificationMethod、工作区/环境基线、依赖 digest、freshnessPolicy、verificationStatus |
+| 修订 | supersedesRefs、derivedFromRefs、conflictGroupId、expectedRevision、来源 operationId |
+
+user-stated 表示“用户说过这句话”，不是“话中外部事实已核实”；verified 只表示列出的检查支持该主张。模型填 confidence=0.99 不增加证据等级。仅有文件路径不证明读过，更不证明语义为真；宿主需核对实际已提交工具结果/读取范围或原话引用。
+
+首版建议：摘要不超过 512 UTF-8 字节，单条 claim/正文通常不超过 4 KiB；证据片段另限额。超长显式保存不默默截断，先拆为用户可见条目或保存资料引用。抽取器不能把“以后有用”当理由复制 32 KiB 工具输出。
+
+有效期按类型处理：明确偏好保留至用户修正/撤销；代码事实依赖相关文件与环境摘要，变更即 stale；外部服务状态须有短期 expiresAt，默认更适合留在 Goal/task 账；decision 保留决定及其当时版本，implemented 状态需新证据。重新编辑正文不刷新 lastVerifiedAt，调用次数或召回次数也不续命。
+
+每次使用前校验候选涉及的少量依赖，不全库扫磁盘。快速 stat 只用于缓存失效提示，不直接当内容未变证明；需复用验证缓存时以相应文件 hash/受控工作区快照为依据。无法在本次资源预算内核验，标 unknown/stale 并跳过正常正文注入，不能为节省 IO 谎称新鲜。
+
+证据须保留最小自足片段、观测结构及原来源引用，避免原 Session 到保留期后整库失去来由。引用源已清理则标 sourceUnavailable；留下的小片段能支持多少便说明多少，不冒认完整原始证据仍可回放。秘密和无关原文不进入片段。
+
+#### 4.71.4 MemoryStore：版本正文、提交账、可重建索引
+
+```text
+<memoryRoot>/
+  entries/<memoryId>/rev-000001.md     # 严格元数据 + 一条正文，不可原地覆盖
+  entries/<memoryId>/rev-000002.md
+  commits.jsonl                       # MemoryStore 自己的提交账，只有 event
+  candidates/<candidateId>.json       # 提案与来源，不作为已生效记忆
+  jobs/<operationId>.json             # 待处理意图；状态由提交/回执判定
+  .state/catalog.json                # 派生元数据索引、分词索引及 appliedThrough
+  index.md                           # 人读目录，派生，可重建，不整份注入模型
+```
+
+同作用域 MemoryStore 只认已提交的正文版本与 commits.jsonl 的 head；文件存在不等于生效。正文可导出、可读；用户编辑通过导入校验、expectedRevision 和新版本提交，不能直接改旧版本让历史 hash 失效。首版保留本地文件与词法索引，不默认引入向量服务、数据库守护进程或网络依赖。
+
+这份库跨 Session 共享，故提交权不能属于某个临时会话的 JSONL。MemoryStore 有自己的 storeId/storeSeq/storeEpoch；Session v3 记录请求、回执、召回和实际使用。两种 seq 互不比较，跨账使用完整 commitRef。它不复制会话消息，也不另设第二份 Session 真值。
+
+写入协议：取得作用域单写者/文件锁 -> 校验 expectedRevision、授权及 deletionEpoch -> 写不可变候选版本并落稳 -> 锁内再次核对 -> 追加 memory.store.applied（版本/hash/operationId/来源）并落稳 -> 发布索引。merge 多条记录时在同一 store 提交内列全受影响 heads，不能先撤旧条再发现新条没写下去。跨 user/project 不做隐式原子迁移，只能显式复制/提升并分别回执。
+
+索引落后不改变正文真值。读取须对齐 appliedThrough，未对齐时补放提交或在有界范围按已提交 heads 重建；失败就报告 degraded/零注入，不能用 stale catalog 重新带回 forgotten 条目。rebuild 不把无 applied 的孤儿版本当 active，不执行 topic 中的代码。
+
+锁租约超时不是可以删锁抢写的充分证据；需核对 owner 存活、boot/process identity 与 fencing epoch。崩溃恢复只修可证明坏尾，不吞中间坏记录。ProcessCrash 与 PowerLoss 保证分别写清，不能以 rename/flush 宣称任何断电都安全。
+
+#### 4.71.5 读写分权：不自动学，也能照吩咐记
+
+沿现有总授权边界，发行默认 memory.enabled=false。开启后读取 use 与写入 write、抽取 extract 分开配置；仓库配置只能收窄权限。用户主动关闭时，任何 Hook、Goal/Loop 或任务恢复不得偷偷开启。
+
+| write | 显式 `/memory remember` | `memory_save` | 自动抽取 |
+| --- | --- | --- | --- |
+| off | 不新增/更新，清理控制仍可用 | 拒绝 | 不排 |
+| manual | 按用户指定内容与 scope 保存 | 仅有本次用户保存意图的宿主授权引用时可排 | 不排 |
+| review | 显式命令可保存 | 模型主动建议进 candidate；确有用户保存授权可排写 | 只产 candidate |
+| auto | 显式命令可保存 | 项目内有证据且过闸才提交，否则进 candidate | 项目内有证据且过闸才提交，否则进 candidate |
+
+user scope 始终只走已授权用户命令，不因 write=auto 放开。普通语言“记住……”可由主模型提出结构化保存操作，宿主绑定当前输入的来源与确切 scope；模型不能自填 userInitiated=true 当通行证。意图含糊则列候选，不能靠一句关键词正则把引用/否定句存成偏好。
+
+extract.mode 首版取 off/gated；session_end 可作为 gated 的触发来源，every_turn 仅留实验对照，不作为新默认。manual+off 明确表示“可以按要求保存，不自动整理”。开启后推荐 review+gated，自动直写仍需全局明确授权；配置向导显示实际合并结果和原因。
+
+写入动作分 create/update/merge/archive/forget。模型工具继续只用 memory_save 提出 create/update 或 merge 候选，必须带 expectedRevision 与证据；模型不直接 archive/forget，不因索引满自动删除。显式用户纠正可更新同主题，auto 只能在核验通过且无冲突时采用，不能自主扩大为全局规则。
+
+`memory_save` 回执区分 proposed、queued、committed、rejected、conflict、failed。queued 返回 operationId 及查询方式，主模型只能说“已排队”；committed 必须携带 memoryId/revision/commitRef，才可说“已记住”。显式命令可短暂等待提交回执，超时保持 pending，不重发一份新操作。同轮显式保存/忘记已排队时，尾部不再另抽同一材料；原 job 失败由原 operation 重试/提示解决，不用抽取器偷偷补写。
+
+#### 4.71.6 写入与抽取：有界攒批，来源逐条对齐
+
+正常 user 输入先按现有 PostUser 召回。主任务的显式保存沿受管工具路径排 job；PostTurn 的 `memory.capture` 只检查是否有未处理耐久信号并提交来源 refs，不在主收尾栈内同步请求抽取模型。
+
+门控先看权限、origin/purpose、是否新增合法材料、显式记忆操作和确定性短文本统计。“好”“继续”、显示命令、自动 Goal 续跑提示、Loop 无变化报告、btw、title/compact 内部问答不单独触发学习。短句“以后用 bun”可能是有效纠正，显式保存/纠正意图不受字符长度一刀切拦截。工具声明不等于成功工具证据，只有已提交结果与可用来源才进入事实候选。
+
+首版 gated 建议累积 6 条合格主输入，或至少 2 条合格主输入且空闲 60 秒，再排抽取；数字用于首轮测量，不宣称已调优。用户明确保存即时走原路径，不等攒批。compact 前仅固定待抽取材料 refs 和 pin，不阻塞压缩等模型“先记完”；优雅退出只持久封存待办，不强制用户等一发抽取完成。
+
+积压保存 qualifiedInputRefs、evidenceRefs、processedRefs/区间及 skipReason，不只用全局 seq 水位。btw 和其他内部消息可交错落行，不能按最后 seq 跳过尚未处理的主输入。每份 extractJob 固定 sourceSetHash、policyVersion、相关 memory heads 和 dedupeKey；已覆盖消息不重复消费，新用户纠正可以成为新来源。
+
+抽取前只做本地近邻查找，提供少量现有主题给模型选 noop/create/update/merge/review；不为每批再起查询扩写模型。抽取请求无工具，沿统一内部请求服务生成 `purpose=memory_extract` 的真实 system/user/assistant、input refs、provider/model/usage；默认材料上限 24 KiB、最多 3 项候选、输出建议 1024 token，均须按实际 request 容量检查。字节/条数上限是限制，不是每批必须写满。
+
+输入超限按完整证据/消息组拆批，保留尚未处理 refs；不截掉句尾里的否定或来源信息再算 processed。模型输出截断/不合法时至多修复一次，仍带原材料与错误回复，失败暂停原 job 并留原因。每项输出回指具体 sourceRefs；无法落到证据的句子不得提交。旧召回 memory、assistant 引用旧 memory 或上一轮抽取摘要不算新的独立证据，禁止“反复引用就越写越真”。
+
+Memory job 与 extraction job 区分：前者执行确定性校验/持久写，后者付费生成候选。后台执行可经已有 worker 或受管内部任务承载，首版每 session 至多一份 extraction 请求；新用户输入到来时优先让出资源。排队满不静默丢候选：保留未处理 refs、显示 backlog，按配置停排。
+
+Session 请求先持久保存 operation/outbox -> worker 读取原操作 -> MemoryStore 按 operationId 幂等提交 -> Session 消费 commit receipt 并记 `memory.write.committed`。库已提交而 Session 尚未收到回执时，恢复查 store receipt 补账；Session 不在线则下次接纳/查询时补。两份文件之间不冒充事务原子性，自动重试始终沿原 operationId。撤销、纠正或忘记后，worker 提交前再查 tombstone/deletionEpoch，旧排队作业不能复活旧条目。
+
+#### 4.71.7 召回：先筛作用域与新旧，再排相关度
+
+`PostUser/memory.recall` 默认只匹配 human 来源的主任务输入，空命中零正文注入。query 由本次输入、已明确的任务、近期确实访问的路径/符号构成，保存 queryFingerprint 和来源；不吞全场聊天，不采用未知来源关键词扩写。
+
+首版默认读路：
+
+1. 固定合法 store watermark，按 principal/scope、状态、时间、worktree/environment 条件过滤。forgotten、冲突、过期不进入普通候选正文。
+2. 使用已有实体/路径/符号硬命中与本地 BM25；中文分词、驼峰拆词和已验证别名共享固定 tokenizerVersion。可先取 20 条廉价候选，再做有限依赖校验。
+3. 在同一主张集合内去重、解决可确定的优先级；相关度、证据等级、适用范围和状态各列字段，不压成一枚不可解释“信任分”。召回次数不作为自我增强权重。
+4. 选至多 3 条，总正文不超过 8 KiB，且受当前模型剩余上下文/输出预留限制；元数据和来源说明也计入。无关/低分不为凑满三条注入。
+5. 单条放不下时只选语义完整的 claim/条件/来源摘要，不能把条件截掉；仍装不下则 drop 并留原因。完整条目可经只读 memory_read 按需读取，不绕过单次工具及窗口上限。
+
+新增模型只读接口 memory_search/memory_read：仅搜索授权记忆视图，参数/结果有条数、字节、时间与 scope 限额，结果作为正常工具消息留档。它们不拥有写权，不访问随意磁盘路径；btw 首版仍无工具，不开放这些接口。显式查询 stale 条目时可标“历史/待核验”返回；自动注入不得隐去标签把它当当前事实。
+
+向量召回、reranker、多跳 query expansion 留为可替换后端，不在首版默认开启。只有固定评测证明它在同样预算下减少漏记且没有增加有害误召，才纳入。后端超时采用已登记的词法回退或零命中并记录实际路径，不隐瞒一次失败后切了算法。
+
+每份 RecallSet 保存 recallId、triggerRef、store watermarks、query/hash、rankedRefs/scores/reasons、freshness 判定、selected/dropRefs、snapshot hashes、字节/token、算法及配置版本。执行上下文只能采用经过宿主作用域与预算检查的候选，Lua 覆写召回不能绕过这层。
+
+#### 4.71.8 真正送进模型：召回、采用、发送、有效果分四笔
+
+memory 正文采用隐藏 user message、`purpose=memory_recall`、origin=memory，引用固定 memoryId/revision/hash/recallId；不改 system，不冒称用户本轮亲口下令。role=user 只是 wire 载体，不能提升旧记忆的指令优先级。正文标明范围、来源、验证时间及当前状态。
+
+候选命中只记 `memory.recall.completed`；提交 contextChain 才记 `memory.context.applied` 并关联 hook.effects.applied；真正发送由 `model.request.prepared/sent` 的 inputMessageRefs 证明。topic 展示列表、ranked 或索引缓存命中都不算模型已看见。实际使用保存 use_evidence 与 used=yes/no/unknown，单凭注入默认 unknown；helpful/harmful/neutral 必须另有用户反馈或任务验收依据。
+
+同一版本仍在有效上下文且适用时复用，不每步追加。当前输入明显换主题时重新选取；旧 memory 消息是否退出有效链须经 contextRevision 提交，原消息不删。更新、撤销或范围变化后，`PreRequest/memory.validity` 重新核对已选引用，再在合法消息边界提交替代投影，不让 cache 目标压过正确性。
+
+compact 的摘要可能已包含旧记忆，不能只删除最末 recall 消息便声称遗忘完成。摘要来源记录其引用的 memoryRef 集合；相关记忆失效时按保守依赖使摘要待重建，重新生成不带失效 memory 的合法上下文，或明确暂停等待可用视图。原 assistant/user 里有同样事实但无法可靠区分出处时，显示已知保留边界，不能凭模型一句“忘了”承诺内容已从请求移除。
+
+采用前和发送前各查一次相关 memory revisions/tombstones。跨进程忘记与发送仍有竞态，线性化点定为最后准入检查：之后新建请求必须拒用，已经发出的请求无法召回。用户发 forget 时本地未发送请求取消重组，已发送请求作标记，不能宣称服务端已经遗忘。UI/审计分清“停止后续召回”和“从所有历史抹去”。
+
+#### 4.71.9 与 Goal、Loop、btw、subagent 接合
+
+| 执行来源 | 读 | 写/抽取 |
+| --- | --- | --- |
+| 用户主输入 | PostUser 按本次任务召回，steer 亦然 | 显式保存或 gated 耐久信号 |
+| Goal continuation | 复用仍有效投影；新证据/任务阶段变化时可经同一 RecallService 有界重查 | checkpoint 本身不当长期事实；阶段产物/新证据可进入待审批次 |
+| Loop tick | 只按固定计划主题、适用范围与相关 store 变化重查，不能每拍全库重读 | 默认不提取“状态未变”；稳定新结论才可提候选，不因循环次数累积偏好 |
+| btw | 只能看到冻结基线里已经采用的记忆 | 不新召回、不写、不抽取；显式回主线后按主输入另判 |
+| subagent / Workflow 节点 | 派工显式传允许 scope 及必要冻结 memoryRef；需新检索时经节点授权接口 | 首版默认只回传候选及子账证据，父/宿主统一提交，不能子代理自写 user 库 |
+| evaluator / title / compact / memory_extract | 使用各自已固定材料 | 不递归触发召回或学习，不把内部提示当用户偏好 |
+
+Goal/Loop 的程序化召回使用 origin=goal/loop，不能伪造 human PostUser；策略只换触发口，取材、作用域、冻结 refs 与计费仍走同一 RecallService。btw 已固定基线受后续 forget 撤销约束，隐私撤销优先于基线不变；需要重建/暂停时明示原因，不静默换成最新 main 背景。
+
+Hook 槽位增加 `PostTurn/memory.capture`、`PreRequest/memory.validity`；原 `PostUser/memory.recall` 保留。Lua 可覆写筛选、排序、候选整理策略，外部检索后端可走已授权 MCP；写入权限、revision CAS、证据/遗忘校验和提交权仍归 MemoryService。整理模型经统一内部请求服务调度，不在 Hook 内自起无账进程写 topic。
+
+费用继承工作来源：Goal/Loop 材料形成的 extraction 请求分别占其预算；独立用户任务占 session memory 预算。首版不跨不同 ownerGoalId/ownerLoopId 合批，避免无法归账；跨多轮同 owner 可批处理。预算不足只保留待办/候选，不为了“记住”越限。Goal 终态后不自动烧一笔新抽取费，除非已有明确的独立维护授权；确定性 job 落盘仍可完成并回执。
+
+#### 4.71.10 冲突、修正、合并与遗忘
+
+冲突先看是否同一适用条件下的同一主张。Windows 与 Linux 命令、两个 worktree 不同基线、前后时间段事实可以并存；不能只因标题相近就 merge。semanticKey/相似度仅用于找近邻，无法证明两条同义时不自动覆盖。
+
+裁决顺序：当前明确用户指令与受信规则优先；同一明确偏好的新用户修正取代旧版；项目范围内的具体偏好可覆盖一般用户偏好，但不能越过用户本轮约束；事实看证据与适用条件，不凭“project 永远大于 user”或最后写盘时间判真。无法自动裁决时设 conflictGroup 并从正常召回排除，列给 `/memory conflicts`；仅在当前任务确实依赖该结论时问用户，不为无关旧冲突打断工作。
+
+更新采用旧 revision 的 CAS，保留 supersedes 链和原来源。两会话同时改同条时，一方提交，另一方收到 conflict 重新读取，不 last-writer-wins。merge 保留各子主张出处和条件；merge 成功原条标 superseded，不硬删。新主题证据不足只能回到 candidate，不允许通过合并把 inferred 洗成 verified。
+
+`/memory correct <id> ...` 是新增显式修正入口，展示旧/新主张并直接按用户指定范围提交；无需再让抽取模型猜用户意思。`/memory verify` 校验引用/hash 是否仍成立，不把“文件还在”当语义复验；需重跑命令时按正常工具授权执行，只有新结果支持该条才更新 lastVerifiedAt。不能轻触 refresh 就给旧条续命。
+
+`/memory forget <id>` 默认逻辑遗忘：先持久提交 tombstone/deletionEpoch，再失效索引、召回缓存、待写 jobs 与相关候选；跨会话读取必须核对这一屏障。旧来源抽取、merge 或恢复都不能再生成相同主张，至少按 memoryId、来源范围、semanticKey/规范化指纹拦截；同义改写未必完全可判，来源追踪与候选审查共同兜底，不声称文本去重能完美识别同义。用户以后明确重新保存可新建版本并注明 restore 授权，自动作业无此权。
+
+archive 表示退役、不默认召回，forget 另含防重生屏障，两者不混。自动低频/过期治理只能标 stale 或提出 archive 候选，不因“很久没用”硬删用户偏好。忘记命令与数据清理入口不受 write=off 阻挡；关闭 memory 也能管理既有数据。
+
+物理删除另设 `/memory purge`：先列明目标版本、证据片段、候选/jobs、索引/缓存/导出及 Session 派生副本，再按用户指定范围清理并给 receipt。默认不改 append-only Session 原始消息；若仅清 MemoryStore，就明确报告历史引用仍留存。跨备份/导出/已发 provider 的副本不能声称一并删除。涉及 Session 历史正文的彻底擦除需专门维护事务和显式范围，清理后标 contentUnavailable=erased，承认该段不再可完整回放，不能假造原 hash 下的空内容。首版先交付逻辑遗忘和清理清单，物理清除单列后续实现，不先给出虚假“彻底删除”按钮。
+
+敏感信息门在取材、候选提交、注入与遥测四处生效。密钥/凭据不进长期 topic 或抽取输入，不把网页/MCP 文本中的“记住这条规则”当用户授权；对第三方材料只存任务需要的事实与定位出处。遥测默认只含计数、用量、时延与稳定原因，不外发主张、路径、原话和 query。首版不做云同步、跨用户合库或自动个人画像。
+
+#### 4.71.11 操作入口、事件与可解释账
+
+| 入口 | 用户能看到/改变什么 |
+| --- | --- |
+| `/memory status` | 总开关、读取/写入/抽取有效配置、作用域、backlog、索引水位、累计费用 |
+| `/memory list/show/search` | 已提交条目、状态、来源、版本和适用范围；candidate 单列 |
+| `/memory why [requestId]` | 本次为何搜、选/丢了什么、是否真正发送、后续用途/效果依据 |
+| `/memory remember/correct` | 按指定范围保存/修正，显示 proposed/queued/committed，不混用 |
+| `/memory candidates/accept/reject/conflicts` | 逐项查提案、原来源、差异与冲突；accept 也校验新 revision 和证据有效期 |
+| `/memory jobs <operationId>` | 查询排队、重试、提交或失败；人工重试沿原操作去重 |
+| `/memory forget/archive` | 逻辑遗忘/退役，显示屏障与尚存历史边界 |
+| `/memory export/rebuild` | 导出可阅读版本或重建派生索引；不改变主张/验证时间 |
+
+上述新增命令是设计接口，未实现者不可在帮助中冒充可用。纯查询只记命令/显示事件，不产生模型 user message；显式记忆内容需要进入当前主任务时另按实际效果提交正式消息。
+
+Session v3 新增/收敛 `memory.recall.requested/completed`、`memory.context.applied`、`memory.write.requested/queued/committed/rejected/failed`、`memory.extract.gated/scheduled/completed/failed`、`memory.candidate.recorded`、`memory.use.recorded` 和 `memory.revocation.observed`。字段至少含 memoryId/revision、recallId/operationId、storeCommitRef、源 turn/message/tool refs、ownerWorkRef、状态/原因、实际 message/request refs。所有 event 仍受原 v3 信封和单写者约束。
+
+Session `memory.write.committed` 是 MemoryStore 真实提交的回执，不另改 store head；MemoryStore `memory.store.applied` 才是跨会话记忆写入的线性化点。后台 worker 不能打开正在写的 Session JSONL 自行追加，必须投递给会话 writer；会话关闭后保留待认领 receipt。request 记录采用的精确正文快照，不能恢复时读 memory 最新版解释昨天发送了什么。
+
+成功漏斗分清：输入被门控检查 → 形成耐久信号 → 排抽取 → 得到候选 → 接受 → 已提交 → 被召回 → 已发送 → 有使用证据 → 有效果证据。每级有明确分母；“没候选但花了 token”“接受后 job 失败”“召回了但预算丢弃”都能单列，不用一枚 savedCount 遮住。
+
+#### 4.71.12 当前代码边界与实施顺序
+
+2026-09-11 静态核对：`src/memory/project_memory.hpp/.cpp` 已有统一 workspace 身份、项目/用户层、kind/scope/evidence/时间字段、实体硬命中+BM25、最多 3 条/8 KiB 召回预算和 pending job/worker；`memory_tool.cpp` 的 memory_save 返回“已排进后台队列”，这一点应保留，不能改成抢先成功。
+
+`src/app/commands/memory_commands.cpp::ExtractTurnMemory` 已接同轮变更去重和短文本必跳门；耐久信号目前仍标 shadow，符合条件后仍直接调用 ModelRouterService::Sample。不能沿旧单写成“每个 history 增长都无门控调用”。`generate_enabled()` 与写入入口仍受 learn 档约束；两轴权限、持久批队列和本节复合事务不能据已有回执类型认定已实现。
+
+`src/app/memory_ledger_bridge.cpp` 已存召回快照并记录 ContextInjected，但采用旧 EventScope/RecordRequest 接口；v3 正式 memory message、inputMessageRefs、storeCommitRef 及 context 采用关系仍须按实际写口接通。当前写入/verify 路会刷新验证时间，本节要求区分写盘、引用校验与语义验证。已有 tests/unit/memory 测试族证明各自测试范围，不能代替下列生产闭环。
+
+- [ ] M0：冻结作用域/主张/证据/有效期合同、MemoryStore commits/head、CAS 与忘记屏障；沿现有身份服务。
+- [ ] M1：权限拆轴、显式写入回执和可靠 outbox/worker；故障注入验证 queued 与 committed 分界。
+- [ ] M2：召回作用域/新鲜度/冲突过滤，正式 v3 memory message、请求 refs 与 why 回执；先接本地词法基线。
+- [ ] M3：有界 gated 批抽取、无工具内部请求、来源去重与 budget owner；后台失败不阻塞主回复。
+- [ ] M4：更正/merge/forget、派生上下文失效、并发会话/工作树/子代理约束；首版不含彻底擦除和云同步。
+- [ ] M5：检索组件、生产自动写入、端到端任务三层评测；结果过线后才讨论 auto 默认或更重后端。
+
+#### 4.71.13 验收与评测：先证实不害事，再看有没有帮忙
+
+遵守 [LoCoMo 评测纠偏单](LoCoMo评测纠偏_判分修复数据隔离与端到端重跑.todo)；旧 E2 结果不复用为收益证据。检索测试与实际办事分开，人工预灌与生产抽取分开。
+
+| 组别 | 测什么 | 边界 |
+| --- | --- | --- |
+| A memory-off | 无记忆对照 | 同模型、任务、预算、工具与环境 |
+| B oracle-ingest | 已有正确条目时检索/使用上限 | 人工灌库，不冒认自动学习成功 |
+| C production-auto/review | 原始合法会话经真实门控、抽取、接受、worker、召回的闭环 | review 的人工接受必须另列，不混成全自动 |
+| D stale/conflict/irrelevant | 过期、冲突、无关及注入指令的防害能力 | 固定扰动与判分，不在看过结果后挑样本 |
+
+材料按时间切分：记忆只可来自测试问题之前允许保存的内容，未来答案、题库、评测日志不准进候选；A/B/C 使用独立可重置库，防止交叉污染。问答型 LoCoMo 答题关闭工具，只由生产召回注入；代码任务保留等价工具权限但隔离答案/评分目录。评分读取 v3 指定 final message/验收产物，绝不从 stdout 猜答案。
+
+检索报 Recall@k、Precision@k、零命中、实际注入命中与错误 scope/stale 注入；写入报触发率、候选精度、纠正命中、重复条目和最终成功提交率。端到端报任务成功、首个有效动作时间、工具/模型轮数、总 token/费用、用户重复解释/纠正次数以及 harmful-memory rate。所有失败、超时和空候选留在预注册分母，附逐项数据、配置/数据 hash、配对差值和置信区间。
+
+首版确定性硬门：未授权写入、跨 scope 泄漏、forgotten 自动复活、重复提交导致丢修正均必须为零；任一发生先停发布。收益不预填百分比，样本量/业务退化阈值在运行前按基线冻结。P50/P95 召回时延、磁盘读取、索引大小、抽取阻塞时间和每条最终接受记忆的摊销成本一起报；不以单个 Recall 数字决定上向量库。
+
+| 场景 | 必须验出的结果（全部待实现/执行） |
+| --- | --- |
+| “好”“继续”与“以后用 bun” | 前两者不无故抽取，明确短纠正不被字数门误杀 |
+| 显式保存随后主轮收尾 | 同来源不二次抽取；queued 与 committed 各有真实回执 |
+| 保存 job 失败、库已提交但 Session 回执丢失 | 原操作可查/恢复，不假成功，不重复创建 |
+| 两会话同时更新同主题/合并多主题 | CAS 防覆盖，多项 head 同提交，失败不留下半份 merge |
+| 两 worktree 的不同配置、Windows/Linux 环境 | 正确筛 scope/依赖，不把别处事实当当前条件 |
+| 设计文档说“计划实现”、assistant 自报成功 | 不写成 implemented/verified，无独立证据不升格 |
+| 模型循环引用旧 memory | 引用次数不提高可信度，不产生伪独立证据 |
+| 文件改动、过期、验证只发现文件存在 | stale/unknown 不当当前事实注入，lastVerifiedAt 不乱续 |
+| 旧偏好、新用户纠正、并存条件 | 正确修订或并存；真冲突不把两条一起当指令注入 |
+| 候选还在排队时 forget | tombstone 拦提交，重启/merge/抽取不复活旧主张 |
+| 索引落后/损坏与 rebuild | 对齐提交水位，不复活孤儿、旧版本或忘记条目 |
+| memory 已进 compact 摘要后被撤销 | 派生依赖可查，后续视图重建或暂停，不谎称只删最后一条就干净 |
+| 召回候选超预算、未发送、模型未用 | ranked/applied/sent/used 四笔分开，unknown 不算 helpful |
+| Goal/Loop/btw/subagent 混合 | 各按读写/owner 合同执行，不递归抽取，不越预算/写权 |
+| 权限关闭、恶意来源文本、Lua 越权候选 | 不偷偷开关、不提升指令来源，宿主提交口拦截 |
+| 用户查 why/jobs/conflicts/forget | 能定位到真实版本、来源、提交和剩余历史边界 |
+| 自动抽取批处理崩溃与内部消息交错 | 不重复处理已覆盖源，不按全局 seq 漏掉待处理主输入 |
+| A/B/C/D 配对与缺答案/无候选 | 无泄题、无 stdout 补判、失败不从分母消失 |
+
 ## 五、分期
+
+- [x] 设计：2026-09-11 补 §4.71 Memory 作用域/新鲜度、版本库与跨会话提交、读写拆轴、批抽取、召回/使用回执、纠错/遗忘及效果评测；M0–M5 与验收矩阵均待实施。
+
+- [x] 设计：2026-09-11 补 §4.68 Loop 固定周期/逐拍事务/恢复去重、§4.69 btw 持久旁问/独立请求/显式回流，以及 §4.70 三者联合调度与计费；新增实施分期及验收矩阵，尚未接线。
 
 - [x] 设计：2026-09-11 参考 Claude Code 官方 Goal 机制，补 §4.67 持久 Goal 模式、独立验收、证据门槛、续排事务、预算、后台等待、恢复与实施验收；运行时尚未接线。
 

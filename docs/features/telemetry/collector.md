@@ -1,5 +1,7 @@
 # 遥测与本地 Collector
 
+> **V3-GAP-02：v3 投影尚未接通。** 当前 projector 解析旧 EventEnvelope，服务发现仍查 main.jsonl。下列 Collector 配置适用于已有遥测链，不能据此承诺默认 v3 新场能导出完整数据。见[清理清单](../../development/v3-legacy-audit.md)。
+
 设计全账见 `todos/端云协同可观测架构与Telemetry插件设计.todo`。本文只讲怎么把
 LubanCode 的 OTLP 出口接到一台本机 Collector 上看数据。默认关闭:不开
 `features.telemetry`,零线程、零目录、零出站。

@@ -256,9 +256,10 @@ TEST_CASE("证据引用合同:来源三选一、hash hex64、必选回指") {
                                           {"bytes", 10},
                                           {"mediaType", "text/plain"}};
         REQUIRE(goalns::ValidateEvidenceRef(ref.ToJson()).empty());
-        // roundtrip:artifact 分支也能回来。
-        const auto restored = GoalEvidenceRef::FromJson(
-            nlohmann::json::parse(ref.ToJson()), nullptr);
+        // roundtrip:artifact 分支也能回来。ToJson() 出的就是 json,直接进
+        // FromJson;先前误套一层 json::parse,把 json 当输入流喂适配器,
+        // 三平台都在 nlohmann input_adapters 处炸出 incomplete type。
+        const auto restored = GoalEvidenceRef::FromJson(ref.ToJson(), nullptr);
         REQUIRE(restored.has_value());
         CHECK(restored->source == GoalEvidenceSource::Artifact);
         CHECK(restored->artifact_ref.at("artifactId") == "res-000001");
@@ -366,46 +367,53 @@ TEST_CASE("ApplyTransition:提交事务、CAS、候选合同、terminal 收账")
     CHECK(service.current()->evidence_refs.size() == 1);
     CHECK(service.current()->usage.input_tokens == 50);
 
-    auto no_reason = Transition(GoalLifecycle::Blocked, 3);
+    // Paused 的边表只许回 active 或收账(§4.67.3):变 blocked 须先回
+    // active 复评再撞阻塞——直接从 paused 发 blocked 候选拿
+    // invalid_transition,到不了候选合同检查。先恢复,再验"缺停因拒"。
+    auto unpause = Transition(GoalLifecycle::Active, 3);
+    unpause.goal_id = "goal-1";
+    REQUIRE(service.ApplyTransition(unpause).ok);
+
+    auto no_reason = Transition(GoalLifecycle::Blocked, 4);
     no_reason.goal_id = "goal-1";
     const auto blocked_bad = service.ApplyTransition(no_reason);
     CHECK_FALSE(blocked_bad.ok);
     CHECK(blocked_bad.error_code == goalns::kErrGoalCandidateInvalid);
 
-    auto blocked = Transition(GoalLifecycle::Blocked, 3);
+    auto blocked = Transition(GoalLifecycle::Blocked, 4);
     blocked.goal_id = "goal-1";
     blocked.stop_reason = "依赖缺位";
     blocked.blocker_key = "auth-dep";
     REQUIRE(service.ApplyTransition(blocked).ok);
 
     // 恢复边:blocked -> active(设计 §4.67.3,条件核验归 G1)。
-    auto resume = Transition(GoalLifecycle::Active, 4);
+    auto resume = Transition(GoalLifecycle::Active, 5);
     resume.goal_id = "goal-1";
     REQUIRE(service.ApplyTransition(resume).ok);
 
     // terminal 收账:achieved;此后迟到候选拒。
-    auto done = Transition(GoalLifecycle::Achieved, 5);
+    auto done = Transition(GoalLifecycle::Achieved, 6);
     done.goal_id = "goal-1";
     done.stop_reason = "全部 criteria 过硬门槛";
     done.applied_evaluation_id = "eval-3";
     REQUIRE(service.ApplyTransition(done).ok);
     CHECK(goalns::IsLifecycleTerminal(service.current()->lifecycle));
 
-    auto late = Transition(GoalLifecycle::Active, 6);
+    auto late = Transition(GoalLifecycle::Active, 7);
     late.goal_id = "goal-1";
     const auto late_result = service.ApplyTransition(late);
     CHECK_FALSE(late_result.ok);
     CHECK(late_result.error_code == goalns::kErrGoalTerminal);
 
-    // 账上 applied 共 6 条(revision 1..6),快照 6 份全在。
+    // 账上 applied 共 7 条(revision 1..7),快照 7 份全在。
     const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.jsonl());
     REQUIRE(ledger.has_value());
     int applied_count = 0;
     for (const auto& event : ledger->events) {
         if (event.kind == EventKindV3::StateGoalApplied) ++applied_count;
     }
-    CHECK(applied_count == 6);
-    for (std::uint64_t revision = 1; revision <= 6; ++revision) {
+    CHECK(applied_count == 7);
+    for (std::uint64_t revision = 1; revision <= 7; ++revision) {
         CHECK(std::filesystem::exists(harness.dir /
                                       goalns::SnapshotRefPath("goal-1", revision)));
     }
@@ -461,7 +469,11 @@ TEST_CASE("fail closed:applied 落账失败锁写口,候选快照不生效") {
     writer_options.inject_io_failure = [&inject_calls]() -> std::optional<std::string> {
         return ++inject_calls > 2 ? std::optional<std::string>("injected") : std::nullopt;
     };
-    auto started = V3Writer::Start(harness.jsonl(), "20260911-120000-AAAAAA", "run-000001",
+    // ServiceHarness 构造时已在 s1.jsonl 上开过 writer(create-new 占名),
+    // 注入版再开同一文件必撞名——REQUIRE(started) 两轮皆 FATAL 的根因。
+    // 本册的账另立 s2.jsonl,harness 自带的 s1 写者闲置不动。
+    const std::filesystem::path stream = harness.dir / "s2.jsonl";
+    auto started = V3Writer::Start(stream, "20260911-120000-AAAAAA", "run-000001",
                                    "system prompt", nlohmann::json::object(), writer_options);
     REQUIRE(started.has_value());
     auto writer = std::move(*started);
@@ -484,7 +496,7 @@ TEST_CASE("fail closed:applied 落账失败锁写口,候选快照不生效") {
     CHECK(again.error_code == goalns::kErrGoalStoreUnavailable);
 
     // 账上没有 applied:投影如实报 no_goal(不从候选快照猜)。
-    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.jsonl());
+    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.dir / "s2.jsonl");
     REQUIRE(ledger.has_value());
     const auto projection = goalns::ProjectGoalState(*ledger, harness.dir);
     CHECK(projection.gap == goalns::GoalProjectionGap::NoGoal);
@@ -507,6 +519,40 @@ TEST_CASE("只读投影:验后账重建、缺口明报、AdoptFromProjection 接
 
     const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.jsonl());
     REQUIRE(ledger.has_value());
+
+    const auto make_snapshot = [](const char* goal, std::uint64_t rev) {
+        GoalStateSnapshot snapshot;
+        snapshot.goal_id = goal;
+        snapshot.session_id = "20260911-120000-AAAAAA";
+        snapshot.run_id = "run-000001";
+        snapshot.state_revision = rev;
+        snapshot.contract_revision = 1;
+        snapshot.objective = "obj";
+        snapshot.lifecycle = GoalLifecycle::Preparing;
+        return snapshot;
+    };
+    const auto write_snapshot = [&](const GoalStateSnapshot& snapshot) {
+        WriteFileBytes(harness.dir / goalns::SnapshotRefPath(snapshot.goal_id,
+                                                             snapshot.state_revision),
+                       goalns::SnapshotBytes(snapshot));
+    };
+    const auto append = [&](const char* goal, std::uint64_t from, std::uint64_t to,
+                            std::uint64_t contract_rev, const char* lifecycle) {
+        EventDraft draft;
+        draft.kind = EventKindV3::StateGoalApplied;
+        draft.payload["goalId"] = goal;
+        draft.payload["fromStateRevision"] = from;
+        draft.payload["toStateRevision"] = to;
+        draft.payload["contractRevision"] = contract_rev;
+        draft.payload["snapshotRef"] = goalns::SnapshotRefPath(goal, to);
+        // applied 所记 hash 用盘上这份快照文件的真实值。
+        const std::string bytes = ReadFileBytes(harness.dir /
+                                                goalns::SnapshotRefPath(goal, to));
+        draft.payload["snapshotSha256"] =
+            bytes.empty() ? std::string(64, 'a') : lubancode::hooks::Sha256Hex(bytes);
+        draft.payload["lifecycle"] = lifecycle;
+        return harness.writer->AppendEvent(std::move(draft), Durability::PowerLoss);
+    };
 
     SUBCASE("正常重建") {
         const auto projection = goalns::ProjectGoalState(*ledger, harness.dir);
@@ -550,9 +596,6 @@ TEST_CASE("只读投影:验后账重建、缺口明报、AdoptFromProjection 接
 TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 不衔接") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     ServiceHarness harness("sequence");
-    // 直接在账上落序列非法的 applied(单行合同都合法,跨行序列坏)。
-    // snapshotSha256 默认取快照文件真 hash(让 hash 校验先过,序列缺口
-    // 才是唯一报点);需要伪造时显式传。
     const auto make_snapshot = [](const char* goal, std::uint64_t rev) {
         GoalStateSnapshot snapshot;
         snapshot.goal_id = goal;
@@ -565,9 +608,11 @@ TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 
         return snapshot;
     };
     const auto write_snapshot = [&](const GoalStateSnapshot& snapshot) {
-        WriteFileBytes(harness.dir / goalns::SnapshotRefPath(snapshot.goal_id,
-                                                             snapshot.state_revision),
-                       goalns::SnapshotBytes(snapshot));
+        const std::filesystem::path path =
+            harness.dir / goalns::SnapshotRefPath(snapshot.goal_id, snapshot.state_revision);
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        WriteFileBytes(path, goalns::SnapshotBytes(snapshot));
     };
     const auto append = [&](const char* goal, std::uint64_t from, std::uint64_t to,
                             std::uint64_t contract_rev, const char* lifecycle) {
@@ -578,7 +623,6 @@ TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 
         draft.payload["toStateRevision"] = to;
         draft.payload["contractRevision"] = contract_rev;
         draft.payload["snapshotRef"] = goalns::SnapshotRefPath(goal, to);
-        // applied 所记 hash 用盘上这份快照文件的真实值。
         const std::string bytes = ReadFileBytes(harness.dir /
                                                 goalns::SnapshotRefPath(goal, to));
         draft.payload["snapshotSha256"] =
@@ -587,6 +631,9 @@ TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 
         return harness.writer->AppendEvent(std::move(draft), Durability::PowerLoss);
     };
 
+    // 直接在账上落序列非法的 applied(单行合同都合法,跨行序列坏)。
+    // snapshotSha256 默认取快照文件真 hash(让 hash 校验先过,序列缺口
+    // 才是唯一报点);需要伪造时显式传。
     SUBCASE("terminal 复活") {
         auto s1 = make_snapshot("goal-1", 1);
         write_snapshot(s1);

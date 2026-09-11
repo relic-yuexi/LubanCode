@@ -6,7 +6,7 @@
 
 ## 两种运行方式
 
-默认模式检查当前表现，包含已知缺陷。通过只说明复现一致。目标模式检查修复后应有行为；目前应报失败，不使用 skip、should_fail 或忽略退出码把它染绿。
+默认模式检查当前表现。FA-01/FA-02/FA-03 已于 2026-09-11(P1 批)按目标断言修复,现为默认回归;FA-04/FA-05 仍是已知缺陷,默认模式钉当前表现,通过只说明复现一致。目标模式(`LUBANCODE_FAILURE_AUDIT_EXPECT_FIXED=1`)检查修复后应有行为;FA-04/FA-05 在该模式下应报失败,不使用 skip、should_fail 或忽略退出码把它染绿。
 
 ```powershell
 cmake --build --preset release --target lubancode_tests -j 2
@@ -36,9 +36,9 @@ $auditExitCode
 
 | 编号 | 注入与观察 | 目标断言及边界 |
 | --- | --- | --- |
-| FA-01 | 第一次工具执行时，把结果仓目录换成普通文件；观察下一次发送、磁盘 tool 消息和恢复工作 | 仓未保存时停止后续发送，并暴露未完成保存工作；当前目标选择停止分支。若另定可靠补存后继续的合同，须同步验证实发/恢复等价，不能仅改调用次数 |
-| FA-02 | 工具返回 `is_error=true`，比较实发与 `ProjectV3ContextHistory` | 错误标记往返不变；正常文本仍不能替代错误语义 |
-| FA-03 | 分别在 prepared/sent 写入处注入失败，并核对实际诊断名称 | 两个点都不得调用 backend；prepared 是已有对照，sent 是缺口 |
+| FA-01(已修 2026-09-11) | 第一次工具执行时，把结果仓目录换成普通文件；观察下一次发送、磁盘 tool 消息和恢复工作 | 仓未保存时停止后续发送(回执翻 Failed,内存 history 撤回到持久边界),恢复投影以 `result_missing` 列出缺口并保留执行终态;现为默认回归。若另定可靠补存后继续的合同，须同步验证实发/恢复等价，不能仅改调用次数 |
+| FA-02(已修 2026-09-11) | 工具返回 `is_error=true`，比较实发与 `ProjectV3ContextHistory` | 错误标记随最终 tool 消息本体落档、投影原样还原;现为默认回归 |
+| FA-03(已修 2026-09-11) | 分别在 prepared/sent 写入处注入失败，并核对实际诊断名称 | 两个点都不得调用 backend(sent 经 `OnRequestSent` 回 false 贯通到 `run_one_attempt`);现为默认回归 |
 | FA-04 | 第一请求输出部分正文后断网，第二请求成功 | 每个 `requestId` 恰有一个响应终态；不能只核总计数 |
 | FA-05 | 同一断流场景接 `TurnEventAdapter`，保留主路当前 wiring | history 为 SUCCESS；当前目标要求录音器正文也为 SUCCESS。若采用失效 item/撤回协议，须扩展录音器到最终可见投影并补 UI 测试，不能把原始 delta 拼接当最终显示 |
 

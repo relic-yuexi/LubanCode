@@ -2,6 +2,12 @@
 // These characterize observed behavior, including known bugs; a green run is NOT
 // an acceptance claim for durability. When fixing a finding, change the matching
 // observation into the intended invariant. No real provider or user data is used.
+//
+// 2026-09-11 P1 batch (失败与恢复单): FA-01/FA-02/FA-03 observation branches
+// were replaced by the intended invariants (unconditional CHECKs) — the fixes
+// landed in loop.cpp / trajectory_session.cpp / reader.cpp. FA-04/FA-05 remain
+// probes (P2, still gated by LUBANCODE_FAILURE_AUDIT_EXPECT_FIXED=1). The
+// original observation snapshot stays in interview/failure-and-recovery.md.
 #include <doctest/doctest.h>
 
 #include <atomic>
@@ -171,9 +177,11 @@ struct Audit {
         wiring.boundary_recorder = bridge.get();
         wiring.wait_request_backoff = [](auto, auto) { return true; };
         wiring.on_tool_trace = [this](const auto& event) { bridge->OnToolTrace(event); };
-        wiring.on_tool_results_committed = [this](const auto& batch, const auto& results) {
-            bridge->OnToolResultsCommitted(batch, results);
-        };
+        // P1-A:回执口(与 ToolTraceHub::Install 同款)——提交成败交回引擎。
+        wiring.on_tool_results_committed_receipt =
+            [this](const std::string& batch, const api::Message& results) {
+                return bridge->OnToolResultsCommitted(batch, results);
+            };
         return wiring;
     }
     std::vector<Json> Rows() const {
@@ -210,6 +218,9 @@ int KindCount(const std::vector<Json>& rows, const std::string& kind) {
 }  // namespace
 
 TEST_CASE("failure audit FA-03: prepared and sent write gates") {
+    // Fixed 2026-09-11 (P1-C): the pre-send write gate is wired through
+    // LoopBoundaryRecorder::OnRequestSent returning false — a failed sent write
+    // must keep the backend at zero calls (prepared failure already did).
     for (const int fail_at : {1, 2}) {
         CAPTURE(fail_at);
         Audit audit;
@@ -225,7 +236,7 @@ TEST_CASE("failure audit FA-03: prepared and sent write gates") {
         const auto result = agent.Run(Input(), audit.Wiring());
         CHECK_FALSE(result.has_value());
         CHECK(audit.ledger->v3_main_writer()->broken());
-        CHECK(backend.requests.size() == (fail_at == 1 || ExpectFixed() ? 0 : 1));
+        CHECK(backend.requests.size() == 0);  // 本地账写不动,一次都不发
         REQUIRE_FALSE(audit.bridge->recent_errors().empty());
         CHECK(audit.bridge->recent_errors().front().find(
             fail_at == 1 ? "model.request.prepared:" : "model.request.sent:") == 0);
@@ -413,16 +424,15 @@ TEST_CASE("failure audit FA-01: unavailable store and recovery work") {
     CHECK(disk_tool_messages == 0);
     REQUIRE(resumed.has_value());
     REQUIRE(replay.has_value());
-    if (ExpectFixed()) {
-        CHECK_FALSE(result.has_value());
-        CHECK(backend.requests.size() == 1);
-        CHECK_FALSE(resumed->execution.open_actions.empty());
-    } else {
-        CHECK(result.has_value());
-        CHECK(backend.requests.size() == 2);
-        CHECK(sent_results == 1);
-        CHECK(resumed->execution.open_actions.empty());
-    }
+    // Fixed 2026-09-11 (P1-A): the batch receipt gate stops the loop before a
+    // second model request, and the resume projection lists the result gap
+    // (execution terminal kept, result chain missing) as recovery work.
+    CHECK_FALSE(result.has_value());
+    CHECK(backend.requests.size() == 1);
+    REQUIRE(resumed->execution.open_actions.size() == 1);
+    CHECK(resumed->execution.open_actions[0].folded_status == "result_missing");
+    REQUIRE_FALSE(resumed->execution.open_actions[0].attempts.empty());
+    CHECK(resumed->execution.open_actions[0].attempts.back().status == "done");
     int replay_results = 0;
     for (const auto& message : *replay) for (const auto& block : message.content)
         if (std::holds_alternative<api::ToolResultBlock>(block)) ++replay_results;
@@ -458,5 +468,7 @@ TEST_CASE("failure audit FA-02: failed tool result error flag roundtrip") {
     audit.Report("tool_error_flag", {{"live_error_results", live_errors},
         {"replay_error_results", replay_errors}, {"verify_ok", v3::VerifyV3File(audit.path).ok}});
     CHECK(live_errors == 1);
-    CHECK(replay_errors == (ExpectFixed() ? live_errors : 0));
+    // Fixed 2026-09-11 (P1-B): the fed-back error semantics ride the final tool
+    // message body and come back through the projection unchanged.
+    CHECK(replay_errors == live_errors);
 }

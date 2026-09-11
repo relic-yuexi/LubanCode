@@ -1,5 +1,7 @@
 # 会话装配与控制边界
 
+> **v3 边界：** 本页保留现行宿主、goal/loop/plan 接线说明。持久消息与恢复以 [Session v3](session-v3.md)为准；新增 Goal/Loop/btw 事务合同尚未全部实现。
+
 [架构总览](README.md) · [Query 数据流](query-data-flow.md) · [Agent Loop](agent-loop/reliability.md) · [命名规范](../development/naming.md)
 
 这页专讲交互会话怎么拆。旧路把配置、后端、工具、提示词、界面、存档、命令、goal、loop、peer、plan 与录制全塞进一只控制器。如今各件已经分家，`TerminalSessionController` 只守会话状态机、路由与公平泵。

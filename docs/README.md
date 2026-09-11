@@ -1,5 +1,7 @@
 # LubanCode 文档
 
+新版入口：[Session v3 当前实现](architecture/session-v3.md) · [旧设计清理清单](development/v3-legacy-audit.md)。新会话默认写 v3；旧读口与尚未接线的模块在清单中逐项标明。
+
 [根 README](../README.md) · [功能目录](features/README.md) · [参考手册](reference/README.md) · [架构说明](architecture/README.md) · [开发手册](development/README.md)
 
 这里只收产品、架构与开发文档。版本号只认 `src/app/version.hpp`，

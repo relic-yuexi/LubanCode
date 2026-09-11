@@ -1,5 +1,7 @@
 # LubanCode 架构
 
+会话持久化以 [Session v3 当前实现](session-v3.md)和[字段合同](trajectory-v3-schema.md)为准。旧接口、消费方与待接线项见[清理清单](../development/v3-legacy-audit.md)。
+
 [文档首页](../README.md) · [会话编排](session-orchestration.md) · [Query 数据流](query-data-flow.md) · [Workflow 运行时](workflow-runtime.md) · [Gateway 总装](gateway/README.md) · [工具手册](../reference/tools.md) · [配置手册](../reference/configuration.md)
 
 LubanCode 是一支 C++23 命令行程序。入口收参数，组合根装部件，会话层排活，Agent 推模型 step，工具层办本机差事，协议层翻各家 JSON。这里看全局；会话怎样拆，另见[会话编排](session-orchestration.md)。版本号只认 `src/app/version.hpp`，测试口径看[测试指南](../development/testing.md)。
@@ -54,7 +56,8 @@ lubancode
 | `src/app_server/` | stdio framing、JSON-RPC schema、连接、交互请求与事件出箱 | Agent 领域状态 |
 | `src/agent/` | `AgentProfile`、`Agent`、step 循环、上下文、prompt 拼装、压缩、artifact 与前缀账 | 终端会话泵与 JSONL 存储 |
 | `src/runtime/` | 中立事件/命令合同、会话/turn 真值、goal、loop、plan、预算、重试与 replay | 终端画法与 wire JSON |
-| `src/sessions/` | JSONL 会话、catalog、生命周期与 goal 事件 | 模型请求推进 |
+| `src/trajectory/v3/` | message/event 原账、上下文链、读写与恢复投影 | 模型请求推进 |
+| `src/sessions/` | 会话接口及旧格式相关实现，迁移边界见清理清单 | v3 字段合同 |
 | `src/workflow/` | workflow 定义、解析、校验、journal、runtime、planner 与宿主 executor | 交互会话所有权 |
 | `src/cli/` | 输入编辑、终端端口、转录投影、Markdown、公式、diff、主题与 i18n | 会话业务策略与 wire 解析 |
 | `src/api/` | 中立消息、请求档案、SSE 分帧、HTTP 流与四套 wire adapter | 工具权限与项目文件 |
@@ -140,7 +143,7 @@ sequenceDiagram
     else 最终正文或收口
         A-->>R: RunOutcome
         R-->>C: RunTurnResult
-        C->>S: 追加本轮新账
+        C->>S: 收束本轮（执行期间已逐步记账）
     end
 ```
 
@@ -220,9 +223,9 @@ LUBAN_BASE_URL / LUBAN_API_KEY / LUBAN_MODEL
 
 顶层连接解析不再隐式读取 `ANTHROPIC_*`、`OPENAI_*` 通名，避免外部工具污染导致 provider 解绑。`providers[].key_env` 是显式配置的密钥来源，仍可指向任意变量名（包括这些通名），不做前缀拦截。
 
-会话写 JSONL。消息、工具、usage、模式、goal、loop、plan 与 compact 各按事件落账。`SessionRuntime` 管会话级真值与事件接线，`SessionStore` 管持久文件，`agent::ContextManager` 管模型眼下要看的两本历史。
+新会话默认写 v3 JSONL，同一文件只含 `message/event` 两类行。`TrajectorySessionLedger` 接 `V3Writer` 写账；读取侧分别投出完整历史和当前上下文。控制状态、goal/loop 等域尚未全迁 v3，不能据现有命令推断其恢复账已经齐全。
 
-上下文吃 system、消息、工具 schema 与输出预留。压力到了，先做结构压缩，再做语义 compact，最后才让 hard trim 兜底。`/compact` 可手动收束，`/context` 可查预算。详见[会话与上下文](../features/sessions/README.md)。
+上下文计入 system、消息、工具 schema 与输出预留。v3 compact 以 `compact.applied` 提交新链，再换内存 history；共用 loop 仍有结构压缩与 hard trim，全部裁剪入链尚待收敛。`/compact` 可手动收束，`/context` 可查预算。详见[会话与上下文](../features/sessions/README.md)。
 
 ## 10. 终端与 app-server
 
@@ -250,7 +253,7 @@ app-server 走同一套中立事件和交互合同。它从 stdio 收 JSON-RPC�
 3. goal、loop、plan、预算或回放状态机怎么算？放 `runtime/`。
 4. 会话怎样装、命令怎样接、turn 怎样投到终端？放 `app/`。
 5. 只改终端输入或画法？放 `cli/`。
-6. 要跨重启保存？先定 `sessions/` 事件，再从 app 接线。
+6. 要跨重启保存？先查 v3 `message/event` 合同与所属状态域，再从 runtime/app 接线。
 7. 要碰系统调用？接口留共享层，平台实现沉 `platform/`。
 
 添命令，补注册表行、域 handler 和命令表测试。添会话子系统，先立 `Host` 借用口，再把状态、泵、恢复与拆线收进自己的 wiring。添协议事件，先翻成中立类型，别让厂商字段爬进 Agent 或 UI。

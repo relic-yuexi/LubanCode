@@ -248,7 +248,7 @@ WriteReceipt ToolActionSession::SelectResult(
 
 WriteReceipt ToolActionSession::AppendToolMessage(V3Writer& writer, std::string content,
                                                   std::optional<std::string> result_selection_ref,
-                                                  Durability durability) {
+                                                  bool is_error, Durability durability) {
     MessageDraft draft;
     draft.turn_id = turn_id_;
     draft.step_id = step_id_;
@@ -256,9 +256,13 @@ WriteReceipt ToolActionSession::AppendToolMessage(V3Writer& writer, std::string 
     draft.purpose = MessagePurpose::Conversation;
     draft.origin = MessageOrigin::SessionRuntime;
     // message.tool_call_id 用本地全局调用号,由 wire adapter 映射回
-    // provider 原始号(§4.18)。
+    // provider 原始号(§4.18)。is_error 只写真值(P1-B):读取侧 contains()
+    // 认键,缺键 = false。
     draft.message = nlohmann::json::object(
         {{"role", "tool"}, {"tool_call_id", action_id_}, {"content", std::move(content)}});
+    if (is_error) {
+        draft.message["is_error"] = true;
+    }
     draft.result_selection_ref = std::move(result_selection_ref);
     WriteReceipt receipt = writer.AppendMessage(std::move(draft), durability);
     if (receipt.status != WriteReceipt::Status::Committed) {

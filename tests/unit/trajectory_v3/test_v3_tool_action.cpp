@@ -336,3 +336,66 @@ TEST_CASE("执行成功而结果保存失败:保留 done,另报 persist_failed")
     CHECK(has_persist_failed);
     CHECK(VerifyV3File(harness.jsonl).ok);
 }
+
+// ---------------------------------------------------------------------------
+// P1-B(失败与恢复单 FA-02):回喂语义落进最终 tool 消息本体。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("回喂语义落档: is_error=true 写进 tool 消息本体,false 不落键") {
+    Harness harness("is-error-body");
+    auto writer = harness.Start();
+    REQUIRE(writer.has_value());
+
+    // 错误结果:执行终态与回喂语义可以分家(执行 done、回喂 error)。
+    auto error_action = ToolActionSession::Admit(*writer, "turn-000001", "step-000001",
+                                                 "action-000001", "queued", std::nullopt, std::nullopt);
+    REQUIRE(error_action.Start(*writer, "args-ref", SampleIdentity()).status ==
+            WriteReceipt::Status::Committed);
+    REQUIRE(error_action.Finish(*writer, 0, 20).status == WriteReceipt::Status::Committed);
+    nlohmann::json result_ref = nlohmann::json::array(
+        {MakeArtifactRef("res-000001", "result_metadata", "artifacts/res-000001.json",
+                         std::string(64, '2'), 96, "application/json")});
+    WriteReceipt persisted = error_action.PersistedResult(
+        *writer, result_ref.get<std::vector<nlohmann::json>>(), error_action.last_event_id());
+    REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+    // 选用口径以回喂为准(P1-B):is_error=true → effectiveOutcome=failed,
+    // 不从执行终态(done)猜。
+    WriteReceipt selected =
+        error_action.SelectResult(*writer, {persisted.id}, {}, /*effective_outcome=*/"failed");
+    REQUIRE(selected.status == WriteReceipt::Status::Committed);
+    REQUIRE(error_action.AppendToolMessage(*writer, "命令没跑起来", selected.id,
+                                           /*is_error=*/true)
+                .status == WriteReceipt::Status::Committed);
+
+    // 成功结果:is_error=false 不落键(缺键即成功,旧账两读法兼容)。
+    auto ok_action = ToolActionSession::Admit(*writer, "turn-000001", "step-000001",
+                                              "action-000002", "queued", std::nullopt, std::nullopt);
+    REQUIRE(ok_action.Start(*writer, "args-ref-2", SampleIdentity()).status ==
+            WriteReceipt::Status::Committed);
+    REQUIRE(ok_action.Finish(*writer, 0, 15).status == WriteReceipt::Status::Committed);
+    WriteReceipt ok_persisted = ok_action.PersistedResult(
+        *writer, result_ref.get<std::vector<nlohmann::json>>(), ok_action.last_event_id());
+    REQUIRE(ok_persisted.status == WriteReceipt::Status::Committed);
+    REQUIRE(ok_action.AppendToolMessage(*writer, "一切正常", ok_persisted.id).status ==
+            WriteReceipt::Status::Committed);
+
+    auto lines = ReadJson(harness.jsonl);
+    int tool_messages = 0;
+    for (const auto& line : lines) {
+        if (line.value("type", "") != "message" || line["message"]["role"] != "tool") {
+            continue;
+        }
+        ++tool_messages;
+        const bool is_error_action = line.value("actionId", "") == "action-000001";
+        // json 缺键一律 contains():operator[] 缺键是 UB(平台坑清单)。
+        const bool has_flag = line["message"].contains("is_error");
+        CHECK(has_flag == is_error_action);
+        if (has_flag) {
+            REQUIRE(line["message"]["is_error"].is_boolean());
+            CHECK(line["message"]["is_error"].get<bool>());
+        }
+        CHECK(line["message"]["content"] == (is_error_action ? "命令没跑起来" : "一切正常"));
+    }
+    REQUIRE(tool_messages == 2);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}

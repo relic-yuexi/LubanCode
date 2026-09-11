@@ -236,28 +236,17 @@ AI 联署，占 `82.9%`。
 证据：[`loop.cpp`](../src/agent/loop.cpp)、[`turn_view.hpp`](../src/runtime/turn_view.hpp)、
 [`schema.cpp`](../src/trajectory/schema.cpp)。
 
-### 3. 主请求不重试，用户要怎样续？
+### 3. 前序发出去了，assistant 没收到，怎么办？
 
-**先答：** 不重试守住了副作用，现版也保住了可信前缀；可一键续跑体验还没补齐。
-每次模型请求前，用户输入与已完成 step 已进 history。上一 step 的 assistant、工具
-调用和工具结果也已逐条落 session。网络错、`429`、`5xx` 或解析错来了，本轮明报
-`请求失败`，会话不杀，输入提示符回来。用户可输入“继续上一项任务”；进程重启后
-也可用 `--continue` 或 `/resume` 找回已成账前缀。工具自己失败时，宿主写一条错误
-`ToolResultBlock`，模型可换参数，用新 call id 再走确认与 Hook。
+**先答：** 先看错在哪儿。当前网络类错误、指定 HTTP 状态和白名单 API 错误，会从同一请求边界有限重发，连首发最多 6 次。每次清空 assembler，成功后才提交 assistant、执行新工具。上一 step 工具已经执行并提交结果，不会让请求恢复环再跑一次。
 
-有一道窄缝必须明说：普通 transport 断流后，屏上已经露出的半截正文不会写进
-history。只有用户按 ESC，主循环才强制收起 partial assistant，添打断标记，并给
-未执行工具补结果。故网络抖在第一 step，原始用户任务还在，用户不必从头重写；
-可那段只在屏上见过的半句话，模型续跑时看不见。若半句含了关键判断，用户得补述。
+半屏字要分账。普通网络失败那份半截回复不拼进有效 history；V3 仍可能记下流片段。ESC 另走中断收口。重试耗尽或遇到确定性错误，就明报失败，随后继续任务要依靠已接纳状态，不能声称接回原来的流，也不能保证服务端只扣一次费。
 
-当前错误文案会带 HTTP 状态或清洗后的错误摘要，却没告诉用户“保住了哪一步、下一步
-该按什么”。也没有 `/retry-last`。这便是没还完的可用性债。补法分三层：错误卡明列
-最近耐久检查点；给一枚“从检查点继续”命令；只有确认零响应字节、零工具副作用，
-且服务端有幂等保障时，才做有限退避。其余情况仍由用户点明续跑。
+落盘另有硬边界：prepared 写失败，不发本次模型请求；完整 assistant 提交失败，不执行工具。工具已执行而结果保存失败，必须保留执行事实，不能当作没做过再跑。当前 sent 回调与工具结果保存回调还没有统一失败回执，不能把局部闸门说成全程事务。
 
-证据：[`loop.cpp`](../src/agent/loop.cpp)、
-[`reliability.md`](../docs/architecture/agent-loop/reliability.md)、
-[`session_utils.cpp`](../src/tools/session_utils.cpp)。
+这题应单独练。详见[失败之后怎么办：断网、半截回复、落盘与崩溃恢复](failure-and-recovery.md)，含失败矩阵、刷盘边界、unknown 状态、追问和测试入口。
+
+证据：[主循环](../src/agent/loop.cpp)、[请求恢复策略](../src/api/model_request_recovery.cpp)、[V3 写账桥](../src/runtime/trajectory_session.cpp)。
 
 ### 4. 单二进制最终多大？启动多快？
 

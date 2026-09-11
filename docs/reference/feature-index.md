@@ -1,5 +1,7 @@
 # 功能全览
 
+会话格式已默认切到 v3。旧格式管理命令、离线 usage、Telemetry 与新合同接线边界见 [Session v3](../architecture/session-v3.md)及[待清理清单](../development/v3-legacy-audit.md)。
+
 [文档首页](../README.md) · [命令参考](commands.md) · [工具参考](tools.md) · [架构说明](../architecture/README.md)
 
 本页是一张当前功能总账：一项能力从哪里进入，什么时候出现，数据落在哪里，细节该去哪一页查。未来设计不混进这张表；版本与测试口径分别看源码和[测试指南](../development/testing.md)。

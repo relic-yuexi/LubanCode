@@ -66,6 +66,13 @@ public:
                                    nlohmann::json extra_payload = nlohmann::json::object(),
                                    Durability durability = Durability::ProcessCrash);
 
+    // 恢复侧把手(失败与恢复单 P1-A):续卷后对已有 Action 补保存/补选用/
+    // 补 tool 消息——只补账,不执行、不造新 pending,不改 attempt(记 1 号,
+    // 与账上既有 attempt 对齐)。缺结果/缺消息的补交走它;执行动作禁止用。
+    static ToolActionSession Reopen(std::string turn_id, std::string step_id, std::string action_id) {
+        return ToolActionSession(std::move(turn_id), std::move(step_id), std::move(action_id));
+    }
+
     // 越过执行准入栅栏:tool.execution.started(effectiveArgsRef + 工具身份
     // + 幂等键快照)。extra_payload 供 hook 子执行注入 parentActionId 等。
     WriteReceipt Start(V3Writer& writer, std::string effective_args_ref,
@@ -125,9 +132,12 @@ public:
                               Durability durability = Durability::PowerLoss);
 
     // 最终 tool 消息(§4.18/§4.19):content 为模型可见的完整预览版本,
-    // 落稳后接纳进上下文;不因 resume 按今天的规则重新生成。
+    // 落稳后接纳进上下文;不因 resume 按今天的规则重新生成。is_error 随
+    // 回喂语义落档(失败与恢复单 P1-B/FA-02):以 Hook 处理后真正交给模型
+    // 的结果为准,只写真值(缺键 = false,旧账两读法都兼容)。
     WriteReceipt AppendToolMessage(V3Writer& writer, std::string content,
                                    std::optional<std::string> result_selection_ref,
+                                   bool is_error = false,
                                    Durability durability = Durability::PowerLoss);
 
     const std::string& action_id() const { return action_id_; }

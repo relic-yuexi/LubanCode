@@ -65,6 +65,23 @@ struct V3SessionBooks {
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
+    // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------
+    // compact applied 已落稳、但内存换账(链投影 / ReplaceHistory)失败时
+    // 置位。此后本场所有主会话轮桥(CLI/AppServer/Goal/Loop 同一条路)的
+    // 请求最终准入一律拒绝:不发新模型请求、不派新工具(请求拒了就没有
+    // 新 assistant 的 tool_use)、自动续跑同门;在飞请求按真实状态收尾。
+    // 保留已提交链,不回写不重压。解除只有一条路:换场时 books 重建
+    // (resume/clear 重开即天然解除);本进程内不静默放行——恢复须沿已
+    // 提交 v3 上下文核验重建,那发生在新场的新 books 上。
+    // 注:阻断只住内存,不落账——schema 尚无对应 kind(T11 按合同发行),
+    // 不拿旧 payload 换名伪造。
+    bool execution_blocked = false;
+    std::string execution_block_reason;         // 稳定原因(compact.swap.*)
+    std::uint64_t execution_block_revision = 0;  // 阻断时账面 revision(准入对表/诊断)
+    // 绑定场次(session_id):换场判据用。manager 的 active 是 std::optional,
+    // clear 同址换值时新写者地址与旧写者相同(地址复用),单比指针认不出
+    // 换场——旧 books(含执行阻断)会原样带进新场。
+    std::string bound_session_id;
     // provider 调用号 -> v3 调用身份:轮桥声明 tool call 时登记(§4.15),
     // 子代理五步的 parentActionRef 从这查(actionId/声明消息/turn/step)。
     struct DeclaredAction {
@@ -124,12 +141,15 @@ public:
     // ---- agent::LoopBoundaryRecorder(loop 在模型边界调) ----
     void OnContextPressure(const agent::ContextPressure& pressure) override;
     std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx) override;
-    void OnRequestSent(const std::string& request_id) override;
+    // false = sent 这笔本地账没写稳(失败与恢复单 P1-C/FA-03):调用方不得
+    // 把请求交给 backend。事件语义只到"本地交给 transport",不暗示远端
+    // 收据。
+    bool OnRequestSent(const std::string& request_id) override;
     // 任务级 turn 账(turn 预算单 §11.1,P1-1):permit 提交后的 sent 边界带
     // task_turn_index/turn_limit/input_round_index;随后同 request_id 的
     // output 三态收口也带上 task_turn_index——started/completed/failed 三处
     // 边界数字与台账同一本账,不靠数 assistant message 猜。
-    void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+    bool OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
                                int input_round_index) override;
     // v3 流式边(轨迹 v3 §4.43):loop 在 SSE 消费点调(MessageStart 到 =
     // 响应开始;文本/思考增量为片段)。v2 模式 no-op——v2 无流式事件账。
@@ -148,7 +168,11 @@ public:
 
     // ---- ToolTrajectorySink(hub 在工具栅栏调) ----
     void OnToolTrace(const agent::ToolTraceEvent& event) override;
-    void OnToolResultsCommitted(const std::string& batch_id, const api::Message& results) override;
+    // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
+    // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
+    // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
+    ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
+                                                    const api::Message& results) override;
     bool ShouldBlockExecution(const agent::ToolTraceEvent& started) override;
 
     // ---- 子代理边界(§3.5:父子文件只传边界引用与 terminal hash) ----
@@ -250,7 +274,8 @@ private:
     void V3RecordInput(const api::Message& user_message);
     std::string V3RequestPrepared(const api::Request& request,
                                   const agent::RequestPreparedContext& ctx);
-    void V3RequestSent(const std::string& request_id);
+    // false = model.request.sent 落不住(P1-C/FA-03):请求不得上 wire。
+    bool V3RequestSent(const std::string& request_id);
     // ---- v3 流式三件套(§4.43/§4.63;接线点 1 的 D1 修复) ----
     // 响应开始:预留 messageId + 发 streamId,落 model.response.started。
     // 幂等;prepared 没落稳的请求不伪造流。
@@ -273,7 +298,8 @@ private:
     void V3OutputFailed(const std::string& request_id, const std::string& reason);
     void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
     void V3ToolTrace(const agent::ToolTraceEvent& event);
-    void V3ToolResultsCommitted(const api::Message& results);
+    // 批次结果提交回执(P1-A):结果链各档折算(见 ToolResultsCommitReceipt)。
+    ToolResultsCommitReceipt V3ToolResultsCommitted(const api::Message& results);
     // turn 收口:已声明未终态的 Action 补 cancelled(配对完整,不悬空)。
     void V3CancelDanglingActions(const std::string& reason);
     // v3 模式判定(空 = v2 原路)。
@@ -359,7 +385,8 @@ public:
     // ---- agent::LoopBoundaryRecorder(采样/探针在模型边界调) ----
     std::string OnRequestPrepared(const api::Request& request,
                                   const agent::RequestPreparedContext& ctx) override;
-    void OnRequestSent(const std::string& request_id) override;
+    // false = sent 落不住(失败与恢复单 P1-C):采样停在发送边界。
+    bool OnRequestSent(const std::string& request_id) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
                          int cache_epoch = 0, bool prefix_append_only = true,
@@ -859,6 +886,17 @@ public:
     // ReplaceHistory 进 loop——v2 compact 换账的同一安全点。非 v3 场或
     // 验卷不过:错误,调用方不换并明说。
     std::expected<std::vector<api::Message>, std::string> ProjectV3ContextHistory() const;
+
+    // ---- T12-A(V3-GAP-07 P0):compact 投影失败的会话级执行阻断 ----
+    // 置位:applied 已落稳、ProjectV3ContextHistory/ReplaceHistory 失败的
+    // 调用方在报错的同时调它。此后本场所有主会话轮桥的请求最终准入拒绝
+    //(V3RequestPrepared 返回空串,loop 本步明败不发模型);CLI/AppServer/
+    // Goal/Loop 殊途同门,不是只在 CLI 分支加早退。幂等:已阻断时重复置位
+    // 保留首因。非 v3 场(无主账)no-op。reason 用调用方拿到的稳定错误
+    //(compact.swap.*)。
+    void BlockV3Execution(const std::string& reason);
+    // 阻断查询(/doctor、测试、AppServer 状态面):false = 本场可继续。
+    bool V3ExecutionBlocked() const;
 
     const std::string& session_id() const;
     std::filesystem::path session_dir() const;

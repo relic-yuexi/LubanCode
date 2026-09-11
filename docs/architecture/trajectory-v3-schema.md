@@ -1,8 +1,11 @@
 # session 轨迹 v3 schema(冻结稿)
 
-状态:P0 定稿冻结;P1 其余域(工具操作账/结果仓与预览/hook 事件账/subagent 独立账/预览降档)已按 §四 落地发行,字段随本稿冻结;P2 读取侧(两份投影/工具快照折叠/result_preview 展开/跨会话五键验 hash/父子账遍历/带来源链 resume)已落地 `src/trajectory/v3/reader.hpp`,resume 载荷随 §四 增补冻结。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
+[当前实现](session-v3.md) · [会话指南](../features/sessions/README.md) · [待清理与缺口](../development/v3-legacy-audit.md)
 
-不承担旧数据兼容:新会话写 v3,v2 读取不迁移,v2→v3 无转换器(单子 §1.5/§七)。
+
+状态：新会话已默认写 v3，写入、读取、历史显示、四角色 adapter、compact 与同场内存换账均有实现。只有 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 使新场回 v2；旧场按源格式读取，不自动转换。本页冻结字段合同，不把“字段已有”视为每个生产入口均已接通。
+
+设计目标见 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`；源码与测试定当前行为。新增 Goal/Loop/btw/Memory 及完整 AppServer/Workflow 合同仍按各自分期实施。旧接口与消费方差距见清理清单，不沿用早期 P0/P1/P2 状态推断今日实现。
 
 ## 一、两类行与公共信封
 
@@ -92,6 +95,8 @@
 | goal 控制状态 | `state.goal.applied`(§4.67 G0:goal 状态唯一生效点,快照不可变文件 + 提交锚,不带 status) |
 | goal 验收族(§4.67.6 G2) | `goal.checkpoint.recorded`、`goal.evidence.recorded`(收口事实行,不改活动 head)、`goal.evaluation.requested`(材料版本冻结:evaluationId/contractRevision/evidenceSetHash)、`goal.evaluation.completed`(判词到手,不等于目标已完成)、`goal.evaluation.rejected`(候选被拒,带 reason)——全部不带 status |
 | goal 等待/usage 族(§4.67.6/§4.67.7 G3) | `goal.wait.registered`(登记后台等待:taskRefs/notifyDedupeKey/inspectionPlan;等待是否生效仍看 applied)、`goal.wait.resolved`(等待解除:deliveryKey 去重 + reason;迟到解除不改账)、`goal.usage.recorded`(逐 requestId 的 usage 归属与计量来源;(sessionId,requestId) 去重,投影累计不重复计费)——全部不带 status |
+| workflow 编排 | `workflow.definition.loaded`、`workflow.segment.opened`、`workflow.inputs.committed`、`workflow.node.reserved`、`workflow.node.dispatched`、`workflow.node.waiting`、`workflow.node.retrying`、`workflow.node.completed`、`workflow.node.failed`、`workflow.node.cancelled`、`workflow.node.skipped`、`workflow.output.committed`、`workflow.checkpoint.committed`、`workflow.branch.started`、`workflow.join.completed`、`workflow.loop.iteration.started`、`workflow.loop.iteration.completed`、`workflow.run.completed`、`workflow.run.failed`、`workflow.run.cancelled` |
+
 
 ### 2.2 kind → status 固定映射(§4.14)
 
@@ -107,9 +112,13 @@
 | `.cancelled` | `cancelled` |
 | `.rejected` | `rejected` |
 | `.unknown` | `unknown` |
-| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`state.goal.applied`、`goal.checkpoint.recorded`、`goal.evidence.recorded`、`goal.evaluation.requested`/`.completed`/`.rejected`、`goal.wait.registered`/`.resolved`、`goal.usage.recorded`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`) | 不携带 status 字段 |
+| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`state.goal.applied`、`goal.checkpoint.recorded`、`goal.evidence.recorded`、`goal.evaluation.requested`/`.completed`/`.rejected`、`goal.wait.registered`/`.resolved`、`goal.usage.recorded`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`、workflow 事实记录族:`workflow.definition.loaded`/`workflow.segment.opened`/`workflow.inputs.committed`/`workflow.node.reserved`/`workflow.node.dispatched`/`workflow.node.retrying`/`workflow.node.skipped`/`workflow.output.committed`/`workflow.checkpoint.committed`) | 不携带 status 字段 |
 
 生命周期规则(§4.14):同一操作可以多条 event,各持自己的 eventId/seq,共用操作身份;每次尝试最多一个执行终态;终态后迟到响应另记观察事件不改旧终态;`pending` 是"在等"、`running` 是"在执行";崩溃后见 `started` 无终态只能判"可能已执行"。
+
+模型请求三段语义(失败与恢复单 P1-C/FA-03):`model.request.prepared` = 准备发送(引用先落稳才许发);`model.request.sent` = 本地交给 transport,`payload.deliveryScope="local_transport"` 钉死本地交接——不暗示已拿到远端收据,服务端事实只看 `model.response.*`;`model.response.*` 各事件才是远端确认。sent 这笔写不稳时请求不得上 wire(发送前写账硬闸)。
+
+tool 消息回喂语义(失败与恢复单 P1-B/FA-02):最终 tool 消息本体可带 `message.is_error=true`(只写真值,缺键 = 成功)——语义以 Hook 处理后真正交给模型的结果为准,不从执行终态猜;恢复投影(EffectiveConversationFromV3 → ProjectHistoryFromReplay)从本体原样还原。工具折叠新增两档缺口态(失败与恢复单 P1-A/FA-01):`result_missing`(执行已有终态、结果链没立起来)与 `message_not_admitted`(tool 消息已写、接纳未成)——都与 `selected_no_message` 一样进 resume 的 open_actions,补保存/补接纳/补消息,不重跑工具。
 
 ### 2.3 compact 状态机(§4.5-4.8)
 
@@ -212,6 +221,9 @@ P1 其余域已发行(工具操作账 `tool_action.*`、结果仓与预览 `resu
 - **resume**(§4.10/§4.59,P2 读取侧增补冻结):`resume.source.attached` payload 定案 `{sourceRef:{sessionId,runId,seq,id,hash}(五键指源末行,§3.1), contextRevision, systemMessageRef, branch}`。读取侧沿 `sourceRef` 逐级回溯来源链:每级验五键 hash、按 sessionId 去重、环标 duplicate;祖先账默认按 `sessions/<id>/<id>.jsonl` 解析。resume 本身不改写源内容(坏尾修复归 §4.60)。
 - **goal 控制状态**(§4.67 G0,已发行):`state.goal.applied` 为 goal 状态唯一生效点。payload 定案 `{goalId, fromStateRevision, toStateRevision(=from+1), contractRevision, snapshotRef, snapshotSha256, lifecycle, causeRef?, adoptedFrom?}`;`lifecycle ∈ preparing|active|waiting|paused|awaiting_user|blocked|budget_exhausted|suspended_by_policy|achieved|cleared|failed`,工作相位(phase:idle/queued/running/evaluating)记在快照。goalId 走 payload(goal 是控制状态,不占信封身份字段族);`causeRef` 为合法引用(§3.1,可缺)。`adoptedFrom`(§4.67 G1,可选)为跨卷续接凭据 `{sessionId, stateRevision}`:resume-as-new 后 goal 从来源卷接管,新卷首条 applied 的 fromStateRevision != 0,须带它且 `stateRevision == fromStateRevision`;读取侧 `ProjectGoalLineage` 沿 resume 来源链(只穿 `start_reason=resume` 边,clear/fork 断链)取最近一份有 goal 账的卷为 head。完整 goal 状态存不可变快照 `sessions/<id>/state/goals/<goalId>/rev-<六位>.json`(先临时文件再改名,不覆盖;hash 为文件字节 sha256;同字节重试复用候选文件——崩溃窗口"快照落稳、applied 未落"的幂等补账),本行只记提交锚;候选快照落稳但 applied 未落时不生效。跨行合同(校验脚本与读取侧投影同钉):同 goal 的 applied revision 逐条 +1;一链最多一枚未收账 goal,换 goal 时前一枚须已 terminal;terminal(achieved/cleared/failed)后同 goal 不得再有 applied;applied 指向的快照缺失/hash 不符时投影报缺口,不用摘要猜。快照 `pendingIntent`(§4.67 G1)为续跑意图 `{workItemId, contractRevision, predecessorIterationId, continuationOrdinal, triggerRef, nextActionRef, claimed, writerEpoch, claimedAtMs}`:去重键 `(goalId, contractRevision, predecessorIterationId, continuationOrdinal)`;claim 落账(claimed=true + writerEpoch + phase=queued 的 applied)即消费,重复 resume 不重复提交;他写者已认领的意图不盲重放(恢复核验)。goal 的其余 kind:checkpoint/evaluation 族已随 §4.67 G2 发行——`goal.checkpoint.recorded` payload `{goalId, iterationId, checkpoint(object), synthesized(bool)}`;`goal.evidence.recorded` payload `{goalId, iterationId, evidenceId, evidence(GoalEvidenceRef), facts?}`(facts 为判材料回溯);`goal.evaluation.requested` payload `{goalId, iterationId, evaluationId, contractRevision(>=1), evidenceSetHash(hex64)}`(材料版本冻结);`goal.evaluation.completed` payload `{goalId, evaluationId, decision(continue|achieved|blocked|needs_user), evaluationMessageRef(合法引用,指判词 assistant), requestRefs[]}`;`goal.evaluation.rejected` payload `{goalId, evaluationId, reason}`。验收模型请求经宿主内部请求服务留账:验收专用 system(purpose=goal_evaluation, turnId=null, systemMeta.cause=goal_evaluation)与 user/assistant(挂 `goaleval-turn-<n>` 内部回合,parentTurnId 回指工作轮,display=collapsed,不经 AdmitMessages、不进 main contextChain);assistant 照记 provider/wire/model 与逐次 usage(repair 各成一条请求,费用各记)。wait/usage 族已随 §4.67 G3 发行——`goal.wait.registered` payload `{goalId, taskRefs(非空 string 数组), notifyDedupeKey(通知合并去重键), inspectionPlan(object: pollsDone>=0/maxPolls>=1/nextDueMs>=0)}`(巡检次数入快照、重启不归零;等待是否生效仍看随后 applied);`goal.wait.resolved` payload `{goalId, deliveryKey, reason}`(交付去重;pause/clear 后迟到解除不改账);`goal.usage.recorded` payload `{goalId, requestId, source(execution/evaluator/subagent/…), usage(object: 各 token 计量非负 + usageReported)}`((sessionId,requestId) 去重、投影累计不重复计费;后台/子代理 usage 走此路,判词与验收请求的逐次费用在 G2 的逐请求账,不在此重复落)。continuation 事件族(claimed/finished 的独立 kind)与 todo/loop 归后续棒次(claim/采用/续排的账面锚暂为相应 state.goal.applied)。
 - **todo/loop/fork/btw**(§4.55-4.58,后续棒次):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
+- **workflow 编排账**(Workflow 接入 v3 第一棒,已发行):编排账不是 agent 会话——经事件账 writer profile(`trajectory::v3::V3EventLedger`)只写 `type=event` 行,不造 system 首行、不写 message 行。目录 `workflow-runs/<workflowRunId>/{definition.json, bindings.json, inputs.json, segments/<segmentId>/workflow.jsonl, checkpoints/<checkpointId>.json, outputs/<outputId>.json, nodes/, artifacts/, subflows/}`(`WorkflowPathResolver` 统一解析,与 session 目录体系并列不混淆)。信封语义:`sessionId`=workflowRunId,`runId`=orchestrationSegmentId;每段 seq 从 1 起,恢复开新段并以 `workflow.segment.opened` 的 `sourceRef` 五键链接旧段水位。身份分层:`nodeExecutionId`=`<runId>-<nodeId>[-i<mapIndex>][-d<dispatch>]`(dispatch 号跨恢复延续),attempt 追加 `-a<n>`;`outputId`=`out-<六位号>`、`checkpointId`=`cp-<六位号>` run 内单调。关键载荷合同:definition.loaded 必带 `workflowId`/`definitionHash`(hex64);node.reserved 必带 `nodeId`/`nodeExecutionId`/`nodeKind`/`attempt`/`inputHash`(输入快照内容寻址);output.committed 必带 `nodeId`/`nodeExecutionId`/`outputId`/`outputHash`(hex64)/`outputRef`/`validation{passed,checks}` 与可选 `resolvedInputHash`——它是"节点产物可供下游消费"的唯一依据(失败/取消绝不写它);checkpoint.committed 必带 `checkpointId`/`checkpointRef`/`sha256`/`throughSeq`,孤立 checkpoint 文件不生效;node.completed.outcome 只取 `success|empty`(失败走 node.failed,恢复判据看 commit 不看事件名);run.* 终态每账至多一枚。无损纪律:outputs/inputs/checkpoint 原件不脱敏(展示/导出脱敏另做投影),payload hash 不符即拒恢复;node/skill/agent 子账与父 run 的 `nodeExecutionRef` 关联归后续棒。
+- **todo/goal/loop/fork/btw**(§4.55-4.58,后续棒次):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
+
 
 ## 五、usage 唯一 owner 表(§4.12 定案)
 
@@ -262,9 +274,9 @@ v3 的 system/user/assistant/tool 四角色经 adapter 结构化转换到四家 
 
 工具结果从内部 tool 角色变成 Anthropic wire 的 user,不代表它变成真人输入:turnId、来源与 Action 仍取原始消息,不能从 wire role 倒推(§4.47 同理)。相邻同组两条 tool 可映射为一条 user 中的两个 `tool_result` 块,按稳定顺序排列并还原 provider 调用 ID;此时两个内部 messageRef 对应同一 wire message 的不同块——请求快照保留这份映射,不能假定内外消息数量一一相等。
 
-### 8.1 现行形状基线(两角色实现)
+### 8.1 迁移前形状基线（历史参考）
 
-现行 `api::Role` 只有 User/Assistant:system 单列 `Request::system`,工具结果是 User 消息内的 `ToolResultBlock`。四家现行拍平形状由合同测试册钉死:`tests/unit/api/test_wire_role_contract.cpp`(四家 × 形状矩阵 + 消息数量映射,只读现状不改 wire 行为)。要点:
+**V3-LEGACY-04：** 下列记录来自四角色迁移前，供 wire 回归对照。当前 `api::Role` 已含 System/User/Assistant/Tool，四家 adapter 已支持；主循环仍有 User 工具容器，不能把“枚举已扩”说成所有内部路径已迁完。旧基线中 system 单列 `Request::system`，工具结果装在 User 消息内。四家现行拍平形状由合同测试册钉死:`tests/unit/api/test_wire_role_contract.cpp`(四家 × 形状矩阵 + 消息数量映射,只读现状不改 wire 行为)。要点:
 
 - **anthropic**(`src/api/anthropic/client.cpp`):内部消息逐条对位;tool 结果留在 user 容器的 `tool_result` 块,两条相邻 tool 结果各自成条(v3 目标允许同组合并成一条 user 的两个 `tool_result` 块——现行不合并,基线钉死);thinking 块带签名按原序保真回传。
 - **chat**(`src/api/chat/request.cpp`):tool 结果从 User 容器拍平成独立 `role=tool` 消息(`tool_call_id` 配对),已是目标形状;user 正文与工具结果混装时一条内部消息分裂成两条 wire;只装工具结果的 User 消息不产 user 消息(空正文不造);thinking 默认策略 Never 不回传。
@@ -272,40 +284,35 @@ v3 的 system/user/assistant/tool 四角色经 adapter 结构化转换到四家 
 - **gemini**(`src/api/gemini/request.cpp`):工具块各自单独成条 content;`functionResponse` 顶 role=user(协议只认函数名不认调用 id,函数名按历史 `tool_use_id` 对回);thinking 跳过。
 - **数量映射是常态不等**:同一份内部对话(system 顶层 + 消息 5 条:U→A(call×2)→T1→T2→A2),anthropic 出 5 条 messages、chat 出 6 条(含 system 消息)、responses 出 7 个 input item、gemini 出 7 条 contents(合同测试册横切节钉死)。
 
-### 8.2 差距清单(现行两角色实现 → 四角色壳要动的点)
+### 8.2 四角色迁移记录与剩余边界
 
-1. `api::Role` 扩 System/Tool(或 adapter 入口另设映射层)后,所有"不是 User 就是 Assistant"的二选一分支逐处核对,只加枚举不算实现:`api/types.hpp` 的 `RoleToString`、`src/api/anthropic/client.cpp` 的本地 `RoleToString`、responses/gemini 的 `WireRole`、chat 的 User/else 主分支、`src/api/assembler.cpp` 的角色判断。
-2. **chat**:独立 tool 角色消息直接落 `role=tool`(`tool_call_id` == actionId 配对);`IsUserTurnStart`/`SegmentToolUseFlags` 的"真 user 输入"判据按内部消息来源判定,不能扫 wire role 倒推(§4.47)。
-3. **anthropic**:独立 tool 角色映射回 user 容器 `tool_result` 块;相邻同组合并为一条 user(现行逐条);`ShouldRecoverTaggedThinking` 的"末条 user 含 tool_result"启发式改认 tool 角色。
-4. **responses**:`instructions` 与 `function_call_output` 形状已合目标;`ContentBlockToItem` 的 `input_text`/`output_text` 角色三元与独立 tool 消息对接。
-5. **gemini**:`ToolNameByUseId` 对回表改认独立 tool 消息的 `tool_call_id`;`functionResponse` 的 role=user 硬编码处按映射表落位。
-6. **thinking/redacted**:`ContentBlock` 无 `redacted_thinking` 原生类型,anthropic 解析器无该分支(§4.42 不透明块无损回传待补);兼容端可能返回空签名,不得按 Claude 非空签名要求虚构。
-7. **请求快照**:保留内部 messageRef ↔ wire message 的映射(两个内部 messageRef 可对应同一 wire message 的不同块)。
-8. **容量检查时点**:最后一道容量检查吃 adapter 与 extra_body 全部覆盖完成后的实际输入形状(anthropic 的 extra_body 尾部覆盖之后),不得在它之前估完便放行。
+早期八项改造已落到四角色枚举、四家 adapter、RedactedThinkingBlock、WireMessageMap 与有效输出上限读取。对照测试在 `test_wire_role_contract.cpp`，新增内核测试在 `test_four_role_kernel.cpp`。
+
+剩余边界是生产内部容器与消费链：`src/agent/loop.cpp` 仍用 User 装一批 ToolResultBlock，v3 写桥拆成独立 tool 行；相邻 tool 的 wire 合并与 messageRef 映射须按真实出口核对，不能拿合同中的“可合并”当成已实现。旧 v2 特有块序列化也不据 v3 测试判定无损。
 
 第三棒(6/7/8 三条)落点:第 6 条——内核补 `RedactedThinkingBlock`(variant 尾部追加,只增不改),anthropic 解析器认 `redacted_thinking` 原生块(整块随 content_block_start 到齐),assembler 落事实块,anthropic wire 出口不透明 data 原样回传、空签名照实不虚构;chat 的 reasoning 回传与 responses/gemini 的一次性思考路都不吃它(载荷一个字节不出门),K2.6 回传路零回退。v2 会话档(runtime 侧 `MessageToBlocksJson` 的 get_if 链)尚未收录该块,resume 后不带回——归 runtime 在途 PR。第 7 条——`api::WireMessageMap`(container + message_to_wire + wire_element_count)由四家 `BuildMessageWireMap` 与 `BuildRequestJson` 同一条拼装路产出,经 `api::Backend::BuildWireMessageMap` 虚函数与 `RequestPreparedContext::wire_message_map` 挂上既有请求快照路径(schema 不动,无新事件 kind)。第 8 条——`Backend::GetEffectiveOutputLimit` 按 extra_body 覆盖序(provider 级先、请求级后;anthropic/chat 键 `max_tokens`、responses `max_output_tokens`、gemini `generationConfig.maxOutputTokens`)报有效上限,loop 最终硬闸的输出预留与降级判定认这份;应急/降级收窄经 `ForceMaxOutputTokensOverride` 写进请求级覆盖位,窄值真出门。钉子在 `tests/unit/api/test_four_role_kernel.cpp`(第三棒三节)与 `tests/unit/agent/test_loop.cpp`(差距 8 两案)。
 
-四角色贯通的完整验收另需从真实 v3 JSONL 读取四角色 → 上下文选取 → adapter 生成 wire → 流式响应落回 v3 的端到端链路(P2 读取侧 + 后续棒次);本节与合同测试册是那条链路的对照基线,不是其替代。
+读取、wire 与写回现已有独立测试和 `scripts/tests/v3_accept_matrix.py` 生产 exe/假后端验收入口。合同测试与集成验收分别看，不把历史发行记录冒充本轮重跑，也不据此宣称真实模型摘要质量已验证。
 
 ## 九、usage 消费方与取数口(§4.12)
 
-§五 owner 表冻结后,原各造各账的消费方按下表收敛取数。本节为 P4 盘点,**不实现消费**;折算钩子(键集 → `api::Usage` 口径)由 `tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp` 钉死,活口径锚点(`TotalInputTokens`、明报位)钉在 `tests/unit/api/test_wire_role_contract.cpp` 末节。
+§五 owner 表冻结后,原各造各账的消费方按下表收敛取数。本节记录消费方迁移边界，**不代表全部消费方已接 v3**;折算钩子(键集 → `api::Usage` 口径)由 `tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp` 钉死,活口径锚点(`TotalInputTokens`、明报位)钉在 `tests/unit/api/test_wire_role_contract.cpp` 末节。
 
 | 消费方 | 现行取数 | v3 取数口 | 依赖 P2 读取侧 |
 | --- | --- | --- | --- |
 | `/usage` 命令(`src/app/commands/usage_commands.cpp`) | v2 Journal 的 UsageSample 流 | assistant message 的 `usage`(唯一可累计事实)+ `model.usage.appended`(失败/迟到/更正观察,不参与累计) | 是 |
-| token 账本五层聚合(`src/accounting/usage_aggregate.hpp`) | UsageSample(v2 事件投出) | sample 的 provider usage 改吃 v3 owner;估算栏吃 `model.request.prepared` 引用的 tokenEstimateRef(估算 hook,后续棒次) | 是 |
+| token 账本五层聚合(`src/accounting/usage_aggregate.hpp`) | UsageSample(v2 事件投出) | sample 的 provider usage 改吃 v3 owner;估算栏吃 `model.request.prepared` 引用的 tokenEstimateRef（估算槽位已接，离线消费仍待迁移） | 是 |
 | cost 估算(`src/accounting/cost_estimator`) | UsageSample + 价格表 | 随账本同源;compact/标题等内部请求的 usage 各入各账,不混主上下文 | 是 |
 | token 校准器(`src/agent/token_calibrator.hpp`) | 活事件流(`assembler.usage_seen()` + 请求字节账) | 实报侧:assistant `usage` 按完整输入口径(`TotalInputTokens`);本地侧:prepared 引用的估算与请求特征(§4.12:特征/标签对齐才谈得上免重放回测) | 回测/跨会话面是 |
 | 会话活账(`src/app/turn_usage_account.hpp`、`src/cli/context_tracker.hpp`) | `on_usage` 活事件流(UsageReport) | 活路径不变,不经文件;resume 后显示历史需读 v3 | 显示历史面是 |
-| compact 触发与 token 显示(§4.11) | 估算,不吃实报 | 估算 hook(后续棒次);provider usage 只做事后对照 | 否(估算 hook 另计) |
+| compact 触发与 token 显示(§4.11) | 估算,不吃实报 | PreRequest 估算槽位已接；provider usage 只做事后对照 | 否(估算 hook 另计) |
 | 前缀缓存守恒账(`src/agent/prefix.hpp`) | UsageReport 诊断字段(活路径) | 逐请求指纹照旧;跨会话对账需 v3 请求特征 + usage 对齐 | 跨会话面是 |
 
 规矩(§4.12/§五):request_metrics 统一为 event,引用同一 usage 时不得成为第二份可累计事实;估算与实报不混同一字段(prepared 只引用 `tokenEstimateRef`,不复制实报);provider 没报不补 0,不借下一请求倒填。
 
 ## 十、v2 事件在 v3 的未覆盖清单(接线点 1 收尾棒盘点)
 
-v3 写侧接线(接线点 1)后,v2 事件表里有一批在 §二 kind 全表里没有对应物、或对应 kind 的合同尚未发行的条目。写侧现状一律"静默不落"(不伪造行;`src/runtime/trajectory_session.cpp` 各早退处注记),本节把这批账摊开登记——新 kind 只许随 schema 版本追加,本清单不为补缺擅自加 kind:
+v3 写侧接线(接线点 1)后,v2 事件表里有一批在 §二 kind 全表里没有对应物、或对应 kind 的合同尚未发行的条目。下列未覆盖项的写侧仍有早退不落分支(不伪造行;`src/runtime/trajectory_session.cpp` 各早退处注记),本节把这批账摊开登记——新 kind 只许随 schema 版本追加,本清单不为补缺擅自加 kind:
 
 | v2 事件(v2 kind) | v3 对应 | 处置 |
 | --- | --- | --- |
@@ -315,6 +322,6 @@ v3 写侧接线(接线点 1)后,v2 事件表里有一批在 §二 kind 全表里
 | 容量预检(`context.pressure.recorded`) | 无 kind。v3 的容量/压缩账是 compact 一族(§4.40 容量字段后续棒次) | 不落 |
 | 任务 turn 账(sent 边界数字,§11.1) | 无 kind。`model.request.sent` 本身照落 | 不落 |
 | verification/恢复注记/迟到响应(`tool.verification.*`/`recovery.*`/迟到 mcp 响应) | 无 kind。v3 工具账是 `tool.execution.*`/`tool.result.*`(§四,已发行);verification 一族不在 v3 目标内 | 不落 |
-| `run.started`/run terminal/`session.clear_requested` | 无 run 概念:开场 = 首行 system + `session.started`;封口 = `session.ended`(clear 换账时 payload 带 `nextSessionId`);无 session.json | 已有对应(clear 八步的 v3 折算见 `SessionManager::ClearV3Locked`) |
+| `run.started`/run terminal/`session.clear_requested` | 不沿用 v2 run 生命周期事件（公共信封仍有 runId）:开场 = 首行 system + `session.started`;封口 = `session.ended`(clear 换账时 payload 带 `nextSessionId`);无 session.json | 已有对应(clear 八步的 v3 折算见 `SessionManager::ClearV3Locked`) |
 
 清点口径:凡写侧早退不落的,读取侧(两份投影/resume/verify)不因缺这些行报错——它们从未属于 v3 账;需要这些事实的消费方(`/doctor` 环境核对、标题真值回填)在 v3 场按"缺件"处理,不从当前环境补造过去(§4.12 同门)。

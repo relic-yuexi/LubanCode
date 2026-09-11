@@ -1239,6 +1239,142 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_type", "goal.usage.recorded 的 usage.usageReported 应为 boolean");
         }
     }
+    // ---- Workflow 编排族(§四 workflow 条目):按 kind 的载荷合同 ----
+    else if (line.kind == K::WorkflowDefinitionLoaded) {
+        for (const auto* key : {"workflowId", "definitionHash"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!IsHex64(line.payload["definitionHash"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "workflow.definition.loaded.definitionHash 应为 64 位十六进制");
+        }
+    } else if (line.kind == K::WorkflowSegmentOpened) {
+        if (auto error = CheckStringField(kind_name, line.payload, "segmentId")) {
+            return error;
+        }
+        // 恢复段必须链接源水位:sourceRef 五键跨段引用(§3.1)。
+        if (auto error = CheckRefField(kind_name, line.payload, "sourceRef", true)) {
+            return error;
+        }
+    } else if (line.kind == K::WorkflowInputsCommitted) {
+        for (const auto* key : {"inputsRef", "sha256"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!IsHex64(line.payload["sha256"].get<std::string>())) {
+            return Err("schema3.bad_type", "workflow.inputs.committed.sha256 应为 64 位十六进制");
+        }
+    } else if (line.kind == K::WorkflowNodeReserved || line.kind == K::WorkflowNodeDispatched) {
+        for (const auto* key : {"nodeId", "nodeExecutionId"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!line.payload.contains("attempt") || !JsonIsNonNegativeInt(line.payload["attempt"]) ||
+            line.payload["attempt"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type",
+                       std::string(kind_name) + ".attempt 应为从 1 起的正整数");
+        }
+        // reserve 独有:输入快照内容寻址(§五 reserve 携带输入)。
+        if (line.kind == K::WorkflowNodeReserved) {
+            if (auto error = CheckStringField(kind_name, line.payload, "nodeKind")) {
+                return error;
+            }
+            if (!line.payload.contains("inputHash") ||
+                !line.payload["inputHash"].is_string() ||
+                !IsHex64(line.payload["inputHash"].get<std::string>())) {
+                return Err("schema3.bad_type",
+                           "workflow.node.reserved.inputHash 应为 64 位十六进制(输入快照)");
+            }
+        }
+    } else if (line.kind == K::WorkflowNodeWaiting) {
+        for (const auto* key : {"nodeId", "waitKind"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::WorkflowNodeRetrying) {
+        for (const auto* key : {"nodeId", "nodeExecutionId"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::WorkflowNodeCompleted) {
+        for (const auto* key : {"nodeId", "nodeExecutionId", "outcome"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        const std::string outcome = line.payload["outcome"].get<std::string>();
+        if (outcome != "success" && outcome != "empty") {
+            return Err("schema3.bad_enum",
+                       "workflow.node.completed.outcome 应为 success|empty(失败走 "
+                       "workflow.node.failed,§五)");
+        }
+    } else if (line.kind == K::WorkflowNodeFailed || line.kind == K::WorkflowRunFailed) {
+        if (auto error = CheckStringField(kind_name, line.payload, "errorCode")) {
+            return error;
+        }
+        if (line.kind == K::WorkflowNodeFailed) {
+            if (auto error = CheckStringField(kind_name, line.payload, "nodeExecutionId")) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::WorkflowOutputCommitted) {
+        for (const auto* key : {"nodeId", "nodeExecutionId", "outputId", "outputHash", "outputRef"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!IsHex64(line.payload["outputHash"].get<std::string>())) {
+            return Err("schema3.bad_type", "workflow.output.committed.outputHash 应为 64 位十六进制");
+        }
+        if (!line.payload.contains("validation") || !line.payload["validation"].is_object() ||
+            !line.payload["validation"].contains("passed") ||
+            !line.payload["validation"]["passed"].is_boolean()) {
+            return Err("schema3.bad_type",
+                       "workflow.output.committed.validation 应为 {passed:bool,...}(§五 产物合同)");
+        }
+    } else if (line.kind == K::WorkflowCheckpointCommitted) {
+        for (const auto* key : {"checkpointId", "checkpointRef", "sha256"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!IsHex64(line.payload["sha256"].get<std::string>())) {
+            return Err("schema3.bad_type", "workflow.checkpoint.committed.sha256 应为 64 位十六进制");
+        }
+        if (!line.payload.contains("throughSeq") || !JsonIsNonNegativeInt(line.payload["throughSeq"])) {
+            return Err("schema3.bad_type",
+                       "workflow.checkpoint.committed.throughSeq 应为非负整数(已提交水位)");
+        }
+    } else if (line.kind == K::WorkflowBranchStarted) {
+        if (auto error = CheckStringField(kind_name, line.payload, "nodeId")) {
+            return error;
+        }
+        if (!line.payload.contains("branches") || !line.payload["branches"].is_array() ||
+            line.payload["branches"].empty()) {
+            return Err("schema3.bad_type", "workflow.branch.started.branches 应为非空数组");
+        }
+    } else if (line.kind == K::WorkflowJoinCompleted) {
+        for (const auto* key : {"nodeId", "join"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::WorkflowLoopIterationStarted ||
+               line.kind == K::WorkflowLoopIterationCompleted) {
+        if (auto error = CheckStringField(kind_name, line.payload, "nodeId")) {
+            return error;
+        }
+        if (!line.payload.contains("iteration") || !JsonIsNonNegativeInt(line.payload["iteration"]) ||
+            line.payload["iteration"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type", std::string(kind_name) + ".iteration 应为从 1 起");
+        }
+    }
     // pending 类必须带 reason(§4.14)。
     if (line.status == OpStatus::Pending && !line.payload.contains("reason")) {
         return Err("schema3.missing_field",
