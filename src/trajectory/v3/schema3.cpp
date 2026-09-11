@@ -270,7 +270,7 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
 std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
                                                 const nlohmann::json& ref) {
     static const std::vector<std::string> kKinds = {
-        "result_metadata", "stdout", "stderr", "combined", "report", "image", "blob",
+        "result_metadata", "stdout", "stderr", "combined", "raw_payload", "report", "image", "blob",
     };
     if (!ref.is_object()) {
         return Err("schema3.bad_ref", std::string(context) + " artifactRef 应为 object");
