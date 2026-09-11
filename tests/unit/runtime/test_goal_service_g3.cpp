@@ -409,7 +409,9 @@ TEST_CASE("RequestStop:旗落账泵不认领,continue 判词照采但不续排,�
     CHECK(snapshot->lifecycle == GoalLifecycle::Paused);
     CHECK(snapshot->stop_reason.rfind("stop_requested", 0) == 0);
     REQUIRE(snapshot->applied_evaluation_id.has_value());  // 判词已采
-    CHECK(snapshot->pending_intent.is_object() && snapshot->pending_intent.empty());
+    // doctest 分解器禁顶层 &&,拆两条。
+    CHECK(snapshot->pending_intent.is_object());
+    CHECK(snapshot->pending_intent.empty());
 
     // 显式恢复:paused->active 清旗(§4.67.3"明确续跑后才恢复")。
     GoalTransitionCandidate resume;
@@ -724,10 +726,12 @@ TEST_CASE("CreateForkedGoal:另发 id 默认 paused,证据待复核,预算不带
                 began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}})
                 .ok);
     // 源再抬一顶预算帽,验 fork"原预算不带"有真东西可丢。
-    goalns::GoalBudgetAddition raise;
-    raise.iterations = 9;
-    raise.total_tokens = 999999;
-    REQUIRE(source_service.AddBudget(raise, source_service.current()->state_revision,
+    // 变量名避开 raise:doctest 断点宏内部调 raise(SIGTRAP),
+    // 同名局部变量会把宏展开的调用接到自己头上(仅 POSIX 腿炸)。
+    goalns::GoalBudgetAddition raise_budget;
+    raise_budget.iterations = 9;
+    raise_budget.total_tokens = 999999;
+    REQUIRE(source_service.AddBudget(raise_budget, source_service.current()->state_revision,
                                      nlohmann::json{{"source", "test"}})
                 .ok);
 
