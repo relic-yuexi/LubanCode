@@ -1788,6 +1788,10 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         if (auto* text = std::get_if<tools::TextContent>(&payload)) text->text.clear();
                     }
                     if (!result->blocks.empty()) result->blocks.insert(result->blocks.begin(), tools::TextContent{result->content});
+                    // Gemini prefers structured_content over text. The immutable
+                    // result metadata retains it; runtime must use the adopted
+                    // preview, matching the persisted tool message and resume.
+                    result->structured_content.reset();
 
                 } else {
                     NoteV3Error(receipt, "tool.result.persisted");

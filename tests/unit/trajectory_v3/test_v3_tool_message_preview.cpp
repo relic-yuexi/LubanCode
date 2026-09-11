@@ -28,6 +28,7 @@
 #include "agent/loop.hpp"  // RequestPreparedContext(桥口同形,只引不改)
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
+#include "api/gemini/request.hpp"
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -148,7 +149,7 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& system,
                              const std::string& call_id, const std::string& result_content,
                              bool use_history_hook = false, bool capture_complete = true,
-                             std::size_t preview_budget = 32768) {
+                             std::size_t preview_budget = 32768, bool structured = false) {
     bridge.BeginTurn("turn-1", "external_user");
     bridge.RecordInput(UserMessage("列出全部文件"));
     const std::string request_id =
@@ -173,6 +174,7 @@ std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& sy
     result.capture_complete = capture_complete;
     result.capture_reason = capture_complete ? "" : "quota";
     result.preview_budget_bytes = preview_budget;
+    if (structured) result.structured_content = nlohmann::json{{"raw_structured", std::string(65536, 'z')}};
     std::string history_content;
     if (use_history_hook) {
         // loop 的次序(hub 挂 rewrite_tool_results_for_history):消息入史前
@@ -181,6 +183,13 @@ std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& sy
         const auto receipt = bridge.RewriteToolResultsForHistory(results);
         REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
         history_content = std::get<api::ToolResultBlock>(results.content[0]).content;
+        if (structured) {
+            CHECK_FALSE(std::get<api::ToolResultBlock>(results.content[0]).structured_content.has_value());
+            auto wire_request = MakeRequest(system, {AssistantWithRunCommandCall(call_id), results});
+            const auto wire = api::gemini::BuildRequestJson(wire_request).dump();
+            CHECK(wire.find("raw_structured") == std::string::npos);
+            CHECK(wire.find("adopted-preview") != std::string::npos);
+        }
     }
     bridge.OnToolResultsCommitted("batch-1", results);
     bridge.EndTurn(/*ok=*/true, /*cancelled=*/false, "");
@@ -405,4 +414,17 @@ TEST_CASE("Complete small result fits a batch cap without preview framing") {
     auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
     REQUIRE(bridge != nullptr);
     CHECK(DriveFatToolTurn(*bridge, "SYSTEM-PREVIEW", "call_small_cap", "ok", true, true, 2) == "ok");
+}
+
+TEST_CASE("Gemini sends adopted preview while raw structured result stays in the store") {
+    EnvGuard v3on("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(FreshRoot("structured-preview")));
+    REQUIRE(ledger.has_value());
+    auto bridge = ledger->NewTurnBridge({"gemini", "gemini", "terminal"});
+    REQUIRE(bridge != nullptr);
+    CHECK(DriveFatToolTurn(*bridge, "SYSTEM", "call_structured", "adopted-preview", true, true, 1024, true) == "adopted-preview");
+    std::ifstream file(ledger->session_dir() / "artifacts" / "res-000001.json");
+    nlohmann::json metadata;
+    file >> metadata;
+    CHECK(metadata.at("structured_content").at("raw_structured").get<std::string>().size() == 65536);
 }
