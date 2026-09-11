@@ -78,8 +78,10 @@ lubancode::cli::StatusPanelData BuildStatusPanelData(const StatusPanelInputs& in
         inputs.session_runtime->collaboration_mode() == lubancode::runtime::CollaborationMode::Plan) {
         status_data.plan_mode = lubancode::cli::tr("plan.mode_label");
     }
-    // goal/loop 会话状态段(goal 单合流):有常驻自动工作在跑才挂。
-    status_data.goal_loop = lubancode::app::BuildGoalLoopStatusSegment(inputs.goal, inputs.loop_scheduler);
+    // goal/loop 会话状态段(goal 单合流):有常驻自动工作在跑才挂。v3
+    // 快照在场吃 v3(§4.67 G3 跨壳统一投影),否则 v1 老折法。
+    status_data.goal_loop = lubancode::app::BuildGoalLoopStatusSegment(inputs.goal_v3, inputs.goal,
+                                                                       inputs.loop_scheduler);
     // 后台命令任务段(background 管理面单):台账里有任务才挂"后台 N 运行
     // / M 完成"。这里给的是圈边界那份基线;空闲 100ms 拍与流式 footer
     // 每帧另经 SetBackgroundStatusProvider 现折,后台起/收当场就变。

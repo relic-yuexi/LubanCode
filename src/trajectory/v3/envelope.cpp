@@ -321,6 +321,9 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::GoalEvaluationRequested: return "goal.evaluation.requested";
         case EventKindV3::GoalEvaluationCompleted: return "goal.evaluation.completed";
         case EventKindV3::GoalEvaluationRejected: return "goal.evaluation.rejected";
+        case EventKindV3::GoalWaitRegistered: return "goal.wait.registered";
+        case EventKindV3::GoalWaitResolved: return "goal.wait.resolved";
+        case EventKindV3::GoalUsageRecorded: return "goal.usage.recorded";
     }
     return "unknown";
 }
@@ -417,6 +420,9 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::GoalEvaluationRequested,
             EventKindV3::GoalEvaluationCompleted,
             EventKindV3::GoalEvaluationRejected,
+            EventKindV3::GoalWaitRegistered,
+            EventKindV3::GoalWaitResolved,
+            EventKindV3::GoalUsageRecorded,
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {
             return std::string_view(EventKindV3Name(a)) < std::string_view(EventKindV3Name(b));

@@ -25,6 +25,7 @@ namespace lubancode::runtime {
 class SessionRuntime;
 namespace goal {
 class GoalCoordinator;
+struct GoalStateSnapshot;
 }
 namespace loop {
 class LoopScheduler;
@@ -57,6 +58,9 @@ struct StatusPanelInputs {
     // 每圈刷新的两枚活字段:
     lubancode::runtime::goal::GoalCoordinator* goal = nullptr;
     lubancode::runtime::loop::LoopScheduler* loop_scheduler = nullptr;
+    // v3 goal 快照(轨迹 v3 §4.67 G3):在场吃 v3 短码(与 /goal status、
+    // resume 通知同一投影);空 = v2 场回落 v1 老折法。
+    const lubancode::runtime::goal::GoalStateSnapshot* goal_v3 = nullptr;
 };
 
 // 折一份状态面板数据。cwd/git 分支现场探(与原先一致,每圈重取,不挂旧帧);

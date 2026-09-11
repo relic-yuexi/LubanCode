@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -68,8 +69,10 @@ public:
         // 晚绑定槽(控制器在装配尾填):
         std::function<lubancode::tools::AgentTool*()> agent_tool;       // 命令材料
         std::function<lubancode::runtime::loop::LoopScheduler*()> loop_scheduler;
-        // 开一枚 goal 执行轮(text + 失败出参;单飞,主线程调)。
-        std::function<void(const std::string&, bool*)> start_turn;
+        // 开一枚 goal 执行轮(text + 失败出参;单飞,主线程调)。G3 加
+        // cancelled 出参:Esc 打断照常收口,但 goal 侧落停止意图(停止
+        // 意图优先,迟到结果不拉起新轮)。cancelled 可空 = 调用方不关心。
+        std::function<void(const std::string&, bool*, bool*)> start_turn;
         // 最近一轮收口后的 turnId(§4.67 G2 验收 parentTurnId 回指工作轮;
         // 可空 = 拿不到,评估账如实落 null,不伪造)。
         std::function<std::string()> last_turn_id;
@@ -122,6 +125,9 @@ public:
     lubancode::runtime::goal::GoalService* goal_service();
     // v3 goal 的单一读面(命令 status 与恢复共这一口);v2 场给 nullopt。
     std::optional<lubancode::runtime::goal::GoalLineageProjection> ProjectGoalForCommands();
+    // v3 当前生效快照(§4.67 G3 状态栏用):内存已发布真值,空指针 =
+    // v2 场/无 goal。状态栏每圈取,比 lineage 投影轻(不走盘)。
+    const lubancode::runtime::goal::GoalStateSnapshot* v3_current_snapshot() const;
     bool HasActiveIteration() const { return !active_iteration_.empty(); }
     // goal_checkpoint 的暴露位(动态工具 P2·§8.2):只认会话级条件
     //(features.goals 开且 env 总闸未关),与"本轮可不可用"
@@ -149,6 +155,17 @@ private:
     // CloseGoalIterationWithEvaluation)。true = 这一拍 v3 吃了(v1 路跳过);
     // false = v3 没活。
     bool PumpV3Continuation(std::int64_t now_ms);
+    // v3 收口(§4.67 G2/G3):材料折装(checkpoint/采证/评估路由)集中
+    // 在这,PumpV3Continuation 与 ResumeV3Closeout 共用。返回 false = 收口
+    // 被后台等待截走(等真实完成通知再续);true = 收口落定(成/败都算)。
+    bool CloseV3IterationFromTurn(const std::string& goal_id, const std::string& iteration_id,
+                                  const std::string& turn_id, std::int64_t now_ms);
+    // v3 收口续跑(§4.67 G3 后台等待):等待解除把 phase 恢复 running 后,
+    // 从这把收口接着走(同一 turn 的材料重折,不重开轮)。true = 接上了。
+    bool ResumeV3Closeout(std::int64_t now_ms);
+    // 本轮相关后台任务(§4.67.7):开轮前在跑的子代理记下,收口时新增的
+    // 在跑子代理即"本轮派生、与验收相关";无关长期进程不进等待账。
+    std::vector<int> V3RunningAgentTaskIds() const;
     // 当前写者 epoch(认领/沿用判据):v3 主写者的 run id。
     std::string V3WriterEpoch() const;
 
@@ -165,6 +182,11 @@ private:
     // 会话级账——resume 后旧证据材料从账投影补齐归 G3;期间旧证据缺材料
     // 只会让验收更保守(不 achieved),不会放过缺口。
     std::map<std::string, lubancode::runtime::goal::GoalEvidence> v3_evidence_memory_;
+    // v3 后台等待的收口续跑账(G3):等登记时的在跑子代理(相关性判据)、
+    // 收口被等截走时的工作轮 turnId(解除后从这续)。
+    std::vector<int> v3_round_baseline_task_ids_;
+    std::string v3_closing_turn_id_;
+    bool v3_closeout_pending_ = false;
 };
 
 }  // namespace lubancode::app

@@ -192,10 +192,12 @@ private:
     using TurnSource = lubancode::runtime::TurnSource;
     void RunSessionTurn(const std::string& content, TurnSource source,
                         bool* autosend_failed = nullptr, bool silent = false,
-                        memory::QueryOrigin origin = memory::QueryOrigin::User);
+                        memory::QueryOrigin origin = memory::QueryOrigin::User,
+                        bool* cancelled_out = nullptr);
     void RunSessionTurn(lubancode::runtime::TurnIngress ingress,
                         bool* autosend_failed = nullptr, bool silent = false,
-                        memory::QueryOrigin origin = memory::QueryOrigin::User);
+                        memory::QueryOrigin origin = memory::QueryOrigin::User,
+                        bool* cancelled_out = nullptr);
     void PumpSteeringToSubagents();
     // (P0-6:PersistSteeringQueue/RestoreSteeringQueueFrom——旧存档的排队
     // 事件快照路——已删;queue 的持久账走 trajectory 的

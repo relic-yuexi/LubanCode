@@ -74,6 +74,10 @@ KINDS = {
     "subagent.spawn.failed",
     "task.started", "task.pending", "task.completed", "task.failed", "task.cancelled",
     "state.goal.applied",
+    # §4.67 G2(验收族事实行)与 G3(后台等待/预算归属),全部 statusless。
+    "goal.checkpoint.recorded", "goal.evidence.recorded",
+    "goal.evaluation.requested", "goal.evaluation.completed", "goal.evaluation.rejected",
+    "goal.wait.registered", "goal.wait.resolved", "goal.usage.recorded",
 }
 
 # kind 后缀 → 固定 status(§2.2);不在表内的 kind 不携带 status。
@@ -99,6 +103,11 @@ STATUSLESS_KINDS = {
     # §4.67 G0:goal 控制状态提交点(与 context.*.applied 同族,不带 status;
     # 后缀虽是 applied,属于状态事实而非操作终态,故列豁免)。
     "state.goal.applied",
+    # §4.67 G2/G3:goal 验收族与等待/usage 族事实行(不带 status;completed
+    # 后缀语义是"判词到手/等待解除",不是操作终态)。
+    "goal.checkpoint.recorded", "goal.evidence.recorded",
+    "goal.evaluation.requested", "goal.evaluation.completed", "goal.evaluation.rejected",
+    "goal.wait.registered", "goal.wait.resolved", "goal.usage.recorded",
 }
 
 GOAL_LIFECYCLES = {
@@ -107,7 +116,8 @@ GOAL_LIFECYCLES = {
 }
 
 ROLES = {"system", "user", "assistant", "tool"}
-PURPOSES = {"conversation", "compact", "context_summary", "session_title", "capability"}
+PURPOSES = {"conversation", "compact", "context_summary", "session_title", "capability",
+            "goal_evaluation"}
 ORIGINS = {
     "human", "soul", "session_runtime", "compact_runtime", "context_runtime",
     "hook", "skill", "subagent", "parent_agent",
@@ -275,8 +285,8 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                 raise ValidationError("system 消息 turnId 恒为 null")
             if not isinstance(obj.get("systemMeta"), dict):
                 raise ValidationError("system 消息必带 systemMeta")
-            if purpose not in ("conversation", "compact"):
-                raise ValidationError("system purpose 只能 conversation/compact")
+            if purpose not in ("conversation", "compact", "goal_evaluation"):
+                raise ValidationError("system purpose 只能 conversation/compact/goal_evaluation")
         elif role == "user":
             if purpose == "context_summary":
                 if turn is not None:
@@ -489,6 +499,91 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             cause = payload.get("causeRef")
             if cause is not None and not is_ref(cause):
                 raise ValidationError("state.goal.applied 的 causeRef 应为合法引用")
+        elif kind == "goal.checkpoint.recorded":
+            # §4.67.6 G2:收口事实行,不改活动 head。
+            require_payload(kind, payload, ["goalId", "iterationId", "checkpoint", "synthesized"])
+            if not payload["goalId"] or not payload["iterationId"]:
+                raise ValidationError("goal.checkpoint.recorded 的 goalId/iterationId 应为非空 string")
+            if not isinstance(payload["checkpoint"], dict):
+                raise ValidationError("goal.checkpoint.recorded 的 checkpoint 应为 object")
+            if not isinstance(payload["synthesized"], bool):
+                raise ValidationError("goal.checkpoint.recorded 的 synthesized 应为 boolean")
+        elif kind == "goal.evidence.recorded":
+            require_payload(kind, payload, ["goalId", "iterationId", "evidenceId", "evidence"])
+            if not payload["goalId"] or not payload["evidenceId"]:
+                raise ValidationError("goal.evidence.recorded 的 goalId/evidenceId 应为非空 string")
+            if not isinstance(payload["evidence"], dict):
+                raise ValidationError("goal.evidence.recorded 的 evidence 应为 object")
+        elif kind == "goal.evaluation.requested":
+            require_payload(kind, payload, [
+                "goalId", "iterationId", "evaluationId", "contractRevision", "evidenceSetHash"])
+            for key in ("goalId", "iterationId", "evaluationId"):
+                if not payload[key]:
+                    raise ValidationError(f"goal.evaluation.requested 的 {key} 应为非空 string")
+            if not isinstance(payload["contractRevision"], int) \
+                    or isinstance(payload["contractRevision"], bool) \
+                    or payload["contractRevision"] < 1:
+                raise ValidationError("goal.evaluation.requested 的 contractRevision 应 >= 1")
+            if not is_hex64(payload["evidenceSetHash"]):
+                raise ValidationError("goal.evaluation.requested 的 evidenceSetHash 应为 hex64")
+        elif kind == "goal.evaluation.completed":
+            # decision 四枚;completed 是"判词到手",不等于目标已完成。
+            require_payload(kind, payload, [
+                "goalId", "evaluationId", "decision", "evaluationMessageRef", "requestRefs"])
+            if not payload["goalId"] or not payload["evaluationId"]:
+                raise ValidationError("goal.evaluation.completed 的 goalId/evaluationId 应为非空 string")
+            if payload["decision"] not in ("continue", "achieved", "blocked", "needs_user"):
+                raise ValidationError(
+                    f"goal.evaluation.completed 的 decision 枚举不认得: {payload['decision']}")
+            if not is_ref(payload["evaluationMessageRef"]):
+                raise ValidationError("goal.evaluation.completed 的 evaluationMessageRef 应为合法引用")
+            if not isinstance(payload["requestRefs"], list) \
+                    or not all(is_ref(r) for r in payload["requestRefs"]):
+                raise ValidationError("goal.evaluation.completed 的 requestRefs 应为引用数组")
+        elif kind == "goal.evaluation.rejected":
+            require_payload(kind, payload, ["goalId", "evaluationId", "reason"])
+            if not payload["goalId"] or not payload["evaluationId"] or not payload["reason"]:
+                raise ValidationError("goal.evaluation.rejected 的 goalId/evaluationId/reason 应为非空 string")
+        elif kind == "goal.wait.registered":
+            # §4.67.7 G3:后台等待登记。taskRefs 非空(无关进程不进等待账)。
+            require_payload(kind, payload, ["goalId", "taskRefs", "notifyDedupeKey", "inspectionPlan"])
+            if not payload["goalId"]:
+                raise ValidationError("goal.wait.registered 的 goalId 应为非空 string")
+            if not isinstance(payload["taskRefs"], list) or not payload["taskRefs"] \
+                    or not all(isinstance(r, str) and r for r in payload["taskRefs"]):
+                raise ValidationError("goal.wait.registered 的 taskRefs 应为非空 string 数组")
+            if not payload["notifyDedupeKey"]:
+                raise ValidationError("goal.wait.registered 的 notifyDedupeKey 应为非空 string")
+            plan = payload["inspectionPlan"]
+            if not isinstance(plan, dict):
+                raise ValidationError("goal.wait.registered 的 inspectionPlan 应为 object")
+            for key in ("pollsDone", "maxPolls", "nextDueMs"):
+                if not isinstance(plan.get(key), int) or isinstance(plan.get(key), bool):
+                    raise ValidationError(f"goal.wait.registered 的 inspectionPlan.{key} 应为整数")
+            if plan["pollsDone"] < 0 or plan["maxPolls"] < 1 or plan["nextDueMs"] < 0:
+                raise ValidationError(
+                    "goal.wait.registered 的 inspectionPlan 须 pollsDone>=0、maxPolls>=1、nextDueMs>=0")
+        elif kind == "goal.wait.resolved":
+            require_payload(kind, payload, ["goalId", "deliveryKey", "reason"])
+            for key in ("goalId", "deliveryKey", "reason"):
+                if not payload[key]:
+                    raise ValidationError(f"goal.wait.resolved 的 {key} 应为非空 string")
+        elif kind == "goal.usage.recorded":
+            # §4.67.7 G3:逐 requestId 的 usage 归属;(sessionId,requestId) 去重。
+            require_payload(kind, payload, ["goalId", "requestId", "source", "usage"])
+            for key in ("goalId", "requestId", "source"):
+                if not payload[key]:
+                    raise ValidationError(f"goal.usage.recorded 的 {key} 应为非空 string")
+            usage = payload["usage"]
+            if not isinstance(usage, dict):
+                raise ValidationError("goal.usage.recorded 的 usage 应为 object")
+            for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheCreationTokens",
+                        "reasoningTokens", "requestCount", "durationMs"):
+                value = usage.get(key)
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise ValidationError(f"goal.usage.recorded 的 usage.{key} 应为非负整数")
+            if not isinstance(usage.get("usageReported"), bool):
+                raise ValidationError("goal.usage.recorded 的 usage.usageReported 应为 boolean")
     return obj
 
 
@@ -816,6 +911,44 @@ def self_test() -> int:
     bad = dict(goal_applied)
     bad["payload"] = {**bad["payload"], "lifecycle": "running"}
     if not expect_fail(lambda: validate_line(bad, 4), "goal lifecycle 枚举"):
+        failures += 1
+    # §4.67 G3:wait/usage 族单行合同(好/坏)。
+    wait_registered = dict(goal_applied)
+    wait_registered["kind"] = "goal.wait.registered"
+    wait_registered["payload"] = {
+        "goalId": "goal-1", "taskRefs": ["subagent-3"],
+        "notifyDedupeKey": "dedupe-1",
+        "inspectionPlan": {"pollsDone": 0, "maxPolls": 3, "nextDueMs": 100}}
+    try:
+        validate_line(dict(wait_registered), 4)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test 误报: {error}")
+    bad = dict(wait_registered)
+    bad["payload"] = {**bad["payload"], "taskRefs": []}
+    if not expect_fail(lambda: validate_line(bad, 4), "wait taskRefs 非空"):
+        failures += 1
+    bad = dict(wait_registered)
+    bad["payload"] = {**bad["payload"],
+                      "inspectionPlan": {"pollsDone": 0, "maxPolls": 0, "nextDueMs": 100}}
+    if not expect_fail(lambda: validate_line(bad, 4), "wait maxPolls>=1"):
+        failures += 1
+    usage_recorded = dict(goal_applied)
+    usage_recorded["kind"] = "goal.usage.recorded"
+    usage_recorded["payload"] = {
+        "goalId": "goal-1", "requestId": "subagent-5", "source": "subagent",
+        "usage": {"inputTokens": 10, "outputTokens": 4, "cacheReadTokens": 0,
+                  "cacheCreationTokens": 0, "reasoningTokens": 0,
+                  "requestCount": 1, "durationMs": 5, "usageReported": True}}
+    try:
+        validate_line(dict(usage_recorded), 4)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test 误报: {error}")
+    bad = dict(usage_recorded)
+    bad["payload"] = {**bad["payload"],
+                      "usage": {**bad["payload"]["usage"], "inputTokens": -1}}
+    if not expect_fail(lambda: validate_line(bad, 4), "usage 非负"):
         failures += 1
     # semantics:goal applied 序列——衔接 + terminal 后开新 goal 合法;
     # achieved 后复活报非法。

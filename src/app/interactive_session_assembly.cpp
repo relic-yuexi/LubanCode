@@ -604,8 +604,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         // 轨迹 v3 §4.67 G1:goal 的持久账接线——v3 主写者/会话根/来源链从
         // 会话账取;v2 场 v3_main_writer() 恒空,goal 照旧走 v1 coordinator。
         goal_host.trajectory = session_runtime_.trajectory();
-        goal_host.start_turn = [this](const std::string& text, bool* turn_failed) {
-            RunSessionTurn(text, TurnSource::User, turn_failed);
+        goal_host.start_turn = [this](const std::string& text, bool* turn_failed,
+                                      bool* cancelled) {
+            RunSessionTurn(text, TurnSource::User, turn_failed,
+                           /*silent=*/false, memory::QueryOrigin::User, cancelled);
         };
         // §4.67 G2:验收回合的 parentTurnId 回指刚收口的工作轮(turn 视图
         // 的栈顶;非用户轮拿不到就空,评估账如实落 null,不伪造)。

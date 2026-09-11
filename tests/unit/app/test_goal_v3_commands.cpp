@@ -94,9 +94,10 @@ struct GoalV3Fixture {
         host.config = &config;
         host.current_model = std::make_shared<std::string>("test-model");
         host.trajectory = ledger.has_value() ? &*ledger : nullptr;
-        host.start_turn = [this](const std::string& text, bool* failed) {
+        host.start_turn = [this](const std::string& text, bool* failed, bool* cancelled) {
             turn_texts.push_back(text);
             if (failed != nullptr) *failed = false;
+            if (cancelled != nullptr) *cancelled = false;
         };
         host.notify = [this](bool is_error, const std::string& text) {
             notes.push_back(std::string(is_error ? "E: " : "N: ") + text);

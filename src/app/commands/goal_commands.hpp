@@ -71,8 +71,19 @@ GoalCommandOutcome FormatGoalStatus(const lubancode::runtime::goal::GoalCoordina
 
 // v3 路线的 status 排版(§4.67 G1 单一读面):吃 lineage 投影——lifecycle
 // ·phase·双版本号·iteration·目标·停因/待答·待续工作项(认领面)·预算
-// 用量。缺口(七档)第一行如实报,不猜(§4.55 状态损坏)。
+// 用量。缺口(七档)第一行如实报,不猜(§4.55 状态损坏)。G3 补:等待/
+// 巡检/停止意图三行。
 GoalCommandOutcome FormatGoalV3Status(const lubancode::runtime::goal::GoalLineageProjection& lineage);
+
+// ---- 跨壳统一状态投影(轨迹 v3 §4.67 G3) ------------------------------------
+// /goal status、状态栏、resume 通知三处同一投影:lifecycle 短码与首行
+// 都从这两只纯函数出,谁也不许自养一套折法。
+// 短码:run(活动中,含 idle/queued/running)/eval(验收中)/wait(等后台)/
+// pause(暂停/等用户/策略挂起)/blocked/done/budget/x(终态其余)。
+std::string GoalV3LifecycleCode(lubancode::runtime::goal::GoalLifecycle lifecycle,
+                                lubancode::runtime::goal::GoalPhase phase);
+// 首行:"<goalId> · <短码> · r<stateRevision> c<contractRevision> · iter<N>"。
+std::string BuildGoalV3HeadLine(const lubancode::runtime::goal::GoalStateSnapshot& snapshot);
 
 // clear 的二次确认文案(objective preview + iteration + 已耗预算 + 提醒
 // clear 不是 rollback)。
@@ -124,6 +135,13 @@ void EmitGoalHook(const GoalWiring& wiring, lubancode::hooks::HookEvent event, n
 // 状态栏的 goal/loop 段:"goal <短码>·iter<N> · loop×<N> next <差>"。两样
 // 都没有给空串(整段不挂)。goal 从 GoalState 现折,loop 用 scheduler 快照。
 std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop);
+
+// v3 版(§4.67 G3"跨壳统一状态显示"):v3 快照在场吃 v3(短码/首行与
+// /goal status、resume 通知同一投影——GoalV3LifecycleCode/
+// BuildGoalV3HeadLine);goal_v3 为空回落 v1 老折法,一字不变。
+std::string BuildGoalLoopStatusSegment(const lubancode::runtime::goal::GoalStateSnapshot* goal_v3,
+                                       lubancode::runtime::goal::GoalCoordinator* goal,
                                        lubancode::runtime::loop::LoopScheduler* loop);
 
 // 子代理回流进 goal 的账:后台子代理完成时,结果折一枚二级证据(producer

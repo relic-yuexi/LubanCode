@@ -173,6 +173,15 @@ enum class EventKindV3 {
     GoalEvaluationRequested,
     GoalEvaluationCompleted,
     GoalEvaluationRejected,
+    // Goal 模式 G3(§4.67.6/§4.67.7):后台等待与预算归属的事实行。
+    // goal.wait.registered:goal 登记后台等待(taskRefs、通知去重键、巡检
+    // 计划);等待计划是否生效仍看 state.goal.applied,本行只是登记事实。
+    // goal.wait.resolved:等待解除(交付去重键 + 原因);迟到解除不改账。
+    // goal.usage.recorded:逐 requestId 的 usage 归属与计量来源;投影累计
+    // 值、(sessionId,requestId) 去重,不重复计费。三者全部 statusless。
+    GoalWaitRegistered,
+    GoalWaitResolved,
+    GoalUsageRecorded,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

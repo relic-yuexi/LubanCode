@@ -24,8 +24,11 @@ MiddlewareAssemblyReport AttachMiddlewareRegistry(hooks::HookDispatcher& dispatc
     };
     MiddlewarePool pool(std::move(pool_options));
 
-    // 内置槽位先入池(builtin 是默认项;§4.36:估算/容量 required)。
+    // 内置槽位先入池(builtin 是默认项;§4.36:估算/容量 required;
+    // §4.67 G3:PostTurn/goal.review 同池——Lua 可按 (hookPoint,name)
+    // 同名替换验收排程策略,门槛归宿主不被绕过)。
     hooks::middleware::AddBuiltinRequestSlots(pool);
+    hooks::middleware::AddBuiltinGoalReviewSlot(pool);
 
     // 项目层先装、用户层后装:同键用户层胜出(§三来源层级)。
     if (!options.project_hooks_root.empty()) {

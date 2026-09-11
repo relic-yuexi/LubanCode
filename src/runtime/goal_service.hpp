@@ -24,8 +24,12 @@
 // 有 evaluating 相位的真来源)。
 //
 // G0 定型、后续棒次补内容:checkpointRef/appliedEvaluationId 的真实来源
-// 事件(G2)、waitTaskRefs 与巡检计划(G3)。pendingIntent(continuation
-// 意图)G1 已定型:GoalPendingIntent + SetPendingIntent/ClaimPendingIntent。
+// 事件(G2)、waitTaskRefs 与巡检计划(G3,已落:EnterWaiting/
+// RecordWaitInspection/ResolveWaiting + GoalWaitPlan)。pendingIntent
+//(continuation 意图)G1 已定型:GoalPendingIntent + SetPendingIntent/
+// ClaimPendingIntent。G3 另落:stopRequested(Esc/pause 停止意图)、预算
+// 预留(ReserveBudget/EvaluateBudget)与 usage 计费去重(RecordGoalUsage +
+// goal.usage.recorded)、显式加预算(AddBudget)、fork(CreateForkedGoal)。
 //
 // 依赖铁律:不 include cli/app/api;trajectory::v3 只前向声明(实现侧引
 // writer/reader),goal_types 的纯数据(合同/预算/usage/计数)照抄复用。
@@ -147,11 +151,28 @@ GoalEvidenceRef EvidenceRefFromTrace(const GoalEvidence& evidence, const std::st
 // 快照 schema(§4.67.3"快照至少保存"全表)
 // ---------------------------------------------------------------------------
 
+// 后台等待的巡检计划(§4.67.7:次数与 nextDue 入快照,重启不归零)。
+// 退避 30/60/120 分钟;pollsDone 到 maxPolls 停排巡检(nextDueMs=0),
+// 目标仍 waiting——真实完成通知到达仍能唤醒,纯等待不付模型请求。
+struct GoalWaitPlan {
+    int polls_done = 0;
+    int max_polls = 3;
+    std::int64_t next_due_ms = 0;  // 0 = 不再排(到上限/未登记)
+
+    nlohmann::json ToJson() const;
+    static GoalWaitPlan FromJson(const nlohmann::json& j);
+};
+// 第 n 次(n 从 0 起)巡检后的下次退避毫秒:30/60/120 分钟。
+std::int64_t GoalWaitBackoffMs(int poll_index);
+
 // 一版不可变 goal 状态快照。字段 = 设计 §4.67.3 清单:
 // goalId、来源 session 引用、stateRevision、contractRevision、合同、
 // lifecycle、phase、stopReason、当前 iterationId、checkpointRef、
 // evidenceRefs、pendingQuestion、waitTaskRefs、预算与累计 usage、
 // 进展/错误计数、待办调度项及已采用 evaluationId。
+// G3 补:waitPlan(巡检计划)、stopRequested(Esc/pause 的停止意图,
+// §4.67.3"取消和暂停收尾用独立 stopRequested 标志表达")、activeElapsedMs
+//(§4.67.7 activeElapsed:活动期累计,resume 不拿新计时器归零旧余额)。
 struct GoalStateSnapshot {
     std::string goal_id;
     std::string parent_goal_id;  // fork lineage;空 = 本链原生
@@ -174,12 +195,15 @@ struct GoalStateSnapshot {
     std::optional<std::string> iteration_id;       // 当前工作轮(可空)
     std::optional<std::string> checkpoint_ref;     // 指向账上 checkpoint 记录(G1+ 填)
     std::vector<GoalEvidenceRef> evidence_refs;
-    std::vector<std::string> wait_task_refs;       // G3 填;空数组照落
+    std::vector<std::string> wait_task_refs;       // G3:waiting 期登记的相关后台任务
+    GoalWaitPlan wait_plan;                        // G3:巡检计划(空等待 = 未登记)
     std::optional<std::string> applied_evaluation_id;  // 已采用判词(G2+ 填)
+    bool stop_requested = false;  // G3:Esc/pause 的停止意图(迟到结果不拉起新轮)
 
     GoalBudget budget;    // 复用(含 no-progress/blocker/provider 连败闸)
     GoalUsage usage;      // 累计(unknown 不冒充 0,usage_reported 管)
     GoalCounters counters;
+    std::int64_t active_elapsed_ms = 0;  // G3:active 期累计(提交间累加)
 
     nlohmann::json pending_intent = nlohmann::json::object();  // G1 填
 
@@ -230,7 +254,7 @@ std::string ValidatePendingIntent(const nlohmann::json& j);
 // §4.67.4 恢复补投影:这枚快照对当前写者还有没有可取的工作项。
 //   - 意图未认领 + 非停态 + 合同版本对得上 → claimable(恢复按原
 //     workItemId 补队列,重复 resume 只补同一项,不另发新工作);
-//   - 他 epoch 已认领且 phase=queued(claim 落账、开轮没落)= 账面证据
+//   - 他 epoch 已认领且 phase=queued(claim 落账、开轮没落)= 贒面证据
 //     "确认未发送"(G2 定案)→ claimable(接管沿用原项,续原请求不重放
 //     副作用;接管落 applied,原写者迟到的开轮被 CAS 拒);
 //   - 他 epoch 已认领且在途(running/evaluating)→ claimed_by_other
@@ -238,7 +262,9 @@ std::string ValidatePendingIntent(const nlohmann::json& j);
 //   - 本 epoch 已认领且 phase=queued(claim 后、开轮前)→ 仍 claimable
 //     (claim 幂等,沿用原项);
 //   - 停态/终态/意图对着旧合同 → 不排(§4.67.4"旧 Goal 工作项不挤过
-//     排在边界前的 pause/edit/clear")。
+//     排在边界前的 pause/edit/clear");
+//   - G3:stop_requested 在账(Esc/pause 先行)→ 不排,停止意图优先,
+//     迟到结果不拉起新轮(§4.67.10 竞态行)。
 struct GoalWorkView {
     bool claimable = false;
     bool claimed_by_other = false;
@@ -275,6 +301,11 @@ struct GoalProjection {
     std::string snapshot_ref;           // 相对 session 根
     GoalProjectionGap gap = GoalProjectionGap::None;
     std::string gap_detail;             // 人话(哪一版、差在哪)
+    // G3:usage 事实账(goal.usage.recorded 的 (sessionId,requestId) 去重
+    // 集与累计)——接管时喂服务的计费去重底;快照 usage 与事实累计的差额
+    // 是 resume 复核的输入(快照少 = 有事实没赶上提交,补账归调用方)。
+    std::vector<std::string> usage_request_ids;
+    GoalUsage usage_recorded;           // 事实行累计(投影值,非快照值)
 };
 
 // 从验后账投影当前 goal 状态:扫全部 state.goal.applied(落盘序),逐条
@@ -288,6 +319,13 @@ struct GoalProjection {
 GoalProjection ProjectGoalState(const trajectory::v3::V3Ledger& ledger,
                                 const std::filesystem::path& session_dir);
 
+// 证据判材料的账面回放(§4.67 G3,resume 后补内存):从 goal.evidence.
+// recorded 事实行重折 GoalEvidence 判材料(ref.kind 解析回 EvidenceKind,
+// facts 随行;同 id 取最晚一笔——stale 翻旧后取到最新鲜度)。解不出 kind
+// 的行保守跳过(缺材料只会让验收更保守,不会放过缺口)。
+std::vector<GoalEvidence> EvidenceMaterialFromLedger(const trajectory::v3::V3Ledger& ledger,
+                                                     const std::string& goal_id);
+
 // 沿 resume 来源链投影 goal head(§4.67.8"goal 沿 session lineage 持久
 // 保存";§4.67 G1 命令面/恢复共用的单一读面)。从 current_session_dir
 // 所在场起:先投本场卷;没有 goal 账且本场 start_reason=resume 时沿
@@ -300,6 +338,9 @@ struct GoalLineageProjection {
     GoalProjection projection;   // found 时为最近一份;否则 gap=NoGoal
     std::vector<std::string> walked;  // 走过的 session id(审计)
     std::string detail;          // 人话(从哪卷来/链停在哪)
+    // G3:head 卷的判材料回放(goal.evidence.recorded 事实行 -> v1 采证
+    // 形状)。gap 时为空——缺口不猜,材料也不假造。
+    std::vector<GoalEvidence> evidence_material;
 };
 GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_session_dir);
 
@@ -449,6 +490,92 @@ public:
                                                       const EvaluationVerdict& verdict,
                                                       nlohmann::json cause_ref);
 
+    // ---- §4.67 G3:后台等待、停止意图、预算预留与 fork --------------------
+
+    // 停止意图(§4.67.3 stopRequested):Esc/pause 边界先落这枚旗,不改
+    // lifecycle——当前轮照常收账,验收后不自动续排(EvaluateGoalWork 不认
+    // 领、continue 判词改落 paused);迟到结果(CAS 已拦)更不拉起新轮。
+    // 已置位时幂等返回,不空耗 revision。恢复(转回 active)时自动清旗。
+    GoalServiceResult RequestStop(std::uint64_t expected_state_revision, nlohmann::json cause_ref);
+    bool stop_requested() const { return current_.has_value() && current_->stop_requested; }
+
+    // 登记后台等待(§4.67.7):active -> waiting,waitTaskRefs 落快照、
+    // 巡检计划初始化(pollsDone=0/maxPolls=3/nextDue=now+30min)。同笔先落
+    // goal.wait.registered 事实行(taskRefs/通知去重键/巡检计划);等待计划
+    // 是否生效仍看随后的 state.goal.applied。收口位(phase=running)登记时
+    // iteration 原地保留(phase 回 idle),等待解除后恢复收口。无关进程不
+    // 进这本账——taskRefs 由调用方按"与当前验收相关"筛。
+    GoalServiceResult EnterWaiting(std::vector<std::string> task_refs,
+                                   std::uint64_t expected_state_revision,
+                                   nlohmann::json cause_ref);
+
+    // 巡检到期查询(纯读):waiting 且 nextDue 到点且未到次数上限。
+    bool WaitInspectionDue(std::int64_t now_ms) const;
+
+    // 记一次巡检(§4.67.7):pollsDone+1、nextDue 按 30/60/120 退避;到
+    // maxPolls 后 nextDue=0(停排巡检,目标仍 waiting,真实完成仍可唤醒)。
+    // payload["stopped"]=true 表示这一拍到顶(调用方通知一次)。
+    GoalServiceResult RecordWaitInspection(std::uint64_t expected_state_revision,
+                                           std::int64_t now_ms, nlohmann::json cause_ref);
+
+    // 解除等待(§4.67.7):waiting -> active;真实完成通知到达时调,
+    // deliveryKey 是通知去重键(同 key 迟到重放由调用方留审计,这里按
+    // waiting 态守门:非 waiting 拒——pause/clear 后的后台报告不拉起新轮)。
+    // 收口位等待(iteration 在途)恢复 phase=running 供收口续跑,否则 idle。
+    // 先落 goal.wait.resolved 事实行,再提交快照。
+    GoalServiceResult ResolveWaiting(const std::string& delivery_key,
+                                     std::uint64_t expected_state_revision,
+                                     nlohmann::json cause_ref);
+
+    // 显式加预算(§4.67.2 budget_exhausted 行):只抬帽不清账,每字段取
+    // max(旧帽,新增);旧费用保留。加完由调用方再走转回 active 的路径
+    //(resume 命令复核后转)。
+    GoalServiceResult AddBudget(const GoalBudgetAddition& addition,
+                                std::uint64_t expected_state_revision, nlohmann::json cause_ref);
+
+    // ---- 预算预留(§4.67.7:并发子任务共用预算预留,不是各花整份余额) --
+    // 预留是内存账(不是实报、不产 applied):发送前按 UTF-8 bytes/4 加
+    // 输出上限预留;真实用量到手后 RecordGoalUsage 对账并释放。崩溃丢了
+    // 预留不丢真账——usage 的真值在快照与 goal.usage.recorded 事实行。
+    struct GoalReservation {
+        std::string request_id;      // (sessionId, requestId) 去重键的后半
+        std::string owner;           // execution/evaluator/subagent/…(留账)
+        std::int64_t tokens = 0;     // 预留 token(input 估算 + 输出上限)
+        std::int64_t created_at_ms = 0;
+    };
+    // 预算闸的纯读投影:实报 + 在途预留一起对帽;would_exhaust(next_tokens)
+    // = 再来这笔就撞帽。usage_reported=false 时 token 尺没账可对(§4.67.7
+    // "不能拿 0 冒充没花"),只查轮数/时长尺。
+    struct GoalBudgetView {
+        bool exhausted = false;         // 现账已撞帽(不该再开新请求)
+        bool would_exhaust = false;     // 再来 next_tokens 这笔会撞帽
+        std::string reason;             // 哪把尺拦的(人话)
+        std::int64_t used_tokens = 0;
+        std::int64_t reserved_tokens = 0;
+    };
+    GoalBudgetView EvaluateBudget(std::int64_t next_tokens = 0) const;
+    // 预留一笔;撞帽/重复 requestId 拒(goal.reservation_rejected)。
+    GoalServiceResult ReserveBudget(std::string request_id, std::string owner,
+                                    std::int64_t tokens);
+    // 释放一笔预留(请求收场——实报或取消);未知 id 幂等成功。
+    GoalServiceResult ReleaseBudgetReservation(const std::string& request_id);
+    const std::vector<GoalReservation>& reservations() const { return reservations_; }
+
+    // 后台/子任务的 usage 归属(§4.67.7):先落 goal.usage.recorded 事实行
+    // (requestId/source/usage),再提交快照 usage 只增;(sessionId,
+    // requestId) 去重——重复通知第二次起幂等返回(payload["deduped"]),
+    // 不落事实行、不加账、不重复计费。顺带释放同名预留。
+    GoalServiceResult RecordGoalUsage(const std::string& request_id, const std::string& source,
+                                      const GoalUsage& usage, std::uint64_t expected_state_revision,
+                                      nlohmann::json cause_ref);
+
+    // fork(§4.67.8):复制合同与进度来路,另发 goalId,默认 paused;继承
+    // 证据全翻 fresh=false(待复核);原预算不带(帽清空)、usage 归零、
+    // waitTaskRefs/巡检/待续意图不带(原任务执行权不过去);parent_goal_id
+    // 记源 goal。新分支费用从显式启动后独立累计。当前已有未收账 goal 拒
+    //(fork 落在新 session 的服务上,本口不该撞 already_active)。
+    GoalServiceResult CreateForkedGoal(const GoalStateSnapshot& source, nlohmann::json cause_ref);
+
     // 只读查询:当前生效快照(applied 已落、内存已发布)。终态 goal 保留
     // 在案(审计);再 Create 会另起 goalId。
     const GoalStateSnapshot* current() const { return current_.has_value() ? &*current_ : nullptr; }
@@ -467,6 +594,11 @@ private:
     GoalServiceResult Commit(GoalStateSnapshot next, const nlohmann::json& cause_ref);
     GoalServiceResult Fail(const char* code, const std::string& message);
     std::int64_t Now() const;
+    // 预算闸的共用核对(BeginIteration/CompleteIterationWithEvaluation 的
+    // continue 分支都问它):iter 尺看 counters、token 尺看 usage+预留、
+    // 时长尺看 active_elapsed_ms。reason 为空 = 放行。
+    std::string BudgetStopReason(const GoalStateSnapshot& snapshot, std::int64_t next_tokens,
+                                 bool counting_next_iteration) const;
 
     trajectory::v3::V3Writer* writer_ = nullptr;
     Options options_;
@@ -476,6 +608,10 @@ private:
     std::string applied_event_id_;
     std::string applied_line_hash_;
     std::optional<std::uint64_t> applied_seq_;
+    // G3:预算预留(内存账;预留不是实报)与 usage 计费去重底(事实行的
+    // requestId 集;接管时从投影喂)。
+    std::vector<GoalReservation> reservations_;
+    std::vector<std::string> recorded_request_ids_;
     // 跨卷接管凭据(G1):AdoptFromProjection 置位,本写者对这只 goal 的
     // 首次 Commit 在 applied 里带 adoptedFrom{sessionId,stateRevision},
     // 落稳后清零。ProjectGoalState 按它认"本卷从半路续接"的合法首条。

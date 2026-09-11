@@ -1142,6 +1142,102 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.payload["reason"].is_string() || line.payload["reason"].get<std::string>().empty()) {
             return Err("schema3.bad_type", "goal.evaluation.rejected 的 reason 应为非空 string");
         }
+    } else if (line.kind == K::GoalWaitRegistered) {
+        // §4.67.7(轨迹 v3 §4.67 G3):goal 登记后台等待。taskRefs 至少一
+        // 项(无关进程不进等待账);notifyDedupeKey 是通知合并去重键;
+        // inspectionPlan 为巡检计划(次数入快照,重启不归零)。
+        for (const auto* key : {"goalId", "taskRefs", "notifyDedupeKey", "inspectionPlan"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.wait.registered payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "goal.wait.registered 的 goalId 应为非空 string");
+        }
+        if (!line.payload["taskRefs"].is_array() || line.payload["taskRefs"].empty()) {
+            return Err("schema3.bad_type", "goal.wait.registered 的 taskRefs 应为非空数组");
+        }
+        for (const auto& ref : line.payload["taskRefs"]) {
+            if (!ref.is_string() || ref.get<std::string>().empty()) {
+                return Err("schema3.bad_type", "goal.wait.registered 的 taskRefs 应为非空 string 项");
+            }
+        }
+        if (!line.payload["notifyDedupeKey"].is_string() ||
+            line.payload["notifyDedupeKey"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "goal.wait.registered 的 notifyDedupeKey 应为非空 string");
+        }
+        const auto& plan = line.payload["inspectionPlan"];
+        if (!plan.is_object()) {
+            return Err("schema3.bad_type", "goal.wait.registered 的 inspectionPlan 应为 object");
+        }
+        for (const auto* key : {"pollsDone", "maxPolls", "nextDueMs"}) {
+            if (!plan.contains(key) || !plan[key].is_number_integer()) {
+                return Err("schema3.bad_type",
+                           "goal.wait.registered 的 inspectionPlan." + std::string(key) +
+                               " 应为整数");
+            }
+        }
+        if (plan["pollsDone"].get<std::int64_t>() < 0 ||
+            plan["maxPolls"].get<std::int64_t>() < 1 ||
+            plan["nextDueMs"].get<std::int64_t>() < 0) {
+            return Err("schema3.bad_type",
+                       "goal.wait.registered 的 inspectionPlan 须 pollsDone>=0、maxPolls>=1、"
+                       "nextDueMs>=0");
+        }
+    } else if (line.kind == K::GoalWaitResolved) {
+        // §4.67.7:等待解除。deliveryKey 按 (sessionId,deliveryKey) 去重
+        // ——同一交付只唤醒一次;迟到解除(clear/终态之后)只留账不改状态。
+        for (const auto* key : {"goalId", "deliveryKey", "reason"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.wait.resolved payload 缺字段: " + std::string(key));
+            }
+        }
+        for (const auto* key : {"goalId", "deliveryKey", "reason"}) {
+            if (!line.payload[key].is_string() || line.payload[key].get<std::string>().empty()) {
+                return Err("schema3.bad_type",
+                           std::string("goal.wait.resolved 的 ") + key + " 应为非空 string");
+            }
+        }
+    } else if (line.kind == K::GoalUsageRecorded) {
+        // §4.67.7:逐 requestId 的 usage 归属。requestId 全局去重
+        // ((sessionId,requestId) 不重复计费);source 标归属
+        // (execution/evaluator/subagent/…);usage 为规范化计量对象。
+        for (const auto* key : {"goalId", "requestId", "source", "usage"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.usage.recorded payload 缺字段: " + std::string(key));
+            }
+        }
+        for (const auto* key : {"goalId", "requestId", "source"}) {
+            if (!line.payload[key].is_string() || line.payload[key].get<std::string>().empty()) {
+                return Err("schema3.bad_type",
+                           std::string("goal.usage.recorded 的 ") + key + " 应为非空 string");
+            }
+        }
+        const auto& usage = line.payload["usage"];
+        if (!usage.is_object()) {
+            return Err("schema3.bad_type", "goal.usage.recorded 的 usage 应为 object");
+        }
+        for (const auto* key : {"inputTokens", "outputTokens", "cacheReadTokens",
+                                "cacheCreationTokens", "reasoningTokens", "requestCount",
+                                "durationMs"}) {
+            if (!usage.contains(key) || !usage[key].is_number_integer()) {
+                return Err("schema3.bad_type",
+                           "goal.usage.recorded 的 usage." + std::string(key) + " 应为整数");
+            }
+        }
+        if (usage["inputTokens"].get<std::int64_t>() < 0 ||
+            usage["outputTokens"].get<std::int64_t>() < 0 ||
+            usage["requestCount"].get<std::int64_t>() < 0 ||
+            usage["durationMs"].get<std::int64_t>() < 0) {
+            return Err("schema3.bad_type", "goal.usage.recorded 的 usage 计量须非负");
+        }
+        if (!usage.contains("usageReported") || !usage["usageReported"].is_boolean()) {
+            return Err("schema3.bad_type", "goal.usage.recorded 的 usage.usageReported 应为 boolean");
+        }
     }
     // pending 类必须带 reason(§4.14)。
     if (line.status == OpStatus::Pending && !line.payload.contains("reason")) {

@@ -83,6 +83,15 @@ std::string DescribeGoalErrorCode(const std::string& code, const std::string& me
     if (code == lubancode::runtime::goal::kErrGoalIntentConflict) {
         return "意图提交冲突(" + message + ")。";
     }
+    if (code == lubancode::runtime::goal::kErrGoalNotWaiting) {
+        return "不在等待态(" + message + ");迟到交付只留审计,不拉起新轮。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalBudgetNotRaised) {
+        return "预算已尽,resume 须显式加预算:" + message;
+    }
+    if (code == lubancode::runtime::goal::kErrGoalReservationRejected) {
+        return "预算预留被拒(" + message + ");并发子任务共用余额,不是各花整份。";
+    }
     return message.empty() ? code : message;
 }
 
@@ -221,6 +230,51 @@ std::string GoalPhaseLabel(const std::string& phase) {
     return phase;
 }
 
+}  // namespace
+
+// ---- 跨壳统一状态投影(§4.67 G3):三处同一折法 ------------------------------
+
+std::string GoalV3LifecycleCode(lubancode::runtime::goal::GoalLifecycle lifecycle,
+                                lubancode::runtime::goal::GoalPhase phase) {
+    namespace goalns = lubancode::runtime::goal;
+    using L = goalns::GoalLifecycle;
+    switch (lifecycle) {
+        case L::Preparing:
+        case L::Active:
+            return phase == goalns::GoalPhase::Evaluating ? "eval" : "run";
+        case L::Waiting:
+            return "wait";
+        case L::Paused:
+        case L::AwaitingUser:
+        case L::SuspendedByPolicy:
+            return "pause";
+        case L::Blocked:
+            return "blocked";
+        case L::Achieved:
+            return "done";
+        case L::BudgetExhausted:
+            return "budget";
+        case L::Failed:
+        case L::Cleared:
+            return "x";
+    }
+    return "x";
+}
+
+std::string BuildGoalV3HeadLine(const lubancode::runtime::goal::GoalStateSnapshot& snapshot) {
+    namespace goalns = lubancode::runtime::goal;
+    std::string line = snapshot.goal_id + " · " +
+                       GoalV3LifecycleCode(snapshot.lifecycle, snapshot.phase) + " · r" +
+                       std::to_string(snapshot.state_revision) + " c" +
+                       std::to_string(snapshot.contract_revision);
+    if (snapshot.counters.iterations_started > 0) {
+        line += " · iter " + std::to_string(snapshot.counters.iterations_started);
+    }
+    return line;
+}
+
+namespace {
+
 std::string PreviewText(const std::string& text, std::size_t max) {
     return text.size() > max ? text.substr(0, max) + "…" : text;
 }
@@ -253,21 +307,24 @@ GoalCommandOutcome FormatGoalV3Status(
     }
     const goalns::GoalStateSnapshot& snapshot = projection.snapshot;
     out.ok = true;
-    std::string head = snapshot.goal_id + " · " +
-                       GoalLifecycleLabel(goalns::ToString(snapshot.lifecycle)) + "·" +
-                       GoalPhaseLabel(goalns::ToString(snapshot.phase)) + " · r" +
-                       std::to_string(snapshot.state_revision) + " c" +
-                       std::to_string(snapshot.contract_revision);
-    if (snapshot.counters.iterations_started > 0) {
-        head += " · iter " + std::to_string(snapshot.counters.iterations_started);
-    }
+    // 首行 = 跨壳统一投影(§4.67 G3):状态栏/resume 通知与此同一只
+    // BuildGoalV3HeadLine;中文态名补在第二段(人话,机器认短码)。
+    std::string head = BuildGoalV3HeadLine(snapshot);
+    head += " · " + GoalLifecycleLabel(goalns::ToString(snapshot.lifecycle)) + "·" +
+            GoalPhaseLabel(goalns::ToString(snapshot.phase));
     out.lines.push_back(head);
     if (projection.session_id != snapshot.session_id) {
         out.lines.push_back("(head 在来源卷 " + projection.session_id + ";本卷接管中)");
     }
+    if (!snapshot.parent_goal_id.empty()) {
+        out.lines.push_back("(fork 自 " + snapshot.parent_goal_id + ";费用/预算独立累计)");
+    }
     out.lines.push_back("目标: " + PreviewText(snapshot.objective, 80));
     if (!snapshot.stop_reason.empty()) {
         out.lines.push_back("停因: " + snapshot.stop_reason);
+    }
+    if (snapshot.stop_requested) {
+        out.lines.push_back("(停止意图在账:Esc/pause 先行,显式 resume 后才续排)");
     }
     if (!snapshot.blocker_key.empty()) {
         out.lines.push_back("受阻键: " + snapshot.blocker_key);
@@ -291,6 +348,21 @@ GoalCommandOutcome FormatGoalV3Status(
         }
         out.lines.push_back(line);
     }
+    // 后台等待与巡检(§4.67.7 G3):等待只盖相关 taskRefs;巡检次数入
+    // 快照,重启不归零;到上限停排但真实完成仍可唤醒。
+    if (snapshot.lifecycle == goalns::GoalLifecycle::Waiting) {
+        std::string line = "等待: " + std::to_string(snapshot.wait_task_refs.size()) + " 项后台任务";
+        for (const auto& ref : snapshot.wait_task_refs) {
+            line += " " + ref;
+        }
+        if (snapshot.wait_plan.next_due_ms > 0) {
+            line += ";巡检 " + std::to_string(snapshot.wait_plan.polls_done) + "/" +
+                    std::to_string(snapshot.wait_plan.max_polls);
+        } else {
+            line += ";巡检到上限,等真实完成通知";
+        }
+        out.lines.push_back(line);
+    }
     std::string progress = "防空转: 无进展连击 " + std::to_string(snapshot.counters.no_progress_streak) +
                            " · 同 blocker 连击 " +
                            std::to_string(snapshot.counters.same_blocker_streak);
@@ -305,6 +377,11 @@ GoalCommandOutcome FormatGoalV3Status(
             line += " · token " + std::to_string(total) + " reported";
         } else {
             line += " · token 未报告";
+        }
+        if (snapshot.budget.max_elapsed_ms.has_value()) {
+            const std::int64_t secs = snapshot.active_elapsed_ms / 1000;
+            line += " · active " + std::to_string(secs / 60) + "m" + std::to_string(secs % 60) +
+                    "s/" + std::to_string(*snapshot.budget.max_elapsed_ms / 60000) + "m";
         }
         out.lines.push_back(line);
     }
@@ -603,18 +680,78 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
                 << "),无需恢复。" << theme.reset << "\n";
             return lubancode::app::CommandFlow::Continue;
         }
+        // §4.67.2 resume 行 + G3:budget_exhausted 须显式加预算后才可恢复
+        //("/goal resume iterations=30 tokens=200000"),不悄悄放宽;旧
+        // 费用保留。其余停态直接复核转回。
+        if (current->lifecycle == goalns::GoalLifecycle::BudgetExhausted) {
+            if (!goal.has_budget_addition()) {
+                goalns::GoalServiceResult refused;
+                refused.error_code = goalns::kErrGoalBudgetNotRaised;
+                out << theme.error
+                    << lubancode::app::DescribeGoalErrorCode(
+                           refused.error_code,
+                           "用 /goal resume iterations=<N> [tokens=<N>] [elapsed_min=<N>] 抬帽后恢复")
+                    << theme.reset << "\n";
+                return lubancode::app::CommandFlow::Continue;
+            }
+            goalns::GoalBudgetAddition addition;
+            addition.iterations = goal.budget_iterations;
+            addition.total_tokens = goal.budget_tokens;
+            addition.elapsed_ms = goal.budget_elapsed_ms;
+            const auto added =
+                service.AddBudget(addition, current->state_revision, command_cause);
+            if (!added.ok) return fail_with(added);
+            std::string raised = "预算已抬(";
+            if (added.payload.contains("maxIterations")) {
+                raised += std::to_string(added.payload.at("maxIterations").get<std::int64_t>()) +
+                          " 轮";
+            }
+            if (added.payload.contains("maxTotalTokens")) {
+                if (raised.back() != '(') raised += " · ";
+                raised += std::to_string(added.payload.at("maxTotalTokens").get<std::int64_t>()) +
+                          " token";
+            }
+            if (added.payload.contains("maxElapsedMs")) {
+                if (raised.back() != '(') raised += " · ";
+                raised += std::to_string(added.payload.at("maxElapsedMs").get<std::int64_t>() /
+                                         60000) +
+                          " 分钟";
+            }
+            raised += ")";
+            out << theme.stats << raised << ";旧费用保留。" << theme.reset << "\n";
+            current = service.current();  // AddBudget 已提交,拿新 revision
+        }
         goalns::GoalTransitionCandidate candidate;
         candidate.goal_id = current->goal_id;
         candidate.expected_state_revision = current->state_revision;
         candidate.to_lifecycle = goalns::GoalLifecycle::Active;
         candidate.to_phase = goalns::GoalPhase::Idle;
-        // §4.67.2 resume 行:重新核对停因与预算才续排。停因这里清;预算
-        // 复核(budget_exhausted 显式加预算)归 G3 的显式加预算路径。
+        // §4.67.2 resume 行:重新核对停因与预算才续排。停因这里清;
+        // budget_exhausted 的复核在上一段(先 AddBudget 再转)。
         candidate.stop_reason.clear();
         const auto result = service.ApplyTransition(candidate);
         if (!result.ok) return fail_with(result);
         out << theme.stats << "目标已续(从快照 r" << result.payload.value("stateRevision", 0)
-            << ";待续工作项沿原 id 回泵,不重放旧 iteration)。" << theme.reset << "\n";
+            << ";待续工作项沿原 id 回泵,不重放旧 iteration)。";
+        // 意图空了(上一轮收口被停/Esc 截走,没有排下续跑):显式 resume
+        // 排一枚新工作项(§4.67.2"可推进才续排"——用户点了 resume 就是
+        // 明确续跑)。predecessor 取最后 iteration,ordinal 1。
+        const goalns::GoalStateSnapshot* resumed = service.current();
+        if (resumed != nullptr &&
+            (!resumed->pending_intent.is_object() || resumed->pending_intent.empty())) {
+            goalns::GoalPendingIntent fresh;
+            fresh.work_item_id =
+                resumed->goal_id + "/wi-r" + std::to_string(resumed->state_revision);
+            fresh.contract_revision = resumed->contract_revision;
+            fresh.predecessor_iteration_id = resumed->iteration_id.value_or(std::string());
+            fresh.continuation_ordinal = 1;
+            const auto queued = service.SetPendingIntent(fresh, resumed->state_revision,
+                                                         command_cause);
+            if (queued.ok) {
+                out << " 新工作项 " << fresh.work_item_id << " 已排。";
+            }
+        }
+        out << theme.reset << "\n";
         return lubancode::app::CommandFlow::Continue;
     }
 
@@ -667,6 +804,73 @@ void EmitGoalHook(const GoalWiring& /*wiring*/, lubancode::hooks::HookEvent even
     payload.fields = std::move(fields);
     payload.match_value = match_value;
     dispatcher->Emit(event, payload);
+}
+
+std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop);
+
+// v3 版(§4.67 G3"跨壳统一状态显示")。实现见下;上面这只前向声明给
+// 三参重载共用 loop 段折法。
+std::string BuildGoalV3StatusSegmentText(const lubancode::runtime::goal::GoalStateSnapshot* goal_v3) {
+    if (goal_v3 == nullptr) return std::string();
+    // 短码/版本号与 /goal status、resume 通知同一投影(GoalV3LifecycleCode)。
+    std::string part = "goal " + GoalV3LifecycleCode(goal_v3->lifecycle, goal_v3->phase);
+    if (goal_v3->counters.iterations_started > 0) {
+        part += "·iter" + std::to_string(goal_v3->counters.iterations_started);
+    }
+    if (goal_v3->state_revision > 1) {
+        part += "·r" + std::to_string(goal_v3->state_revision);
+    }
+    return part;
+}
+
+std::string BuildGoalLoopStatusSegment(const lubancode::runtime::goal::GoalStateSnapshot* goal_v3,
+                                       lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop) {
+    // v3 快照在场吃 v3(v3 会话里 v1 coordinator 没有活动 goal,双算无门);
+    // 没有回落 v1 老折法。
+    const std::string goal_part = BuildGoalV3StatusSegmentText(goal_v3);
+    std::string loop_part;
+    if (loop != nullptr) {
+        const auto now_ms = [] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        };
+        int active = 0;
+        std::int64_t next_due = 0;
+        bool has_next = false;
+        for (const auto& view : loop->Snapshot(now_ms)) {
+            if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
+                view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
+                continue;
+            }
+            ++active;
+            if (!has_next || view.task.next_due_at_ms < next_due) {
+                next_due = view.task.next_due_at_ms;
+                has_next = true;
+            }
+        }
+        if (active > 0) {
+            loop_part = "loop×" + std::to_string(active);
+            if (has_next && next_due > now_ms) {
+                const std::int64_t secs = (next_due - now_ms) / 1000;
+                if (secs < 60) {
+                    loop_part += " next " + std::to_string(secs) + "s";
+                } else if (secs < 3600) {
+                    loop_part += " next " + std::to_string(secs / 60) + "m";
+                } else {
+                    loop_part += " next " + std::to_string(secs / 3600) + "h";
+                }
+            }
+        }
+    }
+    if (goal_part.empty() && loop_part.empty()) {
+        return std::string();
+    }
+    if (goal_part.empty()) return loop_part;
+    if (loop_part.empty()) return goal_part;
+    return goal_part + " · " + loop_part;
 }
 
 std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,

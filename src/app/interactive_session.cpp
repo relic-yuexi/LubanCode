@@ -671,7 +671,7 @@ bool TerminalSessionController::PumpScheduledWork() {
 //   - 排队账快照(PersistSteeringQueue)两路都收(轮内可能进队/送走过)。
 void TerminalSessionController::RunSessionTurn(const std::string& content, TurnSource source,
                                                bool* autosend_failed, bool silent,
-                                               memory::QueryOrigin origin) {
+                                               memory::QueryOrigin origin, bool* cancelled_out) {
     // 多渠道单阶段 3(§15.2):字符串路折 TurnIngress 再进结构体入口。
     // 终端路的 provenance 按 origin 分档落账(User -> HumanTerminal,
     // Incoming -> PeerSession);渠道路(Channel)不经这里——headless 会话
@@ -683,12 +683,12 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
                                    : lubancode::channel::MessageOrigin::PeerSession;
     ingress.message.role = api::Role::User;
     ingress.message.content.push_back(api::TextBlock{content});
-    RunSessionTurn(std::move(ingress), autosend_failed, silent, origin);
+    RunSessionTurn(std::move(ingress), autosend_failed, silent, origin, cancelled_out);
 }
 
 void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress ingress,
                                                bool* autosend_failed, bool silent,
-                                               memory::QueryOrigin origin) {
+                                               memory::QueryOrigin origin, bool* cancelled_out) {
     const TurnSource source = ingress.source;
     // P3 取消闸(§五.4):新一轮开跑,上一轮的取消账翻篇——闸只压"取消后
     // 的第一圈泵"。
@@ -925,8 +925,12 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     // P3 steer/followup 显式化(§五.5):Turn 终局仍未消费的 steer 不许悄悄
     // 改道成 followup——打过期标注、向用户明示、轨迹落 NoteQueueExpired,
     // 条目保持 Queued 等用户去留(取回改写再排,或删除)。取消账同时记下
-    // (§五.4:取消后默认不自动续轮,泵会看这枚旗)。
+    // (§五.4:取消后默认不自动续轮,泵会看这枚旗)。goal 侧的 Esc 停止
+    // 意图(§4.67 G3)也从这一拍取值:goal 泵的 start_turn 出参吃它。
     last_turn_cancelled_ = turn_result.cancelled;
+    if (cancelled_out != nullptr) {
+        *cancelled_out = turn_result.cancelled;
+    }
     {
         const std::vector<lubancode::cli::QueueId> expired =
             SessionSteeringQueue().MarkExpiredUnconsumedSteers("turn_end_no_next_step");
@@ -1086,6 +1090,7 @@ void TerminalSessionController::Run() {
             status_inputs_.rec_override.clear();
         }
         status_inputs_.goal = goal_wiring_.coordinator();
+        status_inputs_.goal_v3 = goal_wiring_.v3_current_snapshot();
         status_inputs_.loop_scheduler = loop_wiring_.scheduler();
         lubancode::cli::SetStatusLineData(
             lubancode::app::BuildStatusPanelData(status_inputs_, config.tool_calling),
