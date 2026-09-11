@@ -105,6 +105,13 @@ struct V3TurnBooks {
         bool started = false;
         bool failed = false;               // 执行终态是 failed(选用口径用)
         bool tool_message_done = false;
+        // V3-REAL-05 模型历史预览钩子(rewrite_tool_results_for_history)
+        // 已走过这枚:原文已归仓、persisted/selected 已落、预览已写进运行
+        // 时历史;批次尾只补 tool 消息(同一份预览文本,不再重复归仓)。
+        bool history_preview_done = false;
+        std::string persisted_event_id;    // 钩子落的 tool.result.persisted 事件
+        std::string selected_event_id;     // 钩子落的 tool.result.selected 事件
+        std::string preview_text;          // 写进历史与 tool 消息的模型可见正文
     };
     struct Request {
         std::string step_id;
@@ -1663,6 +1670,176 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
     }
 }
 
+// 结果链公共段(§4.16-4.18/§4.23;V3-REAL-05):入史预览钩子与批次尾
+// 落账共用——同一份输入产出同一份模型可见正文,运行时历史里的那块与
+// v3 tool 消息逐字节一致(账实一致的地基)。
+std::string TrajectoryTurnBridge::V3AdoptToolResult(const std::string& tool_use_id,
+                                                    const api::ToolResultBlock& result,
+                                                    std::string& persisted_event_id,
+                                                    std::string& selected_event_id) {
+    // 调用方(RewriteToolResultsForHistory/V3ToolResultsCommitted)已守卫过
+    // 账项;这里按 id 再取一次 Action 簿(书在 cpp,V3TurnBooks 不出这个
+    // 编译单元)。
+    const auto it = v3_turn_->calls.find(tool_use_id);
+    if (it == v3_turn_->calls.end() || !it->second.action.has_value()) {
+        return result.content;  // 无账可落:原文原样,不拦消息流
+    }
+    V3TurnBooks::Call& book = it->second;
+    // 结果仓:原文按 artifact 不可变落档(§4.16)。
+    if (!v3_books_->results.has_value()) {
+        if (auto store = v3::ResultStore::Open(v3_writer_->path().parent_path());
+            store.has_value()) {
+            v3_books_->results = std::move(*store);
+        }
+    }
+    const std::string execution_event_ref = book.action->last_event_id().value_or(std::string());
+    // 模型可见正文:线内 = 原文;超帽 = §4.17 预览(原文已归仓)。
+    std::string adopted = result.content;
+    if (v3_books_->results.has_value()) {
+        // 预览档位(§4.17/§4.38):writer 的已采用档(默认 32 KiB,
+        // ReduceToolPreviews 正式降档提交后取新档,普通请求不回升)。
+        const std::uint64_t preview_budget = v3_writer_->context().preview_budget_bytes;
+        v3::ResultStore::PersistRequest persist;
+        persist.result_kind = "text";
+        persist.content = result.content;
+        if (result.structured_content.has_value()) {
+            persist.structured_content = *result.structured_content;
+        }
+        persist.execution_event_ref = execution_event_ref;
+        persist.tool_call_id = book.action_id;
+        // 准入时的策略快照(§4.16 preview_policy):这一枚结果按哪一档
+        // 生成模型预览,落进不可变描述,日后翻账知道当时的帽。
+        persist.preview_policy = nlohmann::json{
+            {"policy", "v3-tool-preview"},
+            {"maxPreviewBytes", preview_budget},
+            {"budgetsLadder", nlohmann::json::array({32768, 16384, 8192, 4096})}};
+        persist.outputs.push_back(v3::ResultStore::ChannelOutput{
+            "combined", "text/plain", result.content, true, std::string(),
+            static_cast<std::uint64_t>(result.content.size()), false});
+        const auto persisted = v3_books_->results->Persist(persist);
+        if (persisted.ok) {
+            const auto receipt = book.action->PersistedResult(
+                *v3_writer_, persisted.result_ref, execution_event_ref, std::nullopt,
+                trajectory::Durability::PowerLoss);
+            V3NotifyCommitted(receipt);
+            if (receipt.status == v3::WriteReceipt::Status::Committed) {
+                persisted_event_id = receipt.id;
+            } else {
+                NoteV3Error(receipt, "tool.result.persisted");
+            }
+        } else {
+            // 执行成功而存储失败(§4.18):保留 done,另报持久化失败,
+            // 不改称"工具没有执行"。
+            const auto receipt = book.action->PersistFailed(
+                *v3_writer_, persisted.error, std::nullopt, trajectory::Durability::PowerLoss);
+            V3NotifyCommitted(receipt);
+            if (receipt.status != v3::WriteReceipt::Status::Committed) {
+                NoteV3Error(receipt, "tool.result.persist_failed");
+            }
+        }
+        // 模型预览(V3-REAL-05,§4.16-4.17):原文已按 artifact 不可变
+        // 归仓,模型可见正文不再背全文(run_command 2MB 递归列目录那场病
+        // 理)。汇总(单通道 combined;stdout/stderr 已在上游并进 content)
+        // 后的总字节超当前档才走预览路:说明区(输出字节数/截断/捕获状态/
+        // 全文路径——标签路径也占预算)+ 头尾节选;线内原样返回(§4.17),
+        // 不硬套壳。超限被省略的正文不伪称完整:truncated 状态如实交代,
+        // 全文按 result_ref 归仓可追(§4.21 读取侧 ExpandResultPreview 验
+        // hash 展开)。
+        if (persisted.ok && result.content.size() > preview_budget) {
+            std::string combined_path;
+            for (const auto& ref : persisted.result_ref) {
+                if (ref.value("kind", std::string()) == "combined") {
+                    combined_path = ref.value("path", std::string());
+                    break;
+                }
+            }
+            v3::PreviewRequest preview_request;
+            v3::PreviewChannel channel;
+            channel.display_path = combined_path;
+            channel.channel = "combined";
+            channel.text = result.content;
+            channel.output_bytes = static_cast<std::uint64_t>(result.content.size());
+            preview_request.channels.push_back(std::move(channel));
+            preview_request.max_preview_bytes = preview_budget;
+            adopted = v3::BuildToolPreview(preview_request).text;
+        }
+        // Persist 失败时上方保持原文:仓没开住,预览帽一裁正文就没有完整
+        // 可得版本了——不裁,内存侧交给上层保命索(§4.18 存储失败不改称
+        // 没执行,正文也不假装修过)。
+    } else {
+        // 结果仓开不了:结果链(persisted→selected)立不起来,不伪造选用
+        // 事件(schema 对空 sourceResultEventRefs 一刀拒),tool 消息不落,
+        // 如实留诊断;正文保持原文入史(不裁)。
+        const std::string note = "tool.result.store_unavailable:" + book.action_id;
+        recent_errors_.push_back(note);
+        if (error_sink_ != nullptr) {
+            error_sink_->push_back(note);
+        }
+        platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
+        return adopted;
+    }
+    // 结果选用(§4.23):无改写也明确选择原结果(sourceResultEventRefs
+    // 须非空——persisted 事件落稳才有得选)。
+    if (!persisted_event_id.empty()) {
+        const auto selected = book.action->SelectResult(
+            *v3_writer_, std::vector<std::string>{persisted_event_id}, {},
+            book.failed ? "failed" : "done", std::nullopt, trajectory::Durability::PowerLoss);
+        V3NotifyCommitted(selected);
+        if (selected.status == v3::WriteReceipt::Status::Committed) {
+            selected_event_id = selected.id;
+        } else {
+            NoteV3Error(selected, "tool.result.selected");
+        }
+    }
+    return adopted;
+}
+
+void TrajectoryTurnBridge::RewriteToolResultsForHistory(api::Message& results) {
+    // 模型历史预览钩子(V3-REAL-05):loop 在工具结果消息压进双账之前调
+    // ——此刻是"首次定形"的最后时点,入史后再改就是追改已发前缀。v2 模式
+    // 走基类默认穿透(轨迹账正文取自这份消息,原文入史不丢;带仓的预览
+    // 化由 v3 桥独担)。
+    if (!V3Mode() || !turn_open_ || v3_turn_ == nullptr) {
+        return;
+    }
+    // 仓开不了:不动这份消息(原文入史,不裁),也不标记——批次尾的
+    // V3ToolResultsCommitted 走原路(诊断 + 不伪造结果链,§4.18)。
+    if (!v3_books_->results.has_value()) {
+        if (auto store = v3::ResultStore::Open(v3_writer_->path().parent_path());
+            store.has_value()) {
+            v3_books_->results = std::move(*store);
+        } else {
+            return;
+        }
+    }
+    for (auto& block : results.content) {
+        auto* result = std::get_if<api::ToolResultBlock>(&block);
+        if (result == nullptr) {
+            continue;
+        }
+        const auto it = v3_turn_->calls.find(result->tool_use_id);
+        if (it == v3_turn_->calls.end() || !it->second.terminal || it->second.tool_message_done ||
+            it->second.history_preview_done) {
+            continue;
+        }
+        V3TurnBooks::Call& book = it->second;
+        if (!book.action.has_value()) {
+            continue;
+        }
+        std::string persisted_event_id;
+        std::string selected_event_id;
+        // 原文归仓 → persisted → selected → 预览;预览文本写回 content,
+        // loop 把它压进 durable/request 双账——模型实发与 v3 tool 消息
+        //(批次尾)吃同一份,账实一致。
+        book.preview_text =
+            V3AdoptToolResult(result->tool_use_id, *result, persisted_event_id, selected_event_id);
+        result->content = book.preview_text;
+        book.persisted_event_id = std::move(persisted_event_id);
+        book.selected_event_id = std::move(selected_event_id);
+        book.history_preview_done = true;
+    }
+}
+
 void TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
     // 结果链(§4.18):persisted(结果仓落 artifact)→ selected(选用声明)
     // → tool 消息(模型可见预览正文)→ 接纳进链。
@@ -1679,113 +1856,21 @@ void TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
         if (!book.action.has_value()) {
             continue;
         }
-        // 结果仓:原文按 artifact 不可变落档(§4.16)。
-        if (!v3_books_->results.has_value()) {
-            if (auto store = v3::ResultStore::Open(v3_writer_->path().parent_path());
-                store.has_value()) {
-                v3_books_->results = std::move(*store);
-            }
-        }
-        const std::string execution_event_ref = book.action->last_event_id().value_or(std::string());
         std::string persisted_event_id;
-        // 模型可见正文:线内 = 原文;超帽 = §4.17 预览(原文已归仓)。
-        std::string tool_message_content = result->content;
-        if (v3_books_->results.has_value()) {
-            // 预览档位(§4.17/§4.38):writer 的已采用档(默认 32 KiB,
-            // ReduceToolPreviews 正式降档提交后取新档,普通请求不回升)。
-            const std::uint64_t preview_budget = v3_writer_->context().preview_budget_bytes;
-            v3::ResultStore::PersistRequest persist;
-            persist.result_kind = "text";
-            persist.content = result->content;
-            if (result->structured_content.has_value()) {
-                persist.structured_content = *result->structured_content;
-            }
-            persist.execution_event_ref = execution_event_ref;
-            persist.tool_call_id = book.action_id;
-            // 准入时的策略快照(§4.16 preview_policy):这一枚结果按哪一档
-            // 生成模型预览,落进不可变描述,日后翻账知道当时的帽。
-            persist.preview_policy = nlohmann::json{
-                {"policy", "v3-tool-preview"},
-                {"maxPreviewBytes", preview_budget},
-                {"budgetsLadder", nlohmann::json::array({32768, 16384, 8192, 4096})}};
-            persist.outputs.push_back(v3::ResultStore::ChannelOutput{
-                "combined", "text/plain", result->content, true, std::string(),
-                static_cast<std::uint64_t>(result->content.size()), false});
-            const auto persisted = v3_books_->results->Persist(persist);
-            if (persisted.ok) {
-                const auto receipt = book.action->PersistedResult(
-                    *v3_writer_, persisted.result_ref, execution_event_ref, std::nullopt,
-                    trajectory::Durability::PowerLoss);
-                V3NotifyCommitted(receipt);
-                if (receipt.status == v3::WriteReceipt::Status::Committed) {
-                    persisted_event_id = receipt.id;
-                } else {
-                    NoteV3Error(receipt, "tool.result.persisted");
-                }
-            } else {
-                // 执行成功而存储失败(§4.18):保留 done,另报持久化失败,
-                // 不改称"工具没有执行"。
-                const auto receipt = book.action->PersistFailed(
-                    *v3_writer_, persisted.error, std::nullopt, trajectory::Durability::PowerLoss);
-                V3NotifyCommitted(receipt);
-                if (receipt.status != v3::WriteReceipt::Status::Committed) {
-                    NoteV3Error(receipt, "tool.result.persist_failed");
-                }
-            }
-            // 模型预览(V3-REAL-05,§4.16-4.17):原文已按 artifact 不可变
-            // 归仓,tool 消息不再背全文(run_command 2MB 递归列目录那场病
-            // 理)。汇总(单通道 combined;stdout/stderr 已在上游并进
-            // content)后的总字节超当前档才走预览路:说明区(输出字节数/
-            // 截断/捕获状态/全文路径——标签路径也占预算)+ 头尾节选;线内
-            // 原样返回(§4.17),不硬套壳。超限被省略的正文不伪称完整:
-            // truncated 状态如实交代,全文按 result_ref 归仓可追(§4.21
-            // 读取侧 ExpandResultPreview 验 hash 展开)。
-            if (persisted.ok && result->content.size() > preview_budget) {
-                std::string combined_path;
-                for (const auto& ref : persisted.result_ref) {
-                    if (ref.value("kind", std::string()) == "combined") {
-                        combined_path = ref.value("path", std::string());
-                        break;
-                    }
-                }
-                v3::PreviewRequest preview_request;
-                v3::PreviewChannel channel;
-                channel.display_path = combined_path;
-                channel.channel = "combined";
-                channel.text = result->content;
-                channel.output_bytes = static_cast<std::uint64_t>(result->content.size());
-                preview_request.channels.push_back(std::move(channel));
-                preview_request.max_preview_bytes = preview_budget;
-                tool_message_content = v3::BuildToolPreview(preview_request).text;
-            }
-            // Persist 失败时上方保持原文:仓没开住,预览帽一裁正文就没有
-            // 完整可得版本了——不裁,内存侧交给上层保命索(§4.18 存储失败
-            // 不改称没执行,正文也不假装修过)。
-        } else {
-            // 结果仓开不了:结果链(persisted→selected)立不起来,不伪造
-            // 选用事件(schema 对空 sourceResultEventRefs 一刀拒),tool
-            // 消息不落,如实留诊断。
-            const std::string note = "tool.result.store_unavailable:" + book.action_id;
-            recent_errors_.push_back(note);
-            if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
-            }
-            platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
-            continue;
-        }
-        // 结果选用(§4.23):无改写也明确选择原结果(sourceResultEventRefs
-        // 须非空——persisted 事件落稳才有得选)。
         std::string selected_event_id;
-        if (!persisted_event_id.empty()) {
-            const auto selected = book.action->SelectResult(
-                *v3_writer_, std::vector<std::string>{persisted_event_id}, {},
-                book.failed ? "failed" : "done", std::nullopt, trajectory::Durability::PowerLoss);
-            V3NotifyCommitted(selected);
-            if (selected.status != v3::WriteReceipt::Status::Committed) {
-                NoteV3Error(selected, "tool.result.selected");
-                continue;
-            }
-            selected_event_id = selected.id;
+        // 模型可见正文:预览钩子(rewrite_tool_results_for_history)已走
+        // 过的,归仓/选用在入史前已落,这里只补 tool 消息,且与运行时历史
+        // 里那份预览同一文本(账实一致);没接钩子的路(子代理/未装配的
+        // 旧 wiring)批次尾现场归仓——运行时历史是原文,tool 消息仍是预览
+        //(V3-REAL-05 的回退路,主链经 hub 的钩子闭环)。
+        std::string tool_message_content;
+        if (book.history_preview_done) {
+            persisted_event_id = book.persisted_event_id;
+            selected_event_id = book.selected_event_id;
+            tool_message_content = result->content;  // 钩子已写回预览
+        } else {
+            tool_message_content =
+                V3AdoptToolResult(result->tool_use_id, *result, persisted_event_id, selected_event_id);
         }
         // 最终 tool 消息:content 是模型可见的最终预览版本(线内原文/超帽
         // §4.17 预览),resultSelectionRef 指回选用事件。

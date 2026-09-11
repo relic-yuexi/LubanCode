@@ -415,6 +415,31 @@ TEST_CASE("V3-REAL-01: 显式降档走正式提交,只产生一次可解释断�
     }
 }
 
+TEST_CASE("V3-REAL-05 衔接: 32 KiB 预览文本入史后,系数漂移永不重裁") {
+    agent::ContextManager context;
+    // 全链喂点(loop 入史前钩子)把超帽结果换成了固定预览:进历史的正文
+    // 本身 ≤32 KiB。这里钉它的下游稳定性——预览文本恰在 25% 线上(32768
+    // 字节 ASCII = 8192 token,窗口 32768 的线恰 8192),系数放大越线后
+    // 也不回头裁(线内定形,模型实发的那份逐请求不变)。
+    InstallFatRunCommandTurn(context, "toolu_preview", 32768);
+    auto first = context.BuildWorkingView({32768, 1.0});
+    CHECK_FALSE(first.trim.truncated_results);
+    const std::string& preview_in_history = ToolResultAt(first.messages, 2).content;
+    CHECK(preview_in_history.size() == 32768);
+
+    // 系数 1.5:同一份文本估 12288 token,越 8192 的线。钉子账按首次定形
+    // 放行——运行时历史里的预览不因估算器状态变化追改。
+    auto hot = context.BuildWorkingView({32768, 1.5});
+    CHECK_FALSE(hot.trim.truncated_results);
+    CHECK(ToolResultAt(hot.messages, 2).content == preview_in_history);
+    // 追加请求再验一次(与 12 拍案同款断言,钉前缀稳定)。
+    context.PushMessage(AssistantMessage("预览后的下一拍"));
+    auto next = context.BuildWorkingView({32768, 1.5});
+    CHECK(ToolResultAt(next.messages, 2).content == preview_in_history);
+    auto account = context.AccountRequest(MakeRequest(next.messages));
+    CHECK(account.append_only);
+}
+
 TEST_CASE("V3-REAL-02: 截断通报按结果身份去重——同枚不重报,另一枚新来必报") {
     agent::ContextManager context;
     InstallFatRunCommandTurn(context, "toolu_a", 200000);

@@ -351,6 +351,15 @@ struct TurnWiring {
     // 2. 本批五枚 tool result 全收齐、合并的 user 消息刚入 history:装配层
     //    append+flush user 消息,再为每枚写 result_committed 栅栏。
     std::function<void(const std::string& batch_id, const api::Message& tool_result_message)> on_tool_results_committed;
+    // 2.5 模型历史预览钩子(V3-REAL-05,真实会话审计棒一):上面那只在
+    //    消息入史之后才回调,归仓来不及。这一只在工具结果消息压进双账
+    //    之前调——带结果仓的一方(hub 接轨迹 v3 桥)把超帽全文(>当前
+    //    预览档,默认 32 KiB)换成固定预览并就地归仓原文;返回后 loop 把
+    //    改写后的消息入史,模型实发与 v3 tool 消息吃同一份预览(账实一
+    //    致)。此刻是"首次定形"的最后时点:入史后再改就是追改已发前缀。
+    //    空 = 没接预览器(单测/子代理旧装配/v2 场),全文入史,保命索兜
+    //    底,行为与从前一字不差。
+    std::function<void(api::Message& tool_result_message)> rewrite_tool_results_for_history;
 
     // ---- token 估算校准(真实 usage 反推 byte 比率单)-----------------------
     // 会话级校准器((provider,model) 分桶,进程内共享;装配层指到
