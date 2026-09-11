@@ -2301,6 +2301,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Request batch_request = request;
         bool batch_measured = false;
         if (wiring.rewrite_tool_results_for_history) {
+            if (wiring.configure_action_summary) {
+                runtime::ActionSummaryProfile summary;
+                summary.provider = agent.profile_.provider;
+                summary.wire = agent.profile_.wire;
+                summary.model = model_;
+                summary.window_tokens = std::min<std::size_t>(window_tokens, 32768);
+                summary.cancel = cancel;
+                wiring.configure_action_summary(&backend_, summary);
+            }
             batch_request.messages = context_.request_history();
             batch_request.tools = BuildToolDefinitions();
             // Snapshot the closed group with empty bodies to charge fixed JSON,
@@ -2344,7 +2353,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     if (batch_capacity_error.empty()) {
                         std::size_t index = 0;
                         for (auto& block : tool_result_message.content) {
-                            std::get<api::ToolResultBlock>(block).preview_budget_bytes = plan.preview_bytes[index++];
+                            auto& result = std::get<api::ToolResultBlock>(block);
+                            result.preview_budget_bytes = plan.preview_bytes[index++];
+                            result.action_summary_requested = plan.reduced && result.content.size() > result.preview_budget_bytes;
                         }
                     }
                 }
@@ -2357,6 +2368,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
         if (wiring.rewrite_tool_results_for_history) {
             const auto receipt = wiring.rewrite_tool_results_for_history(tool_result_message);
+            if (wiring.configure_action_summary) wiring.configure_action_summary(nullptr, {});
             if (receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
                 return std::unexpected("Tool preview commit failed: " + receipt.error_code);
             }

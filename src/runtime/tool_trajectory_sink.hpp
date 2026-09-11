@@ -4,6 +4,8 @@
 // 这只抽象口,不 include trajectory(依赖单向:hub -> 本口 <- 实现)。
 #pragma once
 
+#include "runtime/action_summary.hpp"
+
 #include <string>
 #include <vector>
 
@@ -37,6 +39,7 @@ struct ToolResultsCommitReceipt {
 
 class ToolTrajectorySink {
 public:
+    virtual void ConfigureActionSummary(api::Backend*, const ActionSummaryProfile&) {}
     virtual ~ToolTrajectorySink() = default;
     virtual ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message&) { return {}; }
     // 一枚工具栅栏事件(Scheduled/ExecutionStarted/ExecutionFinished;

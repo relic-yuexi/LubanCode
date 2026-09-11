@@ -47,6 +47,9 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
     // 从批次尾口拿正文。on_assistant_message_ready 因此只剩占位(接口
     // 保留,AgentLoop 的挂点不动)。
     wiring.on_assistant_message_ready = [](const api::Message&) {};
+    wiring.configure_action_summary = [this](api::Backend* backend, const ActionSummaryProfile& profile) {
+        if (trajectory_) trajectory_->ConfigureActionSummary(backend, profile);
+    };
     // P1-A(失败与恢复单 FA-01):回执口替换旧 void 口——持久提交的成败
     // 交回引擎,Failed 时 loop 停止后续模型发送。没挂轨迹的会话给恒
     // Committed 回执(与旧"不拦"行为一致)。

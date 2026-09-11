@@ -141,6 +141,7 @@ const char* MessagePurposeName(MessagePurpose value) {
         case MessagePurpose::ContextSummary: return "context_summary";
         case MessagePurpose::SessionTitle: return "session_title";
         case MessagePurpose::Capability: return "capability";
+        case MessagePurpose::ActionSummary: return "action_summary";
     }
     return "unknown";
 }
@@ -150,6 +151,7 @@ std::optional<MessagePurpose> MessagePurposeFromName(std::string_view name) {
     if (name == "context_summary") return MessagePurpose::ContextSummary;
     if (name == "session_title") return MessagePurpose::SessionTitle;
     if (name == "capability") return MessagePurpose::Capability;
+    if (name == "action_summary") return MessagePurpose::ActionSummary;
     return std::nullopt;
 }
 
@@ -276,6 +278,7 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::ToolResultPersisted: return "tool.result.persisted";
         case EventKindV3::ToolResultPersistFailed: return "tool.result.persist_failed";
         case EventKindV3::ToolResultSelected: return "tool.result.selected";
+        case EventKindV3::ToolResultSummaryFinished: return "tool.result.summary.finished";
         case EventKindV3::HookDispatchRequested: return "hook.dispatch.requested";
         case EventKindV3::HookPending: return "hook.pending";
         case EventKindV3::HookStarted: return "hook.started";
@@ -387,6 +390,7 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::ToolResultPersisted,
             EventKindV3::ToolResultPersistFailed,
             EventKindV3::ToolResultSelected,
+            EventKindV3::ToolResultSummaryFinished,
             EventKindV3::HookDispatchRequested,
             EventKindV3::HookPending,
             EventKindV3::HookStarted,

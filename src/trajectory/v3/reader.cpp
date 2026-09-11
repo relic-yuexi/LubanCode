@@ -947,6 +947,26 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
         if (const EventLine* selected = ledger.FindEvent(*message->result_selection_ref)) {
             projection.source_result_event_refs = RefIdArray(selected->payload, "sourceResultEventRefs");
             persisted_refs = projection.source_result_event_refs;
+            projection.summary_event_ref = JsonString(selected->payload, "summaryEventRef").value_or("");
+            if (!projection.summary_event_ref.empty()) {
+                const auto* summary = ledger.FindEvent(projection.summary_event_ref);
+                if (summary == nullptr || summary->kind != EventKindV3::ToolResultSummaryFinished ||
+                    summary->action_id != message->action_id || summary->seq >= selected->seq ||
+                    JsonString(summary->payload, "state").value_or("") != "accepted" ||
+                    JsonString(summary->payload, "previewSha256").value_or("") != platform::Sha256Hex(projection.result_preview) ||
+                    RefIdArray(summary->payload, "sourceResultEventRefs") != persisted_refs) {
+                    projection.complete = false;
+                } else {
+                    projection.summary_candidate_refs = RefIdArray(summary->payload, "candidateMessageRefs");
+                    if (projection.summary_candidate_refs.empty()) projection.complete = false;
+                    for (const auto& ref : projection.summary_candidate_refs) {
+                        const auto* candidate = ledger.FindMessage(ref);
+                        if (!candidate || candidate->purpose != MessagePurpose::ActionSummary || candidate->seq >= summary->seq) {
+                            projection.complete = false;
+                        }
+                    }
+                }
+            }
         }
     }
     if (persisted_refs.empty() && message->action_id.has_value()) {
@@ -971,7 +991,7 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
     }
     // 逐枚 artifact 实探:存在 + sha256(§4.16"任何对正文的查阅均校验身份
     // 和 hash");缺件标缺口,不冒称完整(§4.10)。
-    bool complete = true;
+    bool complete = projection.complete;
     for (const auto& ref : projection.result_refs) {
         ArtifactProbe probe;
         probe.artifact_id = JsonString(ref, "artifactId").value_or("");

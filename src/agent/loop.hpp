@@ -178,6 +178,9 @@ public:
 // 里:每一枚都是"引擎问宿主、宿主答话"的关口——有返回值,或有落账副作
 // 用;显示出水不在这些口上(events 一只口管完)。
 struct TurnWiring {
+    // Installed by the trajectory hub; summary sampling occurs only after raw
+    // result persistence, and uses a separate request/usage ledger.
+    std::function<void(api::Backend*, const runtime::ActionSummaryProfile&)> configure_action_summary;
     // 显示系统剥离单 P4(补稳定 id):工具生命周期的问话首参一律带
     // tool_use_id(模型给的 ToolUseBlock.id;PTC stub 调用是宿主合成的
     // "ptc-N")。装配层凭它路由条目,不再靠"当前主/子条目"的下标猜——

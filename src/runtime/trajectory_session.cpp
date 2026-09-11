@@ -1734,6 +1734,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
         }
         const std::string execution_event_ref = book.action->last_event_id().value_or(std::string());
         std::string persisted_event_id;
+        std::optional<std::string> summary_event_ref;
         if (v3_books_->results.has_value()) {
             v3::ResultStore::PersistRequest persist;
             persist.result_kind = "text";
@@ -1756,6 +1757,34 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                 V3NotifyCommitted(receipt);
                 if (receipt.status == v3::WriteReceipt::Status::Committed) {
                     persisted_event_id = receipt.id;
+                    if (result->action_summary_requested && action_summary_backend_ != nullptr) {
+                        ActionSummarySource source;
+                        source.action_id = book.action_id;
+                        source.parent_turn_id = book.action->turn_id();
+                        source.persisted_event_ref = persisted_event_id;
+                        source.result_refs = persisted.result_ref;
+                        source.text = result->content;
+                        switch (book.action->terminal()) {
+                            case v3::ToolActionSession::Terminal::Finished: source.execution_state = "done"; break;
+                            case v3::ToolActionSession::Terminal::Failed: source.execution_state = "failed"; break;
+                            case v3::ToolActionSession::Terminal::Cancelled: source.execution_state = "cancelled"; break;
+                            case v3::ToolActionSession::Terminal::Rejected: source.execution_state = "rejected"; break;
+                            default: source.execution_state = "unknown"; break;
+                        }
+                        source.capture_complete = result->capture_complete;
+                        source.capture_reason = result->capture_reason;
+                        source.budget_bytes = budget;
+                        const auto summary = SummarizeActionResult(*v3_writer_, *action_summary_backend_,
+                            action_summary_profile_, source, action_summary_calls_remaining_);
+                        if (summary.persistence_failed) {
+                            hard_fail("tool.summary.persist_failed", book.action_id);
+                            continue;
+                        }
+                        if (summary.accepted) {
+                            result->content = summary.text;
+                            summary_event_ref = summary.terminal_event_ref;
+                        }
+                    }
                     v3::PreviewRequest request;
                     request.max_preview_bytes = budget;
                     v3::PreviewChannel channel;
@@ -1769,7 +1798,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                     channel.output_bytes = result->content.size();
                     channel.output_bytes_lower_bound = !result->capture_complete;
                     request.channels.push_back(std::move(channel));
-                    if (result->content.size() > budget || !result->capture_complete) {
+                    if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete)) {
                         auto preview = v3::BuildToolPreview(request);
                         if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {
                             hard_fail("tool.preview.unrepresentable", book.action_id);
@@ -1831,7 +1860,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
         if (!persisted_event_id.empty()) {
             const auto selected = book.action->SelectResult(
                 *v3_writer_, std::vector<std::string>{persisted_event_id}, {},
-                result->is_error ? "failed" : "done", std::nullopt, trajectory::Durability::PowerLoss);
+                result->is_error ? "failed" : "done", std::nullopt, trajectory::Durability::PowerLoss,
+                summary_event_ref);
             V3NotifyCommitted(selected);
             if (selected.status != v3::WriteReceipt::Status::Committed) {
                 NoteV3Error(selected, "tool.result.selected");

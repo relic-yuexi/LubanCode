@@ -129,7 +129,8 @@ public:
                               const std::vector<std::string>& hook_effect_event_refs,
                               std::string_view effective_outcome,
                               std::optional<std::uint64_t> attempt = std::nullopt,
-                              Durability durability = Durability::PowerLoss);
+                              Durability durability = Durability::PowerLoss,
+                              std::optional<std::string> summary_event_ref = std::nullopt);
 
     // 最终 tool 消息(§4.18/§4.19):content 为模型可见的完整预览版本,
     // 落稳后接纳进上下文;不因 resume 按今天的规则重新生成。is_error 随

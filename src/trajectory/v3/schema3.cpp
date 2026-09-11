@@ -47,7 +47,7 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
     if (in({K::ToolExecutionPending, K::ToolExecutionStarted, K::ToolExecutionWaiting,
             K::ToolExecutionResumed, K::ToolExecutionFinished, K::ToolExecutionFailed,
             K::ToolExecutionCancelled, K::ToolExecutionRejected, K::ToolExecutionUnknown,
-            K::ToolResultPersisted, K::ToolResultPersistFailed, K::ToolResultSelected})) {
+            K::ToolResultPersisted, K::ToolResultPersistFailed, K::ToolResultSelected, K::ToolResultSummaryFinished})) {
         return IdRequirement{"actionId", true};
     }
     if (in({K::HookDispatchRequested, K::HookPending, K::HookStarted, K::HookCompleted,
@@ -450,7 +450,7 @@ std::optional<Schema3Error> ValidateMessageLine(const MessageLine& line) {
                 return Err("schema3.missing_field", "system 消息必带 systemMeta");
             }
             if (line.purpose != MessagePurpose::Conversation &&
-                line.purpose != MessagePurpose::Compact) {
+                line.purpose != MessagePurpose::Compact && line.purpose != MessagePurpose::ActionSummary) {
                 return Err("schema3.bad_purpose",
                            "system 消息 purpose 只能是 conversation 或 compact");
             }
@@ -800,6 +800,20 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
             return error;
         }
+    } else if (line.kind == K::ToolResultSummaryFinished) {
+        if (auto error = CheckToolPayload(kind_name, line, false)) return error;
+        if (auto error = CheckRefArray(kind_name, line.payload, "sourceResultEventRefs", false)) return error;
+        if (auto error = CheckRefArray(kind_name, line.payload, "candidateMessageRefs", true)) return error;
+        if (auto error = CheckStringField(kind_name, line.payload, "state")) return error;
+        const auto state = line.payload.at("state").get<std::string>();
+        if (state != "accepted" && state != "rejected" && state != "failed" && state != "cancelled") {
+            return Err("schema3.bad_enum", "action summary state is invalid");
+        }
+        for (const char* key : {"sourceContextRevision", "modelCalls", "outputBytes", "budgetBytes"}) {
+            if (!line.payload.contains(key) || !JsonIsNonNegativeInt(line.payload.at(key))) {
+                return Err("schema3.bad_type", std::string("action summary missing integer: ") + key);
+            }
+        }
     } else if (line.kind == K::ToolResultSelected) {
         if (auto error = CheckToolPayload(kind_name, line, false)) {
             return error;
@@ -809,6 +823,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         }
         if (auto error = CheckRefArray(kind_name, line.payload, "hookEffectEventRefs", true)) {
             return error;
+        }
+        if (line.payload.contains("summaryEventRef")) {
+            if (auto error = CheckRefField(kind_name, line.payload, "summaryEventRef", false)) return error;
         }
         // §4.23:最终有效结果;hook 替代与宿主配对错误各有名目。
         if (auto error = CheckStringField(kind_name, line.payload, "effectiveOutcome")) {

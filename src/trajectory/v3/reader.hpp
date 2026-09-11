@@ -329,6 +329,8 @@ struct ResultPreviewProjection {
     std::string result_preview;  // 读取投影 = 该 tool 消息的 content 正文
                                  //(§4.18:原始 event 不复制预览文本)
     std::string result_selection_ref;
+    std::string summary_event_ref;
+    std::vector<std::string> summary_candidate_refs;
     std::vector<std::string> source_result_event_refs;  // selected → persisted
     std::vector<nlohmann::json> result_refs;            // 选用链上全部 artifactRef
     std::vector<ArtifactProbe> artifacts;               // 对 session_dir 实探

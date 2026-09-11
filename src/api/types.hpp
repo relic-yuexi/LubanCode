@@ -90,6 +90,7 @@ struct ToolResultBlock {
     std::size_t preview_budget_bytes = 32768;
     bool capture_complete = true;
     std::string capture_reason;
+    bool action_summary_requested = false;  // host only; never serialized as model input
 
 };
 

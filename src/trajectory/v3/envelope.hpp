@@ -35,7 +35,7 @@ inline constexpr std::string_view kV3SchemaName = "lubancode.trajectory.v3";
 // ---------------------------------------------------------------------------
 
 enum class MessageRole { System, User, Assistant, Tool };
-enum class MessagePurpose { Conversation, Compact, ContextSummary, SessionTitle, Capability };
+enum class MessagePurpose { Conversation, Compact, ContextSummary, SessionTitle, Capability, ActionSummary };
 enum class MessageOrigin {
     Human,
     Soul,
@@ -106,6 +106,7 @@ enum class EventKindV3 {
     ToolResultPersisted,
     ToolResultPersistFailed,
     ToolResultSelected,
+    ToolResultSummaryFinished,
     HookDispatchRequested,
     HookPending,
     HookStarted,
