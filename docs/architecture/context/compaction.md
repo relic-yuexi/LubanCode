@@ -1,5 +1,7 @@
 # Context 压缩算法深挖
 
+> **V3-LEGACY-03：旧 compact 算法参考，待清理。** 本页的四分区双账、archive/kept_indices、compact_v2 与旧存储回放不再定义默认 v3 路径。新版见[压缩指南](../../features/context/compaction.md)与 [Session v3](../session-v3.md)。共用 loop 仍有 L1/L2/hard trim，不能据旧算法页面推断它们已全部入 v3 链。
+
 _面向技术面试与源码走查：从 prompt 稳定性、冷热区、程序筛选、分块 map/reduce，一直讲到验收、回放与失败降级。_
 
 ---
@@ -285,7 +287,7 @@ map 的宿主验收较轻：去空白后至少 `40` 个 UTF-8 码点。manifest 
 
 final text 过短、manifest 解析失败、goal 空、活动待办漏项，整场 compact 失败。旧 history 保持原样。
 
-## 🧭 turn 四分区双账 compact(现行主路)
+## 🧭 turn 四分区双账 compact（旧 v2 路径）
 
 上文 episode 分层路(`CompactHierarchical`)保留作兼容与旧档回放;主会话、自动中途压缩与子代理检查点如今都走 `CompactTurnPartitioned`——按《Compact 四分区、工具原子组与双账总结构设计》落的地:
 
