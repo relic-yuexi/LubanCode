@@ -2340,7 +2340,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (wiring.configure_action_summary) {
                 runtime::ActionSummaryProfile summary;
                 summary.provider = agent.profile_.provider;
-                summary.wire = agent.profile_.wire;
+                summary.wire = agent.profile_.prompt_sections.wire;
                 summary.model = model_;
                 summary.window_tokens = std::min<std::size_t>(window_tokens, 32768);
                 summary.cancel = cancel;
