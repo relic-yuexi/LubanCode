@@ -640,3 +640,54 @@ TEST_CASE("B1 real loop: terminal event failure cannot bypass preview commit") {
     CHECK(counter->calls == 1);
     CHECK(backend.requests.size() == 1);
 }
+
+TEST_CASE("B1 publication failure after commit recovers the committed preview without rerunning tools") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(2 * 1024 * 1024, 'x');
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        auto receipt = audit.bridge->RewriteToolResultsForHistory(results);
+        REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
+        // Inject the stop after durable admission and before loop PushMessage.
+        receipt.status = runtime::ToolResultsCommitReceipt::Status::Failed;
+        receipt.error_code = "injected.publication_failure";
+        return receipt;
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(backend.requests.size() == 1);
+    CHECK(counter->calls == 1);
+    auto recovered = audit.ledger->ProjectV3ContextHistory();
+    REQUIRE(recovered.has_value());
+    std::string committed_preview;
+    for (const auto& message : *recovered) for (const auto& block : message.content)
+        if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) committed_preview = result->content;
+    REQUIRE_FALSE(committed_preview.empty());
+    CHECK(committed_preview.size() <= 32768);
+    AuditBackend resumed_backend;
+    resumed_backend.emit = [](int, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink);
+        return {};
+    };
+    agent::Agent resumed_agent(resumed_backend, registry, Profile());
+    resumed_agent.RestoreSessionHistory(std::move(*recovered));
+    REQUIRE(resumed_agent.Run("continue", agent::TurnWiring{}).has_value());
+    REQUIRE(resumed_backend.requests.size() == 1);
+    const auto wire = api::chat::BuildRequestJson(resumed_backend.requests[0]);
+    int tool_results = 0;
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool") {
+        ++tool_results;
+        CHECK(message.at("content") == committed_preview);
+    }
+    CHECK(tool_results == 1);
+    CHECK(counter->calls == 1);
+}
