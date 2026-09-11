@@ -1411,57 +1411,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 const auto reserve = limit.tokens && *limit.tokens > 0
                                          ? static_cast<std::size_t>(*limit.tokens) : estimate_output_reserve;
                 if (ExceedsContextWindow(tokens, reserve, window_tokens)) {
-                    std::string breakdown;
-                    for (std::size_t i = 0; i < request.messages.size(); ++i) {
-                        std::size_t bytes = 0;
-                        unsigned results = 0;
-                        for (const auto& block : request.messages[i].content) {
-                            if (const auto* r = std::get_if<api::ToolResultBlock>(&block)) {
-                                bytes += r->content.size();
-                                ++results;
-                            } else if (const auto* t = std::get_if<api::TextBlock>(&block)) {
-                                bytes += t->text.size();
-                            }
-                        }
-                        breakdown += " msg" + std::to_string(i) + "=" + std::to_string(bytes) +
-                                     "B/" + std::to_string(results) + "r";
-                    }
-                    const auto& reqhist = context_.request_history();
-                    if (!reqhist.empty()) {
-                        std::size_t bytes = 0;
-                        unsigned results = 0;
-                        for (const auto& block : reqhist.back().content) {
-                            if (const auto* r = std::get_if<api::ToolResultBlock>(&block)) {
-                                bytes += r->content.size();
-                                ++results;
-                            } else if (const auto* t = std::get_if<api::TextBlock>(&block)) {
-                                bytes += t->text.size();
-                            }
-                        }
-                        breakdown += " reqhist=" + std::to_string(reqhist.size()) + " last=" +
-                                     std::to_string(bytes) + "B/" + std::to_string(results) + "r";
-                    }
-                    if (!working_view.messages.empty()) {
-                        std::size_t bytes = 0;
-                        unsigned results = 0;
-                        for (const auto& block : working_view.messages.back().content) {
-                            if (const auto* r = std::get_if<api::ToolResultBlock>(&block)) {
-                                bytes += r->content.size();
-                                ++results;
-                            } else if (const auto* t = std::get_if<api::TextBlock>(&block)) {
-                                bytes += t->text.size();
-                            }
-                        }
-                        breakdown += " workview=" + std::to_string(working_view.messages.size()) +
-                                     " last=" + std::to_string(bytes) + "B/" + std::to_string(results) + "r";
-                    }
                     return std::unexpected(
                         "context.adapter_input_exceeds_capacity: final UTF-8 bytes/4 input + output + margin"
                         " (step=" + std::to_string(step_index) +
                         " input_tokens=" + std::to_string(tokens) +
                         " messages=" + std::to_string(request.messages.size()) +
-                        " system=" + std::to_string(request.system.size()) +
-                        breakdown +
                         " output_reserve=" + std::to_string(reserve) +
                         " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
                         " window=" + std::to_string(window_tokens) + ")");
