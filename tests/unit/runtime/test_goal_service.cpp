@@ -367,46 +367,53 @@ TEST_CASE("ApplyTransition:提交事务、CAS、候选合同、terminal 收账")
     CHECK(service.current()->evidence_refs.size() == 1);
     CHECK(service.current()->usage.input_tokens == 50);
 
-    auto no_reason = Transition(GoalLifecycle::Blocked, 3);
+    // Paused 的边表只许回 active 或收账(§4.67.3):变 blocked 须先回
+    // active 复评再撞阻塞——直接从 paused 发 blocked 候选拿
+    // invalid_transition,到不了候选合同检查。先恢复,再验"缺停因拒"。
+    auto unpause = Transition(GoalLifecycle::Active, 3);
+    unpause.goal_id = "goal-1";
+    REQUIRE(service.ApplyTransition(unpause).ok);
+
+    auto no_reason = Transition(GoalLifecycle::Blocked, 4);
     no_reason.goal_id = "goal-1";
     const auto blocked_bad = service.ApplyTransition(no_reason);
     CHECK_FALSE(blocked_bad.ok);
     CHECK(blocked_bad.error_code == goalns::kErrGoalCandidateInvalid);
 
-    auto blocked = Transition(GoalLifecycle::Blocked, 3);
+    auto blocked = Transition(GoalLifecycle::Blocked, 4);
     blocked.goal_id = "goal-1";
     blocked.stop_reason = "依赖缺位";
     blocked.blocker_key = "auth-dep";
     REQUIRE(service.ApplyTransition(blocked).ok);
 
     // 恢复边:blocked -> active(设计 §4.67.3,条件核验归 G1)。
-    auto resume = Transition(GoalLifecycle::Active, 4);
+    auto resume = Transition(GoalLifecycle::Active, 5);
     resume.goal_id = "goal-1";
     REQUIRE(service.ApplyTransition(resume).ok);
 
     // terminal 收账:achieved;此后迟到候选拒。
-    auto done = Transition(GoalLifecycle::Achieved, 5);
+    auto done = Transition(GoalLifecycle::Achieved, 6);
     done.goal_id = "goal-1";
     done.stop_reason = "全部 criteria 过硬门槛";
     done.applied_evaluation_id = "eval-3";
     REQUIRE(service.ApplyTransition(done).ok);
     CHECK(goalns::IsLifecycleTerminal(service.current()->lifecycle));
 
-    auto late = Transition(GoalLifecycle::Active, 6);
+    auto late = Transition(GoalLifecycle::Active, 7);
     late.goal_id = "goal-1";
     const auto late_result = service.ApplyTransition(late);
     CHECK_FALSE(late_result.ok);
     CHECK(late_result.error_code == goalns::kErrGoalTerminal);
 
-    // 账上 applied 共 6 条(revision 1..6),快照 6 份全在。
+    // 账上 applied 共 7 条(revision 1..7),快照 7 份全在。
     const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.jsonl());
     REQUIRE(ledger.has_value());
     int applied_count = 0;
     for (const auto& event : ledger->events) {
         if (event.kind == EventKindV3::StateGoalApplied) ++applied_count;
     }
-    CHECK(applied_count == 6);
-    for (std::uint64_t revision = 1; revision <= 6; ++revision) {
+    CHECK(applied_count == 7);
+    for (std::uint64_t revision = 1; revision <= 7; ++revision) {
         CHECK(std::filesystem::exists(harness.dir /
                                       goalns::SnapshotRefPath("goal-1", revision)));
     }
@@ -462,7 +469,11 @@ TEST_CASE("fail closed:applied 落账失败锁写口,候选快照不生效") {
     writer_options.inject_io_failure = [&inject_calls]() -> std::optional<std::string> {
         return ++inject_calls > 2 ? std::optional<std::string>("injected") : std::nullopt;
     };
-    auto started = V3Writer::Start(harness.jsonl(), "20260911-120000-AAAAAA", "run-000001",
+    // ServiceHarness 构造时已在 s1.jsonl 上开过 writer(create-new 占名),
+    // 注入版再开同一文件必撞名——REQUIRE(started) 两轮皆 FATAL 的根因。
+    // 本册的账另立 s2.jsonl,harness 自带的 s1 写者闲置不动。
+    const std::filesystem::path stream = harness.dir / "s2.jsonl";
+    auto started = V3Writer::Start(stream, "20260911-120000-AAAAAA", "run-000001",
                                    "system prompt", nlohmann::json::object(), writer_options);
     REQUIRE(started.has_value());
     auto writer = std::move(*started);
@@ -485,7 +496,7 @@ TEST_CASE("fail closed:applied 落账失败锁写口,候选快照不生效") {
     CHECK(again.error_code == goalns::kErrGoalStoreUnavailable);
 
     // 账上没有 applied:投影如实报 no_goal(不从候选快照猜)。
-    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.jsonl());
+    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.dir / "s2.jsonl");
     REQUIRE(ledger.has_value());
     const auto projection = goalns::ProjectGoalState(*ledger, harness.dir);
     CHECK(projection.gap == goalns::GoalProjectionGap::NoGoal);
