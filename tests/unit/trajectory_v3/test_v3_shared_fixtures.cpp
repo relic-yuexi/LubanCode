@@ -197,8 +197,10 @@ TEST_CASE("夹具: 主账多轮可读,缺 usage 的 assistant 保持 null 不补
     REQUIRE(it != ledger->message_index.end());
     // usage 读回是 optional<json>:线上 "usage": null 装成含 null 的 optional,
     // 整键缺位是 nullopt——两种形状都算缺实报,不许补成 0 的对象。
-    CHECK(!ledger->messages[it->second].usage.has_value() ||
-          ledger->messages[it->second].usage->is_null());
+    // doctest 禁 || 进 CHECK(DOCTEST_FORBIT_EXPRESSION),先折成一条布尔。
+    const auto& usage = ledger->messages[it->second].usage;
+    const bool missing_usage = !usage.has_value() || usage->is_null();
+    CHECK(missing_usage);
 }
 
 TEST_CASE("夹具: 迟到 usage 走 model.usage.appended 观察,不改旧 message") {
@@ -229,8 +231,10 @@ TEST_CASE("夹具: 迟到 usage 走 model.usage.appended 观察,不改旧 messag
     // 旧 message 的 usage 仍是 null:迟到观察不倒改 owner(§五)。
     const auto it = ledger->message_index.find(assistant_id);
     REQUIRE(it != ledger->message_index.end());
-    CHECK(!ledger->messages[it->second].usage.has_value() ||
-          ledger->messages[it->second].usage->is_null());
+    // 同上:折成布尔再断,不把 || 塞进 CHECK。
+    const auto& late_usage = ledger->messages[it->second].usage;
+    const bool still_missing = !late_usage.has_value() || late_usage->is_null();
+    CHECK(still_missing);
 }
 
 // ---------------------------------------------------------------------------
