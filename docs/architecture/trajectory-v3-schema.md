@@ -37,7 +37,7 @@
 | `requestId` | string | 可选;模型生成的消息必带,指向生成它的那次请求尝试 |
 | `actionId` | string | 可选;工具调用身份(§4.15:与 payload `tool_call_id` 同值) |
 | `compactId` | string | 可选;compact 内部消息与摘要必带,贯穿全链 |
-| `purpose` | string | 必填,枚举:`conversation`/`compact`/`context_summary`/`session_title`/`capability`(capability 留给 §4.29 渐进披露,本棒不发行) |
+| `purpose` | string | 必填,枚举:`conversation`/`compact`/`context_summary`/`session_title`/`capability`/`action_summary`。action_summary 内部问答默认隐藏，不入 main 链；合同见 [新 action 摘要](context/v3-action-summary.md)。 |
 | `origin` | string | 必填,枚举:`human`/`soul`/`session_runtime`/`compact_runtime`/`context_runtime`/`hook`/`skill`/`subagent`/`parent_agent` |
 | `display` | object | 可选,`{"mode":"visible\|collapsed\|hidden"}`;缺省 visible;只管界面(§4.28) |
 | `message` | object | 必填;`role` ∈ `system`/`user`/`assistant`/`tool`,其余按角色(见 1.2.1) |

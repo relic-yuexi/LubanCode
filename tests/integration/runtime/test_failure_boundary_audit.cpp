@@ -691,3 +691,82 @@ TEST_CASE("B1 publication failure after commit recovers the committed preview wi
     CHECK(tool_results == 1);
     CHECK(counter->calls == 1);
 }
+
+TEST_CASE("B2 real loop: action summaries use separate requests and adopted results survive resume") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int call, const auto& sink) -> std::expected<void, api::Error> {
+        if (call == 1) {
+            sink(api::MessageStart{"provider-response", "audit-model"});
+            for (int index = 0; index < 2; ++index) {
+                sink(api::ToolUseStart{index, "summary-tool-" + std::to_string(index), "audit_tool"});
+                sink(api::ToolUseInputDelta{index, "{}"});
+                sink(api::ContentBlockDone{index});
+            }
+            sink(api::MessageDone{"tool_use", api::Usage{}});
+        } else if (call <= 3) {
+            sink(api::MessageStart{"summary-response", "audit-model"});
+            sink(api::TextDelta{R"({"summary":"inspection completed","side_effects":["read only"],"open_items":["review evidence"],"evidence":["combined output"]})"});
+            sink(api::ContentBlockDone{0});
+            sink(api::MessageDone{"end_turn", api::Usage{123, 45, 0, 0, 0}, true});
+        } else {
+            Reply(sink);
+        }
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(16000, 'x');
+    registry.Register(std::move(tool));
+    auto profile = Profile();
+    profile.provider = "audit";
+    profile.wire = "openai-chat-completions";
+    profile.runtime.context_window_tokens = 9000;
+    profile.runtime.max_output_tokens = 1024;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent::Agent agent(backend, registry, profile);
+    auto wiring = audit.Wiring();
+    wiring.configure_action_summary = [&audit](api::Backend* selected, const runtime::ActionSummaryProfile& summary_profile) {
+        audit.bridge->ConfigureActionSummary(selected, summary_profile);
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    const auto outcome = agent.Run(Input(), wiring);
+    REQUIRE_MESSAGE(outcome.has_value(), outcome ? "" : outcome.error());
+    CHECK(counter->calls == 2);
+    REQUIRE(backend.requests.size() == 4);
+    CHECK(KindCount(audit.Rows(), "tool.result.summary.finished") == 2);
+    auto recovered = audit.ledger->ProjectV3ContextHistory();
+    REQUIRE(recovered.has_value());
+    api::Request replay = backend.requests.back();
+    replay.messages = *recovered;
+    const auto wire = api::chat::BuildRequestJson(backend.requests.back());
+    const auto resumed = api::chat::BuildRequestJson(replay);
+    std::vector<Json> sent_tools, resumed_tools;
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool") sent_tools.push_back(message);
+    for (const auto& message : resumed.at("messages")) if (message.value("role", "") == "tool") resumed_tools.push_back(message);
+    CHECK(sent_tools == resumed_tools);
+    REQUIRE(sent_tools.size() == 2);
+    for (const auto& tool_message : sent_tools) {
+        const auto body = Json::parse(tool_message.at("content").get<std::string>());
+        CHECK(body.at("execution_already_occurred") == true);
+        CHECK(body.at("execution_state") == "done");
+        CHECK(body.at("capture_complete") == true);
+        CHECK(body.at("evidence_paths").size() >= 2);
+    }
+    auto ledger = v3::ReadV3Ledger(audit.path);
+    REQUIRE(ledger.has_value());
+    int summary_responses = 0;
+    for (const auto& message : ledger->messages) {
+        if (message.purpose == v3::MessagePurpose::ActionSummary && message.message.at("role") == "assistant") {
+            ++summary_responses;
+            CHECK(message.usage->at("inputTokens") == 123);
+        }
+    }
+    CHECK(summary_responses == 2);
+    for (const char* name : {"res-000001.combined.txt", "res-000002.combined.txt"}) {
+        CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / name) == 16000);
+    }
+}
