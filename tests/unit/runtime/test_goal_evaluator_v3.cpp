@@ -185,7 +185,10 @@ struct WriterHarness {
         writer = std::move(*started);
     }
 
-    std::optional<lubancode::trajectory::v3::V3Ledger> Ledger() {
+    // ReadV3Ledger 自 P2(edceca68) 起返回 expected;auto 接,has_value/
+    // operator-> 用法与 optional 同形。原 G2 册按 optional 写,一直被
+    // 前序 TU 的编译错挡着没轮到编。
+    auto Ledger() {
         return lubancode::trajectory::v3::ReadV3Ledger(dir / "s1.jsonl");
     }
 };
