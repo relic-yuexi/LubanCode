@@ -294,13 +294,17 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——workflow 节点
         // 不经 ToolTraceHub 的统一接线,这里直挂节点账桥(与 hub.Install
         // 同款):工具结果消息入节点历史前,超帽全文就地归仓换固定预览,
-        // 节点实发与账上 tool 消息吃同一份(账实一致)。v2 桥默认穿透。
+        // 节点实发与账上 tool 消息吃同一份(账实一致)。v2 桥默认穿透——
+        // rewrite 钩子只挂 v3 在管预览的节点账(能力位判),钩子非空会把
+        // loop 切进 adapter bytes/4 口径,v2 节点不挂,预检/校准器照旧。
         wiring.capture_tool_result = [node_turn](const api::ToolResultBlock& result) {
             return node_turn->CaptureToolResult(result);
         };
-        wiring.rewrite_tool_results_for_history = [node_turn](api::Message& results) {
-            return node_turn->RewriteToolResultsForHistory(results);
-        };
+        if (node_turn->ManagesToolResultPreviews()) {
+            wiring.rewrite_tool_results_for_history = [node_turn](api::Message& results) {
+                return node_turn->RewriteToolResultsForHistory(results);
+            };
+        }
         wiring.configure_action_summary = [node_turn](api::Backend* backend, const runtime::ActionSummaryProfile& profile) {
             node_turn->ConfigureActionSummary(backend, profile);
         };

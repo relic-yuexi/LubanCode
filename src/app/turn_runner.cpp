@@ -984,12 +984,14 @@ RunTurnResult RunTurn(TurnContext ctx) {
                     }
                 });
         }
-        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, canonical_turn_id);
         // P0-2 轨迹:hub 的持久账从 SessionStore 改接本轮边界桥(§15.2)。
-        // 桥在 Install 之后挂(Install 装的落盘关口会看它分流)。
+        // 桥在 Install 之前挂:Install 要看轨迹的能力位(ManagesToolResult
+        // Previews)决定挂不挂整批 rewrite 钩子——v3 在管预览才挂,v2 不挂
+        // 走旧口径。落盘关口本就在调用时才看 trajectory_,先挂后装零差。
         if (turn_trajectory != nullptr) {
             turn_trace_hub->AttachTrajectory(turn_trajectory.get());
         }
+        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, canonical_turn_id);
         // 补偿关系边(单子第四期):undo_file_edit execute 后报"这枚补偿
         // 谁",finished 栅栏随账落 compensates。
         wiring.on_tool_compensates = [&registry](const std::string& /*execution_id*/,

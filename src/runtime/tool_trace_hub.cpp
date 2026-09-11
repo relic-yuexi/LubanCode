@@ -56,9 +56,16 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
     wiring.capture_tool_result = [this](const api::ToolResultBlock& result) {
         return trajectory_ ? trajectory_->CaptureToolResult(result) : ToolResultsCommitReceipt{};
     };
-    wiring.rewrite_tool_results_for_history = [this](api::Message& results) {
-        return trajectory_ ? trajectory_->RewriteToolResultsForHistory(results) : ToolResultsCommitReceipt{};
-    };
+    // 整批预算的 rewrite 钩子只挂"轨迹在管预览"的会话(v3)。钩子非空会把
+    // AgentLoop 切进 adapter bytes/4 口径——step-0 固定账预检与当前轮检查
+    // 被跳过、token 校准器三处全停;v2 桥的 Rewrite 只是 no-op 回执,挂了
+    // 钩子口径却被切走。v2 会话不挂,走旧路(预检/校准器照旧)。轨迹须在
+    // Install 之前 Attach,这里才看得见能力位。
+    if (trajectory_ != nullptr && trajectory_->ManagesToolResultPreviews()) {
+        wiring.rewrite_tool_results_for_history = [this](api::Message& results) {
+            return trajectory_->RewriteToolResultsForHistory(results);
+        };
+    }
     wiring.on_tool_results_committed_receipt =
         [this](const std::string& batch_id, const api::Message& message) {
             // 正文进 tool.result.committed 事件(轨迹桥落账;没挂轨迹的会话

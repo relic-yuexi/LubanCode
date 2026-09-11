@@ -2255,9 +2255,14 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         turn_wiring.capture_tool_result = [&child_bridge](const api::ToolResultBlock& result) {
             return child_bridge.CaptureToolResult(result);
         };
-        turn_wiring.rewrite_tool_results_for_history = [&child_bridge](api::Message& results) {
-            return child_bridge.RewriteToolResultsForHistory(results);
-        };
+        // 整批 rewrite 钩子只挂 v3 在管预览的子账(与 hub.Install 同款):
+        // 钩子非空会把子 loop 切进 adapter bytes/4 口径,v2 桥的 Rewrite
+        // 只是 no-op 回执——v2 子账不挂,预检与 token 校准器照旧。
+        if (child_bridge.ManagesToolResultPreviews()) {
+            turn_wiring.rewrite_tool_results_for_history = [&child_bridge](api::Message& results) {
+                return child_bridge.RewriteToolResultsForHistory(results);
+            };
+        }
         turn_wiring.configure_action_summary = [&child_bridge](api::Backend* backend, const runtime::ActionSummaryProfile& profile) {
             child_bridge.ConfigureActionSummary(backend, profile);
         };

@@ -27,8 +27,11 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
+#include "agent/token_calibrator.hpp"
 #include "api/chat/request.hpp"
 #include "platform/paths.hpp"
+#include "runtime/id_authority.hpp"
+#include "runtime/tool_trace_hub.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -1044,4 +1047,100 @@ TEST_CASE("B2 real loop: media-bearing result ends the turn unestimated while ca
     }
     CHECK(durable_results == 2);
     CHECK(v3::VerifyV3File(audit.path).ok);
+}
+
+TEST_CASE("B2 gate: hub install keeps v2 bridges on the legacy budget path") {
+    // v2 会话(逃生口 env=0 与旧会话续跑)不得被连带切进 adapter bytes/4
+    // 整批口径:hub.Install 只给"在管预览"的 v3 桥挂 rewrite 钩子。钩子
+    // 非空会跳过 step-0 固定账预检、停用 token 校准器三处——v2 桥的
+    // Rewrite 只是 no-op 回执,口径却会被切走(本测试钉的就是这道回归)。
+    struct V2Environment {
+        std::optional<std::string> previous =
+            platform::GetEnvVar("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+        static void Set(const std::optional<std::string>& value) {
+#ifdef _WIN32
+            _putenv_s("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", value.value_or("").c_str());
+#else
+            if (value) setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", value->c_str(), 1);
+            else unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
+        }
+        V2Environment() { Set(std::string("0")); }
+        ~V2Environment() { Set(previous); }
+    };
+    V2Environment v2;
+    TempLedger temp;
+    runtime::TrajectorySessionLedger::Options options;
+    options.workspaces_root = temp.path / "workspaces";
+    options.workspace_root = temp.path / "ws";
+    options.workspace_identity = workspace::MakeFallbackIdentity(temp.path / "ws");
+    options.launch_cwd = temp.path.string();
+    options.lubancode_version = "failure-audit";
+    options.v3_system_content = "AUDIT_SYSTEM";
+    auto opened = runtime::TrajectorySessionLedger::Open(options);
+    REQUIRE(opened.has_value());
+    auto ledger = std::make_unique<runtime::TrajectorySessionLedger>(std::move(*opened));
+    auto bridge = ledger->NewTurnBridge({"audit", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    CHECK_FALSE(bridge->ManagesToolResultPreviews());  // v2 桥不在管预览
+    bridge->BeginTurn("v2-turn", "external_user");
+    bridge->RecordInput(Input());
+
+    runtime::IdAuthority ids;
+    runtime::ToolTraceHub hub(ids);
+    auto assemble = [&](agent::Agent& agent, agent::TurnWiring& wiring, const char* turn_id) {
+        wiring.boundary_recorder = bridge.get();
+        wiring.wait_request_backoff = [](auto, auto) { return true; };
+        hub.AttachTrajectory(bridge.get());  // 生产次序:桥先挂,Install 看能力位
+        hub.Install(agent, wiring, "audit-thread", turn_id);
+    };
+
+    // 整批 rewrite 钩子不挂;捕获口照挂(v2 回执默认放行,不改行为)。
+    AuditBackend preflight_backend;
+    preflight_backend.emit = [](int, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    agent::TurnWiring preflight_wiring;
+    auto preflight_profile = Profile();
+    preflight_profile.provider = "audit";
+    preflight_profile.runtime.context_window_tokens = 4000;
+    agent::Agent preflight_agent(preflight_backend, registry, preflight_profile);
+    assemble(preflight_agent, preflight_wiring, "v2-preflight");
+    CHECK_FALSE(preflight_wiring.rewrite_tool_results_for_history);
+    CHECK(preflight_wiring.capture_tool_result);
+    api::Message huge;
+    huge.role = api::Role::User;
+    huge.content.push_back(api::TextBlock{std::string(40000, 'h')});
+    const auto rejected = preflight_agent.Run(huge, preflight_wiring);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().find("上下文预检未通过") != std::string::npos);  // 旧 step-0 固定账预检仍在
+    CHECK(preflight_backend.requests.empty());
+
+    // token 校准器照常取样:adapter 整批口径下三处全停,样本数为零;旧路
+    // 上大请求 + 实报 usage 落一对样本。
+    AuditBackend calibrator_backend;
+    calibrator_backend.emit = [](int, const auto& sink) -> std::expected<void, api::Error> {
+        sink(api::MessageStart{"provider-response", "audit-model"});
+        sink(api::TextDelta{"SUCCESS"});
+        sink(api::ContentBlockDone{0});
+        sink(api::MessageDone{"end_turn", api::Usage{4000, 100, 0, 0, 0}});
+        return {};
+    };
+    agent::TokenCalibrator calibrator;
+    agent::TurnWiring calibrator_wiring;
+    calibrator_wiring.token_calibrator = &calibrator;
+    auto calibrator_profile = Profile();
+    calibrator_profile.provider = "audit";
+    agent::Agent calibrator_agent(calibrator_backend, registry, calibrator_profile);
+    assemble(calibrator_agent, calibrator_wiring, "v2-calibrator");
+    CHECK_FALSE(calibrator_wiring.rewrite_tool_results_for_history);
+    api::Message big;
+    big.role = api::Role::User;
+    big.content.push_back(api::TextBlock{std::string(16000, 'q')});
+    const auto sampled = calibrator_agent.Run(big, calibrator_wiring);
+    REQUIRE_MESSAGE(sampled.has_value(), sampled.error());
+    CHECK(calibrator_backend.requests.size() == 1);
+    CHECK(calibrator.StatusOf("audit", "audit-model").sample_count >= 1);
 }

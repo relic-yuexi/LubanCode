@@ -182,6 +182,8 @@ public:
     // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
     // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
     // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
+    // v2 桥回执默认 Committed 且不改正文;v3 桥在管预览与整批预算。
+    bool ManagesToolResultPreviews() const override { return V3Mode(); }
     ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message& results) override;
     ToolResultsCommitReceipt CaptureToolResult(const api::ToolResultBlock& result) override;
     ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
