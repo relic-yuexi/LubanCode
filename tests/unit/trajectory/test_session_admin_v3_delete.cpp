@@ -159,6 +159,7 @@ TEST_CASE("v3 删除门: 未封口(无 session.ended)拒绝,目录字节原样")
     const auto root = FreshRoot("unsealed");
     std::filesystem::path stream;
     std::string session_id;
+    std::filesystem::path workspace_dir;
     std::map<std::string, std::string> before;
     {
         auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
@@ -166,15 +167,17 @@ TEST_CASE("v3 删除门: 未封口(无 session.ended)拒绝,目录字节原样")
         DriveTurn(*ledger, "还没收尾的一轮");
         stream = V3StreamOf(*ledger);
         session_id = ledger->session_id();
+        workspace_dir = WorkspaceDirOf(*ledger);
     }
     // ledger 已析构:独占锁随之释放(session.lock 离场)。快照挪到析构后拍
     // ——活着拍会把锁文件算进"原样",析构又删它,两拍必不等(原 172 行
     // 失败的一半根因)。账未封口:旧门 journal_exists 恒假会直穿,新门按
     // session.ended 拒。
     before = SnapshotDir(stream.parent_path());
-    const std::filesystem::path workspace_dir = stream.parent_path().parent_path();
-    // 前置钉死 + 失败带路径:上一轮 CI 在此案报 session.not_found,与
-    // 实现读码推导(delete_unsealed)相悖,失败时把实现看到的参量打出来。
+    // 根因(CAPTURE 现身后定案):stream = <房间>/sessions/<id>/<id>.jsonl,
+    // 比 session 目录深一层——stream.parent×2 只剥到 <房间>/sessions,再拼
+    // "sessions" 成 sessions/sessions 双层,删除门必报 not_found。房间根改
+    // 从 session_dir 同源取(WorkspaceDirOf,与活锁/歧义/可删三案同款)。
     REQUIRE(std::filesystem::exists(stream.parent_path()));
     CAPTURE(session_id);
     CAPTURE(platform::PathToUtf8(workspace_dir));
@@ -189,12 +192,14 @@ TEST_CASE("v3 删除门: 坏账(封口后追加垃圾)拒绝删除") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("corrupt");
     std::filesystem::path stream;
+    std::filesystem::path workspace_dir;
     {
         auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
         REQUIRE(ledger.has_value());
         DriveTurn(*ledger, "收尾前先留一轮");
         REQUIRE(ledger->CloseSession("exit").error_code.empty());
         stream = V3StreamOf(*ledger);
+        workspace_dir = WorkspaceDirOf(*ledger);
     }
     // 注入:封口完好后往尾巴追加半行垃圾(坏尾,验卷必挂)。
     {
@@ -204,10 +209,10 @@ TEST_CASE("v3 删除门: 坏账(封口后追加垃圾)拒绝删除") {
     }
     const std::string session_id = platform::PathToUtf8(stream.parent_path().filename());
     const auto before = SnapshotDir(stream.parent_path());
-    const auto outcome = trajectory::DeleteSessionDir(stream.parent_path().parent_path(),
-                                                      session_id, "user_delete",
+    // 同未封口案:stream.parent×2 差一层(sessions/sessions 双层必
+    // not_found),房间根从 session_dir 同源取。
+    const auto outcome = trajectory::DeleteSessionDir(workspace_dir, session_id, "user_delete",
                                                       1759468800000LL);
-    // 同未封口案:失败时带实现的 detail 与参量,not_found 之谜下轮见真章。
     CAPTURE(session_id);
     CHECK_MESSAGE(outcome.error_code == "session.delete_v3_unreadable", outcome.message);
     CHECK(SnapshotDir(stream.parent_path()) == before);
