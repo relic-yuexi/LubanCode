@@ -119,6 +119,11 @@ void DriveTurn(TrajectorySessionLedger& ledger, const std::string& text) {
     const std::string request_id = bridge->OnRequestPrepared(
         MakeRequest("你是 LubanCode,读写跑都走工具。", {UserMessage(text)}), PreparedContext());
     REQUIRE_FALSE(request_id.empty());
+    // v2 状态机要求 output 挂在已 sent 的请求上(约束 5):prepared 之后须
+    // 显式补 sent,否则 OnOutputCompleted 被 state.request_not_sent 拒落账
+    //(v2 案 FATAL 的根因)。v3 同序 prepared → sent → output,与
+    // write_wiring 册 DriveToolTurn 同款。
+    bridge->OnRequestSent(request_id);
     REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("收到。"), "end_turn", "resp-1"));
     bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
 }
@@ -161,14 +166,21 @@ TEST_CASE("v3 删除门: 未封口(无 session.ended)拒绝,目录字节原样")
         DriveTurn(*ledger, "还没收尾的一轮");
         stream = V3StreamOf(*ledger);
         session_id = ledger->session_id();
-        before = SnapshotDir(ledger->session_dir());
     }
-    // ledger 已析构(锁随之释放),账未封口:旧门 journal_exists 恒假会直穿,
-    // 新门按 session.ended 拒。
+    // ledger 已析构:独占锁随之释放(session.lock 离场)。快照挪到析构后拍
+    // ——活着拍会把锁文件算进"原样",析构又删它,两拍必不等(原 172 行
+    // 失败的一半根因)。账未封口:旧门 journal_exists 恒假会直穿,新门按
+    // session.ended 拒。
+    before = SnapshotDir(stream.parent_path());
     const std::filesystem::path workspace_dir = stream.parent_path().parent_path();
+    // 前置钉死 + 失败带路径:上一轮 CI 在此案报 session.not_found,与
+    // 实现读码推导(delete_unsealed)相悖,失败时把实现看到的参量打出来。
+    REQUIRE(std::filesystem::exists(stream.parent_path()));
+    CAPTURE(session_id);
+    CAPTURE(platform::PathToUtf8(workspace_dir));
     const auto outcome =
         trajectory::DeleteSessionDir(workspace_dir, session_id, "user_delete", 1759468800000LL);
-    CHECK(outcome.error_code == "session.delete_unsealed");
+    CHECK_MESSAGE(outcome.error_code == "session.delete_unsealed", outcome.message);
     CHECK(SnapshotDir(stream.parent_path()) == before);  // 一字不动
     CHECK(std::filesystem::exists(stream));
 }
@@ -195,7 +207,9 @@ TEST_CASE("v3 删除门: 坏账(封口后追加垃圾)拒绝删除") {
     const auto outcome = trajectory::DeleteSessionDir(stream.parent_path().parent_path(),
                                                       session_id, "user_delete",
                                                       1759468800000LL);
-    CHECK(outcome.error_code == "session.delete_v3_unreadable");
+    // 同未封口案:失败时带实现的 detail 与参量,not_found 之谜下轮见真章。
+    CAPTURE(session_id);
+    CHECK_MESSAGE(outcome.error_code == "session.delete_v3_unreadable", outcome.message);
     CHECK(SnapshotDir(stream.parent_path()) == before);
 }
 
@@ -205,8 +219,10 @@ TEST_CASE("v3 删除门: 活锁在场拒绝(锁门 v3 场补钉)") {
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());
     DriveTurn(*ledger, "活锁场的一轮");
-    REQUIRE(ledger->CloseSession("exit").error_code.empty());
-    // ledger 活着 = 独占锁在本进程手里(Inspect → Alive)。
+    // 不封口:CloseV3Locked 封口即放锁(§3.3.2 同一口径——没有活 writer
+    // 的场不攥独占锁),先 close 就测不到活锁门,原案因此被放行真删了
+    //(error_code 空 + stream 消失)。ledger 活着且场在跑 = 独占锁在本
+    // 进程手里(Inspect → Alive),删除门的锁检查先于封口与格式分派。
     const auto outcome = trajectory::DeleteSessionDir(WorkspaceDirOf(*ledger), ledger->session_id(),
                                                       "user_delete", 1759468800000LL);
     CHECK(outcome.error_code == "session.delete_locked");

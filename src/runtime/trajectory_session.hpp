@@ -78,6 +78,10 @@ struct V3SessionBooks {
     bool execution_blocked = false;
     std::string execution_block_reason;         // 稳定原因(compact.swap.*)
     std::uint64_t execution_block_revision = 0;  // 阻断时账面 revision(准入对表/诊断)
+    // 绑定场次(session_id):换场判据用。manager 的 active 是 std::optional,
+    // clear 同址换值时新写者地址与旧写者相同(地址复用),单比指针认不出
+    // 换场——旧 books(含执行阻断)会原样带进新场。
+    std::string bound_session_id;
     // provider 调用号 -> v3 调用身份:轮桥声明 tool call 时登记(§4.15),
     // 子代理五步的 parentActionRef 从这查(actionId/声明消息/turn/step)。
     struct DeclaredAction {

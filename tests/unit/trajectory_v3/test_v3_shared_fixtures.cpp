@@ -412,7 +412,9 @@ TEST_CASE("夹具: 两层子代理可递归遍历,父子身份不串") {
     CHECK(tree.children[0].session_id == "S-CHILD");
     REQUIRE(tree.children[0].children.size() == 1);
     CHECK(tree.children[0].children[0].session_id == "S-GRAND");
-    CHECK(tree.link_status == "linked");
+    // 根节点无父可链:WalkSessionTree 给根的标记恒为 "root";linked 是子
+    // 节点对父侧 subagent.linked 的判定——下一行才是它,原断言比错了对象。
+    CHECK(tree.link_status == "root");
     CHECK(tree.children[0].link_status == "linked");
 }
 

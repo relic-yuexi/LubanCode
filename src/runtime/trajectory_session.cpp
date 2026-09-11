@@ -2542,11 +2542,15 @@ void TrajectorySessionLedger::BindV3Books_() {
     }
     if (impl_->active != nullptr && impl_->active->is_v3()) {
         v3::V3Writer* writer = &*impl_->active->v3_main;
-        if (!impl_->v3_books.has_value() || impl_->v3_books->writer != writer) {
+        if (!impl_->v3_books.has_value() || impl_->v3_books->writer != writer ||
+            impl_->v3_books->bound_session_id != impl_->active->session_id()) {
             // 首绑或换场(clear/resume 后 active 换了主账):回到新场的
             // 基础 system(§4.10 的"沿用源场 system"由 AdoptSourceSystemV3_
-            // 按切换流程补,不在绑定时偷改)。
+            // 按切换流程补,不在绑定时偷改)。换场判据加场次 id:active 是
+            // std::optional,clear 同址换值时新写者地址与旧写者相同,单比
+            // 指针认不出换场,旧 books(含 T12-A 执行阻断)会带进新场。
             impl_->v3_books = V3SessionBooks{};
+            impl_->v3_books->bound_session_id = impl_->active->session_id();
             impl_->v3_books->system_content = impl_->v3_system_content;
             impl_->v3_books->settings_version = 1;
         }
