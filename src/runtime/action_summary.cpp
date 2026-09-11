@@ -315,7 +315,15 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     candidate["source_result_event_ref"] = source.persisted_event_ref;
     candidate["source_result_event_refs"] = source_events;
     candidate["evidence_paths"] = nlohmann::json::array();
-    for (const auto& ref : source.result_refs) candidate["evidence_paths"].push_back(ref.at("path"));
+    // 来源不齐(ref 不是对象/缺 path/不是串)按来源不齐拒绝,别让 nlohmann 的
+    // at() 缺键异常穿出去——静默跳过会让 evidence_paths 谎报覆盖面。
+    for (const auto& ref : source.result_refs) {
+        if (!ref.is_object() || !ref.contains("path") || !ref.at("path").is_string() ||
+            ref.value("path", "").empty()) {
+            return finish("rejected", "source_ref_missing_path");
+        }
+        candidate["evidence_paths"].push_back(ref.value("path", ""));
+    }
     result.text = candidate.dump();
     if (writer.context().revision != source_revision) return finish("rejected", "source_context_conflict");
     if (result.text.size() > source.budget_bytes || result.text.size() >= source.text.size()) {

@@ -2617,7 +2617,7 @@ TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted 
     };
     const std::string old_input(320000, 'h');
     const auto outcome = loop.Run(old_input, wiring);
-    REQUIRE_MESSAGE(outcome.has_value(), outcome ? "" : outcome.error());
+    REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
     REQUIRE(backend.captured_requests.size() == 2);
     CHECK(executed->call_count == 10);
     const auto& final = backend.captured_requests.back();

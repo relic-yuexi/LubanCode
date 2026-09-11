@@ -742,7 +742,7 @@ TEST_CASE("B2 real loop: action summaries use separate requests and adopted resu
     registry.Register(std::move(tool));
     auto profile = Profile();
     profile.provider = "audit";
-    profile.wire = "openai-chat-completions";
+    profile.prompt_sections.wire = "openai-chat-completions";
     profile.runtime.context_window_tokens = 9000;
     profile.runtime.max_output_tokens = 1024;
     profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
@@ -755,7 +755,7 @@ TEST_CASE("B2 real loop: action summaries use separate requests and adopted resu
         return audit.bridge->RewriteToolResultsForHistory(results);
     };
     const auto outcome = agent.Run(Input(), wiring);
-    REQUIRE_MESSAGE(outcome.has_value(), outcome ? "" : outcome.error());
+    REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
     CHECK(counter->calls == 2);
     REQUIRE(backend.requests.size() == 4);
     CHECK(KindCount(audit.Rows(), "tool.result.summary.finished") == 2);
