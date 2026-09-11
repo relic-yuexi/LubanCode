@@ -937,6 +937,8 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
         ev.id = "ev-1";
         ev.goal_id = "goal-1";
         ev.iteration_id = "goal-1/iter-1";
+        ev.kind = goalns::EvidenceKind::CommandExit;  // 采证 kind 不缺省:
+                                                      // 快照 refs 照它原样落
         ev.producer = "run_command";
         ev.facts["command"] = "ctest -R auth";
         ev.facts["exit_code"] = 1;
