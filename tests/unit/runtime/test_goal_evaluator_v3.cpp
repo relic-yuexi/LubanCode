@@ -185,7 +185,9 @@ struct WriterHarness {
         writer = std::move(*started);
     }
 
-    std::optional<lubancode::trajectory::v3::V3Ledger> Ledger() {
+    // B2 线把 ReadV3Ledger 收紧成 expected<_,string>(main 侧还是
+    // optional);auto 两头都接,has_value/operator-> 用法不变。
+    auto Ledger() {
         return lubancode::trajectory::v3::ReadV3Ledger(dir / "s1.jsonl");
     }
 };
