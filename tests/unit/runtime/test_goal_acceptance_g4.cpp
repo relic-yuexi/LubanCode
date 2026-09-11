@@ -1223,7 +1223,8 @@ TEST_CASE("M15 三停态分路:blocked/awaiting_user 落位,等待不算失败�
         harness.RunToRunning();
         // 首轮建立材料指纹，随后三轮同料即暂停，不采信 progress 自报。
         const GoalEvidence ev = harness.MakeEvidence("ev-1", "");
-        harness.backend.replies = {kContinueVerdict};
+        harness.backend.replies = {kContinueVerdict, kContinueVerdict,
+                                   kContinueVerdict, kContinueVerdict};
         for (int round = 0; round < 4; ++round) {
             const auto result = CloseGoalIterationWithEvaluation(
                 *harness.service, *harness.volume.writer, harness.backend, harness.Options(),
