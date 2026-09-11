@@ -252,7 +252,8 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
             result.persistence_failed = true;
             return std::unexpected("response_start_persist_failed");
         }
-        if (!response || stream_error) {
+        const bool missing_terminal = assembler.stop_reason().empty();
+        if (!response || stream_error || missing_terminal) {
             const bool cancelled = !response && response.error().kind == api::ErrorKind::Cancelled;
             if (!output_blocks.empty()) {
                 v3::MessageDraft partial;
@@ -272,17 +273,20 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                               ? v3::EventKindV3::ModelResponseCancelled : v3::EventKindV3::ModelResponseFailed;
             failed.status = cancelled ? v3::OpStatus::Cancelled : v3::OpStatus::Failed;
             failed.turn_id = internal_turn; failed.step_id = step_id; failed.request_id = request_id;
-            failed.payload = {{"purpose", "action_summary"}, {"reason", stream_error ? *stream_error : response.error().message}};
+            failed.payload = {{"purpose", "action_summary"},
+                              {"reason", stream_error ? *stream_error : !response ? response.error().message : "missing terminal frame"}};
             if (!Committed(writer.AppendEvent(std::move(failed), kDurability))) result.persistence_failed = true;
             return std::unexpected(cancelled ? "cancelled" : "summary_provider_error");
         }
         const auto completed = writer.CompleteStreamResponse(request_id, stream_id, internal_turn, step_id,
             response_id, response_body, profile.provider, profile.wire, profile.model,
             response_model, usage, assembler.stop_reason(), v3::MessagePurpose::ActionSummary, std::nullopt,
-            assembler.stop_reason() == "max_tokens" ? std::optional(v3::CompletionStatus::Truncated) : std::nullopt, kDurability);
+            (assembler.stop_reason() == "max_tokens" || assembler.stop_reason() == "length")
+                ? std::optional(v3::CompletionStatus::Truncated) : std::nullopt, kDurability);
         if (!Committed(completed)) { result.persistence_failed = true; return std::unexpected("candidate_persist_failed"); }
         candidate_refs.push_back(completed.id);
-        if (forbidden_blocks || assembler.stop_reason() == "max_tokens" || assembler.stop_reason() == "length") {
+        if (forbidden_blocks || assembler.has_parse_error() || assembler.idless_tool_calls_dropped() > 0 ||
+            assembler.stop_reason() == "max_tokens" || assembler.stop_reason() == "length") {
             return std::unexpected("summary_truncated_or_nontext");
         }
         const auto candidate = nlohmann::json::parse(text, nullptr, false);
