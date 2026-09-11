@@ -73,6 +73,17 @@ KINDS = {
     "subagent.spawn.requested", "subagent.linked", "subagent.observed",
     "subagent.spawn.failed",
     "task.started", "task.pending", "task.completed", "task.failed", "task.cancelled",
+    # Workflow 编排账(Workflow 接入 v3 第一棒,§四 workflow 条目):事件账
+    # profile 只写 event 行,这些 kind 的载荷合同见 §四 workflow。
+    "workflow.definition.loaded", "workflow.segment.opened",
+    "workflow.inputs.committed",
+    "workflow.node.reserved", "workflow.node.dispatched", "workflow.node.waiting",
+    "workflow.node.retrying", "workflow.node.completed", "workflow.node.failed",
+    "workflow.node.cancelled", "workflow.node.skipped",
+    "workflow.output.committed", "workflow.checkpoint.committed",
+    "workflow.branch.started", "workflow.join.completed",
+    "workflow.loop.iteration.started", "workflow.loop.iteration.completed",
+    "workflow.run.completed", "workflow.run.failed", "workflow.run.cancelled",
 }
 
 # kind 后缀 → 固定 status(§2.2);不在表内的 kind 不携带 status。
@@ -95,6 +106,11 @@ STATUSLESS_KINDS = {
     "tool.result.persist_failed", "tool.result.selected",
     "hook.effects.applied", "hook.effects.rejected", "model.usage.appended",
     "subagent.spawn.requested",
+    "workflow.definition.loaded", "workflow.segment.opened",
+    "workflow.inputs.committed", "workflow.node.reserved",
+    "workflow.node.dispatched", "workflow.node.retrying",
+    "workflow.node.skipped", "workflow.output.committed",
+    "workflow.checkpoint.committed",
 }
 
 ROLES = {"system", "user", "assistant", "tool"}
@@ -455,6 +471,78 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                     raise ValidationError(f"prepared payload 缺字段: {key}")
             if not isinstance(payload["inputMessageRefs"], list):
                 raise ValidationError("inputMessageRefs 应为数组")
+        if kind.startswith("workflow."):
+            # Workflow 编排族载荷合同(§四 workflow 条目;与 C++ schema3 同口径)。
+            def nonempty(key: str) -> None:
+                if not isinstance(payload.get(key), str) or not payload[key]:
+                    raise ValidationError(f"{kind} payload.{key} 应为非空 string")
+            def positive(key: str) -> None:
+                value = payload.get(key)
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                    raise ValidationError(f"{kind} payload.{key} 应为从 1 起的正整数")
+            def hex64(key: str) -> None:
+                if not isinstance(payload.get(key), str) or not is_hex64(payload[key]):
+                    raise ValidationError(f"{kind} payload.{key} 应为 64 位小写十六进制")
+            if kind == "workflow.definition.loaded":
+                nonempty("workflowId")
+                hex64("definitionHash")
+            elif kind == "workflow.segment.opened":
+                nonempty("segmentId")
+                if not is_ref(payload.get("sourceRef")) or isinstance(payload.get("sourceRef"), str):
+                    raise ValidationError("workflow.segment.opened.sourceRef 应为五键跨段引用")
+            elif kind == "workflow.inputs.committed":
+                nonempty("inputsRef")
+                hex64("sha256")
+            elif kind in ("workflow.node.reserved", "workflow.node.dispatched"):
+                nonempty("nodeId")
+                nonempty("nodeExecutionId")
+                positive("attempt")
+                if kind == "workflow.node.reserved":
+                    nonempty("nodeKind")
+                    hex64("inputHash")
+            elif kind == "workflow.node.waiting":
+                nonempty("nodeId")
+                nonempty("waitKind")
+            elif kind == "workflow.node.retrying":
+                nonempty("nodeId")
+                nonempty("nodeExecutionId")
+            elif kind == "workflow.node.completed":
+                nonempty("nodeId")
+                nonempty("nodeExecutionId")
+                nonempty("outcome")
+                if payload["outcome"] not in ("success", "empty"):
+                    raise ValidationError(
+                        "workflow.node.completed.outcome 应为 success|empty(失败走 node.failed)")
+            elif kind in ("workflow.node.failed", "workflow.run.failed"):
+                nonempty("errorCode")
+                if kind == "workflow.node.failed":
+                    nonempty("nodeExecutionId")
+            elif kind == "workflow.output.committed":
+                for key in ("nodeId", "nodeExecutionId", "outputId", "outputRef"):
+                    nonempty(key)
+                hex64("outputHash")
+                validation = payload.get("validation")
+                if not isinstance(validation, dict) \
+                        or not isinstance(validation.get("passed"), bool):
+                    raise ValidationError(
+                        "workflow.output.committed.validation 应为 {passed:bool,...}")
+            elif kind == "workflow.checkpoint.committed":
+                for key in ("checkpointId", "checkpointRef"):
+                    nonempty(key)
+                hex64("sha256")
+                through = payload.get("throughSeq")
+                if not isinstance(through, int) or isinstance(through, bool) or through < 0:
+                    raise ValidationError("workflow.checkpoint.committed.throughSeq 应为非负整数")
+            elif kind == "workflow.branch.started":
+                nonempty("nodeId")
+                if not isinstance(payload.get("branches"), list) or not payload["branches"]:
+                    raise ValidationError("workflow.branch.started.branches 应为非空数组")
+            elif kind == "workflow.join.completed":
+                nonempty("nodeId")
+                nonempty("join")
+            elif kind in ("workflow.loop.iteration.started", "workflow.loop.iteration.completed"):
+                nonempty("nodeId")
+                positive("iteration")
     return obj
 
 
@@ -478,6 +566,26 @@ def validate_chain_nodes(chain: list, where: str) -> None:
 def validate_semantics(lines: list[dict]) -> list[str]:
     """跨行语义;返回发现的问题列表(空 = 全绿)。"""
     problems: list[str] = []
+
+    # Workflow 编排账(事件账 profile):全 event 行且首行是 workflow.* 开账
+    # 事实——按编排语义验,不套 agent 会话首行 system 的断言(§四 workflow)。
+    kinds = [obj.get("kind", "") for obj in lines if obj.get("type") == "event"]
+    is_workflow_ledger = bool(lines) and bool(kinds) and len(kinds) == len(lines) \
+        and all(kind.startswith("workflow.") for kind in kinds) \
+        and kinds[0] in ("workflow.definition.loaded", "workflow.segment.opened")
+    if is_workflow_ledger:
+        run_terminals = [kind for kind in kinds if kind.startswith("workflow.run.")]
+        if len(run_terminals) > 1:
+            problems.append("workflow.run.* 终态多于一枚(终态唯一)")
+        committed = [f"{obj['payload'].get('nodeExecutionId')}#a{obj['payload'].get('attempt')}"
+                     for obj in lines
+                     if obj.get("kind") == "workflow.output.committed"]
+        if len(committed) != len(set(committed)):
+            problems.append("同一 (nodeExecutionId, attempt) 的 output.committed 多于一枚")
+        if not any(kind == "workflow.definition.loaded" for kind in kinds):
+            problems.append("编排账缺 workflow.definition.loaded 开账事实")
+        return problems
+
     if lines and not (
         lines[0].get("type") == "message"
         and lines[0].get("message", {}).get("role") == "system"
