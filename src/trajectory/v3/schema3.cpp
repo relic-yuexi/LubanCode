@@ -575,6 +575,25 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
     }
     using K = EventKindV3;
     const std::string kind_name = EventKindV3Name(line.kind);
+    if (line.kind == K::CompactStarted || line.kind == K::CompactApplied) {
+        if (auto scope = line.payload.find("stepScope"); scope != line.payload.end()) {
+            if (!scope->is_object()) return Err("schema3.bad_type", "stepScope must be an object");
+            if (!scope->empty()) {
+                if (!scope->contains("turnId") || !(*scope)["turnId"].is_string() ||
+                    (*scope)["turnId"].get<std::string>().empty() ||
+                    !scope->contains("stepIds") || !(*scope)["stepIds"].is_array() ||
+                    (*scope)["stepIds"].empty() || !scope->contains("prefixChanged") ||
+                    !(*scope)["prefixChanged"].is_boolean() || !(*scope)["prefixChanged"].get<bool>())
+                    return Err("schema3.bad_step_scope", "stepScope requires turn, steps and changed prefix");
+                std::unordered_set<std::string> steps;
+                for (const auto& id : (*scope)["stepIds"]) {
+                    if (!id.is_string() || id.get<std::string>().empty() ||
+                        !steps.insert(id.get<std::string>()).second)
+                        return Err("schema3.bad_step_scope", "stepIds must be unique nonempty identities");
+                }
+            }
+        }
+    }
     // 关键 payload 子字段(§四;完整载荷表归领域层)。
     if (line.kind == K::ModelRequestPrepared) {
         for (const auto* key : {"contextId", "contextRevision", "systemMessageRef",

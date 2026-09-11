@@ -17,6 +17,17 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     wire.max_tokens = request.max_tokens;
     wire.reasoning_effort = request.reasoning_effort;
 
+    if (request.enforce_output_limit && request.max_tokens) {
+        backend.ForceMaxOutputTokensOverride(wire, *request.max_tokens);
+        const auto effective = backend.GetEffectiveOutputLimit(wire);
+        if (!effective.tokens || *effective.tokens <= 0 || *effective.tokens > *request.max_tokens) {
+            SampleResult blocked;
+            blocked.error = api::Error{api::ErrorKind::Api,
+                "auxiliary output limit could not be enforced", 0, "output_limit_unenforceable"};
+            return blocked;
+        }
+    }
+
     const auto started = std::chrono::steady_clock::now();
 
     // Token 账本单 A1(公共 ModelRequestRecorder,§11.2):旁路采样与
@@ -118,6 +129,7 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
                              std::chrono::steady_clock::now() - started)
                              .count();
     result.provider_response_id = assembler_response_id;
+    result.stop_reason = assembler.stop_reason();
 
     // 轨迹收口(Token 账本单 A1,§6.1.1/§7.3):usage owner 先落(没报也
     // 落 owner,token 字段不现),output 随后按三态自己收口,不复制
@@ -148,7 +160,8 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
         } else if (stream_error) {
             options.boundary_recorder->OnOutputFailed(recorded_request_id, stream_error_message);
         } else {
-            options.boundary_recorder->OnOutputCompleted(recorded_request_id, assistant, "end_turn",
+            options.boundary_recorder->OnOutputCompleted(recorded_request_id, assistant,
+                result.stop_reason.empty() ? "end_turn" : result.stop_reason,
                                                          result.provider_response_id);
         }
     }

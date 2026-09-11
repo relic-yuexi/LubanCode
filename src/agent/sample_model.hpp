@@ -57,6 +57,7 @@ struct SampleRequest {
     // 议),六处旧口径都是"schema 拼进提示词 + 调用方自查",这里给的是
     // 调用方自查之后的第二道本地后手。复检结果见 SampleResult::schema_ok。
     nlohmann::json output_schema = nlohmann::json();
+    bool enforce_output_limit = false;  // Capacity-checked auxiliary requests.
 };
 
 // 一次采样的执行选项。
@@ -91,6 +92,7 @@ struct SampleResult {
     // provider 在 MessageStart 一类帧里回的外部号(§6.1.2;空 = 没回)。
     // 只作对账,不顶 local request id。
     std::string provider_response_id;
+    std::string stop_reason;  // Provider finish reason; empty means not reported.
     // 起跑到收工的墙钟(含看门狗全程);不计时口径的调用方(compact 的
     // map/reduce)不吃它。
     std::int64_t duration_ms = 0;

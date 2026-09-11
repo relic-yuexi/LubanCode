@@ -23,6 +23,8 @@ using lubancode::agent::SampleResult;
 class FullBackend final : public lubancode::api::Backend {
 public:
     std::string reply = "正文一枚";
+    std::string finish_reason;
+    std::optional<int> observed_output_limit;
     std::int64_t input_tokens = 100;
     std::int64_t output_tokens = 50;
     std::int64_t cache_read_tokens = 7;
@@ -33,11 +35,12 @@ public:
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
         const std::atomic<bool>*) override {
-        (void)request;
+        observed_output_limit = request.max_tokens;
         ++calls;
         on_event(lubancode::api::TextDelta{reply});
         on_event(lubancode::api::ContentBlockDone{0});
         lubancode::api::MessageDone done;
+        done.stop_reason = finish_reason;
         done.usage.input_tokens = input_tokens;
         done.usage.output_tokens = output_tokens;
         done.usage.cache_read_tokens = cache_read_tokens;
@@ -300,3 +303,34 @@ TEST_CASE("output_schema 复检:过/不过两态,不影响 ok") {
 }
 
 }  // TEST_SUITE(agent-sample-model)
+
+TEST_CASE("sample preserves provider truncation and the requested output budget") {
+    FullBackend backend;
+    backend.finish_reason = "max_tokens";
+    auto request = OneShot("summary", "source");
+    request.max_tokens = 123;
+    const auto result = SampleModel(backend, request);
+    REQUIRE(result.ok);
+    CHECK(result.stop_reason == "max_tokens");
+    REQUIRE(backend.observed_output_limit);
+    CHECK(*backend.observed_output_limit == 123);
+}
+
+TEST_CASE("bounded auxiliary sampling refuses an overriding output cap") {
+    class OverridingBackend : public lubancode::api::Backend {
+    public:
+        int calls = 0;
+        EffectiveOutputLimit GetEffectiveOutputLimit(const lubancode::api::Request&) const override {
+            return {9999, true};
+        }
+        std::expected<void, lubancode::api::Error> send_stream(const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>&,
+            const std::atomic<bool>*) override { ++calls; return {}; }
+    } backend;
+    auto request = OneShot("summary", "source");
+    request.enforce_output_limit = true;
+    const auto result = SampleModel(backend, request);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.api_code == "output_limit_unenforceable");
+    CHECK(backend.calls == 0);
+}
