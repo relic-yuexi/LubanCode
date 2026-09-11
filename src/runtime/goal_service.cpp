@@ -17,7 +17,10 @@
 
 #include "hooks/hash.hpp"
 #include "platform/json_safe.hpp"
+#include "platform/paths.hpp"
+#include "trajectory/directory.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "trajectory/v3/writer.hpp"
 
 namespace lubancode::runtime::goal {
@@ -186,9 +189,20 @@ GoalCounters CountersFromJson(const nlohmann::json& j) {
     return c;
 }
 
-// 不可变快照落盘(次序同结果仓 §4.16):临时文件 -> 落稳 -> 改不可变名;
-// 不可变名已存在即冲突,不覆盖(同 revision 二次提交是状态回卷,CAS 拦,
-// 真撞说明账面乱,报错不修)。
+std::optional<std::string> ReadFileBytes(const std::filesystem::path& path, std::string* error) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        *error = "快照文件打不开: " + path.string();
+        return std::nullopt;
+    }
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// 不可变快照落盘(次序同结果仓 §4.16):临时文件 -> 落稳 -> 改不可变名。
+// 不可变名已存在时按字节比:同字节 = 上次提交在"快照落稳、applied 未落"
+// 之间崩了的同款重试(§4.55 崩溃窗口),复用这枚候选文件接着补 applied,
+// 不算冲突;字节不同才是真撞(状态回卷 CAS 已拦,真撞说明账面乱,报错
+// 不修)。
 bool WriteSnapshotFile(const std::filesystem::path& final_path, const std::string& data,
                        std::string* error) {
     std::error_code ec;
@@ -203,7 +217,12 @@ bool WriteSnapshotFile(const std::filesystem::path& final_path, const std::strin
         }
     }
     if (std::filesystem::exists(final_path, ec)) {
-        *error = "goal 快照不可变名已存在(不覆盖): " + final_path.string();
+        std::string existing_error;
+        const auto existing = ReadFileBytes(final_path, &existing_error);
+        if (existing.has_value() && *existing == data) {
+            return true;  // 幂等重试:候选文件已是这份内容,直接进 applied 步
+        }
+        *error = "goal 快照不可变名已存在且内容不同(不覆盖): " + final_path.string();
         return false;
     }
     std::filesystem::path temp = final_path;
@@ -228,15 +247,6 @@ bool WriteSnapshotFile(const std::filesystem::path& final_path, const std::strin
         return false;
     }
     return true;
-}
-
-std::optional<std::string> ReadFileBytes(const std::filesystem::path& path, std::string* error) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        *error = "快照文件打不开: " + path.string();
-        return std::nullopt;
-    }
-    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
 std::int64_t DefaultClock() {
@@ -328,7 +338,10 @@ std::vector<GoalLifecycle> AllowedLifecycleTransitions(GoalLifecycle from) {
     using L = GoalLifecycle;
     switch (from) {
         case L::Preparing:
-            return {L::Active, L::AwaitingUser, L::Cleared, L::Failed, L::SuspendedByPolicy};
+            // G1 补 preparing -> paused:§4.67.2 pause 行不设前置(刚立的目标
+            // 也许要立刻停排;v1 PauseOutcome 同款 Preparing→Paused 立刻)。
+            return {L::Active, L::Paused, L::AwaitingUser, L::Cleared, L::Failed,
+                    L::SuspendedByPolicy};
         case L::Active:
             return {L::Preparing, L::Waiting, L::Paused, L::AwaitingUser, L::Blocked,
                     L::BudgetExhausted, L::SuspendedByPolicy, L::Achieved, L::Cleared, L::Failed};
@@ -485,9 +498,67 @@ std::string ValidateEvidenceRef(const nlohmann::json& j) {
     return std::string();
 }
 
+GoalEvidenceRef EvidenceRefFromTrace(const GoalEvidence& evidence, const std::string& session_id,
+                                     const std::string& run_id,
+                                     const std::string& workspace_baseline) {
+    GoalEvidenceRef ref;
+    ref.id = evidence.id;
+    ref.kind = ToString(evidence.kind);
+    ref.source = GoalEvidenceSource::ToolAction;
+    // sourceRef 回指工具调用(§4.67.5"至少回指 session/run、toolCallId 或
+    // messageId");v1 采证没带 tool_use_id 的(宿主合成一类)以 producer
+    // 兜底,不为凑非空造引用。
+    ref.source_ref = !evidence.tool_use_id.empty()
+                         ? evidence.tool_use_id
+                         : ("host:" + (evidence.producer.empty() ? "unknown" : evidence.producer));
+    ref.session_id = session_id;
+    ref.run_id = run_id;
+    ref.content_sha256 = !evidence.content_sha256.empty()
+                             ? evidence.content_sha256
+                             : hooks::Sha256Hex(evidence.facts.dump());
+    ref.observed_at_ms = evidence.observed_at_ms;
+    ref.workspace_baseline = workspace_baseline;
+    ref.fresh = evidence.fresh;
+    ref.truncated = evidence.truncated;
+    ref.criterion_id.clear();  // 绑定验收项归 checkpoint/判词对账,不在采证时填
+    return ref;
+}
+
 // ---------------------------------------------------------------------------
 // 快照 schema
 // ---------------------------------------------------------------------------
+
+nlohmann::json GoalWaitPlan::ToJson() const {
+    nlohmann::json j = nlohmann::json::object();
+    j["pollsDone"] = polls_done;
+    j["maxPolls"] = max_polls;
+    j["nextDueMs"] = next_due_ms;
+    return j;
+}
+
+GoalWaitPlan GoalWaitPlan::FromJson(const nlohmann::json& j) {
+    GoalWaitPlan plan;
+    if (!j.is_object()) return plan;
+    if (j.contains("pollsDone") && j["pollsDone"].is_number_integer()) {
+        plan.polls_done = j["pollsDone"].get<int>();
+    }
+    if (j.contains("maxPolls") && j["maxPolls"].is_number_integer()) {
+        plan.max_polls = j["maxPolls"].get<int>();
+    }
+    if (j.contains("nextDueMs") && j["nextDueMs"].is_number_integer()) {
+        plan.next_due_ms = j["nextDueMs"].get<std::int64_t>();
+    }
+    return plan;
+}
+
+std::int64_t GoalWaitBackoffMs(int poll_index) {
+    // §4.67.7 首版建议:30/60/120 分钟退避;越界按最后一档(120)。
+    switch (poll_index) {
+        case 0: return 30LL * 60 * 1000;
+        case 1: return 60LL * 60 * 1000;
+        default: return 120LL * 60 * 1000;
+    }
+}
 
 nlohmann::json GoalStateSnapshot::ToJson() const {
     nlohmann::json j = nlohmann::json::object();
@@ -514,12 +585,16 @@ nlohmann::json GoalStateSnapshot::ToJson() const {
     for (const auto& ref : evidence_refs) evidence.push_back(ref.ToJson());
     j["evidenceRefs"] = std::move(evidence);
     j["waitTaskRefs"] = wait_task_refs;
+    j["waitPlan"] = wait_plan.ToJson();
     j["appliedEvaluationId"] = applied_evaluation_id.has_value()
                                    ? nlohmann::json(*applied_evaluation_id)
                                    : nlohmann::json(nullptr);
+    j["appliedEvaluation"] = applied_evaluation;
+    j["stopRequested"] = stop_requested;
     j["budget"] = BudgetToJson(budget);
     j["usage"] = UsageToJson(usage);
     j["counters"] = CountersToJson(counters);
+    j["activeElapsedMs"] = active_elapsed_ms;
     j["pendingIntent"] = pending_intent;
     j["workspaceRoot"] = workspace_root;
     j["workspaceIdentity"] = workspace_identity;
@@ -605,6 +680,11 @@ std::optional<GoalStateSnapshot> GoalStateSnapshot::FromJson(const nlohmann::jso
     read_opt_str("iterationId", s.iteration_id);
     read_opt_str("checkpointRef", s.checkpoint_ref);
     read_opt_str("appliedEvaluationId", s.applied_evaluation_id);
+    if (j.contains("appliedEvaluation")) {
+        if (!j["appliedEvaluation"].is_null() && !j["appliedEvaluation"].is_object())
+            return fail("appliedEvaluation must be an object or null");
+        s.applied_evaluation = j["appliedEvaluation"];
+    }
     if (j.contains("evidenceRefs") && j["evidenceRefs"].is_array()) {
         for (const auto& item : j["evidenceRefs"]) {
             std::string evidence_error;
@@ -617,6 +697,13 @@ std::optional<GoalStateSnapshot> GoalStateSnapshot::FromJson(const nlohmann::jso
         for (const auto& item : j["waitTaskRefs"]) {
             if (item.is_string()) s.wait_task_refs.push_back(item.get<std::string>());
         }
+    }
+    if (j.contains("waitPlan")) s.wait_plan = GoalWaitPlan::FromJson(j.at("waitPlan"));
+    if (j.contains("stopRequested") && j["stopRequested"].is_boolean()) {
+        s.stop_requested = j["stopRequested"].get<bool>();
+    }
+    if (j.contains("activeElapsedMs") && j["activeElapsedMs"].is_number_integer()) {
+        s.active_elapsed_ms = j["activeElapsedMs"].get<std::int64_t>();
     }
     if (j.contains("budget")) s.budget = BudgetFromJson(j.at("budget"));
     if (j.contains("usage")) s.usage = UsageFromJson(j.at("usage"));
@@ -667,6 +754,166 @@ std::string SnapshotRefPath(const std::string& goal_id, std::uint64_t state_revi
 }
 
 // ---------------------------------------------------------------------------
+// continuation 意图(§4.67.4/G1)
+// ---------------------------------------------------------------------------
+
+std::string GoalPendingIntent::DedupeKey(const std::string& goal_id) const {
+    // 续跑去重键四元组(§4.67.4):goalId/contractRevision/predecessor/
+    // ordinal。'|' 不出现在 id 文法里,拼串即键。
+    return goal_id + "|" + std::to_string(contract_revision) + "|" + predecessor_iteration_id +
+           "|" + std::to_string(continuation_ordinal);
+}
+
+nlohmann::json GoalPendingIntent::ToJson() const {
+    nlohmann::json j = nlohmann::json::object();
+    j["workItemId"] = work_item_id;
+    j["contractRevision"] = contract_revision;
+    j["predecessorIterationId"] = predecessor_iteration_id;
+    j["continuationOrdinal"] = continuation_ordinal;
+    j["triggerRef"] = trigger_ref;
+    j["nextActionRef"] = next_action_ref;
+    j["claimed"] = claimed;
+    j["writerEpoch"] = writer_epoch;
+    j["claimedAtMs"] = claimed_at_ms;
+    return j;
+}
+
+std::optional<GoalPendingIntent> GoalPendingIntent::FromJson(const nlohmann::json& j,
+                                                             std::string* error) {
+    if (const std::string invalid = ValidatePendingIntent(j); !invalid.empty()) {
+        if (error != nullptr) *error = invalid;
+        return std::nullopt;
+    }
+    GoalPendingIntent intent;
+    intent.work_item_id = j.at("workItemId").get<std::string>();
+    intent.contract_revision = j.at("contractRevision").get<std::uint64_t>();
+    intent.predecessor_iteration_id = j.at("predecessorIterationId").get<std::string>();
+    intent.continuation_ordinal = j.at("continuationOrdinal").get<int>();
+    intent.trigger_ref = j.at("triggerRef").get<std::string>();
+    intent.next_action_ref = j.at("nextActionRef").get<std::string>();
+    intent.claimed = j.at("claimed").get<bool>();
+    intent.writer_epoch = j.at("writerEpoch").get<std::string>();
+    intent.claimed_at_ms = j.at("claimedAtMs").get<std::int64_t>();
+    return intent;
+}
+
+std::string ValidatePendingIntent(const nlohmann::json& j) {
+    const auto fail = [](const std::string& text) { return text; };
+    if (!j.is_object()) return fail("pendingIntent 须为 object");
+    for (const char* key : {"workItemId", "contractRevision", "predecessorIterationId",
+                            "continuationOrdinal", "triggerRef", "nextActionRef", "claimed",
+                            "writerEpoch", "claimedAtMs"}) {
+        if (!j.contains(key)) return fail(std::string("pendingIntent 缺字段: ") + key);
+    }
+    if (!j.at("workItemId").is_string() || j.at("workItemId").get<std::string>().empty()) {
+        return fail("workItemId 须为非空 string(恢复按它补队列)");
+    }
+    if (!j.at("contractRevision").is_number_unsigned() ||
+        j.at("contractRevision").get<std::uint64_t>() < 1) {
+        return fail("contractRevision 须为 >= 1 的无符号整数");
+    }
+    if (!j.at("predecessorIterationId").is_string()) {
+        return fail("predecessorIterationId 须为 string(空 = 首轮)");
+    }
+    if (!j.at("continuationOrdinal").is_number_integer() ||
+        j.at("continuationOrdinal").get<int>() < 1) {
+        return fail("continuationOrdinal 须为 >= 1 的整数");
+    }
+    for (const char* key : {"triggerRef", "nextActionRef", "writerEpoch"}) {
+        if (!j.at(key).is_string()) return fail(std::string(key) + std::string(" 须为 string"));
+    }
+    if (!j.at("claimed").is_boolean()) return fail("claimed 须为 boolean");
+    if (!j.at("claimedAtMs").is_number_integer() || j.at("claimedAtMs").get<std::int64_t>() < 0) {
+        return fail("claimedAtMs 须为非负整数");
+    }
+    if (j.at("claimed").get<bool>()) {
+        if (j.at("writerEpoch").get<std::string>().empty()) {
+            return fail("claimed=true 须带 writerEpoch(认领者)");
+        }
+        if (j.at("claimedAtMs").get<std::int64_t>() <= 0) {
+            return fail("claimed=true 须带 claimedAtMs(认领时点)");
+        }
+    } else if (!j.at("writerEpoch").get<std::string>().empty() ||
+               j.at("claimedAtMs").get<std::int64_t>() != 0) {
+        return fail("claimed=false 时 writerEpoch/claimedAtMs 须为空/0");
+    }
+    return std::string();
+}
+
+GoalWorkView EvaluateGoalWork(const GoalStateSnapshot& snapshot, const std::string& writer_epoch) {
+    GoalWorkView view;
+    if (snapshot.pending_intent.is_object() && !snapshot.pending_intent.empty()) {
+        std::string parse_error;
+        const auto intent = GoalPendingIntent::FromJson(snapshot.pending_intent, &parse_error);
+        if (!intent.has_value()) {
+            view.reason = "pendingIntent 不合合同: " + parse_error;
+            return view;
+        }
+        view.has_intent = true;
+        view.intent = *intent;
+        if (intent->claimed) {
+            if (intent->writer_epoch != writer_epoch) {
+                // §4.67.4 恢复核验(G2 收口):claim 落账后、开轮(Begin-
+                // Iteration,先于模型发送)没落 = 账面证据"确认未发送"
+                //(phase=queued)——本写者可接管沿用原 workItemId 续原请求,
+                // 不重放副作用;已开轮/在评(running/evaluating)是他者
+                // 在途,如实标 claimed_by_other,等他者的下一笔 applied。
+                if (snapshot.phase != GoalPhase::Queued) {
+                    view.claimed_by_other = true;
+                    view.reason =
+                        "工作项 " + intent->work_item_id + " 已被写者 " + intent->writer_epoch +
+                        " 认领且在途(phase=" + ToString(snapshot.phase) + ");等他者收口";
+                    return view;
+                }
+                view.claimable = true;
+                view.reason = "他写者认领后未开轮(phase=queued,确认未发送):"
+                              "接管沿用原工作项 " +
+                              intent->work_item_id;
+                return view;
+            }
+            if (snapshot.phase != GoalPhase::Queued) {
+                view.reason = "工作项 " + intent->work_item_id + " 已认领且不在待开轮相位(" +
+                              ToString(snapshot.phase) + ")";
+                return view;
+            }
+            view.claimable = true;  // claim 后、开轮前:沿用原项(claim 幂等)
+            return view;
+        }
+        if (intent->contract_revision != snapshot.contract_revision) {
+            view.reason = "工作项 " + intent->work_item_id + " 对着旧合同(r" +
+                          std::to_string(snapshot.contract_revision) + " 在账,意图带 r" +
+                          std::to_string(intent->contract_revision) + ")";
+            return view;
+        }
+    } else {
+        view.reason = "没有待续意图";
+        return view;
+    }
+    if (IsLifecycleTerminal(snapshot.lifecycle)) {
+        view.reason = "目标已收账(" + ToString(snapshot.lifecycle) + ")";
+        return view;
+    }
+    const bool stopped = snapshot.lifecycle == GoalLifecycle::Waiting ||
+                         snapshot.lifecycle == GoalLifecycle::Paused ||
+                         snapshot.lifecycle == GoalLifecycle::AwaitingUser ||
+                         snapshot.lifecycle == GoalLifecycle::Blocked ||
+                         snapshot.lifecycle == GoalLifecycle::BudgetExhausted ||
+                         snapshot.lifecycle == GoalLifecycle::SuspendedByPolicy;
+    if (stopped) {
+        view.reason = "目标停态(" + ToString(snapshot.lifecycle) + "),明确恢复后才排";
+        return view;
+    }
+    if (snapshot.stop_requested) {
+        // G3(§4.67.10 竞态行):停止意图优先——Esc/pause 已在账,迟到结果
+        // 不拉起新轮;显式 resume(转回 active)清旗后再排。
+        view.reason = "停止意图在账(Esc/pause 先行),显式 resume 后再排";
+        return view;
+    }
+    view.claimable = true;
+    return view;
+}
+
+// ---------------------------------------------------------------------------
 // GoalService
 // ---------------------------------------------------------------------------
 
@@ -698,6 +945,18 @@ GoalServiceResult GoalService::CreateGoal(GoalStateSnapshot draft, nlohmann::jso
     if (current_.has_value() && !IsLifecycleTerminal(current_->lifecycle)) {
         return Fail(kErrGoalAlreadyActive, "已有一枚未收账 goal;用 edit/clear,不暗中替换");
     }
+    // G1:首轮调度意图随初始快照提交(§4.67.4 接纳);形状先验,坏草稿不落盘。
+    if (draft.pending_intent.is_object() && !draft.pending_intent.empty()) {
+        if (const std::string invalid = ValidatePendingIntent(draft.pending_intent);
+            !invalid.empty()) {
+            return Fail(kErrGoalCandidateInvalid, "draft.pendingIntent 不合合同: " + invalid);
+        }
+        std::string parse_error;
+        const auto intent = GoalPendingIntent::FromJson(draft.pending_intent, &parse_error);
+        if (intent.has_value() && intent->claimed) {
+            return Fail(kErrGoalCandidateInvalid, "首轮意图不能预置 claimed");
+        }
+    }
     if (const std::string invalid = ValidateGoalObjective(draft.objective); !invalid.empty()) {
         return Fail(invalid.c_str(), invalid == kErrGoalObjectiveEmpty
                                          ? "objective 不能为空"
@@ -713,6 +972,12 @@ GoalServiceResult GoalService::CreateGoal(GoalStateSnapshot draft, nlohmann::jso
     draft.lifecycle = GoalLifecycle::Preparing;
     draft.phase = GoalPhase::Idle;
     draft.stop_reason.clear();  // preparing 不带停因(停态约束在 FromJson/Commit)
+    draft.blocker_key.clear();
+    draft.pending_question.clear();
+    draft.wait_task_refs.clear();   // 新 goal 不带等待账(G3)
+    draft.wait_plan = GoalWaitPlan{};
+    draft.stop_requested = false;
+    draft.active_elapsed_ms = 0;
     draft.created_at_ms = Now();
     draft.updated_at_ms = draft.created_at_ms;
     return Commit(std::move(draft), std::move(cause_ref));
@@ -828,6 +1093,30 @@ GoalServiceResult GoalService::AmendContract(const GoalContract& contract,
     if (contract.objective.empty()) {
         return Fail(kErrGoalCandidateInvalid, "改版合同缺 objective");
     }
+    // 在账意图分路(§4.67.2 edit 行"安全边界提交"+ §4.67.4"旧 Goal 工作
+    // 项不挤过排在边界前的 pause/edit/clear"+ §4.67.10 改版撞迟到判词行):
+    //   - 已认领且工作轮在途(running/queued):edit 等安全边界——拒,先
+    //     pause 或等本轮收口(收口即销账 intent),再 edit。终态明确可恢复,
+    //     不在工作轮中途换合同、拍掉在途相位。
+    //   - 已认领但评估在途(evaluating):放行(设计矩阵 M4"合同改版撞上
+    //     迟到判词"):改版落 preparing/idle,开评时冻结的 stateRevision
+    //     让迟到判词被 CAS/相位拒;认领随迟到判词一并作废清空,不滞留。
+    //   - 未认领:意图指向的合同已不存在,随合同作废清空。两种放行情都
+    //     由命令面按新 contractRevision 重拟(与 resume 补意图同款命名),
+    //     泵下一拍即按新合同开轮——不留"意图对着旧合同永不 claimable"
+    //     的死锁。
+    if (current_->pending_intent.is_object() && !current_->pending_intent.empty()) {
+        std::string intent_error;
+        const auto previous = GoalPendingIntent::FromJson(current_->pending_intent, &intent_error);
+        if (!previous.has_value()) {
+            return Fail(kErrGoalCandidateInvalid, "在账意图读不出(不受理改版): " + intent_error);
+        }
+        if (previous->claimed && current_->phase != GoalPhase::Evaluating) {
+            return Fail(kErrGoalBusy,
+                        "工作项 " + previous->work_item_id + " 已被认领(phase=" +
+                            ToString(current_->phase) + ");edit 等安全边界——先 /goal pause 或等本轮收口");
+        }
+    }
     GoalStateSnapshot next = *current_;
     next.state_revision += 1;
     next.contract_revision += 1;
@@ -838,6 +1127,7 @@ GoalServiceResult GoalService::AmendContract(const GoalContract& contract,
     next.lifecycle = GoalLifecycle::Preparing;
     next.phase = GoalPhase::Idle;
     next.stop_reason = "contract_amended";
+    next.pending_intent = nlohmann::json::object();  // 旧意图随合同作废(见上)
     next.blocker_key.clear();
     next.pending_question.clear();
     // §4.67.2 edit 行:相关旧证据重新判有效期——保守全翻 stale,由 G2 的
@@ -850,7 +1140,960 @@ GoalServiceResult GoalService::AmendContract(const GoalContract& contract,
     return Commit(std::move(next), std::move(cause_ref));
 }
 
+// ---- §4.67 G1:意图提交 / 认领 / 开轮 / 收工 --------------------------------
+
+namespace {
+
+// 停态判式(与 EvaluateGoalWork 同一张表;服务侧提交校验用)。
+bool LifecycleIsStopped(GoalLifecycle lifecycle) {
+    switch (lifecycle) {
+        case GoalLifecycle::Waiting:
+        case GoalLifecycle::Paused:
+        case GoalLifecycle::AwaitingUser:
+        case GoalLifecycle::Blocked:
+        case GoalLifecycle::BudgetExhausted:
+        case GoalLifecycle::SuspendedByPolicy:
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+GoalServiceResult GoalService::SetPendingIntent(GoalPendingIntent intent,
+                                                std::uint64_t expected_state_revision,
+                                                nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,不受理新意图");
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (const std::string invalid = ValidatePendingIntent(intent.ToJson()); !invalid.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "意图不合合同: " + invalid);
+    }
+    if (intent.claimed) {
+        return Fail(kErrGoalCandidateInvalid, "SetPendingIntent 只交未认领意图(claim 走 ClaimPendingIntent)");
+    }
+    if (intent.contract_revision != current_->contract_revision) {
+        return Fail(kErrGoalIntentConflict,
+                    "意图对着旧合同(在账 r" + std::to_string(current_->contract_revision) +
+                        ",意图带 r" + std::to_string(intent.contract_revision) + ")");
+    }
+    // 前一枚未认领的意图不许静默覆盖:欠队列的账不能丢(§4.67.4 旧工作项
+    // 不挤过边界命令;先 claim/consume 或先改合同)。
+    if (current_->pending_intent.is_object() && !current_->pending_intent.empty()) {
+        std::string parse_error;
+        const auto previous = GoalPendingIntent::FromJson(current_->pending_intent, &parse_error);
+        if (!previous.has_value()) {
+            return Fail(kErrGoalCandidateInvalid, "在账意图读不出(不覆盖坏账): " + parse_error);
+        }
+        if (!previous->claimed &&
+            previous->DedupeKey(current_->goal_id) != intent.DedupeKey(current_->goal_id)) {
+            return Fail(kErrGoalIntentConflict,
+                        "前一枚意图 " + previous->work_item_id + " 未认领,不许覆盖(先认领或改合同)");
+        }
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.pending_intent = intent.ToJson();
+    next.updated_at_ms = Now();
+    return Commit(std::move(next), std::move(cause_ref));
+}
+
+GoalServiceResult GoalService::ClaimPendingIntent(std::string writer_epoch,
+                                                   std::uint64_t expected_state_revision,
+                                                   nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (writer_epoch.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "writerEpoch 不能为空(单写者接管凭据)");
+    }
+    if (current_->pending_intent.is_null() ||
+        (current_->pending_intent.is_object() && current_->pending_intent.empty())) {
+        return Fail(kErrGoalIntentMissing, "没有待认领的意图");
+    }
+    std::string parse_error;
+    const auto intent = GoalPendingIntent::FromJson(current_->pending_intent, &parse_error);
+    if (!intent.has_value()) {
+        return Fail(kErrGoalCandidateInvalid, "在账意图不合合同: " + parse_error);
+    }
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,迟到认领拒(不复活)");
+    }
+    if (intent->claimed) {
+        if (intent->writer_epoch == writer_epoch) {
+            // 同写者幂等:claim 落过账、调用方没等到回执的重试。
+            GoalServiceResult r;
+            r.ok = true;
+            r.payload["goalId"] = current_->goal_id;
+            r.payload["stateRevision"] = current_->state_revision;
+            r.payload["contractRevision"] = current_->contract_revision;
+            r.payload["workItemId"] = intent->work_item_id;
+            r.payload["idempotent"] = true;
+            return r;
+        }
+        if (current_->phase == GoalPhase::Queued) {
+            // §4.67.4 恢复核验(G2 收口):他写者 claim 落账后开轮没落
+            //(phase=queued,开轮先于模型发送)= 账面证据"确认未发送"
+            // ——本写者接管沿用原 workItemId 续原请求,不重放副作用;
+            // 接管本身落 applied,原写者迟到的开轮会被 CAS 拒。
+            GoalStateSnapshot next = *current_;
+            next.state_revision += 1;
+            GoalPendingIntent taken = *intent;
+            taken.writer_epoch = writer_epoch;
+            taken.claimed_at_ms = Now();
+            next.pending_intent = taken.ToJson();
+            next.updated_at_ms = Now();
+            GoalServiceResult r = Commit(std::move(next), cause_ref);
+            if (r.ok) {
+                r.payload["workItemId"] = taken.work_item_id;
+                r.payload["adoptedFromEpoch"] = intent->writer_epoch;
+            }
+            return r;
+        }
+        GoalServiceResult r = Fail(kErrGoalIntentAlreadyClaimed,
+                                   "工作项 " + intent->work_item_id + " 已被写者 " +
+                                       intent->writer_epoch + " 认领且在途(phase=" +
+                                       ToString(current_->phase) + ");不盲重放");
+        r.payload["workItemId"] = intent->work_item_id;
+        r.payload["writerEpoch"] = intent->writer_epoch;
+        return r;
+    }
+    if (LifecycleIsStopped(current_->lifecycle)) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "停态(" + ToString(current_->lifecycle) + ")不认领;明确恢复后再取");
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    GoalPendingIntent claimed = *intent;
+    claimed.claimed = true;
+    claimed.writer_epoch = writer_epoch;
+    claimed.claimed_at_ms = Now();
+    next.pending_intent = claimed.ToJson();
+    next.phase = GoalPhase::Queued;
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok) r.payload["workItemId"] = claimed.work_item_id;
+    return r;
+}
+
+GoalServiceResult GoalService::BeginIteration(std::uint64_t expected_state_revision,
+                                              nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,不开了");
+    }
+    if (LifecycleIsStopped(current_->lifecycle)) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "停态(" + ToString(current_->lifecycle) + ")不开轮");
+    }
+    if (current_->phase == GoalPhase::Running) {
+        return Fail(kErrGoalCandidateInvalid, "已有轮在跑(收口走 EndIteration)");
+    }
+    // G3 预算闸(§4.67.7"请求前和工具派发前检查预算"):开新一轮前核三尺
+    //(轮数/token+预留/active 时长);撞帽不 silently 拒——落 budget_
+    // exhausted 快照(旧费用保留),显式加预算后可恢复。
+    if (const std::string budget_reason =
+            BudgetStopReason(*current_, /*next_tokens=*/0, /*counting_next_iteration=*/true);
+        !budget_reason.empty()) {
+        GoalStateSnapshot halted = *current_;
+        halted.state_revision += 1;
+        if (IsValidLifecycleTransition(current_->lifecycle, GoalLifecycle::BudgetExhausted)) {
+            halted.lifecycle = GoalLifecycle::BudgetExhausted;
+        } else {
+            halted.lifecycle = GoalLifecycle::Paused;  // 停态再撞帽:保持停态语义
+        }
+        halted.phase = GoalPhase::Idle;
+        halted.stop_reason = "budget_exhausted: " + budget_reason;
+        halted.updated_at_ms = Now();
+        const auto halted_result = Commit(std::move(halted), cause_ref);
+        if (!halted_result.ok) return halted_result;
+        return Fail(kErrGoalBudgetExhausted, "预算已尽: " + budget_reason);
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    if (current_->lifecycle == GoalLifecycle::Preparing) {
+        // 首轮即合同拟定期:objective 已在手即底稿(真 preflight/冻结归 G2),
+        // 取轮即转 active(§4.67.3 preparing 出口)。
+        if (!IsValidLifecycleTransition(GoalLifecycle::Preparing, GoalLifecycle::Active)) {
+            return Fail(kErrGoalInvalidTransition, "preparing -> active 转换被改坏");
+        }
+        next.lifecycle = GoalLifecycle::Active;
+    }
+    // iterationId 归属(§4.67.4):goal-<n>/iter-<m>,m 从 1 起;开轮才发号,
+    // 重试请求不冒充新 iteration。
+    next.counters.iterations_started += 1;
+    next.iteration_id = next.goal_id + "/iter-" + std::to_string(next.counters.iterations_started);
+    next.phase = GoalPhase::Running;
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok) {
+        r.payload["iterationId"] = *current_->iteration_id;
+        r.payload["iterationIndex"] = current_->counters.iterations_started;
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::EndIteration(std::uint64_t expected_state_revision,
+                                            nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (current_->phase != GoalPhase::Running) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "不在执行轮收口位(phase=" + ToString(current_->phase) + ")");
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.phase = GoalPhase::Idle;
+    // 认领过的工作项销账:pendingIntent 清空,下一次 resume 不再补队列
+    //(§4.67.4 已入队已收口;判词与续排意图归 G2,不在这假装评过)。
+    next.pending_intent = nlohmann::json::object();
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok && current_->iteration_id.has_value()) {
+        r.payload["iterationId"] = *current_->iteration_id;
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::BeginEvaluation(std::uint64_t expected_state_revision,
+                                               std::optional<std::string> checkpoint_ref,
+                                               std::vector<GoalEvidenceRef> evidence_additions,
+                                               std::vector<std::string> evidence_stale_ids,
+                                               nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,不受理验收(clear 前的迟到收口拒)");
+    }
+    if (LifecycleIsStopped(current_->lifecycle)) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "停态(" + ToString(current_->lifecycle) + ")不排验收;明确恢复后再评");
+    }
+    if (current_->phase != GoalPhase::Running) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "不在执行轮收口位(phase=" + ToString(current_->phase) + ")");
+    }
+    for (const auto& ref : evidence_additions) {
+        if (const std::string invalid = ValidateEvidenceRef(ref.ToJson()); !invalid.empty()) {
+            return Fail(kErrGoalCandidateInvalid, "evidence 候选坏项: " + invalid);
+        }
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.phase = GoalPhase::Evaluating;
+    if (checkpoint_ref.has_value() && !checkpoint_ref->empty()) {
+        next.checkpoint_ref = std::move(checkpoint_ref);
+    }
+    for (auto& ref : evidence_additions) {
+        next.evidence_refs.push_back(std::move(ref));
+    }
+    // 证据有效期:按 id 翻旧(快照每版全量,在副本上整改;未知 id 静默
+    // 略过——翻旧是保守动作,不为它拒提交)。
+    for (const auto& stale_id : evidence_stale_ids) {
+        for (auto& ref : next.evidence_refs) {
+            if (ref.id == stale_id) ref.fresh = false;
+        }
+    }
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok && current_->iteration_id.has_value()) {
+        r.payload["iterationId"] = *current_->iteration_id;
+        r.payload["evaluationId"] = "eval-" + *current_->iteration_id;
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::CompleteIterationWithEvaluation(
+    std::uint64_t expected_state_revision, const EvaluationVerdict& verdict,
+    nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (current_->phase != GoalPhase::Evaluating) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "不在验收收口位(phase=" + ToString(current_->phase) + ";BeginEvaluation 先落)");
+    }
+    if (verdict.evaluation_id.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "判词采用缺 evaluationId(绑定提交的锚)");
+    }
+    // 分路先验(坏候选不落盘,fail closed 前置)。
+    GoalLifecycle to_lifecycle = current_->lifecycle;
+    switch (verdict.kind) {
+        case GoalVerdictKind::Continue:
+            if (!verdict.next_intent.has_value()) {
+                return Fail(kErrGoalCandidateInvalid,
+                            "continue 判词必带下一轮意图(§4.67.6 同一快照提交)");
+            }
+            if (verdict.next_intent->contract_revision != current_->contract_revision) {
+                return Fail(kErrGoalCandidateInvalid,
+                            "续排意图对着旧合同(在账 r" +
+                                std::to_string(current_->contract_revision) + ")");
+            }
+            break;
+        case GoalVerdictKind::Achieved:
+            to_lifecycle = GoalLifecycle::Achieved;
+            break;
+        case GoalVerdictKind::Blocked:
+            to_lifecycle = GoalLifecycle::Blocked;
+            if (verdict.blocker_key.empty()) {
+                return Fail(kErrGoalCandidateInvalid, "blocked 判词缺 blockerKey");
+            }
+            break;
+        case GoalVerdictKind::NeedsUser:
+            to_lifecycle = GoalLifecycle::AwaitingUser;
+            if (verdict.pending_question.empty()) {
+                return Fail(kErrGoalCandidateInvalid, "needs_user 判词缺 pendingQuestion");
+            }
+            break;
+        case GoalVerdictKind::EvaluatorFailed:
+            // 评估故障(超时/二次坏判词):暂停收口,保留停因(§4.67.5)。
+            to_lifecycle = GoalLifecycle::Paused;
+            if (verdict.stop_reason.empty()) {
+                return Fail(kErrGoalCandidateInvalid, "evaluator_failed 收口缺 stopReason");
+            }
+            break;
+    }
+    if (to_lifecycle != current_->lifecycle &&
+        !IsValidLifecycleTransition(current_->lifecycle, to_lifecycle)) {
+        return Fail(kErrGoalInvalidTransition,
+                    "lifecycle 转换非法: " + ToString(current_->lifecycle) + " -> " +
+                        ToString(to_lifecycle));
+    }
+    const bool to_stopped = to_lifecycle == GoalLifecycle::Paused ||
+                            to_lifecycle == GoalLifecycle::Blocked ||
+                            to_lifecycle == GoalLifecycle::AwaitingUser;
+    if (to_stopped && verdict.stop_reason.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "停态判词缺 stopReason");
+    }
+    if (verdict.next_intent.has_value()) {
+        if (const std::string invalid = ValidatePendingIntent(verdict.next_intent->ToJson());
+            !invalid.empty()) {
+            return Fail(kErrGoalCandidateInvalid, "续排意图不合合同: " + invalid);
+        }
+    }
+
+    // 一次提交收齐(§4.67.6"采用判词与下一轮意图写在同一快照提交中"):
+    // 收口(phase->idle、本轮 intent 销账)+ appliedEvaluationId 绑定 +
+    // lifecycle 分路 + 续排意图 + usage 只增。evaluator_failed 不绑
+    // evaluationId——没有判词可采,它的审计锚是账上 rejected 事实行。
+    // G3 两条收口岔路(§4.67.7/§4.67.10):continue 判词撞上停止意图或
+    // 预算撞帽 → 判词照采(evaluationId/usage 落账),但不排下一轮——
+    // 停止意图优先,迟到结果不拉起新轮。
+    GoalCounters counters = current_->counters;
+    if (verdict.kind == GoalVerdictKind::Continue && !verdict.progress_fingerprint.empty()) {
+        if (counters.last_progress_fingerprint == verdict.progress_fingerprint)
+            ++counters.no_progress_streak;
+        else {
+            counters.last_progress_fingerprint = verdict.progress_fingerprint;
+            counters.no_progress_streak = 0;
+        }
+    }
+    bool park_instead_of_continue = false;
+    std::string park_reason;
+    if (verdict.kind == GoalVerdictKind::Continue) {
+        if (current_->stop_requested) {
+            park_instead_of_continue = true;
+            park_reason = "stop_requested: 停止意图在账,判词已采但不自动续排";
+        } else if (!verdict.progress_fingerprint.empty() &&
+                   current_->budget.max_no_progress_iterations > 0 &&
+                   counters.no_progress_streak >= current_->budget.max_no_progress_iterations) {
+            park_instead_of_continue = true;
+            park_reason = "no_progress: unchanged evidence and criterion status";
+        } else if (const std::string budget_reason =
+                       BudgetStopReason(*current_, /*next_tokens=*/0,
+                                        /*counting_next_iteration=*/true);
+                   !budget_reason.empty()) {
+            park_instead_of_continue = true;
+            park_reason = "budget_exhausted: " + budget_reason;
+        }
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.phase = GoalPhase::Idle;
+    if (verdict.kind != GoalVerdictKind::EvaluatorFailed) {
+        next.applied_evaluation_id = verdict.evaluation_id;
+        next.applied_evaluation = verdict.evaluation;
+    }
+    next.usage.Add(verdict.usage_addition);
+    next.counters = std::move(counters);
+    if (verdict.kind == GoalVerdictKind::Continue && !park_instead_of_continue) {
+        next.pending_intent = verdict.next_intent->ToJson();
+    } else {
+        next.pending_intent = nlohmann::json::object();  // 停态不排(恢复另提交)
+    }
+    if (park_instead_of_continue) {
+        GoalLifecycle park_to = park_reason.rfind("budget_exhausted", 0) == 0
+                                    ? GoalLifecycle::BudgetExhausted
+                                    : GoalLifecycle::Paused;
+        if (!IsValidLifecycleTransition(current_->lifecycle, park_to)) {
+            park_to = GoalLifecycle::Paused;
+        }
+        if (IsValidLifecycleTransition(current_->lifecycle, park_to)) {
+            next.lifecycle = park_to;
+        }
+        next.stop_reason = park_reason;
+        next.blocker_key.clear();
+        next.pending_question.clear();
+    }
+    if (to_lifecycle != current_->lifecycle) {
+        next.lifecycle = to_lifecycle;
+        next.stop_reason = to_stopped ? verdict.stop_reason : std::string();
+        next.blocker_key = verdict.kind == GoalVerdictKind::Blocked ? verdict.blocker_key
+                                                                    : std::string();
+        next.pending_question = verdict.kind == GoalVerdictKind::NeedsUser
+                                    ? verdict.pending_question
+                                    : std::string();
+    }
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok) {
+        r.payload["evaluationId"] = verdict.evaluation_id;
+        r.payload["verdictKind"] = [kind = verdict.kind] {
+            switch (kind) {
+                case GoalVerdictKind::Continue: return "continue";
+                case GoalVerdictKind::Achieved: return "achieved";
+                case GoalVerdictKind::Blocked: return "blocked";
+                case GoalVerdictKind::NeedsUser: return "needs_user";
+                case GoalVerdictKind::EvaluatorFailed: return "evaluator_failed";
+            }
+            return "unknown";
+        }();
+        if (verdict.kind == GoalVerdictKind::Continue && !park_instead_of_continue) {
+            r.payload["nextWorkItemId"] = verdict.next_intent->work_item_id;
+        }
+        if (park_instead_of_continue) {
+            r.payload["parked"] = park_reason;
+        }
+    }
+    return r;
+}
+
+// ---- §4.67 G3:停止意图、后台等待、预算预留、fork ---------------------------
+
+GoalServiceResult GoalService::RequestStop(std::uint64_t expected_state_revision,
+                                            nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,停止意图无的放矢");
+    }
+    if (current_->stop_requested) {
+        // 幂等:旗已落账,不空耗 revision。
+        GoalServiceResult r;
+        r.ok = true;
+        r.payload["goalId"] = current_->goal_id;
+        r.payload["stateRevision"] = current_->state_revision;
+        r.payload["idempotent"] = true;
+        return r;
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.stop_requested = true;
+    next.updated_at_ms = Now();
+    return Commit(std::move(next), std::move(cause_ref));
+}
+
+GoalServiceResult GoalService::EnterWaiting(std::vector<std::string> task_refs,
+                                             std::uint64_t expected_state_revision,
+                                             nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (task_refs.empty()) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "登记等待须带 taskRefs(无关进程不进等待账,空表该走验收)");
+    }
+    for (const auto& ref : task_refs) {
+        if (ref.empty()) {
+            return Fail(kErrGoalCandidateInvalid, "taskRefs 坏项:空 string");
+        }
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,不受理等待登记");
+    }
+    if (!IsValidLifecycleTransition(current_->lifecycle, GoalLifecycle::Waiting)) {
+        return Fail(kErrGoalInvalidTransition,
+                    "lifecycle 转换非法: " + ToString(current_->lifecycle) + " -> waiting");
+    }
+    // 巡检计划(§4.67.7):30 分钟起退避,次数入快照(重启不归零)。
+    const std::int64_t now = Now();
+    GoalWaitPlan plan;
+    plan.polls_done = 0;
+    plan.max_polls = 3;
+    plan.next_due_ms = now + GoalWaitBackoffMs(0);
+    // 事实行先落(登记材料);等待是否生效仍看随后的 applied。
+    {
+        std::string joined;
+        for (const auto& ref : task_refs) {
+            if (!joined.empty()) joined += "|";
+            joined += ref;
+        }
+        EventDraft registered;
+        registered.kind = EventKindV3::GoalWaitRegistered;
+        registered.payload["goalId"] = current_->goal_id;
+        registered.payload["taskRefs"] = task_refs;
+        registered.payload["notifyDedupeKey"] = hooks::Sha256Hex(joined);
+        registered.payload["inspectionPlan"] = plan.ToJson();
+        const auto receipt = writer_->AppendEvent(std::move(registered), Durability::ProcessCrash);
+        if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
+            return Fail(kErrGoalStoreUnavailable,
+                        "goal.wait.registered 落账失败(" + receipt.error_code + "): " +
+                            receipt.error_message);
+        }
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.lifecycle = GoalLifecycle::Waiting;
+    next.phase = GoalPhase::Idle;  // 停态相位回 idle;iteration 原地保留
+    next.stop_reason = "waiting:background_tasks";
+    next.wait_task_refs = std::move(task_refs);
+    next.wait_plan = plan;
+    next.updated_at_ms = now;
+    return Commit(std::move(next), std::move(cause_ref));
+}
+
+bool GoalService::WaitInspectionDue(std::int64_t now_ms) const {
+    if (!current_.has_value()) return false;
+    if (current_->lifecycle != GoalLifecycle::Waiting) return false;
+    if (current_->wait_plan.next_due_ms <= 0) return false;  // 未排/已到上限
+    if (current_->wait_plan.polls_done >= current_->wait_plan.max_polls) return false;
+    return now_ms >= current_->wait_plan.next_due_ms;
+}
+
+GoalServiceResult GoalService::RecordWaitInspection(std::uint64_t expected_state_revision,
+                                                    std::int64_t now_ms, nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (current_->lifecycle != GoalLifecycle::Waiting) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "不在等待态(" + ToString(current_->lifecycle) + "),无巡检可记");
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (current_->wait_plan.polls_done >= current_->wait_plan.max_polls) {
+        return Fail(kErrGoalCandidateInvalid, "巡检已到次数上限(真实完成通知仍可唤醒)");
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.wait_plan.polls_done += 1;
+    // 到上限:停排巡检(nextDue=0),目标仍 waiting——真实完成仍可唤醒;
+    // 未到:按 30/60/120 退避排下一拍。次数入快照,重启不归零(§4.67.7)。
+    next.wait_plan.next_due_ms =
+        next.wait_plan.polls_done >= next.wait_plan.max_polls
+            ? 0
+            : now_ms + GoalWaitBackoffMs(next.wait_plan.polls_done);
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok && current_->wait_plan.next_due_ms == 0) {
+        r.payload["stopped"] = true;  // 这一拍到顶:调用方通知一次
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::ResolveWaiting(const std::string& delivery_key,
+                                              std::uint64_t expected_state_revision,
+                                              nlohmann::json cause_ref,
+                                              const std::string& reason) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (delivery_key.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "deliveryKey 不能为空(通知去重键)");
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (current_->lifecycle != GoalLifecycle::Waiting) {
+        // pause/clear/终态之后的迟到后台报告:留调用方审计,不拉起新轮
+        //(§4.67.10 竞态行)。
+        return Fail(kErrGoalNotWaiting,
+                    "不在等待态(" + ToString(current_->lifecycle) + ");迟到交付只留审计");
+    }
+    {
+        EventDraft resolved;
+        resolved.kind = EventKindV3::GoalWaitResolved;
+        resolved.payload["goalId"] = current_->goal_id;
+        resolved.payload["deliveryKey"] = delivery_key;
+        resolved.payload["reason"] = reason.empty() ? std::string("background_task_finished")
+                                                    : reason;
+        const auto receipt = writer_->AppendEvent(std::move(resolved), Durability::ProcessCrash);
+        if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
+            return Fail(kErrGoalStoreUnavailable,
+                        "goal.wait.resolved 落账失败(" + receipt.error_code + "): " +
+                            receipt.error_message);
+        }
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.lifecycle = GoalLifecycle::Active;
+    next.stop_reason.clear();
+    next.wait_task_refs.clear();
+    next.wait_plan = GoalWaitPlan{};
+    // 收口位等待(iteration 在途、工作项已认领)恢复 running 供收口续跑;
+    // 其余恢复 idle(等待发生在排队/间歇)。
+    next.phase = current_->pending_intent.is_object() && !current_->pending_intent.empty()
+                     ? GoalPhase::Running
+                     : GoalPhase::Idle;
+    next.updated_at_ms = Now();
+    return Commit(std::move(next), std::move(cause_ref));
+}
+
+GoalServiceResult GoalService::AddBudget(const GoalBudgetAddition& addition,
+                                         std::uint64_t expected_state_revision,
+                                         nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,预算不再受理");
+    }
+    if (addition.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "加预算至少给一项(iterations/tokens/elapsed)");
+    }
+    if (addition.iterations.has_value() && *addition.iterations < 0) {
+        return Fail(kErrGoalCandidateInvalid, "iterations 增量须非负");
+    }
+    if (addition.total_tokens.has_value() && *addition.total_tokens < 0) {
+        return Fail(kErrGoalCandidateInvalid, "tokens 增量须非负");
+    }
+    if (addition.elapsed_ms.has_value() && *addition.elapsed_ms < 0) {
+        return Fail(kErrGoalCandidateInvalid, "elapsed 增量须非负");
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    // 只抬帽不清账(§4.67.2 budget_exhausted 行):每字段取 max(旧帽,新增),
+    // 旧费用保留;没到的字段不动。加完由调用方走显式恢复路径。
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    if (addition.iterations.has_value()) {
+        const std::int64_t raised = std::max<std::int64_t>(
+            next.budget.max_iterations.value_or(0), *addition.iterations);
+        next.budget.max_iterations = static_cast<int>(raised);
+    }
+    if (addition.total_tokens.has_value()) {
+        next.budget.max_total_tokens =
+            std::max<std::int64_t>(next.budget.max_total_tokens.value_or(0), *addition.total_tokens);
+    }
+    if (addition.elapsed_ms.has_value()) {
+        next.budget.max_elapsed_ms =
+            std::max<std::int64_t>(next.budget.max_elapsed_ms.value_or(0), *addition.elapsed_ms);
+    }
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok) {
+        if (current_->budget.max_iterations.has_value()) {
+            r.payload["maxIterations"] = *current_->budget.max_iterations;
+        }
+        if (current_->budget.max_total_tokens.has_value()) {
+            r.payload["maxTotalTokens"] = *current_->budget.max_total_tokens;
+        }
+        if (current_->budget.max_elapsed_ms.has_value()) {
+            r.payload["maxElapsedMs"] = *current_->budget.max_elapsed_ms;
+        }
+    }
+    return r;
+}
+
+std::string GoalService::BudgetStopReason(const GoalStateSnapshot& snapshot,
+                                          std::int64_t next_tokens,
+                                          bool counting_next_iteration) const {
+    const GoalBudget& budget = snapshot.budget;
+    // 轮数尺:开新一轮前问(counting_next_iteration),已完成收口的对账不问。
+    if (counting_next_iteration && budget.max_iterations.has_value()) {
+        const std::int64_t next_index = snapshot.counters.iterations_started + 1;
+        if (next_index > *budget.max_iterations) {
+            return "轮数帽 " + std::to_string(*budget.max_iterations) + " 轮已尽(已跑 " +
+                   std::to_string(snapshot.counters.iterations_started) + " 轮)";
+        }
+    }
+    // token 尺:实报 + 在途预留一起对帽;usage 未报时这把尺没账可对
+    //(§4.67.7 不能拿 0 冒充没花),跳过不拦。
+    if (budget.max_total_tokens.has_value() && snapshot.usage.usage_reported) {
+        std::int64_t reserved = 0;
+        for (const auto& reservation : reservations_) {
+            reserved += reservation.tokens;
+        }
+        const std::int64_t used = snapshot.usage.input_tokens + snapshot.usage.output_tokens;
+        if (used + reserved + next_tokens > *budget.max_total_tokens) {
+            return "token 帽 " + std::to_string(*budget.max_total_tokens) + " 已尽(实报 " +
+                   std::to_string(used) + " + 预留 " + std::to_string(reserved) + ")";
+        }
+    }
+    // active 时长尺:activeElapsed 入快照,resume 不归零(§4.67.7)。
+    if (budget.max_elapsed_ms.has_value() && snapshot.active_elapsed_ms > 0 &&
+        snapshot.active_elapsed_ms >= *budget.max_elapsed_ms) {
+        return "active 时长帽 " + std::to_string(*budget.max_elapsed_ms) + "ms 已尽(active " +
+               std::to_string(snapshot.active_elapsed_ms) + "ms)";
+    }
+    return std::string();
+}
+
+GoalService::GoalBudgetView GoalService::EvaluateBudget(std::int64_t next_tokens) const {
+    GoalBudgetView view;
+    if (!current_.has_value()) return view;
+    view.used_tokens =
+        current_->usage.usage_reported ? current_->usage.input_tokens + current_->usage.output_tokens : 0;
+    for (const auto& reservation : reservations_) {
+        view.reserved_tokens += reservation.tokens;
+    }
+    if (!BudgetStopReason(*current_, 0, /*counting_next_iteration=*/false).empty()) {
+        view.exhausted = true;
+        view.reason = BudgetStopReason(*current_, 0, false);
+        view.would_exhaust = true;
+        return view;
+    }
+    const std::string next_reason = BudgetStopReason(*current_, next_tokens, false);
+    if (!next_reason.empty()) {
+        view.would_exhaust = true;
+        view.reason = next_reason;
+    }
+    return view;
+}
+
+GoalServiceResult GoalService::ReserveBudget(std::string request_id, std::string owner,
+                                             std::int64_t tokens) {
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (request_id.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "预留 requestId 不能为空((sessionId,requestId) 去重键)");
+    }
+    if (tokens < 0) {
+        return Fail(kErrGoalCandidateInvalid, "预留 tokens 须非负");
+    }
+    for (const auto& reservation : reservations_) {
+        if (reservation.request_id == request_id) {
+            return Fail(kErrGoalReservationRejected, "预留 requestId 重复: " + request_id);
+        }
+    }
+    // 撞帽拒(并发子任务共用余额,不是各花整份):预留 + 实报一起对帽。
+    if (const std::string reason = BudgetStopReason(*current_, tokens, false); !reason.empty()) {
+        GoalServiceResult r = Fail(kErrGoalReservationRejected, "预留撞帽: " + reason);
+        r.payload["reason_detail"] = reason;
+        return r;
+    }
+    GoalReservation reservation;
+    reservation.request_id = std::move(request_id);
+    reservation.owner = std::move(owner);
+    reservation.tokens = tokens;
+    reservation.created_at_ms = Now();
+    reservations_.push_back(std::move(reservation));
+    GoalServiceResult r;
+    r.ok = true;
+    r.payload["reserved"] = tokens;
+    return r;
+}
+
+GoalServiceResult GoalService::ReleaseBudgetReservation(const std::string& request_id) {
+    for (auto it = reservations_.begin(); it != reservations_.end(); ++it) {
+        if (it->request_id == request_id) {
+            reservations_.erase(it);
+            GoalServiceResult r;
+            r.ok = true;
+            return r;
+        }
+    }
+    GoalServiceResult r;  // 未知 id:幂等成功(取消/收场路径不因账面缺项报错)
+    r.ok = true;
+    r.payload["idempotent"] = true;
+    return r;
+}
+
+GoalServiceResult GoalService::RecordGoalUsage(const std::string& request_id,
+                                               const std::string& source, const GoalUsage& usage,
+                                               std::uint64_t expected_state_revision,
+                                               nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (request_id.empty() || source.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "usage 归属缺 requestId/source");
+    }
+    // (sessionId, requestId) 计费去重:重复通知(同 key)第二次起幂等返回,
+    // 不落事实行、不加账——一次结果只交付一次(§4.67.10)。
+    for (const auto& recorded : recorded_request_ids_) {
+        if (recorded == request_id) {
+            GoalServiceResult r;
+            r.ok = true;
+            r.payload["deduped"] = true;
+            return r;
+        }
+    }
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,迟到 usage 只留调用方审计");
+    }
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    {
+        EventDraft recorded;
+        recorded.kind = EventKindV3::GoalUsageRecorded;
+        recorded.payload["goalId"] = current_->goal_id;
+        recorded.payload["requestId"] = request_id;
+        recorded.payload["source"] = source;
+        recorded.payload["usage"] = UsageToJson(usage);
+        const auto receipt = writer_->AppendEvent(std::move(recorded), Durability::ProcessCrash);
+        if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
+            return Fail(kErrGoalStoreUnavailable,
+                        "goal.usage.recorded 落账失败(" + receipt.error_code + "): " +
+                            receipt.error_message);
+        }
+    }
+    recorded_request_ids_.push_back(request_id);
+    ReleaseBudgetReservation(request_id);  // 实报到手:同名预留释放
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.usage.Add(usage);
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok) {
+        r.payload["requestId"] = request_id;
+        r.payload["source"] = source;
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::CreateForkedGoal(const GoalStateSnapshot& source,
+                                                nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (source.goal_id.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "fork 源缺 goalId");
+    }
+    if (current_.has_value() && !IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalAlreadyActive,
+                    "本卷已有未收账 goal;fork 落在新 session 的服务上,不该撞号");
+    }
+    if (const std::string invalid = ValidateGoalObjective(source.objective); !invalid.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "fork 源 objective 不合合同: " + invalid);
+    }
+    GoalStateSnapshot fork;
+    fork.goal_id = "goal-" + std::to_string(++next_goal_number_);
+    fork.parent_goal_id = source.goal_id;  // fork lineage(§4.67.8 来路)
+    fork.session_id = writer_->session_id();
+    fork.run_id = writer_->run_id();
+    fork.state_revision = 1;
+    fork.contract_revision = source.contract_revision;  // 合同照抄,版本随源
+    fork.objective = source.objective;
+    fork.objective_sha256 = source.objective_sha256;
+    fork.contract = source.contract;
+    fork.contract_frozen = source.contract_frozen;
+    fork.lifecycle = GoalLifecycle::Paused;  // 默认 paused:不让两支同追一目标
+    fork.phase = GoalPhase::Idle;
+    fork.stop_reason = "forked: 分支默认暂停,显式启动后才跑(§4.67.8)";
+    fork.counters = source.counters;              // 进度来路
+    fork.evidence_refs = source.evidence_refs;    // 继承证据……
+    for (auto& ref : fork.evidence_refs) {
+        ref.fresh = false;  // ……全标待复核(版本过了 forks 点,旧验不算数)
+    }
+    fork.budget = GoalBudget{};  // 原预算不带:帽清空(三尺不限),费用独立累计
+    fork.usage = GoalUsage{};    // 原 usage 不带:只作来源展示(源账在源卷)
+    fork.workspace_root = source.workspace_root;
+    fork.workspace_identity = source.workspace_identity;
+    fork.created_at_ms = Now();
+    fork.updated_at_ms = fork.created_at_ms;
+    return Commit(std::move(fork), std::move(cause_ref));
+}
+
 GoalServiceResult GoalService::Commit(GoalStateSnapshot next, const nlohmann::json& cause_ref) {
+    // activeElapsed 累计(§4.67.7 三笔时间的 active 笔):上一版在 active
+    // 态时,距上次提交的墙钟计入;暂停/等待/离线不占它,resume 不归零。
+    if (current_.has_value() && current_->goal_id == next.goal_id &&
+        current_->lifecycle == GoalLifecycle::Active) {
+        const std::int64_t delta = Now() - current_->updated_at_ms;
+        if (delta > 0) next.active_elapsed_ms = current_->active_elapsed_ms + delta;
+    }
+    // 转回 active = 显式恢复:停止意图清旗(§4.67.3"明确续跑后才恢复")。
+    if (next.lifecycle == GoalLifecycle::Active &&
+        (!current_ || current_->lifecycle != GoalLifecycle::Active)) {
+        next.stop_requested = false;
+    }
     // 停态/证据合同先整体验一次(FromJson 是同一份 schema 校验)。
     std::string schema_error;
     if (!GoalStateSnapshot::FromJson(next.ToJson(), &schema_error).has_value()) {
@@ -887,6 +2130,14 @@ GoalServiceResult GoalService::Commit(GoalStateSnapshot next, const nlohmann::js
     draft.payload["snapshotSha256"] = hash;
     draft.payload["lifecycle"] = ToString(next.lifecycle);
     if (!cause_ref.is_null()) draft.payload["causeRef"] = cause_ref;
+    if (adopted_carry_ && same_goal) {
+        // 跨卷接管后的首次提交(G1):resume-as-new 的新卷上,这只 goal 的
+        // 首条 applied fromStateRevision != 0——带 adoptedFrom 凭据,单一卷
+        // 的 ProjectGoalState 凭它认"半路续接"的合法首条。
+        draft.payload["adoptedFrom"] = nlohmann::json{
+            {"sessionId", adopted_from_session_},
+            {"stateRevision", current_->state_revision}};
+    }
     const auto receipt = writer_->AppendEvent(std::move(draft), Durability::PowerLoss);
     if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
         // applied 未落:快照只是候选文件,不生效(不删,留审计);写口锁死。
@@ -895,6 +2146,8 @@ GoalServiceResult GoalService::Commit(GoalStateSnapshot next, const nlohmann::js
                     "state.goal.applied 落账失败(" + receipt.error_code + "): " +
                         receipt.error_message);
     }
+    adopted_carry_ = false;
+    adopted_from_session_.clear();
     // 发布内存 + 账面锚。
     applied_event_id_ = receipt.id;
     applied_line_hash_ = receipt.line_hash;
@@ -946,10 +2199,27 @@ GoalServiceResult GoalService::AdoptFromProjection(const GoalProjection& project
     applied_event_id_ = projection.applied_event_id;
     applied_line_hash_ = projection.applied_line_hash;
     applied_seq_ = projection.applied_seq;
+    // G3:计费去重底从账上喂(事实行已记过的 requestId 不再记);预留是
+    // 内存账,跨进程不迁——预留不是实报,丢了不丢真账。
+    recorded_request_ids_ = projection.usage_request_ids;
+    reservations_.clear();
+    // 跨卷接管凭据(G1):这只 goal 接下来在本写者卷上的首条 applied 带
+    // adoptedFrom(来源卷 + 接管时 revision),单卷投影凭它认半路续接。
+    adopted_carry_ = true;
+    adopted_from_session_ = projection.session_id;
     GoalServiceResult r;
     r.ok = true;
     r.payload["goalId"] = current_->goal_id;
     r.payload["stateRevision"] = current_->state_revision;
+    // 预算复核(§4.67.8"usage watermark"):事实行累计比快照多 = 有事实
+    // 没赶上最后一笔提交——如实带出,补账/告警归调用方,不静默吞。
+    if (projection.usage_recorded.usage_reported &&
+        current_->usage.input_tokens + current_->usage.output_tokens <
+            projection.usage_recorded.input_tokens + projection.usage_recorded.output_tokens) {
+        r.payload["usageGap"] = true;
+        r.payload["usageFactsTotalTokens"] =
+            projection.usage_recorded.input_tokens + projection.usage_recorded.output_tokens;
+    }
     return r;
 }
 
@@ -1051,13 +2321,17 @@ GoalProjection ProjectGoalState(const trajectory::v3::V3Ledger& ledger,
 
         if (have_last) {
             if (view.goal_id == last_goal_id) {
-                // 同 goal:版本须衔接,转换须合法(terminal 复活在这里露馅)。
+                // 同 goal:版本须衔接,lifecycle 变了才验转换(terminal 复活
+                // 在这里露馅)。G1 起 stateRevision 也随 phase/意图/usage 类
+                // 提交递增(claim/set/begin/end 不动 lifecycle),同态的
+                // applied 是合法的状态提交,不是"没变化的假提交"。
                 if (!applied.empty() &&
                     view.from_state_revision != applied.back().to_state_revision) {
                     bad("同 goal 的 applied revision 不衔接");
                     return out;
                 }
-                if (!IsValidLifecycleTransition(last_lifecycle, view.lifecycle)) {
+                if (view.lifecycle != last_lifecycle &&
+                    !IsValidLifecycleTransition(last_lifecycle, view.lifecycle)) {
                     bad("lifecycle 转换非法: " + ToString(last_lifecycle) + " -> " +
                         ToString(view.lifecycle) + "(terminal 不复活)");
                     return out;
@@ -1075,8 +2349,21 @@ GoalProjection ProjectGoalState(const trajectory::v3::V3Ledger& ledger,
             }
         } else {
             if (view.from_state_revision != 0) {
-                bad("首条 applied 的 fromStateRevision 应为 0");
-                return out;
+                // 跨卷续接(G1):resume-as-new 后 goal 从来源卷接管,本卷首条
+                // from = 接管时 revision(>0)。须带 adoptedFrom 凭据且
+                // stateRevision 严丝合缝;没有凭据的半路首条按非法序列报缺口。
+                if (!p.contains("adoptedFrom") || !p.at("adoptedFrom").is_object()) {
+                    bad("首条 applied 的 fromStateRevision != 0 且缺 adoptedFrom(半路续接无凭据)");
+                    return out;
+                }
+                const auto& adopted = p.at("adoptedFrom");
+                if (!adopted.contains("stateRevision") ||
+                    !adopted.at("stateRevision").is_number_integer() ||
+                    static_cast<std::uint64_t>(adopted.at("stateRevision").get<std::int64_t>()) !=
+                        view.from_state_revision) {
+                    bad("adoptedFrom.stateRevision 须等于首条 fromStateRevision");
+                    return out;
+                }
             }
         }
         last_goal_id = view.goal_id;
@@ -1091,6 +2378,7 @@ GoalProjection ProjectGoalState(const trajectory::v3::V3Ledger& ledger,
     const AppliedView& head = applied.back();
     out.has_goal = true;
     out.goal_id = head.goal_id;
+    out.session_id = ledger.session_id;  // 这份投影来自哪一卷(跨卷接管凭据用)
     out.applied_seq = head.seq;
     out.applied_event_id = head.event_id;
     out.applied_line_hash = head.line_hash;
@@ -1145,7 +2433,149 @@ GoalProjection ProjectGoalState(const trajectory::v3::V3Ledger& ledger,
                          std::to_string(head.contract_revision) + ")不一致";
         return out;
     }
+    // G3:usage 事实账(goal.usage.recorded 逐条 (sessionId,requestId) 去重
+    // 累计)——计费去重底与 resume 复核的输入。判词/验收请求的 usage 走
+    // G2 的逐次请求账,不在此列(避免双计)。
+    for (const auto& event : ledger.events) {
+        if (event.kind != EventKindV3::GoalUsageRecorded) continue;
+        const auto& p = event.payload;
+        if (!p.contains("requestId") || !p.at("requestId").is_string()) continue;
+        const std::string request_id = p.at("requestId").get<std::string>();
+        if (request_id.empty()) continue;
+        bool seen = false;
+        for (const auto& recorded : out.usage_request_ids) {
+            if (recorded == request_id) {
+                seen = true;  // 账上重复行:留行,不重复累计(投影去重)
+                break;
+            }
+        }
+        if (seen) continue;
+        out.usage_request_ids.push_back(request_id);
+        if (p.contains("usage") && p.at("usage").is_object()) {
+            out.usage_recorded.Add(UsageFromJson(p.at("usage")));
+        }
+    }
     out.snapshot = std::move(*snapshot);
+    return out;
+}
+
+std::vector<GoalEvidence> EvidenceMaterialFromLedger(const trajectory::v3::V3Ledger& ledger,
+                                                     const std::string& goal_id) {
+    // §4.67 G3:resume 后证据判材料的账面回放。逐条 goal.evidence.recorded
+    // 翻回 v1 采证形状(ref.kind -> EvidenceKind、facts 随行);同 id 后写
+    // 覆盖前写(stale 翻旧以账上最后一笔为准)。
+    std::map<std::string, GoalEvidence> material;
+    for (const auto& event : ledger.events) {
+        if (event.kind != EventKindV3::GoalEvidenceRecorded) continue;
+        const auto& p = event.payload;
+        if (!p.contains("goalId") || !p.at("goalId").is_string() ||
+            p.at("goalId").get<std::string>() != goal_id) {
+            continue;
+        }
+        if (!p.contains("evidenceId") || !p.at("evidenceId").is_string()) continue;
+        if (!p.contains("evidence") || !p.at("evidence").is_object()) continue;
+        std::string ref_error;
+        const auto ref = GoalEvidenceRef::FromJson(p.at("evidence"), &ref_error);
+        if (!ref.has_value()) continue;  // 坏行保守跳过,不放缺口也不假造
+        GoalEvidence evidence;
+        evidence.id = ref->id;
+        if (!ParseEvidenceKind(ref->kind, evidence.kind)) continue;
+        evidence.goal_id = goal_id;
+        evidence.iteration_id =
+            p.contains("iterationId") && p.at("iterationId").is_string()
+                ? p.at("iterationId").get<std::string>()
+                : std::string();
+        evidence.tool_use_id = ref->source_ref;
+        evidence.producer = "ledger";
+        if (p.contains("facts") && p.at("facts").is_object()) {
+            evidence.facts = p.at("facts");
+        }
+        evidence.content_sha256 = ref->content_sha256;
+        evidence.observed_at_ms = ref->observed_at_ms;
+        evidence.fresh = ref->fresh;
+        evidence.truncated = ref->truncated;
+        material[evidence.id] = std::move(evidence);
+    }
+    std::vector<GoalEvidence> out;
+    out.reserve(material.size());
+    for (auto& [id, evidence] : material) {
+        (void)id;
+        out.push_back(std::move(evidence));
+    }
+    return out;
+}
+
+GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_session_dir) {
+    // §4.67.8:goal 沿 session lineage 持久保存,resume 不清。从本场卷起
+    // 逐卷投;本场没有 goal 账且本场是 resume 开的,才沿 previousSessionId
+    // 向上找最近一份。clear/fork 开的新场不带旧 goal(§4.67.2 clear 才撤
+    // goal;fork 另发 goalId)——链在这里断,不猜。目录名即 session id
+    //(FindV3SessionStream 同一约定);深度护栏 32 跳、防 id 回环。
+    GoalLineageProjection out;
+    constexpr int kMaxHops = 32;
+    std::vector<std::string> visited;
+    std::filesystem::path dir = current_session_dir;
+    for (int hop = 0; hop < kMaxHops; ++hop) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(dir, ec)) {
+            out.detail = "来源场目录不在: " + platform::PathToUtf8(dir);
+            break;
+        }
+        const std::string session_id = platform::PathToUtf8(dir.filename());
+        if (session_id.empty()) {
+            out.detail = "来源场目录没有名字,链停";
+            break;
+        }
+        for (const auto& seen : visited) {
+            if (seen == session_id) {
+                out.detail = "来源链回环(" + session_id + "),链停";
+                return out;
+            }
+        }
+        visited.push_back(session_id);
+        if (const auto stream = trajectory::v3::FindV3SessionStream(dir); stream.has_value()) {
+            const auto ledger = trajectory::v3::ReadV3Ledger(*stream);
+            if (!ledger.has_value()) {
+                // 验卷不过:卷坏如实报——把错误装进 gap_detail,不猜。
+                out.found = true;
+                out.projection.gap = GoalProjectionGap::IllegalTransition;
+                out.projection.gap_detail = "卷验不过(" + ledger.error() + ")";
+                out.walked = std::move(visited);
+                out.detail = "在 " + session_id + " 验卷失败";
+                return out;
+            }
+            GoalProjection projection = ProjectGoalState(*ledger, dir);
+            if (projection.gap != GoalProjectionGap::NoGoal) {
+                // 有 goal 账(含缺口)即止:这是最近一份,缺口如实上报。
+                // 顺带回放证据判材料(§4.67 G3):resume 后内存证据从这本
+                // 卷的 goal.evidence.recorded 补齐(缺材料只会让验收更保守)。
+                out.found = true;
+                out.projection = std::move(projection);
+                if (out.projection.gap == GoalProjectionGap::None && out.projection.has_goal) {
+                    out.evidence_material =
+                        EvidenceMaterialFromLedger(*ledger, out.projection.goal_id);
+                }
+                out.walked = std::move(visited);
+                out.detail = "head 在卷 " + session_id;
+                return out;
+            }
+        }
+        // 本卷没有 goal 账:只有 resume 开的场才向上穿(clear/fork 断链)。
+        const auto manifest = trajectory::ReadSessionJson(dir);
+        if (!manifest.has_value()) {
+            out.detail = "session.json 读不动(" + session_id + "),链停";
+            break;
+        }
+        if (manifest->start_reason != "resume" || !manifest->previous_session_id.has_value() ||
+            manifest->previous_session_id->empty()) {
+            out.detail = "链在 " + session_id + "(start_reason=" + manifest->start_reason + ")止";
+            break;
+        }
+        dir = dir.parent_path() /
+              platform::Utf8ToPath(*manifest->previous_session_id);
+    }
+    if (out.detail.empty()) out.detail = "来源链超过 " + std::to_string(kMaxHops) + " 跳,护栏止";
+    out.walked = std::move(visited);
     return out;
 }
 

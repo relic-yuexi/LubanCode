@@ -872,6 +872,9 @@ add_library(lubancode_runtime STATIC
   # 轨迹 v3 §4.67 Goal 模式 G0:GoalService——goal 状态唯一持久写口
   # (不可变快照 + state.goal.applied 提交锚 + CAS + 只读投影)。
   src/runtime/goal_service.cpp
+  # 轨迹 v3 §4.67 Goal 模式 G2:验收收口编排(采证/checkpoint 入账 ->
+  # 排评估 -> 判词门槛 -> 采用与续排意图同一快照提交)。
+  src/runtime/goal_evaluation_flow.cpp
   # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
   src/runtime/loop_types.cpp
   # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。

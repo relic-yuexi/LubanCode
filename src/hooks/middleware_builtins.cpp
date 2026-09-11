@@ -198,4 +198,69 @@ void AddBuiltinRequestSlots(MiddlewarePool& pool) {
     pool.AddDefinition(BuiltinCapacityCheckSlot());
 }
 
+// ---- §4.67 G3:PostTurn/goal.review(验收排程槽) ----------------------------
+
+nlohmann::json DecideGoalReview(const nlohmann::json& review_input) {
+    // 决定次序钉 §4.67.4 排验收步与 §4.67.10 竞态行:停止意图 > 预算/停态
+    // > 后台等待 > 可评。缺键保守(hold),不默认放行。
+    const auto decide = [&](const char* decision, std::string reason) {
+        return nlohmann::json{{"decision", decision}, {"reason", std::move(reason)}};
+    };
+    if (!review_input.is_object()) {
+        return decide("hold", "goal.review 输入不是 object");
+    }
+    const std::string lifecycle = review_input.value("lifecycle", std::string());
+    const bool stop_requested = review_input.value("stopRequested", false);
+    const bool budget_exhausted = review_input.value("budgetExhausted", false);
+    if (stop_requested) {
+        return decide("hold", "停止意图在账(Esc/pause 先行),不排验收续跑");
+    }
+    if (budget_exhausted || lifecycle == "budget_exhausted") {
+        return decide("hold", "预算已尽,停新请求(连验收请求也不豁免)");
+    }
+    if (lifecycle.empty() || lifecycle == "paused" || lifecycle == "awaiting_user" ||
+        lifecycle == "blocked" || lifecycle == "suspended_by_policy" || lifecycle == "achieved" ||
+        lifecycle == "cleared" || lifecycle == "failed") {
+        return decide("hold", "停态/终态(" + (lifecycle.empty() ? "未知" : lifecycle) + ")不排");
+    }
+    if (review_input.contains("waitTaskRefs") && review_input.at("waitTaskRefs").is_array() &&
+        !review_input.at("waitTaskRefs").empty()) {
+        return decide("wait", "相关后台任务未收口,先走等待路径(真实完成可唤醒)");
+    }
+    if (lifecycle == "waiting") {
+        return decide("wait", "目标在等待态");
+    }
+    return decide("evaluate", "工作轮已收口,可排独立验收");
+}
+
+MiddlewareDefinition BuiltinGoalReviewSlot() {
+    MiddlewareDefinition def;
+    def.point = HookPoint::PostTurn;
+    def.stage = Stage::Default;
+    def.name = std::string(kGoalReviewSlot);
+    def.layer = SourceLayer::Builtin;
+    def.source_label = "builtin";
+    def.implementation_ref = "builtin.goal_review_v1";
+    def.required = true;  // 槽位要求:替换实现不能解除验收排程门槛
+    def.priority = 100;
+    def.capabilities = {"goal.review.decide"};
+    // handler:只提出验收工作项(返回决定),不跑模型、不写状态——评估
+    // 请求由宿主经内部请求服务调度留账(§4.67.8)。decision=evaluate 时
+    // next 放行(围住链尾);wait/hold 短路:链上后续项不跑,宿主按决定
+    // 走等待/暂停路径。
+    def.builtin = [](const InvocationCtx&, const nlohmann::json& input,
+                     NextCall& next) -> std::expected<HandlerReturn, HandlerError> {
+        const nlohmann::json decision = DecideGoalReview(input);
+        if (decision.value("decision", std::string()) == "evaluate" && next.calls() == 0) {
+            next();  // 围住链尾:验收工作项由宿主在栈外排
+        }
+        return HandlerReturn::Value(decision);
+    };
+    return def;
+}
+
+void AddBuiltinGoalReviewSlot(MiddlewarePool& pool) {
+    pool.AddDefinition(BuiltinGoalReviewSlot());
+}
+
 }  // namespace lubancode::hooks::middleware

@@ -646,7 +646,48 @@ ParsedGoalCommand ParseGoalCommand(const std::string& args) {
         return parsed;
     }
     if (lower == "resume") {
+        // /goal resume [iterations=N] [tokens=N] [elapsed_min=N](§4.67 G3
+        // 显式加预算):budget_exhausted 的恢复路径。key=value 之外的字
+        // 一律 Invalid(不静默吞)。空尾巴 = 纯 resume。
         parsed.action = GoalCommandAction::Resume;
+        if (!rest.empty()) {
+            std::size_t pos = 0;
+            while (pos < rest.size()) {
+                const std::size_t space_at = rest.find_first_of(" \t", pos);
+                const std::string token = space_at == std::string::npos
+                                              ? rest.substr(pos)
+                                              : rest.substr(pos, space_at - pos);
+                pos = space_at == std::string::npos ? rest.size() : space_at + 1;
+                if (token.empty()) continue;
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    parsed.action = GoalCommandAction::Invalid;
+                    parsed.bad_word = token;
+                    return parsed;
+                }
+                const std::string key = token.substr(0, eq);
+                const std::string value_text = token.substr(eq + 1);
+                if (value_text.empty() ||
+                    value_text.find_first_not_of("0123456789") != std::string::npos) {
+                    parsed.action = GoalCommandAction::Invalid;
+                    parsed.bad_word = token;
+                    return parsed;
+                }
+                const long long value = std::stoll(value_text);
+                if (key == "iterations") {
+                    parsed.budget_iterations = static_cast<std::int64_t>(value);
+                } else if (key == "tokens") {
+                    parsed.budget_tokens = static_cast<std::int64_t>(value);
+                } else if (key == "elapsed_min") {
+                    // 分钟入参,毫秒落账(§4.67.7 时长帽口径)。
+                    parsed.budget_elapsed_ms = static_cast<std::int64_t>(value) * 60 * 1000;
+                } else {
+                    parsed.action = GoalCommandAction::Invalid;
+                    parsed.bad_word = token;
+                    return parsed;
+                }
+            }
+        }
         return parsed;
     }
     if (lower == "clear") {

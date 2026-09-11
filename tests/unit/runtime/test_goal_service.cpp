@@ -432,11 +432,19 @@ TEST_CASE("AmendContract:contractRevision +1,旧证据翻 stale") {
     options.session_dir = harness.dir;
     options.clock = [&now] { return now; };
     GoalService service(&*harness.writer, std::move(options));
-    REQUIRE(service.CreateGoal(DraftObjective("修好 auth"), nlohmann::json()).ok);
+    // 首轮意图随快照提交(命令面 create 同款):未认领、对着 c1。
+    GoalStateSnapshot draft = DraftObjective("修好 auth");
+    goalns::GoalPendingIntent first;
+    first.work_item_id = "wi-1";
+    first.contract_revision = 1;
+    first.continuation_ordinal = 1;
+    draft.pending_intent = first.ToJson();
+    REQUIRE(service.CreateGoal(std::move(draft), nlohmann::json()).ok);
     auto activate = Transition(GoalLifecycle::Active, 1);
     activate.goal_id = "goal-1";
     activate.evidence_additions = {GoodEvidence("ev-1")};
     REQUIRE(service.ApplyTransition(activate).ok);
+    REQUIRE(service.current()->pending_intent.at("workItemId") == "wi-1");
 
     goalns::GoalContract contract;
     contract.objective = "修好 auth;补集成测试";
@@ -452,11 +460,90 @@ TEST_CASE("AmendContract:contractRevision +1,旧证据翻 stale") {
     // 旧证据重新判有效期:保守翻 stale(§4.67.2 edit 行)。
     REQUIRE(service.current()->evidence_refs.size() == 1);
     CHECK_FALSE(service.current()->evidence_refs[0].fresh);
+    // 未认领的旧意图随合同作废清空:命令面按新 contractRevision 重拟,
+    // 泵下一拍即按新合同开轮(不留"意图对着旧合同永不 claimable"死锁)。
+    CHECK(service.current()->pending_intent.empty());
+    // 清空后按新合同补的意图可被认领开轮。
+    goalns::GoalPendingIntent next_intent;
+    next_intent.work_item_id = "goal-1/wi-c2";
+    next_intent.contract_revision = 2;
+    next_intent.continuation_ordinal = 1;
+    REQUIRE(service.SetPendingIntent(next_intent, service.current()->state_revision, {}).ok);
+    const auto view = goalns::EvaluateGoalWork(*service.current(), "run-000001");
+    CHECK(view.claimable);
 
     // revision 冲突拒。
     const auto conflict = service.AmendContract(contract, 2, 1, nlohmann::json());
     CHECK_FALSE(conflict.ok);
     CHECK(conflict.error_code == goalns::kErrGoalRevisionConflict);
+}
+
+TEST_CASE("AmendContract:意图已认领拒改版(edit 等安全边界),认领残账可被新意图接替") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    ServiceHarness harness("amend-claimed");
+    std::int64_t now = 1000;
+    GoalService::Options options;
+    options.session_dir = harness.dir;
+    options.clock = [&now] { return now; };
+    GoalService service(&*harness.writer, std::move(options));
+    GoalStateSnapshot draft = DraftObjective("修好 auth");
+    goalns::GoalPendingIntent first;
+    first.work_item_id = "wi-1";
+    first.contract_revision = 1;
+    first.continuation_ordinal = 1;
+    draft.pending_intent = first.ToJson();
+    REQUIRE(service.CreateGoal(std::move(draft), nlohmann::json()).ok);
+    // 认领 + 开轮(在途):edit 拒 goal.busy,快照一字不动。
+    REQUIRE(service.ClaimPendingIntent("run-000001", service.current()->state_revision, {}).ok);
+    REQUIRE(service.BeginIteration(service.current()->state_revision, {}).ok);
+    goalns::GoalContract contract;
+    contract.objective = "半途想改的目标";
+    const auto busy = service.AmendContract(contract, service.current()->state_revision,
+                                            service.current()->contract_revision, {});
+    CHECK_FALSE(busy.ok);
+    CHECK(busy.error_code == goalns::kErrGoalBusy);
+    CHECK(service.current()->contract_revision == 1);
+    CHECK(service.current()->lifecycle == GoalLifecycle::Active);
+    CHECK(service.current()->phase == GoalPhase::Running);
+
+    // 评估在途(evaluating)放行(设计矩阵 M4"改版撞迟到判词"):改版落
+    // preparing,认领随迟到判词一并作废清空——迟到的判词采用会被相位拒。
+    REQUIRE(service.BeginEvaluation(service.current()->state_revision, std::nullopt,
+                                     std::vector<GoalEvidenceRef>{},
+                                     std::vector<std::string>{}, {})
+                 .ok);
+    const auto amended_mid_eval = service.AmendContract(
+        contract, service.current()->state_revision, service.current()->contract_revision, {});
+    REQUIRE(amended_mid_eval.ok);
+    CHECK(service.current()->contract_revision == 2);
+    CHECK(service.current()->lifecycle == GoalLifecycle::Preparing);
+    CHECK(service.current()->pending_intent.empty());
+
+    // 认领残账(pause 拍掉在途相位后的 claimed 意图滞留):SetPendingIntent
+    // 允许覆写(用户显式续跑 = 作废滞留认领重排,§4.67.2 resume 行)。
+    // 改版已清空在账意图:先按新合同(c2)认领一枚再造残账。
+    goalns::GoalPendingIntent re_claim;
+    re_claim.work_item_id = "wi-2";
+    re_claim.contract_revision = service.current()->contract_revision;
+    re_claim.continuation_ordinal = 1;
+    REQUIRE(service.SetPendingIntent(re_claim, service.current()->state_revision, {}).ok);
+    REQUIRE(service.ClaimPendingIntent("run-000002", service.current()->state_revision, {}).ok);
+    const auto paused = [&] {
+        auto candidate = Transition(GoalLifecycle::Paused, service.current()->state_revision);
+        candidate.goal_id = "goal-1";
+        candidate.stop_reason = "user_pause";
+        return service.ApplyTransition(candidate);
+    }();
+    REQUIRE(paused.ok);
+    REQUIRE(service.current()->pending_intent.at("claimed") == true);
+    goalns::GoalPendingIntent fresh;
+    fresh.work_item_id = "goal-1/wi-r8";
+    fresh.contract_revision = service.current()->contract_revision;
+    fresh.predecessor_iteration_id = service.current()->iteration_id.value_or(std::string());
+    fresh.continuation_ordinal = 1;
+    REQUIRE(service.SetPendingIntent(fresh, service.current()->state_revision, {}).ok);
+    CHECK(service.current()->pending_intent.at("workItemId") == "goal-1/wi-r8");
+    CHECK(service.current()->pending_intent.at("claimed") == false);
 }
 
 TEST_CASE("fail closed:applied 落账失败锁写口,候选快照不生效") {
@@ -589,21 +676,8 @@ TEST_CASE("只读投影:验后账重建、缺口明报、AdoptFromProjection 接
         const auto projection = goalns::ProjectGoalState(*ledger, harness.dir);
         CHECK(projection.gap == goalns::GoalProjectionGap::HashMismatch);
     }
-    SUBCASE("快照 hash 对上但 revision 与 applied 不一致") {
-        // 手写账:快照文件内容合法、hash 与 applied 所记一致,但快照里
-        // state_revision=1 而 applied 记 to=2——RevisionMismatch 缺口。
-        GoalStateSnapshot s1 = make_snapshot("goal-1", 1);
-        s1.state_revision = 1;
-        // applied 的 to 记 2,快照落在 rev-000002 的名字下、内容 revision=1。
-        WriteFileBytes(harness.dir / goalns::SnapshotRefPath("goal-1", 2),
-                       goalns::SnapshotBytes(s1));
-        EventDraft draft;
-        draft.kind = EventKindV3::StateGoalApplied;
-        draft.payload["goalId"] = "goal-1";
-        draft.payload["fromStateRevision"] = 0;
-        draft.payload["toStateRevision"] = 2;  // 单行合同允许(0+1?不——会拒)
-        (void)draft;
-    }
+    // (快照 hash 对上但 revision 与 applied 不一致的 RevisionMismatch 缺口,
+    // 在下一册"投影序列校验"的手写账场景完整钉死,此处不重复。)
 }
 
 TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 不衔接") {

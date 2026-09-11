@@ -141,6 +141,7 @@ const char* MessagePurposeName(MessagePurpose value) {
         case MessagePurpose::ContextSummary: return "context_summary";
         case MessagePurpose::SessionTitle: return "session_title";
         case MessagePurpose::Capability: return "capability";
+        case MessagePurpose::GoalEvaluation: return "goal_evaluation";
     }
     return "unknown";
 }
@@ -150,6 +151,7 @@ std::optional<MessagePurpose> MessagePurposeFromName(std::string_view name) {
     if (name == "context_summary") return MessagePurpose::ContextSummary;
     if (name == "session_title") return MessagePurpose::SessionTitle;
     if (name == "capability") return MessagePurpose::Capability;
+    if (name == "goal_evaluation") return MessagePurpose::GoalEvaluation;
     return std::nullopt;
 }
 
@@ -314,6 +316,14 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::TaskFailed: return "task.failed";
         case EventKindV3::TaskCancelled: return "task.cancelled";
         case EventKindV3::StateGoalApplied: return "state.goal.applied";
+        case EventKindV3::GoalCheckpointRecorded: return "goal.checkpoint.recorded";
+        case EventKindV3::GoalEvidenceRecorded: return "goal.evidence.recorded";
+        case EventKindV3::GoalEvaluationRequested: return "goal.evaluation.requested";
+        case EventKindV3::GoalEvaluationCompleted: return "goal.evaluation.completed";
+        case EventKindV3::GoalEvaluationRejected: return "goal.evaluation.rejected";
+        case EventKindV3::GoalWaitRegistered: return "goal.wait.registered";
+        case EventKindV3::GoalWaitResolved: return "goal.wait.resolved";
+        case EventKindV3::GoalUsageRecorded: return "goal.usage.recorded";
         case EventKindV3::WorkflowDefinitionLoaded: return "workflow.definition.loaded";
         case EventKindV3::WorkflowSegmentOpened: return "workflow.segment.opened";
         case EventKindV3::WorkflowInputsCommitted: return "workflow.inputs.committed";
@@ -427,6 +437,14 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::TaskFailed,
             EventKindV3::TaskCancelled,
             EventKindV3::StateGoalApplied,
+            EventKindV3::GoalCheckpointRecorded,
+            EventKindV3::GoalEvidenceRecorded,
+            EventKindV3::GoalEvaluationRequested,
+            EventKindV3::GoalEvaluationCompleted,
+            EventKindV3::GoalEvaluationRejected,
+            EventKindV3::GoalWaitRegistered,
+            EventKindV3::GoalWaitResolved,
+            EventKindV3::GoalUsageRecorded,
             EventKindV3::WorkflowDefinitionLoaded,
             EventKindV3::WorkflowSegmentOpened,
             EventKindV3::WorkflowInputsCommitted,

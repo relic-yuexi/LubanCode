@@ -68,6 +68,30 @@ std::string DescribeGoalErrorCode(const std::string& code, const std::string& me
     if (code == lubancode::runtime::goal::kErrGoalObjectiveTooLong) {
         return "objective 超过 4000 字符上限。长说明写进文件(如 docs/goal.md),目标里引用它。";
     }
+    if (code == lubancode::runtime::goal::kErrGoalInvalidTransition) {
+        return "状态转换不合法(查 /goal status 的当前态;terminal 不复活)。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalCandidateInvalid) {
+        return "候选不合合同(" + message + ");快照没动,查齐字段再来。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalProjectionGap) {
+        return "goal 账有缺口(" + message + ");按 §4.55 不猜,自动续排停,查档或 /goal clear 重立。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalIntentAlreadyClaimed) {
+        return "工作项已被别的写者认领(" + message + ");恢复核验归下一批,不盲重放。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalIntentConflict) {
+        return "意图提交冲突(" + message + ")。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalNotWaiting) {
+        return "不在等待态(" + message + ");迟到交付只留审计,不拉起新轮。";
+    }
+    if (code == lubancode::runtime::goal::kErrGoalBudgetNotRaised) {
+        return "预算已尽,resume 须显式加预算:" + message;
+    }
+    if (code == lubancode::runtime::goal::kErrGoalReservationRejected) {
+        return "预算预留被拒(" + message + ");并发子任务共用余额,不是各花整份。";
+    }
     return message.empty() ? code : message;
 }
 
@@ -178,10 +202,217 @@ std::vector<std::string> BuildGoalClearConfirmLines(const lubancode::runtime::go
     return lines;
 }
 
+// ---- v3 路线(轨迹 v3 §4.67 G1)---------------------------------------------
+
+namespace {
+
+// lifecycle 中文名(§4.67.3 十一态;排版用,机器判断仍认稳定串)。
+std::string GoalLifecycleLabel(const std::string& lifecycle) {
+    if (lifecycle == "preparing") return "拟合同";
+    if (lifecycle == "active") return "活动中";
+    if (lifecycle == "waiting") return "等后台";
+    if (lifecycle == "paused") return "已暂停";
+    if (lifecycle == "awaiting_user") return "等用户";
+    if (lifecycle == "blocked") return "受阻";
+    if (lifecycle == "budget_exhausted") return "预算尽";
+    if (lifecycle == "suspended_by_policy") return "策略挂起";
+    if (lifecycle == "achieved") return "已达标";
+    if (lifecycle == "cleared") return "已清除";
+    if (lifecycle == "failed") return "失败";
+    return lifecycle;
+}
+
+std::string GoalPhaseLabel(const std::string& phase) {
+    if (phase == "idle") return "闲";
+    if (phase == "queued") return "已排队";
+    if (phase == "running") return "执行中";
+    if (phase == "evaluating") return "验收中";
+    return phase;
+}
+
+}  // namespace
+
+// ---- 跨壳统一状态投影(§4.67 G3):三处同一折法 ------------------------------
+
+std::string GoalV3LifecycleCode(lubancode::runtime::goal::GoalLifecycle lifecycle,
+                                lubancode::runtime::goal::GoalPhase phase) {
+    namespace goalns = lubancode::runtime::goal;
+    using L = goalns::GoalLifecycle;
+    switch (lifecycle) {
+        case L::Preparing:
+        case L::Active:
+            return phase == goalns::GoalPhase::Evaluating ? "eval" : "run";
+        case L::Waiting:
+            return "wait";
+        case L::Paused:
+        case L::AwaitingUser:
+        case L::SuspendedByPolicy:
+            return "pause";
+        case L::Blocked:
+            return "blocked";
+        case L::Achieved:
+            return "done";
+        case L::BudgetExhausted:
+            return "budget";
+        case L::Failed:
+        case L::Cleared:
+            return "x";
+    }
+    return "x";
+}
+
+std::string BuildGoalV3HeadLine(const lubancode::runtime::goal::GoalStateSnapshot& snapshot) {
+    namespace goalns = lubancode::runtime::goal;
+    std::string line = snapshot.goal_id + " · " +
+                       GoalV3LifecycleCode(snapshot.lifecycle, snapshot.phase) + " · r" +
+                       std::to_string(snapshot.state_revision) + " c" +
+                       std::to_string(snapshot.contract_revision);
+    if (snapshot.counters.iterations_started > 0) {
+        line += " · iter " + std::to_string(snapshot.counters.iterations_started);
+    }
+    return line;
+}
+
+namespace {
+
+std::string PreviewText(const std::string& text, std::size_t max) {
+    return text.size() > max ? text.substr(0, max) + "…" : text;
+}
+
+}  // namespace
+
+GoalCommandOutcome FormatGoalV3Status(
+    const lubancode::runtime::goal::GoalLineageProjection& lineage) {
+    namespace goalns = lubancode::runtime::goal;
+    GoalCommandOutcome out;
+    const goalns::GoalProjection& projection = lineage.projection;
+    if (!lineage.found || projection.gap == goalns::GoalProjectionGap::NoGoal) {
+        out.ok = true;
+        out.lines.push_back("当前会话没有目标。用 /goal <objective> 立一只(写明终点与验证法)。");
+        if (!lineage.detail.empty()) {
+            out.lines.push_back("(来源链: " + lineage.detail + ")");
+        }
+        return out;
+    }
+    if (projection.gap != goalns::GoalProjectionGap::None) {
+        // 缺口如实报(§4.55 状态损坏):七档各带码与人话,不猜、不自动续排。
+        out.ok = false;
+        out.error_code = goalns::kErrGoalProjectionGap;
+        out.lines.push_back("goal 状态缺口[" + goalns::ToString(projection.gap) + "]: " +
+                            projection.gap_detail);
+        out.lines.push_back("按 §4.55 不从摘要猜目标;自动续排停,可查档修复或 /goal clear 重立。");
+        out.payload["gap"] = goalns::ToString(projection.gap);
+        out.payload["gapDetail"] = projection.gap_detail;
+        return out;
+    }
+    const goalns::GoalStateSnapshot& snapshot = projection.snapshot;
+    out.ok = true;
+    // 首行 = 跨壳统一投影(§4.67 G3):状态栏/resume 通知与此同一只
+    // BuildGoalV3HeadLine;中文态名补在第二段(人话,机器认短码)。
+    std::string head = BuildGoalV3HeadLine(snapshot);
+    head += " · " + GoalLifecycleLabel(goalns::ToString(snapshot.lifecycle)) + "·" +
+            GoalPhaseLabel(goalns::ToString(snapshot.phase));
+    out.lines.push_back(head);
+    if (projection.session_id != snapshot.session_id) {
+        out.lines.push_back("(head 在来源卷 " + projection.session_id + ";本卷接管中)");
+    }
+    if (!snapshot.parent_goal_id.empty()) {
+        out.lines.push_back("(fork 自 " + snapshot.parent_goal_id + ";费用/预算独立累计)");
+    }
+    out.lines.push_back("目标: " + PreviewText(snapshot.objective, 80));
+    if (!snapshot.stop_reason.empty()) {
+        out.lines.push_back("停因: " + snapshot.stop_reason);
+    }
+    if (snapshot.stop_requested) {
+        out.lines.push_back("(停止意图在账:Esc/pause 先行,显式 resume 后才续排)");
+    }
+    if (!snapshot.blocker_key.empty()) {
+        out.lines.push_back("受阻键: " + snapshot.blocker_key);
+    }
+    if (!snapshot.pending_question.empty()) {
+        out.lines.push_back("待答: " + snapshot.pending_question);
+    }
+    if (snapshot.iteration_id.has_value() && !snapshot.iteration_id->empty()) {
+        out.lines.push_back("当前轮: " + *snapshot.iteration_id);
+    }
+    // 待续工作项(§4.67.4 恢复补投影的读面):
+    const goalns::GoalWorkView work = goalns::EvaluateGoalWork(snapshot, /*writer_epoch=*/"");
+    if (work.has_intent) {
+        std::string line = "待续: " + work.intent.work_item_id;
+        if (work.intent.claimed) {
+            line += "(已认领,写者 " + work.intent.writer_epoch + ")";
+        } else if (work.claimable) {
+            line += "(未认领,泵在安全边界取走)";
+        } else {
+            line += "(" + work.reason + ")";
+        }
+        out.lines.push_back(line);
+    }
+    // 后台等待与巡检(§4.67.7 G3):等待只盖相关 taskRefs;巡检次数入
+    // 快照,重启不归零;到上限停排但真实完成仍可唤醒。
+    if (snapshot.lifecycle == goalns::GoalLifecycle::Waiting) {
+        std::string line = "等待: " + std::to_string(snapshot.wait_task_refs.size()) + " 项后台任务";
+        for (const auto& ref : snapshot.wait_task_refs) {
+            line += " " + ref;
+        }
+        if (snapshot.wait_plan.next_due_ms > 0) {
+            line += ";巡检 " + std::to_string(snapshot.wait_plan.polls_done) + "/" +
+                    std::to_string(snapshot.wait_plan.max_polls);
+        } else {
+            line += ";巡检到上限,等真实完成通知";
+        }
+        out.lines.push_back(line);
+    }
+    std::string progress = "防空转: 无进展连击 " + std::to_string(snapshot.counters.no_progress_streak) +
+                           " · 同 blocker 连击 " +
+                           std::to_string(snapshot.counters.same_blocker_streak);
+    out.lines.push_back(progress);
+    {
+        std::string line = "预算: iter " + std::to_string(snapshot.usage.request_count) + " 请求";
+        if (snapshot.budget.max_iterations.has_value()) {
+            line += "/" + std::to_string(*snapshot.budget.max_iterations) + " 轮上限";
+        }
+        if (snapshot.usage.usage_reported) {
+            const std::int64_t total = snapshot.usage.input_tokens + snapshot.usage.output_tokens;
+            line += " · token " + std::to_string(total) + " reported";
+        } else {
+            line += " · token 未报告";
+        }
+        if (snapshot.budget.max_elapsed_ms.has_value()) {
+            const std::int64_t secs = snapshot.active_elapsed_ms / 1000;
+            line += " · active " + std::to_string(secs / 60) + "m" + std::to_string(secs % 60) +
+                    "s/" + std::to_string(*snapshot.budget.max_elapsed_ms / 60000) + "m";
+        }
+        out.lines.push_back(line);
+    }
+    out.payload = snapshot.ToJson();
+    out.payload["appliedEventId"] = projection.applied_event_id;
+    return out;
+}
+
+std::vector<std::string> BuildGoalV3ClearConfirmLines(
+    const lubancode::runtime::goal::GoalStateSnapshot& snapshot) {
+    std::vector<std::string> lines;
+    lines.push_back("将要清除目标 " + snapshot.goal_id + "(r" +
+                    std::to_string(snapshot.state_revision) + " c" +
+                    std::to_string(snapshot.contract_revision) + ")");
+    lines.push_back("目标: " + PreviewText(snapshot.objective, 60));
+    lines.push_back("已跑 " + std::to_string(snapshot.counters.iterations_started) +
+                    " 轮;快照与 applied 审计账保留在会话存档。");
+    lines.push_back("clear 不撤销已改过的文件;要回滚请用 git/undo 工具。");
+    lines.push_back("确认清除? (y/N)");
+    return lines;
+}
+
 // ---- /goal 会话接线(终端接线收尾单自大类搬出;原文随行,输出走 TerminalPort) ----
 
 lubancode::app::CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal,
                                                const GoalWiring& wiring) {
+    // §4.67 G1 分派:v3 卷上的会话(goal_service 非空)七动作全走 GoalService
+    // 的持久路;v2 场照旧走 v1 coordinator(旧档读路,一字不动)。
+    if (wiring.goal_service != nullptr) {
+        return HandleGoalCommandV3(goal, wiring);
+    }
     auto& out = lubancode::cli::TermOut();
     const lubancode::cli::Theme& theme = *wiring.theme;
     lubancode::runtime::goal::GoalCoordinator& coordinator = *wiring.coordinator;
@@ -308,6 +539,326 @@ lubancode::app::CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCo
     return lubancode::app::CommandFlow::Continue;
 }
 
+// v3 路线七动作(轨迹 v3 §4.67 G1):全走 GoalService——快照 + state.goal.
+// applied。状态读面是 lineage 投影(/goal 显示与 resume 恢复共这一口);
+// 命令只在安全边界改账,CAS 由 expected_state_revision 把关。
+lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoalCommand& goal,
+                                                const GoalWiring& wiring) {
+    namespace goalns = lubancode::runtime::goal;
+    auto& out = lubancode::cli::TermOut();
+    // feature 正门与 v1 同源(features.goals + env 总闸):关了只读存档不
+    // 动账(v1 的 SuspendedByPolicy 落点归 G3 policy 面)。
+    if (!wiring.goals_enabled) {
+        if (goal.action == lubancode::cli::GoalCommandAction::View ||
+            goal.action == lubancode::cli::GoalCommandAction::Status) {
+            out << wiring.theme->stats
+                << "当前会话没有目标;goals 功能未开启(features.goals = true 才可用)。"
+                << wiring.theme->reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << wiring.theme->stats
+            << "goals 功能未开启(features.goals = true 才可用;环境变量 "
+               "LUBANCODE_DISABLE_GOALS=1 是总闸)。"
+            << wiring.theme->reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+    const lubancode::cli::Theme& theme = *wiring.theme;
+    goalns::GoalService& service = *wiring.goal_service;
+    const nlohmann::json command_cause = nlohmann::json{{"source", "command"},
+                                                        {"command", "/goal"}};
+
+    const auto fail_with = [&](const goalns::GoalServiceResult& result) {
+        out << theme.error
+            << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+            << theme.reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    };
+
+    using Action = lubancode::cli::GoalCommandAction;
+    if (goal.action == Action::View || goal.action == Action::Status) {
+        // 查账纯本地输出,不发模型(§4.67.2 status 行"只显示,不添模型消息");
+        // 读面 = lineage 投影(与 resume 恢复同一口),缺口如实报。
+        if (!wiring.project_goal) {
+            out << theme.error << "v3 goal 投影口没接线。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        const auto outcome = lubancode::app::FormatGoalV3Status(wiring.project_goal());
+        for (const std::string& line : outcome.lines) {
+            out << theme.stats << line << theme.reset << "\n";
+        }
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Create) {
+        goalns::GoalStateSnapshot draft;
+        draft.objective = goal.objective;
+        draft.workspace_root = lubancode::platform::CurrentDirUtf8();
+        draft.workspace_identity = draft.workspace_root;
+        draft.contract.objective = goal.objective;  // 底稿;真 preflight/冻结归 G2
+        if (wiring.goals_config != nullptr) {
+            draft.budget.max_elapsed_ms = wiring.goals_config->max_elapsed_ms;
+            draft.budget.max_iterations = wiring.goals_config->max_iterations;
+            draft.budget.max_no_progress_iterations =
+                wiring.goals_config->max_no_progress_iterations;
+            draft.budget.max_same_blocker_iterations =
+                wiring.goals_config->max_same_blocker_iterations;
+            draft.budget.max_consecutive_provider_failures =
+                wiring.goals_config->max_consecutive_provider_failures;
+        }
+        // §4.67.4 接纳:初始快照与首轮调度意图同一笔提交——wi-1 对着
+        // contractRevision 1,predecessor 空、ordinal 1。
+        goalns::GoalPendingIntent first_intent;
+        first_intent.work_item_id = "wi-1";
+        first_intent.contract_revision = 1;
+        first_intent.continuation_ordinal = 1;
+        draft.pending_intent = first_intent.ToJson();
+        const auto result = service.CreateGoal(std::move(draft), command_cause);
+        if (!result.ok) return fail_with(result);
+        out << theme.stats << "目标已立: " << result.payload.value("goalId", std::string()) << "(r"
+            << result.payload.value("stateRevision", 0) << ",拟合同;快照已落 state/goals/)。"
+            << "首轮工作项 wi-1 已随快照提交,泵在下一安全边界认领开轮。"
+            << theme.reset << "\n";
+        EmitGoalHook(wiring, lubancode::hooks::HookEvent::GoalCreated,
+                     nlohmann::json{{"goal_id", result.payload.value("goalId", std::string())},
+                                    {"objective_preview", goal.objective.substr(0, 120)}},
+                     /*match_value=*/"preparing");
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Edit) {
+        const goalns::GoalStateSnapshot* current = service.current();
+        if (current == nullptr) {
+            out << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        goalns::GoalContract contract = current->contract;
+        contract.objective = goal.objective;  // 其余条款沿旧合同;验收范围大改归 G2 判词
+        const auto result = service.AmendContract(contract, current->state_revision,
+                                                  current->contract_revision, command_cause);
+        if (!result.ok) return fail_with(result);
+        // AmendContract 已把随旧合同作废的意图清空;这里按新 contractRevision
+        // 重拟首轮工作项(§4.67.4:改版后目标要能按新合同继续运转)——泵在
+        // 下一安全边界认领开轮,preparing 取轮即转 active,无需用户 resume。
+        const goalns::GoalStateSnapshot* amended = service.current();
+        if (amended != nullptr &&
+            (!amended->pending_intent.is_object() || amended->pending_intent.empty())) {
+            goalns::GoalPendingIntent fresh;
+            fresh.work_item_id =
+                amended->goal_id + "/wi-c" + std::to_string(amended->contract_revision);
+            fresh.contract_revision = amended->contract_revision;
+            fresh.predecessor_iteration_id = amended->iteration_id.value_or(std::string());
+            fresh.continuation_ordinal = 1;
+            const auto queued = service.SetPendingIntent(fresh, amended->state_revision,
+                                                         command_cause);
+            if (queued.ok) {
+                out << theme.stats << "目标已改(c" << result.payload.value("contractRevision", 0)
+                    << ");旧证据全翻 stale 待重判,防空转连击清零,用量账保留。新工作项 "
+                    << fresh.work_item_id << " 已按新合同排下,泵下一拍开轮。" << theme.reset
+                    << "\n";
+                return lubancode::app::CommandFlow::Continue;
+            }
+            // 意图补排失败如实报:目标停在 preparing 且无待续意图,显式
+            // /goal resume 可重补(见 resume 分支)。
+            out << theme.error
+                << "目标已改(c" << result.payload.value("contractRevision", 0)
+                << ")但新工作项排队失败(" << queued.error_code << ": " << queued.error_message
+                << ");用 /goal resume 重排。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << theme.stats << "目标已改(c" << result.payload.value("contractRevision", 0)
+            << ");旧证据全翻 stale 待重判,防空转连击清零,用量账保留。" << theme.reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Pause) {
+        const goalns::GoalStateSnapshot* current = service.current();
+        if (current == nullptr) {
+            out << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        if (current->lifecycle == goalns::GoalLifecycle::Paused) {
+            out << theme.stats << "目标已是暂停态(停因: " << current->stop_reason << ")。"
+                << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        goalns::GoalTransitionCandidate candidate;
+        candidate.goal_id = current->goal_id;
+        candidate.expected_state_revision = current->state_revision;
+        candidate.to_lifecycle = goalns::GoalLifecycle::Paused;
+        candidate.to_phase = goalns::GoalPhase::Idle;
+        candidate.stop_reason = "user_pause";
+        const auto result = service.ApplyTransition(candidate);
+        if (!result.ok) return fail_with(result);
+        out << theme.stats << "目标已暂停(r" << result.payload.value("stateRevision", 0)
+            << ");快照/预算/防空转账都留着,待续工作项不再被泵取。" << theme.reset << "\n";
+        EmitGoalHook(wiring, lubancode::hooks::HookEvent::GoalPaused,
+                     nlohmann::json{{"goal_id", current->goal_id}, {"immediate", true}},
+                     /*match_value=*/"user");
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Resume) {
+        const goalns::GoalStateSnapshot* current = service.current();
+        if (current == nullptr) {
+            out << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        if (current->lifecycle == goalns::GoalLifecycle::Active ||
+            current->lifecycle == goalns::GoalLifecycle::Preparing) {
+            // 未停且"有班可上"(意图可认领,或他写者在途)才无需恢复;意图
+            // 空/滞留旧账(edit 两笔提交间崩溃、pause 拍掉在途相位后的认领
+            // 残账)落到下面的补排段——不留"目标未停却无班可上"的死锁。
+            const goalns::GoalWorkView work =
+                goalns::EvaluateGoalWork(*current, /*writer_epoch=*/"");
+            if (work.claimable || (work.has_intent && work.claimed_by_other)) {
+                out << theme.stats << "目标未停(" << goalns::ToString(current->lifecycle)
+                    << "),无需恢复。" << theme.reset << "\n";
+                return lubancode::app::CommandFlow::Continue;
+            }
+        }
+        // waiting 的恢复走 ResolveWaiting(§4.67.3 waiting -> active 出口):
+        // 收口位等待(iteration 在途、工作项已认领)恢复 phase=running,泵的
+        // ResumeV3Closeout 下一拍把截走的验收接上——不开新轮、不重放副作用;
+        // 排队/间歇等待恢复 idle 后由补排段接管。不走 ApplyTransition(resolve
+        // 已转 active,waitTaskRefs/巡检账一并清,事实行 reason=user_resume
+        // 如实留档)。
+        if (current->lifecycle == goalns::GoalLifecycle::Waiting) {
+            const auto resolved = service.ResolveWaiting("command:goal:resume",
+                                                          current->state_revision,
+                                                          command_cause, "user_resume");
+            if (!resolved.ok) return fail_with(resolved);
+            current = service.current();
+            out << theme.stats << "等待解除(用户 resume;r"
+                << resolved.payload.value("stateRevision", 0) << ")";
+            if (current != nullptr && current->phase == goalns::GoalPhase::Running) {
+                out << ";在途轮收口续跑,不重开新轮。" << theme.reset << "\n";
+                return lubancode::app::CommandFlow::Continue;  // 收口位:泵续跑,无新班可排
+            }
+            out << theme.reset << "\n";
+        }
+        // §4.67.2 resume 行 + G3:budget_exhausted 须显式加预算后才可恢复
+        //("/goal resume iterations=30 tokens=200000"),不悄悄放宽;旧
+        // 费用保留。其余停态直接复核转回。
+        if (current->lifecycle == goalns::GoalLifecycle::BudgetExhausted) {
+            if (!goal.has_budget_addition()) {
+                goalns::GoalServiceResult refused;
+                refused.error_code = goalns::kErrGoalBudgetNotRaised;
+                out << theme.error
+                    << lubancode::app::DescribeGoalErrorCode(
+                           refused.error_code,
+                           "用 /goal resume iterations=<N> [tokens=<N>] [elapsed_min=<N>] 抬帽后恢复")
+                    << theme.reset << "\n";
+                return lubancode::app::CommandFlow::Continue;
+            }
+            goalns::GoalBudgetAddition addition;
+            addition.iterations = goal.budget_iterations;
+            addition.total_tokens = goal.budget_tokens;
+            addition.elapsed_ms = goal.budget_elapsed_ms;
+            const auto added =
+                service.AddBudget(addition, current->state_revision, command_cause);
+            if (!added.ok) return fail_with(added);
+            std::string raised = "预算已抬(";
+            if (added.payload.contains("maxIterations")) {
+                raised += std::to_string(added.payload.at("maxIterations").get<std::int64_t>()) +
+                          " 轮";
+            }
+            if (added.payload.contains("maxTotalTokens")) {
+                if (raised.back() != '(') raised += " · ";
+                raised += std::to_string(added.payload.at("maxTotalTokens").get<std::int64_t>()) +
+                          " token";
+            }
+            if (added.payload.contains("maxElapsedMs")) {
+                if (raised.back() != '(') raised += " · ";
+                raised += std::to_string(added.payload.at("maxElapsedMs").get<std::int64_t>() /
+                                         60000) +
+                          " 分钟";
+            }
+            raised += ")";
+            out << theme.stats << raised << ";旧费用保留。" << theme.reset << "\n";
+            current = service.current();  // AddBudget 已提交,拿新 revision
+        }
+        // 仍停在停态(preparing 不是停态,但同样要转 active 才算恢复;
+        // waiting 上面已走 ResolveWaiting 解除,不重复转)。
+        if (current->lifecycle != goalns::GoalLifecycle::Active) {
+            goalns::GoalTransitionCandidate candidate;
+            candidate.goal_id = current->goal_id;
+            candidate.expected_state_revision = current->state_revision;
+            candidate.to_lifecycle = goalns::GoalLifecycle::Active;
+            candidate.to_phase = goalns::GoalPhase::Idle;
+            // §4.67.2 resume 行:重新核对停因与预算才续排。停因这里清;
+            // budget_exhausted 的复核在上一段(先 AddBudget 再转)。
+            candidate.stop_reason.clear();
+            const auto result = service.ApplyTransition(candidate);
+            if (!result.ok) return fail_with(result);
+            out << theme.stats << "目标已续(从快照 r"
+                << result.payload.value("stateRevision", 0)
+                << ";待续工作项沿原 id 回泵,不重放旧 iteration)。";
+        } else {
+            out << theme.stats << "目标续排(r" << current->state_revision << ")。";
+        }
+        // 补排段(§4.67.2"可推进才续排"——用户点了 resume 就是明确续跑):
+        // 相位回到 idle 且没有可认领的工作项时,排一枚新工作项。覆盖三种
+        // 滞留:意图空(收口被停/Esc 截走没排下续跑)、认领残账(pause 拍
+        // 掉在途相位后 claimed 意图滞留——用户显式续跑即作废重排,服务面
+        // 允许覆写已认领意图)、edit 两笔提交间崩溃留下的空账。相位在
+        // queued(接管面)/running(在途)/evaluating(评估中)时不补——
+        // 那些路有各自的消费口。predecessor 取最后 iteration,ordinal 1。
+        const goalns::GoalStateSnapshot* resumed = service.current();
+        if (resumed != nullptr && resumed->phase == goalns::GoalPhase::Idle) {
+            const goalns::GoalWorkView view =
+                goalns::EvaluateGoalWork(*resumed, /*writer_epoch=*/"");
+            if (!view.claimable) {
+                goalns::GoalPendingIntent fresh;
+                fresh.work_item_id =
+                    resumed->goal_id + "/wi-r" + std::to_string(resumed->state_revision);
+                fresh.contract_revision = resumed->contract_revision;
+                fresh.predecessor_iteration_id = resumed->iteration_id.value_or(std::string());
+                fresh.continuation_ordinal = 1;
+                const auto queued = service.SetPendingIntent(fresh, resumed->state_revision,
+                                                             command_cause);
+                if (queued.ok) {
+                    out << " 新工作项 " << fresh.work_item_id << " 已排。";
+                }
+            }
+        }
+        out << theme.reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Clear) {
+        const goalns::GoalStateSnapshot* current = service.current();
+        if (current == nullptr) {
+            out << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        if (goalns::IsLifecycleTerminal(current->lifecycle)) {
+            out << theme.stats << "目标已收账(" << goalns::ToString(current->lifecycle)
+                << "),不再动。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        for (const std::string& line : lubancode::app::BuildGoalV3ClearConfirmLines(*current)) {
+            out << theme.stats << line << theme.reset << "\n";
+        }
+        const std::optional<std::string> answer = lubancode::cli::ReadLine("y/N", theme, true);
+        if (!answer.has_value() || !(*answer == "y" || *answer == "Y" || *answer == "yes")) {
+            out << theme.stats << "未清除,目标照旧。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        goalns::GoalTransitionCandidate candidate;
+        candidate.goal_id = current->goal_id;
+        candidate.expected_state_revision = current->state_revision;
+        candidate.to_lifecycle = goalns::GoalLifecycle::Cleared;
+        candidate.to_phase = goalns::GoalPhase::Idle;
+        candidate.stop_reason = "user_clear";
+        const auto result = service.ApplyTransition(candidate);
+        if (!result.ok) return fail_with(result);
+        out << theme.stats << "目标已清除;快照与 applied 审计账保留,已改文件不撤销。"
+            << theme.reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+    return lubancode::app::CommandFlow::Continue;
+}
+
 void EmitGoalHook(const GoalWiring& /*wiring*/, lubancode::hooks::HookEvent event,
                   nlohmann::json fields, const std::string& match_value) {
     // additionalContext(OutputCapabilities 已在 events.hpp 定死:没有
@@ -323,6 +874,73 @@ void EmitGoalHook(const GoalWiring& /*wiring*/, lubancode::hooks::HookEvent even
     payload.fields = std::move(fields);
     payload.match_value = match_value;
     dispatcher->Emit(event, payload);
+}
+
+std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop);
+
+// v3 版(§4.67 G3"跨壳统一状态显示")。实现见下;上面这只前向声明给
+// 三参重载共用 loop 段折法。
+std::string BuildGoalV3StatusSegmentText(const lubancode::runtime::goal::GoalStateSnapshot* goal_v3) {
+    if (goal_v3 == nullptr) return std::string();
+    // 短码/版本号与 /goal status、resume 通知同一投影(GoalV3LifecycleCode)。
+    std::string part = "goal " + GoalV3LifecycleCode(goal_v3->lifecycle, goal_v3->phase);
+    if (goal_v3->counters.iterations_started > 0) {
+        part += "·iter" + std::to_string(goal_v3->counters.iterations_started);
+    }
+    if (goal_v3->state_revision > 1) {
+        part += "·r" + std::to_string(goal_v3->state_revision);
+    }
+    return part;
+}
+
+std::string BuildGoalLoopStatusSegment(const lubancode::runtime::goal::GoalStateSnapshot* goal_v3,
+                                       lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop) {
+    // v3 快照在场吃 v3(v3 会话里 v1 coordinator 没有活动 goal,双算无门);
+    // 没有回落 v1 老折法。
+    const std::string goal_part = BuildGoalV3StatusSegmentText(goal_v3);
+    std::string loop_part;
+    if (loop != nullptr) {
+        const auto now_ms = [] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        };
+        int active = 0;
+        std::int64_t next_due = 0;
+        bool has_next = false;
+        for (const auto& view : loop->Snapshot(now_ms)) {
+            if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
+                view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
+                continue;
+            }
+            ++active;
+            if (!has_next || view.task.next_due_at_ms < next_due) {
+                next_due = view.task.next_due_at_ms;
+                has_next = true;
+            }
+        }
+        if (active > 0) {
+            loop_part = "loop×" + std::to_string(active);
+            if (has_next && next_due > now_ms) {
+                const std::int64_t secs = (next_due - now_ms) / 1000;
+                if (secs < 60) {
+                    loop_part += " next " + std::to_string(secs) + "s";
+                } else if (secs < 3600) {
+                    loop_part += " next " + std::to_string(secs / 60) + "m";
+                } else {
+                    loop_part += " next " + std::to_string(secs / 3600) + "h";
+                }
+            }
+        }
+    }
+    if (goal_part.empty() && loop_part.empty()) {
+        return std::string();
+    }
+    if (goal_part.empty()) return loop_part;
+    if (loop_part.empty()) return goal_part;
+    return goal_part + " · " + loop_part;
 }
 
 std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,

@@ -288,6 +288,9 @@ public:
     std::string NewTurnId();          // turn-<n>,主会话回合
     std::string NewCompactTurnId();   // compact-turn-<n>,内部回合独立前缀
                                      // 不与主 turn 撞号(§4.6)
+    std::string NewGoalEvalTurnId();  // goaleval-turn-<n>,验收内部回合
+                                     //(§4.67.6;与 turn/compact-turn 共
+                                     // 用号池,三种前缀互不撞名)
     std::string NewStepId();          // step-<n>
     std::string NewRequestId();  // request-<n>
     std::string NewStreamId();   // stream-<n>
