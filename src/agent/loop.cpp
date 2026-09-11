@@ -1426,6 +1426,21 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         breakdown += " msg" + std::to_string(i) + "=" + std::to_string(bytes) +
                                      "B/" + std::to_string(results) + "r";
                     }
+                    const auto& reqhist = context_.request_history();
+                    if (!reqhist.empty()) {
+                        std::size_t bytes = 0;
+                        unsigned results = 0;
+                        for (const auto& block : reqhist.back().content) {
+                            if (const auto* r = std::get_if<api::ToolResultBlock>(&block)) {
+                                bytes += r->content.size();
+                                ++results;
+                            } else if (const auto* t = std::get_if<api::TextBlock>(&block)) {
+                                bytes += t->text.size();
+                            }
+                        }
+                        breakdown += " reqhist=" + std::to_string(reqhist.size()) + " last=" +
+                                     std::to_string(bytes) + "B/" + std::to_string(results) + "r";
+                    }
                     return std::unexpected(
                         "context.adapter_input_exceeds_capacity: final UTF-8 bytes/4 input + output + margin"
                         " (step=" + std::to_string(step_index) +
