@@ -1046,10 +1046,16 @@ GoalServiceResult GoalService::ApplyTransition(const GoalTransitionCandidate& ca
     next.lifecycle = candidate.to_lifecycle;
     next.phase = candidate.to_phase;
     next.stop_reason = candidate.stop_reason;
-    next.blocker_key = candidate.blocker_key;
-    next.pending_question = candidate.pending_question;
-    if (candidate.to_lifecycle != GoalLifecycle::Blocked) next.blocker_key.clear();
-    if (candidate.to_lifecycle != GoalLifecycle::AwaitingUser) next.pending_question.clear();
+    if (candidate.to_lifecycle == GoalLifecycle::Blocked) {
+        next.blocker_key = candidate.blocker_key;  // 候选门已拒空键
+    }
+    if (candidate.to_lifecycle == GoalLifecycle::AwaitingUser) {
+        next.pending_question = candidate.pending_question;  // 候选门已拒空问题
+    }
+    // 离开 blocked/awaiting_user 不清 blockerKey/pendingQuestion(§4.67.3
+    // "各态保存的停因/问题/blocker"、§4.67.7 两次接管守恒"问题不丢"):
+    // 问题/阻碍面跨停态存活,翻新或清空归下一次判词
+    //(CompleteIterationWithEvaluation 各分路统一改写)。
     if (candidate.iteration_id.has_value()) next.iteration_id = candidate.iteration_id;
     if (candidate.applied_evaluation_id.has_value()) {
         next.applied_evaluation_id = candidate.applied_evaluation_id;
