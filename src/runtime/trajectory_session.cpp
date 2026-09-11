@@ -1864,6 +1864,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
             continue;
         }
         book.tool_message_done = true;
+        result->preview_committed = true;
     }
     if (batch.status == ToolResultsCommitReceipt::Status::Committed && !batch.degraded_codes.empty()) {
         batch.status = ToolResultsCommitReceipt::Status::Degraded;

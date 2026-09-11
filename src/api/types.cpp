@@ -262,7 +262,7 @@ void SanitizeContentBlock(ContentBlock& block) {
                     const std::string projection = tools::TextProjection(payload);
                     b.blocks = std::move(payload.content);
                     b.structured_content = std::move(payload.structured_content);
-                    b.content = std::move(projection);
+                    if (!b.preview_committed) b.content = std::move(projection);
                 }
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                 b.text = platform::SanitizeExternalText(b.text);
