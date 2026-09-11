@@ -1100,8 +1100,8 @@ TEST_CASE("P1-B 错误往返: 同一 assistant 多枚调用成功失败混排,�
     {
         auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
         REQUIRE(bridge != nullptr);
-        bridge.BeginTurn("turn-1", "external_user");
-        bridge.RecordInput(UserMessage("两份都查一下。"));
+        bridge->BeginTurn("turn-1", "external_user");
+        bridge->RecordInput(UserMessage("两份都查一下。"));
         api::Message assistant;
         assistant.role = api::Role::Assistant;
         assistant.content.push_back(api::TextBlock{"分头查。"});
@@ -1113,23 +1113,23 @@ TEST_CASE("P1-B 错误往返: 同一 assistant 多枚调用成功失败混排,�
             assistant.content.push_back(std::move(call));
         }
         const std::string request_id =
-            bridge.OnRequestPrepared(MakeRequest("SYSTEM-MIX", {UserMessage("两份都查一下。")}),
-                                     PreparedContext());
+            bridge->OnRequestPrepared(MakeRequest("SYSTEM-MIX", {UserMessage("两份都查一下。")}),
+                                      PreparedContext());
         REQUIRE_FALSE(request_id.empty());
-        bridge.OnRequestSent(request_id);
-        REQUIRE(bridge.OnOutputCompleted(request_id, assistant, "tool_calls", "resp-mix"));
+        bridge->OnRequestSent(request_id);
+        REQUIRE(bridge->OnOutputCompleted(request_id, assistant, "tool_calls", "resp-mix"));
         for (const std::string& call_id : {first_call, second_call}) {
-            bridge.OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, call_id));
+            bridge->OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, call_id));
             agent::ToolTraceEvent started =
                 TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, call_id);
             started.outcome = agent::ToolOutcome::Succeeded;
-            bridge.OnToolTrace(started);
+            bridge->OnToolTrace(started);
             agent::ToolTraceEvent finished =
                 TraceEvent(agent::ToolTraceEventKind::ExecutionFinished, call_id);
             finished.outcome = agent::ToolOutcome::Succeeded;
             finished.duration_ms = 10;
             finished.details = nlohmann::json{{"exit_code", 0}};
-            bridge.OnToolTrace(finished);
+            bridge->OnToolTrace(finished);
         }
         api::Message results;
         results.role = api::Role::User;
@@ -1142,8 +1142,8 @@ TEST_CASE("P1-B 错误往返: 同一 assistant 多枚调用成功失败混排,�
         err_result.is_error = true;
         results.content.push_back(std::move(ok_result));
         results.content.push_back(std::move(err_result));
-        receipt = bridge.OnToolResultsCommitted("batch-1", results);
-        bridge.EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+        receipt = bridge->OnToolResultsCommitted("batch-1", results);
+        bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
     }
     REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
     const auto replay = ledger->ProjectV3ContextHistory();
