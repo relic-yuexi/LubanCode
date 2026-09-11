@@ -1775,12 +1775,14 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                     channel.output_bytes = result->content.size();
                     channel.output_bytes_lower_bound = !result->capture_complete;
                     request.channels.push_back(std::move(channel));
-                    auto preview = v3::BuildToolPreview(request);
-                    if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {
-                        hard_fail("tool.preview.unrepresentable", book.action_id);
-                        continue;
+                    if (result->content.size() > budget || !result->capture_complete) {
+                        auto preview = v3::BuildToolPreview(request);
+                        if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {
+                            hard_fail("tool.preview.unrepresentable", book.action_id);
+                            continue;
+                        }
+                        result->content = std::move(preview.text);
                     }
-                    if (result->content.size() > budget || !result->capture_complete) result->content = std::move(preview.text);
                     // Replace only text payloads; media retains its own accounting.
                     for (auto& payload : result->blocks) {
                         if (auto* text = std::get_if<tools::TextContent>(&payload)) text->text.clear();
