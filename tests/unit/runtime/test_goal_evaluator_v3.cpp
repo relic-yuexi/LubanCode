@@ -36,6 +36,7 @@
 #include "trajectory/v3/writer.hpp"
 
 namespace goalns = lubancode::runtime::goal;
+using goalns::CriterionVerdict;
 using goalns::GoalCheckpoint;
 using goalns::GoalContract;
 using goalns::GoalDecision;
@@ -233,8 +234,14 @@ TEST_CASE("判词校验:恰好覆盖合同,缺/多/重全拒") {
         CHECK(error.find("重复") != std::string::npos);
     }
     SUBCASE("合同外 criterion(跨 goal)拒") {
+        // 合同 criterion 照判,另塞一枚编造的 c-99——只多不少,才落在
+        // "不在冻结合同"分路(把 c-1 改名会先撞"缺判词"分路)。
         GoalEvaluation e = ParseOrDie(kGoodContinue);
-        e.criteria[0].id = "c-99";
+        CriterionVerdict fabricated;
+        fabricated.id = "c-99";
+        fabricated.status = "pass";
+        fabricated.evidence_ids = e.criteria[0].evidence_ids;
+        e.criteria.push_back(fabricated);
         const std::string error = ValidateEvaluationAgainstMaterial(in, e);
         REQUIRE_FALSE(error.empty());
         CHECK(error.find("不在冻结合同") != std::string::npos);

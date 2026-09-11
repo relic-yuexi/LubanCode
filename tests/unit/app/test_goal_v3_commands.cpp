@@ -17,11 +17,13 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "app/commands/goal_commands.hpp"
 #include "app/wirings/goal_session_wiring.hpp"
+#include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -76,6 +78,9 @@ struct GoalV3Fixture {
     // 主轮 usage 注入口(§4.67.7 归账测试用):空 = 装配层没有 turn 视图,
     // 泵如实跳过归账。
     std::function<std::optional<lubancode::runtime::TurnMetrics>()> turn_metrics;
+    // 命令面用户话走 TermOut(不经 wiring notify):把终端口折进夹具,
+    // 命令输出才能被断言(泵/恢复路的提示仍走 notes)。
+    std::ostringstream term_captured;
 
     explicit GoalV3Fixture(bool with_ledger = true)
         : dir(std::filesystem::temp_directory_path() /
@@ -86,6 +91,7 @@ struct GoalV3Fixture {
         std::filesystem::create_directories(dir, ec);
         std::filesystem::create_directories(dir / "repo", ec);
         config.features_goals = true;  // 正门开(env 总闸测试环境不设)
+        lubancode::cli::TermPort().Redirect(&term_captured, nullptr);
         if (with_ledger) {
             lubancode::runtime::TrajectorySessionLedger::Options options;
             options.workspaces_root = dir / "workspaces";
@@ -113,6 +119,7 @@ struct GoalV3Fixture {
     }
 
     ~GoalV3Fixture() {
+        lubancode::cli::TermPort().Reset();
         ledger.reset();
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
@@ -159,7 +166,7 @@ TEST_CASE("v3 卷:Ensure 绑服务,命令七动作走 GoalService") {
 
     // pause:转换表边(Active 尚未到——create 落 preparing;先开轮到位)。
     auto claim = pack.goal_service->ClaimPendingIntent(
-        "run-test", current->state_revision, nlohmann::json{{"test", true}});
+        "run-test", current->state_revision, nlohmann::json{});
     REQUIRE(claim.ok);
     REQUIRE(pack.goal_service->BeginIteration(pack.goal_service->current()->state_revision, {})
                  .ok);
@@ -251,14 +258,11 @@ TEST_CASE("v3 edit 在途拒:意图已认领时 edit 等安全边界(goal.busy)"
     REQUIRE(lubancode::app::HandleGoalCommand(
                 ParseAction(GoalCommandAction::Edit, "半途想改"), pack) ==
             lubancode::app::CommandFlow::Continue);
-    // 明确终态:合同一字未动,错误面有 goal.busy 的人话引导。
+    // 明确终态:合同一字未动,错误面有 goal.busy 的人话引导(命令面
+    // 用户话走 TermOut,断言对捕获的命令输出)。
     CHECK(service->current()->contract_revision == 1);
     CHECK(service->current()->phase == goalns::GoalPhase::Running);
-    bool saw_busy_note = false;
-    for (const std::string& note : fixture.notes) {
-        if (note.find("目标正在跑") != std::string::npos) saw_busy_note = true;
-    }
-    CHECK(saw_busy_note);
+    CHECK(fixture.term_captured.str().find("目标正在跑") != std::string::npos);
 }
 
 TEST_CASE("v3 resume 修不可推进的 preparing:崩溃窗口(edit 后没排上意图)重排") {
@@ -279,18 +283,15 @@ TEST_CASE("v3 resume 修不可推进的 preparing:崩溃窗口(edit 后没排上
                  .ok);
     CHECK(service->current()->pending_intent.empty());
 
-    // resume 不再对"无班可上"的 preparing 早退:转 active 并补排新工作项。
+    // resume 不再对"无班可上"的 preparing 早退:转 active 并补排新工作项
+    //(补排的"已排"人话在命令输出里)。
     REQUIRE(lubancode::app::HandleGoalCommand(ParseAction(GoalCommandAction::Resume), pack) ==
             lubancode::app::CommandFlow::Continue);
     const goalns::GoalStateSnapshot* current = service->current();
     REQUIRE(current != nullptr);
     CHECK(current->lifecycle == goalns::GoalLifecycle::Active);
     CHECK(current->pending_intent.at("contractRevision") == 2);
-    bool saw_work_note = false;
-    for (const std::string& note : fixture.notes) {
-        if (note.find("已排") != std::string::npos) saw_work_note = true;
-    }
-    CHECK(saw_work_note);
+    CHECK(fixture.term_captured.str().find("已排") != std::string::npos);
 
     // 泵接着按新合同开轮。
     fixture.wiring.PumpContinuation(0);
@@ -312,7 +313,7 @@ TEST_CASE("v3 resume 解 waiting:已认领收口位恢复 running 续收口,不�
     REQUIRE(service->ClaimPendingIntent("run-test", service->current()->state_revision, {}).ok);
     REQUIRE(service->BeginIteration(service->current()->state_revision, {}).ok);
     REQUIRE(service->EnterWaiting({"subagent-4"}, service->current()->state_revision,
-                                  nlohmann::json{{"source", "test"}})
+                                  nlohmann::json{})
                 .ok);
     CHECK(service->current()->lifecycle == goalns::GoalLifecycle::Waiting);
 
@@ -329,11 +330,8 @@ TEST_CASE("v3 resume 解 waiting:已认领收口位恢复 running 续收口,不�
     CHECK(current->pending_intent.at("claimed") == true);
     CHECK(current->counters.iterations_started == 1);  // 没开第二轮
     CHECK(fixture.turn_texts.empty());
-    bool saw_release_note = false;
-    for (const std::string& note : fixture.notes) {
-        if (note.find("等待解除") != std::string::npos) saw_release_note = true;
-    }
-    CHECK(saw_release_note);
+    // 用户 resume 的等待解除人话在命令输出里(后台完成路才走 notify)。
+    CHECK(fixture.term_captured.str().find("等待解除") != std::string::npos);
 }
 
 TEST_CASE("v3 主轮 usage 归账:泵收口把本轮模型用量记入 goal 账") {
@@ -384,7 +382,7 @@ TEST_CASE("v3 主轮 usage 归账:泵收口把本轮模型用量记入 goal 账"
     next.contract_revision = 1;
     next.continuation_ordinal = 1;
     REQUIRE(pack.goal_service
-                 ->SetPendingIntent(next, current->state_revision, nlohmann::json{{"t", true}})
+                 ->SetPendingIntent(next, current->state_revision, nlohmann::json{})
                  .ok);
     lubancode::runtime::TurnMetrics second = metrics;
     second.request_count = 1;
@@ -455,8 +453,9 @@ TEST_CASE("v3 恢复:RestoreFromArchive 接管 + clear 换场清内存") {
 
     // RestoreFromArchive:同卷(lineage 读到本卷 goal 账)接管成功。
     fixture.wiring.RestoreFromArchive();
-    CHECK(fixture.wiring.goal_service() != nullptr);
-    CHECK(fixture.wiring.goal_service()->current() != nullptr);
+    REQUIRE(fixture.wiring.goal_service() != nullptr);
+    // 接管失败时不许再解引用(REQUIRE 挡住,别让坏恢复变成 SIGSEGV)。
+    REQUIRE(fixture.wiring.goal_service()->current() != nullptr);
     CHECK(fixture.wiring.goal_service()->current()->goal_id == "goal-1");
     bool saw_restore_note = false;
     for (const std::string& note : fixture.notes) {

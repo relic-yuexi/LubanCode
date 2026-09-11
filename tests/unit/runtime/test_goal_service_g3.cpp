@@ -154,13 +154,13 @@ void RunToRunning(GoalService& service, const char* objective = "修好 auth 模
     GoalStateSnapshot draft = DraftObjective(objective);
     draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
     draft.pending_intent = FirstIntent().ToJson();
-    auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+    auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
     REQUIRE(created.ok);
     auto claimed = service.ClaimPendingIntent("run-s1", created.payload.at("stateRevision"),
-                                              nlohmann::json{{"source", "test"}});
+                                              nlohmann::json{});
     REQUIRE(claimed.ok);
     auto began = service.BeginIteration(claimed.payload.at("stateRevision"),
-                                        nlohmann::json{{"source", "test"}});
+                                        nlohmann::json{});
     REQUIRE(began.ok);
 }
 
@@ -188,7 +188,7 @@ TEST_CASE("EnterWaiting:active->waiting,taskRefs/巡检计划入快照 + 事实�
 
     auto waiting = service.EnterWaiting({"subagent-3", "subagent-7"},
                                          service.current()->state_revision,
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(waiting.ok);
     const GoalStateSnapshot* snapshot = service.current();
     REQUIRE(snapshot != nullptr);
@@ -213,7 +213,7 @@ TEST_CASE("EnterWaiting:active->waiting,taskRefs/巡检计划入快照 + 事实�
 
     SUBCASE("空 taskRefs 拒(无关进程不进等待账)") {
         auto refused = service.EnterWaiting({}, service.current()->state_revision,
-                                             nlohmann::json{{"source", "test"}});
+                                             nlohmann::json{});
         REQUIRE_FALSE(refused.ok);
         CHECK(refused.error_code == goalns::kErrGoalCandidateInvalid);
     }
@@ -225,7 +225,7 @@ TEST_CASE("巡检:退避三拍到上限停排,计数入快照重启不归零") {
     GoalService service(&*volume.writer, ServiceOptionsFor(volume.dir));
     RunToRunning(service);
     REQUIRE(service.EnterWaiting({"subagent-3"}, service.current()->state_revision,
-                                  nlohmann::json{{"source", "test"}})
+                                  nlohmann::json{})
                 .ok);
 
     // 未到点不巡。
@@ -234,7 +234,7 @@ TEST_CASE("巡检:退避三拍到上限停排,计数入快照重启不归零") {
     REQUIRE(service.WaitInspectionDue(g_now_ms + goalns::GoalWaitBackoffMs(0)));
     auto first = service.RecordWaitInspection(service.current()->state_revision,
                                               g_now_ms + goalns::GoalWaitBackoffMs(0),
-                                              nlohmann::json{{"source", "test"}});
+                                              nlohmann::json{});
     REQUIRE(first.ok);
     CHECK(service.current()->wait_plan.polls_done == 1);
     CHECK_FALSE(first.payload.value("stopped", false));
@@ -245,14 +245,14 @@ TEST_CASE("巡检:退避三拍到上限停排,计数入快照重启不归零") {
                                       goalns::GoalWaitBackoffMs(1) + goalns::GoalWaitBackoffMs(1);
     REQUIRE(service.WaitInspectionDue(after_second));
     REQUIRE(service.RecordWaitInspection(service.current()->state_revision, after_second,
-                                         nlohmann::json{{"source", "test"}})
+                                         nlohmann::json{})
                 .ok);
     // 第三拍:到上限,stopped 标 + nextDue 清零(目标仍 waiting,真实完成
     // 仍可唤醒)。
     const std::int64_t after_third = after_second + goalns::GoalWaitBackoffMs(2);
     REQUIRE(service.WaitInspectionDue(after_third));
     auto third = service.RecordWaitInspection(service.current()->state_revision, after_third,
-                                              nlohmann::json{{"source", "test"}});
+                                              nlohmann::json{});
     REQUIRE(third.ok);
     CHECK(third.payload.value("stopped", false));
     CHECK(service.current()->wait_plan.polls_done == 3);
@@ -260,7 +260,7 @@ TEST_CASE("巡检:退避三拍到上限停排,计数入快照重启不归零") {
     CHECK_FALSE(service.WaitInspectionDue(after_third + 999999));
     // 上限后再记:拒。
     auto refused = service.RecordWaitInspection(service.current()->state_revision,
-                                                after_third + 1, nlohmann::json{{"source", "test"}});
+                                                after_third + 1, nlohmann::json{});
     REQUIRE_FALSE(refused.ok);
     CHECK(service.current()->lifecycle == GoalLifecycle::Waiting);
 
@@ -280,13 +280,13 @@ TEST_CASE("ResolveWaiting:waiting->active,收口位恢复 running;迟到交付�
     GoalService service(&*volume.writer, ServiceOptionsFor(volume.dir));
     RunToRunning(service);
     REQUIRE(service.EnterWaiting({"subagent-3"}, service.current()->state_revision,
-                                  nlohmann::json{{"source", "test"}})
+                                  nlohmann::json{})
                 .ok);
 
     // 真实完成通知唤醒:waiting->active;iteration 在途(意图已认领)恢复
     // running,收口可续(不重开轮)。
     auto resolved = service.ResolveWaiting("subagent-3", service.current()->state_revision,
-                                           nlohmann::json{{"source", "test"}});
+                                           nlohmann::json{});
     REQUIRE(resolved.ok);
     const GoalStateSnapshot* snapshot = service.current();
     CHECK(snapshot->lifecycle == GoalLifecycle::Active);
@@ -298,23 +298,23 @@ TEST_CASE("ResolveWaiting:waiting->active,收口位恢复 running;迟到交付�
     auto began = service.BeginEvaluation(snapshot->state_revision, std::nullopt,
                                          std::vector<goalns::GoalEvidenceRef>{},
                                          std::vector<std::string>{},
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(began.ok);
 
     SUBCASE("pause 之后的迟到后台报告:拒,只留审计不拉起新轮") {
         // 重新等一轮再 pause。
         REQUIRE(service.CompleteIterationWithEvaluation(
                     service.current()->state_revision, ContinueVerdict("goal-1/iter-1"),
-                    nlohmann::json{{"source", "test"}})
+                    nlohmann::json{})
                     .ok);
         REQUIRE(service.ClaimPendingIntent("run-s1", service.current()->state_revision,
-                                           nlohmann::json{{"source", "test"}})
+                                           nlohmann::json{})
                     .ok);
         REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                     .ok);
         REQUIRE(service.EnterWaiting({"subagent-9"}, service.current()->state_revision,
-                                     nlohmann::json{{"source", "test"}})
+                                     nlohmann::json{})
                     .ok);
         GoalTransitionCandidate pause;
         pause.goal_id = service.current()->goal_id;
@@ -324,7 +324,7 @@ TEST_CASE("ResolveWaiting:waiting->active,收口位恢复 running;迟到交付�
         pause.stop_reason = "user_pause";
         REQUIRE(service.ApplyTransition(pause).ok);
         auto late = service.ResolveWaiting("subagent-9", service.current()->state_revision,
-                                           nlohmann::json{{"source", "test"}});
+                                           nlohmann::json{});
         REQUIRE_FALSE(late.ok);
         CHECK(late.error_code == goalns::kErrGoalNotWaiting);
         CHECK(service.current()->lifecycle == GoalLifecycle::Paused);  // 停止意图优先
@@ -335,16 +335,16 @@ TEST_CASE("ResolveWaiting:waiting->active,收口位恢复 running;迟到交付�
         // user_resume):状态面与真实完成唤醒一致,事实行的 reason 分得开。
         REQUIRE(service.CompleteIterationWithEvaluation(
                     service.current()->state_revision, ContinueVerdict("goal-1/iter-1"),
-                    nlohmann::json{{"source", "test"}})
+                    nlohmann::json{})
                     .ok);
         REQUIRE(service.ClaimPendingIntent("run-s1", service.current()->state_revision,
-                                           nlohmann::json{{"source", "test"}})
+                                           nlohmann::json{})
                     .ok);
         REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                     .ok);
         REQUIRE(service.EnterWaiting({"subagent-11"}, service.current()->state_revision,
-                                     nlohmann::json{{"source", "test"}})
+                                     nlohmann::json{})
                     .ok);
         auto resumed = service.ResolveWaiting("command:goal:resume",
                                               service.current()->state_revision,
@@ -379,12 +379,12 @@ TEST_CASE("RequestStop:旗落账泵不认领,continue 判词照采但不续排,�
     RunToRunning(service);
 
     auto stopped = service.RequestStop(service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}, {"reason", "esc"}});
+                                       nlohmann::json{});
     REQUIRE(stopped.ok);
     CHECK(service.current()->stop_requested);
     // 幂等:已置位再请求不空耗 revision。
     const std::uint64_t revision_before = service.current()->state_revision;
-    auto again = service.RequestStop(revision_before, nlohmann::json{{"source", "test"}});
+    auto again = service.RequestStop(revision_before, nlohmann::json{});
     REQUIRE(again.ok);
     CHECK(again.payload.value("idempotent", false));
     CHECK(service.current()->state_revision == revision_before);
@@ -396,11 +396,11 @@ TEST_CASE("RequestStop:旗落账泵不认领,continue 判词照采但不续排,�
     auto began = service.BeginEvaluation(service.current()->state_revision, std::nullopt,
                                          std::vector<goalns::GoalEvidenceRef>{},
                                          std::vector<std::string>{},
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(began.ok);
     auto closed = service.CompleteIterationWithEvaluation(
         began.payload.at("stateRevision"), ContinueVerdict("goal-1/iter-1"),
-        nlohmann::json{{"source", "test"}});
+        nlohmann::json{});
     REQUIRE(closed.ok);
     CHECK(closed.payload.at("verdictKind") == "continue");
     CHECK(closed.payload.contains("parked"));
@@ -435,25 +435,25 @@ TEST_CASE("开轮撞轮数帽:落 budget_exhausted,AddBudget 后显式恢复") {
     draft.contract.criteria.push_back({"c-1", "ctest 全过", true});
     draft.pending_intent = FirstIntent().ToJson();
     draft.budget.max_iterations = 1;
-    auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+    auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
     REQUIRE(created.ok);
     REQUIRE(service.ClaimPendingIntent("run-s1", created.payload.at("stateRevision"),
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                 .ok);
     // 第 1 轮:过(max_iterations=1)。
     REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                   nlohmann::json{{"source", "test"}})
+                                   nlohmann::json{})
                 .ok);
     // 收口排下一轮:continue 撞帽(下一轮 index 2 > 1)——判词照采但不排,
     // 落 budget_exhausted。
     auto began = service.BeginEvaluation(service.current()->state_revision, std::nullopt,
                                          std::vector<goalns::GoalEvidenceRef>{},
                                          std::vector<std::string>{},
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(began.ok);
     auto closed = service.CompleteIterationWithEvaluation(
         began.payload.at("stateRevision"), ContinueVerdict("goal-1/iter-1"),
-        nlohmann::json{{"source", "test"}});
+        nlohmann::json{});
     REQUIRE(closed.ok);
     CHECK(service.current()->lifecycle == GoalLifecycle::BudgetExhausted);
     CHECK(service.current()->stop_reason.rfind("budget_exhausted", 0) == 0);
@@ -464,12 +464,12 @@ TEST_CASE("开轮撞轮数帽:落 budget_exhausted,AddBudget 后显式恢复") {
     spent.usage_reported = true;
     auto recorded = service.RecordGoalUsage("req-1", "execution", spent,
                                             service.current()->state_revision,
-                                            nlohmann::json{{"source", "test"}});
+                                            nlohmann::json{});
     REQUIRE(recorded.ok);
     goalns::GoalBudgetAddition addition;
     addition.iterations = 5;
     auto added = service.AddBudget(addition, service.current()->state_revision,
-                                   nlohmann::json{{"source", "test"}});
+                                   nlohmann::json{});
     REQUIRE(added.ok);
     CHECK(added.payload.at("maxIterations") == 5);
     CHECK(service.current()->budget.max_iterations.has_value());
@@ -488,7 +488,7 @@ TEST_CASE("开轮撞轮数帽:落 budget_exhausted,AddBudget 后显式恢复") {
     SUBCASE("空增量拒") {
         goalns::GoalBudgetAddition empty;
         auto refused = service.AddBudget(empty, service.current()->state_revision,
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
         REQUIRE_FALSE(refused.ok);
     }
 }
@@ -500,7 +500,7 @@ TEST_CASE("token 帽:实报 + 预留共用余额,RecordGoalUsage 释放预留") 
     GoalStateSnapshot draft = DraftObjective("修好 auth");
     draft.pending_intent = FirstIntent().ToJson();
     draft.budget.max_total_tokens = 1000;
-    auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+    auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
     REQUIRE(created.ok);
     // usage 未报:token 尺没账可对,预留放行(§4.67.7 不能拿 0 冒充没花)。
     auto reserved_unknown = service.ReserveBudget("req-a", "evaluator", 5000);
@@ -514,7 +514,7 @@ TEST_CASE("token 帽:实报 + 预留共用余额,RecordGoalUsage 释放预留") 
     spent.usage_reported = true;
     auto recorded = service.RecordGoalUsage("req-1", "execution", spent,
                                             service.current()->state_revision,
-                                            nlohmann::json{{"source", "test"}});
+                                            nlohmann::json{});
     REQUIRE(recorded.ok);
     CHECK_FALSE(recorded.payload.value("deduped", false));
     auto view = service.EvaluateBudget(0);
@@ -538,7 +538,7 @@ TEST_CASE("token 帽:实报 + 预留共用余额,RecordGoalUsage 释放预留") 
     more.usage_reported = true;
     REQUIRE(service.RecordGoalUsage("req-b", "subagent", more,
                                     service.current()->state_revision,
-                                    nlohmann::json{{"source", "test"}})
+                                    nlohmann::json{})
                 .ok);
     CHECK(service.reservations().empty());
     CHECK_FALSE(service.EvaluateBudget(1).would_exhaust);
@@ -554,34 +554,34 @@ TEST_CASE("active 时长帽:activeElapsed 入快照,跨接管不归零") {
     GoalStateSnapshot draft = DraftObjective("修好 auth");
     draft.pending_intent = FirstIntent().ToJson();
     draft.budget.max_elapsed_ms = 60 * 60 * 1000;  // 60 分钟
-    auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+    auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
     REQUIRE(created.ok);
     REQUIRE(service.ClaimPendingIntent("run-s1", created.payload.at("stateRevision"),
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                 .ok);
     REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                   nlohmann::json{{"source", "test"}})
+                                   nlohmann::json{})
                 .ok);
     CHECK(service.current()->active_elapsed_ms == 0);  // preparing 段不计
     // 第一轮判 continue 排下一轮,active 段推进 61 分钟。
     auto began = service.BeginEvaluation(service.current()->state_revision, std::nullopt,
                                          std::vector<goalns::GoalEvidenceRef>{},
                                          std::vector<std::string>{},
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(began.ok);
     REQUIRE(service.CompleteIterationWithEvaluation(
                 began.payload.at("stateRevision"), ContinueVerdict("goal-1/iter-1"),
-                nlohmann::json{{"source", "test"}})
+                nlohmann::json{})
                 .ok);
     g_now_ms += 61 * 60 * 1000;
     // 认领这笔提交先把 61 分钟的 active 段计入快照(prev=active)。
     REQUIRE(service.ClaimPendingIntent("run-s1", service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                 .ok);
     CHECK(service.current()->active_elapsed_ms >= 61 * 60 * 1000);
     // 开新轮撞时长帽:落 budget_exhausted,resume 不拿新计时器归零旧余额。
     auto refused = service.BeginIteration(service.current()->state_revision,
-                                          nlohmann::json{{"source", "test"}});
+                                          nlohmann::json{});
     REQUIRE_FALSE(refused.ok);
     CHECK(refused.error_code == goalns::kErrGoalBudgetExhausted);
     CHECK(service.current()->lifecycle == GoalLifecycle::BudgetExhausted);
@@ -610,12 +610,12 @@ TEST_CASE("RecordGoalUsage:同 requestId 去重,接管喂底,复核缺口如实�
         first.usage_reported = true;
         REQUIRE(service.RecordGoalUsage("subagent-5", "subagent", first,
                                         service.current()->state_revision,
-                                        nlohmann::json{{"source", "test"}})
+                                        nlohmann::json{})
                     .ok);
         // 重复结果通知:同 key 第二次幂等,不落事实行、不加账。
         auto again = service.RecordGoalUsage("subagent-5", "subagent", first,
                                              service.current()->state_revision,
-                                             nlohmann::json{{"source", "test"}});
+                                             nlohmann::json{});
         REQUIRE(again.ok);
         CHECK(again.payload.value("deduped", false));
         CHECK(CountEvents(volume, EventKindV3::GoalUsageRecorded) == 1);
@@ -641,7 +641,7 @@ TEST_CASE("RecordGoalUsage:同 requestId 去重,接管喂底,复核缺口如实�
         repeat.usage_reported = true;
         auto again = service2.RecordGoalUsage("subagent-5", "subagent", repeat,
                                               service2.current()->state_revision,
-                                              nlohmann::json{{"source", "test"}});
+                                              nlohmann::json{});
         REQUIRE(again.ok);
         CHECK(again.payload.value("deduped", false));
         CHECK(service2.current()->usage.input_tokens == 100);  // 没有双计
@@ -658,7 +658,7 @@ TEST_CASE("usage 复核:事实比快照多时接管结果如实带缺口") {
     spent.usage_reported = true;
     REQUIRE(service.RecordGoalUsage("req-x", "subagent", spent,
                                     service.current()->state_revision,
-                                    nlohmann::json{{"source", "test"}})
+                                    nlohmann::json{})
                 .ok);
     // 正常接管:快照与事实一致,不带缺口。
     {
@@ -711,7 +711,7 @@ TEST_CASE("CreateForkedGoal:另发 id 默认 paused,证据待复核,预算不带
     ref.fresh = true;
     auto began = source_service.BeginEvaluation(source_service.current()->state_revision,
                                                 std::nullopt, {ref}, {},
-                                                nlohmann::json{{"source", "test"}});
+                                                nlohmann::json{});
     REQUIRE(began.ok);
     goalns::EvaluationVerdict verdict;
     verdict.evaluation_id = "eval-goal-1/iter-1";
@@ -723,7 +723,7 @@ TEST_CASE("CreateForkedGoal:另发 id 默认 paused,证据待复核,预算不带
     spent.usage_reported = true;
     verdict.usage_addition = spent;
     REQUIRE(source_service.CompleteIterationWithEvaluation(
-                began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}})
+                began.payload.at("stateRevision"), verdict, nlohmann::json{})
                 .ok);
     // 源再抬一顶预算帽,验 fork"原预算不带"有真东西可丢。
     // 变量名避开 raise:doctest 断点宏内部调 raise(SIGTRAP),
@@ -732,14 +732,14 @@ TEST_CASE("CreateForkedGoal:另发 id 默认 paused,证据待复核,预算不带
     raise_budget.iterations = 9;
     raise_budget.total_tokens = 999999;
     REQUIRE(source_service.AddBudget(raise_budget, source_service.current()->state_revision,
-                                     nlohmann::json{{"source", "test"}})
+                                     nlohmann::json{})
                 .ok);
 
     // fork:落在新 session 的服务上(源不动)。
     Volume fork_volume("fork-branch", "s2");
     GoalService fork_service(&*fork_volume.writer, ServiceOptionsFor(fork_volume.dir));
     auto forked = fork_service.CreateForkedGoal(*source_service.current(),
-                                                nlohmann::json{{"source", "test"}, {"fork", true}});
+                                                nlohmann::json{});
     REQUIRE(forked.ok);
     const GoalStateSnapshot* branch = fork_service.current();
     REQUIRE(branch != nullptr);
@@ -778,13 +778,13 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
         draft.pending_intent = FirstIntent().ToJson();
         draft.budget.max_iterations = 20;
         draft.budget.max_total_tokens = 500000;
-        auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         REQUIRE(service.ClaimPendingIntent("run-sv1", created.payload.at("stateRevision"),
-                                           nlohmann::json{{"source", "test"}})
+                                           nlohmann::json{})
                     .ok);
         REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                 .ok);
         goalns::GoalEvidenceRef ref;
         ref.id = "ev-1";
@@ -795,7 +795,7 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
         ref.content_sha256 = std::string(64, 't');
         ref.observed_at_ms = g_now_ms;
         auto began = service.BeginEvaluation(service.current()->state_revision, "evt-ckpt-1",
-                                             {ref}, {}, nlohmann::json{{"source", "test"}});
+                                             {ref}, {}, nlohmann::json{});
         REQUIRE(began.ok);
         goalns::EvaluationVerdict verdict;
         verdict.evaluation_id = "eval-goal-1/iter-1";
@@ -803,7 +803,7 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
         verdict.pending_question = "先修哪个模块?";
         verdict.stop_reason = "needs_user";
         REQUIRE(service.CompleteIterationWithEvaluation(
-                    began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}})
+                    began.payload.at("stateRevision"), verdict, nlohmann::json{})
                     .ok);
     }
     WriteSessionJson(v1.dir, "sv1", "new", "");

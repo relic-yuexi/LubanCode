@@ -86,8 +86,13 @@ struct Volume {
     std::string session_id;
     std::optional<V3Writer> writer;
 
-    Volume(const std::string& tag, const std::string& sid, bool fail_applied = false)
-        : dir(FreshDir(tag)), session_id(sid) {
+    // root 给定时,卷落 root/<sid>/(lineage 走"目录名即 session id、
+    // previousSessionId 按兄弟目录解析"的约定;ProjectGoalLineage 同款)。
+    Volume(const std::string& tag, const std::string& sid, bool fail_applied = false,
+           const std::filesystem::path& root = {})
+        : dir(root.empty() ? FreshDir(tag) : root / sid), session_id(sid) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
         lubancode::trajectory::v3::V3WriterOptions options;
         if (fail_applied) {
             options.inject_io_failure = []() -> std::optional<std::string> {
@@ -134,10 +139,13 @@ GoalPendingIntent FirstIntent() {
     return intent;
 }
 
-GoalTransitionCandidate Transition(GoalLifecycle to, std::uint64_t expected_state_revision) {
+// 停态候选:goal_id 对上在账目标(ApplyTransition 的 goalId 对账是硬门,
+// 候选不带 id 一律 goal.not_found)。
+GoalTransitionCandidate Transition(GoalLifecycle to, const GoalService& service) {
     GoalTransitionCandidate candidate;
+    candidate.goal_id = service.current()->goal_id;
     candidate.to_lifecycle = to;
-    candidate.expected_state_revision = expected_state_revision;
+    candidate.expected_state_revision = service.current()->state_revision;
     return candidate;
 }
 
@@ -203,7 +211,7 @@ TEST_CASE("CreateGoal 带首轮意图:快照与投影可见,坏草稿拒") {
 
     GoalStateSnapshot draft = DraftObjective("修好 auth;ctest -R auth 全过");
     draft.pending_intent = FirstIntent().ToJson();
-    const auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"command", "/goal"}});
+    const auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
     REQUIRE(created.ok);
     REQUIRE(service.current() != nullptr);
     std::string error;
@@ -347,8 +355,7 @@ TEST_CASE("ClaimPendingIntent:claim 落账+queued,同写者幂等,他写者拒")
     GoalStateSnapshot draft2 = DraftObjective("停态认领");
     draft2.pending_intent = FirstIntent().ToJson();
     REQUIRE(service2.CreateGoal(std::move(draft2), {}).ok);
-    GoalTransitionCandidate pause = Transition(GoalLifecycle::Paused,
-                                               service2.current()->state_revision);
+    GoalTransitionCandidate pause = Transition(GoalLifecycle::Paused, service2);
     pause.stop_reason = "user_pause";
     REQUIRE(service2.ApplyTransition(pause).ok);
     const auto stopped = service2.ClaimPendingIntent("run-1", service2.current()->state_revision, {});
@@ -411,8 +418,7 @@ TEST_CASE("BeginIteration/EndIteration:iterationId 发号单调,收口销 intent
     GoalStateSnapshot draft2 = DraftObjective("停态开轮");
     draft2.pending_intent = FirstIntent().ToJson();
     REQUIRE(service2.CreateGoal(std::move(draft2), {}).ok);
-    GoalTransitionCandidate pause = Transition(GoalLifecycle::Paused,
-                                               service2.current()->state_revision);
+    GoalTransitionCandidate pause = Transition(GoalLifecycle::Paused, service2);
     pause.stop_reason = "user_pause";
     REQUIRE(service2.ApplyTransition(pause).ok);
     CHECK_FALSE(service2.BeginIteration(service2.current()->state_revision, {}).ok);
@@ -613,10 +619,12 @@ TEST_CASE("跨卷接管:adoptedFrom 凭据,单卷投影认半路续接,伪造拒
 
 TEST_CASE("ProjectGoalLineage:穿 resume 边,clear 边不穿,多跳与回环") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
-    // 三卷链:C(resume←B(resume←A(launch))),goal 只在 A。
-    Volume a("lineage-a", "s-a");
-    Volume b("lineage-b", "s-b");
-    Volume c("lineage-c", "s-c");
+    // 三卷链:C(resume←B(resume←A(launch))),goal 只在 A。卷须同根且
+    // 目录名即 session id——lineage 按 previousSessionId 找兄弟目录。
+    const std::filesystem::path root = FreshDir("lineage-root");
+    Volume a("lineage-a", "s-a", false, root);
+    Volume b("lineage-b", "s-b", false, root);
+    Volume c("lineage-c", "s-c", false, root);
     WriteSessionJson(a.dir, "s-a", "process_launch", "");
     WriteSessionJson(b.dir, "s-b", "resume", "s-a");
     WriteSessionJson(c.dir, "s-c", "resume", "s-b");
@@ -634,7 +642,7 @@ TEST_CASE("ProjectGoalLineage:穿 resume 边,clear 边不穿,多跳与回环") {
     CHECK(lineage.walked.size() == 3);
 
     // B 也写了 goal:从 C2(resume←B)起取最近一份,不再往 A 走到底。
-    Volume c2("lineage-c2", "s-c2");
+    Volume c2("lineage-c2", "s-c2", false, root);
     WriteSessionJson(c2.dir, "s-c2", "resume", "s-b");
     GoalService service_b(&*b.writer, ServiceOptions(b));
     GoalStateSnapshot draft_b = DraftObjective("B 卷目标");
@@ -648,15 +656,15 @@ TEST_CASE("ProjectGoalLineage:穿 resume 边,clear 边不穿,多跳与回环") {
     CHECK(lineage.projection.snapshot.pending_intent.at("workItemId") == "wi-9");
 
     // clear 边不穿:clear 开的新场不带旧 goal(§4.67.2 clear 才撤 goal)。
-    Volume cleared("lineage-clear", "s-cl");
+    Volume cleared("lineage-clear", "s-cl", false, root);
     WriteSessionJson(cleared.dir, "s-cl", "clear", "s-a");
     lineage = goalns::ProjectGoalLineage(cleared.dir);
     CHECK_FALSE(lineage.found);
     CHECK(lineage.projection.gap == goalns::GoalProjectionGap::NoGoal);
 
     // 回环护栏:C←B 互相指,链停不死循环。
-    Volume loop_c("lineage-loopc", "s-lc");
-    Volume loop_b("lineage-loopb", "s-lb");
+    Volume loop_c("lineage-loopc", "s-lc", false, root);
+    Volume loop_b("lineage-loopb", "s-lb", false, root);
     WriteSessionJson(loop_c.dir, "s-lc", "resume", "s-lb");
     WriteSessionJson(loop_b.dir, "s-lb", "resume", "s-lc");
     lineage = goalns::ProjectGoalLineage(loop_c.dir);
