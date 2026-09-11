@@ -1,5 +1,7 @@
 # 项目记忆系统流程
 
+> **V3-GAP-03：** 下文召回/写入流程沿现有 memory 实现；MemoryLedgerBridge 尚用旧 recorder，v3 消息与上下文采用链不能据此视为已接。见 [Session v3](../session-v3.md)。
+
 [文档首页](../../README.md) · [项目记忆手册](design.md) · [上下文压缩机制](../../features/context/compaction.md) · [安全模型](../../development/security.md)
 
 这页把项目记忆从“识别仓库”到“召回入模”，再到“候选审阅、后台落盘”串成一条线。文件格式、命令全集与字段说明见[项目记忆手册](design.md)。

@@ -1,5 +1,7 @@
 # Workflow 运行时
 
+> **V3-GAP-05：** 本页说明现行 Workflow 运行时。节点独立 Session v3、output.commit 与完整节点恢复仍须按新合同接线，不能把已有 journal 桥当成迁移完成。见 [Session v3](session-v3.md)。
+
 [架构总览](README.md) · [设计指南](../features/workflows/designing-workflows.md) · [Schema 参考](../reference/workflow-schema.md) · [app-server](../features/app-server/README.md)
 
 这页解释 workflow 从 YAML 到终态怎样走，重点是 Store、调度、等待、journal 与

@@ -1,5 +1,7 @@
 # LubanCode 配置
 
+会话格式已默认切到 v3。旧格式管理命令、离线 usage、Telemetry 与新合同接线边界见 [Session v3](../architecture/session-v3.md)及[待清理清单](../development/v3-legacy-audit.md)。
+
 [文档首页](../README.md) · [功能总览](feature-index.md) · [命令手册](commands.md) · [Provider 目录](../features/providers/catalog.md) · [模型与 Schema 深挖](../architecture/providers/schema.md) · [扩展指南](../features/extensions/README.md) · [架构说明](../architecture/README.md)
 
 lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key`、`model` 这几件事。本文档核实自 `src/config/config.hpp`、发行包 `skills/lubancode-config/SKILL.md` 与 `lubancode --help` 的真实输出,字段名与语义以代码为准。

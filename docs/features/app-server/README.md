@@ -1,5 +1,7 @@
 # app-server:无界面后台协议
 
+> **v3 接线边界：** 三端已共用 SessionService 入口；下文协议 1.2 的 thread/resume 仍是只读恢复视图，不能用来启动续跑。进程 lastSeq 不是 v3 文件来源游标。2.0 恢复合同与旧路径清理见[清理清单](../../development/v3-legacy-audit.md)。
+
 [文档首页](../../README.md) · [命令参考](../../reference/commands.md) · [工具参考](../../reference/tools.md) · [测试手册](../../development/testing.md) · [架构说明](../../architecture/README.md)
 
 `lubancode app-server` 是无界面后台入口:前端从 stdin 发 JSON-RPC 请求,后台在项目机上读文件、改代码、跑命令,再从 stdout 把正文、工具进度、审批、diff 与结果一笔笔传回来。SSH 只管架通道,活计全落在远端。

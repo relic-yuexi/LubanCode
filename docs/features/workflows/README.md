@@ -1,5 +1,7 @@
 # Workflow
 
+> **v3 边界：** 现有 Workflow 命令与节点执行沿本页说明；新版独立节点会话和持久输出提交尚未接全，见 [Session v3](../../architecture/session-v3.md)。
+
 [文档首页](../../README.md) · [设计指南](designing-workflows.md) · [Schema 参考](../../reference/workflow-schema.md) · [运行时](../../architecture/workflow-runtime.md)
 
 Workflow 把一件反复要办、步骤与收口规矩都说得清的差事，装成一张可校验、
