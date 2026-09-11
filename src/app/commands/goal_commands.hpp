@@ -27,6 +27,7 @@
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "runtime/goal_coordinator.hpp"
+#include "runtime/goal_service.hpp"  // GoalService/投影(轨迹 v3 §4.67 G1)
 #include "runtime/goal_types.hpp"
 #include "runtime/loop_scheduler.hpp"
 
@@ -68,26 +69,52 @@ std::string DescribeGoalErrorCode(const std::string& code, const std::string& me
 GoalCommandOutcome FormatGoalStatus(const lubancode::runtime::goal::GoalCoordinator& coordinator,
                                     std::int64_t now_ms);
 
+// v3 路线的 status 排版(§4.67 G1 单一读面):吃 lineage 投影——lifecycle
+// ·phase·双版本号·iteration·目标·停因/待答·待续工作项(认领面)·预算
+// 用量。缺口(七档)第一行如实报,不猜(§4.55 状态损坏)。
+GoalCommandOutcome FormatGoalV3Status(const lubancode::runtime::goal::GoalLineageProjection& lineage);
+
 // clear 的二次确认文案(objective preview + iteration + 已耗预算 + 提醒
 // clear 不是 rollback)。
 std::vector<std::string> BuildGoalClearConfirmLines(const lubancode::runtime::goal::GoalTask& task);
+
+// v3 路线 clear 的二次确认文案(快照版:stateRevision/iteration/用量)。
+std::vector<std::string> BuildGoalV3ClearConfirmLines(
+    const lubancode::runtime::goal::GoalStateSnapshot& snapshot);
 
 // ---- /goal 会话接线(终端接线收尾单自大类搬出) ----------------------------
 //
 // 命令分派、goal 钩子发射、状态栏短段、子代理回流喂账原先住在大类里,搬
 // 到这里;材料经 GoalWiring 递入(装配与状态留会话)。
+//
+// 轨迹 v3 §4.67 G1:会话开在 v3 卷上时 goal_service 非空,七动作全走
+// GoalService(快照 + state.goal.applied);v2 场 goal_service 空,照旧走
+// v1 coordinator(旧档读路,一字不动)。
 struct GoalWiring {
     const lubancode::cli::Theme* theme = nullptr;
     lubancode::runtime::goal::GoalCoordinator* coordinator = nullptr;  // ensure 后非空
     lubancode::tools::AgentTool* agent_tool = nullptr;      // 子代理台账(可空)
     lubancode::tools::GoalCheckpointState* checkpoint_state = nullptr;  // 可空
     lubancode::runtime::loop::LoopScheduler* loop_scheduler = nullptr;  // 状态栏短段(可空)
+    // ---- v3(G1)----
+    lubancode::runtime::goal::GoalService* goal_service = nullptr;  // v3 场非空
+    const lubancode::config::GoalsConfig* goals_config = nullptr;   // 建档折预算(可空)
+    bool goals_enabled = false;  // features.goals 正门 + env 总闸(与 v1 同源)
+    // 只读投影(单一读面:/goal 显示与 resume 恢复共这一口)。可空 = v2 场。
+    std::function<lubancode::runtime::goal::GoalLineageProjection()> project_goal;
 };
 
 // /goal 七动作的接线(view/status/create/edit/pause/resume/clear;clear 走
-// 二次确认)。coordinator 由调用方先 ensure。
+// 二次确认)。coordinator 由调用方先 ensure。v3 场(goal_service 非空)分派
+// 到 HandleGoalCommandV3。
 lubancode::app::CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal,
                                                const GoalWiring& wiring);
+
+// v3 路线(轨迹 v3 §4.67 G1):/goal 建(合同入快照 + 首轮意图)、status
+// (读 lineage 投影,缺口七档如实报)、edit(AmendContract)、pause/resume
+// (转换表边)、clear(二次确认 + Cleared)。
+lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoalCommand& goal,
+                                                const GoalWiring& wiring);
 
 // goal 生命周期进 hook 分发:全部只给审计与 additionalContext,没有
 // permission_decision(Hook 不可直接写 Achieved)。

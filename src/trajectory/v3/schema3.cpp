@@ -995,6 +995,28 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckRefField(kind_name, line.payload, "causeRef", /*required=*/false)) {
             return error;
         }
+        // §4.67 G1:跨卷续接凭据(可选)。resume-as-new 后 goal 从来源卷接
+        // 管,本卷首条 applied 的 fromStateRevision != 0,须带 adoptedFrom
+        //{sessionId, stateRevision} 且 stateRevision == fromStateRevision
+        //(接管时 revision);带了但 revision 不衔接 = 半路伪造,拒。
+        if (line.payload.contains("adoptedFrom")) {
+            const auto& adopted = line.payload["adoptedFrom"];
+            if (!adopted.is_object() || !adopted.contains("sessionId") ||
+                !adopted.at("sessionId").is_string() ||
+                adopted.at("sessionId").get<std::string>().empty() ||
+                !adopted.contains("stateRevision") ||
+                !JsonIsNonNegativeInt(adopted.at("stateRevision"))) {
+                return Err("schema3.bad_type",
+                           "state.goal.applied 的 adoptedFrom 应为 object{sessionId:string, "
+                           "stateRevision:非负整数}");
+            }
+            if (adopted.at("stateRevision").get<std::uint64_t>() !=
+                line.payload["fromStateRevision"].get<std::uint64_t>()) {
+                return Err("schema3.bad_type",
+                           "state.goal.applied 的 adoptedFrom.stateRevision 应等于 "
+                           "fromStateRevision(接管时 revision)");
+            }
+        }
     }
     // pending 类必须带 reason(§4.14)。
     if (line.status == OpStatus::Pending && !line.payload.contains("reason")) {

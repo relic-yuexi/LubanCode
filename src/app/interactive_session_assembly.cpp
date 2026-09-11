@@ -601,6 +601,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         goal_host.current_model = current_model;
         goal_host.agent_tool = [this]() { return session_agent_tool(); };
         goal_host.loop_scheduler = [this]() { return loop_wiring_.scheduler(); };
+        // 轨迹 v3 §4.67 G1:goal 的持久账接线——v3 主写者/会话根/来源链从
+        // 会话账取;v2 场 v3_main_writer() 恒空,goal 照旧走 v1 coordinator。
+        goal_host.trajectory = session_runtime_.trajectory();
         goal_host.start_turn = [this](const std::string& text, bool* turn_failed) {
             RunSessionTurn(text, TurnSource::User, turn_failed);
         };
@@ -1614,6 +1617,9 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
             // 新场子的下一问重走本地起名 + 精炼(判定本体在 titles_)。
             titles_.ResetForNewSession();
+            // 轨迹 v3 §4.67 G1:/clear 开的新场不带旧 goal——v3 服务的内存
+            // 接管态清空(v1 coordinator 照旧,行为不变)。
+            goal_wiring_.HandleSessionCleared();
         },
         [this](const std::string& title) {
             peer_wiring_.SetName(title);

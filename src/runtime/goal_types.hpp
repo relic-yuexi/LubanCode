@@ -121,6 +121,14 @@ inline constexpr const char* kErrGoalCandidateInvalid = "goal.candidate_invalid"
 // §4.67 G0(只读投影):账上 applied 指向的快照缺失/hash 不符/序列非法,
 // 报缺口不猜(§4.55"状态损坏")。
 inline constexpr const char* kErrGoalProjectionGap = "goal.projection_gap";
+// §4.67 G1(continuation 意图):快照里没有待认领的意图(claim/consume 无的放矢)。
+inline constexpr const char* kErrGoalIntentMissing = "goal.intent_missing";
+// §4.67 G1(claim 单写者):意图已被别的 writer epoch 认领——不盲重放,
+// 调用方走恢复核验(§4.67.4"已启动但未收口")。
+inline constexpr const char* kErrGoalIntentAlreadyClaimed = "goal.intent_already_claimed";
+// §4.67 G1(意图提交):前一枚意图未认领/对着旧合同,不许静默覆盖(欠队列
+// 的账不能丢)。
+inline constexpr const char* kErrGoalIntentConflict = "goal.intent_conflict";
 
 // ---------------------------------------------------------------------------
 // objective 合同(0 期:4000 characters 的准确计数法)

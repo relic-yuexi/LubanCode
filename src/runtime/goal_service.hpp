@@ -18,12 +18,14 @@
 // 与 v1 运行面(GoalCoordinator)的关系(§4.67.9):coordinator 的 revision
 // 校验/预算闸/完成门槛职责可复用,本件不复刻其内存状态机;lifecycle/phase
 // 与双版本号(stateRevision/contractRevision)按 §4.67.3 收敛,命令面接线
-// 归 G1+。v1 的 GoalState 枚举(Running/Evaluating 顶层态)与本处
-// lifecycle+phase 两层模型的合并收敛同样归 G1+。
+// 归 G1(已接:app/commands/goal_commands.cpp 的 v3 分支 + goal_session_
+// wiring 的认领/开轮/收口泵路)。v1 的 GoalState 枚举(Running/Evaluating
+// 顶层态)与本处 lifecycle+phase 两层模型的合并收敛归 G2+(验收接进来才
+// 有 evaluating 相位的真来源)。
 //
-// G0 定型、后续棒次补内容:pendingIntent(continuation 意图,G1)、
-// checkpointRef/appliedEvaluationId 的真实来源事件(G1/G2)、waitTaskRefs
-// 与巡检计划(G3)。
+// G0 定型、后续棒次补内容:checkpointRef/appliedEvaluationId 的真实来源
+// 事件(G2)、waitTaskRefs 与巡检计划(G3)。pendingIntent(continuation
+// 意图)G1 已定型:GoalPendingIntent + SetPendingIntent/ClaimPendingIntent。
 //
 // 依赖铁律:不 include cli/app/api;trajectory::v3 只前向声明(实现侧引
 // writer/reader),goal_types 的纯数据(合同/预算/usage/计数)照抄复用。
@@ -82,7 +84,7 @@ std::string ToString(GoalPhase phase);
 bool ParseGoalPhase(const std::string& s, GoalPhase& out);
 
 // lifecycle 转换表(纯函数,单测钉死)。合法转换:
-//   preparing    -> active / awaiting_user / cleared / failed
+//   preparing    -> active / paused / awaiting_user / cleared / failed
 //   active       -> waiting / paused / awaiting_user / blocked /
 //                   budget_exhausted / suspended_by_policy / achieved /
 //                   cleared / failed
@@ -190,6 +192,52 @@ std::string SnapshotBytes(const GoalStateSnapshot& snapshot);
 std::string SnapshotRefPath(const std::string& goal_id, std::uint64_t state_revision);
 
 // ---------------------------------------------------------------------------
+// continuation 意图(§4.67.4/G1:快照 pendingIntent 的定型形状)
+// ---------------------------------------------------------------------------
+
+// 一枚待续工作项的意图。§4.67.4:续跑去重键为
+//   (goalId, contractRevision, predecessorIterationId, continuationOrdinal);
+// 首轮 predecessor 为空、ordinal=1。意图含 workItemId(恢复按原 id 补队列,
+// 不重排)、triggerRef/nextActionRef。claim 面:取走工作项先提交 claimed
+// 状态和 writerEpoch 再调模型;他 epoch 已认领的意图不盲重放(恢复核验)。
+struct GoalPendingIntent {
+    std::string work_item_id;      // wi-<n>:恢复补队列的去重身份
+    std::uint64_t contract_revision = 1;
+    std::string predecessor_iteration_id;  // 空 = 首轮
+    int continuation_ordinal = 1;
+    std::string trigger_ref;        // 可空(触发意图的账引用)
+    std::string next_action_ref;    // 可空
+    bool claimed = false;
+    std::string writer_epoch;       // claim 者(写者 run id)
+    std::int64_t claimed_at_ms = 0;
+
+    std::string DedupeKey(const std::string& goal_id) const;
+    nlohmann::json ToJson() const;
+    static std::optional<GoalPendingIntent> FromJson(const nlohmann::json& j, std::string* error);
+};
+
+// 意图形状的单行合同校验(缺字段/类型错/枚举错/claim 面不自洽都拒)。
+std::string ValidatePendingIntent(const nlohmann::json& j);
+
+// §4.67.4 恢复补投影:这枚快照对当前写者还有没有可取的工作项。
+//   - 意图未认领 + 非停态 + 合同版本对得上 → claimable(恢复按原
+//     workItemId 补队列,重复 resume 只补同一项,不另发新工作);
+//   - 他 epoch 已认领 → claimed_by_other(已启动未收口,恢复核验归 G2,
+//     不重放副作用);
+//   - 本 epoch 已认领且 phase=queued(claim 后、开轮前)→ 仍 claimable
+//     (claim 幂等,沿用原项);
+//   - 停态/终态/意图对着旧合同 → 不排(§4.67.4"旧 Goal 工作项不挤过
+//     排在边界前的 pause/edit/clear")。
+struct GoalWorkView {
+    bool claimable = false;
+    bool claimed_by_other = false;
+    bool has_intent = false;
+    GoalPendingIntent intent;
+    std::string reason;  // 人话(为什么不能排)
+};
+GoalWorkView EvaluateGoalWork(const GoalStateSnapshot& snapshot, const std::string& writer_epoch);
+
+// ---------------------------------------------------------------------------
 // 只读投影(§4.67 G0"只读投影";§5.1 纯读零调用零重跑)
 // ---------------------------------------------------------------------------
 
@@ -209,6 +257,7 @@ struct GoalProjection {
     bool has_goal = false;
     GoalStateSnapshot snapshot;   // 最新生效快照
     std::string goal_id;
+    std::string session_id;             // 这份投影来自哪一卷(跨卷接管用)
     std::uint64_t applied_seq = 0;      // 最新 applied 的 seq
     std::string applied_event_id;
     std::string applied_line_hash;
@@ -221,8 +270,27 @@ struct GoalProjection {
 // 校验 revision 递增与 lifecycle 转换合法,取最后一条为 head;按
 // snapshotRef 实探快照并验 hash。ledger 须已过 ReadV3Ledger(哈希链已验);
 // session_dir 为空时快照全部按 SnapshotMissing 报缺口。
+//
+// 跨卷续接(G1):resume-as-new 后 goal 的新 applied 落在新卷,首条
+// fromStateRevision != 0——须带 adoptedFrom{sessionId,stateRevision} 且
+// stateRevision == fromStateRevision(接管凭据),否则按非法序列报缺口。
 GoalProjection ProjectGoalState(const trajectory::v3::V3Ledger& ledger,
                                 const std::filesystem::path& session_dir);
+
+// 沿 resume 来源链投影 goal head(§4.67.8"goal 沿 session lineage 持久
+// 保存";§4.67 G1 命令面/恢复共用的单一读面)。从 current_session_dir
+// 所在场起:先投本场卷;没有 goal 账且本场 start_reason=resume 时沿
+// session.json 的 previousSessionId 逐级向上,取最近一份有 goal 账的卷
+// (含缺口——缺口如实上报,不猜)。clear/fork 边不穿(goal 不跟 clear
+// 走);链断(目录缺/manifest 坏)在 detail 里说明。深度护栏 32 跳、
+// 防 id 回环。
+struct GoalLineageProjection {
+    bool found = false;          // 链上任一卷有 goal 账(含缺口)
+    GoalProjection projection;   // found 时为最近一份;否则 gap=NoGoal
+    std::vector<std::string> walked;  // 走过的 session id(审计)
+    std::string detail;          // 人话(从哪卷来/链停在哪)
+};
+GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_session_dir);
 
 
 // ---------------------------------------------------------------------------
@@ -294,6 +362,35 @@ public:
     // 锁住内存执行门并报错")。换新实例/恢复流程归 G1+。
     bool broken() const { return broken_; }
 
+    // ---- §4.67 G1:continuation 意图、iteration 归属、claim 与恢复去重 ----
+
+    // 意图提交(§4.67.4"continue 且有可行下一步时,将下轮意图随状态快照
+    // 提交";/goal 接纳的首轮意图经 CreateGoal 的 draft.pending_intent 带)。
+    // CAS 同 ApplyTransition。前一枚意图未认领时不许覆盖(欠队列的账不能
+    // 静默丢,goal.intent_conflict);对着旧合同也不受理。状态提交 +1,
+    // lifecycle/phase 不动。
+    GoalServiceResult SetPendingIntent(GoalPendingIntent intent, std::uint64_t expected_state_revision,
+                                       nlohmann::json cause_ref);
+
+    // 认领(§4.67.4"取走工作项也先提交 claimed 状态和 writerEpoch,再调用
+    // 模型";§4.67.8 单写者接管)。提交 claimed=true + writerEpoch +
+    // phase=queued;恢复去重的锚就是这枚 applied:claim 落账后,重复 resume
+    // 不再把同一工作项当未认领补队列。同 epoch 幂等(已认领照回 ok);
+    // 他 epoch 已认领报 goal.intent_already_claimed(恢复核验归 G2)。
+    GoalServiceResult ClaimPendingIntent(std::string writer_epoch, std::uint64_t expected_state_revision,
+                                         nlohmann::json cause_ref);
+
+    // 开轮(§4.67.4 主工作轮绑定 iteration:一个 iteration 表示一份主工作
+    // 轮及其收口处理,iterationId 落快照,不再恒 null)。preparing 顺带转
+    // active(objective 已在手即合同底稿;真 preflight 归 G2),counters.
+    // iterations_started +1;停态/终态拒。
+    GoalServiceResult BeginIteration(std::uint64_t expected_state_revision, nlohmann::json cause_ref);
+
+    // 收工(G1 无验收:执行轮收口回 idle、清 pendingIntent——认领过的工作
+    // 项销账,不留给下一次 resume 重复提交;判词与续排意图归 G2,不在这
+    // 假装评过)。iteration 记录留在快照(status 可见)。
+    GoalServiceResult EndIteration(std::uint64_t expected_state_revision, nlohmann::json cause_ref);
+
     // 只读查询:当前生效快照(applied 已落、内存已发布)。终态 goal 保留
     // 在案(审计);再 Create 会另起 goalId。
     const GoalStateSnapshot* current() const { return current_.has_value() ? &*current_ : nullptr; }
@@ -321,6 +418,11 @@ private:
     std::string applied_event_id_;
     std::string applied_line_hash_;
     std::optional<std::uint64_t> applied_seq_;
+    // 跨卷接管凭据(G1):AdoptFromProjection 置位,本写者对这只 goal 的
+    // 首次 Commit 在 applied 里带 adoptedFrom{sessionId,stateRevision},
+    // 落稳后清零。ProjectGoalState 按它认"本卷从半路续接"的合法首条。
+    bool adopted_carry_ = false;
+    std::string adopted_from_session_;
 };
 
 }  // namespace lubancode::runtime::goal
