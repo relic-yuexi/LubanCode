@@ -24,6 +24,7 @@
 
 #include "runtime/v3_compact_runtime.hpp"
 #include "platform/paths.hpp"
+#include "platform/process.hpp"
 #include "trajectory/session_lock.hpp"
 #include "trajectory/v3/compact.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -194,7 +195,10 @@ TEST_CASE("夹具: 主账多轮可读,缺 usage 的 assistant 保持 null 不补
     REQUIRE(ledger->context.chain.size() == 5);
     const auto it = ledger->message_index.find(no_usage_id);
     REQUIRE(it != ledger->message_index.end());
-    CHECK(ledger->messages[it->second].usage.is_null());  // 缺实报 = null,不是 0
+    // usage 读回是 optional<json>:线上 "usage": null 装成含 null 的 optional,
+    // 整键缺位是 nullopt——两种形状都算缺实报,不许补成 0 的对象。
+    CHECK(!ledger->messages[it->second].usage.has_value() ||
+          ledger->messages[it->second].usage->is_null());
 }
 
 TEST_CASE("夹具: 迟到 usage 走 model.usage.appended 观察,不改旧 message") {
@@ -225,7 +229,8 @@ TEST_CASE("夹具: 迟到 usage 走 model.usage.appended 观察,不改旧 messag
     // 旧 message 的 usage 仍是 null:迟到观察不倒改 owner(§五)。
     const auto it = ledger->message_index.find(assistant_id);
     REQUIRE(it != ledger->message_index.end());
-    CHECK(ledger->messages[it->second].usage.is_null());
+    CHECK(!ledger->messages[it->second].usage.has_value() ||
+          ledger->messages[it->second].usage->is_null());
 }
 
 // ---------------------------------------------------------------------------
@@ -492,16 +497,17 @@ TEST_CASE("夹具: SessionLock 活锁可探、释放即消(v3 场删除/归档�
     SessionsRoot root("lock-state");
     const auto dir = root.Dir("S-LOCKED");
     {
-        SessionLockOwner owner;
+        lubancode::trajectory::SessionLockOwner owner;
         owner.pid = lubancode::platform::CurrentProcessId();
-        owner.process_start_token = CurrentProcessStartToken();
+        owner.process_start_token = lubancode::trajectory::CurrentProcessStartToken();
         owner.acquired_at_ms = 1759468800000LL;
-        auto lock = SessionLock::Acquire(dir, owner);
+        auto lock = lubancode::trajectory::SessionLock::Acquire(dir, owner);
         REQUIRE(lock.has_value());
-        const auto holder = SessionLock::Inspect(dir);
+        const auto holder = lubancode::trajectory::SessionLock::Inspect(dir);
         REQUIRE(holder.has_value());
-        CHECK(ProbeLockHolder(*holder) == LockHolderState::Alive);
+        CHECK(lubancode::trajectory::ProbeLockHolder(*holder) ==
+              lubancode::trajectory::LockHolderState::Alive);
     }  // 析构即释放
-    CHECK_FALSE(SessionLock::Inspect(dir).has_value());
+    CHECK_FALSE(lubancode::trajectory::SessionLock::Inspect(dir).has_value());
     // 归档态(T15-B 前):v3 场无生产归档形状,清单记缺口,不伪造。
 }
