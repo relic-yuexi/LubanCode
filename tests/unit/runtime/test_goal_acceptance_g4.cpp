@@ -1585,3 +1585,25 @@ TEST_CASE("flow freezes the evaluation revision while the backend is in flight")
     CHECK_FALSE(harness.Now()->applied_evaluation_id.has_value());
     CHECK(CountEvents(harness.volume, EventKindV3::GoalEvaluationCompleted) == 1);
 }
+
+TEST_CASE("stop arriving during evaluation is retained and prevents continuation") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Harness harness("flow-stop-race");
+    harness.RunToRunning();
+    const auto evidence = harness.MakeEvidence("ev-1", "");
+    harness.backend.replies = {kContinueVerdict};
+    harness.backend.before_reply = [&] {
+        const auto stopped = harness.service->RequestStop(harness.Now()->state_revision,
+            nlohmann::json{{"source", "test"}});
+        REQUIRE(stopped.ok);
+        CHECK(harness.Now()->stop_requested);
+    };
+    const auto result = CloseGoalIterationWithEvaluation(*harness.service,
+        *harness.volume.writer, harness.backend, harness.Options(),
+        harness.Material({evidence}, {evidence}));
+    REQUIRE(result.ok);
+    CHECK(harness.Now()->lifecycle == GoalLifecycle::Paused);
+    CHECK(harness.Now()->stop_requested);
+    CHECK(harness.Now()->pending_intent.empty());
+    CHECK(result.next_work_item_id.empty());
+}

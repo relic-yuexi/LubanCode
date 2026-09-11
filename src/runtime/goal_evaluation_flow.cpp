@@ -164,6 +164,22 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     evaluator_options.ledger.evaluation_id = evaluation_id;
     evaluator_options.ledger.parent_turn_id = material.parent_turn_id;
 
+    const auto adoption_revision = [&] {
+        const auto* live = service.current();
+        if (live && live->stop_requested && !evaluating_snapshot.stop_requested) {
+            auto original = evaluating_snapshot.ToJson();
+            auto stopped = live->ToJson();
+            // A concurrent stop may park this verdict. It does not authorize
+            // adopting against a different contract, iteration or evidence set.
+            for (const auto* key : {"stateRevision", "updatedAtMs", "activeElapsedMs", "stopRequested"}) {
+                original.erase(key);
+                stopped.erase(key);
+            }
+            if (original == stopped) return live->state_revision;
+        }
+        return evaluating_snapshot.state_revision;
+    };
+
     const auto evaluation =
         RunGoalEvaluation(backend, evaluator_options, input, cancel);
     if (!evaluation.has_value()) {
@@ -175,7 +191,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         verdict.kind = GoalVerdictKind::EvaluatorFailed;
         verdict.stop_reason = "evaluator_failed: " + evaluation.error();
         const auto closed = service.CompleteIterationWithEvaluation(
-            evaluating_snapshot.state_revision, verdict, cause);
+            adoption_revision(), verdict, cause);
         result.decision = "evaluator_failed";
         result.summary = evaluation.error();
         result.ok = closed.ok;
@@ -253,7 +269,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
             break;
     }
     const auto closed =
-        service.CompleteIterationWithEvaluation(evaluating_snapshot.state_revision, verdict, cause);
+        service.CompleteIterationWithEvaluation(adoption_revision(), verdict, cause);
     if (!closed.ok) {
         Fail(result, closed.error_code, closed.error_message);
         return result;

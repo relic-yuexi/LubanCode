@@ -2063,7 +2063,8 @@ GoalServiceResult GoalService::Commit(GoalStateSnapshot next, const nlohmann::js
         if (delta > 0) next.active_elapsed_ms = current_->active_elapsed_ms + delta;
     }
     // 转回 active = 显式恢复:停止意图清旗(§4.67.3"明确续跑后才恢复")。
-    if (next.lifecycle == GoalLifecycle::Active) {
+    if (next.lifecycle == GoalLifecycle::Active &&
+        (!current_ || current_->lifecycle != GoalLifecycle::Active)) {
         next.stop_requested = false;
     }
     // 停态/证据合同先整体验一次(FromJson 是同一份 schema 校验)。
