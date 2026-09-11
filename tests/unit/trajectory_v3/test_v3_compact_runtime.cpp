@@ -1200,6 +1200,12 @@ TEST_CASE("protected old turn stays verbatim while current turn steps still comp
     MessageDraft declaration;
     declaration.turn_id = "turn-prot";
     declaration.step_id = "step-prot";
+    declaration.request_id = "request-prot";
+    declaration.provider = "test";
+    declaration.wire = "test";
+    declaration.model = "test-model";
+    declaration.response_model = nlohmann::json(nullptr);  // 缺实报为 null(§4.44)
+    declaration.usage = nlohmann::json(nullptr);
     declaration.origin = MessageOrigin::SessionRuntime;
     declaration.message = nlohmann::json::object(
         {{"role", "assistant"},
@@ -1232,7 +1238,8 @@ TEST_CASE("protected old turn stays verbatim while current turn steps still comp
     CHECK(std::find(refs.begin(), refs.end(), second) == refs.end());
     CHECK(std::find(refs.begin(), refs.end(), latest) != refs.end());
     // step 压缩真的发生:stepScope 非空且点名两枚闭合旧 step。
-    const auto applied = EventsOf(ReadJsonLines(harness.jsonl), "compact.applied");
+    auto applied_lines = ReadJsonLines(harness.jsonl);
+    const auto applied = EventsOf(applied_lines, "compact.applied");
     REQUIRE(applied.size() == 1);
     CHECK((*applied.front())["payload"]["stepScope"]["stepIds"] ==
           nlohmann::json::array({"step-one", "step-two"}));
@@ -1315,8 +1322,11 @@ TEST_CASE("closed-step source change during model call rejects adoption") {
     // 失败方式(如收益/结构检查)蒙混过关。
     CHECK(result.terminal_kind == "rejected");
     CHECK(result.reason == "validation_failed");
+    // 先接住 lines 再取指针:EventsOf 返回的是指向入参 vector 元素的
+    // 指针,套在 ReadJsonLines 临时量上即悬垂(1330 行当年就是这么翻的)。
+    auto completed_lines = ReadJsonLines(harness.jsonl);
     const auto completed =
-        EventsOf(ReadJsonLines(harness.jsonl), "compact.validation.completed");
+        EventsOf(completed_lines, "compact.validation.completed");
     REQUIRE(completed.size() == 1);
     bool source_revision_failed = false;
     if ((*completed.front()).contains("payload") &&
