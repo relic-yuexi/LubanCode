@@ -39,7 +39,7 @@ JSONL 顶层只有 `message` 与 `event`。两类行共用单写者、递增 `se
 
 请求准备、发送、流式开始、增量、终态各有记录。增量按批落事件，响应收口后落正式 assistant 消息；取消可留下 `completionStatus=interrupted`。账随执行推进，不等整轮结束才统一保存。
 
-工具用 `actionId` 串起执行与结果。全文进结果仓，模型见选中的预览；结果持久化、选用和 tool 消息分别记账。默认文本预览预算为 32 KiB，多文件共享，来源说明也占预算。预览降档保留原文与原消息，生成派生消息，再提交新上下文链。
+工具用 `actionId` 串起执行与结果。全文进结果仓，模型见选中的预览；结果持久化、选用和 tool 消息分别记账。工具真实返回后，先保存 `capture-*` 原始捕获，再运行 post-hook；`res-*` 留有效材料。原始捕获、选用、tool 消息或接纳写失败，后续模型请求就停住，工具不重跑。默认文本预览预算为 32 KiB，多文件共享，来源说明也占预算。预览降档保留原文与原消息，生成派生消息，再提交新上下文链。
 
 模型生成的 assistant 持 `provider/wire/model/responseModel/usage`。服务端没报 usage 就写 null。迟到或更正另记 `model.usage.appended`，不能重复累计。终端活统计与磁盘离线统计是不同读口：`ReadSessionUsage()` 仍沿 v2 流枚举和 `EventEnvelope` 解析，新 v3 档的 `/usage` 完整汇总尚待迁移。
 
