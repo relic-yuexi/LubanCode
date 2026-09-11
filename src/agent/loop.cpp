@@ -1036,7 +1036,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 逐 step 取:上一请求的样本刚记完,系数可能已更新。没接线(单测/
         // 旧路径)恒 1.0,行为与从前一字不差。
         const double token_calibration =
-            wiring.token_calibrator != nullptr
+            wiring.token_calibrator != nullptr && !wiring.rewrite_tool_results_for_history
                 ? wiring.token_calibrator->Coefficient(agent.profile_.provider, model_)
                 : 1.0;
         // 有效窗口(token 轴唯一裁剪的基准):profile 声明了用声明值,0(模型
@@ -1133,7 +1133,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // (ReplaceHistory 开新 epoch),返回后 epoch 断了就按新史重拼——
         // 发出去的仍是(可能已换短的)那份请求视图。没设回调时只拼视图
         // 不评估——这一步不发出任何请求。窗口未知走上面的兜底,不裸奔。
-        ContextWorkingView working_view = context_.BuildWorkingView({window_tokens, token_calibration});
+        ContextWorkingView working_view = context_.BuildWorkingView({window_tokens, token_calibration, static_cast<bool>(wiring.rewrite_tool_results_for_history)});
         if (wiring_.on_context_pressure) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
@@ -1175,7 +1175,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 回调里真换了史(midturn compact 走 ReplaceHistory):按新史
                 // 重拼工作视图——ReplaceHistory 已清决策台账,重拼从头定形,
                 // 与旧时序(压完再 BuildWorkingView)同一副牌。
-                working_view = context_.BuildWorkingView({window_tokens, token_calibration});
+                working_view = context_.BuildWorkingView({window_tokens, token_calibration, static_cast<bool>(wiring.rewrite_tool_results_for_history)});
             }
         }
         request.messages = working_view.messages;
@@ -2227,6 +2227,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     block.tool_use_id = call.id;  // 配对的是 wire 那枚 tool_invoke 的 id
                     block.content = platform::SanitizeUtf8(result.content);
                     block.is_error = result.is_error;
+                block.capture_complete = result.outcome != "output_limit";
+                if (!block.capture_complete) block.capture_reason = "quota";
                     if (!result.payload.empty()) {
                         block.blocks = result.payload.content;
                         block.structured_content = result.payload.structured_content;
@@ -2253,6 +2255,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 block.tool_use_id = call.id;
                 block.content = platform::SanitizeUtf8(result.content);
                 block.is_error = result.is_error;
+                block.capture_complete = result.outcome != "output_limit";
+                if (!block.capture_complete) block.capture_reason = "quota";
                 if (!result.payload.empty()) {
                     block.blocks = result.payload.content;
                     block.structured_content = result.payload.structured_content;
@@ -2267,6 +2271,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
+        if (wiring.rewrite_tool_results_for_history) {
+            const auto receipt = wiring.rewrite_tool_results_for_history(tool_result_message);
+            if (receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
+                return std::unexpected("Tool preview commit failed: " + receipt.error_code);
+            }
+        }
         // 批次尾回调要在消息 move 进双账之前拿:回调里读的是五枚结果齐的
         // user message(装配层此刻 append+flush 它)。P1-A 的回执口与旧口
         // 同一触发点,两枚口任设其一都要备货。

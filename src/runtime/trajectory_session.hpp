@@ -171,6 +171,7 @@ public:
     // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
     // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
     // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
+    ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message& results) override;
     ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
                                                     const api::Message& results) override;
     bool ShouldBlockExecution(const agent::ToolTraceEvent& started) override;
@@ -299,7 +300,7 @@ private:
     void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
     void V3ToolTrace(const agent::ToolTraceEvent& event);
     // 批次结果提交回执(P1-A):结果链各档折算(见 ToolResultsCommitReceipt)。
-    ToolResultsCommitReceipt V3ToolResultsCommitted(const api::Message& results);
+    ToolResultsCommitReceipt V3ToolResultsCommitted(api::Message& results);
     // turn 收口:已声明未终态的 Action 补 cancelled(配对完整,不悬空)。
     void V3CancelDanglingActions(const std::string& reason);
     // v3 模式判定(空 = v2 原路)。

@@ -296,7 +296,7 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         // 同款):工具结果消息入节点历史前,超帽全文就地归仓换固定预览,
         // 节点实发与账上 tool 消息吃同一份(账实一致)。v2 桥默认穿透。
         wiring.rewrite_tool_results_for_history = [node_turn](api::Message& results) {
-            node_turn->RewriteToolResultsForHistory(results);
+            return node_turn->RewriteToolResultsForHistory(results);
         };
     }
     // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-----------------------

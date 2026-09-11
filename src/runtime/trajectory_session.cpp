@@ -1057,7 +1057,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::OnToolResultsCommitted(const std:
         return {};  // 轮没开:无账可落,不拦
     }
     if (V3Mode()) {
-        return V3ToolResultsCommitted(results);
+        auto adopted = results;
+        return V3ToolResultsCommitted(adopted);
     }
     ToolResultsCommitReceipt batch;
     for (const auto& block : results.content) {
@@ -1688,7 +1689,18 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
     }
 }
 
-ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
+ToolResultsCommitReceipt TrajectoryTurnBridge::RewriteToolResultsForHistory(api::Message& results) {
+    if (!V3Mode()) return {};
+    if (!turn_open_ || v3_turn_ == nullptr) {
+        ToolResultsCommitReceipt receipt;
+        receipt.status = ToolResultsCommitReceipt::Status::Failed;
+        receipt.error_code = "tool.preview.turn_not_open";
+        return receipt;
+    }
+    return V3ToolResultsCommitted(results);
+}
+
+ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Message& results) {
     // 结果链(§4.18):persisted(结果仓落 artifact)→ selected(选用声明)
     // → tool 消息(模型可见预览正文)→ 接纳进链。
     // P1-A(FA-01)回执合同,三档分清:
@@ -1700,8 +1712,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
     //             如实记进 degraded_codes,调用方放行另查链;
     //   Committed 全链落稳。
     ToolResultsCommitReceipt batch;
-    for (const auto& block : results.content) {
-        const auto* result = std::get_if<api::ToolResultBlock>(&block);
+    for (auto& block : results.content) {
+        auto* result = std::get_if<api::ToolResultBlock>(&block);
         if (result == nullptr) {
             continue;
         }
@@ -1737,9 +1749,11 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             }
             persist.execution_event_ref = execution_event_ref;
             persist.tool_call_id = book.action_id;
+            const auto budget = std::min<std::uint64_t>(32768, std::min<std::uint64_t>(result->preview_budget_bytes, v3_writer_->context().preview_budget_bytes));
+            persist.preview_policy = {{"policy", "v3-tool-preview"}, {"maxPreviewBytes", budget}, {"budgetsLadder", nlohmann::json::array({32768, 16384, 8192, 4096})}};
             persist.outputs.push_back(v3::ResultStore::ChannelOutput{
-                "combined", "text/plain", result->content, true, std::string(),
-                static_cast<std::uint64_t>(result->content.size()), false});
+                "combined", "text/plain", result->content, result->capture_complete, result->capture_reason,
+                static_cast<std::uint64_t>(result->content.size()), !result->capture_complete});
             const auto persisted = v3_books_->results->Persist(persist);
             if (persisted.ok) {
                 const auto receipt = book.action->PersistedResult(
@@ -1748,6 +1762,31 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
                 V3NotifyCommitted(receipt);
                 if (receipt.status == v3::WriteReceipt::Status::Committed) {
                     persisted_event_id = receipt.id;
+                    v3::PreviewRequest request;
+                    request.max_preview_bytes = budget;
+                    v3::PreviewChannel channel;
+                    for (const auto& ref : persisted.result_ref) {
+                        if (ref.value("kind", std::string()) == "combined") channel.display_path = ref.value("path", std::string());
+                    }
+                    channel.channel = "combined";
+                    channel.text = result->content;
+                    channel.capture_complete = result->capture_complete;
+                    channel.capture_reason = result->capture_reason;
+                    channel.output_bytes = result->content.size();
+                    channel.output_bytes_lower_bound = !result->capture_complete;
+                    request.channels.push_back(std::move(channel));
+                    auto preview = v3::BuildToolPreview(request);
+                    if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {
+                        hard_fail("tool.preview.unrepresentable", book.action_id);
+                        continue;
+                    }
+                    if (result->content.size() > budget || !result->capture_complete) result->content = std::move(preview.text);
+                    // Replace only text payloads; media retains its own accounting.
+                    for (auto& payload : result->blocks) {
+                        if (auto* text = std::get_if<tools::TextContent>(&payload)) text->text.clear();
+                    }
+                    if (!result->blocks.empty()) result->blocks.insert(result->blocks.begin(), tools::TextContent{result->content});
+
                 } else {
                     NoteV3Error(receipt, "tool.result.persisted");
                     // artifact 落稳、ledger 事件没落:正文保住,溯源链缺一节,
@@ -1780,6 +1819,10 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             hard_fail("tool.result.store_unavailable", book.action_id);
             continue;
         }
+        if (persisted_event_id.empty()) {
+            hard_fail("tool.result.not_persisted", book.action_id);
+            continue;
+        }
         // 结果选用(§4.23):无改写也明确选择原结果(sourceResultEventRefs
         // 须非空——persisted 事件落稳才有得选)。effectiveOutcome 以回喂
         // 结果的 is_error 为准(P1-B/FA-02)——Hook 处理后真正交给模型的
@@ -1798,6 +1841,10 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             } else {
                 selected_event_id = selected.id;
             }
+        }
+        if (selected_event_id.empty()) {
+            hard_fail("tool.result.not_selected", book.action_id);
+            continue;
         }
         // 最终 tool 消息:content 是模型可见的正文(runtime 回喂的这份就是
         // 模型将看到的),is_error 随行落档(P1-B:恢复投影从消息本体还原

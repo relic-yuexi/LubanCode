@@ -173,7 +173,8 @@ std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& sy
         // loop 的次序(hub 挂 rewrite_tool_results_for_history):消息入史前
         // 先过预览钩子,再批次尾回调。钩子改写后的 content 就是运行时历史
         // 与 v3 tool 消息共用的那份。
-        bridge.RewriteToolResultsForHistory(results);
+        const auto receipt = bridge.RewriteToolResultsForHistory(results);
+        REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
         history_content = std::get<api::ToolResultBlock>(results.content[0]).content;
     }
     bridge.OnToolResultsCommitted("batch-1", results);
@@ -223,7 +224,7 @@ TEST_CASE("超帽结果(全链):入史前钩子归仓换预览,运行时历史�
     // 脱敏缩样的 2MB 递归列目录:300 KB,头尾各留可辨认标记,中间填充。
     const std::string head_mark = "HEAD-recursive-listing-begin\n";
     const std::string tail_mark = "\nTAIL-recursive-listing-end";
-    std::string fat = head_mark + std::string(300000, 'x') + tail_mark;
+    std::string fat = head_mark + std::string(2 * 1024 * 1024, 'x') + tail_mark;
     const std::string history_content =
         DriveFatToolTurn(*bridge, "SYSTEM-PREVIEW", "call_fat_01", fat, /*use_history_hook=*/true);
     const auto closed = ledger->CloseSession("exit");

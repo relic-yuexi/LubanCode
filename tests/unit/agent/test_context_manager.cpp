@@ -531,3 +531,13 @@ TEST_CASE("V3-REAL-02: 截断通报按结果身份去重——同枚不重报,�
     CHECK(after_compact.trim.truncated_results);
     REQUIRE(after_compact.trim.truncated_result_ids.size() == 2);
 }
+
+TEST_CASE("Committed previews survive smaller windows without implicit rewriting") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "fixed-preview", 32768);
+    auto first = context.BuildWorkingView({100000, 1.0, true});
+    context.PushMessage(AssistantMessage("next"));
+    auto next = context.BuildWorkingView({4096, 1.0, true});
+    CHECK(ToolResultAt(first.messages, 2).content == ToolResultAt(next.messages, 2).content);
+    CHECK_FALSE(next.trim.truncated_results);
+}
