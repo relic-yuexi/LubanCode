@@ -44,7 +44,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         event.kind = v3::EventKindV3::ToolResultSummaryFinished;
         event.action_id = source.action_id;
         event.turn_id = source.parent_turn_id;
-        event.payload = {{"tool_call_id", source.action_id}, {"attempt", 1}, {"state", state},
+        event.payload = {{"tool_call_id", source.action_id}, {"attempt", source.attempt}, {"state", state},
                          {"reason", result.reason}, {"sourceResultEventRefs", {source.persisted_event_ref}},
                          {"candidateMessageRefs", candidate_refs}, {"sourceContextRevision", source_revision},
                          {"modelCalls", result.model_calls}, {"outputBytes", result.text.size()},
@@ -119,6 +119,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         const auto response_id = writer.NewMessageId();
         nlohmann::json prompt = {{"action_id", source.action_id}, {"execution_state", source.execution_state},
                                  {"capture_complete", source.capture_complete}, {"capture_reason", source.capture_reason},
+                                 {"execution_started", source.execution_started},
                                  {"source_result_event_ref", source.persisted_event_ref}, {"result_refs", source.result_refs},
                                  {"byte_offset", offset}, {"depth", depth}, {"material", material},
                                  {"final_preview_byte_budget", source.budget_bytes}};
@@ -162,8 +163,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
              {"tokenEstimate", estimate}, {"outputReserveTokens", output_tokens},
              {"summaryWindowTokens", profile.window_tokens}, {"sourceByteOffset", offset},
              {"sourceByteLength", material.size()}, {"depth", depth}}, std::nullopt, kDurability);
-        if (!Committed(prepared) || !Committed(writer.BeginStreamResponse(request_id, stream_id, internal_turn,
-                                                                          step_id, response_id, kDurability))) {
+        if (!Committed(prepared)) {
             result.persistence_failed = true; return std::unexpected("request_persist_failed");
         }
         v3::EventDraft sent;
@@ -179,7 +179,11 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         --calls_remaining;
         ++result.model_calls;
         api::MessageAssembler assembler;
-        const auto response = backend.send_stream(request, [&](const api::StreamEvent& event) { assembler.Feed(event); }, profile.cancel);
+        nlohmann::json response_model = nullptr;
+        const auto response = backend.send_stream(request, [&](const api::StreamEvent& event) {
+            if (const auto* start = std::get_if<api::MessageStart>(&event); start && !start->model.empty()) response_model = start->model;
+            assembler.Feed(event);
+        }, profile.cancel);
         assembler.FinalizeOpenBlock();
         std::string text;
         bool forbidden_blocks = false;
@@ -194,6 +198,11 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                      {"cacheReadTokens", values.cache_read_tokens}, {"cacheWriteTokens", values.cache_creation_tokens},
                      {"reasoningTokens", values.output_reasoning_tokens}};
         }
+        if ((response || !text.empty()) && !Committed(writer.BeginStreamResponse(request_id, stream_id,
+                internal_turn, step_id, response_id, kDurability))) {
+            result.persistence_failed = true;
+            return std::unexpected("response_start_persist_failed");
+        }
         if (!response) {
             if (!text.empty()) {
                 v3::MessageDraft partial;
@@ -204,7 +213,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                 partial.display = v3::DisplayMode::Hidden;
                 partial.completion_status = v3::CompletionStatus::Interrupted;
                 partial.provider = profile.provider; partial.wire = profile.wire; partial.model = profile.model;
-                partial.response_model = nlohmann::json(nullptr); partial.usage = usage;
+                partial.response_model = response_model; partial.usage = usage;
                 partial.message = {{"role", "assistant"}, {"content", text}};
                 if (!Committed(writer.AppendMessage(std::move(partial), kDurability))) result.persistence_failed = true;
             }
@@ -219,7 +228,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         }
         const auto completed = writer.CompleteStreamResponse(request_id, stream_id, internal_turn, step_id,
             response_id, {{"role", "assistant"}, {"content", text}}, profile.provider, profile.wire, profile.model,
-            nullptr, usage, assembler.stop_reason(), v3::MessagePurpose::ActionSummary, std::nullopt,
+            response_model, usage, assembler.stop_reason(), v3::MessagePurpose::ActionSummary, std::nullopt,
             assembler.stop_reason() == "max_tokens" ? std::optional(v3::CompletionStatus::Truncated) : std::nullopt, kDurability);
         if (!Committed(completed)) { result.persistence_failed = true; return std::unexpected("candidate_persist_failed"); }
         candidate_refs.push_back(completed.id);
@@ -246,7 +255,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         candidate = *reduced;
     }
     candidate["execution_state"] = source.execution_state;
-    candidate["execution_already_occurred"] = true;
+    candidate["execution_already_occurred"] = source.execution_started;
     candidate["capture_complete"] = source.capture_complete;
     candidate["capture_reason"] = source.capture_reason;
     candidate["source_result_event_ref"] = source.persisted_event_ref;

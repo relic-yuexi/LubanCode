@@ -27,9 +27,11 @@ struct ActionSummarySource {
     std::string action_id;
     std::string parent_turn_id;
     std::string persisted_event_ref;
+    std::uint64_t attempt = 1;
     std::vector<nlohmann::json> result_refs;
     std::string text;
     std::string execution_state;
+    bool execution_started = true;
     bool capture_complete = true;
     std::string capture_reason;
     std::size_t budget_bytes = 32768;

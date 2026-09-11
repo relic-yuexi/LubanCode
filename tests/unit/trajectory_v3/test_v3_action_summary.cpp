@@ -170,3 +170,49 @@ TEST_CASE("candidate source conflict and cancellation never enter the main chain
     const auto cancelled = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
     CHECK_FALSE(cancelled.accepted); CHECK(cancelled.reason == "cancelled"); CHECK(backend.calls == 1);
 }
+
+TEST_CASE("summary persistence failures do not publish candidates and bound physical sends") {
+    for (int fail_at = 1; fail_at <= 8; ++fail_at) {
+        CAPTURE(fail_at);
+        Fixture f(("io-" + std::to_string(fail_at)).c_str());
+        const auto path = f.writer.path();
+        f.writer = {};
+        int writes = 0;
+        v3::V3WriterOptions options;
+        options.inject_io_failure = [&]() -> std::optional<std::string> {
+            if (++writes == fail_at) return "injected.summary.write";
+            return std::nullopt;
+        };
+        auto reopened = v3::V3Writer::Continue(path, options);
+        REQUIRE(reopened.has_value());
+        f.writer = std::move(*reopened);
+        SummaryBackend backend; int remaining = 8;
+        const auto result = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+        CHECK_FALSE(result.accepted);
+        CHECK(result.persistence_failed);
+        CHECK(backend.calls <= 1);
+        if (fail_at <= 4) CHECK(backend.calls == 0);
+        CHECK(f.writer.context().chain.size() == 1);
+    }
+}
+
+TEST_CASE("summary refuses changed source bytes before sampling") {
+    Fixture f("source-hash"); SummaryBackend backend; int remaining = 8;
+    f.source.text[0] = 'z';
+    const auto result = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+    CHECK_FALSE(result.accepted); CHECK(result.reason == "source_hash_mismatch"); CHECK(backend.calls == 0);
+}
+
+TEST_CASE("summary reader rejects an adopted body that does not match the validated hash") {
+    Fixture f("bad-selected-body"); SummaryBackend backend; int remaining = 8;
+    const auto result = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+    REQUIRE(result.accepted);
+    auto action = v3::ToolActionSession::Reopen(f.source.parent_turn_id, "step-source", f.source.action_id);
+    const auto selected = action.SelectResult(f.writer, {f.source.persisted_event_ref}, {}, "done", std::nullopt,
+        trajectory::Durability::PowerLoss, result.terminal_event_ref);
+    REQUIRE(selected.status == v3::WriteReceipt::Status::Committed);
+    REQUIRE(action.AppendToolMessage(f.writer, "unvalidated replacement", selected.id).status == v3::WriteReceipt::Status::Committed);
+    const auto ledger = v3::ReadV3Ledger(f.writer.path());
+    CHECK_FALSE(ledger.has_value());
+    if (!ledger) CHECK(ledger.error() == "v3reader.invalid_action_summary_selection");
+}

@@ -960,11 +960,22 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
             persisted_refs = projection.source_result_event_refs;
             projection.summary_event_ref = JsonString(selected->payload, "summaryEventRef").value_or("");
             if (!projection.summary_event_ref.empty()) {
+                // A later explicit preview reduction can derive a shorter tool
+                // message while retaining the original summary selection. Verify
+                // that selection against its original adopted body, not the new
+                // body authorized by context.tool_previews.reduced.
+                const MessageLine* selected_body = message;
+                std::unordered_set<std::string> visited;
+                while (selected_body && selected_body->source_tool_message_ref) {
+                    if (!visited.insert(selected_body->message_id).second) { selected_body = nullptr; break; }
+                    selected_body = ledger.FindMessage(*selected_body->source_tool_message_ref);
+                }
+                const auto selected_text = selected_body ? JsonString(selected_body->message, "content").value_or("") : "";
                 const auto* summary = ledger.FindEvent(projection.summary_event_ref);
                 if (summary == nullptr || summary->kind != EventKindV3::ToolResultSummaryFinished ||
                     summary->action_id != message->action_id || summary->seq >= selected->seq ||
                     JsonString(summary->payload, "state").value_or("") != "accepted" ||
-                    JsonString(summary->payload, "previewSha256").value_or("") != platform::Sha256Hex(projection.result_preview) ||
+                    !selected_body || JsonString(summary->payload, "previewSha256").value_or("") != platform::Sha256Hex(selected_text) ||
                     RefIdArray(summary->payload, "sourceResultEventRefs") != persisted_refs) {
                     projection.summary_valid = false;
                 } else {

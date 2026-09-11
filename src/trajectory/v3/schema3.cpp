@@ -814,6 +814,13 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
                 return Err("schema3.bad_type", std::string("action summary missing integer: ") + key);
             }
         }
+        if (state == "accepted") {
+            if (line.payload.at("candidateMessageRefs").empty() ||
+                line.payload.at("outputBytes").get<std::uint64_t>() > line.payload.at("budgetBytes").get<std::uint64_t>()) {
+                return Err("schema3.invalid_summary_candidate", "accepted summary needs a bounded candidate");
+            }
+            if (auto error = CheckStringField(kind_name, line.payload, "previewSha256")) return error;
+        }
     } else if (line.kind == K::ToolResultSelected) {
         if (auto error = CheckToolPayload(kind_name, line, false)) {
             return error;
