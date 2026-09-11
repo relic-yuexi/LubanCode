@@ -231,7 +231,7 @@ UI 区分 pending、running、waiting_input/approval/io、retry_wait、paused、
 
 ## 十二、实施次序与验收
 
-1. 固定新 WorkflowRun/NodeExecution/产物提交 schema 和目录 resolver；纠正恢复判据、单事实源、无损数据与 fail-closed 提交。
+1. **已落（PR #42，v0.26.252）**：固定新 WorkflowRun/NodeExecution/产物提交 schema 和目录 resolver；纠正恢复判据、单事实源、无损数据与 fail-closed 提交。
 2. 提炼 WorkflowService 与统一 executor 接口；tool 接 Action 服务，llm/agent/skill 接 v3 Session；CLI/AppServer 共用装配，补 subflow 全链。
 3. 落实例级 Store、节点中途恢复、loop/map/parallel checkpoint 与分层预算；补副作用 reconcile 和实际幂等传递。
 4. 接持久交互、取消/暂停、节点 steer、父报告交付、hook 与 compact；继而接 AppServer 图视图、分页和复合 cursor。
