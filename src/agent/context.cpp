@@ -179,18 +179,32 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                 continue;
             }
             auto& tool_result = std::get<api::ToolResultBlock>(block);
+            // 当次判线用的系数:首次定形(memo 未命中)按调用方校准系数——
+            // 估算尺有多准就该按多准判;硬闸重裁(定形后窗口真装不下)按默认
+            // 尺 1.0——硬检查是容量兜底,不随估算器状态漂移,同一窗口重裁出
+            // 同一副形状。
+            double effective_calibration = calibration;
             // 钉子账命中(V3-REAL-01):这枚结果的形状在首次进工作视图时已按
-            // 当时的档位快照定形,本请求直接重放——当次系数/窗口变化不重裁
-            // 已发前缀里的旧内容。原文指纹不符(结果被改写一类的坏账)按
-            // 新结果走下面的定形路。空 tool_use_id 没有稳定身份,不入账。
+            // 当时的档位快照定形,本请求直接重放——当次系数变化不重裁已发
+            // 前缀里的旧内容(系数漂移是软判)。原文指纹不符(结果被改写一
+            // 类的坏账)按新结果走下面的定形路。空 tool_use_id 没有稳定身份,
+            // 不入账。
             if (memo != nullptr && !tool_result.tool_use_id.empty()) {
                 if (auto pinned = memo->pinned.find(tool_result.tool_use_id);
                     pinned != memo->pinned.end() &&
                     pinned->second.source_hash == ToolResultSourceFingerprint(tool_result)) {
-                    if (pinned->second.reduced) {
-                        tool_result = pinned->second.result;
+                    // 最终容量硬检查(B1-5):定形形状按默认尺(不带系数)复验
+                    // 窗口 25% 裸线。装得下 = 定形稳,重放形状走人;装不下 =
+                    // 硬闸——从原文按裸尺重裁、更新定形、按新形状版本通报,
+                    // 不能删检查保缓存(宁可断一次前缀,不发装不下的请求)。
+                    const api::ToolResultBlock& shaped =
+                        pinned->second.reduced ? pinned->second.result : tool_result;
+                    if (ToolResultBlockTokens(shaped, 1.0) <= per_result_budget) {
+                        tool_result = shaped;
+                        continue;
                     }
-                    continue;
+                    effective_calibration = 1.0;  // 硬闸:裸尺重裁,不随系数
+                    // fall through:tool_result 仍是原文,从原文重裁不叠标注。
                 }
             }
             // while 而非 if:富块结果一次截一块(从最后一块文本起倒着),
@@ -202,7 +216,7 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                 memo != nullptr && !tool_result.tool_use_id.empty()
                     ? ToolResultSourceFingerprint(tool_result)
                     : std::string();
-            while (ToolResultBlockTokens(tool_result, calibration) > per_result_budget) {
+            while (ToolResultBlockTokens(tool_result, effective_calibration) > per_result_budget) {
                 bool reduced = false;
                 if (!tool_result.blocks.empty()) {
                     // MCP 富结果(P0.3 规矩):只裁 TextContent 的 text,
@@ -215,11 +229,13 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                         }
                         // 这块得缩到多少,整条结果才落回线内:线内预算减去
                         // "本条结果里这块以外的一切"(id、别的文本块、图片)。
-                        const std::size_t total_tokens = ToolResultBlockTokens(tool_result, calibration);
-                        const std::size_t block_tokens = EstimateUtf8Tokens(text_block->text, calibration);
+                        const std::size_t total_tokens =
+                            ToolResultBlockTokens(tool_result, effective_calibration);
+                        const std::size_t block_tokens =
+                            EstimateUtf8Tokens(text_block->text, effective_calibration);
                         const std::size_t others = total_tokens > block_tokens ? total_tokens - block_tokens : 0;
                         const std::size_t target = per_result_budget > others ? per_result_budget - others : 0;
-                        if (!TruncateTextToTokenBudget(text_block->text, target, calibration)) {
+                        if (!TruncateTextToTokenBudget(text_block->text, target, effective_calibration)) {
                             continue;  // 这块已线内/已到下限:换前一块
                         }
                         {
@@ -232,9 +248,11 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                         break;  // 重估整条结果
                     }
                 } else {
-                    const std::size_t id_tokens = EstimateUtf8Tokens(tool_result.tool_use_id, calibration);
-                    const std::size_t target = per_result_budget > id_tokens ? per_result_budget - id_tokens : 0;
-                    reduced = TruncateTextToTokenBudget(tool_result.content, target, calibration);
+                    const std::size_t id_tokens =
+                        EstimateUtf8Tokens(tool_result.tool_use_id, effective_calibration);
+                    const std::size_t target =
+                        per_result_budget > id_tokens ? per_result_budget - id_tokens : 0;
+                    reduced = TruncateTextToTokenBudget(tool_result.content, target, effective_calibration);
                 }
                 if (!reduced) {
                     break;  // 没有可裁的文本(纯图片/全到下限):放行
@@ -243,8 +261,9 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
             }
             // 定形入账(V3-REAL-01):本次预算下的形状就此钉死;线内放行也
             // 定形(reduced=false)——首次已把全文发给 provider,后续系数
-            // 放大越线也不回头裁(裁它就是追改已发前缀)。换形状走正式
-            // context 提交清账,不走这里。
+            // 放大越线也不回头裁(裁它就是追改已发前缀)。换形状的两条正路:
+            // 正式 context 提交(ReplaceHistory)清账重定形;硬闸(窗口真
+            // 装不下)就地重裁并覆盖定形——这是同一枚 memo 键的唯一覆写点。
             if (memo != nullptr && !tool_result.tool_use_id.empty()) {
                 TruncationMemo::Pinned pinned;
                 pinned.source_hash = source_hash;
@@ -256,7 +275,10 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
             }
             if (was_truncated && report != nullptr) {
                 report->truncated_results = true;
-                report->truncated_result_ids.push_back(tool_result.tool_use_id);
+                TruncationNotice notice;
+                notice.tool_use_id = tool_result.tool_use_id;
+                notice.shape_hash = ToolResultSourceFingerprint(tool_result);  // 采用形状的版本
+                report->truncated_result_ids.push_back(std::move(notice));
             }
         }
     }

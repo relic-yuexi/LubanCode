@@ -105,14 +105,19 @@ constexpr int kOversizedToolResultWindowPercent = 25;
 // 发生了有损截断——静默降级会让用户以为语义压缩已成功,模型其实已经看
 // 不到那段原文了。截断形状随首次采用的档位快照固定(V3-REAL-01,带
 // TruncationMemo 时):同一份超线结果每个请求重放同一副形状,不算新动作;
-// ContextManager 再按结果身份去重(V3-REAL-02):同一枚通报过的不重报,
-// 同 epoch 新来的另一枚首次截断必须报。
+// ContextManager 再按结果身份+预览版本去重(V3-REAL-02):同一枚同形状
+// 通报过的不重报,同 epoch 新来的另一枚首次截断、或已采用结果经硬闸降档
+// 换了形状,必须报。
+struct TruncationNotice {
+    std::string tool_use_id;   // 结果身份
+    std::string shape_hash;    // 本次采用形状的指纹(硬闸降档换形状 = 新版本)
+};
 struct TrimReport {
-    bool truncated_results = false;  // 有超大工具结果被截尾(首次定形的新截断)
-    // 本次新定形的截断落在哪些结果身上(结果身份 = tool_use_id)。带
-    // memo 调用时只有首次定形且真动了刀的进列;memo 命中的重复采用不进。
-    // 上层按它做"按身份去重"的通报,不再拿一枚全局布尔吞掉后来者。
-    std::vector<std::string> truncated_result_ids;
+    bool truncated_results = false;  // 有超大工具结果被截尾(新定形/硬闸降档)
+    // 本次新发生截断的结果清单(身份+形状版本)。带 memo 调用时只有首次
+    // 定形真动了刀、以及硬闸重裁换了形状的进列;memo 命中的同形状重复采用
+    // 不进。上层按 (身份, 形状版本) 去重通报,不拿一枚全局布尔吞掉后来者。
+    std::vector<TruncationNotice> truncated_result_ids;
 };
 
 // 保命索的钉子账(V3-REAL-01):tool_use_id -> 首次采用的截断快照。裁剪
@@ -148,9 +153,13 @@ struct TruncationMemo {
 //   - report 非空时把本次实际发生的截断填进去(没截就保持全默认假)。
 // memo 非空时(V3-REAL-01,ContextManager 的正式路径):每枚结果的裁剪
 // 形状首次采用即定形——memo 命中的(原文指纹一致)直接重放快照,当次
-// 系数/窗口一概不看;线内首次定形(reduced=false)后来越线也不回头裁
-//(首次已把全文发给 provider,后请求裁它必断缓存前缀)。新定形且真动了
-// 刀的记进 report->truncated_result_ids。memo 为空指针 = 无记忆的一次性
+// 校准系数不看(系数漂移是软判:已发送预览不随估算器状态重新截取);
+// 线内首次定形(reduced=false)后系数放大越线也不回头裁(首次已把全文
+// 发给 provider,后请求裁它必断缓存前缀)。最终容量硬检查保留(B1-5):
+// 定形形状按默认尺(不带系数)复验窗口 25% 裸线,真装不下单条时从原文
+// 按裸尺重裁、更新定形并按新形状版本通报——硬闸降档宁可断一次前缀也不
+// 发装不下的请求;不能删检查保缓存。新定形/硬闸降档都记进 report->
+// truncated_result_ids(带形状指纹)。memo 为空指针 = 无记忆的一次性
 // 纯函数调用(单测、dry-run),按当次预算现裁,行为与从前一字不差。
 // window_tokens 传 0(窗口未知)时按 kFallbackContextWindowTokens 兜底,
 // 不裸奔。返回处理后的消息(没动就是原样拷贝)。
