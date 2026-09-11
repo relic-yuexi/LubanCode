@@ -28,7 +28,7 @@ concurrency:
 jobs:
   check:
     name: layout-links-skill-route
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ubuntu-latest' || 'macos-latest' }}
     steps:
       - uses: actions/checkout@v7
       - name: Check docs
