@@ -1205,6 +1205,15 @@ void TrajectoryTurnBridge::V3RecordInput(const api::Message& user_message) {
 std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
                                                     const agent::RequestPreparedContext& ctx) {
     (void)ctx;
+    // T12-A(V3-GAP-07 P0):请求最终准入门。compact applied 落稳但内存换账
+    // 失败后,本场 books 置阻断——这里拦在引用对表之前:空串即"prepared
+    // 记不住不发模型"的既有语义,loop 本步明败,模型请求/新工具/自动续跑
+    // 一次都出不去。CLI/AppServer/Goal/Loop 的轮桥全走这同一道门,不在
+    // 任何分支另加早退。恢复(resume 沿已提交链核验重建)发生在新场新
+    // books 上,天然不携带本阻断。
+    if (v3_books_ != nullptr && v3_books_->execution_blocked) {
+        return std::string();
+    }
     if (!V3EnsureSystem(request.system)) {
         return std::string();  // §4.4:引用没落稳,请求不得发出
     }
@@ -2587,11 +2596,15 @@ void TrajectorySessionLedger::BindV3Books_() {
     }
     if (impl_->active != nullptr && impl_->active->is_v3()) {
         v3::V3Writer* writer = &*impl_->active->v3_main;
-        if (!impl_->v3_books.has_value() || impl_->v3_books->writer != writer) {
+        if (!impl_->v3_books.has_value() || impl_->v3_books->writer != writer ||
+            impl_->v3_books->bound_session_id != impl_->active->session_id()) {
             // 首绑或换场(clear/resume 后 active 换了主账):回到新场的
             // 基础 system(§4.10 的"沿用源场 system"由 AdoptSourceSystemV3_
-            // 按切换流程补,不在绑定时偷改)。
+            // 按切换流程补,不在绑定时偷改)。换场判据加场次 id:active 是
+            // std::optional,clear 同址换值时新写者地址与旧写者相同,单比
+            // 指针认不出换场,旧 books(含 T12-A 执行阻断)会带进新场。
             impl_->v3_books = V3SessionBooks{};
+            impl_->v3_books->bound_session_id = impl_->active->session_id();
             impl_->v3_books->system_content = impl_->v3_system_content;
             impl_->v3_books->settings_version = 1;
         }
@@ -4094,6 +4107,28 @@ TrajectorySessionLedger::ProjectV3ContextHistory() const {
 std::uint64_t TrajectorySessionLedger::SpanEndSeq() {
     trajectory::TrajectoryRecorder* recorder = main();
     return recorder != nullptr ? recorder->next_seq() : 1;
+}
+
+// T12-A(V3-GAP-07 P0):会话级执行阻断的置位/查询。只对 v3 主账场生效;
+// 幂等保留首因(第一次失败的原因最重要,后续重复置位不覆盖)。revision
+// 取置位时账面 contextRevision——诊断与准入对表用,不参与放行判定
+//(放行只有换场重建一条路)。
+void TrajectorySessionLedger::BlockV3Execution(const std::string& reason) {
+    if (impl_ == nullptr || !impl_->v3_books.has_value()) {
+        return;  // 非 v3 场:no-op(v2 无此门)
+    }
+    if (impl_->v3_books->execution_blocked) {
+        return;  // 已阻断:保留首因
+    }
+    impl_->v3_books->execution_blocked = true;
+    impl_->v3_books->execution_block_reason = reason;
+    impl_->v3_books->execution_block_revision =
+        impl_->v3_books->writer != nullptr ? impl_->v3_books->writer->context().revision : 0;
+    io_errors_.push_back("compact.execution_blocked:" + reason);
+}
+
+bool TrajectorySessionLedger::V3ExecutionBlocked() const {
+    return impl_ != nullptr && impl_->v3_books.has_value() && impl_->v3_books->execution_blocked;
 }
 
 void TrajectorySessionLedger::PutUserCommand_(trajectory::EventKind kind, nlohmann::json payload) {

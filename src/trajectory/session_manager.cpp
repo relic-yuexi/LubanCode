@@ -3077,6 +3077,87 @@ SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir
     return SessionAdminOutcome{};
 }
 
+// T15-A(V3-GAP-09 P0,SessionV3 旧设计清理单):<id>.jsonl 是否是一份
+// v3 主账(读首行验 schemaVersion;不看 main.jsonl——并存的歧义判定
+// 需要在两件都在场时仍能认出 v3 侧)。
+bool LooksLikeV3SessionStream(const std::filesystem::path& session_dir) {
+    const std::string id = platform::PathToUtf8(session_dir.filename());
+    if (id.empty()) {
+        return false;
+    }
+    const auto first =
+        v3::ReadV3FirstLine(session_dir / platform::Utf8ToPath(id + ".jsonl"));
+    if (!first.has_value()) {
+        return false;
+    }
+    const auto version = first->find("schemaVersion");
+    return version != first->end() && version->is_number_integer() &&
+           version->get<int>() == v3::kSchemaVersion;
+}
+
+// T15-A:v3 主账的删除准入。旧封口门只扫 main.jsonl——对只有 <id>.jsonl
+// 的 v3 场 journal_exists 恒假,未封口的运行档会直穿 remove_all。这里先
+// 验整卷(ReadV3Ledger:严格解析 + 语义 + seq 连续 + 哈希链,即引用完整
+// 性核验),再认 session.ended 终态;任一不满足即拒绝,目录一字不动
+//(不先 remove_all 再报缺口)。末行 hash 进 tombstone。
+SessionAdminOutcome DeleteV3SessionDir(const std::filesystem::path& workspace_dir,
+                                       const std::filesystem::path& session_dir,
+                                       const std::filesystem::path& v3_stream,
+                                       const std::string& session_id, const std::string& reason,
+                                       std::int64_t now_ms) {
+    const auto ledger = v3::ReadV3Ledger(v3_stream);
+    if (!ledger.has_value()) {
+        // 账损坏/状态不可知:拒绝删除,给稳定原因。删了就丢"跑到一半"
+        // 的事实,半场账先 resume/verify 收口。
+        return SessionAdminOutcome{"session.delete_v3_unreadable",
+                                   "v3 主账验卷不过: " + ledger.error()};
+    }
+    bool sealed = false;
+    for (const auto& event : ledger->events) {
+        if (event.kind == v3::EventKindV3::SessionEnded) {
+            sealed = true;
+            break;
+        }
+    }
+    if (!sealed) {
+        return SessionAdminOutcome{"session.delete_unsealed",
+                                   "v3 账没有 session.ended 终态,先 close/verify"};
+    }
+    // 末行身份(tombstone 的实际 v3 尾 hash):两类行取各自 lineHash。
+    std::string last_line_hash;
+    if (const auto last = ledger->LastEntry(); last.has_value()) {
+        last_line_hash = last->is_message ? ledger->messages[last->index].line_hash
+                                          : ledger->events[last->index].line_hash;
+    }
+    // durable intent 先行,再留 tombstone,末后删目录(§3.2;与 v2 路同款)。
+    std::string operation_id;
+    SessionAdminOutcome outcome =
+        RunDirLifecycleOp(workspace_dir, LifecycleOperation::DeleteSession, session_id,
+                          nlohmann::json{{"reason", reason}, {"format", "v3"}},
+                          nlohmann::json{{"tombstone", true}}, now_ms, &operation_id);
+    if (!outcome.ok()) {
+        return outcome;
+    }
+    SessionTombstone tombstone;
+    tombstone.session_id = session_id;
+    tombstone.deleted_at_ms = now_ms;
+    tombstone.reason = reason;
+    tombstone.last_event_hash =
+        last_line_hash.empty() ? std::nullopt : std::optional(last_line_hash);
+    tombstone.operation_id = operation_id;
+    if (const auto written = WriteSessionTombstone(workspace_dir / "tombstones", tombstone);
+        !written.has_value()) {
+        return SessionAdminOutcome{"session.delete_tombstone_failed", written.error()};
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(session_dir, ec);
+    if (ec) {
+        return SessionAdminOutcome{"session.delete_remove_failed",
+                                   platform::PathToUtf8(session_dir) + ": " + ec.message()};
+    }
+    return SessionAdminOutcome{};
+}
+
 }  // namespace
 
 SessionAdminOutcome ArchiveSessionDir(const std::filesystem::path& workspace_dir,
@@ -3163,6 +3244,29 @@ SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
     const auto holder = SessionLock::Inspect(session_dir);
     if (holder.has_value() && ProbeLockHolder(*holder) == LockHolderState::Alive) {
         return SessionAdminOutcome{"session.delete_locked", "活进程正持有此 session"};
+    }
+    // T15-A(V3-GAP-09 P0):先识别实际主账,再谈封口。旧判据只扫
+    // main.jsonl——v3 场(只有 sessions/<id>/<id>.jsonl)journal_exists
+    // 恒假,封口门直穿 remove_all,运行中的 v3 档也能被删。分派三路:
+    //   两本主账并存 -> 格式歧义,拒绝(不因 main.jsonl 先命中就忽略合法
+    //                  v3;留人看清哪本是正身,T00 统一识别后另有定夺);
+    //   只 v3 主账   -> v3 删除准入(验卷 + session.ended 封口 + 末行
+    //                  hash 进 tombstone);
+    //   其余         -> v2 原路,一字不动。
+    {
+        std::error_code ec;
+        const bool main_exists = std::filesystem::exists(session_dir / "main.jsonl", ec);
+        const bool v3_candidate = LooksLikeV3SessionStream(session_dir);
+        if (main_exists && v3_candidate) {
+            return SessionAdminOutcome{"session.delete_format_ambiguous",
+                                       "同目录并存 main.jsonl 与 <id>.jsonl(v3),先厘清正身再删"};
+        }
+        if (!main_exists && v3_candidate) {
+            const std::string id = platform::PathToUtf8(session_dir.filename());
+            return DeleteV3SessionDir(workspace_dir, session_dir,
+                                      session_dir / platform::Utf8ToPath(id + ".jsonl"),
+                                      session_id, reason, now_ms);
+        }
     }
     const MainJournalFacts facts = ScanStreamFacts(session_dir / "main.jsonl");
     if (facts.journal_exists && !facts.run_terminal) {
