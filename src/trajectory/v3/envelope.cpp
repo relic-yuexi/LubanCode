@@ -313,6 +313,7 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::TaskCompleted: return "task.completed";
         case EventKindV3::TaskFailed: return "task.failed";
         case EventKindV3::TaskCancelled: return "task.cancelled";
+        case EventKindV3::StateGoalApplied: return "state.goal.applied";
     }
     return "unknown";
 }
@@ -403,6 +404,7 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::TaskCompleted,
             EventKindV3::TaskFailed,
             EventKindV3::TaskCancelled,
+            EventKindV3::StateGoalApplied,
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {
             return std::string_view(EventKindV3Name(a)) < std::string_view(EventKindV3Name(b));

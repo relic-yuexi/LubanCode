@@ -115,6 +115,12 @@ inline constexpr const char* kErrGoalEvidenceInsufficient = "goal.achievement_ev
 inline constexpr const char* kErrGoalEvidenceUnknown = "goal.evidence_unknown";
 // evaluator 输出不合 Schema(一次 repair 后仍坏 → Paused(evaluator_failed))。
 inline constexpr const char* kErrGoalEvaluatorSchema = "goal.evaluator_schema_invalid";
+// §4.67 G0(GoalService):候选不合合同——blocked 缺 blockerKey、停态缺
+// stopReason、证据引用坏项等,提交前就拒,不落盘。
+inline constexpr const char* kErrGoalCandidateInvalid = "goal.candidate_invalid";
+// §4.67 G0(只读投影):账上 applied 指向的快照缺失/hash 不符/序列非法,
+// 报缺口不猜(§4.55"状态损坏")。
+inline constexpr const char* kErrGoalProjectionGap = "goal.projection_gap";
 
 // ---------------------------------------------------------------------------
 // objective 合同(0 期:4000 characters 的准确计数法)

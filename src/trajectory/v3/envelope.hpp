@@ -146,6 +146,13 @@ enum class EventKindV3 {
     TaskCompleted,
     TaskFailed,
     TaskCancelled,
+    // Goal 模式(§4.67 G0):goal 控制状态的唯一生效点。事实提交,不带
+    // status(与 context.*.applied 同族:控制状态提交,不是操作生命周期)。
+    // payload 合同:goalId/fromStateRevision/toStateRevision/contractRevision/
+    // snapshotRef/snapshotSha256/lifecycle(+可选 causeRef);完整 goal 状态
+    // 在不可变快照 sessions/<id>/state/goals/<goalId>/rev-*.json,本行只记
+    // 提交锚(§4.55)。
+    StateGoalApplied,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);
