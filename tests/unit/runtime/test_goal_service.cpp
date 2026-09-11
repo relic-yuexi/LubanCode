@@ -610,9 +610,11 @@ TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 
         return snapshot;
     };
     const auto write_snapshot = [&](const GoalStateSnapshot& snapshot) {
-        WriteFileBytes(harness.dir / goalns::SnapshotRefPath(snapshot.goal_id,
-                                                             snapshot.state_revision),
-                       goalns::SnapshotBytes(snapshot));
+        const std::filesystem::path path =
+            harness.dir / goalns::SnapshotRefPath(snapshot.goal_id, snapshot.state_revision);
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        WriteFileBytes(path, goalns::SnapshotBytes(snapshot));
     };
     const auto append = [&](const char* goal, std::uint64_t from, std::uint64_t to,
                             std::uint64_t contract_rev, const char* lifecycle) {

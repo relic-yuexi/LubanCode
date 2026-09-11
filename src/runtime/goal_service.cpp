@@ -192,6 +192,16 @@ GoalCounters CountersFromJson(const nlohmann::json& j) {
 bool WriteSnapshotFile(const std::filesystem::path& final_path, const std::string& data,
                        std::string* error) {
     std::error_code ec;
+    // 父目录:不在就建(同 AtomicWriteFile 合同)。快照树 state/goals/<id>/
+    // 归本服务管,调用方不替它铺目录;纯文件名无父段则不建。
+    const std::filesystem::path parent = final_path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            *error = "goal 快照目录建不成: " + parent.string() + ": " + ec.message();
+            return false;
+        }
+    }
     if (std::filesystem::exists(final_path, ec)) {
         *error = "goal 快照不可变名已存在(不覆盖): " + final_path.string();
         return false;
