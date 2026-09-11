@@ -495,7 +495,7 @@ TEST_CASE("V3-REAL-02: 截断通报按结果身份去重——同枚不重报,�
     auto first = context.BuildWorkingView({100000, 1.0});
     CHECK(first.trim.truncated_results);  // 第一枚首次截断:报
     REQUIRE(first.trim.truncated_result_ids.size() == 1);
-    CHECK(first.trim.truncated_result_ids[0] == "toolu_a");
+    CHECK(first.trim.truncated_result_ids[0].tool_use_id == "toolu_a");
 
     // 同一枚重复采用(追加请求后重放同形状):不是新动作,不重报。
     context.PushMessage(AssistantMessage("再问一句"));
@@ -517,7 +517,7 @@ TEST_CASE("V3-REAL-02: 截断通报按结果身份去重——同枚不重报,�
     auto second = context.BuildWorkingView({100000, 1.0});
     CHECK(second.trim.truncated_results);  // 新枚首次:报
     REQUIRE(second.trim.truncated_result_ids.size() == 1);
-    CHECK(second.trim.truncated_result_ids[0] == "toolu_b");  // 老枚不进列
+    CHECK(second.trim.truncated_result_ids[0].tool_use_id == "toolu_b");  // 老枚不进列
 
     // 两枚都定形后:再追加请求,谁都不重报。
     context.PushMessage(AssistantMessage("收尾"));
