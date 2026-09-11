@@ -41,6 +41,7 @@
 | V3-GAP-09 | T15：archive/unarchive/delete 的 v3 生命周期 | P0/P1 | P0 拦错误删除；全量依赖 T00/T11 | 本单 |
 | V3-ADD-01 | T14：Insights 与遗漏消费者清册 | P1 | T00/T06、请求快照合同 | 本轮静态新增 |
 | V3-ADD-02 | T16：测试环境默认强制 v2 | P1，早建双面验证 | T00；随各批迁移 | 本轮静态新增 |
+| V3-ADD-03 | T17：旧 context 追回工具与 artifact 仓退役 | P1 | v3 结果原文读取闭环、旧仓消费者迁完 | 本单，见 §十二 |
 
 T00 为共用读取/测试材料基础，不是原审计缺陷编号。每项实现可拆小 PR，但编号不可随拆分消失。关联单“设计已写”不等于本单销项；有未完旧依赖就继续保留对应退役项。
 
@@ -406,3 +407,41 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 本单不负责系统 cron、向量数据库、模型训练、真实摘要质量评测或全部 Memory 产品能力；不追溯重写旧实验结论，不删除用户 Session/Memory/Hook outbox。新 kind 先走合同，不把合法旧记录当垃圾；删除旧代码要有调用清册和替代证据，不能用批量搜索替代审计。
 
 本次文档交付检查：UTF-8、章节/任务编号、原 14 项映射、相对链接目标和 `git diff --check`。后续修改 docs 时再执行仓库 `scripts/check_docs.sh`；本轮未改 docs，不复述来源审计的测试结果为本轮通过。
+
+## 十二、T17 / V3-ADD-03：旧 context 追回工具与 artifact 仓退役
+
+- 状态：pending。2026-09-11 补记；本次只查源码、记清理任务，未删生产代码，未做运行验收。
+- 目标：撤掉重复的旧工具与旧仓接线，让 v3 结果原文只有明确的一套落盘、引用和读取路径。先补接替缺口，再删旧口；不保留无需求的旧格式兼容层，不删除用户旧档。
+- 来源：旧 `context_read必要性评测_rg定位与全文读对照.todo` 已于 2026-09-11 按用户要求删除。其中 A 实验按旧仓设计，停止照旧方案实施；源码读窗 R 实验另属读取策略研究，不算本项清理验收。
+
+### 12.1 已查到的入口与边界
+
+| 落点 | 当前接线 | 清理要求 |
+| --- | --- | --- |
+| `src/app/interactive_session_assembly.cpp` | 主代理、子代理均注册 `ContextSearchTool/ContextReadTool`；主代理附带摘要回调，ContextManager 接旧 store | 删除注册前查工具过滤、提示词和真实请求 schema；两级代理一并收口 |
+| `src/tools/context_tools.{hpp,cpp}` | `context_read` 用 `artifact_id` 调旧仓 Find/Read，支持块、行窗及可选摘要 | 核定替代入口后删旧工具实现、schema、文案及专属测试 |
+| `src/app/session_stack.{hpp,cpp}`、`interactive_session.cpp` | 创建 `ContextArtifactStore`，会话内 Open；装配退出路径 Close | 查新建、resume、切换、清空、退出生命周期，不留空指针接线或无人关闭的仓 |
+| `src/agent/context_events.cpp`、`context_manager.cpp`、`artifact_store.*` | CompressWorkingView 仍能把长输出落旧仓，并发出旧工具追回提示 | 核对 v3 下实际请求路径；停止重复落盘和失效提示，不把整个 ContextManager 当旧代码删除 |
+| `src/app/wirings/plan_session_wiring.cpp` | 计划内容仍调用旧仓 Offload | 迁移计划原文引用与读取，不可只删工具后留下不可追回的计划 |
+| `src/app/commands/memory_commands.cpp`、`session_commands.cpp`、`src/agent/microcompact.*` | 按需摘要、仓统计和压缩文案仍消费旧接口 | 摘要能力明确迁移或退役；更新诊断、统计、错误和提示词 |
+| `src/trajectory/v3/result_store.{hpp,cpp}` | 独立保存完整输出、metadata、预览及 artifactRef | 现有 context_read 未接此仓；不能把“两边都有 artifact”当作读取链已通 |
+
+以上为静态证据。尚未证明所有入口都会生成旧 artifact，也未证明现有文件读取工具能完整接住 v3 追回；实施者须沿真实运行链核实。
+
+### 12.2 可直接领取的工作
+
+- [ ] 冻结实施 commit，列出 CLI 交互、one-shot、AppServer、子代理、Workflow 的生产注册与执行清册；逐项写明是否可见、是否可调用、落哪套仓。
+- [ ] 用真实工具生成超过预览预算的输出，追到 v3 ResultStore、实际模型请求和原文读取入口。明确按路径读取还是专用工具；补齐权限、会话作用域、完整性校验、读窗和缺文件错误，不另造一套结果仓。
+- [ ] 迁走计划 Offload、按需摘要及诊断统计等旧仓消费者；不需要的能力明确退役，移除相应提示和配置，不能悄悄变成 no-op。
+- [ ] 删除旧 context_search/context_read 注册、实现与专属 store 生命周期；若仍有共用代码，逐项列保留理由，禁止凭文件名整片删除。
+- [ ] 清理 `src/prompts/tools/` 各语言文案、plan 模式允许列表、agent profile、手工驱动、单测及构建清单。搜索两个工具名和旧类名，每个剩余命中注明共用或历史资料。
+- [ ] 同步 context/compaction 文档；旧评测单已删除。其他历史方案保留时标 retired，不再声称 v3 靠旧 artifact id 追回。
+
+### 12.3 验收与交付
+
+- [ ] 当前源码构建通过；运行受影响工具、context、plan、session 生命周期和 v3 结果仓测试，记录具体命令与结果。
+- [ ] 用受控后端走真实组件：长输出中段证据未出现在预览里，仍能经选定入口取回；检查最终模型请求，不只看磁盘有文件。
+- [ ] 主代理与子代理不再暴露已退役工具，调用退役名称给明确错误；产品提示不得再引导模型调用它们。
+- [ ] 新建、恢复、切换、清空和退出后，引用作用域正确；缺失或篡改结果文件不得冒充成功读取，不生成重复旧仓文件。
+- [ ] 计划原文可追回；摘要若保留，结果与费用沿当前 v3 合同记账。验证无需真实付费模型，模型质量另算评测。
+- [ ] 提交调用清册、替代链证据、测试命令及未验入口；沿 §10.1 填结案记录。只有源码搜索归零或编译通过，不足以销项。
