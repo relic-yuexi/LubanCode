@@ -4,6 +4,8 @@
 #include "runtime/goal_evaluation_flow.hpp"
 
 #include <utility>
+#include <set>
+#include "hooks/hash.hpp"
 
 namespace lubancode::runtime::goal {
 
@@ -206,6 +208,21 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     verdict.evaluation_id = evaluation_id;
     verdict.evaluation = adopted.to_json();
     verdict.usage_addition = evaluation->usage;
+    // Hash material facts, not the evaluator's self-reported progress flag or
+    // changing prose. New ids for repeated identical evidence do not reset it.
+    std::set<std::string> evidence_facts;
+    for (const auto& evidence : material.material_evidence) {
+        evidence_facts.insert(nlohmann::json{{"kind", ToString(evidence.kind)},
+            {"facts", evidence.facts}, {"fresh", evidence.fresh},
+            {"truncated", evidence.truncated}}.dump());
+    }
+    nlohmann::json criterion_states = nlohmann::json::object();
+    for (const auto& criterion : adopted.criteria)
+        criterion_states[criterion.id] = criterion.status;
+    verdict.progress_fingerprint = hooks::Sha256Hex(nlohmann::json{
+        {"workspaceBaseline", material.workspace_baseline}, {"evidence", evidence_facts},
+        {"criteria", criterion_states}}.dump());
+
     switch (adopted.decision) {
         case GoalDecision::Continue:
             verdict.kind = GoalVerdictKind::Continue;
@@ -232,6 +249,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         Fail(result, closed.error_code, closed.error_message);
         return result;
     }
+    if (closed.payload.contains("parked")) result.next_work_item_id.clear();
     result.decision = ToString(adopted.decision);
     result.ok = true;
     return result;

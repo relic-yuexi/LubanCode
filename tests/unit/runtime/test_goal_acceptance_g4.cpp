@@ -25,7 +25,7 @@
 //   - M13 相关后台未完 waiting:无关进程不进等待账,纯等待零模型请求;
 //   - M14 巡检上限离线恢复:计数不重置不补跑,真实通知仍可唤醒;
 //   - M15 无进展/确定阻塞/用户问题三停态分路,等待不算失败轮
-//     (无进展闸现行未接线,本册钉现行行为,缺陷单里记);
+//     (相同证据和criterion状态累计至阈值后暂停);
 //   - INJ1 判词采用的 applied 写盘失败:fail-closed,事实在 applied 缺不
 //     生效;
 //   - INJ2 EnterWaiting 事实先行、applied 缺:等待不生效;
@@ -1218,18 +1218,21 @@ TEST_CASE("M15 三停态分路:blocked/awaiting_user 落位,等待不算失败�
         CHECK(harness.Now()->pending_question == "删库还是归档?");
     }
 
-    SUBCASE("无进展:现行 v3 连击未接线(缺陷 D2),本断言钉现行行为") {
+    SUBCASE("相同证据和判定累计三次无进展后暂停") {
         Harness harness("m15-no-progress");
         harness.RunToRunning();
-        // 两轮 continue 且 progress=false:设计要求无进展暂停;现行 v3 判词
-        // 面不动 counters(连击账在 v1 coordinator),修复后此断言应转红。
+        // 首轮建立材料指纹，随后三轮同料即暂停，不采信 progress 自报。
         const GoalEvidence ev = harness.MakeEvidence("ev-1", "");
         harness.backend.replies = {kContinueVerdict};
-        for (int round = 0; round < 2; ++round) {
+        for (int round = 0; round < 4; ++round) {
             const auto result = CloseGoalIterationWithEvaluation(
                 *harness.service, *harness.volume.writer, harness.backend, harness.Options(),
                 harness.Material({ev}, {ev}));
             REQUIRE(result.ok);
+            if (round == 3) {
+                CHECK(result.next_work_item_id.empty());
+                break;
+            }
             REQUIRE(harness.service->ClaimPendingIntent(
                         "run-s1", harness.Now()->state_revision,
                         nlohmann::json{{"source", "test"}})
@@ -1238,8 +1241,10 @@ TEST_CASE("M15 三停态分路:blocked/awaiting_user 落位,等待不算失败�
                                                     nlohmann::json{{"source", "test"}})
                         .ok);
         }
-        CHECK(harness.Now()->counters.no_progress_streak == 0);  // D2:未计数
-        CHECK(harness.Now()->lifecycle == GoalLifecycle::Active);
+        CHECK(harness.Now()->counters.no_progress_streak == 3);
+        CHECK(harness.Now()->lifecycle == GoalLifecycle::Paused);
+        CHECK(harness.Now()->stop_reason.rfind("no_progress:", 0) == 0);
+        CHECK(harness.Now()->pending_intent.empty());
     }
 
     SUBCASE("等待不算失败轮:waiting 期间连击与轮数都不动") {

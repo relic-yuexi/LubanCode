@@ -1323,8 +1323,8 @@ GoalServiceResult GoalService::BeginIteration(std::uint64_t expected_state_revis
     next.updated_at_ms = Now();
     GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
     if (r.ok) {
-        r.payload["iterationId"] = *next.iteration_id;
-        r.payload["iterationIndex"] = next.counters.iterations_started;
+        r.payload["iterationId"] = *current_->iteration_id;
+        r.payload["iterationIndex"] = current_->counters.iterations_started;
     }
     return r;
 }
@@ -1353,8 +1353,8 @@ GoalServiceResult GoalService::EndIteration(std::uint64_t expected_state_revisio
     next.pending_intent = nlohmann::json::object();
     next.updated_at_ms = Now();
     GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
-    if (r.ok && next.iteration_id.has_value()) {
-        r.payload["iterationId"] = *next.iteration_id;
+    if (r.ok && current_->iteration_id.has_value()) {
+        r.payload["iterationId"] = *current_->iteration_id;
     }
     return r;
 }
@@ -1408,9 +1408,9 @@ GoalServiceResult GoalService::BeginEvaluation(std::uint64_t expected_state_revi
     }
     next.updated_at_ms = Now();
     GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
-    if (r.ok && next.iteration_id.has_value()) {
-        r.payload["iterationId"] = *next.iteration_id;
-        r.payload["evaluationId"] = "eval-" + *next.iteration_id;
+    if (r.ok && current_->iteration_id.has_value()) {
+        r.payload["iterationId"] = *current_->iteration_id;
+        r.payload["evaluationId"] = "eval-" + *current_->iteration_id;
     }
     return r;
 }
@@ -1498,12 +1498,26 @@ GoalServiceResult GoalService::CompleteIterationWithEvaluation(
     // G3 两条收口岔路(§4.67.7/§4.67.10):continue 判词撞上停止意图或
     // 预算撞帽 → 判词照采(evaluationId/usage 落账),但不排下一轮——
     // 停止意图优先,迟到结果不拉起新轮。
+    GoalCounters counters = current_->counters;
+    if (verdict.kind == GoalVerdictKind::Continue && !verdict.progress_fingerprint.empty()) {
+        if (counters.last_progress_fingerprint == verdict.progress_fingerprint)
+            ++counters.no_progress_streak;
+        else {
+            counters.last_progress_fingerprint = verdict.progress_fingerprint;
+            counters.no_progress_streak = 0;
+        }
+    }
     bool park_instead_of_continue = false;
     std::string park_reason;
     if (verdict.kind == GoalVerdictKind::Continue) {
         if (current_->stop_requested) {
             park_instead_of_continue = true;
             park_reason = "stop_requested: 停止意图在账,判词已采但不自动续排";
+        } else if (!verdict.progress_fingerprint.empty() &&
+                   current_->budget.max_no_progress_iterations > 0 &&
+                   counters.no_progress_streak >= current_->budget.max_no_progress_iterations) {
+            park_instead_of_continue = true;
+            park_reason = "no_progress: unchanged evidence and criterion status";
         } else if (const std::string budget_reason =
                        BudgetStopReason(*current_, /*next_tokens=*/0,
                                         /*counting_next_iteration=*/true);
@@ -1519,6 +1533,7 @@ GoalServiceResult GoalService::CompleteIterationWithEvaluation(
         next.applied_evaluation_id = verdict.evaluation_id;
     }
     next.usage.Add(verdict.usage_addition);
+    next.counters = std::move(counters);
     if (verdict.kind == GoalVerdictKind::Continue && !park_instead_of_continue) {
         next.pending_intent = verdict.next_intent->ToJson();
     } else {
@@ -1812,14 +1827,14 @@ GoalServiceResult GoalService::AddBudget(const GoalBudgetAddition& addition,
     next.updated_at_ms = Now();
     GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
     if (r.ok) {
-        if (next.budget.max_iterations.has_value()) {
-            r.payload["maxIterations"] = *next.budget.max_iterations;
+        if (current_->budget.max_iterations.has_value()) {
+            r.payload["maxIterations"] = *current_->budget.max_iterations;
         }
-        if (next.budget.max_total_tokens.has_value()) {
-            r.payload["maxTotalTokens"] = *next.budget.max_total_tokens;
+        if (current_->budget.max_total_tokens.has_value()) {
+            r.payload["maxTotalTokens"] = *current_->budget.max_total_tokens;
         }
-        if (next.budget.max_elapsed_ms.has_value()) {
-            r.payload["maxElapsedMs"] = *next.budget.max_elapsed_ms;
+        if (current_->budget.max_elapsed_ms.has_value()) {
+            r.payload["maxElapsedMs"] = *current_->budget.max_elapsed_ms;
         }
     }
     return r;

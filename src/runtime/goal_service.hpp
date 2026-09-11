@@ -393,6 +393,7 @@ struct EvaluationVerdict {
     nlohmann::json evaluation;      // 判词 JSON(审计投影,可空)
     std::optional<GoalPendingIntent> next_intent;  // continue 必带
     GoalUsage usage_addition;       // 评估请求逐次累计(只增)
+    std::string progress_fingerprint;  // Host material hash; excludes model narrative.
 };
 
 class GoalService {
