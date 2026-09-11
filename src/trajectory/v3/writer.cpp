@@ -269,6 +269,7 @@ struct V3Writer::Impl {
     }
 };
 
+V3Writer::V3Writer() = default;
 V3Writer::V3Writer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 V3Writer::V3Writer(V3Writer&&) noexcept = default;
 V3Writer& V3Writer::operator=(V3Writer&&) noexcept = default;
