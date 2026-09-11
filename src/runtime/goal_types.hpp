@@ -115,6 +115,28 @@ inline constexpr const char* kErrGoalEvidenceInsufficient = "goal.achievement_ev
 inline constexpr const char* kErrGoalEvidenceUnknown = "goal.evidence_unknown";
 // evaluator 输出不合 Schema(一次 repair 后仍坏 → Paused(evaluator_failed))。
 inline constexpr const char* kErrGoalEvaluatorSchema = "goal.evaluator_schema_invalid";
+// §4.67 G0(GoalService):候选不合合同——blocked 缺 blockerKey、停态缺
+// stopReason、证据引用坏项等,提交前就拒,不落盘。
+inline constexpr const char* kErrGoalCandidateInvalid = "goal.candidate_invalid";
+// §4.67 G0(只读投影):账上 applied 指向的快照缺失/hash 不符/序列非法,
+// 报缺口不猜(§4.55"状态损坏")。
+inline constexpr const char* kErrGoalProjectionGap = "goal.projection_gap";
+// §4.67 G1(continuation 意图):快照里没有待认领的意图(claim/consume 无的放矢)。
+inline constexpr const char* kErrGoalIntentMissing = "goal.intent_missing";
+// §4.67 G1(claim 单写者):意图已被别的 writer epoch 认领——不盲重放,
+// 调用方走恢复核验(§4.67.4"已启动但未收口")。
+inline constexpr const char* kErrGoalIntentAlreadyClaimed = "goal.intent_already_claimed";
+// §4.67 G1(意图提交):前一枚意图未认领/对着旧合同,不许静默覆盖(欠队列
+// 的账不能丢)。
+inline constexpr const char* kErrGoalIntentConflict = "goal.intent_conflict";
+// §4.67 G3(后台等待):非 waiting 态解除等待(pause/clear 后迟到的后台报
+// 告只留审计,不拉起新轮)。
+inline constexpr const char* kErrGoalNotWaiting = "goal.not_waiting";
+// §4.67 G3(预算复核):budget_exhausted 恢复须显式加预算——没加就 resume
+// 拒,不悄悄放宽(§4.67.2 预算字段"不能悄悄放宽")。
+inline constexpr const char* kErrGoalBudgetNotRaised = "goal.budget_not_raised";
+// §4.67 G3(预算预留):预留撞帽(共用余额,不是每路各花整份)。
+inline constexpr const char* kErrGoalReservationRejected = "goal.reservation_rejected";
 
 // ---------------------------------------------------------------------------
 // objective 合同(0 期:4000 characters 的准确计数法)
@@ -173,6 +195,19 @@ struct GoalBudget {
     // 消费方按 max_* 语义用)。
     nlohmann::json to_json() const;
     static GoalBudget from_json(const nlohmann::json& j);
+};
+
+// 显式加预算(轨迹 v3 §4.67 G3:budget_exhausted 的恢复路径)。只抬帽,
+// 不清账——旧费用保留,新帽取 max(旧帽,新增);没到的字段不动。
+// "/goal resume iterations=30 tokens=200000" 的解析产物。
+struct GoalBudgetAddition {
+    std::optional<std::int64_t> iterations;
+    std::optional<std::int64_t> total_tokens;
+    std::optional<std::int64_t> elapsed_ms;
+
+    bool empty() const {
+        return !iterations.has_value() && !total_tokens.has_value() && !elapsed_ms.has_value();
+    }
 };
 
 // 分角色 usage 账(execution/evaluator/subagent 分列;cache 与 input/

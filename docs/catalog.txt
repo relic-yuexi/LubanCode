@@ -44,6 +44,7 @@ DOC architecture/channels/message-contracts.md
 DOC architecture/channels/security.md
 DOC architecture/context/compaction.md
 DOC architecture/context/v3-action-summary.md
+DOC architecture/context/v3-capacity-recovery.md
 DOC architecture/extensions/plugin-runtime.md
 DOC architecture/extensions/tool-extension.md
 DOC architecture/hooks-flow.md

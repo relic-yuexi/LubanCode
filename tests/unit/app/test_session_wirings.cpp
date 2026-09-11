@@ -54,9 +54,12 @@ GoalSessionWiring::Host MakeGoalHost(lubancode::runtime::SessionRuntime& /*runti
     static lubancode::config::Config config;
     host.config = &config;
     host.current_model = std::make_shared<std::string>("test-model");
-    host.start_turn = [](const std::string&, bool* failed) {
+    host.start_turn = [](const std::string&, bool* failed, bool* cancelled) {
         if (failed != nullptr) {
             *failed = false;
+        }
+        if (cancelled != nullptr) {
+            *cancelled = false;
         }
     };
     return host;

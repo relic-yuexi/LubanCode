@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -204,6 +205,16 @@ struct ParsedGoalCommand {
     std::string objective;   // Create/Edit 的正文(保留多行);其余动作空
     bool dashdash = false;   // 用过 `--` 消歧
     std::string bad_word;    // Invalid 时第一词的原始拼写(容错提示用)
+    // /goal resume 的显式加预算(轨迹 v3 §4.67 G3):key=value 对,认
+    // iterations/tokens/elapsed_min 三键(缺省不带)。budget_exhausted
+    // 的恢复路径——没加预算的 resume 在命令面被拒,不悄悄放宽。
+    std::optional<std::int64_t> budget_iterations;
+    std::optional<std::int64_t> budget_tokens;
+    std::optional<std::int64_t> budget_elapsed_ms;
+    bool has_budget_addition() const {
+        return budget_iterations.has_value() || budget_tokens.has_value() ||
+               budget_elapsed_ms.has_value();
+    }
 };
 
 ParsedGoalCommand ParseGoalCommand(const std::string& args);

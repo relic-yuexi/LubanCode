@@ -104,6 +104,7 @@ struct FakeResponse {
     std::string body = "{}";
     std::map<std::string, std::string> headers;  // 额外响应头(Retry-After)
     bool drop = false;                           // 收了不回(ACK 丢)
+    bool hold_until_stop = false;                // 收体后保持连接，不回响应
 };
 
 class FakeCollector {
@@ -269,6 +270,14 @@ private:
                 script_.pop_front();
             }
             received_.push_back(std::move(request));
+        }
+        if (response.hold_until_stop) {
+            // 与 drop 的立即断连分开：这条连接在 collector 收场前不回 ACK，
+            // 避免脚本耗尽后默认 200 把待验 spool 提前清掉。
+            while (!stop_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return;
         }
         if (response.drop) {
             return;  // ACK 丢:收货不回
@@ -817,7 +826,7 @@ TEST_CASE("业务线程不等网络:出口挂死(收货不回)时 Notify 快、�
     fixture.CloseRun();
 
     FakeCollector collector;
-    collector.Queue(FakeResponse{.drop = true});  // 黑洞:收货永不回
+    collector.Queue(FakeResponse{.hold_until_stop = true});  // 黑洞:收货后保持连接
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
                                        "lubancode-tel-e2e-backpressure";
     std::error_code ec;
@@ -833,6 +842,7 @@ TEST_CASE("业务线程不等网络:出口挂死(收货不回)时 Notify 快、�
         std::chrono::steady_clock::now() - begin);
     CHECK(elapsed.count() < 200);
 
+    REQUIRE(WaitUntil([&] { return collector.RequestCount() >= 1; }));
     // 投影不受网络拖累:cursor 推到底,spool 有账,collector 一颗业务数据
     // 都没收到合法 OTLP(body 全在,但它永不回——那正是故障注入点)。
     REQUIRE(WaitUntil([&] { return CursorFileReaches(root, fixture.LastEventId()); }));
@@ -841,6 +851,7 @@ TEST_CASE("业务线程不等网络:出口挂死(收货不回)时 Notify 快、�
         return status.spool.sealed_batches >= 1;
     }));
     CHECK(service.Status().queue.size_items == 0);  // 队不积压(已落 spool)
+    CHECK(service.Status().exporter.exported_batches_total == 0);  // 黑洞没回 ACK
     service.Stop();
 }
 

@@ -22,6 +22,12 @@ namespace lubancode::hooks::middleware {
 // 逻辑槽位名(§4.48 首批建议)。
 inline constexpr std::string_view kTokenEstimateSlot = "context.token_estimate";
 inline constexpr std::string_view kCapacityCheckSlot = "context.capacity_check";
+// 轨迹 v3 §4.67.8(G3):Goal 验收排程槽。与 PreRequest/control_state.project
+// 同一注册池;内置实现只做"这轮验收可不可排"的决定(评估工作项的提出),
+// 不在 PostTurn 栈里递归跑模型——评估请求仍经宿主内部请求服务调度留账。
+// Lua 可按 (PostTurn, goal.review) 同名替换策略(组织材料/候选下一步),
+// 但状态提交、预算、取消、证据准入、去重仍归宿主,不因 overwrite 绕过。
+inline constexpr std::string_view kGoalReviewSlot = "goal.review";
 
 // §4.36 的纯计算:最终模型输入快照(紧凑 JSON)的 UTF-8 字节数 ÷ 4,
 // 总量一次向上取整(不对每条消息分别 ceil)。非文本块(image/audio/
@@ -48,8 +54,25 @@ nlohmann::json DecideRequestCapacity(const nlohmann::json& capacity_input);
 MiddlewareDefinition BuiltinTokenEstimateSlot();
 MiddlewareDefinition BuiltinCapacityCheckSlot();
 
+// §4.67 G3:Goal 验收排程的纯决定(宿主侧共用——内置 handler 与 goal
+// 收口路都吃这一只,不因 hook 覆盖改变门槛)。输入 json 键:
+//   lifecycle(string)、phase(string)、waitTaskRefs(数组)、
+//   stopRequested(bool)、budgetExhausted(bool)
+// 返回 {"decision": "evaluate"|"wait"|"hold", "reason": ...}:
+//   evaluate 可排验收(工作轮收口、无等待、无停止、预算在);
+//   wait     有相关后台任务未收口,先走等待路径(§4.67.4);
+//   hold     停止意图/预算尽/停态/终态——不排,迟到结果不拉起新轮。
+// 缺键按保守侧判(unknown lifecycle -> hold),不默认放行。
+nlohmann::json DecideGoalReview(const nlohmann::json& review_input);
+
+// §4.67.8(G3):PostTurn/goal.review 内置槽位定义(required:替换实现
+// 不能解除门槛;返回值是决定,不携带状态提交)。
+MiddlewareDefinition BuiltinGoalReviewSlot();
+
 // 注册进池(装配层一次;§三:builtin 是默认项,同键高层胜出)。
 void AddBuiltinRequestSlots(MiddlewarePool& pool);
+// §4.67 G3:与请求槽同一池注册(PostTurn 挂点)。
+void AddBuiltinGoalReviewSlot(MiddlewarePool& pool);
 
 // 容量判断的协议余量(与 loop 侧 kContextPreflightHeadroomTokens 同值;
 // 首版冻结 512)。

@@ -796,6 +796,14 @@ public:
     // 的操作台账种进新场——新 sessionId 不洗掉旧意图(§4.2 沿来源链识
     // 别原键)。
     std::string launch_resume_source_session_id() const;
+    // 当前场的来源(§4.67 G1 goal 沿 lineage 恢复用的通用面):start_reason
+    //(process_launch | resume | clear)与 previous_session_id。launch 路与
+    // 交互 /resume 换场后都读得到(前一枚访问器只盖 --continue 启动路)。
+    struct SessionLineageInfo {
+        std::string start_reason;
+        std::string previous_session_id;  // 空 = 无前驱
+    };
+    SessionLineageInfo session_lineage() const;
     // 启动路 resume 折叠出的有效对话投影(没 resume 给空)。
     std::vector<api::Message> LaunchResumeHistory() const;
     // 启动路 resume 的 v3 旧史显示投影(源是 v2/没 resume 给 nullopt)。

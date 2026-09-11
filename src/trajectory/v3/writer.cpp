@@ -1132,6 +1132,10 @@ std::string V3Writer::NewCompactTurnId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->NextId("compact-turn", 2);
 }
+std::string V3Writer::NewGoalEvalTurnId() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->NextId("goaleval-turn", 2);
+}
 std::string V3Writer::NewStepId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->NextId("step", 3);

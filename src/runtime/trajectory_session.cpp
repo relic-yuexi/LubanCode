@@ -4147,6 +4147,17 @@ std::string TrajectorySessionLedger::launch_resume_source_session_id() const {
     return impl_->active->manifest.previous_session_id.value_or(std::string());
 }
 
+TrajectorySessionLedger::SessionLineageInfo TrajectorySessionLedger::session_lineage() const {
+    SessionLineageInfo info;
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        return info;
+    }
+    info.start_reason = impl_->active->manifest.start_reason;
+    info.previous_session_id =
+        impl_->active->manifest.previous_session_id.value_or(std::string());
+    return info;
+}
+
 std::vector<api::Message> TrajectorySessionLedger::LaunchResumeHistory() const {
     return impl_ != nullptr ? impl_->launch_resume_history : std::vector<api::Message>();
 }

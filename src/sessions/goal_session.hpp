@@ -1,17 +1,19 @@
-// goal 事件行(持久目标单第 4 期):session JSONL 的 goal_v1 / goal_iteration_v1 /
-// goal_evidence_v1 / goal_checkpoint_v1 / goal_evaluation_v1 序列化与解析。
+// goal 事件行(goal 单第 4 期;写侧已按 §4.67.6 收敛口径删除):旧档
+// goal_v1 族行的只读解析。
 //
-// 事件形状(单子"session JSONL"节原文):
+// 收敛口径(轨迹 v3 §4.67.6):不再写 goal_v1 顶层类型,不另造一份与
+// Session 争真值的可变 goal 日志。goal 的持久账自 v3 起走 trajectory 的
+// state.goal.applied 提交锚 + sessions/<id>/state/goals/ 快照
+// (runtime/goal_service.hpp)。本件只剩读侧:旧档(ledger sink 尚在的
+// 年代落过盘的 goal_v1 族)在 /resume 与 evolution 只读观察里仍要能认,
+// 坏行跳过不废整场(事件行通用约定);消息账无损。
+//
+// 旧事件形状(读侧认账用):
 //   {"type":"goal_v1","event":"created","goal_id":"goal-3","revision":1,...}
 //   {"type":"goal_iteration_v1","event":"scheduled","goal_id":...,"iteration_id":...}
 //   {"type":"goal_evidence_v1","event":"observed",...}
 //   {"type":"goal_checkpoint_v1","goal_id":...,"iteration_id":...,"checkpoint":{},...}
 //   {"type":"goal_evaluation_v1","goal_id":...,"iteration_id":...,"evaluation_id":...}
-//
-// 分层与 tool_trace 同款:本头是纯数据 + 纯函数(不碰磁盘),SessionStore
-// 的 AppendGoalEvent 是落盘薄壳;回放按文件序整收 LoadedSession,折叠/重建
-// 在 runtime 侧的 GoalCoordinator::ReplayEvent。坏行跳过,不废整场(事件
-// 行通用约定);老版本读到 goal 行当坏行跳过,消息账无损。
 //
 // sessions/ 不反向依赖 runtime/(老规矩):所以这一层只认 nlohmann + 标准库,
 // 领域字段用中立的 nlohmann::json 载(payload 的 shape 由 runtime 侧的
@@ -46,34 +48,13 @@ struct GoalSessionEvent {
     // payload["evaluation"]。
 };
 
-// 事件 -> 一行 JSON(不带换行符)。ts 是落盘时刻,与其余事件行同款。
-std::string SerializeGoalEvent(const GoalSessionEvent& event, const std::string& ts);
-
 // 一行 JSON -> 事件。不是合法 JSON、type 不认得、缺 goal_id/event,给
-// nullopt——坏行调用方跳过,不废整场。
+// nullopt——坏行调用方跳过,不废整场。(写侧 SerializeGoalEvent 已随
+// goal_v1 收敛删除:新账不落这种行。)
 std::optional<GoalSessionEvent> ParseGoalEvent(const std::string& line);
 
 // 这一行是不是 goal 事件行(顶层 type 粗筛,省 JSON 解析;ParseGoalEvent
 // 再真验)。
 bool IsGoalEventLine(const std::string& line);
-
-// 一份证据(goal_evidence_v1 的中立形状;fields 与 runtime::goal::GoalEvidence
-// 一一对应,但不引 runtime 头)。
-struct GoalEvidenceRecord {
-    std::string id;
-    std::string kind;            // 稳定字符串(tool_result/command_exit/…)
-    std::string goal_id;
-    std::string iteration_id;
-    std::string tool_use_id;
-    std::string producer;
-    nlohmann::json facts;
-    std::string content_sha256;
-    std::int64_t observed_at_ms = 0;
-    bool fresh = true;
-    bool truncated = false;
-};
-
-std::string SerializeGoalEvidence(const GoalEvidenceRecord& evidence, const std::string& ts);
-std::optional<GoalEvidenceRecord> ParseGoalEvidence(const std::string& line);
 
 }  // namespace lubancode::sessions
