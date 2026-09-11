@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <fstream>
 
 #include "api/assembler.hpp"
 #include "api/model_input_snapshot.hpp"
@@ -27,6 +28,14 @@ bool ValidSummary(const nlohmann::json& candidate) {
         for (const auto& item : candidate.at(key)) if (!item.is_string()) return false;
     }
     return true;
+}
+
+bool ContainsExactString(const nlohmann::json& value, const std::string& wanted) {
+    if (value.is_string()) return value.get_ref<const std::string&>() == wanted;
+    if (value.is_array() || value.is_object()) {
+        for (const auto& item : value) if (ContainsExactString(item, wanted)) return true;
+    }
+    return false;
 }
 }
 
@@ -74,7 +83,13 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     }
     bool matched_source = false;
     for (const auto& ref : source.result_refs) {
-        if (ref.value("kind", "") == "combined" && ref.value("sha256", "") == platform::Sha256Hex(source.text)) matched_source = true;
+        if (ref.value("kind", "") != "combined" || ref.value("sha256", "") != platform::Sha256Hex(source.text)) continue;
+        std::error_code error;
+        const auto path = writer.path().parent_path() / ref.value("path", "");
+        if (std::filesystem::file_size(path, error) != source.text.size() || error) continue;
+        std::ifstream file(path, std::ios::binary);
+        std::string saved(source.text.size(), '\0');
+        if (file.read(saved.data(), static_cast<std::streamsize>(saved.size())) && saved == source.text) matched_source = true;
     }
     if (!matched_source) return finish("rejected", "source_hash_mismatch");
     // Fixed upper bounds prevent arbitrarily large raw results from consuming an
@@ -135,11 +150,16 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         const auto snapshot = api::ModelInputSnapshotFromWire(backend.SerializeForDiagnostics(request));
         if (!snapshot) return std::unexpected(snapshot.error());
         if (api::HasUnestimatedInput(*snapshot)) return std::unexpected("unestimated_summary_input");
+        if (snapshot->contains("tools") && !snapshot->at("tools").empty()) return std::unexpected("summary_tools_not_allowed");
+        if (!ContainsExactString(*snapshot, system) || !ContainsExactString(*snapshot, prompt.dump())) {
+            return std::unexpected("summary_adapter_replaced_material");
+        }
         const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
         const auto input_tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
         const auto effective = backend.GetEffectiveOutputLimit(request);
         if (!effective.tokens || *effective.tokens <= 0) return std::unexpected("summary_output_limit_unknown");
         const auto output_tokens = static_cast<std::size_t>(*effective.tokens);
+        if (output_tokens > profile.output_tokens) return std::unexpected("summary_output_override");
         if (input_tokens >= profile.window_tokens || output_tokens >= profile.window_tokens - input_tokens ||
             profile.margin_tokens >= profile.window_tokens - input_tokens - output_tokens) {
             return std::unexpected("summary_input_capacity_exceeded");
@@ -161,6 +181,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
             {{"provider", profile.provider}, {"wire", profile.wire}, {"model", profile.model},
              {"sourceActionId", source.action_id}, {"sourceResultEventRefs", {source.persisted_event_ref}},
              {"tokenEstimate", estimate}, {"outputReserveTokens", output_tokens},
+             {"modelInputSnapshot", *snapshot},
              {"summaryWindowTokens", profile.window_tokens}, {"sourceByteOffset", offset},
              {"sourceByteLength", material.size()}, {"depth", depth}}, std::nullopt, kDurability);
         if (!Committed(prepared)) {
@@ -244,14 +265,14 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     std::size_t offset = 0;
     for (const auto& chunk : chunks) {
         const auto candidate = sample(chunk, offset, 1);
-        if (!candidate) return finish(result.persistence_failed ? "failed" : candidate.error() == "cancelled" ? "cancelled" : "rejected", candidate.error());
+        if (!candidate) return finish(result.persistence_failed || candidate.error() == "summary_provider_error" ? "failed" : candidate.error() == "cancelled" ? "cancelled" : "rejected", candidate.error());
         mapped.push_back(*candidate);
         offset += chunk.size();
     }
     nlohmann::json candidate = mapped.front();
     if (mapped.size() > 1) {
         const auto reduced = sample(mapped.dump(), 0, 2);
-        if (!reduced) return finish(reduced.error() == "cancelled" ? "cancelled" : "rejected", reduced.error());
+        if (!reduced) return finish(result.persistence_failed || reduced.error() == "summary_provider_error" ? "failed" : reduced.error() == "cancelled" ? "cancelled" : "rejected", reduced.error());
         candidate = *reduced;
     }
     candidate["execution_state"] = source.execution_state;

@@ -17,9 +17,10 @@ struct SummaryBackend : api::Backend {
     bool truncated = false;
     std::string reply = R"({"summary":"read finished","side_effects":["none observed"],"open_items":["inspect evidence"],"evidence":["combined output"]})";
     std::function<void()> during_call;
+    nlohmann::json extra_body = nlohmann::json::object();
     std::vector<api::Request> requests;
     std::string SerializeForDiagnostics(const api::Request& request) const override {
-        return api::chat::BuildRequestJson(request).dump();
+        return api::chat::BuildRequestJson(request, extra_body).dump();
     }
     std::expected<void, api::Error> send_stream(const api::Request& request,
         const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>*) override {
@@ -201,6 +202,16 @@ TEST_CASE("summary refuses changed source bytes before sampling") {
     f.source.text[0] = 'z';
     const auto result = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
     CHECK_FALSE(result.accepted); CHECK(result.reason == "source_hash_mismatch"); CHECK(backend.calls == 0);
+}
+
+TEST_CASE("summary rejects adapter overrides that enable tools or replace evidence") {
+    Fixture f("adapter-overrides"); SummaryBackend backend; int remaining = 8;
+    backend.extra_body = {{"tools", nlohmann::json::array({"disabled-test-tool"})}};
+    const auto tool = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+    CHECK_FALSE(tool.accepted); CHECK(tool.reason == "summary_tools_not_allowed"); CHECK(backend.calls == 0);
+    backend.extra_body = {{"messages", {{{"role", "user"}, {"content", "unrelated"}}}}};
+    const auto replaced = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+    CHECK_FALSE(replaced.accepted); CHECK(replaced.reason == "summary_adapter_replaced_material"); CHECK(backend.calls == 0);
 }
 
 TEST_CASE("summary reader rejects an adopted body that does not match the validated hash") {
