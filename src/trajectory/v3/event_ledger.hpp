@@ -59,7 +59,9 @@ struct V3EventLedgerReport {
 
 class V3EventLedger {
 public:
-    V3EventLedger() = default;
+    // 默认构造也只声明:头内 = default 会连带实例化 unique_ptr 析构,
+    // Impl 此处不完整(gcc 报 invalid sizeof)。定义在 cpp。
+    V3EventLedger();
     V3EventLedger(V3EventLedger&&) noexcept;
     V3EventLedger& operator=(V3EventLedger&&) noexcept;
     V3EventLedger(const V3EventLedger&) = delete;

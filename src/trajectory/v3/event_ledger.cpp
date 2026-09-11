@@ -177,6 +177,7 @@ struct V3EventLedger::Impl {
     }
 };
 
+V3EventLedger::V3EventLedger() = default;
 V3EventLedger::V3EventLedger(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 V3EventLedger::V3EventLedger(V3EventLedger&&) noexcept = default;
