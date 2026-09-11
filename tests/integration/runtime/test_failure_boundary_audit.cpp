@@ -27,7 +27,11 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
+#include "agent/token_calibrator.hpp"
+#include "api/chat/request.hpp"
 #include "platform/paths.hpp"
+#include "runtime/id_authority.hpp"
+#include "runtime/tool_trace_hub.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -91,6 +95,9 @@ class AuditBackend final : public api::Backend {
 public:
     std::function<std::expected<void, api::Error>(int, const std::function<void(const api::StreamEvent&)>&)> emit;
     std::vector<api::Request> requests;
+    std::string SerializeForDiagnostics(const api::Request& request) const override {
+        return api::chat::BuildRequestJson(request).dump();
+    }
     std::expected<void, api::Error> send_stream(
         const api::Request& request, const std::function<void(const api::StreamEvent&)>& sink,
         const std::atomic<bool>*) override {
@@ -103,6 +110,9 @@ class AuditTool final : public tools::Tool {
 public:
     int calls = 0;
     bool result_error = false;
+    std::optional<std::string> result_content;
+    std::string result_outcome;
+    std::vector<tools::ToolContentBlock> native_blocks;
     std::function<void()> effect;
     std::string name() const override { return "audit_tool"; }
     std::string description() const override { return "local audit counter"; }
@@ -111,7 +121,14 @@ public:
     Result execute(const Json&) override {
         ++calls;
         if (effect) effect();
-        return {result_error ? "AUDIT_ERROR" : "AUDIT_RESULT", result_error};
+        Result result{result_content.value_or(result_error ? "AUDIT_ERROR" : "AUDIT_RESULT"), result_error};
+        result.outcome = result_outcome;
+        if (!native_blocks.empty()) {
+            auto payload = result.payload;
+            payload.content = native_blocks;
+            result.SetPayload(std::move(payload));
+        }
+        return result;
     }
 };
 
@@ -177,6 +194,9 @@ struct Audit {
         wiring.boundary_recorder = bridge.get();
         wiring.wait_request_backoff = [](auto, auto) { return true; };
         wiring.on_tool_trace = [this](const auto& event) { bridge->OnToolTrace(event); };
+        wiring.capture_tool_result = [this](const api::ToolResultBlock& result) {
+            return bridge->CaptureToolResult(result);
+        };
         // P1-A:回执口(与 ToolTraceHub::Install 同款)——提交成败交回引擎。
         wiring.on_tool_results_committed_receipt =
             [this](const std::string& batch, const api::Message& results) {
@@ -330,7 +350,7 @@ TEST_CASE("failure audit FA-04 FA-05: retry terminals and visible text") {
         {"verify_ok", v3::VerifyV3File(audit.path).ok}});
 }
 
-TEST_CASE("failure audit control: metadata failure retains journal result") {
+TEST_CASE("failure audit: metadata failure stops before unpublished result is sent") {
     Audit audit;
     AuditBackend backend;
     backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
@@ -370,16 +390,14 @@ TEST_CASE("failure audit control: metadata failure retains journal result") {
     CHECK(counter->calls == 2);
     CHECK(KindCount(rows, "tool.result.persist_failed") == 1);
     REQUIRE(resumed.has_value());
-    // Control: metadata persistence failed, but the main journal retained the
-    // result. Whether this fallback may continue is a policy question, not the
-    // missing-live-input bug in the unavailable-store test below.
-    CHECK(result.has_value());
-    CHECK(backend.requests.size() == 3);
-    CHECK(sent_results == 2);
+    // B1 requires immutable source metadata before publication; the first
+    // committed result survives and the second result never reaches the model.
+    CHECK_FALSE(result.has_value());
+    CHECK(backend.requests.size() == 2);
+    CHECK(sent_results == 1);
     CHECK(KindCount(rows, "tool.result.selected") == 1);
     REQUIRE(replay.has_value());
-    CHECK(replay_results == 2);
-    CHECK(resumed->execution.open_actions.empty());
+    CHECK(replay_results == 1);
 }
 
 TEST_CASE("failure audit FA-01: unavailable store and recovery work") {
@@ -471,4 +489,693 @@ TEST_CASE("failure audit FA-02: failed tool result error flag roundtrip") {
     // Fixed 2026-09-11 (P1-B): the fed-back error semantics ride the final tool
     // message body and come back through the projection unchanged.
     CHECK(replay_errors == live_errors);
+}
+
+TEST_CASE("B1 real loop: 2 MiB captures persist and fixed previews match ledger wire and resume") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt <= 2, "audit-call-" + std::to_string(attempt));
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    const std::string original = "HEAD-中文\n" + std::string(2 * 1024 * 1024, 'x') + "\nTAIL-原文";
+    tool->result_content = original;
+    bool complete = true;
+    SUBCASE("complete capture") {}
+    SUBCASE("capture quota") {
+        complete = false;
+        tool->result_outcome = "output_limit";
+        tool->result_error = true;
+    }
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    const auto outcome = agent.Run(Input(), wiring);
+    REQUIRE(outcome.has_value());
+    CHECK(counter->calls == 2);
+    REQUIRE(backend.requests.size() == 3);
+    std::vector<std::string> sent;
+    for (std::size_t request_index = 1; request_index < backend.requests.size(); ++request_index) {
+        const auto wire = api::chat::BuildRequestJson(backend.requests[request_index]);
+        std::vector<std::string> this_request;
+        for (const auto& message : wire.at("messages")) {
+            if (message.value("role", "") != "tool") continue;
+            this_request.push_back(message.at("content").get<std::string>());
+            CHECK(this_request.back().size() <= 32768);
+            CHECK(this_request.back().find(complete ? "capture_complete: true" : "capture_complete: false") != std::string::npos);
+        }
+        REQUIRE(this_request.size() == request_index);
+        if (!sent.empty()) CHECK(this_request.front() == sent.front());
+        sent = std::move(this_request);
+    }
+    std::vector<std::string> durable;
+    for (const auto& row : audit.Rows()) {
+        if (row.value("type", "") == "message" && row.at("message").value("role", "") == "tool")
+            durable.push_back(row.at("message").at("content").get<std::string>());
+    }
+    CHECK(durable == sent);
+    const auto resumed = audit.ledger->ProjectV3ContextHistory();
+    REQUIRE(resumed.has_value());
+    std::vector<std::string> replayed;
+    for (const auto& message : *resumed) for (const auto& block : message.content) {
+        if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) replayed.push_back(result->content);
+    }
+    CHECK(replayed == sent);
+    for (const auto* name : {"res-000001.combined.txt", "res-000002.combined.txt"}) {
+        std::ifstream stream(audit.path.parent_path() / "artifacts" / name, std::ios::binary);
+        const std::string saved(std::istreambuf_iterator<char>(stream), {});
+        CHECK(saved == original);
+    }
+    CHECK(v3::VerifyV3File(audit.path).ok);
+}
+
+TEST_CASE("B1 real loop: failed immutable metadata never publishes the next tool result") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt <= 2, "audit-call-" + std::to_string(attempt));
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(2 * 1024 * 1024, 'x');
+    tool->effect = [&audit, counter] {
+        if (counter->calls == 2) {
+            const auto destination = audit.path.parent_path() / "artifacts" / "res-000002.json";
+            std::filesystem::create_directories(destination);
+            std::ofstream(destination / "keep") << "blocked";
+        }
+    };
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 2);
+    CHECK(backend.requests.size() == 2);
+    CHECK(KindCount(audit.Rows(), "tool.result.persist_failed") == 1);
+    int published = 0;
+    for (const auto& message : agent.history()) for (const auto& block : message.content)
+        if (std::holds_alternative<api::ToolResultBlock>(block)) ++published;
+    CHECK(published == 1);
+    CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / "res-000002.combined.txt") == 2 * 1024 * 1024);
+}
+
+TEST_CASE("B1 real loop: every preview ledger write failure stops before publication") {
+    for (const int fail_at : {1, 2, 3, 4}) {
+        CAPTURE(fail_at);
+        Audit audit;
+        AuditBackend backend;
+        backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+            Reply(sink, attempt == 1);
+            return {};
+        };
+        tools::ToolRegistry registry;
+        auto tool = std::make_unique<AuditTool>();
+        auto* counter = tool.get();
+        tool->result_content = std::string(2 * 1024 * 1024, 'x');
+        registry.Register(std::move(tool));
+        agent::Agent agent(backend, registry, Profile());
+        auto wiring = audit.Wiring();
+        wiring.rewrite_tool_results_for_history = [&audit, fail_at](api::Message& results) {
+            audit.Inject();
+            audit.fail_at = fail_at;
+            return audit.bridge->RewriteToolResultsForHistory(results);
+        };
+        const auto outcome = agent.Run(Input(), wiring);
+        CHECK_FALSE(outcome.has_value());
+        CHECK(counter->calls == 1);
+        CHECK(backend.requests.size() == 1);
+        CHECK(audit.writes >= fail_at);
+        CHECK(audit.ledger->v3_main_writer()->broken());
+        int results = 0;
+        for (const auto& message : agent.history()) for (const auto& block : message.content)
+            if (std::holds_alternative<api::ToolResultBlock>(block)) ++results;
+        CHECK(results == 0);
+        CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / "res-000001.combined.txt") == 2 * 1024 * 1024);
+    }
+}
+
+TEST_CASE("B1 real loop: terminal event failure cannot bypass preview commit") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.on_tool_trace = [&audit](const agent::ToolTraceEvent& event) {
+        if (event.kind == agent::ToolTraceEventKind::ExecutionFinished) {
+            audit.Inject();
+            audit.fail_at = 1;
+        }
+        audit.bridge->OnToolTrace(event);
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 1);
+    CHECK(backend.requests.size() == 1);
+}
+
+TEST_CASE("B1 publication failure after commit recovers the committed preview without rerunning tools") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(2 * 1024 * 1024, 'x');
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        auto receipt = audit.bridge->RewriteToolResultsForHistory(results);
+        REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
+        // Inject the stop after durable admission and before loop PushMessage.
+        receipt.status = runtime::ToolResultsCommitReceipt::Status::Failed;
+        receipt.error_code = "injected.publication_failure";
+        return receipt;
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(backend.requests.size() == 1);
+    CHECK(counter->calls == 1);
+    auto recovered = audit.ledger->ProjectV3ContextHistory();
+    REQUIRE(recovered.has_value());
+    std::string committed_preview;
+    for (const auto& message : *recovered) for (const auto& block : message.content)
+        if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) committed_preview = result->content;
+    REQUIRE_FALSE(committed_preview.empty());
+    CHECK(committed_preview.size() <= 32768);
+    AuditBackend resumed_backend;
+    resumed_backend.emit = [](int, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink);
+        return {};
+    };
+    agent::Agent resumed_agent(resumed_backend, registry, Profile());
+    resumed_agent.RestoreSessionHistory(std::move(*recovered));
+    REQUIRE(resumed_agent.Run("continue", agent::TurnWiring{}).has_value());
+    REQUIRE(resumed_backend.requests.size() == 1);
+    const auto wire = api::chat::BuildRequestJson(resumed_backend.requests[0]);
+    int tool_results = 0;
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool") {
+        ++tool_results;
+        CHECK(message.at("content") == committed_preview);
+    }
+    CHECK(tool_results == 1);
+    CHECK(counter->calls == 1);
+}
+
+TEST_CASE("B2 real loop: action summaries use separate requests and adopted results survive resume") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [&audit](int call, const auto& sink) -> std::expected<void, api::Error> {
+        if (call == 1) {
+            sink(api::MessageStart{"provider-response", "audit-model"});
+            for (int index = 0; index < 2; ++index) {
+                sink(api::ToolUseStart{index, "summary-tool-" + std::to_string(index), "audit_tool"});
+                sink(api::ToolUseInputDelta{index, "{}"});
+                sink(api::ContentBlockDone{index});
+            }
+            sink(api::MessageDone{"tool_use", api::Usage{}});
+        } else if (call <= 3) {
+            if (call == 2) {
+                int raw_captures = 0;
+                for (const auto& row : audit.Rows()) {
+                    if (row.value("kind", "") != "tool.result.persisted") continue;
+                    bool raw = false;
+                    for (const auto& ref : row.at("payload").at("result_ref")) {
+                        if (ref.at("path").get<std::string>().find("capture-") != std::string::npos) raw = true;
+                    }
+                    if (raw) ++raw_captures;
+                }
+                CHECK(raw_captures == 2);
+            }
+            sink(api::MessageStart{"summary-response", "audit-model"});
+            sink(api::TextDelta{R"({"summary":"inspection completed","side_effects":["read only"],"open_items":["review evidence"],"evidence":["combined output"]})"});
+            sink(api::ContentBlockDone{0});
+            sink(api::MessageDone{"end_turn", api::Usage{123, 45, 0, 0, 0}, true});
+        } else {
+            Reply(sink);
+        }
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(16000, 'x');
+    registry.Register(std::move(tool));
+    auto profile = Profile();
+    profile.provider = "audit";
+    profile.prompt_sections.wire = "openai-chat-completions";
+    profile.runtime.context_window_tokens = 9000;
+    profile.runtime.max_output_tokens = 1024;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent::Agent agent(backend, registry, profile);
+    auto wiring = audit.Wiring();
+    wiring.configure_action_summary = [&audit](api::Backend* selected, const runtime::ActionSummaryProfile& summary_profile) {
+        audit.bridge->ConfigureActionSummary(selected, summary_profile);
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    const auto outcome = agent.Run(Input(), wiring);
+    REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+    CHECK(counter->calls == 2);
+    REQUIRE(backend.requests.size() == 4);
+    CHECK(KindCount(audit.Rows(), "tool.result.summary.finished") == 2);
+    auto recovered = audit.ledger->ProjectV3ContextHistory();
+    REQUIRE(recovered.has_value());
+    api::Request replay = backend.requests.back();
+    replay.messages = *recovered;
+    const auto wire = api::chat::BuildRequestJson(backend.requests.back());
+    const auto resumed = api::chat::BuildRequestJson(replay);
+    // 工具配对号两域对账(§1.2.1/§4.15):live 请求带 provider 原始号
+    // ("summary-tool-N",与假模型刚回的 assistant tool_use 同键);台账投影
+    // 带 actionId("action-<n>",写侧 AppendToolMessage 落账即此键,assistant
+    // 调用块经 FoldToolActions 同换)。两域各自配对自洽即合合同——比对
+    // 正文时剥掉 tool_call_id,配对键各查各的请求。
+    const auto collect_tools = [](const Json& built, std::vector<Json>* bodies,
+                                  std::vector<std::string>* ids,
+                                  std::set<std::string>* assistant_calls) {
+        for (const auto& message : built.at("messages")) {
+            const std::string role = message.value("role", "");
+            if (role == "tool") {
+                Json body = message;
+                body.erase("tool_call_id");
+                bodies->push_back(std::move(body));
+                ids->push_back(message.value("tool_call_id", std::string()));
+            } else if (role == "assistant" && message.contains("tool_calls")) {
+                for (const auto& call : message.at("tool_calls")) {
+                    assistant_calls->insert(call.value("id", std::string()));
+                }
+            }
+        }
+    };
+    std::vector<Json> sent_tools, resumed_tools;
+    std::vector<std::string> sent_ids, resumed_ids;
+    std::set<std::string> sent_calls, resumed_calls;
+    collect_tools(wire, &sent_tools, &sent_ids, &sent_calls);
+    collect_tools(resumed, &resumed_tools, &resumed_ids, &resumed_calls);
+    CHECK(sent_tools == resumed_tools);
+    REQUIRE(sent_tools.size() == 2);
+    // live:provider 号域,逐一同假模型的 tool_use 同键。
+    for (const auto& id : sent_ids) {
+        CHECK(sent_calls.count(id) == 1);
+    }
+    // resumed:actionId 域(writer 发号 action-<n>),投影内配对键同域。
+    for (const auto& id : resumed_ids) {
+        CHECK(resumed_calls.count(id) == 1);
+        CHECK(id.rfind("action-", 0) == 0);
+    }
+    for (const auto& tool_message : sent_tools) {
+        const auto body = Json::parse(tool_message.at("content").get<std::string>());
+        CHECK(body.at("execution_already_occurred") == true);
+        CHECK(body.at("execution_state") == "done");
+        CHECK(body.at("capture_complete") == true);
+        CHECK(body.at("evidence_paths").size() >= 2);
+        CHECK(body.at("source_result_event_refs").size() == 2);
+    }
+    auto ledger = v3::ReadV3Ledger(audit.path);
+    REQUIRE(ledger.has_value());
+    int summary_responses = 0;
+    for (const auto& message : ledger->messages) {
+        if (message.purpose == v3::MessagePurpose::ActionSummary && message.message.at("role") == "assistant") {
+            ++summary_responses;
+            CHECK(message.usage->at("inputTokens") == 123);
+        }
+    }
+    CHECK(summary_responses == 2);
+    for (const char* name : {"res-000001.combined.txt", "res-000002.combined.txt"}) {
+        CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / name) == 16000);
+    }
+}
+
+TEST_CASE("B1 real loop: multi-file native text shares one preview and retains both originals") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = "two resource files";
+    tools::EmbeddedTextResourceContent first;
+    first.uri = "file:///first.txt";
+    first.mime_type = "text/plain";
+    first.text = "第一份\n" + std::string(1024 * 1024, 'a');
+    tools::EmbeddedTextResourceContent second = first;
+    second.uri = "file:///second.txt";
+    second.text = "第二份\n" + std::string(1024 * 1024, 'b');
+    tool->native_blocks = {first, second};
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    REQUIRE(agent.Run(Input(), wiring).has_value());
+    REQUIRE(backend.requests.size() == 2);
+    CHECK(counter->calls == 1);
+    std::string preview;
+    const auto wire = api::chat::BuildRequestJson(backend.requests[1]);
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool")
+        preview = message.at("content").get<std::string>();
+    REQUIRE_FALSE(preview.empty());
+    CHECK(preview.size() <= 32768);
+    CHECK(preview.find("res-000001.combined.txt") != std::string::npos);
+    CHECK(preview.find("res-000001.raw_payload.json") != std::string::npos);
+    std::ifstream file(audit.path.parent_path() / "artifacts" / "res-000001.raw_payload.json");
+    Json raw;
+    file >> raw;
+    REQUIRE(raw.size() == 2);
+    CHECK(raw[0].at("text") == first.text);
+    CHECK(raw[1].at("text") == second.text);
+    int durable_results = 0;
+    for (const auto& row : audit.Rows()) if (row.value("type", "") == "message" && row.at("message").value("role", "") == "tool") {
+        ++durable_results;
+        CHECK(row.at("message").at("content") == preview);
+    }
+    CHECK(durable_results == 1);
+}
+
+TEST_CASE("B1 original capture survives post-tool hook feedback appended to the result") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    const std::string original(2 * 1024 * 1024, 'x');
+    tool->result_content = original;
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.on_post_tool_use_hook = [](const std::string&, const std::string&, const Json&, const tools::Tool::Result&) {
+        return std::vector<std::string>{"hook-added feedback"};
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    REQUIRE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 1);
+    REQUIRE(backend.requests.size() == 2);
+    std::ifstream captured(audit.path.parent_path() / "artifacts" / "capture-000001.combined.txt", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(captured), {}) == original);
+    std::ifstream effective(audit.path.parent_path() / "artifacts" / "res-000001.combined.txt", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(effective), {}) == original + "\n[post-tool-use hook 追加] hook-added feedback");
+    const auto wire = api::chat::BuildRequestJson(backend.requests[1]);
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool")
+        CHECK(message.at("content").get<std::string>().find("hook-added feedback") != std::string::npos);
+    for (const auto& row : audit.Rows()) if (row.value("kind", "") == "tool.result.selected")
+        CHECK(row.at("payload").at("sourceResultEventRefs").size() == 2);
+    CHECK(v3::VerifyV3File(audit.path).ok);
+}
+
+TEST_CASE("B1 post-tool hook failure leaves the original capture recoverable") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    const std::string original(2 * 1024 * 1024, 'x');
+    tool->result_content = original;
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.on_post_tool_hook = [](const std::string&, const std::string&, const Json&, const tools::Tool::Result&) {
+        throw std::runtime_error("injected post-tool failure");
+    };
+    CHECK_THROWS_AS(agent.Run(Input(), wiring), std::runtime_error);
+    CHECK(counter->calls == 1);
+    CHECK(backend.requests.size() == 1);
+    std::ifstream captured(audit.path.parent_path() / "artifacts" / "capture-000001.combined.txt", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(captured), {}) == original);
+    CHECK(KindCount(audit.Rows(), "tool.result.persisted") == 1);
+    CHECK(KindCount(audit.Rows(), "tool.result.selected") == 0);
+}
+
+TEST_CASE("B1 original capture failure stops post-tool hooks and subsequent model sends") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt <= 2, "audit-call-" + std::to_string(attempt));
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(2 * 1024 * 1024, 'x');
+    tool->effect = [&audit, counter] {
+        if (counter->calls == 2) {
+            const auto destination = audit.path.parent_path() / "artifacts" / "capture-000002.json";
+            std::filesystem::create_directories(destination);
+            std::ofstream(destination / "keep") << "blocked";
+        }
+    };
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    int post_hooks = 0;
+    wiring.on_post_tool_hook = [&post_hooks](const std::string&, const std::string&, const Json&, const tools::Tool::Result&) {
+        ++post_hooks;
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 2);
+    CHECK(post_hooks == 1);
+    CHECK(backend.requests.size() == 2);
+    CHECK(KindCount(audit.Rows(), "tool.result.persist_failed") == 1);
+    CHECK_FALSE(std::filesystem::exists(audit.path.parent_path() / "artifacts" / "res-000002.json"));
+}
+
+TEST_CASE("B2 real loop: media-bearing result ends the turn unestimated while captures persist") {
+    // 产品决定(见 v3-action-summary.md「媒体边界」):文本 bytes/4 不给媒体
+    // 定价,首发预算块遇到 Image/Audio/EmbeddedBlob 显式拒绝并终态,不静默
+    // 放行。这条测试钉三件事:轮以 unestimated 错误收场、原始捕获(含图片
+    // 块)完整落 artifacts、同批已执行的文本结果照常入账不丢。
+    struct ImageTool final : tools::Tool {
+        int calls = 0;
+        std::string name() const override { return "image_tool"; }
+        std::string description() const override { return "returns one image block"; }
+        Json input_schema() const override { return Json::object(); }
+        bool needs_confirm() const override { return false; }
+        Result execute(const Json&) override {
+            ++calls;
+            tools::Tool::Result result{"screenshot captured", false};
+            tools::ImageContent image;
+            image.mime_type = "image/png";
+            image.width = 4;
+            image.height = 2;
+            image.bytes = 8;
+            image.sha256 = "media-sha";
+            image.artifact.id = "art-mediasha";
+            image.artifact.filename = "art-mediasha.png";
+            image.artifact.path = "mcp-artifacts/art-mediasha.png";
+            image.artifact.mime_type = "image/png";
+            image.artifact.bytes = 8;
+            image.artifact.sha256 = "media-sha";
+            image.artifact.stored = true;
+            tools::ToolResultPayload payload;
+            payload.content.push_back(std::move(image));
+            result.SetPayload(std::move(payload));
+            return result;
+        }
+    };
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        if (attempt != 1) {
+            Reply(sink);
+            return {};
+        }
+        sink(api::MessageStart{"provider-response", "audit-model"});
+        sink(api::ToolUseStart{0, "media-text-1", "audit_tool"});
+        sink(api::ToolUseInputDelta{0, "{}"});
+        sink(api::ToolUseStart{1, "media-image-2", "image_tool"});
+        sink(api::ToolUseInputDelta{1, "{}"});
+        sink(api::ContentBlockDone{0});
+        sink(api::ContentBlockDone{1});
+        sink(api::MessageDone{"tool_use", api::Usage{}});
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto text_tool = std::make_unique<AuditTool>();
+    auto* text_counter = text_tool.get();
+    text_tool->result_content = "plain text evidence";
+    registry.Register(std::move(text_tool));
+    auto image_tool = std::make_unique<ImageTool>();
+    auto* image_counter = image_tool.get();
+    registry.Register(std::move(image_tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    const auto outcome = agent.Run(Input(), wiring);
+    REQUIRE_FALSE(outcome.has_value());
+    CHECK(outcome.error().find("tool_batch.unestimated_media_or_reasoning") != std::string::npos);
+    CHECK(text_counter->calls == 1);
+    CHECK(image_counter->calls == 1);
+    CHECK(backend.requests.size() == 1);  // 终态后不发下一份请求
+    const auto rows = audit.Rows();
+    int raw_captures = 0;
+    for (const auto& row : rows) {
+        if (row.value("kind", "") != "tool.result.persisted") continue;
+        for (const auto& ref : row.at("payload").at("result_ref")) {
+            if (ref.value("path", "").find("capture-") != std::string::npos) {
+                ++raw_captures;
+                break;
+            }
+        }
+    }
+    CHECK(raw_captures == 2);  // 文本与图片两枚原始捕获都落了仓
+    std::ifstream captured_text(audit.path.parent_path() / "artifacts" / "capture-000001.combined.txt",
+                                std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(captured_text), {}) == "plain text evidence");
+    std::ifstream captured_media(audit.path.parent_path() / "artifacts" / "capture-000002.raw_payload.json");
+    Json media_blocks;
+    captured_media >> media_blocks;
+    REQUIRE(media_blocks.size() == 1);
+    CHECK(media_blocks[0].at("type") == "image");
+    CHECK(media_blocks[0].at("artifact").at("path") == "mcp-artifacts/art-mediasha.png");
+    CHECK(media_blocks[0].at("artifact").at("stored") == true);
+    // 同批文本结果照常入账:选用事件、有效正文与持久 tool 消息一枚不少。
+    CHECK(KindCount(rows, "tool.result.selected") == 2);
+    std::ifstream effective_text(audit.path.parent_path() / "artifacts" / "res-000001.combined.txt",
+                                 std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(effective_text), {}) == "plain text evidence");
+    int durable_results = 0;
+    for (const auto& row : rows) {
+        if (row.value("type", "") == "message" && row.at("message").value("role", "") == "tool") ++durable_results;
+    }
+    CHECK(durable_results == 2);
+    CHECK(v3::VerifyV3File(audit.path).ok);
+}
+
+TEST_CASE("B2 gate: hub install keeps v2 bridges on the legacy budget path") {
+    // v2 会话(逃生口 env=0 与旧会话续跑)不得被连带切进 adapter bytes/4
+    // 整批口径:hub.Install 只给"在管预览"的 v3 桥挂 rewrite 钩子。钩子
+    // 非空会跳过 step-0 固定账预检、停用 token 校准器三处——v2 桥的
+    // Rewrite 只是 no-op 回执,口径却会被切走(本测试钉的就是这道回归)。
+    struct V2Environment {
+        std::optional<std::string> previous =
+            platform::GetEnvVar("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+        static void Set(const std::optional<std::string>& value) {
+#ifdef _WIN32
+            _putenv_s("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", value.value_or("").c_str());
+#else
+            if (value) setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", value->c_str(), 1);
+            else unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
+        }
+        V2Environment() { Set(std::string("0")); }
+        ~V2Environment() { Set(previous); }
+    };
+    V2Environment v2;
+    TempLedger temp;
+    runtime::TrajectorySessionLedger::Options options;
+    options.workspaces_root = temp.path / "workspaces";
+    options.workspace_root = temp.path / "ws";
+    options.workspace_identity = workspace::MakeFallbackIdentity(temp.path / "ws");
+    options.launch_cwd = temp.path.string();
+    options.lubancode_version = "failure-audit";
+    options.v3_system_content = "AUDIT_SYSTEM";
+    auto opened = runtime::TrajectorySessionLedger::Open(options);
+    REQUIRE(opened.has_value());
+    auto ledger = std::make_unique<runtime::TrajectorySessionLedger>(std::move(*opened));
+    auto bridge = ledger->NewTurnBridge({"audit", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    CHECK_FALSE(bridge->ManagesToolResultPreviews());  // v2 桥不在管预览
+    bridge->BeginTurn("v2-turn", "external_user");
+    bridge->RecordInput(Input());
+
+    runtime::IdAuthority ids;
+    runtime::ToolTraceHub hub(ids);
+    auto assemble = [&](agent::Agent& agent, agent::TurnWiring& wiring, const char* turn_id) {
+        wiring.boundary_recorder = bridge.get();
+        wiring.wait_request_backoff = [](auto, auto) { return true; };
+        hub.AttachTrajectory(bridge.get());  // 生产次序:桥先挂,Install 看能力位
+        hub.Install(agent, wiring, "audit-thread", turn_id);
+    };
+
+    // 整批 rewrite 钩子不挂;捕获口照挂(v2 回执默认放行,不改行为)。
+    AuditBackend preflight_backend;
+    preflight_backend.emit = [](int, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    agent::TurnWiring preflight_wiring;
+    auto preflight_profile = Profile();
+    preflight_profile.provider = "audit";
+    preflight_profile.runtime.context_window_tokens = 4000;
+    agent::Agent preflight_agent(preflight_backend, registry, preflight_profile);
+    assemble(preflight_agent, preflight_wiring, "v2-preflight");
+    CHECK_FALSE(preflight_wiring.rewrite_tool_results_for_history);
+    CHECK(preflight_wiring.capture_tool_result);
+    api::Message huge;
+    huge.role = api::Role::User;
+    huge.content.push_back(api::TextBlock{std::string(40000, 'h')});
+    const auto rejected = preflight_agent.Run(huge, preflight_wiring);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().find("上下文预检未通过") != std::string::npos);  // 旧 step-0 固定账预检仍在
+    CHECK(preflight_backend.requests.empty());
+
+    // token 校准器照常取样:adapter 整批口径下三处全停,样本数为零;旧路
+    // 上大请求 + 实报 usage 落一对样本。
+    AuditBackend calibrator_backend;
+    calibrator_backend.emit = [](int, const auto& sink) -> std::expected<void, api::Error> {
+        sink(api::MessageStart{"provider-response", "audit-model"});
+        sink(api::TextDelta{"SUCCESS"});
+        sink(api::ContentBlockDone{0});
+        // 第三参 usage_reported 是 A0 显式位:取样口只认它,不带位光有
+        // Usage 数值不算 provider 明报(loop.cpp 校准样本护栏)。
+        sink(api::MessageDone{"end_turn", api::Usage{4000, 100, 0, 0, 0}, true});
+        return {};
+    };
+    agent::TokenCalibrator calibrator;
+    agent::TurnWiring calibrator_wiring;
+    calibrator_wiring.token_calibrator = &calibrator;
+    auto calibrator_profile = Profile();
+    calibrator_profile.provider = "audit";
+    agent::Agent calibrator_agent(calibrator_backend, registry, calibrator_profile);
+    assemble(calibrator_agent, calibrator_wiring, "v2-calibrator");
+    CHECK_FALSE(calibrator_wiring.rewrite_tool_results_for_history);
+    api::Message big;
+    big.role = api::Role::User;
+    big.content.push_back(api::TextBlock{std::string(16000, 'q')});
+    const auto sampled = calibrator_agent.Run(big, calibrator_wiring);
+    REQUIRE_MESSAGE(sampled.has_value(), sampled.error());
+    CHECK(calibrator_backend.requests.size() == 1);
+    CHECK(calibrator.StatusOf("audit", "audit-model").sample_count >= 1);
 }

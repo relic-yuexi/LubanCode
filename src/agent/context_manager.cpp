@@ -69,14 +69,19 @@ void ContextManager::ReplaceHistory(std::vector<api::Message> new_history) {
     pending_epoch_break_reason_ = "history_compacted";
     last_prefix_.reset();
     last_wire_dump_.clear();  // 新 epoch:上一份 wire 文本不再可比,清掉
-    // 新 epoch,压缩决策与截断通报一并翻篇:compact 是唯一常规的全量重写
-    // 点,重写后的视图从头定形(前缀缓存守恒单第六期);热区若仍带超线
-    // 原文,下一请求的截断按新发生重新通报。
+    // 新 epoch,压缩决策、截断钉子账与截断通报一并翻篇:compact/显式降档
+    // 是唯一常规的全量重写点(正式 context 提交),重写后的视图按新档位
+    // 从头定形(前缀缓存守恒单第六期;V3-REAL-01 换形状只走这条路);热区
+    // 若仍带超线原文,下一请求的截断按新发生重新通报。
     result_view_memo_.decisions.clear();
-    truncation_announced_in_epoch_ = false;
+    truncation_memo_.pinned.clear();
+    announced_result_shapes_.clear();
 }
 
 ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& budget) {
+    if (budget.preserve_committed_previews) {
+        return ContextWorkingView{request_history_, {}};
+    }
     // 无损结构压缩(第六期"首次定形"):只改发给模型的视图——每枚
     // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
     // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
@@ -92,19 +97,32 @@ ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& bud
     }
 
     // 保命索(单条巨肥工具结果的尾部截断,token 轴口径):截断按结果自身
-    // 的 token 账算,确定性——同一份历史每请求截出同一副形状,旧消息不因
-    // 历史增长被追改(旧字节轴按全量 overage 截会滑窗,须 sticky 钉住;
-    // 那条轴拆了,sticky 随之退场)。真"新发生"的截断(本 epoch 首次)才
-    // 进 trim 报告,loop 拿去打 AfterHardTrim 通报并给前缀账点名;重复截
-    // 同一副形状不是新动作,不反复刷告警。全量 JSONL 照旧保留。
+    // 的 token 账算,且随首次采用的档位快照钉死(V3-REAL-01)——钉子账
+    // 命中的直接重放定形时的形状,当次系数/窗口变化不重裁旧内容(估算器
+    // 状态追改已发前缀,正是命中率 93%→57% 那场病理的暗裁来源);真换形状
+    // 走 ReplaceHistory 正式提交。真"新发生"的截断(本 epoch 首次定形且真
+    // 动了刀)才进 trim 报告,loop 拿去打 AfterHardTrim 通报并给前缀账
+    // 点名。全量 JSONL 照旧保留。
     ContextWorkingView out;
     out.messages = ShrinkOversizedToolResults(std::move(view_source), budget.window_tokens,
-                                              budget.token_calibration, &out.trim);
-    if (out.trim.truncated_results && truncation_announced_in_epoch_) {
-        out.trim.truncated_results = false;  // 老现象,本 epoch 已通报过
-    } else if (out.trim.truncated_results) {
-        truncation_announced_in_epoch_ = true;
+                                              budget.token_calibration, &out.trim,
+                                              &truncation_memo_);
+    // 截断通报按结果身份+预览版本去重(V3-REAL-02):Shrink 只报新定形/硬闸
+    // 降档的截断(带形状指纹),这里再滤掉"本 epoch 同身份同形状已通报过"
+    // 的——同一枚重复采用不重报;另一枚巨型结果首次截断、已采用结果经
+    // 硬闸换了形状,都必须报,不再被一枚全局布尔吞掉。
+    bool newly_truncated = false;
+    for (const auto& notice : out.trim.truncated_result_ids) {
+        auto announced = announced_result_shapes_.find(notice.tool_use_id);
+        if (announced == announced_result_shapes_.end()) {
+            announced_result_shapes_.emplace(notice.tool_use_id, notice.shape_hash);
+            newly_truncated = true;
+        } else if (announced->second != notice.shape_hash) {
+            announced->second = notice.shape_hash;  // 硬闸降档:新形状版本
+            newly_truncated = true;
+        }
     }
+    out.trim.truncated_results = newly_truncated;
     return out;
 }
 

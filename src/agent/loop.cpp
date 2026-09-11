@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <limits>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -23,7 +24,10 @@
 #include "agent/resolved_prompt_builder.hpp"  // Token 账本单 A1:三层后叠 + manifest 同一次解析
 #include "agent/token_calibrator.hpp"  // token 估算校准:真实 usage 反推的会话级系数
 #include "agent/tool_result_images.hpp"  // 工具结果图片回喂:请求出门前的 base64 重灌
+#include "agent/tool_batch_budget.hpp"
 #include "api/assembler.hpp"
+#include "api/model_input_snapshot.hpp"
+#include "hooks/middleware_builtins.hpp"
 #include "cli/i18n.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
@@ -709,6 +713,19 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // trace 里的 result_ref 记的是追加前的原始结果(两份 digest 分得开,
     // 恢复时能判断 Hook 到底改了什么)。
     finish(result, source_kind, source_instance, effect_class);
+    if (wiring.capture_tool_result) {
+        api::ToolResultBlock captured{call.id, result.content, result.is_error,
+                                     result.payload.content, result.payload.structured_content};
+        captured.capture_complete = result.outcome != "output_limit";
+        if (!captured.capture_complete) captured.capture_reason = "quota";
+        const auto receipt = wiring.capture_tool_result(captured);
+        if (receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
+            tools::Tool::Result failed{"Tool capture persistence failed: " + receipt.error_code, true};
+            failed.outcome = ToString(ToolOutcome::ResultStoreFailed);
+            failed.error_code = receipt.error_code;
+            return dispatch_done(call.id, call.name, std::move(failed));
+        }
+    }
     if (wiring.on_post_tool_use_hook) {
         const std::vector<std::string> feedback =
             wiring.on_post_tool_use_hook(call.id, call.name, effective_input, result);
@@ -1030,13 +1047,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
         // 发送必须吃同一份定义，免得先估旧表、后发新表。
         request.tools = BuildToolDefinitions();
+        const bool adapter_budget = wiring.rewrite_tool_results_for_history &&
+                                    !backend_.SerializeForDiagnostics(request).empty();
         // token 估算校准(真实 usage 反推 byte 比率单):本步全部估算(固定
         // 账预检、A/B 双闸、preflight 三项账)乘当前系数——(provider,model)
         // 桶内最近 8 对 (默认尺估算, 实报完整输入) 样本的中位 real/est。
         // 逐 step 取:上一请求的样本刚记完,系数可能已更新。没接线(单测/
         // 旧路径)恒 1.0,行为与从前一字不差。
         const double token_calibration =
-            wiring.token_calibrator != nullptr
+            wiring.token_calibrator != nullptr && !wiring.rewrite_tool_results_for_history
                 ? wiring.token_calibrator->Coefficient(agent.profile_.provider, model_)
                 : 1.0;
         // 有效窗口(token 轴唯一裁剪的基准):profile 声明了用声明值,0(模型
@@ -1064,7 +1083,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
         // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
         // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
-        if (step_index == 0 && !context_.request_history().empty()) {
+        if (!adapter_budget && step_index == 0 && !context_.request_history().empty()) {
             std::size_t fixed_input_tokens =
                 EstimateTextTokensForPreflight(request.system, token_calibration) +
                 EstimateMessageTokensForPreflight(context_.request_history().back(), token_calibration);
@@ -1133,7 +1152,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // (ReplaceHistory 开新 epoch),返回后 epoch 断了就按新史重拼——
         // 发出去的仍是(可能已换短的)那份请求视图。没设回调时只拼视图
         // 不评估——这一步不发出任何请求。窗口未知走上面的兜底,不裸奔。
-        ContextWorkingView working_view = context_.BuildWorkingView({window_tokens, token_calibration});
+        ContextWorkingView working_view = context_.BuildWorkingView({window_tokens, token_calibration, static_cast<bool>(wiring.rewrite_tool_results_for_history)});
         if (wiring_.on_context_pressure) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
@@ -1157,8 +1176,28 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 短词密集的历史虚抬两倍;水位与 /context 同尺,账才对得上。
             // 校准系数同一枚(token 估算校准单):双闸两把尺同乘,谁也不
             // 单独偏科;没接线时 1.0,双闸既有单测的数字一字不动。
-            const std::size_t working_view_tokens =
+            std::size_t working_view_tokens =
                 EstimateHistoryTokens(working_view.messages, token_calibration);
+            if (adapter_budget) {
+                auto candidate = request;
+                candidate.messages = working_view.messages;
+                candidate.max_tokens = profile_.max_output_tokens;
+                const auto snapshot = api::ModelInputSnapshotFromWire(backend_.SerializeForDiagnostics(candidate));
+                if (!snapshot) return std::unexpected(snapshot.error());
+                if (!api::HasUnestimatedInput(*snapshot)) {
+                    const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+                    working_view_tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
+                    const auto limit = backend_.GetEffectiveOutputLimit(candidate);
+                    const auto reserve = limit.tokens && *limit.tokens > 0
+                                             ? static_cast<std::size_t>(*limit.tokens) : estimate_output_reserve;
+                    projected = working_view_tokens + reserve + kContextPreflightHeadroomTokens;
+                } else {
+                    // Text compression cannot establish a missing media/signature
+                    // policy. The final adapter gate reports that specific cause.
+                    projected = 0;
+                    working_view_tokens = 0;
+                }
+            }
             const std::size_t projected_line = AutoCompactTriggerLine(window_tokens);
             const std::size_t real_line =
                 window_tokens * static_cast<std::size_t>(kRealOverflowPercent) / 100;
@@ -1168,14 +1207,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             pressure.window_tokens = window_tokens;
             pressure.working_view_tokens = working_view_tokens;
             pressure.working_view_overflow = working_view_tokens >= real_line;
-            pressure.projected_overflow = projected >= projected_line && pressure.working_view_overflow;
+            pressure.projected_overflow = projected >= projected_line &&
+                                          (adapter_budget || pressure.working_view_overflow);
             const int epoch_before = context_.cache_epoch();
             wiring_.on_context_pressure(pressure);
             if (context_.cache_epoch() != epoch_before) {
                 // 回调里真换了史(midturn compact 走 ReplaceHistory):按新史
                 // 重拼工作视图——ReplaceHistory 已清决策台账,重拼从头定形,
                 // 与旧时序(压完再 BuildWorkingView)同一副牌。
-                working_view = context_.BuildWorkingView({window_tokens, token_calibration});
+                working_view = context_.BuildWorkingView({window_tokens, token_calibration, static_cast<bool>(wiring.rewrite_tool_results_for_history)});
             }
         }
         request.messages = working_view.messages;
@@ -1243,7 +1283,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 余量,任务照常调工具。尤其是当前单条用户消息本身过大时，摘要压
         // 多少遍也救不了，不能再把同一份请求发给 provider 撞 500。窗口按
         // 上面的有效窗口算(未知落兜底),永不跳过。
-        {
+        if (!adapter_budget) {
             const std::size_t input_tokens =
                 EstimateRequestInputTokensForPreflight(request, token_calibration);
             const std::size_t current_turn_tokens = request.messages.empty()
@@ -1356,8 +1396,37 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 留绕开 hook 的估算路径。没配回调一处不调,行为与从前逐字节一致;
         // 拦下即整步明败(与预检未通过同款收口),mutate 采用改写时报
         // reprepare——本批不重建请求,明拦不暗发。
+        std::optional<nlohmann::json> adapter_input_snapshot;
+        if (wiring.rewrite_tool_results_for_history) {
+            const auto wire = backend_.SerializeForDiagnostics(request);
+            if (!wire.empty()) {
+                auto snapshot = api::ModelInputSnapshotFromWire(wire);
+                if (!snapshot) return std::unexpected(snapshot.error());
+                if (api::HasUnestimatedInput(*snapshot)) {
+                    return std::unexpected("context.unestimated_media_or_reasoning: explicit budget policy required");
+                }
+                const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+                const auto tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
+                const auto limit = backend_.GetEffectiveOutputLimit(request);
+                const auto reserve = limit.tokens && *limit.tokens > 0
+                                         ? static_cast<std::size_t>(*limit.tokens) : estimate_output_reserve;
+                if (ExceedsContextWindow(tokens, reserve, window_tokens)) {
+                    return std::unexpected(
+                        "context.adapter_input_exceeds_capacity: final UTF-8 bytes/4 input + output + margin"
+                        " (step=" + std::to_string(step_index) +
+                        " input_tokens=" + std::to_string(tokens) +
+                        " messages=" + std::to_string(request.messages.size()) +
+                        " output_reserve=" + std::to_string(reserve) +
+                        " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
+                        " window=" + std::to_string(window_tokens) + ")");
+                }
+                adapter_input_snapshot = std::move(*snapshot);
+            }
+        }
         if (wiring.on_pre_request_hooks) {
-            const nlohmann::json frozen_snapshot = runtime::BuildRequestSnapshotJson(request);
+            const nlohmann::json frozen_snapshot = adapter_input_snapshot
+                                                       ? *adapter_input_snapshot
+                                                       : runtime::BuildRequestSnapshotJson(request);
             const std::string pre_request_blocked = wiring.on_pre_request_hooks(
                 step_id, wiring.turn_id, frozen_snapshot, static_cast<std::uint64_t>(window_tokens),
                 static_cast<std::uint64_t>(estimate_output_reserve));
@@ -1371,7 +1440,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // (不乘 token_calibration——系数的锚是默认尺,乘过再量就自我追尾);
         // 字节按 system + messages + 工具定义的文本字节累,与实报完整输入
         // (TotalInputTokens)同一份 prompt 对账。
-        if (wiring.token_calibrator != nullptr) {
+        if (wiring.token_calibrator != nullptr && !adapter_budget) {
             calibration_est_tokens =
                 EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(request.messages);
             calibration_request_bytes = request.system.size() + EstimateHistoryBytes(request.messages);
@@ -1953,7 +2022,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // input 对整份字节,cache 命中时必然虚低,样本全废,单子护栏点的
         // 就是这个坑;个别 provider 缓存计数失真的,落在异常带外进不了窗。
         // 漂移重置(分词口径真换了)打一行诊断,别让估算悄悄变了样。
-        if (wiring.token_calibrator != nullptr && assembler.usage_seen()) {
+        if (wiring.token_calibrator != nullptr && !adapter_budget && assembler.usage_seen()) {
             TokenCalibrationSample calibration_sample;
             calibration_sample.request_bytes = calibration_request_bytes;
             calibration_sample.estimated_tokens = calibration_est_tokens;
@@ -2227,6 +2296,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     block.tool_use_id = call.id;  // 配对的是 wire 那枚 tool_invoke 的 id
                     block.content = platform::SanitizeUtf8(result.content);
                     block.is_error = result.is_error;
+                    block.capture_complete = result.outcome != "output_limit";
+                    if (!block.capture_complete) block.capture_reason = "quota";
                     if (!result.payload.empty()) {
                         block.blocks = result.payload.content;
                         block.structured_content = result.payload.structured_content;
@@ -2253,6 +2324,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 block.tool_use_id = call.id;
                 block.content = platform::SanitizeUtf8(result.content);
                 block.is_error = result.is_error;
+                block.capture_complete = result.outcome != "output_limit";
+                if (!block.capture_complete) block.capture_reason = "quota";
                 if (!result.payload.empty()) {
                     block.blocks = result.payload.content;
                     block.structured_content = result.payload.structured_content;
@@ -2267,6 +2340,123 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
+        std::string batch_capacity_error;
+        api::Request batch_request = request;
+        bool batch_measured = false;
+        if (wiring.rewrite_tool_results_for_history) {
+            if (wiring.configure_action_summary) {
+                runtime::ActionSummaryProfile summary;
+                summary.provider = agent.profile_.provider;
+                summary.wire = agent.profile_.prompt_sections.wire;
+                summary.model = model_;
+                summary.window_tokens = std::min<std::size_t>(window_tokens, 32768);
+                summary.cancel = cancel;
+                wiring.configure_action_summary(&backend_, summary);
+            }
+            batch_request.messages = context_.request_history();
+            batch_request.tools = BuildToolDefinitions();
+            // Snapshot the closed group with empty bodies to charge fixed JSON,
+            // history and tool IDs once. Media remains present and is classified
+            // separately; it must never quietly consume zero tokens.
+            auto shell = tool_result_message;
+            bool unestimated_result_media = false;
+            for (auto& block : shell.content) {
+                if (auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                    result->content.clear();
+                    // Mirror the selected preview path: sanitation must not
+                    // reconstruct an original rich-text projection into this
+                    // empty shell, and Gemini will consume the adopted text.
+                    result->preview_committed = true;
+                    result->structured_content.reset();
+                    for (const auto& rich : result->blocks) {
+                        if (std::holds_alternative<tools::ImageContent>(rich) ||
+                            std::holds_alternative<tools::AudioContent>(rich) ||
+                            std::holds_alternative<tools::EmbeddedBlobResourceContent>(rich)) {
+                            unestimated_result_media = true;
+                        }
+                    }
+                }
+            }
+            batch_request.messages.push_back(std::move(shell));
+            const auto wire = backend_.SerializeForDiagnostics(batch_request);
+            // All four production adapters supply the same serialization used by
+            // send_stream. Legacy test/trace backends without it retain their own
+            // preflight; they do not claim an adapter-level batch measurement.
+            batch_measured = !wire.empty();
+            if (batch_measured) {
+                const auto input = api::ModelInputSnapshotFromWire(wire);
+                if (!input) batch_capacity_error = input.error();
+                else if (unestimated_result_media || api::HasUnestimatedInput(*input)) {
+                    batch_capacity_error = "tool_batch.unestimated_media_or_reasoning";
+                } else {
+                    const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
+                    const auto fixed_bytes = measured.at("inputUtf8Bytes").get<std::size_t>();
+                    const auto limit = backend_.GetEffectiveOutputLimit(batch_request);
+                    const auto reserve = limit.tokens && *limit.tokens > 0
+                                             ? static_cast<std::size_t>(*limit.tokens)
+                                             : estimate_output_reserve;
+                    std::size_t input_tokens = window_tokens;
+                    for (auto charge : {reserve, kContextPreflightHeadroomTokens, std::size_t{1}}) {
+                        input_tokens = charge >= input_tokens ? 0 : input_tokens - charge;
+                    }
+                    const auto input_bytes = input_tokens > std::numeric_limits<std::size_t>::max() / 4
+                                                 ? std::numeric_limits<std::size_t>::max()
+                                                 : input_tokens * 4;
+                    const auto free_bytes = fixed_bytes < input_bytes ? input_bytes - fixed_bytes : 0;
+                    // A JSON control byte can expand to six bytes (\\u00xx).
+                    // This is an explicit serialization bound, not token scaling.
+                    // The complete adopted input is measured again below.
+                    const auto plan = PlanToolBatchBudget(tool_result_message, free_bytes / 6);
+                    batch_capacity_error = plan.error;
+                    if (batch_capacity_error.empty()) {
+                        std::size_t index = 0;
+                        for (auto& block : tool_result_message.content) {
+                            auto& result = std::get<api::ToolResultBlock>(block);
+                            result.preview_budget_bytes = plan.preview_bytes[index++];
+                            result.action_summary_requested = plan.reduced && result.content.size() > result.preview_budget_bytes;
+                        }
+                    }
+                }
+                if (!ToolBatchPairingMatches(last_assistant, tool_result_message)) {
+                    batch_capacity_error = "tool_batch.invalid_pairing";
+                }
+            }
+            // Even an impossible budget still traverses persistence: these tools
+            // already executed. Preserve their captured results before stopping.
+        }
+        if (wiring.rewrite_tool_results_for_history) {
+            const auto receipt = wiring.rewrite_tool_results_for_history(tool_result_message);
+            if (wiring.configure_action_summary) wiring.configure_action_summary(nullptr, {});
+            if (receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
+                return std::unexpected("Tool preview commit failed: " + receipt.error_code);
+            }
+            if (batch_measured) {
+                if (!ToolBatchPairingMatches(last_assistant, tool_result_message)) {
+                    batch_capacity_error = "tool_batch.preview_pairing_changed";
+                }
+                batch_request.messages.back() = tool_result_message;
+                const auto input = api::ModelInputSnapshotFromWire(backend_.SerializeForDiagnostics(batch_request));
+                if (!input) batch_capacity_error = input.error();
+                else if (api::HasUnestimatedInput(*input)) {
+                    batch_capacity_error = "tool_batch.unestimated_media_or_reasoning";
+                } else {
+                    const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
+                    const auto tokens = measured.at("estimatedInputTokens").get<std::size_t>();
+                    const auto limit = backend_.GetEffectiveOutputLimit(batch_request);
+                    const auto reserve = limit.tokens && *limit.tokens > 0
+                                             ? static_cast<std::size_t>(*limit.tokens)
+                                             : estimate_output_reserve;
+                    if (ExceedsContextWindow(tokens, reserve, window_tokens)) {
+                        batch_capacity_error =
+                            "tool_batch.final_preview_exceeds_capacity"
+                            " (input_tokens=" + std::to_string(tokens) +
+                            " output_reserve=" + std::to_string(reserve) +
+                            " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
+                            " window=" + std::to_string(window_tokens) + ")";
+                    }
+                }
+            }
+        }
         // 批次尾回调要在消息 move 进双账之前拿:回调里读的是五枚结果齐的
         // user message(装配层此刻 append+flush 它)。P1-A 的回执口与旧口
         // 同一触发点,两枚口任设其一都要备货。
@@ -2314,6 +2504,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
+        if (!batch_capacity_error.empty()) {
+            return std::unexpected("新工具结果整批预算未通过；结果已交持久化，不重跑、不发超限请求: " +
+                                   batch_capacity_error);
+        }
         if (interrupted) {
             return RunOutcome{true, false, false, last_stop_reason, steps_used};
         }

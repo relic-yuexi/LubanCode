@@ -14,6 +14,7 @@ constexpr PurposeEntry kEntries[] = {
     {RequestPurpose::WorkflowNode, "workflow_node"},
     {RequestPurpose::CompactMap, "compact_map"},
     {RequestPurpose::CompactReduce, "compact_reduce"},
+    {RequestPurpose::ActionSummary, "action_summary"},
     {RequestPurpose::MemoryExtract, "memory_extract"},
     {RequestPurpose::TitleRefine, "title_refine"},
     {RequestPurpose::DoctorProbe, "doctor_probe"},

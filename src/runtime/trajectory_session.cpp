@@ -3,6 +3,7 @@
 // §五与 P0-1 的 schema.cpp 逐字段钉死的样子。
 
 #include "runtime/trajectory_session.hpp"
+#include "runtime/v3_tool_result_material.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -105,6 +106,11 @@ struct V3TurnBooks {
         bool started = false;
         bool failed = false;               // 执行终态是 failed(选用口径用)
         bool tool_message_done = false;
+        std::string terminal_event_id;
+        std::string capture_event_id;
+        bool capture_failed = false;
+        std::optional<bool> capture_complete;
+        std::string capture_reason;
     };
     struct Request {
         std::string step_id;
@@ -1057,7 +1063,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::OnToolResultsCommitted(const std:
         return {};  // 轮没开:无账可落,不拦
     }
     if (V3Mode()) {
-        return V3ToolResultsCommitted(results);
+        auto adopted = results;
+        return V3ToolResultsCommitted(adopted);
     }
     ToolResultsCommitReceipt batch;
     for (const auto& block : results.content) {
@@ -1554,6 +1561,7 @@ void TrajectoryTurnBridge::V3OutputCancelled(const std::string& request_id,
 }
 
 void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
+    std::lock_guard lock(*v3_books_->tool_results_mutex);
     // ownership 门(P0-D 的 v3 版):只认模型输出声明过的 call。陌生
     // tool_use_id 只进有界诊断投影,不造册、不推进操作账。
     const auto it = v3_turn_->calls.find(event.tool_use_id);
@@ -1669,6 +1677,7 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
             V3NotifyCommitted(receipt);
             if (receipt.status == v3::WriteReceipt::Status::Committed) {
                 book.terminal = true;
+                book.terminal_event_id = receipt.id;
                 if (event.outcome != agent::ToolOutcome::Succeeded &&
                     event.outcome != agent::ToolOutcome::UnknownAfterStart &&
                     !(never_started || OutcomeMapsToCancelled(event))) {
@@ -1688,30 +1697,117 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
     }
 }
 
-ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
+ToolResultsCommitReceipt TrajectoryTurnBridge::CaptureToolResult(const api::ToolResultBlock& result) {
+    if (!V3Mode()) return {};
+    ToolResultsCommitReceipt outcome;
+    const auto fail = [&outcome](std::string code) {
+        outcome.status = ToolResultsCommitReceipt::Status::Failed;
+        outcome.error_code = std::move(code);
+    };
+    if (!turn_open_ || v3_turn_ == nullptr) {
+        fail("tool.capture.turn_not_open");
+        return outcome;
+    }
+    std::lock_guard lock(*v3_books_->tool_results_mutex);
+    const auto found = v3_turn_->calls.find(result.tool_use_id);
+    if (found == v3_turn_->calls.end() || !found->second.terminal || !found->second.action.has_value()) {
+        fail("tool.capture.missing_terminal");
+        return outcome;
+    }
+    auto& book = found->second;
+    if (!book.capture_event_id.empty()) return outcome;
+    book.capture_complete = result.capture_complete;
+    book.capture_reason = result.capture_reason;
+    if (!v3_books_->captures.has_value()) {
+        auto store = v3::ResultStore::Open(v3_writer_->path().parent_path(), "capture-");
+        if (!store.has_value()) {
+            book.capture_failed = true;
+            const auto receipt = book.action->PersistFailed(*v3_writer_, "tool.capture.store_unavailable:" + store.error(),
+                std::nullopt, trajectory::Durability::PowerLoss);
+            V3NotifyCommitted(receipt);
+            fail("tool.capture.store_unavailable");
+            return outcome;
+        }
+        v3_books_->captures = std::move(*store);
+    }
+    v3::ResultStore::PersistRequest capture;
+    capture.result_kind = "text";
+    capture.content = result.content;
+    if (result.structured_content.has_value()) capture.structured_content = *result.structured_content;
+    capture.tool_call_id = book.action_id;
+    capture.execution_event_ref = book.terminal_event_id;
+    capture.preview_policy = {{"policy", "raw-capture-before-post-hook"}};
+    capture.outputs.push_back(v3::ResultStore::ChannelOutput{
+        "combined", "text/plain", result.content, result.capture_complete, result.capture_reason,
+        static_cast<std::uint64_t>(result.content.size()), !result.capture_complete});
+    PreserveNativeToolPayload(result, capture);
+    const auto stored = v3_books_->captures->Persist(capture);
+    if (!stored.ok) {
+        book.capture_failed = true;
+        const auto receipt = book.action->PersistFailed(*v3_writer_, stored.error, std::nullopt,
+                                                       trajectory::Durability::PowerLoss);
+        V3NotifyCommitted(receipt);
+        fail("tool.capture.persist_failed:" + stored.error);
+        return outcome;
+    }
+    const auto receipt = book.action->PersistedResult(*v3_writer_, stored.result_ref,
+        book.terminal_event_id, std::nullopt, trajectory::Durability::PowerLoss);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        book.capture_failed = true;
+        NoteV3Error(receipt, "tool.capture.persisted");
+        fail("tool.capture.ledger_failed:" + receipt.error_code);
+        return outcome;
+    }
+    book.capture_event_id = receipt.id;
+    return outcome;
+}
+
+ToolResultsCommitReceipt TrajectoryTurnBridge::RewriteToolResultsForHistory(api::Message& results) {
+    if (!V3Mode()) return {};
+    if (!turn_open_ || v3_turn_ == nullptr) {
+        ToolResultsCommitReceipt receipt;
+        receipt.status = ToolResultsCommitReceipt::Status::Failed;
+        receipt.error_code = "tool.preview.turn_not_open";
+        return receipt;
+    }
+    return V3ToolResultsCommitted(results);
+}
+
+ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Message& results) {
+    std::unique_lock lock(*v3_books_->tool_results_mutex);
+    if (action_summary_running_) {
+        ToolResultsCommitReceipt busy;
+        busy.status = ToolResultsCommitReceipt::Status::Failed;
+        busy.error_code = "tool.summary.batch_busy";
+        return busy;
+    }
     // 结果链(§4.18):persisted(结果仓落 artifact)→ selected(选用声明)
     // → tool 消息(模型可见预览正文)→ 接纳进链。
-    // P1-A(FA-01)回执合同,三档分清:
-    //   Failed    有结果的"模型可见 tool 消息"没写稳(仓开不了/消息或接纳
-    //             写失败)——主循环停止后续模型发送,不得拿内存里独有的
-    //             结果当已提交输入再发请求;
-    //   Degraded  主账正文已保住的约定降级(metadata 落盘失败、选用事件
-    //             未落一类):tool 消息照落,模型上下文完整,溯源链缺口
-    //             如实记进 degraded_codes,调用方放行另查链;
-    //   Committed 全链落稳。
+    // Any missing persistence, selection, message or admission receipt fails
+    // this batch. A committed preview must have an immutable source to recover.
     ToolResultsCommitReceipt batch;
-    for (const auto& block : results.content) {
-        const auto* result = std::get_if<api::ToolResultBlock>(&block);
+    for (auto& block : results.content) {
+        auto* result = std::get_if<api::ToolResultBlock>(&block);
         if (result == nullptr) {
             continue;
         }
         const auto it = v3_turn_->calls.find(result->tool_use_id);
-        if (it == v3_turn_->calls.end() || !it->second.terminal || it->second.tool_message_done) {
+        if (it != v3_turn_->calls.end() && it->second.tool_message_done) continue;
+        if (it == v3_turn_->calls.end() || !it->second.terminal || !it->second.action.has_value()) {
+            batch.status = ToolResultsCommitReceipt::Status::Failed;
+            batch.error_code = "tool.preview.missing_terminal:" + result->tool_use_id;
             continue;
         }
         V3TurnBooks::Call& book = it->second;
-        if (!book.action.has_value()) {
+        if (book.capture_failed) {
+            batch.status = ToolResultsCommitReceipt::Status::Failed;
+            batch.error_code = "tool.capture.failed:" + result->tool_use_id;
             continue;
+        }
+        if (book.capture_complete.has_value()) {
+            result->capture_complete = *book.capture_complete;
+            result->capture_reason = book.capture_reason;
         }
         const auto hard_fail = [&batch](const char* where, const std::string& code) {
             if (batch.status != ToolResultsCommitReceipt::Status::Failed) {
@@ -1726,8 +1822,9 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
                 v3_books_->results = std::move(*store);
             }
         }
-        const std::string execution_event_ref = book.action->last_event_id().value_or(std::string());
+        const std::string execution_event_ref = book.terminal_event_id;
         std::string persisted_event_id;
+        std::optional<std::string> summary_event_ref;
         if (v3_books_->results.has_value()) {
             v3::ResultStore::PersistRequest persist;
             persist.result_kind = "text";
@@ -1737,9 +1834,12 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             }
             persist.execution_event_ref = execution_event_ref;
             persist.tool_call_id = book.action_id;
+            const auto budget = std::min<std::uint64_t>(32768, std::min<std::uint64_t>(result->preview_budget_bytes, v3_writer_->context().preview_budget_bytes));
+            persist.preview_policy = {{"policy", "v3-tool-preview"}, {"maxPreviewBytes", budget}, {"budgetsLadder", nlohmann::json::array({32768, 16384, 8192, 4096})}};
             persist.outputs.push_back(v3::ResultStore::ChannelOutput{
-                "combined", "text/plain", result->content, true, std::string(),
-                static_cast<std::uint64_t>(result->content.size()), false});
+                "combined", "text/plain", result->content, result->capture_complete, result->capture_reason,
+                static_cast<std::uint64_t>(result->content.size()), !result->capture_complete});
+            PreserveNativeToolPayload(*result, persist);
             const auto persisted = v3_books_->results->Persist(persist);
             if (persisted.ok) {
                 const auto receipt = book.action->PersistedResult(
@@ -1748,6 +1848,91 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
                 V3NotifyCommitted(receipt);
                 if (receipt.status == v3::WriteReceipt::Status::Committed) {
                     persisted_event_id = receipt.id;
+                    if (result->action_summary_requested && action_summary_backend_ != nullptr) {
+                        ActionSummarySource source;
+                        source.action_id = book.action_id;
+                        source.parent_turn_id = book.action->turn_id();
+                        source.persisted_event_ref = persisted_event_id;
+                        if (!book.capture_event_id.empty()) source.source_result_event_refs.push_back(book.capture_event_id);
+                        source.source_result_event_refs.push_back(persisted_event_id);
+                        source.attempt = book.action->attempt();
+                        source.execution_started = book.action->started();
+                        source.result_refs = persisted.result_ref;
+                        source.text = result->content;
+                        switch (book.action->terminal()) {
+                            case v3::ToolActionSession::Terminal::Finished: source.execution_state = "done"; break;
+                            case v3::ToolActionSession::Terminal::Failed: source.execution_state = "failed"; break;
+                            case v3::ToolActionSession::Terminal::Cancelled: source.execution_state = "cancelled"; break;
+                            case v3::ToolActionSession::Terminal::Rejected: source.execution_state = "rejected"; break;
+                            default: source.execution_state = "unknown"; break;
+                        }
+                        source.capture_complete = result->capture_complete;
+                        source.capture_reason = result->capture_reason;
+                        source.budget_bytes = budget;
+                        const auto generation = action_summary_generation_;
+                        const auto profile = action_summary_profile_;
+                        auto* backend = action_summary_backend_;
+                        auto* turn_identity = v3_turn_.get();
+                        const auto* book_identity = &book;
+                        const auto tool_use_id = result->tool_use_id;
+                        int remaining = std::exchange(action_summary_calls_remaining_, 0);
+                        action_summary_running_ = true;
+                        lock.unlock();
+                        ActionSummaryResult summary;
+                        try {
+                            summary = SummarizeActionResult(*v3_writer_, *backend, profile, source, remaining);
+                        } catch (...) {
+                            lock.lock();
+                            action_summary_running_ = false;
+                            throw;
+                        }
+                        lock.lock();
+                        action_summary_running_ = false;
+                        if (generation != action_summary_generation_ || v3_turn_.get() != turn_identity ||
+                            v3_turn_->calls.find(tool_use_id) == v3_turn_->calls.end() ||
+                            &v3_turn_->calls.at(tool_use_id) != book_identity) {
+                            batch.status = ToolResultsCommitReceipt::Status::Failed;
+                            batch.error_code = "tool.summary.source_scope_changed";
+                            return batch;
+                        }
+                        action_summary_calls_remaining_ += remaining;
+                        if (summary.persistence_failed) {
+                            hard_fail("tool.summary.persist_failed", book.action_id);
+                            continue;
+                        }
+                        if (summary.accepted) {
+                            result->content = summary.text;
+                            summary_event_ref = summary.terminal_event_ref;
+                        }
+                    }
+                    auto request = PreviewFromPersistedMaterials(persist, persisted, budget);
+                    if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete || persist.outputs.size() > 1)) {
+                        auto preview = v3::BuildToolPreview(request);
+                        if (preview.listing_overflow) {
+                            auto index = v3_books_->results->PersistListing(persisted.result_id + "-output-index.txt", preview.listing_text);
+                            if (!index.has_value()) {
+                                hard_fail("tool.preview.index_failed", book.action_id);
+                                continue;
+                            }
+                            request.output_index_path = *index;
+                            preview = v3::BuildToolPreview(request);
+                        }
+                        if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {
+                            hard_fail("tool.preview.unrepresentable", book.action_id);
+                            continue;
+                        }
+                        result->content = std::move(preview.text);
+                    }
+                    // Replace only text payloads; media retains its own accounting.
+                    for (auto& payload : result->blocks) {
+                        if (auto* text = std::get_if<tools::TextContent>(&payload)) text->text.clear();
+                    }
+                    if (!result->blocks.empty()) result->blocks.insert(result->blocks.begin(), tools::TextContent{result->content});
+                    // Gemini prefers structured_content over text. The immutable
+                    // result metadata retains it; runtime must use the adopted
+                    // preview, matching the persisted tool message and resume.
+                    result->structured_content.reset();
+
                 } else {
                     NoteV3Error(receipt, "tool.result.persisted");
                     // artifact 落稳、ledger 事件没落:正文保住,溯源链缺一节,
@@ -1780,15 +1965,23 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             hard_fail("tool.result.store_unavailable", book.action_id);
             continue;
         }
+        if (persisted_event_id.empty()) {
+            hard_fail("tool.result.not_persisted", book.action_id);
+            continue;
+        }
         // 结果选用(§4.23):无改写也明确选择原结果(sourceResultEventRefs
         // 须非空——persisted 事件落稳才有得选)。effectiveOutcome 以回喂
         // 结果的 is_error 为准(P1-B/FA-02)——Hook 处理后真正交给模型的
         // 语义,不从原始执行终态猜。
         std::string selected_event_id;
+        std::vector<std::string> source_result_event_refs;
+        if (!book.capture_event_id.empty()) source_result_event_refs.push_back(book.capture_event_id);
+        source_result_event_refs.push_back(persisted_event_id);
         if (!persisted_event_id.empty()) {
             const auto selected = book.action->SelectResult(
-                *v3_writer_, std::vector<std::string>{persisted_event_id}, {},
-                result->is_error ? "failed" : "done", std::nullopt, trajectory::Durability::PowerLoss);
+                *v3_writer_, source_result_event_refs, {},
+                result->is_error ? "failed" : "done", std::nullopt, trajectory::Durability::PowerLoss,
+                summary_event_ref);
             V3NotifyCommitted(selected);
             if (selected.status != v3::WriteReceipt::Status::Committed) {
                 NoteV3Error(selected, "tool.result.selected");
@@ -1798,6 +1991,10 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             } else {
                 selected_event_id = selected.id;
             }
+        }
+        if (selected_event_id.empty()) {
+            hard_fail("tool.result.not_selected", book.action_id);
+            continue;
         }
         // 最终 tool 消息:content 是模型可见的正文(runtime 回喂的这份就是
         // 模型将看到的),is_error 随行落档(P1-B:恢复投影从消息本体还原
@@ -1817,6 +2014,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(const api:
             continue;
         }
         book.tool_message_done = true;
+        result->preview_committed = true;
     }
     if (batch.status == ToolResultsCommitReceipt::Status::Committed && !batch.degraded_codes.empty()) {
         batch.status = ToolResultsCommitReceipt::Status::Degraded;

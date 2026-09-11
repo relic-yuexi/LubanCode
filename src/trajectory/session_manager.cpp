@@ -1839,6 +1839,9 @@ std::expected<V3ResumeFold, V3FoldError> FoldV3ResumeChain(
             } else if (role == "tool") {
                 message.role = ReplayMessage::Role::Tool;
                 message.call_id = wire_key(body.value("tool_call_id", std::string()));
+                if (body.contains("is_error") && body["is_error"].is_boolean()) {
+                    message.is_error = body["is_error"].get<bool>();
+                }
                 if (body.contains("content")) {
                     AppendConversationText(body["content"], &message);
                 }

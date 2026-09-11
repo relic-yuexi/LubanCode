@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ namespace lubancode::agent {
 struct ContextViewBudget {
     std::size_t window_tokens = 0;
     double token_calibration = 1.0;
+    bool preserve_committed_previews = false;
 };
 
 // BuildWorkingView 的产物:发上 wire 的那份消息视图 + 这次有没有真丢东西。
@@ -167,11 +169,17 @@ private:
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的压缩账(观测用)
     ContextArtifactStore* artifact_store_ = nullptr;  // 空 = 没仓,退回旧行为
-    // 保命索的截断是确定性的:同一份超线结果每个请求都会再截一次。真通报
-    // 只打第一次(本 epoch 内),后续请求形状不变,不是新发生的有损动作——
-    // 不去重会每请求刷一条告警。ReplaceHistory 开新 epoch 时复位,压缩后
-    // 热区里若还留着超线原文,下一请求重新通报。
-    bool truncation_announced_in_epoch_ = false;
+    // 保命索截断的钉子账(V3-REAL-01):每枚结果的裁剪形状随首次采用的档位
+    // 快照固定,epoch 内普通追加请求不重裁——系数变化追改旧预览正是缓存
+    // 前缀持续分叉的病理;窗口真装不下时硬闸重裁并覆写定形(B1-5)。换形状
+    // 的正路:ReplaceHistory(正式 context 提交:compact/显式降档)清账。
+    TruncationMemo truncation_memo_;
+    // 截断通报的已报名单(V3-REAL-02):按结果身份+预览版本去重——
+    // id -> 上次通报的形状指纹。同一枚同形状重复采用不重报;同 epoch 新来
+    // 的另一枚巨型结果首次截断、已采用结果经硬闸降档换了形状,都必须报,
+    // 不许被"报过一次"吞掉。ReplaceHistory 开新 epoch 时一并清空,压缩后
+    // 热区里若还留着超线原文,重新通报。
+    std::map<std::string, std::string> announced_result_shapes_;
 };
 
 }  // namespace lubancode::agent

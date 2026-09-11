@@ -50,7 +50,8 @@ UsageSample MakeSample() {
 }  // namespace
 
 TEST_CASE("purpose 枚举齐全且严格") {
-    CHECK(AllPurposes().size() == 12);
+    CHECK(AllPurposes().size() == 13);
+    CHECK(PurposeFromName("action_summary") == RequestPurpose::ActionSummary);
     CHECK(PurposeName(RequestPurpose::MainTurn) == std::string("main_turn"));
     CHECK(PurposeName(RequestPurpose::InsightsModelReview) == std::string("insights_model_review"));
     CHECK(PurposeName(RequestPurpose::OtherHostRequest) == std::string("other_host_request"));

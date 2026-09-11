@@ -222,7 +222,8 @@ WriteReceipt ToolActionSession::PersistFailed(V3Writer& writer, std::string reas
 WriteReceipt ToolActionSession::SelectResult(
     V3Writer& writer, const std::vector<std::string>& source_result_event_refs,
     const std::vector<std::string>& hook_effect_event_refs, std::string_view effective_outcome,
-    std::optional<std::uint64_t> attempt, Durability durability) {
+    std::optional<std::uint64_t> attempt, Durability durability,
+    std::optional<std::string> summary_event_ref) {
     nlohmann::json sources = nlohmann::json::array();
     for (const auto& ref : source_result_event_refs) {
         sources.push_back(ref);
@@ -237,6 +238,7 @@ WriteReceipt ToolActionSession::SelectResult(
          {"sourceResultEventRefs", sources},
          {"hookEffectEventRefs", hooks},
          {"effectiveOutcome", std::string(effective_outcome)}});
+    if (summary_event_ref) payload["summaryEventRef"] = *summary_event_ref;
     WriteReceipt receipt =
         Emit(writer, EventKindV3::ToolResultSelected, std::nullopt, std::move(payload),
              durability);

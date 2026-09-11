@@ -447,3 +447,23 @@ TEST_CASE("不可变名冲突:同名结果不允许覆盖(§4.15 result_id 不�
     std::string content((std::istreambuf_iterator<char>(check)), std::istreambuf_iterator<char>());
     CHECK(content == "occupied");
 }
+
+TEST_CASE("Original capture and effective result stores use independent immutable namespaces") {
+    StoreHarness h("capture-prefix");
+    auto captures = ResultStore::Open(h.dir, "capture-");
+    auto results = ResultStore::Open(h.dir);
+    REQUIRE(captures.has_value());
+    REQUIRE(results.has_value());
+    ResultStore::PersistRequest request;
+    request.result_kind = "text";
+    request.outputs.push_back(Out("combined", "original", 8));
+    CHECK(captures->Persist(request).result_id == "capture-000001");
+    request.outputs[0].data = "effective";
+    CHECK(results->Persist(request).result_id == "res-000001");
+    auto reopened = ResultStore::Open(h.dir, "capture-");
+    REQUIRE(reopened.has_value());
+    CHECK(reopened->Persist(request).result_id == "capture-000002");
+    CHECK(ReadFile(h.dir / "artifacts" / "capture-000001.combined.txt") == "original");
+    CHECK(ReadFile(h.dir / "artifacts" / "res-000001.combined.txt") == "effective");
+    CHECK_FALSE(ResultStore::Open(h.dir, "../escape-").has_value());
+}

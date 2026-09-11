@@ -38,6 +38,7 @@ enum class MessageRole { System, User, Assistant, Tool };
 // goal_evaluation(§4.67.6):验收内部回合的实际 system/user/assistant,
 // 不进 main 输入链;goal_continuation 的续跑 user 正文走 Conversation
 //(它真进 main),宿主来源在 origin 区分,不另立 purpose。
+// action_summary(B2):整批结果压缩的摘要模型内部回合,同样不进 main 链。
 enum class MessagePurpose {
     Conversation,
     Compact,
@@ -45,6 +46,7 @@ enum class MessagePurpose {
     SessionTitle,
     Capability,
     GoalEvaluation,
+    ActionSummary,
 };
 enum class MessageOrigin {
     Human,
@@ -116,6 +118,7 @@ enum class EventKindV3 {
     ToolResultPersisted,
     ToolResultPersistFailed,
     ToolResultSelected,
+    ToolResultSummaryFinished,
     HookDispatchRequested,
     HookPending,
     HookStarted,

@@ -25,6 +25,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -64,6 +65,8 @@ struct V3SessionBooks {
     trajectory::v3::V3Writer* writer = nullptr;          // 主账写者(ActiveSession::v3_main)
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
+    std::optional<trajectory::v3::ResultStore> captures;
+    std::shared_ptr<std::recursive_mutex> tool_results_mutex = std::make_shared<std::recursive_mutex>();
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
     // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------
     // compact applied 已落稳、但内存换账(链投影 / ReplaceHistory)失败时
@@ -168,9 +171,21 @@ public:
 
     // ---- ToolTrajectorySink(hub 在工具栅栏调) ----
     void OnToolTrace(const agent::ToolTraceEvent& event) override;
+    void ConfigureActionSummary(api::Backend* backend, const ActionSummaryProfile& profile) override {
+        std::unique_lock<std::recursive_mutex> lock;
+        if (v3_books_) lock = std::unique_lock(*v3_books_->tool_results_mutex);
+        action_summary_backend_ = backend;
+        action_summary_profile_ = profile;
+        action_summary_calls_remaining_ = profile.max_calls;
+        ++action_summary_generation_;
+    }
     // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
     // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
     // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
+    // v2 桥回执默认 Committed 且不改正文;v3 桥在管预览与整批预算。
+    bool ManagesToolResultPreviews() const override { return V3Mode(); }
+    ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message& results) override;
+    ToolResultsCommitReceipt CaptureToolResult(const api::ToolResultBlock& result) override;
     ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
                                                     const api::Message& results) override;
     bool ShouldBlockExecution(const agent::ToolTraceEvent& started) override;
@@ -221,6 +236,11 @@ public:
     }
 
 private:
+    api::Backend* action_summary_backend_ = nullptr;
+    ActionSummaryProfile action_summary_profile_;
+    int action_summary_calls_remaining_ = 0;
+    std::uint64_t action_summary_generation_ = 0;
+    bool action_summary_running_ = false;
     struct CallBook {
         std::string request_id;         // 声明它的 model output 所属请求
         // P0-E:只由已提交的 model.output.completed 置真。dangling 收口
@@ -299,7 +319,7 @@ private:
     void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
     void V3ToolTrace(const agent::ToolTraceEvent& event);
     // 批次结果提交回执(P1-A):结果链各档折算(见 ToolResultsCommitReceipt)。
-    ToolResultsCommitReceipt V3ToolResultsCommitted(const api::Message& results);
+    ToolResultsCommitReceipt V3ToolResultsCommitted(api::Message& results);
     // turn 收口:已声明未终态的 Action 补 cancelled(配对完整,不悬空)。
     void V3CancelDanglingActions(const std::string& reason);
     // v3 模式判定(空 = v2 原路)。

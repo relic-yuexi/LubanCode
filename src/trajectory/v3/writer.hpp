@@ -147,7 +147,9 @@ struct EventDraft {
 
 class V3Writer {
 public:
-    V3Writer() = default;
+    // 默认构造只在 cpp 里 default(Impl 是 pimpl,头内 =default 会让任何
+    // 默认构造此类型的 TU 实例化 ~unique_ptr<Impl> 而碰上不完整类型)。
+    V3Writer();
     V3Writer(V3Writer&&) noexcept;
     V3Writer& operator=(V3Writer&&) noexcept;
     V3Writer(const V3Writer&) = delete;

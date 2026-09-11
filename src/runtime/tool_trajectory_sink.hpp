@@ -4,6 +4,8 @@
 // 这只抽象口,不 include trajectory(依赖单向:hub -> 本口 <- 实现)。
 #pragma once
 
+#include "runtime/action_summary.hpp"
+
 #include <string>
 #include <vector>
 
@@ -37,7 +39,16 @@ struct ToolResultsCommitReceipt {
 
 class ToolTrajectorySink {
 public:
+    virtual void ConfigureActionSummary(api::Backend*, const ActionSummaryProfile&) {}
     virtual ~ToolTrajectorySink() = default;
+    // 该轨迹是否在管工具结果的预览与整批预算(v3 = 在管;v2 与默认实现
+    // = 不在管)。装配层据此决定挂不挂 rewrite 钩子——钩子非空会把
+    // AgentLoop 切进 adapter bytes/4 整批口径(跳过 step-0 固定账预检、
+    // 停用 token 校准器);不在管的轨迹挂了钩子只会拿到 no-op 回执,口径
+    // 却被切走了。默认 false:宁可少切,不可错切。
+    virtual bool ManagesToolResultPreviews() const { return false; }
+    virtual ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message&) { return {}; }
+    virtual ToolResultsCommitReceipt CaptureToolResult(const api::ToolResultBlock&) { return {}; }
     // 一枚工具栅栏事件(Scheduled/ExecutionStarted/ExecutionFinished;
     // ResultCommitted 忽略——正文从 OnToolResultsCommitted 的消息翻)。
     virtual void OnToolTrace(const agent::ToolTraceEvent& event) = 0;

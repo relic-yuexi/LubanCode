@@ -62,6 +62,7 @@ KINDS = {
     "tool.execution.resumed", "tool.execution.finished", "tool.execution.failed",
     "tool.execution.cancelled", "tool.execution.rejected", "tool.execution.unknown",
     "tool.result.persisted", "tool.result.persist_failed", "tool.result.selected",
+    "tool.result.summary.finished",
     "hook.dispatch.requested", "hook.pending", "hook.started", "hook.completed",
     "hook.failed", "hook.cancelled", "hook.unknown", "hook.skipped",
     "hook.effects.applied", "hook.effects.rejected",
@@ -109,7 +110,7 @@ STATUSLESS_KINDS = {
     "subagent.observed", "command.received",
     "hook.dispatch.requested", "hook.skipped", "title.requested",
     "title.extracted", "session.title.applied", "tool.result.persisted",
-    "tool.result.persist_failed", "tool.result.selected",
+    "tool.result.persist_failed", "tool.result.selected", "tool.result.summary.finished",
     "hook.effects.applied", "hook.effects.rejected", "model.usage.appended",
     "subagent.spawn.requested",
     # §4.67 G0:goal 控制状态提交点(与 context.*.applied 同族,不带 status;
@@ -135,7 +136,7 @@ GOAL_LIFECYCLES = {
 
 ROLES = {"system", "user", "assistant", "tool"}
 PURPOSES = {"conversation", "compact", "context_summary", "session_title", "capability",
-            "goal_evaluation"}
+            "goal_evaluation", "action_summary"}
 ORIGINS = {
     "human", "soul", "session_runtime", "compact_runtime", "context_runtime",
     "hook", "skill", "subagent", "parent_agent",
@@ -186,7 +187,7 @@ def is_ref(value) -> bool:
 
 
 ARTIFACT_KINDS = {
-    "result_metadata", "stdout", "stderr", "combined", "report", "image", "blob",
+    "result_metadata", "stdout", "stderr", "combined", "raw_payload", "report", "image", "blob",
 }
 
 
@@ -303,8 +304,8 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                 raise ValidationError("system 消息 turnId 恒为 null")
             if not isinstance(obj.get("systemMeta"), dict):
                 raise ValidationError("system 消息必带 systemMeta")
-            if purpose not in ("conversation", "compact", "goal_evaluation"):
-                raise ValidationError("system purpose 只能 conversation/compact/goal_evaluation")
+            if purpose not in ("conversation", "compact", "goal_evaluation", "action_summary"):
+                raise ValidationError("system purpose 只能 conversation/compact/goal_evaluation/action_summary")
         elif role == "user":
             if purpose == "context_summary":
                 if turn is not None:
@@ -433,12 +434,30 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             elif kind == "tool.result.persist_failed":
                 check_tool_payload(obj, kind, payload, True)
                 require_payload(kind, payload, ["reason"])
+            elif kind == "tool.result.summary.finished":
+                check_tool_payload(obj, kind, payload, False)
+                sources = payload.get("sourceResultEventRefs")
+                candidates = payload.get("candidateMessageRefs")
+                if not isinstance(sources, list) or not sources or not all(is_ref(r) for r in sources):
+                    raise ValidationError("summary sourceResultEventRefs must be nonempty references")
+                if not isinstance(candidates, list) or not all(is_ref(r) for r in candidates):
+                    raise ValidationError("summary candidateMessageRefs must be references")
+                if payload.get("state") not in ("accepted", "rejected", "failed", "cancelled"):
+                    raise ValidationError("summary state is invalid")
+                for key in ("sourceContextRevision", "modelCalls", "outputBytes", "budgetBytes"):
+                    if not isinstance(payload.get(key), int) or isinstance(payload[key], bool) or payload[key] < 0:
+                        raise ValidationError("summary needs nonnegative integer " + key)
+                if payload["state"] == "accepted" and (not candidates or
+                        payload["outputBytes"] > payload["budgetBytes"] or not is_hex64(payload.get("previewSha256"))):
+                    raise ValidationError("accepted summary needs a bounded hashed candidate")
             elif kind == "tool.result.selected":
                 check_tool_payload(obj, kind, payload, False)
                 sources = payload.get("sourceResultEventRefs")
                 if not isinstance(sources, list) or not sources \
                         or not all(is_ref(r) for r in sources):
                     raise ValidationError("selected sourceResultEventRefs 应为非空引用数组")
+                if "summaryEventRef" in payload and not is_ref(payload["summaryEventRef"]):
+                    raise ValidationError("selected summaryEventRef must be a reference")
                 hooks = payload.get("hookEffectEventRefs")
                 if not isinstance(hooks, list) or not all(is_ref(r) for r in hooks):
                     raise ValidationError("selected hookEffectEventRefs 应为引用数组")

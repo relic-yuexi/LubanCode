@@ -857,6 +857,7 @@ add_library(lubancode_runtime STATIC
   # 组装、模型采样(抽象 client)、必需内容校验、applied 原子提交。只依赖
   # trajectory/v3 库,不认 api::Backend。
   src/runtime/v3_compact_runtime.cpp
+  src/runtime/action_summary.cpp
   # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
   src/runtime/goal_types.cpp
   # /goal 持久目标单:目标状态机唯一写口(命令面/预算闸/防空转/硬门槛/回放)。

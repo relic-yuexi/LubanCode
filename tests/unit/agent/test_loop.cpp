@@ -18,6 +18,10 @@
 #include "tools/session_utils.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "api/chat/request.hpp"
+#include "api/model_input_snapshot.hpp"
+#include "hooks/middleware_builtins.hpp"
+#include "trajectory/v3/result_store.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
 #include "tools/tool_search.hpp"  // ToolSearchTool/ToolInvokeTool:P1 代理对的两枚壳
@@ -39,6 +43,10 @@ public:
     std::vector<std::vector<api::StreamEvent>> scripts;
     std::vector<api::Request> captured_requests;
     std::optional<std::size_t> cancel_after_event_index;
+    bool serialize_adapter_input = false;
+    std::string SerializeForDiagnostics(const api::Request& request) const override {
+        return serialize_adapter_input ? api::chat::BuildRequestJson(request).dump() : std::string();
+    }
 
     std::expected<void, api::Error> send_stream(
         const api::Request& request,
@@ -2560,4 +2568,111 @@ TEST_CASE("P2 turn 闸: proxy 解引用来的调用同一道闸,不在轮次照�
     REQUIRE(result != nullptr);
     CHECK(result->is_error);
     CHECK(result->content.find("等相应轮次") != std::string::npos);
+}
+
+TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted batch") {
+    FakeBackend backend;
+    backend.serialize_adapter_input = true;
+    std::vector<api::StreamEvent> script{api::MessageStart{"batch", "test-model"}};
+    for (int i = 0; i < 10; ++i) {
+        script.push_back(api::ToolUseStart{i, "batch-" + std::to_string(i), "batch_tool"});
+        script.push_back(api::ToolUseInputDelta{i, "{}"});
+        script.push_back(api::ContentBlockDone{i});
+    }
+    script.push_back(api::MessageDone{"tool_use", api::Usage{}});
+    backend.scripts = {script, TextOnlyScript("done")};
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<FakeTool>("batch_tool", tools::Tool::Result{std::string(16000, 'r'), false}, false);
+    auto* executed = tool.get();
+    registry.Register(std::move(tool));
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    profile.runtime.context_window_tokens = 110000;
+    profile.runtime.max_output_tokens = 4096;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent::Agent loop(backend, registry, profile);
+    agent::TurnWiring wiring;
+    std::vector<std::string> adopted;
+    // Controlled commit adapter: the real loop and real Chat serializer run;
+    // disk persistence is independently covered by the bridge/result-store tests.
+    wiring.rewrite_tool_results_for_history = [&](api::Message& batch) {
+        for (auto& block : batch.content) {
+            auto& result = std::get<api::ToolResultBlock>(block);
+            CHECK(result.preview_budget_bytes < 16000);
+            trajectory::v3::PreviewRequest request;
+            request.max_preview_bytes = result.preview_budget_bytes;
+            trajectory::v3::PreviewChannel channel;
+            channel.display_path = "artifacts/" + result.tool_use_id + ".txt";
+            channel.channel = "combined";
+            channel.text = result.content;
+            channel.output_bytes = result.content.size();
+            request.channels.push_back(channel);
+            const auto preview = trajectory::v3::BuildToolPreview(request);
+            CHECK_FALSE(preview.preview_unrepresentable);
+            result.content = preview.text;
+            // 学生产桥(trajectory_session.cpp V3ToolResultsCommitted)的
+            // 收尾:预览已提交须置 preview_committed。文本结果经 Tool::Result
+            // 构造器带着原始 blocks 入史,下一请求的 SanitizeMessage 见
+            // blocks 非空且未置位,会按"payload 是唯一真账"合同用
+            // TextProjection(blocks) 把原文重构回 content——不置位,预览
+            // 就在这里被原文冲掉,整批预算白做。
+            result.preview_committed = true;
+            adopted.push_back(result.content);
+        }
+        return runtime::ToolResultsCommitReceipt{};
+    };
+    const std::string old_input(320000, 'h');
+    const auto outcome = loop.Run(old_input, wiring);
+    REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+    REQUIRE(backend.captured_requests.size() == 2);
+    CHECK(executed->call_count == 10);
+    const auto& final = backend.captured_requests.back();
+    REQUIRE(final.messages.front().content.size() >= 1);
+    CHECK(std::get<api::TextBlock>(final.messages.front().content.front()).text == old_input);
+    REQUIRE(final.messages.back().content.size() == 10);
+    for (std::size_t i = 0; i < 10; ++i) {
+        const auto& result = std::get<api::ToolResultBlock>(final.messages.back().content[i]);
+        CHECK(result.tool_use_id == "batch-" + std::to_string(i));
+        CHECK(result.content == adopted[i]);
+    }
+    const auto snapshot = api::ModelInputSnapshotFromWire(backend.SerializeForDiagnostics(final));
+    REQUIRE(snapshot.has_value());
+    const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+    CHECK(estimate.at("estimatedInputTokens").get<std::size_t>() + 4096 + 512 < 110000);
+}
+
+TEST_CASE("B2 impossible closed batch persists once then stops before a second request") {
+    FakeBackend backend;
+    backend.serialize_adapter_input = true;
+    std::vector<api::StreamEvent> script{api::MessageStart{"batch", "test-model"}};
+    for (int i = 0; i < 3; ++i) {
+        script.push_back(api::ToolUseStart{i, "batch-" + std::to_string(i), "batch_tool"});
+        script.push_back(api::ToolUseInputDelta{i, "{}"});
+        script.push_back(api::ContentBlockDone{i});
+    }
+    script.push_back(api::MessageDone{"tool_use", api::Usage{}});
+    backend.scripts = {script};
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<FakeTool>("batch_tool", tools::Tool::Result{std::string(4000, 'r'), false}, false);
+    auto* executed = tool.get();
+    registry.Register(std::move(tool));
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.runtime.context_window_tokens = 3000;
+    profile.runtime.max_output_tokens = 1024;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent::Agent loop(backend, registry, profile);
+    agent::TurnWiring wiring;
+    int commits = 0;
+    wiring.rewrite_tool_results_for_history = [&](api::Message&) {
+        ++commits;
+        return runtime::ToolResultsCommitReceipt{};
+    };
+    const auto outcome = loop.Run("read", wiring);
+    REQUIRE_FALSE(outcome.has_value());
+    CHECK(outcome.error().find("tool_batch.") != std::string::npos);
+    CHECK(commits == 1);
+    CHECK(executed->call_count == 3);
+    CHECK(backend.captured_requests.size() == 1);
 }

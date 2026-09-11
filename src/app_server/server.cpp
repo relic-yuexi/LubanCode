@@ -1418,8 +1418,10 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
             if (trajectory_bridge != nullptr) {
                 trajectory_hub.emplace(record->session_service->runtime()->ids());
-                trajectory_hub->Install(loop, wiring, thread_id, turn_id);
+                // 桥先挂再 Install:Install 看能力位决定挂不挂整批 rewrite
+                // 钩子(v3 在管预览才挂,v2 走旧口径),见 hub 的注释。
                 trajectory_hub->AttachTrajectory(trajectory_bridge.get());
+                trajectory_hub->Install(loop, wiring, thread_id, turn_id);
                 wiring.boundary_recorder = trajectory_bridge.get();
                 trajectory_bridge->BeginTurn(turn_id, "external_user");
                 trajectory_bridge->RecordInput(user_message);

@@ -47,7 +47,7 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
     if (in({K::ToolExecutionPending, K::ToolExecutionStarted, K::ToolExecutionWaiting,
             K::ToolExecutionResumed, K::ToolExecutionFinished, K::ToolExecutionFailed,
             K::ToolExecutionCancelled, K::ToolExecutionRejected, K::ToolExecutionUnknown,
-            K::ToolResultPersisted, K::ToolResultPersistFailed, K::ToolResultSelected})) {
+            K::ToolResultPersisted, K::ToolResultPersistFailed, K::ToolResultSelected, K::ToolResultSummaryFinished})) {
         return IdRequirement{"actionId", true};
     }
     if (in({K::HookDispatchRequested, K::HookPending, K::HookStarted, K::HookCompleted,
@@ -266,11 +266,11 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
 // ---------------------------------------------------------------------------
 
 // artifactRef(§3.1 六键):{artifactId,kind,path,sha256,bytes,mediaType};
-// kind ∈ result_metadata|stdout|stderr|combined|report|image|blob。
+// kind ∈ result_metadata|stdout|stderr|combined|raw_payload|report|image|blob。
 std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
                                                 const nlohmann::json& ref) {
     static const std::vector<std::string> kKinds = {
-        "result_metadata", "stdout", "stderr", "combined", "report", "image", "blob",
+        "result_metadata", "stdout", "stderr", "combined", "raw_payload", "report", "image", "blob",
     };
     if (!ref.is_object()) {
         return Err("schema3.bad_ref", std::string(context) + " artifactRef 应为 object");
@@ -451,9 +451,10 @@ std::optional<Schema3Error> ValidateMessageLine(const MessageLine& line) {
             }
             if (line.purpose != MessagePurpose::Conversation &&
                 line.purpose != MessagePurpose::Compact &&
-                line.purpose != MessagePurpose::GoalEvaluation) {
+                line.purpose != MessagePurpose::GoalEvaluation &&
+                line.purpose != MessagePurpose::ActionSummary) {
                 return Err("schema3.bad_purpose",
-                           "system 消息 purpose 只能是 conversation/compact 或 goal_evaluation");
+                           "system 消息 purpose 只能是 conversation/compact/goal_evaluation 或 action_summary");
             }
             break;
         }
@@ -801,6 +802,30 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
             return error;
         }
+    } else if (line.kind == K::ToolResultSummaryFinished) {
+        if (auto error = CheckToolPayload(kind_name, line, false)) return error;
+        if (auto error = CheckRefArray(kind_name, line.payload, "sourceResultEventRefs", false)) return error;
+        if (auto error = CheckRefArray(kind_name, line.payload, "candidateMessageRefs", true)) return error;
+        if (auto error = CheckStringField(kind_name, line.payload, "state")) return error;
+        const auto state = line.payload.at("state").get<std::string>();
+        if (state != "accepted" && state != "rejected" && state != "failed" && state != "cancelled") {
+            return Err("schema3.bad_enum", "action summary state is invalid");
+        }
+        for (const char* key : {"sourceContextRevision", "modelCalls", "outputBytes", "budgetBytes"}) {
+            if (!line.payload.contains(key) || !JsonIsNonNegativeInt(line.payload.at(key))) {
+                return Err("schema3.bad_type", std::string("action summary missing integer: ") + key);
+            }
+        }
+        if (state == "accepted") {
+            if (line.payload.at("candidateMessageRefs").empty() ||
+                line.payload.at("outputBytes").get<std::uint64_t>() > line.payload.at("budgetBytes").get<std::uint64_t>()) {
+                return Err("schema3.invalid_summary_candidate", "accepted summary needs a bounded candidate");
+            }
+            if (auto error = CheckStringField(kind_name, line.payload, "previewSha256")) return error;
+            if (!IsHex64(line.payload.at("previewSha256").get<std::string>())) {
+                return Err("schema3.invalid_summary_hash", "accepted summary requires SHA-256 hex");
+            }
+        }
     } else if (line.kind == K::ToolResultSelected) {
         if (auto error = CheckToolPayload(kind_name, line, false)) {
             return error;
@@ -810,6 +835,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         }
         if (auto error = CheckRefArray(kind_name, line.payload, "hookEffectEventRefs", true)) {
             return error;
+        }
+        if (line.payload.contains("summaryEventRef")) {
+            if (auto error = CheckRefField(kind_name, line.payload, "summaryEventRef", false)) return error;
         }
         // §4.23:最终有效结果;hook 替代与宿主配对错误各有名目。
         if (auto error = CheckStringField(kind_name, line.payload, "effectiveOutcome")) {

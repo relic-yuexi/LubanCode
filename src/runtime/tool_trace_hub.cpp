@@ -47,9 +47,25 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
     // 从批次尾口拿正文。on_assistant_message_ready 因此只剩占位(接口
     // 保留,AgentLoop 的挂点不动)。
     wiring.on_assistant_message_ready = [](const api::Message&) {};
+    wiring.configure_action_summary = [this](api::Backend* backend, const ActionSummaryProfile& profile) {
+        if (trajectory_) trajectory_->ConfigureActionSummary(backend, profile);
+    };
     // P1-A(失败与恢复单 FA-01):回执口替换旧 void 口——持久提交的成败
     // 交回引擎,Failed 时 loop 停止后续模型发送。没挂轨迹的会话给恒
     // Committed 回执(与旧"不拦"行为一致)。
+    wiring.capture_tool_result = [this](const api::ToolResultBlock& result) {
+        return trajectory_ ? trajectory_->CaptureToolResult(result) : ToolResultsCommitReceipt{};
+    };
+    // 整批预算的 rewrite 钩子只挂"轨迹在管预览"的会话(v3)。钩子非空会把
+    // AgentLoop 切进 adapter bytes/4 口径——step-0 固定账预检与当前轮检查
+    // 被跳过、token 校准器三处全停;v2 桥的 Rewrite 只是 no-op 回执,挂了
+    // 钩子口径却被切走。v2 会话不挂,走旧路(预检/校准器照旧)。轨迹须在
+    // Install 之前 Attach,这里才看得见能力位。
+    if (trajectory_ != nullptr && trajectory_->ManagesToolResultPreviews()) {
+        wiring.rewrite_tool_results_for_history = [this](api::Message& results) {
+            return trajectory_->RewriteToolResultsForHistory(results);
+        };
+    }
     wiring.on_tool_results_committed_receipt =
         [this](const std::string& batch_id, const api::Message& message) {
             // 正文进 tool.result.committed 事件(轨迹桥落账;没挂轨迹的会话

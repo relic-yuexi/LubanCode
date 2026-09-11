@@ -298,3 +298,238 @@ TEST_CASE("诊断账: wire dump 只在递进来才算,首记不可得、次记�
     auto after = context.AccountRequest(MakeRequest(context.request_history()), &body_b);
     CHECK(after.wire_common_prefix_bytes == -1);
 }
+
+// ---------------------------------------------------------------------------
+// V3-REAL-01/02(真实会话审计单):校正系数变化不得重裁已采用的旧工具结果
+// (裁剪形状随首次档位快照固定,追加律不断);截断通报按结果身份去重,不按
+// 全局"报过一次"吞掉同 epoch 新来的巨型结果。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 一轮带巨肥副作用工具结果(run_command,空判重键:结构压缩对它永远全文,
+// 保命索才有得接)的历史。content_bytes 个 ASCII = bytes/4 token。
+void InstallFatRunCommandTurn(agent::ContextManager& context, const std::string& tool_use_id,
+                              std::size_t content_bytes) {
+    api::Message user = UserMessage("递归列目录");
+    context.PushUserTurn(user, user);
+    api::Message use;
+    use.role = api::Role::Assistant;
+    use.content.push_back(api::ToolUseBlock{tool_use_id, "run_command", nlohmann::json::object()});
+    context.PushMessage(use);
+    api::Message fat;
+    fat.role = api::Role::User;
+    fat.content.push_back(api::ToolResultBlock{tool_use_id, std::string(content_bytes, 'x'), false});
+    context.PushMessage(fat);
+}
+
+const api::ToolResultBlock& ToolResultAt(const std::vector<api::Message>& messages, std::size_t index,
+                                         std::size_t block_index = 0) {
+    return std::get<api::ToolResultBlock>(messages[index].content[block_index]);
+}
+
+}  // namespace
+
+TEST_CASE("V3-REAL-01: 巨型结果一次定形后,系数/窗口读数变化不重裁,12 次追加请求前缀恒稳") {
+    agent::ContextManager context;
+    // 200000 ASCII = 50000 token;窗口 100000 的 25% 线是 25000,越线即截。
+    InstallFatRunCommandTurn(context, "toolu_fat", 200000);
+
+    auto first = context.BuildWorkingView({100000, 1.0});
+    CHECK(first.trim.truncated_results);  // 首次真动手:通报
+    const std::string pinned_shape = ToolResultAt(first.messages, 2).content;
+    CHECK(pinned_shape.size() < 200000);
+    // 首份请求入账:本 turn 第一份,无从比较,天然追加。
+    auto account_first = context.AccountRequest(MakeRequest(first.messages));
+    CHECK(account_first.append_only);
+    CHECK(context.cache_epoch() == 1);
+
+    // 12 次追加请求:校准系数按真实病理现场取值(1.58/1.59 在受控复算里
+    // 相差 4176 字符——正是"算法会改旧内容"的病理量级),窗口读数也在
+    // 装得下定形形状的区间内来回(100k↔120k)。钉子账必须把首次形状钉死:
+    // 旧预览字节逐次相等,追加律逐请求成立。窗口缩到装不下属硬闸,另案钉。
+    const double calibrations[] = {1.0, 1.58, 1.59, 2.0, 0.8, 1.0,
+                                   1.58, 1.0,  1.59, 2.0, 1.0, 1.58};
+    const std::size_t windows[] = {100000, 120000, 100000, 100000, 120000, 100000,
+                                   120000, 100000, 120000, 100000, 100000, 120000};
+    for (int i = 0; i < 12; ++i) {
+        context.PushMessage(AssistantMessage("第 " + std::to_string(i) + " 拍回答"));
+        auto view = context.BuildWorkingView({windows[i], calibrations[i]});
+        CHECK(ToolResultAt(view.messages, 2).content == pinned_shape);  // 不重裁
+        auto account = context.AccountRequest(MakeRequest(view.messages));
+        CHECK(account.append_only);       // 追加律不断
+        CHECK(account.break_reason.empty());
+        CHECK(context.cache_epoch() == 1);  // 前缀缓存不持续分叉
+    }
+}
+
+TEST_CASE("B1-5 硬闸: 窗口真装不下定形形状时重裁并通报,不静默升档") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "toolu_hard", 200000);
+    auto first = context.BuildWorkingView({100000, 1.0});
+    REQUIRE(first.trim.truncated_results);
+    const std::string original_shape = ToolResultAt(first.messages, 2).content;
+    const std::string original_version = first.trim.truncated_result_ids[0].shape_hash;
+    (void)context.AccountRequest(MakeRequest(first.messages));
+
+    // 窗口缩到 60000(裸线 15000 token < 定形形状的 ~25000):最终容量硬
+    // 检查出——宁可断一次前缀,不发装不下的请求。硬闸从原文按裸尺重裁
+    // (不随系数),定形覆写为新形状,通报按新版本报。
+    context.PushMessage(AssistantMessage("换小窗口的一拍"));
+    auto hard = context.BuildWorkingView({60000, 1.58});
+    CHECK(hard.trim.truncated_results);
+    REQUIRE(hard.trim.truncated_result_ids.size() == 1);
+    CHECK(hard.trim.truncated_result_ids[0].tool_use_id == "toolu_hard");
+    CHECK(hard.trim.truncated_result_ids[0].shape_hash != original_version);  // 新形状版本
+    const std::string hard_shape = ToolResultAt(hard.messages, 2).content;
+    CHECK(hard_shape.size() < original_shape.size());
+    // loop 在 trim 通报时会点名 hard_trim;前缀账如实记一次可解释断点。
+    context.NotePendingEpochBreak("hard_trim");
+    auto broken = context.AccountRequest(MakeRequest(hard.messages));
+    CHECK_FALSE(broken.append_only);
+    CHECK(broken.break_reason == "hard_trim");
+    CHECK(context.cache_epoch() == 2);
+
+    // 硬闸后:同窗口下系数再漂(1.58→2.0→1.0)不再动新形状,追加律恢复。
+    for (const double calibration : {2.0, 1.0, 1.58}) {
+        context.PushMessage(AssistantMessage("硬闸后的一拍"));
+        auto view = context.BuildWorkingView({60000, calibration});
+        CHECK_FALSE(view.trim.truncated_results);  // 同形状不重报
+        CHECK(ToolResultAt(view.messages, 2).content == hard_shape);
+        auto stable = context.AccountRequest(MakeRequest(view.messages));
+        CHECK(stable.append_only);
+    }
+    CHECK(context.cache_epoch() == 2);
+
+    // 不静默升档:窗口回升到 100000,裸线装得下硬闸形状——重放新形状,
+    // 不回升到旧大形状(降档只经正式提交回升)。
+    context.PushMessage(AssistantMessage("窗口回升的一拍"));
+    auto recovered = context.BuildWorkingView({100000, 1.0});
+    CHECK(ToolResultAt(recovered.messages, 2).content == hard_shape);
+    auto still_append = context.AccountRequest(MakeRequest(recovered.messages));
+    CHECK(still_append.append_only);
+}
+
+TEST_CASE("V3-REAL-01: 线内定形后系数放大越线,不回头裁已发过的全文") {
+    agent::ContextManager context;
+    // 40000 ASCII = 10000 token,线 25000 内:首次全文定形。
+    InstallFatRunCommandTurn(context, "toolu_warm", 40000);
+    auto first = context.BuildWorkingView({100000, 1.0});
+    CHECK_FALSE(first.trim.truncated_results);
+    CHECK(ToolResultAt(first.messages, 2).content.size() == 40000);  // 全文放行
+
+    // 系数 3.0:同一份内容估 30000 token,已越过 25000 的线。旧实现会回头
+    // 裁它(首次已把全文发给 provider,追改就是断前缀);钉子账保持全文。
+    auto hot = context.BuildWorkingView({100000, 3.0});
+    CHECK_FALSE(hot.trim.truncated_results);
+    CHECK(ToolResultAt(hot.messages, 2).content.size() == 40000);
+
+    // 正式 context 提交(ReplaceHistory)清账:按新系数重新定形,此时才裁,
+    // 且算新发生的截断(通报),断点由前缀账点名(下案验)。
+    context.ReplaceHistory(context.durable_history());
+    auto reformed = context.BuildWorkingView({100000, 3.0});
+    CHECK(reformed.trim.truncated_results);
+    CHECK(ToolResultAt(reformed.messages, 2).content.size() < 40000);
+}
+
+TEST_CASE("V3-REAL-01: 显式降档走正式提交,只产生一次可解释断点") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "toolu_down", 200000);
+    auto first = context.BuildWorkingView({100000, 1.0});
+    const std::string old_shape = ToolResultAt(first.messages, 2).content;
+    (void)context.AccountRequest(MakeRequest(first.messages));
+
+    // 正式降档:compact/换史(ReplaceHistory)后按更紧预算(窗口 60000,
+    // 线 15000)重新定形——形状换新,但只此一次,断因点名 history_compacted
+    //(显式提交的因压过指纹反推的 old_message_changed)。
+    context.ReplaceHistory(context.durable_history());
+    auto downgraded = context.BuildWorkingView({60000, 1.0});
+    CHECK(downgraded.trim.truncated_results);
+    const std::string new_shape = ToolResultAt(downgraded.messages, 2).content;
+    CHECK(new_shape.size() < old_shape.size());
+    auto account = context.AccountRequest(MakeRequest(downgraded.messages));
+    // ReplaceHistory opens a new epoch and clears its comparison baseline.
+    CHECK(account.append_only);
+    CHECK_FALSE(account.had_previous);
+    CHECK(context.cache_epoch() == 2);
+
+    // 断点之后:继续追加请求,新形状稳定,epoch 不再动。
+    for (int i = 0; i < 3; ++i) {
+        context.PushMessage(AssistantMessage("降档后第 " + std::to_string(i) + " 拍"));
+        auto view = context.BuildWorkingView({60000, 1.58});  // 系数再漂也不追改
+        CHECK(ToolResultAt(view.messages, 2).content == new_shape);
+        auto stable = context.AccountRequest(MakeRequest(view.messages));
+        CHECK(stable.append_only);
+        CHECK(context.cache_epoch() == 2);
+    }
+}
+
+TEST_CASE("Committed 32 KiB preview survives smaller windows and ordinary appends") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "toolu_preview", 32768);
+    const auto first = context.BuildWorkingView({32768, 1.0, true});
+    CHECK_FALSE(first.trim.truncated_results);
+    const std::string preview = ToolResultAt(first.messages, 2).content;
+    CHECK(preview.size() == 32768);
+    const auto smaller = context.BuildWorkingView({16384, 1.0, true});
+    CHECK_FALSE(smaller.trim.truncated_results);
+    CHECK(ToolResultAt(smaller.messages, 2).content == preview);
+    context.PushMessage(AssistantMessage("next request"));
+    const auto next = context.BuildWorkingView({16384, 1.0, true});
+    CHECK(ToolResultAt(next.messages, 2).content == preview);
+    CHECK(context.AccountRequest(MakeRequest(next.messages)).append_only);
+}
+
+TEST_CASE("V3-REAL-02: 截断通报按结果身份去重——同枚不重报,另一枚新来必报") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "toolu_a", 200000);
+
+    auto first = context.BuildWorkingView({100000, 1.0});
+    CHECK(first.trim.truncated_results);  // 第一枚首次截断:报
+    REQUIRE(first.trim.truncated_result_ids.size() == 1);
+    CHECK(first.trim.truncated_result_ids[0].tool_use_id == "toolu_a");
+
+    // 同一枚重复采用(追加请求后重放同形状):不是新动作,不重报。
+    context.PushMessage(AssistantMessage("再问一句"));
+    auto again = context.BuildWorkingView({100000, 1.0});
+    CHECK_FALSE(again.trim.truncated_results);
+    CHECK(again.trim.truncated_result_ids.empty());
+
+    // 同 epoch 新来另一枚巨型结果:首次截断必须报——旧的全局布尔会把它
+    // 静默吞掉,预检与用户全然不知(本项病理)。
+    api::Message use2;
+    use2.role = api::Role::Assistant;
+    use2.content.push_back(api::ToolUseBlock{"toolu_b", "run_command", nlohmann::json::object()});
+    context.PushMessage(use2);
+    api::Message fat2;
+    fat2.role = api::Role::User;
+    fat2.content.push_back(api::ToolResultBlock{"toolu_b", std::string(180000, 'y'), false});
+    context.PushMessage(fat2);
+
+    auto second = context.BuildWorkingView({100000, 1.0});
+    CHECK(second.trim.truncated_results);  // 新枚首次:报
+    REQUIRE(second.trim.truncated_result_ids.size() == 1);
+    CHECK(second.trim.truncated_result_ids[0].tool_use_id == "toolu_b");  // 老枚不进列
+
+    // 两枚都定形后:再追加请求,谁都不重报。
+    context.PushMessage(AssistantMessage("收尾"));
+    auto third = context.BuildWorkingView({100000, 1.0});
+    CHECK_FALSE(third.trim.truncated_results);
+    CHECK(third.trim.truncated_result_ids.empty());
+
+    // 换史开新 epoch:热区仍带两枚超线原文,按新发生重新通报(两枚都算)。
+    context.ReplaceHistory(context.durable_history());
+    auto after_compact = context.BuildWorkingView({100000, 1.0});
+    CHECK(after_compact.trim.truncated_results);
+    REQUIRE(after_compact.trim.truncated_result_ids.size() == 2);
+}
+
+TEST_CASE("Committed previews survive smaller windows without implicit rewriting") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "fixed-preview", 32768);
+    auto first = context.BuildWorkingView({100000, 1.0, true});
+    context.PushMessage(AssistantMessage("next"));
+    auto next = context.BuildWorkingView({4096, 1.0, true});
+    CHECK(ToolResultAt(first.messages, 2).content == ToolResultAt(next.messages, 2).content);
+    CHECK_FALSE(next.trim.truncated_results);
+}

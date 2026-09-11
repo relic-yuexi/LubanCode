@@ -178,6 +178,9 @@ public:
 // 里:每一枚都是"引擎问宿主、宿主答话"的关口——有返回值,或有落账副作
 // 用;显示出水不在这些口上(events 一只口管完)。
 struct TurnWiring {
+    // Installed by the trajectory hub; summary sampling occurs only after raw
+    // result persistence, and uses a separate request/usage ledger.
+    std::function<void(api::Backend*, const runtime::ActionSummaryProfile&)> configure_action_summary;
     // 显示系统剥离单 P4(补稳定 id):工具生命周期的问话首参一律带
     // tool_use_id(模型给的 ToolUseBlock.id;PTC stub 调用是宿主合成的
     // "ptc-N")。装配层凭它路由条目,不再靠"当前主/子条目"的下标猜——
@@ -367,6 +370,8 @@ struct TurnWiring {
     std::function<runtime::ToolResultsCommitReceipt(const std::string& batch_id,
                                                     const api::Message& tool_result_message)>
         on_tool_results_committed_receipt;
+    std::function<runtime::ToolResultsCommitReceipt(api::Message&)> rewrite_tool_results_for_history;
+    std::function<runtime::ToolResultsCommitReceipt(const api::ToolResultBlock&)> capture_tool_result;
 
     // ---- token 估算校准(真实 usage 反推 byte 比率单)-----------------------
     // 会话级校准器((provider,model) 分桶,进程内共享;装配层指到
