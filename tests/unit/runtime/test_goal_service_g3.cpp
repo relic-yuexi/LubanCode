@@ -804,10 +804,11 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
         const auto lineage = goalns::ProjectGoalLineage(v3.dir);
         REQUIRE(lineage.found);
         REQUIRE(lineage.projection.gap == goalns::GoalProjectionGap::None);
-        // 证据判材料随链回放(§4.67 G3:resume 后内存证据从账补齐)。
-        REQUIRE(lineage.evidence_material.size() == 1);
-        CHECK(lineage.evidence_material[0].id == "ev-1");
-        CHECK(lineage.evidence_material[0].kind == goalns::EvidenceKind::TestReport);
+        // 证据判材料只从 head 卷回放(§4.67 G3:goal.evidence.recorded 事实行
+        // 谁写谁卷里;祖先卷的不沿链追)。head(sv2)没跑过收口(flow 才落
+        // 事实行,本测用 service API 直驱),回放为空——旧证据缺材料只会
+        // 让验收更保守,快照 evidenceRefs 仍逐项守恒(下面断言)。
+        REQUIRE(lineage.evidence_material.empty());
         GoalService service3(&*v3.writer, ServiceOptionsFor(v3.dir));
         REQUIRE(service3.AdoptFromProjection(lineage.projection).ok);
         const GoalStateSnapshot* kept = service3.current();

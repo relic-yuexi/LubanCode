@@ -2479,7 +2479,7 @@ GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_se
                 // 验卷不过:卷坏如实报——把错误装进 gap_detail,不猜。
                 out.found = true;
                 out.projection.gap = GoalProjectionGap::IllegalTransition;
-                out.projection.gap_detail = "卷验不过(" + *ledger.error() + ")";
+                out.projection.gap_detail = "卷验不过(" + ledger.error() + ")";
                 out.walked = std::move(visited);
                 out.detail = "在 " + session_id + " 验卷失败";
                 return out;

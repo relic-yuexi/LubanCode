@@ -543,21 +543,8 @@ TEST_CASE("只读投影:验后账重建、缺口明报、AdoptFromProjection 接
         const auto projection = goalns::ProjectGoalState(*ledger, harness.dir);
         CHECK(projection.gap == goalns::GoalProjectionGap::HashMismatch);
     }
-    SUBCASE("快照 hash 对上但 revision 与 applied 不一致") {
-        // 手写账:快照文件内容合法、hash 与 applied 所记一致,但快照里
-        // state_revision=1 而 applied 记 to=2——RevisionMismatch 缺口。
-        GoalStateSnapshot s1 = make_snapshot("goal-1", 1);
-        s1.state_revision = 1;
-        // applied 的 to 记 2,快照落在 rev-000002 的名字下、内容 revision=1。
-        WriteFileBytes(harness.dir / goalns::SnapshotRefPath("goal-1", 2),
-                       goalns::SnapshotBytes(s1));
-        EventDraft draft;
-        draft.kind = EventKindV3::StateGoalApplied;
-        draft.payload["goalId"] = "goal-1";
-        draft.payload["fromStateRevision"] = 0;
-        draft.payload["toStateRevision"] = 2;  // 单行合同允许(0+1?不——会拒)
-        (void)draft;
-    }
+    // (快照 hash 对上但 revision 与 applied 不一致的 RevisionMismatch 缺口,
+    // 在下一册"投影序列校验"的手写账场景完整钉死,此处不重复。)
 }
 
 TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 不衔接") {
