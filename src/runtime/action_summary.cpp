@@ -35,6 +35,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                                            const ActionSummarySource& source,
                                            int& calls_remaining) {
     ActionSummaryResult result;
+    calls_remaining = std::min(calls_remaining, profile.max_calls);
     const auto source_revision = writer.context().revision;
     std::vector<std::string> candidate_refs;
     const auto finish = [&](std::string state, std::string reason) {
@@ -80,8 +81,8 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     // unbounded map. Each planned call still passes its actual adapter gate.
     std::vector<std::string> chunks;
     for (std::size_t offset = 0; offset < source.text.size();) {
-        const auto remaining = source.text.substr(offset, profile.max_chunk_bytes);
-        auto length = platform::Utf8PrefixBoundary(remaining, remaining.size());
+        const auto end = offset + std::min(profile.max_chunk_bytes, source.text.size() - offset);
+        const auto length = platform::Utf8PrefixBoundary(source.text, end) - offset;
         if (length == 0) return finish("rejected", "chunk_utf8_boundary");
         chunks.push_back(source.text.substr(offset, length));
         offset += length;

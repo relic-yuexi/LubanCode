@@ -1034,6 +1034,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
         // 发送必须吃同一份定义，免得先估旧表、后发新表。
         request.tools = BuildToolDefinitions();
+        const bool adapter_budget = wiring.rewrite_tool_results_for_history &&
+                                    !backend_.SerializeForDiagnostics(request).empty();
         // token 估算校准(真实 usage 反推 byte 比率单):本步全部估算(固定
         // 账预检、A/B 双闸、preflight 三项账)乘当前系数——(provider,model)
         // 桶内最近 8 对 (默认尺估算, 实报完整输入) 样本的中位 real/est。
@@ -1068,7 +1070,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
         // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
         // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
-        if (step_index == 0 && !context_.request_history().empty()) {
+        if (!adapter_budget && step_index == 0 && !context_.request_history().empty()) {
             std::size_t fixed_input_tokens =
                 EstimateTextTokensForPreflight(request.system, token_calibration) +
                 EstimateMessageTokensForPreflight(context_.request_history().back(), token_calibration);
@@ -1161,8 +1163,28 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 短词密集的历史虚抬两倍;水位与 /context 同尺,账才对得上。
             // 校准系数同一枚(token 估算校准单):双闸两把尺同乘,谁也不
             // 单独偏科;没接线时 1.0,双闸既有单测的数字一字不动。
-            const std::size_t working_view_tokens =
+            std::size_t working_view_tokens =
                 EstimateHistoryTokens(working_view.messages, token_calibration);
+            if (adapter_budget) {
+                auto candidate = request;
+                candidate.messages = working_view.messages;
+                candidate.max_tokens = profile_.max_output_tokens;
+                const auto snapshot = api::ModelInputSnapshotFromWire(backend_.SerializeForDiagnostics(candidate));
+                if (!snapshot) return std::unexpected(snapshot.error());
+                if (!api::HasUnestimatedInput(*snapshot)) {
+                    const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+                    working_view_tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
+                    const auto limit = backend_.GetEffectiveOutputLimit(candidate);
+                    const auto reserve = limit.tokens && *limit.tokens > 0
+                                             ? static_cast<std::size_t>(*limit.tokens) : estimate_output_reserve;
+                    projected = working_view_tokens + reserve + kContextPreflightHeadroomTokens;
+                } else {
+                    // Text compression cannot establish a missing media/signature
+                    // policy. The final adapter gate reports that specific cause.
+                    projected = 0;
+                    working_view_tokens = 0;
+                }
+            }
             const std::size_t projected_line = AutoCompactTriggerLine(window_tokens);
             const std::size_t real_line =
                 window_tokens * static_cast<std::size_t>(kRealOverflowPercent) / 100;
@@ -1172,7 +1194,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             pressure.window_tokens = window_tokens;
             pressure.working_view_tokens = working_view_tokens;
             pressure.working_view_overflow = working_view_tokens >= real_line;
-            pressure.projected_overflow = projected >= projected_line && pressure.working_view_overflow;
+            pressure.projected_overflow = projected >= projected_line &&
+                                          (adapter_budget || pressure.working_view_overflow);
             const int epoch_before = context_.cache_epoch();
             wiring_.on_context_pressure(pressure);
             if (context_.cache_epoch() != epoch_before) {
@@ -1247,7 +1270,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 余量,任务照常调工具。尤其是当前单条用户消息本身过大时，摘要压
         // 多少遍也救不了，不能再把同一份请求发给 provider 撞 500。窗口按
         // 上面的有效窗口算(未知落兜底),永不跳过。
-        {
+        if (!adapter_budget) {
             const std::size_t input_tokens =
                 EstimateRequestInputTokensForPreflight(request, token_calibration);
             const std::size_t current_turn_tokens = request.messages.empty()
@@ -1397,7 +1420,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // (不乘 token_calibration——系数的锚是默认尺,乘过再量就自我追尾);
         // 字节按 system + messages + 工具定义的文本字节累,与实报完整输入
         // (TotalInputTokens)同一份 prompt 对账。
-        if (wiring.token_calibrator != nullptr) {
+        if (wiring.token_calibrator != nullptr && !adapter_budget) {
             calibration_est_tokens =
                 EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(request.messages);
             calibration_request_bytes = request.system.size() + EstimateHistoryBytes(request.messages);
@@ -1979,7 +2002,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // input 对整份字节,cache 命中时必然虚低,样本全废,单子护栏点的
         // 就是这个坑;个别 provider 缓存计数失真的,落在异常带外进不了窗。
         // 漂移重置(分词口径真换了)打一行诊断,别让估算悄悄变了样。
-        if (wiring.token_calibrator != nullptr && assembler.usage_seen()) {
+        if (wiring.token_calibrator != nullptr && !adapter_budget && assembler.usage_seen()) {
             TokenCalibrationSample calibration_sample;
             calibration_sample.request_bytes = calibration_request_bytes;
             calibration_sample.estimated_tokens = calibration_est_tokens;

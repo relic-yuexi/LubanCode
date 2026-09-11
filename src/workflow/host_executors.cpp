@@ -298,6 +298,9 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         wiring.rewrite_tool_results_for_history = [node_turn](api::Message& results) {
             return node_turn->RewriteToolResultsForHistory(results);
         };
+        wiring.configure_action_summary = [node_turn](api::Backend* backend, const runtime::ActionSummaryProfile& profile) {
+            node_turn->ConfigureActionSummary(backend, profile);
+        };
     }
     // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-----------------------
     // 每枚 agent 节点执行时自起一份已见指纹账(节点跑完即弃,不与兄弟

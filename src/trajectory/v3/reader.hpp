@@ -331,6 +331,7 @@ struct ResultPreviewProjection {
     std::string result_selection_ref;
     std::string summary_event_ref;
     std::vector<std::string> summary_candidate_refs;
+    bool summary_valid = true;
     std::vector<std::string> source_result_event_refs;  // selected → persisted
     std::vector<nlohmann::json> result_refs;            // 选用链上全部 artifactRef
     std::vector<ArtifactProbe> artifacts;               // 对 session_dir 实探

@@ -2255,6 +2255,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         turn_wiring.rewrite_tool_results_for_history = [&child_bridge](api::Message& results) {
             return child_bridge.RewriteToolResultsForHistory(results);
         };
+        turn_wiring.configure_action_summary = [&child_bridge](api::Backend* backend, const runtime::ActionSummaryProfile& profile) {
+            child_bridge.ConfigureActionSummary(backend, profile);
+        };
         turn_wiring.on_tool_results_committed_receipt =
             [&child_bridge](const std::string& batch_id, const api::Message& results) {
                 return child_bridge.OnToolResultsCommitted(batch_id, results);

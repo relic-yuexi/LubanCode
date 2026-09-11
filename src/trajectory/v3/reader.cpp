@@ -203,6 +203,17 @@ std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& j
             last_revision = view.revision;
         }
     }
+    // A summary candidate does not become main input until its selected tool
+    // message is admitted. Reject broken adopted provenance on resume, rather
+    // than silently treating the candidate as an ordinary tool preview.
+    for (const auto& message : ledger.messages) {
+        if (!message.result_selection_ref) continue;
+        const auto* selected = ledger.FindEvent(*message.result_selection_ref);
+        if (selected && selected->payload.contains("summaryEventRef")) {
+            const auto preview = ExpandResultPreview(ledger, {}, message.message_id);
+            if (!preview.summary_valid) return std::unexpected("v3reader.invalid_action_summary_selection");
+        }
+    }
     return ledger;
 }
 
@@ -955,14 +966,14 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
                     JsonString(summary->payload, "state").value_or("") != "accepted" ||
                     JsonString(summary->payload, "previewSha256").value_or("") != platform::Sha256Hex(projection.result_preview) ||
                     RefIdArray(summary->payload, "sourceResultEventRefs") != persisted_refs) {
-                    projection.complete = false;
+                    projection.summary_valid = false;
                 } else {
                     projection.summary_candidate_refs = RefIdArray(summary->payload, "candidateMessageRefs");
-                    if (projection.summary_candidate_refs.empty()) projection.complete = false;
+                    if (projection.summary_candidate_refs.empty()) projection.summary_valid = false;
                     for (const auto& ref : projection.summary_candidate_refs) {
                         const auto* candidate = ledger.FindMessage(ref);
                         if (!candidate || candidate->purpose != MessagePurpose::ActionSummary || candidate->seq >= summary->seq) {
-                            projection.complete = false;
+                            projection.summary_valid = false;
                         }
                     }
                 }
@@ -991,7 +1002,7 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
     }
     // 逐枚 artifact 实探:存在 + sha256(§4.16"任何对正文的查阅均校验身份
     // 和 hash");缺件标缺口,不冒称完整(§4.10)。
-    bool complete = projection.complete;
+    bool complete = projection.complete && projection.summary_valid;
     for (const auto& ref : projection.result_refs) {
         ArtifactProbe probe;
         probe.artifact_id = JsonString(ref, "artifactId").value_or("");
