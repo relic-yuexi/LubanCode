@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.255] - 2026-09-11
+
+- **Goal 模式地基 G0：GoalService 落账。**GoalLifecycle/GoalPhase 两层模型（v1 GoalCoordinator 不动，收敛归 G1）；CreateGoal/ApplyTransition（CAS stateRevision+证据验合同+usage 只增）/AmendContract（合同改版回 preparing，旧证据翻 stale）；提交事务按 §4.55：验→核 revision→快照落稳（临时+rename）→applied 落账（PowerLoss）→内存发布，任一步失败不发布。快照 schema v1 含 fork lineage/合同全量/evidenceRefs 六键 fresh/truncated/pendingIntent（G1 挂点）；state.goal.applied 一枚 statusless kind 四处同步，跨行序列合同 python 校验器补正反例；只读投影逐条验 applied+head 实探快照，缺口七档明报，AdoptFromProjection 作 resume 接管口。CI 侧：非 main 只烧 macOS 一腿，分支 push 与 PR 同 head 去重，合入 main 才跑全平台。
+
 ## [v0.26.254] - 2026-09-11
 
 - **旧设计清理 B1:两道止损门。**compact 投影失败阻断门——applied 后投影失败即阻断后续请求,话术如实("压缩已提交,运行态未恢复"),在飞请求照常收尾,clear 换场即解除;v3 删除封口门——先识别实际主账,v3 场验卷+封口+末行 hash 入 tombstone,坏账/未封口/格式歧义一律拒绝且目录一字不动。配套消费者清册(C1-C8 含退役阻塞列)与默认-v3 冒烟册。
