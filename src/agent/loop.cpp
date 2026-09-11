@@ -1411,7 +1411,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 const auto reserve = limit.tokens && *limit.tokens > 0
                                          ? static_cast<std::size_t>(*limit.tokens) : estimate_output_reserve;
                 if (ExceedsContextWindow(tokens, reserve, window_tokens)) {
-                    return std::unexpected("context.adapter_input_exceeds_capacity: final UTF-8 bytes/4 input + output + margin");
+                    return std::unexpected(
+                        "context.adapter_input_exceeds_capacity: final UTF-8 bytes/4 input + output + margin"
+                        " (step=" + std::to_string(step_index) +
+                        " input_tokens=" + std::to_string(tokens) +
+                        " messages=" + std::to_string(request.messages.size()) +
+                        " output_reserve=" + std::to_string(reserve) +
+                        " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
+                        " window=" + std::to_string(window_tokens) + ")");
                 }
                 adapter_input_snapshot = std::move(*snapshot);
             }
@@ -2440,7 +2447,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                              ? static_cast<std::size_t>(*limit.tokens)
                                              : estimate_output_reserve;
                     if (ExceedsContextWindow(tokens, reserve, window_tokens)) {
-                        batch_capacity_error = "tool_batch.final_preview_exceeds_capacity";
+                        batch_capacity_error =
+                            "tool_batch.final_preview_exceeds_capacity"
+                            " (input_tokens=" + std::to_string(tokens) +
+                            " output_reserve=" + std::to_string(reserve) +
+                            " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
+                            " window=" + std::to_string(window_tokens) + ")";
                     }
                 }
             }

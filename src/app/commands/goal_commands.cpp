@@ -564,8 +564,9 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
     }
     const lubancode::cli::Theme& theme = *wiring.theme;
     goalns::GoalService& service = *wiring.goal_service;
-    const nlohmann::json command_cause = nlohmann::json{{"source", "command"},
-                                                        {"command", "/goal"}};
+    // applied 的 causeRef 合同是 §3.1 合法引用(同会话 string 行号或跨会话
+    // 五键)或空;slash 命令的账面事件族未发行,没有可指的行——不带。
+    const nlohmann::json command_cause = nlohmann::json();
 
     const auto fail_with = [&](const goalns::GoalServiceResult& result) {
         out << theme.error
@@ -902,11 +903,13 @@ std::string BuildGoalLoopStatusSegment(const lubancode::runtime::goal::GoalState
     const std::string goal_part = BuildGoalV3StatusSegmentText(goal_v3);
     std::string loop_part;
     if (loop != nullptr) {
+        // 即调即值:漏了调用括号会让三处用值处拿 lambda 本体比大小,
+        // 三平台编译全红(#49 全腿验证抓的)。
         const auto now_ms = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                 .count();
-        };
+        }();
         int active = 0;
         std::int64_t next_due = 0;
         bool has_next = false;

@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.257] - 2026-09-12
+
+- **容量恢复 B1+B2 落地：工具结果首次定形与整批预算。**新 action 结果原文落仓（结果仓+SHA-256 对账），首次发给模型的预览每调用合计 ≤32 KiB（策略/引用/捕获完整度/失败原因落档，配额截断不得记 capture_complete）；原文、选用、tool 消息与接纳全落稳后主循环才发布同一份文本，四道写闸失败即停后续请求，子代理/workflow 同路。整批结果超剩余窗口时发前按调用分配预算（预览降档/范围选取在先，action 摘要只是可选手段：同 backend 显式 model 路由、整批最多八次两层 map/reduce、失败回确定性预览），输入按 ceil(UTF-8 bytes/4) 计量，媒体与不透明思考明确拒绝终态；v2 会话收回旧预算口径（rewrite 钩子只挂在管预览的 v3 桥，校准器照旧）。Gemini 不再优先发旧 structured_content；请求清洗不再重建已提交正文。容量门拒绝文案带 step/token/预留/窗口实测数字。接手修编译与测试十四桩（wire 取址、pimpl 完整性、doctest 宏撞名、ReadV3Ledger expected 适配等）。
+
 ## [v0.26.256] - 2026-09-11
 
 - **Goal 模式 G1–G4 整链接通。**七动作命令全接 v3（含 continuation 意图提交/认领/恢复去重）；验收走 v3 内部请求服务（requested→prepared→stream→assistant 带逐次 usage 全落链）+严格判词校验（缺/多/重 criterion 拒收）；后台等待 30-60-120 巡检、组合取消、compact/resume 守恒、fork/btw 服务面；跨壳状态投影三处同源。接手修死锁三处：`/goal edit` 后旧意图随合同作废并按新合同补排（在途工作轮拒改、评估在途放行由冻结 revision 拒迟到判词）；waiting 态 resume 走 ResolveWaiting 恢复收口位不重开轮；主工作轮 usage 归 goal 账 + 验收请求发送前过预算闸（撞帽销账转 budget_exhausted 可恢复）。留待：criteria 生产拟定（G2 preflight）、崩溃后收口重建事实行、十五行验收矩阵真机首跑。

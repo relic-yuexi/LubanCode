@@ -1046,10 +1046,16 @@ GoalServiceResult GoalService::ApplyTransition(const GoalTransitionCandidate& ca
     next.lifecycle = candidate.to_lifecycle;
     next.phase = candidate.to_phase;
     next.stop_reason = candidate.stop_reason;
-    next.blocker_key = candidate.blocker_key;
-    next.pending_question = candidate.pending_question;
-    if (candidate.to_lifecycle != GoalLifecycle::Blocked) next.blocker_key.clear();
-    if (candidate.to_lifecycle != GoalLifecycle::AwaitingUser) next.pending_question.clear();
+    if (candidate.to_lifecycle == GoalLifecycle::Blocked) {
+        next.blocker_key = candidate.blocker_key;  // 候选门已拒空键
+    }
+    if (candidate.to_lifecycle == GoalLifecycle::AwaitingUser) {
+        next.pending_question = candidate.pending_question;  // 候选门已拒空问题
+    }
+    // 离开 blocked/awaiting_user 不清 blockerKey/pendingQuestion(§4.67.3
+    // "各态保存的停因/问题/blocker"、§4.67.7 两次接管守恒"问题不丢"):
+    // 问题/阻碍面跨停态存活,翻新或清空归下一次判词
+    //(CompleteIterationWithEvaluation 各分路统一改写)。
     if (candidate.iteration_id.has_value()) next.iteration_id = candidate.iteration_id;
     if (candidate.applied_evaluation_id.has_value()) {
         next.applied_evaluation_id = candidate.applied_evaluation_id;
@@ -1086,7 +1092,12 @@ GoalServiceResult GoalService::AmendContract(const GoalContract& contract,
     if (expected_contract_revision != current_->contract_revision) {
         return Fail(kErrGoalRevisionConflict, "contractRevision 冲突");
     }
-    if (!IsValidLifecycleTransition(current_->lifecycle, GoalLifecycle::Preparing)) {
+    // 同态改版合法:preparing 原地改合同(contractRevision/stateRevision 都
+    // 在动,不是"没变化的假提交"——投影对同 goal 的 applied 只在 lifecycle
+    // 变了时才验转换)。刚立未开跑的目标立即 /goal edit 是正路;其余态仍按
+    // 转换表(budget_exhausted/suspended_by_policy 回不到 preparing,拒)。
+    if (current_->lifecycle != GoalLifecycle::Preparing &&
+        !IsValidLifecycleTransition(current_->lifecycle, GoalLifecycle::Preparing)) {
         return Fail(kErrGoalInvalidTransition,
                     "当前 lifecycle(" + ToString(current_->lifecycle) + ")不受理合同改版");
     }
@@ -1587,7 +1598,17 @@ GoalServiceResult GoalService::CompleteIterationWithEvaluation(
     }
     if (to_lifecycle != current_->lifecycle) {
         next.lifecycle = to_lifecycle;
-        next.stop_reason = to_stopped ? verdict.stop_reason : std::string();
+        if (to_stopped) {
+            next.stop_reason = verdict.stop_reason;
+        } else if (to_lifecycle == GoalLifecycle::Achieved) {
+            // 终态快照按 schema 须带停因(§4.67 G0 终态须带 stopReason);
+            // achieved 判词没有显式停因,用枚举本身——判词锚在
+            // appliedEvaluationId,这里只补合法占位不编故事。
+            next.stop_reason =
+                verdict.stop_reason.empty() ? std::string("achieved") : verdict.stop_reason;
+        } else {
+            next.stop_reason.clear();
+        }
         next.blocker_key = verdict.kind == GoalVerdictKind::Blocked ? verdict.blocker_key
                                                                     : std::string();
         next.pending_question = verdict.kind == GoalVerdictKind::NeedsUser
@@ -2529,6 +2550,7 @@ GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_se
         for (const auto& seen : visited) {
             if (seen == session_id) {
                 out.detail = "来源链回环(" + session_id + "),链停";
+                out.projection.gap = GoalProjectionGap::NoGoal;
                 return out;
             }
         }
@@ -2575,6 +2597,9 @@ GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_se
               platform::Utf8ToPath(*manifest->previous_session_id);
     }
     if (out.detail.empty()) out.detail = "来源链超过 " + std::to_string(kMaxHops) + " 跳,护栏止";
+    // 走到头也没撞见 goal 账:缺口如实报 NoGoal(与单卷空账同一口径),
+    // 不留默认 None 冒充"投影健康"。
+    if (!out.found) out.projection.gap = GoalProjectionGap::NoGoal;
     out.walked = std::move(visited);
     return out;
 }

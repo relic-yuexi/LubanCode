@@ -36,6 +36,7 @@
 #include "trajectory/v3/writer.hpp"
 
 namespace goalns = lubancode::runtime::goal;
+using goalns::CriterionVerdict;
 using goalns::GoalCheckpoint;
 using goalns::GoalContract;
 using goalns::GoalDecision;
@@ -185,7 +186,10 @@ struct WriterHarness {
         writer = std::move(*started);
     }
 
-    std::optional<lubancode::trajectory::v3::V3Ledger> Ledger() {
+    // ReadV3Ledger 自 P2(edceca68) 起返回 expected;auto 接,has_value/
+    // operator-> 用法与 optional 同形。原 G2 册按 optional 写,一直被
+    // 前序 TU 的编译错挡着没轮到编。
+    auto Ledger() {
         return lubancode::trajectory::v3::ReadV3Ledger(dir / "s1.jsonl");
     }
 };
@@ -230,8 +234,14 @@ TEST_CASE("判词校验:恰好覆盖合同,缺/多/重全拒") {
         CHECK(error.find("重复") != std::string::npos);
     }
     SUBCASE("合同外 criterion(跨 goal)拒") {
+        // 合同 criterion 照判,另塞一枚编造的 c-99——只多不少,才落在
+        // "不在冻结合同"分路(把 c-1 改名会先撞"缺判词"分路)。
         GoalEvaluation e = ParseOrDie(kGoodContinue);
-        e.criteria[0].id = "c-99";
+        CriterionVerdict fabricated;
+        fabricated.id = "c-99";
+        fabricated.status = "pass";
+        fabricated.evidence_ids = e.criteria[0].evidence_ids;
+        e.criteria.push_back(fabricated);
         const std::string error = ValidateEvaluationAgainstMaterial(in, e);
         REQUIRE_FALSE(error.empty());
         CHECK(error.find("不在冻结合同") != std::string::npos);

@@ -119,13 +119,13 @@ struct FlowHarness {
         draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
         draft.contract.required_artifacts.push_back("auth-report.txt");
         draft.pending_intent = goalns::GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
-        auto created = service->CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = service->CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         auto claimed = service->ClaimPendingIntent(
-            "run-000001", created.payload.at("stateRevision"), nlohmann::json{{"source", "test"}});
+            "run-000001", created.payload.at("stateRevision"), nlohmann::json{});
         REQUIRE(claimed.ok);
         auto began = service->BeginIteration(claimed.payload.at("stateRevision"),
-                                             nlohmann::json{{"source", "test"}});
+                                             nlohmann::json{});
         REQUIRE(began.ok);
     }
 
@@ -315,15 +315,15 @@ TEST_CASE("验收前预算闸:token 帽已尽时验收请求也不发,落 budget
         draft.contract.criteria.push_back({"c-1", "ctest 全过", true});
         draft.budget.max_total_tokens = 50;
         draft.pending_intent = goalns::GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
-        auto created = gated.service->CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = gated.service->CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         REQUIRE(gated.service
                     ->ClaimPendingIntent("run-000001", created.payload.at("stateRevision"),
-                                         nlohmann::json{{"source", "test"}})
+                                         nlohmann::json{})
                     .ok);
         REQUIRE(gated.service
                     ->BeginIteration(gated.service->current()->state_revision,
-                                     nlohmann::json{{"source", "test"}})
+                                     nlohmann::json{})
                     .ok);
     }
     goalns::GoalUsage overspent;
@@ -333,7 +333,7 @@ TEST_CASE("验收前预算闸:token 帽已尽时验收请求也不发,落 budget
     REQUIRE(gated.service
                 ->RecordGoalUsage("subagent-9", "subagent", overspent,
                                   gated.service->current()->state_revision,
-                                  nlohmann::json{{"source", "test"}})
+                                  nlohmann::json{})
                 .ok);
     gated.backend.replies = {kContinueVerdict};
     const auto result = CloseGoalIterationWithEvaluation(
@@ -352,7 +352,7 @@ TEST_CASE("验收前预算闸:token 帽已尽时验收请求也不发,落 budget
     addition.total_tokens = 500;
     REQUIRE(gated.service
                 ->AddBudget(addition, gated.service->current()->state_revision,
-                            nlohmann::json{{"source", "test"}})
+                            nlohmann::json{})
                 .ok);
     goalns::GoalTransitionCandidate back;
     back.goal_id = gated.Now()->goal_id;
@@ -405,7 +405,7 @@ TEST_CASE("不在执行轮:编排拒,不动状态") {
     GoalStateSnapshot draft;
     draft.objective = "目标";
     draft.contract.criteria.push_back({"c-1", "验", true});
-    auto created = harness.service->CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+    auto created = harness.service->CreateGoal(std::move(draft), nlohmann::json{});
     REQUIRE(created.ok);
     const auto result = CloseGoalIterationWithEvaluation(
         *harness.service, *harness.writer, harness.backend, harness.Options(),

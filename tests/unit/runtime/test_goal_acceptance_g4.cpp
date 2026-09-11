@@ -163,9 +163,13 @@ struct Volume {
     std::string session_id;
     std::optional<V3Writer> writer;
 
+    // root 给定时卷落 root/<sid>/(lineage 按"目录名即 session id、
+    // previousSessionId 找兄弟目录"的约定走,ProjectGoalLineage 同款)。
     Volume(const std::string& tag, const std::string& sid,
-           V3WriterOptions options = V3WriterOptions{})
-        : dir(FreshDir(tag)), session_id(sid) {
+           const std::filesystem::path& root = {}, V3WriterOptions options = V3WriterOptions{})
+        : dir(root.empty() ? FreshDir(tag) : root / sid), session_id(sid) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
         auto started = V3Writer::Start(dir / (sid + ".jsonl"), sid, "run-" + sid,
                                        "system prompt", nlohmann::json::object(),
                                        std::move(options));
@@ -207,8 +211,9 @@ struct Harness {
     std::optional<GoalService> service;
     ScriptBackend backend;
 
-    explicit Harness(const std::string& tag, V3WriterOptions options = V3WriterOptions{})
-        : volume(tag, "s1", std::move(options)) {
+    explicit Harness(const std::string& tag, const std::filesystem::path& root = {},
+                     V3WriterOptions options = V3WriterOptions{})
+        : volume(tag, "s1", root, std::move(options)) {
         service.emplace(&*volume.writer, ServiceOptionsFor(volume.dir));
     }
 
@@ -221,13 +226,13 @@ struct Harness {
         draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
         draft.contract.required_artifacts.push_back("auth-report.txt");
         draft.pending_intent = GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
-        auto created = service->CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = service->CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         auto claimed = service->ClaimPendingIntent("run-s1", created.payload.at("stateRevision"),
-                                                   nlohmann::json{{"source", "test"}});
+                                                   nlohmann::json{});
         REQUIRE(claimed.ok);
         auto began = service->BeginIteration(claimed.payload.at("stateRevision"),
-                                             nlohmann::json{{"source", "test"}});
+                                             nlohmann::json{});
         REQUIRE(began.ok);
     }
 
@@ -406,11 +411,11 @@ TEST_CASE("M1 首轮未过二轮修好:两轮独立验收,第二轮引用第一�
 
     // 第二轮:认领续排意图(与判词同笔落的)、开轮、补产物证据。
     auto claimed = harness.service->ClaimPendingIntent(
-        "run-s1", harness.Now()->state_revision, nlohmann::json{{"source", "test"}});
+        "run-s1", harness.Now()->state_revision, nlohmann::json{});
     REQUIRE(claimed.ok);
     CHECK(claimed.payload.at("workItemId") == "goal-1/wi-1");
     auto began = harness.service->BeginIteration(harness.Now()->state_revision,
-                                                 nlohmann::json{{"source", "test"}});
+                                                 nlohmann::json{});
     REQUIRE(began.ok);
     CHECK(began.payload.at("iterationId") == "goal-1/iter-2");
 
@@ -533,7 +538,7 @@ TEST_CASE("M4 合同改版撞迟到判词:拒旧候选,费用仍留账,证据全
     // 进评估相位(§4.67.8 evaluating 崩溃/竞态窗口的锚)。
     auto began = harness.service->BeginEvaluation(
         harness.Now()->state_revision, "evt-ckpt-1", std::vector<goalns::GoalEvidenceRef>{},
-        std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+        std::vector<std::string>{}, nlohmann::json{});
     REQUIRE(began.ok);
     const std::uint64_t evaluating_revision = harness.Now()->state_revision;
     const std::string iteration_id = "goal-1/iter-1";
@@ -567,8 +572,7 @@ TEST_CASE("M4 合同改版撞迟到判词:拒旧候选,费用仍留账,证据全
     goalns::GoalContract amended = harness.Now()->contract;
     amended.objective = "修好 auth 模块;ctest 全绿且产物齐";
     const auto edit = harness.service->AmendContract(
-        amended, evaluating_revision, harness.Now()->contract_revision,
-        nlohmann::json{{"source", "command"}});
+        amended, evaluating_revision, harness.Now()->contract_revision, nlohmann::json{});
     REQUIRE(edit.ok);
     CHECK(harness.Now()->contract_revision == 2);
     CHECK(harness.Now()->lifecycle == GoalLifecycle::Preparing);
@@ -581,7 +585,7 @@ TEST_CASE("M4 合同改版撞迟到判词:拒旧候选,费用仍留账,证据全
     // 迟到判词(旧候选)不采用:不在验收收口位(改版已收走相位)。
     goalns::EvaluationVerdict late = ContinueVerdictFor("eval-goal-1/iter-1", iteration_id);
     const auto refused = harness.service->CompleteIterationWithEvaluation(
-        harness.Now()->state_revision, late, nlohmann::json{{"source", "test"}});
+        harness.Now()->state_revision, late, nlohmann::json{});
     REQUIRE_FALSE(refused.ok);
     CHECK(refused.error_code == goalns::kErrGoalCandidateInvalid);
     CHECK_FALSE(harness.Now()->applied_evaluation_id.has_value());
@@ -716,10 +720,11 @@ TEST_CASE("M7 repair 一次后成:合同与证据可追,两次 usage 各记") {
 
 TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一项") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m8-root");
     {
         // 源卷把第一轮 continue 收完:判词 applied(带续排意图)落稳,泵还
         // 没认领就崩(scope 结束 = 进程消失,无收尾行)。
-        Harness harness("m8");
+        Harness harness("m8", root);
         harness.RunToRunning();
         const GoalEvidence ev = harness.MakeEvidence("ev-1", "");
         harness.backend.call = 0;
@@ -730,8 +735,8 @@ TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一
         REQUIRE(result.ok);
     }
 
-    // 恢复:新卷(resume)沿链接管。
-    Volume next("m8-next", "s2");
+    // 恢复:新卷(resume)沿链接管(源/恢复卷同根,目录名即 session id)。
+    Volume next("m8-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -746,11 +751,11 @@ TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一
     CHECK(view.claimable);
     CHECK(view.intent.work_item_id == "goal-1/wi-1");
     auto claimed = service2.ClaimPendingIntent("run-s2", snapshot->state_revision,
-                                               nlohmann::json{{"source", "test"}});
+                                               nlohmann::json{});
     REQUIRE(claimed.ok);
     CHECK(claimed.payload.at("workItemId") == "goal-1/wi-1");
     auto began = service2.BeginIteration(service2.current()->state_revision,
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(began.ok);
     // 只补一项续跑:恰开第二轮(iter-2),没有第二枚工作项冒出来。
     CHECK(began.payload.at("iterationId") == "goal-1/iter-2");
@@ -763,22 +768,23 @@ TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一
 
 TEST_CASE("M9a claim 后未开轮崩溃:接管沿用原 workItemId,不重放") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m9a-root");
     {
-        Harness harness("m9a");
+        Harness harness("m9a", root);
         GoalStateSnapshot draft;
         draft.objective = "修好 auth 模块";
         draft.workspace_root = "/repo";
         draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
         draft.pending_intent = GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
         auto created = harness.service->CreateGoal(std::move(draft),
-                                                   nlohmann::json{{"source", "test"}});
+                                                   nlohmann::json{});
         REQUIRE(created.ok);
         auto claimed = harness.service->ClaimPendingIntent(
-            "run-s1", created.payload.at("stateRevision"), nlohmann::json{{"source", "test"}});
+            "run-s1", created.payload.at("stateRevision"), nlohmann::json{});
         REQUIRE(claimed.ok);
         // claim 落账、开轮没落(phase=queued):工具执行结果未知 = 确认未发送。
     }
-    Volume next("m9a-next", "s2");
+    Volume next("m9a-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -792,12 +798,12 @@ TEST_CASE("M9a claim 后未开轮崩溃:接管沿用原 workItemId,不重放") {
     CHECK(view.intent.work_item_id == "wi-1");
     CHECK(view.intent.writer_epoch == "run-s1");
     auto taken = service2.ClaimPendingIntent("run-s2", service2.current()->state_revision,
-                                             nlohmann::json{{"source", "test"}});
+                                             nlohmann::json{});
     REQUIRE(taken.ok);
     CHECK(taken.payload.at("workItemId") == "wi-1");
     CHECK(taken.payload.at("adoptedFromEpoch") == "run-s1");
     auto began = service2.BeginIteration(service2.current()->state_revision,
-                                         nlohmann::json{{"source", "test"}});
+                                         nlohmann::json{});
     REQUIRE(began.ok);
     // 接管只开一轮:iterations_started == 1,没把崩溃前的工作项再跑一遍。
     CHECK(service2.current()->counters.iterations_started == 1);
@@ -806,11 +812,12 @@ TEST_CASE("M9a claim 后未开轮崩溃:接管沿用原 workItemId,不重放") {
 
 TEST_CASE("M9b claim 后已开轮崩溃:进恢复核验,不盲重放副作用") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m9b-root");
     {
-        Harness harness("m9b");
+        Harness harness("m9b", root);
         harness.RunToRunning();  // claim + 开轮(phase=running):执行在途
     }
-    Volume next("m9b-next", "s2");
+    Volume next("m9b-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -824,7 +831,7 @@ TEST_CASE("M9b claim 后已开轮崩溃:进恢复核验,不盲重放副作用") 
     CHECK(view.claimed_by_other);
     CHECK(view.reason.find("run-s1") != std::string::npos);
     auto refused = service2.ClaimPendingIntent("run-s2", service2.current()->state_revision,
-                                               nlohmann::json{{"source", "test"}});
+                                               nlohmann::json{});
     REQUIRE_FALSE(refused.ok);
     CHECK(refused.error_code == goalns::kErrGoalIntentAlreadyClaimed);
     // 副作用不重跑:iterations_started 仍是 1(没有第二枚轮被开出来)。
@@ -841,10 +848,7 @@ TEST_CASE("M10 停止意图优先:continue 照采但不续排,迟到结果不拉
     harness.RunToRunning();
 
     // Esc 边界:停止意图先落账(当前轮照常收口)。
-    REQUIRE(harness.service->RequestStop(harness.Now()->state_revision,
-                                         nlohmann::json{{"source", "host"},
-                                                        {"reason", "esc_interrupt"}})
-                .ok);
+    REQUIRE(harness.service->RequestStop(harness.Now()->state_revision, nlohmann::json{}).ok);
     CHECK(harness.Now()->stop_requested);
 
     const GoalEvidence ev = harness.MakeEvidence("ev-1", "auth-report.txt");
@@ -870,13 +874,13 @@ TEST_CASE("M10 停止意图优先:continue 照采但不续排,迟到结果不拉
 
     // 迟到的后台报告:非 waiting 拒,只留审计不拉起新轮。
     auto late_bg = harness.service->ResolveWaiting("subagent-9", snapshot->state_revision,
-                                                   nlohmann::json{{"source", "test"}});
+                                                   nlohmann::json{});
     REQUIRE_FALSE(late_bg.ok);
     CHECK(late_bg.error_code == goalns::kErrGoalNotWaiting);
     // 迟到的判词重放:不在验收收口位拒。
     goalns::EvaluationVerdict late = ContinueVerdictFor("eval-goal-1/iter-1", "goal-1/iter-1");
     auto late_verdict = harness.service->CompleteIterationWithEvaluation(
-        harness.Now()->state_revision, late, nlohmann::json{{"source", "test"}});
+        harness.Now()->state_revision, late, nlohmann::json{});
     REQUIRE_FALSE(late_verdict.ok);
     CHECK(late_verdict.error_code == goalns::kErrGoalCandidateInvalid);
 
@@ -890,7 +894,7 @@ TEST_CASE("M10 停止意图优先:continue 照采但不续排,迟到结果不拉
     REQUIRE(harness.service->ApplyTransition(clear).ok);
     CHECK(harness.Now()->lifecycle == GoalLifecycle::Cleared);
     auto late_claim = harness.service->ClaimPendingIntent(
-        "run-s1", harness.Now()->state_revision, nlohmann::json{{"source", "test"}});
+        "run-s1", harness.Now()->state_revision, nlohmann::json{});
     REQUIRE_FALSE(late_claim.ok);
     CHECK(late_claim.error_code == goalns::kErrGoalIntentMissing);  // 工作项已销账
 }
@@ -904,7 +908,8 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
     // v1 卷:全链收口到 needs_user(带证据/checkpoint/问题/预算/合同条款)。
     // compact 本身不写 goal 行(只改模型上下文)——这里两次 resume 各接管
     // 一遍,对账"compact 前立的 goal 在 compact/resume 后逐项守恒"。
-    Volume v1("m11-v1", "sv1");
+    const std::filesystem::path root = FreshDir("m11-root");
+    Volume v1("m11-v1", "sv1", root);
     {
         GoalService service(&*v1.writer, ServiceOptionsFor(v1.dir));
         GoalStateSnapshot draft;
@@ -914,13 +919,13 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
         draft.pending_intent = GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
         draft.budget.max_iterations = 20;
         draft.budget.max_total_tokens = 500000;
-        auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         REQUIRE(service.ClaimPendingIntent("run-sv1", created.payload.at("stateRevision"),
-                                           nlohmann::json{{"source", "test"}})
+                                           nlohmann::json{})
                     .ok);
         REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                     .ok);
         ScriptBackend backend;
         backend.replies = {kNeedsUserVerdict};
@@ -932,10 +937,12 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
         ev.id = "ev-1";
         ev.goal_id = "goal-1";
         ev.iteration_id = "goal-1/iter-1";
+        ev.kind = goalns::EvidenceKind::CommandExit;  // 采证 kind 不缺省:
+                                                      // 快照 refs 照它原样落
         ev.producer = "run_command";
         ev.facts["command"] = "ctest -R auth";
         ev.facts["exit_code"] = 1;
-        ev.content_sha256 = std::string(64, 't');
+        ev.content_sha256 = std::string(64, 'a');  // hex64:'t' 不是十六进制位
         ev.observed_at_ms = g_now_ms;
         material.fresh_evidence = {ev};
         material.material_evidence = {ev};
@@ -953,7 +960,7 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
     // resume 第一次:sv2 接管(needs_user->paused 写一笔本卷提交,模拟
     // compact 后继续用)。
     {
-        Volume v2("m11-v2", "sv2");
+        Volume v2("m11-v2", "sv2", root);
         WriteSessionJson(v2.dir, "sv2", "resume", "sv1");
         const auto lineage = goalns::ProjectGoalLineage(v2.dir);
         REQUIRE(lineage.found);
@@ -970,7 +977,7 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
     }
 
     // resume 第二次:sv3 沿链(sv2 -> sv1)接管,逐项对账。
-    Volume v3("m11-v3", "sv3");
+    Volume v3("m11-v3", "sv3", root);
     WriteSessionJson(v3.dir, "sv3", "resume", "sv2");
     const auto lineage3 = goalns::ProjectGoalLineage(v3.dir);
     REQUIRE(lineage3.found);
@@ -1020,13 +1027,13 @@ TEST_CASE("M12 并发子任务:共用预算预留,计费去重,一次结果只�
     draft.pending_intent = GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
     draft.budget.max_total_tokens = 1000;
     auto created = harness.service->CreateGoal(std::move(draft),
-                                               nlohmann::json{{"source", "test"}});
+                                               nlohmann::json{});
     REQUIRE(created.ok);
     REQUIRE(harness.service->ClaimPendingIntent("run-s1", created.payload.at("stateRevision"),
-                                                nlohmann::json{{"source", "test"}})
+                                                nlohmann::json{})
                 .ok);
     REQUIRE(harness.service->BeginIteration(harness.service->current()->state_revision,
-                                            nlohmann::json{{"source", "test"}})
+                                            nlohmann::json{})
                 .ok);
 
     // 两路子任务共用预算预留(不是各花整份余额)。
@@ -1041,19 +1048,19 @@ TEST_CASE("M12 并发子任务:共用预算预留,计费去重,一次结果只�
     used_a.usage_reported = true;
     REQUIRE(harness.service->RecordGoalUsage("subagent-3", "subagent", used_a,
                                              harness.Now()->state_revision,
-                                             nlohmann::json{{"source", "test"}})
+                                             nlohmann::json{})
                 .ok);
     GoalUsage used_b;
     used_b.input_tokens = 250;
     used_b.usage_reported = true;
     REQUIRE(harness.service->RecordGoalUsage("subagent-5", "subagent", used_b,
                                              harness.Now()->state_revision,
-                                             nlohmann::json{{"source", "test"}})
+                                             nlohmann::json{})
                 .ok);
     // 重复结果通知(同 requestId 第二次):幂等 deduped,不落事实行不加账。
     auto dup = harness.service->RecordGoalUsage("subagent-3", "subagent", used_a,
                                                 harness.Now()->state_revision,
-                                                nlohmann::json{{"source", "test"}});
+                                                nlohmann::json{});
     REQUIRE(dup.ok);
     CHECK(dup.payload.value("deduped", false));
     CHECK(CountEvents(harness.volume, EventKindV3::GoalUsageRecorded) == 2);
@@ -1067,14 +1074,14 @@ TEST_CASE("M12 并发子任务:共用预算预留,计费去重,一次结果只�
     // 一次结果只交付一次:等待解除同 deliveryKey 第二次被拒。
     REQUIRE(harness.service->EnterWaiting({"subagent-3"},
                                           harness.Now()->state_revision,
-                                          nlohmann::json{{"source", "test"}})
+                                          nlohmann::json{})
                 .ok);
     auto resolved = harness.service->ResolveWaiting("subagent-3",
                                                     harness.Now()->state_revision,
-                                                    nlohmann::json{{"source", "test"}});
+                                                    nlohmann::json{});
     REQUIRE(resolved.ok);
     auto resolved_again = harness.service->ResolveWaiting(
-        "subagent-3", harness.Now()->state_revision, nlohmann::json{{"source", "test"}});
+        "subagent-3", harness.Now()->state_revision, nlohmann::json{});
     REQUIRE_FALSE(resolved_again.ok);
     CHECK(resolved_again.error_code == goalns::kErrGoalNotWaiting);
 }
@@ -1090,7 +1097,7 @@ TEST_CASE("M13 相关后台未完 waiting:无关进程不进账,纯等待零模�
 
     // 本轮派生的 subagent-9 未收口:转 waiting,只登记相关项。
     REQUIRE(harness.service->EnterWaiting({"subagent-9"}, harness.Now()->state_revision,
-                                          nlohmann::json{{"source", "test"}})
+                                          nlohmann::json{})
                 .ok);
     const GoalStateSnapshot* snapshot = harness.Now();
     CHECK(snapshot->lifecycle == GoalLifecycle::Waiting);
@@ -1120,13 +1127,13 @@ TEST_CASE("M13 相关后台未完 waiting:无关进程不进账,纯等待零模�
 
     // 真实完成通知唤醒:同 iteration 恢复收口位。
     REQUIRE(harness.service->ResolveWaiting("subagent-9", harness.Now()->state_revision,
-                                            nlohmann::json{{"source", "test"}})
+                                            nlohmann::json{})
                 .ok);
     CHECK(harness.Now()->lifecycle == GoalLifecycle::Active);
     CHECK(harness.Now()->phase == GoalPhase::Running);
     auto began = harness.service->BeginEvaluation(
         harness.Now()->state_revision, std::nullopt, std::vector<goalns::GoalEvidenceRef>{},
-        std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+        std::vector<std::string>{}, nlohmann::json{});
     REQUIRE(began.ok);  // 收口续跑,不重开轮
     CHECK(harness.backend.call_count == 0);  // 等待期间没烧过模型
 }
@@ -1137,12 +1144,13 @@ TEST_CASE("M13 相关后台未完 waiting:无关进程不进账,纯等待零模�
 
 TEST_CASE("M14 巡检到上限后崩溃恢复:计数不重置不补跑,真实通知可唤醒") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m14-root");
     {
-        Harness harness("m14");
+        Harness harness("m14", root);
         harness.RunToRunning();
         REQUIRE(harness.service->EnterWaiting({"subagent-3"},
                                               harness.Now()->state_revision,
-                                              nlohmann::json{{"source", "test"}})
+                                              nlohmann::json{})
                     .ok);
         // 三拍到上限(30/60/120 分钟退避),计数入快照。
         std::int64_t now = g_now_ms;
@@ -1150,7 +1158,7 @@ TEST_CASE("M14 巡检到上限后崩溃恢复:计数不重置不补跑,真实通
             now += goalns::GoalWaitBackoffMs(poll);
             REQUIRE(harness.service->WaitInspectionDue(now));
             REQUIRE(harness.service->RecordWaitInspection(
-                        harness.Now()->state_revision, now, nlohmann::json{{"source", "test"}})
+                        harness.Now()->state_revision, now, nlohmann::json{})
                         .ok);
         }
         CHECK(harness.Now()->wait_plan.polls_done == 3);
@@ -1158,7 +1166,7 @@ TEST_CASE("M14 巡检到上限后崩溃恢复:计数不重置不补跑,真实通
         // 到上限即崩(离线)。
     }
 
-    Volume next("m14-next", "s2");
+    Volume next("m14-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -1177,12 +1185,12 @@ TEST_CASE("M14 巡检到上限后崩溃恢复:计数不重置不补跑,真实通
     CHECK_FALSE(service2.WaitInspectionDue(g_now_ms + 1000LL * 60 * 60 * 24));
     auto refused = service2.RecordWaitInspection(snapshot->state_revision,
                                                  g_now_ms + 1000LL * 60 * 60 * 24,
-                                                 nlohmann::json{{"source", "test"}});
+                                                 nlohmann::json{});
     REQUIRE_FALSE(refused.ok);
 
     // 真实完成通知仍可唤醒:同 iteration 恢复收口位,验收可续。
     REQUIRE(service2.ResolveWaiting("subagent-3", service2.current()->state_revision,
-                                    nlohmann::json{{"source", "test"}})
+                                    nlohmann::json{})
                 .ok);
     CHECK(service2.current()->phase == GoalPhase::Running);
     REQUIRE(service2.current()->iteration_id.has_value());
@@ -1251,10 +1259,10 @@ TEST_CASE("M15 三停态分路:blocked/awaiting_user 落位,等待不算失败�
             }
             REQUIRE(harness.service->ClaimPendingIntent(
                         "run-s1", harness.Now()->state_revision,
-                        nlohmann::json{{"source", "test"}})
+                        nlohmann::json{})
                         .ok);
             REQUIRE(harness.service->BeginIteration(harness.Now()->state_revision,
-                                                    nlohmann::json{{"source", "test"}})
+                                                    nlohmann::json{})
                         .ok);
         }
         CHECK(harness.Now()->counters.no_progress_streak == 3);
@@ -1267,7 +1275,7 @@ TEST_CASE("M15 三停态分路:blocked/awaiting_user 落位,等待不算失败�
         Harness harness("m15-waiting");
         harness.RunToRunning();
         REQUIRE(harness.service->EnterWaiting({"subagent-4"}, harness.Now()->state_revision,
-                                              nlohmann::json{{"source", "test"}})
+                                              nlohmann::json{})
                     .ok);
         const GoalStateSnapshot* snapshot = harness.Now();
         CHECK(snapshot->lifecycle == GoalLifecycle::Waiting);  // 不是 paused/failed
@@ -1286,21 +1294,23 @@ TEST_CASE("INJ1 判词采用 applied 写盘失败:fail-closed,事实在 applied 
     FaultInjector injector;
     V3WriterOptions options;
     options.inject_io_failure = [&injector]() { return injector(); };
-    Harness harness("inj1", std::move(options));
+    Harness harness("inj1", {}, std::move(options));
     harness.RunToRunning();
 
     auto began = harness.service->BeginEvaluation(
         harness.Now()->state_revision, "evt-ckpt-1", std::vector<goalns::GoalEvidenceRef>{},
-        std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+        std::vector<std::string>{}, nlohmann::json{});
     REQUIRE(began.ok);
     const std::uint64_t evaluating_revision = harness.Now()->state_revision;
 
-    // 评估完成(事实行落账),然后给采用口注入写盘失败。
+    // 评估完成(事实行落账),然后给采用口注入写盘失败。材料须带 ev-1:
+    // kContinueVerdict 的 criteria 引它,材料缺证据判词按"材料外"两坏收场。
     GoalEvaluationInput input;
     input.task.id = "goal-1";
     input.task.revision = 1;
     input.task.objective = "修好 auth 模块";
     input.task.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
+    input.evidence = {harness.MakeEvidence("ev-1", "")};
     input.now_ms = g_now_ms;
     goalns::GoalEvaluatorOptions evaluator_options;
     evaluator_options.model = "eval-model";
@@ -1319,7 +1329,7 @@ TEST_CASE("INJ1 判词采用 applied 写盘失败:fail-closed,事实在 applied 
     goalns::EvaluationVerdict verdict = ContinueVerdictFor("eval-goal-1/iter-1", "goal-1/iter-1");
     verdict.usage_addition = evaluation->usage;
     const auto failed = harness.service->CompleteIterationWithEvaluation(
-        evaluating_revision, verdict, nlohmann::json{{"source", "test"}});
+        evaluating_revision, verdict, nlohmann::json{});
     REQUIRE_FALSE(failed.ok);
     CHECK(failed.error_code == goalns::kErrGoalStoreUnavailable);
     CHECK(harness.service->broken());  // fail-closed:写口锁死
@@ -1328,7 +1338,7 @@ TEST_CASE("INJ1 判词采用 applied 写盘失败:fail-closed,事实在 applied 
     CHECK_FALSE(harness.Now()->applied_evaluation_id.has_value());
     // 后续提交全拒(fail-closed 不只拦一次)。
     auto refused = harness.service->ClaimPendingIntent("run-s1", harness.Now()->state_revision,
-                                                       nlohmann::json{{"source", "test"}});
+                                                       nlohmann::json{});
     REQUIRE_FALSE(refused.ok);
     CHECK(refused.error_code == goalns::kErrGoalStoreUnavailable);
 
@@ -1361,12 +1371,12 @@ TEST_CASE("INJ2 EnterWaiting 事实先行 applied 缺:等待不生效") {
     FaultInjector injector;
     V3WriterOptions options;
     options.inject_io_failure = [&injector]() { return injector(); };
-    Harness harness("inj2", std::move(options));
+    Harness harness("inj2", {}, std::move(options));
     harness.RunToRunning();
 
     injector.Arm(2);  // 事实行(1)落稳,applied(2)失败
     auto failed = harness.service->EnterWaiting({"subagent-3"}, harness.Now()->state_revision,
-                                                nlohmann::json{{"source", "test"}});
+                                                nlohmann::json{});
     REQUIRE_FALSE(failed.ok);
     CHECK(failed.error_code == goalns::kErrGoalStoreUnavailable);
     CHECK(harness.service->broken());
@@ -1394,7 +1404,7 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
     FaultInjector injector;
     V3WriterOptions options;
     options.inject_io_failure = [&injector]() { return injector(); };
-    Harness harness("inj3", std::move(options));
+    Harness harness("inj3", {}, std::move(options));
     harness.RunToRunning();
 
     // 第一笔正常入账(快照 usage=100)。
@@ -1403,7 +1413,7 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
     first.usage_reported = true;
     REQUIRE(harness.service->RecordGoalUsage("req-a", "subagent", first,
                                              harness.Now()->state_revision,
-                                             nlohmann::json{{"source", "test"}})
+                                             nlohmann::json{})
                 .ok);
     // 第二笔:事实行落稳、applied 失败(有事实没赶上提交)。
     injector.Arm(2);
@@ -1412,7 +1422,7 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
     second.usage_reported = true;
     auto failed = harness.service->RecordGoalUsage("req-y", "subagent", second,
                                                    harness.Now()->state_revision,
-                                                   nlohmann::json{{"source", "test"}});
+                                                   nlohmann::json{});
     REQUIRE_FALSE(failed.ok);
     CHECK(failed.error_code == goalns::kErrGoalStoreUnavailable);
 
@@ -1435,7 +1445,7 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
     // 计费去重底按事实喂:req-y 重复通知不再计费(补账归调用方)。
     auto dup = service2.RecordGoalUsage("req-y", "subagent", second,
                                         service2.current()->state_revision,
-                                        nlohmann::json{{"source", "test"}});
+                                        nlohmann::json{});
     REQUIRE(dup.ok);
     CHECK(dup.payload.value("deduped", false));
     CHECK(service2.current()->usage.input_tokens == 100);
@@ -1447,19 +1457,20 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
 
 TEST_CASE("INJ4 收口被等待截走后崩溃:恢复同 iteration 续收口,不重开轮") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("inj4-root");
     {
-        Harness harness("inj4");
+        Harness harness("inj4", root);
         harness.RunToRunning();
         // 收口撞上本轮派生后台任务:转 waiting,收口截流(iteration 在途)。
         REQUIRE(harness.service->EnterWaiting({"subagent-6"},
                                               harness.Now()->state_revision,
-                                              nlohmann::json{{"source", "test"}})
+                                              nlohmann::json{})
                     .ok);
         CHECK(harness.Now()->iteration_id.has_value());
         // 进程消失(截流状态只在 wiring 内存,持久面只有 waiting 快照)。
     }
 
-    Volume next("inj4-next", "s2");
+    Volume next("inj4-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -1470,7 +1481,7 @@ TEST_CASE("INJ4 收口被等待截走后崩溃:恢复同 iteration 续收口,不
 
     // 真实完成通知到:恢复收口位(同 iteration、phase=running)。
     REQUIRE(service2.ResolveWaiting("subagent-6", service2.current()->state_revision,
-                                    nlohmann::json{{"source", "test"}})
+                                    nlohmann::json{})
                 .ok);
     CHECK(service2.current()->phase == GoalPhase::Running);
     REQUIRE(service2.current()->iteration_id.has_value());
@@ -1514,7 +1525,8 @@ TEST_CASE("INJ4 收口被等待截走后崩溃:恢复同 iteration 续收口,不
 
 TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
-    Volume volume("inj5", "s1");
+    const std::filesystem::path root = FreshDir("inj5-root");
+    Volume volume("inj5", "s1", root);
     {
         GoalService service(&*volume.writer, ServiceOptionsFor(volume.dir));
         GoalStateSnapshot draft;
@@ -1522,13 +1534,13 @@ TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") 
         draft.workspace_root = "/repo";
         draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
         draft.pending_intent = GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
-        auto created = service.CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = service.CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         REQUIRE(service.ClaimPendingIntent("run-s1", created.payload.at("stateRevision"),
-                                           nlohmann::json{{"source", "test"}})
+                                           nlohmann::json{})
                     .ok);
         REQUIRE(service.BeginIteration(service.current()->state_revision,
-                                       nlohmann::json{{"source", "test"}})
+                                       nlohmann::json{})
                     .ok);
     }
     // head 快照(rev-000003,BeginIteration 那笔)从盘上消失。
@@ -1547,7 +1559,7 @@ TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") 
     CHECK(projection.gap == goalns::GoalProjectionGap::SnapshotMissing);
 
     // 恢复面:lineage 带缺口上报;接管拒(goal.projection_gap),自动续排停。
-    Volume next("inj5-next", "s2");
+    Volume next("inj5-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     CHECK(lineage.found);
@@ -1557,7 +1569,7 @@ TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") 
     REQUIRE_FALSE(adopted.ok);
     CHECK(adopted.error_code == goalns::kErrGoalProjectionGap);
     CHECK(service2.current() == nullptr);  // 没接管:泵无件可认
-    auto claim = service2.ClaimPendingIntent("run-s2", 1, nlohmann::json{{"source", "test"}});
+    auto claim = service2.ClaimPendingIntent("run-s2", 1, nlohmann::json{});
     REQUIRE_FALSE(claim.ok);
     CHECK(claim.error_code == goalns::kErrGoalNotFound);
 }
@@ -1577,7 +1589,7 @@ TEST_CASE("flow freezes the evaluation revision while the backend is in flight")
         spent.request_count = 1;
         spent.usage_reported = true;
         REQUIRE(harness.service->RecordGoalUsage("race-usage", "subagent", spent,
-            harness.Now()->state_revision, nlohmann::json{{"source", "test"}}).ok);
+            harness.Now()->state_revision, nlohmann::json{}).ok);
     };
     const auto result = CloseGoalIterationWithEvaluation(*harness.service,
         *harness.volume.writer, harness.backend, harness.Options(),
@@ -1597,7 +1609,7 @@ TEST_CASE("stop arriving during evaluation is retained and prevents continuation
     harness.backend.replies = {kContinueVerdict};
     harness.backend.before_reply = [&] {
         const auto stopped = harness.service->RequestStop(harness.Now()->state_revision,
-            nlohmann::json{{"source", "test"}});
+            nlohmann::json{});
         REQUIRE(stopped.ok);
         CHECK(harness.Now()->stop_requested);
     };

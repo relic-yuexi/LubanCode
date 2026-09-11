@@ -2611,6 +2611,13 @@ TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted 
             const auto preview = trajectory::v3::BuildToolPreview(request);
             CHECK_FALSE(preview.preview_unrepresentable);
             result.content = preview.text;
+            // 学生产桥(trajectory_session.cpp V3ToolResultsCommitted)的
+            // 收尾:预览已提交须置 preview_committed。文本结果经 Tool::Result
+            // 构造器带着原始 blocks 入史,下一请求的 SanitizeMessage 见
+            // blocks 非空且未置位,会按"payload 是唯一真账"合同用
+            // TextProjection(blocks) 把原文重构回 content——不置位,预览
+            // 就在这里被原文冲掉,整批预算白做。
+            result.preview_committed = true;
             adopted.push_back(result.content);
         }
         return runtime::ToolResultsCommitReceipt{};

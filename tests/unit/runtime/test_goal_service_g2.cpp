@@ -86,13 +86,13 @@ struct ServiceHarness {
         draft.objective = objective;
         draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
         draft.pending_intent = GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
-        auto created = service->CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        auto created = service->CreateGoal(std::move(draft), nlohmann::json{});
         REQUIRE(created.ok);
         auto claimed = service->ClaimPendingIntent("run-000001", created.payload.at("stateRevision"),
-                                                   nlohmann::json{{"source", "test"}});
+                                                   nlohmann::json{});
         REQUIRE(claimed.ok);
         auto began = service->BeginIteration(claimed.payload.at("stateRevision"),
-                                             nlohmann::json{{"source", "test"}});
+                                             nlohmann::json{});
         REQUIRE(began.ok);
         REQUIRE(began.payload.contains("iterationId"));
     }
@@ -142,22 +142,22 @@ TEST_CASE("BeginEvaluation:相位、checkpointRef、证据追加、stale 翻旧"
         // 第一轮:落证据 ev-1(command_exit)并收口。
         auto began1 = harness.service->BeginEvaluation(
             harness.Now()->state_revision, "evt-ckpt-1", {harness.MakeEvidence("ev-1")},
-            {}, nlohmann::json{{"source", "test"}});
+            {}, nlohmann::json{});
         REQUIRE(began1.ok);
         auto closed1 = harness.service->CompleteIterationWithEvaluation(
             began1.payload.at("stateRevision"), ContinueVerdict("goal-1/iter-1"),
-            nlohmann::json{{"source", "test"}});
+            nlohmann::json{});
         REQUIRE(closed1.ok);
         // 第二轮:认领新意图、开轮、写盘级证据落地后评估——ev-1 须翻 stale。
         auto claimed = harness.service->ClaimPendingIntent(
-            "run-000001", harness.Now()->state_revision, nlohmann::json{{"source", "test"}});
+            "run-000001", harness.Now()->state_revision, nlohmann::json{});
         REQUIRE(claimed.ok);
         auto began_iter = harness.service->BeginIteration(
-            claimed.payload.at("stateRevision"), nlohmann::json{{"source", "test"}});
+            claimed.payload.at("stateRevision"), nlohmann::json{});
         REQUIRE(began_iter.ok);
         auto began2 = harness.service->BeginEvaluation(
             harness.Now()->state_revision, "evt-ckpt-2", {harness.MakeEvidence("ev-2")},
-            {"ev-1"}, nlohmann::json{{"source", "test"}});
+            {"ev-1"}, nlohmann::json{});
         REQUIRE(began2.ok);
         const GoalStateSnapshot* snapshot = harness.Now();
         REQUIRE(snapshot->phase == GoalPhase::Evaluating);
@@ -177,12 +177,12 @@ TEST_CASE("BeginEvaluation:相位、checkpointRef、证据追加、stale 翻旧"
         ServiceHarness idle("begin-eval-idle");
         idle.RunToRunning();
         auto ended = idle.service->EndIteration(idle.Now()->state_revision,
-                                                nlohmann::json{{"source", "test"}});
+                                                nlohmann::json{});
         REQUIRE(ended.ok);
         auto began = idle.service->BeginEvaluation(idle.Now()->state_revision, {},
                                                    std::vector<GoalEvidenceRef>{},
                                                    std::vector<std::string>{},
-                                                   nlohmann::json{{"source", "test"}});
+                                                   nlohmann::json{});
         REQUIRE_FALSE(began.ok);
         CHECK(began.error_code == goalns::kErrGoalCandidateInvalid);
     }
@@ -191,7 +191,7 @@ TEST_CASE("BeginEvaluation:相位、checkpointRef、证据追加、stale 翻旧"
         harness.RunToRunning();
         auto began = harness.service->BeginEvaluation(
             harness.Now()->state_revision + 999, {}, std::vector<GoalEvidenceRef>{},
-            std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+            std::vector<std::string>{}, nlohmann::json{});
         REQUIRE_FALSE(began.ok);
         CHECK(began.error_code == goalns::kErrGoalRevisionConflict);
     }
@@ -203,13 +203,13 @@ TEST_CASE("CompleteIterationWithEvaluation:continue 与下一轮意图同一笔 
     harness.RunToRunning();
     auto began = harness.service->BeginEvaluation(
         harness.Now()->state_revision, "evt-ckpt-1", {harness.MakeEvidence("ev-1")},
-        std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+        std::vector<std::string>{}, nlohmann::json{});
     REQUIRE(began.ok);
     const std::uint64_t revision_before = harness.Now()->state_revision;
 
     auto closed = harness.service->CompleteIterationWithEvaluation(
         began.payload.at("stateRevision"), ContinueVerdict("goal-1/iter-1"),
-        nlohmann::json{{"source", "test"}});
+        nlohmann::json{});
     REQUIRE(closed.ok);
     CHECK(closed.payload.at("verdictKind") == "continue");
     CHECK(closed.payload.at("nextWorkItemId") == "goal-1/wi-1");
@@ -247,20 +247,20 @@ TEST_CASE("CompleteIterationWithEvaluation:分路终态与字段门槛") {
         harness.RunToRunning();
         auto began = harness.service->BeginEvaluation(
             harness.Now()->state_revision, {}, std::vector<GoalEvidenceRef>{},
-            std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+            std::vector<std::string>{}, nlohmann::json{});
         REQUIRE(began.ok);
         goalns::EvaluationVerdict verdict;
         verdict.evaluation_id = "eval-goal-1/iter-1";
         verdict.kind = GoalVerdictKind::Achieved;
         auto closed = harness.service->CompleteIterationWithEvaluation(
-            began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}});
+            began.payload.at("stateRevision"), verdict, nlohmann::json{});
         REQUIRE(closed.ok);
         CHECK(harness.Now()->lifecycle == GoalLifecycle::Achieved);
         CHECK(goalns::IsLifecycleTerminal(harness.Now()->lifecycle));
         // 终态后再来的迟到判词:只留审计,不改账(§4.67.6)。
         goalns::EvaluationVerdict late = ContinueVerdict("goal-1/iter-1");
         auto refused = harness.service->CompleteIterationWithEvaluation(
-            harness.Now()->state_revision, late, nlohmann::json{{"source", "test"}});
+            harness.Now()->state_revision, late, nlohmann::json{});
         REQUIRE_FALSE(refused.ok);
         CHECK(refused.error_code == goalns::kErrGoalCandidateInvalid);
     }
@@ -270,21 +270,21 @@ TEST_CASE("CompleteIterationWithEvaluation:分路终态与字段门槛") {
         harness.RunToRunning();
         auto began = harness.service->BeginEvaluation(
             harness.Now()->state_revision, {}, std::vector<GoalEvidenceRef>{},
-            std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+            std::vector<std::string>{}, nlohmann::json{});
         REQUIRE(began.ok);
         goalns::EvaluationVerdict no_key;
         no_key.evaluation_id = "eval-goal-1/iter-1";
         no_key.kind = GoalVerdictKind::Blocked;
         no_key.stop_reason = "blocked";
         auto refused = harness.service->CompleteIterationWithEvaluation(
-            began.payload.at("stateRevision"), no_key, nlohmann::json{{"source", "test"}});
+            began.payload.at("stateRevision"), no_key, nlohmann::json{});
         REQUIRE_FALSE(refused.ok);
         CHECK(refused.error_code == goalns::kErrGoalCandidateInvalid);
 
         goalns::EvaluationVerdict with_key = no_key;
         with_key.blocker_key = "missing_credential:DEPLOY_TOKEN";
         auto closed = harness.service->CompleteIterationWithEvaluation(
-            began.payload.at("stateRevision"), with_key, nlohmann::json{{"source", "test"}});
+            began.payload.at("stateRevision"), with_key, nlohmann::json{});
         REQUIRE(closed.ok);
         CHECK(harness.Now()->lifecycle == GoalLifecycle::Blocked);
         CHECK(harness.Now()->blocker_key == "missing_credential:DEPLOY_TOKEN");
@@ -295,7 +295,7 @@ TEST_CASE("CompleteIterationWithEvaluation:分路终态与字段门槛") {
         harness.RunToRunning();
         auto began = harness.service->BeginEvaluation(
             harness.Now()->state_revision, {}, std::vector<GoalEvidenceRef>{},
-            std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+            std::vector<std::string>{}, nlohmann::json{});
         REQUIRE(began.ok);
         goalns::EvaluationVerdict verdict;
         verdict.evaluation_id = "eval-goal-1/iter-1";
@@ -303,7 +303,7 @@ TEST_CASE("CompleteIterationWithEvaluation:分路终态与字段门槛") {
         verdict.pending_question = "删库还是归档?";
         verdict.stop_reason = "needs_user";
         auto closed = harness.service->CompleteIterationWithEvaluation(
-            began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}});
+            began.payload.at("stateRevision"), verdict, nlohmann::json{});
         REQUIRE(closed.ok);
         CHECK(harness.Now()->lifecycle == GoalLifecycle::AwaitingUser);
         CHECK(harness.Now()->pending_question == "删库还是归档?");
@@ -314,14 +314,14 @@ TEST_CASE("CompleteIterationWithEvaluation:分路终态与字段门槛") {
         harness.RunToRunning();
         auto began = harness.service->BeginEvaluation(
             harness.Now()->state_revision, {}, std::vector<GoalEvidenceRef>{},
-            std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+            std::vector<std::string>{}, nlohmann::json{});
         REQUIRE(began.ok);
         goalns::EvaluationVerdict verdict;
         verdict.evaluation_id = "eval-goal-1/iter-1";
         verdict.kind = GoalVerdictKind::EvaluatorFailed;
         verdict.stop_reason = "evaluator_failed: 判词两坏";
         auto closed = harness.service->CompleteIterationWithEvaluation(
-            began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}});
+            began.payload.at("stateRevision"), verdict, nlohmann::json{});
         REQUIRE(closed.ok);
         CHECK(harness.Now()->lifecycle == GoalLifecycle::Paused);
         CHECK(harness.Now()->stop_reason.find("evaluator_failed") != std::string::npos);
@@ -336,13 +336,13 @@ TEST_CASE("CompleteIterationWithEvaluation:分路终态与字段门槛") {
         harness.RunToRunning();
         auto began = harness.service->BeginEvaluation(
             harness.Now()->state_revision, {}, std::vector<GoalEvidenceRef>{},
-            std::vector<std::string>{}, nlohmann::json{{"source", "test"}});
+            std::vector<std::string>{}, nlohmann::json{});
         REQUIRE(began.ok);
         goalns::EvaluationVerdict verdict;
         verdict.evaluation_id = "eval-goal-1/iter-1";
         verdict.kind = GoalVerdictKind::Continue;
         auto refused = harness.service->CompleteIterationWithEvaluation(
-            began.payload.at("stateRevision"), verdict, nlohmann::json{{"source", "test"}});
+            began.payload.at("stateRevision"), verdict, nlohmann::json{});
         REQUIRE_FALSE(refused.ok);
         CHECK(refused.error_code == goalns::kErrGoalCandidateInvalid);
     }

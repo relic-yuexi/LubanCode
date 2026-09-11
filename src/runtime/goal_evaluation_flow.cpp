@@ -73,8 +73,9 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     const std::string iteration_id = *snapshot->iteration_id;
     const std::string evaluation_id = "eval-" + iteration_id;
     result.evaluation_id = evaluation_id;
-    const nlohmann::json cause = nlohmann::json{{"source", "host"},
-                                                {"iterationId", iteration_id}};
+    // causeRef 合同为 §3.1 合法引用或空(§4.67 G0);iterationId 已在快照
+    // 与 evaluation 事实行里,applied 行不重复带成因。
+    const nlohmann::json cause = nlohmann::json{};
 
     // ---- 1) 证据入账:本轮新采逐枚落 goal.evidence.recorded 事实行 -----
     std::vector<GoalEvidenceRef> evidence_refs;
@@ -143,7 +144,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         halted.to_lifecycle = GoalLifecycle::BudgetExhausted;
         halted.to_phase = GoalPhase::Idle;
         halted.stop_reason = "budget_exhausted: " + budget_view.reason;
-        halted.cause_ref = nlohmann::json{{"source", "host"}, {"iterationId", iteration_id}};
+        halted.cause_ref = nlohmann::json{};
         const auto stopped = service.ApplyTransition(halted);
         result.decision = "budget_exhausted";
         result.summary = "预算已尽,验收请求未发: " + budget_view.reason;
