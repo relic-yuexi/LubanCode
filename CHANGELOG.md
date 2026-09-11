@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.256] - 2026-09-11
+
+- **Goal 模式 G1–G4 整链接通。**七动作命令全接 v3（含 continuation 意图提交/认领/恢复去重）；验收走 v3 内部请求服务（requested→prepared→stream→assistant 带逐次 usage 全落链）+严格判词校验（缺/多/重 criterion 拒收）；后台等待 30-60-120 巡检、组合取消、compact/resume 守恒、fork/btw 服务面；跨壳状态投影三处同源。接手修死锁三处：`/goal edit` 后旧意图随合同作废并按新合同补排（在途工作轮拒改、评估在途放行由冻结 revision 拒迟到判词）；waiting 态 resume 走 ResolveWaiting 恢复收口位不重开轮；主工作轮 usage 归 goal 账 + 验收请求发送前过预算闸（撞帽销账转 budget_exhausted 可恢复）。留待：criteria 生产拟定（G2 preflight）、崩溃后收口重建事实行、十五行验收矩阵真机首跑。
+
 ## [v0.26.255] - 2026-09-11
 
 - **Goal 模式地基 G0：GoalService 落账。**GoalLifecycle/GoalPhase 两层模型（v1 GoalCoordinator 不动，收敛归 G1）；CreateGoal/ApplyTransition（CAS stateRevision+证据验合同+usage 只增）/AmendContract（合同改版回 preparing，旧证据翻 stale）；提交事务按 §4.55：验→核 revision→快照落稳（临时+rename）→applied 落账（PowerLoss）→内存发布，任一步失败不发布。快照 schema v1 含 fork lineage/合同全量/evidenceRefs 六键 fresh/truncated/pendingIntent（G1 挂点）；state.goal.applied 一枚 statusless kind 四处同步，跨行序列合同 python 校验器补正反例；只读投影逐条验 applied+head 实探快照，缺口七档明报，AdoptFromProjection 作 resume 接管口。CI 侧：非 main 只烧 macOS 一腿，分支 push 与 PR 同 head 去重，合入 main 才跑全平台。
