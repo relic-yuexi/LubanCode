@@ -124,12 +124,15 @@ public:
     // ---- agent::LoopBoundaryRecorder(loop 在模型边界调) ----
     void OnContextPressure(const agent::ContextPressure& pressure) override;
     std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx) override;
-    void OnRequestSent(const std::string& request_id) override;
+    // false = sent 这笔本地账没写稳(失败与恢复单 P1-C/FA-03):调用方不得
+    // 把请求交给 backend。事件语义只到"本地交给 transport",不暗示远端
+    // 收据。
+    bool OnRequestSent(const std::string& request_id) override;
     // 任务级 turn 账(turn 预算单 §11.1,P1-1):permit 提交后的 sent 边界带
     // task_turn_index/turn_limit/input_round_index;随后同 request_id 的
     // output 三态收口也带上 task_turn_index——started/completed/failed 三处
     // 边界数字与台账同一本账,不靠数 assistant message 猜。
-    void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+    bool OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
                                int input_round_index) override;
     // v3 流式边(轨迹 v3 §4.43):loop 在 SSE 消费点调(MessageStart 到 =
     // 响应开始;文本/思考增量为片段)。v2 模式 no-op——v2 无流式事件账。
@@ -148,7 +151,11 @@ public:
 
     // ---- ToolTrajectorySink(hub 在工具栅栏调) ----
     void OnToolTrace(const agent::ToolTraceEvent& event) override;
-    void OnToolResultsCommitted(const std::string& batch_id, const api::Message& results) override;
+    // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
+    // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
+    // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
+    ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
+                                                    const api::Message& results) override;
     bool ShouldBlockExecution(const agent::ToolTraceEvent& started) override;
 
     // ---- 子代理边界(§3.5:父子文件只传边界引用与 terminal hash) ----
@@ -250,7 +257,8 @@ private:
     void V3RecordInput(const api::Message& user_message);
     std::string V3RequestPrepared(const api::Request& request,
                                   const agent::RequestPreparedContext& ctx);
-    void V3RequestSent(const std::string& request_id);
+    // false = model.request.sent 落不住(P1-C/FA-03):请求不得上 wire。
+    bool V3RequestSent(const std::string& request_id);
     // ---- v3 流式三件套(§4.43/§4.63;接线点 1 的 D1 修复) ----
     // 响应开始:预留 messageId + 发 streamId,落 model.response.started。
     // 幂等;prepared 没落稳的请求不伪造流。
@@ -273,7 +281,8 @@ private:
     void V3OutputFailed(const std::string& request_id, const std::string& reason);
     void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
     void V3ToolTrace(const agent::ToolTraceEvent& event);
-    void V3ToolResultsCommitted(const api::Message& results);
+    // 批次结果提交回执(P1-A):结果链各档折算(见 ToolResultsCommitReceipt)。
+    ToolResultsCommitReceipt V3ToolResultsCommitted(const api::Message& results);
     // turn 收口:已声明未终态的 Action 补 cancelled(配对完整,不悬空)。
     void V3CancelDanglingActions(const std::string& reason);
     // v3 模式判定(空 = v2 原路)。
@@ -359,7 +368,8 @@ public:
     // ---- agent::LoopBoundaryRecorder(采样/探针在模型边界调) ----
     std::string OnRequestPrepared(const api::Request& request,
                                   const agent::RequestPreparedContext& ctx) override;
-    void OnRequestSent(const std::string& request_id) override;
+    // false = sent 落不住(失败与恢复单 P1-C):采样停在发送边界。
+    bool OnRequestSent(const std::string& request_id) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
                          int cache_epoch = 0, bool prefix_append_only = true,

@@ -49,6 +49,10 @@ struct ReplayMessage {
     enum class Role { User, Assistant, Tool } role = Role::User;
     std::string origin;  // 信封 origin(external_user/queued_user/provider_model/…)
     std::optional<std::string> call_id;  // tool result 的配对键
+    // tool result 的回喂语义(失败与恢复单 P1-B/FA-02):写侧从最终回喂
+    // 结果落档(v2 的 tool.result.committed.payload.is_error / v3 最终 tool
+    // 消息本体),投影原样带回——恢复输入的成功/失败语义与当场一致。
+    bool is_error = false;
     nlohmann::json blocks = nlohmann::json::array();  // 规范 blocks(text/tool_call/…)
     std::string source_event_id;                     // 来源事件(qualified:run 内 event_id)
     std::string source_event_hash;

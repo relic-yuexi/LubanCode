@@ -377,6 +377,18 @@ TEST_CASE("工具折叠:attempt 重试链逐次留档(§4.14)") {
         REQUIRE(action.Start(*writer, "args-1", ToolIdentity{"grep", "builtin", "1.0", ""})
                     .status == WriteReceipt::Status::Committed);
         REQUIRE(action.Finish(*writer, 0, 40).status == WriteReceipt::Status::Committed);
+        // 结果链补齐(失败与恢复单 P1-A:done 无结果链会折成 result_missing
+        // 缺口态——本钉只看尝试链折叠,给全链保持 done)。
+        WriteReceipt persisted = action.PersistedResult(
+            *writer,
+            {MakeArtifactRef("res-000001", "result_metadata", "artifacts/res-000001.json",
+                             std::string(64, '7'), 24, "application/json")},
+            action.last_event_id());
+        REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+        REQUIRE(action.SelectResult(*writer, {persisted.id}, {}, "done").status ==
+                WriteReceipt::Status::Committed);
+        REQUIRE(action.AppendToolMessage(*writer, "ok", action.selected_event_id()).status ==
+                WriteReceipt::Status::Committed);
     }
     auto ledger = ReadV3Ledger(jsonl);
     REQUIRE(ledger.has_value());
