@@ -1192,10 +1192,14 @@ TEST_CASE("P1-B wire 对照: 会编码错误标记的 adapter 恢复前后 wire 
             request.model = "test-model";
             request.messages.push_back(message);
             const auto body = api::anthropic::BuildRequestJson(request);
-            REQUIRE(body.contains("messages") && body["messages"].is_array() &&
-                    !body["messages"].empty());
-            REQUIRE(body["messages"][0].contains("content") &&
-                    body["messages"][0]["content"].is_array() && !body["messages"][0]["content"].empty());
+            // doctest 禁 && 进 REQUIRE(分解器禁逻辑与),形状校验折成布尔再断。
+            const bool has_messages = body.contains("messages") && body["messages"].is_array() &&
+                                      !body["messages"].empty();
+            REQUIRE(has_messages);
+            const bool has_content = body["messages"][0].contains("content") &&
+                                     body["messages"][0]["content"].is_array() &&
+                                     !body["messages"][0]["content"].empty();
+            REQUIRE(has_content);
             return body["messages"][0]["content"][0];
         };
         const auto live_wire = wire_of(live);
