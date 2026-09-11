@@ -406,7 +406,11 @@ nlohmann::json MakeArtifactRef(std::string artifact_id, std::string kind, std::s
 }
 
 std::expected<ResultStore, std::string> ResultStore::Open(
-    const std::filesystem::path& session_dir) {
+    const std::filesystem::path& session_dir, std::string result_prefix) {
+    if (result_prefix.empty() || result_prefix.size() > 32 ||
+        result_prefix.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos) {
+        return std::unexpected("invalid result prefix");
+    }
     std::filesystem::path artifacts = session_dir / "artifacts";
     std::error_code ec;
     std::filesystem::create_directories(artifacts, ec);
@@ -416,12 +420,12 @@ std::expected<ResultStore, std::string> ResultStore::Open(
     std::uint64_t next = 1;
     for (const auto& entry : std::filesystem::directory_iterator(artifacts, ec)) {
         const std::string name = entry.path().filename().string();
-        if (name.rfind("res-", 0) != 0) {
+        if (name.rfind(result_prefix, 0) != 0) {
             continue;
         }
         auto dot = name.find('.');
         std::string number =
-            name.substr(4, dot == std::string::npos ? std::string::npos : dot - 4);
+            name.substr(result_prefix.size(), dot == std::string::npos ? std::string::npos : dot - result_prefix.size());
         if (number.empty() ||
             !std::all_of(number.begin(), number.end(), [](char c) { return c >= '0' && c <= '9'; })) {
             continue;
@@ -431,15 +435,15 @@ std::expected<ResultStore, std::string> ResultStore::Open(
             next = value + 1;
         }
     }
-    return ResultStore(std::move(artifacts), next);
+    return ResultStore(std::move(artifacts), next, std::move(result_prefix));
 }
 
-ResultStore::ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number)
-    : artifacts_dir_(std::move(artifacts_dir)), next_result_number_(next_result_number) {}
+ResultStore::ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number, std::string result_prefix)
+    : artifacts_dir_(std::move(artifacts_dir)), result_prefix_(std::move(result_prefix)), next_result_number_(next_result_number) {}
 
 ResultStore::PersistedResult ResultStore::Persist(const PersistRequest& request) {
     PersistedResult outcome;
-    const std::string result_id = "res-" + ZeroPad6(next_result_number_);
+    const std::string result_id = result_prefix_ + ZeroPad6(next_result_number_);
     nlohmann::json outputs = nlohmann::json::array();
     std::vector<nlohmann::json> result_ref;
     for (const auto& output : request.outputs) {

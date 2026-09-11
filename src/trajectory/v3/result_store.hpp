@@ -74,7 +74,7 @@ class ResultStore {
 public:
     // session_dir:含 <sessionId>.jsonl 的目录;artifacts/ 建在其下。
     static std::expected<ResultStore, std::string> Open(
-        const std::filesystem::path& session_dir);
+        const std::filesystem::path& session_dir, std::string result_prefix = "res-");
 
     struct ChannelOutput {
         std::string channel;                // stdout/stderr/combined/report/...
@@ -118,8 +118,9 @@ public:
     const std::filesystem::path& artifacts_dir() const { return artifacts_dir_; }
 
 private:
-    ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number);
+    ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number, std::string result_prefix);
     std::filesystem::path artifacts_dir_;
+    std::string result_prefix_;
     // 下一枚 result 号:开仓时扫已有 res-*.json 取最大 +1。
     std::uint64_t next_result_number_ = 1;
 };
