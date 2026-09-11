@@ -697,19 +697,38 @@ bool GoalSessionWiring::CloseV3IterationFromTurn(const std::string& goal_id,
     // 评估模型路由(§4.67.5:沿模型路由选独立小模型,记录实际
     // provider/model/wire)。
     goal::GoalEvaluationFlowOptions flow_options;
-    if (host_.current_model != nullptr) flow_options.model = *host_.current_model;
-    if (host_.model_router != nullptr) {
-        const auto routed_info =
-            host_.model_router->RouteInfo(lubancode::agent::TaskKind::GoalEvaluate);
-        if (!routed_info.model.empty()) {
-            flow_options.model = routed_info.model;
-            flow_options.reasoning_effort = routed_info.effort;
-        }
-    }
+    auto* evaluation_backend = host_.evaluation_backend;
     flow_options.provider = host_.evaluation_provider;
     flow_options.wire = host_.evaluation_wire;
+    if (host_.current_model != nullptr) flow_options.model = *host_.current_model;
+    if (host_.model_router != nullptr) {
+        const auto routed = host_.model_router->Route(lubancode::agent::TaskKind::GoalEvaluate);
+        if (routed.backend == nullptr) {
+            goal::GoalTransitionCandidate paused;
+            paused.goal_id = closing->goal_id;
+            paused.expected_state_revision = closing->state_revision;
+            paused.expected_contract_revision = closing->contract_revision;
+            paused.to_lifecycle = goal::GoalLifecycle::Paused;
+            paused.to_phase = goal::GoalPhase::Idle;
+            paused.stop_reason = "evaluator_route_unavailable";
+            paused.cause_ref = nlohmann::json{{"source", "host"}};
+            const auto stopped = goal_service_->ApplyTransition(paused);
+            Notify(true, stopped.ok ? "goal 验收路由不可用，已暂停。" :
+                "goal 验收路由不可用，暂停写账失败: " + stopped.error_message);
+            return true;
+        }
+        evaluation_backend = routed.backend;
+        flow_options.model = routed.route.model;
+        flow_options.reasoning_effort = routed.route.effort;
+        if (!routed.route.provider.empty()) flow_options.provider = routed.route.provider;
+        if (host_.config != nullptr && flow_options.provider != host_.evaluation_provider) {
+            if (const auto* provider = lubancode::config::FindProvider(
+                    host_.config->providers, flow_options.provider); provider != nullptr)
+                flow_options.wire = lubancode::config::ProviderWireName(provider->wire);
+        }
+    }
     const auto closed_eval = goal::CloseGoalIterationWithEvaluation(
-        *goal_service_, *host_.trajectory->v3_main_writer(), *host_.evaluation_backend,
+        *goal_service_, *host_.trajectory->v3_main_writer(), *evaluation_backend,
         flow_options, material);
     if (closed_eval.decision == "evaluator_failed") {
         Notify(/*is_error=*/true,
