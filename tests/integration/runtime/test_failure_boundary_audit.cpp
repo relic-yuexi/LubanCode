@@ -187,6 +187,9 @@ struct Audit {
         wiring.boundary_recorder = bridge.get();
         wiring.wait_request_backoff = [](auto, auto) { return true; };
         wiring.on_tool_trace = [this](const auto& event) { bridge->OnToolTrace(event); };
+        wiring.capture_tool_result = [this](const api::ToolResultBlock& result) {
+            return bridge->CaptureToolResult(result);
+        };
         // P1-A:回执口(与 ToolTraceHub::Install 同款)——提交成败交回引擎。
         wiring.on_tool_results_committed_receipt =
             [this](const std::string& batch, const api::Message& results) {
@@ -821,4 +824,67 @@ TEST_CASE("B1 real loop: multi-file native text shares one preview and retains b
         CHECK(row.at("message").at("content") == preview);
     }
     CHECK(durable_results == 1);
+}
+
+TEST_CASE("B1 original capture survives post-tool hook feedback appended to the result") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    const std::string original(2 * 1024 * 1024, 'x');
+    tool->result_content = original;
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.on_post_tool_use_hook = [](const std::string&, const std::string&, const Json&, const tools::Tool::Result&) {
+        return std::vector<std::string>{"hook-added feedback"};
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    REQUIRE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 1);
+    REQUIRE(backend.requests.size() == 2);
+    std::ifstream captured(audit.path.parent_path() / "artifacts" / "capture-000001.combined.txt", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(captured), {}) == original);
+    std::ifstream effective(audit.path.parent_path() / "artifacts" / "res-000001.combined.txt", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(effective), {}) == original + "\n[post-tool-use hook 追加] hook-added feedback");
+    const auto wire = api::chat::BuildRequestJson(backend.requests[1]);
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool")
+        CHECK(message.at("content").get<std::string>().find("hook-added feedback") != std::string::npos);
+    for (const auto& row : audit.Rows()) if (row.value("kind", "") == "tool.result.selected")
+        CHECK(row.at("payload").at("sourceResultEventRefs").size() == 2);
+    CHECK(v3::VerifyV3File(audit.path).ok);
+}
+
+TEST_CASE("B1 post-tool hook failure leaves the original capture recoverable") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    const std::string original(2 * 1024 * 1024, 'x');
+    tool->result_content = original;
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.on_post_tool_hook = [](const std::string&, const std::string&, const Json&, const tools::Tool::Result&) {
+        throw std::runtime_error("injected post-tool failure");
+    };
+    CHECK_THROWS_AS(agent.Run(Input(), wiring), std::runtime_error);
+    CHECK(counter->calls == 1);
+    CHECK(backend.requests.size() == 1);
+    std::ifstream captured(audit.path.parent_path() / "artifacts" / "capture-000001.combined.txt", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(captured), {}) == original);
+    CHECK(KindCount(audit.Rows(), "tool.result.persisted") == 1);
+    CHECK(KindCount(audit.Rows(), "tool.result.selected") == 0);
 }

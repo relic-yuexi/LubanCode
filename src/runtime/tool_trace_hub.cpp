@@ -53,6 +53,9 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
     // P1-A(失败与恢复单 FA-01):回执口替换旧 void 口——持久提交的成败
     // 交回引擎,Failed 时 loop 停止后续模型发送。没挂轨迹的会话给恒
     // Committed 回执(与旧"不拦"行为一致)。
+    wiring.capture_tool_result = [this](const api::ToolResultBlock& result) {
+        return trajectory_ ? trajectory_->CaptureToolResult(result) : ToolResultsCommitReceipt{};
+    };
     wiring.rewrite_tool_results_for_history = [this](api::Message& results) {
         return trajectory_ ? trajectory_->RewriteToolResultsForHistory(results) : ToolResultsCommitReceipt{};
     };

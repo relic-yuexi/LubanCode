@@ -371,6 +371,7 @@ struct TurnWiring {
                                                     const api::Message& tool_result_message)>
         on_tool_results_committed_receipt;
     std::function<runtime::ToolResultsCommitReceipt(api::Message&)> rewrite_tool_results_for_history;
+    std::function<runtime::ToolResultsCommitReceipt(const api::ToolResultBlock&)> capture_tool_result;
 
     // ---- token 估算校准(真实 usage 反推 byte 比率单)-----------------------
     // 会话级校准器((provider,model) 分桶,进程内共享;装配层指到

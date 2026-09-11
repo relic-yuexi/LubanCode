@@ -25,6 +25,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -64,6 +65,8 @@ struct V3SessionBooks {
     trajectory::v3::V3Writer* writer = nullptr;          // 主账写者(ActiveSession::v3_main)
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
+    std::optional<trajectory::v3::ResultStore> captures;
+    std::shared_ptr<std::recursive_mutex> tool_results_mutex = std::make_shared<std::recursive_mutex>();
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
     // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------
     // compact applied 已落稳、但内存换账(链投影 / ReplaceHistory)失败时
@@ -177,6 +180,7 @@ public:
     // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
     // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
     ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message& results) override;
+    ToolResultsCommitReceipt CaptureToolResult(const api::ToolResultBlock& result) override;
     ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
                                                     const api::Message& results) override;
     bool ShouldBlockExecution(const agent::ToolTraceEvent& started) override;

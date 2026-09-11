@@ -713,6 +713,19 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // trace 里的 result_ref 记的是追加前的原始结果(两份 digest 分得开,
     // 恢复时能判断 Hook 到底改了什么)。
     finish(result, source_kind, source_instance, effect_class);
+    if (wiring.capture_tool_result) {
+        api::ToolResultBlock captured{call.id, result.content, result.is_error,
+                                     result.payload.content, result.payload.structured_content};
+        captured.capture_complete = result.outcome != "output_limit";
+        if (!captured.capture_complete) captured.capture_reason = "quota";
+        const auto receipt = wiring.capture_tool_result(captured);
+        if (receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
+            tools::Tool::Result failed{"Tool capture persistence failed: " + receipt.error_code, true};
+            failed.outcome = ToString(ToolOutcome::ResultStoreFailed);
+            failed.error_code = receipt.error_code;
+            return dispatch_done(call.id, call.name, std::move(failed));
+        }
+    }
     if (wiring.on_post_tool_use_hook) {
         const std::vector<std::string> feedback =
             wiring.on_post_tool_use_hook(call.id, call.name, effective_input, result);
@@ -2276,8 +2289,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     block.tool_use_id = call.id;  // 配对的是 wire 那枚 tool_invoke 的 id
                     block.content = platform::SanitizeUtf8(result.content);
                     block.is_error = result.is_error;
-                block.capture_complete = result.outcome != "output_limit";
-                if (!block.capture_complete) block.capture_reason = "quota";
+                    block.capture_complete = result.outcome != "output_limit";
+                    if (!block.capture_complete) block.capture_reason = "quota";
                     if (!result.payload.empty()) {
                         block.blocks = result.payload.content;
                         block.structured_content = result.payload.structured_content;

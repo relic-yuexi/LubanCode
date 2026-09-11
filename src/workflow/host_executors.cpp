@@ -295,6 +295,9 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         // 不经 ToolTraceHub 的统一接线,这里直挂节点账桥(与 hub.Install
         // 同款):工具结果消息入节点历史前,超帽全文就地归仓换固定预览,
         // 节点实发与账上 tool 消息吃同一份(账实一致)。v2 桥默认穿透。
+        wiring.capture_tool_result = [node_turn](const api::ToolResultBlock& result) {
+            return node_turn->CaptureToolResult(result);
+        };
         wiring.rewrite_tool_results_for_history = [node_turn](api::Message& results) {
             return node_turn->RewriteToolResultsForHistory(results);
         };

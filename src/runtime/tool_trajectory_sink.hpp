@@ -42,6 +42,7 @@ public:
     virtual void ConfigureActionSummary(api::Backend*, const ActionSummaryProfile&) {}
     virtual ~ToolTrajectorySink() = default;
     virtual ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message&) { return {}; }
+    virtual ToolResultsCommitReceipt CaptureToolResult(const api::ToolResultBlock&) { return {}; }
     // 一枚工具栅栏事件(Scheduled/ExecutionStarted/ExecutionFinished;
     // ResultCommitted 忽略——正文从 OnToolResultsCommitted 的消息翻)。
     virtual void OnToolTrace(const agent::ToolTraceEvent& event) = 0;

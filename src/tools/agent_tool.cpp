@@ -2252,6 +2252,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         };
         // P1-A(失败与恢复单 FA-01):回执口——子账的结果提交失败同样要
         // 拦住子 loop 的后续模型发送,不拿内存独有结果继续。
+        turn_wiring.capture_tool_result = [&child_bridge](const api::ToolResultBlock& result) {
+            return child_bridge.CaptureToolResult(result);
+        };
         turn_wiring.rewrite_tool_results_for_history = [&child_bridge](api::Message& results) {
             return child_bridge.RewriteToolResultsForHistory(results);
         };
