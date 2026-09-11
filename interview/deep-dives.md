@@ -35,7 +35,7 @@ LubanCode 是一只 C++23 终端 coding agent。它把三家模型协议翻进�
 | 面试官从哪里问 | 先答什么 | 深读 |
 | --- | --- | --- |
 | Agent Loop 怎么转 | turn 里循环 step；无工具则收口，有工具则顺序执行、成对回填 | [Agent Loop、重试与恢复深挖](../docs/architecture/agent-loop/reliability.md)、[Query 数据流](../docs/architecture/query-data-flow.md) |
-| 失败会不会重试 | 主模型 transport 不自动重试；续跑、工具纠错、session 恢复各走各路 | [Agent Loop、重试与恢复深挖](../docs/architecture/agent-loop/reliability.md) |
+| 失败之后怎么办 | 瞬时请求错最多尝试 6 次；输出落账后才跑工具；结果保存失败不等于工具未执行 | [失败、落盘与恢复重点](failure-and-recovery.md) |
 | 模型与 Schema 怎么管 | 端点判可用、目录补元数据、用户配置压默认；三种 Schema 分账 | [模型、Provider 与 JSON Schema 深挖](../docs/architecture/providers/schema.md)、[Provider 目录](../docs/features/providers/catalog.md) |
 | 开发中遇到什么问题 | 先讲现场与证据，再讲根因边界、分层修法、回归与未结欠账 | [开发难题与故障复盘](retrospectives/development-challenges.md) |
 | 上下文怎么管 | 四本账分开；长内容先在源头限流，再逐级压缩 | [上下文、长文本与记忆深挖](../docs/architecture/memory/context.md)、[Context 压缩算法深挖](../docs/architecture/context/compaction.md) |
@@ -125,7 +125,7 @@ LubanCode 是一只 C++23 终端 coding agent。它把三家模型协议翻进�
 
 ### 请求失败会不会自动重试
 
-当前不会。三家 client 每枚 step 只发一次 HTTP/SSE attempt。已经流出正文、tool use 或跑过副作用工具后，盲重试会重复输出、打乱 id，甚至把命令跑两遍。系统保住请求前已成账的 history 与 session，再明报失败。普通 transport 断流时，屏上 partial text 不进 history；ESC 才会专门收起半截消息并补打断账。`max_tokens` 后追加宿主标记另开 step，算 continuation，不算 retry。
+当前主循环已接上请求恢复环。网络类错误、指定 HTTP 状态和白名单 API 错误，最多尝试 6 次；每次重建 assembler，半截回复不拼进成功消息，前一步工具不重跑。prepared 写失败不发本次模型请求，完整输出提交失败不执行工具。V3 流片段可留观察账，不能把“不进有效 history”说成“没有落盘”。详见[失败之后怎么办](failure-and-recovery.md)，其中另列 sent 回调与结果保存的现存缺口。
 
 ### 中立层能承住全新交互范式吗
 

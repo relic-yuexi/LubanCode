@@ -83,10 +83,14 @@ public:
         ++prepared_count;
         return "req-" + std::to_string(prepared_count);
     }
-    void OnRequestSent(const std::string& request_id) override { sent.push_back({request_id, 0, 0, 0}); }
-    void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+    bool OnRequestSent(const std::string& request_id) override {
+        sent.push_back({request_id, 0, 0, 0});
+        return true;
+    }
+    bool OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
                                int input_round_index) override {
         sent.push_back({request_id, task_turn_index, turn_limit, input_round_index});
+        return true;
     }
     void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
                          bool) override {}

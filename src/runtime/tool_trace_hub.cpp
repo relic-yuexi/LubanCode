@@ -47,21 +47,18 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
     // 从批次尾口拿正文。on_assistant_message_ready 因此只剩占位(接口
     // 保留,AgentLoop 的挂点不动)。
     wiring.on_assistant_message_ready = [](const api::Message&) {};
-    wiring.on_tool_results_committed = [this](const std::string& batch_id, const api::Message& message) {
-        // 正文进 tool.result.committed 事件(轨迹桥落账;没挂轨迹的会话
-        // 只有进程内 recent_ 诊断账)。
-        if (trajectory_ != nullptr) {
-            trajectory_->OnToolResultsCommitted(batch_id, message);
-        }
-    };
-    // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——消息入史之前先
-    // 经轨迹桥(v3 场:超帽全文就地归仓换固定预览;v2 场默认穿透,原文
-    // 入史不丢)。没挂轨迹的会话 wiring 那头留空,loop 全文入史,行为不变。
-    wiring.rewrite_tool_results_for_history = [this](api::Message& message) {
-        if (trajectory_ != nullptr) {
-            trajectory_->RewriteToolResultsForHistory(message);
-        }
-    };
+    // P1-A(失败与恢复单 FA-01):回执口替换旧 void 口——持久提交的成败
+    // 交回引擎,Failed 时 loop 停止后续模型发送。没挂轨迹的会话给恒
+    // Committed 回执(与旧"不拦"行为一致)。
+    wiring.on_tool_results_committed_receipt =
+        [this](const std::string& batch_id, const api::Message& message) {
+            // 正文进 tool.result.committed 事件(轨迹桥落账;没挂轨迹的会话
+            // 只有进程内 recent_ 诊断账)。
+            if (trajectory_ != nullptr) {
+                return trajectory_->OnToolResultsCommitted(batch_id, message);
+            }
+            return ToolResultsCommitReceipt{};
+        };
 }
 
 bool ToolTraceHub::ShouldBlockOnFailedStart(agent::EffectClass cls) const {

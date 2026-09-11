@@ -35,6 +35,7 @@
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "workflow/account.hpp"
 #include "workflow/definition.hpp"
 #include "workflow/journal.hpp"
 #include "workflow/store.hpp"
@@ -168,6 +169,15 @@ struct RuntimeOptions {
     // ReserveWorkflowRun 开轨迹 Journal、逐 attempt 开 node stream(fail
     // closed)。空 = 不落轨迹账(旧 workflow-runs/ 路照旧,兼容头less 测试)。
     lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
+    // 编排账 v3(Workflow 接入 v3 第一棒):非空 = run 在新编排账下跑
+    // (WorkflowRunAccount:segments/<segmentId>/workflow.jsonl 事件账 +
+    // 无损 outputs/checkpoints + fail-closed 提交)。单事实源——开了它,
+    // 上面的 runs_root 旧 journal 与 trajectory_ledger 旧 v2 桥都不启,
+    // 不让两本账分别决定成功。空 = 旧路原样(既有测试/调用方)。
+    std::filesystem::path account_root;
+    // 故障注入(测试专用;生产恒空):编排账每枚事件提交前问一次,返回
+    // 稳定码即注入一次提交失败(验证 fail-closed 与崩溃恢复窗口)。
+    std::function<std::optional<std::string>()> account_fault;
 };
 
 // 起跑入参。
@@ -177,6 +187,11 @@ struct RunInputs {
     explicit RunInputs(nlohmann::json v) : values(std::move(v)) {}
     RunInputs() = default;
 };
+
+// RunNode 一族在编排账写不住时的内部返回值:节点不成功、后继零派发、
+// 整场 run 停在明确失败态(fail-closed,§十二验收"写失败零派发")。
+// 只在 runtime 内部流转,不是图上的 outcome 边。
+inline constexpr const char* kOutcomeLedgerBroken = "ledger_broken";
 
 class WorkflowRuntime {
 public:
@@ -199,11 +214,28 @@ public:
     const RuntimeOptions& options() const { return options_; }
 
 private:
-    // 带预置 Store 与已完成节点账的内部跑法(Resume 用)。
+    // 账路恢复的随行材料:编排账本体 + 悬置候选(保存原件后崩溃,到达
+    // 该节点时采纳,不重跑)+ 预算恢复底数(计数不归零,§十)。
+    struct AccountContext {
+        WorkflowRunAccount* account = nullptr;
+        std::map<std::string, OutputCommitRecord> dangling_by_node;
+        std::int64_t seed_tokens = 0;
+        int seed_steps = 0;
+    };
+
+    // 带预置 Store 与已完成节点账的内部跑法(Resume 用)。account_ctx 非空
+    // = 续账(账已开好,RunWithStore 不再另起);run_id_override 非空 =
+    // 沿用逻辑 run 身份(恢复不换号,§二)。
     WorkflowRunSummary RunWithStore(const WorkflowDefinition& definition, const nlohmann::json& inputs,
                                     Store&& preloaded,
                                     const std::map<std::string, NodeRunRecord>& precompleted,
-                                    const std::atomic<bool>* cancel_token, bool resuming);
+                                    const std::atomic<bool>* cancel_token, bool resuming,
+                                    AccountContext* account_ctx = nullptr,
+                                    const std::string& run_id_override = std::string());
+
+    // 新编排账布局的恢复(segments/ 在场):验账重放 → 开恢复段 → 续跑。
+    std::expected<WorkflowRunSummary, std::string> ResumeAccount(
+        const std::filesystem::path& run_dir, const std::atomic<bool>* cancel_token);
 
     struct ExecutionContext {
         const WorkflowDefinition* definition = nullptr;
@@ -212,6 +244,11 @@ private:
         RunJournal* journal = nullptr;
         // 编排账(workflow 会话归属统一单):null = 本场不落轨迹账。
         lubancode::runtime::TrajectoryWorkflowRunBridge* trajectory = nullptr;
+        // 编排账 v3:非空 = 节点生命周期走 fail-closed 提交合同。
+        WorkflowRunAccount* v3_account = nullptr;
+        // 悬置候选(nodeId -> 原件记录):保存原件后崩溃的执行,到达时
+        // 采纳候选继续校验与提交,不重跑(§十)。
+        std::map<std::string, OutputCommitRecord>* dangling = nullptr;
         // 派发序号(一场 run 一只,node_run_id 带 -d<N> 防 loop 重入撞名)。
         std::atomic<std::uint64_t>* dispatch_seq = nullptr;
         const std::atomic<bool>* cancel = nullptr;

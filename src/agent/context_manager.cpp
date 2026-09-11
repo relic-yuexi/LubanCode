@@ -33,6 +33,15 @@ void ContextManager::PushMessage(api::Message message) {
     request_history_.push_back(std::move(message));
 }
 
+void ContextManager::PopMessageBack() {
+    if (!history_.empty()) {
+        history_.pop_back();
+    }
+    if (!request_history_.empty()) {
+        request_history_.pop_back();
+    }
+}
+
 void ContextManager::InjectIncoming(api::Message incoming) {
     InjectIncomingMessage(history_, incoming);
     InjectIncomingMessage(request_history_, std::move(incoming));

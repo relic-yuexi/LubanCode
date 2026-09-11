@@ -106,6 +106,62 @@ nlohmann::json ApplyInputDefaults(const nlohmann::json& values, const nlohmann::
     return result;
 }
 
+// 节点产物合同校验(§五):声明 output_schema(JSON Schema 子集,与
+// ValidateInputsAgainstSchema 同口径)时,候选不是对象、缺必填字段、字段
+// 类型不合都判失败——"候选非空、JSON 能解析、工具退出码为 0"都不能代替
+// 完整产物合同;解析失败/截断的 content 外壳冒充不了合格产物。未声明
+// schema 的纯文本节点按声明输出文本,直接过。
+OutputValidation ValidateNodeOutput(const WorkflowNode& node, const nlohmann::json& candidate) {
+    OutputValidation out;
+    const nlohmann::json& schema = node.output_schema;
+    if (!schema.is_object() || schema.empty()) return out;
+    if (!candidate.is_object()) {
+        out.passed = false;
+        out.checks.push_back(nlohmann::json{{"code", "output_not_object"},
+                                            {"field", std::string()},
+                                            {"expected", "object"},
+                                            {"actual", std::string(candidate.type_name())}});
+        return out;
+    }
+    const auto push = [&out](const char* code, const std::string& field, const std::string& expected,
+                             const std::string& actual) {
+        out.passed = false;
+        out.checks.push_back(nlohmann::json{
+            {"code", code}, {"field", field}, {"expected", expected}, {"actual", actual}});
+    };
+    if (const auto required = schema.find("required"); required != schema.end() && required->is_array()) {
+        for (const auto& field : *required) {
+            if (!field.is_string()) continue;
+            const std::string name = field.get<std::string>();
+            if (!candidate.contains(name) || candidate[name].is_null()) {
+                push("missing_required_field", name, "必填", "缺字段");
+            }
+        }
+    }
+    if (const auto props = schema.find("properties"); props != schema.end() && props->is_object()) {
+        for (auto it = props->begin(); it != props->end(); ++it) {
+            const auto value = candidate.find(it.key());
+            if (value == candidate.end() || value->is_null()) continue;
+            const std::string* type = nullptr;
+            if (const auto t = it->find("type"); t != it->end() && t->is_string()) {
+                type = &t->get_ref<const std::string&>();
+            }
+            if (type == nullptr) continue;
+            bool ok = true;
+            if (*type == "string") ok = value->is_string();
+            else if (*type == "integer") ok = value->is_number_integer();
+            else if (*type == "number") ok = value->is_number();
+            else if (*type == "boolean") ok = value->is_boolean();
+            else if (*type == "array") ok = value->is_array();
+            else if (*type == "object") ok = value->is_object();
+            if (!ok) {
+                push("type_mismatch", it.key(), *type, std::string(value->type_name()));
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 // ---- 状态机 -----------------------------------------------------------------
@@ -339,6 +395,16 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                    record.error_code, record.error_message, 0, 0,
                                                    std::string());
         }
+        if (ctx.v3_account != nullptr) {
+            // 失败事实要落稳(没走到 reserve 的死路也铸个身份指认);落不住
+            // = 账断,零派发(fail-closed)。
+            const NodeExecutionIdentity identity =
+                ctx.v3_account->MintExecutionId(node.id, item_index);
+            if (!ctx.v3_account->RecordNodeFailed(identity, record.error_code, record.error_message,
+                                                  0, 0)) {
+                return kOutcomeLedgerBroken;
+            }
+        }
         emit_node_event(kEventNodeCompleted,
                         nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
         return "error";
@@ -351,11 +417,85 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     // 末次 attempt 的 node 账终态 hash(成功/失败收口都引用它;attempt 循环
     // 外的 CommitOutput 段还要用)。
     std::string node_terminal_hash;
+
+    // 输入先解好(重试不换输入:backoff 等待期间 Store 不变),reserve 的
+    // 输入快照也提前到执行之前(§五:reserve 携带输入)。
+    auto resolved_input = ResolveTemplate(*ctx.store, node.input);
+    if (!resolved_input.has_value()) {
+        record.state = NodeState::Failed;
+        record.error_code = "resolve_input";
+        record.error_message = resolved_input.error().path + ": " + resolved_input.error().message;
+        if (ctx.journal != nullptr) {
+            ctx.journal->Append(kEventNodeCompleted, node.id, 1,
+                                nlohmann::json{{"outcome", "error"},
+                                               {"code", record.error_code},
+                                               {"error", record.error_message}});
+        }
+        if (ctx.trajectory != nullptr) {
+            (void)ctx.trajectory->RecordNodeFailed(node.id, node_run_id_base + "-a1", 1,
+                                                   record.error_code, record.error_message, 0,
+                                                   0, std::string());
+        }
+        if (ctx.v3_account != nullptr) {
+            const NodeExecutionIdentity identity =
+                ctx.v3_account->MintExecutionId(node.id, item_index);
+            if (!ctx.v3_account->RecordNodeFailed(identity, record.error_code, record.error_message,
+                                                  0, 0)) {
+                return kOutcomeLedgerBroken;
+            }
+        }
+        emit_node_event(kEventNodeCompleted,
+                        nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+        return "error";
+    }
+
+    // 编排账 v3:reserve nodeExecution 与输入快照 → dispatched(实际已派
+    // 发)。写不住 = 节点不执行、零派发(fail-closed,§五 pipeline)。
+    NodeExecutionIdentity identity;
+    std::string adopt_output_id;
+    if (ctx.v3_account != nullptr) {
+        auto reserved = ctx.v3_account->ReserveNodeExecution(node.id, ToString(node.kind),
+                                                             item_index, resolved_input->value);
+        if (!reserved.has_value()) {
+            record.state = NodeState::Failed;
+            record.error_code = "account_reserve_failed";
+            record.error_message = "编排账 reserve 落不稳[" + reserved.error().stage + "]: " +
+                                   reserved.error().error_code;
+            emit_node_event(kEventNodeCompleted,
+                            nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+            return kOutcomeLedgerBroken;
+        }
+        identity = std::move(*reserved);
+        if (!ctx.v3_account->RecordNodeDispatched(identity)) {
+            record.state = NodeState::Failed;
+            record.error_code = "account_dispatch_failed";
+            record.error_message = "编排账派发事实落不住,节点停跑(fail closed)";
+            emit_node_event(kEventNodeCompleted,
+                            nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+            return kOutcomeLedgerBroken;
+        }
+        // 悬置候选(保存原件后崩溃):到达本节点时采纳,不重跑执行(§十)。
+        if (ctx.dangling != nullptr) {
+            const auto pending = ctx.dangling->find(node.id);
+            if (pending != ctx.dangling->end()) {
+                adopt_output_id = pending->second.output_id;
+                result.ok = true;
+                result.output = pending->second.payload;
+            }
+        }
+    }
+    const bool adopted_candidate = !adopt_output_id.empty();
+
     for (int attempt = 1; attempt <= max_attempts; ++attempt) {
         record.attempt = attempt;
+        identity.attempt = attempt;
         // 取消检查:每个 attempt 之前看一眼。
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
             record.state = NodeState::Cancelled;
+            if (ctx.v3_account != nullptr) {
+                (void)ctx.v3_account->RecordNodeCancelled(node.id, identity.node_execution_id,
+                                                          "cancelled");
+            }
             emit_node_event(kEventNodeCompleted, nlohmann::json{{"outcome", "cancelled"}});
             return "cancelled";
         }
@@ -377,26 +517,6 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         request.attempt = attempt;
         request.store = ctx.store;
         request.cancel = ctx.cancel;
-        auto resolved_input = ResolveTemplate(*ctx.store, node.input);
-        if (!resolved_input.has_value()) {
-            record.state = NodeState::Failed;
-            record.error_code = "resolve_input";
-            record.error_message = resolved_input.error().path + ": " + resolved_input.error().message;
-            if (ctx.journal != nullptr) {
-                ctx.journal->Append(kEventNodeCompleted, node.id, attempt,
-                                    nlohmann::json{{"outcome", "error"},
-                                                   {"code", record.error_code},
-                                                   {"error", record.error_message}});
-            }
-            if (ctx.trajectory != nullptr) {
-                (void)ctx.trajectory->RecordNodeFailed(node.id, request.node_run_id, attempt,
-                                                       record.error_code, record.error_message, 0,
-                                                       0, std::string());
-            }
-            emit_node_event(kEventNodeCompleted,
-                            nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
-            return "error";
-        }
         request.resolved_input = resolved_input->value;
 
         // 编排账:node attempt 账 + 派发事实(§15.6)。fail closed——开不
@@ -441,11 +561,14 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
 
         // 到这里，输入已解好、执行器也找着了；此刻才算真正交办。终端据
         // 这条回执告诉用户“中书省已经接到”，不拿预备状态冒充已发送。
-        emit_node_event(kEventNodeStarted,
-                        nlohmann::json{{"attempt", attempt},
-                                       {"max_attempts", max_attempts},
-                                       {"input", request.resolved_input}});
-        result = executor.Execute(request);
+        // 采纳悬置候选的执行不重发 started——派发事实在上个进程已落账。
+        if (!adopted_candidate) {
+            emit_node_event(kEventNodeStarted,
+                            nlohmann::json{{"attempt", attempt},
+                                           {"max_attempts", max_attempts},
+                                           {"input", request.resolved_input}});
+            result = executor.Execute(request);
+        }
         // node attempt 账收口(在账本锁外;bridge 自带锁):终态 hash 回填
         // 编排事实,verifier 据此逐位对账。
         if (node_trajectory != nullptr) {
@@ -465,9 +588,10 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
 
         if (result.ok) break;
         // 可重试判定:稳定 code 白名单;空白名单认默认可重试档(超时/
-        // 限流/瞬时网络一类执行器报上来的)。
+        // 限流/瞬时网络一类执行器报上来的)。采纳的悬置候选不走重试——
+        // 它代表已完成的执行,只续校验与提交(§十)。
         bool retryable = false;
-        if (node.retry.has_value() && attempt < max_attempts) {
+        if (!adopted_candidate && node.retry.has_value() && attempt < max_attempts) {
             if (node.retry->when.empty()) {
                 retryable = result.error_code == "timeout" || result.error_code == "rate_limited" ||
                             result.error_code == "transient_network" || result.error_code == "transient";
@@ -494,6 +618,10 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                             nlohmann::json{{"attempt", attempt},
                                            {"max_attempts", max_attempts},
                                            {"code", result.error_code}});
+            // 编排账 v3:重试是编排事实不是终态(非关键投影)。
+            if (ctx.v3_account != nullptr) {
+                ctx.v3_account->RecordNodeRetrying(identity, max_attempts, result.error_code);
+            }
             // backoff 等待:受取消打断。fake clock 下 wait 缩为 0(单测不
             // 靠 sleep 赌时序)。批五:阶梯与等待走公共退避件;定义里的
             // jitter 仍不启用(声明了未接线是现状,开了改节奏,另立一批)。
@@ -529,6 +657,15 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                 node.id, request.node_run_id, attempt, result.error_code, result.error_message,
                 result.duration_ms, result.tokens_used, node_terminal_hash);
         }
+        if (ctx.v3_account != nullptr) {
+            // 失败事实落稳是关键:落不住 = 账断,零派发。
+            if (!ctx.v3_account->RecordNodeFailed(identity, result.error_code, result.error_message,
+                                                  result.duration_ms, result.tokens_used)) {
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", result.error_code}});
+                return kOutcomeLedgerBroken;
+            }
+        }
         emit_node_event(kEventNodeCompleted,
                         nlohmann::json{{"outcome", "error"},
                                        {"code", result.error_code},
@@ -541,6 +678,45 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     // 首写与覆写都算落账成功——"半份 output"仍不可能:Execute 只产候选,
     // 这里一次性换入。
     if (result.ok) {
+        // 编排账 v3 的提交门(§五):校验 → 原件落稳 → output.commit 落稳
+        // → 才发布 Store、放行后继。校验不过:候选照常保存,不提交 success、
+        // 不推进 success 边。
+        if (ctx.v3_account != nullptr) {
+            const OutputValidation validation = ValidateNodeOutput(node, result.output);
+            if (!validation.passed) {
+                ctx.v3_account->SaveRejectedCandidate(identity, result.output, validation,
+                                                      adopt_output_id);
+                record.state = NodeState::Failed;
+                record.error_code = "output_validation_failed";
+                record.error_message = "产物不合 output_schema(" + node.id + ")";
+                if (!ctx.v3_account->RecordNodeFailed(identity, record.error_code,
+                                                      record.error_message, result.duration_ms,
+                                                      result.tokens_used)) {
+                    emit_node_event(kEventNodeCompleted,
+                                    nlohmann::json{{"outcome", "error"},
+                                                   {"code", record.error_code}});
+                    return kOutcomeLedgerBroken;
+                }
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                return "error";
+            }
+            auto commit = ctx.v3_account->CommitNodeOutput(identity, result.output, validation,
+                                                           adopt_output_id);
+            if (!commit.has_value()) {
+                record.state = NodeState::Failed;
+                record.error_code = "account_commit_failed";
+                record.error_message = "产物提交落不稳[" + commit.error().stage + "]: " +
+                                       commit.error().error_code;
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                return kOutcomeLedgerBroken;  // 不发布成功、后继零派发
+            }
+            // 采纳件已消费:悬置候选出队,防 loop 重入误再采纳。
+            if (ctx.dangling != nullptr && !adopt_output_id.empty()) {
+                ctx.dangling->erase(node.id);
+            }
+        }
         ctx.store->CommitOutputOverwrite(node.id, result.output);
         // 本项产物当场交还调用方(map 并发用):store 的 body 键在并发下是
         // 共用垫,回头 GetOutput 取到的是"最后一只 commit 的",不是自己那份。
@@ -567,6 +743,16 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                       {"duration_ms", result.duration_ms},
                                                       {"tokens", result.tokens_used}};
         if (!result.agent_name.empty()) event_payload["agent"] = result.agent_name;
+        if (ctx.v3_account != nullptr) {
+            // 收口事实落稳:commit 已落(下游可消费),completed 落不住时账
+            // 断、整场停明确失败态——恢复重放按 commit 判成功、补内存,不
+            // 重跑副作用(§十)。
+            if (!ctx.v3_account->RecordNodeCompleted(identity, result.empty ? "empty" : "success",
+                                                     result.duration_ms, result.tokens_used)) {
+                emit_node_event(kEventNodeCompleted, event_payload);
+                return kOutcomeLedgerBroken;
+            }
+        }
         emit_node_event(kEventNodeCompleted, event_payload);
         return result.empty ? "empty" : "success";
     }
@@ -597,6 +783,9 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
     }
     if (ctx.trajectory != nullptr) {
         ctx.trajectory->RecordNodeWaiting(node.id, "io", node.async_body);
+    }
+    if (ctx.v3_account != nullptr) {
+        ctx.v3_account->RecordNodeWaiting(node.id, "io", "等待 async body 完成", node.async_body);
     }
 
     if (++*ctx.steps > ctx.definition->limits.max_steps) {
@@ -635,6 +824,15 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
     }
     auto [outcome, output] = future.get();
     account.state = RunState::Running;
+
+    // 编排账断(body 侧已停零派发):等待节点同样收失败态,不吞。
+    if (outcome == kOutcomeLedgerBroken) {
+        std::scoped_lock lock(*ctx.nodes_mutex);
+        NodeRunRecord& record = account.nodes[node.id];
+        record.state = NodeState::Failed;
+        record.error_code = "orchestration_ledger_broken";
+        return kOutcomeLedgerBroken;
+    }
 
     std::scoped_lock lock(*ctx.nodes_mutex);
     NodeRunRecord& record = account.nodes[node.id];
@@ -829,6 +1027,9 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
         if (ctx.trajectory != nullptr) {
             ctx.trajectory->RecordLoopIterationStarted(node.id, iteration);
         }
+        if (ctx.v3_account != nullptr) {
+            ctx.v3_account->RecordLoopIterationStarted(node.id, iteration);
+        }
 
         nlohmann::json outputs = nlohmann::json::object();
         for (const auto& body_id : node.loop_body) {
@@ -865,6 +1066,11 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
                 }
             } else {
                 outcome = RunNode(ctx, body->second, &output);
+            }
+            if (outcome == kOutcomeLedgerBroken) {
+                record.state = NodeState::Failed;
+                record.error_code = "orchestration_ledger_broken";
+                return kOutcomeLedgerBroken;
             }
             if (outcome == "cancelled") {
                 record.state = NodeState::Cancelled;
@@ -911,6 +1117,18 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
             (void)ctx.trajectory->RecordCheckpointSaved(
                 hooks::Sha256Hex(ctx.store->ToJson().dump()));
         }
+        if (ctx.v3_account != nullptr) {
+            ctx.v3_account->RecordLoopIterationCompleted(node.id, iteration, condition_met);
+            // 轮末 checkpoint 是恢复水位:文件+提交事件都落稳才继续(§十)。
+            auto checkpoint = ctx.v3_account->CommitCheckpoint(ctx.store->ToJson());
+            if (!checkpoint.has_value()) {
+                record.state = NodeState::Failed;
+                record.error_code = "checkpoint_commit_failed";
+                record.error_message = "轮末 checkpoint 落不稳[" + checkpoint.error().stage + "]: " +
+                                       checkpoint.error().error_code;
+                return kOutcomeLedgerBroken;
+            }
+        }
         if (condition_met && completed >= *min_iterations) {
             record.state = NodeState::Succeeded;
             record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
@@ -949,6 +1167,9 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     }
     if (ctx.trajectory != nullptr) {
         ctx.trajectory->RecordBranchStarted(node.id, node.branches, effective_cap);
+    }
+    if (ctx.v3_account != nullptr) {
+        ctx.v3_account->RecordBranchStarted(node.id, node.branches, effective_cap);
     }
 
     struct BranchOutcome {
@@ -1000,6 +1221,10 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
                 // RunNode 内部只碰自己名下的 Store 分区与 account.nodes[自己]
                 //(std::map 写入互斥由 nodes_mutex_ 担着),分支间不互踩。
                 const std::string outcome = RunNode(ctx, step);
+                if (outcome == kOutcomeLedgerBroken) {
+                    branch_outcome = outcome;
+                    break;
+                }
                 if (outcome == "error" || outcome == "cancelled") {
                     branch_outcome = outcome;
                     break;
@@ -1056,6 +1281,19 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     if (ctx.trajectory != nullptr) {
         ctx.trajectory->RecordJoinCompleted(node.id, ToString(node.join), succeeded.load(),
                                             failed.load(), unavailable);
+    }
+    if (ctx.v3_account != nullptr) {
+        ctx.v3_account->RecordJoinCompleted(node.id, ToString(node.join), succeeded.load(),
+                                            failed.load(), unavailable);
+    }
+
+    // 编排账断(任一分支 zero-dispatch 收场):整图停,不进 join 判定。
+    for (const auto& result : results) {
+        if (result.outcome == kOutcomeLedgerBroken) {
+            record.state = NodeState::Failed;
+            record.error_code = "orchestration_ledger_broken";
+            return kOutcomeLedgerBroken;
+        }
     }
 
     // join 政策(单子"并行与汇合规矩"五种)。
@@ -1145,6 +1383,7 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     };
     std::vector<MapSlot> slots(count);  // 预分配,worker 只写自己的下标
     int failures = 0;
+    bool ledger_broken = false;  // 编排账断:项级失败之外的单列旗(零派发)
     const bool sequential = node.kind == NodeKind::Foreach;
     std::mutex slots_mutex;  // failures 计数与诊断类共写互斥(json 非线程安全)
 
@@ -1162,6 +1401,11 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         if (outcome == "success" || outcome == "empty") {
             slots[index].done = true;
             return true;
+        }
+        if (outcome == kOutcomeLedgerBroken) {
+            std::lock_guard<std::mutex> lock(slots_mutex);
+            ledger_broken = true;
+            return false;
         }
         {
             std::lock_guard<std::mutex> lock(slots_mutex);
@@ -1204,6 +1448,11 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     if (ctx.cancel != nullptr && ctx.cancel->load()) {
         record.state = NodeState::Cancelled;
         return "cancelled";
+    }
+    if (ledger_broken) {
+        record.state = NodeState::Failed;
+        record.error_code = "orchestration_ledger_broken";
+        return kOutcomeLedgerBroken;
     }
     // join 后拼装:预分配的 array,逐槽按下标落——不靠 operator[] 的
     // 缺省插入语义(libstdc++/libc++ 行为虽同,显式 resize 更不给巧合留门)。
@@ -1260,6 +1509,11 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
         body_input["item"] = item;
         body.input = body_input;
         const std::string outcome = RunNode(ctx, body);
+        if (outcome == kOutcomeLedgerBroken) {
+            record.state = NodeState::Failed;
+            record.error_code = "orchestration_ledger_broken";
+            return kOutcomeLedgerBroken;
+        }
         if (outcome != "success") {
             record.state = NodeState::Failed;
             record.error_code = "reduce_step_failed";
@@ -1283,6 +1537,12 @@ WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, co
 
 std::expected<WorkflowRunSummary, std::string> WorkflowRuntime::Resume(
     const std::filesystem::path& run_dir, const std::atomic<bool>* cancel_token) {
+    // 新编排账布局(segments/ 在场)走账路恢复;旧 events.jsonl 路照旧
+    //(棒二 WorkflowService 收拢装配后统一入口)。
+    std::error_code layout_ec;
+    if (std::filesystem::exists(run_dir / "segments", layout_ec)) {
+        return ResumeAccount(run_dir, cancel_token);
+    }
     // 1) definition 快照:归一化定义必须还原得动(定义没了也续得上)。
     std::ifstream def_file(run_dir / "definition.json", std::ios::binary);
     if (!def_file) {
@@ -1342,14 +1602,111 @@ std::expected<WorkflowRunSummary, std::string> WorkflowRuntime::Resume(
     return RunWithStore(definition, inputs_json, std::move(store), precompleted, cancel_token, true);
 }
 
+// 新编排账的恢复(§十 顺序):验账重放 → 终态裁决 → Store/产物/悬置候选
+// 恢复 → 开恢复段(链接源水位)→ 续跑。恢复不换 run 号,预算计数不归零。
+std::expected<WorkflowRunSummary, std::string> WorkflowRuntime::ResumeAccount(
+    const std::filesystem::path& run_dir, const std::atomic<bool>* cancel_token) {
+    const std::string run_id = lubancode::platform::PathToUtf8(run_dir.filename());
+    const std::filesystem::path runs_root = run_dir.parent_path();
+    WorkflowRunAccount::Options account_options;
+    account_options.clock = options_.clock;
+    account_options.inject_io_failure = options_.account_fault;
+    auto resumed = WorkflowRunAccount::Resume(runs_root, run_id, std::move(account_options));
+    if (!resumed.has_value()) {
+        const WorkflowAccountError& failure = resumed.error();
+        return std::unexpected("编排账续不上[" + failure.stage + "]: " + failure.error_code +
+                               (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
+    }
+    WorkflowRunAccount& account = *resumed;
+    const RecoveryState& recovery = account.recovery();
+
+    // 终态 run 不复活:显式重跑另起新 run(新 workflowRunId),不改旧终态。
+    if (!recovery.run_terminal.empty()) {
+        return std::unexpected("run 已终态(" + recovery.run_terminal +
+                               ");显式重跑请新开 workflowRunId");
+    }
+
+    WorkflowDefinition definition;
+    try {
+        definition = WorkflowDefinition::FromJson(recovery.definition);
+    } catch (const std::exception& e) {
+        return std::unexpected(std::string("定义快照还原失败: ") + e.what());
+    }
+
+    // Store:优先最后 committed checkpoint(无损,验过 hash);无 checkpoint
+    // 从 inputs 起底,不初始化成空(§十)。
+    Store store;
+    if (recovery.checkpoint.has_value()) {
+        store = Store::FromJson(recovery.checkpoint->store);
+    } else {
+        store.Initialize(recovery.inputs,
+                         nlohmann::json{{"workflow_id", definition.id},
+                                        {"workflow_version", definition.version},
+                                        {"run_id", run_id}});
+    }
+    // 已提交产物回灌(按事件序):nodeId 投影 = 该节点最新一次 commit
+    //(§三:node.id 只是当前作用域快捷投影)。commit 在、收口缺的也回灌
+    //——commit 是下游可消费的唯一依据(§五)。
+    std::map<std::string, NodeRunRecord> precompleted;
+    for (const std::string& exec_id : recovery.execution_order) {
+        const auto it = recovery.executions.find(exec_id);
+        if (it == recovery.executions.end()) continue;
+        const RecoveredExecution& exec = it->second;
+        const bool consumable =
+            exec.output_committed &&
+            (exec.outcome == "success" || exec.outcome == "empty" || exec.outcome.empty());
+        if (!consumable) continue;
+        // nodeId 投影 = 最新一次 commit(后到的覆写;§三"node.id 只是当前
+        // 作用域快捷投影")。历史产物本体按 executionId 分存在 outputs/,
+        // 互不覆盖。
+        store.CommitOutputOverwrite(exec.node_id, exec.committed_output);
+        NodeRunRecord record;
+        record.node_id = exec.node_id;
+        record.state = NodeState::Succeeded;
+        precompleted.insert_or_assign(exec.node_id, std::move(record));
+    }
+    // 失败/取消的节点不进 precompleted——outcome=error 绝不误跳成成功
+    //(§十);副作用 reconcile 归棒三,本棒保守重跑未提交的失败节点。
+    // loop 节点不按"有 output 即跳过"处理(loop 自读 checkpoint 续轮次)。
+    for (const auto& node : definition.nodes) {
+        if (node.kind == NodeKind::Loop) precompleted.erase(node.id);
+    }
+
+    // 悬置候选按 node 摆好:到达该节点时采纳,不重跑执行(§十)。
+    AccountContext account_ctx;
+    for (const auto& candidate : recovery.dangling_candidates) {
+        account_ctx.dangling_by_node[candidate.node_id] = candidate;
+    }
+    // 开恢复段(链接源水位):开不出 = 恢复失败,如实报。
+    auto segment = account.OpenSegment();
+    if (!segment.has_value()) {
+        return std::unexpected("恢复段开不成[" + segment.error().stage + "]: " +
+                               segment.error().error_code);
+    }
+    account_ctx.account = &account;
+    account_ctx.seed_tokens = recovery.tokens_used;
+    account_ctx.seed_steps = recovery.dispatch_count;
+    return RunWithStore(definition, recovery.inputs, std::move(store), precompleted, cancel_token,
+                        /*resuming=*/true, &account_ctx, run_id);
+}
+
 WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& definition,
                                                   const nlohmann::json& inputs, Store&& preloaded,
                                                   const std::map<std::string, NodeRunRecord>& precompleted,
-                                                  const std::atomic<bool>* cancel_token, bool resuming) {
+                                                  const std::atomic<bool>* cancel_token, bool resuming,
+                                                  AccountContext* account_ctx,
+                                                  const std::string& run_id_override) {
     WorkflowRunSummary account;
-    account.run_id = options_.run_id_generator ? options_.run_id_generator() : DefaultRunId();
+    // 恢复沿用逻辑 run 身份:普通暂停/恢复不换号,恢复段另发号(§二)。
+    account.run_id = !run_id_override.empty()
+                         ? run_id_override
+                         : (options_.run_id_generator ? options_.run_id_generator() : DefaultRunId());
     account.workflow_id = definition.id;
     account.state = RunState::Created;
+    // 预算恢复底数(计数不归零,§十):账路 resume 递进来。
+    if (account_ctx != nullptr) {
+        account.tokens_used = account_ctx->seed_tokens;
+    }
     for (const auto& [id, record] : precompleted) {
         account.nodes.emplace(id, record);
     }
@@ -1400,9 +1757,45 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     const std::string definition_json = BuildNormalizedJson(definition).dump();
     const std::string cwd_text = lubancode::platform::PathToUtf8(std::filesystem::current_path());
 
-    // journal(可选)。
+    // 编排账 v3(Workflow 接入 v3 第一棒):account_root 非空即在新账下跑。
+    // 单事实源——开了新账,旧 RunJournal 与旧 v2 编排桥都不启,不让两本
+    // 账分别决定成功(§二)。开不出账 = run 停在明确失败态(fail closed)。
+    // 续账(account_ctx 非空)账已由 Resume 开好段,这里只接指针。
+    WorkflowRunAccount* v3_account = nullptr;
+    std::optional<WorkflowRunAccount> owned_account;
+    if (account_ctx != nullptr) {
+        v3_account = account_ctx->account;
+    } else if (!options_.account_root.empty()) {
+        WorkflowRunAccount::DefinitionInfo def_info;
+        def_info.workflow_id = definition.id;
+        def_info.workflow_version = definition.version;
+        def_info.content_hash = content_hash;
+        def_info.cwd = cwd_text;
+        def_info.definition_json = definition_json;
+        WorkflowRunAccount::Options account_options;
+        account_options.clock = options_.clock;
+        account_options.inject_io_failure = options_.account_fault;
+        auto started =
+            WorkflowRunAccount::Start(options_.account_root, account.run_id, def_info,
+                                      effective_inputs, std::move(account_options));
+        if (!started.has_value()) {
+            const WorkflowAccountError& failure = started.error();
+            account.state = RunState::Failed;
+            account.error_code = "account_start_failed";
+            account.error_message = "编排账开张失败[" + failure.stage + "]: " + failure.error_code +
+                                    (failure.detail.empty() ? std::string()
+                                                            : " (" + failure.detail + ")");
+            account.duration_ms =
+                (options_.clock ? options_.clock->NowMs() : JournalClock().NowMs()) - started_ms;
+            return account;
+        }
+        owned_account.emplace(std::move(*started));
+        v3_account = &*owned_account;
+    }
+
+    // journal(可选;账路 v3 不启——单事实源)。
     std::optional<RunJournal> journal;
-    if (!options_.runs_root.empty()) {
+    if (!options_.runs_root.empty() && v3_account == nullptr) {
         RunJournal::StartInfo info;
         info.run_id = account.run_id;
         info.workflow_id = definition.id;
@@ -1420,9 +1813,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
 
     // 编排账(workflow 会话归属统一单):run 起动经 ReserveWorkflowRun 开
     // 轨迹 Journal。fail closed——开不出账,run 停在明确失败态,不回退
-    // 旧写口(§3.6"写不住时,workflow 必须停在明确失败态")。
+    // 旧写口(§3.6"写不住时,workflow 必须停在明确失败态")。账路 v3 不启
+    // 旧桥(单事实源)。
     std::unique_ptr<runtime::TrajectoryWorkflowRunBridge> trajectory_bridge;
-    if (options_.trajectory_ledger != nullptr) {
+    if (options_.trajectory_ledger != nullptr && v3_account == nullptr) {
         runtime::TrajectoryWorkflowRunBridge::DefinitionInfo def_info;
         def_info.workflow_id = definition.id;
         def_info.workflow_version = definition.version;
@@ -1454,7 +1848,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     account.state = RunState::Running;
     EmitRunEvent(account, kEventRunStarted, nlohmann::json{{"state", ToString(account.state)}});
 
-    int steps = 0;
+    int steps = account_ctx != nullptr ? account_ctx->seed_steps : 0;
     std::atomic<std::uint64_t> dispatch_seq{0};
     ExecutionContext ctx;
     ctx.definition = &definition;
@@ -1462,6 +1856,8 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     ctx.store = &store;
     ctx.journal = journal.has_value() ? &*journal : nullptr;
     ctx.trajectory = trajectory_bridge.get();
+    ctx.v3_account = v3_account;
+    ctx.dangling = account_ctx != nullptr ? &account_ctx->dangling_by_node : nullptr;
     ctx.dispatch_seq = &dispatch_seq;
     ctx.cancel = cancel_token;
     ctx.steps = &steps;
@@ -1470,6 +1866,11 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     ctx.nodes_mutex = &nodes_mutex;
 
     // 主循环:entry 起步,按 outcome 边走。
+    const auto halt_ledger_broken = [&account]() {
+        account.state = RunState::Failed;
+        account.error_code = "orchestration_ledger_broken";
+        account.error_message = "编排账写不住关键事实,run 停在明确失败态(后继零派发)";
+    };
     std::string current = definition.entry;
     while (!current.empty()) {
         if (cancel_token != nullptr && cancel_token->load()) {
@@ -1513,6 +1914,16 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             break;
         }
         if (node.kind == NodeKind::Checkpoint) {
+            if (v3_account != nullptr) {
+                auto checkpoint = v3_account->CommitCheckpoint(store.ToJson());
+                if (!checkpoint.has_value()) {
+                    account.state = RunState::Failed;
+                    account.error_code = "checkpoint_commit_failed";
+                    account.error_message = "checkpoint 落不稳[" + checkpoint.error().stage +
+                                            "]: " + checkpoint.error().error_code;
+                    break;
+                }
+            }
             if (journal.has_value()) {
                 journal->SaveCheckpoint(journal->last_seq(), store.ToJson());
             }
@@ -1540,6 +1951,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                 break;
             }
             if (loop_outcome == "budget_exhausted") break;
+            if (loop_outcome == kOutcomeLedgerBroken) {
+                halt_ledger_broken();
+                break;
+            }
             if (loop_outcome == "error") {
                 account.state = RunState::Failed;
                 account.error_code = "loop_failed";
@@ -1564,6 +1979,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                 break;
             }
             if (async_outcome == "budget_exhausted") break;
+            if (async_outcome == kOutcomeLedgerBroken) {
+                halt_ledger_broken();
+                break;
+            }
             if (async_outcome == "error") {
                 std::string next = NextNodeFor(definition, node.id, "error");
                 if (next.empty()) {
@@ -1593,6 +2012,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         // parallel:分支齐跑,join 政策收束(第 3 批)。
         if (node.kind == NodeKind::Parallel || node.kind == NodeKind::Join) {
             const std::string join_outcome = RunParallel(ctx, node);
+            if (join_outcome == kOutcomeLedgerBroken) {
+                halt_ledger_broken();
+                break;
+            }
             if (join_outcome == "cancelled") {
                 account.state = RunState::Cancelled;
                 account.error_code = "cancelled";
@@ -1624,6 +2047,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         // map/foreach:数组拆项,逐项跑 body(map 并发,foreach 顺次)。
         if (node.kind == NodeKind::Map || node.kind == NodeKind::Foreach) {
             const std::string map_outcome = RunMap(ctx, node);
+            if (map_outcome == kOutcomeLedgerBroken) {
+                halt_ledger_broken();
+                break;
+            }
             if (map_outcome == "cancelled") {
                 account.state = RunState::Cancelled;
                 account.error_code = "cancelled";
@@ -1641,6 +2068,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         // reduce:按定义顺序汇总(第 3 批:吃 map/parallel 的结果数组)。
         if (node.kind == NodeKind::Reduce) {
             const std::string reduce_outcome = RunReduce(ctx, node);
+            if (reduce_outcome == kOutcomeLedgerBroken) {
+                halt_ledger_broken();
+                break;
+            }
             if (reduce_outcome == "error") {
                 account.state = RunState::Failed;
                 account.error_code = "reduce_failed";
@@ -1683,6 +2114,11 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             continue;
         }
         const std::string outcome = RunNode(ctx, node);
+        // 编排账断:不发布成功、后继零派发,整场停明确失败态(§十二验收)。
+        if (outcome == kOutcomeLedgerBroken) {
+            halt_ledger_broken();
+            break;
+        }
         // skip 的节点(unavailable)计入缺失账(单子验收:报告明写缺了谁)。
         if (outcome == "skipped") {
             account.unavailable_sources.push_back(node.id);
@@ -1748,6 +2184,28 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                                 {"error", account.error_message},
                                 {"tokens", account.tokens_used},
                                 {"duration_ms", account.duration_ms}});
+    if (v3_account != nullptr) {
+        // 终态前水位:checkpoint 先落稳,再落 run 终态事件。终态事件写不
+        // 住时(如账断)本跑的执行事实已各自提交,summary 照实返回;恢复
+        // 重放见不到终态即按未终态续,收口自愈(§十)。
+        (void)v3_account->CommitCheckpoint(store.ToJson());
+        bool terminal_ok = false;
+        if (account.state == RunState::Succeeded) {
+            terminal_ok = v3_account->RecordRunCompleted(account.result);
+        } else if (account.state == RunState::Cancelled) {
+            terminal_ok = v3_account->RecordRunCancelled(account.error_message.empty()
+                                                             ? std::string("cancelled")
+                                                             : account.error_message);
+        } else {
+            terminal_ok = v3_account->RecordRunFailed(
+                account.error_code.empty() ? std::string("failed") : account.error_code,
+                account.error_message);
+        }
+        if (!terminal_ok && account.error_code.empty()) {
+            // 执行本身没报错、只是终态账没写住:如实带上,不装作全绿。
+            account.error_code = "account_terminal_unwritten";
+        }
+    }
     if (journal.has_value()) {
         journal->SaveCheckpoint(journal->last_seq(), store.ToJson());
         journal->Finish(ToString(account.state),

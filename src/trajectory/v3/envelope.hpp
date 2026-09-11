@@ -146,6 +146,30 @@ enum class EventKindV3 {
     TaskCompleted,
     TaskFailed,
     TaskCancelled,
+    // Workflow 编排账(Workflow 接入 v3 第一棒,schema 文档 §四 workflow 域):
+    // 编排事实的专用事件族。事件账 profile(V3EventLedger)只写 event 行、
+    // 只认这些 kind——不造 system 首行、不写 message 行,不偷填假 session
+    // 字段。payload 合同见 schema3 与 schema 文档 §四 workflow 条目。
+    WorkflowDefinitionLoaded,
+    WorkflowSegmentOpened,
+    WorkflowInputsCommitted,
+    WorkflowNodeReserved,
+    WorkflowNodeDispatched,
+    WorkflowNodeWaiting,
+    WorkflowNodeRetrying,
+    WorkflowNodeCompleted,
+    WorkflowNodeFailed,
+    WorkflowNodeCancelled,
+    WorkflowNodeSkipped,
+    WorkflowOutputCommitted,
+    WorkflowCheckpointCommitted,
+    WorkflowBranchStarted,
+    WorkflowJoinCompleted,
+    WorkflowLoopIterationStarted,
+    WorkflowLoopIterationCompleted,
+    WorkflowRunCompleted,
+    WorkflowRunFailed,
+    WorkflowRunCancelled,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

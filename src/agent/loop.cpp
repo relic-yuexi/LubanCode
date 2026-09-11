@@ -1568,15 +1568,29 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 用(Turn 单 §3.2 三步账);重试趟由上面的旗子跳过,不重复扣。
             }
             if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+                bool sent_recorded = false;
                 if (turn_committed) {
                     // 任务 turn 账随发随记(§11.1):started 边界带 index/limit/
                     // input round,收口三态(completed/failed/cancelled)由实现
                     // 侧按 request_id 对回这枚 turn。
-                    wiring.boundary_recorder->OnRequestSentWithTurn(
+                    sent_recorded = wiring.boundary_recorder->OnRequestSentWithTurn(
                         trajectory_request_id, committed_turn_index,
                         turn_permit.has_value() ? turn_permit->limit : 0, wiring.input_round_index);
                 } else {
-                    wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+                    sent_recorded = wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+                }
+                if (!sent_recorded) {
+                    // 发送前写账硬闸(失败与恢复单 P1-C/FA-03):sent 这笔本地
+                    // 账没写稳,backend 不得被调用。按本地存储故障退出尝试环
+                    //(Api 类不重试,不当 Network 错继续发),归还预算 permit
+                    // 名额(attempted 未 commit,不加)。
+                    if (turn_permit.has_value() && !turn_committed &&
+                        wiring.turn_budget->abort_before_send) {
+                        wiring.turn_budget->abort_before_send(*turn_permit);
+                        turn_permit.reset();
+                    }
+                    trajectory_write_failed = true;
+                    return std::unexpected(api::Error{api::ErrorKind::Api, "trajectory write failed", 0});
                 }
             }
             const std::size_t thinking_bytes_at_attempt_start = budget_report.thinking_bytes;
@@ -2253,18 +2267,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
-        // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——工具结果消息
-        // 在压进双账之前最后一次可定形,入史后再改就是追改已发前缀。带结
-        // 果仓的装配层(hub 接轨迹 v3 桥)把超帽全文换成固定预览(§4.17,
-        // 32 KiB 当前档)并就地归仓原文;线内结果原样穿透。没接预览器 =
-        // 全文入史,保命索兜底,行为与从前一字不差。
-        if (wiring.rewrite_tool_results_for_history != nullptr) {
-            wiring.rewrite_tool_results_for_history(tool_result_message);
-        }
         // 批次尾回调要在消息 move 进双账之前拿:回调里读的是五枚结果齐的
-        // user message(装配层此刻 append+flush 它;预览钩子已改写过的,
-        // 这里拿到的就是预览版)。
-        const bool results_callback_armed = wiring.on_tool_results_committed != nullptr;
+        // user message(装配层此刻 append+flush 它)。P1-A 的回执口与旧口
+        // 同一触发点,两枚口任设其一都要备货。
+        const bool results_callback_armed = wiring.on_tool_results_committed != nullptr ||
+                                            wiring.on_tool_results_committed_receipt;
         api::Message message_for_callback = results_callback_armed ? tool_result_message : api::Message{};
         context_.PushMessage(std::move(tool_result_message));
 
@@ -2279,7 +2286,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 落盘;若这里之前崩溃,resume 由 trace 重建:finished 的从
             // result ref 恢复,started 无 finished 的标 unknown,只有
             // scheduled 的标未执行(单子"消息落盘次序")。
-            if (results_callback_armed) {
+            // P1-A(FA-01):回执口优先——持久提交的成败交回引擎;旧口只在
+            // 没设回执口的装配上走(同一次触发只走一只口)。
+            runtime::ToolResultsCommitReceipt results_receipt;
+            if (wiring.on_tool_results_committed_receipt) {
+                results_receipt = wiring.on_tool_results_committed_receipt(batch_id, message_for_callback);
+            } else if (results_callback_armed) {
                 wiring.on_tool_results_committed(batch_id, message_for_callback);
             }
             for (const std::string& execution_id : scheduled_ids) {
@@ -2289,6 +2301,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 committed.execution_id = execution_id;
                 committed.timestamp_ms = NowMsEpoch();
                 wiring.on_tool_trace(committed);
+            }
+            if (results_receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
+                // 硬失败:有结果的"模型可见 tool 消息"没写稳。结果已执行不可
+                // 重做——撤回刚推进的内存 history(内存推进与持久接纳对齐,
+                // 不得留一条盘上没有的"已提交输入"),本轮明败,不发下一份
+                // 模型请求。降级(Degraded:主账正文已保住)放行,缺口由回执
+                // 的 degraded_codes 与 doctor 另查。
+                context_.PopMessageBack();
+                return std::unexpected("轨迹账写盘失败,工具结果未落账: " + results_receipt.error_code +
+                                       ",不发后续模型请求");
             }
         }
 

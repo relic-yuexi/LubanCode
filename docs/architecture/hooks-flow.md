@@ -1,5 +1,7 @@
 # Hooks 运行流程
 
+> **V3-LEGACY-05：本页总图描述旧 command hooks。** Lua 中间件不按“所有命中 handler 并发后归并”执行；同键先选实现，再按阶段/依赖排序，效果另行采用。当前接线见 [Session v3](session-v3.md)。
+
 [文档首页](../README.md) · [Hooks 手册](../features/extensions/hooks.md) · [工具调用流程](tool-calling-flow.md) · [配置手册](../reference/configuration.md) · [安全模型](../development/security.md)
 
 这页讲 Hook 从装载到回收的整条路。事件字段、JSON schema、配置示例与 `/hooks` 命令见[Hooks 手册](../features/extensions/hooks.md)。

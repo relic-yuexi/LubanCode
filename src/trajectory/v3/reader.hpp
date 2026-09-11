@@ -240,8 +240,11 @@ struct ToolActionSnapshot {
 
     // 整体折叠状态(§4.14:由尝试链、重试决策、结果持久状态和消息提交
     // 状态共同折叠):done/failed/cancelled/rejected/unknown/pending/
-    // running;另有 selected_no_message = 已选用结果、tool 消息未提交
-    //(§4.59 恢复补消息不重跑)。
+    // running;另有三档缺口态(失败与恢复单 P1-A):selected_no_message =
+    // 已选用结果、tool 消息未提交(§4.59 恢复补消息不重跑);
+    // result_missing = 执行已有终态、结果链没立起来(补保存/补接纳,不
+    // 重跑);message_not_admitted = tool 消息已写、接纳未成(不冒充有效
+    // 上下文,按提交链补接纳)。
     std::string folded_status;
 };
 

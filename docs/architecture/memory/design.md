@@ -1,5 +1,7 @@
 # 项目记忆
 
+> **V3-GAP-03：** 本页保留现行 memory 模块说明。召回桥仍取旧 recorder；新版作用域、CAS、忘记屏障和正式 memory 消息合同尚待实施。v3 默认启用不代表记忆链已迁完，见 [Session v3](../session-v3.md)。
+
 [文档首页](../../README.md) · [项目记忆流程](flow.md) · [上下文压缩机制](../../features/context/compaction.md) · [配置手册](../../reference/configuration.md) · [会话与上下文](../../features/sessions/README.md) · [架构说明](../README.md) · [安全模型](../../development/security.md)
 
 项目记忆让 LubanCode 跨会话记住少量仓库事实与用户偏好。它默认关闭。检索只读本地文件；写入先排队，再由后台进程原子落盘。

@@ -562,6 +562,17 @@ std::vector<ToolActionSnapshot> FoldToolActions(const V3Ledger& ledger) {
     for (const auto& node : ledger.context.chain) {
         in_chain.insert(node.message_ref);
     }
+    // compact 正常移链的消息(与 ProjectHistoryTimeline 的 removed_by 同
+    // 口径):退出模型上下文是既定事实,不算接纳缺口。
+    std::unordered_set<std::string> removed_by_compact;
+    for (const auto& event : ledger.events) {
+        if (event.kind != EventKindV3::CompactApplied) {
+            continue;
+        }
+        for (const auto& ref : RefIdArray(event.payload, "removedMessageRefs")) {
+            removed_by_compact.insert(ref);
+        }
+    }
     for (auto& [action_id, snapshot] : folded) {
         for (const auto& message : ledger.messages) {
             if (message.action_id != action_id || RoleOf(message) != MessageRole::Tool) {
@@ -588,8 +599,27 @@ std::vector<ToolActionSnapshot> FoldToolActions(const V3Ledger& ledger) {
             }
         }
         const bool has_message = !snapshot.message_versions.empty();
-        if (status == "done" && snapshot.selected_event_ref.has_value() && !has_message) {
-            status = "selected_no_message";  // §4.59:补消息,不重跑
+        if ((status == "done" || status == "failed") && !has_message) {
+            // 执行已有终态、模型侧却没有可见 tool 消息(失败与恢复单
+            // P1-A/FA-01):恢复投影必须列出结果缺口——执行终态保留,补
+            // 保存/补接纳,不得重跑工具。已选用(selected 落稳)缺消息是
+            // §4.59 的 selected_no_message;连选用都没有则是整条结果链
+            // 没立起来(仓打不开/persist 失败后崩溃),另立 result_missing。
+            status = snapshot.selected_event_ref.has_value() ? "selected_no_message" : "result_missing";
+        } else if ((status == "done" || status == "failed") && has_message) {
+            // 消息已写、接纳未成(失败与恢复单 P1-A):本 action 名下没有任何
+            // tool 消息在当前链上(降档派生会顶上、compact 移链是既定事实,
+            // 都不算缺口),不得冒充有效上下文,按提交链补接纳。
+            bool any_covered = false;
+            for (const auto& version : snapshot.message_versions) {
+                if (version.on_current_chain || removed_by_compact.count(version.message_id) > 0) {
+                    any_covered = true;
+                    break;
+                }
+            }
+            if (!any_covered) {
+                status = "message_not_admitted";
+            }
         }
         snapshot.folded_status = status;
     }
@@ -1158,7 +1188,9 @@ std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem
             projection.compact_markers.push_back(item.compact);
         }
     }
-    // 执行状态:未收口工具(无终态/unknown/已选用无消息)不重跑,原地续(§4.59)。
+    // 执行状态:未收口工具(无终态/unknown/已选用无消息/结果缺失/消息未
+    // 接纳)不重跑,原地续(§4.59;失败与恢复单 P1-A:执行终态、结果保存
+    // 状态、消息接纳状态分别保留,缺口逐枚列出恢复工作)。
     std::vector<ToolActionSnapshot> snapshots = FoldToolActions(*own);
     for (auto& snapshot : snapshots) {
         const std::string& status = snapshot.folded_status;

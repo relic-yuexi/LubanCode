@@ -531,12 +531,25 @@ private:
 
 }  // namespace
 
+// T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):v3 compact 分支的收场
+// 分两笔账——"持久 applied"(compact.applied 已按 PowerLoss 落稳)与
+// "运行态可继续"(链投影 ReplaceHistory 成功)。旧返回 bool applied 把两
+// 笔混成一笔,投影失败也照走成功尾部;现在拆开:applied 是事实照报,
+// runtime_ready=false 时设置会话级执行阻断(TrajectorySessionLedger::
+// BlockV3Execution),后续模型请求/新工具/自动续跑在请求最终准入处被拒
+//(不在本分支加早退——AppServer/Goal/Loop 殊途同门)。
+struct V3CompactBranchOutcome {
+    bool persisted_applied = false;  // compact.applied 已落稳(持久事实)
+    bool runtime_ready = false;      // 内存换账成功,本场可继续执行
+};
+
 // v3 compact 的会话现场路:PreCompact 闸 → cheap 路由 → profile/校验清单
-// 现场收集 → RunV3Compact → 记账/报数/PostCompact。返回 true = applied。
-// trigger 顶层只分 manual/auto;reason 按触发点给(threshold/
-// pre_send_overflow/context_overflow;手动 user_command)。
-bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
-                        const std::string& trigger, const std::string& reason, bool midturn) {
+// 现场收集 → RunV3Compact → 记账/报数/PostCompact。trigger 顶层只分
+// manual/auto;reason 按触发点给(threshold/pre_send_overflow/
+// context_overflow;手动 user_command)。
+V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
+                                          const std::string& trigger, const std::string& reason,
+                                          bool midturn) {
     auto& out = lubancode::cli::TermOut();
     const lubancode::cli::Theme& theme = *in.theme;
     // PreCompact 钩子闸:与 v2 同一道门,备份场景可以拦这一压。
@@ -552,21 +565,21 @@ bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
             if (merged.blocked) {
                 out << theme.error << "PreCompact 钩子拦下这次压缩: " << merged.block_reason
                     << theme.reset << "\n";
-                return false;
+                return {};
             }
         }
     }
     lubancode::runtime::TrajectorySessionLedger* ledger = in.trajectory;
     lubancode::trajectory::v3::V3Writer* writer = ledger->v3_main_writer();
     if (writer == nullptr) {
-        return false;  // 分派门已在外层判过;双保险,不该走到
+        return {};  // 分派门已在外层判过;双保险,不该走到
     }
     // 压缩路由:与 v2 同一只(cheap 角色,回落 normal),不拿会话模型顶包。
     const auto routed = in.route_compact();
     if (routed.backend == nullptr) {
         out << theme.error << "压缩路由找不到 provider \"" << routed.route.provider
             << "\",本次 compact 未执行" << theme.reset << "\n";
-        return false;
+        return {};
     }
     const lubancode::agent::CompactOptions options = in.build_compact_options();
     // --dry-run 只算不压;v3 侧的干跑口径(链上可回收量)随后续棒补,
@@ -574,7 +587,7 @@ bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
     if (args == "--dry-run") {
         out << theme.stats << "v3 会话的 /compact --dry-run 尚未接线;本次未发请求、未动上下文。"
             << theme.reset << "\n";
-        return false;
+        return {};
     }
 
     lubancode::runtime::V3CompactProfile profile;
@@ -653,16 +666,42 @@ bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
         // applied 即账本行持久化确认)——同一安全点把新链投影换进 loop
         // 内存,对齐 v2 的 loop.ReplaceHistory 换账位。投影重读主卷验卷,
         // 读回即确认;不携旧史、不携内部 compact 问答,后续实发与账侧
-        // prepared 引用同链。投影失败明说:内存保旧史,不装换过(账侧
-        // 已是新链,继续发会账实分离,交给人看)。
+        // prepared 引用同链。
+        V3CompactBranchOutcome outcome;
+        outcome.persisted_applied = true;
         {
             auto swapped = ledger->ProjectV3ContextHistory();
             if (swapped.has_value()) {
                 in.agent->ReplaceHistory(std::move(*swapped));
+                outcome.runtime_ready = true;
             } else {
-                out << theme.error << "compact 已记账生效,但内存换账失败(" << swapped.error()
-                    << ");本会话内存仍携旧史,建议 /resume 重开。"
+                // T12-A(V3-GAP-07 P0):applied 已落稳、内存换账失败——两笔
+                // 账分开记。已提交链保留(不回写旧链、不重跑摘要覆盖);
+                // 本场设置会话级执行阻断,后续模型请求/新工具/自动续跑在
+                // 请求最终准入处被拒(ledger 层的门,AppServer/Goal/Loop
+                // 同一道)。话术照实:压缩已提交、运行态未恢复,不打印
+                // "校验通过"的成功尾部;PostCompact 表达持久完成但带
+                // runtimeRestored=false,SessionStart(新上下文就绪)不发。
+                ledger->BlockV3Execution(swapped.error());
+                out << theme.error << "压缩已提交,运行态未恢复(" << swapped.error()
+                    << ");本场已停止后续模型请求,已提交链原样保留——请 /resume 沿已提交链重开。"
                     << theme.reset << "\n";
+                if (in.hysteresis != nullptr) {
+                    // 滞回账认持久事实:applied 已生效,自动路不得立刻再压
+                    // 一次(再压也是基于新链的无意义重试)。
+                    in.hysteresis->armed = true;
+                    in.hysteresis->last_post_tokens = result.tokens_after;
+                    in.hysteresis->map_path_held = false;
+                }
+                if (in.session_compact_epoch != nullptr) {
+                    *in.session_compact_epoch += 1;
+                }
+                if (in.emit_session_hook) {
+                    in.emit_session_hook(
+                        lubancode::hooks::HookEvent::PostCompact,
+                        nlohmann::json{{"trigger", trigger}, {"runtimeRestored", false}}, trigger);
+                }
+                return outcome;
             }
         }
         if (in.hysteresis != nullptr) {
@@ -696,21 +735,21 @@ bool RunV3CompactBranch(const std::string& args, const CompactSessionInputs& in,
             in.emit_session_hook(lubancode::hooks::HookEvent::SessionStart,
                                  nlohmann::json{{"source", "compact"}}, "compact");
         }
-        return true;
+        return outcome;
     }
     if (result.terminal_kind == "busy") {
         out << theme.stats << "已有进行中的 compact(" << result.reason << "),本次不再开场。"
             << theme.reset << "\n";
-        return false;
+        return {};
     }
     if (result.terminal_kind == "rejected" && result.reason == "no_eligible_history") {
         out << theme.error << tr("cmd.compact.empty") << theme.reset << "\n";
-        return false;
+        return {};
     }
     out << theme.error << (midturn ? trf("compact.auto_failed", result.reason)
                                    : trf("cmd.compact.failed", result.reason))
         << theme.reset << "\n";
-    return false;
+    return {};
 }
 
 // /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
@@ -1538,9 +1577,12 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
     const lubancode::cli::Theme& theme = *in.theme;
     // v3 会话分支(compact 全链单):账本是 v3 卷时走 RunV3Compact 全链
     //(§1.15 followup 语义的 CLI 命令入口,本棒先接 /compact);v2 会话
-    // 恒 nullptr,下面老路一字不动。
+    // 恒 nullptr,下面老路一字不动。T12-A:applied 与运行态两笔账在分支
+    // 内分开收场(投影失败即置会话级执行阻断),此处不再只认一个 bool。
     if (in.trajectory != nullptr && in.trajectory->v3_main_writer() != nullptr) {
-        RunV3CompactBranch(args, in, "manual", "user_command", /*midturn=*/false);
+        const V3CompactBranchOutcome outcome =
+            RunV3CompactBranch(args, in, "manual", "user_command", /*midturn=*/false);
+        (void)outcome;  // 呈现与阻断都在分支内落定;调用面无后戏
         return;
     }
     // PreCompact(trigger=manual):钩子可以拦这一压(备份场景)。
@@ -1641,8 +1683,11 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     if (in.trajectory != nullptr && in.trajectory->v3_main_writer() != nullptr) {
         out << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start")
             << theme.reset << "\n";
-        return RunV3CompactBranch(std::string(), in, "auto",
-                                  midturn ? "pre_send_overflow" : "threshold", midturn);
+        // 旧返回语义保持:applied(持久事实)= true;运行态失败已由分支
+        // 内置阻断,不把"运行态未恢复"伪装成"没压成"。
+        const V3CompactBranchOutcome outcome = RunV3CompactBranch(
+            std::string(), in, "auto", midturn ? "pre_send_overflow" : "threshold", midturn);
+        return outcome.persisted_applied;
     }
     // §2.2 滞回旗:map 防线拒收过一次,本会话自动路不再立刻重试 map 路
     //(真机事故:拒收 → 原史重发 → 预检再爆 → 再拒,死循环)。拒收当时的

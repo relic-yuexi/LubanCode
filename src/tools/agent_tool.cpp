@@ -2250,17 +2250,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         turn_wiring.on_tool_trace = [&child_bridge](const agent::ToolTraceEvent& event) {
             child_bridge.OnToolTrace(event);
         };
-        turn_wiring.on_tool_results_committed = [&child_bridge](const std::string& batch_id,
-                                                               const api::Message& results) {
-            child_bridge.OnToolResultsCommitted(batch_id, results);
-        };
-        // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——子代理不经
-        // ToolTraceHub 的统一接线,这里直挂子账桥(与 hub.Install 同款):
-        // 工具结果消息入子代理历史前,超帽全文就地归仓换固定预览,子代理
-        // 实发与子账 tool 消息吃同一份(账实一致)。v2 桥默认穿透。
-        turn_wiring.rewrite_tool_results_for_history = [&child_bridge](api::Message& results) {
-            child_bridge.RewriteToolResultsForHistory(results);
-        };
+        // P1-A(失败与恢复单 FA-01):回执口——子账的结果提交失败同样要
+        // 拦住子 loop 的后续模型发送,不拿内存独有结果继续。
+        turn_wiring.on_tool_results_committed_receipt =
+            [&child_bridge](const std::string& batch_id, const api::Message& results) {
+                return child_bridge.OnToolResultsCommitted(batch_id, results);
+            };
     } else if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
         auto parent_getter = foreground_hooks->parent_execution_id_getter;
         turn_wiring.on_tool_trace = [parent_getter, trace_hook = foreground_hooks->on_tool_trace](

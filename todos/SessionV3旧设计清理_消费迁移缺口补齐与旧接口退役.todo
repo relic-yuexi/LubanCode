@@ -1,0 +1,408 @@
+# Session v3 旧设计清理：消费迁移、缺口补齐与旧接口退役
+
+- 状态：待实施。本轮完成静态复核和任务拆分；未改运行代码，未运行本单所列运行验收。
+- 日期：2026-09-11。
+- 级别：P0（请求账实一致、会话删除门槛）；P1（消费者迁移、生命周期与旧接口收敛）。
+- 来源：[v3 旧设计审计](../docs/development/v3-legacy-audit.md)。保留原编号 V3-LEGACY-01–05、V3-GAP-01–09，另补两项遗漏。
+- 基线：HEAD `62b69d44`，`src/app/version.hpp` 为 `0.26.251`；核查对象包含当时工作区未提交改动，不把 HEAD 当整份工作区快照。
+- 来源文档 SHA256：`91832b0b814a6c8cec6b0c58be81f1fa998587b9e78bd1c1755f3aa8e62bfed3`。实施前重新核对源码、状态和审计版本，行号只作本次定位。
+- 范围：v3 写入遗漏、消费端、内部 Tool 角色、compact、Hook、Session 管理、测试默认配置、旧会话专属接口及配套文档。
+- 依赖：[v3 总设计](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)、[现行 v3 架构](../docs/architecture/session-v3.md)、[字段合同](../docs/architecture/trajectory-v3-schema.md)。
+- 关联：[Lua Hook](LuaHook统一扩展_MCP分工与SessionV3接入.todo)、[AppServer](AppServer接入SessionV3_统一入口与事件恢复设计.todo)、[Workflow](Workflow接入SessionV3_编排账与节点恢复设计.todo)。
+- 本轮交付仅此新 todo。原审计、既有文档修改、代码及用户存档保留。
+
+## 一、先定清理目标
+
+新 Session 只走 v3；模型实际收到的消息、v3 请求引用、恢复视图三者须一致。查询、计费、遥测和管理入口都能读懂这份账，才有资格撤掉旧桥。
+
+“出现 v2 字样”不构成删除理由。要撤的是旧会话格式的生产写口、专属信封和算法；canonical JSON、哈希、BlobStore、锁、耐久写入等共用底座保留。插件 manifest v2、原生 ABI v2、JSON-RPC 2.0 与此无关。
+
+原审计建议先迁消费者再删旧口，这个方向保留；补两项先行止损：compact 已提交而内存投影失败必须挡住后续执行；v3 删除不得因找不到 main.jsonl 而跳过封口检查。两项不等整套大迁移完成再处理。
+
+旧数据政策按 v3 总设计执行：不造转换器、不迁移用户旧档、不因撤代码删除旧档。本单建议最终运行入口只恢复 v3；遇旧格式给可识别的 unsupported 格式状态和原路径，不伪装为空会话。现存 v2 读取仅在实施过渡期保留，最后随生产旧依赖退役；若另要长期旧档查看器，另立只读离线范围，不反向牵制 v3 主路。
+
+## 二、编号、优先级与交付归属
+
+| 原编号/新增编号 | 本单任务 | 优先级 | 先决条件 | 销项归属 |
+| --- | --- | --- | --- | --- |
+| V3-LEGACY-01 | T01：格式开关、旧新建与目录分支退役 | P1 | T00/T02-A，各调用方迁完 | 本单 |
+| V3-LEGACY-02 | T02：旧信封/记录器/回放接口收敛 | P1 | T06–T15 消费清册归零；最终删型须在 T01 后 | 本单 |
+| V3-LEGACY-03 | T03：旧 compact 双账路径退役 | P1 | T04/T12 | 本单 |
+| V3-LEGACY-04 | T04：生产内部 Tool 容器收敛 | P1 | 四角色 wire/身份合同、逐项恢复用例 | 本单 |
+| V3-LEGACY-05 | T05：command Hook 与 Lua 中间件收口 | P1 | 各旧挂点替代及 outbox 处置 | LuaHook 单实施，本单验退役 |
+| V3-GAP-01 | T06：离线 usage 读 v3 | P1 | T00、现行 usage owner 合同 | 本单 |
+| V3-GAP-02 | T07：Telemetry v3 投影及补投 | P1 | T00/T06，所用事件合同齐备 | 本单 |
+| V3-GAP-03 | T08：Memory 召回/写入桥接 v3 | P1 | T00、正式消息与效果提交 | 本单验桥，总设计 §4.71 管完整系统 |
+| V3-GAP-04 | T09：AppServer 真实读写/恢复边界 | P1 | T00/T15、SessionService | AppServer 单实施，本单验旧桥 |
+| V3-GAP-05 | T10：Workflow 编排及节点账 | P1 | T00、Workflow output.commit 合同 | Workflow 单实施，本单验旧桥 |
+| V3-GAP-06 | T11：标题/审批档/环境/验证等遗漏 | P1；权限恢复先行 | 逐域 schema 与恢复政策 | 分域落地，本单逐域核销 |
+| V3-GAP-07 | T12：compact 余缺与投影失败阻断 | P0/P1 | P0 可先独立落；其余接 T04 | 本单 |
+| V3-GAP-08 | T13：Goal/Loop/btw/Memory 新合同接入 | P1 | 总设计 §4.67–4.71 的各分期 | 原分期实施，本单验替代依赖 |
+| V3-GAP-09 | T15：archive/unarchive/delete 的 v3 生命周期 | P0/P1 | P0 拦错误删除；全量依赖 T00/T11 | 本单 |
+| V3-ADD-01 | T14：Insights 与遗漏消费者清册 | P1 | T00/T06、请求快照合同 | 本轮静态新增 |
+| V3-ADD-02 | T16：测试环境默认强制 v2 | P1，早建双面验证 | T00；随各批迁移 | 本轮静态新增 |
+
+T00 为共用读取/测试材料基础，不是原审计缺陷编号。每项实现可拆小 PR，但编号不可随拆分消失。关联单“设计已写”不等于本单销项；有未完旧依赖就继续保留对应退役项。
+
+## 三、静态复核与新发现
+
+### 3.1 已重新定位的硬证据
+
+- `src/trajectory/v3/session_switch.cpp::NewSessionV3WriteEnabled`：未设变量默认 v3，显式 `0` 仍可写 v2；`FindV3SessionStream` 看见 main.jsonl 就不走 v3 发现。
+- `src/accounting/session_usage_reader.cpp::ListSessionStreams/ParseStream`：主流只找 main.jsonl，子流用平铺目录，解析为 EventEnvelope；找不到 v3 样本仍可能返回 ok=true 的空集合。
+- `src/telemetry/projector.cpp::Fold` 仍取 EventEnvelope；`service.cpp` 的发现/游标/补投尚依旧流身份。
+- `src/app/memory_ledger_bridge.cpp` 使用旧 Recorder/ContextInjected 接口；这与 v3 正式 memory message、context 采用和实际请求引用不是一回事。
+- `src/app_server/server.cpp` 明确把 thread/resume 实现为只读恢复视图预览；另在会话记录中拼 `session_main_path = .../main.jsonl`。
+- `src/agent/loop.cpp` 工具结果批次及中断补配对仍装进 `api::Role::User`；桥层再拆 v3 tool 行，内部容器与持久形状不同。
+- `src/app/commands/session_commands.cpp::RunV3CompactBranch`：dry-run 明报未接；midturn 丢弃；applied 后 `ProjectV3ContextHistory` 失败只打印提示，随后仍走成功尾部并返回 true。
+- `src/trajectory/session_manager.cpp::ArchiveSessionDir/UnarchiveSessionDir` 先读 session.json；`DeleteSessionDir` 从 main.jsonl 判封口。对只有 `<id>.jsonl` 的 v3，`journal_exists && !run_terminal` 这一旧判断不能证明其可删。
+
+上面是源码分支证据。尚未运行真实删除、故障注入、收费模型或 Collector；“可落入分支”与“本轮实测复现”分开记。
+
+### 3.2 V3-ADD-01：原表未单列的消费者
+
+`src/insights/integrity_gate.cpp` 查 main.jsonl 并解析 EventEnvelope；`prompt_auditor.cpp`、`friction_classifier.cpp` 也接旧信封集合。即便 usage/Telemetry 改完，这些生产查询仍能留下旧依赖，须纳入 T14。
+
+源码引用搜索还命中 `src/tools/task_ledger.*`、`src/tools/agent_tool.cpp`、`src/runtime/event.hpp`、`runtime_contract.cpp`、`src/app/memory_extract.cpp` 等。这里只把它们列为待分类引用，不因命中 RecordRequest/RecordRequestOutcome 等近名符号就认定全是旧会话接口。T00 逐个追到生产调用、纯类型引用或可保留共用件。
+
+### 3.3 V3-ADD-02：测试默认与产品默认错开
+
+`tests/CMakeLists.txt` 的每源码册 CTest 注册循环统一设置 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0`。部分 v3 测试自行 EnvGuard("1")，另有守门测试检查未设变量；因此不能说当前测试完全没测 v3，也不能用“全套绿”证明所有生产入口按默认 v3 跑过。
+
+T16 必须把测试分成默认生产路径、v3 强制路径、明确历史格式路径。移除总开关前先知道哪些册还借环境变量走旧路，不能一刀换成 1 后把失败册删掉。
+
+## 四、共用合同与实现顺序
+
+### T00：统一定位、引用与最小验收材料
+
+- [ ] 在已有 SessionService/runtime 查询边界收敛目录解析、格式识别、源链遍历及子 session 发现；具体 helper 可提取，不另建一套大而全的 Session 框架。
+- [ ] 返回稳定 session/stream 身份、格式、路径、来源引用、锁/损坏/缺件状态。不能让五个消费者各猜 `<id>.jsonl`、main.jsonl 或 session.json。
+- [ ] 复用 `src/trajectory/v3/reader.hpp` 的源链/子账校验和投影；校验首行身份、ref/hash、路径边界、环及重复节点。目录遍历有深度/数量限制，软链接不允许越 workspace 读任意文件。
+- [ ] 同目录同时出现两种主账时返回格式歧义，不因 main.jsonl 先命中就忽略合法 v3；部分新建/空文件/坏首行分别报状态，不当“无会话”。
+- [ ] 建消费者清册：源符号、直接调用方、最终命令/入口、输入/输出合同、替代 API、测试、退役阻塞项。需要保留的共用类型单列理由。
+- [ ] 冻结小型 v3 夹具：主账、两层子代理、两次 resume 来源链、compact、工具逐项结果、缺 usage/迟到 usage、缺 blob、坏尾/坏中段、归档及锁态。
+
+验收：同一组材料经 usage、Telemetry、Insights、AppServer 与管理入口解析出相同身份和缺口。只读解析不启动模型/工具、不新建 Session、不自动改坏档。
+
+通用引用使用 sessionId/runId/recordId/seq/hash 与源路径映射，seq 仅在本文件有序。统计的物理请求归属与 resume 的上下文继承分开：新会话引用祖先历史，不代表再发生一次祖先模型请求。
+
+### 4.1 批次依赖
+
+```text
+先行止损：T12-A（compact 执行门） + T15-A（v3 删除封口门）
+基础准备：T00 + T16 的测试分类
+并行实施顺序（不要求并行 Agent）：
+  T11 各域合同 -> 对应 T07/T08/T09/T10/T13 消费
+  T00 -> T06 -> T07/T14
+  T04 + T12 余项 -> T03
+  LuaHook 各槽位合同 -> T05
+消费者与对应验证完成 -> T02-A 收窄/拆开旧接口
+  -> T01 关闭旧新建/执行 -> T02-B 删旧类型、T03 最后删旧 compact
+```
+
+T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用到的字段。T13 未完也可先移除已无消费者的某个旧接口，但不能把未完模块删掉或批量宣布 v3 完成。
+
+## 五、先行止损：账已生效，执行就不能仍认旧账
+
+### T12-A / V3-GAP-07：compact 投影失败阻断（P0）
+
+落点：`src/app/commands/session_commands.cpp::RunV3CompactBranch`，Session/runtime 请求准入，Goal/Loop 自动工作入口。
+
+- [ ] 将“持久 applied”与“运行态可继续”分成结果字段/状态，不能继续只用 bool applied 表达整个操作成功。
+- [ ] applied 成功、投影/ReplaceHistory 失败时设置 Session 执行阻断：停止后续模型请求、新工具派发和自动续跑；已有在飞工作按真实状态收尾。
+- [ ] 保留已提交链，不回写旧链或重跑摘要覆盖它。恢复仅从已提交 v3 上下文重建，核验通过才解除阻断；存储故障使阻断事件也写不下时，内存先拒绝执行并如实报错。
+- [ ] 显示“压缩已提交，运行态未恢复”，不继续打印“全流程成功”；PostCompact 通知即使表达持久完成，也不得借此发新请求绕过阻断。
+- [ ] 在请求最终准入再次比较当前 contextRevision 与 prepared 引用；不能只在 CLI 分支加一个早退，AppServer/Goal/Loop 另路照发。
+
+验收：注入“applied 已落、投影读取失败/内存替换失败”，假后端请求计数不再增长，工具计数不再增长；重启后采用已提交链，旧史不混入新请求。D3 正常 ReplaceHistory 已修，只新增失败门，不重复把 D3 本体列为未修。
+
+### T15-A / V3-GAP-09：删除准入（P0）
+
+- [ ] 先识别实际 v3 主账，再取封口、锁、末行 hash；旧 main.jsonl 不存在不能当作无未完执行。
+- [ ] v3 状态/锁所有者未知、账损坏、未封口、引用完整性未核验时拒绝删除，给稳定原因；不先进入 remove_all 再报缺口。
+- [ ] 在独立临时目录加未封口 v3、活锁/未知锁、坏账测试，断言目录及内容 hash 原样保留；不拿用户真实 Session 验删除。
+
+验收：只含 `<id>.jsonl` 的运行中/不确定 v3 档不能穿过旧封口条件；完整生命周期另由 T15-B 完成。
+
+## 六、逐项迁移消费者
+
+### T06 / V3-GAP-01：离线 usage
+
+落点：`src/accounting/session_usage_reader.*`、`usage_projector.*`、`usage_aggregate.*`、usage 命令；复用 v3 usage owner 定义。
+
+- [ ] 流发现走 T00，递归识别正式子 session；Workflow 编排流不冒充模型 session，模型节点按关联单解析。
+- [ ] 从 assistant message 的唯一 usage owner 产 UsageSample；`model.usage.appended` 按当前 schema 只作失败/迟到/更正观察，不二次累计。若以后修改 owner 合同，要先改 schema 和所有消费者，不在此私自相加。
+- [ ] 使用实际 provider/model、purpose、ownerWorkRef 和 request 身份；compact/title/Goal 验收/子代理各记本次真实请求。
+- [ ] physical spend 默认按实际发生请求去重；resume/派生引用不重复计费。需要 lineage 汇总时显式选范围并展示纳入哪些源 session。
+- [ ] 区分 zero、unknown、partial、unsupported/corrupt；未找到可读 v3 流不能 ok=true+空样本伪装零消耗。错误请求的观察用量单列覆盖缺口，不随意升级成 owner。
+- [ ] 缓存输入/输出 reasoning 的归一化沿已有 `TotalInputTokens` 与价目表合同；估算、实报、金额分别显示来源。
+
+验收：人工可复算的小账逐请求相等；两层子代理、重复源链、缺实报、迟到实报、内部请求均不漏识别、不重复累计。旧历史材料另标格式，不混入 v3 完整率分母。
+
+### T07 / V3-GAP-02：Telemetry
+
+落点：`src/telemetry/projector.*`、`service.*`、identity/cursor/spool 与 OTLP 测试。
+
+- [ ] 替换 DiscoverStreams 与 EventEnvelope Fold，复用 T00、v3 正式消息/事件及 T06 同源 usage 取数。
+- [ ] 制定 Session/turn/request/tool/compact/Hook 到 span 的映射；缺起点、失败终态、未结束跨窗口 span 明确 partial，不从记录时间猜完整时长。
+- [ ] cursor 固定 store/session/stream 身份、投影版本、末 recordId/seq/hash；重命名、来源链、归档不等于新流。旧游标不套进新投影版本。
+- [ ] 继续遵守“投影批次 durable 入 spool 后才推 cursor”；确定 batchId/spanId，重启重投不生成新身份；远端 OTLP 投递不承诺 exactly-once，需区分本地去重与远端重收。
+- [ ] 无 title/verification/approval 等新域材料时标未覆盖，不伪造 span；对应 T11 完成后再增加映射并补版本测试。
+- [ ] 在投影到外发前执行现有 redaction/consent；不能因能读新 message 就把 prompt、工具正文、图片或 memory 私料送出去。
+
+验收：本地假 Collector 验正常、超时、重启、ack/落盘断点和重复发送；usage 与 T06 相同范围对得上。真实 Collector 可选验证单列，配置能加载不等于数据链通过。
+
+### T08 / V3-GAP-03：Memory 桥的最低替代面
+
+落点：`src/app/memory_ledger_bridge.*`、MemoryAccounting、实际召回调用、v3 message/context 提交；完整库改造归总设计 §4.71。
+
+- [ ] 去掉“v3 ledger.main()==nullptr 即召回失败”的旧 Recorder 假设，调用 v3 受管 writer/context 服务。
+- [ ] 召回候选、正式隐藏 user message、context 采用、实际 request refs 各有记录；origin/purpose 防止再次触发人类输入的召回 Hook。
+- [ ] 固定正文快照及 memoryId/revision/hash，恢复不用新 topic 正文解释旧请求；快照提交失败时本次不注入，主任务按 optional/required 策略处理。
+- [ ] 写入 requested/queued/committed 按真实回执分开，worker 不直接抢写 Session；MemoryStore 自己的版本/CAS/遗忘屏障仍按 §4.71 实施。
+- [ ] 用 v3 主场正常 memory-on 场景检查“候选非空但未真正发送”的断点，不能只测 Bridge 的孤立序列化。
+
+销项分两级：T08 桥迁完可解除对应旧 Recorder 依赖；§4.71 M0–M5 未完继续留 T13-M，不把一枚 context.injected 当整套 Memory 完成。
+
+### T09 / V3-GAP-04：AppServer
+
+落点：`src/app_server/server.cpp`、SessionService、thread history/resume 及 websocket 相关测试。
+
+- [ ] session_main_path 改由统一描述对象取得，不硬拼 main.jsonl；所有热/冷 Session 路由同一解析器。
+- [ ] 分开 history/read、effective-context preview 与恢复执行命令。当前 thread/resume 是只读预览，迁移时按 AppServer 协议版本显式命名/声明行为，不能悄悄让旧查询调用突然启动 Agent。
+- [ ] 真恢复沿 SessionService：来源校验、写者所有权、控制状态恢复、队列恢复和执行门；客户端重连不再新建同一轮。
+- [ ] 游标含会话来源及投影版本，文件 seq 与连接消息序号分开；带上归档/删除/缺件的稳定状态。
+- [ ] 普通输入、slash、审批和 Esc 沿统一接纳链；旁支请求不得踩 main 活动 turn，按 §4.69 另验。
+
+验收：冷 thread/read 零执行；真实恢复后实际 wire 等于有效 refs；断线重连不重复 turn/工具；归档、权限/锁冲突和缺来源能明确失败。AppServer 2.0 全面功能由关联单验，本单只确认旧路径和旧读取桥可撤。
+
+### T10 / V3-GAP-05：Workflow
+
+落点：`src/workflow/journal.*`、`runtime.*`、`host_executors.*` 及 WorkflowRun ledger。字段以 Workflow 关联单为准。
+
+- [ ] 逐节点类型分类：模型节点独立 v3 session；纯工具/控制/转换节点只有编排事件，不伪造 system/assistant。
+- [ ] 固定 workflowRunId/nodeExecutionId/attempt 与子 session 引用，输出采用以 output.commit 及 payload/hash 为准。
+- [ ] 区分 node completed 通知、外部副作用结果与已提交输出；崩溃恢复不能只看事件名字决定重新运行节点。
+- [ ] 编排/模型费用归属与 T06 对齐，不把父节点汇总再累计一次；工具权限、等待、取消与 task 账使用共享服务。
+- [ ] 标出可保留的编排 journal 与必须替换的 v2 模型桥；文件名 journal 不构成删除理由。
+
+验收：顺序、并行 join、子流程、失败重试和 output.commit 前后崩溃；已提交输出复用，未知副作用不盲重做。缺新节点运行时就保留对应旧依赖，不能为了清理表变绿关掉 Workflow 功能。
+
+### T14 / V3-ADD-01：Insights 与尾部消费者
+
+落点：`src/insights/integrity_gate.*`、`prompt_auditor.*`、`friction_classifier.*`、相关 session/workspace 分析入口。
+
+- [ ] 完整性检查复用 v3 reader/verify，坏来源/缺 blob/不完整请求在报告中标 partial，而非跳过整场或记零风险。
+- [ ] PromptAudit 读取实际 request refs、wire map、contextRevision 与 tokenEstimateRef，不从最终聊天显示倒推出站 prompt。
+- [ ] Friction 分类从 v3 工具/请求/审批事实取材，保留规则版本和 evidenceRefs；没有相应 T11 事实时输出 unknown，不据未记录推断没有审批/失败。
+- [ ] workspace 汇总按 T06 的范围去重，父/子/恢复链不重算，隐私与 redaction canary 保持。
+- [ ] 完成 T00 清册中 task_ledger、agent_tool、runtime_contract 等命中引用分类；每个真实旧信封消费者另挂子项，不能只靠头文件删除后编译不过再临时补洞。
+
+验收：同一请求能从 Insights 跳到对应 v3 消息/工具与原始请求材料；损坏/缺件可解释；无关字段缺失不变成“模型没做”。已有 `tests/unit/insights` fixture 迁新格式并保留错误反例。
+
+## 七、收敛执行内核与尚未发行的事实
+
+### T04 / V3-LEGACY-04：独立 Tool 容器
+
+落点：`src/agent/loop.cpp`、api Message/blocks、context turn partition、工具结果回调、恢复桥及四家 wire adapter。
+
+- [ ] 穷举 Role::User 分支，区分真正用户输入、宿主续跑提示与 ToolResultBlock；只改工具载体，不把所有合成 user 都改成 Tool。
+- [ ] 采用独立 Tool message 并保留每次调用身份、单项持久结果、跨请求重复 provider call id 的映射；批次回调保留明确 batch/调用列表，不能靠相邻 user 数量猜 turn。
+- [ ] 中断、未启动工具、孤儿调用补配对按实际 outcome 表达；已完成工具不重跑，半份调用不伪造完整。
+- [ ] 同步检查 summary 切分、保留尾部、预览降档、Hook 输入和 request fingerprint；Tool message 不开启新 user turn。
+- [ ] 四家 wire 对照以语义、顺序、call id、thinking/签名/图片及 WireMessageMap 为准；协议需要 user tool_result/functionResponse 时由 adapter 转，不把 wire 限制搬回内部角色。
+
+验收：一轮两工具、跨 step、多工具中第二项取消、第三项未启动、resume 从未完成项继续；持久 refs 与实际 wire 映射完整。复用 `test_wire_role_contract.cpp`、`test_four_role_kernel.cpp`、`test_v3_tool_action.cpp` 及真实主入口假后端场景。
+
+### T12-B–E / V3-GAP-07：compact 剩余四项
+
+- [ ] **B 干跑**：`/compact --dry-run` 从同一候选范围与容量规划器算 before/可压范围/保留项/输出预留；不发模型、不改 context、不调用副作用 Hook。只估计结构可回收量，不编造摘要实际 token。
+- [ ] **C 回合关联**：传入真实 main turnId，内部 compact 使用独立 turnId/parentTurnId；idle 手动压缩按实际无活动主轮表达，不伪造 parent。测试 user steer 与中途压缩竞争。
+- [ ] **D overflow 恢复**：区分阈值、pre-send 与 provider context_overflow；重试须有更小且合法的输入 hash/范围，尝试有界。不能 Goal 新 iteration 重发相同超限请求。
+- [ ] **E hard trim 收口**：`AfterHardTrim` 及工具截断归到 v3 32/16/8/4 KiB 派生预览和 context 提交；原 artifact 不动、调用结果不拆散。重读结果全量文件不能绕过最低档失败门槛。
+
+验收：B 零请求、C 身份正确、D 每次失败重试严格有变化且有终点、E 账实/预览/全文三者可核。与 T12-A 合并验 applied 后重启、后续 tool、第二次 compact，D1/D2/D3 已有正常链测试继续守住。
+
+### T03 / V3-LEGACY-03：旧 compact 退役
+
+- [ ] 追 `HandleCompactCommand/TryRunCompact/CompactTurnPartitioned` 所有实际调用；把仍用 archive/kept_indices/旧双账结果的消费者列清。
+- [ ] T04/T12 验收通过后，新执行路径只走 RunV3Compact 与 contextChain；保留估算、canonical/hash 等可复用纯函数。
+- [ ] 删除旧格式专属算法、schema、命令分支及仅证明其行为的夹具；通用容量/配对/失败测试迁到新入口，不连测试意图一起丢掉。
+- [ ] 架构历史页可保留并标 retired/日期，用户指南、帮助和注释只讲现行路径。
+
+销项：生产无旧 compact 调用；新路径手动/自动/中途/overflow 四入口同源且通过故障测试。不要求重跑摘要质量或 token 估算收益实验。
+
+### T05 / V3-LEGACY-05：Hook 单槽位迁移
+
+- [ ] 为旧 HookEvent/配置键建逐项映射：新 hookPoint/name/phase、触发入口、排序、权限、阻断/候选效果与通知语义。没有替代项的挂点不能先删。
+- [ ] 每个槽位只能选一份逻辑实现；明确旧 command 与 Lua 并存过渡时的归属，测试防止同一行为双执行。
+- [ ] 把旧退出码/deny/warn 规则改成宿主结构化裁决，Lua 返回候选不直接改状态；权限与效果 commit 仍有唯一写口。
+- [ ] 盘点 Post/outbox 的 pending/ack 和外部副作用。当前文档已说明自动重投未接，迁移不得突然自动重跑历史 pending；保留可查询记录及人工处置状态。
+- [ ] 替换 dispatcher 的生命周期职责后再拆进程执行、legacy adapter、protocol/loader 旧分支；信任/超时/取消/后处理等共用能力按用途保留。
+
+验收：Pre/PostUser、工具前后、PostTurn、compact、Goal/Loop、子代理/后台通知各有一条真实触发路径；同名替换、依赖排序、失败/取消、效果未采用、崩溃后迟到结果均可解释。新 Lua 挂点写齐并不自动证明旧 outbox 可删。
+
+### T11 / V3-GAP-06：遗漏事实按域销项
+
+当前 schema 第十节明确部分事实无 kind/未发行。先决定必要语义，再同时更新 schema、writer、reader、UI 与测试；禁止直接删 v3 早退，把旧 payload 换个名称塞进去。
+
+| 子项 | 需要定的合同与实现 | 完成证据 |
+| --- | --- | --- |
+| T11-A 标题 | manual 与 generated 来源分开；自动生成 prompt/assistant 留 message；实际采用独立事件；手动标题不伪造 titleGenerationId | 手动改名/自动失败/迟到生成与用户改名竞态，resume 显示真实已采用标题 |
+| T11-B 审批档 | 档位变更与单次审批分开；保存来源/策略版本；恢复需重算当前授权上限，不能仅从旧历史恢复更高权限 | 变更后崩溃、策略收紧、待答审批恢复，不静默提权 |
+| T11-C 环境 | 捕获时间、OS/git/provider/能力配置快照、redaction 与取材状态；没有采集就 unavailable | 旧场恢复不拿今天环境补昨天事实，秘密 canary 不入档/外发 |
+| T11-D 验证/恢复/迟到 | verification 关联工具/产物与版本；失效原因、未知副作用、迟到响应只记观察，不覆盖已提交终态 | 重复/迟到/变更后旧验证不能封新目标，也不触发工具重做 |
+| T11-E 容量/预算 | 用现行 prepared/估算引用/usage owner 能表达的就复用；剩余压力与预算裁决新增结构化事件，不复制第二份累计用量 | 发送前预算、取消、retry 和恢复累计可对账 |
+
+每域新增 kind 按现行 schema 演进规则发行，不能在同一 schemaVersion 下改旧字段含义。若裁定某旧事实不再需要，需列出现存消费者替代策略/降级输出及测试，才可标 intentional omission；“没有 kind”本身不算完成。
+
+### T13 / V3-GAP-08：大功能的移交与旧依赖出口
+
+- [ ] **T13-G** 对照 §4.67 G0–G4，记录 Goal 的 state.goal.applied、evaluator 内部消息、预算及续排恢复何时替换旧接线。
+- [ ] **T13-L** 对照 §4.68 L0–L3，记录 Loop 的 state.loop.applied、tick/outbox/恢复替代口；只管当前会话定时工作，不扩为系统 cron 或每天定时启动程序的通用服务。
+- [ ] **T13-B** 对照 §4.69 B0–B3，确认 per-context turn/取消/请求与隔离落地；不能仅加命令面板就删 main-only 控制假设。
+- [ ] **T13-M** 对照 §4.71 M0–M5，分清 T08 桥接与 MemoryStore/权限/遗忘的完整实施；两处共享同一接口，不各造状态真值。
+- [ ] 每项附“尚占用哪些旧符号/事件”的清单及相关 PR/验证报告。完成对应替代面即可释放旧依赖，其余新功能继续原单推进。
+
+本单不重写四份功能设计，也不以“已移交”冒充实现完成。最终旧接口删除受依赖清册约束，未完项有明确阻塞原因和归属。
+
+## 八、Session 管理与旧入口退役
+
+### T15-B / V3-GAP-09：完整生命周期
+
+落点：SessionManager 管理方法、目录 lifecycle journal/索引、v3 来源引用与 SessionLock。
+
+- [ ] 用 v3 首行/终态及 writer 锁推导执行状态，不为满足旧函数临时造 session.json。
+- [ ] 归档是目录管理状态，与会话执行 closed/interrupted 分开；复用 workspace lifecycle 提交/索引，已封口 JSONL 不为切 archived 改原行。查询投影合并二者。
+- [ ] archive/unarchive 幂等，运行中/坏档/来源缺件拒绝或给明确处理政策；操作后重建索引仍能读回同样状态。
+- [ ] 删除前核验 incoming refs：resume、fork、子会话、artifact 与 memory 等依赖。首版默认拒删仍被引用的源，不级联删后代，也不偷偷复制一套来源解除依赖。
+- [ ] 生命周期 intent、tombstone、实际目录删除、完成回执之间有可恢复状态；tombstone 保存实际 v3 尾 hash/范围和原因，失败不能先报告删除成功。
+- [ ] 删除动作始终限定规范化 workspace/session 路径，检查软链接和锁；物理删除只在用户明确请求时执行，测试用独立临时根。
+
+验收：正常归档/恢复归档、重复调用、活锁/未知锁、坏尾/坏中段、引用阻挡、intent/tombstone/remove 后分别崩溃。原始合法账 hash 在 archive/unarchive 前后不变；删除后可查收据且不会凭索引残留重新执行。
+
+### T02 / V3-LEGACY-02：先断消费者，再撤旧类型
+
+分两步执行：T02-A 迁消费者、隔离共用件，保留仍供旧新建/恢复调用的实现；T01 关闭旧执行入口后，T02-B 才删除剩余旧类型/记录器。不能先删记录器再补旧入口退出，也不能要求双方互等完成。
+
+- [ ] 以 T00 清册为准逐个替换 EventEnvelope/EventScope/RecordRequest/TrajectoryRecorder/replay 的生产消费者；不要创造“v3 转回 v2 EventEnvelope”的永久桥来凑兼容。
+- [ ] `src/runtime/trajectory_session.*` 按 v3 职责缩减双分支，未覆盖域由 T11 显式支持或降级；生产不再依赖 recorder_->Record 空值路径。
+- [ ] 共享 canonical/hash/blob/durability/clock/lock 与领域独立事件类型提到清晰边界，删除会话格式专属部分；不按目录删除整个 trajectory。
+- [ ] 处理头文件/include、前置声明、CMake 源列表、测试夹具、脚本、导出器/insights 与文档。编译无报错不是全部消费者迁完，需命令级验收。
+- [ ] 符号级检查输出分类结果：已移除、保留共用、历史测试/文档；不能要求仓库字符串 v2 为零。
+
+销项：生产调用图不再回到旧会话信封；明确保留的共用件有理由及测试。旧接口仍被未迁模块引用时，本项继续 pending，不靠断功能绕过。
+
+### T01 / V3-LEGACY-01：格式开关与旧新建收口
+
+- [ ] 所有新建、clear 换场、子 session、AppServer 和恢复执行入口写 v3；不留显式 `0` 可新建 v2 的逃生分支。
+- [ ] 移除格式分流后，旧环境变量若仍设置为 `0`，给“选项已退役”诊断并按 v3 唯一路径处理；帮助/配置文档说明实际行为，不静默声称关闭 v3。
+- [ ] 停用运行时 v2 resume/写回，格式识别器仅保留识别并报 unsupported 的最小入口；用户原档原样保留，查看/导出旧数据的额外需求不混进新主路。
+- [ ] 归档/删除/查询新接口不再依赖 main.jsonl 或 session.json；可保留的历史路径检测注明用途，防止后续误接为写路径。
+- [ ] T16 生产默认测试不再靠总环境变量绕开 v3；产品所有会话入口与测试使用同一默认。
+
+销项：搜索实际创建流路径和 old-format writer 的引用为零；未设变量、1、0 三种启动都不会新建 v2。旧档在格式识别用例中只返回明确状态，不自动转换/删除。
+
+## 九、测试、构建与故障证据
+
+### T16 / V3-ADD-02：拆开测试面
+
+- [ ] 导出 CTest 源码册和环境设置表，标明 default-v3、explicit-v3、legacy-only、format-neutral，不以目录名代替真实所走路径。
+- [ ] 新增“完全不设格式环境变量”的 CLI/AppServer/子代理/compact 管理入口冒烟；保留 EnvGuard 的针对性格式测试。
+- [ ] 各批迁移对应测试后逐步撤全局强制 0；旧专属册退役时保留其通用失败/完整性意图到新册。
+- [ ] 测试 fixture 既用 v3 writer 生成合法账，也保留手工错误夹具；不能 writer/reader 同一个错误互相自证。
+- [ ] 运行前记录版本、HEAD、工作区 diff/夹具 hash、构建产物路径和测试环境；基线更新时补记，不复用旧通过数字。
+
+### 9.1 按改动选测试，不拿旧套件冒充新覆盖
+
+| 批次 | 现有测试落点/补充方向 |
+| --- | --- |
+| T00/T01/T02/T15 | `tests/unit/trajectory_v3/`、`tests/unit/trajectory/` 中锁/Session 管理通用用例、新增 v3 管理失败册 |
+| T04/T03/T12 | `tests/unit/api/test_wire_role_contract.cpp`、`test_four_role_kernel.cpp`、`tests/unit/agent/test_loop.cpp`、v3 compact/preview/stream/writer 册 |
+| T06 | `tests/unit/accounting/`、`tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp`，新增 session_usage_reader v3 明确用例 |
+| T07 | `tests/unit/telemetry/`、`tests/integration/telemetry/test_telemetry_otlp_export.cpp` |
+| T08 | `tests/unit/app/test_memory_ledger_bridge.cpp`、`tests/unit/memory/` 与实际主入口 memory-on 场景 |
+| T09 | `tests/unit/app_server/`、`tests/integration/app_server/` 与 WS smoke，恢复预览和实际执行分开断言 |
+| T10 | `tests/unit/workflows/`、`test_workflow_trajectory_runtime.cpp`、WorkflowRun ledger 与 crash/output.commit 场景 |
+| T05/T11/T13 | 各域现有册 + v3 接线/恢复/并发反例，不用旧域单测代替新提交链 |
+| T14 | `tests/unit/insights/` 完整性、prompt、friction、聚合和 redaction canary |
+
+现有 tests/CMakeLists.txt 按源码册注册 `unit.<domain>.<stem>`。实施时先用 `ctest --test-dir build/release -C Release -N` 核对实际名称，再跑相关册；不要写一个匹配零测试的正则就宣称通过。
+
+生产入口使用 `scripts/tests/v3_accept_matrix.py` 与 `scripts/tests/v3_accept_fake_backend.py`，扩展本单场景并用 `scripts/validate_trajectory_v3.py` 验账。运行前查看 `--help`，为 `--work` 指定独立临时目录，避免覆盖其他任务的验收产物。它是实际 exe + 假模型后端验证，不是摘要质量或真实供应商稳定性实测。
+
+### 9.2 最小端到端矩阵
+
+| 场景 | 必须联合核对的证据 |
+| --- | --- |
+| 默认启动 → 工具两项 → compact → 新请求 | 内部 Tool、v3 refs、实发 wire、usage 同源 |
+| compact applied 后投影故障 | 新请求/新工具零增长；已提交链保持；恢复后才能续 |
+| 两次 resume + 两层子代理 | 历史可查，当前链合法，usage/Telemetry/Insights 不重算祖先 |
+| provider overflow + 32/16/8/4 KiB 降档 | 每次实际输入可追，配对完整，最低档失败有界停止 |
+| memory-on + recall + compact/resume | 正文快照与实际采用可核，不再因旧 recorder 空而丢召回 |
+| AppServer read/preview/resume + 重连 | 查询零执行，真正恢复一次，cursor 不把源 seq 当连接序号 |
+| Workflow 模型节点 + 输出提交前后崩溃 | 子 session/attempt 可定位，output.commit 准入，副作用不盲重做 |
+| Hook 覆盖 + Post 通知失败 | 一槽一实现，效果采用明确，旧 pending 不自动重投 |
+| v3 未封口/活锁/引用中源被请求删除 | 明确拒绝，目录及 hash 不变 |
+| archive/unarchive + 索引重建 | 管理状态正确、正文不变；缺 manifest 不报不存在 |
+| 缺 usage/缺 blob/坏中段/歧义布局 | partial/unknown/unsupported 正确，不报零消耗或完整恢复 |
+| 旧格式检测与变量 0 | 退役后只建 v3，旧数据不迁移/删除，不在运行中偷偷回旧路 |
+
+每个场景报告命令/环境、输入 fixture、实际退出状态、断言数、请求/工具计数和账 hash。Windows/Linux/macOS 的路径、换名锁、进程取消测试分别记；没环境就写未验，失败/超时不改成跳过绿灯。
+
+## 十、批次提交与最终销项
+
+### B0：本轮设计与复核
+
+- [x] 读取来源审计，复核版本、关键分支、测试注册规则和遗漏消费者。
+- [x] 原 14 项逐一映射到实施任务，新增 Insights 与测试默认两项。
+- [x] 单列 P0 止损、跨域依赖、故障矩阵与退役门槛。
+- [ ] 运行时复现与全部实现验证。本轮没有执行，不提前勾。
+
+### B1：止损与基线（PR #43，v0.26.254）
+
+- [ ] T12-A、T15-A；T00 共用读面/夹具清册；T16 测试分类及默认-v3 冒烟。
+
+验收：两条 P0 失败路径确实挡住执行/删除；新增测试确实进入默认 v3，旧通过结果作为历史记录保留。
+
+### B2：消费链与事实补齐
+
+- [ ] T06/T07/T08/T14，T11 所需域；按 AppServer/Workflow 关联单推进 T09/T10。
+
+验收：同一组 v3 原账能产查询、用量、遥测和分析结果；所有缺件如实标注；各域旧依赖从清册逐条消失。
+
+### B3：内核、Hook 和域接线
+
+- [ ] T04、T12-B–E、T05、T11 余域、T13 对应替代口及 T15-B。
+
+验收：正常/取消/崩溃/恢复的消息、工具、控制状态及执行门一致；关联设计项未完成时保留真实阻塞项。
+
+### B4：退役与发布收口
+
+- [ ] T02-A 依赖清册验空 -> T01 关闭旧执行入口 -> T02-B/T03 删除余下旧实现；移除旧新建写口和全局测试 0，清理旧专属构建/夹具/脚本引用。
+- [ ] 构建、相关测试及受影响全套回归通过；三平台差异测试给真实结果，未验项不宣称完成。
+- [ ] 源审计逐项填写 commit/测试/报告路径；README、命令帮助、schema、专题页同批更新现状。历史算法页保留日期与 retired 标记。
+
+验收：新执行只走 v3，原审计的每项“销项条件”都有证据，未完成项写明阻塞模块与下一步。不得用“文档已更新”“已转其他 todo”替代运行验收。
+
+### 10.1 每项结案记录格式
+
+```text
+任务编号：Txx / V3-LEGACY-xx 或 V3-GAP-xx
+状态：pending / implementing / verified / blocked
+实现：commit + 路径/符号
+生产入口：CLI / AppServer / worker / Workflow / 只读查询
+验证：构建配置、测试名、场景、结果及报告路径
+失败/未验：明确原因和剩余边界
+旧依赖：已移除 / 保留共用及理由 / 等待哪项
+文档：改动页面
+销项日期：只有 verified 后填写
+```
+
+## 十一、预计改动范围与保留边界
+
+代码集中在 `src/trajectory/`、`src/runtime/trajectory_session.*`、`src/agent/loop.cpp`、compact、`src/accounting/`、`src/telemetry/`、`src/insights/`、Memory bridge、AppServer、Workflow 和 Hook；测试涉及对应目录及 `tests/CMakeLists.txt`。每批只暂存该批明确文件，检查 staged diff，保留工作区其他改动。
+
+本单不负责系统 cron、向量数据库、模型训练、真实摘要质量评测或全部 Memory 产品能力；不追溯重写旧实验结论，不删除用户 Session/Memory/Hook outbox。新 kind 先走合同，不把合法旧记录当垃圾；删除旧代码要有调用清册和替代证据，不能用批量搜索替代审计。
+
+本次文档交付检查：UTF-8、章节/任务编号、原 14 项映射、相对链接目标和 `git diff --check`。后续修改 docs 时再执行仓库 `scripts/check_docs.sh`；本轮未改 docs，不复述来源审计的测试结果为本轮通过。
