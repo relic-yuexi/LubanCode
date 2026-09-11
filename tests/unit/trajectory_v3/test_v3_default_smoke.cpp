@@ -26,6 +26,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"  // NewSessionV3WriteEnabled(前提断言)
 #include "workspace/identity.hpp"
 
 namespace platform = lubancode::platform;
