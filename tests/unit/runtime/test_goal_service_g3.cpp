@@ -329,6 +329,43 @@ TEST_CASE("ResolveWaiting:waiting->active,收口位恢复 running;迟到交付�
         CHECK(late.error_code == goalns::kErrGoalNotWaiting);
         CHECK(service.current()->lifecycle == GoalLifecycle::Paused);  // 停止意图优先
     }
+
+    SUBCASE("user_resume 解除等待:reason 如实落事实行,相位同样恢复") {
+        // 收口位等待下用户显式 resume(命令面走 ResolveWaiting + reason=
+        // user_resume):状态面与真实完成唤醒一致,事实行的 reason 分得开。
+        REQUIRE(service.CompleteIterationWithEvaluation(
+                    service.current()->state_revision, ContinueVerdict("goal-1/iter-1"),
+                    nlohmann::json{{"source", "test"}})
+                    .ok);
+        REQUIRE(service.ClaimPendingIntent("run-s1", service.current()->state_revision,
+                                           nlohmann::json{{"source", "test"}})
+                    .ok);
+        REQUIRE(service.BeginIteration(service.current()->state_revision,
+                                       nlohmann::json{{"source", "test"}})
+                    .ok);
+        REQUIRE(service.EnterWaiting({"subagent-11"}, service.current()->state_revision,
+                                     nlohmann::json{{"source", "test"}})
+                    .ok);
+        auto resumed = service.ResolveWaiting("command:goal:resume",
+                                              service.current()->state_revision,
+                                              nlohmann::json{{"source", "command"}},
+                                              "user_resume");
+        REQUIRE(resumed.ok);
+        CHECK(service.current()->lifecycle == GoalLifecycle::Active);
+        CHECK(service.current()->phase == GoalPhase::Running);  // 收口位:续收口不开新轮
+        CHECK(service.current()->wait_task_refs.empty());
+        // 事实行 reason=user_resume(与 background_task_finished 分得开)。
+        const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(volume.jsonl());
+        REQUIRE(ledger.has_value());
+        bool saw_user_resume = false;
+        for (const auto& event : ledger->events) {
+            if (event.kind != EventKindV3::GoalWaitResolved) continue;
+            if (event.payload.contains("reason") && event.payload.at("reason") == "user_resume") {
+                saw_user_resume = true;
+            }
+        }
+        CHECK(saw_user_resume);
+    }
 }
 
 // ---------------------------------------------------------------------------

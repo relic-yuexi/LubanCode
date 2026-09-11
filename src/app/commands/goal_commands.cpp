@@ -716,6 +716,26 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
                 return lubancode::app::CommandFlow::Continue;
             }
         }
+        // waiting 的恢复走 ResolveWaiting(§4.67.3 waiting -> active 出口):
+        // 收口位等待(iteration 在途、工作项已认领)恢复 phase=running,泵的
+        // ResumeV3Closeout 下一拍把截走的验收接上——不开新轮、不重放副作用;
+        // 排队/间歇等待恢复 idle 后由补排段接管。不走 ApplyTransition(resolve
+        // 已转 active,waitTaskRefs/巡检账一并清,事实行 reason=user_resume
+        // 如实留档)。
+        if (current->lifecycle == goalns::GoalLifecycle::Waiting) {
+            const auto resolved = service.ResolveWaiting("command:goal:resume",
+                                                          current->state_revision,
+                                                          command_cause, "user_resume");
+            if (!resolved.ok) return fail_with(resolved);
+            current = service.current();
+            out << theme.stats << "等待解除(用户 resume;r"
+                << resolved.payload.value("stateRevision", 0) << ")";
+            if (current != nullptr && current->phase == goalns::GoalPhase::Running) {
+                out << ";在途轮收口续跑,不重开新轮。" << theme.reset << "\n";
+                return lubancode::app::CommandFlow::Continue;  // 收口位:泵续跑,无新班可排
+            }
+            out << theme.reset << "\n";
+        }
         // §4.67.2 resume 行 + G3:budget_exhausted 须显式加预算后才可恢复
         //("/goal resume iterations=30 tokens=200000"),不悄悄放宽;旧
         // 费用保留。其余停态直接复核转回。
@@ -758,7 +778,7 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
             current = service.current();  // AddBudget 已提交,拿新 revision
         }
         // 仍停在停态(preparing 不是停态,但同样要转 active 才算恢复;
-        // waiting 的解除与收口续跑归后台等待路,不走这笔)。
+        // waiting 上面已走 ResolveWaiting 解除,不重复转)。
         if (current->lifecycle != goalns::GoalLifecycle::Active) {
             goalns::GoalTransitionCandidate candidate;
             candidate.goal_id = current->goal_id;

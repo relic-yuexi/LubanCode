@@ -1759,7 +1759,8 @@ GoalServiceResult GoalService::RecordWaitInspection(std::uint64_t expected_state
 
 GoalServiceResult GoalService::ResolveWaiting(const std::string& delivery_key,
                                               std::uint64_t expected_state_revision,
-                                              nlohmann::json cause_ref) {
+                                              nlohmann::json cause_ref,
+                                              const std::string& reason) {
     if (broken_) {
         return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
     }
@@ -1784,7 +1785,8 @@ GoalServiceResult GoalService::ResolveWaiting(const std::string& delivery_key,
         resolved.kind = EventKindV3::GoalWaitResolved;
         resolved.payload["goalId"] = current_->goal_id;
         resolved.payload["deliveryKey"] = delivery_key;
-        resolved.payload["reason"] = "background_task_finished";
+        resolved.payload["reason"] = reason.empty() ? std::string("background_task_finished")
+                                                    : reason;
         const auto receipt = writer_->AppendEvent(std::move(resolved), Durability::ProcessCrash);
         if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
             return Fail(kErrGoalStoreUnavailable,

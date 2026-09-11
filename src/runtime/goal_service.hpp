@@ -524,10 +524,13 @@ public:
     // deliveryKey 是通知去重键(同 key 迟到重放由调用方留审计,这里按
     // waiting 态守门:非 waiting 拒——pause/clear 后的后台报告不拉起新轮)。
     // 收口位等待(iteration 在途)恢复 phase=running 供收口续跑,否则 idle。
-    // 先落 goal.wait.resolved 事实行,再提交快照。
+    // 先落 goal.wait.resolved 事实行(带解除原因),再提交快照。reason 缺省
+    // background_task_finished;/goal resume 也走这口解除等待,reason 传
+    // user_resume 如实留档。
     GoalServiceResult ResolveWaiting(const std::string& delivery_key,
                                      std::uint64_t expected_state_revision,
-                                     nlohmann::json cause_ref);
+                                     nlohmann::json cause_ref,
+                                     const std::string& reason = "background_task_finished");
 
     // 显式加预算(§4.67.2 budget_exhausted 行):只抬帽不清账,每字段取
     // max(旧帽,新增);旧费用保留。加完由调用方再走转回 active 的路径

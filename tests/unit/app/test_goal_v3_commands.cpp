@@ -291,6 +291,44 @@ TEST_CASE("v3 resume 修不可推进的 preparing:崩溃窗口(edit 后没排上
     CHECK(fixture.turn_texts[0].find("改版后的目标") != std::string::npos);
 }
 
+TEST_CASE("v3 resume 解 waiting:已认领收口位恢复 running 续收口,不重开轮") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    GoalV3Fixture fixture;
+    fixture.wiring.Ensure(fixture.config);
+    GoalWiring pack = fixture.Pack();
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Create, "等后台的目标"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    // 直进收口位等待:认领 + 开轮后转 waiting(泵路里等价于收口被本轮
+    // 派生的在跑子代理截走)。
+    goalns::GoalService* service = pack.goal_service;
+    REQUIRE(service->ClaimPendingIntent("run-test", service->current()->state_revision, {}).ok);
+    REQUIRE(service->BeginIteration(service->current()->state_revision, {}).ok);
+    REQUIRE(service->EnterWaiting({"subagent-4"}, service->current()->state_revision,
+                                  nlohmann::json{{"source", "test"}})
+                .ok);
+    CHECK(service->current()->lifecycle == goalns::GoalLifecycle::Waiting);
+
+    // 修复前:resume 落 active/idle,intent 已认领 → 泵判"已认领且不在待开
+    // 轮相位"死锁;修复后:走 ResolveWaiting 恢复 active/running,收口续跑。
+    REQUIRE(lubancode::app::HandleGoalCommand(ParseAction(GoalCommandAction::Resume), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    const goalns::GoalStateSnapshot* current = service->current();
+    REQUIRE(current != nullptr);
+    CHECK(current->lifecycle == goalns::GoalLifecycle::Active);
+    CHECK(current->phase == goalns::GoalPhase::Running);  // 收口位:续收口不开新轮
+    CHECK(current->wait_task_refs.empty());
+    // 工作项还认领着,不会被新意图顶掉(收口材料不动)。
+    CHECK(current->pending_intent.at("claimed") == true);
+    CHECK(current->counters.iterations_started == 1);  // 没开第二轮
+    CHECK(fixture.turn_texts.empty());
+    bool saw_release_note = false;
+    for (const std::string& note : fixture.notes) {
+        if (note.find("等待解除") != std::string::npos) saw_release_note = true;
+    }
+    CHECK(saw_release_note);
+}
+
 TEST_CASE("v3 泵路:认领→开轮→synthetic turn→收工,第二拍不再开轮") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     GoalV3Fixture fixture;
