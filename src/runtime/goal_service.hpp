@@ -198,6 +198,7 @@ struct GoalStateSnapshot {
     std::vector<std::string> wait_task_refs;       // G3:waiting 期登记的相关后台任务
     GoalWaitPlan wait_plan;                        // G3:巡检计划(空等待 = 未登记)
     std::optional<std::string> applied_evaluation_id;  // 已采用判词(G2+ 填)
+    nlohmann::json applied_evaluation;  // Adopted verdict, including host overrides.
     bool stop_requested = false;  // G3:Esc/pause 的停止意图(迟到结果不拉起新轮)
 
     GoalBudget budget;    // 复用(含 no-progress/blocker/provider 连败闸)

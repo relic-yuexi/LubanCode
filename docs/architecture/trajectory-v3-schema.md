@@ -325,3 +325,9 @@ v3 写侧接线(接线点 1)后,v2 事件表里有一批在 §二 kind 全表里
 | `run.started`/run terminal/`session.clear_requested` | 不沿用 v2 run 生命周期事件（公共信封仍有 runId）:开场 = 首行 system + `session.started`;封口 = `session.ended`(clear 换账时 payload 带 `nextSessionId`);无 session.json | 已有对应(clear 八步的 v3 折算见 `SessionManager::ClearV3Locked`) |
 
 清点口径:凡写侧早退不落的,读取侧(两份投影/resume/verify)不因缺这些行报错——它们从未属于 v3 账;需要这些事实的消费方(`/doctor` 环境核对、标题真值回填)在 v3 场按"缺件"处理,不从当前环境补造过去(§4.12 同门)。
+
+### Goal adopted verdict and progress recovery
+
+Goal snapshots retain `appliedEvaluation` alongside `appliedEvaluationId`. The value contains the adopted verdict, including host overrides; the next evaluation and resume use this committed value, rather than treating an unadopted model reply as the previous decision. It is null before a verdict is adopted.
+
+The host fingerprints evidence facts and criterion status for continuation. Identical material increments `counters.noProgressStreak`; changed material resets it. Reaching `budget.maxNoProgressIterations` commits a paused state and removes the pending continuation in the same snapshot. Model narrative and newly assigned evidence ids do not reset this counter. Waiting does not increment it.

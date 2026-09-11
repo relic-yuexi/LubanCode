@@ -589,6 +589,7 @@ nlohmann::json GoalStateSnapshot::ToJson() const {
     j["appliedEvaluationId"] = applied_evaluation_id.has_value()
                                    ? nlohmann::json(*applied_evaluation_id)
                                    : nlohmann::json(nullptr);
+    j["appliedEvaluation"] = applied_evaluation;
     j["stopRequested"] = stop_requested;
     j["budget"] = BudgetToJson(budget);
     j["usage"] = UsageToJson(usage);
@@ -679,6 +680,11 @@ std::optional<GoalStateSnapshot> GoalStateSnapshot::FromJson(const nlohmann::jso
     read_opt_str("iterationId", s.iteration_id);
     read_opt_str("checkpointRef", s.checkpoint_ref);
     read_opt_str("appliedEvaluationId", s.applied_evaluation_id);
+    if (j.contains("appliedEvaluation")) {
+        if (!j["appliedEvaluation"].is_null() && !j["appliedEvaluation"].is_object())
+            return fail("appliedEvaluation must be an object or null");
+        s.applied_evaluation = j["appliedEvaluation"];
+    }
     if (j.contains("evidenceRefs") && j["evidenceRefs"].is_array()) {
         for (const auto& item : j["evidenceRefs"]) {
             std::string evidence_error;
@@ -1531,6 +1537,7 @@ GoalServiceResult GoalService::CompleteIterationWithEvaluation(
     next.phase = GoalPhase::Idle;
     if (verdict.kind != GoalVerdictKind::EvaluatorFailed) {
         next.applied_evaluation_id = verdict.evaluation_id;
+        next.applied_evaluation = verdict.evaluation;
     }
     next.usage.Add(verdict.usage_addition);
     next.counters = std::move(counters);

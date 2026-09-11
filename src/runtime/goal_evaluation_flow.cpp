@@ -143,6 +143,8 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     input.checkpoint = material.checkpoint;
     input.evidence = material.material_evidence;
     input.previous = material.previous;
+    if (!input.previous && evaluating->applied_evaluation.is_object())
+        input.previous = GoalEvaluation::from_json(evaluating->applied_evaluation);
     input.workspace_summary = material.workspace_summary;
     input.wait_task_refs = material.wait_task_refs;
     input.now_ms = material.now_ms;
