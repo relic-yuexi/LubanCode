@@ -176,7 +176,7 @@ idle
 | messageRef | id 字符串 | `{"sessionId","runId","seq","id","hash"}` 五键齐全,读侧校验 hash(§4.2:不存裸 seq) |
 | eventRef | id 字符串 | 同上 |
 
-`artifactRef`(结果仓,§4.16):`{"artifactId","kind","path","sha256","bytes","mediaType"}`,kind ∈ `result_metadata|stdout|stderr|combined|report|image|blob`;数组 `result_ref` 固定为数组,只有一份也 `[ref]`,没有写 `[]`。`blobRef` 承继 v2 BlobRef 五键(`sha256/size/media_type/encoding/compression`)。
+`artifactRef`(结果仓,§4.16):`{"artifactId","kind","path","sha256","bytes","mediaType"}`,kind ∈ `result_metadata|stdout|stderr|combined|raw_payload|report|image|blob`;数组 `result_ref` 固定为数组,只有一份也 `[ref]`,没有写 `[]`。`blobRef` 承继 v2 BlobRef 五键(`sha256/size/media_type/encoding/compression`)。
 
 ### 3.2 hash
 
