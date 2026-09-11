@@ -399,6 +399,8 @@ TEST_CASE("v3 主轮 usage 归账:泵收口把本轮模型用量记入 goal 账"
     CHECK(current->usage.input_tokens == 160);  // 120 + 40,只增
     CHECK(current->usage.request_count == 3);
 }
+
+TEST_CASE("v3 泵路:认领→开轮→synthetic turn→收工,第二拍不再开轮") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     GoalV3Fixture fixture;
     fixture.wiring.Ensure(fixture.config);

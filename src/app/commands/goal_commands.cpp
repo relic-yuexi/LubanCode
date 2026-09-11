@@ -902,11 +902,13 @@ std::string BuildGoalLoopStatusSegment(const lubancode::runtime::goal::GoalState
     const std::string goal_part = BuildGoalV3StatusSegmentText(goal_v3);
     std::string loop_part;
     if (loop != nullptr) {
+        // 即调即值:漏了调用括号会让三处用值处拿 lambda 本体比大小,
+        // 三平台编译全红(#49 全腿验证抓的)。
         const auto now_ms = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                 .count();
-        };
+        }();
         int active = 0;
         std::int64_t next_due = 0;
         bool has_next = false;
