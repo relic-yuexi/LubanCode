@@ -1217,3 +1217,33 @@ TEST_CASE("P1-B wire 对照: 会编码错误标记的 adapter 恢复前后 wire 
         }
     }
 }
+
+TEST_CASE("Resume into a new v3 session preserves adopted tool error semantics") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("b1-resume-error");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        runtime::ToolResultsCommitReceipt receipt;
+        DriveToolTurnWithOutcome(*bridge, "SYSTEM", "error-call", agent::ToolOutcome::Succeeded,
+            ToolResultsWithError("error-call", "adopted error result", true), &receipt);
+        REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
+    }
+    REQUIRE(ledger->CloseSession("exit").error_code.empty());
+    auto options = LedgerOptions(root);
+    options.resume_at_launch = true;
+    auto resumed = TrajectorySessionLedger::Open(options);
+    REQUIRE(resumed.has_value());
+    REQUIRE(resumed->resumed_at_launch());
+    int results = 0;
+    for (const auto& message : resumed->LaunchResumeHistory()) for (const auto& block : message.content) {
+        if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+            ++results;
+            CHECK(result->content == "adopted error result");
+            CHECK(result->is_error);
+        }
+    }
+    CHECK(results == 1);
+}
