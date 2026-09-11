@@ -137,14 +137,16 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         return result;
     }
 
+    const GoalStateSnapshot evaluating_snapshot = *evaluating;
+
     // ---- 4) 内部请求服务采判词(§4.67.5:经宿主调度并留账) -----------
     GoalEvaluationInput input;
     input.task = SnapshotToTask(*evaluating);
     input.checkpoint = material.checkpoint;
     input.evidence = material.material_evidence;
     input.previous = material.previous;
-    if (!input.previous && evaluating->applied_evaluation.is_object())
-        input.previous = GoalEvaluation::from_json(evaluating->applied_evaluation);
+    if (!input.previous && evaluating_snapshot.applied_evaluation.is_object())
+        input.previous = GoalEvaluation::from_json(evaluating_snapshot.applied_evaluation);
     input.workspace_summary = material.workspace_summary;
     input.wait_task_refs = material.wait_task_refs;
     input.now_ms = material.now_ms;
@@ -157,7 +159,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     evaluator_options.timeout_secs = options.timeout_secs;
     evaluator_options.max_tokens = options.max_tokens;
     evaluator_options.ledger.writer = &writer;
-    evaluator_options.ledger.goal_id = evaluating->goal_id;
+    evaluator_options.ledger.goal_id = evaluating_snapshot.goal_id;
     evaluator_options.ledger.iteration_id = iteration_id;
     evaluator_options.ledger.evaluation_id = evaluation_id;
     evaluator_options.ledger.parent_turn_id = material.parent_turn_id;
@@ -173,7 +175,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         verdict.kind = GoalVerdictKind::EvaluatorFailed;
         verdict.stop_reason = "evaluator_failed: " + evaluation.error();
         const auto closed = service.CompleteIterationWithEvaluation(
-            evaluating->state_revision, verdict, cause);
+            evaluating_snapshot.state_revision, verdict, cause);
         result.decision = "evaluator_failed";
         result.summary = evaluation.error();
         result.ok = closed.ok;
@@ -228,7 +230,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     switch (adopted.decision) {
         case GoalDecision::Continue:
             verdict.kind = GoalVerdictKind::Continue;
-            verdict.next_intent = NextContinuationIntent(*evaluating);
+            verdict.next_intent = NextContinuationIntent(evaluating_snapshot);
             result.next_work_item_id = verdict.next_intent->work_item_id;
             break;
         case GoalDecision::Achieved:
@@ -246,7 +248,7 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
             break;
     }
     const auto closed =
-        service.CompleteIterationWithEvaluation(evaluating->state_revision, verdict, cause);
+        service.CompleteIterationWithEvaluation(evaluating_snapshot.state_revision, verdict, cause);
     if (!closed.ok) {
         Fail(result, closed.error_code, closed.error_message);
         return result;

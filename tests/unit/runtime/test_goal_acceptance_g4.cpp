@@ -139,12 +139,14 @@ public:
     std::vector<std::string> replies;
     std::size_t call = 0;
     int call_count = 0;
+    std::function<void()> before_reply;
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request&,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
         const std::atomic<bool>* = nullptr) override {
         ++call_count;
+        if (before_reply) before_reply();
         const std::string text = call < replies.size() ? replies[call++] : "{}";
         on_event(lubancode::api::MessageStart{});
         on_event(lubancode::api::TextDelta{text});
@@ -1555,4 +1557,28 @@ TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") 
     auto claim = service2.ClaimPendingIntent("run-s2", 1, nlohmann::json{{"source", "test"}});
     REQUIRE_FALSE(claim.ok);
     CHECK(claim.error_code == goalns::kErrGoalNotFound);
+}
+
+TEST_CASE("flow freezes the evaluation revision while the backend is in flight") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Harness harness("flow-contract-race");
+    harness.RunToRunning();
+    const auto evidence = harness.MakeEvidence("ev-1", "");
+    harness.backend.replies = {kContinueVerdict};
+    harness.backend.before_reply = [&] {
+        auto contract = harness.Now()->contract;
+        contract.objective = "new contract while evaluator is running";
+        const auto amended = harness.service->AmendContract(contract,
+            harness.Now()->state_revision, harness.Now()->contract_revision,
+            nlohmann::json{{"source", "test"}});
+        REQUIRE(amended.ok);
+    };
+    const auto result = CloseGoalIterationWithEvaluation(*harness.service,
+        *harness.volume.writer, harness.backend, harness.Options(),
+        harness.Material({evidence}, {evidence}));
+    CHECK_FALSE(result.ok);
+    CHECK(result.error_code == goalns::kErrGoalRevisionConflict);
+    CHECK(harness.Now()->contract_revision == 2);
+    CHECK_FALSE(harness.Now()->applied_evaluation_id.has_value());
+    CHECK(CountEvents(harness.volume, EventKindV3::GoalEvaluationCompleted) == 1);
 }
