@@ -597,6 +597,39 @@ TEST_CASE("只读投影:验后账重建、缺口明报、AdoptFromProjection 接
 TEST_CASE("投影序列校验:terminal 复活、未收账开新 goal、revision 不衔接") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     ServiceHarness harness("sequence");
+    const auto make_snapshot = [](const char* goal, std::uint64_t rev) {
+        GoalStateSnapshot snapshot;
+        snapshot.goal_id = goal;
+        snapshot.session_id = "20260911-120000-AAAAAA";
+        snapshot.run_id = "run-000001";
+        snapshot.state_revision = rev;
+        snapshot.contract_revision = 1;
+        snapshot.objective = "obj";
+        snapshot.lifecycle = GoalLifecycle::Preparing;
+        return snapshot;
+    };
+    const auto write_snapshot = [&](const GoalStateSnapshot& snapshot) {
+        WriteFileBytes(harness.dir / goalns::SnapshotRefPath(snapshot.goal_id,
+                                                             snapshot.state_revision),
+                       goalns::SnapshotBytes(snapshot));
+    };
+    const auto append = [&](const char* goal, std::uint64_t from, std::uint64_t to,
+                            std::uint64_t contract_rev, const char* lifecycle) {
+        EventDraft draft;
+        draft.kind = EventKindV3::StateGoalApplied;
+        draft.payload["goalId"] = goal;
+        draft.payload["fromStateRevision"] = from;
+        draft.payload["toStateRevision"] = to;
+        draft.payload["contractRevision"] = contract_rev;
+        draft.payload["snapshotRef"] = goalns::SnapshotRefPath(goal, to);
+        const std::string bytes = ReadFileBytes(harness.dir /
+                                                goalns::SnapshotRefPath(goal, to));
+        draft.payload["snapshotSha256"] =
+            bytes.empty() ? std::string(64, 'a') : lubancode::hooks::Sha256Hex(bytes);
+        draft.payload["lifecycle"] = lifecycle;
+        return harness.writer->AppendEvent(std::move(draft), Durability::PowerLoss);
+    };
+
     // 直接在账上落序列非法的 applied(单行合同都合法,跨行序列坏)。
     // snapshotSha256 默认取快照文件真 hash(让 hash 校验先过,序列缺口
     // 才是唯一报点);需要伪造时显式传。
