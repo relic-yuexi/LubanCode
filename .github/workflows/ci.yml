@@ -36,6 +36,9 @@ jobs:
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
+          elif [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            # Shared push/PR concurrency needs the same code-change scope.
+            BASE="$(git merge-base origin/main "$GITHUB_SHA" 2>/dev/null || true)"
           else
             BASE="${{ github.event.before }}"
           fi
