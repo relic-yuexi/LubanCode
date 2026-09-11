@@ -149,7 +149,7 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& system,
                              const std::string& call_id, const std::string& result_content,
                              bool use_history_hook = false, bool capture_complete = true,
-                             std::size_t preview_budget = 32768, bool structured = false) {
+                             std::size_t preview_budget = 32768, bool structured = false, bool with_rich = false) {
     bridge.BeginTurn("turn-1", "external_user");
     bridge.RecordInput(UserMessage("列出全部文件"));
     const std::string request_id =
