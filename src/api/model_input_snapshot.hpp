@@ -14,6 +14,11 @@ inline std::expected<nlohmann::json, std::string> ModelInputSnapshotFromWire(con
     if (wire.empty()) return std::unexpected("tool_batch.adapter_snapshot_unavailable");
     const auto body = nlohmann::json::parse(wire, nullptr, false);
     if (!body.is_object()) return std::unexpected("tool_batch.adapter_snapshot_invalid");
+    for (const char* hidden : {"previous_response_id", "conversation", "cachedContent", "cached_content"}) {
+        if (body.contains(hidden) && !body.at(hidden).is_null()) {
+            return std::unexpected("tool_batch.server_context_unestimated");
+        }
+    }
     nlohmann::json input = nlohmann::json::object();
     for (const char* field : {"system", "messages", "tools", "input", "instructions",
                               "contents", "systemInstruction", "system_instruction", "toolConfig"}) {
@@ -48,7 +53,8 @@ inline bool HasUnestimatedInput(const nlohmann::json& value) {
             // A tool schema/arguments may contain arbitrary keys and type names;
             // those are ordinary input text, not protocol media blocks.
             if (key == "tools" || key == "parameters" || key == "input_schema" || key == "arguments" ||
-                key == "args" || (key == "input" && type != value.end() && *type == "tool_use")) continue;
+                key == "args" || (key == "response" && value.contains("name")) ||
+                (key == "input" && type != value.end() && *type == "tool_use")) continue;
             if (HasUnestimatedInput(item)) return true;
         }
     }

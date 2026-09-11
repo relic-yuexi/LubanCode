@@ -18,6 +18,7 @@ enum class RequestPurpose {
     WorkflowNode,       // 工作流节点
     CompactMap,         // compact 的分块映射请求
     CompactReduce,      // compact 的归并请求
+    ActionSummary,      // 尚未发送的工具结果摘要，独立于主模型调用
     MemoryExtract,      // 记忆抽取
     TitleRefine,        // 标题打磨
     DoctorProbe,        // /doctor 诊断探针

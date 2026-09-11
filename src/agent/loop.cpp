@@ -2339,8 +2339,23 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // history and tool IDs once. Media remains present and is classified
             // separately; it must never quietly consume zero tokens.
             auto shell = tool_result_message;
+            bool unestimated_result_media = false;
             for (auto& block : shell.content) {
-                if (auto* result = std::get_if<api::ToolResultBlock>(&block)) result->content.clear();
+                if (auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                    result->content.clear();
+                    // Mirror the selected preview path: sanitation must not
+                    // reconstruct an original rich-text projection into this
+                    // empty shell, and Gemini will consume the adopted text.
+                    result->preview_committed = true;
+                    result->structured_content.reset();
+                    for (const auto& rich : result->blocks) {
+                        if (std::holds_alternative<tools::ImageContent>(rich) ||
+                            std::holds_alternative<tools::AudioContent>(rich) ||
+                            std::holds_alternative<tools::EmbeddedBlobResourceContent>(rich)) {
+                            unestimated_result_media = true;
+                        }
+                    }
+                }
             }
             batch_request.messages.push_back(std::move(shell));
             const auto wire = backend_.SerializeForDiagnostics(batch_request);
@@ -2351,7 +2366,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (batch_measured) {
                 const auto input = api::ModelInputSnapshotFromWire(wire);
                 if (!input) batch_capacity_error = input.error();
-                else if (api::HasUnestimatedInput(*input)) {
+                else if (unestimated_result_media || api::HasUnestimatedInput(*input)) {
                     batch_capacity_error = "tool_batch.unestimated_media_or_reasoning";
                 } else {
                     const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
