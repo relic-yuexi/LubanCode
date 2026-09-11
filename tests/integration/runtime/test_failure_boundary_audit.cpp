@@ -1158,7 +1158,9 @@ TEST_CASE("B2 gate: hub install keeps v2 bridges on the legacy budget path") {
         sink(api::MessageStart{"provider-response", "audit-model"});
         sink(api::TextDelta{"SUCCESS"});
         sink(api::ContentBlockDone{0});
-        sink(api::MessageDone{"end_turn", api::Usage{4000, 100, 0, 0, 0}});
+        // 第三参 usage_reported 是 A0 显式位:取样口只认它,不带位光有
+        // Usage 数值不算 provider 明报(loop.cpp 校准样本护栏)。
+        sink(api::MessageDone{"end_turn", api::Usage{4000, 100, 0, 0, 0}, true});
         return {};
     };
     agent::TokenCalibrator calibrator;
