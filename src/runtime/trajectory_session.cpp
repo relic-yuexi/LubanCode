@@ -1775,7 +1775,13 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::RewriteToolResultsForHistory(api:
 }
 
 ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Message& results) {
-    std::lock_guard lock(*v3_books_->tool_results_mutex);
+    std::unique_lock lock(*v3_books_->tool_results_mutex);
+    if (action_summary_running_) {
+        ToolResultsCommitReceipt busy;
+        busy.status = ToolResultsCommitReceipt::Status::Failed;
+        busy.error_code = "tool.summary.batch_busy";
+        return busy;
+    }
     // 结果链(§4.18):persisted(结果仓落 artifact)→ selected(选用声明)
     // → tool 消息(模型可见预览正文)→ 接纳进链。
     // Any missing persistence, selection, message or admission receipt fails
@@ -1863,8 +1869,33 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         source.capture_complete = result->capture_complete;
                         source.capture_reason = result->capture_reason;
                         source.budget_bytes = budget;
-                        const auto summary = SummarizeActionResult(*v3_writer_, *action_summary_backend_,
-                            action_summary_profile_, source, action_summary_calls_remaining_);
+                        const auto generation = action_summary_generation_;
+                        const auto profile = action_summary_profile_;
+                        auto* backend = action_summary_backend_;
+                        auto* turn_identity = v3_turn_.get();
+                        const auto* book_identity = &book;
+                        const auto tool_use_id = result->tool_use_id;
+                        int remaining = std::exchange(action_summary_calls_remaining_, 0);
+                        action_summary_running_ = true;
+                        lock.unlock();
+                        ActionSummaryResult summary;
+                        try {
+                            summary = SummarizeActionResult(*v3_writer_, *backend, profile, source, remaining);
+                        } catch (...) {
+                            lock.lock();
+                            action_summary_running_ = false;
+                            throw;
+                        }
+                        lock.lock();
+                        action_summary_running_ = false;
+                        if (generation != action_summary_generation_ || v3_turn_.get() != turn_identity ||
+                            v3_turn_->calls.find(tool_use_id) == v3_turn_->calls.end() ||
+                            &v3_turn_->calls.at(tool_use_id) != book_identity) {
+                            batch.status = ToolResultsCommitReceipt::Status::Failed;
+                            batch.error_code = "tool.summary.source_scope_changed";
+                            return batch;
+                        }
+                        action_summary_calls_remaining_ += remaining;
                         if (summary.persistence_failed) {
                             hard_fail("tool.summary.persist_failed", book.action_id);
                             continue;

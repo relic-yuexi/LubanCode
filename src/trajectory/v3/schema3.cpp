@@ -820,6 +820,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
                 return Err("schema3.invalid_summary_candidate", "accepted summary needs a bounded candidate");
             }
             if (auto error = CheckStringField(kind_name, line.payload, "previewSha256")) return error;
+            if (!IsHex64(line.payload.at("previewSha256").get<std::string>())) {
+                return Err("schema3.invalid_summary_hash", "accepted summary requires SHA-256 hex");
+            }
         }
     } else if (line.kind == K::ToolResultSelected) {
         if (auto error = CheckToolPayload(kind_name, line, false)) {

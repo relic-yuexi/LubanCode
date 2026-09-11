@@ -172,9 +172,12 @@ public:
     // ---- ToolTrajectorySink(hub 在工具栅栏调) ----
     void OnToolTrace(const agent::ToolTraceEvent& event) override;
     void ConfigureActionSummary(api::Backend* backend, const ActionSummaryProfile& profile) override {
+        std::unique_lock<std::recursive_mutex> lock;
+        if (v3_books_) lock = std::unique_lock(*v3_books_->tool_results_mutex);
         action_summary_backend_ = backend;
         action_summary_profile_ = profile;
         action_summary_calls_remaining_ = profile.max_calls;
+        ++action_summary_generation_;
     }
     // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
     // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
@@ -234,6 +237,8 @@ private:
     api::Backend* action_summary_backend_ = nullptr;
     ActionSummaryProfile action_summary_profile_;
     int action_summary_calls_remaining_ = 0;
+    std::uint64_t action_summary_generation_ = 0;
+    bool action_summary_running_ = false;
     struct CallBook {
         std::string request_id;         // 声明它的 model output 所属请求
         // P0-E:只由已提交的 model.output.completed 置真。dangling 收口
