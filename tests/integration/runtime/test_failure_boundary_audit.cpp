@@ -109,6 +109,7 @@ public:
     bool result_error = false;
     std::optional<std::string> result_content;
     std::string result_outcome;
+    std::vector<tools::ToolContentBlock> native_blocks;
     std::function<void()> effect;
     std::string name() const override { return "audit_tool"; }
     std::string description() const override { return "local audit counter"; }
@@ -119,6 +120,7 @@ public:
         if (effect) effect();
         Result result{result_content.value_or(result_error ? "AUDIT_ERROR" : "AUDIT_RESULT"), result_error};
         result.outcome = result_outcome;
+        result.payload.content = native_blocks;
         return result;
     }
 };
@@ -690,4 +692,54 @@ TEST_CASE("B1 publication failure after commit recovers the committed preview wi
     }
     CHECK(tool_results == 1);
     CHECK(counter->calls == 1);
+}
+
+TEST_CASE("B1 real loop: multi-file native text shares one preview and retains both originals") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = "two resource files";
+    tools::EmbeddedTextResourceContent first;
+    first.uri = "file:///first.txt";
+    first.mime_type = "text/plain";
+    first.text = "第一份\n" + std::string(1024 * 1024, 'a');
+    tools::EmbeddedTextResourceContent second = first;
+    second.uri = "file:///second.txt";
+    second.text = "第二份\n" + std::string(1024 * 1024, 'b');
+    tool->native_blocks = {first, second};
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    REQUIRE(agent.Run(Input(), wiring).has_value());
+    REQUIRE(backend.requests.size() == 2);
+    CHECK(counter->calls == 1);
+    std::string preview;
+    const auto wire = api::chat::BuildRequestJson(backend.requests[1]);
+    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool")
+        preview = message.at("content").get<std::string>();
+    REQUIRE_FALSE(preview.empty());
+    CHECK(preview.size() <= 32768);
+    CHECK(preview.find("res-000001.combined.txt") != std::string::npos);
+    CHECK(preview.find("res-000001.raw_payload.json") != std::string::npos);
+    std::ifstream file(audit.path.parent_path() / "artifacts" / "res-000001.raw_payload.json");
+    Json raw;
+    file >> raw;
+    REQUIRE(raw.size() == 2);
+    CHECK(raw[0].at("text") == first.text);
+    CHECK(raw[1].at("text") == second.text);
+    int durable_results = 0;
+    for (const auto& row : audit.Rows()) if (row.value("type", "") == "message" && row.at("message").value("role", "") == "tool") {
+        ++durable_results;
+        CHECK(row.at("message").at("content") == preview);
+    }
+    CHECK(durable_results == 1);
 }
