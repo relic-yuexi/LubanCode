@@ -280,6 +280,9 @@ public:
 
     // 实际派发(workflow.node.dispatched)。
     bool RecordNodeDispatched(const NodeExecutionIdentity& identity);
+    // inputs.json(无损)+ workflow.inputs.committed:无 checkpoint 也能恢复
+    // inputs(定义在 cpp)。
+    bool RecordInputs(const nlohmann::json& effective_inputs);
 
     // 产物提交:原件先落稳(原子、无损)→ workflow.output.committed
     // (PowerLoss)→ 才算提交成功。adopt_output_id 非空 = 采纳悬置候选
