@@ -369,10 +369,14 @@ TEST_CASE("OpenSegment:开恢复段链接源水位,单写者不覆写") {
     auto segment = resumed->OpenSegment();
     REQUIRE(segment.has_value());
     CHECK(*segment == "seg-3");
-    // 段已存在(另一恢复者先开):单写者拒。
+    // 另一恢复者再来:Resume 看见第一只开的 seg-3(账面事实,合法链尾),
+    // 续开 seg-4——串行测试造不出"两只同时从 seg-2 开 seg-3"的真并发
+    // 窗口,那道门由 OpenSegment 的 segment_exists 检查守着(见实现);
+    // 这里钉的是恢复语义:先开者的事实被后来者如实接管,不覆写不断链。
     auto resumed_again = WorkflowRunAccount::Resume(root, "run-1");
     REQUIRE(resumed_again.has_value());
-    auto conflict = resumed_again->OpenSegment();
-    CHECK_FALSE(conflict.has_value());
-    CHECK(conflict.error().stage == "segment_open");
+    CHECK(resumed_again->recovery().tail_segment_id == "seg-3");
+    auto continued = resumed_again->OpenSegment();
+    REQUIRE(continued.has_value());
+    CHECK(*continued == "seg-4");
 }
