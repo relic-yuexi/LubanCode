@@ -564,8 +564,9 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
     }
     const lubancode::cli::Theme& theme = *wiring.theme;
     goalns::GoalService& service = *wiring.goal_service;
-    const nlohmann::json command_cause = nlohmann::json{{"source", "command"},
-                                                        {"command", "/goal"}};
+    // applied 的 causeRef 合同是 §3.1 合法引用(同会话 string 行号或跨会话
+    // 五键)或空;slash 命令的账面事件族未发行,没有可指的行——不带。
+    const nlohmann::json command_cause = nlohmann::json();
 
     const auto fail_with = [&](const goalns::GoalServiceResult& result) {
         out << theme.error

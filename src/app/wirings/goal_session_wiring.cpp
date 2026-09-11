@@ -275,8 +275,7 @@ void GoalSessionWiring::RestoreFromArchive() {
                 std::to_string(snapshot->wait_plan.max_polls) + ")";
         if (goal_service_->WaitInspectionDue(now_ms)) {
             const auto inspected = goal_service_->RecordWaitInspection(
-                goal_service_->current()->state_revision, now_ms,
-                nlohmann::json{{"source", "host"}, {"reason", "resume_catchup"}});
+                goal_service_->current()->state_revision, now_ms, nlohmann::json{});
             if (inspected.ok) {
                 line += inspected.payload.value("stopped", false) ? ";离线巡检补一枚,已到上限"
                                                                   : ";离线巡检补一枚";
@@ -336,9 +335,8 @@ void GoalSessionWiring::NoteSubagentCompletion() {
                     }
                 }
                 if (!relevant) continue;  // 无关进程的完成:不挡验收也不唤醒
-                const auto resolved = goal_service_->ResolveWaiting(
-                    ref, snapshot->state_revision,
-                    nlohmann::json{{"source", "host"}, {"deliveryKey", ref}});
+                const auto resolved =
+                    goal_service_->ResolveWaiting(ref, snapshot->state_revision, nlohmann::json{});
                 if (resolved.ok) {
                     woke = true;
                     Notify(/*is_error=*/false,
@@ -368,8 +366,7 @@ void GoalSessionWiring::NoteSubagentCompletion() {
                 sub_usage.usage_reported = detail->usage_reported;
                 const auto recorded = goal_service_->RecordGoalUsage(
                     "subagent-" + std::to_string(id), "subagent", sub_usage,
-                    goal_service_->current()->state_revision,
-                    nlohmann::json{{"source", "host"}, {"subagentTaskId", id}});
+                    goal_service_->current()->state_revision, nlohmann::json{});
                 if (!recorded.ok && !recorded.payload.value("deduped", false)) {
                     Notify(/*is_error=*/true,
                            "goal usage 归属失败(" + recorded.error_code + "): " +
@@ -427,9 +424,8 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
     // 巡检到点(§4.67.7):纯本地状态检查,不付模型请求;次数入快照,
     // 到上限停排(真实完成仍可唤醒)。
     if (snapshot->lifecycle == goal::GoalLifecycle::Waiting && goal_service_->WaitInspectionDue(now_ms)) {
-        const auto inspected = goal_service_->RecordWaitInspection(
-            snapshot->state_revision, now_ms,
-            nlohmann::json{{"source", "host"}, {"reason", "inspection"}});
+        const auto inspected = goal_service_->RecordWaitInspection(snapshot->state_revision,
+                                                                   now_ms, nlohmann::json{});
         if (inspected.ok && inspected.payload.value("stopped", false)) {
             Notify(/*is_error=*/false,
                    "goal 巡检到上限,停自动巡检;仍在等真实完成通知(后台任务收口即唤醒)。");
@@ -442,9 +438,10 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
         return false;
     }
     // 认领/开轮都会提交(整替 current_),快照指针此后失效:目标原文先拷。
+    // causeRef 合同为 §3.1 合法引用或空(§4.67 G0);宿主侧没有可指的
+    // 触发行(workItemId 等成因已在快照 pendingIntent 里),不带。
     const std::string objective_text = snapshot->objective;
-    const nlohmann::json cause = nlohmann::json{{"source", "host"},
-                                                {"workItemId", view.intent.work_item_id}};
+    const nlohmann::json cause = nlohmann::json{};
     // 1) 认领(§4.67.4:取走工作项先提交 claimed + writerEpoch 再调模型)。
     auto claim = goal_service_->ClaimPendingIntent(epoch, snapshot->state_revision, cause);
     if (!claim.ok) {
@@ -527,8 +524,7 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
     // 验收后不自动续排;迟到结果(CAS 已拦)更不拉起新轮。
     if (turn_cancelled && goal_service_->current() != nullptr) {
         const auto stopped = goal_service_->RequestStop(
-            goal_service_->current()->state_revision,
-            nlohmann::json{{"source", "host"}, {"reason", "esc_interrupt"}});
+            goal_service_->current()->state_revision, nlohmann::json{});
         if (stopped.ok) {
             Notify(/*is_error=*/false,
                    "goal 停止意图已落账:本轮照常收口,之后不自动续排(/goal resume 续)。");
@@ -560,8 +556,7 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
                                    0;
             const auto recorded = goal_service_->RecordGoalUsage(
                 iteration_id, "main_turn", spent,
-                goal_service_->current()->state_revision,
-                nlohmann::json{{"source", "host"}, {"iterationId", iteration_id}});
+                goal_service_->current()->state_revision, nlohmann::json{});
             if (!recorded.ok && !recorded.payload.value("deduped", false)) {
                 Notify(/*is_error=*/true,
                        "goal 主轮 usage 归账失败(" + recorded.error_code + "): " +
@@ -625,9 +620,7 @@ bool GoalSessionWiring::CloseV3IterationFromTurn(const std::string& goal_id,
     if (host_.evaluation_backend == nullptr || host_.trajectory == nullptr ||
         host_.trajectory->v3_main_writer() == nullptr) {
         // 评估口没接:evaluator 没材料可判——照旧收口销账,不烧评估这一趟。
-        auto ended = goal_service_->EndIteration(
-            closing->state_revision, nlohmann::json{{"source", "host"},
-                                                     {"iterationId", iteration_id}});
+        auto ended = goal_service_->EndIteration(closing->state_revision, nlohmann::json{});
         if (!ended.ok) {
             Notify(/*is_error=*/true,
                    "goal 收工落账失败(" + ended.error_code + "): " + ended.error_message);
@@ -652,9 +645,9 @@ bool GoalSessionWiring::CloseV3IterationFromTurn(const std::string& goal_id,
         }
     }
     if (!wait_refs.empty()) {
-        const auto waiting = goal_service_->EnterWaiting(
-            std::move(wait_refs), closing->state_revision,
-            nlohmann::json{{"source", "host"}, {"iterationId", iteration_id}});
+        const auto waiting = goal_service_->EnterWaiting(std::move(wait_refs),
+                                                          closing->state_revision,
+                                                          nlohmann::json{});
         if (waiting.ok) {
             Notify(/*is_error=*/false,
                    "goal 转等待: " + std::to_string(goal_service_->current()->wait_task_refs.size()) +
@@ -746,7 +739,7 @@ bool GoalSessionWiring::CloseV3IterationFromTurn(const std::string& goal_id,
             paused.to_lifecycle = goal::GoalLifecycle::Paused;
             paused.to_phase = goal::GoalPhase::Idle;
             paused.stop_reason = "evaluator_route_unavailable";
-            paused.cause_ref = nlohmann::json{{"source", "host"}};
+            paused.cause_ref = nlohmann::json{};
             const auto stopped = goal_service_->ApplyTransition(paused);
             Notify(true, stopped.ok ? "goal 验收路由不可用，已暂停。" :
                 "goal 验收路由不可用，暂停写账失败: " + stopped.error_message);

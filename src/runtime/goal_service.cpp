@@ -1086,7 +1086,12 @@ GoalServiceResult GoalService::AmendContract(const GoalContract& contract,
     if (expected_contract_revision != current_->contract_revision) {
         return Fail(kErrGoalRevisionConflict, "contractRevision 冲突");
     }
-    if (!IsValidLifecycleTransition(current_->lifecycle, GoalLifecycle::Preparing)) {
+    // 同态改版合法:preparing 原地改合同(contractRevision/stateRevision 都
+    // 在动,不是"没变化的假提交"——投影对同 goal 的 applied 只在 lifecycle
+    // 变了时才验转换)。刚立未开跑的目标立即 /goal edit 是正路;其余态仍按
+    // 转换表(budget_exhausted/suspended_by_policy 回不到 preparing,拒)。
+    if (current_->lifecycle != GoalLifecycle::Preparing &&
+        !IsValidLifecycleTransition(current_->lifecycle, GoalLifecycle::Preparing)) {
         return Fail(kErrGoalInvalidTransition,
                     "当前 lifecycle(" + ToString(current_->lifecycle) + ")不受理合同改版");
     }
@@ -2529,6 +2534,7 @@ GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_se
         for (const auto& seen : visited) {
             if (seen == session_id) {
                 out.detail = "来源链回环(" + session_id + "),链停";
+                out.projection.gap = GoalProjectionGap::NoGoal;
                 return out;
             }
         }
@@ -2575,6 +2581,9 @@ GoalLineageProjection ProjectGoalLineage(const std::filesystem::path& current_se
               platform::Utf8ToPath(*manifest->previous_session_id);
     }
     if (out.detail.empty()) out.detail = "来源链超过 " + std::to_string(kMaxHops) + " 跳,护栏止";
+    // 走到头也没撞见 goal 账:缺口如实报 NoGoal(与单卷空账同一口径),
+    // 不留默认 None 冒充"投影健康"。
+    if (!out.found) out.projection.gap = GoalProjectionGap::NoGoal;
     out.walked = std::move(visited);
     return out;
 }
