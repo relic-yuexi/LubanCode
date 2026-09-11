@@ -112,8 +112,9 @@ TEST_CASE("续卷:验链后可写、发号续号不撞") {
     REQUIRE(resumed.has_value());
     CHECK(resumed->last_seq() == 1);
     CHECK(resumed->next_seq() == 2);
-    // evt-000001/000002 已在卷内,续号从 000003 起。
-    CHECK(resumed->NextId("evt") == "evt-000003");
+    // NextId 只动内存计数,不落卷;卷内最大号是开账的 evt-000001,续卷
+    // 计数从卷内恢复,下一号 000002——没写进卷的号,账上不认(单事实源)。
+    CHECK(resumed->NextId("evt") == "evt-000002");
     EventDraft skipped;
     skipped.kind = EventKindV3::WorkflowNodeSkipped;
     skipped.payload = nlohmann::json{{"nodeId", std::string("x")}, {"reason", std::string("r")}};

@@ -156,12 +156,14 @@ struct V3EventLedger::Impl {
         }
         if (options.inject_io_failure && options.inject_io_failure()) {
             broken = true;
+            receipt.status = WriteReceipt::Status::IoFailed;  // 合同:注入失败按 IoFailed 收
             receipt.error_code = "v3ledger.injected";
             receipt.error_message = "注入的提交失败(测试)";
             return receipt;
         }
         if (!journal.AppendLine(*final_line, durability)) {
             broken = true;
+            receipt.status = WriteReceipt::Status::IoFailed;
             receipt.error_code = "v3ledger.io_failed";
             receipt.error_message = "追加落盘失败,句柄已断";
             return receipt;
@@ -203,10 +205,14 @@ std::expected<V3EventLedger, std::string> V3EventLedger::Start(
     // 不在盘上留 0 字节正式账(P0-C 同款)。
     WriteReceipt receipt = ledger.Append(std::move(opening_event), Durability::PowerLoss);
     if (receipt.status != WriteReceipt::Status::Committed) {
+        const std::string detail =
+            "v3ledger.opening_event_failed: " + receipt.error_code + " " + receipt.error_message;
+        // 先断账再删文件:Windows 下写句柄占着的文件删不掉,不关句柄会漏
+        // 0 字节残卷,下回 create-new 便撞名。
+        ledger = V3EventLedger{};
         std::error_code ec;
         std::filesystem::remove(jsonl_path, ec);
-        return std::unexpected("v3ledger.opening_event_failed: " + receipt.error_code + " " +
-                               receipt.error_message);
+        return std::unexpected(detail);
     }
     return ledger;
 }
@@ -343,18 +349,22 @@ V3EventLedgerReport VerifyV3EventLedgerFile(const std::filesystem::path& path) {
             report.message = "第 " + std::to_string(i + 1) + " 行不是合法 JSON";
             return report;
         }
+        // 事件账 profile:只认 event 行。这盏门排在逐行语义/哈希校验之前:
+        // message 行出现在这里 = 有人拿 agent 写者写编排账(或拿事件账
+        // profile 写会话),先按 profile 拒收,不猜它内容合不合法。缺 type
+        // 的行仍交给 VerifyLine 报信封错。
+        const auto type_it = line_json.find("type");
+        if (type_it != line_json.end() && type_it->is_string() &&
+            type_it->get<std::string>() != "event") {
+            report.error_code = "v3ledger.message_line_rejected";
+            report.message = "第 " + std::to_string(i + 1) + " 行是 " +
+                             type_it->get<std::string>() + " 行;事件账 profile 只收 event 行";
+            return report;
+        }
         auto error = VerifyLine(line_json, prev_hash, static_cast<std::uint64_t>(i + 1));
         if (error.has_value()) {
             report.error_code = error->code;
             report.message = "第 " + std::to_string(i + 1) + " 行: " + error->message;
-            return report;
-        }
-        // 事件账 profile:只认 event 行。message 行出现在这里 = 有人拿 agent
-        // 写者写编排账(或拿事件账 profile 写会话),拒收不猜。
-        if (line_json.at("type").get<std::string>() != "event") {
-            report.error_code = "v3ledger.message_line_rejected";
-            report.message =
-                "第 " + std::to_string(i + 1) + " 行是 message 行;事件账 profile 只收 event 行";
             return report;
         }
         if (i == 0) {

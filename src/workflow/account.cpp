@@ -403,8 +403,15 @@ std::expected<WorkflowRunAccount, WorkflowAccountError> WorkflowRunAccount::Star
     impl->definition_hash = definition.content_hash;
     impl->cwd = definition.cwd;
 
-    // 开 seg-1:首事件 = workflow.definition.loaded(开账事实)。
+    // 开 seg-1:首事件 = workflow.definition.loaded(开账事实)。段目录先建:
+    // JournalWriter 只开文件不建父目录,segments/seg-1 缺位时 create-new 必败。
     {
+        std::filesystem::create_directories(resolver->segment_stream("seg-1").parent_path(), ec);
+        if (ec) {
+            return std::unexpected(MakeError(
+                "ledger_start", "workflow.account.mkdir_failed",
+                platform::PathToUtf8(resolver->segment_stream("seg-1")) + ": " + ec.message()));
+        }
         EventDraft opening;
         opening.kind = EventKindV3::WorkflowDefinitionLoaded;
         opening.payload = nlohmann::json{{"workflowId", definition.workflow_id},
@@ -726,6 +733,12 @@ std::expected<std::string, WorkflowAccountError> WorkflowRunAccount::OpenSegment
         return std::unexpected(MakeError(
             "segment_open", "workflow.account.segment_exists",
             "段 " + next + " 已存在(另一恢复者先开了)——单写者,不覆写"));
+    }
+    std::filesystem::create_directories(impl_->resolver.segment_stream(next).parent_path(), ec);
+    if (ec) {
+        return std::unexpected(MakeError(
+            "segment_open", "workflow.account.mkdir_failed",
+            platform::PathToUtf8(impl_->resolver.segment_stream(next)) + ": " + ec.message()));
     }
     // 链接源水位:五键指尾段末行(§3.1 跨账引用;旧段只读)。
     EventDraft opening;
