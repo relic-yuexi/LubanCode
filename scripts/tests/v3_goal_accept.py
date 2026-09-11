@@ -13,8 +13,9 @@ v3_accept_matrix.py(临时 USERPROFILE、假 anthropic-messages 后端、账本�
                                序门槛空转——如实记缺陷 D3;门槛行为由 ctest
                                册 test_goal_acceptance_g4.cpp M2 钉)
   G3  测试零项                 生产入口部分(evaluator 判词面;宿主无零项闸)
-  G4  合同改版撞迟到判词       生产入口部分(pause→edit→resume 后新轮按新
-                               合同;拒绝路由 ctest M4 钉)
+  G4  合同改版撞迟到判词       真机(pause→edit 后新轮按新合同:edit 即
+                               清旧意图、按 c2 补排新工作项,泵自动续跑,
+                               无需 resume;拒绝路由 ctest M4 钉)
   G5  材料夹注入指令           真机(材料原样进验收请求,不改合同)
   G6  判词两坏暂停             真机(坏 JSON ×2 → evaluator_failed → paused)
   G7  repair 后成 usage 各记   真机(坏一次好一次;两请求各留账)
@@ -312,13 +313,15 @@ def scenario_g4(bench, check):
         {"text": verdict_achieved("改版后全过"), "usage": {"input_tokens": 10, "output_tokens": 4}},
     ])
     write_goal_config(bench)
-    bench.run_cli("g4", [
+    out = bench.run_cli("g4", [
         ("/goal 旧目标", ("none",)),
         ("/goal pause", ("none",)),
         ("", ("ledger", '"stopReason":"user_pause"')),
         ("/goal edit 新目标-改成全绿", ("none",)),
         ("", ("ledger", '"contractRevision":2')),
-        ("/goal resume", ("none",)),
+        # edit 即按新合同排下首轮工作项(goal-1/wi-c2):目标未停、泵自动
+        # 续跑,无需 resume——status 读面看得到待续项。
+        ("/goal status", ("none",)),
         ("", ("requests", 4)),
         ("", ("sleep", 1)),
         ("/exit", ("exit",)),
@@ -332,6 +335,11 @@ def scenario_g4(bench, check):
     check.check("G4 改版生效(head contractRevision=2)",
                 head_applied(rows).get("payload", {}).get("contractRevision") == 2,
                 str(head_applied(rows).get("payload", {}).get("contractRevision")))
+    check.check("G4 edit 后新合同工作项已排(status 待续行)",
+                "wi-c2" in out, "")
+    check.check("G4 pause→edit 后新轮按新合同跑完封账(head achieved)",
+                head_applied(rows).get("payload", {}).get("lifecycle") == "achieved",
+                str(head_applied(rows).get("payload", {}).get("lifecycle")))
     if requested:
         check.check("G4 改版后的验收按新合同(requested 带当前 revision)",
                     requested[-1]["payload"].get("contractRevision")
@@ -808,8 +816,9 @@ def scenario_g15(bench, check):
                 .get("lifecycle") == "awaiting_user"
         check.check("G15b awaiting_user 落位", user_ok, "")
         check.check("G15b 状态面问题可见", "删库还是归档" in out2, "")
-        check.check("G15c 无进展闸未接线(缺陷 D2;等待不算失败轮由 ctest M15 钉)",
-                    True, "v3 判词面不动 counters,启用范围建议里记")
+        # G15c 无进展闸:进展指纹 + 连击暂停已接(goal_service 的
+        # CompleteIterationWithEvaluation 判词收口),连击上限行为由 ctest
+        # 服务册钉;真机不另烧一轮模型验证。
     finally:
         bench2.stop_backend()
 
