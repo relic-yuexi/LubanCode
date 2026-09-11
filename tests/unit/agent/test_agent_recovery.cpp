@@ -419,7 +419,7 @@ TEST_CASE("恢复账:尝试相位从环里流出,started 连号、retrying 带�
 
 TEST_CASE("发送前写账硬闸: sent 记不住,backend 零调用,无重试") {
     FlakyBackend backend;
-    backend.script = {TextScript("不该被需要")};
+    backend.script = {TextScript("不该被需要"), std::nullopt};
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry,
                       agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
