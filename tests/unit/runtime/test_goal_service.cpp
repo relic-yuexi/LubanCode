@@ -432,11 +432,19 @@ TEST_CASE("AmendContract:contractRevision +1,旧证据翻 stale") {
     options.session_dir = harness.dir;
     options.clock = [&now] { return now; };
     GoalService service(&*harness.writer, std::move(options));
-    REQUIRE(service.CreateGoal(DraftObjective("修好 auth"), nlohmann::json()).ok);
+    // 首轮意图随快照提交(命令面 create 同款):未认领、对着 c1。
+    GoalStateSnapshot draft = DraftObjective("修好 auth");
+    goalns::GoalPendingIntent first;
+    first.work_item_id = "wi-1";
+    first.contract_revision = 1;
+    first.continuation_ordinal = 1;
+    draft.pending_intent = first.ToJson();
+    REQUIRE(service.CreateGoal(std::move(draft), nlohmann::json()).ok);
     auto activate = Transition(GoalLifecycle::Active, 1);
     activate.goal_id = "goal-1";
     activate.evidence_additions = {GoodEvidence("ev-1")};
     REQUIRE(service.ApplyTransition(activate).ok);
+    REQUIRE(service.current()->pending_intent.at("workItemId") == "wi-1");
 
     goalns::GoalContract contract;
     contract.objective = "修好 auth;补集成测试";
@@ -452,11 +460,70 @@ TEST_CASE("AmendContract:contractRevision +1,旧证据翻 stale") {
     // 旧证据重新判有效期:保守翻 stale(§4.67.2 edit 行)。
     REQUIRE(service.current()->evidence_refs.size() == 1);
     CHECK_FALSE(service.current()->evidence_refs[0].fresh);
+    // 未认领的旧意图随合同作废清空:命令面按新 contractRevision 重拟,
+    // 泵下一拍即按新合同开轮(不留"意图对着旧合同永不 claimable"死锁)。
+    CHECK(service.current()->pending_intent.empty());
+    // 清空后按新合同补的意图可被认领开轮。
+    goalns::GoalPendingIntent next_intent;
+    next_intent.work_item_id = "goal-1/wi-c2";
+    next_intent.contract_revision = 2;
+    next_intent.continuation_ordinal = 1;
+    REQUIRE(service.SetPendingIntent(next_intent, service.current()->state_revision, {}).ok);
+    const auto view = goalns::EvaluateGoalWork(*service.current(), "run-000001");
+    CHECK(view.claimable);
 
     // revision 冲突拒。
     const auto conflict = service.AmendContract(contract, 2, 1, nlohmann::json());
     CHECK_FALSE(conflict.ok);
     CHECK(conflict.error_code == goalns::kErrGoalRevisionConflict);
+}
+
+TEST_CASE("AmendContract:意图已认领拒改版(edit 等安全边界),认领残账可被新意图接替") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    ServiceHarness harness("amend-claimed");
+    std::int64_t now = 1000;
+    GoalService::Options options;
+    options.session_dir = harness.dir;
+    options.clock = [&now] { return now; };
+    GoalService service(&*harness.writer, std::move(options));
+    GoalStateSnapshot draft = DraftObjective("修好 auth");
+    goalns::GoalPendingIntent first;
+    first.work_item_id = "wi-1";
+    first.contract_revision = 1;
+    first.continuation_ordinal = 1;
+    draft.pending_intent = first.ToJson();
+    REQUIRE(service.CreateGoal(std::move(draft), nlohmann::json()).ok);
+    // 认领 + 开轮(在途):edit 拒 goal.busy,快照一字不动。
+    REQUIRE(service.ClaimPendingIntent("run-000001", service.current()->state_revision, {}).ok);
+    REQUIRE(service.BeginIteration(service.current()->state_revision, {}).ok);
+    goalns::GoalContract contract;
+    contract.objective = "半途想改的目标";
+    const auto busy = service.AmendContract(contract, service.current()->state_revision,
+                                            service.current()->contract_revision, {});
+    CHECK_FALSE(busy.ok);
+    CHECK(busy.error_code == goalns::kErrGoalBusy);
+    CHECK(service.current()->contract_revision == 1);
+    CHECK(service.current()->lifecycle == GoalLifecycle::Active);
+    CHECK(service.current()->phase == GoalPhase::Running);
+
+    // 认领残账(pause 拍掉在途相位后的 claimed 意图滞留):SetPendingIntent
+    // 允许覆写(用户显式续跑 = 作废滞留认领重排,§4.67.2 resume 行)。
+    const auto paused = [&] {
+        auto candidate = Transition(GoalLifecycle::Paused, service.current()->state_revision);
+        candidate.goal_id = "goal-1";
+        candidate.stop_reason = "user_pause";
+        return service.ApplyTransition(candidate);
+    }();
+    REQUIRE(paused.ok);
+    REQUIRE(service.current()->pending_intent.at("claimed") == true);
+    goalns::GoalPendingIntent fresh;
+    fresh.work_item_id = "goal-1/wi-r8";
+    fresh.contract_revision = 1;
+    fresh.predecessor_iteration_id = service.current()->iteration_id.value_or(std::string());
+    fresh.continuation_ordinal = 1;
+    REQUIRE(service.SetPendingIntent(fresh, service.current()->state_revision, {}).ok);
+    CHECK(service.current()->pending_intent.at("workItemId") == "goal-1/wi-r8");
+    CHECK(service.current()->pending_intent.at("claimed") == false);
 }
 
 TEST_CASE("fail closed:applied 落账失败锁写口,候选快照不生效") {

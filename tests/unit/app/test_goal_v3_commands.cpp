@@ -189,6 +189,108 @@ TEST_CASE("v3 卷:Ensure 绑服务,命令七动作走 GoalService") {
     CHECK(pack.goal_service->current()->goal_id == "goal-1");  // 没被替换
 }
 
+TEST_CASE("v3 edit 后按新合同续跑:edit 落新工作项,泵下一拍开新轮") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    GoalV3Fixture fixture;
+    fixture.wiring.Ensure(fixture.config);
+    GoalWiring pack = fixture.Pack();
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Create, "旧目标正文"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+
+    // 第一轮按 c1 跑完(无评估口:EndIteration 销账收口)。
+    fixture.wiring.PumpContinuation(0);
+    REQUIRE(fixture.turn_texts.size() == 1);
+    CHECK(fixture.turn_texts[0].find("旧目标正文") != std::string::npos);
+
+    // pause 后 edit:AmendContract 清随旧合同作废的意图,命令面按 c2 重拟
+    // 新工作项——目标 preparing 但有班可上,泵自动续跑,无需 resume。
+    REQUIRE(lubancode::app::HandleGoalCommand(ParseAction(GoalCommandAction::Pause), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Edit, "新目标正文-改成补文档"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    const goalns::GoalStateSnapshot* current = pack.goal_service->current();
+    REQUIRE(current != nullptr);
+    CHECK(current->contract_revision == 2);
+    CHECK(current->lifecycle == goalns::GoalLifecycle::Preparing);
+    CHECK(current->pending_intent.at("workItemId") == "goal-1/wi-c2");
+    CHECK(current->pending_intent.at("contractRevision") == 2);
+
+    // 泵下一拍:按新合同开第二轮(轮正文带新目标,不带旧目标)。
+    fixture.wiring.PumpContinuation(0);
+    REQUIRE(fixture.turn_texts.size() == 2);
+    CHECK(fixture.turn_texts[1].find("新目标正文") != std::string::npos);
+    CHECK(fixture.turn_texts[1].find("旧目标正文") == std::string::npos);
+    current = pack.goal_service->current();
+    REQUIRE(current != nullptr);
+    CHECK(current->counters.iterations_started == 2);
+    CHECK(current->pending_intent.empty());  // 收口销账,不再死锁
+}
+
+TEST_CASE("v3 edit 在途拒:意图已认领时 edit 等安全边界(goal.busy)") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    GoalV3Fixture fixture;
+    fixture.wiring.Ensure(fixture.config);
+    GoalWiring pack = fixture.Pack();
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Create, "在途目标"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    // 模拟在途:认领 + 开轮(泵还没跑 turn)。
+    goalns::GoalService* service = pack.goal_service;
+    REQUIRE(service->ClaimPendingIntent("run-test", service->current()->state_revision, {}).ok);
+    REQUIRE(service->BeginIteration(service->current()->state_revision, {}).ok);
+
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Edit, "半途想改"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    // 明确终态:合同一字未动,错误面有 goal.busy 的人话引导。
+    CHECK(service->current()->contract_revision == 1);
+    CHECK(service->current()->phase == goalns::GoalPhase::Running);
+    bool saw_busy_note = false;
+    for (const std::string& note : fixture.notes) {
+        if (note.find("目标正在跑") != std::string::npos) saw_busy_note = true;
+    }
+    CHECK(saw_busy_note);
+}
+
+TEST_CASE("v3 resume 修不可推进的 preparing:崩溃窗口(edit 后没排上意图)重排") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    GoalV3Fixture fixture;
+    fixture.wiring.Ensure(fixture.config);
+    GoalWiring pack = fixture.Pack();
+    goalns::GoalService* service = pack.goal_service;
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Create, "改版目标"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    // 直接服务面改版(绕过命令面的补排步)= edit 两笔提交间崩溃的等价态:
+    // preparing + 意图空(随旧合同作废)。
+    goalns::GoalContract contract = service->current()->contract;
+    contract.objective = "改版后的目标";
+    REQUIRE(service->AmendContract(contract, service->current()->state_revision,
+                                   service->current()->contract_revision, {})
+                 .ok);
+    CHECK(service->current()->pending_intent.empty());
+
+    // resume 不再对"无班可上"的 preparing 早退:转 active 并补排新工作项。
+    REQUIRE(lubancode::app::HandleGoalCommand(ParseAction(GoalCommandAction::Resume), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    const goalns::GoalStateSnapshot* current = service->current();
+    REQUIRE(current != nullptr);
+    CHECK(current->lifecycle == goalns::GoalLifecycle::Active);
+    CHECK(current->pending_intent.at("contractRevision") == 2);
+    bool saw_work_note = false;
+    for (const std::string& note : fixture.notes) {
+        if (note.find("已排") != std::string::npos) saw_work_note = true;
+    }
+    CHECK(saw_work_note);
+
+    // 泵接着按新合同开轮。
+    fixture.wiring.PumpContinuation(0);
+    REQUIRE(fixture.turn_texts.size() == 1);
+    CHECK(fixture.turn_texts[0].find("改版后的目标") != std::string::npos);
+}
+
 TEST_CASE("v3 泵路:认领→开轮→synthetic turn→收工,第二拍不再开轮") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     GoalV3Fixture fixture;

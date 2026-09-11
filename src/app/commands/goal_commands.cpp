@@ -636,6 +636,35 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
         const auto result = service.AmendContract(contract, current->state_revision,
                                                   current->contract_revision, command_cause);
         if (!result.ok) return fail_with(result);
+        // AmendContract 已把随旧合同作废的意图清空;这里按新 contractRevision
+        // 重拟首轮工作项(§4.67.4:改版后目标要能按新合同继续运转)——泵在
+        // 下一安全边界认领开轮,preparing 取轮即转 active,无需用户 resume。
+        const goalns::GoalStateSnapshot* amended = service.current();
+        if (amended != nullptr &&
+            (!amended->pending_intent.is_object() || amended->pending_intent.empty())) {
+            goalns::GoalPendingIntent fresh;
+            fresh.work_item_id =
+                amended->goal_id + "/wi-c" + std::to_string(amended->contract_revision);
+            fresh.contract_revision = amended->contract_revision;
+            fresh.predecessor_iteration_id = amended->iteration_id.value_or(std::string());
+            fresh.continuation_ordinal = 1;
+            const auto queued = service.SetPendingIntent(fresh, amended->state_revision,
+                                                         command_cause);
+            if (queued.ok) {
+                out << theme.stats << "目标已改(c" << result.payload.value("contractRevision", 0)
+                    << ");旧证据全翻 stale 待重判,防空转连击清零,用量账保留。新工作项 "
+                    << fresh.work_item_id << " 已按新合同排下,泵下一拍开轮。" << theme.reset
+                    << "\n";
+                return lubancode::app::CommandFlow::Continue;
+            }
+            // 意图补排失败如实报:目标停在 preparing 且无待续意图,显式
+            // /goal resume 可重补(见 resume 分支)。
+            out << theme.error
+                << "目标已改(c" << result.payload.value("contractRevision", 0)
+                << ")但新工作项排队失败(" << queued.error_code << ": " << queued.error_message
+                << ");用 /goal resume 重排。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
         out << theme.stats << "目标已改(c" << result.payload.value("contractRevision", 0)
             << ");旧证据全翻 stale 待重判,防空转连击清零,用量账保留。" << theme.reset << "\n";
         return lubancode::app::CommandFlow::Continue;
@@ -676,9 +705,16 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
         }
         if (current->lifecycle == goalns::GoalLifecycle::Active ||
             current->lifecycle == goalns::GoalLifecycle::Preparing) {
-            out << theme.stats << "目标未停(" << goalns::ToString(current->lifecycle)
-                << "),无需恢复。" << theme.reset << "\n";
-            return lubancode::app::CommandFlow::Continue;
+            // 未停且"有班可上"(意图可认领,或他写者在途)才无需恢复;意图
+            // 空/滞留旧账(edit 两笔提交间崩溃、pause 拍掉在途相位后的认领
+            // 残账)落到下面的补排段——不留"目标未停却无班可上"的死锁。
+            const goalns::GoalWorkView work =
+                goalns::EvaluateGoalWork(*current, /*writer_epoch=*/"");
+            if (work.claimable || (work.has_intent && work.claimed_by_other)) {
+                out << theme.stats << "目标未停(" << goalns::ToString(current->lifecycle)
+                    << "),无需恢复。" << theme.reset << "\n";
+                return lubancode::app::CommandFlow::Continue;
+            }
         }
         // §4.67.2 resume 行 + G3:budget_exhausted 须显式加预算后才可恢复
         //("/goal resume iterations=30 tokens=200000"),不悄悄放宽;旧
@@ -721,34 +757,48 @@ lubancode::app::CommandFlow HandleGoalCommandV3(const lubancode::cli::ParsedGoal
             out << theme.stats << raised << ";旧费用保留。" << theme.reset << "\n";
             current = service.current();  // AddBudget 已提交,拿新 revision
         }
-        goalns::GoalTransitionCandidate candidate;
-        candidate.goal_id = current->goal_id;
-        candidate.expected_state_revision = current->state_revision;
-        candidate.to_lifecycle = goalns::GoalLifecycle::Active;
-        candidate.to_phase = goalns::GoalPhase::Idle;
-        // §4.67.2 resume 行:重新核对停因与预算才续排。停因这里清;
-        // budget_exhausted 的复核在上一段(先 AddBudget 再转)。
-        candidate.stop_reason.clear();
-        const auto result = service.ApplyTransition(candidate);
-        if (!result.ok) return fail_with(result);
-        out << theme.stats << "目标已续(从快照 r" << result.payload.value("stateRevision", 0)
-            << ";待续工作项沿原 id 回泵,不重放旧 iteration)。";
-        // 意图空了(上一轮收口被停/Esc 截走,没有排下续跑):显式 resume
-        // 排一枚新工作项(§4.67.2"可推进才续排"——用户点了 resume 就是
-        // 明确续跑)。predecessor 取最后 iteration,ordinal 1。
+        // 仍停在停态(preparing 不是停态,但同样要转 active 才算恢复;
+        // waiting 的解除与收口续跑归后台等待路,不走这笔)。
+        if (current->lifecycle != goalns::GoalLifecycle::Active) {
+            goalns::GoalTransitionCandidate candidate;
+            candidate.goal_id = current->goal_id;
+            candidate.expected_state_revision = current->state_revision;
+            candidate.to_lifecycle = goalns::GoalLifecycle::Active;
+            candidate.to_phase = goalns::GoalPhase::Idle;
+            // §4.67.2 resume 行:重新核对停因与预算才续排。停因这里清;
+            // budget_exhausted 的复核在上一段(先 AddBudget 再转)。
+            candidate.stop_reason.clear();
+            const auto result = service.ApplyTransition(candidate);
+            if (!result.ok) return fail_with(result);
+            out << theme.stats << "目标已续(从快照 r"
+                << result.payload.value("stateRevision", 0)
+                << ";待续工作项沿原 id 回泵,不重放旧 iteration)。";
+        } else {
+            out << theme.stats << "目标续排(r" << current->state_revision << ")。";
+        }
+        // 补排段(§4.67.2"可推进才续排"——用户点了 resume 就是明确续跑):
+        // 相位回到 idle 且没有可认领的工作项时,排一枚新工作项。覆盖三种
+        // 滞留:意图空(收口被停/Esc 截走没排下续跑)、认领残账(pause 拍
+        // 掉在途相位后 claimed 意图滞留——用户显式续跑即作废重排,服务面
+        // 允许覆写已认领意图)、edit 两笔提交间崩溃留下的空账。相位在
+        // queued(接管面)/running(在途)/evaluating(评估中)时不补——
+        // 那些路有各自的消费口。predecessor 取最后 iteration,ordinal 1。
         const goalns::GoalStateSnapshot* resumed = service.current();
-        if (resumed != nullptr &&
-            (!resumed->pending_intent.is_object() || resumed->pending_intent.empty())) {
-            goalns::GoalPendingIntent fresh;
-            fresh.work_item_id =
-                resumed->goal_id + "/wi-r" + std::to_string(resumed->state_revision);
-            fresh.contract_revision = resumed->contract_revision;
-            fresh.predecessor_iteration_id = resumed->iteration_id.value_or(std::string());
-            fresh.continuation_ordinal = 1;
-            const auto queued = service.SetPendingIntent(fresh, resumed->state_revision,
-                                                         command_cause);
-            if (queued.ok) {
-                out << " 新工作项 " << fresh.work_item_id << " 已排。";
+        if (resumed != nullptr && resumed->phase == goalns::GoalPhase::Idle) {
+            const goalns::GoalWorkView view =
+                goalns::EvaluateGoalWork(*resumed, /*writer_epoch=*/"");
+            if (!view.claimable) {
+                goalns::GoalPendingIntent fresh;
+                fresh.work_item_id =
+                    resumed->goal_id + "/wi-r" + std::to_string(resumed->state_revision);
+                fresh.contract_revision = resumed->contract_revision;
+                fresh.predecessor_iteration_id = resumed->iteration_id.value_or(std::string());
+                fresh.continuation_ordinal = 1;
+                const auto queued = service.SetPendingIntent(fresh, resumed->state_revision,
+                                                             command_cause);
+                if (queued.ok) {
+                    out << " 新工作项 " << fresh.work_item_id << " 已排。";
+                }
             }
         }
         out << theme.reset << "\n";
