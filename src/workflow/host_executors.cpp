@@ -291,6 +291,13 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
                                                        const api::Message& results) {
             node_turn->OnToolResultsCommitted(batch_id, results);
         };
+        // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——workflow 节点
+        // 不经 ToolTraceHub 的统一接线,这里直挂节点账桥(与 hub.Install
+        // 同款):工具结果消息入节点历史前,超帽全文就地归仓换固定预览,
+        // 节点实发与账上 tool 消息吃同一份(账实一致)。v2 桥默认穿透。
+        wiring.rewrite_tool_results_for_history = [node_turn](api::Message& results) {
+            return node_turn->RewriteToolResultsForHistory(results);
+        };
     }
     // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-----------------------
     // 每枚 agent 节点执行时自起一份已见指纹账(节点跑完即弃,不与兄弟

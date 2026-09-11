@@ -171,11 +171,9 @@ public:
     // 批次尾结果提交回执(失败与恢复单 P1-A/FA-01):Failed = 有结果的
     // "模型可见 tool 消息"没写稳,调用方须停止后续模型发送;Degraded =
     // 主账正文已保住的约定降级(metadata 落盘失败一类),放行另查链。
+    ToolResultsCommitReceipt RewriteToolResultsForHistory(api::Message& results) override;
     ToolResultsCommitReceipt OnToolResultsCommitted(const std::string& batch_id,
                                                     const api::Message& results) override;
-    // 模型历史预览钩子(V3-REAL-05):v3 场把超帽结果就地归仓换固定预览,
-    // 预览文本写回消息(loop 压进双账,模型实发吃预览);v2 场默认穿透。
-    void RewriteToolResultsForHistory(api::Message& tool_result_message) override;
     bool ShouldBlockExecution(const agent::ToolTraceEvent& started) override;
 
     // ---- 子代理边界(§3.5:父子文件只传边界引用与 terminal hash) ----
@@ -302,16 +300,7 @@ private:
     void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
     void V3ToolTrace(const agent::ToolTraceEvent& event);
     // 批次结果提交回执(P1-A):结果链各档折算(见 ToolResultsCommitReceipt)。
-    ToolResultsCommitReceipt V3ToolResultsCommitted(const api::Message& results);
-    // 结果链公共段(§4.16-4.18/§4.23;V3-REAL-05):原文落仓 →
-    // tool.result.persisted → tool.result.selected → 模型可见正文(线内
-    // 原文;超当前预览档 §4.17 头尾节选)。入史预览钩子与批次尾落账共用,
-    // 保证两路产出同一份预览文本(账实一致)。归仓开不了/写失败:正文保持
-    // 原文不裁(仓没开住,裁了正文就没有完整可得版本)。tool_use_id 在
-    // v3_turn_->calls 的账上查 Action 簿;查无返回原文(调用方守卫后不该
-    // 发生)。
-    std::string V3AdoptToolResult(const std::string& tool_use_id, const api::ToolResultBlock& result,
-                                  std::string& persisted_event_id, std::string& selected_event_id);
+    ToolResultsCommitReceipt V3ToolResultsCommitted(api::Message& results);
     // turn 收口:已声明未终态的 Action 补 cancelled(配对完整,不悬空)。
     void V3CancelDanglingActions(const std::string& reason);
     // v3 模式判定(空 = v2 原路)。

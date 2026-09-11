@@ -79,6 +79,9 @@ void ContextManager::ReplaceHistory(std::vector<api::Message> new_history) {
 }
 
 ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& budget) {
+    if (budget.preserve_committed_previews) {
+        return ContextWorkingView{request_history_, {}};
+    }
     // 无损结构压缩(第六期"首次定形"):只改发给模型的视图——每枚
     // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
     // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不

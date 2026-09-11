@@ -33,6 +33,7 @@ namespace lubancode::agent {
 struct ContextViewBudget {
     std::size_t window_tokens = 0;
     double token_calibration = 1.0;
+    bool preserve_committed_previews = false;
 };
 
 // BuildWorkingView 的产物:发上 wire 的那份消息视图 + 这次有没有真丢东西。

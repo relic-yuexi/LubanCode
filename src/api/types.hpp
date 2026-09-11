@@ -86,6 +86,11 @@ struct ToolResultBlock {
     bool is_error = false;
     std::vector<tools::ToolContentBlock> blocks;              // 空 = 纯文本结果
     std::optional<nlohmann::json> structured_content;  // MCP structuredContent;nullopt = 没给
+    // Host-only first-send policy; never serialized as protocol fields.
+    std::size_t preview_budget_bytes = 32768;
+    bool capture_complete = true;
+    std::string capture_reason;
+
 };
 
 // 模型的思考过程(extended thinking / reasoning)。text 是思考正文,
