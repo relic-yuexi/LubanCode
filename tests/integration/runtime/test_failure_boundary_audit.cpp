@@ -120,7 +120,11 @@ public:
         if (effect) effect();
         Result result{result_content.value_or(result_error ? "AUDIT_ERROR" : "AUDIT_RESULT"), result_error};
         result.outcome = result_outcome;
-        result.payload.content = native_blocks;
+        if (!native_blocks.empty()) {
+            auto payload = result.payload;
+            payload.content = native_blocks;
+            result.SetPayload(std::move(payload));
+        }
         return result;
     }
 };

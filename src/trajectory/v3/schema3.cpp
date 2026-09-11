@@ -266,7 +266,7 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
 // ---------------------------------------------------------------------------
 
 // artifactRef(§3.1 六键):{artifactId,kind,path,sha256,bytes,mediaType};
-// kind ∈ result_metadata|stdout|stderr|combined|report|image|blob。
+// kind ∈ result_metadata|stdout|stderr|combined|raw_payload|report|image|blob。
 std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
                                                 const nlohmann::json& ref) {
     static const std::vector<std::string> kKinds = {
