@@ -768,11 +768,44 @@ TEST_CASE("B2 real loop: action summaries use separate requests and adopted resu
     replay.messages = *recovered;
     const auto wire = api::chat::BuildRequestJson(backend.requests.back());
     const auto resumed = api::chat::BuildRequestJson(replay);
+    // 工具配对号两域对账(§1.2.1/§4.15):live 请求带 provider 原始号
+    // ("summary-tool-N",与假模型刚回的 assistant tool_use 同键);台账投影
+    // 带 actionId("action-<n>",写侧 AppendToolMessage 落账即此键,assistant
+    // 调用块经 FoldToolActions 同换)。两域各自配对自洽即合合同——比对
+    // 正文时剥掉 tool_call_id,配对键各查各的请求。
+    const auto collect_tools = [](const Json& built, std::vector<Json>* bodies,
+                                  std::vector<std::string>* ids,
+                                  std::set<std::string>* assistant_calls) {
+        for (const auto& message : built.at("messages")) {
+            const std::string role = message.value("role", "");
+            if (role == "tool") {
+                Json body = message;
+                body.erase("tool_call_id");
+                bodies->push_back(std::move(body));
+                ids->push_back(message.value("tool_call_id", std::string()));
+            } else if (role == "assistant" && message.contains("tool_calls")) {
+                for (const auto& call : message.at("tool_calls")) {
+                    assistant_calls->insert(call.value("id", std::string()));
+                }
+            }
+        }
+    };
     std::vector<Json> sent_tools, resumed_tools;
-    for (const auto& message : wire.at("messages")) if (message.value("role", "") == "tool") sent_tools.push_back(message);
-    for (const auto& message : resumed.at("messages")) if (message.value("role", "") == "tool") resumed_tools.push_back(message);
+    std::vector<std::string> sent_ids, resumed_ids;
+    std::set<std::string> sent_calls, resumed_calls;
+    collect_tools(wire, &sent_tools, &sent_ids, &sent_calls);
+    collect_tools(resumed, &resumed_tools, &resumed_ids, &resumed_calls);
     CHECK(sent_tools == resumed_tools);
     REQUIRE(sent_tools.size() == 2);
+    // live:provider 号域,逐一同假模型的 tool_use 同键。
+    for (const auto& id : sent_ids) {
+        CHECK(sent_calls.count(id) == 1);
+    }
+    // resumed:actionId 域(writer 发号 action-<n>),投影内配对键同域。
+    for (const auto& id : resumed_ids) {
+        CHECK(resumed_calls.count(id) == 1);
+        CHECK(id.rfind("action-", 0) == 0);
+    }
     for (const auto& tool_message : sent_tools) {
         const auto body = Json::parse(tool_message.at("content").get<std::string>());
         CHECK(body.at("execution_already_occurred") == true);
