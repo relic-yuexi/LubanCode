@@ -213,17 +213,33 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         ++result.model_calls;
         api::MessageAssembler assembler;
         nlohmann::json response_model = nullptr;
+        std::optional<std::string> stream_error;
         const auto response = backend.send_stream(request, [&](const api::StreamEvent& event) {
             if (const auto* start = std::get_if<api::MessageStart>(&event); start && !start->model.empty()) response_model = start->model;
+            if (const auto* error = std::get_if<api::StreamError>(&event)) stream_error = error->message;
             assembler.Feed(event);
         }, profile.cancel);
         assembler.FinalizeOpenBlock();
         std::string text;
         bool forbidden_blocks = false;
+        nlohmann::json output_blocks = nlohmann::json::array();
         for (const auto& block : assembler.BuildMessage().content) {
-            if (const auto* part = std::get_if<api::TextBlock>(&block)) text += part->text;
-            else forbidden_blocks = true;
+            if (const auto* part = std::get_if<api::TextBlock>(&block)) {
+                text += part->text;
+                output_blocks.push_back({{"type", "text"}, {"text", part->text}});
+            } else if (const auto* thought = std::get_if<api::ThinkingBlock>(&block)) {
+                output_blocks.push_back({{"type", "thinking"}, {"text", thought->text}, {"signature", thought->signature}});
+            } else if (const auto* opaque = std::get_if<api::RedactedThinkingBlock>(&block)) {
+                output_blocks.push_back({{"type", "redacted_thinking"}, {"data", opaque->data}});
+            } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
+                forbidden_blocks = true;
+                output_blocks.push_back({{"type", "tool_use"}, {"id", call->id}, {"name", call->name}, {"input", call->input}});
+            } else {
+                forbidden_blocks = true;
+                output_blocks.push_back({{"type", "unsupported_summary_output"}, {"variantIndex", block.index()}});
+            }
         }
+        const nlohmann::json response_body = {{"role", "assistant"}, {"content", output_blocks}};
         nlohmann::json usage = nullptr;
         if (assembler.usage_seen()) {
             const auto& values = assembler.usage();
@@ -231,13 +247,14 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                      {"cacheReadTokens", values.cache_read_tokens}, {"cacheWriteTokens", values.cache_creation_tokens},
                      {"reasoningTokens", values.output_reasoning_tokens}};
         }
-        if ((response || !text.empty()) && !Committed(writer.BeginStreamResponse(request_id, stream_id,
+        if ((response || !output_blocks.empty()) && !Committed(writer.BeginStreamResponse(request_id, stream_id,
                 internal_turn, step_id, response_id, kDurability))) {
             result.persistence_failed = true;
             return std::unexpected("response_start_persist_failed");
         }
-        if (!response) {
-            if (!text.empty()) {
+        if (!response || stream_error) {
+            const bool cancelled = !response && response.error().kind == api::ErrorKind::Cancelled;
+            if (!output_blocks.empty()) {
                 v3::MessageDraft partial;
                 partial.message_id_override = response_id;
                 partial.turn_id = internal_turn; partial.step_id = step_id; partial.request_id = request_id;
@@ -247,20 +264,20 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                 partial.completion_status = v3::CompletionStatus::Interrupted;
                 partial.provider = profile.provider; partial.wire = profile.wire; partial.model = profile.model;
                 partial.response_model = response_model; partial.usage = usage;
-                partial.message = {{"role", "assistant"}, {"content", text}};
+                partial.message = response_body;
                 if (!Committed(writer.AppendMessage(std::move(partial), kDurability))) result.persistence_failed = true;
             }
             v3::EventDraft failed;
-            failed.kind = response.error().kind == api::ErrorKind::Cancelled
+            failed.kind = cancelled
                               ? v3::EventKindV3::ModelResponseCancelled : v3::EventKindV3::ModelResponseFailed;
-            failed.status = response.error().kind == api::ErrorKind::Cancelled ? v3::OpStatus::Cancelled : v3::OpStatus::Failed;
+            failed.status = cancelled ? v3::OpStatus::Cancelled : v3::OpStatus::Failed;
             failed.turn_id = internal_turn; failed.step_id = step_id; failed.request_id = request_id;
-            failed.payload = {{"purpose", "action_summary"}, {"reason", response.error().message}};
+            failed.payload = {{"purpose", "action_summary"}, {"reason", stream_error ? *stream_error : response.error().message}};
             if (!Committed(writer.AppendEvent(std::move(failed), kDurability))) result.persistence_failed = true;
-            return std::unexpected(response.error().kind == api::ErrorKind::Cancelled ? "cancelled" : "summary_provider_error");
+            return std::unexpected(cancelled ? "cancelled" : "summary_provider_error");
         }
         const auto completed = writer.CompleteStreamResponse(request_id, stream_id, internal_turn, step_id,
-            response_id, {{"role", "assistant"}, {"content", text}}, profile.provider, profile.wire, profile.model,
+            response_id, response_body, profile.provider, profile.wire, profile.model,
             response_model, usage, assembler.stop_reason(), v3::MessagePurpose::ActionSummary, std::nullopt,
             assembler.stop_reason() == "max_tokens" ? std::optional(v3::CompletionStatus::Truncated) : std::nullopt, kDurability);
         if (!Committed(completed)) { result.persistence_failed = true; return std::unexpected("candidate_persist_failed"); }

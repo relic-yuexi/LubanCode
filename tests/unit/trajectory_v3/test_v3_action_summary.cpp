@@ -15,6 +15,8 @@ namespace {
 struct SummaryBackend : api::Backend {
     int calls = 0;
     bool truncated = false;
+    bool emit_reasoning = false;
+    bool emit_error = false;
     std::string reply = R"({"summary":"read finished","side_effects":["none observed"],"open_items":["inspect evidence"],"evidence":["combined output"]})";
     std::function<void()> during_call;
     nlohmann::json extra_body = nlohmann::json::object();
@@ -28,11 +30,16 @@ struct SummaryBackend : api::Backend {
         requests.push_back(request);
         if (during_call) during_call();
         emit(api::MessageStart{"summary-response", request.model});
+        if (emit_reasoning) {
+            emit(api::ThinkingDelta{"retained private reasoning"});
+            emit(api::ContentBlockDone{0});
+        }
         emit(api::TextDelta{reply});
         emit(api::ContentBlockDone{0});
         api::MessageDone done{truncated ? "max_tokens" : "end_turn", api::Usage{11, 7, 0, 0, 0}};
         done.usage_reported = true;
         emit(done);
+        if (emit_error) emit(api::StreamError{"provider stream failed", "stream_failed"});
         return {};
     }
 };
@@ -202,6 +209,30 @@ TEST_CASE("summary refuses changed source bytes before sampling") {
     f.source.text[0] = 'z';
     const auto result = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
     CHECK_FALSE(result.accepted); CHECK(result.reason == "source_hash_mismatch"); CHECK(backend.calls == 0);
+}
+
+TEST_CASE("summary reasoning is retained and a stream error cannot masquerade as success") {
+    Fixture f("reasoning"); SummaryBackend backend; int remaining = 8;
+    backend.emit_reasoning = true;
+    const auto result = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+    REQUIRE_MESSAGE(result.accepted, result.reason);
+    auto ledger = v3::ReadV3Ledger(f.writer.path());
+    REQUIRE(ledger.has_value());
+    bool retained = false;
+    for (const auto& message : ledger->messages) {
+        if (message.purpose == v3::MessagePurpose::ActionSummary && message.message.at("role") == "assistant") {
+            for (const auto& block : message.message.at("content")) {
+                if (block.value("type", "") == "thinking") retained = block.at("text") == "retained private reasoning";
+            }
+        }
+    }
+    CHECK(retained);
+    backend.emit_error = true;
+    const auto failed = runtime::SummarizeActionResult(f.writer, backend, f.profile, f.source, remaining);
+    CHECK_FALSE(failed.accepted); CHECK(failed.reason == "summary_provider_error");
+    ledger = v3::ReadV3Ledger(f.writer.path());
+    REQUIRE(ledger.has_value());
+    CHECK(ledger->FindEvent(failed.terminal_event_ref)->payload.at("state") == "failed");
 }
 
 TEST_CASE("summary rejects adapter overrides that enable tools or replace evidence") {
