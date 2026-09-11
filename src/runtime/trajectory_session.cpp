@@ -3,6 +3,7 @@
 // §五与 P0-1 的 schema.cpp 逐字段钉死的样子。
 
 #include "runtime/trajectory_session.hpp"
+#include "runtime/v3_tool_result_material.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1749,6 +1750,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
             persist.outputs.push_back(v3::ResultStore::ChannelOutput{
                 "combined", "text/plain", result->content, result->capture_complete, result->capture_reason,
                 static_cast<std::uint64_t>(result->content.size()), !result->capture_complete});
+            PreserveNativeToolPayload(*result, persist);
             const auto persisted = v3_books_->results->Persist(persist);
             if (persisted.ok) {
                 const auto receipt = book.action->PersistedResult(
@@ -1785,21 +1787,18 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                             summary_event_ref = summary.terminal_event_ref;
                         }
                     }
-                    v3::PreviewRequest request;
-                    request.max_preview_bytes = budget;
-                    v3::PreviewChannel channel;
-                    for (const auto& ref : persisted.result_ref) {
-                        if (ref.value("kind", std::string()) == "combined") channel.display_path = ref.value("path", std::string());
-                    }
-                    channel.channel = "combined";
-                    channel.text = result->content;
-                    channel.capture_complete = result->capture_complete;
-                    channel.capture_reason = result->capture_reason;
-                    channel.output_bytes = result->content.size();
-                    channel.output_bytes_lower_bound = !result->capture_complete;
-                    request.channels.push_back(std::move(channel));
-                    if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete)) {
+                    auto request = PreviewFromPersistedMaterials(persist, persisted, budget);
+                    if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete || persist.outputs.size() > 1)) {
                         auto preview = v3::BuildToolPreview(request);
+                        if (preview.listing_overflow) {
+                            auto index = v3_books_->results->PersistListing(persisted.result_id + "-output-index.txt", preview.listing_text);
+                            if (!index.has_value()) {
+                                hard_fail("tool.preview.index_failed", book.action_id);
+                                continue;
+                            }
+                            request.output_index_path = *index;
+                            preview = v3::BuildToolPreview(request);
+                        }
                         if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {
                             hard_fail("tool.preview.unrepresentable", book.action_id);
                             continue;

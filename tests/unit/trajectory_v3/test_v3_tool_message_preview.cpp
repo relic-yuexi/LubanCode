@@ -174,6 +174,17 @@ std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& sy
     result.capture_complete = capture_complete;
     result.capture_reason = capture_complete ? "" : "quota";
     result.preview_budget_bytes = preview_budget;
+    if (with_rich) {
+        tools::EmbeddedTextResourceContent resource;
+        resource.uri = "file:///source-a.txt";
+        resource.mime_type = "text/plain";
+        resource.text = std::string(131072, 'a');
+        result.blocks.push_back(resource);
+        resource.uri = "file:///source-b.txt";
+        resource.text = std::string(131072, 'b');
+        result.blocks.push_back(std::move(resource));
+    }
+
     if (structured) result.structured_content = nlohmann::json{{"raw_structured", std::string(65536, 'z')}};
     std::string history_content;
     if (use_history_hook) {
@@ -427,4 +438,29 @@ TEST_CASE("Gemini sends adopted preview while raw structured result stays in the
     nlohmann::json metadata;
     file >> metadata;
     CHECK(metadata.at("structured_content").at("raw_structured").get<std::string>().size() == 65536);
+}
+
+TEST_CASE("Native multi-resource text is immutable and all source channels share one preview cap") {
+    EnvGuard v3on("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(FreshRoot("native-payload")));
+    REQUIRE(ledger.has_value());
+    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    const auto preview = DriveFatToolTurn(*bridge, "SYSTEM", "call_native", "short projection", true, true, 32768, false, true);
+    CHECK(preview.size() <= 32768);
+    CHECK(preview.find("res-000001.combined.txt") != std::string::npos);
+    CHECK(preview.find("res-000001.raw_payload.json") != std::string::npos);
+    std::ifstream file(ledger->session_dir() / "artifacts" / "res-000001.raw_payload.json");
+    nlohmann::json raw;
+    file >> raw;
+    REQUIRE(raw.size() == 2);
+    CHECK(raw[0].at("text") == std::string(131072, 'a'));
+    CHECK(raw[1].at("text") == std::string(131072, 'b'));
+    CHECK(raw[0].at("uri") == "file:///source-a.txt");
+    const auto stream = ledger->session_dir() / platform::Utf8ToPath(platform::PathToUtf8(ledger->session_dir().filename()) + ".jsonl");
+    const auto rows = ReadLines(stream);
+    const auto* message = FindToolMessage(rows);
+    REQUIRE(message != nullptr);
+    CHECK(message->at("message").at("content") == preview);
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
 }
