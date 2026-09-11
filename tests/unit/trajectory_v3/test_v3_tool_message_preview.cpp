@@ -147,7 +147,8 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 // 空串(没走钩子)。
 std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& system,
                              const std::string& call_id, const std::string& result_content,
-                             bool use_history_hook = false) {
+                             bool use_history_hook = false, bool capture_complete = true,
+                             std::size_t preview_budget = 32768) {
     bridge.BeginTurn("turn-1", "external_user");
     bridge.RecordInput(UserMessage("列出全部文件"));
     const std::string request_id =
@@ -168,6 +169,10 @@ std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& sy
     finished.details = nlohmann::json{{"exit_code", 0}};
     bridge.OnToolTrace(finished);
     api::Message results = ToolResultMessage(call_id, result_content);
+    auto& result = std::get<api::ToolResultBlock>(results.content[0]);
+    result.capture_complete = capture_complete;
+    result.capture_reason = capture_complete ? "" : "quota";
+    result.preview_budget_bytes = preview_budget;
     std::string history_content;
     if (use_history_hook) {
         // loop 的次序(hub 挂 rewrite_tool_results_for_history):消息入史前
@@ -372,4 +377,32 @@ TEST_CASE("多字节边界(回退路:批次尾归仓预览):中文超帽预览�
     CHECK(platform::IsValidUtf8(preview_text));  // 截断刀口对齐码点边界
     CHECK(preview_text.find("truncated: true") != std::string::npos);
     CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}
+
+TEST_CASE("Capture quota remains incomplete in adopted preview and immutable metadata") {
+    EnvGuard v3on("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("capture-quota");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    const auto preview = DriveFatToolTurn(*bridge, "SYSTEM-PREVIEW", "call_quota", "captured bytes", true, false);
+    CHECK(preview.find("capture_complete: false") != std::string::npos);
+    CHECK(preview.find("quota") != std::string::npos);
+    CHECK(preview.size() <= 32768);
+    std::ifstream file(ledger->session_dir() / "artifacts" / "res-000001.json");
+    nlohmann::json metadata;
+    file >> metadata;
+    CHECK_FALSE(metadata.at("outputs")[0].at("capture_complete").get<bool>());
+    CHECK(metadata.at("outputs")[0].at("capture_reason") == "quota");
+}
+
+TEST_CASE("Complete small result fits a batch cap without preview framing") {
+    EnvGuard v3on("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("small-cap");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    CHECK(DriveFatToolTurn(*bridge, "SYSTEM-PREVIEW", "call_small_cap", "ok", true, true, 2) == "ok");
 }
