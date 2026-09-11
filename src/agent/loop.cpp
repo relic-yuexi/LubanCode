@@ -1415,6 +1415,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         "context.adapter_input_exceeds_capacity: final UTF-8 bytes/4 input + output + margin"
                         " (step=" + std::to_string(step_index) +
                         " input_tokens=" + std::to_string(tokens) +
+                        " messages=" + std::to_string(request.messages.size()) +
                         " output_reserve=" + std::to_string(reserve) +
                         " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
                         " window=" + std::to_string(window_tokens) + ")");

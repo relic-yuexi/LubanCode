@@ -2596,9 +2596,16 @@ TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted 
     std::vector<std::string> adopted;
     // Controlled commit adapter: the real loop and real Chat serializer run;
     // disk persistence is independently covered by the bridge/result-store tests.
+    int hook_calls = 0;
     wiring.rewrite_tool_results_for_history = [&](api::Message& batch) {
+        ++hook_calls;
+        MESSAGE("rewrite hook invocation #", hook_calls,
+                " blocks=", batch.content.size());
         for (auto& block : batch.content) {
             auto& result = std::get<api::ToolResultBlock>(block);
+            MESSAGE("hook block ", result.tool_use_id,
+                    " budget=", result.preview_budget_bytes,
+                    " content=", result.content.size());
             CHECK(result.preview_budget_bytes < 16000);
             trajectory::v3::PreviewRequest request;
             request.max_preview_bytes = result.preview_budget_bytes;
