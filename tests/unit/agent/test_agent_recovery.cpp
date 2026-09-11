@@ -103,6 +103,49 @@ struct Turn {
     Turn() : adapter("test", ids) { adapter.Start(); }
 };
 
+// P1-C(失败与恢复单 FA-03)的边界录音替身:prepared/sent 逐枚记账,sent
+// 的成败可按请求序号脚本化——发第 N 枚请求时 sent 记不住就在它身上拦。
+class SentGateRecorder final : public agent::LoopBoundaryRecorder {
+public:
+    // 第几枚请求(1 起)的 sent 记不住;0 = 全部落稳。
+    int fail_sent_on_request = 0;
+    int prepared = 0;
+    int sent = 0;
+    std::vector<std::string> request_ids;
+    std::vector<std::string> response_started_for;
+
+    std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+        ++prepared;
+        request_ids.push_back("req-" + std::to_string(prepared));
+        return request_ids.back();
+    }
+    bool OnRequestSent(const std::string& request_id) override {
+        ++sent;
+        if (fail_sent_on_request == sent) {
+            return false;  // 发送前最后一笔本地账写不住
+        }
+        sent_ok_.push_back(request_id);
+        return true;
+    }
+    void OnResponseStarted(const std::string& request_id) override {
+        response_started_for.push_back(request_id);
+    }
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                         bool) override {}
+    bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                           const std::string&) override {
+        return true;
+    }
+    void OnOutputFailed(const std::string&, const std::string&) override {}
+    void OnOutputCancelled(const std::string&, agent::OutputCancelSource) override {}
+
+    // 落稳 sent 的请求(按序)。
+    const std::vector<std::string>& sent_ok() const { return sent_ok_; }
+
+private:
+    std::vector<std::string> sent_ok_;
+};
+
 }  // namespace
 
 TEST_CASE("断流恢复:假后端前三次 503,第 4 次尝试恢复成功") {
@@ -367,4 +410,188 @@ TEST_CASE("恢复账:尝试相位从环里流出,started 连号、retrying 带�
     CHECK(phases[2].first == 2);
     CHECK(phases[3].second == api::RequestAttemptPhase::Succeeded);
     CHECK(retry_reason == "network.error");
+}
+
+// ---------------------------------------------------------------------------
+// P1-C(失败与恢复单 FA-03):发送前写账硬闸——prepared 过、sent 记不住,
+// backend 不得被调用;本地存储故障退出恢复环,不按 Network 错继续重试。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("发送前写账硬闸: sent 记不住,backend 零调用,无重试") {
+    FlakyBackend backend;
+    backend.script = {TextScript("不该被需要")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    SentGateRecorder recorder;
+    recorder.fail_sent_on_request = 1;  // 首枚请求的 sent 写不住
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.boundary_recorder = &recorder;
+    const auto result = loop.Run("问一句", wiring);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(backend.calls == 0);  // 本地已知账写不动,就不再发本次模型请求
+    CHECK(recorder.prepared == 1);
+    CHECK(recorder.sent == 1);
+    CHECK(recorder.response_started_for.empty());  // 没有任何远端事实被冒认
+    // 本地存储故障不是网络错误:恢复环直接退出,无第二次尝试。
+    CHECK(result.error().find("轨迹账写盘失败") != std::string::npos);
+}
+
+TEST_CASE("发送前写账硬闸: 首次网络失败后,第二次尝试 sent 记不住,总数停在已发送次数") {
+    FlakyBackend backend;
+    backend.script = {
+        {/*空*/},
+        {TextScript("不该被需要"), std::nullopt},
+    };
+    backend.script[0].error = ConnectReset();
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    SentGateRecorder recorder;
+    recorder.fail_sent_on_request = 2;  // 第二枚逻辑请求的 sent 写不住
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.boundary_recorder = &recorder;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
+    const auto result = loop.Run("问一句", wiring);
+    REQUIRE_FALSE(result.has_value());
+    // 第一次真发出去了(网络失败);第二次尝试在 sent 边界被拦——调用总数
+    // 停在此前已发送次数(1),不再发。
+    CHECK(backend.calls == 1);
+    CHECK(recorder.prepared == 2);
+    CHECK(recorder.sent == 2);
+    REQUIRE(recorder.sent_ok().size() == 1);  // 只有第一枚落稳
+}
+
+TEST_CASE("发送前写账成功后 transport 失败: 本地尝试记录保留,按网络策略收口") {
+    FlakyBackend backend;
+    backend.script = {
+        {/*空*/},
+        {TextScript("重试后的完整回答"), std::nullopt},
+    };
+    backend.script[0].error = ConnectReset();
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    SentGateRecorder recorder;
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.boundary_recorder = &recorder;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
+    const auto result = loop.Run("问一句", wiring);
+    REQUIRE(result.has_value());
+    CHECK(backend.calls == 2);  // 网络策略照走:可安全重发的从提交边界重来
+    // 两枚逻辑请求各有 prepared + sent(本地尝试记录保留)。
+    CHECK(recorder.prepared == 2);
+    REQUIRE(recorder.sent_ok().size() == 2);
+    CHECK(recorder.sent_ok()[0] != recorder.sent_ok()[1]);  // 各次尝试独立身份
+    // 不得推出服务端已处理:首枚请求没有任何 response.* 事实。
+    REQUIRE(recorder.response_started_for.size() == 1);
+    CHECK(recorder.response_started_for[0] == recorder.sent_ok()[1]);
+}
+
+// ---------------------------------------------------------------------------
+// P1-A(失败与恢复单 FA-01):批次结果持久提交回执——硬失败停止后续模型
+// 发送并撤回内存 history;约定降级放行。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("结果提交回执闸: 硬失败停止后续模型发送,内存 history 撤回到持久边界") {
+    FlakyBackend backend;
+    backend.script = {
+        {ToolScript("toolu_1"), std::nullopt},  // 工具执行一次
+        {TextScript("不该被需要"), std::nullopt},
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<CountingTool>();
+    CountingTool* counting = tool.get();
+    registry.Register(std::move(tool));
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
+    wiring.on_tool_trace = [](const agent::ToolTraceEvent&) {};
+    runtime::ToolResultsCommitReceipt failed;
+    failed.status = runtime::ToolResultsCommitReceipt::Status::Failed;
+    failed.error_code = "tool.result.store_unavailable";
+    wiring.on_tool_results_committed_receipt =
+        [&failed](const std::string&, const api::Message&) { return failed; };
+    const auto result = loop.Run("跑个工具", wiring);
+    REQUIRE_FALSE(result.has_value());
+    // 副作用只发生一次;backend 不进第二次调用(FA-01:不拿内存独有结果
+    // 继续发请求)。
+    CHECK(counting->call_count == 1);
+    CHECK(backend.calls == 1);
+    CHECK(result.error().find("工具结果未落账") != std::string::npos);
+    CHECK(result.error().find("tool.result.store_unavailable") != std::string::npos);
+    // 内存推进与持久接纳对齐:未提交的 tool_result 不留 history——但已
+    // 落稳的 assistant 声明照旧在(不倒写已成立的事实)。
+    const auto& history = loop.History();
+    bool has_tool_result = false;
+    bool has_assistant_call = false;
+    for (const auto& message : history) {
+        for (const auto& block : message.content) {
+            if (std::holds_alternative<api::ToolResultBlock>(block)) {
+                has_tool_result = true;
+            }
+            if (std::holds_alternative<api::ToolUseBlock>(block)) {
+                has_assistant_call = true;
+            }
+        }
+    }
+    CHECK_FALSE(has_tool_result);
+    CHECK(has_assistant_call);
+}
+
+TEST_CASE("结果提交回执闸: 约定降级放行,后续模型请求照发,缺口码随回执交出") {
+    FlakyBackend backend;
+    backend.script = {
+        {ToolScript("toolu_1"), std::nullopt},
+        {TextScript("降级后的收口"), std::nullopt},
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<CountingTool>();
+    CountingTool* counting = tool.get();
+    registry.Register(std::move(tool));
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.on_tool_trace = [](const agent::ToolTraceEvent&) {};
+    runtime::ToolResultsCommitReceipt degraded;
+    degraded.status = runtime::ToolResultsCommitReceipt::Status::Degraded;
+    degraded.degraded_codes.push_back("tool.result.persist_failed");
+    std::vector<runtime::ToolResultsCommitReceipt> seen;
+    wiring.on_tool_results_committed_receipt =
+        [&degraded, &seen](const std::string&, const api::Message&) {
+            seen.push_back(degraded);
+            return degraded;
+        };
+    const auto result = loop.Run("跑个工具", wiring);
+    REQUIRE(result.has_value());
+    // 降级合同:主账正文已保住,放行——下一份模型请求带着结果照发。
+    CHECK(counting->call_count == 1);
+    CHECK(backend.calls == 2);
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].ok());
+    REQUIRE(seen[0].degraded_codes.size() == 1);
+    CHECK(seen[0].degraded_codes[0] == "tool.result.persist_failed");
+    // 第二份请求带着工具结果(3 条消息:1 user + 1 assistant + 1 tool_result)。
+    REQUIRE(backend.message_counts.size() == 2);
+    CHECK(backend.message_counts[1] == 3);
+    bool has_tool_result = false;
+    for (const auto& message : loop.History()) {
+        for (const auto& block : message.content) {
+            if (std::holds_alternative<api::ToolResultBlock>(block)) {
+                has_tool_result = true;
+            }
+        }
+    }
+    CHECK(has_tool_result);  // 降级:内存 history 保留(持久正文已保住)
 }

@@ -1646,6 +1646,12 @@ std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledge
         } else if (role == "tool") {
             message.role = ReplayMessage::Role::Tool;
             message.call_id = body.value("tool_call_id", std::string());
+            // 回喂语义(P1-B/FA-02):写侧把最终回喂结果的 is_error 落在最终
+            // tool 消息本体;读取从本体还原,不从执行终态猜。旧账缺键 =
+            // false(写侧只写真值)。
+            if (body.contains("is_error") && body["is_error"].is_boolean()) {
+                message.is_error = body["is_error"].get<bool>();
+            }
             if (body.contains("content")) {
                 append_text(body["content"]);
             }

@@ -26,6 +26,7 @@
 
 #include "agent/loop.hpp"
 #include "agent/tool_trace.hpp"
+#include "api/anthropic/client.hpp"  // BuildRequestJson:P1-B wire 字段对照
 #include "api/types.hpp"
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -920,4 +921,295 @@ TEST_CASE("D3: v2 场 ProjectV3ContextHistory 报错不换") {
     const auto projected = ledger->ProjectV3ContextHistory();
     CHECK_FALSE(projected.has_value());
     CHECK(projected.error().rfind("compact.swap.not_v3", 0) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// P1-B(失败与恢复单 FA-02):错误结果往返不变——回喂语义以 Hook 处理后
+// 真正交给模型的结果为准,写进最终 tool 消息本体,投影原样还原;不从
+// 原始执行终态猜。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 结果消息带 is_error 开关(默认 ToolResults 只有成功形)。
+api::Message ToolResultsWithError(const std::string& call_id, const std::string& content, bool is_error) {
+    api::Message message;
+    message.role = api::Role::User;
+    api::ToolResultBlock result;
+    result.tool_use_id = call_id;
+    result.content = content;
+    result.is_error = is_error;
+    message.content.push_back(std::move(result));
+    return message;
+}
+
+// 执行终态与回喂结果可配置的一轮工具流(与 DriveToolTurn 同形)。
+TurnFlow DriveToolTurnWithOutcome(TrajectoryTurnBridge& bridge, const std::string& system,
+                                  const std::string& call_id, agent::ToolOutcome execution_outcome,
+                                  const api::Message& results_message,
+                                  runtime::ToolResultsCommitReceipt* receipt_out = nullptr) {
+    bridge.BeginTurn("turn-1", "external_user");
+    bridge.RecordInput(UserMessage("按这份结果继续。"));
+    const std::string request_id =
+        bridge.OnRequestPrepared(MakeRequest(system, {UserMessage("按这份结果继续。")}), PreparedContext());
+    REQUIRE_FALSE(request_id.empty());
+    bridge.OnRequestSent(request_id);
+    bridge.OnUsageRecorded(request_id, SampleUsage(), /*reported_by_provider=*/true, "resp-t", 0, true,
+                           false);
+    REQUIRE(bridge.OnOutputCompleted(request_id, AssistantWithToolCall(call_id), "tool_calls", "resp-t"));
+    bridge.OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, call_id));
+    agent::ToolTraceEvent started = TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, call_id);
+    started.outcome = agent::ToolOutcome::Succeeded;
+    bridge.OnToolTrace(started);
+    agent::ToolTraceEvent finished = TraceEvent(agent::ToolTraceEventKind::ExecutionFinished, call_id);
+    finished.outcome = execution_outcome;
+    finished.duration_ms = 42;
+    if (execution_outcome != agent::ToolOutcome::Succeeded) {
+        finished.error_code = "tool_blew_up";
+    } else {
+        finished.details = nlohmann::json{{"exit_code", 0}};
+    }
+    bridge.OnToolTrace(finished);
+    const auto receipt = bridge.OnToolResultsCommitted("batch-1", results_message);
+    if (receipt_out != nullptr) {
+        *receipt_out = receipt;
+    }
+    bridge.EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    return TurnFlow{request_id};
+}
+
+// 折出投影里的 tool 结果块(按 call_id 找;找不到给 nullopt)。
+std::optional<api::ToolResultBlock> FindProjectedResult(const std::vector<api::Message>& history,
+                                                        const std::string& call_id) {
+    for (const auto& message : history) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                result != nullptr && result->tool_use_id == call_id) {
+                return *result;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+TEST_CASE("P1-B 错误往返: 执行成功但回喂 is_error=true,选用 failed、消息本体带标记、投影还原") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("p1b-error-roundtrip");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::filesystem::path stream = V3StreamOf(*ledger);
+    const std::string call_id = "call_err_flip";
+
+    runtime::ToolResultsCommitReceipt receipt;
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        // 执行终态 Succeeded,回喂结果却是错误(Hook 改写/清洗后的最终语义)。
+        DriveToolTurnWithOutcome(*bridge, "SYSTEM-P1B", call_id, agent::ToolOutcome::Succeeded,
+                                 ToolResultsWithError(call_id, "文件读不出来:磁盘报错", /*is_error=*/true),
+                                 &receipt);
+    }
+    CHECK(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
+    // 投影还原(先投影后关账,投影自己重读盘):is_error 不丢、正文不变。
+    const auto replay = ledger->ProjectV3ContextHistory();
+    REQUIRE(replay.has_value());
+    CHECK(ledger->CloseSession("exit").error_code.empty());
+
+    const auto rows = ReadLines(stream);
+    // 选用口径以回喂为准:effectiveOutcome=failed(不从执行终态猜 done)。
+    bool saw_selected_failed = false;
+    const nlohmann::json* tool_message = nullptr;
+    for (const auto& row : rows) {
+        if (row.value("kind", std::string()) == "tool.result.selected") {
+            saw_selected_failed = row.at("payload").value("effectiveOutcome", std::string()) == "failed";
+        }
+        if (row.value("type", std::string()) == "message" && row.contains("message") &&
+            row.at("message").value("role", std::string()) == "tool") {
+            tool_message = &row;
+        }
+    }
+    CHECK(saw_selected_failed);
+    REQUIRE(tool_message != nullptr);
+    // 消息本体带 is_error=true(只写真值;读取侧 contains() 认键)。
+    REQUIRE(tool_message->at("message").contains("is_error"));
+    CHECK(tool_message->at("message").at("is_error").get<bool>());
+
+    const auto projected = FindProjectedResult(*replay, /*call_id=*/"action-000001");
+    REQUIRE(projected.has_value());
+    CHECK(projected->is_error);
+    CHECK(projected->content == "文件读不出来:磁盘报错");
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}
+
+TEST_CASE("P1-B 错误往返: 执行失败但回喂成功,当场与恢复输入均取最终结果") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("p1b-success-roundtrip");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::filesystem::path stream = V3StreamOf(*ledger);
+    const std::string call_id = "call_ok_flip";
+
+    runtime::ToolResultsCommitReceipt receipt;
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        // 执行终态 ToolError,Hook 改写后的最终回喂是成功结果。
+        DriveToolTurnWithOutcome(*bridge, "SYSTEM-P1B2", call_id, agent::ToolOutcome::ToolError,
+                                 ToolResults(call_id, "降级读到了:缓存副本"), &receipt);
+    }
+    CHECK(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
+    const auto replay = ledger->ProjectV3ContextHistory();
+    REQUIRE(replay.has_value());
+    CHECK(ledger->CloseSession("exit").error_code.empty());
+
+    const auto rows = ReadLines(stream);
+    bool saw_selected_done = false;
+    const nlohmann::json* tool_message = nullptr;
+    for (const auto& row : rows) {
+        if (row.value("kind", std::string()) == "tool.result.selected") {
+            saw_selected_done = row.at("payload").value("effectiveOutcome", std::string()) == "done";
+        }
+        if (row.value("type", std::string()) == "message" && row.contains("message") &&
+            row.at("message").value("role", std::string()) == "tool") {
+            tool_message = &row;
+        }
+    }
+    CHECK(saw_selected_done);  // 不从执行终态猜 failed
+    REQUIRE(tool_message != nullptr);
+    // is_error=false 不落键(写侧只写真值)——缺键即成功,旧账两读法兼容。
+    CHECK_FALSE(tool_message->at("message").contains("is_error"));
+    const auto projected = FindProjectedResult(*replay, "action-000001");
+    REQUIRE(projected.has_value());
+    CHECK_FALSE(projected->is_error);
+    CHECK(projected->content == "降级读到了:缓存副本");
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}
+
+TEST_CASE("P1-B 错误往返: 同一 assistant 多枚调用成功失败混排,回放不串号不换序不丢标记") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("p1b-mixed");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::filesystem::path stream = V3StreamOf(*ledger);
+    const std::string first_call = "call_mix_a";
+    const std::string second_call = "call_mix_b";
+
+    runtime::ToolResultsCommitReceipt receipt;
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge.BeginTurn("turn-1", "external_user");
+        bridge.RecordInput(UserMessage("两份都查一下。"));
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content.push_back(api::TextBlock{"分头查。"});
+        for (const std::string& call_id : {first_call, second_call}) {
+            api::ToolUseBlock call;
+            call.id = call_id;
+            call.name = "read_file";
+            call.input = nlohmann::json{{"path", "a.cpp"}};
+            assistant.content.push_back(std::move(call));
+        }
+        const std::string request_id =
+            bridge.OnRequestPrepared(MakeRequest("SYSTEM-MIX", {UserMessage("两份都查一下。")}),
+                                     PreparedContext());
+        REQUIRE_FALSE(request_id.empty());
+        bridge.OnRequestSent(request_id);
+        REQUIRE(bridge.OnOutputCompleted(request_id, assistant, "tool_calls", "resp-mix"));
+        for (const std::string& call_id : {first_call, second_call}) {
+            bridge.OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, call_id));
+            agent::ToolTraceEvent started =
+                TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, call_id);
+            started.outcome = agent::ToolOutcome::Succeeded;
+            bridge.OnToolTrace(started);
+            agent::ToolTraceEvent finished =
+                TraceEvent(agent::ToolTraceEventKind::ExecutionFinished, call_id);
+            finished.outcome = agent::ToolOutcome::Succeeded;
+            finished.duration_ms = 10;
+            finished.details = nlohmann::json{{"exit_code", 0}};
+            bridge.OnToolTrace(finished);
+        }
+        api::Message results;
+        results.role = api::Role::User;
+        api::ToolResultBlock ok_result;
+        ok_result.tool_use_id = first_call;
+        ok_result.content = "第一份:正常";
+        api::ToolResultBlock err_result;
+        err_result.tool_use_id = second_call;
+        err_result.content = "第二份:炸了";
+        err_result.is_error = true;
+        results.content.push_back(std::move(ok_result));
+        results.content.push_back(std::move(err_result));
+        receipt = bridge.OnToolResultsCommitted("batch-1", results);
+        bridge.EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    }
+    REQUIRE(receipt.status == runtime::ToolResultsCommitReceipt::Status::Committed);
+    const auto replay = ledger->ProjectV3ContextHistory();
+    REQUIRE(replay.has_value());
+    CHECK(ledger->CloseSession("exit").error_code.empty());
+
+    // 投影:两枚结果都在、次序与声明序一致、配对键不串、错误标记不丢。
+    std::vector<std::pair<std::string, bool>> seen;
+    for (const auto& message : *replay) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                seen.emplace_back(result->tool_use_id, result->is_error);
+            }
+        }
+    }
+    REQUIRE(seen.size() == 2);
+    // 投影配对键是 actionId(writer 发号,声明序即 action 序),两枚互不相等。
+    CHECK(seen[0].first != seen[1].first);
+    CHECK_FALSE(seen[0].second);  // 第一枚成功
+    CHECK(seen[1].second);        // 第二枚错误,标记不丢
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}
+
+TEST_CASE("P1-B wire 对照: 会编码错误标记的 adapter 恢复前后 wire 字段一致") {
+    // FA-02 第 4 条:JSONL 校验成功不能替代 wire 字段断言——anthropic 的
+    // tool_result 会把 is_error 编码进 wire,同一条结果消息(当场回喂的
+    // 那份 vs 恢复投影回来的那份)过同一只拼装器,对应 wire 字段必须一致。
+    const std::string content = "命令没跑起来:exit 127";
+    for (const bool is_error : {false, true}) {
+        CAPTURE(is_error);
+        api::Message live;
+        live.role = api::Role::User;
+        api::ToolResultBlock live_result;
+        live_result.tool_use_id = "call_wire";
+        live_result.content = content;
+        live_result.is_error = is_error;
+        live.content.push_back(live_result);
+
+        api::Message restored = live;  // 投影回来的形状:同 content、同标记
+        // (配对键由投影换成 actionId 属预期;此处对照的是错误标记的 wire
+        // 编码,不对照键名。)
+        restored.content.front() = api::ToolResultBlock{"action-000001", content, is_error};
+
+        const auto wire_of = [](const api::Message& message) {
+            api::Request request;
+            request.model = "test-model";
+            request.messages.push_back(message);
+            const auto body = api::anthropic::BuildRequestJson(request);
+            REQUIRE(body.contains("messages") && body["messages"].is_array() &&
+                    !body["messages"].empty());
+            REQUIRE(body["messages"][0].contains("content") &&
+                    body["messages"][0]["content"].is_array() && !body["messages"][0]["content"].empty());
+            return body["messages"][0]["content"][0];
+        };
+        const auto live_wire = wire_of(live);
+        const auto restored_wire = wire_of(restored);
+        CHECK(live_wire.value("type", std::string()) == "tool_result");
+        CHECK(restored_wire.value("type", std::string()) == "tool_result");
+        CHECK(live_wire.value("content", std::string()) == content);
+        CHECK(restored_wire.value("content", std::string()) == content);
+        // is_error 的 wire 编码:anthropic 只写真值;两份必须同形。
+        CHECK(live_wire.contains("is_error") == is_error);
+        CHECK(restored_wire.contains("is_error") == is_error);
+        if (is_error) {
+            CHECK(live_wire["is_error"].get<bool>());
+            CHECK(restored_wire["is_error"].get<bool>());
+        }
+    }
 }

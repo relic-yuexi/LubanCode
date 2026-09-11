@@ -108,6 +108,10 @@
 
 生命周期规则(§4.14):同一操作可以多条 event,各持自己的 eventId/seq,共用操作身份;每次尝试最多一个执行终态;终态后迟到响应另记观察事件不改旧终态;`pending` 是"在等"、`running` 是"在执行";崩溃后见 `started` 无终态只能判"可能已执行"。
 
+模型请求三段语义(失败与恢复单 P1-C/FA-03):`model.request.prepared` = 准备发送(引用先落稳才许发);`model.request.sent` = 本地交给 transport,`payload.deliveryScope="local_transport"` 钉死本地交接——不暗示已拿到远端收据,服务端事实只看 `model.response.*`;`model.response.*` 各事件才是远端确认。sent 这笔写不稳时请求不得上 wire(发送前写账硬闸)。
+
+tool 消息回喂语义(失败与恢复单 P1-B/FA-02):最终 tool 消息本体可带 `message.is_error=true`(只写真值,缺键 = 成功)——语义以 Hook 处理后真正交给模型的结果为准,不从执行终态猜;恢复投影(EffectiveConversationFromV3 → ProjectHistoryFromReplay)从本体原样还原。工具折叠新增两档缺口态(失败与恢复单 P1-A/FA-01):`result_missing`(执行已有终态、结果链没立起来)与 `message_not_admitted`(tool 消息已写、接纳未成)——都与 `selected_no_message` 一样进 resume 的 open_actions,补保存/补接纳/补消息,不重跑工具。
+
 ### 2.3 compact 状态机(§4.5-4.8)
 
 ```

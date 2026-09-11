@@ -54,6 +54,10 @@ public:
     void PushUserTurn(api::Message durable, api::Message request_view);
     // 一条消息原样落双账(assistant 回复、tool_result 批、续跑标记)。
     void PushMessage(api::Message message);
+    // 撤回刚推进的末条消息(双账同撤;失败与恢复单 P1-A/FA-01)。只许撤
+    // 本轮刚推的那条——工具结果持久提交硬失败时,内存 history 不得留一条
+    // 盘上没有的"已提交输入"(内存推进与持久接纳对齐)。空账 no-op。
+    void PopMessageBack();
     // 轮次边界的来信注入(inbox):按 InjectIncomingMessage 的规矩进双账。
     void InjectIncoming(api::Message incoming);
     // 双账末条各追加一块(步数将尽提醒那类"随 history 留住"的尾部注入)。

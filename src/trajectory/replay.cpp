@@ -376,6 +376,10 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             message.role = ReplayMessage::Role::Tool;
             message.origin = OriginName(envelope.origin);
             message.call_id = GetString(payload, "call_id");
+            // 回喂语义(P1-B/FA-02):v2 事件正文带 is_error(缺省 false)。
+            if (payload.contains("is_error") && payload["is_error"].is_boolean()) {
+                message.is_error = payload["is_error"].get<bool>();
+            }
             message.blocks = payload.contains("content") && payload["content"].is_array()
                                  ? payload["content"]
                                  : nlohmann::json::array();
@@ -589,6 +593,9 @@ nlohmann::json ReplayMessage::ToJson() const {
     if (call_id.has_value()) {
         out["call_id"] = *call_id;
     }
+    if (is_error) {
+        out["is_error"] = true;  // 只写真值:旧 checkpoint 没这键 = false,口径不破
+    }
     out["blocks"] = blocks;
     out["source_event_id"] = source_event_id;
     out["source_event_hash"] = source_event_hash;
@@ -613,6 +620,9 @@ std::optional<ReplayMessage> ReplayMessage::FromJson(const nlohmann::json& json)
     message.origin = GetString(json, "origin");
     if (json.contains("call_id") && json["call_id"].is_string()) {
         message.call_id = json["call_id"].get<std::string>();
+    }
+    if (json.contains("is_error") && json["is_error"].is_boolean()) {
+        message.is_error = json["is_error"].get<bool>();
     }
     if (json.contains("blocks")) {
         message.blocks = json["blocks"];
