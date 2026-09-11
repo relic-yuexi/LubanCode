@@ -215,6 +215,9 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
     TIMEOUT "${test_timeout}"
     # v3 写侧已翻默认(产品:未设=开);测试套显式钉 0 保住 v2 老册的
     # 行为断言——v3 册自带 EnvGuard("1") 显式开,守门案钉"未设=开"。
+    # T16(B1):default-v3 冒烟册(test_v3_default_smoke)册内自行摘掉
+    # 本变量再走真入口,ctest 注入的 0 被它显式覆盖,分类见
+    # docs/development/v3-consumer-inventory.md §二。
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
 endforeach()
 

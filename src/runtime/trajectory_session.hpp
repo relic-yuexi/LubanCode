@@ -65,6 +65,19 @@ struct V3SessionBooks {
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
+    // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------
+    // compact applied 已落稳、但内存换账(链投影 / ReplaceHistory)失败时
+    // 置位。此后本场所有主会话轮桥(CLI/AppServer/Goal/Loop 同一条路)的
+    // 请求最终准入一律拒绝:不发新模型请求、不派新工具(请求拒了就没有
+    // 新 assistant 的 tool_use)、自动续跑同门;在飞请求按真实状态收尾。
+    // 保留已提交链,不回写不重压。解除只有一条路:换场时 books 重建
+    // (resume/clear 重开即天然解除);本进程内不静默放行——恢复须沿已
+    // 提交 v3 上下文核验重建,那发生在新场的新 books 上。
+    // 注:阻断只住内存,不落账——schema 尚无对应 kind(T11 按合同发行),
+    // 不拿旧 payload 换名伪造。
+    bool execution_blocked = false;
+    std::string execution_block_reason;         // 稳定原因(compact.swap.*)
+    std::uint64_t execution_block_revision = 0;  // 阻断时账面 revision(准入对表/诊断)
     // provider 调用号 -> v3 调用身份:轮桥声明 tool call 时登记(§4.15),
     // 子代理五步的 parentActionRef 从这查(actionId/声明消息/turn/step)。
     struct DeclaredAction {
@@ -851,6 +864,17 @@ public:
     // ReplaceHistory 进 loop——v2 compact 换账的同一安全点。非 v3 场或
     // 验卷不过:错误,调用方不换并明说。
     std::expected<std::vector<api::Message>, std::string> ProjectV3ContextHistory() const;
+
+    // ---- T12-A(V3-GAP-07 P0):compact 投影失败的会话级执行阻断 ----
+    // 置位:applied 已落稳、ProjectV3ContextHistory/ReplaceHistory 失败的
+    // 调用方在报错的同时调它。此后本场所有主会话轮桥的请求最终准入拒绝
+    //(V3RequestPrepared 返回空串,loop 本步明败不发模型);CLI/AppServer/
+    // Goal/Loop 殊途同门,不是只在 CLI 分支加早退。幂等:已阻断时重复置位
+    // 保留首因。非 v3 场(无主账)no-op。reason 用调用方拿到的稳定错误
+    //(compact.swap.*)。
+    void BlockV3Execution(const std::string& reason);
+    // 阻断查询(/doctor、测试、AppServer 状态面):false = 本场可继续。
+    bool V3ExecutionBlocked() const;
 
     const std::string& session_id() const;
     std::filesystem::path session_dir() const;
