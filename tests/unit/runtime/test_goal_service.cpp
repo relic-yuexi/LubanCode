@@ -256,9 +256,10 @@ TEST_CASE("证据引用合同:来源三选一、hash hex64、必选回指") {
                                           {"bytes", 10},
                                           {"mediaType", "text/plain"}};
         REQUIRE(goalns::ValidateEvidenceRef(ref.ToJson()).empty());
-        // roundtrip:artifact 分支也能回来。
-        const auto restored = GoalEvidenceRef::FromJson(
-            nlohmann::json::parse(ref.ToJson()), nullptr);
+        // roundtrip:artifact 分支也能回来。ToJson() 出的就是 json,直接进
+        // FromJson;先前误套一层 json::parse,把 json 当输入流喂适配器,
+        // 三平台都在 nlohmann input_adapters 处炸出 incomplete type。
+        const auto restored = GoalEvidenceRef::FromJson(ref.ToJson(), nullptr);
         REQUIRE(restored.has_value());
         CHECK(restored->source == GoalEvidenceSource::Artifact);
         CHECK(restored->artifact_ref.at("artifactId") == "res-000001");
