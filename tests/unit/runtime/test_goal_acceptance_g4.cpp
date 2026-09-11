@@ -1564,24 +1564,27 @@ TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") 
 
 TEST_CASE("flow freezes the evaluation revision while the backend is in flight") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
-    Harness harness("flow-contract-race");
+    Harness harness("flow-revision-race");
     harness.RunToRunning();
     const auto evidence = harness.MakeEvidence("ev-1", "");
     harness.backend.replies = {kContinueVerdict};
+    // 评估在途时账面被并发提交抬 revision(此处以子任务 usage 归账为源;
+    // 合同改版在途已被 goal.busy 拒——edit 等安全边界,§4.67.2):判词
+    // 回来后按开评时冻结的 stateRevision 提交,CAS 拒、不采用。
     harness.backend.before_reply = [&] {
-        auto contract = harness.Now()->contract;
-        contract.objective = "new contract while evaluator is running";
-        const auto amended = harness.service->AmendContract(contract,
-            harness.Now()->state_revision, harness.Now()->contract_revision,
-            nlohmann::json{{"source", "test"}});
-        REQUIRE(amended.ok);
+        GoalUsage spent;
+        spent.input_tokens = 5;
+        spent.request_count = 1;
+        spent.usage_reported = true;
+        REQUIRE(harness.service->RecordGoalUsage("race-usage", "subagent", spent,
+            harness.Now()->state_revision, nlohmann::json{{"source", "test"}}).ok);
     };
     const auto result = CloseGoalIterationWithEvaluation(*harness.service,
         *harness.volume.writer, harness.backend, harness.Options(),
         harness.Material({evidence}, {evidence}));
     CHECK_FALSE(result.ok);
     CHECK(result.error_code == goalns::kErrGoalRevisionConflict);
-    CHECK(harness.Now()->contract_revision == 2);
+    CHECK(harness.Now()->contract_revision == 1);  // 合同没动:在途改版被拒
     CHECK_FALSE(harness.Now()->applied_evaluation_id.has_value());
     CHECK(CountEvents(harness.volume, EventKindV3::GoalEvaluationCompleted) == 1);
 }

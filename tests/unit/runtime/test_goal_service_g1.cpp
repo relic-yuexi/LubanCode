@@ -265,11 +265,13 @@ TEST_CASE("SetPendingIntent:CAS、未认领不覆盖、认领后可换、旧合�
     const auto stale = service.SetPendingIntent(FirstIntent(), rev, {});
     CHECK_FALSE(stale.ok);  // 上一笔已把 revision 抬到 rev+1
 
-    // 对着旧合同拒:改合同后(c2)再交带 r1 的意图。
+    // 对着旧合同拒:改合同后(c2;随旧合同作废的意图已被 AmendContract
+    // 清空)再交带 r1 的意图。
     const std::uint64_t rev2 = service.current()->state_revision;
     goalns::GoalContract contract = service.current()->contract;
     contract.objective = "目标 A(改)";
     REQUIRE(service.AmendContract(contract, rev2, service.current()->contract_revision, {}).ok);
+    CHECK(service.current()->pending_intent.empty());  // 旧意图随合同作废
     GoalPendingIntent stale_contract = FirstIntent();
     stale_contract.contract_revision = 1;  // 在账已是 r2
     const auto old_contract = service.SetPendingIntent(
@@ -277,7 +279,10 @@ TEST_CASE("SetPendingIntent:CAS、未认领不覆盖、认领后可换、旧合�
     CHECK_FALSE(old_contract.ok);
     CHECK(old_contract.error_code == goalns::kErrGoalIntentConflict);
 
-    // 认领销账后可交下一枚:claim wi-1(同键覆盖的那枚),再交 wi-2。
+    // 认领销账后可交下一枚:按新合同补 wi-1(r2),claim 后再交 wi-2。
+    GoalPendingIntent fresh = FirstIntent();
+    fresh.contract_revision = service.current()->contract_revision;
+    REQUIRE(service.SetPendingIntent(fresh, service.current()->state_revision, {}).ok);
     REQUIRE(service.ClaimPendingIntent("run-set", service.current()->state_revision, {}).ok);
     GoalPendingIntent wi2 = FirstIntent();
     wi2.work_item_id = "wi-2";

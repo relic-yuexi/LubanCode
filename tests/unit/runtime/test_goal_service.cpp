@@ -506,8 +506,28 @@ TEST_CASE("AmendContract:意图已认领拒改版(edit 等安全边界),认领�
     CHECK(service.current()->lifecycle == GoalLifecycle::Active);
     CHECK(service.current()->phase == GoalPhase::Running);
 
+    // 评估在途(evaluating)放行(设计矩阵 M4"改版撞迟到判词"):改版落
+    // preparing,认领随迟到判词一并作废清空——迟到的判词采用会被相位拒。
+    REQUIRE(service.BeginEvaluation(service.current()->state_revision, std::nullopt,
+                                     std::vector<GoalEvidenceRef>{},
+                                     std::vector<std::string>{}, {})
+                 .ok);
+    const auto amended_mid_eval = service.AmendContract(
+        contract, service.current()->state_revision, service.current()->contract_revision, {});
+    REQUIRE(amended_mid_eval.ok);
+    CHECK(service.current()->contract_revision == 2);
+    CHECK(service.current()->lifecycle == GoalLifecycle::Preparing);
+    CHECK(service.current()->pending_intent.empty());
+
     // 认领残账(pause 拍掉在途相位后的 claimed 意图滞留):SetPendingIntent
     // 允许覆写(用户显式续跑 = 作废滞留认领重排,§4.67.2 resume 行)。
+    // 改版已清空在账意图:先按新合同(c2)认领一枚再造残账。
+    goalns::GoalPendingIntent re_claim;
+    re_claim.work_item_id = "wi-2";
+    re_claim.contract_revision = service.current()->contract_revision;
+    re_claim.continuation_ordinal = 1;
+    REQUIRE(service.SetPendingIntent(re_claim, service.current()->state_revision, {}).ok);
+    REQUIRE(service.ClaimPendingIntent("run-000002", service.current()->state_revision, {}).ok);
     const auto paused = [&] {
         auto candidate = Transition(GoalLifecycle::Paused, service.current()->state_revision);
         candidate.goal_id = "goal-1";
@@ -518,7 +538,7 @@ TEST_CASE("AmendContract:意图已认领拒改版(edit 等安全边界),认领�
     REQUIRE(service.current()->pending_intent.at("claimed") == true);
     goalns::GoalPendingIntent fresh;
     fresh.work_item_id = "goal-1/wi-r8";
-    fresh.contract_revision = 1;
+    fresh.contract_revision = service.current()->contract_revision;
     fresh.predecessor_iteration_id = service.current()->iteration_id.value_or(std::string());
     fresh.continuation_ordinal = 1;
     REQUIRE(service.SetPendingIntent(fresh, service.current()->state_revision, {}).ok);

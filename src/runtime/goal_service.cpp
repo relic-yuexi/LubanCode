@@ -1093,21 +1093,25 @@ GoalServiceResult GoalService::AmendContract(const GoalContract& contract,
     if (contract.objective.empty()) {
         return Fail(kErrGoalCandidateInvalid, "改版合同缺 objective");
     }
-    // 在账意图分两路(§4.67.2 edit 行"安全边界提交"+ §4.67.4"旧 Goal 工作
-    // 项不挤过排在边界前的 pause/edit/clear"):
-    //   - 已认领(claim 落账/轮在途):edit 等安全边界——拒,先 pause 或
-    //     等本轮收口(收口即销账 intent),再 edit。终态明确可恢复,不在
-    //     途轮中途换合同。
-    //   - 未认领:意图指向的合同已不存在,随合同作废清空;由命令面按新
-    //     contractRevision 重拟(与 resume 补意图同款命名),泵下一拍即按
-    //     新合同开轮——不留"意图对着旧合同永不 claimable"的死锁。
+    // 在账意图分路(§4.67.2 edit 行"安全边界提交"+ §4.67.4"旧 Goal 工作
+    // 项不挤过排在边界前的 pause/edit/clear"+ §4.67.10 改版撞迟到判词行):
+    //   - 已认领且工作轮在途(running/queued):edit 等安全边界——拒,先
+    //     pause 或等本轮收口(收口即销账 intent),再 edit。终态明确可恢复,
+    //     不在工作轮中途换合同、拍掉在途相位。
+    //   - 已认领但评估在途(evaluating):放行(设计矩阵 M4"合同改版撞上
+    //     迟到判词"):改版落 preparing/idle,开评时冻结的 stateRevision
+    //     让迟到判词被 CAS/相位拒;认领随迟到判词一并作废清空,不滞留。
+    //   - 未认领:意图指向的合同已不存在,随合同作废清空。两种放行情都
+    //     由命令面按新 contractRevision 重拟(与 resume 补意图同款命名),
+    //     泵下一拍即按新合同开轮——不留"意图对着旧合同永不 claimable"
+    //     的死锁。
     if (current_->pending_intent.is_object() && !current_->pending_intent.empty()) {
         std::string intent_error;
         const auto previous = GoalPendingIntent::FromJson(current_->pending_intent, &intent_error);
         if (!previous.has_value()) {
             return Fail(kErrGoalCandidateInvalid, "在账意图读不出(不受理改版): " + intent_error);
         }
-        if (previous->claimed) {
+        if (previous->claimed && current_->phase != GoalPhase::Evaluating) {
             return Fail(kErrGoalBusy,
                         "工作项 " + previous->work_item_id + " 已被认领(phase=" +
                             ToString(current_->phase) + ");edit 等安全边界——先 /goal pause 或等本轮收口");
