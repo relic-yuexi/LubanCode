@@ -34,6 +34,7 @@
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/goal_service.hpp"  // GoalService(轨迹 v3 §4.67 G1)
 #include "runtime/session_work_scheduler.hpp"  // GoalWorkSource/FairnessCounter
+#include "runtime/turn_view.hpp"  // TurnMetrics(主轮 usage 归账,§4.67.7)
 #include "tools/goal_checkpoint_tool.hpp"
 
 namespace lubancode::cli {
@@ -76,6 +77,11 @@ public:
         // 最近一轮收口后的 turnId(§4.67 G2 验收 parentTurnId 回指工作轮;
         // 可空 = 拿不到,评估账如实落 null,不伪造)。
         std::function<std::string()> last_turn_id;
+        // 最近一轮收口后的整轮 usage(§4.67.7 主轮费用归 goal 账):
+        // TurnView::metrics 只含主 loop 的请求(子代理各有子账,经
+        // NoteSubagentCompletion 单独归账,这里不双计)。可空 = 装配层没有
+        // turn 视图,如实不归账。
+        std::function<std::optional<lubancode::runtime::TurnMetrics>()> last_turn_metrics;
         // 渲染事件出口(问题 3 第 2 条):is_error 定色,text 是纯文案
         // ——怎么画由装配层(interactive_session_assembly 填)决定。
         std::function<void(bool is_error, const std::string& text)> notify;

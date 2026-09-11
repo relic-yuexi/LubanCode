@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -24,6 +25,8 @@
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "workspace/identity.hpp"
 
 namespace goalns = lubancode::runtime::goal;
@@ -70,6 +73,9 @@ struct GoalV3Fixture {
     GoalSessionWiring wiring;
     std::vector<std::string> turn_texts;
     std::vector<std::string> notes;
+    // 主轮 usage 注入口(§4.67.7 归账测试用):空 = 装配层没有 turn 视图,
+    // 泵如实跳过归账。
+    std::function<std::optional<lubancode::runtime::TurnMetrics>()> turn_metrics;
 
     explicit GoalV3Fixture(bool with_ledger = true)
         : dir(std::filesystem::temp_directory_path() /
@@ -99,6 +105,7 @@ struct GoalV3Fixture {
             if (failed != nullptr) *failed = false;
             if (cancelled != nullptr) *cancelled = false;
         };
+        host.last_turn_metrics = [this]() { return turn_metrics ? turn_metrics() : std::nullopt; };
         host.notify = [this](bool is_error, const std::string& text) {
             notes.push_back(std::string(is_error ? "E: " : "N: ") + text);
         };
@@ -329,7 +336,69 @@ TEST_CASE("v3 resume 解 waiting:已认领收口位恢复 running 续收口,不�
     CHECK(saw_release_note);
 }
 
-TEST_CASE("v3 泵路:认领→开轮→synthetic turn→收工,第二拍不再开轮") {
+TEST_CASE("v3 主轮 usage 归账:泵收口把本轮模型用量记入 goal 账") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    GoalV3Fixture fixture;
+    lubancode::runtime::TurnMetrics metrics;
+    metrics.request_count = 2;
+    metrics.input_tokens = 120;
+    metrics.output_tokens = 30;
+    metrics.cache_read_tokens = 8;
+    fixture.turn_metrics = [metrics]() { return metrics; };
+    fixture.wiring.Ensure(fixture.config);
+    GoalWiring pack = fixture.Pack();
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Create, "记账目标"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+
+    fixture.wiring.PumpContinuation(0);
+    REQUIRE(fixture.turn_texts.size() == 1);
+    const goalns::GoalStateSnapshot* current = pack.goal_service->current();
+    REQUIRE(current != nullptr);
+    // 快照 usage 只增:主轮 120/30 + cache 8 全入账,实报置位。
+    CHECK(current->usage.input_tokens == 120);
+    CHECK(current->usage.output_tokens == 30);
+    CHECK(current->usage.cache_read_tokens == 8);
+    CHECK(current->usage.request_count == 2);
+    CHECK(current->usage.usage_reported);
+    // 事实行 goal.usage.recorded 在链上,requestId=iterationId,source=main_turn。
+    const auto stream =
+        lubancode::trajectory::v3::FindV3SessionStream(fixture.ledger->session_dir());
+    REQUIRE(stream.has_value());
+    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(*stream);
+    REQUIRE(ledger.has_value());
+    bool saw_usage_row = false;
+    for (const auto& event : ledger->events) {
+        if (event.kind != lubancode::trajectory::v3::EventKindV3::GoalUsageRecorded) continue;
+        if (event.payload.value("requestId", std::string()) == "goal-1/iter-1" &&
+            event.payload.value("source", std::string()) == "main_turn") {
+            saw_usage_row = true;
+        }
+    }
+    CHECK(saw_usage_row);
+
+    // 第二轮:新 iterationId 各记各的(计费去重按 (sessionId,requestId),
+    // 同轮重复通知幂等;这里跨轮各一笔,累计只增)。
+    goalns::GoalPendingIntent next;
+    next.work_item_id = "goal-1/wi-1";
+    next.contract_revision = 1;
+    next.continuation_ordinal = 1;
+    REQUIRE(pack.goal_service
+                 ->SetPendingIntent(next, current->state_revision, nlohmann::json{{"t", true}})
+                 .ok);
+    lubancode::runtime::TurnMetrics second = metrics;
+    second.request_count = 1;
+    second.input_tokens = 40;
+    second.output_tokens = 10;
+    second.cache_read_tokens = 0;
+    fixture.turn_metrics = [second]() { return second; };
+    fixture.wiring.PumpContinuation(0);
+    REQUIRE(fixture.turn_texts.size() == 2);
+    current = pack.goal_service->current();
+    REQUIRE(current != nullptr);
+    CHECK(current->usage.input_tokens == 160);  // 120 + 40,只增
+    CHECK(current->usage.request_count == 3);
+}
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     GoalV3Fixture fixture;
     fixture.wiring.Ensure(fixture.config);

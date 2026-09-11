@@ -109,9 +109,12 @@ struct GoalEvaluatorOptions {
 // 跑一次 evaluator。backend 由调用方给(可配独立模型的那只是装配层的活)。
 // 失败(expected)返回人话错误;schema/材料校验两坏报 "evaluator_failed"
 // 打头的串(调用方进 Paused,不默认 achieved)。
+// failed_usage 可空出参:失败路把已发生的逐次累计 usage 带回(请求失败/
+// 两坏也花了钱,§4.67.10"每次 usage 各记";成功路值在 GoalEvaluationOutput。
+// usage 里,不写此出参)。空指针 = 调用方不关心。
 std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
     api::Backend& backend, const GoalEvaluatorOptions& options, const GoalEvaluationInput& input,
-    const std::atomic<bool>* cancel = nullptr);
+    const std::atomic<bool>* cancel = nullptr, GoalUsage* failed_usage = nullptr);
 
 // ---- 严格判词校验与完成门槛(纯函数,单测钉) ------------------------------
 

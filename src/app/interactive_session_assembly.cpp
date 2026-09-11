@@ -614,6 +614,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         goal_host.last_turn_id = [this]() {
             return turn_views_.empty() ? std::string() : turn_views_.back().turn_id;
         };
+        // §4.67.7 主轮费用归 goal 账:刚收口的工作轮 metrics(TurnCollector
+        // 只吃主 loop 的 usage 事件,子代理费用另有子账,不双计)。
+        goal_host.last_turn_metrics =
+            [this]() -> std::optional<lubancode::runtime::TurnMetrics> {
+            if (turn_views_.empty()) return std::nullopt;
+            return turn_views_.back().metrics;
+        };
         // 评估端点身份(assistant 落账必带 provider/wire/model)。
         goal_host.evaluation_provider = active_provider;
         goal_host.evaluation_wire = session_runtime_.wire_name();

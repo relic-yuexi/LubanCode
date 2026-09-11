@@ -74,7 +74,8 @@ struct GoalCloseoutResult {
     std::string error_message;
     std::string evaluation_id;
     std::string decision;        // continue/achieved/blocked/needs_user/
-                                 // evaluator_failed(notify 文案分路用)
+                                 // evaluator_failed/budget_exhausted(notify
+                                 // 文案分路用;后者 = 验收前预算闸拦下)
     std::string summary;         // 判词摘要(通知用)
     bool overridden_achieved = false;  // evaluator 判 achieved 被程序门槛改判
     std::string override_reason;

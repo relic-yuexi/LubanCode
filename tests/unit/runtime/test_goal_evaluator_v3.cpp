@@ -441,11 +441,16 @@ TEST_CASE("进账 + 两坏:rejected 落链,evaluator_failed 不默认 achieved")
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     WriterHarness harness("rejected-ledger");
     ScriptBackend backend;
-    backend.replies = {{"坏的一次"}, {"坏的两次"}};
+    backend.replies = {{"坏的一次", 7, 3}, {"坏的两次", 11, 6}};
+    goalns::GoalUsage failed_usage;
     const auto result = RunGoalEvaluation(backend, LedgeredOptions(*harness.writer),
-                                          SampleInput());
+                                          SampleInput(), /*cancel=*/nullptr, &failed_usage);
     REQUIRE(!result.has_value());
     CHECK(result.error().find("evaluator_failed") != std::string::npos);
+    // 失败路出参带回已花费用(两轮各记,§4.67.10):7+11=18、3+6=9。
+    CHECK(failed_usage.input_tokens == 18);
+    CHECK(failed_usage.output_tokens == 9);
+    CHECK(failed_usage.request_count == 2);
 
     const auto ledger = harness.Ledger();
     REQUIRE(ledger.has_value());

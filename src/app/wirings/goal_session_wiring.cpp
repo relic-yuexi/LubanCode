@@ -534,6 +534,41 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
                    "goal 停止意图已落账:本轮照常收口,之后不自动续排(/goal resume 续)。");
         }
     }
+    // 4.5) 主轮 usage 归账(§4.67.7"Goal 费用覆盖归属它的主轮"):本轮
+    // turn 的模型用量记入 goal 账(goal.usage.recorded 事实行 + 快照 usage
+    // 只增;requestId=iterationId 每轮一笔,重复通知由 (sessionId,
+    // requestId) 计费去重拦)。TurnView::metrics 只含主 loop 请求——子代理
+    // 费用经 NoteSubagentCompletion 走子账,这里不双计。槽空(单测/无 turn
+    // 视图)如实跳过;失败只报不挡收口。
+    if (host_.last_turn_metrics && goal_service_->current() != nullptr &&
+        !goal::IsLifecycleTerminal(goal_service_->current()->lifecycle)) {
+        if (const auto metrics = host_.last_turn_metrics();
+            metrics.has_value() && metrics->request_count > 0) {
+            goal::GoalUsage spent;
+            spent.input_tokens = metrics->input_tokens;
+            spent.output_tokens = metrics->output_tokens;
+            spent.cache_read_tokens = metrics->cache_read_tokens;
+            spent.cache_creation_tokens = metrics->cache_creation_tokens;
+            spent.reasoning_tokens = metrics->reasoning_tokens;
+            spent.request_count = metrics->request_count;
+            // metrics 不带实报口径:token 全 0 时不冒充实报(usage_reported
+            // 留 false——预算尺对没账可对的 token 不拿 0 充数,§4.67.7)。
+            spent.usage_reported = metrics->input_tokens + metrics->output_tokens +
+                                       metrics->cache_read_tokens +
+                                       metrics->cache_creation_tokens +
+                                       metrics->reasoning_tokens >
+                                   0;
+            const auto recorded = goal_service_->RecordGoalUsage(
+                iteration_id, "main_turn", spent,
+                goal_service_->current()->state_revision,
+                nlohmann::json{{"source", "host"}, {"iterationId", iteration_id}});
+            if (!recorded.ok && !recorded.payload.value("deduped", false)) {
+                Notify(/*is_error=*/true,
+                       "goal 主轮 usage 归账失败(" + recorded.error_code + "): " +
+                           recorded.error_message);
+            }
+        }
+    }
     // 5) 收口(G2:验收走 v3 内部请求服务;G3:等待截流)。请求失败/
     // Esc 打断收场:evaluator 没材料可判——照旧销账收口,不烧评估这一趟
     //(stop_requested 已在账拦续排,连败记 provider 账,下一圈泵再问)。

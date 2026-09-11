@@ -426,11 +426,17 @@ GoalAchievementAudit AuditAchievedDecision(const GoalEvaluationInput& material,
 
 std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
     api::Backend& backend, const GoalEvaluatorOptions& options, const GoalEvaluationInput& input,
-    const std::atomic<bool>* cancel) {
+    const std::atomic<bool>* cancel, GoalUsage* failed_usage) {
     GoalEvaluationInput material = input;
     const bool ledgered = options.ledger.writer != nullptr;
     GoalEvaluationOutput out;
     out.evidence_set_hash = GoalEvidenceSetHash(material.evidence);
+    // 失败路兜底:每处 return std::unexpected 前把已累计 usage 带回——
+    // 请求失败/两坏也花了钱,调用方的 evaluator_failed 收口照记(§4.67.10)。
+    const auto fail_with = [&](std::string message) {
+        if (failed_usage != nullptr) *failed_usage = out.usage;
+        return std::unexpected(std::move(message));
+    };
 
     // ---- 内部请求服务的账面开张(§4.67.5/§4.67.6) ----------------------
     // requested 先落:材料版本(contractRevision/evidenceSetHash)在此冻结,
@@ -455,7 +461,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             const auto receipt =
                 writer.AppendEvent(std::move(requested), trajectory::v3::Durability::ProcessCrash);
             if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
-                return std::unexpected("goal.evaluation.requested 落账失败(" + receipt.error_code +
+                return fail_with("goal.evaluation.requested 落账失败(" + receipt.error_code +
                                        "): " + receipt.error_message);
             }
         }
@@ -476,7 +482,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             const auto receipt = writer.AppendMessage(std::move(system),
                                                       trajectory::v3::Durability::ProcessCrash);
             if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
-                return std::unexpected("验收 system 落账失败(" + receipt.error_code + "): " +
+                return fail_with("验收 system 落账失败(" + receipt.error_code + "): " +
                                        receipt.error_message);
             }
             out.message_ids.push_back(receipt.id);
@@ -557,7 +563,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             if (user_receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
                 done = true;
                 watchdog.join();
-                return std::unexpected("验收 user 消息落账失败(" + user_receipt.error_code +
+                return fail_with("验收 user 消息落账失败(" + user_receipt.error_code +
                                        "): " + user_receipt.error_message);
             }
             user_message_id = user_receipt.id;
@@ -580,7 +586,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             if (prepared.status != trajectory::v3::WriteReceipt::Status::Committed) {
                 done = true;
                 watchdog.join();
-                return std::unexpected("model.request.prepared 落账失败(" + prepared.error_code +
+                return fail_with("model.request.prepared 落账失败(" + prepared.error_code +
                                        "): " + prepared.error_message);
             }
             out.request_ids.push_back(request_id);
@@ -621,7 +627,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
                 (void)writer.AppendEvent(std::move(rejected),
                                          trajectory::v3::Durability::ProcessCrash);
             }
-            return std::unexpected(sampled.error.message);
+            return fail_with(sampled.error.message);
         }
         const std::string& reply = sampled.text;
         last_reply = reply;
@@ -640,7 +646,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             if (started_receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
                 done = true;
                 watchdog.join();
-                return std::unexpected("model.response.started 落账失败(" +
+                return fail_with("model.response.started 落账失败(" +
                                        started_receipt.error_code + "): " +
                                        started_receipt.error_message);
             }
@@ -660,7 +666,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
                 if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
                     done = true;
                     watchdog.join();
-                    return std::unexpected("model.response.completed 落账失败(" +
+                    return fail_with("model.response.completed 落账失败(" +
                                            receipt.error_code + "): " + receipt.error_message);
                 }
             }
@@ -687,7 +693,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
                 done = true;
                 watchdog.join();
-                return std::unexpected("验收 assistant 落账失败(" + receipt.error_code + "): " +
+                return fail_with("验收 assistant 落账失败(" + receipt.error_code + "): " +
                                        receipt.error_message);
             }
             out.message_ids.push_back(receipt.id);
@@ -750,7 +756,7 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
         (void)writer.AppendEvent(std::move(rejected), trajectory::v3::Durability::ProcessCrash);
     }
     (void)last_reply;
-    return std::unexpected("evaluator_failed: " + last_error);
+    return fail_with("evaluator_failed: " + last_error);
 }
 
 }  // namespace lubancode::runtime::goal

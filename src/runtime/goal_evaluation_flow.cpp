@@ -123,6 +123,38 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         return result;
     }
 
+    // ---- 2.5) 验收前预算闸(§4.67.7"达到限额就停新请求,连验收请求也
+    // 不能豁免"):token/时长尺撞帽即停——销账本轮工作项(EndIteration 在
+    // 执行轮收口位清 pendingIntent,不滞留认领残账),落 budget_exhausted
+    //(旧费用保留),不发验收请求。轮数尺不在此问(BudgetStopReason 的轮数
+    // 尺只问"开新一轮",counting=false)——本轮已跑完,收尾验收是欠账不
+    // 是新轮;continue 判词的续排另有过闸。须在 BeginEvaluation 之前(闸后
+    // 走 EndIteration,只在 phase=running 位合法)。
+    if (const auto budget_view = service.EvaluateBudget(/*next_tokens=*/0);
+        budget_view.exhausted || budget_view.would_exhaust) {
+        auto ended = service.EndIteration(service.current()->state_revision, cause);
+        if (!ended.ok) {
+            Fail(result, ended.error_code, ended.error_message);
+            return result;
+        }
+        GoalTransitionCandidate halted;
+        halted.goal_id = service.current()->goal_id;
+        halted.expected_state_revision = service.current()->state_revision;
+        halted.to_lifecycle = GoalLifecycle::BudgetExhausted;
+        halted.to_phase = GoalPhase::Idle;
+        halted.stop_reason = "budget_exhausted: " + budget_view.reason;
+        halted.cause_ref = nlohmann::json{{"source", "host"}, {"iterationId", iteration_id}};
+        const auto stopped = service.ApplyTransition(halted);
+        result.decision = "budget_exhausted";
+        result.summary = "预算已尽,验收请求未发: " + budget_view.reason;
+        result.ok = stopped.ok;
+        if (!stopped.ok) {
+            result.error_code = stopped.error_code;
+            result.error_message = stopped.error_message;
+        }
+        return result;
+    }
+
     // ---- 3) 排评估:phase -> evaluating(评估崩溃窗口的锚,§4.67.8) ----
     auto began = service.BeginEvaluation(snapshot->state_revision,
                                          checkpoint_receipt.id, std::move(evidence_refs),
@@ -180,20 +212,24 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
         return evaluating_snapshot.state_revision;
     };
 
+    GoalUsage failed_usage;  // 请求失败/两坏也花了钱,收口照记(§4.67.10)
     const auto evaluation =
-        RunGoalEvaluation(backend, evaluator_options, input, cancel);
+        RunGoalEvaluation(backend, evaluator_options, input, cancel, &failed_usage);
     if (!evaluation.has_value()) {
         // evaluator 两坏/超时/请求失败:无效判词不采用——evaluator_failed
         // 暂停收口(§4.67.5),费用已在账(requested/failed/rejected 事实行),
-        // 不默认 achieved,不盲排下一轮。
+        // 不默认 achieved,不盲排下一轮。已发生的评估 usage 随收口入 goal
+        // 账(failed_usage;丢掉就是漏记)。
         EvaluationVerdict verdict;
         verdict.evaluation_id = evaluation_id;
         verdict.kind = GoalVerdictKind::EvaluatorFailed;
         verdict.stop_reason = "evaluator_failed: " + evaluation.error();
+        verdict.usage_addition = failed_usage;
         const auto closed = service.CompleteIterationWithEvaluation(
             adoption_revision(), verdict, cause);
         result.decision = "evaluator_failed";
         result.summary = evaluation.error();
+        result.usage = failed_usage;
         result.ok = closed.ok;
         if (!closed.ok) {
             result.error_code = closed.error_code;

@@ -286,6 +286,12 @@ TEST_CASE("evaluator 两坏:rejected 落链,目标暂停不默认 achieved") {
     CHECK(harness.Now()->stop_reason.find("evaluator_failed") != std::string::npos);
     // 无效判词不采用:appliedEvaluationId 不绑定(审计在 rejected 行)。
     CHECK_FALSE(harness.Now()->applied_evaluation_id.has_value());
+    // 两坏也花了钱:失败路的逐次累计 usage 随 evaluator_failed 收口入 goal
+    // 账(§4.67.10"每次 usage 各记";丢掉就是漏记)。两轮各 input 10。
+    CHECK(result.usage.input_tokens == 20);
+    CHECK(result.usage.request_count == 2);
+    CHECK(harness.Now()->usage.input_tokens == 20);
+    CHECK(harness.Now()->usage.request_count == 2);
 
     const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(harness.dir / "s1.jsonl");
     REQUIRE(ledger.has_value());
@@ -296,6 +302,66 @@ TEST_CASE("evaluator 两坏:rejected 落链,目标暂停不默认 achieved") {
     }
     CHECK(saw_rejected);
     CHECK_FALSE(saw_completed);
+}
+
+TEST_CASE("验收前预算闸:token 帽已尽时验收请求也不发,落 budget_exhausted 可恢复") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    // 带帽干净场:帽 50,开轮后先花 55(实报)——EvaluateBudget 判
+    // exhausted,连验收请求也不能豁免(§4.67.7)。
+    FlowHarness gated("budget-gate");
+    {
+        GoalStateSnapshot draft;
+        draft.objective = "预算受限的目标";
+        draft.contract.criteria.push_back({"c-1", "ctest 全过", true});
+        draft.budget.max_total_tokens = 50;
+        draft.pending_intent = goalns::GoalPendingIntent{"wi-1", 1, "", 1}.ToJson();
+        auto created = gated.service->CreateGoal(std::move(draft), nlohmann::json{{"source", "test"}});
+        REQUIRE(created.ok);
+        REQUIRE(gated.service
+                    ->ClaimPendingIntent("run-000001", created.payload.at("stateRevision"),
+                                         nlohmann::json{{"source", "test"}})
+                    .ok);
+        REQUIRE(gated.service
+                    ->BeginIteration(gated.service->current()->state_revision,
+                                     nlohmann::json{{"source", "test"}})
+                    .ok);
+    }
+    goalns::GoalUsage overspent;
+    overspent.input_tokens = 55;
+    overspent.request_count = 1;
+    overspent.usage_reported = true;
+    REQUIRE(gated.service
+                ->RecordGoalUsage("subagent-9", "subagent", overspent,
+                                  gated.service->current()->state_revision,
+                                  nlohmann::json{{"source", "test"}})
+                .ok);
+    gated.backend.replies = {kContinueVerdict};
+    const auto result = CloseGoalIterationWithEvaluation(
+        *gated.service, *gated.writer, gated.backend, gated.Options(),
+        gated.Material({}, {}));
+    CHECK(result.ok);
+    CHECK(result.decision == "budget_exhausted");
+    CHECK(gated.backend.call == 0);  // 验收请求一个都没发
+    CHECK(gated.Now()->lifecycle == GoalLifecycle::BudgetExhausted);
+    CHECK(gated.Now()->phase == GoalPhase::Idle);
+    CHECK(gated.Now()->pending_intent.empty());  // 工作项销账,不滞留认领
+    CHECK(gated.Now()->stop_reason.find("budget_exhausted") == 0);
+    CHECK(gated.Now()->usage.input_tokens == 55);  // 旧费用保留
+    // 恢复路:显式加预算后转回 active,工作面可再排(命令面 resume)。
+    goalns::GoalBudgetAddition addition;
+    addition.total_tokens = 500;
+    REQUIRE(gated.service
+                ->AddBudget(addition, gated.service->current()->state_revision,
+                            nlohmann::json{{"source", "test"}})
+                .ok);
+    goalns::GoalTransitionCandidate back;
+    back.goal_id = gated.Now()->goal_id;
+    back.expected_state_revision = gated.Now()->state_revision;
+    back.to_lifecycle = GoalLifecycle::Active;
+    back.to_phase = GoalPhase::Idle;
+    REQUIRE(gated.service->ApplyTransition(back).ok);
+    const auto view = goalns::EvaluateGoalWork(*gated.Now(), "run-000001");
+    CHECK_FALSE(view.claimable);  // 意图已销账:resume 命令面的补排段接管
 }
 
 TEST_CASE("判词缺 criterion:一次修复后仍错,暂停") {
