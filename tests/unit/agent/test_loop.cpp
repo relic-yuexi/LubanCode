@@ -2596,16 +2596,9 @@ TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted 
     std::vector<std::string> adopted;
     // Controlled commit adapter: the real loop and real Chat serializer run;
     // disk persistence is independently covered by the bridge/result-store tests.
-    int hook_calls = 0;
     wiring.rewrite_tool_results_for_history = [&](api::Message& batch) {
-        ++hook_calls;
-        MESSAGE("rewrite hook invocation #", hook_calls,
-                " blocks=", batch.content.size());
         for (auto& block : batch.content) {
             auto& result = std::get<api::ToolResultBlock>(block);
-            MESSAGE("hook block ", result.tool_use_id,
-                    " budget=", result.preview_budget_bytes,
-                    " content=", result.content.size());
             CHECK(result.preview_budget_bytes < 16000);
             trajectory::v3::PreviewRequest request;
             request.max_preview_bytes = result.preview_budget_bytes;
@@ -2618,34 +2611,19 @@ TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted 
             const auto preview = trajectory::v3::BuildToolPreview(request);
             CHECK_FALSE(preview.preview_unrepresentable);
             result.content = preview.text;
+            // 学生产桥(trajectory_session.cpp V3ToolResultsCommitted)的
+            // 收尾:预览已提交须置 preview_committed。文本结果经 Tool::Result
+            // 构造器带着原始 blocks 入史,下一请求的 SanitizeMessage 见
+            // blocks 非空且未置位,会按"payload 是唯一真账"合同用
+            // TextProjection(blocks) 把原文重构回 content——不置位,预览
+            // 就在这里被原文冲掉,整批预算白做。
+            result.preview_committed = true;
             adopted.push_back(result.content);
         }
         return runtime::ToolResultsCommitReceipt{};
     };
     const std::string old_input(320000, 'h');
     const auto outcome = loop.Run(old_input, wiring);
-    if (!outcome.has_value()) {
-        MESSAGE("hook_calls=", hook_calls, " adopted=", adopted.size());
-        if (!adopted.empty()) {
-            MESSAGE("adopted[0] bytes=", adopted[0].size());
-        }
-        const auto& hist = loop.history();
-        MESSAGE("durable history=", hist.size());
-        for (std::size_t i = 0; i < hist.size(); ++i) {
-            std::size_t bytes = 0;
-            unsigned results = 0;
-            for (const auto& block : hist[i].content) {
-                if (const auto* r = std::get_if<api::ToolResultBlock>(&block)) {
-                    bytes += r->content.size();
-                    ++results;
-                } else if (const auto* t = std::get_if<api::TextBlock>(&block)) {
-                    bytes += t->text.size();
-                }
-            }
-            MESSAGE("durable msg", i, "=", bytes, "B/", results, "r");
-        }
-        MESSAGE("captured requests=", backend.captured_requests.size());
-    }
     REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
     REQUIRE(backend.captured_requests.size() == 2);
     CHECK(executed->call_count == 10);
