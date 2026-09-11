@@ -450,9 +450,10 @@ std::optional<Schema3Error> ValidateMessageLine(const MessageLine& line) {
                 return Err("schema3.missing_field", "system 消息必带 systemMeta");
             }
             if (line.purpose != MessagePurpose::Conversation &&
-                line.purpose != MessagePurpose::Compact) {
+                line.purpose != MessagePurpose::Compact &&
+                line.purpose != MessagePurpose::GoalEvaluation) {
                 return Err("schema3.bad_purpose",
-                           "system 消息 purpose 只能是 conversation 或 compact");
+                           "system 消息 purpose 只能是 conversation/compact 或 goal_evaluation");
             }
             break;
         }
@@ -938,6 +939,208 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
                 line.payload["oldPreviewBudget"].get<std::uint64_t>()) {
             return Err("schema3.bad_type",
                        "降档须 newPreviewBudget < oldPreviewBudget(§4.38 只降不升)");
+        }
+    } else if (line.kind == K::StateGoalApplied) {
+        // §4.67 G0:goal 控制状态的唯一生效点。goalId 走 payload(goal 是
+        // 控制状态,不占信封身份字段族);快照本体是不可变文件,本行只
+        // 记提交锚(goalId/旧新 stateRevision/contractRevision/snapshotRef/
+        // snapshotSha256/lifecycle + 可选 causeRef)。跨行语义(快照实存、
+        // hash 对得上、revision 序列衔接)归读取侧投影与校验脚本。
+        for (const auto* key :
+             {"goalId", "fromStateRevision", "toStateRevision", "contractRevision",
+              "snapshotRef", "snapshotSha256", "lifecycle"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "state.goal.applied payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "state.goal.applied 的 goalId 应为非空 string");
+        }
+        if (!line.payload["snapshotRef"].is_string() ||
+            line.payload["snapshotRef"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "state.goal.applied 的 snapshotRef 应为非空 string");
+        }
+        if (!line.payload["snapshotSha256"].is_string() ||
+            !IsHex64(line.payload["snapshotSha256"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "state.goal.applied 的 snapshotSha256 应为 64 位十六进制");
+        }
+        for (const auto* key : {"fromStateRevision", "toStateRevision", "contractRevision"}) {
+            if (!JsonIsNonNegativeInt(line.payload[key])) {
+                return Err("schema3.bad_type",
+                           std::string("state.goal.applied 的 ") + key + " 应为非负整数");
+            }
+        }
+        if (line.payload["toStateRevision"].get<std::uint64_t>() !=
+            line.payload["fromStateRevision"].get<std::uint64_t>() + 1) {
+            return Err("schema3.bad_type",
+                       "state.goal.applied 的 toStateRevision 应为 fromStateRevision + 1");
+        }
+        if (line.payload["contractRevision"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type", "state.goal.applied 的 contractRevision 应 >= 1");
+        }
+        if (!line.payload["lifecycle"].is_string()) {
+            return Err("schema3.bad_type", "state.goal.applied 的 lifecycle 应为 string");
+        }
+        const std::string lifecycle = line.payload["lifecycle"].get<std::string>();
+        static const std::unordered_set<std::string> kGoalLifecycles = {
+            "preparing", "active",    "waiting",        "paused",
+            "awaiting_user", "blocked", "budget_exhausted", "suspended_by_policy",
+            "achieved",  "cleared",   "failed"};
+        if (!kGoalLifecycles.count(lifecycle)) {
+            return Err("schema3.bad_enum",
+                       "state.goal.applied 的 lifecycle 枚举不认得: " + lifecycle);
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "causeRef", /*required=*/false)) {
+            return error;
+        }
+        // §4.67 G1:跨卷续接凭据(可选)。resume-as-new 后 goal 从来源卷接
+        // 管,本卷首条 applied 的 fromStateRevision != 0,须带 adoptedFrom
+        //{sessionId, stateRevision} 且 stateRevision == fromStateRevision
+        //(接管时 revision);带了但 revision 不衔接 = 半路伪造,拒。
+        if (line.payload.contains("adoptedFrom")) {
+            const auto& adopted = line.payload["adoptedFrom"];
+            if (!adopted.is_object() || !adopted.contains("sessionId") ||
+                !adopted.at("sessionId").is_string() ||
+                adopted.at("sessionId").get<std::string>().empty() ||
+                !adopted.contains("stateRevision") ||
+                !JsonIsNonNegativeInt(adopted.at("stateRevision"))) {
+                return Err("schema3.bad_type",
+                           "state.goal.applied 的 adoptedFrom 应为 object{sessionId:string, "
+                           "stateRevision:非负整数}");
+            }
+            if (adopted.at("stateRevision").get<std::uint64_t>() !=
+                line.payload["fromStateRevision"].get<std::uint64_t>()) {
+                return Err("schema3.bad_type",
+                           "state.goal.applied 的 adoptedFrom.stateRevision 应等于 "
+                           "fromStateRevision(接管时 revision)");
+            }
+        }
+    } else if (line.kind == K::GoalCheckpointRecorded) {
+        // §4.67.6:收口 checkpoint 的事实行(不改活动 head)。synthesized
+        // 必带(合成 checkpoint 不冒充模型自报);checkpoint 是整份对象。
+        for (const auto* key : {"goalId", "iterationId", "checkpoint", "synthesized"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.checkpoint.recorded payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty() ||
+            !line.payload["iterationId"].is_string() ||
+            line.payload["iterationId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type",
+                       "goal.checkpoint.recorded 的 goalId/iterationId 应为非空 string");
+        }
+        if (!line.payload["checkpoint"].is_object()) {
+            return Err("schema3.bad_type", "goal.checkpoint.recorded 的 checkpoint 应为 object");
+        }
+        if (!line.payload["synthesized"].is_boolean()) {
+            return Err("schema3.bad_type", "goal.checkpoint.recorded 的 synthesized 应为 boolean");
+        }
+    } else if (line.kind == K::GoalEvidenceRecorded) {
+        // §4.67.6:证据入账事实行。evidence 是一枚 GoalEvidenceRef(六键
+        // 引用结构在领域层 ValidateEvidenceRef,这里只钉形状底)。
+        for (const auto* key : {"goalId", "iterationId", "evidenceId", "evidence"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.evidence.recorded payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty() ||
+            !line.payload["evidenceId"].is_string() ||
+            line.payload["evidenceId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type",
+                       "goal.evidence.recorded 的 goalId/evidenceId 应为非空 string");
+        }
+        if (!line.payload["evidence"].is_object()) {
+            return Err("schema3.bad_type", "goal.evidence.recorded 的 evidence 应为 object");
+        }
+    } else if (line.kind == K::GoalEvaluationRequested) {
+        // §4.67.5/§4.67.6:发起验收——材料版本在此冻结。evidenceSetHash 是
+        // 本次证据集的 hex64(迟到判词对账的锚);contractRevision >= 1。
+        for (const auto* key :
+             {"goalId", "iterationId", "evaluationId", "contractRevision", "evidenceSetHash"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.evaluation.requested payload 缺字段: " + std::string(key));
+            }
+        }
+        for (const auto* key : {"goalId", "iterationId", "evaluationId"}) {
+            if (!line.payload[key].is_string() || line.payload[key].get<std::string>().empty()) {
+                return Err("schema3.bad_type",
+                           std::string("goal.evaluation.requested 的 ") + key + " 应为非空 string");
+            }
+        }
+        if (!JsonIsNonNegativeInt(line.payload["contractRevision"]) ||
+            line.payload["contractRevision"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type", "goal.evaluation.requested 的 contractRevision 应 >= 1");
+        }
+        if (!line.payload["evidenceSetHash"].is_string() ||
+            !IsHex64(line.payload["evidenceSetHash"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "goal.evaluation.requested 的 evidenceSetHash 应为 64 位十六进制");
+        }
+    } else if (line.kind == K::GoalEvaluationCompleted) {
+        // §4.67.6:判词到手(completed 不等于目标已完成,采用与否看
+        // state.goal.applied)。decision 四枚;evaluationMessageRef 回指判词
+        // assistant;requestRefs 是本次评估实际发出的请求(逐次各记)。
+        for (const auto* key :
+             {"goalId", "evaluationId", "decision", "evaluationMessageRef", "requestRefs"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.evaluation.completed payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty() ||
+            !line.payload["evaluationId"].is_string() ||
+            line.payload["evaluationId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type",
+                       "goal.evaluation.completed 的 goalId/evaluationId 应为非空 string");
+        }
+        if (!line.payload["decision"].is_string()) {
+            return Err("schema3.bad_type", "goal.evaluation.completed 的 decision 应为 string");
+        }
+        static const std::unordered_set<std::string> kDecisions = {
+            "continue", "achieved", "blocked", "needs_user"};
+        if (!kDecisions.count(line.payload["decision"].get<std::string>())) {
+            return Err("schema3.bad_enum",
+                       "goal.evaluation.completed 的 decision 枚举不认得: " +
+                           line.payload["decision"].get<std::string>());
+        }
+        if (!IsValidRef(line.payload["evaluationMessageRef"])) {
+            return Err("schema3.bad_ref",
+                       "goal.evaluation.completed 的 evaluationMessageRef 应为合法引用");
+        }
+        if (!line.payload["requestRefs"].is_array()) {
+            return Err("schema3.bad_type", "goal.evaluation.completed 的 requestRefs 应为数组");
+        }
+        for (const auto& ref : line.payload["requestRefs"]) {
+            if (!IsValidRef(ref)) {
+                return Err("schema3.bad_ref", "goal.evaluation.completed 的 requestRefs 引用格式错");
+            }
+        }
+    } else if (line.kind == K::GoalEvaluationRejected) {
+        // §4.67.5:判词不合合同/二次失败——无效判词不采用,带原因暂停。
+        for (const auto* key : {"goalId", "evaluationId", "reason"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "goal.evaluation.rejected payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty() ||
+            !line.payload["evaluationId"].is_string() ||
+            line.payload["evaluationId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type",
+                       "goal.evaluation.rejected 的 goalId/evaluationId 应为非空 string");
+        }
+        if (!line.payload["reason"].is_string() || line.payload["reason"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "goal.evaluation.rejected 的 reason 应为非空 string");
         }
     }
     // pending 类必须带 reason(§4.14)。

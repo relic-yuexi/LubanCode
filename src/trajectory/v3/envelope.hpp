@@ -35,7 +35,17 @@ inline constexpr std::string_view kV3SchemaName = "lubancode.trajectory.v3";
 // ---------------------------------------------------------------------------
 
 enum class MessageRole { System, User, Assistant, Tool };
-enum class MessagePurpose { Conversation, Compact, ContextSummary, SessionTitle, Capability };
+// goal_evaluation(§4.67.6):验收内部回合的实际 system/user/assistant,
+// 不进 main 输入链;goal_continuation 的续跑 user 正文走 Conversation
+//(它真进 main),宿主来源在 origin 区分,不另立 purpose。
+enum class MessagePurpose {
+    Conversation,
+    Compact,
+    ContextSummary,
+    SessionTitle,
+    Capability,
+    GoalEvaluation,
+};
 enum class MessageOrigin {
     Human,
     Soul,
@@ -146,6 +156,23 @@ enum class EventKindV3 {
     TaskCompleted,
     TaskFailed,
     TaskCancelled,
+    // Goal 模式(§4.67 G0):goal 控制状态的唯一生效点。事实提交,不带
+    // status(与 context.*.applied 同族:控制状态提交,不是操作生命周期)。
+    // payload 合同:goalId/fromStateRevision/toStateRevision/contractRevision/
+    // snapshotRef/snapshotSha256/lifecycle(+可选 causeRef);完整 goal 状态
+    // 在不可变快照 sessions/<id>/state/goals/<goalId>/rev-*.json,本行只记
+    // 提交锚(§4.55)。
+    StateGoalApplied,
+    // Goal 模式 G2(§4.67.6 表):checkpoint/evidence 的事实记录(不改活动
+    // head)与验收三段。全部 statusless 事实行——requested 是"发起验收"
+    // (材料版本冻结),completed 是"判词到手"(不等于目标已完成),rejected
+    // 是"候选被拒"(校验不过/二次失败,带原因);goalId/evaluationId 走
+    // payload,与 state.goal.applied 同口径(控制状态族不占信封身份字段)。
+    GoalCheckpointRecorded,
+    GoalEvidenceRecorded,
+    GoalEvaluationRequested,
+    GoalEvaluationCompleted,
+    GoalEvaluationRejected,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

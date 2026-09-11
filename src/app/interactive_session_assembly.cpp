@@ -601,9 +601,20 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         goal_host.current_model = current_model;
         goal_host.agent_tool = [this]() { return session_agent_tool(); };
         goal_host.loop_scheduler = [this]() { return loop_wiring_.scheduler(); };
+        // 轨迹 v3 §4.67 G1:goal 的持久账接线——v3 主写者/会话根/来源链从
+        // 会话账取;v2 场 v3_main_writer() 恒空,goal 照旧走 v1 coordinator。
+        goal_host.trajectory = session_runtime_.trajectory();
         goal_host.start_turn = [this](const std::string& text, bool* turn_failed) {
             RunSessionTurn(text, TurnSource::User, turn_failed);
         };
+        // §4.67 G2:验收回合的 parentTurnId 回指刚收口的工作轮(turn 视图
+        // 的栈顶;非用户轮拿不到就空,评估账如实落 null,不伪造)。
+        goal_host.last_turn_id = [this]() {
+            return turn_views_.empty() ? std::string() : turn_views_.back().turn_id;
+        };
+        // 评估端点身份(assistant 落账必带 provider/wire/model)。
+        goal_host.evaluation_provider = active_provider;
+        goal_host.evaluation_wire = session_runtime_.wire_name();
         // 渲染事件出口(骨架拆解反弹·问题 3):goal 接线器不再直接画终端,
         // 通知从这递出来——is_error 定色,文案由接线器拼好,渲染逐字节照旧。
         goal_host.notify = [this](bool is_error, const std::string& text) {
@@ -1614,6 +1625,9 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
             // 新场子的下一问重走本地起名 + 精炼(判定本体在 titles_)。
             titles_.ResetForNewSession();
+            // 轨迹 v3 §4.67 G1:/clear 开的新场不带旧 goal——v3 服务的内存
+            // 接管态清空(v1 coordinator 照旧,行为不变)。
+            goal_wiring_.HandleSessionCleared();
         },
         [this](const std::string& title) {
             peer_wiring_.SetName(title);
