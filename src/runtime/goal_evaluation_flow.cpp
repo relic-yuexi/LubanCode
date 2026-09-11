@@ -216,8 +216,13 @@ GoalCloseoutResult CloseGoalIterationWithEvaluation(
     // changing prose. New ids for repeated identical evidence do not reset it.
     std::set<std::string> evidence_facts;
     for (const auto& evidence : material.material_evidence) {
+        auto stable_facts = evidence.facts;
+        if (stable_facts.is_object()) {
+            for (const auto* key : {"execution_id", "parent_execution_id", "duration_ms", "result_artifact_id"})
+                stable_facts.erase(key);
+        }
         evidence_facts.insert(nlohmann::json{{"kind", ToString(evidence.kind)},
-            {"facts", evidence.facts}, {"fresh", evidence.fresh},
+            {"facts", stable_facts}, {"fresh", evidence.fresh},
             {"truncated", evidence.truncated}}.dump());
     }
     nlohmann::json criterion_states = nlohmann::json::object();

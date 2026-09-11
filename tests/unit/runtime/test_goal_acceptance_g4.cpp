@@ -1237,10 +1237,13 @@ TEST_CASE("M15 三停态分路:blocked/awaiting_user 落位,等待不算失败�
         harness.backend.replies = {kContinueVerdict, kContinueVerdict,
                                    kContinueVerdict, kContinueVerdict};
         for (int round = 0; round < 4; ++round) {
+            auto current_evidence = ev;
+            current_evidence.facts["execution_id"] = "exec-" + std::to_string(round);
+            current_evidence.facts["duration_ms"] = 100 + round;
             const auto result = CloseGoalIterationWithEvaluation(
                 *harness.service, *harness.volume.writer, harness.backend, harness.Options(),
                 harness.Material(round == 0 ? std::vector<GoalEvidence>{ev} :
-                                 std::vector<GoalEvidence>{}, {ev}));
+                                 std::vector<GoalEvidence>{}, {current_evidence}));
             REQUIRE(result.ok);
             if (round == 3) {
                 CHECK(result.next_work_item_id.empty());
