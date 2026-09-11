@@ -1,6 +1,6 @@
 # session 轨迹 v3 schema(冻结稿)
 
-状态:P0 定稿冻结;P1 其余域(工具操作账/结果仓与预览/hook 事件账/subagent 独立账/预览降档)已按 §四 落地发行,字段随本稿冻结;P2 读取侧(两份投影/工具快照折叠/result_preview 展开/跨会话五键验 hash/父子账遍历/带来源链 resume)已落地 `src/trajectory/v3/reader.hpp`,resume 载荷随 §四 增补冻结。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
+状态:P0 定稿冻结;P1 其余域(工具操作账/结果仓与预览/hook 事件账/subagent 独立账/预览降档)已按 §四 落地发行,字段随本稿冻结;P2 读取侧(两份投影/工具快照折叠/result_preview 展开/跨会话五键验 hash/父子账遍历/带来源链 resume)已落地 `src/trajectory/v3/reader.hpp`,resume 载荷随 §四 增补冻结;workflow 编排账(事件账 writer profile + workflow.* kind 族)随 Workflow 接入 v3 第一棒发行,载荷合同见 §四 workflow 条目。本文是 `todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`(下称"单子")§4.13 待敲定合同的落地答案;与单子冲突时以单子 §一 用户定案为准。写入侧实现见 `src/trajectory/v3/`,可校验 fixture 见 `tests/fixtures/trajectory_v3/`,校验脚本见 `scripts/validate_trajectory_v3.py`。
 
 不承担旧数据兼容:新会话写 v3,v2 读取不迁移,v2→v3 无转换器(单子 §1.5/§七)。
 
@@ -89,6 +89,7 @@
 | resume | `resume.source.attached` |
 | subagent | `subagent.spawn.requested`、`subagent.linked`、`subagent.observed`、`subagent.spawn.failed` |
 | 后台任务 | `task.started`、`task.pending`、`task.completed`、`task.failed`、`task.cancelled` |
+| workflow 编排 | `workflow.definition.loaded`、`workflow.segment.opened`、`workflow.inputs.committed`、`workflow.node.reserved`、`workflow.node.dispatched`、`workflow.node.waiting`、`workflow.node.retrying`、`workflow.node.completed`、`workflow.node.failed`、`workflow.node.cancelled`、`workflow.node.skipped`、`workflow.output.committed`、`workflow.checkpoint.committed`、`workflow.branch.started`、`workflow.join.completed`、`workflow.loop.iteration.started`、`workflow.loop.iteration.completed`、`workflow.run.completed`、`workflow.run.failed`、`workflow.run.cancelled` |
 
 ### 2.2 kind → status 固定映射(§4.14)
 
@@ -104,7 +105,7 @@
 | `.cancelled` | `cancelled` |
 | `.rejected` | `rejected` |
 | `.unknown` | `unknown` |
-| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`) | 不携带 status 字段 |
+| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`、workflow 事实记录族:`workflow.definition.loaded`/`workflow.segment.opened`/`workflow.inputs.committed`/`workflow.node.reserved`/`workflow.node.dispatched`/`workflow.node.retrying`/`workflow.node.skipped`/`workflow.output.committed`/`workflow.checkpoint.committed`) | 不携带 status 字段 |
 
 生命周期规则(§4.14):同一操作可以多条 event,各持自己的 eventId/seq,共用操作身份;每次尝试最多一个执行终态;终态后迟到响应另记观察事件不改旧终态;`pending` 是"在等"、`running` 是"在执行";崩溃后见 `started` 无终态只能判"可能已执行"。
 
@@ -207,6 +208,7 @@ P1 其余域已发行(工具操作账 `tool_action.*`、结果仓与预览 `resu
 - **长文本/图片**(§4.51-4.52,后续棒次):用户文本 32 KiB 预览 + 原文 artifact;图片原图引用进 message,编码交给 wire。
 - **后台任务**(§4.53-4.54,后续棒次):`taskId` + `task.*` 事件,`parentActionRef` 关联。
 - **resume**(§4.10/§4.59,P2 读取侧增补冻结):`resume.source.attached` payload 定案 `{sourceRef:{sessionId,runId,seq,id,hash}(五键指源末行,§3.1), contextRevision, systemMessageRef, branch}`。读取侧沿 `sourceRef` 逐级回溯来源链:每级验五键 hash、按 sessionId 去重、环标 duplicate;祖先账默认按 `sessions/<id>/<id>.jsonl` 解析。resume 本身不改写源内容(坏尾修复归 §4.60)。
+- **workflow 编排账**(Workflow 接入 v3 第一棒,已发行):编排账不是 agent 会话——经事件账 writer profile(`trajectory::v3::V3EventLedger`)只写 `type=event` 行,不造 system 首行、不写 message 行。目录 `workflow-runs/<workflowRunId>/{definition.json, bindings.json, inputs.json, segments/<segmentId>/workflow.jsonl, checkpoints/<checkpointId>.json, outputs/<outputId>.json, nodes/, artifacts/, subflows/}`(`WorkflowPathResolver` 统一解析,与 session 目录体系并列不混淆)。信封语义:`sessionId`=workflowRunId,`runId`=orchestrationSegmentId;每段 seq 从 1 起,恢复开新段并以 `workflow.segment.opened` 的 `sourceRef` 五键链接旧段水位。身份分层:`nodeExecutionId`=`<runId>-<nodeId>[-i<mapIndex>][-d<dispatch>]`(dispatch 号跨恢复延续),attempt 追加 `-a<n>`;`outputId`=`out-<六位号>`、`checkpointId`=`cp-<六位号>` run 内单调。关键载荷合同:definition.loaded 必带 `workflowId`/`definitionHash`(hex64);node.reserved 必带 `nodeId`/`nodeExecutionId`/`nodeKind`/`attempt`/`inputHash`(输入快照内容寻址);output.committed 必带 `nodeId`/`nodeExecutionId`/`outputId`/`outputHash`(hex64)/`outputRef`/`validation{passed,checks}` 与可选 `resolvedInputHash`——它是"节点产物可供下游消费"的唯一依据(失败/取消绝不写它);checkpoint.committed 必带 `checkpointId`/`checkpointRef`/`sha256`/`throughSeq`,孤立 checkpoint 文件不生效;node.completed.outcome 只取 `success|empty`(失败走 node.failed,恢复判据看 commit 不看事件名);run.* 终态每账至多一枚。无损纪律:outputs/inputs/checkpoint 原件不脱敏(展示/导出脱敏另做投影),payload hash 不符即拒恢复;node/skill/agent 子账与父 run 的 `nodeExecutionRef` 关联归后续棒。
 - **todo/goal/loop/fork/btw**(§4.55-4.58,后续棒次):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
 
 ## 五、usage 唯一 owner 表(§4.12 定案)

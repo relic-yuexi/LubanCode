@@ -665,6 +665,10 @@ add_library(lubancode_engine STATIC
   src/trajectory/v3/result_store.cpp
   src/trajectory/v3/hooks.cpp
   src/trajectory/v3/subagent.cpp
+  # Workflow 接入 v3 第一棒:事件账 writer profile(非 agent owner 的受
+  # 校验 v3 事件账——只写 event 行、共用信封/seq/哈希链,不造 system)。
+  # 编排账消费方在 src/workflow/account.cpp。
+  src/trajectory/v3/event_ledger.cpp
   # session 轨迹 v3 第三棒(P2 读取侧):一份原始账三项读取结果——
   # 历史时间线(全消息/系统切换/压缩标记滚动,标注已压缩/降档退链)、
   # 当前模型上下文(链投影,排除 compact 内部问答)、单次请求输入回放
@@ -961,6 +965,10 @@ add_library(lubancode_core STATIC
   src/cli/diff.cpp
   src/cli/diff_syntax.cpp
   # Workflows 自然语言编排单:定义/解析/校验/目录/图渲染,纯逻辑。
+  # Workflow 接入 v3 第一棒:编排账(WorkflowRun/NodeExecution/产物提交
+  # schema 冻结、目录 resolver、无损 outputs/checkpoints、恢复重放与
+  # fail-closed 提交)。
+  src/workflow/account.cpp
   src/workflow/definition.cpp
   src/workflow/parser.cpp
   src/workflow/catalog.cpp
