@@ -378,9 +378,8 @@ TEST_CASE("failure audit: metadata failure stops before unpublished result is se
     CHECK(counter->calls == 2);
     CHECK(KindCount(rows, "tool.result.persist_failed") == 1);
     REQUIRE(resumed.has_value());
-    // Control: metadata persistence failed, but the main journal retained the
-    // result. Whether this fallback may continue is a policy question, not the
-    // missing-live-input bug in the unavailable-store test below.
+    // B1 requires immutable source metadata before publication; the first
+    // committed result survives and the second result never reaches the model.
     CHECK_FALSE(result.has_value());
     CHECK(backend.requests.size() == 2);
     CHECK(sent_results == 1);
@@ -577,4 +576,67 @@ TEST_CASE("B1 real loop: failed immutable metadata never publishes the next tool
         if (std::holds_alternative<api::ToolResultBlock>(block)) ++published;
     CHECK(published == 1);
     CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / "res-000002.combined.txt") == 2 * 1024 * 1024);
+}
+
+TEST_CASE("B1 real loop: every preview ledger write failure stops before publication") {
+    for (const int fail_at : {1, 2, 3, 4}) {
+        CAPTURE(fail_at);
+        Audit audit;
+        AuditBackend backend;
+        backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+            Reply(sink, attempt == 1);
+            return {};
+        };
+        tools::ToolRegistry registry;
+        auto tool = std::make_unique<AuditTool>();
+        auto* counter = tool.get();
+        tool->result_content = std::string(2 * 1024 * 1024, 'x');
+        registry.Register(std::move(tool));
+        agent::Agent agent(backend, registry, Profile());
+        auto wiring = audit.Wiring();
+        wiring.rewrite_tool_results_for_history = [&audit, fail_at](api::Message& results) {
+            audit.Inject();
+            audit.fail_at = fail_at;
+            return audit.bridge->RewriteToolResultsForHistory(results);
+        };
+        const auto outcome = agent.Run(Input(), wiring);
+        CHECK_FALSE(outcome.has_value());
+        CHECK(counter->calls == 1);
+        CHECK(backend.requests.size() == 1);
+        CHECK(audit.writes >= fail_at);
+        CHECK(audit.ledger->v3_main_writer()->broken());
+        int results = 0;
+        for (const auto& message : agent.history()) for (const auto& block : message.content)
+            if (std::holds_alternative<api::ToolResultBlock>(block)) ++results;
+        CHECK(results == 0);
+        CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / "res-000001.combined.txt") == 2 * 1024 * 1024);
+    }
+}
+
+TEST_CASE("B1 real loop: terminal event failure cannot bypass preview commit") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt == 1);
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.on_tool_trace = [&audit](const agent::ToolTraceEvent& event) {
+        if (event.kind == agent::ToolTraceEventKind::ExecutionFinished) {
+            audit.Inject();
+            audit.fail_at = 1;
+        }
+        audit.bridge->OnToolTrace(event);
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 1);
+    CHECK(backend.requests.size() == 1);
 }

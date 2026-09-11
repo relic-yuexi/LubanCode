@@ -1703,14 +1703,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::RewriteToolResultsForHistory(api:
 ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Message& results) {
     // 结果链(§4.18):persisted(结果仓落 artifact)→ selected(选用声明)
     // → tool 消息(模型可见预览正文)→ 接纳进链。
-    // P1-A(FA-01)回执合同,三档分清:
-    //   Failed    有结果的"模型可见 tool 消息"没写稳(仓开不了/消息或接纳
-    //             写失败)——主循环停止后续模型发送,不得拿内存里独有的
-    //             结果当已提交输入再发请求;
-    //   Degraded  主账正文已保住的约定降级(metadata 落盘失败、选用事件
-    //             未落一类):tool 消息照落,模型上下文完整,溯源链缺口
-    //             如实记进 degraded_codes,调用方放行另查链;
-    //   Committed 全链落稳。
+    // Any missing persistence, selection, message or admission receipt fails
+    // this batch. A committed preview must have an immutable source to recover.
     ToolResultsCommitReceipt batch;
     for (auto& block : results.content) {
         auto* result = std::get_if<api::ToolResultBlock>(&block);
@@ -1718,13 +1712,13 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
             continue;
         }
         const auto it = v3_turn_->calls.find(result->tool_use_id);
-        if (it == v3_turn_->calls.end() || !it->second.terminal || it->second.tool_message_done) {
+        if (it != v3_turn_->calls.end() && it->second.tool_message_done) continue;
+        if (it == v3_turn_->calls.end() || !it->second.terminal || !it->second.action.has_value()) {
+            batch.status = ToolResultsCommitReceipt::Status::Failed;
+            batch.error_code = "tool.preview.missing_terminal:" + result->tool_use_id;
             continue;
         }
         V3TurnBooks::Call& book = it->second;
-        if (!book.action.has_value()) {
-            continue;
-        }
         const auto hard_fail = [&batch](const char* where, const std::string& code) {
             if (batch.status != ToolResultsCommitReceipt::Status::Failed) {
                 batch.status = ToolResultsCommitReceipt::Status::Failed;
