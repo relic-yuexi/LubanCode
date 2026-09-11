@@ -46,6 +46,9 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     ActionSummaryResult result;
     calls_remaining = std::min(calls_remaining, profile.max_calls);
     const auto source_revision = writer.context().revision;
+    const auto source_events = source.source_result_event_refs.empty()
+                                   ? std::vector<std::string>{source.persisted_event_ref}
+                                   : source.source_result_event_refs;
     std::vector<std::string> candidate_refs;
     const auto finish = [&](std::string state, std::string reason) {
         result.reason = std::move(reason);
@@ -54,7 +57,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         event.action_id = source.action_id;
         event.turn_id = source.parent_turn_id;
         event.payload = {{"tool_call_id", source.action_id}, {"attempt", source.attempt}, {"state", state},
-                         {"reason", result.reason}, {"sourceResultEventRefs", {source.persisted_event_ref}},
+                         {"reason", result.reason}, {"sourceResultEventRefs", source_events},
                          {"candidateMessageRefs", candidate_refs}, {"sourceContextRevision", source_revision},
                          {"modelCalls", result.model_calls}, {"outputBytes", result.text.size()},
                          {"budgetBytes", source.budget_bytes}, {"executionState", source.execution_state},
@@ -81,6 +84,14 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         persisted->payload.value("result_ref", nlohmann::json::array()) != nlohmann::json(source.result_refs)) {
         return finish("rejected", "source_not_persisted");
     }
+    for (const auto& ref : source_events) {
+        const auto* event = ledger->FindEvent(ref);
+        if (!event || event->kind != v3::EventKindV3::ToolResultPersisted ||
+            event->action_id != source.action_id || event->seq > persisted->seq) {
+            return finish("rejected", "source_chain_mismatch");
+        }
+    }
+    if (source_events.back() != source.persisted_event_ref) return finish("rejected", "source_chain_mismatch");
     bool matched_source = false;
     for (const auto& ref : source.result_refs) {
         if (ref.value("kind", "") != "combined" || ref.value("sha256", "") != platform::Sha256Hex(source.text)) continue;
@@ -136,6 +147,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                                  {"capture_complete", source.capture_complete}, {"capture_reason", source.capture_reason},
                                  {"execution_started", source.execution_started},
                                  {"source_result_event_ref", source.persisted_event_ref}, {"result_refs", source.result_refs},
+                                 {"source_result_event_refs", source_events},
                                  {"byte_offset", offset}, {"depth", depth}, {"material", material},
                                  {"final_preview_byte_budget", source.budget_bytes}};
         api::Request request;
@@ -179,7 +191,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         const auto prepared = writer.PrepareRequest(request_id, internal_turn, step_id, "action_summary",
             system_receipt.id, {prompt_receipt.id},
             {{"provider", profile.provider}, {"wire", profile.wire}, {"model", profile.model},
-             {"sourceActionId", source.action_id}, {"sourceResultEventRefs", {source.persisted_event_ref}},
+             {"sourceActionId", source.action_id}, {"sourceResultEventRefs", source_events},
              {"tokenEstimate", estimate}, {"outputReserveTokens", output_tokens},
              {"modelInputSnapshot", *snapshot},
              {"summaryWindowTokens", profile.window_tokens}, {"sourceByteOffset", offset},
@@ -280,6 +292,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     candidate["capture_complete"] = source.capture_complete;
     candidate["capture_reason"] = source.capture_reason;
     candidate["source_result_event_ref"] = source.persisted_event_ref;
+    candidate["source_result_event_refs"] = source_events;
     candidate["evidence_paths"] = nlohmann::json::array();
     for (const auto& ref : source.result_refs) candidate["evidence_paths"].push_back(ref.at("path"));
     result.text = candidate.dump();

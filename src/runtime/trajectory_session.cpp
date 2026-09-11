@@ -1847,6 +1847,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         source.action_id = book.action_id;
                         source.parent_turn_id = book.action->turn_id();
                         source.persisted_event_ref = persisted_event_id;
+                        if (!book.capture_event_id.empty()) source.source_result_event_refs.push_back(book.capture_event_id);
+                        source.source_result_event_refs.push_back(persisted_event_id);
                         source.attempt = book.action->attempt();
                         source.execution_started = book.action->started();
                         source.result_refs = persisted.result_ref;

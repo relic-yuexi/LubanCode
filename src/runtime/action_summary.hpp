@@ -27,6 +27,7 @@ struct ActionSummarySource {
     std::string action_id;
     std::string parent_turn_id;
     std::string persisted_event_ref;
+    std::vector<std::string> source_result_event_refs;
     std::uint64_t attempt = 1;
     std::vector<nlohmann::json> result_refs;
     std::string text;

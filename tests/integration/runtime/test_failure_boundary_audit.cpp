@@ -700,7 +700,7 @@ TEST_CASE("B1 publication failure after commit recovers the committed preview wi
 TEST_CASE("B2 real loop: action summaries use separate requests and adopted results survive resume") {
     Audit audit;
     AuditBackend backend;
-    backend.emit = [](int call, const auto& sink) -> std::expected<void, api::Error> {
+    backend.emit = [&audit](int call, const auto& sink) -> std::expected<void, api::Error> {
         if (call == 1) {
             sink(api::MessageStart{"provider-response", "audit-model"});
             for (int index = 0; index < 2; ++index) {
@@ -710,6 +710,18 @@ TEST_CASE("B2 real loop: action summaries use separate requests and adopted resu
             }
             sink(api::MessageDone{"tool_use", api::Usage{}});
         } else if (call <= 3) {
+            if (call == 2) {
+                int raw_captures = 0;
+                for (const auto& row : audit.Rows()) {
+                    if (row.value("kind", "") != "tool.result.persisted") continue;
+                    bool raw = false;
+                    for (const auto& ref : row.at("payload").at("result_ref")) {
+                        if (ref.at("path").get<std::string>().find("capture-") != std::string::npos) raw = true;
+                    }
+                    if (raw) ++raw_captures;
+                }
+                CHECK(raw_captures == 2);
+            }
             sink(api::MessageStart{"summary-response", "audit-model"});
             sink(api::TextDelta{R"({"summary":"inspection completed","side_effects":["read only"],"open_items":["review evidence"],"evidence":["combined output"]})"});
             sink(api::ContentBlockDone{0});
@@ -760,6 +772,7 @@ TEST_CASE("B2 real loop: action summaries use separate requests and adopted resu
         CHECK(body.at("execution_state") == "done");
         CHECK(body.at("capture_complete") == true);
         CHECK(body.at("evidence_paths").size() >= 2);
+        CHECK(body.at("source_result_event_refs").size() == 2);
     }
     auto ledger = v3::ReadV3Ledger(audit.path);
     REQUIRE(ledger.has_value());
