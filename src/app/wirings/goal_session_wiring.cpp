@@ -15,6 +15,7 @@
 #include "platform/paths.hpp"
 #include "runtime/goal_compact.hpp"
 #include "runtime/goal_context.hpp"
+#include "runtime/goal_evaluation_flow.hpp"
 #include "runtime/goal_evidence.hpp"
 #include "runtime/goal_evaluator.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -128,6 +129,7 @@ void GoalSessionWiring::BindGoalService() {
         goal_service_.reset();
         goal_service_bound_session_.clear();
         goal_v3_restored_ = false;
+        v3_evidence_memory_.clear();
         return;
     }
     if (goal_service_.has_value() && goal_service_bound_session_ == writer->session_id()) {
@@ -156,6 +158,7 @@ void GoalSessionWiring::HandleSessionCleared() {
     goal_service_.reset();
     goal_service_bound_session_.clear();
     goal_v3_restored_ = false;
+    v3_evidence_memory_.clear();
 }
 
 void GoalSessionWiring::RestoreFromArchive() {
@@ -241,9 +244,10 @@ void GoalSessionWiring::NoteSubagentCompletion() {
                           host_.loop_scheduler ? host_.loop_scheduler() : nullptr));
 }
 
-// v3 泵路(轨迹 v3 §4.67 G1):认领 → 开轮 → synthetic turn → 收工。
-// 单飞与 v1 同泵(一场 session 同时一枚主 turn);每拍只认领一枚工作项,
-// 收口后 intent 销账——没有判词不续排下一轮(验收归 G2)。
+// v3 泵路(轨迹 v3 §4.67 G1/G2):认领 → 开轮 → synthetic turn → 收口
+// (采证/验收/判词采用/续排意图)。单飞与 v1 同泵(一场 session 同时一枚
+// 主 turn);每拍只认领一枚工作项,收口后按判词走——没有可采判词
+// (evaluator_failed)不续排下一轮(§4.67.5)。
 bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
     if (!ToolExposed()) {
         return false;  // features.goals 正门关着:不排轮(v1 同源判式)
@@ -303,8 +307,8 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
                        {"iteration_index", iteration_index},
                        {"work_item_id", view.intent.work_item_id}},
         /*match_value=*/std::string());
-    // 3) synthetic turn(文字供模型看;G1 没有 GoalContext 注入面,正文自带
-    // 目标;收口前 goal_checkpoint 照 v1 口径可用)。
+    // 3) synthetic turn(文字供模型看;正文自带目标,收口前 goal_checkpoint
+    // 照 v1 口径可用)。
     bool turn_failed = false;
     if (host_.start_turn) {
         const goal::GoalStateSnapshot* running = goal_service_->current();
@@ -312,13 +316,144 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
                              std::to_string(iteration_index) + "]\n目标:" +
                              (running != nullptr ? running->objective : snapshot->objective) +
                              "\n请推进当前目标;收口前调用 goal_checkpoint 写检查点。"
-                             "\n(本轮尚未接入自动验收;完成后写清剩余工作,由用户决定续跑。)",
+                             "\n完成后写清剩余工作,宿主将独立验收并决定续跑。",
                          &turn_failed);
     }
-    // 4) 收工(G1 无验收):执行轮收口回 idle、intent 销账——不假装评过,
-    // 不自动续排(判词与下一轮意图归 G2)。
+    // 4) 收口(G2:验收走 v3 内部请求服务):采证 -> checkpoint ->
+    // 排评估 -> 采判词 -> 程序门槛 -> 采用与续排意图同一快照提交。
+    // 逻辑全在 runtime 的 CloseGoalIterationWithEvaluation(单测钉),
+    // 这里只折材料与转发通知。
     const goal::GoalStateSnapshot* closing = goal_service_->current();
-    if (closing != nullptr) {
+    if (closing != nullptr && !turn_failed && host_.evaluation_backend != nullptr &&
+        host_.trajectory != nullptr &&
+        host_.trajectory->v3_main_writer() != nullptr) {
+        goal::GoalCloseoutMaterial material;
+        material.parent_turn_id = host_.last_turn_id ? host_.last_turn_id() : std::string();
+        material.now_ms = now_ms;
+        material.workspace_summary = "cwd: " + lubancode::platform::CurrentDirUtf8();
+        // checkpoint:工具调过取之,否则宿主合成(标 synthesized,不能因此
+        // 漏验,也不能把自报完成当证据)。
+        bool has_tool_checkpoint = false;
+        if (checkpoint_state_ != nullptr && checkpoint_state_->HasCheckpoint() &&
+            checkpoint_state_->goal_id == goal_id) {
+            const auto candidate = checkpoint_state_->Candidate();
+            if (candidate.has_value()) {
+                has_tool_checkpoint = true;
+                material.checkpoint.summary = candidate->summary;
+                material.checkpoint.completed = candidate->completed;
+                material.checkpoint.remaining = candidate->remaining;
+                material.checkpoint.next_action = candidate->next_action;
+                material.checkpoint.evidence_ids = candidate->evidence_ids;
+                material.checkpoint.blocker_key = candidate->blocker_key;
+                material.checkpoint.question = candidate->question;
+            }
+        }
+        if (!has_tool_checkpoint) {
+            material.checkpoint.synthesized = true;
+            material.checkpoint.summary = "执行轮收口时未调用 goal_checkpoint;宿主合成 missing checkpoint。";
+            material.checkpoint.next_action = "重读目标与合同 criteria,补一枚明确 checkpoint 再收口。";
+        }
+        // 采证:本轮 finished 工具事件翻证据(v1 形状,内存留判材料;引用
+        // 入快照归 flow)。写盘级工具落成后,旧验证证据翻 stale(§4.67.5)。
+        if (host_.trace_hub != nullptr && !material.parent_turn_id.empty()) {
+            goal::GoalEvidenceContext ctx;
+            ctx.goal_id = goal_id;
+            ctx.iteration_id = iteration_id;
+            ctx.turn_id = material.parent_turn_id;
+            // 发号续快照在账数(同 goal 内单调;resume 后内存空、快照计数
+            // 衔接,不与旧 id 撞)。
+            int evidence_seq = static_cast<int>(closing->evidence_refs.size());
+            bool write_landed = false;
+            for (const auto& event :
+                 host_.trace_hub->FinishedEventsOfTurn(material.parent_turn_id)) {
+                const auto evidence = goal::EvidenceFromToolTrace(
+                    event, ctx, "ev-" + std::to_string(++evidence_seq));
+                if (!evidence.has_value()) continue;
+                if (goal::EvidenceStalesOnWrite(evidence->kind)) write_landed = true;
+                material.fresh_evidence.push_back(*evidence);
+            }
+            if (write_landed) {
+                for (auto& [id, ev] : v3_evidence_memory_) {
+                    if (goal::EvidenceStalesOnWrite(ev.kind) && ev.fresh) {
+                        ev.fresh = false;
+                        material.evidence_stale_ids.push_back(id);
+                    }
+                }
+            }
+            for (const auto& ev : material.fresh_evidence) {
+                v3_evidence_memory_[ev.id] = ev;
+            }
+            material.material_evidence.reserve(v3_evidence_memory_.size());
+            for (const auto& [id, ev] : v3_evidence_memory_) {
+                (void)id;
+                material.material_evidence.push_back(ev);
+            }
+        } else {
+            // 拿不到工作轮 turnId(旧装配没填 last_turn_id):只剩内存旧证
+            // 据可判;材料缺口让验收更保守,不放缺口。
+            material.material_evidence.reserve(v3_evidence_memory_.size());
+            for (const auto& [id, ev] : v3_evidence_memory_) {
+                (void)id;
+                material.material_evidence.push_back(ev);
+            }
+        }
+        // 评估模型路由(§4.67.5:沿模型路由选独立小模型,记录实际
+        // provider/model/wire)。
+        goal::GoalEvaluationFlowOptions flow_options;
+        if (host_.current_model != nullptr) flow_options.model = *host_.current_model;
+        if (host_.model_router != nullptr) {
+            const auto routed_info =
+                host_.model_router->RouteInfo(lubancode::agent::TaskKind::GoalEvaluate);
+            if (!routed_info.model.empty()) {
+                flow_options.model = routed_info.model;
+                flow_options.reasoning_effort = routed_info.effort;
+            }
+        }
+        flow_options.provider = host_.evaluation_provider;
+        flow_options.wire = host_.evaluation_wire;
+        const auto closed_eval = goal::CloseGoalIterationWithEvaluation(
+            *goal_service_, *host_.trajectory->v3_main_writer(), *host_.evaluation_backend,
+            flow_options, material);
+        if (closed_eval.decision == "evaluator_failed") {
+            Notify(/*is_error=*/true,
+                   "goal evaluator 失败: " + closed_eval.summary + ";目标转暂停(/goal resume 续)。");
+        } else if (!closed_eval.ok) {
+            Notify(/*is_error=*/true, "goal 验收收口失败(" + closed_eval.error_code + "): " +
+                                          closed_eval.error_message);
+        } else {
+            Notify(/*is_error=*/false,
+                   "[goal 判词: " + closed_eval.decision + "] " + closed_eval.summary);
+        }
+        if (closed_eval.overridden_achieved) {
+            Notify(/*is_error=*/false,
+                   "  (evaluator 判 achieved 被程序门槛改判 continue: " +
+                       closed_eval.override_reason + ")");
+        }
+        lubancode::app::EmitGoalHook(
+            MakeCommandWiring(host_.agent_tool ? host_.agent_tool() : nullptr,
+                              host_.loop_scheduler ? host_.loop_scheduler() : nullptr),
+            lubancode::hooks::HookEvent::GoalEvaluated,
+            nlohmann::json{{"goal_id", goal_id},
+                           {"iteration_id", iteration_id},
+                           {"summary", closed_eval.summary.substr(0, 600)},
+                           {"decision", closed_eval.decision}},
+            /*match_value=*/closed_eval.decision);
+        const goal::GoalStateSnapshot* after = goal_service_->current();
+        if (after != nullptr && goal::IsLifecycleTerminal(after->lifecycle)) {
+            // terminal 事件已随快照提交落;GoalCompleted 在其后跑(通知失败
+            // 不撤回已提交终态)。
+            lubancode::app::EmitGoalHook(
+                MakeCommandWiring(host_.agent_tool ? host_.agent_tool() : nullptr,
+                                  host_.loop_scheduler ? host_.loop_scheduler() : nullptr),
+                lubancode::hooks::HookEvent::GoalCompleted,
+                nlohmann::json{{"goal_id", after->goal_id},
+                               {"decision", closed_eval.decision},
+                               {"iterations", after->counters.iterations_started}},
+                /*match_value=*/goal::ToString(after->lifecycle));
+        }
+    } else if (closing != nullptr) {
+        // 请求都没成或评估口没接:evaluator 没材料可判——照旧收口销账,
+        // 不烧评估这一趟(连败记 provider 账,下一圈泵再问)。
         auto ended = goal_service_->EndIteration(closing->state_revision, cause);
         if (!ended.ok) {
             Notify(/*is_error=*/true,

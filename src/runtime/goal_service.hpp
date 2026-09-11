@@ -135,6 +135,14 @@ struct GoalEvidenceRef {
 // 证据引用的合同校验(单行可判:必选字段/类型/枚举/hex64)。返回空串 = 过。
 std::string ValidateEvidenceRef(const nlohmann::json& j);
 
+// v1 采证(GoalEvidence,tool trace 翻译层产物) -> v3 快照证据引用
+//(GoalEvidenceRef,§4.67 G2 采证接线)。content_sha256 缺失时用 facts
+// canonical 字节的 sha256 顶(fresh/truncated 照搬);goal_id/iteration_id
+// 以 v1 证据自带为准(空则用 scope 兜底)。
+GoalEvidenceRef EvidenceRefFromTrace(const GoalEvidence& evidence, const std::string& session_id,
+                                     const std::string& run_id,
+                                     const std::string& workspace_baseline);
+
 // ---------------------------------------------------------------------------
 // 快照 schema(§4.67.3"快照至少保存"全表)
 // ---------------------------------------------------------------------------
@@ -222,8 +230,11 @@ std::string ValidatePendingIntent(const nlohmann::json& j);
 // §4.67.4 恢复补投影:这枚快照对当前写者还有没有可取的工作项。
 //   - 意图未认领 + 非停态 + 合同版本对得上 → claimable(恢复按原
 //     workItemId 补队列,重复 resume 只补同一项,不另发新工作);
-//   - 他 epoch 已认领 → claimed_by_other(已启动未收口,恢复核验归 G2,
-//     不重放副作用);
+//   - 他 epoch 已认领且 phase=queued(claim 落账、开轮没落)= 账面证据
+//     "确认未发送"(G2 定案)→ claimable(接管沿用原项,续原请求不重放
+//     副作用;接管落 applied,原写者迟到的开轮被 CAS 拒);
+//   - 他 epoch 已认领且在途(running/evaluating)→ claimed_by_other
+//     (等他者的下一笔 applied,不盲重放);
 //   - 本 epoch 已认领且 phase=queued(claim 后、开轮前)→ 仍 claimable
 //     (claim 幂等,沿用原项);
 //   - 停态/终态/意图对着旧合同 → 不排(§4.67.4"旧 Goal 工作项不挤过
@@ -324,6 +335,25 @@ struct GoalTransitionCandidate {
     nlohmann::json cause_ref;  // applied 的 causeRef(合法引用或空)
 };
 
+// ---------------------------------------------------------------------------
+// 判词采用(G2):CompleteIterationWithEvaluation 的入参形状
+// ---------------------------------------------------------------------------
+
+// 判词分路:四路判词 + 评估故障收口(evaluator_failed 暂停,§4.67.5)。
+enum class GoalVerdictKind { Continue, Achieved, Blocked, NeedsUser, EvaluatorFailed };
+
+// 一枚待采用判词的完整描述(宿主侧装配;模型无权直写)。
+struct EvaluationVerdict {
+    std::string evaluation_id;      // eval-<n>(绑定快照 appliedEvaluationId)
+    GoalVerdictKind kind = GoalVerdictKind::Continue;
+    std::string stop_reason;        // paused/blocked 等停因(evaluator_failed 必带)
+    std::string blocker_key;        // blocked 必带
+    std::string pending_question;   // needs_user 必带
+    nlohmann::json evaluation;      // 判词 JSON(审计投影,可空)
+    std::optional<GoalPendingIntent> next_intent;  // continue 必带
+    GoalUsage usage_addition;       // 评估请求逐次累计(只增)
+};
+
 class GoalService {
 public:
     struct Options {
@@ -376,7 +406,10 @@ public:
     // 模型";§4.67.8 单写者接管)。提交 claimed=true + writerEpoch +
     // phase=queued;恢复去重的锚就是这枚 applied:claim 落账后,重复 resume
     // 不再把同一工作项当未认领补队列。同 epoch 幂等(已认领照回 ok);
-    // 他 epoch 已认领报 goal.intent_already_claimed(恢复核验归 G2)。
+    // 他 epoch 已认领按相位分路(§4.67.4 恢复核验,G2 定案):phase=queued
+    // = claim 落账但开轮没落(开轮先于模型发送)= 账面证据"确认未发送"
+    // ——接管沿用原 workItemId 续原请求;running/evaluating = 他者在途,
+    // 报 goal.intent_already_claimed 不盲重放。
     GoalServiceResult ClaimPendingIntent(std::string writer_epoch, std::uint64_t expected_state_revision,
                                          nlohmann::json cause_ref);
 
@@ -390,6 +423,31 @@ public:
     // 项销账,不留给下一次 resume 重复提交;判词与续排意图归 G2,不在这
     // 假装评过)。iteration 记录留在快照(status 可见)。
     GoalServiceResult EndIteration(std::uint64_t expected_state_revision, nlohmann::json cause_ref);
+
+    // ---- §4.67 G2:验收相位与判词采用(同一快照提交) --------------------
+
+    // 进入评估相位(§4.67.4 收口后排验收):phase running -> evaluating,
+    // checkpointRef 与本轮新采证据在此落快照(evidenceRefs 追加不整替)。
+    // evidence_stale_ids 是"证据有效期"的翻旧口(§4.67.5):本轮有写盘级
+    // 工具落成时,把在账的旧验证证据(command_exit/test_report 类)按 id
+    // 翻 fresh=false——改动之后的旧验证不再可信,须重验。
+    // 这笔 applied 是"evaluating 崩溃窗口"的锚(§4.67.8:恢复时已有完整
+    // 候选就校验后只采用一次)。CAS 同前;停态/终态/不在执行轮拒。
+    GoalServiceResult BeginEvaluation(std::uint64_t expected_state_revision,
+                                      std::optional<std::string> checkpoint_ref,
+                                      std::vector<GoalEvidenceRef> evidence_additions,
+                                      std::vector<std::string> evidence_stale_ids,
+                                      nlohmann::json cause_ref);
+
+    // 判词采用:一次 CAS 提交里收口本轮(phase -> idle、pendingIntent 销
+    // 账)、绑 appliedEvaluationId、按判词落 lifecycle、continue 带下一轮
+    // 意图(§4.67.6"采用判词与下一轮意图写在同一快照提交中")、usage 只增
+    // 不清零。evaluator_failed 等评估故障不走这里——调用方先
+    // ApplyTransition(paused) 落停因,评估相位由本口在 verdict 里以
+    // pause 分支收口。
+    GoalServiceResult CompleteIterationWithEvaluation(std::uint64_t expected_state_revision,
+                                                      const EvaluationVerdict& verdict,
+                                                      nlohmann::json cause_ref);
 
     // 只读查询:当前生效快照(applied 已落、内存已发布)。终态 goal 保留
     // 在案(审计);再 Create 会另起 goalId。

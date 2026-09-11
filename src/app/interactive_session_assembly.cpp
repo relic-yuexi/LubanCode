@@ -607,6 +607,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         goal_host.start_turn = [this](const std::string& text, bool* turn_failed) {
             RunSessionTurn(text, TurnSource::User, turn_failed);
         };
+        // §4.67 G2:验收回合的 parentTurnId 回指刚收口的工作轮(turn 视图
+        // 的栈顶;非用户轮拿不到就空,评估账如实落 null,不伪造)。
+        goal_host.last_turn_id = [this]() {
+            return turn_views_.empty() ? std::string() : turn_views_.back().turn_id;
+        };
+        // 评估端点身份(assistant 落账必带 provider/wire/model)。
+        goal_host.evaluation_provider = active_provider;
+        goal_host.evaluation_wire = session_runtime_.wire_name();
         // 渲染事件出口(骨架拆解反弹·问题 3):goal 接线器不再直接画终端,
         // 通知从这递出来——is_error 定色,文案由接线器拼好,渲染逐字节照旧。
         goal_host.notify = [this](bool is_error, const std::string& text) {

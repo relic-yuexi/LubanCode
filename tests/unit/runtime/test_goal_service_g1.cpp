@@ -3,7 +3,9 @@
 //   - 意图提交(SetPendingIntent):CAS、前一枚未认领不覆盖、认领后可换、
 //     对着旧合同拒;
 //   - 认领(ClaimPendingIntent):claimed+writerEpoch+phase=queued 落 applied;
-//     同写者幂等、他写者 goal.intent_already_claimed、缺意图/停态拒;
+//     同写者幂等;他写者按相位分路(G2 定案:queued=确认未发送,接管沿用
+//     原工作项;running/evaluating=在途,goal.intent_already_claimed 不盲
+//     重放);缺意图/停态拒;
 //   - 开轮/收工(BeginIteration/EndIteration):iterationId 发号单调落快照
 //     (不再恒 null)、preparing→active、收口销 intent 不假装评过;
 //   - EvaluateGoalWork 可用性矩阵(未认领/本写者待开轮/他写者已认领/
@@ -313,11 +315,26 @@ TEST_CASE("ClaimPendingIntent:claim 落账+queued,同写者幂等,他写者拒")
     CHECK(again.payload.value("idempotent", false) == true);
     CHECK(service.current()->state_revision == rev1 + 1);
 
-    // 他写者接管:goal.intent_already_claimed,不改账(§4.67.8 恢复核验)。
+    // 他写者接管(G2 收口):phase=queued = claim 落账、开轮没落(开轮
+    // 先于模型发送)= 账面证据"确认未发送"——接管沿用原工作项,续原请求
+    // 不重放副作用;接管本身落 applied。
     const auto other = service.ClaimPendingIntent("run-2", service.current()->state_revision, {});
-    CHECK_FALSE(other.ok);
-    CHECK(other.error_code == goalns::kErrGoalIntentAlreadyClaimed);
-    CHECK(service.current()->state_revision == rev1 + 1);  // 账没动
+    CHECK(other.ok);
+    CHECK(other.payload.at("workItemId") == "wi-1");
+    CHECK(other.payload.at("adoptedFromEpoch") == "run-1");
+    CHECK(service.current()->state_revision == rev1 + 2);
+    {
+        std::string intent_error;
+        const auto taken = GoalPendingIntent::FromJson(service.current()->pending_intent,
+                                                       &intent_error);
+        REQUIRE(taken.has_value());
+        CHECK(taken->writer_epoch == "run-2");
+    }
+    // 他写者已在途(phase=running):真拒,不盲重放(§4.67.8)。
+    REQUIRE(service.BeginIteration(service.current()->state_revision, {}).ok);
+    const auto in_flight = service.ClaimPendingIntent("run-3", service.current()->state_revision, {});
+    CHECK_FALSE(in_flight.ok);
+    CHECK(in_flight.error_code == goalns::kErrGoalIntentAlreadyClaimed);
 
     // 停态不认领。
     Volume volume2("claim-stopped", "s-claim2");
@@ -681,7 +698,8 @@ TEST_CASE("恢复去重:claim 落账后,重复接管不再补队列") {
     CHECK_FALSE(view2.claimable);
     CHECK_FALSE(view2.has_intent);
 
-    // claim 落账但没收工(claim 与开轮之间崩):他写者接管不盲重放。
+    // claim 落账但没收工(claim 与开轮之间崩):phase=queued = 确认未发送
+    //(G2 定案:开轮先于模型发送)——新写者接管沿用原工作项,不另发新工作。
     Volume volume2("dedup-claim", "s-dedup2");
     {
         GoalService service(&*volume2.writer, ServiceOptions(volume2));
@@ -699,9 +717,11 @@ TEST_CASE("恢复去重:claim 落账后,重复接管不再补队列") {
     GoalService service3(&*continued3, ServiceOptions(volume2));
     REQUIRE(service3.AdoptFromProjection(projection3).ok);
     auto view3 = goalns::EvaluateGoalWork(*service3.current(), "run-restart");
-    CHECK_FALSE(view3.claimable);
-    CHECK(view3.claimed_by_other);
+    CHECK(view3.claimable);  // 未发送:接管续原请求(§4.67.4 恢复核验)
     CHECK(view3.intent.work_item_id == "wi-1");  // 同一 id,不另发新工作
+    // 接管成:writerEpoch 换手落 applied,原写者迟到的开轮被 CAS 拒。
+    REQUIRE(service3.ClaimPendingIntent("run-restart", service3.current()->state_revision, {}).ok);
+    CHECK(service3.current()->state_revision == projection3.snapshot.state_revision + 1);
 }
 
 TEST_CASE("命令面状态投影:FormatGoalV3Status 不在 runtime 册钉(占位防漏)") {

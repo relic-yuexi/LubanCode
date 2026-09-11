@@ -488,6 +488,32 @@ std::string ValidateEvidenceRef(const nlohmann::json& j) {
     return std::string();
 }
 
+GoalEvidenceRef EvidenceRefFromTrace(const GoalEvidence& evidence, const std::string& session_id,
+                                     const std::string& run_id,
+                                     const std::string& workspace_baseline) {
+    GoalEvidenceRef ref;
+    ref.id = evidence.id;
+    ref.kind = ToString(evidence.kind);
+    ref.source = GoalEvidenceSource::ToolAction;
+    // sourceRef 回指工具调用(§4.67.5"至少回指 session/run、toolCallId 或
+    // messageId");v1 采证没带 tool_use_id 的(宿主合成一类)以 producer
+    // 兜底,不为凑非空造引用。
+    ref.source_ref = !evidence.tool_use_id.empty()
+                         ? evidence.tool_use_id
+                         : ("host:" + (evidence.producer.empty() ? "unknown" : evidence.producer));
+    ref.session_id = session_id;
+    ref.run_id = run_id;
+    ref.content_sha256 = !evidence.content_sha256.empty()
+                             ? evidence.content_sha256
+                             : hooks::Sha256Hex(evidence.facts.dump());
+    ref.observed_at_ms = evidence.observed_at_ms;
+    ref.workspace_baseline = workspace_baseline;
+    ref.fresh = evidence.fresh;
+    ref.truncated = evidence.truncated;
+    ref.criterion_id.clear();  // 绑定验收项归 checkpoint/判词对账,不在采证时填
+    return ref;
+}
+
 // ---------------------------------------------------------------------------
 // 快照 schema
 // ---------------------------------------------------------------------------
@@ -769,9 +795,22 @@ GoalWorkView EvaluateGoalWork(const GoalStateSnapshot& snapshot, const std::stri
         view.intent = *intent;
         if (intent->claimed) {
             if (intent->writer_epoch != writer_epoch) {
-                view.claimed_by_other = true;
-                view.reason = "工作项 " + intent->work_item_id + " 已被写者 " +
-                              intent->writer_epoch + " 认领;恢复核验归 G2,不盲重放";
+                // §4.67.4 恢复核验(G2 收口):claim 落账后、开轮(Begin-
+                // Iteration,先于模型发送)没落 = 账面证据"确认未发送"
+                //(phase=queued)——本写者可接管沿用原 workItemId 续原请求,
+                // 不重放副作用;已开轮/在评(running/evaluating)是他者
+                // 在途,如实标 claimed_by_other,等他者的下一笔 applied。
+                if (snapshot.phase != GoalPhase::Queued) {
+                    view.claimed_by_other = true;
+                    view.reason =
+                        "工作项 " + intent->work_item_id + " 已被写者 " + intent->writer_epoch +
+                        " 认领且在途(phase=" + ToString(snapshot.phase) + ");等他者收口";
+                    return view;
+                }
+                view.claimable = true;
+                view.reason = "他写者认领后未开轮(phase=queued,确认未发送):"
+                              "接管沿用原工作项 " +
+                              intent->work_item_id;
                 return view;
             }
             if (snapshot.phase != GoalPhase::Queued) {
@@ -1115,9 +1154,29 @@ GoalServiceResult GoalService::ClaimPendingIntent(std::string writer_epoch,
             r.payload["idempotent"] = true;
             return r;
         }
+        if (current_->phase == GoalPhase::Queued) {
+            // §4.67.4 恢复核验(G2 收口):他写者 claim 落账后开轮没落
+            //(phase=queued,开轮先于模型发送)= 账面证据"确认未发送"
+            // ——本写者接管沿用原 workItemId 续原请求,不重放副作用;
+            // 接管本身落 applied,原写者迟到的开轮会被 CAS 拒。
+            GoalStateSnapshot next = *current_;
+            next.state_revision += 1;
+            GoalPendingIntent taken = *intent;
+            taken.writer_epoch = writer_epoch;
+            taken.claimed_at_ms = Now();
+            next.pending_intent = taken.ToJson();
+            next.updated_at_ms = Now();
+            GoalServiceResult r = Commit(std::move(next), cause_ref);
+            if (r.ok) {
+                r.payload["workItemId"] = taken.work_item_id;
+                r.payload["adoptedFromEpoch"] = intent->writer_epoch;
+            }
+            return r;
+        }
         GoalServiceResult r = Fail(kErrGoalIntentAlreadyClaimed,
                                    "工作项 " + intent->work_item_id + " 已被写者 " +
-                                       intent->writer_epoch + " 认领;恢复核验归 G2,不盲重放");
+                                       intent->writer_epoch + " 认领且在途(phase=" +
+                                       ToString(current_->phase) + ");不盲重放");
         r.payload["workItemId"] = intent->work_item_id;
         r.payload["writerEpoch"] = intent->writer_epoch;
         return r;
@@ -1212,6 +1271,184 @@ GoalServiceResult GoalService::EndIteration(std::uint64_t expected_state_revisio
     GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
     if (r.ok && next.iteration_id.has_value()) {
         r.payload["iterationId"] = *next.iteration_id;
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::BeginEvaluation(std::uint64_t expected_state_revision,
+                                               std::optional<std::string> checkpoint_ref,
+                                               std::vector<GoalEvidenceRef> evidence_additions,
+                                               std::vector<std::string> evidence_stale_ids,
+                                               nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (IsLifecycleTerminal(current_->lifecycle)) {
+        return Fail(kErrGoalTerminal, "目标已收账,不受理验收(clear 前的迟到收口拒)");
+    }
+    if (LifecycleIsStopped(current_->lifecycle)) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "停态(" + ToString(current_->lifecycle) + ")不排验收;明确恢复后再评");
+    }
+    if (current_->phase != GoalPhase::Running) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "不在执行轮收口位(phase=" + ToString(current_->phase) + ")");
+    }
+    for (const auto& ref : evidence_additions) {
+        if (const std::string invalid = ValidateEvidenceRef(ref.ToJson()); !invalid.empty()) {
+            return Fail(kErrGoalCandidateInvalid, "evidence 候选坏项: " + invalid);
+        }
+    }
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.phase = GoalPhase::Evaluating;
+    if (checkpoint_ref.has_value() && !checkpoint_ref->empty()) {
+        next.checkpoint_ref = std::move(checkpoint_ref);
+    }
+    for (auto& ref : evidence_additions) {
+        next.evidence_refs.push_back(std::move(ref));
+    }
+    // 证据有效期:按 id 翻旧(快照每版全量,在副本上整改;未知 id 静默
+    // 略过——翻旧是保守动作,不为它拒提交)。
+    for (const auto& stale_id : evidence_stale_ids) {
+        for (auto& ref : next.evidence_refs) {
+            if (ref.id == stale_id) ref.fresh = false;
+        }
+    }
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok && next.iteration_id.has_value()) {
+        r.payload["iterationId"] = *next.iteration_id;
+        r.payload["evaluationId"] = "eval-" + *next.iteration_id;
+    }
+    return r;
+}
+
+GoalServiceResult GoalService::CompleteIterationWithEvaluation(
+    std::uint64_t expected_state_revision, const EvaluationVerdict& verdict,
+    nlohmann::json cause_ref) {
+    if (broken_) {
+        return Fail(kErrGoalStoreUnavailable, "goal 写口已锁(此前写盘失败);fail closed");
+    }
+    if (writer_ == nullptr || options_.session_dir.empty()) {
+        return Fail(kErrGoalStoreUnavailable, "GoalService 写口未接线");
+    }
+    if (!current_.has_value()) return Fail(kErrGoalNotFound, "没有 goal");
+    if (expected_state_revision != current_->state_revision) {
+        return Fail(kErrGoalRevisionConflict, "stateRevision 冲突:状态已被改过");
+    }
+    if (current_->phase != GoalPhase::Evaluating) {
+        return Fail(kErrGoalCandidateInvalid,
+                    "不在验收收口位(phase=" + ToString(current_->phase) + ";BeginEvaluation 先落)");
+    }
+    if (verdict.evaluation_id.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "判词采用缺 evaluationId(绑定提交的锚)");
+    }
+    // 分路先验(坏候选不落盘,fail closed 前置)。
+    GoalLifecycle to_lifecycle = current_->lifecycle;
+    switch (verdict.kind) {
+        case GoalVerdictKind::Continue:
+            if (!verdict.next_intent.has_value()) {
+                return Fail(kErrGoalCandidateInvalid,
+                            "continue 判词必带下一轮意图(§4.67.6 同一快照提交)");
+            }
+            if (verdict.next_intent->contract_revision != current_->contract_revision) {
+                return Fail(kErrGoalCandidateInvalid,
+                            "续排意图对着旧合同(在账 r" +
+                                std::to_string(current_->contract_revision) + ")");
+            }
+            break;
+        case GoalVerdictKind::Achieved:
+            to_lifecycle = GoalLifecycle::Achieved;
+            break;
+        case GoalVerdictKind::Blocked:
+            to_lifecycle = GoalLifecycle::Blocked;
+            if (verdict.blocker_key.empty()) {
+                return Fail(kErrGoalCandidateInvalid, "blocked 判词缺 blockerKey");
+            }
+            break;
+        case GoalVerdictKind::NeedsUser:
+            to_lifecycle = GoalLifecycle::AwaitingUser;
+            if (verdict.pending_question.empty()) {
+                return Fail(kErrGoalCandidateInvalid, "needs_user 判词缺 pendingQuestion");
+            }
+            break;
+        case GoalVerdictKind::EvaluatorFailed:
+            // 评估故障(超时/二次坏判词):暂停收口,保留停因(§4.67.5)。
+            to_lifecycle = GoalLifecycle::Paused;
+            if (verdict.stop_reason.empty()) {
+                return Fail(kErrGoalCandidateInvalid, "evaluator_failed 收口缺 stopReason");
+            }
+            break;
+    }
+    if (to_lifecycle != current_->lifecycle &&
+        !IsValidLifecycleTransition(current_->lifecycle, to_lifecycle)) {
+        return Fail(kErrGoalInvalidTransition,
+                    "lifecycle 转换非法: " + ToString(current_->lifecycle) + " -> " +
+                        ToString(to_lifecycle));
+    }
+    const bool to_stopped = to_lifecycle == GoalLifecycle::Paused ||
+                            to_lifecycle == GoalLifecycle::Blocked ||
+                            to_lifecycle == GoalLifecycle::AwaitingUser;
+    if (to_stopped && verdict.stop_reason.empty()) {
+        return Fail(kErrGoalCandidateInvalid, "停态判词缺 stopReason");
+    }
+    if (verdict.next_intent.has_value()) {
+        if (const std::string invalid = ValidatePendingIntent(verdict.next_intent->ToJson());
+            !invalid.empty()) {
+            return Fail(kErrGoalCandidateInvalid, "续排意图不合合同: " + invalid);
+        }
+    }
+
+    // 一次提交收齐(§4.67.6"采用判词与下一轮意图写在同一快照提交中"):
+    // 收口(phase->idle、本轮 intent 销账)+ appliedEvaluationId 绑定 +
+    // lifecycle 分路 + 续排意图 + usage 只增。evaluator_failed 不绑
+    // evaluationId——没有判词可采,它的审计锚是账上 rejected 事实行。
+    GoalStateSnapshot next = *current_;
+    next.state_revision += 1;
+    next.phase = GoalPhase::Idle;
+    if (verdict.kind != GoalVerdictKind::EvaluatorFailed) {
+        next.applied_evaluation_id = verdict.evaluation_id;
+    }
+    next.usage.Add(verdict.usage_addition);
+    if (verdict.kind == GoalVerdictKind::Continue) {
+        next.pending_intent = verdict.next_intent->ToJson();
+    } else {
+        next.pending_intent = nlohmann::json::object();  // 停态不排(恢复另提交)
+    }
+    if (to_lifecycle != current_->lifecycle) {
+        next.lifecycle = to_lifecycle;
+        next.stop_reason = to_stopped ? verdict.stop_reason : std::string();
+        next.blocker_key = verdict.kind == GoalVerdictKind::Blocked ? verdict.blocker_key
+                                                                    : std::string();
+        next.pending_question = verdict.kind == GoalVerdictKind::NeedsUser
+                                    ? verdict.pending_question
+                                    : std::string();
+    }
+    next.updated_at_ms = Now();
+    GoalServiceResult r = Commit(std::move(next), std::move(cause_ref));
+    if (r.ok) {
+        r.payload["evaluationId"] = verdict.evaluation_id;
+        r.payload["verdictKind"] = [kind = verdict.kind] {
+            switch (kind) {
+                case GoalVerdictKind::Continue: return "continue";
+                case GoalVerdictKind::Achieved: return "achieved";
+                case GoalVerdictKind::Blocked: return "blocked";
+                case GoalVerdictKind::NeedsUser: return "needs_user";
+                case GoalVerdictKind::EvaluatorFailed: return "evaluator_failed";
+            }
+            return "unknown";
+        }();
+        if (verdict.kind == GoalVerdictKind::Continue) {
+            r.payload["nextWorkItemId"] = verdict.next_intent->work_item_id;
+        }
     }
     return r;
 }
