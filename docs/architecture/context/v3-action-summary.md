@@ -10,6 +10,12 @@
 
 四个生产 adapter 提供实际序列化入口。没有该入口的旧测试/trace backend 仍走原预检，不能把它算作 adapter 预算验收。图片、音频、视频、文件二进制与不透明思考没有统一预算策略时，明确报未计量，不能拿文本 bytes/4 补零放行。
 
+## 媒体边界
+
+工具结果携带 Image/Audio/EmbeddedBlob 块时，首发预算判 `tool_batch.unestimated_media_or_reasoning`，整轮以错误终态收场：不重跑工具、不发下一份请求。已执行结果的原始捕获（combined 原文与 raw_payload 块序）照常落 artifacts，同批文本结果照常入账，恢复侧不丢证据。
+
+这是产品决定，不是疏漏。媒体占用按自身预算另计（见 `v3-capacity-recovery.md` 失败边界表：媒体采用自身预算，必要时要求缩减输入或报错）；文本 bytes/4 不给媒体定价，也不拿补零放行。媒体预算策略落地前，显式拒绝是唯一诚实口径。真循环回归测试钉在 `tests/integration/runtime/test_failure_boundary_audit.cpp`（"B2 real loop: media-bearing result ends the turn unestimated while captures persist"）。
+
 ## 模型路由与界限
 
 整批分配确实缩小某项预算时，可调用 action 摘要。默认用当前 backend 和明确的 model，独立构造无工具的请求；不会继承主会话历史。主会话、子代理与 workflow 节点均接到同一服务。

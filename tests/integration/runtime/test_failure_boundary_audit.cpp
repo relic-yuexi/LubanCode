@@ -941,3 +941,107 @@ TEST_CASE("B1 original capture failure stops post-tool hooks and subsequent mode
     CHECK(KindCount(audit.Rows(), "tool.result.persist_failed") == 1);
     CHECK_FALSE(std::filesystem::exists(audit.path.parent_path() / "artifacts" / "res-000002.json"));
 }
+
+TEST_CASE("B2 real loop: media-bearing result ends the turn unestimated while captures persist") {
+    // 产品决定(见 v3-action-summary.md「媒体边界」):文本 bytes/4 不给媒体
+    // 定价,首发预算块遇到 Image/Audio/EmbeddedBlob 显式拒绝并终态,不静默
+    // 放行。这条测试钉三件事:轮以 unestimated 错误收场、原始捕获(含图片
+    // 块)完整落 artifacts、同批已执行的文本结果照常入账不丢。
+    struct ImageTool final : tools::Tool {
+        int calls = 0;
+        std::string name() const override { return "image_tool"; }
+        std::string description() const override { return "returns one image block"; }
+        Json input_schema() const override { return Json::object(); }
+        bool needs_confirm() const override { return false; }
+        Result execute(const Json&) override {
+            ++calls;
+            tools::Tool::Result result{"screenshot captured", false};
+            tools::ImageContent image;
+            image.mime_type = "image/png";
+            image.width = 4;
+            image.height = 2;
+            image.bytes = 8;
+            image.sha256 = "media-sha";
+            image.artifact.id = "art-mediasha";
+            image.artifact.filename = "art-mediasha.png";
+            image.artifact.path = "mcp-artifacts/art-mediasha.png";
+            image.artifact.mime_type = "image/png";
+            image.artifact.bytes = 8;
+            image.artifact.sha256 = "media-sha";
+            image.artifact.stored = true;
+            tools::ToolResultPayload payload;
+            payload.content.push_back(std::move(image));
+            result.SetPayload(std::move(payload));
+            return result;
+        }
+    };
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        if (attempt != 1) {
+            Reply(sink);
+            return {};
+        }
+        sink(api::MessageStart{"provider-response", "audit-model"});
+        sink(api::ToolUseStart{0, "media-text-1", "audit_tool"});
+        sink(api::ToolUseInputDelta{0, "{}"});
+        sink(api::ToolUseStart{1, "media-image-2", "image_tool"});
+        sink(api::ToolUseInputDelta{1, "{}"});
+        sink(api::ContentBlockDone{0});
+        sink(api::ContentBlockDone{1});
+        sink(api::MessageDone{"tool_use", api::Usage{}});
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto text_tool = std::make_unique<AuditTool>();
+    auto* text_counter = text_tool.get();
+    text_tool->result_content = "plain text evidence";
+    registry.Register(std::move(text_tool));
+    auto image_tool = std::make_unique<ImageTool>();
+    auto* image_counter = image_tool.get();
+    registry.Register(std::move(image_tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    const auto outcome = agent.Run(Input(), wiring);
+    REQUIRE_FALSE(outcome.has_value());
+    CHECK(outcome.error().find("tool_batch.unestimated_media_or_reasoning") != std::string::npos);
+    CHECK(text_counter->calls == 1);
+    CHECK(image_counter->calls == 1);
+    CHECK(backend.requests.size() == 1);  // 终态后不发下一份请求
+    const auto rows = audit.Rows();
+    int raw_captures = 0;
+    for (const auto& row : rows) {
+        if (row.value("kind", "") != "tool.result.persisted") continue;
+        for (const auto& ref : row.at("payload").at("result_ref")) {
+            if (ref.value("path", "").find("capture-") != std::string::npos) {
+                ++raw_captures;
+                break;
+            }
+        }
+    }
+    CHECK(raw_captures == 2);  // 文本与图片两枚原始捕获都落了仓
+    std::ifstream captured_text(audit.path.parent_path() / "artifacts" / "capture-000001.combined.txt",
+                                std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(captured_text), {}) == "plain text evidence");
+    std::ifstream captured_media(audit.path.parent_path() / "artifacts" / "capture-000002.raw_payload.json");
+    Json media_blocks;
+    captured_media >> media_blocks;
+    REQUIRE(media_blocks.size() == 1);
+    CHECK(media_blocks[0].at("type") == "image");
+    CHECK(media_blocks[0].at("artifact").at("path") == "mcp-artifacts/art-mediasha.png");
+    CHECK(media_blocks[0].at("artifact").at("stored") == true);
+    // 同批文本结果照常入账:选用事件、有效正文与持久 tool 消息一枚不少。
+    CHECK(KindCount(rows, "tool.result.selected") == 2);
+    std::ifstream effective_text(audit.path.parent_path() / "artifacts" / "res-000001.combined.txt",
+                                 std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(effective_text), {}) == "plain text evidence");
+    int durable_results = 0;
+    for (const auto& row : rows) {
+        if (row.value("type", "") == "message" && row.at("message").value("role", "") == "tool") ++durable_results;
+    }
+    CHECK(durable_results == 2);
+    CHECK(v3::VerifyV3File(audit.path).ok);
+}
