@@ -5,6 +5,8 @@
 
 #include <utility>
 
+#include "hooks/middleware_builtins.hpp"  // ComputeUtf8BytesDiv4Estimate:核缺场的回落公式
+
 namespace lubancode::runtime {
 
 namespace {
@@ -16,6 +18,17 @@ using hooks::middleware::MiddlewareDispatcher;
 
 MiddlewareDispatcher* MiddlewareOf(hooks::HookDispatcher* dispatcher) {
     return dispatcher != nullptr ? dispatcher->middleware() : nullptr;
+}
+
+// P1-C(生产通电):显式 sink 优先(测试直递);参数空时从 dispatcher 槽
+// 取——BindMiddlewareSessionWriter 幂等换绑的那只。nullptr = 不落 v3
+// 事件,只拿 DispatchOutcome 的 UI/诊断投影。
+hooks::middleware::MiddlewareEventSink* EffectiveSink(hooks::HookDispatcher* dispatcher,
+                                                      hooks::middleware::MiddlewareEventSink* sink) {
+    if (sink != nullptr) {
+        return sink;
+    }
+    return dispatcher != nullptr ? dispatcher->middleware_sink() : nullptr;
 }
 
 DispatchTrigger MakeTrigger(const MiddlewareHookContext& context, nlohmann::json input,
@@ -130,7 +143,8 @@ PreUserGate RunPreUserMiddleware(hooks::HookDispatcher* dispatcher, const std::s
     DispatchTrigger trigger = MakeTrigger(context, nlohmann::json{{"prompt", user_text}});
     // 链尾 = 宿主接纳位:返回待接纳候选(§四)。
     DispatchOutcome outcome = middleware->Dispatch(HookPoint::PreUser, trigger,
-                                                   [](const nlohmann::json& input) { return input; }, sink);
+                                                   [](const nlohmann::json& input) { return input; },
+                                                   EffectiveSink(dispatcher, sink));
     gate.dispatched = true;
     gate.outcome = std::move(outcome);
     if (OutcomeBlocks(gate.outcome, &gate.block_code, &gate.block_reason)) {
@@ -162,7 +176,8 @@ PostUserAppend RunPostUserMiddleware(hooks::HookDispatcher* dispatcher, const st
     }
     DispatchTrigger trigger = MakeTrigger(context, nlohmann::json{{"prompt", admitted_prompt}});
     DispatchOutcome outcome = middleware->Dispatch(HookPoint::PostUser, trigger,
-                                                   [](const nlohmann::json& input) { return input; }, sink);
+                                                   [](const nlohmann::json& input) { return input; },
+                                                   EffectiveSink(dispatcher, sink));
     append.dispatched = true;
     append.outcome = std::move(outcome);
     if (OutcomeBlocks(append.outcome, &append.block_code, &append.block_reason)) {
@@ -192,10 +207,11 @@ PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
     stages.dispatched = true;
 
     // ---- 段一 mutate:改输入的最后机会(§4.36)。----
+    hooks::middleware::MiddlewareEventSink* effective_sink = EffectiveSink(dispatcher, sink);
     DispatchTrigger mutate_trigger = MakeTrigger(context, request_snapshot, Stage::Mutate);
     stages.mutate_outcome =
         middleware->Dispatch(HookPoint::PreRequest, mutate_trigger,
-                             [](const nlohmann::json& input) { return input; }, sink);
+                             [](const nlohmann::json& input) { return input; }, effective_sink);
     stages.adopted_input = stages.mutate_outcome.adopted_input;
     if (stages.mutate_outcome.kind == DispatchOutcome::Kind::Failed ||
         stages.mutate_outcome.kind == DispatchOutcome::Kind::Denied) {
@@ -220,7 +236,7 @@ PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
     DispatchTrigger estimate_trigger = MakeTrigger(context, request_snapshot, Stage::Estimate);
     stages.estimate_outcome =
         middleware->Dispatch(HookPoint::PreRequest, estimate_trigger,
-                             [](const nlohmann::json& input) { return input; }, sink);
+                             [](const nlohmann::json& input) { return input; }, effective_sink);
     if (stages.estimate_outcome.kind != DispatchOutcome::Kind::Completed ||
         !stages.estimate_outcome.value.is_object() ||
         !stages.estimate_outcome.value.contains("estimatedInputTokens")) {
@@ -241,7 +257,7 @@ PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
     DispatchTrigger capacity_trigger = MakeTrigger(context, std::move(capacity_input), Stage::Capacity);
     stages.capacity_outcome =
         middleware->Dispatch(HookPoint::PreRequest, capacity_trigger,
-                             [](const nlohmann::json& input) { return input; }, sink);
+                             [](const nlohmann::json& input) { return input; }, effective_sink);
     if (stages.capacity_outcome.kind != DispatchOutcome::Kind::Completed) {
         stages.decision = "reject";
         stages.reason = stages.capacity_outcome.kind == DispatchOutcome::Kind::Denied
@@ -308,6 +324,37 @@ bool HasPreRequestMiddleware(const hooks::HookDispatcher* dispatcher) {
 
 bool HasUserMiddleware(const hooks::HookDispatcher* dispatcher) {
     return HasSelectedFor(dispatcher, HookPoint::PreUser) || HasSelectedFor(dispatcher, HookPoint::PostUser);
+}
+
+// ---------------------------------------------------------------------------
+// compact 旁路请求的估算切槽(P1-C)
+// ---------------------------------------------------------------------------
+
+std::expected<nlohmann::json, std::string> EstimateBypassRequestTokens(
+    hooks::HookDispatcher* dispatcher, const nlohmann::json& request_snapshot,
+    const MiddlewareHookContext& context) {
+    MiddlewareDispatcher* middleware = MiddlewareOf(dispatcher);
+    if (middleware == nullptr) {
+        // 核未装配(发布失败/未 SetupHookRuntime 的老路):回落内置公式
+        //(与槽内置实现同一枚 bytes/4,不换口径)。核不在场也没有同名
+        // 替换可言,回落即正确语义。
+        return hooks::middleware::ComputeUtf8BytesDiv4Estimate(request_snapshot);
+    }
+    DispatchTrigger trigger = MakeTrigger(context, request_snapshot, hooks::middleware::Stage::Estimate);
+    DispatchOutcome outcome =
+        middleware->Dispatch(HookPoint::PreRequest, trigger,
+                             [](const nlohmann::json& input) { return input; },
+                             EffectiveSink(dispatcher, nullptr));
+    if (outcome.kind != DispatchOutcome::Kind::Completed || !outcome.value.is_object() ||
+        !outcome.value.contains("estimatedInputTokens")) {
+        // 估算段失败/缺场/形状不合:fail closed(§4.36),不假装核过。
+        return std::unexpected(
+            "compact.estimate_failed: " +
+            (outcome.kind == DispatchOutcome::Kind::Failed
+                 ? outcome.error_detail
+                 : std::string("估算段未产出结构化结果(estimatedInputTokens 缺失)")));
+    }
+    return outcome.value;
 }
 
 // ---------------------------------------------------------------------------

@@ -128,6 +128,17 @@ public:
     }
     middleware::MiddlewareDispatcher* middleware() const { return middleware_.get(); }
 
+    // ---- LuaHook 单 P1-C:中间件事件账的进程级落点 ------------------------
+    // 三个 Run*Middleware 派发点的 sink 参数为空时从这里取——生产调用方
+    //(turn_runner/agent_channel_engine)只递 dispatcher,不必层层递 sink;
+    // 会话开卷/换场时由 runtime::BindMiddlewareSessionWriter 幂等换绑(参照
+    // ActiveSession::v3_main 的写者指针)。空(默认)= 不落 v3 事件,与
+    // P0-B 前行为一致。拷贝/移动沿用同一只 sink(shared_ptr)。
+    void SetMiddlewareSink(std::shared_ptr<middleware::MiddlewareEventSink> sink) {
+        middleware_sink_ = std::move(sink);
+    }
+    middleware::MiddlewareEventSink* middleware_sink() const { return middleware_sink_.get(); }
+
     // 主线程调用:拷一份当前定义表(含信任/禁用账)。后台执行器存着这份
     // 快照跑——会话中途 trust/disable 只影响之后新起的快照,不在跑的
     // 那份不追改(只读语义)。
@@ -173,6 +184,8 @@ private:
     HookContext context_;
     // LuaHook 单 P0-A:中间件核(可选;空 = 零行为,老路径照旧)。
     std::shared_ptr<middleware::MiddlewareDispatcher> middleware_;
+    // LuaHook 单 P1-C:中间件事件 sink(可选;空 = 不落 v3 事件账)。
+    std::shared_ptr<middleware::MiddlewareEventSink> middleware_sink_;
     // 可靠 Post 的账本(可选;空 = 没挂,零行为)。shared_ptr:拷贝语义
     // 沿用同一只账本,主线程 Emit 记账,后台路不碰。
     std::shared_ptr<HookOutbox> outbox_;

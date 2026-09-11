@@ -252,6 +252,19 @@ std::string ComputeMiddlewareDefinitionHash(const MiddlewareDefinition& def) {
     return Sha256Hex(CanonicalDefinitionText(def));
 }
 
+// P1-C:implementation_ref "hooks/<id>#<entry>[@<ver>]" 的包 id;非该形状
+//(直构定义/内置)退 chunk_name。只做展示与命名空间归属,不当身份键。
+std::string PackageIdOfRef(const std::string& implementation_ref, const std::string& fallback) {
+    constexpr std::string_view kPrefix = "hooks/";
+    if (implementation_ref.rfind(kPrefix, 0) == 0) {
+        const std::size_t hash = implementation_ref.find('#', kPrefix.size());
+        if (hash != std::string::npos && hash > kPrefix.size()) {
+            return implementation_ref.substr(kPrefix.size(), hash - kPrefix.size());
+        }
+    }
+    return fallback;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -578,11 +591,14 @@ std::expected<std::shared_ptr<const FrozenRegistry>, PlanError> MiddlewarePool::
                 PlanError{std::string(err::kPlanObserverWithDeps), "观察者不许带 before/after 依赖: " + key});
         }
         // Lua 定义须有工厂;发布期把 lua 声明物化成 Handler(执行核里 lua
-        // 与 builtin 同形)。物化失败(编译/对账不过)整版拒绝。
+        // 与 builtin 同形)。物化失败(编译/对账不过)整版拒绝。P1-C 起能力
+        // 申请随声明传给工厂(宿主造 per-invocation 服务束用,§五交集)。
         if (effective.is_lua) {
             if (!options_.lua_factory) {
                 return std::unexpected(PlanError{std::string(err::kPlanNoLuaFactory), "lua 定义而无 lua 工厂: " + key});
             }
+            effective.lua.capabilities = effective.capabilities;
+            effective.lua.package = PackageIdOfRef(effective.implementation_ref, effective.lua.chunk_name);
             auto handler = options_.lua_factory(effective.lua, effective.limits);
             if (!handler.has_value()) {
                 return std::unexpected(PlanError{std::string(err::kLuaCompileError),

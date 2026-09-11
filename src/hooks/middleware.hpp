@@ -183,6 +183,13 @@ struct LuaHandlerSpec {
     std::string script;       // Lua 源码(内存,不走盘)
     std::string chunk_name;   // 报错与 trace 用(如 "hooks/my_memory/main.lua")
     std::string entry;        // handler 表字段名(如 "recall")
+    // P1-C:定义声明的能力申请随物化传给 lua 工厂——宿主按"清单申请 ∩ 槽位
+    // 允许 ∩ 宿主授权"造 per-invocation 服务束(§五权限交集)。不进
+    // definition_hash(授权是宿主侧运行账,不是定义身份)。
+    std::vector<std::string> capabilities;
+    // P1-C:包 id(状态命名空间/日志来源/服务束归属用);清单路从
+    // implementation_ref 的 "hooks/<id>#…" 折,直构定义缺省 chunk_name。
+    std::string package;
 };
 
 // ---------------------------------------------------------------------------

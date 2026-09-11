@@ -2,7 +2,9 @@
 #include "runtime/agent_channel_engine.hpp"
 
 #include "config/config.hpp"
+#include "runtime/hook_host_services.hpp"
 #include "runtime/middleware_runtime.hpp"
+#include "runtime/middleware_v3_sink.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/session_utils.hpp"  // NowIdTimestamp(P0-6 自 sessions 迁来)
 #include "workspace/identity.hpp"
@@ -80,6 +82,12 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
     // origin 按 provenance 分档:HumanTerminal/PeerSession 都是宿主外的
     // 真来信,按 human 报;purpose=interactive,delivery_mode=direct。
     hooks::HookDispatcher* dispatcher = options_.hook_dispatcher;
+    // P0-B 遗留①(P1-C 补):渠道路同样把会话 v3 主写者挂进中间件事件账
+    // 与 hook 工具桥的子执行账(幂等;v2 场/未开卷 = 解绑)。
+    BindMiddlewareSessionWriter(dispatcher, &DefaultHookServiceCenter(),
+                                session_runtime_.trajectory() != nullptr
+                                    ? session_runtime_.trajectory()->v3_main_writer()
+                                    : nullptr);
     std::string effective_text;
     for (const auto& block : ingress.message.content) {
         if (const auto* text = std::get_if<api::TextBlock>(&block)) {

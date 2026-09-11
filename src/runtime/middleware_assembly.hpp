@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "hooks/dispatcher.hpp"
+#include "runtime/hook_host_services.hpp"  // P1-C:hook 能力中心(lua 工厂用)
 
 namespace lubancode::runtime {
 
@@ -21,6 +22,10 @@ struct MiddlewareAssemblyOptions {
     // hooks。空路径跳过该层。
     std::filesystem::path project_hooks_root;
     std::filesystem::path user_hooks_root;
+    // P1-C:hook 宿主能力中心(grants ∩ 清单申请 → per-invocation 服务束)。
+    // 空 = lua 定义不带任何宿主能力(luban.* hook API 全拒);生产传
+    // DefaultHookServiceCenter()。
+    HookHostServiceCenter* services = nullptr;
 };
 
 struct MiddlewareAssemblyReport {
