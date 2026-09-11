@@ -214,8 +214,8 @@ TEST_CASE("默认-v3 冒烟: SessionManager::LaunchSession 同默认开 v3 场")
     lubancode::trajectory::SessionManager manager(options);
     auto active = manager.LaunchSession();
     REQUIRE(active.has_value());
-    const std::string session_id = active->session_id();
-    const std::filesystem::path session_dir = active->session_dir();
+    const std::string session_id = (*active)->session_id();
+    const std::filesystem::path session_dir = (*active)->session_dir();
     // v3 布局:只有 <id>.jsonl,无 v2 的 session.json。
     CHECK(std::filesystem::exists(
         session_dir / platform::Utf8ToPath(session_id + ".jsonl")));
