@@ -146,6 +146,15 @@ enum class EventKindV3 {
     TaskCompleted,
     TaskFailed,
     TaskCancelled,
+
+    // Goal 模式(§4.67 G0):goal 控制状态的唯一生效点。事实提交,不带
+    // status(与 context.*.applied 同族:控制状态提交,不是操作生命周期)。
+    // payload 合同:goalId/fromStateRevision/toStateRevision/contractRevision/
+    // snapshotRef/snapshotSha256/lifecycle(+可选 causeRef);完整 goal 状态
+    // 在不可变快照 sessions/<id>/state/goals/<goalId>/rev-*.json,本行只记
+    // 提交锚(§4.55)。
+    StateGoalApplied,
+
     // Workflow 编排账(Workflow 接入 v3 第一棒,schema 文档 §四 workflow 域):
     // 编排事实的专用事件族。事件账 profile(V3EventLedger)只写 event 行、
     // 只认这些 kind——不造 system 首行、不写 message 行,不偷填假 session

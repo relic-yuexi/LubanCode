@@ -507,17 +507,8 @@ void NoteSubagentCompletionForGoal(const GoalWiring& wiring) {
         evidence.content_sha256 = lubancode::hooks::Sha256Hex(detail->result);
         evidence.observed_at_ms = now_ms;
         evidence.fresh = true;
-        // 事件行(goal_evidence_v1)先落再进账,与工具采证同序。
-        lubancode::sessions::GoalSessionEvent line;
-        line.type = "goal_evidence_v1";
-        line.event = "observed";
-        line.goal_id = evidence.goal_id;
-        line.iteration_id = evidence.iteration_id;
-        line.revision = task->revision;
-        nlohmann::json payload;
-        payload["evidence"] = evidence.to_json();
-        line.payload = std::move(payload);
-        line.timestamp_ms = now_ms;
+        // 证据直接进账(v1 运行面,内存账;goal_evidence_v1 落盘行已随
+        // §4.67.6 收敛删除,持久证据账归 v3 goal 快照的 evidenceRefs)。
         coordinator.RecordEvidence(evidence);
         // 白名单顺手补(checkpoint 工具可引用它)。
         if (wiring.checkpoint_state != nullptr &&

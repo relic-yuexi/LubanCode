@@ -63,8 +63,10 @@ void GoalSessionWiring::Ensure(const lubancode::config::Config& config) {
     if (coordinator_.has_value()) return;
     auto options = lubancode::app::GoalOptionsFromConfig(config.features_goals, config.goals);
     coordinator_.emplace(std::move(options));
-    // P0-6:旧存档的 LedgerSink 已删;goal 事件持久账接 trajectory 属
-    // goal 单后续波次(不接 sink = 事件只进内存,现状自 P0-2 起即如此)。
+    // P0-6:旧存档的 LedgerSink 已删;v3 起 goal 持久账走 GoalService 的
+    // state.goal.applied + 不可变快照(§4.67 G0 合同已定型,runtime/
+    // goal_service.hpp)。coordinator(v1 运行面)不接 sink = 事件只进内存;
+    // 命令面换接 GoalService 归 §4.67 G1。
     // loop 单分流合流:coordinator 的 ready continuation 经 GoalWorkSource
     // 进泵(泵问 ProbeWork;选中后装配层 TakeReadyIteration 发 synthetic
     // turn)。trigger 各归各(evaluator 判终点 vs 时钟到点),泵共用。
@@ -190,7 +192,8 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
                 continue;
             }
             // P0-6:旧存档的 goal_evidence_v1 行已删;证据账进 coordinator
-            //(进程内),持久化接 trajectory 属 goal 单后续波次。
+            //(进程内)。持久证据账走 v3 goal 快照的 evidenceRefs
+            //(§4.67 G0 GoalService;采证接线归 G2)。
             coordinator_->RecordEvidence(*evidence);
             fresh_ids.push_back(evidence->id);
             // 写盘级工具落完:旧验证证据按分档翻 stale(单子"证据涉及改动

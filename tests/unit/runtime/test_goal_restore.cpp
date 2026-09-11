@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "sessions/goal_session.hpp"
-#include "sessions/goal_session.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/goal_types.hpp"
 #include "tools/goal_checkpoint_tool.hpp"
@@ -95,21 +94,38 @@ TEST_CASE("RestoreFromArchive:整账重建,状态与 checkpoint 对上") {
     CHECK(next.payload.at("iteration_id") == "goal-1/iter-2");
 }
 
-TEST_CASE("RestoreFromArchive:序列化往返(存档行进出)不丢账") {
-    const auto lines = RecordLifecycle();
-    // 事件行过一遍 SerializeGoalEvent/ParseGoalEvent(存档真路径)再回放。
-    std::vector<GoalSessionEvent> round_tripped;
-    for (const auto& line : lines) {
-        const std::string text = lubancode::sessions::SerializeGoalEvent(line, "ts");
+TEST_CASE("ParseGoalEvent:旧档 goal_v1 行读侧兼容(写侧已随 §4.67.6 收敛)") {
+    // 写侧 SerializeGoalEvent 已删(v3 起 goal 持久账走 state.goal.applied +
+    // 不可变快照);这里钉 ledger sink 年代落过盘的旧档行解析仍认,
+    // /resume 与 evolution 只读观察不断粮。手写行按旧 to_json 键序。
+    const std::vector<std::string> legacy_lines = {
+        R"({"event":"created","goal_id":"goal-1","payload":{"objective":"迁移认证层","objective_sha256":"h","budget":{}},"revision":1,"timestamp_ms":1000,"type":"goal_v1"})",
+        R"({"event":"contract_ready","goal_id":"goal-1","payload":{"contract":{"criteria":[{"id":"c-1","required":true,"text":"契约测试全绿"}],"objective":"迁移认证层"},"contract_sha256":"h"},"revision":1,"timestamp_ms":1100,"type":"goal_v1"})",
+        R"({"event":"cleared","goal_id":"goal-1","payload":{"from_state":"active"},"revision":1,"timestamp_ms":1200,"type":"goal_v1"})",
+    };
+    std::vector<GoalSessionEvent> parsed_lines;
+    for (const auto& text : legacy_lines) {
+        REQUIRE(lubancode::sessions::IsGoalEventLine(text));
         const auto parsed = lubancode::sessions::ParseGoalEvent(text);
         REQUIRE(parsed.has_value());
-        round_tripped.push_back(*parsed);
+        CHECK(parsed->goal_id == "goal-1");
+        parsed_lines.push_back(*parsed);
     }
     GoalCoordinator restored(Opts());
-    const auto stats = restored.RestoreFromArchive(round_tripped);
+    const auto stats = restored.RestoreFromArchive(parsed_lines);
     CHECK(stats.skipped == 0);
-    CHECK(restored.task()->state == GoalState::Active);
-    CHECK(restored.task()->checkpoint.summary == "契约测试跑通");
+    REQUIRE(restored.has_goal());
+    CHECK(restored.task()->id == "goal-1");
+    CHECK(restored.task()->state == GoalState::Cleared);
+    CHECK(restored.task()->contract_frozen);
+    // 坏行跳过不废整场:缺 goal_id、未知 type、非 goal 行。
+    CHECK_FALSE(lubancode::sessions::ParseGoalEvent(
+                    R"({"event":"created","type":"goal_v1"})")
+                    .has_value());
+    CHECK_FALSE(lubancode::sessions::ParseGoalEvent(
+                    R"({"event":"x","goal_id":"g","type":"goal_v9"})")
+                    .has_value());
+    CHECK_FALSE(lubancode::sessions::IsGoalEventLine(R"({"type":"message"})"));
 }
 
 TEST_CASE("RestoreFromArchive:feature 关,active goal 落 SuspendedByPolicy") {

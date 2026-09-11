@@ -939,6 +939,62 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_type",
                        "降档须 newPreviewBudget < oldPreviewBudget(§4.38 只降不升)");
         }
+    } else if (line.kind == K::StateGoalApplied) {
+        // §4.67 G0:goal 控制状态的唯一生效点。goalId 走 payload(goal 是
+        // 控制状态,不占信封身份字段族);快照本体是不可变文件,本行只
+        // 记提交锚(goalId/旧新 stateRevision/contractRevision/snapshotRef/
+        // snapshotSha256/lifecycle + 可选 causeRef)。跨行语义(快照实存、
+        // hash 对得上、revision 序列衔接)归读取侧投影与校验脚本。
+        for (const auto* key :
+             {"goalId", "fromStateRevision", "toStateRevision", "contractRevision",
+              "snapshotRef", "snapshotSha256", "lifecycle"}) {
+            if (!line.payload.contains(key)) {
+                return Err("schema3.missing_field",
+                           "state.goal.applied payload 缺字段: " + std::string(key));
+            }
+        }
+        if (!line.payload["goalId"].is_string() ||
+            line.payload["goalId"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "state.goal.applied 的 goalId 应为非空 string");
+        }
+        if (!line.payload["snapshotRef"].is_string() ||
+            line.payload["snapshotRef"].get<std::string>().empty()) {
+            return Err("schema3.bad_type", "state.goal.applied 的 snapshotRef 应为非空 string");
+        }
+        if (!line.payload["snapshotSha256"].is_string() ||
+            !IsHex64(line.payload["snapshotSha256"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "state.goal.applied 的 snapshotSha256 应为 64 位十六进制");
+        }
+        for (const auto* key : {"fromStateRevision", "toStateRevision", "contractRevision"}) {
+            if (!JsonIsNonNegativeInt(line.payload[key])) {
+                return Err("schema3.bad_type",
+                           std::string("state.goal.applied 的 ") + key + " 应为非负整数");
+            }
+        }
+        if (line.payload["toStateRevision"].get<std::uint64_t>() !=
+            line.payload["fromStateRevision"].get<std::uint64_t>() + 1) {
+            return Err("schema3.bad_type",
+                       "state.goal.applied 的 toStateRevision 应为 fromStateRevision + 1");
+        }
+        if (line.payload["contractRevision"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type", "state.goal.applied 的 contractRevision 应 >= 1");
+        }
+        if (!line.payload["lifecycle"].is_string()) {
+            return Err("schema3.bad_type", "state.goal.applied 的 lifecycle 应为 string");
+        }
+        const std::string lifecycle = line.payload["lifecycle"].get<std::string>();
+        static const std::unordered_set<std::string> kGoalLifecycles = {
+            "preparing", "active",    "waiting",        "paused",
+            "awaiting_user", "blocked", "budget_exhausted", "suspended_by_policy",
+            "achieved",  "cleared",   "failed"};
+        if (!kGoalLifecycles.count(lifecycle)) {
+            return Err("schema3.bad_enum",
+                       "state.goal.applied 的 lifecycle 枚举不认得: " + lifecycle);
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "causeRef", /*required=*/false)) {
+            return error;
+        }
     }
     // ---- Workflow 编排族(§四 workflow 条目):按 kind 的载荷合同 ----
     else if (line.kind == K::WorkflowDefinitionLoaded) {
