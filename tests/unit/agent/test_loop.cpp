@@ -2624,6 +2624,28 @@ TEST_CASE("B2 actual loop budgets ten unsent results and serializes the adopted 
     };
     const std::string old_input(320000, 'h');
     const auto outcome = loop.Run(old_input, wiring);
+    if (!outcome.has_value()) {
+        MESSAGE("hook_calls=", hook_calls, " adopted=", adopted.size());
+        if (!adopted.empty()) {
+            MESSAGE("adopted[0] bytes=", adopted[0].size());
+        }
+        const auto& hist = loop.history();
+        MESSAGE("durable history=", hist.size());
+        for (std::size_t i = 0; i < hist.size(); ++i) {
+            std::size_t bytes = 0;
+            unsigned results = 0;
+            for (const auto& block : hist[i].content) {
+                if (const auto* r = std::get_if<api::ToolResultBlock>(&block)) {
+                    bytes += r->content.size();
+                    ++results;
+                } else if (const auto* t = std::get_if<api::TextBlock>(&block)) {
+                    bytes += t->text.size();
+                }
+            }
+            MESSAGE("durable msg", i, "=", bytes, "B/", results, "r");
+        }
+        MESSAGE("captured requests=", backend.captured_requests.size());
+    }
     REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
     REQUIRE(backend.captured_requests.size() == 2);
     CHECK(executed->call_count == 10);
