@@ -448,6 +448,7 @@ ResultStore::PersistedResult ResultStore::Persist(const PersistRequest& request)
     std::vector<nlohmann::json> result_ref;
     for (const auto& output : request.outputs) {
         nlohmann::json entry = nlohmann::json::object();
+        entry["channel"] = output.channel;
         if (!output.data.empty()) {
             const std::string extension = ExtensionFor(output.media_type);
             const std::string file_name =

@@ -165,7 +165,7 @@ def is_ref(value) -> bool:
 
 
 ARTIFACT_KINDS = {
-    "result_metadata", "stdout", "stderr", "combined", "report", "image", "blob",
+    "result_metadata", "stdout", "stderr", "combined", "raw_payload", "report", "image", "blob",
 }
 
 

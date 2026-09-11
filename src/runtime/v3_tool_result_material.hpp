@@ -10,6 +10,11 @@ namespace lubancode::runtime {
 inline void PreserveNativeToolPayload(const api::ToolResultBlock& result,
                                       trajectory::v3::ResultStore::PersistRequest& persist) {
     if (result.blocks.empty()) return;
+    if (result.blocks.size() == 1) {
+        const auto* text = std::get_if<tools::TextContent>(&result.blocks.front());
+        if (text != nullptr && text->text == result.content) return;
+    }
+
     nlohmann::json blocks = nlohmann::json::array();
     for (const auto& block : result.blocks) blocks.push_back(tools::BlockToJson(block));
     const auto raw = blocks.dump();
