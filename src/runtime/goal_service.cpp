@@ -1592,7 +1592,17 @@ GoalServiceResult GoalService::CompleteIterationWithEvaluation(
     }
     if (to_lifecycle != current_->lifecycle) {
         next.lifecycle = to_lifecycle;
-        next.stop_reason = to_stopped ? verdict.stop_reason : std::string();
+        if (to_stopped) {
+            next.stop_reason = verdict.stop_reason;
+        } else if (to_lifecycle == GoalLifecycle::Achieved) {
+            // 终态快照按 schema 须带停因(§4.67 G0 终态须带 stopReason);
+            // achieved 判词没有显式停因,用枚举本身——判词锚在
+            // appliedEvaluationId,这里只补合法占位不编故事。
+            next.stop_reason =
+                verdict.stop_reason.empty() ? std::string("achieved") : verdict.stop_reason;
+        } else {
+            next.stop_reason.clear();
+        }
         next.blocker_key = verdict.kind == GoalVerdictKind::Blocked ? verdict.blocker_key
                                                                     : std::string();
         next.pending_question = verdict.kind == GoalVerdictKind::NeedsUser

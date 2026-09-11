@@ -86,7 +86,13 @@ struct Volume {
     std::string session_id;
     std::optional<V3Writer> writer;
 
-    Volume(const std::string& tag, const std::string& sid) : dir(FreshDir(tag)), session_id(sid) {
+    // root 给定时卷落 root/<sid>/(lineage 按"目录名即 session id、
+    // previousSessionId 找兄弟目录"的约定走,ProjectGoalLineage 同款)。
+    Volume(const std::string& tag, const std::string& sid,
+           const std::filesystem::path& root = {})
+        : dir(root.empty() ? FreshDir(tag) : root / sid), session_id(sid) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
         auto started = V3Writer::Start(dir / (sid + ".jsonl"), sid, "run-" + sid, "system prompt");
         REQUIRE(started.has_value());
         writer = std::move(*started);
@@ -348,8 +354,7 @@ TEST_CASE("ResolveWaiting:waiting->active,收口位恢复 running;迟到交付�
                     .ok);
         auto resumed = service.ResolveWaiting("command:goal:resume",
                                               service.current()->state_revision,
-                                              nlohmann::json{{"source", "command"}},
-                                              "user_resume");
+                                              nlohmann::json{}, "user_resume");
         REQUIRE(resumed.ok);
         CHECK(service.current()->lifecycle == GoalLifecycle::Active);
         CHECK(service.current()->phase == GoalPhase::Running);  // 收口位:续收口不开新轮
@@ -697,7 +702,20 @@ TEST_CASE("CreateForkedGoal:另发 id 默认 paused,证据待复核,预算不带
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Volume source_volume("fork-source", "s1");
     GoalService source_service(&*source_volume.writer, ServiceOptionsFor(source_volume.dir));
-    RunToRunning(source_service);
+    // 源是老场里第 7 只 goal(显式 id):分支新场从 goal-1 起发号,
+    // "另发 id"在跨卷语境下天然可辨,不与源同串。
+    GoalStateSnapshot source_draft = DraftObjective("修好 auth 模块");
+    source_draft.goal_id = "goal-7";
+    source_draft.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
+    source_draft.pending_intent = FirstIntent().ToJson();
+    REQUIRE(source_service.CreateGoal(std::move(source_draft), nlohmann::json{}).ok);
+    REQUIRE(source_service
+                .ClaimPendingIntent("run-s1", source_service.current()->state_revision,
+                                    nlohmann::json{})
+                .ok);
+    REQUIRE(source_service.BeginIteration(source_service.current()->state_revision,
+                                          nlohmann::json{})
+                .ok);
     // 源:落证据、花预算、撞一轮,留问题面。
     goalns::GoalEvidenceRef ref;
     ref.id = "ev-1";
@@ -769,7 +787,8 @@ TEST_CASE("CreateForkedGoal:另发 id 默认 paused,证据待复核,预算不带
 TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字段 roundtrip") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     // v1 卷:立 goal,攒齐合同/计数/问题/预算/证据/停止意图/等待计划。
-    Volume v1("keep-v1", "sv1");
+    const std::filesystem::path root = FreshDir("keep-root");
+    Volume v1("keep-v1", "sv1", root);
     {
         GoalService service(&*v1.writer, ServiceOptionsFor(v1.dir));
         GoalStateSnapshot draft = DraftObjective("修好 auth;ctest 全过");
@@ -792,7 +811,7 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
         ref.source_ref = "action-000002";
         ref.session_id = "sv1";
         ref.run_id = "run-sv1";
-        ref.content_sha256 = std::string(64, 't');
+        ref.content_sha256 = std::string(64, 'a');  // hex64:'t' 不是十六进制位
         ref.observed_at_ms = g_now_ms;
         auto began = service.BeginEvaluation(service.current()->state_revision, "evt-ckpt-1",
                                              {ref}, {}, nlohmann::json{});
@@ -817,7 +836,7 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
     // resume 第一次:sv2 接管,立刻转回 active 再停(写一笔本卷提交)。
     nlohmann::json kept_json;
     {
-        Volume v2("keep-v2", "sv2");
+        Volume v2("keep-v2", "sv2", root);
         WriteSessionJson(v2.dir, "sv2", "resume", "sv1");
         GoalService service2(&*v2.writer, ServiceOptionsFor(v2.dir));
         auto adopted = service2.AdoptFromProjection(projection1);
@@ -840,7 +859,7 @@ TEST_CASE("跨两次接管的守恒:合同/计数/问题/预算/证据不丢,字
     }
     // resume 第二次:sv3 沿链(sv2 -> sv1)接管,逐项对账。
     {
-        Volume v3("keep-v3", "sv3");
+        Volume v3("keep-v3", "sv3", root);
         WriteSessionJson(v3.dir, "sv3", "resume", "sv2");
         const auto lineage = goalns::ProjectGoalLineage(v3.dir);
         REQUIRE(lineage.found);

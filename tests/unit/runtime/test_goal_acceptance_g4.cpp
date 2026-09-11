@@ -163,9 +163,13 @@ struct Volume {
     std::string session_id;
     std::optional<V3Writer> writer;
 
+    // root 给定时卷落 root/<sid>/(lineage 按"目录名即 session id、
+    // previousSessionId 找兄弟目录"的约定走,ProjectGoalLineage 同款)。
     Volume(const std::string& tag, const std::string& sid,
-           V3WriterOptions options = V3WriterOptions{})
-        : dir(FreshDir(tag)), session_id(sid) {
+           const std::filesystem::path& root = {}, V3WriterOptions options = V3WriterOptions{})
+        : dir(root.empty() ? FreshDir(tag) : root / sid), session_id(sid) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
         auto started = V3Writer::Start(dir / (sid + ".jsonl"), sid, "run-" + sid,
                                        "system prompt", nlohmann::json::object(),
                                        std::move(options));
@@ -207,8 +211,9 @@ struct Harness {
     std::optional<GoalService> service;
     ScriptBackend backend;
 
-    explicit Harness(const std::string& tag, V3WriterOptions options = V3WriterOptions{})
-        : volume(tag, "s1", std::move(options)) {
+    explicit Harness(const std::string& tag, const std::filesystem::path& root = {},
+                     V3WriterOptions options = V3WriterOptions{})
+        : volume(tag, "s1", root, std::move(options)) {
         service.emplace(&*volume.writer, ServiceOptionsFor(volume.dir));
     }
 
@@ -567,8 +572,7 @@ TEST_CASE("M4 合同改版撞迟到判词:拒旧候选,费用仍留账,证据全
     goalns::GoalContract amended = harness.Now()->contract;
     amended.objective = "修好 auth 模块;ctest 全绿且产物齐";
     const auto edit = harness.service->AmendContract(
-        amended, evaluating_revision, harness.Now()->contract_revision,
-        nlohmann::json{{"source", "command"}});
+        amended, evaluating_revision, harness.Now()->contract_revision, nlohmann::json{});
     REQUIRE(edit.ok);
     CHECK(harness.Now()->contract_revision == 2);
     CHECK(harness.Now()->lifecycle == GoalLifecycle::Preparing);
@@ -716,10 +720,11 @@ TEST_CASE("M7 repair 一次后成:合同与证据可追,两次 usage 各记") {
 
 TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一项") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m8-root");
     {
         // 源卷把第一轮 continue 收完:判词 applied(带续排意图)落稳,泵还
         // 没认领就崩(scope 结束 = 进程消失,无收尾行)。
-        Harness harness("m8");
+        Harness harness("m8", root);
         harness.RunToRunning();
         const GoalEvidence ev = harness.MakeEvidence("ev-1", "");
         harness.backend.call = 0;
@@ -730,8 +735,8 @@ TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一
         REQUIRE(result.ok);
     }
 
-    // 恢复:新卷(resume)沿链接管。
-    Volume next("m8-next", "s2");
+    // 恢复:新卷(resume)沿链接管(源/恢复卷同根,目录名即 session id)。
+    Volume next("m8-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -763,8 +768,9 @@ TEST_CASE("M8 applied 落盘后排队前崩溃:恢复同一 workItemId,只补一
 
 TEST_CASE("M9a claim 后未开轮崩溃:接管沿用原 workItemId,不重放") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m9a-root");
     {
-        Harness harness("m9a");
+        Harness harness("m9a", root);
         GoalStateSnapshot draft;
         draft.objective = "修好 auth 模块";
         draft.workspace_root = "/repo";
@@ -778,7 +784,7 @@ TEST_CASE("M9a claim 后未开轮崩溃:接管沿用原 workItemId,不重放") {
         REQUIRE(claimed.ok);
         // claim 落账、开轮没落(phase=queued):工具执行结果未知 = 确认未发送。
     }
-    Volume next("m9a-next", "s2");
+    Volume next("m9a-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -806,11 +812,12 @@ TEST_CASE("M9a claim 后未开轮崩溃:接管沿用原 workItemId,不重放") {
 
 TEST_CASE("M9b claim 后已开轮崩溃:进恢复核验,不盲重放副作用") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m9b-root");
     {
-        Harness harness("m9b");
+        Harness harness("m9b", root);
         harness.RunToRunning();  // claim + 开轮(phase=running):执行在途
     }
-    Volume next("m9b-next", "s2");
+    Volume next("m9b-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -841,10 +848,7 @@ TEST_CASE("M10 停止意图优先:continue 照采但不续排,迟到结果不拉
     harness.RunToRunning();
 
     // Esc 边界:停止意图先落账(当前轮照常收口)。
-    REQUIRE(harness.service->RequestStop(harness.Now()->state_revision,
-                                         nlohmann::json{{"source", "host"},
-                                                        {"reason", "esc_interrupt"}})
-                .ok);
+    REQUIRE(harness.service->RequestStop(harness.Now()->state_revision, nlohmann::json{}).ok);
     CHECK(harness.Now()->stop_requested);
 
     const GoalEvidence ev = harness.MakeEvidence("ev-1", "auth-report.txt");
@@ -904,7 +908,8 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
     // v1 卷:全链收口到 needs_user(带证据/checkpoint/问题/预算/合同条款)。
     // compact 本身不写 goal 行(只改模型上下文)——这里两次 resume 各接管
     // 一遍,对账"compact 前立的 goal 在 compact/resume 后逐项守恒"。
-    Volume v1("m11-v1", "sv1");
+    const std::filesystem::path root = FreshDir("m11-root");
+    Volume v1("m11-v1", "sv1", root);
     {
         GoalService service(&*v1.writer, ServiceOptionsFor(v1.dir));
         GoalStateSnapshot draft;
@@ -935,7 +940,7 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
         ev.producer = "run_command";
         ev.facts["command"] = "ctest -R auth";
         ev.facts["exit_code"] = 1;
-        ev.content_sha256 = std::string(64, 't');
+        ev.content_sha256 = std::string(64, 'a');  // hex64:'t' 不是十六进制位
         ev.observed_at_ms = g_now_ms;
         material.fresh_evidence = {ev};
         material.material_evidence = {ev};
@@ -953,7 +958,7 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
     // resume 第一次:sv2 接管(needs_user->paused 写一笔本卷提交,模拟
     // compact 后继续用)。
     {
-        Volume v2("m11-v2", "sv2");
+        Volume v2("m11-v2", "sv2", root);
         WriteSessionJson(v2.dir, "sv2", "resume", "sv1");
         const auto lineage = goalns::ProjectGoalLineage(v2.dir);
         REQUIRE(lineage.found);
@@ -970,7 +975,7 @@ TEST_CASE("M11 跨两次接管的守恒:合同/计数/问题/预算/证据/引�
     }
 
     // resume 第二次:sv3 沿链(sv2 -> sv1)接管,逐项对账。
-    Volume v3("m11-v3", "sv3");
+    Volume v3("m11-v3", "sv3", root);
     WriteSessionJson(v3.dir, "sv3", "resume", "sv2");
     const auto lineage3 = goalns::ProjectGoalLineage(v3.dir);
     REQUIRE(lineage3.found);
@@ -1137,8 +1142,9 @@ TEST_CASE("M13 相关后台未完 waiting:无关进程不进账,纯等待零模�
 
 TEST_CASE("M14 巡检到上限后崩溃恢复:计数不重置不补跑,真实通知可唤醒") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("m14-root");
     {
-        Harness harness("m14");
+        Harness harness("m14", root);
         harness.RunToRunning();
         REQUIRE(harness.service->EnterWaiting({"subagent-3"},
                                               harness.Now()->state_revision,
@@ -1158,7 +1164,7 @@ TEST_CASE("M14 巡检到上限后崩溃恢复:计数不重置不补跑,真实通
         // 到上限即崩(离线)。
     }
 
-    Volume next("m14-next", "s2");
+    Volume next("m14-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -1286,7 +1292,7 @@ TEST_CASE("INJ1 判词采用 applied 写盘失败:fail-closed,事实在 applied 
     FaultInjector injector;
     V3WriterOptions options;
     options.inject_io_failure = [&injector]() { return injector(); };
-    Harness harness("inj1", std::move(options));
+    Harness harness("inj1", {}, std::move(options));
     harness.RunToRunning();
 
     auto began = harness.service->BeginEvaluation(
@@ -1295,12 +1301,14 @@ TEST_CASE("INJ1 判词采用 applied 写盘失败:fail-closed,事实在 applied 
     REQUIRE(began.ok);
     const std::uint64_t evaluating_revision = harness.Now()->state_revision;
 
-    // 评估完成(事实行落账),然后给采用口注入写盘失败。
+    // 评估完成(事实行落账),然后给采用口注入写盘失败。材料须带 ev-1:
+    // kContinueVerdict 的 criteria 引它,材料缺证据判词按"材料外"两坏收场。
     GoalEvaluationInput input;
     input.task.id = "goal-1";
     input.task.revision = 1;
     input.task.objective = "修好 auth 模块";
     input.task.contract.criteria.push_back({"c-1", "ctest -R auth 全过", true});
+    input.evidence = {harness.MakeEvidence("ev-1", "")};
     input.now_ms = g_now_ms;
     goalns::GoalEvaluatorOptions evaluator_options;
     evaluator_options.model = "eval-model";
@@ -1361,7 +1369,7 @@ TEST_CASE("INJ2 EnterWaiting 事实先行 applied 缺:等待不生效") {
     FaultInjector injector;
     V3WriterOptions options;
     options.inject_io_failure = [&injector]() { return injector(); };
-    Harness harness("inj2", std::move(options));
+    Harness harness("inj2", {}, std::move(options));
     harness.RunToRunning();
 
     injector.Arm(2);  // 事实行(1)落稳,applied(2)失败
@@ -1394,7 +1402,7 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
     FaultInjector injector;
     V3WriterOptions options;
     options.inject_io_failure = [&injector]() { return injector(); };
-    Harness harness("inj3", std::move(options));
+    Harness harness("inj3", {}, std::move(options));
     harness.RunToRunning();
 
     // 第一笔正常入账(快照 usage=100)。
@@ -1447,8 +1455,9 @@ TEST_CASE("INJ3 usage 事实先行 applied 缺:恢复对账 usageGap 如实带�
 
 TEST_CASE("INJ4 收口被等待截走后崩溃:恢复同 iteration 续收口,不重开轮") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const std::filesystem::path root = FreshDir("inj4-root");
     {
-        Harness harness("inj4");
+        Harness harness("inj4", root);
         harness.RunToRunning();
         // 收口撞上本轮派生后台任务:转 waiting,收口截流(iteration 在途)。
         REQUIRE(harness.service->EnterWaiting({"subagent-6"},
@@ -1459,7 +1468,7 @@ TEST_CASE("INJ4 收口被等待截走后崩溃:恢复同 iteration 续收口,不
         // 进程消失(截流状态只在 wiring 内存,持久面只有 waiting 快照)。
     }
 
-    Volume next("inj4-next", "s2");
+    Volume next("inj4-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     REQUIRE(lineage.found);
@@ -1514,7 +1523,8 @@ TEST_CASE("INJ4 收口被等待截走后崩溃:恢复同 iteration 续收口,不
 
 TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
-    Volume volume("inj5", "s1");
+    const std::filesystem::path root = FreshDir("inj5-root");
+    Volume volume("inj5", "s1", root);
     {
         GoalService service(&*volume.writer, ServiceOptionsFor(volume.dir));
         GoalStateSnapshot draft;
@@ -1547,7 +1557,7 @@ TEST_CASE("INJ5 head 快照缺失:明报缺口不猜,不接管不自动续跑") 
     CHECK(projection.gap == goalns::GoalProjectionGap::SnapshotMissing);
 
     // 恢复面:lineage 带缺口上报;接管拒(goal.projection_gap),自动续排停。
-    Volume next("inj5-next", "s2");
+    Volume next("inj5-next", "s2", root);
     WriteSessionJson(next.dir, "s2", "resume", "s1");
     const auto lineage = goalns::ProjectGoalLineage(next.dir);
     CHECK(lineage.found);
