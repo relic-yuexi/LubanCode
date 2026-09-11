@@ -75,7 +75,7 @@ void ContextManager::ReplaceHistory(std::vector<api::Message> new_history) {
     // 若仍带超线原文,下一请求的截断按新发生重新通报。
     result_view_memo_.decisions.clear();
     truncation_memo_.pinned.clear();
-    announced_result_ids_.clear();
+    announced_result_shapes_.clear();
 }
 
 ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& budget) {
@@ -107,12 +107,18 @@ ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& bud
     out.messages = ShrinkOversizedToolResults(std::move(view_source), budget.window_tokens,
                                               budget.token_calibration, &out.trim,
                                               &truncation_memo_);
-    // 截断通报按结果身份去重(V3-REAL-02):Shrink 只报新定形的截断,这里
-    // 再滤掉本 epoch 已通报过的结果身份——同一枚重复采用不重报,同 epoch
-    // 新来的另一枚巨型结果首次截断必须报,不再被一枚全局布尔吞掉。
+    // 截断通报按结果身份+预览版本去重(V3-REAL-02):Shrink 只报新定形/硬闸
+    // 降档的截断(带形状指纹),这里再滤掉"本 epoch 同身份同形状已通报过"
+    // 的——同一枚重复采用不重报;另一枚巨型结果首次截断、已采用结果经
+    // 硬闸换了形状,都必须报,不再被一枚全局布尔吞掉。
     bool newly_truncated = false;
-    for (const auto& id : out.trim.truncated_result_ids) {
-        if (announced_result_ids_.insert(id).second) {
+    for (const auto& notice : out.trim.truncated_result_ids) {
+        auto announced = announced_result_shapes_.find(notice.tool_use_id);
+        if (announced == announced_result_shapes_.end()) {
+            announced_result_shapes_.emplace(notice.tool_use_id, notice.shape_hash);
+            newly_truncated = true;
+        } else if (announced->second != notice.shape_hash) {
+            announced->second = notice.shape_hash;  // 硬闸降档:新形状版本
             newly_truncated = true;
         }
     }

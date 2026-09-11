@@ -330,7 +330,7 @@ const api::ToolResultBlock& ToolResultAt(const std::vector<api::Message>& messag
 
 }  // namespace
 
-TEST_CASE("V3-REAL-01: 巨型结果一次定形后,系数/窗口变化不重裁,12 次追加请求前缀恒稳") {
+TEST_CASE("V3-REAL-01: 巨型结果一次定形后,系数/窗口读数变化不重裁,12 次追加请求前缀恒稳") {
     agent::ContextManager context;
     // 200000 ASCII = 50000 token;窗口 100000 的 25% 线是 25000,越线即截。
     InstallFatRunCommandTurn(context, "toolu_fat", 200000);
@@ -345,12 +345,13 @@ TEST_CASE("V3-REAL-01: 巨型结果一次定形后,系数/窗口变化不重裁,
     CHECK(context.cache_epoch() == 1);
 
     // 12 次追加请求:校准系数按真实病理现场取值(1.58/1.59 在受控复算里
-    // 相差 4176 字符——正是"算法会改旧内容"的病理量级),窗口也来回变。
-    // 钉子账必须把首次形状钉死:旧预览字节逐次相等,追加律逐请求成立。
+    // 相差 4176 字符——正是"算法会改旧内容"的病理量级),窗口读数也在
+    // 装得下定形形状的区间内来回(100k↔120k)。钉子账必须把首次形状钉死:
+    // 旧预览字节逐次相等,追加律逐请求成立。窗口缩到装不下属硬闸,另案钉。
     const double calibrations[] = {1.0, 1.58, 1.59, 2.0, 0.8, 1.0,
                                    1.58, 1.0,  1.59, 2.0, 1.0, 1.58};
-    const std::size_t windows[] = {100000, 100000, 100000, 60000, 120000, 100000,
-                                   60000,  120000, 100000, 60000, 100000, 100000};
+    const std::size_t windows[] = {100000, 120000, 100000, 100000, 120000, 100000,
+                                   120000, 100000, 120000, 100000, 100000, 120000};
     for (int i = 0; i < 12; ++i) {
         context.PushMessage(AssistantMessage("第 " + std::to_string(i) + " 拍回答"));
         auto view = context.BuildWorkingView({windows[i], calibrations[i]});
@@ -360,6 +361,53 @@ TEST_CASE("V3-REAL-01: 巨型结果一次定形后,系数/窗口变化不重裁,
         CHECK(account.break_reason.empty());
         CHECK(context.cache_epoch() == 1);  // 前缀缓存不持续分叉
     }
+}
+
+TEST_CASE("B1-5 硬闸: 窗口真装不下定形形状时重裁并通报,不静默升档") {
+    agent::ContextManager context;
+    InstallFatRunCommandTurn(context, "toolu_hard", 200000);
+    auto first = context.BuildWorkingView({100000, 1.0});
+    REQUIRE(first.trim.truncated_results);
+    const std::string original_shape = ToolResultAt(first.messages, 2).content;
+    const std::string original_version = first.trim.truncated_result_ids[0].shape_hash;
+    (void)context.AccountRequest(MakeRequest(first.messages));
+
+    // 窗口缩到 60000(裸线 15000 token < 定形形状的 ~25000):最终容量硬
+    // 检查出——宁可断一次前缀,不发装不下的请求。硬闸从原文按裸尺重裁
+    // (不随系数),定形覆写为新形状,通报按新版本报。
+    context.PushMessage(AssistantMessage("换小窗口的一拍"));
+    auto hard = context.BuildWorkingView({60000, 1.58});
+    CHECK(hard.trim.truncated_results);
+    REQUIRE(hard.trim.truncated_result_ids.size() == 1);
+    CHECK(hard.trim.truncated_result_ids[0].tool_use_id == "toolu_hard");
+    CHECK(hard.trim.truncated_result_ids[0].shape_hash != original_version);  // 新形状版本
+    const std::string hard_shape = ToolResultAt(hard.messages, 2).content;
+    CHECK(hard_shape.size() < original_shape.size());
+    // loop 在 trim 通报时会点名 hard_trim;前缀账如实记一次可解释断点。
+    context.NotePendingEpochBreak("hard_trim");
+    auto broken = context.AccountRequest(MakeRequest(hard.messages));
+    CHECK_FALSE(broken.append_only);
+    CHECK(broken.break_reason == "hard_trim");
+    CHECK(context.cache_epoch() == 2);
+
+    // 硬闸后:同窗口下系数再漂(1.58→2.0→1.0)不再动新形状,追加律恢复。
+    for (const double calibration : {2.0, 1.0, 1.58}) {
+        context.PushMessage(AssistantMessage("硬闸后的一拍"));
+        auto view = context.BuildWorkingView({60000, calibration});
+        CHECK_FALSE(view.trim.truncated_results);  // 同形状不重报
+        CHECK(ToolResultAt(view.messages, 2).content == hard_shape);
+        auto stable = context.AccountRequest(MakeRequest(view.messages));
+        CHECK(stable.append_only);
+    }
+    CHECK(context.cache_epoch() == 2);
+
+    // 不静默升档:窗口回升到 100000,裸线装得下硬闸形状——重放新形状,
+    // 不回升到旧大形状(降档只经正式提交回升)。
+    context.PushMessage(AssistantMessage("窗口回升的一拍"));
+    auto recovered = context.BuildWorkingView({100000, 1.0});
+    CHECK(ToolResultAt(recovered.messages, 2).content == hard_shape);
+    auto still_append = context.AccountRequest(MakeRequest(recovered.messages));
+    CHECK(still_append.append_only);
 }
 
 TEST_CASE("V3-REAL-01: 线内定形后系数放大越线,不回头裁已发过的全文") {
