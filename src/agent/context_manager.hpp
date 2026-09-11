@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -167,11 +168,16 @@ private:
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的压缩账(观测用)
     ContextArtifactStore* artifact_store_ = nullptr;  // 空 = 没仓,退回旧行为
-    // 保命索的截断是确定性的:同一份超线结果每个请求都会再截一次。真通报
-    // 只打第一次(本 epoch 内),后续请求形状不变,不是新发生的有损动作——
-    // 不去重会每请求刷一条告警。ReplaceHistory 开新 epoch 时复位,压缩后
-    // 热区里若还留着超线原文,下一请求重新通报。
-    bool truncation_announced_in_epoch_ = false;
+    // 保命索截断的钉子账(V3-REAL-01):每枚结果的裁剪形状随首次采用的档位
+    // 快照固定,epoch 内普通追加请求不重裁——系数/窗口变化追改旧预览正是
+    // 缓存前缀持续分叉的病理。ReplaceHistory(正式 context 提交:compact/
+    // 显式降档)清账重新定形。
+    TruncationMemo truncation_memo_;
+    // 截断通报的已报名单(V3-REAL-02):按结果身份(tool_use_id)去重——
+    // 同一枚结果重复采用同形状不重报;同 epoch 新来的另一枚巨型结果首次
+    // 截断必须报,不许被"本 epoch 报过一次"的全局布尔吞掉。ReplaceHistory
+    // 开新 epoch 时一并清空,压缩后热区里若还留着超线原文,重新通报。
+    std::set<std::string> announced_result_ids_;
 };
 
 }  // namespace lubancode::agent

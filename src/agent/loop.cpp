@@ -2267,6 +2267,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
+        // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——工具结果消息
+        // 在压进双账之前最后一次可定形,入史后再改就是追改已发前缀。带结
+        // 果仓的装配层(hub 接轨迹 v3 桥)把超帽全文换成固定预览(§4.17,
+        // 32 KiB 当前档)并就地归仓原文;线内结果原样穿透。没接预览器 =
+        // 全文入史,保命索兜底,行为与从前一字不差。
+        if (wiring.rewrite_tool_results_for_history != nullptr) {
+            wiring.rewrite_tool_results_for_history(tool_result_message);
+        }
         // 批次尾回调要在消息 move 进双账之前拿:回调里读的是五枚结果齐的
         // user message(装配层此刻 append+flush 它)。P1-A 的回执口与旧口
         // 同一触发点,两枚口任设其一都要备货。

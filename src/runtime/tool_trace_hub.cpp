@@ -59,6 +59,14 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
             }
             return ToolResultsCommitReceipt{};
         };
+    // V3-REAL-05(真实会话审计棒一):模型历史预览钩子——消息入史之前先
+    // 经轨迹桥(v3 场:超帽全文就地归仓换固定预览;v2 场默认穿透,原文
+    // 入史不丢)。没挂轨迹的会话 wiring 那头留空,loop 全文入史,行为不变。
+    wiring.rewrite_tool_results_for_history = [this](api::Message& message) {
+        if (trajectory_ != nullptr) {
+            trajectory_->RewriteToolResultsForHistory(message);
+        }
+    };
 }
 
 bool ToolTraceHub::ShouldBlockOnFailedStart(agent::EffectClass cls) const {

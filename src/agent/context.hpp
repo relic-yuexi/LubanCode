@@ -7,6 +7,8 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
+#include <string>
 #include <vector>
 
 #include "api/types.hpp"
@@ -101,11 +103,33 @@ constexpr int kOversizedToolResultWindowPercent = 25;
 
 // 硬裁剪报告:保命索这一次有没有真动手。上层(UI)拿到报告须向用户明说
 // 发生了有损截断——静默降级会让用户以为语义压缩已成功,模型其实已经看
-// 不到那段原文了。截断是确定性的(同一份超线结果每请求都会再截一次),
-// ContextManager 按 epoch 去重:只有"本 epoch 首次发生"才置真,重复截
-// 同一副形状不算新动作,不反复刷告警。
+// 不到那段原文了。截断形状随首次采用的档位快照固定(V3-REAL-01,带
+// TruncationMemo 时):同一份超线结果每个请求重放同一副形状,不算新动作;
+// ContextManager 再按结果身份去重(V3-REAL-02):同一枚通报过的不重报,
+// 同 epoch 新来的另一枚首次截断必须报。
 struct TrimReport {
-    bool truncated_results = false;  // 有超大工具结果被截尾(本 epoch 首次)
+    bool truncated_results = false;  // 有超大工具结果被截尾(首次定形的新截断)
+    // 本次新定形的截断落在哪些结果身上(结果身份 = tool_use_id)。带
+    // memo 调用时只有首次定形且真动了刀的进列;memo 命中的重复采用不进。
+    // 上层按它做"按身份去重"的通报,不再拿一枚全局布尔吞掉后来者。
+    std::vector<std::string> truncated_result_ids;
+};
+
+// 保命索的钉子账(V3-REAL-01):tool_use_id -> 首次采用的截断快照。裁剪
+// 结果随档位快照固定——一枚工具结果第一次进工作视图时按当次预算
+//(窗口 25% × 当次校准系数)定形(线内也是定形:全文即形状),此后
+// epoch 内的普通追加请求不再重裁:估算器系数更新、窗口读数变化都不得
+// 追改已发前缀里那副旧形状。真要换形状,走正式 context 提交
+//(ContextManager::ReplaceHistory,compact/显式降档)清账重新定形,
+// 由前缀账点名一次可解释断点。原文指纹防串:同 id 的结果原文变了
+//(本不该发生,重试改写一类的坏账)按新结果重新定形,不拿旧快照顶。
+struct TruncationMemo {
+    struct Pinned {
+        std::string source_hash;       // 定形时原文(裁剪前)的指纹
+        bool reduced = false;          // 定形时真动了刀(线内定形 = false)
+        api::ToolResultBlock result;   // 定形后的整块形状(reduced 才有意义)
+    };
+    std::map<std::string, Pinned> pinned;
 };
 
 // 截断保命索(纯函数):
@@ -122,12 +146,19 @@ struct TrimReport {
 //   - 截断按内容自身算,确定性的:同一份历史每请求截出同一副形状,追加律
 //     不受牵连(旧的按全量 overage 截会随历史增长滑窗,已随之退场);
 //   - report 非空时把本次实际发生的截断填进去(没截就保持全默认假)。
+// memo 非空时(V3-REAL-01,ContextManager 的正式路径):每枚结果的裁剪
+// 形状首次采用即定形——memo 命中的(原文指纹一致)直接重放快照,当次
+// 系数/窗口一概不看;线内首次定形(reduced=false)后来越线也不回头裁
+//(首次已把全文发给 provider,后请求裁它必断缓存前缀)。新定形且真动了
+// 刀的记进 report->truncated_result_ids。memo 为空指针 = 无记忆的一次性
+// 纯函数调用(单测、dry-run),按当次预算现裁,行为与从前一字不差。
 // window_tokens 传 0(窗口未知)时按 kFallbackContextWindowTokens 兜底,
 // 不裸奔。返回处理后的消息(没动就是原样拷贝)。
 std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages,
                                                      std::size_t window_tokens,
                                                      double calibration = 1.0,
-                                                     TrimReport* report = nullptr);
+                                                     TrimReport* report = nullptr,
+                                                     TruncationMemo* memo = nullptr);
 
 // ---------------------------------------------------------------------------
 // mid-turn 上下文安全点(0.27.x 分层压缩第一期;骨架拆解批四从 loop.hpp
