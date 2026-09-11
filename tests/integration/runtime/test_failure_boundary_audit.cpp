@@ -27,6 +27,7 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
+#include "api/chat/request.hpp"
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "tools/registry.hpp"
@@ -91,6 +92,9 @@ class AuditBackend final : public api::Backend {
 public:
     std::function<std::expected<void, api::Error>(int, const std::function<void(const api::StreamEvent&)>&)> emit;
     std::vector<api::Request> requests;
+    std::string SerializeForDiagnostics(const api::Request& request) const override {
+        return api::chat::BuildRequestJson(request).dump();
+    }
     std::expected<void, api::Error> send_stream(
         const api::Request& request, const std::function<void(const api::StreamEvent&)>& sink,
         const std::atomic<bool>*) override {
@@ -103,6 +107,8 @@ class AuditTool final : public tools::Tool {
 public:
     int calls = 0;
     bool result_error = false;
+    std::optional<std::string> result_content;
+    std::string result_outcome;
     std::function<void()> effect;
     std::string name() const override { return "audit_tool"; }
     std::string description() const override { return "local audit counter"; }
@@ -111,7 +117,9 @@ public:
     Result execute(const Json&) override {
         ++calls;
         if (effect) effect();
-        return {result_error ? "AUDIT_ERROR" : "AUDIT_RESULT", result_error};
+        Result result{result_content.value_or(result_error ? "AUDIT_ERROR" : "AUDIT_RESULT"), result_error};
+        result.outcome = result_outcome;
+        return result;
     }
 };
 
@@ -330,7 +338,7 @@ TEST_CASE("failure audit FA-04 FA-05: retry terminals and visible text") {
         {"verify_ok", v3::VerifyV3File(audit.path).ok}});
 }
 
-TEST_CASE("failure audit control: metadata failure retains journal result") {
+TEST_CASE("failure audit: metadata failure stops before unpublished result is sent") {
     Audit audit;
     AuditBackend backend;
     backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
@@ -373,13 +381,12 @@ TEST_CASE("failure audit control: metadata failure retains journal result") {
     // Control: metadata persistence failed, but the main journal retained the
     // result. Whether this fallback may continue is a policy question, not the
     // missing-live-input bug in the unavailable-store test below.
-    CHECK(result.has_value());
-    CHECK(backend.requests.size() == 3);
-    CHECK(sent_results == 2);
+    CHECK_FALSE(result.has_value());
+    CHECK(backend.requests.size() == 2);
+    CHECK(sent_results == 1);
     CHECK(KindCount(rows, "tool.result.selected") == 1);
     REQUIRE(replay.has_value());
-    CHECK(replay_results == 2);
-    CHECK(resumed->execution.open_actions.empty());
+    CHECK(replay_results == 1);
 }
 
 TEST_CASE("failure audit FA-01: unavailable store and recovery work") {
@@ -471,4 +478,103 @@ TEST_CASE("failure audit FA-02: failed tool result error flag roundtrip") {
     // Fixed 2026-09-11 (P1-B): the fed-back error semantics ride the final tool
     // message body and come back through the projection unchanged.
     CHECK(replay_errors == live_errors);
+}
+
+TEST_CASE("B1 real loop: 2 MiB captures persist and fixed previews match ledger wire and resume") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt <= 2, "audit-call-" + std::to_string(attempt));
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    const std::string original = "HEAD-中文\n" + std::string(2 * 1024 * 1024, 'x') + "\nTAIL-原文";
+    tool->result_content = original;
+    bool complete = true;
+    SUBCASE("complete capture") {}
+    SUBCASE("capture quota") {
+        complete = false;
+        tool->result_outcome = "output_limit";
+        tool->result_error = true;
+    }
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    const auto outcome = agent.Run(Input(), wiring);
+    REQUIRE(outcome.has_value());
+    CHECK(counter->calls == 2);
+    REQUIRE(backend.requests.size() == 3);
+    std::vector<std::string> sent;
+    for (std::size_t request_index = 1; request_index < backend.requests.size(); ++request_index) {
+        const auto wire = api::chat::BuildRequestJson(backend.requests[request_index]);
+        std::vector<std::string> this_request;
+        for (const auto& message : wire.at("messages")) {
+            if (message.value("role", "") != "tool") continue;
+            this_request.push_back(message.at("content").get<std::string>());
+            CHECK(this_request.back().size() <= 32768);
+            CHECK(this_request.back().find(complete ? "capture_complete: true" : "capture_complete: false") != std::string::npos);
+        }
+        REQUIRE(this_request.size() == request_index);
+        if (!sent.empty()) CHECK(this_request.front() == sent.front());
+        sent = std::move(this_request);
+    }
+    std::vector<std::string> durable;
+    for (const auto& row : audit.Rows()) {
+        if (row.value("type", "") == "message" && row.at("message").value("role", "") == "tool")
+            durable.push_back(row.at("message").at("content").get<std::string>());
+    }
+    CHECK(durable == sent);
+    const auto resumed = audit.ledger->ProjectV3ContextHistory();
+    REQUIRE(resumed.has_value());
+    std::vector<std::string> replayed;
+    for (const auto& message : *resumed) for (const auto& block : message.content) {
+        if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) replayed.push_back(result->content);
+    }
+    CHECK(replayed == sent);
+    for (const auto* name : {"res-000001.combined.txt", "res-000002.combined.txt"}) {
+        std::ifstream stream(audit.path.parent_path() / "artifacts" / name, std::ios::binary);
+        const std::string saved(std::istreambuf_iterator<char>(stream), {});
+        CHECK(saved == original);
+    }
+    CHECK(v3::VerifyV3File(audit.path).ok);
+}
+
+TEST_CASE("B1 real loop: failed immutable metadata never publishes the next tool result") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt <= 2, "audit-call-" + std::to_string(attempt));
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(2 * 1024 * 1024, 'x');
+    tool->effect = [&audit, counter] {
+        if (counter->calls == 2) {
+            const auto destination = audit.path.parent_path() / "artifacts" / "res-000002.json";
+            std::filesystem::create_directories(destination);
+            std::ofstream(destination / "keep") << "blocked";
+        }
+    };
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 2);
+    CHECK(backend.requests.size() == 2);
+    CHECK(KindCount(audit.Rows(), "tool.result.persist_failed") == 1);
+    int published = 0;
+    for (const auto& message : agent.history()) for (const auto& block : message.content)
+        if (std::holds_alternative<api::ToolResultBlock>(block)) ++published;
+    CHECK(published == 1);
+    CHECK(std::filesystem::file_size(audit.path.parent_path() / "artifacts" / "res-000002.combined.txt") == 2 * 1024 * 1024);
 }
