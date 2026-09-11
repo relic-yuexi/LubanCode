@@ -1688,7 +1688,12 @@ void TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
         }
         const std::string execution_event_ref = book.action->last_event_id().value_or(std::string());
         std::string persisted_event_id;
+        // 模型可见正文:线内 = 原文;超帽 = §4.17 预览(原文已归仓)。
+        std::string tool_message_content = result->content;
         if (v3_books_->results.has_value()) {
+            // 预览档位(§4.17/§4.38):writer 的已采用档(默认 32 KiB,
+            // ReduceToolPreviews 正式降档提交后取新档,普通请求不回升)。
+            const std::uint64_t preview_budget = v3_writer_->context().preview_budget_bytes;
             v3::ResultStore::PersistRequest persist;
             persist.result_kind = "text";
             persist.content = result->content;
@@ -1697,6 +1702,12 @@ void TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
             }
             persist.execution_event_ref = execution_event_ref;
             persist.tool_call_id = book.action_id;
+            // 准入时的策略快照(§4.16 preview_policy):这一枚结果按哪一档
+            // 生成模型预览,落进不可变描述,日后翻账知道当时的帽。
+            persist.preview_policy = nlohmann::json{
+                {"policy", "v3-tool-preview"},
+                {"maxPreviewBytes", preview_budget},
+                {"budgetsLadder", nlohmann::json::array({32768, 16384, 8192, 4096})}};
             persist.outputs.push_back(v3::ResultStore::ChannelOutput{
                 "combined", "text/plain", result->content, true, std::string(),
                 static_cast<std::uint64_t>(result->content.size()), false});
@@ -1721,6 +1732,35 @@ void TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
                     NoteV3Error(receipt, "tool.result.persist_failed");
                 }
             }
+            // 模型预览(V3-REAL-05,§4.16-4.17):原文已按 artifact 不可变
+            // 归仓,tool 消息不再背全文(run_command 2MB 递归列目录那场病
+            // 理)。汇总(单通道 combined;stdout/stderr 已在上游并进
+            // content)后的总字节超当前档才走预览路:说明区(输出字节数/
+            // 截断/捕获状态/全文路径——标签路径也占预算)+ 头尾节选;线内
+            // 原样返回(§4.17),不硬套壳。超限被省略的正文不伪称完整:
+            // truncated 状态如实交代,全文按 result_ref 归仓可追(§4.21
+            // 读取侧 ExpandResultPreview 验 hash 展开)。
+            if (persisted.ok && result->content.size() > preview_budget) {
+                std::string combined_path;
+                for (const auto& ref : persisted.result_ref) {
+                    if (ref.value("kind", std::string()) == "combined") {
+                        combined_path = ref.value("path", std::string());
+                        break;
+                    }
+                }
+                v3::PreviewRequest preview_request;
+                v3::PreviewChannel channel;
+                channel.display_path = combined_path;
+                channel.channel = "combined";
+                channel.text = result->content;
+                channel.output_bytes = static_cast<std::uint64_t>(result->content.size());
+                preview_request.channels.push_back(std::move(channel));
+                preview_request.max_preview_bytes = preview_budget;
+                tool_message_content = v3::BuildToolPreview(preview_request).text;
+            }
+            // Persist 失败时上方保持原文:仓没开住,预览帽一裁正文就没有
+            // 完整可得版本了——不裁,内存侧交给上层保命索(§4.18 存储失败
+            // 不改称没执行,正文也不假装修过)。
         } else {
             // 结果仓开不了:结果链(persisted→selected)立不起来,不伪造
             // 选用事件(schema 对空 sourceResultEventRefs 一刀拒),tool
@@ -1747,10 +1787,10 @@ void TrajectoryTurnBridge::V3ToolResultsCommitted(const api::Message& results) {
             }
             selected_event_id = selected.id;
         }
-        // 最终 tool 消息:content 是模型可见的正文(runtime 回喂的这份就是
-        // 模型将看到的),resultSelectionRef 指回选用事件。
+        // 最终 tool 消息:content 是模型可见的最终预览版本(线内原文/超帽
+        // §4.17 预览),resultSelectionRef 指回选用事件。
         const auto message = book.action->AppendToolMessage(
-            *v3_writer_, result->content,
+            *v3_writer_, std::move(tool_message_content),
             selected_event_id.empty() ? std::optional<std::string>{}
                                       : std::optional<std::string>(selected_event_id),
             trajectory::Durability::PowerLoss);

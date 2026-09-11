@@ -4,6 +4,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "agent/context_events.hpp"  // Fingerprint64:钉子账的原文指纹(判"完全相同")
 #include "agent/runtime_profile.hpp"   // kFallbackContextWindowTokens:窗口未知时的兜底
 #include "agent/tool_result_images.hpp"  // EstimateImageTokensForPreflight:图片 token 的像素口径公共尺
 #include "platform/text_encoding.hpp"    // Utf8PrefixBoundary:截短不劈半个字
@@ -147,9 +148,25 @@ std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history) {
     return total;
 }
 
+// 钉子账的原文指纹(V3-REAL-01):对裁剪会动的全部文本分量(content 与
+// 富块里的 TextContent)取合成指纹。图片/结构化结果不参与——它们本来就
+// 不裁,指纹只须敏于"会被刀碰的正文变了没有"。
+namespace {
+std::string ToolResultSourceFingerprint(const api::ToolResultBlock& block) {
+    std::string material = block.content;
+    for (const auto& rich : block.blocks) {
+        if (const auto* text = std::get_if<tools::TextContent>(&rich); text != nullptr) {
+            material += "\x1f";
+            material += text->text;
+        }
+    }
+    return Fingerprint64(material);
+}
+}  // namespace
+
 std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages,
                                                      std::size_t window_tokens, double calibration,
-                                                     TrimReport* report) {
+                                                     TrimReport* report, TruncationMemo* memo) {
     if (window_tokens == 0) {
         // 窗口未知不裸奔:token 轴有兜底窗口(依据见 runtime_profile.hpp)。
         window_tokens = kFallbackContextWindowTokens;
@@ -162,9 +179,29 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                 continue;
             }
             auto& tool_result = std::get<api::ToolResultBlock>(block);
+            // 钉子账命中(V3-REAL-01):这枚结果的形状在首次进工作视图时已按
+            // 当时的档位快照定形,本请求直接重放——当次系数/窗口变化不重裁
+            // 已发前缀里的旧内容。原文指纹不符(结果被改写一类的坏账)按
+            // 新结果走下面的定形路。空 tool_use_id 没有稳定身份,不入账。
+            if (memo != nullptr && !tool_result.tool_use_id.empty()) {
+                if (auto pinned = memo->pinned.find(tool_result.tool_use_id);
+                    pinned != memo->pinned.end() &&
+                    pinned->second.source_hash == ToolResultSourceFingerprint(tool_result)) {
+                    if (pinned->second.reduced) {
+                        tool_result = pinned->second.result;
+                    }
+                    continue;
+                }
+            }
             // while 而非 if:富块结果一次截一块(从最后一块文本起倒着),
             // 截完按真账重估,不估"截多少正好"的一次到位账——图片等不可裁
             // 的分量混在里头,精确账算不出,重估最诚实。
+            bool was_truncated = false;
+            // 定形用的原文指纹在动刀前取(裁完再取就成裁后文的指纹了)。
+            const std::string source_hash =
+                memo != nullptr && !tool_result.tool_use_id.empty()
+                    ? ToolResultSourceFingerprint(tool_result)
+                    : std::string();
             while (ToolResultBlockTokens(tool_result, calibration) > per_result_budget) {
                 bool reduced = false;
                 if (!tool_result.blocks.empty()) {
@@ -202,9 +239,24 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                 if (!reduced) {
                     break;  // 没有可裁的文本(纯图片/全到下限):放行
                 }
-                if (report != nullptr) {
-                    report->truncated_results = true;
+                was_truncated = true;
+            }
+            // 定形入账(V3-REAL-01):本次预算下的形状就此钉死;线内放行也
+            // 定形(reduced=false)——首次已把全文发给 provider,后续系数
+            // 放大越线也不回头裁(裁它就是追改已发前缀)。换形状走正式
+            // context 提交清账,不走这里。
+            if (memo != nullptr && !tool_result.tool_use_id.empty()) {
+                TruncationMemo::Pinned pinned;
+                pinned.source_hash = source_hash;
+                pinned.reduced = was_truncated;
+                if (was_truncated) {
+                    pinned.result = tool_result;
                 }
+                memo->pinned[tool_result.tool_use_id] = std::move(pinned);
+            }
+            if (was_truncated && report != nullptr) {
+                report->truncated_results = true;
+                report->truncated_result_ids.push_back(tool_result.tool_use_id);
             }
         }
     }
