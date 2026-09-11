@@ -901,3 +901,39 @@ TEST_CASE("B1 post-tool hook failure leaves the original capture recoverable") {
     CHECK(KindCount(audit.Rows(), "tool.result.persisted") == 1);
     CHECK(KindCount(audit.Rows(), "tool.result.selected") == 0);
 }
+
+TEST_CASE("B1 original capture failure stops post-tool hooks and subsequent model sends") {
+    Audit audit;
+    AuditBackend backend;
+    backend.emit = [](int attempt, const auto& sink) -> std::expected<void, api::Error> {
+        Reply(sink, attempt <= 2, "audit-call-" + std::to_string(attempt));
+        return {};
+    };
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<AuditTool>();
+    auto* counter = tool.get();
+    tool->result_content = std::string(2 * 1024 * 1024, 'x');
+    tool->effect = [&audit, counter] {
+        if (counter->calls == 2) {
+            const auto destination = audit.path.parent_path() / "artifacts" / "capture-000002.json";
+            std::filesystem::create_directories(destination);
+            std::ofstream(destination / "keep") << "blocked";
+        }
+    };
+    registry.Register(std::move(tool));
+    agent::Agent agent(backend, registry, Profile());
+    auto wiring = audit.Wiring();
+    int post_hooks = 0;
+    wiring.on_post_tool_hook = [&post_hooks](const std::string&, const std::string&, const Json&, const tools::Tool::Result&) {
+        ++post_hooks;
+    };
+    wiring.rewrite_tool_results_for_history = [&audit](api::Message& results) {
+        return audit.bridge->RewriteToolResultsForHistory(results);
+    };
+    CHECK_FALSE(agent.Run(Input(), wiring).has_value());
+    CHECK(counter->calls == 2);
+    CHECK(post_hooks == 1);
+    CHECK(backend.requests.size() == 2);
+    CHECK(KindCount(audit.Rows(), "tool.result.persist_failed") == 1);
+    CHECK_FALSE(std::filesystem::exists(audit.path.parent_path() / "artifacts" / "res-000002.json"));
+}
