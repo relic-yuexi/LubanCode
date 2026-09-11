@@ -31,7 +31,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "trajectory/journal.hpp"  // JournalClock 复用(测试喂 fake 钟)
+#include "workflow/journal.hpp"  // JournalClock 复用(测试喂 fake 钟)
 #include "trajectory/v3/event_ledger.hpp"
 #include "workflow/definition.hpp"
 
