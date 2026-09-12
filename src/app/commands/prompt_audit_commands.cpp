@@ -638,10 +638,15 @@ CommandFlow HandleSlashPromptAudit(SlashDispatchContext& ctx, const std::string&
     context.prompts_dir = ctx.prompts_dir != nullptr ? *ctx.prompts_dir : std::string();
     context.model_instructions =
         ctx.current_model_instructions != nullptr ? *ctx.current_model_instructions : std::string();
-    if (ctx.current_soul != nullptr) {
+    // Soul 会话冻结单 P0(§六):审计读实际快照(本会话真发的那份魂),
+    // 不拿 configured 默认的 current_soul 指针冒充实际发送内容。
+    if (ctx.soul_session != nullptr) {
+        context.soul_text = lubancode::agent::StripPromptComments(ctx.soul_session->content);
+        context.soul_name = ctx.soul_session->name.empty() ? "default" : ctx.soul_session->name;
+    } else if (ctx.current_soul != nullptr) {
         context.soul_text = lubancode::agent::StripPromptComments(*ctx.current_soul);
+        context.soul_name = ctx.current_soul_name != nullptr ? *ctx.current_soul_name : "default";
     }
-    context.soul_name = ctx.current_soul_name != nullptr ? *ctx.current_soul_name : "default";
     if (ctx.context_tracker != nullptr) {
         context.context_budget_tokens =
             static_cast<std::int64_t>(ctx.context_tracker->window_tokens());

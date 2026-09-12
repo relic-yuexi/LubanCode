@@ -37,6 +37,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/id_authority.hpp"
+#include "runtime/session_soul.hpp"  // SessionSoulSnapshot(Soul 会话冻结单 P0)
 #include "runtime/tool_trajectory_sink.hpp"
 #include "runtime/trajectory_history_view.hpp"  // P3:RestoredHistoryView(v3 旧史显示投影)
 #include "telemetry/wake.hpp"
@@ -627,6 +628,11 @@ struct TrajectoryResumeSummary {
     // 标记(持久 token 字段)。v2 源为 nullopt——v2 照旧走 history 渲染,
     // 数据结构喂不进就不强求(单子 P3 第一棒口径)。
     std::optional<RestoredHistoryView> restored_view;
+    // Soul 会话冻结单 P0(§5.3):源场已提交的 soul 快照(锁定那一刻落
+    // 进源场目录的 blob)。nullopt = 源场从未锁定过魂,恢复后按未锁定
+    // 草稿起步;材料坏在 outcome.error_code 里报错(resume.soul_snapshot_
+    // corrupt),不静默换魂。
+    std::optional<SessionSoulSnapshot> soul_snapshot;
 };
 
 // ---------------------------------------------------------------------------
@@ -813,6 +819,13 @@ public:
     // 启动路 resume 的 v3 旧史显示投影(源是 v2/没 resume 给 nullopt)。
     // 装配层用它一次性铺终端滚动缓冲,与 live 条目账分开。
     std::optional<RestoredHistoryView> LaunchRestoredHistoryView() const;
+    // Soul 会话冻结单 P0(§5.3):--continue 启动路 resume 带回的源场
+    // soul 快照(交互 /resume 走 TrajectoryResumeSummary.soul_snapshot)。
+    // nullopt = 没 resume 或源场从未锁定过魂。
+    std::optional<SessionSoulSnapshot> LaunchResumeSoulSnapshot() const;
+    // 启动路源场 soul 快照材料坏(没坏/没 resume 给空串):装配层据此
+    // 明说——报错不静默换魂(§5.3)。
+    std::string launch_resume_soul_error() const;
 
     // 折叠本场 main.jsonl(纯读,writer 持句柄照读——journal 以共享读开)。
     // /export、/copy、session view 的数据源(§14.5:一律读 ReplayState)。
@@ -851,6 +864,14 @@ public:
         std::vector<std::pair<std::string, std::string>> allowlisted_env;
     };
     std::string CaptureEnvironment(const EnvironmentFacts& facts);
+
+    // ---- Soul 会话冻结单 P0(§5.1"宿主串行锁定并持久化快照") ----
+    // 把锁定的会话魂快照 blob 落进当前场目录(soul-snapshot.json;正文
+    // 全文存档,resume 只认它,不凭魂名重读磁盘文件)。回空串 = 成功;
+    // 失败给稳定码人话并记 recent_io_errors——不拦发送(快照 blob 写不住
+    // 是恢复材料缺口,不该把会话卡死;resume 侧读不到按未锁定处理,
+    // 材料坏则报错拒绝)。
+    std::string CommitSoulSnapshot(const SessionSoulSnapshot& snapshot);
 
     // ---- P0-4:排队账(§5.5 control.queue.item.*) ----
     // steering queue 的状态可见变化经这四枚口进 Journal。item_id 用队列

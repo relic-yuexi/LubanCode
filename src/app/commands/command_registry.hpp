@@ -52,6 +52,7 @@
 #include "telemetry/service.hpp"  // TelemetryService(/telemetry status 的状态面)
 #include "runtime/event_sinks.hpp"
 #include "runtime/session_runtime.hpp"
+#include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0
 #include "runtime/tool_trace_hub.hpp"
 #include "workflow/host_executors.hpp"
 
@@ -135,6 +136,13 @@ struct SlashDispatchContext {
     std::shared_ptr<std::string> current_model_instructions;
     std::shared_ptr<std::string> current_soul;
     std::string* current_soul_name = nullptr;
+    // Soul 会话冻结单 P0:本会话采用的魂快照(实际进系统提示的那份)。
+    // /soul 的草稿/锁定判定与审计展示读它;current_soul/current_soul_name
+    // 只当 configured 默认值用(§5.1 双状态)。
+    lubancode::runtime::SessionSoulSnapshot* soul_session = nullptr;
+    // /resume 的会话魂恢复口(§5.3):恢复源场已提交快照(未锁定源场按
+    // 当前默认起草稿),并整份重灌主 Agent——换场即换魂,不受旧锁挡。
+    std::function<void(const std::optional<lubancode::runtime::SessionSoulSnapshot>&)> adopt_resumed_soul;
     lubancode::cli::ContextTracker* context_tracker = nullptr;
     lubancode::app::ModelRouterService* model_router = nullptr;
     std::shared_ptr<lubancode::agent::ContextArtifactStore> artifact_store;

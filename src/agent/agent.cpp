@@ -35,6 +35,19 @@ std::vector<api::ToolDefinition> Agent::BuildToolDefinitions() const {
     return defs;
 }
 
+// Soul 会话冻结单 P0(§5.1):首个请求锁定口。幂等——只在本场第一次
+// 从假翻真时触发宿主回调(主线程串行:置位会话快照 locked + 持久化
+// blob),此后每步再调只是空过。失败/取消/零输出不解锁,重试沿用快照。
+void Agent::LockSessionSoul() {
+    if (soul_locked_) {
+        return;
+    }
+    soul_locked_ = true;
+    if (wiring_.on_session_soul_locked) {
+        wiring_.on_session_soul_locked();
+    }
+}
+
 std::expected<RunOutcome, std::string> Agent::Run(const std::string& user_input, const TurnWiring& wiring,
                                                   const std::atomic<bool>* cancel) {
     api::Message user_message;

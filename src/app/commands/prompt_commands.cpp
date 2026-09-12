@@ -72,15 +72,68 @@ std::string LoadSoulContentByName(const std::string& name, bool warn) {
     return *content;
 }
 
-// /soul 命令:裸敲看当前正文和可选旧魂;/soul clear 把 SOUL.md 还原成
-// 默认空魂;/soul <内容> 直接写 SOUL.md、立刻生效,下回启动也会读回来。
-// 兼容旧用法:参数恰好命中 souls/<名字>.md 时仍是选魂。off/default/
-// <名字> 三条路都当场生效,并在有配置文件时问一句要不要持久化——答 y
-// 才落盘,免得下次启动被配置里的旧值悄悄盖过去(或者悄悄留着没改)。
-// clear 语义不同,是把 SOUL.md 本身还原成空魂,所以自动把配置里的选魂
-// 项归位 default,不用问。
-void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::string>& current_soul,
-                        std::string& current_soul_name, const std::optional<std::string>& config_file_path) {
+// ---------------------------------------------------------------------------
+// Soul 会话冻结单 P0:HandleSoulCommand 的新语义(单内 §5.2 表,用户定案)。
+// 双状态:session_soul 是本会话快照(锁定前草稿/锁定后只读),configured_*
+// 是持久默认值的内存映像。保存顺序一律"先校验、保存成功,再动账"——
+// 失败报错回滚,不宣称成功,不留内存/磁盘各用一份的状态。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 把魂选择落进配置文件。没有配置文件不算失败(内存默认账照改,新会话
+// 反正读不到那份配置,调用方打一行"仅本会话");落盘失败给错误串。
+std::string PersistSoulChoice(const std::optional<std::string>& config_file_path, const std::string& choice) {
+    if (!config_file_path.has_value()) {
+        return std::string();
+    }
+    const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, choice);
+    if (!updated.has_value()) {
+        return updated.error();
+    }
+    return std::string();
+}
+
+// 保存回执:内容规范化后相同提示"内容未变",不记虚假 pending/revision;
+// 其余按锁定状态走 §5.2 的两条原文提示。
+void PrintSoulSaveReceipt(const lubancode::runtime::SessionSoulSnapshot& session_soul, bool changed) {
+    if (!changed) {
+        TermOut() << tr("cmd.soul.unchanged") << "\n";
+        return;
+    }
+    if (session_soul.locked) {
+        TermOut() << trf("cmd.soul.locked.save_hint", session_soul.name) << "\n";
+    } else {
+        TermOut() << tr("cmd.soul.draft.save_hint") << "\n";
+    }
+}
+
+// 保存成功后的账目善手:configured 两笔(正文/选择)换新;锁定前草稿跟着
+// 默认走,锁定后快照一字不动(§5.2 表右列——多次修改以后一次成功保存
+// 为准,每次成功即覆盖)。
+void CommitSoulDefault(lubancode::runtime::SessionSoulSnapshot& session_soul,
+                       const std::shared_ptr<std::string>& configured_content, std::string& configured_name,
+                       std::string new_name, std::string new_content) {
+    const bool default_changed =
+        new_name != configured_name || lubancode::runtime::SessionSoulContentHash(new_content) !=
+                                           lubancode::runtime::SessionSoulContentHash(*configured_content);
+    *configured_content = std::move(new_content);
+    configured_name = std::move(new_name);
+    if (session_soul.locked) {
+        PrintSoulSaveReceipt(session_soul, default_changed);
+        return;
+    }
+    const bool changed = lubancode::runtime::UpdateSessionSoulDraft(session_soul, configured_name,
+                                                                    *configured_content,
+                                                                    "config:" + configured_name);
+    PrintSoulSaveReceipt(session_soul, changed);
+}
+
+}  // namespace
+
+void HandleSoulCommand(const std::string& args, lubancode::runtime::SessionSoulSnapshot& session_soul,
+                       const std::shared_ptr<std::string>& configured_content, std::string& configured_name,
+                       const std::optional<std::string>& config_file_path) {
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
     if (!luban_dir.has_value()) {
         TermOut() << tr("cmd.soul.no_home") << "\n";
@@ -88,14 +141,24 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     }
 
     if (args.empty()) {
+        // 裸敲:本会话快照 + 锁定状态 + 下个新会话默认值,差异标清
+        //(pending 只是展示状态,不是自动应用队列)。
         const std::vector<std::string> souls = lubancode::config::ListSouls(*luban_dir);
-        TermOut() << trf("cmd.soul.current", current_soul_name) << "\n";
-        const std::string visible = lubancode::agent::StripPromptComments(*current_soul);
+        TermOut() << trf("cmd.soul.current", session_soul.name) << "\n";
+        TermOut() << (session_soul.locked ? tr("cmd.soul.status.locked") : tr("cmd.soul.status.unlocked"))
+                  << "\n";
+        const std::string visible = lubancode::agent::StripPromptComments(session_soul.content);
         if (visible.empty()) {
             TermOut() << tr("cmd.soul.empty_note") << "\n";
         } else {
             TermOut() << visible << "\n";
         }
+        TermOut() << trf("cmd.soul.default_header", configured_name) << "\n";
+        const bool pending =
+            configured_name != session_soul.name ||
+            lubancode::runtime::SessionSoulContentHash(*configured_content) != session_soul.content_hash;
+        TermOut() << (pending ? trf("cmd.soul.pending_note", configured_name) : tr("cmd.soul.pending_same"))
+                  << "\n";
         TermOut() << tr("cmd.soul.available_header") << "\n";
         TermOut() << tr("cmd.soul.default_item") << "\n";
         for (const auto& name : souls) {
@@ -106,110 +169,82 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     }
 
     if (args == "off") {
-        current_soul->clear();
-        current_soul_name = "off";
-        TermOut() << tr("cmd.soul.off") << "\n" << tr("cmd.soul.switch_hint") << "\n";
-
-        // 跟 /soul <名字> 一路的持久化问法对齐:配置里原先若存着旧魂名,
-        // 不问清楚就不动它,免得下次启动又被旧值盖过去。
-        if (config_file_path.has_value()) {
-            const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
-            if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-                const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "off");
-                if (updated.has_value()) {
-                    TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
-                } else {
-                    TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
-                }
-            }
-        } else {
+        // off 只改选择,不删正文(clear 才清空正文,§5.2)。先保存,成功才动账。
+        const std::string persist_error = PersistSoulChoice(config_file_path, "off");
+        if (!persist_error.empty()) {
+            TermOut() << trf("cmd.write_config.failed", persist_error) << "\n";
+            return;
+        }
+        if (!config_file_path.has_value()) {
             TermOut() << tr("cmd.session_only") << "\n";
         }
+        CommitSoulDefault(session_soul, configured_content, configured_name, "off", std::string());
         return;
     }
 
     if (args == "default") {
-        *current_soul = LoadSoulContentByName("default", /*warn=*/true);
-        current_soul_name = "default";
-        TermOut() << tr("cmd.soul.back_default");
-        if (lubancode::agent::StripPromptComments(*current_soul).empty()) {
-            TermOut() << tr("cmd.soul.empty_note");
+        // 解析默认文件,保存选择并更新草稿;锁定后只更新以后采用的默认。
+        const std::string content = LoadSoulContentByName("default", /*warn=*/true);
+        const std::string persist_error = PersistSoulChoice(config_file_path, "default");
+        if (!persist_error.empty()) {
+            TermOut() << trf("cmd.write_config.failed", persist_error) << "\n";
+            return;
         }
-        TermOut() << "。\n" << tr("cmd.soul.switch_hint") << "\n";
-
-        // 同上:配置里原先若存着旧魂名,问清楚了才改,不然下次启动照旧
-        // 被旧值盖过去(这就是本函数要修的那个 bug)。
-        if (config_file_path.has_value()) {
-            const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
-            if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-                const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
-                if (updated.has_value()) {
-                    TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
-                } else {
-                    TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
-                }
-            }
-        } else {
+        if (!config_file_path.has_value()) {
             TermOut() << tr("cmd.session_only") << "\n";
         }
+        CommitSoulDefault(session_soul, configured_content, configured_name, "default", content);
         return;
     }
 
     if (args == "clear") {
+        // clear 清空默认正文(SOUL.md 还原空魂),快照不动——锁定后的当前
+        // 快照仍可从会话档的 blob 恢复(§5.2)。写失败整体回滚:两本账、
+        // 磁盘文件都不动,不宣称成功。
         const auto cleared = lubancode::config::ClearSoulFile(*luban_dir);
         if (!cleared.has_value()) {
             TermOut() << trf("cmd.soul.write_failed", cleared.error()) << "\n";
             return;
         }
-        *current_soul = lubancode::config::DefaultSoulFileContent();
-        current_soul_name = "default";
-        if (config_file_path.has_value()) {
-            const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
-            if (!updated.has_value()) {
-                TermOut() << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
-            }
+        // 配置选择归位 default:这一笔失败不回滚 SOUL.md(文件内容已是
+        // 默认空魂,configured 内存账照文件同步,选择项失败明说)。
+        const std::string persist_error = PersistSoulChoice(config_file_path, "default");
+        if (!persist_error.empty()) {
+            TermOut() << trf("cmd.soul.default_config_failed", persist_error) << "\n";
         }
-        TermOut() << tr("cmd.soul.cleared") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+        CommitSoulDefault(session_soul, configured_content, configured_name, "default",
+                          lubancode::config::DefaultSoulFileContent());
         return;
     }
 
+    // 具名魂:参数恰好命中 souls/<名字>.md 时仍是选魂(兼容旧用法)。
     const std::string path = lubancode::config::SoulPathByName(*luban_dir, args);
     const auto content = lubancode::config::ReadTextFileIfExists(path);
     if (content.has_value()) {
-        *current_soul = *content;
-        current_soul_name = args;
-        TermOut() << trf("cmd.soul.switched", args) << "\n" << tr("cmd.soul.switch_hint") << "\n";
-
-        if (config_file_path.has_value()) {
-            const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
-            if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-                const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, args);
-                if (updated.has_value()) {
-                    TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
-                } else {
-                    TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
-                }
-            }
-        } else {
+        const std::string persist_error = PersistSoulChoice(config_file_path, args);
+        if (!persist_error.empty()) {
+            TermOut() << trf("cmd.write_config.failed", persist_error) << "\n";
+            return;
+        }
+        if (!config_file_path.has_value()) {
             TermOut() << tr("cmd.session_only") << "\n";
         }
+        CommitSoulDefault(session_soul, configured_content, configured_name, args, *content);
         return;
     }
 
+    // 其余一律当正文:写进 SOUL.md(默认正文与正文选择同时归位 default)。
+    // 先写文件,成功才动账。
     const auto written = lubancode::config::WriteSoulFile(*luban_dir, args);
     if (!written.has_value()) {
         TermOut() << trf("cmd.soul.write_failed", written.error()) << "\n";
         return;
     }
-    *current_soul = args;
-    current_soul_name = "default";
-    if (config_file_path.has_value()) {
-        const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
-        if (!updated.has_value()) {
-            TermOut() << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
-        }
+    const std::string persist_error = PersistSoulChoice(config_file_path, "default");
+    if (!persist_error.empty()) {
+        TermOut() << trf("cmd.soul.default_config_failed", persist_error) << "\n";
     }
-    TermOut() << tr("cmd.soul.saved") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+    CommitSoulDefault(session_soul, configured_content, configured_name, "default", args);
 }
 
 // /prompt 命令:裸敲显示当前法(人格段)的来源和字数,外加各提示词模块
@@ -275,8 +310,12 @@ void HandlePromptCommand(const std::string& args, const std::string& law_source,
 // ---------------------------------------------------------------------------
 
 CommandFlow HandleSlashSoul(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    HandleSoulCommand(parsed.args, ctx.current_soul, *ctx.current_soul_name, *ctx.config_file_path);
-    // 五层后端退役(批四):魂的即时生效改走皮上的叠层字段。
+    // Soul 会话冻结单 P0:命令只改会话快照与 configured 默认账;皮上的
+    // 同步经 SyncAgentRequestPolicy 走锁定闸——已锁定的会话不会换魂。
+    if (ctx.soul_session != nullptr) {
+        HandleSoulCommand(parsed.args, *ctx.soul_session, ctx.current_soul, *ctx.current_soul_name,
+                          *ctx.config_file_path);
+    }
     ctx.sync_request_policy();
     return CommandFlow::Continue;
 }

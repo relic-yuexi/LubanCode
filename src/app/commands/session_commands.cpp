@@ -2131,7 +2131,9 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     lubancode::app::ContextEstimateInputs context_in;
     context_in.prompt_options = ctx.prompt_options;
     context_in.model_instructions = ctx.current_model_instructions.get();
-    context_in.soul = ctx.current_soul.get();
+    // Soul 会话冻结单 P0(§六):/context 的 token 估算吃本会话实际快照
+    //(真发的那份魂),不吃 configured 默认。
+    context_in.soul = ctx.soul_session != nullptr ? &ctx.soul_session->content : ctx.current_soul.get();
     context_in.registry = ctx.registry;
     context_in.tool_filter = ctx.main_tool_filter;
     context_in.tool_deferral = ctx.main_deferral;
@@ -2498,6 +2500,13 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
         }
         // 标题真值吃 replay 折叠(control.title.changed 的最后一条)。
         *ctx.session_title = summary.outcome.control.title.value_or(std::string());
+        // Soul 会话冻结单 P0(§5.3):恢复源场已提交快照,忽略磁盘新默认值
+        //——源场从未锁定过就按当前默认起未锁定草稿;整份重灌主 Agent
+        //(换场即换魂,不受本会话旧锁挡)。快照材料坏的场在 ResumeInteractive
+        // 里已报错拒绝,走不到这里。
+        if (ctx.adopt_resumed_soul) {
+            ctx.adopt_resumed_soul(summary.soul_snapshot);
+        }
         if (summary.outcome.approval_mode.has_value()) {
             // resume 继承盘上档:公共值域过具名桥回 CLI 显示档(收口审计
             // 单 P1:枚举间 static_cast 禁绝)。

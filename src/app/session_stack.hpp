@@ -25,6 +25,7 @@
 #include "app/tool_runtime.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/spinner_backend.hpp"
+#include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0 的会话快照
 #include "runtime/worktree.hpp"
 #include "config/config.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域解析(共用一份)
@@ -108,8 +109,16 @@ struct SessionStack {
     // 切换,/resume 恢复,切模型重校验。单一真值与 current_think 同住一排。
     std::shared_ptr<lubancode::api::ReasoningHistoryMode> current_think_history;
     std::shared_ptr<std::string> current_model_instructions;
+    // ---- Soul 会话冻结单 P0(§5.1 双状态) ----
+    // current_soul_name/current_soul = configuredSoul:持久化默认值(SOUL.md
+    // + 配置 soul: 项)的内存映像,只供 /soul 展示与"新建会话"读取;
+    // soul_session = sessionSoul:本会话采用的快照(名称/正文/来源/hash/
+    // revision/locked)。首请求锁定后 soul_session 定格,current_* 再变
+    // 也不进本会话的系统提示。共享指针:后台派工的冻结后端 spawner 要
+    // 借同一份,派工当刻读值(§5.3 子代理 inherit 复制父已采用快照)。
     std::string current_soul_name;
     std::shared_ptr<std::string> current_soul;
+    std::shared_ptr<lubancode::runtime::SessionSoulSnapshot> soul_session;
     std::string active_provider;
     // 渐进式上下文仓:会话建档那一刻才 Open,没开的仓一切操作安全退化。
     std::shared_ptr<lubancode::agent::ContextArtifactStore> artifact_store;

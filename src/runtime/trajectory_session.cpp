@@ -2643,6 +2643,11 @@ struct TrajectorySessionLedger::Impl {
     // --continue 启动路的 resume 投影(没 resume 为空)。
     bool launch_resumed = false;
     std::vector<api::Message> launch_resume_history;
+    // Soul 会话冻结单 P0:启动路 resume 带回的源场 soul 快照(nullopt =
+    // 源场未锁定过魂);launch_resume_soul_error 非空 = 源场快照材料坏
+    //(那种情况 resume 整个回落普通开张,不带着坏材料硬恢复)。
+    std::optional<SessionSoulSnapshot> launch_resume_soul;
+    std::string launch_resume_soul_error;
     // v3 源的旧史显示投影(P3;v2 源/没 resume 为 nullopt)。
     std::optional<RestoredHistoryView> launch_restored_view;
     // 接线点 1:v3 写模式的会话共享账(active 是 v3 场时有值;clear/resume
@@ -2755,10 +2760,24 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     if (options.resume_at_launch) {
         const std::string latest = impl.manager->LatestResumableSessionId();
         if (!latest.empty()) {
+            // Soul 会话冻结单 P0(§5.3):源场 soul 快照在 ResumeAsNew 之前
+            // 先读——材料坏就整个回落普通开张(与"源场验不过回落"同一
+            // 拍,--continue 没指名要哪场,不带着坏材料硬恢复),错误记
+            // 账可见,不静默换魂。源场 id 与 ResumeAsNew 用同一份(显式
+            // 指名时是指名那场,不是最近那场)。
+            const std::string source_id =
+                options.resume_source_session_id.empty() ? latest : options.resume_source_session_id;
+            const auto source_soul = ReadSessionSoulSnapshot(impl.manager->SessionDirOf(source_id));
+            if (!source_soul.has_value()) {
+                impl.launch_resume_soul_error = source_soul.error();
+                platform::LogSink::Instance().Error(
+                    "trajectory", "--continue 源场 Soul 快照材料坏,回落普通开张: " + source_soul.error());
+            } else if (source_soul->has_value()) {
+                impl.launch_resume_soul = **source_soul;
+            }
+            if (impl.launch_resume_soul_error.empty()) {
             trajectory::ResumeRequest resume;
-            resume.source_session_id = options.resume_source_session_id.empty()
-                                           ? latest
-                                           : options.resume_source_session_id;
+            resume.source_session_id = source_id;
             resume.interactive = false;  // 启动路没有旧 requested 可指
             const auto resumed = impl.manager->ResumeAsNew(resume);
             if (resumed.error_code.empty()) {
@@ -2789,6 +2808,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
             }
             // resume 失败回落普通开张:源场坏不拦人开新会话(明错留给
             // /doctor trajectory 查),与旧路 --continue 找不到档不报错同门。
+            }
         }
     }
     auto active = impl.manager->LaunchSession();
@@ -4070,6 +4090,21 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
         return summary;
     }
 
+    // Soul 会话冻结单 P0(§5.3):恢复源场已提交 soul 快照——只认 blob 里
+    // 的正文,不凭魂名重读磁盘新默认。源场从未锁定过(nullopt)不挡
+    // resume,恢复后按未锁定草稿起步;有快照但材料坏:报错拒绝,当前场
+    // 不封、新场不建,不静默换魂。
+    std::optional<SessionSoulSnapshot> source_soul;
+    {
+        const auto soul = ReadSessionSoulSnapshot(manager.SessionDirOf(source_session_id));
+        if (!soul.has_value()) {
+            summary.outcome.error_code = "resume.soul_snapshot_corrupt";
+            summary.outcome.message = "源会话的 Soul 快照材料损坏: " + soul.error();
+            return summary;
+        }
+        source_soul = *soul;
+    }
+
     // 旧场(若有):requested 先 durable,随后 switch_to_resume 封口
     //(§10.4/§14.1 的 clear/resume 例外:旧 main 写 requested 与 terminal)。
     if (has_active) {
@@ -4146,6 +4181,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     if (summary.outcome.source_is_v3) {
         summary.restored_view = ProjectRestoredHistory(summary.outcome.source_v3_stream);
     }
+    summary.soul_snapshot = std::move(source_soul);
     return summary;
 }
 
@@ -4194,6 +4230,26 @@ std::vector<api::Message> TrajectorySessionLedger::LaunchResumeHistory() const {
 
 std::optional<RestoredHistoryView> TrajectorySessionLedger::LaunchRestoredHistoryView() const {
     return impl_ != nullptr ? impl_->launch_restored_view : std::nullopt;
+}
+
+std::optional<SessionSoulSnapshot> TrajectorySessionLedger::LaunchResumeSoulSnapshot() const {
+    return impl_ != nullptr ? impl_->launch_resume_soul : std::nullopt;
+}
+
+std::string TrajectorySessionLedger::launch_resume_soul_error() const {
+    return impl_ != nullptr ? impl_->launch_resume_soul_error : std::string();
+}
+
+std::string TrajectorySessionLedger::CommitSoulSnapshot(const SessionSoulSnapshot& snapshot) {
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        return "soul_snapshot.no_active_session: 轨迹账未开张,快照只留内存";
+    }
+    const auto written = WriteSessionSoulSnapshot(impl_->active->directory.session_dir(), snapshot);
+    if (!written.has_value()) {
+        io_errors_.push_back("soul_snapshot.write_failed: " + written.error());
+        return written.error();
+    }
+    return std::string();
 }
 
 trajectory::ReplayReport TrajectorySessionLedger::FoldMainReplay() const {
