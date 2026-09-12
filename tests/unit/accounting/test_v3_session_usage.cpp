@@ -34,26 +34,10 @@ using namespace lubancode::accounting;
 
 namespace {
 
-// ctest 注册循环统一注入 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0;本册虽直用
-// V3Writer/ReadV3Ledger(不经建场开关),仍显式钉 1 防将来内部接线误读。
-struct EnvGuard {
-    explicit EnvGuard(const char* name, const char* value) : name_(name) {
-#ifdef _WIN32
-        _putenv((std::string(name_) + "=" + value).c_str());
-#else
-        setenv(name_, value, 1);
-#endif
-    }
-    ~EnvGuard() {
-#ifdef _WIN32
-        _putenv((std::string(name_) + "=").c_str());
-#else
-        unsetenv(name_);
-#endif
-    }
-    const char* name_;
-};
-const EnvGuard kV3Env{"LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1"};
+// 本册 format-neutral:直接 V3Writer/ReadV3Ledger,不经 SessionManager 建场
+// 开关(与 test_v3_shared_fixtures 同类)。特别注意不许放进程级 EnvGuard——
+// 全部测试编在同一只二进制里,全局改写环境变量会把其余册的 v2 老路全
+// 掀翻(2026-09-12 首轮 CI 的教训)。
 
 class FixedClock : public v3::V3Clock {
 public:
