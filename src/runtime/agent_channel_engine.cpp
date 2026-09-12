@@ -160,14 +160,13 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
     if (HasPreRequestMiddleware(dispatcher)) {
         wiring.on_pre_request_hooks = [dispatcher](const std::string& step_id, const std::string& turn_id_,
                                                    const nlohmann::json& frozen_request_snapshot,
-                                                   std::uint64_t context_window_tokens,
-                                                   std::uint64_t output_reserve_tokens) {
+                                                   const PreRequestBudget& budget) {
             MiddlewareHookContext context;
             context.turn_id = turn_id_;
             context.step_id = step_id;
             context.purpose = "interactive";
-            const PreRequestStages stages = RunPreRequestMiddleware(
-                dispatcher, frozen_request_snapshot, context_window_tokens, output_reserve_tokens, context);
+            const PreRequestStages stages =
+                RunPreRequestMiddleware(dispatcher, frozen_request_snapshot, budget, context);
             if (!stages.dispatched || stages.decision == "allow") {
                 return std::string();
             }

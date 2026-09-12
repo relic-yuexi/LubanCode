@@ -2676,3 +2676,72 @@ TEST_CASE("B2 impossible closed batch persists once then stops before a second r
     CHECK(executed->call_count == 3);
     CHECK(backend.captured_requests.size() == 1);
 }
+
+TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预留") {
+    // 旧病现场(request-000022):loop 应急把本请求输出预留收窄放行收尾,
+    // PreRequest 容量 Hook 却还拿收窄前的策略预留——同一份输入在 Hook 侧
+    // 变成"装不下",已放行的请求被最后一道闸拦下。新账:Hook 收冻结预算
+    // 快照,判定吃 final_reserve_tokens(应急/覆盖后的值),声明/策略/实发
+    // 分字段对照。
+    // 触发路径的讲究:v2 旧路的保命索先把单条结果裁进窗口 25% 帽,单枚
+    // 巨果永远到不了应急线(单结果 ≤ W/4,应急要 ~7W/8)——真机应急都是
+    // 多轮历史累积顶到窗口。这里用 40k 小窗 × 四枚 9k token 结果累积复刻:
+    // 第 5 枚请求 input ≈ 36.8k + 策略预留 8192 超窗 → 应急 2.5k 放行;
+    // 各枚结果 9k ≤ 保命索帽(40k×25% = 10k),不触发暗裁。
+    FakeBackend backend;  // 不开 serialize_adapter_input:v2 旧路的预检/应急分支
+    auto tool_call_script = [](const std::string& call_id) {
+        return std::vector<api::StreamEvent>{api::MessageStart{"m", "test-model"},
+                                             api::ToolUseStart{0, call_id, "big_tool"},
+                                             api::ToolUseInputDelta{0, "{}"},
+                                             api::ContentBlockDone{0},
+                                             api::MessageDone{"tool_use", api::Usage{}}};
+    };
+    backend.scripts = {tool_call_script("call-1"), tool_call_script("call-2"),
+                       tool_call_script("call-3"), tool_call_script("call-4"),
+                       TextOnlyScript("收尾")};
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("big_tool",
+                                                 tools::Tool::Result{std::string(36000, 'x'), false},
+                                                 /*needs_confirm=*/false));
+    // 窗口 40k:预留帽 = clamp(40k/8, 8192, 32768) = 8192;声明 80k(ModelCatalog
+    // 源,吃帽)。应急 = EmergencyOutputReserveTokens(40k) = clamp(2.5k,
+    // 2k, 8k) = 2.5k。声明 80k 远超小窗,前几枚请求会走实发优雅降级
+    //(另账,不动判定预留)——正要断言"降级不改 final、应急才改"。
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    profile.runtime.context_window_tokens = 40000;
+    profile.runtime.max_output_tokens = 80000;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ModelCatalog;
+    agent::Agent loop(backend, registry, profile);
+    agent::TurnWiring wiring;
+    std::vector<runtime::PreRequestBudget> hook_budgets;
+    wiring.on_pre_request_hooks = [&hook_budgets](const std::string&, const std::string&,
+                                                  const nlohmann::json&,
+                                                  const runtime::PreRequestBudget& budget) {
+        hook_budgets.push_back(budget);
+        return std::string();
+    };
+    const auto outcome = loop.Run("连跑四次大工具", wiring);
+    REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+    REQUIRE(hook_budgets.size() == 5);
+    // 前几枚请求(未到应急线):判定预留 = 封顶后的策略预留;声明上限照记。
+    // (实发限额可能因声明超窗走优雅降级另账——不进判定预留,不冒充。)
+    for (std::size_t i = 0; i + 1 < hook_budgets.size(); ++i) {
+        CHECK(hook_budgets[i].policy_reserve_tokens == 8192);
+        CHECK(hook_budgets[i].final_reserve_tokens == 8192);
+        CHECK(hook_budgets[i].declared_max_output_tokens == 80000);
+        CHECK_FALSE(hook_budgets[i].output_limit_overridden);
+    }
+    // 末枚请求(四枚结果累积顶到窗口,应急已收窄):判定预留换成应急值,
+    // 不再拿 8192 旧预留;实发限额与覆盖位同步。
+    CHECK(hook_budgets.back().policy_reserve_tokens == 8192);
+    CHECK(hook_budgets.back().final_reserve_tokens == 2500);
+    CHECK(hook_budgets.back().final_reserve_tokens != hook_budgets.back().policy_reserve_tokens);
+    CHECK(hook_budgets.back().effective_output_limit_tokens == 2500);
+    CHECK(hook_budgets.back().output_limit_overridden);
+    // Agent 运行态的最近请求预算与最后一枚 Hook 账同源(V3-REAL-08 的
+    // /context 数据源)。
+    REQUIRE(loop.has_request_budget());
+    CHECK(loop.last_request_budget().final_reserve_tokens == 2500);
+}

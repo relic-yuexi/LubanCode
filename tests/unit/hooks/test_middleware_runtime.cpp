@@ -336,7 +336,11 @@ TEST_CASE("BuildRequestSnapshotJson:中立投影,媒体保类型占位") {
     const nlohmann::json snapshot = BuildRequestSnapshotJson(request);
     CHECK(snapshot["model"] == "m");
     CHECK(snapshot["system"] == "sys");
-    CHECK(snapshot["max_tokens"] == 128);
+    // V3-REAL-04:控制参数与计量对象分开——max_tokens 不在计量顶层,挪进
+    // control 子对象留审计;估算器对 control 一概不计量。
+    CHECK_FALSE(snapshot.contains("max_tokens"));
+    REQUIRE(snapshot.contains("control"));
+    CHECK(snapshot["control"]["maxOutputTokens"] == 128);
     REQUIRE(snapshot["messages"].size() == 1);
     const auto& blocks = snapshot["messages"][0]["content"];
     REQUIRE(blocks.size() == 2);
@@ -349,4 +353,87 @@ TEST_CASE("BuildRequestSnapshotJson:中立投影,媒体保类型占位") {
     // 估算对含图快照标 partial,文本照算。
     const auto estimate = ComputeUtf8BytesDiv4Estimate(snapshot);
     CHECK(estimate["coverage"] == "partial");
+}
+
+TEST_CASE("V3-REAL-04:只改输出限额/温度等控制参数,输入估算不变") {
+    api::Request request;
+    request.model = "m";
+    request.system = "sys";
+    request.max_tokens = 128;
+    api::Message message;
+    message.role = api::Role::User;
+    message.content.push_back(api::TextBlock{"正文"});
+    request.messages.push_back(message);
+
+    const auto baseline = ComputeUtf8BytesDiv4Estimate(BuildRequestSnapshotJson(request));
+    // 同一份输入,只动输出限额:估算逐字节不变。
+    for (const int limit : {1, 4096, 524288}) {
+        request.max_tokens = limit;
+        const auto estimate = ComputeUtf8BytesDiv4Estimate(BuildRequestSnapshotJson(request));
+        CHECK(estimate.at("inputUtf8Bytes") == baseline.at("inputUtf8Bytes"));
+        CHECK(estimate.at("estimatedInputTokens") == baseline.at("estimatedInputTokens"));
+    }
+    // unset(不带字段)同样不动估算。
+    request.max_tokens = std::nullopt;
+    const auto unset_estimate = ComputeUtf8BytesDiv4Estimate(BuildRequestSnapshotJson(request));
+    CHECK(unset_estimate.at("estimatedInputTokens") == baseline.at("estimatedInputTokens"));
+
+    // 旧形状兼容:直传顶层 max_tokens/temperature 的快照(容量段宿主字段
+    // tokenEstimate/outputReserveTokens/contextWindowTokens 同理),估算器
+    // 也把它们排除出 bytes/4——改它们不算改输入。
+    nlohmann::json legacy = BuildRequestSnapshotJson(request);
+    legacy["max_tokens"] = 8192;
+    legacy["temperature"] = 0.7;
+    legacy["tokenEstimate"] = nlohmann::json{{"estimatedInputTokens", 1}};
+    legacy["outputReserveTokens"] = 32768;
+    legacy["contextWindowTokens"] = 1048576;
+    const auto legacy_estimate = ComputeUtf8BytesDiv4Estimate(legacy);
+    CHECK(legacy_estimate.at("estimatedInputTokens") == baseline.at("estimatedInputTokens"));
+
+    // 改实际输入(messages)则计入:估算必须变大。
+    request.max_tokens = 128;
+    api::Message extra;
+    extra.role = api::Role::User;
+    extra.content.push_back(api::TextBlock{"再补一段更长的输入正文"});
+    request.messages.push_back(extra);
+    const auto grown = ComputeUtf8BytesDiv4Estimate(BuildRequestSnapshotJson(request));
+    CHECK(grown.at("estimatedInputTokens").get<std::size_t>() >
+          baseline.at("estimatedInputTokens").get<std::size_t>());
+}
+
+TEST_CASE("V3-REAL-07:容量段预算四字段分账,判定吃最终判定预留") {
+    hooks::HookDispatcher& dispatcher = MakeWiredDispatcher();
+
+    // 应急收窄后的账:声明 524288、策略预留 32768、判定预留收窄到 8192、
+    // 实发 8192。判定按 8192 走:估算 + 8192 + 协议余量在窗口内 → allow;
+    // 旧病(拿收窄前的 32768 判)在同样数字下会误拦成 recover。
+    runtime::PreRequestBudget budget;
+    budget.context_window_tokens = 10000;
+    budget.declared_max_output_tokens = 524288;
+    budget.policy_reserve_tokens = 32768;
+    budget.final_reserve_tokens = 8192;
+    budget.effective_output_limit_tokens = 8192;
+    budget.protocol_headroom_tokens = 512;
+    budget.output_limit_overridden = true;
+    // 输入 ~1000 token(system 4000 字节):1000 + 8192 + 512 ≤ 10000 →
+    // allow;拿收窄前的 32768 判则 1000 + 32768 + 512 > 10000 → recover。
+    // 构造边界使新旧预留给出相反判断(验收:最终放行/拒绝与 loop 同判)。
+    nlohmann::json edge = nlohmann::json{{"system", std::string(4000, 'x')}, {"messages", nlohmann::json::array()}};
+    const PreRequestStages stages = RunPreRequestMiddleware(&dispatcher, edge, budget, HumanTurn());
+    CHECK(stages.dispatched);
+    CHECK(stages.decision == "allow");
+
+    // 同一输入,判定预留换回收窄前的旧值(旧病现场:loop 已应急放行,Hook
+    // 还拿 32768 旧预留)→ recover,把已放行的收尾请求拦下。
+    runtime::PreRequestBudget stale = budget;
+    stale.final_reserve_tokens = 32768;
+    const PreRequestStages stale_stages = RunPreRequestMiddleware(&dispatcher, edge, stale, HumanTurn());
+    CHECK(stale_stages.decision == "recover");  // 旧预留:装不下,要压缩
+    CHECK(stages.decision == "allow");          // 收窄预留:放行(loop 同判)
+
+    // 容量决定回显分字段(审计可见,不再混一个数)。
+    REQUIRE(stages.capacity_outcome.value.contains("declaredMaxOutputTokens"));
+    CHECK(stages.capacity_outcome.value.at("declaredMaxOutputTokens") == 524288);
+    CHECK(stages.capacity_outcome.value.at("policyReserveTokens") == 32768);
+    CHECK(stages.capacity_outcome.value.at("effectiveOutputLimitTokens") == 8192);
 }

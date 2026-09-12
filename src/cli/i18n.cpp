@@ -1489,6 +1489,19 @@ const Entry kZhCN[] = {
     {"cmd.context.next_line_over", "已越线,下一轮发送前会自动压缩"},
     {"cmd.context.last_compact", "最近一次 compact:{0}"},
     {"cmd.context.compact_turns", "compact turn 策略:按 token 平衡 {0} 分;前 {1} 份 map,末份热区"},
+    // ---- Session v3 真实会话审计单(V3-REAL-03/08/A02):v3 会话的 /context 口径 ----
+    {"cmd.context.v3_estimator",
+     "估算口径:v3 主路容量判定按请求快照 utf8_bytes_div4(bytes/4,媒体剥离),不参与在线校准;本卡逐段展示为旧尺参考"},
+    {"cmd.context.last_request_budget",
+     "最近请求预算:窗口 {0} · 声明输出 {1} · 策略预留 {2} · 容量判定预留 {3} · 实发生效限额 {4}"},
+    {"cmd.context.last_request_budget_none",
+     "最近请求预算:本场尚未发请求——上面各行是配置声明口径,不是实际请求记录"},
+    {"cmd.context.v3_result_store",
+     "v3 结果仓:{0} 枚工具结果已存盘 · 全文共 {1} 字节(模型侧收预算内预览,全文按 result_ref 追溯)"},
+    {"cmd.context.v3_result_store_none", "v3 结果仓:本会话尚无存盘的工具结果。"},
+    {"cmd.context.v3_layers_off",
+     "分层占用:结构压缩层 v3 会话未启用(工具结果预览在提交边界定形,请求视图原样重放)"},
+    {"cmd.context.v3_compact_note", "压缩预算:v3 会话 compact 走独立规划器(RunV3Compact),本卡片不预测其摘要目标。"},
     {"cmd.think.current", "当前推理强度: {0}"},
     {"cmd.think.catalog_header", "模型目录声明的档位({0}):"},
     {"cmd.think.provider_header", "provider 声明的档位(请求参数 {0}):"},
@@ -3547,6 +3560,26 @@ const Entry kEn[] = {
      "(the most recent request returned no usage; figures above are from the last measured request. The "
      "status bar shows the same numbers with a ~ prefix)"},
     {"cmd.context.compact_turns", "compact turn strategy: {0} token-balanced partitions; first {1} mapped, last kept as the hot zone"},
+    // ---- Session v3 real-session audit (V3-REAL-03/08/A02): /context v3 wording, zh+en paired ----
+    {"cmd.context.v3_estimator",
+     "estimate basis: the v3 main path gates capacity on the request snapshot via utf8_bytes_div4 (bytes/4, media "
+     "stripped) with no online calibration; per-section figures on this card use the legacy scale for reference"},
+    {"cmd.context.last_request_budget",
+     "last request budget: window {0} · declared output {1} · policy reserve {2} · capacity-decision reserve {3} · "
+     "effective limit {4}"},
+    {"cmd.context.last_request_budget_none",
+     "last request budget: no request sent yet in this session — the lines above are configuration declarations, "
+     "not a record of actual requests"},
+    {"cmd.context.v3_result_store",
+     "v3 result store: {0} tool results persisted · {1} bytes of full content (the model receives in-budget "
+     "previews; full text is traceable via result_ref)"},
+    {"cmd.context.v3_result_store_none", "v3 result store: no persisted tool results in this session yet."},
+    {"cmd.context.v3_layers_off",
+     "layer usage: structural compression is not active in v3 sessions (tool-result previews take shape at the "
+     "commit boundary; the request view replays verbatim)"},
+    {"cmd.context.v3_compact_note",
+     "compact budget: v3 sessions compact through the dedicated planner (RunV3Compact); this card does not "
+     "predict its summary target."},
     // token estimate calibration (calibrated from real usage): pairs with the
     // zh entries above per the house rule.
     {"cmd.context.calibration",

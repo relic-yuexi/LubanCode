@@ -14,6 +14,7 @@
 
 #include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
 #include "agent/context.hpp"        // EstimateUtf8Tokens:request_snapshot 的 token 估算
+#include "agent/context_events.hpp"  // Fingerprint64:prepared 行 inputView 的视图指纹(V3-REAL-06)
 #include "config/config.hpp"
 #include "hooks/hash.hpp"           // Sha256Hex:request_snapshot 的 parameters_hash
 #include "platform/atomic_write.hpp"  // AtomicWriteFile:workflow run 的 definition 快照
@@ -85,6 +86,34 @@ bool OutcomeMapsToCancelled(const agent::ToolTraceEvent& event) {
         default:
             return false;
     }
+}
+
+// 实际发送视图的逐消息指纹(V3-REAL-06):role + 块数 + 各块正文投影
+//(与 session 侧 HistoryStateHash 同款投影标记,非密码学真值;同一份消息
+// 两次算必然同值——离线重放拿它逐块核对"引用还原的正文"与"实际模型
+// 输入"是否一致)。
+std::string RequestMessageViewFingerprint(const api::Message& message) {
+    std::string buffer;
+    buffer += message.role == api::Role::User
+                  ? std::string("U")
+                  : (message.role == api::Role::Assistant ? std::string("A") : std::string("?"));
+    buffer += std::to_string(message.content.size());
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            buffer += "t" + text->text;
+        } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
+            buffer += "k" + thinking->text + thinking->signature;
+        } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
+            buffer += "u" + call->id + call->name + call->input.dump();
+        } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+            buffer += "r" + result->tool_use_id + result->content;
+        } else if (const auto* image = std::get_if<api::ImageBlock>(&block)) {
+            buffer += "i" + image->filename;
+        } else {
+            buffer += "x";
+        }
+    }
+    return agent::Fingerprint64(buffer);
 }
 
 }  // namespace
@@ -1250,6 +1279,27 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
                                                       {"model", request.model}};
     if (request.max_tokens.has_value()) {
         provider_snapshot["parameters"] = nlohmann::json{{"maxOutputTokens", *request.max_tokens}};
+    }
+    // V3-REAL-06(最小可验修复):prepared 的 input_refs 指向链上消息原文,
+    // 而实际发送的 request.messages 是 loop 定形的副本——同批工具结果可能
+    // 合批进一条 User 容器、compact 存档头被收编进 system、图片按 artifact
+    // 重灌。旧账只记引用,离线重放拿引用拼出来的可能是另一份正文。这里给
+    // prepared 行补一册"实际发送视图"的指纹账:消息数与链引用数对账、逐
+    // 消息指纹(role+块序+正文投影)、system 指纹。指纹一致 = 引用还原可
+    // 逐块核对;divergent=true = 视图定形改了表示(合批/收编),按事实记
+    // 账,不假装引用即正文。"先提交采用视图再备请求"的完整链路涉及消息
+    // 主轴重排,不在本单内。
+    {
+        nlohmann::json view = nlohmann::json{{"messageCount", request.messages.size()},
+                                             {"chainRefCount", input_refs.size()},
+                                             {"divergent", request.messages.size() != input_refs.size()}};
+        nlohmann::json fingerprints = nlohmann::json::array();
+        for (const auto& message : request.messages) {
+            fingerprints.push_back(RequestMessageViewFingerprint(message));
+        }
+        view["messageFingerprints"] = std::move(fingerprints);
+        view["systemFingerprint"] = agent::Fingerprint64(request.system);
+        provider_snapshot["inputView"] = std::move(view);
     }
     if (!request.tools.empty()) {
         nlohmann::json tools = nlohmann::json::array();
@@ -4378,6 +4428,41 @@ trajectory::v3::V3Writer* TrajectorySessionLedger::v3_main_writer() {
         return nullptr;
     }
     return &*impl_->active->v3_main;
+}
+
+// v3 结果仓统计(V3-REAL-A02):按仓的记账单位现数——res-*.json 一文件
+// 一枚逻辑工具结果(枚数可核),字节收全部 res-* 伴生文件。captures 原始
+// 捕获仓(capture-*)不混入:那是执行侧原始捕获,不是"工具结果"本体。
+std::optional<TrajectorySessionLedger::V3ResultStoreStats> TrajectorySessionLedger::V3ResultStoreStatsOf()
+    const {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
+        return std::nullopt;  // 非 v3 场:调用方走旧 artifact 口径
+    }
+    V3ResultStoreStats stats;
+    std::error_code ec;
+    const std::filesystem::path artifacts = session_dir() / "artifacts";
+    if (!std::filesystem::exists(artifacts, ec)) {
+        return stats;  // 仓还没开过(尚无超帽结果):0 枚如实
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(artifacts, ec)) {
+        if (ec) {
+            break;
+        }
+        const std::string name = platform::PathToUtf8(entry.path().filename());
+        if (name.rfind("res-", 0) != 0) {
+            continue;
+        }
+        std::error_code size_ec;
+        const auto size = std::filesystem::file_size(entry.path(), size_ec);
+        if (size_ec) {
+            continue;
+        }
+        stats.total_bytes += static_cast<std::uint64_t>(size);
+        if (entry.path().extension() == ".json") {
+            ++stats.results;
+        }
+    }
+    return stats;
 }
 
 // D3(§5.1.2):compact applied 后的内存换账投影。重读主卷(共享读,

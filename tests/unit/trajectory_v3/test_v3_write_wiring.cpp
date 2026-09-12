@@ -26,6 +26,7 @@
 
 #include "agent/loop.hpp"
 #include "agent/tool_trace.hpp"
+#include "agent/context_events.hpp"  // Fingerprint64:V3-REAL-06 inputView 指纹离线重算
 #include "api/anthropic/client.hpp"  // BuildRequestJson:P1-B wire 字段对照
 #include "api/types.hpp"
 #include "platform/paths.hpp"
@@ -1246,4 +1247,139 @@ TEST_CASE("Resume into a new v3 session preserves adopted tool error semantics")
         }
     }
     CHECK(results == 1);
+}
+
+// ---------------------------------------------------------------------------
+// V3-REAL-06(最小可验修复):prepared 行的 inputView 视图账
+// ---------------------------------------------------------------------------
+
+TEST_CASE("prepared 行带实际发送视图的指纹账,引用数与视图数对账") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("v3-real-06-view");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::filesystem::path stream = V3StreamOf(*ledger);
+    const std::string user_text = "列一下目录";
+    const std::string system = "SYSTEM-REAL";
+    std::string request_id;
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge->BeginTurn("turn-1", "external_user");
+        bridge->RecordInput(UserMessage(user_text));
+        request_id =
+            bridge->OnRequestPrepared(MakeRequest(system, {UserMessage(user_text)}), PreparedContext());
+        REQUIRE_FALSE(request_id.empty());
+        bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    }
+    REQUIRE(ledger->CloseSession("exit").error_code.empty());
+
+    // prepared 行:inputView 与 inputMessageRefs 同行;指纹可离线重算
+    //(role + 块数 + 各块正文投影,Fingerprint64),离线重放拿它逐块核对
+    //"引用还原的正文"与"实际模型输入"是否一致。
+    const auto rows = ReadLines(stream);
+    const nlohmann::json* prepared = nullptr;
+    for (const auto& row : rows) {
+        if (row.value("kind", std::string()) == "model.request.prepared") {
+            prepared = &row;
+        }
+    }
+    REQUIRE(prepared != nullptr);
+    const auto& payload = prepared->at("payload");
+    REQUIRE(payload.contains("inputMessageRefs"));
+    REQUIRE(payload.at("inputMessageRefs").size() == 1);
+    REQUIRE(payload.contains("inputView"));
+    const auto& view = payload.at("inputView");
+    CHECK(view.at("messageCount") == 1);
+    CHECK(view.at("chainRefCount") == 1);
+    CHECK(view.at("divergent") == false);
+    REQUIRE(view.contains("messageFingerprints"));
+    REQUIRE(view.at("messageFingerprints").size() == 1);
+    // 单块文本 user 消息的投影 = "U" + 块数 + "t" + 正文。
+    CHECK(view.at("messageFingerprints")[0] ==
+          lubancode::agent::Fingerprint64("U1t" + user_text));
+    CHECK(view.at("systemFingerprint") == lubancode::agent::Fingerprint64(system));
+}
+
+TEST_CASE("视图与链引用数分叉时,prepared 行如实记 divergent") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("v3-real-06-divergent");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::filesystem::path stream = V3StreamOf(*ledger);
+    const std::string user_text = "看看";
+    {
+        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge->BeginTurn("turn-1", "external_user");
+        bridge->RecordInput(UserMessage(user_text));
+        // 链上只有一条 user;请求视图却带两条(合批/收编类定形的缩小件)。
+        // 旧账只记引用,离线重放拼出的消息数就是错的;新账按事实记
+        // divergent=true,重放者能发现并查因,不假装引用即正文。
+        api::Request request = MakeRequest("SYS", {UserMessage(user_text), UserMessage("追加材料")});
+        const std::string request_id = bridge->OnRequestPrepared(request, PreparedContext());
+        REQUIRE_FALSE(request_id.empty());
+        bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    }
+    REQUIRE(ledger->CloseSession("exit").error_code.empty());
+    for (const auto& row : ReadLines(stream)) {
+        if (row.value("kind", std::string()) != "model.request.prepared") {
+            continue;
+        }
+        const auto& view = row.at("payload").at("inputView");
+        CHECK(view.at("messageCount") == 2);
+        CHECK(view.at("chainRefCount") == 1);
+        CHECK(view.at("divergent") == true);
+        REQUIRE(view.at("messageFingerprints").size() == 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// V3-REAL-A02:结果仓统计(/context 的 v3 数据源)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("V3ResultStoreStatsOf:res-* 一 json 一结果,字节收伴生;v2 会话 nullopt") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("v3-real-a02-stats");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+
+    // 仓还没开过:0 枚如实(不是"没有这回事")。
+    {
+        const auto stats = ledger->V3ResultStoreStatsOf();
+        REQUIRE(stats.has_value());
+        CHECK(stats->results == 0);
+        CHECK(stats->total_bytes == 0);
+    }
+
+    // 手造仓的记账单位:两枚结果(各一份 res-*.json 元数据),第二枚带
+    // combined 伴生与 listing 索引——枚数只数 json,字节全收。
+    const auto artifacts = ledger->session_dir() / "artifacts";
+    std::filesystem::create_directories(artifacts);
+    const auto meta1 = artifacts / "res-000001.json";
+    const auto meta2 = artifacts / "res-000002.json";
+    const auto blob2 = artifacts / "res-000002.combined.txt";
+    const auto index2 = artifacts / "res-000002-output-index.txt";
+    {
+        std::ofstream(meta1, std::ios::binary) << std::string(100, 'm');
+        std::ofstream(meta2, std::ios::binary) << std::string(120, 'm');
+        std::ofstream(blob2, std::ios::binary) << std::string(500, 'c');
+        std::ofstream(index2, std::ios::binary) << std::string(30, 'i');
+    }
+    // captures 仓(capture-*)不是结果仓,不混入。
+    std::ofstream(artifacts / "capture-000001.json", std::ios::binary) << std::string(999, 'x');
+
+    const auto stats = ledger->V3ResultStoreStatsOf();
+    REQUIRE(stats.has_value());
+    CHECK(stats->results == 2);
+    CHECK(stats->total_bytes == 100 + 120 + 500 + 30);
+    REQUIRE(ledger->CloseSession("exit").error_code.empty());
+
+    // v2 会话:没有结果仓口径,调用方走旧 artifact 统计,不拿 0 冒充。
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+    const auto v2_root = FreshRoot("v3-real-a02-v2");
+    auto v2_ledger = TrajectorySessionLedger::Open(LedgerOptions(v2_root));
+    REQUIRE(v2_ledger.has_value());
+    CHECK_FALSE(v2_ledger->V3ResultStoreStatsOf().has_value());
+    REQUIRE(v2_ledger->CloseSession("exit").error_code.empty());
 }

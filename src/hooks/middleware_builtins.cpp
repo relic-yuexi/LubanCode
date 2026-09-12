@@ -75,11 +75,29 @@ std::uint64_t ReadNonNegativeInt(const nlohmann::json& object, const char* key) 
 
 }  // namespace
 
+// 计量对象 ≠ 请求快照(V3-REAL-04):§4.36 明令 bytes/4 只数模型输入,
+// 不数日志信封、凭据与 max_output_tokens/temperature 一类非输入设置。
+// 宿主递进来的快照可能带控制参数(BuildRequestSnapshotJson 的 control
+// 子对象)或容量段的宿主字段(tokenEstimate/outputReserveTokens/
+// contextWindowTokens)——这些键只出现在顶层,计量前先摘掉;摘不出
+// 任何输入字段时报给调用方(空对象 dump 仍是 "{}",2 字节,足以暴露
+// 快照形状错了,不静默当 0)。
+constexpr const char* kControlOnlyTopLevelKeys[] = {
+    "control", "max_tokens", "max_output_tokens", "temperature", "top_p",
+    "top_k", "stop_sequences", "stream", "tokenEstimate", "outputReserveTokens",
+    "contextWindowTokens", "declaredMaxOutputTokens", "effectiveOutputLimitTokens",
+    "policyReserveTokens", "protocolHeadroomTokens", "outputLimitOverridden"};
+
 nlohmann::json ComputeUtf8BytesDiv4Estimate(const nlohmann::json& model_input_snapshot) {
     bool saw_media = false;
     std::vector<std::string> modalities;
-    const nlohmann::json measured =
-        StripUnestimatedMedia(model_input_snapshot, &saw_media, &modalities);
+    nlohmann::json measured = model_input_snapshot;
+    if (measured.is_object()) {
+        for (const char* key : kControlOnlyTopLevelKeys) {
+            measured.erase(key);
+        }
+    }
+    measured = StripUnestimatedMedia(measured, &saw_media, &modalities);
     // 紧凑 JSON 序列化即 UTF-8 字节(nlohmann 默认排序键,序列化可复现);
     // 非文本媒体已剥成占位,字节里只剩类型标记。
     const std::string compact = measured.dump();
@@ -116,6 +134,21 @@ nlohmann::json DecideRequestCapacity(const nlohmann::json& capacity_input) {
     out["estimatedInputTokens"] = estimated;
     out["outputReserveTokens"] = reserve;
     out["contextWindowTokens"] = window;
+    // 预算四字段分账(V3-REAL-07):回显进决定,日志/事件据此能把"声明
+    // 上限/策略预留/判定预留/实发限额"各说各的,不再互相冒充。缺键(旧
+    // 调用方直喂 JSON)不补 0——字段带出去才可核,不带不虚造。
+    if (capacity_input.contains("declaredMaxOutputTokens")) {
+        out["declaredMaxOutputTokens"] = capacity_input.at("declaredMaxOutputTokens");
+    }
+    if (capacity_input.contains("policyReserveTokens")) {
+        out["policyReserveTokens"] = capacity_input.at("policyReserveTokens");
+    }
+    if (capacity_input.contains("effectiveOutputLimitTokens")) {
+        out["effectiveOutputLimitTokens"] = capacity_input.at("effectiveOutputLimitTokens");
+    }
+    if (capacity_input.contains("protocolHeadroomTokens")) {
+        out["protocolHeadroomTokens"] = capacity_input.at("protocolHeadroomTokens");
+    }
 
     // 窗口未知(0)不拦:与 loop 老路"窗口未知走兜底"同一态度,容量判断
     // 不制造新的硬闸;装不下时分 recover(压历史有望救)与 reject(当前
