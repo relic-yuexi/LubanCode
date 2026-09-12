@@ -902,6 +902,19 @@ public:
             live.thinking_phase = expanded ? lubancode::cli::ThinkingPhase::ExplicitExpandedRunning
                                            : lubancode::cli::ThinkingPhase::CollapsedRunning;
         }
+        // 收定条目同样按用户档定相位(只改副本):ExplicitExpandedDone 让有效档
+        // 自锁展开(用户展开过的收定思考,完毕不自动收折)——重打若照旧带它,
+        // 用户按"收起"会没反应。每次重打按这一拍的用户档统一定:展开升
+        // ExplicitExpandedDone、收起降 CollapsedDone;本尊 phase 留给落账路
+        // (OnThinkingDone)与 painter 原地改写,互不越界。
+        for (auto& done_item : snapshot) {
+            if (done_item.kind == lubancode::cli::TranscriptKind::Thinking &&
+                (done_item.thinking_phase == lubancode::cli::ThinkingPhase::CollapsedDone ||
+                 done_item.thinking_phase == lubancode::cli::ThinkingPhase::ExplicitExpandedDone)) {
+                done_item.thinking_phase = expanded ? lubancode::cli::ThinkingPhase::ExplicitExpandedDone
+                                                    : lubancode::cli::ThinkingPhase::CollapsedDone;
+            }
+        }
 
         const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
         return lubancode::cli::FormatTranscriptItems(snapshot, theme, width, expanded);
