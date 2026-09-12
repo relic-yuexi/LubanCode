@@ -123,8 +123,8 @@ std::string PlantWriterSession(const std::filesystem::path& sessions_dir, const 
                                                        nlohmann::json{{"type", "text"},
                                                                       {"text", "第二块"}},
                                                    })}};
-        REQUIRE(writer->AppendMessage(std::move(user)).status ==
-                v3::WriteReceipt::Status::Committed);
+        REQUIRE(writer->AppendMessage(std::move(user), v3::Durability::ProcessCrash)
+                    .status == v3::WriteReceipt::Status::Committed);
     }
     if (string_user) {
         MessageDraft user;
@@ -132,15 +132,15 @@ std::string PlantWriterSession(const std::filesystem::path& sessions_dir, const 
         user.purpose = MessagePurpose::Conversation;
         user.turn_id = "turn-2";
         user.message = nlohmann::json{{"role", "user"}, {"content", "字符串的首句"}};
-        REQUIRE(writer->AppendMessage(std::move(user)).status ==
-                v3::WriteReceipt::Status::Committed);
+        REQUIRE(writer->AppendMessage(std::move(user), v3::Durability::ProcessCrash)
+                    .status == v3::WriteReceipt::Status::Committed);
     }
     if (title_event) {
         v3::EventDraft applied;
         applied.kind = v3::EventKindV3::SessionTitleApplied;
         applied.title_generation_id = "titlegen-1";
         applied.payload = nlohmann::json{{"title", "正式标题一"}};
-        REQUIRE(writer->AppendEvent(std::move(applied)).status ==
+        REQUIRE(writer->AppendEvent(std::move(applied), v3::Durability::ProcessCrash).status ==
                 v3::WriteReceipt::Status::Committed);
     }
     return session_id;
@@ -164,7 +164,8 @@ std::string PlantLegacyV3Session(const std::filesystem::path& sessions_dir) {
     user.purpose = MessagePurpose::Conversation;
     user.turn_id = "turn-1";
     user.message = nlohmann::json{{"role", "user"}, {"content", "老档的一句"}};
-    REQUIRE(writer->AppendMessage(std::move(user)).status == v3::WriteReceipt::Status::Committed);
+    REQUIRE(writer->AppendMessage(std::move(user), v3::Durability::ProcessCrash).status ==
+            v3::WriteReceipt::Status::Committed);
     return session_id;
 }
 
