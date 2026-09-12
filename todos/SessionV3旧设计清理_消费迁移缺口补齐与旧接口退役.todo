@@ -132,14 +132,26 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 落点：`src/accounting/session_usage_reader.*`、`usage_projector.*`、`usage_aggregate.*`、usage 命令；复用 v3 usage owner 定义。
 
-- [ ] 流发现走 T00，递归识别正式子 session；Workflow 编排流不冒充模型 session，模型节点按关联单解析。
-- [ ] 从 assistant message 的唯一 usage owner 产 UsageSample；`model.usage.appended` 按当前 schema 只作失败/迟到/更正观察，不二次累计。若以后修改 owner 合同，要先改 schema 和所有消费者，不在此私自相加。
-- [ ] 使用实际 provider/model、purpose、ownerWorkRef 和 request 身份；compact/title/Goal 验收/子代理各记本次真实请求。
-- [ ] physical spend 默认按实际发生请求去重；resume/派生引用不重复计费。需要 lineage 汇总时显式选范围并展示纳入哪些源 session。
-- [ ] 区分 zero、unknown、partial、unsupported/corrupt；未找到可读 v3 流不能 ok=true+空样本伪装零消耗。错误请求的观察用量单列覆盖缺口，不随意升级成 owner。
-- [ ] 缓存输入/输出 reasoning 的归一化沿已有 `TotalInputTokens` 与价目表合同；估算、实报、金额分别显示来源。
+- [x] 流发现走 T00，递归识别正式子 session；Workflow 编排流不冒充模型 session，模型节点按关联单解析。（B1 未落统一读面 API，按派工指令用 `ProbeV3SessionStream`+`ReadV3Ledger`+`WalkSessionTree` 拼最小发现；Workflow 编排流本单不实现，v3 分派不认 workflow 账＝记账阻塞待 T10。）
+- [x] 从 assistant message 的唯一 usage owner 产 UsageSample；`model.usage.appended` 按当前 schema 只作失败/迟到/更正观察，不二次累计。若以后修改 owner 合同，要先改 schema 和所有消费者，不在此私自相加。（`ProjectV3Usage` owner 驱动；appended 进 warnings 单列带数字，不产 sample。）
+- [x] 使用实际 provider/model、purpose、ownerWorkRef 和 request 身份；compact/title/Goal 验收/子代理各记本次真实请求。（provider/wire/model 取自 assistant §4.44 自带；purpose 按 message.purpose 枚举经 `MapV3Purpose`：conversation 分层 MainTurn/SubagentTurn、compact→CompactReduce、action_summary/session_title 直映；goal_evaluation 等 RequestPurpose 无对应者 unmapped 点名不装懂。）
+- [x] physical spend 默认按实际发生请求去重；resume/派生引用不重复计费。需要 lineage 汇总时显式选范围并展示纳入哪些源 session。（v3 只计本树：WalkSessionTree visited 去重，重复 spawn 标 cycle 不计第二遍；resume 源链不在树内默认不并入，lineage 汇总留调用方显式选范围。）
+- [x] 区分 zero、unknown、partial、unsupported/corrupt；未找到可读 v3 流不能 ok=true+空样本伪装零消耗。错误请求的观察用量单列覆盖缺口，不随意升级成 owner。（真零＝合法账零请求 ok=true 空样本；主账验卷不过 ok=false `usage.v3_ledger_unreadable`；子账坏/缺＝warning 点名 partial 其余照读；异版本 `usage.session_format_unsupported`、并存 `usage.session_format_conflict`；sent 无 owner 的失败/未收口请求投 unknown sample，appended 观察单列。）
+- [x] 缓存输入/输出 reasoning 的归一化沿已有 `TotalInputTokens` 与价目表合同；估算、实报、金额分别显示来源。（折算口 `accounting::UsageFromV3Owner` 与 owner_hooks 册同口径对表；cacheRead/cacheWrite 键在场即明报位 true、省键 false；费用仍走 `ApplyCostEstimates` 价目表。）
 
-验收：人工可复算的小账逐请求相等；两层子代理、重复源链、缺实报、迟到实报、内部请求均不漏识别、不重复累计。旧历史材料另标格式，不混入 v3 完整率分母。
+验收：人工可复算的小账逐请求相等；两层子代理、重复源链、缺实报、迟到实报、内部请求均不漏识别、不重复累计。旧历史材料另标格式，不混入 v3 完整率分母。（`tests/unit/accounting/test_v3_session_usage.cpp` 逐项钉；format 字段标 v2/v3。）
+
+```text
+任务编号：T06 / V3-GAP-01
+状态：implementing（代码与测试已落，CI 判绿后改 verified）
+实现：commit 594aff8d（分支 worktree-agent-usage-v3）——src/accounting/session_usage_reader.*（分派+树收集）、usage_projector.*（ProjectV3Usage/UsageFromV3Owner/MapV3Purpose）、app/commands/usage_commands.*（format 上报告）、tests/unit/accounting/test_v3_session_usage.cpp、tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp（生产折算对表）
+生产入口：只读查询（/usage 命令、ReadSessionUsage 消费方）
+验证：新增 unit.accounting.test_v3_session_usage（主账逐笔对账/真零与坏账/两层子代理/重复 spawn 去重/resume 源不混入/迟到实报/compact+goal 内部请求/失败请求/格式分派）与 owner_hooks 对表；CI 未跑——本地禁构建，PR 开出后以三平台 rollup conclusion=success 判绿回填（PR 号与结果见 B2 记账）
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实 v3 会话的真机 /usage 抽验未做；Workflow 模型节点费用归属按关联单（T10）不在本单；估算栏 tokenEstimateRef 离线消费仍待迁移（schema §九原注，归 T07/T14 批次）
+旧依赖：v2 EventEnvelope 读路保留（旧档消费，T02-B 退役）；insights（integrity_gate/prompt_auditor）仍走 v2 路待 T14
+文档：docs/architecture/trajectory-v3-schema.md §九 /usage 行、docs/development/v3-consumer-inventory.md C1 行
+销项日期：待 PR 合并回填
+```
 
 ### T07 / V3-GAP-02：Telemetry
 
