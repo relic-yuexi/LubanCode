@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "service": {
+    "mode": "managed",
+    "listeners": {
+      "stdio": { "enabled": true },
+      "websocket": { "enabled": false },
+      "http": { "enabled": false, "sse": false },
+      "grpc": { "enabled": false },
+      "localIpc": { "enabled": false }
+    },
+    "channelAccounts": [],
+    "queueConsumers": [],
+    "defaultProfile": "zero-tools"
+  },
+  "harnessProfiles": {
+    "zero-tools": {
+      "agentRef": "example.tools:assistant",
+      "features": {
+        "default": "disabled",
+        "enabled": [],
+        "disabled": [
+          "process.exec",
+          "filesystem.write",
+          "browser",
+          "subagents",
+          "ptc",
+          "memory.read",
+          "memory.write",
+          "goal",
+          "loop",
+          "workflow"
+        ]
+      },
+      "components": {},
+      "tools": { "mode": "none", "deny": [] },
+      "exposure": { "default": "direct" },
+      "updates": { "defaultApplyAt": "next_session", "allowSessionExpansion": false },
+      "limits": { "stepsPerInput": 6, "wallTimeMs": 30000, "toolCallsPerInput": 8, "maxOutputTokens": 1200 }
+    }
+  }
+}

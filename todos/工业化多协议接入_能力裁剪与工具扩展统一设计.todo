@@ -35,7 +35,25 @@
 | [SessionV3 异步工具](SessionV3异步工具_任务执行协议配对与结果投递.todo) | 预留 Waiting/Unknown/执行查询；热撤销不破坏配对 | 原生 async、外部任务与结果投递合同 |
 | [失败与恢复](失败与恢复_写账闸门工具结果与重试收口.todo) | 接纳写失败、结果提交失败和不明副作用 | 执行故障与 v3 提交闸门 |
 
-以上文档各有编写日期，旧行号与旧“待实现”判断可能已变。实施时读当前源码；本单不复制旧结论当现状。多租户设计目前是工作区已有未跟踪文件，本轮只读，不替它提交或修改。
+以上文档各有编写日期，旧行号与旧“待实现”判断可能已变。实施时读当前源码；本单不复制旧结论当现状。多租户设计已随 `4e80429a` 进 git，此前"工作区未跟踪文件"的说法作废。
+
+### 2.1 P0 owner 归属账（2026-09-13 逐张对齐）
+
+九张关联单已随 `4e80429a` 全部通读。重复实施任务按下表归属，本单只留消费与验收侧；同义不许两账（合同侧统一收在 `docs/reference/capability-contract.md` §12）：
+
+| 实施事项 | owner 单 | 本单留什么 |
+| --- | --- | --- |
+| 2.0 信封（标准 JSON-RPC）、方法面、clientOperationId 协议语义、事件游标、断线策略 | AppServer接入SessionV3 | 多入口（HTTP/SSE/gRPC/IPC/IM/队列）的领域映射与 toolExecution 反向承载 |
+| SessionFactory／中立装配、Theme 退役、RequestContext、SDK 级 Shutdown | LubanCore与CLI分离（阶段 B/C） | 生产 app-server 装配消费该服务（P1 第三条）；RuntimeBundle 会话级寿命（合同 §7） |
+| AuthenticatedSubject／ResourceScope、租户/项目 ACL、Worker OS 隔离、LocalTrusted/Managed 档 | 多租户隔离 | §5.3／§十三 只引用不展开 |
+| 实例路由、租约/fencing、CapabilitySnapshot 跨节点恢复裁决 | 多用户多节点控制面 | SessionCapabilitySnapshot 字段定义（合同 §6） |
+| IM 入口、durable-before-200、渠道出站投递、平台 SDK 验收 | 多渠道消息接入 | P5 只验"复用操作去重/claim"的接缝 |
+| 扩展 ABI/SPI、manifest、热重载两层快照、在飞安全、注册 generation | 轻量可塑ExtensionRuntime | 工具 canonical 身份与 wire 映射（P3）；冲突拒绝对齐其 §十二 |
+| 提示部件段模型、工具 schema 与能力说明同源 | System拼装Hook(Soul)（P1） | §6.4 引用 |
+| 外部任务等待底座、执行侧 ownerEpoch、结果投递计划 | SessionV3异步工具 | §7.3 的协议回调与执行器租约 |
+| 执行/结果提交闸门、attempt 收口（FA-01..05 已落） | 失败与恢复 | G15 受理真账与 durability 档位口径（合同 §9-10） |
+
+据此修订本单实施清单：P1 第一条"抽中立 RuntimeAssembly 服务"改由 Core 单 B 主刀（见 §十五 标注），本单不另起炉灶；其余条目未发现整条重复，仅按上表加注。
 
 新类型与名字在下文暂拟。能补进已有 SessionService、AgentProfile、PackageSnapshot 的，就补原件。不能因名称不同，另造同义服务、台账或配置体系。
 
@@ -65,6 +83,33 @@
 | G18 | `src/config/settings_local.hpp:20` | permissions.allow_tools 表示免确认名单 | 与“可用工具集合”严格分开；免确认不能增加工具权限 |
 
 当前可确认的是 stdio/WS 的协议代码与若干渠道基础件。未确认当前存在完整 HTTP 业务 API、SSE 业务事件接口、gRPC 服务、通用队列 Worker 或可交付核心 SDK；本单把它们列为新增项，不给“全支持”标签。
+
+### 3.1 P0 盘点栏（2026-09-13，worktree HEAD `4e80429a` 逐锚点实查）
+
+四态口径：**已支持**＝当前 HEAD 已有实现、装配可达；**留位**＝结构在、扩展动作未做；**未装配**＝缺口无实现；**未实测**＝代码在、无真机或平台验证。合同冻结件见 `docs/reference/capability-contract.md`。
+
+| 编号 | 实查锚点（行号为 4e80429a） | 状态 | 部署入口 |
+| --- | --- | --- | --- |
+| G01 | src/app/cli_app.cpp:500-504（`app_server::Server server(..., nullptr)`） | 未装配——生产 headless 以空工厂充当已接工具 | `lubancode --app-server`（stdio）；`--app-server-ws` |
+| G02 | src/app_server/server.cpp:1246（空工厂建空表）、:1257（`system_prompt = "lubancode app-server"` 字面量） | 未装配——会话级运行材料与 Agent 档案未建 | 同上 |
+| G03 | src/app/tool_runtime.hpp:229 构造器收 `cli::Theme&`；src/app/tool_runtime.cpp:447 `StartMcpServers` 构造期启动 | 已支持（终端路）；无终端诊断口留位 | CLI/one-shot 终端装配（app-server 不走此路） |
+| G04 | src/app/tool_runtime.cpp:123 `BuildExploreToolRegistry` 只读表（ReadFile/Search/WebFetch/WebSearch） | 已支持；推广成具名能力计划留位 | Explore 会话档 |
+| G05 | src/agent/agent_definition.hpp:78 `AgentToolRules`（allow 空=继承、deny 胜出）；src/agent/agent_profile_resolver.cpp:167 起过滤 | 已支持（旧 schema）；`mode: inherit/only/none` 未装配（合同已冻结，docs/reference/capability-contract.md §2） | Agent 定义 YAML `tools` 段 |
+| G06 | src/agent/agent.hpp:112 `tool_filter`、:140 `tool_execution_policy`；src/app/tool_runtime.cpp:846 起轮 gate | 已支持（三处过滤各管一段）；共同能力快照未装配 | 装配层逐路注入 |
+| G07 | src/tools/deferred_tool_resolver.hpp:1；src/agent/loop.cpp:2258 `tool_invoke` 解引用 | 已支持（proxy 路）；跨模式同授权/版本钉住留位 | deferral 配置（发现策略） |
+| G08 | src/agent/loop.cpp:408 直名过滤；src/ptc/ptc_tool.cpp:258 PTC 子调用走 `RunOneTool` | 已支持；参数级资源授权未装配 | RunOneTool 正门 |
+| G09 | src/runtime/hook_host_services.cpp:601 hook allowlist、:655 `tool->execute` 直调（不走 RunOneTool） | 已支持（hook 现行路）；中立授权/执行服务未装配 | Lua hook host tools |
+| G10 | src/tools/registry.cpp:13 `Register` 追加、:38 `Find` 取首个 | 已支持（追加式注册）；查重与不可变 generation 未装配 | 全部装配路共用 |
+| G11 | src/package/mount_plan.hpp:20 `MountTargetTable`；src/package/mounting.hpp:1 会话钉快照 | 已支持（信任门+挂载事务，"登记不是放行"已落语义） | Package 四层扫描，启动装配 |
+| G12 | src/app_server/protocol.hpp:52 `kProtocolVersion="1.2"`、:58 附近 `kEmitJsonRpcField=false`；src/app_server/schema.cpp:484 固定 methods 表 | 已支持（1.2 合同）；2.0 显式切版未装配 | stdio/WS 协议出口 |
+| G13 | src/app_server/server.cpp:1806 收线即 `InterruptRunningTurns()`；`connection_` 单句柄（:1810 附近收发） | 已支持（WS 单连接串行）；多连接/scope 订阅未装配 | `--app-server-ws` |
+| G14 | src/runtime/session_service.hpp:147 `SubmitInput`（含 client_operation_id）；src/app_server/server.cpp:1114 旧 `AcceptTurnStart` 未暴露该键 | 已支持（服务层）；旧 turn/start 迁移留位 | app-server thread/start（旧面） |
+| G15 | src/runtime/session_service.cpp:188 `SeedOperationLedger`（台账打不开退内存）、:277 `(void)operations_file_->Append(line)`（写失败忽略；ofstream flush 无档位） | 已支持（降级实现）；完整意图落账/持久 claim 未装配——P1 阻断项（durability 档位与探针清单已冻结，capability-contract.md §9-10） | SessionService::SubmitInput |
+| G16 | src/channel/manager.hpp:46 `ChannelWakeCoordinator`；src/channel/ingress_store.cpp:322 起 journal；src/runtime/channel_session_host.hpp:1 | 已支持（渠道基础件）；逐平台真收发未实测 | channel 域；CLI 普通启动不启用 |
+| G17 | src/runtime/agent_channel_engine.cpp:20 `ApplyChannelToolPolicy`（每层只收窄）；src/channel/channel_router.hpp:55 `ToolRoutePolicy`、:65 `MemoryRoutePolicy`（非 owner 默认关） | 已支持 | 渠道 binding 配置 |
+| G18 | src/config/settings_local.hpp:31 `allow_tools`（免确认名单） | 已支持；与"可用工具集合"分离留位（合同已冻结：不进 E 的任何一层） | `<cwd>/.lubancode/settings.local.json` |
+
+盘点结论：G03-G07、G10-G14、G16-G18 的既有机制可复用，缺口集中在"共同授权快照（G06-G09）、生产装配（G01-G02）、受理真账（G15）、2.0 协议（G12-G13）"四处——与 §十八 的三处最先动手判断一致。
 
 ## 四、共同应用服务与入口分层
 
@@ -589,18 +634,31 @@ fsync/FlushFileBuffers 或等价事务提交是否完成，按选定 durability 
 
 ### P0：合同冻结与真实能力盘点
 
-- [ ] 更新 G01–G18，记录当前 HEAD、部署入口、已支持/留位/未装配/未实测四类状态。
-- [ ] 对齐已有 AppServer、Core、租户、Channel、Extension、Soul、异步工具单；去除重复实施任务，明确各自 owner。
-- [ ] 冻结 ToolPolicySpec、功能名、资源授权、能力快照、反向交互与 2.0 映射；明确旧 schema 转换。
-- [ ] 冻结“一场会话一份 RuntimeBundle”的寿命图、取消顺序、后台引用与资源共享边界。
-- [ ] 确认操作真账迁移与 durability 标准，列出 G15 的错误回执、意图丢失和 claim 恢复探针。
-- [ ] 完成最小测试工具集与零工具两份配置样例，静态解析能解释全部依赖；不接模型也不联网。
+- [x] 更新 G01–G18，记录当前 HEAD、部署入口、已支持/留位/未装配/未实测四类状态。
+- [x] 对齐已有 AppServer、Core、租户、Channel、Extension、Soul、异步工具单；去除重复实施任务，明确各自 owner。
+- [x] 冻结 ToolPolicySpec、功能名、资源授权、能力快照、反向交互与 2.0 映射；明确旧 schema 转换。
+- [x] 冻结“一场会话一份 RuntimeBundle”的寿命图、取消顺序、后台引用与资源共享边界。
+- [x] 确认操作真账迁移与 durability 标准，列出 G15 的错误回执、意图丢失和 claim 恢复探针。
+- [x] 完成最小测试工具集与零工具两份配置样例，静态解析能解释全部依赖；不接模型也不联网。
 
-退出条件：配置和协议 golden 示例通过 schema 校验；所有新接口明确标注设计状态；无同义双台账或同功能两份授权算法。
+#### P0 记账（2026-09-13，worktree HEAD `4e80429a`，随本 PR 提交）
+
+1. G01–G18 盘点：§3.1 盘点栏，逐锚点实查行号（符号如 `RunAppServerMode` cli_app.cpp:500、`SubmitInput` session_service.hpp:147、`AgentToolRules` agent_definition.hpp:78、`ApplyChannelToolPolicy` agent_channel_engine.cpp:20）。验证口径为静态源码审查，未构建未运行——"已支持"指装配可达，不指多协议实测。
+2. 关联单对齐：§2.1 owner 归属账，九张单逐张通读。九张关联单正文未改（无需歧义指针：各单自身已互相引用）；本单 P1 第一条改由 LubanCore 单阶段 B 主刀，P1 第三条保留本单消费侧验收。
+3. 合同冻结：`docs/reference/capability-contract.md`（§2 ToolPolicySpec 含旧 schema 换算表、§4 功能名十六枚、§5 资源授权集合代数、§6 SessionCapabilitySnapshot 字段、§11 反向交互与 2.0 映射）。golden：`tests/fixtures/capability/`（deployment.schema.json、profile.minimal-tools.json、profile.zero-tools.json、appserver-v2.messages.golden.json）。静态测试：`tests/unit/capability/test_capability_contract.cpp`（受限 JSON Schema 校验器 + 新旧不混读 + 依赖解释 + 2.0 信封校验，按 tests/CMakeLists.txt 源码册循环自动注册；册内无 v3 会话用例，不需 EnvGuard）。
+4. RuntimeBundle 寿命：合同 §7（构造序六步、关闭序五步、引用与共享边界三条），与 LubanCore 单 §6.2 关闭合同定好层级咬合。
+5. durability 档位与探针：合同 §9-10。源码符号：`trajectory::Durability`（src/trajectory/event.hpp:79，Buffered/ProcessCrash/PowerLoss 三档已有权威定义）、`FlushFileDurable`（src/trajectory/journal.cpp:26，PowerLoss=fsync/FlushFileBuffers）、`AtomicWriteFile`（src/platform/atomic_write.cpp:105）。定档：受理事实达 PowerLoss 才许回 durable accepted；现 `SessionService::OperationsFile::Append`（session_service.cpp:57，ofstream flush）不达任何声明的档且调用处 `(void)` 忽略返回值（:277）——G15 判定与盘点一致。探针清单 E1-E4/I1-I3/C1-C4 共 11 条，实现归 P1/P2。
+6. 两份配置样例与静态解析：fixtures 两份 + 机器 schema + 测试册 CI 验（解析、schema 校验、依赖全解释、零工具档零启动依赖）。未接模型、未联网、未起监听——与 C01/C02 静态可验部分对齐（运行时行为验收仍留 P2）。
+
+未验边界：全部验证为静态（源码实查 + golden schema 校验测试在 CI 编跑）；未做真进程协议收发、未跑真 MCP 握手、未验 1.2/2.0 实际互操作；G16 渠道平台真收发仍为未实测。PR/CI 链接随合并回填。
+
+CI 回填（2026-09-13）：PR relic-yuexi/LubanCode#56（分支 worktree-agent-proto-p0，head `bcd86fcb`）。ci run 34715882353 rollup conclusion=success（PR 快车道只烧 macos-clang 编译测试腿，linux 矩阵按仓库设计仅在合入 main 后跑）；docs 检查 layout-links-skill-route 绿。`unit.capability.capability_contract` 九个用例全过（含 golden schema 校验、新旧不混读、依赖解释、2.0 信封），全量 476/476 通过。中途两红已就地修：新合同页收录 docs/catalog.txt（孤儿页面检查）；测试册补匿名 namespace 闭括号与 `<cstdint>`；2.0 golden 的 result 通知补 `jsonrpc` 信封字段。
+
+退出条件核对：配置与协议 golden 过 schema 校验（测试册 CI 执法）✔；新接口全标注设计状态（合同每节〔冻结〕/〔拟议〕，样例文件头注明"生产未接线"）✔；无同义双台账（§2.1 归属账 + 合同 §12 owner 表；受理真账单权威=统一进 v3 writer，operations.jsonl 只作迁移来源）✔。
 
 ### P1：补共同装配与可靠接纳
 
-- [ ] 抽中立 RuntimeAssembly 服务；诊断替 Theme，配置/工作目录/凭据显式传递。
+- [ ] 抽中立 RuntimeAssembly 服务；诊断替 Theme，配置/工作目录/凭据显式传递。（owner 归属：主刀在 LubanCore 单阶段 B"抽 SessionFactory 与工具/后端装配，移出 Theme、Spinner、终端 IO"；本单验收生产 app-server 改用该服务后的行为，不另起一套装配。）
 - [ ] 先解析允许组件再启动；RuntimeBundle 明确持有 MCP、插件、backend 和注册表。
 - [ ] 修生产 app-server nullptr 注册工厂和固定提示档；只装选定 Profile，不直接开放全部终端工具。
 - [ ] 生产缺授权、缺工具、依赖启动失败均明拒；可选降级必须写结果并让 Profile 决定能否继续。
@@ -790,3 +848,5 @@ P4a 是宣称“支持协议注入应用侧工具”的必过阶段；P4 仅完�
 - 范围修订：按用户要求移除新项目结构、Agentic RAG 业务方案与业务评测；示例改为通用测试工具，交付门槛只认协议和引擎接入验收。
 
 - 后续设计补充：新增 7.3、P4a 与 I01–I12，正式纳入协议注册和应用侧执行回调。上面的文档检查数量属于原交付记录；本次未实现接口、构建或实测。
+
+- P0 交付（2026-09-13，基线 `4e80429a`）：合同冻结落 `docs/reference/capability-contract.md`（含 owner 归属 §12）；golden 与机器 schema 落 `tests/fixtures/capability/`（4 份）；静态校验册 `tests/unit/capability/test_capability_contract.cpp`（受限 JSON Schema 子集校验器、新旧 ToolPolicy 不混读、依赖全解释、2.0 信封与反向 id 空间）；§2.1 owner 账、§3.1 盘点栏（G01–G18 四态+部署入口）。本 PR 只动文档、fixtures、测试，未动 src/ 生产装配与协议代码；本地未构建未运行，验证交 CI。
