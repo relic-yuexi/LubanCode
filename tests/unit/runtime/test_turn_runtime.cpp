@@ -843,7 +843,7 @@ TEST_CASE("usage 验收: Claude 官方流式形状经 assembler→UsageReport �
     // 验收样本第 1 行的 runtime 侧:EventParser 合并(开头报齐输入侧、
     // 末尾只报 output)→ assembler → UsageReport → StepUsageRecord,
     // 报告状态中途不丢。
-    anthropic::EventParser parser;
+    lubancode::api::anthropic::EventParser parser;
     api::MessageAssembler assembler;
     for (const char* raw : {
              R"({"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":1000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":9000}}})",
