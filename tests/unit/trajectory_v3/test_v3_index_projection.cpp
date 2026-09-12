@@ -224,12 +224,12 @@ TEST_CASE("标题写读接通: v3 场 /title 落 session.title.applied,投影现
     // 真入口开一场(TrajectorySessionLedger,默认 v3),设标题,封口。
     std::string live_id;
     {
-        runtime::TrajectorySessionLedger::Options options;
+        lubancode::runtime::TrajectorySessionLedger::Options options;
         options.workspaces_root = scaffold.root / "workspaces";
         options.workspace_root = scaffold.root / "ws";
         options.workspace_identity = lubancode::workspace::MakeFallbackIdentity(scaffold.root / "ws");
         options.lubancode_version = "0.26.259-test";
-        auto ledger = runtime::TrajectorySessionLedger::Open(options);
+        auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(options);
         REQUIRE(ledger.has_value());
         live_id = ledger->session_id();
         ledger->RecordTitleChanged("手动题名", "旧题");
