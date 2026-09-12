@@ -391,15 +391,13 @@ TEST_CASE("账与回归:失败精修照记 usage,本地标题保住,不触发写
 // 被拦在起名门外——首问自动起名与 /title 全不落账。v3 场必须同 v2 一样
 // 活:LedgerActive 为真、本地起名落账成功、标题真值走
 // session.title.applied。
-TEST_CASE("v3 场起名门: LedgerActive 为真,本地起名落 session.title.applied") {
+TEST_CASE("v3 场起名门: 首问本地起名照常落账(session.title.applied)") {
     V3EnvGuard v3("1");
     TitleFixture fixture;  // 真 ledger,显式 v3 场
     CHECK(fixture.ledger->v3_main_writer() != nullptr);  // 前提:确是 v3
 
-    // 门开:v3 场也认"档子活着"。
-    CHECK(fixture.account->LedgerActive());
-
-    // 本地起名:落账成功才占标题(与 v2 同一条纪律)。
+    // 门开(此前 LedgerActive 只认 v2 main,这里被 NoNeed 拦):本地起名
+    // 落账成功才占标题,与 v2 同一条纪律。
     const LocalResult result = fixture.account->BeginLocalTitle("D:/repo/主仓/readme.md 帮我改一段");
     CHECK(result == LocalResult::Set);
     CHECK(fixture.title.find("readme") != std::string::npos);  // 路径取文件主题
