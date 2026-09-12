@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -34,6 +35,33 @@ namespace {
 using lubancode::app::SessionTitleAccount;
 using LocalResult = SessionTitleAccount::LocalResult;
 using AdoptResult = SessionTitleAccount::AdoptResult;
+
+// 显式钉 v3 开(beta.1 反弹二标题案):构造置值,析构还原旧值——本册
+// 其余案靠 ctest 注入 0 走 v2,清空会漏成"未设=默认 v3"。
+struct V3EnvGuard {
+    explicit V3EnvGuard(const char* value) {
+        if (const char* old = std::getenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS")) {
+            old_value_ = old;
+        }
+#ifdef _WIN32
+        _putenv((std::string("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=") + value).c_str());
+#else
+        setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", value, 1);
+#endif
+    }
+    ~V3EnvGuard() {
+#ifdef _WIN32
+        _putenv((std::string("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=") + old_value_.value_or("")).c_str());
+#else
+        if (old_value_.has_value()) {
+            setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", old_value_->c_str(), 1);
+        } else {
+            unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+        }
+#endif
+    }
+    std::optional<std::string> old_value_;
+};
 
 // 真账本夹具:临时根下开一场 TrajectorySessionLedger——标题事件走
 // control.title.changed(与生产同一条路)。
@@ -357,4 +385,46 @@ TEST_CASE("账与回归:失败精修照记 usage,本地标题保住,不触发写
     CHECK(count.refine_usage == 1);
     CHECK(count.refine_output == 1);
     CHECK(count.turn_overlap == 0);
+}
+
+// beta.1 反弹二(标题全空)根因钉:LedgerActive 此前只认 v2 main,v3 场
+// 被拦在起名门外——首问自动起名与 /title 全不落账。v3 场必须同 v2 一样
+// 活:LedgerActive 为真、本地起名落账成功、标题真值走
+// session.title.applied。
+TEST_CASE("v3 场起名门: LedgerActive 为真,本地起名落 session.title.applied") {
+    V3EnvGuard v3("1");
+    TitleFixture fixture;  // 真 ledger,显式 v3 场
+    CHECK(fixture.ledger->v3_main_writer() != nullptr);  // 前提:确是 v3
+
+    // 门开:v3 场也认"档子活着"。
+    CHECK(fixture.account->LedgerActive());
+
+    // 本地起名:落账成功才占标题(与 v2 同一条纪律)。
+    const LocalResult result = fixture.account->BeginLocalTitle("D:/repo/主仓/readme.md 帮我改一段");
+    CHECK(result == LocalResult::Set);
+    CHECK(fixture.title.find("readme") != std::string::npos);  // 路径取文件主题
+
+    // 真账:v3 主账上长出 session.title.applied(手动/本地来源)。
+    const std::string session_id = fixture.ledger->session_id();
+    const auto stream = fixture.ledger->session_dir() /
+                        (session_id + ".jsonl");
+    bool saw_applied = false;
+    {
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() ||
+                row.value("kind", std::string()) != "session.title.applied") {
+                continue;
+            }
+            saw_applied = true;
+            CHECK(row.contains("titleGenerationId"));
+        }
+    }
+    CHECK(saw_applied);
 }

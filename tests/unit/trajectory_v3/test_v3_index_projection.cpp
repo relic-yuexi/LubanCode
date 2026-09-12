@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include "platform/paths.hpp"
+#include "runtime/trajectory_session.hpp"  // RecordTitleChanged 真入口(标题写读接通案)
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/writer.hpp"
@@ -210,6 +211,60 @@ TEST_CASE("投影: 新档 session.started 的 cwd/run_kind 是权威来源,正�
     CHECK(summary->first_user_text == "块状的首句");  // blocks 数组取首块文本
     CHECK(summary->title == "正式标题一");            // session.title.applied 折叠
     CHECK(summary->message_count == 1);               // 一条 human user
+}
+
+// beta.1 反弹二(标题全空)写侧钉:/title 的 RecordTitleChanged 此前只认
+// v2 main recorder,v3 场是 no-op——用户设过标题也不落账,投影自然空。
+// 本案走真入口:默认 v3 场设标题,账上长出 session.title.applied(手动
+// 来源),索引投影把标题列出来。
+TEST_CASE("标题写读接通: v3 场 /title 落 session.title.applied,投影现标题") {
+    EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    Scaffold scaffold("title-wiring");
+    // 真入口开一场(TrajectorySessionLedger,默认 v3),设标题,封口。
+    std::string live_id;
+    {
+        runtime::TrajectorySessionLedger::Options options;
+        options.workspaces_root = scaffold.root / "workspaces";
+        options.workspace_root = scaffold.root / "ws";
+        options.workspace_identity = lubancode::workspace::MakeFallbackIdentity(scaffold.root / "ws");
+        options.lubancode_version = "0.26.259-test";
+        auto ledger = runtime::TrajectorySessionLedger::Open(options);
+        REQUIRE(ledger.has_value());
+        live_id = ledger->session_id();
+        ledger->RecordTitleChanged("手动题名", "旧题");
+        REQUIRE(ledger->CloseSession("exit").error_code.empty());
+    }
+    // 账面:session.title.applied 带 title/source=manual。
+    bool saw_applied = false;
+    {
+        const auto stream = scaffold.sessions_dir / platform::Utf8ToPath(live_id) /
+                            platform::Utf8ToPath(live_id + ".jsonl");
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() || row.value("kind", std::string()) != "session.title.applied") {
+                continue;
+            }
+            saw_applied = true;
+            REQUIRE(row.contains("titleGenerationId"));
+            CHECK(!row["titleGenerationId"].get<std::string>().empty());
+            CHECK(row["payload"].value("title", std::string()) == "手动题名");
+            CHECK(row["payload"].value("source", std::string()) == "manual");
+        }
+    }
+    REQUIRE(saw_applied);
+    // 投影:索引把标题列出来。
+    SessionIndexQuery query;
+    query.current_workspace_key = scaffold.workspace_key;
+    const auto page = QueryWorkspaceSessions(scaffold.root / "workspaces", query);
+    const WorkspaceSessionSummary* summary = FindSummary(page, live_id);
+    REQUIRE(summary != nullptr);
+    CHECK(summary->title == "手动题名");
 }
 
 TEST_CASE("投影: 老档缺 runKind 读作未知,不暗填、不被单发过滤误伤") {
