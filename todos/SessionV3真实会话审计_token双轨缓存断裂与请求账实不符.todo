@@ -239,4 +239,6 @@
 - 归旧设计清理单 T16 共用实施，本单不动。
 
 ### 验证口径
-- 本地零构建零测试（用户纪律：验证一律交 CI）。全部新测试经 ctest 注册循环自动收册（tests/CMakeLists.txt GLOB 目录制）；涉及 v3 格式的用例（test_v3_write_wiring 两册新例 + 统计册）册内 EnvGuard("1") 显式开 v3。CI 三平台结论见 PR。
+- 本地零构建零测试（用户纪律：验证一律交 CI）。全部新测试经 ctest 注册循环自动收册（tests/CMakeLists.txt GLOB 目录制）；涉及 v3 格式的用例（test_v3_write_wiring 两册新例 + 统计册）册内 EnvGuard("1") 显式开 v3。
+- PR #55（https://github.com/relic-yuexi/LubanCode/pull/55），head 22ea40bd。CI 判绿：活跃 check suite rollup conclusion = success——changes/lane/macos-clang 三腿全 pass（macos 26m13s，含全部新册）。windows-msvc 与 linux-manylinux 腿按 ci.yml 现行编排只在 push 到 main 后把关（lane 的选腿条件 `push && ref==main`），PR 阶段不跑；列表里的 fail 0s 行是 concurrency 撞掉的 cancelled run（假红，实际 conclusion=cancelled）。修红历程：macos 编译红三笔（枚举名 Catalog→ModelCatalog、PreviewCommitHook 已废成员赋值、wire 册漏改 wiring 签名）+ 断言红两笔（应急册单巨果被保命索先裁到不了应急线→改四枚 9k 结果累积触发；预留帽下限常量是 8192 非 8000；/context 册裸数字→与 FormatTokenCount 同尺现算）。
+- 真实 UHURZ3 原档只读参考未复制进仓；测试夹具为脱敏缩小件（2MB 目录清单→200k/36k 字节），保持"超帽输出+多轮 usage 反馈"故障结构。
