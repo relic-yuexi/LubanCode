@@ -211,9 +211,17 @@ std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_report
     if (!last_usage_reported) {
         return tr("status.cache_note_not_reported");
     }
+    const auto& history = tracker.cache_request_history();
+    // C2:usage 在场而读取明细缺席——读取量未知,写"缓存明细未报",
+    // 不冒充 0%(零命中与"没报明细"两码事)。
+    if (!history.empty() && history.back().miss_kind == ContextTracker::CacheMissKind::CacheDetailUnreported) {
+        return tr("status.cache_note_detail_unreported");
+    }
+    if (!history.empty() && history.back().anomalous) {
+        return tr("status.cache_note_anomalous");
+    }
     // 问题 9:零命中先看本地视角——最近一笔诊断说本地前缀稳定而 provider
     // 报零,明写"上游未命中",不让人误以为是自己多发几条冲掉了缓存。
-    const auto& history = tracker.cache_request_history();
     if (!history.empty() && history.back().diagnostics_present &&
         history.back().miss_kind == ContextTracker::CacheMissKind::UpstreamMiss) {
         return tr("status.cache_note_upstream_miss");
@@ -237,6 +245,8 @@ std::string CacheMissKindLabel(ContextTracker::CacheMissKind kind) {
             return tr("cmd.context.cache_miss.upstream");
         case ContextTracker::CacheMissKind::Unreported:
             return tr("cmd.context.cache_miss.unreported");
+        case ContextTracker::CacheMissKind::CacheDetailUnreported:
+            return tr("cmd.context.cache_miss.detail_unreported");
         case ContextTracker::CacheMissKind::Unknown:
             return std::string();  // 诊断未随行:显示层另行说明,不猜
     }
@@ -330,9 +340,15 @@ std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tra
             }
         }
         const std::string diag = BuildCacheDiagSegment(record);
-        if (record.unreported || record.hit_percent() < 0) {
+        if (record.unreported) {
+            // usage 都没回:缺测另记。
             lines.push_back(std::string("      ") +
                             trf("cmd.context.cache_history_row_unreported", record.step_index + 1, diag));
+        } else if (record.hit_percent() < 0) {
+            // usage 在场而比例算不得(读取明细未报/账目异常):数字在案,
+            // 比例不冒充——C2/C4 的显示合同。
+            lines.push_back(std::string("      ") +
+                            trf("cmd.context.cache_history_row_no_ratio", record.step_index + 1, diag));
         } else {
             lines.push_back(std::string("      ") +
                             trf("cmd.context.cache_history_row", record.step_index + 1,
@@ -348,8 +364,14 @@ std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tra
         std::size_t breaks = 0;
         std::size_t upstream = 0;
         std::size_t unreported = 0;
+        std::size_t detail_unreported = 0;
+        std::size_t anomalous = 0;
         bool any_diag = false;
         for (const auto& record : history) {
+            if (record.anomalous) {
+                // 异常样本单列一笔(C4):数字在行里,比例不认它。
+                ++anomalous;
+            }
             if (!record.diagnostics_present) {
                 continue;
             }
@@ -369,6 +391,9 @@ std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tra
                     break;
                 case ContextTracker::CacheMissKind::Unreported:
                     ++unreported;
+                    break;
+                case ContextTracker::CacheMissKind::CacheDetailUnreported:
+                    ++detail_unreported;
                     break;
                 case ContextTracker::CacheMissKind::Unknown:
                     break;
@@ -390,6 +415,8 @@ std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tra
             append(tr("cmd.context.cache_miss.epoch_break"), breaks);
             append(tr("cmd.context.cache_miss.upstream"), upstream);
             append(tr("cmd.context.cache_miss.unreported"), unreported);
+            append(tr("cmd.context.cache_miss.detail_unreported"), detail_unreported);
+            append(tr("cmd.context.cache_miss.anomalous"), anomalous);
             lines.push_back(std::string("  ") + trf("cmd.context.cache_history_tally", tally));
         }
     }

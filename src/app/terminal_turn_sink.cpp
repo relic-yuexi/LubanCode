@@ -132,8 +132,15 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
             report.step_index = event.payload.value("step_index", 0);
             report.provider_response_id = event.payload.value("provider_response_id", std::string());
             report.reported_by_provider = event.payload.value("reported_by_provider", false);
-            report.cache_reported_by_provider =
-                event.payload.value("cache_reported_by_provider", false);
+            // 缓存读/写明报位(缓存用量按 Wire 归一单 C2):新键优先,旧事件
+            // 只有合并位时退回——读=写=合并位(旧口径分不开,如实如此)。
+            report.cache_read_reported_by_provider =
+                event.payload.value("cache_read_reported_by_provider",
+                                    event.payload.value("cache_reported_by_provider", false));
+            report.cache_creation_reported_by_provider =
+                event.payload.value("cache_creation_reported_by_provider",
+                                    event.payload.value("cache_reported_by_provider", false));
+            report.usage_anomaly = event.payload.value("usage_anomaly", std::string());
             report.model = event.payload.value("model", std::string());
             report.cache_epoch = event.payload.value("cache_epoch", 1);
             report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());
@@ -184,7 +191,16 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
                 diag.stable_prefix_messages = report.stable_prefix_messages;
                 diag.total_messages = report.total_messages;
                 diag.wire_common_prefix_bytes = report.wire_common_prefix_bytes;
-                ingredients_.context_tracker->ApplyUsage(report.usage, event.turn_id, report.step_index, diag);
+                // C2 报告位随同一笔递进:usage/读/写明报位与异常位从事件
+                // payload 还原(上面 report 已抄好),tracker 不再靠数字猜。
+                lubancode::cli::ContextTracker::UsageReportFlags flags;
+                flags.known = true;
+                flags.usage_reported = report.reported_by_provider;
+                flags.cache_read_reported = report.cache_read_reported_by_provider;
+                flags.cache_creation_reported = report.cache_creation_reported_by_provider;
+                flags.anomalous = !report.usage_anomaly.empty();
+                ingredients_.context_tracker->ApplyUsage(report.usage, event.turn_id, report.step_index, diag,
+                                                         flags);
                 // usage 一到就把 context/tokens 两段发布给状态行数据源——
                 // 只改数据不落笔(锁与重画事务在 cli::UpdateStatusLineContext
                 // 里),回合内状态栏跟着前进,不必等整轮收口回外层循环重建

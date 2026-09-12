@@ -51,6 +51,21 @@ public:
         std::int64_t wire_common_prefix_bytes = -1;  // 诊断模式:-1 = 未开/不可得
     };
 
+    // provider 报告位(缓存用量按 Wire 归一单 C2):wire 是否明报,与数字
+    // 非零分开递进——"明报零"与"压根没报"靠它分家,不靠数字猜。
+    //   known=false:事件流没带报告位(旧路径/单测),消费端退回数字推断;
+    //   usage_reported:usage 对象真在 wire 上出现过(明报全零也是真);
+    //   cache_read_reported / cache_creation_reported:读/写明细字段各自
+    //   在场与否——只报写入不能证明读取为零;
+    //   anomalous:账目自相矛盾(R>T、负数一类),数字保留原数、比例排除。
+    struct UsageReportFlags {
+        bool known = false;
+        bool usage_reported = false;
+        bool cache_read_reported = false;
+        bool cache_creation_reported = false;
+        bool anomalous = false;
+    };
+
     // miss 分型(问题 9):命中率掉下来时,断在哪一层一眼可辨——
     //   Hit          provider 报了 cached_tokens > 0,这一笔不是 miss;
     //   FirstRequest epoch 首请求,本地就没有可比的前一份,miss 是天然的;
@@ -58,14 +73,20 @@ public:
     //                break_reason 点名是哪根梁;
     //   UpstreamMiss 本地前缀稳定(追加律成立)而 provider 报 cached=0
     //                ——锅不在本地,明写"上游未命中";
+    //   CacheDetailUnreported usage 在场而读取明细缺席(C2):读取量未知,
+    //                显示"缓存明细未报",不冒充 0% 也不猜上游;
     //   Unreported   provider 没回 usage,缺测另记,不冒充 0%。
     // 诊断没随行(diag.present=false)时不分型,显示层写"诊断未随行"。
-    enum class CacheMissKind { Hit, FirstRequest, EpochBreak, UpstreamMiss, Unreported, Unknown };
+    enum class CacheMissKind { Hit, FirstRequest, EpochBreak, UpstreamMiss, Unreported, CacheDetailUnreported, Unknown };
 
-    // 分型判定(纯逻辑,单测钉):优先级 Unreported > FirstRequest >
-    // EpochBreak > UpstreamMiss > Hit——缺测最不该被冒充,本地断因先于
-    // 上游结论(本地断了,上游报什么都不用猜)。
-    static CacheMissKind ClassifyMiss(bool reported, std::int64_t cache_read, const CacheDiagnostics& diag);
+    // 分型判定(纯逻辑,单测钉):优先级 Unreported > CacheDetailUnreported
+    // > FirstRequest > EpochBreak > UpstreamMiss > Hit——缺测最不该被冒充
+    // (usage 缺测先于读取明细缺测),本地断因先于上游结论(本地断了,上游
+    // 报什么都不用猜)。usage_reported 取"provider 明报 OR 数字非零兜底"
+    // 之后的合成值;cache_read_reported 同理(报告位是主路,数字非零是
+    // legacy 兜底——非零的读取本身就是证据)。
+    static CacheMissKind ClassifyMiss(bool usage_reported, bool cache_read_reported,
+                                      std::int64_t cache_read, const CacheDiagnostics& diag);
 
     // 用最近一次请求的 usage 覆盖当前占用(input_tokens + cache_read_tokens +
     // cache_creation_tokens + output_tokens),不是累加——理由见文件头注释。
@@ -98,7 +119,14 @@ public:
         ApplyUsage(usage, turn_id, step_index, CacheDiagnostics{});
     }
     void ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
-                    const CacheDiagnostics& diag);
+                    const CacheDiagnostics& diag) {
+        ApplyUsage(usage, turn_id, step_index, diag, UsageReportFlags{});
+    }
+    // 最全一路(C2):provider 报告位随行——flags.known=false 时全部按旧路
+    // 数字推断,行为与三参版逐字节一致;真带了就按明报位说话,"明报零"
+    // 不再被数字全零吞掉。
+    void ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
+                    const CacheDiagnostics& diag, const UsageReportFlags& flags);
 
     // 最近一次"请求结束"是否没有带回实测 usage(旧值标记)。一次实测都没
     // 发生过(刚启动,current_tokens 还是 0)时为 false——那时也没有数字
@@ -163,7 +191,8 @@ public:
     static constexpr std::size_t kCacheHistorySize = 12;
 
     // 逐请求记录:问题 5 的 turn_id/step_index/unreported 之上,问题 9 再
-    // 抄入每请求诊断账(见类头的 CacheDiagnostics)与 miss 分型。
+    // 抄入每请求诊断账(见类头的 CacheDiagnostics)与 miss 分型;缓存用量
+    // 按 Wire 归一单 C2 又抄入读/写明报位与异常位。
     struct CacheRequestRecord {
         std::int64_t input_tokens = 0;      // 该次请求完整输入(TotalInputTokens)
         std::int64_t cache_read_tokens = 0; // 该次请求缓存命中
@@ -175,6 +204,14 @@ public:
         int step_index = 0;
         // 该次请求 provider 没回 usage(缺测):显示层写"未回报",不冒充 0%。
         bool unreported = false;
+        // ---- C2 报告位(由 ApplyUsage 从 UsageReportFlags 抄入) ----
+        // usage 在场而读取明细缺席:读取量未知,显示"缓存明细未报",
+        // 命中率照 -1 处理,不冒充 0%。
+        bool cache_read_reported = false;
+        // 写入明细在场与否(只报写入不能证明读取为零,两位各自独立)。
+        bool cache_creation_reported = false;
+        // 账目自相矛盾(负数、R>T 一类):数字保留原数,比例排除。
+        bool anomalous = false;
         // ---- 问题 9 诊断账(由 ApplyUsage 从 CacheDiagnostics 抄入) ----
         bool diagnostics_present = false;   // false = 该路径没带诊断(显示层另写)
         int cache_epoch = 1;
@@ -188,9 +225,14 @@ public:
         std::size_t total_messages = 0;
         std::int64_t wire_common_prefix_bytes = -1;
         CacheMissKind miss_kind = CacheMissKind::Unknown;
-        // 该次请求命中率(百分比,四舍五入);input 为 0(含未回报)时返回 -1。
+        // 该次请求命中率(百分比,四舍五入);input 为 0(含未回报)、读取
+        // 明细未报(cache_read_reported=false 且数字为 0——读取量未知)或
+        // 样本异常时返回 -1:这三种都不是"0% 命中",不许冒充。
         int hit_percent() const {
-            if (input_tokens <= 0) {
+            if (input_tokens <= 0 || anomalous) {
+                return -1;
+            }
+            if (cache_read_tokens <= 0 && !cache_read_reported) {
                 return -1;
             }
             const double ratio = static_cast<double>(cache_read_tokens) /

@@ -135,8 +135,15 @@ struct StepUsageRecord {
     std::int64_t output_tokens = 0;
     std::int64_t reasoning_tokens = 0;  // output 里的 reasoning 拆账(含在 output_tokens)
     bool reported = false;             // provider 是否明报整份 usage
-    bool cache_reported = false;       // provider 是否明报 cache token 明细
-    std::string epoch_break_reason;    // 空 = 本步没断 epoch
+    // 读/写明报位分开(缓存用量按 Wire 归一单 C2):读取、写入各自记——
+    // 只报写入不能证明读取为零;两位皆 false = 缓存明细未知。
+    bool cache_read_reported = false;
+    bool cache_creation_reported = false;
+    // provider 账目自相矛盾(R>T、负数、hit+miss 与总数不符一类):数字
+    // 保留原数,精确比例把这笔排除、点名——不截零不截到 100% 掩盖。
+    bool anomalous = false;
+    std::string anomaly_note;           // anomalous 时的人话(空串 = 自洽)
+    std::string epoch_break_reason;     // 空 = 本步没断 epoch
 
     // ---- 四层生命周期单 P1:Step 身份、尝试与耗时明细 ----
     // step_id/turn_id:稳定身份("step-N"/"turn-N")。step_id 在 Agent 域
@@ -160,10 +167,11 @@ struct StepUsageRecord {
         return input_tokens + cache_read_tokens + cache_creation_tokens;
     }
 
-    // 本步命中率(百分比);没实测(reported=false 或总输入 0)返回 -1,
-    // 显示层写"服务端未回报",不许拿 0 冒充真未命中。
+    // 本步命中率(百分比);没实测(reported=false 或总输入 0)或账目自相
+    // 矛盾(anomalous——负数、R>T 一类,比例算出来只会骗人)返回 -1,
+    // 显示层写"服务端未回报/样本异常",不许拿 0 冒充真未命中。
     int cache_hit_percent() const {
-        if (!reported || total_input_tokens() <= 0) {
+        if (!reported || anomalous || total_input_tokens() <= 0) {
             return -1;
         }
         const double ratio =
@@ -198,9 +206,15 @@ struct TurnUsageStats {
         record.stop_reason = report.stop_reason;
         // 显式位是主路；聚合初始化的旧测试/旧调用方仍可由非零数字兼容。
         record.reported = report.reported_by_provider || report.reported();
-        record.cache_reported = report.cache_reported_by_provider ||
-                                report.usage.cache_read_tokens > 0 ||
-                                report.usage.cache_creation_tokens > 0;
+        // 读/写明报位各自分开(C2),各自留非零数字兜底:只报写入不能证明
+        // 读取为零;明报零与没报靠显式位分家,数字推断只是旧路兜底。
+        record.cache_read_reported = report.cache_read_reported_by_provider ||
+                                     report.usage.cache_read_tokens > 0;
+        record.cache_creation_reported = report.cache_creation_reported_by_provider ||
+                                         report.usage.cache_creation_tokens > 0;
+        // 异常账(C4):矛盾样本保留原数、精确比例排除。
+        record.anomalous = !report.usage_anomaly.empty();
+        record.anomaly_note = report.usage_anomaly;
         record.epoch_break_reason = report.epoch_break_reason;
         steps.push_back(std::move(record));
     }
@@ -246,20 +260,43 @@ struct TurnUsageStats {
     }
 
     // 整轮命中率(百分比,四舍五入);分母只取输入,按 token 总和重算。
-    // 一笔实测都没有(全没回报)时返回 -1,显示层写"服务端未回报"。
+    // 异常样本(anomalous,账目自相矛盾)不计入分子分母——比例只对自洽
+    // 样本算,排除数另见 anomalous_count();一笔有效样本都没有返回 -1,
+    // 显示层写"服务端未回报",不许拿 0 冒充真未命中。
     int cache_hit_percent() const {
-        if (total_input_tokens() <= 0) {
+        std::int64_t read = 0;
+        std::int64_t input = 0;
+        for (const auto& step : steps) {
+            if (step.anomalous) {
+                continue;
+            }
+            read += step.cache_read_tokens;
+            input += step.total_input_tokens();
+        }
+        if (input <= 0) {
             return -1;
         }
-        const double ratio = static_cast<double>(cache_read_tokens()) / static_cast<double>(total_input_tokens()) * 100.0;
+        const double ratio = static_cast<double>(read) / static_cast<double>(input) * 100.0;
         return static_cast<int>(ratio + 0.5);
+    }
+
+    // 异常样本数(显示层列排除数,保留查账入口:原始数字都在 steps 里)。
+    std::size_t anomalous_count() const {
+        std::size_t n = 0;
+        for (const auto& step : steps) {
+            if (step.anomalous) {
+                ++n;
+            }
+        }
+        return n;
     }
 
     // 整轮里哪怕一笔 usage 是实测的就算 true——全没回报时统计行按
     // "usage 未报告"收场,不拿 0 命中糊(缓存诊断单四态里的 not_reported)。
+    // 口径(C2):这里问的是"读取明细",读/写明报位分开后以读取为准。
     bool any_cache_reported() const {
         for (const auto& step : steps) {
-            if (step.cache_reported) {
+            if (step.cache_read_reported) {
                 return true;
             }
         }
@@ -273,7 +310,7 @@ struct TurnUsageStats {
                 continue;
             }
             saw_usage = true;
-            if (!step.cache_reported) {
+            if (!step.cache_read_reported) {
                 return false;
             }
         }
@@ -297,11 +334,11 @@ struct TurnUsageStats {
         return n;
     }
 
-    /// 报了 usage 且缓存明细字段在场的请求数。
+    /// 报了 usage 且缓存读取明细在场的请求数(C2:读/写分开后按读取算)。
     std::size_t cache_reported_count() const {
         std::size_t n = 0;
         for (const auto& step : steps) {
-            if (step.reported && step.cache_reported) {
+            if (step.reported && step.cache_read_reported) {
                 ++n;
             }
         }

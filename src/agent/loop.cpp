@@ -1902,7 +1902,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     wiring.boundary_recorder->OnUsageRecorded(
                         trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id,
                         step_prefix_account.cache_epoch, step_prefix_account.append_only,
-                        assembler.cache_seen());
+                        assembler.cache_read_seen(), assembler.cache_creation_seen(),
+                        assembler.usage_anomaly());
                     const OutputCancelSource cancel_source =
                         cancel != nullptr && cancel->load() ? OutputCancelSource::UserInterrupt
                                                            : OutputCancelSource::StreamError;
@@ -1989,7 +1990,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                                       assembler.usage_seen(), stream_request_id,
                                                       step_prefix_account.cache_epoch,
                                                       step_prefix_account.append_only,
-                                                      assembler.cache_seen());
+                                                      assembler.cache_read_seen(),
+                                                      assembler.cache_creation_seen(),
+                                                      assembler.usage_anomaly());
             if (!wiring.boundary_recorder->OnOutputCompleted(trajectory_request_id, assistant_message,
                                                              stop_reason, stream_request_id)) {
                 return std::unexpected("轨迹账写盘失败,模型输出未落账,不执行工具");
@@ -2048,9 +2051,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         report.epoch_break_reason = step_epoch_break_reason;
         report.prefix_append_only = step_prefix_append_only;
         // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
-        // 明报全零也是真,没报不许拿 0 冒充。
+        // 明报全零也是真,没报不许拿 0 冒充。缓存读/写明报位分开(C2):
+        // 只报写入不能证明读取为零,两位各自随报告传递。
         report.reported_by_provider = assembler.usage_seen();
-        report.cache_reported_by_provider = assembler.cache_seen();
+        report.cache_read_reported_by_provider = assembler.cache_read_seen();
+        report.cache_creation_reported_by_provider = assembler.cache_creation_seen();
+        report.usage_anomaly = assembler.usage_anomaly();
         // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
         // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
         // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。

@@ -159,10 +159,16 @@ public:
         (void)delta_type;
         (void)text;
     }
+    // cache_read_reported_by_provider / cache_creation_reported_by_provider
+    // (缓存用量按 Wire 归一单 C2):读/写明报位分开传递——只报写入不能证明
+    // 读取为零。旧调用方省参时两位皆 false(未报),与从前单布尔缺省同貌。
+    // usage_anomaly:provider 账目自相矛盾的人话(空 = 自洽),数字保留原数。
     virtual void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                  bool reported_by_provider, const std::string& provider_response_id,
                                  int cache_epoch = 0, bool prefix_append_only = true,
-                                 bool cache_reported_by_provider = false) = 0;
+                                 bool cache_read_reported_by_provider = false,
+                                 bool cache_creation_reported_by_provider = false,
+                                 const std::string& usage_anomaly = std::string()) = 0;
     // 返回 false = 输出事实没写稳,loop 不执行工具(§7.4"model output
     // 记不住,不执行工具"),本步明败。
     virtual bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,

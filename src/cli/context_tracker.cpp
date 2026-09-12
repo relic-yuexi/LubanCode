@@ -8,10 +8,17 @@ namespace lubancode::cli {
 
 ContextTracker::ContextTracker(std::size_t window_tokens) : window_tokens_(window_tokens) {}
 
-ContextTracker::CacheMissKind ContextTracker::ClassifyMiss(bool reported, std::int64_t cache_read,
+ContextTracker::CacheMissKind ContextTracker::ClassifyMiss(bool usage_reported, bool cache_read_reported,
+                                                           std::int64_t cache_read,
                                                            const CacheDiagnostics& diag) {
-    if (!reported) {
+    if (!usage_reported) {
         return CacheMissKind::Unreported;  // 缺测最优先:不冒充 0%,也不猜断因
+    }
+    // usage 在场而读取明细缺席(C2):读取量未知——既不是命中也不是上游
+    // 没接住,先记"明细未报",不猜。读取数字非零时不算这类(非零本身
+    // 就是证据,调用方已把它并进 cache_read_reported)。
+    if (!cache_read_reported && cache_read <= 0) {
+        return CacheMissKind::CacheDetailUnreported;
     }
     if (diag.epoch_first_request) {
         return CacheMissKind::FirstRequest;
@@ -19,7 +26,7 @@ ContextTracker::CacheMissKind ContextTracker::ClassifyMiss(bool reported, std::i
     if (!diag.prefix_append_only) {
         return CacheMissKind::EpochBreak;  // 本地断因先于上游结论
     }
-    // 本地前缀稳定(追加律成立):报了命中就是命中,报零就是上游没接住。
+    // 本地前缀稳定(追加律成立):报了命中是命中,报零是上游没接住。
     return cache_read > 0 ? CacheMissKind::Hit : CacheMissKind::UpstreamMiss;
 }
 
@@ -38,28 +45,45 @@ void ContextTracker::Update(const api::Usage& usage) {
 }
 
 void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
-                                const CacheDiagnostics& diag) {
+                                const CacheDiagnostics& diag, const UsageReportFlags& flags) {
     // 四项全零 = provider 没在流末给 usage(见头文件注释):不清零、不
-    // 覆盖,现有数字原样保住,只标旧值。
+    // 覆盖,现有数字原样保住,只标旧值。C2 后"明报全零"另有 flags 说话
+    // ——flags.known 时 usage_reported 才是权威,数字全零不再被当成没报。
     const bool measured = usage.input_tokens > 0 || usage.output_tokens > 0 ||
                           usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0 ||
                           usage.output_reasoning_tokens > 0;
+    // 报告位合成:显式位是主路;没带(旧路径/单测)退回数字推断。读取位
+    // 再并一道"数字非零"兜底——非零的读取本身就是证据。
+    const bool usage_reported = flags.known ? flags.usage_reported : measured;
+    const bool cache_read_reported =
+        (flags.known ? flags.cache_read_reported : measured) || usage.cache_read_tokens > 0;
     if (measured) {
         Update(usage);
-        // 本场累计(命中率分子分母):只认实测到的这笔,跨轮不清零。
-        session_cache_read_total_ += usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
-        session_input_total_ += api::TotalInputTokens(usage);
+        // 本场累计(命中率分子分母):只认实测到且自洽的这笔,跨轮不清零。
+        // 异常样本(矛盾账)不进分子分母——比例只对自洽样本算。
+        if (!flags.anomalous) {
+            session_cache_read_total_ += usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
+            session_input_total_ += api::TotalInputTokens(usage);
+        }
+        usage_stale_ = false;
+    } else if (flags.known && flags.usage_reported) {
+        // provider 明报了 usage 而五项皆零:数字没变,但不是"没报"——
+        // 不标旧值(那是给缺测的),照实当一次零实测。
         usage_stale_ = false;
     }
     // 逐请求历史:一次模型请求一笔,实测与缺测都记(缺测标 unreported,
     // 显示层写"未回报"),环形缓冲保留最近 kCacheHistorySize 次。总账
     // 不跟着环形挤,显示层拿它写"全会话共 N 次",12 不冒充总数。
     // 问题 9:同一笔把诊断账抄进去并分型——本地前缀稳不稳、断在哪层,
-    // 面板不再让人猜。
+    // 面板不再让人猜。C2:读/写明报位与异常位一并抄入。
     CacheRequestRecord record;
     record.turn_id = turn_id;
     record.step_index = step_index;
-    record.unreported = !measured;
+    record.unreported = !usage_reported;
+    record.cache_read_reported = cache_read_reported;
+    record.cache_creation_reported =
+        (flags.known ? flags.cache_creation_reported : false) || usage.cache_creation_tokens > 0;
+    record.anomalous = flags.anomalous;
     if (measured) {
         record.input_tokens = api::TotalInputTokens(usage);
         record.cache_read_tokens = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
@@ -76,7 +100,7 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
         record.stable_prefix_messages = diag.stable_prefix_messages;
         record.total_messages = diag.total_messages;
         record.wire_common_prefix_bytes = diag.wire_common_prefix_bytes;
-        record.miss_kind = ClassifyMiss(measured, usage.cache_read_tokens, diag);
+        record.miss_kind = ClassifyMiss(usage_reported, cache_read_reported, usage.cache_read_tokens, diag);
     }
     cache_history_.push_back(std::move(record));
     if (cache_history_.size() > kCacheHistorySize) {
@@ -86,7 +110,7 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
     // 陌生 turn_id(没走过 BeginUserTurn 的路径,如单发/续跑)自动补号,
     // 标签留空;显示层按"未登记"措辞,不猜内容。
     RegisterTurnIfMissing(turn_id);
-    if (!measured) {
+    if (!usage_reported) {
         usage_stale_ = true;
     }
 }
