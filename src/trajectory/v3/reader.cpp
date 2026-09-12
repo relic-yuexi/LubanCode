@@ -1724,7 +1724,13 @@ std::vector<Schema3Error> ValidateAsyncToolSequence(const V3Ledger& ledger) {
                 actions_with_call_evidence.insert(*event.action_id);
             }
         }
+        // 投递族自身不算该 Action 的存在证据——否则 prepared 先把自己
+        // 的 actionId 记进集合,unknown_action 永远不响(自证)。证据只认
+        // 更早的 tool.execution/tool.result/tool.job 事件。
         if (event.action_id.has_value() &&
+            event.kind != K::ToolDeliveryPrepared &&
+            event.kind != K::ToolDeliveryAcknowledged &&
+            event.kind != K::ToolDeliveryUncertain &&
             std::string_view(EventKindV3Name(event.kind)).substr(0, 5) == "tool.") {
             tool_domain_actions.insert(*event.action_id);
         }

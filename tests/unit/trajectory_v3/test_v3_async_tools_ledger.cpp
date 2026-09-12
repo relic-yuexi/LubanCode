@@ -642,8 +642,8 @@ TEST_CASE("能力快照:unknown fail-closed,verified 放行,unsupported 禁用")
 
     AsyncModeDecision second = DecideAsyncModes(snapshots[1]);
     CHECK(second.native_deferred_allowed);
-    CHECK(second.job_handle_reason.empty());
-    CHECK_FALSE(second.job_handle_allowed);  // 明示 unsupported 才禁
+    CHECK_FALSE(second.job_handle_reason.empty());  // unsupported 带拒因
+    CHECK_FALSE(second.job_handle_allowed);         // 明示 unsupported 才禁
 
     // 缺项按 unknown 处理(fail-closed),不静默放行。
     ToolCapabilitySnapshotView partial;
