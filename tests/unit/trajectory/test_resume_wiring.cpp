@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,8 +29,13 @@ using namespace lubancode::runtime;
 namespace {
 
 // 摘掉/钉上格式变量(本册默认随 ctest 注入 0 走 v2;个别案子要钉默认 v3)。
+// 析构还原旧值而非清空——ctest 注入的 0 漏成"未设"会把后续案子悄悄翻
+// 到默认 v3(本册是 v2 册,曾因此红)。
 struct EnvSetter {
     explicit EnvSetter(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) {
+            old_value_ = old;
+        }
 #ifdef _WIN32
         _putenv((std::string(name_) + "=" + value).c_str());
 #else
@@ -37,13 +43,20 @@ struct EnvSetter {
 #endif
     }
     ~EnvSetter() {
+        const std::string restore =
+            old_value_.has_value() ? (std::string(name_) + "=" + *old_value_) : (std::string(name_) + "=");
 #ifdef _WIN32
-        _putenv((std::string(name_) + "=").c_str());
+        _putenv(restore.c_str());
 #else
-        unsetenv(name_);
+        if (old_value_.has_value()) {
+            setenv(name_, old_value_->c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
 #endif
     }
     const char* name_;
+    std::optional<std::string> old_value_;
 };
 
 std::filesystem::path MakeRoot(const char* tag) {
@@ -64,11 +77,12 @@ TrajectorySessionLedger::Options LedgerOptions(const std::filesystem::path& root
     return options;
 }
 
-// 用账本自己的桥写一轮真 turn(比手拼事件更贴运行时路径)。
-void DriveOneTurn(TrajectorySessionLedger& ledger) {
+// 用账本自己的桥写一轮真 turn(比手拼事件更贴运行时路径)。turn id
+// 可换:同一场第二次写必须换号(Recorder 状态机查重,turn_duplicate 拒)。
+void DriveOneTurn(TrajectorySessionLedger& ledger, const char* turn_id = "turn-0001") {
     auto bridge = ledger.NewTurnBridge({});
     REQUIRE(bridge != nullptr);
-    bridge->BeginTurn("turn-0001", "external_user");
+    bridge->BeginTurn(turn_id, "external_user");
     api::Message user;
     user.role = api::Role::User;
     user.content.push_back(api::TextBlock{.text = "接线一轮"});
@@ -250,7 +264,7 @@ TEST_CASE("ResumeInteractive 预检失败保住当前场: 源不存在明拒,场
         ledger->ResumeInteractive("20990101-000000-NOSUCH", "resume");
     CHECK(missing.outcome.error_code == "resume.source_not_found");
     CHECK(ledger->session_id() == current_id);  // 没封场没换场
-    DriveOneTurn(*ledger);                      // 当前场还能写
+    DriveOneTurn(*ledger, "turn-0002");         // 当前场还能写(换 turn 号,查重不撞)
     CHECK(ledger->session_id() == current_id);
 }
 

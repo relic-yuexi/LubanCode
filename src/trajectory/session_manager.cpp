@@ -2052,10 +2052,16 @@ SessionManager::ResumeSourceProbe SessionManager::ProbeResumeSource(
             }
         }
     }
-    // 活锁在外进程:默认拒绝(§10.4 末段)。
-    if (const auto holder = SessionLock::Inspect(source_dir); holder.has_value()) {
-        if (ProbeLockHolder(*holder) == LockHolderState::Alive) {
-            return fail("resume.source_locked", "source session 仍被别的进程持写锁");
+    // 活锁在外进程:默认拒绝(§10.4 末段)。本 manager 自己的 active 场
+    // 例外——交互 /resume 的 source 就是当前场(马上要 Close 它),锁在
+    // 本进程手里不算外部锁;ResumeAsNew 的七步在 Close 之后跑,不受影响。
+    const bool source_is_own_active =
+        active_.has_value() && active_->session_id() == source_id;
+    if (!source_is_own_active) {
+        if (const auto holder = SessionLock::Inspect(source_dir); holder.has_value()) {
+            if (ProbeLockHolder(*holder) == LockHolderState::Alive) {
+                return fail("resume.source_locked", "source session 仍被别的进程持写锁");
+            }
         }
     }
     return probe;
