@@ -1,0 +1,48 @@
+name: windows-build-profile
+
+on:
+  push:
+    branches: [codex/windows-build-profile]
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch bundled ripgrep
+        shell: bash
+        run: bash scripts/fetch_ripgrep.sh --target rg-stage --platform windows-x64 --cache rg-cache
+      - uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-windows-msvc-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-windows-msvc-
+      - name: Configure (same route as production CI)
+        shell: bash
+        run: |
+          set -ex
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec"
+          if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
+               -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
+            echo "configured with vcpkg"
+          else
+            rm -rf build/CMakeCache.txt build/CMakeFiles
+            cmake -B build -S . $COMMON_FLAGS
+          fi
+      - name: Profile build
+        shell: pwsh
+        run: ./scripts/profile_windows_build.ps1
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-profile
+          path: build/profile
+          if-no-files-found: warn
