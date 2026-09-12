@@ -923,6 +923,10 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
         query.limit = 0;
         const auto page = ledger->ListWorkspaceSessions(query);
         if (page.entries.empty()) {
+            if (!page.diagnostic.empty()) {
+                TermOut() << trf("cmd.sessions.query_failed", page.diagnostic) << "\n";
+                return;
+            }
             TermOut() << tr("cmd.sessions.archived_none") << "\n";
             return;
         }

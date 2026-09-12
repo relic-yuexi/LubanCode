@@ -257,7 +257,7 @@ TEST_CASE("ResumeInteractive 预检失败保住当前场: 源不存在明拒,场
 // R2+R3:one_shot 写读接通——one_shot 场的 v3 账带 runKind=one_shot,
 // 交互 resume 的预检认出明拒,当前场保住;main_session 源照常可续。
 TEST_CASE("默认 v3: one_shot 源预检明拒,普通 v3 源照常续接") {
-    EnvSetter unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    EnvSetter set_v3("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = MakeRoot("oneshot-v3");
 
     // 造两场源:一场普通、一场 one_shot(写侧把 runKind 落进 session.started)。
