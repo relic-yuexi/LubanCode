@@ -90,6 +90,7 @@
     },
     {
       "direction": "executor->engine",
+      "jsonrpc": "2.0",
       "method": "toolExecution/result",
       "params": {
         "executionId": "exec-5",
