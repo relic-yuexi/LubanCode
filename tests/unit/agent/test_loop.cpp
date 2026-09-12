@@ -2676,3 +2676,61 @@ TEST_CASE("B2 impossible closed batch persists once then stops before a second r
     CHECK(executed->call_count == 3);
     CHECK(backend.captured_requests.size() == 1);
 }
+
+TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预留") {
+    // 旧病现场(request-000022):loop 应急把本请求输出预留收窄到 ~6k 放行
+    // 收尾,PreRequest 容量 Hook 却还拿收窄前的策略预留(12.5k)——同一份
+    // 输入在 Hook 侧变成"装不下",已放行的请求被最后一道闸拦下。新账:
+    // Hook 收冻结预算快照,判定吃 final_reserve_tokens(应急/覆盖后的值),
+    // 声明/策略/实发分字段对照。
+    FakeBackend backend;  // 不开 serialize_adapter_input:v2 旧路的预检/应急分支
+    std::vector<api::StreamEvent> call{api::MessageStart{"m", "test-model"},
+                                       api::ToolUseStart{0, "call-1", "big_tool"},
+                                       api::ToolUseInputDelta{0, "{}"},
+                                       api::ContentBlockDone{0},
+                                       api::MessageDone{"tool_use", api::Usage{}}};
+    backend.scripts = {call, TextOnlyScript("收尾")};
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("big_tool",
+                                                 tools::Tool::Result{std::string(360000, 'x'), false},
+                                                 /*needs_confirm=*/false));
+    // 窗口 100k:预留帽 = clamp(100k/8, 8k, 32k) = 12.5k;声明 80k(Catalog
+    // 源,吃帽)。工具结果 360k 字节 ≈ 90k token:输入 + 12.5k 超窗触发
+    // 应急;输入 + 6.25k(EmergencyOutputReserveTokens(100k))在线内 →
+    // 应急放行。Hook 侧第二枚 budget 必须拿 6.25k,不是 12.5k。
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    profile.runtime.context_window_tokens = 100000;
+    profile.runtime.max_output_tokens = 80000;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::Catalog;
+    agent::Agent loop(backend, registry, profile);
+    agent::TurnWiring wiring;
+    std::vector<runtime::PreRequestBudget> hook_budgets;
+    wiring.on_pre_request_hooks = [&hook_budgets](const std::string&, const std::string&,
+                                                  const nlohmann::json&,
+                                                  const runtime::PreRequestBudget& budget) {
+        hook_budgets.push_back(budget);
+        return std::string();
+    };
+    const auto outcome = loop.Run("跑一次大工具", wiring);
+    REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+    REQUIRE(hook_budgets.size() == 2);
+    // 第一枚请求(输入还小):判定预留 = 封顶后的策略预留,实发 = 声明值。
+    CHECK(hook_budgets[0].policy_reserve_tokens == 12500);
+    CHECK(hook_budgets[0].final_reserve_tokens == 12500);
+    CHECK(hook_budgets[0].declared_max_output_tokens == 80000);
+    CHECK(hook_budgets[0].effective_output_limit_tokens == 80000);
+    CHECK_FALSE(hook_budgets[0].output_limit_overridden);
+    // 第二枚请求(巨型工具结果已进史,应急已收窄):判定预留换成应急值,
+    // 不再拿 12.5k 旧预留;实发限额与覆盖位同步。
+    CHECK(hook_budgets[1].policy_reserve_tokens == 12500);
+    CHECK(hook_budgets[1].final_reserve_tokens == 6250);
+    CHECK(hook_budgets[1].final_reserve_tokens != hook_budgets[1].policy_reserve_tokens);
+    CHECK(hook_budgets[1].effective_output_limit_tokens == 6250);
+    CHECK(hook_budgets[1].output_limit_overridden);
+    // Agent 运行态的最近请求预算与最后一枚 Hook 账同源(V3-REAL-08 的
+    // /context 数据源)。
+    REQUIRE(loop.has_request_budget());
+    CHECK(loop.last_request_budget().final_reserve_tokens == 6250);
+}

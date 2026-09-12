@@ -35,6 +35,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/interaction.hpp"
+#include "runtime/middleware_runtime.hpp"  // PreRequestBudget(V3-REAL-07:冻结预算快照,Hook/记账同源)
 #include "runtime/turn_runtime.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/deferred_tool_resolver.hpp"  // ProxyCallContext:tool_invoke 规范化调用的协议证据
@@ -443,14 +444,15 @@ struct TurnWiring {
     // ---- LuaHook 单 P0-B:PreRequest 中间件挂点(§4.36)----------------------
     // 每次物理模型请求最终定形(预检/应急收窄之后)、上 wire 之前调用:
     // frozen_request_snapshot = 最终输入的冻结快照(引擎拼好的那份,本批
-    // 不改请求本体),context_window_tokens/output_reserve_tokens 是容量
-    // 判断的两笔预算。返回空串 = 放行;非空 = 拦下本次请求的理由(整步明
+    // 不改请求本体),budget = 本次冻结的预算快照(V3-REAL-07:声明上限/
+    // 策略预留/判定预留/实发限额分字段,容量 Hook 拿判定预留,不再拿应急
+    // 收窄前的旧值)。返回空串 = 放行;非空 = 拦下本次请求的理由(整步明
     // 败,按上下文预检未通过同款收口)。mutate 段采用改写时中间件路自会
     // 报 reprepare——本批引擎不重建请求,明拦不暗发。空 = 没配,一处不调,
     // 行为与从前逐字节一致。
     std::function<std::string(const std::string& step_id, const std::string& turn_id,
-                              const nlohmann::json& frozen_request_snapshot, std::uint64_t context_window_tokens,
-                              std::uint64_t output_reserve_tokens)>
+                              const nlohmann::json& frozen_request_snapshot,
+                              const runtime::PreRequestBudget& budget)>
         on_pre_request_hooks;
 };
 

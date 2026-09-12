@@ -194,8 +194,7 @@ PostUserAppend RunPostUserMiddleware(hooks::HookDispatcher* dispatcher, const st
 
 PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
                                          const nlohmann::json& request_snapshot,
-                                         std::uint64_t context_window_tokens,
-                                         std::uint64_t output_reserve_tokens,
+                                         const PreRequestBudget& budget,
                                          const MiddlewareHookContext& context,
                                          hooks::middleware::MiddlewareEventSink* sink) {
     using hooks::middleware::Stage;
@@ -252,8 +251,17 @@ PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
     // ---- 段三 capacity:消费估算,给准入决定。----
     nlohmann::json capacity_input = request_snapshot;
     capacity_input["tokenEstimate"] = stages.token_estimate;
-    capacity_input["outputReserveTokens"] = output_reserve_tokens;
-    capacity_input["contextWindowTokens"] = context_window_tokens;
+    // 预算四字段分账(V3-REAL-07):判定吃 final_reserve_tokens(本次容量
+    // 判定实际使用的输出预留——extra_body 覆盖、应急收窄之后的值);声明
+    // 上限/策略预留/实发限额/协议余量随行,Hook 与日志据此各说各的概念,
+    // 不再拿声明上限冒充预留。这些键由估算器一概排除出 bytes/4 计量。
+    capacity_input["outputReserveTokens"] = budget.final_reserve_tokens;
+    capacity_input["contextWindowTokens"] = budget.context_window_tokens;
+    capacity_input["declaredMaxOutputTokens"] = budget.declared_max_output_tokens;
+    capacity_input["policyReserveTokens"] = budget.policy_reserve_tokens;
+    capacity_input["effectiveOutputLimitTokens"] = budget.effective_output_limit_tokens;
+    capacity_input["protocolHeadroomTokens"] = budget.protocol_headroom_tokens;
+    capacity_input["outputLimitOverridden"] = budget.output_limit_overridden;
     DispatchTrigger capacity_trigger = MakeTrigger(context, std::move(capacity_input), Stage::Capacity);
     stages.capacity_outcome =
         middleware->Dispatch(HookPoint::PreRequest, capacity_trigger,
@@ -312,8 +320,12 @@ nlohmann::json BuildRequestSnapshotJson(const api::Request& request) {
                                        {"input_schema", tool.input_schema}});
     }
     snapshot["tools"] = std::move(tools);
+    // 控制参数与计量对象分开(V3-REAL-04):max_tokens 是输出限额,不是模型
+    // 输入,§4.36 不许它进 bytes/4——挪进 control 子对象留审计;估算器
+    //(ComputeUtf8BytesDiv4Estimate)对 control 键一概不计量,只改输出限额
+    // 不再改输入估算。
     if (request.max_tokens.has_value()) {
-        snapshot["max_tokens"] = *request.max_tokens;
+        snapshot["control"]["maxOutputTokens"] = *request.max_tokens;
     }
     return snapshot;
 }

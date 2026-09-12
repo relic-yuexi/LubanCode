@@ -101,15 +101,48 @@ struct PreRequestStages {
     hooks::middleware::DispatchOutcome capacity_outcome;
 };
 
+// 本次物理模型请求的冻结预算快照(V3-REAL-07):一次定形,容量 Hook、
+// prepared 记账与 /context 展示全从这一对象取数。四个概念分字段,不许
+// 互相冒充——
+//   declared_max_output_tokens:配置/目录声明上限(524288 一类;0 = unset);
+//   policy_reserve_tokens:运行策略预留(主会话输出预留封顶后的值);
+//   final_reserve_tokens:本次容量判定实际使用的输出预留(extra_body
+//     覆盖、应急收窄之后的值——应急已收窄,Hook 不许再拿旧预留);
+//   effective_output_limit_tokens:本次实发生效的输出上限(降级/应急/
+//     覆盖后的 max_tokens;0 = unset,交服务端默认)。
+struct PreRequestBudget {
+    std::uint64_t context_window_tokens = 0;
+    std::uint64_t declared_max_output_tokens = 0;
+    std::uint64_t policy_reserve_tokens = 0;
+    std::uint64_t final_reserve_tokens = 0;
+    std::uint64_t effective_output_limit_tokens = 0;
+    std::uint64_t protocol_headroom_tokens = 0;
+    bool output_limit_overridden = false;  // extra_body/应急写侧覆盖生效
+};
+
 // request_snapshot:引擎冻结的最终模型输入快照(BuildRequestSnapshotJson
-// 的产物或等价形状);context_window_tokens/output_reserve_tokens 是容量
-// 判断的两笔预算(§4.36 预算分开:估算只估输入)。
+// 的产物或等价形状);budget 是容量判断的预算对象(§4.36 预算分开:估算
+// 只估输入)。
 PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
                                          const nlohmann::json& request_snapshot,
-                                         std::uint64_t context_window_tokens,
-                                         std::uint64_t output_reserve_tokens,
+                                         const PreRequestBudget& budget,
                                          const MiddlewareHookContext& context,
                                          hooks::middleware::MiddlewareEventSink* sink = nullptr);
+
+// 旧双 uint64 签名的薄适配(legacy:老测试/未迁移调用方)。仅填窗口与
+// 最终判定预留,其余字段留默认——新代码一律传 PreRequestBudget。
+inline PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
+                                                const nlohmann::json& request_snapshot,
+                                                std::uint64_t context_window_tokens,
+                                                std::uint64_t output_reserve_tokens,
+                                                const MiddlewareHookContext& context,
+                                                hooks::middleware::MiddlewareEventSink* sink = nullptr) {
+    PreRequestBudget budget;
+    budget.context_window_tokens = context_window_tokens;
+    budget.policy_reserve_tokens = output_reserve_tokens;
+    budget.final_reserve_tokens = output_reserve_tokens;
+    return RunPreRequestMiddleware(dispatcher, request_snapshot, budget, context, sink);
+}
 
 // api::Request → 冻结快照(§4.36 scope=model_input_json_utf8_v1 的计量
 // 对象:system、有序消息、工具定义与参数;非文本块保类型,媒体字节由

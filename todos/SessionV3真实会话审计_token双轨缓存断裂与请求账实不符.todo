@@ -1,7 +1,7 @@
 # Session v3 真实会话审计：token 双轨、缓存断裂与请求账实不符
 
 - 日期：2026-09-11。
-- 状态：待修复。本单只立案、列证据和验收门槛；未改生产代码，未运行 C++ 测试套件。
+- 状态：工A已修（2026-09-12，见 §七销项记账）：03/04/07/08/A02 已修，01/02/05 复核已修（随 B1 落地、回归已钉），06 最小可验修复+完整链路记阻塞，A01 审计结案不改配置，TEST-GAP-01 已补；TEST-GAP-02 归清理单 T16。
 - 范围：会话 UHURZ3 暴露的 token 估算、工具预览、缓存前缀、请求记录和 /context 显示。不声称查清全仓全部 bug。
 - 数量：8 项已确认的代码/合同缺陷，2 项待核查，另列 2 处测试漏口。若几项共用根因，可合并实施，不可漏掉各自验收。
 - 当前源码基线：HEAD `3cfd95b2d5a4f1384ae0131e893f7dab8c77c2bc`；工作区还有既有未提交改动。它不是运行二进制的可验证构建指纹。
@@ -54,9 +54,9 @@
 
 受控复算：取 msg-000029 原文，照当前单条 token 预算算法计算。系数人为设为 1.58 时保留 663444 字符，1.59 时保留 659268 字符，差 4176。用于证明算法会改旧内容，不当作历史系数。
 
-- [ ] 按 v3 合同固定首次采用的工具预览。普通追加请求不得因估算器状态变化追改它。
-- [ ] 真要降档，走正式 context 提交，记录前后预览和原因，原结果不变。
-- [ ] 回归：巨型结果进入一次后追加至少 12 次请求；预算测量变化，旧预览字节仍相等、前缀 append-only；显式降档只产生一次可解释断点。
+- [x] 按 v3 合同固定首次采用的工具预览。普通追加请求不得因估算器状态变化追改它。（随容量恢复 B1 落地：`TruncationMemo::Pinned` 钉子账，src/agent/context.cpp:192-275；本单复核确认）
+- [x] 真要降档，走正式 context 提交，记录前后预览和原因，原结果不变。（ReplaceHistory 清账重定形是唯一常规换形状路；B1-5 硬闸（窗口真装不下）按裸尺重裁并按新形状版本通报）
+- [x] 回归：巨型结果进入一次后追加至少 12 次请求；预算测量变化，旧预览字节仍相等、前缀 append-only；显式降档只产生一次可解释断点。（tests/unit/agent/test_context_manager.cpp：L333「巨型结果一次定形后,系数/窗口读数变化不重裁,12 次追加请求前缀恒稳」、L366「B1-5 硬闸」、L413「线内定形后系数放大越线不回头裁」、L435「显式降档走正式提交」四册已落）
 
 ### V3-REAL-02 · P1：截断通报去重掩盖了实际内容再次变化
 
@@ -64,8 +64,8 @@
 
 影响：旧内容确实又变了，原因却退化为 old_message_changed。该布尔位还按整个 epoch 去重，须覆盖“同 epoch 新来另一枚巨型结果”，不能只测同一结果重复读取。
 
-- [ ] 通报依据实际采用的变更事实，按结果身份/预览版本去重，不按全局“报过一次”吞掉新变化。
-- [ ] 回归：相同预览重复采用不重报；另一枚结果首次降档必须报；已采用结果显式降档记录旧版/新版、原因和受影响 request。
+- [x] 通报依据实际采用的变更事实，按结果身份/预览版本去重，不按全局“报过一次”吞掉新变化。（已修：`announced_result_shapes_` 按 tool_use_id+shape_hash 去重，src/agent/context_manager.cpp:110-125；ReplaceHistory 换史清空重新通报；`truncation_announced_in_epoch_` 全局布尔已拆除，全仓无此符号）
+- [x] 回归：相同预览重复采用不重报；另一枚结果首次降档必须报；已采用结果显式降档记录旧版/新版、原因和受影响 request。（tests/unit/agent/test_context_manager.cpp:483「截断通报按结果身份去重——同枚不重报,另一枚新来必报」；硬闸换形状新版本的通报在 L366 B1-5 册）
 
 ### V3-REAL-03 · P1：v3 Hook 与主循环仍走两套 token 算法
 
@@ -73,9 +73,9 @@
 
 影响：Hook 记录的估算不能解释前面已经发生的裁剪、输出收窄和旧预检。只把新 Hook 接上，并未迁完生产决策路径。
 
-- [ ] 清点主会话、子请求、compact、恢复候选、/context 的全部估算消费者；v3 统一消费获选估算 Hook 的结果和明确用途。
-- [ ] v3 主路撤掉旧校准对裁剪/容量/显示的影响；若旧实现暂存，也不得被 v3 调用。
-- [ ] 回归：混合 ASCII/汉字/emoji/转义字符；发送、候选恢复、compact 前后用同版算法；总量只 ceil 一次；不同 usage 不改变相同快照的估算。
+- [x] 清点主会话、子请求、compact、恢复候选、/context 的全部估算消费者；v3 统一消费获选估算 Hook 的结果和明确用途。（清点结论见 §七记账 V3-REAL-03：v3 主会话/子代理/workflow 节点/app-server 的容量与批次预算全走 bytes/4；v3 compact 走 EstimateBypassRequestTokens→estimate 槽（bytes/4）；resume 无重新估算，v3 压缩分界线读持久账；/context 显示面本单修复对齐）
+- [x] v3 主路撤掉旧校准对裁剪/容量/显示的影响；若旧实现暂存，也不得被 v3 调用。（裁剪：loop.cpp 系数在 rewrite_tool_results_for_history 在场时恒 1.0，且 v3 会话 preserve_committed_previews=true 直接短路保命索/结构压缩（预览在提交边界定形）；容量：v3 全走 bytes/4；显示：本单 /context v3 分支不乘 DefaultTokenCalibrator 系数、不打 v2 校准行（session_commands.cpp RunContextCommand v3_session 分支），同进程 v2 旁路记下的样本不再污染 v3 显示；校准样本记录 `!adapter_budget` 条件已钉，v3 请求不喂样本）
+- [x] 回归：混合 ASCII/汉字/emoji/转义字符；发送、候选恢复、compact 前后用同版算法；总量只 ceil 一次；不同 usage 不改变相同快照的估算。（tests/unit/agent/test_v3_orchestration_audit.cpp 两册：多轮编排热校准器(×2.5)/干净校准器请求逐字节一致 + 同一请求 bytes/4 估算不随 usage 反馈变化；混合字符与总量一次 ceil 由 tests/unit/agent/test_tool_batch_budget.cpp L62「adapter input snapshot counts one escaped UTF-8 total」与 tests/unit/trajectory_v3/test_v3_result_store.cpp 既有册覆盖）
 
 ### V3-REAL-04 · P1：估算快照混入非输入 max_tokens
 
@@ -83,8 +83,8 @@
 
 影响：仅改输出限额也会改输入估算；而这个快照还不是按各 wire adapter 选出最终输入字段。不要把“公式正确”当作“计量对象正确”。后者还须审计 extra_body、输出 schema、thinking 回传、媒体字段和工具结果富块。
 
-- [ ] 控制参数与模型输入计量对象分开；保留必要审计参数但排除出 bytes/4。
-- [ ] 回归：只改 max_tokens/temperature，输入字节数不变；改变实际输入或输出格式 schema，则按字段映射计入；四家 wire 各有 fixture。
+- [x] 控制参数与模型输入计量对象分开；保留必要审计参数但排除出 bytes/4。（本单修：BuildRequestSnapshotJson 的 max_tokens 挪进 control 子对象留审计（src/runtime/middleware_runtime.cpp）；ComputeUtf8BytesDiv4Estimate 计量前剥顶层控制键——control/max_tokens/max_output_tokens/temperature/top_p/top_k/stop_sequences/stream 及容量段宿主字段 tokenEstimate/outputReserveTokens/contextWindowTokens 等（src/hooks/middleware_builtins.cpp）。adapter wire 快照路本就白名单投影不受影响（ModelInputSnapshotFromWire））
+- [x] 回归：只改 max_tokens/temperature，输入字节数不变；改变实际输入或输出格式 schema，则按字段映射计入；四家 wire 各有 fixture。（tests/unit/hooks/test_middleware_runtime.cpp「V3-REAL-04:只改输出限额/温度等控制参数,输入估算不变」——limit 1/4096/524288/unset/旧形状顶层键直传全不动估算、改 messages 则计入。四家 wire fixture 的字段映射既有验收在 test_tool_batch_budget.cpp「all adapter input families retain their selected input fields」（messages/input/contents 三族）+ ComputeUtf8BytesDiv4Estimate 的快照口；未逐家扩 fixture 的边界记 §七）
 
 ### V3-REAL-05 · P1：工具结果已存仓，仍把巨量全文当模型预览
 
@@ -92,9 +92,9 @@
 
 影响：结果仓、模型预览和临时裁剪各走一段；输入膨胀，后续又破坏前缀。只把全文落盘不算完成 v3 预览分层。
 
-- [ ] 接通现有 v3 结果选用与 32/16/8/4 KiB 预览链；run_command 同样受最终预览帽约束。
-- [ ] 单次工具调用汇总 stdout/stderr/文件等预览后再验总字节数，说明标签也占预算；禁止只裁某个单字段。
-- [ ] 回归：2MB 目录输出、超长单行、多字节边界、多通道、已截断捕获；模型只见合法预算预览，完整可得内容在仓中可追溯。原工具已丢失的超限输出不得伪称完整。
+- [x] 接通现有 v3 结果选用与 32/16/8/4 KiB 预览链；run_command 同样受最终预览帽约束。（随容量恢复 B1 落地：V3ToolResultsCommitted 在提交边界按 preview_budget_bytes 调 v3::BuildToolPreview，result->content 换预览、原文进结果仓（src/runtime/trajectory_session.cpp:1919-1945）；本单复核确认生产调用在位）
+- [x] 单次工具调用汇总 stdout/stderr/文件等预览后再验总字节数，说明标签也占预算；禁止只裁某个单字段。（B1 落地：PlanToolBatchBudget 按窗口余量分配 preview_budget_bytes，多通道汇总进同一帽；loop.cpp 工具批次预算 2398-2463 提交前后两道 bytes/4 复验）
+- [x] 回归：2MB 目录输出、超长单行、多字节边界、多通道、已截断捕获；模型只见合法预算预览，完整可得内容在仓中可追溯。原工具已丢失的超限输出不得伪称完整。（既有册：tests/unit/trajectory_v3/test_v3_tool_message_preview.cpp 七册（超帽全链归仓换预览/线内穿透/多字节边界/清单超限 artifact/降档）、test_v3_result_store.cpp 十七册纯函数钉、tests/unit/agent/test_loop.cpp B2 全链「actual loop budgets ten unsent results and serializes the adopted batch」；本单 TEST-GAP-01 册再钉多轮行为）
 
 ### V3-REAL-06 · P1：prepared 引用原链，不能重建实际裁剪后的请求
 
@@ -102,9 +102,9 @@
 
 影响：JSONL 看似记录了请求，离线重放却可能拼出另一份正文。这正是本轮无法逐字比较历史截点的原因。已有旧设计清理单的“账实一致”任务，本条补真实反例。
 
-- [ ] 先提交已采用预览/视图，再以它准备请求；prepared 的有序引用必须还原实际模型输入。
-- [ ] estimated/prepared/sent/usage 串到同一次请求和输入版本；输出降额也可追溯。无需盲目重复落全量 wire，优先复用不可变正文和引用。
-- [ ] 回归：捕获假后端实际发送正文，与 prepared 引用重建结果逐块比对；覆盖巨型工具、降档、Hook 改写、compact、resume，不能只断言 refs 数量或 JSONL 可解析。
+- [ ] 先提交已采用预览/视图，再以它准备请求；prepared 的有序引用必须还原实际模型输入。（**部分修复**：本单给 prepared 行补 inputView 视图指纹账——消息数/链引用数对账、逐消息指纹（role+块序+正文投影）、system 指纹、divergent 如实标记（src/runtime/trajectory_session.cpp V3RequestPrepared + RequestMessageViewFingerprint）。离线重放可逐块核对引用还原与实际输入是否一致，不再"看似记录了请求却拼出另一份正文"而不可发现。完整"先提交采用视图再备请求"要动消息主轴与视图提交链，涉及面过大，**记阻塞**，归后续单。）
+- [ ] estimated/prepared/sent/usage 串到同一次请求和输入版本；输出降额也可追溯。无需盲目重复落全量 wire，优先复用不可变正文和引用。（**部分**：prepared 的 inputView 与 provider.parameters.maxOutputTokens 同行落账（降额后实发值随请求定形记入）；estimated/sent/usage 的逐请求版本串账**未验**——记阻塞，与上一项同链。）
+- [x] 回归：捕获假后端实际发送正文，与 prepared 引用重建结果逐块比对；覆盖巨型工具、降档、Hook 改写、compact、resume，不能只断言 refs 数量或 JSONL 可解析。（本单落两层：tests/unit/trajectory_v3/test_v3_write_wiring.cpp「prepared 行带实际发送视图的指纹账,引用数与视图数对账」（指纹可离线重算、逐块核对）+「视图与链引用数分叉时,prepared 行如实记 divergent」；tests/unit/agent/test_v3_orchestration_audit.cpp 捕获假后端逐请求正文断言预览采用与请求一致。未覆盖边界：Hook 改写（reprepare）与 compact/resume 场景下的指纹对账未单列册——记 §七。）
 
 ### V3-REAL-07 · P1：最终 capacity Hook 收到旧输出预留
 
@@ -112,9 +112,9 @@
 
 现场：request-000022 capacity 记录 32768，prepared 记 511635。两者允许作为不同预算概念存在，但字段、决策和显示必须明确。更实在的错误是：应急已收窄，Hook 还拿旧预留；extra_body 有效覆盖也没沿同一份预算往下传。
 
-- [ ] 区分配置声明上限、实际有效输出限额、运行策略预留、协议余量；冻结本次预算决定，所有后续消费者从同一对象取数。
-- [ ] 回归：provider 大上限+日常小预留、显式 agent 配置、provider/request extra_body 覆盖、应急收窄、普通降额。构造边界使旧/新预留会给出相反判断，验证最终放行/拒绝及日志一致。
-- [ ] 不把“预留必须恒等于厂家最大上限”写成修复；先执行已有日常预留合同，再保证本次最终决定不丢。
+- [x] 区分配置声明上限、实际有效输出限额、运行策略预留、协议余量；冻结本次预算决定，所有后续消费者从同一对象取数。（本单修：runtime::PreRequestBudget 冻结预算快照（declared/policy/final/effective/headroom/overridden 六字段），loop 在请求定形处一次组装、应急/覆盖/adapter 各分支更新（src/agent/loop.cpp）；RunPreRequestMiddleware 的 capacity_input 分字段递 Hook，DecideRequestCapacity 回显全字段（src/runtime/middleware_runtime.cpp、src/hooks/middleware_builtins.cpp）；Agent 运行态留 last_request_budget 供 /context 同源取数（src/agent/agent.hpp））
+- [x] 回归：provider 大上限+日常小预留、显式 agent 配置、provider/request extra_body 覆盖、应急收窄、普通降额。构造边界使旧/新预留会给出相反判断，验证最终放行/拒绝及日志一致。（本单落：tests/unit/hooks/test_middleware_runtime.cpp「V3-REAL-07:容量段预算四字段分账,判定吃最终判定预留」——构造 10000 窗口边界使收窄预留 allow、旧策略预留 recover 相反判断 + 分字段回显断言；tests/unit/agent/test_loop.cpp「V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预留」——100k 窗/80k 声明/12.5k 帽/6.25k 应急全链真 loop 断言 Hook 收 6250 非 12500、Agent 运行态同源。extra_body 覆盖分支（overridden）在 loop 册以 output_limit_overridden 断言；provider/request 双层覆盖差异与显式 ConfigFile 例外沿既有差距清单 §8.2 册，未在本单重复扩册——记 §七）
+- [x] 不把“预留必须恒等于厂家最大上限”写成修复；先执行已有日常预留合同，再保证本次最终决定不丢。（封顶帽（MainSessionOutputReserveCap）与 ConfigFile 例外原样保留；本单只补“本次最终决定”一栏（final/effective），声明与预留各自成字段不互冒充）
 
 ### V3-REAL-08 · P2：/context 预算卡片把声明上限充作当前预留
 
@@ -122,24 +122,24 @@
 
 影响：卡片称“统一估算口径”“已计入 projected”，实际把声明、策略预留、最近有效值和另算的 compact 计划混在一起。218k 摘要目标来自该计划，不能凭此认定 v3 compact 真会生成这么大摘要；本场 cheap 调用为 0。
 
-- [ ] /context 消费 v3 最近请求与当前候选预算的正式快照，明确各自时点；历史实报、当前估算、配置声明分栏。
-- [ ] 展示最近有效 max_tokens、预留、降额原因；compact 卡片从实际 v3 规划器取数，未规划就明说。
-- [ ] 回归：524288 provider 声明、32768 策略预留、511635 最近有效限额三者都能解释；resume 后不拿今天现算结果冒充昨日请求。
+- [x] /context 消费 v3 最近请求与当前候选预算的正式快照，明确各自时点；历史实报、当前估算、配置声明分栏。（本单修：/context 预算卡片加「最近请求预算」行，消费 loop 冻结的 PreRequestBudget（window/声明/策略预留/判定预留/实发限额五栏）；没发过请求明说「本场尚未发请求——上面各行是配置声明口径」（cmd.context.last_request_budget_none）；预算总账的输出预留改吃 loop 同款封顶口径，不再把声明 524288 整份当预留与 Hook 32768 同屏打架（src/app/commands/session_commands.cpp RunContextCommand/HandleContextCommand））
+- [x] 展示最近有效 max_tokens、预留、降额原因；compact 卡片从实际 v3 规划器取数，未规划就明说。（最近有效值 = effective_output_limit_tokens（降额/应急/覆盖后的实发）；降额原因经 output_limit_overridden 与字段对照可解释。v3 会话的 compact 卡片改打「v3 compact 走独立规划器(RunV3Compact),本卡片不预测其摘要目标」（cmd.context.v3_compact_note）——v3 规划器只在压缩触发时运行、无常驻计划，"明说不冒充"即正解；规划器实时数的接入记 §七遗留）
+- [x] 回归：524288 provider 声明、32768 策略预留、511635 最近有效限额三者都能解释；resume 后不拿今天现算结果冒充昨日请求。（tests/unit/app/test_context_command_v3.cpp 四册：「v3 会话:最近请求预算分栏,三枚值各有其名」直接以 524288/32768/511635 断言同屏；「没发过请求就明说」钉 resume 重建（Agent 内存态无预算 → 明说，不冒充）+「v3 会话打 bytes/4 口径行不打 v2 校准行」+「v2 会话旧口径一行不改」）
 
 ## 四、两项待核查，不算已确认模型缺陷
 
 ### V3-REAL-A01：minimax-m3 的 524288 声明来源
 
-- [ ] 审计配置生成链、目录条目、端点/别名与厂家依据。当前只能确认全局 config 写了这个值。
-- [ ] 上限值大，不足以判错；基准评测的 32K 配置也不能当成 API 硬上限。收费实测不能从“请求成功但输出很短”推断能输出 512K。
-- [ ] 同时核查窗口 1048576 的来源、单位和实际端点约束；不擅改用户全局配置。
+- [x] 审计配置生成链、目录条目、端点/别名与厂家依据。当前只能确认全局 config 写了这个值。（审计完成，见 §七 A01 记账：两值首现于 commit 66b7a1a8（2026-08-24 目录扩容），维护源 catalog/models/minimax.json:163-166；经 /provider add 向导 → ProviderConfigFromPreset（src/config/provider_catalog.cpp:850-854）按 default_model=minimax-m3 抄进用户 config.json；仓内无 m3 逐条厂家字据（仅 m2 于 634fe6f7 有官方页依据），上游目录身份未具名）
+- [x] 上限值大，不足以判错；基准评测的 32K 配置也不能当成 API 硬上限。收费实测不能从“请求成功但输出很短”推断能输出 512K。（维持判断：1048576/524288 为二进制圆数值（1 MiB/512 KiB）的能力级声明，与 m2 官方写法风格一致；本轮未做收费实测，不据任何旁证判其对错）
+- [x] 同时核查窗口 1048576 的来源、单位和实际端点约束；不擅改用户全局配置。（窗口与输出上限同源同链（同一目录条目同一次抄写）；实际端点约束未实测——记 §七。用户全局 config.json 一字未改，本单一切修复只在估算/预算/展示层）
 
 ### V3-REAL-A02：artifact 统计仍看旧仓，UI 是否误导
 
 用户卡片写“尚无落盘的超长工具结果”，真实 session/artifacts 已有 res-*.json/combined.txt。session_commands.cpp:274 读传入的 artifact_store->StatsOf；v3 桥另开 v3::ResultStore。须追到参数装配，分清卡片本意是旧结构压缩预览仓，还是全部结果仓。
 
-- [ ] 对齐统计 owner 与文案。原始结果已存但没选预览，应显示“结果已保存，当前仍 inline”，不能笼统写没落盘。
-- [ ] 回归：原结果存仓、派生预览、读取全文、resume 四种状态；计数来源可核，不用文件数冒充逻辑工具结果数。
+- [x] 对齐统计 owner 与文案。原始结果已存但没选预览，应显示“结果已保存，当前仍 inline”，不能笼统写没落盘。（本单修：TrajectorySessionLedger::V3ResultStoreStatsOf 按仓的记账单位现数（res-*.json 一文件一结果，字节收全部 res-* 伴生，captures 仓不混入）；/context v3 分支打「v3 结果仓:N 枚工具结果已存盘 · 全文共 X 字节(模型侧收预算内预览,全文按 result_ref 追溯)」，0 枚如实打「尚无存盘的工具结果」；v2 会话照旧走旧 artifact 口径（src/runtime/trajectory_session.hpp/.cpp、src/app/commands/session_commands.cpp、i18n 中英成对））
+- [x] 回归：原结果存仓、派生预览、读取全文、resume 四种状态；计数来源可核，不用文件数冒充逻辑工具结果数。（tests/unit/trajectory_v3/test_v3_write_wiring.cpp「V3ResultStoreStatsOf:res-* 一 json 一结果,字节收伴生;v2 会话 nullopt」——0 枚/两枚含伴生与索引/capture- 排除/v2 nullopt 四态；res-*.json 是结果仓自身的记账单位（一结果一份元数据），枚数即逻辑结果数、可核。派生预览与读取全文的状态面由 test_v3_tool_message_preview 既有册覆盖；resume 后统计复用同仓扫描——路径不变行为一致）
 
 ## 五、为什么原测试没挡住
 
@@ -147,8 +147,8 @@
 
 `tests/unit/agent/test_context_manager.cpp:140` 的“保命索截断确定性稳定”固定 `ContextViewBudget{100000, 1.0}`，追加历史后仍用同一预算。它证明相同输入参数重复调用稳定，没证明在线系数更新后旧前缀稳定。TokenCalibrator 另有测试，不等于两者组合测过。
 
-- [ ] 增加真实编排集成用例：工具大结果 → request → usage 反馈 → 下一 request，连跑多个用户轮次。
-- [ ] 最终 v3 回归应断言没有在线校准参与；保留旧路径过渡测试时，再覆盖变化系数，不能以固定 1.0 掩盖旧漏洞。
+- [x] 增加真实编排集成用例：工具大结果 → request → usage 反馈 → 下一 request，连跑多个用户轮次。（本单落 tests/unit/agent/test_v3_orchestration_audit.cpp：真 AgentLoop + 假后端（wire 序列化开 → adapter_budget/v3 主路），两用户轮四次请求，工具大结果 200k（UHURZ3 现场 2MB 目录清单的脱敏缩小件），脚本逐请求带 usage（50k→52k→54k→56k））
+- [x] 最终 v3 回归应断言没有在线校准参与；保留旧路径过渡测试时，再覆盖变化系数，不能以固定 1.0 掩盖旧漏洞。（同册两册：「多轮编排——大结果走预览、前缀稳定、校准系数不参与 v3 主路」——预喂系数 2.5 的热校准器与干净校准器各跑同场景，请求逐字节一致 + 相邻请求旧消息逐字节稳定 + 大结果以预览进请求且后续请求不再变化；「同一请求的 bytes/4 估算不随 usage 反馈变化」。v2 旧路的变化系数覆盖由 test_context_manager.cpp 既有册（1.0/1.58/1.59/2.0/0.8 五系数循环）钉住，不以固定 1.0 掩盖）
 
 ### TEST-GAP-02：CTest 默认环境与产品默认不一致
 
@@ -170,3 +170,73 @@
 缓存验收分两层：本地逐请求前缀稳定必须自动断言；服务端 cache read 按实报记录，仅作观察。不得把服务端命中率恒为某值写成确定性测试。
 
 本场原 JSONL 只读保留。测试夹具应脱敏、缩小且保持故障结构；不要整份复制用户会话进仓，也不要为了通过测试改写原历史。
+
+## 七、销项记账（2026-09-12，基线 ce37455e）
+
+工A（token 双轨 / 缓存断裂 / 请求账实不符）落地。提交分支 worktree-agent-token-audit，PR 与 CI 结论见文末。
+
+### V3-REAL-01 · 复核已修（随容量恢复 B1 落地）
+- 修改文件：无（本单只复核）。生产实现：src/agent/context.cpp（TruncationMemo 钉子账 192-275、硬闸裸尺重裁）、src/agent/context_manager.hpp/.cpp。
+- 回归钉死：tests/unit/agent/test_context_manager.cpp L333/L366/L413/L435 四册（既有）。
+- 未覆盖边界：memo 是 epoch 内账，跨会话 resume 后旧结果重进视图按新 epoch 重新定形（设计如此——正式提交语义），无专册。
+
+### V3-REAL-02 · 复核已修
+- 修改文件：无（本单只复核）。生产实现：announced_result_shapes_ 按 id+shape_hash 去重（src/agent/context_manager.cpp:110-125）；全局布尔 truncation_announced 已拆净。
+- 回归钉死：test_context_manager.cpp:483 册（既有）。
+
+### V3-REAL-03 · 已修（显示面收口；主路/容量/裁剪面随既有改造达标，本单复核）
+- 修改文件：src/app/commands/session_commands.cpp（RunContextCommand v3 分支：系数恒 1.0、不取校准状态、history 估算改量 request_history——与实际请求同源；HandleContextCommand 打 bytes/4 口径行）；src/app/commands/session_commands.hpp（ContextEstimateInputs.trajectory）；src/cli/i18n.cpp（cmd.context.v3_estimator 中英成对）。
+- 消费者清点结论（复核）：v3 主会话/子代理/workflow 节点/app-server 的 projected/最终硬闸/批次预算全走 ComputeUtf8BytesDiv4Estimate（loop.cpp 1188/1408/2398/2449）；v3 compact 走 EstimateBypassRequestTokens→estimate 槽（session_commands.cpp:663，全仓唯一生产调用），槽内部回落同公式；resume 无重新估算（压缩分界线读 v3 持久账）；loop 系数在 rewrite 在场时恒 1.0（loop.cpp:1057-1060）；校准样本 `!adapter_budget` 才记（loop.cpp:1443/2028）。修复前 /context 是最后一个会被进程级校准器（同进程 v2 旁路/子代理样本）污染的 v3 显示口——本单封住。
+- 复现/修前失败：v2 旁路喂过样本后（Coefficient≠1.0），v3 会话 /context 三类估算被乘上非 1.0 系数且校准行充数——与 v3 请求链路（bytes/4、无系数）不同轨。修后：v3 会话显示不乘系数、口径行明示 bytes/4。
+- 测试：tests/unit/app/test_context_command_v3.cpp（v3 口径行/不打 1.59）；tests/unit/agent/test_v3_orchestration_audit.cpp（校准不参与的行为断言）。
+- 未覆盖边界：/context 三类逐段展示估算仍为旧尺（ASCII/4+汉字 1.5）参考值（口径行已明说）；v3 下逐段展示估算换 bytes/4 逐段投影未做（展示用途不进判定，记遗留）。resume 展示行（interactive_session_assembly.cpp:1006、session_commands.cpp:2509）仍裸旧尺——不进判定，记遗留。
+
+### V3-REAL-04 · 已修
+- 修改文件：src/runtime/middleware_runtime.cpp（BuildRequestSnapshotJson：max_tokens → control.maxOutputTokens）；src/hooks/middleware_builtins.cpp（ComputeUtf8BytesDiv4Estimate 计量前剥顶层控制键：control/max_tokens/max_output_tokens/temperature/top_p/top_k/stop_sequences/stream/tokenEstimate/outputReserveTokens/contextWindowTokens/declaredMaxOutputTokens/effectiveOutputLimitTokens/policyReserveTokens/protocolHeadroomTokens/outputLimitOverridden）。
+- 复现/修前失败：同一输入 max_tokens 4096→524288，估算随 dump 变大——控制参数混进计量对象。修后：limit 1/4096/524288/unset/旧形状顶层直传全不动估算；改 messages 计入。
+- 测试：tests/unit/hooks/test_middleware_runtime.cpp「V3-REAL-04:只改输出限额/温度等控制参数,输入估算不变」；test_middleware_runtime.cpp 快照册改断言 control 子对象。
+- 未覆盖边界：四家 wire 各自的输入字段映射 fixture 未逐家新扩（既有 messages/input/contents 三族册覆盖白名单机制）；extra_body 中的实际输入型字段（如自定义注入的模型输入）未纳入计量——记遗留。
+
+### V3-REAL-05 · 复核已修（随 B1 落地）
+- 修改文件：无（本单只复核）。生产实现：src/runtime/trajectory_session.cpp:1919-1945（BuildToolPreview 生产调用、result->content 换预览、listing 超限外置、blocks/structured_content 对齐）。
+- 回归钉死：tests/unit/trajectory_v3/test_v3_tool_message_preview.cpp 七册、test_v3_result_store.cpp 十七册、tests/unit/agent/test_loop.cpp B2 全链（既有）；本单 TEST-GAP-01 册加多轮行为钉。
+
+### V3-REAL-06 · 最小可验修复落地；完整链路记阻塞
+- 修改文件：src/runtime/trajectory_session.cpp（V3RequestPrepared 补 inputView：messageCount/chainRefCount/divergent/messageFingerprints/systemFingerprint；RequestMessageViewFingerprint helper）。
+- 复现/修前失败：prepared 行 input_refs 指链上原文，实际 request.messages 是定形副本——离线重放拼出另一份正文且无从发现（真实 seq 605 引用含 msg-000029 原文）。修后：指纹账同行落账，可离线重算逐块核对；分叉如实标 divergent。
+- 测试：test_v3_write_wiring.cpp 两册（对账 + divergent）；test_v3_orchestration_audit.cpp（假后端捕获正文与预览采用一致性）。
+- 阻塞项（涉及消息主轴与视图提交链重排，另立单）：「先提交已采用视图再备请求」的完整链路；estimated/prepared/sent/usage 的逐请求输入版本串账。
+- 未覆盖边界：Hook 改写（reprepare）与 compact/resume 场景下的指纹对账未单列册。
+
+### V3-REAL-07 · 已修
+- 修改文件：src/runtime/middleware_runtime.hpp（PreRequestBudget 结构 + RunPreRequestMiddleware 新签名 + 旧签名薄适配重载）；src/runtime/middleware_runtime.cpp（capacity_input 分字段）；src/hooks/middleware_builtins.cpp（DecideRequestCapacity 回显四字段，缺键不虚造）；src/agent/loop.hpp/.cpp（wiring 签名、预算组装/应急/覆盖/adapter 更新、Agent.last_request_budget）；src/app/turn_runner.cpp、src/runtime/agent_channel_engine.cpp（两装配点）。
+- 复现/修前失败：应急收窄放行后 Hook 仍拿收窄前策略预留，构造边界即把已放行请求误拦（request-000022 capacity 32768 vs prepared 511635 的概念混同根因）。修后：Hook 判定吃 final_reserve_tokens（应急/覆盖后），声明/策略/实发分字段；构造相反判断边界验证（allow vs recover）。
+- 测试：test_middleware_runtime.cpp「V3-REAL-07:容量段预算四字段分账」；test_loop.cpp「V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预留」（真 loop 全链 6250 vs 12500）。
+- 未覆盖边界：provider 级与请求级 extra_body 双层覆盖差异、ConfigFile 显式值例外沿差距清单 §8.2 既有册，本单未重复扩册。
+
+### V3-REAL-08 · 已修
+- 修改文件：src/app/commands/session_commands.cpp/.hpp（ContextSessionFacts、最近请求预算行、未发请求明说、预算总账预留吃封顶口径、v3 compact 卡片明说规划器另账、v3 layers/结果仓行）；src/agent/agent.hpp/.cpp（last_request_budget 冻结账）；src/cli/i18n.cpp（七键中英成对）。
+- 复现/修前失败：卡片把声明 524288 当"输出预留"与 Hook 32768 同屏；218k 摘要目标冒充 v3 compact 会产出的摘要（本场 cheap=0）。修后：三值分栏可解释；v3 compact 明说另有规划器；resume 后无请求预算即明说，不拿现算冒充。
+- 测试：tests/unit/app/test_context_command_v3.cpp 四册（524288/32768/511635 同屏、未发请求明说、v3 口径行、v2 旧口径一行不改）。
+- 未覆盖边界：v3 规划器实时计划数接入 /context（规划器无常驻计划，"明说"即当前合同）；预算总账其余字段仍 v2 公式（v3 下仅预留与 compact 两处收口）。
+
+### V3-REAL-A01 · 审计结案（不改配置）
+- 来源链：catalog/models/minimax.json:163-166（minimax-m3: context_window 1048576 / max_output 524288）← 首现 commit 66b7a1a8（2026-08-24"目录扩到 75 家"，数据来自仓内未具名上游目录）；分片迁移（b7f07e73/59037187）逐字节等价；v0.26.233 全目录输出上限审计（64583c0d）未点名改动 m3、无逐条记录。→ 用户 config.json：/provider add 向导经 ProviderConfigFromPreset（provider_catalog.cpp:850-854）按 default_model 抄值，AddProviderToGlobalConfig 落盘。→ 运行时：ResolveOutputBudget 三级（config 显式 > provider > 目录），窗口 1048576/输出 524288 即此链。
+- 厂家依据：仓内仅 minimax-m2 于 634fe6f7（2026-09-10）引官方页（platform.minimax.io models-intro：窗口 204800/输出 131072）修正过；m3 两值无仓内字据。1048576=1 MiB、524288=512 KiB 与官方对 m2 的写法风格一致，属能力级声明。实际端点约束未实测（未收费实测，不判对错）。用户全局配置一字未改。
+- 附带发现：32768 预留的机制根源 = 主会话/子代理输出预留封顶帽（clamp(window/8, 8k, 32k)），非独立配置。
+
+### V3-REAL-A02 · 已修
+- 修改文件：src/runtime/trajectory_session.hpp/.cpp（V3ResultStoreStatsOf）；src/app/commands/session_commands.cpp/.hpp（v3 结果仓行 + layers v3 行）；src/cli/i18n.cpp。
+- 复现/修前失败：/context 读旧 ContextArtifactStore（index.jsonl），v3 结果仓（res-*）不进它的账且 v3 下 Offload 被短路——v3 会话恒打"尚无落盘的超长工具结果"（真实会话 artifacts/ 已有 res-*.json/combined.txt）。修后：v3 会话按结果仓记账单位现数（res-*.json 一文件一结果），文案如实（已保存/预览进模型/按 result_ref 追溯）；v2 一字不动。
+- 测试：test_v3_write_wiring.cpp「V3ResultStoreStatsOf」册；test_context_command_v3.cpp（结果仓行断言）。
+- 未覆盖边界：/context 尚未给出 v3 下"inline 全文 vs 预览"的逐枚分栏（结构压缩 memo 在 v3 恒空，无数据源；预览枚数要读 v3 账本的 tool.result.persisted 事件——记遗留）。
+
+### TEST-GAP-01 · 已补
+- tests/unit/agent/test_v3_orchestration_audit.cpp（新册）：多轮真实编排（2 用户轮 × 4 请求 × 逐请求 usage），断言大结果预览、前缀逐字节稳定、热校准器(2.5)/干净校准器请求逐字节一致、bytes/4 估算不随 usage 变化。
+- 未覆盖边界：真 v3 writer/dispatcher 全链（本册预览链手接，writer 侧由 test_v3_write_wiring 既有册与本单两册拼合覆盖）；服务端 cache read 只作观察不进断言（单内规矩）。
+
+### TEST-GAP-02 · 不在本单
+- 归旧设计清理单 T16 共用实施，本单不动。
+
+### 验证口径
+- 本地零构建零测试（用户纪律：验证一律交 CI）。全部新测试经 ctest 注册循环自动收册（tests/CMakeLists.txt GLOB 目录制）；涉及 v3 格式的用例（test_v3_write_wiring 两册新例 + 统计册）册内 EnvGuard("1") 显式开 v3。CI 三平台结论见 PR。

@@ -98,6 +98,18 @@ struct DeferredToolModeSummary {
     std::size_t total = 0;
 };
 
+// /context 的会话事实(V3-REAL-03/07/08/A02):装配层一并递进来——v3 判定、
+// 最近一次请求的冻结预算(loop 请求定形时刷新)、v3 结果仓统计。预算空指针
+// = 本会话尚未发请求(卡片明说,不拿配置现算冒充);统计 absent = v2 会话
+// 或 v3 结果仓未开(走旧 artifact 口径)。
+struct ContextSessionFacts {
+    bool v3_session = false;
+    const lubancode::runtime::PreRequestBudget* last_request_budget = nullptr;
+    bool has_result_store_stats = false;
+    std::size_t result_store_results = 0;
+    std::uint64_t result_store_bytes = 0;
+};
+
 // usage_ledger(可空,模型分工第一期):分角色 usage 台账,非空时列一节
 // "模型调用分角色账"——普通 turn 归 normal,压缩/抽取/标题归 cheap,
 // 回退另有留痕(规格"路由看得见")。roles_table(可空,问题 6):三角色
@@ -113,7 +125,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ModelRouteTable* roles_table = nullptr,
                            int compact_partition_count = 0,
                            const DeferredToolModeSummary* deferred_tool_summary = nullptr,
-                           const lubancode::agent::TokenCalibrationStatus* token_calibration = nullptr);
+                           const lubancode::agent::TokenCalibrationStatus* token_calibration = nullptr,
+                           const ContextSessionFacts& session_facts = ContextSessionFacts{});
 
 // ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
 //
@@ -143,6 +156,10 @@ struct ContextEstimateInputs {
     // ModelRouterService::Table() 副本,本结构不拥有。
     const lubancode::agent::ModelRouteTable* roles_table = nullptr;
     const lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
+    // 轨迹账本(可空;V3-REAL-03/08/A02):v3 判定与 v3 结果仓统计从它取
+    //(与 CompactSessionInputs 同款非 const——v3_main_writer 取用口非
+    // const)。空指针 = 无轨迹现场(单测/旧路径),/context 走 v2 口径。
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     const std::string* last_compact_line = nullptr;
     // compact_partition_count(§八,Compact 四分区单·阶段 1):/context 展示
     // "compact turn 策略"一行用;0 = 现场没带到(不打那一行)。

@@ -176,7 +176,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ModelRouteTable* roles_table,
                            int compact_partition_count,
                            const DeferredToolModeSummary* deferred_tool_summary,
-                           const lubancode::agent::TokenCalibrationStatus* token_calibration) {
+                           const lubancode::agent::TokenCalibrationStatus* token_calibration,
+                           const ContextSessionFacts& session_facts) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -236,7 +237,12 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         // token 估算校准行(token 估算校准单):上面三类估算数字的定盘星
         //——多少对样本、tokens/byte 比率、默认尺偏差几何。样本不足两对
         // 显示"未校准",估算全按默认口径,如实说破,不装准。
-        if (token_calibration != nullptr) {
+        // v3 会话(V3-REAL-03):主路消费 utf8_bytes_div4、不记校准样本、
+        // 不乘在线系数——校准行只属于 v2 口径,v3 明说自己的尺,不把进程
+        // 级校准器里别处(v2 旁路/子代理)记下的系数拿来充数。
+        if (session_facts.v3_session) {
+            TermOut() << "  " << tr("cmd.context.v3_estimator") << "\n";
+        } else if (token_calibration != nullptr) {
             if (token_calibration->calibrated) {
                 TermOut() << "  "
                           << trf("cmd.context.calibration", token_calibration->sample_count,
@@ -273,7 +279,19 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                           << "\n";
             }
         }
-        if (artifact_store != nullptr && artifact_store->active()) {
+        if (session_facts.has_result_store_stats) {
+            // v3 结果仓(V3-REAL-A02):工具结果在提交边界存盘(res-*),模型
+            // 侧收预算内预览——"已保存但当前仍以预览/inline 进模型"如实
+            // 说,不笼统写没落盘,也不冒充 context_search 可检索的旧 artifact。
+            if (session_facts.result_store_results > 0) {
+                TermOut() << "  "
+                          << trf("cmd.context.v3_result_store", session_facts.result_store_results,
+                                 session_facts.result_store_bytes)
+                          << "\n";
+            } else {
+                TermOut() << "  " << tr("cmd.context.v3_result_store_none") << "\n";
+            }
+        } else if (artifact_store != nullptr && artifact_store->active()) {
             const auto stats = artifact_store->StatsOf();
             if (stats.artifacts > 0) {
                 TermOut() << "  " << trf("cmd.context.artifacts", stats.artifacts, stats.total_bytes) << "\n";
@@ -281,7 +299,16 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                 TermOut() << "  " << tr("cmd.context.artifacts_none") << "\n";
             }
         }
-        if (layers != nullptr) {
+        if (session_facts.v3_session) {
+            // v3 会话:结构压缩层未启用(预览在工具结果提交边界定形,请求
+            // 视图原样重放)——inline/artifact 的旧统计口径没有数据源,明说
+            // 而不是打两枚 0 冒充(A02 探账:CompressWorkingView 被短路,
+            // memo/stats 恒空)。
+            TermOut() << "  " << tr("cmd.context.v3_layers_off") << "\n";
+            if (layers != nullptr && !layers->last_compact_line.empty()) {
+                TermOut() << "  " << trf("cmd.context.last_compact", layers->last_compact_line) << "\n";
+            }
+        } else if (layers != nullptr) {
             TermOut() << "  " << trf("cmd.context.layers", layers->inline_full_results,
                                      layers->artifact_previews)
                       << "\n";
@@ -309,6 +336,33 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                 TermOut() << "  " << tr("cmd.context.output_budget_unset") << "\n";
             }
         }
+        // 最近请求的冻结预算(V3-REAL-08):历史实报(context_tracker 的
+        // usage 卡)、当前估算(上面三类)、配置声明(上一行)之外,把最近
+        // 一次请求实际定形的预算分栏说清——声明 524288 / 策略预留 32768 /
+        // 实发限额 511635 三枚值各有其名,不再混作一个"预留"。本场还没发
+        // 过请求就明说,不拿今天现算冒充昨日请求。
+        if (session_facts.last_request_budget != nullptr) {
+            const auto& budget = *session_facts.last_request_budget;
+            TermOut() << "  "
+                      << trf("cmd.context.last_request_budget",
+                             lubancode::cli::FormatTokenCount(
+                                 static_cast<std::int64_t>(budget.context_window_tokens)),
+                             budget.declared_max_output_tokens > 0
+                                 ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(
+                                       budget.declared_max_output_tokens))
+                                 : std::string("unset"),
+                             lubancode::cli::FormatTokenCount(
+                                 static_cast<std::int64_t>(budget.policy_reserve_tokens)),
+                             lubancode::cli::FormatTokenCount(
+                                 static_cast<std::int64_t>(budget.final_reserve_tokens)),
+                             budget.effective_output_limit_tokens > 0
+                                 ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(
+                                       budget.effective_output_limit_tokens))
+                                 : std::string("unset"))
+                      << "\n";
+        } else {
+            TermOut() << "  " << tr("cmd.context.last_request_budget_none") << "\n";
+        }
         // compact turn 策略(§八):compact_partition_count 配成几份、前几份
         // map、末份热区,一行说清——不调模型,纯配置展示。
         if (compact_partition_count > 0) {
@@ -331,10 +385,18 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                                      plan.tokenizer_error_margin)
                       << "\n";
             if (plan.compact_call_input_budget.has_value()) {
-                TermOut() << "  " << trf("cmd.context.compact_budget",
-                                         lubancode::cli::FormatTokenCount(*plan.compact_call_input_budget),
-                                         lubancode::cli::FormatTokenCount(plan.summary_target_budget))
-                          << "\n";
+                // v3 会话(V3-REAL-08):compact 走独立规划器(RunV3Compact 全
+                // 链,bytes/4 口径),这份 v2 公式的摘要目标不能拿来预测它——
+                // 明说"另有规划器",不冒充 v3 会真的生成这么大摘要(本场
+                // cheap 调用为 0 的教训)。
+                if (session_facts.v3_session) {
+                    TermOut() << "  " << tr("cmd.context.v3_compact_note") << "\n";
+                } else {
+                    TermOut() << "  " << trf("cmd.context.compact_budget",
+                                             lubancode::cli::FormatTokenCount(*plan.compact_call_input_budget),
+                                             lubancode::cli::FormatTokenCount(plan.summary_target_budget))
+                              << "\n";
+                }
             }
             // 下一触发线:自动压缩线(§〇.1 用户定案:窗口×80% − 压缩提示词
             // 4k − 压缩结果预留 8k,与 ShouldAutoCompact/projected 双闸同一只
@@ -1518,8 +1580,13 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     // 数字与触发判定才是同一本账。状态行(样本数/比率/偏差)随占用卡片
     // 交给 HandleContextCommand;没接线或样本不足时系数 1.0,行为照旧。
     lubancode::agent::TokenCalibrator& calibrator = lubancode::agent::DefaultTokenCalibrator();
+    // v3 会话判定(V3-REAL-03 显示面):v3 主路不参与在线校准——估算消费
+    // utf8_bytes_div4、不记样本;进程级校准器里同进程 v2 旁路/子代理记下
+    // 的系数不许乘进 v3 会话的显示。系数恒 1.0,校准状态行不取(卡片改打
+    // v3 估算口径行)。
+    const bool v3_session = in.trajectory != nullptr && in.trajectory->v3_main_writer() != nullptr;
     const double token_calibration =
-        calibrator.Coefficient(loop.provider(), loop.request_profile().model);
+        v3_session ? 1.0 : calibrator.Coefficient(loop.provider(), loop.request_profile().model);
     lubancode::agent::TokenCalibrationStatus token_calibration_status;
     if (args.empty()) {
         sys_tokens = lubancode::agent::ApplyTokenCalibration(
@@ -1541,10 +1608,16 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                 lubancode::tools::BuildDeferredToolsIndexSegment(*in.registry, *in.loaded_tools));
         }
         tools_tokens = lubancode::agent::ApplyTokenCalibration(tools_tokens, token_calibration);
-        history_tokens = lubancode::agent::EstimateHistoryTokens(loop.context().BuildPressureDryRunView(),
-                                                                token_calibration);
-        token_calibration_status =
-            calibrator.StatusOf(loop.provider(), loop.request_profile().model);
+        // v3 会话:历史估算直接量 request_history——那才是实际发给模型的
+        // 那本(预览在提交边界定形,请求视图原样重放);BuildPressureDryRunView
+        // 走结构压缩决策路,v3 下与实际请求不是同一副牌。v2 照旧 dry-run。
+        history_tokens = lubancode::agent::EstimateHistoryTokens(
+            v3_session ? loop.context().request_history() : loop.context().BuildPressureDryRunView(),
+            token_calibration);
+        if (!v3_session) {
+            token_calibration_status =
+                calibrator.StatusOf(loop.provider(), loop.request_profile().model);
+        }
     }
     // 分层占用 + 预算总账(第四期,规格"/context"节):视图各层
     // 枚数从决策台账数,预算从统一公式算,/context 打的就是
@@ -1584,9 +1657,22 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                                                  loop.History().end()),
             token_calibration);
         budget_inputs.protected_hot_zone_tokens = lubancode::agent::kDefaultHotZoneTokens;
-        budget_inputs.requested_output_reserve_tokens =
-            static_cast<std::size_t>(loop.runtime_profile().max_output_tokens.value_or(
+        // 输出预留(V3-REAL-08):预算总账吃 loop 同款封顶口径——能力级声明
+        // 是"最多能给",ConfigFile 手笔之外超 MainSessionOutputReserveCap 的
+        // 收进来。旧版把声明 524288 整份当预留,与 Hook 侧 32768 同屏打架,
+        // 用户看不出哪枚是"本次真留的"。
+        {
+            std::size_t reserve = static_cast<std::size_t>(loop.runtime_profile().max_output_tokens.value_or(
                 lubancode::agent::kUnsetOutputReserveEstimateTokens));
+            if (loop.runtime_profile().max_output_tokens_source !=
+                    lubancode::agent::OutputBudgetSource::ConfigFile &&
+                reserve > static_cast<std::size_t>(lubancode::agent::MainSessionOutputReserveCap(
+                              loop.runtime_profile().context_window_tokens))) {
+                reserve = static_cast<std::size_t>(lubancode::agent::MainSessionOutputReserveCap(
+                    loop.runtime_profile().context_window_tokens));
+            }
+            budget_inputs.requested_output_reserve_tokens = reserve;
+        }
         budget_inputs.compact_prompt_overhead_tokens = 512;  // 压缩指令的公开估算档
         layers.budget = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
         layers.last_compact_line = *in.last_compact_line;
@@ -1619,10 +1705,25 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
         }
         deferred_tool_summary_ptr = &deferred_tool_summary;
     }
+    // 会话事实(V3-REAL-03/07/08/A02):v3 判定、最近请求冻结预算(Agent 运行
+    // 态)、v3 结果仓统计(账本扫 artifacts/res-* 元数据,一文件一结果)。
+    ContextSessionFacts session_facts;
+    session_facts.v3_session = v3_session;
+    if (loop.has_request_budget()) {
+        session_facts.last_request_budget = &loop.last_request_budget();
+    }
+    if (v3_session) {
+        const auto result_stats = in.trajectory->V3ResultStoreStatsOf();
+        if (result_stats.has_value()) {
+            session_facts.has_result_store_stats = true;
+            session_facts.result_store_results = result_stats->results;
+            session_facts.result_store_bytes = result_stats->total_bytes;
+        }
+    }
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
                          loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers,
                          in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr,
-                         &token_calibration_status);
+                         v3_session ? nullptr : &token_calibration_status, session_facts);
 }
 
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) {
@@ -2149,6 +2250,7 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
         context_in.roles_table = &roles_table_storage;
     }
     context_in.artifact_store = ctx.artifact_store.get();
+    context_in.trajectory = ctx.trajectory;
     context_in.last_compact_line = ctx.last_compact_line;
     if (ctx.config != nullptr) {
         context_in.compact_partition_count = ctx.config->compact_partition_count;

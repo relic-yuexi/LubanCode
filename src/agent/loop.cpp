@@ -1081,6 +1081,20 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             estimate_output_reserve =
                 static_cast<std::size_t>(MainSessionOutputReserveCap(profile_.context_window_tokens));
         }
+        // 冻结预算快照(V3-REAL-07):本次请求的输出预算一次定形,容量 Hook、
+        // 请求边界记账与 /context 展示从同一对象取数。final_reserve_tokens
+        // 是容量判定实际用的预留——下面 extra_body 覆盖、应急收窄会改写
+        // 它;policy_reserve_tokens 留着策略原值供对照。旧病:应急已把本
+        // 请求收窄到 8k,Hook 还拿收窄前的 32k 旧预留判,把 loop 已放行的
+        // 收尾请求拦下(request-000022 capacity 记 32768、prepared 记
+        // 511635 的那场)。
+        runtime::PreRequestBudget pre_request_budget;
+        pre_request_budget.context_window_tokens = static_cast<std::uint64_t>(window_tokens);
+        pre_request_budget.declared_max_output_tokens =
+            profile_.max_output_tokens.has_value() ? static_cast<std::uint64_t>(*profile_.max_output_tokens) : 0;
+        pre_request_budget.policy_reserve_tokens = static_cast<std::uint64_t>(estimate_output_reserve);
+        pre_request_budget.final_reserve_tokens = static_cast<std::uint64_t>(estimate_output_reserve);
+        pre_request_budget.protocol_headroom_tokens = kContextPreflightHeadroomTokens;
         // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
         // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
         if (!adapter_budget && step_index == 0 && !context_.request_history().empty()) {
@@ -1306,6 +1320,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (effective_output.overridden && effective_output.tokens.has_value()) {
                 output_tokens = static_cast<std::size_t>(*effective_output.tokens);
                 declared_output_reserve_for_degrade = output_tokens;
+                // 冻结预算快照(V3-REAL-07):覆盖生效,判定预留同步换新值。
+                pre_request_budget.final_reserve_tokens = static_cast<std::uint64_t>(output_tokens);
+                pre_request_budget.output_limit_overridden = true;
             }
             // 三项账进可观测事件(派工单 §4.4):estimated_input + reserved_
             // output + protocol_margin,判定处当场发,不等问题发生后再翻账。
@@ -1346,6 +1363,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     // 值压回去),须写进合并序最后的请求级覆盖位。
                     backend_.ForceMaxOutputTokensOverride(request, static_cast<int>(emergency));
                     output_tokens = emergency;
+                    // 冻结预算快照(V3-REAL-07):应急收窄后,容量 Hook 拿同一枚
+                    // 收窄值判定——不再把收窄前的旧预留递给 Hook,把 loop 已
+                    // 放行的收尾请求拦在最后一道闸外。
+                    pre_request_budget.final_reserve_tokens = static_cast<std::uint64_t>(emergency);
+                    pre_request_budget.output_limit_overridden = true;
                     emit_preflight(output_tokens, /*clamped=*/true);
                     if (!context_wrapup_nudged) {
                         const api::TextBlock nudge{BuildContextWrapupNudgeText(emergency)};
@@ -1381,6 +1403,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 const std::size_t degraded = window_tokens - input_tokens - kContextPreflightHeadroomTokens;
                 request.max_tokens = static_cast<int>(degraded);
                 backend_.ForceMaxOutputTokensOverride(request, static_cast<int>(degraded));
+                // 冻结预算快照(V3-REAL-07):实发限额降到 degraded,判定预留
+                // 不动(放行判定本就按封顶预留做的);Hook 侧看得到两枚值各
+                // 是什么,不再混一个数。
                 platform::LogSink::Instance().Info(
                     "loop", "[context-preflight] estimated_input=" + std::to_string(input_tokens) +
                                 " declared_output=" + std::to_string(declared_output_reserve) +
@@ -1420,16 +1445,36 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         " margin=" + std::to_string(kContextPreflightHeadroomTokens) +
                         " window=" + std::to_string(window_tokens) + ")");
                 }
+                // 冻结预算快照(V3-REAL-07):adapter 路的判定预留与最终硬闸
+                // 同一枚(覆盖值优先,缺省吃封顶预留),Hook 与硬闸不再各拿
+                // 各的账。
+                pre_request_budget.final_reserve_tokens = static_cast<std::uint64_t>(reserve);
+                if (limit.overridden) {
+                    pre_request_budget.output_limit_overridden = true;
+                }
                 adapter_input_snapshot = std::move(*snapshot);
             }
         }
+        // 实发生效的输出上限(冻结预算快照的最后一笔):请求已定形,降级/
+        // 应急/覆盖全落在 request 上,这里取的就是真出门的值;unset(0)如实。
+        {
+            const api::Backend::EffectiveOutputLimit final_limit = backend_.GetEffectiveOutputLimit(request);
+            if (final_limit.tokens.has_value() && *final_limit.tokens > 0) {
+                pre_request_budget.effective_output_limit_tokens =
+                    static_cast<std::uint64_t>(*final_limit.tokens);
+            }
+        }
+        // 预算快照就此冻结(V3-REAL-07):Hook、请求边界记账与 /context 展示
+        // 从同一对象取数——Agent 运行态留一份,/context 不再拿配置现算冒充
+        // 最近请求(V3-REAL-08)。
+        agent.last_request_budget_ = pre_request_budget;
+        agent.last_request_budget_set_ = true;
         if (wiring.on_pre_request_hooks) {
             const nlohmann::json frozen_snapshot = adapter_input_snapshot
                                                        ? *adapter_input_snapshot
                                                        : runtime::BuildRequestSnapshotJson(request);
             const std::string pre_request_blocked = wiring.on_pre_request_hooks(
-                step_id, wiring.turn_id, frozen_snapshot, static_cast<std::uint64_t>(window_tokens),
-                static_cast<std::uint64_t>(estimate_output_reserve));
+                step_id, wiring.turn_id, frozen_snapshot, pre_request_budget);
             if (!pre_request_blocked.empty()) {
                 return std::unexpected(pre_request_blocked);
             }

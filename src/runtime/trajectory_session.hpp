@@ -901,6 +901,18 @@ public:
     // 写者;当前主树尚无 v3 开卷路,恒 nullptr(分派门在,通路等接线)。
     trajectory::v3::V3Writer* v3_main_writer();
 
+    // ---- v3 结果仓统计(V3-REAL-A02:/context 消费) ----
+    // v3 会话的工具结果在提交边界由 v3::ResultStore 存盘(artifacts/res-*,
+    // 一份 res-*.json 元数据 = 一枚逻辑工具结果,伴生通道文件同前缀)。
+    // 这里按仓的记账单位现数:枚数只数 res-*.json(文件数 = 结果数,可核),
+    // 字节收全部 res-* 文件。非 v3 会话返回 nullopt——调用方走旧 artifact
+    // 口径,不拿 0 枚冒充"没有结果"。
+    struct V3ResultStoreStats {
+        std::size_t results = 0;
+        std::uint64_t total_bytes = 0;
+    };
+    std::optional<V3ResultStoreStats> V3ResultStoreStatsOf() const;
+
     // ---- D3(§5.1.2):compact applied 后的内存换账投影 ----
     // v3 会话专用:重读主卷验卷(读回即 applied 行的持久化确认)→
     // ProjectModelContext 链投影(选中 system 之外的链序输入:生效摘要 +

@@ -205,6 +205,12 @@ public:
     // 吃到的预算与来源",不再让各处自己猜。
     const AgentRuntimeProfile& runtime_profile() const { return profile_.runtime; }
 
+    // 最近一次物理模型请求的冻结预算快照(V3-REAL-07/08:/context 消费)。
+    // 每次请求定形(覆盖/应急/降级之后、上 wire 之前)刷新;has=false 表示
+    // 本会话尚未发过请求——/context 不得拿今天的配置现算冒充历史请求。
+    const runtime::PreRequestBudget& last_request_budget() const { return last_request_budget_; }
+    bool has_request_budget() const { return last_request_budget_set_; }
+
     // 窗口是运行档案里唯一的活字段(/context、/model 的目录窗口生效口)。
     void SetContextWindowTokens(std::size_t window_tokens) { profile_.runtime.context_window_tokens = window_tokens; }
 
@@ -293,6 +299,8 @@ private:
     bool run_active_ = false;
     ContextManager context_;
     AgentWiring wiring_;
+    runtime::PreRequestBudget last_request_budget_;  // V3-REAL-07/08:最近请求的冻结预算
+    bool last_request_budget_set_ = false;
 
     // 逐枚追踪:批次序号(execution_id 的兜底发号)。装配层接了 Runtime
     // 的会话在 wiring.execution_id_issuer 里换成 IdAuthority 的号——单子
