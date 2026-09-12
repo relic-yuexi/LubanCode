@@ -2,12 +2,13 @@
 
 日期：2026-09-12
 优先级：P1；若确认已有 v3 会话无法续接，升 P0。
-状态：回炉中。2026-09-12 PR #50 合入 main（11 commit，R1-R3 全做）；升 P0 坐实：安装版 0.26.258 即源码基线同版，默认建场即 v3 每场中招。根因：`workspace_key()` 只认 v2 `main` recorder 的 scope，v3 场恒空 key → Cwd 查询空页 → 面板 0/0；盘上 222 场档案俱在。合入后 main 全平台 CI 绿（run 34677053472）。随 v0.26.259-beta.1 预发布。beta.1 真机复测两笔反弹见 §七。
+状态：回炉中。2026-09-12 PR #50 合入 main（11 commit，R1-R3 全做）；升 P0 坐实：安装版 0.26.258 即源码基线同版，默认建场即 v3 每场中招。根因：`workspace_key()` 只认 v2 `main` recorder 的 scope，v3 场恒空 key → Cwd 查询空页 → 面板 0/0；盘上 222 场档案俱在。合入后 main 全平台 CI 绿（run 34677053472）。随 v0.26.259-beta.1 预发布。beta.1 真机复测两笔反弹已由 PR #52 修复并合入 main（2026-09-12，全平台 CI 绿，run 随 PR 可查）；见 §七记账。剩余尾巴：下个 patch 发版安装后真机复测，过了删单。
 
 ## 七、beta.1 复测反弹（2026-09-12）
 
-- [ ] **Esc 误恢复**：选择器按 Esc 取消后自动 resume 最近一场，用户未选择却被切场。根因已定位：`src/app/commands/session_commands.cpp:2413` 裸敲路径把"用户取消"与"非交互弹不出面板"混作同一个 `nullopt`，一律 fallback `LatestResumableSessionId()`。须拆三态（选中 / 用户取消 / 无法弹面板），用户取消即原地不动、不封场不建场；所有 `PromptResumeTarget` 调用点一并核对。
-- [ ] **标题全空**：面板列表标题全无（cwd/预览未核实，一并查）。先核安装版本确系 beta.1；再对真机数据根（`C:\Users\moontidef\.lubancode\workspaces`，D:\lubancode 对应房间，222 场存量）逐场只读对账投影链：索引缓存是否按 v2 版本整份重建、存量 v3 场的 title/first_user_text 提取为何落空（事件 kind 不合？消息 content 形状不合？只扫了半边账？显示列没接？）。修完存量场必须现标题，缺值如实标未知。
+- [x] **Esc 误恢复**：已修（PR #52，d6ea2190）。`PromptResumeTarget` 拆三态（选中 / 用户取消 / 无法弹面板）；全仓调用点仅 `session_commands.cpp:2426` 一处，已随改核对。用户取消原地不动、不封场不建场。
+- [x] **标题全空**：已修（PR #52：3e1104ba 标题三层接通 v3——起名门/真账/投影现标题；1f5127f9+bb003e68 session.title.applied 事实提交族合同；a755ed5b launch_cwd 三端收口；另 PR #50 0600b7ad v3 列表投影补齐先落）。CI 册绿；存量 222 场真机对账未做，归入下条尾巴。
+- [ ] **真机复测尾巴**：上述修复尚未随任何 tag 发版（最新 tag v0.26.259-beta.1 早于 PR #52）。待下个 patch 发版、安装后对真机数据根（`C:\Users\moontidef\.lubancode\workspaces`，222 场存量）复测：Esc 取消不再切场、存量场标题/预览现字、缺值如实标未知。复测过了才删本单。
 源码基线：d52e7772。截图程序：lubancode 0.26.258，不能默认等同于当前 checkout。
 
 ## 一、问题与裁决
