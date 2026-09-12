@@ -4935,6 +4935,28 @@ std::string TrajectorySessionLedger::DeleteSessionInWorkspace(const std::string&
 }
 
 void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const std::string& old_title) {
+    // v3 场:session.title.applied 落真账(beta.1 反弹二——此前 PutUserCommand_
+    // 只认 v2 main,v3 场 /title 是 no-op,标题列恒空)。手动来源:titleGenerationId
+    // 按合同必填,给稳定的手动形状;来源枚举与自动精炼的完整合同归 T11-A。
+    if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
+        v3::EventDraft applied;
+        applied.kind = v3::EventKindV3::SessionTitleApplied;
+        // 事实提交族(同 state.goal.applied):RequiredStatusForKind 查表无
+        // 此 kind,不带 status 才过校验——§2.2 的 .applied→done 是文档语义,
+        // 校验按穷举表走,带 status 反被"不携带"分支拒。
+        applied.title_generation_id = "title-manual-" + std::to_string(++command_counter_);
+        applied.payload = nlohmann::json{{"title", title}, {"source", "manual"}};
+        if (!old_title.empty()) {
+            applied.payload["oldTitle"] = old_title;
+        }
+        const auto receipt =
+            impl_->active->v3_main->AppendEvent(std::move(applied), trajectory::Durability::PowerLoss);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            platform::LogSink::Instance().Error(
+                "trajectory", std::string("v3 标题落账失败: ") + receipt.error_code);
+        }
+        return;
+    }
     nlohmann::json payload = nlohmann::json{{"title", title}};
     if (!old_title.empty()) {
         payload["old_title"] = old_title;

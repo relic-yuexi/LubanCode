@@ -337,10 +337,24 @@ bool DeleteCurrentSession(lubancode::runtime::TrajectorySessionLedger* ledger,
                           const std::string& cwd, const std::function<std::string()>& stdin_line);
 
 
-// /resume 裸敲:本目录最近 20 场直接做成方向键菜单。显式编号/id 仍由
-// ResumeSession 解析，脚本和熟手用法不变。
-std::optional<std::string> PromptResumeTarget(const lubancode::runtime::TrajectorySessionLedger* ledger,
-                                              const lubancode::cli::Theme& theme);
+// /resume 裸敲的弹选结果,三态分开(beta.1 反弹一:用户取消与弹不出
+// 面板混作同一个 nullopt,Esc 后被 fallback 误恢复最近一场):
+//   - Picked:用户 Enter 选中,session_id 有效,走 resume 七步;
+//   - Cancelled:用户 Esc/Ctrl+C/EOF 主动退出——原地不动,不封场、不建
+//     场、不发请求,调用方就此返回;
+//   - Unavailable:面板开不了(非交互终端/没数据/查询失败)——调用方按
+//     旧口径 fallback 最近一场(--continue 同款语义)或按空处理。
+struct ResumeTargetChoice {
+    enum class Outcome { Picked, Cancelled, Unavailable };
+    Outcome outcome = Outcome::Unavailable;
+    std::string session_id;  // Picked 时有效
+    bool picked() const { return outcome == Outcome::Picked; }
+    bool cancelled() const { return outcome == Outcome::Cancelled; }
+};
+
+// /resume 裸敲:全屏选择器。Enter 回选中的 id;Esc 三态分流见上。
+ResumeTargetChoice PromptResumeTarget(const lubancode::runtime::TrajectorySessionLedger* ledger,
+                                      const lubancode::cli::Theme& theme);
 
 
 // (P0-6:旧 SessionStore 的 ResumeSession/HandleExportCommand 已删;

@@ -1,6 +1,6 @@
 # 缓存用量按 wire 归一：Claude 流式漏账与 Responses 写入拆账
 
-- 状态：待实施。2026-09-12 查过当前源码与官方文档；尚未修改生产代码、运行测试或发真实请求。
+- 状态：代码已落。2026-09-12 PR #51 合入 main（9 commit，C1-C6 全做，验收表 12 行 fixture 断言落 tests/unit/{api,runtime,agent,accounting}），macOS 腿三轮修红后绿，合入后 main 全平台 CI 绿（run 34679140349）。随 v0.26.259-beta.1 预发布。真实端点未发请求、未验证；Responses `cache_write_tokens` 字段形状按官方文档盲写，真机首验须再核对当时协议版本。
 - 级别：P1。先修 Claude 流式漏账及报告标记，再补 Responses 写入拆账，最后核对消费端。
 - 来源：用户提供《缓存命中率计算：OpenAI、Claude、DeepSeek》，要求将本次核查结论写入 todos。
 - 关联：[Insights 与账本迁移](Insights接入SessionV3_使用账本与Prompt审计迁移.todo)、[真实会话缓存审计](SessionV3真实会话审计_token双轨缓存断裂与请求账实不符.todo)。本单管 wire 取数、流式合并、统一口径与显示；v3 owner、投影及读面迁移沿用关联单，不另造账本。

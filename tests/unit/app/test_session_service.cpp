@@ -149,6 +149,32 @@ TEST_CASE("服务开张:开关开走 v3 流,首行 system(§1.2),v2 文件一枚
     CHECK(closed.error_code.empty());
 }
 
+// beta.1 反弹二(cwd 全空):终端/app-server 旧装配不递 launch_cwd,
+// v3 session.started 没有 launchCwd 可落,列表目录列全空。服务收口:
+// 空则按身份裁决起点补——本册 LaunchRequestOf 只递 cwd_utf8(生产终端
+// 同款),开出的账必须带真值。
+TEST_CASE("服务开张: 不递 launch_cwd 时按启动 cwd 补,session.started 带 launchCwd") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("launch-cwd");
+    runtime::SessionService service(LaunchRequestOf(root));
+    REQUIRE(service.runtime() != nullptr);
+    REQUIRE(service.trajectory() != nullptr);
+    CHECK(service.v3_format());
+
+    const auto rows = ReadJsonl(V3StreamOf(service.trajectory()->session_dir()));
+    REQUIRE(rows.size() >= 2);
+    REQUIRE(rows[1].value("kind", std::string()) == "session.started");
+    REQUIRE(rows[1].contains("payload"));
+    // 路径断言走 weakly_canonical:macOS 的 /var 是 /private/var 的符号
+    // 链接,身份裁决归一后的拼写与测试直接拼的路径差一个前缀。
+    CHECK(std::filesystem::weakly_canonical(
+              tools::Utf8ToPath(rows[1]["payload"].value("launchCwd", std::string()))) ==
+          std::filesystem::weakly_canonical(root / "ws"));
+
+    const auto closed = service.Close("exit");
+    CHECK(closed.error_code.empty());
+}
+
 // ---------------------------------------------------------------------------
 // 2. 输入接纳:幂等(§4.2)与先账后回执
 // ---------------------------------------------------------------------------

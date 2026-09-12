@@ -13,10 +13,13 @@ SessionTitleAccount::SessionTitleAccount(std::string& title,
                                          lubancode::runtime::TrajectorySessionLedger* ledger)
     : title_(title), ledger_(ledger) {}
 
-// P0-2:账本在,标题真账就是 control.title.changed;"档子活没活"看
-// ledger 的 main recorder。
+// P0-2:账本在,标题真账就是 control.title.changed(v3 场是
+// session.title.applied);"档子活没活"看有没有能落账的写者——v2 看
+// main recorder,v3 看 v3_main_writer(beta.1 反弹二:此前只认 v2 main,
+// v3 场被拦在起名门外,首问自动起名与 /title 全不落账,标题列恒空)。
 bool SessionTitleAccount::LedgerActive() const {
-    return ledger_ != nullptr && ledger_->main() != nullptr;
+    return ledger_ != nullptr &&
+           (ledger_->main() != nullptr || ledger_->v3_main_writer() != nullptr);
 }
 
 bool SessionTitleAccount::AppendTitleEvent(const std::string& title) {
