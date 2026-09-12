@@ -229,6 +229,6 @@ TEST_CASE("多会话并存不串值:同默认账下两只快照各自独立") {
     fx.Run("会话一改了自己的魂");
     CHECK(fx.session.content == "会话一改了自己的魂");
     CHECK(session_b.content == "会话共享草稿起点");  // 会话二不跟着动
-    CHECK(session_b.revision == 0);
-    CHECK(fx.session.revision == 1);
+    CHECK(session_b.revision == 1);  // 拷贝时刻的账(第一次改动后)
+    CHECK(fx.session.revision == 2);  // 会话一自己又记了一笔
 }

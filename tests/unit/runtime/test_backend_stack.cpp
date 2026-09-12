@@ -118,13 +118,15 @@ TEST_CASE("会话中改皮上的活字段,下一次请求立即生效") {
     request.reasoning_effort = "high";
     agent.SetRequestProfile(std::move(request));
     agent.SetModelInstructions("NEW-INSTRUCTIONS");
-    agent.SetSoul("NEW-SOUL");
+    // Soul 会话冻结单 P0(§5.1):首请求已锁定,SetSoul 被拒——魂的
+    //"中途改完下一请求立即生效"旧合同随锁定边界废除,system 不再换魂。
+    CHECK_FALSE(agent.SetSoul("NEW-SOUL"));
 
     REQUIRE(agent.Run("再问", lubancode::agent::TurnWiring{}).has_value());
     CHECK(inner.captured.back().model == "glm-b");
     CHECK(inner.captured.back().reasoning_effort == "high");
     CHECK(inner.captured.back().system.find("NEW-INSTRUCTIONS") != std::string::npos);
-    CHECK(inner.captured.back().system.find("NEW-SOUL") != std::string::npos);
+    CHECK(inner.captured.back().system.find("NEW-SOUL") == std::string::npos);
 }
 
 TEST_CASE("RebuildableBackend:构造/重建/析构不崩,对外引用地址不变") {

@@ -129,7 +129,9 @@ TEST_CASE("首请求失败(脚本用尽报错)仍锁定:重试沿用快照,换�
     CHECK(loop.soul_locked());
     CHECK_FALSE(loop.SetSoul("中途换魂"));
 
-    backend.scripts = {TextOnlyScript("好了")};
+    // 重试:假后端按捕获序号取脚本,首请求已占 idx 0,这里补齐两份让
+    // idx 1(重试请求)有脚本可吐。
+    backend.scripts = {TextOnlyScript("占位"), TextOnlyScript("好了")};
     REQUIRE(loop.Run("重试", callbacks).has_value());
     REQUIRE(backend.captured_requests.size() == 2);
     CHECK(backend.captured_requests[1].system.find("文风甲") != std::string::npos);
@@ -150,7 +152,8 @@ TEST_CASE("首请求中途取消仍锁定:重试沿用快照") {
     (void)result;
 
     backend.cancel_after_event_index.reset();
-    backend.scripts = {TextOnlyScript("重试成功")};
+    // 重试的请求按捕获序号走 idx 1,补齐两份脚本。
+    backend.scripts = {TextOnlyScript("长答"), TextOnlyScript("重试成功")};
     REQUIRE(loop.Run("重试", callbacks).has_value());
     CHECK(backend.captured_requests.back().system.find("文风甲") != std::string::npos);
 }
