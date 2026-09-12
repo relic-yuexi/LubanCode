@@ -779,10 +779,11 @@ TEST_CASE("四家 wire fixture:ThinkingDelta 喂同一组显示测试,画面一�
         const WirePicture picture = FeedFixture(*fixture);
 
         INFO("thinking text: ", picture.thinking_text);
-        // 有正文、成了一条思考条目、收定折叠一行。
+        // 有正文、成了一条思考条目、收定折叠一行。渲染首行带 "[OK] " 状态词
+        // 前缀(plain 主题),"思考"不落行首——改断言"含思考事实"。
         CHECK_FALSE(picture.thinking_text.empty());
         REQUIRE(picture.items == 1);
-        CHECK(picture.collapsed_title.find("思考 ") == 0);
+        CHECK(picture.collapsed_title.find("思考 ") != std::string::npos);
         CHECK(picture.collapsed_title.find("Ctrl+O 展开") != std::string::npos);
         // 预览行只含正文文本:索引/signature/协议字段一个都不漏进来。
         for (const std::string& row : picture.preview_while_running) {
@@ -807,15 +808,15 @@ TEST_CASE("四家 wire fixture:ThinkingDelta 喂同一组显示测试,画面一�
         const WirePicture r = load("openai_responses", "manual_reasoning_summary_stream");
         const WirePicture g = load("google_generate_content", "internal_thought_part_stream");
         const WirePicture c = load("openai_chat", "vllm_qwen_reasoning_delta");
-        // "思考 <时长>(Ctrl+O 展开)":时长各家不同,骨架逐字节一致。
+        // "[OK] 思考 <时长>(Ctrl+O 展开)":时长各家不同,骨架(前缀+文案模板)一致。
         const auto skeleton = [](const std::string& title) {
             const std::size_t at = title.find('(');
             return at == std::string::npos ? title : title.substr(0, at);
         };
-        CHECK(skeleton(a.collapsed_title).find("思考 ") == 0);
-        CHECK(skeleton(r.collapsed_title).find("思考 ") == 0);
-        CHECK(skeleton(g.collapsed_title).find("思考 ") == 0);
-        CHECK(skeleton(c.collapsed_title).find("思考 ") == 0);
+        CHECK(skeleton(a.collapsed_title).find("思考 ") != std::string::npos);
+        CHECK(skeleton(r.collapsed_title).find("思考 ") != std::string::npos);
+        CHECK(skeleton(g.collapsed_title).find("思考 ") != std::string::npos);
+        CHECK(skeleton(c.collapsed_title).find("思考 ") != std::string::npos);
         CHECK(a.collapsed_title.find("(Ctrl+O 展开)") != std::string::npos);
         CHECK(r.collapsed_title.find("(Ctrl+O 展开)") != std::string::npos);
         CHECK(g.collapsed_title.find("(Ctrl+O 展开)") != std::string::npos);

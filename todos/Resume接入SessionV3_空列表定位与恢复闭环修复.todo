@@ -1,0 +1,76 @@
+# /resume 接入 Session v3：空列表定位与恢复闭环修复
+
+日期：2026-09-12
+优先级：P1；若确认已有 v3 会话无法续接，升 P0。
+状态：待修复。本轮只查源码、写方案；未改运行代码，未构建、未跑测试、未操作真实会话。
+源码基线：d52e7772。截图程序：lubancode 0.26.258，不能默认等同于当前 checkout。
+
+## 一、问题与裁决
+
+用户在 D:\lubancode 启动程序，敲 /resume。选择器停在 Filter [Cwd]，显示“本目录还没有会话存档”，计数 0/0。
+
+截图证明当前目录列表为空，尚不能证明所有存档丢失，也不能单凭截图认定恢复内核没迁 v3。当前源码已有 v3 发现、摘要和 resume-as-new 分支。要沿“安装版本 → 数据根 → workspace 身份 → 目录发现 → 索引 → 筛选 → 恢复”逐段查，找出会话在哪一段消失。
+
+本单修列表与续接闭环。复用现有 reader、索引和 SessionManager；不另造存储，不拿 v2 manifest 冒充 v3 真账，不为恢复可见性重写旧会话。
+
+## 二、已核源码
+
+1. `src/app/commands/session_commands.cpp:1066`，`PromptResumeTarget`：先查当前 workspace，再查 All；两边都空才直接返回。选择器每次按 scope 重查，调用 `ListWorkspaceSessions`，并排除 one_shot。按这份源码推断，能进入截图面板，可能是当前 workspace 空、其他 workspace 有记录；安装版本尚待核对。
+2. `src/runtime/trajectory_session.cpp:4780`，`ListWorkspaceSessions`：Cwd 查询补入 `workspace_key()`，交给 `QueryWorkspaceSessions`。这里按 workspace key 查，不按摘要 cwd 字符串过滤。不可把“cwd 字段为空”直接定为空列表根因。
+3. `src/trajectory/session_index.cpp:634`，`QueryWorkspaceSessions`：靠 `ResolveDirByWorkspaceKey` 找目录；key 为空、不合法、房间解析失败时返回空集合或跳过。缺记录与定位失败没有在这一层明确分开。
+4. `src/trajectory/session_index.cpp:175`，`ScanSession`：先读 session.json；读不到再识别 v3。`ScanV3Session` 已读 v3 message/event，却不填 cwd、title、run_kind；正文只接 string content。目录展示、标题搜索、单发过滤与块状正文预览都有缺口，需按实际 schema 补齐。
+5. `src/trajectory/v3/session_switch.cpp`，`FindV3SessionStream`：只认 `<id>/<id>.jsonl` 首行 schemaVersion=3；同目录有 main.jsonl 就退回。格式冲突、空首行、坏首行须报状态，不可混为没档。
+6. `src/trajectory/session_index.cpp`，`LoadOrRebuildIndex`：命中 session.json 字节数/mtime、main 字节数、v3 字节数就复用旧摘要。投影代码升级后，未变化的旧文件仍可能沿用缺字段摘要；修投影时须一起处理缓存版本。
+7. `src/runtime/trajectory_session.cpp:4028`，`ResumeInteractive` → `SessionManager::ResumeAsNew` → `ResumeAsNewV3Locked`（`src/trajectory/session_manager.cpp:2319`）。v3 恢复已经有路，不能另接一套。交互入口先 Close 当前场再调用 ResumeAsNew，须补源预检失败时的保场用例。
+8. `src/trajectory/v3/writer.cpp:325`，初始 session.started 目前写 writerVersion 与 context，不含完整列表元数据。不能只让 reader 猜一个 cwd/title/runKind 键便算修完。
+
+本机 Get-Command 指向 `C:\Users\moontidef\AppData\Local\Programs\lubancode\lubancode.exe`。本轮未执行该程序，也未核实其版本与真实账本根目录。
+
+## 三、修复步骤
+
+### R1：先定位截图空列表
+
+- [ ] 记录实际 exe 路径、版本、构建来源，核对截图 0.26.258 与源码基线；记录影响数据根和 v3 写入的配置/环境变量，隐去凭据。
+- [ ] 只读核对实际 workspaces_root、启动 cwd、规范化路径、workspace key、解析出的房间目录。列出 Cwd/All 查询在各阶段的数量与排除原因，不打印聊天正文。
+- [ ] 核对盘上目标 v3 主账、workspace manifest 与索引映射。覆盖大小写、尾分隔符、仓库子目录、linked worktree；沿 workspace 身份合同处理，不随手把 Cwd 改成字符串相等。
+- [ ] 找到“盘上存在 → 列表消失”的最小样本，先加失败回归。若只是旧安装包，另记升级与回归结果；仍保留本单已查实的投影缺口。
+- [ ] 区分真空目录、其他 workspace 有档、查询失败、坏索引、格式冲突。面板不得将读取失败统一显示为“没有会话”。
+
+### R2：补齐 v3 列表合同
+
+- [ ] 共用格式定位和 reader 边界，统一返回格式、身份、健康状态及可恢复状态。与旧设计清理单 T00 共用实现。
+- [ ] 明确 cwd、标题、run_kind 的权威来源：会话级字段先定 schema/事件合同再写入；workspace manifest 只能提供已知仓库目录，不能伪称历史启动 cwd。老档缺值显示“未知”，不暗填为 main_session。
+- [ ] 标题按正式变更事件折叠；首句、模型、消息数按 v3 合同提取。正文覆盖 string 和实际允许的文本块，跳过图片/blob、内部 compact 问答及非 human 输入。
+- [ ] one_shot 的写入与读取一起接通；元数据未知时给明确策略与提示，不误当可续会话。
+- [ ] 为摘要投影加版本；版本变化只重建派生索引。未变化的 v3 主账也要更新摘要。重建失败保留旧缓存并报诊断，不覆盖成空成功。
+- [ ] Cwd、All、搜索、排序、分页、Ctrl+O 详情、Ctrl+T 转录与 `/resume <id>` 使用同一身份；不得在选中后重新猜目录。
+
+### R3：接稳恢复与失败边界
+
+- [ ] 复用 ResumeAsNewV3Locked；先只读校验源身份、源链、引用和恢复资格，再切换当前场。预检失败不封当前场、不建新场、不发模型请求。
+- [ ] 源档全程只读；成功后新场仍写 v3，保留来源链、有效 compact 视图、tool call/result 配对和 is_error。不得只拼可见聊天文字当模型上下文。
+- [ ] 切换成功后核对 writer、历史投影、UI 转录与后续模型请求均指向新场；一次真实续聊写入新账，源账字节不变。
+- [ ] 坏尾、缺 blob、源链断裂、格式歧义分别返回可诊断错误。当前场封口后若新场创建失败，明确报告可用状态与恢复办法，不能假称续接成功。
+
+## 四、验收矩阵
+
+- [ ] 默认生产开关未设置时：创建 v3 会话，写入一轮，退出重进，同 workspace 的 /resume Cwd 能列出并选中；All 也可见。
+- [ ] 纯 v3、纯历史 v2、混合 workspace 都能正确列出；one_shot、归档、损坏档按合同处理。
+- [ ] 中文标题、块状首句、未知目录、标题更新、Created/Updated 排序均有断言；不将内部消息计入用户首句。
+- [ ] 用旧投影缓存和未增长主账启动：升级后自动刷新摘要，且不改源账。
+- [ ] Windows 路径大小写、子目录、linked worktree 按既定 workspace 归属得到一致结果。
+- [ ] 索引缺失可重建；manifest 损坏、根目录不可读、双格式冲突有错误提示，不能报空成功。
+- [ ] Cwd → All → 搜索 → 详情 → 转录 → Enter，以及直接 id、--continue 均测到同一 v3 恢复链。
+- [ ] 两次 resume、compact 后 resume、工具错误结果恢复都有端到端断言；恢复后首个请求与新账投影一致，源档 hash 不变。
+- [ ] 源预检失败保住当前会话；切换期间写入失败无“成功”提示。
+- [ ] 最后用修复构建重走截图操作，记录版本、数据根、两种 scope 的条数和续聊结果。单元绿不代替这一步。
+
+测试落点：`tests/unit/sessions/test_session_picker.cpp`、`test_session_command_service.cpp`；`tests/unit/trajectory/test_resume_wiring.cpp`；`tests/unit/trajectory_v3/test_v3_session_resume_bridge.cpp`、`test_v3_resume_chain.cpp`、`test_v3_reader_resume.cpp`；另在 workspace 索引测试处补投影/缓存回归。先查已有用例，再添缺口。
+
+验证须分清默认 v3、显式 v3、历史 v2。检查 `tests/CMakeLists.txt` 注入环境变量的规则；不能拿强制 v2 的测试结果给默认 v3 销项。本轮只交方案，不安排本地构建。
+
+## 五、关联与收官
+
+关联：`SessionV3旧设计清理_消费迁移缺口补齐与旧接口退役.todo`（T00、T16），`失败与恢复_写账闸门工具结果与重试收口.todo`（工具错误与持久恢复边界）。本单承担 CLI 列表、选择和续聊闭环，不重复认领其他消费者。
+
+落地顺序：R1 定位并留失败用例 → R2 投影与缓存 → R3 恢复边界 → 验收矩阵与实际安装包复测。收官要附根因、改动入口、测试结果、安装版本和截图场景结果；只写完方案不得勾完成。

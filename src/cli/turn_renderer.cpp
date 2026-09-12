@@ -82,6 +82,7 @@ lubancode::cli::TranscriptItem ProjectTurnItem(const lubancode::runtime::TurnIte
     if (item.kind == lubancode::runtime::TurnItemViewKind::User) {
         out.title = item.result_text;
     } else if (item.kind == lubancode::runtime::TurnItemViewKind::Thinking) {
+        out.kind = lubancode::cli::TranscriptKind::Thinking;  // 重放路也走思考渲染(提示/折叠/间距)
         out.tool_name = "thinking";
         const double seconds =
             item.ended_at_ms > item.started_at_ms
