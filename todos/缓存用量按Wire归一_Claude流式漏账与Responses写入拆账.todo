@@ -1,0 +1,98 @@
+# 缓存用量按 wire 归一：Claude 流式漏账与 Responses 写入拆账
+
+- 状态：待实施。2026-09-12 查过当前源码与官方文档；尚未修改生产代码、运行测试或发真实请求。
+- 级别：P1。先修 Claude 流式漏账及报告标记，再补 Responses 写入拆账，最后核对消费端。
+- 来源：用户提供《缓存命中率计算：OpenAI、Claude、DeepSeek》，要求将本次核查结论写入 todos。
+- 关联：[Insights 与账本迁移](Insights接入SessionV3_使用账本与Prompt审计迁移.todo)、[真实会话缓存审计](SessionV3真实会话审计_token双轨缓存断裂与请求账实不符.todo)。本单管 wire 取数、流式合并、统一口径与显示；v3 owner、投影及读面迁移沿用关联单，不另造账本。
+
+## 一、已确认的边界
+
+当前主公式并未混算三家。`src/api/types.hpp::Usage` 将输入拆成普通输入、缓存读取、缓存写入；`TotalInputTokens` 将三项相加。
+
+- OpenAI Chat：从 prompt 总量扣掉 cached，余量记入内部 input。
+- OpenAI Responses：从 input 总量扣掉 cached，余量记入内部 input。
+- Claude Messages：普通输入、读取、写入原样取值，再求总量。
+- DeepSeek Chat：优先取顶层 hit/miss，分别记作 cache_read/input。
+- `src/runtime/turn_runtime.hpp` 按 token 总和计算整轮比例，并非平均各次百分比。
+
+因此，不可看到内部 `input_tokens + cache_read_tokens` 就判定重复计算。内部 input 与上游同名字段并非同一口径。也不可把真实缓存下降一概归咎于统计：关联审计单已有总输入增长、命中率下降而除法正确的实例。
+
+## 二、源码漏洞
+
+### C1：Claude 开头 usage 丢失（P1）
+
+- `src/api/anthropic/events.cpp::HandleMessageStart` 只取 id/model，没有保存 `message.usage`。
+- `HandleMessageDelta` 假定末尾带齐输入及缓存字段，缺失项直接补零。
+- `EventParser::Consume` 先走无状态解析；当前未见跨开头、末尾的 usage 合并。
+- `src/api/assembler.cpp` 在 MessageDone 时直接接收整份 usage，无法找回前面已丢字段。
+- 官方流式示例允许开头报 input，末尾只报 output。按这份返回走现有代码，输入便会丢失；不能拿兼容端点末尾恰好报齐来替代官方协议验收。
+
+### C2：Claude 缓存报告标记漏设（P1）
+
+- `HandleMessageDelta` 读取缓存数字，却未设置 `MessageDone::cache_reported`。
+- assembler 将该标记传至 AgentLoop 的 `UsageReport::cache_reported_by_provider`。
+- `TurnUsageStats::Record` 有非零缓存数字兜底，故不能声称所有 UI 都必然显示未知；但明确报零仍与缺字段混淆，显式报告链也不完整。
+
+### C3：Responses 未拆缓存写入（P1）
+
+- `src/api/responses/events.cpp` 只读取 `input_tokens_details.cached_tokens`，未读 `cache_write_tokens`。
+- “Responses 没有缓存写入概念”的注释已不适用当前官方协议。
+- 正常计数下，现有读命中率仍可正确：内部普通输入暂时包含写入，总输入未变。但写入显示、普通输入分类及依赖分类的成本估算会失真。
+
+## 三、实施清单
+
+- [ ] C1：为 Anthropic 每条响应流保存 usage 状态。开头建立快照，后续只覆盖实际出现的字段；累计快照不逐帧相加，缺字段不清零，显式零须覆盖旧值。
+- [ ] C1：核对多个 message_delta、message_stop、错误及取消路径；完整用量只提交一次，未完成响应不得伪装完整账。新请求清空状态，不串上次数字。
+- [ ] C2：区分“usage 已报告”“缓存读取已报告”“缓存写入已报告”。只报写入不能证明读取为零；若现有布尔位不足，扩展领域状态并一路传递。
+- [ ] C2：核对 `api::UsageReport`、assembler、AgentLoop、TurnUsageStats、ContextTracker、轨迹写入及派生查询；不得靠非零数字推断明确报零。
+- [ ] C3：Responses 读取 W=cache_write_tokens、R=cached_tokens、T=input_tokens，普通输入 U=T-R-W。不得把 W 再加到上游 T，也不得把 W 加入命中分子。
+- [ ] C3：缺写入字段与显式零分开。旧模型和兼容服务未提供写入明细时，按协议能力说明可知范围；不能伪造已拆账，也不能一律宣称存在写入收费。
+- [ ] C4：复查 Chat 两种字段形状。DeepSeek 顶层 hit 与 details.cached_tokens 同时出现时不可相加；只报 hit 或 miss 时不可将缺项直接补零并据此替换总输入。完整字段冲突须留诊断。
+- [ ] C4：异常计数另标无效，保留原始数字与来源。覆盖 R>T、R+W>T、负数、字段类型错误、hit+miss 与 prompt_total 不符；不能用截零或截到 100% 掩盖矛盾。
+- [ ] C5：原始 usage 或足以追溯字段的安全副本沿用现有请求/轨迹合同保存；不另存凭据、完整请求头或重复计费事件。若需改 schema，写清版本及旧记录 unknown 策略。
+- [ ] C6：更新注释和字段说明，明确内部普通输入与厂商原始 input 的差别。
+
+## 四、显示与汇总合同
+
+wire 层认字段、合并事件；统一用量层提供同一含义的数字与有效状态；UI 不按模型名字另写除法。兼容厂商扩展在 wire/provider 适配层处理，不能仅凭模型名猜协议。
+
+- 单次 token 命中率：R/T；T=0 时显示 N/A。
+- 多次汇总：ΣR/ΣT；不平均各次百分比。
+- 缺缓存明细：显示未报告。混合完整与缺失样本时，默认对有效样本计算比例，同时标明请求覆盖率和统计范围；不得把缺失读取当零再标成整体精确命中率。
+- 异常样本：标明异常并排除精确比例，列出排除数，保留查账入口。
+- 可展示总输入、缓存读取、缓存写入、普通输入；字段不齐时如实标未知。
+- 命中率与省钱率分开。费用按实际 provider/model/计价版本拆账；有 TTL 写入分项时不可与顶层写入总量重复累计。
+- 最近请求、本轮、整场会话、历史汇总须注明范围。沿用 v3 唯一 usage owner，不因多个 UI/事件副本重复计数。
+
+## 五、验收样本
+
+| 样本 | 预期 |
+| --- | --- |
+| Claude 开头 U=1000、W=2000、R=9000，末尾只有 output | T=12000，命中率 75%，三项输入保留 |
+| Claude 后续显式将某项改成 0 | 该项归零，其余未出现字段保留 |
+| Claude 明报 R=0 与完全未报 R | 前者为已报告，后者为未知 |
+| Claude 只报 W，不报 R | 不将读取标成已知零 |
+| OpenAI Chat T=12000、R=8960 | T 保持 12000，命中率约 74.67% |
+| Responses T=12000、R=9000、W=2000 | U=1000，T=12000，命中率 75% |
+| DeepSeek T=12000、hit=8960、miss=3040，另报 cached=8960 | 读取只算一次，命中率约 74.67% |
+| DeepSeek 只给一项，或 hit+miss 与 T 冲突 | 按明确规则保留可知总量/标异常，不用缺项零值造出 100% |
+| 同份完整 usage 重复出现 | 一次请求只落一次账 |
+| 前次请求有缓存，后次没有 usage | 后次不继承旧值 |
+| 两次完整输入 1000/100000，读取 0/90000 | 汇总约 89.11%，不是 45% |
+| 完整样本、缺字段、异常样本混合 | 比例标清有效样本范围及覆盖情况 |
+
+- [ ] 扩充 `tests/unit/api/test_anthropic_events.cpp`、`test_responses_events.cpp`、`test_chat_events.cpp` 及必要的 assembler 测试。
+- [ ] 补 runtime/ContextTracker/显示与 v3 消费测试，证明报告状态不在中途丢失、缺失样本不冒充零。
+- [ ] 用官方形状构造流式 fixture；保留兼容端点末尾报齐样本，证明两类流都能处理。
+- [ ] 按仓库要求运行相关检查。若当前任务仍要求 GitHub-only CI，则只交 CI，不在本地构建。
+- [ ] 单测、离线回放、CI、真实端点分别报告。真实请求未执行就明确记未验证；不得拿 fixture 通过宣称线上统计已正确。
+
+## 六、核对资料
+
+- Claude 流式协议：https://platform.claude.com/docs/en/build-with-claude/streaming
+- Claude 缓存字段：https://platform.claude.com/docs/en/build-with-claude/prompt-caching#tracking-cache-performance
+- OpenAI 缓存读写：https://developers.openai.com/api/docs/guides/prompt-caching
+- DeepSeek Chat：https://api-docs.deepseek.com/api/create-chat-completion/
+- DeepSeek Responses：https://api-docs.deepseek.com/guides/responses_api/
+
+本次实际打开并核对了 Claude 流式协议与 OpenAI 缓存文档；其余链接来自用户材料，实施对应适配前再次核对。文档随协议变化，验收须记录当时版本与响应形状。
