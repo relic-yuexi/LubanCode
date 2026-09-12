@@ -165,8 +165,11 @@ TEST_CASE("服务开张: 不递 launch_cwd 时按启动 cwd 补,session.started 
     REQUIRE(rows.size() >= 2);
     REQUIRE(rows[1].value("kind", std::string()) == "session.started");
     REQUIRE(rows[1].contains("payload"));
-    CHECK(rows[1]["payload"].value("launchCwd", std::string()) ==
-          tools::PathToUtf8(root / "ws"));
+    // 路径断言走 weakly_canonical:macOS 的 /var 是 /private/var 的符号
+    // 链接,身份裁决归一后的拼写与测试直接拼的路径差一个前缀。
+    CHECK(std::filesystem::weakly_canonical(
+              tools::Utf8ToPath(rows[1]["payload"].value("launchCwd", std::string()))) ==
+          std::filesystem::weakly_canonical(root / "ws"));
 
     const auto closed = service.Close("exit");
     CHECK(closed.error_code.empty());
