@@ -647,7 +647,7 @@ TEST_CASE("response.completed C3: W/R/T 三项齐——U=T-R-W,T 保持厂商原
 
 TEST_CASE("response.completed C3: 只有 R 没有 W——写入未知,不是明报零") {
     auto event = parse_event(Frame(
-        R"({"type":"response.completed","response":{"id":"resp_rw","status":"completed","output":[],"usage":{"input_tokens":2000,"output_tokens":5,"input_tokens_details":{"cached_tokens":500}}})"));
+        R"({"type":"response.completed","response":{"id":"resp_rw","status":"completed","output":[],"usage":{"input_tokens":2000,"output_tokens":5,"input_tokens_details":{"cached_tokens":500}}}})"));
     REQUIRE(event.has_value());
     const auto& done = std::get<MessageDone>(*event);
     // 旧模型/兼容服务不给写入明细:U=T-R 照摊,creation 数字 0、明报位
@@ -671,7 +671,7 @@ TEST_CASE("response.completed C3: W 显式为零——明报位为真") {
 
 TEST_CASE("response.completed C3: R>T——U 为负保留原数,不截零") {
     auto event = parse_event(Frame(
-        R"({"type":"response.completed","response":{"id":"resp_bad","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":5,"input_tokens_details":{"cached_tokens":1200}}})"));
+        R"({"type":"response.completed","response":{"id":"resp_bad","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":5,"input_tokens_details":{"cached_tokens":1200}}}})"));
     REQUIRE(event.has_value());
     const auto& done = std::get<MessageDone>(*event);
     // 矛盾账:input=1000-1200=-200 照记,anomaly 点名;总输入仍是厂商

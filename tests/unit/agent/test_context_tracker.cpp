@@ -424,6 +424,16 @@ TEST_CASE("C2 报告位: 明报全零的 usage 不是缺测,不标旧值不记 u
     // 不落"明细未报"。
     CHECK(record.miss_kind == cli::ContextTracker::CacheMissKind::UpstreamMiss);
     CHECK(record.hit_percent() == 0);  // 明报零:0% 是真零
+
+    // 真正的全零明报(数字层分不出"报了零"与"没报",全靠旗标):
+    cli::ContextTracker zero(100000);
+    cli::ContextTracker::UsageReportFlags zero_flags = flags;
+    zero.ApplyUsage(api::Usage{}, "turn-1", 0, Diag(false, true), zero_flags);
+    REQUIRE(zero.cache_request_history().size() == 1);
+    CHECK_FALSE(zero.cache_request_history()[0].unreported);  // 明报了,不是缺测
+    CHECK_FALSE(zero.usage_stale());                          // 也不标旧值
+    CHECK(zero.cache_request_history()[0].miss_kind ==
+          cli::ContextTracker::CacheMissKind::UpstreamMiss);
 }
 
 TEST_CASE("C2 报告位: usage 在场而读取明细缺席——明细未报,不冒充 0%") {

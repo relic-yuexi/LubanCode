@@ -52,9 +52,10 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
     const bool measured = usage.input_tokens > 0 || usage.output_tokens > 0 ||
                           usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0 ||
                           usage.output_reasoning_tokens > 0;
-    // 报告位合成:显式位是主路;没带(旧路径/单测)退回数字推断。读取位
-    // 再并一道"数字非零"兜底——非零的读取本身就是证据。
-    const bool usage_reported = flags.known ? flags.usage_reported : measured;
+    // 报告位合成:显式位是主路,但"数字非零"仍是明报的证据(provider 报了
+    // 数字才非零)——flags 在场时明报与非零取或,没带(旧路径/单测)退回
+    // 数字推断。明报全零(flags 真、数字零)不再被当成缺测。
+    const bool usage_reported = flags.known ? (flags.usage_reported || measured) : measured;
     const bool cache_read_reported =
         (flags.known ? flags.cache_read_reported : measured) || usage.cache_read_tokens > 0;
     if (measured) {

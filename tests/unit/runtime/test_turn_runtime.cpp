@@ -813,7 +813,7 @@ TEST_CASE("usage C4: 异常样本保留原数,精确比例排除并计数") {
     api::UsageReport second;
     second.reported_by_provider = true;
     second.cache_read_reported_by_provider = true;
-    second.usage = api::Usage{100000, 8, 90000, 0};
+    second.usage = api::Usage{10000, 8, 90000, 0};  // 完整输入 10000+90000=100000
     stats.Add(second);
     CHECK(stats.cache_hit_percent() == 89);  // 90000/101000=89.1%,四舍五入 89
 
