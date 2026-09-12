@@ -1,0 +1,112 @@
+{
+  "$id": "lubancode:deployment-profile/1",
+  "title": "部署档 schema 1(docs/reference/capability-contract.md §3)",
+  "type": "object",
+  "required": ["schemaVersion", "service", "harnessProfiles"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "service": {
+      "type": "object",
+      "required": ["mode", "listeners", "defaultProfile"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["managed", "local"] },
+        "listeners": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "stdio": { "$ref": "#/definitions/listener" },
+            "websocket": { "$ref": "#/definitions/listener" },
+            "http": { "$ref": "#/definitions/httpListener" },
+            "grpc": { "$ref": "#/definitions/listener" },
+            "localIpc": { "$ref": "#/definitions/listener" }
+          }
+        },
+        "channelAccounts": { "type": "array", "items": { "type": "string" } },
+        "queueConsumers": { "type": "array", "items": { "type": "string" } },
+        "defaultProfile": { "type": "string", "minLength": 1 }
+      }
+    },
+    "harnessProfiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/definitions/harnessProfile" }
+    }
+  },
+  "definitions": {
+    "listener": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "httpListener": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "sse": { "type": "boolean" }
+      }
+    },
+    "harnessProfile": {
+      "type": "object",
+      "required": ["agentRef", "features", "tools"],
+      "additionalProperties": false,
+      "properties": {
+        "agentRef": { "type": "string", "minLength": 1 },
+        "features": { "$ref": "#/definitions/features" },
+        "components": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "mcpServers": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+        },
+        "tools": { "$ref": "#/definitions/toolPolicy" },
+        "exposure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "default": { "enum": ["direct", "deferred", "host_only"] } }
+        },
+        "updates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "defaultApplyAt": { "enum": ["next_session"] },
+            "allowSessionExpansion": { "const": false }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "stepsPerInput": { "type": "integer", "minimum": 0 },
+            "wallTimeMs": { "type": "integer", "minimum": 0 },
+            "toolCallsPerInput": { "type": "integer", "minimum": 0 },
+            "maxOutputTokens": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "required": ["default"],
+      "additionalProperties": false,
+      "properties": {
+        "default": { "enum": ["enabled", "disabled"] },
+        "enabled": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "disabled": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "toolPolicy": {
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["inherit", "only", "none"] },
+        "allow": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  }
+}

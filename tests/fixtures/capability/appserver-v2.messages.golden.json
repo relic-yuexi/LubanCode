@@ -1,0 +1,115 @@
+{
+  "contract": "docs/reference/capability-contract.md §11",
+  "note": "协议 2.0 报文 golden。信封为标准 JSON-RPC 2.0(出站带 jsonrpc 字段;与 1.2 的出站不带互不越界)。反向请求 id 用独立空间,与客户端请求 id 两不相干。样例中方法名为冻结合同草案,生产未接线。",
+  "clientRequests": [
+    {
+      "direction": "client->engine",
+      "jsonrpc": "2.0",
+      "id": 41,
+      "method": "input/submit",
+      "params": {
+        "sessionId": "S2",
+        "contextId": "main",
+        "clientOperationId": "OP-71",
+        "content": [{ "type": "text", "text": "跑一遍冒烟" }]
+      }
+    },
+    {
+      "direction": "client->engine",
+      "jsonrpc": "2.0",
+      "id": 42,
+      "method": "tools/register",
+      "params": {
+        "clientOperationId": "REG-1",
+        "scope": "session:S2",
+        "expectedRevision": "cap-7",
+        "tool": {
+          "name": "app.echo",
+          "description": "应用侧回声工具(示例)",
+          "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] },
+          "resultContractVersion": 1
+        },
+        "execution": { "mode": "application", "executorRef": "conn-9/executor-1" },
+        "applyAt": "next_session"
+      }
+    }
+  ],
+  "clientResponses": [
+    {
+      "direction": "engine->client",
+      "jsonrpc": "2.0",
+      "id": 41,
+      "result": { "accepted": true, "inputId": "I9", "status": "queued", "turnId": null, "operationId": "O9" }
+    },
+    {
+      "direction": "engine->client",
+      "jsonrpc": "2.0",
+      "id": 42,
+      "result": {
+        "registrationId": "reg-3",
+        "generation": 1,
+        "catalogRevision": "cap-8",
+        "status": "pending_next_session"
+      }
+    }
+  ],
+  "serverRequests": [
+    {
+      "direction": "engine->executor",
+      "jsonrpc": "2.0",
+      "id": "srv-req-1001",
+      "method": "toolExecution/request",
+      "params": {
+        "sessionId": "S2",
+        "turnId": "T4",
+        "actionId": "a-12",
+        "toolCallId": "tc-88",
+        "executionId": "exec-5",
+        "attemptId": 1,
+        "registrationId": "reg-3",
+        "registrationGeneration": 1,
+        "executorId": "conn-9/executor-1",
+        "ownerEpoch": 3,
+        "arguments": { "text": "ping" },
+        "argumentsDigest": "sha256:5a1f...",
+        "deadlineMs": 15000,
+        "authorizationRef": "cap-8/scope:S2"
+      }
+    }
+  ],
+  "executorResponses": [
+    {
+      "direction": "executor->engine",
+      "jsonrpc": "2.0",
+      "id": "srv-req-1001",
+      "result": {
+        "event": "toolExecution/accepted",
+        "executionId": "exec-5",
+        "attemptId": 1
+      }
+    },
+    {
+      "direction": "executor->engine",
+      "method": "toolExecution/result",
+      "params": {
+        "executionId": "exec-5",
+        "attemptId": 1,
+        "executorId": "conn-9/executor-1",
+        "ownerEpoch": 3,
+        "status": "succeeded",
+        "content": [{ "type": "text", "text": "pong" }],
+        "resultContractVersion": 1
+      }
+    }
+  ],
+  "envelopeRules": {
+    "clientRequestRequired": ["jsonrpc", "id", "method"],
+    "clientRequestForbiddenInResult": [],
+    "responseRequired": ["jsonrpc", "id"],
+    "serverRequestRequired": ["jsonrpc", "id", "method"],
+    "notificationOptionalId": false,
+    "serverRequestIdPattern": "srv-req-<n>",
+    "versionField": "jsonrpc",
+    "versionValue": "2.0"
+  }
+}

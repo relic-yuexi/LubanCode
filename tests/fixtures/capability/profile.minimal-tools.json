@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "service": {
+    "mode": "managed",
+    "listeners": {
+      "stdio": { "enabled": true },
+      "websocket": { "enabled": false },
+      "http": { "enabled": false, "sse": false },
+      "grpc": { "enabled": false },
+      "localIpc": { "enabled": false }
+    },
+    "channelAccounts": [],
+    "queueConsumers": [],
+    "defaultProfile": "minimal-tools"
+  },
+  "harnessProfiles": {
+    "minimal-tools": {
+      "agentRef": "example.tools:assistant",
+      "features": {
+        "default": "disabled",
+        "enabled": ["mcp"],
+        "disabled": [
+          "process.exec",
+          "filesystem.write",
+          "browser",
+          "subagents",
+          "ptc",
+          "memory.read",
+          "memory.write",
+          "goal",
+          "loop",
+          "workflow"
+        ]
+      },
+      "components": { "mcpServers": ["tools-approved"] },
+      "tools": {
+        "mode": "only",
+        "allow": ["mcp:tools-approved:echo", "mcp:tools-approved:describe"],
+        "deny": []
+      },
+      "exposure": { "default": "direct" },
+      "updates": { "defaultApplyAt": "next_session", "allowSessionExpansion": false },
+      "limits": { "stepsPerInput": 6, "wallTimeMs": 30000, "toolCallsPerInput": 8, "maxOutputTokens": 1200 }
+    }
+  }
+}
