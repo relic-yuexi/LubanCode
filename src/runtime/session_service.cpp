@@ -125,6 +125,14 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
         }
         // 裁决失败留空:沿旧例交账本兜底/明败,不在服务里另算一把 key。
     }
+    // launch_cwd 三端收口(beta.1 反弹二):终端/app-server 旧装配沿空,
+    // v3 session.started 的 launchCwd 与 v2 manifest.launch_cwd 由此缺值,
+    // 列表目录列全空。空则按身份裁决起点(=实际启动 cwd)补上——这是
+    // 建场时刻的真值,不是事后猜测;显式递的(one_shot)优先不覆盖。
+    if (options.trajectory_launch_cwd.empty() && options.trajectory_workspace_identity.valid()) {
+        options.trajectory_launch_cwd =
+            tools::PathToUtf8(options.trajectory_workspace_identity.launch_cwd);
+    }
     return options;
 }
 
