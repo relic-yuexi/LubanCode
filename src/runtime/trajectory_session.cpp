@@ -4762,10 +4762,19 @@ std::filesystem::path TrajectorySessionLedger::session_dir() const {
 }
 
 std::string TrajectorySessionLedger::workspace_key() const {
-    return impl_ != nullptr && impl_->active != nullptr &&
-                   impl_->active->main.has_value()
-               ? impl_->active->main->base_scope().workspace_key
-               : std::string();
+    // v3 场 main(v2 recorder)恒空、身份在 v3_main 与内存 manifest
+    //(ActiveSession 头注:认 active 一律先看 v3_main)。这条只认 main 的
+    // 读面曾让默认 v3 场恒拿空 key——/resume 的 Cwd 范围查询见空 key 直接
+    // 空手,列表 0/0,盘上档案全在也列不出(Resume 接入 v3 单 R1 根因)。
+    if (impl_ != nullptr && impl_->active != nullptr) {
+        if (impl_->active->is_v3()) {
+            return impl_->active->manifest.workspace_key;
+        }
+        if (impl_->active->main.has_value()) {
+            return impl_->active->main->base_scope().workspace_key;
+        }
+    }
+    return std::string();
 }
 
 // ---------------------------------------------------------------------------
