@@ -18,6 +18,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -700,3 +701,5 @@ TEST_CASE("协议 2.0 golden:客户端请求都带 clientOperationId,幂等键�
         CHECK(request["params"].contains("clientOperationId"));
     }
 }
+
+}  // namespace
