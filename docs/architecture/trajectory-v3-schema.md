@@ -315,7 +315,7 @@ v3 的 system/user/assistant/tool 四角色经 adapter 结构化转换到四家 
 
 | 消费方 | 现行取数 | v3 取数口 | 依赖 P2 读取侧 |
 | --- | --- | --- | --- |
-| `/usage` 命令(`src/app/commands/usage_commands.cpp`) | v2 Journal 的 UsageSample 流 | assistant message 的 `usage`(唯一可累计事实)+ `model.usage.appended`(失败/迟到/更正观察,不参与累计) | 是 |
+| `/usage` 命令(`src/app/commands/usage_commands.cpp`) | **已接 v3**(T06,2026-09-12):`ReadSessionUsage` 分派 v3(`ProjectV3Usage` 吃 assistant usage owner + `WalkSessionTree` 递归子 session);v2 老路保留给旧档 | assistant message 的 `usage`(唯一可累计事实)+ `model.usage.appended`(失败/迟到/更正观察,不参与累计);折算口 `accounting::UsageFromV3Owner` | 已接(离线读面) |
 | token 账本五层聚合(`src/accounting/usage_aggregate.hpp`) | UsageSample(v2 事件投出) | sample 的 provider usage 改吃 v3 owner;估算栏吃 `model.request.prepared` 引用的 tokenEstimateRef（估算槽位已接，离线消费仍待迁移） | 是 |
 | cost 估算(`src/accounting/cost_estimator`) | UsageSample + 价格表 | 随账本同源;compact/标题等内部请求的 usage 各入各账,不混主上下文 | 是 |
 | token 校准器(`src/agent/token_calibrator.hpp`) | 活事件流(`assembler.usage_seen()` + 请求字节账) | 实报侧:assistant `usage` 按完整输入口径(`TotalInputTokens`);本地侧:prepared 引用的估算与请求特征(§4.12:特征/标签对齐才谈得上免重放回测) | 回测/跨会话面是 |

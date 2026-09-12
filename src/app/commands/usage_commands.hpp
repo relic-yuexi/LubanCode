@@ -75,6 +75,8 @@ struct UsageReportModel {
     std::string workspace_key;
     std::string status;        // session.json status;读不到 unknown
     bool provisional = false;  // active/未封口:数字如实,成色注明
+    std::string format;        // 账格式 "v2"/"v3"(T06:v3 读法另标,旧历史
+                                // 不混 v3 完整率分母)
     // 价格表口径(§6.3 四条线):没配给 nullopt,note 说明。
     std::optional<lubancode::accounting::PricingTable> pricing;
     std::string pricing_note;  // "未配价格表" / 表 id / 坏表说明
