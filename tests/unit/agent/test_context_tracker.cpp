@@ -331,21 +331,28 @@ cli::ContextTracker::CacheDiagnostics Diag(bool first, bool append_only,
 TEST_CASE("ClassifyMiss: 分型四态各归各,缺测最优先,本地断因先于上游结论") {
     using Kind = cli::ContextTracker::CacheMissKind;
     // 缺测:不管本地视角如何,先记"未回报",不冒充 0% 也不猜断因。
-    CHECK(cli::ContextTracker::ClassifyMiss(false, 0, Diag(false, true)) == Kind::Unreported);
-    CHECK(cli::ContextTracker::ClassifyMiss(false, 500, Diag(false, true)) == Kind::Unreported);
+    CHECK(cli::ContextTracker::ClassifyMiss(false, true, 0, Diag(false, true)) == Kind::Unreported);
+    CHECK(cli::ContextTracker::ClassifyMiss(false, true, 500, Diag(false, true)) == Kind::Unreported);
 
     // epoch 首请求:没有前一份可比,miss 是天然的。
-    CHECK(cli::ContextTracker::ClassifyMiss(true, 0, Diag(true, true)) == Kind::FirstRequest);
+    CHECK(cli::ContextTracker::ClassifyMiss(true, true, 0, Diag(true, true)) == Kind::FirstRequest);
     // 首请求报了命中也不改口:它不是 miss,分型按命中算。
-    CHECK(cli::ContextTracker::ClassifyMiss(true, 100, Diag(true, true)) == Kind::FirstRequest);
+    CHECK(cli::ContextTracker::ClassifyMiss(true, true, 100, Diag(true, true)) == Kind::FirstRequest);
 
     // 明确断 epoch:锅在本地,断因在诊断账里另有点名。
-    CHECK(cli::ContextTracker::ClassifyMiss(true, 0, Diag(false, false, "tools_changed")) ==
+    CHECK(cli::ContextTracker::ClassifyMiss(true, true, 0, Diag(false, false, "tools_changed")) ==
           Kind::EpochBreak);
 
     // 本地前缀稳定:报了命中是命中,报零是上游没接住——锅不背到本地头上。
-    CHECK(cli::ContextTracker::ClassifyMiss(true, 800, Diag(false, true)) == Kind::Hit);
-    CHECK(cli::ContextTracker::ClassifyMiss(true, 0, Diag(false, true)) == Kind::UpstreamMiss);
+    CHECK(cli::ContextTracker::ClassifyMiss(true, true, 800, Diag(false, true)) == Kind::Hit);
+    CHECK(cli::ContextTracker::ClassifyMiss(true, true, 0, Diag(false, true)) == Kind::UpstreamMiss);
+
+    // C2 新分型:usage 在场而读取明细缺席——读取量未知,不冒充 0%、
+    // 也不猜上游;读取数字非零时不落这类(非零本身是证据,调用方已并入
+    // cache_read_reported)。
+    CHECK(cli::ContextTracker::ClassifyMiss(true, false, 0, Diag(false, true)) ==
+          Kind::CacheDetailUnreported);
+    CHECK(cli::ContextTracker::ClassifyMiss(true, false, 800, Diag(false, true)) == Kind::Hit);
 }
 
 TEST_CASE("ApplyUsage 带诊断账: epoch/追加律/稳定前缀逐笔记进请求账") {
@@ -393,4 +400,87 @@ TEST_CASE("ApplyUsage 缺诊断: 记账不炸,标诊断未随行,不拿默认值
     REQUIRE(tracker.cache_request_history().size() == 1);
     CHECK_FALSE(tracker.cache_request_history()[0].diagnostics_present);
     CHECK(tracker.cache_request_history()[0].miss_kind == cli::ContextTracker::CacheMissKind::Unknown);
+}
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C2:报告位随 ApplyUsage 递进——"明报零"不再被
+// 数字全零吞掉,读/写位与异常位各自落 CacheRequestRecord,中途不丢;
+// 缺失样本不冒充零(命中率 -1,不写 0%)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("C2 报告位: 明报全零的 usage 不是缺测,不标旧值不记 unreported") {
+    cli::ContextTracker tracker(100000);
+    cli::ContextTracker::UsageReportFlags flags;
+    flags.known = true;
+    flags.usage_reported = true;      // provider 明报了 usage(全零也是真)
+    flags.cache_read_reported = true; // 读取明细也在场,值是零
+    tracker.ApplyUsage(api::Usage{2000, 10, 0, 0}, "turn-1", 0, Diag(false, true), flags);
+
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    const auto& record = tracker.cache_request_history()[0];
+    CHECK_FALSE(record.unreported);  // 不是缺测:usage 明报了
+    CHECK_FALSE(tracker.usage_stale());
+    // 报零的读取分型走 UpstreamMiss(本地前缀稳定、上游没接住),
+    // 不落"明细未报"。
+    CHECK(record.miss_kind == cli::ContextTracker::CacheMissKind::UpstreamMiss);
+    CHECK(record.hit_percent() == 0);  // 明报零:0% 是真零
+
+    // 真正的全零明报(数字层分不出"报了零"与"没报",全靠旗标):
+    cli::ContextTracker zero(100000);
+    cli::ContextTracker::UsageReportFlags zero_flags = flags;
+    zero.ApplyUsage(api::Usage{}, "turn-1", 0, Diag(false, true), zero_flags);
+    REQUIRE(zero.cache_request_history().size() == 1);
+    CHECK_FALSE(zero.cache_request_history()[0].unreported);  // 明报了,不是缺测
+    CHECK_FALSE(zero.usage_stale());                          // 也不标旧值
+    CHECK(zero.cache_request_history()[0].miss_kind ==
+          cli::ContextTracker::CacheMissKind::UpstreamMiss);
+}
+
+TEST_CASE("C2 报告位: usage 在场而读取明细缺席——明细未报,不冒充 0%") {
+    cli::ContextTracker tracker(100000);
+    cli::ContextTracker::UsageReportFlags flags;
+    flags.known = true;
+    flags.usage_reported = true;
+    flags.cache_read_reported = false;  // 读取字段压根没出现
+    flags.cache_creation_reported = true; // 写入报了——不能证明读取为零
+    tracker.ApplyUsage(api::Usage{2000, 10, 0, 300}, "turn-1", 0, Diag(false, true), flags);
+
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    const auto& record = tracker.cache_request_history()[0];
+    CHECK(record.cache_creation_reported);   // 写入位落账
+    CHECK_FALSE(record.cache_read_reported); // 读取位保持未知
+    CHECK(record.miss_kind == cli::ContextTracker::CacheMissKind::CacheDetailUnreported);
+    CHECK(record.hit_percent() == -1);  // 读取量未知:比例不算,不写 0%
+}
+
+TEST_CASE("C2 报告位: 未知路径(旧事件/单测)退回数字推断,行为与老版一致") {
+    cli::ContextTracker tracker(100000);
+    // flags 缺省(known=false):measured 推断——老三参版的逐字节行为。
+    tracker.ApplyUsage(api::Usage{2000, 10, 0, 0}, "turn-1", 0, Diag(false, true));
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    const auto& record = tracker.cache_request_history()[0];
+    CHECK(record.cache_read_reported);  // measured 兜底
+    CHECK(record.miss_kind == cli::ContextTracker::CacheMissKind::UpstreamMiss);
+}
+
+TEST_CASE("C4 异常样本: 数字保留原数,本场命中率分子分母不认它") {
+    cli::ContextTracker tracker(100000);
+    // 先一笔自洽样本:输入 1000、命中 900。
+    tracker.ApplyUsage(api::Usage{100, 5, 900, 0}, "turn-1", 0, Diag(false, true));
+    CHECK(tracker.session_cache_hit_percent() == 90);  // 900/1000
+    // 再一笔矛盾账(cached>total):原数照记,session 累计不加它。
+    cli::ContextTracker::UsageReportFlags bad;
+    bad.known = true;
+    bad.usage_reported = true;
+    bad.cache_read_reported = true;
+    bad.anomalous = true;
+    tracker.ApplyUsage(api::Usage{-200, 3, 1200, 0}, "turn-1", 1, Diag(false, true), bad);
+    REQUIRE(tracker.cache_request_history().size() == 2);
+    const auto& record = tracker.cache_request_history()[1];
+    CHECK(record.anomalous);
+    CHECK(record.input_tokens == 1000);  // TotalInputTokens 原数(1200-200)
+    CHECK(record.cache_read_tokens == 1200);
+    CHECK(record.hit_percent() == -1);   // 比例不算,不写 120%
+    // session 累计只含自洽那笔:900/1000 仍是 90%。
+    CHECK(tracker.session_cache_hit_percent() == 90);
 }

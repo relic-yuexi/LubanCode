@@ -279,3 +279,49 @@ TEST_CASE("SanitizeRequest:所有 wire 字符串出口一并清洗") {
     CHECK(lubancode::platform::IsValidUtf8(request.tools[0].input_schema.at("title").get<std::string>()));
     CHECK(lubancode::platform::IsValidUtf8(request.extra_body["vendor"]["note"].get<std::string>()));
 }
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C2:MessageDone 的读/写明报位与异常位经 assembler
+// 原样落账——中途不丢,"只报写入"不许被吞成"读取已知零"。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("C2 旗标: MessageDone 的读/写明报位与异常位各自独立落账") {
+    {
+        MessageAssembler assembler;
+        MessageDone done;
+        done.stop_reason = "end_turn";
+        done.usage = Usage{100, 5, 0, 300};  // 只报写入:R 数字 0、W=300
+        done.usage_reported = true;
+        done.cache_read_reported = false;
+        done.cache_creation_reported = true;
+        assembler.Feed(done);
+        CHECK(assembler.usage_seen());
+        CHECK_FALSE(assembler.cache_read_seen());  // 读取未知,不冒充已知零
+        CHECK(assembler.cache_creation_seen());
+        CHECK(assembler.usage().cache_creation_tokens == 300);
+    }
+    {
+        MessageAssembler assembler;
+        MessageDone done;
+        done.usage_reported = true;
+        done.cache_read_reported = true;  // 明报 R=0
+        assembler.Feed(done);
+        CHECK(assembler.cache_read_seen());
+        CHECK(assembler.usage().cache_read_tokens == 0);  // 数字是零,旗标是"已报"
+    }
+    {
+        MessageAssembler assembler;
+        MessageDone done;
+        done.usage_reported = true;
+        done.usage_anomaly = "cached_tokens(1200) > input_tokens(1000)";
+        assembler.Feed(done);
+        CHECK_FALSE(assembler.usage_anomaly().empty());  // 异常位不丢
+        CHECK(assembler.usage_seen());
+    }
+    // 缺省(老路径/未接线):三位皆 false——与"明报零"分得开。
+    MessageAssembler bare;
+    bare.Feed(MessageDone{"end_turn", Usage{10, 5}});
+    CHECK(bare.usage_seen() == false);
+    CHECK_FALSE(bare.cache_read_seen());
+    CHECK_FALSE(bare.cache_creation_seen());
+}

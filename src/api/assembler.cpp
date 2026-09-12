@@ -127,7 +127,10 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 stop_reason_ = e.stop_reason;
                 usage_ = e.usage;
                 usage_seen_ = e.usage_reported;  // 显式位:wire 见没见过 usage 帧
-                cache_seen_ = e.cache_reported;
+                // 读/写明报位各自一枚(C2):只报写入不能证明读取为零。
+                cache_read_seen_ = e.cache_read_reported;
+                cache_creation_seen_ = e.cache_creation_reported;
+                usage_anomaly_ = e.usage_anomaly;
             }
             // MessageStart / StreamError:不影响攒出来的内容。
         },

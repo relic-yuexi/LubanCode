@@ -113,7 +113,15 @@ UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
         epoch.run_id = sample.run_id;
         epoch.cache_epoch = epoch_label;
         epoch.totals.Add(sample);
-        if (sample.cache_reported_by_provider.value_or(false)) {
+        // 读/写明报位分开后的聚合口径(C2):读取明细在场才进"报了缓存"
+        // 桶(命中率的分母门);只报写入的样本读取量未知,进 unknown 桶。
+        // 异常样本(C4)另计排除数,不进比例桶——数字留在 sample 可查。
+        if (sample.usage_anomaly.has_value() && !sample.usage_anomaly->empty()) {
+            aggregate.anomalous_samples += 1;
+            epoch.anomalous_samples += 1;
+        }
+        if (sample.cache_read_reported_by_provider.value_or(false) &&
+            !(sample.usage_anomaly.has_value() && !sample.usage_anomaly->empty())) {
             epoch.requests_cache_reported += 1;
             if (sample.usage.has_value()) {
                 epoch.cache_reported_input_tokens += sample.usage->input_tokens;
@@ -225,6 +233,7 @@ nlohmann::json UsageAggregate::ToJson() const {
                             {"requests", row.totals.requests_total},
                             {"requests_cache_reported", row.requests_cache_reported},
                             {"requests_cache_unknown", row.requests_cache_unknown},
+                            {"anomalous_samples", row.anomalous_samples},
                             {"input_tokens", row.totals.input_tokens},
                             {"cache_read_tokens", row.totals.cache_read_tokens},
                             {"cache_creation_tokens", row.totals.cache_creation_tokens},
@@ -261,6 +270,7 @@ nlohmann::json UsageAggregate::ToJson() const {
         {"by_outcome", breakdown_json(by_outcome)},
         {"legacy_samples", legacy_samples},
         {"incomplete_linkage_samples", incomplete_linkage_samples},
+        {"anomalous_samples", anomalous_samples},
         {"warnings", warnings_json}};
 }
 

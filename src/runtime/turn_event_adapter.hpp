@@ -226,7 +226,18 @@ public:
                                        {"step_index", report.step_index},
                                        {"provider_response_id", report.provider_response_id},
                                        {"reported_by_provider", report.reported_by_provider},
-                                       {"cache_reported_by_provider", report.cache_reported_by_provider},
+                                       // 缓存读/写明报位分开(缓存用量按 Wire
+                                       // 归一单 C2):旧键 cache_reported_by_provider
+                                       // 保留(= 读||写),旧消费方不破;新消费方
+                                       // 认两位新键,只报写入不冒充读取已知。
+                                       {"cache_reported_by_provider",
+                                        report.cache_read_reported_by_provider ||
+                                            report.cache_creation_reported_by_provider},
+                                       {"cache_read_reported_by_provider",
+                                        report.cache_read_reported_by_provider},
+                                       {"cache_creation_reported_by_provider",
+                                        report.cache_creation_reported_by_provider},
+                                       {"usage_anomaly", report.usage_anomaly},
                                        {"cache_epoch", report.cache_epoch},
                                        {"epoch_break_reason", report.epoch_break_reason},
                                        {"prefix_append_only", report.prefix_append_only},

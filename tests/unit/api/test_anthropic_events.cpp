@@ -503,3 +503,267 @@ TEST_CASE("P3 搜索失败流: tool_search_tool_result_error 的 error_code/mess
     CHECK(result.content.at("error_code") == "invalid_tool_input");
     CHECK(result.content.at("error_message").get<std::string>().find("missing )") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C1/C2:官方流式形状允许 message_start 就报齐输入
+// 侧 usage、末尾 message_delta 只报 output——旧的无状态翻译把开头那份丢
+// 了,兼容端"末尾恰好报齐"不能替代官方协议验收。EventParser 在有状态层
+// 跨帧合并:开头立快照,后续只覆盖实际出现的字段;累计是快照覆盖不是逐
+// 帧相加;缺字段不清零、显式零覆盖旧值;读/写明报位分开,未完成的流不
+// 伪装完整账。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 从一组帧里抽出 EventParser 吐出的那枚 MessageDone(官方流只有
+// message_delta 会发;取最后一枚,多枚 delta 场景的合并语义见各用例)。
+const MessageDone* FindDone(const std::vector<StreamEvent>& events) {
+    const MessageDone* found = nullptr;
+    for (const auto& event : events) {
+        if (const auto* done = std::get_if<MessageDone>(&event); done != nullptr) {
+            found = done;
+        }
+    }
+    return found;
+}
+
+std::vector<StreamEvent> FeedAll(anthropic::EventParser& parser, const std::vector<std::string>& frames) {
+    std::vector<StreamEvent> events;
+    for (const auto& raw : frames) {
+        for (auto& event : parser.Consume(Frame(raw))) {
+            events.push_back(std::move(event));
+        }
+    }
+    return events;
+}
+
+}  // namespace
+
+TEST_CASE("C1 官方形状: 开头报齐输入侧,末尾只报 output——三项输入保留不丢") {
+    // 验收样本第 1 行:开头 U=1000、W=2000、R=9000,末尾只有 output。
+    // 预期 T=12000,命中率 75%,三项输入保留。
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"msg_official","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":1000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":9000,"output_tokens":1}}})",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"答"}})",
+        R"({"type":"content_block_stop","index":0})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":44}})",
+        R"({"type":"message_stop"})",
+    });
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.input_tokens == 1000);
+    CHECK(done->usage.cache_creation_tokens == 2000);
+    CHECK(done->usage.cache_read_tokens == 9000);
+    CHECK(done->usage.output_tokens == 44);  // output 取末帧累计值
+    CHECK(TotalInputTokens(done->usage) == 12000);
+    CHECK(done->usage.cache_read_tokens * 100 / TotalInputTokens(done->usage) == 75);
+    CHECK(done->usage_reported);
+    CHECK(done->cache_read_reported);
+    CHECK(done->cache_creation_reported);
+    CHECK(done->usage_anomaly.empty());
+}
+
+TEST_CASE("C1 显式零覆盖: 末帧把某项明报成 0——该项归零,未出现字段保留") {
+    // 验收样本第 2 行:开头三项齐,末帧显式 cache_read=0——R 归零,U/W
+    // 保留(没出现的字段不清零)。
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":1000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":9000}}})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1000,"output_tokens":5,"cache_read_input_tokens":0}})",
+        R"({"type":"message_stop"})",
+    });
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.cache_read_tokens == 0);        // 显式零覆盖
+    CHECK(done->usage.cache_creation_tokens == 2000); // 未出现:保留快照
+    CHECK(done->usage.input_tokens == 1000);
+    CHECK(done->cache_read_reported);  // 报了零也是"已报告"
+    CHECK(done->cache_creation_reported);
+}
+
+TEST_CASE("C1 明报 R=0 与完全未报 R 分家: 旗标说话,不靠数字猜") {
+    // 验收样本第 3 行:两条流数字同为 0,前者 cache_read_reported=true
+    //(已报告),后者 false(未知)。
+    {
+        anthropic::EventParser parser;  // 明报 R=0
+        const auto events = FeedAll(parser, {
+            R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100,"cache_read_input_tokens":0}}})",
+            R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}})",
+        });
+        const MessageDone* done = FindDone(events);
+        REQUIRE(done != nullptr);
+        CHECK(done->usage.cache_read_tokens == 0);
+        CHECK(done->cache_read_reported);  // 开头明报了 0
+    }
+    {
+        anthropic::EventParser parser;  // 全程未报 R
+        const auto events = FeedAll(parser, {
+            R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100}}})",
+            R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}})",
+        });
+        const MessageDone* done = FindDone(events);
+        REQUIRE(done != nullptr);
+        CHECK(done->usage.cache_read_tokens == 0);
+        CHECK_FALSE(done->cache_read_reported);  // 没报过:未知,不是零
+        CHECK_FALSE(done->cache_creation_reported);
+    }
+}
+
+TEST_CASE("C1 只报 W 不报 R: 读取不标已知零") {
+    // 验收样本第 4 行:只报写入——R 数字 0 + read 位 false,不许把读取
+    // 说成"已知为零"。
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100,"cache_creation_input_tokens":300}}})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}})",
+    });
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.cache_creation_tokens == 300);
+    CHECK(done->cache_creation_reported);
+    CHECK_FALSE(done->cache_read_reported);  // 只报写入不能证明读取为零
+    CHECK(done->usage.cache_read_tokens == 0);
+}
+
+TEST_CASE("C1 多枚 message_delta: 快照不逐帧相加,后续帧缺 usage 不清零") {
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100,"cache_read_input_tokens":80}}})",
+        // 兼容端分片报 output:第一枚 delta 只带 output。
+        R"({"type":"message_delta","delta":{},"usage":{"output_tokens":10}})",
+        // 第二枚 delta 没有 usage 对象:快照原样带出,不得清零、不得重报。
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"}})",
+        R"({"type":"message_stop"})",
+    });
+    // 两次 message_delta 各发一枚 MessageDone;取最后一枚(无状态合并后
+    // 的完整账),assembler 端覆盖式记账,不会累计两遍。
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.input_tokens == 100);
+    CHECK(done->usage.cache_read_tokens == 80);
+    CHECK(done->usage.output_tokens == 10);
+    CHECK(done->usage_reported);
+    int done_count = 0;
+    for (const auto& event : events) {
+        if (std::holds_alternative<MessageDone>(event)) {
+            ++done_count;
+        }
+    }
+    CHECK(done_count == 2);
+    // assembler 收两枚:覆盖式,末值与合并账一致——一次请求只落一次账
+    //(验收样本第 9 行的消费端口径)。
+    MessageAssembler assembler;
+    for (const auto& event : events) {
+        assembler.Feed(event);
+    }
+    CHECK(assembler.usage().input_tokens == 100);
+    CHECK(assembler.usage().cache_read_tokens == 80);
+    CHECK(assembler.usage_seen());
+    CHECK(assembler.cache_read_seen());
+}
+
+TEST_CASE("C1 新请求清空状态: 第二条流的 message_start 不串上一条的数字") {
+    // 验收样本第 10 行的精神:前次请求有缓存,后次没有 usage——后次不
+    // 继承旧值。EventParser 是每请求新建的,但复用同一只 parser(测试/
+    // 极端路径)也必须靠 message_start 重置兜住。
+    anthropic::EventParser parser;
+    FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m1","model":"c","usage":{"input_tokens":1000,"cache_read_input_tokens":900}}})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}})",
+        R"({"type":"message_stop"})",
+    });
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m2","model":"c","content":[]}})",  // 无 usage
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"}})",             // 也无 usage
+        R"({"type":"message_stop"})",
+    });
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.input_tokens == 0);
+    CHECK(done->usage.cache_read_tokens == 0);
+    CHECK_FALSE(done->usage_reported);  // 第二条流真没报,不冒充
+    CHECK_FALSE(done->cache_read_reported);
+}
+
+TEST_CASE("C1 错误与取消路径: 半截流不伪装完整账") {
+    // error 帧到达时流失败:MessageDone 不发,usage 快照不外泄——上层按
+    // "没收到终帧"收口,未完成响应不得伪装完整账。
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100,"cache_read_input_tokens":80}}})",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})",
+        R"({"type":"error","error":{"type":"overloaded_error","message":"忙"}})",
+    });
+    CHECK(FindDone(events) == nullptr);  // 没有完整账
+    bool saw_error = false;
+    for (const auto& event : events) {
+        if (std::holds_alternative<StreamError>(event)) {
+            saw_error = true;
+        }
+    }
+    CHECK(saw_error);
+    // 流被掐断(只有 message_start,没有 message_delta):同样没有 MessageDone。
+    anthropic::EventParser cut;
+    const auto half = FeedAll(cut, {
+        R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100}}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"半截"}})",
+    });
+    CHECK(FindDone(half) == nullptr);
+}
+
+TEST_CASE("C1 兼容端末尾报齐形状照旧: 两类流都能处理") {
+    // MiniMax 等兼容端在 message_delta 里报齐四项——旧路已覆盖的形状,
+    // 快照合并不改变它的结果(末帧全覆盖)。
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"msg_compat","model":"qwen3.7-plus","content":[],"usage":{"input_tokens":15,"output_tokens":0}}})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":15,"output_tokens":1078,"cache_creation_input_tokens":50,"cache_read_input_tokens":128}})",
+        R"({"type":"message_stop"})",
+    });
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.input_tokens == 15);
+    CHECK(done->usage.output_tokens == 1078);
+    CHECK(done->usage.cache_read_tokens == 128);
+    CHECK(done->usage.cache_creation_tokens == 50);
+    CHECK(done->cache_read_reported);
+    CHECK(done->cache_creation_reported);
+}
+
+TEST_CASE("C2 无状态 parse_event 的帧内旗标: 字段在场即明报,缺字段不置") {
+    // parse_event 保持无状态(单帧):message_delta 帧内旗标照置,跨帧合并
+    // 是 EventParser::Consume 的活。老调用方/单测的判定基础。
+    {
+        auto event = parse_event(Frame(
+            R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3}})"));
+        REQUIRE(event.has_value());
+        const auto& done = std::get<MessageDone>(*event);
+        CHECK(done.usage_reported);
+        CHECK(done.cache_read_reported);      // 帧内在场
+        CHECK_FALSE(done.cache_creation_reported);  // 帧内缺席
+    }
+    {
+        auto event = parse_event(Frame(
+            R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":5}})"));
+        REQUIRE(event.has_value());
+        const auto& done = std::get<MessageDone>(*event);
+        CHECK(done.usage_reported);
+        CHECK_FALSE(done.cache_read_reported);
+        CHECK_FALSE(done.cache_creation_reported);
+    }
+}
+
+TEST_CASE("C2 负数字段: 记异常不吞帧") {
+    anthropic::EventParser parser;
+    const auto events = FeedAll(parser, {
+        R"({"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":100,"cache_read_input_tokens":-5}}})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}})",
+    });
+    const MessageDone* done = FindDone(events);
+    REQUIRE(done != nullptr);
+    CHECK(done->usage.cache_read_tokens == -5);  // 原数保留
+    CHECK(done->cache_read_reported);            // 字段在场
+    CHECK_FALSE(done->usage_anomaly.empty());    // 负数点名
+}

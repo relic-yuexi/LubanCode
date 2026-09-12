@@ -822,7 +822,7 @@ public:
     }
     bool OnRequestSent(const std::string&) override { return true; }
     void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                         bool) override {}
+                         bool, bool, const std::string&) override {}
     bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                            const std::string&) override {
         return true;
@@ -1157,7 +1157,7 @@ TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens �
         }
         bool OnRequestSent(const std::string&) override { return true; }
         void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                             bool) override {}
+                             bool, bool, const std::string&) override {}
         bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                                const std::string&) override {
             return true;
@@ -1265,7 +1265,7 @@ TEST_CASE("预检(差距8): extra_body 覆盖输出上限——预留吃覆盖�
         }
         bool OnRequestSent(const std::string&) override { return true; }
         void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                             bool) override {}
+                             bool, bool, const std::string&) override {}
         bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                                const std::string&) override {
             return true;
@@ -1372,7 +1372,7 @@ TEST_CASE("预检应急(§4.1 收紧): 封顶后仍装不下才进应急,收尾�
         }
         bool OnRequestSent(const std::string&) override { return true; }
         void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                             bool) override {}
+                             bool, bool, const std::string&) override {}
         bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                                const std::string&) override {
             return true;
@@ -1486,7 +1486,7 @@ TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场
         }
         bool OnRequestSent(const std::string&) override { return true; }
         void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                             bool) override {}
+                             bool, bool, const std::string&) override {}
         bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                                const std::string&) override {
             return true;

@@ -211,10 +211,18 @@ constexpr PayloadField kPayloadFields[] = {
     // 五项与 cache_epoch/prefix_append_only 只在 reported_by_provider=true
     // 时必填、false 时禁现——"没报"不许拿 0 顶上。条件硬约束在
     // ValidatePayloadWithVersion 里逐条裁。
+    // 缓存读/写明报位(缓存用量按 Wire 归一单 C2,2026-09):两位新键分开
+    // 落;旧键 cache_reported_by_provider 是上一代合并位,写侧已停写,读侧
+    // (usage_projector)两代都认,旧档案照读不误。usage_anomaly(C4):
+    // provider 账目自相矛盾的人话点名,非空才落;token 字段为负只在带此
+    // 点名时放行(负数是矛盾的原数保留,不是合法账)。
     {EventKind::ModelUsageRecorded, "attempt", "u", true},
     {EventKind::ModelUsageRecorded, "provider_response_id", "s", false},
     {EventKind::ModelUsageRecorded, "reported_by_provider", "b", true},
     {EventKind::ModelUsageRecorded, "cache_reported_by_provider", "b", false},
+    {EventKind::ModelUsageRecorded, "cache_read_reported_by_provider", "b", false},
+    {EventKind::ModelUsageRecorded, "cache_creation_reported_by_provider", "b", false},
+    {EventKind::ModelUsageRecorded, "usage_anomaly", "s", false},
     {EventKind::ModelUsageRecorded, "input_tokens", "i", false},
     {EventKind::ModelUsageRecorded, "cache_read_tokens", "i", false},
     {EventKind::ModelUsageRecorded, "cache_creation_tokens", "i", false},
@@ -697,12 +705,19 @@ std::optional<SchemaError> ValidatePayloadWithVersion(int schema_version, EventK
             }
         }
         if (reported) {
+            // 负 token 的例外(缓存用量按 Wire 归一单 C4):provider 账目自相
+            // 矛盾(例:cached_tokens > input_tokens,U=T-R-W<0)时原数保留,
+            // 但必须带非空 usage_anomaly 点名——无点名的负数仍是坏账,拒。
+            const bool anomaly_flagged = payload.contains("usage_anomaly") &&
+                                         payload.at("usage_anomaly").is_string() &&
+                                         !payload.at("usage_anomaly").get<std::string>().empty();
             std::int64_t values[5] = {0, 0, 0, 0, 0};
             for (std::size_t i = 0; i < 5; ++i) {
                 values[i] = payload.at(kTokenFields[i]).get<std::int64_t>();
-                if (values[i] < 0) {
+                if (values[i] < 0 && !anomaly_flagged) {
                     return SchemaError{"schema.usage_negative_tokens",
-                                       std::string("token 字段不得为负: ") + kTokenFields[i]};
+                                       std::string("token 字段不得为负(矛盾账须带 usage_anomaly 点名): ") +
+                                           kTokenFields[i]};
                 }
             }
             // reasoning 是 output 的子集(Token 账本单 §6.1/§15.1)。

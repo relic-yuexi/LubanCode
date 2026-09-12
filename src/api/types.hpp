@@ -324,14 +324,30 @@ void SanitizeRequest(Request& request);
 //               responses wire 的 output_tokens_details.reasoning_tokens;
 //               没拆就是 0,不许拿 0 冒充"reasoning 为零")
 //
+// 口径差别(缓存用量按 Wire 归一单 C6,常被看混):这里的 input_tokens 是
+// "内部普通输入",不是厂商 JSON 里同名的原始 input/prompt_tokens。厂商
+// 原始总数(anthropic 的不算,chat 的 prompt_tokens、responses 的
+// input_tokens)都把缓存读/写含在自己里;翻到这层时先扣掉缓存分项再记
+// 普通输入,完整输入恒等于 TotalInputTokens(三项相加),恰与厂商总数
+// 对得上。看到内部 input+cache_read 就喊"算重了",是把两个口径看串了。
+//
+// 异常账(provider 数字自相矛盾时):字段可为负(例:responses 报
+// cached_tokens > input_tokens,U=T-R-W < 0),原数照记、不截零不截到
+// 100%——矛盾本身是事实,靠 MessageDone/UsageReport 的 usage_anomaly
+// 点名,汇总与命中率把异常样本排除出精确比例(消费端各自注明)。
+//
 // 各 wire 的映射(细节在各自 events.cpp):
 //   anthropic   input_tokens 本来就不含 cache read/creation,原样照抄;
+//               流式按官方形状跨帧合并:message_start 的 message.usage
+//               先立快照,后续 message_delta.usage 只覆盖实际出现的字段
+//               (缺字段不清零、显式零覆盖旧值),不是逐帧相加;
 //   chat        DeepSeek 顶层 prompt_cache_hit/miss_tokens:input=miss,
 //               cache_read=hit;OpenAI/Qwen 风格 prompt_tokens_details.
-//               cached_tokens:cache_read=cached,input=max(prompt-cached,0);
+//               cached_tokens:cache_read=cached,input=prompt-cached;
 //               都没有:input=prompt_tokens,cache_read=0;
-//   responses   cache_read=input_tokens_details.cached_tokens,
-//               input=max(input_tokens-cached_tokens,0)。
+//   responses   R=input_tokens_details.cached_tokens、W=cache_write_tokens
+//               (协议有此字段才在),input=T-R-W;T 是厂商原始
+//               input_tokens,W 不再加回 T、不进命中分子。
 struct Usage {
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
@@ -389,9 +405,15 @@ struct UsageReport {
     // usage 帧才置真,明报全零也是真。耐久账(accounting::UsageSample 与
     // Trajectory v2 model.usage.recorded)只认这一位。
     bool reported_by_provider = false;
-    // provider 是否明报缓存读明细。与 usage 明报分开：usage 对象存在但
-    // cached_tokens/cache hit 字段缺席时为 false，显示与耐久账据此写“未报缓存”。
-    bool cache_reported_by_provider = false;
+    // provider 是否明报缓存读/写明细(缓存用量按 Wire 归一单 C2):与 usage
+    // 明报分开三态——usage 对象在场而缓存字段缺席时两位皆 false,显示与
+    // 耐久账据此写"未报缓存";只报写入(cache_creation=true、read=false)
+    // 不能证明读取为零,消费端不得互推。
+    bool cache_read_reported_by_provider = false;
+    bool cache_creation_reported_by_provider = false;
+    // provider 账目自相矛盾的人话描述(空 = 自洽;语义见 MessageDone 同名
+    // 字段)。usage 数字保留原数;汇总把异常样本排除出精确比例并点名。
+    std::string usage_anomaly;
 
     // ---- 四层生命周期单 P1:Step 身份与耗时账(附加字段,旧调用方缺省) ----
     // step_id:Agent 域单调的稳定 Step 号("step-N"),跨 Run 不裂不重号;
@@ -507,11 +529,21 @@ struct BuiltinToolDone {
 // usage_reported(Token 账本单 A0):provider 是否真回了一帧 usage。四家 wire
 // 只在帧里真的出现 usage 对象时置真——"明报全零"与"压根没报"从这里分家,
 // 下游不许再拿"五项全零"猜。老解析路径没置位的,消费端按 legacy 推断。
+// cache_read_reported / cache_creation_reported(缓存用量按 Wire 归一单
+// C2):读取/写入明报位各自一枚——只报写入不能证明读取为零,只报读取也不
+//说明写入在场。"明报零"与"字段压根没出现"靠这两位分家,别再拿数字非零
+// 反推。chat/gemini wire 没有缓存写入概念,creation 位恒 false(未报,
+// 不是"报了零")。
+// usage_anomaly:空 = 账目自洽;非空 = provider 数字自相矛盾的人话描述
+// (R>T、R+W>T、负数、hit+miss 与总数不符、字段类型错一类),usage 数字
+// 保留原数不截零。消费端把异常样本排除出精确比例并点名,不许掩盖。
 struct MessageDone {
     std::string stop_reason;
     Usage usage;
     bool usage_reported = false;
-    bool cache_reported = false;  // wire 中是否真出现 cache token 明细字段
+    bool cache_read_reported = false;
+    bool cache_creation_reported = false;
+    std::string usage_anomaly;
 };
 
 // 模型输出的一张图片(Responses 的 image_generation_call.result)。base64

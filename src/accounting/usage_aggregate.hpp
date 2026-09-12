@@ -82,11 +82,17 @@ struct CacheEpochBreakdown {
     std::string run_id;
     int cache_epoch = 0;  // 0 = 未标 epoch
     UsageTotals totals;
+    // 口径(缓存用量按 Wire 归一单 C2):requests_cache_reported 数的是
+    // "读取明细在场"的请求——只报写入不算(cache_read 位才是命中率的
+    // 分母门),creation-only 样本进 unknown 桶,读取量如实未知。
     std::int64_t requests_cache_reported = 0;
     std::int64_t requests_cache_unknown = 0;
     std::int64_t cache_reported_input_tokens = 0;
     std::int64_t cache_reported_read_tokens = 0;
     std::int64_t cache_reported_creation_tokens = 0;
+    // 异常样本数(C4):账目自相矛盾的笔——数字留在 sample 里可查,精确
+    // 比例不认它,报告列排除数。
+    std::int64_t anomalous_samples = 0;
 
     std::optional<int> cache_read_ratio_percent() const;
 };
@@ -105,6 +111,7 @@ struct UsageAggregate {
     // 投影缺口点名(§6.2):不混进任何"异常"语气,只说明账的成色。
     std::int64_t legacy_samples = 0;             // v1 completed 顶的旧账
     std::int64_t incomplete_linkage_samples = 0;  // prepared/usage 缺一的笔
+    std::int64_t anomalous_samples = 0;           // 账目自相矛盾的笔(C4,列排除数)
     std::vector<std::string> warnings;            // projector warnings 透传
 
     nlohmann::json ToJson() const;

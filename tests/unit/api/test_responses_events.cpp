@@ -186,9 +186,9 @@ TEST_CASE("response.completed:usage.input_tokens_details.cached_tokens 映射进
     CHECK(done.usage.input_tokens == 1450);
     CHECK(done.usage.output_tokens == 83);
     CHECK(done.usage.cache_read_tokens == 128);
-    CHECK(done.cache_reported);
+    CHECK(done.cache_read_reported);
     CHECK(TotalInputTokens(done.usage) == 1578);
-    CHECK(done.usage.cache_creation_tokens == 0);  // responses wire 没有缓存写入这个概念
+    CHECK(done.usage.cache_creation_tokens == 0);  // 这帧没给写入明细:数字 0 + 明报位 false(未知),不是"明报零"
 }
 
 TEST_CASE("response.completed:没有 input_tokens_details 字段时,cache_read_tokens 落 0,不崩") {
@@ -200,7 +200,7 @@ TEST_CASE("response.completed:没有 input_tokens_details 字段时,cache_read_t
     const auto& done = std::get<MessageDone>(*event);
     CHECK(done.usage.cache_read_tokens == 0);
     CHECK(done.usage_reported);
-    CHECK_FALSE(done.cache_reported);
+    CHECK_FALSE(done.cache_read_reported);
 }
 
 TEST_CASE("response.completed:output 里带 function_call,stop_reason 相当于 tool_use") {
@@ -618,4 +618,88 @@ TEST_CASE("ExpandNonStreamResponse: incomplete 状态映射 max_tokens,与流式
     REQUIRE(events.size() == 3);
     REQUIRE(std::holds_alternative<MessageDone>(events[2]));
     CHECK(std::get<MessageDone>(events[2]).stop_reason == "max_tokens");
+}
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C3:Responses 拆缓存写入。W=cache_write_tokens、
+// R=input_tokens_details.cached_tokens、T=input_tokens,内部普通输入 U=T-R-W;
+// W 不再加回 T、不进命中分子;缺写入字段与显式零分开(明报位);矛盾账
+// (R>T、R+W>T、负数)原数保留、usage_anomaly 点名,不截零不截到 100%。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("response.completed C3: W/R/T 三项齐——U=T-R-W,T 保持厂商原数") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_w","status":"completed","output":[],"usage":{"input_tokens":12000,"output_tokens":40,"input_tokens_details":{"cached_tokens":9000},"cache_write_tokens":2000}}})"));
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<MessageDone>(*event));
+    const auto& done = std::get<MessageDone>(*event);
+    // U=12000-9000-2000=1000;W 不再进 T、不进命中分子;TotalInput 恰为
+    // 厂商原数 12000,命中率 9000/12000=75%。
+    CHECK(done.usage.input_tokens == 1000);
+    CHECK(done.usage.cache_read_tokens == 9000);
+    CHECK(done.usage.cache_creation_tokens == 2000);
+    CHECK(TotalInputTokens(done.usage) == 12000);
+    CHECK(done.usage.cache_read_tokens * 100 / TotalInputTokens(done.usage) == 75);
+    CHECK(done.cache_read_reported);
+    CHECK(done.cache_creation_reported);
+    CHECK(done.usage_anomaly.empty());
+}
+
+TEST_CASE("response.completed C3: 只有 R 没有 W——写入未知,不是明报零") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_rw","status":"completed","output":[],"usage":{"input_tokens":2000,"output_tokens":5,"input_tokens_details":{"cached_tokens":500}}}})"));
+    REQUIRE(event.has_value());
+    const auto& done = std::get<MessageDone>(*event);
+    // 旧模型/兼容服务不给写入明细:U=T-R 照摊,creation 数字 0、明报位
+    // false——"没报"与"报了零"分家,不伪造已拆账。
+    CHECK(done.usage.input_tokens == 1500);
+    CHECK(done.usage.cache_creation_tokens == 0);
+    CHECK(done.cache_read_reported);
+    CHECK_FALSE(done.cache_creation_reported);
+    CHECK(TotalInputTokens(done.usage) == 2000);
+}
+
+TEST_CASE("response.completed C3: W 显式为零——明报位为真") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_w0","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":5,"input_tokens_details":{"cached_tokens":400},"cache_write_tokens":0}}})"));
+    REQUIRE(event.has_value());
+    const auto& done = std::get<MessageDone>(*event);
+    CHECK(done.usage.cache_creation_tokens == 0);
+    CHECK(done.cache_creation_reported);  // 显式零也是明报
+    CHECK(done.usage.input_tokens == 600);
+}
+
+TEST_CASE("response.completed C3: R>T——U 为负保留原数,不截零") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_bad","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":5,"input_tokens_details":{"cached_tokens":1200}}}})"));
+    REQUIRE(event.has_value());
+    const auto& done = std::get<MessageDone>(*event);
+    // 矛盾账:input=1000-1200=-200 照记,anomaly 点名;总输入仍是厂商
+    // 原数 1000。旧实现 max(total-cached,0) 截零那套,是把矛盾藏起来。
+    CHECK(done.usage.input_tokens == -200);
+    CHECK(done.usage.cache_read_tokens == 1200);
+    CHECK(TotalInputTokens(done.usage) == 1000);
+    CHECK_FALSE(done.usage_anomaly.empty());
+}
+
+TEST_CASE("response.completed C3: R+W>T——标异常,不掩盖") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_bad2","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":5,"input_tokens_details":{"cached_tokens":900},"cache_write_tokens":500}}})"));
+    REQUIRE(event.has_value());
+    const auto& done = std::get<MessageDone>(*event);
+    // 900+500=1400 > 1000:分项之和超过总量,矛盾点名,数字各归各位。
+    CHECK(done.usage.input_tokens == -400);
+    CHECK(done.usage.cache_read_tokens == 900);
+    CHECK(done.usage.cache_creation_tokens == 500);
+    CHECK_FALSE(done.usage_anomaly.empty());
+}
+
+TEST_CASE("response.completed C3: 负数 token——标异常") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_neg","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":5,"cache_write_tokens":-50}}})"));
+    REQUIRE(event.has_value());
+    const auto& done = std::get<MessageDone>(*event);
+    CHECK(done.usage.cache_creation_tokens == -50);
+    CHECK(done.cache_creation_reported);  // 字段在场:明报位仍真
+    CHECK_FALSE(done.usage_anomaly.empty());
 }

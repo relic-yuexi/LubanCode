@@ -589,6 +589,57 @@ TEST_CASE("TerminalTurnSink::usage: 第二次请求覆盖发布,不累加;缺 us
     CHECK(snapshot.context_stale);  // 状态行数据标旧,渲染带 ~
 }
 
+TEST_CASE("TerminalTurnSink::usage: 读/写明报位与异常位经事件流不丢(缓存用量按 Wire 归一单 C2)") {
+    // 适配器 payload → sink 还原 → stats/tracker:报告位中途不丢——
+    // "只报写入"不被吞成"读取已知零",异常样本如实落账。
+    runtime::TurnUsageStats stats;
+    cli::ContextTracker tracker(100000);
+    cli::Theme theme;
+    std::vector<cli::TranscriptItem> transcript;
+    std::atomic<bool> cancel_flag{false};
+    std::atomic<bool> expanded{false};
+    cli::ToolDisplay display(transcript, theme, /*console=*/false, nullptr, &cancel_flag, &expanded);
+    cli::StreamBodyTracker body(theme, /*enabled=*/false);
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("test", event_ids);
+    app::TerminalTurnSink::Ingredients ingredients;
+    ingredients.display = &display;
+    ingredients.body_tracker = &body;
+    ingredients.usage_stats = &stats;
+    ingredients.context_tracker = &tracker;
+    app::TerminalTurnSink sink(std::move(ingredients));
+    events.Attach([&sink](const runtime::ServerEvent& event) { sink.Emit(event); });
+    events.Start();
+
+    // 一笔"只报写入"的 Responses 样本:U=1000、W=300,读取字段压根没出现。
+    api::UsageReport write_only;
+    write_only.reported_by_provider = true;
+    write_only.cache_read_reported_by_provider = false;
+    write_only.cache_creation_reported_by_provider = true;
+    write_only.usage = api::Usage{1000, 5, 0, 300};
+    events.OnUsage(write_only);
+    REQUIRE(stats.steps.size() == 1);
+    CHECK(stats.steps[0].cache_creation_reported);
+    CHECK_FALSE(stats.steps[0].cache_read_reported);  // 事件流不把读取说成已知零
+    CHECK(stats.cache_reported_count() == 0);         // 读取口径的报数不含它
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    CHECK(tracker.cache_request_history()[0].cache_creation_reported);
+    CHECK_FALSE(tracker.cache_request_history()[0].cache_read_reported);
+    CHECK(tracker.cache_request_history()[0].miss_kind ==
+          cli::ContextTracker::CacheMissKind::CacheDetailUnreported);  // 分型按明报位说话
+    CHECK(tracker.cache_request_history()[0].hit_percent() == -1);     // 不冒充 0%
+
+    // 一笔矛盾账:anomaly 随事件流带出,stats 标异常。
+    api::UsageReport anomalous = write_only;
+    anomalous.usage = api::Usage{-200, 3, 1200, 0};
+    anomalous.cache_read_reported_by_provider = true;
+    anomalous.usage_anomaly = "cached_tokens(1200) > input_tokens(1000)";
+    events.OnUsage(anomalous);
+    REQUIRE(stats.steps.size() == 2);
+    CHECK(stats.steps[1].anomalous);
+    CHECK(stats.anomalous_count() == 1);
+}
+
 TEST_CASE("AgentTool::Hooks::on_usage: 子代理 usage 只进累计花销,不碰 tracker、不发布状态") {
     cli::SetStatusLineData(BasePanelData(), {"context", "tokens"}, " · ");
 

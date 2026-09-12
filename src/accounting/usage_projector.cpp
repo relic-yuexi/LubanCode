@@ -203,10 +203,27 @@ UsageProjection ProjectUsage(const std::vector<trajectory::EventEnvelope>& event
                     owner.payload.at("prefix_append_only").is_boolean()) {
                     sample.prefix_append_only = owner.payload.at("prefix_append_only").get<bool>();
                 }
-                if (owner.payload.contains("cache_reported_by_provider") &&
-                    owner.payload.at("cache_reported_by_provider").is_boolean()) {
-                    sample.cache_reported_by_provider =
+                // 缓存读/写明报位(C2):新键优先;旧 owner 只有合并位
+                // cache_reported_by_provider,读进 read 位,creation 留
+                // nullopt(旧账分不开读写,不猜)。异常账(C4)非空才在。
+                if (owner.payload.contains("cache_read_reported_by_provider") &&
+                    owner.payload.at("cache_read_reported_by_provider").is_boolean()) {
+                    sample.cache_read_reported_by_provider =
+                        owner.payload.at("cache_read_reported_by_provider").get<bool>();
+                } else if (owner.payload.contains("cache_reported_by_provider") &&
+                           owner.payload.at("cache_reported_by_provider").is_boolean()) {
+                    sample.cache_read_reported_by_provider =
                         owner.payload.at("cache_reported_by_provider").get<bool>();
+                }
+                if (owner.payload.contains("cache_creation_reported_by_provider") &&
+                    owner.payload.at("cache_creation_reported_by_provider").is_boolean()) {
+                    sample.cache_creation_reported_by_provider =
+                        owner.payload.at("cache_creation_reported_by_provider").get<bool>();
+                }
+                if (owner.payload.contains("usage_anomaly") &&
+                    owner.payload.at("usage_anomaly").is_string() &&
+                    !owner.payload.at("usage_anomaly").get<std::string>().empty()) {
+                    sample.usage_anomaly = owner.payload.at("usage_anomaly").get<std::string>();
                 }
                 if (owner.payload.value("reported_by_provider", false)) {
                     api::Usage usage;
