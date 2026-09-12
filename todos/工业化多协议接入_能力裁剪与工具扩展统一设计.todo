@@ -1,0 +1,792 @@
+# 工业化多协议接入：能力裁剪、工具扩展与统一执行入口
+
+- 日期：2026-09-13。
+- 状态：设计待实施。本轮只查源码、写设计，不改生产代码，不宣称新入口可用。
+- 源码基线：`ce37455ef43b52cef70d729e290024e24b26b1e6`，同时核对当前工作区文件。
+- 用户目标：只设计 LubanCode 的多协议入口、多进程接入、功能裁剪与工具增减。新项目由用户另行设计。
+- 本单范围：协议与引擎接入所需的现状缺口、共同应用服务、能力配置、工具发现与执行、扩展装配、会话快照、进程归属和协议验收。
+- 范围外：新项目目录与架构、RAG 检索流程、知识库/索引设计、业务答案 schema、产品页面和业务效果评测；本单不预定这些方案。
+- 验证口径：静态源码审查。未构建、未运行模型、未做平台收发、压力或故障注入测试。下列拟议字段、接口、事件和命令均不是当前可用接口。
+
+## 一、先定方向
+
+1. 本单只收敛 LubanCode 的协议与执行接入合同。外部应用如何组织业务，留给另案；协议验收使用通用测试客户端和测试工具。
+2. 协议可以多，执行规则只能有一份。stdio、WS、HTTP、gRPC、渠道和队列适配器都交中立应用服务接纳意图，不各养一套循环、取消旗或会话真账。
+3. “支持一种入口”指完整实现它的身份、接纳、结果、错误、取消和重连合同，不只加监听端口。
+4. “关闭功能”须覆盖装配、方法、工具、提示材料和后台资源；只隐藏菜单不算关闭。
+5. 工具供应、工具授权、模型可见、运行时可执行分开。发现不授予权限，允许执行不等于每次都要展示完整 schema。
+6. 工具既可由引擎装配内置组件、MCP、Lua/process/native 插件与 Package，也可由外部应用通过协议注册并接收执行回调；不要求业务项目链接内部 C++ 类、包装成 MCP 或修改 AgentLoop。
+7. 所有入口和外部组件按需启用。普通 CLI 启动不因安装了适配器就开端口、连 IM、启动队列消费者。
+8. 不另造裸 TCP 业务协议。WS/HTTP/gRPC 已可覆盖当前网络接入目标；保留将来扩展通道的窄接口即可。
+9. 能力裁剪不是 OS 沙箱。整个不可信 Worker 的文件、网络、环境和进程隔离，沿多租户单落实。
+10. 先收好执行入口、权限与持久接纳，再增加协议。暂未接通的能力必须如实返回 unavailable，不落回全功能 Agent。
+
+## 二、与已有设计怎样衔接
+
+| 已有单子 | 本单接续处 | 真源仍归谁 |
+| --- | --- | --- |
+| [AppServer 接入 SessionV3](AppServer接入SessionV3_统一入口与事件恢复设计.todo) | 补生产装配、多协议映射、能力合同 | session/input/operation/events 的业务语义与 2.0 协议主单 |
+| [LubanCore 与 CLI 分离](LubanCore与CLI分离_核心库独立成宿主底座设计.todo) | 抽无终端装配服务，避免 Theme 进入运行核心 | SDK 导出、对象寿命、核心与宿主依赖 |
+| [多租户隔离](多租户隔离_身份授权与隔离Worker落地设计.todo) | 复用可信身份、授权项目映射、Worker 隔离与资源范围 | 租户/项目/会话 ACL、OS 隔离、凭据下发 |
+| [多用户多节点控制面](多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo) | 对齐实例路由、租约、writer epoch | 多节点管理与远期集群，不在此承诺已完成 |
+| [多渠道接入](多渠道消息接入与常驻ChannelPlugin设计.todo) | IM 入口复用 Manager/Router/Ingress/Delivery | 平台账号、Channel Bridge、回复投递 |
+| [Extension Runtime](轻量可塑ExtensionRuntime与动态扩展API设计.todo) | 对齐工具注册、generation、在途引用与回收 | 通用扩展 ABI/SPI，不再造第二套插件清单 |
+| [System Hook 与 Soul 冻结](System拼装Hook_Soul会话冻结与缓存边界.todo) | 工具快照与提示说明同源，变更说明缓存影响 | 提示部件、Soul 生效时点、请求冻结 |
+| [SessionV3 异步工具](SessionV3异步工具_任务执行协议配对与结果投递.todo) | 预留 Waiting/Unknown/执行查询；热撤销不破坏配对 | 原生 async、外部任务与结果投递合同 |
+| [失败与恢复](失败与恢复_写账闸门工具结果与重试收口.todo) | 接纳写失败、结果提交失败和不明副作用 | 执行故障与 v3 提交闸门 |
+
+以上文档各有编写日期，旧行号与旧“待实现”判断可能已变。实施时读当前源码；本单不复制旧结论当现状。多租户设计目前是工作区已有未跟踪文件，本轮只读，不替它提交或修改。
+
+新类型与名字在下文暂拟。能补进已有 SessionService、AgentProfile、PackageSnapshot 的，就补原件。不能因名称不同，另造同义服务、台账或配置体系。
+
+## 三、当前源码：已有底子与真实缺口
+
+下列锚点取本轮 HEAD；行号只助定位，实施时再查同名符号。
+
+| 编号 | 源码锚点 | 本轮看到什么 | 本单要补什么 |
+| --- | --- | --- | --- |
+| G01 | `src/app/cli_app.cpp:500`，RunAppServerMode | 创建 Server 时 RegistryFactory 为 nullptr | 生产 headless 装配必须显式选择工具与 Profile；不能用空工厂充当已接好工具 |
+| G02 | `src/app_server/server.cpp:1244`、`:1257` | 每轮取 backend/registry；空工厂建空表；system_prompt 写死为 lubancode app-server | 建会话级运行材料，复用同场资源和明确的 Agent 档案；不直接照搬终端所有工具 |
+| G03 | `src/app/tool_runtime.hpp:229`；`src/app/tool_runtime.cpp:447` | ToolRuntime 收 CLI Theme，构造期启动已配置 MCP；基础表包含命令和写文件 | 抽无终端诊断口；先解析能力计划，再启动批准组件，避免先启动再过滤 |
+| G04 | `src/app/tool_runtime.cpp:123` | Explore 有独立只读工具表 | 保留这种硬边界，推广成具名、可解释的能力计划 |
+| G05 | `src/agent/agent_definition.hpp:77`；`src/agent/agent_profile_resolver.cpp:167` | tools.allow/deny、requires.tools、父工具面约束已有；空 allow 表示继承 | 复用裁剪规则；增加显式 none/only 语义，不把空名单误读成禁止全部 |
+| G06 | `src/agent/agent.hpp:109`、`:137`；`src/app/tool_runtime.cpp:846` | 暴露过滤、proxy 执行过滤、turn gate 分别存在 | 将共同授权判定抽出，暴露/发现/调用各消费同一能力快照 |
+| G07 | `src/tools/deferred_tool_resolver.hpp:1`；`src/agent/loop.cpp:2253` | 已有工具 ref、schema 摘要、proxy/native/legacy 模式和解引用执行 | 复用；补跨模式同一授权、版本钉住与撤销，不能把延迟工具当被禁工具 |
+| G08 | `src/agent/loop.cpp:408`；`src/ptc/ptc_tool.cpp:258` | 直接调用有过滤，PTC 子调用经过 RunOneTool | 补共同参数级资源授权、版本、权限修订与最终执行闸 |
+| G09 | `src/runtime/hook_host_services.cpp:603`、`:654` | Hook 有自己的 allowlist、schema/递归帽，然后直接调用 Tool::execute | 不能声称所有路径已共用 RunOneTool；抽中立授权/执行服务给 Hook 与模型共用，保留不同记账身份 |
+| G10 | `src/tools/registry.cpp:13`、`:37` | 注册追加；Find 按名字取首个；没有统一的冲突拒绝与动态卸载事务 | 注册计划先查重；不可变 generation，避免覆盖同名、悬垂指针或新旧混配 |
+| G11 | `src/package/mount_plan.hpp:18`；`src/package/mounting.hpp:1` | 已有代码信任、组件名、包版本、挂载快照与启停材料 | 复用信任和版本；Package 安装不等于会话可用，不另建旁路注册 |
+| G12 | `src/app_server/protocol.hpp:52`、`:58`；`src/app_server/schema.cpp:484` | 协议 1.2、出站不带 jsonrpc；能力表由固定方法列表生成 | 2.0 显式切版；方法表改按已装配 handler 与调用方权限生成 |
+| G13 | `src/app_server/server.cpp:1806`、`:1822`；`docs/features/app-server/README.md:43` | WS 断线打断回合；当前连接句柄单一；WS 活连接串行服务 | 区分连接与执行；按 scope 订阅；重连、租约与并发须另验 |
+| G14 | `src/runtime/session_service.hpp:145`；`src/app_server/server.cpp:1114` | SessionService 已有 client_operation_id；旧 turn/start 没暴露该键，同场忙时拒绝 | 新入口全部交统一 SubmitInput；排队/steer 不各端另写 |
+| G15 | `src/runtime/session_service.cpp:188`、`:269`、`:277`、`:291` | 台账打开失败退为内存；Append 结果忽略；只记 payloadHash 等元数据；待执行正文/图片在内存队列；来源去重只读直接来源 | 修成失败即拒收、完整意图可恢复、持久 claim；不能据头文件“先账后回执”注释认定已可靠 |
+| G16 | `src/channel/manager.hpp:48`；`src/channel/ingress_store.cpp:322`；`src/runtime/channel_session_host.hpp:1` | 渠道桥、入站存储、会话宿主已有源码 | 对接共同应用服务，逐平台做真收发；目录存在不代表每个渠道可交付 |
+| G17 | `src/runtime/agent_channel_engine.cpp:20`；`src/channel/channel_router.hpp:61` | 渠道另有 tool policy 与 memory 默认关闭规则 | 复用限制并求交，不让新的协议配置放宽群聊/非 owner 记忆边界 |
+| G18 | `src/config/settings_local.hpp:20` | permissions.allow_tools 表示免确认名单 | 与“可用工具集合”严格分开；免确认不能增加工具权限 |
+
+当前可确认的是 stdio/WS 的协议代码与若干渠道基础件。未确认当前存在完整 HTTP 业务 API、SSE 业务事件接口、gRPC 服务、通用队列 Worker 或可交付核心 SDK；本单把它们列为新增项，不给“全支持”标签。
+
+## 四、共同应用服务与入口分层
+
+```text
+CLI / one-shot ─────────────────────────────────────┐
+stdio / WS / HTTP + SSE / gRPC / 本机 IPC → 协议适配器 ├→ 共同应用服务
+IM Webhook / 长连接 / 长轮询 → Channel Runtime ───────┤     ├─身份与资源范围
+选定队列 → QueueWorkerAdapter ───────────────────────┘     ├─操作接纳与查询
+                                                         ├─会话创建/绑定/恢复
+                                                         ├─能力解析与运行装配
+                                                         └─订阅/结果/交互/取消
+                                                                  ↓
+                                                       SessionService / Runtime
+                                                                  ↓
+                                                       Agent / ToolExecutionService
+                                                                  ↓
+                                                  v3 账、artifact、模型和授权工具
+```
+
+共同应用服务是门面，不接管所有领域。SessionService 仍管一场会话的意图接纳与生命周期；Agent 管循环；Package 管分发与信任；Channel 管平台投递；Supervisor 管进程和监听器。适配器只编解码、映射身份、调用服务、转投影。
+
+建议收敛以下中立材料：
+
+| 类型（拟议） | 内容与职责 |
+| --- | --- |
+| RequestContext | 经认证主体、resource scope、deadline、cancel、审计关联；不接受客户端自封管理员 |
+| RuntimeAssemblyRequest | Agent 引用、部署 Profile、项目范围、存储/secret/provider 句柄；无 Theme、stdin 或 WebSocket |
+| ResolvedCapabilityPlan | 功能、工具、扩展依赖、授权来源、额度、版本与拒绝原因；解析阶段无外部启动副作用 |
+| SessionCapabilitySnapshot | 本场采用的计划、工具/schema/包摘要、prompt 材料引用、generation 与 policyRevision |
+| RuntimeBundle | 拥有 backend、工具实例、MCP/插件资源、取消及日志接点；先断调度、排空在途、再析构依赖 |
+| CapabilityDecision | allow/deny/unavailable/needs_interaction，加稳定码与安全裁剪后的解释 |
+| ToolExecutionService | 所有来源共用的授权与执行底座；模型调用和 Hook 子执行仍用各自合法账面身份 |
+
+RuntimeBundle 的依赖对象先构造、后销毁；不得每轮建注册表后把旧 Tool 指针留给后台任务。MCP Client、native library、Lua state、回调与 schema 快照寿命须覆盖所有在途引用。
+
+先抽接口并迁移现有实现，暂不发布“稳定 SDK”。SDK 的安装、导出 target、外部 consumer 构建由 Core 分离单验收。
+
+## 五、功能开关：关什么，怎么关
+
+### 5.1 四类开关不能混用
+
+| 类型 | 示例 | 生效结果 |
+| --- | --- | --- |
+| 编译/发行裁剪 | 未编 gRPC adapter、未随包分发 browser | 不存在相应组件；配置点名则 unavailable；不是普通运行时开关 |
+| 宿主功能关闭 | browser、subagents、memory.write、workflow、channels | 新会话不装该功能，不生成相关提示/工具/业务路由，不启动它的后台资源 |
+| 工具策略禁止 | 禁 run_command；仅允许两只指定工具 | 发现和请求不暴露；猜名字、旧 ref、代理子调用也不能执行 |
+| 暴露/延迟策略 | direct、deferred、host_only | 已授权工具如何向模型呈现；不授予权限，不替代禁用 |
+
+`host_only` 表示模型不可调用，但具备明确内部授权的宿主组件可调用。例如受限入库流程。它不能成为模型经 PTC/Hook 绕行的名字；来源与授权由宿主盖章，不能靠调用参数自报 host。
+
+“没装配”与“已装配但外部端点不可用”分开。disabled 不得以懒启动为由联网；enabled + lazy 可只载描述，在首次允许调用时启动。若 MCP 必须握手才知道 schema，首次启用该组件就需握手，不能声称枚举全部工具完全不联网。
+
+### 5.2 功能分组与不可关闭底线
+
+首批具名功能至少包括：`filesystem.read/write`、`process.exec`、`web`、`browser`、`lsp`、`mcp`、`plugins`、`skills`、`memory.read/write`、`subagents`、`workflow`、`goal`、`loop`、`ptc`。命名由 P0 与现有配置表对齐，避免同一功能两枚不同键。
+
+核心校验、资源授权、取消传递、提交闸门、账面引用校验、容量预检不能列成可任意关闭的业务功能。关闭 memory 不影响必须保存的执行事实；关闭遥测外送不等于关闭本地必需账。
+
+依赖解析遵守：
+
+- 功能要求某组件，组件未编/未装/未信任时，显式要求启动的 Profile 报错；可选组件返回降级详情，不自动开更多能力。
+- 禁止 browser 后，其工具、browser/* 方法与截图取件业务授权都关闭；历史 artifact 是否可读单看历史读取权限，不由运行功能决定。
+- 禁止 goal/loop 后，不能创建或继续新的对应执行；已有任务按明确停用策略停排、取消或排空，查询/停止/审计管理口仍可由管理员使用。
+- 禁止 subagents/ptc 后，不注册委托工具及其等价入口。不能允许另一个通用执行工具替它偷渡。
+- 关闭 memory.read 后不召回、不注入；关闭 memory.write 后不启动抽取/写入任务。此前已进入上下文的材料不会因开关而凭空消失；即时遗忘沿独立忘记屏障/上下文重建合同，必要时开新会话。
+- 单场停用不能杀掉其他会话合法共用的组件；资源所有者用作用域和引用计数决定何时回收。
+
+### 5.3 服务级、会话级与用户级分开
+
+监听器配置归 Supervisor。会话 Profile 只能选服务已提供的入口与能力，不能要求宿主新开公网端口。
+
+部署默认值可由更具体配置覆盖；授权上限只能求交。配置加载顺序不是授权顺序。模型提示、项目文档、检索结果和普通客户端 JSON 都无权修改宿主授权。
+
+本机 CLI 使用明确 LocalTrusted 档；托管入口缺可信身份时拒绝，不能回落 LocalTrusted。租户与项目授权沿多租户单；不把 cwd 或同一个共享 token 当 ACL。
+
+## 六、工具裁剪：一份策略贯穿发现与执行
+
+### 6.1 集合与参数范围
+
+```text
+可供应工具 S = 已编组件 ∩ 已安装/已信任版本 ∩ 功能允许装配的组件
+可授权工具 G = S ∩ 平台授权 ∩ 租户授权 ∩ 项目授权 ∩ 调用主体授权
+会话工具 E   = G ∩ 部署Profile选择 ∩ Agent选择 ∩ 渠道/任务限制 − 任一层deny
+可发现集合 D ⊆ E
+本次直接schema集合 V ⊆ E
+```
+
+上式省略了依赖/资源健康判断；最终计划须同时满足它们。每层未设置表示继承，明确空集表示一个也不允许。父 Agent 派子 Agent、Workflow 节点派工具，都在父有效授权范围内再求交，不能把“父请求里没有展示”误作“父没有权限”。
+
+`E` 只回答工具种类，不回答本次参数可访问什么。每次调用还须核验路径、外部资源 ACL、网络目标、数据库范围、凭据、资源配额及当前撤销状态。授予某只工具不等于授予它能访问的全部资源；具体业务 ACL 由资源服务落实，宿主传递可信范围并执行共同约束。
+
+deny 优先；包或 Agent 的 requires 只是依赖断言，不会自动授予权限。未知 feature/tool 名、冲突别名和模糊 canonical id 报配置错误。托管首版禁止 allow 通配符，防服务升级后新工具自动获权。
+
+### 6.2 明确“没有工具”的配置
+
+复用 AgentToolRules，将同一解析器用于 Agent 与部署 Profile 的工具选择，不另写两套 allow/deny 算法。新 schema 增加 `mode`：
+
+| mode | 语义 |
+| --- | --- |
+| inherit | 继承上层；可附 deny；不接受非空 allow，以免语义不清 |
+| only | 只取 allow 指定集合；allow 必须出现，空数组表示零工具 |
+| none | 零工具；allow 必须省略或为空 |
+
+旧 schema 的空 allow 保持原“继承”含义；导入时明确换算，不静默解释为 none。新旧配置版本分明，未知键拒绝，不让拼错的 `mode` 被忽略后落成全工具。
+
+允许“无工具问答”Profile。此时不挂 tool_search/tool_invoke，也不启动 MCP 来发现用户压根不要的工具。
+
+### 6.3 每条调用路径都过共同闸
+
+```text
+解析真工具身份、版本与调用来源
+ → 校验所绑定能力快照
+ → 当前权限/撤销/feature/资源范围检查
+ → 参数schema校验
+ → PreTool等允许的改写
+ → 对最终参数再验schema与资源授权
+ → 必要审批；审批答复绑定最终参数摘要和policyRevision
+ → 排队/等待后，在真正dispatch前复验撤销与授权
+ → 记录开始 → 执行 → 原始捕获/有效结果/模型配对或子执行记账
+```
+
+角色与策略禁止不能由 `acceptForSession`、yolo、缓存审批或模型口头许可放宽。旧 `permissions.allow_tools` 只影响是否再问一次，不参与新增 E。
+
+必须覆盖：直接名调用、proxy ref、native deferred、tool_search 结果、PTC 子调用、Hook host tools、Workflow 节点、子 Agent、后台任务、管理端工具执行入口（若提供）。
+
+Hook 现有路径并不调用 RunOneTool，故应提取共同 Authorize/Dispatch 原语；不要为了复用，伪造 provider tool_call_id 或给模型历史塞一条不存在的 tool 消息。Hook 的深度、单次次数和子执行账继续保留。
+
+模型产生被禁止调用时，照原 provider 配对协议给稳定拒绝结果，实际工具零执行；若拒绝账/消息提交失败，阻止后续模型请求，不悄悄略去那枚调用。
+
+### 6.4 可见性与缓存
+
+- 每个请求先固定工具快照，再从它生成 request.tools、tool_search 索引、Skill/能力说明与请求 manifest。
+- 禁止的工具不出现在直接 schema、搜索结果、延迟索引或能力提示中。普通客户端也不能借 catalog 查询枚举其他租户工具与资源。
+- deferred 工具仍在授权集合内；proxy/native 模式只改变发现机制。native 若需要将全部获准 schema 发给 provider，就如实记录，不声称 schema 从未外发。
+- 临时运行状态由 turn gate 控制。不要因 goal/loop 某一拍不活跃就反复改 schema；真正能力变更则须改快照，不能为缓存命中保留已撤销描述。
+- 工具新增或撤销后，下次请求可更换 tools 摘要并记录原因。已提交历史不改写；新提示不得与当前可用工具互相矛盾。
+- 本地工具哈希/请求字节可测；Provider 缓存命中须看真实 endpoint usage，缺字段记 unknown。
+
+## 七、如何增加工具
+
+### 7.1 支持路径与边界
+
+| 路径 | 使用场景 | 挂载条件 |
+| --- | --- | --- |
+| 内置 Tool 工厂 | 文件/进程等宿主能力 | 编译可用、功能开启、Profile 点名 |
+| MCP | 接外部工具服务 | 受信服务引用、明确凭据/环境/cwd、成功协商并验证 schema |
+| Lua / process 插件 | 轻量业务工具 | 复用现有 manifest、Host 权限、取消/日志/资源帽 |
+| native C ABI 插件 | 需原生库能力 | 明确受信版本，运行于合适 Worker；不能把 native 插件声明当安全隔离 |
+| Package | 分发 Agent/Skill/MCP/插件组合 | 复用包清单、摘要、信任与挂载计划；Package 自身不是新执行协议 |
+| 协议注册的应用侧工具 | 桌面/业务服务持有实现，LubanCode 发起调用 | 注册者获授权、声明执行归属、建立回调通道、结果与取消可追踪；详见 7.3 |
+
+MCP 目前查到的是 stdio 客户端路径。远程 MCP 承载若新增，独立核验协商、授权和取消，不因本单增加 HTTP 服务入口就宣称远程 MCP 同时完成。
+
+客户端可申请启用已安装且获授权的组件引用。普通任务接口不收任意 executable、shell 启动串、DLL 路径、环境变量或远程工具地址并立即执行。安装/批准归管理面，任务输入归数据面。
+
+### 7.2 从安装到生效
+
+```text
+安装包或登记受信MCP服务
+ → 静态检查清单/版本/来源/依赖/工具重名
+ → 管理员确认代码信任与资源授权
+ → 解析待采用CapabilityPlan
+ → 隔离候选RuntimeBundle，按需握手并收schema
+ → 复验实际工具与批准清单/摘要
+ → 提交能力快照
+ → 新会话采用；失败则旧会话不动、候选资源清理
+```
+
+发现出的新增 MCP 工具默认不获授权。握手只建立候选目录；动态 tools/list 变化不能自动修改正在用的执行工具集合。工具 metadata 声称 read-only 或 idempotent 只是声明，不能代替宿主权限与恢复判定。
+
+canonical id 复用 Package 命名体系；builtin、MCP 服务、插件组件必须有不可混淆身份。wire name 由确定性映射生成。原注册表不应依靠“先注册的赢”；重名、映射冲突、schema 不合法均在采用前拒绝。
+
+只换实现但保留工具名也算版本变更。快照须记实现/组件摘要与 schema 摘要，不能单凭名字继续信任。远端服务若不能钉实现版本，应如实标注未验证，不能宣称跨日重现；观察到 schema 漂移则拒绝旧 ref 并要求重建计划。
+
+### 7.3 协议注册工具与应用侧执行回调
+
+这是本次明确新增的协议目标，不是“将来可能需要”或现有 SDK 能力声明。外部应用能通过协议提交工具描述，由 LubanCode 纳入获准工具快照；模型调用时，引擎把执行请求发给该应用，应用执行自己的函数、程序或服务，再回传结果。新增工具不必经过 Lua hook，也不必先包装成 MCP。
+
+#### 7.3.1 注册描述与执行归属
+
+| 模式 | 注册内容 | 执行者 |
+| --- | --- | --- |
+| application | 工具名称、说明、输入/结果合同、应用执行器引用 | 注册工具的桌面应用或业务服务 |
+| engine | 已安装且获授权的组件引用、配置摘要 | 指定 LubanCode Worker |
+| mcp | 已批准服务引用、允许工具范围 | MCP 服务，由引擎适配 |
+
+注册 application 工具不上传实现代码；执行器引用绑定已认证连接或已批准通道，不接任意回调 URL。engine/mcp 模式仍沿 7.1–7.2 装配，不能通过注册接口绕开安装、服务连接和资源授权。工具名称来自客户端，租户/身份/可用 scope 则由服务端认证与授权确定，不能只信请求正文。
+
+首版允许 session scope 的应用侧注册，申请者须有该会话的工具管理权。连接负责投递，不是工具身份：记录稳定 applicationId、executorId、registrationId、generation、schemaDigest、scope 和租约。跨会话/项目共享、租户级目录以后另开权限；默认不向其他客户端公开注册工具。
+
+注册输入至少包含：clientOperationId、目标 scope、expectedRevision、工具描述、输入 schema、结果合同版本、执行模式与引用、超时/输出预算申请、版本摘要和 applyAt。声明 read-only 或 idempotent 不自动获得对应信任。服务端约束名称、描述/schema 长度、数量、嵌套深度与 schema 支持子集；拒绝不支持的关键字，不能忽略后按另一合同执行。
+
+#### 7.3.2 拟议方法与消息
+
+以下均为方法草案，实施时与 AppServer 2.0 的统一 envelope、错误和 id 类型对齐，不兼容套用旧版 id=0 特例。
+
+| 方法/事件草案 | 方向 | 含义 |
+| --- | --- | --- |
+| tools/register | 应用 → 引擎 | 校验并持久登记候选工具；返回 registrationId、generation、catalogRevision、采用状态 |
+| tools/list | 应用 → 引擎 | 返回当前身份可见的注册与可用状态、执行位置、采用会话和版本 |
+| tools/unregister | 应用 → 引擎 | 按 registrationId、expectedRevision 撤销；回报已阻止新调用及在途处理状态 |
+| toolExecution/request | 引擎 → 指定执行器 | 投递一次执行意图，带调用身份、版本、参数、截止时间与结果合同 |
+| toolExecution/accepted | 应用 → 引擎 | 执行器已持久接纳，尚不代表执行完成；不能只在内存收包就承诺恢复 |
+| toolExecution/result | 应用 → 引擎 | 提交结构化终态结果；引擎持久接收后才返回结果收据 |
+| toolExecution/cancel | 引擎 → 应用 | 请求停止特定调用；收到取消不等于副作用已撤回 |
+| toolExecution/query | 双向，限各自获准调用 | 按调用身份查询接纳、执行或结果收据；不触发重执行 |
+| toolExecutor/resume | 应用 → 引擎 | 认证后恢复投递绑定、协商新 owner epoch、核对未决调用与游标 |
+
+执行消息至少关联 sessionId、turnId、actionId、toolCallId、executionId、attemptId、registrationId/generation、executorId/ownerEpoch、参数摘要、deadline 和授权范围引用。服务端生成或解析这些身份，结果提交者不能随意绑定别人的 Action。transport request id 只配对消息，不充当执行身份。
+
+register 使用 clientOperationId 去重：相同请求返回原注册收据，复用同一键却内容不同则冲突。注册成功表示目录已受理；只有 adopted 才进入指定会话的工具快照。新会话可在首个模型请求前采用；已有会话首版返回 pending_next_session，后续按 8.2 显式事务扩展，不能在模型流途中偷偷换工具表。采用撤销则沿 8.3 立即阻止未 dispatch 调用。
+
+#### 7.3.3 执行与结果合同
+
+```text
+应用注册工具 → 引擎校验、授权、持久登记 → 会话采用工具快照
+    → 模型发起调用 → 共同工具闸与审批 → 持久记录 dispatch 意图
+    → 指定应用接纳 → 应用执行 → 回传结果
+    → 引擎校验、持久接收并返回收据 → 原模型调用取得结果
+```
+
+引擎保存逻辑调用、审批和执行真账；应用保存它实际承担的执行记录。应用侧执行也须检查本机授权和目标资源，服务端批准不等于任意读取客户端整盘。参数带来的程序或脚本不能直接拼成 shell 命令。协议提供协调合同，不证明不可信客户端如实执行或具备 OS 隔离。
+
+结果保留成功/工具失败/已取消等状态、结构化内容、文本或获准 artifact 引用、实际执行器版本、截断信息。协议参数错误与工具执行失败分开。首版只提交一个完整终态，进度消息不作为模型工具结果；大文件走受控 artifact 上传/引用，不把客户端绝对路径当成服务器可读文件。结果按合同、归属、字节帽和访问权校验后才能进入上下文。
+
+同一 executionId/attemptId 的相同结果重投返回原收据，内容不同则 result_conflict，不覆盖已接纳结果。不重复写入模型历史，不改原 toolCallId。模型循环必须能等待外部结果并响应取消；不能在工具执行函数里无限等待一个已经断开的 UI。等待状态、资源预算与恢复沿异步工具单收口，但不据此宣称 Provider 原生异步工具已支持。
+
+#### 7.3.4 断线、租约、取消和多进程
+
+- 执行器离线/租约过期后不再派新调用。未发送的意图可以明确记未执行；已经发送但回执丢失则先记 Unknown，不能猜它没跑。
+- 协议不承诺任意副作用 exactly-once。执行器须持久去重并支持状态查询，才允许在明确合同下重投同一执行意图；缺少此能力时，断线不自动重新执行。
+- resume 核对身份、作用域、注册版本与未决调用。不能由另一个同名客户端抢走执行权。旧连接的 ownerEpoch 失效；新通道可以上报已确认归属的旧执行结果，但不能借此产生新 attempt。
+- 多 Worker 只允许当前 owner 派发；迁移先完成 fencing 和状态核对。执行器也须检查 epoch/去重；双方缺少对应保证时暂停迁移，不能只靠服务端租约宣称不会双跑。
+- cancel 有明确截止与查询：应用确认停止后才记 Cancelled；无法确认则保留 Unknown。取消和成功结果竞态由持久账串行裁决，取消请求不能抹掉已经完成的副作用。迟到结果作为证据保存；会话已经结束时不自动唤醒模型。
+- unregister 不等于取消完成。立即封住新 dispatch，再处理在途；保留结果接收所需的最小身份绑定，授权复验后只准提交既有调用结果，不能再领新任务。已撤数据权限的结果不得继续向模型或其他客户端投递。
+- 更新通过新 generation 注册。旧调用钉旧实现与 schema，旧执行器未排空前不卸载；只声明相同名字或版本号，不能证明远端实现未变。
+
+#### 7.3.5 各传输如何承载
+
+stdio/WS 可以双向发送执行请求与回复；HTTP+SSE 用 SSE 下发持久事件，再由鉴权 HTTP 方法提交 accepted/result，SSE 本身不承担上行。SSE 重放只重投消息，执行器须去重，不能重新跑工具。gRPC 映射到对应流与 RPC。每条下发通道都绑定执行器和 scope，普通会话观察者不能收到工具参数或抢答结果。
+
+IM 普通聊天消息不作为工具注册或执行回执。需由已认证 sidecar 走管理/执行协议。队列承载另验消息归属、重复投递与结果收据。未实现双向交互的入口须返回 callback_transport_unavailable，不能把应用侧工具误当引擎本地工具运行。
+
+稳定错误草案：registration_conflict、schema_unsupported、executor_unavailable、executor_lease_expired、stale_executor_epoch、registration_not_adopted、execution_unknown、result_conflict、callback_transport_unavailable。统一接入第十四节错误结构，附可重试条件；Unknown 不得标为可盲重试。
+
+## 八、会话中途增减：默认稳，急撤销要快
+
+### 8.1 默认生效规则
+
+| 变更 | 默认生效时点 | 当前会话处理 |
+| --- | --- | --- |
+| 安装新包、加入新 MCP、修改 Agent 工具清单 | 下个新会话 | 返回 pending_next_session，不假装已用上 |
+| 修改 Soul/系统提示默认值 | 遵循 Soul 单，下个新会话 | 当前快照不动 |
+| 自愿收窄工具范围 | 当前调用闸立即收窄；下一安全请求换快照 | 在途动作按撤销规则处理 |
+| 管理员撤销权限、泄露凭据、紧急停用组件 | 立即阻止未 dispatch 调用 | 通知取消在途；记实际终态，可能是 Unknown |
+| 普通插件升级 | 下个新会话 | 旧 generation 排空后回收 |
+| 监听器增删、节点级依赖变更 | 服务管理事务/重启 | 明确 drain 与连接告知，不混入会话配置热改 |
+
+第一批仅实现“新会话采用 + 立即收窄/紧急撤销”。当前会话授权扩展列为后续独立阶段，必须完成下面的事务合同才开放；不以 reload 成功替代采用成功。
+
+### 8.2 后续显式扩展事务
+
+管理面拟提供 `capability/preview` 与 `capability/apply`。apply 须带 `expectedRevision`、`clientOperationId`、目标 scope、计划摘要与 applyAt；普通模型无权调用管理面。
+
+preview 返回 added/removed、缺失依赖、信任需求、待启动组件、预计 schema/提示变动、当前在途引用、适用会话。估计只谈本地字段，不报未经实测的节费比例。
+
+apply 顺序：验证操作者授权 → 持久记录变更意图 → 构造候选代 → 校验 → 等安全点 → 再验授权修订 → 提交快照/采用事件 → 切下一请求材料。任一步失败，旧代仍有效；快照文件存在而采用事件未提交，不算生效。
+
+安全点指本场没有模型流/工具批次正在使用待替换材料，也没有未决工具配对。带后台任务时允许新旧代并存，任务钉原代；不能因前台空闲就卸载后台仍握着的库。超时可回 requires_new_session，不强切。
+
+变化仅及未来请求。旧 tool_ref 钉 generation、scope、schemaDigest；旧代仍被允许且有活引用时按原代解析，不悄悄转到同名新实现。已撤销、已回收或摘要不同则报稳定失效码。
+
+### 8.3 紧急撤销与竞态
+
+授权使用单调 policyRevision，与代码 generation 分开。撤销优先于缓存稳定、排空偏好和旧审批。
+
+在可信执行边界登记撤销后，不再准入新动作；权限检查与 dispatch 用同一受控提交点，关闭“检查通过后、真正发出前被撤销”的竞态。排队、审批、重试后都重查。无法确认当前撤销版本的隔离 Worker 必须停发，不能靠旧快照无限执行。
+
+撤销记录写失败时，本节点先封住相关执行并告警，不回复“全局撤销完成”；跨节点离线 Worker 通过授权租约到期/fencing 收口，不能声称网络分区时能瞬时全球撤销。
+
+已经发往外部的动作不能靠删工具撤回。发取消、查询执行状态；无法确认时保持 Unknown。原结果与源引用仍可保存用于审计，但向模型/客户端再投递前检查数据访问授权；撤权后不能把缓存结果当旁门继续外发。
+
+## 九、拟议配置：一份部署档配一份 Agent
+
+以下 JSON 为新部署 schema 草案，当前解析器不支持；工具与包名均为示例。实现时挂进既有配置解析和诊断，不另找一个偷偷生效的配置目录。
+
+```json
+{
+  "schemaVersion": 1,
+  "service": {
+    "mode": "managed",
+    "listeners": {
+      "stdio": {"enabled": true},
+      "websocket": {"enabled": false},
+      "http": {"enabled": false, "sse": false},
+      "grpc": {"enabled": false},
+      "localIpc": {"enabled": false}
+    },
+    "channelAccounts": [],
+    "queueConsumers": [],
+    "defaultProfile": "minimal-tools"
+  },
+  "harnessProfiles": {
+    "minimal-tools": {
+      "agentRef": "example.tools:assistant",
+      "features": {
+        "default": "disabled",
+        "enabled": ["mcp"],
+        "disabled": ["process.exec", "filesystem.write", "browser", "subagents", "ptc", "memory.read", "memory.write", "goal", "loop", "workflow"]
+      },
+      "components": {"mcpServers": ["tools-approved"]},
+      "tools": {
+        "mode": "only",
+        "allow": ["mcp:tools-approved:echo", "mcp:tools-approved:describe"],
+        "deny": []
+      },
+      "exposure": {"default": "direct"},
+      "updates": {"defaultApplyAt": "next_session", "allowSessionExpansion": false},
+      "limits": {"stepsPerInput": 6, "wallTimeMs": 30000, "toolCallsPerInput": 8, "maxOutputTokens": 1200}
+    }
+  }
+}
+```
+
+`schemaVersion:1` 只指拟议部署 schema，不代表覆盖现有 Agent/Package/app-server 版本。上例 tools 中 canonical 文本是面向配置的提案，解析时映射到既有合法 ToolOrigin/wire name，不把冒号名字直接发 provider。
+
+示例只选 echo 与 describe 两只测试工具，故没有必要挂 tool_search/tool_invoke。少量工具 direct 即可；大工具库可选 deferred，并由解析器声明发现/调用所需内置依赖。所需依赖若被上层禁止，拒绝该暴露模式，不偷偷添入工具。
+
+Profile 不能通过 components 给上层未批准 MCP 授权。上例 managed 需要监督器提供身份、资源和凭据上下文；本地裸启动而缺身份会拒绝。HTTP/SSE 开启时 HTTP listener 必须同时启用；WS token 门不自动获得多人 ACL。
+
+额度继续折入 AgentRuntimeProfile 和共同请求预算。超过上层上限的值拒绝或按明确规则收窄，并返回有效值；不另养一份与执行侧脱节的预算。
+
+## 十、统一能力查询：让“没开”和“没做好”看得见
+
+不再手工把固定方法名全报成已支持。以已装配 adapter、实际 handler、当前 subject、Profile 与资源健康折出能力视图。
+
+| 字段（拟议） | 含义 |
+| --- | --- |
+| implemented | 此版本是否完成该方法/组件接线 |
+| enabled | 此服务实例是否启用 |
+| authorized | 此主体在目标 scope 是否获准 |
+| available | 依赖就绪且当前可用 |
+| exposed | 是否进入当前模型发现/直接请求面 |
+| effectiveRevision / generation | 当前采用的策略与实现版本 |
+| reasonCode / applyAt | 为什么不可用，变更何时生效 |
+
+对未授权主体不暴露敏感组件名、服务地址或工具 schema；返回通用拒绝原因。管理员可读详细来源链与配置位置，但仍不回明文凭据。
+
+initialize 只描述协议与服务能力；session capability/read 再描述该场实际工具。编译进去了但没装配不能报 available；model/list 等旧 pending 项未实现时不得因换了适配器就变成可用。
+
+方法裁剪与停用管理分开：功能关了，其执行方法被禁；已经存在的任务状态查询、取消、排空和审计接口仍按管理授权提供，避免把“停止按钮”也一并关掉。
+
+## 十一、多协议映射：扩入口，不改任务含义
+
+### 11.1 统一业务语义
+
+沿 AppServer v3 单使用 `session/create|read|attach|detach|resume|continue|close`、`input/submit`、`operation/read`、`turn/interrupt`、`events/subscribe|read|ack` 等语义。这里的“统一”是共同类型与服务调用，不要求每条网络连接都装 JSON-RPC。
+
+所有写意图要求 clientOperationId；连接 RPC id 仅配对。身份取认证上下文，session/project 必须在授权范围内。受理返回 operationId/inputId、当前状态与查询入口；完成返回另一份有持久来源的结果。
+
+HTTP、gRPC、IM、队列的不同状态码统一映射到领域错误。语法错误、未授权、未配置、资源忙、受理未知、执行失败、结果不足分开；不拿 HTTP 200 或 RPC 成功表示 Agent 任务已完成。
+
+### 11.2 适配矩阵
+
+| 入口 | 接纳/控制 | 事件与结果 | 首批边界 |
+| --- | --- | --- | --- |
+| stdio | 逐行 JSON-RPC | 通知流 + operation/result 查询 | 后端管理子进程；EOF 行为显式约定 |
+| WebSocket | JSON-RPC 请求/响应 | 同连接订阅事件及反向交互 | 先补订阅归属和连接隔离，不能沿用单 connection_ 充当多客户端 |
+| HTTP + SSE | HTTP JSON 写命令、读查询 | SSE 单向推事件；HTTP 回交互、取消、ack | 与网页/业务调用对接；不把 SSE 伪装双向 RPC |
+| gRPC | proto 定义 unary 方法 | 服务端流订阅，交互答复用 unary；双向流按需后加 | 复用 domain DTO，Protobuf 只是编码；独立 adapter 构建开关 |
+| 本机 IPC | Unix socket 或 Windows 命名管道承载相同 RPC | 明确定长/长度前缀或沿逐行文本，冻结一种 | 同机常驻服务；检查 peer/管道 ACL，不能默认“本机即管理员” |
+| IM | Channel Bridge 入站规范化、路由、持久接纳 | ReplyAssembler + DeliveryDriver | 平台 SDK、Webhook/长轮询/WS 放 sidecar；不让 Channel 冒充普通前端连接 |
+| 队列 | Worker 验消息范围并交 SubmitInput | 状态/结果服务或事务 outbox | 先选一种队列实现；不要发布未经验证的“兼容所有 MQ” |
+| MCP | Agent 调外部工具 | 工具返回与执行查询 | 不作为客户端提交整个 Agent 任务的替代协议 |
+
+所有 adapter 有创建、启动、停止接纳、drain、关闭、诊断、健康接口。配置未启用时只允许读静态注册信息，不创建线程、listener 或外部连接。
+
+### 11.3 HTTP 与 SSE 草案
+
+以下路径均为拟议映射，不是已有 REST 端点：
+
+| HTTP | 领域调用 |
+| --- | --- |
+| POST /v2/sessions | session/create |
+| POST /v2/sessions/{id}/inputs | input/submit |
+| GET /v2/operations/{id} | operation/read |
+| GET /v2/sessions/{id}/result?operationId=... | 结果投影；必须属于所查会话 |
+| POST /v2/sessions/{id}/interrupt | turn/interrupt，必须指定目标执行范围 |
+| GET /v2/sessions/{id}/events | SSE 订阅/恢复 |
+| POST /v2/interactions/{id}/response | 审批/提问答复 |
+
+路径参数仍须授权；不能凭难猜的 UUID 放行。请求 body 使用统一 clientOperationId；若同时提供 Idempotency-Key header，必须等值，不等值拒绝。202 只表示持久受理，不表示执行成功。
+
+SSE 使用 text/event-stream；id 放不透明订阅游标，event 放事件类型，data 放版本化 JSON。支持 Last-Event-ID 或显式 cursor，但两者不一致则拒绝。心跳不发新业务 id，不推进执行。
+
+浏览器 EventSource 不能任意设置认证 header；部署明确选择同源会话 cookie 或支持 header 的流式 fetch 客户端。cookie 写请求需 CSRF 防护，跨源白名单与 credential 规则显式配置；不把长期密钥塞 URL 查询串。
+
+SSE 自动重连只恢复订阅，不重发 input/submit。代理缓冲、连接空闲超时、慢客户端与事件窗口过期都要真测；游标不合法返回 resync_required，不能静默跳到最新事件。
+
+### 11.4 gRPC 与本机 IPC
+
+gRPC 显式映射 deadline：控制请求超时可以只停止等待；取消订阅只脱离；只有 Cancel/Interrupt 业务命令或执行 deadline 才停止 Agent。不得让 gRPC context 析构顺手撤销已持久受理任务。
+
+grpc status 与 domain error 双层保留，错误详情使用统一安全 DTO。认证信息通过可信 interceptor 转 RequestContext；metadata 中客户端自填 tenant_id 不能作为授权依据。
+
+本机 IPC 与 stdio 共用报文处理内核；只替传输层。Windows 管道使用显式访问控制；Unix socket 检查目录/socket 权限与 peer 身份。跨平台不满足所选安全模式时拒启，不退回公开 TCP 端口。
+
+### 11.5 IM 入口与队列入口
+
+IM 保留“平台消息身份”和“LubanCode 操作身份”。去重键包括平台/账号/会话/消息或事件 ID，处理编辑、撤回和重投的版本语义，不只用正文 hash 去重。Webhook 校验来源并在持久接纳后快速确认，不等待整场 Agent 跑完才答平台。
+
+群聊、私聊、@机器人、话题线程与发送者范围沿 ChannelRouter。平台发言人不是自动获权的工具调用主体；binding 只收窄授权。模型 thinking、内部工具参数、secret、审计细节不直接发群；正文先经显式回复投影、分块/限频再投递。
+
+平台发送失败，只重试同一份已提交回复的投递；不重新调用模型。外部平台不支持幂等投递时，丢回执必须保留 delivery_unknown 并按平台查询能力核对，不能宣称绝不重复。
+
+队列 ACK 放在共同意图账可靠接纳之后，不放在“刚读到消息”时。ACK 后任务如何继续，由持久队列/调度服务恢复；若尚未具备这条恢复链，不能提前 ACK。重复投递返回原 operation，载荷冲突拒绝并进入明确失败处理。
+
+业务事件桥向外部队列发布时用事务 outbox/可重建投影；外部队列不是第二份执行真账。序列化 DTO 不带管理凭据、任意代码或可修改授权的 profile 正文。
+
+### 11.6 版本与兼容窗口
+
+1.2 按当前合同维护，不能悄悄把 thread/resume 从只读改成续跑，不能悄悄改变 EOF/WS 断线行为。新合同发行 2.0，JSON-RPC 入口使用标准 2.0 信封和独立反向请求 id；HTTP/gRPC 用各自版本化接口承载同一 domain DTO。
+
+首版不同协议版本可通过明确启动选项或独立端点分开，具体命令在 P0 冻结；不在同一会话半途切版。若决定停止支持旧版，明确报版本不匹配与迁移方式，不伪装兼容。客户端至少检查协议版本、方法能力、事件版本与限制。
+
+## 十二、先补受理、恢复与结果真账
+
+### 12.1 受理不丢，不能靠一条 hash
+
+G15 必须列为 P0/P1 阻断项。当前 operations.jsonl 只记元数据且忽略写失败，不能恢复排队正文。新链必须同时解决完整输入、去重、操作状态和队列重建。
+
+建议将会话内 accepted/claimed/completed/cancelled 等事实统一进入 v3 writer；operations.jsonl 仅作迁移来源或可重建索引，不继续形成两份不同权威账。会话创建尚无 session 时，按 AppServer 主单在控制面事务操作存储登记创建意图，再绑定新 session；操作意图账与执行轨迹职责明确，不能互相冒充。
+
+```text
+验证身份/资源/能力/请求大小
+ → 计算版本化规范载荷hash
+ → 保存不可变输入材料（大图/文本用artifact）
+ → 在单写者事务边界提交接受事实与材料引用
+ → 达到声明的持久级别
+ → 返回受理回执
+ → 调度器按持久状态领取
+ → 提交claim/owner epoch
+ → 执行并提交结果/终态
+```
+
+输入 hash 使用版本化 canonical JSON 或长度定界编码，不沿用无转义分隔符拼接。hash 范围含授权资源标识、输入类型、内容/附件摘要、Agent/Profile 请求与执行选项；不含瞬时 RPC id。主体与幂等范围纳入去重键。
+
+fsync/FlushFileBuffers 或等价事务提交是否完成，按选定 durability 档验收；仅 ostream.flush 不能宣称断电不丢。账写失败或结果未知时，禁止执行新工具并拒绝 durable accepted；读取核验已落记录后，才可返回 duplicate。
+
+允许存在“材料已落，采用事实未落”的孤儿文件，按保留期清理；不允许“先答 accepted，事后才补关键输入”。恢复用全来源链与 scope 查原意图，不能只看直接 resume 来源，也不能重复发行裸 op-N 冒充全局唯一身份。
+
+领取与执行分开。已 claim 未完成但进程消失时，按工具事实核验后恢复或标 Unknown；不要因队列里看不到它就当已完成，也不要把在途副作用当新任务重发。
+
+### 12.2 三种生命周期
+
+| 对象 | 断开/取消含义 |
+| --- | --- |
+| 连接/订阅 | 可以重连、detach；不代表任务取消 |
+| 已受理 operation / 执行 turn | 由明确取消命令、业务 deadline、政策或宿主停服策略结束 |
+| Worker/节点 | 退出、崩溃、失联或租约失效；须核验执行事实，不能等同正常完成 |
+
+拟议 deployment 设置 disconnectPolicy：`cancel_owned` 或 `detach`。本地子进程场可显式选 cancel_owned；持久服务选 detach 的前提是受理、结果、无人交互处理与恢复全部完成。策略随握手/受理回执可见，不能按 adapter 私下猜。
+
+单连接断开不得取消其他主体/订阅名下的任务。关闭监听器先 stop_admission，再 drain 连接/执行，最后回收资源；不能把 close socket 当作关闭所有 Session 的通用实现。
+
+无人交互时使用明确 mayPrompt 与 wait deadline：允许等待则进入 awaiting_user；无人可答则拒绝/结束并说明，不能默认批准。交互答复复核操作者、目标、参数hash、修订号和是否过期。
+
+### 12.3 事件游标与终态结果
+
+实时 seq、v3 recordRef、订阅 cursor 分开。cursor 绑定 tenant/scope、过滤器、投影版本、来源水位；重连/续接不能拿全局 max(seq) 跳过某份来源账。
+
+事件允许至少一次投递。文本增量带 stream/item 身份与 offset 范围，合并后仍可校验连续性；客户端去重、发现缺段后读持久快照。慢消费者出站有界，溢出报 resync_required；唯一结果不能只留在队列。
+
+终态提供可查询的 ResultEnvelope（拟议），含 operation/session/turn 身份、executionStatus、finalMessageRefs、artifactRefs、能力快照引用、用量报告状态与错误。finalMessageRefs 由运行时明确选定，不把所有 text item 连起来当最终答案。
+
+`executionStatus=success` 只说明执行正常收口。协议只报告执行状态、最终消息和结果引用；业务是否验收通过由调用方判断，本单不规定业务字段或答案质量标准。usageReported/计费字段须沿现有 usage 合同逐 wire 核验，缺失不能默认为零；UI 派生汇总不是额外计费真账。
+
+终态事实与结果引用先提交，再通知订阅者。网络断掉后仍能查询；若最终模型输出已有但提交失败，禁止报告“结果已可靠保存”。
+
+## 十三、多进程部署与组件归属
+
+首版按多租户单：共享可信控制面，执行放隔离 Worker；有不可信工具的不同租户不复用同一 Worker。初期一场 Session 一只 Worker，可有多个 Worker 同时执行；同场至多一轮实际运行，后续输入持久排队。
+
+本机单用户开发可以使用受控小池。池里连接互不混用；路由持 `(scope, logicalConversationId) -> (workerInstanceId, sessionId, writerEpoch)`。多轮粘住原场；失效后先恢复/查询，不随机换进程续答。
+
+普通 RPC id、进程 seq、工具 ref 都不是全局身份。事件分发同时绑定来源连接、Worker incarnation、会话与权限；旧 Worker 迟到结果须过 epoch 校验，不能写进新 owner 的会话。
+
+共享组件只共享获准部分：
+
+- 外部工具服务可独立运行；多 Worker 共享连接或池时仍按 scope 传递身份、凭据与授权范围，结果返回前复核访问权限。
+- backend/MCP 凭据按 scope 解析，不从监督器继承整份环境。Provider 限流与检索配额需要跨 Worker 总控。
+- 用户/项目 memory、artifact、任务临时目录与日志不得混用；工具禁写文件并不能代替 Worker 文件系统隔离。
+- native 插件、Hook、本地解析器只在适合的隔离进程里运行。动态代码默认不加载进可信控制面。
+- OS 资源限制必须覆盖 Worker 及其子进程；部署承诺的限制未生效则拒启。
+
+进程扩缩容、健康检查、重启退避与 shutdown deadline 属 Supervisor。租约/fencing、节点路由细节沿多租户/集群单。本单不另造一个被称为“协议层”的调度平台。
+
+## 十四、稳定错误与诊断
+
+下列为拟议领域码；实现时与现有码归并，避免同一故障两种名字：
+
+| 错误码 | 何时返回 | 调用方动作 |
+| --- | --- | --- |
+| capability.not_implemented / feature.disabled | 未接线或明确关闭 | 展示状态，不自动退成全工具 |
+| capability.not_authorized | 上层授权不足 | 明报范围，不靠重试或审批绕开 |
+| capability.missing_dependency | 点名依赖缺失 | 管理面补配置/安装，执行不启动 |
+| capability.invalid_config / tool.name_conflict | 规则不明或工具身份冲突 | 修配置，不采用候选计划 |
+| capability.revision_conflict | expectedRevision 已过期 | 重读、重预览，不盲覆盖 |
+| capability.requires_new_session | 无安全热切时点或组件不可热换 | 新场采用，保留原场状态 |
+| tool.revoked / tool.version_stale | 权限撤销或版本不符 | 停止该调用，按当前计划重选 |
+| tool.scope_denied | 参数越资源范围 | 返回合法范围内的安全说明 |
+| operation.commit_failed | 持久接纳失败 | 未受理；查原操作避免误重投 |
+| operation.conflict | 同键不同载荷 | 调用方修正意图/键，不能覆盖原操作 |
+| execution.unknown | 外部动作或 owner 状态无法判定 | 查询事实/人工处理，禁止盲重跑 |
+| events.resync_required | 游标/缓冲窗口不足 | 拉取持久快照后重订阅 |
+
+拒绝详情给管理员看来源层、规则与缺依赖，给业务用户看安全裁剪后的缘由。日志不记 token、secret、原始凭据或未经许可的完整检索材料。诊断可回答：“没安装”“功能关闭”“这场没选”“没有权限”“等待审批”“端点失败”，不用一句“工具不可用”抹平。
+
+## 十五、分阶段实施清单
+
+各阶段合并前更新本单实测栏。勾选项必须附源码/测试或运行证据，不能凭类名存在打勾。平台/线协议与 Provider wire 测试分开记录。
+
+### P0：合同冻结与真实能力盘点
+
+- [ ] 更新 G01–G18，记录当前 HEAD、部署入口、已支持/留位/未装配/未实测四类状态。
+- [ ] 对齐已有 AppServer、Core、租户、Channel、Extension、Soul、异步工具单；去除重复实施任务，明确各自 owner。
+- [ ] 冻结 ToolPolicySpec、功能名、资源授权、能力快照、反向交互与 2.0 映射；明确旧 schema 转换。
+- [ ] 冻结“一场会话一份 RuntimeBundle”的寿命图、取消顺序、后台引用与资源共享边界。
+- [ ] 确认操作真账迁移与 durability 标准，列出 G15 的错误回执、意图丢失和 claim 恢复探针。
+- [ ] 完成最小测试工具集与零工具两份配置样例，静态解析能解释全部依赖；不接模型也不联网。
+
+退出条件：配置和协议 golden 示例通过 schema 校验；所有新接口明确标注设计状态；无同义双台账或同功能两份授权算法。
+
+### P1：补共同装配与可靠接纳
+
+- [ ] 抽中立 RuntimeAssembly 服务；诊断替 Theme，配置/工作目录/凭据显式传递。
+- [ ] 先解析允许组件再启动；RuntimeBundle 明确持有 MCP、插件、backend 和注册表。
+- [ ] 修生产 app-server nullptr 注册工厂和固定提示档；只装选定 Profile，不直接开放全部终端工具。
+- [ ] 生产缺授权、缺工具、依赖启动失败均明拒；可选降级必须写结果并让 Profile 决定能否继续。
+- [ ] 修 SubmitInput 忽略写失败；完整输入落不可变材料与唯一接受事实，规范 hash 可重现。
+- [ ] 实现去重索引重建、全来源链去重、持久排队/claim/终态；崩溃后不靠内存队列猜任务。
+- [ ] 终态提供持久 ResultEnvelope 与 finalMessageRefs；只报告执行与持久结果状态，不替调用方判断业务成功。
+- [ ] 用真实 exe + 本地脚本模型后端 + 测试 MCP 走一次多轮工具调用；记录工具实际执行次数。
+
+退出条件：真实生产启动命令能按两份 Profile 跑通；写账失败零执行、丢受理回执同键重发不重复；不是只靠注入 fake registry 的单测过关。
+
+### P2：能力裁剪与共同工具授权
+
+- [ ] 统一 feature/module/工具选择解析；实现 inherit/only/none、deny 优先、未知键/依赖/重名拒绝。
+- [ ] 暴露、发现、prompt 材料与执行消费同一 SessionCapabilitySnapshot。
+- [ ] 抽共同 ToolExecutionService；直接、proxy/native、PTC、Hook、Workflow、子代理逐路迁移。
+- [ ] 加参数级路径/外部资源/网络/凭据授权；PreTool 改写后和审批等待后重新验证。
+- [ ] 免确认与能力授权分离；父子/渠道/任务按权限求交，无隐式回落全工具。
+- [ ] 关闭功能时无新副作用资源；既有任务停用策略、状态/取消管理口可用。
+- [ ] 能力查询按真实装配和身份生成，普通调用者看不到未授权 schema/服务地址。
+- [ ] 加即时收窄/撤销与 policyRevision；原结果保存和对外投递授权分开。
+
+退出条件：验收表中 C01–C18 全过；缓存指标只是额外测量，不能以保缓存为由跳过禁用检查。
+
+### P3：工具安装与新会话采用
+
+- [ ] 复用 Package 信任/挂载计划，MCP 受信注册；调用数据面与安装管理面分离。
+- [ ] 工具 canonical 身份、wire 映射、schema/实现摘要可查；冲突原子拒绝。
+- [ ] 新组件先构候选再提交；失败清理资源，现有会话不受影响。
+- [ ] 明确 next_session 生效与 pending 状态；新会话采用新版本，旧会话持有原代。
+- [ ] 模型经 Skill/工具结果要求安装或扩大权限时，不自动采用；需要的管理意图由可信主体提交。
+- [ ] MCP 工具列表漂移、新工具、凭据更新或组件失联有明确版本/可用状态。
+
+退出条件：能增加第三只授权工具给新场使用，旧场没有权限/实现漂移；卸载等待在途句柄释放，进程与动态库均无悬垂引用。
+
+### P4：2.0 stdio/WS 与 HTTP/SSE
+
+- [ ] 2.0 handler 都调用共同服务；clientOperationId、持久结果、attach/detach/resume/continue 含义统一。
+- [ ] WS 多连接独立身份与订阅；一个连接断开不终止其他任务；1.2 行为显式隔离。
+- [ ] HTTP 请求和 SSE 投影接共同 DTO；正文 offset、游标、重同步、反向交互答复完整。
+- [ ] 认证/CSRF/CORS/慢消费者/代理缓冲/超时限制配置有实测；未启用 listener 不监听。
+- [ ] stdio 客户端按流拆行、按 id 配响应；服务端请求、乱序事件、丢响应、进程退出均能收口。
+- [ ] 通过三种入口执行同一输入，比较归一后的实际工具计划、拒绝原因和结果引用。
+
+退出条件：协议 golden + 真进程 + 真实浏览器连接均通过；续看只读，SSE 重连不重投任务；业务同义操作不因入口改变权限。
+
+### P4a：协议注入与应用侧工具执行
+
+- [ ] 冻结 7.3 注册/执行合同与 capability 标记；区分目录登记、会话采用、执行授权及执行器在线状态。
+- [ ] 实现注册目录、schema 校验、scope 授权、幂等收据与版本快照，默认采用规则对齐 P3，当前会话扩展仍依赖 P7。
+- [ ] 实现 application 工具适配器和外部等待/结果接收路径，复用共同授权、Action 身份、预算、取消与结果落账。
+- [ ] 接通 stdio/WS 回调及 HTTP+SSE 下发/上报；校验执行器身份、游标、去重与结果收据。
+- [ ] 实现执行器离线/租约、恢复查询、撤销与 owner fencing；无恢复保证的执行器明确限制为不自动重试。
+- [ ] 用真实 app-server 进程和假模型/外部执行器跑下表；记录外部实际执行次数，不用进程内注册桩冒充协议注入。
+
+P4a 是宣称“支持协议注入应用侧工具”的必过阶段；P4 仅完成基础传输不能代替它。其他入口逐项验收后再打开相应 capability。
+
+### P5：一个 IM 平台与一个队列后端
+
+- [ ] 选定平台官方 SDK/API，补完 Channel Adapter 生命周期、认证、配对与消息映射。
+- [ ] IM 入站持久后 ACK，重复事件不重复执行，reply 出站失败只重试投递。
+- [ ] 群聊/私聊/话题线程、权限撤销、平台限频、消息大小和回复分块做真账号验收。
+- [ ] QueueWorkerAdapter 复用操作去重/claim，不让队列 ACK 早于可靠接纳。
+- [ ] Worker 在接纳后/ACK 前、claim 后/执行前、执行后/终态前分别崩溃，检查恢复与 Unknown。
+- [ ] 平台/队列关闭后不轮询、不联网；管理查询与失败处理仍可访问。
+
+退出条件：实测记录标清平台、账号范围、事件 ID、时间与版本；fixture 不冒充平台验收，至少一次交付不冒充 exactly-once。
+
+### P6：gRPC 与本机 IPC
+
+- [ ] proto 契约生成客户端/服务端；与共同 DTO 映射有交叉合同测试。
+- [ ] unary 受理与服务端流订阅分开；deadline/cancel 不误取消已脱离任务。
+- [ ] 独立构建/安装 adapter；未编时配置拒启，不自动拉依赖或回落别的端口。
+- [ ] Unix socket、Windows 命名管道各测身份与 ACL、残留端点、并发关闭和超大报文。
+- [ ] 运行与 P4 相同的业务合同，结果/权限/错误一致；差异仅限已声明传输行为。
+
+退出条件：有真实客户端需求与至少一个外部 consumer 验证；支持列表按已测试平台列，不把本机 IPC 当跨平台单次测试。
+
+### P7：当前会话显式扩展与部署验收
+
+- [ ] 实现 preview/apply、expectedRevision、持久变更意图、原子采用与变更查询。
+- [ ] 安全点/在途工具/后台任务钉 generation；引用计数与排空有故障注入。
+- [ ] 紧急撤销跨候选构造、审批等待、dispatch、外部执行与结果投递各竞态收口。
+- [ ] 记录工具/提示哈希变化，旧历史不改；native/proxy 旧引用失败有正确 provider 配对。
+- [ ] 按租户单部署两个隔离范围，验证目录、凭据、事件、artifact、结果缓存都不能串用。
+- [ ] 通用协议测试客户端固定引擎版本与包摘要，跑并发、延迟、资源上限与真实端点取消测试；不引入新业务项目。
+- [ ] 每种新增入口都有启动、健康、drain、关闭、升级及版本不匹配说明。
+
+退出条件：C/T 验收表按适用入口全部过；未完成 P7 时，能力查询继续报 current_session_expansion=false。
+
+## 十六、验收矩阵
+
+### 16.1 裁剪与工具扩展
+
+| 编号 | 场景 | 必须看到的结果 |
+| --- | --- | --- |
+| C01 | tools.mode=none | 请求无工具定义，无发现器，无 MCP/插件工具进程启动 |
+| C02 | only + allow=[]；旧 schema 空 allow | 前者零工具，后者按旧规则继承；新旧 schema 不能混读 |
+| C03 | allow/deny 交叠 | deny 胜出，requires 指向它则启动失败 |
+| C04 | Profile 点名宿主未授权工具 | 拒绝扩权，诊断来源；不产生执行 |
+| C05 | 猜被禁工具名 | 合法拒绝结果/配对，真实 Tool 零执行 |
+| C06 | 旧 ref 指向被撤销工具 | 执行拒绝；不因曾发现/曾批准而放行 |
+| C07 | proxy/native/direct 三条路调用同一禁用目标 | 权限结果一致；各 wire 的消息配对合法 |
+| C08 | PTC/Hook/Workflow/子代理绕行 | 共同闸拒绝，Hook 不伪造模型 tool 消息 |
+| C09 | PreTool 把合法路径或 resourceId 改到越权目标 | 最终参数授权拦下，副作用零发生 |
+| C10 | 审批期间撤权，随后 acceptForSession | 答复失效/调用拒绝，不刷新旧授权 |
+| C11 | memory/browser/subagents/loop 功能关闭 | 无对应新提示/工具/自动任务/外连；历史读取按另行 ACL |
+| C12 | ToolSearch 查询未授权目录 | 无敏感工具名、schema 或服务地址泄露 |
+| C13 | Package 工具重名或 wire 名碰撞 | 采用失败，旧表不变，候选资源清理 |
+| C14 | 安装 MCP 新工具但未批准 | 管理目录可见待授权项，模型不可发现/调用 |
+| C15 | 新版同名工具、旧 ref | 钉旧代或明确 stale，不静默改用新实现 |
+| C16 | 单场停用共享资源 | 其他获准会话继续使用；最后引用释放才回收 |
+| C17 | native/插件仍在执行时更新 | 旧库不卸载、不悬垂；新调用按代路由 |
+| C18 | 增加第三只测试工具到新场 | 新场计划新增、旧场不变；若下层无授权则仍拒绝 |
+| C19 | 热扩展 expectedRevision 过期 | revision_conflict，旧场继续，候选不采用 |
+| C20 | 快照已写、采用事件写失败 | 不切新代；候选文件不被恢复器认作生效 |
+| C21 | 撤销与 dispatch 同时发生 | 以受控提交点裁决；已发请求记事实，未发请求拦下 |
+| C22 | Worker 离线收到不了撤销 | 授权租约到期停发，不能无限使用旧权限；全局完成不谎报 |
+| C23 | 资源撤权后取缓存结果 | 对外投递重新授权，不能靠缓存绕 ACL |
+| C24 | 工具返回内容指示启用 shell/装插件 | 仍作为数据处理，Profile 和管理授权不变 |
+
+### 16.2 协议与持久恢复
+
+| 编号 | 场景 | 必须看到的结果 |
+| --- | --- | --- |
+| T01 | capabilities 中列未装配方法 | available=false；不能与已完成方法混报 |
+| T02 | 接纳账打不开或 Append 失败 | 不回 durable accepted，不进执行队列 |
+| T03 | 保存输入后、回执前崩溃 | 同键重发定位原意图；正文/附件可恢复 |
+| T04 | 同键同载荷、同键异载荷 | 分别原回执与 conflict，真实执行次数符合账 |
+| T05 | resume 多跳后重复原请求 | 沿全来源链去重，不因新 sessionId 重跑 |
+| T06 | claim 后 Worker 崩溃 | 恢复 claim 与事实；不把在途动作当未开始 |
+| T07 | 两客户端订阅不同 scope | 事件/结果/交互不串；一方断开不打断另一方 |
+| T08 | SSE 断线并 Last-Event-ID 重连 | 只恢复订阅；重复可去重、缺段可重同步 |
+| T09 | 慢客户端/代理缓冲/队列满 | 资源有界、缺口明报、终态从持久查询可得 |
+| T10 | gRPC 订阅 deadline 到期 | 订阅关闭；已受理 detach 任务不误取消 |
+| T11 | 1.2 客户端连 2.0 | 明确版本不匹配或显式适配；不暗改 resume/审批行为 |
+| T12 | 过期/别人的 interactionId | 拒绝答复，不修改任务；参数改过旧批准失效 |
+| T13 | IM 重复投递、出站失败 | 不重复跑 Agent；仅投递重试，未知回执如实记 |
+| T14 | 队列接纳后 ACK 丢失 | 重投返回原 operation，不产生第二场执行 |
+| T15 | 服务端业务成功但网络回执丢失 | 可查询原结果；RPC id 不能充当幂等键 |
+| T16 | 标准输入半行/多行、事件先于响应 | 正确分帧配对，不错把事件当请求结果 |
+| T17 | 传输/功能均未启用 | 无监听、无 sidecar、无队列消费、无 IM 轮询 |
+| T18 | 旧 Worker 迟到结果与新 owner 并存 | epoch 校验拒绝越代写入，原事实单独核验 |
+| T19 | 只读历史/attach/补事件 | 零模型、零工具、不偷偷继续执行 |
+| T20 | 只有中间 text、无合格最终答案 | 结果状态如实，无“拼全量text即合格答案” |
+
+### 16.3 协议注入与应用侧执行
+
+| 编号 | 场景 | 通过条件 |
+| --- | --- | --- |
+| I01 | 无 MCP 的外部函数注册、首请求前采用与调用 | 真 app-server 通过协议发请求，外部只执行一次，原模型收到配对结果 |
+| I02 | 重复注册、同键不同内容、同名冲突、超大 schema | 原收据稳定；冲突和超限明确拒绝，无部分采用 |
+| I03 | 其他租户/会话注册、旁观连接抢答、伪造 executionId | 均拒绝，未泄露参数或更改执行账 |
+| I04 | 当前会话新增、在途更新与撤销 | 新增按采用状态处理；旧调用钉旧代；撤销后不派新调用 |
+| I05 | 执行前、执行后、结果落账后分别断线 | 核对执行次数；未知不盲重跑；已收结果返回原收据 |
+| I06 | SSE 重放、重复结果、内容冲突 | 不重复执行或写模型历史；不同结果报冲突 |
+| I07 | deadline、取消竞态与迟到结果 | 可确认才记取消，未知如实保留；终止会话不自动续跑 |
+| I08 | 多连接恢复、多 Worker 争抢与旧 epoch 回报 | 只有当前 owner 可派发；旧执行结果经恢复核对后处理 |
+| I09 | 执行器崩溃、缺去重账或不支持状态查询 | 明确 unavailable/Unknown，无“自动恢复成功”假象 |
+| I10 | 超大结果、非法 artifact、错误 schema | 结果受控拒绝并留下诊断；不送错误内容给模型 |
+| I11 | stdio、WS、HTTP+SSE 对照 | 授权、实际执行次数、结果收据、取消规则一致 |
+| I12 | 客户端独有工具接远端引擎 | 实际执行位置在客户端；引擎不读取客户端路径，不要求复制实现到服务器 |
+
+## 十七、验证分层与交付门槛
+
+1. 文档/配置校验：检查链接、源码锚点、JSON/schema、错误名与版本，不算运行验证。
+2. 纯函数单测：策略求交、配置迁移、版本比较、canonical hash、依赖/名字冲突。优先补现有测试文件，不为每个字段写镜像测试。
+3. Runtime 合同测试：真实权限、存储、取消和资源寿命，加确定性假模型/工具探针，证明控制规则。
+4. 真进程协议测试：启动真正发行入口、连接 stdio/WS/HTTP/gRPC/IPC，不能只在 Server 构造器注入完美 registry。
+5. 故障注入：写失败、丢回执、kill Worker、端点超时、慢消费、撤权竞态，按 C/T 表核验事实与执行次数。
+6. 外部实测：真实 Provider、真实 MCP 服务、选定 IM 账号、选定队列与真实浏览器。记录版本、原始账、重试和未知状态；不外发无授权消息。
+7. 协议一致性验收：固定脚本模型与测试工具，跨入口比较授权、调用次数、回执、结果引用和取消语义。业务效果评测留给外部项目。
+
+现有测试接点：`tests/unit/agent_catalog/test_agent_profile_resolver.cpp`、`tests/unit/tools/test_deferred_tool_resolver.cpp`、`tests/unit/runtime/test_tool_runtime.cpp`、`tests/unit/runtime/test_channel_session_host.cpp`、`tests/unit/app/test_session_service.cpp`、`tests/unit/app_server/`、`tests/integration/app_server/test_app_server_smoke.cpp`、`tests/unit/packages/test_package_code_mounting.cpp`。
+
+按仓库构建与 CI 要求运行受影响测试；只有新增代码、失败或未解风险才扩大范围。Windows/Linux/macOS 各自验证其实际承载与隔离能力，不以某平台通过推断另两平台。
+
+第一份可交付版本至少完成 P0–P4，并通过适用的 C/T 协议与能力验收。IM/队列、gRPC/IPC、会话内扩展分别达到 P5/P6/P7 才对外标支持。未完成项继续留在能力表和发布说明中，不用一句“插件化，理论上都能接”替代验收。
+
+## 十八、本轮交付记录
+
+- 已核查当前生产入口、工具策略/装配、SessionService、Channel 与相关设计。
+- 已写本设计和分阶段验收；所有实施勾选保持未完成。
+- 当前最先动手的三处：G01/G02 生产装配、G15 持久接纳、G06–G09 全路径共同授权。
+- 本轮文档检查：9 个关联链接存在，38 处独立文件锚点存在且显式行号未越界，1 段 JSON 可解析，代码围栏配对；52 项实施待办与 44 个验收场景均未勾选。源码锚点检查只证明定位有效，当前行为仍以上文静态审查为准。
+- 不以文档检查代替编译、协议或平台实测。本轮只新增本文件，未提交 Git。
+
+- 范围修订：按用户要求移除新项目结构、Agentic RAG 业务方案与业务评测；示例改为通用测试工具，交付门槛只认协议和引擎接入验收。
+
+- 后续设计补充：新增 7.3、P4a 与 I01–I12，正式纳入协议注册和应用侧执行回调。上面的文档检查数量属于原交付记录；本次未实现接口、构建或实测。

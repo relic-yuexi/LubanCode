@@ -1,0 +1,163 @@
+# 多租户隔离：身份授权与隔离 Worker 落地设计
+
+- 日期：2026-09-12
+- 状态：源码审查与设计，未实施。基线 HEAD：ce37455e。
+- 范围：LubanCode 托管多用户时，身份、会话、数据、工具、凭据、事件与资源如何隔开。
+- 关联：`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`、`LubanCore与CLI分离_核心库独立成宿主底座设计.todo`。
+- 本单细化隔离边界，不改变集群单的远期状态，也不宣布 Core SDK 已完成。
+- 证据：本轮静态读源码；未启动多人服务，未做越权利用、沙箱逃逸或容量实测。
+
+## 一、裁决
+
+先做单节点托管闭环：共享控制面，隔离执行面。租户之间不共用承载不可信工具的 Worker 进程；首版每场 Session 起一只 Worker，放进所属租户的隔离环境。
+
+边界还须按权限细分：同租户内若项目互不可见，项目/Session 沙箱也不能挂载全租户目录。租户是最低外边界，具体挂载与凭据按本场授权再收窄。
+
+控制面管登录、成员关系、资源归属、授权、路由、配额和审计。可信节点监督器管 Worker 生命周期与隔离装配。Worker 经 SessionService 驱动 Runtime，管一场执行。CLI 保留本机单用户用法。
+
+不要只把 Shell 放沙箱：read_file 等内置工具会在 Agent 进程里直接读盘。整个 Worker 都要落在受限文件、网络和进程边界内。控制面不得执行用户代码，不挂载租户可执行插件，不向 Worker 暴露管理凭据或宿主控制 socket。
+
+初期不做跨节点迁移，不先建大型资源池。先用两家租户、同名项目、各一场会话，把拒绝越权和故障收口做实。
+
+## 二、当前源码与缺口
+
+| 源码锚点 | 当前行为 | 托管缺口 |
+|---|---|---|
+| `src/app_server/dispatcher.hpp:45` | DispatchContext.principal 为 user/agent，区分操作来源 | 不是用户 ID；没有租户成员身份 |
+| `src/app_server/server.cpp:1791` | 过 WS 入口后 SetPrincipal("user") | 共享 token 不能表达多人身份与资源权限 |
+| `src/app_server/server.hpp:72`、`src/app_server/server.cpp:426` | ThreadRecord 存会话状态，FindThread 按 thread_id 查 map | 缺租户、项目归属与主体授权参数 |
+| `src/app_server/server.cpp:872` | thread/start 接收 cwd，交 SessionLaunchRequest | 客户端路径尚非服务端授权项目映射 |
+| `src/runtime/session_service.hpp:57` | 开场参数已有 cwd、workspace_identity、workspaces_root | 可作为隔离装配接点，尚无可信安全范围 |
+| `src/runtime/session_command_service.hpp:60` | 根目录与 workspace key 限定查询；支持 scope=all | workspace 范围不能代替租户和项目 ACL |
+| `src/app_server/server.cpp:554`、`:650` | 冷会话查询可跨 workspace 索引定位 | 冷读、恢复和历史查询同样须授权 |
+| `src/app_server/server.cpp:1797`、`:1806`、`:1822` | 当前连接存进 connection_；断线打断运行回合；事件发给当前连接 | 不是多主体订阅与持久续看合同 |
+| `src/app_server/ws_transport.cpp:234` | artifact 过服务 token 后按统一目录和内容名读取 | 缺 artifact 到租户/会话的归属授权 |
+| `src/workspace/identity.hpp:1` | 按 Git common dir、marker、config、cwd 裁决 workspace | workspace 表示本地项目身份，不是安全域 |
+| `src/tools/isolation.cpp:60` | 防回写主树；主树之外放行 | 是 worktree 协作闸，不是允许目录白名单 |
+| `src/tools/read_file.cpp:71` | 参数路径直接交 filesystem/ifstream | 单独把命令执行隔开仍会留下宿主读盘入口 |
+| `src/tools/run_command.cpp:503`、`:562` | cwd/worktree 检查后调用平台进程接口 | cwd 与命令文本检查不能构成 OS 租户隔离 |
+| `src/platform/process.hpp:61`、`:327` | 已有 Inherit/Replace 环境模式；ChildProcess 默认 Inherit | 可复用 Replace，须逐个接调用链 |
+| `src/platform/process.hpp:333` | 约束版进程接口允许部分限制失败后降级 | 托管硬约束必须失败即拒绝，不能照常执行 |
+| `src/mcp/transport.cpp:42` | stdio MCP 走 ChildProcess.Start 默认参数路径 | 托管需显式环境、cwd、权限与生命周期 |
+| `src/runtime/secret_resolver.cpp:314` | 已声明 Secret 先查宿主环境，再查插件 .env | 插件声明校验值得保留，宿主环境查找不等于租户授权 |
+| `src/app/session_stack.cpp:127`、`:291` | 装配仍有 current_path 使用 | Core 分离时须换成显式范围，不能靠切进程 cwd 轮流服务多人 |
+
+以上不足针对“扩成多租户”的目标，不把现行本机单用户行为一概算成漏洞。现有隔离、审批、环境替换接口也不能一概抹掉；要分清覆盖面，再补硬边界。
+
+## 三、身份合同
+
+新增中立类型，名称暂拟，代码尚无这些合同：
+
+```text
+AuthenticatedSubject: tenant_id, user_id, actor_kind, credential_id
+ResourceScope: tenant_id, project_id, workspace_key, thread_id
+ExecutionScope: ResourceScope, initiating_subject, policy_revision,
+                execution_id, lease_epoch, allowed_capabilities
+```
+
+- actor_kind 继续表达 user/agent/service，不拿它替 user_id。
+- tenant_id 由认证结果与成员关系核验后确定。客户端可选择租户，不能自行盖章。
+- Project 是控制面登记对象，workspace_key 是本地身份。服务端登记两者映射，不能仅凭仓库 marker、路径或相同 Git remote 授权。
+- 开场时绑定资源归属，后续不能随请求改 tenant。用户退租后保留历史归属，但撤销其访问权。
+- Worker 工作身份与发起用户分开记。自动任务用明确服务授权；不能借“原用户已离线”默许继续使用全部权限。
+- 托管模式缺身份即拒绝。CLI 用显式 LocalTrusted 模式，不能把远程缺身份请求悄悄降成 local。
+- 有效权限受平台、租户、项目、主体与本场约束共同限制；拒绝优先。accept_for_session、YOLO、Skill 指令均不得突破上层限制。
+
+身份认证适配器归宿主。核心执行接口只吃中立身份、范围与策略，不依赖某家登录 SDK，也不读 HTTP 头。
+
+## 四、授权放两处
+
+第一处在控制面资源入口：Authenticate → Authorize(subject, action, resource) → 路由。
+第二处在 Worker 执行入口：核验服务端签发的短期执行授权、范围、到期时间和租约，再查本次能力。
+
+- 用带范围的 GetAuthorizedSession 取代托管入口裸用 FindThread；不能只检查 turn/start。
+- 纳入列表、计数、搜索、历史、trace、workflow、恢复、归档、删除、打断、审批回复、跨会话消息、浏览器和 artifact。
+- 列表在读范围内过滤，再算 total、分页与游标；不能先全库分页再删越权条目。
+- 权限撤销要影响排队任务、活订阅与下次工具调用。长任务按能力支持中断/吊销；已经发生的外部副作用无法撤回，须明确记账。
+- 资源标识带不带 tenant 前缀都不替授权；内容 hash 也不是下载凭据。
+- 幂等键按 tenant + target + operation + client key 划范围，并核对请求摘要。
+
+## 五、存储与凭据
+
+首版复用现有 workspace/session 真账。托管宿主注入租户存储根，例：
+
+```text
+managed-root/tenants/<opaque-tenant-id>/
+  workspaces/<workspace-key>/...
+  artifacts/...
+  plugin-data/...
+  package-data/...
+  browser-profiles/...
+```
+
+这只是可信存储布局示意。Worker 只挂本场获准子集，不能把整棵 managed-root 暴露进去。目录权限、挂载与授权缺一不可。
+
+- 不改 thread/turn/item 发号，不另造 Session 真账。租户、项目归属在可信目录和可校验会话元数据中登记，索引是投影。
+- 同名 workspace、相同 artifact hash、同名插件 Secret 在两租户中都可存在，不互相命中。
+- Memory、摘要、检索索引、缓存、导出、日志、浏览器 profile 同样分范围。只读公共包可复用内容，私有包和可变缓存不能默认混池。
+- 租户拥有多个互斥项目时，不能仅靠租户根限定 SessionCommandService；仍须按项目 ACL 收窄查询与管理。
+- 旧本机数据不猜租户。迁入要有显式认领映射与清单，失败可回滚；不就地改旧 append-only 轨迹来伪造历史身份。
+- SecretResolver 保留不透明引用与打码接口，托管改为范围化凭据提供者。SecretRef 包含 scope、用途和版本，实际调用前查授权。
+- 控制面总凭据不进 Worker 环境。能用服务代理或短期凭据就收窄下发；确须交 MCP 的明文只给对应隔离进程，不能谎称接收方看不见。
+- 日志、模型上下文、轨迹、事件不得存明文；错误体也须过打码。撤销 Secret 后不能从恢复快照复活旧凭据。
+
+## 六、执行环境
+
+- 节点监督器以可信配置创建隔离环境，记录实际能力：文件挂载、网络出口、进程权限、CPU/内存/PID/磁盘限制。
+- 所需硬能力未建成或只能降级，返回 isolation_unavailable，禁止启动不可信工作。不能把 SandboxGrade 的降级仅记在日志里。
+- 整只 Worker、内置文件工具、Shell、MCP、浏览器与后台子进程都在边界内；清理也必须覆盖后代进程。
+- 同租户内默认一 Session 一 Worker、一份可变工具状态。获准共享项目目录是显式协作，不是误共享 HOME、cookie 或 MCP 连接。
+- 同系统账号起两只普通进程不算完成隔离。部署须选并验证具体 OS/容器/虚拟机方案；公开接纳任意代码时优先更强虚拟化边界。
+- 工作目录显式传入；不改宿主 current_path，不改进程环境以切换租户。EnvMode::Replace 只放运行所需变量。
+- 路径测试覆盖绝对路径、..、symlink、Windows junction、共享 Git 元数据与检查后替换；OS 挂载/权限承担硬拒绝，字符串判断只作前置提示。
+- 网络出口按场授权，防访问控制面、节点管理口与云元数据。MCP远端凭据和连接池不能跨授权主体复用。
+
+## 七、事件、调度与失败
+
+- 用主体绑定的连接注册表与订阅表替代托管端单份 connection_。订阅绑定资源范围，每条出口都核验，不靠前端过滤。
+- 托管 Session 由监督器持有。网页断开只撤订阅；显式取消另走授权命令。CLI 的退出规则保留本机语义。
+- 续看沿用事实事件与稳定 seq；游标绑定 tenant/resource，不能借另一租户游标跨账读取。若底层账缺必需事件，补合同，不虚称任意事件都已可回放。
+- 同场 main turn 单飞；跨场按 tenant/user/project/node 配额公平排队。队列限长，模型调用前预留预算，结束后按真实用量结算，释放失败能对账。
+- Worker 崩溃记失败或待恢复，不自动重放未知副作用。execution_id 在派发前持久登记。
+- 单节点首版也要阻止双 Worker 同写一场；后续跨节点使用租约与 fencing epoch，由事实提交/副作用代理检查，不能只在调度器内存中检查。
+- 无法被租约拦截的外部工具请求仍可能在旧 Worker 上完成，必须记录 Unknown 并查询对账；租约本身不保证外部 exactly-once。
+
+## 八、实施顺序与验收门
+
+### P0：冻结托管合同，接身份与授权
+
+- [ ] 明确 Tenant/Project/Session 归属与 LocalTrusted/Managed 模式。
+- [ ] DispatchContext、SessionLaunchRequest、资源查询口接中立范围类型。
+- [ ] 完整列出协议方法与授权动作，默认拒绝未登记方法。
+- [ ] A/B 租户用同名项目与可知 thread_id，交叉读取、搜索、删除、恢复、取消、审批均失败，且无副作用。
+
+### P1：根目录注入与凭据分域
+
+- [ ] 清点 workspace、Memory、插件数据、包数据、artifact、profile、临时文件、日志全部根目录。
+- [ ] 补项目 ACL、冷会话查询、分页 total、导出与下载授权。
+- [ ] SecretResolver 接范围化 provider，MCP/工具进程显式 Replace 环境。
+- [ ] 两租户同 Secret 名返回各自结果；所有输出搜不到另一租户标记或凭据。旧数据迁入必须显式认领。
+
+### P2：隔离 Worker，单节点两租户真机验收
+
+- [ ] 在 Core 宿主分离合同允许的接口上接 Worker；若接口未稳，先补 Core 前置，不能把 CLI 私有状态直接暴露成云 API。
+- [ ] 实现受监督 Worker 的启动、停止、资源帽、最小挂载与出口限制。
+- [ ] 文件工具、Shell、MCP、浏览器、后台孙进程均测越界；沙箱建立失败必须拒绝启动。
+- [ ] A 跑满 CPU、内存、进程数或输出量时，A 受限；B 仍能调度。记录机器配置、负载与响应数据。
+
+### P3：多人连接与恢复
+
+- [ ] 多用户同时订阅；A 断线不打断 B，也不自动取消托管 A 会话。
+- [ ] 重连只补获准事件；权限撤销立刻收订阅，排队和后续执行重新裁权。
+- [ ] 错租户游标、迟到审批、重复命令、旧 lease 提交、Worker 崩溃逐项验收。
+- [ ] 浏览器 cookie、截图、MCP 状态、日志和历史从活会话到冷恢复都不串域。
+
+### P4：再谈多节点与复用池
+
+- [ ] 前三阶段过门后再接节点注册、跨节点调度、租约和共享持久存储。
+- [ ] 只有证明无敏感状态、无凭据串用且资源受控的服务，才考虑同范围池化。
+- [ ] 保留更强隔离部署档；不拿节省冷启动作为跨租户混放 Worker 的理由。
+
+## 九、本轮交付界限
+
+本轮只新增本设计单。源码锚点已按当前 checkout 查读；不运行代码测试来替文档背书，也不声称现有部署已完成多租户隔离。
