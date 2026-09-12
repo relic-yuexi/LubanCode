@@ -29,6 +29,9 @@ struct SessionPickerFeed {
     std::vector<SessionPickerEntry> entries;  // 当前 scope/sort 下的一页(已排好序)
     std::size_t total = 0;                    // 命中总数(底栏百分比用)
     long long now_epoch = 0;                  // 相对时间的"现在"(测试可钉)
+    // 查询侧诊断(空 = 健康):非空时空列表要报"读取失败",不冒充
+    // "没有会话"(Resume 接入 v3 单 R2)。
+    std::string diagnostic;
 };
 
 // Ctrl+T 转录浮层的按需取数(P3 第二棒:游标分页):一问一页,翻页用

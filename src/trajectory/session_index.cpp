@@ -25,8 +25,11 @@ namespace lubancode::trajectory {
 namespace {
 
 // 索引文件的 schema 标识(合同:派生物可整份丢弃重建,version 只升不降)。
+// v2(Resume 接入 v3 单 R2):v3 行补 cwd/title/run_kind 投影与
+// run_kind_unknown 标记。加载只认当前版本——旧版本整份重扫,投影升级
+// 自动吃到未变化的旧档案("未变化的 v3 主账也要更新摘要")。
 constexpr const char* kIndexSchema = "lubancode.workspace.session-index";
-constexpr int kIndexVersion = 1;
+constexpr int kIndexVersion = 2;
 // 提问历史每 workspace 最多留多少行(新→旧截尾;Ctrl+R 一次也只看几百条)。
 constexpr std::size_t kPromptHistoryCap = 2000;
 
@@ -86,7 +89,8 @@ std::string FirstTextOfContent(const nlohmann::json& content) {
 // 摘要口径对齐 v2:event_count=总行数;message_count=会话消息(human
 // user + assistant);model=首个 model.request.prepared;状态按
 // session.ended 有无折 closed/incomplete(v3 无 manifest,活场无锁概念,
-// "incomplete" 如实)。标题/审批档是 v2 manifest 的账,v3 源留空。
+// "incomplete" 如实)。cwd/run_kind 从 session.started 取(R2 权威来源),
+// 老档缺键 run_kind 读作"未知"不暗填;标题折 session.title.applied。
 SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string& workspace_key,
                           const std::string& session_id) {
     SessionScan scan;
@@ -95,6 +99,8 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
     summary.session_id = session_id;
     summary.session_dir = platform::PathToUtf8(stream.parent_path());
     summary.status = SessionStatusName(SessionStatus::Incomplete);
+    summary.run_kind.clear();         // v3 的种类从账上读,缺=未知(R2)
+    summary.run_kind_unknown = true;  // 读到 session.started.runKind 才翻 false
 
     std::ifstream file(stream, std::ios::binary);
     if (!file.is_open()) {
@@ -131,9 +137,16 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
                                              : nlohmann::json::object();
             const std::string role = GetJsonString(body, "role");
             const std::string purpose = GetJsonString(row, "purpose");
-            const std::string content = body.contains("content") && body["content"].is_string()
-                                            ? body["content"].get<std::string>()
-                                            : std::string();
+            // 正文两读法(桥的写侧合同):单块纯文本落 string,多块落
+            // blocks 数组——首句预览两样都认,图片/引用块自然跳过。
+            std::string content;
+            if (body.contains("content")) {
+                if (body["content"].is_string()) {
+                    content = body["content"].get<std::string>();
+                } else if (body["content"].is_array()) {
+                    content = FirstTextOfContent(body["content"]);
+                }
+            }
             if (purpose != "conversation") {
                 continue;  // compact 内部问答/摘要不进摘要与提问历史
             }
@@ -155,12 +168,31 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
             } else if (role == "assistant") {
                 ++summary.message_count;
             }
-        } else if (GetJsonString(row, "kind") == "model.request.prepared") {
-            if (summary.model.empty() && row.contains("payload") && row["payload"].is_object()) {
-                summary.model = GetJsonString(row["payload"], "model");
+        } else if (const std::string kind = GetJsonString(row, "kind"); !kind.empty()) {
+            const nlohmann::json& payload = row.contains("payload") && row["payload"].is_object()
+                                                ? row["payload"]
+                                                : nlohmann::json::object();
+            if (kind == "model.request.prepared") {
+                if (summary.model.empty()) {
+                    summary.model = GetJsonString(payload, "model");
+                }
+            } else if (kind == "session.started") {
+                // 会话级事实(R2):cwd/run_kind 的权威来源;老档缺键保持
+                // "未知"(run_kind 空 + run_kind_unknown=true)。
+                const std::string cwd = GetJsonString(payload, "launchCwd");
+                if (!cwd.empty()) {
+                    summary.cwd = cwd;
+                }
+                const std::string run_kind = GetJsonString(payload, "runKind");
+                if (!run_kind.empty()) {
+                    summary.run_kind = run_kind;
+                    summary.run_kind_unknown = false;
+                }
+            } else if (kind == "session.title.applied") {
+                summary.title = GetJsonString(payload, "title");
+            } else if (kind == "session.ended") {
+                summary.status = SessionStatusName(SessionStatus::Closed);
             }
-        } else if (GetJsonString(row, "kind") == "session.ended") {
-            summary.status = SessionStatusName(SessionStatus::Closed);
         }
     }
     if (tail_broken) {
@@ -368,6 +400,7 @@ nlohmann::json SummaryToJson(const WorkspaceSessionSummary& summary, const Sessi
                           {"status", summary.status},
                           {"archived", summary.archived},
                           {"run_kind", summary.run_kind},
+                          {"run_kind_unknown", summary.run_kind_unknown},
                           {"title", summary.title},
                           {"first_user_text", summary.first_user_text},
                           {"cwd", summary.cwd},
@@ -396,7 +429,13 @@ WorkspaceSessionSummary SummaryFromJson(const nlohmann::json& json) {
     // run_kind:旧索引行缺键回落 main_session(单发轨迹断档单;旧场没有
     // one_shot,回落无害)。
     summary.run_kind = GetJsonString(json, "run_kind");
-    if (summary.run_kind.empty()) {
+    summary.run_kind_unknown =
+        json.contains("run_kind_unknown") && json["run_kind_unknown"].is_boolean() &&
+        json["run_kind_unknown"].get<bool>();
+    // v2 老索引行缺 run_kind 键回落 main_session(v2 manifest 必有该字段,
+    // 缺=旧档,回落无害);v3 行的空串是"账上没写"(run_kind_unknown),
+    // 不许借这条路暗填。
+    if (summary.run_kind.empty() && !summary.run_kind_unknown) {
         summary.run_kind = "main_session";
     }
     summary.created_at_ms = GetJsonInt(json, "created_at_ms");
@@ -436,10 +475,13 @@ PromptHistoryLine PromptFromJson(const nlohmann::json& json, const std::string& 
     return prompt;
 }
 
-// 一份 workspace 索引(读盘或重建后的内存态)。
+// 一份 workspace 索引(读盘或重建后的内存态)。error 非空 = 重建没走完
+//(目录列举失败等),sessions/prompts 是旧缓存兜底——查询层带着诊断冒泡,
+// 不许把"读不成"折成空列表报"没有会话"。
 struct WorkspaceIndex {
     std::vector<WorkspaceSessionSummary> sessions;
     std::vector<PromptHistoryLine> prompts;  // 场内时序;未截尾
+    std::string error;                       // 重建失败诊断(空=健康)
 };
 
 // 核心:读 <ws>/indexes/sessions.json,对指纹,动了的重扫,变了就写回。
@@ -450,6 +492,10 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
     const std::filesystem::path index_path = workspace_dir / "indexes" / "sessions.json";
     std::error_code ec;
     if (!std::filesystem::exists(sessions_dir, ec)) {
+        if (ec) {
+            index.error = "sessions 目录探测失败(" + ec.message() + "): " +
+                          platform::PathToUtf8(sessions_dir);
+        }
         return index;
     }
 
@@ -466,9 +512,11 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
             buffer << file.rdbuf();
             const nlohmann::json json =
                 nlohmann::json::parse(buffer.str(), nullptr, /*allow_exceptions=*/false);
+            // 只认当前版本:旧版本(投影合同升级前)整份重扫,未变化的
+            // 主账也重出摘要(R2);不匹配置之不理,当没有旧账。
             if (json.is_object() && GetJsonString(json, "schema") == kIndexSchema &&
                 json.contains("version") && json["version"].is_number_integer() &&
-                json["version"].get<int>() <= kIndexVersion && json.contains("sessions") &&
+                json["version"].get<int>() == kIndexVersion && json.contains("sessions") &&
                 json["sessions"].is_array()) {
                 std::vector<WorkspaceSessionSummary> rows;
                 for (const auto& row : json["sessions"]) {
@@ -500,7 +548,36 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
 
     bool changed = false;
     std::set<std::string> seen;
-    for (const auto& entry : std::filesystem::directory_iterator(sessions_dir, ec)) {
+    std::error_code iter_ec;
+    const std::filesystem::directory_iterator sessions_iter(sessions_dir, iter_ec);
+    if (iter_ec) {
+        // 列举失败(权限/占用/半删目录):旧缓存整份兜底返回,带诊断,
+        // 不把盘上还有的场从索引里抹掉,也不写回"空成功"。
+        index.sessions.reserve(old_rows.size());
+        for (const auto& row_pair : old_rows) {
+            const WorkspaceSessionSummary& row = row_pair.second;
+            index.sessions.push_back(row);
+            const auto prompts = old_prompts.find(row_pair.first);
+            if (prompts != old_prompts.end()) {
+                for (const auto& prompt : prompts->second) {
+                    PromptHistoryLine filled = prompt;
+                    filled.title = row.title;
+                    index.prompts.push_back(std::move(filled));
+                }
+            }
+        }
+        std::sort(index.sessions.begin(), index.sessions.end(),
+                  [](const WorkspaceSessionSummary& a, const WorkspaceSessionSummary& b) {
+                      if (a.updated_at_ms != b.updated_at_ms) {
+                          return a.updated_at_ms > b.updated_at_ms;
+                      }
+                      return a.session_id > b.session_id;
+                  });
+        index.error = "sessions 目录列举失败(" + iter_ec.message() + "): " +
+                      platform::PathToUtf8(sessions_dir) + ",以下为缓存快照";
+        return index;
+    }
+    for (const auto& entry : sessions_iter) {
         if (!entry.is_directory()) {
             continue;
         }
@@ -640,6 +717,11 @@ SessionIndexPage QueryWorkspaceSessions(const std::filesystem::path& workspaces_
         keys = ListWorkspaceKeys(workspaces_root);
     } else {
         if (query.current_workspace_key.empty() || !IsSafeSingleSegment(query.current_workspace_key)) {
+            // 空 key 不是"没有会话":当前场身份没立(读面缺 v3 分支/建场
+            // 失败),如实报障碍(R2:读取失败不混为空账)。
+            page.diagnostic = query.current_workspace_key.empty()
+                                  ? "当前会话没有 workspace 身份,本目录范围查不了"
+                                  : "workspace key 不是合法单段名: " + query.current_workspace_key;
             return page;
         }
         keys.push_back(query.current_workspace_key);
@@ -647,12 +729,17 @@ SessionIndexPage QueryWorkspaceSessions(const std::filesystem::path& workspaces_
     std::vector<WorkspaceSessionSummary> all;
     for (const std::string& key : keys) {
         // 账本制:key → 房门走 manifest 反查(目录名是门牌)。反查不到的
-        // key(房被手删)跳过,不冒充。
+        // key(房被手删)记诊断跳过,不冒充。
         const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, key);
         if (!room.has_value()) {
+            page.diagnostic += (page.diagnostic.empty() ? "" : "; ") +
+                               "账本与各房 manifest 找不到 workspace_key=" + key;
             continue;
         }
         const WorkspaceIndex index = LoadOrRebuildIndex(*room, key);
+        if (!index.error.empty()) {
+            page.diagnostic += (page.diagnostic.empty() ? "" : "; ") + index.error;
+        }
         all.reserve(all.size() + index.sessions.size());
         for (const auto& summary : index.sessions) {
             if (query.archived_only) {
