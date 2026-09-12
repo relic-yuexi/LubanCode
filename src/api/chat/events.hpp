@@ -40,7 +40,11 @@ private:
     std::map<int, ToolCall> tool_calls_;
     Usage usage_;
     bool usage_reported_ = false;  // 流里真见过 usage 对象(Token 账本单 A0)
-    bool cache_reported_ = false;  // usage 中真见过 cache token 明细字段
+    // 读取/写入明报位分开(缓存用量按 Wire 归一单 C2):字段在场才算明报,
+    // 推算值不算;chat wire 无缓存写入概念,creation 恒 false(未报)。
+    bool cache_read_reported_ = false;
+    bool cache_creation_reported_ = false;
+    std::string usage_anomaly_;  // 最后一帧解析出的矛盾账(空 = 自洽)
     std::string finish_reason_;
     std::string reasoning_delta_field_;
     bool started_ = false;

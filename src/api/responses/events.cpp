@@ -147,25 +147,61 @@ MessageDone DoneFromResponseObject(const json& response) {
         event.stop_reason = "end_turn";
     }
 
-    if (auto usage_it = response.find("usage"); usage_it != response.end() && usage_it->is_object()) {
+    if (auto usage_it = response.find("usage"); usage_it != usage_it->end() && usage_it->is_object()) {
         // completed 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0)。
         event.usage_reported = true;
-        // 统一口径(api::Usage 文件头):input_tokens 总数已含 cached_tokens,
-        // 摊开成 input=total-cached、cache_read=cached,消费端不再加两遍。
-        // responses wire 没有"缓存写入"概念,cache_creation_tokens 恒为 0。
+        // 统一口径(api::Usage 文件头,缓存用量按 Wire 归一单 C3):厂商的
+        // input_tokens(T)已含缓存读 R 与写 W,摊开成
+        //   cache_read=R=input_tokens_details.cached_tokens
+        //   cache_creation=W=cache_write_tokens(协议给了才在,2026 起官方
+        //               Responses 缓存文档有此字段;旧模型/兼容服务缺它
+        //               = 写入未知,不是"明报零")
+        //   input(内部普通输入)=T-R-W
+        // W 不再加回 T、不进命中分子;T 保持厂商原数,TotalInputTokens
+        // 恰与 T 对上。
         event.usage.output_tokens = usage_it->value("output_tokens", static_cast<std::int64_t>(0));
-        const std::int64_t input_total = usage_it->value("input_tokens", static_cast<std::int64_t>(0));
+        std::int64_t input_total = 0;
+        if (auto t = usage_it->find("input_tokens"); t != usage_it->end() && t->is_number_integer()) {
+            input_total = t->get<std::int64_t>();
+        }
         std::int64_t cached = 0;
         if (auto details_it = usage_it->find("input_tokens_details");
             details_it != usage_it->end() && details_it->is_object()) {
             if (auto cached_it = details_it->find("cached_tokens");
                 cached_it != details_it->end() && cached_it->is_number_integer()) {
                 cached = cached_it->get<std::int64_t>();
-                event.cache_reported = true;
+                event.cache_read_reported = true;
             }
         }
+        std::int64_t cache_write = 0;
+        if (auto w = usage_it->find("cache_write_tokens"); w != usage_it->end()) {
+            // 缺字段与显式零分开:在场就置写入旗标(类型错也置,矛盾另记)。
+            event.cache_creation_reported = true;
+            if (w->is_number_integer()) {
+                cache_write = w->get<std::int64_t>();
+            } else {
+                event.usage_anomaly = "usage.cache_write_tokens 类型不是整数";
+            }
+        }
+        // 自相矛盾的账(负数、R>T、R+W>T):原数照记不截零,U=T-R-W 可为
+        // 负,anomaly 点名——消费端把异常样本排除出精确比例,不掩盖。
+        if (cached < 0) {
+            event.usage_anomaly = "cached_tokens(" + std::to_string(cached) + ")为负";
+        } else if (cache_write < 0) {
+            event.usage_anomaly = "cache_write_tokens(" + std::to_string(cache_write) + ")为负";
+        } else if (input_total < 0) {
+            event.usage_anomaly = "input_tokens(" + std::to_string(input_total) + ")为负";
+        } else if (cached > input_total) {
+            event.usage_anomaly = "cached_tokens(" + std::to_string(cached) + ") > input_tokens(" +
+                                  std::to_string(input_total) + ")";
+        } else if (cached + cache_write > input_total) {
+            event.usage_anomaly = "cached(" + std::to_string(cached) + ")+write(" +
+                                  std::to_string(cache_write) + ") > input_tokens(" +
+                                  std::to_string(input_total) + ")";
+        }
         event.usage.cache_read_tokens = cached;
-        event.usage.input_tokens = input_total > cached ? input_total - cached : 0;
+        event.usage.cache_creation_tokens = cache_write;
+        event.usage.input_tokens = input_total - cached - cache_write;
         // reasoning 拆账:output_tokens_details.reasoning_tokens(已含在
         // output_tokens 总数里)。没拆账就是 0(语义见 api::Usage 注释)。
         if (auto out_details = usage_it->find("output_tokens_details");
