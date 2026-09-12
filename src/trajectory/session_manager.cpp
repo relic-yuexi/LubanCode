@@ -1985,6 +1985,82 @@ std::string SessionManager::LatestResumableSessionIdLocked() {
     return best;
 }
 
+SessionManager::ResumeSourceProbe SessionManager::ProbeResumeSource(
+    const std::string& source_session_id) {
+    // 只读预检(R3):interactive 入口在 Close 当前场之前先问这道——不过
+    // 就地返回,场不封。检查项与 ResumeAsNew 第 1 步同口径(单段名/目录/
+    // 格式探针/one_shot/活锁),但轻量:v3 源只读前两行认 runKind,不整卷
+    // 验账(七步 resume 仍全量验,这里只挡"一眼就过不了")。
+    std::lock_guard<std::mutex> lock(mutex_);
+    ResumeSourceProbe probe;
+    const auto fail = [&probe](std::string code, std::string message) {
+        probe.error_code = std::move(code);
+        probe.message = std::move(message);
+        return probe;
+    };
+    std::string source_id = source_session_id;
+    if (source_id.empty()) {
+        source_id = LatestResumableSessionIdLocked();
+        if (source_id.empty()) {
+            return fail("resume.source_not_found", "本 workspace 没有可恢复的 session");
+        }
+    }
+    if (!IsSafeSingleSegment(source_id)) {
+        return fail("resume.source_invalid_ref", "session id 须是单段名(不带路径): " + source_id);
+    }
+    const auto source_dir = SessionDirOf(source_id);
+    if (!std::filesystem::is_directory(source_dir)) {
+        return fail("resume.source_not_found", "source session 目录不存在");
+    }
+    // one_shot 两路认:先 v2 manifest,再 v3 session.started 的 runKind。
+    if (const auto manifest = ReadSessionJson(source_dir); manifest.has_value()) {
+        if (manifest->run_kind == RunKindName(RunKind::OneShot)) {
+            return fail("resume.source_not_resumable",
+                        "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+        }
+    }
+    const auto v3_probe = v3::ProbeV3SessionStream(source_dir);
+    if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
+        return fail("resume.source_format_conflict",
+                    v3_probe.detail + ";两种主账并存须人工裁决,不自动选边");
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::EmptyFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::BadFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::NotV3Schema) {
+        return fail("resume.source_format_unknown", v3_probe.detail);
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+        // 轻量读第二行(session.started)认 runKind:首行是 system。老档
+        // 没写该键 = 未知,放行走七步(未知不等于单发)。
+        std::ifstream file(v3_probe.stream, std::ios::binary);
+        std::string line;
+        std::getline(file, line);  // 首行 system
+        if (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            const auto row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+            if (!row.is_discarded() && row.is_object() &&
+                row.value("kind", std::string()) == "session.started" &&
+                row.contains("payload") && row["payload"].is_object()) {
+                const auto run_kind = row["payload"].find("runKind");
+                if (run_kind != row["payload"].end() && run_kind->is_string() &&
+                    run_kind->get<std::string>() == RunKindName(RunKind::OneShot)) {
+                    return fail("resume.source_not_resumable",
+                                "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+                }
+            }
+        }
+    }
+    // 活锁在外进程:默认拒绝(§10.4 末段)。
+    if (const auto holder = SessionLock::Inspect(source_dir); holder.has_value()) {
+        if (ProbeLockHolder(*holder) == LockHolderState::Alive) {
+            return fail("resume.source_locked", "source session 仍被别的进程持写锁");
+        }
+    }
+    return probe;
+}
+
 ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     if (boundary_in_progress_.load()) {
         ResumeOutcome busy;
@@ -2086,6 +2162,20 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         auto ledger = v3::ReadV3Ledger(v3_stream);
         if (!ledger.has_value()) {
             return fail("resume.source_corrupt", ledger.error());
+        }
+        // v3 源的 one_shot(R2 写读接通后的真闸):session.started 的
+        // runKind 是权威;老档没写该键 = 未知,放行走验卷(未知不等于单发)。
+        for (const auto& event : ledger->events) {
+            if (event.kind != v3::EventKindV3::SessionStarted) {
+                continue;
+            }
+            const auto run_kind = event.payload.find("runKind");
+            if (run_kind != event.payload.end() && run_kind->is_string() &&
+                run_kind->get<std::string>() == RunKindName(RunKind::OneShot)) {
+                return fail("resume.source_not_resumable",
+                            "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+            }
+            break;
         }
         outcome.source_verified = true;
         outcome.source_is_v3 = true;

@@ -8,6 +8,7 @@
 //   - FoldMainReplay / ExactReplayMain:writer 持柄时照读,hash 确定。
 #include <doctest/doctest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -24,6 +25,25 @@ using namespace lubancode;
 using namespace lubancode::runtime;
 
 namespace {
+
+// 摘掉/钉上格式变量(本册默认随 ctest 注入 0 走 v2;个别案子要钉默认 v3)。
+struct EnvSetter {
+    explicit EnvSetter(const char* name, const char* value) : name_(name) {
+#ifdef _WIN32
+        _putenv((std::string(name_) + "=" + value).c_str());
+#else
+        setenv(name_, value, 1);
+#endif
+    }
+    ~EnvSetter() {
+#ifdef _WIN32
+        _putenv((std::string(name_) + "=").c_str());
+#else
+        unsetenv(name_);
+#endif
+    }
+    const char* name_;
+};
 
 std::filesystem::path MakeRoot(const char* tag) {
     const std::filesystem::path root =
@@ -212,6 +232,79 @@ TEST_CASE("ResumeInteractive: 旧场封口 + 新场七步 + 跨 session command"
         }
     }
     CHECK(old_ended);
+}
+
+// Resume 接入 v3 单 R3:封场前只读预检——源不合法当场报错,当前场
+// 不封、新场不建、还能继续写。此前先 Close 再 ResumeAsNew,预检失败
+// 时当前场已封回不来。
+TEST_CASE("ResumeInteractive 预检失败保住当前场: 源不存在明拒,场照写") {
+    const auto root = MakeRoot("probe-keep");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    DriveOneTurn(*ledger);
+    const std::string current_id = ledger->session_id();
+
+    // 源目录不存在:预检明拒,当前场原样。
+    const TrajectoryResumeSummary missing =
+        ledger->ResumeInteractive("20990101-000000-NOSUCH", "resume");
+    CHECK(missing.outcome.error_code == "resume.source_not_found");
+    CHECK(ledger->session_id() == current_id);  // 没封场没换场
+    DriveOneTurn(*ledger);                      // 当前场还能写
+    CHECK(ledger->session_id() == current_id);
+}
+
+// R2+R3:one_shot 写读接通——one_shot 场的 v3 账带 runKind=one_shot,
+// 交互 resume 的预检认出明拒,当前场保住;main_session 源照常可续。
+TEST_CASE("默认 v3: one_shot 源预检明拒,普通 v3 源照常续接") {
+    EnvSetter unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = MakeRoot("oneshot-v3");
+
+    // 造两场源:一场普通、一场 one_shot(写侧把 runKind 落进 session.started)。
+    std::string normal_id;
+    std::string oneshot_id;
+    {
+        auto normal = TrajectorySessionLedger::Open(LedgerOptions(root));
+        REQUIRE(normal.has_value());
+        normal_id = normal->session_id();
+        DriveOneTurn(*normal);
+        REQUIRE(normal->CloseSession("exit").error_code.empty());
+    }
+    {
+        auto options = LedgerOptions(root);
+        options.one_shot = true;
+        auto oneshot = TrajectorySessionLedger::Open(std::move(options));
+        REQUIRE(oneshot.has_value());
+        oneshot_id = oneshot->session_id();
+        DriveOneTurn(*oneshot);
+        REQUIRE(oneshot->CloseSession("exit").error_code.empty());
+        // 账面印证:session.started 带 runKind=one_shot。
+        const auto stream = oneshot->session_dir() /
+                            (oneshot_id + ".jsonl");
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        std::getline(file, line);  // 首行 system
+        REQUIRE(std::getline(file, line));
+        const auto started = nlohmann::json::parse(line, nullptr, false);
+        REQUIRE_FALSE(started.is_discarded());
+        CHECK(started.value("kind", std::string()) == "session.started");
+        CHECK(started.at("payload").value("runKind", std::string()) == "one_shot");
+    }
+
+    // 新场续 one_shot:预检明拒,当前场保住。
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::string current_id = ledger->session_id();
+    const TrajectoryResumeSummary refused = ledger->ResumeInteractive(oneshot_id, "resume");
+    CHECK(refused.outcome.error_code == "resume.source_not_resumable");
+    CHECK(ledger->session_id() == current_id);
+
+    // 同一当前场续普通 v3 源:照常七步。
+    const TrajectoryResumeSummary resumed = ledger->ResumeInteractive(normal_id, "resume");
+    REQUIRE(resumed.outcome.error_code.empty());
+    CHECK(resumed.outcome.source_is_v3);
+    CHECK(resumed.outcome.source_session_id == normal_id);
+    CHECK(ledger->session_id() != current_id);
 }
 
 TEST_CASE("ClearSession: 八步换账后账本指新场,选段器重置") {

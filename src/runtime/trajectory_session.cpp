@@ -4040,6 +4040,16 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     request.interactive = has_active;  // 交互路:有旧场才有跨 session requested 可指
     request.user_initiated = true;
 
+    // R3:封场前先只读预检源(单段名/目录/格式/one_shot/活锁)——不过
+    // 当场报错返回,当前场不封、新场不建、不发模型请求。此前先 Close 再
+    // ResumeAsNew,源预检失败时当前场已封回不来。
+    if (const auto source_probe = manager.ProbeResumeSource(source_session_id);
+        !source_probe.ok()) {
+        summary.outcome.error_code = source_probe.error_code;
+        summary.outcome.message = source_probe.message;
+        return summary;
+    }
+
     // 旧场(若有):requested 先 durable,随后 switch_to_resume 封口
     //(§10.4/§14.1 的 clear/resume 例外:旧 main 写 requested 与 terminal)。
     if (has_active) {

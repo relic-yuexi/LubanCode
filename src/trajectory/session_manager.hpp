@@ -529,6 +529,18 @@ public:
     // Close(switch_to_resume)——本口不管封旧场。
     ResumeOutcome ResumeAsNew(const ResumeRequest& request);
 
+    // 恢复源只读预检(Resume 接入 v3 单 R3):单段名/目录/格式探针/
+    // one_shot(v2 manifest 与 v3 session.started 两路)/活锁。interactive
+    // 入口在 Close 当前场之前先调它——预检不过当场报错返回,当前场不封、
+    // 新场不建、模型请求不发。error_code 空 = 可以往下走(七步仍要验全账,
+    // 这里只挡"一眼就过不了"的)。
+    struct ResumeSourceProbe {
+        std::string error_code;
+        std::string message;
+        bool ok() const { return error_code.empty(); }
+    };
+    ResumeSourceProbe ProbeResumeSource(const std::string& source_session_id);
+
     // 本 workspace 最近一场可恢复的 session(closed/archived/incomplete,
     // 按创建时间取新);跳过本进程 active 的那场。空串 = 没有。
     std::string LatestResumableSessionId();
