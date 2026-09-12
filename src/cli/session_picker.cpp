@@ -376,7 +376,8 @@ SessionPickerFrame BuildSessionTranscriptFrame(const std::string& title_line,
     return frame;
 }
 
-SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int width) {
+SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int width,
+                                            const std::string& diagnostic) {
     SessionPickerFrame frame;
     const int usable = width > 4 ? width - 2 : 20;  // 左右各留一格,绝不贴死
     const auto& state = core.state();
@@ -414,11 +415,20 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
     // 列表区。
     const auto visible = core.VisibleRows();
     if (visible.empty()) {
-        // 两种空态:全无 / 搜空(单子:空列表、搜索无命中各有画面)。
-        // 搜索词非空且无命中 = 搜空;连数据都没有 = 全无。
+        // 三种空态:读取障碍 / 搜空 / 全无(单子:空列表、搜索无命中各
+        // 有画面;R2 再分出读取失败——不许把读不成冒充"没有会话")。
+        // 搜索词非空且无命中 = 搜空;diagnostic 非空 = 数据源有障碍;
+        // 其余 = 全无。
         const bool searched = !state.search.empty();
-        frame.lines.push_back(std::string("  ") +
-                               trf(searched ? "picker.empty.search" : "picker.empty.none", state.search));
+        std::string empty_line;
+        if (searched) {
+            empty_line = trf("picker.empty.search", state.search);
+        } else if (!diagnostic.empty()) {
+            empty_line = trf("picker.empty.error", diagnostic);
+        } else {
+            empty_line = tr("picker.empty.none");
+        }
+        frame.lines.push_back(std::string("  ") + empty_line);
         frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
     } else {
         for (const std::size_t index : visible) {
@@ -433,6 +443,9 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
             std::string line = prefix + ago + "    " + label;
             if (entry.damaged) {
                 line += "  [" + std::string(tr("picker.damaged")) + "]";
+            }
+            if (entry.run_kind_unknown) {
+                line += "  [" + std::string(tr("picker.kind_unknown")) + "]";
             }
             // 舒展行(Ctrl+O):选中行与普通行都多一行 cwd(选中行多了才看
             // 得出"现在指着哪间房");展开详情(Ctrl+E)另算,见下。

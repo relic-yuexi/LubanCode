@@ -4040,6 +4040,16 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     request.interactive = has_active;  // 交互路:有旧场才有跨 session requested 可指
     request.user_initiated = true;
 
+    // R3:封场前先只读预检源(单段名/目录/格式/one_shot/活锁)——不过
+    // 当场报错返回,当前场不封、新场不建、不发模型请求。此前先 Close 再
+    // ResumeAsNew,源预检失败时当前场已封回不来。
+    if (const auto source_probe = manager.ProbeResumeSource(source_session_id);
+        !source_probe.ok()) {
+        summary.outcome.error_code = source_probe.error_code;
+        summary.outcome.message = source_probe.message;
+        return summary;
+    }
+
     // 旧场(若有):requested 先 durable,随后 switch_to_resume 封口
     //(§10.4/§14.1 的 clear/resume 例外:旧 main 写 requested 与 terminal)。
     if (has_active) {
@@ -4762,10 +4772,19 @@ std::filesystem::path TrajectorySessionLedger::session_dir() const {
 }
 
 std::string TrajectorySessionLedger::workspace_key() const {
-    return impl_ != nullptr && impl_->active != nullptr &&
-                   impl_->active->main.has_value()
-               ? impl_->active->main->base_scope().workspace_key
-               : std::string();
+    // v3 场 main(v2 recorder)恒空、身份在 v3_main 与内存 manifest
+    //(ActiveSession 头注:认 active 一律先看 v3_main)。这条只认 main 的
+    // 读面曾让默认 v3 场恒拿空 key——/resume 的 Cwd 范围查询见空 key 直接
+    // 空手,列表 0/0,盘上档案全在也列不出(Resume 接入 v3 单 R1 根因)。
+    if (impl_ != nullptr && impl_->active != nullptr) {
+        if (impl_->active->is_v3()) {
+            return impl_->active->manifest.workspace_key;
+        }
+        if (impl_->active->main.has_value()) {
+            return impl_->active->main->base_scope().workspace_key;
+        }
+    }
+    return std::string();
 }
 
 // ---------------------------------------------------------------------------

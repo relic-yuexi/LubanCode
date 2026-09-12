@@ -152,6 +152,10 @@ TEST_CASE("默认-v3 冒烟: 未设变量时 ledger 开场即 v3,一轮 turn 账
     CHECK(head[0]["message"].value("role", std::string()) == "system");
     CHECK(head[1].value("type", std::string()) == "event");
     CHECK(head[1].value("kind", std::string()) == "session.started");
+    // 会话级事实(R2):launchCwd/runKind 随 session.started 落账,列表
+    // 投影的权威来源。
+    CHECK(head[1]["payload"].value("launchCwd", std::string()) == "D:/tmp/ws");
+    CHECK(head[1]["payload"].value("runKind", std::string()) == "main_session");
 
     // 一轮 turn:user 入账入链、prepared 落账、assistant 定稿。
     {
@@ -221,4 +225,42 @@ TEST_CASE("默认-v3 冒烟: SessionManager::LaunchSession 同默认开 v3 场")
         session_dir / platform::Utf8ToPath(session_id + ".jsonl")));
     CHECK_FALSE(std::filesystem::exists(session_dir / "session.json"));
     CHECK_FALSE(std::filesystem::exists(session_dir / "main.jsonl"));
+}
+
+// Resume 接入 v3 单 R1 回归钉:v3 场的 workspace_key() 曾只认 v2 main
+//(恒空),/resume 的 Cwd 范围拿空 key 直接空手——盘上档案全在也 0/0。
+// 本案钉三层:key 非空且等于身份钥匙;封口后重开(退场再进的截图场景)
+// Cwd 查询列得上一场;All 范围同账。
+TEST_CASE("默认-v3 冒烟: v3 场 workspace_key 非空,Cwd 列表列得上一场") {
+    EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    const auto root = FreshRoot("workspace-key-cwd");
+    const auto identity = lubancode::workspace::MakeFallbackIdentity(root / "ws");
+    const std::string first_id = [&] {
+        auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+        REQUIRE(ledger.has_value());
+        // v3 场读面身份:不再只认 v2 main 的 scope。
+        CHECK_FALSE(ledger->workspace_key().empty());
+        CHECK(ledger->workspace_key() == identity.workspace_key);
+        const std::string id = ledger->session_id();
+        REQUIRE(ledger->CloseSession("exit").error_code.empty());
+        return id;
+    }();
+
+    // 截图场景:退出重进,同 workspace 裸开新场,/resume 默认 Cwd 范围。
+    auto second = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(second.has_value());
+    trajectory::SessionIndexQuery cwd_query;  // all_workspaces=false:填 workspace_key()
+    const auto cwd_page = second->ListWorkspaceSessions(cwd_query);
+    CHECK(cwd_page.total >= 1);
+    bool saw_first = false;
+    for (const auto& entry : cwd_page.entries) {
+        saw_first = saw_first || entry.session_id == first_id;
+    }
+    CHECK(saw_first);
+
+    // All 范围同一份账(不走 workspace_key,历来自成;对齐用)。
+    trajectory::SessionIndexQuery all_query;
+    all_query.all_workspaces = true;
+    const auto all_page = second->ListWorkspaceSessions(all_query);
+    CHECK(all_page.total >= cwd_page.total);
 }

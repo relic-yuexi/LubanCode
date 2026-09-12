@@ -23,6 +23,7 @@
 #include "trajectory/replay.hpp"
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
+#include "trajectory/v3/session_switch.hpp"  // ProbeV3SessionStream(R2 格式探针)
 
 namespace platform = lubancode::platform;
 using namespace lubancode::trajectory;
@@ -226,6 +227,72 @@ TEST_CASE("v3 坏账: 验卷不过明拒 resume.source_corrupt,不开新场") {
     CHECK(outcome.error_code == "resume.source_corrupt");
     CHECK_FALSE(outcome.new_session_running);
     CHECK(manager.active() == nullptr);
+}
+
+// R2:格式探针——"认不出"拆成可诊断状态,不混作"没档";ResumeAsNew 对
+// 两账并存与首行不合 schema 明确拒绝,不开新场。
+TEST_CASE("格式探针: 双账冲突/坏首行/异版本各有稳定状态,resume 明拒") {
+    Scaffold scaffold("probe");
+    const std::string conflict_id = "20260912-170000-CONFLI";
+    const std::filesystem::path conflict_dir = scaffold.sessions_dir / platform::Utf8ToPath(conflict_id);
+    std::error_code ec;
+    std::filesystem::create_directories(conflict_dir, ec);
+    REQUIRE_FALSE(ec);
+    {
+        std::ofstream main_file(conflict_dir / "main.jsonl", std::ios::binary);
+        main_file << "{}\n";
+        std::error_code copy_ec;
+        std::filesystem::copy_file(Fixture("startup.jsonl"),
+                                   conflict_dir / platform::Utf8ToPath(conflict_id + ".jsonl"),
+                                   std::filesystem::copy_options::overwrite_existing, copy_ec);
+        REQUIRE_FALSE(copy_ec);
+    }
+    const std::string bad_id = "20260912-170002-BADFIR";
+    const std::filesystem::path bad_dir = scaffold.sessions_dir / platform::Utf8ToPath(bad_id);
+    std::filesystem::create_directories(bad_dir, ec);
+    {
+        std::ofstream bad_file(bad_dir / platform::Utf8ToPath(bad_id + ".jsonl"), std::ios::binary);
+        bad_file << "not-json-at-all\n";
+    }
+    const std::string old_id = "20260912-170003-OLDVER";
+    const std::filesystem::path old_dir = scaffold.sessions_dir / platform::Utf8ToPath(old_id);
+    std::filesystem::create_directories(old_dir, ec);
+    {
+        std::ofstream old_file(old_dir / platform::Utf8ToPath(old_id + ".jsonl"), std::ios::binary);
+        old_file << R"({"type":"message","schemaVersion":2,"sessionId":")" << old_id
+                 << R"(","runId":"main-0001","seq":1,"messageId":"msg-000001","message":{"role":"system","content":""}})"
+                 << "\n";
+    }
+
+    // 探针状态:冲突/坏首行/异版本各有名分,诊断文本非空。
+    auto probe = v3::ProbeV3SessionStream(conflict_dir);
+    CHECK(probe.status == v3::V3StreamProbe::Status::FormatConflict);
+    CHECK_FALSE(probe.detail.empty());
+    probe = v3::ProbeV3SessionStream(bad_dir);
+    CHECK(probe.status == v3::V3StreamProbe::Status::BadFirstLine);
+    probe = v3::ProbeV3SessionStream(old_dir);
+    CHECK(probe.status == v3::V3StreamProbe::Status::NotV3Schema);
+    // 正主:v2 布局与 v3 流照旧认得。
+    probe = v3::ProbeV3SessionStream(scaffold.sessions_dir / platform::Utf8ToPath(scaffold.v2_id));
+    CHECK(probe.status == v3::V3StreamProbe::Status::V2Layout);
+    const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "startup.jsonl");
+    probe = v3::ProbeV3SessionStream(scaffold.sessions_dir / platform::Utf8ToPath(v3_id));
+    CHECK(probe.status == v3::V3StreamProbe::Status::V3Stream);
+
+    // resume 分派:明确拒绝且不开新场;目录原样不动。
+    const auto before_bytes = std::filesystem::file_size(conflict_dir / "main.jsonl");
+    SessionManager manager(Opts(scaffold.root));
+    ResumeRequest request;
+    request.source_session_id = conflict_id;
+    auto outcome = manager.ResumeAsNew(request);
+    CHECK(outcome.error_code == "resume.source_format_conflict");
+    CHECK_FALSE(outcome.new_session_running);
+    CHECK(manager.active() == nullptr);
+    request.source_session_id = bad_id;
+    outcome = manager.ResumeAsNew(request);
+    CHECK(outcome.error_code == "resume.source_format_unknown");
+    CHECK(manager.active() == nullptr);
+    CHECK(std::filesystem::file_size(conflict_dir / "main.jsonl") == before_bytes);
 }
 
 TEST_CASE("v2 源行为不变: 照旧 FoldStreamReplay,不标 v3") {

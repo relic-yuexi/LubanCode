@@ -793,9 +793,14 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     // 完整拼装结果;settingsVersion 从 1 起,后续切换逐次 +1。开张失败按
     // P0-C 同款纪律清 0 字节残留(先放句柄,再按所有权凭据删目标名空文件)。
     nlohmann::json system_extra = nlohmann::json::object({{"settingsVersion", 1}});
+    v3::V3WriterOptions writer_options;
+    // 会话级事实随 session.started 落账(R2):列表投影的 cwd/run_kind
+    // 以此为权威来源,v2 manifest 不再是唯一出处。
+    writer_options.launch_cwd = manifest.launch_cwd;
+    writer_options.run_kind = manifest.run_kind;
     auto writer = v3::V3Writer::Start(directory->v3_stream_path(), manifest.session_id,
                                       manifest.main_run_id, options_.v3_system_content,
-                                      std::move(system_extra), v3::V3WriterOptions{});
+                                      std::move(system_extra), std::move(writer_options));
     if (!writer.has_value()) {
         { auto drop_lock = std::move(lock_file); }
         (void)DiscardUncommittedStream(directory->v3_stream_path());
@@ -1980,6 +1985,88 @@ std::string SessionManager::LatestResumableSessionIdLocked() {
     return best;
 }
 
+SessionManager::ResumeSourceProbe SessionManager::ProbeResumeSource(
+    const std::string& source_session_id) {
+    // 只读预检(R3):interactive 入口在 Close 当前场之前先问这道——不过
+    // 就地返回,场不封。检查项与 ResumeAsNew 第 1 步同口径(单段名/目录/
+    // 格式探针/one_shot/活锁),但轻量:v3 源只读前两行认 runKind,不整卷
+    // 验账(七步 resume 仍全量验,这里只挡"一眼就过不了")。
+    std::lock_guard<std::mutex> lock(mutex_);
+    ResumeSourceProbe probe;
+    const auto fail = [&probe](std::string code, std::string message) {
+        probe.error_code = std::move(code);
+        probe.message = std::move(message);
+        return probe;
+    };
+    std::string source_id = source_session_id;
+    if (source_id.empty()) {
+        source_id = LatestResumableSessionIdLocked();
+        if (source_id.empty()) {
+            return fail("resume.source_not_found", "本 workspace 没有可恢复的 session");
+        }
+    }
+    if (!IsSafeSingleSegment(source_id)) {
+        return fail("resume.source_invalid_ref", "session id 须是单段名(不带路径): " + source_id);
+    }
+    const auto source_dir = SessionDirOf(source_id);
+    if (!std::filesystem::is_directory(source_dir)) {
+        return fail("resume.source_not_found", "source session 目录不存在");
+    }
+    // one_shot 两路认:先 v2 manifest,再 v3 session.started 的 runKind。
+    if (const auto manifest = ReadSessionJson(source_dir); manifest.has_value()) {
+        if (manifest->run_kind == RunKindName(RunKind::OneShot)) {
+            return fail("resume.source_not_resumable",
+                        "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+        }
+    }
+    const auto v3_probe = v3::ProbeV3SessionStream(source_dir);
+    if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
+        return fail("resume.source_format_conflict",
+                    v3_probe.detail + ";两种主账并存须人工裁决,不自动选边");
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::EmptyFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::BadFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::NotV3Schema) {
+        return fail("resume.source_format_unknown", v3_probe.detail);
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+        // 轻量读第二行(session.started)认 runKind:首行是 system。老档
+        // 没写该键 = 未知,放行走七步(未知不等于单发)。
+        std::ifstream file(v3_probe.stream, std::ios::binary);
+        std::string line;
+        std::getline(file, line);  // 首行 system
+        if (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            const auto row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+            if (!row.is_discarded() && row.is_object() &&
+                row.value("kind", std::string()) == "session.started" &&
+                row.contains("payload") && row["payload"].is_object()) {
+                const auto run_kind = row["payload"].find("runKind");
+                if (run_kind != row["payload"].end() && run_kind->is_string() &&
+                    run_kind->get<std::string>() == RunKindName(RunKind::OneShot)) {
+                    return fail("resume.source_not_resumable",
+                                "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+                }
+            }
+        }
+    }
+    // 活锁在外进程:默认拒绝(§10.4 末段)。本 manager 自己的 active 场
+    // 例外——交互 /resume 的 source 就是当前场(马上要 Close 它),锁在
+    // 本进程手里不算外部锁;ResumeAsNew 的七步在 Close 之后跑,不受影响。
+    const bool source_is_own_active =
+        active_.has_value() && active_->session_id() == source_id;
+    if (!source_is_own_active) {
+        if (const auto holder = SessionLock::Inspect(source_dir); holder.has_value()) {
+            if (ProbeLockHolder(*holder) == LockHolderState::Alive) {
+                return fail("resume.source_locked", "source session 仍被别的进程持写锁");
+            }
+        }
+    }
+    return probe;
+}
+
 ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     if (boundary_in_progress_.load()) {
         ResumeOutcome busy;
@@ -2058,19 +2145,47 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     // <id>.jsonl 首行 schemaVersion==3 即 v3:ReadV3Ledger 验卷 + 沿源链
     // 折算(FoldV3ResumeChain,D2)。悬空工具三道账与 checkpoint 是 v2
     // 折叠的概念,v3 源不伪造(执行状态恢复走 v3::ProjectResume 的后续棒)。
+    // 认不出的目录(两账并存/首行坏/异版本)各自报状态,不混作"没档"
+    //(R2 与旧设计清理单 T00 共用的读面合同)。
     std::string source_last_event_id;
     std::string source_run_id;
     std::uint64_t source_seq = 0;
     V3ResumeFold chain_fold;       // v3 源的链折算(第 6.5 步导入新场用)
     bool has_chain_fold = false;
-    if (const auto v3_stream = v3::FindV3SessionStream(source_dir); v3_stream.has_value()) {
-        auto ledger = v3::ReadV3Ledger(*v3_stream);
+    const auto v3_probe = v3::ProbeV3SessionStream(source_dir);
+    if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
+        return fail("resume.source_format_conflict",
+                    v3_probe.detail + ";两种主账并存须人工裁决,不自动选边");
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::EmptyFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::BadFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::NotV3Schema) {
+        return fail("resume.source_format_unknown",
+                    v3_probe.detail + ";目录无 main.jsonl,按 v3 主账认但首行不合 schema");
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+        const std::filesystem::path& v3_stream = v3_probe.stream;
+        auto ledger = v3::ReadV3Ledger(v3_stream);
         if (!ledger.has_value()) {
             return fail("resume.source_corrupt", ledger.error());
         }
+        // v3 源的 one_shot(R2 写读接通后的真闸):session.started 的
+        // runKind 是权威;老档没写该键 = 未知,放行走验卷(未知不等于单发)。
+        for (const auto& event : ledger->events) {
+            if (event.kind != v3::EventKindV3::SessionStarted) {
+                continue;
+            }
+            const auto run_kind = event.payload.find("runKind");
+            if (run_kind != event.payload.end() && run_kind->is_string() &&
+                run_kind->get<std::string>() == RunKindName(RunKind::OneShot)) {
+                return fail("resume.source_not_resumable",
+                            "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+            }
+            break;
+        }
         outcome.source_verified = true;
         outcome.source_is_v3 = true;
-        outcome.source_v3_stream = *v3_stream;
+        outcome.source_v3_stream = v3_stream;
         outcome.source_event_count = ledger->lines;
         source_run_id = ledger->run_id;
         source_seq = ledger->lines;
@@ -2089,7 +2204,7 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         // 防环、深度护栏。compact 内部问答从未入链,天然排除;被摘要替代
         // 的原文不回潮(各段取各自 ModelContext 投影)。链有缺口时精确
         // 恢复拒绝,不缺斤短两地续。
-        auto folded = FoldV3ResumeChain(*ledger, *v3_stream);
+        auto folded = FoldV3ResumeChain(*ledger, v3_stream);
         if (!folded.has_value()) {
             return fail(folded.error().code == "chain" ? "resume.source_chain_broken"
                                                        : "resume.source_corrupt",

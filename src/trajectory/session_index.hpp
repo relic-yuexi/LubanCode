@@ -35,6 +35,10 @@ struct WorkspaceSessionSummary {
     // 空/旧索引缺键按 main_session 读。/sessions 标注单发场、resume 选择器
     // 排除单发场都从这认。
     std::string run_kind = "main_session";
+    // run_kind 是否真从账上读到(Resume 接入 v3 单 R2):v3 老档的
+    // session.started 不写 runKind,读作"未知"——不暗填 main_session,
+    // 展示层标"(种类未知)",排除单发场时不排未知(七步 resume 再验)。
+    bool run_kind_unknown = false;
     std::string title;               // 最后一条 control.title.changed(可空)
     std::string first_user_text;     // 首条 input.received 的首段文本(可空)
     std::string cwd;                 // 最后一条 control.cwd.changed,空回落 launch_cwd
@@ -66,6 +70,10 @@ struct SessionIndexQuery {
 struct SessionIndexPage {
     std::vector<WorkspaceSessionSummary> entries;  // 新→旧
     std::size_t total = 0;                         // 过滤后总条数(截断前)
+    // 查询侧诊断(Resume 接入 v3 单 R2):非空 = 这页不是"真空",是
+    // key 缺失/房门反查失败/目录列举失败等读取障碍。展示层据此报
+    // "读取失败",不许混作"没有会话"。
+    std::string diagnostic;
 };
 
 // 查询口(只读 + 惰性重建索引)。workspaces_root 不存在给空页,不冒充。

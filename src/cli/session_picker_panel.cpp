@@ -170,7 +170,7 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         // 浮层开着画转录帧;关着画台账帧。转录按需取(选中 id 变了才读)。
         const SessionPickerFrame frame = [&]() -> SessionPickerFrame {
             if (!core.state().transcript_open) {
-                return BuildSessionPickerFrame(core, width);
+                return BuildSessionPickerFrame(core, width, feed.diagnostic);
             }
             const std::string id = selected_id_now();
             const int viewport_height =

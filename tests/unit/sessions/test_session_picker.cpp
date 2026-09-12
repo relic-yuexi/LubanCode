@@ -305,6 +305,40 @@ TEST_CASE("渲染帧: 空列表与搜索无命中各有画面") {
     CHECK(no_match_hint);
 }
 
+// Resume 接入 v3 单 R2:读取障碍的空列表报"读不成",不冒充"没有会话";
+// v3 老档 run_kind 未知行尾标"种类未知"。
+TEST_CASE("渲染帧: 诊断非空的空列表报读取失败;种类未知行有标注") {
+    SessionPickerCore broken(4);
+    broken.SetEntries({});
+    auto frame = BuildSessionPickerFrame(broken, 80, "sessions 目录列举失败");
+    bool error_hint = false;
+    bool false_empty = false;
+    for (const auto& line : frame.lines) {
+        if (line.find("会话列表读不成") != std::string::npos) {
+            error_hint = true;
+        }
+        if (line.find("还没有会话存档") != std::string::npos) {
+            false_empty = true;
+        }
+    }
+    CHECK(error_hint);
+    CHECK_FALSE(false_empty);  // 读取失败不许再顶"还没有会话"的帽子
+
+    // 有诊断但列表非空:行照画,诊断只在空态出现(有货时障碍由命令层报)。
+    SessionPickerCore partial(4);
+    partial.SetEntries({Entry("a", "", "首句", "c")});
+    frame = BuildSessionPickerFrame(partial, 80, "部分房反查失败");
+    CHECK(frame.lines[4].find("首句") != std::string::npos);
+
+    // v3 老档:run_kind 账上没写,行尾标"种类未知"。
+    SessionPickerEntry unknown = Entry("old", "", "老档首句", "c");
+    unknown.run_kind_unknown = true;
+    SessionPickerCore with_unknown(4);
+    with_unknown.SetEntries({unknown});
+    frame = BuildSessionPickerFrame(with_unknown, 80);
+    CHECK(frame.lines[4].find("种类未知") != std::string::npos);
+}
+
 TEST_CASE("相对时间: 分钟/小时/天分档,未来时间按刚刚") {
     const long long now = 1000000;
     CHECK(FormatSessionAgo(now, now) == "just now");

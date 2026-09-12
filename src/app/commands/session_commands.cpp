@@ -923,6 +923,10 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
         query.limit = 0;
         const auto page = ledger->ListWorkspaceSessions(query);
         if (page.entries.empty()) {
+            if (!page.diagnostic.empty()) {
+                TermOut() << trf("cmd.sessions.query_failed", page.diagnostic) << "\n";
+                return;
+            }
             TermOut() << tr("cmd.sessions.archived_none") << "\n";
             return;
         }
@@ -950,12 +954,21 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
     query.limit = 20;
     const auto page = ledger->ListWorkspaceSessions(query);
     if (page.entries.empty()) {
+        // 读取失败不冒充"没有会话"(R2):diagnostic 非空先报障碍。
+        if (!page.diagnostic.empty()) {
+            TermOut() << trf("cmd.sessions.query_failed", page.diagnostic) << "\n";
+            return;
+        }
         if (all) {
             TermOut() << trf("cmd.sessions.none_all", "workspaces") << "\n";
         } else {
             TermOut() << tr("cmd.sessions.none_here") << "\n";
         }
         return;
+    }
+    if (!page.diagnostic.empty()) {
+        // 有货也有障碍:报在表头前,列表照给(能读到的部分)。
+        TermOut() << trf("cmd.sessions.query_failed", page.diagnostic) << "\n";
     }
     TermOut() << trf("cmd.sessions.header", page.entries.size(),
                       all ? tr("cmd.sessions.scope_all") : tr("cmd.sessions.scope_here"))
@@ -972,9 +985,12 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
                                          : lubancode::tools::TruncateUtf8Chars(label, 40))
                   << "\n";
         // 单发轨迹断档单:one_shot 场照列照标——审计可读,单发语义不续
-        //(编号仍可作 /resume 的指认,七步里明拒并说原因)。
+        //(编号仍可作 /resume 的指认,七步里明拒并说原因)。v3 老档没写
+        // runKind 的标"种类未知",不暗当可续(R2)。
         if (entry.run_kind == "one_shot") {
             TermOut() << tr("cmd.sessions.oneshot_line") << "\n";
+        } else if (entry.run_kind_unknown) {
+            TermOut() << tr("cmd.sessions.kind_unknown") << "\n";
         }
         if (all) {
             TermOut() << trf("cmd.sessions.dir_line",
@@ -1076,15 +1092,25 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
 
     // 打开时查一回(本 workspace 与全部都空才说"没什么可恢复")。单发轨迹
     // 断档单:选择器排除 one_shot 场——单发语义不续,面板里不摆续不了的场。
+    // 读取失败(diagnostic 非空)如实报障碍,不冒充"没有会话"(R2)。
     lubancode::trajectory::SessionIndexQuery query;
     query.limit = 0;  // 面板自己管视口,数据一次给全
     query.exclude_one_shot = true;
-    if (ledger->ListWorkspaceSessions(query).total == 0) {
+    const auto cwd_first = ledger->ListWorkspaceSessions(query);
+    if (cwd_first.total == 0) {
         lubancode::trajectory::SessionIndexQuery all_query;
         all_query.all_workspaces = true;
         all_query.limit = 0;
         all_query.exclude_one_shot = true;
-        if (ledger->ListWorkspaceSessions(all_query).total == 0) {
+        const auto all_first = ledger->ListWorkspaceSessions(all_query);
+        if (all_first.total == 0) {
+            if (!cwd_first.diagnostic.empty() || !all_first.diagnostic.empty()) {
+                TermOut() << trf("cmd.resume.query_failed",
+                                 !cwd_first.diagnostic.empty() ? cwd_first.diagnostic
+                                                               : all_first.diagnostic)
+                          << "\n";
+                return std::nullopt;
+            }
             TermOut() << tr("cmd.resume.none") << "\n";
             return std::nullopt;
         }
@@ -1117,6 +1143,7 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
             row.created_ago = lubancode::cli::FormatSessionAgo(
                 now, SessionTsToEpoch(lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms)));
             row.damaged = entry.damaged;
+            row.run_kind_unknown = entry.run_kind_unknown;
             row.created_at = lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms);
             row.updated_at = lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.updated_at_ms);
             row.model = entry.model;
@@ -1125,6 +1152,7 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
         }
         feed.total = page.entries.size();
         feed.now_epoch = now;
+        feed.diagnostic = page.diagnostic;  // 空态区分"读取失败"与"没有会话"
         // Ctrl+T 转录浮层:按需读盘(选中 id 变了面板才回调;P3 第二棒起
         // 翻页按 seq 游标补页,v3 场不反复全量重读)。
         lubancode::cli::SessionTranscriptProvider transcript =

@@ -42,31 +42,83 @@ std::optional<nlohmann::json> ReadV3FirstLine(const std::filesystem::path& strea
     return json;
 }
 
-std::optional<std::filesystem::path> FindV3SessionStream(const std::filesystem::path& session_dir) {
+V3StreamProbe ProbeV3SessionStream(const std::filesystem::path& session_dir) {
+    V3StreamProbe probe;
+    const auto set_status = [&probe](V3StreamProbe::Status status, std::string detail) {
+        probe.status = status;
+        probe.detail = std::move(detail);
+        return probe;
+    };
     std::error_code ec;
-    if (!std::filesystem::is_directory(session_dir, ec)) {
-        return std::nullopt;
+    if (!std::filesystem::is_directory(session_dir, ec) || ec) {
+        return set_status(V3StreamProbe::Status::NotSessionDir,
+                          "session 目录不存在: " + platform::PathToUtf8(session_dir));
     }
-    // main.jsonl 在 = v2 布局:两回路互斥,不在此处分派(接线点 1 开关
-    // 管写侧二选一,读侧只认既有格式)。
-    if (std::filesystem::exists(session_dir / "main.jsonl", ec)) {
-        return std::nullopt;
-    }
+    std::error_code main_ec;
+    const bool has_main = std::filesystem::exists(session_dir / "main.jsonl", main_ec);
     const std::string id = platform::PathToUtf8(session_dir.filename());
+    const std::filesystem::path stream =
+        id.empty() ? std::filesystem::path() : session_dir / platform::Utf8ToPath(id + ".jsonl");
+    std::error_code v3_ec;
+    const bool has_v3 = !id.empty() && std::filesystem::exists(stream, v3_ec);
+    // main.jsonl 在 = v2 布局:两回路互斥,不在此处分派(接线点 1 开关
+    // 管写侧二选一,读侧只认既有格式)。并存 = 两种主账打架,如实报冲突。
+    if (has_main && has_v3) {
+        return set_status(V3StreamProbe::Status::FormatConflict,
+                          "main.jsonl 与 <id>.jsonl 并存(两种主账打架): " +
+                              platform::PathToUtf8(session_dir));
+    }
+    if (has_main) {
+        return set_status(V3StreamProbe::Status::V2Layout,
+                          "v2 布局(main.jsonl): " + platform::PathToUtf8(session_dir));
+    }
     if (id.empty()) {
-        return std::nullopt;
+        return set_status(V3StreamProbe::Status::NotSessionDir,
+                          "session 目录名取不出单段 id: " + platform::PathToUtf8(session_dir));
     }
-    const std::filesystem::path stream = session_dir / platform::Utf8ToPath(id + ".jsonl");
-    auto first = ReadV3FirstLine(stream);
-    if (!first.has_value()) {
-        return std::nullopt;
+    if (!has_v3) {
+        return set_status(V3StreamProbe::Status::StreamMissing,
+                          "无 main.jsonl 也无 <id>.jsonl: " + platform::PathToUtf8(session_dir));
     }
-    const auto version = first->find("schemaVersion");
-    if (version == first->end() || !version->is_number_integer() ||
+    // <id>.jsonl 在:读首行定 schema。空文件/打不开/坏 JSON/异版本各自
+    // 报状态,不混作"没有档"。
+    std::ifstream file(stream, std::ios::binary);
+    if (!file.is_open()) {
+        return set_status(V3StreamProbe::Status::EmptyFirstLine,
+                          "<id>.jsonl 打不开: " + platform::PathToUtf8(stream));
+    }
+    std::string line;
+    if (!std::getline(file, line)) {
+        return set_status(V3StreamProbe::Status::EmptyFirstLine,
+                          "<id>.jsonl 首行为空: " + platform::PathToUtf8(stream));
+    }
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+    const nlohmann::json json = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (json.is_discarded() || !json.is_object()) {
+        return set_status(V3StreamProbe::Status::BadFirstLine,
+                          "<id>.jsonl 首行不是 JSON object: " + platform::PathToUtf8(stream));
+    }
+    const auto version = json.find("schemaVersion");
+    if (version == json.end() || !version->is_number_integer() ||
         version->get<int>() != kSchemaVersion) {
+        return set_status(V3StreamProbe::Status::NotV3Schema,
+                          "<id>.jsonl 首行 schemaVersion != " + std::to_string(kSchemaVersion) +
+                              ": " + platform::PathToUtf8(stream));
+    }
+    probe.status = V3StreamProbe::Status::V3Stream;
+    probe.stream = stream;
+    probe.detail = platform::PathToUtf8(stream);
+    return probe;
+}
+
+std::optional<std::filesystem::path> FindV3SessionStream(const std::filesystem::path& session_dir) {
+    const V3StreamProbe probe = ProbeV3SessionStream(session_dir);
+    if (probe.status != V3StreamProbe::Status::V3Stream) {
         return std::nullopt;
     }
-    return stream;
+    return probe.stream;
 }
 
 std::optional<std::int64_t> ParseV3TimestampMs(const std::string& iso) {

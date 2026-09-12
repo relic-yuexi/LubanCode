@@ -31,6 +31,9 @@ struct SessionPickerEntry {
     std::string created_ago;     // 同上(排序为 Created 时用)
     bool damaged = false;        // 坏档:行尾标 damaged,照样能选(Enter 后
                                  // 由 resume 路报"认不得格式",不在这拦)
+    // run_kind 账上没写(v3 老档,session.started 缺 runKind):行尾标
+    // "(种类未知)",不暗当 main_session(R2)。
+    bool run_kind_unknown = false;
     // Ctrl+E 展开详情(接线层从 SessionSummary 直转,不用额外读盘):
     // created/updated 用存档侧稳定串,模型名原样;空串由渲染层回退占位。
     std::string created_at;      // "yyyy-mm-dd HH:MM:SS"
@@ -157,7 +160,10 @@ struct SessionPickerFrame {
     static constexpr std::size_t kNoMatch = static_cast<std::size_t>(-1);
 };
 
-SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int width);
+// diagnostic 非空 = 数据源读取有障碍(空列表不是"真空"):空态画面报
+// 读取失败而不是"还没有会话"(Resume 接入 v3 单 R2)。
+SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int width,
+                                            const std::string& diagnostic = std::string());
 
 // 转录浮层一帧(Ctrl+T)。excerpt_lines 由接线层按需读档拼好(大文件取
 // 头尾若干行);这里只排版:标题行 + 内容行 + 底栏。滚动归接线层
