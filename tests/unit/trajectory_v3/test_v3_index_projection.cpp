@@ -139,7 +139,8 @@ std::string PlantWriterSession(const std::filesystem::path& sessions_dir, const 
     if (title_event) {
         v3::EventDraft applied;
         applied.kind = v3::EventKindV3::SessionTitleApplied;
-        applied.status = v3::OpStatus::Done;  // §2.2 映射必带,免成验卷拒收的样本
+        // 事实提交族不带 status(校验按 RequiredStatusForKind 穷举表,此 kind
+        // 不在表里,带 status 会被"不携带"分支拒)。
         applied.title_generation_id = "titlegen-1";
         applied.payload = nlohmann::json{{"title", "正式标题一"}};
         REQUIRE(writer->AppendEvent(std::move(applied), v3::Durability::ProcessCrash).status ==

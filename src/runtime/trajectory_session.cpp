@@ -4941,7 +4941,9 @@ void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
         v3::EventDraft applied;
         applied.kind = v3::EventKindV3::SessionTitleApplied;
-        applied.status = v3::OpStatus::Done;  // §2.2:.applied 后缀的固定映射
+        // 事实提交族(同 state.goal.applied):RequiredStatusForKind 查表无
+        // 此 kind,不带 status 才过校验——§2.2 的 .applied→done 是文档语义,
+        // 校验按穷举表走,带 status 反被"不携带"分支拒。
         applied.title_generation_id = "title-manual-" + std::to_string(++command_counter_);
         applied.payload = nlohmann::json{{"title", title}, {"source", "manual"}};
         if (!old_title.empty()) {
