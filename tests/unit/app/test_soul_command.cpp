@@ -15,6 +15,7 @@
 #include <system_error>
 
 #include "app/commands/prompt_commands.hpp"
+#include "config/config.hpp"  // HomeLubancodeDir:命令层读魂文件的同一只口
 #include "config/prompt_files.hpp"
 #include "runtime/session_soul.hpp"
 
