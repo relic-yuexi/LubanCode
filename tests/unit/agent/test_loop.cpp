@@ -2686,7 +2686,7 @@ TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预�
     // 触发路径的讲究:v2 旧路的保命索先把单条结果裁进窗口 25% 帽,单枚
     // 巨果永远到不了应急线(单结果 ≤ W/4,应急要 ~7W/8)——真机应急都是
     // 多轮历史累积顶到窗口。这里用 40k 小窗 × 四枚 9k token 结果累积复刻:
-    // 第 5 枚请求 input ≈ 36.8k + 策略预留 8k 超窗 → 应急 2.5k 放行;
+    // 第 5 枚请求 input ≈ 36.8k + 策略预留 8192 超窗 → 应急 2.5k 放行;
     // 各枚结果 9k ≤ 保命索帽(40k×25% = 10k),不触发暗裁。
     FakeBackend backend;  // 不开 serialize_adapter_input:v2 旧路的预检/应急分支
     auto tool_call_script = [](const std::string& call_id) {
@@ -2703,7 +2703,7 @@ TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预�
     registry.Register(std::make_unique<FakeTool>("big_tool",
                                                  tools::Tool::Result{std::string(36000, 'x'), false},
                                                  /*needs_confirm=*/false));
-    // 窗口 40k:预留帽 = clamp(40k/8, 8k, 32k) = 8k;声明 80k(ModelCatalog
+    // 窗口 40k:预留帽 = clamp(40k/8, 8192, 32768) = 8192;声明 80k(ModelCatalog
     // 源,吃帽)。应急 = EmergencyOutputReserveTokens(40k) = clamp(2.5k,
     // 2k, 8k) = 2.5k。声明 80k 远超小窗,前几枚请求会走实发优雅降级
     //(另账,不动判定预留)——正要断言"降级不改 final、应急才改"。
@@ -2728,14 +2728,14 @@ TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预�
     // 前几枚请求(未到应急线):判定预留 = 封顶后的策略预留;声明上限照记。
     // (实发限额可能因声明超窗走优雅降级另账——不进判定预留,不冒充。)
     for (std::size_t i = 0; i + 1 < hook_budgets.size(); ++i) {
-        CHECK(hook_budgets[i].policy_reserve_tokens == 8000);
-        CHECK(hook_budgets[i].final_reserve_tokens == 8000);
+        CHECK(hook_budgets[i].policy_reserve_tokens == 8192);
+        CHECK(hook_budgets[i].final_reserve_tokens == 8192);
         CHECK(hook_budgets[i].declared_max_output_tokens == 80000);
         CHECK_FALSE(hook_budgets[i].output_limit_overridden);
     }
     // 末枚请求(四枚结果累积顶到窗口,应急已收窄):判定预留换成应急值,
-    // 不再拿 8k 旧预留;实发限额与覆盖位同步。
-    CHECK(hook_budgets.back().policy_reserve_tokens == 8000);
+    // 不再拿 8192 旧预留;实发限额与覆盖位同步。
+    CHECK(hook_budgets.back().policy_reserve_tokens == 8192);
     CHECK(hook_budgets.back().final_reserve_tokens == 2500);
     CHECK(hook_budgets.back().final_reserve_tokens != hook_budgets.back().policy_reserve_tokens);
     CHECK(hook_budgets.back().effective_output_limit_tokens == 2500);
