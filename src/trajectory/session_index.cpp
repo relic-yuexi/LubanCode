@@ -732,13 +732,19 @@ SessionIndexPage QueryWorkspaceSessions(const std::filesystem::path& workspaces_
         // key(房被手删)记诊断跳过,不冒充。
         const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, key);
         if (!room.has_value()) {
-            page.diagnostic += (page.diagnostic.empty() ? "" : "; ") +
-                               "账本与各房 manifest 找不到 workspace_key=" + key;
+            if (!page.diagnostic.empty()) {
+                page.diagnostic += "; ";
+            }
+            page.diagnostic += "账本与各房 manifest 找不到 workspace_key=";
+            page.diagnostic += key;
             continue;
         }
         const WorkspaceIndex index = LoadOrRebuildIndex(*room, key);
         if (!index.error.empty()) {
-            page.diagnostic += (page.diagnostic.empty() ? "" : "; ") + index.error;
+            if (!page.diagnostic.empty()) {
+                page.diagnostic += "; ";
+            }
+            page.diagnostic += index.error;
         }
         all.reserve(all.size() + index.sessions.size());
         for (const auto& summary : index.sessions) {
