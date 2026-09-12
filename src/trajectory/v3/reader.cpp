@@ -97,6 +97,7 @@ CompactMarkerView MakeCompactMarker(const EventLine& event) {
     view.trigger = JsonString(event.payload, "trigger").value_or("");
     view.summary_message_ref = JsonString(event.payload, "summaryMessageRef").value_or("");
     view.validation_event_ref = JsonString(event.payload, "validationEventRef").value_or("");
+    view.step_scope = event.payload.value("stepScope", nlohmann::json::object());
     view.removed_message_refs = RefIdArray(event.payload, "removedMessageRefs");
     view.retained_message_refs = RefIdArray(event.payload, "retainedMessageRefs");
     if (auto turns = event.payload.find("protectedTurnIds");

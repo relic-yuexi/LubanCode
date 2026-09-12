@@ -81,7 +81,8 @@ public:
     FreezeResult Freeze(V3Writer& writer, std::vector<std::string> removed_message_refs,
                         std::vector<std::string> retained_message_refs,
                         std::vector<std::string> protected_turn_ids,
-                        Durability durability = Durability::ProcessCrash);
+                        Durability durability = Durability::ProcessCrash,
+                        nlohmann::json step_scope = nlohmann::json::object());
 
     // 追加 compact prompt(user,purpose=compact,归内部回合;可多条,§4.5 行3)。
     // 也可经 WriteSpecialSystem 落压缩专用 system(不替换会话 system,§4.3)。
@@ -148,6 +149,7 @@ private:
     std::vector<std::string> protected_turns_;
     std::optional<std::string> candidate_message_id_;
     std::optional<std::string> validation_event_id_;
+    nlohmann::json step_scope_ = nlohmann::json::object();
     bool frozen_ = false;
     bool finished_ = false;
 };

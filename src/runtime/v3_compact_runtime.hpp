@@ -117,6 +117,9 @@ struct V3CompactRunInput {
     // 调用方钉死的整轮保留(未完成主 turn 等);运行时另把工具动作未收口
     // 的 turn 并进保护集(§4.8"工具配对"行:未完成 turn 保留完整消息结构)。
     std::vector<std::string> protected_turn_ids;
+    // Capacity recovery may summarize closed old steps of parent_turn_id.
+    // Explicitly protected other turns remain indivisible.
+    bool allow_closed_step_compaction = false;
     // 压缩专用 system 正文(§4.3:另存实际内容,不替换会话 system)。
     // 空串 = 用本运行时的缺省模板。
     std::string special_system;

@@ -92,6 +92,7 @@ struct CompactMarkerView {
     std::vector<std::string> removed_message_refs;   // 只退出模型上下文,原档不删
     std::vector<std::string> retained_message_refs;
     std::vector<std::string> protected_turn_ids;
+    nlohmann::json step_scope = nlohmann::json::object();
     std::uint64_t source_revision = 0;
     std::uint64_t new_revision = 0;
 };

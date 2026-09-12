@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "trajectory/canonical_json.hpp"
+#include "hooks/hash.hpp"
 #include "trajectory/v3/compact.hpp"
 #include "trajectory/v3/reader.hpp"
 
@@ -153,7 +154,8 @@ std::string DefaultSpecialSystem() {
     return
         "你是 LubanCode 的上下文压缩器。任务:把提供的对话材料压成一份给后续会话"
         "接力的交接摘要——保留任务目标、用户明示约束、关键决策、文件路径、代码要点、"
-        "已证实事实、失败尝试及其原因、未完成事项;丢弃寒暄与过程噪音。\n"
+        "已证实事实、失败尝试及其原因、未完成事项;逐项记清已执行操作、副作用、"
+        "成功/失败/未知状态及证据引用，不得暗示已执行工具尚未执行。\n"
         "摘要正文用 Markdown,分节清楚。正文之后另起一行输出一枚 JSON 代码块"
         "(```json 围栏),键名逐字照写:\n"
         "```json\n"
@@ -170,6 +172,7 @@ std::string DefaultSpecialSystem() {
 // ---------------------------------------------------------------------------
 
 struct PlanBlock {
+    std::optional<std::string> step_id;
     std::optional<std::string> turn_id;  // nullopt = 游离节点(旧摘要等)
     bool summary_head = false;           // 链头紧随 system 的游离段 = 当前旧摘要 Q
     std::vector<const MessageLine*> messages;  // 链序
@@ -180,6 +183,7 @@ struct ScopePlan {
     std::vector<PlanBlock> removed;    // 压缩材料(含旧摘要 Q,§4.41 无永久保留特权)
     std::vector<PlanBlock> retained;   // 保留尾部 R(未完成/受保护 turn)+ 回退并入的 K
     std::vector<std::string> protected_turns;
+    nlohmann::json step_scope = nlohmann::json::object();
 
     std::vector<std::string> RemovedIds() const {
         std::vector<std::string> ids;
@@ -214,6 +218,28 @@ struct ScopePlan {
         return tokens;
     }
 };
+
+// Opaque/signed thinking cannot be transplanted across a changed prefix
+// without an adapter-specific proof. Fail closed until that proof is supplied.
+// The production persistence path never writes these fields today (thinking
+// blocks keep type/text only, signatures are dropped), so this stays a
+// conservative front line for future faithful writers; a real adapter-level
+// check of whether the target model requires prefix-consistent signatures is
+// not wired yet.
+bool HasPrefixBoundPayload(const nlohmann::json& value) {
+    if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            if ((it.key() == "signature" || it.key() == "encrypted_content") &&
+                !it.value().is_null() && it.value() != "") return true;
+            if (it.key() == "type" && (it.value() == "redacted_thinking" ||
+                it.value() == "reasoning.encrypted")) return true;
+            if (HasPrefixBoundPayload(it.value())) return true;
+        }
+    } else if (value.is_array()) {
+        for (const auto& item : value) if (HasPrefixBoundPayload(item)) return true;
+    }
+    return false;
+}
 
 // 折叠状态是否已收口(未收口的 turn 整轮保护,§4.8"工具配对"行)。
 bool ToolStatusTerminal(const std::string& status) {
@@ -259,6 +285,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return result;
     }
 
+    if (input.allow_closed_step_compaction && !input.parent_turn_id) {
+        for (auto it = ledger.context.chain.rbegin(); it != ledger.context.chain.rend(); ++it) {
+            const auto* line = ledger.FindMessage(it->message_ref);
+            if (line && line->turn_id) { input.parent_turn_id = line->turn_id; break; }
+        }
+    }
+
     // ---- 1. 开场:compact.requested + 内部回合(§4.6)。已有进行中的
     // compact 时库层拒收(busy),不另开场。 ----
     auto begin = CompactSession::Begin(writer, input.trigger, input.reason,
@@ -270,6 +303,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         result.reason = begin.info.error;
         return result;
     }
+    result.began = true;
     CompactSession& session = *begin.session;
 
     // 结束兜底:任何提前 return 前必须落终态(除非库层已落)。
@@ -300,11 +334,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     std::set<std::string> protected_turns(input.protected_turn_ids.begin(),
                                           input.protected_turn_ids.end());
+    if (input.allow_closed_step_compaction && input.parent_turn_id)
+        protected_turns.insert(*input.parent_turn_id);
     for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
         if (action.turn_id.empty() || ToolStatusTerminal(action.folded_status)) {
             continue;
         }
-        protected_turns.insert(action.turn_id);  // 未收口工具所在 turn 整轮保护
+        protected_turns.insert(action.turn_id);  // Default whole-turn protection.
     }
 
     std::vector<PlanBlock> blocks;
@@ -345,6 +381,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
             std::optional<std::size_t> removed_side;
             std::optional<std::size_t> retained_side;
+            if (action.assistant_message_ref) {
+                const auto it = block_of_message.find(*action.assistant_message_ref);
+                if (it != block_of_message.end()) {
+                    if (it->second < boundary) removed_side = it->second;
+                    else retained_side = it->second;
+                }
+            }
             for (const auto& version : action.message_versions) {
                 const auto it = block_of_message.find(version.message_id);
                 if (it == block_of_message.end()) {
@@ -378,6 +421,94 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     }
     plan.protected_turns.assign(protected_turns.begin(), protected_turns.end());
 
+    // Only enter the current turn when old turns cannot free enough space.
+    // Keep every user input verbatim and the latest step. Identity comes from
+    // the envelopes and action ledger, never from append sequence numbers.
+    const bool old_turns_insufficient = plan.removed.empty() ||
+        (profile.main_window_tokens > 0 &&
+         plan.RetainedTokens() + profile.main_output_reserve_tokens +
+             profile.compact_output_reserve_tokens >= profile.main_window_tokens);
+    if (input.allow_closed_step_compaction && input.parent_turn_id && old_turns_insufficient) {
+        const auto& current_turn = *input.parent_turn_id;
+        const auto actions = trajectory::v3::FoldToolActions(ledger);
+        std::optional<std::string> latest_step;
+        for (const auto* line : chain_messages) {
+            if (line->turn_id == input.parent_turn_id && line->step_id) latest_step = line->step_id;
+        }
+        std::vector<PlanBlock> keep;
+        std::vector<std::string> compacted_steps;
+        bool stopped = false;
+        for (auto& block : plan.retained) {
+            if (block.turn_id != input.parent_turn_id) {
+                // Protected old turns and orphan blocks stay verbatim without
+                // tripping the sticky flag: whole-turn protection of another
+                // turn must not truncate the parent turn's compactable prefix
+                // of closed steps.
+                keep.push_back(std::move(block));
+                continue;
+            }
+            std::vector<PlanBlock> steps;
+            for (const auto* line : block.messages) {
+                const bool user = line->message.value("role", std::string()) == "user";
+                if (steps.empty() || user || !line->step_id ||
+                    steps.back().step_id != line->step_id) {
+                    PlanBlock step;
+                    step.turn_id = line->turn_id;
+                    step.step_id = user ? std::nullopt : line->step_id;
+                    steps.push_back(std::move(step));
+                }
+                steps.back().messages.push_back(line);
+                steps.back().tokens += EstimateMessageTokens(*line);
+            }
+            for (auto& step : steps) {
+                // User messages are pinned but do not prevent removing old steps.
+                if (!step.step_id) {
+                    for (const auto* line : step.messages)
+                        stopped = stopped || line->message.value("role", std::string()) != "user";
+                    keep.push_back(std::move(step));
+                    continue;
+                }
+                bool closed = step.step_id != latest_step;
+                std::set<std::string> ids;
+                for (const auto* line : step.messages) ids.insert(line->message_id);
+                for (const auto& action : actions) {
+                    if (action.turn_id != current_turn || action.step_id != *step.step_id) continue;
+                    bool result_in_step = false;
+                    for (const auto& version : action.message_versions)
+                        result_in_step = result_in_step || ids.count(version.message_id) > 0;
+                    closed = closed && ToolStatusTerminal(action.folded_status) && result_in_step &&
+                        action.assistant_message_ref && ids.count(*action.assistant_message_ref) > 0;
+                }
+                // A declaration absent from the folded action ledger is not closed.
+                for (const auto* line : step.messages) {
+                    if (auto calls = line->message.find("tool_calls");
+                        calls != line->message.end() && calls->is_array()) {
+                        for (const auto& call : *calls) {
+                            const auto id = call.value("id", std::string());
+                            closed = closed && std::any_of(actions.begin(), actions.end(),
+                                [&](const auto& action) { return action.tool_call_id == id &&
+                                    action.turn_id == current_turn && action.step_id == *step.step_id; });
+                        }
+                    }
+                }
+                stopped = stopped || !closed;
+                if (stopped) keep.push_back(std::move(step));
+                else {
+                    compacted_steps.push_back(*step.step_id);
+                    plan.removed.push_back(std::move(step));
+                }
+            }
+        }
+        plan.retained = std::move(keep);
+        if (!compacted_steps.empty()) {
+            plan.protected_turns.erase(std::remove(plan.protected_turns.begin(),
+                plan.protected_turns.end(), current_turn), plan.protected_turns.end());
+            plan.step_scope = {{"turnId", current_turn}, {"stepIds", compacted_steps},
+                              {"prefixChanged", true}};
+            result.notes.push_back("Closed old steps selected; the sent prefix changes.");
+        }
+    }
+
     // 没有可摘要化历史(空链/全受保护):rejected(no_eligible_history),
     // 一次模型都不调(§4.9)。
     if (plan.removed.empty()) {
@@ -395,6 +526,34 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     const std::string special_system =
         input.special_system.empty() ? DefaultSpecialSystem() : input.special_system;
     const std::uint64_t system_tokens = EstimateUtf8Div4(special_system);
+
+    const auto execution_records = [&](const ScopePlan& current) {
+        nlohmann::json records = nlohmann::json::array();
+        if (current.step_scope.empty()) return records;
+        const auto ids = current.RemovedIds();
+        const std::set<std::string> removed(ids.begin(), ids.end());
+        for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+            if (action.turn_id != input.parent_turn_id || !action.assistant_message_ref ||
+                !removed.count(*action.assistant_message_ref)) continue;
+            nlohmann::json evidence = nlohmann::json::array();
+            for (const auto& version : action.message_versions)
+                if (removed.count(version.message_id)) evidence.push_back(version.message_id);
+            if (evidence.empty()) continue;
+            const auto* declaration = ledger.FindMessage(*action.assistant_message_ref);
+            nlohmann::json operation = nlohmann::json::object();
+            if (declaration && declaration->message.contains("tool_calls")) {
+                for (const auto& call : declaration->message["tool_calls"]) {
+                    const auto id = call.value("id", std::string());
+                    if (id == action.tool_call_id || id == action.provider_tool_call_id.value_or(""))
+                        operation = call.value("function", nlohmann::json::object());
+                }
+            }
+            records.push_back({{"actionId", action.tool_call_id},
+                {"executionStatus", action.folded_status}, {"resultOutcome", action.effective_outcome},
+                {"operation", operation}, {"evidenceRefs", evidence}});
+        }
+        return records;
+    };
 
     const auto build_instruction = [&](const ScopePlan& current, bool reference_included) {
         std::string instruction = "请把以下材料压缩成交接摘要(范围如下),并按系统指令的"
@@ -432,19 +591,42 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 instruction += "\n" + std::to_string(i + 1) + ". " + requirements.required_open_items[i];
             }
         }
+        const auto executed = execution_records(current);
+        if (!executed.empty()) {
+            instruction += "\n这些工具操作已经执行。不得将它们当成待执行动作。"
+                "请在末尾 manifest 的 executed_actions 字段完整复制下列执行账，"
+                "保留操作参数、执行状态、选用结果状态及证据引用：\n" + executed.dump();
+        }
         if (!input.focus.empty()) {
             instruction += "\n重点保留:" + input.focus;
         }
         return instruction;
     };
 
+    // A step summary sees the selected closed groups and pinned user inputs.
+    // Unclosed retained calls must not enter the auxiliary model request.
+    const auto material_ids = [&](const ScopePlan& current, bool include_reference) {
+        const auto removed = current.RemovedIds();
+        const auto retained = current.RetainedIds();
+        std::set<std::string> selected(removed.begin(), removed.end());
+        if (include_reference) selected.insert(retained.begin(), retained.end());
+        if (!current.step_scope.empty()) {
+            for (const auto* line : chain_messages)
+                if (line->turn_id == input.parent_turn_id &&
+                    line->message.value("role", std::string()) == "user")
+                    selected.insert(line->message_id);
+        }
+        std::vector<std::string> ids;
+        for (const auto* line : chain_messages)
+            if (selected.count(line->message_id)) ids.push_back(line->message_id);
+        return ids;
+    };
+
     const auto estimate_input = [&](const ScopePlan& current, bool reference_included,
                                     const std::string& instruction) {
         std::uint64_t tokens = system_tokens + EstimateUtf8Div4(instruction);
-        tokens += current.RemovedTokens();
-        if (reference_included) {
-            tokens += current.RetainedTokens();
-        }
+        for (const auto& id : material_ids(current, reference_included))
+            tokens += EstimateMessageTokens(*ledger.FindMessage(id));
         return tokens;
     };
 
@@ -461,17 +643,8 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         nlohmann::json snapshot = nlohmann::json::object();
         snapshot["system"] = special_system;
         nlohmann::json messages = nlohmann::json::array();
-        const auto push_block_messages = [&messages](const std::vector<PlanBlock>& blocks) {
-            for (const auto& block : blocks) {
-                for (const MessageLine* line : block.messages) {
-                    messages.push_back(line->message);
-                }
-            }
-        };
-        push_block_messages(current.removed);
-        if (reference_included) {
-            push_block_messages(current.retained);
-        }
+        for (const auto& id : material_ids(current, reference_included))
+            messages.push_back(ledger.FindMessage(id)->message);
         snapshot["messages"] = std::move(messages);
         snapshot["instruction"] = instruction;
         auto estimated = input.estimate(snapshot);
@@ -491,7 +664,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return static_cast<std::uint64_t>(tokens);
     };
 
-    bool reference_included = true;
+    bool reference_included = plan.step_scope.empty();
     const bool gate_active = profile.compact_window_tokens > 0;
     result.gate_checked = gate_active;
     result.window_unknown = !gate_active;
@@ -551,7 +724,12 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 for (const auto* message : block.messages) {
                     retreated_ids.push_back(message->message_id);
                 }
-                plan.retained.insert(plan.retained.begin(), std::move(block));
+                plan.retained.push_back(std::move(block));
+                std::stable_sort(plan.retained.begin(), plan.retained.end(),
+                    [&](const PlanBlock& a, const PlanBlock& b) {
+                        return std::find(chain_messages.begin(), chain_messages.end(), a.messages.front()) <
+                               std::find(chain_messages.begin(), chain_messages.end(), b.messages.front());
+                    });
             }
             if (!dropped_reference && retreated_ids.empty()) {
                 // no_change 候选跳过(§4.64):没有可退的内容,不记事件、
@@ -604,14 +782,31 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
             }
         }
     }
+    if (!plan.step_scope.empty()) {
+        std::vector<std::string> steps;
+        for (const auto& block : plan.removed) {
+            if (block.turn_id == input.parent_turn_id && block.step_id &&
+                std::find(steps.begin(), steps.end(), *block.step_id) == steps.end())
+                steps.push_back(*block.step_id);
+        }
+        if (steps.empty()) plan.step_scope = nlohmann::json::object();
+        else plan.step_scope["stepIds"] = steps;
+    }
+    for (const auto* line : chain_messages) {
+        if (HasPrefixBoundPayload(line->message)) {
+            finish_rejected("compact.signature_prefix_incompatible");
+            return result;
+        }
+    }
     const std::string instruction = build_instruction(plan, reference_included);
 
     // ---- 4. 冻结源版本与压缩/保留范围(§4.5 行 1:执行时冻结)。 ----
     const auto freeze =
-        session.Freeze(writer, plan.RemovedIds(), plan.RetainedIds(), plan.protected_turns);
+        session.Freeze(writer, plan.RemovedIds(), plan.RetainedIds(), plan.protected_turns,
+                       trajectory::Durability::ProcessCrash, plan.step_scope);
     if (!freeze.eligible) {
         result.terminal_kind = "rejected";
-        result.reason = "no_eligible_history";
+        result.reason = freeze.error.empty() ? "no_eligible_history" : freeze.error;
         return result;
     }
     if (freeze.event.status != WriteReceipt::Status::Committed) {
@@ -632,11 +827,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         finish_failed("compact.prompt_write_failed: " + prompt_receipt.error_code);
         return result;
     }
-    std::vector<std::string> input_ids = plan.RemovedIds();
-    if (reference_included) {
-        const std::vector<std::string> retained_ids = plan.RetainedIds();
-        input_ids.insert(input_ids.end(), retained_ids.begin(), retained_ids.end());
-    }
+    std::vector<std::string> input_ids = material_ids(plan, reference_included);
     input_ids.push_back(prompt_receipt.id);
     const std::string request_id = writer.NewRequestId();
     const std::string step_id = writer.NewStepId();
@@ -655,6 +846,49 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
          {"windowTokens", gate_active ? nlohmann::json(profile.compact_window_tokens)
                                       : nlohmann::json(nullptr)},
          {"estimatedInputTokens", *prepared_tokens}});
+    nlohmann::json fingerprint_messages = nlohmann::json::array();
+    for (const auto& id : input_ids) {
+        if (id == prompt_receipt.id)
+            fingerprint_messages.push_back({{"role", "user"}, {"content", instruction}});
+        else fingerprint_messages.push_back(ledger.FindMessage(id)->message);
+    }
+    const auto fingerprint_source = trajectory::CanonicalJsonDump(nlohmann::json{
+        {"system", special_system}, {"messages", fingerprint_messages},
+        {"provider", profile.provider}, {"wire", profile.wire}, {"model", profile.model},
+        {"outputReserveTokens", profile.compact_output_reserve_tokens}});
+    if (!fingerprint_source) {
+        finish_rejected("compact.input_fingerprint_failed");
+        return result;
+    }
+    const auto input_fingerprint = hooks::Sha256Hex(*fingerprint_source);
+    provider_snapshot["inputFingerprint"] = input_fingerprint;
+    provider_snapshot["inputFingerprintAlgorithm"] = "sha256-canonical-summary-input-v1";
+    provider_snapshot["recoveryAttemptLimit"] = 1;
+    // A failed capacity request is durable evidence. Resume cannot erase it.
+    // On the same source/model budget, retry only a strictly smaller input.
+    std::set<std::string> overflow_compacts;
+    for (const auto& event : ledger.events) {
+        if (event.kind == trajectory::v3::EventKindV3::CompactFailed && event.compact_id &&
+            event.payload.value("reason", std::string()) == "input_context_overflow")
+            overflow_compacts.insert(*event.compact_id);
+    }
+    for (const auto& event : ledger.events) {
+        if (event.kind != trajectory::v3::EventKindV3::ModelRequestPrepared ||
+            !event.compact_id || !overflow_compacts.count(*event.compact_id)) continue;
+        const auto& previous = event.payload;
+        const bool same_route = previous.value("provider", std::string()) == profile.provider &&
+            previous.value("wire", std::string()) == profile.wire &&
+            previous.value("model", std::string()) == profile.model &&
+            previous.value("outputReserveTokens", std::uint64_t{0}) == profile.compact_output_reserve_tokens &&
+            previous.value("windowTokens", nlohmann::json()) == provider_snapshot["windowTokens"];
+        if (same_route && previous.value("contextRevision", std::uint64_t{0}) == session.source_revision() &&
+            (previous.value("inputFingerprint", std::string()) == input_fingerprint ||
+             *prepared_tokens >= previous.value("estimatedInputTokens", std::uint64_t{0}))) {
+            finish_rejected("compact.failed_input_not_smaller");
+            result.notes.push_back("Rejected repeated capacity input: " + input_fingerprint);
+            return result;
+        }
+    }
     const WriteReceipt prepared = writer.PrepareRequest(
         request_id, session.turn_id(), step_id, "compact", special_system_receipt.id, input_ids,
         std::move(provider_snapshot), session.compact_id());
@@ -682,7 +916,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     ++result.model_calls;
     const V3CompactModelReply reply = client.Send(special_system, material);
     if (!reply.ok) {
-        finish_failed(reply.error_code.empty() ? "provider_error" : reply.error_code);
+        if (reply.error_code == "cancelled") {
+            session.Fail(writer, CompactSession::FailKind::Cancelled, "cancelled");
+            result.terminal_kind = "cancelled";
+            result.reason = "cancelled";
+        } else {
+            finish_failed(reply.error_code.empty() ? "provider_error" : reply.error_code);
+        }
         if (!reply.error_detail.empty()) {
             result.notes.push_back("压缩模型请求失败: " + reply.error_detail);
         }
@@ -758,6 +998,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         }
         add_check("content_structure", missing.empty(),
                   missing.empty() ? std::string() : "manifest 缺必需字段或类型不符: " + missing);
+    }
+    const auto expected_executions = execution_records(plan);
+    if (!expected_executions.empty()) {
+        const bool preserved = manifest && manifest->contains("executed_actions") &&
+            (*manifest)["executed_actions"] == expected_executions;
+        add_check("executed_actions_conservation", preserved,
+                  preserved ? "" : "summary omitted or changed executed operations, outcomes or evidence");
     }
     // 7.3 正文下限(防 prefill 残次品,与 v2 同门槛)。
     add_check("body_length", CountUtf8Chars(reply.text) >= requirements.min_summary_chars,
@@ -835,13 +1082,31 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 in_removed = in_removed || removed_set.count(version.message_id) > 0;
                 in_retained = in_retained || retained_set.count(version.message_id) > 0;
             }
-            if (in_removed && in_retained) {
+            if (action.assistant_message_ref) {
+                in_removed = in_removed || removed_set.count(*action.assistant_message_ref) > 0;
+                in_retained = in_retained || retained_set.count(*action.assistant_message_ref) > 0;
+            }
+            if (in_removed && (in_retained ||
+                (!plan.step_scope.empty() && action.turn_id == input.parent_turn_id &&
+                 !ToolStatusTerminal(action.folded_status)))) {
                 pairing_ok = false;
                 break;
             }
         }
         add_check("tool_pairing", pairing_ok,
                   pairing_ok ? std::string() : "压缩边界劈开了工具调用与结果的配对");
+    }
+    if (!plan.step_scope.empty()) {
+        const auto retained_ids = plan.RetainedIds();
+        bool users_preserved = true;
+        for (const auto* line : chain_messages) {
+            if (line->turn_id == input.parent_turn_id &&
+                line->message.value("role", std::string()) == "user")
+                users_preserved = users_preserved &&
+                    std::find(retained_ids.begin(), retained_ids.end(), line->message_id) != retained_ids.end();
+        }
+        add_check("current_turn_constraints", users_preserved,
+                  users_preserved ? "" : "current user input was removed");
     }
     // 7.7 源未变化:校验时点再核一遍(§4.8 表行 7;Apply 内还会再核)。
     add_check("source_revision", writer.context().revision == session.source_revision(),

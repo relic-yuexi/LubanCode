@@ -1,3 +1,4 @@
+#include <limits>
 // session_commands.hpp 的实现:上下文/压缩/会话存档命令的函数体。
 #include "app/commands/session_commands.hpp"
 
@@ -445,6 +446,7 @@ lubancode::api::Message V3MaterialToApiMessage(const nlohmann::json& body) {
     if (role == "tool") {
         lubancode::api::ToolResultBlock result;
         result.tool_use_id = body.value("tool_call_id", std::string());
+        result.is_error = body.value("is_error", false);
         if (body.contains("content")) {
             if (body["content"].is_string()) {
                 result.content = body["content"].get<std::string>();
@@ -484,13 +486,15 @@ class SampleModelV3CompactClient : public lubancode::runtime::V3CompactModelClie
 public:
     SampleModelV3CompactClient(lubancode::api::Backend& backend,
                                const lubancode::agent::ModelRoute& route,
-                               lubancode::agent::BackgroundCallAccounting* accounting)
-        : backend_(backend), route_(route), accounting_(accounting) {}
+                               lubancode::agent::BackgroundCallAccounting* accounting, int output_limit)
+        : backend_(backend), route_(route), accounting_(accounting), output_limit_(output_limit) {}
 
     lubancode::runtime::V3CompactModelReply Send(
         const std::string& system, const std::vector<nlohmann::json>& messages) override {
         lubancode::agent::SampleRequest sample;
         sample.model = route_.model;
+        sample.max_tokens = output_limit_;
+        sample.enforce_output_limit = true;
         sample.system = system;
         sample.messages.reserve(messages.size());
         for (const auto& body : messages) {
@@ -506,10 +510,16 @@ public:
             reply.error_code =
                 result.error.kind == lubancode::api::ErrorKind::Cancelled ? "cancelled"
                                                                           : "provider_error";
+            if (result.error.api_code == "context_length_exceeded" ||
+                result.error.api_code == "context_window_exceeded" ||
+                result.error.api_code == "input_context_overflow")
+                reply.error_code = "input_context_overflow";
             reply.error_detail = result.error.message;
             return reply;
         }
         reply.text = result.text;
+        reply.truncated = result.stop_reason == "length" || result.stop_reason == "max_tokens" ||
+                          result.stop_reason == "max_output_tokens";
         // usage 唯一 owner:服务端真回报过才给数,缺失保持 nullopt 不补 0。
         if (result.usage_reported) {
             reply.usage = nlohmann::json::object(
@@ -527,6 +537,7 @@ private:
     lubancode::api::Backend& backend_;
     const lubancode::agent::ModelRoute& route_;
     lubancode::agent::BackgroundCallAccounting* accounting_;
+    int output_limit_;
 };
 
 }  // namespace
@@ -612,7 +623,7 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
     run_input.reason = reason;
     // turn 中途的 parentTurnId 由 v3 会话运行时(接线点 1)递主 turn 号;
     // 终端接线暂未持有 v3 turn 簿,先如实挂 null,不假称。
-    (void)midturn;
+    run_input.allow_closed_step_compaction = midturn;
     run_input.requirements_snapshot = nlohmann::json::object(
         {{"requiredOpenItems", options.required_open_items}});
     run_input.focus = args;
@@ -634,7 +645,13 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
     }
 
     lubancode::agent::BackgroundCallAccounting accounting;
-    SampleModelV3CompactClient client(*routed.backend, routed.route, &accounting);
+    if (profile.compact_output_reserve_tokens == 0 ||
+        profile.compact_output_reserve_tokens > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        out << theme.error << "压缩输出预算无效，本次未发模型。" << theme.reset << "\n";
+        return {};
+    }
+    SampleModelV3CompactClient client(*routed.backend, routed.route, &accounting,
+        static_cast<int>(profile.compact_output_reserve_tokens));
     // LuaHook P0-B 遗留①(P1-C 补):compact 现场先把中间件事件账/子执行账
     // 绑到本场 v3 主写者(空闲压缩不在轮内,轮起的那次绑定可能已过期);
     // 遗留②:压缩请求的输入估算切到 PreRequest/estimate 槽位(§4.36

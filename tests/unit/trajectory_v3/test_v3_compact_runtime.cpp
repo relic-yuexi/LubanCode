@@ -7,6 +7,7 @@
 // 崩溃注入只做到事件账与恢复逻辑;真进程注入跑法留验收单。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,8 @@
 
 #include "runtime/v3_compact_runtime.hpp"
 #include "trajectory/v3/compact.hpp"
+#include "trajectory/v3/tool_action.hpp"
+#include "trajectory/v3/result_store.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/writer.hpp"
 
@@ -56,10 +59,12 @@ public:
 };
 
 // 合格摘要回复:正文 + 末尾 manifest 围栏(与缺省校验清单同形)。
-std::string ManifestReply(const std::string& body, const std::vector<std::string>& open_items) {
+std::string ManifestReply(const std::string& body, const std::vector<std::string>& open_items,
+                          nlohmann::json actions = nlohmann::json::array()) {
     nlohmann::json manifest = nlohmann::json::object(
         {{"goal", "把会话接下去"}, {"constraints", nlohmann::json::array({"不许动旧档"})},
          {"open_items", open_items}, {"next_action", "继续干活"}});
+    if (!actions.empty()) manifest["executed_actions"] = std::move(actions);
     return body + "\n```json\n" + manifest.dump() + "\n```\n";
 }
 
@@ -236,6 +241,7 @@ TEST_CASE("手动空闲 compact 全链一次成功:八类行闭合,marker 字段
         const V3CompactRunResult result =
             lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), ManualInput());
         REQUIRE(result.applied);
+        CHECK(result.began);
         CHECK(result.terminal_kind == "applied");
         CHECK(result.model_calls == 1);
         CHECK(result.tokens_before > result.tokens_after);
@@ -983,4 +989,433 @@ TEST_CASE("applied 写盘失败:摘要在档不生效,恢复后旧上下文仍�
     const V3CompactRunResult retry =
         lubancode::runtime::RunV3Compact(*continued, client, BaseProfile(), ManualInput());
     CHECK(retry.terminal_kind == "busy");
+}
+
+namespace {
+std::string AppendCurrentUserFixture(V3Writer& writer) {
+    MessageDraft draft;
+    draft.turn_id = "turn-long";
+    draft.origin = MessageOrigin::Human;
+    draft.message = {{"role", "user"}, {"content", "Never rerun side effects"}};
+    const auto receipt = writer.AppendMessage(std::move(draft), Durability::PowerLoss);
+    REQUIRE(receipt.status == WriteReceipt::Status::Committed);
+    REQUIRE(writer.AdmitMessages({receipt.id}).status == WriteReceipt::Status::Committed);
+    return receipt.id;
+}
+std::string AppendStepFixture(V3Writer& writer, const std::string& step,
+                              bool open_call = false, bool signed_thinking = false) {
+    MessageDraft draft;
+    draft.turn_id = "turn-long";
+    draft.step_id = step;
+    draft.request_id = "request-" + step;
+    draft.provider = "test";
+    draft.wire = "openai-chat-completions";
+    draft.model = "test";
+    draft.response_model = nlohmann::json(nullptr);
+    draft.usage = nlohmann::json(nullptr);
+    draft.origin = MessageOrigin::SessionRuntime;
+    draft.message = {{"role", "assistant"}, {"content", BigText(5000)}};
+    if (open_call) draft.message["tool_calls"] = nlohmann::json::array({
+        {{"id", "action-open"}, {"function", {{"name", "write"}, {"arguments", "{}"}}}}});
+    if (signed_thinking) draft.message["content"] = nlohmann::json::array({
+        {{"type", "thinking"}, {"thinking", BigText(5000)}, {"signature", "opaque-sig"}}});
+    auto receipt = writer.AppendMessage(std::move(draft), Durability::PowerLoss);
+    REQUIRE(receipt.status == WriteReceipt::Status::Committed);
+    REQUIRE(writer.AdmitMessages({receipt.id}).status == WriteReceipt::Status::Committed);
+    return receipt.id;
+}
+V3CompactRunInput LongTurnInput() {
+    auto input = ManualInput();
+    input.trigger = "auto";
+    input.reason = "pre_send_overflow";
+    input.parent_turn_id = "turn-long";
+    input.allow_closed_step_compaction = true;
+    return input;
+}
+StubClient StepSummaryClient(nlohmann::json actions = nlohmann::json::array()) {
+    StubClient client;
+    client.respond = [actions] {
+        V3CompactModelReply reply;
+        reply.ok = true;
+        reply.text = ManifestReply(BigText(200, 's'), {"continue"}, actions);
+        return reply;
+    };
+    return client;
+}
+}
+
+TEST_CASE("closed old steps retain user input and latest step across resume") {
+    Harness harness("closed-steps");
+    std::vector<std::string> expected;
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer);
+        // Non-numeric identities make sequence-based step arithmetic impossible.
+        const auto user = AppendCurrentUserFixture(*writer);
+        const auto first = AppendStepFixture(*writer, "step-z");
+        const auto second = AppendStepFixture(*writer, "step-a");
+        const auto latest = AppendStepFixture(*writer, "step-q");
+        auto client = StepSummaryClient();
+        auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+        REQUIRE(result.applied);
+        for (const auto& node : writer->context().chain) expected.push_back(node.message_ref);
+        CHECK(std::find(expected.begin(), expected.end(), user) != expected.end());
+        CHECK(std::find(expected.begin(), expected.end(), latest) != expected.end());
+        CHECK(std::find(expected.begin(), expected.end(), first) == expected.end());
+        CHECK(std::find(expected.begin(), expected.end(), second) == expected.end());
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const auto applied = EventsOf(lines, "compact.applied");
+        REQUIRE(applied.size() == 1);
+        CHECK((*applied.front())["payload"]["stepScope"]["stepIds"] ==
+              nlohmann::json::array({"step-z", "step-a"}));
+        auto ledger = ReadV3Ledger(harness.jsonl);
+        REQUIRE(ledger);
+        CHECK(ledger->FindMessage(first) != nullptr);
+        CHECK(ledger->FindMessage(second) != nullptr);
+    }
+    auto resumed = V3Writer::Continue(harness.jsonl, V3WriterOptions{});
+    REQUIRE(resumed);
+    std::vector<std::string> actual;
+    for (const auto& node : resumed->context().chain) actual.push_back(node.message_ref);
+    CHECK(actual == expected);
+}
+
+TEST_CASE("open tool group stops the old-step prefix without inventing replies") {
+    Harness harness("open-step");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    AppendCurrentUserFixture(*writer);
+    const auto old = AppendStepFixture(*writer, "step-old");
+    const auto open = AppendStepFixture(*writer, "step-open", true);
+    const auto latest = AppendStepFixture(*writer, "step-latest");
+    auto client = StepSummaryClient();
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    REQUIRE(result.applied);
+    std::vector<std::string> refs;
+    for (const auto& node : writer->context().chain) refs.push_back(node.message_ref);
+    CHECK(std::find(refs.begin(), refs.end(), old) == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), open) != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), latest) != refs.end());
+    REQUIRE(!client.last_messages.empty());
+    CHECK(client.last_messages.front().value("role", "") == "user");
+    for (const auto& message : client.last_messages) CHECK_FALSE(message.contains("tool_calls"));
+}
+
+TEST_CASE("signed thinking refuses a changed prefix before calling summary model") {
+    Harness harness("signed-step");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    AppendCurrentUserFixture(*writer);
+    AppendStepFixture(*writer, "step-old", false, true);
+    AppendStepFixture(*writer, "step-latest");
+    const auto revision = writer->context().revision;
+    auto client = StepSummaryClient();
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    CHECK_FALSE(result.applied);
+    CHECK(result.reason == "compact.signature_prefix_incompatible");
+    CHECK(client.calls == 0);
+    CHECK(writer->context().revision == revision);
+}
+
+TEST_CASE("closed tool step removes declaration and selected result together") {
+    Harness harness("closed-tool-step");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    AppendCurrentUserFixture(*writer);
+    const auto declaration = AppendStepFixture(*writer, "step-tool", true);
+    auto action = ToolActionSession::Admit(*writer, "turn-long", "step-tool", "action-open",
+                                          "queued", declaration, "provider-call");
+    REQUIRE(action.Start(*writer, "args-ref", ToolIdentity{"write", "builtin", "1", "test"}).status ==
+            WriteReceipt::Status::Committed);
+    REQUIRE(action.Finish(*writer, 0).status == WriteReceipt::Status::Committed);
+    const auto persisted = action.PersistedResult(*writer,
+        {MakeArtifactRef("res-test", "result_metadata", "artifacts/res-test.json",
+                         std::string(64, '1'), 412, "application/json")}, action.last_event_id());
+    REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+    REQUIRE(action.SelectResult(*writer, {persisted.id}, {}, "done").status == WriteReceipt::Status::Committed);
+    REQUIRE(action.AppendToolMessage(*writer, BigText(5000), action.selected_event_id()).status ==
+            WriteReceipt::Status::Committed);
+    const auto tool_ref = writer->context().chain.back().message_ref;
+    AppendStepFixture(*writer, "step-latest");
+    bool omit_execution_record = false;
+    SUBCASE("keep operation status and evidence") {}
+    SUBCASE("omitting executed operation refuses adoption") { omit_execution_record = true; }
+    auto client = StepSummaryClient(nlohmann::json::array({
+        {{"actionId", "action-open"}, {"executionStatus", "done"}, {"resultOutcome", "done"},
+         {"operation", {{"name", "write"}, {"arguments", "{}"}}},
+         {"evidenceRefs", nlohmann::json::array({tool_ref})}}}));
+    if (omit_execution_record) client = StepSummaryClient();
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    if (omit_execution_record) {
+        CHECK_FALSE(result.applied);
+        CHECK(result.reason == "validation_failed");
+        CHECK(writer->context().chain.size() == 5);
+        return;
+    }
+    REQUIRE(result.applied);
+    for (const auto& node : writer->context().chain) {
+        CHECK(node.message_ref != declaration);
+        CHECK(node.message_ref != tool_ref);
+    }
+    const auto ledger = ReadV3Ledger(harness.jsonl);
+    REQUIRE(ledger);
+    CHECK(ledger->FindMessage(declaration) != nullptr);
+    CHECK(ledger->FindMessage(tool_ref) != nullptr);
+}
+
+TEST_CASE("old turns with sufficient capacity leave current steps unchanged") {
+    Harness harness("prefer-old-turns");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    harness.SeedTurn(*writer, "turn-old", BigText(10000));
+    AppendCurrentUserFixture(*writer);
+    const auto first = AppendStepFixture(*writer, "step-one");
+    const auto latest = AppendStepFixture(*writer, "step-two");
+    auto client = StepSummaryClient();
+    auto profile = BaseProfile();
+    profile.main_window_tokens = 100000;
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, profile, LongTurnInput());
+    REQUIRE(result.applied);
+    std::vector<std::string> refs;
+    for (const auto& node : writer->context().chain) refs.push_back(node.message_ref);
+    CHECK(std::find(refs.begin(), refs.end(), first) != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), latest) != refs.end());
+    const auto lines = ReadJsonLines(harness.jsonl);
+    const auto applied = EventsOf(lines, "compact.applied");
+    REQUIRE(applied.size() == 1);
+    CHECK((*applied.front())["payload"]["stepScope"].empty());
+}
+
+TEST_CASE("protected old turn stays verbatim while current turn steps still compact") {
+    Harness harness("protected-old-turn");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    // 受保护旧 turn:后台工具只准入未收口(folded=pending),整轮保护。
+    MessageDraft user;
+    user.turn_id = "turn-prot";
+    user.origin = MessageOrigin::Human;
+    user.message = {{"role", "user"}, {"content", "后台慢慢跑"}};
+    const auto user_receipt = writer->AppendMessage(std::move(user), Durability::PowerLoss);
+    REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
+    MessageDraft declaration;
+    declaration.turn_id = "turn-prot";
+    declaration.step_id = "step-prot";
+    declaration.request_id = "request-prot";
+    declaration.provider = "test";
+    declaration.wire = "test";
+    declaration.model = "test-model";
+    declaration.response_model = nlohmann::json(nullptr);  // 缺实报为 null(§4.44)
+    declaration.usage = nlohmann::json(nullptr);
+    declaration.origin = MessageOrigin::SessionRuntime;
+    declaration.message = nlohmann::json::object(
+        {{"role", "assistant"},
+         {"tool_calls", nlohmann::json::array({nlohmann::json::object(
+                            {{"id", "action-prot"},
+                             {"function", nlohmann::json::object({{"name", "search"},
+                                                                  {"arguments", "{}"}})}})})}});
+    const auto declaration_receipt =
+        writer->AppendMessage(std::move(declaration), Durability::PowerLoss);
+    REQUIRE(declaration_receipt.status == WriteReceipt::Status::Committed);
+    REQUIRE(writer->AdmitMessages({user_receipt.id, declaration_receipt.id}).status ==
+            WriteReceipt::Status::Committed);
+    ToolActionSession::Admit(*writer, "turn-prot", "step-prot", "action-prot", "queued",
+                             declaration_receipt.id, "provider-call");
+    // 超长当前 turn:两个已闭合旧 step + 最新 step。
+    AppendCurrentUserFixture(*writer);
+    const auto first = AppendStepFixture(*writer, "step-one");
+    const auto second = AppendStepFixture(*writer, "step-two");
+    const auto latest = AppendStepFixture(*writer, "step-latest");
+    auto client = StepSummaryClient();
+    const auto result =
+        lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    REQUIRE(result.applied);
+    std::vector<std::string> refs;
+    for (const auto& node : writer->context().chain) refs.push_back(node.message_ref);
+    // 受保护旧 turn 原块保留;当前 turn 的闭合旧 step 退出链,最新 step 留守。
+    CHECK(std::find(refs.begin(), refs.end(), user_receipt.id) != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), declaration_receipt.id) != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), first) == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), second) == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), latest) != refs.end());
+    // step 压缩真的发生:stepScope 非空且点名两枚闭合旧 step。
+    auto applied_lines = ReadJsonLines(harness.jsonl);
+    const auto applied = EventsOf(applied_lines, "compact.applied");
+    REQUIRE(applied.size() == 1);
+    CHECK((*applied.front())["payload"]["stepScope"]["stepIds"] ==
+          nlohmann::json::array({"step-one", "step-two"}));
+    // 压缩请求材料含选中闭合 step 的正文(材料里唯一的 assistant 角色),
+    // 受保护旧 turn 的声明块不入材料。
+    REQUIRE(client.calls == 1);
+    bool selected_step_in_material = false;
+    bool protected_declaration_in_material = false;
+    for (const auto& message : client.last_messages) {
+        if (message.value("role", std::string()) == "assistant") selected_step_in_material = true;
+        if (message.dump().find("action-prot") != std::string::npos) {
+            protected_declaration_in_material = true;
+        }
+    }
+    CHECK(selected_step_in_material);
+    CHECK_FALSE(protected_declaration_in_material);
+}
+
+TEST_CASE("closed-step write failures never publish candidate context") {
+    // setup 收笔后第 N 次提交的注入点:8=候选 assistant 落盘、
+    // 11=摘要 user 消息落盘、12=compact.applied 事件落盘。
+    constexpr int kCandidateAppend = 8;
+    constexpr int kSummaryAppend = 11;
+    constexpr int kAppliedAppend = 12;
+    for (const int failing_phase : {kCandidateAppend, kSummaryAppend, kAppliedAppend}) {
+        Harness harness(("step-failure-" + std::to_string(failing_phase)).c_str());
+        int commits = 0;
+        int fail_at = 0;
+        V3WriterOptions options;
+        options.inject_io_failure = [&]() -> std::optional<std::string> {
+            ++commits;
+            return fail_at && commits >= fail_at ? std::optional<std::string>("step.injected") : std::nullopt;
+        };
+        std::vector<std::string> original;
+        {
+            auto writer = harness.Start(options);
+            REQUIRE(writer);
+            AppendCurrentUserFixture(*writer);
+            AppendStepFixture(*writer, "step-old");
+            AppendStepFixture(*writer, "step-latest");
+            for (const auto& node : writer->context().chain) original.push_back(node.message_ref);
+            fail_at = commits + failing_phase; // candidate, summary or applied append
+            auto client = StepSummaryClient();
+            const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+            CHECK_FALSE(result.applied);
+            std::vector<std::string> refs;
+            for (const auto& node : writer->context().chain) refs.push_back(node.message_ref);
+            CHECK(refs == original);
+        }
+        auto resumed = V3Writer::Continue(harness.jsonl, V3WriterOptions{});
+        REQUIRE(resumed);
+        std::vector<std::string> refs;
+        for (const auto& node : resumed->context().chain) refs.push_back(node.message_ref);
+        CHECK(refs == original);
+        const auto projection = ProjectResume(harness.jsonl);
+        REQUIRE(projection);
+        CHECK(projection->model_context.inputs.size() + 1 == original.size());
+        CHECK(projection->compact_markers.empty());
+    }
+}
+
+TEST_CASE("closed-step source change during model call rejects adoption") {
+    Harness harness("step-source-conflict");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    AppendCurrentUserFixture(*writer);
+    const auto old = AppendStepFixture(*writer, "step-old");
+    AppendStepFixture(*writer, "step-latest");
+    auto client = StepSummaryClient();
+    const auto response = client.respond;
+    std::string queued_input;
+    client.respond = [&] {
+        queued_input = AppendCurrentUserFixture(*writer);
+        return response();
+    };
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    CHECK_FALSE(result.applied);
+    // 实际路径:校验 7.7 source_revision 先拦下(revision 已变),不到
+    // Apply 层的 compact.source_conflict;终态须是这把尺,不许被更弱的
+    // 失败方式(如收益/结构检查)蒙混过关。
+    CHECK(result.terminal_kind == "rejected");
+    CHECK(result.reason == "validation_failed");
+    // 先接住 lines 再取指针:EventsOf 返回的是指向入参 vector 元素的
+    // 指针,套在 ReadJsonLines 临时量上即悬垂(1330 行当年就是这么翻的)。
+    auto completed_lines = ReadJsonLines(harness.jsonl);
+    const auto completed =
+        EventsOf(completed_lines, "compact.validation.completed");
+    REQUIRE(completed.size() == 1);
+    bool source_revision_failed = false;
+    if ((*completed.front()).contains("payload") &&
+        (*completed.front())["payload"].contains("checks")) {
+        for (const auto& check : (*completed.front())["payload"]["checks"]) {
+            source_revision_failed = source_revision_failed ||
+                (check.value("code", std::string()) == "source_revision" &&
+                 !check.value("passed", true));
+        }
+    }
+    CHECK(source_revision_failed);
+    const auto ledger = ReadV3Ledger(harness.jsonl);
+    REQUIRE(ledger);
+    const auto projection = ProjectModelContext(*ledger);
+    std::vector<std::string> refs;
+    for (const auto& item : projection.inputs) refs.push_back(item.message_id);
+    CHECK(std::find(refs.begin(), refs.end(), old) != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), queued_input) != refs.end());
+    CHECK(EventsOf(ReadJsonLines(harness.jsonl), "compact.applied").empty());
+}
+
+TEST_CASE("provider capacity failure cannot resend the same summary input after resume") {
+    Harness harness("failed-input-repeat");
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer);
+        AppendCurrentUserFixture(*writer);
+        AppendStepFixture(*writer, "step-old");
+        AppendStepFixture(*writer, "step-latest");
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.error_code = "input_context_overflow";
+            return reply;
+        };
+        const auto first = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+        CHECK(first.reason == "input_context_overflow");
+        CHECK(client.calls == 1);
+    }
+    auto writer = V3Writer::Continue(harness.jsonl, V3WriterOptions{});
+    REQUIRE(writer);
+    auto client = StepSummaryClient();
+    const auto retry = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    CHECK_FALSE(retry.applied);
+    CHECK(retry.reason == "compact.failed_input_not_smaller");
+    CHECK(client.calls == 0);
+    const auto lines = ReadJsonLines(harness.jsonl);
+    const auto prepared = EventsOf(lines, "model.request.prepared");
+    REQUIRE(prepared.size() == 1);
+    CHECK((*prepared.front())["payload"]["inputFingerprint"].get<std::string>().size() == 64);
+}
+
+TEST_CASE("cancelled old-step summary records cancellation without adopting context") {
+    Harness harness("step-cancelled");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    AppendCurrentUserFixture(*writer);
+    AppendStepFixture(*writer, "step-old");
+    AppendStepFixture(*writer, "step-latest");
+    const auto revision = writer->context().revision;
+    StubClient client;
+    client.respond = [] {
+        V3CompactModelReply reply;
+        reply.error_code = "cancelled";
+        return reply;
+    };
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+    CHECK(result.terminal_kind == "cancelled");
+    CHECK_FALSE(result.applied);
+    CHECK(writer->context().revision == revision);
+    const auto lines = ReadJsonLines(harness.jsonl);
+    CHECK(EventsOf(lines, "compact.cancelled").size() == 1);
+    CHECK(EventsOf(lines, "compact.failed").empty());
+    CHECK(EventsOf(lines, "compact.applied").empty());
+}
+
+TEST_CASE("compact freeze rejects a forged scope that removes the latest step") {
+    Harness harness("forged-latest-step");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    const auto user = AppendCurrentUserFixture(*writer);
+    const auto latest = AppendStepFixture(*writer, "step-latest");
+    auto session = CompactSession::Begin(*writer, "auto", "pre_send_overflow", "turn-long", {});
+    REQUIRE(session.info.began);
+    const auto frozen = session.session->Freeze(*writer, {latest}, {user}, {},
+        Durability::ProcessCrash,
+        {{"turnId", "turn-long"}, {"stepIds", nlohmann::json::array({"step-latest"})},
+         {"prefixChanged", true}});
+    CHECK_FALSE(frozen.eligible);
+    CHECK(frozen.error == "invalid_step_scope");
+    CHECK(writer->context().chain.size() == 3);
 }

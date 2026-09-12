@@ -363,6 +363,19 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                 raise ValidationError(f"{kind} pending 必带 payload.reason")
         if not isinstance(obj.get("payload"), dict):
             raise ValidationError("event 行 payload 必为 object(可为 {})")
+        if kind in ("compact.started", "compact.applied") and "stepScope" in obj["payload"]:
+            scope = obj["payload"]["stepScope"]
+            if not isinstance(scope, dict):
+                raise ValidationError("stepScope must be an object")
+            if scope:
+                steps = scope.get("stepIds")
+                if not isinstance(scope.get("turnId"), str) or not scope["turnId"]:
+                    raise ValidationError("stepScope.turnId must be a nonempty identity")
+                if not isinstance(steps, list) or not steps or not all(
+                        isinstance(step, str) and step for step in steps):
+                    raise ValidationError("stepScope.stepIds must be nonempty identities")
+                if len(set(steps)) != len(steps) or scope.get("prefixChanged") is not True:
+                    raise ValidationError("stepScope requires unique steps and changed prefix")
         # 按 kind 的必选身份字段。
         id_field = None
         if kind.startswith("compact."):

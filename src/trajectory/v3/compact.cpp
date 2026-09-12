@@ -1,7 +1,9 @@
 // compact 全链实现。
 #include "trajectory/v3/compact.hpp"
 
+#include <set>
 #include "hooks/hash.hpp"
+#include "trajectory/v3/reader.hpp"
 #include "trajectory/canonical_json.hpp"
 
 namespace lubancode::trajectory::v3 {
@@ -96,7 +98,8 @@ CompactSession::FreezeResult CompactSession::Freeze(V3Writer& writer,
                                                     std::vector<std::string> removed_message_refs,
                                                     std::vector<std::string> retained_message_refs,
                                                     std::vector<std::string> protected_turn_ids,
-                                                    Durability durability) {
+                                                    Durability durability,
+                                                    nlohmann::json step_scope) {
     FreezeResult result;
     if (finished_) {
         result.eligible = false;
@@ -119,10 +122,79 @@ CompactSession::FreezeResult CompactSession::Freeze(V3Writer& writer,
         finished_ = true;
         return result;
     }
+    if (source_revision_ != writer.context().revision) {
+        result.error = "source_conflict";
+        result.eligible = false;
+        result.event = Fail(writer, FailKind::Rejected, result.error);
+        return result;
+    }
+    if (!step_scope.empty()) {
+        auto ledger = ReadV3Ledger(writer.path());
+        bool valid = ledger.has_value() && step_scope.is_object() &&
+            step_scope.contains("turnId") && step_scope["turnId"].is_string() &&
+            step_scope.contains("stepIds") && step_scope["stepIds"].is_array();
+        std::set<std::string> expected_steps;
+        if (valid) for (const auto& id : step_scope["stepIds"]) {
+            if (!id.is_string() || id.get<std::string>().empty() ||
+                !expected_steps.insert(id.get<std::string>()).second) valid = false;
+        }
+        if (valid) {
+            const auto turn = step_scope["turnId"].get<std::string>();
+            std::set<std::string> actual_steps;
+            const std::set<std::string> removed(removed_message_refs.begin(), removed_message_refs.end());
+            const std::set<std::string> retained(retained_message_refs.begin(), retained_message_refs.end());
+            for (const auto& node : ledger->context.chain) {
+                const auto* line = ledger->FindMessage(node.message_ref);
+                if (!line || line->turn_id != turn) continue;
+                if (removed.count(node.message_ref)) {
+                    valid = valid && line->step_id.has_value() &&
+                        line->message.value("role", std::string()) != "user";
+                    if (line->step_id) actual_steps.insert(*line->step_id);
+                } else {
+                    valid = valid && retained.count(node.message_ref) > 0;
+                    if (line->step_id && expected_steps.count(*line->step_id) &&
+                        line->message.value("role", std::string()) != "user") valid = false;
+                }
+            }
+            std::optional<std::string> latest_step;
+            bool retained_step_seen = false;
+            for (const auto& node : ledger->context.chain) {
+                const auto* line = ledger->FindMessage(node.message_ref);
+                if (!line || line->turn_id != turn || !line->step_id ||
+                    line->message.value("role", std::string()) == "user") continue;
+                latest_step = line->step_id;
+                if (!removed.count(node.message_ref)) retained_step_seen = true;
+                else if (retained_step_seen) valid = false; // selected steps must form an old prefix
+            }
+            if (latest_step && expected_steps.count(*latest_step)) valid = false;
+            for (const auto& action : FoldToolActions(*ledger)) {
+                if (action.turn_id != turn || !expected_steps.count(action.step_id)) continue;
+                const bool terminal = action.folded_status == "done" || action.folded_status == "failed" ||
+                    action.folded_status == "cancelled" || action.folded_status == "rejected";
+                bool selected_result = false;
+                for (const auto& version : action.message_versions) {
+                    if (version.on_current_chain) {
+                        selected_result = selected_result || removed.count(version.message_id) > 0;
+                        if (retained.count(version.message_id)) valid = false;
+                    }
+                }
+                valid = valid && terminal && selected_result && action.assistant_message_ref &&
+                    removed.count(*action.assistant_message_ref) > 0;
+            }
+            valid = valid && !actual_steps.empty() && actual_steps == expected_steps;
+        }
+        if (!valid) {
+            result.error = "invalid_step_scope";
+            result.eligible = false;
+            result.event = Fail(writer, FailKind::Rejected, result.error);
+            return result;
+        }
+    }
     source_revision_ = writer.context().revision;  // 执行时冻结(§4.5 行1)
     removed_ = std::move(removed_message_refs);
     retained_ = std::move(retained_message_refs);
     protected_turns_ = std::move(protected_turn_ids);
+    step_scope_ = std::move(step_scope);
     EventDraft draft;
     draft.kind = EventKindV3::CompactStarted;
     draft.status = OpStatus::Running;
@@ -133,7 +205,8 @@ CompactSession::FreezeResult CompactSession::Freeze(V3Writer& writer,
         {{"sourceContextRevision", source_revision_},
          {"removedMessageRefs", RefsToJson(removed_)},
          {"retainedMessageRefs", RefsToJson(retained_)},
-         {"protectedTurnIds", RefsToJson(protected_turns_)}});
+         {"protectedTurnIds", RefsToJson(protected_turns_)},
+         {"stepScope", step_scope_}});
     result.event = writer.AppendEvent(std::move(draft), durability);
     frozen_ = result.event.status == WriteReceipt::Status::Committed;
     return result;
@@ -347,6 +420,7 @@ CompactSession::ApplyResult CompactSession::Apply(V3Writer& writer,
          {"removedMessageRefs", RefsToJson(removed_)},
          {"retainedMessageRefs", RefsToJson(retained_)},
          {"protectedTurnIds", RefsToJson(protected_turns_)},
+         {"stepScope", step_scope_},
          {"contextId", view.context_id},
          {"contextChain", std::move(chain_json)},
          {"contextTokensBefore", context_tokens_before},

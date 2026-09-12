@@ -147,6 +147,12 @@ idle
 
 `compact.applied` payload 至少含(§4.8 全表):`sourceContextRevision`/`newContextRevision`、`oldStateHash`/`newStateHash`、`summaryMessageRef`/`validationEventRef`、`removedMessageRefs`/`retainedMessageRefs`、`protectedTurnIds`、`contextId`/`contextChain`、`contextTokensBefore`/`contextTokensAfter`、`tokenMetric`、`trigger`/`compactId`。
 
+容量恢复选中当前 turn 内闭合旧 step 时，`compact.started` 与 `compact.applied` 另带 `stepScope: {turnId, stepIds, prefixChanged: true}`。`stepIds` 依原链排序，取消息信封与 action 账中真实身份，不用 seq 推算。没有 step 摘要时该对象为空。移除/保留消息仍由 `removedMessageRefs` / `retainedMessageRefs` 逐项列明；用户原文留在新链，最新 step 与未闭合组不入摘要范围。reader 的 `CompactMarkerView.step_scope` 公开这份范围，resume 仍按已提交 `contextChain` 恢复。
+
+step 摘要覆盖已执行工具时，候选 manifest 必带 `executed_actions`。每项逐字保留宿主提供的 `actionId`、`operation`（工具名与参数）、`executionStatus`、`resultOutcome`、`evidenceRefs`；遗漏或改写则拒收候选。这样，后续模型仍能区分已经执行的操作、执行终态与回喂结果，不把旧操作当作待执行工作。操作参数本身过大、保留这些事实后没有缩减收益时，停止本次摘要。
+
+冻结前核对源 revision、step 身份、移除消息与保留消息。摘要内部请求只含选中闭合组和保留用户输入，不夹带未闭合工具调用。发现签名或不透明思考载荷时，本实现报 `compact.signature_prefix_incompatible`，不复制旧签名后假称兼容。当前生产持久化路径不写 `signature`/`encrypted_content`，也不落 `redacted_thinking`（thinking 块只存 type/text，签名丢弃），此检查是对未来保真写侧的保守前置防线，生产输入上通常不触发；adapter 级“目标模型是否要求签名前缀一致”的真核验尚未接线，留待后续单。范围替换会改请求前缀，不能据此保证服务端缓存命中。
+
 采用顺序(§4.8,写死):锁上下文提交口 -> 核对源版本 -> 预构造新内存视图并验预算 -> 摘要与引用落稳 -> `compact.applied` 按 PowerLoss 档落稳 -> 发布预构造内存视图 -> 放锁。
 
 - applied 前崩溃:旧上下文有效,已有回复/校验/摘要都只算候选。
