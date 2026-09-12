@@ -198,7 +198,12 @@ Responses 原生首期只在已验证的同路由响应链上续接，记录最�
 
 ## 11. 实施顺序与验收
 
-- [ ] P0：更新 schema/validator/reader 合同，加入身份、状态、投递与能力快照；统一未知执行语义。先用 fixture 验证，不能据此宣称生产已接。
+- [x] P0：更新 schema/validator/reader 合同，加入身份、状态、投递与能力快照；统一未知执行语义。先用 fixture 验证，不能据此宣称生产已接。
+  - 证据（2026-09-13，分支 `worktree-agent-async-tools-p0`，PR/CI 链接随合并回填）：schema 注册表新增 8 枚 statusless 事实 kind：`tool.job.registered/dispatched/observed/cancel_requested`、`tool.delivery.prepared/acknowledged/uncertain`、`tool.capability.recorded`（envelope.hpp/cpp `AllEventKindsV3`）。§5 身份映射落现有字段不另造：actionId/attempt=信封 actionId+payload、jobId/deliveryId/ownerEpoch/wireCallRef/resultRef+resultVersion=payload、targetRequestId=信封 requestId、originRef=turnId/stepId+assistantMessageRef；执行终态/结果持久化/选用复用 `tool.execution.*`/`tool.result.*`；schemaVersion 仍 3，纯追加不改旧字段含义（schema 文档 §2.1/§2.2/§四 与 `scripts/validate_trajectory_v3.py` 同步登记）。
+  - 校验：`schema3.cpp` 逐 kind 载荷合同（mode 只收 job_handle|native_deferred、native 注册必带 wireCallRef.async、resultRef/resultVersion 成对、acknowledged 必带 evidenceRef、uncertain 必带 reason 等）；`reader.cpp ValidateAsyncToolSequence` 跨行合同，错误码 `async.unknown_job/duplicate_job_registration/job_without_call_evidence/duplicate_terminal_observation/delivery_without_prepared/duplicate_delivery_attempt/duplicate_delivery_acknowledged/unknown_action/unknown_result/unknown_evidence`。
+  - 投影（`reader.hpp/cpp`）：`FoldJobExecutions`（registered→queued→running→succeeded/failed/cancelled，终态粘住、陈旧观测不回退；awaiting_approval；running 查不明=unknown——unknown 只在执行投影，不硬塞信封 status）、`ProjectProtocolObligations`（哪枚调用还欠模型一份结果，跨 turn 口径）、`FoldDeliveries`（prepared→sent→acknowledged；uncertain 可被迟到 acknowledged 解除）。能力快照：`FoldCapabilitySnapshots` + `DecideAsyncModes`（native_deferred 只认 verified，缺项按 unknown fail-closed；job_handle 仅明示 unsupported 才禁）。
+  - 测试：`tests/unit/trajectory_v3/test_v3_async_tools_contract.cpp`（kind 注册表与逐 kind 单行正反例）、`test_v3_async_tools_ledger.cpp`（v3 writer 造账：native_deferred 全链含跨 turn 欠账与投递 acknowledged、job_handle 接单即配齐、awaiting_approval/unknown/取消竞态、投递 uncertain、能力快照；校验器九类反例全拒；EnvGuard("1")）。
+  - 记账口径：合同与 fixture 已验，生产未接——`src/agent/loop.cpp`、各 wire adapter、AppServer 均未动，ToolJobCoordinator 未实现。拟议待 P1 确认：ownerEpoch 租约细节、executionPolicy 字段集（先钉类型不钉枚举）、inline 不注册 job 的口径、observed 不要求 attempt（宿主可自发观测）、deliveryId 跨 requestId 重试的条目粒度。
 - [ ] P1：实现持久 job 与单写者完成信封，打通 start/get/wait/cancel；落权鉴、资源锁、配额、取消及恢复。
 - [ ] P2：拆 AgentLoop 批次闸门，接 ResultDeliveryPlanner；覆盖终端、one-shot、AppServer、子代理与 Workflow 宿主。
 - [ ] P3：Responses function 原生试点，保留 async 标记和响应链；补 capability fail-closed 与 PTC 排斥。custom 与流式提前派发另验后开。
@@ -228,4 +233,4 @@ Responses 原生首期只在已验证的同路由响应链上续接，记录最�
 
 验证分三层：单测验状态机；真实主循环配剧本后端验落账、wire 与故障；真实 OpenAI/Claude 只读小任务验协议能力。记录 endpoint/model/配置、完整 wire 证据、请求次数与 usage。假后端通过不能代替网关和模型真实支持。
 
-本次交付只含设计与入口链接。上述清单不打勾，不把新字段写成当前已实现。
+本次交付只含设计与入口链接。上述清单不打勾，不把新字段写成当前已实现。（P0 后于 2026-09-13 落地并勾选，证据见 §11；其余 P1-P4 仍待实施。）

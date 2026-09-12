@@ -456,4 +456,134 @@ std::expected<ResumeProjection, std::string> ProjectResume(
     const std::filesystem::path& jsonl, SourceLedgerResolver resolver = nullptr,
     int max_source_depth = 64);
 
+// ---------------------------------------------------------------------------
+// 异步工具 P0 投影(异步工具单 §5/§6;合同与 fixture 已验,生产未接)。
+// 三件拆开:execution(工作跑没跑完)、protocol obligation(哪枚调用还欠
+// 模型一份结果)、delivery(哪份结果进了哪次请求、远端收没收到)。全部
+// 只读:不派发、不重跑、不合成假终态;unknown 是执行投影状态,不硬塞
+// 信封 status。
+// ---------------------------------------------------------------------------
+
+// 执行投影(单 §6):registered → queued → running → succeeded/failed/
+// cancelled;running 查不明 = unknown;审批未过停 awaiting_approval。
+struct JobExecutionView {
+    std::string job_id;
+    std::string mode;  // job_handle|native_deferred(注册时申报)
+    std::string state;
+    std::string origin_action_id;                 // 注册时的发起 Action
+    std::optional<std::string> assistant_message_ref;  // originRef 的声明消息
+    std::optional<nlohmann::json> wire_call_ref;  // provider/wire/callId/async
+    std::string owner_epoch;                      // 最近派发租约(拟议待 P1)
+    bool approval_required = false;
+    bool dispatched = false;
+    bool cancel_requested = false;  // 取消请求在账;不等于已终止(单 §8)
+    std::optional<std::string> cancel_request_action_id;
+    std::optional<std::string> observed_result_ref;  // 终态观测的结果引用
+    std::uint64_t observed_result_version = 0;
+    std::vector<std::string> event_ids;
+};
+
+// 折叠全部 job(注册序,即 jobId 首次注册顺序)。状态机单调:dispatched
+// 即 running(审批随派发隐式放行);观测只在升序时推进,running/unknown
+// 同档以最新观测为准;终态粘住——首个终态观测生效,后续观测不改(重复
+// 终态由 ValidateAsyncToolSequence 拒)。
+std::vector<JobExecutionView> FoldJobExecutions(const V3Ledger& ledger);
+const JobExecutionView* FindJobExecution(const std::vector<JobExecutionView>& jobs,
+                                         std::string_view job_id);
+
+// 协议欠账投影(单 §1/§4):逐 Action 回答"这枚调用配齐没有"。job_handle
+// 的 start 接单结果即配齐;native_deferred 的原调用只在最终结果回喂时
+// 配齐;inline 无 job,执行终态后照 tool 消息配齐。跨 turn 欠账 = 条目
+// paired=false 且账上已有后续请求。
+struct ProtocolObligationView {
+    std::string action_id;
+    std::string mode;  // inline(默认)|job_handle|native_deferred
+    std::optional<std::string> job_id;
+    std::optional<std::string> provider_call_id;  // wireCallRef.callId
+    bool async_call = false;                      // wireCallRef.async
+    bool paired = false;  // 账上已有该 actionId 的正式 tool 消息
+    std::string pairing_message_id;               // paired 时
+    bool on_current_context = false;              // 配对消息在当前链上
+};
+
+std::vector<ProtocolObligationView> ProjectProtocolObligations(const V3Ledger& ledger);
+const ProtocolObligationView* FindProtocolObligation(
+    const std::vector<ProtocolObligationView>& obligations, std::string_view action_id);
+
+// 投递投影(单 §6):pending → prepared → sent → acknowledged;请求发出
+// 而回执丢失 = uncertain。条目自 prepared 起(pending 是尚未预备投递的
+// 已选结果,归 P2 ResultDeliveryPlanner 选取时才有主)。sent 由同
+// requestId 的 model.request.sent 推进;uncertain 可被更晚的 acknowledged
+// 解除(迟到证据),不降级 acknowledged。
+struct DeliveryView {
+    std::string delivery_id;
+    std::string action_id;
+    std::string target_request_id;
+    std::uint64_t result_version = 0;
+    std::string state;  // prepared|sent|acknowledged|uncertain
+    std::optional<std::string> result_ref_id;   // 同会话引用的 event id
+    std::optional<std::string> evidence_ref;    // acknowledged 的证据
+    std::string uncertain_reason;
+    std::vector<std::string> event_ids;
+};
+
+std::vector<DeliveryView> FoldDeliveries(const V3Ledger& ledger);
+const DeliveryView* FindDelivery(const std::vector<DeliveryView>& deliveries,
+                                 std::string_view delivery_id);
+
+// 能力快照(单 §4):provider/endpoint/wire/model/工具声明/运行配置合成
+// 的判定及其依据。三态 unknown/verified/unsupported;能力名不钉死枚举
+//(已用:native_deferred/job_handle/parallel_tool_calls)。
+struct ToolCapabilityVerdict {
+    std::string capability;
+    std::string status;  // unknown|verified|unsupported
+    std::string evidence;
+};
+
+struct ToolCapabilitySnapshotView {
+    std::string event_id;
+    std::string provider;
+    std::string wire;
+    std::string model;
+    std::string endpoint;
+    std::string tool_name;
+    std::vector<ToolCapabilityVerdict> verdicts;
+};
+
+std::vector<ToolCapabilitySnapshotView> FoldCapabilitySnapshots(const V3Ledger& ledger);
+const ToolCapabilityVerdict* FindCapabilityVerdict(const ToolCapabilitySnapshotView& snapshot,
+                                                   std::string_view capability);
+
+// 模式闸门(单 §4:unknown 默认不用 native_deferred;能力 unknown 时
+// fail-closed)。native_deferred 只认 verified——unknown/unsupported/缺项
+// 一律不放行;job_handle 是宿主侧行为,不依赖 provider 协议,只有明示
+// unsupported 才禁。纯合同判定,不接真探针。
+struct AsyncModeDecision {
+    bool native_deferred_allowed = false;
+    std::string native_deferred_reason;
+    bool job_handle_allowed = true;
+    std::string job_handle_reason;
+};
+
+AsyncModeDecision DecideAsyncModes(const ToolCapabilitySnapshotView& snapshot);
+
+// 跨行合同校验器(异步工具单 §5/§6;同 CheckPreparedAgainstChain 的读取
+// 侧跨行钉法,验卷不改):前驱、唯一终态、投递次序与身份引用。
+//   - async.duplicate_job_registration:同一 jobId 二次注册;
+//   - async.unknown_job:dispatched/observed/cancel_requested 引用未注册
+//     的 jobId(未知身份引用);
+//   - async.job_without_call_evidence:注册的 Action 此前无调用证据
+//     (tool.execution.pending/started;非法前驱);
+//   - async.duplicate_terminal_observation:同一 job 第二枚终态观测
+//     (单 §6:合法终态只接纳一次;取消与完成竞态由单写者收唯一终态);
+//   - async.delivery_without_prepared:acknowledged/uncertain 先于同
+//     deliveryId 的 prepared(乱序信封);
+//   - async.duplicate_delivery_attempt:同 (deliveryId,requestId) 二次
+//     prepared;async.duplicate_delivery_acknowledged 同理;
+//   - async.unknown_action:投递引用的 Action 账上无任何工具域事件;
+//   - async.unknown_result:prepared.resultRef 指不到 tool.result.persisted;
+//   - async.unknown_evidence:acknowledged.evidenceRef 指不到账上事件。
+// 跨会话五键引用只验格式(schema3),解析归目标账——本验不追外账。
+std::vector<Schema3Error> ValidateAsyncToolSequence(const V3Ledger& ledger);
+
 }  // namespace lubancode::trajectory::v3

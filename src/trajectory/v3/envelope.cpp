@@ -348,6 +348,14 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::WorkflowRunCompleted: return "workflow.run.completed";
         case EventKindV3::WorkflowRunFailed: return "workflow.run.failed";
         case EventKindV3::WorkflowRunCancelled: return "workflow.run.cancelled";
+        case EventKindV3::ToolJobRegistered: return "tool.job.registered";
+        case EventKindV3::ToolJobDispatched: return "tool.job.dispatched";
+        case EventKindV3::ToolJobObserved: return "tool.job.observed";
+        case EventKindV3::ToolJobCancelRequested: return "tool.job.cancel_requested";
+        case EventKindV3::ToolDeliveryPrepared: return "tool.delivery.prepared";
+        case EventKindV3::ToolDeliveryAcknowledged: return "tool.delivery.acknowledged";
+        case EventKindV3::ToolDeliveryUncertain: return "tool.delivery.uncertain";
+        case EventKindV3::ToolCapabilityRecorded: return "tool.capability.recorded";
 
     }
     return "unknown";
@@ -469,6 +477,15 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::WorkflowRunCompleted,
             EventKindV3::WorkflowRunFailed,
             EventKindV3::WorkflowRunCancelled,
+            // 异步工具族(单 P0):事实行,全部 statusless。
+            EventKindV3::ToolJobRegistered,
+            EventKindV3::ToolJobDispatched,
+            EventKindV3::ToolJobObserved,
+            EventKindV3::ToolJobCancelRequested,
+            EventKindV3::ToolDeliveryPrepared,
+            EventKindV3::ToolDeliveryAcknowledged,
+            EventKindV3::ToolDeliveryUncertain,
+            EventKindV3::ToolCapabilityRecorded,
 
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {
@@ -554,6 +571,12 @@ std::optional<OpStatus> RequiredStatusForKind(EventKindV3 kind) {
         case K::WorkflowNodeCancelled:
         case K::WorkflowRunCancelled:
             return OpStatus::Cancelled;
+        // 异步工具族(单 P0)整体 statusless:tool.job.registered/dispatched/
+        // observed/cancel_requested、tool.delivery.prepared/acknowledged/
+        // uncertain、tool.capability.recorded 都是事实记录。后缀
+        // acknowledged/uncertain/observed/registered 不在 §2.2 生命周期表;
+        // 执行/投递状态进 payload(observedStatus)与读取投影,unknown 不
+        // 硬塞信封 status——走 default 不携带。
         default:
             return std::nullopt;
     }
