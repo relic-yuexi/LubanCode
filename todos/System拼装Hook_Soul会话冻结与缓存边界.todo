@@ -153,6 +153,7 @@ Anthropic 文档说明缓存前缀按 tools → system → messages 组织。修
   - tests/unit/agent/test_soul_freeze.cpp——假后端捕获真实请求构建结果：锁定前可改；首请求锁定后 SetSoul 被拒、下一请求 system 魂段字节不变；首请求失败（脚本用尽）/中途取消仍锁定、重试沿用快照；新会话（新 Agent）采用新值、与旧会话快照互不相干；AdoptSessionSoul 换场重灌；锁定回调恰触发一次（幂等）；轮次收口后到达的"排队命令"（SetSoul）被拒。
   - tests/unit/runtime/test_session_soul.cpp——规范化/内容未变判定、JSON round-trip 与缺字段/类型/正文 hash 对不上报错（contains 纪律）、blob 原子写读 round-trip/覆盖/损坏 JSON 报错、多会话快照不串值。
   - tests/unit/app/test_soul_command.cpp——HOME/USERPROFILE 隔离跑 HandleSoulCommand 全分支：锁定前保存并更新草稿、内容未变、off/default/clear/具名、锁定后只改默认、写入失败整体回滚（SOUL.md 造成目录注入失败）、多会话不串值。
+  - tests/unit/runtime/test_backend_stack.cpp 的"会话中改皮上的活字段"册随新合同更新：首请求锁定后 SetSoul 被拒、system 不再换魂——旧断言"中途改魂下一请求生效"正是本单废除的行为。
 - 未验与边界：
   - "重启后原值不变"验证到单元级（blob round-trip + CommitSoulSnapshot/LaunchResumeSoulSnapshot/AdoptResumedSessionSoul 接线），真进程 --continue 端到端未跑（本地禁 build，交 CI 后可后续真机抽验）。
   - 会话级 fork 路径在代码中不存在（仅 goal 域有 goal fork，不涉魂），无从接线，未验。
