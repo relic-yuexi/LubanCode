@@ -68,7 +68,9 @@ public:
     void PrintViewedTranscript(int viewed_task_id, int tail_rows = 0);
 
     // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
-    void PrintRecentItems(std::size_t count);
+    // expand_latest(RepaintScreen 路传):Ctrl+O 的最近一条档随重画走,
+    // 最近一枚按展开画,其余照紧凑——重绘后档位不丢。
+    void PrintRecentItems(std::size_t count, bool expand_latest = false);
 
     // ---- 会话侧的零星口 ----
     // 查看态的 Ctrl+O 档位:查看帧构建(子代理视口)时读,ToggleExpand 翻。

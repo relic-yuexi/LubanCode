@@ -34,6 +34,10 @@ struct TurnRenderOptions {
     int width = 80;             // 终端列宽;<= 0 按 80 兜底
     bool plain = false;         // plain 主题(裸文本,无 ANSI)
     bool expanded = false;      // 详细态:条目展开(完整参数/输出)
+    // 单条展开(Ctrl+O 空闲态"最近一条"档,Ctrl+L/resize 重放不丢):本轮
+    // 内"打印序"等于它的条目按展开画,其余照 expanded。-1 = 无单条选择;
+    // 多轮重放时只在目标所在的那一轮传,别的轮 -1(打印序按轮独立计)。
+    int expanded_index = -1;
     bool include_user = true;   // 画不画 user 条目(resume 重放可能自带)
     bool include_footer = true; // 画不画 turn footer(紧凑态实时画面不画,
                                 // footer 由 RunTurn 收口时单独落)

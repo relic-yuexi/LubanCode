@@ -157,6 +157,119 @@ TEST_CASE("TranscriptUiController:查看态视口构建走钩子") {
 }
 
 // ---------------------------------------------------------------------------
+// Ctrl+O 最近一条档的重绘保档(截图单 §二.3):RepaintScreen(Ctrl+L/resize)
+// 原先只传全局 expanded_,最近条目的展开选择在整屏重建后丢失。现在快照路
+// 与 TurnView 重放路都要带上 expand_latest_。
+// ---------------------------------------------------------------------------
+TEST_CASE("TranscriptUiController:RepaintScreen 无 TurnView 时最近条目档随重画走") {
+    const lubancode::cli::Theme theme;
+    std::ostringstream out;
+    auto controller = MakeController(out, theme);
+    auto& items = controller.items();
+    lubancode::cli::TranscriptItem first;
+    first.id = 1;
+    first.title = "run_command(git log)";
+    first.summary_lines = {"Done · 退出码 0"};
+    first.status = lubancode::cli::TranscriptStatus::Ok;
+    items.push_back(first);
+    lubancode::cli::TranscriptItem latest;
+    latest.id = 2;
+    latest.title = "read_file(a.txt)";
+    latest.input_json = "{\"path\":\"a.txt\"}";
+    latest.full_output = "1  hi";
+    latest.status = lubancode::cli::TranscriptStatus::Ok;
+    items.push_back(latest);
+
+    // Ctrl+O 展开:expand_latest_ 落在最近一条(read_file)。
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::ToggleExpand));
+    out.str("");
+    // Ctrl+L:无 TurnView 存档,重画最近 10 条——最近一条保持展开档。
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::RepaintScreen));
+    const std::string repainted = out.str();
+    CHECK(repainted.find("read_file(a.txt)") != std::string::npos);
+    CHECK(repainted.find("参数: {\"path\":\"a.txt\"}") != std::string::npos);  // 最近一条展开
+    CHECK(repainted.find("run_command(git log)") != std::string::npos);
+    bool first_expanded = repainted.find("{\"command\"") != std::string::npos;
+    CHECK_FALSE(first_expanded);  // 其余条目照紧凑
+
+    // 再按 Ctrl+O 收起,重画恢复全紧凑。
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::ToggleExpand));
+    out.str("");
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::RepaintScreen));
+    CHECK(out.str().find("参数:") == std::string::npos);
+    lubancode::cli::TermPort().Reset();
+}
+
+TEST_CASE("TranscriptUiController:RepaintScreen 有 TurnView 时末轮最近条目保持展开") {
+    const lubancode::cli::Theme theme;
+    std::ostringstream out;
+    auto controller = MakeController(out, theme);
+
+    std::vector<lubancode::runtime::TurnView> views;
+    // 首轮:一枚工具。
+    {
+        lubancode::runtime::TurnView v;
+        v.turn_id = "t1";
+        lubancode::runtime::TurnItemView tool;
+        tool.item_id = "a1";
+        tool.step_id = "s0";
+        tool.kind = lubancode::runtime::TurnItemViewKind::Tool;
+        tool.status = lubancode::runtime::TurnItemViewState::Succeeded;
+        tool.tool_name = "run_command";
+        tool.input = nlohmann::json{{"command", "git log"}};
+        tool.result_text = "ok";
+        v.items.push_back(tool);
+        v.steps.push_back(lubancode::runtime::ModelStepView{"s0", 0, {"a1"}, true});
+        views.push_back(std::move(v));
+    }
+    // 末轮:思考 + 工具,最近可展开条目是工具(打印序 1)。
+    {
+        lubancode::runtime::TurnView v;
+        v.turn_id = "t2";
+        lubancode::runtime::TurnItemView think;
+        think.item_id = "b1";
+        think.step_id = "s1";
+        think.kind = lubancode::runtime::TurnItemViewKind::Thinking;
+        think.status = lubancode::runtime::TurnItemViewState::Succeeded;
+        think.tool_name = "thinking";
+        think.result_text = "琢磨了一下";
+        think.started_at_ms = 1000;
+        think.ended_at_ms = 2800;
+        v.items.push_back(think);
+        lubancode::runtime::TurnItemView tool;
+        tool.item_id = "b2";
+        tool.step_id = "s1";
+        tool.kind = lubancode::runtime::TurnItemViewKind::Tool;
+        tool.status = lubancode::runtime::TurnItemViewState::Succeeded;
+        tool.tool_name = "read_file";
+        tool.input = nlohmann::json{{"path", "a.txt"}};
+        tool.result_text = "1  hi";
+        v.items.push_back(tool);
+        v.steps.push_back(lubancode::runtime::ModelStepView{"s1", 0, {"b1", "b2"}, true});
+        views.push_back(std::move(v));
+    }
+
+    lubancode::cli::TranscriptUiController::Hooks hooks;
+    hooks.turn_views = [&views]() -> const std::vector<lubancode::runtime::TurnView>* { return &views; };
+    controller.SetHooks(std::move(hooks));
+
+    // Ctrl+O 展开最近一条(末轮的 read_file),Ctrl+L 重放:展开档不丢。
+    controller.items().push_back(lubancode::cli::TranscriptItem{});  // ToggleExpand 需要非空账本
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::ToggleExpand));
+    out.str("");
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::RepaintScreen));
+    const std::string repainted = out.str();
+    CHECK(repainted.find("read_file(a.txt)") != std::string::npos);
+    bool read_file_expanded = repainted.find("参数: {\"path\":\"a.txt\"}") != std::string::npos;
+    CHECK(read_file_expanded);  // 末轮最近条目保持展开
+    bool first_turn_expanded = repainted.find("参数: {\"command\":\"git log\"}") != std::string::npos;
+    CHECK_FALSE(first_turn_expanded);  // 别的轮/条目照紧凑
+    CHECK(repainted.find("琢磨了一下") == std::string::npos);  // 思考照紧凑(正文不露)
+    CHECK(repainted.find("(Ctrl+O 展开)") != std::string::npos);  // 思考收起档提示展开
+    lubancode::cli::TermPort().Reset();
+}
+
+// ---------------------------------------------------------------------------
 // 后台通知标题分家(后台代理管控三连 bug 单,Bug A):权限拒绝与监督提醒
 // 各挂各的标题,不许张冠李戴。真机实录:三只后台代理工具全放行,监督器
 // 的提醒 toast 却顶着"权限未放行已拒"的标题连刷五条,用户读成全线被拒。

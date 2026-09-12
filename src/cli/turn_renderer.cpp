@@ -136,6 +136,9 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
     // 一条打印块(user 块/正文/条目各自记账),不硬塞 UserPrompt 兜底——首
     // 条不垫由 first_printed 守门。
     lubancode::cli::BlockRole previous_role = lubancode::cli::BlockRole::Tool;
+    // 思考/工具条目的打印序(跳过 parent 非空与 user/text,与 expanded_index
+    // 同一把尺):单条展开档按它对号。
+    int printed_item_index = -1;
     for (const auto& item : view.items) {
         if (!item.parent_item_id.empty()) {
             continue;
@@ -237,8 +240,9 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
         previous_step = item.step_id;
         previous_role = lubancode::cli::RoleOf(projected);
         first_printed = true;
-        const std::string text = lubancode::cli::FormatTranscriptItem(projected, theme, width,
-                                                                     options.expanded);
+        ++printed_item_index;
+        const bool item_expanded = options.expanded || printed_item_index == options.expanded_index;
+        const std::string text = lubancode::cli::FormatTranscriptItem(projected, theme, width, item_expanded);
         // FormatTranscriptItem 每行以 \n 收尾:拆进行组。
         std::size_t pos = 0;
         while (pos < text.size()) {

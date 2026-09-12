@@ -264,9 +264,13 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
     const int focus_cols = focused ? 2 : 0;
     // 思考条目的有效档:全局展开开关,或本条自己的用户展开态(运行中
     // ExplicitExpandedRunning 优先于全局紧凑——用户刚伸手打开,不能等
-    // 下一帧全局重打才看见)。收定后的展开交给全局开关(整组重打路)。
-    const bool thinking_explicit_expanded = item.kind == TranscriptKind::Thinking &&
-                                            item.thinking_phase == ThinkingPhase::ExplicitExpandedRunning;
+    // 下一帧全局重打才看见;收定后的 ExplicitExpandedDone 同理——用户
+    // 展开过的思考,完毕不自动收折,重打/收定改写都保持展开,档位不随
+    // 结束事件改回)。全局展开开关照旧管其余条目(整组重打路)。
+    const bool thinking_explicit_expanded =
+        item.kind == TranscriptKind::Thinking &&
+        (item.thinking_phase == ThinkingPhase::ExplicitExpandedRunning ||
+         item.thinking_phase == ThinkingPhase::ExplicitExpandedDone);
     const bool effective_expanded = expanded || thinking_explicit_expanded;
 
     std::string out;
@@ -284,6 +288,16 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
             prefix_cols += 2;  // ● 一列 + 空格一列
         }
         std::string title = item.title;
+        // 思考提示按"有效档位"现场生成(截图单:标题写死"Ctrl+O 展开",
+        // 展开态露全文时提示失真):item.title 只存思考事实("思考 Xs"),
+        // 收起档补展开提示、展开档补收起提示;无可见正文不可展开,不挂
+        // 提示(空 thinking 由 thinking_no_summary 兜底)。事实与提示分家,
+        // 不在落账处烧死快捷键文案。
+        if (item.kind == TranscriptKind::Thinking && ThinkingHasVisibleText(item.full_output)) {
+            title = trf(effective_expanded ? "transcript.thinking_collapse_hint"
+                                            : "transcript.thinking_expand_hint",
+                        title);
+        }
         // 思考条目展开档:标题补「· N 字」,正文多长一眼有数。紧凑档不
         // 加,收定时保持一行「思考 Xs」。
         if (effective_expanded && item.kind == TranscriptKind::Thinking && !item.full_output.empty()) {

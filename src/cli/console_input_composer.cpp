@@ -889,6 +889,35 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 印不擦,擦旧帧全归这本账(每次铺帧前现记现擦,绝不跨调用攒)。
     // -------------------------------------------------------------------
     std::optional<int> view_body_top;  // 上一视图正文的缓冲顶行;nullopt = 无
+    // 主会话 Ctrl+O 的受管转录帧账(截图单:旧界面层层堆叠):空闲态按下
+    // Ctrl+O 时先收底栏帧(retire_idle_chrome),再按这本账把上一帧转录
+    // 从缓冲里擦净,回调按新档重打,最后 reanchor 画回一套底栏——每次切
+    // 换只有一套界面,不往下方叠副本。与 view_body_top 同规矩:锚点只在
+    // 本段读取内有效(两段读取之间可能整轮流式滚屏,绝对行号全失效),
+    // 跨段不认账;段内 Ctrl+L/resize 整屏重建时随重建作废重记。
+    std::optional<int> transcript_body_top;  // 上一帧转录的缓冲顶行;nullopt = 无
+    int transcript_body_width = -1;          // 记账时的缓冲宽;宽变了(重排)弃账不硬擦
+    const auto erase_previous_transcript_body = [&]() {
+        if (!transcript_body_top.has_value()) {
+            return;
+        }
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value() || info->width != transcript_body_width) {
+            // 拿不到屏幕信息或缓冲宽变了(重排过):绝对行号不可信,退回
+            // 旧行为(换行追加),宁可重新堆也不擦错别人的内容。
+            transcript_body_top.reset();
+            return;
+        }
+        int top = *transcript_body_top;
+        if (top < info->viewport_y) {
+            top = info->viewport_y;  // 只管当前 viewport,滚出的留在滚屏历史
+        }
+        for (int y = top; y < info->height; ++y) {
+            platform::ClearRowHardFrom(0, y, info->width);
+        }
+        platform::SetCursorPos(0, top);
+        transcript_body_top.reset();
+    };
     const auto erase_previous_view_body = [&]() {
         if (!view_body_top.has_value()) {
             return;
@@ -914,6 +943,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // tail_rows>0 是实时流的重铺拍(只铺头几行+最近 N 行,见 console_input.hpp
     // 的钩子注释)。
     const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
+        transcript_body_top.reset();  // 视口换源:主转录帧账随之作废(画面已被查看帧接管)
         std::optional<platform::ScreenInfo> before;
         if (tail_rows == 0) {
             // 真切页(main <-> agent):上半屏是一块独立 Panel，整块换源。
@@ -1066,6 +1096,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             view_body_top.reset();  // 旧锚点随整屏清一起作废,view_frame 会重记
             print_view_frame(viewed_now);
         } else if (UiHandlerSlot()) {
+            transcript_body_top.reset();  // 转录随整屏重铺挪了位,旧账作废,下按重记
             (void)UiHandlerSlot()(UiKeyAction::RepaintScreen);  // 正文从 transcript 快照重铺
         }
         if (box) {
@@ -1886,6 +1917,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 // view_body_top 这本账把旧查看帧擦净——app 侧只打印不擦,不在这
                 // 再开第二本账(查看态完成退场花屏单)。
                 const bool view_relay = *action == UiKeyAction::ToggleExpand && CurrentAgentViewedTaskId() != 0;
+                // 主会话 Ctrl+O(截图单:旧界面层层堆叠):受管区域重绘——先收
+                // 底栏帧,再按 transcript_body_top 这本账擦净上一帧转录,回调按
+                // 新档重打(模式行+转录),reanchor 画回一套底栏。每按一次只有
+                // 一套界面;转录长过视口时滚出部分留在滚屏历史(账夹到视口
+                // 顶),不反复刷屏。其余 UI 键(焦点导航/轮次导航/ESC)照旧走
+                // 追加路——它们本来就该滚进历史。
+                const bool transcript_relay = *action == UiKeyAction::ToggleExpand && !view_relay;
                 std::optional<int> relay_frame_top;
                 if (view_relay) {
                     retire_idle_chrome();
@@ -1893,6 +1931,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     if (const std::optional<platform::ScreenInfo> relay_info = platform::GetScreenInfo();
                         relay_info.has_value()) {
                         relay_frame_top = relay_info->cursor_y;
+                    }
+                } else if (transcript_relay) {
+                    retire_idle_chrome();
+                    erase_previous_transcript_body();
+                    if (const std::optional<platform::ScreenInfo> relay_info = platform::GetScreenInfo();
+                        relay_info.has_value()) {
+                        transcript_body_top = relay_info->cursor_y;  // 回调从这行起铺,下一按照账擦
+                        transcript_body_width = relay_info->width;
                     }
                 } else if (const std::optional<platform::ScreenInfo> before_info = platform::GetScreenInfo();
                            before_info.has_value()) {

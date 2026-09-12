@@ -624,8 +624,11 @@ struct ToolDisplay {
         } else {
             item.thinking_phase = user_expanded ? lubancode::cli::ThinkingPhase::ExplicitExpandedDone
                                                 : lubancode::cli::ThinkingPhase::CollapsedDone;
-            item.title =
-                lubancode::cli::trf("transcript.thinking_done_expandable", lubancode::cli::FormatSeconds(seconds));
+            // 标题只存思考事实("思考 Xs"),展开/收起提示由渲染层按有效档位
+            // 现场生成(截图单:写死"(Ctrl+O 展开)"在用户展开后失真)。有无
+            // 正文可展开由 ThinkingHasVisibleText 判,thinking_phase 已记用户
+            // 展开选择。
+            item.title = lubancode::cli::trf("transcript.thinking_done", lubancode::cli::FormatSeconds(seconds));
         }
         UpdateSnapshotItem(idx);
         if (is_console) {

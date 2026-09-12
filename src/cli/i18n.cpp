@@ -83,8 +83,8 @@ const Entry kZhCN[] = {
      "                  聚焦查看(Ctrl+E)画面里按下:返回会话\n"
      "  / 后按 ↓↑       进入候选菜单直选(↓ 选中第一条,↓↑ 循环移动),Enter 执行选中命令\n"
      "                  (已敲的参数尾巴原样保留),继续打字/退格/ESC 回普通编辑\n"
-     "  Ctrl+O          紧凑/详细全局切换:把全部工具条目按新档整块重打(详细 = 完整参数\n"
-     "                  JSON + 完整输出/diff 全文),再按切回\n"
+     "  Ctrl+O          展开/收起最近一条:把最近一枚工具/思考条目在新旧档间切换(详细 = 完整参数\n"
+     "                  JSON + 完整输出/diff 全文),再按切回;重画不叠旧界面副本\n"
      "  Ctrl+E          聚焦查看当前焦点条目(无焦点则最近一条)全文;再按 Ctrl+E 或 ESC 返回\n"
      "  Tab             输入框有内容:补全/轮转 slash 命令(现职);输入框为空:进入焦点态\n"
      "                  并选中最近一条工具条目;焦点态内 Tab 往旧走、Shift+Tab 往新走,\n"
@@ -150,7 +150,7 @@ const Entry kZhCN[] = {
      "粘贴内容在 1000 字符内直接显示;超过后折成 [粘贴内容 N 字符],提交时展开原文。\n"
      "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
      "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
-     "条目查看:Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,整块重打);\n"
+     "条目查看:Ctrl+O 展开/收起最近一条(详细 = 完整参数 + 输出/diff 全文,原地换档不叠旧帧);\n"
      "Shift+Tab 任何时候都是切确认档(confirm/auto/yolo,状态行实时显示;auto 档文件与\n"
      "安全命令放行,危险命令与外挂工具确认);输入框为空时\n"
      "Tab 进入焦点态选最近一条,焦点态内 Tab 往旧走、Shift+Tab 往新走(这时不切档),\n"
@@ -1105,7 +1105,8 @@ const Entry kZhCN[] = {
     {"transcript.thinking_running", "思考中…"},
     {"transcript.thinking_running_timed", "思考中… {0}"},
     {"transcript.thinking_done", "思考 {0}"},
-    {"transcript.thinking_done_expandable", "思考 {0}(Ctrl+O 展开)"},
+    {"transcript.thinking_expand_hint", "{0}(Ctrl+O 展开)"},
+    {"transcript.thinking_collapse_hint", "{0}(Ctrl+O 收起)"},
     {"transcript.thinking_no_summary", "思考 {0}(未提供摘要)"},
     {"transcript.thinking_chars", " · {0} 字"},
     {"transcript.batch_pending", "(本拍排队中)"},
@@ -2054,7 +2055,8 @@ const Entry kEn[] = {
      "  Down/Up after / enter the candidate menu (Down selects the first entry, Down/Up cycle);\n"
      "                  Enter runs the selected command (typed argument tail is kept); typing/\n"
      "                  Backspace/ESC returns to normal editing\n"
-     "  Ctrl+O          toggle compact/detailed globally (detailed = full argument JSON + full\n"
+     "  Ctrl+O          expand/collapse the latest entry: toggles the most recent tool/thinking item\n"
+     "                  between compact and detailed (detailed = full argument JSON + full\n"
      "                  output/diff); press again to switch back\n"
      "  Ctrl+E          focus-view the focused item (or the latest one); Ctrl+E or ESC returns\n"
      "  Tab             with input: complete/cycle slash commands; with empty input: enter focus\n"
@@ -2128,7 +2130,8 @@ const Entry kEn[] = {
      "Paste content up to 1000 chars stays visible; larger pastes collapse and expand on submit.\n"
      "Candidate menu: with a leading /, Down enters the menu (Down/Up cycle, Enter runs the\n"
      "selection, typed argument tail kept; typing/Backspace/ESC returns to editing); Tab completes.\n"
-     "Item view: Ctrl+O toggles compact/detailed globally; Shift+Tab always cycles the confirmation\n"
+     "Item view: Ctrl+O expands/collapses the latest entry (detailed = full args + output/diff,\n"
+     "redrawn in place without stacking stale frames); Shift+Tab always cycles the confirmation\n"
      "mode (confirm/auto/yolo, shown live in the status line; auto passes file edits and safe\n"
      "commands, asks for dangerous commands and external tools); with empty input Tab enters focus\n"
      "mode on the latest item (Tab older, Shift+Tab newer, ESC/Enter exits); Ctrl+E focus-views the\n"
@@ -3259,7 +3262,8 @@ const Entry kEn[] = {
     {"transcript.thinking_running", "Thinking…"},
     {"transcript.thinking_running_timed", "Thinking… {0}"},
     {"transcript.thinking_done", "Thought {0}"},
-    {"transcript.thinking_done_expandable", "Thought {0} (ctrl+o to expand)"},
+    {"transcript.thinking_expand_hint", "{0} (ctrl+o to expand)"},
+    {"transcript.thinking_collapse_hint", "{0} (ctrl+o to collapse)"},
     {"transcript.thinking_no_summary", "Thought {0} (no summary provided)"},
     {"transcript.thinking_chars", " · {0} chars"},
     {"transcript.batch_pending", "(queued in this step)"},

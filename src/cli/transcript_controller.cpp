@@ -22,6 +22,30 @@ namespace lubancode::cli {
 
 using lubancode::cli::TermOut;
 
+namespace {
+
+// 轮内"最近一条可展开条目"的打印序(Ctrl+L/resize 重放时保住空闲态
+// Ctrl+O 的最近一条档):思考/工具/警告条目且 parent 为空——与
+// RenderTurnView 的打印序同一把尺(跳过 parent 非空与 user/text)。倒序
+// 找第一条即最近;正序走到底留下的也是它。没有可展开条目返回 -1。
+int LastExpandablePrintedIndex(const runtime::TurnView& view) {
+    int index = -1;
+    int printed = -1;
+    for (const auto& item : view.items) {
+        if (!item.parent_item_id.empty()) {
+            continue;
+        }
+        if (item.kind == runtime::TurnItemViewKind::User || item.kind == runtime::TurnItemViewKind::Text) {
+            continue;
+        }
+        ++printed;
+        index = printed;
+    }
+    return index;
+}
+
+}  // namespace
+
 TranscriptUiController::TranscriptUiController(const Theme& theme) : theme_(theme) {}
 
 void TranscriptUiController::SetHooks(Hooks hooks) { hooks_ = std::move(hooks); }
@@ -80,11 +104,14 @@ void TranscriptUiController::PrintViewedTranscript(int viewed_task_id, int tail_
 }
 
 // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
-void TranscriptUiController::PrintRecentItems(std::size_t count) {
+// expand_latest 时最近一枚按展开画(RepaintScreen 重绘保档)。
+void TranscriptUiController::PrintRecentItems(std::size_t count, bool expand_latest) {
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
+    const int total = static_cast<int>(items_.size());
     const std::size_t from = items_.size() > count ? items_.size() - count : 0;
     for (std::size_t i = from; i < items_.size(); ++i) {
-        TermOut() << lubancode::cli::FormatTranscriptItem(items_[i], theme_, width, /*expanded=*/false,
+        const bool item_expanded = expand_latest && static_cast<int>(i) == total - 1;
+        TermOut() << lubancode::cli::FormatTranscriptItem(items_[i], theme_, width, item_expanded,
                                                           static_cast<int>(i) == focus_index_);
     }
 }
@@ -222,6 +249,22 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                 hooks_.turn_views ? hooks_.turn_views() : nullptr;
             if (turn_views != nullptr && !turn_views->empty()) {
                 const int repaint_width = lubancode::cli::DetectConsoleWidth().value_or(80);
+                // Ctrl+O 的"最近一条"档随重放走(截图单 §二.3:RepaintScreen
+                // 原先只传全局 expanded_,最近条目的展开档在 Ctrl+L/resize 后
+                // 丢失):倒序找最后一个带可展开条目的轮,只在那一轮把该轮
+                // 最近条目的打印序传下去,别的轮 -1(打印序按轮独立计)。
+                int latest_turn = -1;
+                int latest_index = -1;
+                if (expand_latest_.load(std::memory_order_acquire)) {
+                    for (int t = static_cast<int>(turn_views->size()) - 1; t >= 0; --t) {
+                        const int idx = LastExpandablePrintedIndex((*turn_views)[static_cast<std::size_t>(t)]);
+                        if (idx >= 0) {
+                            latest_turn = t;
+                            latest_index = idx;
+                            break;
+                        }
+                    }
+                }
                 TurnRenderOptions render_options;
                 render_options.width = repaint_width;
                 render_options.plain = theme_.reset.empty();
@@ -233,8 +276,11 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                 // 一道克制横线把 turn 分开——"上面有没有前一轮"是这里的账
                 // (多轮循环),renderer 只照 leading_turn_divider 办事。
                 bool first_turn = true;
-                for (const runtime::TurnView& turn_view : *turn_views) {
+                for (std::size_t t = 0; t < turn_views->size(); ++t) {
+                    const runtime::TurnView& turn_view = (*turn_views)[t];
                     render_options.leading_turn_divider = !first_turn;
+                    render_options.expanded_index =
+                        static_cast<int>(t) == latest_turn ? latest_index : -1;
                     first_turn = false;
                     const std::vector<std::string> lines = lubancode::cli::RenderTurnView(turn_view, theme_,
                                                                                            render_options);
@@ -243,7 +289,9 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                     }
                 }
             } else {
-                PrintRecentItems(count > 0 ? 10 : 0);
+                // 无 TurnView 存档(老轮次/纯 slash):最近条目档随重画走,
+                // 不因整屏重建把 Ctrl+O 的选择弄丢。
+                PrintRecentItems(count > 0 ? 10 : 0, expand_latest_.load(std::memory_order_acquire));
             }
             return true;
         }

@@ -1,0 +1,69 @@
+# Ctrl+O 展开收起：旧界面堆叠与思考提示失真
+
+- 状态：待修复；已查源码，未改生产代码，未跑真终端复现。
+- 日期：2026-09-12
+- 级别：P1（终端交互）
+- 取证基线：仓库 HEAD `9624b2bb`。
+- 范围：主会话空闲输入、运行中 Ctrl+O、思考标题、重绘后状态保持。
+
+## 一、现象与结论
+
+用户截图里，同一轮思考在紧凑、详细之间切换。每切一次，旧输入框、快捷键提示、状态栏就留下一套。详细态已露出全文，标题仍写“Ctrl+O 展开”。
+
+当前源码足以解释这两处现象：主会话走追加打印，不擦旧帧；思考标题把“展开”写进条目，渲染时不随档位更新。这不是单凭截图猜字体或终端兼容问题。
+
+证据边界：本次核对源码与用户截图，未注入按键，未跑交互复现。当前 PowerShell 将 `lubancode` 解析到 `C:\Users\moontidef\AppData\Local\Programs\lubancode\lubancode.exe`，文件时间为 2026-09-12 10:42:45；尚未证明截图所用二进制与当前 HEAD 同版。修复验收需记录实际可执行文件和构建提交。
+
+## 二、原因与代码落点
+
+### 1. 空闲主会话保留旧底栏，再追加整组转录
+
+- `src/app/interactive_session_assembly.cpp:886`：UI 回调接入 `transcript_ui_.HandleKey(action)`。
+- `src/cli/console_input_composer.cpp:1863-1869`：注释明确写着旧编辑区留在上方，回调从下面追加，再重打提示符。
+- 同文件 `1888-1905`：只有子代理查看态 `view_relay` 才调用 `retire_idle_chrome()` 和 `erase_previous_view_body()`。主会话只把光标移到旧帧末尾，没有擦旧输入框和状态栏。
+- `src/cli/transcript_controller.cpp:110-123`：`ToggleExpand` 翻 `expand_latest_`，打印模式行，再打印 `FormatTranscriptItems(...)`。没有原地替换步骤；虽然只展开最近一条，却重打整组条目。
+- `src/cli/console_input_composer.cpp:1920-1922`：回调返回后调用 `reanchor_prompt_and_redraw()`，另起一套提示符与底栏。
+
+这条调用链正好生成截图里“旧底栏 → 模式行与转录 → 新底栏”的层层堆叠。仅擦底栏仍不够，旧转录副本也得由同一份屏幕区域账管理。
+
+### 2. 思考标题写死“展开”，渲染时只添字数
+
+- `src/cli/tool_display.hpp:623-628`：思考结束且有正文时，不论用户是否已展开，都把 `transcript.thinking_done_expandable` 写进 `item.title`。
+- `src/cli/i18n.cpp:1108,3262`：中英文文案都固定提示展开。
+- `src/cli/transcript.cpp:286-295`：直接取 `item.title`；详细态只追加字数，没有按 `effective_expanded` 改快捷键提示。
+
+故“完整输出”与“Ctrl+O 展开”会同时出现。应分开存思考事实与显示提示，渲染时按有效档位选文案；不要靠替换本地化字符串补洞。
+
+### 3. 相邻路径还有状态分叉
+
+- 空闲主会话：`transcript_controller.cpp:118-122` 翻 `expand_latest_`，只展开末条。
+- 运行中：`console_input_turn_listener.cpp:482-495` 翻 `transcript_expanded_`，擦流式底栏后追加模式行和快照，再画底栏。
+- `tool_display.hpp:874-904`：`FormatSnapshotForToggleLocked` 作废 painter 锚点，按全局 `expanded` 格式化快照；不会原地替换旧转录。
+- `transcript_controller.cpp:225-228`：`RepaintScreen` 的 TurnView 路径只传 `expanded_`，没有传空闲态 `expand_latest_`。修复时需验证 Ctrl+L、resize 后最近条目是否仍保持展开。
+- `i18n.cpp:86-87,153` 等帮助仍讲全局切换、整块重打，与空闲态“最近一条”实现不齐。
+
+这些是源码确认的路径差异；运行中堆叠、重绘后档位丢失尚未真终端验证，不冒充本截图已覆盖。
+
+## 三、修复事项
+
+- [ ] 定齐 Ctrl+O 语义。建议沿用空闲态最近一条：运行中切当前条目，结束后保留选择；中英文帮助、模式提示同步修改。
+- [ ] 把主会话 Ctrl+O 改成受管区域重绘：收旧底栏，擦旧受管正文，按新档绘正文，重锚并画回一套底栏。保留输入内容、光标和既有会话历史。
+- [ ] 复用 composer 已有帧账及重绘入口，先核对 `retire_idle_chrome`、`reanchor_prompt_and_redraw`、Ctrl+L 路径；不要另造互不知情的光标账。
+- [ ] 正文超出视口时明确替换区域与滚动边界；收起长文后擦净尾部，不清空用户此前 shell 滚动历史，不把完整会话反复刷入 scrollback。
+- [ ] 统一空闲、流式、Ctrl+L、resize 的展开状态来源。不要直接复用只读 `expanded_` 的重绘路径，漏掉最近条目选择。
+- [ ] 思考标题按有效显示状态生成：收起时提示展开，展开时提示收起；无正文不提示可展开。耗时和字数照原值显示。
+- [ ] 保住流式 stdout 锁、快照同步和 painter 锚点失效规则；重绘完后续 delta 不得写回旧坐标。
+- [ ] 核对子代理查看态，保留现有先擦再画路径；不要为修主会话把查看态改回追加打印。
+
+## 四、测试与验收
+
+现有测试入口：`tests/unit/cli/test_transcript_controller.cpp`、`test_transcript.cpp`、`test_thinking_preview.cpp`、`test_terminal_frame.cpp`、`test_bottom_chrome.cpp`。本次未执行这些测试；纯字符串格式化测试不能证明终端旧帧已擦净。
+
+- [ ] 格式化测试：同一条完成思考分别收起、展开；正文显隐、字数、提示对应，展开态不再出现“展开”提示；覆盖中文、英文、无正文。
+- [ ] 交互帧测试：一轮短思考结束，连续切换 6 次。最终帧只有一套输入框、快捷键提示、状态栏；切换本身不累计旧界面副本。须验证屏幕格子或终端操作序列，不能只数输出字符串。
+- [ ] 保留未提交多行输入和光标；展开后缩窄窗口、Ctrl+L，再收起，状态不丢，长文尾部不残留。
+- [ ] 流式途中展开、收起、再次展开，接着接收 delta 和 done；无重复正文、无旧锚点覆盖、用户选择不被结束事件擅自改回。
+- [ ] 覆盖多条工具记录、空转录、正文超过一屏、子代理查看态。
+- [ ] 在 Windows PowerShell 所在真实终端验收截图场景，记录终端宿主、窗口尺寸、二进制路径和构建提交；其他平台能跑则验，未验则注明。
+
+收官条件：上列测试通过，真实终端连按 Ctrl+O 不再留下截图所示层层旧帧；展开/收起提示与正文一致。

@@ -359,7 +359,8 @@ TEST_CASE("思考条目渲染:自动预览档 = 标题 + 弱色三行,折叠档�
     item.title = "思考中… 7.4s";
     item.full_output = "行一\n行二\n行三\n行四";
     const std::string out = FormatTranscriptItem(item, dark, 120);
-    CHECK(out.find("思考中… 7.4s\n") != std::string::npos);
+    CHECK(out.find("思考中… 7.4s") != std::string::npos);
+    CHECK(out.find("(Ctrl+O 展开)") != std::string::npos);  // 收起档(自动预览)提示展开
     CHECK(out.find("行二") != std::string::npos);  // 露尾三行 = 行二三四
     CHECK(out.find("行一") == std::string::npos);
     CHECK(out.find("行四") != std::string::npos);
@@ -386,19 +387,29 @@ TEST_CASE("思考条目渲染:用户展开档不吃全局开关,标题带字数,
     item.full_output = "想第一段\n想第二段";
     // 全局紧凑(expanded=false),本条自己的展开态照样铺全文。
     const std::string out = FormatTranscriptItem(item, BuiltinTheme("plain"), 120, /*expanded=*/false);
-    CHECK(out.find("思考中… 7.4s · 9 字") != std::string::npos);  // 换行也算码点
+    CHECK(out.find("思考中… 7.4s") != std::string::npos);
+    CHECK(out.find("(Ctrl+O 收起)") != std::string::npos);  // 展开档提示收起
+    CHECK(out.find("· 9 字") != std::string::npos);  // 换行也算码点
     CHECK(out.find("想第一段") != std::string::npos);
     CHECK(out.find("想第二段") != std::string::npos);
 }
 
 TEST_CASE("思考条目渲染:收定折叠一行带 Ctrl+O 提示,空正文不露空框") {
     TranscriptItem done = MakeThinking(ThinkingPhase::CollapsedDone, TranscriptStatus::Ok);
-    done.title = "思考 10.2s(Ctrl+O 展开)";
+    done.title = "思考 10.2s";  // 落账只存事实;提示由渲染层按档生成
     done.full_output = "完整思考正文";
     const std::string out = FormatTranscriptItem(done, BuiltinTheme("plain"), 120);
     CHECK(LineCountOf(out) == 1);
-    CHECK(out.find("Ctrl+O") != std::string::npos);
+    CHECK(out.find("思考 10.2s") != std::string::npos);
+    CHECK(out.find("(Ctrl+O 展开)") != std::string::npos);  // 收起档给展开提示
+    CHECK(out.find("Ctrl+O 收起") == std::string::npos);
     CHECK(out.find("完整思考正文") == std::string::npos);  // 折叠态藏正文
+
+    // 展开档:同一条目提示翻成"收起",不再出现"展开"字样(截图单失真点)。
+    const std::string expanded_out = FormatTranscriptItem(done, BuiltinTheme("plain"), 120, /*expanded=*/true);
+    CHECK(expanded_out.find("(Ctrl+O 收起)") != std::string::npos);
+    CHECK(expanded_out.find("Ctrl+O 展开") == std::string::npos);
+    CHECK(expanded_out.find("完整思考正文") != std::string::npos);
 
     // 无正文(仅 signature/redacted):不铺空框,展开档也不给"无完整输出"占位。
     TranscriptItem empty = MakeThinking(ThinkingPhase::CollapsedDone, TranscriptStatus::Ok);
@@ -407,6 +418,7 @@ TEST_CASE("思考条目渲染:收定折叠一行带 Ctrl+O 提示,空正文不�
     const std::string empty_out = FormatTranscriptItem(empty, BuiltinTheme("plain"), 120, /*expanded=*/true);
     CHECK(empty_out.find("未提供摘要") != std::string::npos);
     CHECK(empty_out.find("无完整输出") == std::string::npos);
+    CHECK(empty_out.find("Ctrl+O") == std::string::npos);  // 没正文可展开,不挂提示
 }
 
 // ---- ToolDisplay 数据面 ------------------------------------------------------
@@ -471,11 +483,15 @@ TEST_CASE("ToolDisplay 思考:done 默认自动收一行带提示;空正文文�
     CHECK(item.thinking_phase == ThinkingPhase::CollapsedDone);
     CHECK(item.status == TranscriptStatus::Ok);
     CHECK(item.title.find("思考 ") == 0);
-    CHECK(item.title.find("Ctrl+O 展开") != std::string::npos);
+    CHECK(item.title.find("Ctrl+O") == std::string::npos);  // 落账只存事实,提示在渲染层
+    {
+        const std::string out = FormatTranscriptItem(item, BuiltinTheme("plain"), 120);
+        CHECK(LineCountOf(out) == 1);
+        CHECK(out.find("(Ctrl+O 展开)") != std::string::npos);  // 收定折叠一行带展开提示
+        CHECK(out.find("先想\n再想") == std::string::npos);
+    }
     CHECK(item.full_output == "先想\n再想");  // 收折不丢数据
     CHECK(h.display.HasActiveThinking() == false);
-    const std::string out = FormatTranscriptItem(item, BuiltinTheme("plain"), 120);
-    CHECK(LineCountOf(out) == 1);
 
     // 空白正文:未提供摘要,不造内容。
     ThinkingHarness empty_h;
@@ -503,7 +519,12 @@ TEST_CASE("ToolDisplay 思考:运行中展开后续 delta 可见,完毕不强折
     h.display.OnThinkingDone();
     const auto& done = h.transcript.front();
     CHECK(done.thinking_phase == ThinkingPhase::ExplicitExpandedDone);  // 完毕不自动收折
-    CHECK(done.title.find("Ctrl+O 展开") != std::string::npos);
+    // 用户显式展开过的收定条目:全局紧凑下也保持展开(有效档吃 ExplicitExpandedDone),
+    // 标题提示收起——用户的选择不因结束事件改回。
+    const std::string compact_out = FormatTranscriptItem(done, BuiltinTheme("plain"), 120, /*expanded=*/false);
+    CHECK(compact_out.find("(Ctrl+O 收起)") != std::string::npos);
+    CHECK(compact_out.find("Ctrl+O 展开") == std::string::npos);
+    CHECK(compact_out.find("收尾") != std::string::npos);
     // 全局展开档(此刻 Ctrl+O 是开的)展开渲染见全文。
     const std::string out = FormatTranscriptItem(done, BuiltinTheme("plain"), 120, /*expanded=*/true);
     CHECK(out.find("收尾") != std::string::npos);
@@ -728,7 +749,11 @@ WirePicture FeedFixture(const lubancode_test::ApiFixture& fixture) {
     display.OnThinkingDone();
     picture.items = static_cast<int>(transcript.size());
     if (!transcript.empty()) {
-        picture.collapsed_title = transcript.front().title;
+        // 收定折叠标题:按渲染层取(裸事实 + 按档生成的提示),与终端画面同源。
+        const std::string rendered =
+            FormatTranscriptItem(transcript.front(), theme, 120, /*expanded=*/false);
+        const std::size_t nl = rendered.find('\n');
+        picture.collapsed_title = nl == std::string::npos ? rendered : rendered.substr(0, nl);
     }
     return picture;
 }

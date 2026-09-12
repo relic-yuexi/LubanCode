@@ -597,7 +597,7 @@ TEST_CASE("CountUtf8Codepoints: ASCII/汉字/emoji 各按码点计") {
     CHECK(CountUtf8Codepoints("a汉\xF0\x9F\x9A\x80") == 3);  // 🚀 算一个码点
 }
 
-TEST_CASE("FormatTranscriptItem 思考条目:紧凑档一行「思考 Xs」,正文不露") {
+TEST_CASE("FormatTranscriptItem 思考条目:紧凑档一行,收起档给展开提示,正文不露") {
     const auto theme = BuiltinTheme("plain");
     TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::Thinking);
     item.tool_name = "thinking";
@@ -605,12 +605,14 @@ TEST_CASE("FormatTranscriptItem 思考条目:紧凑档一行「思考 Xs」,正�
     item.summary_lines.clear();
     item.full_output = "先想第一步\n再想第二步";
     const std::string out = FormatTranscriptItem(item, theme, 120);
-    CHECK(out.find("思考 3.2s\n") != std::string::npos);
+    CHECK(out.find("思考 3.2s") != std::string::npos);
+    CHECK(out.find("(Ctrl+O 展开)") != std::string::npos);  // 收起档提示展开(渲染层按档生成)
+    CHECK(out.find("Ctrl+O 收起") == std::string::npos);
     CHECK(out.find("先想第一步") == std::string::npos);
     CHECK(out.find("· ") == std::string::npos);  // 字数标注只在展开档出现
 }
 
-TEST_CASE("FormatTranscriptItem 思考条目展开(收定):标题带「· N 字」,正文全文铺,不限行") {
+TEST_CASE("FormatTranscriptItem 思考条目展开(收定):标题带收起提示与「· N 字」,正文全文铺,不限行") {
     const auto theme = BuiltinTheme("plain");
     TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::Thinking);
     item.tool_name = "thinking";
@@ -618,11 +620,28 @@ TEST_CASE("FormatTranscriptItem 思考条目展开(收定):标题带「· N 字�
     item.summary_lines.clear();
     item.full_output = "line1\nline2";
     const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
-    CHECK(out.find("思考 3.2s · 11 字") != std::string::npos);  // 换行也算一个码点
+    CHECK(out.find("思考 3.2s") != std::string::npos);
+    CHECK(out.find("(Ctrl+O 收起)") != std::string::npos);  // 展开档提示收起(截图单:不再写"展开")
+    CHECK(out.find("Ctrl+O 展开") == std::string::npos);
+    CHECK(out.find("· 11 字") != std::string::npos);  // 换行也算一个码点
     CHECK(out.find("完整输出(2 行)") != std::string::npos);
     CHECK(out.find("\n  line1\n") != std::string::npos);
     CHECK(out.find("\n  line2\n") != std::string::npos);
     CHECK(out.find("看全文") == std::string::npos);  // 收定后不截断,无需收口行
+}
+
+TEST_CASE("FormatTranscriptItem 思考条目:用户显式展开过的收定条目,全局紧凑下也保持展开") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::Thinking);
+    item.tool_name = "thinking";
+    item.title = "思考 7.7s";
+    item.summary_lines.clear();
+    item.full_output = "留给下一轮的推理";
+    item.thinking_phase = lubancode::cli::ThinkingPhase::ExplicitExpandedDone;
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/false);
+    CHECK(out.find("(Ctrl+O 收起)") != std::string::npos);  // 有效档=展开:提示收起
+    CHECK(out.find("Ctrl+O 展开") == std::string::npos);
+    CHECK(out.find("留给下一轮的推理") != std::string::npos);  // 不因收定/重打收折
 }
 
 TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,短):已到正文全铺,无收口行") {
@@ -633,7 +652,9 @@ TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,短):已到正文�
     item.summary_lines.clear();
     item.full_output = "abc";
     const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
-    CHECK(out.find("思考中… · 3 字") != std::string::npos);
+    CHECK(out.find("思考中…") != std::string::npos);
+    CHECK(out.find("(Ctrl+O 收起)") != std::string::npos);  // 有正文的运行中条目同样按档提示
+    CHECK(out.find("· 3 字") != std::string::npos);
     CHECK(out.find("\n  abc\n") != std::string::npos);
     CHECK(out.find("看全文") == std::string::npos);
 }
@@ -647,6 +668,7 @@ TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,空):正文没到,�
     const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
     CHECK(out.find("(无完整输出)") == std::string::npos);
     CHECK(out.find("· ") == std::string::npos);
+    CHECK(out.find("Ctrl+O") == std::string::npos);  // 没正文可展开,不挂提示
 }
 
 TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,超长):全文随流续画,不再设行帽") {
@@ -943,4 +965,71 @@ TEST_CASE("RenderTurnView 间距:思考 -> 工具 与 工具 -> 工具 都留一
     REQUIRE(tool2_at > tool1_at + 1);
     CHECK(lines[tool1_at + 1].find("退出码") != std::string::npos);  // tool1 自带 ⎿ 摘要行
     CHECK(lines[tool2_at - 1].empty());  // 摘要行之后、下一枚卡之前恰一口
+}
+
+TEST_CASE("RenderTurnView 单条展开档:expanded_index 只展开对应条目(Ctrl+L/resize 保最近一条)") {
+    const auto theme = BuiltinTheme("plain");
+    lubancode::runtime::TurnView view;
+    view.turn_id = "t1";
+    view.items.push_back(MakeViewItem("i1", lubancode::runtime::TurnItemViewKind::Thinking,
+                                      lubancode::runtime::TurnItemViewState::Succeeded, "thinking",
+                                      nlohmann::json::object(), "琢磨了一下"));
+    view.items.push_back(MakeViewItem("i2", lubancode::runtime::TurnItemViewKind::Tool,
+                                      lubancode::runtime::TurnItemViewState::Succeeded, "run_command",
+                                      nlohmann::json{{"command", "git log"}}, "[退出码 0]\nok"));
+    view.steps.push_back(lubancode::runtime::ModelStepView{"s0", 0, {"i1", "i2"}, true});
+
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 100;
+    options.plain = true;
+    options.include_user = false;
+    options.include_footer = false;
+
+    // 全紧凑基线:参数与思考正文都不铺。
+    {
+        const std::vector<std::string> compact = lubancode::cli::RenderTurnView(view, theme, options);
+        bool saw_params = false;
+        bool saw_thinking = false;
+        for (const auto& line : compact) {
+            if (line.find("参数:") != std::string::npos) saw_params = true;
+            if (line.find("琢磨了一下") != std::string::npos) saw_thinking = true;
+        }
+        CHECK_FALSE(saw_params);
+        CHECK_FALSE(saw_thinking);
+    }
+
+    // 单条展开档:expanded_index = 0(思考),只有它铺全文并提示收起;
+    // 工具条目照紧凑(参数不出现)。
+    options.expanded_index = 0;
+    {
+        const std::vector<std::string> lines = lubancode::cli::RenderTurnView(view, theme, options);
+        bool saw_thinking = false;
+        bool saw_collapse_hint = false;
+        bool saw_params = false;
+        for (const auto& line : lines) {
+            if (line.find("琢磨了一下") != std::string::npos) saw_thinking = true;
+            if (line.find("(Ctrl+O 收起)") != std::string::npos) saw_collapse_hint = true;
+            if (line.find("参数:") != std::string::npos) saw_params = true;
+        }
+        CHECK(saw_thinking);
+        CHECK(saw_collapse_hint);
+        CHECK_FALSE(saw_params);
+    }
+
+    // expanded_index = 1(run_command):参数铺出,思考回紧凑(提示展开,正文不露)。
+    options.expanded_index = 1;
+    {
+        const std::vector<std::string> lines = lubancode::cli::RenderTurnView(view, theme, options);
+        bool saw_params = false;
+        bool saw_thinking = false;
+        bool saw_expand_hint = false;
+        for (const auto& line : lines) {
+            if (line.find("参数: {\"command\":\"git log\"}") != std::string::npos) saw_params = true;
+            if (line.find("琢磨了一下") != std::string::npos) saw_thinking = true;
+            if (line.find("(Ctrl+O 展开)") != std::string::npos) saw_expand_hint = true;
+        }
+        CHECK(saw_params);
+        CHECK(saw_thinking == false);
+        CHECK(saw_expand_hint);
+    }
 }
