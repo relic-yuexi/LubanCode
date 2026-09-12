@@ -24,6 +24,11 @@
 namespace lubancode::accounting {
 
 inline constexpr const char* kUsageSampleSchema = "lubancode.usage.sample";
+// 版本说明(C5,缓存用量按 Wire 归一单):v1 内追加过一批向后兼容的可选键
+// (cache_read_reported_by_provider / cache_creation_reported_by_provider /
+// usage_anomaly,2026-09)——新键缺席 = 旧记录的该项 unknown,不猜;旧合并位
+// cache_reported_by_provider 读进 read 位、creation 位留 nullopt。仍算
+// v1:旧档可读、新档旧读端忽略新键,不需迁移。
 inline constexpr int kUsageSampleSchemaVersion = 1;
 
 // usage 的来源三态(§6.1)。
@@ -79,8 +84,16 @@ struct UsageSample {
     std::int64_t total_billed_shape_tokens = 0;  // total_input + output,比较规模用
     std::optional<int> cache_epoch;
     std::optional<bool> prefix_append_only;
-    // nullopt = 旧账未知；false = usage 有报但 cache 明细字段缺席；true = 明报。
-    std::optional<bool> cache_reported_by_provider;
+    // 读/写明报位分开(缓存用量按 Wire 归一单 C2,2026-09):nullopt = 旧账
+    // 未知;false = usage 有报但该项明细字段缺席;true = 明报(全零也算)。
+    // 只报写入(creation=true、read=false)不能证明读取为零,消费端不互推。
+    // 旧记录(v1 起的 cache_reported_by_provider 合并位)读进 read 位,
+    // creation 位留 nullopt(旧账分不开读写,如实 unknown,不猜)。
+    std::optional<bool> cache_read_reported_by_provider;
+    std::optional<bool> cache_creation_reported_by_provider;
+    // provider 账目自相矛盾的人话(C4;nullopt = 旧账/自洽未标)。数字照读,
+    // 汇总把异常样本排除出精确比例并计数。
+    std::optional<std::string> usage_anomaly;
     CostEstimate cost;
     std::optional<SourceEventRef> source_event;
     // request 终态:completed/failed/cancelled;没见到终态留空(unknown)。

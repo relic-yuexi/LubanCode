@@ -615,14 +615,25 @@ void TrajectoryTurnBridge::OnStreamDelta(const std::string& request_id, const st
 void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                            bool reported_by_provider,
                                            const std::string& provider_response_id, int cache_epoch,
-                                           bool prefix_append_only, bool cache_reported_by_provider) {
+                                           bool prefix_append_only, bool cache_read_reported_by_provider,
+                                           bool cache_creation_reported_by_provider,
+                                           const std::string& usage_anomaly) {
     if (V3Mode()) {
         V3UsageRecorded(request_id, usage, reported_by_provider, provider_response_id);
         return;
     }
+    // 缓存读/写明报位分开落(C2):旧键 cache_reported_by_provider 不再写
+    // (读侧 usage_projector 兼容两代);异常账(C4)非空才落——数字保留
+    // 原数(可为负),矛盾由 anomaly 点名,schema 校验放行"负数必带点名"。
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
                                             {"reported_by_provider", reported_by_provider},
-                                            {"cache_reported_by_provider", cache_reported_by_provider}};
+                                            {"cache_read_reported_by_provider",
+                                             cache_read_reported_by_provider},
+                                            {"cache_creation_reported_by_provider",
+                                             cache_creation_reported_by_provider}};
+    if (!usage_anomaly.empty()) {
+        payload["usage_anomaly"] = usage_anomaly;
+    }
     if (!provider_response_id.empty()) {
         payload["provider_response_id"] = provider_response_id;
     }
@@ -2267,10 +2278,19 @@ bool TrajectoryBypassBridge::OnRequestSent(const std::string& request_id) {
 void TrajectoryBypassBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                              bool reported_by_provider,
                                              const std::string& provider_response_id, int cache_epoch,
-                                             bool prefix_append_only, bool cache_reported_by_provider) {
+                                             bool prefix_append_only, bool cache_read_reported_by_provider,
+                                             bool cache_creation_reported_by_provider,
+                                             const std::string& usage_anomaly) {
+    // 读/写明报位分开落,异常账非空才落(与主桥同一条,C2/C4)。
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
                                             {"reported_by_provider", reported_by_provider},
-                                            {"cache_reported_by_provider", cache_reported_by_provider}};
+                                            {"cache_read_reported_by_provider",
+                                             cache_read_reported_by_provider},
+                                            {"cache_creation_reported_by_provider",
+                                             cache_creation_reported_by_provider}};
+    if (!usage_anomaly.empty()) {
+        payload["usage_anomaly"] = usage_anomaly;
+    }
     if (!provider_response_id.empty()) {
         payload["provider_response_id"] = provider_response_id;
     }

@@ -219,8 +219,16 @@ nlohmann::json UsageSample::ToJson() const {
     if (prefix_append_only.has_value()) {
         json["prefix_append_only"] = *prefix_append_only;
     }
-    if (cache_reported_by_provider.has_value()) {
-        json["cache_reported_by_provider"] = *cache_reported_by_provider;
+    // 读/写明报位与异常账(C2/C4):新键各自落;旧键 cache_reported_by_provider
+    // 停写(读侧兼容两代,见 FromJsonStrict)。
+    if (cache_read_reported_by_provider.has_value()) {
+        json["cache_read_reported_by_provider"] = *cache_read_reported_by_provider;
+    }
+    if (cache_creation_reported_by_provider.has_value()) {
+        json["cache_creation_reported_by_provider"] = *cache_creation_reported_by_provider;
+    }
+    if (usage_anomaly.has_value() && !usage_anomaly->empty()) {
+        json["usage_anomaly"] = *usage_anomaly;
     }
     json["cost"] = cost.ToJson();
     if (source_event.has_value()) {
@@ -361,13 +369,38 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
         }
         sample.prefix_append_only = json.at("prefix_append_only").get<bool>();
     }
-    if (json.contains("cache_reported_by_provider")) {
+    // 读/写明报位(C2):新键优先;旧记录只有合并位 cache_reported_by_provider
+    // ——读进 read 位,creation 留 nullopt(旧账分不开读写,不猜)。两键同现
+    // 时新键压旧键。异常账(C4)非空才落盘,这里照读。
+    if (json.contains("cache_read_reported_by_provider")) {
+        if (!json.at("cache_read_reported_by_provider").is_boolean()) {
+            *error = "cache_read_reported_by_provider 须是 bool";
+            return std::nullopt;
+        }
+        sample.cache_read_reported_by_provider =
+            json.at("cache_read_reported_by_provider").get<bool>();
+    } else if (json.contains("cache_reported_by_provider")) {
         if (!json.at("cache_reported_by_provider").is_boolean()) {
             *error = "cache_reported_by_provider 须是 bool";
             return std::nullopt;
         }
-        sample.cache_reported_by_provider =
+        sample.cache_read_reported_by_provider =
             json.at("cache_reported_by_provider").get<bool>();
+    }
+    if (json.contains("cache_creation_reported_by_provider")) {
+        if (!json.at("cache_creation_reported_by_provider").is_boolean()) {
+            *error = "cache_creation_reported_by_provider 须是 bool";
+            return std::nullopt;
+        }
+        sample.cache_creation_reported_by_provider =
+            json.at("cache_creation_reported_by_provider").get<bool>();
+    }
+    if (json.contains("usage_anomaly")) {
+        if (!json.at("usage_anomaly").is_string()) {
+            *error = "usage_anomaly 须是字符串";
+            return std::nullopt;
+        }
+        sample.usage_anomaly = json.at("usage_anomaly").get<std::string>();
     }
     if (json.contains("cost")) {
         const auto cost = CostEstimate::FromJsonStrict(json.at("cost"), error);
@@ -409,6 +442,9 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
                                        "cache_epoch",
                                        "prefix_append_only",
                                        "cache_reported_by_provider",
+                                       "cache_read_reported_by_provider",
+                                       "cache_creation_reported_by_provider",
+                                       "usage_anomaly",
                                        "cost",
                                        "source_event",
                                        "request_outcome",
