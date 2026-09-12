@@ -4941,6 +4941,7 @@ void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
         v3::EventDraft applied;
         applied.kind = v3::EventKindV3::SessionTitleApplied;
+        applied.status = v3::OpStatus::Done;  // §2.2:.applied 后缀的固定映射
         applied.title_generation_id = "title-manual-" + std::to_string(++command_counter_);
         applied.payload = nlohmann::json{{"title", title}, {"source", "manual"}};
         if (!old_title.empty()) {
