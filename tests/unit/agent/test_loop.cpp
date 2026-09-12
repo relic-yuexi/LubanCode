@@ -2703,7 +2703,7 @@ TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预�
     profile.system_prompt = "system";
     profile.runtime.context_window_tokens = 100000;
     profile.runtime.max_output_tokens = 80000;
-    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::Catalog;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ModelCatalog;
     agent::Agent loop(backend, registry, profile);
     agent::TurnWiring wiring;
     std::vector<runtime::PreRequestBudget> hook_budgets;
