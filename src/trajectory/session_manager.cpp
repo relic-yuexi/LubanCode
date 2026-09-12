@@ -793,9 +793,14 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     // 完整拼装结果;settingsVersion 从 1 起,后续切换逐次 +1。开张失败按
     // P0-C 同款纪律清 0 字节残留(先放句柄,再按所有权凭据删目标名空文件)。
     nlohmann::json system_extra = nlohmann::json::object({{"settingsVersion", 1}});
+    v3::V3WriterOptions writer_options;
+    // 会话级事实随 session.started 落账(R2):列表投影的 cwd/run_kind
+    // 以此为权威来源,v2 manifest 不再是唯一出处。
+    writer_options.launch_cwd = manifest.launch_cwd;
+    writer_options.run_kind = manifest.run_kind;
     auto writer = v3::V3Writer::Start(directory->v3_stream_path(), manifest.session_id,
                                       manifest.main_run_id, options_.v3_system_content,
-                                      std::move(system_extra), v3::V3WriterOptions{});
+                                      std::move(system_extra), std::move(writer_options));
     if (!writer.has_value()) {
         { auto drop_lock = std::move(lock_file); }
         (void)DiscardUncommittedStream(directory->v3_stream_path());

@@ -322,7 +322,8 @@ std::expected<V3Writer, std::string> V3Writer::Start(const std::filesystem::path
     writer.impl_->context.revision = 1;
     writer.impl_->context.chain.push_back(ChainNode{receipt.id, std::nullopt});
     writer.impl_->context.system_message_ref = receipt.id;
-    // 行 2:session.started(revision 1 单节点链)。
+    // 行 2:session.started(revision 1 单节点链)。会话级事实
+    //(launchCwd/runKind,R2)随行落账——空不写键,老档缺键读作"未知"。
     EventDraft started;
     started.kind = EventKindV3::SessionStarted;
     started.payload = nlohmann::json::object(
@@ -331,6 +332,12 @@ std::expected<V3Writer, std::string> V3Writer::Start(const std::filesystem::path
           nlohmann::json::object({{"contextId", "main"},
                                   {"revision", 1},
                                   {"contextChain", ChainToJson(writer.impl_->context.chain)}})}});
+    if (!writer.impl_->options.launch_cwd.empty()) {
+        started.payload["launchCwd"] = writer.impl_->options.launch_cwd;
+    }
+    if (!writer.impl_->options.run_kind.empty()) {
+        started.payload["runKind"] = writer.impl_->options.run_kind;
+    }
     WriteReceipt started_receipt =
         writer.impl_->CommitEvent(std::move(started), Durability::PowerLoss);
     if (started_receipt.status != WriteReceipt::Status::Committed) {

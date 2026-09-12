@@ -152,6 +152,10 @@ TEST_CASE("默认-v3 冒烟: 未设变量时 ledger 开场即 v3,一轮 turn 账
     CHECK(head[0]["message"].value("role", std::string()) == "system");
     CHECK(head[1].value("type", std::string()) == "event");
     CHECK(head[1].value("kind", std::string()) == "session.started");
+    // 会话级事实(R2):launchCwd/runKind 随 session.started 落账,列表
+    // 投影的权威来源。
+    CHECK(head[1]["payload"].value("launchCwd", std::string()) == "D:/tmp/ws");
+    CHECK(head[1]["payload"].value("runKind", std::string()) == "main_session");
 
     // 一轮 turn:user 入账入链、prepared 落账、assistant 定稿。
     {

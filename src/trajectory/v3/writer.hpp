@@ -56,6 +56,13 @@ struct V3Clock {
 
 struct V3WriterOptions {
     std::string writer_version = "trajectory-v3-writer-1";
+    // 会话级事实(Resume 接入 v3 单 R2:进 session.started payload,读面
+    // 的列表投影权威来源)。launchCwd=建场时启动 cwd;runKind=main run
+    // 种类(main_session/one_shot/…,与 v2 manifest.run_kind 同枚举)。
+    // 子账(subagent)不带会话语义,两键留空即不写——老档缺键读作
+    // "未知",不许暗填 main_session。
+    std::string launch_cwd;
+    std::string run_kind;
     // 注入提交失败(测试专用;生产恒空):返回稳定码则该枚提交按 IoFailed
     // 收(writer 句柄随后 broken)。锁内调用,须廉价无副作用。
     std::function<std::optional<std::string>()> inject_io_failure;
