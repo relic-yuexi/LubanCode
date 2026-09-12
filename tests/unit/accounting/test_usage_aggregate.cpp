@@ -225,8 +225,9 @@ TEST_CASE("C4 聚合: 异常样本计数排除,比例只对自洽样本") {
     const auto ratio = aggregate.by_cache_epoch[0].cache_read_ratio_percent();
     REQUIRE(ratio.has_value());
     CHECK(*ratio == 90);
-    // token 总量照实含原数(不掩盖):1000 + (2000-8000 原数 = -200+8000+0)。
-    CHECK(aggregate.by_cache_epoch[0].totals.total_input_tokens == 1000 + 7800);
+    // token 总量照实含原数(不掩盖):good 完整输入 10000 + bad 原数
+    // (TotalInputTokens(-200+8000)=7800)。
+    CHECK(aggregate.by_cache_epoch[0].totals.total_input_tokens == 10000 + 7800);
 }
 
 TEST_CASE("UsageSample 序列化: 读/写明报位与异常账新键,旧合并位读进 read") {

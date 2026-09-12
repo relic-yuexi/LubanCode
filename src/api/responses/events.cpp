@@ -147,7 +147,7 @@ MessageDone DoneFromResponseObject(const json& response) {
         event.stop_reason = "end_turn";
     }
 
-    if (auto usage_it = response.find("usage"); usage_it != usage_it->end() && usage_it->is_object()) {
+    if (auto usage_it = response.find("usage"); usage_it != response.end() && usage_it->is_object()) {
         // completed 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0)。
         event.usage_reported = true;
         // 统一口径(api::Usage 文件头,缓存用量按 Wire 归一单 C3):厂商的
