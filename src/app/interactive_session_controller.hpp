@@ -57,6 +57,7 @@
 #include "runtime/event_sinks.hpp"
 #include "runtime/idle_wake.hpp"
 #include "runtime/session_runtime.hpp"
+#include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0
 #include "runtime/session_work_scheduler.hpp"
 #include "runtime/turn_ingress.hpp"
 #include "tools/agent_tool.hpp"
@@ -149,7 +150,18 @@ private:
     // 会话级请求策略的同步口(批四·病十一其三:五层后端退役,/model、
     // /think、/soul 改完会话状态后把皮上的 request 档案与叠层刷新一遍,
     // 下一份请求即时生效——从前这活是传输层包装器在 send_stream 里干的)。
+    // Soul 会话冻结单 P0:魂的同步自此受锁定闸约束(已锁快照不许覆盖)。
     void SyncAgentRequestPolicy();
+    // Soul 会话冻结单 P0:/clear 确实新建了 sessionId 之后,重置会话快照
+    // 重读 configured 默认值(§5.3"只有确实创建新 sessionId 才重新读默认
+    // 值");仅清上下文不新建场的路径不许调它。
+    void ResetSoulSessionForNewSession();
+    // Soul 会话冻结单 P0:首请求锁定那一刻的宿主善后(置位会话快照 locked
+    // + 经轨迹账本持久化快照 blob,§5.1"宿主串行锁定并持久化快照")。
+    void OnSessionSoulLocked();
+    // Soul 会话冻结单 P0:resume 恢复源场已提交快照(§5.3;源场未锁定过
+    // 就按当前默认起未锁定草稿)。
+    void AdoptResumedSessionSoul(const std::optional<lubancode::runtime::SessionSoulSnapshot>& resumed);
     void RefreshSkills();
     void RefreshWorkflowCompletions();
     void RefreshProjectInstructions();
@@ -372,6 +384,9 @@ private:
     const std::shared_ptr<std::string>& current_model_instructions;
     std::string& current_soul_name;
     const std::shared_ptr<std::string>& current_soul;
+    // Soul 会话冻结单 P0:本会话采用的魂快照(别名,本体在 stack_;双状态
+    // 的会话侧,见 session_stack.hpp 的注释)。
+    const std::shared_ptr<lubancode::runtime::SessionSoulSnapshot>& soul_session;
     lubancode::cli::SpinnerBackend& wrapped_backend;
     lubancode::cli::ContextTracker& context_tracker;
     lubancode::cli::WorktreeSession& worktree_session;

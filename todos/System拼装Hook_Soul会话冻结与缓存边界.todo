@@ -134,11 +134,31 @@ Anthropic 文档说明缓存前缀按 tools → system → messages 组织。修
 
 ### P0：Soul 会话固定
 
-- [ ] 增加配置值/会话快照双状态及首请求锁定提交；禁止 SetSoul 和策略同步越界。
-- [ ] 改全部 `/soul` 分支、错误回执、只读展示与帮助文本；覆盖 CLI、one-shot、app-server 的统一会话入口。
-- [ ] 接恢复、fork、子代理和旁路请求，审计改读实际快照。
-- [ ] 用捕获真实请求构建结果的测试验证：锁定前可改；锁定后下一请求 system 字节保持不变；新会话采用新值。
-- [ ] 验证首请求失败/取消仍锁定、重启后原值不变、off/clear/default 同规、写入失败回滚、多会话不串值、并发命令与首请求竞态。
+- [x] 增加配置值/会话快照双状态及首请求锁定提交；禁止 SetSoul 和策略同步越界。
+- [x] 改全部 `/soul` 分支、错误回执、只读展示与帮助文本；覆盖 CLI、one-shot、app-server 的统一会话入口。
+- [x] 接恢复、fork、子代理和旁路请求，审计改读实际快照。
+- [x] 用捕获真实请求构建结果的测试验证：锁定前可改；锁定后下一请求 system 字节保持不变；新会话采用新值。
+- [x] 验证首请求失败/取消仍锁定、重启后原值不变、off/clear/default 同规、写入失败回滚、多会话不串值、并发命令与首请求竞态。
+
+#### P0 记账（2026-09-12，随 PR 落地）
+
+- 双状态：`runtime::SessionSoulSnapshot`（src/runtime/session_soul.hpp/.cpp，name/content/source/contentHash/revision/locked）为 sessionSoul；configuredSoul 仍是 SessionStack 的 current_soul/current_soul_name。开场快照=默认值定格拷贝、未锁定。
+- 锁定边界：`Agent::LockSessionSoul()`（src/agent/agent.cpp，幂等；首次翻真触发 `AgentWiring.on_session_soul_locked`）在 src/agent/loop.cpp 每步请求构建点（构建 `api::Request` 前、PreStep 钩子前）调用——锁定发生在准备一开始，不靠 response 是否返回判断。宿主回调 `TerminalSessionController::OnSessionSoulLocked`（src/app/interactive_session_assembly.cpp）置位快照 locked 并经 `TrajectorySessionLedger::CommitSoulSnapshot` 把整份快照原子写进会话目录 `soul-snapshot.json`（platform::AtomicWriteFile，ProcessCrashDurability 档）。失败/取消/零输出/结果未知均不解锁（agent 级测试钉）。
+- 越界禁令：`Agent::SetSoul/SetSoulName` 锁定后返回 false 一字不动；`SyncAgentRequestPolicy` 已锁会话跳过魂同步（双保险）。RebuildLoop（/model、RefreshSkills 等同会话重建）吃 soul_session 快照并继承锁定态；`AdoptSessionSoul` 仅供换场（resume/clear）整份重灌。
+- /soul 全分支（src/app/commands/prompt_commands.cpp）：按 §5.2 表落。裸敲展示快照+锁定状态+默认值+差异（pending 只是展示态）；锁定前保存默认成功才更新草稿（先写盘后动账），锁定后只改默认；off 不删正文、clear 才清空；内容规范化后相同提示"内容未变"不记虚假 revision；两条提示文案用单内原文（i18n key cmd.soul.locked.save_hint / cmd.soul.draft.save_hint，src/cli/i18n.cpp 中英两表）；去掉旧"写进配置? [y/N]"问询（新语义=保存默认值，不问）。写入失败整体回滚不留内存/磁盘两份。
+- 会话边界：resume 两路（/resume 交互路 ResumeInteractive、--continue 启动路）读源场 `soul-snapshot.json`——只认 blob 正文不凭魂名重读；材料坏报错拒绝（交互路 resume.soul_snapshot_corrupt 拒绝且不封旧场；启动路回落普通开张+明说）。源场从未锁定（无快照文件）=按当前默认起未锁定草稿。/clear 确实新建 sessionId（SessionManager 八步换账），善后重置快照重读默认。子代理：BuildDetachedBackend/BuildFrozenBackendSpawner 改读 soul_session（父已采用快照，父 pending 不泄漏）；agent 工具 prompt.soul:off 语义原样（tools/agent_tool.cpp 既有）。旁路请求（compact 摘要、会话起名、btw 一类）本就不读魂、不进 main Agent，天然合规。换模型只改模型说明（model_instructions），不动魂。
+- 审计：/prompt audit 与 /context 的 soul 取材改读 soul_session（实际快照），不再拿 current_soul 指针冒充（src/app/commands/prompt_audit_commands.cpp、session_commands.cpp）。
+- v3/manifest：ResolveFinalPrompt 的 soul 名从硬编码 "custom" 改为皮上真名（AgentProfile::soul_name 新增，RebuildLoop 灌快照名）；v3 场 system 正文账（V3EnsureSystem 三步切换）照旧对表——魂变即 system 变，账如实记。sessionSoulRef/promptRevision 的细分审计账仍归 P2，本批未造新账。
+- 测试（tests/unit，按源码册循环自动注册，册内无 v3 用例不需 EnvGuard）：
+  - tests/unit/agent/test_soul_freeze.cpp——假后端捕获真实请求构建结果：锁定前可改；首请求锁定后 SetSoul 被拒、下一请求 system 魂段字节不变；首请求失败（脚本用尽）/中途取消仍锁定、重试沿用快照；新会话（新 Agent）采用新值、与旧会话快照互不相干；AdoptSessionSoul 换场重灌；锁定回调恰触发一次（幂等）；轮次收口后到达的"排队命令"（SetSoul）被拒。
+  - tests/unit/runtime/test_session_soul.cpp——规范化/内容未变判定、JSON round-trip 与缺字段/类型/正文 hash 对不上报错（contains 纪律）、blob 原子写读 round-trip/覆盖/损坏 JSON 报错、多会话快照不串值。
+  - tests/unit/app/test_soul_command.cpp——HOME/USERPROFILE 隔离跑 HandleSoulCommand 全分支：锁定前保存并更新草稿、内容未变、off/default/clear/具名、锁定后只改默认、写入失败整体回滚（SOUL.md 造成目录注入失败）、多会话不串值。
+- 未验与边界：
+  - "重启后原值不变"验证到单元级（blob round-trip + CommitSoulSnapshot/LaunchResumeSoulSnapshot/AdoptResumedSessionSoul 接线），真进程 --continue 端到端未跑（本地禁 build，交 CI 后可后续真机抽验）。
+  - 会话级 fork 路径在代码中不存在（仅 goal 域有 goal fork，不涉魂），无从接线，未验。
+  - CommitSoulSnapshot 写盘失败不拦发送（记 io_errors+终端提示，resume 侧按未锁定处理并明说）——规格未授权拦发送，此取舍已在代码注释写明。
+  - P1（具名段/PreSystem/PostSystem 挂点）与 P2（缓存审计）未动。
+
 
 ### P1：具名段与挂点
 

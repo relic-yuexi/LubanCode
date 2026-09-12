@@ -847,6 +847,9 @@ add_library(lubancode_runtime STATIC
   # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
   # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。
   src/runtime/trajectory_session.cpp
+  # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
+  # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
+  src/runtime/session_soul.cpp
   # 轨迹 v3 P3 显示侧第一棒:HistoryTimeline → 显示 DTO 的 runtime 投影
   # (逐消息上下文状态标志 + CompactMarkerView 持久 token 字段);cli 与
   # app_server 都从这层拿,显示层不直接碰 reader.hpp 的 C++ 结构。

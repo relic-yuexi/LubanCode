@@ -986,6 +986,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
+        // Soul 会话冻结单 P0(§5.1 锁定边界):首个请求准备一开始就把
+        // 会话魂快照锁死——此后 SetSoul/通用策略同步不再能改写;首请求
+        // 失败、取消、零输出或结果未知都不解锁,重试沿用快照。幂等:已
+        // 锁定的会话每步再调只是空过。宿主经 AgentWiring.
+        // on_session_soul_locked 在首次翻真时串行持久化快照 blob。
+        agent.LockSessionSoul();
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
@@ -1032,7 +1038,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 agent.profile_.deferred_index_provider ? agent.profile_.deferred_index_provider() : std::string();
             AssembledPrompt assembled = ResolveFinalPrompt(
                 *agent.profile_.resolved_prompt_base, deferred_index_segment, agent.profile_.model_instructions,
-                agent.profile_.soul, agent.profile_.soul.empty() ? std::string() : std::string("custom"));
+                agent.profile_.soul, agent.profile_.soul_name);
             request.system = std::move(assembled.text);
             request_prompt_manifest = std::move(assembled.manifest);
         } else {

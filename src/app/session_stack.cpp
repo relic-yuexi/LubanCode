@@ -232,7 +232,10 @@ lubancode::tools::DetachedAgentBackend SessionStack::BuildDetachedBackend() cons
     // 覆盖规矩——后台任务不该中途被会话层的 /think history 改了形状。
     out.request_profile.reasoning_history = *current_think_history;
     out.model_instructions = *current_model_instructions;
-    out.soul = *current_soul;
+    // Soul 会话冻结单 P0(§5.3):子代理 inherit 吃父会话已采用的快照
+    //(soul_session),不吃 configured 默认(current_soul)——父 pending
+    // 不泄漏给子代理;派工必在父首请求之后,那时快照已锁定定格。
+    out.soul = soul_session->content;
     return out;
 }
 
@@ -241,16 +244,21 @@ std::unique_ptr<lubancode::tools::ToolRegistry> SessionStack::BuildDetachedRegis
 }
 
 std::function<lubancode::tools::DetachedAgentBackend()> SessionStack::BuildFrozenBackendSpawner() const {
-    // P0-3 冻结快照:闭包拷值,不捕会话活引用。model/think/history/指令/魂
+    // P0-3 冻结快照:闭包拷值,不捕会话活引用。model/think/history/指令
     // 在"这只父任务派出"当刻定格(单子 §4.3:子环境是父环境的冻结快照,
     // 后台线程不回头读主会话正在变的活账);config 用会话定格份。
+    // Soul 会话冻结单 P0:魂走共享指针按派工当刻读——它要的是"父已采用
+    // 的快照"(锁定后定格),构造时的拷值会钉死在会话起手的默认上,父
+    // 会话锁定前 /soul 改的草稿、resume 恢复的快照都进不来。派工必在
+    // 父首请求后,读到的一定是已锁定快照;读这一下仍在主线程派工当口,
+    // 后台线程拿到的是拷贝,活账不被回读(§4.3 同款纪律)。
     const auto config = frozen_backend_config;
     const std::string provider = active_provider;
     const std::string model = *current_model;
     const std::string think = *current_think;
     const auto history = *current_think_history;
     const std::string instructions = *current_model_instructions;
-    const std::string soul = *current_soul;
+    const auto soul = soul_session;
     return [config, provider, model, think, history, instructions, soul]()
                -> lubancode::tools::DetachedAgentBackend {
         lubancode::tools::DetachedAgentBackend out;
@@ -262,7 +270,7 @@ std::function<lubancode::tools::DetachedAgentBackend()> SessionStack::BuildFroze
         out.request_profile.reasoning_effort = think;
         out.request_profile.reasoning_history = history;
         out.model_instructions = instructions;
-        out.soul = soul;
+        out.soul = soul->content;
         return out;
     };
 }
@@ -304,6 +312,14 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
       current_model_instructions(std::make_shared<std::string>()),
       current_soul_name(config_result.config.soul.empty() ? "default" : config_result.config.soul),
       current_soul(std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true))),
+      // Soul 会话冻结单 P0:开场的会话快照 = configured 默认值的定格拷贝,
+      // 未锁定(/soul 在首请求前可改草稿;锁定后定格,见 §5.1)。此后
+      // current_* 是默认值活账,soul_session 是本会话账,两本分开走。
+      soul_session(std::make_shared<lubancode::runtime::SessionSoulSnapshot>(
+          lubancode::runtime::SessionSoulSnapshot{current_soul_name, *current_soul,
+                                                  "config:" + current_soul_name,
+                                                  lubancode::runtime::SessionSoulContentHash(*current_soul),
+                                                  /*revision=*/0, /*locked=*/false})),
       artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       wrapped_backend(real_backend, options.theme, options.spinner_enabled),
       context_tracker(config_result.config.context_window_tokens),

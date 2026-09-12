@@ -474,6 +474,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       current_model_instructions(stack_.current_model_instructions),
       current_soul_name(stack_.current_soul_name),
       current_soul(stack_.current_soul),
+      soul_session(stack_.soul_session),
       wrapped_backend(stack_.wrapped_backend),
       context_tracker(stack_.context_tracker),
       worktree_session(stack_.worktree_session),
@@ -1005,6 +1006,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                       << theme.reset << " (resume-as-new)\n";
             TermOut() << trf("cmd.resume.estimate", lubancode::agent::EstimateHistoryTokens(resumed))
                       << "\n";
+            // Soul 会话冻结单 P0(§5.3):恢复源场已提交快照(忽略磁盘新默认
+            // 值);源场从未锁定过就按当前默认起未锁定草稿。
+            AdoptResumedSessionSoul(session_runtime_.trajectory()->LaunchResumeSoulSnapshot());
             // resume 的历史开新账(SessionStart source=resume),仓按新场开。
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
                             nlohmann::json{{"source", "resume"}}, "resume");
@@ -1015,6 +1019,17 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     }
     // (P0-6:--continue 的旧 SessionStore resume 路已删;账本恒开,
     // resumed_at_launch 为假即安静开新会话,同旧 quiet_if_none 语义。)
+    // Soul 会话冻结单 P0(§5.3):--continue 源场 Soul 快照材料坏时,账本
+    // 开张已整个回落普通开张(不带着坏材料硬恢复)——错误在这明说,
+    // 不静默换魂。
+    if (opts_.continue_last && session_runtime_.trajectory() != nullptr) {
+        const std::string soul_error = session_runtime_.trajectory()->launch_resume_soul_error();
+        if (!soul_error.empty()) {
+            TermErr() << theme.error << tr("error.prefix")
+                      << "--continue 源场 Soul 快照材料坏,本次未恢复旧魂(已按新会话开张): "
+                      << soul_error << theme.reset << "\n";
+        }
+    }
     // -----------------------------------------------------------------------
     // 跨会话传话:登记名册、起 pipe/socket 服务与心跳。只在交互会话启用
     // (spinner_enabled = 真控制台;管道/单发没有可回话的人,也不该挂监听)。
@@ -1254,7 +1269,12 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 皮上的叠层(从前由传输层的 ModelInstructions/SoulOverlay/
     // DeferredIndex 三只包装后端现拼,现在 Agent 拼请求时就地生效)。
     main_agent_profile.model_instructions = *current_model_instructions;
-    main_agent_profile.soul = *current_soul;
+    // Soul 会话冻结单 P0:皮上的魂吃会话快照(soul_session),不吃
+    // configured 默认——preserve_history 重建(/model、技能刷新一类,
+    // 仍属当前会话)继承快照与锁定态;锁定后的默认值变更进不来
+    //(§5.1/§5.3)。
+    main_agent_profile.soul = soul_session->content;
+    main_agent_profile.soul_name = soul_session->name;
     // 动态工具 P3(Claude NativeReference·§7.1):原生路的双字段——皮上
     // native_deferred_tools 让 BuildToolDefinitions 给延迟定义标
     // load_mode=Deferred;request.server_tool_search(请求档案)让 anthropic
@@ -1339,6 +1359,13 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     main_agent_profile.prompt_sections.lsp = prompt_options.lsp;
     main_agent_profile.prompt_sections.wire = prompt_options.wire;
     main_agent.emplace(wrapped_backend, registry(), main_agent_profile);
+    // Soul 会话冻结单 P0:同会话重建(preserve_history)继承锁定态——已锁
+    // 快照的会话重建后依旧锁定(回调幂等:宿主账已置位,只是给新 Agent
+    // 挂上同一道闸)。/clear 的重建前已由 ResetSoulSessionForNewSession
+    // 把快照重置成未锁定新草稿,这里自然是未锁。
+    if (soul_session->locked) {
+        main_agent->LockSessionSoul();
+    }
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
         lubancode::agent::AgentProfile subagent_profile = main_agent_profile;
@@ -1374,6 +1401,11 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         context_exhaustion_gate_.NotePressure(pressure);
         lubancode::app::HandleContextPressure(pressure, MakeCompactInputs());
     };
+    // Soul 会话冻结单 P0:首请求锁定那一刻的宿主善后(置位 + 持久化快照
+    // blob)。回调在主线程的请求构建点被调,与命令天然串行——排队命令
+    // 在轮次收口后处理,看到的已是锁定态(§5.1"排队命令按此边界判定,
+    // 不能靠 response 是否返回判断")。
+    main_wiring.on_session_soul_locked = [this]() { OnSessionSoulLocked(); };
     main_agent->SetWiring(std::move(main_wiring));
     if (reapply_peer_inbox) {
         reapply_peer_inbox();  // 跨会话收件点:重建的 loop 也要能收信
@@ -1389,6 +1421,9 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     // 档案与叠层由这里整份刷新,下一份请求即时生效。reasoning 档位照
     // (provider, model) 从目录现查,与从前 ThinkOverrideBackend 在
     // send_stream 里干的是同一笔账,只是挪进了正门、进了前缀指纹的视野。
+    // Soul 会话冻结单 P0:魂的同步加锁定闸——已锁定的会话跳过
+    // SetSoul/SetSoulName,configured 默认值的后续变更不许覆盖已锁快照
+    //(§5.1 越界禁令;Agent::SetSoul 自身也挡,这里是双保险)。
     if (!main_agent.has_value()) {
         return;
     }
@@ -1425,7 +1460,62 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     }
     main_agent->SetRequestProfile(std::move(request));
     main_agent->SetModelInstructions(*current_model_instructions);
-    main_agent->SetSoul(*current_soul);
+    if (!main_agent->soul_locked()) {
+        main_agent->SetSoulName(soul_session->name);
+        main_agent->SetSoul(soul_session->content);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Soul 会话冻结单 P0(§5.1/§5.3):会话魂的锁定善后、新会话重置与 resume
+// 恢复。三只都在主线程串行调(锁定回调来自 AgentLoop 的请求构建点,
+// 重置/恢复来自命令善后),没有并发窗口。
+// ---------------------------------------------------------------------------
+
+void TerminalSessionController::OnSessionSoulLocked() {
+    if (soul_session->locked) {
+        return;  // 幂等:重建的 Agent 再触发时,宿主账早已置位并持久化过
+    }
+    soul_session->locked = true;
+    if (auto* ledger = session_runtime_.trajectory()) {
+        const std::string error = ledger->CommitSoulSnapshot(*soul_session);
+        if (!error.empty()) {
+            // 快照 blob 写不住是恢复材料缺口,不拦发送(§5.1 锁定在前、
+            // 持久化尽力);doctor 的最近 I/O 错误与这行提示都看得见。
+            TermErr() << theme.error << tr("error.prefix")
+                      << "Soul 快照没写进会话档(resume 将按未锁定处理): " << error << theme.reset
+                      << "\n";
+        }
+    }
+}
+
+void TerminalSessionController::ResetSoulSessionForNewSession() {
+    // /clear 确实新建了 sessionId 才走这里(§5.3):重读 configured 默认,
+    // 起一份未锁定草稿。默认值活账 current_* 由 /soul 维护,与磁盘同步。
+    soul_session->name = current_soul_name;
+    soul_session->content = *current_soul;
+    soul_session->source = "config:" + current_soul_name;
+    soul_session->content_hash = lubancode::runtime::SessionSoulContentHash(soul_session->content);
+    soul_session->revision = 0;
+    soul_session->locked = false;
+}
+
+void TerminalSessionController::AdoptResumedSessionSoul(
+    const std::optional<lubancode::runtime::SessionSoulSnapshot>& resumed) {
+    if (resumed.has_value()) {
+        // 恢复源场已提交快照:锁定态一并继承——恢复后的会话从第一请求起
+        // 就用这份魂,磁盘新默认值进不来(§5.3)。
+        *soul_session = *resumed;
+        soul_session->source = "resume:" + std::string(soul_session->source);
+    } else {
+        // 源场从未锁定过:按未锁定草稿起步,读当前默认。
+        ResetSoulSessionForNewSession();
+    }
+    // main_agent 可能已按开场默认建好:整份重灌(换场即换魂,不受旧锁挡);
+    // resume 后本会话从快照继续,锁定态照源场。
+    if (main_agent.has_value()) {
+        main_agent->AdoptSessionSoul(soul_session->name, soul_session->content, soul_session->locked);
+    }
 }
 
 // (P0-6:RestoreThinkHistoryFrom——旧存档 think_history 事件的恢复口——
@@ -1546,6 +1636,9 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.current_model_instructions = current_model_instructions;
     ctx.current_soul = current_soul;
     ctx.current_soul_name = &current_soul_name;
+    // Soul 会话冻结单 P0:/soul 与审计读会话快照(实际发送的魂),不再拿
+    // configured 默认的 current_soul 指针冒充(§六)。
+    ctx.soul_session = soul_session.get();
     ctx.context_tracker = &context_tracker;
     ctx.model_router = model_router.get();
     ctx.artifact_store = artifact_store;
@@ -1584,6 +1677,10 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.record_wiring = &record_wiring_;
     ctx.rebuild_loop = [this](bool preserve_history) { RebuildLoop(preserve_history); };
     ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
+    // Soul 会话冻结单 P0:/resume 的魂恢复口(§5.3)。
+    ctx.adopt_resumed_soul = [this](const std::optional<lubancode::runtime::SessionSoulSnapshot>& resumed) {
+        AdoptResumedSessionSoul(resumed);
+    };
     ctx.refresh_skills = [this]() { RefreshSkills(); };
     ctx.reload_packages = [this]() { return ReloadPackages(); };
     ctx.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
@@ -1621,6 +1718,15 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             // /clear:旧上下文就此终局——SessionEnd(reason=clear) 先发,新的
             // 空会话用 SessionStart(source=clear) 开账。仓也关掉:工具们持
             // 同一只仓,scope 只跟当前会话,旧场子的 artifact 查不到。
+            // Soul 会话冻结单 P0(§5.3):clear 的换账确实新建了 sessionId,
+            // 会话魂重读 configured 默认、起未锁定草稿——rebuild_loop(false)
+            // 在此回调之前已把新 Agent 建起来(可能带着旧快照),这里整份
+            // 重灌换掉。
+            ResetSoulSessionForNewSession();
+            if (main_agent.has_value()) {
+                main_agent->AdoptSessionSoul(soul_session->name, soul_session->content,
+                                             soul_session->locked);
+            }
             artifact_store->Close();
             EmitSessionHook(lubancode::hooks::HookEvent::SessionEnd, nlohmann::json{{"reason", "clear"}}, "clear");
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "clear"}},

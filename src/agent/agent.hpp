@@ -89,7 +89,10 @@ struct AgentProfile {
     std::string model_instructions;
     // 魂(SOUL.md / souls/)的原文,随 /soul 换;空 = 不注,注入时剥注释。
     // 永远压轴(system 的最后一段)。
+    // Soul 会话冻结单 P0:这份 soul 自本会话首请求锁定后即快照,SetSoul
+    // 不再能改写(§5.1 锁定边界);名称随行(manifest.soul.name 用)。
     std::string soul;
+    std::string soul_name;  // "default"/"off"/具名;空按 "default" 展示
     // tool_search 的延迟工具索引段(活口):逐请求现查——tool_search 命中
     // 会在一次 Run() 中途改变 loaded 集合,下一份请求的索引段就得跟着变。
     // 空 = 不注。
@@ -176,6 +179,11 @@ struct AgentWiring {
     // IdAuthority::NextItemId 上——execution_id 与 Runtime item id 同源,
     // 不另开计数器。空 = 旧路兜底 "exec-N"(仅单测/未接 Runtime 的会话)。
     std::function<std::string()> execution_id_issuer;
+    // Soul 会话冻结单 P0(§5.1):首个请求准备一开始,AgentLoop 调
+    // Agent::LockSessionSoul,首次从假翻真的那一刻回调这里——宿主在
+    // 主线程上串行置位会话快照的 locked 并持久化 blob,随后才允许发送。
+    // 空 = 没接宿主的会话(单测/旁路)只锁自己的标志,零行为外溢。
+    std::function<void()> on_session_soul_locked;
 };
 
 class Agent {
@@ -194,8 +202,38 @@ public:
     void SetRequestProfile(api::RequestProfile request) { profile_.request = std::move(request); }
     // 模型目录 base_instructions 的会话级同步(/model 切目录内模型时随换)。
     void SetModelInstructions(std::string instructions) { profile_.model_instructions = std::move(instructions); }
-    // 魂的会话级同步(/soul、/soul off)。
-    void SetSoul(std::string soul) { profile_.soul = std::move(soul); }
+    // 魂的会话级同步。Soul 会话冻结单 P0:只在尚未锁定(首请求还没
+    // 准备)时生效;锁定后返回 false 且一字不动——通用策略同步
+    //(SyncAgentRequestPolicy 一族)不得覆盖已锁快照,直接编辑 SOUL.md、
+    // 切换名字、热重载插件都绕不过这道闸。
+    bool SetSoul(std::string soul) {
+        if (soul_locked_) {
+            return false;
+        }
+        profile_.soul = std::move(soul);
+        return true;
+    }
+    // 魂名称的会话级同步(与 SetSoul 同一道锁定闸)。
+    bool SetSoulName(std::string name) {
+        if (soul_locked_) {
+            return false;
+        }
+        profile_.soul_name = std::move(name);
+        return true;
+    }
+    // 首请求锁定口(AgentLoop 在请求构建点调,幂等):首次翻真时触发
+    // wiring.on_session_soul_locked,宿主串行持久化快照。锁定后即使首
+    // 请求失败、取消、零输出或结果未知也不解锁,重试沿用快照(§5.1)。
+    void LockSessionSoul();
+    bool soul_locked() const { return soul_locked_; }
+    // 会话换场专用(resume 恢复已提交快照、/clear 重读默认):整份换
+    // 名称/正文/锁定态,不受当前锁定挡——旧锁不跨场。与 SetSoul 的分工:
+    // SetSoul 是"同一场内的策略同步"(锁定即拒),这是"换场即换魂"。
+    void AdoptSessionSoul(std::string name, std::string soul, bool locked) {
+        profile_.soul_name = std::move(name);
+        profile_.soul = std::move(soul);
+        soul_locked_ = locked;
+    }
     // 原生延迟声明的会话级同步(动态工具 P3):/model 切到目录未声明
     // deferred_tools 能力的模型时,装配层关掉它——defer_loading 发给不认的
     // 模型是必 400 的空承诺;声明与能力随模型走,不做会话级钉死。
@@ -291,6 +329,8 @@ private:
     std::string turn_context_;
     std::string active_turn_context_;        // 只在 Run() 活着时给 mid-turn compact 重注入
     bool run_active_ = false;
+    // Soul 会话冻结单 P0:首请求锁定标志(§5.1 锁定边界,见 LockSessionSoul)。
+    bool soul_locked_ = false;
     ContextManager context_;
     AgentWiring wiring_;
 

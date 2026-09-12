@@ -18,6 +18,7 @@
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
 #include "config/prompt_files.hpp"
+#include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0
 
 namespace lubancode::app {
 
@@ -42,15 +43,21 @@ std::size_t CountUtf8Chars(const std::string& text);
 std::string LoadSoulContentByName(const std::string& name, bool warn);
 
 
-// /soul 命令:裸敲看当前正文和可选旧魂;/soul clear 把 SOUL.md 还原成
-// 默认空魂;/soul <内容> 直接写 SOUL.md、立刻生效,下回启动也会读回来。
-// 兼容旧用法:参数恰好命中 souls/<名字>.md 时仍是选魂。off/default/
-// <名字> 三条路都当场生效,并在有配置文件时问一句要不要持久化——答 y
-// 才落盘,免得下次启动被配置里的旧值悄悄盖过去(或者悄悄留着没改)。
-// clear 语义不同,是把 SOUL.md 本身还原成空魂,所以自动把配置里的选魂
-// 项归位 default,不用问。
-void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::string>& current_soul,
-                        std::string& current_soul_name, const std::optional<std::string>& config_file_path);
+// /soul 命令(Soul 会话冻结单 P0 后的新语义,单内 §5.2 表):
+//   session_soul   —— 本会话快照(草稿或已锁定快照);锁定前可改,锁定后
+//                     只读展示。
+//   configured_content/configured_name —— configuredSoul 持久默认的内存
+//                     映像(SOUL.md + 配置 soul: 项),供以后新建会话读取。
+// 分支口径:
+//   裸敲       展示本会话草稿/快照、默认值、锁定状态与差异;
+//   <内容/名称> 先校验保存默认值,成功才更新草稿(锁定后只保存默认);
+//   off        默认选择 off(不删正文);clear 才清空默认正文;
+//   default    解析默认文件,保存选择;锁定后只改默认选择。
+// 保存失败报错回滚,不宣称成功、不留内存/磁盘两份账;内容规范化后相同
+// 提示"内容未变",不记虚假 pending/revision。首版没有 apply-now/force。
+void HandleSoulCommand(const std::string& args, lubancode::runtime::SessionSoulSnapshot& session_soul,
+                       const std::shared_ptr<std::string>& configured_content, std::string& configured_name,
+                       const std::optional<std::string>& config_file_path);
 
 
 // /prompt 命令:裸敲显示当前法(人格段)的来源和字数,外加各提示词模块
