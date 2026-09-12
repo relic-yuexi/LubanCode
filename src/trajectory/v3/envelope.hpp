@@ -211,6 +211,28 @@ enum class EventKindV3 {
     WorkflowRunCompleted,
     WorkflowRunFailed,
     WorkflowRunCancelled,
+
+    // 异步工具族(异步工具单 P0,合同与 fixture 已验、生产未接):任务执行、
+    // 协议配对与结果投递的事实行。全部 statusless——registered/dispatched/
+    // acknowledged 只表示事件已发生,不等于业务 job 已完成;执行/投递状态
+    // 由 payload(observedStatus 等)与读取侧投影表达,unknown 是执行投影
+    // 状态,不硬塞本信封的 status(§二 2.2 豁免同 state.goal.applied 族)。
+    // 执行终态、结果持久化与选用复用已有 tool.execution/tool.result 事件,
+    // 不另造重复身份。身份映射(单 §5 逻辑名 → 落点):actionId/attempt=
+    // 信封 actionId+payload attempt;jobId/deliveryId/ownerEpoch/wireCallRef/
+    // resultRef+resultVersion=payload;targetRequestId=信封 requestId;
+    // originRef=信封 turnId/stepId+payload assistantMessageRef。
+    ToolJobRegistered,
+    ToolJobDispatched,
+    ToolJobObserved,
+    ToolJobCancelRequested,
+    ToolDeliveryPrepared,
+    ToolDeliveryAcknowledged,
+    ToolDeliveryUncertain,
+    // 能力快照(§4 能力三态):provider/endpoint/wire/model/工具声明/运行
+    // 配置合成的能力判定及其依据的留档。纯合同+fixture,不接真探针;
+    // unknown 默认不用 native_deferred 的闸门在读取侧 DecideAsyncModes。
+    ToolCapabilityRecorded,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

@@ -445,6 +445,19 @@ std::vector<ToolActionSnapshot> FoldToolActions(const V3Ledger& ledger) {
         return &snapshot.attempts.back();
     };
     for (const auto& event : ledger.events) {
+        // 异步工具族(单 P0)不进本折叠:job/投递/能力是独立投影
+        //(FoldJobExecutions/FoldDeliveries/…),混进 attempt 状态会拿
+        //"默认 pending"冒充执行事实。tool.execution/tool.result 维持原口径。
+        if (event.kind == EventKindV3::ToolJobRegistered ||
+            event.kind == EventKindV3::ToolJobDispatched ||
+            event.kind == EventKindV3::ToolJobObserved ||
+            event.kind == EventKindV3::ToolJobCancelRequested ||
+            event.kind == EventKindV3::ToolDeliveryPrepared ||
+            event.kind == EventKindV3::ToolDeliveryAcknowledged ||
+            event.kind == EventKindV3::ToolDeliveryUncertain ||
+            event.kind == EventKindV3::ToolCapabilityRecorded) {
+            continue;
+        }
         const bool tool_event =
             event.action_id.has_value() &&
             std::string_view(EventKindV3Name(event.kind)).substr(0, 5) == "tool.";
@@ -1324,6 +1337,497 @@ std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem
         current = std::move(*ancestor);
     }
     return projection;
+}
+
+// ---------------------------------------------------------------------------
+// 异步工具 P0 投影(单 §5/§6;合同与 fixture 已验,生产未接)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 执行投影状态档位(单 §6):单调推进;running/unknown 同档,最新观测
+// 说了算;终态档粘住。
+int JobStateRank(std::string_view state) {
+    if (state == "awaiting_approval") return 0;
+    if (state == "registered") return 1;
+    if (state == "queued") return 2;
+    if (state == "running" || state == "unknown") return 3;
+    return 4;  // succeeded/failed/cancelled
+}
+
+}  // namespace
+
+std::vector<JobExecutionView> FoldJobExecutions(const V3Ledger& ledger) {
+    std::vector<JobExecutionView> jobs;
+    std::map<std::string, std::size_t> index;  // jobId → jobs[] 下标
+    const auto job_of = [&](const std::string& job_id) -> JobExecutionView* {
+        auto it = index.find(job_id);
+        return it == index.end() ? nullptr : &jobs[it->second];
+    };
+    for (const auto& event : ledger.events) {
+        using K = EventKindV3;
+        if (event.kind != K::ToolJobRegistered && event.kind != K::ToolJobDispatched &&
+            event.kind != K::ToolJobObserved && event.kind != K::ToolJobCancelRequested) {
+            continue;
+        }
+        // schema3 已保证四种 kind 都带 jobId;防御性再核一道。
+        const std::string job_id = JsonString(event.payload, "jobId").value_or("");
+        if (job_id.empty()) {
+            continue;
+        }
+        JobExecutionView* job = job_of(job_id);
+        if (job == nullptr && event.kind != K::ToolJobRegistered) {
+            // 未注册先观测/派发:校验器拒,折叠按事件事实建影子条目,
+            // 不吞证据。
+            JobExecutionView shadow;
+            shadow.job_id = job_id;
+            shadow.origin_action_id = event.action_id.value_or("");
+            shadow.state = "registered";
+            jobs.push_back(std::move(shadow));
+            job = &jobs.back();
+            index[job_id] = jobs.size() - 1;
+        }
+        if (job == nullptr) {
+            JobExecutionView fresh;
+            fresh.job_id = job_id;
+            fresh.origin_action_id = event.action_id.value_or("");
+            fresh.mode = JsonString(event.payload, "mode").value_or("");
+            fresh.assistant_message_ref = RefId(event.payload.value(
+                "assistantMessageRef", nlohmann::json(nullptr)));
+            if (event.payload.contains("wireCallRef") &&
+                event.payload["wireCallRef"].is_object()) {
+                fresh.wire_call_ref = event.payload["wireCallRef"];
+            }
+            fresh.approval_required =
+                event.payload.value("approvalRequired", false);
+            fresh.state = fresh.approval_required ? "awaiting_approval" : "registered";
+            jobs.push_back(std::move(fresh));
+            index[job_id] = jobs.size() - 1;
+            job = &jobs.back();
+        }
+        job->event_ids.push_back(event.event_id);
+        switch (event.kind) {
+            case K::ToolJobDispatched:
+                // 派发即 running(审批随派发隐式放行;单 §6"不派发"指的
+                // 是停在 awaiting_approval 的前置态)。
+                if (JobStateRank(job->state) < JobStateRank("running")) {
+                    job->state = "running";
+                }
+                job->dispatched = true;
+                job->owner_epoch = JsonString(event.payload, "ownerEpoch").value_or("");
+                break;
+            case K::ToolJobObserved: {
+                const std::string observed =
+                    JsonString(event.payload, "observedStatus").value_or("");
+                const int current = JobStateRank(job->state);
+                const int incoming = JobStateRank(observed);
+                // 终态粘住(首个终态生效);升序推进;running/unknown 同档
+                // 最新观测为准。
+                if (current < 4 && (incoming > current || (incoming == current && incoming == 3))) {
+                    job->state = observed;
+                }
+                if (auto ref = RefId(event.payload.value("resultRef", nlohmann::json(nullptr)))) {
+                    job->observed_result_ref = *ref;
+                    job->observed_result_version =
+                        JsonUint(event.payload, "resultVersion").value_or(0);
+                }
+                break;
+            }
+            case K::ToolJobCancelRequested:
+                // 取消请求是意图,不是终态(单 §8:不保证已终止)。
+                job->cancel_requested = true;
+                job->cancel_request_action_id = event.action_id;
+                break;
+            default:
+                break;
+        }
+    }
+    return jobs;
+}
+
+const JobExecutionView* FindJobExecution(const std::vector<JobExecutionView>& jobs,
+                                         std::string_view job_id) {
+    for (const auto& job : jobs) {
+        if (job.job_id == job_id) {
+            return &job;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<ProtocolObligationView> ProjectProtocolObligations(const V3Ledger& ledger) {
+    std::map<std::string, ProtocolObligationView> folded;
+    // 注册事件先立条目(带模式与 jobId);其余工具域事件补 inline 条目。
+    for (const auto& event : ledger.events) {
+        if (!event.action_id.has_value()) {
+            continue;
+        }
+        ProtocolObligationView& view = folded[*event.action_id];
+        view.action_id = *event.action_id;
+        if (event.kind == EventKindV3::ToolJobRegistered) {
+            view.mode = JsonString(event.payload, "mode").value_or("job_handle");
+            view.job_id = JsonString(event.payload, "jobId").value_or("");
+            if (event.payload.contains("wireCallRef") &&
+                event.payload["wireCallRef"].is_object()) {
+                view.provider_call_id = JsonString(event.payload["wireCallRef"], "callId");
+                view.async_call = event.payload["wireCallRef"].value("async", false);
+            }
+        }
+    }
+    // 正式 tool 消息 = 配齐(单 §1:正式回喂记 tool 消息)。账上存在即
+    // paired;在不在当前链另标(欠账口径跨 turn,不因 compact 移链误判)。
+    std::unordered_set<std::string> in_chain;
+    for (const auto& node : ledger.context.chain) {
+        in_chain.insert(node.message_ref);
+    }
+    for (const auto& message : ledger.messages) {
+        if (!message.action_id.has_value() || RoleOf(message) != MessageRole::Tool) {
+            continue;
+        }
+        auto it = folded.find(*message.action_id);
+        if (it == folded.end()) {
+            ProtocolObligationView view;
+            view.action_id = *message.action_id;
+            folded.emplace(*message.action_id, std::move(view));
+        }
+        ProtocolObligationView& view = folded[*message.action_id];
+        if (!view.paired) {
+            view.paired = true;
+            view.pairing_message_id = message.message_id;
+        }
+        if (in_chain.count(message.message_id) > 0) {
+            view.on_current_context = true;
+        }
+    }
+    std::vector<ProtocolObligationView> result;
+    result.reserve(folded.size());
+    for (auto& [action_id, view] : folded) {
+        if (view.mode.empty()) {
+            view.mode = "inline";  // 无 job 注册的调用默认 inline(单 §4)
+        }
+        result.push_back(std::move(view));
+    }
+    return result;
+}
+
+const ProtocolObligationView* FindProtocolObligation(
+    const std::vector<ProtocolObligationView>& obligations, std::string_view action_id) {
+    for (const auto& view : obligations) {
+        if (view.action_id == action_id) {
+            return &view;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<DeliveryView> FoldDeliveries(const V3Ledger& ledger) {
+    // requestId → 是否有 model.request.sent(投递 sent 档的判据)。
+    std::unordered_set<std::string> sent_requests;
+    for (const auto& event : ledger.events) {
+        if (event.kind == EventKindV3::ModelRequestSent && event.request_id.has_value()) {
+            sent_requests.insert(*event.request_id);
+        }
+    }
+    std::vector<DeliveryView> deliveries;
+    std::map<std::pair<std::string, std::string>, std::size_t> index;  // (deliveryId,requestId) → 下标
+    std::map<std::string, std::size_t> by_delivery;                    // deliveryId → 首条下标
+    const auto state_rank = [](std::string_view state) -> int {
+        if (state == "prepared") return 1;
+        if (state == "sent") return 2;
+        if (state == "uncertain") return 3;
+        return 4;  // acknowledged
+    };
+    for (const auto& event : ledger.events) {
+        using K = EventKindV3;
+        if (event.kind != K::ToolDeliveryPrepared && event.kind != K::ToolDeliveryAcknowledged &&
+            event.kind != K::ToolDeliveryUncertain) {
+            continue;
+        }
+        const std::string delivery_id = JsonString(event.payload, "deliveryId").value_or("");
+        if (delivery_id.empty()) {
+            continue;
+        }
+        const std::string request_id = event.request_id.value_or("");
+        const auto key = std::make_pair(delivery_id, request_id);
+        DeliveryView* view = nullptr;
+        if (event.kind == K::ToolDeliveryPrepared) {
+            // 同 (deliveryId,targetRequestId) 只一条投递;重试换新
+            // requestId 另立条目(单 §5:targetRequestId 是一次发送尝试)。
+            auto it = index.find(key);
+            if (it != index.end()) {
+                view = &deliveries[it->second];
+            } else {
+                DeliveryView fresh;
+                fresh.delivery_id = delivery_id;
+                fresh.action_id = event.action_id.value_or("");
+                fresh.target_request_id = request_id;
+                fresh.result_version = JsonUint(event.payload, "resultVersion").value_or(0);
+                fresh.state = "prepared";
+                if (auto ref = RefId(event.payload.value("resultRef", nlohmann::json(nullptr)))) {
+                    fresh.result_ref_id = *ref;
+                }
+                deliveries.push_back(std::move(fresh));
+                index[key] = deliveries.size() - 1;
+                view = &deliveries.back();
+            }
+        } else {
+            // acknowledged/uncertain 挂到该 deliveryId 已有条目(同请求
+            // 优先;没有就挂首条)。乱序(先回执后预备)归校验器拒。
+            auto it = index.find(key);
+            std::size_t slot = 0;
+            bool found = false;
+            if (it != index.end()) {
+                slot = it->second;
+                found = true;
+            } else {
+                auto first = by_delivery.find(delivery_id);
+                if (first != by_delivery.end()) {
+                    slot = first->second;
+                    found = true;
+                }
+            }
+            if (!found) {
+                continue;
+            }
+            view = &deliveries[slot];
+        }
+        view->event_ids.push_back(event.event_id);
+        if (event.kind == K::ToolDeliveryPrepared) {
+            if (by_delivery.count(delivery_id) == 0) {
+                by_delivery[delivery_id] = index[key];
+            }
+            if (sent_requests.count(view->target_request_id) > 0 &&
+                state_rank(view->state) < state_rank("sent")) {
+                view->state = "sent";
+            }
+        } else if (event.kind == K::ToolDeliveryAcknowledged) {
+            // acknowledged 只升不降(迟到证据解除 uncertain,单 §6)。
+            view->state = "acknowledged";
+            if (auto ref = RefId(event.payload.value("evidenceRef", nlohmann::json(nullptr)))) {
+                view->evidence_ref = *ref;
+            }
+        } else {
+            if (state_rank(view->state) < state_rank("uncertain")) {
+                view->state = "uncertain";
+                view->uncertain_reason = JsonString(event.payload, "reason").value_or("");
+            }
+        }
+    }
+    return deliveries;
+}
+
+const DeliveryView* FindDelivery(const std::vector<DeliveryView>& deliveries,
+                                 std::string_view delivery_id) {
+    for (const auto& delivery : deliveries) {
+        if (delivery.delivery_id == delivery_id) {
+            return &delivery;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<ToolCapabilitySnapshotView> FoldCapabilitySnapshots(const V3Ledger& ledger) {
+    std::vector<ToolCapabilitySnapshotView> snapshots;
+    for (const auto& event : ledger.events) {
+        if (event.kind != EventKindV3::ToolCapabilityRecorded) {
+            continue;
+        }
+        ToolCapabilitySnapshotView view;
+        view.event_id = event.event_id;
+        const nlohmann::json empty = nlohmann::json::object();
+        const auto basis_it = event.payload.find("basis");
+        const nlohmann::json& basis = basis_it != event.payload.end() && basis_it->is_object()
+                                          ? *basis_it
+                                          : empty;
+        view.provider = JsonString(basis, "provider").value_or("");
+        view.wire = JsonString(basis, "wire").value_or("");
+        view.model = JsonString(basis, "model").value_or("");
+        view.endpoint = JsonString(basis, "endpoint").value_or("");
+        view.tool_name = JsonString(basis, "toolName").value_or("");
+        const auto verdicts_it = event.payload.find("verdicts");
+        if (verdicts_it != event.payload.end() && verdicts_it->is_object()) {
+            for (auto verdict = verdicts_it->begin(); verdict != verdicts_it->end(); ++verdict) {
+                ToolCapabilityVerdict item;
+                item.capability = verdict.key();
+                item.status = JsonString(verdict.value(), "status").value_or("");
+                item.evidence = JsonString(verdict.value(), "evidence").value_or("");
+                view.verdicts.push_back(std::move(item));
+            }
+        }
+        snapshots.push_back(std::move(view));
+    }
+    return snapshots;
+}
+
+const ToolCapabilityVerdict* FindCapabilityVerdict(const ToolCapabilitySnapshotView& snapshot,
+                                                   std::string_view capability) {
+    for (const auto& verdict : snapshot.verdicts) {
+        if (verdict.capability == capability) {
+            return &verdict;
+        }
+    }
+    return nullptr;
+}
+
+AsyncModeDecision DecideAsyncModes(const ToolCapabilitySnapshotView& snapshot) {
+    AsyncModeDecision decision;
+    // native_deferred fail-closed:只认 verified。unknown 默认不用
+    //(单 §4);缺项按 unknown 处理,不静默放行。
+    if (const auto* verdict = FindCapabilityVerdict(snapshot, "native_deferred")) {
+        if (verdict->status == "verified") {
+            decision.native_deferred_allowed = true;
+        } else {
+            decision.native_deferred_reason =
+                "native_deferred 能力为 " + verdict->status + "(单 §4:只认 verified,unknown 默认不用)";
+        }
+    } else {
+        decision.native_deferred_reason =
+            "能力快照缺 native_deferred 判定,按 unknown 处理(单 §4 fail-closed)";
+    }
+    // job_handle 是宿主侧行为,不依赖 provider 协议支持;只有明示
+    // unsupported 才禁(与 unknown 默认可用的差异是单 §4 的既定方向)。
+    if (const auto* verdict = FindCapabilityVerdict(snapshot, "job_handle")) {
+        if (verdict->status == "unsupported") {
+            decision.job_handle_allowed = false;
+            decision.job_handle_reason = "job_handle 能力为 unsupported(单 §4)";
+        }
+    }
+    return decision;
+}
+
+std::vector<Schema3Error> ValidateAsyncToolSequence(const V3Ledger& ledger) {
+    std::vector<Schema3Error> errors;
+    const auto fail = [&errors](std::string code, std::string message) {
+        errors.push_back(Schema3Error{std::move(code), std::move(message)});
+    };
+    // 账内已知事件 id(同会话引用解析);跨会话五键不在此验。
+    std::unordered_set<std::string> event_ids;
+    for (const auto& event : ledger.events) {
+        event_ids.insert(event.event_id);
+    }
+    std::unordered_set<std::string> tool_result_persisted_ids;
+    // 注册状态:jobId → 注册事件;调用证据:actionId → 有无 tool.execution.*。
+    std::unordered_set<std::string> registered_jobs;
+    std::unordered_set<std::string> actions_with_call_evidence;
+    std::unordered_set<std::string> job_terminal_observed;
+    std::unordered_set<std::string> tool_domain_actions;
+    // (deliveryId,requestId) 粒度的投递状态。
+    std::unordered_set<std::string> prepared_deliveries;
+    std::unordered_set<std::string> acknowledged_deliveries;
+    for (const auto& event : ledger.events) {
+        using K = EventKindV3;
+        const std::string job_id = JsonString(event.payload, "jobId").value_or("");
+        const std::string delivery_id = JsonString(event.payload, "deliveryId").value_or("");
+        const std::string request_id = event.request_id.value_or("");
+        if (event.kind == K::ToolExecutionPending || event.kind == K::ToolExecutionStarted) {
+            if (event.action_id.has_value()) {
+                actions_with_call_evidence.insert(*event.action_id);
+            }
+        }
+        // 投递族自身不算该 Action 的存在证据——否则 prepared 先把自己
+        // 的 actionId 记进集合,unknown_action 永远不响(自证)。证据只认
+        // 更早的 tool.execution/tool.result/tool.job 事件。
+        if (event.action_id.has_value() &&
+            event.kind != K::ToolDeliveryPrepared &&
+            event.kind != K::ToolDeliveryAcknowledged &&
+            event.kind != K::ToolDeliveryUncertain &&
+            std::string_view(EventKindV3Name(event.kind)).substr(0, 5) == "tool.") {
+            tool_domain_actions.insert(*event.action_id);
+        }
+        if (event.kind == K::ToolResultPersisted) {
+            tool_result_persisted_ids.insert(event.event_id);
+        }
+        switch (event.kind) {
+            case K::ToolJobRegistered: {
+                if (!registered_jobs.insert(job_id).second) {
+                    fail("async.duplicate_job_registration",
+                         "jobId " + job_id + " 二次注册(单 §5:注册身份唯一)");
+                }
+                if (!event.action_id.has_value() ||
+                    actions_with_call_evidence.count(*event.action_id) == 0) {
+                    fail("async.job_without_call_evidence",
+                         "job " + job_id + " 注册先于调用证据(单 §5 持久顺序:调用证据 → job 注册)");
+                }
+                break;
+            }
+            case K::ToolJobDispatched:
+            case K::ToolJobObserved:
+            case K::ToolJobCancelRequested: {
+                if (registered_jobs.count(job_id) == 0) {
+                    fail("async.unknown_job",
+                         std::string(EventKindV3Name(event.kind)) + " 引用未注册的 jobId: " +
+                             job_id);
+                }
+                if (event.kind == K::ToolJobObserved) {
+                    const std::string observed =
+                        JsonString(event.payload, "observedStatus").value_or("");
+                    const bool terminal = observed == "succeeded" || observed == "failed" ||
+                                          observed == "cancelled";
+                    if (terminal && !job_terminal_observed.insert(job_id).second) {
+                        fail("async.duplicate_terminal_observation",
+                             "job " + job_id + " 出现第二枚终态观测(" + observed +
+                                 ";单 §6:合法终态只接纳一次)");
+                    }
+                }
+                break;
+            }
+            case K::ToolDeliveryPrepared: {
+                if (event.action_id.has_value() &&
+                    tool_domain_actions.count(*event.action_id) == 0) {
+                    fail("async.unknown_action",
+                         "tool.delivery.prepared 引用的 Action 无工具域账: " + *event.action_id);
+                }
+                if (auto ref_it = event.payload.find("resultRef");
+                    ref_it != event.payload.end() && ref_it->is_string()) {
+                    const std::string ref_id = ref_it->get<std::string>();
+                    if (tool_result_persisted_ids.count(ref_id) == 0) {
+                        fail("async.unknown_result",
+                             "tool.delivery.prepared.resultRef 指不到 tool.result.persisted: " +
+                                 ref_id);
+                    }
+                }
+                const std::string attempt_key = delivery_id + "|" + request_id;
+                if (!prepared_deliveries.insert(attempt_key).second) {
+                    fail("async.duplicate_delivery_attempt",
+                         "deliveryId " + delivery_id + " 对请求 " + request_id +
+                             " 二次 prepared(重试须换新 targetRequestId,单 §5)");
+                }
+                break;
+            }
+            case K::ToolDeliveryAcknowledged: {
+                const std::string attempt_key = delivery_id + "|" + request_id;
+                if (prepared_deliveries.count(attempt_key) == 0) {
+                    fail("async.delivery_without_prepared",
+                         "tool.delivery.acknowledged 先于同请求的 prepared: " + delivery_id);
+                }
+                if (!acknowledged_deliveries.insert(attempt_key).second) {
+                    fail("async.duplicate_delivery_acknowledged",
+                         "deliveryId " + delivery_id + " 对请求 " + request_id +
+                             " 二次 acknowledged");
+                }
+                if (auto ref_it = event.payload.find("evidenceRef");
+                    ref_it != event.payload.end() && ref_it->is_string()) {
+                    const std::string ref_id = ref_it->get<std::string>();
+                    if (event_ids.count(ref_id) == 0) {
+                        fail("async.unknown_evidence",
+                             "tool.delivery.acknowledged.evidenceRef 指不到账上事件: " + ref_id);
+                    }
+                }
+                break;
+            }
+            case K::ToolDeliveryUncertain: {
+                const std::string attempt_key = delivery_id + "|" + request_id;
+                if (prepared_deliveries.count(attempt_key) == 0) {
+                    fail("async.delivery_without_prepared",
+                         "tool.delivery.uncertain 先于同请求的 prepared: " + delivery_id);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    return errors;
 }
 
 }  // namespace lubancode::trajectory::v3

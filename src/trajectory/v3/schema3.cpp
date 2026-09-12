@@ -50,6 +50,15 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
             K::ToolResultPersisted, K::ToolResultPersistFailed, K::ToolResultSelected, K::ToolResultSummaryFinished})) {
         return IdRequirement{"actionId", true};
     }
+    // 异步工具族(单 P0):tool.job.* 挂发起/观察该 job 的 Action(同
+    // subagent.* 挂父工具 Action 的口径);tool.delivery.* 挂被投递结果的
+    // Action。jobId/deliveryId 走 payload(同 goalId 口径,不占信封身份
+    // 字段族);targetRequestId 用信封 requestId(不拿 deliveryId 代替)。
+    if (in({K::ToolJobRegistered, K::ToolJobDispatched, K::ToolJobObserved,
+            K::ToolJobCancelRequested, K::ToolDeliveryPrepared,
+            K::ToolDeliveryAcknowledged, K::ToolDeliveryUncertain})) {
+        return IdRequirement{"actionId", true};
+    }
     if (in({K::HookDispatchRequested, K::HookPending, K::HookStarted, K::HookCompleted,
             K::HookFailed, K::HookCancelled, K::HookUnknown, K::HookSkipped,
             K::HookEffectsApplied, K::HookEffectsRejected, K::HookOutputProposed,
@@ -426,6 +435,199 @@ std::optional<Schema3Error> CheckChildCheckpointRef(std::string_view context,
         !IsHex64((*it)["lineHash"].get<std::string>())) {
         return Err("schema3.bad_ref",
                    std::string(context) + " childCheckpointRef.lineHash 应为 64 位十六进制");
+    }
+    return std::nullopt;
+}
+
+// ---- 异步工具族(单 P0;合同与 fixture 已验,生产未接) ----
+
+// wireCallRef(单 §5):provider/wire/callId 非空 string + async 布尔(原生
+// 调用的 async 标记);responseId/itemId 可选 string。native_deferred 的
+// 原调用身份必带;job_handle 的来源调用可带。
+std::optional<Schema3Error> CheckWireCallRef(std::string_view context,
+                                             const nlohmann::json& payload, bool required) {
+    auto it = payload.find("wireCallRef");
+    if (it == payload.end()) {
+        if (required) {
+            return Err("schema3.missing_field",
+                       std::string(context) + " payload 缺 wireCallRef(native_deferred 必带)");
+        }
+        return std::nullopt;
+    }
+    if (!it->is_object()) {
+        return Err("schema3.bad_type", std::string(context) + " wireCallRef 应为 object");
+    }
+    for (const auto* key : {"provider", "wire", "callId"}) {
+        if (!it->contains(key) || !(*it)[key].is_string() ||
+            (*it)[key].get<std::string>().empty()) {
+            return Err("schema3.bad_ref",
+                       std::string(context) + " wireCallRef." + std::string(key) +
+                           " 应为非空 string(单 §5)");
+        }
+    }
+    if (!it->contains("async") || !(*it)["async"].is_boolean()) {
+        return Err("schema3.bad_type",
+                   std::string(context) + " wireCallRef.async 应为 boolean(原生 async 标记)");
+    }
+    for (const auto* key : {"responseId", "itemId"}) {
+        if (it->contains(key) && !(*it)[key].is_string()) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " wireCallRef." + std::string(key) +
+                           " 应为 string");
+        }
+    }
+    return std::nullopt;
+}
+
+// executionPolicy(单 §4:执行策略单独记;字段集拟议待 P1 确认,这里只钉
+// 已知键的类型,不钉枚举——side_effect_class 等语义归 P1 定案)。
+std::optional<Schema3Error> CheckExecutionPolicy(std::string_view context,
+                                                 const nlohmann::json& payload) {
+    auto it = payload.find("executionPolicy");
+    if (it == payload.end()) {
+        return std::nullopt;
+    }
+    if (!it->is_object()) {
+        return Err("schema3.bad_type", std::string(context) + " executionPolicy 应为 object");
+    }
+    if (it->contains("allow_background") && !(*it)["allow_background"].is_boolean()) {
+        return Err("schema3.bad_type", "executionPolicy.allow_background 应为 boolean");
+    }
+    for (const auto* key : {"side_effect_class", "retry_policy", "resume_policy"}) {
+        if (it->contains(key) && (!(*it)[key].is_string() ||
+                                  (*it)[key].get<std::string>().empty())) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " executionPolicy." + std::string(key) +
+                           " 应为非空 string");
+        }
+    }
+    if (it->contains("resource_keys")) {
+        if (!(*it)["resource_keys"].is_array()) {
+            return Err("schema3.bad_type", "executionPolicy.resource_keys 应为数组");
+        }
+        for (const auto& key : (*it)["resource_keys"]) {
+            if (!key.is_string() || key.get<std::string>().empty()) {
+                return Err("schema3.bad_type", "executionPolicy.resource_keys 项应为非空 string");
+            }
+        }
+    }
+    for (const auto* key : {"deadline_ms", "max_output_bytes"}) {
+        if (it->contains(key) && !JsonIsNonNegativeInt((*it)[key])) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " executionPolicy." + std::string(key) +
+                           " 应为非负整数");
+        }
+    }
+    return std::nullopt;
+}
+
+// 能力快照 basis(单 §4):provider/wire/model 必带;endpoint/toolName/
+// runtimeConfigRef 可选 string;toolDeclarationHash 可选 hex64。
+std::optional<Schema3Error> CheckCapabilityBasis(std::string_view context,
+                                                 const nlohmann::json& payload) {
+    auto it = payload.find("basis");
+    if (it == payload.end() || !it->is_object()) {
+        return Err("schema3.missing_field",
+                   std::string(context) + " payload.basis 应为 object(判定依据留档)");
+    }
+    for (const auto* key : {"provider", "wire", "model"}) {
+        if (!it->contains(key) || !(*it)[key].is_string() ||
+            (*it)[key].get<std::string>().empty()) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " basis." + std::string(key) + " 应为非空 string");
+        }
+    }
+    for (const auto* key : {"endpoint", "toolName", "runtimeConfigRef"}) {
+        if (it->contains(key) && (!(*it)[key].is_string() ||
+                                  (*it)[key].get<std::string>().empty())) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " basis." + std::string(key) + " 应为非空 string");
+        }
+    }
+    if (it->contains("toolDeclarationHash")) {
+        if (!(*it)["toolDeclarationHash"].is_string() ||
+            !IsHex64((*it)["toolDeclarationHash"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "basis.toolDeclarationHash 应为 64 位十六进制");
+        }
+    }
+    return std::nullopt;
+}
+
+// 能力快照 verdicts(单 §4 能力三态):非空 object;每项 {status:
+// unknown|verified|unsupported, evidence?: string}。能力名不钉死枚举
+//(native_deferred/job_handle/parallel_tool_calls 为已用名,新增随 P1)。
+std::optional<Schema3Error> CheckCapabilityVerdicts(std::string_view context,
+                                                    const nlohmann::json& payload) {
+    auto it = payload.find("verdicts");
+    if (it == payload.end() || !it->is_object() || it->empty()) {
+        return Err("schema3.bad_type",
+                   std::string(context) + " payload.verdicts 应为非空 object");
+    }
+    static const std::unordered_set<std::string> kStatuses = {
+        "unknown", "verified", "unsupported"};
+    for (auto verdict = it->begin(); verdict != it->end(); ++verdict) {
+        if (!verdict.value().is_object() || !verdict.value().contains("status") ||
+            !verdict.value()["status"].is_string() ||
+            !kStatuses.count(verdict.value()["status"].get<std::string>())) {
+            return Err("schema3.bad_enum",
+                       std::string(context) + " verdicts." + verdict.key() +
+                           ".status 应为 unknown|verified|unsupported(单 §4)");
+        }
+        if (verdict.value().contains("evidence") &&
+            (!verdict.value()["evidence"].is_string() ||
+             verdict.value()["evidence"].get<std::string>().empty())) {
+            return Err("schema3.bad_type",
+                       std::string(context) + " verdicts." + verdict.key() +
+                           ".evidence 应为非空 string");
+        }
+    }
+    return std::nullopt;
+}
+
+// job 模式(单 §4 三种协议模式;inline 不注册 job——注册了就把"任务存在"
+// 与"调用配对"搅浑,故枚举只收 job_handle|native_deferred)。
+std::optional<Schema3Error> CheckJobMode(std::string_view context, const nlohmann::json& payload,
+                                         std::string* mode_out = nullptr) {
+    auto it = payload.find("mode");
+    if (it == payload.end() || !it->is_string()) {
+        return Err("schema3.missing_field",
+                   std::string(context) + " payload.mode 应为 job_handle|native_deferred");
+    }
+    const std::string mode = it->get<std::string>();
+    if (mode != "job_handle" && mode != "native_deferred") {
+        return Err("schema3.bad_enum",
+                   std::string(context) + " mode 应为 job_handle|native_deferred,inline 不注册 job");
+    }
+    if (mode_out != nullptr) {
+        *mode_out = mode;
+    }
+    return std::nullopt;
+}
+
+// job 观测状态(单 §6 执行投影;unknown 是投影状态,不是信封 status)。
+std::optional<Schema3Error> CheckObservedStatus(std::string_view context,
+                                                const nlohmann::json& payload) {
+    static const std::unordered_set<std::string> kStatuses = {
+        "registered", "queued", "running", "succeeded", "failed", "cancelled", "unknown",
+        "awaiting_approval"};
+    auto it = payload.find("observedStatus");
+    if (it == payload.end() || !it->is_string() ||
+        !kStatuses.count(it->get<std::string>())) {
+        return Err("schema3.bad_enum",
+                   std::string(context) + " payload.observedStatus 应为 registered|queued|"
+                                          "running|succeeded|failed|cancelled|unknown|"
+                                          "awaiting_approval(单 §6)");
+    }
+    return std::nullopt;
+}
+
+// 信封 requestId 必带(tool.delivery.*:targetRequestId 用信封字段,单 §5)。
+std::optional<Schema3Error> CheckRequestIdEnvelope(std::string_view context,
+                                                   const EventLine& line) {
+    if (!line.request_id.has_value() || line.request_id->empty()) {
+        return Err("schema3.missing_field",
+                   std::string(context) + " 必带信封 requestId(targetRequestId,单 §5)");
     }
     return std::nullopt;
 }
@@ -1420,6 +1622,173 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.payload.contains("iteration") || !JsonIsNonNegativeInt(line.payload["iteration"]) ||
             line.payload["iteration"].get<std::uint64_t>() < 1) {
             return Err("schema3.bad_type", std::string(kind_name) + ".iteration 应为从 1 起");
+        }
+    }
+    // ---- 异步工具族(单 P0;全部 statusless 事实行)----
+    else if (line.kind == K::ToolJobRegistered) {
+        // job 注册落稳(单 §5:注册落稳前不派发)。attempt 从 1 起(注册
+        // 挂发起 Action 的执行尝试);mode 只收 job_handle|native_deferred;
+        // originRef 落信封 turnId/stepId + payload assistantMessageRef;
+        // native_deferred 必带 wireCallRef(async 标记与原调用身份)。
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "jobId")) {
+            return error;
+        }
+        std::string mode;
+        if (auto error = CheckJobMode(kind_name, line.payload, &mode)) {
+            return error;
+        }
+        if (!line.turn_id.has_value() || !line.step_id.has_value()) {
+            return Err("schema3.missing_field",
+                       std::string(kind_name) + " 必带 turnId 与 stepId(originRef,单 §5)");
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "assistantMessageRef", true)) {
+            return error;
+        }
+        if (auto error = CheckWireCallRef(kind_name, line.payload,
+                                          /*required=*/mode == "native_deferred")) {
+            return error;
+        }
+        if (line.payload.contains("approvalRequired") &&
+            !line.payload["approvalRequired"].is_boolean()) {
+            return Err("schema3.bad_type", "tool.job.registered.approvalRequired 应为 boolean");
+        }
+        if (auto error = CheckExecutionPolicy(kind_name, line.payload)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolJobDispatched) {
+        // 派发事实(不等于业务 job 已完成)。ownerEpoch 为当前执行/接管
+        // 租约代号(单 §5;租约细节拟议待 P1 确认,这里只钉非空 string)。
+        if (auto error = CheckToolPayload(kind_name, line, true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "jobId")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "ownerEpoch")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolJobObserved) {
+        // 执行观测(get/wait/巡检/完成信封共用)。observedStatus 是单 §6
+        // 执行投影状态的来源——unknown 在这里与投影里,不进信封 status。
+        // attempt 可缺:观测可由宿主发起,不必伴随一次工具执行尝试。
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "jobId")) {
+            return error;
+        }
+        if (auto error = CheckObservedStatus(kind_name, line.payload)) {
+            return error;
+        }
+        if (line.payload.contains("ownerEpoch")) {
+            if (auto error = CheckStringField(kind_name, line.payload, "ownerEpoch")) {
+                return error;
+            }
+        }
+        // resultRef/resultVersion 成对出现或都不出现(单 §5:进度不占终态
+        // 版本;只有终态观测才指向不可变结果及版本)。
+        const bool has_ref = line.payload.contains("resultRef");
+        const bool has_version = line.payload.contains("resultVersion");
+        if (has_ref != has_version) {
+            return Err("schema3.bad_type",
+                       "tool.job.observed 的 resultRef 与 resultVersion 须成对出现(单 §5)");
+        }
+        if (has_ref) {
+            if (auto error = CheckRefField(kind_name, line.payload, "resultRef", true)) {
+                return error;
+            }
+            if (!JsonIsNonNegativeInt(line.payload["resultVersion"]) ||
+                line.payload["resultVersion"].get<std::uint64_t>() < 1) {
+                return Err("schema3.bad_type",
+                           "tool.job.observed.resultVersion 应为从 1 起的正整数(单 §5)");
+            }
+        }
+    } else if (line.kind == K::ToolJobCancelRequested) {
+        // 取消请求(单 §8:回取消请求状态;不保证已终止,不冒充成功取消)。
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "jobId")) {
+            return error;
+        }
+        if (line.payload.contains("reason")) {
+            if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+                return error;
+            }
+        }
+    } else if (line.kind == K::ToolDeliveryPrepared) {
+        // 投递预备(单 §5 持久顺序的"请求 prepared"前一环):deliveryId 是
+        // resultVersion+目标分支+用途的稳定去重键;targetRequestId 落信封
+        // requestId(一次发送尝试,不拿 deliveryId 代替)。
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "deliveryId")) {
+            return error;
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "resultRef", true)) {
+            return error;
+        }
+        if (!line.payload.contains("resultVersion") ||
+            !JsonIsNonNegativeInt(line.payload["resultVersion"]) ||
+            line.payload["resultVersion"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type",
+                       "tool.delivery.prepared.resultVersion 应为从 1 起的正整数(单 §5)");
+        }
+        if (auto error = CheckRequestIdEnvelope(kind_name, line)) {
+            return error;
+        }
+        if (line.payload.contains("toolMessageRef")) {
+            if (auto error = CheckRefField(kind_name, line.payload, "toolMessageRef", false)) {
+                return error;
+            }
+        }
+        if (line.payload.contains("branch") &&
+            (!line.payload["branch"].is_string() ||
+             line.payload["branch"].get<std::string>().empty())) {
+            return Err("schema3.bad_type", "tool.delivery.prepared.branch 应为非空 string");
+        }
+    } else if (line.kind == K::ToolDeliveryAcknowledged) {
+        // 远端接纳证据(只表示服务端接纳了这条续接链,不证明模型理解了
+        // 结果,单 §6)。evidenceRef 必带——没有证据不许宣称 acknowledged。
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "deliveryId")) {
+            return error;
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "evidenceRef", true)) {
+            return error;
+        }
+        if (auto error = CheckRequestIdEnvelope(kind_name, line)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolDeliveryUncertain) {
+        // 回执丢失/无法证明(单 §6:不把重试当 exactly-once)。必带 reason;
+        // 投影暂停自动分叉续跑的判据。
+        if (auto error = CheckToolPayload(kind_name, line, false)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "deliveryId")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+        if (auto error = CheckRequestIdEnvelope(kind_name, line)) {
+            return error;
+        }
+    } else if (line.kind == K::ToolCapabilityRecorded) {
+        // 能力快照(单 §4):判定依据(basis)与逐能力三态判定(verdicts)
+        // 一并留档;纯合同+fixture,生产未接真探针。
+        if (auto error = CheckCapabilityBasis(kind_name, line.payload)) {
+            return error;
+        }
+        if (auto error = CheckCapabilityVerdicts(kind_name, line.payload)) {
+            return error;
         }
     }
     // pending 类必须带 reason(§4.14)。

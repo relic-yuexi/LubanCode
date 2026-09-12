@@ -90,6 +90,15 @@ KINDS = {
     "workflow.branch.started", "workflow.join.completed",
     "workflow.loop.iteration.started", "workflow.loop.iteration.completed",
     "workflow.run.completed", "workflow.run.failed", "workflow.run.cancelled",
+    # 异步工具族(异步工具单 P0;合同与 fixture 已验,生产未接)。全部
+    # statusless 事实行:registered/dispatched/acknowledged 只表示事件已
+    # 发生,不等于业务 job 已完成;unknown 是执行投影状态(payload
+    # observedStatus),不硬塞信封 status。
+    "tool.job.registered", "tool.job.dispatched", "tool.job.observed",
+    "tool.job.cancel_requested",
+    "tool.delivery.prepared", "tool.delivery.acknowledged",
+    "tool.delivery.uncertain",
+    "tool.capability.recorded",
 
 }
 
@@ -384,6 +393,10 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             id_field = "requestId"
         elif kind.startswith(("tool.execution", "tool.result")):
             id_field = "actionId"
+        elif kind.startswith(("tool.job.", "tool.delivery.")):
+            # 异步工具族(单 P0):挂发起/观察/被投递结果的 Action;jobId/
+            # deliveryId 走 payload;targetRequestId 用信封 requestId。
+            id_field = "actionId"
         elif kind.startswith("hook."):
             id_field = "hookDispatchId"
         elif kind.startswith("command."):
@@ -478,6 +491,93 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                         "done", "failed", "substituted", "error"):
                     raise ValidationError(
                         "selected effectiveOutcome 应为 done|failed|substituted|error")
+        elif kind.startswith(("tool.job.", "tool.delivery.")) or kind == "tool.capability.recorded":
+            # 异步工具族(单 P0;与 C++ schema3 同口径)。前驱/唯一终态/引用
+            # 的跨行校验归 C++ ValidateAsyncToolSequence。
+            if kind.startswith("tool.job."):
+                require_payload(kind, payload, ["jobId"])
+                if not isinstance(payload["jobId"], str) or not payload["jobId"]:
+                    raise ValidationError(f"{kind} jobId 应为非空 string")
+                if kind == "tool.job.registered":
+                    check_tool_payload(obj, kind, payload, True)
+                    if payload.get("mode") not in ("job_handle", "native_deferred"):
+                        raise ValidationError(
+                            "tool.job.registered mode 应为 job_handle|native_deferred(inline 不注册 job)")
+                    if not is_ref(payload.get("assistantMessageRef")):
+                        raise ValidationError("tool.job.registered assistantMessageRef 应为合法引用")
+                    wire = payload.get("wireCallRef")
+                    if payload["mode"] == "native_deferred" and not isinstance(wire, dict):
+                        raise ValidationError(
+                            "native_deferred 注册必带 wireCallRef(单 §5 原调用身份与 async 标记)")
+                    if isinstance(wire, dict):
+                        for key in ("provider", "wire", "callId"):
+                            if not isinstance(wire.get(key), str) or not wire[key]:
+                                raise ValidationError(f"wireCallRef.{key} 应为非空 string")
+                        if not isinstance(wire.get("async"), bool):
+                            raise ValidationError("wireCallRef.async 应为 boolean")
+                    if "approvalRequired" in payload and not isinstance(payload["approvalRequired"], bool):
+                        raise ValidationError("tool.job.registered approvalRequired 应为 boolean")
+                elif kind == "tool.job.dispatched":
+                    check_tool_payload(obj, kind, payload, True)
+                    if not isinstance(payload.get("ownerEpoch"), str) or not payload["ownerEpoch"]:
+                        raise ValidationError("tool.job.dispatched ownerEpoch 应为非空 string")
+                elif kind == "tool.job.observed":
+                    check_tool_payload(obj, kind, payload, False)
+                    if payload.get("observedStatus") not in (
+                            "registered", "queued", "running", "succeeded", "failed",
+                            "cancelled", "unknown", "awaiting_approval"):
+                        raise ValidationError(
+                            "tool.job.observed observedStatus 应为单 §6 执行投影状态枚举")
+                    has_ref, has_version = "resultRef" in payload, "resultVersion" in payload
+                    if has_ref != has_version:
+                        raise ValidationError("tool.job.observed resultRef/resultVersion 须成对")
+                    if has_ref:
+                        if not is_ref(payload["resultRef"]):
+                            raise ValidationError("tool.job.observed resultRef 应为合法引用")
+                        version = payload["resultVersion"]
+                        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+                            raise ValidationError("tool.job.observed resultVersion 应为从 1 起")
+                else:  # tool.job.cancel_requested
+                    check_tool_payload(obj, kind, payload, False)
+            elif kind.startswith("tool.delivery."):
+                # 投递族(单 §5/§6):targetRequestId 用信封 requestId。
+                require_payload(kind, payload, ["deliveryId"])
+                if not isinstance(payload["deliveryId"], str) or not payload["deliveryId"]:
+                    raise ValidationError(f"{kind} deliveryId 应为非空 string")
+                if not isinstance(obj.get("requestId"), str) or not obj["requestId"]:
+                    raise ValidationError(f"{kind} 必带信封 requestId(targetRequestId)")
+                if kind == "tool.delivery.prepared":
+                    check_tool_payload(obj, kind, payload, False)
+                    if not is_ref(payload.get("resultRef")):
+                        raise ValidationError("tool.delivery.prepared resultRef 应为合法引用")
+                    version = payload.get("resultVersion")
+                    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+                        raise ValidationError("tool.delivery.prepared resultVersion 应为从 1 起")
+                elif kind == "tool.delivery.acknowledged":
+                    check_tool_payload(obj, kind, payload, False)
+                    if not is_ref(payload.get("evidenceRef")):
+                        raise ValidationError(
+                            "tool.delivery.acknowledged evidenceRef 应为合法引用(没证据不宣称接纳)")
+                else:  # tool.delivery.uncertain
+                    check_tool_payload(obj, kind, payload, False)
+                    if not isinstance(payload.get("reason"), str) or not payload["reason"]:
+                        raise ValidationError("tool.delivery.uncertain reason 应为非空 string")
+            else:  # tool.capability.recorded
+                # 能力快照(单 §4 三态):basis 必带 provider/wire/model;
+                # verdicts 非空且逐项 status ∈ unknown|verified|unsupported。
+                basis = payload.get("basis")
+                if not isinstance(basis, dict):
+                    raise ValidationError("tool.capability.recorded basis 应为 object")
+                for key in ("provider", "wire", "model"):
+                    if not isinstance(basis.get(key), str) or not basis[key]:
+                        raise ValidationError(f"basis.{key} 应为非空 string")
+                verdicts = payload.get("verdicts")
+                if not isinstance(verdicts, dict) or not verdicts:
+                    raise ValidationError("tool.capability.recorded verdicts 应为非空 object")
+                for name, verdict in verdicts.items():
+                    if not isinstance(verdict, dict) or verdict.get("status") not in (
+                            "unknown", "verified", "unsupported"):
+                        raise ValidationError(f"verdicts.{name}.status 应为 unknown|verified|unsupported")
         elif kind.startswith("hook."):
             # hook 载荷合同(§4.22-4.23)。
             if kind == "hook.dispatch.requested":
