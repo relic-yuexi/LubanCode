@@ -13,14 +13,24 @@
 //   - provider 没报(reported_by_provider=false 或 owner 事件缺席)照投
 //     sample,usage_source=unknown、usage 为空——coverage 靠它数出来;
 //   - 一条 stream 混 v1/v2 直接拒绝,不出残账。
+//
+// v3 半场(T06/V3-GAP-01,2026-09):assistant message.usage 是唯一可累计
+// owner(schema §五);model.usage.appended 只作失败/迟到/更正观察,不二次
+// 累计。子 session(递归发现)里 conversation 记 SubagentTurn;goal_evaluation
+// 等在 RequestPurpose 无对应的用途,如实标 unmapped 不装懂。
 #pragma once
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "accounting/usage_sample.hpp"
+#include "api/types.hpp"
 #include "trajectory/event.hpp"
+#include "trajectory/v3/reader.hpp"
 
 namespace lubancode::accounting {
 
@@ -34,5 +44,32 @@ struct UsageProjection {
 
 // 投一条 stream(全部事件,按 seq 升序)。
 UsageProjection ProjectUsage(const std::vector<trajectory::EventEnvelope>& events);
+
+// ---------------------------------------------------------------------------
+// v3 半场(T06)
+// ---------------------------------------------------------------------------
+
+// v3 owner 键 -> api::Usage 五项的唯一折算口(schema §五键集;键名错一位
+// tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp 就红)。缺子项省键
+// = 保持 0,不补、不猜;reasoningTokens 含在 outputTokens 里,汇总不再加。
+api::Usage UsageFromV3Owner(const nlohmann::json& usage);
+
+// v3 purpose 名(schema §1.2 MessagePurpose 线上名)→ 账本 RequestPurpose。
+// conversation 按所在账分层(主账 MainTurn/子 session 账 SubagentTurn);
+// goal_evaluation/context_summary/capability 在 RequestPurpose 无对应——
+// 返回 nullopt,调用方标 unmapped,不硬塞近似枚举。
+std::optional<RequestPurpose> MapV3Purpose(std::string_view name, bool is_subagent);
+
+// 投一份 v3 账(单文件,不含子 session)。owner 驱动:每条模型生成的
+// assistant(schema 保证带 requestId/provider/wire/model/usage)产一条
+// sample;实际发出(model.request.sent)却无 owner 的请求照投 unknown
+// sample(coverage 靠它数);只 prepared 未发出的不计(physical spend 按
+// 实际发生)。appended 只进 warnings,单列观察。
+struct V3UsageProjectorContext {
+    bool is_subagent = false;  // 子 session 账:conversation 记 SubagentTurn
+    std::string run_kind;      // UsageSample.run_kind 线上名(main_session/subagent/…)
+};
+UsageProjection ProjectV3Usage(const trajectory::v3::V3Ledger& ledger,
+                               const V3UsageProjectorContext& context);
 
 }  // namespace lubancode::accounting

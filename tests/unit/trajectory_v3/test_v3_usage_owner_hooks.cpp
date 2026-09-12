@@ -14,6 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "accounting/usage_projector.hpp"
 #include "api/types.hpp"
 #include "trajectory/v3/schema3.hpp"
 
@@ -99,4 +100,42 @@ TEST_CASE("折算钩子: 缺子项保持 0,不冒充、不倒填;reasoning 含�
     const api::Usage with_reasoning = UsageFromOwner(
         nlohmann::json{{"inputTokens", 50}, {"outputTokens", 5}, {"reasoningTokens", 4}});
     CHECK(api::TotalInputTokens(with_reasoning) == 50);
+}
+
+TEST_CASE("消费侧对表: ProjectV3Usage 的折算与 purpose 映射走生产钩子(T06)") {
+    // T06 落地后生产折算口在 accounting::UsageFromV3Owner——本册上面那份
+    // 手写钩子仍按 schema 原文断言,这里两下对表:同键同值,键位走岔必红。
+    using lubancode::accounting::UsageFromV3Owner;
+    using lubancode::accounting::MapV3Purpose;
+    const nlohmann::json owner = nlohmann::json{
+        {"inputTokens", 1000},   {"outputTokens", 300},       {"reasoningTokens", 120},
+        {"cacheReadTokens", 90}, {"cacheWriteTokens", 1100},
+    };
+    const api::Usage manual = UsageFromOwner(owner);
+    const api::Usage production = UsageFromV3Owner(owner);
+    CHECK(manual.input_tokens == production.input_tokens);
+    CHECK(manual.output_tokens == production.output_tokens);
+    CHECK(manual.output_reasoning_tokens == production.output_reasoning_tokens);
+    CHECK(manual.cache_read_tokens == production.cache_read_tokens);
+    CHECK(manual.cache_creation_tokens == production.cache_creation_tokens);
+    CHECK(api::TotalInputTokens(production) == 1000 + 90 + 1100);
+    // 缺子项省键:生产口同样保持 0;null owner 也不炸(unknown 路径调用方拦)。
+    const api::Usage partial = UsageFromV3Owner(
+        nlohmann::json{{"inputTokens", 50}, {"outputTokens", 5}});
+    CHECK(api::TotalInputTokens(partial) == 50);
+    // purpose 映射:conversation 按账层分层,compact 归并,unmapped 不装懂。
+    CHECK(MapV3Purpose("conversation", /*is_subagent=*/false) ==
+          lubancode::accounting::RequestPurpose::MainTurn);
+    CHECK(MapV3Purpose("conversation", /*is_subagent=*/true) ==
+          lubancode::accounting::RequestPurpose::SubagentTurn);
+    CHECK(MapV3Purpose("compact", false) ==
+          lubancode::accounting::RequestPurpose::CompactReduce);
+    CHECK(MapV3Purpose("action_summary", false) ==
+          lubancode::accounting::RequestPurpose::ActionSummary);
+    CHECK(MapV3Purpose("session_title", false) ==
+          lubancode::accounting::RequestPurpose::TitleRefine);
+    CHECK_FALSE(MapV3Purpose("goal_evaluation", false).has_value());
+    CHECK_FALSE(MapV3Purpose("context_summary", false).has_value());
+    CHECK_FALSE(MapV3Purpose("capability", false).has_value());
+    CHECK_FALSE(MapV3Purpose("yolo", false).has_value());
 }

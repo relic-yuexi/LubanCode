@@ -68,7 +68,7 @@ EnvGuard 显式开)、**legacy-only**(吃全局 0 的 v2 行为断言)、
 
 | # | 源符号/文件 | 直接调用方 | 最终入口 | 现行合同 | 替代 API | 退役阻塞 |
 | --- | --- | --- | --- | --- | --- | --- |
-| C1 | `accounting::ListSessionStreams`/`ParseStream`(src/accounting/session_usage_reader.*) | usage_projector、usage 命令、insights(integrity_gate/prompt_auditor) | `/usage`、workspace 汇总、insights 报告 | 主流只认 main.jsonl,子流平铺目录;EventEnvelope 解析;找不到 v3 样本仍 ok=true 空集 | T00 统一读面(v3 reader + 子 session 递归)+ v3 usage owner | T06 全迁 + T14 insights 迁完 |
+| C1 | `accounting::ListSessionStreams`/`ParseStream`(src/accounting/session_usage_reader.*) | usage_projector、usage 命令、insights(integrity_gate/prompt_auditor) | `/usage`、workspace 汇总、insights 报告 | v3 已分派(T06,2026-09-12):`ReadSessionUsage` 先 `ProbeV3SessionStream`,v3 走 `ReadV3Ledger`+`WalkSessionTree` 递归子 session,`ProjectV3Usage` 吃 assistant usage owner;v2 老路(main.jsonl/平铺子流/EventEnvelope)保留给旧档 | T14 insights 迁完(v3 读面复用 `ProjectV3Usage`/`UsageFromV3Owner`) | T14 insights 迁完 |
 | C2 | `telemetry::TelemetryService::DiscoverStreams`/`projector::Fold`(src/telemetry/*) | TelemetryService 自身(spool/cursor/补投) | OTLP 导出链 | EventEnvelope Fold;游标按旧流身份;发现按 SessionIndex | T00 读面 + v3 事件/usage 投影(T07,含投影版本) | T07 |
 | C3 | `app::MemoryLedgerBridge`(src/app/memory_ledger_bridge.*) | MemoryAccounting 装配 | 主入口 memory-on 场 | 走 `ledger.main()`(v2 recorder);v3 场 main()==nullptr → 召回失败 | v3 受管 writer/context 服务 + 正文快照/refs(T08) | T08 桥迁 + §4.71 排期 |
 | C4 | `app_server/server.cpp` thread 记录(`session_main_path` 拼接、thread/resume 只读预览) | AppServer 协议处理 | AppServer 2.0 WS | 硬拼 `.../main.jsonl`;resume 为只读恢复视图预览 | SessionService 统一描述对象 + 真恢复(T09,AppServer 单实施) | T09 |

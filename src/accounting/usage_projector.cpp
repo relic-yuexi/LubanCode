@@ -1,6 +1,7 @@
 #include "accounting/usage_projector.hpp"
 
 #include <map>
+#include <set>
 #include <utility>
 
 namespace lubancode::accounting {
@@ -292,6 +293,254 @@ UsageProjection ProjectUsage(const std::vector<trajectory::EventEnvelope>& event
         }
         result.samples.push_back(std::move(sample));
     }
+    result.ok = true;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// v3 半场(T06/V3-GAP-01):assistant usage owner 唯一可累计。
+// ---------------------------------------------------------------------------
+
+api::Usage UsageFromV3Owner(const nlohmann::json& usage) {
+    api::Usage out;
+    // 键集合同(schema §五):五键缺子项省略——省键保持 0,不补不猜。
+    if (usage.is_object()) {
+        if (usage.contains("inputTokens") && usage.at("inputTokens").is_number_integer()) {
+            out.input_tokens = usage.at("inputTokens").get<std::int64_t>();
+        }
+        if (usage.contains("cacheReadTokens") && usage.at("cacheReadTokens").is_number_integer()) {
+            out.cache_read_tokens = usage.at("cacheReadTokens").get<std::int64_t>();
+        }
+        if (usage.contains("cacheWriteTokens") &&
+            usage.at("cacheWriteTokens").is_number_integer()) {
+            out.cache_creation_tokens = usage.at("cacheWriteTokens").get<std::int64_t>();
+        }
+        if (usage.contains("outputTokens") && usage.at("outputTokens").is_number_integer()) {
+            out.output_tokens = usage.at("outputTokens").get<std::int64_t>();
+        }
+        if (usage.contains("reasoningTokens") &&
+            usage.at("reasoningTokens").is_number_integer()) {
+            out.output_reasoning_tokens = usage.at("reasoningTokens").get<std::int64_t>();
+        }
+    }
+    return out;
+}
+
+std::optional<RequestPurpose> MapV3Purpose(std::string_view name, bool is_subagent) {
+    if (name == "conversation") {
+        return is_subagent ? RequestPurpose::SubagentTurn : RequestPurpose::MainTurn;
+    }
+    if (name == "compact") {
+        return RequestPurpose::CompactReduce;  // v3 单段归并,无 map 分账
+    }
+    if (name == "action_summary") {
+        return RequestPurpose::ActionSummary;
+    }
+    if (name == "session_title") {
+        return RequestPurpose::TitleRefine;
+    }
+    // goal_evaluation / context_summary / capability:RequestPurpose 无对应,
+    // nullopt + 调用方点名,不硬塞近似枚举。
+    return std::nullopt;
+}
+
+UsageProjection ProjectV3Usage(const trajectory::v3::V3Ledger& ledger,
+                               const V3UsageProjectorContext& context) {
+    namespace v3 = trajectory::v3;
+    UsageProjection result;
+
+    // 事件索引一遍收齐:prepared / sent / 终态 / appended 观察。
+    std::map<std::string, const nlohmann::json*> prepared;  // requestId → payload
+    std::map<std::string, std::string> outcome;             // requestId → completed/failed/cancelled
+    std::vector<std::string> sent_order;                    // 实际发出的请求(首现序)
+    std::set<std::string> sent_seen;
+    for (const auto& event : ledger.events) {
+        const std::string request_id = event.request_id.value_or("");
+        switch (event.kind) {
+            case v3::EventKindV3::ModelRequestPrepared: {
+                if (!request_id.empty()) {
+                    prepared[request_id] = &event.payload;
+                }
+                break;
+            }
+            case v3::EventKindV3::ModelRequestSent: {
+                if (!request_id.empty() && sent_seen.insert(request_id).second) {
+                    sent_order.push_back(request_id);
+                }
+                break;
+            }
+            case v3::EventKindV3::ModelResponseCompleted: {
+                if (!request_id.empty()) {
+                    outcome[request_id] = "completed";
+                }
+                break;
+            }
+            case v3::EventKindV3::ModelResponseFailed:
+            case v3::EventKindV3::ModelRequestFailed: {
+                if (!request_id.empty()) {
+                    outcome[request_id] = "failed";
+                }
+                break;
+            }
+            case v3::EventKindV3::ModelResponseCancelled: {
+                if (!request_id.empty()) {
+                    outcome[request_id] = "cancelled";
+                }
+                break;
+            }
+            case v3::EventKindV3::ModelUsageAppended: {
+                // §五 owner 表:迟到/更正/无消息请求的观察承载,不参与累计。
+                // 单列点名(带数字,人工对账用),绝不升级成 owner。
+                std::string note = "usage.v3_appended_observed: " +
+                                   (request_id.empty() ? event.event_id : request_id);
+                if (event.payload.contains("usage") && event.payload.at("usage").is_object()) {
+                    const auto& usage = event.payload.at("usage");
+                    if (usage.contains("inputTokens") &&
+                        usage.at("inputTokens").is_number_integer()) {
+                        note += " in=" + std::to_string(
+                                             usage.at("inputTokens").get<std::int64_t>());
+                    }
+                    if (usage.contains("outputTokens") &&
+                        usage.at("outputTokens").is_number_integer()) {
+                        note += " out=" + std::to_string(
+                                              usage.at("outputTokens").get<std::int64_t>());
+                    }
+                }
+                note += "(观察,不入累计)";
+                result.warnings.push_back(std::move(note));
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    const auto fill_request_side = [&](UsageSample& sample, const std::string& request_id,
+                                       std::string_view purpose_fallback) {
+        // purpose:优先 message.purpose(owner 驱动时的枚举);无 owner 的请求
+        // 只能读 prepared.payload.purpose 字符串。
+        if (!purpose_fallback.empty()) {
+            const auto purpose = MapV3Purpose(purpose_fallback, context.is_subagent);
+            if (purpose.has_value()) {
+                sample.purpose = purpose;
+            } else {
+                result.warnings.push_back("usage.v3_purpose_unmapped: " +
+                                          std::string(purpose_fallback));
+            }
+        }
+        const auto prepared_it = prepared.find(request_id);
+        if (prepared_it == prepared.end()) {
+            result.warnings.push_back("usage.prepared_missing: " + request_id);
+            sample.incomplete_linkage = true;
+            return;
+        }
+        const nlohmann::json& payload = *prepared_it->second;
+        const auto read_string = [&](const char* key) {
+            return payload.contains(key) && payload.at(key).is_string()
+                       ? payload.at(key).get<std::string>()
+                       : std::string();
+        };
+        // 实际 provider/model:owner 驱动时 message 自带(§4.44),这里只在
+        // 缺席时补 prepared 快照(sent-only 的失败请求没有 message 可读)。
+        if (sample.provider.empty()) {
+            sample.provider = read_string("provider");
+        }
+        if (sample.wire.empty()) {
+            sample.wire = read_string("wire");
+        }
+        if (sample.model.empty()) {
+            sample.model = read_string("model");
+        }
+    };
+
+    // owner 驱动:模型生成的 assistant 一条一个 owner。
+    std::set<std::string> owned_requests;
+    for (const auto& message : ledger.messages) {
+        const std::string role = message.message.value("role", "");
+        if (role != "assistant") {
+            continue;  // system/user/tool 不是 usage owner
+        }
+        const std::string request_id = message.request_id.value_or("");
+        if (!owned_requests.insert(request_id).second) {
+            // 同一请求第二条 assistant:账被动过的形状,点名不静默覆盖。
+            result.warnings.push_back("usage.v3_owner_duplicate: " + request_id);
+            continue;
+        }
+        UsageSample sample;
+        sample.session_id = ledger.session_id;
+        sample.run_id = ledger.run_id;
+        sample.run_kind = context.run_kind;
+        sample.turn_id = message.turn_id;
+        sample.request_id = request_id;
+        sample.attempt = 1;  // v3 每请求唯一 requestId,无 attempt 维度
+        sample.provider = message.provider.value_or("");
+        sample.wire = message.wire.value_or("");
+        sample.model = message.model.value_or("");
+        sample.source_event =
+            SourceEventRef{ledger.run_id, message.message_id, message.line_hash};
+        const auto outcome_it = outcome.find(request_id);
+        if (outcome_it != outcome.end()) {
+            sample.request_outcome = outcome_it->second;
+        }
+        const std::string purpose_name = v3::MessagePurposeName(message.purpose);
+        fill_request_side(sample, request_id, purpose_name);
+        if (message.usage.has_value() && !message.usage->is_null()) {
+            const api::Usage usage = UsageFromV3Owner(*message.usage);
+            sample.usage = usage;
+            sample.usage_source = UsageSource::ProviderReported;
+            sample.total_input_tokens = api::TotalInputTokens(usage);
+            sample.total_billed_shape_tokens =
+                sample.total_input_tokens + usage.output_tokens;
+            // 明报位(C2 口径):键在场(0 也算)= 该明细 provider 明报;
+            // 省键 = usage 报了但该子项没拆账。
+            sample.cache_read_reported_by_provider = message.usage->contains("cacheReadTokens");
+            sample.cache_creation_reported_by_provider =
+                message.usage->contains("cacheWriteTokens");
+        } else {
+            // 缺实报(§五:不补 0)——照投 unknown sample,coverage 靠它数。
+            sample.usage_source = UsageSource::Unknown;
+        }
+        result.samples.push_back(std::move(sample));
+    }
+
+    // 实际发出却无 owner 的请求:失败/取消无消息、completed 而消息丢失、
+    // 崩溃未收口——各照投 unknown sample,不冒充零消耗也不虚构数字。
+    for (const auto& request_id : sent_order) {
+        if (owned_requests.count(request_id) > 0) {
+            continue;
+        }
+        UsageSample sample;
+        sample.session_id = ledger.session_id;
+        sample.run_id = ledger.run_id;
+        sample.run_kind = context.run_kind;
+        sample.request_id = request_id;
+        sample.attempt = 1;
+        sample.usage_source = UsageSource::Unknown;
+        const auto outcome_it = outcome.find(request_id);
+        if (outcome_it != outcome.end()) {
+            sample.request_outcome = outcome_it->second;
+            if (sample.request_outcome == "completed") {
+                // completed 事件在、assistant 没落盘:消息丢失,点名。
+                result.warnings.push_back("usage.v3_owner_missing: " + request_id);
+                sample.incomplete_linkage = true;
+            }
+        }
+        const auto prepared_it = prepared.find(request_id);
+        std::string purpose_name;
+        if (prepared_it != prepared.end() && prepared_it->second->contains("purpose") &&
+            prepared_it->second->at("purpose").is_string()) {
+            purpose_name = prepared_it->second->at("purpose").get<std::string>();
+        }
+        fill_request_side(sample, request_id, purpose_name);
+        if (sample.provider.empty()) {
+            sample.provider = "unknown";
+        }
+        if (sample.wire.empty()) {
+            sample.wire = "unknown";
+        }
+        result.samples.push_back(std::move(sample));
+    }
+
     result.ok = true;
     return result;
 }

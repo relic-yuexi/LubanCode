@@ -263,6 +263,11 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
     {
         std::ostringstream out;
         out << "  成色        " << model.aggregate.run_ids.size() << " 条 run";
+        if (model.format == "v3") {
+            out << " · v3 账";
+        } else if (model.format == "v2") {
+            out << " · v2 旧格式账";
+        }
         if (model.aggregate.legacy_samples > 0) {
             out << " · v1 旧账 " << model.aggregate.legacy_samples << " 笔";
         }
@@ -361,6 +366,7 @@ nlohmann::json BuildUsageReportJson(const UsageReportModel& model) {
         {"workspace_key", model.workspace_key},
         {"session_status", model.status},
         {"provisional", model.provisional},
+        {"format", model.format},
         {"pricing", pricing},
         {"by", by},
         {"aggregate", model.aggregate.ToJson()}};
@@ -486,6 +492,7 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     model.session_id = read.session_id;
     model.workspace_key = read.workspace_key;
     model.status = read.status;
+    model.format = read.format;
     // active session 恒未封口;指定 session 看 session.json(§14.2:未封口
     // 读高水位,标 provisional)。
     model.provisional = parsed.scope == ParsedUsageCommand::Scope::ActiveSession || !read.sealed();
