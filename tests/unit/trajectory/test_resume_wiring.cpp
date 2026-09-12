@@ -10,6 +10,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -269,6 +270,28 @@ TEST_CASE("默认 v3: one_shot 源预检明拒,普通 v3 源照常续接") {
         DriveOneTurn(*normal);
         REQUIRE(normal->CloseSession("exit").error_code.empty());
     }
+    // 源账字节基准(续接后对照:resume 永不 append 源档)。v3 布局:
+    // sessions/<id>/<id>.jsonl。
+    const auto normal_stream =
+        [&] {
+            const auto workspaces = root / "workspaces";
+            for (const auto& workspace : std::filesystem::directory_iterator(workspaces)) {
+                std::error_code dir_ec;
+                if (!workspace.is_directory(dir_ec) || dir_ec) {
+                    continue;
+                }
+                const auto nested =
+                    workspace.path() / "sessions" / normal_id / (normal_id + ".jsonl");
+                if (std::filesystem::exists(nested)) {
+                    return nested;
+                }
+            }
+            return std::filesystem::path();
+        }();
+    REQUIRE_FALSE(normal_stream.empty());
+    std::error_code size_ec;
+    const auto source_bytes_before = std::filesystem::file_size(normal_stream, size_ec);
+    REQUIRE_FALSE(size_ec);
     {
         auto options = LedgerOptions(root);
         options.one_shot = true;
@@ -305,6 +328,10 @@ TEST_CASE("默认 v3: one_shot 源预检明拒,普通 v3 源照常续接") {
     CHECK(resumed.outcome.source_is_v3);
     CHECK(resumed.outcome.source_session_id == normal_id);
     CHECK(ledger->session_id() != current_id);
+    // 源档全程只读:字节不变;新账另有其址。
+    CHECK(std::filesystem::file_size(normal_stream, size_ec) == source_bytes_before);
+    CHECK_FALSE(size_ec);
+    CHECK(ledger->session_dir() != normal_stream.parent_path());
 }
 
 TEST_CASE("ClearSession: 八步换账后账本指新场,选段器重置") {

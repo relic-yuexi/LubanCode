@@ -120,6 +120,11 @@ SessionCommandOutcome SessionCommandService::ListThreads(const nlohmann::json& q
             entry.archived ? "archived" : "active", entry.damaged ? "damaged" : "ok"));
     }
     outcome.payload = {{"threads", std::move(threads)}, {"total", page.total}};
+    if (!page.diagnostic.empty()) {
+        // 查询侧障碍如实透出(Resume 接入 v3 单 R2):空列表 + 诊断 = 读取
+        // 失败,不是"没有会话"。加键不破协议(旧客户端忽略未知键)。
+        outcome.payload["error"] = page.diagnostic;
+    }
     return outcome;
 }
 
