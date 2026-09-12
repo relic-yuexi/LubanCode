@@ -1078,16 +1078,20 @@ lubancode::cli::SessionTranscriptPage MakeTranscriptPage(
 
 // /resume 裸敲的全屏选择器(SessionPicker;P0-2 数据源换 workspace 索引):
 // 默认范围是当前 workspace(同仓子目录/linked worktree 一把钥匙),全部
-// 范围扫所有 workspace。Enter 回 id 交 resume 七步,Esc 原路返回不动盘。
-std::optional<std::string> PromptResumeTarget(const lubancode::runtime::TrajectorySessionLedger* ledger,
-                                              const lubancode::cli::Theme& theme) {
+// 范围扫所有 workspace。Enter 回 id 交 resume 七步;Esc 是用户取消
+//(Cancelled,调用方原地返回不动盘)——与"面板开不了"(Unavailable,
+// 调用方 fallback 最近一场)分态,不许混(beta.1 反弹一:混作 nullopt
+// 后 Esc 也被 fallback 误恢复)。
+ResumeTargetChoice PromptResumeTarget(const lubancode::runtime::TrajectorySessionLedger* ledger,
+                                      const lubancode::cli::Theme& theme) {
+    ResumeTargetChoice choice;  // 缺省 Unavailable
     if (ledger == nullptr) {
         TermOut() << tr("session.no_home") << "\n";
-        return std::nullopt;
+        return choice;
     }
     if (!lubancode::platform::StdinIsInteractive() || !lubancode::platform::ProbeStdoutConsole().is_console) {
         TermOut() << tr("cmd.resume.usage") << "\n";
-        return std::nullopt;
+        return choice;
     }
 
     // 打开时查一回(本 workspace 与全部都空才说"没什么可恢复")。单发轨迹
@@ -1109,10 +1113,10 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
                                  !cwd_first.diagnostic.empty() ? cwd_first.diagnostic
                                                                : all_first.diagnostic)
                           << "\n";
-                return std::nullopt;
+                return choice;
             }
             TermOut() << tr("cmd.resume.none") << "\n";
-            return std::nullopt;
+            return choice;
         }
     }
 
@@ -1170,10 +1174,15 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
                 keep_id = result.selected_id;
                 continue;
             }
+            // 用户主动退出(Esc/Ctrl+C/EOF):Cancelled——调用方原地返回,
+            // 不 fallback 不 resume。
             TermOut() << theme.stats << tr("cmd.resume.cancelled") << theme.reset << "\n";
-            return std::nullopt;
+            choice.outcome = ResumeTargetChoice::Outcome::Cancelled;
+            return choice;
         }
-        return *result.picked_id;
+        choice.outcome = ResumeTargetChoice::Outcome::Picked;
+        choice.session_id = *result.picked_id;
+        return choice;
     }
 }
 
@@ -2411,10 +2420,15 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
     if (ctx.trajectory != nullptr) {
         std::string target = parsed.args;
         if (target.empty()) {
-            // 裸敲:全屏选择器(真控制台);非交互退回最近一场。
-            const auto selected = PromptResumeTarget(ctx.trajectory, theme);
-            if (selected.has_value()) {
-                target = *selected;
+            // 裸敲:全屏选择器(真控制台)。三态分流(beta.1 反弹一):
+            // 选中走七步;用户取消原地不动(不封场不建场不发请求);
+            // 面板开不了(非交互/没数据)才 fallback 最近一场。
+            const ResumeTargetChoice selected = PromptResumeTarget(ctx.trajectory, theme);
+            if (selected.cancelled()) {
+                return CommandFlow::Continue;  // "已取消恢复"已由选择器打印
+            }
+            if (selected.picked()) {
+                target = selected.session_id;
             } else {
                 target = ctx.trajectory->LatestResumableSessionId();
             }

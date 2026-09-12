@@ -55,6 +55,45 @@ std::filesystem::path TempDir(const std::string& tag) {
 
 using namespace lubancode::app;
 
+// beta.1 反弹一(Esc 误恢复):裸敲选择器的弹选结果拆三态——用户取消与
+// 面板开不了不再混作同一个 nullopt。单测环境非交互(管道)钉得住
+// Unavailable 态(调用方 fallback 最近一场的语义保留);真 TTY 的 Esc
+// → Cancelled 分派在 HandleSlashResume 是两行直返(不 fallback 不
+// resume),由结构判型与下述分派合同共同钉住。
+TEST_CASE("/resume 裸敲三态: 非交互不开面板回 Unavailable,不冒充用户取消") {
+    const auto root = TempDir("resume_three_state");
+    std::filesystem::path workspaces = root / "workspaces";
+    {
+        lubancode::runtime::TrajectorySessionLedger::Options options;
+        options.workspaces_root = workspaces;
+        options.workspace_root = root / "ws";
+        options.workspace_identity = lubancode::workspace::MakeFallbackIdentity(root / "ws");
+        options.lubancode_version = "test";
+        auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(options);
+        REQUIRE(ledger.has_value());
+        REQUIRE(ledger->CloseSession("exit").error_code.empty());  // 封口场:有可恢复目标
+    }
+    lubancode::runtime::TrajectorySessionLedger::Options reopen_options;
+    reopen_options.workspaces_root = workspaces;
+    reopen_options.workspace_root = root / "ws";
+    reopen_options.workspace_identity = lubancode::workspace::MakeFallbackIdentity(root / "ws");
+    reopen_options.lubancode_version = "test";
+    auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(reopen_options);
+    REQUIRE(ledger.has_value());
+
+    lubancode::cli::Theme theme;
+    const ResumeTargetChoice choice = PromptResumeTarget(&*ledger, theme);
+    // 非交互(测试进程管道):面板开不了 → Unavailable,不是用户取消。
+    CHECK(choice.outcome == ResumeTargetChoice::Outcome::Unavailable);
+    CHECK_FALSE(choice.cancelled());
+    CHECK_FALSE(choice.picked());
+    CHECK(choice.session_id.empty());
+
+    // 分派合同:Unavailable 由调用方 fallback(最近一场真在);Cancelled
+    // 原地不动。三态判型各归各位。
+    CHECK_FALSE(ledger->LatestResumableSessionId().empty());
+}
+
 TEST_CASE("/skills 按来源分组,说明另起一行,不把长路径铺满屏") {
     std::vector<lubancode::tools::SkillMeta> skills = {
         {"project-skill", "项目说明", "D:/very/long/project/path", "项目级"},
