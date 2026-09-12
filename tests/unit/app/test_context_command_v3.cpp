@@ -16,6 +16,7 @@
 #include "agent/runtime_profile.hpp"
 #include "app/commands/session_commands.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/format_utils.hpp"  // FormatTokenCount:期望串与实现同一把尺
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
 
@@ -96,11 +97,12 @@ TEST_CASE("v3 会话:最近请求预算分栏,三枚值各有其名") {
         text = capture.text();
     }
     // 524288 / 32768 / 511635 三枚值同屏可解释(单内验收),不再混作一个
-    // "预留"。
+    // "预留"。数字按 FormatTokenCount 的十进制 K/M 折算上屏,期望串与
+    // 实现同一把尺现算,不抄格式细节。
     CHECK(text.find("最近请求预算") != std::string::npos);
-    CHECK(text.find("524288") != std::string::npos);
-    CHECK(text.find("32768") != std::string::npos);
-    CHECK(text.find("511635") != std::string::npos);
+    CHECK(text.find(cli::FormatTokenCount(524288)) != std::string::npos);
+    CHECK(text.find(cli::FormatTokenCount(32768)) != std::string::npos);
+    CHECK(text.find(cli::FormatTokenCount(511635)) != std::string::npos);
 }
 
 TEST_CASE("v3 会话:没发过请求就明说,不冒充") {
