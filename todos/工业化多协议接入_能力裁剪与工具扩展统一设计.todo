@@ -639,7 +639,7 @@ fsync/FlushFileBuffers 或等价事务提交是否完成，按选定 durability 
 - [x] 冻结 ToolPolicySpec、功能名、资源授权、能力快照、反向交互与 2.0 映射；明确旧 schema 转换。
 - [x] 冻结“一场会话一份 RuntimeBundle”的寿命图、取消顺序、后台引用与资源共享边界。
 - [x] 确认操作真账迁移与 durability 标准，列出 G15 的错误回执、意图丢失和 claim 恢复探针。
-- [ ] 完成最小测试工具集与零工具两份配置样例，静态解析能解释全部依赖；不接模型也不联网。
+- [x] 完成最小测试工具集与零工具两份配置样例，静态解析能解释全部依赖；不接模型也不联网。
 
 #### P0 记账（2026-09-13，worktree HEAD `4e80429a`，随本 PR 提交）
 
@@ -651,6 +651,8 @@ fsync/FlushFileBuffers 或等价事务提交是否完成，按选定 durability 
 6. 两份配置样例与静态解析：fixtures 两份 + 机器 schema + 测试册 CI 验（解析、schema 校验、依赖全解释、零工具档零启动依赖）。未接模型、未联网、未起监听——与 C01/C02 静态可验部分对齐（运行时行为验收仍留 P2）。
 
 未验边界：全部验证为静态（源码实查 + golden schema 校验测试在 CI 编跑）；未做真进程协议收发、未跑真 MCP 握手、未验 1.2/2.0 实际互操作；G16 渠道平台真收发仍为未实测。PR/CI 链接随合并回填。
+
+CI 回填（2026-09-13）：PR relic-yuexi/LubanCode#56（分支 worktree-agent-proto-p0，head `bcd86fcb`）。ci run 34715882353 rollup conclusion=success（PR 快车道只烧 macos-clang 编译测试腿，linux 矩阵按仓库设计仅在合入 main 后跑）；docs 检查 layout-links-skill-route 绿。`unit.capability.capability_contract` 九个用例全过（含 golden schema 校验、新旧不混读、依赖解释、2.0 信封），全量 476/476 通过。中途两红已就地修：新合同页收录 docs/catalog.txt（孤儿页面检查）；测试册补匿名 namespace 闭括号与 `<cstdint>`；2.0 golden 的 result 通知补 `jsonrpc` 信封字段。
 
 退出条件核对：配置与协议 golden 过 schema 校验（测试册 CI 执法）✔；新接口全标注设计状态（合同每节〔冻结〕/〔拟议〕，样例文件头注明"生产未接线"）✔；无同义双台账（§2.1 归属账 + 合同 §12 owner 表；受理真账单权威=统一进 v3 writer，operations.jsonl 只作迁移来源）✔。
 
