@@ -106,7 +106,7 @@ TEST_CASE("Chat events: 只有 prompt_tokens、没有 cache 字段——input=to
     CHECK(event.usage.input_tokens == 37);
     CHECK(event.usage.cache_read_tokens == 0);
     CHECK(event.usage_reported);
-    CHECK_FALSE(event.cache_reported);
+    CHECK_FALSE(event.cache_read_reported);
     CHECK(api::TotalInputTokens(event.usage) == 37);
 }
 
@@ -138,7 +138,7 @@ TEST_CASE("Chat events: usage 在 finish chunk 与独立 chunk 各来一次,只�
     const auto& event = std::get<api::MessageDone>(done[0]);
     CHECK(event.usage.input_tokens == 40);
     CHECK(event.usage.cache_read_tokens == 60);
-    CHECK(event.cache_reported);
+    CHECK(event.cache_read_reported);
     CHECK(event.usage.output_tokens == 10);
     CHECK(api::TotalInputTokens(event.usage) == 100);
 }
@@ -326,4 +326,125 @@ TEST_CASE("Chat events: 结构化 reasoning_details——不映射也不静默�
     REQUIRE(done.size() == 1);
     CHECK(parser.reasoning_details_blocks() == 1);
     CHECK(std::get<api::MessageDone>(done[0]).stop_reason == "end_turn");
+}
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C4:双字段形状核对与异常账。DeepSeek 顶层 hit/miss
+// 与 details.cached_tokens 同现只算一次;只报一项按明确规则推算/标异常,
+// 不拿缺项零值造 100%;矛盾账(负数、cached>total、hit+miss 不符)原数保留、
+// usage_anomaly 点名,绝不截零或截到 100%。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Chat events C4: DeepSeek 分项与 details.cached_tokens 同现——读取只算一次") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    // 兼容网关两副都回:读取按 DeepSeek 分项记,cached 不再加一遍。
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"prompt_tokens":12000,"completion_tokens":9,"prompt_cache_hit_tokens":8960,"prompt_cache_miss_tokens":3040,"prompt_tokens_details":{"cached_tokens":8960}}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK(event.usage.cache_read_tokens == 8960);  // 只算一次
+    CHECK(event.usage.input_tokens == 3040);
+    CHECK(api::TotalInputTokens(event.usage) == 12000);
+    CHECK(event.cache_read_reported);
+    CHECK(event.usage_anomaly.empty());  // 两副一致:不算矛盾
+}
+
+TEST_CASE("Chat events C4: 只报 hit 不报 miss 也不报总量——不拿 0 补 miss 造 100%") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"completion_tokens":9,"prompt_cache_hit_tokens":8960}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    // 已知的只有 hit:数字照记,总量未知(anomaly 点名)——绝不 input=0
+    // 凑出 8960/8960=100%。
+    CHECK(event.usage.cache_read_tokens == 8960);
+    CHECK(event.usage.input_tokens == 0);
+    CHECK_FALSE(event.usage_anomaly.empty());
+    CHECK(event.cache_read_reported);
+}
+
+TEST_CASE("Chat events C4: 只报 hit 但总量在场——miss 按总量推算并点名") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"prompt_tokens":12000,"completion_tokens":9,"prompt_cache_hit_tokens":8960}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    // miss = 12000-8960 = 3040,推算进 anomaly 说明,总输入保持 12000。
+    CHECK(event.usage.input_tokens == 3040);
+    CHECK(event.usage.cache_read_tokens == 8960);
+    CHECK(api::TotalInputTokens(event.usage) == 12000);
+    CHECK_FALSE(event.usage_anomaly.empty());
+}
+
+TEST_CASE("Chat events C4: hit+miss 与 prompt_tokens 冲突——原数保留并标异常") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"prompt_tokens":60000,"completion_tokens":5,"prompt_cache_hit_tokens":49000,"prompt_cache_miss_tokens":1000}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK(event.usage.input_tokens == 1000);
+    CHECK(event.usage.cache_read_tokens == 49000);
+    CHECK(api::TotalInputTokens(event.usage) == 50000);  // 原数,不被 60000 覆盖
+    CHECK_FALSE(event.usage_anomaly.empty());             // 冲突点名
+}
+
+TEST_CASE("Chat events C4: cached_tokens 超过 prompt_tokens——input 为负保留,不截零") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":1200}}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    // 旧实现会 max(total-cached,0) 截零:那是拿 0 掩盖矛盾。现在 input
+    // 照记 -200,anomaly 点名,消费端把这笔排除出精确比例。
+    CHECK(event.usage.input_tokens == -200);
+    CHECK(event.usage.cache_read_tokens == 1200);
+    CHECK(api::TotalInputTokens(event.usage) == 1000);  // 总输入仍是厂商原数
+    CHECK_FALSE(event.usage_anomaly.empty());
+}
+
+TEST_CASE("Chat events C4: 负数字段——标异常,样本不冒充精确比例") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":-10,"prompt_cache_miss_tokens":110}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK_FALSE(event.usage_anomaly.empty());  // 负数点名
+    // 数字照记(hit 读不出时落 0,但 seen 旗标与 anomaly 都在)。
+    CHECK(event.usage.input_tokens == 110);
+    CHECK(event.cache_read_reported);  // 字段在场:明报位仍真
+}
+
+TEST_CASE("Chat events C4: 只报 miss 不报 hit——读取未知,不冒充已知零") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[],"usage":{"completion_tokens":5,"prompt_cache_miss_tokens":3040}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    // 已知只有 miss:读取量未知(明报位 false + anomaly 点名),不写 0%
+    // 也不写 100%。
+    CHECK(event.usage.input_tokens == 3040);
+    CHECK(event.usage.cache_read_tokens == 0);
+    CHECK_FALSE(event.cache_read_reported);
+    CHECK_FALSE(event.usage_anomaly.empty());
 }

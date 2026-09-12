@@ -200,6 +200,23 @@ TEST_CASE("v2 usage payload 条件硬约束") {
     error = ValidatePayloadWithVersion(2, EventKind::ModelUsageRecorded, negative);
     REQUIRE(error.has_value());
     CHECK(error->error_code == "schema.usage_negative_tokens");
+    // 负 token + 非空 usage_anomaly 点名:放行(缓存用量按 Wire 归一单
+    // C4——矛盾账原数保留,但必须点名;无点名的负数仍是坏账)。
+    nlohmann::json flagged = negative;
+    flagged["usage_anomaly"] = "cached_tokens(1200) > input_tokens(1000)";
+    CHECK(!ValidatePayloadWithVersion(2, EventKind::ModelUsageRecorded, flagged).has_value());
+    // 点名是空串:不算点名,照拒。
+    nlohmann::json empty_flag = negative;
+    empty_flag["usage_anomaly"] = "";
+    error = ValidatePayloadWithVersion(2, EventKind::ModelUsageRecorded, empty_flag);
+    REQUIRE(error.has_value());
+    CHECK(error->error_code == "schema.usage_negative_tokens");
+    // 读/写明报位新键(C2):合法可选字段。
+    nlohmann::json flags = bad_reasoning;
+    flags["reasoning_tokens"] = 5;
+    flags["cache_read_reported_by_provider"] = true;
+    flags["cache_creation_reported_by_provider"] = false;
+    CHECK(!ValidatePayloadWithVersion(2, EventKind::ModelUsageRecorded, flags).has_value());
     // 全字段的合法 owner:过。
     nlohmann::json good = bad_reasoning;
     good["reasoning_tokens"] = 5;

@@ -146,13 +146,13 @@ TEST_CASE("聚合数学:求和、unknown 不折 0、reasoning 不双计、重试
 TEST_CASE("cache epoch 分段:compact 翻页后各段独立求和,未报缓存不伪装 0%") {
     UsageSample first = Sample("req-1", RequestPurpose::MainTurn, 1000, 9000, 10);
     first.cache_epoch = 1;
-    first.cache_reported_by_provider = true;
+    first.cache_read_reported_by_provider = true;
     UsageSample second = Sample("req-2", RequestPurpose::MainTurn, 2000, 8000, 20);
     second.cache_epoch = 2;
-    second.cache_reported_by_provider = true;
+    second.cache_read_reported_by_provider = true;
     UsageSample unknown = Sample("req-3", RequestPurpose::MainTurn, 3000, 0, 30);
     unknown.cache_epoch = 2;
-    unknown.cache_reported_by_provider = false;
+    unknown.cache_read_reported_by_provider = false;
 
     const UsageAggregate aggregate = AggregateUsage({first, second, unknown});
     REQUIRE(aggregate.by_cache_epoch.size() == 2);
@@ -181,6 +181,86 @@ TEST_CASE("全 unknown:比例给 nullopt,不拿 0% 冒充") {
     CHECK(aggregate.totals.requests_unknown == 2);
     CHECK(aggregate.totals.total_input_tokens == 0);
     CHECK(!aggregate.totals.cache_read_ratio_percent().has_value());
+}
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C2/C4:聚合只认"读取明报"的样本进比例桶(只报
+// 写入不冒充读取已知);异常样本单独计数、不进精确比例。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("C2 聚合: 只报写入的样本进 unknown 桶,不冒充读取已知") {
+    UsageSample write_only = Sample("req-w", RequestPurpose::MainTurn, 1000, 0, 10);
+    write_only.cache_epoch = 1;
+    write_only.cache_read_reported_by_provider = false;    // 读取字段缺席
+    write_only.cache_creation_reported_by_provider = true; // 只报写入
+    write_only.usage->cache_creation_tokens = 1000;
+    write_only.total_input_tokens = api::TotalInputTokens(*write_only.usage);
+
+    const UsageAggregate aggregate = AggregateUsage({write_only});
+    REQUIRE(aggregate.by_cache_epoch.size() == 1);
+    CHECK(aggregate.by_cache_epoch[0].requests_cache_reported == 0);  // 读取未知
+    CHECK(aggregate.by_cache_epoch[0].requests_cache_unknown == 1);
+    // 比例桶里没有它:ratio 给 nullopt(分母 0),不拿"读取=0"算出 0%。
+    CHECK(!aggregate.by_cache_epoch[0].cache_read_ratio_percent().has_value());
+}
+
+TEST_CASE("C4 聚合: 异常样本计数排除,比例只对自洽样本") {
+    UsageSample good = Sample("req-1", RequestPurpose::MainTurn, 1000, 9000, 10);
+    good.cache_epoch = 1;
+    good.cache_read_reported_by_provider = true;
+    UsageSample bad = Sample("req-2", RequestPurpose::MainTurn, 2000, 8000, 20);
+    bad.cache_epoch = 1;
+    bad.cache_read_reported_by_provider = true;
+    bad.usage_anomaly = std::string("cached_tokens(1200) > input_tokens(1000)");
+    bad.usage->input_tokens = -200;  // R>T 推出的负 U,原数保留
+    bad.total_input_tokens = api::TotalInputTokens(*bad.usage);
+
+    const UsageAggregate aggregate = AggregateUsage({good, bad});
+    CHECK(aggregate.anomalous_samples == 1);
+    REQUIRE(aggregate.by_cache_epoch.size() == 1);
+    CHECK(aggregate.by_cache_epoch[0].anomalous_samples == 1);
+    // 比例桶只收 good:9000/10000=90%;bad 的 8000/10000 不进。
+    CHECK(aggregate.by_cache_epoch[0].requests_cache_reported == 1);
+    CHECK(aggregate.by_cache_epoch[0].requests_cache_unknown == 1);
+    const auto ratio = aggregate.by_cache_epoch[0].cache_read_ratio_percent();
+    REQUIRE(ratio.has_value());
+    CHECK(*ratio == 90);
+    // token 总量照实含原数(不掩盖):1000 + (2000-8000 原数 = -200+8000+0)。
+    CHECK(aggregate.by_cache_epoch[0].totals.total_input_tokens == 1000 + 7800);
+}
+
+TEST_CASE("UsageSample 序列化: 读/写明报位与异常账新键,旧合并位读进 read") {
+    UsageSample sample = Sample("req-json", RequestPurpose::MainTurn, 1000, 9000, 10);
+    sample.cache_read_reported_by_provider = true;
+    sample.cache_creation_reported_by_provider = false;
+    sample.usage_anomaly = std::string("cached_tokens(1200) > input_tokens(1000)");
+
+    const nlohmann::json json = sample.ToJson();
+    CHECK(json.at("cache_read_reported_by_provider") == true);
+    CHECK(json.at("cache_creation_reported_by_provider") == false);
+    CHECK(json.at("usage_anomaly") == "cached_tokens(1200) > input_tokens(1000)");
+    CHECK_FALSE(json.contains("cache_reported_by_provider"));  // 旧合并位停写
+
+    std::string error;
+    const auto back = UsageSample::FromJsonStrict(json, &error);
+    REQUIRE(back.has_value());
+    CHECK(back->cache_read_reported_by_provider.has_value());
+    CHECK(*back->cache_read_reported_by_provider);
+    CHECK(back->cache_creation_reported_by_provider.has_value());
+    CHECK_FALSE(*back->cache_creation_reported_by_provider);
+    REQUIRE(back->usage_anomaly.has_value());
+    CHECK(back->usage_anomaly->find("cached_tokens") != std::string::npos);
+
+    // 旧档(只有合并位):读进 read 位,creation 留 nullopt(旧账分不开,不猜)。
+    nlohmann::json legacy = json;
+    legacy.erase("cache_read_reported_by_provider");
+    legacy.erase("cache_creation_reported_by_provider");
+    legacy["cache_reported_by_provider"] = true;
+    const auto old = UsageSample::FromJsonStrict(legacy, &error);
+    REQUIRE(old.has_value());
+    CHECK(old->cache_read_reported_by_provider.has_value());
+    CHECK(*old->cache_read_reported_by_provider);
+    CHECK_FALSE(old->cache_creation_reported_by_provider.has_value());
 }
 
 TEST_CASE("provider 明报全零:是实测零,不是 unknown") {

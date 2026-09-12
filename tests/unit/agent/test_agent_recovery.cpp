@@ -131,7 +131,7 @@ public:
         response_started_for.push_back(request_id);
     }
     void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                         bool) override {}
+                         bool, bool, const std::string&) override {}
     bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                            const std::string&) override {
         return true;

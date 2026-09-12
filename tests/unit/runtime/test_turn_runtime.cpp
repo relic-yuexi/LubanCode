@@ -18,6 +18,9 @@
 #include <thread>
 #include <vector>
 
+#include "api/anthropic/events.hpp"  // EventParser:C1 流式 usage 合并的验收链
+#include "api/assembler.hpp"
+#include "api/sse_framing.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "agent/agent.hpp"
@@ -702,13 +705,13 @@ TEST_CASE("usage:明报全零与 cache 未报靠显式位分家") {
     rt::TurnUsageStats stats;
     api::UsageReport report;
     report.reported_by_provider = true;
-    report.cache_reported_by_provider = false;
+    report.cache_read_reported_by_provider = false;
     stats.Add(report);
     CHECK(stats.any_reported());
     CHECK_FALSE(stats.any_cache_reported());
     CHECK_FALSE(stats.all_cache_reported());
 
-    report.cache_reported_by_provider = true;
+    report.cache_read_reported_by_provider = true;
     stats.Add(report);
     CHECK(stats.any_cache_reported());
     CHECK_FALSE(stats.all_cache_reported());
@@ -722,7 +725,7 @@ TEST_CASE("usage:缓存报数接口按报了的说账——一笔缺席不再全
     // 三笔全报缓存明细
     api::UsageReport full;
     full.reported_by_provider = true;
-    full.cache_reported_by_provider = true;
+    full.cache_read_reported_by_provider = true;
     full.usage = api::Usage{100, 0, 900, 0};
     stats.Add(full);
     stats.Add(full);
@@ -730,7 +733,7 @@ TEST_CASE("usage:缓存报数接口按报了的说账——一笔缺席不再全
     // 一笔报了 usage 但缓存明细缺席(辅助请求形状)
     api::UsageReport partial;
     partial.reported_by_provider = true;
-    partial.cache_reported_by_provider = false;
+    partial.cache_read_reported_by_provider = false;
     partial.usage = api::Usage{50, 0, 0, 0};
     stats.Add(partial);
     CHECK(stats.reported_count() == 4);
@@ -761,6 +764,113 @@ TEST_CASE("usage:reasoning 拆账含在 output 里,不是另加的一笔") {
     CHECK(stats.reasoning_tokens() == 30);
     CHECK(stats.output_tokens() == 50);  // 不叠加
     CHECK(stats.total_input_tokens() == 100);
+}
+
+// ---------------------------------------------------------------------------
+// 缓存用量按 Wire 归一单 C2/C4:读/写明报位分开落 StepUsageRecord;异常
+// 样本保留原数、被精确比例排除并计数;只报写入不冒充读取已知。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("usage C2: 只报写入——写入位真、读取位假,不互推") {
+    rt::TurnUsageStats stats;
+    api::UsageReport report;
+    report.reported_by_provider = true;
+    report.cache_creation_reported_by_provider = true;
+    report.usage = api::Usage{100, 5, 0, 300};  // R 数字 0、W=300
+    stats.Add(report);
+    REQUIRE(stats.steps.size() == 1);
+    CHECK(stats.steps[0].cache_creation_reported);
+    CHECK_FALSE(stats.steps[0].cache_read_reported);  // 只报写入不能证明读取为零
+    // 缓存报数按读取算:这笔不计入 cache_reported_count(读取量未知)。
+    CHECK(stats.reported_count() == 1);
+    CHECK(stats.cache_reported_count() == 0);
+    CHECK_FALSE(stats.any_cache_reported());
+}
+
+TEST_CASE("usage C2: 读/写明报位经 UsageReport 全链传递,数字兜底各自保留") {
+    rt::TurnUsageStats stats;
+    api::UsageReport both;
+    both.reported_by_provider = true;
+    both.cache_read_reported_by_provider = true;
+    both.cache_creation_reported_by_provider = false;
+    both.usage = api::Usage{1000, 5, 900, 0};  // W 数字 0 且未报:未知,不是明报零
+    stats.Add(both);
+    REQUIRE(stats.steps.size() == 1);
+    CHECK(stats.steps[0].cache_read_reported);
+    CHECK_FALSE(stats.steps[0].cache_creation_reported);  // 未报写入:不靠数字 0 反推
+    CHECK(stats.cache_reported_count() == 1);
+}
+
+TEST_CASE("usage C4: 异常样本保留原数,精确比例排除并计数") {
+    // 验收样本第 11 行的两笔完整样本:输入 1000/100000、读取 0/90000——
+    // 汇总按 token 总和 ΣR/ΣT = 90000/101000 ≈ 89.11% → 89,不是各次平均。
+    rt::TurnUsageStats stats;
+    api::UsageReport first;
+    first.reported_by_provider = true;
+    first.cache_read_reported_by_provider = true;
+    first.usage = api::Usage{1000, 5, 0, 0};
+    stats.Add(first);
+    api::UsageReport second;
+    second.reported_by_provider = true;
+    second.cache_read_reported_by_provider = true;
+    second.usage = api::Usage{100000, 8, 90000, 0};
+    stats.Add(second);
+    CHECK(stats.cache_hit_percent() == 89);  // 90000/101000=89.1%,四舍五入 89
+
+    // 再混进一笔矛盾账(cached>total):原数保留,比例只对自洽样本算。
+    api::UsageReport bad;
+    bad.reported_by_provider = true;
+    bad.cache_read_reported_by_provider = true;
+    bad.usage = api::Usage{-200, 3, 1200, 0};  // R>T 的 responses 形状
+    bad.usage_anomaly = "cached_tokens(1200) > input_tokens(1000)";
+    stats.Add(bad);
+    REQUIRE(stats.steps.size() == 3);
+    CHECK(stats.steps[2].anomalous);
+    CHECK_FALSE(stats.steps[2].anomaly_note.empty());
+    CHECK(stats.anomalous_count() == 1);
+    CHECK(stats.cache_hit_percent() == 89);  // 异常样本不进分子分母,比例不漂
+    CHECK(stats.steps[2].cache_hit_percent() == -1);  // 单步比例也算不得
+    // token 总量账如实含异常样本的原数(不掩盖),总输入 1000+100000+1000。
+    CHECK(stats.total_input_tokens() == 102000);
+    // 全是异常样本时比例返回 -1(没有有效样本)。
+    rt::TurnUsageStats only_bad;
+    only_bad.Add(bad);
+    CHECK(only_bad.cache_hit_percent() == -1);
+    CHECK(only_bad.anomalous_count() == 1);
+}
+
+TEST_CASE("usage 验收: Claude 官方流式形状经 assembler→UsageReport 的完整账") {
+    // 验收样本第 1 行的 runtime 侧:EventParser 合并(开头报齐输入侧、
+    // 末尾只报 output)→ assembler → UsageReport → StepUsageRecord,
+    // 报告状态中途不丢。
+    anthropic::EventParser parser;
+    api::MessageAssembler assembler;
+    for (const char* raw : {
+             R"({"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":1000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":9000}}})",
+             R"({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})",
+             R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"答"}})",
+             R"({"type":"content_block_stop","index":0})",
+             R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":44}})",
+             R"({"type":"message_stop"})",
+         }) {
+        for (auto& event : parser.Consume(api::SseFrame{"message", raw})) {
+            assembler.Feed(event);
+        }
+    }
+    api::UsageReport report;
+    report.usage = assembler.usage();
+    report.reported_by_provider = assembler.usage_seen();
+    report.cache_read_reported_by_provider = assembler.cache_read_seen();
+    report.cache_creation_reported_by_provider = assembler.cache_creation_seen();
+    report.usage_anomaly = assembler.usage_anomaly();
+    rt::TurnUsageStats stats;
+    stats.Add(report);
+    REQUIRE(stats.steps.size() == 1);
+    CHECK(stats.total_input_tokens() == 12000);
+    CHECK(stats.cache_hit_percent() == 75);
+    CHECK(stats.steps[0].cache_read_reported);
+    CHECK(stats.steps[0].cache_creation_reported);
+    CHECK_FALSE(stats.steps[0].anomalous);
 }
 
 // ---------------------------------------------------------------------------
