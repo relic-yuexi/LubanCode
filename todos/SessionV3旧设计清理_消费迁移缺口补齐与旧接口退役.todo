@@ -143,14 +143,14 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 ```text
 任务编号：T06 / V3-GAP-01
-状态：implementing（代码与测试已落，CI 判绿后改 verified）
+状态：verified
 实现：commit 594aff8d（分支 worktree-agent-usage-v3）——src/accounting/session_usage_reader.*（分派+树收集）、usage_projector.*（ProjectV3Usage/UsageFromV3Owner/MapV3Purpose）、app/commands/usage_commands.*（format 上报告）、tests/unit/accounting/test_v3_session_usage.cpp、tests/unit/trajectory_v3/test_v3_usage_owner_hooks.cpp（生产折算对表）
 生产入口：只读查询（/usage 命令、ReadSessionUsage 消费方）
-验证：新增 unit.accounting.test_v3_session_usage（主账逐笔对账/真零与坏账/两层子代理/重复 spawn 去重/resume 源不混入/迟到实报/compact+goal 内部请求/失败请求/格式分派）与 owner_hooks 对表；CI 未跑——本地禁构建，PR 开出后以三平台 rollup conclusion=success 判绿回填（PR 号与结果见 B2 记账）
+验证：新增 unit.accounting.test_v3_session_usage（主账逐笔对账/真零与坏账/两层子代理/重复 spawn 去重/resume 源不混入/迟到实报/compact+goal 内部请求/失败请求/格式分派）与 owner_hooks 对表；PR #53 CI rollup conclusion=success（2026-09-13，macos-clang 快车道 470 册全绿；首轮因测试册误置进程级 EnvGuard 连累 26 册 v2 断言册，撤后复绿，非生产代码缺陷）
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实 v3 会话的真机 /usage 抽验未做；Workflow 模型节点费用归属按关联单（T10）不在本单；估算栏 tokenEstimateRef 离线消费仍待迁移（schema §九原注，归 T07/T14 批次）
 旧依赖：v2 EventEnvelope 读路保留（旧档消费，T02-B 退役）；insights（integrity_gate/prompt_auditor）仍走 v2 路待 T14
 文档：docs/architecture/trajectory-v3-schema.md §九 /usage 行、docs/development/v3-consumer-inventory.md C1 行
-销项日期：待 PR 合并回填
+销项日期：2026-09-13（CI 判绿口径；真机 /usage 抽验尾巴见『失败/未验』栏）
 ```
 
 ### T07 / V3-GAP-02：Telemetry
