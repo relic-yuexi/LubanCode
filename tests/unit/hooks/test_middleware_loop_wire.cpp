@@ -96,15 +96,15 @@ TEST_CASE("放行:每步一次,快照与预算齐;两步各得各的 step_id") {
     };
     std::vector<Call> calls;
     wiring.on_pre_request_hooks = [&calls](const std::string& step_id, const std::string& turn_id,
-                                           const nlohmann::json& snapshot, std::uint64_t window,
-                                           std::uint64_t reserve) {
+                                           const nlohmann::json& snapshot,
+                                           const runtime::PreRequestBudget& budget) {
         Call call;
         call.step_id = step_id;
         call.turn_id = turn_id;
         call.model = snapshot.value("model", std::string());
         call.system = snapshot.value("system", std::string());
-        call.window = window;
-        call.reserve = reserve;
+        call.window = budget.context_window_tokens;
+        call.reserve = budget.final_reserve_tokens;
         calls.push_back(std::move(call));
         return std::string();  // 放行
     };
@@ -130,7 +130,7 @@ TEST_CASE("拦截:整步明败,请求不出门,理由透传") {
     agent::TurnWiring wiring;
     wiring.events = &turn.adapter;
     wiring.on_pre_request_hooks = [](const std::string&, const std::string&, const nlohmann::json&,
-                                     std::uint64_t, std::uint64_t) {
+                                     const runtime::PreRequestBudget&) {
         return std::string("PreRequest 钩子拦下本次请求[recover]: 须压缩历史");
     };
 
