@@ -2063,19 +2063,33 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     // <id>.jsonl 首行 schemaVersion==3 即 v3:ReadV3Ledger 验卷 + 沿源链
     // 折算(FoldV3ResumeChain,D2)。悬空工具三道账与 checkpoint 是 v2
     // 折叠的概念,v3 源不伪造(执行状态恢复走 v3::ProjectResume 的后续棒)。
+    // 认不出的目录(两账并存/首行坏/异版本)各自报状态,不混作"没档"
+    //(R2 与旧设计清理单 T00 共用的读面合同)。
     std::string source_last_event_id;
     std::string source_run_id;
     std::uint64_t source_seq = 0;
     V3ResumeFold chain_fold;       // v3 源的链折算(第 6.5 步导入新场用)
     bool has_chain_fold = false;
-    if (const auto v3_stream = v3::FindV3SessionStream(source_dir); v3_stream.has_value()) {
-        auto ledger = v3::ReadV3Ledger(*v3_stream);
+    const auto v3_probe = v3::ProbeV3SessionStream(source_dir);
+    if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
+        return fail("resume.source_format_conflict",
+                    v3_probe.detail + ";两种主账并存须人工裁决,不自动选边");
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::EmptyFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::BadFirstLine ||
+        v3_probe.status == v3::V3StreamProbe::Status::NotV3Schema) {
+        return fail("resume.source_format_unknown",
+                    v3_probe.detail + ";目录无 main.jsonl,按 v3 主账认但首行不合 schema");
+    }
+    if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+        const std::filesystem::path& v3_stream = v3_probe.stream;
+        auto ledger = v3::ReadV3Ledger(v3_stream);
         if (!ledger.has_value()) {
             return fail("resume.source_corrupt", ledger.error());
         }
         outcome.source_verified = true;
         outcome.source_is_v3 = true;
-        outcome.source_v3_stream = *v3_stream;
+        outcome.source_v3_stream = v3_stream;
         outcome.source_event_count = ledger->lines;
         source_run_id = ledger->run_id;
         source_seq = ledger->lines;
@@ -2094,7 +2108,7 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         // 防环、深度护栏。compact 内部问答从未入链,天然排除;被摘要替代
         // 的原文不回潮(各段取各自 ModelContext 投影)。链有缺口时精确
         // 恢复拒绝,不缺斤短两地续。
-        auto folded = FoldV3ResumeChain(*ledger, *v3_stream);
+        auto folded = FoldV3ResumeChain(*ledger, v3_stream);
         if (!folded.has_value()) {
             return fail(folded.error().code == "chain" ? "resume.source_chain_broken"
                                                        : "resume.source_corrupt",
