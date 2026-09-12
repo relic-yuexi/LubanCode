@@ -1,0 +1,231 @@
+# Session V3 异步工具：任务执行、协议配对与结果投递
+
+日期：2026-09-12。状态：设计草案，全部待实施、待验收。本次只查源码与官方文档，没有运行真实 provider 探针。
+
+主合同：[Session V3](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)。当前实现：[session-v3.md](../docs/architecture/session-v3.md)。容量合同：[v3-capacity-recovery.md](../docs/architecture/context/v3-capacity-recovery.md)。本文新增字段、事件和接口均为提案，不表示现有 schema 已接受。
+
+## 1. 定案方向
+
+底座统一执行任务，上层按 provider 编排调用。别用一个 async 布尔值包办全部语义。
+
+拆开三件事：
+
+1. execution：实际工作有没有启动、还在不在跑、结果落稳没有。
+2. protocol obligation：哪枚调用还欠模型一份结果，哪枚已经配齐。
+3. delivery：哪份结果进入哪版上下文、哪次请求；远端收没收到，另凭证据判断。
+
+V3 继续只有 message/event 两类顶层行。进度记事件，正式回喂记 tool 消息。原账只追加，seq 只排追加次序。异步结果可以晚到，不能倒插旧账，不能改旧请求。
+
+首期先做持久任务底座和显式 start/get/wait/cancel，再接 OpenAI 原生异步。一般工具仍同步；仅白名单、可恢复、只读长任务先试。后续支持副作用任务时须先具备幂等或外部对账能力。
+
+## 2. 协议依据与修正
+
+2026-09-12 已打开核对：
+
+- [OpenAI Async tool calling](https://developers.openai.com/api/docs/guides/async-tool-calling)：function/custom 定义可加 async，回包调用也携带 async；后续用原 call_id 回结果。适用于 GPT-6 Astra 及后续支持模型，应用负责执行。托管工具不适用；不与 PTC 配置混用；API Multi-agent mode 不与 parallel tool calls 组合。
+- [Claude Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)：客户端 tool_use 必须在紧随的 user 消息中配齐 tool_result，结果块排在文本之前。若同轮还有未完成服务端工具，续接消息只能含客户端结果，且须保留工具定义。
+
+不把用户材料中发布日期、PTC 四分钟、SDK defer 保留期当作本设计前提；本次未逐项核实。API 文档没给客户端任务时限，不等于应用该无限等待。
+
+Claude 上不必靠补 is_error 假装异步。显式 search_start 的语义就是“提交任务”，成功回 jobId 是完整、正常结果；稍后 search_get/search_wait 用新调用取业务结果。启动失败、真实执行失败或确实未执行才报错误。不能把原来承诺“返回搜索结果”的工具暗改成“返回句柄”。
+
+## 3. 当前代码落点
+
+以下是静态检查，不是运行验收：
+
+| 位置 | 当前形状 | 需要改动 |
+| --- | --- | --- |
+| src/agent/loop.cpp，AgentLoop 工具循环 | 完整 assistant 收口后逐枚 RunOneTool；收齐 ToolResultBlock 才续请求 | 增加调度与安全边界，不能简单把 for 换成线程池 |
+| src/agent/loop.hpp，RunOutcome/TurnWiring | 批次回调及提交回执 | 增加 waiting/pending 摘要，支持单 action 提交与晚到完成 |
+| src/api/types.hpp，ToolDefinition | name/description/input_schema/load_mode | 增加执行策略；load_mode=Deferred 仍只表示延迟加载定义 |
+| src/api/responses/request.cpp | 普通 function_call/output 序列化 | 输出 async 定义、保留调用标记及映射，验证未配对调用是否合法 |
+| src/api/responses/events.cpp | function 调用事件转中立块 | 保留 async、item id、call_id；完整调用与增量分开 |
+| src/runtime/trajectory_session.cpp，V3ToolResultsCommitted | 从当前 v3_turn_->calls 找 terminal 调用，再落结果与 tool 消息 | 跨 turn 查询不能依赖栈上当前 turn；改成稳定 action 引用 |
+| src/trajectory/v3/reader.* | 历史、上下文、请求引用三种投影 | 加 pending execution、协议欠账与投递投影 |
+| src/tools/task_ledger.*、agent_tool.cpp | 已有子代理任务快照与后台输出 | 复用可用接口，别把旧内存 task 表直接当作 V3 恢复事实 |
+
+当前结果回执已有 Failed 时撤回内存消息、阻止续发的分支；也有 Degraded 放行分支。不能沿用旧审计结论说这些保护完全没有。异步新增提交链必须逐项定义哪些字段不可缺，不能借 Degraded 跳过任务身份或结果引用。
+
+## 4. 三种协议模式
+
+| mode（拟增） | 执行方式 | 调用何时配齐 | 适用 |
+| --- | --- | --- | --- |
+| inline | 宿主等待，可串行或受控并发 | 本批实际结果齐后 | 所有普通客户端工具 |
+| job_handle | start 交任务，get/wait 另取 | start 回接单结果即配齐 | 跨 provider 通用 |
+| native_deferred | 原调用保持未配对，工作可继续 | 原 call_id 收到最终结果 | 已验证支持的 Responses 路由 |
+
+选择条件是 endpoint/wire/model/工具声明/运行配置共同满足。兼容网关、模型别名不按名称猜支持。能力取 unknown/verified/unsupported；unknown 默认不用 native_deferred。保存本次能力快照及其依据。
+
+执行策略单独记：allow_background、side_effect_class、resource_keys、retry_policy、deadline、resume_policy、max_output_bytes。provider 能异步不代表工具线程安全，也不代表权限已放行。
+
+原生调用没带 async 或标记不符时按普通同步配对处理；不允许凭本地配置留下悬空调用。已发出原生调用后遇 provider 拒绝，不在原对话中偷偷转成 job_handle。
+
+API Multi-agent mode 与 LubanCode 本地子代理不是一回事。首期原生路径保守禁用 parallel_tool_calls，限制先写入能力校验；本地 worker 并发仍单独管控。
+
+## 5. 身份和账
+
+以下名称为逻辑合同，实现时须映射现有 envelope 字段，不能另造重复身份。
+
+| 字段 | 含义 |
+| --- | --- |
+| actionId | 宿主生成，一次逻辑工具动作；不拿 provider call_id 替代 |
+| executionId / attempt | 某次实际执行；重试增 attempt，不重造逻辑调用 |
+| jobId | 持久后台任务身份，可被多次 get 观察 |
+| originRef | 源 session/run/turn/step/assistant 消息完整引用 |
+| wireCallRef | provider、wire、响应/item/call_id、会话链与 async 标记 |
+| ownerEpoch | 当前执行/接管租约代号，挡旧 worker 与双重恢复 |
+| resultRef / resultVersion | 不可变结果及版本；进度不占终态版本 |
+| deliveryId | resultVersion + 目标会话分支 + 用途的稳定去重键 |
+| targetRequestId | 具体一次发送尝试，不拿 deliveryId 代替 |
+
+job_handle 下 start 与 get 各有自己的 action/call；jobId 串业务工作。native_deferred 下原调用持有 jobId，最终结果只配原 call。用户或模型提供 task_handle 时，宿主绑定到 jobId；整段会话连同已完成任务都不得重用 handle。
+
+拟增事件族：tool.job.registered、tool.job.dispatched、tool.job.observed、tool.job.cancel_requested、tool.delivery.prepared、tool.delivery.acknowledged、tool.delivery.uncertain。执行终态、结果持久化及选用优先复用已有 tool.execution/tool.result 事件。registered/dispatched/acknowledged 表示事件已发生，不等于业务 job 已完成。
+
+事件必须进入 schema 注册表，明确 kind/status、字段、合法前驱及引用校验。unknown 是执行投影状态，不硬塞成现有 envelope 未支持的 status。
+
+持久顺序：调用证据 → 参数与授权快照 → job 注册及调度意图 → 派发 → 执行观测/终态 → 原文落仓 → 结果选用与正式 tool 消息 → 上下文采用 → 请求 prepared/sent → 远端响应证据。
+
+注册落稳前不派发。原生结果落仓、身份映射或正文提交失败，挡住该结果投递与依赖它的续跑；无法安全证明上下文一致时挡住整个发送口。不得让 UI 看见“已交模型”，盘上却没有。
+
+多文件不能假装原子事务：blob 先不可变写入，ledger 提交锚才让投影可见。崩溃留下孤立 blob 可清理，不能据 blob 存在推断已采用。worker 只投完成信封，单写者校验 ownerEpoch 再追加，不直接写 history。
+
+## 6. 状态与恢复
+
+执行投影：registered → queued → running → succeeded/failed/cancelled；running 无法查明去向则 unknown。审批未过停在 awaiting_approval，不派发。超时先请求取消或查外部状态，不能把仍可能运行的副作用写成“未执行”。
+
+投递投影：pending → prepared → sent → acknowledged；请求发出而回执丢失则 uncertain。执行 succeeded 与投递 acknowledged 可以相隔很久。acknowledged 只表示服务端已接纳这条续接链，不证明模型理解了结果。
+
+| 崩溃位置 | 恢复动作 |
+| --- | --- |
+| registered 后、派发前 | 查幂等键/执行登记；证实未派发才调度 |
+| 外部已启动、dispatched 未落账 | 以稳定幂等键查询；无查询能力则 unknown，不盲跑 |
+| running 后无终态 | 查询存活进程或外部任务；不可恢复进程转 unknown |
+| 原文已落仓、tool 消息未提交 | 从终态与原文补投递，不重跑工作 |
+| tool 消息已采用、请求未发 | 按已提交上下文准备请求 |
+| 请求可能已收、响应未落账 | 查可用响应证据；不能证明则 uncertain，暂停自动分叉续跑 |
+| cancel 与完成同时到 | 单写者按证据收唯一执行终态；保留取消请求，不把取消意图当成功取消 |
+
+保证本地去重和至少一次完成通知。没有外部幂等/查询支持，不承诺跨网络 exactly-once 副作用或模型处理。
+
+失败重试按工具策略走同 action 的新 attempt，保留各次证据。只有最终选定结果配协议 call；不能每次失败和成功都给同一 native call 发一遍 output。非幂等副作用 unknown 默认需对账。
+
+## 7. 主循环与并发
+
+首期每个 Session 只有一个模型请求在途。工具可在后台跑，模型请求与 history 修改不可无序并发。
+
+拟拆职责：ToolJobCoordinator 管队列/租约/恢复；现有 RunOneTool 拆出可复用授权准备与执行段；ResultDeliveryPlanner 在请求边界选已提交结果；ProviderToolContractValidator 在发送前检查配对。名称是提案，落码时按现有分层收敛。
+
+首期在完整 assistant 已落账后派发，不抢流式参数。后期提速可在完整 call item 到达、调用证据落稳后启动，继续消费响应；不得在 JSON delta 半截、call_id 未定时开跑。需处理后续流失败而工具已经执行的情形。
+
+原生一轮混有异步 a、同步 b：注册 a 后派发，等待 b 得到真实结果；续请求带 b，a 可仍欠账。若同期有 wait(a)，先注册所有 launch，再处理 wait。已完成 a 的结果排在 wait 自身状态结果前。
+
+完成通知只入 mailbox。当前请求开始后才来的结果，留给下次请求，不修改已冻结输入。下一次选取按稳定提交次序与依赖排序，写入 inputMessageRefs 和 wire 映射。待投递结果不能悄悄跨过目标分支。
+
+并发上限同时管全局、Session、工具和资源键。文件写、git 操作、同一外部实体默认串行；只读也要声明可并发，记录所读版本。权限/确认在宿主顺序办理，worker 不并排弹框。执行前检查授权有效期和取消状态，不因入队时获准就永久放行。
+
+无 ready 结果、无新输入、无独立工作时挂起，不空转请求模型。事件唤醒合并，限制每轮请求预算、连续无进展次数、后台任务数、队列数、超时、重试和输出捕获。等待时间不凭空算模型 token。
+
+## 8. 工具接口与两条示例
+
+以下是拟定接口和假想轨迹，不是现有工具名或真实执行记录。
+
+- search_start(query, task_handle)：提交已持久化任务，回 {jobId, status:"queued"}；语义只是接单。
+- job_get(jobId)：回当前状态；终态时带 resultRef 及有界结果，不自动重跑。
+- job_wait(jobIds, timeout_ms, mode:any|all)：有界等待。超时回 pending 和游标，不宣告任务失败。
+- job_cancel(jobId)：请求取消，回取消请求状态；不保证已终止。
+
+这些接口须经过原工具权限、作用域与 Hook；jobId 不是访问凭证。工具结果中的其他 jobId 不授予跨会话读取或取消权限。
+
+通用模式：
+
+```text
+assistant: search_start("资料", "research_1") [call=A]
+tool:      A -> {jobId:J, status:queued}          # A 已配齐
+assistant: 先解释不依赖资料的部分
+assistant: job_wait([J], 10000, all) [call=B]
+tool:      B -> {status:succeeded, resultRef:R, preview:...}
+assistant: 引用 R，补完答复
+```
+
+native_deferred：
+
+```text
+response-1: search(query, task_handle=research_1) [call=A, async=true]
+            + 不依赖资料的正文
+event:      job J registered/dispatched            # 没有伪造 A 的 tool 结果
+response-2: 其他独立工作                          # 仍沿最新响应链
+event:      J succeeded；R 落仓；选择预览
+request-3:  原 call=A 的 function_call_output(R)
+response-3: 模型使用结果
+```
+
+原生 wait 接口回状态，业务结果仍回原 call。job_handle 的 wait 则可返回业务结果，因为 start 已闭合。两种语义在工具说明与返回 schema 中写明。
+
+第一期只接 function JSON 工具；custom 原始字符串工具需独立类型与 serializer/assembler，不能强塞 input_schema。托管工具由 provider 执行，不能接入本地 worker 冒充客户端 job。
+
+## 9. Turn、控制与前端
+
+response 完成、turn 停住、任务结束分开显示。RunOutcome 拟增 foreground_state 与 pending_action_refs。模型发出最终文字时若仍欠依赖结果，标“等待工具”；若已交付独立答复但留后台任务，标“本轮已答复，后台任务未完”。不能据 end_turn 判所有工作完成。
+
+结果就绪时，Session 调度器按持久 resume_policy 决定只通知还是续跑。续跑建新 request/必要时新 turn，以 causeRef 指向结果事件；主循环已经活跃就合并进下一边界，不再另开循环。
+
+- steer：入队，按目标 provider 合法边界送入。Claude 有未配齐普通调用时先闭合该组。
+- btw：独立上下文，不偷取或消耗主任务待投递结果。
+- pause/Esc：停止前台续跑；后台继续、取消或保留由明确策略决定，UI 写清楚。
+- detach/断线：不等于取消；常驻宿主是否还活着要有证据。
+- shutdown：短命线程不能承诺跨进程存活；外部任务可凭句柄接管，本地任务按恢复策略收账。
+- Goal：还有必需结果、unknown 副作用或审批未决，不得 achieved；可选后台工作须显式脱离目标义务。
+- Loop：定时只排唤醒；合并同一 Session 的唤醒，沿已有单写者执行。
+- Workflow：依赖节点只在业务结果与 output.commit 落稳后放行，接到 jobId 不等于节点完成。
+- AppServer：start/cancel/attach 操作有幂等 operationId；read/resume 查询不启动 job，不调用模型。
+
+UI 分列“执行中 / 执行完待送入 / 已送入请求 / 接纳未明 / 需对账”。展示源调用、结果引用及失败原因。进度事件可节流，终态与接管事件不能丢。
+
+## 10. Compact、resume 与换模型
+
+原生欠账跨 step，旧“按 turn 或一批工具划闭合组”不足。首期 compact 采用保守前沿：最早未配对 native 调用及其后整段上下文保留，只有更早且完全闭合前缀可摘要。工具组、签名与 provider 原始项仍须满足协议。
+
+job_handle 模式中 start 配齐后可按普通闭合组压缩，但 active job 清单及目标引用须由正式控制快照恢复；不依赖摘要模型记住 jobId。工具原文继续落仓，首次预览沿 32 KiB 与整批预算合同。原生回包一批只送部分已完成 async 结果时，也检查整批请求容量。
+
+resume-as-new 不改源 session。新会话引用源 action/result，并经租约接管持久宿主；两个恢复分支不能同时驱动同一 job。只读历史可以多份；可写 owner 只一份。复制任务必须显式新建，不能自动重跑。
+
+Responses 原生首期只在已验证的同路由响应链上续接，记录最新已提交 response id。仓库现有全量历史模式能否保留 pending async、reasoning/item 顺序，须真实探针验证后才启用；不只靠 call_id 和普通正文重建。previous_response_id 不替代本地 V3 请求审计，发送增量与逻辑完整输入分别留引用。
+
+响应链不可用或要切 Claude 时，先停自动原生续接。可等待/真实取消后闭合；或显式创建新上下文，将任务状态作为带来源的宿主材料导入，后续用新 get 调用取结果。原分支欠账保留并注明终止续接，不把旧孤立 tool_result 发给新 provider，不伪造旧历史。
+
+待完成调用保护区装不下时，挂起或走明确新上下文流程；不删除 pending 调用硬凑窗口。容量恢复只重发严格更小且已提交的合法输入。
+
+## 11. 实施顺序与验收
+
+- [ ] P0：更新 schema/validator/reader 合同，加入身份、状态、投递与能力快照；统一未知执行语义。先用 fixture 验证，不能据此宣称生产已接。
+- [ ] P1：实现持久 job 与单写者完成信封，打通 start/get/wait/cancel；落权鉴、资源锁、配额、取消及恢复。
+- [ ] P2：拆 AgentLoop 批次闸门，接 ResultDeliveryPlanner；覆盖终端、one-shot、AppServer、子代理与 Workflow 宿主。
+- [ ] P3：Responses function 原生试点，保留 async 标记和响应链；补 capability fail-closed 与 PTC 排斥。custom 与流式提前派发另验后开。
+- [ ] P4：接 compact/resume/Goal/Loop/btw 与显示投影，补说明及清理条件。
+
+验收矩阵（全部待运行）：
+
+| 场景 | 必须证明 |
+| --- | --- |
+| Claude 三枚普通调用 | 下一 user 配齐三份结果；文本不插在结果前 |
+| 通用 start + 后续 wait | start 是正常接单结果；wait 用新 call，无伪造错误或重复结果 |
+| OpenAI async a 慢、b 快 | b 可先送，a 后送且沿原 call；同步调用仍必须配齐 |
+| launch 与 wait 同响应 | 先注册 launch；原调用输出排在 wait 状态前 |
+| 完整 call item 前参数仍在流 | 不派发；重复终帧只派发一次 |
+| 完成早于注册/重复/乱序信封 | 非法信封隔离；合法终态只接纳一次 |
+| 当前请求在途时 job 完成 | 已冻结 input 不变；下一次引用结果 |
+| 各个持久边界杀进程 | 依第 6 节恢复；副作用不盲重跑，原账可验证 |
+| 结果落仓失败/提交锚失败 | 不漏发未提交结果；UI 与盘账一致 |
+| 回包丢失 | 标投递 uncertain；不把重试当 exactly-once |
+| 用户取消与完成竞态 | 唯一执行终态；真实完成不改成“未执行” |
+| 两个 resume 分支 | 仅一个 owner 可推进；另一分支只读或明确拒绝 |
+| native pending 跨 compact/换 provider | 不拆保护区、不发送孤立结果、不能静默降级 |
+| 长输出/大量完成结果 | 原文完整度如实，预览及整批预算有界，实发与采用一致 |
+| 资源冲突/审批/过期授权 | 同资源串行；未授权不派发；worker 不绕闸 |
+| 无结果/无独立工作 | 无空转模型请求，唤醒有界且可去重 |
+| Goal/Workflow/AppServer | 接单不算完成，查询不驱动执行 |
+
+验证分三层：单测验状态机；真实主循环配剧本后端验落账、wire 与故障；真实 OpenAI/Claude 只读小任务验协议能力。记录 endpoint/model/配置、完整 wire 证据、请求次数与 usage。假后端通过不能代替网关和模型真实支持。
+
+本次交付只含设计与入口链接。上述清单不打勾，不把新字段写成当前已实现。

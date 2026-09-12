@@ -1,5 +1,7 @@
 # LubanCode 使用洞察、Token 账本与 Prompt 审计设计
 
+> 2026-09-11：本单保留产品目标与 A0–A5 历史实现记录；旧 Journal/EventEnvelope 接线不再作为 v3 实施依据。后续迁移与验收见 [Insights 接入 Session v3](Insights接入SessionV3_使用账本与Prompt审计迁移.todo)。A6/A7 尚未完成，不因迁移立单而销项。
+
 - 状态：A0–A5 已落（A0=accounting/insights 合同与十二场夹具；A1=事实接线与旁路桥；A2=/usage 报告命令面；A3=/prompt audit 三层审法；A4=Session Analyzer：IntegrityGate/FrictionClassifier/FeatureSignal/派生仓；A5=/insights：跨会话/跨工作区总报告 + HTML + /doctor insights）；A6(模型评议)/A7(app-server 与 GUI)起待实现
 - 级别：P1；其中 Usage 事实入账随 Trajectory P0 一道落地
 - 日期：2026-08-30

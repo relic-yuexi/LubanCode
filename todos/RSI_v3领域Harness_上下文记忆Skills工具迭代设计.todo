@@ -1,0 +1,473 @@
+# LubanCode v3：领域 Harness 自我改进设计
+
+日期：2026-09-12。修订：2。状态：设计待实施；本轮仅查源码、校合同，未跑真实模型评测。
+
+目标：模型权重不变，让 LubanCode 从任务、纠正和领域资料中学到经验，再把经验用到未见任务上。先在一域做实，再扩领域。本文是这条路线的实施主单。
+
+关联：[Session v3 当前边界](../docs/architecture/session-v3.md)、[v3 字段合同](../docs/architecture/trajectory-v3-schema.md)、[v3 总设计 §4.71 Memory](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)、[Lua 中间件](LuaHook统一扩展_MCP分工与SessionV3接入.todo)、[现有 Evolution](../docs/features/evolution/README.md)、[真实任务评测](Agent全链路度量_真实任务Harness回放与功耗评测.todo)。
+
+## 1. 先把下一次任务画出来
+
+假设领域选“LubanCode provider 请求故障排查”。Agent 第一次只看配置文件，改了默认值，故障照旧。用户提醒查最终请求，它才发现请求路由覆盖了默认值。
+
+下次再遇见“配置改了，调用没变”，理想路径如下。这里只举设计例子，没有实测成绩。
+
+1. 开工时命中领域条目，看见短提示：“先看最终请求，再追配置来源。”
+2. 读出对应 Skill，按配置、路由、序列化、响应逐层核对。还没读 Skill 正文，就不能记“已经用过”。
+3. 查到项目记忆，知道哪条路由规则在当前版本成立；源码已变，就重新核验。
+4. 调用现有工具取证。反复手工比对字段时，才考虑把这一步封成脚本。
+5. 长日志进结果仓。当前上下文保留任务约束、有效请求、未决假设、失败尝试与证据引用。
+6. 验收检查能复现故障，也能验证修复。收尾只提炼新增经验，已有经验补证据，不再复制一份。
+
+四条线要在这里碰头：**上下文负责及时带来材料；记忆保存有条件的知识；Skill 编排做法；工具执行可重复步骤。** 学习的交付物是下一次任务能调用的本事。
+
+## 2. 核心取舍
+
+### 2.1 做事、积累、改进，三种节奏
+
+- **做事**：当前任务照常读资料、记临时笔记、调整计划、调用工具。合法上下文变化沿 v3 提交。
+- **积累**：任务收尾或收到明确纠正，先收证据；值得留下的事实、反馈、procedure_hint 走既有 MemoryService。服从已选 scope、写入模式和授权，不要求每条事实都跑包发布。
+- **改进**：后台拿一簇经验查缺口，修订上下文策略、提炼 Skill、封装工具，或整理领域记忆。行为变更再走候选、验证、canary、晋升。
+
+普通工作不等学习任务跑完。当前会话不在半轮中换 Skill、工具或上下文策略版本。任务内补充工作状态与跨任务替换行为版本分开。
+
+### 2.2 经验可以一次学到，收益须另行证明
+
+用户一次明确纠正，足以保存这次反馈并起草候选。两次相似成功，也不能证明通用规律。证据多少决定主张范围，不能用“至少两条”替代判断。
+
+先保留条件和反例，再决定是否扩大适用范围。未核验经验可作为带来源的建议材料；不得伪装成用户命令或确定事实。
+
+### 2.3 内容与选择策略一起改
+
+一份好 Skill 若始终找不到，任务不会受益。每类内容都要带“何时适用、何时不适用、依赖什么”；召回、加载、预算和路由也纳入改进对象。
+
+先复用现有 memory、skill、tool_search 和中间件。能力索引只是这几处数据的投影，不另建一座知识库，不默认上向量服务。
+
+### 2.4 模型、验收尺与预算先固定
+
+首版只改 harness。求解模型与起草模型分别记版本和采样设置，配对时各自固定。更换模型、评分器、任务分布都另开实验，不能混作同一代收益。
+
+递归先收在有限范围内：本代改过的领域知识与 Skill，可以辅助下一代诊断和起草；起草策略若要改，也当独立候选验证。宿主提交规则、验收答案、预算和权限边界不归候选修改。
+
+## 3. 当前底座与真实缺口
+
+证据级别均为本次静态读码。现有文档写“已落”的阶段，只代表其原实现范围。
+
+| 入口 | 当前事实 | 本单要补的地方 |
+| --- | --- | --- |
+| `src/evolution/collector.hpp`：CollectSources | 收 recording、workflow run、已接受 memory；goal/trace 新账采集仍待接 | 从 v3 reader 提取任务片段与后续验收修订 |
+| `src/evolution/drafter.hpp`：DraftSkillCandidate、ClusterTaskMaterial | 用录制与同形工具序列起草；组合与代码件有专门分档 | 先形成原因假设与最小变更；不拿同形工具序列直接证明方法通用 |
+| `src/evolution/candidate.hpp`、`coordinator.hpp` | CandidateStore 和 EvolutionCoordinator 围绕 package_id、package/、包 hash 设计 | 扩成能引用原生资产的 HarnessChangeSet；不能直接假称支持 memory/context 候选 |
+| `src/evolution/eval.hpp`、`eval.cpp` | 检查静态内容、夹具、验收命令；不启动真模型 | 保留检查器，新增生产执行适配口与配对报告 |
+| `src/evolution/promoter.hpp`：VersionStore | 存包版本，管理 active/canary | 复用不可变组件存储；领域选择不顺手修改全局包 active |
+| `src/app/session_stack.cpp`：BuildSessionPackageMountInput | 默认扫描 store 选中版本，折成 PackageSnapshot | 评测与领域任务要显式传精确组件集，不能偷偷合入另一版本 |
+| `src/tools/skill_tool.cpp`：SkillTool::execute | 清单持在内存，正文调用时重新打开 SKILL.md | 候选材料须冻结；加载时核 hash，脚本与引用资源也须锁版本 |
+| `src/runtime/trajectory_session.cpp`：V3RequestPrepared | inputMessageRefs 由当前 context chain 枚举；provider 快照记模型、输出上限、工具名 | 补“最终 api::Request 与引用逐项对应”检查；仅有 prepared 不能证明最终 wire 材料完全一致 |
+| `src/runtime/session_service.hpp`；`src/app/one_shot.cpp`、`turn_runner.cpp` | SessionService 管会话/输入；AskOnce 走 RunTurn；并非单靠创建 SessionService 就执行模型 | 用真实生产装配和 RunTurn，注入隔离根与冻结 binding，不另写一个假 Agent loop |
+| `src/runtime/middleware_assembly.cpp`、`middleware_runtime.cpp` | Lua 装配、PreRequest mutate/estimate/capacity 已有入口 | 增加领域策略装配；required 估算与容量槽位照走 |
+| `src/app/memory_ledger_bridge.cpp`；v3 总设计 §4.71 | 现桥仍沿旧账；MemoryStore、CAS、忘记屏障、正式召回消息有新合同 | 遵循原合同，不另造 RSI 记忆库或第二提交点 |
+
+首轮可以先交付 Skill 单类闭环。Memory v3 写库、完整 Workflow 节点恢复、通用异步工具未全落，不必一起开工；未接通的分支须明确禁用。
+
+## 4. 所有权：少造一套系统
+
+```mermaid
+flowchart LR
+  D[领域合同与资料] --> R[生产 Session 执行]
+  H[领域 Harness 版本] --> R
+  M[MemoryStore 已提交记忆] --> R
+  R --> V[Session v3 原账与产物]
+  V --> O[观察投影]
+  O --> L[诊断与最小变更]
+  L --> C[EvolutionCoordinator 候选]
+  C --> E[独立任务评测]
+  E --> P[领域发布提交]
+  P --> H
+  O --> W[MemoryService 候选与提交]
+  W --> M
+```
+
+| 对象 | 唯一职责与写口 |
+| --- | --- |
+| Session v3 | 记录发生过什么、上下文怎样采用、请求怎样发送；会话 writer 独占追加 |
+| MemoryService / MemoryStore | 主张、scope、版本、CAS、忘记和写入回执；RSI 只提案和引用 |
+| EvolutionCoordinator | 行为候选状态、验证资格、发布事务；CLI/Agent/Workflow 都调用它 |
+| Package / VersionStore | 可交付组件与不可变包版本；不负责评分，也不决定用户事实真假 |
+| Goal / Workflow / SessionWorkScheduler / Loop | 目标与总预算 / 一代步骤 / 排队 / 定时唤醒；不各写一套进化状态 |
+
+Episode、能力索引、使用统计都是可重建投影。投影里的 helpful 分数不能直接改 MemoryStore 信任状态。Evaluator 给结果，Coordinator 按冻结规则判断资格；生成模型不能替两者盖章。
+
+## 5. 领域合同与运行绑定
+
+### 5.1 DomainSpec：学哪一门，怎样算学会
+
+DomainSpec 合并原稿 EvolutionTaskSpec 与 EvolutionPolicy，免得两份配置互相覆盖。它含两块：
+
+| 字段 | 含义 |
+| --- | --- |
+| identity | domainId、revision/hash；workspace/principal 沿现有身份服务 |
+| taskContract | 任务类型、输入/产物、适用环境、验收器引用；缺验收可收经验，不能自动宣称胜出 |
+| knowledgeSources | 用户指定的源码、文档、案例；版本、范围、用途和可见对象 |
+| allowedChanges | context/memory/skill/tool 各允许哪些动作；代码脚本按 code-bearing 对待 |
+| selectionPolicy | 显式选择优先；初版只绑定一个主领域；不确定就用通用能力，可继续检索 |
+| learningPolicy | passive 或 practice；什么触发起草、每代候选上限、练习范围 |
+| evalPolicy | 数据切分、分组键、对照、评分器 hash、模型绑定、门槛、重复数、缺失样本规则 |
+| budgetAndStop | 每题执行预算、独立起草预算、总代际预算、无改进停机条件 |
+| activationPolicy | 哪些变更已有预授权、哪些只可候选、何时点名 canary、如何停用 |
+
+domainId 是语义标签，不是新的访问权限。项目能力不能凭换 domainId 读另一项目记忆。资料“可读”、经验“可保存”、候选“可执行”分别按原权限服务裁决。
+
+初版领域由用户或任务配置点名。后续自动路由也是可测候选：错选率、额外 token 与任务回归都要记。不能靠模型自由填写 domainId 就扩 scope。
+
+### 5.2 发布版本与任务绑定分开
+
+`DomainHarnessSnapshot` 只描述一版可复用行为：contextPolicyRef、skillRefs、toolRefs、受发布控制的 memoryRefs、原生组件依赖、父版本和内容 hash。它不复制 Memory 正文，不含密钥，不重造 package.yaml。
+
+`TaskHarnessBinding` 描述这一题实际环境：
+
+```text
+bindingId / bindingHash
+workspaceIdentity / domainSpecRef / domainSnapshotRef
+runtimeRevision / modelBindings / samplingConfig / effectiveConfigHash
+packageInventoryRef / skillInventoryRef / toolSchemaRefs
+memoryReadViewRefs / memoryWriteMode
+workspaceFixtureRef / dataSnapshotRefs / environmentFingerprint
+policyEpoch / revocationEpoch / sourceRefs
+```
+
+普通记忆继续按 MemoryStore 既有方式更新；每题开工冻结 read view，逐请求记实际选用 revision。评测两侧读相同基线 view，只有本次被测记忆变更可不同。领域发布成功不代表所有用户记忆也该回到某个旧版。
+
+初版一个执行 Session 钉一份 binding。新版本从新 Session/任务生效；长会话须在显式、无未决工具的任务边界换版，生成新的 bindingId 并引用 parentBindingRef，不能原地改旧 binding。resume-as-new 默认继承原 binding；组件缺失或已撤销时明确处理，不能默读最新版。主任务调用子 Agent 时传 binding 的允许子集；补查能力仍受同一版本与 scope 约束。
+
+## 6. 下一次怎样找到并用上经验
+
+### 6.1 原生资产之上的薄索引
+
+能力索引每项只存 assetRef、类型、短描述、正/负适用条件、依赖、有效期、领域标签和成本提示。正文仍在 Memory、SKILL.md、脚本/插件目录与策略配置。先做词法检索和明确条件匹配；有数据证明不足再换排序器。
+
+关系先用少量类型化引用表达：supports、requires、supersedes、conflictsWith。它们负责追根、失效与依赖闭合，不要求图数据库。Skill 可引用原生 Memory 主张与工具版本；工具修了，依赖 Skill 要重验。工具仅改说明，也可能改变调用行为，同样算变更。
+
+### 6.2 每次请求分三段装配
+
+1. **定位**：任务起点按 domain、意图、文件/错误类型检索短条目；工具报错、子目标改变、材料失效时可重查。不每步无差别检索。
+2. **选料**：先过 scope、版本、撤销、适用条件，再排序、去重、按预算取材。Memory 返回相关主张；Skill 先露短描述，模型按需加载正文；工具沿现有 tool_search/注册路径发现。新材料超过预算就少取或走合法 compact，不暗删旧链。
+3. **采用**：材料落正式消息/上下文效果，记录来源；PreRequest 完成改写、估算、容量检查和最终请求对表后发送。
+
+ContextPolicy v1 只开放已有实现支持的参数与模板：召回触发、取材上限、排序规则、摘要保留项、工具预览形状。超过现有入口的能力必须先接线。Lua 策略沿逻辑槽位覆盖与排序；RSI 不另定一套高于用户配置的优先级。
+
+同槽位冲突须在装配时显示最终胜出实现。评测若候选被用户 hook 遮蔽，记 candidate_not_exercised，不能把那场当成候选已受测。一般任务可用宿主规定的降级路径；评测不能静默降级后继续计分。
+
+### 6.3 使用证据分层
+
+| 记录 | 能证明什么 |
+| --- | --- |
+| matched | 索引找到候选 |
+| selected / loaded | 选中了版本，读到指定字节；工具定义已挂载也只算可用 |
+| context_applied | 内容提交进本次上下文链 |
+| request_prepared / sent | 最终请求对表后，本地交给 transport；sent 不冒称远端已收到 |
+| behavior_observed | 后续动作或产物能引用该内容；没有证据就 unknown |
+| effect_assessed | 用户反馈或配对试验支持 helpful/harmful/neutral；同时注明范围与方法 |
+
+这些是统一使用投影字段，不强造六种事件。Memory 沿 §4.71 的 recall/context/use 事件；Skill 可从 tool action 和结果引用提取；缺少的版本/来源字段才扩 v3 schema。
+
+某条经验没加载，先查检索与适用条件；加载后没进入请求，查预算与提交；进入请求仍失败，才查内容或执行。不能把三种问题一律叫“模型没学会”。
+
+## 7. 经验怎样长出来
+
+### 7.1 Episode：提取一段可判断的经过
+
+沿 `EvolutionObservation` 扩结构，Episode 是按 task/work owner 聚合后的投影，不另存一份会话。至少保留：目标与验收、初态/关键观测引用、尝试/结果、纠正、最终产物、已知限制、binding、来源水位与提取器版本。
+
+不凭“一轮聊天结束”判任务成功。工具成功、assistant 结束、Goal achieved 都只能作信号；最终结果来自验收与实际产物。迟到反馈追加 assessment revision，再触发重算；旧结论保留出处。
+
+成功任务也可有无效绕路，失败任务也可留下正确步骤。抽取器输出 `claim + conditions + action + expectedObservation + failureBoundary + evidenceRefs`，映射到 Memory 既有 fact/feedback/decision/procedure_hint，不新增泛化的“我学会了”类型。
+
+### 7.2 触发起草，先过便宜的一关
+
+先用宿主信号决定要不要调用学习模型：用户明确纠正、同因反复失败、失败后换法成功、重复昂贵操作、旧来源失效、用户点名沉淀。没有新证据或该簇刚评过，就只追加事实，不再反思一遍。
+
+每簇记 evidenceWatermark、lastAttempt、cooldown、spentBudget 和最后结果。去重针对来源与内容；同因换了新证据或环境版本，可以再试。用户明确拒绝某做法应保留抑制规则；一次低分候选不能永久封死整个任务簇。
+
+### 7.3 诊断先列竞争解释
+
+| 可见问题 | 优先查什么 | 最小尝试 |
+| --- | --- | --- |
+| 资料存在，但没查到 | 检索、触发、领域误选 | 改查询/描述/条件，不复制资料 |
+| 查到了，后续请求丢了 | 预算、compact、预览、链提交 | 改保留规则或材料布局 |
+| 用了旧知识 | 来源版本、scope、冲突、过期 | 修正/降权记忆，重验派生 Skill |
+| 证据齐全却步骤错 | procedure_hint/Skill 前置条件与分支 | 修订步骤和反例 |
+| 操作重复又容易错 | 现有工具覆盖、参数、结构化输出 | 先修封装，再考虑新工具 |
+| 任务本身判不清或环境坏了 | 验收器、数据、基础设施 | 标 unknown/infra_error，补证据，不硬起草 |
+
+学习模型每次给：观察事实、两三个合理解释、还缺什么证据、建议改哪一处、预计改善哪类任务、什么结果会推翻它。记录的是简短论据，不要求保存模型隐式思考。
+
+先在开发任务做小探针，比如只补那条缺失证据。它能帮助选方向，却只是局部证据；正式候选仍须从干净初态跑完整任务，不能把续接成功当通用提升。
+
+### 7.4 四类资产按成本落位
+
+Memory 留有条件的知识；Skill 留可复用做法；工具留稳定执行；ContextPolicy 负责及时取用。它们不是强制升级阶梯：一条事实不必长成 Skill，一份 Skill 也不必生插件。
+
+每个候选只写一个可证伪假设，列清依赖。优先改单类；若 Skill 必须调用新脚本，两者共同验证和发布，不拆成坏的中间版。配套脚本、Lua、命令模板都按代码能力核权，不能躲在 content-only Skill 里。
+
+整理也属于学习：合并重复项、缩短常驻说明、收窄误触发、退役失效工具、提出记忆 archive。用户事实仍按 MemoryService 规则处理，RSI 不因“很久没用”自动 forget。
+
+## 8. 主动学领域：允许查资料和练手
+
+只等真实失败，冷门领域学得太慢。DomainSpec 允许两种来源：
+
+- passive：从授权范围内已完成任务、纠正、成功/失败对照中学；默认不另起大量任务。
+- practice：用户已指定资料与练习范围时，允许读文档、查源码、做小实验、构造任务；学习调用和练习执行都计费、受预算约束。
+
+练习围绕当前缺口安排：先查尚未覆盖的任务类型、经常误判的分支、依赖工具的边界。初版按“影响范围、复发次数、证据是否齐备、验证成本”分桶排序，先做代价低且可验的一项；不伪造精确的预期收益分。
+
+生成的题能用于练习，不能直接兼任封存评测。自拟答案须经测试、源码或独立验收核对。资料里含封存答案的段落不能进学习源；若任务本来允许查手册，两侧都给同一手册，检验迁移到新输入的能力。
+
+缺独立任务或可靠验收时，产出经验草稿与缺口报告，继续积累。不能为了凑出“提升”让生成器同时写题、答题、评分。
+
+## 9. 候选合同与递归边界
+
+### 9.1 HarnessChangeSet
+
+扩展现有候选记录，输入/输出形状如下；字段均为提案：
+
+```text
+candidateId / generationId / domainSpecRef
+parentSnapshotRef / baseMemoryViewRefs / sourceWatermark
+hypothesis / targetTaskFamilies / disconfirmingConditions
+operations[]:
+  kind: context | memory | skill | tool
+  operation: add | update | merge | retire | reweight
+  targetRef / expectedRevision / beforeHash / afterArtifactRef
+  conditions / dependencyRefs / evidenceRefs
+learnerBindingRef / rationaleRef
+staticReportRef / evaluationPlanRef / accessPolicyRef
+contentHash
+```
+
+候选 contentHash 覆盖语义清单、所有受控文件、依赖 hash、条件与版本前提；报告引用、日志时间和运行状态不参与，避免报告引用候选再反过来改变候选 hash。规范 JSON 按键排序，文件按规范相对路径排序，以 schemaVersion 和原始字节 hash 计算 SHA-256；依赖不许靠未声明的路径或可变符号链接补齐。
+
+评测报告另用 evaluationBindingHash 绑定 candidate contentHash、plan、grader、数据、模型和环境。改了内容、基线、评分器或适用范围，旧报告不自动复用。metadata 纠错与实质条件改变分开；后者不能打着改说明的名义绕过重验。
+
+原生格式继续使用：SKILL.md、memory 原生版本、Lua hook 包、Plugin/MCP 配置。候选外层只管理变更集。PackageManifest 不强塞 memory/context 字段，`package/` 仅在有可打包组件时出现。
+
+### 9.2 状态、资格、部署位置分开
+
+保留 `CandidateState` 与唯一 Coordinator：
+
+```text
+observed -> drafted -> validated -> evaluated -> awaiting_approval
+         -> staged -> canary -> active
+未采用候选可 rejected；已采用候选退出走 rolled_back
+```
+
+`evaluated` 只表示已有评测，另给 `Eligibility = pass | fail | insufficient | stale` 和原因。查到缺项就停资格，不偷偷补一个 0 或 pass。candidate_not_exercised 是某项机制未覆盖；需覆盖的任务缺此证据，整场报告不能准入。
+
+批准可以来自当次决定，也可来自已有预授权，均绑定 candidate hash 与 policy revision；不强迫每代重新问用户。代码与权限变更沿宿主既有规则。训练预算不足、证据不足、未授权分别返回稳定原因，不能都写 blocked。
+
+### 9.3 递归怎样测
+
+首版学习策略固定。求解端新 Skill 可以供下一代诊断参考，但不会因此自动证明“学习器更强”。后续单独改起草策略时，给新旧学习器相同起始 harness、同一训练流、相同总预算，各自产候选，再在未见任务上比最终质量与学习成本。
+
+评分器、封存集、运行权限、提交逻辑始终由宿主管。一次实验只改求解侧或学习侧，避免两头一起变而无法归因。连续 K 代无有效改进、预算耗尽、数据耗尽、基础设施持续失败时停；K 和重试上限事前写入合同。
+
+## 10. 评测分两问：强了没有，学得快不快
+
+### 10.1 先建立可信执行路径
+
+新增 `LiveSessionEvalRunner` 作为 host 注入接口；evolution 核不 include app/cli。实现放生产装配侧，使用实际模型路由、工具注册、中间件、RunTurn 与 Session v3。one-shot 是首个适配口，多轮任务必须递交完整 TaskContract，不能只测第一句。
+
+每个 arm 从独立、干净初态启动。隔离 config、workspace、memory、hooks、packages、缓存与可写路径；只给合同指定资料。仅换 cwd 不够隔离。sealed 数据和验收脚本在执行工具可读根之外，结果由宿主传给 verifier；生产 shell 若没有这层隔离，封存测试不得开跑。
+
+先核四件事：A/A 能反映同版本随机波动；已知坏候选能检出退步；候选确实装入并在预定任务中受测；旧产物、宿主记忆和上题缓存没泄进下一题。假后端只验证协议、恢复和污染拦截，不证明学习质量。
+
+### 10.2 能力评测：冻结后再比
+
+Champion 与 Challenger 读相同 memory 基线、工具数据和任务初态。各跑整题，任务顺序交错，随机种子/重复次数预先固定。每题使用独立 session/artifact 根。远端模型没有可固定版本时记时间、服务声明和漂移，不能冒称精确重放。
+
+数据按真实故障/仓库来源/任务模板分组，所有近似变体跟随同组；对同题改名不算新题。划分：
+
+- train：起草器可看过程与验收反馈。
+- dev：可选候选，累计查询预算；小探针和调参都算查询。
+- sealed-test：只在冻结候选后由宿主执行。求解器看到当前题目，学习器看不到题库、标签或逐题结果；不能把“题目全隐藏”误写成求解器也不许读题。
+
+封存测试产生的 session 必须标 `learningAccess=sealed`，普通采集、记忆抽取和后续起草均排除。封存结果即使只回传总分，也会形成选择反馈；一批候选最多一次晋升决策用该批封存题，后续调参须换新组。退出封存的材料方可显式转 train。
+
+### 10.3 学习评测：按时间先做，再学
+
+准备同顺序任务流，评测每题时只能访问此前已经释放的经验。第 t 题先出结果并评分，再释放允许的反馈给学习器，用于 t+1。一个任务组第一次露面后的同组变体只算练习/复现，不再算未见组迁移成绩。
+
+完整学习评测设三路。首轮只接通 Skill 时，先跑固定 harness 与本次候选；Memory 接通后再加只留经验的基线：
+
+| 分支 | 用途 |
+| --- | --- |
+| 固定 harness | 起始能力不更新，作为基线 |
+| 只留经验记忆 | 走同样来源和预算，验证简单经验召回能做到多少 |
+| 完整改进 | 可修检索、ContextPolicy、Skill/工具，验证结构化改进是否多带来收益 |
+
+各路独立存记忆和候选，不能互读赢家经验。分别报告按任务数、按累计 token/费用的质量曲线；起草、验证、失败候选和练习都计入。学习阶段留下的旧领域回归题穿插执行，查新领域收益是否挤掉旧本事。
+
+全量四类消融不是每代必跑。先比基线与最小候选；结果有希望、改动又耦合时，再做移除一项的对照。省下无效全排列，但保留关键因果疑问。
+
+### 10.4 分数、缺项与晋升
+
+TaskResult 分开记录：`executionStatus`、`verificationStatus`、`quality`、`cost`、`usageCoverage`。环境起不来、用户取消、评分器崩溃不记成 Agent 答错；候选耗尽每题预算、自己的工具报错则按事先约定计任务失败，不能藏进 infra_error。
+
+报告含计划组数/题数、完成配对、重试、缺失与失败归属。基础设施缺项沿冻结规则补齐；补不齐就 insufficient，不能只挑成功样本作分母。usage=null 保留 null；若成本门依赖实报而缺数据，成本资格不足，不能拿估算填平。
+
+质量任务用明确主指标与回归上限；提效任务允许质量在预设容差内，成本显著降低。两种目标起草前选定，不能看到结果再换赛道。每题成功率与部分得分分列，不混入工具完成率。
+
+按 caseGroup 聚合配对差值并估区间，不能把同一故障的十个变体当十份独立证据。候选数、dev 查询数与封存使用次数都入报告。小样本只够定向 canary 时，写 experimental，不声称稳定优势。
+
+在线 canary 不重复执行有外部副作用的任务来凑 A/B。可重置场景再做配对；自然任务只用于发现回归和漂移。推广范围不得超过已验证环境、模型和任务族。
+
+## 11. 发布与记忆提交：不造第二份真值
+
+### 11.1 普通积累不进发布事务
+
+用户事实、明确反馈和核验过的项目知识沿 MemoryService 提案/提交。采用后新任务可读；当前任务仍按既有 view 取材，确需刷新时沿 §5.2 的边界生成新 binding，评测期间禁用这种刷新。用户当场补充的内容可作为普通输入进入当前任务，不必等待重新召回。记忆不随 Skill 回滚撤销，也不改写旧请求快照。
+
+候选试验用隔离 memory overlay，和正式库分开。未晋升时不能让正式检索扫到候选；文件存在、安装进 store、审批通过都不等于已激活。
+
+### 11.2 耦合发布的记忆也由 MemoryStore 提交
+
+若一份新 Skill 必须配一组新主张，按以下次序执行。新增的 release 可见性约束须同步补入 §4.71 才能开放此分支；初版 Skill-only 不依赖它。
+
+1. Coordinator 写 prepare 记录，锁定 parent release、changeSetHash、expectedMemoryRevisions、policyEpoch。
+2. 把组件写进不可变 store，复验内容/依赖；此时不改全局 package active，不让默认扫描带入候选。
+3. MemoryService 以同一 operationId 提交记忆批次，取得 `memory.store.applied` receipt。批次带 `eligibility=release_bound` 与 releaseId；未被领域 release 选中时，所有普通召回与抽取路径都须排除。候选不得通过这一批改写 live 用户条目，只能新建发布专属主张；普通纠正另走 MemoryService。
+4. 锁内再查 parent、CAS、依赖、撤销和授权版本，append `domain.release.applied` 并落稳。这一事件决定领域哪份快照可选；channels.json 只是可重建索引。
+5. 新 Session 按 release 构造 binding；恢复从 release 账与 memory receipt 对账，不猜“文件在所以成功了”。
+
+release 事件至少带 operationId、releaseRevision、channel、expectedChannelRevision、championBaseRef、snapshotRef、candidateRef、memoryCommitRefs、policyRef、reason。channel 取 active/canary；点名 canary 不改变 active，晋升才改 active。创建 canary 与正式晋升都重查 active 基线，别人已晋升则本候选变 stale。撤回 canary 只撤该指针；回滚 active 才替换日常任务所用版本。
+
+MemoryStore 提交点仍是 memory.store.applied；领域发布只是额外的召回资格，不替它改 head。库提交成功而 release 未提交，记忆留在未激活批次，重启用原 operationId 恢复。不能声称跨文件系统与记忆库存在一笔原子 rename。
+
+### 11.3 回滚、并发、遗忘
+
+回滚追加一次新的 release 选择事件，指回旧快照；不删除新文件，不回退用户独立记忆，不撤销已发生的外部副作用。旧版事实失效时不能为求“原样回滚”继续注入，须重建可用快照或停用领域。
+
+同领域两代并发发布，按 parentRelease CAS 只准一份胜出。另一份记 eligibility=stale；基于新父版重放变更、生成新候选并重验，不能套用旧分数。安装日志、候选状态和 channels 缺一笔时，从同一 operationId/权威 release 账补投影；不可双写竞争裁决。
+
+forget 撤销优先于快照稳定：沿 memoryRef/sourceRef 使派生 Skill、摘要、缓存和候选待重验；已知内容依赖宁可收窄。来源不全时不能承诺已识别所有同义副本。新请求准入时查撤销 epoch；已发请求无法召回。正文物理清理仍归现有 purge 范围与授权。
+
+## 12. v3 接口、证据与恢复
+
+### 12.1 三处必接
+
+- **开场绑定**：扩 SessionLaunchRequest/装配参数，传精确 TaskHarnessBinding；在首个模型请求前落 binding artifact 与绑定事件。新字段是提案，不能沿未实现旧接口假填。
+- **请求对表**：TrajectoryTurnBridge::V3RequestPrepared 接收实际消息来源映射，按最终 api::Request 检查正文、顺序、工具配对、system 与材料 hash；晚于此处的语义改写须更新映射。各 provider adapter 的转换另做合同夹具，不把内部消息形状冒称原样 wire。
+- **任务收尾与迟到反馈**：v3 只记真实产物/验收来源；只读采集器增量更新 ObservationStore，再由调度器排学习作业。
+
+绑定事件和 prepared 的 `harnessBindingRef` 为 schema 提案；先更新 envelope、writer、reader、fixture，再接生产。复用 memory/skill/tool/hook 既有因果键，generationId 不挤占 turnId 或 actionId。
+
+### 12.2 增量采集与标识
+
+游标使用 `{sessionId,runId,seq,hash}`，跨源证据用 `{sessionId,runId,seq,id,hash}`。seq 只作文件追加次序；resume-as-new、子 Agent、Workflow 独立账按稳定 source refs 去重。Episode 聚合按明确 task/work owner；当前无法认清多任务边界时，首版只收专用评测 Session，不能按一段 seq 猜任务。
+
+先幂等落观察，再推进 source watermark。观察 id 包含源事件身份、观察类别、提取器版本；重新提取产生 revision，不把它算成新一场独立任务。坏链隔离并报告，缺源标 unavailable；不静默用残账继续起草。
+
+学习作业各用独立 v3 Session，usage 标 purpose=learning 并挂 generationId；基线、候选、评分、练习分别归账。晚到 usage 和验收追加更正，汇总按 owner/version 去重。后台 worker 不直接打开活跃 Session JSONL 追加，沿 writer mailbox/outbox。
+
+评测快照引用当前来源版本；业务文件、provider、MCP 服务或评分器发生漂移时使对应评测资格 stale，重新验证。仅工具 wire 名、包版号或 last-modified 时间不够锁内容。
+
+## 13. 服务接口与落点
+
+这些是边界接口草案，命名可在实施时依项目习惯收敛；返回值须保留不可判定与冲突，不能全压成 bool。
+
+```text
+CollectV3Observations(sourceWatermark) -> observations + nextWatermark + errors
+BuildTaskHarnessBinding(domainSpecRef, snapshotRef, environment) -> binding | conflict
+ProposeChangeSet(observations, parentBinding, budget) -> draft | no_change | need_evidence
+EvaluateCandidate(candidateRef, frozenPlanRef) -> reportRef + eligibility
+ActivateCandidate(candidateRef, expectedParent, policyRef) -> releaseReceipt | conflict
+```
+
+| 修改位置 | 工作 | 验证 |
+| --- | --- | --- |
+| `src/evolution/observation.*`、`collector.*` | 加 v3 适配、assessment revision、去重水位；复用 ObservationStore | 迟到验收、重采、resume/子账重复来源 |
+| `src/evolution/candidate.*`、`coordinator.*` | 从包专用候选改为资产引用变更集，保留唯一状态写口 | memory/context 不必造 package；内容变动使资格失效 |
+| `src/evolution/eval.*` | 静态检查与 live report 分型；注入执行接口 | fixture 通过不得冒充 live 通过；评分器故障可辨 |
+| `src/app/one_shot.cpp`、`turn_runner.cpp`、`session_stack.*` | 生产装配侧实现 live runner，传隔离环境/精确组件 | A/A、坏候选、全局包不串入、候选确实加载 |
+| `src/tools/skill_tool.*`、`src/package/mounting.*` | 冻结正文/资源与加载 hash；精确挂载不改用户 active | 清单后改文件、同名覆盖、脚本变化均能检出 |
+| `src/runtime/middleware_assembly.*` | 领域上下文策略装配，保留槽位与作用域裁决 | 覆盖顺序、required 槽位、候选被遮蔽的报告 |
+| `src/runtime/session_service.*`、`trajectory_session.*`、`src/trajectory/v3/` | binding、实际请求来源对表、恢复引用 | compact/裁剪后对表，缺组件恢复，sent 语义 |
+| MemoryService 新合同所在实现 | 写回/召回沿 §4.71；后续添 release_bound 可见性 | queued 不当 committed；未发布不可见；forget 不复活 |
+
+存储先复用现有候选/组件目录。新增 `evolution/domains/<domainId>/` 只保存 versioned spec、generation refs、release ledger 和 channels 投影；原轨迹、Memory 正文、SKILL.md 不在此多抄一份。恢复用本地文件与短锁，不先引入服务端编排。
+
+## 14. 第一轮实施：做出一条完整小路
+
+### P0：证明测对了
+
+- [ ] 冻结 DomainSpec/TaskHarnessBinding 与最终请求对表合同。
+- [ ] 接独立评测 Session，固定模型/配置/工具/资料，封住宿主记忆与包扫描串入。
+- [ ] 冻结 Skill 正文及资源；用受控改坏的 Skill 验证能装入、能见到退步。
+- [ ] 跑 A/A、污染探针、缺 usage、评分器失败；完整核对输入和产物。
+
+出口：能解释每题两侧的全部差异。这里只证明执行和测量路径，不要求分数上涨。
+
+### P1：先闭合 Skill 学习
+
+- [ ] 首域用 provider 请求故障排查；训练材料取指定源码/文档和可复现故障，自动检查规则由维护者冻结。
+- [ ] 把一次失败、纠正和成功修复投成 observation；起草一份带适用/排除条件的 Skill。
+- [ ] 初始探索上限为 3 代、每代最多 2 个候选；模型 token/费用上限与样本数须在开跑前按模型和任务填实，不能留“无限”。这些数字是试点配置，不是产品常数。
+- [ ] 在分组未见故障上与固定 harness 配对；样本少则只出 experimental 结论。
+- [ ] 点名新 Session canary，能回滚、能恢复，报告实际加载与未采用原因。
+
+出口：从真实经过到候选，再到新任务使用与结果归档，一条路走通。只有失败报告也算工程闭环完成，能力收益仍未证明。
+
+### P2：接 Memory 与选择策略
+
+- [ ] 依赖 §4.71 的 read view、CAS、召回正式消息与忘记屏障；不临时写另一份长期记忆。
+- [ ] 对比固定/只留记忆/完整改进三路；检验收益来自记住答案、取材更准，还是方法迁移。
+- [ ] 开放 ContextPolicy 的触发、排序、预算、compact 保留项；原链与工具配对仍守 v3。
+- [ ] 支持冲突、过期、负适用条件和低价值项合并，防止上下文越学越满。
+
+### P3：工具与有预算的主动练习
+
+- [ ] 反复出现同类可验步骤后，开放脚本/Plugin/MCP 变更；代码候选走真实执行测试。
+- [ ] 开放已授权 practice：找资料、补缺口题、做小实验；生成题不兼任封存题。
+- [ ] 补耦合发布 memory 可见性、release CAS、崩溃恢复与撤销依赖。
+
+### P4：有限递归与长期治理
+
+- [ ] 按总学习成本和未见组质量测 sample efficiency；固定旧领域回归集。
+- [ ] 接已授权后台调度、停机、过期重验和漂移报告；用户停止后不再派新作业。
+- [ ] 单独评测学习策略变更；有效才允许下一代沿用，始终保留固定基线。
+
+## 15. 必须能答过的反例
+
+| 反例 | 合格行为 |
+| --- | --- |
+| 新 Skill 名字进清单，正文仍从旧目录读 | binding/hash 对账失败或机制未受测，不给晋升资格 |
+| 包已安装，领域还没发布 | 默认扫描不能挂进任务 |
+| 两题一模一样，只改文件名 | 同组；不能算第二份迁移证据 |
+| 候选往夹具写入标准答案 | 隔离/验收权限拒绝；静态结果不能代替 live 成绩 |
+| 工具报成功，但最终文件不对 | task verification fail |
+| 预览删掉关键输出后 token 下降 | 质量/约束回归失败，不能只报省钱 |
+| 一份失败经验只在当前版本成立 | 缩 scope、写条件，换版本重验 |
+| 多代试验挑到偶然赢家 | 报全部查询与候选数；用未耗尽的封存组再验证 |
+| 新版本学会了一域，却误触发另一域 | 负适用条件/路由回归拦晋升 |
+| 用户更正后，旧任务晚交一条相反记忆 | expectedRevision 冲突，重读；不能覆盖最新主张 |
+| 记忆已提交，进程死在领域发布前 | release_bound 批次不可召回；原 operationId 幂等恢复 |
+| 领域 release 已落，channels 还没更新 | 重放 release 账重建索引，不再提交一次 |
+| 来源被 forget，摘要/Skill 仍藏着同一主张 | 标派生依赖失效，重建或停用；不从旧快照复活 |
+| prepared 有 refs，实际请求被后续裁剪 | 请求对表/adapter 合同失败，不能沿该账归因 |
+| sealed 会话出现在普通历史扫描里 | learningAccess 过滤；权限隔离阻止起草器读取正文 |
+| 学习作业重启三次 | 观察不重采、候选不重发、模型重试成本照记 |
+
+## 16. 对外怎样呈现
+
+沿现有 `/evolve` 增加领域状态、候选差异、学习成本和使用原因；具体参数留到命令实现，不在文档里假装已有命令。
+
+用户先看到四件事：这次学了什么、从哪几次任务学来、在哪些新题上验证、花了多少。必要时再展开版本与证据。无变化时安静收账；出现有效候选、回归、预算耗尽或必须用户处理的阻碍时再通知。
+
+“已收经验”“已起草”“已验证”“已启用”分开说。模型不能因 SKILL.md 写好了，就说“以后都会了”。
+
+## 17. 外部参考与结论边界
+
+- [Continual Harness](https://arxiv.org/abs/2605.09998)：摘要讨论任务执行与 harness 调整交替推进。本方案借鉴在线反馈的方向；本文固定模型，不沿用论文另一条模型更新路线。
+- [Evo-Harness](https://arxiv.org/abs/2608.15071)：摘要把单次噪声轨迹提炼成可复用 Skill 作为研究对象。本方案允许一次证据起草，收益另用未见任务核验。
+- [Anthropic：Effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)：取其按需加载、渐进取材与有限上下文预算思路；本方案仍须测 LubanCode 实际表现。
+
+前两篇本轮核到摘要；未复现实验。上述方向不代表本方案独创，也不证明 LubanCode 已获收益。完成标准写在生产输入、任务产物、学习曲线和回滚证据里。

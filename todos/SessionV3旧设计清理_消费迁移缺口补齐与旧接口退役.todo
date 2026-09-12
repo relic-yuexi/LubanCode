@@ -9,6 +9,7 @@
 - 范围：v3 写入遗漏、消费端、内部 Tool 角色、compact、Hook、Session 管理、测试默认配置、旧会话专属接口及配套文档。
 - 依赖：[v3 总设计](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)、[现行 v3 架构](../docs/architecture/session-v3.md)、[字段合同](../docs/architecture/trajectory-v3-schema.md)。
 - 关联：[Lua Hook](LuaHook统一扩展_MCP分工与SessionV3接入.todo)、[AppServer](AppServer接入SessionV3_统一入口与事件恢复设计.todo)、[Workflow](Workflow接入SessionV3_编排账与节点恢复设计.todo)。
+- T06/T14 细化交付：[Insights 接入 Session v3](Insights接入SessionV3_使用账本与Prompt审计迁移.todo)。共用 T00 读面，迁移成果回写本单，不因另立细单销项。
 - 本轮交付仅此新 todo。原审计、既有文档修改、代码及用户存档保留。
 
 ## 一、先定清理目标

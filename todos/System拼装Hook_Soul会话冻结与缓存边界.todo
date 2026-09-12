@@ -1,0 +1,155 @@
+# System 拼装 Hook、Soul 会话冻结与缓存边界
+
+- 日期：2026-09-12；P1；待实现。
+- 本轮只写设计。下列新挂点、状态和验收项均未实现、未运行。
+- 用户定案：提示词按部件细分；Soul 中途修改不进入当前会话，留到下个新会话；命令须说明缓存影响。
+- 依赖：`LuaHook统一扩展_MCP分工与SessionV3接入.todo`、`session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`。
+- 重构口径：接现有 v3 中间件、请求冻结和会话记录，不另建调度器，不安排旧协议兼容。
+
+## 一、当前代码与改动缘由
+
+以下为当日静态核对，不能当作新行为验证。
+
+| 落点 | 当前行为 | 本单任务 |
+| --- | --- | --- |
+| `src/agent/prompt_assembler.cpp`：AssembleSystemPrompt | 拼基础规则、环境、项目规则、能力说明、Skill 清单、平台与模式段 | 拆出具名段和依赖，不再靠散落 append 决定顺序 |
+| `src/agent/resolved_prompt_builder.cpp`：ResolveFinalPrompt | 基础文本后接延迟工具索引、模型指令、Soul，同时产 manifest | 统一段清单与最终渲染；稳定段先放，动态段另定去处 |
+| `src/agent/loop.cpp:1016`、`:1032` | 先解析 system，再单独 BuildToolDefinitions；每步重取工具定义 | 说明和 schema 消费同一份工具快照 |
+| `src/app/commands/prompt_commands.cpp`：HandleSoulCommand、HandleSlashSoul | 写入或选择 Soul 后立刻改 current_soul，再 sync_request_policy | 命令改默认配置；当前会话另持不可变快照 |
+| `src/app/interactive_session_assembly.cpp:1408`；`src/agent/agent.hpp:198` | SyncAgentRequestPolicy 调 SetSoul，直接改 profile.soul | 禁止通用配置同步覆盖已锁定 Soul |
+| `src/agent/prefix.cpp`：DiffRequests、FingerprintRequest | system、tools 分开比较、记指纹 | 复用差分；补来源与 wire 影响，不把本地指纹当服务端命中证明 |
+| `src/runtime/middleware_runtime.cpp`：RunPreRequestMiddleware | mutate 后由宿主收口；采用改写时要求重新准备请求，再走 estimate/capacity | 新拼装链归入该流程，不绕过重新准备和冻结合同 |
+| `src/api/anthropic/client.cpp` | system 与 tools 分字段；deferred 工具按协议传输 | provider 继续负责协议映射，不手写服务端工具模板 |
+
+## 二、先分清三种顺序
+
+1. 执行顺序：哪个 handler 先准备材料、哪个后校验。由阶段、before/after、priority 决定。
+2. 文本顺序：哪些段先展示给模型。由具名段依赖决定，不取 handler 完成时间。
+3. wire 顺序及缓存边界：由 provider 编码和模型协议决定。API JSON 字段先后不能代表模型输入先后。
+
+`PreSystem` 指组装前，`PostSystem` 指组装后。PostSystem 不代表“追加到尾部”。tool schema 属 request.tools，不归 PostSystem。MCP 可同时提供工具定义和提示说明，两件输出分开接。
+
+## 三、挂点与执行合同
+
+建议发布 PreSystem/PostSystem 两个挂点，沿用 `(hookPoint,name)` 注册和 Lua effect 合同。挂点名在实现首批冻结。
+
+```text
+PreRequest / mutate（同一请求准备事务）
+  tools.resolve + skills.resolve → 固定本次材料快照
+  PreSystem   → 选择段、提交新增/替换/删除候选
+  宿主 system.compose → 排序、校验、渲染候选 system
+  PostSystem  → 查看成稿、提交按 segmentId 定位的修订或拒绝理由
+  宿主 system.finalize → 校验并一次重渲染，生成 manifest
+  request.finalize → 汇合 system、messages、tools 与请求参数
+宿主 freeze → estimate → capacity → provider 发送
+```
+
+- PreSystem/PostSystem 是 PreRequest/mutate 内受管子流程，不重复注册整条拼装链。采用效果后若现有合同要求重新准备，沿原 continuation 前进。
+- 子挂点每次只处理当前 buildRevision；PostSystem 修订后不递归重跑自己。重准备须有新输入版本、沿用效果收据，并受重准备次数预算约束，不能无限自改。
+- 同键先选实现，再匹配条件和排序；沿用既有 overwrite、required、权限与失败合同。
+- handler 只能提交段候选。宿主检查可写范围、冲突、依赖环与冻结状态，再采用。禁止后置 next() 尾段偷改已经冻结或发送的请求。
+- 同段两个无明确依赖的写者报冲突，不按偶然完成顺序取最后一个。显式串行依赖允许后者看到前者已采用结果。
+- 必需槽位失败就停止准备；可选段只有预先声明可省略才允许省略，并记录原因。不能暗用旧实现兜底。
+- system.compose/system.finalize/request freeze 属宿主边界，Lua 不能替换掉校验、身份发行或提交。
+
+## 四、段模型与槽位
+
+建议每段记录 `segmentId、sourceRef、sourceHash、renderedHash、lifetime、before/after、owner、mutableBy`。lifetime 至少区分 session、provider-profile、request。manifest 记录最终次序、获选实现、采用效果和排除原因。
+
+| 部件 | 建议槽位/归属 | 生命周期与位置 |
+| --- | --- | --- |
+| 基础规则、项目规则、环境基线 | PreSystem/core、project、environment | session 快照；稳定区 |
+| 模型与平台说明 | PreSystem/model.instructions | provider-profile；换模型时重新解析并记差分 |
+| Soul | PreSystem/soul.apply | 读取当前会话快照；稳定区，不能每步重读文件 |
+| Skill 使用规则、目录 | PreSystem/skills.catalog | session 快照；skills.resolve 先完成 |
+| MCP 使用说明、其他能力说明 | PreSystem/capability.notes | tools.resolve 先完成；不能宣称未提供的能力 |
+| 工具 schema、server tool 配置 | tools.resolve / request.tools | 独立结构化字段；执行权限仍在调用时复核 |
+| 已激活 Skill 正文、检索结果、即时环境变化 | 正常上下文候选/消息路径 | 按来源、角色和作用域追加，不追改早期 system |
+| 动态工具索引 | provider 能力适配/请求动态材料 | 原生 tool reference 优先；回退方案显式记前缀差分 |
+| 成稿检查 | PostSystem/system.validate | 检查必需段、越权、重复、过期版本、能力声明一致 |
+
+默认文本顺序建议：基础规则 → 项目与环境基线 → 模型/平台说明 → Soul → 稳定能力说明与 Skill 目录。这个顺序只管排版，不改变指令权限，也不允许 Soul 覆盖宿主安全约束。
+
+日期跨天、工作目录变化、模式切换不能继续展示旧事实。走有来源的上下文更新；确需重建 system 时记新 revision 和缓存影响。不要为省缓存延迟权限撤销或隐藏实际环境变化。
+
+Skill 目录与正文分别处理；MCP 注册、连接状态与 schema 分别处理。目录刷新默认下个新会话采用；当前会话按需加载仍可继续。MCP 断连/撤权立即阻止执行，必要时更新请求定义，不能坚持保留失实声明来保缓存。
+
+## 五、Soul 状态与命令
+
+### 5.1 两份数据、一个锁定边界
+
+- `configuredSoul`：持久化默认值，供以后新建会话读取。
+- `sessionSoul`：本会话采用的名称、规范化正文、来源/hash、revision 与 locked 状态。正文存 blob，不能恢复时仅凭文件名重读。
+- `pending` 是“默认值与当前快照不同”的展示状态，不是下一轮自动应用队列。
+- 空闲且尚未准备首个模型请求时，可设置本会话 Soul。首个请求准备开始，宿主串行锁定并持久化快照，随后才允许发送。排队命令按此边界判定，不能靠 response 是否返回判断。
+- 锁定后，即使首请求失败、取消、零输出或结果未知，也不自动解锁。重试继续使用快照。
+- 锁定前改动先校验、保存成功，再更新草稿；保存失败不宣称成功，不留下内存/磁盘各用一份的状态。跨文件更新需原子配置方案或明确失败回滚。
+
+### 5.2 命令行为
+
+| 命令 | 首请求准备前且空闲 | 锁定以后 |
+| --- | --- | --- |
+| `/soul` | 展示本会话草稿、默认值、锁定状态 | 展示当前快照和下个新会话默认值；标出差异 |
+| `/soul <内容或名称>` | 校验并保存默认值，更新当前草稿 | 只保存默认值，不改当前快照 |
+| `/soul off` | 默认选择 off，当前草稿关闭 | 下个新会话关闭；当前仍保留原 Soul |
+| `/soul default` | 解析默认文件，保存选择并更新草稿 | 只更新以后采用的默认选择 |
+| `/soul clear` | 清空默认正文，更新当前草稿 | 清空默认正文；当前快照仍可从 blob 恢复 |
+
+首版不加 `/soul apply-now` 或 force。用户若要立刻换，须新建会话。直接编辑 SOUL.md、切换名字、热重载插件、通用 SyncAgentRequestPolicy 都不能绕过这条规则。off 不删正文，clear 才清空正文。
+
+锁定后保存成功，统一提示：
+
+> 已保存，下个新会话生效。本会话仍用「原名称」。中途更换 Soul 会改写系统提示词，影响后续缓存复用，因此本会话不切换。
+
+锁定前提示：
+
+> 已设置。本会话从首次请求起固定使用这份 Soul；此后修改留到下个新会话。
+
+内容规范化后相同，提示“内容未变”，不记虚假 pending 或 revision。多次修改以后一次成功保存为准。多会话并存时，更新默认值不广播覆盖其他会话。
+
+### 5.3 会话边界
+
+- resume/restart：恢复已提交 sessionSoul，忽略磁盘新默认值；恢复材料缺失则报错，不静默换魂。
+- compact、上下文重建、retry、换模型：仍属当前会话，Soul 不变。换模型可改变模型说明，但不能顺手刷新 Soul。
+- `/clear`：只有确实创建新 sessionId 才重新读默认值；只清上下文不算新会话。实现时须查清命令实际路径，并让 UI 明说是否新建。
+- fork 并保留历史：默认继承来源 sessionSoul，保留快照来源；不拿最新全局配置改写旧历史语境。空白新会话才读新默认。
+- 子代理：inherit 复制父会话已采用快照；off 明确为空；显式独立 Soul 在子会话首请求前固定。父会话 pending 不泄漏给子代理。
+- btw、compact 摘要等内部旁路请求：按各自 purpose 配置构建 prompt；只有合同要求继承才读 sessionSoul，不读取 pending，也不解锁主会话。
+
+## 六、缓存边界与审计
+
+固定 Soul 是产品策略，避免无意改写前缀；不承诺每次命中缓存。TTL、模型、provider、工具配置、历史改写等仍会影响命中。
+
+Anthropic 文档说明缓存前缀按 tools → system → messages 组织。修改顶层 system 会影响该层及后续前缀复用，前方已有工具缓存不必一并丢失。带 defer_loading 的工具另有按需载入路径，不应把所有 tools 差分都判成相同损失。以上仅作 Anthropic 边界，不能直接套到全部 provider。
+
+资料（2026-09-12 核对）：[Tool use with prompt caching](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching)、[Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)。具体模型特例由能力适配处理，本单不固化工具隐式提示词模板或固定 token 数。
+
+- 保留 sessionSoulRef、promptRevision、toolRegistryRevision、buildRevision、最终 manifest 与请求引用；沿既有 Session v3 writer 记录，不另造“已采用”账。
+- 默认配置保存与会话采用是两件事。审计界面分别展示 configured 与 adopted，不得拿最新 current_soul 指针冒充实际发送内容。
+- 每次请求记录最早变化段、变更来源和 provider 映射后差分。稳定段集合 hash 不能冒充连续可缓存前缀 hash。
+- `predictedCacheImpact` 只作预测；真实命中以响应 usage 为准。日志不得把“本地 hash 变化”写成“服务端已清缓存”。
+- 冻结后估算和最终发送消费同一版本 system/tools/messages；provider 隐式开销单独计量或标为未知，不伪装成客户端段落。
+
+## 七、实施批次与验收
+
+### P0：Soul 会话固定
+
+- [ ] 增加配置值/会话快照双状态及首请求锁定提交；禁止 SetSoul 和策略同步越界。
+- [ ] 改全部 `/soul` 分支、错误回执、只读展示与帮助文本；覆盖 CLI、one-shot、app-server 的统一会话入口。
+- [ ] 接恢复、fork、子代理和旁路请求，审计改读实际快照。
+- [ ] 用捕获真实请求构建结果的测试验证：锁定前可改；锁定后下一请求 system 字节保持不变；新会话采用新值。
+- [ ] 验证首请求失败/取消仍锁定、重启后原值不变、off/clear/default 同规、写入失败回滚、多会话不串值、并发命令与首请求竞态。
+
+### P1：具名段与挂点
+
+- [ ] 抽出材料快照、段图、宿主渲染；接 PreSystem/PostSystem，清理独立 With* 后叠旁路。
+- [ ] schema 与能力说明消费同一工具快照；稳定排序不受文件枚举或 MCP 返回顺序影响。
+- [ ] 验证同键替换、依赖环、同段冲突、required 失败、越权修改、PostSystem 不递归、冻结后改写拒绝。
+- [ ] 验证已激活 Skill、动态工具、日期/工作目录更新与权限撤销路径，不以缓存为由压住必要更新。
+
+### P2：缓存与可解释审计
+
+- [ ] `/prompt audit` 展示段顺序、lifetime、来源、当前/待生效 Soul、首个前缀变化点。
+- [ ] 对实际支持的 provider 做序列化请求对照；检查 schema 未塞进 system、无重复注入、估算与实发版本一致。
+- [ ] 区分普通工具变化与 deferred 载入；覆盖原生路径和 fallback，分别报告静态判断、受控测试和真实 usage。
+- [ ] 真实缓存实验另列输入、模型、TTL、断点与 usage；未跑前只称“避免 Soul 导致前缀变化”，不称“缓存已验证”。

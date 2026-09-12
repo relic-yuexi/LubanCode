@@ -1,0 +1,133 @@
+# Insights 接入 Session v3：使用账本、Prompt 审计与报告迁移
+
+- 状态：待实施。2026-09-11 完成静态核查与任务拆分；未改生产代码，未运行本单验收。
+- 核查基线：HEAD `58e949af` 加当前工作区；实施前重查代码与 schema，本文不冻结后续字段变化。
+- 级别：P1；缺账不得报零、重复计费与错误完成率优先处理。
+- 来源：[旧产品设计](LubanCode使用洞察_Token账本与Prompt审计设计.todo)。旧单 A0–A5 的实现记录保留，不代表 v3 已接通；A6/A7 未完项见本单 I6。
+- 合同：[Session v3](../docs/architecture/session-v3.md)、[v3 字段与 usage owner](../docs/architecture/trajectory-v3-schema.md)。
+- 归属：[v3 旧设计清理单](SessionV3旧设计清理_消费迁移缺口补齐与旧接口退役.todo) T00 提供共用读面，T06 管离线 usage，T14 管 Insights。本单细化三者交付，不另建重复投影器；T07 Telemetry 只复用同一口径。
+- 范围：`/usage`、`/prompt audit`、`/insights`、`/doctor insights` 的 v3 读取、统计、派生缓存及报告；不改模型行为，不造旧档转换器，不删除用户历史。
+
+## 一、哪些保留，哪些退役
+
+产品问题没有过时：查花费、查真实请求、查工具摩擦、跨会话汇总仍需保留。过时的是旧 Journal 信封、main.jsonl 发现、旧 usage owner 和以旧事件推断结果的接线。
+
+- 保留：默认本地、只读、不调模型、不自动打开浏览器；报告可删可重算；静态 prompt 审计；聚合、脱敏与 HTML 展示中不依赖旧格式的代码。
+- 替换：旧 EventEnvelope 输入、session.json/run terminal 状态、按旧 request snapshot 拼实际输入、旧 usage 事件累计、平铺子流发现。
+- 不补造：v3 没记录的 verification、outcome、环境快照、prompt 来源材料。缺件标 unknown/unavailable，不借当前环境或旧规则猜过去。
+- 不做永久兼容桥：不能把 v3 转成伪 v2 EventEnvelope 再喂旧分析器。建立领域读模型，由 v3 已验证事实投出。
+
+## 二、源码证据与改动落点
+
+| 当前落点 | 静态发现 | 迁移任务 |
+| --- | --- | --- |
+| `src/accounting/session_usage_reader.cpp::ReadSessionUsage/ParseStream` | 发现 main.jsonl，解析 EventEnvelope，调用 ProjectUsage | 接共用 v3 发现和 owner 投影；无流不能返回成功零账 |
+| `src/insights/integrity_gate.{hpp,cpp}::GateSession` | 流列表仍是 EventEnvelope；状态依旧 session 元数据 | 读 v3 校验结果、封口及来源/子账引用，明确分析准入 |
+| `src/insights/session_analyzer.cpp` | 遍历旧事件，累计 usage、验证和 outcome | 接领域读模型；缺少事实的规则停止判分 |
+| `src/insights/prompt_auditor.{hpp,cpp}` | runtime 入口接旧事件集合和 request_snapshot_ref | 从 prepared 的历史引用还原请求材料，来源不足时降级 |
+| `src/insights/friction_classifier.cpp` | 工具、验证、结果判据依赖旧事件 | 工具按 actionId 折叠；验证/结果只消费现行合同已落的事实 |
+| `src/insights/derived_store.*` | insights-v1，按 stream terminal hashes 判断 stale | 更新版本和源指纹，纳入来源链、子账及引用材料 |
+| `src/insights/workspace_aggregator.*`、`insights_generate.*`、`report_store.*`、`insights_health.*` | 报告、发现、缓存与健康检查串联入口 | 逐项审查旧目录/状态假设，同一准入与去重口径贯穿全链 |
+| `src/trajectory/v3/reader.{hpp,cpp}` | 已有 ReadV3Ledger、历史/上下文/请求读取面、FoldToolActions、ProjectResume | 复用校验和引用读取，不另写不验 hash 的 JSONL 扫描器 |
+
+实施时补齐命令注册、AppServer 查询及测试清册。上表只证明源码依赖，不冒充实际运行结果。
+
+## 三、投影合同
+
+### 3.1 三种视图不能混
+
+1. 历史时间线回答发生过什么，包含已退出模型上下文的消息与内部请求。
+2. 当前 contextChain 回答现在保留什么，不能拿来统计全部历史花费。
+3. 单次 `model.request.prepared` 的引用回答那次实际用了什么；按当时 revision 和不可变引用还原，不能用今天的 system、工具表或当前链替代。
+
+`seq` 只表示文件追加顺序，不当 turn/step/action 身份。工具操作按 actionId；模型尝试按 requestId；跨 session 身份加所属 session，来源引用按现行五键合同校验。
+
+### 3.2 Usage 与费用
+
+- 唯一累计 owner 是模型生成 assistant message 的 usage。成功、取消、中断均按实际有无实报处理。
+- `model.usage.appended` 是迟到、更正或无消息请求的观察承载，按现行 schema 不参与累计，也不覆写旧 owner。报告可展示观察值及未计入原因；不能为了账单看起来齐全而重复加总。
+- `usage:null` 与缺失子字段保持 unknown。reasoning 不在 output 之外再加一遍；输入与 cache 使用 api 的中立折算口径，测试须覆盖不同供应商是否已含 cache。
+- 重试另有 requestId，保留每次尝试；compact、标题、子代理、Workflow 各自归因。内部请求花费可以计入总花费，不能混成主上下文尺寸。
+- 恢复/分叉引用祖先不代表再花一次钱。定义“本 session 新请求”“含来源链视图”“工作区唯一请求”三种范围；相同 owner 在同一聚合范围只算一次。缺源不能当零。
+- token 估算取 prepared 引用的 tokenEstimateRef；provider 实报、context 估算、费用估算和供应商账单分栏。价格缺失时费用未知；价格版本、币种、命中档位可追。
+- cache 比率按已报告样本汇总分子分母，明示分母和覆盖数，不平均各请求百分比，不把 unknown 当 miss。
+
+### 3.3 Prompt 与结果诊断
+
+- `/prompt audit static` 继续读当前文件和来源账，页眉明确“当前配置”；不得冒充某次历史请求。
+- runtime 审计消费当次请求的 system、toolset、消息引用、估算及可用来源快照。消息大小变化不等于来源模块变化；缺 manifest 时不输出模块归因。
+- prepared 引用不必等同供应商最终 wire。需要声称“实际发送正文”时，核对现有发送快照与变换合同；证据不足就限定为持久请求视图，禁止补造快照字段。
+- compact 前后比较采用已提交 revision 和持久指标；失败候选、未 applied 的替换不算生效。preview 降档不算新的工具执行。
+- 工具失败/重试从工具操作及结果选择链推导，区分执行失败、落盘失败、取消和外部故障。成功执行命令不等于任务成功。
+- verification/outcome 在现行 v3 无对应事实时，相关规则标 unsupported_by_schema；不能把未记录判成“没有验证”，也不能从 session.ended 推断任务完成。真要补事实，先交 T11/所属域定 schema，再接生产写口与消费端。
+- 建议带源引用、规则版本与覆盖范围；相关性不写成因果。报告默认不带 prompt 正文、工具全文或隐藏思维。
+
+### 3.4 准入与派生缓存
+
+- 区分 sealed、active/provisional、incomplete、corrupt、missing、unsupported、reference_missing。具体枚举可沿项目命名，但外部语义不得合并成“空结果”。
+- active 只读稳定提交边界；当前 ReadV3Ledger 遇截断会报错，不能直接截行后当验过。需要高水位读面则由 T00 补合同和测试；未补前明确暂不可分析。
+- 坏链/缺引用不计入完整完成率。能局部分析时明示受影响指标和排除数，不能用 partial 总数冒充全量。
+- 派生指纹包含 analyzer/schema/规则版本、读取范围、源 session 与高水位 hash、祖先/子账依赖、所用快照 hash；价格参与报告时记录价格版本。引用变化或缺件后失效重算。
+- 重复生成替换派生结果，不在旧聚合上叠加；升级分析器不误用 insights-v1 缓存。清理缓存只删派生目录，不碰原账、artifact 或用户报告。
+
+## 四、分批交付
+
+### I0：合同与夹具（关联 T00/T11）
+
+- [ ] 冻结代码、schema 与测试入口；逐字段标“已有生产事实/只有设计/缺失”。
+- [ ] 定义领域读模型、准入状态、owner 去重键及统计范围，形成字段映射表；不新造旧信封。
+- [ ] 整理合法 v3 夹具：普通工具回合、重试、中断、usage 缺失/追加、compact、来源链、两层子代理、坏账与缺引用。
+
+### I1：发现、校验、离线 usage（关联 T06）
+
+- [ ] 迁 ReadSessionUsage 和 GateSession，复用 v3 发现、校验、来源遍历；明确旧格式 unsupported，不迁用户旧档。
+- [ ] 落 owner 投影与去重，接 `/usage`、聚合与费用估算；失败/迟到观察另栏。
+- [ ] 无 v3 流、坏引用与未报告 usage 均不能显示为成功零消耗。
+
+### I2：Prompt 审计（关联 T14）
+
+- [ ] 保留 static；迁 runtime 输入读模型、历史引用与快照读取，缺件关闭对应规则。
+- [ ] 对照 compact/system 切换/工具集变化前后实际请求材料；记录 prepared 与 wire 的证据边界。
+- [ ] 更新错误、JSON 与终端文案，移除仍声称依赖旧 request_snapshot_ref 的说明。
+
+### I3：Session Insights 与跨仓聚合（关联 T14）
+
+- [ ] 迁 SessionAnalyzer/FrictionClassifier/FeatureSignal，按 action 与当前域合同计数。
+- [ ] 缺 verification/outcome 等事实的规则不判分，覆盖表明示；不为了凑旧报告临时加事件。
+- [ ] 主子账、resume/fork 祖先在跨 session/跨 workspace 报告中去重；默认当前 workspace，跨仓须显式选择。
+
+### I4：派生仓、报告与健康检查
+
+- [ ] 更新派生版本与失效指纹，贯通 report_model、HTML、JSON、doctor 和 clean。
+- [ ] 报告列读取范围、格式、分析版本、覆盖数、排除原因、估算/实报边界。
+- [ ] 保留脱敏 canary；读账或生成报告不得改原账 hash，不调模型、不重跑工具、不自动打开浏览器。
+
+### I5：生产验收与旧接口退役
+
+- [ ] 当前源码重建；先 `ctest -N` 查真实名称，再跑 accounting/insights/trajectory_v3 及受影响命令测试，禁止零匹配当通过。
+- [ ] 用实际 exe + 受控模型后端生成 v3，会话内执行工具、compact、resume、子代理；再从实际命令生成 usage/prompt/insights 报告。夹具后端只验接线，不当真实模型质量成绩。
+- [ ] 核对报告统计、owner、prepared 引用和实际产物；重复运行及删派生后重算结果一致。
+- [ ] 删除本域生产 EventEnvelope/main.jsonl/session.json 专属依赖、旧测试与过期说明；共用 hash/费用/脱敏组件保留。
+- [ ] 填实现 commit、命令、结果、未验范围，回写 T06/T14；不能用“已转本单”销项。
+
+### I6：旧单 A6/A7 的后续范围
+
+- [ ] A6 模型评议不挡 I0–I5。保留显式开启、脱敏、材料范围与费用说明；结果只是建议，usage 按 v3 自己的请求 owner 记账。未实现就维持未实现。
+- [ ] A7 AppServer/GUI 查询复用本单读模型，另接命令或协议；默认只读，明确分页、scope、provisional 与错误。查询不得恢复执行。UI 完成须有实际入口证据，不能只凭 DTO 或 HTML 判完成。
+
+## 五、最小验收矩阵
+
+| 场景 | 必须断言 |
+| --- | --- |
+| assistant 实报 + 同 request usage.appended | 累计一次；追加观察另栏 |
+| usage:null、部分字段缺失、失败无 assistant | unknown 保留；无消息观察不进入累计 |
+| 两次网络尝试、一次 compact 内部请求 | 尝试分别归因；内部花费不冒充上下文尺寸 |
+| resume 两次、fork、主子账重复发现 | 单范围内 owner 不重算；范围标签明确 |
+| 两次 prepared 之间 system/compact/预览替换 | 各自读历史引用，旧请求不随当前链变化 |
+| 工具重试、取消、结果重选 | 操作/尝试/结果分开计数，降档不增加执行次数 |
+| 无 verification/outcome 的合法 v3 | 规则不可用，不报零验证或任务成功 |
+| 活账、坏尾、坏中段、缺祖先或快照 | 准入与覆盖如实；不返回成功空报告 |
+| 派生缓存命中、源/价格/规则变更、删缓存重算 | 失效正确；不叠加；原账不变 |
+| CLI 三条命令、doctor、HTML/JSON、脱敏 canary | 同源同数、证据可追、敏感正文不泄漏 |
+
+本单完成标志：I0–I5 有运行证据，T06/T14 可核销；I6 独立标进度。源码静态审查、夹具测试、真实程序接线、真实供应商试验分栏记录，不拿一种充另一种。

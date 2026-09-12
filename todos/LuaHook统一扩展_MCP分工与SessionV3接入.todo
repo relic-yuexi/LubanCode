@@ -6,6 +6,7 @@
 - 范围：内置 C++ 与 Lua 共用 hook 注册池、Lua Host API、MCP 工具调用桥、Session v3 接线、作者文档、生成模板及试跑校验。
 - 依赖：`todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`，重点为 §4.22–§4.30、§4.35–§4.38、§4.47–§4.50、§4.53–§4.63。
 - 重构口径：按新 session 管理系统设计；当前代码只供找接点、复用底座。不安排旧配置、旧轨迹或旧插件协议迁移。
+- 2026-09-12 细化子单：`System拼装Hook_Soul会话冻结与缓存边界.todo`。补 PreSystem/PostSystem、具名段与请求字段分工；Soul 首请求前固定，中途修改仅供下个新会话采用。子单新行为仍待实现。
 - 本轮不做：TS/Node hook、WASM hook、DLL/SO hook、外置进程 hook、多轮 JSON 行插件协议、完整通用 Extension SDK。
 
 ## 一、用户定案与职责
