@@ -178,7 +178,6 @@ std::vector<api::Request> RunOrchestration(agent::TokenCalibrator* calibrator,
     agent::Agent loop(backend, registry, profile);
     agent::TurnWiring wiring;
     PreviewCommitHook hook;
-    hook.calibrator = calibrator;
     wiring.rewrite_tool_results_for_history = [&hook](api::Message& batch) { return hook(batch); };
     wiring.token_calibrator = calibrator;
 
