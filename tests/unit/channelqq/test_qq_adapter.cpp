@@ -239,6 +239,9 @@ std::vector<nlohmann::json> WaitFrames(QqBotAdapter* adapter,
 }
 
 // 手工路径:写 initialize(一次编码一次写)。
+nlohmann::json InitializeFrame(std::int64_t id, const std::string& account,
+                               const std::string& protocol_version = "2026-08-29");
+
 void HostInitialize(AdapterHarness& harness, const std::string& account = "main",
                     const std::string& protocol_version = "2026-08-29") {
     const auto frame =
