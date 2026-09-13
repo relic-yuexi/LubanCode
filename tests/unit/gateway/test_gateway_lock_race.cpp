@@ -189,10 +189,14 @@ TEST_CASE("ownerEpoch fencing:锁账带 epoch,同进程不同 epoch 互不相认
     auto resumed = GatewayLock::TryAcquire(lock_file, SelfRecord("boot-1"), &again);
     REQUIRE(resumed.status == GatewayLock::AcquireResult::Status::Acquired);
     CHECK(again.holds());
-    again.Release();  // 续持分支无句柄,Release 走删文件
-    CHECK_FALSE(std::filesystem::exists(lock_file));
-
+    // 重入分支不接管句柄(原始句柄在 first 手里):again.Release() 的
+    // 删文件在 Windows 上会被 first 的打开句柄挡住(_SH_DENYNO 无
+    // FILE_SHARE_DELETE),POSIX unlink 不受影响。锁文件消失的正确合同
+    // 是"全部持有者放锁之后"——first.Release() 先关句柄再删,两平台
+    // 一致;单在 again.Release() 后断言不存在是 POSIX 假设,不成立。
+    again.Release();
     first.Release();
+    CHECK_FALSE(std::filesystem::exists(lock_file));
 }
 
 TEST_CASE("原子互斥:锁文件占位失败必因已存在,坏锁保守不删") {
