@@ -11,6 +11,7 @@
 // "pid 还活着"/"pid 已死"两条路)。
 #pragma once
 
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -55,7 +56,9 @@ public:
         std::string detail;        // 脱敏人话
     };
 
-    // 尝试取锁。成功时 *out 持锁(RAII);失败时 out 不持任何东西。
+    // 尝试取锁:原子创建(create-new)占位 → 撞上则读账核身份(活拒/
+    // 死清重试/读不懂保守拒)。成功时 *out 持锁(RAII);失败时 out 不持
+    // 任何东西。双进程互斥不依赖读写的先后顺序(V0:OS 原子性担保)。
     static AcquireResult TryAcquire(const std::filesystem::path& lock_file,
                                     const AccountLockRecord& self, const AliveChecker& alive,
                                     AccountLock* out);
@@ -74,6 +77,7 @@ public:
 
 private:
     std::filesystem::path lock_file_;  // 空 = 未持锁
+    std::FILE* file_ = nullptr;        // create-new 的原始句柄(占位即持有)
 };
 
 }  // namespace lubancode::channel

@@ -229,7 +229,7 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                                 trajectory.session_id;
             return parsed;
         }
-        // Gateway 子命令(总装单 G1):lubancode gateway <run|status|stop>
+        // Gateway 子命令(总装单 V0 起):lubancode gateway <run|status|stop>
         // [--profile <名>] [--json 只 status 认]。只认裸词打头且此前没有
         // 位置参数;形状不对当场退用法,不静默当普通位置参数走单发问句。
         if (arg == "gateway" && options.positional.empty()) {
@@ -239,7 +239,7 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                 parsed.action = CliAction::BadGateway;
                 parsed.error_text =
                     "用法: lubancode gateway <run|status|stop> [--profile <名>] [--json]"
-                    "(install/start/restart/doctor/logs 是后续批次的口,G1 未实现)";
+                    "(install/start/restart/doctor/logs 是后续批次的口,尚未实现)";
                 return parsed;
             }
             GatewayCliArgs gateway;

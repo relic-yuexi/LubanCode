@@ -135,24 +135,39 @@ public:
     struct InputReceipt {
         bool accepted = false;   // 本次接纳为新操作(已落账入队)
         bool duplicate = false;  // 同键同载荷重发:返回原回执,不重复接纳
-        std::string error_code;  // "operation_conflict" / "queue_full" / 空
+        // "operation_conflict"(同键异载荷) / "queue_full"(容量帽) /
+        // "operation.artifact_failed"(输入原件落不稳) /
+        // "operation.append_failed"(受理账行落不稳)。后两码出现即受理
+        // 被拒——写盘失败不回成功回执,受理面随之停住(总装单 §5.3)。
+        std::string error_code;
         std::string operation_id;  // 服务发号(op-<n>)
         std::string input_id;      // 服务发号(in-<n>)
         std::string payload_hash;  // 规范载荷的 SHA-256
     };
 
-    // 提交输入:单写者串行(会话锁内)按 §4.2 次序走——先落操作台账
-    // (operations.jsonl,先账),后入队、后出回执(后回执)。崩溃窗口
-    // 里账已落而回执未达时,同键重发命中台账,不重复接纳。
+    // 提交输入:单写者串行(会话锁内)按总装单 §六 受理次序走——先落
+    // 输入原件(durable input artifact),再落操作台账行(operations.jsonl,
+    // PowerLoss 档),后入队、后出回执。任何一步落不稳即拒绝受理,不回
+    // 成功。崩溃窗口里账已落而回执未达时,同键重发命中台账,不重复接纳。
     InputReceipt SubmitInput(const InputRequest& input);
 
-    // 泵侧消费:队首取出(FIFO;每端自己的回合泵调)。空 = 没有待处理输入。
+    // 泵侧消费:队首取出(FIFO;每端自己的回合泵调)。三态:
+    //   Ok          取到一笔(dispatched 事实已按 PowerLoss 档落稳,先账
+    //               后取——重启重建只重排"accepted 未 dispatched"的输入);
+    //   Empty       没有待处理输入;
+    //   WriteFailed dispatched 事实落不了盘——输入留在队首不取出,调用
+    //               方应停泵报错,不得当作消费成功(写盘失败停止受理/执行)。
     struct QueuedInput {
         std::string text;
         std::vector<api::ImageBlock> images;
         std::string operation_id;  // 接纳时的操作号(与台账对账)
     };
-    std::optional<QueuedInput> PopPendingInput();
+    struct PendingPop {
+        enum class Status { Ok, Empty, WriteFailed };
+        Status status = Status::Empty;
+        QueuedInput input;  // status == Ok 时有效
+    };
+    PendingPop PopPendingInput();
     std::size_t pending_input_count() const;
 
     // 规范载荷串(幂等键比对的底):text + 图片字段 US('\x1f')定界拼接。
@@ -192,11 +207,22 @@ private:
         std::string operation_id;
         std::string input_id;
         std::string payload_hash;
+        // v2 行:输入原件相对会话目录的路径(operations-inputs/<op>.json);
+        // v1 旧行无原件可指,留空(去重照旧,重建不排)。
+        std::string input_ref;
     };
 
-    // 开张成功后装载:本场的操作台账若在(防御);resume-at-launch 的
-    // 直接来源场的台账单跳种进来——新 sessionId 不洗掉旧意图(§4.2
-    // "恢复沿来源链识别原键,不能因新 sessionId 又执行一次旧意图")。
+    // 开张成功后装载(总装单 V0 受理底线):
+    //   1) 本场台账若在:种去重表、按 dispatched 行标已派发,accepted 而
+    //      未派发且原件可读的输入重排进 pending(进程内队列只是投影,
+    //      从账重建,§六"accepted 写稳、队列未入:从账重建");
+    //   2) 沿 resume-at-launch 的完整来源链(直接来源 → 其来源 → …,
+    //      访问集 + 深度上限防坏环)逐场种表——多跳去重,不是只读上一场;
+    //      链上 accepted 未 dispatched 且原件可读的输入在本场重落
+    //      (原件 + accepted 行,带 originSessionId/originOperationId 审计)
+    //      并重排进 pending。新 sessionId 不洗掉旧意图,也不丢未派发正文。
+    //   v1 旧行(无 inputRef)只种去重表,不重建 pending(正文不可恢复,
+    //      如实降级,不凭空造正文)。
     void SeedOperationLedger();
 
     std::unique_ptr<SessionRuntime> runtime_;

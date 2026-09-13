@@ -356,6 +356,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::ToolDeliveryAcknowledged: return "tool.delivery.acknowledged";
         case EventKindV3::ToolDeliveryUncertain: return "tool.delivery.uncertain";
         case EventKindV3::ToolCapabilityRecorded: return "tool.capability.recorded";
+        case EventKindV3::GatewayWorkBound: return "gateway.work.bound";
+        case EventKindV3::ReplySelectionCommitted: return "reply.selection.committed";
 
     }
     return "unknown";
@@ -486,6 +488,9 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::ToolDeliveryAcknowledged,
             EventKindV3::ToolDeliveryUncertain,
             EventKindV3::ToolCapabilityRecorded,
+            // Gateway 常驻总装 V0:work↔turn 绑定与回复选择(statusless)。
+            EventKindV3::GatewayWorkBound,
+            EventKindV3::ReplySelectionCommitted,
 
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {

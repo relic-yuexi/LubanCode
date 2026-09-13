@@ -18,6 +18,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -45,11 +46,17 @@ enum class ProcessMode {
 // 唯一实例锁
 // ---------------------------------------------------------------------------
 
-// 锁文件里的账(不含任何密钥)。
+// 锁文件里的账(不含任何密钥)。schema v2(V0):纯追加 owner_epoch,
+// 不改旧义——旧格式(缺 owner_epoch)的锁文件读不懂,按 RefusedBrokenLock
+// 留人工(锁无生产宿主,升级期残留概率可忽略,明报优于猜)。
 struct GatewayLockRecord {
     unsigned long pid = 0;
     std::string start_token;  // 进程起始 token(防 PID 复用)
     std::string boot_id;      // 实例令牌(同进程双 Gateway 互不相认)
+    // 实例 fencing 代号(总装单 §5.2 ownerEpoch):旧 epoch 的迟到提交核对
+    // 它即拒。取值 = boot_id(一 boot 一 epoch);work 级认领的 ownerEpoch
+    // 由受理/派发账自带,V1 随 claim 落。
+    std::string owner_epoch;
     std::int64_t acquired_at_ms = 0;
 
     nlohmann::json ToJson() const;
@@ -57,7 +64,10 @@ struct GatewayLockRecord {
                                                            std::string* error);
 };
 
-// RAII 独占锁:析构即删锁文件(幂等)。move-only。
+// RAII 独占锁:原子创建占位(create-new),持有期间保持句柄,析构即删锁
+// 文件(幂等)。move-only。双进程互斥不靠"先读后写"的顺序——那只是
+// 竞态窗口大小的差别,单测证明不了;create-new 由 OS 保证至多一只成功
+//(V0 锁裁决,与 trajectory::SessionLock 同一把尺)。
 class GatewayLock {
 public:
     struct AcquireResult {
@@ -72,9 +82,10 @@ public:
         std::string detail;
     };
 
-    // 身份核:持有者活着且 token 对得上才算活;死透或 PID 复用 = 陈旧可清;
-    // 探不到按活保守(宁拒不抢)。直接复用 trajectory 的 ProbeLockHolder
-    //(同一把尺,两处锁不各养一套身份判定)。
+    // 取锁次序:原子创建 → 撞上则读账 → 身份核(活拒/死清重试/读不懂
+    // 保守拒)。持有者活着且 token 对得上才算活;死透或 PID 复用 = 陈旧
+    // 可清;探不到按活保守(宁拒不抢)。身份核直接复用 trajectory 的
+    // ProbeLockHolder(同一把尺,两处锁不各养一套身份判定)。
     static AcquireResult TryAcquire(const std::filesystem::path& lock_file,
                                     const GatewayLockRecord& self, GatewayLock* out);
 
@@ -86,10 +97,14 @@ public:
     GatewayLock& operator=(GatewayLock&& other) noexcept;
 
     bool holds() const { return !lock_file_.empty(); }
+    // 锁内的实例 fencing 代号(未持锁为空;= 持有者 boot_id)。
+    const std::string& owner_epoch() const { return owner_epoch_; }
     void Release();
 
 private:
     std::filesystem::path lock_file_;  // 空 = 未持锁
+    std::FILE* file_ = nullptr;        // create-new 的原始句柄(占位即持有)
+    std::string owner_epoch_;
 };
 
 // ---------------------------------------------------------------------------

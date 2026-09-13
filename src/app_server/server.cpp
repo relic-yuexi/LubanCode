@@ -1151,7 +1151,18 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
         out_error_code = input_receipt.error_code.empty() ? "input_rejected" : input_receipt.error_code;
         return nlohmann::json();
     }
-    auto queued_input = record->session_service->PopPendingInput();
+    // 派发面(V0 受理底线):dispatched 事实落稳才算取出;落不稳即停泵
+    // 报错——写盘失败不得当作消费成功,也不得带空输入空跑一轮。
+    const auto pop = record->session_service->PopPendingInput();
+    if (pop.status == runtime::SessionService::PendingPop::Status::WriteFailed) {
+        record->turn_running.store(false);
+        out_error_code = "operation.append_failed";
+        return nlohmann::json();
+    }
+    std::optional<lubancode::runtime::SessionService::QueuedInput> queued_input;
+    if (pop.status == runtime::SessionService::PendingPop::Status::Ok) {
+        queued_input = std::move(pop.input);
+    }
 
     // P9(显示系统剥离单):统一发号换 runtime::ProcessIdAuthority——
     // id_authority.hpp 定过的规矩:只此一家,不许各处再造第二套。

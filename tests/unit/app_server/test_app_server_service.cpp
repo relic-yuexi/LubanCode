@@ -166,11 +166,16 @@ TEST_CASE("turn/start 经服务接纳:operations 先账,协议回包一字不动
     const auto session_dir = FindSessionDir(sessions_dir + "/workspaces");
     REQUIRE(session_dir.has_value());
     const auto lines = ReadJsonl(*session_dir / "operations.jsonl");
-    REQUIRE(lines.size() == 1);
+    // V0 受理底线:一接纳一派发各落一行(accepted 先账后回执,dispatched
+    // 先账后出队)。
+    REQUIRE(lines.size() == 2);
     CHECK(lines[0].value("kind", std::string()) == "operation.accepted");
     CHECK(lines[0].value("clientOperationId", std::string()).empty());
     CHECK(lines[0].value("operationId", std::string()) == "op-1");
+    CHECK(lines[0].value("inputRef", std::string()) == "operations-inputs/op-1.json");
     CHECK(lines[0].contains("payloadHash"));
+    CHECK(lines[1].value("kind", std::string()) == "operation.dispatched");
+    CHECK(lines[1].value("operationId", std::string()) == "op-1");
 
     // 第二回合照走(每轮一接纳一消费,队列不积):协议回包形状照旧,
     // 台账记到 op-2。
@@ -180,8 +185,10 @@ TEST_CASE("turn/start 经服务接纳:operations 先账,协议回包一字不动
     REQUIRE(error_code.empty());
     CHECK(second["status"] == "success");
     const auto after_two = ReadJsonl(*session_dir / "operations.jsonl");
-    REQUIRE(after_two.size() == 2);
-    CHECK(after_two[1].value("operationId", std::string()) == "op-2");
+    REQUIRE(after_two.size() == 4);
+    CHECK(after_two[2].value("operationId", std::string()) == "op-2");
+    CHECK(after_two[3].value("kind", std::string()) == "operation.dispatched");
+    CHECK(after_two[3].value("operationId", std::string()) == "op-2");
 
     (void)server.HandleThreadStop(thread_id, error_code);
 }
