@@ -245,6 +245,18 @@ B1 首次预览接线补充：工具真实返回、执行终态落稳后，先�
 - **Gateway 常驻域**(常驻总装 V0,合同与 fixture 已验、**生产装配归 V1**;与 tool.job 族同规矩,schemaVersion 纯追加):`gateway.work.bound` 必带 `workId`/`sourceKind`/`sourceId`/`ownerEpoch`(均非空 string;workId/sourceId 全局带域,不收 `op-1` 这类会话局部号跨场判重)、`attempt`(从 1 起,重派计数)、信封 turnId(预留 turn 身份——派发次序里绑定先于 V3 开轮事实提交,恢复器扫 V3 流凭 workId 反查原轮,不再派新轮);可选 `inputRef`(合法引用格式;接纳前正文在 durable input artifact,进 V3 后对照)。`reply.selection.committed` 必带 `selectionId`/`deliveryTarget`/`formatVersion`(均非空 string;原件先落稳、选择事实后提交,resume 后 selectionId 不变——不重新散列投递身份,resume 一次不多送一次)、`ordinal`(从 1 起,同轮多段回复的次序)、`sourceMessageRef`(合法引用,选定的来源 message;不得拿"最后一条 assistant"猜答复)、`artifactRef`(六键,最终正文原件,含 sha256)、信封 turnId;可选 `completedEventRef`(指向 turn 终态事件——选择事实引用对应 V3 终态)。工作认领(`claim(ownerEpoch)`)本身落 Work 领域账,不进 V3;执行/投递状态由领域账与读取投影表达,unknown/needs_review 不硬塞信封 status。
 - **todo/goal/loop/fork/btw**(§4.55-4.58,后续棒次):独立存档;fork/btw 引入 `targetContext` 作用域,字段留挂点。
 
+### 四.1 异步工具 P1 定案补遗(纯追加;实现于 `src/tools/tool_job_coordinator.*`)
+
+P0 记账留下五处"拟议待 P1 确认",定案如下。schema 载荷合同零改动(P0 已按此钉型),本节只冻结语义:
+
+1. **ownerEpoch 租约细节**:代号格式 `epoch-<n>`,每 jobId 独立、从 1 起单调递增,由单写者(持账的 ToolJobCoordinator)发号。账上体现=每枚 `tool.job.dispatched` 的 `payload.ownerEpoch`,同 jobId 第 N 枚 dispatched 即第 N 代租约;恢复接管=再落一枚 dispatched(epoch 递增),不另设租约文件、无过期时间(租约有效期=该 job 执行投影未收终态期间)。完成信封必带 ownerEpoch:单写者只收与当前租约一致的信封;不一致(旧 worker 迟到/双重恢复)拒收——不落终态、不落观测,协调器计数暴露(`stale_envelopes_rejected`)。终态已落后的第二枚信封同样拒收(单 §6"合法终态只接纳一次";计数 `duplicate_terminal_envelopes_rejected`)。
+2. **executionPolicy 字段集**(七键冻结,枚举定案;类型 P0 已钉):`allow_background`(bool,缺省 false);`side_effect_class` ∈ `read_only`(缺省)|`local_write`|`git`|`external`|`irreversible`——read_only 可并发(仍受全局/Session/工具三档上限管),其余档默认串行:resource_keys 逐键互斥,未声明 resource_keys 按 `tool:<logical_name>` 单键串行;`resource_keys`(string[],同键同时至多一个在跑);`retry_policy` ∈ `none`(缺省)|`auto`——P1 协调器只执行 none,auto 落档案不自动重试(同 action 新 attempt 的重试执行归后续批次);`deadline_ms`(缺省 0=无限期)——到点先请求取消(自动 `tool.job.cancel_requested`,reason=`deadline_exceeded`)+置取消旗,不直接判失败,副作用可能仍在跑(单 §6);`resume_policy` ∈ `hold`(缺省)|`requeue_when_registered`——两档对 dispatched/running 无终态一律转 unknown 不盲跑,requeue_when_registered 只额外声明"registered 未派发可重新入队"(P1 协调器默认行为,字段是留档声明);`max_output_bytes`(缺省 1 MiB)——结果原文捕获配额,超限截断,persisted 描述 `capture_complete=false`/`capture_reason=quota`,预览仍按 32 KiB 合同(§4.18)。
+3. **inline 不注册 job 的口径**:inline 模式不落任何 `tool.job.*` 事件——执行/终态/结果/配对全走既有 `tool.execution.*`/`tool.result.*`+tool 消息路径(inline 主路现状),协议配对由 tool 消息配齐(读取侧 `ProjectProtocolObligations` 已按"无注册即 inline"投影)。协调器不把 inline 调度进 job 队列、不造影子 job;job 注册与否即模式分界,inline 的等待/并发由 inline 执行策略管。
+4. **observed 不要求 attempt**:定案为永不强制。观测者是"宿主对 job 的观测"(job_get/job_wait 巡检、恢复巡检、单写者收到完成信封后的终态落账),不绑定某次工具执行尝试;attempt 可带(观测伴随真实调用尝试时),缺省不带。信封合法性只看 jobId/observedStatus/resultRef 成对。
+5. **deliveryId 跨 requestId 重试的条目粒度**:deliveryId 是 resultVersion+目标分支+用途的稳定去重键,跨重试不变;账面条目粒度=(deliveryId,targetRequestId)——每次发送尝试一条 `tool.delivery.prepared`,重试开新 requestId 另立条目(`FoldDeliveries` 已按此折叠,`ValidateAsyncToolSequence` 拒同对二次 prepared)。消费方按 deliveryId 聚合:任一条目 acknowledged 即已送达;全部条目未决=进行中;有 uncertain 且无 acknowledged=uncertain。
+
+P1 宿主侧四接口落地口径(单 §8):start/get/wait/cancel 是宿主侧任务服务(ToolJobCoordinator),不是模型工具——模型可见性归后续批次,不改工具清单。四接口都过授权闸门(jobId 不是访问凭证,工具名与入参走原工具权限/作用域/Hook 的 gate 回调,缺省 fail-closed;派发出队时再复查一次,不因入队时获准就永久放行)。jobId 格式 `job-<六位号>`(账内单调,恢复续号)。start 接单回 `{jobId,status:"queued|awaiting_approval"}`,注册落稳前不派发;get 终态带 resultRef(指向 `tool.result.persisted` 事件)与 ≤32 KiB 有界预览,不自动重跑;wait 有界等待,超时回 pending+状态快照游标,不宣告任务失败;cancel 回取消请求状态(`cancel_requested`|`already_terminal`),不保证已终止。执行前(出队派发时)查授权与取消状态;完成信封由 worker 投递、单写者校验 ownerEpoch 后追加,worker 不直接写 history(单 §5)。
+
 
 ## 五、usage 唯一 owner 表(§4.12 定案)
 

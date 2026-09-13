@@ -469,6 +469,9 @@ add_library(lubancode_engine STATIC
   src/tools/subagent_scheduler.cpp
   # 递归派工单 P0-3:会话级派工协调器(台账/治理/线程表/closing 唯一 owner)。
   src/tools/agent_task_coordinator.cpp
+  # 异步工具单 P1:持久 job 宿主侧服务(队列/租约/单写者完成信封/
+  # start-get-wait-cancel 四接口/权鉴/资源锁/配额/取消/账态注入恢复)。
+  src/tools/tool_job_coordinator.cpp
   src/tools/subagent_isolation.cpp
   src/tools/agent_message_tool.cpp
   # 监督器单 P1-0:agent_watch 模型工具(lineage 鉴权、有界快照与 cv 长等)。
