@@ -54,7 +54,7 @@ private:
     std::uint32_t AssignSeq(const C2cSendRequest& request);
 
     Options options_;
-    std::mutex mutex_;                          // seq 记账串行
+    mutable std::mutex mutex_;                  // seq 记账串行(观测口 const 可锁)
     std::map<std::string, std::uint32_t> next_seq_by_msg_id_;
     std::map<std::string, std::uint32_t> frozen_seq_by_delivery_;
     std::size_t frozen_done_ = 0;  // 已终结 delivery 的清理计数(防 map 无界涨)
