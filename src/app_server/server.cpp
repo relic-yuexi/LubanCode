@@ -165,12 +165,19 @@ private:
     }
 
     // 与 SessionService::OperationsFile 同手法:惰性开账、PowerLoss 档、
-    // broken 后恒 false(写盘失败停止受理,不回成功语义)。
+    // broken 后恒 false(写盘失败停止受理,不回成功语义)。差别一处:
+    // 台账在 workspace 目录(不在场目录),本 workspace 首场受理时目录
+    // 还没立——开账前先把父目录建出来(建不动则 Open 自然失败,broken
+    // 照置位,不吞错)。
     bool Append(const nlohmann::json& line) {
         if (broken_) {
             return false;
         }
         if (!writer_.has_value()) {
+            std::error_code ec;
+            if (!path_.parent_path().empty()) {
+                std::filesystem::create_directories(path_.parent_path(), ec);
+            }
             auto opened =
                 trajectory::JournalWriter::Open(path_, trajectory::JournalWriter::OpenMode::Append);
             if (!opened.has_value()) {
