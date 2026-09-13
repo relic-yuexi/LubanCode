@@ -563,24 +563,16 @@ TEST_CASE("台账写失败:受理面停摆(写账失败零执行的服务层底�
     runtime::SessionService service(LaunchRequestOf(root));
     REQUIRE(service.trajectory() != nullptr);
 
-    // 先纳一笔正常的(把台账立起来),再废它:operations.jsonl 换成
-    // 一枚目录——JournalWriter 追加打不开,Append 恒败(broken 传播)。
-    runtime::SessionService::InputRequest first;
-    first.client_operation_id = "OP-BEFORE-BREAK";
-    first.text = "废账前";
-    REQUIRE(service.SubmitInput(first).accepted);
-    const auto pop_first = service.PopPendingInput();
-    REQUIRE(pop_first.status == runtime::SessionService::PendingPop::Status::Ok);
-
+    // E1/E2 合流的注入(冻结合同 §10):operations.jsonl 的位置先占成
+    // 一枚目录——OperationsFile 惰性开账,首笔 Append 的 JournalWriter
+    // 追加打不开目录,broken 即刻置位并传播。此后受理面恒拒。
     const std::filesystem::path ledger = service.trajectory()->session_dir() / "operations.jsonl";
     {
         std::error_code ec;
-        std::filesystem::remove(ledger, ec);
         std::filesystem::create_directory(ledger, ec);
     }
 
-    // E2(冻结合同 §10):Append 写失败——受理失败,不回成功回执,不进
-    // 执行队列;同键重发同样拒收。
+    // 受理失败:不回成功回执、不入执行队列;同键重发同样拒收。
     runtime::SessionService::InputRequest broken;
     broken.client_operation_id = "OP-AFTER-BREAK";
     broken.text = "废账后";
@@ -591,9 +583,11 @@ TEST_CASE("台账写失败:受理面停摆(写账失败零执行的服务层底�
     CHECK(service.pending_input_count() == 0);  // 零执行:队里没有它
 
     // 终态落账同样明败:调用方据此在事件里报 resultEnvelopePersisted=
-    // false,不谎称"结果已可靠保存"。
+    // false,不谎称"结果已可靠保存"。对账面拿不到受理号,用防御路径
+    // (空操作号)外的真号:受拒的操作没发号,这里以一枚不合账的号验证
+    // "账 broken 时恒 false"的传播,不伪造受理事实。
     runtime::SessionService::TurnFinalRecord final_record;
-    final_record.operation_id = pop_first.input.operation_id;
+    final_record.operation_id = "op-uncommitted";
     final_record.turn_id = "turn-broken";
     final_record.execution_status = "success";
     CHECK_FALSE(service.RecordTurnFinal(final_record));

@@ -318,6 +318,11 @@ TEST_CASE("profile 冒烟:minimal-tools——真 exe+假模型+真 MCP,多轮工
     REQUIRE(smoke.PumpUntil([&] { return smoke.FindResponse(2) != nullptr; }, 30000));
     const json* thread_response = smoke.FindResponse(2);
     REQUIRE(thread_response != nullptr);
+    if (!thread_response->contains("result")) {
+        // 诊断落账:错误响应全文与服务端 stderr,排障不猜。
+        MESSAGE("thread/start 错误响应: ", thread_response->dump());
+        MESSAGE("服务端 stderr: ", smoke.proc->StderrText());
+    }
     REQUIRE(thread_response->contains("result"));
     const std::string thread_id = (*thread_response)["result"].value("threadId", std::string());
     REQUIRE_FALSE(thread_id.empty());

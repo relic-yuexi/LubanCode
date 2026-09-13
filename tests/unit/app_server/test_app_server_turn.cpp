@@ -476,13 +476,15 @@ TEST_CASE("同一 thread 同拍两轮:协议明拒 kErrTurnAlreadyRunning 的口
     // 同上:账恒开,临时根起场(空串会折成 "/workspaces",POSIX CI 建不起)。
     const std::string sessions_dir = MakeTempDir("lubancode_test_app_server_turn_twice");
     TestHarness harness(sessions_dir);
-    harness.backend->scripts = {TextOnlyScript("第一轮")};
 
     std::string error_code;
     const nlohmann::json start_result = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
     const std::string thread_id = start_result["threadId"];
 
-    // 第一轮同步跑完:turn_running 已复位,第二轮合法。
+    // 第一轮同步跑完:turn_running 已复位,第二轮合法。P1(G02)起
+    // backend 会话级复用(同场不再每轮现建),脚本后端按请求顺序消耗
+    // ——两轮得排两份脚本。
+    harness.backend->scripts = {TextOnlyScript("第一轮"), TextOnlyScript("第二轮")};
     const nlohmann::json first = harness.server->HandleTurnStart(thread_id, "一", {}, error_code);
     CHECK(error_code.empty());
     CHECK(first["status"] == "success");
