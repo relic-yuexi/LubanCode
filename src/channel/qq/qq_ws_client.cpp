@@ -300,11 +300,11 @@ std::expected<std::string, WsError> WsClient::ReadMessage(int timeout_ms) {
         if (!got.has_value()) {
             return std::unexpected(ToWsError(got.error()));
         }
-        decoder_.Feed(chunk, *got);
+        decoder_.Feed(std::string_view(chunk, *got));
     }
 }
 
-std::expected<std::string, WsError> WsClient::Close(std::uint16_t code, std::string_view reason) {
+std::expected<void, WsError> WsClient::Close(std::uint16_t code, std::string_view reason) {
     // close 载荷 = 2 字节码 + reason(RFC 6455 §5.5.1)。
     std::string payload;
     payload.push_back(static_cast<char>((code >> 8) & 0xFF));

@@ -6,6 +6,7 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>  // MBEDTLS_ERR_NET_* 错误码
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 
