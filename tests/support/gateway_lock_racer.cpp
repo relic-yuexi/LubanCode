@@ -78,6 +78,8 @@ int main(int argc, char** argv) {
     int refused = 0;
     int errors = 0;
     for (int round = 0; round < rounds; ++round) {
+        bool got_lock = false;
+        bool backoff = false;
         if (mode == "account") {
             lubancode::channel::AccountLock lock;
             const auto result = lubancode::channel::AccountLock::TryAcquire(
@@ -85,36 +87,52 @@ int main(int argc, char** argv) {
                 &lock);
             using Status = lubancode::channel::AccountLock::AcquireResult::Status;
             if (result.status == Status::Acquired) {
+                got_lock = true;
                 ++acquired;
                 emit("acquire", NowMs());
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms > 0 ? hold_ms : 1));
                 emit("release", NowMs());
                 lock.Release();
-            } else if (result.status == Status::RefusedAliveHolder) {
+            } else if (result.status == Status::RefusedAliveHolder ||
+                       result.status == Status::RefusedBrokenLock) {
+                // BrokenLock 是对手 create-new 与写账之间的毫秒窗口
+                //(锁的既有取舍),与活持有者拒绝同路:退避重试,不算错。
                 ++refused;
                 emit("refused", NowMs());
+                backoff = true;
             } else {
                 ++errors;
                 emit("error", NowMs());
+                backoff = true;
             }
-            continue;
-        }
-        lubancode::gateway::GatewayLock lock;
-        const auto result =
-            lubancode::gateway::GatewayLock::TryAcquire(lock_file, gateway_self, &lock);
-        using Status = lubancode::gateway::GatewayLock::AcquireResult::Status;
-        if (result.status == Status::Acquired) {
-            ++acquired;
-            emit("acquire", NowMs());  // 记录时刻 >= 实际取到锁
-            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms > 0 ? hold_ms : 1));
-            emit("release", NowMs());  // 记录时刻 <= 实际放掉锁
-            lock.Release();
-        } else if (result.status == Status::RefusedAliveHolder) {
-            ++refused;  // 竞争本身的证据,不是错
-            emit("refused", NowMs());
         } else {
-            ++errors;
-            emit("error", NowMs());
+            lubancode::gateway::GatewayLock lock;
+            const auto result =
+                lubancode::gateway::GatewayLock::TryAcquire(lock_file, gateway_self, &lock);
+            using Status = lubancode::gateway::GatewayLock::AcquireResult::Status;
+            if (result.status == Status::Acquired) {
+                got_lock = true;
+                ++acquired;
+                emit("acquire", NowMs());  // 记录时刻 >= 实际取到锁
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms > 0 ? hold_ms : 1));
+                emit("release", NowMs());  // 记录时刻 <= 实际放掉锁
+                lock.Release();
+            } else if (result.status == Status::RefusedAliveHolder ||
+                       result.status == Status::RefusedBrokenLock) {
+                ++refused;  // 竞争本身的证据,不是错
+                emit("refused", NowMs());
+                backoff = true;
+            } else {
+                ++errors;
+                emit("error", NowMs());
+                backoff = true;
+            }
+        }
+        // 失败退避:不睡的裸重试会在对手一个持锁期里烧完全部轮数,
+        // 两只永远错不开——退避让轮数铺满多个持锁周期,另一只才有
+        // 空位可占(真竞争)。
+        if (!got_lock && backoff) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
     events << "{\"summary\":true,\"acquired\":" << acquired << ",\"refused\":" << refused

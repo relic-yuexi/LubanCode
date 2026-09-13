@@ -133,7 +133,7 @@ Gateway 进程退出码（G1 实现裁决，冻结）：
   subagents/...
 ```
 
-会话位置一律走 workspace identity/index/resolver 解析实际目录，不按显示名手拼（见 §8-V0）。`~/.lubancode/trajectories/workspaces/...` 是旧口径，已废除。
+会话位置一律走 workspace identity/index/resolver 解析实际目录，不按显示名手拼（见 §8-V0）。workspace-storage-v2 迁移前的旧 trajectories 平铺根口径废除。
 
 首版存储裁决不变：append-only event + 原子 snapshot/manifest，不先引 SQLite。spec 可原子换代；事实事件只追加，不可把 JSON 文件当共享可变 map 反复整份覆盖。关键受理、认领、执行授权、回复选择与发送回执要求 PowerLoss 级提交（§10-V0）。
 

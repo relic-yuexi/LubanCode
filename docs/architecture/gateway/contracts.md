@@ -269,7 +269,7 @@ replySelectionId + target + ordinal  -> deliveryId
 
 ### 11.4 resolver 规则
 
-会话目录一律走 workspace identity/index/resolver（`ResolveDirByWorkspaceKey`）解析实际目录；显示 slug、workspaceKey、实际目录分别处理，不拼目录名、不把显示名当身份。旧 `~/.lubancode/trajectories/workspaces/...` 口径废除。
+会话目录一律走 workspace identity/index/resolver（`ResolveDirByWorkspaceKey`）解析实际目录；显示 slug、workspaceKey、实际目录分别处理，不拼目录名、不把显示名当身份。workspace-storage-v2 迁移前的旧 trajectories 平铺根口径废除。
 
 ### 11.5 PowerLoss 提交原语与原件保留（新版 §5.3）
 

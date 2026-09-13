@@ -2809,7 +2809,11 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     // 照旧失败退出,不回退旧写口。
     if (options.resume_at_launch) {
         const std::string latest = impl.manager->LatestResumableSessionId();
-        if (!latest.empty()) {
+        // 显式指名的源不受 LatestResumable 的"running 不碰"连坐——那是
+        // 自动挑最近场的筛子;接管硬杀场(running、无活锁)是常驻恢复的
+        // 正路(V0 受理底线),可恢复性(活锁/one_shot/验卷)由 ResumeAsNew
+        // 的七步裁定,失败仍回落普通开张。
+        if (!latest.empty() || !options.resume_source_session_id.empty()) {
             // Soul 会话冻结单 P0(§5.3):源场 soul 快照在 ResumeAsNew 之前
             // 先读——材料坏就整个回落普通开张(与"源场验不过回落"同一
             // 拍,--continue 没指名要哪场,不带着坏材料硬恢复),错误记
