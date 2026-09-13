@@ -1,0 +1,378 @@
+# 持久 Agent：Gateway 接入 Session V3，常驻助理与可靠自动任务总装计划
+
+- 日期：2026-09-13。
+- 状态：新版设计，待实施、待验收。现状按 HEAD `c6b755e4` 及本次工作树静态核查；未重跑构建、测试、真实模型、渠道或系统服务。
+- 替代：[旧总装计划](持久Agent_Gateway自动任务与可靠恢复总装计划.todo)。旧 G0/G1 留作历史证据，不将旧勾选搬成新版验收结果。
+- 主合同：[Session V3](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)、[V3 schema](../docs/architecture/trajectory-v3-schema.md)。本文新增接口、字段、状态均为提案，未注册前不能写入现行 V3 envelope。
+- 实施范围：`src/gateway`、`src/channel`、`src/runtime`、`src/trajectory/v3`、`src/workspace`、`src/platform`、`src/cli` 及对应测试；自动任务领域目录按本单新增。
+- 首版：单机、单用户、显式启动，先本地定时任务，再接一只真渠道。多租户、集群、跨机迁移另立验收。
+
+## 一、这份计划到底要做什么
+
+是为了支撑 OpenClaw、Hermes 那类常驻助理：从聊天入口接事，按时间或事件办事，用户关掉终端也能跑，办完把结果送回去。底座还可供仓库巡检、资料监测、日报、运维助手复用。
+
+Gateway 管常驻、受理、排队、接管和投递。LubanCode 原有 Agent、工具、Session V3 负责执行与记账。具体业务、技能包、人格、知识源和产品页面放上层；本单不包办两家产品所有功能，也不以“能接 IM”冒充完整助理。
+
+首版交付两条用户水路：
+
+1. 建一项“每天九点检查指定仓库”任务，关终端；系统拉起 Gateway，到点执行，结果落本地，稍后可查。
+2. 从已授权聊天会话交办任务；先拿受理回执，再收执行结果。网络断了重送回复，进程崩了先查账，不盲目重做工具。
+
+外部参照已于本日查阅官方资料，只取产品形态：
+
+- [OpenClaw Gateway](https://docs.openclaw.ai/gateway)：常驻进程管理路由、控制面与渠道连接。
+- [OpenClaw Automations](https://docs.openclaw.ai/automation/cron-jobs)：自动任务产品入口，具体调度语义不照抄旧版本描述。
+- [Hermes Messaging Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/)：聊天入口、后台会话、结果回送及服务管理。
+- [Hermes Cron Internals](https://hermes-agent.nousresearch.com/docs/developer-guide/cron-internals)：调度与执行分工；cron 每次开 fresh session，持久记忆可载入，前次临时对话不混进来。
+
+这些资料不证明 LubanCode 已有同等能力，也不替任何平台承诺 exactly-once。
+
+## 二、旧单哪些过时，哪些保留
+
+| 旧说法或安排 | 当前判断 | 新版处理 |
+| --- | --- | --- |
+| 新 Trajectory 默认关闭 | 已过时；V3 新场默认开启，只有环境变量恰为 `0` 才回 v2 | Gateway 新执行固定要求 V3；遇 v2 新写配置明报拒绝，不偷偷双写 |
+| SessionStore、旧 Journal 两套生产账待合并 | 不宜再当新版起点 | Session V3 管执行事实，领域账只存职责内事实及引用 |
+| `~/.lubancode/trajectories/workspaces/...` | 已过时 | 走 workspace identity/index/resolver，解析当前 workspaces 下会话目录 |
+| Channel 缺 Manager、IngressStore、SessionHost | 已有组件，旧文前后也有冲突 | 复用并补耐久与生产装配，不重新造同名组件 |
+| Gateway 尚不存在 | G1 骨架存在 | 保留 run/status/stop、profile、boot history、SafeMode；补真正工作泵 |
+| Loop 可从旧存档恢复 | 当前不能沿用此承诺 | 明列事件落盘断口；服务级 Automation 不依赖旧 `/loop` 恢复 |
+| Goal 只是旧 goal 事件账 | V3 已有服务、投影接管及迭代收口代码 | 复用领域服务；Gateway 不另造目标调度器 |
+| HeadlessSessionHost 从零建 | 已有 ChannelSessionHost/AgentChannelEngine，另有 SessionService | 提炼共同装配，补持久受理、完整工具账与恢复入口 |
+| 有模型输出即可投递 | 对 V3 太宽 | 必须显式选定可外送回复，固定原始来源与正文版本后入 outbox |
+| 子代理持久化紧跟调度做全套 | 首版范围过大，又与异步工具单重叠 | 先完成普通 turn 闭环，再共用任务执行底座 |
+
+保留旧单六条底线：显式启动；单机先行；同场单飞；未知副作用停住；发送失败只重送；真机证据与假件证据分开。
+
+## 三、源码核查：已有件与真断口
+
+以下行号只定位本次快照，实施时按符号复查。
+
+| 来源锚点 | 核查结果 | 对新版意味着什么 |
+| --- | --- | --- |
+| `src/trajectory/v3/session_switch.cpp:13`，`NewSessionV3WriteEnabled` | 新场默认 V3 | 不能再用旧 feature-off 分阶段 |
+| `src/trajectory/v3/writer.hpp:169`，`V3Writer::Start/Continue` | writer 有创建、续写、提交回执 | 底层 Continue 存在，不等于恢复业务应就地续源账 |
+| `src/trajectory/session_manager.cpp:2434`，`ResumeAsNewV3Locked` | 来源账验证后另开新 session 接续 | Gateway 接管也遵循 resume-as-new，保留原 work 身份 |
+| `src/trajectory/v3/reader.hpp`，读取侧合同 | 历史、模型上下文、单次请求是不同投影 | 禁止把整段历史回填成模型输入 |
+| `src/trajectory/directory.cpp:249`，`ResolveDirByWorkspaceKey` | workspace_key 通过索引找实际目录 | 不拼目录名，不把显示名当身份 |
+| `src/gateway/process.cpp:469`，`GatewayProcess::Run` | 主循环只查停止信号/文件命令并等待 | 进程能活，不代表会跑任务或接渠道 |
+| `src/cli/gateway_command.cpp`，`RunGatewayCommand` | 仅分发 run/status/stop | install/start/restart/doctor/logs 都须另验，不按旧命令表宣称支持 |
+| `src/channel/manager.hpp:1`、`src/channel/ingress_store.cpp:322` | 已有账号生命周期、注入 Transport、入站事件与去重；写盘使用 stream.flush | 仍须接真实进程 transport，并核实 ACK 所需耐久档位 |
+| `src/runtime/channel_session_host.cpp:40`，`Submit/PumpOne` | 队列、engine、busy 状态留在进程内 | 增加持久 work 到 session/turn 对照；内存队列只作投影 |
+| `src/runtime/agent_channel_engine.cpp:41`、`:127`、`:189` | 直接构造 SessionRuntime；工具栅栏接线有遗留；回复从新增 assistant 文本拼接 | 接共同执行装配，逐项核查工具录账；停止以拼接文本作为可靠最终回复来源 |
+| `src/runtime/session_service.cpp:188`、`:236` | 受理账只存键、ID、hash；正文在 pending_inputs_；Append 失败被忽略；来源去重只种直接上一场 | 不能把现有 SubmitInput 当 durable inbox，首批补齐 |
+| `src/app/commands/loop_commands.cpp:429`、`:464` | 旧恢复路已删，FlushLoopEvents 只送内存/前端投影 | 当前 `/loop` 不是耐久 AutomationStore |
+| `src/app/wirings/loop_session_wiring.cpp:53` | 会话 Ensure 中 StartTimer | Gateway 未启动时禁止的是服务调度器，不能误禁用户显式使用会话 `/loop` |
+| `src/app/wirings/goal_session_wiring.cpp:195`，`RestoreFromArchive`；`src/runtime/goal_service.cpp` | 已有 V3 goal 投影接管、状态提交等实现 | 按现有规则恢复，持久托管授权另行校验，不笼统写“Goal 尚未接 V3” |
+| `src/tools/task_ledger.hpp:782`、`src/tools/agent_task_coordinator.hpp:183` | 任务对象、线程由进程持有 | 任务快照/子账可查，不等于工作线程可跨进程复活 |
+| `src/app_server/outbox.hpp`、`src/hooks/outbox.hpp` | 一个是前端有界事件队列，一个是 hook pending/ack 账 | 都不是本文渠道 DurableReplyOutbox，名字相似也不能直接顶替 |
+| `src/trajectory/journal.cpp:26` | PowerLoss 走 FlushFileBuffers/fsync；与 ProcessCrash 分档 | 关键领域提交明确要求耐久档位，不能只看 flush 字样 |
+
+另有首批必须复核之处：`GatewayLock::TryAcquire` 在 `src/gateway/process.cpp:131` 附近先读文件，再写文件，不能仅凭顺序单测断言并发启动互斥。业务认领前须补 OS 排他锁或原子创建合同、实例 fencing 与双进程竞争测试。
+
+已有 `tests/unit/gateway/test_gateway_process.cpp`、`tests/unit/runtime/test_channel_session_host.cpp`、`tests/integration/channel/test_channel_phase3_e2e.cpp`、`tests/unit/trajectory_v3/`。这里只确认测试源码存在；旧报告“16 例全绿”不是本次运行结果。
+
+## 四、新版总水路与分层
+
+```text
+OS supervisor
+  -> GatewayProcess（显式启动、profile 锁、健康、停止）
+       -> AutomationScheduler -> occurrence
+       -> ChannelManager      -> ingress
+       -> 本地受理入口          -> operation
+                    |
+                    v
+          DurableWorkCoordinator（引用来源，不另抄输入正文）
+                    |
+          SessionWorkScheduler（内存就绪/公平/单飞）
+                    |
+          共用 Headless 装配 -> SessionService / SessionRuntime
+                    |
+          Agent / tools / hooks -> Session V3
+                    |
+          committed reply selection + artifact
+                    |
+          DurableReplyOutbox -> local / channel adapter
+
+重启：先拿所有权 -> 验领域账和 V3 来源链 -> 对账裁决
+      -> 补待派发/待投递投影 -> 按托管授权恢复执行
+```
+
+图中 DurableWorkCoordinator、DurableReplyOutbox、回复选择记录是拟新增职责。实现可收进现有类，不以多建一层为目标。AgentLoop 不复制；平台 SDK 不进入 agent/runtime；OS supervisor 只拉起进程。
+
+AppServer 提供控制入口与观察视图，Gateway 提供常驻生命周期。未来可共宿主，也可用控制连接；首版无需为了跑 cron 再暴露公网 WebSocket。断开 UI、打开历史、订阅事件都不能触发执行。
+
+普通 CLI 不因 enabled job/channel 偷启 Gateway。用户手动开的 `/loop`、普通工具后台命令仍按各自合同运行，别把“Gateway 默认关闭”扩大成禁止现有会话功能。
+
+## 五、领域账、身份与目录
+
+### 5.1 各账只管本职
+
+| 账 | 写者 | 内容 |
+| --- | --- | --- |
+| Gateway profile/boot | GatewayProcess | 实例身份、配置版本、启动/停止、健康 |
+| Automation | AutomationStore | spec revision、时间计划、每次 occurrence、暂停/取消、触发结算 |
+| Channel ingress | ChannelIngressStore | 原始来信/附件引用、平台去重键、准入与路由裁决 |
+| Work/受理 | 共用持久受理服务 | workId、sourceRef、inputRef、状态、ownerEpoch、session/turn 引用；不抄会话 history |
+| Execution | V3 单写者 | 四角色消息、请求、Action、结果、上下文链、终态 |
+| Task execution（后批） | 与异步工具单共用服务 | 跨 turn 作业、接管、结果引用、取消；不另建 Gateway 专用 task 真值 |
+| Reply delivery | DurableReplyOutbox | 固定正文 artifact、来源引用、目标、发送尝试、回执、未知态 |
+
+Work 是统一执行意图，occurrence/ingress 是触发来源。两者通过 sourceRef 关联，不能各自都拥有一套“是否已经执行”的独立判据。Work 的运行投影最终须核对 V3 开轮/终态；UI 快照随时可重建。
+
+接纳前正文可以保存在 durable input artifact；进入 V3 后用 inputRef/messageRef 对照。这是输入原件与执行事实，不是第二份可改写 history。不得只存 payloadHash 而不留可恢复正文。
+
+### 5.2 身份不能随恢复洗掉
+
+拟定领域身份：
+
+```text
+jobId + specRevision + scheduledSlot -> occurrenceId
+accountId + providerEventId          -> ingressId（按平台规则补 conversation/thread）
+sourceKind + sourceId                -> workId
+workId                              -> session lineage + current ownerEpoch
+logicalConversationId               -> current sessionRef（恢复后原子换代）
+replySelectionId + target + ordinal  -> deliveryId
+```
+
+- V3 跨场事实引用沿现有五键 `sessionId/runId/seq/id/hash`；外层再带 workspaceKey，不能只留 event hash 或相对路径。
+- sourceId/workId 全局带域，不拿 `op-1` 这种会话局部号跨场判重。
+- occurrence 的 slot 用计划内时间，不用实际启动时间；时钟倒拨不能再造同一拍。
+- 回复恢复后仍指原已提交选择；不能用新 sessionId 重新散列 deliveryId，否则 resume 一次便多送一次。
+- 多次 resume 沿完整来源链查去重和已完成工作；不是只读上一场 operations.jsonl。
+- ownerEpoch 拦旧 worker 迟到提交；它不能撤回外部已发生动作，未知副作用仍须外部对账。
+
+### 5.3 目录与持久提交
+
+```text
+<home>/.lubancode/gateway/profiles/<profile>/
+  gateway.json / gateway.lock / control/ / boot-history.jsonl
+  automation/     # spec、occurrence 事实及可重建索引
+  work/           # 受理/派发/接管引用、输入原件
+  channels/       # 账号状态、ingress、adapter 状态引用
+  delivery/       # 回复原件、发送事实、回执、dead letter
+
+<home>/.lubancode/workspaces/<resolved-workspace-dir>/sessions/<sessionId>/
+  <sessionId>.jsonl
+  artifacts/
+  subagents/...
+```
+
+Gateway 子目录布局为提案；会话位置必须调用现有 resolver，不按图手拼。显示 slug、workspaceKey、实际目录分别处理。
+
+首版用追加事件与原子快照，可复用 JournalWriter 耐久原语；领域 schema 独立版本化，不假冒 V3 会话事件。关键受理、认领、执行授权、回复选择与发送回执要求 PowerLoss 级提交；文件创建、替换及父目录同步须逐平台核实。进程硬杀测试不能冒充断电测试。
+
+写盘失败就拒绝受理或停在可诊断状态。索引/快照是派生物，损坏可重建；已提交原件丢失或中段断链则隔离，不能跳过继续执行。只有未提交残尾可按备份、修复意图、修复回执流程处理。
+
+活 work、来源链、未送回复持有 artifact 保留引用。压缩、清理、归档不能删这些依赖；敏感凭据存 SecretRef，日志和死信不泄露票据。
+
+## 六、受理与执行：先补跨账窗口
+
+受理次序：
+
+```text
+验身份/权限/配额/输入 -> input 原件落稳 -> accepted(sourceRef, inputRef, hash) 落稳
+  -> 向调用方或平台确认受理 -> 投内存 wake
+```
+
+若平台必须在短时限 ACK，就把 durable ingress 当受理边界；来不及落稳便返回平台允许的重试/拒绝，不先 ACK 再赌写盘。平台 ACK 行为须由 adapter 明确声明。
+
+派发次序：
+
+```text
+source.accepted -> 幂等建立 work -> claim(ownerEpoch) 落稳
+  -> 绑定预留 session/turn 身份与 workId -> V3 输入/开轮事实提交
+  -> 按统一工具授权执行 -> V3 终态/回复选择提交 -> 结算 work
+```
+
+无跨文件事务时，靠稳定身份、先后栅栏和恢复对账补齐窗口：
+
+- source 已接纳，work 未建：按 sourceId 补同一 work。
+- work 已认领，V3 未开轮：核实没有旧执行，再开轮；不能凭租约过期认定未执行。
+- V3 已开轮，work 还没记 turnRef：从预留身份/注册后的 work 关联事实找到原轮，不能再派一个新轮。
+- V3 已终结，work 未结算：补状态，复用输出，不调用模型。
+- accepted 写稳、队列未入：从账重建；duplicate 回原回执，并保证原 work 仍可观察/推进，不能“去重成功、任务失踪”。
+
+`SessionService` 受理面须统一修补：检查 Append 回值；输入有 durable ref；启动重建 pending；操作计数与作用域不冲突；重复键同载荷返回原操作，异载荷冲突；沿来源链恢复。现有 AppServer/CLI 调用者同步适配，不能只在 Gateway 私下加一个绕行入口。
+
+Headless 装配须与共用执行路核齐：模型路由、工具/Profile、权限确认、ToolTraceHub/Action、结果捕获与选用、Lua hook、预算、取消、V3 close。注册了工具或绑了 boundary_recorder 都不算核齐。
+
+## 七、触发规则：Cron、Heartbeat、Goal、Loop 分清
+
+| 对象 | 负责什么 | 首版安排 |
+| --- | --- | --- |
+| Automation | 持久计划，何时生成工作 | 新增 once/interval/cron，先验 once 和 interval |
+| Heartbeat | 周期检查与变化通知策略 | Automation 的一种用途，不另养 timer；无变化默认安静 |
+| 会话 `/loop` | 当前会话周期触发 | 继续原职责；显式导入才转托管 automation，来源停用或明确允许双跑 |
+| Goal | 目标、预算、迭代、验收与完成状态 | 复用 GoalService；不因 Gateway 重启无限补跑迭代 |
+| Workflow | 图与节点依赖、节点恢复 | 后批调用 WorkflowService 合同，不由 Gateway 重做节点调度 |
+| 异步工具/子代理 | 一次长任务执行、结果与取消 | 与异步工具单共用执行账，不与 cron jobId 混用 |
+
+AutomationSpec 至少固定：owner、workspaceKey、prompt/inputRef、model/tool/profile 版本、schedule/timezone、sessionPolicy、misfirePolicy、overlapPolicy、budget、authorizationRef、deliveryTarget、revision。
+
+首版裁决：
+
+- cron 默认 fresh session；continuation 显式绑定 logicalConversationId，进入同一单飞队列。下一周期属于新 occurrence，崩溃恢复属于原 occurrence，不能混成一次“重试”。
+- prompt 默认固定内容和 hash；若允许每次读文件，spec 明写 live 模式，每个 occurrence 派发前保存所读版本。
+- 时区用 IANA 名称，存 UTC slot；明确 DST 跳过/重复时段规则。测试不得只用 Asia/Shanghai。
+- 错过周期默认合并一拍，记录覆盖范围；once 过期按 deadline 执行或记 missed；paused/disabled 不补跑。
+- 同 job 默认不重叠，最多留一份合并待办；全局/工作区/会话都有并发和队列上限，不无限 catch up。
+- update/pause/cancel 使用 expectedRevision；排队时固定 specRevision；取消先停未来派发，再处理当前 work，不删除历史来假装未发生。
+- 模型失败重试、工具重试、整轮重试、delivery 重试分别计数。重启不刷新预算、deadline、失败次数或原授权。
+- heartbeat 留 observation/resultRef 与上次已通知版本；只在有变化、完成、失败或需用户处理时投递。检查失败不能记成“无变化”。
+- 持久 memory 复用实际可用召回面，明确作用域；不能把旧 run history 当长期记忆，也不将尚未落地新版 Memory 合同写成现有能力。
+
+## 八、V3 恢复裁决
+
+恢复顺序：取 profile/账号/会话所有权，封住旧 epoch；读领域账；验证会话来源链及 artifacts；先补已完成投影，再分类未完工作；最后才开 scheduler 和执行器。
+
+状态读回、执行续跑分别授权。普通 resume/read 仍只读或恢复默认状态；已明确托管且授权仍有效的 work，可由 Gateway 策略续跑。目标暂停、用户取消、权限撤回、deadline 到期都压过自动恢复。
+
+| 最后可信事实 | 恢复动作 |
+| --- | --- |
+| accepted，无 claim | 排同一 work |
+| claim，无开轮事实 | 对账后重派同一 work，另记 attempt |
+| model request 已发送、无完整响应 | 记请求中断/未知成本；按模型重试政策另发 requestId，不称为 provider 断点续传 |
+| assistant 已落但未接纳上下文 | 按 V3 已提交链及请求状态裁决，不因消息存在就自动入链 |
+| Action started，无 terminal | 查进程/外部操作；不能判明便 unknown/needs_review，不默认重跑 shell/MCP/HTTP |
+| 工具已返回，结果捕获/选用提交失败 | 保存现有证据并停住，不能通过重跑工具补一份结果 |
+| 工具结果完整，模型尚未消费 | 按 actionId/resultSelection/message/context 事实补允许的后续步骤，不再执行工具 |
+| compact 候选存在，无 applied | 恢复旧链 |
+| compact.applied 已提交 | 恢复新链；投影失败禁止后续发送，不退回旧内存史凑请求 |
+| reply selection 已提交，无 outbox | 补同一 deliveryId |
+| adapter 已 send，无 receipt | 有幂等键或查询能力则对账；无此能力记 delivery_unknown，不无声重送 |
+| 多段 resume 来源链缺失/坏 hash | 隔离该 work，明报缺失来源；不补造历史 |
+
+unknown/needs_review 是工作或执行投影状态，不直接塞入现有 V3 OpStatus。新增事件先注册 schema、校验前驱、校验引用，再接 writer/reader/测试。
+
+只读或幂等工具也不只凭工具名决定能否重试：记录实际调用参数、资源键、授权、输入版本、外部幂等键是否真的送达。epoch 只能拦旧结果落账；没有外部 fencing 时，不因本地换 owner 就断言旧动作已停止。
+
+处置入口至少支持 inspect、reconcile、cancel、明确授权 retry。处置要带 expectedRevision、原 work/action 引用与理由，留下回执；不能直接改 JSON 状态。
+
+## 九、回复与投递
+
+V3 的“assistant 消息”“当前上下文”“对外最终答复”不能混用。中途说明、工具调用伴随文本、compact 内部问答、子代理摘要、隐藏思考都不得靠一次 history 拼接送出去。
+
+拟新增 reply selection 合同：
+
+1. 按完成策略选择明确的对外正文/附件；默认 turn 成功才选，失败另用明确的失败通知。
+2. 固定来源 message/event 引用、最终正文 artifact/hash、selectionId、ordinal、target 与格式版本。
+3. 原件先落稳，选择事实后提交；选择事实引用对应 V3 终态。不为 Gateway 改成“等 outbox 成功才准 V3 收口”。
+4. Projector 从已提交选择生成唯一 outbox item；扫描游标与投影版本落盘，崩溃可重扫并去重。
+5. sender 只读 outbox。回复格式和内容在 enqueue 后不随最新 prompt、路由或配置改变；重定向是新的有审计操作。
+
+另补“V3 已终结、选择记录尚未提交”这道缝：派发前冻结 reply policy/version；执行收口时须能从已提交事实唯一定位最终正文引用。恢复器据原终态、正文引用和冻结策略生成同一 selectionId，再补 artifact 与选择记录，全程不调模型。若现行终态无法给出足够引用，V0 先补 schema/投影合同，V1 再接执行器；不能退回“取最后一条 assistant”猜答复。原件缺失或选择仍有歧义就转 needs_review，不凭空补内容。
+
+拟定投递状态：pending → sending → delivered；暂时失败到 retry_wait，永久失败到 dead_letter，发送结果不可判到 delivery_unknown。业务执行成功与投递失败分别显示，发送异常不倒改 work 执行终态。
+
+本地投递也要幂等：固定 deliveryId 文件名，原子发布 artifact/receipt，重启核 hash。渠道发送适配器声明 client-id、receipt-query、消息长度、媒体上传与限流能力；附件上传和正文发送分开留回执。
+
+首版不可靠持久化 token delta，不承诺断线重放流式外送；先保最终答复。若以后加进度推送，另定独立投递 ID、通知频率与可丢规则。
+
+## 十、实施批次
+
+新版使用 V0—V6，避免与旧 G0—G8 混号。各批先过放行门，再勾完成。
+
+### V0：合同与持久受理底线
+
+- [ ] 更新 gateway 三篇冻结文档，删去当前权威口径中的旧存储路径、旧 Loop 恢复与组件缺失判断。
+- [ ] 固定 work/occurrence/reply 身份、跨账栅栏、schema 版本和 resolver；现行 V3 不支持的关联事实先补注册。
+- [ ] 修 SessionService 受理失败仍成功、正文丢失、pending 重建、单跳来源去重问题；三端共用。
+- [ ] profile/账号/会话锁做实际双进程竞争测试，补原子互斥与 ownerEpoch。
+- [ ] 定义 PowerLoss 提交原语及原件保留规则；写盘失败停止受理/执行。
+
+放行：在 accepted 前后、claim 前后、开轮前后硬杀，只有同一 work 留存；重启无丢输入、无双派发。磁盘写失败不能收到成功回执。
+
+### V1：最短纵向闭环——一次任务到本地结果
+
+- [ ] GatewayProcess 接有界主泵，复用现有 SessionWorkScheduler；先暂停接活，再摘 wake，再收执行器和 writer。
+- [ ] 新增最小 AutomationStore，先支持 once 和手动 run-now；持久任务创建走本地命令/控制服务，不直接改文件。
+- [ ] 提炼共用 headless 装配，核齐真实工具 Action、结果捕获、hook、预算和取消链。
+- [ ] 建 V3 新会话、执行、提交 reply selection，经本地 DurableReplyOutbox 出结果。
+- [ ] `status` 分别报 process、work、execution、delivery，不能拿“进程 running”冒充任务成功。
+
+放行：假 provider + 受控工具，进程退出重启后能查原任务与原结果；生成结束、入 outbox、发布本地文件三处硬杀，都不多调用模型或工具。
+
+### V2：周期调度与可靠接管
+
+- [ ] 加 interval/cron、时区/DST、misfire、合并、并发与队列上限。
+- [ ] 加 list/read/update/pause/resume/cancel/run-now 领域操作，命令名实施时固定；所有写操作带幂等键和 revision。
+- [ ] 按第八节实现恢复裁决；多次 resume 保持同一 work、预算与投递身份。
+- [ ] 加 heartbeat 观察结果与通知去重；区分 fresh/continuation；补权限撤回与 deadline。
+- [ ] 对 `/loop` 提供显式导入方案；没有导入 receipt 不暗搬、不双跑。
+
+放行：停机跨多个周期后按政策补一拍；时钟倒拨不重跑原 slot；未知副作用停住；三次 resume 不重复执行已完成工作。
+
+### V3：渠道总装与真 transport
+
+- [ ] 接现有 ChannelManager/IngressStore/ChannelSessionHost，增加 durable work 引用，替换仅内存排队假设。
+- [ ] 落真实 sidecar Transport、进程树收尾、重连、generation、账号锁；保留 FakeChannelSidecar 测试口。
+- [ ] 路由固定 owner/workspace/profile/conversation/thread 身份，补准入、附件原件和背压。
+- [ ] ACK 严格服从 ingress 耐久回执；重复来信复用原 work；已读/已 ACK 不等于 turn 已成功。
+- [ ] 真渠道明确 allowlist 与工具授权交集；未决审批留 waiting/拒绝，不因无人值守自动放行。
+- [ ] 先用假渠道验完整收发，再选一只真渠道。是否沿用旧 QQ Bot 优先级，按可用账号与 adapter 条件决定。
+
+放行：重复、乱序、断线、ACK 丢失、send 成功但 receipt 丢失逐项扫；平台无幂等能力时明确展示 delivery_unknown。
+
+### V4：服务安装与常驻运维
+
+- [ ] 落 install/start/restart/doctor/logs；现有 stop 与系统 supervisor 的停止语义统一。
+- [ ] Windows Scheduled Task、systemd、launchd 按支持范围逐个验证；先交付一平台不得宣称三平台完成。
+- [ ] 配置/凭据换代、账号失效、SafeMode、健康探针、死信检查、备份与升级回滚。
+- [ ] 关机宽限到期如实记录未收净 work，不假报取消成功；重启先 reconcile 再接新活。
+
+放行：首个平台关闭终端、注销或重启后的行为有实测记录；24 小时常驻，断网/崩溃/坏配置不丢账、不重启风暴。具体系统监督条件写进 runbook。
+
+### V5：长任务、Goal 与 Workflow
+
+- [ ] 与[异步工具计划](SessionV3异步工具_任务执行协议配对与结果投递.todo)共用 job execution、租约、权限、结果与取消服务。
+- [ ] detached task 明确从会话所有转为 Gateway 托管的交接记录；未交接任务不能因 daemon 存在自动长住。
+- [ ] 任务执行结果、provider 工具协议配对、聊天渠道投递三者分账；禁止借渠道 outbox 补 tool result。
+- [ ] 复用 GoalService 投影接管、预算和验收规则，补 headless 场装配与策略测试。
+- [ ] 按[Workflow V3 计划](Workflow接入SessionV3_编排账与节点恢复设计.todo)调用编排服务；工作流终态不等于每个未知副作用均已解决。
+
+放行：主聊天继续交互，后台任务完成能回送；杀 worker 只恢复可判工作；取消后迟到结果不能把任务复活。
+
+### V6：发布验收
+
+- [ ] 跑相关回归、完整 Release CTest、目标平台构建；报告分列假 provider 和 opt-in 真 provider。
+- [ ] 72 小时 soak：CPU/RSS/线程/句柄、队列、文件与索引、写盘延迟、模型成本；初值和最终值留原始数据。
+- [ ] 容量扫点：重复 ingress、拥塞会话、429/5xx、低磁盘、只读目录、坏尾、坏中段、PID 复用、双实例。
+- [ ] 验 secret 脱敏、控制端身份、权限收窄、artifact 保留与垃圾回收；控制面不可跨 workspace 读写别人的任务。
+- [ ] 更新能力表与用户文档，按已验收范围写“常驻自动任务/渠道助理”；缺哪个平台、渠道、恢复分支就明列。
+
+## 十一、故障验收清单
+
+| 注入点 | 必须看到的结果 |
+| --- | --- |
+| input 原件落稳，accepted 未提交 | 无成功回执；孤立原件可回收 |
+| accepted 提交，内存入队前硬杀 | 重建原 work，正文和附件都在 |
+| operations Append 失败 | 明确失败，不返回 accepted |
+| 两个 Gateway 同时启动 | 至多一只进入业务派发；另一只拒绝 |
+| occurrence 落稳，next-fire 索引未更新 | 重扫仍只有同一 slot；重建索引不漏下一拍 |
+| V3 开轮成功，work turnRef 未回写 | 找回原轮，不双开 |
+| shell 已写文件，terminal 未落 | unknown/reconcile，不再写一次 |
+| 结果捕获失败或 post-hook 提交失败 | 原工具不重做，后续模型请求停止 |
+| compact.applied 后投影失败 | 不拿旧链继续请求 |
+| V3 已成功，reply selection 尚未提交 | 依原终态正文引用和冻结策略补同一 selection，不调模型；材料不足则停住 |
+| reply selection 已提交，outbox 尚未投影 | 从已提交回复选择补出同一 delivery |
+| 本地文件已发布，receipt 未落 | 核 deliveryId/hash 后补回执，不出第二份 |
+| 渠道已发送，receipt 未落 | 幂等查询或 delivery_unknown，不当作普通网络失败盲重试 |
+| 连续 resume 三次 | work/预算/原回复身份不变，去重穿过完整来源链 |
+| pause/cancel 与到点派发竞争 | revision 决胜；未派发受取消约束，已执行事实保留 |
+| 旧 worker 在换 owner 后回报成功 | epoch 拒绝旧提交，保留外部对账线索 |
+| 归档/GC 碰上待投递 artifact | 引用保留，无法安全删除就拒绝 |
+| 只打开历史/断开 AppServer | 零新增执行、零新增平台发送 |
+
+测试驱动应真实起子进程，在具名栅栏硬杀再启动，核副作用计数、V3 引用与领域状态。只改 JSON 尾行可以测读取合同，不能独自证明进程级恢复。
+
+## 十二、与相邻计划如何分工
+
+- [AppServer V3](AppServer接入SessionV3_统一入口与事件恢复设计.todo)：共用 SessionService 与操作身份；本单负责常驻接管，不私造另一套输入接纳语义。
+- [多渠道计划](多渠道消息接入与常驻ChannelPlugin设计.todo)：平台协议、账号与 transport；本单负责把 ingress、执行与 delivery 接成一条路。
+- [异步工具计划](SessionV3异步工具_任务执行协议配对与结果投递.todo)：执行作业和 provider 配对；本单只提供持久托管与触发，不重定工具协议。
+- [Workflow V3](Workflow接入SessionV3_编排账与节点恢复设计.todo)：图账与节点执行；Gateway 只看外层任务及编排引用。
+- [工业化多协议接入](工业化多协议接入_能力裁剪与工具扩展统一设计.todo)：共同引擎装配与能力配置。无需等全部工业化目标完成，但 headless 工具/权限链是 V1 硬门。
+- [上层应用方向](LubanCode上层应用方向_场景组合与独立项目候选.todo)：决定替谁办哪件事，Gateway 为其提供常驻底座。业务逻辑不塞进调度器。
+
+这次先把 V0、V1 做透：受理落得住，执行查得清，结果送得稳。那条路打通，再往上添周期、渠道和长任务，才不至于处处有零件，重启却没人能把账接上。

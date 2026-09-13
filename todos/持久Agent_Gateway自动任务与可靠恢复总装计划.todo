@@ -1,5 +1,7 @@
 # 持久 Agent：Gateway、自动任务与可靠恢复总装计划
 
+> 2026-09-13：本单已由[《Gateway 接入 Session V3：常驻助理与可靠自动任务总装计划》](持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo)替代。下文保留旧 G0/G1 设计与历史验收记录；默认格式、存储目录、Loop 恢复、Channel 组件现状与后续批次不再作为当前实施依据。新版逐项列明可复用代码、真实断口及 V0—V6 放行门。
+
 - 状态：G0/G1 已落地（2026-09-01。G0：合同冻结进 docs/architecture/gateway/ 三篇。G1：GatewayProcess/profile/锁/文件控制面/status/stop/boot history/SafeMode 骨架 + `lubancode gateway run|status|stop` 子命令，测试 tests/unit/gateway/test_gateway_process.cpp 16 例全绿 + 真机冒烟）。G2（AutomationStore/Scheduler/系统服务）起待实现
 - 日期：2026-08-31
 - 级别：P0
