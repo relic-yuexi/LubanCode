@@ -18,9 +18,11 @@
 // 纯合同:不 include agent/app/cli;channel 与 api 都是中立层。
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "api/types.hpp"
+#include "channel/channel_router.hpp"
 #include "channel/types.hpp"
 
 namespace lubancode::runtime {
@@ -41,14 +43,20 @@ struct TurnIngress {
     std::string reply_route;            // 回发路由(渠道 reply_route_id);终端路空
     std::string ingress_delivery_id;    // 渠道入站 delivery id;终端路空
     bool allow_memory_retrieval = true;  // 渠道 memory 隔离执行位
+    // 本轮冻结的工具策略(QQ 接入单 Q0):执行前重验准入时路由决策里的
+    // 五层交集账,随入账带进执行——比引擎建档的会话级策略窄时,执行口
+    // 闸(on_pre_tool_use_hook/确认口)按这份拦。nullopt = 渠道路没递
+    //(引擎回落会话级 options_.tools);终端路不填。
+    std::optional<channel::ToolRoutePolicy> tools;
 };
 
 // 渠道事件折成 TurnIngress 的正文投影(§12.1:text 进 TextBlock,媒体按
 // 投影规矩给稳定说明;本批只钉 text 与 unsupported 的说明,图片/转录归
 // 阶段 4 的 ReplyAssembler/媒体路)。空文本(纯媒体消息)给一行占位说明,
-// 不发空消息。
+// 不发空消息。tools 非空时随入账冻结(Q0;空指针 = 没递,引擎用会话级)。
 TurnIngress MakeChannelTurnIngress(const channel::ChannelInboundEvent& event,
                                    const channel::MessageProvenance& provenance,
-                                   const std::string& session_key, bool allow_memory_retrieval);
+                                   const std::string& session_key, bool allow_memory_retrieval,
+                                   const channel::ToolRoutePolicy* tools = nullptr);
 
 }  // namespace lubancode::runtime

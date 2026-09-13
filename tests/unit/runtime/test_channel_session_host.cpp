@@ -62,7 +62,7 @@ TurnIngress MakeIngress(const std::string& session_key, const std::string& text,
 
 TEST_CASE("confirm fail closed:allowlist 明确允许才放行,deny 永远赢") {
     channel::ToolRoutePolicy tools;
-    tools.allow = {"read_file", "search"};
+    tools.allow = std::vector<std::string>{"read_file", "search"};
     tools.deny = {"search", "shell"};
 
     CHECK(ChannelConfirmAllows(tools, "read_file"));
@@ -70,7 +70,7 @@ TEST_CASE("confirm fail closed:allowlist 明确允许才放行,deny 永远赢") 
     CHECK_FALSE(ChannelConfirmAllows(tools, "shell"));     // deny
     CHECK_FALSE(ChannelConfirmAllows(tools, "write_file"));  // 不在名单
 
-    // allow 为空(binding 没设上限,也没有任何明确允许):须确认的工具
+    // allow 全没设(binding 没设上限,也没有任何明确允许):须确认的工具
     // 全拒——渠道会话没有审批渠道,这正是 §16.1 的"没有远端审批能力:
     // 拒绝",不是"走 Agent 默认确认"。
     channel::ToolRoutePolicy deny_only;
@@ -79,6 +79,15 @@ TEST_CASE("confirm fail closed:allowlist 明确允许才放行,deny 永远赢") 
     CHECK_FALSE(ChannelConfirmAllows(deny_only, "shell"));
     channel::ToolRoutePolicy empty;
     CHECK_FALSE(ChannelConfirmAllows(empty, "read_file"));
+
+    // allow=[](显式空名单,Q0 起)= 禁全部工具:交集后什么都不剩,
+    // 须确认工具自然全拒——没有明确授权。
+    channel::ToolRoutePolicy empty_cap;
+    empty_cap.allow = std::vector<std::string>{};
+    CHECK(empty_cap.allow.has_value());
+    CHECK_FALSE(ChannelConfirmAllows(empty_cap, "read_file"));
+    CHECK_FALSE(empty_cap.Allows("read_file"));
+    CHECK_FALSE(empty_cap.Allows("anything"));
 
     // 拒绝文案:点名审批渠道缺失,不冒充"用户拒绝"。
     const std::string denial = ChannelToolDenialText("shell");

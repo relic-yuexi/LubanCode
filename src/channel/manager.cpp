@@ -173,6 +173,20 @@ ChannelManager::AddAccountResult ChannelManager::AddAccount(
     const ChannelAccountUserConfig& config, ChannelBridgeTransport* transport) {
     std::lock_guard<std::mutex> lock(mutex_);
     AddAccountResult result;
+    // id 先过守门(QQ 接入单 Q0):id 直接拼 state_root/<ch>/<acct> 与锁
+    // 文件名,带路径段的 id 拼得出状态根外路径——fail closed。
+    if (!IsValidChannelId(channel_id)) {
+        result.status = AddAccountResult::Status::InvalidArgument;
+        result.detail = "channel id 不合法(非空、无路径段、无控制字符、<=64 字符): " +
+                        channel_id;
+        return result;
+    }
+    if (!IsValidChannelAccountId(account_id)) {
+        result.status = AddAccountResult::Status::InvalidArgument;
+        result.detail = "account id 不合法(非空、无路径段、无控制字符、<=64 字符): " +
+                        account_id;
+        return result;
+    }
     if (Find(channel_id, account_id) != nullptr) {
         result.status = AddAccountResult::Status::IoError;
         result.detail = "账号已在册: " + channel_id + "/" + account_id;
@@ -493,6 +507,18 @@ void ChannelManager::HandleMessageLocked(AccountEntry& entry, const IncomingMess
 }
 
 void ChannelManager::OnInboundLocked(AccountEntry& entry, const ChannelInboundEvent& event) {
+    // 0) 身份复核(QQ 接入单 Q0):远端事件的账号身份取实际连接上下文,
+    // 宿主逐枚复核 channel/account。sidecar 报上来的事件若声称别的账号
+    // (跨账号伪造)按协议错处置——不 ingest、不 ack,账号进 Degraded。
+    // sender 永远取事件信封的 sender 字段,不从正文提。
+    if (event.channel_id != entry.channel_id || event.account_id != entry.account_id) {
+        NotifyTransportFailureLocked(entry, "invalid_frame",
+                                     "channel.inbound 事件身份与连接不符(事件自称 " +
+                                         event.channel_id + "/" + event.account_id + ",连接是 " +
+                                         entry.channel_id + "/" + entry.account_id + ")");
+        return;
+    }
+
     // 1) 耐久 + 去重(不 durable 不进任何后续口)。
     const auto ingest = entry.ingress->Ingest(event);
     if (!ingest.has_value()) {
@@ -556,6 +582,11 @@ RouteDecision ChannelManager::RouteInboundLocked(AccountEntry& entry,
     RouteInput input;
     input.event = &event;
     input.account = &entry.config;
+    // 渠道层 tools 上限(Q0 五层交集的渠道层):宿主递了才参与。
+    const auto tools = channel_tools_.find(entry.channel_id);
+    if (tools != channel_tools_.end()) {
+        input.channel_tools = &tools->second;
+    }
     const auto bindings = channel_bindings_.find(entry.channel_id);
     input.bindings = bindings != channel_bindings_.end() ? &bindings->second : nullptr;
     input.pairing = &admission;
@@ -571,6 +602,12 @@ void ChannelManager::SetChannelBindings(const std::string& channel_id,
         return;
     }
     channel_bindings_[channel_id] = std::move(bindings);
+}
+
+void ChannelManager::SetChannelToolsPolicy(const std::string& channel_id,
+                                           ChannelToolsUserPolicy tools) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    channel_tools_[channel_id] = std::move(tools);
 }
 
 void ChannelManager::NotifyTransportFailure(const std::string& channel_id,
@@ -692,22 +729,35 @@ std::optional<ChannelManager::WorkItem> ChannelManager::TakeNextWork(
     std::lock_guard<std::mutex> lock(mutex_);
     AccountEntry* entry = Find(channel_id, account_id);
     if (entry == nullptr) return std::nullopt;
-    const auto item = entry->inbox->TakeNext();
-    if (!item.has_value()) return std::nullopt;
-    WorkItem work;
-    work.sid = item->sid;
-    work.conversation_id = item->conversation_id;
-    work.sender_id = item->sender_id;
-    const auto record = entry->ingress->FindBySid(item->sid);
-    if (record.has_value()) {
+    // 执行前重验准入(QQ 接入单 Q0):权限撤销影响排队输入——入队后
+    // 配置改了(撤 allow_from/bindings 收紧/撤销 pairing),重跑同一只
+    // 纯函数不过的输入就地落 Rejected,不进执行;过账的决策即本轮的
+    // 冻结策略版本。已开始的工具沿现有取消边界收场,不在这里追杀。
+    while (true) {
+        const auto item = entry->inbox->TakeNext();
+        if (!item.has_value()) return std::nullopt;
+        const auto record = entry->ingress->FindBySid(item->sid);
+        if (!record.has_value()) {
+            continue;  // 账上查不回(理论不可达):不执行,取下一件
+        }
+        WorkItem work;
+        work.sid = item->sid;
+        work.conversation_id = item->conversation_id;
+        work.sender_id = item->sender_id;
         work.event = record->event;
-        entry->ingress->Transition(item->sid, IngressEventState::Running, "");
         // 路由全账现跑(纯函数:与准入时同一只 RouteChannelEvent,同样的
-        // 输入同样的决策)。准入后配置又改了(如 SetChannelBindings)按新
-        // 账算——正在跑的 turn 不受影响,新 turn 用新快照(§8.4)。
+        // 输入同样的决策)。
         work.route = RouteInboundLocked(*entry, work.event);
+        if (work.route.status != RouteDecision::Status::Admitted) {
+            // 重验不过:落账退场,接着看下一件排队输入。
+            entry->ingress->Transition(item->sid, IngressEventState::Rejected,
+                                       work.route.reason.empty() ? "revoked_before_run"
+                                                                 : work.route.reason);
+            continue;
+        }
+        entry->ingress->Transition(item->sid, IngressEventState::Running, "");
+        return work;
     }
-    return work;
 }
 
 std::vector<ChannelManager::PendingPairingView> ChannelManager::PendingPairings(

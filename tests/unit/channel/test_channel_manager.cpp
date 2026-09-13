@@ -451,3 +451,130 @@ TEST_CASE("传输故障:可重试的进 Degraded/Backoff,退避账带 retry_at")
     REQUIRE(snapshot.has_value());
     CHECK(snapshot->state == ChannelAccountState::NeedsLogin);
 }
+
+// ---- QQ 接入单 Q0 -------------------------------------------------------------
+
+TEST_CASE("Q0:非法 channel/account id 拒注册——拼不出状态根外路径") {
+    const auto root = MakeStateRoot("invalid_ids");
+    FakeChannelSidecar sidecar;
+    FakeTransport transport(sidecar);
+    ChannelManager manager(MakeOptions(root));
+
+    for (const std::string& bad_channel : {"../evil", "a/b", "a\\b", "..", ".", ""}) {
+        const auto result = manager.AddAccount(bad_channel, "main", OpenAccount(), &transport);
+        CHECK(result.status == ChannelManager::AddAccountResult::Status::InvalidArgument);
+    }
+    for (const std::string& bad_account :
+         {std::string("../main"), std::string("a/b"), std::string("C:x"), std::string(""),
+          std::string(1, '\t')}) {
+        const auto result = manager.AddAccount("qqbot", bad_account, OpenAccount(), &transport);
+        CHECK(result.status == ChannelManager::AddAccountResult::Status::InvalidArgument);
+    }
+    CHECK(manager.account_count() == 0);
+    // 合法 id 照常进册。
+    CHECK(manager.AddAccount("qqbot", "main", OpenAccount(), &transport).status ==
+          ChannelManager::AddAccountResult::Status::Ok);
+}
+
+TEST_CASE("Q0:跨账号伪造——事件自称别的账号按协议错处置,不 ingest") {
+    const auto root = MakeStateRoot("forgery");
+    FakeChannelSidecar sidecar;
+    FakeTransport transport(sidecar);
+    ChannelManager manager(MakeOptions(root));
+    AddAndStart(manager, sidecar, transport);
+    REQUIRE(manager.Snapshot("qqbot", "main")->state == ChannelAccountState::Running);
+
+    // qqbot/main 的连接上报一封自称 qqbot/other 的事件:宿主复核连接上下文,
+    // 不认事件自报身份。不 ingest、不 ack,账号 Degraded。
+    ChannelInboundEvent forged = MakeDm("in-evil", "pe-evil");
+    forged.account_id = "other";
+    sidecar.EmitInboundEvent(forged);
+    auto bytes = sidecar.DrainToHost();
+    manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
+
+    const auto snapshot = manager.Snapshot("qqbot", "main");
+    REQUIRE(snapshot.has_value());
+    CHECK(snapshot->state == ChannelAccountState::Degraded);
+    CHECK(snapshot->ingress_state_counts.empty());  // 什么都没进账
+    CHECK_FALSE(manager.HasPendingWork("qqbot", "main"));
+    // 伪造事件没被 ack(ack 名单里没有 in-evil)。
+    for (const std::string& acked : sidecar.acked_delivery_ids()) {
+        CHECK(acked != "in-evil");
+    }
+}
+
+TEST_CASE("Q0:执行前重验准入——权限撤销后排队输入就地落 rejected") {
+    const auto root = MakeStateRoot("revocation");
+    FakeChannelSidecar sidecar;
+    FakeTransport transport(sidecar);
+    ChannelManager manager(MakeOptions(root));
+    AddAndStart(manager, sidecar, transport);
+
+    // 先入队一封(准入过)。两封正文错开——同正文短窗去重(固定钟下
+    // 窗口恒命中)会把第二封吞成 rate_limited。
+    sidecar.EmitInboundEvent(MakeDm("in-1", "pe-1", "第一句"));
+    auto bytes = sidecar.DrainToHost();
+    manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
+    manager.Pump("qqbot", "main");
+    REQUIRE(manager.HasPendingWork("qqbot", "main"));
+
+    // 撤权限:塞两条同档 conversation binding 制造 binding_conflict
+    //(SetChannelBindings 运行时可改,路由每次现读)。
+    std::vector<ChannelBindingConfig> conflicting;
+    {
+        ChannelBindingConfig first;
+        ChannelBindingConversationMatch conversation;
+        conversation.kind = "direct";
+        conversation.id = "dm-owner";
+        first.match.conversation = conversation;
+        first.agent = "a-one";
+        ChannelBindingConfig second = first;
+        second.agent = "a-two";
+        conflicting.push_back(first);
+        conflicting.push_back(second);
+    }
+    manager.SetChannelBindings("qqbot", std::move(conflicting));
+
+    // 取件重验:binding_conflict,输入不进执行,账上落 rejected。
+    CHECK_FALSE(manager.TakeNextWork("qqbot", "main").has_value());
+    CHECK_FALSE(manager.HasPendingWork("qqbot", "main"));
+    const auto snapshot = manager.Snapshot("qqbot", "main");
+    REQUIRE(snapshot.has_value());
+    CHECK(snapshot->ingress_state_counts.at("rejected") == 1);
+
+    // 撤掉冲突后新来信照常走。
+    manager.SetChannelBindings("qqbot", {});
+    sidecar.EmitInboundEvent(MakeDm("in-2", "pe-2", "第二句"));
+    bytes = sidecar.DrainToHost();
+    manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
+    manager.Pump("qqbot", "main");
+    const auto work = manager.TakeNextWork("qqbot", "main");
+    REQUIRE(work.has_value());
+    REQUIRE(work->route.status == RouteDecision::Status::Admitted);
+    CHECK(work->route.reason.empty());
+}
+
+TEST_CASE("Q0:渠道层工具上限进路由——SetChannelToolsPolicy 现读现用") {
+    const auto root = MakeStateRoot("channel_cap");
+    FakeChannelSidecar sidecar;
+    FakeTransport transport(sidecar);
+    ChannelManager manager(MakeOptions(root));
+    AddAndStart(manager, sidecar, transport);
+
+    sidecar.EmitInboundEvent(MakeDm("in-1", "pe-1"));
+    auto bytes = sidecar.DrainToHost();
+    manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
+    manager.Pump("qqbot", "main");
+
+    // 渠道层上限:只许 read_file。取件时的路由决策带上交集账。
+    ChannelToolsUserPolicy channel_tools;
+    channel_tools.allow = std::vector<std::string>{"read_file"};
+    manager.SetChannelToolsPolicy("qqbot", channel_tools);
+    const auto work = manager.TakeNextWork("qqbot", "main");
+    REQUIRE(work.has_value());
+    REQUIRE(work->route.tools.allow.has_value());
+    CHECK(*work->route.tools.allow == std::vector<std::string>{"read_file"});
+    CHECK(work->route.tools.source == "channel");
+    CHECK(work->route.tools.Allows("read_file"));
+    CHECK_FALSE(work->route.tools.Allows("run_command"));
+}

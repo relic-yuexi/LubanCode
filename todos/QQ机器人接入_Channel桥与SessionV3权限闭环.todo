@@ -3,6 +3,7 @@
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
+进度：Q0（权限与激活合同）已落 PR #64（CI 结论随 PR）；Q1 起的批次仍待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -69,11 +70,12 @@ channels/qqbot/
 
 第一版选 `secret_file`，内容为 AppSecret 原值，路径由用户明确指定；也兼容现有 `secret_env`。`secret_file` 并非任意 JSON 凭据文件，读取规则要写清，最多去掉末尾换行，拒绝空值、超限与不安全文件。
 
-- [ ] 新增运行时 credential resolver：按现有来源优先级处理；高优先级来源存在却无效时明报，不静默降级。诊断只报来源与状态。
-- [ ] 明确绝对路径解析、符号链接/重解析点、文件归属和 Windows DACL/POSIX 权限检查。账号 ID、渠道 ID 也须验证，不能拼出状态根外路径。
-- [ ] 密钥不进入 argv、模型输入、会话、trace、错误或普通日志。适配器通过不落日志的专用启动管道接收；与固定 Bridge 握手字段分开，或先正式升级协议，不能悄悄加未知字段。
-- [ ] 子进程只继承必要环境；不把宿主模型 API key、其他 QQ 账号凭据交给适配器。SDK 默认日志也需接脱敏 logger。
-- [ ] 暂不生成 `credentials.json.enc`。文件名带 enc 不代表加密；以后实现 OS 密钥库/DPAPI 后再提供登录存储和迁移。
+- [x] 新增运行时 credential resolver：按现有来源优先级处理；高优先级来源存在却无效时明报，不静默降级。诊断只报来源与状态。（Q0 落 `src/channel/credentials.hpp/cpp`：优先级 secret_file > secret_env > inline；稳定码清单见头文件；`DescribeCredentialSource` 同步同口径。测试 `tests/unit/channel/test_channel_credentials.cpp`——优先级/降级拒绝/稳定码逐项。PR #64）
+- [x] 明确绝对路径解析、符号链接/重解析点、文件归属和 Windows DACL/POSIX 权限检查。账号 ID、渠道 ID 也须验证，不能拼出状态根外路径。（Q0 落 `ResolveChannelCredential`：绝对路径 + `weakly_canonical` + 归属/权限检查（POSIX mode 位、Windows owner SID + DACL 逐 ACE 白名单）；`IsValidChannelId/IsValidChannelAccountId` 守门，`ChannelManager::AddAccount` 拒非法 id。测试同上册 + `test_channel_manager.cpp` "非法 channel/account id"。Windows DACL 拒收案在 credentials 册内联；真实跨用户场景 CI 单账户 runner 覆盖不到，写"未验"。）
+- [x] 密钥不进入 argv、模型输入、会话、trace、错误或普通日志。（Q0 落宿主侧：错误文案结构上只装稳定码/路径，`RedactSecret` 防御性脱敏，`ResolvedChannelCredential` 无流出口；测试"泄露禁令"案。交付通道措辞传输无关——凭据只进入获准的渠道执行载体（进程内直连则不出宿主进程；受管子进程则走不落日志的专用管道），实装归 Q1；`SidecarEnvAllowlist` 已定形环境白名单合同（定案子进程才消费），规矩写进 configuration.md §4。）
+- [ ] 适配器经不落日志的专用启动管道接收密钥；与固定 Bridge 握手字段分开，或先正式升级协议，不能悄悄加未知字段。（Q1：transport 三选一定案后落——进程内直连无此件；受管子进程按 configuration.md §4 的中性口径实装。）
+- [ ] 子进程只继承必要环境；不把宿主模型 API key、其他 QQ 账号凭据交给适配器。SDK 默认日志也需接脱敏 logger。（Q0 落 `SidecarEnvAllowlist()` 白名单合同与测试；定案进程内直连则不消费此表，定案子进程则 spawn 环境裁剪与 SDK 脱敏 logger 归 Q1。）
+- [x] 暂不生成 `credentials.json.enc`。（Q0 未生成、文档明写"文件名带 enc 不代表加密"；OS 密钥库/DPAPI 后置。）
 
 同一 OS 账号的文件 ACL 不能挡住该账号内拥有任意 shell 的 Agent。首版须限制工具能力并拦凭据路径；要承诺强隔离，另接系统沙箱/隔离账号，不能靠隐藏路径或提示词。
 
@@ -81,12 +83,12 @@ channels/qqbot/
 
 ### 4.1 谁能进门
 
-- [ ] QQ 首次配置模板明确 `dm_policy=pairing`、`group_policy=disabled`、`allow_bots=false`、`reply.mode=final`。不修改所有渠道默认值来迁就 QQ。
-- [ ] 未批准用户只收到宿主生成的配对提示，不进模型。代码已有 PendingPairing 裁决，但当前 manager 只标 rejected；须补限频的配对提示发送。
-- [ ] 本地批准复用 PairingStore。补 Gateway 控制入口，让另一个终端能向持锁 Gateway 提交 approve/reject；普通交互进程不能直接拿一只空 manager 冒充批准成功。
-- [ ] 配对码须一次性、有期限，批准后原消息不自动执行；用户重新发指令。不能把“第一个给机器人发话的人”自动设成 owner。
-- [ ] 配对身份与 owner 分开。owner/私有记忆继续要求本机配置明确指定，不采信 SDK 上报的 is_owner。
-- [ ] 远端事件中的账号身份取实际连接上下文；宿主复核 channel/account。拒绝跨账号伪造；不要从正文提取 sender。
+- [x] QQ 首次配置模板明确 `dm_policy=pairing`、`group_policy=disabled`、`allow_bots=false`、`reply.mode=final`。不修改所有渠道默认值来迁就 QQ。（Q0 落 `MakeQqTemplateAccount()`（channel_config.cpp），configuration.md §7 有 JSON 样例；测试 `test_channel_config.cpp` "QQ 模板" + `test_channel_router.cpp` "QQ 模板路由出来"。PR #64）
+- [ ] 未批准用户只收到宿主生成的配对提示，不进模型。代码已有 PendingPairing 裁决，但当前 manager 只标 rejected；须补限频的配对提示发送。（Q1 批次；Q0 钉住"未批准零模型调用"：router PendingPairing 不建 session，e2e `test_channel_phase3_e2e.cpp` "准入与 pairing" 断言模型零调用。）
+- [ ] 本地批准复用 PairingStore。补 Gateway 控制入口，让另一个终端能向持锁 Gateway 提交 approve/reject；普通交互进程不能直接拿一只空 manager 冒充批准成功。（不在 Q0 批次清单。）
+- [ ] 配对码须一次性、有期限，批准后原消息不自动执行；用户重新发指令。不能把“第一个给机器人发话的人”自动设成 owner。（不在 Q0 批次清单。）
+- [x] 配对身份与 owner 分开。owner/私有记忆继续要求本机配置明确指定，不采信 SDK 上报的 is_owner。（Q0 测试钉住：`test_channel_router.cpp` "配对不升 owner"（批准账不进 allow_from）与 "provenance 不信 sidecar 的 is_owner" 既有案。）
+- [x] 远端事件中的账号身份取实际连接上下文；宿主复核 channel/account。拒绝跨账号伪造；不要从正文提取 sender。（Q0 落 `ChannelManager::OnInboundLocked` 头一道身份复核——不符按 `invalid_frame` 进 Degraded，不 ingest 不 ack；sender 只取事件信封。测试 `test_channel_manager.cpp` "跨账号伪造" + router 册 "不从正文提 sender"。）
 
 ### 4.2 能用什么工具
 
@@ -98,13 +100,13 @@ channels/qqbot/
          - 各层 deny 并集
 ```
 
-- [ ] Agent 选择保持具体优先、同档冲突拒绝；权限收集所有适用上限，具体 binding 不能抹掉宽层 deny。
-- [ ] 区分 allow 未设置与 allow=[]：前者不添上限，后者禁用所有工具。现有 vector 空值表示“不设上限”，不能直接改义；须保留显式 presence、迁移旧配置并补兼容测试。
-- [ ] QQ 模板使用显式最小读取工具名单，逐项核实现有注册名。缺省不等于“所有免确认工具均为只读”。动态 tool_search、插件、MCP、子 Agent 也不能扩出这份上限。
-- [ ] 复用 `ApplyChannelToolPolicy` 与 `ChannelConfirmAllows`，把有效策略及来源带到执行时；须确认工具未获明确授权就拒绝，不能在 Gateway 全局改成 auto。
-- [ ] 读文件、搜索等工具统一拦账号凭据、全局密钥配置等受保护路径；检查 canonical 路径、链接绕过和实际工具执行入口。只过滤工具名不够。
-- [ ] 首版不开放任意 shell。后续开放时，若还要求目录强隔离，必须同时接系统执行隔离；不能用 shell 字符串黑名单冒充沙箱。
-- [ ] 权限撤销影响后续待执行输入；已排队输入执行前重验准入并冻结新一轮策略版本。已开始的工具遵循现有取消边界，不假称副作用能撤回。
+- [x] Agent 选择保持具体优先、同档冲突拒绝；权限收集所有适用上限，具体 binding 不能抹掉宽层 deny。（Q0 落 `ChannelRouter`：权限与 Agent 选择分两本账——`matched` 收集所有命中 binding，交集合并渠道/账号/各 binding，deny 全并。测试 `test_channel_router.cpp` "所有命中 binding 都算，具体 binding 抹不掉宽层 deny"。）
+- [x] 区分 allow 未设置与 allow=[]：前者不添上限，后者禁用所有工具。现有 vector 空值表示“不设上限”，不能直接改义；须保留显式 presence、迁移旧配置并补兼容测试。（Q0 落 `std::optional<std::vector<std::string>> allow`（channel/binding/账号/渠道四处同口径）；解析层保留 presence；旧配置（不写 tools 段）解析为 nullopt 行为零变化。测试 `test_channel_binding_config.cpp` "allow 未设置与 allow=[] 分开"、`test_channel_config.cpp` "tools 上限字段"、router 册 "allow=[] 禁全部工具"。）
+- [x] QQ 模板使用显式最小读取工具名单，逐项核实现有注册名。缺省不等于“所有免确认工具均为只读”。动态 tool_search、插件、MCP、子 Agent 也不能扩出这份上限。（Q0 落 `MakeQqTemplateAccount()`：read_file（`ReadFileTool::name()`）+ search（`SearchTool::name()`）两枚注册名逐项核实；名字 allowlist 天然拦 tool_search/tool_invoke/agent/mcp__*——router 册 "QQ 模板路由出来" 逐名断言。）
+- [x] 复用 `ApplyChannelToolPolicy` 与 `ChannelConfirmAllows`，把有效策略及来源带到执行时；须确认工具未获明确授权就拒绝，不能在 Gateway 全局改成 auto。（Q0：`ToolRoutePolicy.source` 来源账随路由冻结；`TurnIngress.tools` 每轮带进执行——引擎建档为会话级暴露面，逐轮收窄由 `on_pre_tool_use_hook` 执行口闸拦（不折前缀缓存）；`ChannelConfirmAllows` 走 `ExplicitlyAllows`——零显式 allow 即无明确授权即拒。测试 e2e "逐轮策略收窄"、session_host 册 confirm 案。）
+- [x] 读文件、搜索等工具统一拦账号凭据、全局密钥配置等受保护路径；检查 canonical 路径、链接绕过和实际工具执行入口。只过滤工具名不够。（Q0 落 `channel/tool_guard` 纯谓词（`platform::PathComparisonKey` canonical 比对）+ `AgentChannelEngine` 的 `GuardedChannelTool` 在 `Tool::execute` 入口拦截（注册元数据原样拷贝）；默认护全局 config.json、渠道状态根、信任账、rg-stage。测试 `test_channel_tool_guard.cpp`（含 ../ 回绕、search 缺省根）+ e2e "读文件工具碰受保护路径"（真引擎回路零执行）。符号链接案在无特权平台（Windows CI）可能建链失败——该案如实跳过，POSIX 腿覆盖，Windows 符号链接绕过路径写"未验"。）
+- [x] 首版不开放任意 shell。后续开放时，若还要求目录强隔离，必须同时接系统执行隔离；不能用 shell 字符串黑名单冒充沙箱。（Q0：QQ 模板与文档都只放只读件，run_command 不进任何模板 allow；security.md §3 写明后置条件。）
+- [x] 权限撤销影响后续待执行输入；已排队输入执行前重验准入并冻结新一轮策略版本。已开始的工具遵循现有取消边界，不假称副作用能撤回。（Q0 落 `ChannelManager::TakeNextWork` 取件重验——不过的输入就地落 rejected（ingress 状态机加 queued→rejected 退场边），过账决策即本轮冻结版本随 `WorkItem.route` 带出。测试 `test_channel_manager.cpp` "执行前重验准入"。）
 
 参考：[路由](../src/channel/channel_router.cpp)、[工具过滤](../src/runtime/agent_channel_engine.cpp)、[确认裁决](../src/runtime/channel_session_host.cpp)。
 
@@ -128,7 +130,7 @@ channels/qqbot/
 - [ ] 新增 `src/runtime/channel_bridge_process.*`，实现 ChannelBridgeTransport。复用 [ChildProcess](../src/platform/process.hpp) 的管道、退出和进程树能力；不要套 [短命工具进程](../src/runtime/plugin_process.hpp) 的“写一次就关 stdin”流程。
 - [ ] 复用四字节大端长度 + JSON 帧，stdout 只协议，stderr 有界排水。慢模型不能阻塞 QQ 心跳、Bridge 读循环与收信落盘。
 - [ ] 按现有 manifest/握手能力交集声明；首版只宣称 websocket/direct/text/send/credentials，不借 SDK 全功能表虚报媒体或 streaming 已接通。
-- [ ] 实现统一激活决策：Gateway 模式、包信任、双层 enabled、凭据可读、账号锁齐才 spawn。普通 CLI/one-shot/App Server 零渠道进程、零监听。
+- [ ] 实现统一激活决策：Gateway 模式、包信任、双层 enabled、凭据可读、账号锁齐才 spawn。普通 CLI/one-shot/App Server 零渠道进程、零监听。（Q0 已落决策函数 `src/channel/activation.hpp/cpp`：五闸 + 决策码冻结表逐枚，测试 `tests/unit/channel/test_channel_activation.cpp`（CLI/one-shot/AppServer 三形态 NotGatewayMode）。真 spawn 侧接线与 Package trust 快照的装配归 Q1——本批无人调用该函数，"零渠道进程零监听"现状成立是因为装配本就未接，写"未验"到真装配。注：若 Q1 定案 C++ 直连、无渠道包，"包信任"闸退化为"渠道实现内置受信"（装配侧恒信任），不另造假包概念。）
 - [ ] Package 安装/构建按实际 runtime 分发：原生适配器随平台编译，无 Node；若选 Node/SDK 备选，则只给 QQ 包安装依赖，普通 LubanCode 不依赖 Node。
 - [ ] Gateway 遍历已安装渠道与启用账号，通过统一激活检查后逐一装配，不硬编码 qqbot/main。用两类假适配器验账号凭据隔离、会话隔离、资源公平与单账号故障收尾；损坏共用耐久账仍须停泵，不伪称平台之间绝无影响。
 - [ ] sidecar spool、SDK session/resume 状态与宿主 ingress 各归各账。SDK 不提供足够 spool 钩子时，补适配层持久化，不能把 SDK 收到回调当作已耐久接纳。
@@ -160,8 +162,8 @@ channels/qqbot/
 
 ### Q0：权限与激活合同
 
-- [ ] 配置 schema、allow 空值迁移、策略交集、凭据 resolver、真实激活决策；同步冻结文档。
-- [ ] 扩展现有 channel_config/binding/router/session_host 测试。证明具体 binding 不能扩权、未批准用户零模型调用、项目不能启用账号、配对不升 owner、凭据不可出日志。
+- [x] 配置 schema、allow 空值迁移、策略交集、凭据 resolver、真实激活决策；同步冻结文档。（PR #64，基线 c899c0fb。schema/五层交集/模板：`src/channel/channel_config.*`、`channel_router.*`；凭据：`src/channel/credentials.*`；激活：`src/channel/activation.*`；路径闸：`src/channel/tool_guard.*` + `src/runtime/agent_channel_engine.*`；宿主复核/执行前重验：`src/channel/manager.*`、`ingress_store.cpp`。冻结件先改后码：configuration.md §3/§4/§7/§8、security.md §3。）
+- [x] 扩展现有 channel_config/binding/router/session_host 测试。证明具体 binding 不能扩权、未批准用户零模型调用、项目不能启用账号、配对不升 owner、凭据不可出日志。（五项逐一：① router 册"所有命中 binding 都算，具体 binding 抹不掉宽层 deny"+ e2e"逐轮策略收窄"；② e2e"准入与 pairing"断言 `backend.captured.empty()`；③ `test_channel_config.cpp` "config 合并"既有案维持（项目 channels 整体拒绝）；④ router 册"配对不升 owner"+"provenance 不信 is_owner"；⑤ credentials 册"泄露禁令"（错误文案/RedactSecret 不带值）+ activation 册 detail 只装稳定码。另新增 activation/credentials/tool_guard 三册、manager 册 Q0 四案、turn_ingress 册逐轮策略案。CI 结论见 PR checks。）
 
 ### Q1：真实进程与平台协议桥
 

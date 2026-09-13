@@ -67,14 +67,17 @@ const char* CredentialSourceName(CredentialSource source) {
 }
 
 CredentialSource DescribeCredentialSource(const ChannelAccountUserConfig& account) {
-    if (account.secret.has_value() && !account.secret->empty()) {
-        return CredentialSource::InlinePlaintext;
+    // 与运行时 credential resolver 同一口径(configuration.md §4:secret_file
+    // > secret_env > secret 明文)。多来源并配时报高优先级者;resolver 遇
+    // 高优先级来源无效时明报,不静默降级。
+    if (account.secret_file.has_value() && !account.secret_file->empty()) {
+        return CredentialSource::FromFile;
     }
     if (account.secret_env.has_value() && !account.secret_env->empty()) {
         return CredentialSource::FromEnv;
     }
-    if (account.secret_file.has_value() && !account.secret_file->empty()) {
-        return CredentialSource::FromFile;
+    if (account.secret.has_value() && !account.secret->empty()) {
+        return CredentialSource::InlinePlaintext;
     }
     return CredentialSource::Missing;
 }
@@ -100,6 +103,36 @@ bool ParseStringArray(const nlohmann::json& value, const std::string& path,
             return false;
         }
         out->push_back(item.get<std::string>());
+    }
+    return true;
+}
+
+// tools 上限段(渠道层/账号层共用;QQ 接入单 Q0)。allow 的 presence 显式
+// 保留:键在(哪怕空数组)= 设上限;键不在 = nullopt 不添上限。
+bool ParseToolsPolicy(const nlohmann::json& value, const std::string& path,
+                      const std::string& file_path_for_error, ChannelToolsUserPolicy* out,
+                      std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        if (it.key() == "allow") {
+            std::vector<std::string> allow;
+            if (!ParseStringArray(it.value(), path + ".allow", file_path_for_error, &allow, error)) {
+                return false;
+            }
+            out->allow = std::move(allow);  // 空数组也是显式上限:禁全部工具
+        } else if (it.key() == "deny") {
+            if (!ParseStringArray(it.value(), path + ".deny", file_path_for_error, &out->deny,
+                                  error)) {
+                return false;
+            }
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + it.key() +
+                     " 是认不得的字段(tools 只收 allow/deny)";
+            return false;
+        }
     }
     return true;
 }
@@ -256,11 +289,15 @@ bool ParseAccountConfig(const std::string& account_id, const nlohmann::json& val
                          ".group_scope 只认 group/group_sender/group_thread/group_thread_sender";
                 return false;
             }
+        } else if (key == "tools") {
+            if (!ParseToolsPolicy(field, path + ".tools", file_path_for_error, &out->tools, error)) {
+                return false;
+            }
         } else {
             *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
                      " 是认不得的字段(账号段收 enabled/transport/app_id/secret_env/"
                      "secret_file/secret/dm_policy/allow_from/group_policy/group_allow_from/"
-                     "require_mention/allow_bots/agent/reply/group_scope)";
+                     "require_mention/allow_bots/agent/reply/group_scope/tools)";
             return false;
         }
     }
@@ -369,10 +406,14 @@ bool ParseBindingPolicy(const nlohmann::json& value, const std::string& path,
             }
             for (auto tool_it = tools.begin(); tool_it != tools.end(); ++tool_it) {
                 if (tool_it.key() == "allow") {
+                    std::vector<std::string> allow;
                     if (!ParseStringArray(tool_it.value(), path + ".tools.allow",
-                                          file_path_for_error, &out->tools.allow, error)) {
+                                          file_path_for_error, &allow, error)) {
                         return false;
                     }
+                    // presence 显式保留:allow 键在(含空数组)= 设上限,
+                    // 空名单即禁全部工具;键不在 = 不添上限(旧语义)。
+                    out->tools.allow = std::move(allow);
                 } else if (tool_it.key() == "deny") {
                     if (!ParseStringArray(tool_it.value(), path + ".tools.deny",
                                           file_path_for_error, &out->tools.deny, error)) {
@@ -468,6 +509,42 @@ bool ParseBindings(const nlohmann::json& value, const std::string& channel_path,
 
 }  // namespace
 
+bool IsValidChannelId(const std::string& id) {
+    if (id.empty() || id.size() > 64 || id == "." || id == "..") {
+        return false;
+    }
+    for (const char c : id) {
+        const unsigned char byte = static_cast<unsigned char>(c);
+        // 路径分隔段(两平台)、盘符冒号、控制字符、空白一概不收——id 会
+        // 直接拼进 state_root/<ch>/<acct> 与锁文件名,收了就拼得出根外路径。
+        if (byte < 0x21 || byte > 0x7E || c == '/' || c == '\\' || c == ':') {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsValidChannelAccountId(const std::string& id) { return IsValidChannelId(id); }
+
+ChannelAccountUserConfig MakeQqTemplateAccount() {
+    // QQ 首版模板(configuration.md §7):逐字段显式。group_policy=disabled、
+    // reply.mode=final 与全渠道默认(allowlist/block)不同——这是 QQ 模板
+    // 自己的取值,不动全局默认;group 首版不开放,dm 走 pairing。
+    ChannelAccountUserConfig account;
+    account.enabled = false;  // 用户配齐凭据再自己开
+    account.transport = "websocket";
+    account.dm_policy = DmPolicy::Pairing;
+    account.group_policy = GroupPolicy::Disabled;
+    account.allow_bots = false;
+    account.require_mention = true;
+    account.reply.mode = ReplyMode::Final;
+    // 显式最小只读名单:两枚名字都核过现有注册表(ReadFileTool::name() =
+    // "read_file",SearchTool::name() = "search")。tool_search/插件/MCP/
+    // 子 Agent 的工具名不在这份名单里,五层交集自然拦下。
+    account.tools.allow = std::vector<std::string>{"read_file", "search"};
+    return account;
+}
+
 std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
     const nlohmann::json& channels_json, const std::string& file_path_for_error,
     std::string* error) {
@@ -535,11 +612,17 @@ std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
                                    &channel.bindings, error)) {
                     return std::nullopt;
                 }
+            } else if (key == "tools") {
+                if (!ParseToolsPolicy(field, channel_path + ".tools", file_path_for_error,
+                                      &channel.tools, error)) {
+                    return std::nullopt;
+                }
             } else {
                 if (error != nullptr) {
                     *error = "配置文件 " + file_path_for_error + " 里的 " + channel_path + "." +
                              key +
-                             " 是认不得的字段(渠道段只收 enabled/default_account/accounts/bindings)";
+                             " 是认不得的字段(渠道段只收 enabled/default_account/accounts/"
+                             "bindings/tools)";
                 }
                 return std::nullopt;
             }

@@ -71,8 +71,17 @@ struct ChannelBindingMatch {
     std::string thread_id;  // 空 = 不限 thread
 };
 
+// 工具上限(§7/§8;QQ 接入单 Q0):allow 的 presence 是显式合同——
+// nullopt = 本层不添上限;有值(含空名单)= 只许名单内,空名单即禁全部
+// 工具。旧配置没写 tools.allow 的解析结果是 nullopt,行为与从前一字不差。
+struct ChannelToolsUserPolicy {
+    std::optional<std::vector<std::string>> allow;
+    std::vector<std::string> deny;
+};
+
 struct ChannelBindingToolsPolicy {
-    std::vector<std::string> allow;  // 空 = 不另设上限(仍受 deny 与上层交集管)
+    // 未设置(nullopt)= binding 不另设上限;[] = 禁全部工具。
+    std::optional<std::vector<std::string>> allow;
     std::vector<std::string> deny;
 };
 
@@ -109,6 +118,8 @@ struct ChannelAccountUserConfig {
     ChannelReplyUserConfig reply;
     // 群聊 session scope(§8):group|group_sender|group_thread|group_thread_sender。默认 group。
     std::string group_scope;
+    // 账号层工具上限(§7;五层交集的一层)。缺省 = 不添上限。
+    ChannelToolsUserPolicy tools;
 };
 
 struct ChannelUserConfig {
@@ -117,6 +128,8 @@ struct ChannelUserConfig {
     std::map<std::string, ChannelAccountUserConfig> accounts;  // key = account id
     // 渠道层 bindings(§8):match.channel 可空 = 本渠道;非空须等于本渠道 id。
     std::vector<ChannelBindingConfig> bindings;
+    // 渠道层工具上限(§7;五层交集的最宽一层)。缺省 = 不添上限。
+    ChannelToolsUserPolicy tools;
 };
 
 // ---------------------------------------------------------------------------
@@ -126,9 +139,26 @@ struct ChannelUserConfig {
 enum class CredentialSource { Missing, FromEnv, FromFile, InlinePlaintext };
 
 const char* CredentialSourceName(CredentialSource source);
-// 账号的凭据来源判定(纯配置侧:secret 明文 > secret_env > secret_file >
-// 缺失;真实值解析是 manager/doctor 运行时的事)。
+// 账号的凭据来源判定(纯配置侧;QQ 接入单 Q0 起与 resolver 同一口径:
+// secret_file > secret_env > secret 明文 > 缺失。多来源并配时高优先级
+// 者胜——真实值解析是 credentials resolver 运行时的事,高优先级无效时
+// 明报不降级)。
 CredentialSource DescribeCredentialSource(const ChannelAccountUserConfig& account);
+
+// ---------------------------------------------------------------------------
+// ID 校验与 QQ 模板(QQ 接入单 Q0)
+// ---------------------------------------------------------------------------
+
+// channel/account id 进路径(state_root/<ch>/<acct>、锁文件名)前的守门:
+// 非空、无路径分隔段(分隔符/盘符冒号)、不是 "."/".."、无控制字符、
+// 长度上限 64。拼不出状态根外路径。
+bool IsValidChannelId(const std::string& id);
+bool IsValidChannelAccountId(const std::string& id);
+
+// QQ 渠道首版模板(configuration.md §7):逐字段显式,不修改全渠道默认值
+// 迁就 QQ。tools.allow 是核过注册名的最小只读名单(read_file/search);
+// 动态 tool_search、插件、MCP、子 Agent 都扩不出这份上限。
+ChannelAccountUserConfig MakeQqTemplateAccount();
 
 // ---------------------------------------------------------------------------
 // 解析

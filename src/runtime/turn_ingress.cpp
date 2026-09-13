@@ -5,7 +5,8 @@ namespace lubancode::runtime {
 
 TurnIngress MakeChannelTurnIngress(const channel::ChannelInboundEvent& event,
                                    const channel::MessageProvenance& provenance,
-                                   const std::string& session_key, bool allow_memory_retrieval) {
+                                   const std::string& session_key, bool allow_memory_retrieval,
+                                   const channel::ToolRoutePolicy* tools) {
     TurnIngress ingress;
     ingress.source = TurnSource::Channel;
     ingress.provenance = provenance;
@@ -16,6 +17,9 @@ TurnIngress MakeChannelTurnIngress(const channel::ChannelInboundEvent& event,
                           event.conversation.id;
     ingress.ingress_delivery_id = event.delivery_id;
     ingress.allow_memory_retrieval = allow_memory_retrieval;
+    if (tools != nullptr) {
+        ingress.tools = *tools;  // 本轮冻结的策略版本(Q0):随入账带进执行
+    }
 
     // 正文投影(§12.1):text 连拼;mention 带 @ 文本;媒体给一行稳定说明,
     // 不把二进制冒充文本。整条没有可投影内容时给占位行,不发空消息。

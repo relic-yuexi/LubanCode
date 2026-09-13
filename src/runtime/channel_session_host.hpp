@@ -44,10 +44,10 @@ public:
                                       std::string* error) = 0;
 };
 
-// 无远端审批时的工具确认裁定(§16.1 fail closed):
-// 工具在 binding allowlist 明确允许且不在 deny -> 允许;其余一律拒绝。
-// 这不是"把 confirm 偷换成 auto"——allow 的每一层(binding/账号)都是
-// 用户显式写的,没有的默认拒。
+// 无远端审批时的工具确认裁定(§16.1/security.md §3 fail closed):
+// 工具在五层交集的某层显式 allow 列名且不在任何 deny -> 允许;其余一律
+// 拒绝。这不是"把 confirm 偷换成 auto"——allow 的每一层(渠道/账号/
+// binding)都是用户显式写的,没有的默认拒。
 bool ChannelConfirmAllows(const channel::ToolRoutePolicy& tools, const std::string& tool_name);
 
 // 渠道侧工具被拒时给模型的 tool_result 文案(区别于"用户拒绝":

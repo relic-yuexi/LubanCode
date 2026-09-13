@@ -87,6 +87,7 @@ public:
     struct AddAccountResult {
         enum class Status {
             Ok,
+            InvalidArgument,  // channel/account id 不合法(拼得出根外路径)
             LockRefused,   // 活进程持有(account_in_use)或假锁看不懂
             ReplayError,   // ingress 账打开失败(账损坏不是拒绝,是明错)
             IoError,       // 目录/账建不了
@@ -106,6 +107,10 @@ public:
     // AddAccount 前后都可设;路由每次现读,改完即生效(新 turn 用新账)。
     void SetChannelBindings(const std::string& channel_id,
                             std::vector<ChannelBindingConfig> bindings);
+    // 渠道层工具上限(QQ 接入单 Q0;五层交集的渠道层):按渠道注入,
+    // 路由每次现读。空 allow/deny 的缺省份会覆盖旧值(收窄可撤,显式
+    // 撤销也是配置)。
+    void SetChannelToolsPolicy(const std::string& channel_id, ChannelToolsUserPolicy tools);
 
     // 起账号:Disabled -> Validating -> Starting,发 channel.initialize。
     // 后续推进靠 Pump()(收到 initialize result 发 start,收到 start result
@@ -176,7 +181,8 @@ public:
         ChannelInboundEvent event;
         // 路由决策(阶段 3 ChannelRouter):session_key/agent/工具与记忆
         // 策略/provenance。准入时已判过 Admitted;这里现跑同一只纯函数
-        // 取全账(同样的输入同样的决策,不另存第二份真账)。
+        // 取全账(同样的输入同样的决策,不另存第二份真账)。这就是本轮
+        // 执行的冻结策略版本——权限撤销后重验不过的输入到不了这里。
         RouteDecision route;
     };
     std::optional<WorkItem> TakeNextWork(const std::string& channel_id,
@@ -251,6 +257,8 @@ private:
     std::vector<std::unique_ptr<AccountEntry>> accounts_;
     // 渠道层 bindings(§8):channel_id -> bindings。
     std::map<std::string, std::vector<ChannelBindingConfig>> channel_bindings_;
+    // 渠道层工具上限(QQ 接入单 Q0):channel_id -> tools policy。
+    std::map<std::string, ChannelToolsUserPolicy> channel_tools_;
 };
 
 }  // namespace lubancode::channel

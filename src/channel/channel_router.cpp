@@ -100,10 +100,20 @@ bool ToolRoutePolicy::Allows(const std::string& tool_name) const {
     if (Contains(deny, tool_name)) {
         return false;
     }
-    if (!allow.empty() && !Contains(allow, tool_name)) {
+    if (allow.has_value() && !Contains(*allow, tool_name)) {
         return false;
     }
     return true;
+}
+
+bool ToolRoutePolicy::ExplicitlyAllows(const std::string& tool_name) const {
+    // security.md §3:须确认工具只有一条生路——某层显式 allow 列了它
+    //(故 allow 必有值),且交集后不在 deny 并集里。零显式 allow = 无
+    // 明确授权 = fail closed。
+    if (!allow.has_value()) {
+        return false;
+    }
+    return Allows(tool_name);
 }
 
 RouteDecision RouteChannelEvent(const RouteInput& input) {
@@ -179,6 +189,10 @@ RouteDecision RouteChannelEvent(const RouteInput& input) {
     const ChannelBindingConfig* best = nullptr;
     int best_specificity = 0;
     bool conflict = false;
+    // 所有命中 binding 全记着:Agent 只取最具体一条,工具上限却要每条
+    // 命中的都算(QQ 接入单 Q0——具体 binding 不能抹掉宽层 deny,也不能
+    // 借"最具体"独占上限)。
+    std::vector<const ChannelBindingConfig*> matched;
     if (input.bindings != nullptr) {
         for (const ChannelBindingConfig& binding : *input.bindings) {
             if (!BindingMatches(binding, event)) {
@@ -188,6 +202,7 @@ RouteDecision RouteChannelEvent(const RouteInput& input) {
             if (specificity == 0) {
                 continue;  // 空 match 不参与(配置层已拦,双保险)
             }
+            matched.push_back(&binding);
             if (specificity > best_specificity) {
                 best = &binding;
                 best_specificity = specificity;
@@ -212,11 +227,53 @@ RouteDecision RouteChannelEvent(const RouteInput& input) {
         decision.agent_source = account.agent.empty() ? "default" : "account_default";
     }
 
-    // ---- 6) 工具策略(§16.2:每层只收窄,deny 永远赢) ----------------------
-    if (best != nullptr) {
-        decision.tools.allow = best->policy.tools.allow;
-        decision.tools.deny = best->policy.tools.deny;
-        decision.tools.source = "binding";
+    // ---- 6) 工具权限五层交集(QQ 接入单 Q0;configuration.md §8 ----------
+    // /security.md §3)。有效工具 = Agent 已有 ∩ 渠道上限 ∩ 账号上限 ∩ 所有
+    // 命中 binding 上限 - 各层 deny 并集。每层 allow 未设 = 不添上限;设了
+    //(含空名单)= 显式上限。deny 永远赢,具体 binding 抹不掉宽层 deny。
+    {
+        bool any_layer = false;
+        auto merge_layer = [&](const std::string& label,
+                               const std::optional<std::vector<std::string>>& cap_allow,
+                               const std::vector<std::string>& cap_deny) {
+            if (!cap_allow.has_value() && cap_deny.empty()) {
+                return;  // 本层没设:不添上限
+            }
+            any_layer = true;
+            if (!decision.tools.source.empty()) {
+                decision.tools.source += "+";
+            }
+            decision.tools.source += label;
+            if (cap_allow.has_value()) {
+                if (!decision.tools.allow.has_value()) {
+                    decision.tools.allow = *cap_allow;
+                } else {
+                    std::vector<std::string> intersection;
+                    for (const std::string& name : *decision.tools.allow) {
+                        if (Contains(*cap_allow, name) && !Contains(intersection, name)) {
+                            intersection.push_back(name);
+                        }
+                    }
+                    decision.tools.allow = std::move(intersection);
+                }
+            }
+            for (const std::string& denied : cap_deny) {
+                if (!Contains(decision.tools.deny, denied)) {
+                    decision.tools.deny.push_back(denied);
+                }
+            }
+        };
+        if (input.channel_tools != nullptr) {
+            merge_layer("channel", input.channel_tools->allow, input.channel_tools->deny);
+        }
+        merge_layer("account", account.tools.allow, account.tools.deny);
+        for (std::size_t i = 0; i < matched.size(); ++i) {
+            merge_layer("binding[" + std::to_string(i) + "]", matched[i]->policy.tools.allow,
+                        matched[i]->policy.tools.deny);
+        }
+        if (!any_layer) {
+            decision.tools.source.clear();
+        }
     }
 
     // ---- 7) memory 默认(§8:安全边界,不是偏好) ---------------------------
