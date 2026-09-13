@@ -14,6 +14,9 @@
 namespace lubancode::channel::qq {
 namespace {
 
+using test_support::MockTlsServer;
+using test_support::MockWsServer;
+
 }  // namespace
 
 TEST_CASE("qq_ws_client: 明文握手+收发文本+Ping 自动回 Pong") {
@@ -64,7 +67,7 @@ TEST_CASE("qq_ws_client: 明文握手+收发文本+Ping 自动回 Pong") {
     CHECK(*from_client == R"({"op":2})");
 
     // Ping → 客户端自动回 Pong(读文本调用内消化),载荷回传。
-    REQUIRE(server_side.SendRaw(std::string{"\x89\x03abc", 5}).has_value());
+    REQUIRE(server_side.SendRaw(std::string{"\x89\x03" "abc", 5}).has_value());
     REQUIRE(server_side.SendText(R"({"after":"ping"})").has_value());
     // 客户端下一读收到的是 Ping 之后的消息(不是 Ping 本身),且连接活着。
     const auto after_ping = client->ReadMessage(5'000);
@@ -124,7 +127,7 @@ TEST_CASE("qq_ws_client: close 帧让 ReadMessage 以 Closed 分型返回") {
             return;
         }
         // close 1000 "bye"。
-        (void)connection->SendRaw(std::string{"\x88\x06\x03\xe8bye", 8});
+        (void)connection->SendRaw(std::string{"\x88\x06\x03\xe8" "bye", 8});
         // 等客户端 close 回帧(尽力)。
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     });
