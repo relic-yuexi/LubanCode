@@ -182,17 +182,20 @@ TEST_CASE("turn/start 经服务接纳:operations 先账,协议回包一字不动
     CHECK(lines[2].value("executionStatus", std::string()) == "success");
 
     // 第二回合照走(每轮一接纳一消费,队列不积):协议回包形状照旧,
-    // 台账记到 op-2。
+    // 台账记到 op-2(接纳/派发/终态三行一轮,P1 终态行随行)。
     scripts.push_back(TextOnlyScript("第二轮。"));
     const nlohmann::json second =
         server.HandleTurnStart(thread_id, "再问一句", {}, error_code);
     REQUIRE(error_code.empty());
     CHECK(second["status"] == "success");
     const auto after_two = ReadJsonl(*session_dir / "operations.jsonl");
-    REQUIRE(after_two.size() == 4);
-    CHECK(after_two[2].value("operationId", std::string()) == "op-2");
-    CHECK(after_two[3].value("kind", std::string()) == "operation.dispatched");
+    REQUIRE(after_two.size() == 6);
+    CHECK(after_two[3].value("kind", std::string()) == "operation.accepted");
     CHECK(after_two[3].value("operationId", std::string()) == "op-2");
+    CHECK(after_two[4].value("kind", std::string()) == "operation.dispatched");
+    CHECK(after_two[4].value("operationId", std::string()) == "op-2");
+    CHECK(after_two[5].value("kind", std::string()) == "operation.final");
+    CHECK(after_two[5].value("operationId", std::string()) == "op-2");
 
     (void)server.HandleThreadStop(thread_id, error_code);
 }

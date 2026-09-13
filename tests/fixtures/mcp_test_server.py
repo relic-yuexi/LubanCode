@@ -3,9 +3,11 @@
 
 协议:换行分隔的 JSON-RPC 2.0,一行一条完整消息。支持
 initialize / notifications/initialized / tools/list / tools/call,
-两个工具:
   echo{text: string}  -> 原样返回 text
+  describe{topic: string} -> 回 "describe:<topic>"(P1 部署档 golden 的
+                             第二只点名工具,与静态样例对得上)
   add{a: number, b: number} -> 返回 a+b 的字符串
+之外还有富结果夹具工具(rich/structured/bad_structured/bad_image)。
 
 不认得的方法:有 id 就回一条 JSON-RPC 错误(-32601),没有 id(通知)就
 静默忽略——跟真实 MCP 服务器该有的行为一致。
@@ -43,6 +45,18 @@ TOOLS = [
             "type": "object",
             "properties": {"text": {"type": "string"}},
             "required": ["text"],
+        },
+    },
+    {
+        # 工业化多协议接入单 P1:部署档 golden(profile.minimal-tools.json)
+        # 点名的第二只测试工具——装配冒烟要真握手它,静态样例与真夹具
+        # 的工具名对得上。
+        "name": "describe",
+        "description": "按主题回一段固定描述文本",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"topic": {"type": "string"}},
+            "required": ["topic"],
         },
     },
     {
@@ -144,6 +158,12 @@ def handle_tools_call(msg_id, params):
 
     if name == "echo":
         text = arguments.get("text", "")
+        send_result(msg_id, {"content": [{"type": "text", "text": text}], "isError": False})
+        return
+
+    if name == "describe":
+        topic = arguments.get("topic", "")
+        text = "describe:" + topic if topic else "describe:未给主题"
         send_result(msg_id, {"content": [{"type": "text", "text": text}], "isError": False})
         return
 
