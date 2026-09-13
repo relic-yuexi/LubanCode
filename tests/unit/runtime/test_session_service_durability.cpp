@@ -144,8 +144,9 @@ TEST_CASE("受理落稳:原件与账行都在,正文含图片整份可读回") {
             nullptr, false);
         REQUIRE(stored.is_object());
         CHECK(stored.value("text", std::string()) == "带图问一句");
-        REQUIRE(stored.contains("images") && stored["images"].is_array() &&
-                stored["images"].size() == 1);
+        REQUIRE(stored.contains("images"));
+        REQUIRE(stored["images"].is_array());
+        REQUIRE(stored["images"].size() == 1);
         CHECK(stored["images"][0].value("data", std::string()) == "aGk=");
         CHECK(stored["images"][0].value("width", 0) == 320);
     }
