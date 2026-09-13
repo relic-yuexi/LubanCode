@@ -529,13 +529,18 @@ TEST_CASE("回合终态:operation.final 行按操作对账,字段如实") {
             continue;
         }
         found_final = true;
-        CHECK(line.contains("operationId") && line["operationId"] == receipt.operation_id);
-        CHECK(line.contains("turnId") && line["turnId"] == "turn-final-1");
-        CHECK(line.contains("executionStatus") && line["executionStatus"] == "success");
-        REQUIRE(line.contains("finalMessageRefs") && line["finalMessageRefs"].is_array());
+        REQUIRE(line.contains("operationId"));
+        CHECK(line["operationId"] == receipt.operation_id);
+        REQUIRE(line.contains("turnId"));
+        CHECK(line["turnId"] == "turn-final-1");
+        REQUIRE(line.contains("executionStatus"));
+        CHECK(line["executionStatus"] == "success");
+        REQUIRE(line.contains("finalMessageRefs"));
+        REQUIRE(line["finalMessageRefs"].is_array());
         REQUIRE(line["finalMessageRefs"].size() == 1);
         CHECK(line["finalMessageRefs"][0] == "item-a1");
-        CHECK(line.contains("usageReported") && line["usageReported"] == true);
+        REQUIRE(line.contains("usageReported"));
+        CHECK(line["usageReported"] == true);
     }
     CHECK(found_final);
 }
