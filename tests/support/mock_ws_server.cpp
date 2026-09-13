@@ -11,8 +11,7 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/sha1.h>
 #include <mbedtls/ssl.h>
-#include <mbedtls/x509_crt.h>
-#include <mbedtls/x509_crt_write.h>
+#include <mbedtls/x509_crt.h>  // x509write_crt 系列也在这一头里
 
 #include "channel/qq/ws_frame.hpp"
 #include "platform/base64.hpp"
