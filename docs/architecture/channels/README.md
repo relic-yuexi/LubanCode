@@ -162,7 +162,7 @@ Package 已安装且已信任
 && account_lock_acquired
 ```
 
-判断收进唯一权威函数 `ResolveChannelActivation`，决策码冻结在 [配置层级冻结](configuration.md)。只有 `Ready` 才 spawn sidecar。`/channel login` 是唯一例外，且只许起短命 setup helper，不开收消息循环。
+判断收进唯一权威函数 `ResolveChannelActivation`，决策码冻结在 [配置层级冻结](configuration.md)。只有 `Ready` 才启动渠道执行载体——执行载体形态按渠道实现定案：QQ 已定案进程内直连（Q1，见接入单 §十五；适配器编进宿主可执行，实现 `ChannelBridgeTransport` 字节面，无 sidecar 子进程、无 Node），未来其他渠道仍可走受管 sidecar 子进程。`/channel login` 是唯一例外，且只许起短命 setup helper，不开收消息循环。
 
 ## 6. 进程形态
 
@@ -199,7 +199,7 @@ Agent reply -> platform：幂等尽力；平台支持 client id 时用 client id
 | 2 | ChannelManager 与入站耐久：状态机、journal、去重、队列背压、pairing、`/channels` 命令 | 已落地 |
 | 3 | Headless Session 与路由：TurnIngress、provenance、router、session host、ChannelTurn | 待实现 |
 | 4 | ReplyAssembler 与 outbox：final/block/native、分块、preview/committed 分账 | 待实现 |
-| 5 | QQ Bot 参考适配器 | 待实现 |
+| 5 | QQ Bot 参考适配器 | 进行中（Q1：进程内直连定案，协议核心 auth/gateway-events/messages/spool 与 mock 测试落地；V3 总装与真实联调见接入单 Q2/Q3） |
 | 6 | WeChat 参考适配器 | 待实现 |
 | 7 | Webhook 共用底座（LINE/Feishu/Zalo/WeCom callback） | 待实现 |
 | 8 | 其余 WebSocket/轮询渠道 | 待实现 |

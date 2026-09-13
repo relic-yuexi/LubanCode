@@ -348,7 +348,22 @@ Q7 验收：手机/桌面分别查填入与发送行为；未配对用户虽见�
 
 ## 十五、SDK 可选，允许直接实现官方协议
 
-用户进一步确认了“不用 SDK”的方向。官方已有鉴权、收发、上传、互动和菜单文档，接入不要求导入腾讯 Node SDK。推荐优先评估原生 C++ QQ 适配进程，保持 Channel Bridge 隔离；无需把平台代码塞进 Agent，也不必把 SDK 再包一层当作硬依赖。前述 Node 目录只是备选示例。
+> **2026-09-14 Q1 定案（本节三选一，随 Q1 PR 落地）**：取第一案——**原生 C++ 直调官方 API，进程内直连**。QQ 适配器编进宿主 `lubancode` 可执行（`src/channel/qq/`），无 Node、无 sidecar 子进程、无渠道包。
+>
+> 协议事实依据（官方 bot.q.qq.com v2 文档，本次逐页核读）：[通用 payload/opcode/intents 表](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html)（op 0/1/2/6/7/9/10/11 与 intents 位表）、[单聊消息事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)（事件体/User/MessageScene/附件三例官方示例）、[发送单聊消息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)（msg_type/msg_id/msg_seq 合同与全量错误码表）。Q1 协议面（token、网关事件、v2 发送）官方文档全覆盖；腾讯 SDK 只作交叉参考，不进依赖。
+>
+> 代价对表：
+>
+> | 维度 | 原生 C++ 进程内（定案） | Node 直连 | Node + 腾讯 SDK |
+> | --- | --- | --- | --- |
+> | 新增依赖 | mbedTLS 3.6.x（FetchContent 自建，三平台同源码同编译） | Node 运行时 + npm 依赖树 | 同左 + SDK 锁版本（1.0.4 已见与官方文档冲突） |
+> | 进程面 | 零新进程：无 spawn、无进程树收尾、无 stderr 排水、无 stdio 帧传输 | 每账号一只受管子进程 | 同左 |
+> | 断线/重放可控性 | Identify/Resume/心跳/退避全显式状态机自测 | 同等工作量自行实现 | SDK 隐式行为，resume 语义需拆 SDK 源码核对 |
+> | 维护面 | 与宿主同构建同测试同 CI；协议 fixture 进 tests/ | 两套构建、两套测试路 | 同左 + SDK 版本漂移 |
+>
+> Bridge 隔离语义照"保持一致的部分"执行：QQ 适配器实现 `ChannelBridgeTransport` 字节面（进程内对象调用替代子进程 stdio，`ChannelManager`/ingress/pairing/路由零改动）；能力声明内置（websocket/direct/text/send/credentials），不虚报媒体与 streaming；宿主权限/任务/会话/outbox 不变。凭据交付：进程内直连——**凭据不出宿主进程**（configuration.md §4 中性措辞兑现），无专用启动管道，`SidecarEnvAllowlist` 不消费。包信任闸退化为"渠道实现内置受信"（activation.hpp 注脚兑现：装配侧恒信任，不造假包概念）。
+>
+> 传输库选型：**TLS WebSocket 客户端 = 自实现 RFC 6455 客户端子集（帧编解码/握手/心跳/close）+ mbedTLS（TLS 底座）**。否掉 ixwebsocket：维护者明言投入减少；上游 CI 的 Windows/UWP 腿直接禁用 TLS（自述因 vcpkg 时长），mbedTLS 后端仅 macOS 有 CI——Windows+TLS 恰是零上游保障组合，而本仓合并后必跑 Windows 腿；OpenSSL 系统供给在 Windows FetchContent 回退路无解。否掉 libwebsockets（lws）：事件循环线程模型集成面更大，mbedTLS 后端组合同样无上游 Windows CI 保障。否掉 libcurl WS（官方仍标实验性，本单明令不赌）与 Boost.Beast/µWebSockets（拉进大依赖）。mbedTLS：ARM 维护、纯 C 自包含、CMake 原生、无 perl/无系统 OpenSSL 供给要求，三平台一份源码，符合"跨平台血统硬、集成面最小"。HTTP 面（token、发消息）Q1 复用现有 cpr 底座（`src/net/http_transport.hpp`，GET/POST 即足，不动 Provider 请求路径）；受控 PUT/DELETE/流式上传属 Q4 媒体批次，不在 Q1 提前扩底盘。CI 风险如实记：PR 腿只跑 macos，Windows/Linux 编译验证靠合并后全量复验——选型以"三平台同源码、零系统依赖"压这个险。
 
 | 方案 | 依赖与代价 | 保持一致的部分 |
 | --- | --- | --- |
