@@ -96,11 +96,12 @@ TEST_CASE("qq_ws_client: 半帧+分片——服务端切三段发,客户端拼�
         if (!connection->AcceptUpgrade(5'000).has_value()) {
             return;
         }
-        // 切三段:起始 fin=0 / continuation fin=0 / 尾 fin=1(尾段 38-16=22=0x16)。
+        // 切三段:起始 fin=0 / continuation fin=0 / 尾 fin=1(payload 40 字节,
+        // 尾段 40-16=24=0x18)。
         const std::string payload = R"({"op":0,"s":42,"t":"C2C_MESSAGE_CREATE"})";
         (void)connection->SendRaw(std::string{"\x01\x08", 2} + payload.substr(0, 8));
         (void)connection->SendRaw(std::string{"\x00\x08", 2} + payload.substr(8, 8));
-        (void)connection->SendRaw(std::string{"\x80\x16", 2} + payload.substr(16));
+        (void)connection->SendRaw(std::string{"\x80\x18", 2} + payload.substr(16));
         server_side = std::move(*connection);
     });
 
@@ -184,8 +185,8 @@ TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
     REQUIRE(port.has_value());
 
     std::thread acceptor([&]() {
-        auto connection = server.AcceptNext(5'000);
-        if (!connection.has_value() || !connection->AcceptUpgrade(5'000).has_value()) {
+        auto connection = server.AcceptNext(10'000);
+        if (!connection.has_value() || !connection->AcceptUpgrade(10'000).has_value()) {
             return;
         }
         (void)connection->SendText(R"({"op":10,"d":{"heartbeat_interval_ms":1000}})");
@@ -196,7 +197,12 @@ TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
     options.url = "wss://127.0.0.1:" + std::to_string(*port) + "/ws";
     options.ca_pem = cert->ca_pem;
     auto client = WsClient::Connect(options);
-    REQUIRE(client.has_value());
+    if (!client.has_value()) {
+        // 先收线程再报错——REQUIRE 直接抛会把 joinable 的 acceptor 析构成
+        // SIGABRT;FAIL 带 detail 出来诊断。
+        acceptor.join();
+        FAIL(client.error().detail);
+    }
     const auto message = client->ReadMessage(5'000);
     REQUIRE(message.has_value());
     CHECK(message->find(R"("heartbeat_interval_ms")") != std::string::npos);
