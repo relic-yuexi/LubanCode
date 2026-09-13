@@ -20,6 +20,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "channel/qq/qq_proto.hpp"  // kIntentGroupAndC2cEvent(默认 intents)
 #include "channel/qq/qq_ws_client.hpp"
 
 namespace lubancode::channel::qq {

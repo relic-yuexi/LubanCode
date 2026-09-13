@@ -51,7 +51,7 @@ nlohmann::json QqBotCapabilities() {
 QqBotAdapter::QqBotAdapter(Options options)
     : options_(std::move(options)),
       token_manager_(QqTokenManager::Options{
-          options_.app_id,
+          options_.config.app_id,
           options_.credential.secret,
           options_.http,
           options_.now_ms,
