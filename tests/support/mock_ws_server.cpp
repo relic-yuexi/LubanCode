@@ -439,10 +439,10 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     if (rc != 0) {
         return fail("drbg seed", rc);
     }
-    // 3.6 无统一 key 生成口:pk_setup + rsa_gen_key 两步。
+    // 3.6 无统一 key 生成口:pk_setup + rsa_gen_key 两步(pk_rsa 按值收参)。
     rc = mbedtls_pk_setup(&key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
     if (rc == 0) {
-        rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(&key), mbedtls_ctr_drbg_random, &drbg, 2048,
+        rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(key), mbedtls_ctr_drbg_random, &drbg, 2048,
                                  65537);
     }
     if (rc != 0) {
