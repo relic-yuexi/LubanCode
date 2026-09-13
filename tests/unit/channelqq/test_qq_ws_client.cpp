@@ -130,7 +130,7 @@ TEST_CASE("qq_ws_client: close 帧让 ReadMessage 以 Closed 分型返回") {
         // close 1000 "bye"。
         (void)connection->SendRaw(std::string{"\x88\x06\x03\xe8" "bye", 8});
         // 等客户端 close 回帧(尽力)。
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1'500));
     });
 
     WsConnectOptions options;
@@ -163,7 +163,7 @@ TEST_CASE("qq_ws_client: 服务端直发超帽长度立即报协议错") {
             frame.push_back(static_cast<char>((huge >> shift) & 0xFF));
         }
         (void)connection->SendRaw(frame);
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1'500));
     });
 
     WsConnectOptions options;
@@ -190,7 +190,9 @@ TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
             return;
         }
         (void)connection->SendText(R"({"op":10,"d":{"heartbeat_interval_ms":1000}})");
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        // 活够久:客户端要读完 Hello 再 Close,提前拆连接会把客户端的
+        // Pong/close 回写撞成 -78。
+        std::this_thread::sleep_for(std::chrono::milliseconds(2'000));
     });
 
     WsConnectOptions options;
