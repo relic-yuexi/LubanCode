@@ -38,8 +38,8 @@ AutomationStore::OpenResult OpenStore(AutomationStore* store, const std::filesys
 std::size_t CountLines(const std::filesystem::path& file) {
     std::ifstream stream(file, std::ios::binary);
     std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-    if (text.empty()) return 0;
-    std::size_t lines = 1;
+    // 账行均以 \n 结尾(JournalWriter 补 \n):数 \n 即数行;尾串无 \n 不计。
+    std::size_t lines = 0;
     for (const char c : text) {
         if (c == '\n') ++lines;
     }

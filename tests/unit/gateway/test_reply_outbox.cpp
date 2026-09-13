@@ -152,31 +152,40 @@ TEST_CASE("窗口:入箱后未发布——重开从原件续投,不丢不多") {
     CHECK(ReadText(fixture.paths.published_dir / (delivery_id + ".txt")) == "答复");
 }
 
-TEST_CASE("异常面:发布文件 hash 不符 → flagged 不覆盖;原件缺失 → flagged") {
-    Fixture fixture("flag");
+TEST_CASE("异常面:发布文件 hash 不符 → flagged 不覆盖") {
+    // 两个异常面各开干净 Fixture:SUBCASE 重跑会共享盘上状态(第一遍落的
+    // flagged 行会让第二遍的 item 不再 pending),拆开各自验。
+    Fixture fixture("flag-hash");
     DurableReplyOutbox outbox;
     REQUIRE(Open(&outbox, fixture).ok);
     const auto enqueued = outbox.Enqueue("sel-t1", "真答复", "s", "t", 1);
     const std::string delivery_id = enqueued.delivery_id;
+    std::error_code ec;
+    std::filesystem::create_directories(fixture.paths.published_dir, ec);
+    std::ofstream out(fixture.paths.published_dir / (delivery_id + ".txt"), std::ios::binary);
+    out << "别人的内容";
+    const auto result = outbox.DeliverPending(2000);
+    CHECK(result.flagged == 1);
+    CHECK(ReadText(fixture.paths.published_dir / (delivery_id + ".txt")) == "别人的内容");
+    // 账面 flagged 留档,原件不动。
+    const auto item = outbox.Find(delivery_id);
+    REQUIRE(item.has_value());
+    CHECK(item->state == "flagged");
+    CHECK(ReadText(fixture.paths.replies_dir / "sel-t1.txt") == "真答复");
+}
 
-    SUBCASE("发布位被别人占了内容不对") {
-        std::error_code ec;
-        std::filesystem::create_directories(fixture.paths.published_dir, ec);
-        std::ofstream out(fixture.paths.published_dir / (delivery_id + ".txt"), std::ios::binary);
-        out << "别人的内容";
-        const auto result = outbox.DeliverPending(2000);
-        CHECK(result.flagged == 1);
-        CHECK(ReadText(fixture.paths.published_dir / (delivery_id + ".txt")) == "别人的内容");
-    }
-    SUBCASE("原件丢了") {
-        std::error_code ec;
-        std::filesystem::remove(fixture.paths.replies_dir / "sel-t1.txt", ec);
-        DurableReplyOutbox fresh;  // 内存正文清空,逼它走原件路
-        REQUIRE(Open(&fresh, fixture).ok);
-        const auto result = fresh.DeliverPending(2000);
-        CHECK(result.flagged == 1);
-        CHECK(result.pending == 0);
-    }
+TEST_CASE("异常面:原件缺失 → flagged 隔离,不跳过继续") {
+    Fixture fixture("flag-missing");
+    DurableReplyOutbox outbox;
+    REQUIRE(Open(&outbox, fixture).ok);
+    REQUIRE(outbox.Enqueue("sel-t1", "真答复", "s", "t", 1).accepted);
+    std::error_code ec;
+    std::filesystem::remove(fixture.paths.replies_dir / "sel-t1.txt", ec);
+    DurableReplyOutbox fresh;  // 内存正文清空,逼它走原件路
+    REQUIRE(Open(&fresh, fixture).ok);
+    const auto result = fresh.DeliverPending(2000);
+    CHECK(result.flagged == 1);
+    CHECK(result.pending == 0);
 }
 
 TEST_CASE("写盘失败:账行落不了 → broken") {
