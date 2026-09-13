@@ -767,6 +767,7 @@ add_library(lubancode_engine STATIC
   # 自实现 WS 客户端。ws_frame(RFC6455 帧纯函数)/qq_socket(跨平台 TCP+
   # select 超时)/qq_tls(mbedTLS 客户端流)/qq_ws_client(升级握手+读写+
   # close)/qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
+  # qq_http(受控 GET/POST seam,生产走 net/http_transport)/
   # qq_spool(sidecar spool 先落盘再上报,ACK 后清理)/qq_auth(token 单飞
   # 刷新)/qq_messages(v2 发送,稳定 msg_seq)/qq_gateway(事件连接状态机:
   # Identify/Heartbeat/Resume/退避)/qq_adapter(ChannelBridgeTransport 进程内
@@ -776,6 +777,7 @@ add_library(lubancode_engine STATIC
   src/channel/qq/qq_tls.cpp
   src/channel/qq/qq_ws_client.cpp
   src/channel/qq/qq_proto.cpp
+  src/channel/qq/qq_http.cpp
   src/channel/qq/qq_spool.cpp
   src/channel/qq/qq_auth.cpp
   src/channel/qq/qq_messages.cpp
