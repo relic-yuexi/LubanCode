@@ -180,7 +180,13 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
             return;
         }
         case BridgeMethod::Start: {
-            StartGatewayLocked();
+            if (!StartGatewayLocked()) {
+                // spool 开不了账:不虚报 started——按 domain 错回宿主,状态机
+                // 进 Degraded 留痕,不冒充运行。
+                ReplyDomainError(id, DomainErrorName::SpawnFailed,
+                                 "spool store open failed");
+                return;
+            }
             nlohmann::json result = nlohmann::json::object();
             result["started"] = true;
             result["transport"] = message.params.value("transport", "websocket");
@@ -274,9 +280,9 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
     }
 }
 
-void QqBotAdapter::StartGatewayLocked() {
+bool QqBotAdapter::StartGatewayLocked() {
     if (gateway_thread_ != nullptr) {
-        return;  // 幂等
+        return true;  // 幂等
     }
     // spool:随 start 开(独立于 stop 关闭——重启重投在下轮连接里做)。
     if (!spool_.has_value()) {
@@ -285,10 +291,7 @@ void QqBotAdapter::StartGatewayLocked() {
         if (auto spool = QqSpoolStore::Open(spool_dir); spool.has_value()) {
             spool_ = std::move(*spool);
         } else {
-            EmitNotification(BridgeMethod::Fatal,
-                             nlohmann::json{{"reason", "spool_write_failed"},
-                                            {"detail", spool.error()}});
-            return;
+            return false;  // 账开不了:如实失败,不虚报 started
         }
         // 重启重投:历史 pending 全部重新上报(宿主 ingress 去重键兜底)。
         for (const auto& [delivery_id, event_json] : spool_->ListPending()) {
@@ -330,6 +333,7 @@ void QqBotAdapter::StartGatewayLocked() {
         sender_thread_ =
             std::make_unique<std::thread>([this]() { SenderLoop(); });
     }
+    return true;
 }
 
 void QqBotAdapter::StopGatewayLocked(const std::string& reason) {

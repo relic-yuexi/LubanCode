@@ -79,7 +79,8 @@ private:
     void EmitNotification(BridgeMethod method, const nlohmann::json& params);
     // 网关事件落地:spool 先落,再编 channel.inbound 通知进 to_host。
     void HandleGatewayEvent(const GatewayEvent& event);
-    void StartGatewayLocked();
+    // 起网关/发送线程与 spool。返回 false = spool 开不了账(不虚报 started)。
+    bool StartGatewayLocked();
     void StopGatewayLocked(const std::string& reason);
     void SenderLoop();
     std::string NextDeliveryId();
