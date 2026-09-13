@@ -145,8 +145,8 @@ std::optional<std::string> GatewayAutomationPump::RecoverOccurrence(
         return std::nullopt;
     }
     // 定位原场(§11.4 resolver:key 反查房门,不拼目录名)。
-    const auto room = workspace::ResolveDirByWorkspaceKey(options_.workspaces_root,
-                                                          options_.workspace_identity.workspace_key);
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(
+        options_.workspaces_root, options_.workspace_identity.workspace_key);
     if (!room.has_value()) {
         if (store_->SettleOccurrence(occurrence.occurrence_id, "needs_review",
                                      "workspace_room_unresolved", now_ms)) {

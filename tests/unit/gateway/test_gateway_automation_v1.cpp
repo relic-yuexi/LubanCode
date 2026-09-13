@@ -250,7 +250,7 @@ TEST_CASE("闭环:once 任务 -> V3 执行(含工具轮)-> reply selection -> �
     CHECK(CountOf(fixture.counter_file, "tool") == 1);
 
     // V3 流:gateway.work.bound 与 reply.selection.committed 都在。
-    const auto room = workspace::ResolveDirByWorkspaceKey(
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(
         fixture.workspaces_root, workspace::MakeFallbackIdentity(fixture.root).workspace_key);
     REQUIRE(room.has_value());
     const auto stream = trajectory::v3::FindV3SessionStream(*room / "sessions" /

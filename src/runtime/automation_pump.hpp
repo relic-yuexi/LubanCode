@@ -33,6 +33,7 @@
 #include <string>
 
 #include "gateway/automation_store.hpp"
+#include "gateway/profile.hpp"  // GatewayProfilePaths(automation/delivery 落位)
 #include "gateway/reply_outbox.hpp"
 #include "gateway/work_pump.hpp"
 #include "runtime/headless_executor.hpp"
