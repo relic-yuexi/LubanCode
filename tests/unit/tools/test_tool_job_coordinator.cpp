@@ -459,6 +459,7 @@ TEST_CASE("注册落账失败:不派发不接单,executor 零调用") {
     v3::MessageDraft draft;
     draft.turn_id = "turn-000001";
     draft.step_id = "step-000001";
+    draft.request_id = "request-000001";
     draft.origin = v3::MessageOrigin::SessionRuntime;
     draft.provider = "openai";
     draft.wire = "responses";
@@ -1209,6 +1210,7 @@ TEST_CASE("恢复:号池对齐,新单不与账上 jobId 撞号") {
     v3::MessageDraft draft;
     draft.turn_id = "turn-000001";
     draft.step_id = "step-000001";
+    draft.request_id = "request-000001";
     draft.origin = v3::MessageOrigin::SessionRuntime;
     draft.provider = "openai";
     draft.wire = "responses";
