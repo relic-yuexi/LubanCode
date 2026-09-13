@@ -7,6 +7,7 @@
 | [plugins/](plugins/README.md) | 散装插件四条路各一枚:Lua、process(Python/Rust/C)、native DLL |
 | [workflows/](workflows/README.md) | 散装工作流示例(三省六部) |
 | [web-console/](web-console/README.md) | 参考前端(多前端外壳单·阶段 D):纯静态 Web 页四件套(聊天/页签/面板/镜像+审批),全程只走 AppServer 协议——验收协议面的工具,不是产品 |
+| [node-client/](node-client/README.md) | Node 外部客户端(应用Worker接入单 P4):起受控 app-server Worker 的最小参考实现(专属 env/幂等受理/收口四步),附五幕端到端验收跑法与托管部署样例 |
 | [shells/](shells/README.md) | 外壳孵化(多前端外壳单·阶段 E):Tauri 桌面壳与 Android WebView 壳,都不复制参考前端(直指同一份代码),零内核改动 |
 
 两条路怎么选:整箱分发、多件组件搭配、要讲信任门的,走 `packages/`

@@ -13,5 +13,6 @@
 - [Package 与组件挂载](packages.md)：标准目录、package.yaml schema 1、命名空间与 wire 编码。
 - [BrowserRuntime 与内嵌浏览器边界](browser-runtime.md)：四层职责、术语冻结、状态真值与用户/Agent 仲裁。
 - [能力裁剪与工具扩展冻结合同](capability-contract.md)：ToolPolicySpec、功能名表、RuntimeBundle 寿命、受理真账 durability 档与 G15 探针清单。
+- [app-server 外部客户端固定版本兼容记录](app-server-external-client.md)：协议 1.3 基线、关键方法/错误码清单、部署隔离基线、已验范围与未验边界(应用Worker接入单 P4)。
 - [Workflow Schema](workflow-schema.md)：定义、节点、边、Store、预算与控制结构。
 - [app-server 协议](../features/app-server/README.md)：无界面后台协议的方法面、事件账、diff 行表与 SSH 承载。
