@@ -73,6 +73,20 @@ public:
         return ToolActionSession(std::move(turn_id), std::move(step_id), std::move(action_id));
     }
 
+    // 恢复侧把手(账面对齐版,异步工具单 P1):按读取投影折叠出的账面事实
+    //(当前 attempt 号、started 与否、已收终态)校准内存态——只补账/续派
+    // 用,不执行。与 Reopen 的差别:补链时不会对账上已有的 started/终态
+    // 重复落事件,BeginNextAttempt 也能从已终态的 attempt 正确接续。
+    static ToolActionSession ReopenAligned(std::string turn_id, std::string step_id,
+                                           std::string action_id, std::uint64_t attempt,
+                                           bool started, Terminal terminal) {
+        ToolActionSession session(std::move(turn_id), std::move(step_id), std::move(action_id));
+        session.attempt_ = attempt;
+        session.started_ = started;
+        session.terminal_ = terminal;
+        return session;
+    }
+
     // 越过执行准入栅栏:tool.execution.started(effectiveArgsRef + 工具身份
     // + 幂等键快照)。extra_payload 供 hook 子执行注入 parentActionId 等。
     WriteReceipt Start(V3Writer& writer, std::string effective_args_ref,
