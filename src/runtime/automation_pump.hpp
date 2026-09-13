@@ -39,7 +39,9 @@
 #include "runtime/headless_executor.hpp"
 #include "workspace/identity.hpp"
 
-namespace api {
+// 前置声明(不拉 backend/registry 重头;注意必须住在 lubancode 内——
+// 全局 namespace api 会与 using namespace lubancode 的调用方打歧义)。
+namespace lubancode::api {
 class Backend;
 }
 namespace lubancode::tools {

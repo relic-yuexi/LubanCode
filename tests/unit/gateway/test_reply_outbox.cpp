@@ -40,6 +40,11 @@ DurableReplyOutbox::OpenResult Open(DurableReplyOutbox* out, const Fixture& fixt
     return DurableReplyOutbox::Open(out, fixture.paths);
 }
 
+DurableReplyOutbox::OpenResult Open(DurableReplyOutbox* out,
+                                    const DurableReplyOutbox::Paths& paths) {
+    return DurableReplyOutbox::Open(out, paths);
+}
+
 std::string ReadText(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
@@ -70,7 +75,7 @@ TEST_CASE("入箱与本地投递:原件先落、账行后落;发布文件名固�
     CHECK(enqueued.delivery_id == delivery_id);
 
     // 原件已落。
-    CHECK(ReadText(fixture.replies_dir / "sel-t1.txt") == "答复正文");
+    CHECK(ReadText(fixture.paths.replies_dir / "sel-t1.txt") == "答复正文");
     // 未投递前 pending=1。
     CHECK(outbox.PendingCount() == 1);
 
@@ -95,7 +100,7 @@ TEST_CASE("入箱幂等:同 selection 重入回 duplicate,正文不重写不重�
     const auto again = outbox.Enqueue("sel-t1", "第二版", "s", "t", 2);
     CHECK(again.duplicate);
     CHECK_FALSE(again.accepted);
-    CHECK(ReadText(fixture.replies_dir / "sel-t1.txt") == "第一版");
+    CHECK(ReadText(fixture.paths.replies_dir / "sel-t1.txt") == "第一版");
 
     const auto items = outbox.ListItems();
     REQUIRE(items.size() == 1);  // 只入了一箱
@@ -165,7 +170,7 @@ TEST_CASE("异常面:发布文件 hash 不符 → flagged 不覆盖;原件缺失
     }
     SUBCASE("原件丢了") {
         std::error_code ec;
-        std::filesystem::remove(fixture.replies_dir / "sel-t1.txt", ec);
+        std::filesystem::remove(fixture.paths.replies_dir / "sel-t1.txt", ec);
         DurableReplyOutbox fresh;  // 内存正文清空,逼它走原件路
         REQUIRE(Open(&fresh, fixture).ok);
         const auto result = fresh.DeliverPending(2000);
