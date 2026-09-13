@@ -119,7 +119,7 @@ public:
             }
             return runtime::SecretValue(std::string());
         }
-        return runtime::SecretValue(it->second);
+        return runtime::SecretValue(std::string(it->second));
     }
 
     runtime::SecretStatus Describe(const runtime::SecretDeclaration& declaration) override {

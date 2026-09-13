@@ -402,7 +402,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         harness.plugins = {"demo-lua"};
         request.harness = &harness;
         request.plugins_root = root;
-        request.plugin_trust = TrustAllIn(root);
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
@@ -428,7 +429,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         harness.plugins = {"demo-lua"};
         request.harness = &harness;
         request.plugins_root = root;
-        request.plugin_trust = TrustAllIn(root);
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
@@ -446,7 +448,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         harness.plugins = {"demo-lua"};
         request.harness = &harness;
         request.plugins_root = root;
-        request.plugin_trust = TrustAllIn(root);
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
@@ -464,7 +467,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         harness.plugins = {"demo-lua"};
         request.harness = &harness;
         request.plugins_root = root;
-        request.plugin_trust = TrustAllIn(root);
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         CHECK(result.assembly == nullptr);
@@ -480,7 +484,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         harness.plugins = {"v1proc"};
         request.harness = &harness;
         request.plugins_root = root;
-        request.plugin_trust = TrustAllIn(root);
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         CHECK(result.assembly == nullptr);
