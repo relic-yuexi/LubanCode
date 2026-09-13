@@ -38,6 +38,7 @@ const { LubancodeWorkerClient, makeTempRoot } =
 let passed = 0;
 let failed = 0;
 const failures = [];
+const liveWorkers = []; // 诊断底:跑挂时吐各 Worker 的 stderr/命令行
 
 function ok(name, condition, detail) {
   if (condition) {
@@ -201,7 +202,7 @@ function writeDeployment(field) {
 }
 
 async function spawnWorker(binary, field, backend, extraOptions) {
-  return LubancodeWorkerClient.spawn(Object.assign({
+  const worker = await LubancodeWorkerClient.spawn(Object.assign({
     binary,
     configRoot: field.configRoot,
     dataRoot: field.dataRoot,
@@ -212,6 +213,20 @@ async function spawnWorker(binary, field, backend, extraOptions) {
     v3Sessions: true,
     model: { baseUrl: backend.baseUrl(), model: 'fake-model', apiKey: 'sk-node-e2e', wire: 'anthropic' },
   }, extraOptions || {}));
+  liveWorkers.push(worker); // 诊断底:跑挂时吐各 Worker 的 stderr/命令行
+  return worker;
+}
+
+// 跑挂时的现场快照:每只 Worker 的命令行与 stderr 尾巴。
+function dumpLiveWorkers() {
+  for (const worker of liveWorkers) {
+    console.log('---- worker 诊断 ----');
+    console.log('argv: ' + worker.argv.join(' '));
+    const stderrTail = (worker.stderrText || '').split('\n').slice(-12).join('\n');
+    if (stderrTail.trim()) {
+      console.log('stderr 尾巴:\n' + stderrTail);
+    }
+  }
 }
 
 // 递归收相对路径清单(参数根零写入断言用)。
@@ -611,5 +626,6 @@ async function main() {
 
 main().catch((error) => {
   console.error('e2e 跑挂:', error && error.stack ? error.stack : error);
+  dumpLiveWorkers();
   process.exitCode = 1;
 });

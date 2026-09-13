@@ -135,9 +135,11 @@ class LubancodeWorkerClient {
     fs.mkdirSync(this.options.configRoot, { recursive: true });
     fs.mkdirSync(this.options.dataRoot, { recursive: true });
     this.writeModelConfig();
-    const argv = [this.options.binary, 'app-server', '--yes'];
+    // Node 的 spawn 是 command + args 两截(args 不含 argv[0],与 C++ 的
+    // exec 风格 argv 数组不同):binary 只出现在 command 位。
+    const args = ['app-server', '--yes'];
     if (this.options.deploymentProfile) {
-      argv.push('--app-server-profile', this.options.deploymentProfile);
+      args.push('--app-server-profile', this.options.deploymentProfile);
     }
     const spawnOptions = {
       env: this.buildEnv(),
@@ -146,8 +148,8 @@ class LubancodeWorkerClient {
     if (this.options.cwd) {
       spawnOptions.cwd = this.options.cwd;
     }
-    this.child = spawn(this.options.binary, argv, spawnOptions);
-    this.argv = argv; // 留档:凭据不进 argv 的断言底
+    this.child = spawn(this.options.binary, args, spawnOptions);
+    this.argv = [this.options.binary].concat(args); // 留档:凭据不进 argv 的断言底
     this.child.stdout.setEncoding('utf8');
     this.child.stderr.setEncoding('utf8');
     let stdoutBuffer = '';
