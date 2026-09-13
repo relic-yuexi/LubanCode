@@ -262,7 +262,15 @@ bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
                                            nlohmann::json::object(), session_id_,
                                            payload->s});
         } else {
-            // 鉴权窗内来了别的事件:按序记账后继续(不判错)。
+            // 鉴权窗内来了业务事件(网关通常先回 READY 才推,但不赌):
+            // 按序记账并照常派发,不静默吞。
+            if (payload->t == "C2C_MESSAGE_CREATE") {
+                GatewayEvent event;
+                event.kind = GatewayEvent::Kind::C2cMessageCreate;
+                event.c2c_d = payload->d;
+                event.seq = payload->s;
+                options_.on_event(event);
+            }
         }
         if (payload->s >= 0) {
             last_seq_.store(payload->s);

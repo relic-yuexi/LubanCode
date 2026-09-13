@@ -51,7 +51,9 @@ struct GatewayPayload {
     nlohmann::json d = nlohmann::json::object();
 };
 
-// 严格解析:op 缺失或非整数、d 存在但非 object 一律拒绝(错误落 *error)。
+// 严格解析:非 object、缺 op、op 非整数一律拒绝(错误落 *error)。d 的形状
+// 随 op 而异(Hello 是 object、Heartbeat 是数字、Invalid Session 是 bool),
+// 不在通用层限定——各 op 的解析函数自行校验。
 std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
                                                   std::string* error);
 

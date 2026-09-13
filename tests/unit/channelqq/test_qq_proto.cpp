@@ -51,14 +51,17 @@ TEST_CASE("qq_proto: 官方通用结构解析(op/d/s/t 各字段)") {
     CHECK(parsed->d.is_object());
 }
 
-TEST_CASE("qq_proto: 缺 op / op 非整数 / d 非 object 一律拒绝") {
+TEST_CASE("qq_proto: 缺 op / op 非整数 / 非 object 拒绝;d 形状随 op 不限") {
     std::string error;
     CHECK_FALSE(ParseGatewayPayload(Parse(R"({"d":{}})"), &error).has_value());
     CHECK_FALSE(ParseGatewayPayload(Parse(R"({"op":"x"})"), &error).has_value());
-    CHECK_FALSE(ParseGatewayPayload(Parse(R"({"op":0,"d":[1,2]})"), &error).has_value());
     CHECK_FALSE(ParseGatewayPayload(Parse(R"(42)"), &error).has_value());
-    // d 为 null 合法(心跳的 d 可以是 null)。
+    // d 形状不限(Hello/READY object、Heartbeat 数字、Invalid Session bool、
+    // 心跳未收到事件时 null)——通用层不拦,各 op 解析函数自校。
     CHECK(ParseGatewayPayload(Parse(R"({"op":1,"d":null})"), &error).has_value());
+    CHECK(ParseGatewayPayload(Parse(R"({"op":1,"d":42})"), &error).has_value());
+    CHECK(ParseGatewayPayload(Parse(R"({"op":9,"d":false})"), &error).has_value());
+    CHECK(ParseGatewayPayload(Parse(R"({"op":0,"d":[1,2]})"), &error).has_value());
 }
 
 TEST_CASE("qq_proto: Hello 心跳间隔解析;缺失/非正数拒绝") {

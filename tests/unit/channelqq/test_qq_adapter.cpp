@@ -273,12 +273,16 @@ std::string C2cPayload(const char* openid, const char* message_id, const char* c
 
 nlohmann::json InitializeFrame(std::int64_t id, const std::string& account,
                                const std::string& protocol_version) {
+    // bridge-protocol.md §3 的 initialize params 形状:protocol_version/
+    // channel_id/account_id/state_dir/host 五枚必填(host 为 object)。
     return channel::BuildRequestJson(
         id, channel::BridgeMethod::Initialize,
         nlohmann::json{{"protocol", "lubancode-channel/1"},
                        {"protocol_version", protocol_version},
                        {"channel_id", "qqbot"},
-                       {"account_id", account}});
+                       {"account_id", account},
+                       {"state_dir", "/tmp/qq-adapter-test-state"},
+                       {"host", nlohmann::json{{"name", "test-host"}}}});
 }
 
 }  // namespace
@@ -367,12 +371,13 @@ TEST_CASE("qq_adapter: C2C 事件 spool 先落再报;宿主 ACK 后清理(端到
                                  C2cPayload("OPEN9", "ROBOT1.0_m1", "hello qq"));
     // 宿主 Pump:inbound 进 manager → durable → 自动 ack → adapter 清 spool。
     // (dm_policy=pairing:首条消息 PendingPairing → rejected 入账,但 durable
-    // 与 ACK 已发生——这正是要验的水路。)
-    REQUIRE(harness.PumpUntil(
-        [&harness]() { return harness.adapter->spool_pending_count() == 0; }));
-    const auto snapshot = harness.manager->Snapshot("qqbot", "main");
-    REQUIRE(snapshot.has_value());
-    CHECK(snapshot->ingress_state_counts.size() >= 1);  // 账上有痕
+    // 与 ACK 已发生——这正是要验的水路。)等"ingress 有账"而不是 spool==0
+    //(初始即 0,等它等于没等)。
+    REQUIRE(harness.PumpUntil([&harness]() {
+        const auto snapshot = harness.manager->Snapshot("qqbot", "main");
+        return snapshot.has_value() && !snapshot->ingress_state_counts.empty();
+    }));
+    CHECK(harness.adapter->spool_pending_count() == 0);  // durable+ack 后清理
 }
 
 TEST_CASE("qq_adapter: spool 重启重投——pending 在新实例上重新上报") {

@@ -91,6 +91,27 @@ QqMessageSender::Outcome QqMessageSender::SendC2c(const C2cSendRequest& request)
         if (response->status >= 200 && response->status < 300) {
             const auto parsed = nlohmann::json::parse(response->body, nullptr,
                                                       /*allow_exceptions=*/false);
+            // 腾讯错误体走 HTTP 200 + body {"code":..,"message":..}
+            //(官方错误码表即此形态)——2xx 不等于成功,先查 code。
+            if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("code") &&
+                parsed.at("code").is_number_integer() &&
+                parsed.at("code").get<std::int64_t>() != 0) {
+                QqApiError error = ClassifyQqSendFailure(response->status, response->body);
+                if (error.kind == QqApiErrorKind::Deduped) {
+                    Outcome outcome;
+                    outcome.status = Outcome::Status::Deduped;
+                    outcome.error = std::move(error);
+                    return outcome;
+                }
+                if (error.kind == QqApiErrorKind::Unauthorized && attempt == 0) {
+                    options_.tokens->Invalidate();
+                    continue;
+                }
+                Outcome outcome;
+                outcome.status = DeferredOrPermanent(error);
+                outcome.error = std::move(error);
+                return outcome;
+            }
             if (parsed.is_discarded()) {
                 QqApiError error;
                 error.kind = QqApiErrorKind::InvalidResponse;

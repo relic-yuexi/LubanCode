@@ -38,6 +38,9 @@ std::vector<std::byte> EncodeClientFrame(WsOpcode opcode, std::string_view paylo
     std::vector<std::byte> out;
     out.reserve(payload.size() + 14);
     AppendFrameHeader(out, opcode, /*mask=*/true, payload.size());
+    for (std::size_t i = 0; i < 4; ++i) {
+        out.push_back(static_cast<std::byte>(mask_key[i]));
+    }
     for (std::size_t i = 0; i < payload.size(); ++i) {
         const std::uint8_t masked =
             static_cast<std::uint8_t>(payload[i]) ^ mask_key[i % 4];
@@ -79,6 +82,7 @@ std::expected<std::optional<WsFrameEvent>, WsFrameError> WsFrameDecoder::TryNext
         cursor_ = 0;
     }
     while (true) {
+        const std::size_t consumed_before = cursor_;
         const auto result = ConsumeOne();
         if (!result.has_value()) {
             return std::unexpected(result.error());
@@ -86,8 +90,14 @@ std::expected<std::optional<WsFrameEvent>, WsFrameError> WsFrameDecoder::TryNext
         if (result->has_value()) {
             return *result;
         }
-        // nullopt:缓冲不足。若拼装中的消息还没收尾,继续等字节;直接返回。
-        return std::nullopt;
+        if (cursor_ == consumed_before) {
+            // 这一轮没消费任何字节:真缺数据,等 Feed。
+            return std::nullopt;
+        }
+        // 消费了帧但没出事件(分片进行中):擦掉已消费字节继续解下一帧。
+        buffer_.erase(buffer_.begin(),
+                      buffer_.begin() + static_cast<std::ptrdiff_t>(cursor_));
+        cursor_ = 0;
     }
 }
 

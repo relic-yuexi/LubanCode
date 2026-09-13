@@ -65,16 +65,10 @@ std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
     out.op_raw = payload.at("op").get<int>();
     out.op = GatewayOpFromInt(out.op_raw);
     if (payload.contains("d")) {
-        const nlohmann::json& d = payload.at("d");
-        if (!d.is_object() && !d.is_null()) {
-            if (error != nullptr) {
-                *error = "gateway payload d must be object or null";
-            }
-            return std::nullopt;
-        }
-        if (!d.is_null()) {
-            out.d = d;
-        }
+        // d 的形状随 op 而异(Hello/READY 是 object,Heartbeat 是数字,
+        // Invalid Session 是 bool,null 合法)——不在此处限定形状,由各
+        // op 的解析函数(ParseHelloInterval 等)自行校验。
+        out.d = payload.at("d");
     }
     if (payload.contains("s") && payload.at("s").is_number_integer()) {
         out.s = payload.at("s").get<std::int64_t>();
