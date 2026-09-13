@@ -214,7 +214,7 @@ DurableReplyOutbox::EnqueueReceipt DurableReplyOutbox::Enqueue(const std::string
         }
     }
     const std::string published_rel =
-        std::filesystem::path("delivery") / "out" / (delivery_id + ".txt").generic_string();
+        (std::filesystem::path("delivery") / "out" / (delivery_id + ".txt")).generic_string();
     nlohmann::json line = nlohmann::json::object();
     line["type"] = kTypeEnqueued;
     line["schemaVersion"] = 1;
