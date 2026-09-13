@@ -327,6 +327,17 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             options.app_server_ws_token = args[++i];
             continue;
         }
+        // 部署档路径(P1):这里只查"带了值且非空";文件读不读得动、档合
+        // 不合法,归 RunAppServerMode 的装配前奏(启动即拒,人话给全)。
+        if (arg == "--app-server-profile") {
+            if (i + 1 >= args.size() || args[i + 1].empty()) {
+                parsed.action = CliAction::BadAppServerProfile;
+                parsed.error_text = "--app-server-profile 需要一个部署档 JSON 路径";
+                return parsed;
+            }
+            options.app_server_profile_path = args[++i];
+            continue;
+        }
         if (arg == "--version") {
             parsed.action = CliAction::PrintVersion;
             return parsed;

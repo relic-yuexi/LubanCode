@@ -451,11 +451,14 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
                 return MakeError(request.id, kErrInternalError, "thread/start 失败: " + error_code);
             }
             // thread/started 事件在响应之前发:前端先见事件后见响应,顺眼
-            // 也顺逻辑(threadId 是事件给出来的身份)。
-            context.emit_event(kEventThreadStarted,
-                               MakeThreadStartedParams(result.value("threadId", std::string()),
-                                                        result.value("cwd", std::string())),
-                               false);
+            // 也顺逻辑(threadId 是事件给出来的身份)。装配降级账(P1
+            // "可选降级必须写结果")随事件一并可见。
+            nlohmann::json started_params = MakeThreadStartedParams(
+                result.value("threadId", std::string()), result.value("cwd", std::string()));
+            if (result.contains("degradedComponents")) {
+                started_params["degradedComponents"] = result["degradedComponents"];
+            }
+            context.emit_event(kEventThreadStarted, std::move(started_params), false);
             return MakeResult(request.id, result);
         });
 
@@ -917,6 +920,23 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     }
     record->thread_id = ledger->session_id();
     record->session_main_path = (ledger->session_dir() / "main.jsonl").generic_string();
+
+    // 工业化多协议接入单 P1(G01/G02):本场会话级运行材料一次装配——
+    // backend、工具表、MCP 子进程、Agent 档案同场多轮复用。两档语义:
+    //   - 显式装配工厂(生产 cli_app 递部署档计划;测试点名):缺授权/
+    //     缺工具/依赖起服失败均在此明拒,不回退空表冒充已接好;
+    //   - 未递工厂的旧注入形态(直驱单测):thread 开张不因装配拒(旧行
+    //     为——工厂只在回合才被碰),回合驱动里走同一条 AssembleSession
+    //     兜底,材料仍是一场一份。
+    if (options_.assembly_factory) {
+        SessionAssemblyResult assembled = options_.assembly_factory();
+        if (assembled.assembly == nullptr) {
+            Diagnose("会话装配失败,thread 不开: " + assembled.error);
+            out_error_code = "assembly.failed";
+            return nlohmann::json();
+        }
+        record->assembly = std::move(assembled.assembly);
+    }
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
         // ledger 的 session_id 自带随机尾,理论不撞;真撞了(同秒同尾)按
@@ -933,7 +953,19 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     }
     record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
     Diagnose("thread 已建: " + record->thread_id);
-    return nlohmann::json{{"threadId", record->thread_id}, {"cwd", record->cwd}};
+    nlohmann::json result{{"threadId", record->thread_id}, {"cwd", record->cwd}};
+    // 可选降级必须写结果(单子 P1):装配期跳过的可选组件(未被档的
+    // tools.allow 引用、起服失败的 MCP)如实带回,Profile 决定降级能否
+    // 继续——必需组件失败在装配层已整场拒绝,到这里的都是可选降级。
+    if (record->assembly != nullptr && !record->assembly->degraded_components.empty()) {
+        nlohmann::json degraded = nlohmann::json::array();
+        for (const std::string& entry : record->assembly->degraded_components) {
+            degraded.push_back(entry);
+            Diagnose("会话装配降级: " + entry);
+        }
+        result["degradedComponents"] = std::move(degraded);
+    }
+    return result;
 }
 
 nlohmann::json Server::HandleThreadList(const nlohmann::json& params) {
@@ -1244,29 +1276,43 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
 
     // 事件账:P9 起条目 id 与事件序号都从 runtime::ProcessIdAuthority 发
     // (id_authority.hpp 的"只此一家"),旧 next_item_seq 回合内计数拆掉。
+    // 本轮操作号留底(P1:终态账行按它对账;空 = 防御路径没经接纳)。
+    const std::string operation_id = input.operation_id;
     nlohmann::json completed_params;
     {
-        // 装配:假 backend + 注册表(骨架期工具链由测试注入假工具;生产
-        // 装配走 cli_app 的 registry_factory)。
-        // TODO(plugins 第 7 步的 app-server 侧收尾,另一线接手):插件工具
-        // 挂进这条 registry 后,ESC/取消链与 PluginLogSink(事件流日志)也
-        // 要照 ToolRuntime::SetPluginCancel/SetPluginLogSink 的口子接进来;
-        // 本线只做了 Terminal 侧,app-server 深度挂载不在这里展开。
-        std::unique_ptr<api::Backend> backend = backend_factory_();
-        std::unique_ptr<tools::ToolRegistry> registry =
-            registry_factory_ ? registry_factory_() : std::make_unique<tools::ToolRegistry>();
-
-        // 病十(骨架拆解批三):差别全部进皮。app-server 这张皮从前走兼容
-        // 门旁参 + 字面量,现在正门构造,两处差别显式写在皮上:
-        //   max_steps——配置轴 max_steps_per_turn 的解析结果(装配层经
-        //   ResolveMaxStepsPerTurn 折进 options;缺省 32 防跑飞,协议前端
-        //   没有 ESC 可打断,用户显式写 0 = 不限也照吃);
-        //   system_prompt——协议服务器的最小人格(不吃终端人格/法文件:
-        //   这里没有交互提示词栈,装了反而是没想清的差别)。
-        agent::AgentProfile profile;
-        profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
-        profile.system_prompt = "lubancode app-server";
-        agent::Agent loop(*backend, *registry, std::move(profile));
+        // 工业化多协议接入单 P1(G02):backend/注册表/Agent 档案从本场
+        // 会话材料(SessionAssembly)取——thread/start 装配一次,同场多轮
+        // 复用,不再每轮重建注册表把旧 Tool 指针留给后台任务(冻结合同
+        // §7 RuntimeBundle)。缺材料 = 防御路径(thread/start 必装配,老
+        // 直驱单测在构造器兜的默认装配工厂也走同一口):显式空表,不崩。
+        if (record->assembly == nullptr) {
+            SessionAssemblyRequest fallback;
+            fallback.backend_factory = backend_factory_;
+            fallback.registry_factory = registry_factory_;
+            fallback.system_prompt = kAppServerDefaultSystemPrompt;
+            fallback.max_steps_per_turn = options_.max_steps_per_turn;
+            SessionAssemblyResult assembled = AssembleSession(std::move(fallback));
+            record->assembly = std::move(assembled.assembly);
+            if (record->assembly == nullptr) {
+                // 装配兜底也失败(工厂缺失一类):回合按错误收口,不空跑。
+                record->interactions->CancelPending();
+                completed_params = MakeTurnCompletedParams(
+                    thread_id, turn_id, kTurnStatusError, "会话运行材料缺失: " + assembled.error,
+                    nlohmann::json(), 0, /*final_message_refs=*/{}, /*usage_reported=*/false,
+                    /*result_envelope_persisted=*/false);
+                EmitEventSafe(kEventTurnCompleted, completed_params);
+                record->last_completed = completed_params;
+                record->turn_finished.store(true);
+                record->turn_running.store(false);
+                return;
+            }
+        }
+        api::Backend& backend = *record->assembly->backend;
+        tools::ToolRegistry& registry = *record->assembly->registry;
+        // Agent 档案从会话材料取(装配层显式定的 system_prompt 与步数闸);
+        // Agent 循环对象本身每轮新建(便宜、无跨轮状态),材料不重建。
+        agent::AgentProfile profile = record->assembly->agent_profile;
+        agent::Agent loop(backend, registry, std::move(profile));
 
         // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----
         // 旧路在本地手拼 text/thinking 懒起条、open_tools 对账、收口补账,
@@ -1330,6 +1376,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                            const runtime::ToolHookDecision& pre) {
                 runtime::PermissionContext context;
                 context.mode = options_.permission_mode;
+                context.auto_confirm = options_.auto_confirm;
                 std::set<std::string> session_allowed;
                 if (record->interactions->IsSessionAllowed(name)) {
                     session_allowed.insert(name);
@@ -1376,7 +1423,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // ---- ask_user 接线(user/ask 反向请求,同一套悬起机制) ----
         // 工具表的 ask_user 工具(装配时注入的)经 SetHandler 换成悬起
         // 版:每题发一枚 user/ask,等前端 answers。
-        if (tools::Tool* raw_ask = registry->Find("ask_user"); raw_ask != nullptr) {
+        if (tools::Tool* raw_ask = registry.Find("ask_user"); raw_ask != nullptr) {
             if (auto* ask_tool = dynamic_cast<tools::AskUserTool*>(raw_ask); ask_tool != nullptr) {
                 ask_tool->SetHandler([this, record, turn_id](const tools::AskUserQuestion& question)
                                          -> std::expected<tools::AskUserResponse, std::string> {
@@ -1472,9 +1519,38 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             status = std::string(kTurnStatusSuccess);
         }
         const int steps_used = outcome.has_value() ? outcome->steps_used : 0;
-        completed_params = MakeTurnCompletedParams(thread_id, turn_id, status, error_message,
-                                                   UsageToJson(SumUsage(usage_reports)), steps_used);
+        // ResultEnvelope 侧材料(工业化多协议接入单 P1,§12.3):最终消息
+        // 引用由运行时选定(最近一条 assistant 文本条目),不把全部文本
+        // 拼当答案;usage 缺报不默认零(usageReported=false 时 Make*
+        // 省略 usage 字段)。
+        std::vector<std::string> final_message_refs;
+        if (!turn_events.last_text_item_id().empty()) {
+            final_message_refs.push_back(turn_events.last_text_item_id());
+        }
+        const bool usage_reported = !usage_reports.empty();
+        completed_params =
+            MakeTurnCompletedParams(thread_id, turn_id, status, error_message,
+                                    UsageToJson(SumUsage(usage_reports)), steps_used,
+                                    final_message_refs, usage_reported,
+                                    /*result_envelope_persisted=*/true);
 
+        // 终态事实先提交,再通知订阅者(§12.3):operation.final 行按
+        // PowerLoss 档落稳才发 turn/completed。落不稳不谎称"结果已可靠
+        // 保存"——事件里如实标注 resultEnvelopePersisted=false。
+        bool envelope_persisted = true;
+        if (record->session_service != nullptr && !operation_id.empty()) {
+            runtime::SessionService::TurnFinalRecord final_record;
+            final_record.operation_id = operation_id;
+            final_record.turn_id = turn_id;
+            final_record.execution_status = status;
+            final_record.final_message_refs = final_message_refs;
+            final_record.usage_reported = usage_reported;
+            envelope_persisted = record->session_service->RecordTurnFinal(final_record);
+        }
+        if (!envelope_persisted) {
+            completed_params["resultEnvelopePersisted"] = false;
+            Diagnose("回合终态账行落不稳,事件如实标注(resultEnvelopePersisted=false): " + turn_id);
+        }
     }
 
     // 回合收口:清掉这一轮残留的悬起请求(理论到不了这——审批都是同步

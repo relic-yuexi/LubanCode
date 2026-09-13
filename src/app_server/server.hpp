@@ -38,6 +38,7 @@
 #include "app_server/dispatcher.hpp"
 #include "app_server/interaction.hpp"
 #include "app_server/outbox.hpp"
+#include "app_server/session_assembly.hpp"  // P1:会话级运行材料(G01/G02)
 #include "app_server/ws_transport.hpp"
 #include "app/version.hpp"
 #include "config/config.hpp"
@@ -61,6 +62,12 @@ std::string PlatformId();
 // 的对应默认是 0(不限,防跑飞靠用户打断),协议宿主没有这层保险。用户在
 // 任何一级写了就吃什么,含显式 0(不限,那是用户自己的选择)。
 inline constexpr int kAppServerDefaultMaxStepsPerTurn = 32;
+
+// app-server 的最小人格(工业化多协议接入单 P1 起显式成档):协议宿主
+// 没有终端人格/法文件可吃,这里写明它是什么。生产装配(部署档路)由
+// cli_app 显式递进 SessionAssemblyRequest;这是缺省档的正文,不再散落
+// 在回合驱动里当字面量(G02)。
+inline constexpr const char* kAppServerDefaultSystemPrompt = "lubancode app-server";
 
 // 步数闸的配置解析(装配层与单测共用同一份):sources 落 Default(四级合并
 // 谁都没给)时用 kAppServerDefaultMaxStepsPerTurn,否则原样吃
@@ -107,6 +114,11 @@ struct ThreadRecord {
     // 三端同路)。SessionRuntime 由服务宿主,这里经 runtime()/trajectory()
     // 取。
     std::unique_ptr<runtime::SessionService> session_service;
+    // 工业化多协议接入单 P1(G01/G02):本场会话级运行材料——backend、
+    // 工具表、MCP 子进程与 Agent 档案一场一份,同场多轮复用,不再每轮
+    // 重建注册表(冻结合同 §7 RuntimeBundle 最小形状)。thread/start 时
+    // 装配,thread 停场随 record 析构(注册表先亡,MCP 子进程后收)。
+    std::unique_ptr<SessionAssembly> assembly;
 
     explicit ThreadRecord(std::string id)
         : thread_id(std::move(id)) {}
@@ -132,6 +144,10 @@ struct ServerOptions {
     // 非终端宿主同样由 Runtime 权限核裁定；缺省仍为可询问。值域 = 公共
     // ApprovalMode(收口审计单 P1:runtime 侧镜像枚举已删)。
     lubancode::ApprovalMode permission_mode = lubancode::ApprovalMode::Default;
+    // --yes(cli_app 折进来):显式全放,与终端同语义。P1 生产装配给了
+    // headless 会话真工具(MCP),--yes 从前无工具可裁、折不折都一样;
+    // 现在工具能真跑,旗标不折就成了"有工具但永远悬停"的哑场。
+    bool auto_confirm = false;
     // turn/interrupt 的硬时限(毫秒)。打断旗置位后回合驱动最多再等这么
     // 久:AgentLoop 的 cancel 在流式/工具边界生效,工具跑完了才看旗;真
     // 有卡死不看的(长命令/卡住的外部进程),硬时限一到强制收线,终态照
@@ -158,6 +174,13 @@ struct ServerOptions {
     // (两承载按需起一种,不并跑——stdio 的"EOF 即进程收线"与 WS 的
     // "断线只收连接、进程等重连"语义不同,混跑两头都拧巴)。
     std::optional<WsOptions> ws;
+    // 会话装配工厂(工业化多协议接入单 P1,G01/G02 的修复口):thread/
+    // start 时每场调一次,产出本场运行材料(backend+工具表+MCP+档案)。
+    // 生产由 cli_app 递(部署档先解析、按计划起组件——session_assembly.
+    // hpp);装配失败(缺授权/缺工具/依赖起服失败)thread/start 明拒。
+    // 不递 = 旧注入形态(直驱单测):thread 开张不因装配拒,回合驱动里走
+    // 同一条 AssembleSession 兜底,材料一场一份。
+    std::function<SessionAssemblyResult()> assembly_factory;
 };
 
 // 一台 app-server。一个进程一台;装配好后 Run() 进主循环(stdio 或 WS

@@ -404,12 +404,30 @@ nlohmann::json MakeTurnStartedParams(const std::string& thread_id, const std::st
 
 nlohmann::json MakeTurnCompletedParams(const std::string& thread_id, const std::string& turn_id,
                                        std::string_view status, const std::string& error_message,
-                                       const nlohmann::json& usage, int steps_used) {
+                                       const nlohmann::json& usage, int steps_used,
+                                       const std::vector<std::string>& final_message_refs,
+                                       bool usage_reported, bool result_envelope_persisted) {
     nlohmann::json params = nlohmann::json{{"threadId", thread_id},
                                            {"turnId", turn_id},
                                            {"status", std::string(status)},
-                                           {"usage", usage},
                                            {"stepsUsed", steps_used}};
+    // usageReported=false:provider 没报 usage,不拿全零冒充实测(§12.3
+    // "缺失不能默认为零")——usage 字段省略,消费方以 usageReported 判。
+    if (usage_reported) {
+        params["usage"] = usage;
+    }
+    params["usageReported"] = usage_reported;
+    nlohmann::json refs = nlohmann::json::array();
+    for (const std::string& ref : final_message_refs) {
+        refs.push_back(ref);
+    }
+    params["finalMessageRefs"] = std::move(refs);
+    // executionStatus 与 status 同源(执行收口):单独成字段是 §12.3 的
+    // 拟议名,业务验收由调用方自己判,这两个字段都不替它判。
+    params["executionStatus"] = std::string(status);
+    if (!result_envelope_persisted) {
+        params["resultEnvelopePersisted"] = false;  // 终态账没落稳,如实报
+    }
     if (!error_message.empty()) {
         params["error"] = error_message;
     }

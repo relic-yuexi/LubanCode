@@ -1082,6 +1082,10 @@ add_library(lubancode_app STATIC
   src/app_server/connection.cpp
   src/app_server/interaction.cpp
   src/app_server/server.cpp
+  # 工业化多协议接入单 P1:部署档解析(纯数据)与会话级运行材料装配
+  # (G01/G02 生产 headless 显式装配;先解析允许组件再启动)。
+  src/app_server/harness_profile.cpp
+  src/app_server/session_assembly.cpp
   # 可见调试阶段 3:browser/* 方法面——sidecar 进程管理、RPC 配对、
   # 事件转发、审批与取消、截图 artifact。
   src/app_server/browser_service.cpp

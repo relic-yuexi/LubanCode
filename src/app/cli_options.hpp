@@ -23,6 +23,13 @@ struct CliOptions {
     // --app-server-ws-token <token>:显式 token,启用首帧门;不 给 则 看
     // LUBANCODE_APPSERVER_TOKEN(装配层)。token 不进任何日志。
     std::string app_server_ws_token;
+    // --app-server-profile <部署档.json>(工业化多协议接入单 P1):生产
+    // headless 的部署档(deployment schema 1,冻结合同 capability-
+    // contract.md §3)。空 = 显式零工具默认档(不照搬终端全部工具,也
+    // 不拿空工厂充当已接好)。档解析失败(依赖解释不全/未知键)在
+    // RunAppServerMode 启动即拒,不静默落回默认。文件内未点名档名则取
+    // service.defaultProfile。
+    std::string app_server_profile_path;
     std::string system_prompt_file_arg;  // --system-prompt <文件>(空 = 没给)
     // Plan 模式单:--mode plan(只认 "plan";"default" 等价没给)。非法值
     // 在解析层就退 BadMode——认不得的值报错,不静默落回 Default(单子:
@@ -109,6 +116,7 @@ enum class CliAction {
     BadMode,                  // --mode 认不得:人话已塞进 error_text(Plan 单)
     BadPackageDir,            // --package-dir 缺值:人话已塞进 error_text(Package 单)
     BadAppServerWs,           // --app-server-ws[-token] 参数不对:人话在 error_text(WS 承载单)
+    BadAppServerProfile,      // --app-server-profile 缺值/空值:人话在 error_text(P1 部署档)
     RunEvolveTest,            // evolve test 子命令:跑候选评测后退(自进化阶段 3)
     BadEvolveTest,            // evolve test 参数不对:人话已塞进 error_text
     RunTrajectory,            // trajectory 子命令:verify/replay/harness-replay 后退(P0-3)
