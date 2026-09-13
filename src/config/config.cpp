@@ -89,15 +89,11 @@ namespace {
 // 个坑);用 GetEnvVarPresent——空串也算"设了",空值留给调用方/启动门
 // 判配置错误,不在读取口吞掉。
 std::optional<std::string> GetAppRootEnvUtf8(const char* name) {
-    auto raw = platform::GetEnvVarPresent(name);
-    if (!raw.has_value()) {
-        return std::nullopt;
-    }
-#ifdef _WIN32
-    return platform::AcpBytesToUtf8(*raw);
-#else
-    return raw;
-#endif
+    // GetEnvVarPresent 在 Windows 走 GetEnvironmentVariableW 底座,值经
+    // WideToUtf8 已是 UTF-8(空值条目对 CRT 不可见,Win32 面才读得到——
+    // 这是它在 Windows 的存在理由);POSIX 的 env 本来就是 UTF-8 字节串。
+    // 两侧都直通,不做 ACP 二次转换。
+    return platform::GetEnvVarPresent(name);
 }
 
 // 应用根变量的值够不够格当根:非空且绝对。坏值不当根用(返回 false),

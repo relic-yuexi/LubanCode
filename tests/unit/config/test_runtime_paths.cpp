@@ -20,18 +20,38 @@
 #include <optional>
 #include <string>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>  // SetEnvironmentVariableW:EnvGuard 的 Win32 面
+#endif
+
 #include "config/config.hpp"
 #include "config/runtime_paths.hpp"
 #include "platform/paths.hpp"
 
 namespace {
 
-// 设一枚环境变量,析构恢复原值(在则删,不在则不设)。空值也是"设了"——
-// 用 Set("") 表达,与合同"未设置与设置为空分开处理"对齐。
+// 设一枚环境变量,析构删除。空值也是"设了"——用 Set("") 表达,与合同
+// "未设置与设置为空分开处理"对齐。
+//
+// Windows 双写(实证见 paths_win.cpp GetEnvVarPresent 注释,2026-09-14
+// 本机探针):CRT 的 _putenv("NAME=") 文档语义是删除变量,活进程造不出
+// 空值条目;要设出 "NAME=" 空条目只有 Win32 面 SetEnvironmentVariableW。
+// 双写让 CRT 消费面(getenv/_dupenv_s,读不到空值、当未设)与 Win32 面
+// (生产 GetEnvVarPresent,能区分空值/未设)各自看到一致事实:
+//   值非空 → CRT+Win32 都设上;
+//   值为空 → 只有 Win32 面设上(CRT 面 _putenv 的空值=删除,恰好保持
+//            "CRT 消费方当未设"的既有语义);
+//   析构   → 两面都删(_putenv 会同步删 Win32,显式再删一道兜底)。
+// POSIX 无此分家,setenv/unsetenv 原样。
 struct EnvGuard {
     explicit EnvGuard(const char* name, const std::string& value) : name_(name) {
 #ifdef _WIN32
         _putenv((std::string(name_) + "=" + value).c_str());
+        // 值是 UTF-8 路径,转宽走正道,不逐字节窄转(非 ASCII 会坏)。
+        SetEnvironmentVariableW(lubancode::platform::Utf8ToWide(name).c_str(),
+                                lubancode::platform::Utf8ToWide(value).c_str());
 #else
         setenv(name_, value.c_str(), 1);
 #endif
@@ -39,6 +59,7 @@ struct EnvGuard {
     ~EnvGuard() {
 #ifdef _WIN32
         _putenv((std::string(name_) + "=").c_str());
+        SetEnvironmentVariableW(lubancode::platform::Utf8ToWide(name).c_str(), nullptr);
 #else
         unsetenv(name_);
 #endif

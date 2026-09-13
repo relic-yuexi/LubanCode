@@ -283,6 +283,7 @@ claim 恢复类:
 - **禁止隐式降级**:`LUBANCODE_MANAGED=1` 下缺件即拒,不回落个人默认目录,不裁剪成"照旧读 cwd/个人材料"顶替。
 - env 是进程级的:宿主应用给每个 Worker child 构造专属 env,不修改自己的全局环境,不重定义 `HOME`/`USERPROFILE` 冒充应用参数根。与多租户隔离单"不改进程环境以切换租户"不冲突——那条管"同进程轮流服务多人",本合同管"一进程一份 env、进程内单一身份"。
 - 启动序:先识别三变量,再发现文件、播种默认材料、启动组件。校验失败发生在任何读家目录的动作之前。
+- **Windows 空值语义**:"设为空串"与"未设置"在 Windows 上必须走 Win32 面区分——CRT 面 `_putenv("NAME=")` 的语义就是删除变量,`getenv`/`_dupenv_s` 也读不到环境块里物理存在的 `NAME=` 空值条目。生产读侧 `platform::GetEnvVarPresent` 走 `GetEnvironmentVariableW`(变量未设=rc 0 且 lasterr `ERROR_ENVVAR_NOT_FOUND`;条目在值为空=rc 0 且 lasterr 未设)。宿主给 child 传空值只有 envblock 一条真路(Node/libuv spawn 的 env 表原样落块);活进程内测试注入用 `SetEnvironmentVariableW(name, L"")`。CRT 消费面(`GetEnvVar` 及全仓既有环境变量读取)不受影响:空值条目对它当未设,恰是"空=未设"的既有语义。
 - 路径等值比较走 `platform::PathComparisonKey`(weakly_canonical 失败退 lexically_normal);OS 挂载/权限承担硬拒绝,字符串判断只作前置提示(多租户隔离单口径)。
 
 ### 13.2 来源裁剪〔冻结;执法路随 P1 落地、档点名来源归 P2〕
