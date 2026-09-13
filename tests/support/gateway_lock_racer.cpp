@@ -3,8 +3,8 @@
 // channel account 两把锁,mode 选)——不另写一套锁逻辑,测的就是产品代码。
 //
 // 用法: gateway_lock_racer <mode:gateway|account> <lock_file> <boot_id> <rounds> <hold_ms> <events_out>
-//   每轮:TryAcquire → 成功则持锁 hold_ms 再 Release;活持有者拒绝则
-//   立即重试(无间隔,模拟最凶的启动竞态)。事件一行一 JSON:
+//   每轮:TryAcquire → 成功则持锁 hold_ms 再 Release;拒绝(活持有者/
+//   对手写锁窗口)则退避 2ms 重试。事件一行一 JSON:
 //     {"t":<now_ms>,"event":"acquire"|"release"|"refused"|"error"}
 //   时间戳统一取 WallClockNowMs(与测试端同源同钟)。
 //   acquire 的 t 在取锁成功之后、release 的 t 在放锁之前——[t_acq,t_rel]
@@ -79,7 +79,6 @@ int main(int argc, char** argv) {
     int errors = 0;
     for (int round = 0; round < rounds; ++round) {
         bool got_lock = false;
-        bool backoff = false;
         if (mode == "account") {
             lubancode::channel::AccountLock lock;
             const auto result = lubancode::channel::AccountLock::TryAcquire(
@@ -99,11 +98,11 @@ int main(int argc, char** argv) {
                 //(锁的既有取舍),与活持有者拒绝同路:退避重试,不算错。
                 ++refused;
                 emit("refused", NowMs());
-                backoff = true;
+
             } else {
                 ++errors;
                 emit("error", NowMs());
-                backoff = true;
+
             }
         } else {
             lubancode::gateway::GatewayLock lock;
@@ -121,19 +120,19 @@ int main(int argc, char** argv) {
                        result.status == Status::RefusedBrokenLock) {
                 ++refused;  // 竞争本身的证据,不是错
                 emit("refused", NowMs());
-                backoff = true;
+
             } else {
                 ++errors;
                 emit("error", NowMs());
-                backoff = true;
+
             }
         }
-        // 失败退避:不睡的裸重试会在对手一个持锁期里烧完全部轮数,
-        // 两只永远错不开——退避让轮数铺满多个持锁周期,另一只才有
-        // 空位可占(真竞争)。
-        if (!got_lock && backoff) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        // 轮间退避(成功失败都退):失败方的裸重试会在对手一个持锁期里
+        // 烧完全部轮数;成功方的紧凑循环(release 后纳秒级再 create)又
+        // 把空窗挤没了。对称退避让两只的 create 在时间上松散交错,双方
+        // 都拿到过锁、也真撞过拒绝——这才是可判的竞争。
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        (void)got_lock;
     }
     events << "{\"summary\":true,\"acquired\":" << acquired << ",\"refused\":" << refused
            << ",\"errors\":" << errors << "}\n";
