@@ -5,6 +5,8 @@
 #include "platform/paths.hpp"
 
 #include <cstdlib>
+#include <iterator>  // std::size(GetEnvVarPresent 的栈 buffer 计数)
+#include <optional>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -34,16 +36,50 @@ std::optional<std::string> HomeDir() {
 }
 
 std::optional<std::string> GetEnvVarPresent(const char* name) {
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    const errno_t err = _dupenv_s(&buffer, &size, name);
-    if (err != 0 || buffer == nullptr) {
-        return std::nullopt;  // 变量不在(区别于"在但为空")
+    // Windows 上"设为空串"与"未设置"必须走 Win32 面区分,CRT 面做不到:
+    //   - CRT 写侧:_putenv("NAME=") 的文档语义就是删除变量,活进程造不出
+    //     空值条目;
+    //   - CRT 读侧:getenv/_dupenv_s 把 rc==0 统一当"未设",环境块里物理
+    //     存在的 "NAME=" 空值条目(宿主手工构造 envblock——Node spawn
+    //     env 表传空值即此路——或 SetEnvironmentVariableW(name, L"") 都
+    //     能造出)对 CRT 不可见。
+    // GetEnvironmentVariableW 的实证语义(2026-09-14 本机探针):
+    //   变量未设      → rc==0 且 GetLastError()==ERROR_ENVVAR_NOT_FOUND(203)
+    //   条目在,值为空 → rc==0 且不设 lasterr(预置值原样保留)
+    //   有值          → rc==不含 NUL 的字符数;buffer 不够时 rc==所需字符
+    //                   数(不含 NUL),按数配 rc+1 的 buffer 重取必成
+    // 值按 UTF-8 交回(WideToUtf8,坏字符 U+FFFD 兜底),与全仓路径纪律一致。
+    const std::wstring wide_name = Utf8ToWide(name);
+    const auto classify_zero = []() -> std::optional<std::string> {
+        return GetLastError() == ERROR_ENVVAR_NOT_FOUND
+                   ? std::nullopt                          // 变量不在
+                   : std::optional<std::string>(std::string());  // 在,值为空
+    };
+    wchar_t stack_buffer[512];
+    SetLastError(0);
+    const DWORD rc = GetEnvironmentVariableW(wide_name.c_str(), stack_buffer,
+                                             static_cast<DWORD>(std::size(stack_buffer)));
+    if (rc == 0) {
+        return classify_zero();
     }
-    // 空串原样交回:调用方拿"有值但为空"自行判配置错误。
-    std::string value(buffer);
-    std::free(buffer);
-    return value;
+    if (rc < std::size(stack_buffer)) {
+        return WideToUtf8(std::wstring(stack_buffer, rc));
+    }
+    // 栈 buffer 不够:rc==所需字符数(不含 NUL),配 rc+1 连 NUL 重取一次。
+    std::wstring wide_value(rc + 1, L'\0');
+    SetLastError(0);
+    const DWORD rc2 = GetEnvironmentVariableW(wide_name.c_str(), wide_value.data(),
+                                              static_cast<DWORD>(wide_value.size()));
+    if (rc2 == 0) {
+        // 取值窗口间被改短成空/被删:按当前事实报,不为旧长度编值。
+        return classify_zero();
+    }
+    if (rc2 < wide_value.size()) {
+        return WideToUtf8(std::wstring(wide_value.data(), rc2));
+    }
+    // 窗口间又变长,超出第二遍配的量:当未设。环境变量值在启动后本就不该
+    // 有人动,不为理论竞态再追第三遍;应用根三变量更不该进程内热改。
+    return std::nullopt;
 }
 
 std::optional<std::filesystem::path> ExecutablePath() {
