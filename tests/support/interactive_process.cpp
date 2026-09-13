@@ -20,9 +20,11 @@
 #include <windows.h>
 using RawHandle = HANDLE;
 constexpr RawHandle kInvalidHandle = nullptr;
-// MSVC 的 CRT 头不一定带 ssize_t,自己统一一枚(与 POSIX read/write 的
-// 返回口径对上)。
+// 新版 MSVC CRT 自带 ssize_t(crtdefs.h,带 _SSIZE_T_DEFINED 守卫);老版
+// 没有——缺了才补一枚,与 POSIX read/write 的返回口径对上。
+#ifndef _SSIZE_T_DEFINED
 using ssize_t = long long;
+#endif
 #else
 #include <signal.h>
 #include <sys/types.h>
@@ -452,7 +454,9 @@ std::unique_ptr<InteractiveProcess> InteractiveProcess::Spawn(
     impl->stderr_reader = std::make_unique<LineReader>(
         [stderr_handle](char* buffer, std::size_t size) { return ReadFromHandle(stderr_handle, buffer, size); });
 
-    auto out = std::make_unique<InteractiveProcess>();
+    // 裸 new 而非 make_unique:构造是 private(只许 Spawn 这道口),类内
+    // 成员函数可直接调用,make_unique 穿不透访问控制。
+    auto out = std::unique_ptr<InteractiveProcess>(new InteractiveProcess());
     out->impl_ = impl.release();
     return out;
 }
