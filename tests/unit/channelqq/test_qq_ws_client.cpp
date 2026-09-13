@@ -96,11 +96,11 @@ TEST_CASE("qq_ws_client: 半帧+分片——服务端切三段发,客户端拼�
         if (!connection->AcceptUpgrade(5'000).has_value()) {
             return;
         }
-        // 切三段:起始 fin=0 / continuation fin=0 / 尾 fin=1。
+        // 切三段:起始 fin=0 / continuation fin=0 / 尾 fin=1(尾段 38-16=22=0x16)。
         const std::string payload = R"({"op":0,"s":42,"t":"C2C_MESSAGE_CREATE"})";
         (void)connection->SendRaw(std::string{"\x01\x08", 2} + payload.substr(0, 8));
         (void)connection->SendRaw(std::string{"\x00\x08", 2} + payload.substr(8, 8));
-        (void)connection->SendRaw(std::string{"\x80\x0b", 2} + payload.substr(16));
+        (void)connection->SendRaw(std::string{"\x80\x16", 2} + payload.substr(16));
         server_side = std::move(*connection);
     });
 

@@ -478,6 +478,12 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     if (rc != 0) {
         return fail("basic constraints", rc);
     }
+    // 客户端连 127.0.0.1:hostname 验证要 SAN 里真有这个 IP,否则
+    // CertVerifyFailed——回环测试的必备项。
+    rc = mbedtls_x509write_crt_set_subject_alternative_name(&crt, "IP:127.0.0.1");
+    if (rc != 0) {
+        return fail("subject alt name", rc);
+    }
     unsigned char cert_pem[4096];
     rc = mbedtls_x509write_crt_pem(&crt, cert_pem, sizeof(cert_pem), mbedtls_ctr_drbg_random,
                                   &drbg);

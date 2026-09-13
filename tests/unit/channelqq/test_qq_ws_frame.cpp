@@ -185,10 +185,10 @@ TEST_CASE("ws_frame: 控制帧——ping/pong/close 单帧直出") {
     REQUIRE(event->has_value());
     CHECK((*event)->kind == WsFrameEvent::Kind::Pong);
 
-    // close 带码 1000 + reason。
+    // close 带码 1000 + reason(载荷 = 2 字节码 + 3 字节 reason = 5)。
     std::string close_frame;
     close_frame.push_back(static_cast<char>(0x88));
-    close_frame.push_back(static_cast<char>(6));
+    close_frame.push_back(static_cast<char>(5));
     close_frame.push_back(static_cast<char>(0x03));
     close_frame.push_back(static_cast<char>(0xE8));
     close_frame += "bye";

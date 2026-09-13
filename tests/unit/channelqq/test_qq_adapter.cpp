@@ -52,7 +52,10 @@ public:
         if (shared_->fail_connect) {
             return std::unexpected("connect refused");
         }
-        shared_->incoming.push_back(
+        // 连接即回 Hello——插队头,保证无论测试预置了什么脚本,Hello 总是
+        // 客户端连接后读到的第一条(官方语义如此)。
+        shared_->incoming.insert(
+            shared_->incoming.begin(),
             R"({"op":10,"d":{"heartbeat_interval_ms":30000}})");
         return {};
     }
@@ -273,12 +276,11 @@ std::string C2cPayload(const char* openid, const char* message_id, const char* c
 
 nlohmann::json InitializeFrame(std::int64_t id, const std::string& account,
                                const std::string& protocol_version) {
-    // bridge-protocol.md §3 的 initialize params 形状:protocol_version/
-    // channel_id/account_id/state_dir/host 五枚必填(host 为 object)。
+    // bridge-protocol.md §3 的 initialize params 形状(严格表:未知字段即拒):
+    // protocol_version/channel_id/account_id/state_dir/host 必填。
     return channel::BuildRequestJson(
         id, channel::BridgeMethod::Initialize,
-        nlohmann::json{{"protocol", "lubancode-channel/1"},
-                       {"protocol_version", protocol_version},
+        nlohmann::json{{"protocol_version", protocol_version},
                        {"channel_id", "qqbot"},
                        {"account_id", account},
                        {"state_dir", "/tmp/qq-adapter-test-state"},
@@ -367,6 +369,9 @@ TEST_CASE("qq_adapter: C2C 事件 spool 先落再报;宿主 ACK 后清理(端到
         return harness.State() == ChannelAccountState::Running;
     }));
 
+    ScriptGatewayTransport::Push(
+        harness.gateway,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-c2c","user":{"id":"bot-1"}}})");
     ScriptGatewayTransport::Push(harness.gateway,
                                  C2cPayload("OPEN9", "ROBOT1.0_m1", "hello qq"));
     // 宿主 Pump:inbound 进 manager → durable → 自动 ack → adapter 清 spool。
@@ -388,6 +393,9 @@ TEST_CASE("qq_adapter: spool 重启重投——pending 在新实例上重新上�
         harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
         // 手工路径(不经 manager):宿主没确认就"崩",spool 才会留 pending。
         HostInitialize(harness);
+        ScriptGatewayTransport::Push(
+            harness.gateway,
+            R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-r1","user":{"id":"bot-1"}}})");
         const auto start = channel::EncodeFrame(
             channel::BuildRequestJson(2, channel::BridgeMethod::Start,
                                       nlohmann::json{{"transport", "websocket"}}));
@@ -486,6 +494,9 @@ TEST_CASE("qq_adapter: stop 停网关线程,未 ACK spool 保留(bridge stop 帧
     harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
     // 手工路径:宿主直接发 initialize/start/stop,不 drain(不触发 ACK)。
     HostInitialize(harness);
+    ScriptGatewayTransport::Push(
+        harness.gateway,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-s1","user":{"id":"bot-1"}}})");
     const auto start = channel::EncodeFrame(
         channel::BuildRequestJson(2, channel::BridgeMethod::Start,
                                   nlohmann::json{{"transport", "websocket"}}));
