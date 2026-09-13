@@ -676,6 +676,8 @@ CI 回填（2026-09-13）：PR relic-yuexi/LubanCode#56（分支 worktree-agent-
 
 退出条件核对：真实生产启动命令按两份 Profile 跑通 ✔（冒烟册用例 1/2，CI 执法）；写账失败零执行 ✔（服务层 E2 注入单测＋server 侧 pop WriteFailed 停泵路，#59 已接线）；丢受理回执同键重发不重复 ✔（服务层单测；真进程端到端待 2.0 面，见记账 3①）；不是只靠注入 fake registry 的单测过关 ✔（真 exe＋真 MCP＋假模型的进程级冒烟）。
 
+CI 回填（2026-09-13）：PR relic-yuexi/LubanCode#62（分支 worktree-agent-proto-p1，head `5e6042da`）。ci run 34752247462 活跃 check suite（GitHub Actions）conclusion=success；PR 快车道 macos-clang 编译+484 册测试腿绿。`integration.app_server.app_server_profile_smoke` 四用例全过（真 exe＋FakeHttpServer 假模型＋python 真 MCP）；`unit.app_server.harness_profile`/`unit.app_server.session_assembly`/`unit.app.session_service`（含回合终态三用例）绿；既有册适配两处（app_server_service 台账 2 行→3/6 行、app_server_turn 两轮用例脚本后端排两份——G02 会话级复用 backend 的契约演进）。中途四红已就地修：夹具 mcp_test_server.py 补 describe 工具（P0 golden 点名它而夹具原先没有，真握手才露馅）、E2 注入改"开张即占目录"（OperationsFile 惰性开账，先纳后废废不掉已开句柄）、doctest 三段表达式拆行、InteractiveProcess 裸 new（make_unique 穿不透 private 构造）。
+
 ### P2：能力裁剪与共同工具授权
 
 - [ ] 统一 feature/module/工具选择解析；实现 inherit/only/none、deny 优先、未知键/依赖/重名拒绝。
