@@ -85,13 +85,22 @@ struct TrajectoryCliArgs {
                                     // 重导)与 Harbor adapter 收尾都用它。
 };
 
-// Gateway 子命令(总装单 G1):`lubancode gateway run|status|stop
-// [--profile <名>] [--json 只 status 认]`。run 是前台真进程;status/stop
-// 是只读 probe/本地控制文件操作,绝不暗起 Gateway(零副作用合同)。
+// Gateway 子命令(总装单 G1 + V1 job 族):`lubancode gateway run|status|stop
+// [--profile <名>] [--json 只 status 认]`;`gateway job add|run-now|list`
+// 是 V1 的持久任务入口(add/run-now 落控制命令文件,活着的 Gateway 消费;
+// list 只读账)。run 是前台真进程;status/stop/job list 绝不暗起 Gateway
+// (零副作用合同)。
 struct GatewayCliArgs {
-    std::string verb;    // run | status | stop
+    std::string verb;    // run | status | stop | job
     std::string profile; // --profile <名>;空 = default
-    bool json = false;   // status --json:机器可读快照
+    bool json = false;   // status --json:机器可读快照(job list 也认)
+    // job 子族(verb == "job"):add 落命令文件等消费;run-now 同;list
+    // 只读 automation 账。
+    std::string job_verb;             // add | run-now | list
+    std::string prompt;               // add 的任务正文
+    std::string job_id;               // add --id / run-now 位置参数
+    std::string idempotency_key;      // --idem(重发同键回原回执)
+    long long due_at_ms = 0;          // add --at(0 = 立即)
 };
 
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。

@@ -38,6 +38,14 @@ struct GatewayProfilePaths {
     std::filesystem::path boot_history;    // profile_dir/boot-history.jsonl
     std::filesystem::path logs_dir;        // profile_dir/logs
     std::filesystem::path log_file;        // logs_dir/gateway.log
+    // V1(总装单 §5.3 目录提案):automation 与 delivery 两本领域账的落位。
+    // 纯裁决零 IO——目录建与不建归各账的写侧。
+    std::filesystem::path automation_dir;  // profile_dir/automation
+    std::filesystem::path automation_log;  // automation_dir/jobs.jsonl
+    std::filesystem::path delivery_dir;    // profile_dir/delivery
+    std::filesystem::path outbox_log;      // delivery_dir/outbox.jsonl
+    std::filesystem::path replies_dir;     // delivery_dir/replies(回复原件)
+    std::filesystem::path published_dir;   // delivery_dir/out(本地发布文件)
 };
 
 // 名字不合法时返回空 root 的paths(调用方先过 IsValidGatewayProfileName;

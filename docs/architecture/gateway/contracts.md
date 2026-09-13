@@ -294,3 +294,17 @@ replySelectionId + target + ordinal  -> deliveryId
 - claim/开轮裁决执行器（V1 主泵未落，栅栏先冻结在 §11.2）。
 
 锁面分账：`GatewayLock` 与 `channel::AccountLock`（V0 同步改 create-new 原子占位）都有双进程竞争册；会话锁 `trajectory::SessionLock` 本就是 `wbx` 原子创建，V0 未动也未加新竞争册。
+
+## 12. V1 裁决：最短纵向闭环（2026-09-13，回单子报备）
+
+V1 批落定的实现裁决（单子 §十 V1 五件事的落点）：
+
+1. **主泵形态**：`gateway::GatewayWorkPump` 合同口（engine 层）+ `runtime::GatewayAutomationPump` 真装配（runtime 层）。同步单飞——每 `TickOnce` 至多一枚新执行 + 一轮恢复扫描 + 一轮 outbox 投递；stop 在 turn 边界生效（宽限内收不净如实记 `shutdown_timeout`）。取件排序复用 `SessionWorkScheduler`（`WorkKind::AutomationDue` 纯追加，与 goal/loop 同数值档）。收尾次序：`StopAccepting`（暂停接活）→ 主循环退出（摘 wake）→ `Close`（收执行器与领域 writer）→ 既有钩子/锁。
+2. **AutomationStore**：`automation/jobs.jsonl` 纯追加事件账（job.created / occurrence.created / occurrence.claimed / occurrence.bound / occurrence.settled），`JournalWriter::AppendLine(PowerLoss)`，lazy 开写者。创建入口 = `control/` 命令文件（`gateway job add|run-now` CLI 落，泵消费即删）；`job list`/status 走只读投影 `ReadAutomationProjection`（零建目录零写盘）。occurrenceId = hash(jobId + revision + slot)，slot 用计划内时间。
+3. **headless 装配**：`runtime::HeadlessExecutor`——SessionService 开场（V3 强制，v2 明报拒绝不双写）、受理/派发走 V0 修复后的账路、`gateway.work.bound` 落 V3（PowerLoss）、hook 四点、工具 fail closed（allow 名单）、ToolTraceHub 挂桥（补齐 AgentChannelEngine 的工具栅栏遗留）、预算三根硬线（AgentRuntimeProfile）、取消链（`AgentLoop::Run` 的 cancel 旗贯通到 wire 与工具）。回复选择冻结策略：`selectionId = "sel-" + turnId`，正文 = turn 内最后一条 assistant 的 text 块全文（`PlanReplySelection` 纯函数，执行路与恢复路同一份）；原件先落（`delivery/replies/`）→ `reply.selection.committed` 后提交（PowerLoss）。
+4. **DurableReplyOutbox（本地）**：`delivery/outbox.jsonl`（item.enqueued/delivered/flagged）+ `replies/` 原件 + `out/<deliveryId>.txt` 发布。deliveryId = hash(selectionId + target + ordinal)。投递幂等：已发布核 hash 补回执不出第二份；hash 不符/原件缺失 → flagged（隔离）。
+5. **status 分栏**：`ProbeStatusSections` 只读投影 work/execution/delivery 三栏，与 process 活探针分开报——进程 running 不冒充任务成功。
+
+V1 恢复裁决（§八的 V1 面；重派/补跑归 V2）：occurrence claimed 未结算时——bound 行在且 V3 有 assistant 且无 selection → 补 selection（续原卷 `V3Writer::Continue` 追加事实行，不调模型）；selection 已在 → 补 outbox 投影与投递；V3 无 assistant（生成未完成）→ needs_review；bound 行不在（claim 后崩）→ needs_review（V1 保守：核实无旧执行后重派归 V2）。
+
+V1 已验/未验分账见单子 V1 勾选；真起子进程在具名栅栏硬杀的冒烟仍未验（CI 册用"装配销毁重建 + 盘上调用计数"模拟，如实分账）。

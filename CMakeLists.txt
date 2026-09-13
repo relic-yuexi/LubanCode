@@ -731,6 +731,11 @@ add_library(lubancode_engine STATIC
   src/gateway/control_server.cpp
   src/gateway/process.cpp
   src/gateway/status.cpp
+  # 常驻总装 V1:最小任务账(once/run-now)、本地 DurableReplyOutbox、
+  # job 控制命令文件与泵合同口。纯文件账,零 runtime 依赖。
+  src/gateway/automation_store.cpp
+  src/gateway/reply_outbox.cpp
+  src/gateway/work_pump.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
@@ -895,6 +900,10 @@ add_library(lubancode_runtime STATIC
   src/runtime/turn_ingress.cpp
   src/runtime/channel_session_host.cpp
   src/runtime/agent_channel_engine.cpp
+  # 常驻总装 V1:共用 headless 装配(从渠道引擎/SessionService 提炼,核齐
+  # 工具栅栏/预算/取消链/reply selection)与 Gateway 有界主泵总装。
+  src/runtime/headless_executor.cpp
+  src/runtime/automation_pump.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp

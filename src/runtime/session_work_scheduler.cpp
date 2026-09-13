@@ -22,6 +22,8 @@ int WorkPriority(WorkKind kind) {
         case WorkKind::ChannelTurn: return 0;  // 渠道消息与用户排队同档(§15.3)
         case WorkKind::GoalContinuation: return 1;
         case WorkKind::LoopTick: return 1;
+        case WorkKind::AutomationDue: return 1;  // 已到点 once/run-now:与
+                                                 // goal/loop 同档(V1 纯追加)
         case WorkKind::Maintenance: return 2;
     }
     return 2;

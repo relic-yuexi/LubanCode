@@ -35,6 +35,12 @@ enum class WorkKind {
                       // goal/loop 后头"),不掺 fairness 账。
     GoalContinuation, // evaluator=continue 的下一轮 goal iteration
     LoopTick,         // 到点的 loop 拍子
+    // Gateway 常驻总装 V1(纯追加不改旧档位):已到点的 automation
+    // occurrence——once 与人工 run-now(contracts §8:"已到点 one-shot 与
+    // 人工 run-now"排在用户/渠道直接来信之后、普通 recurring 之前;
+    // 与 goal/loop 同数值档,档内细分归 V2 周期调度)。Gateway 泵的候选
+    // 池里只有 automation 一族,不会与 goal/loop 的宿主泵互串。
+    AutomationDue,
     Maintenance,      // compact/摘要一类后台活(低)
 };
 

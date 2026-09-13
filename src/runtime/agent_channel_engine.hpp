@@ -32,6 +32,12 @@
 
 namespace lubancode::runtime {
 
+// binding 的 allow/deny 叠进 AgentProfile 的 tool_filter(每层只收窄)。
+// 渠道引擎与 Gateway headless 执行器共用(headless 提炼单 V1:两处不各养
+// 一份交集逻辑)。实现见 agent_channel_engine.cpp。
+agent::AgentProfile ApplyChannelToolPolicy(agent::AgentProfile profile,
+                                           const channel::ToolRoutePolicy& policy);
+
 class AgentChannelEngine : public ChannelTurnEngine {
 public:
     struct Options {

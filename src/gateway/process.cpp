@@ -511,6 +511,11 @@ GatewayProcess::StartResult GatewayProcess::Start() {
     Log("info", "boot " + boot_id_ + " pid " + std::to_string(self.pid) +
                     (safe_mode_ ? " SafeMode(连续非干净关机达阈值,业务面暂停;干净关机即退出)"
                                 : std::string()));
+    // 锁内 epoch 递给业务泵(§11.1:work 级 ownerEpoch 随 claim 落,
+    // = 持锁实例的 fencing 代号)。
+    if (options_.pump != nullptr) {
+        options_.pump->set_owner_epoch(lock_.owner_epoch());
+    }
     std::fprintf(stderr, "[gateway] profile=%s boot=%s pid=%lu%s\n",
                  (options_.paths.name.empty() ? std::string(kDefaultGatewayProfile)
                                               : options_.paths.name)
@@ -529,6 +534,7 @@ GatewayProcess::StartResult GatewayProcess::Start() {
 }
 
 int GatewayProcess::Run() {
+    bool pump_broken = false;
     while (!stop_requested_.load()) {
         if (g_gateway_signal_stop != 0) {
             RequestStop("signal:" + std::to_string(g_gateway_signal_stop));
@@ -537,6 +543,20 @@ int GatewayProcess::Run() {
         if (PollStopCommand(options_.paths.control_dir, boot_id_)) {
             RequestStop("stop_command");
             break;
+        }
+        // V1 有界主泵:SafeMode 业务面暂停(控制面照起,contracts §10);
+        // 每至多一枚执行 + 一轮投递 + 一轮恢复扫描,同步收口(取舍见
+        // work_pump.hpp:stop 在 turn 边界生效,宽限内收不净如实记
+        // shutdown_timeout)。
+        if (options_.pump != nullptr && !pump_broken && !safe_mode_) {
+            if (!options_.pump->TickOnce(options_.now_ms())) {
+                pump_broken = true;
+                Log("error", "主泵 broken(领域账写不进),业务面停摆;进程保留供诊断");
+                if (!options_.keep_running_on_pump_failure) {
+                    RequestStop("pump_broken");
+                    break;
+                }
+            }
         }
         SleepMs(options_.poll_interval_ms);
     }
@@ -549,13 +569,24 @@ int GatewayProcess::Run() {
 }
 
 int GatewayProcess::Shutdown(const std::string& reason) {
-    // 单子 §5.2 关机次序:先停止接活(主循环已出),再摘 wake,再收 turn,
-    // 再关 outbox/adapter,最后释放 lock。G1 无业务面,业务收口由钩子承载。
+    // 单子 V1 第一件事的收尾次序:先暂停接活(StopAccepting:不再受理
+    // 新命令/认领新 occurrence)→ 摘 wake(主循环已出,不再 TickOnce)
+    // → 收执行器与领域 writer(Close,宽限内收净才算 clean)。之后才是
+    // 既有钩子与 boot/shutdown 账、锁释放。
     WriteControl("draining", safe_mode_ ? "degraded" : "ok");
     Log("info", "shutdown begin(" + reason + ")");
 
     bool clean = true;
     std::string failed_hook;
+    if (options_.pump != nullptr) {
+        options_.pump->StopAccepting();
+        const int grace_ms = options_.config.shutdown_grace_secs * 1000;
+        if (!options_.pump->Close(grace_ms)) {
+            clean = false;
+            failed_hook = "work_pump";
+            Log("error", "主泵未在宽限内收净(grace " + std::to_string(grace_ms) + "ms)");
+        }
+    }
     for (const ShutdownHook& hook : hooks_) {
         bool done = false;
         try {

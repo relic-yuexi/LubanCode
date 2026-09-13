@@ -39,6 +39,12 @@ GatewayProfilePaths ResolveGatewayProfilePaths(const std::filesystem::path& root
     paths.boot_history = paths.profile_dir / "boot-history.jsonl";
     paths.logs_dir = paths.profile_dir / "logs";
     paths.log_file = paths.logs_dir / "gateway.log";
+    paths.automation_dir = paths.profile_dir / "automation";
+    paths.automation_log = paths.automation_dir / "jobs.jsonl";
+    paths.delivery_dir = paths.profile_dir / "delivery";
+    paths.outbox_log = paths.delivery_dir / "outbox.jsonl";
+    paths.replies_dir = paths.delivery_dir / "replies";
+    paths.published_dir = paths.delivery_dir / "out";
     return paths;
 }
 

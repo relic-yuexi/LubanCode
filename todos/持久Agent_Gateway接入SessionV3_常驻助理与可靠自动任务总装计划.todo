@@ -285,13 +285,13 @@ V3 的“assistant 消息”“当前上下文”“对外最终答复”不能�
 
 ### V1：最短纵向闭环——一次任务到本地结果
 
-- [ ] GatewayProcess 接有界主泵，复用现有 SessionWorkScheduler；先暂停接活，再摘 wake，再收执行器和 writer。
-- [ ] 新增最小 AutomationStore，先支持 once 和手动 run-now；持久任务创建走本地命令/控制服务，不直接改文件。
-- [ ] 提炼共用 headless 装配，核齐真实工具 Action、结果捕获、hook、预算和取消链。
-- [ ] 建 V3 新会话、执行、提交 reply selection，经本地 DurableReplyOutbox 出结果。
-- [ ] `status` 分别报 process、work、execution、delivery，不能拿“进程 running”冒充任务成功。
+- [x] GatewayProcess 接有界主泵，复用现有 SessionWorkScheduler；先暂停接活，再摘 wake，再收执行器和 writer。（`gateway::GatewayWorkPump` 合同口（engine 层，`src/gateway/work_pump.hpp`）+ `runtime::GatewayAutomationPump` 真装配（`src/runtime/automation_pump.*`）；`GatewayProcess::Options.pump` 递进，Run 每 tick 调 `TickOnce`（SafeMode 跳过），Shutdown 按 StopAccepting → 主循环出（摘 wake）→ Close(grace) 次序，泵没收净算 shutdown_timeout 不假写 clean；取件经 `PumpNextWork`（`WorkKind::AutomationDue` 纯追加，`session_work_scheduler.*`）；同步单飞取舍：stop 在 turn 边界生效，contracts §12 如实记。测试：`unit.gateway.test_gateway_automation_v1` 关机次序案（StopAccepting 后不取新活、Close 幂等）。）
+- [x] 新增最小 AutomationStore，先支持 once 和手动 run-now；持久任务创建走本地命令/控制服务，不直接改文件。（`src/gateway/automation_store.*`：jobs.jsonl 纯追加事件账（job.created/occurrence.created/claimed/bound/settled），JournalWriter PowerLoss 档、lazy 开写者、broken 传播；occurrenceId=hash(jobId+revision+slot) 计划内时间；幂等键同载荷回原回执、异载荷 conflict。创建入口：`gateway job add|run-now` CLI 落 `control/job-*.json` 命令文件（`src/gateway/work_pump.cpp` 写/消费两侧），泵消费进账即删；`job list`/status 走只读投影 `ReadAutomationProjection` 零建目录零写盘。测试：`unit.gateway.test_automation_store` 七案（定式/建账/幂等/claim-bind-settle/重启重建/坏账容错/写盘失败）。）
+- [x] 提炼共用 headless 装配，核齐真实工具 Action、结果捕获、hook、预算和取消链。（`src/runtime/headless_executor.*`：从 AgentChannelEngine/SessionService 提炼（`ApplyChannelToolPolicy` 提为共用导出）；开场/受理/派发走 SessionService 同一账路；补齐渠道引擎遗留——ToolTraceHub 挂桥真实工具 Action 落账、hook 四点（PreUser/PostUser/PreRequest 与渠道路同一派发点）、预算三根硬线（AgentRuntimeProfile 步数/墙钟/token）、取消链经 AgentLoop::Run cancel 旗贯通 wire 与工具；工具确认 fail closed 复用 ChannelConfirmAllows。未做中立 RuntimeAssembly 大框架（归 LubanCore 单阶段 B）。测试：`unit.gateway.test_gateway_automation_v1` 闭环案（含工具轮，模型 2 次工具 1 次）与取消链案。）
+- [x] 建 V3 新会话、执行、提交 reply selection，经本地 DurableReplyOutbox 出结果。（执行器强制 V3（v2 场明报 `gateway.requires_v3` 拒绝不双写，册内钉 v2refuse 案）；`gateway.work.bound`（ownerEpoch/attempt/inputRef）落 V3 PowerLoss；回复冻结策略 `selectionId="sel-"+turnId`、正文=turn 内最后 assistant text 全文（`PlanReplySelection` 纯函数执行/恢复共用）；原件先落 `delivery/replies/` → `reply.selection.committed` 落 V3 → 本地 `DurableReplyOutbox`（`src/gateway/reply_outbox.*`：outbox.jsonl+replies/+out/<deliveryId>.txt；deliveryId=hash(selectionId+target+ordinal)；投递幂等——已发布核 hash 补回执、hash 不符/原件缺失 flagged 隔离）。测试：`unit.gateway.test_reply_outbox` 六案 + `unit.gateway.test_gateway_automation_v1` 闭环案（V3 流两枚 kind 断言、发布文件内容）。）
+- [x] `status` 分别报 process、work、execution、delivery，不能拿“进程 running”冒充任务成功。（`GatewayStatusSections`/`ProbeStatusSections`/`SectionsToJson`/`FormatSectionLines`（`src/gateway/status.*`）：process 活探针与三栏领域只读投影分开采分开报；`gateway status` 文本面四栏、--json 加 work/execution/delivery 键。测试：`unit.gateway.test_gateway_status_sections` 三案（空 profile 零副作用、有账分报、没跑过不画成功）。）
 
-放行：假 provider + 受控工具，进程退出重启后能查原任务与原结果；生成结束、入 outbox、发布本地文件三处硬杀，都不多调用模型或工具。
+放行：假 provider + 受控工具，进程退出重启后能查原任务与原结果；生成结束、入 outbox、发布本地文件三处硬杀，都不多调用模型或工具。（已过，CI 可重复册：`unit.gateway.test_gateway_automation_v1`——“进程退出重启”以装配销毁重建模拟（盘上账唯一真源），模型/工具调用计数落盘上 calls.log 作“不多调用”判据；重启可查案（泵销毁后经只读投影查回任务/结果/正文）；三窗注入 `fault_injection`/`fault_after_enqueue`：生成结束（AfterGeneration）/selection 已落（AfterSelectionCommitted）/入 outbox 后发布前（fault_after_enqueue）——重开后计数不多一跳、结果落文件、occurrence=succeeded；发布后回执未落窗在 `unit.gateway.test_reply_outbox` receipt-window 案（补回执不出第二份）。真杀进程/重启冒烟与断电一致性**未验**；恢复面 V1 只做“补齐不重跑”（生成未完成/claim 后崩 → needs_review 停审，重派归 V2）已验；V0 留的“V3 已开轮、work 未记 turnRef”真窗口裁决属 V2 §八全表，**未验**。） PR：#63（https://github.com/relic-yuexi/LubanCode/pull/63），头提交 81f4b0b0。
 
 ### V2：周期调度与可靠接管
 
