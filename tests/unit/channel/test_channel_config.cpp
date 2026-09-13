@@ -117,6 +117,110 @@ TEST_CASE("密钥来源三种 + 明文兼容") {
           CredentialSource::InlinePlaintext);
 }
 
+// ---- QQ 接入单 Q0 ------------------------------------------------------------
+
+TEST_CASE("tools 上限字段:渠道段/账号段都收,presence 显式保留") {
+    const auto parsed = Parse(R"({
+      "qqbot": {
+        "tools": {"allow": ["read_file", "search"], "deny": ["run_command"]},
+        "accounts": {
+          "main": {"tools": {"allow": ["read_file"]}},
+          "capped_empty": {"tools": {"allow": []}},
+          "no_tools": {}
+        }
+      }
+    })");
+    REQUIRE(parsed.has_value());
+    const ChannelUserConfig& channel = parsed->at("qqbot");
+    REQUIRE(channel.tools.allow.has_value());
+    CHECK(*channel.tools.allow == std::vector<std::string>{"read_file", "search"});
+    REQUIRE(channel.tools.deny.size() == 1);
+    CHECK(channel.tools.deny[0] == "run_command");
+
+    const ChannelAccountUserConfig& main = channel.accounts.at("main");
+    REQUIRE(main.tools.allow.has_value());
+    CHECK(*main.tools.allow == std::vector<std::string>{"read_file"});
+    CHECK(main.tools.deny.empty());
+
+    // allow=[]:显式空名单(禁全部工具),不是"不设上限"。
+    const ChannelAccountUserConfig& capped = channel.accounts.at("capped_empty");
+    REQUIRE(capped.tools.allow.has_value());
+    CHECK(capped.tools.allow->empty());
+
+    // 没写 tools:零上限(nullopt)。
+    CHECK_FALSE(channel.accounts.at("no_tools").tools.allow.has_value());
+
+    // 只写 deny 不写 allow:同样合法(nullopt + deny)。
+    const auto deny_only = Parse(
+        R"({"qqbot": {"accounts": {"m": {"tools": {"deny": ["shell"]}}}}})");
+    REQUIRE(deny_only.has_value());
+    const auto& policy = deny_only->at("qqbot").accounts.at("m").tools;
+    CHECK_FALSE(policy.allow.has_value());
+    REQUIRE(policy.deny.size() == 1);
+}
+
+TEST_CASE("tools 上限字段:坏类型/未知字段明拒") {
+    std::string error;
+    CHECK_FALSE(Parse(R"({"qqbot": {"tools": {"allow": "read_file"}}})", &error).has_value());
+    CHECK(error.find("tools.allow") != std::string::npos);
+
+    CHECK_FALSE(Parse(R"({"qqbot": {"tools": {"maybe": 1}}})", &error).has_value());
+    CHECK(error.find("tools.maybe") != std::string::npos);
+
+    CHECK_FALSE(Parse(R"({"qqbot": {"accounts": {"m": {"tools": []}}}})", &error).has_value());
+    CHECK(error.find("tools") != std::string::npos);
+}
+
+TEST_CASE("QQ 模板:逐字段显式,不改全渠道默认值迁就 QQ") {
+    const ChannelAccountUserConfig template_account = MakeQqTemplateAccount();
+    CHECK_FALSE(template_account.enabled);
+    CHECK(template_account.transport == "websocket");
+    CHECK(template_account.dm_policy == DmPolicy::Pairing);
+    CHECK(template_account.group_policy == GroupPolicy::Disabled);
+    CHECK_FALSE(template_account.allow_bots);
+    CHECK(template_account.require_mention);
+    CHECK(template_account.reply.mode == ReplyMode::Final);
+    REQUIRE(template_account.tools.allow.has_value());
+    CHECK(*template_account.tools.allow == std::vector<std::string>{"read_file", "search"});
+
+    // 全渠道默认值不动:别的账号/别的渠道照旧。
+    const auto parsed = Parse(R"({"other": {"accounts": {"m": {}}}})");
+    REQUIRE(parsed.has_value());
+    const auto& other = parsed->at("other").accounts.at("m");
+    CHECK(other.group_policy == GroupPolicy::Allowlist);  // 不是 disabled
+    CHECK(other.reply.mode == ReplyMode::Block);          // 不是 final
+    CHECK(other.dm_policy == DmPolicy::Pairing);
+}
+
+TEST_CASE("ID 校验:拼不进路径段的 id 才合法") {
+    CHECK(IsValidChannelId("qqbot"));
+    CHECK(IsValidChannelId("feishu-2"));
+    CHECK(IsValidChannelAccountId("main"));
+    CHECK_FALSE(IsValidChannelId(""));
+    CHECK_FALSE(IsValidChannelId("."));
+    CHECK_FALSE(IsValidChannelId(".."));
+    CHECK_FALSE(IsValidChannelId("a/b"));
+    CHECK_FALSE(IsValidChannelId("a\\b"));
+    CHECK_FALSE(IsValidChannelId("C:temp"));
+    CHECK_FALSE(IsValidChannelId("has space"));
+    CHECK_FALSE(IsValidChannelId(std::string("a") + std::string(1, '\n')));
+    CHECK_FALSE(IsValidChannelId(std::string(65, 'a')));
+}
+
+TEST_CASE("多来源并配: DescribeCredentialSource 按解析优先级报最高档") {
+    // file > env > inline(configuration.md §4;resolver 同口径)。
+    const auto parsed = Parse(R"({
+      "all_three": {"accounts": {"m": {
+        "secret_file": "/secure/qq.key", "secret_env": "ENV", "secret": "plain"}}},
+      "env_and_inline": {"accounts": {"m": {"secret_env": "ENV", "secret": "plain"}}}
+    })");
+    REQUIRE(parsed.has_value());
+    CHECK(DescribeCredentialSource(parsed->at("all_three").accounts.at("m")) ==
+          CredentialSource::FromFile);
+    CHECK(DescribeCredentialSource(parsed->at("env_and_inline").accounts.at("m")) ==
+          CredentialSource::FromEnv);
+}
+
 TEST_CASE("config 合并:全局 channels 进 Config,项目级 channels 明拒,没段零变化") {
     const LubancodeEnvValues env{};
 

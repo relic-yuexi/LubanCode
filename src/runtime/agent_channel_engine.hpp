@@ -22,13 +22,16 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "agent/agent.hpp"
 #include "channel/channel_router.hpp"
+#include "channel/tool_guard.hpp"
 #include "hooks/dispatcher.hpp"
 #include "runtime/channel_session_host.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/turn_ingress.hpp"
+#include "tools/registry.hpp"
 
 namespace lubancode::runtime {
 
@@ -47,7 +50,12 @@ public:
         std::string model;          // 会话模型(存档 meta 用)
         std::string cwd;            // 会话目录(身份按它四级裁决,不认进程 cwd)
         std::string lubancode_version;
-        channel::ToolRoutePolicy tools;  // binding 工具策略(fail closed 裁定用)
+        // 会话级工具策略(五层交集的冻结版本;引擎建档时的暴露面上限)。
+        // 逐轮策略随 TurnIngress.tools 进来——比会话级窄时由执行口闸拦下。
+        channel::ToolRoutePolicy tools;
+        // 受保护路径闸(QQ 接入单 Q0):默认表(全局 config.json/渠道状态根/
+        // 信任账,channel/tool_guard)之外追加的根(测试注入临时根用)。
+        std::vector<std::string> extra_protected_roots;
         // LuaHook 单 P0-B:中间件核宿主(进程级 HookDispatcher,借用指针,须
         // 活过引擎生命周期)。空 = 没装配,PreUser/PostUser/PreRequest 一处
         // 不调,行为与从前逐字节一致。与 CLI/one-shot 共用同一 runtime 派发
@@ -70,6 +78,12 @@ public:
 private:
     Options options_;
     SessionRuntime session_runtime_;
+    // 受保护路径闸(QQ 接入单 Q0):默认表 + 装配层追加的根。先于守卫
+    // 注册表声明(初始化次序),守卫壳各持一份拷贝。
+    channel::ChannelProtectedPaths protected_paths_;
+    // 守卫注册表:包一层 Tool::execute,读文件/搜索类工具的本地路径
+    // 入参过 canonical 比对。须先于 agent_ 声明,agent_ 持它的引用。
+    std::unique_ptr<tools::ToolRegistry> guarded_registry_;
     agent::Agent agent_;
 };
 

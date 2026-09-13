@@ -37,27 +37,28 @@ _阶段 0 冻结件。列出资产、敌手、入口与防线；定死哪些数�
 
 ## 3. 权限交集与 fail closed
 
-最终有效工具：
+最终有效工具（QQ 接入单 Q0 起的实装口径）：
 
 ```text
 主 Agent 工具
 ∩ Channel 全局上限
 ∩ Account 上限
-∩ Binding 上限
-∩ Conversation 上限
-- deny 并集
+∩ 每一条命中 binding 的上限   （所有命中的都算，不只最具体那条）
+- （Channel ∪ Account ∪ 所有命中 binding 的 deny 并集）
 ```
 
-每一层只可收窄。解析时保留来源账。
+每一层只可收窄。每层 allow 未设置 = 不添上限；`allow: []` = 该层禁全部工具。Agent 选择与权限分两本账：Agent 取最具体 binding（同档冲突整事件拒绝），但**具体 binding 抹不掉宽层 deny**。解析时保留来源账——哪些层出了手，随路由决策冻结带进执行，执行前重验准入。
 
 Channel Session 没本地用户守着键盘。现有 confirm 档遇上工具审批，首版必须 fail closed：
 
-- 工具已在全局账号政策与 binding allowlist 明确允许：可执行。
-- 工具须确认但没有远端审批能力：拒绝，并回一条短说明。
+- 工具已在某层**显式 allow** 列名，且交集后仍可用（未进任何 deny）：可执行。
+- 工具须确认但没有远端审批能力：拒绝，并回一条短说明。没有任何显式 allow 时，须确认工具一律拒绝。
 - deny 工具：直接拒绝。
 - project policy 只能继续收窄。
 
-不为"机器人好用"便把 confirm 偷换成 auto。远端按钮/卡片审批留二期；无 interaction 能力的平台仍 fail closed。模型不可提供 sender id，不可生成 approval id，不可改 hash。
+不为"机器人好用"便把 confirm 偷换成 auto，也不在 Gateway 全局改 auto。远端按钮/卡片审批留二期；无 interaction 能力的平台仍 fail closed。模型不可提供 sender id，不可生成 approval id，不可改 hash。
+
+**受保护路径闸**：读文件/搜索类工具统一拦账号凭据与全局密钥配置——全局 `config.json`、`<home>/.lubancode/channels/` 状态根、信任账（package-trust/plugin-trust）、锁文件。检查在**实际工具执行入口**做（包装 Tool::execute，不只过滤工具名），按 canonical 路径比对（符号链接/重解析点解析到真实目标；大小写与斜杠变体归一），绕不过。QQ 首版模板的上限是 `read_file`/`search` 两枚核过注册名的只读工具；首版不开放任意 shell——后续要开，须同时接系统执行隔离，不得拿 shell 字符串黑名单冒充沙箱。
 
 ## 4. 关联键与可观测上限
 

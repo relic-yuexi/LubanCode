@@ -726,6 +726,12 @@ add_library(lubancode_engine STATIC
   # 多渠道消息接入单阶段 3:ChannelRouter(准入链/binding/session key/
   # 工具与记忆策略;manager 的路由准入经它)。
   src/channel/channel_router.cpp
+  # QQ 机器人接入单 Q0:权限与激活合同。激活决策(五闸权威函数)、凭据
+  # resolver(来源优先级/secret_file 读取规矩/泄露禁令/sidecar 环境白名单)、
+  # 受保护路径闸的纯谓词(执行入口的包装在 runtime/agent_channel_engine)。
+  src/channel/activation.cpp
+  src/channel/credentials.cpp
+  src/channel/tool_guard.cpp
   # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
   # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
   # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include

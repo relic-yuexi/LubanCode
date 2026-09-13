@@ -88,7 +88,11 @@ bool CanIngressTransition(IngressEventState from, IngressEventState to) {
         case IngressEventState::Routed:
             return to == IngressEventState::Queued || to == IngressEventState::RateLimited;
         case IngressEventState::Queued:
-            return to == IngressEventState::Running || to == IngressEventState::RateLimited;
+            // queued -> rejected 是"执行前重验准入"的退场边(QQ 接入单 Q0):
+            // 排队期间权限撤销(撤 allow_from/收窄 binding),取件时重跑
+            // 路由不过的输入就地落 rejected,不进执行。
+            return to == IngressEventState::Running || to == IngressEventState::RateLimited ||
+                   to == IngressEventState::Rejected;
         case IngressEventState::Running:
             return to == IngressEventState::Replied ||
                    to == IngressEventState::CompletedWithoutReply ||

@@ -42,6 +42,13 @@ using lubancode::test_support::FakeChannelSidecar;
 
 namespace {
 
+// 路径塞进 tool_use 的 JSON 入参:UTF-8 + 反斜杠统一正斜杠(合法 JSON
+// 转义 + 工具与路径闸都认正斜杠)。
+std::string JsonSafePath(const std::filesystem::path& path) {
+    const std::u8string u8 = path.generic_u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
 // ---- 假后端:按脚本吐流式事件(记下收到的请求,供工具权限断言) -----------
 class ScriptBackend final : public api::Backend {
 public:
@@ -181,9 +188,12 @@ struct MiniGateway {
         manager->Pump("qqbot", "main");
     }
 
-    void InstallHost(channel::ToolRoutePolicy tools) {
+    void InstallHost(channel::ToolRoutePolicy tools,
+                     std::vector<std::string> extra_protected_roots = {}) {
         // 引擎工厂:每场 session 一只真引擎(真 SessionRuntime 落盘 + 真 Agent)。
-        host.SetEngineFactory([this, tools](const std::string& /*session_key*/) {
+        host.SetEngineFactory([this, tools,
+                               roots = std::move(extra_protected_roots)](
+                                  const std::string& /*session_key*/) {
             runtime::AgentChannelEngine::Options engine_options;
             engine_options.sessions_dir = (root / "sessions").string();
             engine_options.workspaces_dir = (root / "workspaces").string();  // P0-2:会话账根
@@ -191,6 +201,7 @@ struct MiniGateway {
             engine_options.model = "test-model";
             engine_options.cwd = root.string();
             engine_options.tools = tools;
+            engine_options.extra_protected_roots = roots;
             agent::AgentProfile profile;
             profile.provider = "test";
             profile.request.model = "test-model";
@@ -218,8 +229,10 @@ struct MiniGateway {
     }
 
     // sidecar 来信 -> manager 入账 -> 取活 -> 折 ingress -> 泵一轮。
+    // per_turn_tools 非空时随入账冻结(Q0);空 = 引擎用会话级策略。
     std::optional<runtime::ChannelSessionHost::TurnOutcome> DeliverOne(
-        const channel::ChannelInboundEvent& event) {
+        const channel::ChannelInboundEvent& event,
+        const channel::ToolRoutePolicy* per_turn_tools = nullptr) {
         sidecar.EmitInboundEvent(event);
         manager->Pump("qqbot", "main");  // 发出站帧 + 收 sidecar 字节(入账/ack)
         auto work = manager->TakeNextWork("qqbot", "main");
@@ -227,7 +240,8 @@ struct MiniGateway {
         REQUIRE(work->route.status == channel::RouteDecision::Status::Admitted);
         auto ingress = runtime::MakeChannelTurnIngress(
             work->event, work->route.provenance, work->route.session_key,
-            work->route.memory.user_memory || work->route.memory.project_memory);
+            work->route.memory.user_memory || work->route.memory.project_memory,
+            per_turn_tools != nullptr ? per_turn_tools : &work->route.tools);
         host.Submit(std::move(ingress));
         return host.PumpOne();
     }
@@ -308,7 +322,7 @@ TEST_CASE("验收三:工具权限不越过 binding,confirm fail closed") {
 
         // binding:只许 read_file,deny run_shell。
         channel::ToolRoutePolicy tools;
-        tools.allow = {"read_file"};
+        tools.allow = std::vector<std::string>{"read_file"};
         tools.deny = {"run_shell"};
         gw.InstallHost(tools);
 
@@ -329,7 +343,7 @@ TEST_CASE("验收三:工具权限不越过 binding,confirm fail closed") {
                 if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
                     if (result->tool_use_id == "t1") {
                         CHECK(result->is_error);
-                        CHECK(result->content.find("渠道 binding") != std::string::npos);
+                        CHECK(result->content.find("渠道工具上限") != std::string::npos);
                         saw_denial = true;
                     }
                 }
@@ -417,4 +431,145 @@ TEST_CASE("准入与 pairing:allowlist 外的 sender 不进 Agent,命令口子�
     std::string error;
     CHECK_FALSE(gw.manager->ApprovePairing("qqbot", "main", "DEADBEEF", &error).has_value());
     CHECK_FALSE(error.empty());
+}
+
+// ---- QQ 接入单 Q0:受保护路径闸与逐轮策略 ---------------------------------------
+
+TEST_CASE("Q0:读文件工具碰受保护路径——在实际执行入口拦,不靠工具名过滤") {
+    std::atomic<int> read_calls{0};
+    MiniGateway gw("path_guard");
+    // 名字叫 read_file 的探针工具:路径闸包装在 execute 前,不看工具本体。
+    gw.registry.Register(std::make_unique<ProbeTool>("read_file", false, &read_calls));
+
+    // 受保护根:临时目录下建一棵"密钥树",护住它。
+    const std::string protected_root = JsonSafePath(gw.root / "vault");
+    std::filesystem::create_directories(gw.root / "vault");
+    { std::ofstream(gw.root / "vault" / "credentials", std::ios::trunc); }
+
+    channel::ToolRoutePolicy tools;
+    tools.allow = std::vector<std::string>{"read_file"};
+    gw.InstallHost(tools, {protected_root});
+
+    // 模型点名读受保护路径:工具在允许名单里(名字过滤放行),路径闸拦下。
+    const std::string secret_path = JsonSafePath(gw.root / "vault" / "credentials");
+    const std::string call_input = "{\"path\": \"" + secret_path + "\"}";
+    gw.backend.scripts.push_back({
+        api::MessageStart{"msg", "test-model"},
+        api::ToolUseStart{0, "t1", "read_file"},
+        api::ToolUseInputDelta{0, call_input},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+        api::MessageStart{"msg", "test-model"},
+        api::TextDelta{"读不了"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{}},
+    });
+    gw.backend.scripts.push_back(TextScript("好吧"));
+
+    auto outcome = gw.DeliverOne(MakeDm("d1", "pe1", "dm-owner", "读一下密钥文件"));
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->ok);
+    CHECK(read_calls.load() == 0);  // 执行入口拦住:探针零执行
+
+    // tool_result 带拒绝文案(点名受保护路径,不冒充工具失败)。
+    REQUIRE(gw.backend.captured.size() == 2);
+    bool saw_denial = false;
+    for (const auto& message : gw.backend.captured[1].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                if (result->tool_use_id == "t1") {
+                    CHECK(result->is_error);
+                    CHECK(result->content.find("受保护路径") != std::string::npos);
+                    saw_denial = true;
+                }
+            }
+        }
+    }
+    CHECK(saw_denial);
+
+    // 同一工具读护外路径:照常执行。
+    const std::string open_path = JsonSafePath(gw.root / "plain.txt");
+    { std::ofstream(gw.root / "plain.txt", std::ios::trunc) << "hello"; }
+    const std::string ok_input = "{\"path\": \"" + open_path + "\"}";
+    gw.backend.scripts.push_back({
+        api::MessageStart{"msg", "test-model"},
+        api::ToolUseStart{0, "t2", "read_file"},
+        api::ToolUseInputDelta{0, ok_input},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+        api::MessageStart{"msg", "test-model"},
+        api::TextDelta{"读到了"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{}},
+    });
+    auto second = gw.DeliverOne(MakeDm("d2", "pe2", "dm-owner", "读普通文件"));
+    REQUIRE(second.has_value());
+    CHECK(second->ok);
+    CHECK(read_calls.load() == 1);
+}
+
+TEST_CASE("Q0:逐轮策略收窄——会话建档后撤销,执行口按冻结版本拦下") {
+    std::atomic<int> read_calls{0};
+    std::atomic<int> search_calls{0};
+    MiniGateway gw("per_turn_narrow");
+    gw.registry.Register(std::make_unique<ProbeTool>("read_file", false, &read_calls));
+    gw.registry.Register(std::make_unique<ProbeTool>("search", false, &search_calls));
+
+    // 会话级策略:read_file + search 都在(建档时的暴露面)。
+    channel::ToolRoutePolicy session_tools;
+    session_tools.allow = std::vector<std::string>{"read_file", "search"};
+    gw.InstallHost(session_tools);
+
+    // 逐轮冻结策略:只剩 search(权限在排队期间被收窄,重验后的新账)。
+    channel::ToolRoutePolicy turn_tools;
+    turn_tools.allow = std::vector<std::string>{"search"};
+
+    // 模型调 read_file:暴露面看得见,但本轮策略闸拦在执行口。
+    gw.backend.scripts.push_back({
+        api::MessageStart{"msg", "test-model"},
+        api::ToolUseStart{0, "t1", "read_file"},
+        api::ToolUseInputDelta{0, "{}"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+        api::MessageStart{"msg", "test-model"},
+        api::TextDelta{"行吧"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{}},
+    });
+    auto outcome = gw.DeliverOne(MakeDm("d1", "pe1", "dm-owner", "读一下配置"), &turn_tools);
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->ok);
+    CHECK(read_calls.load() == 0);  // 逐轮闸拦住,零执行
+
+    REQUIRE(gw.backend.captured.size() == 2);
+    bool saw_denial = false;
+    for (const auto& message : gw.backend.captured[1].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                if (result->tool_use_id == "t1") {
+                    CHECK(result->is_error);
+                    CHECK(result->content.find("本轮渠道工具上限") != std::string::npos);
+                    saw_denial = true;
+                }
+            }
+        }
+    }
+    CHECK(saw_denial);
+
+    // 同一轮策略里点名的 search:照常执行。
+    gw.backend.scripts.push_back({
+        api::MessageStart{"msg", "test-model"},
+        api::ToolUseStart{0, "t2", "search"},
+        api::ToolUseInputDelta{0, "{}"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+        api::MessageStart{"msg", "test-model"},
+        api::TextDelta{"搜到了"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{}},
+    });
+    auto second = gw.DeliverOne(MakeDm("d2", "pe2", "dm-owner", "搜一下"), &turn_tools);
+    REQUIRE(second.has_value());
+    CHECK(second->ok);
+    CHECK(search_calls.load() == 1);
 }

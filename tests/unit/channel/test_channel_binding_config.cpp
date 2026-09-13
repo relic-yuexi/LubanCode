@@ -55,8 +55,9 @@ TEST_CASE("bindings 解析:冻结形状全字段") {
     CHECK(binding.match.conversation->kind == "group");
     CHECK(binding.match.conversation->id == "group_openid");
     CHECK(binding.match.thread_id == "t-1");
-    REQUIRE(binding.policy.tools.allow.size() == 2);
-    CHECK(binding.policy.tools.allow[0] == "read_file");
+    REQUIRE(binding.policy.tools.allow.has_value());
+    REQUIRE(binding.policy.tools.allow->size() == 2);
+    CHECK((*binding.policy.tools.allow)[0] == "read_file");
     REQUIRE(binding.policy.tools.deny.size() == 1);
     CHECK(binding.policy.tools.deny[0] == "shell");
     REQUIRE(binding.policy.memory.has_value());
@@ -75,6 +76,34 @@ TEST_CASE("bindings 解析:match.channel 指别家渠道明拒") {
                               &error);
     CHECK_FALSE(config.has_value());
     CHECK(error.find("不一致") != std::string::npos);
+}
+
+TEST_CASE("bindings 解析:allow 未设置与 allow=[] 分开(Q0 presence 合同)") {
+    // 没写 tools.allow:binding 不设上限(旧语义,兼容)。
+    const auto legacy = Parse(R"({
+      "qqbot": {"bindings": [{"match": {"account": "main"}}]}
+    })");
+    REQUIRE(legacy.has_value());
+    CHECK_FALSE(legacy->at("qqbot").bindings[0].policy.tools.allow.has_value());
+
+    // allow=[]:显式空名单 = 这条 binding 禁全部工具。
+    const auto empty_cap = Parse(R"({
+      "qqbot": {"bindings": [{"match": {"account": "main"},
+                              "policy": {"tools": {"allow": []}}}]}
+    })");
+    REQUIRE(empty_cap.has_value());
+    const auto& tools = empty_cap->at("qqbot").bindings[0].policy.tools;
+    REQUIRE(tools.allow.has_value());
+    CHECK(tools.allow->empty());
+
+    // 只写 deny 不写 allow:照旧合法(nullopt + deny)。
+    const auto deny_only = Parse(R"({
+      "qqbot": {"bindings": [{"match": {"account": "main"},
+                              "policy": {"tools": {"deny": ["shell"]}}}]}
+    })");
+    REQUIRE(deny_only.has_value());
+    CHECK_FALSE(deny_only->at("qqbot").bindings[0].policy.tools.allow.has_value());
+    REQUIRE(deny_only->at("qqbot").bindings[0].policy.tools.deny.size() == 1);
 }
 
 TEST_CASE("bindings 解析:缺 match、未知字段、坏类型明拒") {

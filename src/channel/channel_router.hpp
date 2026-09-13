@@ -11,7 +11,9 @@
 //   - session key(§8):channel:<ch>:<acct>:<kind>:<conv>[:thread:<t>];
 //     群聊按 group_scope 四档展开 sender/thread 维度。
 //   - binding(§8):具体到宽五档,同档命中两条报 binding_conflict,
-//     不按配置次序碰运气。
+//     不按配置次序碰运气。Agent 选择与工具权限分两本账(QQ 接入单 Q0):
+//     Agent 取最具体 binding;工具上限收集所有命中 binding 与渠道/账号
+//     上限做交集再减 deny 并集,具体 binding 抹不掉宽层 deny。
 //   - memory 默认(§8):owner DM 可按 binding 明开;非 owner DM 与 group
 //     全关——这份默认表是安全边界,不是偏好。
 //
@@ -53,13 +55,23 @@ std::string MakeChannelSessionKey(const std::string& channel_id, const std::stri
 // ---- 路由决策 -------------------------------------------------------------
 
 struct ToolRoutePolicy {
-    // allow 非空 = 只许这些工具(再叠 deny 排除);空 = binding 没设上限。
-    std::vector<std::string> allow;
+    // 五层交集后的有效上限(QQ 接入单 Q0;configuration.md §8):
+    //   nullopt = 没有任何层设 allow(不添上限,仍受 Agent 自身工具表管);
+    //   有值(可为空)= 只许名单内,空名单即禁全部工具。
+    // 值 = 渠道上限 ∩ 账号上限 ∩ 所有命中 binding 上限(逐层取显式 allow
+    // 的交集);deny = 各层 deny 的并集——具体 binding 抹不掉宽层 deny。
+    std::optional<std::vector<std::string>> allow;
     std::vector<std::string> deny;
-    // 来源账:哪些 binding 出的手(空 = 无 binding 参与)。
+    // 来源账:哪些层出了手(如 "channel+account+binding[1]+binding[3]";
+    // 空 = 无层参与,零上限)。
     std::string source;
 
+    // 名字放行判定:deny 永远赢;显式 allow 名单外不放。
     bool Allows(const std::string& tool_name) const;
+    // 须确认(needs_confirm)工具的"明确授权"判定(security.md §3):
+    // 至少一层显式 allow 列了它(故 allow 必有值),且并完 deny 仍可用。
+    // 没有任何显式 allow = 无明确授权 = 拒——渠道会话没有审批渠道。
+    bool ExplicitlyAllows(const std::string& tool_name) const;
 };
 
 struct MemoryRoutePolicy {
@@ -97,6 +109,8 @@ struct RouteInput {
     const ChannelInboundEvent* event = nullptr;
     // 事件所属账号的配置(manager 的 AccountEntry.config)。
     const ChannelAccountUserConfig* account = nullptr;
+    // 渠道层工具上限(§7 五层交集的渠道层;可空 = 宿主没递,渠道层不参与)。
+    const ChannelToolsUserPolicy* channel_tools = nullptr;
     // 渠道层 bindings(§8)。
     const std::vector<ChannelBindingConfig>* bindings = nullptr;
     // pairing 查询口;空 = 无 pairing 账(pairing 策略下未知 sender 拒)。

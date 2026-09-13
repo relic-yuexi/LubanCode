@@ -3,6 +3,7 @@
 
 #include "config/config.hpp"
 #include "runtime/hook_host_services.hpp"
+#include "runtime/interaction.hpp"
 #include "runtime/middleware_runtime.hpp"
 #include "runtime/middleware_v3_sink.hpp"
 #include "tools/path_utils.hpp"
@@ -16,16 +17,63 @@ namespace {
 // (ApplyChannelToolPolicy 的定义在下方具名空间外——V1 起与 Gateway
 // headless 执行器共用,公开导出。)
 
+// 受保护路径闸的包装层(QQ 接入单 Q0;security.md §3):拦在"实际工具
+// 执行入口"——不管这枚调用从哪条路来(直名调用/延迟挂载/tool_invoke
+// 解引用),Registry 里查到的都是这层壳,execute 前先过路径闸。只查
+// 认得的路径入参(read_file.path/search.path,见 channel::ChannelToolPathBlocked),
+// 其余工具透传——工具能力收窄归五层交集,这里管的是"允许的工具也不许
+// 碰凭据与全局密钥配置"。
+class GuardedChannelTool : public tools::Tool {
+public:
+    GuardedChannelTool(tools::Tool& inner, channel::ChannelProtectedPaths protected_paths,
+                       std::string default_search_root)
+        : inner_(inner),
+          protected_paths_(std::move(protected_paths)),
+          default_search_root_(std::move(default_search_root)) {}
+
+    std::string name() const override { return inner_.name(); }
+    std::string description() const override { return inner_.description(); }
+    nlohmann::json input_schema() const override { return inner_.input_schema(); }
+    bool needs_confirm() const override { return inner_.needs_confirm(); }
+    tools::ApprovalClass approval_class() const override { return inner_.approval_class(); }
+    bool deferred() const override { return inner_.deferred(); }
+
+    tools::Tool::Result execute(const nlohmann::json& input) override {
+        if (const std::string blocked = channel::ChannelToolPathBlocked(
+                name(), input, protected_paths_, default_search_root_);
+            !blocked.empty()) {
+            return tools::Tool::Result::Error(blocked);
+        }
+        return inner_.execute(input);
+    }
+
+    tools::Tool::Result execute(const nlohmann::json& input,
+                                const tools::ToolExecutionContext& context) override {
+        if (const std::string blocked = channel::ChannelToolPathBlocked(
+                name(), input, protected_paths_, default_search_root_);
+            !blocked.empty()) {
+            return tools::Tool::Result::Error(blocked);
+        }
+        return inner_.execute(input, context);
+    }
+
+private:
+    tools::Tool& inner_;
+    channel::ChannelProtectedPaths protected_paths_;
+    std::string default_search_root_;
+};
+
 }  // namespace
 
-// §16.2 的权限交集在暴露面执法:binding 的 allow/deny 叠进 AgentProfile 的
-// tool_filter(原 profile 已有过滤的先过,再过渠道层——每层只收窄)。
-// 被滤掉的工具模型看都看不见;看得见但 needs_confirm 的调用点再由
-// on_tool_confirm 的 fail closed 裁定(两层各管一段)。
+// §16.2 的权限交集在暴露面执法:五层交集后的 allow/deny(渠道/账号/
+// 所有命中 binding)叠进 AgentProfile 的 tool_filter(原 profile 已有
+// 过滤的先过,再过渠道层——每层只收窄)。被滤掉的工具模型看都看不见;
+// 看得见但 needs_confirm 的调用点再由 on_tool_confirm 的 fail closed
+// 裁定;逐轮收窄由 RunTurn 的 on_pre_tool_use_hook 闸兜住(三层各管一段)。
 agent::AgentProfile ApplyChannelToolPolicy(agent::AgentProfile profile,
                                            const channel::ToolRoutePolicy& policy) {
-    if (policy.allow.empty() && policy.deny.empty()) {
-        return profile;  // binding 没设上限:不添乱,交给 Agent 自身工具表
+    if (!policy.allow.has_value() && policy.deny.empty()) {
+        return profile;  // 没有任何层设上限:不添乱,交给 Agent 自身工具表
     }
     auto prior = profile.tool_filter;
     const channel::ToolRoutePolicy policy_copy = policy;
@@ -36,8 +84,9 @@ agent::AgentProfile ApplyChannelToolPolicy(agent::AgentProfile profile,
         return policy_copy.Allows(tool.name());
     };
     profile.tool_filter_denial =
-        "channel.binding_denied|该工具不在渠道 binding 的 tools 允许名单内"
-        "(allowlist 没列或进了 deny)。要放行须在全局 config 的渠道 binding 显式声明。";
+        "channel.policy_denied|该工具不在渠道工具上限的允许名单内(渠道/账号/"
+        "binding 的 tools.allow 交集没列它,或进了任一层 deny)。要放行须在全局 "
+        "config 的渠道段/账号段/binding 显式声明。";
     return profile;
 }
 
@@ -63,7 +112,41 @@ AgentChannelEngine::AgentChannelEngine(api::Backend& backend, tools::ToolRegistr
         }
         return runtime_options;
     }()),
-      agent_(backend, registry, ApplyChannelToolPolicy(std::move(profile), options_.tools)) {}
+      protected_paths_([this]() {
+          // 受保护路径闸(Q0):默认表 + 装配层追加的根。
+          channel::ChannelProtectedPaths paths = channel::DefaultChannelProtectedPaths();
+          for (const std::string& root : options_.extra_protected_roots) {
+              if (!root.empty()) {
+                  paths.roots.push_back(root);
+              }
+          }
+          return paths;
+      }()),
+      guarded_registry_([this, &registry]() {
+          // search 不带 path 时的起点按会话 cwd(options_.cwd)——不认
+          // 进程 current_path,与身份裁决同一条规矩。注册元数据
+          //(来源/实例/版本/副作用档)原样拷贝,不把 MCP/插件洗成 builtin。
+          auto guarded = std::make_unique<tools::ToolRegistry>();
+          for (const auto& tool : registry.All()) {
+              tools::ToolRegistration registration;
+              registration.tool = std::make_unique<GuardedChannelTool>(
+                  *tool, protected_paths_, options_.cwd);
+              if (const tools::ToolRegistration* source = registry.RegistrationOf(tool->name());
+                  source != nullptr) {
+                  registration.source_kind = source->source_kind;
+                  registration.source_instance = source->source_instance;
+                  registration.version_or_digest = source->version_or_digest;
+                  registration.effect_class = source->effect_class;
+                  registration.idempotency = source->idempotency;
+                  registration.recovery = source->recovery;
+                  registration.package_origin = source->package_origin;
+              }
+              guarded->Register(std::move(registration));
+          }
+          return guarded;
+      }()),
+      agent_(backend, *guarded_registry_,
+             ApplyChannelToolPolicy(std::move(profile), options_.tools)) {}
 
 agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::string* reply_text,
                                               std::string* error) {
@@ -176,15 +259,36 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
             return "PreRequest 钩子拦下本次请求[" + stages.decision + "]: " + stages.reason;
         };
     }
-    const channel::ToolRoutePolicy& tools = options_.tools;
-    wiring.on_tool_confirm = [&tools](const std::string& /*tool_use_id*/,
-                                      const std::string& name, const nlohmann::json& /*input*/) {
-        return ChannelConfirmAllows(tools, name);
+    // 逐轮工具策略(QQ 接入单 Q0):TurnIngress.tools 是执行前重验准入后
+    // 冻结的五层交集账,随入账带进执行;没递(终端路/旧装配)回落会话级
+    // options_.tools。比会话级窄时(权限撤销/收窄发生在建档后),这枚
+    // PreToolUse 闸在执行口拦下——暴露面(会话级 tool_filter)不动,不折
+    // 前缀缓存;须确认工具由确认口按同一份冻结策略 fail closed。
+    const channel::ToolRoutePolicy& effective_tools =
+        ingress.tools.has_value() ? *ingress.tools : options_.tools;
+    wiring.on_tool_confirm = [&effective_tools](const std::string& /*tool_use_id*/,
+                                                const std::string& name,
+                                                const nlohmann::json& /*input*/) {
+        return ChannelConfirmAllows(effective_tools, name);
     };
     wiring.on_tool_denial_text = [](const std::string& /*tool_use_id*/,
                                     const std::string& name) {
         return ChannelToolDenialText(name);
     };
+    wiring.on_pre_tool_use_hook =
+        [&effective_tools](const std::string& /*tool_use_id*/, const std::string& name,
+                           const nlohmann::json& /*input*/) {
+            runtime::ToolHookDecision decision;
+            if (!effective_tools.Allows(name)) {
+                decision.decision = runtime::ToolHookDecision::Decision::Deny;
+                decision.reason =
+                    "工具 " + name +
+                    " 不在本轮渠道工具上限的允许名单内(渠道/账号/binding 的 tools.allow "
+                    "交集没列它,或进了任一层 deny)。本轮策略以执行前重验为准;要放行须在"
+                    "全局 config 显式声明。";
+            }
+            return decision;
+        };
 
     const auto outcome = agent_.Run(effective_message, wiring);
     if (!outcome.has_value()) {

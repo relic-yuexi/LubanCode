@@ -65,16 +65,17 @@ Package 已安装且已信任
 && account_lock_acquired
 ```
 
-判断写成一只权威函数，不在 CLI、ChannelManager、Package mounting 三处各猜一遍：
+判断写成一只权威函数，不在 CLI、ChannelManager、Package mounting 三处各猜一遍（QQ 接入单 Q0 起实装于 `src/channel/activation.hpp`；渠道库不反向依赖 package，信任态以 `ChannelTrustState` 快照传入）：
 
 ```cpp
 ChannelActivationDecision ResolveChannelActivation(
-    ProcessMode process_mode,
-    const PackageTrustSnapshot& trust,
-    const ChannelConfig& channel,
-    const ChannelAccountConfig& account,
-    const CredentialState& credentials,
-    const AccountLockState& lock);
+    ChannelProcessMode process_mode,          // InteractiveCli | OneShot | AppServer | Gateway
+    const ChannelTrustState& trust,           // 已安装且已信任
+    const std::optional<ChannelUserConfig>& channel,  // nullopt = 没有 channels 配置
+    const std::string& channel_id,            // 只进诊断文案
+    const std::string& account_id,
+    const ChannelCredentialState& credentials,
+    const ChannelLockState& lock);
 ```
 
 决策码冻结：
@@ -112,11 +113,21 @@ Ready               唯一可 spawn sidecar 的状态
 
 | 来源 | 字段 | 规矩 |
 | --- | --- | --- |
+| 文件 | `secret_file` | 用户明确指定的**绝对路径**文件，须做权限与越界检查。QQ 首版推荐。 |
 | 环境变量 | `secret_env` | 值从宿主环境取，配置只记名字。 |
-| 文件 | `secret_file` | 用户明确指定的文件，须做权限与越界检查。 |
 | 登录产物 | （平台登录后写入） | 放 Channel 私有 state，`0600`/DACL 当前用户。 |
 
 可兼容 `secret` 明文，但 `/channel doctor` 必须给 warning；日志、trace、session、错误文案一概打码。
+
+**解析优先级（QQ 接入单 Q0 起冻结）**：`secret_file` > `secret_env` > `secret` 明文。高优先级来源**配置了但无效**（文件读不出、权限不安全、内容为空）时明报稳定错误，**不静默降级**到低优先级来源——降级只会把"配置错了"藏成"碰巧能用"。
+
+`secret_file` 读取规矩（它不是任意 JSON 凭据文件）：
+
+- 内容即 AppSecret 原值；至多剥掉末尾一处换行（`\n` 或 `\r\n`），其余字节一概不动。
+- 拒绝空值、拒绝内部控制字符、拒绝超限文件（上限 8 KiB）。
+- 路径必须绝对；按 canonical 解析（符号链接/重解析点解析到真实目标再验）；目标须是常规文件、归属当前用户，且无组/其他用户读写位（POSIX）或 DACL 无其他账户读权（Windows）。
+
+密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。适配器经**专用启动管道**接收（Q1 实装），与 Bridge 握手的固定字段分开——协议不加未知字段。子进程环境走白名单（见 [security.md](security.md) §2），宿主模型 key 与其他账号凭据不递。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
 
 ## 5. 状态目录
 
@@ -167,6 +178,7 @@ dm_policy: pairing | allowlist | open | disabled
 group_policy: allowlist | open | disabled
 require_mention: true | false
 allow_bots: false
+tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
 ```
 
 默认值：
@@ -176,6 +188,24 @@ allow_bots: false
 - Group mention：`true`。
 - 其他 bot：拒绝。
 - 非官方个人账号自动化（如 Zalo Personal）：默认整体 `disabled`，须明写风险确认。
+
+`tools` 上限字段（QQ 接入单 Q0 起）：**allow 未设置与 `allow: []` 语义分开**——未设置 = 本层不添上限；`[]` = 本层禁用全部工具。每一层只可收窄，deny 永远压过 allow。渠道段写渠道上限，账号段写账号上限，binding 写会话上限，合并规矩见 §8。
+
+**QQ 首版模板**（`MakeQqTemplateAccount()`，逐字段显式，不改全渠道默认值迁就 QQ）：
+
+```json
+{
+  "transport": "websocket",
+  "dm_policy": "pairing",
+  "group_policy": "disabled",
+  "allow_bots": false,
+  "require_mention": true,
+  "reply": {"mode": "final"},
+  "tools": {"allow": ["read_file", "search"]}
+}
+```
+
+`tools.allow` 是核过注册名的最小只读名单（`read_file`、`search` 均为现有注册工具名）。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在这份名单里，五层交集自然拦下，扩不出上限。首版不开放任意 shell。
 
 准入次序——先鉴权，后建 session。不通过准入的消息，不建 session，不召回记忆，不调用模型：
 
@@ -248,6 +278,16 @@ conversation+thread
 ```
 
 同档命中两条，报冲突，不按文件次序碰运气。
+
+**Agent 选择与工具权限分两本账（QQ 接入单 Q0 起）**：Agent 取最具体的那条 binding（同档冲突整事件拒绝）；工具上限则**收集所有命中 binding**，与渠道上限、账号上限做交集，再减各层 deny 并集：
+
+```text
+有效工具 = Agent 已有工具
+         ∩ 渠道 tools.allow ∩ 账号 tools.allow ∩ 每条命中 binding 的 tools.allow
+         - （渠道 ∪ 账号 ∪ 所有命中 binding 的 tools.deny 并集）
+```
+
+每层 allow 未设置 = 不添上限；设了（含空名单）= 只许名单内。**具体 binding 抹不掉宽层 deny**——conversation 档 binding 放行的工具，仍会被它命中的 account 档 binding 或渠道/账号段的 deny 拦下。有效策略与来源账（哪些层出了手）随路由决策冻结带进执行：准入在执行前重验，本轮用的策略版本以执行时重验的决策为准；已开始的工具沿现有取消边界收场，不假称副作用能撤回。须确认（needs_confirm）的工具只有一条生路：至少一层显式 allow 列了它、且五层交集后仍可用——见 [security.md](security.md) §3。
 
 记忆与多用户隔离首版默认：
 

@@ -4,26 +4,17 @@
 namespace lubancode::runtime {
 
 bool ChannelConfirmAllows(const channel::ToolRoutePolicy& tools, const std::string& tool_name) {
-    // fail closed 的根基(§16.1):渠道会话没有远端审批渠道,须确认的
-    // 工具只有"binding allowlist 明确允许"一条生路。allow 名单没列 =
-    // 没有任何明确允许 = 拒绝;进了 deny 更是拒。不为"机器人好用"把
-    // confirm 偷换成 auto。
-    for (const std::string& allowed : tools.allow) {
-        if (allowed == tool_name) {
-            for (const std::string& denied : tools.deny) {
-                if (denied == tool_name) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
-    return false;
+    // fail closed 的根基(§16.1/security.md §3):渠道会话没有远端审批渠道,
+    // 须确认的工具只有"五层交集里某层显式 allow 列了它"一条生路。allow
+    // 全没设(nullopt)= 没有任何明确允许 = 拒绝;allow=[] = 禁全部;进了
+    // deny 更是拒。不为"机器人好用"把 confirm 偷换成 auto。
+    return tools.ExplicitlyAllows(tool_name);
 }
 
 std::string ChannelToolDenialText(const std::string& tool_name) {
-    return "渠道会话没有审批渠道,工具 " + tool_name + " 未在 binding allowlist 明确允许,已拒绝执行。"
-           "如需放行,在全局 config 的渠道 binding 里显式加进 tools.allow。";
+    return "渠道会话没有审批渠道,工具 " + tool_name +
+           " 未在渠道工具上限(渠道/账号/binding 的 tools.allow)明确允许,已拒绝执行。"
+           "如需放行,在全局 config 的渠道段/账号段/binding 里显式加进 tools.allow。";
 }
 
 ChannelSessionHost::ChannelSessionHost(Options options) : options_(options) {

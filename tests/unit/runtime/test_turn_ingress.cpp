@@ -65,6 +65,24 @@ TEST_CASE("MakeChannelTurnIngress:合同字段全带") {
     CHECK_FALSE(ingress.allow_memory_retrieval);
     CHECK(ingress.provenance.channel_id == "qqbot");
     CHECK(ingress.message.role == api::Role::User);
+    CHECK_FALSE(ingress.tools.has_value());  // 没递策略:引擎回落会话级
+}
+
+TEST_CASE("MakeChannelTurnIngress:逐轮冻结策略随入账带上(Q0)") {
+    const auto event = MakeEvent();
+    channel::ToolRoutePolicy tools;
+    tools.allow = std::vector<std::string>{"read_file"};
+    tools.deny = {"run_command"};
+    tools.source = "channel+account";
+
+    const auto ingress = MakeChannelTurnIngress(event, channel::MessageProvenance{}, "k", true,
+                                                &tools);
+    REQUIRE(ingress.tools.has_value());
+    REQUIRE(ingress.tools->allow.has_value());
+    CHECK(*ingress.tools->allow == std::vector<std::string>{"read_file"});
+    REQUIRE(ingress.tools->deny.size() == 1);
+    CHECK(ingress.tools->deny[0] == "run_command");
+    CHECK(ingress.tools->source == "channel+account");
 }
 
 TEST_CASE("投影:text 多块连拼,mention 附带") {
