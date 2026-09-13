@@ -316,6 +316,9 @@ claim 恢复类:
 | SkillTool/技能材料装载 | **已落(P2,2026-09-14)**——features.skills 放行且 tools 面点名 `skill` 才装配:显式单根(材料根 skills/)扫描,清单段/工具/预装正文三面同进同退;skills.preload 缺名整场明拒;不搬终端五层合并,装技能不授予任何执行工具 | `AssembleSession` 步骤 2.5(src/app_server/session_assembly.cpp)+`tools::ScanSkillsDir`/`SkillTool`;组合 `ComposeHarnessSystemPrompt` |
 | Lua/process 插件装载 | **点名通道已开、装载未接(P2)**——`components.plugins` 收名单;当前 build 未接线,点名在装配层报 `component_unavailable` 整场明拒(thread/start 错误带 `data.code`,additive),不忽略不冒充;真装载归 P5 | `HarnessProfile::plugins`(src/app_server/harness_profile.cpp)+`AssembleSession` 步骤 0 |
 | 幂等受理+输入原件持久(operations-inputs、CanonicalInputPayload、ProcessCrash 耐久) | 已落 | `SessionService::SubmitInput`(src/runtime/session_service.cpp;PR #59) |
+| 协议 1.3 幂等受理面(thread/start、turn/start 可选 clientOperationId:同键同载荷回原受理,同键异载荷 operation_conflict;会话创建去重按主体+workspace 落 session-creates.jsonl) | 已落(P3) | `Server::HandleThreadStart`/`AcceptTurnStart` + `SessionCreateLedger`(src/app_server/server.cpp) |
+| operation/read 只读核对口(受理/派发/终态/unknown,重启后按 clientOperationId 找回;final 正文经 v3 投影按 turnId 定位;零副作用不触发执行) | 已落(P3) | `Server::HandleOperationRead` + `SessionService::ReadOperationFacts` + `runtime::FindFinalAssistantText`(src/runtime/session_service.cpp、trajectory_history_view.cpp) |
+| 客户端自动重试(受理—终态幂等闭环) | **可用**(P3 故障注入过:受理落盘失败拒收零执行、终态行丢失回 unknown 不冒充、重启窗口同键找回不重跑;证据 tests/unit/app_server/test_app_server_operation_idempotency.cpp) | 同上两行;进程级硬杀(真拔电)未验,归后续真机批次 |
 | turn 终态与 ResultEnvelope(finalMessageRefs、usageReported、resultEnvelopePersisted) | 已落 | `SessionService::RecordTurnFinal`/`MakeTurnCompletedParams`(src/app_server/schema.cpp;PR #62) |
 | 应用根三变量/来源裁剪/参数根-数据根分家 | 已落(本节合同+P1) | `config::ResolveRuntimePaths`/`StateRootDir`(src/config/runtime_paths.cpp) |
 | gateway/channels 状态根接数据根 | **未接**(避让在跑的 QQ 接入单,另立小单) | cli_app.cpp gateway run 段仍走 HomeLubancodeDir |

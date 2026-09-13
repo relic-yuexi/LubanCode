@@ -49,7 +49,17 @@ namespace lubancode::app_server {
 //          状态标志),分页沿用 trace/query 的 lastSeq 游标语义。v2 旧账
 //          无四角色/上下文投影,两法子如实回 sourceFormat="v2" + 空
 //          items,不冒充。新增方法不占老报文形状。
-inline constexpr std::string_view kProtocolVersion = "1.2";
+//   1.3(应用Worker接入单 P3,additive)—— 幂等受理与操作核对的最小面:
+//          thread/start 与 turn/start 增可选 clientOperationId(2.0 owner
+//          合同 §4.2 的语义在 1.x 面上的投影:同键同载荷重发回原受理、
+//          同键异载荷报 operation_conflict;不带键 = 旧行为一字不动);
+//          新增只读方法 operation/read(方法名与查询语义照 owner 单 2.0
+//          合同,不另造第三套):按 clientOperationId/operationId 查受理/
+//          派发/终态与稳定结果正文(v3 投影解析)。这不是 2.0 开面——
+//          2.0 的信封/版本协商/全量方法面仍归 AppServer接入SessionV3 单,
+//          本注只是把"受理—终态查询闭环"的最小操作面按同一合同暴露。
+//          老报文形状零改动。
+inline constexpr std::string_view kProtocolVersion = "1.3";
 
 // jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):
 //   - 出站:不带。方法名/params/id 的形状自足,少一个字段少一分冗余;
@@ -111,6 +121,12 @@ inline constexpr std::string_view kMethodWorkflowQuery = "workflow/query"; // ru
 // 存档的 tool_trace_v1 行折叠——进程重启后仍可查(单子第 5 期:
 // "app-server 断线按 seq 补事件,必要时从 session trace 冷回放")。
 inline constexpr std::string_view kMethodTraceQuery = "trace/query";
+
+// 操作核对(应用Worker接入单 P3):按 clientOperationId/operationId 查
+// 受理、派发与终态的只读口——方法名与语义照 AppServer接入SessionV3 单
+// 2.0 合同的 operation/read,是"受理—终态查询闭环"的最小操作面,不是
+// 2.0 开面。零副作用:不开写柄、不入队、不起回合(查询不能变成续跑)。
+inline constexpr std::string_view kMethodOperationRead = "operation/read";
 
 // turn:一轮问答。steer 骨架期不接(SteeringQueue 另一张单在改),interrupt
 // 阶段 2 接线。

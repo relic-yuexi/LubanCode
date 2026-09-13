@@ -383,4 +383,55 @@ RestoredTranscriptPage SliceRestoredTranscript(const std::vector<RestoredTranscr
     return page;
 }
 
+std::optional<FinalAssistantText> FindFinalAssistantText(const std::filesystem::path& v3_jsonl,
+                                                          const std::string& turn_id) {
+    if (turn_id.empty()) {
+        return std::nullopt;
+    }
+    auto ledger = trajectory::v3::ReadV3Ledger(v3_jsonl);
+    if (!ledger.has_value()) {
+        // 验卷不过(坏行/截断尾——活场正在写、或账损):如实缺,不猜。
+        return std::nullopt;
+    }
+    std::optional<FinalAssistantText> best;
+    for (const trajectory::v3::MessageLine& line : ledger->messages) {
+        // turnId 逐字对上(信封字段,null 不等价空串);非 assistant 不算
+        // 最终答案;文本块空的(纯工具声明回合)不顶数。
+        if (!line.turn_id.has_value() || *line.turn_id != turn_id) {
+            continue;
+        }
+        if (!line.message.is_object() || !line.message.contains("role") ||
+            !line.message["role"].is_string() || line.message["role"].get<std::string>() != "assistant") {
+            continue;
+        }
+        std::string text;
+        if (line.message.contains("content")) {
+            // 与 AppendTextBlocks 同一解析口径(字符串或 blocks 数组两形),
+            // 这里直接拼串,不走 variant 中转。
+            const nlohmann::json& content = line.message["content"];
+            if (content.is_string()) {
+                text = content.get<std::string>();
+            } else if (content.is_array()) {
+                for (const auto& part : content) {
+                    if (part.is_object() && part.value("type", std::string()) == "text" &&
+                        part.contains("text") && part["text"].is_string()) {
+                        text += part["text"].get<std::string>();
+                    }
+                }
+            }
+        }
+        if (text.empty()) {
+            continue;
+        }
+        FinalAssistantText found;
+        found.message_id = line.message_id;
+        found.seq = line.seq;
+        found.text = std::move(text);
+        found.hidden = line.display.has_value() &&
+                       *line.display == trajectory::v3::DisplayMode::Hidden;
+        best = std::move(found);  // messages 落盘序(seq 升序),后者胜 = seq 最大
+    }
+    return best;
+}
+
 }  // namespace lubancode::runtime
