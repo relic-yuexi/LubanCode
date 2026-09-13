@@ -68,7 +68,7 @@ JobAuthDecision AllowAll(const std::string&, const nlohmann::json&) {
 }
 
 // 六键 artifactRef(手造账用,P0 ledger 册同款形状)。
-nlohmann::json ArtifactRef(const char* id) {
+nlohmann::json MakeArtifactRef(const char* id) {
     return nlohmann::json::object({
         {"artifactId", id},
         {"kind", "result_metadata"},
@@ -254,7 +254,7 @@ void EmitAdmissionChain(v3::V3Writer& writer, const char* job_id) {
     auto persisted = Emit(writer, v3::EventKindV3::ToolResultPersisted, std::nullopt, kAction,
                           nlohmann::json{{"tool_call_id", kAction},
                                          {"attempt", 1},
-                                         {"result_ref", nlohmann::json::array({ArtifactRef("res-000001")})},
+                                         {"result_ref", nlohmann::json::array({MakeArtifactRef("res-000001")})},
                                          {"executionEventRef", finished.id}});
     auto selected = Emit(writer, v3::EventKindV3::ToolResultSelected, std::nullopt, kAction,
                          nlohmann::json{{"tool_call_id", kAction},
@@ -303,7 +303,7 @@ std::string EmitBusinessTerminal(v3::V3Writer& writer, const char* job_id) {
     auto persisted = Emit(writer, v3::EventKindV3::ToolResultPersisted, std::nullopt, kAction,
                           nlohmann::json{{"tool_call_id", kAction},
                                          {"attempt", 2},
-                                         {"result_ref", nlohmann::json::array({ArtifactRef("res-000002")})},
+                                         {"result_ref", nlohmann::json::array({MakeArtifactRef("res-000002")})},
                                          {"executionEventRef", finished.id}});
     return persisted.id;
 }
@@ -1032,19 +1032,19 @@ TEST_CASE("恢复:接单 tool 消息缺 -> 补链入队,不重跑") {
         std::string assistant = h.AppendAssistantWithCall("call_A1");
         // 账造到:registered 落稳、接单链断在 selected 之后(消息没写)。
         EmitPendingAndRegistered(*h.writer, assistant, "job-000001");
-        Emit(writer, v3::EventKindV3::ToolExecutionStarted, v3::OpStatus::Running, kAction,
+        Emit(*h.writer, v3::EventKindV3::ToolExecutionStarted, v3::OpStatus::Running, kAction,
              nlohmann::json{{"tool_call_id", kAction},
                             {"attempt", 1},
                             {"effectiveArgsRef", "args-000001"}});
         auto finished =
-            Emit(writer, v3::EventKindV3::ToolExecutionFinished, v3::OpStatus::Done, kAction,
+            Emit(*h.writer, v3::EventKindV3::ToolExecutionFinished, v3::OpStatus::Done, kAction,
                  nlohmann::json{{"tool_call_id", kAction}, {"attempt", 1}, {"exit_code", nullptr}});
-        Emit(writer, v3::EventKindV3::ToolResultPersisted, std::nullopt, kAction,
+        Emit(*h.writer, v3::EventKindV3::ToolResultPersisted, std::nullopt, kAction,
              nlohmann::json{{"tool_call_id", kAction},
                             {"attempt", 1},
-                            {"result_ref", nlohmann::json::array({ArtifactRef("res-000001")})},
+                            {"result_ref", nlohmann::json::array({MakeArtifactRef("res-000001")})},
                             {"executionEventRef", finished.id}});
-        Emit(writer, v3::EventKindV3::ToolResultSelected, std::nullopt, kAction,
+        Emit(*h.writer, v3::EventKindV3::ToolResultSelected, std::nullopt, kAction,
              nlohmann::json{{"tool_call_id", kAction},
                             {"attempt", 1},
                             {"sourceResultEventRefs", nlohmann::json::array({finished.id})},
@@ -1131,7 +1131,7 @@ TEST_CASE("恢复:审批挂起与已终态;取消竞态唯一终态") {
             EmitAdmissionChain(*h.writer, "job-000001");
             EmitDispatch(*h.writer, "job-000001", "epoch-1");
             // 取消请求与完成观测都在账(竞态已由先到者收口为 succeeded)。
-            Emit(writer, v3::EventKindV3::ToolJobCancelRequested, std::nullopt, kAction,
+            Emit(*h.writer, v3::EventKindV3::ToolJobCancelRequested, std::nullopt, kAction,
                  nlohmann::json{{"tool_call_id", kAction},
                                 {"jobId", "job-000001"},
                                 {"reason", "user_escape"}});
