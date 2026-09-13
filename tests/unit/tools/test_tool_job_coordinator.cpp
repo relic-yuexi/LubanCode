@@ -6,6 +6,15 @@
 //
 // P1 是宿主侧服务,不是模型工具:不动 AgentLoop、不改工具注册表(单 §8
 // 模型可见性归后续批次)。
+//
+// 夹具纪律:遍历账面先落局部 V3Ledger,不许 range-for 直接吃
+// ReadV3Ledger(...).value().events / h.Read().events ——range 表达式里的
+// expected(或按值返回的账)临时随完整表达式析构,auto&& 绑到的是其成员
+// 左值,不延长生命周期,循环遍历已释放内存(UB)。libstdc++(gcc)腿上
+// 确定性显形(glibc free 写 tcache 指针污染 EventLine 数组,垃圾 json 的
+// type 字节读作 null,get<string> 抛 type_error.302);libc++/MSVC 侥幸不
+// 显。CI 先例:run 34764809961 linux-manylinux 双红,g++-14 对该写法发
+// [-Wdangling-pointer=]。
 #include <doctest/doctest.h>
 
 #include <atomic>
@@ -863,9 +872,12 @@ TEST_CASE("完成信封:旧租约拒收;终态后第二枚拒收") {
                                              Tool::Result::Text("late duplicate")));
     CHECK(h.coord->duplicate_terminal_envelopes_rejected() == 1);
     CHECK(h.coord->GetJob(start.job_id).state == "succeeded");
-    // 账上只有一枚终态观测。
+    // 账上只有一枚终态观测。(账先落局部再遍历:range-for 的 range
+    // 表达式里函数按值返回的临时随完整表达式析构,直接绑它的成员是
+    // 悬垂遍历 UB——gcc/libstdc++ 腿确定性踩雷,见册头夹具纪律。)
     int terminal_observations = 0;
-    for (const auto& event : h.Read().events) {
+    v3::V3Ledger envelope_ledger = h.Read();
+    for (const auto& event : envelope_ledger.events) {
         if (event.kind == v3::EventKindV3::ToolJobObserved &&
             event.payload.contains("observedStatus") &&
             event.payload["observedStatus"].get<std::string>() == "succeeded") {
@@ -981,9 +993,12 @@ TEST_CASE("恢复:dispatched 无终态 -> unknown_hold,不盲跑") {
     REQUIRE(coord.AdoptRecovery(plan) == 1);
     CHECK(coord.GetJob("job-000001").state == "unknown");  // 不合成假终态
     CHECK(executor_calls.load() == 0);                     // 不盲跑(单 §6)
-    // observed(unknown) 在账。
+    // observed(unknown) 在账。(账先落局部再遍历:range 表达式里的
+    // expected 临时随完整表达式析构,直接绑 .value().events 是悬垂遍历
+    // UB——gcc/libstdc++ 腿确定性踩雷,见册头夹具纪律。)
     bool unknown_observed = false;
-    for (const auto& event : v3::ReadV3Ledger(jsonl).value().events) {
+    v3::V3Ledger after_adopt = v3::ReadV3Ledger(jsonl).value();
+    for (const auto& event : after_adopt.events) {
         if (event.kind == v3::EventKindV3::ToolJobObserved &&
             event.payload.contains("observedStatus") &&
             event.payload["observedStatus"].get<std::string>() == "unknown") {
@@ -1088,9 +1103,13 @@ TEST_CASE("恢复:接单 tool 消息缺 -> 补链入队,不重跑") {
     JobWaitResult wait = coord.WaitJobs({"job-000001"}, 5000, true);
     REQUIRE(wait.satisfied);
     CHECK(wait.statuses[0].state == "succeeded");
-    // 补链不重跑"接单执行"(attempt 1 只有一条 finished)。
+    // 补链不重跑"接单执行"(attempt 1 只有一条 finished)。(账先落局部
+    // 再遍历:range 表达式里的 expected 临时随完整表达式析构,直接绑
+    // .value().events 是悬垂遍历 UB——gcc/libstdc++ 腿确定性踩雷,见册头
+    // 夹具纪律。)
     int attempt1_finished = 0;
-    for (const auto& event : v3::ReadV3Ledger(jsonl).value().events) {
+    v3::V3Ledger settled = v3::ReadV3Ledger(jsonl).value();
+    for (const auto& event : settled.events) {
         if (event.kind == v3::EventKindV3::ToolExecutionFinished && event.action_id.has_value() &&
             *event.action_id == kAction && event.payload.contains("attempt") &&
             event.payload["attempt"].get<std::uint64_t>() == 1) {
@@ -1173,9 +1192,13 @@ TEST_CASE("恢复:审批挂起与已终态;取消竞态唯一终态") {
         REQUIRE(cancel.ok);
         CHECK(cancel.status == "already_terminal");
         CHECK(cancel.terminal == "succeeded");
-        // 账没被 Adopt/Cancel 追加任何 job 事件。
+        // 账没被 Adopt/Cancel 追加任何 job 事件。(账先落局部再遍历:
+        // range 表达式里的 expected 临时随完整表达式析构,直接绑
+        // .value().events 是悬垂遍历 UB——gcc/libstdc++ 腿确定性踩雷,
+        // 见册头夹具纪律。)
         int job_events = 0;
-        for (const auto& event : v3::ReadV3Ledger(jsonl).value().events) {
+        v3::V3Ledger terminal_ledger = v3::ReadV3Ledger(jsonl).value();
+        for (const auto& event : terminal_ledger.events) {
             const std::string name = v3::EventKindV3Name(event.kind);
             if (name.rfind("tool.job.", 0) == 0) {
                 job_events += 1;
