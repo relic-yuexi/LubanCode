@@ -53,6 +53,8 @@ GatewayAutomationPump::OpenResult GatewayAutomationPump::Open(GatewayAutomationP
     return result;
 }
 
+GatewayAutomationPump::GatewayAutomationPump() = default;
+
 GatewayAutomationPump::~GatewayAutomationPump() = default;
 
 bool GatewayAutomationPump::TickOnce(std::int64_t now_ms) {

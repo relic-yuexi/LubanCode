@@ -81,6 +81,9 @@ public:
                            tools::ToolRegistry& registry, Options options);
 
     ~GatewayAutomationPump() override;
+    // 显式默认构造:下面的移动/拷贝删除声明会抑制隐式默认构造,而装配
+    // 层用 std::optional<T>::emplace() 原地构造,需要它。
+    GatewayAutomationPump();
     GatewayAutomationPump(GatewayAutomationPump&&) = delete;
     GatewayAutomationPump(const GatewayAutomationPump&) = delete;
     GatewayAutomationPump& operator=(const GatewayAutomationPump&) = delete;

@@ -694,9 +694,14 @@ int RunCli(const std::vector<std::string>& args) {
                 pump_options.workspaces_root =
                     lubancode::tools::Utf8ToPath(*home_luban) / "workspaces";
                 const std::filesystem::path cwd = std::filesystem::current_path();
-                pump_options.workspace_identity = lubancode::workspace::ResolveWorkspaceIdentity(
-                    cwd, home_luban.has_value() ? lubancode::tools::Utf8ToPath(*home_luban)
-                                                : std::filesystem::path());
+                const auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
+                    cwd, lubancode::tools::Utf8ToPath(*home_luban));
+                if (!identity.has_value()) {
+                    std::cerr << "gateway run: workspace 身份裁决失败——" << identity.error()
+                              << "\n";
+                    return 1;
+                }
+                pump_options.workspace_identity = *identity;
                 pump_options.cwd_utf8 = lubancode::platform::CurrentDirUtf8();
                 pump_options.lubancode_version = std::string(lubancode::app::kVersion);
                 pump_options.wire_name =
