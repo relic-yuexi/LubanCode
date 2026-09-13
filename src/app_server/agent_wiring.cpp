@@ -103,9 +103,9 @@ HarnessPromptResult ComposeHarnessSystemPrompt(const HarnessPromptInput& input) 
 
     if (plan.agent.has_value()) {
         const agent::AgentDefinition& definition = *plan.agent;
-        if (!definition.prompt.profile.empty()) {
+        if (definition.prompt.profile.has_value()) {
             // 业务正文:Profile 五层回路(嵌入 Profile 层/参数根用户层)。
-            options.profile = definition.prompt.profile;
+            options.profile = *definition.prompt.profile;
         } else {
             options.persona = HarnessAgentPersona(definition);
         }
