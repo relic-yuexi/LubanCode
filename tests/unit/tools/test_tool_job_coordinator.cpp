@@ -235,7 +235,10 @@ v3::WriteReceipt EmitPendingAndRegistered(
          nlohmann::json{{"tool_call_id", kAction},
                         {"attempt", 1},
                         {"reason", "queued"},
-                        {"assistantMessageRef", assistant_ref}});
+                        {"assistantMessageRef", assistant_ref},
+                        // 声明块配对键:缺了它 FoldToolActions 按 provider 号
+                        // 过滤声明块时会把 tool_name 洗空(P0 fixture 同款)。
+                        {"provider_tool_call_id", "call_A1"}});
     nlohmann::json payload{{"tool_call_id", kAction},
                            {"attempt", 1},
                            {"jobId", job_id},
@@ -457,9 +460,15 @@ TEST_CASE("注册落账失败:不派发不接单,executor 零调用") {
     draft.turn_id = "turn-000001";
     draft.step_id = "step-000001";
     draft.origin = v3::MessageOrigin::SessionRuntime;
+    draft.provider = "openai";
+    draft.wire = "responses";
+    draft.model = "gpt-6";
+    draft.response_model = nlohmann::json("gpt-6");
+    draft.usage = nlohmann::json::object({{"inputTokens", 10}, {"outputTokens", 5}});
     draft.message = nlohmann::json::object({{"role", "assistant"}, {"content", "查"}});
     auto assistant = writer.AppendMessage(draft, v3::Durability::PowerLoss);
-    REQUIRE(assistant.status == v3::WriteReceipt::Status::Committed);
+    REQUIRE_MESSAGE(assistant.status == v3::WriteReceipt::Status::Committed,
+                    assistant.error_message);
 
     JobStartRequest request;
     request.tool_name = "search";
@@ -622,18 +631,16 @@ TEST_CASE("派发前复查:入队时获准不永久放行,复查拒按 failed �
 TEST_CASE("资源键串行:同 resource_keys 同时只跑一个") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     auto gate1 = std::make_shared<Gate>();
-    auto gate2 = std::make_shared<Gate>();
     Harness h("resource", ToolJobCoordinator::Options{}, AllowAll,
-              [gate1, gate2](const JobExecutionContext& ctx) {
-                  // 按入参分辨两只 job,分别挂在不同闸上。
+              [gate1](const JobExecutionContext& ctx) {
+                  // 只挂第一只(占住资源);第二只获得资源后立即跑完。
                   if (ctx.input.contains("n") && ctx.input["n"] == 2) {
-                      gate2->released.wait();
                       return Tool::Result::Text("second");
                   }
                   gate1->released.wait();
                   return Tool::Result::Text("first");
               });
-    h.gates = {gate1, gate2};
+    h.gates = {gate1};
     std::string assistant = h.AppendAssistantWithCall("call_A1");
     JobExecutionPolicy policy;
     policy.side_effect_class = "local_write";
@@ -664,22 +671,21 @@ TEST_CASE("资源键串行:同 resource_keys 同时只跑一个") {
 TEST_CASE("并发上限:session_running=1 挡住第二只(read_only 不占资源键)") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     auto gate1 = std::make_shared<Gate>();
-    auto gate2 = std::make_shared<Gate>();
     Harness h("limit", [&] {
                   ToolJobCoordinator::Options options;
                   options.limits.session_running = 1;
                   return options;
               }(),
               AllowAll,
-              [gate1, gate2](const JobExecutionContext& ctx) {
+              [gate1](const JobExecutionContext& ctx) {
+                  // 只挂第一只;第二只获配额后立即跑完。
                   if (ctx.input.contains("n") && ctx.input["n"] == 2) {
-                      gate2->released.wait();
                       return Tool::Result::Text("second");
                   }
                   gate1->released.wait();
                   return Tool::Result::Text("first");
               });
-    h.gates = {gate1, gate2};
+    h.gates = {gate1};
     std::string assistant = h.AppendAssistantWithCall("call_A1");
     JobStartRequest first = h.MakeRequest(assistant);  // 默认 read_only
     first.tool_input = nlohmann::json::object({{"n", 1}});
@@ -1204,9 +1210,15 @@ TEST_CASE("恢复:号池对齐,新单不与账上 jobId 撞号") {
     draft.turn_id = "turn-000001";
     draft.step_id = "step-000001";
     draft.origin = v3::MessageOrigin::SessionRuntime;
+    draft.provider = "openai";
+    draft.wire = "responses";
+    draft.model = "gpt-6";
+    draft.response_model = nlohmann::json("gpt-6");
+    draft.usage = nlohmann::json::object({{"inputTokens", 10}, {"outputTokens", 5}});
     draft.message = nlohmann::json::object({{"role", "assistant"}, {"content", "再查"}});
     auto assistant = writer->AppendMessage(draft, v3::Durability::PowerLoss);
-    REQUIRE(assistant.status == v3::WriteReceipt::Status::Committed);
+    REQUIRE_MESSAGE(assistant.status == v3::WriteReceipt::Status::Committed,
+                    assistant.error_message);
     ToolJobCoordinator* coord_ptr = &coord;
     JobStartRequest request;
     request.tool_name = "search";
