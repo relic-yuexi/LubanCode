@@ -735,7 +735,7 @@ int RunCli(const std::vector<std::string>& args) {
         case CliAction::BadAppServerProfile:
             // 部署档旗标没带值:低级用法错误,启动即拒(P1——档的语义
             // 错误归 RunAppServerMode 给全人话,这里只拦"没给路径")。
-            std::cerr << parsed.error_text << "\n";
+            std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::ManageSession: {
             // 会话管理子命令(archive/unarchive/delete):不进会话,打完
