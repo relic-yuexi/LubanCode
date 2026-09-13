@@ -451,7 +451,11 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             }
             const nlohmann::json result = HandleThreadStart(request.params, error_code);
             if (!error_code.empty()) {
-                return MakeError(request.id, kErrInternalError, "thread/start 失败: " + error_code);
+                // P2(应用Worker接入单 §7.2):稳定字符串码随 data.code 一并
+                // 给(additive 字段,老前端不受影响)——component_unavailable
+                // 一类码要能被程序认出,不只躺在 message 文本里。
+                return MakeError(request.id, kErrInternalError, "thread/start 失败: " + error_code,
+                                 nlohmann::json{{"code", error_code}});
             }
             // thread/started 事件在响应之前发:前端先见事件后见响应,顺眼
             // 也顺逻辑(threadId 是事件给出来的身份)。装配降级账(P1
@@ -935,7 +939,9 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         SessionAssemblyResult assembled = options_.assembly_factory();
         if (assembled.assembly == nullptr) {
             Diagnose("会话装配失败,thread 不开: " + assembled.error);
-            out_error_code = "assembly.failed";
+            // P2(应用Worker接入单 §7.2):装配自带稳定码(component_unavailable
+            // 一类)优先;空 = 通用装配失败。
+            out_error_code = assembled.error_code.empty() ? "assembly.failed" : assembled.error_code;
             return nlohmann::json();
         }
         record->assembly = std::move(assembled.assembly);

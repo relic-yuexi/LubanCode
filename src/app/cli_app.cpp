@@ -6,6 +6,7 @@
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章)
 #include "app/one_shot.hpp"
 #include "app/plugin_scaffold.hpp"
+#include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
 #include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
 #include "app_server/server.hpp"
 #include "app_server/session_assembly.hpp"  // P1:会话级运行材料装配
@@ -537,15 +538,46 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             harness.has_value() && harness->steps_per_input > 0
                 ? std::min(config_steps, harness->steps_per_input)
                 : config_steps;
-        options.assembly_factory = [config_ptr, harness, planned_steps]() {
+        // P2(应用Worker接入单 §五/§六):档在场即解析 Agent 面——agentRef
+        // 必须落到可用档案(找不到/坏档明拒启,不回落编码默认提示词);
+        // Skill/提示模块的来源根同源折好(材料根下 agents/skills/prompts
+        // 三处;应用根语义即参数根,个人模式即 ~/.lubancode,§13.2 参数根
+        // 内材料照读)。解析结果是冻结件:此后逐场装配只消费这份计划,
+        // 开场后文件改动不热换(§五)。
+        std::shared_ptr<const lubancode::app_server::HarnessAgentPlan> agent_plan;
+        std::optional<std::filesystem::path> skills_root;
+        if (harness.has_value()) {
+            lubancode::app_server::HarnessAgentSources sources;
+            if (const auto material_root = lubancode::config::HomeLubancodeDir();
+                material_root.has_value()) {
+                const std::filesystem::path root = lubancode::tools::Utf8ToPath(*material_root);
+                sources.agents_dir = root / "agents";
+                sources.skills_dir = root / "skills";
+                sources.prompts_dir_utf8 = *material_root + "/prompts";
+                skills_root = sources.skills_dir;
+            }
+            auto plan_result = lubancode::app_server::ResolveHarnessAgentPlan(
+                *harness, std::move(sources), options.session_wire, options.cwd);
+            if (!plan_result.plan.has_value()) {
+                std::fprintf(stderr, "[app-server] Agent 装配失败,拒绝启动: %s\n",
+                             plan_result.error.c_str());
+                return 1;
+            }
+            agent_plan =
+                std::make_shared<const lubancode::app_server::HarnessAgentPlan>(std::move(*plan_result.plan));
+        }
+        options.assembly_factory = [config_ptr, harness, planned_steps, agent_plan, skills_root]() {
             lubancode::app_server::SessionAssemblyRequest request;
             request.config = config_ptr;
             request.harness = harness ? &*harness : nullptr;
             request.backend_factory = [config_ptr]() {
                 return lubancode::app::BuildBackend(*config_ptr);
             };
+            // 无档默认路的兜底正文;agent_plan 在场时被提示部件组合覆盖。
             request.system_prompt = lubancode::app_server::kAppServerDefaultSystemPrompt;
             request.max_steps_per_turn = planned_steps;
+            request.agent_plan = agent_plan;
+            request.skills_root = skills_root;
             return lubancode::app_server::AssembleSession(std::move(request));
         };
     }

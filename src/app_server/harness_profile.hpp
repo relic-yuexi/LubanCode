@@ -37,8 +37,9 @@ bool IsFrozenFeatureName(std::string_view name);
 struct HarnessToolPolicy {
     enum class Mode { Inherit, Only, None };
     Mode mode = Mode::Inherit;
-    // canonical 名(mcp:<server>:<tool>)。mode=Inherit 必空;mode=Only
-    // 必填(空数组合法=零工具);mode=None 必空。
+    // canonical 名(mcp:<server>:<tool>;P2 起另收内置 skill 工具的裸名
+    // "skill",须 features 放行 skills——见解析器)。mode=Inherit 必空;
+    // mode=Only 必填(空数组合法=零工具);mode=None 必空。
     std::vector<std::string> allow;
     std::vector<std::string> deny;
 };
@@ -54,6 +55,12 @@ struct HarnessProfile {
     std::set<std::string> features_disabled;
     // components.mcpServers:本场点名要挂的 MCP 服务(canonical 名)。
     std::vector<std::string> mcp_servers;
+    // components.plugins:本场点名要挂的 Lua/process 插件(canonical 名)。
+    // P2 只开点名通道:当前 build 未接线 app-server 插件装配,点名即在
+    // 装配层按 component_unavailable 整场明拒(单子 §7.2"不支持即拒绝",
+    // 错误码冻结见 docs/reference/capability-contract.md §13.4);P5 接线
+    // 后此名单进入真装载。
+    std::vector<std::string> plugins;
     HarnessToolPolicy tools;
     // exposure.default:direct|deferred|host_only。P1 直连表只走 direct;
     // 值仍解析与校验(零工具配 deferred 在解析层就拒)。

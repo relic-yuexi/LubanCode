@@ -60,7 +60,10 @@
         "components": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "mcpServers": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+          "properties": {
+            "mcpServers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "plugins": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          }
         },
         "tools": { "$ref": "#/definitions/toolPolicy" },
         "exposure": {

@@ -387,15 +387,20 @@ std::vector<SkillLayerEntry> EnumerateSkillLayers(const std::string& project_dir
     return out;
 }
 
-std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills) {
+std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills, const std::string& source_note) {
     if (skills.empty()) {
         return std::string();
     }
-    std::string out =
-        "技能目录约定:LubanCode 扫发行包官方 skills、~/.agents/skills、~/.lubancode/skills、"
-        "<cwd>/.agents/skills 与 <cwd>/.lubancode/skills。跨客户端共享技能可放 .agents/skills；"
-        "/skill install 默认装进 ~/.lubancode/skills。\n"
-        "可用技能(用 skill 工具按名加载):\n";
+    std::string out;
+    if (source_note.empty()) {
+        out =
+            "技能目录约定:LubanCode 扫发行包官方 skills、~/.agents/skills、~/.lubancode/skills、"
+            "<cwd>/.agents/skills 与 <cwd>/.lubancode/skills。跨客户端共享技能可放 .agents/skills；"
+            "/skill install 默认装进 ~/.lubancode/skills。\n";
+    } else {
+        out = source_note + "\n";
+    }
+    out += "可用技能(用 skill 工具按名加载):\n";
     for (const auto& meta : skills) {
         out += "- " + meta.name + ": " + meta.description + "\n";
     }

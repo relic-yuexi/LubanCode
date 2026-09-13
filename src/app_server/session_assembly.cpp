@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "mcp/mcp_tool.hpp"
+#include "tools/skill_loader.hpp"
 
 namespace lubancode::app_server {
 
@@ -27,6 +28,27 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     SessionAssemblyResult result;
     if (!request.backend_factory) {
         result.error = "装配失败:backend 工厂缺失(headless 会话必须有显式 backend)";
+        return result;
+    }
+
+    // ---- 步骤 0:P2,点名未接线组件零副作用明拒 ----
+    // 部署档点名 Lua/process 插件(components.plugins)而当前 build 未接线
+    // app-server 插件装配(归 P5):component_unavailable,不忽略、不伪报
+    // 已装载(单子 §7.2"不支持即拒绝";错误码冻结见
+    // docs/reference/capability-contract.md §13.4)。
+    if (request.harness != nullptr && !request.harness->plugins.empty()) {
+        std::string names;
+        for (const std::string& plugin : request.harness->plugins) {
+            if (!names.empty()) {
+                names += ", ";
+            }
+            names += plugin;
+        }
+        result.error_code = "component_unavailable";
+        result.error =
+            "部署档点名插件组件,当前 build 未接线 app-server 插件装配"
+            "(component_unavailable): " +
+            names;
         return result;
     }
 
@@ -60,6 +82,23 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     }
 
     auto assembly = std::make_unique<SessionAssembly>();
+
+    // ---- 步骤 2.5:P2,Skill 材料——单根显式扫描,不搬终端五层合并 ----
+    // 装配面 = features.skills 放行 ∧ tools 面点名 "skill"(mode=only 的
+    // allow 名单;inherit/none 无内置面可继承,开关单独不起工具)。清单、
+    // 工具、提示段三面同进同退(§六"清单、正文加载结果、实际工具面必须
+    // 一致")。skill 工具只加载 SKILL.md 正文——脚本/CLI/MCP 需求仅是
+    // 依赖声明,装它不自动授予任何执行工具(§六"SKILL.md 正文与脚本分开
+    // 授权";本场注册表里本就只有档点名的那几枚工具)。
+    const bool skill_exposed =
+        !injection_path && harness != nullptr && harness->FeatureEnabled("skills") &&
+        harness->tools.mode == HarnessToolPolicy::Mode::Only &&
+        std::find(harness->tools.allow.begin(), harness->tools.allow.end(), std::string("skill")) !=
+            harness->tools.allow.end();
+    std::vector<lubancode::tools::SkillMeta> session_skills;
+    if (skill_exposed && request.skills_root.has_value()) {
+        session_skills = lubancode::tools::ScanSkillsDir(*request.skills_root, "材料根级");
+    }
 
     // ---- 步骤 3:backend ----
     assembly->backend = request.backend_factory();
@@ -142,9 +181,18 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
                     *runtime.client, runtime.name, tool_info, std::string()));
             }
         }
+        // P2:内置 skill 工具(受控单根清单,与扫描件同一份——发现面、
+        // 提示清单段、SkillTool 构造三处同源,不各扫各的)。
+        if (skill_exposed) {
+            registry->Register(std::make_unique<lubancode::tools::SkillTool>(session_skills));
+        }
         // 复验(步骤 4 的另一半):mode=only 的每枚 allow 名单必须真的装上
-        // ——握手清单里没有就是"缺工具",明拒,不静默降级。
+        // ——握手清单里没有就是"缺工具",明拒,不静默降级。"skill" 是内置
+        // 件,上面 skill_exposed 为真即已装。
         for (const std::string& canonical : harness->tools.allow) {
+            if (canonical == "skill") {
+                continue;  // 内置件:装不装由 features/allow 交集定,装了就在
+            }
             bool mounted = false;
             for (const HeadlessMcpRuntime& runtime : assembly->mcp_servers) {
                 for (const auto& tool_info : runtime.tools) {
@@ -171,8 +219,40 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     }
 
     // ---- 步骤 6:Agent 档案(显式材料,装配不猜)----
-    assembly->agent_profile.system_prompt = request.system_prompt;
-    assembly->agent_profile.runtime.max_steps_per_turn = request.max_steps_per_turn;
+    // P2:计划在场(生产递了部署档)时,系统提示由提示部件组合产出
+    // (prompt_assembler 既有管线;业务正文来自档案,宿主段由本场实际
+    // 工具面与 wire 现拼,盖不掉)。计划缺席(无档默认路/测试注入路)
+    // 沿用调用方显式给的 system_prompt。
+    if (request.agent_plan != nullptr) {
+        HarnessPromptInput prompt_input;
+        prompt_input.plan = request.agent_plan.get();
+        prompt_input.skills = &session_skills;
+        prompt_input.face_names.reserve(assembly->registry->All().size());
+        for (const auto& tool : assembly->registry->All()) {
+            prompt_input.face_names.push_back(tool->name());
+        }
+        const HarnessPromptResult composed = ComposeHarnessSystemPrompt(prompt_input);
+        if (!composed.error.empty()) {
+            result.error = "装配失败:Agent 提示部件组合失败,整场拒绝: " + composed.error;
+            return result;
+        }
+        assembly->agent_profile.system_prompt = std::move(composed.text);
+    } else {
+        assembly->agent_profile.system_prompt = request.system_prompt;
+    }
+    // 步数闸:宿主/档收窄值再与档案 runtime.max_steps_per_turn 取更严
+    // (§5.2 预算行:交集/更严限制,不放宽;0 = 不限,不限 ∩ N = N)。
+    int planned_steps = request.max_steps_per_turn;
+    if (request.agent_plan != nullptr && request.agent_plan->agent.has_value() &&
+        request.agent_plan->agent->max_steps_per_turn.has_value()) {
+        const int agent_steps = *request.agent_plan->agent->max_steps_per_turn;
+        if (planned_steps <= 0) {
+            planned_steps = agent_steps;
+        } else if (agent_steps > 0) {
+            planned_steps = std::min(planned_steps, agent_steps);
+        }
+    }
+    assembly->agent_profile.runtime.max_steps_per_turn = planned_steps;
 
     result.assembly = std::move(assembly);
     return result;
