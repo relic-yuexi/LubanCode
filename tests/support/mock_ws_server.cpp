@@ -450,11 +450,13 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     }
     mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
     mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
-    rc = mbedtls_x509write_crt_set_subject_name(&crt, "CN=lubancode-qq-test");
+    // CN 直接用回环地址:客户端按 host(127.0.0.1)做名字验证,证书无 SAN
+    // 时 mbedTLS 回落 CN 匹配——回环测试最省事的锚。
+    rc = mbedtls_x509write_crt_set_subject_name(&crt, "CN=127.0.0.1");
     if (rc != 0) {
         return fail("subject name", rc);
     }
-    rc = mbedtls_x509write_crt_set_issuer_name(&crt, "CN=lubancode-qq-test");
+    rc = mbedtls_x509write_crt_set_issuer_name(&crt, "CN=127.0.0.1");
     if (rc != 0) {
         return fail("issuer name", rc);
     }
@@ -477,12 +479,6 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     rc = mbedtls_x509write_crt_set_basic_constraints(&crt, /*is_ca=*/1, /*pathlen=*/0);
     if (rc != 0) {
         return fail("basic constraints", rc);
-    }
-    // 客户端连 127.0.0.1:hostname 验证要 SAN 里真有这个 IP,否则
-    // CertVerifyFailed——回环测试的必备项。
-    rc = mbedtls_x509write_crt_set_subject_alternative_name(&crt, "IP:127.0.0.1");
-    if (rc != 0) {
-        return fail("subject alt name", rc);
     }
     unsigned char cert_pem[4096];
     rc = mbedtls_x509write_crt_pem(&crt, cert_pem, sizeof(cert_pem), mbedtls_ctr_drbg_random,
