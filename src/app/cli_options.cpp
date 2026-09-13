@@ -3,6 +3,7 @@
 
 #include "app/cli_options.hpp"
 
+#include <cstdlib>
 #include <set>
 #include <string>
 
@@ -229,26 +230,63 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                                 trajectory.session_id;
             return parsed;
         }
-        // Gateway 子命令(总装单 V0 起):lubancode gateway <run|status|stop>
-        // [--profile <名>] [--json 只 status 认]。只认裸词打头且此前没有
-        // 位置参数;形状不对当场退用法,不静默当普通位置参数走单发问句。
+        // Gateway 子命令(总装单 V0 起,V1 加 job 族):lubancode gateway
+        // <run|status|stop|job ...> [--profile <名>] [--json 只 status/job
+        // list 认]。只认裸词打头且此前没有位置参数;形状不对当场退用法,
+        // 不静默当普通位置参数走单发问句。
         if (arg == "gateway" && options.positional.empty()) {
-            static const std::set<std::string> kVerbs = {"run", "status", "stop"};
+            static const std::set<std::string> kVerbs = {"run", "status", "stop", "job"};
             const std::size_t rest = args.size() - i - 1;
             if (rest == 0 || kVerbs.count(args[i + 1]) == 0) {
                 parsed.action = CliAction::BadGateway;
                 parsed.error_text =
-                    "用法: lubancode gateway <run|status|stop> [--profile <名>] [--json]"
+                    "用法: lubancode gateway <run|status|stop|job ...> [--profile <名>] [--json]"
                     "(install/start/restart/doctor/logs 是后续批次的口,尚未实现)";
                 return parsed;
             }
             GatewayCliArgs gateway;
             gateway.verb = args[i + 1];
-            for (std::size_t extra = i + 2; extra < args.size(); ++extra) {
-                if (args[extra] == "--json") {
-                    if (gateway.verb != "status") {
+            std::size_t extra = i + 2;
+            if (gateway.verb == "job") {
+                // gateway job add "<prompt>" [--at ms] [--id 名] [--idem 键]
+                // gateway job run-now <jobId> [--idem 键]
+                // gateway job list
+                if (extra >= args.size()) {
+                    parsed.action = CliAction::BadGateway;
+                    parsed.error_text =
+                        "用法: lubancode gateway job <add \"正文\"|run-now <jobId>|list> "
+                        "[--at 毫秒] [--id 任务名] [--idem 幂等键]";
+                    return parsed;
+                }
+                gateway.job_verb = args[extra++];
+                if (gateway.job_verb == "add") {
+                    if (extra >= args.size()) {
                         parsed.action = CliAction::BadGateway;
-                        parsed.error_text = "--json 只在 gateway status 下有效";
+                        parsed.error_text = "gateway job add 需要任务正文(引号包住)";
+                        return parsed;
+                    }
+                    gateway.prompt = args[extra++];
+                } else if (gateway.job_verb == "run-now") {
+                    if (extra >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "gateway job run-now 需要任务 id";
+                        return parsed;
+                    }
+                    gateway.job_id = args[extra++];
+                } else if (gateway.job_verb != "list") {
+                    parsed.action = CliAction::BadGateway;
+                    parsed.error_text =
+                        "gateway job 认不得子命令 \"" + gateway.job_verb +
+                        "\":只认 add|run-now|list";
+                    return parsed;
+                }
+            }
+            for (; extra < args.size(); ++extra) {
+                if (args[extra] == "--json") {
+                    if (gateway.verb != "status" &&
+                        !(gateway.verb == "job" && gateway.job_verb == "list")) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--json 只在 gateway status / job list 下有效";
                         return parsed;
                     }
                     gateway.json = true;
@@ -263,9 +301,36 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     gateway.profile = args[++extra];
                     continue;
                 }
+                if (gateway.verb == "job" && args[extra] == "--at") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--at 需要毫秒时间戳";
+                        return parsed;
+                    }
+                    gateway.due_at_ms = std::atoll(args[++extra].c_str());
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--id") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--id 需要任务名";
+                        return parsed;
+                    }
+                    gateway.job_id = args[++extra];
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--idem") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--idem 需要幂等键";
+                        return parsed;
+                    }
+                    gateway.idempotency_key = args[++extra];
+                    continue;
+                }
                 parsed.action = CliAction::BadGateway;
                 parsed.error_text = "gateway " + gateway.verb + " 认不得参数 \"" + args[extra] +
-                                    "\":只认 --profile <名> --json";
+                                    "\":只认 --profile <名> --json (--at/--id/--idem 属 job)";
                 return parsed;
             }
             if (!gateway.profile.empty() && !lubancode::gateway::IsValidGatewayProfileName(gateway.profile)) {

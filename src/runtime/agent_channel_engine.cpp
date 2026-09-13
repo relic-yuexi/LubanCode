@@ -13,6 +13,11 @@ namespace lubancode::runtime {
 
 namespace {
 
+// (ApplyChannelToolPolicy 的定义在下方具名空间外——V1 起与 Gateway
+// headless 执行器共用,公开导出。)
+
+}  // namespace
+
 // §16.2 的权限交集在暴露面执法:binding 的 allow/deny 叠进 AgentProfile 的
 // tool_filter(原 profile 已有过滤的先过,再过渠道层——每层只收窄)。
 // 被滤掉的工具模型看都看不见;看得见但 needs_confirm 的调用点再由
@@ -35,8 +40,6 @@ agent::AgentProfile ApplyChannelToolPolicy(agent::AgentProfile profile,
         "(allowlist 没列或进了 deny)。要放行须在全局 config 的渠道 binding 显式声明。";
     return profile;
 }
-
-}  // namespace
 
 AgentChannelEngine::AgentChannelEngine(api::Backend& backend, tools::ToolRegistry& registry,
                                        agent::AgentProfile profile, Options options)

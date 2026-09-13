@@ -30,6 +30,7 @@
 
 #include "gateway/control_server.hpp"
 #include "gateway/profile.hpp"
+#include "gateway/work_pump.hpp"
 
 namespace lubancode::gateway {
 
@@ -163,6 +164,13 @@ public:
         std::function<std::string()> make_boot_id;  // 实例 id seam(测试钉死)
         bool install_signal_handlers = true;   // 测试/嵌入装配关掉,不动全局
         int poll_interval_ms = 100;            // 控制命令轮询粒度(不 busy)
+        // V1 有界主泵(单子 V1 第一件事):业务面入口。空 = 无业务面
+        //(G1 骨架行为)。借用指针,须活过 GatewayProcess;装配层(CLI)
+        // 递进,engine 层不反向依赖 runtime。
+        GatewayWorkPump* pump = nullptr;
+        // 主泵 broken(账写不进等)后还要继续主循环吗。缺省 true:控制面
+        // 仍活,operator 看日志处置;测试可关掉让 broken 即退出。
+        bool keep_running_on_pump_failure = true;
     };
 
     // 关机钩子:G1 无业务面,机制先立。close 返回 true = 收干净;false =

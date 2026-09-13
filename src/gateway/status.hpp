@@ -40,6 +40,47 @@ struct GatewayProbe {
 // 纯读探测。paths.root 不存在也照样回 NotRunning,不建任何东西。
 GatewayProbe ProbeGateway(const GatewayProfilePaths& paths);
 
+// ---------------------------------------------------------------------------
+// V1 分栏(单子 V1 第五件事):process / work / execution / delivery 四栏
+// 分报——进程 running 不冒充任务成功。后三栏是领域账的只读投影(账不在
+// = 空栏,不建目录零写盘),与 process 栏的活探针分开采、分开报。
+// ---------------------------------------------------------------------------
+
+struct GatewayStatusSections {
+    // work 栏:任务与 occurrence 的账面状态。
+    std::size_t jobs_total = 0;
+    std::size_t occurrences_due = 0;        // scheduled 且到点(等 claim)
+    std::size_t occurrences_in_flight = 0;  // claimed 未结算
+    std::size_t occurrences_succeeded = 0;
+    std::size_t occurrences_failed = 0;
+    std::size_t occurrences_needs_review = 0;
+    // execution 栏:最近一枚 occurrence 的执行落点(空 = 还没跑过)。
+    struct ExecutionEntry {
+        std::string occurrence_id;
+        std::string job_id;
+        std::string session_id;   // V3 场(绑定账;未绑定为空)
+        std::string turn_id;
+        std::string outcome;      // 空 = 未结算(in_flight)
+    };
+    std::vector<ExecutionEntry> recent_executions;  // 最近若干枚(倒序)
+    // delivery 栏:outbox 投影。
+    std::size_t delivery_pending = 0;
+    std::size_t delivery_delivered = 0;
+    std::size_t delivery_flagged = 0;
+    std::vector<std::string> pending_delivery_ids;
+    bool work_ledger_present = false;   // automation 账在不在(空栏与坏账分得开)
+    bool delivery_ledger_present = false;
+};
+
+// 三栏只读投影(process 栏仍在 GatewayProbe)。纯读,零建目录零写盘。
+GatewayStatusSections ProbeStatusSections(const GatewayProfilePaths& paths);
+
+// 分栏的 JSON 面(挂在 ProbeToJson 的 "work"/"execution"/"delivery" 键下)。
+nlohmann::json SectionsToJson(const GatewayStatusSections& sections);
+
+// 分栏的人话行(终端打印,前缀分栏)。
+std::vector<std::string> FormatSectionLines(const GatewayStatusSections& sections);
+
 // `gateway status --json` 的正文(稳定字段名,机器可读)。
 nlohmann::json ProbeToJson(const GatewayProbe& probe);
 

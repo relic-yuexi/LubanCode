@@ -65,6 +65,9 @@
 #include "cli/keymap.hpp"
 #include "cli/live_transcript.hpp"
 #include "runtime/worktree.hpp"
+// Gateway V1 主泵装配(app 层:backend/registry 是 app 的材料)。
+#include "runtime/automation_pump.hpp"
+#include "workspace/identity.hpp"
 #include "cli/markdown.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/record_command.hpp"
@@ -646,14 +649,74 @@ int RunCli(const std::vector<std::string>& args) {
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunGateway: {
-            // 总装单 G1:gateway run/status/stop。run 是前台真进程;status
-            // 是只读 probe(零写盘零建目录,不暗起 Gateway);stop 投本地
-            // 控制命令。退出码合同见 docs/architecture/gateway/README.md §5。
+            // 总装单 G1+V1:gateway run/status/stop/job。run 是前台真进程
+            //(V1 起带业务泵);status 是只读 probe + 三栏领域投影;stop 投
+            // 本地控制命令;job 是持久任务入口。退出码合同见 gateway 文档。
             cli::GatewayCommandArgs gateway_args;
             gateway_args.verb = parsed_cli.gateway.verb;
             gateway_args.profile = parsed_cli.gateway.profile;
             gateway_args.json = parsed_cli.gateway.json;
-            return cli::RunGatewayCommand(gateway_args);
+            gateway_args.job_verb = parsed_cli.gateway.job_verb;
+            gateway_args.prompt = parsed_cli.gateway.prompt;
+            gateway_args.job_id = parsed_cli.gateway.job_id;
+            gateway_args.idempotency_key = parsed_cli.gateway.idempotency_key;
+            gateway_args.due_at_ms = parsed_cli.gateway.due_at_ms;
+            if (gateway_args.verb != "run") {
+                return cli::RunGatewayCommand(gateway_args);
+            }
+            // V1 主泵装配(app 层:backend/registry 是 app 的材料,engine
+            // 不反向依赖)。模型/工具面按当前配置;工具授权 fail closed
+            //(名单空 = needs_confirm 工具全拒,基础表里免确认的工具照走)。
+            const auto home_luban = lubancode::config::HomeLubancodeDir();
+            if (!home_luban.has_value()) {
+                std::cerr << "gateway run: 找不到用户主目录,无法定位 ~/.lubancode\n";
+                return 1;
+            }
+            const auto gateway_config = lubancode::config::LoadFromEnv();
+            if (!gateway_config.has_value()) {
+                std::cerr << "gateway run: 配置装载失败——" << gateway_config.error() << "\n";
+                return 1;
+            }
+            auto backend = lubancode::app::BuildBackend(gateway_config->config);
+            lubancode::tools::ToolRegistry registry = lubancode::app::BuildBaseToolRegistry(
+                {}, gateway_config->config.search);
+            std::optional<lubancode::runtime::GatewayAutomationPump> pump;
+            {
+                lubancode::runtime::GatewayAutomationPump::Options pump_options;
+                const std::filesystem::path gateway_root =
+                    lubancode::tools::Utf8ToPath(*home_luban) / "gateway";
+                const std::string profile_name =
+                    gateway_args.profile.empty()
+                        ? std::string(lubancode::gateway::kDefaultGatewayProfile)
+                        : gateway_args.profile;
+                pump_options.paths =
+                    lubancode::gateway::ResolveGatewayProfilePaths(gateway_root, profile_name);
+                pump_options.workspaces_root =
+                    lubancode::tools::Utf8ToPath(*home_luban) / "workspaces";
+                const std::filesystem::path cwd = std::filesystem::current_path();
+                pump_options.workspace_identity = lubancode::workspace::ResolveWorkspaceIdentity(
+                    cwd, home_luban.has_value() ? lubancode::tools::Utf8ToPath(*home_luban)
+                                                : std::filesystem::path());
+                pump_options.cwd_utf8 = lubancode::platform::CurrentDirUtf8();
+                pump_options.lubancode_version = std::string(lubancode::app::kVersion);
+                pump_options.wire_name =
+                    lubancode::config::ProviderWireName(gateway_config->config.wire);
+                pump_options.model = gateway_config->config.model;
+                pump_options.max_steps_per_turn = 32;   // V1 生产缺省:预算三根
+                pump_options.max_wall_secs = 600;       // 硬线至少步数+墙钟两根
+                pump.emplace();
+                const auto open = lubancode::runtime::GatewayAutomationPump::Open(
+                    &*pump, *backend, registry, std::move(pump_options));
+                if (!open.ok) {
+                    std::cerr << "gateway run: 业务泵开不了——" << open.error << "\n";
+                    return 1;
+                }
+                // ownerEpoch 不在这里预造:GatewayProcess 取到锁后把锁内
+                // epoch(= boot_id)递进泵(process.cpp 的 set_owner_epoch)。
+            }
+            gateway_args.pump = &*pump;
+            const int code = cli::RunGatewayCommand(gateway_args);
+            return code;
         }
         case CliAction::BadGateway:
             std::cerr << parsed_cli.error_text << "\n";
