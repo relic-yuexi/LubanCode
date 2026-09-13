@@ -331,13 +331,14 @@ std::expected<ResolvedChannelCredential, ChannelCredentialError> ResolveChannelC
 }
 
 const std::vector<std::string>& SidecarEnvAllowlist() {
-    // 子进程只继承必要环境(Q0 定形,Q1 spawn 实装照此):
+    // 渠道子进程只继承必要环境(Q0 定形合同;Q1 若定案进程内直连则本表
+    // 不消费,定案受管子进程则 spawn 实装照此):
     //   - 进程基件(SystemRoot/SystemDrive/PATHEXT:Windows 下缺了连 CRT
-    //     都起不稳;PATH 找 node);
-    //   - 临时目录(TEMP/TMP:Node 运行时内部要用);
-    //   - 语言时区(LANG/LC_ALL/TZ/HOME/USERPROFILE:SDK 日志与编码兜底)。
-    // 凭据不走环境(专用启动管道,见 configuration.md §4);宿主模型 API
-    // key、其他账号的密钥环境变量不在名单里,一律不递。
+    //     都起不稳;PATH 找运行时);
+    //   - 临时目录(TEMP/TMP:运行时内部要用);
+    //   - 语言时区(LANG/LC_ALL/TZ/HOME/USERPROFILE:日志与编码兜底)。
+    // 凭据不走环境(交付通道见 configuration.md §4,传输无关);宿主模型
+    // API key、其他账号的密钥环境变量不在名单里,一律不递。
     static const std::vector<std::string> allowlist = {
         "PATH",       "PATHEXT",   "SystemRoot", "SystemDrive", "TEMP",
         "TMP",        "LANG",      "LC_ALL",     "TZ",          "HOME",

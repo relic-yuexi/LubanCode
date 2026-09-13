@@ -13,9 +13,10 @@
 //   - 密钥值只在本进程内持有:不进 argv、不进模型输入、不进会话、不进
 //     trace、不进错误与普通日志。诊断只报来源与状态(稳定码 + 路径,
 //     绝不带值)。
-//   - 子进程环境白名单(Q1 spawn 实装时照此清单继承,凭据不走环境,
-//     走不落日志的专用启动管道):宿主模型 API key、其他账号的密钥环境
-//     变量一律不递给适配器。
+//   - 凭据只进入获准的渠道执行载体(Q1 三选一定案:进程内直连则不出
+//     宿主进程;受管子进程则走不落日志的专用启动管道)。子进程若存在,
+//     环境按白名单继承(见 SidecarEnvAllowlist):宿主模型 API key、
+//     其他账号的密钥环境变量一律不递。
 //   - 首版不生成 credentials.json.enc(文件名带 enc 不代表加密)。
 //
 // 纯运行时件:读环境变量与用户明指的文件,不写任何文件。
@@ -71,7 +72,8 @@ std::expected<ResolvedChannelCredential, ChannelCredentialError> ResolveChannelC
 std::expected<void, ChannelCredentialError> CheckCredentialFileSecurity(
     const std::filesystem::path& canonical_path);
 
-// sidecar 子进程环境白名单(Q1 的 spawn 实装 + 测试共同遵守;Q0 定形)。
+// 渠道子进程环境白名单(Q0 定形;Q1 定案走子进程时 spawn 实装照此继承,
+// 定案进程内直连则本表不消费)。凭据不走环境。
 const std::vector<std::string>& SidecarEnvAllowlist();
 
 // 防御性脱敏:把 text 里出现的已知密钥值换成 <redacted>。密钥为空原样

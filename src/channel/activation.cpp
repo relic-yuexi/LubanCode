@@ -72,7 +72,7 @@ ChannelActivationDecision ResolveChannelActivation(
         return decision;
     }
     decision.code = ChannelActivationDecision::Code::Ready;
-    decision.detail = "五闸全过,可 spawn sidecar";
+    decision.detail = "五闸全过,可启动渠道执行载体";
     return decision;
 }
 

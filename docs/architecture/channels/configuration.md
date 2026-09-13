@@ -88,10 +88,10 @@ ChannelDisabled     channels.<id>.enabled != true
 AccountDisabled     accounts.<id>.enabled != true
 CredentialsMissing  凭据缺失或解析失败
 AccountInUse        账号锁被另一实例持有
-Ready               唯一可 spawn sidecar 的状态
+Ready               唯一可启动渠道执行载体的状态（受管子进程或进程内直连，Q1 定案）
 ```
 
-只有 `Ready` 才能 spawn sidecar。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。
+只有 `Ready` 才能启动渠道执行载体（受管子进程或进程内直连——传输形态 Q1 定案，决策合同传输无关）。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。"Package 已安装且已信任"一闸：若定案 C++ 直连、无渠道包，退化为"渠道实现内置受信"（装配侧恒信任），不另造假包概念。
 
 默认行为表：
 
@@ -127,7 +127,7 @@ Ready               唯一可 spawn sidecar 的状态
 - 拒绝空值、拒绝内部控制字符、拒绝超限文件（上限 8 KiB）。
 - 路径必须绝对；按 canonical 解析（符号链接/重解析点解析到真实目标再验）；目标须是常规文件、归属当前用户，且无组/其他用户读写位（POSIX）或 DACL 无其他账户读权（Windows）。
 
-密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。适配器经**专用启动管道**接收（Q1 实装），与 Bridge 握手的固定字段分开——协议不加未知字段。子进程环境走白名单（见 [security.md](security.md) §2），宿主模型 key 与其他账号凭据不递。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
+密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。凭据只进入获准的渠道执行载体——进程内直连（Q1 三选一定案之一）则根本不出宿主进程；若走受管子进程，则经不落日志的专用启动管道交付，与 Bridge 握手的固定字段分开，协议不加未知字段。子进程若存在，环境走白名单（见 [security.md](security.md) §2），宿主模型 key 与其他账号凭据不递。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
 
 ## 5. 状态目录
 

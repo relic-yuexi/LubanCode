@@ -4,9 +4,13 @@
 // 决策码冻结表、默认行为表)。一只权威函数,不在 CLI、ChannelManager、
 // Package mounting 三处各猜一遍:
 //   Gateway 模式 + 包已安装且已信任 + 渠道/账号双层 enabled + 凭据可读
-//   + 账号锁齐,五闸全过才 Ready;只有 Ready 可 spawn sidecar(真 spawn
-//   归 Q1,本批落决策合同)。普通 CLI/one-shot/App Server 一律
+//   + 账号锁齐,五闸全过才 Ready;只有 Ready 可启动渠道执行载体(受管
+//   子进程或进程内直连——传输形态 Q1 三选一定案,决策合同传输无关;
+//   真接线归 Q1,本批落决策函数)。普通 CLI/one-shot/App Server 一律
 //   NotGatewayMode——零渠道进程、零监听。
+//
+// "包信任"闸的退化注脚:若 Q1 定案 C++ 直连、无渠道包,该条件退化为
+// "渠道实现内置受信"(装配侧恒信任),不另造假包概念。
 //
 // 纯函数件:不读配置文件、不碰锁、不起进程;调用方把状态快照递进来。
 // 渠道库不反向依赖 package(trust 以 ChannelTrustState 快照传入)。
@@ -51,7 +55,7 @@ struct ChannelActivationDecision {
         AccountDisabled,    // accounts.<id>.enabled != true(或账号不在册)
         CredentialsMissing, // 凭据缺失或解析失败
         AccountInUse,       // 账号锁被另一活实例持有
-        Ready,              // 唯一可 spawn sidecar 的状态
+        Ready,              // 唯一可启动渠道执行载体的状态(子进程或进程内,Q1 定案)
     };
     Code code = Code::DisabledByDefault;
     std::string detail;  // 脱敏诊断:不带凭据值、不带整份平台事件

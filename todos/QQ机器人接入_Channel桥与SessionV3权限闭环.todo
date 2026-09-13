@@ -72,9 +72,9 @@ channels/qqbot/
 
 - [x] 新增运行时 credential resolver：按现有来源优先级处理；高优先级来源存在却无效时明报，不静默降级。诊断只报来源与状态。（Q0 落 `src/channel/credentials.hpp/cpp`：优先级 secret_file > secret_env > inline；稳定码清单见头文件；`DescribeCredentialSource` 同步同口径。测试 `tests/unit/channel/test_channel_credentials.cpp`——优先级/降级拒绝/稳定码逐项。PR #64）
 - [x] 明确绝对路径解析、符号链接/重解析点、文件归属和 Windows DACL/POSIX 权限检查。账号 ID、渠道 ID 也须验证，不能拼出状态根外路径。（Q0 落 `ResolveChannelCredential`：绝对路径 + `weakly_canonical` + 归属/权限检查（POSIX mode 位、Windows owner SID + DACL 逐 ACE 白名单）；`IsValidChannelId/IsValidChannelAccountId` 守门，`ChannelManager::AddAccount` 拒非法 id。测试同上册 + `test_channel_manager.cpp` "非法 channel/account id"。Windows DACL 拒收案在 credentials 册内联；真实跨用户场景 CI 单账户 runner 覆盖不到，写"未验"。）
-- [x] 密钥不进入 argv、模型输入、会话、trace、错误或普通日志。（Q0 落宿主侧：错误文案结构上只装稳定码/路径，`RedactSecret` 防御性脱敏，`ResolvedChannelCredential` 无流出口；测试"泄露禁令"案。适配器专用启动管道的实装归 Q1——`SidecarEnvAllowlist` 已定形环境白名单合同，凭据不走环境不走 argv 的规矩写进 configuration.md §4。）
-- [ ] 适配器经不落日志的专用启动管道接收密钥；与固定 Bridge 握手字段分开，或先正式升级协议，不能悄悄加未知字段。（Q1：transport 实装时落，Q0 已把合同写进冻结件。）
-- [ ] 子进程只继承必要环境；不把宿主模型 API key、其他 QQ 账号凭据交给适配器。SDK 默认日志也需接脱敏 logger。（Q0 落 `SidecarEnvAllowlist()` 白名单合同与测试；真 spawn 的环境裁剪与 SDK 脱敏 logger 归 Q1。）
+- [x] 密钥不进入 argv、模型输入、会话、trace、错误或普通日志。（Q0 落宿主侧：错误文案结构上只装稳定码/路径，`RedactSecret` 防御性脱敏，`ResolvedChannelCredential` 无流出口；测试"泄露禁令"案。交付通道措辞传输无关——凭据只进入获准的渠道执行载体（进程内直连则不出宿主进程；受管子进程则走不落日志的专用管道），实装归 Q1；`SidecarEnvAllowlist` 已定形环境白名单合同（定案子进程才消费），规矩写进 configuration.md §4。）
+- [ ] 适配器经不落日志的专用启动管道接收密钥；与固定 Bridge 握手字段分开，或先正式升级协议，不能悄悄加未知字段。（Q1：transport 三选一定案后落——进程内直连无此件；受管子进程按 configuration.md §4 的中性口径实装。）
+- [ ] 子进程只继承必要环境；不把宿主模型 API key、其他 QQ 账号凭据交给适配器。SDK 默认日志也需接脱敏 logger。（Q0 落 `SidecarEnvAllowlist()` 白名单合同与测试；定案进程内直连则不消费此表，定案子进程则 spawn 环境裁剪与 SDK 脱敏 logger 归 Q1。）
 - [x] 暂不生成 `credentials.json.enc`。（Q0 未生成、文档明写"文件名带 enc 不代表加密"；OS 密钥库/DPAPI 后置。）
 
 同一 OS 账号的文件 ACL 不能挡住该账号内拥有任意 shell 的 Agent。首版须限制工具能力并拦凭据路径；要承诺强隔离，另接系统沙箱/隔离账号，不能靠隐藏路径或提示词。
