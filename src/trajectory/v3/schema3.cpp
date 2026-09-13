@@ -1791,6 +1791,66 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return error;
         }
     }
+    // ---- Gateway 常驻总装 V0(总装单 §五/§六/§九;statusless 事实行,
+    // 合同与 fixture 先行、生产装配归 V1)----
+    else if (line.kind == K::GatewayWorkBound) {
+        // work↔turn 关联事实:开轮前把预留 turn 身份绑定 workId。恢复器扫
+        // V3 流凭 workId 反查原轮(§六窗口"V3 已开轮,work 还没记 turnRef"),
+        // 不另派新轮。workId/sourceId 全局带域(§5.2,不收会话局部号);
+        // ownerEpoch 拦旧 worker 迟到提交;attempt 从 1 起(重派计)。
+        for (const auto* key : {"workId", "sourceKind", "sourceId", "ownerEpoch"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!line.payload.contains("attempt") || !JsonIsNonNegativeInt(line.payload["attempt"]) ||
+            line.payload["attempt"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type",
+                       "gateway.work.bound.attempt 应为从 1 起的正整数(重派计数)");
+        }
+        if (!line.turn_id.has_value()) {
+            return Err("schema3.missing_field",
+                       "gateway.work.bound 必带 turnId(预留 turn 身份,恢复反查的锚)");
+        }
+        // inputRef 可选(§5.1:接纳前正文在 durable input artifact;进 V3 后
+        // 用 inputRef/messageRef 对照):带则须为合法引用格式。
+        if (auto error = CheckRefField(kind_name, line.payload, "inputRef", false)) {
+            return error;
+        }
+    } else if (line.kind == K::ReplySelectionCommitted) {
+        // 回复选择提交(§九合同):原件先落稳、选择事实后提交;selectionId
+        // 恢复后不变——resume 不重新散列投递身份,否则 resume 一次便多送
+        // 一次。artifactRef 六键指最终正文原件(§3.1);sourceMessageRef 指
+        // 选定的来源 message;completedEventRef 可选指 turn 终态事件
+        // (选择事实引用对应 V3 终态);ordinal 从 1 起(同轮多段回复的次序)。
+        for (const auto* key : {"selectionId", "deliveryTarget", "formatVersion"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!line.payload.contains("ordinal") || !JsonIsNonNegativeInt(line.payload["ordinal"]) ||
+            line.payload["ordinal"].get<std::uint64_t>() < 1) {
+            return Err("schema3.bad_type",
+                       "reply.selection.committed.ordinal 应为从 1 起的正整数(同轮次序)");
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "sourceMessageRef", true)) {
+            return error;
+        }
+        if (!line.payload.contains("artifactRef") || !line.payload["artifactRef"].is_object()) {
+            return Err("schema3.missing_field",
+                       "reply.selection.committed payload 缺 artifactRef(最终正文原件)");
+        }
+        if (auto error = ValidateArtifactRef(kind_name, line.payload["artifactRef"])) {
+            return error;
+        }
+        if (auto error = CheckRefField(kind_name, line.payload, "completedEventRef", false)) {
+            return error;
+        }
+        if (!line.turn_id.has_value()) {
+            return Err("schema3.missing_field",
+                       "reply.selection.committed 必带 turnId(回复属哪一轮)");
+        }
+    }
     // pending 类必须带 reason(§4.14)。
     if (line.status == OpStatus::Pending && !line.payload.contains("reason")) {
         return Err("schema3.missing_field",

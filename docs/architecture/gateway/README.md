@@ -1,6 +1,6 @@
 # 持久 Agent Gateway：总装合同
 
-_本目录是《持久 Agent Gateway 自动任务与可靠恢复总装计划》的合同冻结文档（G0 批次落）。单子原文为权威；此处把散在单子里的核心合同提炼成实现批次可直接对照的唯一真源。_
+_本目录原是旧总装计划（G0 批次）的合同冻结文档。2026-09-13 起以[Session V3 新版总装计划](../../../todos/持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo)为唯一权威，本目录三篇已随 V0 批次逐项同步（旧存储路径、旧 Loop 恢复承诺、组件缺失判断等过时口径已删改；批号从 G0—G8 换为 V0—V6）。单子原文仍是权威，此处把核心合同提炼成实现批次可直接对照的唯一真源。_
 
 ---
 
@@ -115,45 +115,38 @@ Gateway 进程退出码（G1 实现裁决，冻结）：
 
 ## 6. 目录布局
 
+新版（总装单 §5.3 提案；目录布局随 V1 起按批落定，下表是目标形状，不是"已存在"清单）：
+
 ```text
-~/.lubancode/gateway/
-  profiles/<profile>/
-    gateway.json
-    gateway.lock
-    control.json
-    boot-history.jsonl
-    logs/
-    automations/
-      jobs/<job_id>/spec.json
-      events/<shard>.jsonl
-      occurrences/<occurrence_id>.json
-    tasks/
-      events/<shard>.jsonl
-      snapshots/
-    channels/
-      <channel>/<account>/
-        account.json
-        account.lock
-        ingress/
-        outbox/
-        dead-letter/
-        adapter-state/
+~/.lubancode/gateway/profiles/<profile>/
+  gateway.json / gateway.lock / control/ / boot-history.jsonl
+  automation/     # spec、occurrence 事实及可重建索引（V2 起）
+  work/           # 受理/派发/接管引用、输入原件（V1 起）
+  channels/       # 账号状态、ingress、adapter 状态引用（V3 起）
+  delivery/       # 回复原件、发送事实、回执、dead letter（V1 起本地、V3 起渠道）
+
+~/.lubancode/workspaces/<resolved-workspace-dir>/sessions/<sessionId>/
+  <sessionId>.jsonl          # V3 主账（新场默认开启；只显式 0 回 v2）
+  operations.jsonl           # 受理账（SessionService，三端共用）
+  operations-inputs/         # 输入原件（durable input artifact）
+  artifacts/
+  subagents/...
 ```
 
-Agent 运行事实仍住 `~/.lubancode/workspaces/<workspace_key>/sessions/<session_id>/`。Gateway 不把 Trajectory 搬进自己的目录。
+会话位置一律走 workspace identity/index/resolver 解析实际目录，不按显示名手拼（见 §8-V0）。`~/.lubancode/trajectories/workspaces/...` 是旧口径，已废除。
 
-首版存储裁决：append-only event + 原子 snapshot/manifest，不先引 SQLite。spec 可原子换代；事实事件只追加，不可把 JSON 文件当共享可变 map 反复整份覆盖。
+首版存储裁决不变：append-only event + 原子 snapshot/manifest，不先引 SQLite。spec 可原子换代；事实事件只追加，不可把 JSON 文件当共享可变 map 反复整份覆盖。关键受理、认领、执行授权、回复选择与发送回执要求 PowerLoss 级提交（§10-V0）。
 
 ## 7. 批次地图与当前状态
 
+旧 G0—G8 已废，新版 V0—V6（见新版总装单 §十）。旧 G0/G1 的产出（本目录文档、GatewayProcess 骨架、CLI run/status/stop、测试册）折入新账：
+
 | 批 | 内容 | 状态 |
 |---|---|---|
-| G0 | 现状冻结与总合同（本目录文档 + 渠道单对账） | 已落（2026-09-01） |
-| G1 | 前台 Gateway 骨架与控制面（GatewayProcess/profile/lock/control/status/boot history/SafeMode 骨架） | 已落（2026-09-01：`src/gateway/` 四件 + `lubancode gateway run\|status\|stop` 子命令 + `tests/unit/gateway/` 16 例 + 真机冒烟） |
-| G2 | AutomationStore、Scheduler 与系统服务 | 待实现 |
-| G3 | Headless Session 与 Trajectory 收口（BuildRecoveryDecision） | 待实现 |
-| G4 | DurableTaskStore 与 detached work | 待实现 |
-| G5 | ChannelManager 宿主化与 durable ingress 接线 | 待实现 |
-| G6 | ReplyAssembler、Outbox 与可靠投递 | 待实现 |
-| G7 | 首只真渠道与生产运维 | 待实现 |
-| G8 | 故障扫点、容量与发布 | 待实现 |
+| V0 | 合同与持久受理底线：文档翻新、work/occurrence/reply 身份与 schema 注册、SessionService 受理四病修复、锁的原子互斥与 ownerEpoch + 双进程竞争测试、PowerLoss 提交原语与原件保留规则 | 已落（2026-09-13，本目录三篇同步） |
+| V1 | 最短纵向闭环：主泵、最小 AutomationStore（once/run-now）、共用 headless 装配、reply selection + 本地 DurableReplyOutbox | 待实现 |
+| V2 | 周期调度与可靠接管（interval/cron、时区/DST、misfire、恢复裁决、heartbeat、/loop 导入） | 待实现 |
+| V3 | 渠道总装与真 transport（durable work 引用、sidecar、ACK 服从 ingress 耐久回执） | 待实现 |
+| V4 | 服务安装与常驻运维（install/start/restart/doctor/logs、三平台 supervisor） | 待实现 |
+| V5 | 长任务、Goal 与 Workflow（与异步工具单共用执行账） | 待实现 |
+| V6 | 发布验收（回归、72h soak、容量扫点、安全、能力表） | 待实现 |

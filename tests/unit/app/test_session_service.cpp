@@ -221,14 +221,15 @@ TEST_CASE("输入接纳幂等:同键同载荷回原回执,同键异载荷冲突,
     CHECK(service.SubmitInput(keyless).accepted);
     CHECK(service.pending_input_count() == 3);
 
-    // 泵侧消费:FIFO,带接纳时的操作号。
+    // 泵侧消费:FIFO,带接纳时的操作号(V0 起 Pop 落 dispatched 事实,
+    // 三态返回:Ok/Empty/WriteFailed)。
     const auto popped = service.PopPendingInput();
-    REQUIRE(popped.has_value());
-    CHECK(popped->text == "继续检查恢复路径");
-    CHECK(popped->operation_id == r1.operation_id);
-    CHECK(service.PopPendingInput().has_value());
-    CHECK(service.PopPendingInput().has_value());
-    CHECK_FALSE(service.PopPendingInput().has_value());
+    REQUIRE(popped.status == runtime::SessionService::PendingPop::Status::Ok);
+    CHECK(popped.input.text == "继续检查恢复路径");
+    CHECK(popped.input.operation_id == r1.operation_id);
+    CHECK(service.PopPendingInput().status == runtime::SessionService::PendingPop::Status::Ok);
+    CHECK(service.PopPendingInput().status == runtime::SessionService::PendingPop::Status::Ok);
+    CHECK(service.PopPendingInput().status == runtime::SessionService::PendingPop::Status::Empty);
     CHECK(service.pending_input_count() == 0);
 }
 

@@ -1,7 +1,15 @@
 #include "channel/account_lock.hpp"
 
 #include <array>
+#include <cstdio>
 #include <fstream>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <share.h>
+#endif
 
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
@@ -44,20 +52,34 @@ std::optional<AccountLockRecord> ReadLockFile(const std::filesystem::path& lock_
     return record;
 }
 
-// 写锁文件。取舍:直接截断写,不做 temp+rename 原子换——锁的对手是
-// 本机另一只实例的启动竞态(毫秒级),不是断电一致性;半写坏锁走
-// RefusedBrokenLock 留给人看,不静默当作可抢。configuration.md §11 钉的
-// 是"核进程存活再清",不是原子写。
-bool WriteLockFile(const std::filesystem::path& lock_file, const AccountLockRecord& record) {
+// 取锁写侧(V0 常驻总装):不再"先读后写"的截断写——那只是竞态窗口
+// 大小的差别,双进程互斥靠 create-new(wbx)的 OS 原子性,至多一只实例
+// 占位成功。锁的对手仍是本机另一只实例的启动竞态(毫秒级),不是断电
+// 一致性;半写坏锁走 RefusedBrokenLock 留给人看,不静默当作可抢。
+// configuration.md §11 钉的"核进程存活再清"保持不变。
+bool CreateLockFile(const std::filesystem::path& lock_file, const AccountLockRecord& record,
+                    std::FILE** out_file) {
     std::error_code ec;
     std::filesystem::create_directories(lock_file.parent_path(), ec);
     if (ec && !lock_file.parent_path().empty()) return false;
-    std::ofstream stream(lock_file, std::ios::binary | std::ios::trunc);
-    if (!stream) return false;
+    std::FILE* file = nullptr;
+#ifdef _WIN32
+    file = _wfsopen(lock_file.c_str(), L"wbx", _SH_DENYNO);
+#else
+    file = std::fopen(lock_file.c_str(), "wbx");
+#endif
+    if (file == nullptr) return false;
     const std::string text = record.ToJson().dump();
-    stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-    stream.flush();
-    return static_cast<bool>(stream);
+    const bool wrote =
+        std::fwrite(text.data(), 1, text.size(), file) == text.size() && std::fflush(file) == 0;
+    if (!wrote) {
+        std::fclose(file);
+        std::error_code remove_ec;
+        std::filesystem::remove(lock_file, remove_ec);
+        return false;
+    }
+    *out_file = file;
+    return true;
 }
 
 }  // namespace
@@ -126,17 +148,31 @@ AccountLock::AcquireResult AccountLock::TryAcquire(const std::filesystem::path& 
     }
     out->Release();
 
-    std::string read_error;
-    const auto existing = ReadLockFile(lock_file, &read_error);
-    if (existing.has_value()) {
-        const AccountLockRecord& holder = *existing;
-        // 同一实例重入(同一 ChannelManager 重启账号时撞上自己的旧锁):
-        // pid、启动时刻、实例令牌都对上才可续。仅 pid 相同不够——同进程
-        // 两只 manager(测试/嵌入式)互不相认。
-        const bool same_instance = holder.pid == self.pid &&
-                                   holder.start_time_ms == self.start_time_ms &&
-                                   holder.instance_token == self.instance_token;
-        if (!same_instance) {
+    // 陈旧锁清掉后有界重试:每一轮头一步都是 create-new 原子占位,并发
+    // 下别人可能先占,撞满即报错,不无限绕。
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        std::FILE* file = nullptr;
+        if (CreateLockFile(lock_file, self, &file)) {
+            out->lock_file_ = lock_file;
+            out->file_ = file;
+            result.status = AcquireResult::Status::Acquired;
+            return result;
+        }
+        std::string read_error;
+        const auto existing = ReadLockFile(lock_file, &read_error);
+        if (existing.has_value()) {
+            const AccountLockRecord& holder = *existing;
+            // 同一实例重入(同一 ChannelManager 重启账号时撞上自己的旧锁):
+            // pid、启动时刻、实例令牌都对上才可续。仅 pid 相同不够——同进程
+            // 两只 manager(测试/嵌入式)互不相认。
+            const bool same_instance = holder.pid == self.pid &&
+                                       holder.start_time_ms == self.start_time_ms &&
+                                       holder.instance_token == self.instance_token;
+            if (same_instance) {
+                out->lock_file_ = lock_file;  // 幂等续持(无句柄,Release 走删)
+                result.status = AcquireResult::Status::Acquired;
+                return result;
+            }
             const AliveChecker checker = alive ? alive : DefaultAliveChecker();
             if (checker(holder.pid)) {
                 result.status = AcquireResult::Status::RefusedAliveHolder;
@@ -152,34 +188,35 @@ AccountLock::AcquireResult AccountLock::TryAcquire(const std::filesystem::path& 
                 result.detail = "清假死锁 " + platform::PathToUtf8(lock_file) + " 失败: " + ec.message();
                 return result;
             }
+            continue;  // 清掉了,回头再占
         }
-    } else if (!read_error.empty()) {
-        // 锁文件在但读不懂:不敢删,明报(configuration.md §11"不可见锁便
-        // 直接删"的反面——看不懂就更不能删)。
-        result.status = AcquireResult::Status::RefusedBrokenLock;
-        result.detail = read_error + "(锁文件: " + platform::PathToUtf8(lock_file) + ")";
-        return result;
+        if (!read_error.empty()) {
+            // 锁文件在但读不懂:不敢删,明报(configuration.md §11"不可见锁便
+            // 直接删"的反面——看不懂就更不能删)。
+            result.status = AcquireResult::Status::RefusedBrokenLock;
+            result.detail = read_error + "(锁文件: " + platform::PathToUtf8(lock_file) + ")";
+            return result;
+        }
+        // 占位撞了但读不到锁文件:并发尾巴,重试。
     }
-
-    if (!WriteLockFile(lock_file, self)) {
-        result.status = AcquireResult::Status::IoError;
-        result.detail = "写锁文件 " + platform::PathToUtf8(lock_file) + " 失败";
-        return result;
-    }
-    out->lock_file_ = lock_file;
-    result.status = AcquireResult::Status::Acquired;
+    result.status = AcquireResult::Status::IoError;
+    result.detail = "取锁反复撞(假死锁清后仍占不到位): " + platform::PathToUtf8(lock_file);
     return result;
 }
 
-AccountLock::AccountLock(AccountLock&& other) noexcept : lock_file_(std::move(other.lock_file_)) {
+AccountLock::AccountLock(AccountLock&& other) noexcept
+    : lock_file_(std::move(other.lock_file_)), file_(other.file_) {
     other.lock_file_.clear();
+    other.file_ = nullptr;
 }
 
 AccountLock& AccountLock::operator=(AccountLock&& other) noexcept {
     if (this != &other) {
         Release();
         lock_file_ = std::move(other.lock_file_);
+        file_ = other.file_;
         other.lock_file_.clear();
+        other.file_ = nullptr;
     }
     return *this;
 }
@@ -187,6 +224,10 @@ AccountLock& AccountLock::operator=(AccountLock&& other) noexcept {
 AccountLock::~AccountLock() { Release(); }
 
 void AccountLock::Release() {
+    if (file_ != nullptr) {
+        std::fclose(file_);
+        file_ = nullptr;
+    }
     if (lock_file_.empty()) return;
     std::error_code ec;
     std::filesystem::remove(lock_file_, ec);
