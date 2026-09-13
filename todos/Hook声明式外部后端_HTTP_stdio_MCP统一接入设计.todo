@@ -1,0 +1,328 @@
+# Hook 声明式外部后端：HTTP、stdio、MCP 统一接入设计
+
+日期：2026-09-13
+状态：设计待实现。本文只核对当前源码、冻结建议与验收项，不代表接口已经发布。
+范围：当前重构中的 middleware / Session v3；旧 command hooks 只作代码参照，本单不扩建旧协议。
+
+## 一、结论与本轮范围
+
+Hook 管触发时点、槽位、排序和效果采用；backend 管一次 handler 如何执行。保留一套注册池、一套计划、一套效果校验和一份 v3 事实账。
+
+作者可以只交 hook.json，声明挂点与 HTTP 地址。宿主到了挂点，按版本化协议组包、发请求、校验返回，再接着跑。Python、Go、Node 服务均可承接，宿主不要求安装 Lua 脚本。
+
+Lua 继续处理需要 next() 的前后编排，也可只做外部能力的薄壳。外部后端首版采用单次请求返回，不向远端交出 next()、Session writer 或任意 Host API 调用权。
+
+本轮用户明确提出“像 plugin/MCP 那样填清单，自动发送 prompt/tool_result”。这更新了《LuaHook统一扩展_MCP分工与SessionV3接入.todo》早期“公共入口只收 Lua”的范围约束。沿用该单的槽位、来源覆盖、权限与落账合同；新增外部实现种类。旧单中“未实现”的历史判断须按当前代码复核，不照抄成现状。
+
+交付分批：先完成中立后端合同、HTTP 和单次进程；再接 PreAction/PostAction 的真实工具边界；最后补 MCP 直接绑定与常驻 stdio。不能为了填满后端表，先发布尚无实际调用路径的挂点。
+
+## 二、当前源码与缺口
+
+以下锚点按本轮工作区静态核对，后续改码时以符号为准。
+
+| 源码锚点 | 当前事实 | 本单要补什么 |
+| --- | --- | --- |
+| src/hooks/middleware.hpp:45，HookPoint | 枚举已有 PreUser/PostUser/PreRequest/PreAction/PostAction 等 | 枚举存在与运行路径接通分开展示 |
+| src/hooks/middleware.hpp:281，MiddlewareDefinition | 目前用 is_lua、builtin、LuaHandlerSpec 表示实现 | 换成带判别项的 BackendSpec；公共调度不认传输细节 |
+| src/hooks/middleware.cpp:315，清单解析；:498，AddManifest | schemaVersion=1，必须有 entry/handler，物化 Lua | 增加 schemaVersion=2 与分后端严格校验 |
+| src/hooks/middleware_loader.cpp:51，LoadHookPackage | hook.json 发现后必读 entry 脚本 | HTTP/MCP 包不读脚本；stdio 校验启动定义；Lua 保留包内入口检查 |
+| src/hooks/middleware.cpp:251，ComputeMiddlewareDefinitionHash | 已有定义身份与不可变计划 | hash 覆盖后端、协议、输入投影、目标与启动配置 |
+| src/hooks/middleware.cpp:163，EffectAllowed | 挂点/阶段有统一效果矩阵 | 外部返回走同一矩阵，再过 payload 与业务版本校验 |
+| src/hooks/middleware.cpp:1141–1240，RunFrame | next 是一次性执行权；零次 next 就短路；返回效果目前在 handler 返回后收集 | 单次外部返回不能直接当普通 Lua 返回，否则会误短路或把改写放到下游之后 |
+| src/runtime/middleware_runtime.cpp:134/:169/:195 | 已有 PreUser、PostUser、PreRequest 三处运行封装 | 首批复用这些入口，核对哪些效果最终被消费 |
+| src/app/turn_runner.cpp:820/:864；src/runtime/agent_channel_engine.cpp:103/:140/:169 | 前台与 channel engine 调同组封装 | CLI、one-shot、app-server 的真实验收必须各跑一遍 |
+| src/runtime/middleware_assembly.cpp:23；src/app/hook_runtime.cpp:103 | Lua 工厂已接；正式缺省 grants 仅开 state/log | 新后端工厂与按来源授权在生产装配处接实 |
+| src/runtime/plugin_http.cpp:174，NormalizeHttpUrl；src/net/http_transport.hpp | 已有带预算/取消的 HTTP 底座；现行 URL 策略拒绝 localhost/IP 等目标 | 复用中立传输；单列 hook 本地端点策略，不能悄悄放宽所有 Lua 插件 |
+| src/platform/process.hpp:198，RunProcessWithStdin；src/hooks/dispatcher.cpp:53，ExecuteV2 | 旧 command hook 已能 stdin JSON → stdout JSON，每次起进程 | 复用进程底座，新增 v3 后端适配；核对取消与双流限额，不能照搬旧退出码语义 |
+| src/mcp/transport.hpp:1；src/mcp/client.hpp:86 | MCP 当前是常驻 stdio JSON-RPC 客户端 | 直接 MCP hook 复用已注册工具；HTTP hook 不等于 HTTP MCP |
+| src/runtime/hook_host_services.cpp:561，HookToolExecutionService::Call | 统一准入、执行与 tool.execution.* 子执行记录已有实现 | MCP 后端经此桥调用，不另造 Client，不伪造模型 tool_call |
+| tests/unit/runtime/test_hook_mcp_bridge.cpp:150 | 有 Lua → 假 MCP → context.append 判例 | 只证明测试场景；补真实进程和正式入口验证 |
+| src/runtime/middleware_v3_sink.*；middleware_recovery.cpp:16；src/trajectory/v3/hooks.* | 已有候选、采用、续调与恢复判例 | 增加外部请求发出后结果不明的断点，不借 Lua next 状态猜网络结果 |
+
+## 三、清单：沿用 hook.json，增加 backend
+
+仍从项目 .lubancode/hooks/<包名>/hook.json 与用户 hooks 目录发现。扩展包交同样声明，由宿主装入同一池；本单不新增独立插件市场或第二套配置发现。
+
+### 3.1 最小 HTTP 包
+
+以下全部为待实现 schemaVersion=2 示例。schemaVersion=1 继续按原 Lua 规则解释。
+
+```json
+{
+  "schemaVersion": 2,
+  "id": "prompt-service",
+  "version": "1.0.0",
+  "hooks": [
+    {
+      "hookPoint": "PreUser",
+      "name": "prompt.normalize",
+      "backend": {
+        "type": "http",
+        "url": "http://127.0.0.1:8080/hooks/prompt"
+      }
+    }
+  ]
+}
+```
+
+默认采用当前挂点的最小输入投影、flow=continue、failurePolicy=abort；HTTP 固定 POST application/json，协议默认为 luban-hook/1。非 PreRequest 阶段为 default。缺省超时与字节帽见第七节。
+
+“只填地址”指省去客户端代码。目标准入仍由宿主配置决定，包不能自己授权自己的 URL。首次加载、授权拒绝与运行失败均须给明确诊断。
+
+### 3.2 同一 hook 下的其他后端
+
+下面每份 JSON 替换上例 backend，其他槽位字段照用：
+
+```json
+{
+  "type": "stdio",
+  "mode": "oneshot",
+  "command": "python",
+  "args": ["-u", "./handler.py"]
+}
+```
+
+```json
+{
+  "type": "mcp",
+  "tool": "mcp__policy__evaluate_hook"
+}
+```
+
+```json
+{
+  "type": "lua",
+  "entry": "main.lua",
+  "handler": "normalize"
+}
+```
+
+- HTTP 只收 URL 与可选 auth secretRef、limits；不收运行时模板 URL。prompt、工具输出不能改请求目标。
+- stdio 用 exec form，command/args 分开；不经隐式 shell。默认 cwd 为包目录，./handler.py 依此解析。可声明 Windows 覆盖项，字段沿用项目进程合同命名后再冻结。
+- MCP 指向已注册逻辑工具，输入必须接受本单 envelope，结构化输出必须符合响应 schema。首版不接任意 JSONPath 模板/文本猜 JSON；已有普通工具若不符合同，用 Lua 适配。
+- Lua 的 entry 是包内文件，handler 是返回表中的函数名。v1 归一化成同一 Lua BackendSpec，行为保持原样。
+- stdio 后续增加 mode=persistent；首批遇到此值明确报 unsupported，不能偷偷退成 oneshot。
+- 顶层 entry 不再强制。后端字段采用 oneOf 校验：HTTP 带 command、MCP 带 url 等组合直接拒绝；未知字段、未知协议版本给错误路径。
+- 保留 stage、priority、before/after、match、failurePolicy、observer 等公共字段。只继承已经定义的匹配语义；工具名匹配要单独加字段和测试，不能声称当前 MatchRule 已支持。
+
+### 3.3 槽位与发布
+
+沿用 (hookPoint,name) 同键选唯一实现；来源优先级、依赖排序、required 与阶段约束保持一致。落选实现不发请求，获选项未匹配/失败也不暗跑低层实现。
+
+definitionHash 覆盖归一化清单、输入 schema/version、后端配置与本地声明资源。Secret 只算引用名，不算明文。HTTP 地址不能证明远端程序版本；MCP 工具名也不能证明实现未变。清单版本与可选服务 build 标识只作追溯，不宣称远端代码已冻结。
+
+装载与发布不得起子进程、请求健康检查或调用服务。校验成功后原子发布 registryRevision；在途调用持旧快照。网络/进程在真正调用时才启动。显式诊断探测另走有记录的入口。
+
+## 四、输入输出协议：按挂点定形
+
+清单 schemaVersion 与 wire protocolVersion 分开演进。不能把任意 C++ input.dump() 当作长期公共协议；每处挂点提供显式编码器、JSON Schema 与示例。
+
+### 4.1 请求 envelope
+
+```json
+{
+  "protocolVersion": "luban-hook/1",
+  "hookPoint": "PreUser",
+  "stage": "default",
+  "hookId": "PreUser/prompt.normalize",
+  "dispatchId": "dispatch_123",
+  "invocationId": "invocation_456",
+  "registryRevision": 7,
+  "definitionHash": "sha256:example",
+  "inputSchema": "PreUser/1",
+  "inputVersion": "input_12",
+  "remainingTimeoutMs": 3000,
+  "context": {
+    "sessionId": "session_1",
+    "turnId": "turn_2",
+    "stepId": null,
+    "actionId": null
+  },
+  "input": {
+    "prompt": "请帮我看这段代码"
+  }
+}
+```
+
+身份由宿主发行。远端只能原样回显 invocationId/inputVersion，不能指定另一会话。预算用剩余毫秒，宿主用单调时钟裁决，不依赖服务端时钟同步。
+
+### 4.2 成功返回
+
+```json
+{
+  "protocolVersion": "luban-hook/1",
+  "invocationId": "invocation_456",
+  "inputVersion": "input_12",
+  "status": "ok",
+  "flow": "continue",
+  "candidateInput": {
+    "prompt": "请检查这段代码，指出错误并说明原因。"
+  },
+  "effects": []
+}
+```
+
+- flow 首版只收 continue 或 deny；省略为 continue。deny 需 code/message，且挂点准许准入效果。PostAction 上 deny 是协议错误。
+- candidateInput 可省，出现时视为完整的该挂点可改输入对象；宿主映射为 input.rewrite。不能与 effects 中同类改写重复提交。
+- effects 沿现有 EffectType 字符串，如 context.append、result.replace；统一采用 {type,payload}。每类 payload 必须另有明确 schema、目标与版本，不能只检查 type 名称。
+- 普通外部 hook 首版不收随意 output 字段、任意短路值或远程 next 指令。PreRequest/estimate、capacity 的 required 槽位暂不开放外部替换，待结构化测量/准入返回合同补齐后另批启用；Lua/内置现有行为照用。
+- status=error 返回稳定 code 与简短 message，无 candidate/effects；HTTP 200 不等于业务成功。错误和合法 deny 分开记。
+- invocationId/inputVersion 不符、未知字段、结构错、重复 JSON 键、非有限数值、超深对象、非法 UTF-8 一律拒绝，不能靠 nlohmann 默认行为漏检。
+
+### 4.3 挂点载荷与采用边界
+
+| 挂点 | 发送内容 | 准许作用 | 接线要求 |
+| --- | --- | --- | --- |
+| PreUser | 待接纳 prompt 与必要身份 | 改写输入、准入、上下文候选 | 复用现有 runtime，校验每类效果最终消费 |
+| PostUser | 已接纳 prompt | context.append、补充材料 | 不回写原 user；来源由宿主补齐 |
+| PreRequest/mutate | 已授权的请求准备输入投影 | 可改字段与上下文候选 | 现有改写会要求 reprepare；必须证明重建与重新冻结闭环，未闭环就不发布此能力 |
+| PreAction | toolName、工具参数、actionId 与输入版本 | 改参、准入；后端选择另列白名单合同 | 工具参数重过 schema/权限，不把模型传来的字段当执行授权 |
+| PostAction | 原始结果引用、执行状态、有限文本预览与结构化结果 | result.replace/supplement/filter | 原始结果先保存；效果用于后续消费版本，不回写执行事实 |
+| 其他挂点 | 待单独冻结 | 按现有效果矩阵逐项接 | 枚举能解析不算功能已开放 |
+
+PostAction 使用当前正式名字。前面讨论中的 PostTool、replaceToolResult 仅为口头示例，不引入新别名协议。
+
+默认不发送整段会话、完整 provider 请求、工具注册表、鉴权头或工作区文件。投影范围由挂点合同与用户授权交集决定；配置只选公开字段集，不跑模板表达式。
+
+大结果带 resultRef、captureComplete、truncated、原始字节数与预览边界。引用是宿主 opaque ID，远端不能把它当本机路径或任意下载 URL。首版无反向取文件接口；确需完整文本时由宿主在授权与字节帽内物化，超帽明确失败，不静默截断 prompt。二进制与图片首版只送元数据，不隐式 base64 扩大请求。
+
+## 五、接进中间件：不能让“返回”误成“短路”
+
+当前 RunFrame 把零次 next 当短路，并在 handler 返回后处理 effects。简单写一个 HTTP HandlerReturn 适配器会跳过后续 hook；先调用 next 再交 input.rewrite 又会太迟。这是本单 P0 必须解决的接口缝。
+
+建议增加单次后端专用的 DeclarativeReply 及统一采用入口，由执行核依次完成：
+
+1. 冻结计划，发行 invocationId，取输入投影与版本。
+2. 核验端点/进程/工具授权，记录调用意图，调用后端。
+3. 收到响应后先保存受限返回及引用，再校验整份返回、效果矩阵和目标版本。
+4. 在本 invocation 内按既有 v3 提案/采用合同写账。任何校验失败，本份效果全不采用；不得出现“前一项已改 prompt，后一项才发现越权”。
+5. 合法 deny 按准入合同收口，不跑下游。
+6. continue 时先把 input.rewrite/result.* 作用到本挂点工作版本，再由执行核消费一次 continuation，把工作版本交给下一项。远端拿不到 continuation token。
+7. 透传下游结局，不能用远端返回洗掉下游 deny/failed。上下文等附加效果仍在宿主既定提交边界落账，不擅自提前写 session。
+
+不要复制另一份效果校验器。先从现有 next(candidate)、RecordEffect 与 runtime 消费层提炼公共采用服务；需要新增批次提交标记时同步改 v3 schema/reader/recovery。逻辑原子采用不等于多条 JSONL 写入天然原子，崩溃恢复必须靠已提交批次与保留身份补交。
+
+Lua handler 保留原洋葱语义；外部单次后端按计划顺序收前一项采用后的工作版本。observer 只执行一次，不消费 next；首版外部 observer 不收候选与效果，纯观察返回确认。现有 Lua observer 合同不在本单改动。
+
+## 六、传输方式
+
+### 6.1 HTTP：宿主主动 POST
+
+- 宿主是客户端，不开 webhook 监听端口。服务由用户或部署系统启动；本单不让 hook 充当 Gateway/定时器。
+- 一次 invocation 一次 POST；首版只收 200 + JSON envelope。204、202、重定向、SSE、流式 body 均不算完成协议。非 200 归 transport/protocol failure，不能解析为 allow。
+- 禁自动重定向；禁隐式代理继承，端点代理若要支持必须显式配置并纳入目标校验。URL 查询参数不放密钥，日志只留脱敏端点标识。
+- 服务地址默认写在 backend.url；鉴权使用 auth.secretRef，由宿主临发包时解析并注入。响应可伪造字段，仍须当候选处理。
+- 复用 net::PerformFullHttpRequest 的取消、大小帽与超时底座；现行插件网络策略仍保持原边界。
+- hook 端点单独分 public_https 与 local_loopback。前者用已有 DNS/地址复核与连接钉址；后者首版只接受显式授权的 127.0.0.1 或 [::1] + 精确端口，可用 HTTP。不默认放通 localhost 别名、整个 127/8、任意内网或自动解析到私网的域名。公司内网服务作为后续显式端点策略，不冒充已支持。
+
+### 6.2 stdio oneshot：先把无 Lua 脚本跑通
+
+- 每次起进程，stdin 写一份 UTF-8 无 BOM JSON 后关写端；stdout 收一份完整 JSON；stderr 单独收受限诊断。
+- 退出码 0 且响应完整合法才成功。任意非零退出码都是 handler failure；业务 deny 用 envelope，不继承旧 command hook 的 exit 2 特例。
+- stdout 混入打印日志、多个 JSON、尾部垃圾、超帽或子进程未在预算内退出，都算失败。stdout/stderr 同时持续读取，stdin 写入可取消，防管道互相堵住。
+- 进程环境显式构造，默认只保留启动所需系统变量，不把 provider 密钥整份继承过去。确需 Secret 时显式映射，记录仅保留引用名。
+- 超时/取消收整棵进程树并排空/关闭管道；覆盖 Windows/POSIX。现有便捷函数若缺取消或分流限额，先补底座，不能“调用前查一次取消”便算接通。
+- 启动命令、cwd、入口文件和环境引用加入信任审查及定义快照。外部解释器与依赖由作者部署；服务有外部副作用，不宣称宿主进程授权等于 OS 沙箱。
+
+### 6.3 stdio persistent：后续常驻模式
+
+- 使用独立 luban-hook/1 JSON-RPC 2.0 行协议；方法 hooks/initialize、hooks/invoke，取消用 hooks/cancel 通知。握手协商版本、帧上限及并发值，不能仅凭进程已启动就标可用。
+- 首版每连接仅一笔在途。每帧一个 UTF-8 JSON，JSON 字符串换行必须转义；stdout 专供协议，stderr 专供日志。ChildProcess 只复用管道能力，不伪装成 MCP Client。
+- 进程池键至少覆盖定义/授权指纹、项目与 session 域。默认不同 session 不共享进程，避免全局变量串会话。空闲回收、崩溃退避、reload 排空和应用退出都要收树。
+- 已发送后断连，本次记 unknown；新进程只接新调用，不自动重放旧请求。迟到响应、旧连接 generation 响应和取消后响应丢弃并记诊断。
+- 常驻仅省启动成本。进程内状态不能代替持久状态、任务恢复或服务端幂等账。
+
+### 6.4 MCP：直接绑定已有 hook-aware 工具
+
+- backend.tool 解析到注册表中的 MCP 工具，再走 HookToolExecutionService。调用参数固定为 {"request": <envelope>}，工具 input schema 须支持这个合同。
+- 只消费明确的结构化结果；当前 McpTool 若没有稳定结构化结果出口，先扩结果模型与桥接测试，再开放后端。isError=true、缺少结构化输出或响应身份不符均失败。
+- 定义发布只检查本地描述，不以“校验”为名触发 tools/call；真正调用时重新检查工具身份、授权和 schema。
+- 保留 tool.execution.* 子执行账与 hookInvocationId 联链；不再伪造一笔 HTTP/stdio 调用账来重复计算同一次 MCP 执行。
+- 递归调用 hook、工具及其他代理需共享深度/次数预算。MCP 工具调用不能绕回同槽位无限触发 PreAction。
+- 当前 MCP 传输是 stdio。以后添加其他 MCP transport 应由 MCP 层完成，本单不顺带建设 Streamable HTTP MCP。
+
+## 七、预算、失败与恢复
+
+建议默认值：外部单次调用 3000ms，连接 1000ms，请求 1MiB，响应 1MiB，stderr 64KiB。单端点最大并发 4，全局 16，排队也计入调用预算。以上均待实现与实测，不是性能保证。
+
+有效预算取宿主上限、包声明与父调用剩余预算最小值。外部网络等待计入本 handler 自用时间；已经转入 next 的下游耗时不再算成本 handler 超时。不要沿用 Lua 默认 500ms 又在 HTTP 层另开 3 秒，造成两处合同冲突。
+
+| 情形 | 处理 |
+| --- | --- |
+| 授权拒绝、启动前失败、输入超帽 | 未发送；按槽位失败策略收口 |
+| 合法业务 deny | 记准入效果，停止该处下游；不是服务崩溃 |
+| malformed/非 200/工具 isError | handler failure，零效果采用 |
+| 发出后超时、断连、取消 | 记录远端执行结果未知，停止等候，不宣称服务没做事 |
+| optional + keep_original | 当前工作版本继续一次，未知外部副作用仍在账上；不切回低层同名实现 |
+| required 或 abort | 不绕过失败继续；外部 required 首版不开放 |
+| 返回已存、采用前崩溃 | 校验原版本，补采用原返回，不再请求服务 |
+| 效果已采用、后续消息尚未提交 | 用保留身份补交，不重复追加上下文 |
+| 发出后无返回记录 | 恢复到 unknown/暂停或显式处置，不自动再调用 |
+
+首版 HTTP/stdio 不自动重试。幂等键使用 invocationId；日后若引入重试，attemptId 区分物理尝试，服务端必须明确承诺持久去重后才能重发。收到取消或杀掉客户端都不证明远端事务回滚。
+
+在 v3 hook 调用事实下增加受版本约束的外部传输记录，区分 prepared、send_started、response_saved、failed/unknown/cancelled。具体事件名称随 schema 变更冻结；send_started 须先持久化再发包，崩溃窗口保守归 unknown。HTTP 状态、耗时、字节数与脱敏 endpointId 可记；Authorization、完整敏感请求体不能倾倒进 trace。恢复所需载荷沿现有受控 artifact/ref 保存。
+
+只读 replay、历史展示、打开 session 不发 HTTP、不起进程、不调用 MCP。调用事实、效果采用、最终消息提交各归各账；hook.completed 不能冒充“效果已入正式历史”。
+
+## 八、实施清单
+
+### P0：先冻结公共合同与采用顺序
+
+- [ ] 新增 BackendSpec 判别联合与工厂接口，替换 is_lua 分支；engine 只依赖合同，runtime 注入 HTTP/进程/MCP 工厂。
+- [ ] schemaVersion=2、wire schema、挂点投影 schema、错误码集中定义；v1 Lua 按原行为加载。
+- [ ] 提炼 DeclarativeReply 采用路径；钉住先校验/采用、后消费一次 continuation，保证与 Lua 链混用顺序正确。
+- [ ] 发布时拒绝未接线挂点与不支持阶段；诊断分 registered / invokable / authorized，不混成一个 enabled。
+- [ ] 增加输入版本、批次采用及传输事实的 v3 schema/reader/recovery 支持，审查 JSONL 崩溃断点。
+
+### P1：HTTP 与生产授权接通
+
+- [ ] 抽取 hook 端点策略，复用中立 net transport；local_loopback 与 public_https 分测，不放宽普通 Lua 插件策略。
+- [ ] 生产装配加载宿主授权和 Secret 引用；清单无法自授。继承信任账思路，不能只在测试 harness 注入 grants。
+- [ ] PreUser/PostUser 首先跑通；逐项检查 effects 是否真进后续上下文，未消费的类型不对外宣称支持。
+- [ ] PreRequest/mutate 完成 reprepare → 重新冻结 → 估算/容量 → 最终请求的闭环；检测重复改写循环并设上限。
+- [ ] 提供 examples/hooks/http-prompt 包与本地参考服务，清单以外无需 Lua。
+
+### P2：单次 stdio 与工具结果场景
+
+- [ ] 进程执行补齐 stdin 可取消、stdout/stderr 分流与字节帽、超时杀树；提供 Python/Node 两份等价示例。
+- [ ] PreAction 接在真实准入与执行前，改参后重新校验权限/schema；原 Action 身份保留。
+- [ ] PostAction 接在原始结果保存后、模型可见结果提交前；原始结果引用与采用后的版本分别留账。
+- [ ] 多工具并发结果各自绑定 actionId/resultRef，不能串结果；工具失败、取消、部分输出也有明确 payload。
+- [ ] 图片、长文本与不完整输出按第 4.3 节处理，provider 的 tool_call_id 与原始响应不受服务端改写。
+
+### P3：MCP 与常驻 stdio
+
+- [ ] MCP 后端复用统一工具服务，补结构化结果出口、权限、取消、unknown 和调用次数预算。
+- [ ] stdio persistent 握手、行帧、进程池、generation、迟到响应、排空与崩溃退避实现完再公开配置值。
+- [ ] 新增显式诊断命令设计，输出清单来源、槽位获选项、目标、授权、最后结果与挂点接线状态；健康探测与装载严格分开。
+
+### P4：文档与发布
+
+- [ ] 更新 docs/features/extensions/hooks.md、hooks-flow.md、Session v3 合同与旧 Lua TODO 的范围说明。
+- [ ] 发布作者手册：最小清单、逐挂点 request/response、错误返回、取消、编码、大结果、部署与调试。
+- [ ] 提供 JSON Schema 与可独立运行的协议检查器；不要求作者先读 C++ 才能写服务。
+- [ ] 文档区分 Lua 完整中间件、外部单次 handler、旧 command hooks；MCP 服务与普通 HTTP 服务各写一例。
+
+## 九、验收用例
+
+| 层次 | 必须验收 |
+| --- | --- |
+| 清单/计划单测 | HTTP 包无 entry 也能加载；v1 Lua 保持行为；字段混用与未知版本拒绝；同键只跑获选后端；同层冲突/依赖环拒绝；加载零 I/O 副作用 |
+| 调度单测 | HTTP 改写 → Lua → stdio 收到逐次工作版本；continue 只推进一次；deny 不跑下游；错误效果整批不采用；下游失败不被洗掉 |
+| 协议 fixture | 中文/emoji/换行、错 invocationId/版本、重复键、超深 JSON、尾部垃圾、未知 effects、PostAction deny、大结果截断标志 |
+| HTTP 假传输 | 精确端点授权、Secret 不泄漏、禁止重定向、排队预算、取消、超帽、非 200、响应丢失与 unknown |
+| 真实本地 HTTP | 授权 127.0.0.1 服务收到确切 envelope；真实响应改写 prompt；邻近未授权端口零请求；断连/迟到无重复采用 |
+| 真实 stdio | Python/Node 各一次；日志分流；子进程不读 stdin/洪泛 stderr/孙进程不退出时均可取消收树；Windows/POSIX 验证 |
+| MCP 集成 | 真正注册的测试 MCP 工具收到 request envelope；结构化响应生效；失败与 uncertain 记录联回 hook；不伪造模型消息 |
+| 工具运行路径 | PostAction 收到已保存原始结果引用；替换只影响后续消费版本；两笔并发 Action 不串；改参复验权限 |
+| v3 崩溃恢复 | 发出前、发出后无返回、返回已存未采用、采用未提交各断点；只读 replay 零调用；恢复不重发不重复注入 |
+| 正式入口 | CLI、one-shot、app-server 各用同一清单触发；看到修改后的最终请求材料与 v3 采用记录；安装版复测单独记录版本与数据根 |
+
+单元测试通过不能替代真实进程/HTTP；真实本地服务通过不能替代安装版入口。首批完成标准是：作者只交清单和服务，宿主自动送入约定字段，合法结果沿正式提交边界生效，失败与恢复有可核对记录。
+
+## 十、本次设计核验
+
+- 已静态核对清单加载、同名槽位、next 短路、效果矩阵、runtime 三处入口、HTTP 地址限制、进程底座、MCP 桥与恢复规划。
+- 本次仅新增设计 TODO，没有实现 backend、启动测试服务或运行 provider。
+- 文档检查：6 段 JSON 示例均解析通过，19 处源码引用的文件与行号范围有效。尚未写出的 API/schema 仅为建议，以上检查不证明运行行为。

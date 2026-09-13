@@ -1,0 +1,84 @@
+# OpenTelemetry 接入 V3：现状与落地路线
+
+- 日期：2026-09-12
+- 状态：源码核查与设计；本单没有改生产代码，没有跑构建、测试或真实 Collector。
+- 接续：`端云协同可观测架构与Telemetry插件设计.todo`；本单细化 V3-GAP-02，不另造遥测架构。
+
+## 1. 先说结论
+
+已有 OTLP 出口，先补 V3 读账。保留 Service、Redactor、Spool、Exporter，再适配数据源与投影。
+OpenTelemetry 管 traces、metrics、logs 等观测信号；Collector 接收、处理、转发。查询、存储、告警交给后端。
+本项目先打通请求与工具 trace、用量和失败计数；日志、系统指标、跨进程传播另排批次。
+
+## 2. 当前证据
+
+| 源码锚点 | 核查结果 |
+| --- | --- |
+| `src/app/interactive_session_assembly.cpp:439` | 装配层把 Service 挂到 ledger 的 SetTelemetryWake |
+| `src/runtime/trajectory_session.cpp:203` | V3NotifyCommitted 在 Committed 后发唤醒 |
+| `src/telemetry/wake.hpp:26` | CommitObserver 只通知流身份，不传正文 |
+| `src/telemetry/service.cpp:399` | DiscoverStreams 找 main.jsonl 和旧式子账文件 |
+| `src/telemetry/service.cpp:121` | ParseLineIdHash 仍取 event_id/event_hash/schema_version |
+| `src/telemetry/projector.cpp:738` | 投影器调用旧 EventEnvelope::FromJsonStrict |
+| `src/trajectory/v3/reader.hpp:1` | 已有 V3 验卷、消息/事件索引、上下文与请求输入投影能力 |
+| `docs/development/v3-legacy-audit.md:19` | V3-GAP-02 已登记同一缺口 |
+| `tests/integration/telemetry/test_telemetry_otlp_export.cpp:662` | 已有旧 Journal 到 ACK 测试；不能据此证明 V3 真机链路 |
+
+旧 TODO 写 T0/T1/T2 已落地，指已有遥测链。默认 V3 会话能完整导出，仍待验证。
+
+## 3. 数据怎么走
+
+Agent 执行 → V3 已提交 JSONL → 唤醒/补扫 → V3 遥测投影 → 脱敏 → 有界队列/Spool → OTLP/HTTP JSON → Collector → 查询后端。
+
+- JSONL 留作事实账，恢复、审计、重放都认它。遥测可删、可重建，不回写原账。
+- 唤醒只催读账。漏唤醒靠补扫恢复；写账线程不等网络。
+- 数据库若另存完整会话，另设消费者与检查点，不从采样后的遥测倒推原账。
+- 不让模型调用 MCP 工具上报。遥测归宿主后台服务，模型不必知晓。
+- 保留现有 OTLP 出口即可接 Collector；首期不必先引入整套 C++ SDK。后续要接自动埋点或跨进程传播，再评估 SDK。
+
+## 4. 分期实施
+
+### P0：换读面，保住提交边界
+
+- [ ] 按 schema 选 V2/V3 读取器；V3 发现 session.jsonl 与递归子会话树，复用 V3 目录/树契约。
+- [ ] 去掉注册与补扫中硬编码 main.jsonl 的假设；检查所有生产入口如何注册 session。
+- [ ] 身份、seq、hash、检查点改走版本适配层；V3 message/event 两种行都计入连续覆盖。
+- [ ] 校验读账边界：未完成尾行等下次再读；已提交坏链报错，不跳过继续猜。
+- [ ] 复用 V3 读取契约做正确性基线；长会话另测增量读取，避免每次唤醒整卷重扫。
+
+### P1：投影真实执行
+
+- [ ] 以 requestId 关联 prepared、sent、完成/失败和 usage；prepared 只代表准备，不计为已发送请求。
+- [ ] 以 actionId 关联工具状态；pending 不当执行开始，approval 等待不算工具执行耗时。
+- [ ] 重试按实际请求身份分开；记录取消、失败、压缩内部请求，避免混成一次成功请求。
+- [ ] 缺终态时标未完成；缺精确回合边界时只展示观测范围，不虚构 turn.started/finished。
+- [ ] 父子会话按来源关系建立 parent 或 span link；不能只靠工具名或时间先后来配对。
+- [ ] 请求输入统计认 prepared 固定引用与当时 contextRevision，不拿会话最终上下文代替。
+- [ ] usage 保留 provider 已报/未报差别；输入、缓存读、缓存写口径先归一再聚合，缺报不填零。
+- [ ] 核对 GenAI 官方语义约定并固定版本；项目专用字段用 lubancode.*，不要把现有 gen_ai.* 键全当当前标准。
+- [ ] 指标标签只放受控模型名、工具名、结果等；sessionId/requestId 放 span，不灌进指标标签。
+
+### P2：本机打通，再开远端
+
+- [ ] 默认 metadata；白名单字段过 Redactor 后才落 spool，不写 prompt、源码、工具正文或凭证。
+- [ ] 固定 Collector 版本，核对发行包含所需组件；首验用 debug exporter，不依赖未确认的 file exporter。
+- [ ] Windows 若走容器：容器内监听 0.0.0.0:4318，宿主只映射 127.0.0.1:4318；不要把容器回环口当宿主口。
+- [ ] 先跑真实 V3 会话：一次模型请求、一次工具执行、后续回答；在真实查询后端按 trace 查到对应链路。
+- [ ] 逐项对照 JSONL：请求数量、工具身份、状态、耗时边界、usage。Collector 收到 HTTP 不能独自算验收通过。
+- [ ] 远端沿用 HTTPS、凭证解析、发送授权；默认关闭时不起遥测线程、网络与 spool。
+
+## 5. 故障与验收
+
+- [ ] 固定 V3 fixture 重放两次，span 身份与输出稳定；消息/事件混排不漏记录。
+- [ ] 子会话、压缩、审批拒绝、取消、迟到 usage、缺终态各有样例。
+- [ ] 重启和漏唤醒后补投；检查点与 spool 覆盖一致，累计指标不能反复加整卷总数。
+- [ ] ACK 丢失允许 at-least-once 重发；普通后端未必按自定义 batch header 去重，验收须查清后端行为。
+- [ ] 断网、429/5xx、永久错误、磁盘满、队列满均有明确计数和状态；不阻塞 Agent，不承诺无限缓存不丢。
+- [ ] 测本次接线涉及的 projector/service/export 集成，再做真实 V3→Collector→后端验收。旧 fixture 通过不能顶替真机证据。
+- [ ] 单独测开启/关闭遥测后的 CPU、内存、磁盘、每回合开销；没有数字不宣称低开销或全链路完成。
+
+## 6. 官方资料
+
+- https://opentelemetry.io/docs/concepts/components/
+- https://opentelemetry.io/docs/specs/semconv/gen-ai/
+- https://opentelemetry.io/docs/specs/otel/schemas/
