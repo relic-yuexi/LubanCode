@@ -264,9 +264,20 @@ nlohmann::json MakeTurnStartedParams(const std::string& thread_id, const std::st
 
 // turn/completed 的 params。status 见 protocol.hpp 的 kTurnStatus*。
 // error_message 只在 status=error 时给(别的终态给空串,不落字段)。
+//
+// ResultEnvelope 侧字段(工业化多协议接入单 P1,§12.3 拟议形状的最小
+// 落地):executionStatus 与 status 同源,只报执行收口,不替调用方判断
+// 业务成败;final_message_refs 由运行时选定(最终 assistant 文本条目
+// 引用;空数组 = 本回合无文本输出,如实报);usage_reported=false 时
+// usage 字段省略——provider 没报 usage 就不拿全零冒充实测。result_
+// envelope_persisted=false 表示终态账行落不稳(禁止宣称"结果已可靠
+// 保存");true 不另发字段。
 nlohmann::json MakeTurnCompletedParams(const std::string& thread_id, const std::string& turn_id,
                                        std::string_view status, const std::string& error_message,
-                                       const nlohmann::json& usage, int steps_used);
+                                       const nlohmann::json& usage, int steps_used,
+                                       const std::vector<std::string>& final_message_refs = {},
+                                       bool usage_reported = true,
+                                       bool result_envelope_persisted = true);
 
 // item/started 的 params。item_type 见 protocol.hpp 的 kItemType*;
 // item_id 由回合驱动器派发(回合内单调);payload 装条目自己的字段

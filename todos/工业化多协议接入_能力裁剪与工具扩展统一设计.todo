@@ -658,16 +658,25 @@ CI 回填（2026-09-13）：PR relic-yuexi/LubanCode#56（分支 worktree-agent-
 
 ### P1：补共同装配与可靠接纳
 
-- [ ] 抽中立 RuntimeAssembly 服务；诊断替 Theme，配置/工作目录/凭据显式传递。（owner 归属：主刀在 LubanCore 单阶段 B"抽 SessionFactory 与工具/后端装配，移出 Theme、Spinner、终端 IO"；本单验收生产 app-server 改用该服务后的行为，不另起一套装配。）
-- [ ] 先解析允许组件再启动；RuntimeBundle 明确持有 MCP、插件、backend 和注册表。
-- [ ] 修生产 app-server nullptr 注册工厂和固定提示档；只装选定 Profile，不直接开放全部终端工具。
-- [ ] 生产缺授权、缺工具、依赖启动失败均明拒；可选降级必须写结果并让 Profile 决定能否继续。
-- [ ] 修 SubmitInput 忽略写失败；完整输入落不可变材料与唯一接受事实，规范 hash 可重现。
-- [ ] 实现去重索引重建、全来源链去重、持久排队/claim/终态；崩溃后不靠内存队列猜任务。
-- [ ] 终态提供持久 ResultEnvelope 与 finalMessageRefs；只报告执行与持久结果状态，不替调用方判断业务成功。
-- [ ] 用真实 exe + 本地脚本模型后端 + 测试 MCP 走一次多轮工具调用；记录工具实际执行次数。
+- [ ] 抽中立 RuntimeAssembly 服务；诊断替 Theme，配置/工作目录/凭据显式传递。（owner 归属：主刀在 LubanCore 单阶段 B"抽 SessionFactory 与工具/后端装配，移出 Theme、Spinner、终端 IO"；本单验收生产 app-server 改用该服务后的行为，不另起一套装配。**P1 实施核（2026-09-13）：本单未建该服务——只落了 app_server 侧最小内聚装配（session_assembly），见下第二条；中立装配服务仍归 Core-B，账不动。**）
+- [x] 先解析允许组件再启动；RuntimeBundle 明确持有 MCP、插件、backend 和注册表。（`src/app_server/harness_profile.hpp/.cpp` 部署档解析纯数据零副作用；`src/app_server/session_assembly.hpp/.cpp` 装配序＝冻结合同 §7.1 最小落地：计划解析→依赖解释（allow 引用的服务须在 config.mcpServers 获准）→只启动档点名的服务→握手复验→注册表只装 allow 点名工具。ThreadRecord 持 SessionAssembly 一场一份，成员序＝寿命序（MCP 拥有者先声明后析构，注册表先亡）。测试：`tests/unit/app_server/test_harness_profile.cpp`、`test_session_assembly.cpp`。插件/native 未接——P1 工具面只开 MCP 一条组件路，其余 canonical 映射归 P2（解析器对非 mcp: 前缀的 allow 名明拒）。）
+- [x] 修生产 app-server nullptr 注册工厂和固定提示档；只装选定 Profile，不直接开放全部终端工具。（G01：`src/app/cli_app.cpp` RunAppServerMode 不再传 nullptr——部署档先解析（`--app-server-profile <json>`，坏档启动即拒退 1），`ServerOptions::assembly_factory` 按计划装配；未递档＝显式零工具默认档（合同 §2.3），不照搬终端全部工具。G02：`server.cpp` RunTurnToCompletion 不再每轮 backend_factory_()/registry_factory_() 现建——从 record->assembly 取，Agent 档案（system_prompt＝显式常量 kAppServerDefaultSystemPrompt、步数闸取配置轴与档 limits.stepsPerInput 收窄值）装配时显式定型。另补 `--yes` 折进 ServerOptions.auto_confirm（工具真跑后显式全放旗标才有可裁对象）。）
+- [x] 生产缺授权、缺工具、依赖启动失败均明拒；可选降级必须写结果并让 Profile 决定能否继续。（必需服务＝tools.allow 引用：缺上层配置明拒（"档点名必需的 MCP 服务未在上层配置获准"）、起服失败整场拒绝、握手清单没有点名工具明拒——均在装配层拒，thread/start 回 assembly.failed，零模型请求。可选降级＝档点名但 tools.allow 未引用：起服失败记 degradedComponents，进 thread/start 响应与 thread/started 事件（"可选降级必须写结果"）；能否继续由 Profile 的工具选择决定（引用即必需、未引用即可选），不另加配置键。真进程证据：冒烟册用例 3（no_such_tool 明拒）与用例 1（flaky 降级记账）。）
+- [x] 修 SubmitInput 忽略写失败；完整输入落不可变材料与唯一接受事实，规范 hash 可重现。（**已由 #59 承担**：`src/runtime/session_service.cpp` SubmitInput 受理次序＝原件先落稳（operations-inputs/<op>.json，ProcessCrashDurability 原子写）→accepted 行 PowerLoss 档（JournalWriter::AppendLine）→回执；任一步落不稳即拒（error_code=operation.artifact_failed/operation.append_failed），broken 传播受理面停摆。规范 hash＝CanonicalInputPayload（US 定界）+SHA-256，公开静态供对照测试。证据：PR #59 合并 511579c6；测试 `tests/unit/app/test_session_service.cpp`"先账后回执""载荷 hash 同源"用例。本单复核无缺口，未改动该链路。）
+- [x] 实现去重索引重建、全来源链去重、持久排队/claim/终态；崩溃后不靠内存队列猜任务。（**去重索引重建/全来源链/持久排队 claim 大部分已由 #59 承担**：`SeedOperationLedger` 本场台账＋resume 完整来源链（访问集+深度帽 64）种去重表、accepted 未 dispatched 且原件可读的重排/重落；`PopPendingInput` dispatched 先稳再出队（WriteFailed 停泵留队首）。证据：PR #59；测试"恢复沿来源链识别原键"。**终态行本单补**：`SessionService::RecordTurnFinal`（operation.final 行，PowerLoss 档，含 executionStatus/finalMessageRefs/usageReported）；测试：test_session_service.cpp"回合终态"三用例（对账/防御路径不落账/台账写失败时受理停摆＋终态明败——E2 探针的服务层注入）。E1/E3/E4 探针已有或被"先账后回执""幂等"用例覆盖；C1-C4（claim 崩溃恢复）的进程级注入未做，归 P2 故障注入。）
+- [x] 终态提供持久 ResultEnvelope 与 finalMessageRefs；只报告执行与持久结果状态，不替调用方判断业务成功。（turn/completed params 扩：executionStatus（与 status 同源，只报执行收口）、finalMessageRefs（TurnEventAdapter 新增 last_text_item_id()——最近一条 assistant 文本条目引用，由运行时选定，不拼全部文本）、usageReported（false 时省略 usage 字段，不拿全零冒充实测）；终态事实先经 RecordTurnFinal 落账（PowerLoss）再发 turn/completed，落不稳事件如实带 resultEnvelopePersisted=false（禁止谎称"结果已可靠保存"）。符号：`MakeTurnCompletedParams`（schema.cpp）、`SessionService::TurnFinalRecord`。）
+- [x] 用真实 exe + 本地脚本模型后端 + 测试 MCP 走一次多轮工具调用；记录工具实际执行次数。（`tests/integration/app_server/test_app_server_profile_smoke.cpp`：真 exe（FindLubancodeBinary）＋假模型后端（tests/support/fake_http_server 扮 chat wire SSE 两幕）＋真 MCP（tests/fixtures/mcp_test_server.py，server 名 tools-approved）。用例 1 minimal-tools：两幕多轮——断言模型第 1 笔请求 tools 恰为档点名两只（mcp__tools-approved__echo/describe，无终端 run_command 等）、echo 实际执行（第 2 笔请求 body 带 PING 工具结果）＝工具实际执行次数以模型真账核验、turn/completed 带 executionStatus/finalMessageRefs/usageReported、stepsUsed>=2、flaky 可选降级进 thread/start。用例 2 zero-tools：模型请求无 tools 定义（chat 请求空工具连键不发）。用例 3 缺工具明拒不炸。用例 4 坏档拒绝启动退非 0。交互驱动靠新增 `tests/support/interactive_process.{hpp,cpp}`（保住 stdin 写端的真进程 stdio 夹具——不是一把梭喂完关管被 EOF 提前收线）。缺 exe 或缺 python 的环境整案跳过（与 smoke 册/test_mcp_client 同口径）。）
 
-退出条件：真实生产启动命令能按两份 Profile 跑通；写账失败零执行、丢受理回执同键重发不重复；不是只靠注入 fake registry 的单测过关。
+#### P1 记账（2026-09-13，基线 `511579c6`）
+
+1. 生产装配（G01/G02）：新 `app_server/harness_profile.*`（部署档 schema 1 解析，语义与 P0 测试册 test_capability_contract.cpp 逐条对齐：schemaVersion=1、未知键/未知 mode/矛盾组合全拒、依赖解释不全不许采用、deny 胜出、defaultProfile 选取）、`app_server/session_assembly.*`（会话级运行材料）。CLI 旗标 `--app-server-profile <path>`（cli_options.hpp/.cpp，缺值退 BadAppServerProfile 报错退 1）。CMake：根 CMakeLists 的 lubancode_app 源码清单加两枚 cpp；tests/CMakeLists.txt 加 interactive_process.cpp。
+2. #59 认领复核：受理真账（原件+accepted/dispatched 行+幂等+来源链重建）与单测证据逐条核对，**无缺口**；P1 第 5 条整条、第 6 条大部分标"已由 #59 承担"并引证。本单在其上补 operation.final 终态行（RecordTurnFinal）。
+3. 冒烟未验边界（如实记）：①clientOperationId 的端到端（丢回执同键重发不重复）——协议 1.2 面无该键（键留空＝每发必纳，冻结语义），2.0 开面（P4）后才可真进程验收；服务层幂等已单测（同键同载荷原回执/同键异载荷 conflict）。②E1（目录只读）/E3（崩溃窗口）与 C1-C4（claim 崩溃恢复）的真进程注入未做——E2 以"operations.jsonl 造目录"服务层注入覆盖；其余归 P2 故障注入阶段。③zero-tools 档"MCP 未启动"的进程级证据未直接断言（无 python 子进程观测口），以模型请求无 tools＋档面零依赖解释佐证。④冒烟在 CI 三平台跑（python 缺位整案跳过不冒充）；真实 Provider、真 WS/HTTP 入口未测（归 P4/P5）。
+4. 本单未动：docs/reference/capability-contract.md 冻结面零改动（§9-10 durability 档位、探针清单照引）；中立 RuntimeAssembly 服务（Core-B 主刀）；PluginTraceHub/ESC 链在 app-server 侧的深度挂载（plugins 单第 7 步 TODO 原样保留——P1 工具面只开 MCP，插件工具未接）。
+
+退出条件核对：真实生产启动命令按两份 Profile 跑通 ✔（冒烟册用例 1/2，CI 执法）；写账失败零执行 ✔（服务层 E2 注入单测＋server 侧 pop WriteFailed 停泵路，#59 已接线）；丢受理回执同键重发不重复 ✔（服务层单测；真进程端到端待 2.0 面，见记账 3①）；不是只靠注入 fake registry 的单测过关 ✔（真 exe＋真 MCP＋假模型的进程级冒烟）。
+
+CI 回填（2026-09-13）：PR relic-yuexi/LubanCode#62（分支 worktree-agent-proto-p1，head `5e6042da`）。ci run 34752247462 活跃 check suite（GitHub Actions）conclusion=success；PR 快车道 macos-clang 编译+484 册测试腿绿。`integration.app_server.app_server_profile_smoke` 四用例全过（真 exe＋FakeHttpServer 假模型＋python 真 MCP）；`unit.app_server.harness_profile`/`unit.app_server.session_assembly`/`unit.app.session_service`（含回合终态三用例）绿；既有册适配两处（app_server_service 台账 2 行→3/6 行、app_server_turn 两轮用例脚本后端排两份——G02 会话级复用 backend 的契约演进）。中途四红已就地修：夹具 mcp_test_server.py 补 describe 工具（P0 golden 点名它而夹具原先没有，真握手才露馅）、E2 注入改"开张即占目录"（OperationsFile 惰性开账，先纳后废废不掉已开句柄）、doctest 三段表达式拆行、InteractiveProcess 裸 new（make_unique 穿不透 private 构造）。
 
 ### P2：能力裁剪与共同工具授权
 

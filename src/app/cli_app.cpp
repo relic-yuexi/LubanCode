@@ -6,7 +6,9 @@
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章)
 #include "app/one_shot.hpp"
 #include "app/plugin_scaffold.hpp"
+#include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
 #include "app_server/server.hpp"
+#include "app_server/session_assembly.hpp"  // P1:会话级运行材料装配
 
 #include <algorithm>
 #include <atomic>
@@ -432,6 +434,9 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             break;
     }
     options.session_model = config_result.config.model;
+    // --yes 折进来(P1:headless 装配上真工具后,显式全放旗标才有了可裁
+    // 的对象;与终端同语义——deny 也不拦是用户自己的选择)。
+    options.auto_confirm = cli_options.auto_confirm;
     // 步数闸接配置轴(清理批):max_steps_per_turn 走终端同一条四级合并,
     // 用户写了就吃什么;哪级都没写(Default)才落协议宿主自己的缺省闸
     // 32——协议前端没有 ESC 可打断,显式 0(不限)是用户自己的选择,照吃。
@@ -499,6 +504,43 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
         ws.token = token; // 空串 = 回环免鉴权;配了就启用首帧门
         options.ws = ws;
         // WS 模式下 stdout 不再是协议口,但仍守 stdio 纪律:诊断一律 stderr。
+    }
+    // 工业化多协议接入单 P1(G01):生产 headless 装配显式化——部署档
+    // 先解析(纯数据、依赖全解释),会话装配按计划起组件(只启动档点名
+    // 的 MCP、只装 allow 点名的工具),不再拿 nullptr 注册工厂充当已接
+    // 好。未递档 = 显式零工具默认档(合同 §2.3),不照搬终端全部工具。
+    std::optional<lubancode::app_server::HarnessProfile> harness;
+    if (!cli_options.app_server_profile_path.empty()) {
+        auto parsed_profile = lubancode::app_server::LoadHarnessDeploymentFile(
+            lubancode::tools::Utf8ToPath(cli_options.app_server_profile_path), std::string());
+        if (!parsed_profile.profile.has_value()) {
+            std::fprintf(stderr, "[app-server] 部署档解析失败,拒绝启动: %s\n",
+                         parsed_profile.error.c_str());
+            return 1;
+        }
+        harness = std::move(*parsed_profile.profile);
+    }
+    {
+        // 装配工厂(一场 thread 一次):部署档 + config 的计划装配。步数
+        // 闸取配置轴与档 limits.stepsPerInput 的收窄值(档没设就吃配置轴,
+        // 档设了 0 = 档显式不限,同样吃配置轴——收窄不放宽)。
+        const int config_steps = options.max_steps_per_turn;
+        const lubancode::config::Config* config_ptr = &config_result.config;
+        const int planned_steps =
+            harness.has_value() && harness->steps_per_input > 0
+                ? std::min(config_steps, harness->steps_per_input)
+                : config_steps;
+        options.assembly_factory = [config_ptr, harness, planned_steps]() {
+            lubancode::app_server::SessionAssemblyRequest request;
+            request.config = config_ptr;
+            request.harness = harness ? &*harness : nullptr;
+            request.backend_factory = [config_ptr]() {
+                return lubancode::app::BuildBackend(*config_ptr);
+            };
+            request.system_prompt = lubancode::app_server::kAppServerDefaultSystemPrompt;
+            request.max_steps_per_turn = planned_steps;
+            return lubancode::app_server::AssembleSession(std::move(request));
+        };
     }
     lubancode::app_server::Server server(
         std::move(options),
@@ -758,6 +800,11 @@ int RunCli(const std::vector<std::string>& args) {
         case CliAction::RunAppServer:
         case CliAction::BadAppServerWs:
             break;
+        case CliAction::BadAppServerProfile:
+            // 部署档旗标没带值:低级用法错误,启动即拒(P1——档的语义
+            // 错误归 RunAppServerMode 给全人话,这里只拦"没给路径")。
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
         case CliAction::ManageSession: {
             // 会话管理子命令(archive/unarchive/delete):不进会话,打完
             // 结果就退。i18n 已在函数头初始化;确认屏在 handler 里。

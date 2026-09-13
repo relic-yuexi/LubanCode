@@ -89,6 +89,7 @@ public:
         text_item_id_.clear();
         thinking_item_id_.clear();
         open_tools_.clear();
+        last_text_item_id_.clear();
         // 复用同一只适配器开第二轮(Stop 钩子续跑、workflow 节点连轴):上一轮
         // 的收口旗翻回去,新一轮的 TurnCompleted 才发得出来。
         turn_finished_ = false;
@@ -98,6 +99,11 @@ public:
 
     // 本轮 turn_id(Start 之前为空)。
     const std::string& turn_id() const { return turn_id_; }
+    // 本回合最近一条 assistant 文本条目的 item id(收口后仍保留,新回合
+    // 清空)。终态 ResultEnvelope 的 finalMessageRefs 由运行时从这选定
+    //(工业化多协议接入单 P1 §12.3):最终答案引用一条明确的条目,不把
+    // 全部文本拼起来当答案。回合无文本输出时为空。
+    const std::string& last_text_item_id() const { return last_text_item_id_; }
     // 会话 id 与发号局(从路适配器对账用:同一场会话、同一本号,seq 才单
     // 调得起来)。
     const std::string& thread_id() const { return thread_id_; }
@@ -113,6 +119,7 @@ public:
         CloseThinking();
         if (text_item_id_.empty()) {
             text_item_id_ = StartItem(ItemKind::Text, std::string());
+            last_text_item_id_ = text_item_id_;  // 工具段隔开的新文本=新条目
         }
         ServerEvent event = MakeEvent(ServerEventKind::ItemDelta, text_item_id_, ItemKind::Text);
         event.text = text;
@@ -424,6 +431,7 @@ private:
     std::function<void(const ServerEvent&)> sink_;
     std::string turn_id_;
     std::string text_item_id_;
+    std::string last_text_item_id_;
     std::string thinking_item_id_;
     std::map<std::string, std::string> open_tools_;  // tool_use_id -> item_id
     bool turn_finished_ = false;

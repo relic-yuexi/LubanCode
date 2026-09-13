@@ -162,13 +162,14 @@ TEST_CASE("turn/start 经服务接纳:operations 先账,协议回包一字不动
     CHECK(completed["stepsUsed"] == 1);
 
     // 服务层先账:回合跑完,operations.jsonl 里已有这笔回合的接纳记录
-    //(协议 1.2 没有幂等键,键位空;payload hash 可复算)。
+    //(协议 1.2 没有幂等键,键位空;payload hash 可复算)。P1 起回合
+    // 终态再多一行 operation.final(ResultEnvelope 的持久收口)。
     const auto session_dir = FindSessionDir(sessions_dir + "/workspaces");
     REQUIRE(session_dir.has_value());
     const auto lines = ReadJsonl(*session_dir / "operations.jsonl");
     // V0 受理底线:一接纳一派发各落一行(accepted 先账后回执,dispatched
-    // 先账后出队)。
-    REQUIRE(lines.size() == 2);
+    // 先账后出队);P1 终态行按操作对账收尾。
+    REQUIRE(lines.size() == 3);
     CHECK(lines[0].value("kind", std::string()) == "operation.accepted");
     CHECK(lines[0].value("clientOperationId", std::string()).empty());
     CHECK(lines[0].value("operationId", std::string()) == "op-1");
@@ -176,19 +177,25 @@ TEST_CASE("turn/start 经服务接纳:operations 先账,协议回包一字不动
     CHECK(lines[0].contains("payloadHash"));
     CHECK(lines[1].value("kind", std::string()) == "operation.dispatched");
     CHECK(lines[1].value("operationId", std::string()) == "op-1");
+    CHECK(lines[2].value("kind", std::string()) == "operation.final");
+    CHECK(lines[2].value("operationId", std::string()) == "op-1");
+    CHECK(lines[2].value("executionStatus", std::string()) == "success");
 
     // 第二回合照走(每轮一接纳一消费,队列不积):协议回包形状照旧,
-    // 台账记到 op-2。
+    // 台账记到 op-2(接纳/派发/终态三行一轮,P1 终态行随行)。
     scripts.push_back(TextOnlyScript("第二轮。"));
     const nlohmann::json second =
         server.HandleTurnStart(thread_id, "再问一句", {}, error_code);
     REQUIRE(error_code.empty());
     CHECK(second["status"] == "success");
     const auto after_two = ReadJsonl(*session_dir / "operations.jsonl");
-    REQUIRE(after_two.size() == 4);
-    CHECK(after_two[2].value("operationId", std::string()) == "op-2");
-    CHECK(after_two[3].value("kind", std::string()) == "operation.dispatched");
+    REQUIRE(after_two.size() == 6);
+    CHECK(after_two[3].value("kind", std::string()) == "operation.accepted");
     CHECK(after_two[3].value("operationId", std::string()) == "op-2");
+    CHECK(after_two[4].value("kind", std::string()) == "operation.dispatched");
+    CHECK(after_two[4].value("operationId", std::string()) == "op-2");
+    CHECK(after_two[5].value("kind", std::string()) == "operation.final");
+    CHECK(after_two[5].value("operationId", std::string()) == "op-2");
 
     (void)server.HandleThreadStop(thread_id, error_code);
 }

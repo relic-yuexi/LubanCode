@@ -1,5 +1,5 @@
 // SessionService 测试册(AppServer 接入 Session v3 第一棒:统一服务入口
-// 与身份)。三块:
+// 与身份)。四块:
 //   1. 开张/v3 开关两路回归——开关关 = v2 布局(main.jsonl + session.json),
 //      开关开 = v3 流(首行 system,§1.2);服务只是递合同,开关在
 //      SessionManager 建场时二选一(接线点 1)。
@@ -11,6 +11,10 @@
 //      BuildOneShotSessionRequest)与服务路(app-server 形状的请求),
 //      落账一致(同一布局合同、同一 operation 记录形状、同源 payload
 //      hash)。
+//   4. 回合终态持久收口(工业化多协议接入单 P1:ResultEnvelope 的最小
+//      持久形状)——operation.final 行按操作对账、写盘失败明败(调用方
+//      不许谎称"结果已可靠保存")、台账写失败时受理面停摆(写账失败
+//      零执行的服务层底线)。
 // json 缺键断言一律 contains()(nlohmann UB 纪律);路径断言用
 // equivalent/字符串比较,不比盘符大小写。
 #include <doctest/doctest.h>
@@ -486,4 +490,105 @@ TEST_CASE("三端同路:CLI 路(one-shot 折算)与服务路,开张/接纳/收�
         }
         CHECK(found_closed);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 4. 回合终态持久收口(工业化多协议接入单 P1:ResultEnvelope 最小持久形状)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("回合终态:operation.final 行按操作对账,字段如实") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+    const auto root = FreshRoot("turn-final");
+    runtime::SessionService service(LaunchRequestOf(root));
+    REQUIRE(service.trajectory() != nullptr);
+
+    runtime::SessionService::InputRequest input;
+    input.client_operation_id = "OP-FINAL";
+    input.text = "终态对账";
+    const auto receipt = service.SubmitInput(input);
+    REQUIRE(receipt.accepted);
+
+    // 模拟泵侧:取出(dispatched 落稳)后跑完回合,落终态。
+    const auto pop = service.PopPendingInput();
+    REQUIRE(pop.status == runtime::SessionService::PendingPop::Status::Ok);
+
+    runtime::SessionService::TurnFinalRecord final_record;
+    final_record.operation_id = receipt.operation_id;
+    final_record.turn_id = "turn-final-1";
+    final_record.execution_status = "success";
+    final_record.final_message_refs = {"item-a1"};
+    final_record.usage_reported = true;
+    CHECK(service.RecordTurnFinal(final_record));
+
+    // 台账行逐字段:kind=operation.final、操作对账、终态分型、消息引用、
+    // usage 如实(P1 §12.3:executionStatus 只报执行收口)。
+    const auto lines = ReadJsonl(service.trajectory()->session_dir() / "operations.jsonl");
+    bool found_final = false;
+    for (const nlohmann::json& line : lines) {
+        if (!line.is_object() || !line.contains("kind") || line["kind"] != "operation.final") {
+            continue;
+        }
+        found_final = true;
+        REQUIRE(line.contains("operationId"));
+        CHECK(line["operationId"] == receipt.operation_id);
+        REQUIRE(line.contains("turnId"));
+        CHECK(line["turnId"] == "turn-final-1");
+        REQUIRE(line.contains("executionStatus"));
+        CHECK(line["executionStatus"] == "success");
+        REQUIRE(line.contains("finalMessageRefs"));
+        REQUIRE(line["finalMessageRefs"].is_array());
+        REQUIRE(line["finalMessageRefs"].size() == 1);
+        CHECK(line["finalMessageRefs"][0] == "item-a1");
+        REQUIRE(line.contains("usageReported"));
+        CHECK(line["usageReported"] == true);
+    }
+    CHECK(found_final);
+}
+
+TEST_CASE("回合终态:空操作号的防御路径不落账(没经接纳的回合没有对账面)") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+    const auto root = FreshRoot("turn-final-defensive");
+    runtime::SessionService service(LaunchRequestOf(root));
+    REQUIRE(service.trajectory() != nullptr);
+    runtime::SessionService::TurnFinalRecord final_record;
+    final_record.turn_id = "turn-no-op";
+    final_record.execution_status = "error";
+    CHECK_FALSE(service.RecordTurnFinal(final_record));
+    CHECK(ReadJsonl(service.trajectory()->session_dir() / "operations.jsonl").empty());
+}
+
+TEST_CASE("台账写失败:受理面停摆(写账失败零执行的服务层底线)与终态如实明败") {
+    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+    const auto root = FreshRoot("ledger-broken");
+    runtime::SessionService service(LaunchRequestOf(root));
+    REQUIRE(service.trajectory() != nullptr);
+
+    // E1/E2 合流的注入(冻结合同 §10):operations.jsonl 的位置先占成
+    // 一枚目录——OperationsFile 惰性开账,首笔 Append 的 JournalWriter
+    // 追加打不开目录,broken 即刻置位并传播。此后受理面恒拒。
+    const std::filesystem::path ledger = service.trajectory()->session_dir() / "operations.jsonl";
+    {
+        std::error_code ec;
+        std::filesystem::create_directory(ledger, ec);
+    }
+
+    // 受理失败:不回成功回执、不入执行队列;同键重发同样拒收。
+    runtime::SessionService::InputRequest broken;
+    broken.client_operation_id = "OP-AFTER-BREAK";
+    broken.text = "废账后";
+    const auto rejected = service.SubmitInput(broken);
+    CHECK_FALSE(rejected.accepted);
+    CHECK_FALSE(rejected.duplicate);
+    CHECK(rejected.error_code == "operation.append_failed");
+    CHECK(service.pending_input_count() == 0);  // 零执行:队里没有它
+
+    // 终态落账同样明败:调用方据此在事件里报 resultEnvelopePersisted=
+    // false,不谎称"结果已可靠保存"。对账面拿不到受理号,用防御路径
+    // (空操作号)外的真号:受拒的操作没发号,这里以一枚不合账的号验证
+    // "账 broken 时恒 false"的传播,不伪造受理事实。
+    runtime::SessionService::TurnFinalRecord final_record;
+    final_record.operation_id = "op-uncommitted";
+    final_record.turn_id = "turn-broken";
+    final_record.execution_status = "success";
+    CHECK_FALSE(service.RecordTurnFinal(final_record));
 }

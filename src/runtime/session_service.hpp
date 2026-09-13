@@ -170,6 +170,24 @@ public:
     PendingPop PopPendingInput();
     std::size_t pending_input_count() const;
 
+    // ---- 回合终态的持久收口(工业化多协议接入单 P1:ResultEnvelope 的
+    // 最小持久形状)----
+    // 终态事实先落账(PowerLoss 档),再由调用方发通知——"终态事实与
+    // 结果引用先提交,再通知订阅者"。executionStatus 只报执行收口,
+    // 不替调用方判断业务成败;finalMessageRefs 由运行时选定(最终
+    // assistant 文本条目的引用),不把全部文本拼当答案;usageReported
+    // 如实报 provider 是否报了 usage,缺失不默认零。
+    struct TurnFinalRecord {
+        std::string operation_id;                // 本轮消费的输入(空=防御路径)
+        std::string turn_id;
+        std::string execution_status;            // success/error/cancelled/interrupted
+        std::vector<std::string> final_message_refs;  // 条目 id 引用
+        bool usage_reported = false;             // provider 是否真报了 usage
+    };
+    // 落一行 operation.final。回 false = 落不稳(broken 传播):调用方
+    // 不得再宣称"结果已可靠保存",须在终态事件里如实标注。
+    bool RecordTurnFinal(const TurnFinalRecord& record);
+
     // 规范载荷串(幂等键比对的底):text + 图片字段 US('\x1f')定界拼接。
     // 公开给对照测试:同一操作走 CLI 路与服务路,hash 必须同源。
     static std::string CanonicalInputPayload(const InputRequest& input);

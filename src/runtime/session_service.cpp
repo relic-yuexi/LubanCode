@@ -662,6 +662,34 @@ std::size_t SessionService::pending_input_count() const {
     return pending_inputs_.size();
 }
 
+bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
+    if (runtime_ == nullptr || trajectory() == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(commit_mutex_);
+    if (operations_file_ == nullptr || !operations_file_->ok()) {
+        return false;
+    }
+    // 行形状(schemaVersion=2 纯追加):operationId 是本终态归属的操作;
+    // 空操作号的防御路径不落账(没经接纳的回合没有对账面,不伪造)。
+    if (record.operation_id.empty()) {
+        return false;
+    }
+    nlohmann::json refs = nlohmann::json::array();
+    for (const std::string& ref : record.final_message_refs) {
+        refs.push_back(ref);
+    }
+    nlohmann::json line{{"schemaVersion", 2},
+                        {"kind", "operation.final"},
+                        {"operationId", record.operation_id},
+                        {"turnId", record.turn_id},
+                        {"executionStatus", record.execution_status},
+                        {"finalMessageRefs", std::move(refs)},
+                        {"usageReported", record.usage_reported},
+                        {"finalizedAtMs", NowMs()}};
+    return operations_file_->Append(line);
+}
+
 // ---------------------------------------------------------------------------
 // typed 域命令(goal/loop/plan;原样搬自 app-server HandleTypedDomainCommand
 // 的执行段,CommandService 与轨迹 command 包裹共用一份)
