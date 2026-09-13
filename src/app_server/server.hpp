@@ -28,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <nlohmann/json.hpp>
 
@@ -99,6 +100,15 @@ struct ThreadRecord {
     std::atomic<bool> turn_finished{false};
     // 最近一轮的 turn/completed params(HandleTurnStart 同步口径取回)。
     nlohmann::json last_completed;
+    // clientOperationId -> 受理时的 turnId(应用Worker接入单 P3:同键重发
+    // 回原受理,turnId 是回执的一部分)。只归读线程读写(turn/start 的
+    // 受理与预查都在读线程;回合工作线程不碰),无需加锁。resume 链上种
+    // 来的旧键没有本进程的 turnId,查不到就回空——不猜。
+    std::unordered_map<std::string, std::string> operation_turns;
+    // 在跑回合消费的操作号(P3:operation/read 的 running 判定——活场
+    // turn_running 旗 + 操作号对上才报 running,其余一律按账面事实报)。
+    // 读线程受理时写,查询也走读线程,无锁;先看 turn_running 旗再用。
+    std::string running_operation_id;
     // 本场 main.jsonl 的绝对路径(trace/query 断线补账/冷回放用;账本
     // 开张成功后由 thread/start 填)。
     std::string session_main_path;
@@ -261,17 +271,32 @@ public:
     // turn/start 的处理体:同步跑完一整回合(假 backend 一趟即终),
     // 事件从 emit 出去。返回 turn/completed 的 params。images 是
     // CheckTurnStartParams 折出来的图片输入(空 = 纯文本)。
+    // client_operation_id(应用Worker接入单 P3,可空):非空走幂等受理
+    // ——同键同载荷回原受理(duplicate),同键异载荷报 operation_conflict。
     nlohmann::json HandleTurnStart(const std::string& thread_id, const std::string& text,
-                                   const std::vector<nlohmann::json>& images, std::string& out_error_code);
+                                   const std::vector<nlohmann::json>& images, std::string& out_error_code,
+                                   const std::string& client_operation_id = std::string());
     // turn/start 的受理体(协议路径):立工作线程跑整回合,立即回
-    // {threadId, turnId};终态走 turn/completed 事件。
+    // {threadId, turnId, operationId, inputId}(P3 起带操作对账字段);
+    // 终态走 turn/completed 事件。client_operation_id 语义同上,空 = 1.2
+    // 旧行为(每发必纳)。
     nlohmann::json AcceptTurnStart(const std::string& thread_id, const std::string& text,
-                                   const std::vector<nlohmann::json>& images, std::string& out_error_code);
+                                   const std::vector<nlohmann::json>& images, std::string& out_error_code,
+                                   const std::string& client_operation_id = std::string());
     // turn/interrupt 的处理体:置打断旗。turn_id 空 = 该 thread 当前在跑
     // 的回合;回合不在跑(收口了/没这回合)报 stale,不追旧账。
     // 返回空串 = 受理;否则 out_error_code 记原因("stale" = 迟到)。
     nlohmann::json HandleTurnInterrupt(const std::string& thread_id, const std::string& turn_id,
                                        std::string& out_error_code);
+
+    // operation/read 的处理体(应用Worker接入单 P3:重启后按操作查询)。
+    // thread_id 定位场(活场从账本、冷场经 workspaces 索引);两枚定位键
+    // 至少一枚非空(协议层已查,直驱同样要求)。纯读:零模型调用、零
+    // 入队、零回合。out_error_code 非空 = 定位失败(没这场的账);操作
+    // 本身查不到不是错误——result 里 status="not_found" 如实报。
+    nlohmann::json HandleOperationRead(const std::string& thread_id,
+                                       const std::string& client_operation_id,
+                                       const std::string& operation_id, std::string& out_error_code);
     // 反向请求响应的处理体(审批/ask_user 的前端答复):对到 thread 的
     // 悬起件上。result 只在 ok 时有意义。
     InteractionResolution HandleInteractionResponse(const IncomingResponse& response);

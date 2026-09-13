@@ -88,6 +88,25 @@ struct RestoredHistoryView {
 RestoredHistoryView ProjectRestoredHistory(const std::filesystem::path& v3_jsonl);
 
 // ---------------------------------------------------------------------------
+// 操作终态的稳定正文(应用Worker接入单 P3:operation/read 按 turnId 取
+// 结果)。final 行的 finalMessageRefs 是协议事件条目 id(进程内发号),
+// 跨进程取正文不猜映射——按账面 turnId 定位该回合最后一条带非空文本的
+// assistant 消息,回它账上的 messageId 与正文。纯读,不改账、不重算。
+// ---------------------------------------------------------------------------
+
+struct FinalAssistantText {
+    std::string message_id;  // v3 账 messageId(跨重启稳定)
+    std::uint64_t seq = 0;   // 该消息行的账面 seq
+    std::string text;        // 文本块拼接(多文本块按序接)
+    bool hidden = false;     // display.hidden 如实带,裁决归调用方
+};
+
+// 读不动(验卷不过/账在写半行)或该 turn 没有可取正文,给 nullopt——
+// 调用方按"正文缺口"如实上报,不拿别的 turn 顶数。
+std::optional<FinalAssistantText> FindFinalAssistantText(const std::filesystem::path& v3_jsonl,
+                                                          const std::string& turn_id);
+
+// ---------------------------------------------------------------------------
 // /export 的 v3 投影(轨迹 v3 收尾棒):时间线 → markdown 导出的消息序与
 // 压缩分界位。hidden(display.hidden)默认不导出(§4.28"隐藏不等于删除",
 // 详情档另算),compact 内部问答/生效摘要天然排除在导出正文外,压缩标记

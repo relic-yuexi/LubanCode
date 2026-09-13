@@ -145,10 +145,27 @@ ParamsCheck CheckInitializeParams(const nlohmann::json& params);
 // thread/start:无必填字段(cwd 可选)。
 ParamsCheck CheckThreadStartParams(const nlohmann::json& params);
 
+// thread/start 的幂等键版(应用Worker接入单 P3,1.3 additive):额外折
+// 可选 clientOperationId(给了就必须是非空字符串;空串/类型不对报参数
+// 错,不静默当无键)。不带 = 旧行为。
+ParamsCheck CheckThreadStartParams(const nlohmann::json& params, std::string& out_client_operation_id);
+
 // turn/start:threadId(字符串)、text(字符串)两个必填;images 数组
 // 可选(元素须是对象,mediaType/data 是字符串——宽松校验,深校验归执行链)。
 ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_thread_id,
                                  std::string& out_text, std::vector<nlohmann::json>& out_images);
+
+// turn/start 的幂等键版(应用Worker接入单 P3,1.3 additive):额外折
+// 可选 clientOperationId,校验口径同 thread/start 的键版。
+ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_thread_id,
+                                 std::string& out_text, std::vector<nlohmann::json>& out_images,
+                                 std::string& out_client_operation_id);
+
+// operation/read(应用Worker接入单 P3,只读核对口):threadId 必填;
+// clientOperationId 与 operationId 至少给一枚(都给时按 operationId 定位、
+// clientOperationId 用于一致性核对,不一致由执行链按账面事实报)。
+ParamsCheck CheckOperationReadParams(const nlohmann::json& params, std::string& out_thread_id,
+                                      std::string& out_client_operation_id, std::string& out_operation_id);
 
 // thread/stop:threadId(字符串)必填。
 ParamsCheck CheckThreadStopParams(const nlohmann::json& params, std::string& out_thread_id);

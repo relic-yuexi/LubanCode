@@ -188,6 +188,43 @@ public:
     // 不得再宣称"结果已可靠保存",须在终态事件里如实标注。
     bool RecordTurnFinal(const TurnFinalRecord& record);
 
+    // ---- 操作台账的只读投影(应用Worker接入单 P3:重启后按操作查询) ----
+    // 一行台账事实的读侧形状(accepted/dispatched/final 三类行共用;
+    // 各类行只填自己的字段,其余缺省)。时间戳毫秒,行里没有就是 0——
+    // 缺值不猜。
+    struct OperationFact {
+        std::string kind;             // operation.accepted | operation.dispatched | operation.final
+        std::string operation_id;
+        std::string input_id;         // accepted 行
+        std::string client_operation_id;  // accepted 行(空 = 无键受理)
+        std::string payload_hash;     // accepted 行
+        std::string turn_id;          // final 行
+        std::string execution_status; // final 行(success/error/cancelled/interrupted)
+        std::vector<std::string> final_message_refs;  // final 行
+        bool usage_reported = false;  // final 行
+        std::int64_t received_at_ms = 0;
+        std::int64_t dispatched_at_ms = 0;
+        std::int64_t finalized_at_ms = 0;
+    };
+
+    // 读一场的操作台账(session_dir/operations.jsonl)。纯读:不开写柄、
+    // 不碰内存状态;坏行/半截尾行跳过不猜(json 缺键一律 contains()。
+    // 活场并发追加时读到半行属常态,跳过即可——下次读全)。文件不存在
+    // 回空表。协议查询面(operation/read)活场冷场同吃这一口,不在
+    // app-server 再解析一遍行格式。
+    static std::vector<OperationFact> ReadOperationFacts(const std::filesystem::path& session_dir);
+
+    // 只读查重(§4.2 幂等键预查):键在内存去重表里的受理事实。found
+    // =false 即无此键;同键异载荷报 operation_conflict 的裁决由调用方比
+    // payload_hash 得出,这里只交事实,不替调用方判。
+    struct OperationLookup {
+        bool found = false;
+        std::string operation_id;
+        std::string input_id;
+        std::string payload_hash;
+    };
+    OperationLookup LookupClientOperation(const std::string& client_operation_id) const;
+
     // 规范载荷串(幂等键比对的底):text + 图片字段 US('\x1f')定界拼接。
     // 公开给对照测试:同一操作走 CLI 路与服务路,hash 必须同源。
     static std::string CanonicalInputPayload(const InputRequest& input);

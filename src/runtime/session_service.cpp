@@ -690,6 +690,75 @@ bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
     return operations_file_->Append(line);
 }
 
+std::vector<SessionService::OperationFact> SessionService::ReadOperationFacts(
+    const std::filesystem::path& session_dir) {
+    std::vector<OperationFact> facts;
+    std::ifstream in(session_dir / kOperationsFileName, std::ios::binary);
+    if (!in.is_open()) {
+        return facts;  // 没建过账(空场)或目录不在:空表,调用方按 not_found 口径处理
+    }
+    std::string text;
+    while (std::getline(in, text)) {
+        if (text.empty()) {
+            continue;
+        }
+        const nlohmann::json line = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+        if (!line.is_object() || !line.contains("kind") || !line["kind"].is_string()) {
+            continue;  // 半截尾行/坏行:跳过,不猜
+        }
+        OperationFact fact;
+        fact.kind = line["kind"].get<std::string>();
+        const auto get_string = [&](const char* key) {
+            return line.contains(key) && line[key].is_string() ? line[key].get<std::string>()
+                                                               : std::string();
+        };
+        fact.operation_id = get_string("operationId");
+        fact.input_id = get_string("inputId");
+        fact.client_operation_id = get_string("clientOperationId");
+        fact.payload_hash = get_string("payloadHash");
+        fact.turn_id = get_string("turnId");
+        fact.execution_status = get_string("executionStatus");
+        const auto get_ms = [&](const char* key) {
+            return line.contains(key) && line[key].is_number_integer()
+                       ? line[key].get<std::int64_t>()
+                       : std::int64_t{0};
+        };
+        fact.received_at_ms = get_ms("receivedAtMs");
+        fact.dispatched_at_ms = get_ms("dispatchedAtMs");
+        fact.finalized_at_ms = get_ms("finalizedAtMs");
+        fact.usage_reported = line.contains("usageReported") && line["usageReported"].is_boolean()
+                                  ? line["usageReported"].get<bool>()
+                                  : false;
+        if (line.contains("finalMessageRefs") && line["finalMessageRefs"].is_array()) {
+            for (const auto& ref : line["finalMessageRefs"]) {
+                if (ref.is_string()) {
+                    fact.final_message_refs.push_back(ref.get<std::string>());
+                }
+            }
+        }
+        facts.push_back(std::move(fact));
+    }
+    return facts;
+}
+
+SessionService::OperationLookup SessionService::LookupClientOperation(
+    const std::string& client_operation_id) const {
+    OperationLookup lookup;
+    if (client_operation_id.empty()) {
+        return lookup;
+    }
+    std::lock_guard<std::mutex> lock(commit_mutex_);
+    const auto it = operations_.find(client_operation_id);
+    if (it == operations_.end()) {
+        return lookup;
+    }
+    lookup.found = true;
+    lookup.operation_id = it->second.operation_id;
+    lookup.input_id = it->second.input_id;
+    lookup.payload_hash = it->second.payload_hash;
+    return lookup;
+}
+
 // ---------------------------------------------------------------------------
 // typed 域命令(goal/loop/plan;原样搬自 app-server HandleTypedDomainCommand
 // 的执行段,CommandService 与轨迹 command 包裹共用一份)
