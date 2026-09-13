@@ -210,7 +210,7 @@ Responses 原生首期只在已验证的同路由响应链上续接，记录最�
   - 恢复（单 §6 表，账态注入 CI 可重复）：`PlanRecovery`(静态纯读账，FoldJobExecutions+FoldToolActions)分五类 disposition——requeue（registered 未派发，接单链在账则重新入队，epoch 从账上租约数接续）/awaiting_approval/unknown_hold（dispatched 无终态→落 observed(unknown) 不盲跑不合成假终态）/complete_delivery（admission_chain_missing 补接单链+tool 消息不重跑；terminal_observation_missing 补终态观测 resultRef 指账上业务 persisted）/already_terminal（含取消竞态落账后，真实完成不改写）；native_deferred 报 unsupported_mode 不接管（归 P3）。`AdoptRecovery` 按计划收账，JobId 号池对齐（新单不撞账上号）；恢复用 `ToolActionSession::ReopenAligned`（本单新增，按账面 attempt/started/终态对齐内存态，补链不重复落事件、续派从已终态 attempt 接续）。
   - 测试：`tests/unit/tools/test_tool_job_coordinator.cpp`（EnvGuard("1")，executor 挂 promise/future 闸无 sleep 竞态）——start 全链账序断言+ValidateAsyncToolSequence 零错、注册落账失败不派发（inject_io_failure）、权鉴 fail-closed/审批挂起放行/拒读视角拿不到结果、派发前复查授权过期按 failed 收口、资源键串行、session 并发上限、取消三径（未派发收口/worker 响应/竞态跑完不改写）、wait 超时回 pending、get 不自动重跑、旧租约与终态后信封拒收、输出配额截断（persisted 描述 capture_reason=quota）、恢复五 disposition 账态注入（requeue epoch 接续/unknown_hold 不盲跑/补投递不重跑/审批/已终态+取消竞态/号池对齐）。
   - 未验边界（生产接线归后续批次）：AgentLoop/工具注册表未接（模型不可见）；P2 ResultDeliveryPlanner 未接（业务结果 tool 消息与投递 prepared/sent/acknowledged 由 P2 在请求边界选）；native_deferred 执行未接（P3）；恢复后 GetJob 的 preview 不从仓重建（只回 resultRef，原文走结果仓 artifact 追）；writer 由调用方保证寿命与独占（与 TrajectorySession 共享写者的装配归 P2）；deadline 巡检是泵驱动（无人泵时不过期）。
-  - 证据：PR 待 push 后回填，CI 判绿以 rollup conclusion 为准。
+  - 证据：PR https://github.com/relic-yuexi/LubanCode/pull/61 ，CI 判绿以 rollup conclusion 为准。
 - [ ] P2：拆 AgentLoop 批次闸门，接 ResultDeliveryPlanner；覆盖终端、one-shot、AppServer、子代理与 Workflow 宿主。
 - [ ] P3：Responses function 原生试点，保留 async 标记和响应链；补 capability fail-closed 与 PTC 排斥。custom 与流式提前派发另验后开。
 - [ ] P4：接 compact/resume/Goal/Loop/btw 与显示投影，补说明及清理条件。
