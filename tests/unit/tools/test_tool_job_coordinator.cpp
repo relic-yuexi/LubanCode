@@ -56,11 +56,18 @@ struct EnvGuard {
 };
 
 // 受控执行闸:executor 挂在 future 上,测试精确放行(无 sleep 竞态)。
+// Open 幂等——测试显式放行后 Harness 析构的兜底放行不二次 set_value。
 struct Gate {
     std::promise<void> release;
     std::future<void> released;
+    std::atomic<bool> opened{false};
     Gate() : released(release.get_future()) {}
-    void Open() { release.set_value(); }
+    void Open() {
+        bool expected = false;
+        if (opened.compare_exchange_strong(expected, true)) {
+            release.set_value();
+        }
+    }
 };
 
 JobAuthDecision AllowAll(const std::string&, const nlohmann::json&) {

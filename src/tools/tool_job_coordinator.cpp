@@ -320,6 +320,11 @@ struct ToolJobCoordinator::Impl {
         } else {
             output.data = text;
         }
+        // 预览要在 move 进请求前拷一份捕获文本(use-after-move 会拿空串)。
+        const std::string captured_text = output.data;
+        const bool capture_complete = output.capture_complete;
+        const std::string capture_reason = output.capture_reason;
+        const std::uint64_t output_bytes = output.output_bytes;
         trajectory::v3::ResultStore::PersistRequest request;
         request.result_kind = "text";
         request.outputs.push_back(std::move(output));
@@ -352,10 +357,10 @@ struct ToolJobCoordinator::Impl {
                                            ? "artifacts/" + persisted.result_id
                                            : outcome.text_artifact_path;
         preview_channel.channel = channel;
-        preview_channel.text = output.data;
-        preview_channel.capture_complete = output.capture_complete;
-        preview_channel.capture_reason = output.capture_reason;
-        preview_channel.output_bytes = output.output_bytes;
+        preview_channel.text = captured_text;
+        preview_channel.capture_complete = capture_complete;
+        preview_channel.capture_reason = capture_reason;
+        preview_channel.output_bytes = output_bytes;
         preview_request.channels.push_back(std::move(preview_channel));
         preview_request.max_preview_bytes = kPreviewBudgetBytes;
         outcome.preview = trajectory::v3::BuildToolPreview(preview_request);
