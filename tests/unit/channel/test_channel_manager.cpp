@@ -510,8 +510,9 @@ TEST_CASE("Q0:执行前重验准入——权限撤销后排队输入就地落 re
     ChannelManager manager(MakeOptions(root));
     AddAndStart(manager, sidecar, transport);
 
-    // 先入队一封(准入过)。
-    sidecar.EmitInboundEvent(MakeDm("in-1", "pe-1"));
+    // 先入队一封(准入过)。两封正文错开——同正文短窗去重(固定钟下
+    // 窗口恒命中)会把第二封吞成 rate_limited。
+    sidecar.EmitInboundEvent(MakeDm("in-1", "pe-1", "第一句"));
     auto bytes = sidecar.DrainToHost();
     manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
     manager.Pump("qqbot", "main");
@@ -543,7 +544,7 @@ TEST_CASE("Q0:执行前重验准入——权限撤销后排队输入就地落 re
 
     // 撤掉冲突后新来信照常走。
     manager.SetChannelBindings("qqbot", {});
-    sidecar.EmitInboundEvent(MakeDm("in-2", "pe-2"));
+    sidecar.EmitInboundEvent(MakeDm("in-2", "pe-2", "第二句"));
     bytes = sidecar.DrainToHost();
     manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
     manager.Pump("qqbot", "main");

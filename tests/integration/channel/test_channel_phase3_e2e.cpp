@@ -229,7 +229,8 @@ struct MiniGateway {
     }
 
     // sidecar 来信 -> manager 入账 -> 取活 -> 折 ingress -> 泵一轮。
-    // per_turn_tools 非空时随入账冻结(Q0);空 = 引擎用会话级策略。
+    // per_turn_tools 非空时随入账冻结(Q0:逐轮收窄案用);空 = 引擎用
+    // 会话级策略(与 Q0 前的行为一致——本夹具的工具上限装在引擎工厂)。
     std::optional<runtime::ChannelSessionHost::TurnOutcome> DeliverOne(
         const channel::ChannelInboundEvent& event,
         const channel::ToolRoutePolicy* per_turn_tools = nullptr) {
@@ -241,7 +242,7 @@ struct MiniGateway {
         auto ingress = runtime::MakeChannelTurnIngress(
             work->event, work->route.provenance, work->route.session_key,
             work->route.memory.user_memory || work->route.memory.project_memory,
-            per_turn_tools != nullptr ? per_turn_tools : &work->route.tools);
+            per_turn_tools);
         host.Submit(std::move(ingress));
         return host.PumpOne();
     }
@@ -497,11 +498,8 @@ TEST_CASE("Q0:读文件工具碰受保护路径——在实际执行入口拦,�
         api::ToolUseInputDelta{0, ok_input},
         api::ContentBlockDone{0},
         api::MessageDone{"tool_use", api::Usage{}},
-        api::MessageStart{"msg", "test-model"},
-        api::TextDelta{"读到了"},
-        api::ContentBlockDone{0},
-        api::MessageDone{"end_turn", api::Usage{}},
     });
+    gw.backend.scripts.push_back(TextScript("读到了"));
     auto second = gw.DeliverOne(MakeDm("d2", "pe2", "dm-owner", "读普通文件"));
     REQUIRE(second.has_value());
     CHECK(second->ok);
@@ -531,11 +529,8 @@ TEST_CASE("Q0:逐轮策略收窄——会话建档后撤销,执行口按冻结�
         api::ToolUseInputDelta{0, "{}"},
         api::ContentBlockDone{0},
         api::MessageDone{"tool_use", api::Usage{}},
-        api::MessageStart{"msg", "test-model"},
-        api::TextDelta{"行吧"},
-        api::ContentBlockDone{0},
-        api::MessageDone{"end_turn", api::Usage{}},
     });
+    gw.backend.scripts.push_back(TextScript("行吧"));
     auto outcome = gw.DeliverOne(MakeDm("d1", "pe1", "dm-owner", "读一下配置"), &turn_tools);
     REQUIRE(outcome.has_value());
     CHECK(outcome->ok);
@@ -563,11 +558,8 @@ TEST_CASE("Q0:逐轮策略收窄——会话建档后撤销,执行口按冻结�
         api::ToolUseInputDelta{0, "{}"},
         api::ContentBlockDone{0},
         api::MessageDone{"tool_use", api::Usage{}},
-        api::MessageStart{"msg", "test-model"},
-        api::TextDelta{"搜到了"},
-        api::ContentBlockDone{0},
-        api::MessageDone{"end_turn", api::Usage{}},
     });
+    gw.backend.scripts.push_back(TextScript("搜到了"));
     auto second = gw.DeliverOne(MakeDm("d2", "pe2", "dm-owner", "搜一下"), &turn_tools);
     REQUIRE(second.has_value());
     CHECK(second->ok);

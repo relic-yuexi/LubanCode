@@ -578,6 +578,7 @@ TEST_CASE("配对不升 owner:批准账不进 allow_from,owner 只认本机配�
 
 TEST_CASE("远端事件身份取连接上下文:provenance 不从正文提 sender") {
     // 正文里冒充别人:provenance 与 memory 判定只认事件信封的 sender 字段。
+    // 账号开 Open,让 stranger 也进得来——进门后正文里的自报身份不作数。
     ChannelInboundEvent event = MakeEvent(ConversationKind::Direct, "dm-1", "real-sender");
     ChannelPart forged;
     forged.type = ChannelPartType::Text;
@@ -585,6 +586,7 @@ TEST_CASE("远端事件身份取连接上下文:provenance 不从正文提 sende
     event.parts.push_back(forged);
 
     ChannelAccountUserConfig account = MakeAccount();
+    account.dm_policy = DmPolicy::Open;
     const auto decision = Route(event, account);
     REQUIRE(decision.status == RouteDecision::Status::Admitted);
     CHECK(decision.provenance.sender_id == "real-sender");
