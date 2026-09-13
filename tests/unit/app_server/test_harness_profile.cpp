@@ -288,3 +288,61 @@ TEST_CASE("P2 解析:components.plugins 点名通道——收名单,未放行 pl
         CHECK_FALSE(parsed.error.empty());
     }
 }
+
+TEST_CASE("P5 解析:plugin__<id>__<tool> 进 allow——依赖解释与 deny 裁") {
+    const auto deployment = ReadJsonFile(kFixturesRoot / "profile.zero-tools.json");
+    REQUIRE(deployment.has_value());
+
+    // 点名+放行+mode=only 的底版(名字段全改写:golden 是零工具档)。
+    const auto MakePluginDoc = [&deployment]() {
+        json doc = *deployment;
+        doc["harnessProfiles"]["zero-tools"]["features"]["enabled"] = json::array({"plugins"});
+        doc["harnessProfiles"]["zero-tools"]["components"] = json{{"plugins", json::array({"demo-lua"})}};
+        doc["harnessProfiles"]["zero-tools"]["tools"] = json{
+            {"mode", "only"}, {"allow", json::array({"plugin__demo-lua__search"})}, {"deny", json::array()}};
+        return doc;
+    };
+
+    SUBCASE("点名+放行:allow 收 plugin__ 名") {
+        const auto parsed = app_server::ParseHarnessDeployment(MakePluginDoc(), "zero-tools");
+        REQUIRE(parsed.profile.has_value());
+        REQUIRE(parsed.profile->tools.allow.size() == 1);
+        CHECK(parsed.profile->tools.allow[0] == "plugin__demo-lua__search");
+        REQUIRE(parsed.profile->plugins.size() == 1);
+        CHECK(parsed.profile->plugins[0] == "demo-lua");
+    }
+    SUBCASE("id 段不在 components.plugins:配置矛盾明拒") {
+        json doc = MakePluginDoc();
+        doc["harnessProfiles"]["zero-tools"]["tools"]["allow"] =
+            json::array({"plugin__other-lua__search"});
+        const auto parsed = app_server::ParseHarnessDeployment(doc, "zero-tools");
+        CHECK_FALSE(parsed.profile.has_value());
+        REQUIRE_FALSE(parsed.error.empty());
+        CHECK(parsed.error.find("plugin__other-lua__search") != std::string::npos);
+        CHECK(parsed.error.find("components.plugins") != std::string::npos);
+    }
+    SUBCASE("features 未放行 plugins:allow 点名 plugin 工具明拒") {
+        json doc = MakePluginDoc();
+        doc["harnessProfiles"]["zero-tools"]["features"]["enabled"] = json::array();
+        const auto parsed = app_server::ParseHarnessDeployment(doc, "zero-tools");
+        CHECK_FALSE(parsed.profile.has_value());
+        REQUIRE_FALSE(parsed.error.empty());
+        CHECK(parsed.error.find("plugin__demo-lua__search") != std::string::npos);
+        CHECK(parsed.error.find("plugins") != std::string::npos);
+    }
+    SUBCASE("缺工具段的病态名:明拒不猜") {
+        json doc = MakePluginDoc();
+        doc["harnessProfiles"]["zero-tools"]["tools"]["allow"] = json::array({"plugin__demo-lua"});
+        const auto parsed = app_server::ParseHarnessDeployment(doc, "zero-tools");
+        CHECK_FALSE(parsed.profile.has_value());
+        REQUIRE_FALSE(parsed.error.empty());
+        CHECK(parsed.error.find("plugin__demo-lua") != std::string::npos);
+    }
+    SUBCASE("deny 裁掉 allow 里的 plugin__ 工具(deny 胜出,与 mcp/skill 同款)") {
+        json doc = MakePluginDoc();
+        doc["harnessProfiles"]["zero-tools"]["tools"]["deny"] = json::array({"plugin__demo-lua__search"});
+        const auto parsed = app_server::ParseHarnessDeployment(doc, "zero-tools");
+        REQUIRE(parsed.profile.has_value());
+        CHECK(parsed.profile->tools.allow.empty());
+    }
+}

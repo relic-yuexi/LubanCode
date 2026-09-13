@@ -344,6 +344,34 @@ std::vector<DependencyExplanation> ExplainDependencies(const json& profile) {
         }
     }
 
+    // P5(应用Worker接入单 §7.2):插件工具名 plugin__<id>__<tool> 的依赖
+    // 解释——<id> 段须 components.plugins 点名且 features 放行 plugins
+    //(与生产解析器同一口径;id 段拆法取最后一个 "__")。
+    const bool plugins_allowed = [&] {
+        if (!profile.contains("features") || !profile["features"].is_object()) {
+            return false;
+        }
+        const json& features = profile["features"];
+        const std::string def =
+            features.contains("default") && features["default"].is_string()
+                ? features["default"].get<std::string>() : "enabled";
+        if (def == "enabled") {
+            return true;
+        }
+        return features.contains("enabled") && features["enabled"].is_array() &&
+               std::find(features["enabled"].begin(), features["enabled"].end(), "plugins") !=
+                   features["enabled"].end();
+    }();
+    std::vector<std::string> mounted_plugins;
+    if (profile.contains("components") && profile["components"].is_object() &&
+        profile["components"].contains("plugins") && profile["components"]["plugins"].is_array()) {
+        for (const auto& plugin : profile["components"]["plugins"]) {
+            if (plugin.is_string()) {
+                mounted_plugins.push_back(plugin.get<std::string>());
+            }
+        }
+    }
+
     if (profile.contains("tools") && profile["tools"].is_object() &&
         profile["tools"].contains("allow") && profile["tools"]["allow"].is_array()) {
         for (const auto& tool : profile["tools"]["allow"]) {
@@ -356,8 +384,25 @@ std::vector<DependencyExplanation> ExplainDependencies(const json& profile) {
                 out.push_back({name, "features 放行 skills", skills_allowed});
                 continue;
             }
+            // 插件工具名(P5 起):依赖 = components.plugins 点名 id 段 ∧
+            // features 放行 plugins。
+            if (name.rfind("plugin__", 0) == 0) {
+                const std::size_t sep = name.rfind("__");
+                if (sep == std::string::npos || sep <= std::string("plugin__").size()) {
+                    out.push_back({name, "canonical 名缺插件段或工具段", false});
+                    continue;
+                }
+                const std::string plugin_id =
+                    name.substr(std::string("plugin__").size(), sep - std::string("plugin__").size());
+                const bool mounted = std::find(mounted_plugins.begin(), mounted_plugins.end(), plugin_id) !=
+                                     mounted_plugins.end();
+                const bool satisfied = mounted && plugins_allowed;
+                out.push_back({name, "components.plugins 含 " + plugin_id + " 且 features 放行 plugins",
+                               satisfied});
+                continue;
+            }
             // canonical 文本形如 <origin>:<server>:<tool>;本阶段只解释
-            // mcp: 前缀(内置/插件工具的 canonical 映射在 P2 与 ToolOrigin
+            // mcp: 前缀(内置工具的 canonical 映射在 P2 与 ToolOrigin
             // 对账后补)。
             if (name.rfind("mcp:", 0) != 0) {
                 continue;

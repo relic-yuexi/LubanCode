@@ -82,13 +82,13 @@
 | `agentRef` | canonical Agent 引用,如 `example.tools:assistant`;P2 起点名必解析(AgentCatalog),找不到/不可用拒启,不回落默认提示词 |
 | `features` | `default: enabled|disabled` 加 `enabled`/`disabled` 名单;名单值须在 §4 功能名表内;同键两名单同现是配置错误 |
 | `components.mcpServers` | 名单;点名未在上层获准的服务是配置错误,不给档内授权 |
-| `components.plugins` | 名单(canonical 插件名;P2 起收)。点名须 `features` 放行 `plugins`;当前 build 未接线 app-server 插件装配,点名在会话装配层报 `component_unavailable` 整场明拒(应用Worker接入单 §7.2"不支持即拒绝";P5 接线后进入真装载) |
-| `tools` | §2 ToolPolicySpec;P2 起 `allow` 另收内置 skill 工具裸名 `skill`(须 `features` 放行 `skills`) |
+| `components.plugins` | 名单(canonical 插件名,即 manifest.id;不重复点名)。点名须 `features` 放行 `plugins`;P5 起进入真装载——发现根(材料根 `plugins/`)扫描 → 信任账(`PluginTrustStore`,数据根 `plugin-trust.json`,装配只读不批)→ v2 embedded-lua 挂载(`ManifestLuaRuntime`)。点名件不在发现账报 `plugin_missing`、信任账不过(未信任/disable/指纹算不出)报 `plugin_untrusted`、Lua 挂载坏报 `plugin_load_failed`、点名 process/native 件报 `component_unavailable`——四路整场明拒(thread/start 错误信封带 `data.code`,additive),不忽略不降级(应用Worker接入单 §7.2) |
+| `tools` | §2 ToolPolicySpec;P2 起 `allow` 另收内置 skill 工具裸名 `skill`(须 `features` 放行 `skills`);P5 起另收插件工具名 `plugin__<id>__<tool>`(须 `components.plugins` 含 `<id>` 且 `features` 放行 `plugins`;装配期另有 manifest 全名精确对账兜底) |
 | `exposure.default` | `direct|deferred|host_only` |
 | `updates` | `defaultApplyAt`、`allowSessionExpansion`;首版只支持 `next_session`,`allowSessionExpansion` 只可为 false |
 | `limits` | 非负整数;超出上层上限按明确规则拒绝或收窄,须在结果里给有效值 |
 
-依赖解释是校验的一部分,不是可选项:`tools.allow` 里的 `mcp:<server>:<tool>` 名字要求 `components.mcpServers` 含 `<server>` 且 `features` 放行 `mcp`;裸名 `skill` 要求 `features` 放行 `skills`;`exposure.default: deferred` 要求发现器依赖(tool_search/tool_invoke)未被禁,零工具面(`none` 或 `only`+空 allow)配 `deferred` 是配置错误——没有可延迟暴露的东西。解释不全的档不许采用。
+依赖解释是校验的一部分,不是可选项:`tools.allow` 里的 `mcp:<server>:<tool>` 名字要求 `components.mcpServers` 含 `<server>` 且 `features` 放行 `mcp`;裸名 `skill` 要求 `features` 放行 `skills`;`plugin__<id>__<tool>` 名字要求 `components.plugins` 含 `<id>` 且 `features` 放行 `plugins`;`exposure.default: deferred` 要求发现器依赖(tool_search/tool_invoke)未被禁,零工具面(`none` 或 `only`+空 allow)配 `deferred` 是配置错误——没有可延迟暴露的东西。解释不全的档不许采用。
 
 ## 4. 功能名表〔冻结〕
 
@@ -104,7 +104,7 @@
 | `browser` | 内嵌浏览器与截图取件 | BrowserRuntime;见 [browser-runtime.md](browser-runtime.md) |
 | `lsp` | LSP 工具 | lsp 工具表 |
 | `mcp` | MCP 客户端与 MCP 工具 | config `mcp_servers`;ToolRuntime 构造期启动 |
-| `plugins` | Lua/process 插件 | Package 挂载事务+信任门 |
+| `plugins` | Lua/process 插件 | 终端:Package 挂载事务+信任门;app-server:`components.plugins` 点名+材料根 plugins/ 发现+信任门(P5,仅 v2 embedded-lua) |
 | `skills` | Skill 装载 | skills 目录+Agent 定义 preload |
 | `memory.read` | 记忆召回注入 | config `memory.enabled`+`memory.use` |
 | `memory.write` | 记忆抽取写入 | config `memory.generate`/`learn` |
@@ -314,11 +314,11 @@ claim 恢复类:
 | 无档默认 | 显式零工具默认档(合同 §2.3),不照搬终端工具表 | `RunAppServerMode` 未递档分支 |
 | Agent 装配(agentRef 解析入首请求) | **已落(P2,2026-09-14)**——档点名 agentRef 必解析(AgentCatalog,解析面=码内内置+材料根 agents/);档案定系统提示部件(prompt_assembler 既有管线:Profile/persona 替业务正文,宿主段按实际工具面现拼盖不掉);找不到/不可用拒启,不回落默认 | `app_server::ResolveHarnessAgentPlan`/`ComposeHarnessSystemPrompt`(src/app_server/agent_wiring.cpp);消费 `SessionAssemblyRequest::agent_plan` |
 | SkillTool/技能材料装载 | **已落(P2,2026-09-14)**——features.skills 放行且 tools 面点名 `skill` 才装配:显式单根(材料根 skills/)扫描,清单段/工具/预装正文三面同进同退;skills.preload 缺名整场明拒;不搬终端五层合并,装技能不授予任何执行工具 | `AssembleSession` 步骤 2.5(src/app_server/session_assembly.cpp)+`tools::ScanSkillsDir`/`SkillTool`;组合 `ComposeHarnessSystemPrompt` |
-| Lua/process 插件装载 | **点名通道已开、装载未接(P2)**——`components.plugins` 收名单;当前 build 未接线,点名在装配层报 `component_unavailable` 整场明拒(thread/start 错误带 `data.code`,additive),不忽略不冒充;真装载归 P5 | `HarnessProfile::plugins`(src/app_server/harness_profile.cpp)+`AssembleSession` 步骤 0 |
+| Lua/process 插件装载 | **已落(P5,2026-09-14)——v2 embedded-lua 真装载**:`components.plugins` 点名 → 材料根 `plugins/` 扫描(与终端同一发现面)→ 信任账(`PluginTrustStore`,只读消费)→ `ManifestLuaRuntime` 挂载(每场一份,Lua state 不跨会话,registry 先析构 owner 后收口);工具面由 `tools.allow` 的 `plugin__<id>__<tool>` 名定(装载面≠注册面,与 MCP 同规矩);插件工具走统一工具闸(`ManifestLuaToolAdapter`:needs_confirm 恒真、ApprovalClass::External);HTTP/Secret 是 manifest 声明面(permissions.network/secrets)经既有宿主执法(越权在传输层权限对账步落锤、Secret 只在调用作用域解析),P5 未另立授权字段。**未接面如实**:process/native 件点名仍报 `component_unavailable`(kind 未接线);Package(packaged)插件不经此通道;挂载事实只进 `SessionAssembly::mounted_plugins` 与诊断日志,未进 thread/started 协议字段 | `PluginMounter`+`AssembleSession` 步骤 0(src/app_server/session_assembly.cpp);`HarnessProfile::plugins` 与 plugin__ 依赖解释(src/app_server/harness_profile.cpp);入口接线 `RunAppServerMode`(src/app/cli_app.cpp);测试 tests/unit/app_server/test_plugin_assembly.cpp(信任/HTTP·Secret/寿命三件)+ test_session_assembly.cpp(装配路) |
 | 幂等受理+输入原件持久(operations-inputs、CanonicalInputPayload、ProcessCrash 耐久) | 已落 | `SessionService::SubmitInput`(src/runtime/session_service.cpp;PR #59) |
 | turn 终态与 ResultEnvelope(finalMessageRefs、usageReported、resultEnvelopePersisted) | 已落 | `SessionService::RecordTurnFinal`/`MakeTurnCompletedParams`(src/app_server/schema.cpp;PR #62) |
 | 应用根三变量/来源裁剪/参数根-数据根分家 | 已落(本节合同+P1) | `config::ResolveRuntimePaths`/`StateRootDir`(src/config/runtime_paths.cpp) |
 | gateway/channels 状态根接数据根 | **未接**(避让在跑的 QQ 接入单,另立小单) | cli_app.cpp gateway run 段仍走 HomeLubancodeDir |
 | rg-stage 工具缓存的播种脚本 | **未接**(读取走数据根;fetch_ripgrep.py 不认数据根,应用根下的 rg-stage 须部署者自落) | src/tools/search_ripgrep.cpp UserStage 层 |
 
-错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"自 P2 生效(装配失败经 thread/start 错误信封带 `data.code`,additive 字段);"缺获准执行工具返回 `capability_unavailable`"(本单 §六冻结)待 Skill 依赖声明 schema 升级时生效。
+错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"自 P2 生效(装配失败经 thread/start 错误信封带 `data.code`,additive 字段)——P5 起 v2 embedded-lua 真装载,此码收窄到"runtime kind 未接线"(点名 process/native 件),另增三枚插件装载失败码:`plugin_missing`(点名件不在发现账,含 manifest 坏被扫描剔除)、`plugin_untrusted`(信任账不过:未信任/disable/内容指纹算不出)、`plugin_load_failed`(Lua 挂载坏:entry 读不到/编译坏/handler 对账不过),同一错误信封带出;"缺获准执行工具返回 `capability_unavailable`"(本单 §六冻结)待 Skill 依赖声明 schema 升级时生效。

@@ -83,6 +83,7 @@
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
+#include "config/plugin_trust.hpp"  // P5:插件信任账(数据根 plugin-trust.json,只读消费)
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
@@ -546,6 +547,15 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
         // 开场后文件改动不热换(§五)。
         std::shared_ptr<const lubancode::app_server::HarnessAgentPlan> agent_plan;
         std::optional<std::filesystem::path> skills_root;
+        // P5(应用Worker接入单 §7.2):Lua 插件装配来源——材料根 plugins/
+        // 单根显式扫描(与 agents/skills 同一条来源裁剪,复用终端同一发现
+        // 面,不另造清单);信任账读数据根 plugin-trust.json(只读消费,
+        // 装配不批信任——托管信任来自预先部署的 hash 与策略,不能后台
+        // 自动 trust);.env 数据目录落数据根 plugin-data。账读不出只打警
+        // 告:点名件按未信任处理,装配时 plugin_untrusted 明拒。
+        std::optional<std::filesystem::path> plugins_root;
+        std::optional<std::filesystem::path> plugin_data_root;
+        std::shared_ptr<const lubancode::config::PluginTrustStore> plugin_trust;
         if (harness.has_value()) {
             lubancode::app_server::HarnessAgentSources sources;
             if (const auto material_root = lubancode::config::HomeLubancodeDir();
@@ -555,7 +565,20 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                 sources.skills_dir = root / "skills";
                 sources.prompts_dir_utf8 = *material_root + "/prompts";
                 skills_root = sources.skills_dir;
+                plugins_root = root / "plugins";
             }
+            if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+                plugin_data_root = lubancode::tools::Utf8ToPath(*state_root) / "plugin-data";
+            }
+            auto [trust_store, trust_error] = lubancode::config::PluginTrustStore::Load(
+                lubancode::config::PluginTrustStore::DefaultStorePath());
+            if (trust_error.has_value()) {
+                std::fprintf(stderr,
+                             "[app-server] 插件信任账读取失败,点名插件将按未信任拒: %s\n",
+                             trust_error->c_str());
+            }
+            plugin_trust =
+                std::make_shared<const lubancode::config::PluginTrustStore>(std::move(trust_store));
             auto plan_result = lubancode::app_server::ResolveHarnessAgentPlan(
                 *harness, std::move(sources), options.session_wire, options.cwd);
             if (!plan_result.plan.has_value()) {
@@ -566,7 +589,8 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             agent_plan =
                 std::make_shared<const lubancode::app_server::HarnessAgentPlan>(std::move(*plan_result.plan));
         }
-        options.assembly_factory = [config_ptr, harness, planned_steps, agent_plan, skills_root]() {
+        options.assembly_factory = [config_ptr, harness, planned_steps, agent_plan, skills_root,
+                                    plugins_root, plugin_data_root, plugin_trust]() {
             lubancode::app_server::SessionAssemblyRequest request;
             request.config = config_ptr;
             request.harness = harness ? &*harness : nullptr;
@@ -578,6 +602,9 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             request.max_steps_per_turn = planned_steps;
             request.agent_plan = agent_plan;
             request.skills_root = skills_root;
+            request.plugins_root = plugins_root;
+            request.plugin_data_root = plugin_data_root;
+            request.plugin_trust = plugin_trust.get();
             return lubancode::app_server::AssembleSession(std::move(request));
         };
     }
