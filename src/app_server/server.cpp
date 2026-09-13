@@ -1001,7 +1001,7 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
                 if (error_code == "operation_conflict") {
                     return MakeError(request.id, kErrInvalidParams,
                                      "turn/start: 同 clientOperationId 异载荷",
-                                     nlohmann::json{{"reason", "operation_conflict"}});
+                                     nlohmann::json{{"code", "operation_conflict"}});
                 }
                 return MakeError(request.id, kErrInvalidParams, "turn/start 失败: " + error_code);
             }
@@ -1033,7 +1033,7 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             if (!error_code.empty()) {
                 return MakeError(request.id, kErrInvalidParams,
                                  "operation/read 失败: " + error_code,
-                                 nlohmann::json{{"reason", error_code}});
+                                 nlohmann::json{{"code", error_code}});
             }
             return MakeResult(request.id, result);
         });
