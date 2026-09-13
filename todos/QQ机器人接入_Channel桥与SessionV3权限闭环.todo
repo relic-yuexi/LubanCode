@@ -3,7 +3,7 @@
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64（CI 结论随 PR）；Q1 起的批次仍待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落本批 PR（见 §八 Q1 记账），配对入口与进程外壳拆 Q1b；Q2 起仍待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -73,8 +73,8 @@ channels/qqbot/
 - [x] 新增运行时 credential resolver：按现有来源优先级处理；高优先级来源存在却无效时明报，不静默降级。诊断只报来源与状态。（Q0 落 `src/channel/credentials.hpp/cpp`：优先级 secret_file > secret_env > inline；稳定码清单见头文件；`DescribeCredentialSource` 同步同口径。测试 `tests/unit/channel/test_channel_credentials.cpp`——优先级/降级拒绝/稳定码逐项。PR #64）
 - [x] 明确绝对路径解析、符号链接/重解析点、文件归属和 Windows DACL/POSIX 权限检查。账号 ID、渠道 ID 也须验证，不能拼出状态根外路径。（Q0 落 `ResolveChannelCredential`：绝对路径 + `weakly_canonical` + 归属/权限检查（POSIX mode 位、Windows owner SID + DACL 逐 ACE 白名单）；`IsValidChannelId/IsValidChannelAccountId` 守门，`ChannelManager::AddAccount` 拒非法 id。测试同上册 + `test_channel_manager.cpp` "非法 channel/account id"。Windows DACL 拒收案在 credentials 册内联；真实跨用户场景 CI 单账户 runner 覆盖不到，写"未验"。）
 - [x] 密钥不进入 argv、模型输入、会话、trace、错误或普通日志。（Q0 落宿主侧：错误文案结构上只装稳定码/路径，`RedactSecret` 防御性脱敏，`ResolvedChannelCredential` 无流出口；测试"泄露禁令"案。交付通道措辞传输无关——凭据只进入获准的渠道执行载体（进程内直连则不出宿主进程；受管子进程则走不落日志的专用管道），实装归 Q1；`SidecarEnvAllowlist` 已定形环境白名单合同（定案子进程才消费），规矩写进 configuration.md §4。）
-- [ ] 适配器经不落日志的专用启动管道接收密钥；与固定 Bridge 握手字段分开，或先正式升级协议，不能悄悄加未知字段。（Q1：transport 三选一定案后落——进程内直连无此件；受管子进程按 configuration.md §4 的中性口径实装。）
-- [ ] 子进程只继承必要环境；不把宿主模型 API key、其他 QQ 账号凭据交给适配器。SDK 默认日志也需接脱敏 logger。（Q0 落 `SidecarEnvAllowlist()` 白名单合同与测试；定案进程内直连则不消费此表，定案子进程则 spawn 环境裁剪与 SDK 脱敏 logger 归 Q1。）
+- [x] 适配器经不落日志的专用启动管道接收密钥；与固定 Bridge 握手字段分开，或先正式升级协议，不能悄悄加未知字段。（Q1 定案进程内直连——**无此件**：凭据不出宿主进程，无启动管道；见 §十五 定案与 configuration.md §4 已同步的定案措辞。）
+- [x] 子进程只继承必要环境；不把宿主模型 API key、其他 QQ 账号凭据交给适配器。SDK 默认日志也需接脱敏 logger。（Q1 定案进程内直连——**不消费 `SidecarEnvAllowlist`**：无子进程无环境继承，无 SDK 日志面；该表白名单合同保留给未来受管子进程渠道。）
 - [x] 暂不生成 `credentials.json.enc`。（Q0 未生成、文档明写"文件名带 enc 不代表加密"；OS 密钥库/DPAPI 后置。）
 
 同一 OS 账号的文件 ACL 不能挡住该账号内拥有任意 shell 的 Agent。首版须限制工具能力并拦凭据路径；要承诺强隔离，另接系统沙箱/隔离账号，不能靠隐藏路径或提示词。
@@ -84,9 +84,9 @@ channels/qqbot/
 ### 4.1 谁能进门
 
 - [x] QQ 首次配置模板明确 `dm_policy=pairing`、`group_policy=disabled`、`allow_bots=false`、`reply.mode=final`。不修改所有渠道默认值来迁就 QQ。（Q0 落 `MakeQqTemplateAccount()`（channel_config.cpp），configuration.md §7 有 JSON 样例；测试 `test_channel_config.cpp` "QQ 模板" + `test_channel_router.cpp` "QQ 模板路由出来"。PR #64）
-- [ ] 未批准用户只收到宿主生成的配对提示，不进模型。代码已有 PendingPairing 裁决，但当前 manager 只标 rejected；须补限频的配对提示发送。（Q1 批次；Q0 钉住"未批准零模型调用"：router PendingPairing 不建 session，e2e `test_channel_phase3_e2e.cpp` "准入与 pairing" 断言模型零调用。）
-- [ ] 本地批准复用 PairingStore。补 Gateway 控制入口，让另一个终端能向持锁 Gateway 提交 approve/reject；普通交互进程不能直接拿一只空 manager 冒充批准成功。（不在 Q0 批次清单。）
-- [ ] 配对码须一次性、有期限，批准后原消息不自动执行；用户重新发指令。不能把“第一个给机器人发话的人”自动设成 owner。（不在 Q0 批次清单。）
+- [ ] 未批准用户只收到宿主生成的配对提示，不进模型。代码已有 PendingPairing 裁决，但当前 manager 只标 rejected；须补限频的配对提示发送。（**Q1b**（规模阀门从 Q1 拆出）：Q1 已落协议核心与装配面，提示发送挂 manager PendingPairing 分支出站，单独立批。Q0 钉住"未批准零模型调用"：router PendingPairing 不建 session，e2e `test_channel_phase3_e2e.cpp` "准入与 pairing" 断言模型零调用。）
+- [ ] 本地批准复用 PairingStore。补 Gateway 控制入口，让另一个终端能向持锁 Gateway 提交 approve/reject；普通交互进程不能直接拿一只空 manager 冒充批准成功。（**Q1b**，同上拆出。）
+- [ ] 配对码须一次性、有期限，批准后原消息不自动执行；用户重新发指令。不能把“第一个给机器人发话的人”自动设成 owner。（**Q1b**，同上拆出。Q0 已钉住批准账不进 allow_from、"配对不升 owner"两案。）
 - [x] 配对身份与 owner 分开。owner/私有记忆继续要求本机配置明确指定，不采信 SDK 上报的 is_owner。（Q0 测试钉住：`test_channel_router.cpp` "配对不升 owner"（批准账不进 allow_from）与 "provenance 不信 sidecar 的 is_owner" 既有案。）
 - [x] 远端事件中的账号身份取实际连接上下文；宿主复核 channel/account。拒绝跨账号伪造；不要从正文提取 sender。（Q0 落 `ChannelManager::OnInboundLocked` 头一道身份复核——不符按 `invalid_frame` 进 Degraded，不 ingest 不 ack；sender 只取事件信封。测试 `test_channel_manager.cpp` "跨账号伪造" + router 册 "不从正文提 sender"。）
 
@@ -127,13 +127,12 @@ channels/qqbot/
 | `channel.send` | 取 direct OpenID、冻结正文、reply_to_message_id，调用 `POST /v2/users/{openid}/messages` |
 | `channel.stop` | 停收、保留未 ACK spool、收连接与进程；超时杀进程树 |
 
-- [ ] 新增 `src/runtime/channel_bridge_process.*`，实现 ChannelBridgeTransport。复用 [ChildProcess](../src/platform/process.hpp) 的管道、退出和进程树能力；不要套 [短命工具进程](../src/runtime/plugin_process.hpp) 的“写一次就关 stdin”流程。
-- [ ] 复用四字节大端长度 + JSON 帧，stdout 只协议，stderr 有界排水。慢模型不能阻塞 QQ 心跳、Bridge 读循环与收信落盘。
-- [ ] 按现有 manifest/握手能力交集声明；首版只宣称 websocket/direct/text/send/credentials，不借 SDK 全功能表虚报媒体或 streaming 已接通。
-- [ ] 实现统一激活决策：Gateway 模式、包信任、双层 enabled、凭据可读、账号锁齐才 spawn。普通 CLI/one-shot/App Server 零渠道进程、零监听。（Q0 已落决策函数 `src/channel/activation.hpp/cpp`：五闸 + 决策码冻结表逐枚，测试 `tests/unit/channel/test_channel_activation.cpp`（CLI/one-shot/AppServer 三形态 NotGatewayMode）。真 spawn 侧接线与 Package trust 快照的装配归 Q1——本批无人调用该函数，"零渠道进程零监听"现状成立是因为装配本就未接，写"未验"到真装配。注：若 Q1 定案 C++ 直连、无渠道包，"包信任"闸退化为"渠道实现内置受信"（装配侧恒信任），不另造假包概念。）
-- [ ] Package 安装/构建按实际 runtime 分发：原生适配器随平台编译，无 Node；若选 Node/SDK 备选，则只给 QQ 包安装依赖，普通 LubanCode 不依赖 Node。
-- [ ] Gateway 遍历已安装渠道与启用账号，通过统一激活检查后逐一装配，不硬编码 qqbot/main。用两类假适配器验账号凭据隔离、会话隔离、资源公平与单账号故障收尾；损坏共用耐久账仍须停泵，不伪称平台之间绝无影响。
-- [ ] sidecar spool、SDK session/resume 状态与宿主 ingress 各归各账。SDK 不提供足够 spool 钩子时，补适配层持久化，不能把 SDK 收到回调当作已耐久接纳。
+- [x] 实现统一激活决策：Gateway 模式、包信任、双层 enabled、凭据可读、账号锁齐才装配。普通 CLI/one-shot/App Server 零渠道进程、零监听。（Q0 落决策函数 `src/channel/activation.hpp/cpp`；**Q1 接上真实调用方**：`src/app/channel_gateway_wiring.*` 的 `ChannelGatewayWiring::Create` 在 `gateway run` 装配段对每只启用账号跑该函数——trust 快照按定案恒"内置受信"，凭据走 Q0 resolver，锁权威在 `ChannelManager::AddAccount`；skipped 账号带稳定码打给 stderr，Gateway 照常起。cli_app.cpp RunGateway 段挂 `CompositeGatewayPump`（automation 主泵 + 渠道泵，不动 engine 的 GatewayWorkPump 冻结面）。测试 `tests/unit/channelqq/test_qq_wiring.cpp`：零渠道/分支裁决/五闸全过真装配三案。）
+- [x] 按现有 manifest/握手能力交集声明；首版只宣称 websocket/direct/text/send/credentials，不借 SDK 全功能表虚报媒体或 streaming 已接通。（Q1 定案进程内直连——无渠道包/manifest 文件，能力声明内置：`QqBotCapabilities()` 只报 `websocket/direct/send/credentials`，media 显式 null、streaming 显式 false；测试 `test_qq_adapter.cpp` "initialize 握手帧"案逐字段断言。）
+- [x] Package 安装/构建按实际 runtime 分发：原生适配器随平台编译，无 Node。（Q1 定案：`src/channel/qq/` 编进 `lubancode_engine`，mbedTLS FetchContent 静态链，零外部运行时；安装要求写进 channels/README §6。）
+- [ ] ~~新增 `src/runtime/channel_bridge_process.*`，实现 ChannelBridgeTransport（子进程）~~（Q1 定案进程内直连：**不落子进程 transport**。`QqBotAdapter` 直接实现 `ChannelBridgeTransport` 字节面（进程内对象调用替代子进程 stdio），manager/ingress/pairing/路由零改动。stdio 帧、stderr 排水、进程树收尾三面随定案消失；Bridge 四字节帧协议照旧复用（`channel/frame.hpp`），粘帧/半帧在 `ws_frame` 层与 Bridge 帧层各有测试。）
+- [x] sidecar spool、session/resume 状态与宿主 ingress 各归各账。（Q1 落 `src/channel/qq/qq_spool.*`：先落 sidecar spool 再上报、宿主 `inbound.ack` 后清理、重启 `ListPending` 全量重投（宿主 ingress 去重键兜底）；gateway session_id/seq 记账在 `qq_gateway`（宿主 ingress 不混账）。测试 `test_qq_spool.cpp` + `test_qq_adapter.cpp` "spool 重启重投"/"C2C 事件 spool 先落再报;ACK 后清理"案。）
+- [ ] Gateway 遍历已安装渠道与启用账号，通过统一激活检查后逐一装配，不硬编码 qqbot/main。用两类假适配器验账号凭据隔离、会话隔离、资源公平与单账号故障收尾；损坏共用耐久账仍须停泵，不伪称平台之间绝无影响。（Q1：装配路径已落（`ChannelGatewayWiring` 遍历 channels 段，非 qqbot 渠道如实记 skipped 不起线程）；多渠道并发公平调度与故障收尾验收随 Q2 的 work pump 批次。）
 
 ## 六、接进 Session V3，保住多轮与恢复
 
@@ -167,8 +166,10 @@ channels/qqbot/
 
 ### Q1：真实进程与平台协议桥
 
-- [ ] 新增 QQ 包、安装挂载、stdio transport；真实适配子进程 fixture 测握手、半帧/粘帧、超限、stderr 堵塞、坏版本、停止和崩溃收尾。
-- [ ] mock HTTP/事件服务测 C2C 映射、spool 重启重投、ACK 清理、稳定发送载荷；若用 SDK，再补 SDK 适配测试。此处不是 QQ 联调。
+- [x] ~~新增 QQ 包、安装挂载、stdio transport；真实适配子进程 fixture~~ → **按 §十五 定案落进程内适配器装配**（原生 C++ 直连，无 Node、无子进程、无渠道包；Bridge 隔离语义按"保持一致的部分"执行：manifest 能力声明内置、Bridge 四字节帧协议与宿主权限/任务/会话/outbox 零改动）。握手/半帧/粘帧/超限/坏版本/停止与崩溃收尾逐项测试：`src/channel/qq/`（ws_frame/qq_socket/qq_tls/qq_ws_client/qq_proto/qq_spool/qq_auth/qq_messages/qq_gateway/qq_adapter）；测试册 `tests/unit/channelqq/test_qq_ws_frame.cpp`（半帧/粘帧/分片/超限/方向性 mask/RSV/控制帧）、`test_qq_ws_client.cpp`（真 socket 握手/SendText/ping 自动回 pong/close 传播/TLS 自签两路）、`test_qq_adapter.cpp`（Bridge initialize/start/stop 握手、坏 protocol_version 明败、manager 状态机推到 Running、stop 收线程）。"stderr 堵塞"案随子进程形态一并消失（无 stderr 面）。
+- [x] mock HTTP/事件服务测 C2C 映射、spool 重启重投、ACK 清理、稳定发送载荷；未用 SDK（定案直连），无 SDK 适配测试。此处不是 QQ 联调。（测试册 `tests/unit/channelqq/`：`test_qq_proto.cpp`——官方 C2C 事件三例固化为 fixture + intents/opcode 表 + 发送载荷/响应 + 错误码全表分型；`test_qq_spool.cpp`——落盘/重投/ACK 清理/坏账跳过/路径注入拒绝；`test_qq_auth_messages.cpp`——token 单飞/到期/Invalidate/错误分型、msg_seq 稳定（同 delivery 重试同序号、同 msg_id 不同回复递增）、Deduped/过期/401 刷 token 重试；`test_qq_gateway.cpp`——假传输状态机：Hello→Identify→READY→Dispatch seq 记账→心跳饥饿断线、Resume 携带 session_id+seq、Invalid Session 不可恢复清 session 重 Identify、Reconnect 保 session、退避阶梯。mock 面：`tests/support/mock_ws_server.cpp`（回环明文/mbedTLS 自签 WS 服务端）+ 册内 ScriptedHttp/ScriptGatewayTransport。）
+- **Q1 遗留（Q1b，规模阀门拆出，如实记账）**：配对提示限频发送（§4.1 第 2 行——manager PendingPairing 分支现状只落 rejected，提示发送未接）；Gateway 批准控制入口（§4.1 第 3/4 行，配对码一次性/期限/批准后不自动执行）；`gateway status` 的渠道连接/投递错误栏（§七 末行）。这三件不动协议核心，单独立批。
+- **未验边界（如实记）**：Ready/Resume 的 d 字段形状官方 payload 页未逐字列全，按 opcode 表语义与官方 SDK 交叉核，真平台核验归 Q3；TLS 信任锚生产路只落了平台 PEM 路径探测（`DetectSystemCaPemPath`），真锚对真网关的验证归 Q3 联调；`/gateway` 接口的 URL 获取（GET 返回 `{"url":...}`）与 Access Token 接口字段（`appId/clientSecret`→`access_token/expires_in`）按官方 SDK 家族（botgo/botpy）交叉核，真账号行为归 Q3。心跳节拍按官方表"携带最新 s"实现。
 
 ### Q2：V3 与 outbox 总装
 
@@ -373,8 +374,8 @@ Q7 验收：手机/桌面分别查填入与发送行为；未配对用户虽见�
 
 不用 SDK 不等于不用成熟 HTTP/TLS/WebSocket 库。当前 [HTTP 传输底座](../src/net/http_transport.hpp) 是完整响应的 GET/POST 路径，可供鉴权与小 JSON 请求复用评估；文件流、PUT/DELETE 和 WebSocket 不能假定已支持。此轮在 platform/net 与构建依赖中未找到现成 QQ WebSocket 客户端，实施前需选定传输库并验证平台构建选项。
 
-- [ ] 原生适配器分 auth、gateway-events、messages、media-upload、interactions、menu-panel、spool 模块。令牌刷新单飞、到期重取、错误码分型、限速、心跳和重连状态显式测试，不依赖 SDK 隐式行为。
-- [ ] WebSocket 需实现 Identify/Intents、Heartbeat/ACK、seq/session_id、Resume/失效重建、断线退避和取消。当前账号是否获准使用该接收方式须实测；若选 Webhook，另补公网入口、raw-body 验签与重放校验，不因绕过 SDK 自动获得平台权限。
-- [ ] HTTP 边界增加受控 PUT/DELETE、流式文件读写、大小帽和取消；避免为了大文件把整件读入内存。复用 libcurl 等底座时不改现有 Provider 请求路径，单独跑原有 HTTP/Provider 回归。
-- [ ] 将官方 API 示例固化为协议 fixture；第十、十一节记录的 SDK/文档冲突保留为测试案例。SDK 即使不进入依赖，也可用于交叉检查；测试通过不等于真实平台联调通过。
-- [ ] README 按最终 runtime 写安装要求，原生实现不得继续要求 Node；飞书日后可独立选语言与 SDK，宿主不绑定某一家平台实现方式。
+- [x] 原生适配器分 auth、gateway-events、messages、spool 模块（media-upload/interactions/menu-panel 分归 Q4/Q6/Q7 批次）。令牌刷新单飞、到期重取、错误码分型、限速、心跳和重连状态显式测试，不依赖 SDK 隐式行为。（Q1 落 `src/channel/qq/`：qq_auth（单飞=锁内刷新后来者等结果，到期=expires_in-300s 余量，`test_qq_auth_messages.cpp` "未到期不重取;到期现刷;Invalidate 强制现刷"）、qq_gateway（状态机 state_name 显式观测：idle/connecting/authenticating/running/backoff/stopped；心跳锚定绝对时刻不受事件流重置；退避阶梯 1s..60s+10% jitter，稳定归零）、qq_messages（限频/5xx DeferredRetry 退避三次、Deduped 收账、401 刷 token 重试一次、稳定 msg_seq）——显式测试见 `test_qq_auth_messages.cpp`/`test_qq_gateway.cpp`。）
+- [x] WebSocket 实现 Identify/Intents、Heartbeat/ACK、seq/session_id、Resume/失效重建、断线退避和取消（Q1：`qq_gateway` + `ws_frame`/`qq_ws_client`。Resume 携带 session_id+seq；op9 d=false 清 session 重 Identify；op7 保 session 重连；心跳连续 missed_ack_limit 次 ACK 断线；`CancelInFlight` 从停止方打断在途连接。当前账号是否获准 websocket 接收——归 Q3 真账号实测；Webhook 路线未选，不涉）。测试 `test_qq_gateway.cpp` 六案 + `test_qq_ws_frame.cpp`/`test_qq_ws_client.cpp` 帧级全案。
+- [ ] HTTP 边界增加受控 PUT/DELETE、流式文件读写、大小帽和取消；避免为了大文件把整件读入内存。复用 libcurl 等底座时不改现有 Provider 请求路径，单独跑原有 HTTP/Provider 回归。（Q1 只需 GET/POST（token、gateway、v2 发送），复用 `src/net/http_transport` 现有合同面零改动、零新回归面；Provider 请求路径未动。受控 PUT/DELETE 与流式上传属 Q4 媒体批次（upload_prepare/分片 PUT），届时再扩底盘并跑原回归。）
+- [x] 将官方 API 示例固化为协议 fixture；第十、十一节记录的 SDK/文档冲突保留为测试案例。SDK 即使不进入依赖，也可用于交叉检查；测试通过不等于真实平台联调通过。（Q1 fixture：官方 payload/opcode/intents 表、C2C 事件三例（文本/ARK 卡片/引用）、发送请求响应两例、错误码表逐枚（`test_qq_proto.cpp`）。文档与 SDK 冲突案（§十 富媒体分片起点等）属 Q4 范围的媒体路径，届时落测试；本批 C2C/发送/网关面无已知冲突。）
+- [x] README 按最终 runtime 写安装要求，原生实现不得继续要求 Node。（channels/README §6 新增"QQ 安装要求"：零额外安装，适配器随宿主编译，mbedTLS 静态链，用户只配 config.json；飞书等后续渠道独立选型，宿主不绑定。）

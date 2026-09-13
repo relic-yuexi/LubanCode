@@ -168,6 +168,8 @@ Package 已安装且已信任
 
 目标形态是 `lubancode gateway`：常驻入口，持 ChannelManager、Headless Session registry、SessionWorkScheduler、Agent/Package/Tool catalogs，可选同进程再挂 App Server。过渡形态可在现有交互进程里挂 ChannelManager 做试跑壳，但须用显式测试参数（如 `--dev-host-channels`），验收完成后删掉，不与 Gateway 真值长期并存。
 
+**QQ 安装要求（Q1 定案后的最终 runtime）**：零额外安装——QQ 适配器是原生 C++，随宿主 `lubancode` 可执行一起编译（`src/channel/qq/`，进程内直连），不要求 Node、npm、渠道包安装或任何外部运行时。TLS 底座 mbedTLS 静态链进可执行（构建期 FetchContent，用户机无感知）。用户要做的只有：在全局 `~/.lubancode/config.json` 配 `channels.qqbot`（AppID + 密钥来源），再 `lubancode gateway run`。
+
 ## 7. 交付语义速览
 
 ```text

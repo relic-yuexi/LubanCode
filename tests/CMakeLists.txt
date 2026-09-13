@@ -64,6 +64,9 @@ add_executable(lubancode_tests
   support/api_fixture.cpp
   # Lua 受控 HTTP 单·阶段 2:本机回环假 HTTP 服务(§13.3 假服务矩阵)。
   support/fake_http_server.cpp
+  # QQ 机器人接入单 Q1:本机回环 mock WebSocket 服务端(明文与 mbedTLS
+  # 自签两路),供 src/channel/qq 的 WS 客户端/网关/适配器测试用。
+  support/mock_ws_server.cpp
   # 工业化多协议接入单 P1:交互式子进程夹具(真进程 stdio 协议冒烟——
   # 发一行、等事件、再发一行,保住写端不被 EOF 提前收线)。
   support/interactive_process.cpp
@@ -73,6 +76,10 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+# QQ 机器人接入单 Q1:mock WS/TLS 服务端夹具直接用 mbedTLS(服务端握手与
+# 自签证书生成),engine 对 mbedtls 是 PRIVATE 链,这里显式补上(include
+# 路径随 target 的 PUBLIC usage 递)。
+target_link_libraries(lubancode_tests PRIVATE mbedtls)
 # 批二余款:测试共用的回合事件录音器(Callbacks 显示回调退役,观察点
 # 改吃事件流)住 support/。
 target_include_directories(lubancode_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
