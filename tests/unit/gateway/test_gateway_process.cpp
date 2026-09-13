@@ -59,6 +59,7 @@ GatewayLockRecord SelfRecord(const std::string& boot_id) {
     record.pid = lubancode::platform::CurrentProcessId();
     record.start_token = lubancode::trajectory::CurrentProcessStartToken();
     record.boot_id = boot_id;
+    record.owner_epoch = boot_id;  // V0:一 boot 一 epoch(锁内 fencing 代号)
     record.acquired_at_ms = lubancode::platform::WallClockNowMs();
     return record;
 }
@@ -518,7 +519,7 @@ TEST_CASE("CLI:gateway 子命令解析与用法错误") {
     {
         const auto parsed = ParseCliArgs({"lubancode", "gateway", "install"});
         CHECK(parsed.action == lubancode::app::CliAction::BadGateway);
-        CHECK(parsed.error_text.find("G1 未实现") != std::string::npos);
+        CHECK(parsed.error_text.find("尚未实现") != std::string::npos);
     }
     {
         const auto parsed = ParseCliArgs({"lubancode", "gateway", "run", "--json"});

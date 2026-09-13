@@ -135,6 +135,18 @@ add_dependencies(lubancode_tests fake_ripgrep)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_FAKE_RG_EXE="$<TARGET_FILE:fake_ripgrep>")
 
+# ---- 常驻总装 V0:Gateway 锁双进程竞争靶子 --------------------------------
+# gateway_lock_racer:真起两只并发抢同一把 gateway.lock 的可执行,跑生产
+# 同一份 GatewayLock::TryAcquire。tests/unit/gateway 的竞争册经
+# platform::RunProcess 起它,按事件流时间戳对账"至多一只持锁"——不拿
+# 同进程顺序单测冒充双进程互斥(总装单 §三/§十一"两个 Gateway 同时启动")。
+add_executable(gateway_lock_racer support/gateway_lock_racer.cpp)
+target_link_libraries(gateway_lock_racer PRIVATE lubancode_core)
+target_compile_features(gateway_lock_racer PRIVATE cxx_std_23)
+add_dependencies(lubancode_tests gateway_lock_racer)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_GATEWAY_RACER_EXE="$<TARGET_FILE:gateway_lock_racer>")
+
 # 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
 #    目录(scripts/fetch_ripgrep.py 的产物,如 build/rg-stage/libexec)。
 #    configure 时校一遍版本(与 third_party/ripgrep/manifest.json 对账),

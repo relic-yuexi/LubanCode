@@ -6,6 +6,13 @@
 #include <fstream>
 #include <thread>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <share.h>
+#endif
+
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "platform/wall_clock.hpp"
@@ -47,19 +54,10 @@ std::optional<GatewayLockRecord> ReadLockFile(const std::filesystem::path& lock_
     return record;
 }
 
-// 与 channel::AccountLock 同款取舍:锁的对手是本机另一只实例的启动竞态
-// (毫秒级),不是断电一致性;半写坏锁走 RefusedBrokenLock 留给人看。
-bool WriteLockFile(const std::filesystem::path& lock_file, const GatewayLockRecord& record) {
-    std::error_code ec;
-    std::filesystem::create_directories(lock_file.parent_path(), ec);
-    if (ec && !lock_file.parent_path().empty()) return false;
-    std::ofstream stream(lock_file, std::ios::binary | std::ios::trunc);
-    if (!stream) return false;
-    const std::string text = record.ToJson().dump();
-    stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-    stream.flush();
-    return static_cast<bool>(stream);
-}
+// 取锁的写侧只走"原子创建 + 身份核"(V0):create-new(wbx)由 OS 保证
+// 至多一只实例成功,双进程互斥不依赖先后顺序;半写坏锁走
+// RefusedBrokenLock 留给人看。锁的对手是本机另一只实例的启动竞态
+// (毫秒级),不是断电一致性。
 
 // ---- 信号面:handler 里只置旗,一切落账在主循环里做 ----
 volatile std::sig_atomic_t g_gateway_signal_stop = 0;
@@ -87,6 +85,7 @@ nlohmann::json GatewayLockRecord::ToJson() const {
     json["pid"] = pid;
     json["start_token"] = start_token;
     json["boot_id"] = boot_id;
+    json["owner_epoch"] = owner_epoch;
     json["acquired_at_ms"] = acquired_at_ms;
     return json;
 }
@@ -98,7 +97,9 @@ std::optional<GatewayLockRecord> GatewayLockRecord::FromJsonStrict(const nlohman
         return std::optional<GatewayLockRecord>{};
     };
     if (!json.is_object()) return fail("锁账必须是 JSON object");
-    const std::array<const char*, 4> kRequired = {"pid", "start_token", "boot_id",
+    // schema v2(V0):owner_epoch 必填——缺它的旧格式锁读不懂,按
+    // RefusedBrokenLock 留人工,不猜。
+    const std::array<const char*, 5> kRequired = {"pid", "start_token", "boot_id", "owner_epoch",
                                                   "acquired_at_ms"};
     for (const char* key : kRequired) {
         if (!json.contains(key)) return fail(std::string("缺必填字段 ") + key);
@@ -116,15 +117,18 @@ std::optional<GatewayLockRecord> GatewayLockRecord::FromJsonStrict(const nlohman
     if (!json["pid"].is_number_integer() || !json["acquired_at_ms"].is_number_integer()) {
         return fail("pid/acquired_at_ms 必须是整数");
     }
-    if (!json["start_token"].is_string() || !json["boot_id"].is_string()) {
-        return fail("start_token/boot_id 必须是字符串");
+    if (!json["start_token"].is_string() || !json["boot_id"].is_string() ||
+        !json["owner_epoch"].is_string()) {
+        return fail("start_token/boot_id/owner_epoch 必须是字符串");
     }
     GatewayLockRecord record;
     record.pid = static_cast<unsigned long>(json["pid"].get<std::int64_t>());
     record.start_token = json["start_token"].get<std::string>();
     record.boot_id = json["boot_id"].get<std::string>();
+    record.owner_epoch = json["owner_epoch"].get<std::string>();
     record.acquired_at_ms = json["acquired_at_ms"].get<std::int64_t>();
     if (record.pid == 0) return fail("pid 不能是 0");
+    if (record.owner_epoch.empty()) return fail("owner_epoch 不能为空");
     return record;
 }
 
@@ -139,13 +143,59 @@ GatewayLock::AcquireResult GatewayLock::TryAcquire(const std::filesystem::path& 
     }
     out->Release();
 
-    std::string read_error;
-    const auto existing = ReadLockFile(lock_file, &read_error);
-    if (existing.has_value()) {
-        const GatewayLockRecord& holder = *existing;
-        const bool same_instance = holder.pid == self.pid && holder.start_token == self.start_token &&
-                                   holder.boot_id == self.boot_id;
-        if (!same_instance) {
+    // 陈旧锁清掉后有界重试:并发下别人可能先占,撞满即报错,不无限绕。
+    // 每一轮的头一步都是 create-new 原子占位——双进程同时走到这里,OS
+    // 保证至多一只成功,互斥不依赖读写的先后顺序(V0 锁裁决)。
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        std::error_code ec;
+        std::filesystem::create_directories(lock_file.parent_path(), ec);
+        if (ec && !lock_file.parent_path().empty()) {
+            result.status = AcquireResult::Status::IoError;
+            result.detail = "建锁目录 " + platform::PathToUtf8(lock_file.parent_path()) +
+                            " 失败: " + ec.message();
+            return result;
+        }
+        std::FILE* file = nullptr;
+#ifdef _WIN32
+        // _SH_DENYNO:锁文件本体仍可被只读探测(status/stop)并行打开。
+        file = _wfsopen(lock_file.c_str(), L"wbx", _SH_DENYNO);
+#else
+        file = std::fopen(lock_file.c_str(), "wbx");
+#endif
+        if (file != nullptr) {
+            const std::string text = self.ToJson().dump();
+            const bool wrote = std::fwrite(text.data(), 1, text.size(), file) == text.size() &&
+                               std::fflush(file) == 0;
+            if (!wrote) {
+                std::fclose(file);
+                std::error_code remove_ec;
+                std::filesystem::remove(lock_file, remove_ec);
+                result.status = AcquireResult::Status::IoError;
+                result.detail = "锁账写不进 " + platform::PathToUtf8(lock_file);
+                return result;
+            }
+            out->lock_file_ = lock_file;
+            out->file_ = file;
+            out->owner_epoch_ = self.owner_epoch;
+            result.status = AcquireResult::Status::Acquired;
+            return result;
+        }
+        // 占位失败(文件已存在):读账、核身份再定去留。
+        std::string read_error;
+        const auto existing = ReadLockFile(lock_file, &read_error);
+        if (existing.has_value()) {
+            const GatewayLockRecord& holder = *existing;
+            const bool same_instance = holder.pid == self.pid &&
+                                       holder.start_token == self.start_token &&
+                                       holder.boot_id == self.boot_id &&
+                                       holder.owner_epoch == self.owner_epoch;
+            if (same_instance) {
+                // 同实例重入(幂等续持):占位虽撞自己,身份全对即算持有。
+                out->lock_file_ = lock_file;
+                out->owner_epoch_ = self.owner_epoch;
+                result.status = AcquireResult::Status::Acquired;
+                return result;
+            }
             // 身份核与 trajectory session lock 同一把尺:活进程且 token 对
             // 上才拒绝;死透/PID 复用 = 陈旧,清掉重拿;探不到按活保守。
             const trajectory::SessionLockOwner owner{holder.pid, holder.start_token, 0};
@@ -156,34 +206,34 @@ GatewayLock::AcquireResult GatewayLock::TryAcquire(const std::filesystem::path& 
                                 " 持有本 profile 的锁(boot " + holder.boot_id + ")";
                 return result;
             }
-            std::error_code ec;
-            std::filesystem::remove(lock_file, ec);
-            if (ec) {
+            std::error_code remove_ec;
+            std::filesystem::remove(lock_file, remove_ec);
+            if (remove_ec) {
                 result.status = AcquireResult::Status::IoError;
                 result.detail = "清陈旧锁 " + platform::PathToUtf8(lock_file) + " 失败: " +
-                                ec.message();
+                                remove_ec.message();
                 return result;
             }
+            continue;  // 清掉了,回头再占
         }
-    } else if (!read_error.empty()) {
-        // 锁文件在但读不懂:不敢删,明报(看不懂就更不能删)。
-        result.status = AcquireResult::Status::RefusedBrokenLock;
-        result.detail = "gateway.lock_stale: " + read_error + "(锁文件: " +
-                        platform::PathToUtf8(lock_file) + ")";
-        return result;
+        if (!read_error.empty()) {
+            // 锁文件在但读不懂:不敢删,明报(看不懂就更不能删)。
+            result.status = AcquireResult::Status::RefusedBrokenLock;
+            result.detail = "gateway.lock_stale: " + read_error + "(锁文件: " +
+                            platform::PathToUtf8(lock_file) + ")";
+            return result;
+        }
+        // 读不到锁文件但占位又撞了:并发尾巴(别人创建后被清),重试。
     }
-
-    if (!WriteLockFile(lock_file, self)) {
-        result.status = AcquireResult::Status::IoError;
-        result.detail = "写锁文件 " + platform::PathToUtf8(lock_file) + " 失败";
-        return result;
-    }
-    out->lock_file_ = lock_file;
-    result.status = AcquireResult::Status::Acquired;
+    result.status = AcquireResult::Status::IoError;
+    result.detail = "取锁反复撞(陈旧锁清后仍占不到位): " + platform::PathToUtf8(lock_file);
     return result;
 }
 
-GatewayLock::GatewayLock(GatewayLock&& other) noexcept : lock_file_(std::move(other.lock_file_)) {
+GatewayLock::GatewayLock(GatewayLock&& other) noexcept
+    : lock_file_(std::move(other.lock_file_)), file_(other.file_),
+      owner_epoch_(std::move(other.owner_epoch_)) {
+    other.file_ = nullptr;
     other.lock_file_.clear();
 }
 
@@ -191,6 +241,9 @@ GatewayLock& GatewayLock::operator=(GatewayLock&& other) noexcept {
     if (this != &other) {
         Release();
         lock_file_ = std::move(other.lock_file_);
+        file_ = other.file_;
+        owner_epoch_ = std::move(other.owner_epoch_);
+        other.file_ = nullptr;
         other.lock_file_.clear();
     }
     return *this;
@@ -199,11 +252,17 @@ GatewayLock& GatewayLock::operator=(GatewayLock&& other) noexcept {
 GatewayLock::~GatewayLock() { Release(); }
 
 void GatewayLock::Release() {
-    if (lock_file_.empty()) return;
-    std::error_code ec;
-    std::filesystem::remove(lock_file_, ec);
-    // 删失败只剩日志可打;残留锁由下次 TryAcquire 走身份核收口。
-    lock_file_.clear();
+    if (file_ != nullptr) {
+        std::fclose(file_);
+        file_ = nullptr;
+    }
+    if (!lock_file_.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(lock_file_, ec);
+        // 删失败只剩日志可打;残留锁由下次 TryAcquire 走身份核收口。
+        lock_file_.clear();
+    }
+    owner_epoch_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +471,9 @@ GatewayProcess::StartResult GatewayProcess::Start() {
     self.pid = platform::CurrentProcessId();
     self.start_token = trajectory::CurrentProcessStartToken();
     self.boot_id = boot_id_;
+    // 一 boot 一 epoch(V0):锁内 owner_epoch 即本实例的 fencing 代号,
+    // 旧 epoch 的迟到提交核对它即拒。
+    self.owner_epoch = boot_id_;
     self.acquired_at_ms = options_.now_ms();
     const auto acquire = GatewayLock::TryAcquire(options_.paths.lock_file, self, &lock_);
     if (acquire.status == GatewayLock::AcquireResult::Status::RefusedAliveHolder) {

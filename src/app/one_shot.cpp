@@ -481,10 +481,18 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
                   << input_receipt.error_code << "\n";
         return 1;
     }
+    // 派发面(V0 受理底线):dispatched 事实落稳才算取出。单发场落不稳
+    // 即停(写盘失败不得当作消费成功);取空(理论不到,防御)退原问句。
+    const auto pop = oneshot_service.PopPendingInput();
+    if (pop.status == lubancode::runtime::SessionService::PendingPop::Status::WriteFailed) {
+        std::cerr << lubancode::cli::tr("error.prefix")
+                  << "oneshot 派发事实落不了盘: operation.append_failed\n";
+        return 1;
+    }
     const std::string submitted_question =
-        oneshot_service.PopPendingInput()
-            .value_or(lubancode::runtime::SessionService::QueuedInput{question, {}, input_receipt.operation_id})
-            .text;
+        pop.status == lubancode::runtime::SessionService::PendingPop::Status::Ok
+            ? pop.input.text
+            : question;
     // 批三:RunTurn 二十四参收成一只 TurnContext。
     lubancode::app::TurnContext turn;
     turn.loop = &loop;

@@ -233,6 +233,18 @@ enum class EventKindV3 {
     // 配置合成的能力判定及其依据的留档。纯合同+fixture,不接真探针;
     // unknown 默认不用 native_deferred 的闸门在读取侧 DecideAsyncModes。
     ToolCapabilityRecorded,
+
+    // Gateway 常驻总装 V0(总装单 §五/§六/§九):work↔turn 绑定事实与回复
+    // 选择提交。两者都是 statusless 事实行,合同与 fixture 先行、生产装配
+    // 归 V1(与 tool.job 族同规矩,schemaVersion 纯追加不改旧义)。
+    // gateway.work.bound:预留 turn 身份绑定 workId 的关联事实——恢复器
+    // 扫 V3 流凭 workId 反查原轮(§六"V3 已开轮,work 还没记 turnRef"
+    // 窗口),不另派新轮;ownerEpoch/attempt 辨新旧认领。
+    // reply.selection.committed:对外回复的选定事实(§九:引用最终正文
+    // artifact 与来源 message;原件先落稳、选择事实后提交,resume 后
+    // selectionId 不变,不重新散列投递身份)。
+    GatewayWorkBound,
+    ReplySelectionCommitted,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

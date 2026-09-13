@@ -1,6 +1,6 @@
 # G0 现状冻结审计与真实写盘图（2026-09-01 工作树）
 
-_本页是 G0 批次的审计账：逐项审既有件、画出当前真实写盘图（每本账的 writer 与 direct write call site）、列断口。开每一批前都须重新查源码；本页“已有”不等于已过真机常驻验收。_
+_本页是 G0 批次的审计账：逐项审既有件、画出当前真实写盘图（每本账的 writer 与 direct write call site）、列断口。开每一批前都须重新查源码；本页“已有”不等于已过真机常驻验收。2026-09-13 的 V0 复核补记见 §6；下文 §1-§5 是 2026-09-01 的历史快照，其中已被新版推翻的口径（旧存储路径、Loop 恢复、组件缺失判断）以 §6 与[新版总装计划](../../../todos/持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo)第三节为准。_
 
 ---
 
@@ -88,3 +88,14 @@ P0-2 起恒开一场 `TrajectorySessionLedger`（本类持有 Recorder 所有权
 
 - 渠道单《多渠道消息接入与常驻ChannelPlugin设计》阶段 1 勾选逐项核过：types/yaml parser/ComponentKind/frame/router/fake sidecar/错误码七项全有源码对应，勾选属实（阶段 2/3 亦实）。无需改勾；渠道单状态行已注记本页对账。
 - 本单《总装计划》§2“眼下真相”按本页第 2-4 节更新（channel 三行由“无”改“件已落库、无宿主”）。
+
+## 6. V0 复核补记（2026-09-13 工作树，静态核查未重跑构建）
+
+新版总装计划落笔时的源码复核（行号按当时快照，实施按符号复查）：
+
+- **SessionService 受理四病（V0 第三件事，已修）**：`src/runtime/session_service.cpp` 的 `OperationsFile::Append` 仅 ofstream flush 且调用处 `(void)` 吞返回值——受理账写失败仍回成功；正文只存 `pending_inputs_` 内存；启动只种去重表不重建 pending；来源去重只种直接上一场。V0 修复：账行走 `JournalWriter`（PowerLoss 档，broken 传播停受理）、正文落 `operations-inputs/` 原件（原子写 + fsync）、dispatched 先落稳再出队、resume 沿完整来源链种表并把未派发输入重落重排。
+- **GatewayLock 无 OS 排他（V0 第四件事，已修）**：`src/gateway/process.cpp` 的 `GatewayLock::TryAcquire` 先读后写，双进程互斥只靠顺序。V0 改 create-new（`wbx`）原子占位 + 身份核 + 有界重试，锁账加 owner_epoch；`src/channel/account_lock.cpp` 的 `AccountLock` 同病同修。`trajectory::SessionLock` 本就是 `wbx`，未动。
+- **PowerLoss 档已有（复用，不重造）**：`src/trajectory/journal.cpp` 的 `FlushFileDurable`（FlushFileBuffers/fsync）与 `platform/atomic_write.hpp` 的 `ProcessCrashDurability`（文件 fsync + 目录 fsync）。V0 把"关键领域提交用哪档、原件怎么留"定成规则（contracts.md §11.5），受理账/原件分别接上述原语。
+- **V3 schema 注册表**：V0 追加 `gateway.work.bound`、`reply.selection.committed`（statusless 事实行，合同+fixture 先行、生产装配归 V1）——与 tool.job 族同一演进规矩，schemaVersion 纯追加。
+- 写盘图增补：会话目录新增 `operations.jsonl`（受理账，schemaVersion 2）与 `operations-inputs/`（输入原件）；`gateway.lock` 内容加 owner_epoch 字段（旧 schema 锁文件读不懂，保守拒绝留人工）。
+- 未验边界：真拔电、真进程硬杀窗口、claim/开轮执行器（contracts.md §11.6）。
