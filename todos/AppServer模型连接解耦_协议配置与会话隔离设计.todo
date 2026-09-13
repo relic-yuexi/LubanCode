@@ -1,0 +1,201 @@
+# AppServer 模型连接解耦：协议配置、环境变量与会话隔离
+
+- 状态：设计待实现；下列接口、类型和错误码均为拟议合同。
+- 日期：2026-09-13。
+- 起因：客户端经协议驱动 LubanCode 时，也应能选模型、指定 API 地址、提供密钥。环境变量仍可启动服务，但不能代替会话配置。
+- 范围：Provider 连接、模型选择、凭据解析、backend 装配、配置查询、切换与恢复。
+- 接续：`AppServer接入SessionV3_统一入口与事件恢复设计.todo`、`LubanCore与CLI分离_核心库独立成宿主底座设计.todo`。复用统一 Session 服务，不在 AppServer 另建运行规则。
+- 证据：本单只核对当前源码，未跑模型请求；源码行号仅作定位，后续以符号为准。
+
+## 一、边界先定
+
+环境变量属于进程。客户端启动本机子进程，可以给它注入环境；连上已有服务或远程服务，客户端环境不会自动传过去。服务启动后，也不能靠客户端改环境来切换服务内的会话。
+
+运行链收成一条：
+
+```text
+环境变量 / 配置文件 / 协议输入
+  -> 中立配置解析器 + Provider 目录 + 凭据解析器
+  -> 会话模型配置
+  -> 本轮冻结快照
+  -> BackendFactory(snapshot)
+  -> Provider adapter -> 模型服务
+```
+
+- CLI、GUI、Web、Android 共用解析器与运行规则；壳只收输入、发命令、展示结果。
+- AppServer 协议与模型 API wire 分开。客户端协议不承担 Anthropic/OpenAI/Google 请求编码。
+- 环境变量保留为默认入口；协议显式配置可覆盖默认值，不修改进程环境，不暗写全局配置。
+- API key 可以通过专门接口传入；普通会话输入只引用 Provider，不每轮重复夹带密钥。
+- 连接凭据只供模型后端使用，不注入 prompt、工具结果或子进程环境。
+
+## 二、当前源码与缺口
+
+| 源码落点 | 当前事实 | 待办 |
+| --- | --- | --- |
+| `src/config/config.hpp:1`、`config.cpp:4076`，LoadFromEnv / MergeConfig | 已按字段合并专属环境变量、项目配置、全局配置；读取 LUBAN_* 和 LUBANCODE_* | 保留原默认规则；抽出无 IO 解析入口，接入协议覆盖层 |
+| `src/config/config.hpp:199`，ProviderConfig | 已有 wire、地址、鉴权、模型等连接材料 | 复用字段语义，拆开公开描述与秘密材料 |
+| `src/app/cli_app.cpp:405`，RunAppServerMode | 启动时接收 config_result；约 500 行 lambda 捕获它，调用 BuildBackend(config_result.config) | 工厂改接会话快照，不再固定使用启动配置 |
+| `src/app_server/server.hpp:117`，ServerOptions | session_wire、session_model 放在服务级选项 | 默认配置与会话实际配置分开，元数据从会话快照取 |
+| `src/app_server/server.hpp:169`，BackendFactory | 工厂无参 | 传入已解析快照，测试仍可注入假 backend |
+| `src/app_server/server.cpp`，HandleThreadStart / AcceptTurnStart / RunTurn | 会话创建已走 SessionService；回合内仍调用 backend_factory_() | 会话服务持有模型选择，输入接纳时冻结本轮配置 |
+| `src/app_server/schema.cpp:186`，CheckThreadStartParams | 当前只校验可选 cwd | 增加模型配置结构、版本和错误检查 |
+| `src/app_server/protocol.hpp:122` | model/list、config/read 仍留位 | 真接线后再声明能力 |
+
+源码变化频繁。实施前再查启动前置校验、BuildBackend、角色模型路由和后台子代理装配，不能只改协议 schema 就算接通。
+
+## 三、拆成三份对象
+
+### 3.1 ProviderConnection
+
+- `providerId`：宿主发行的引用；沿用已有 Provider 名时须有明确映射。
+- `revision`：连接配置版本，变更时递增。
+- `wire`、`baseUrl`：请求格式与地址；显式校验，不能凭模型名猜 wire。
+- `auth`：沿用现有 env / inline / none 语义。协议可以提交 inline 密钥，内部转换成凭据引用。
+- `extraHeaders`、`extraBody`：复用已有支持；鉴权头也按秘密处理。
+- `defaultModel`、Provider 级模型参数：供会话选值时回落。
+- `scope`：临时或明确持久化；默认临时。
+
+公开对象只回 `authMode`、`credentialConfigured` 等状态，不回原始密钥、密钥前缀或鉴权头。extraBody、URL 也不能整段盲回；查询采用可公开字段白名单，凭据不得塞进 URL。
+
+### 3.2 SessionModelSelection
+
+- `providerId`、`model`、`reasoningEffort`，以及已支持的窗口、输出上限覆盖项。
+- `configVersion`：会话配置版本；显式变更后递增。
+- 字段来源：协议、Provider 默认、环境变量、项目配置、全局配置、目录默认。
+- 显式选择 Provider 后，地址、wire、鉴权和私有参数必须来自同一套连接。不能换了地址还沿用另一家密钥。
+
+### 3.3 ResolvedModelSnapshot
+
+- 冻结 providerId/revision、model、wire、参数、会话 configVersion 与凭据版本引用。
+- backend 只吃这份已校验快照；秘密内容只在运行内存中解析使用。
+- 主模型、compact/标题等角色路由共享解析规则，但各请求分别记录实际快照。
+- 子代理按已有继承合同冻结父配置；后台任务不得在执行途中读取可变全局配置。
+
+## 四、解析顺序与空值
+
+先选连接，再选模型参数，最后校验整套结果。
+
+1. 协议未指定 Provider：使用服务默认连接。默认配置沿用当前规则：LUBAN_* > 对应 LUBANCODE_* > 项目配置 > 全局配置 > 内置默认。
+2. 项目配置按 thread 的 cwd 读取；不能拿 server 进程 cwd 代替。环境快照来自服务端进程。
+3. 协议显式指定 providerId：从目标 Provider 取完整连接；启动时顶层地址、密钥和 wire 不再逐字段覆盖它。
+4. 同一连接内，协议显式模型参数覆盖该连接的默认值；未填项再走已有目录/参数解析规则。
+5. Provider 的 env 鉴权在服务端解析；沿用现有 auth 规则。客户端只传变量名，不会让远端读到客户端变量值。
+6. 初建时字段省略表示继承；必填字符串为空时报错。更新采用独立 `resetFields` 表达恢复继承，不让空串/null兼任多种意思。
+7. 首期不开放 turn/start 临时模型覆盖，避免同时出现会话、排队输入、单轮三套覆盖规则。
+
+配置未齐时允许服务启动、握手、查询、配置和只读历史。首次模型调用前返回明确缺项。具体启动拦截点须在 P0 查清再改，不能据此声称当前服务已支持空配置启动。
+
+## 五、拟议协议
+
+接口名实施时与统一 AppServer 合同对齐。initialize 只声明已落地能力，不靠新增常量冒充支持。
+
+| 方法 | 请求与结果 |
+| --- | --- |
+| `provider/list` | 返回调用方可用 Provider、版本、鉴权是否齐备；不返回秘密 |
+| `provider/configure` | 提交连接，默认临时；返回 providerId/revision。更新带 expectedRevision |
+| `model/list` | 按 providerId 查询目录，标明目录/远端发现来源；列得出不等于实测可用 |
+| `config/read` | 指定 threadId 时返回会话生效配置、来源、版本；不带 threadId 时返回默认配置摘要 |
+| `thread/start` | 可带 modelConfig，建立会话选择 |
+| `thread/model/set` | threadId、expectedConfigVersion、modelConfig 或 resetFields；成功后回新版本 |
+
+示例只表达业务参数，外层请求 ID 与协议版本沿用 AppServer 合同：
+
+```json
+{
+  "method": "provider/configure",
+  "params": {
+    "clientOperationId": "configure-001",
+    "scope": "ephemeral",
+    "connection": {
+      "wire": "openai-responses",
+      "baseUrl": "https://example.invalid/v1",
+      "auth": { "mode": "inline", "apiKey": "<客户端提供的密钥>" }
+    }
+  }
+}
+```
+
+```json
+{
+  "method": "thread/start",
+  "params": {
+    "modelConfig": {
+      "providerId": "provider-issued-by-server",
+      "model": "my-model",
+      "reasoningEffort": "high"
+    }
+  }
+}
+```
+
+- wire 值以仓库规范词表为准，统一解析已有别名；不要新增一套拼写。
+- 持久保存须显式指定 scope 并检查宿主写权限；配置与凭据存储分开。未实现保存能力就明确报不支持。
+- 配置修改复用 clientOperationId/操作回执；回执不保存秘密请求正文，不把原始报文写进轨迹。
+- 错误需区分：Provider 不存在、无权使用、配置缺项、wire 不支持、版本冲突、会话忙、凭据缺失。不可静默回退到另一家服务。
+
+## 六、隔离、切换与恢复
+
+- Session 服务掌管配置真值与更新规则，AppServer 只转发 typed 命令。
+- 首期只许空闲且无已接纳待执行输入的会话切换；否则返回 `model_config.busy`。切换检查与输入接纳使用同一串行裁决口。
+- 输入接纳成功时绑定配置版本；本轮所有工具往返沿用冻结快照。普通重试也不能悄悄换模型或 Provider。
+- Provider 更新生成新 revision；已有会话继续固定旧版本，显式重绑才采用新版本。旧版本被引用时不能直接删除；凭据撤销则后续请求明确失败。
+- 配置变更、排队输入与请求事实记录版本关联。历史中不写密钥；涉及地址、头和私有参数时走专门公开投影。
+- 只读 thread/read、thread/resume 不解析凭据，不探测模型，不因缺钥匙拒绝读历史。
+- 继续执行时重新取得所需凭据；临时密钥随进程退出丢失后，明确要求重新配置/绑定，不偷用默认 Provider。
+- 临时 Provider 默认归当前宿主认证主体，进程内可重连引用；引用不是访问凭证。断线不自动销毁活会话所需连接，清理按引用计数与显式释放处理。
+- 当前单用户宿主不因此变成多租户。远程共享若要扩大授权范围，另立访问控制合同。
+- AppServer 访问 token 与模型 API key 分开。远程传密钥须走受保护通道；已有普通 WS 不能仅凭 token 就算传输加密。复用 SSH 或 TLS 承载，不在本单声称已完成。
+
+## 七、分期落地
+
+### P0：解析与合同
+
+- [ ] 核对 LoadFromEnv/MergeConfig、Provider auth、BuildBackend、角色路由、启动必填校验和线程 cwd 路径。
+- [ ] 定下三份对象、字段来源、空值、版本、错误码与秘密字段表。
+- [ ] 抽出中立解析器；CLI 默认行为保留，协议覆盖只作用于目标会话。
+- [ ] 定义公开配置投影；禁止通用 Config JSON 序列化直接充当协议返回。
+
+### P1：会话装配
+
+- [ ] Session 服务保存选择，接纳输入时冻结快照。
+- [ ] BackendFactory 改接快照；移除捕获启动 config_result 的固定模型装配。
+- [ ] 会话元数据、请求模型、usage/trace 所记模型保持一致。
+- [ ] 接通 thread/start、config/read、provider/list、model/list；允许缺配置时先配置再运行。
+
+### P2：动态连接与切换
+
+- [ ] 接通临时 provider/configure、thread/model/set、版本冲突与幂等回执。
+- [ ] 阻止跨会话串配置；Provider 变更不改在飞请求。
+- [ ] 对齐角色模型、后台子代理、恢复后的凭据重绑。
+- [ ] 检查 stdio/WS 报文日志、错误、trace、事件与历史，覆盖密钥和鉴权头。
+
+### P3：保存与外壳
+
+- [ ] 明确持久凭据存储方案，再声明保存能力；不得将秘密塞回 Session JSONL。
+- [ ] 外壳展示当前 Provider/模型、来源与缺配置状态；提交失败不冒充切换成功。
+- [ ] 更新协议文档、示例客户端与配置文档，写清服务端环境和客户端环境差别。
+
+## 八、验收
+
+| 场景 | 必须看到 |
+| --- | --- |
+| 仅环境变量启动 | 未传 modelConfig 仍沿用默认连接；LUBAN_* 优先规则不变 |
+| 服务无模型配置 | 能握手/配置/读历史；未配置就调用模型时返回缺项 |
+| 已启动远程服务 | 客户端环境不会自动影响它；服务端 key_env 按服务端环境解析 |
+| 两会话同时运行 | A/B 使用各自地址、wire、模型和密钥；假 HTTP 服务核对实际出站请求 |
+| 显式换 Provider | 不混入原连接密钥、鉴权头、extraBody 或 wire |
+| 不同 thread cwd | 各自项目默认值生效，不全用服务进程项目配置 |
+| 运行中/排队时切换 | 明确 busy；整轮工具往返继续使用原快照 |
+| 空闲切换与竞争写入 | 下一轮采用新版本；旧 expectedConfigVersion 更新失败 |
+| Provider 更新/删除 | 已绑定版本稳定；有引用时不误删；撤销凭据后明确失败 |
+| 临时密钥与重启 | 进程内重连可续；重启后历史可读，执行需补钥匙；无静默回退 |
+| 秘密泄漏检查 | 用合成密钥/鉴权头标记扫描 RPC 返回、日志、trace、JSONL、错误和回执，不能出现标记 |
+| 重发配置操作 | 同一操作不重复创建 Provider；回执不含秘密正文 |
+| 角色/子代理 | 实际 backend 与所记快照一致，不在后台读取后来改掉的全局配置 |
+| 协议坏字段 | 空值、未知 wire、越权引用、过期版本分别明确拒绝 |
+
+验证分层：纯解析单测 -> 假 backend/本机假 HTTP 集成 -> stdio/WS 客户端接线 -> 按实际可用凭据单列真模型联调。前几层通过，只证明配置与请求路径接通，不证明模型能力、远程安全承载或实际供应商调用成功。
+
+## 九、完成标准
+
+一台 LubanCode 服务内，两场会话能选不同模型连接；客户端既可引用服务端配置，也可通过协议提供临时连接。CLI 环境变量入口照常工作。配置来源查得清，切换时点说得准，出站请求对得上，密钥不进历史。达到这些再勾完成。
