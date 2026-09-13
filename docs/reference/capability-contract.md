@@ -264,3 +264,59 @@ claim 恢复类:
 | 提示部件段模型、工具 schema 与能力说明同源 | System拼装Hook(Soul) |
 | 外部任务等待、ownerEpoch 执行侧、结果投递底座 | SessionV3异步工具 |
 | 执行/结果提交闸门、attempt 收口 | 失败与恢复 |
+| 应用根三变量、来源裁剪、参数根/数据根分家、RuntimePaths | 应用Worker接入补齐 |
+
+## 13. 应用根与来源裁剪〔冻结 2026-09-14;实现属应用Worker接入补齐单 P1〕
+
+外部应用常驻、每项独立研究起一只 Worker 时,LubanCode 进程的材料来源与状态落点由三枚环境变量钉死。设计出处 `todos/应用Worker接入补齐_Agent与Skills装配_独立参数目录及恢复隔离.todo` §四。
+
+### 13.1 三枚变量〔冻结〕
+
+| 变量 | 语义 | 取值约束 |
+| --- | --- | --- |
+| `LUBANCODE_HOME` | 应用专用参数根,值即根本身,不追加 `.lubancode`。未设置=个人 CLI 旧布局(`~/.lubancode`)原样,不暗迁移 | 非空绝对路径;空值/相对路径/不可访问均为配置错误,启动门拒启(退出码 1,stderr 人话),不静默回个人目录 |
+| `LUBANCODE_DATA_HOME` | 独立运行数据根(会话账/信任账/插件数据/缓存/日志)。未设置默认 `<LUBANCODE_HOME>/data`;仅在启用应用根语义时采用 | 同上;孤立设置(无 `LUBANCODE_HOME`)是配置错误;等于参数根、或包住参数根(参数根落数据根之内)均拒——读写不分;数据根在参数根之内合法(默认即如此) |
+| `LUBANCODE_MANAGED` | `1`=托管模式,即多租户隔离单 LocalTrusted/Managed 档中 Managed 档的进程级入口;`0`=关 | 只认 `1`/`0`(空串与其余值均拒,不猜);`=1` 必须显式设置 `LUBANCODE_HOME`——托管第一件事就是在参数根里发现文件、播种材料,没根的托管无从谈起 |
+
+铁律:
+
+- **禁止隐式降级**:`LUBANCODE_MANAGED=1` 下缺件即拒,不回落个人默认目录,不裁剪成"照旧读 cwd/个人材料"顶替。
+- env 是进程级的:宿主应用给每个 Worker child 构造专属 env,不修改自己的全局环境,不重定义 `HOME`/`USERPROFILE` 冒充应用参数根。与多租户隔离单"不改进程环境以切换租户"不冲突——那条管"同进程轮流服务多人",本合同管"一进程一份 env、进程内单一身份"。
+- 启动序:先识别三变量,再发现文件、播种默认材料、启动组件。校验失败发生在任何读家目录的动作之前。
+- 路径等值比较走 `platform::PathComparisonKey`(weakly_canonical 失败退 lexically_normal);OS 挂载/权限承担硬拒绝,字符串判断只作前置提示(多租户隔离单口径)。
+
+### 13.2 来源裁剪〔冻结;执法路随 P1 落地、档点名来源归 P2〕
+
+| 来源 | 应用根(非托管) | 托管(`MANAGED=1`) |
+| --- | --- | --- |
+| 参数根内材料(config.json/prompts/souls/agents/skills/languages/models.json) | 读 | 读 |
+| 个人 `~/.lubancode`、`~/.agents`(skills/AGENTS 等个人材料层) | 不进视野(整层裁) | 不进视野(整层裁) |
+| cwd 项目级 `.lubancode/config.json`、settings.local | 照旧读 | **整层裁掉**;部署档点名来源 P2 起接档字段,当前一律不读 |
+| 旧位置 `.lubancode.json` 迁移 | 不适用(参数根是新地界,无旧账) | 不适用 |
+| 发行内置材料(官方 skills/内置提示模块) | 读(发行层,非个人家目录) | 读;来源在能力清单列明 |
+
+状态落点:workspaces/会话账、workflow-runs、browser-artifacts、package-trust/package-state/hook-trust/plugin-trust、hooks-outbox、plugin-data/package-data、package-store、cache、logs、memory(含 memory-jobs)全部落**数据根**;参数根可挂只读。个人 CLI(未设应用根)一切落 `~/.lubancode`,行为与从前逐字节一致(AW-01)。
+
+### 13.3 RuntimePaths 归属〔冻结〕
+
+`config::RuntimePaths`(`src/config/runtime_paths.hpp`)是参数根/数据根的唯一解析口,挂靠 LubanCore 单阶段 B 的 RuntimeAssembly 服务条款("配置/工作目录/凭据显式传递")——Core owner 接管该服务时此类型并轨,别的单子不得另立同名路径服务。进程级便捷口 `config::HomeLubancodeDir()`(材料根,重定向后即参数根)与 `config::StateRootDir()`(状态根)供库层消费,语义以本节为准。
+
+### 13.4 app-server 当前装配能力事实〔P0 清单;2026-09-14 对源码〕
+
+逐项对符号,"开关存在"不冒充"装配完成":
+
+| 能力 | 状态 | 源码符号 |
+| --- | --- | --- |
+| 部署档解析(schema 1:features/tools/exposure/limits/MCP 名单) | 已落 | `app_server::LoadHarnessDeploymentFile`/`ParseHarnessDeployment`(src/app_server/harness_profile.cpp) |
+| headless 生产装配(MCP 按档点名启动、allow 名单装工具、必需件起失败拒整场) | 已落 | `app_server::AssembleSession`(src/app_server/session_assembly.cpp);入口 `RunAppServerMode --app-server-profile`(src/app/cli_app.cpp) |
+| 无档默认 | 显式零工具默认档(合同 §2.3),不照搬终端工具表 | `RunAppServerMode` 未递档分支 |
+| Agent 装配(agentRef 解析入首请求) | **未接线**——档有字段,生产入口仍传 `kAppServerDefaultSystemPrompt` 固定正文 | GAP-02;归 P2 |
+| SkillTool/技能材料装载 | **未接线**——app-server 路径不装 skill 工具 | GAP-01/GAP-03;归 P2 |
+| Lua/process 插件装载 | **未接线**——部署档点名即按 §7.2 报 `component_unavailable` 拒(P2 落地,现无点名通道故不可达) | GAP-01;归 P2/P5 |
+| 幂等受理+输入原件持久(operations-inputs、CanonicalInputPayload、ProcessCrash 耐久) | 已落 | `SessionService::SubmitInput`(src/runtime/session_service.cpp;PR #59) |
+| turn 终态与 ResultEnvelope(finalMessageRefs、usageReported、resultEnvelopePersisted) | 已落 | `SessionService::RecordTurnFinal`/`MakeTurnCompletedParams`(src/app_server/schema.cpp;PR #62) |
+| 应用根三变量/来源裁剪/参数根-数据根分家 | 已落(本节合同+P1) | `config::ResolveRuntimePaths`/`StateRootDir`(src/config/runtime_paths.cpp) |
+| gateway/channels 状态根接数据根 | **未接**(避让在跑的 QQ 接入单,另立小单) | cli_app.cpp gateway run 段仍走 HomeLubancodeDir |
+| rg-stage 工具缓存的播种脚本 | **未接**(读取走数据根;fetch_ripgrep.py 不认数据根,应用根下的 rg-stage 须部署者自落) | src/tools/search_ripgrep.cpp UserStage 层 |
+
+错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"、"缺获准执行工具返回 `capability_unavailable`"(本单 §六/§7.2 冻结,P2/P5 生效)。

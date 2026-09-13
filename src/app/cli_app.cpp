@@ -86,6 +86,7 @@
 #include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
+#include "config/runtime_paths.hpp"  // 启动门:应用根三变量先识别先校验(应用Worker接入单 P1)
 #include "config/settings_local.hpp"
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
@@ -356,8 +357,10 @@ private:
 // code 1(首次自动压缩后)没有任何回执,用户连"该去哪找现场"都不知道。
 void PrintFatalExitDiagnostics(const char* error_category) {
     std::string sessions_hint;
-    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        sessions_hint = *luban_dir + "/sessions";
+    // 会话现场在状态根(应用Worker接入单 §4.2):应用根语义=数据根,
+    // 个人模式与从前同一处。
+    if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+        sessions_hint = *state_root + "/sessions";
     }
     std::cerr << tr("error.fatal_category") << error_category << "\n";
     if (!sessions_hint.empty()) {
@@ -410,11 +413,14 @@ int HandlePluginInitCommand(const PluginInitArgs& init) {
 int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                      const CliOptions& cli_options) {
     lubancode::app_server::ServerOptions options;
-    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        // P0-2:会话账走唯一持久化根 workspaces/。
-        options.workspaces_dir = *luban_dir + "/workspaces";
+    if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+        // P0-2:会话账走唯一持久化根 workspaces/。P1(应用Worker接入单
+        // §4.2):运行数据(workspaces/workflow-runs/browser-artifacts)落
+        // 状态根——应用根语义下即数据根,参数根保持只读材料;个人模式
+        // 与从前同一处。
+        options.workspaces_dir = *state_root + "/workspaces";
         // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
-        options.workflow_runs_dir = *luban_dir + "/workflow-runs";
+        options.workflow_runs_dir = *state_root + "/workflow-runs";
     }
     options.cwd = CurrentDirUtf8();
     // 会话档 meta 真值(阶段 3 冻结项):wire/model 用配置四级合并的
@@ -447,7 +453,8 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
     // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
     // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*
     // 方法回 browser.not_configured,不冒充)。截图 artifact 落
-    // <HomeLubancodeDir>/browser-artifacts(内容寻址)。
+    // <状态根>/browser-artifacts(内容寻址;个人模式=HomeLubancodeDir,
+    // 应用根语义=数据根)。
     if (const char* env_sidecar = std::getenv("LUBAN_BROWSER_SIDECAR");
         env_sidecar != nullptr && *env_sidecar != '\0') {
         options.browser_sidecar_command = "node";
@@ -470,8 +477,8 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             }
         }
     }
-    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        options.browser_artifact_dir = *luban_dir + "/browser-artifacts";
+    if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+        options.browser_artifact_dir = *state_root + "/browser-artifacts";
     }
     // WS 承载(多前端外壳单阶段 A):--app-server-ws <port | host:port>。
     // 裸端口绑回环;显式 host 须是点分 IPv4 或 localhost(ws_sockets 的
@@ -597,6 +604,29 @@ std::optional<std::string> ValidateOneShotOutputTarget(const std::string& output
 // 一旦经这条路转一圈,就会被拆成不合法的 UTF-8 字节,喂给 nlohmann::json
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args) {
+    // 应用根启动门(应用Worker接入单 §四/P1):LUBANCODE_HOME /
+    // LUBANCODE_DATA_HOME / LUBANCODE_MANAGED 三变量先识别、先校验,再
+    // 干活——空值/相对路径/不合法重叠/托管缺根在这里明拒(退出码 1,
+    // stderr 人话),不静默回个人默认目录。放在一切会碰家目录的动作
+    // (i18n 语言包、配置装载、播种脚手架)之前;--memory-worker 这类
+    // 宿主派的后台进程同样过门,防绕行。
+    {
+        const auto paths = lubancode::config::ResolveRuntimePaths(
+            lubancode::config::CaptureProcessEnv());
+        if (!paths.has_value()) {
+            std::cerr << "[config] " << paths.error() << "\n";
+            return 1;
+        }
+        if (paths->app_root_active) {
+            const auto accessible =
+                lubancode::config::EnsureRuntimeRootsAccessible(*paths);
+            if (!accessible.has_value()) {
+                std::cerr << "[config] " << accessible.error() << "\n";
+                return 1;
+            }
+        }
+    }
+
     if (args.size() == 3 && args[1] == "--memory-worker") {
         const auto result = lubancode::memory::RunPendingMemoryJobs(
             lubancode::tools::Utf8ToPath(args[2]));
@@ -808,8 +838,9 @@ int RunCli(const std::vector<std::string>& args) {
         case CliAction::ManageSession: {
             // 会话管理子命令(archive/unarchive/delete):不进会话,打完
             // 结果就退。i18n 已在函数头初始化;确认屏在 handler 里。
-            const auto luban_dir = lubancode::config::HomeLubancodeDir();
-            if (!luban_dir.has_value()) {
+            // 会话账在状态根(应用Worker接入单 §4.2)。
+            const auto state_root = lubancode::config::StateRootDir();
+            if (!state_root.has_value()) {
                 std::cerr << tr("session.no_home") << "\n";
                 return 1;
             }
@@ -817,7 +848,7 @@ int RunCli(const std::vector<std::string>& args) {
                 std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
             // P0-2:搬删走 workspace 新账(不进会话;索引定位 + 管理面)。
             return HandleSessionManagementCommand(
-                lubancode::tools::Utf8ToPath(*luban_dir) / "workspaces",
+                lubancode::tools::Utf8ToPath(*state_root) / "workspaces",
                 static_cast<int>(parsed_cli.session_command.kind), parsed_cli.session_command.session_ref,
                 parsed_cli.session_command.force, manage_theme, nullptr);
         }

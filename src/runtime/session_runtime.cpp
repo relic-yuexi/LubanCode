@@ -45,8 +45,10 @@ SessionRuntime::~SessionRuntime() = default;
 
 std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {
     std::filesystem::path home_dir;
-    if (const auto home = config::HomeLubancodeDir(); home.has_value()) {
-        home_dir = tools::Utf8ToPath(*home);
+    // 身份裁决的 home 是 workspaces 树宿主根:跟状态根走(应用Worker
+    // 接入单 §4.2),个人模式与从前同一处。
+    if (const auto state_root = config::StateRootDir(); state_root.has_value()) {
+        home_dir = tools::Utf8ToPath(*state_root);
     }
     auto identity = workspace::ResolveWorkspaceIdentity(new_cwd, home_dir);
     if (!identity.has_value()) {

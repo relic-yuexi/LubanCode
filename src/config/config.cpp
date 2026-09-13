@@ -17,6 +17,7 @@
 // i18n:cli/i18n 是零依赖的叶子字符串表(只用标准库 + json),config 层引它
 // 不构成反向依赖——它不牵扯 cli 的任何交互逻辑。
 #include "cli/i18n.hpp"
+#include "config/runtime_paths.hpp"
 #include "platform/paths.hpp"
 // telemetry 值域校验(端云协同可观测单 T2):data_class 四档名与 endpoint
 // 形状(禁 userinfo/query)认 telemetry 合同的同一张表,不在 config 再抄一份。
@@ -82,7 +83,45 @@ std::optional<std::string> HomeDir() {
     return platform::HomeDir();
 }
 
+namespace {
+
+// 读一枚应用根变量并折 UTF-8(Windows env 是 ACP 字节,与 HomeDir 同一
+// 个坑);用 GetEnvVarPresent——空串也算"设了",空值留给调用方/启动门
+// 判配置错误,不在读取口吞掉。
+std::optional<std::string> GetAppRootEnvUtf8(const char* name) {
+    auto raw = platform::GetEnvVarPresent(name);
+    if (!raw.has_value()) {
+        return std::nullopt;
+    }
+#ifdef _WIN32
+    return platform::AcpBytesToUtf8(*raw);
+#else
+    return raw;
+#endif
+}
+
+// 应用根变量的值够不够格当根:非空且绝对。坏值不当根用(返回 false),
+// 也不静默回个人目录——启动门 ResolveRuntimePaths 对坏值明拒,这里只是
+// 库级兜底(测试/嵌入方绕过启动门时)。
+bool IsViableRootValue(const std::string& value) {
+    if (value.empty()) {
+        return false;
+    }
+    return platform::Utf8ToPath(value).is_absolute();
+}
+
+}  // namespace
+
 std::optional<std::string> HomeLubancodeDir() {
+    // 应用根语义(应用Worker接入单 §4.1):LUBANCODE_HOME 有效设置时,值
+    // 即参数根本身,不追加 .lubancode。
+    if (const auto app_root = GetAppRootEnvUtf8("LUBANCODE_HOME")) {
+        if (!IsViableRootValue(*app_root)) {
+            // 空值/相对路径:启动门已明拒;库级不拿它当根,更不回个人目录。
+            return std::nullopt;
+        }
+        return *app_root;
+    }
     const auto home = HomeDir();
     if (!home.has_value()) {
         return std::nullopt;
@@ -97,6 +136,46 @@ std::optional<std::string> HomeLubancodeDir() {
     const std::string& home_utf8 = *home;
 #endif
     return home_utf8 + "/.lubancode";
+}
+
+std::optional<std::string> StateRootDir() {
+    // 应用根语义:状态写入落数据根。HomeLubancodeDir 已对 LUBANCODE_HOME
+    // 的坏值返回 nullopt,这里沿用同一道闸;数据根取值与 ResolveRuntimePaths
+    // 同口径(显式 DATA_HOME 或默认 <HOME>/data)。
+    if (const auto app_root = GetAppRootEnvUtf8("LUBANCODE_HOME")) {
+        if (!IsViableRootValue(*app_root)) {
+            return std::nullopt;
+        }
+        if (const auto data_root = GetAppRootEnvUtf8("LUBANCODE_DATA_HOME")) {
+            if (!IsViableRootValue(*data_root)) {
+                return std::nullopt;
+            }
+            return *data_root;
+        }
+        return *app_root + "/data";
+    }
+    // 孤立 LUBANCODE_DATA_HOME(无 HOME):启动门明拒;库级返回 nullopt,
+    // 写入点按"无根"跳过(纯内存/禁用),不落个人目录。
+    if (GetAppRootEnvUtf8("LUBANCODE_DATA_HOME").has_value()) {
+        return std::nullopt;
+    }
+    return HomeLubancodeDir();
+}
+
+bool AppRootActive() {
+    const auto app_root = GetAppRootEnvUtf8("LUBANCODE_HOME");
+    return app_root.has_value() && IsViableRootValue(*app_root);
+}
+
+std::optional<std::string> PersonalMaterialsHomeDir() {
+    // 应用根语义下,以 OS 主目录为锚的个人材料层(.agents/skills、
+    // .lubancode/skills)整层裁掉——应用 Worker 的视野里没有个人家目录
+    // (应用Worker接入单 §4.2);参数根内的 skills/agents 来源装配归 P2。
+    // 个人模式原样:HomeDir()。
+    if (AppRootActive()) {
+        return std::nullopt;
+    }
+    return HomeDir();
 }
 
 // 新位置配置文件的路径:<base_dir>/.lubancode/config.json。
@@ -2378,29 +2457,55 @@ std::expected<LoadedFileConfigs, std::string> LoadFileConfigs() {
     namespace fs = std::filesystem;
     LoadedFileConfigs out;
 
+    // 应用根语义先识别,再发现文件(应用Worker接入单 §4.1:托管模式必须
+    // 先识别,再发现文件)。启动门已在进程入口跑过 ResolveRuntimePaths
+    // 拒了坏值;这里解析失败(理论不可达)按个人默认布局走,不拦启动。
+    const RuntimeEnvSnapshot env = CaptureProcessEnv();
+    const auto runtime_paths = ResolveRuntimePaths(env);
+    const bool managed = runtime_paths.has_value() && runtime_paths->managed;
+    const bool app_root = runtime_paths.has_value() && runtime_paths->app_root_active;
+
     const fs::path cwd = fs::current_path();
-    const auto home = HomeDir();
 
-    // 项目级:<cwd>/.lubancode/...
-    auto project = LoadConfigFromBaseDir(cwd);
-    if (!project.has_value()) {
-        return std::unexpected(project.error());
-    }
-    out.project = *project;
-
-    // 全局:<主目录>/.lubancode/...,但 cwd 就是主目录时不重复读(否则同一份
-    // 文件读两遍、来源标记打架)——那种情形只当项目级一份。
-    bool cwd_is_home = false;
-    if (home.has_value()) {
-        std::error_code ec;
-        cwd_is_home = fs::equivalent(cwd, fs::path(*home), ec) && !ec;
-    }
-    if (home.has_value() && !cwd_is_home) {
-        auto global = LoadConfigFromBaseDir(fs::path(*home));
-        if (!global.has_value()) {
-            return std::unexpected(global.error());
+    // 项目级:<cwd>/.lubancode/...。托管模式整层裁掉——默认不读 cwd/祖先
+    // 目录里的配置,只有部署档点名来源才参与(P2 起接档字段,当前一律
+    // 不读,不静默降级成"照旧读 cwd")。
+    if (!managed) {
+        auto project = LoadConfigFromBaseDir(cwd);
+        if (!project.has_value()) {
+            return std::unexpected(project.error());
         }
-        out.global = *global;
+        out.project = *project;
+    }
+
+    if (app_root) {
+        // 全局层 = 参数根下的 config.json(无 .lubancode 一层、无旧位置
+        // 迁移——参数根是新地界,旧 .lubancode.json 账与它无关)。
+        const fs::path global_path = *runtime_paths->config_root / "config.json";
+        std::error_code ec;
+        if (fs::exists(global_path, ec) && !ec) {
+            const auto parsed = ReadAndParseConfigFile(global_path);
+            if (!parsed.has_value()) {
+                return std::unexpected(parsed.error());
+            }
+            out.global = std::optional<FileConfig>(*parsed);
+        }
+    } else {
+        // 全局:<主目录>/.lubancode/...,但 cwd 就是主目录时不重复读(否则
+        // 同一份文件读两遍、来源标记打架)——那种情形只当项目级一份。
+        const auto home = HomeDir();
+        bool cwd_is_home = false;
+        if (home.has_value()) {
+            std::error_code ec;
+            cwd_is_home = fs::equivalent(cwd, fs::path(*home), ec) && !ec;
+        }
+        if (home.has_value() && !cwd_is_home) {
+            auto global = LoadConfigFromBaseDir(fs::path(*home));
+            if (!global.has_value()) {
+                return std::unexpected(global.error());
+            }
+            out.global = *global;
+        }
     }
 
     // 迁移通知合并:项目级、全局各自可能有一行,拼一起(都没有就 nullopt)。
@@ -3463,14 +3568,25 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
     return std::unexpected(message);
 }
 
+std::optional<std::string> GlobalConfigFilePath() {
+    // HomeLubancodeDir 自带两套语义:应用根=参数根本身(配置在根下),
+    // 个人=主目录/.lubancode(配置在 .lubancode 下)。拼法统一一条。
+    const auto root = HomeLubancodeDir();
+    if (!root.has_value()) {
+        return std::nullopt;
+    }
+    return *root + "/config.json";
+}
+
 std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录(Windows 下是 %USERPROFILE%),没法保存配置文件");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected(
+            "找不到用户主目录(Windows 下是 %USERPROFILE%),也没设 LUBANCODE_HOME,没法保存配置文件");
     }
 
     namespace fs = std::filesystem;
-    const fs::path path = NewConfigPathFor(fs::path(*home));
+    const fs::path path = platform::Utf8ToPath(*config_path);
 
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
@@ -3794,11 +3910,11 @@ std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const st
     if (name.empty()) {
         return std::unexpected("active_provider 不能为空");
     }
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法记住当前 provider");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法记住当前 provider");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3816,11 +3932,11 @@ std::expected<std::string, std::string> AddProviderToGlobalConfig(const Provider
     if (!valid.has_value()) {
         return std::unexpected(valid.error());
     }
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法保存 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法保存 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3841,11 +3957,11 @@ std::expected<std::string, std::string> AddProviderToGlobalConfig(const Provider
 }
 
 std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std::string& name) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3870,11 +3986,11 @@ std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std
 
 std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig(const std::string& name,
                                                                                    bool enabled) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3895,11 +4011,11 @@ std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig
 
 std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const std::string& name,
                                                                              const nlohmann::json& body) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3920,11 +4036,11 @@ std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const
 
 std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(const std::string& name,
                                                                                bool enabled) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3946,11 +4062,11 @@ std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(con
 std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(const std::string& name,
                                                                                const std::string& header_name,
                                                                                const std::string& value) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3976,11 +4092,11 @@ namespace {
 // 报错、不碰文件。
 std::expected<std::string, std::string> MutateProviderInGlobalConfig(
     const std::string& name, const std::function<void(ProviderConfig&)>& mutate) {
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -4048,11 +4164,11 @@ std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std:
     }
     // 走 AddProviderToGlobalConfig 同一条路子:整份读进来,替换那一条,整份
     // 写回去——UpdateProvidersInConfigFile 里的校验(重名/条目合法)照兜底。
-    const auto home = HomeDir();
-    if (!home.has_value()) {
-        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    const auto config_path = GlobalConfigFilePath();
+    if (!config_path.has_value()) {
+        return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
     }
-    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
+    const std::string path = *config_path;
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());

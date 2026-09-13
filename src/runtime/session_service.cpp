@@ -293,7 +293,7 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     } else {
         const std::filesystem::path identity_cwd =
             request.cwd_utf8.empty() ? std::filesystem::current_path() : tools::Utf8ToPath(request.cwd_utf8);
-        const auto identity_home = config::HomeLubancodeDir();
+        const auto identity_home = config::StateRootDir();
         auto identity = workspace::ResolveWorkspaceIdentity(
             identity_cwd, identity_home.has_value() ? tools::Utf8ToPath(*identity_home)
                                                     : std::filesystem::path());

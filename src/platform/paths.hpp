@@ -41,6 +41,13 @@ inline std::string PathToUtf8(const std::filesystem::path& path) {
 // 下 std::getenv 会吃 C4996 告警),其余平台走 std::getenv。
 std::optional<std::string> GetEnvVar(const char* name);
 
+// 读一个环境变量,变量存在就返回值——空串也算"设了",只有变量整个不在
+// 才给 nullopt。与 GetEnvVar 的差别就是空串的归置:那枚把"设为空"与
+// "没设"归一,这枚分开。应用根合同(应用Worker接入补齐单 §4.1)要求
+// "未设置与设置为空分开处理"——LUBANCODE_HOME 这类路径根变量设成空串
+// 是配置错误,不能被吞成"没设"后静默回个人默认。
+std::optional<std::string> GetEnvVarPresent(const char* name);
+
 // 用户主目录:Windows 取 %USERPROFILE%,别的平台取 $HOME。找不到返回
 // std::nullopt。
 std::optional<std::string> HomeDir();

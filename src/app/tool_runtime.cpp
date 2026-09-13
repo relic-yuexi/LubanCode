@@ -455,10 +455,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     if (options.package_snapshot != nullptr) {
         lubancode::package::PackageCodeMountOptions code_options;
         code_options.cwd_utf8 = cwd_utf8;
-        if (const auto home_lubancode = lubancode::config::HomeLubancodeDir();
-            home_lubancode.has_value()) {
+        if (const auto state_root = lubancode::config::StateRootDir();
+            state_root.has_value()) {
+            // 包数据是运行状态,落状态根(应用Worker接入单 §4.2)。
             const std::filesystem::path data_root =
-                lubancode::tools::Utf8ToPath(*home_lubancode) / "package-data";
+                lubancode::tools::Utf8ToPath(*state_root) / "package-data";
             std::error_code ec;
             std::filesystem::create_directories(data_root, ec);  // 拿不到/建不动都照旧
             code_options.package_data_root = data_root;

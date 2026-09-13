@@ -591,9 +591,11 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
 }
 
 std::optional<fs::path> CacheDir() {
-    const auto home = HomeLubancodeDir();
-    if (!home.has_value()) return std::nullopt;
-    return fs::path(*home) / "cache";
+    // 目录缓存是可再生的运行状态,落状态根(应用Worker接入单 §4.2):
+    // 应用根语义=数据根,个人模式与从前同一处(<home>/.lubancode/cache)。
+    const auto state_root = StateRootDir();
+    if (!state_root.has_value()) return std::nullopt;
+    return platform::Utf8ToPath(*state_root) / "cache";
 }
 
 std::optional<std::string> ReadSmallFile(const fs::path& path) {
