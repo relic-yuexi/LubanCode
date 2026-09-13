@@ -426,9 +426,13 @@ TEST_CASE("注册落账失败:不派发不接单,executor 零调用") {
     std::filesystem::create_directories(dir, ec);
     auto jsonl = dir / "s1.jsonl";
     v3::V3WriterOptions options;
-    std::atomic<int> failures_left{1};  // 只坏一笔:registered 那笔
-    options.inject_io_failure = [&failures_left]() -> std::optional<std::string> {
-        if (failures_left.fetch_sub(1) > 0) {
+    // 只坏 registered 那一笔:提交序 system(1)/session.started(2)/
+    // assistant(3)/pending(4)/registered(5)。注入后 writer 句柄 broken,
+    // 正是"注册没落稳"的崩溃边界。
+    std::atomic<int> commit_ordinal{0};
+    options.inject_io_failure = [&commit_ordinal]() -> std::optional<std::string> {
+        const int ordinal = commit_ordinal.fetch_add(1) + 1;
+        if (ordinal == 5) {
             return std::string("injected_io_failure");
         }
         return std::nullopt;

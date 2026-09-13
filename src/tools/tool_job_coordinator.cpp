@@ -443,7 +443,7 @@ struct ToolJobCoordinator::Impl {
         if (finished_event.empty()) {
             return false;
         }
-        auto persisted_text = PersistTextLocked(job, "text", admission_text, finished_event, 1);
+        auto persisted_text = PersistTextLocked(job, "combined", admission_text, finished_event, 1);
         if (!persisted_text.ok) {
             return false;
         }
@@ -699,7 +699,7 @@ struct ToolJobCoordinator::Impl {
         std::string preview;
         bool preview_truncated = false;
         if (envelope.succeeded) {
-            auto persisted = PersistTextLocked(job, "text", envelope.result.content,
+            auto persisted = PersistTextLocked(job, "combined", envelope.result.content,
                                                terminal_receipt.id, job.action->attempt());
             if (!persisted.ok) {
                 // 执行已终态、结果链没立起来:保留 done,另报持久化失败
