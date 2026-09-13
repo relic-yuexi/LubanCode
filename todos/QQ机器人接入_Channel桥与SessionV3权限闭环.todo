@@ -1,11 +1,14 @@
 # QQ 机器人接入：Channel 桥、Session V3 与权限闭环
 
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
+补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
+
+官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
 ## 一、目标与用法
 
-在本仓库新增 QQ 渠道包，复用腾讯 QQ SDK。宿主仍由 C++ Gateway 管会话、工具、权限、执行账和投递账。无需另建项目。
+在本仓库新增 QQ 渠道包，按官方 API 接入；腾讯 SDK 只作可选封装和参考。宿主仍由 C++ Gateway 管会话、工具、权限、执行账和投递账。无需另建项目。直连 API 与可选 SDK 的取舍见第十五节。
 
 首个可用版本：单机器人、已批准用户私聊、WebSocket、纯文本、多轮对话、重启恢复。不先开群聊、媒体、主动推送、流式输出和按钮审批。
 
@@ -45,7 +48,7 @@ lubancode gateway run
 
 ## 三、目录与凭据：修正此前口头示例
 
-源码拟新增：
+源码布局示例（Node/SDK 备选方案；采用原生适配器时 runtime 下改放 C++ 源码和构建产物，桥协议与账号目录相同）：
 
 ```text
 channels/qqbot/
@@ -107,15 +110,17 @@ channels/qqbot/
 
 ## 五、QQ 适配器与真实 Bridge
 
+> **2026-09-13 用户定案**：可以不用腾讯 SDK，也可自研薄适配层。方案取舍、传输底座现状与实施要求见 §十五；Q1 开工先按 §十五 定案并同步冻结件。
+
 腾讯来源：`tencent-connect/openclaw-qqbot` 提交 `a730701d36aa7a070f98d4cba0f340f91f15e5f5`，依赖 `@tencent-connect/qqbot-nodejs`；本次会话已拆阅 SDK 1.0.4 源码。实施时固定版本和 lockfile，升级再验接口。仓库链接：[依赖清单](https://github.com/tencent-connect/openclaw-qqbot/blob/a730701d36aa7a070f98d4cba0f340f91f15e5f5/package.json)。
 
 最小映射：
 
 | QQ / Bridge | 适配动作 |
 | --- | --- |
-| 平台鉴权 | SDK 用 AppID/Secret 换令牌并刷新 |
+| 平台鉴权 | 适配器用 AppID/Secret 换令牌并刷新，可直接 HTTP 调用 |
 | `channel.start` | 连接 WebSocket；凭据或 intent 拒绝须明报 |
-| `C2C_MESSAGE_CREATE` | SDK 身份映射 sender/conversation；保留平台消息 ID、时间、正文，生成稳定 delivery_id |
+| `C2C_MESSAGE_CREATE` | 从平台事件映射 sender/conversation；保留平台消息 ID、时间、正文，生成稳定 delivery_id |
 | `channel.inbound` | 先落 sidecar spool，再上报规范化事件；等宿主 `channel.inbound.ack` 后清理 |
 | `channel.send` | 取 direct OpenID、冻结正文、reply_to_message_id，调用 `POST /v2/users/{openid}/messages` |
 | `channel.stop` | 停收、保留未 ACK spool、收连接与进程；超时杀进程树 |
@@ -124,7 +129,7 @@ channels/qqbot/
 - [ ] 复用四字节大端长度 + JSON 帧，stdout 只协议，stderr 有界排水。慢模型不能阻塞 QQ 心跳、Bridge 读循环与收信落盘。
 - [ ] 按现有 manifest/握手能力交集声明；首版只宣称 websocket/direct/text/send/credentials，不借 SDK 全功能表虚报媒体或 streaming 已接通。
 - [ ] 实现统一激活决策：Gateway 模式、包信任、双层 enabled、凭据可读、账号锁齐才 spawn。普通 CLI/one-shot/App Server 零渠道进程、零监听。
-- [ ] 在 Package 安装与构建中给 QQ 包单独安装 Node 依赖；没有启用 QQ 时，普通 LubanCode 不依赖 Node。
+- [ ] Package 安装/构建按实际 runtime 分发：原生适配器随平台编译，无 Node；若选 Node/SDK 备选，则只给 QQ 包安装依赖，普通 LubanCode 不依赖 Node。
 - [ ] Gateway 遍历已安装渠道与启用账号，通过统一激活检查后逐一装配，不硬编码 qqbot/main。用两类假适配器验账号凭据隔离、会话隔离、资源公平与单账号故障收尾；损坏共用耐久账仍须停泵，不伪称平台之间绝无影响。
 - [ ] sidecar spool、SDK session/resume 状态与宿主 ingress 各归各账。SDK 不提供足够 spool 钩子时，补适配层持久化，不能把 SDK 收到回调当作已耐久接纳。
 
@@ -151,17 +156,17 @@ channels/qqbot/
 
 ## 八、实施批次与验收
 
-顺序：Q0 → Q1 → Q2 → Q3。Q3 才能称为可用 QQ 接入。
+顺序：Q0 → Q1 → Q2 → Q3。Q3 只验纯文本接入；文件、定时任务、审批与菜单分别按第十至十四节的 Q4—Q7 验收。
 
 ### Q0：权限与激活合同
 
 - [ ] 配置 schema、allow 空值迁移、策略交集、凭据 resolver、真实激活决策；同步冻结文档。
 - [ ] 扩展现有 channel_config/binding/router/session_host 测试。证明具体 binding 不能扩权、未批准用户零模型调用、项目不能启用账号、配对不升 owner、凭据不可出日志。
 
-### Q1：真实进程与 SDK 桥
+### Q1：真实进程与平台协议桥
 
-- [ ] 新增 QQ 包、安装挂载、stdio transport；真实 Node fixture 测握手、半帧/粘帧、超限、stderr 堵塞、坏版本、停止和崩溃收尾。
-- [ ] mock QQ SDK 测 C2C 映射、spool 重启重投、ACK 清理、稳定发送载荷。此处不是 QQ 联调。
+- [ ] 新增 QQ 包、安装挂载、stdio transport；真实适配子进程 fixture 测握手、半帧/粘帧、超限、stderr 堵塞、坏版本、停止和崩溃收尾。
+- [ ] mock HTTP/事件服务测 C2C 映射、spool 重启重投、ACK 清理、稳定发送载荷；若用 SDK，再补 SDK 适配测试。此处不是 QQ 联调。
 
 ### Q2：V3 与 outbox 总装
 
@@ -178,4 +183,181 @@ channels/qqbot/
 
 ## 九、本次交付边界
 
-本次只新增这份代码改造单。检查当前生产装配、权限解析、入站提交与回复投递源码，并核对既有 V3 总装进展。没有修改运行时代码，没有运行 C++/Node 测试，也没有 QQ 真实账号调用。文档路径、锚点和 diff 检查另记交付说明。
+本单及后续补充只记录源码审查与实施设计。没有修改运行时代码，没有运行 C++/Node 功能测试，也没有 QQ 真实账号调用。文档路径、锚点和 diff 检查另记交付说明。
+
+## 十、Q4：手机发文件，处理后把产物发回去
+
+### 10.1 已核实的接口与当前缺口
+
+QQ 单聊事件的 `attachments[]` 提供 url、filename、size、content_type；引用消息还可在 msg_elements 中带附件。来源：[单聊消息事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)。下载 URL 是文件入口，不是可永久依赖的存储，也不应原样进入模型与日志。
+
+LubanCode 的 [ChannelPart / MediaAttachment / ReplyAction](../src/channel/types.hpp) 已有媒体字段，但 [MakeChannelTurnIngress](../src/runtime/turn_ingress.cpp) 目前只生成“收到文件，未解析”一类文本；[SessionService 输入](../src/runtime/session_service.hpp) 当前只收 text/images；[ReplyOutboxItem](../src/gateway/reply_outbox.hpp) 仍是冻结文本。只有附件类型声明，尚未完成下载、文档读取和文件投递。
+
+QQ 出站分两步，基址仍为 `https://api.sgroup.qq.com`：
+
+1. `POST /v2/users/{openid}/files` 上传/合并，`srv_send_msg=false`，取得 file_info。
+2. `POST /v2/users/{openid}/messages`，传 `msg_type=7`、`media.file_info`，以及本次合法回复的 msg_id/msg_seq。
+
+file_type 为图片 1、视频 2、语音 3、普通文件 4。`file_info` 透传，不自己解码；ttl 到期重传原件。上传成功不等于消息已发出。`srv_send_msg=true` 会直接发信并占主动消息频次，可靠 outbox 路径不走这个捷径。[单聊富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_files.post.html)
+
+本机产物优先走分片上传，避免为了发文件临时开放公网文件服务器：
+
+```text
+POST /v2/users/{openid}/upload_prepare
+  → 文件大小、文件名、MD5/SHA1、前 10002432 字节 MD5
+  → 得到 upload_id、block_size、parts、upload_config
+逐片 PUT 到服务端返回的预签名 URL
+  → POST /v2/users/{openid}/upload_part_finish
+POST /v2/users/{openid}/files {upload_id, srv_send_msg:false}
+  → file_info → 发送消息
+```
+
+依据：[预上传接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_id_upload_prepare.post.html)。COS PUT 不带 QQ Authorization，也不把预签名 URL 写入普通日志。
+
+**接口与 SDK 有漂移，先加合同测试。** 本次拆阅的 SDK 1.0.4 `src/protocol/api/media-chunked.ts` 使用 `(part.index - 1) * block_size`；官方示例却从 index=0 起。SDK 将 file_size 作为 number 发送，并从响应顶层读 concurrency/retry_timeout；官方字段为字符串大小、配置在 upload_config 下。须以当前真实响应判定，做显式适配；不能让负偏移、字符串相加或错误并发进入上传循环。
+
+官方现页普通文件上限写 200MB，腾讯插件 README 写 100MB；当前 manifest 示例还写 20MiB。三者不是同一口径。产品上限按宿主配置、适配器能力和平台实际许可取最小值。SDK 小文件路径发送 file_data，但当前官方页面只列 URL 和 upload_id；Base64 直传列为待核能力，不作为首批必需路径。
+
+### 10.2 具体改动
+
+- [ ] 新增宿主附件接纳/解析服务，拟放 `src/runtime/channel_media_service.*`。规范化附件引用先入 ingress；准入通过才下载大文件，不让陌生用户耗下载/解析资源。已 ACK 的附件元数据不等于二进制已持久，另记 downloading/ready/failed。
+- [ ] QQ 适配器只取平台附件、执行受控传输；宿主核账号/会话归属、文件名、大小、MIME、hash。下载临时件成功后原子发布到会话可访问的受控 artifact 目录，再进入 Agent 一轮。失败明确报附件不可用，不能假装读过文件。
+- [ ] 限制字节总量、重定向、超时和解压膨胀；校验目标地址，拒绝私网与非预期协议，防 DNS/链接绕过。签名 URL、message_scene.ext 中的 auth_token 不进入模型。引用附件只按用户请求显式展开，有递归深度和数量帽。
+- [ ] 通过稳定 artifact_id 记录原名、hash、MIME、原始来信和可读范围。补 SessionService 持久输入引用及其 replay 合同；不能只在首次 prompt 塞临时绝对路径，重启就丢。
+- [ ] 文本/源码走受限读工具；图片走现有 ImageBlock 与模型能力检查；PDF/DOCX/XLSX 走可配置提取器，结果带页/表/段出处、大小帽和解析状态。传输支持某格式不等于模型能理解它。此批不运行文档宏、不自动执行上传脚本。
+- [ ] 新增平台中立的产物交付口（拟 `channel_deliver_artifact`），只接 artifact_id 与说明；接收账号和会话由宿主绑定，模型不能把文件改发第三人。用户明确要求跨会话发送时另经目标授权。
+- [ ] reply selection 扩展为有序正文/文件引用清单；输出原件冻结后再入 outbox。没有文字、只有一个文件也算有效回复，不被当前纯文本选择器误判为空。
+- [ ] QQ 适配器新增 media-upload 模块；保持原件 hash、upload_id、已完成分片和 file_info/到期状态。过期重传同一原件，投递失败不重做文件生成。失去平台续传条件时可重新上传，但消息发送仍守 delivery_unknown 规则。
+- [ ] 回执必须区分 generated/uploaded/sent；上传到平台不等于对方已读。附件原件在未完成任务、审批或投递引用释放前不清理；下载、提取与发送均计入账号资源帽。
+
+### 10.3 Q4 验收
+
+- [ ] 手机发 TXT、图片、PDF/表格各一份：确认二进制落盘、解析出处、模型实际获得内容；单文件无正文、多个附件、引用附件均覆盖。
+- [ ] 执行后收到生成文件，核 SHA-256；无正文文件回复可出站；超限、URL 失效、解析器缺失、伪 MIME、路径穿越均给准确状态。
+- [ ] 0/1 起始分片、字符串大小、upload_config 嵌套、最后不足一片、大文件重启续传、file_info 过期全测。发送超时不重复生成产物，重复来信不重复跑模型。
+
+## 十一、Q5：从 QQ 建单次提醒和周期任务
+
+### 11.1 调度属于 LubanCode，QQ 负责投递
+
+腾讯插件 [remind.ts](https://github.com/tencent-connect/openclaw-qqbot/blob/a730701d36aa7a070f98d4cba0f340f91f15e5f5/src/tools/remind.ts) 将提醒转为 OpenClaw cron 参数，包含时间/时区、isolated session、agentTurn、channel/to/accountId；工具还会返回调用 cron 的指引。它不能作为 LubanCode 调度实现。另一个 `cron-scheduler.ts` 是基于内存计时器的轻量路径，不作常驻耐久任务底座。
+
+当前 [AutomationStore](../src/gateway/automation_store.hpp) 已有 once、run-now、幂等键、occurrence claim/bind/settle；周期表达式、时区、补跑、暂停/取消仍待补。[GatewayAutomationPump](../src/runtime/automation_pump.cpp) 可复用；不在 Node sidecar 另养定时器，不让模型写 jobs.jsonl。
+
+### 11.2 从一句话落成一笔任务
+
+- [ ] 新增平台中立的 automation 创建/查询/修改/暂停/取消服务及工具。模型提供结构化意图，宿主验证并落 AutomationStore；QQ 菜单与其他渠道也调用此服务，不绕 shell 执行 CLI。
+- [ ] job 新增 schedule(kind/at 或 cron/interval/tz)、动作类型、workspace、创建者、交付目标、预算、policy ceiling、revision；创建者与渠道目标取真实入站上下文。所有查询/修改核 job 归属，跨用户不泄露任务。
+- [ ] “今晚八点”按冻结的接收时间和账号时区解析为具体日期。回复列完整日期、时间、时区和 jobId；若当晚时间已过或“每天整理一次”缺时间/范围，明确询问，不能静默改成明天或猜一个目录。
+- [ ] 原始来信 ID + 稳定操作身份生成创建幂等键。写盘成功后才说“已设置”；同键异规格报 conflict。创建确认没发到，只补确认投递，不再创建一个 job。
+- [ ] 区分 notify（固定提醒正文）与 agent_task（到点读资料、整理、生成结果）。纯提醒可直接将持久 payload 投递，不必再调一次模型；它须有独立 committed notification 来源，不能伪造 V3 assistant/reply selection。扩展 outbox 来源合同并保持旧回复兼容。
+- [ ] 周期 task 默认每次新开隔离 V3 场，固定工作目录与显式输入；不自动带上 QQ 全部聊天史。所需附件用保留的 artifact 引用，不依赖数天后失效的 URL。
+- [ ] 每次 slot 用计划时间发 occurrenceId=hash(jobId+revision+slot)，时区转换由宿主做。定义 DST 重复/不存在时间、时钟回拨、服务离线、重叠执行政策。建议离线后最多合并补一次，再排未来 slot；每种任务可显式配置 skip/coalesce，不默认补跑几百次。
+- [ ] 取消/修改追加新 revision，未 claim 的旧 occurrence 作废；运行中取消走合作取消，不把已发生副作用说成撤回。执行前重验创建者授权及当前工具政策，只可收窄创建时上限。
+
+### 11.3 QQ 主动投递与回复窗口
+
+当前 [单聊发送文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html) 区分被动回复、主动消息和 `is_wakeup` 互动召回；定时任务不能一直复用建单时 msg_id，也不能把 is_wakeup 当无限推送开关。
+
+文档现列：主动发送方认证后 10 QPS，未认证 5 QPS 且 30 QPM；单关系 20 QPM、每好友每天 1000 条。互动召回另有 30 天内四个区间各一条。接口总频率帽又与主动频控分开。这些是本次文档值，不是本账号已获权限或长期保证，须配置化限速并记录平台返回。
+
+**文档自身有矛盾：页首被动有效期写 60 分钟，msg_id 字段写 5 分钟。** 先以保守窗口安排回复，并将真实账号验证列为放行项；不对用户承诺“60 分钟一定能回”。回复次数现写每条 4 次，文件、说明和审批卡片须统一占用计数。
+
+- [ ] 主动投递使用已绑定的 QQ 账号/目标，不附陈旧 msg_id/event_id；建单时检查可投递条件，到点再验。`INTERACTION_CREATE` 的授权事件含 c2c_push/group_push，记录平台授权线索；平台授权与 LubanCode 配对、工具授权仍各管一层。
+- [ ] 识别 40034100（主动频控）、40034105（无权限）、40054004（无好友）、40054013（拒收）、40034122（召回区间额度）、304103/40034005（过期回复）等文档错误。限频延后、明确拒收暂停此目标，执行结果保留供用户查询。
+- [ ] 不因 QQ 拒收重跑 Agent，也不自行换账号、群或平台。状态分别显示 schedule/execution/delivery；菜单“查看任务”可查结果，不能把投递失败伪装为提醒完成。
+- [ ] 将原第七节“过期不转主动消息”限定为普通被动回复：Q5 中用户明确授权的定时交付有独立主动目标，沿专门投递政策；两条路径不可互相偷换。
+
+### 11.4 Q5 验收
+
+- [ ] 今晚指定时间提醒、每天指定时间整理目录；确认时间和 jobId，重发建单只一笔，修改/暂停/取消可查询。
+- [ ] 重启跨过 due、跨午夜、DST、时钟回拨、任务重叠时 slot 不重复；附件数天后仍可读；纯提醒零模型调用。
+- [ ] 平台拒收/限频时任务不重做，结果可查；撤销配对/工具权限后不能继续越权执行。真实 QQ 接收延迟与主动消息权限单独实测。
+
+## 十二、Q6：QQ 按钮批准一次工具调用
+
+### 12.1 可复用的两端
+
+QQ 在 Markdown 消息的 keyboard 中放 `action.type=1` 回调按钮，点击触发 `INTERACTION_CREATE`。从 d.id 取互动 ID，调用 `PUT /interactions/{interaction_id}` 结束客户端等待；外层事件 ID、互动 ID、原消息 ID 不可混用。[消息按钮](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/msg-btn.html)、[互动事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)、[回应接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/interactions_interaction_id.put.html)
+
+官方按钮页注明模板需申请、自定义按钮需开通；是否对当前账号开放须实测。`permission.type=0` 为指定用户，1 为管理员，2 为所有人。SDK/插件类型注释可能不同，不能照注释猜权限；平台 UI 限制也不能替代宿主身份复核。click_limit 已标废弃，按钮变灰也不是防重复执行凭证。
+
+腾讯 [approval-handler.ts](https://github.com/tencent-connect/openclaw-qqbot/blob/a730701d36aa7a070f98d4cba0f340f91f15e5f5/src/features/approval-handler.ts) 展示了 keyboard 与 OpenClaw 审批 RPC 接线；其短 ID、allow-always 和账号 allowFrom 策略不直接移植。
+
+LubanCode 已有 [ApprovalRequest / InteractionDecision](../src/runtime/interaction.hpp)、[InteractionBroker](../src/runtime/interaction_broker.hpp) 和 [on_tool_confirm_async](../src/agent/loop.hpp)。future 等待阻塞执行工作线程，不该堵事件泵；[App Server 交互实现](../src/app_server/interaction.cpp) 可供生命周期参考，渠道宿主不反向依赖 App Server。
+
+### 12.2 宿主裁决，平台只传按钮和身份
+
+- [ ] 新增平台中立 ChannelInteractionBroker（拟 `src/runtime/channel_interaction_broker.*`），复用现有四态和 future。QQ/飞书映射各自卡片，不各造审批引擎。
+- [ ] 新增显式 interaction capability 和 Bridge 交互请求/响应合同。当前严格 schema 没有通用审批回调口与 keyboard 类型，须版本化/协商并给旧适配器降级；不要塞普通聊天文本让模型解释“同意”。
+- [ ] 扩展为“可申请审批”的工具上限：工具须在本机允许询问的范围内，hard deny 不可被按钮覆盖。Q0 的最小工具表不能先隐藏工具，再期待模型申请它；新审批政策也不能把所有 shell 默认加回。
+- [ ] request_id 由宿主分配；pending 表绑定 channel/account/operator/conversation/workspace/session/turn/tool_use_id、规范参数 hash、policy revision、期限和 ownerEpoch。button_data 只放随机 opaque token 与决定码，服务端映射完整身份；不使用前八位 ID，不把命令或密钥塞按钮数据。
+- [ ] 卡片展示经脱敏的操作摘要、影响路径和参数差异。参数/文件内容/工作目录发生变化须重新请求批准；对写文件按待写内容 hash，对命令按 argv/cwd 与执行政策核对。审批通过仍过沙箱和权限上限。
+- [ ] 第一批只显示“允许这次”“拒绝”。未来若开放 AcceptForSession，文案写“本会话允许”，按现有内存会话语义处理，不能叫“永久允许”或修改全局配置。
+- [ ] 校验 QQ application_id、实际连接账号、场景及操作者 OpenID。单聊取 user_openid；以后群聊取 group_member_openid，不拿群 OpenID 当人。批准者须属于该请求授权集合，并在处理时仍有权限。
+- [ ] 回调经短路径验证、去重、落决策，再及时回应 QQ；code=0 表示回调处理成功，不表示工具执行成功。重复互动/重复 token 只返回已处理；未知、过期、跨账号或篡改请求不唤醒 future。回应接口每个互动 ID 只能一次，响应重试也要记状态。
+- [ ] Broker 等待期间 Bridge、QQ 心跳、控制命令与超时仍运转。Gateway 当前同步 tick 执行路径要拆开工作线程/事件推进，不能等按钮的线程恰好也是唯一收按钮线程。
+- [ ] 超时、取消、权限撤销、Gateway 关闭走 Cancel，文案写未获答复；不冒充用户点拒绝。重启后旧 future 不复活：原请求作废并保留审计；只有核实工具未执行且安全恢复后，才能为新执行尝试重新申请。
+- [ ] 审批控制消息走有期限的交互 outbox，和已完成 Agent 回复分开；卡片发送失败就取消等待，不因重试卡片突破审批 TTL。卡片无权限时保持 fail closed，用户可回本机处理。
+- [ ] 决策与真实工具 Action 关联进 V3 审计。已批准/未执行、执行中崩溃、执行完回执未发三窗分别恢复，未知副作用停审，不借重新点按钮盲重跑。
+
+### 12.3 Q6 验收
+
+- [ ] 手机允许一次只执行一次；拒绝/超时/取消不执行。重复点、他人点、转发卡片、跨账号 token、参数变化、过期和重启后点旧卡片均拒绝。
+- [ ] 等待审批时还能收新消息、响应 stop、保持连接。无 keyboard 权限时给准确失败，不能自动改成允许。
+- [ ] 终端同步确认、App Server 四态、子代理/PTC 权限原有测试回归；hard deny 不能经远端批准突破。
+
+## 十三、Q7：自定义菜单与指令面板
+
+用户提供的 [菜单面板入口](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/menu-panel/) 已读取。它适合做“帮助、文件处理说明、查看任务、待审批”入口，不承担定时器、文件解析或权限判断。
+
+| 能力 | 官方接口与适用范围 | LubanCode 用法 |
+| --- | --- | --- |
+| 全局自定义菜单 | GET/PUT `/v2/menu`；仅 C2C，全用户共用；PUT 覆盖整份菜单 | 只放不含私有信息的帮助与常用入口 |
+| 指令面板 | GET/POST `/v2/panels`，GET/PUT/DELETE `/v2/panels/{panel_id}` | 创建 LubanCode 面板，保存返回 panel_id，随后更新原件 |
+| 面板目标 | PUT `/v2/panels/{panel_id}/target`，op=add/del | c2c/group 可按用户/群关联；channel/dm 只支持 all |
+
+依据：[菜单更新](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_menu.put.html)、[面板创建](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_panels.post.html)、[目标更新](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_panels_panel_id_target.put.html)。文档现列菜单最多 10 项、子菜单最多 5 项且不再嵌套；每 bot 最多 20 面板、每面板最多 20 元素，目标单批最多 20 个。名称长度按平台字符规则校验，不能按 JS 字符串长度猜中文限额。
+
+**两类动作必须区分：** menu.send_message 与 panel.command 按文档是把文字填入输入框；用户发送后才成为聊天指令。旧式快捷菜单还可产生 type=12、feature_id 互动；消息内审批按钮是 type=11、button_data。分别解码，不能假定所有菜单点击都会立即执行请求。
+
+- [ ] 新增 QQ menu-panel 模块与本地配置发布入口；安装或普通启动不自动覆盖用户在开放平台配好的菜单。显式启用后先读远端配置、展示差异、保存版本/摘要，再 PUT；不反复创建面板耗尽额度。
+- [ ] 全局菜单建议“帮助”“文件”“任务”“审批”。“文件”提示从 QQ 原生附件入口发送；当前菜单接口未提供通用文件选择器。按钮 anchor=1 只记作特定手机单聊选图能力，不能宣传可任意选 PDF/ZIP。
+- [ ] c2c specific 面板可关联已配对用户，撤销时移除；面板可见和 only_admin 都不是宿主授权。用户直接手敲同名命令仍走相同身份/任务归属检查。
+- [ ] “查看任务”“暂停任务”“待审批”等控制命令在宿主识别后调用中立服务；只查当前主体有权查看的项目。菜单不展示私有路径、任务名或凭据，不在全局菜单塞个人审批 token。
+- [ ] 菜单 switch 的 ext 标记只用于用户偏好，不可改变工具授权/owner/全局模型。状态缺失或客户端不支持时用明确默认，不从一次 ext 消失推断权限撤销或授予。
+- [ ] 面板发布独立限速与重试：菜单修改文档为 5 QPM，创建面板 10 QPM，目标更新 60 QPM。GET/PUT 版本冲突不覆盖后台人工修改，给本地可见提示。
+- [ ] 把菜单/面板作为可选平台能力；飞书日后用自己的菜单/卡片调用同一任务和审批服务，不向 C++ 通用 schema 塞 QQ 原始 panel JSON。
+
+Q7 验收：手机/桌面分别查填入与发送行为；未配对用户虽见全局菜单仍不能执行；指定面板增删目标、全局覆盖冲突、重启不重复创建、配额错误都测。Q7 帮助入口可提前做，任务/审批入口只有 Q5/Q6 可用后才发布。
+
+## 十四、补充调研证据与交付顺序
+
+本次证据分三档：QQ 在线官方页给协议，腾讯插件/SDK 给参考实现，LubanCode 工作区给已有接线。网页正文通过 HTTPS 读取并提取 main；旧 send-receive 链接已返回“启动接入”页，故改用当前 autogen 接口链接，没有拿跳转页冒充 API 文档。官方页内部及 SDK 的差异均已记入上文，不据此宣称线上某一行为必然成功。
+
+- SDK 来源：[qqbot-nodejs 1.0.4](https://www.npmjs.com/package/@tencent-connect/qqbot-nodejs/v/1.0.4)，核读包内 `src/protocol/api/media.ts`、`media-chunked.ts`、`messages.ts`、`types.ts`。不把本机 Temp 路径作为团队唯一证据入口。
+- 文件参考：[腾讯附件中间件](https://github.com/tencent-connect/openclaw-qqbot/blob/a730701d36aa7a070f98d4cba0f340f91f15e5f5/src/middleware/attachment.ts)；下载、语音转录、图片路径与普通附件处理分支均存在，具体能力不直接等同 LubanCode 能力。
+- 调度与审批来源分别见第十一、十二节；源码符号、接口路径、已知差异与可执行验收已列明。
+
+建议顺序：Q0—Q3 文字链 → Q4 文件闭环 → Q5 单次提醒再周期任务 → Q6 远端审批。Q7 菜单壳按依赖插入，已实现哪些功能才发布哪些入口。每批保留旧功能回归；发布说明分“文档/fixture 通过”和“真实 QQ 账号通过”。
+
+- [ ] README 后续补手机操作示例、文件格式表、时间/时区确认、拒收后的结果查询与审批超时说明；Q4—Q7 未验收前继续标待实现。
+- [ ] 真实账号测试须使用明确授权的收件人；本次只调研公开文档与源码，没有配置菜单、创建定时任务、发文件或发送审批消息。
+
+## 十五、SDK 可选，允许直接实现官方协议
+
+用户进一步确认了“不用 SDK”的方向。官方已有鉴权、收发、上传、互动和菜单文档，接入不要求导入腾讯 Node SDK。推荐优先评估原生 C++ QQ 适配进程，保持 Channel Bridge 隔离；无需把平台代码塞进 Agent，也不必把 SDK 再包一层当作硬依赖。前述 Node 目录只是备选示例。
+
+| 方案 | 依赖与代价 | 保持一致的部分 |
+| --- | --- | --- |
+| 原生 C++ 适配进程直调 API | 无 Node；自行实现事件连接、令牌刷新、上传与重试，按平台发布二进制 | manifest、Bridge、宿主权限/任务/会话/outbox |
+| Node 适配进程直调 API | 仍需 Node；不用腾讯 SDK，但自行处理协议 | 同上 |
+| Node + 腾讯 SDK | 少写连接代码；需固定版本、核对协议差异 | 同上 |
+
+不用 SDK 不等于不用成熟 HTTP/TLS/WebSocket 库。当前 [HTTP 传输底座](../src/net/http_transport.hpp) 是完整响应的 GET/POST 路径，可供鉴权与小 JSON 请求复用评估；文件流、PUT/DELETE 和 WebSocket 不能假定已支持。此轮在 platform/net 与构建依赖中未找到现成 QQ WebSocket 客户端，实施前需选定传输库并验证平台构建选项。
+
+- [ ] 原生适配器分 auth、gateway-events、messages、media-upload、interactions、menu-panel、spool 模块。令牌刷新单飞、到期重取、错误码分型、限速、心跳和重连状态显式测试，不依赖 SDK 隐式行为。
+- [ ] WebSocket 需实现 Identify/Intents、Heartbeat/ACK、seq/session_id、Resume/失效重建、断线退避和取消。当前账号是否获准使用该接收方式须实测；若选 Webhook，另补公网入口、raw-body 验签与重放校验，不因绕过 SDK 自动获得平台权限。
+- [ ] HTTP 边界增加受控 PUT/DELETE、流式文件读写、大小帽和取消；避免为了大文件把整件读入内存。复用 libcurl 等底座时不改现有 Provider 请求路径，单独跑原有 HTTP/Provider 回归。
+- [ ] 将官方 API 示例固化为协议 fixture；第十、十一节记录的 SDK/文档冲突保留为测试案例。SDK 即使不进入依赖，也可用于交叉检查；测试通过不等于真实平台联调通过。
+- [ ] README 按最终 runtime 写安装要求，原生实现不得继续要求 Node；飞书日后可独立选语言与 SDK，宿主不绑定某一家平台实现方式。
