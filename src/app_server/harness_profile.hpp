@@ -55,11 +55,11 @@ struct HarnessProfile {
     std::set<std::string> features_disabled;
     // components.mcpServers:本场点名要挂的 MCP 服务(canonical 名)。
     std::vector<std::string> mcp_servers;
-    // components.plugins:本场点名要挂的 Lua/process 插件(canonical 名)。
-    // P2 只开点名通道:当前 build 未接线 app-server 插件装配,点名即在
-    // 装配层按 component_unavailable 整场明拒(单子 §7.2"不支持即拒绝",
-    // 错误码冻结见 docs/reference/capability-contract.md §13.4);P5 接线
-    // 后此名单进入真装载。
+    // components.plugins:本场点名要挂的 Lua/process 插件(canonical 名,
+    // 即 manifest.id)。P5 起 v2 embedded-lua 件进入真装载(发现根扫描->
+    // 信任账 ->挂载,见 session_assembly 步骤 0);点名 process/native 件
+    // 仍按 component_unavailable 整场明拒(单子 §7.2"不支持即拒绝"的
+    // 收窄面;错误码冻结见 docs/reference/capability-contract.md §13.4)。
     std::vector<std::string> plugins;
     HarnessToolPolicy tools;
     // exposure.default:direct|deferred|host_only。P1 直连表只走 direct;

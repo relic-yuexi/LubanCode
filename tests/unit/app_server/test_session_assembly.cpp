@@ -38,6 +38,10 @@
 #include "app_server/harness_profile.hpp"
 #include "app_server/session_assembly.hpp"
 #include "config/config.hpp"
+#include "config/plugin_trust.hpp"
+#include "platform/paths.hpp"
+#include "runtime/plugin_contract.hpp"
+#include "runtime/plugin_tool.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 
@@ -117,6 +121,83 @@ fs::path MakeSkillsRoot(const std::string& tag) {
         out << "---\nname: greet\ndescription: 问候技能。\n---\nGREET-SKILL-BODY。\n";
     }
     return root;
+}
+
+// P5:临时插件发现根,种一只 v2 embedded-lua 插件(plugin.json + demo.lua,
+// 夹具形状与 tests/unit/runtime/test_plugin_lua_manifest.cpp 同款)。返回
+// 根路径;插件 id 是 demo-lua,工具 plugin__demo-lua__search。
+void WriteLuaPlugin(const fs::path& dir, const std::string& lua_script) {
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    {
+        std::ofstream out(dir / "plugin.json", std::ios::binary);
+        out << R"json({
+  "manifest_version": 2,
+  "id": "demo-lua",
+  "version": "0.1.0",
+  "language": "lua",
+  "runtime": {"kind": "embedded-lua", "entry": "demo.lua"},
+  "tools": [
+    {
+      "name": "search",
+      "entry": "search",
+      "description": "Demo search tool.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    }
+  ]
+})json";
+    }
+    {
+        std::ofstream out(dir / "demo.lua", std::ios::binary);
+        out << lua_script;
+    }
+}
+
+fs::path MakePluginsRoot(const std::string& tag) {
+    static int counter = 0;
+    const fs::path root = fs::temp_directory_path() /
+                          ("lubancode_assembly_plugins_" + tag + "_" + std::to_string(counter++));
+    WriteLuaPlugin(root / "demo-lua",
+                   "return { search = function(input) return 'ok: ' .. tostring(input.query) end }\n");
+    return root;
+}
+
+// 一只 v1 process 插件(kind 未接线的点名对象)。
+void WriteProcessPlugin(const fs::path& dir) {
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    {
+        std::ofstream out(dir / "plugin.json", std::ios::binary);
+        out << R"json({
+  "manifest_version": 1,
+  "id": "v1proc",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {"kind": "process", "command": "python", "args": ["${plugin_dir}/runner.py"]},
+  "tools": [{"name": "count", "description": "数词", "input_schema": {"type": "object"}}]
+})json";
+    }
+    {
+        std::ofstream out(dir / "runner.py", std::ios::binary);
+        out << "print('{}')\n";
+    }
+}
+
+// 发现根里全部插件记进一本纯内存信任账(装配消费账是只读面,测试自建)。
+config::PluginTrustStore TrustAllIn(const fs::path& root) {
+    auto [store, load_error] = config::PluginTrustStore::Load(std::optional<std::string>{});
+    REQUIRE(load_error == std::nullopt);
+    for (const auto& manifest : runtime::ScanPluginDirectories(root).manifests) {
+        const auto hash = runtime::ComputePluginContentHash(manifest->plugin_dir);
+        REQUIRE(hash.has_value());
+        store.SetTrusted(platform::PathToUtf8(manifest->plugin_dir), *hash, "assembly test");
+    }
+    return store;
 }
 
 // 一份最小档案的冻结计划(persona 路;preload 可选)。
@@ -287,18 +368,131 @@ TEST_CASE("P2 skill 工具:features 放行且 allow 点名才进面,清单段同
     }
 }
 
-TEST_CASE("P2 插件点名:component_unavailable 整场明拒,零副作用") {
+// P5(应用Worker接入单 §7.2):点名插件真装载。装载/信任/HTTP·Secret/寿命
+// 的整链用例在 test_plugin_assembly.cpp(单子 P5 勾选点名的三件测试);
+// 这里只钉装配路与 tools 面的衔接。
+
+TEST_CASE("P5 插件点名:未递发现根,plugin_missing 整场明拒") {
     SessionAssemblyRequest request = BaseRequest();
     HarnessProfile harness;
     harness.name = "lua";
+    harness.features_enabled.insert("plugins");
     harness.plugins = {"demo.lua-tool"};
     request.harness = &harness;
+    // 不递 plugins_root:点名件无处发现,明拒不降级(P2 时此路是
+    // component_unavailable;P5 接线后让位给真装载的失败码)。
     const auto result = AssembleSession(std::move(request));
     CHECK(result.assembly == nullptr);
-    CHECK(result.error_code == "component_unavailable");
+    CHECK(result.error_code == "plugin_missing");
     REQUIRE_FALSE(result.error.empty());
     CHECK(result.error.find("demo.lua-tool") != std::string::npos);
-    CHECK(result.error.find("component_unavailable") != std::string::npos);
+    CHECK(result.error.find("plugin_missing") != std::string::npos);
+}
+
+TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow 决定出面") {
+    const fs::path root = MakePluginsRoot("face");
+
+    SUBCASE("allow 点名插件工具:adapter 进注册表,挂载快照记账") {
+        SessionAssemblyRequest request = BaseRequest();
+        HarnessProfile harness;
+        harness.name = "lua";
+        harness.tools.mode = HarnessToolPolicy::Mode::Only;
+        harness.tools.allow = {"plugin__demo-lua__search"};
+        harness.features_enabled.insert("plugins");
+        harness.plugins = {"demo-lua"};
+        request.harness = &harness;
+        request.plugins_root = root;
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
+        request.plugin_data_root = root / "data";
+        const auto result = AssembleSession(std::move(request));
+        REQUIRE(result.assembly != nullptr);
+        REQUIRE(result.assembly->registry != nullptr);
+        CHECK(result.assembly->registry->Find("plugin__demo-lua__search") != nullptr);
+        REQUIRE(result.assembly->manifest_lua != nullptr);
+        REQUIRE(result.assembly->manifest_lua->plugins().size() == 1);
+        REQUIRE(result.assembly->mounted_plugins.size() == 1);
+        CHECK(result.assembly->mounted_plugins[0] == "demo-lua@0.1.0");
+        // 统一工具闸:外部代码一律先问,不走旁路(§7.2/§十)。
+        tools::Tool* tool = result.assembly->registry->Find("plugin__demo-lua__search");
+        REQUIRE(tool != nullptr);
+        CHECK(tool->needs_confirm());
+        CHECK(tool->approval_class() == tools::ApprovalClass::External);
+    }
+    SUBCASE("allow 未点名:装载照旧(点名=部署意志),工具零出面") {
+        SessionAssemblyRequest request = BaseRequest();
+        HarnessProfile harness;
+        harness.name = "lua";
+        harness.tools.mode = HarnessToolPolicy::Mode::Only;
+        harness.tools.allow = {};  // 空表=零工具面,合法
+        harness.features_enabled.insert("plugins");
+        harness.plugins = {"demo-lua"};
+        request.harness = &harness;
+        request.plugins_root = root;
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
+        request.plugin_data_root = root / "data";
+        const auto result = AssembleSession(std::move(request));
+        REQUIRE(result.assembly != nullptr);
+        REQUIRE(result.assembly->registry != nullptr);
+        CHECK(result.assembly->registry->All().empty());
+        REQUIRE(result.assembly->manifest_lua != nullptr);  // 装载照做
+        CHECK(result.assembly->mounted_plugins.size() == 1);
+    }
+    SUBCASE("mode=none:点名装载,零工具空表(与 MCP 起服同构)") {
+        SessionAssemblyRequest request = BaseRequest();
+        HarnessProfile harness;
+        harness.name = "lua";
+        harness.tools.mode = HarnessToolPolicy::Mode::None;
+        harness.features_enabled.insert("plugins");
+        harness.plugins = {"demo-lua"};
+        request.harness = &harness;
+        request.plugins_root = root;
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
+        request.plugin_data_root = root / "data";
+        const auto result = AssembleSession(std::move(request));
+        REQUIRE(result.assembly != nullptr);
+        REQUIRE(result.assembly->registry != nullptr);
+        CHECK(result.assembly->registry->All().empty());
+        REQUIRE(result.assembly->manifest_lua != nullptr);
+    }
+    SUBCASE("allow 点名不存在的插件工具:缺工具明拒,不静默降级") {
+        SessionAssemblyRequest request = BaseRequest();
+        HarnessProfile harness;
+        harness.name = "lua";
+        harness.tools.mode = HarnessToolPolicy::Mode::Only;
+        harness.tools.allow = {"plugin__demo-lua__no_such_tool"};
+        harness.features_enabled.insert("plugins");
+        harness.plugins = {"demo-lua"};
+        request.harness = &harness;
+        request.plugins_root = root;
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
+        request.plugin_data_root = root / "data";
+        const auto result = AssembleSession(std::move(request));
+        CHECK(result.assembly == nullptr);
+        REQUIRE_FALSE(result.error.empty());
+        CHECK(result.error.find("plugin__demo-lua__no_such_tool") != std::string::npos);
+    }
+    SUBCASE("点名 process 件:kind 未接线,component_unavailable 明拒") {
+        WriteProcessPlugin(root / "v1proc");
+        SessionAssemblyRequest request = BaseRequest();
+        HarnessProfile harness;
+        harness.name = "proc";
+        harness.features_enabled.insert("plugins");
+        harness.plugins = {"v1proc"};
+        request.harness = &harness;
+        request.plugins_root = root;
+        config::PluginTrustStore trust = TrustAllIn(root);
+        request.plugin_trust = &trust;
+        request.plugin_data_root = root / "data";
+        const auto result = AssembleSession(std::move(request));
+        CHECK(result.assembly == nullptr);
+        CHECK(result.error_code == "component_unavailable");
+        REQUIRE_FALSE(result.error.empty());
+        CHECK(result.error.find("v1proc") != std::string::npos);
+    }
 }
 
 TEST_CASE("P2 agent_plan:提示部件组合进档案,能力段按注册表实际面开合") {

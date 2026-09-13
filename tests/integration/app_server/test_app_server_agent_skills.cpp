@@ -34,6 +34,7 @@
 #include "interactive_process.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "runtime/plugin_tool.hpp"  // P5:信任账预批用的同一套扫描/指纹 API
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -415,9 +416,9 @@ TEST_CASE("P2 MCP 错误链:rich(unknown kind) 的 -32602 回进下一轮请求"
 }
 
 // ---------------------------------------------------------------------------
-// 用例 3:点名未接线的 Lua 插件——component_unavailable,不忽略不冒充
+// 用例 3:Lua 插件边界(AW-10)——P5 真装载后,缺件按 plugin_missing 明拒
 // ---------------------------------------------------------------------------
-TEST_CASE("P2 Lua 边界:点名插件 thread/start 明拒 component_unavailable") {
+TEST_CASE("P5 Lua 边界:点名件不在发现根,thread/start 明拒 plugin_missing") {
     const std::string binary = FindLubancodeBinary();
     if (binary.empty() || !PythonAvailable()) {
         return;
@@ -447,12 +448,127 @@ TEST_CASE("P2 Lua 边界:点名插件 thread/start 明拒 component_unavailable"
     CHECK_FALSE(thread_response->contains("result"));
     const json& error = (*thread_response)["error"];
     REQUIRE(error.contains("message"));
-    CHECK(error["message"].get<std::string>().find("component_unavailable") != std::string::npos);
+    // P5 真装载后缺件让位:不再 component_unavailable(build 未接线),而是
+    // plugin_missing(发现根里没有这只件)——不忽略、不冒充已装载。
+    CHECK(error["message"].get<std::string>().find("plugin_missing") != std::string::npos);
     if (error.contains("data") && error["data"].contains("code")) {
-        CHECK(error["data"]["code"] == "component_unavailable");  // 机器可读码(additive)
+        CHECK(error["data"]["code"] == "plugin_missing");  // 机器可读码(additive)
     }
     // 零模型请求:组件没装上就不许碰模型。
     CHECK(field.model.requests().empty());
+
+    REQUIRE(field.Send(R"({"id":9,"method":"shutdown","params":{}})"));
+    int exit_code = -1;
+    REQUIRE(field.proc->Wait(15000, &exit_code));
+    CHECK(exit_code == 0);
+}
+
+// 用例 3b:P5 Lua 真装载全链(AW-10 后半)——材料根 plugins/ 预置 v2
+// embedded-lua 插件 + 信任账预批,thread 开场、模型首请求带插件工具、
+// 工具调用真跑 Lua、结果进下一轮请求。
+TEST_CASE("P5 Lua 全链:预置插件+信任账,装载出面调用真跑") {
+    const std::string binary = FindLubancodeBinary();
+    if (binary.empty() || !PythonAvailable()) {
+        return;
+    }
+    AgentSkillsField field;
+    field.WriteGlobalConfig();
+    // 材料根 plugins/demo-lua:一只 v2 embedded-lua 插件。
+    const fs::path plugin_dir = field.home_dir / ".lubancode" / "plugins" / "demo-lua";
+    field.WriteFile(plugin_dir / "plugin.json", R"json({
+  "manifest_version": 2,
+  "id": "demo-lua",
+  "version": "0.1.0",
+  "language": "lua",
+  "runtime": {"kind": "embedded-lua", "entry": "demo.lua"},
+  "tools": [
+    {
+      "name": "search",
+      "entry": "search",
+      "description": "Demo lua search tool.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    }
+  ]
+})json");
+    field.WriteFile(plugin_dir / "demo.lua",
+                    "return { search = function(input) return 'lua-saw: ' .. tostring(input.query) end }\n");
+    // 信任账预批(个人模式落 <home>/.lubancode/plugin-trust.json):键是
+    // canonical 目录 + content hash,用与生产同一套 API 算,不手拼。
+    {
+        const auto scanned = lubancode::runtime::ScanPluginDirectories(field.home_dir / ".lubancode" /
+                                                                       "plugins");
+        REQUIRE(scanned.manifests.size() == 1);
+        const auto hash = lubancode::runtime::ComputePluginContentHash(scanned.manifests[0]->plugin_dir);
+        REQUIRE(hash.has_value());
+        json trusted;
+        trusted[lubancode::platform::PathToUtf8(scanned.manifests[0]->plugin_dir) + "\n" + *hash] = {
+            {"description", "integration preset"}, {"trusted_at", "integration"}};
+        field.WriteFile(field.home_dir / ".lubancode" / "plugin-trust.json",
+                        json{{"trusted", std::move(trusted)}}.dump());
+    }
+    json deployment = {
+        {"schemaVersion", 1},
+        {"service", {{"mode", "managed"},
+                     {"listeners", {{"stdio", {{"enabled", true}}}}},
+                     {"defaultProfile", "smoke"}}},
+        {"harnessProfiles",
+         {{"smoke",
+           {{"agentRef", "general-purpose"},
+            {"features",
+             {{"default", "disabled"}, {"enabled", json::array({"plugins"})}, {"disabled", json::array()}}},
+            {"components", {{"plugins", json::array({"demo-lua"})}}},
+            {"tools",
+             {{"mode", "only"}, {"allow", json::array({"plugin__demo-lua__search"})}, {"deny", json::array()}}},
+            {"exposure", {{"default", "direct"}}}}}}}};
+    field.WriteDeployment(deployment.dump());
+    // 假模型两幕:幕1 调插件工具,幕2 终答。
+    field.model.Enqueue(SseResponse({ToolCallFrame("call-lua-1", "plugin__demo-lua__search",
+                                                   R"({\"query\":\"integration-ping\"})"),
+                                     kFinishToolCalls}));
+    field.model.Enqueue(SseResponse({TextFrame("p5-lua-final"), kFinishStop, kUsageFrame}));
+
+    std::string spawn_error;
+    REQUIRE(field.SpawnServer(binary, &spawn_error));
+    const json* thread_response = field.StartThread();
+    REQUIRE(thread_response != nullptr);
+    if (!thread_response->contains("result")) {
+        MESSAGE("thread/start 错误响应: ", thread_response->dump());
+        MESSAGE("服务端 stderr: ", field.proc->StderrText());
+    }
+    REQUIRE(thread_response->contains("result"));
+    const std::string thread_id = (*thread_response)["result"].value("threadId", std::string());
+    REQUIRE_FALSE(thread_id.empty());
+
+    REQUIRE(field.Send(json{{"id", 3},
+                            {"method", "turn/start"},
+                            {"params", json{{"threadId", thread_id}, {"text", "调插件工具"}}}}
+                               .dump()));
+    REQUIRE(field.PumpUntil([&] { return field.FindEvent("turn/completed") != nullptr; }, 60000));
+    const json* completed = field.FindEvent("turn/completed");
+    REQUIRE(completed != nullptr);
+    CHECK((*completed)["params"].value("executionStatus", std::string()) == "success");
+
+    const std::vector<lubancode::test_support::FakeHttpRequest> requests = field.model.requests();
+    REQUIRE(requests.size() == 2);
+    const json first_body = json::parse(requests[0].body, nullptr, false);
+    REQUIRE_FALSE(first_body.is_discarded());
+    // 首请求的工具面:恰是档点名的插件工具。
+    REQUIRE(first_body.contains("tools"));
+    bool has_lua_tool = false;
+    for (const auto& tool : first_body["tools"]) {
+        if (tool.contains("function") && tool["function"].contains("name") &&
+            tool["function"]["name"] == "plugin__demo-lua__search") {
+            has_lua_tool = true;
+        }
+    }
+    CHECK(has_lua_tool);
+    // 幕1 真执行:Lua 工具的输出进幕2 请求(装载不是空架子)。
+    CHECK(requests[1].body.find("lua-saw: integration-ping") != std::string::npos);
 
     REQUIRE(field.Send(R"({"id":9,"method":"shutdown","params":{}})"));
     int exit_code = -1;
