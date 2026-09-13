@@ -316,6 +316,24 @@ std::vector<DependencyExplanation> ExplainDependencies(const json& profile) {
     }();
     out.push_back({"", "features 放行 mcp", mcp_allowed});
 
+    // P2(应用Worker接入单):内置 skill 工具进 allow 名单的依赖解释——
+    // 裸名 "skill" 须 features 放行 skills(与生产解析器同一口径)。
+    const bool skills_allowed = [&] {
+        if (!profile.contains("features") || !profile["features"].is_object()) {
+            return false;
+        }
+        const json& features = profile["features"];
+        const std::string def =
+            features.contains("default") && features["default"].is_string()
+                ? features["default"].get<std::string>() : "enabled";
+        if (def == "enabled") {
+            return true;
+        }
+        return features.contains("enabled") && features["enabled"].is_array() &&
+               std::find(features["enabled"].begin(), features["enabled"].end(), "skills") !=
+                   features["enabled"].end();
+    }();
+
     std::vector<std::string> mounted_servers;
     if (profile.contains("components") && profile["components"].is_object() &&
         profile["components"].contains("mcpServers") && profile["components"]["mcpServers"].is_array()) {
@@ -333,6 +351,11 @@ std::vector<DependencyExplanation> ExplainDependencies(const json& profile) {
                 continue;
             }
             const std::string name = tool.get<std::string>();
+            // 内置 skill 工具的裸名(P2 起):依赖 = features 放行 skills。
+            if (name == "skill") {
+                out.push_back({name, "features 放行 skills", skills_allowed});
+                continue;
+            }
             // canonical 文本形如 <origin>:<server>:<tool>;本阶段只解释
             // mcp: 前缀(内置/插件工具的 canonical 映射在 P2 与 ToolOrigin
             // 对账后补)。

@@ -142,6 +142,31 @@ struct ProfileSmoke {
         temp_root = root;
         home_dir = root / "home";
         fs::create_directories(home_dir / ".lubancode", ec);
+        // P2(应用Worker接入单 §五):agentRef 必须解析到可用档案——冒烟场
+        // 在材料根(~/.lubancode 同构的临时树)里种一份最小档案,档名指它。
+        WriteAgentMaterials();
+    }
+
+    // Agent 档案 + 它点名的 Prompt Profile 业务正文(P2 装配吃这两层)。
+    void WriteAgentMaterials() {
+        std::error_code ec;
+        const fs::path agents_dir = home_dir / ".lubancode" / "agents";
+        fs::create_directories(agents_dir, ec);
+        const fs::path profile_core =
+            home_dir / ".lubancode" / "prompts" / "profiles" / "smoke" / "core";
+        fs::create_directories(profile_core, ec);
+        {
+            std::ofstream out(agents_dir / "smoke-assistant.yaml", std::ios::binary);
+            out << "schema: 1\n"
+                   "name: smoke-assistant\n"
+                   "description: profile 冒烟场的最小档案。\n"
+                   "prompt:\n"
+                   "  profile: smoke\n";
+        }
+        {
+            std::ofstream out(profile_core / "10-identity.md", std::ios::binary);
+            out << "# 身份\n\n你是 SMOKE-PROFILE-IDENTITY,部署档点名的业务档案正文。\n";
+        }
     }
 
     ~ProfileSmoke() {
@@ -260,7 +285,7 @@ std::string MinimalToolsDeployment(bool with_flaky) {
                      {"defaultProfile", "smoke"}}},
         {"harnessProfiles",
          {{"smoke",
-           {{"agentRef", "example.tools:assistant"},
+           {{"agentRef", "smoke-assistant"},
             {"features", {{"default", "disabled"}, {"enabled", json::array({"mcp"})}, {"disabled", disabled}}},
             {"components", {{"mcpServers", servers}}},
             {"tools",
@@ -282,7 +307,7 @@ std::string ZeroToolsDeployment() {
                      {"defaultProfile", "smoke"}}},
         {"harnessProfiles",
          {{"smoke",
-           {{"agentRef", "example.tools:assistant"},
+           {{"agentRef", "smoke-assistant"},
             {"features", {{"default", "disabled"}, {"enabled", json::array()}, {"disabled", disabled}}},
             {"components", json::object()},
             {"tools", {{"mode", "none"}, {"deny", json::array()}}},
@@ -379,6 +404,18 @@ TEST_CASE("profile 冒烟:minimal-tools——真 exe+假模型+真 MCP,多轮工
     }
     CHECK(has_echo);
     CHECK(has_describe);
+
+    // P2(AW-05 首棒):系统提示来自档案业务正文——档点名的 Prompt Profile
+    // 的 core 身份段在场,编码助手默认人格不混入;宿主能力段(mcp)按
+    // 实际工具面照注。chat wire 的 system 落消息流头一条。
+    REQUIRE(first_body.contains("messages"));
+    REQUIRE(first_body["messages"].is_array());
+    REQUIRE_FALSE(first_body["messages"].empty());
+    REQUIRE(first_body["messages"][0].contains("content"));
+    const std::string system_text = first_body["messages"][0]["content"].get<std::string>();
+    CHECK(system_text.find("SMOKE-PROFILE-IDENTITY") != std::string::npos);
+    CHECK(system_text.find("命令行 AI 编程助手") == std::string::npos);
+    CHECK(system_text.find("外接工具(MCP)") != std::string::npos);  // mcp 能力段按工具面照注
 
     // 第二笔:幕1 的 echo 真执行了——工具结果(PING 回显)进了下一轮请求。
     const std::string second_body_text = requests[1].body;

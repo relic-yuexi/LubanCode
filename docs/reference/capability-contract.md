@@ -79,15 +79,16 @@
 
 | 字段 | 约束 |
 | --- | --- |
-| `agentRef` | canonical Agent 引用,如 `example.tools:assistant` |
+| `agentRef` | canonical Agent 引用,如 `example.tools:assistant`;P2 起点名必解析(AgentCatalog),找不到/不可用拒启,不回落默认提示词 |
 | `features` | `default: enabled|disabled` 加 `enabled`/`disabled` 名单;名单值须在 §4 功能名表内;同键两名单同现是配置错误 |
 | `components.mcpServers` | 名单;点名未在上层获准的服务是配置错误,不给档内授权 |
-| `tools` | §2 ToolPolicySpec |
+| `components.plugins` | 名单(canonical 插件名;P2 起收)。点名须 `features` 放行 `plugins`;当前 build 未接线 app-server 插件装配,点名在会话装配层报 `component_unavailable` 整场明拒(应用Worker接入单 §7.2"不支持即拒绝";P5 接线后进入真装载) |
+| `tools` | §2 ToolPolicySpec;P2 起 `allow` 另收内置 skill 工具裸名 `skill`(须 `features` 放行 `skills`) |
 | `exposure.default` | `direct|deferred|host_only` |
 | `updates` | `defaultApplyAt`、`allowSessionExpansion`;首版只支持 `next_session`,`allowSessionExpansion` 只可为 false |
 | `limits` | 非负整数;超出上层上限按明确规则拒绝或收窄,须在结果里给有效值 |
 
-依赖解释是校验的一部分,不是可选项:`tools.allow` 里的 `mcp:<server>:<tool>` 名字要求 `components.mcpServers` 含 `<server>` 且 `features` 放行 `mcp`;`exposure.default: deferred` 要求发现器依赖(tool_search/tool_invoke)未被禁,零工具面(`none` 或 `only`+空 allow)配 `deferred` 是配置错误——没有可延迟暴露的东西。解释不全的档不许采用。
+依赖解释是校验的一部分,不是可选项:`tools.allow` 里的 `mcp:<server>:<tool>` 名字要求 `components.mcpServers` 含 `<server>` 且 `features` 放行 `mcp`;裸名 `skill` 要求 `features` 放行 `skills`;`exposure.default: deferred` 要求发现器依赖(tool_search/tool_invoke)未被禁,零工具面(`none` 或 `only`+空 allow)配 `deferred` 是配置错误——没有可延迟暴露的东西。解释不全的档不许采用。
 
 ## 4. 功能名表〔冻结〕
 
@@ -311,13 +312,13 @@ claim 恢复类:
 | 部署档解析(schema 1:features/tools/exposure/limits/MCP 名单) | 已落 | `app_server::LoadHarnessDeploymentFile`/`ParseHarnessDeployment`(src/app_server/harness_profile.cpp) |
 | headless 生产装配(MCP 按档点名启动、allow 名单装工具、必需件起失败拒整场) | 已落 | `app_server::AssembleSession`(src/app_server/session_assembly.cpp);入口 `RunAppServerMode --app-server-profile`(src/app/cli_app.cpp) |
 | 无档默认 | 显式零工具默认档(合同 §2.3),不照搬终端工具表 | `RunAppServerMode` 未递档分支 |
-| Agent 装配(agentRef 解析入首请求) | **未接线**——档有字段,生产入口仍传 `kAppServerDefaultSystemPrompt` 固定正文 | GAP-02;归 P2 |
-| SkillTool/技能材料装载 | **未接线**——app-server 路径不装 skill 工具 | GAP-01/GAP-03;归 P2 |
-| Lua/process 插件装载 | **未接线**——部署档点名即按 §7.2 报 `component_unavailable` 拒(P2 落地,现无点名通道故不可达) | GAP-01;归 P2/P5 |
+| Agent 装配(agentRef 解析入首请求) | **已落(P2,2026-09-14)**——档点名 agentRef 必解析(AgentCatalog,解析面=码内内置+材料根 agents/);档案定系统提示部件(prompt_assembler 既有管线:Profile/persona 替业务正文,宿主段按实际工具面现拼盖不掉);找不到/不可用拒启,不回落默认 | `app_server::ResolveHarnessAgentPlan`/`ComposeHarnessSystemPrompt`(src/app_server/agent_wiring.cpp);消费 `SessionAssemblyRequest::agent_plan` |
+| SkillTool/技能材料装载 | **已落(P2,2026-09-14)**——features.skills 放行且 tools 面点名 `skill` 才装配:显式单根(材料根 skills/)扫描,清单段/工具/预装正文三面同进同退;skills.preload 缺名整场明拒;不搬终端五层合并,装技能不授予任何执行工具 | `AssembleSession` 步骤 2.5(src/app_server/session_assembly.cpp)+`tools::ScanSkillsDir`/`SkillTool`;组合 `ComposeHarnessSystemPrompt` |
+| Lua/process 插件装载 | **点名通道已开、装载未接(P2)**——`components.plugins` 收名单;当前 build 未接线,点名在装配层报 `component_unavailable` 整场明拒(thread/start 错误带 `data.code`,additive),不忽略不冒充;真装载归 P5 | `HarnessProfile::plugins`(src/app_server/harness_profile.cpp)+`AssembleSession` 步骤 0 |
 | 幂等受理+输入原件持久(operations-inputs、CanonicalInputPayload、ProcessCrash 耐久) | 已落 | `SessionService::SubmitInput`(src/runtime/session_service.cpp;PR #59) |
 | turn 终态与 ResultEnvelope(finalMessageRefs、usageReported、resultEnvelopePersisted) | 已落 | `SessionService::RecordTurnFinal`/`MakeTurnCompletedParams`(src/app_server/schema.cpp;PR #62) |
 | 应用根三变量/来源裁剪/参数根-数据根分家 | 已落(本节合同+P1) | `config::ResolveRuntimePaths`/`StateRootDir`(src/config/runtime_paths.cpp) |
 | gateway/channels 状态根接数据根 | **未接**(避让在跑的 QQ 接入单,另立小单) | cli_app.cpp gateway run 段仍走 HomeLubancodeDir |
 | rg-stage 工具缓存的播种脚本 | **未接**(读取走数据根;fetch_ripgrep.py 不认数据根,应用根下的 rg-stage 须部署者自落) | src/tools/search_ripgrep.cpp UserStage 层 |
 
-错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"、"缺获准执行工具返回 `capability_unavailable`"(本单 §六/§7.2 冻结,P2/P5 生效)。
+错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"自 P2 生效(装配失败经 thread/start 错误信封带 `data.code`,additive 字段);"缺获准执行工具返回 `capability_unavailable`"(本单 §六冻结)待 Skill 依赖声明 schema 升级时生效。

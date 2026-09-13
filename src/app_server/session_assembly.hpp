@@ -7,37 +7,47 @@
 // 生产装配缺口(G01/G02):显式选择工具与 Agent 档案、复用同场资源、
 // 缺授权/缺工具/依赖启动失败明拒。
 //
-// 装配序(冻结合同 §7.1 的最小落地):
+// 装配序(冻结合同 §7.1 的最小落地;P2 起插三步):
+//   0. 点名未接线组件(components.plugins)即拒:component_unavailable,
+//      零副作用(应用Worker接入单 §7.2);
 //   1. 计划已解析(HarnessProfile 纯数据,解析在 harness_profile.hpp,
 //      零外部启动副作用);
 //   2. 依赖解释:tools.allow 引用的每个 MCP 服务须在 config.mcp_servers
 //      里配置(上层获准的现行判法)——缺即明拒,不起任何进程;
+//   2.5. Skill 材料:features.skills 放行且 tools 面点名 "skill" 才按
+//      显式单根(skills_root)扫描(§六;GAP-03 不搬终端五层合并);
 //   3. 只启动计划点名的 MCP 服务(config.mcp_servers ∩ components.
 //      mcpServers):tools.allow 引用(必需)的起失败=整场明拒;未被
 //      引用(可选)的起失败=降级记账、继续(Profile 的工具选择决定该
 //      组件能否降级);
 //   4. 握手 tools/list 后复验:mode=only 的每枚 allow 名单必须在握手
 //      清单里——缺即明拒("缺工具"不许静默降级);
-//   5. 注册表只装 allow 点名的工具;mode=none/inherit 落零工具空表
-//      (合同 §2.3 无工具会话:不启动 MCP、不挂发现器);
-//   6. Agent 档案显式:system_prompt 与步数闸由调用方显式给。
+//   5. 注册表只装 allow 点名的工具(内置 skill 工具同规矩);mode=none/
+//      inherit 落零工具空表(合同 §2.3 无工具会话:不启动 MCP、不挂发现器);
+//   6. Agent 档案显式:agent_plan 在场时系统提示由提示部件组合产出
+//      (agent_wiring.hpp,prompt_assembler 既有管线),步数闸与档案
+//      runtime 取更严;缺席时 system_prompt 与步数闸由调用方显式给。
 //
 // 寿命规矩(§7.2/§7.3 的最小落地):MCP 子进程持有者先声明(后析构),
 // 注册表后声明(先析构)——McpTool 持 Client&。同场多轮共用,不每轮
 // 重建注册表把旧 Tool 指针留给后台任务。
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "agent/agent.hpp"  // AgentProfile
 #include "api/backend.hpp"
+#include "app_server/agent_wiring.hpp"  // HarnessAgentPlan:P2 Agent/Skill 装配计划
 #include "app_server/harness_profile.hpp"
 #include "config/config.hpp"
 #include "mcp/client.hpp"
 #include "tools/registry.hpp"
+#include "tools/skill_tool.hpp"
 
 namespace lubancode::app_server {
 
@@ -66,6 +76,10 @@ struct SessionAssembly {
 struct SessionAssemblyResult {
     std::unique_ptr<SessionAssembly> assembly;  // 空 = 装配失败(明拒)
     std::string error;                          // 失败人话(诊断与事件共用)
+    // 稳定错误码(空 = 通用装配失败,server 落 assembly.failed)。在册值:
+    //   component_unavailable —— 部署档点名当前 build 未接线的组件
+    //   (单子 §7.2 Lua 插件;P5 接线后此码让位给真装载的失败码)。
+    std::string error_code;
 };
 
 struct SessionAssemblyRequest {
@@ -83,6 +97,16 @@ struct SessionAssemblyRequest {
     // "明确的 Agent 档案"不在装配里猜)。
     std::string system_prompt;
     int max_steps_per_turn = 0;
+    // ---- P2(应用Worker接入单 §五/§六)----
+    // 显式 Skill 来源根(材料根 skills/;GAP-03)。features.skills 放行
+    // 且 tools 面点名 "skill" 时才扫描、装 skill 工具、注清单段——单根
+    // 显式扫描,不搬终端五层合并。空 = 不装。
+    std::optional<std::filesystem::path> skills_root;
+    // 启动冻结的 Agent 装配计划(RunAppServerMode 解析 agentRef 的结果,
+    // GAP-01/02)。非空时 system_prompt 由提示部件组合产出(prompt_assembler
+    // 既有管线,能力段按本场注册表实际面开合),步数闸再与档案 runtime
+    // 取更严;空时沿用上面的 system_prompt 显式件(无档默认路)。
+    std::shared_ptr<const HarnessAgentPlan> agent_plan;
 };
 
 // 装配一场会话的运行材料。任何一步失败回空 assembly + 人话 error,

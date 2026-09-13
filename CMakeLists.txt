@@ -1107,6 +1107,9 @@ add_library(lubancode_app STATIC
   # (G01/G02 生产 headless 显式装配;先解析允许组件再启动)。
   src/app_server/harness_profile.cpp
   src/app_server/session_assembly.cpp
+  # 应用Worker接入单 P2:Agent 档案解析 + Skill 来源 + 提示部件组合
+  # (GAP-01/02/03;prompt_assembler 既有管线,来源显式、缺件明拒)。
+  src/app_server/agent_wiring.cpp
   # 可见调试阶段 3:browser/* 方法面——sidecar 进程管理、RPC 配对、
   # 事件转发、审批与取消、截图 artifact。
   src/app_server/browser_service.cpp

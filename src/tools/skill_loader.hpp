@@ -117,8 +117,12 @@ std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::opt
                                   bool report_collisions = true);
 
 // 系统提示词里"可用技能"这一段。skills 为空时返回空串——一个字都不注入,
-// 不影响没配技能的既有场景。
-std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills);
+// 不影响没配技能的既有场景。source_note 非空时,段首的"技能目录约定"
+//(终端五层目录的说明)换成这句话——headless 装配(app-server)只认部署
+// 材料根一处,沿这段话如实告知,不让模型照终端约定去 ~/.agents 里找。
+// 缺省空串 = 终端既有文案,一字不动。
+std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills,
+                                     const std::string& source_note = std::string());
 
 // 读一份技能的正文(frontmatter 之后的 body)。读不到、frontmatter 损坏都
 // 返回 nullopt——预装侧(自定义 Agent 的 skills.preload)据此降级:只登记
