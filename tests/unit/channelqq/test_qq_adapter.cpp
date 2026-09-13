@@ -272,7 +272,7 @@ std::string C2cPayload(const char* openid, const char* message_id, const char* c
 }
 
 nlohmann::json InitializeFrame(std::int64_t id, const std::string& account,
-                               const std::string& protocol_version = "2026-08-29") {
+                               const std::string& protocol_version) {
     return channel::BuildRequestJson(
         id, channel::BridgeMethod::Initialize,
         nlohmann::json{{"protocol", "lubancode-channel/1"},
