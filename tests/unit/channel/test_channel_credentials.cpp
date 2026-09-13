@@ -23,7 +23,8 @@
 #define NOMINMAX
 #include <stdlib.h>  // _putenv_s/_dupenv_s 同源
 #include <windows.h>
-#include <sddl.h>
+#include <aclapi.h>  // SetNamedSecurityInfoW
+#include <sddl.h>    // ConvertStringSecurityDescriptorToSecurityDescriptorW
 #else
 #include <sys/stat.h>
 #endif

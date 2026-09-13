@@ -17,6 +17,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <aclapi.h>  // GetNamedSecurityInfoW(文件 owner/DACL)
+#include <sddl.h>    // ConvertSidToStringSidW
 #else
 #include <sys/stat.h>
 #include <unistd.h>
