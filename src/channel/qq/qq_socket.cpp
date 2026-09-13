@@ -183,6 +183,12 @@ std::expected<TcpSocket, SocketError> TcpSocket::Connect(const std::string& host
             const int flags = fcntl(sock, F_GETFL, 0);
             fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
 #endif
+#ifdef __APPLE__
+            // macOS 无 MSG_NOSIGNAL:向已断开的对端写默认发 SIGPIPE 杀进程,
+            // socket 级关掉(对端关闭后 write 走 EPIPE 错误分型)。
+            int nosigpipe = 1;
+            ::setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
             // 关 Nagle:网关心跳与事件都是小帧,攒包只会白添延迟。
             int nodelay = 1;
             ::setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay),
@@ -260,9 +266,15 @@ std::expected<void, SocketError> TcpSocket::WriteAll(std::string_view bytes,
             return std::unexpected(SocketError{SocketErrorKind::Failed,
                                                "select failed: " + ErrnoText(LastSocketError())});
         }
+#ifdef MSG_NOSIGNAL
+        const int send_flags = MSG_NOSIGNAL;  // Linux:写断开的对端不杀进程
+#else
+        const int send_flags = 0;  // macOS 走 SO_NOSIGPIPE;Windows 无此问题
+#endif
         const int written = static_cast<int>(::send(
             sock, bytes.data() + sent,
-            static_cast<int>(std::min<std::size_t>(bytes.size() - sent, 0x3FFFFFFF)), 0));
+            static_cast<int>(std::min<std::size_t>(bytes.size() - sent, 0x3FFFFFFF)),
+            send_flags));
         if (written <= 0) {
             const int err = LastSocketError();
             return std::unexpected(SocketError{

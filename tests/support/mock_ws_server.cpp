@@ -112,8 +112,13 @@ bool ReadChunk(NativeSocket fd, std::string& into, int timeout_ms) {
 bool WriteAllNative(NativeSocket fd, const char* data, std::size_t size) {
     std::size_t sent = 0;
     while (sent < size) {
+#ifdef MSG_NOSIGNAL
+        const int flags = MSG_NOSIGNAL;  // Linux:不杀进程
+#else
+        const int flags = 0;  // macOS 靠 accept 后的 SO_NOSIGPIPE;Windows 无此问题
+#endif
         const int wrote =
-            static_cast<int>(::send(fd, data + sent, size - sent, 0));
+            static_cast<int>(::send(fd, data + sent, size - sent, flags));
         if (wrote <= 0) {
             return false;
         }
@@ -317,6 +322,13 @@ std::expected<MockWsServer::Connection, std::string> MockWsServer::AcceptNext(
     if (fd == kBadSocket) {
         return std::unexpected("accept failed");
     }
+#ifdef __APPLE__
+    // 写断开的客户端不发 SIGPIPE(册级进程命门,同 qq_socket 的口径)。
+    {
+        int nosigpipe = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+    }
+#endif
     return Connection(static_cast<long long>(fd));
 }
 
@@ -637,6 +649,13 @@ std::expected<MockTlsServer::Connection, std::string> MockTlsServer::AcceptNext(
     if (fd == kBadSocket) {
         return std::unexpected("accept failed");
     }
+#ifdef __APPLE__
+    // 写断开的客户端不发 SIGPIPE(册级进程命门,同 qq_socket 的口径)。
+    {
+        int nosigpipe = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+    }
+#endif
     auto* ssl = new mbedtls_ssl_context();
     mbedtls_ssl_init(ssl);
     if (mbedtls_ssl_setup(ssl, static_cast<mbedtls_ssl_config*>(config_)) != 0) {
