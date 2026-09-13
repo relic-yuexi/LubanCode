@@ -169,7 +169,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         std::cerr << "app-server 是子命令,不是问题;该走协议主循环,不进单发\n";
         return 2;
     }    // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
-    const std::optional<std::string> home_dir = lubancode::config::HomeDir();
+    const std::optional<std::string> home_dir = lubancode::config::PersonalMaterialsHomeDir();
     // Package 会话钉快照(统一封装单阶段 3;阶段 6 起与交互会话共用
     // BuildSessionPackageMountInput 一只折算):单发一场即一会话,启动装配
     // 一次,跑完即弃。信任账同样在此钉住(读不动警告 + 空白续),启停账

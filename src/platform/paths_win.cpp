@@ -33,6 +33,19 @@ std::optional<std::string> HomeDir() {
     return GetEnvVar("USERPROFILE");
 }
 
+std::optional<std::string> GetEnvVarPresent(const char* name) {
+    char* buffer = nullptr;
+    std::size_t size = 0;
+    const errno_t err = _dupenv_s(&buffer, &size, name);
+    if (err != 0 || buffer == nullptr) {
+        return std::nullopt;  // 变量不在(区别于"在但为空")
+    }
+    // 空串原样交回:调用方拿"有值但为空"自行判配置错误。
+    std::string value(buffer);
+    std::free(buffer);
+    return value;
+}
+
 std::optional<std::filesystem::path> ExecutablePath() {
     std::vector<wchar_t> buffer(1024);
     for (;;) {

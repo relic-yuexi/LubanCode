@@ -407,6 +407,9 @@ add_library(lubancode_engine STATIC
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
   src/config/plugin_trust.cpp
+  # 应用根语义(应用Worker接入单 P1):LUBANCODE_HOME/DATA_HOME/MANAGED
+  # 三变量的解析、校验与可达性探测;HomeLubancodeDir/StateRootDir 消费。
+  src/config/runtime_paths.cpp
   src/tools/registry.cpp
   src/tools/tool_content.cpp  # MCP 富结果:中立内容块/投影/序列化
   src/tools/tool_text.cpp

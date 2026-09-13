@@ -372,7 +372,10 @@ std::string Server::DefaultWorkspaceKey() const {
         return std::string();
     }
     const std::filesystem::path identity_cwd = tools::Utf8ToPath(options_.cwd);
-    const auto identity_home = lubancode::config::HomeLubancodeDir();
+    // 身份裁决的 home = workspaces 树宿主根 = 状态根(应用Worker接入单
+    // §4.2):应用根语义下 workspaces 在数据根,裁决跟着走;个人模式
+    // 与从前同一处。
+    const auto identity_home = lubancode::config::StateRootDir();
     auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
         identity_cwd, identity_home.has_value() ? lubancode::tools::Utf8ToPath(*identity_home)
                                                 : std::filesystem::path());

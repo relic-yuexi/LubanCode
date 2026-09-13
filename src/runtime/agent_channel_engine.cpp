@@ -100,7 +100,8 @@ AgentChannelEngine::AgentChannelEngine(api::Backend& backend, tools::ToolRegistr
         // P0-2(Trajectory 升为唯一 Session):账本恒开;身份按 engine 的
         // cwd 四级裁决(P0-1 规矩:不认进程 current_path)。
         const std::filesystem::path identity_cwd = tools::Utf8ToPath(options_.cwd);
-        const auto identity_home = config::HomeLubancodeDir();
+        // 身份裁决的 home = workspaces 树宿主根 = 状态根(应用Worker接入单 §4.2)。
+        const auto identity_home = config::StateRootDir();
         auto identity = workspace::ResolveWorkspaceIdentity(
             identity_cwd, identity_home.has_value() ? tools::Utf8ToPath(*identity_home)
                                                     : std::filesystem::path());

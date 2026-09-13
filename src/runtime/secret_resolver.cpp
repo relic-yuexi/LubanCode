@@ -248,21 +248,23 @@ std::expected<std::map<std::string, std::string>, std::string> ParseDotenvFile(
 // ---------------------------------------------------------------------------
 
 std::optional<std::filesystem::path> StandalonePluginDataDir(std::string_view plugin_id) {
-    const auto home = config::HomeLubancodeDir();
-    if (!home.has_value() || plugin_id.empty()) {
+    // 插件数据是运行状态,落状态根(应用Worker接入单 §4.2)。
+    const auto state_root = config::StateRootDir();
+    if (!state_root.has_value() || plugin_id.empty()) {
         return std::nullopt;
     }
-    return platform::Utf8ToPath(*home) / "plugin-data" /
+    return platform::Utf8ToPath(*state_root) / "plugin-data" /
            platform::Utf8ToPath(std::string(plugin_id));
 }
 
 std::optional<std::filesystem::path> PackagedPluginDataDir(std::string_view package_id,
                                                            std::string_view local_id) {
-    const auto home = config::HomeLubancodeDir();
-    if (!home.has_value() || package_id.empty() || local_id.empty()) {
+    // 同上:受控包数据落状态根。
+    const auto state_root = config::StateRootDir();
+    if (!state_root.has_value() || package_id.empty() || local_id.empty()) {
         return std::nullopt;
     }
-    return platform::Utf8ToPath(*home) / "package-data" /
+    return platform::Utf8ToPath(*state_root) / "package-data" /
            platform::Utf8ToPath(std::string(package_id)) / "plugins" /
            platform::Utf8ToPath(std::string(local_id));
 }
