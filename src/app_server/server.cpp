@@ -199,9 +199,13 @@ private:
     bool broken_ = false;
 };
 
-// 会话创建台账的路径(workspaces 根 + workspace key;裁决失败回空路径
-// = 台账不可用,创建去重如实跳过)。裁决与 DefaultWorkspaceKey 同一颗
-// resolver、同一个 home 止步(StateRootDir)。
+// 会话创建台账的路径(workspaces 根下的文件,按 workspace key 分文件;
+// 裁决失败回空路径 = 台账不可用,创建去重如实跳过)。裁决与
+// DefaultWorkspaceKey 同一颗 resolver、同一个 home 止步(StateRootDir)。
+// 落点规矩:workspaces 树下的目录都是"门牌房"(各带 workspace.json
+// manifest,ScanRooms 按自描述收账)——台账不造房,落根下文件
+// (ScanRooms 对根下文件直接跳过,零干扰);一个 key 一份文件,保住
+// "主体 + workspace 范围去重"的作用域。
 std::filesystem::path SessionCreateLedgerPath(const std::string& workspaces_dir,
                                               const std::string& cwd_utf8) {
     if (workspaces_dir.empty()) {
@@ -215,8 +219,8 @@ std::filesystem::path SessionCreateLedgerPath(const std::string& workspaces_dir,
     if (!identity.has_value()) {
         return std::filesystem::path();
     }
-    return tools::Utf8ToPath(workspaces_dir) / tools::Utf8ToPath(identity->workspace_key) /
-           "session-creates.jsonl";
+    const std::string file_name = "session-creates-" + identity->workspace_key + ".jsonl";
+    return tools::Utf8ToPath(workspaces_dir) / tools::Utf8ToPath(file_name);
 }
 
 // usage 报告 -> 事件字段(五项原样,缺失字段前端自己看)。

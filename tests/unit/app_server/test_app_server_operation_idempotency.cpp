@@ -142,12 +142,26 @@ std::string MakeTempDir(const char* name) {
     return tools::PathToUtf8(dir);
 }
 
-// workspaces 树里按 sessionId 找场目录(布局 <root>/<workspace>/<id>/)。
+// workspaces 树里按 sessionId 找场目录(布局 <root>/<门牌房>/<id>/)。
 std::filesystem::path SessionDirOf(const std::string& sessions_dir, const std::string& session_id) {
     const std::filesystem::path workspaces = tools::Utf8ToPath(sessions_dir) / "workspaces";
     std::error_code ec;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(workspaces, ec)) {
         if (entry.is_directory() && entry.path().filename() == tools::Utf8ToPath(session_id)) {
+            return entry.path();
+        }
+    }
+    return std::filesystem::path();
+}
+
+// workspaces 根下找会话创建台账(session-creates-<workspace_key>.jsonl;
+// 一个 key 一份,去重域即 workspace)。
+std::filesystem::path CreateLedgerOf(const std::string& sessions_dir) {
+    const std::filesystem::path workspaces = tools::Utf8ToPath(sessions_dir) / "workspaces";
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(workspaces, ec)) {
+        const std::string name = tools::PathToUtf8(entry.path().filename());
+        if (entry.is_regular_file(ec) && name.rfind("session-creates-", 0) == 0) {
             return entry.path();
         }
     }
@@ -239,7 +253,7 @@ TEST_CASE("turn/start 幂等:同键同载荷回原受理不重跑,同键异载�
 // GAP-05:thread/start 幂等(会话创建去重)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("thread/start 幂等:同键同 cwd 回原场不建第二场,异 cwd 报冲突") {
+TEST_CASE("thread/start 幂等:同键同 cwd 回原场不建第二场,同键异载荷报冲突") {
     EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const std::string sessions_dir = MakeTempDir("lubancode_test_op_idem_thread");
     TestHarness harness(sessions_dir);
@@ -265,27 +279,39 @@ TEST_CASE("thread/start 幂等:同键同 cwd 回原场不建第二场,异 cwd �
     CHECK(retry["active"] == true);  // 原场还在本进程活着
     CHECK(harness.server->active_thread_count() == 1);
 
-    // 同键异 cwd:载荷不同,operation_conflict,不建第二场。
-    nlohmann::json other = params;
-    other["cwd"] = (tools::Utf8ToPath(sessions_dir) / "ws2").generic_string();
-    const nlohmann::json conflict = harness.server->HandleThreadStart(other, error_code);
+    // 台账在盘上:requested + completed 两行(PowerLoss 档先意图后结果),
+    // 落在 workspaces 根下的文件(不造门牌房)。
+    const std::filesystem::path ledger = CreateLedgerOf(sessions_dir);
+    REQUIRE(!ledger.empty());
+    {
+        bool saw_requested = false;
+        bool saw_completed = false;
+        for (const nlohmann::json& line : ReadJsonl(ledger)) {
+            if (!line.is_object() || !line.contains("kind")) continue;
+            if (line["kind"] == "session.create.requested") saw_requested = true;
+            if (line["kind"] == "session.create.completed") saw_completed = true;
+        }
+        CHECK(saw_requested);
+        CHECK(saw_completed);
+    }
+
+    // 同键异载荷:账态注入改掉台账里的 payloadHash,同 cwd 重发按
+    // operation_conflict 明报,不建第二场。注:不同 cwd 是不同的去重域
+    // (workspace 范围去重),各建各场不冲突——那是正确行为,不是本用例
+    // 要钉的"同域异载荷"。
+    {
+        std::vector<nlohmann::json> lines = ReadJsonl(ledger);
+        for (nlohmann::json& line : lines) {
+            if (line.is_object() && line.contains("clientOperationId") &&
+                line["clientOperationId"] == "CREATE-1") {
+                line["payloadHash"] = "injected-different-hash";
+            }
+        }
+        RewriteJsonl(ledger, lines);
+    }
+    const nlohmann::json conflict = harness.server->HandleThreadStart(params, error_code);
     REQUIRE(error_code == "operation_conflict");
     CHECK(harness.server->active_thread_count() == 1);
-
-    // 台账在盘上:requested + completed 两行(PowerLoss 档先意图后结果)。
-    const std::filesystem::path session_dir = SessionDirOf(sessions_dir, thread_id);
-    REQUIRE(!session_dir.empty());
-    const std::filesystem::path ledger = session_dir.parent_path() / "session-creates.jsonl";
-    REQUIRE(std::filesystem::exists(ledger));
-    bool saw_requested = false;
-    bool saw_completed = false;
-    for (const nlohmann::json& line : ReadJsonl(ledger)) {
-        if (!line.is_object() || !line.contains("kind")) continue;
-        if (line["kind"] == "session.create.requested") saw_requested = true;
-        if (line["kind"] == "session.create.completed") saw_completed = true;
-    }
-    CHECK(saw_requested);
-    CHECK(saw_completed);
 
     std::string stop_error;
     harness.server->HandleThreadStop(thread_id, stop_error);
@@ -309,9 +335,8 @@ TEST_CASE("thread/start 幂等·崩溃窄窗:completed 行缺失时重发不建�
     const std::string thread_id = first["threadId"];
 
     // 账态注入:抹掉 completed 行,模拟"场已建成、completed 落账前崩溃"。
-    const std::filesystem::path session_dir = SessionDirOf(sessions_dir, thread_id);
-    REQUIRE(!session_dir.empty());
-    const std::filesystem::path ledger = session_dir.parent_path() / "session-creates.jsonl";
+    const std::filesystem::path ledger = CreateLedgerOf(sessions_dir);
+    REQUIRE(!ledger.empty());
     std::vector<nlohmann::json> kept;
     for (const nlohmann::json& line : ReadJsonl(ledger)) {
         if (line.is_object() && line.contains("kind") &&
