@@ -443,19 +443,23 @@ TEST_CASE("status:未运行时零建目录零写盘(disabled 零副作用合同)
 TEST_CASE("status:活实例报 running;锁没了快照还在报 stale remnant") {
     const auto root = MakeTempRoot("probe");
     const auto paths = PathsOf(root);
-    GatewayProcess process(MakeOptions(paths));
-    REQUIRE(process.Start().status == GatewayProcess::StartResult::Status::Started);
+    {
+        GatewayProcess process(MakeOptions(paths));
+        REQUIRE(process.Start().status == GatewayProcess::StartResult::Status::Started);
 
-    const auto running = ProbeGateway(paths);
-    REQUIRE(running.state == GatewayProbe::State::Running);
-    CHECK(running.holder.boot_id == process.boot_id());
-    CHECK(running.control.has_value());
-    CHECK(ProbeToJson(running)["state"] == "running");
-
-    process.RequestStop("test");
-    // 硬杀模拟:锁直接删(进程没走关机流程,control 仍说 running)。
-    std::error_code ec;
-    std::filesystem::remove(paths.lock_file, ec);
+        const auto running = ProbeGateway(paths);
+        REQUIRE(running.state == GatewayProbe::State::Running);
+        CHECK(running.holder.boot_id == process.boot_id());
+        CHECK(running.control.has_value());
+        CHECK(ProbeToJson(running)["state"] == "running");
+        // 硬杀模拟:块尾 RAII 放锁(先关句柄再删)。不走 Shutdown——
+        // control 快照没被盖成 stopped,仍说 running。原先"同进程裸
+        // remove 锁文件"的模拟在 Windows 上删不动:V0 起 GatewayLock 持
+        // FILE*(_SH_DENYNO 无 FILE_SHARE_DELETE),DeleteFile 被自己进程
+        // 的打开句柄挡住;POSIX unlink 不受打开 fd 影响,所以只 Windows
+        // 红。生产各路(Release 先 fclose 再删;硬杀后 OS 收句柄,陈旧锁
+        // 清得掉)不踩这个窗口——是测试模拟手段的平台假设错。
+    }
     const auto remnant = ProbeGateway(paths);
     CHECK(remnant.state == GatewayProbe::State::StaleRemnant);
 }
