@@ -1,19 +1,44 @@
 #include "channel/qq/qq_tls.hpp"
 
 #include <cstdio>
-#include <cstring>
 #include <utility>
 
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
-#include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 
 namespace lubancode::channel::qq {
 
 namespace {
+
+// mbedtls 全家桶(实体只在 .cpp 可见,头里是 void*)。
+struct TlsContext {
+    mbedtls_ssl_context ssl{};
+    mbedtls_ssl_config config{};
+    mbedtls_x509_crt ca{};
+    mbedtls_ctr_drbg_context drbg{};
+    mbedtls_entropy_context entropy{};
+    TcpSocket* sock = nullptr;
+
+    TlsContext() {
+        mbedtls_ssl_init(&ssl);
+        mbedtls_ssl_config_init(&config);
+        mbedtls_x509_crt_init(&ca);
+        mbedtls_ctr_drbg_init(&drbg);
+        mbedtls_entropy_init(&entropy);
+    }
+    ~TlsContext() {
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&config);
+        mbedtls_x509_crt_free(&ca);
+        mbedtls_ctr_drbg_free(&drbg);
+        mbedtls_entropy_free(&entropy);
+    }
+    TlsContext(const TlsContext&) = delete;
+    TlsContext& operator=(const TlsContext&) = delete;
+};
 
 int MbedSend(void* ctx, const unsigned char* buf, std::size_t len) {
     auto* sock = static_cast<TcpSocket*>(ctx);
@@ -85,10 +110,10 @@ SocketErrorKind ToSocketKind(int mbed_code) {
 
 std::string DetectSystemCaPemPath() {
     static const char* kCandidates[] = {
-        "/etc/ssl/cert.pem",                            // macOS / 部分 Linux
-        "/etc/ssl/certs/ca-certificates.crt",           // Debian 系
-        "/etc/pki/tls/certs/ca-bundle.crt",             // RHEL 系
-        "/etc/openssl/cert.pem",                        // FreeBSD
+        "/etc/ssl/cert.pem",                    // macOS / 部分 Linux
+        "/etc/ssl/certs/ca-certificates.crt",   // Debian 系
+        "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL 系
+        "/etc/openssl/cert.pem",                // FreeBSD
     };
     for (const char* path : kCandidates) {
         std::FILE* probe = std::fopen(path, "rb");
@@ -100,69 +125,27 @@ std::string DetectSystemCaPemPath() {
     return std::string();
 }
 
-TlsClientStream::~TlsClientStream() { Cleanup(); }
+TlsClientStream::~TlsClientStream() {
+    delete static_cast<TlsContext*>(context_);
+    context_ = nullptr;
+    sock_ = nullptr;
+}
 
 TlsClientStream::TlsClientStream(TlsClientStream&& other) noexcept
-    : ssl_(other.ssl_),
-      config_(other.config_),
-      ca_(other.ca_),
-      drbg_(other.drbg_),
-      entropy_(other.entropy_),
-      sock_(other.sock_) {
-    other.ssl_ = nullptr;
-    other.config_ = nullptr;
-    other.ca_ = nullptr;
-    other.drbg_ = nullptr;
-    other.entropy_ = nullptr;
+    : context_(other.context_), sock_(other.sock_) {
+    other.context_ = nullptr;
     other.sock_ = nullptr;
 }
 
 TlsClientStream& TlsClientStream::operator=(TlsClientStream&& other) noexcept {
     if (this != &other) {
-        Cleanup();
-        ssl_ = other.ssl_;
-        config_ = other.config_;
-        ca_ = other.ca_;
-        drbg_ = other.drbg_;
-        entropy_ = other.entropy_;
+        delete static_cast<TlsContext*>(context_);
+        context_ = other.context_;
         sock_ = other.sock_;
-        other.ssl_ = nullptr;
-        other.config_ = nullptr;
-        other.ca_ = nullptr;
-        other.drbg_ = nullptr;
-        other.entropy_ = nullptr;
+        other.context_ = nullptr;
         other.sock_ = nullptr;
     }
     return *this;
-}
-
-void TlsClientStream::Cleanup() {
-    if (ssl_ != nullptr) {
-        mbedtls_ssl_free(ssl_);
-        delete ssl_;
-        ssl_ = nullptr;
-    }
-    if (config_ != nullptr) {
-        mbedtls_ssl_config_free(config_);
-        delete config_;
-        config_ = nullptr;
-    }
-    if (ca_ != nullptr) {
-        mbedtls_x509_crt_free(ca_);
-        delete ca_;
-        ca_ = nullptr;
-    }
-    if (drbg_ != nullptr) {
-        mbedtls_ctr_drbg_free(drbg_);
-        delete drbg_;
-        drbg_ = nullptr;
-    }
-    if (entropy_ != nullptr) {
-        mbedtls_entropy_free(entropy_);
-        delete entropy_;
-        entropy_ = nullptr;
-    }
-    sock_ = nullptr;
 }
 
 std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* sock,
@@ -173,62 +156,49 @@ std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* soc
         return std::unexpected(TlsError{TlsErrorKind::Failed, "socket not connected"});
     }
 
-    auto* ssl = new mbedtls_ssl_context();
-    auto* config = new mbedtls_ssl_config();
-    auto* ca = new mbedtls_x509_crt();
-    auto* drbg = new mbedtls_ctr_drbg_context();
-    auto* entropy = new mbedtls_entropy_context();
-    mbedtls_ssl_init(ssl);
-    mbedtls_ssl_config_init(config);
-    mbedtls_x509_crt_init(ca);
-    mbedtls_ctr_drbg_init(drbg);
-    mbedtls_entropy_init(entropy);
+    auto* context = new TlsContext();
+    context->sock = sock;
 
     const auto fail = [&](TlsErrorKind kind, std::string detail) {
-        mbedtls_ssl_free(ssl);
-        mbedtls_ssl_config_free(config);
-        mbedtls_x509_crt_free(ca);
-        mbedtls_ctr_drbg_free(drbg);
-        mbedtls_entropy_free(entropy);
-        delete ssl;
-        delete config;
-        delete ca;
-        delete drbg;
-        delete entropy;
+        delete context;
         return std::unexpected(TlsError{kind, std::move(detail)});
     };
 
-    int rc = mbedtls_ctr_drbg_seed(drbg, mbedtls_entropy_func, entropy, nullptr, 0);
+    int rc = mbedtls_ctr_drbg_seed(&context->drbg, mbedtls_entropy_func,
+                                   &context->entropy, nullptr, 0);
     if (rc != 0) {
         return fail(TlsErrorKind::Failed, "drbg seed: " + MbedErrorText(rc));
     }
-    rc = mbedtls_x509_crt_parse(ca, reinterpret_cast<const unsigned char*>(ca_pem.data()),
+    rc = mbedtls_x509_crt_parse(&context->ca,
+                                reinterpret_cast<const unsigned char*>(ca_pem.data()),
                                 ca_pem.size() + 1);
     if (rc != 0) {
         return fail(TlsErrorKind::Failed, "ca parse: " + MbedErrorText(rc));
     }
-    rc = mbedtls_ssl_config_defaults(config, MBEDTLS_SSL_IS_CLIENT,
-                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    rc = mbedtls_ssl_config_defaults(&context->config, MBEDTLS_SSL_IS_CLIENT,
+                                     MBEDTLS_SSL_TRANSPORT_STREAM,
+                                     MBEDTLS_SSL_PRESET_DEFAULT);
     if (rc != 0) {
         return fail(TlsErrorKind::Failed, "config defaults: " + MbedErrorText(rc));
     }
-    mbedtls_ssl_conf_authmode(config, MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_ca_chain(config, ca, nullptr);
-    mbedtls_ssl_conf_rng(config, mbedtls_ctr_drbg_random, drbg);
-    mbedtls_ssl_conf_read_timeout(config, static_cast<std::uint32_t>(handshake_timeout_ms));
+    mbedtls_ssl_conf_authmode(&context->config, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&context->config, &context->ca, nullptr);
+    mbedtls_ssl_conf_rng(&context->config, mbedtls_ctr_drbg_random, &context->drbg);
+    mbedtls_ssl_conf_read_timeout(&context->config,
+                                  static_cast<std::uint32_t>(handshake_timeout_ms));
 
-    rc = mbedtls_ssl_setup(ssl, config);
+    rc = mbedtls_ssl_setup(&context->ssl, &context->config);
     if (rc != 0) {
         return fail(TlsErrorKind::Failed, "ssl setup: " + MbedErrorText(rc));
     }
-    rc = mbedtls_ssl_set_hostname(ssl, host.c_str());
+    rc = mbedtls_ssl_set_hostname(&context->ssl, host.c_str());
     if (rc != 0) {
         return fail(TlsErrorKind::Failed, "set hostname: " + MbedErrorText(rc));
     }
-    mbedtls_ssl_set_bio(ssl, sock, MbedSend, MbedRecv, MbedRecvTimeout);
+    mbedtls_ssl_set_bio(&context->ssl, sock, MbedSend, MbedRecv, MbedRecvTimeout);
 
     while (true) {
-        rc = mbedtls_ssl_handshake(ssl);
+        rc = mbedtls_ssl_handshake(&context->ssl);
         if (rc == 0) {
             break;
         }
@@ -236,7 +206,7 @@ std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* soc
             continue;
         }
         if (rc == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
-            const std::uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
+            const std::uint32_t flags = mbedtls_ssl_get_verify_result(&context->ssl);
             return fail(TlsErrorKind::CertVerifyFailed,
                         "cert verify failed: flags=0x" + std::to_string(flags));
         }
@@ -244,23 +214,25 @@ std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* soc
     }
     // 握手成功后仍须核 verify flags(链不完整等在 REQUIRED 模式下应由
     // handshake 返回,这里再核一道,双保险)。
-    const std::uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
+    const std::uint32_t flags = mbedtls_ssl_get_verify_result(&context->ssl);
     if (flags != 0) {
-        return fail(TlsErrorKind::CertVerifyFailed, "post-handshake verify flags=0x" +
-                                                        std::to_string(flags));
+        return fail(TlsErrorKind::CertVerifyFailed,
+                    "post-handshake verify flags=0x" + std::to_string(flags));
     }
 
-    return TlsClientStream(ssl, config, ca, drbg, entropy, sock);
+    return TlsClientStream(static_cast<void*>(context), sock);
 }
 
 std::expected<std::size_t, SocketError> TlsClientStream::ReadSome(char* buf, std::size_t len,
                                                                   int timeout_ms) const {
-    if (ssl_ == nullptr) {
+    auto* context = static_cast<TlsContext*>(context_);
+    if (context == nullptr) {
         return std::unexpected(SocketError{SocketErrorKind::Closed, "tls not open"});
     }
-    mbedtls_ssl_conf_read_timeout(config_, static_cast<std::uint32_t>(timeout_ms));
+    mbedtls_ssl_conf_read_timeout(&context->config, static_cast<std::uint32_t>(timeout_ms));
     while (true) {
-        const int rc = mbedtls_ssl_read(ssl_, reinterpret_cast<unsigned char*>(buf), len);
+        const int rc = mbedtls_ssl_read(&context->ssl, reinterpret_cast<unsigned char*>(buf),
+                                        len);
         if (rc >= 0) {
             return static_cast<std::size_t>(rc);
         }
@@ -270,20 +242,22 @@ std::expected<std::size_t, SocketError> TlsClientStream::ReadSome(char* buf, std
         if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
             return std::unexpected(SocketError{SocketErrorKind::Closed, "tls close notify"});
         }
-        return std::unexpected(SocketError{ToSocketKind(rc), "tls read: " + MbedErrorText(rc)});
+        return std::unexpected(
+            SocketError{ToSocketKind(rc), "tls read: " + MbedErrorText(rc)});
     }
 }
 
 std::expected<void, SocketError> TlsClientStream::WriteAll(std::string_view bytes,
                                                            int timeout_ms) const {
-    if (ssl_ == nullptr) {
+    auto* context = static_cast<TlsContext*>(context_);
+    if (context == nullptr) {
         return std::unexpected(SocketError{SocketErrorKind::Closed, "tls not open"});
     }
-    mbedtls_ssl_conf_read_timeout(config_, static_cast<std::uint32_t>(timeout_ms));
+    mbedtls_ssl_conf_read_timeout(&context->config, static_cast<std::uint32_t>(timeout_ms));
     std::size_t sent = 0;
     while (sent < bytes.size()) {
         const int rc = mbedtls_ssl_write(
-            ssl_, reinterpret_cast<const unsigned char*>(bytes.data() + sent),
+            &context->ssl, reinterpret_cast<const unsigned char*>(bytes.data() + sent),
             bytes.size() - sent);
         if (rc > 0) {
             sent += static_cast<std::size_t>(rc);
@@ -292,17 +266,18 @@ std::expected<void, SocketError> TlsClientStream::WriteAll(std::string_view byte
         if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
             continue;
         }
-        return std::unexpected(
-            SocketError{ToSocketKind(rc), "tls write: " + MbedErrorText(rc)});
+        return std::unexpected(SocketError{ToSocketKind(rc),
+                                           "tls write: " + MbedErrorText(rc)});
     }
     return {};
 }
 
 void TlsClientStream::CloseNotify() {
-    if (ssl_ == nullptr) {
+    auto* context = static_cast<TlsContext*>(context_);
+    if (context == nullptr) {
         return;
     }
-    (void)mbedtls_ssl_close_notify(ssl_);
+    (void)mbedtls_ssl_close_notify(&context->ssl);
 }
 
 }  // namespace lubancode::channel::qq

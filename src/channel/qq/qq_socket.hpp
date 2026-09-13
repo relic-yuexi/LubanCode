@@ -58,7 +58,7 @@ public:
     void Close();
 
 private:
-    explicit TcpSocket(std::int64_t fd) : fd_(fd) {}
+    explicit TcpSocket(std::int64_t fd);
     std::int64_t fd_ = kInvalidFd;
     static constexpr std::int64_t kInvalidFd = -1;
 };

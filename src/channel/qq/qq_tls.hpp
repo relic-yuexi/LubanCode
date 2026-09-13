@@ -5,9 +5,11 @@
 // 证书验证恒 REQUIRED:CA 桩 PEM 由调用方注入(测试用自签根;生产默认探测
 // 平台 PEM 路径,真锚核验归 Q3 联调——测试绿不等于真平台 TLS 联调过)。
 //
-// 线程模型:一只实例归一只线程(单连接单线程);内部 entropy/ctr_drbg
-// 每实例私有,不共享。密钥/证书不落日志,错误 detail 只带 mbed 错误码与
-// verify flags。
+// 头不递 mbedtls include(engine 对 mbedTLS 是 PRIVATE 链,头一传染,消费方
+// 就得都链):内部上下文以 void* 隐藏,生命周期归本类(.cpp 内定义实体)。
+//
+// 线程模型:一只实例归一只线程(单连接单线程);entropy/ctr_drbg 每实例
+// 私有,不共享。密钥/证书不落日志,错误 detail 只带 mbed 错误码与 flags。
 #pragma once
 
 #include <cstddef>
@@ -17,14 +19,6 @@
 #include <string_view>
 
 #include "channel/qq/qq_socket.hpp"
-
-namespace mbedtls {
-typedef struct ssl_context ssl_context;
-typedef struct ssl_config ssl_config;
-typedef struct x509_crt x509_crt;
-typedef struct ctr_drbg_context ctr_drbg_context;
-typedef struct entropy_context entropy_context;
-}  // namespace mbedtls
 
 namespace lubancode::channel::qq {
 
@@ -60,7 +54,7 @@ public:
                                                             const std::string& ca_pem,
                                                             int handshake_timeout_ms);
 
-    bool valid() const { return ssl_ != nullptr; }
+    bool valid() const { return context_ != nullptr; }
 
     // 语义同 TcpSocket::ReadSome/WriteAll(分型沿用 SocketError)。
     std::expected<std::size_t, SocketError> ReadSome(char* buf, std::size_t len,
@@ -71,21 +65,8 @@ public:
     void CloseNotify();
 
 private:
-    void Cleanup();
-    TlsClientStream(mbedtls::ssl_context* ssl, mbedtls::ssl_config* config,
-                    mbedtls::x509_crt* ca, mbedtls::ctr_drbg_context* drbg,
-                    mbedtls::entropy_context* entropy, TcpSocket* sock)
-        : ssl_(ssl),
-          config_(config),
-          ca_(ca),
-          drbg_(drbg),
-          entropy_(entropy),
-          sock_(sock) {}
-    mbedtls::ssl_context* ssl_ = nullptr;
-    mbedtls::ssl_config* config_ = nullptr;
-    mbedtls::x509_crt* ca_ = nullptr;
-    mbedtls::ctr_drbg_context* drbg_ = nullptr;
-    mbedtls::entropy_context* entropy_ = nullptr;
+    TlsClientStream(void* context, TcpSocket* sock) : context_(context), sock_(sock) {}
+    void* context_ = nullptr;  // .cpp 内的 TlsContext 实体(mbedtls 全家桶)
     TcpSocket* sock_ = nullptr;
 };
 
