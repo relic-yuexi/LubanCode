@@ -281,7 +281,7 @@ V3 的“assistant 消息”“当前上下文”“对外最终答复”不能�
 - [x] profile/账号/会话锁做实际双进程竞争测试，补原子互斥与 ownerEpoch。（`GatewayLock`/`AccountLock` 弃"先读后写"改 create-new（wbx）原子占位+身份核+有界重试；锁账加 `owner_epoch`（=boot_id，fencing）；真起 racer 子进程双进程竞争：`tests/support/gateway_lock_racer.cpp` + `unit.gateway.test_gateway_lock_race`（gateway/account 两模式，断言至多一只持锁、真撞 RefusedAliveHolder、坏锁/旧 schema 锁保守拒、epoch 互不相认）；`SessionLock` 本就 wbx 未动、未加新册。）
 - [x] 定义 PowerLoss 提交原语及原件保留规则；写盘失败停止受理/执行。（规则冻结于 contracts.md §11.5：受理账行走 `JournalWriter::AppendLine(PowerLoss)`、原件走 `AtomicWriteFile(ProcessCrashDurability)`、索引可重建、原件丢失隔离、孤立原件可回收；受理面 broken 传播持续拒绝、泵侧 dispatched 落不稳停泵。测试：`test_session_service_durability` 磁盘写失败两案（append_failed/artifact_failed、broken 传播、账行不落）。）
 
-放行（V0 口径，按"测试缝隙注入账态"验收；真拔电/真杀进程属后续批次真机验收）：accepted 前后——原件已落/账行未落不重排（孤立原件无害，`test_session_service_durability` 孤立原件案）；accepted 落稳/内存入队前崩——重建不丢输入（同册重建案，正文与键全回）；claim 前后（以 dispatched 行为可注入面）——已派发不重排无双派发（同册 dispatched 案）；开轮前后——合同与 `gateway.work.bound` 注册先行，真开轮裁决属 V1 主泵（**未验**）；磁盘写失败收不到成功回执（同册写失败两案）。重启无丢输入、无双派发已过；断电一致性与真进程硬杀**未验**。CI：见 PR。
+放行（V0 口径，按"测试缝隙注入账态"验收；真拔电/真杀进程属后续批次真机验收）：accepted 前后——原件已落/账行未落不重排（孤立原件无害，`test_session_service_durability` 孤立原件案）；accepted 落稳/内存入队前崩——重建不丢输入（同册重建案，正文与键全回）；claim 前后（以 dispatched 行为可注入面）——已派发不重排无双派发（同册 dispatched 案）；开轮前后——合同与 `gateway.work.bound` 注册先行，真开轮裁决属 V1 主泵（**未验**）；磁盘写失败收不到成功回执（同册写失败两案）。重启无丢输入、无双派发已过；断电一致性与真进程硬杀**未验**。CI：PR #59（https://github.com/relic-yuexi/LubanCode/pull/59），头提交 62ea1ae4 活跃 check suite 全绿（macos-clang 20m7s 过；cloudflare 位历史常态 queued，同 PR #58，不属判绿口径）。附带落定：resume-at-launch 显式指名源不再被 LatestResumableSessionId 的"running 不碰"连坐——接管硬杀场是常驻恢复正路（`trajectory_session.cpp`）。
 
 ### V1：最短纵向闭环——一次任务到本地结果
 
