@@ -8,7 +8,9 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
 #include <mbedtls/md.h>
+#include <mbedtls/net_sockets.h>  // MBEDTLS_ERR_NET_* 错误码
 #include <mbedtls/pk.h>
+#include <mbedtls/rsa.h>
 #include <mbedtls/sha1.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>  // x509write_crt 系列也在这一头里
@@ -437,7 +439,12 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     if (rc != 0) {
         return fail("drbg seed", rc);
     }
-    rc = mbedtls_pk_generate_key(&key, &drbg, nullptr, MBEDTLS_PK_RSA, 2048, 65537);
+    // 3.6 无统一 key 生成口:pk_setup + rsa_gen_key 两步。
+    rc = mbedtls_pk_setup(&key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
+    if (rc == 0) {
+        rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(&key), mbedtls_ctr_drbg_random, &drbg, 2048,
+                                 65537);
+    }
     if (rc != 0) {
         return fail("generate key", rc);
     }
