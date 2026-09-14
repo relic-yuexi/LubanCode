@@ -3,7 +3,7 @@
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落本批 PR（见 §八 Q1 记账），配对入口与进程外壳拆 Q1b；Q2 起仍待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2 起仍待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -165,6 +165,8 @@ channels/qqbot/
 - [x] 扩展现有 channel_config/binding/router/session_host 测试。证明具体 binding 不能扩权、未批准用户零模型调用、项目不能启用账号、配对不升 owner、凭据不可出日志。（五项逐一：① router 册"所有命中 binding 都算，具体 binding 抹不掉宽层 deny"+ e2e"逐轮策略收窄"；② e2e"准入与 pairing"断言 `backend.captured.empty()`；③ `test_channel_config.cpp` "config 合并"既有案维持（项目 channels 整体拒绝）；④ router 册"配对不升 owner"+"provenance 不信 is_owner"；⑤ credentials 册"泄露禁令"（错误文案/RedactSecret 不带值）+ activation 册 detail 只装稳定码。另新增 activation/credentials/tool_guard 三册、manager 册 Q0 四案、turn_ingress 册逐轮策略案。CI 结论见 PR checks。）
 
 ### Q1：真实进程与平台协议桥
+
+（本批已落 PR #66；测试名/符号清单见下方两行记账。）
 
 - [x] ~~新增 QQ 包、安装挂载、stdio transport；真实适配子进程 fixture~~ → **按 §十五 定案落进程内适配器装配**（原生 C++ 直连，无 Node、无子进程、无渠道包；Bridge 隔离语义按"保持一致的部分"执行：manifest 能力声明内置、Bridge 四字节帧协议与宿主权限/任务/会话/outbox 零改动）。握手/半帧/粘帧/超限/坏版本/停止与崩溃收尾逐项测试：`src/channel/qq/`（ws_frame/qq_socket/qq_tls/qq_ws_client/qq_proto/qq_spool/qq_auth/qq_messages/qq_gateway/qq_adapter）；测试册 `tests/unit/channelqq/test_qq_ws_frame.cpp`（半帧/粘帧/分片/超限/方向性 mask/RSV/控制帧）、`test_qq_ws_client.cpp`（真 socket 握手/SendText/ping 自动回 pong/close 传播/TLS 自签两路）、`test_qq_adapter.cpp`（Bridge initialize/start/stop 握手、坏 protocol_version 明败、manager 状态机推到 Running、stop 收线程）。"stderr 堵塞"案随子进程形态一并消失（无 stderr 面）。
 - [x] mock HTTP/事件服务测 C2C 映射、spool 重启重投、ACK 清理、稳定发送载荷；未用 SDK（定案直连），无 SDK 适配测试。此处不是 QQ 联调。（测试册 `tests/unit/channelqq/`：`test_qq_proto.cpp`——官方 C2C 事件三例固化为 fixture + intents/opcode 表 + 发送载荷/响应 + 错误码全表分型；`test_qq_spool.cpp`——落盘/重投/ACK 清理/坏账跳过/路径注入拒绝；`test_qq_auth_messages.cpp`——token 单飞/到期/Invalidate/错误分型、msg_seq 稳定（同 delivery 重试同序号、同 msg_id 不同回复递增）、Deduped/过期/401 刷 token 重试；`test_qq_gateway.cpp`——假传输状态机：Hello→Identify→READY→Dispatch seq 记账→心跳饥饿断线、Resume 携带 session_id+seq、Invalid Session 不可恢复清 session 重 Identify、Reconnect 保 session、退避阶梯。mock 面：`tests/support/mock_ws_server.cpp`（回环明文/mbedTLS 自签 WS 服务端）+ 册内 ScriptedHttp/ScriptGatewayTransport。）
