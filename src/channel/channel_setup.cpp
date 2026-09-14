@@ -34,7 +34,10 @@ nlohmann::json TemplateAccountToJson() {
     account["require_mention"] = template_account.require_mention;
     account["reply"] = nlohmann::json{{"mode", ReplyModeName(template_account.reply.mode)},
                                       {"tool_progress", template_account.reply.tool_progress}};
-    account["tools"] = nlohmann::json{{"allow", template_account.tools.allow}};
+    // tools.allow 是 optional<vector>:nlohmann 不认 optional,显式拆包
+    //(模板恒设值;万一缺省落空名单 = 禁全部工具,与解析端空数组语义一致)。
+    account["tools"] = nlohmann::json{
+        {"allow", template_account.tools.allow.value_or(std::vector<std::string>{})}};
     return account;
 }
 
