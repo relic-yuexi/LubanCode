@@ -302,6 +302,29 @@ TEST_CASE("output_schema 复检:过/不过两态,不影响 ok") {
     CHECK(plain.schema_error.empty());
 }
 
+TEST_CASE("output_schema 复检: 字面 null 是合法 JSON,按 schema 拒而不是 parse 拒") {
+    // 解析失败在 allow_exceptions=false 下回 discarded 值;字面 "null" 解析
+    // 得动,得交给 schema 按 type 拒——不能拿 is_null 当 parse 失败的记号
+    //(记忆抽取单 P1-A:公共本地校验对 discarded JSON 的判定修复)。
+    FullBackend null_backend;
+    null_backend.reply = "null";
+    SampleRequest request = OneShot("指令", "材料");
+    request.output_schema = nlohmann::json{{"type", "object"}};
+    const SampleResult null_body = SampleModel(null_backend, request);
+    REQUIRE(null_body.ok);
+    CHECK_FALSE(null_body.schema_ok);
+    // 报的是 schema 的"必须是 object",不是"不是合法 JSON"。
+    CHECK(null_body.schema_error.find("object") != std::string::npos);
+
+    // 真解析失败(半截 JSON):报"不是合法 JSON"。
+    FullBackend broken_backend;
+    broken_backend.reply = "{\"task_type\": ";
+    const SampleResult broken = SampleModel(broken_backend, request);
+    REQUIRE(broken.ok);
+    CHECK_FALSE(broken.schema_ok);
+    CHECK(broken.schema_error.find("合法 JSON") != std::string::npos);
+}
+
 }  // TEST_SUITE(agent-sample-model)
 
 TEST_CASE("sample preserves provider truncation and the requested output budget") {

@@ -615,6 +615,9 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         sample_call.messages.push_back(std::move(message));
         sample_call.max_tokens = 1500;
     }
+    // 字段合同随请求带给 SampleModel 做本地复检(P1-A):与
+    // ParseExtractionJson 同一份合同,两条入口同一把尺子。不上 wire。
+    sample_call.output_schema = MemoryExtractionOutputSchema();
     lubancode::agent::SampleOptions sample_options;
     sample_options.timeout_secs = 45;
     // Token 账本单 A1(旁路落账):抽取请求铸一只旁路桥,prepared/sent/
@@ -635,17 +638,23 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     const std::int64_t extract_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                              std::chrono::steady_clock::now() - extract_started)
                                              .count();
-    std::expected<MemoryExtraction, std::string> extraction;
+    std::expected<MemoryExtraction, ExtractionError> extraction;
     if (sampled.backend == nullptr) {
         // 路由落空:旧口径也记一笔零账(calls=1,零 token,"未报告"),不吞。
         model_router.ledger().Record(lubancode::agent::ModelRole::Cheap, sampled.route.model,
                                       lubancode::api::Usage{}, /*duration_ms=*/0, /*reported=*/false);
-        extraction = std::unexpected("cheap 路由找不到 provider \"" + sampled.route.provider + "\"");
+        ExtractionError route_miss;
+        route_miss.code = lubancode::app::ExtractionErrorCode::RouteMiss;
+        route_miss.message = "cheap 路由找不到 provider \"" + sampled.route.provider + "\"";
+        extraction = std::unexpected(route_miss);
     } else {
         extraction = FinishMemoryExtraction(sampled.result);
     }
     if (!extraction.has_value()) {
-        TermOut() << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
+        // 终端只出短错误与定位号(P0-A):诊断细节(请求号/字节数/结束原因)
+        // 在错误对象里,查原文走受控轨迹,不透传含 last read 的库异常。
+        TermOut() << theme.stats << trf("memory.extract.failed", extraction.error().message)
+                  << theme.reset << "\n";
         if (memory_turns != nullptr) {
             lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
             outcome.ok = false;

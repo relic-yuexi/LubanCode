@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 #include "agent/sample_model.hpp"  // SampleResult(抽取侧收口的入参)
 #include "api/backend.hpp"
@@ -44,6 +46,46 @@ struct MemoryExtraction {
     std::vector<ProposedCandidate> candidates;
 };
 
+// ---------------------------------------------------------------------------
+// 抽取失败的结构化错误(P0-A/P0-B):模型文本按不可信输入处理,语法/编码/
+// 字段错都从抽取接口稳定返回,不许越过这层抛出。
+//
+// 旧账兼容:StableExtractErrorCode 的旧文案路把 syntax_invalid/utf8_invalid/
+// schema_invalid 一律记 parse_failed——离线重放旧账时,parse_failed ≈ 这三
+// 类的统称;新账各记各名,route_miss/empty_output 口径不变。
+// ---------------------------------------------------------------------------
+enum class ExtractionErrorCode {
+    SyntaxInvalid,    // JSON 语法坏:未转义引号、漏逗号、多对象歧义、半截对象
+    Utf8Invalid,      // 响应正文不是合法 UTF-8(先验整段,再谈语法)
+    SchemaInvalid,    // 语法过了,字段合同不过:缺必填/null/数字/数组/顶层数组
+    OutputTruncated,  // provider 结束原因报长度截断(max_tokens/length 一族)
+    EmptyOutput,      // 采样"成功"但正文为空
+    TransportFailed,  // 发送失败/流内错/看门狗取消
+    RouteMiss,        // cheap 路由找不到 provider(旧稳定码 route_miss)
+};
+const char* ExtractionErrorCodeName(ExtractionErrorCode code);
+
+// 一次抽取失败的完整账。message 是终端可直出的短文案(自证合法 UTF-8,
+// 不含库异常的 last read 片段);诊断字段只进日志与轨迹,查原文复用受控
+// 轨迹,不在错误里转储正文。
+struct ExtractionError {
+    ExtractionErrorCode code = ExtractionErrorCode::SyntaxInvalid;
+    std::string message;
+    // ---- 诊断(P0-A) ----
+    std::string request_id;               // provider 外部号(空 = 没回)
+    std::size_t body_bytes = 0;           // 响应正文总字节
+    std::size_t error_offset = static_cast<std::size_t>(-1);  // 原文字节偏移;-1 = 不适用
+    bool utf8_valid = true;               // 整段 UTF-8 预检结果
+    std::string stop_reason;              // provider 结束原因(空 = 未报告,单列诊断)
+    std::string field_path;               // schema_invalid 时的字段路径(如 candidates[0].kind)
+    std::string schema_check_error;       // SampleModel output_schema 复检账(空 = 没设或过了)
+};
+inline constexpr std::size_t kExtractionNoOffset = static_cast<std::size_t>(-1);
+
+// 抽取输出预算(P1-A):候选正文与写路同款上限(kMaxTopicBytes,8 KiB)对齐,
+// 超长候选整条跳过——先减冗长输出,不动请求的 max_tokens。
+inline constexpr std::size_t kMaxCandidateContentBytes = 8 * 1024;
+
 // 任务类型判定(用户基调 1:先推测目的再选总结提示词)。纯词法启发,不
 // 打请求;user_text 是本轮用户消息,tool_names 是本轮调用过的工具名。
 std::string ClassifyTaskType(const std::string& user_text, const std::vector<std::string>& tool_names);
@@ -58,15 +100,20 @@ std::string BuildTurnTranscript(const std::vector<api::Message>& messages, std::
 // 时用 other。
 std::string BuildExtractionSystemPrompt(const std::string& prompts_dir, const std::string& task_type);
 
-// 解析模型输出(容错:剥代码围栏、取首个 { 到末个 })。候选最多 3 条,
-// 字段缺错的整条丢弃,不整份报错。
-std::expected<MemoryExtraction, std::string> ParseExtractionJson(const std::string& text);
+// 解析模型输出。先验整段 UTF-8,再按明确规则收 JSON:纯 JSON、单层代码
+// 围栏、无歧义的前后说明(首个 { 之前不含 {,配对 } 之后无剩余内容);多
+// 对象、字符串外悬空花括号、半截对象一律拒绝,不选一个碰运气。字段合同
+// (P0-B):顶层必须 object;task_type/summary 必填 string(summary 非空);
+// 已声明字段类型错(null/数字/数组/对象)拒绝整次并在错误里带字段路径;
+// 无效业务候选(kind 不在枚举、title/content 空、正文超预算)沿既有规则
+// 跳过该条,禁止静默类型转换。候选最多 3 条。
+std::expected<MemoryExtraction, ExtractionError> ParseExtractionJson(const std::string& text);
 
 // 发一次抽取请求(同步,带看门狗取消)。失败只返回错误,调用方降级。
 // reasoning_effort 非空时随请求带上(cheap 路由的档位);accounting 非空时
 // 把这次调用的 usage/时长记进去(分角色记账,不混普通 turn 的账)。
 // 采样走 agent::SampleModel 原语(批一·病四)。
-std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& backend,
+std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backend& backend,
                                                                  const std::string& model,
                                                                  const std::string& system_prompt,
                                                                  const std::string& transcript,
@@ -75,8 +122,16 @@ std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& b
                                                                  agent::BackgroundCallAccounting* accounting = nullptr);
 
 // 采样结果的抽取侧收口:RunMemoryExtraction 与走 ModelRouterService::Sample
-// 一站的调用方共用——失败回 message、空文回"抽取输出为空"、成功交解析。
-std::expected<MemoryExtraction, std::string> FinishMemoryExtraction(const agent::SampleResult& sampled);
+// 一站的调用方共用——失败回 transport_failed、空文回 empty_output、已知
+// 截断结束原因(max_tokens/length 一族)回 output_truncated,成功交解析。
+// 结束原因未知/缺失不据此判死:照走解析,诊断里单列 stop_reason 原值。
+std::expected<MemoryExtraction, ExtractionError> FinishMemoryExtraction(const agent::SampleResult& sampled);
+
+// 抽取输出的字段合同(SampleModel.output_schema 本地复检用,与
+// ParseExtractionJson 的判型同一份合同;候选内部字段的合同在解析函数里
+// 显式判型——公共校验器不递归嵌套)。设这份不等于 provider 结构化输出
+// 接通:api::Request 没有 output_schema 字段,wire 侧约束待批六再议。
+const nlohmann::json& MemoryExtractionOutputSchema();
 
 // ---------------------------------------------------------------------------
 // 记忆写入调度单 P0(§六/§10):调度账。P0 批纯 instrumentation——
@@ -177,6 +232,10 @@ std::vector<std::string> EvaluateDurableSignals(const std::string& user_text,
 bool MemoryGateShadowEnabled();
 
 // 抽取失败的稳定码(§10.3 时延/失败账的 reason 枚举)。
+// 结构化版(P0-A 起):六类新码 + route_miss;旧文案版保留——旧账与旧
+// 调用方(字符串前缀路)继续可用,parse_failed 是 syntax_invalid/
+// utf8_invalid/schema_invalid 三类的旧统称。
+std::string StableExtractErrorCode(const ExtractionError& error);
 std::string StableExtractErrorCode(const std::string& error);
 
 // 一场会话的调度漏斗(§10.1"每场至少聚合")。P0 在线的计数器填得出;

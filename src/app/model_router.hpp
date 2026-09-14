@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "agent/model_router.hpp"
 #include "agent/sample_model.hpp"
 #include "api/backend.hpp"
@@ -77,6 +79,10 @@ public:
         std::string system;                    // 调用方拼好的指令
         std::vector<lubancode::api::Message> messages;  // 一般就一条 user
         std::optional<int> max_tokens;         // 空 = 不带上限字段
+        // 可选 output_schema(P1-A):透传给 SampleModel 做本地复检,结果见
+        // SampleResult::schema_ok/schema_error。不上 wire——api::Request 没有
+        // 这个字段,设了不等于 provider 结构化输出接通。
+        nlohmann::json output_schema = nlohmann::json();
     };
     struct SampleOutcome {
         lubancode::agent::ModelRoute route;    // 实际用的路由(来源/回退标记齐)
