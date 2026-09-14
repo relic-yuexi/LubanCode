@@ -73,7 +73,7 @@ ImPreferences ImPreferenceStore::Load() const {
     return preferences;
 }
 
-std::optional<std::string> ImPreferenceStore::Save(const ImPreferences& preferences) const {
+std::expected<void, std::string> ImPreferenceStore::Save(const ImPreferences& preferences) const {
     nlohmann::json root;
     root["schema"] = kImPreferencesSchema;
     if (preferences.last.has_value() && preferences.last->present()) {
