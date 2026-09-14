@@ -13,6 +13,7 @@
 #include "channel/qq/qq_http.hpp"
 #include "channel/qq/qq_tls.hpp"
 #include "config/config.hpp"
+#include "platform/process.hpp"
 #include "platform/wall_clock.hpp"
 
 namespace lubancode::app {
@@ -21,26 +22,6 @@ namespace {
 
 // Q1 只实现 qqbot 的进程内适配器;其余渠道名如实记 skipped。
 constexpr const char* kImplementedChannelId = "qqbot";
-
-std::string ReadFileToString(const std::filesystem::path& path) {
-    std::FILE* file = nullptr;
-#ifdef _WIN32
-    file = _wfopen(path.c_str(), L"rb");
-#else
-    file = std::fopen(path.c_str(), "rb");
-#endif
-    if (file == nullptr) {
-        return std::string();
-    }
-    std::string content;
-    char buffer[8192];
-    std::size_t got = 0;
-    while ((got = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        content.append(buffer, got);
-    }
-    std::fclose(file);
-    return content;
-}
 
 }  // namespace
 
@@ -114,12 +95,22 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     // QQ 定案进程内直连(§十五):渠道实现内置受信,不造假包概念。
     const channel::ChannelTrustState builtin_trust{/*installed=*/true, /*trusted=*/true};
 
-    std::string ca_pem = options.ca_pem;
-    if (ca_pem.empty()) {
-        const std::string detected = channel::qq::DetectSystemCaPemPath();
-        if (!detected.empty()) {
-            ca_pem = ReadFileToString(std::filesystem::path(detected));
-        }
+    // 信任根解析(§四):显式 ca_pem(测试位/覆盖位)优先且不回退;空则按
+    // 平台取默认(Windows 系统证书库;Linux/macOS 系统 PEM)。解析不到/
+    // 失败明报进 diagnostics——不静默放行,也不拦装配(连接时按
+    // tls_trust_store_empty 稳定码失败,现场能定位第一处失败)。
+    const channel::qq::ResolvedTrustStore trust =
+        channel::qq::ResolveChannelTrustRoots(options.ca_pem);
+    const channel::qq::TlsTrustMode trust_mode = options.ca_pem.empty()
+                                                     ? channel::qq::TlsTrustMode::SystemDefault
+                                                     : channel::qq::TlsTrustMode::ExplicitCa;
+    const std::string& ca_pem = trust.ca_pem;
+    if (!trust.error.empty()) {
+        wiring->diagnostics_.push_back("TLS 信任根不可用(" + trust.error +
+                                       ")——QQ 连接将失败(tls_trust_store_empty)");
+    } else {
+        wiring->diagnostics_.push_back("TLS 信任根:" + trust.detail + "(" +
+                                       std::to_string(trust.certificate_count) + " 张)");
     }
 
     const auto now_ms = options.now_ms ? options.now_ms
@@ -130,7 +121,7 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     const auto transport_factory =
         options.test_transport_factory
             ? std::move(options.test_transport_factory)
-            : channel::qq::MakeWsTransportFactory(ca_pem);
+            : channel::qq::MakeWsTransportFactory(ca_pem, trust_mode);
 
     for (const auto& [channel_id, channel_config] : options.config->channels) {
         if (channel_id != kImplementedChannelId) {
@@ -179,6 +170,9 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
                 continue;  // adapter 析构收线程
             }
             wiring->adapters_.push_back(std::move(adapter));
+            wiring->adapter_views_.push_back(
+                AdapterView{channel_id, account_id,
+                            static_cast<channel::qq::QqBotAdapter*>(adapter_ptr)});
         }
         // 渠道层 bindings/tools(Q0 五层交集的渠道层)。
         wiring->manager_->SetChannelBindings(channel_id, channel_config.bindings);
@@ -189,6 +183,27 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     // start,由 TickOnce 的 Pump 推进握手)。
     for (const auto& snapshot : wiring->manager_->Snapshots()) {
         (void)wiring->manager_->StartAccount(snapshot.channel_id, snapshot.account_id);
+    }
+
+    // 连接状态宿主输出件(§三):每 tick 限频打印连接状态 + 发布跨进程
+    // 只读快照(带 boot ID 与更新时间,CLI 校验存活与过期)。
+    if (!wiring->adapter_views_.empty()) {
+        ChannelConnectionReporter::Deps reporter_deps;
+        reporter_deps.channels_state_root = options.channels_state_root;
+        reporter_deps.emit = [](const std::string& line) {
+            std::fprintf(stderr, "%s\n", line.c_str());
+        };
+        for (const AdapterView& view : wiring->adapter_views_) {
+            ChannelConnectionReporter::Account reporter_account;
+            reporter_account.channel_id = view.channel_id;
+            reporter_account.account_id = view.account_id;
+            reporter_account.snapshot = [adapter = view.adapter]() {
+                return adapter->ConnectionState();
+            };
+            reporter_deps.accounts.push_back(std::move(reporter_account));
+        }
+        wiring->reporter_ =
+            std::make_unique<ChannelConnectionReporter>(std::move(reporter_deps));
     }
     return wiring;
 }
@@ -214,11 +229,15 @@ void ChannelGatewayWiring::PumpAll() {
 }
 
 bool ChannelGatewayWiring::TickOnce(std::int64_t now_ms) {
-    (void)now_ms;
     if (manager_ == nullptr) {
         return true;
     }
     PumpAll();
+    // 连接状态输出与快照发布(§三):boot_id 即 owner_epoch(Gateway 取锁
+    // 后递进);pid 现取。账号失败不拦主业务(单账号失败不拖死其他)。
+    if (reporter_ != nullptr) {
+        reporter_->Observe(owner_epoch_, platform::CurrentProcessId(), now_ms);
+    }
     if (work_pump_ != nullptr && !work_pump_->TickOnce(now_ms)) {
         return false;  // 渠道业务泵 broken(账写不进):停业务 tick
     }
@@ -232,6 +251,7 @@ void ChannelGatewayWiring::StopAccepting() {
 }
 
 void ChannelGatewayWiring::set_owner_epoch(const std::string& epoch) {
+    owner_epoch_ = epoch;
     if (work_pump_ != nullptr) {
         work_pump_->set_owner_epoch(epoch);
     }
@@ -255,20 +275,29 @@ bool ChannelGatewayWiring::Close(int grace_ms) {
         (void)manager_->StopAccount(snapshot.channel_id, snapshot.account_id);
     }
     const auto deadline = platform::WallClockNowMs() + grace_ms;
+    bool all_stopped = false;
     while (platform::WallClockNowMs() < deadline) {
         PumpAll();
-        bool all_stopped = true;
+        all_stopped = true;
         for (const auto& snapshot : manager_->Snapshots()) {
             if (snapshot.state != channel::ChannelAccountState::Stopped) {
                 all_stopped = false;
             }
         }
         if (all_stopped) {
-            return ok;
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    return false;
+    // 收口后把 stopped 状态刷进快照(CLI 侧不把停机前的旧快照当在线)。
+    if (reporter_ != nullptr) {
+        reporter_->Observe(owner_epoch_, platform::CurrentProcessId(),
+                           platform::WallClockNowMs());
+    }
+    if (!all_stopped) {
+        return false;
+    }
+    return ok;
 }
 
 }  // namespace lubancode::app

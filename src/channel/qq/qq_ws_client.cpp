@@ -161,10 +161,12 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
     std::optional<TlsClientStream> tls;
     if (parsed->tls) {
         auto stream = TlsClientStream::Connect(std::move(*socket), parsed->host,
-                                                options.ca_pem, options.connect_timeout_ms);
+                                                options.ca_pem, options.trust_mode,
+                                                options.connect_timeout_ms);
         if (!stream.has_value()) {
             return std::unexpected(WsError{WsError::Kind::Failed,
-                                           "tls: " + stream.error().detail, 0});
+                                           "tls: " + stream.error().detail, 0,
+                                           stream.error().error_code});
         }
         tls = std::move(*stream);
     }

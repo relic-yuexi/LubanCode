@@ -3,7 +3,7 @@
 日期：2026-09-14。
 问题版本：`v0.26.263-beta.1`，Windows x64 发布包。
 复核基线：工作区 `f4559cb1`；同时核对问题版本源码。
-状态：待实现。本单记录修复设计，未修改运行时代码，未完成真实 QQ 联调。
+状态：P0-A（§三连接状态）与 P0-B（§四 Windows 信任根）已实现，测试上册，待 CI 与 Windows 真机复测；§五/§六（向导与 IM 入口）另行批次进行中。真实 QQ 联调仍未做（Q3）。
 归属：补充 [QQ 接入总单](QQ机器人接入_Channel桥与SessionV3权限闭环.todo) 的 Q1b 配置入口与 Q3 真实账号验收；不重复 Q2 会话与投递实现。
 
 产品主线补充（2026-09-14）：[常驻助理 Web 主界面总装](常驻助理Web主界面_CPP本地服务与Gateway总装.todo)。先有不依赖 IM 的聊天、任务、结果和审批界面，本单成为“渠道设置”子项目。Web 表单与终端 im 向导复用配置/凭据服务；最近平台只是渠道偏好，不决定整位助理是否启动。
@@ -37,13 +37,13 @@
 
 ## 三、P0：连接状态说清楚
 
-- [ ] QQ session 独占平台连接状态：取令牌 → 查询地址 → TCP/TLS → WebSocket → Identify/Resume → READY/RESUMED。适配器透传结构化快照，宿主负责输出；不另养一份猜测状态。
-- [ ] `connected=true` 只在 READY/RESUMED 后成立；断线、停止立即变 false。分别保留线程存活、连接阶段、最近失败、失败时间、重试次数与下次重试时间。
-- [ ] 失败保留 `stage`、稳定 `error_code`、清洗后的简短说明。退避事件不得覆盖根因；连接成功后把错误移到历史，当前错误清空。
-- [ ] `gateway run` 默认打印账号开始连接、首次失败、在线、断线和停止。重复失败合并限频；原因变化立即显示，不能刷屏，也不能一直沉默。
-- [ ] 不打印 AppSecret、token、Authorization、原始响应体或带敏感参数的 URL。诊断只取允许字段；平台报文不能原样拼日志。
-- [ ] 提供跨进程只读状态入口，目标命令为 `lubancode channel status qqbot main`。由 Gateway 发布带 boot ID、更新时间的脱敏快照；CLI 校验存活与过期状态，不把旧快照当在线。快照不成为连接状态权威。
-- [ ] 一个账号失败不拖死其他账号或自动任务；启动日志汇报失败账号。专用连接检查遇到失败/超时须返回非零；不能凭 PID 宣告检查成功。
+- [x] QQ session 独占平台连接状态：取令牌 → 查询地址 → TCP/TLS → WebSocket → Identify/Resume → READY/RESUMED。适配器透传结构化快照，宿主负责输出；不另养一份猜测状态。（P0-A 批：`GatewayEvent::StageChanged`/`kStage*` 六阶段常量 src/channel/qq/qq_gateway.hpp；适配器 `ConnectionSnapshot` src/channel/qq/qq_adapter.hpp + `ConnectionState()`；测试 tests/unit/channelqq/test_qq_gateway.cpp"阶段推进事件"案、test_qq_adapter.cpp"ConnectionState"案）
+- [x] `connected=true` 只在 READY/RESUMED 后成立；断线、停止立即变 false。分别保留线程存活、连接阶段、最近失败、失败时间、重试次数与下次重试时间。（`HandleGatewayEvent` 全分派：SessionReady/Resumed→connected=true、ConnectFailed/Disconnected/Stopped→false；快照带 thread_alive/stage/last_failure{stage,error_code,detail,at_ms}/retry_count/next_retry_at_ms；Health 响应修"线程存活冒充 connected"病——test_qq_adapter.cpp"Health 响应带真实 connected"案）
+- [x] 失败保留 `stage`、稳定 `error_code`、清洗后的简短说明。退避事件不得覆盖根因；连接成功后把错误移到历史，当前错误清空。（`GatewayConnectError{stage,error_code,detail}` 承载事件流：ConnectFailed/Disconnected 带根因，`BackoffScheduled` 只带 attempt/next_retry_at_ms；适配器 `last_failure` 归档 `failure_history`（留 8 笔）；测试 test_qq_gateway.cpp"READY 前失败发 ConnectFailed"案、test_qq_adapter.cpp"连接失败记根因；成功后错误移入历史"案）
+- [x] `gateway run` 默认打印账号开始连接、首次失败、在线、断线和停止。重复失败合并限频；原因变化立即显示，不能刷屏，也不能一直沉默。（`ChannelConnectionReporter` src/app/channel_connection_reporter.{hpp,cpp}：开场行、边沿立即打、同码 30 秒窗合并+超窗补"仍在失败(第 N 次)"、码变立即；挂 ChannelGatewayWiring::TickOnce；测试 tests/unit/channelqq/test_qq_connection_reporter.cpp"边沿都立即打印"/"同码重复失败限频合并"案）
+- [x] 不打印 AppSecret、token、Authorization、原始响应体或带敏感参数的 URL。诊断只取允许字段；平台报文不能原样拼日志。（快照字段全来自 GatewayEvent 稳定账（token 层脱敏在 QqTokenManager/QqHttp 既有禁令）；`RedactConnectionDetail` 控制字符折叠+200 字帽双保险；日志只打阶段/码/清洗 detail，不打印 URL；测试 test_qq_connection_reporter.cpp"脱敏清洗"案）
+- [x] 提供跨进程只读状态入口，目标命令为 `lubancode channel status qqbot main`。由 Gateway 发布带 boot ID、更新时间的脱敏快照；CLI 校验存活与过期状态，不把旧快照当在线。快照不成为连接状态权威。（`connection-status.json` 由 reporter 每 tick 写：变化即写+5 秒保新鲜刷 updated_at，带 boot_id/pid；CLI `JudgeChannelStatus`：进程死/快照过期(60 秒)/未连接/在线四路裁决；源 src/cli/channel_status_command.{hpp,cpp}、装配 src/app/cli_options.cpp channel 子命令；测试 test_qq_connection_reporter.cpp"快照发布"案、tests/unit/cli/test_channel_status_command.cpp 全册）
+- [x] 一个账号失败不拖死其他账号或自动任务；启动日志汇报失败账号。专用连接检查遇到失败/超时须返回非零；不能凭 PID 宣告检查成功。（每账号独立网关线程既有事实不变，wiring skipped 清单照打+新增信任根诊断行；reporter 开场行逐账号报"已装配,开始连接"，首次失败立即打=启动日志可见失败账号；`channel status` 非在线路径全退非零，在线只认 connected=true+进程活+新鲜——test_channel_status_command.cpp"进程已退"/"快照过期"/"未连接"案）
 
 目标输出示例（尚未实现）：
 
@@ -56,11 +56,13 @@
 
 ## 四、P0：Windows 信任根
 
-- [ ] 默认走 Windows 系统证书信任，不要求用户下载 PEM、造 `/etc/ssl` 目录或设置未接线的环境变量。
-- [ ] TLS 层封装平台信任校验。Windows 优先用系统证书链构建与 SSL 策略校验，接入 mbedTLS 握手验证；覆盖目标主机名、有效期、链信任、用途与系统不信任策略。若实现改为导入 ROOT，须证明与系统策略的差异并处理显式不信任，不能只导出几张证书就声称等同系统校验。
-- [ ] 保留 Linux/macOS 现有路径行为，测试用 CA 注入仍可用。显式 CA 覆盖若对外开放，须接全配置解析、优先级与文档；配置无效时明报错，不静默退回其他来源。
-- [ ] 信任根为空、加载失败、证书过期、主机名不符、握手超时分别报稳定错误。禁止关闭证书验证或失败后改走明文。
-- [ ] 检查 HTTP 取令牌/查地址与 WSS 的信任策略差异；两段分别验收，不能拿 HTTP 成功代替 WSS 成功。
+- [x] 默认走 Windows 系统证书信任，不要求用户下载 PEM、造 `/etc/ssl` 目录或设置未接线的环境变量。（`ResolveChannelTrustRoots` src/channel/qq/qq_tls.{hpp,cpp}：Windows 分支 `ExportWindowsTrustRoots` 从 Root/Ca 店（CurrentUser+LocalMachine）导出喂 mbedTLS；用户零动作。**未验边界**：`#ifdef _WIN32` 块 CI 只编 main 不跑测，真机行为归 Q3 下个发布包复测。）
+- [x] TLS 层封装平台信任校验。Windows 优先用系统证书链构建与 SSL 策略校验，接入 mbedTLS 握手验证；覆盖目标主机名、有效期、链信任、用途与系统不信任策略。若实现改为导入 ROOT，须证明与系统策略的差异并处理显式不信任，不能只导出几张证书就声称等同系统校验。（两道都上：mbedTLS 验导入链 + `mbedtls_ssl_conf_verify` 挂 `WindowsPolicyVerify` 回调（leaf 上 `CertGetCertificateChain`+`CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL)`，覆盖 CN/有效期/EKU/Disallowed/系统弱算法策略）；差异论证：系统链构建可走 AIA 拉中间证书、Disallowed 显式不信任、系统策略演进，导出子集做不到——故系统裁决为权威（回调拒→握手拒，过→清 flags 放行），且导出时即剔除 Disallowed 命中的锚。**未验边界**同上，Q3 真机。）
+- [x] 保留 Linux/macOS 现有路径行为，测试用 CA 注入仍可用。显式 CA 覆盖若对外开放，须接全配置解析、优先级与文档；配置无效时明报错，不静默退回其他来源。（Linux/macOS 探测路径与 PEM 读取行为不变；`TlsTrustMode::ExplicitCa` 下三平台同走纯 mbedTLS 验证（测试自签 CA 注入不受影响，tests/unit/channelqq/test_qq_ws_client.cpp TLS 两案原样）；显式锚未接用户配置（只测试 seam），无效即明报不回退——test_qq_tls_errors.cpp"explicit 优先且不回退"案、test_qq_wiring.cpp"信任根诊断"案；文档 docs/architecture/channels/configuration.md §13.2。）
+- [x] 信任根为空、加载失败、证书过期、主机名不符、握手超时分别报稳定错误。禁止关闭证书验证或失败后改走明文。（`TlsError.error_code` 稳定码族 kTlsCode*：trust_store_empty/trust_store_load_failed/cert_expired/cert_hostname_mismatch/cert_not_trusted/cert_policy_rejected/cert_verify_failed/handshake_timeout/handshake_failed；`authmode` 恒 `VERIFY_REQUIRED`，无降级开关、无明文回退；映射测试 test_qq_tls_errors.cpp"验证 flags→稳定码"/"握手错误码映射"案。）
+- [x] 检查 HTTP 取令牌/查地址与 WSS 的信任策略差异；两段分别验收，不能拿 HTTP 成功代替 WSS 成功。（两段本就异栈：HTTP 走 cpr/libcurl（Windows 发布包 vcpkg 路线默认 Schannel=系统信任），WSS 走自建 mbedTLS——本批补齐 WSS 的 Windows 信任根；连接快照按阶段分开报错（fetching_token 段 token_*/gateway_url_* 码、connecting 段 tls_* 码），成功各记各的，HTTP 段成功不会写成 WSS 在线（connected 只认 READY/RESUMED）。HTTP 段真机行为未改动未复测——如实记 Q3。）
+
+P0-A/P0-B 落地批：PR relic-yuexi/LubanCode#81（分支 worktree-agent-qqwin-conn）。mock 覆盖：tests/unit/channelqq/{test_qq_gateway,test_qq_adapter,test_qq_connection_reporter,test_qq_tls_errors,test_qq_wiring}.cpp、tests/unit/cli/test_channel_status_command.cpp；CI rollup 判绿以头提交活跃 check suite 为准。未验口径：Windows 证书链/策略校验真机行为、HTTP(Schannel) 与 WSS(mbedTLS) 双段真平台联调、真实账号全链路——全部归 Q3 下个发布包复测，mock 绿不冒充联调过。
 
 ## 五、P0：用户输入配置，程序管文件权限
 

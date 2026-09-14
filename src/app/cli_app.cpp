@@ -59,6 +59,7 @@
 #include "app/commands/workspace_commands.hpp"
 #include "app/commands/evolve_commands.hpp"  // RunEvolveTestCommand(自进化阶段 3 的 CI 口)
 #include "app/version.hpp"
+#include "cli/channel_status_command.hpp"  // 连接状态单 §三:channel status 只读快照
 #include "cli/console_input.hpp"
 #include "cli/gateway_command.hpp"  // 总装单 G1:gateway run/status/stop 子命令
 #include "cli/trajectory_command.hpp"  // P0-3:trajectory verify/replay/harness-replay 子命令
@@ -956,6 +957,12 @@ int RunCli(const std::vector<std::string>& args) {
                     for (const std::string& line : channel_wiring->skipped()) {
                         std::cerr << "[gateway] 渠道账号未装配: " << line << "\n";
                     }
+                    // 连接状态单 §四:装配时检查信任根并明报来源(解析不到
+                    // 也说清楚,现场能定位第一处失败;具体连接状态由 wiring
+                    // 的 reporter 每 tick 打印)。
+                    for (const std::string& line : channel_wiring->diagnostics()) {
+                        std::cerr << "[gateway] " << line << "\n";
+                    }
                     // QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装)挂进
                     // wiring——桥泵之后每 tick 推进一轮;outbox 共享
                     // automation 泵的同一本账(单写者,两泵同 tick 串行)。
@@ -997,6 +1004,18 @@ int RunCli(const std::vector<std::string>& args) {
             return code;
         }
         case CliAction::BadGateway:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunChannelStatus: {
+            // 连接状态单 §三:跨进程只读连接快照(在线 0/其余非零;不凭
+            // PID 宣告成功)。
+            cli::ChannelStatusCommandArgs channel_status_args;
+            channel_status_args.channel_id = parsed_cli.channel_status.channel_id;
+            channel_status_args.account_id = parsed_cli.channel_status.account_id;
+            channel_status_args.json = parsed_cli.channel_status.json;
+            return cli::RunChannelStatusCommand(channel_status_args);
+        }
+        case CliAction::BadChannelStatus:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:

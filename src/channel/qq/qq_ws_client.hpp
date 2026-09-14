@@ -25,6 +25,10 @@ namespace lubancode::channel::qq {
 struct WsConnectOptions {
     std::string url;      // ws://host:port/path 或 wss://…
     std::string ca_pem;   // wss 时的信任锚 PEM(w 不用)
+    // 信任锚语义(Windows 信任根单 §四):ExplicitCa = 调用方全权指定
+    //(测试自签根,三平台同行为);SystemDefault = 平台默认信任(Windows
+    // 接系统证书店 + SSL 策略校验)。默认 ExplicitCa 保旧调用方行为。
+    TlsTrustMode trust_mode = TlsTrustMode::ExplicitCa;
     int connect_timeout_ms = 10'000;
     int io_timeout_ms = 10'000;  // 单次 select 落锤
 };
@@ -39,6 +43,9 @@ struct WsError {
     Kind kind = Kind::Failed;
     std::string detail;
     std::uint16_t close_code = 0;  // Kind::Closed 且对端带码时
+    // 稳定错误码(连接状态快照/日志;空 = 无细码,消费方按 kind/detail
+    // 分型)。TLS 失败时透传 kTlsCode* 码。
+    std::string error_code;
 };
 
 // 单条握手响应/帧头部的读缓冲帽(8 KiB——网关握手响应远小于此)。

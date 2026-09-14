@@ -859,8 +859,9 @@ target_include_directories(lubancode_engine PUBLIC
 target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 if(WIN32)
   # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
-  # 系统依赖会以 link-only 形态传给消费方)。
-  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32)
+  # 系统依赖会以 link-only 形态传给消费方);crypt32:qq_tls 的 Windows
+  # 信任根(系统证书店导出 + SSL 策略校验,连接状态单 §四)。
+  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32 crypt32)
 endif()
 target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
 # mbedTLS(QQ Q1):TLS 底座。PRIVATE——qq/ 内部件,头不外递,消费方零感知。
@@ -1143,6 +1144,9 @@ add_library(lubancode_app STATIC
   # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ
   # 进程内适配器实例化)与双泵叠加件(不动 engine 的 GatewayWorkPump 冻结面)。
   src/app/channel_gateway_wiring.cpp
+  # QQ 连接状态单 §三:连接状态宿主输出件——适配器快照的限频日志与跨进程
+  # 只读快照发布(connection-status.json,带 boot ID 与更新时间)。
+  src/app/channel_connection_reporter.cpp
   # 终端接线收尾单:子代理面板 presenter(条目列表/查看态视口,自大类搬出)。
   src/app/agent_panel_presenter.cpp
   src/app/session_title.cpp
@@ -1282,6 +1286,9 @@ add_library(lubancode_app STATIC
   src/cli/trajectory_command.cpp
   # 持久 Agent 总装单 G1:`lubancode gateway run|status|stop` 子命令面。
   src/cli/gateway_command.cpp
+  # QQ 连接状态单 §三:`lubancode channel status <渠道> <账号>` 跨进程只读
+  # 连接快照(Gateway 发布的脱敏 connection-status.json)。
+  src/cli/channel_status_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

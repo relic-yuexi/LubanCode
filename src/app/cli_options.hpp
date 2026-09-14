@@ -110,6 +110,16 @@ struct GatewayCliArgs {
     long long due_at_ms = 0;          // add --at(0 = 立即)
 };
 
+// channel status 子命令(连接状态单 §三 P0-A):`lubancode channel status
+// <渠道> <账号> [--json]`。跨进程只读——读 Gateway 发布的脱敏连接快照
+// (connection-status.json),校验进程存活与快照新鲜度;不把旧快照当在线,
+// 不凭 PID 宣告成功。在线(connected=true)退 0,其余非零。
+struct ChannelStatusCliArgs {
+    std::string channel_id;  // 目标渠道(如 qqbot)
+    std::string account_id;  // 目标账号(如 main)
+    bool json = false;       // --json:stdout 吐快照 + verdict
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -133,6 +143,8 @@ enum class CliAction {
     BadOutput,                // --output 缺值/空值:人话已塞进 error_text(Harbor JSONL 单)
     RunGateway,               // gateway 子命令:run/status/stop(总装单 G1)
     BadGateway,               // gateway 参数不对:人话已塞进 error_text
+    RunChannelStatus,         // channel status 子命令:跨进程只读连接快照(§三)
+    BadChannelStatus,         // channel 子命令参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -144,6 +156,7 @@ struct ParsedCliArgs {
     EvolveTestArgs evolve_test;  // action == RunEvolveTest 时有效
     TrajectoryCliArgs trajectory;  // action == RunTrajectory 时有效
     GatewayCliArgs gateway;  // action == RunGateway 时有效
+    ChannelStatusCliArgs channel_status;  // action == RunChannelStatus 时有效
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

@@ -12,28 +12,49 @@ namespace lubancode::channel::qq {
 
 namespace {
 
-// GET /gateway 的响应:{"url": "wss://..."}(官方 API)。失败给脱敏人话。
-std::expected<std::string, std::string> FetchGatewayUrl(const QqHttpFunc& http,
-                                                        const std::string& api_base,
-                                                        const std::string& token) {
+// GET /gateway 的响应:{"url": "wss://..."}(官方 API)。失败带稳定码与
+// 阶段(连接状态单 §三:查询地址是独立阶段,不与取令牌混报)。
+std::expected<std::string, GatewayConnectError> FetchGatewayUrl(const QqHttpFunc& http,
+                                                                const std::string& api_base,
+                                                                const std::string& token) {
     QqHttpRequest request;
     request.method = "GET";
     request.url = api_base + "/gateway";
     request.headers.emplace_back("Authorization", "QQBot " + token);
     const auto response = http(request);
     if (!response.has_value()) {
-        return std::unexpected(response.error());
+        return std::unexpected(GatewayConnectError{
+            kStageFetchingGatewayUrl, "gateway_url_http_failed", response.error()});
     }
     if (response->status < 200 || response->status >= 300) {
-        return std::unexpected("gateway url status " + std::to_string(response->status));
+        return std::unexpected(GatewayConnectError{
+            kStageFetchingGatewayUrl, "gateway_url_http_failed",
+            "gateway url status " + std::to_string(response->status)});
     }
     const auto parsed =
         nlohmann::json::parse(response->body, nullptr, /*allow_exceptions=*/false);
     if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("url") ||
         !parsed.at("url").is_string()) {
-        return std::unexpected("gateway url response missing url");
+        return std::unexpected(GatewayConnectError{
+            kStageFetchingGatewayUrl, "gateway_url_bad_response",
+            "gateway url response missing url"});
     }
     return parsed.at("url").get<std::string>();
+}
+
+// QqTokenManager 错误分型 -> 稳定码(取令牌阶段)。
+std::string TokenErrorCode(QqTokenManager::ErrorKind kind) {
+    switch (kind) {
+        case QqTokenManager::ErrorKind::InvalidCredentials:
+            return "token_invalid_credentials";
+        case QqTokenManager::ErrorKind::ServerError:
+            return "token_server_error";
+        case QqTokenManager::ErrorKind::RateLimited:
+            return "token_rate_limited";
+        case QqTokenManager::ErrorKind::NetworkError:
+            break;
+    }
+    return "token_network_failed";
 }
 
 }  // namespace
@@ -262,12 +283,27 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
             return;
         }
         case BridgeMethod::Health: {
+            // 连接状态单 §三:connected 只认 READY/RESUMED(不再拿线程存活
+            // 冒充在线);last_error 带最近失败(不再恒空)。
+            const ConnectionSnapshot snapshot = ConnectionState();
             nlohmann::json result = nlohmann::json::object();
             result["state"] = session_ ? session_->state_name() : std::string("stopped");
-            result["connected"] = gateway_thread_running();
+            result["connected"] = snapshot.connected;
+            result["thread_alive"] = snapshot.thread_alive;
+            result["stage"] = snapshot.stage;
             result["cursor"] = nullptr;
             result["backlog"] = spool_pending_count();
-            result["last_error"] = nullptr;
+            if (snapshot.last_failure.has_value()) {
+                result["last_error"] = nlohmann::json{
+                    {"stage", snapshot.last_failure->stage},
+                    {"error_code", snapshot.last_failure->error_code},
+                    {"detail", snapshot.last_failure->detail},
+                    {"at_ms", snapshot.last_failure->at_ms}};
+            } else {
+                result["last_error"] = nullptr;
+            }
+            result["retry_count"] = snapshot.retry_count;
+            result["next_retry_at_ms"] = snapshot.next_retry_at_ms;
             ReplyResult(id, result);
             return;
         }
@@ -306,21 +342,46 @@ bool QqBotAdapter::StartGatewayLocked() {
         sender_.emplace(std::move(sender_options));
     }
     stop_.store(false);
+    // 重启(桥 stop -> start)时重置在线账;last_failure 保留到下次成功——
+    // 用户看得到上一次为什么失败(§三)。
+    {
+        const std::lock_guard<std::mutex> lock(connection_mutex_);
+        connection_.connected = false;
+        connection_.connected_since_ms = 0;
+        connection_.stage = kStageConnecting;
+        connection_.retry_count = 0;
+        connection_.next_retry_at_ms = 0;
+        connection_.updated_at_ms = options_.now_ms();
+    }
 
     QqGatewaySession::Options gateway_options;
     gateway_options.transport_factory = options_.transport_factory;
-    gateway_options.gateway_url_provider = [this]() {
+    // provider 发阶段事件(取令牌/查地址两段独立可见,§三);失败带
+    // GatewayConnectError(阶段 + 稳定码 + 脱敏 detail)。
+    gateway_options.gateway_url_provider =
+        [this]() -> std::expected<std::string, GatewayConnectError> {
+        HandleGatewayEvent(GatewayEvent{GatewayEvent::Kind::StageChanged,
+                                        nlohmann::json::object(), std::string(), -1,
+                                        kStageFetchingToken});
         const auto token = token_manager_.GetValidToken();
         if (!token.has_value()) {
-            return std::expected<std::string, std::string>(
-                std::unexpected("token: " + token.error().detail));
+            return std::unexpected(GatewayConnectError{
+                kStageFetchingToken, TokenErrorCode(token.error().kind),
+                "token: " + token.error().detail});
         }
+        HandleGatewayEvent(GatewayEvent{GatewayEvent::Kind::StageChanged,
+                                        nlohmann::json::object(), std::string(), -1,
+                                        kStageFetchingGatewayUrl});
         return FetchGatewayUrl(options_.http, options_.api_base, *token);
     };
-    gateway_options.token_provider = [this]() -> std::expected<std::string, std::string> {
+    gateway_options.token_provider =
+        [this]() -> std::expected<std::string, GatewayConnectError> {
+        // 网关线程在 identifying 阶段再取(鉴权窗);失败同样带阶段与码。
         const auto token = token_manager_.GetValidToken();
         if (!token.has_value()) {
-            return std::unexpected(token.error().detail);
+            return std::unexpected(GatewayConnectError{
+                kStageIdentifying, TokenErrorCode(token.error().kind),
+                "token: " + token.error().detail});
         }
         return *token;
     };
@@ -381,15 +442,106 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             EmitNotification(BridgeMethod::Inbound, event_json);
             return;
         }
+        case GatewayEvent::Kind::StageChanged: {
+            // 阶段推进只记本地快照账,不刷宿主状态机(宿主只认
+            // running/backoff/stopped 粗粒度状态)。
+            const std::lock_guard<std::mutex> lock(connection_mutex_);
+            connection_.stage = event.stage.empty() ? kStageConnecting : event.stage;
+            connection_.updated_at_ms = options_.now_ms();
+            return;
+        }
         case GatewayEvent::Kind::SessionReady:
-        case GatewayEvent::Kind::SessionResumed:
-            EmitNotification(BridgeMethod::Status, nlohmann::json{{"state", "running"}});
+        case GatewayEvent::Kind::SessionResumed: {
+            // connected 只在 READY/RESUMED 后成立;连接成功把错误移入
+            // 历史、当前清空(§三)。
+            {
+                const std::lock_guard<std::mutex> lock(connection_mutex_);
+                connection_.connected = true;
+                connection_.connected_since_ms = options_.now_ms();
+                connection_.stage = kStageConnected;
+                if (connection_.last_failure.has_value()) {
+                    connection_.failure_history.push_back(*connection_.last_failure);
+                    if (connection_.failure_history.size() > 8) {
+                        connection_.failure_history.erase(
+                            connection_.failure_history.begin());
+                    }
+                    connection_.last_failure.reset();
+                }
+                connection_.retry_count = 0;
+                connection_.next_retry_at_ms = 0;
+                connection_.updated_at_ms = options_.now_ms();
+            }
+            EmitNotification(BridgeMethod::Status,
+                             nlohmann::json{{"state", "running"}, {"connected", true},
+                                            {"stage", kStageConnected}});
             return;
-        case GatewayEvent::Kind::SessionInvalidated:
-        case GatewayEvent::Kind::Disconnected:
-            EmitNotification(BridgeMethod::Status, nlohmann::json{{"state", "backoff"}});
+        }
+        case GatewayEvent::Kind::ConnectFailed:
+        case GatewayEvent::Kind::Disconnected: {
+            // 失败保留 stage/稳定码/清洗说明;退避事件不进这里,根因不被
+            // 覆盖(§三)。宿主粗粒度状态仍报 backoff(不动宿主状态机语义,
+            // 细账走扩展字段)。
+            {
+                const std::lock_guard<std::mutex> lock(connection_mutex_);
+                connection_.connected = false;
+                connection_.connected_since_ms = 0;
+                connection_.last_failure = ConnectionFailure{
+                    event.stage, event.error_code, event.detail, options_.now_ms()};
+                connection_.updated_at_ms = options_.now_ms();
+            }
+            EmitNotification(BridgeMethod::Status,
+                             nlohmann::json{{"state", "backoff"},
+                                            {"connected", false},
+                                            {"stage", event.stage},
+                                            {"error_code", event.error_code},
+                                            {"detail", event.detail}});
             return;
+        }
+        case GatewayEvent::Kind::BackoffScheduled: {
+            // 只记重试账,不碰 last_failure(退避不许覆盖根因,§三)。
+            const std::lock_guard<std::mutex> lock(connection_mutex_);
+            connection_.retry_count = event.attempt;
+            connection_.next_retry_at_ms = event.next_retry_at_ms;
+            connection_.updated_at_ms = options_.now_ms();
+            return;
+        }
+        case GatewayEvent::Kind::SessionInvalidated: {
+            {
+                const std::lock_guard<std::mutex> lock(connection_mutex_);
+                connection_.stage = kStageIdentifying;
+                connection_.updated_at_ms = options_.now_ms();
+            }
+            EmitNotification(BridgeMethod::Status,
+                             nlohmann::json{{"state", "backoff"}, {"connected", false},
+                                            {"stage", kStageIdentifying}});
+            return;
+        }
+        case GatewayEvent::Kind::Stopped: {
+            // 停止:connected 立即 false(§三)。
+            {
+                const std::lock_guard<std::mutex> lock(connection_mutex_);
+                connection_.connected = false;
+                connection_.connected_since_ms = 0;
+                connection_.stage = kStageStopped;
+                connection_.next_retry_at_ms = 0;
+                connection_.updated_at_ms = options_.now_ms();
+            }
+            EmitNotification(BridgeMethod::Status,
+                             nlohmann::json{{"state", "stopped"}, {"connected", false},
+                                            {"stage", kStageStopped}});
+            return;
+        }
     }
+}
+
+ConnectionSnapshot QqBotAdapter::ConnectionState() const {
+    const std::lock_guard<std::mutex> lock(connection_mutex_);
+    ConnectionSnapshot snapshot = connection_;
+    snapshot.thread_alive = gateway_thread_ != nullptr;
+    if (snapshot.stage.empty()) {
+        snapshot.stage = snapshot.thread_alive ? kStageConnecting : std::string("idle");
+    }
+    return snapshot;
 }
 
 void QqBotAdapter::SenderLoop() {

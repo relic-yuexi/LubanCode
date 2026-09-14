@@ -42,15 +42,18 @@ public:
         std::size_t cursor = 0;
         std::vector<std::string> sent;
         bool fail_connect = false;
+        // 脚本耗尽后的读错误(默认 Timeout=静默;测试改 Closed 模拟立即断线)。
+        WsError exhausted_error{WsError::Kind::Timeout, "script exhausted", 0};
     };
 
     explicit ScriptGatewayTransport(std::shared_ptr<Shared> shared)
         : shared_(std::move(shared)) {}
 
-    std::expected<void, std::string> Connect(const std::string&) override {
+    std::expected<void, GatewayConnectError> Connect(const std::string&) override {
         const std::lock_guard<std::mutex> lock(shared_->mutex);
         if (shared_->fail_connect) {
-            return std::unexpected("connect refused");
+            return std::unexpected(GatewayConnectError{
+                kStageConnecting, "connect_refused", "connect refused"});
         }
         // 连接即回 Hello——插队头,保证无论测试预置了什么脚本,Hello 总是
         // 客户端连接后读到的第一条(官方语义如此)。
@@ -71,7 +74,7 @@ public:
         if (shared_->cursor < shared_->incoming.size()) {
             return shared_->incoming[shared_->cursor++];
         }
-        return std::unexpected(WsError{WsError::Kind::Timeout, "idle", 0});
+        return std::unexpected(shared_->exhausted_error);
     }
 
     void Cancel() override {}
@@ -521,6 +524,148 @@ TEST_CASE("qq_adapter: stop 停网关线程,未 ACK spool 保留(bridge stop 帧
         }
     }
     CHECK(saw_stopped);
+}
+
+// ---------------------------------------------------------------------------
+// 连接状态快照(连接状态单 §三):connected 只认 READY/RESUMED;失败保留
+// 根因、退避不覆盖;成功后错误归档清当前;Health 响应带真实 connected。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_adapter: ConnectionState——connected 只在 READY 后成立,断线立即 false") {
+    AdapterHarness harness("conn_state");
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    // 未 start:线程不活,connected=false,stage=idle。
+    {
+        const ConnectionSnapshot before = harness.adapter->ConnectionState();
+        CHECK_FALSE(before.thread_alive);
+        CHECK_FALSE(before.connected);
+        CHECK(before.stage == "idle");
+    }
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    REQUIRE(WaitQuiet([&harness]() { return harness.adapter->gateway_thread_running(); }));
+    // 已起线程但未 READY:thread_alive=true 而 connected 仍 false(§三
+    // "不用线程存活冒充在线")。
+    REQUIRE(WaitQuiet([&harness]() {
+        const ConnectionSnapshot mid = harness.adapter->ConnectionState();
+        return mid.thread_alive && !mid.connected;
+    }));
+
+    // READY → connected=true。
+    ScriptGatewayTransport::Push(
+        harness.gateway,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-cs","user":{"id":"b"}}})");
+    REQUIRE(WaitQuiet([&harness]() { return harness.adapter->ConnectionState().connected; }));
+    {
+        const ConnectionSnapshot live = harness.adapter->ConnectionState();
+        CHECK(live.stage == kStageConnected);
+        CHECK(live.connected_since_ms > 0);
+        CHECK_FALSE(live.last_failure.has_value());
+    }
+
+    // 断线(脚本耗尽改 Closed:运行循环 read 立即断):connected 立即
+    // false,last_failure 保留根因与阶段(§三 Disconnected 不丢 detail)。
+    {
+        const std::lock_guard<std::mutex> lock(harness.gateway->mutex);
+        harness.gateway->exhausted_error =
+            WsError{WsError::Kind::Closed, "peer closed", 1000};
+    }
+    REQUIRE(WaitQuiet([&harness]() {
+        const ConnectionSnapshot dead = harness.adapter->ConnectionState();
+        return !dead.connected && dead.last_failure.has_value();
+    }));
+    {
+        const ConnectionSnapshot dead = harness.adapter->ConnectionState();
+        CHECK(dead.last_failure->stage == kStageConnected);
+        CHECK_FALSE(dead.last_failure->error_code.empty());
+    }
+}
+
+TEST_CASE("qq_adapter: 连接失败记根因;成功后错误移入历史、当前清空") {
+    AdapterHarness harness("conn_failure");
+    // token 接口直接拒:provider 阶段 ConnectFailed(fetching_token)。
+    {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        harness.http.access_token.clear();  // 响应缺 access_token → InvalidCredentials
+    }
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    REQUIRE(WaitQuiet([&harness]() {
+        const ConnectionSnapshot failing = harness.adapter->ConnectionState();
+        return failing.last_failure.has_value() &&
+               failing.last_failure->stage == kStageFetchingToken && failing.retry_count >= 1;
+    }));
+    {
+        const ConnectionSnapshot failing = harness.adapter->ConnectionState();
+        CHECK(failing.last_failure->error_code == "token_invalid_credentials");
+        CHECK_FALSE(failing.connected);
+        CHECK(failing.retry_count >= 1);          // BackoffScheduled 记了账
+        CHECK(failing.next_retry_at_ms > 0);
+    }
+    // 修好 token:下一轮连接成功 → 错误移入历史、当前清空、重试账清零。
+    {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        harness.http.access_token = "TT2";
+    }
+    ScriptGatewayTransport::Push(
+        harness.gateway,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-ok","user":{"id":"b"}}})");
+    REQUIRE(WaitQuiet([&harness]() { return harness.adapter->ConnectionState().connected; }));
+    {
+        const ConnectionSnapshot healed = harness.adapter->ConnectionState();
+        CHECK_FALSE(healed.last_failure.has_value());
+        REQUIRE_FALSE(healed.failure_history.empty());
+        CHECK(healed.failure_history.back().error_code == "token_invalid_credentials");
+        CHECK(healed.retry_count == 0);
+        CHECK(healed.next_retry_at_ms == 0);
+    }
+}
+
+TEST_CASE("qq_adapter: Health 响应带真实 connected 与 last_error(修三处现状病)") {
+    AdapterHarness harness("health_fix");
+    {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        harness.http.access_token.clear();
+    }
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    // 先等失败账立起来(token 失败已入账、阶段停在取令牌),再发 Health——
+    // 否则网关线程首事件未发,快照阶段还是默认填充值。
+    REQUIRE(WaitQuiet([&harness]() {
+        const ConnectionSnapshot failing = harness.adapter->ConnectionState();
+        return failing.last_failure.has_value() &&
+               failing.last_failure->error_code == "token_invalid_credentials";
+    }));
+    // 线程活着但没连上:Health 的 connected 必须 false(不再用线程存活冒充)。
+    harness.HostWrite(channel::BuildRequestJson(9, channel::BridgeMethod::Health,
+                                                nlohmann::json{}));
+    bool saw_health = false;
+    for (const auto& frame :
+         WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
+             return frame.contains("id") && frame.at("id") == 9 && frame.contains("result");
+         })) {
+        if (frame.contains("id") && frame.at("id") == 9 && frame.contains("result")) {
+            saw_health = true;
+            const auto& result = frame.at("result");
+            CHECK(result.at("connected") == false);
+            CHECK(result.at("thread_alive") == true);
+            CHECK(result.at("last_error").is_object());
+            CHECK(result.at("last_error").at("error_code") == "token_invalid_credentials");
+            CHECK(result.at("stage") == kStageFetchingToken);
+        }
+    }
+    REQUIRE(saw_health);
 }
 
 }  // namespace lubancode::channel::qq

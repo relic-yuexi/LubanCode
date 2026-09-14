@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,11 +41,12 @@ public:
 
     explicit FakeTransport(std::shared_ptr<Shared> shared) : shared_(std::move(shared)) {}
 
-    std::expected<void, std::string> Connect(const std::string& url) override {
+    std::expected<void, GatewayConnectError> Connect(const std::string& url) override {
         const std::lock_guard<std::mutex> lock(shared_->mutex);
         shared_->connect_urls.push_back(url);
         if (shared_->fail_connect) {
-            return std::unexpected("connect refused");
+            return std::unexpected(GatewayConnectError{
+                kStageConnecting, "connect_refused", "connect refused"});
         }
         return {};
     }
@@ -101,16 +103,30 @@ struct Harness {
     std::atomic<bool> stop{false};
     std::unique_ptr<QqGatewaySession> session;
     std::unique_ptr<std::thread> thread;
+    // url provider 可换(测 provider 侧失败:取令牌/查地址阶段)。测试线程
+    // 在网关线程跑动中换,上锁防竞态。
+    std::mutex url_mutex;
+    std::function<std::expected<std::string, GatewayConnectError>()> url_provider_impl =
+        []() -> std::expected<std::string, GatewayConnectError> {
+        return std::string("wss://gateway.test/ws");
+    };
+
+    void SetUrlProvider(
+        std::function<std::expected<std::string, GatewayConnectError>()> provider) {
+        const std::lock_guard<std::mutex> lock(url_mutex);
+        url_provider_impl = std::move(provider);
+    }
 
     QqGatewaySession::Options MakeOptions() {
         QqGatewaySession::Options options;
         options.transport_factory = [s = shared]() {
             return std::unique_ptr<IGatewayTransport>(std::make_unique<FakeTransport>(s));
         };
-        options.gateway_url_provider = []() -> std::expected<std::string, std::string> {
-            return std::string("wss://gateway.test/ws");
+        options.gateway_url_provider = [this]() {
+            const std::lock_guard<std::mutex> lock(url_mutex);
+            return url_provider_impl();
         };
-        options.token_provider = []() -> std::expected<std::string, std::string> {
+        options.token_provider = []() -> std::expected<std::string, GatewayConnectError> {
             return std::string("TOKEN");
         };
         options.on_event = [this](const GatewayEvent& event) {
@@ -334,8 +350,14 @@ TEST_CASE("qq_gateway: 连接失败沿退避阶梯重试,connect 次数递增") 
         harness.shared->fail_connect = true;
     }
     harness.Start();
+    // 从未到 READY 的失败发 ConnectFailed(不是 Disconnected),带阶段与稳定码。
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
-        return e.kind == GatewayEvent::Kind::Disconnected;
+        return e.kind == GatewayEvent::Kind::ConnectFailed && e.stage == kStageConnecting &&
+               e.error_code == "connect_refused";
+    }));
+    // 失败后是退避排程事件(不带根因,不覆盖)。
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::BackoffScheduled && e.attempt >= 1;
     }));
     // scale 0.001:秒级阶梯变毫秒级,几百 ms 内应累计多次连接尝试。
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -352,10 +374,107 @@ TEST_CASE("qq_gateway: 首条消息不是 Hello 即断线") {
     Harness harness;
     FakeTransport::PushIncoming(harness.shared, R"({"op":0,"t":"READY","d":{}})");
     harness.Start();
+    // hello 阶段失败(未到 READY)→ ConnectFailed + 阶段码。
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
-        return e.kind == GatewayEvent::Kind::Disconnected &&
+        return e.kind == GatewayEvent::Kind::ConnectFailed && e.stage == kStageConnecting &&
+               e.error_code == "hello_bad_payload" &&
                e.detail.find("HELLO") != std::string::npos;
     }));
+}
+
+// ---------------------------------------------------------------------------
+// 连接状态单 §三:阶段事件、失败/退避分家、在线后断线带根因、停止事件。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_gateway: 阶段推进事件——connecting→identifying→connected") {
+    Harness harness;
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(
+        harness.shared,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-st","user":{"id":"b"}}})");
+    harness.Start();
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::SessionReady;
+    }));
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::StageChanged && e.stage == kStageConnected;
+    }));
+    // 事件序:connecting 在 identifying 前,identifying 在 connected 前。
+    const std::vector<GatewayEvent> events = harness.SnapshotEvents();
+    auto position = [&events](const char* stage) {
+        for (std::size_t i = 0; i < events.size(); ++i) {
+            if (events[i].kind == GatewayEvent::Kind::StageChanged &&
+                events[i].stage == stage) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    const int connecting = position(kStageConnecting);
+    const int identifying = position(kStageIdentifying);
+    const int connected = position(kStageConnected);
+    CHECK(connecting >= 0);
+    CHECK(identifying > connecting);
+    CHECK(connected > identifying);
+}
+
+TEST_CASE("qq_gateway: READY 前失败发 ConnectFailed;在线后断线发 Disconnected 带根因") {
+    Harness harness;
+    // provider 返回失败:阶段 fetching_token、稳定码 token_invalid_credentials。
+    harness.SetUrlProvider(
+        []() -> std::expected<std::string, GatewayConnectError> {
+            return std::unexpected(GatewayConnectError{
+                kStageFetchingToken, "token_invalid_credentials",
+                "token: invalid credentials"});
+        });
+    harness.Start();
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::ConnectFailed &&
+               e.stage == kStageFetchingToken &&
+               e.error_code == "token_invalid_credentials";
+    }));
+    // 退避事件跟在失败后,不带根因。
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::BackoffScheduled;
+    }));
+
+    // 换回正常 provider:在线后断线(运行期 read 失败)→ Disconnected
+    // 带根因与阶段。
+    harness.SetUrlProvider(
+        []() -> std::expected<std::string, GatewayConnectError> {
+            return std::string("wss://gateway.test/ws");
+        });
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(
+        harness.shared,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-x"}})");
+    {
+        const std::lock_guard<std::mutex> lock(harness.shared->mutex);
+        harness.shared->exhausted_error =
+            WsError{WsError::Kind::Closed, "peer closed", 1000};
+    }
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::Disconnected && e.stage == kStageConnected &&
+               e.error_code == "read_closed" &&
+               e.detail.find("peer closed") != std::string::npos;
+    }));
+}
+
+TEST_CASE("qq_gateway: 停止时发 Stopped 事件(RunLoop 收口)") {
+    Harness harness;
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(
+        harness.shared,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-s"}})");
+    harness.Start();
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::StageChanged && e.stage == kStageConnected;
+    }));
+    harness.stop.store(true);
+    harness.session->CancelInFlight();
+    REQUIRE(harness.WaitForEvent(
+        [](const GatewayEvent& e) { return e.kind == GatewayEvent::Kind::Stopped; }));
+    CHECK(harness.session->state_name() == "stopped");
 }
 
 }  // namespace lubancode::channel::qq
