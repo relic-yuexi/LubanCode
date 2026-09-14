@@ -3,7 +3,7 @@
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落，worktree-agent-qq-q2 分支，PR 待开——开后补号与 CI 链接）；Q3 起仍待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q3 起仍待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -175,7 +175,7 @@ channels/qqbot/
 
 ### Q2：V3 与 outbox 总装
 
-（本批已落 worktree-agent-qq-q2 分支，PR 号与 CI 链接见行 6 进度注；测试名/符号清单见 §六/§七 记账。）
+（本批已落 **PR #75**；CI 头提交活跃 suite rollup=success，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)。测试名/符号清单见 §六/§七 记账。）
 
 - [x] 假 provider + 真桥 fixture：连续两条消息共享上下文；不同账号/用户/workspace 不串场；停机恢复仍接上上文。（册 `tests/unit/runtime/test_channel_work_pump.cpp`：假 provider（`CaptureBackend`，逐请求落对话 dump——上下文断言看真请求不靠猜）+ 真桥（`FakeChannelSidecar` 走真 Bridge 帧，support 件扩发送脚本/回执口）。四案："连续两条消息共享上下文"（同场+第二轮请求含第一轮对话）/"不同用户不串场"（dm-b 请求无 dm-a 对话、场 id 不同）/"不同 workspace 不串场"（换 ws 目录重启 → 新场，模型看不见旧对话）/"停机恢复仍接上上文"（干净停机 → 重建 → resume-as-new 新场带旧上下文、映射更新）。不同**账号**不串场由账号目录+ingress 账+session_key 含账号三重隔离承担，经理册/映射册已钉——泵册不另起一案。）
 - [x] 写盘失败、队列满、来信重放、权限撤销、三个执行/回复窗口崩溃注入；模型和工具调用计数不多一次。（泵册：`HardKillWindowCase` 窗 1（生成后 selection 前）/窗 2（selection 后 outbox 前）共用骨架——工具轮真执行（工具计数 1）+ 恢复补齐全程模型计数不多一次、回复恰投一份、ingress delivered；窗 3（入箱后发送前，`fault_after_enqueue`）；"claim 后崩"（无绑定行 → dead letter needs_review，零模型）；"来信重放"（同 delivery 重投模型恰 1 次）；"权限撤销"（排队后两条同档 binding 冲突 → TakeNextWork 重验 rejected 零模型）；"队列满"（inbox 帽 1 → 第二件 rate_limited 旁路）；"写盘失败"（outbox 账被目录占住 → 入箱失败停泵、模型恰 1 次）。计数走盘上 calls.log，装配销毁重建后仍有效——"不多一次"是对账不是内存断言。）
