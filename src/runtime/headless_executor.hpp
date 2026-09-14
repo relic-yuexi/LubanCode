@@ -60,12 +60,15 @@ struct HeadlessWorkBinding {
     std::uint64_t attempt = 1;
 };
 
-// 冻结的回复选择策略(V1 版):从已提交 V3 事实唯一定位可外送正文。
-// selectionId = "sel-" + turnId——执行与恢复同一式,不变洗。
+// 冻结的回复选择策略(V1 版 + V2 修正):从已提交 V3 事实唯一定位可外送
+// 正文。selectionId = "sel-" + sessionId + "-" + turnId——turnId 只在场内
+// 唯一,周期任务同 profile 多场共存时旧式 sel-<turnId> 会撞名(V2 修正,
+// 详见 contracts.md §13.8);流上已按旧式提交过的沿用旧式(V1 在途恢复
+// 不双送)。执行与恢复同一式,不变洗。
 struct ReplySelectionPlan {
     bool ok = false;
     std::string error;                 // 无 assistant/正文为空等原因
-    std::string selection_id;          // "sel-" + turnId
+    std::string selection_id;          // "sel-<sessionId>-<turnId>(旧式 sel-<turnId> 兼容沿用)"
     std::string turn_id;
     std::string source_message_ref;    // 选定 assistant 的 V3 message id
     std::string completed_event_ref;   // 本轮最后 model.response.completed 事件 id
@@ -146,7 +149,7 @@ public:
         std::string session_id;   // 开出的 V3 场
         std::string turn_id;      // 本轮 id(绑定/恢复反查的锚)
         std::string reply_text;   // 冻结正文(ok 时)
-        std::string selection_id; // "sel-" + turnId
+        std::string selection_id; // "sel-<sessionId>-<turnId>(V2 定式;旧式兼容见上)
     };
 
     // backend/registry 借用(须活过本次执行)。cancel 外部持有,置位即

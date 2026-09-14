@@ -356,6 +356,14 @@ V2 批落定的实现裁决（单子 §十 V2 五件事的落点）。调度引�
 - 入口 `gateway job import-loop <来源会话id> "正文" --task loop-N --every 秒 [--idem 键]` → `control/job-import-loop-*.json` → 活 Gateway 消费 → `ImportLoop`：建 interval job（prompt 固定副本，不逐拍现读原 /loop 状态）+ `loop.imported` receipt 行（receiptId = `imp-` + hash(sessionId+taskId)，账上凭来源键反查）。
 - 同来源（sessionId+taskId）幂等：再导回原 receipt，不建第二个 job——无 receipt 不暗搬、不双跑。结构上也不存在暗搬路：Gateway 不扫会话的 loop 状态，导入只走这条显式命令。原 /loop 状态只读留档（Gateway 不写它）；崩在"job 已建、receipt 未落"的极窄窗，凭 `--idem` 幂等键兜底（同键回原 job），裸重导可能出两个 job——如实记窗口，receipt 行落不稳属账 broken 一类。
 
-### 13.7 新账行 type（纯追加，未知 type 读取侧跳过）
+### 13.8 selectionId 定式修正（V2 对 §12.3 的修订）
+
+V1 冻结的 `selectionId = "sel-" + turnId` 在 V2 周期任务下暴露缺陷：turnId 只在场（session）内唯一，同 profile 多场共存时两场各自的 turn-1 会派生同名 selection——回复原件 `replies/<selectionId>.txt` 内容对不上即按 §11.5 拒绝，第二轮执行断为 `reply_unavailable`（V2 首批 CI 实测）。修正：
+
+- **V2 定式：`selectionId = "sel-" + sessionId + "-" + turnId`**（`PlanReplySelection` 纯函数，执行路与恢复路同一份）；`deliveryId = hash(selectionId + target + ordinal)` 随之派生，公式不变。
+- **V1 兼容**：流上已按旧式 `sel-<turnId>` 提交过 `reply.selection.committed` 的，恢复器沿用旧式 id——V1 期在途 occurrence 的恢复仍派生同一 id，不多送一份。新执行一律新式。
+- 本修订只影响身份定式与原件文件名，不改提交次序、不改 outbox 语义；QQ 渠道线（Q2）随 `ExecuteChannelTurn` 同享此修正。
+
+### 13.9 新账行 type（纯追加，未知 type 读取侧跳过）
 
 `job.updated`（fromRevision/toRevision/patch 键/cursorMs）、`job.paused`、`job.resumed`（cursorThroughMs）、`job.cancelled`、`job.schedule_advanced`（throughSlotMs/policy）、`occurrence.merged`（missedCount/throughSlotMs）、`occurrence.redispatched`（attempt/reason）、`occurrence.observed`（resultSha256/changed/delivered/updateLastObserved）、`occurrence.cancel_requested`、`loop.imported`。V2 已验/未验分账见单子 V2 勾选（放行门四条全过；真起子进程硬杀冒烟、断电一致性、真渠道投递仍属后续批次）。

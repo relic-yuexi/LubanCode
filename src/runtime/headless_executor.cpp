@@ -70,7 +70,15 @@ ReplySelectionPlan PlanReplySelection(const trajectory::v3::V3Ledger& ledger,
                                       const std::string& turn_id) {
     ReplySelectionPlan plan;
     plan.turn_id = turn_id;
-    plan.selection_id = "sel-" + turn_id;
+    // selectionId 定式(V2 修正):sel-<sessionId>-<turnId>。turnId 只在
+    // 场内唯一——周期任务同 profile 多场共存,两场各自 mint turn-1 时
+    // 旧式 sel-<turnId> 会撞名(回复原件 replies/<sel>.txt 内容对不上即
+    // 断执行,V2 首批实测)。V1 兼容:流上已按旧式提交过的,沿用旧式
+    // id——恢复器对 V1 期在途 occurrence 仍派生同一 id,不多送一份。
+    plan.selection_id = "sel-" + ledger.session_id + "-" + turn_id;
+    if (SelectionAlreadyCommitted(ledger, "sel-" + turn_id)) {
+        plan.selection_id = "sel-" + turn_id;
+    }
     // 落盘序扫:turn 匹配的最后一条 assistant message = 最终正文来源。
     const trajectory::v3::MessageLine* final_assistant = nullptr;
     for (const auto& message : ledger.messages) {

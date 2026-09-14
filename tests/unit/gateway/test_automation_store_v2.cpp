@@ -132,7 +132,7 @@ TEST_CASE("skip:迟到的拍不补不并,游标直进;最近一拍在宽限内�
     const auto next = store.SweepSchedule(361000);
     CHECK(next.generated == 1);
     CHECK(next.skipped_slots == 0);
-    const auto after = store.ListOccurrences();
+    const auto after = store.ListJobOccurrences("job-1");  // 按 slot 排序
     REQUIRE(after.size() == 2);
     CHECK(after[1].slot_ms == 361000);
     CHECK(after[1].missed_count == 0);

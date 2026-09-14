@@ -364,7 +364,8 @@ TEST_CASE("三次 resume:已完成工作不重开,模型与投递身份不变") 
         const auto projection = gateway::ReadAutomationProjection(fixture.paths.automation_log);
         REQUIRE(projection.occurrences.size() == 1);
         occurrence_id = projection.occurrences.begin()->first;
-        selection_id = "sel-" + projection.occurrences.begin()->second.turn_id;
+        selection_id = "sel-" + projection.occurrences.begin()->second.session_id + "-" +
+                       projection.occurrences.begin()->second.turn_id;  // V2 定式
     }
     // 三次"重启"(resume):每次都只读账 + 恢复扫描,不该有新执行。
     for (int round = 0; round < 3; ++round) {
