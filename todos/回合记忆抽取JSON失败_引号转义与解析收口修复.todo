@@ -204,6 +204,7 @@ last read: '"用户问"�'; expected '}'
 
 ## 八、落地记录（P0-A/P0-B/P1-A，2026-09-14）
 
+- PR：https://github.com/relic-yuexi/LubanCode/pull/78（头提交 b0835335，CI run 34845039402 rollup conclusion=success：lane/linux 与 macos-clang 两腿绿；中途两红均为测试夹具笔误——hex 转义贪婪、样例漏收尾 `}`——已修）。
 - 分支 `worktree-agent-memory-json`，基线 origin/main @ 7f195c50。
 - 改动面：
   - `src/app/memory_extract.hpp/.cpp`：ExtractionError/ExtractionErrorCode（七枚）、MemoryExtractionOutputSchema、kMaxCandidateContentBytes、解析器三步收口（UTF-8 预检 → 包装规则 → 严格 parse + 字段合同）、FinishMemoryExtraction 六类分诊、StableExtractErrorCode 双版。
