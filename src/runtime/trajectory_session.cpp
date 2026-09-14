@@ -2738,11 +2738,13 @@ void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
     std::filesystem::path home_dir;
     if (options.workspaces_root.empty()) {
-        const auto home = config::HomeLubancodeDir();
-        if (!home.has_value()) {
+        // 会话账是运行数据,落状态根(应用Worker接入单 §4.2):应用根语义
+        // =数据根,个人模式与从前同一处。
+        const auto state_root = config::StateRootDir();
+        if (!state_root.has_value()) {
             return std::unexpected("trajectory.no_home: 找不到主目录,会话账无处落");
         }
-        home_dir = tools::Utf8ToPath(*home);
+        home_dir = tools::Utf8ToPath(*state_root);
         options.workspaces_root = home_dir / "workspaces";
     }
     // P0-1:身份只认装配层递进的冻结 WorkspaceIdentity;空身份才按兜底根
@@ -2757,9 +2759,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
             return std::unexpected("identity.no_boundary: 启动工作目录取不到,身份无从裁决");
         }
         if (home_dir.empty()) {
-            const auto home = config::HomeLubancodeDir();
-            if (home.has_value()) {
-                home_dir = tools::Utf8ToPath(*home);
+            const auto state_root = config::StateRootDir();
+            if (state_root.has_value()) {
+                home_dir = tools::Utf8ToPath(*state_root);
             }
         }
         auto resolved = workspace::ResolveWorkspaceIdentity(start, home_dir);

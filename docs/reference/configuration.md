@@ -332,8 +332,11 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_SOUL` | `soul` | `default`、`off` 或 `souls/` 下魂名。 |
 | `LUBANCODE_FORCE_COLOR` | 终端颜色开关 | 设为 `1` 时,管道/重定向也强制尝试输出颜色;不写入 `config.json`。 |
 | `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `default`、`accept_edits`、`yolo`、`auto` 或 `dont_ask`；旧值 `confirm` 兼容为 `default`，但已弃用。不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`；非法值告警并保守回到 `default`。 |
+| `LUBANCODE_HOME` | 应用专用参数根 | 非空绝对路径,值即根本身(不追加 `.lubancode`)。未设置=个人 `~/.lubancode` 旧布局原样。空值/相对路径/不可访问在启动时明拒,不静默回个人目录。详见[独立参数根与应用托管模式](#十二独立参数根与应用托管模式)。 |
+| `LUBANCODE_DATA_HOME` | 独立运行数据根 | 非空绝对路径;未设置默认 `<LUBANCODE_HOME>/data`。仅在与 `LUBANCODE_HOME` 同设时采用;孤立设置、等于/包住参数根均在启动时明拒。 |
+| `LUBANCODE_MANAGED` | 托管模式开关 | 只认 `1`(开)与 `0`(关),空串与其余值明拒。`=1` 即 Managed 档进程级入口,必须同设 `LUBANCODE_HOME`;托管模式下 cwd 项目级配置整层不读,缺件即拒、不回落个人默认。 |
 
-环境变量设为空串,按没设处理。`LUBAN_*` 与对应 `LUBANCODE_*` 同设时采用 `LUBAN_*`。`ANTHROPIC_*`/`OPENAI_*` 不参与顶层解析；provider.key_env 显式指定它们时例外。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
+环境变量设为空串,按没设处理——**例外是上面三枚应用根变量**(`LUBANCODE_HOME`/`LUBANCODE_DATA_HOME`/`LUBANCODE_MANAGED`):它们"未设置"与"设置为空"分开处理,空值是配置错误,启动即拒,不静默当没设。`LUBAN_*` 与对应 `LUBANCODE_*` 同设时采用 `LUBAN_*`。`ANTHROPIC_*`/`OPENAI_*` 不参与顶层解析；provider.key_env 显式指定它们时例外。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
 
 交互命令 `/update` 使用当前配置的 `connect_timeout_ms` 与 `request_timeout_secs`。启动参数 `--check-update` 在加载配置前执行，故用内置默认超时。两者都只访问 GitHub Release API，不带模型密钥。
 
@@ -571,6 +574,8 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
 
 工作区钥匙由身份裁决器统一计算（Git 公共目录 → 显式 marker → 项目 config → 启动 cwd 四级，见 [workspace 存储 v2 合同](../development/workspace-storage-v2/P0-0-contracts.md)）；主仓与 linked worktree 共用同一间 workspace。目录名只是门牌（路径 slug + seed 哈希前 8 位，给人看），查找走 `index.json` 账本——查账 → 新项目开房记账 → 账本坏了扫各房 `workspace.json` 自描述重建。旧版的平铺会话目录与按项目 key 分账的记忆目录已退场，新装只认 `workspaces/` 这棵树；升级安装不迁移旧档，旧目录原样保留、不再读写。
 
+上表是个人 CLI 的布局。应用根语义(`LUBANCODE_HOME`,见[独立参数根与应用托管模式](#十二独立参数根与应用托管模式))下材料在参数根、状态在数据根,布局另有约定,个人目录零读写。
+
 项目级的 `.lubancode/`(在 `<cwd>` 下)能放 `config.json`(按字段压过全局)、`settings.local.json`(本地权限,不进版本库)与 `skills/`(同名技能时项目级压过主目录级)。
 
 官方 Skill 不再播种进主目录。便携包、Windows 安装与开发构建从 `<exe-dir>/skills/` 读取，并把同版本官方文档放在 `<exe-dir>/docs/`。POSIX 前缀安装则用 `<prefix>/share/lubancode/skills/` 与 `<prefix>/share/lubancode/docs/`。两处都守同一相对布局，故 `lubancode-config` 可从技能目录经 `../../docs` 读取官方文档。用户级与项目级还会各扫 `.agents/skills`、`.lubancode/skills`。同名优先级是项目 > 用户 > 官方，同层取 `.lubancode` > `.agents`。旧版主目录里带系统维护标记的 `lubancode-config` 副本会自动让位给发行包新版。
@@ -650,3 +655,24 @@ lubancode --config
 ### 终端仍有颜色或完全没颜色
 
 先看 `theme`，再看 stdout 是否为真终端，最后看 `LUBANCODE_FORCE_COLOR`。`plain` 主动禁色；强制颜色主要供集成测试和明确知道终端能力的场景。
+
+## 十二、独立参数根与应用托管模式
+
+外部应用(常驻后端、自动化宿主)起 LubanCode Worker 时,可以用三枚环境变量把 Worker 的材料来源与状态落点从个人 `~/.lubancode` 里切出来,钉进应用自备的目录树。个人 CLI 不设这些变量,一切照旧,旧账不迁移。
+
+```powershell
+$env:LUBANCODE_HOME      = 'D:\AppRuntime\config'    # 参数根(可只读)
+$env:LUBANCODE_DATA_HOME = 'D:\AppRuntime\state'     # 数据根(可写;不设默认 <HOME>\data)
+$env:LUBANCODE_MANAGED   = '1'                       # 托管模式
+lubancode app-server --app-server-profile 'D:\AppRuntime\config\deployment.json'
+```
+
+三件事分开:参数根放材料(配置、提示部件、Agent/Skill 来源),数据根放运行状态(会话账、信任账、插件数据、缓存、日志),工作目录归任务本身。参数根与数据根是组织手段,不是操作系统沙箱——进程级隔离归多租户隔离单的部署档。
+
+规矩(冻结合同全文见 [能力裁剪合同 §13](capability-contract.md)):
+
+- `LUBANCODE_HOME` 的值就是参数根本身,不再追加 `.lubancode`;全局配置读 `<HOME>/config.json`。
+- 两根都要非空绝对路径。空值、相对路径、建不动、数据根等于或包住参数根——启动即拒(stderr 人话,退出码 1),不静默回个人目录。`LUBANCODE_DATA_HOME` 单独设置(没给 `LUBANCODE_HOME`)也是配置错误。
+- `LUBANCODE_MANAGED=1`(托管模式)下,cwd 里的项目级 `.lubancode/config.json`、个人 `~/.lubancode` 与 `~/.agents` 材料层整层不读;缺件即拒,不回落个人默认。托管必须显式给参数根。
+- 会话账(workspaces)、workflow-runs、browser-artifacts、各类信任账、插件/包数据、缓存、日志在应用根语义下全落数据根;个人 CLI 仍全在 `~/.lubancode`,与从前逐字节一致。
+- 宿主应用给每个 Worker 子进程构造专属环境,不改自己的全局环境,也不重定义 `HOME`/`USERPROFILE` 冒充参数根。

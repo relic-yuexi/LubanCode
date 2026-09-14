@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "agent/model_image_store.hpp"  // DecodeBase64Strict/SniffImageFormat/ReadImageDimensions
+#include "config/config.hpp"  // HomeLubancodeDir:用户插件层定位(应用根语义走参数根)
 #include "hooks/hash.hpp"
 #include "mcp/rich_result.hpp"          // kMaxImageBlockBytes/kMaxCallBinaryBytes/LandToolArtifact
 #include "platform/dir_fingerprint.hpp"  // PluginDirFingerprintV1(指纹共用底座)
@@ -489,10 +490,13 @@ PluginTrustActionResult TrustProjectPluginById(const std::filesystem::path& proj
         result.lines.push_back("注意:信任账里这份指纹还标着 disable,挂载照旧跳过——先销掉 "
                                "disable 标记再重启。");
     }
-    // 同名让位:用户主目录(~/.lubancode/plugins/)有同 id 的 process 插件时,
-    // 挂载扫描让主目录优先,这份批了也不挂——如实说,别让用户批完还疑惑。
-    if (const auto home = platform::HomeDir(); home.has_value()) {
-        const std::filesystem::path home_plugins = platform::Utf8ToPath(*home) / "plugins";
+    // 同名让位:用户插件目录(<HomeLubancodeDir>/plugins/)有同 id 的 process
+    // 插件时,挂载扫描让那层优先,这份批了也不挂——如实说,别让用户批完还
+    // 疑惑。应用根语义下 HomeLubancodeDir 即参数根,应用 Worker 的插件层
+    // 从参数根取,个人家目录不进视野(应用Worker接入单 §4.2)。
+    if (const auto home = lubancode::config::HomeLubancodeDir(); home.has_value()) {
+        const std::filesystem::path home_plugins =
+            platform::Utf8ToPath(*home) / "plugins";
         for (const auto& manifest : ScanPluginDirectories(home_plugins).manifests) {
             if (manifest->id == plugin_id) {
                 result.lines.push_back("注意:用户主目录里有同名插件 " + plugin_id +

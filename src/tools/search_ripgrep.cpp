@@ -10,6 +10,7 @@
 #include <system_error>
 #include <utility>
 
+#include "config/config.hpp"      // StateRootDir:rg-stage 工具缓存落状态根
 #include "platform/paths.hpp"    // platform::ExecutablePath:定位随包 rg
 #include "platform/process.hpp"  // RunProcess:smoke 的 --version 真探针
 #include "tools/observation_filter.hpp"
@@ -154,9 +155,13 @@ std::vector<RipgrepCandidate> CollectRipgrepCandidates() {
     }
 
     // 第 2 层:用户级 rg-stage(scripts/fetch_ripgrep.py 的一次性产物,
-    // 全机共享;构建侧 CMake 早就在探同一路径当离线分期兜底)。
-    if (const std::optional<std::string> home = platform::HomeDir()) {
-        out.push_back({platform::Utf8ToPath(*home) / ".lubancode" / "rg-stage" / "libexec" /
+    // 全机共享;构建侧 CMake 早就在探同一路径当离线分期兜底)。工具缓存
+    // 属状态,落状态根(应用Worker接入单 §4.2):应用根语义 = 数据根
+    // rg-stage;个人模式 = <主目录>/.lubancode/rg-stage 原样。注:播种
+    // 脚本 fetch_ripgrep.py 本身未接数据根,应用根下的 rg-stage 得部署
+    // 者自行落材料(未验边界,见冻结合同 §13)。
+    if (const std::optional<std::string> state_root = config::StateRootDir()) {
+        out.push_back({platform::Utf8ToPath(*state_root) / "rg-stage" / "libexec" /
                            RipgrepExecutableName(),
                        RipgrepSource::UserStage});
     }

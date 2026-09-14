@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <system_error>
 #include <thread>
@@ -38,7 +39,9 @@
 #include "workspace/identity.hpp"  // P0-1:thread 面 workspace 身份裁决
 #include "workflow/frontend.hpp"
 #include "workflow/journal.hpp"
+#include "platform/sha256.hpp"  // P3:幂等键预查的规范载荷 hash
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:入站用户文本的编码关口
+#include "trajectory/journal.hpp"      // P3:会话创建台账的 PowerLoss 落账
 
 namespace lubancode::app_server {
 
@@ -46,6 +49,178 @@ namespace {
 
 void Diagnose(const std::string& text) {
     std::fprintf(stderr, "[app-server] %s\n", text.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// 会话创建台账(应用Worker接入单 P3,GAP-05:thread/start 的幂等键)。
+// 放 workspace 目录下(<workspaces_root>/<workspace_key>/session-creates
+// .jsonl),去重作用域 = 主体 + workspace(owner 单 §4.2"会话创建使用主体
+// 与 workspace 范围去重";app-server 首版单主体,主体即本进程)。行形状
+// (append-only,schemaVersion=1):
+//   {"kind":"session.create.requested","clientOperationId":...,
+//    "payloadHash":...,"cwd":...,"requestedAtMs":...}
+//   {"kind":"session.create.completed","clientOperationId":...,
+//    "payloadHash":...,"sessionId":...,"sessionDir":...,"completedAtMs":...}
+// 受理次序与输入台账同规(§4.2"先保存操作意图,再执行副作用"):requested
+// 先落稳(落不稳不建场);completed 建场成功后补。崩溃在两行之间 → 重发
+// 命中 requested 而无 completed → session_create_unknown,不建第二场,
+// 客户端 thread/list 核对后自行处置。这是服务层账,不进轨迹主账。
+// ---------------------------------------------------------------------------
+class SessionCreateLedger {
+public:
+    struct Entry {
+        std::string payload_hash;
+        std::string cwd;
+        std::string session_id;   // 空 = 只有 requested 没有 completed
+        std::string session_dir;  // completed 行的审计冗余(查询定位走索引)
+        bool failed = false;      // 有 failed 行:上次建场明败,重试不卡 unknown
+    };
+
+    explicit SessionCreateLedger(std::filesystem::path path) : path_(std::move(path)) {}
+
+    // 全量装载(每次 thread/start 读一遍;行数 = 场数,量小)。坏行跳过
+    // 不猜;completed 后到覆盖同键 requested 条目。文件不存在 = 空表。
+    std::map<std::string, Entry> Load() const {
+        std::map<std::string, Entry> entries;
+        std::ifstream in(path_, std::ios::binary);
+        if (!in.is_open()) {
+            return entries;
+        }
+        std::string text;
+        while (std::getline(in, text)) {
+            if (text.empty()) {
+                continue;
+            }
+            const nlohmann::json line =
+                nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+            if (!line.is_object() || !line.contains("kind") || !line["kind"].is_string()) {
+                continue;
+            }
+            const std::string kind = line["kind"].get<std::string>();
+            if (kind != "session.create.requested" && kind != "session.create.completed" &&
+                kind != "session.create.failed") {
+                continue;
+            }
+            const auto get_string = [&](const char* key) {
+                return line.contains(key) && line[key].is_string() ? line[key].get<std::string>()
+                                                                   : std::string();
+            };
+            const std::string key = get_string("clientOperationId");
+            if (key.empty()) {
+                continue;
+            }
+            Entry& entry = entries[key];  // requested 先到建条,completed 后到补全
+            entry.payload_hash = get_string("payloadHash");
+            entry.cwd = get_string("cwd");
+            if (kind == "session.create.completed") {
+                entry.session_id = get_string("sessionId");
+                entry.session_dir = get_string("sessionDir");
+            } else if (kind == "session.create.failed") {
+                entry.failed = true;
+            }
+        }
+        return entries;
+    }
+
+    // requested 行落稳(PowerLoss 档;false = 落不稳,调用方不得继续建场)。
+    bool AppendRequested(const std::string& client_operation_id, const std::string& payload_hash,
+                         const std::string& cwd) {
+        return Append(nlohmann::json{{"schemaVersion", 1},
+                                     {"kind", "session.create.requested"},
+                                     {"clientOperationId", client_operation_id},
+                                     {"payloadHash", payload_hash},
+                                     {"cwd", cwd},
+                                     {"requestedAtMs", NowMs()}});
+    }
+
+    // completed 行落稳(建场成功后、回执前;false = 调用方按窄窗如实报错)。
+    bool AppendCompleted(const std::string& client_operation_id, const std::string& payload_hash,
+                         const std::string& session_id, const std::string& session_dir) {
+        return Append(nlohmann::json{{"schemaVersion", 1},
+                                     {"kind", "session.create.completed"},
+                                     {"clientOperationId", client_operation_id},
+                                     {"payloadHash", payload_hash},
+                                     {"sessionId", session_id},
+                                     {"sessionDir", session_dir},
+                                     {"completedAtMs", NowMs()}});
+    }
+
+    // failed 行(建场明败:账开不出/装配拒绝)。重发命中 failed 不卡
+    // unknown——上次意图没成,允许再试(落不稳也照样按失败上报)。
+    bool AppendFailed(const std::string& client_operation_id, const std::string& payload_hash,
+                      const std::string& reason) {
+        return Append(nlohmann::json{{"schemaVersion", 1},
+                                     {"kind", "session.create.failed"},
+                                     {"clientOperationId", client_operation_id},
+                                     {"payloadHash", payload_hash},
+                                     {"reason", reason},
+                                     {"failedAtMs", NowMs()}});
+    }
+
+private:
+    static std::int64_t NowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
+    // 与 SessionService::OperationsFile 同手法:惰性开账、PowerLoss 档、
+    // broken 后恒 false(写盘失败停止受理,不回成功语义)。差别一处:
+    // 台账在 workspace 目录(不在场目录),本 workspace 首场受理时目录
+    // 还没立——开账前先把父目录建出来(建不动则 Open 自然失败,broken
+    // 照置位,不吞错)。
+    bool Append(const nlohmann::json& line) {
+        if (broken_) {
+            return false;
+        }
+        if (!writer_.has_value()) {
+            std::error_code ec;
+            if (!path_.parent_path().empty()) {
+                std::filesystem::create_directories(path_.parent_path(), ec);
+            }
+            auto opened =
+                trajectory::JournalWriter::Open(path_, trajectory::JournalWriter::OpenMode::Append);
+            if (!opened.has_value()) {
+                broken_ = true;
+                return false;
+            }
+            writer_.emplace(std::move(*opened));
+        }
+        if (!writer_->AppendLine(line.dump(), trajectory::Durability::PowerLoss)) {
+            broken_ = true;
+            writer_.reset();
+            return false;
+        }
+        return true;
+    }
+
+    std::filesystem::path path_;
+    std::optional<trajectory::JournalWriter> writer_;
+    bool broken_ = false;
+};
+
+// 会话创建台账的路径(workspaces 根下的文件,按 workspace key 分文件;
+// 裁决失败回空路径 = 台账不可用,创建去重如实跳过)。裁决与
+// DefaultWorkspaceKey 同一颗 resolver、同一个 home 止步(StateRootDir)。
+// 落点规矩:workspaces 树下的目录都是"门牌房"(各带 workspace.json
+// manifest,ScanRooms 按自描述收账)——台账不造房,落根下文件
+// (ScanRooms 对根下文件直接跳过,零干扰);一个 key 一份文件,保住
+// "主体 + workspace 范围去重"的作用域。
+std::filesystem::path SessionCreateLedgerPath(const std::string& workspaces_dir,
+                                              const std::string& cwd_utf8) {
+    if (workspaces_dir.empty()) {
+        return std::filesystem::path();
+    }
+    const std::filesystem::path identity_cwd = tools::Utf8ToPath(cwd_utf8);
+    const auto identity_home = config::StateRootDir();
+    auto identity = workspace::ResolveWorkspaceIdentity(
+        identity_cwd,
+        identity_home.has_value() ? tools::Utf8ToPath(*identity_home) : std::filesystem::path());
+    if (!identity.has_value()) {
+        return std::filesystem::path();
+    }
+    const std::string file_name = "session-creates-" + identity->workspace_key + ".jsonl";
+    return tools::Utf8ToPath(workspaces_dir) / tools::Utf8ToPath(file_name);
 }
 
 // usage 报告 -> 事件字段(五项原样,缺失字段前端自己看)。
@@ -372,7 +547,10 @@ std::string Server::DefaultWorkspaceKey() const {
         return std::string();
     }
     const std::filesystem::path identity_cwd = tools::Utf8ToPath(options_.cwd);
-    const auto identity_home = lubancode::config::HomeLubancodeDir();
+    // 身份裁决的 home = workspaces 树宿主根 = 状态根(应用Worker接入单
+    // §4.2):应用根语义下 workspaces 在数据根,裁决跟着走;个人模式
+    // 与从前同一处。
+    const auto identity_home = lubancode::config::StateRootDir();
     auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
         identity_cwd, identity_home.has_value() ? lubancode::tools::Utf8ToPath(*identity_home)
                                                 : std::filesystem::path());
@@ -436,29 +614,53 @@ Server::~Server() {
 }
 
 void Server::RegisterMethods(Dispatcher& dispatcher) {
-    // thread/start
+    // thread/start(P3 起:可选 clientOperationId 的幂等受理——同键同载荷
+    // 重发回原身份,不建第二场;不带键 = 1.2 旧行为一字不动)。
     dispatcher.RegisterMethod(
         kMethodThreadStart, [this](const IncomingRequest& request, DispatchContext& context)
                            -> std::optional<nlohmann::json> {
             std::string error_code;
-            // 参数表在 handler 内查(纯函数,错误码稳定)。
+            // 参数表在 handler 内查(纯函数,错误码稳定);键版顺带折
+            // clientOperationId 并校验形状(给了就非空字符串)。
             const ParamsCheck base = CheckThreadStartParams(request.params);
             if (!base.ok) {
                 return MakeError(request.id, base.code, base.message);
             }
             const nlohmann::json result = HandleThreadStart(request.params, error_code);
             if (!error_code.empty()) {
-                return MakeError(request.id, kErrInternalError, "thread/start 失败: " + error_code);
+                // 错误信封统一 P2 约定(应用Worker接入单 §7.2):稳定字符串码
+                // 随 data.code 一并给(additive 字段,老前端不受影响)——
+                // component_unavailable 一类码要能被程序认出,不只躺在
+                // message 文本里。P3 的幂等受理码同轨。
+                if (error_code == "operation_conflict") {
+                    return MakeError(request.id, kErrInvalidParams,
+                                     "thread/start: 同 clientOperationId 异载荷",
+                                     nlohmann::json{{"code", "operation_conflict"}});
+                }
+                if (error_code == "session_create_unknown") {
+                    // 创建意图已落账、结果未知(崩溃窄窗):不建第二场,
+                    // 客户端稍后重试或 thread/list 核对(§9.2 unknown 口径)。
+                    return MakeError(request.id, kErrInternalError,
+                                     "thread/start: 创建意图已受理但结果未知,稍后重试或 thread/list 核对",
+                                     nlohmann::json{{"code", "session_create_unknown"}});
+                }
+                return MakeError(request.id, kErrInternalError, "thread/start 失败: " + error_code,
+                                 nlohmann::json{{"code", error_code}});
             }
-            // thread/started 事件在响应之前发:前端先见事件后见响应,顺眼
-            // 也顺逻辑(threadId 是事件给出来的身份)。装配降级账(P1
-            // "可选降级必须写结果")随事件一并可见。
-            nlohmann::json started_params = MakeThreadStartedParams(
-                result.value("threadId", std::string()), result.value("cwd", std::string()));
-            if (result.contains("degradedComponents")) {
-                started_params["degradedComponents"] = result["degradedComponents"];
+            // duplicate 命中不再发 thread/started:那场早已 started,重发
+            // 的应答是查询性的,不重放生命周期事件(前端也不该把它当
+            // 新场开张)。
+            if (!result.value("duplicate", false)) {
+                // thread/started 事件在响应之前发:前端先见事件后见响应,顺眼
+                // 也顺逻辑(threadId 是事件给出来的身份)。装配降级账(P1
+                // "可选降级必须写结果")随事件一并可见。
+                nlohmann::json started_params = MakeThreadStartedParams(
+                    result.value("threadId", std::string()), result.value("cwd", std::string()));
+                if (result.contains("degradedComponents")) {
+                    started_params["degradedComponents"] = result["degradedComponents"];
+                }
+                context.emit_event(kEventThreadStarted, std::move(started_params), false);
             }
-            context.emit_event(kEventThreadStarted, std::move(started_params), false);
             return MakeResult(request.id, result);
         });
 
@@ -774,31 +976,66 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             return MakeResult(request.id, result);
         });
 
-    // turn/start
+    // turn/start(P3 起:可选 clientOperationId 的幂等受理——同键同载荷
+    // 重发回原受理,不重跑;不带键 = 1.2 旧行为一字不动)。
     dispatcher.RegisterMethod(
         kMethodTurnStart, [this](const IncomingRequest& request, DispatchContext&)
                           -> std::optional<nlohmann::json> {
             std::string thread_id;
             std::string text;
             std::vector<nlohmann::json> images;
+            std::string client_operation_id;
             const ParamsCheck base =
-                CheckTurnStartParams(request.params, thread_id, text, images);
+                CheckTurnStartParams(request.params, thread_id, text, images, client_operation_id);
             if (!base.ok) {
                 return MakeError(request.id, base.code, base.message);
             }
             std::string error_code;
-            const nlohmann::json accepted = AcceptTurnStart(thread_id, text, images, error_code);
+            const nlohmann::json accepted =
+                AcceptTurnStart(thread_id, text, images, error_code, client_operation_id);
             if (!error_code.empty()) {
                 if (error_code == "already_running") {
                     return MakeError(request.id, kErrTurnAlreadyRunning,
                                      "该 thread 已有回合在跑: " + thread_id);
                 }
+                if (error_code == "operation_conflict") {
+                    return MakeError(request.id, kErrInvalidParams,
+                                     "turn/start: 同 clientOperationId 异载荷",
+                                     nlohmann::json{{"code", "operation_conflict"}});
+                }
                 return MakeError(request.id, kErrInvalidParams, "turn/start 失败: " + error_code);
             }
-            // 立即回 {threadId, turnId}:整回合在工作线程跑,终态走
-            // turn/completed 事件(handler 不等回合结束——审批悬停期间
-            // 读线程还得收前端的答复与 interrupt)。
+            // 立即回 {threadId, turnId, operationId, inputId}:整回合在
+            // 工作线程跑,终态走 turn/completed 事件(handler 不等回合结束
+            // ——审批悬停期间读线程还得收前端的答复与 interrupt)。
             return MakeResult(request.id, accepted);
+        });
+
+    // operation/read(应用Worker接入单 P3,GAP-06):按 clientOperationId/
+    // operationId 查受理、派发与终态的只读口。零副作用(GAP-07:查询不能
+    // 变成续跑——不开写柄、不入队、不起回合、不触发模型);活场冷场同吃
+    // 操作台账,重启后按原键找回终态与稳定结果正文(v3 投影解析)。
+    dispatcher.RegisterMethod(
+        kMethodOperationRead, [this](const IncomingRequest& request, DispatchContext&)
+                              -> std::optional<nlohmann::json> {
+            std::string thread_id;
+            std::string client_operation_id;
+            std::string operation_id;
+            const ParamsCheck base =
+                CheckOperationReadParams(request.params, thread_id, client_operation_id,
+                                          operation_id);
+            if (!base.ok) {
+                return MakeError(request.id, base.code, base.message);
+            }
+            std::string error_code;
+            const nlohmann::json result =
+                HandleOperationRead(thread_id, client_operation_id, operation_id, error_code);
+            if (!error_code.empty()) {
+                return MakeError(request.id, kErrInvalidParams,
+                                 "operation/read 失败: " + error_code,
+                                 nlohmann::json{{"code", error_code}});
+            }
+            return MakeResult(request.id, result);
         });
 
     // turn/interrupt
@@ -880,6 +1117,73 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         record->cwd = options_.cwd;
     }
 
+    // 应用Worker接入单 P3(GAP-05):会话创建的幂等受理。带 clientOperationId
+    // 且 workspace 台账可用时,先意图后副作用——requested 行落不稳不建场
+    // (受理持久化失败不得继续执行);同键同载荷已有 completed 回原身份
+    // (duplicate,不建第二场、不重放 thread/started);同键异载荷明报
+    // operation_conflict;requested 在而 completed 无 = 崩溃窄窗,报
+    // session_create_unknown 也不建第二场(§9.2"查不到完整事实返回
+    // unknown 及缺口")。台账不可用(纯内存测试无 workspaces 根、或
+    // workspace 裁决失败)时创建去重如实跳过,键照旧进输入受理层——
+    // 不冒充"已持久去重"。
+    std::string client_operation_id;
+    if (params.contains("clientOperationId") && !params["clientOperationId"].is_null()) {
+        const ParamsCheck key_check = CheckThreadStartParams(params, client_operation_id);
+        if (!key_check.ok) {
+            out_error_code = "invalid_client_operation_id: " + key_check.message;
+            return nlohmann::json();
+        }
+    }
+    // 台账与载荷 hash 提到函数域:completed 行要等建场成功后用同一只
+    // 句柄落(见函数尾)。
+    std::unique_ptr<SessionCreateLedger> create_ledger;
+    std::string create_payload_hash;
+    if (!client_operation_id.empty()) {
+        const std::filesystem::path ledger_path =
+            SessionCreateLedgerPath(workspaces_dir_, record->cwd);
+        if (ledger_path.empty()) {
+            Diagnose("会话创建台账不可用(无 workspaces 根或 workspace 裁决失败),"
+                     "创建去重跳过: " + client_operation_id);
+        } else {
+            create_ledger = std::make_unique<SessionCreateLedger>(ledger_path);
+            create_payload_hash = platform::Sha256Hex(record->cwd);
+            const auto entries = create_ledger->Load();
+            const auto it = entries.find(client_operation_id);
+            if (it != entries.end()) {
+                if (it->second.payload_hash != create_payload_hash) {
+                    out_error_code = "operation_conflict";
+                    return nlohmann::json();
+                }
+                if (!it->second.session_id.empty()) {
+                    // 回原身份:active 告诉客户端本场是否还在本进程活着
+                    // (活着可直接续用;不活只读面可查,续跑须显式恢复——
+                    // 1.x 面没有恢复执行方法,如实由 active=false 交代)。
+                    return nlohmann::json{{"threadId", it->second.session_id},
+                                          {"cwd", it->second.cwd},
+                                          {"duplicate", true},
+                                          {"active", FindThread(it->second.session_id) != nullptr}};
+                }
+                if (it->second.failed) {
+                    // 上次建场明败(账开不出/装配拒):意图没成,允许重试
+                    // ——requested 行已在,直接再走建场,不卡 unknown。
+                    Diagnose("会话创建上次明败,同键重试建场: " + client_operation_id);
+                } else {
+                    // requested 在、completed/failed 都无:建场进行中或
+                    // 完成后崩溃的窄窗,结果未知——不建第二场(§9.2)。
+                    out_error_code = "session_create_unknown";
+                    return nlohmann::json();
+                }
+            }
+            if (!create_ledger->AppendRequested(client_operation_id, create_payload_hash,
+                                                record->cwd)) {
+                // 意图落不稳:不建场(先账后副作用,不回成功语义)。
+                out_error_code = "operation.append_failed";
+                return nlohmann::json();
+            }
+            // requested 已落稳,建场成功后在本函数尾部补 completed 行。
+        }
+    }
+
     // P0-2(Trajectory 升为唯一 Session):thread 的会话账走
     // SessionRuntime 的 TrajectorySessionLedger——thread_id 直接用 workspace
     // session id(与 CLI 同一命名空间,迁移器原样带入 legacy_import 场)。
@@ -915,6 +1219,10 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     if (ledger == nullptr) {
         // 开不出账 thread 明败,不回退旧写口(§十七失败合同)。
         Diagnose("会话账开张失败,thread 不开: " + record->session_service->launch_error());
+        if (create_ledger != nullptr) {
+            create_ledger->AppendFailed(client_operation_id, create_payload_hash,
+                                        "trajectory.open_failed");
+        }
         out_error_code = "trajectory.open_failed";
         return nlohmann::json();
     }
@@ -932,7 +1240,15 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         SessionAssemblyResult assembled = options_.assembly_factory();
         if (assembled.assembly == nullptr) {
             Diagnose("会话装配失败,thread 不开: " + assembled.error);
-            out_error_code = "assembly.failed";
+            // P2(应用Worker接入单 §7.2):装配自带稳定码(component_unavailable
+            // 一类)优先;空 = 通用装配失败。
+            out_error_code = assembled.error_code.empty() ? "assembly.failed" : assembled.error_code;
+            // P3:创建台账落 failed 行(重发同键不卡 unknown);reason 记
+            // P2 的稳定码,比通用码可诊断。
+            if (create_ledger != nullptr) {
+                create_ledger->AppendFailed(client_operation_id, create_payload_hash,
+                                            out_error_code);
+            }
             return nlohmann::json();
         }
         record->assembly = std::move(assembled.assembly);
@@ -953,6 +1269,17 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     }
     record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
     Diagnose("thread 已建: " + record->thread_id);
+    // 创建台账收尾(P3):场已建成,completed 行落稳才回成功回执——同键
+    // 重发靠它找回原身份。落不稳如实报错(场已建、completed 无:重发会
+    // 命中 requested→session_create_unknown,不建第二场;客户端 thread/
+    // list 可核对到这场),不静默吞。
+    if (create_ledger != nullptr &&
+        !create_ledger->AppendCompleted(client_operation_id, create_payload_hash, record->thread_id,
+                                        record->session_service->trajectory()->session_dir()
+                                            .generic_string())) {
+        out_error_code = "operation.append_failed";
+        return nlohmann::json();
+    }
     nlohmann::json result{{"threadId", record->thread_id}, {"cwd", record->cwd}};
     // 可选降级必须写结果(单子 P1):装配期跳过的可选组件(未被档的
     // tools.allow 引用、起服失败的 MCP)如实带回,Profile 决定降级能否
@@ -1145,7 +1472,8 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
 
 nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::string& text,
                                        const std::vector<nlohmann::json>& images,
-                                       std::string& out_error_code) {
+                                       std::string& out_error_code,
+                                       const std::string& client_operation_id) {
     out_error_code.clear();
 
     const std::shared_ptr<ThreadRecord> record = FindThread(thread_id);
@@ -1154,18 +1482,11 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
         return nlohmann::json();
     }
 
-    // 同一 thread 同拍两轮:协议明拒(单子验收:规矩写死并有测试)。
-    bool expected = false;
-    if (!record->turn_running.compare_exchange_strong(expected, true)) {
-        out_error_code = "already_running";
-        return nlohmann::json();
-    }
-
     // AppServer 接 v3 第一棒:输入先过 SessionService 接纳(§4.1/§4.2:
-    // 先账后回执、入队待泵)。协议 1.2 面没有 clientOperationId,幂等键
-    // 留空(每发必纳;2.0 开面后前端递键)。busy 的 CAS 拒收在前——
-    // 协议行为一字不动。
+    // 先账后回执、入队待泵)。协议 1.2 面没有 clientOperationId 的旧路:
+    // 键留空,每发必纳。busy 的 CAS 拒收在接纳前——协议行为一字不动。
     runtime::SessionService::InputRequest input;
+    input.client_operation_id = client_operation_id;
     input.text = text;
     input.images.reserve(images.size());
     for (const nlohmann::json& image : images) {
@@ -1177,7 +1498,55 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
         block.height = image.value("height", 0);
         input.images.push_back(std::move(block));
     }
+
+    // 应用Worker接入单 P3(GAP-05):带幂等键的受理先查重——在 busy CAS
+    // 之前,同键重发是原操作的查询,不是新回合,不该吃 already_running。
+    // 预查与 SubmitInput 锁内裁决吃同一本内存去重表(表从账面种来,重启
+    // /resume 沿来源链重建,§9.1"不能只在内存 map 查重");hash 与
+    // SubmitInput 内部同源(CanonicalInputPayload + SHA-256)。
+    if (!client_operation_id.empty()) {
+        const std::string payload_hash =
+            platform::Sha256Hex(runtime::SessionService::CanonicalInputPayload(input));
+        const auto lookup = record->session_service->LookupClientOperation(client_operation_id);
+        if (lookup.found) {
+            if (lookup.payload_hash == payload_hash) {
+                // 同键同载荷:回原受理(§4.2"相同键相同 payload 返回原
+                // 操作")。turnId 只在本进程受理过才有一致值;resume 链种
+                // 来的旧键账面无 turnId,回 null 不猜。
+                nlohmann::json accepted{{"threadId", thread_id},
+                                        {"operationId", lookup.operation_id},
+                                        {"inputId", lookup.input_id},
+                                        {"duplicate", true}};
+                const auto turn_it = record->operation_turns.find(client_operation_id);
+                accepted["turnId"] = turn_it != record->operation_turns.end()
+                                         ? nlohmann::json(turn_it->second)
+                                         : nlohmann::json();
+                return accepted;
+            }
+            out_error_code = "operation_conflict";
+            return nlohmann::json();
+        }
+    }
+
+    // 同一 thread 同拍两轮:协议明拒(单子验收:规矩写死并有测试)。
+    bool expected = false;
+    if (!record->turn_running.compare_exchange_strong(expected, true)) {
+        out_error_code = "already_running";
+        return nlohmann::json();
+    }
+
     const auto input_receipt = record->session_service->SubmitInput(input);
+    if (input_receipt.duplicate) {
+        // 并发窄窗(预查未命中、锁内命中——同键请求几乎同拍到达):回
+        // 原受理,回合没起,CAS 翻回去。
+        record->turn_running.store(false);
+        nlohmann::json accepted{{"threadId", thread_id},
+                                {"operationId", input_receipt.operation_id},
+                                {"inputId", input_receipt.input_id},
+                                {"duplicate", true}};
+        accepted["turnId"] = nlohmann::json();
+        return accepted;
+    }
     if (!input_receipt.accepted) {
         record->turn_running.store(false);  // 接纳都失败,回合没起
         out_error_code = input_receipt.error_code.empty() ? "input_rejected" : input_receipt.error_code;
@@ -1200,9 +1569,14 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
     // id_authority.hpp 定过的规矩:只此一家,不许各处再造第二套。
     const std::string turn_id = runtime::ProcessIdAuthority().NextTurnId();
     record->turn_id = turn_id;
+    record->running_operation_id = input_receipt.operation_id;
     record->interrupted_turn.clear();
     record->interrupt_requested.store(false);
     record->turn_finished.store(false);
+    if (!client_operation_id.empty()) {
+        // 受理回执的 turnId 记账(同键重发回原值;只归读线程读写)。
+        record->operation_turns[client_operation_id] = turn_id;
+    }
     if (record->turn_worker.joinable()) {
         record->turn_worker.join(); // 上一轮的尾巴(正常已收,防御)
     }
@@ -1210,18 +1584,28 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
                                        queued_input = std::move(queued_input)]() mutable {
         RunTurnToCompletion(record, thread_id, turn_id, std::move(queued_input));
     });
-    return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}};
+    return nlohmann::json{{"threadId", thread_id},
+                          {"turnId", turn_id},
+                          {"operationId", input_receipt.operation_id},
+                          {"inputId", input_receipt.input_id}};
 }
 
 nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::string& text,
                                        const std::vector<nlohmann::json>& images,
-                                       std::string& out_error_code) {
+                                       std::string& out_error_code,
+                                       const std::string& client_operation_id) {
     // 兼容直驱(单测与阶段 1 的口径):受理 + 等工作线程收尾,返回
     // turn/completed 的 params。协议路径(读线程)只调 AcceptTurnStart,
     // 立即回 turnId——这里给同步消费方留一条等完的路。
-    const nlohmann::json accepted = AcceptTurnStart(thread_id, text, images, out_error_code);
+    const nlohmann::json accepted =
+        AcceptTurnStart(thread_id, text, images, out_error_code, client_operation_id);
     if (!out_error_code.empty()) {
         return nlohmann::json();
+    }
+    if (accepted.value("duplicate", false)) {
+        // 同键重发回原受理:没有新回合可等,原样交回(调用方按 duplicate
+        // 与原 operationId/turnId 对账,不把它当新终态)。
+        return accepted;
     }
     const std::shared_ptr<ThreadRecord> record = FindThread(thread_id);
     if (record == nullptr || !record->turn_worker.joinable()) {
@@ -1586,6 +1970,176 @@ nlohmann::json Server::HandleTurnInterrupt(const std::string& thread_id, const s
     record->interactions->CancelPending();
     Diagnose("turn/interrupt 受理: " + thread_id + " " + record->turn_id);
     return nlohmann::json{{"threadId", thread_id}, {"turnId", record->turn_id}, {"accepted", true}};
+}
+
+nlohmann::json Server::HandleOperationRead(const std::string& thread_id,
+                                           const std::string& client_operation_id,
+                                           const std::string& operation_id,
+                                           std::string& out_error_code) {
+    out_error_code.clear();
+    // 应用Worker接入单 P3(GAP-06/07):按操作身份查受理—终态的只读口。
+    // 源定位与 thread/read、trace/query 同一条路:活 thread 从账本,冷
+    // thread 经 workspaces 索引跨 workspace 找。零副作用:不开写柄、不
+    // 入队、不起回合、不触发模型——查询不能变成续跑(§9.1)。
+    std::filesystem::path session_dir;
+    std::shared_ptr<ThreadRecord> live;
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        const auto it = threads_.find(thread_id);
+        if (it != threads_.end() && it->second->session_service != nullptr &&
+            it->second->session_service->trajectory() != nullptr) {
+            session_dir = it->second->session_service->trajectory()->session_dir();
+            live = it->second;
+        }
+    }
+    if (session_dir.empty() && !workspaces_dir_.empty()) {
+        trajectory::SessionIndexQuery index_query;
+        index_query.all_workspaces = true;
+        const auto page =
+            trajectory::QueryWorkspaceSessions(tools::Utf8ToPath(workspaces_dir_), index_query);
+        for (const auto& summary : page.entries) {
+            if (summary.session_id == thread_id) {
+                session_dir = tools::Utf8ToPath(summary.session_dir);
+                break;
+            }
+        }
+    }
+    if (session_dir.empty()) {
+        out_error_code = "没有会话账(纯内存 thread 或未配置 workspaces 根)";
+        return nlohmann::json();
+    }
+
+    // 台账读投影(纯读;活场并发追加的半截尾行由读侧跳过,下次读全)。
+    const std::vector<runtime::SessionService::OperationFact> facts =
+        runtime::SessionService::ReadOperationFacts(session_dir);
+
+    // 定位 accepted 行:给了 operationId 按号直配,否则按 clientOperationId
+    //(先到先得)。双键都给而键不一致 = 两枚身份指向不同操作,按账面
+    // 事实报错,不猜哪枚为准。
+    const runtime::SessionService::OperationFact* accepted = nullptr;
+    for (const auto& fact : facts) {
+        if (fact.kind != "operation.accepted") {
+            continue;
+        }
+        const bool id_match = !operation_id.empty() && fact.operation_id == operation_id;
+        const bool key_match =
+            !client_operation_id.empty() && fact.client_operation_id == client_operation_id;
+        if (id_match || key_match) {
+            accepted = &fact;
+            break;
+        }
+    }
+    if (accepted != nullptr && !client_operation_id.empty() &&
+        accepted->client_operation_id != client_operation_id) {
+        out_error_code = "operation_id_mismatch(键与号指向不同操作)";
+        return nlohmann::json();
+    }
+
+    nlohmann::json gaps = nlohmann::json::array();
+    nlohmann::json result{{"threadId", thread_id},
+                          {"sessionId", session_dir.filename().generic_string()},
+                          {"gaps", gaps}};
+    if (accepted == nullptr) {
+        // 查无此操作不是错误:状态如实交代(客户端 typo/键记错自己核)。
+        result["status"] = "not_found";
+        result["gaps"].push_back("operation_not_found:本场账上没有这枚操作");
+        return result;
+    }
+
+    result["operationId"] = accepted->operation_id;
+    result["inputId"] = accepted->input_id;
+    if (!accepted->client_operation_id.empty()) {
+        result["clientOperationId"] = accepted->client_operation_id;
+    }
+    if (accepted->received_at_ms > 0) {
+        result["receivedAtMs"] = accepted->received_at_ms;
+    }
+
+    // 派发与终态对账(同行散落三类,按 operationId 归并)。
+    const runtime::SessionService::OperationFact* dispatched = nullptr;
+    const runtime::SessionService::OperationFact* final_fact = nullptr;
+    for (const auto& fact : facts) {
+        if (fact.operation_id != accepted->operation_id) {
+            continue;
+        }
+        if (fact.kind == "operation.dispatched" && dispatched == nullptr) {
+            dispatched = &fact;
+        } else if (fact.kind == "operation.final" && final_fact == nullptr) {
+            final_fact = &fact;
+        }
+    }
+
+    if (final_fact != nullptr) {
+        // final 行在 = 终态事实已按 PowerLoss 档落稳(RecordTurnFinal 落
+        // 不稳时行根本不在,不拿残存文本当正式终态——AW-16 口径)。
+        result["status"] = "final";
+        result["turnId"] = final_fact->turn_id;
+        result["executionStatus"] = final_fact->execution_status;
+        result["usageReported"] = final_fact->usage_reported;
+        result["resultEnvelopePersisted"] = true;
+        nlohmann::json refs = nlohmann::json::array();
+        for (const std::string& ref : final_fact->final_message_refs) {
+            refs.push_back(ref);
+        }
+        result["finalMessageRefs"] = std::move(refs);
+        if (final_fact->finalized_at_ms > 0) {
+            result["finalizedAtMs"] = final_fact->finalized_at_ms;
+        }
+        // 稳定正文(GAP-06):finalMessageRefs 是协议事件条目 id(进程内
+        // 发号),跨进程取正文按 final 行的 turnId 从 v3 投影定位最终
+        // assistant 文本——turnId 在受理发号、operation.final、v3 消息
+        // 信封三处同源。只读投影,不改账、不重算。v2 场无投影,如实报
+        // 缺口,不冒充。
+        const auto v3_stream = runtime::FindV3HistoryStream(session_dir);
+        if (!v3_stream.has_value()) {
+            result["sourceFormat"] = "v2";
+            result["gaps"].push_back(
+                "v2_no_projection:旧账无 v3 投影,最终正文经 thread/read 旧史面查");
+        } else if (final_fact->turn_id.empty()) {
+            result["sourceFormat"] = "v3";
+            result["gaps"].push_back("final_no_turn_id:终态行无 turnId,正文无从定位");
+        } else {
+            result["sourceFormat"] = "v3";
+            const auto body = runtime::FindFinalAssistantText(*v3_stream, final_fact->turn_id);
+            if (body.has_value()) {
+                nlohmann::json entry{{"messageId", body->message_id},
+                                     {"seq", body->seq},
+                                     {"text", body->text},
+                                     {"hidden", body->hidden}};
+                if (!final_fact->final_message_refs.empty()) {
+                    // ref 对事件流(item/*),messageId 对账——两个身份都给,
+                    // 客户端两头都能对上。
+                    entry["ref"] = final_fact->final_message_refs.front();
+                }
+                result["finalMessages"] = nlohmann::json::array({std::move(entry)});
+            } else {
+                result["gaps"].push_back(
+                    "final_body_unavailable:账在写或验卷不过,正文稍后重查");
+            }
+        }
+        return result;
+    }
+
+    if (dispatched != nullptr) {
+        if (dispatched->dispatched_at_ms > 0) {
+            result["dispatchedAtMs"] = dispatched->dispatched_at_ms;
+        }
+        // 已派发无终态:活场在跑(旗 + 操作号都对上)才报 running;
+        // 其余(重启窗口/中断/卡死)一律 unknown——缺终态行不是"未执行",
+        // 也不是"成功",客户端选择人工核对或显式恢复(§9.2,AW-14)。
+        const bool running = live != nullptr && live->turn_running.load() &&
+                             live->running_operation_id == accepted->operation_id;
+        result["status"] = running ? "running" : "unknown";
+        if (!running) {
+            result["gaps"].push_back(
+                "no_final_after_dispatch:已派发无终态(执行中断或进程重启),查询不触发执行");
+        }
+        return result;
+    }
+
+    // 受理未派发:排队中(重启后由账面重排,不丢意图)。
+    result["status"] = "accepted";
+    return result;
 }
 
 // goal/loop/plan 的 typed 命令执行体(goal 单合流批)。方法名 ->

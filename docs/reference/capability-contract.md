@@ -79,15 +79,16 @@
 
 | 字段 | 约束 |
 | --- | --- |
-| `agentRef` | canonical Agent 引用,如 `example.tools:assistant` |
+| `agentRef` | canonical Agent 引用,如 `example.tools:assistant`;P2 起点名必解析(AgentCatalog),找不到/不可用拒启,不回落默认提示词 |
 | `features` | `default: enabled|disabled` 加 `enabled`/`disabled` 名单;名单值须在 §4 功能名表内;同键两名单同现是配置错误 |
 | `components.mcpServers` | 名单;点名未在上层获准的服务是配置错误,不给档内授权 |
-| `tools` | §2 ToolPolicySpec |
+| `components.plugins` | 名单(canonical 插件名,即 manifest.id;不重复点名)。点名须 `features` 放行 `plugins`;P5 起进入真装载——发现根(材料根 `plugins/`)扫描 → 信任账(`PluginTrustStore`,数据根 `plugin-trust.json`,装配只读不批)→ v2 embedded-lua 挂载(`ManifestLuaRuntime`)。点名件不在发现账报 `plugin_missing`、信任账不过(未信任/disable/指纹算不出)报 `plugin_untrusted`、Lua 挂载坏报 `plugin_load_failed`、点名 process/native 件报 `component_unavailable`——四路整场明拒(thread/start 错误信封带 `data.code`,additive),不忽略不降级(应用Worker接入单 §7.2) |
+| `tools` | §2 ToolPolicySpec;P2 起 `allow` 另收内置 skill 工具裸名 `skill`(须 `features` 放行 `skills`);P5 起另收插件工具名 `plugin__<id>__<tool>`(须 `components.plugins` 含 `<id>` 且 `features` 放行 `plugins`;装配期另有 manifest 全名精确对账兜底) |
 | `exposure.default` | `direct|deferred|host_only` |
 | `updates` | `defaultApplyAt`、`allowSessionExpansion`;首版只支持 `next_session`,`allowSessionExpansion` 只可为 false |
 | `limits` | 非负整数;超出上层上限按明确规则拒绝或收窄,须在结果里给有效值 |
 
-依赖解释是校验的一部分,不是可选项:`tools.allow` 里的 `mcp:<server>:<tool>` 名字要求 `components.mcpServers` 含 `<server>` 且 `features` 放行 `mcp`;`exposure.default: deferred` 要求发现器依赖(tool_search/tool_invoke)未被禁,零工具面(`none` 或 `only`+空 allow)配 `deferred` 是配置错误——没有可延迟暴露的东西。解释不全的档不许采用。
+依赖解释是校验的一部分,不是可选项:`tools.allow` 里的 `mcp:<server>:<tool>` 名字要求 `components.mcpServers` 含 `<server>` 且 `features` 放行 `mcp`;裸名 `skill` 要求 `features` 放行 `skills`;`plugin__<id>__<tool>` 名字要求 `components.plugins` 含 `<id>` 且 `features` 放行 `plugins`;`exposure.default: deferred` 要求发现器依赖(tool_search/tool_invoke)未被禁,零工具面(`none` 或 `only`+空 allow)配 `deferred` 是配置错误——没有可延迟暴露的东西。解释不全的档不许采用。
 
 ## 4. 功能名表〔冻结〕
 
@@ -103,7 +104,7 @@
 | `browser` | 内嵌浏览器与截图取件 | BrowserRuntime;见 [browser-runtime.md](browser-runtime.md) |
 | `lsp` | LSP 工具 | lsp 工具表 |
 | `mcp` | MCP 客户端与 MCP 工具 | config `mcp_servers`;ToolRuntime 构造期启动 |
-| `plugins` | Lua/process 插件 | Package 挂载事务+信任门 |
+| `plugins` | Lua/process 插件 | 终端:Package 挂载事务+信任门;app-server:`components.plugins` 点名+材料根 plugins/ 发现+信任门(P5,仅 v2 embedded-lua) |
 | `skills` | Skill 装载 | skills 目录+Agent 定义 preload |
 | `memory.read` | 记忆召回注入 | config `memory.enabled`+`memory.use` |
 | `memory.write` | 记忆抽取写入 | config `memory.generate`/`learn` |
@@ -264,3 +265,63 @@ claim 恢复类:
 | 提示部件段模型、工具 schema 与能力说明同源 | System拼装Hook(Soul) |
 | 外部任务等待、ownerEpoch 执行侧、结果投递底座 | SessionV3异步工具 |
 | 执行/结果提交闸门、attempt 收口 | 失败与恢复 |
+| 应用根三变量、来源裁剪、参数根/数据根分家、RuntimePaths | 应用Worker接入补齐 |
+
+## 13. 应用根与来源裁剪〔冻结 2026-09-14;实现属应用Worker接入补齐单 P1〕
+
+外部应用常驻、每项独立研究起一只 Worker 时,LubanCode 进程的材料来源与状态落点由三枚环境变量钉死。设计出处 `todos/应用Worker接入补齐_Agent与Skills装配_独立参数目录及恢复隔离.todo` §四。
+
+### 13.1 三枚变量〔冻结〕
+
+| 变量 | 语义 | 取值约束 |
+| --- | --- | --- |
+| `LUBANCODE_HOME` | 应用专用参数根,值即根本身,不追加 `.lubancode`。未设置=个人 CLI 旧布局(`~/.lubancode`)原样,不暗迁移 | 非空绝对路径;空值/相对路径/不可访问均为配置错误,启动门拒启(退出码 1,stderr 人话),不静默回个人目录 |
+| `LUBANCODE_DATA_HOME` | 独立运行数据根(会话账/信任账/插件数据/缓存/日志)。未设置默认 `<LUBANCODE_HOME>/data`;仅在启用应用根语义时采用 | 同上;孤立设置(无 `LUBANCODE_HOME`)是配置错误;等于参数根、或包住参数根(参数根落数据根之内)均拒——读写不分;数据根在参数根之内合法(默认即如此) |
+| `LUBANCODE_MANAGED` | `1`=托管模式,即多租户隔离单 LocalTrusted/Managed 档中 Managed 档的进程级入口;`0`=关 | 只认 `1`/`0`(空串与其余值均拒,不猜);`=1` 必须显式设置 `LUBANCODE_HOME`——托管第一件事就是在参数根里发现文件、播种材料,没根的托管无从谈起 |
+
+铁律:
+
+- **禁止隐式降级**:`LUBANCODE_MANAGED=1` 下缺件即拒,不回落个人默认目录,不裁剪成"照旧读 cwd/个人材料"顶替。
+- env 是进程级的:宿主应用给每个 Worker child 构造专属 env,不修改自己的全局环境,不重定义 `HOME`/`USERPROFILE` 冒充应用参数根。与多租户隔离单"不改进程环境以切换租户"不冲突——那条管"同进程轮流服务多人",本合同管"一进程一份 env、进程内单一身份"。
+- 启动序:先识别三变量,再发现文件、播种默认材料、启动组件。校验失败发生在任何读家目录的动作之前。
+- **Windows 空值语义**:"设为空串"与"未设置"在 Windows 上必须走 Win32 面区分——CRT 面 `_putenv("NAME=")` 的语义就是删除变量,`getenv`/`_dupenv_s` 也读不到环境块里物理存在的 `NAME=` 空值条目。生产读侧 `platform::GetEnvVarPresent` 走 `GetEnvironmentVariableW`(变量未设=rc 0 且 lasterr `ERROR_ENVVAR_NOT_FOUND`;条目在值为空=rc 0 且 lasterr 未设)。宿主给 child 传空值只有 envblock 一条真路(Node/libuv spawn 的 env 表原样落块);活进程内测试注入用 `SetEnvironmentVariableW(name, L"")`。CRT 消费面(`GetEnvVar` 及全仓既有环境变量读取)不受影响:空值条目对它当未设,恰是"空=未设"的既有语义。
+- 路径等值比较走 `platform::PathComparisonKey`(weakly_canonical 失败退 lexically_normal);OS 挂载/权限承担硬拒绝,字符串判断只作前置提示(多租户隔离单口径)。
+
+### 13.2 来源裁剪〔冻结;执法路随 P1 落地、档点名来源归 P2〕
+
+| 来源 | 应用根(非托管) | 托管(`MANAGED=1`) |
+| --- | --- | --- |
+| 参数根内材料(config.json/prompts/souls/agents/skills/languages/models.json) | 读 | 读 |
+| 个人 `~/.lubancode`、`~/.agents`(skills/AGENTS 等个人材料层) | 不进视野(整层裁) | 不进视野(整层裁) |
+| cwd 项目级 `.lubancode/config.json`、settings.local | 照旧读 | **整层裁掉**;部署档点名来源 P2 起接档字段,当前一律不读 |
+| 旧位置 `.lubancode.json` 迁移 | 不适用(参数根是新地界,无旧账) | 不适用 |
+| 发行内置材料(官方 skills/内置提示模块) | 读(发行层,非个人家目录) | 读;来源在能力清单列明 |
+
+状态落点:workspaces/会话账、workflow-runs、browser-artifacts、package-trust/package-state/hook-trust/plugin-trust、hooks-outbox、plugin-data/package-data、package-store、cache、logs、memory(含 memory-jobs)全部落**数据根**;参数根可挂只读。个人 CLI(未设应用根)一切落 `~/.lubancode`,行为与从前逐字节一致(AW-01)。
+
+### 13.3 RuntimePaths 归属〔冻结〕
+
+`config::RuntimePaths`(`src/config/runtime_paths.hpp`)是参数根/数据根的唯一解析口,挂靠 LubanCore 单阶段 B 的 RuntimeAssembly 服务条款("配置/工作目录/凭据显式传递")——Core owner 接管该服务时此类型并轨,别的单子不得另立同名路径服务。进程级便捷口 `config::HomeLubancodeDir()`(材料根,重定向后即参数根)与 `config::StateRootDir()`(状态根)供库层消费,语义以本节为准。
+
+### 13.4 app-server 当前装配能力事实〔P0 清单;2026-09-14 对源码〕
+
+逐项对符号,"开关存在"不冒充"装配完成":
+
+| 能力 | 状态 | 源码符号 |
+| --- | --- | --- |
+| 部署档解析(schema 1:features/tools/exposure/limits/MCP 名单) | 已落 | `app_server::LoadHarnessDeploymentFile`/`ParseHarnessDeployment`(src/app_server/harness_profile.cpp) |
+| headless 生产装配(MCP 按档点名启动、allow 名单装工具、必需件起失败拒整场) | 已落 | `app_server::AssembleSession`(src/app_server/session_assembly.cpp);入口 `RunAppServerMode --app-server-profile`(src/app/cli_app.cpp) |
+| 无档默认 | 显式零工具默认档(合同 §2.3),不照搬终端工具表 | `RunAppServerMode` 未递档分支 |
+| Agent 装配(agentRef 解析入首请求) | **已落(P2,2026-09-14)**——档点名 agentRef 必解析(AgentCatalog,解析面=码内内置+材料根 agents/);档案定系统提示部件(prompt_assembler 既有管线:Profile/persona 替业务正文,宿主段按实际工具面现拼盖不掉);找不到/不可用拒启,不回落默认 | `app_server::ResolveHarnessAgentPlan`/`ComposeHarnessSystemPrompt`(src/app_server/agent_wiring.cpp);消费 `SessionAssemblyRequest::agent_plan` |
+| SkillTool/技能材料装载 | **已落(P2,2026-09-14)**——features.skills 放行且 tools 面点名 `skill` 才装配:显式单根(材料根 skills/)扫描,清单段/工具/预装正文三面同进同退;skills.preload 缺名整场明拒;不搬终端五层合并,装技能不授予任何执行工具 | `AssembleSession` 步骤 2.5(src/app_server/session_assembly.cpp)+`tools::ScanSkillsDir`/`SkillTool`;组合 `ComposeHarnessSystemPrompt` |
+| Lua/process 插件装载 | **已落(P5,2026-09-14)——v2 embedded-lua 真装载**:`components.plugins` 点名 → 材料根 `plugins/` 扫描(与终端同一发现面)→ 信任账(`PluginTrustStore`,只读消费)→ `ManifestLuaRuntime` 挂载(每场一份,Lua state 不跨会话,registry 先析构 owner 后收口);工具面由 `tools.allow` 的 `plugin__<id>__<tool>` 名定(装载面≠注册面,与 MCP 同规矩);插件工具走统一工具闸(`ManifestLuaToolAdapter`:needs_confirm 恒真、ApprovalClass::External);HTTP/Secret 是 manifest 声明面(permissions.network/secrets)经既有宿主执法(越权在传输层权限对账步落锤、Secret 只在调用作用域解析),P5 未另立授权字段。**未接面如实**:process/native 件点名仍报 `component_unavailable`(kind 未接线);Package(packaged)插件不经此通道;挂载事实只进 `SessionAssembly::mounted_plugins` 与诊断日志,未进 thread/started 协议字段 | `PluginMounter`+`AssembleSession` 步骤 0(src/app_server/session_assembly.cpp);`HarnessProfile::plugins` 与 plugin__ 依赖解释(src/app_server/harness_profile.cpp);入口接线 `RunAppServerMode`(src/app/cli_app.cpp);测试 tests/unit/app_server/test_plugin_assembly.cpp(信任/HTTP·Secret/寿命三件)+ test_session_assembly.cpp(装配路) |
+| 幂等受理+输入原件持久(operations-inputs、CanonicalInputPayload、ProcessCrash 耐久) | 已落 | `SessionService::SubmitInput`(src/runtime/session_service.cpp;PR #59) |
+| 协议 1.3 幂等受理面(thread/start、turn/start 可选 clientOperationId:同键同载荷回原受理,同键异载荷 operation_conflict;会话创建去重按主体+workspace 落 session-creates.jsonl) | 已落(P3) | `Server::HandleThreadStart`/`AcceptTurnStart` + `SessionCreateLedger`(src/app_server/server.cpp) |
+| operation/read 只读核对口(受理/派发/终态/unknown,重启后按 clientOperationId 找回;final 正文经 v3 投影按 turnId 定位;零副作用不触发执行) | 已落(P3) | `Server::HandleOperationRead` + `SessionService::ReadOperationFacts` + `runtime::FindFinalAssistantText`(src/runtime/session_service.cpp、trajectory_history_view.cpp) |
+| 客户端自动重试(受理—终态幂等闭环) | **可用**(P3 故障注入过:受理落盘失败拒收零执行、终态行丢失回 unknown 不冒充、重启窗口同键找回不重跑;证据 tests/unit/app_server/test_app_server_operation_idempotency.cpp) | 同上两行;进程级硬杀(真拔电)未验,归后续真机批次 |
+| turn 终态与 ResultEnvelope(finalMessageRefs、usageReported、resultEnvelopePersisted) | 已落 | `SessionService::RecordTurnFinal`/`MakeTurnCompletedParams`(src/app_server/schema.cpp;PR #62) |
+| 应用根三变量/来源裁剪/参数根-数据根分家 | 已落(本节合同+P1) | `config::ResolveRuntimePaths`/`StateRootDir`(src/config/runtime_paths.cpp) |
+| gateway/channels 状态根接数据根 | **未接**(避让在跑的 QQ 接入单,另立小单) | cli_app.cpp gateway run 段仍走 HomeLubancodeDir |
+| rg-stage 工具缓存的播种脚本 | **未接**(读取走数据根;fetch_ripgrep.py 不认数据根,应用根下的 rg-stage 须部署者自落) | src/tools/search_ripgrep.cpp UserStage 层 |
+
+错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"自 P2 生效(装配失败经 thread/start 错误信封带 `data.code`,additive 字段)——P5 起 v2 embedded-lua 真装载,此码收窄到"runtime kind 未接线"(点名 process/native 件),另增三枚插件装载失败码:`plugin_missing`(点名件不在发现账,含 manifest 坏被扫描剔除)、`plugin_untrusted`(信任账不过:未信任/disable/内容指纹算不出)、`plugin_load_failed`(Lua 挂载坏:entry 读不到/编译坏/handler 对账不过),同一错误信封带出;"缺获准执行工具返回 `capability_unavailable`"(本单 §六冻结)待 Skill 依赖声明 schema 升级时生效。

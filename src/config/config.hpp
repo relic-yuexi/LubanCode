@@ -1217,7 +1217,33 @@ std::optional<std::string> HomeDir();
 // <主目录>/.lubancode 这个目录的路径——lubancode 的"家",配置文件放
 // <主目录>/.lubancode/config.json,往后 plugins/、skills/ 也会住这儿。
 // 找不到主目录时返回 std::nullopt。
+//
+// 应用根语义(应用Worker接入补齐单 §四,P1):LUBANCODE_HOME 有效设置时
+// 返回值就是参数根本身,不再追加 .lubancode。空值/相对路径不是参数根
+// ——启动门 ResolveRuntimePaths 已拒,这里兜底返回 nullopt,绝不静默
+// 回个人目录。未设置时个人 CLI 默认行为原样(AW-01)。
 std::optional<std::string> HomeLubancodeDir();
+
+// 状态写入根:workspaces/会话账、package-data、信任账、logs、缓存等
+// "需要修改的状态"的落点(应用Worker接入单 §4.2"信任账等需要修改的
+// 状态放数据根")。
+//   - 应用根语义下 = LUBANCODE_DATA_HOME,未设默认 <LUBANCODE_HOME>/data;
+//   - 未启用应用根时 = HomeLubancodeDir()(个人旧布局单根,行为原样);
+//   - 孤立 LUBANCODE_DATA_HOME(无 HOME)或坏值:启动门已拒,这里返回
+//     nullopt——写入点按"无根可用"跳过,不落个人目录。
+// 读材料的口子(prompts/souls/models.json/agents/skills)仍走
+// HomeLubancodeDir(),参数根与数据根由此分家。
+std::optional<std::string> StateRootDir();
+
+// 应用根语义是否激活(LUBANCODE_HOME 有效设置)。库级消费做来源裁剪
+// (个人 .agents/.lubancode 材料层)时用它判;启动门校验归
+// ResolveRuntimePaths(config/runtime_paths.hpp)。
+bool AppRootActive();
+
+// LoadSkills 一族"个人层扫描"的主目录入参:应用根语义下返回 nullopt
+// ——个人 .agents/.lubancode 的技能不进应用 Worker 的视野(应用Worker
+// 接入单 §4.2 来源裁剪);个人模式返回 HomeDir() 原样。
+std::optional<std::string> PersonalMaterialsHomeDir();
 
 // 一次"旧位置配置文件挪到新位置"的处理结果。
 struct ConfigMigrationOutcome {
@@ -1412,7 +1438,20 @@ struct LoadedFileConfigs {
 //   MigrateConfigFileIfNeeded)。都没有就那一级留 std::nullopt(不算错)。
 // cwd 与主目录是同一个目录时(在主目录里跑),只当项目级读一份,全局留空,
 // 免得同一份文件读两遍、来源标记打架。找到了但解析失败,返回错误(带路径)。
+//
+// 应用根语义(应用Worker接入单 P1)在两级之上另有两道裁剪:
+//   - LUBANCODE_HOME 设置时,全局层改读参数根下的 config.json
+//     (即 <LUBANCODE_HOME>/config.json,无 .lubancode 一层、无旧位置
+//     迁移——参数根是新地界,.lubancode.json 旧账与它无关);
+//   - LUBANCODE_MANAGED=1 托管模式下,cwd 项目级整层裁掉:默认不读
+//     cwd/祖先目录里的配置,只有部署档点名来源才参与(P2 起接档字段)。
 std::expected<LoadedFileConfigs, std::string> LoadFileConfigs();
+
+// 全局配置文件的落点(读与写同一条):应用根语义 = <LUBANCODE_HOME>/
+// config.json;个人模式 = <主目录>/.lubancode/config.json(原样)。
+// SaveConfigFile 与 /provider 命令族写全局配置都走这里,不各拼各的。
+// 无可用根(主目录取不到且应用根未设)返回 nullopt。
+std::optional<std::string> GlobalConfigFilePath();
 
 // 真正的入口:读 LUBAN_ / LUBANCODE_ 专属环境变量并读配置文件，按上述
 // 优先级合并；不隐式读取 ANTHROPIC_* / OPENAI_* 通名。

@@ -26,6 +26,14 @@ std::optional<std::string> GetEnvVar(const char* name) {
     return std::string(value);
 }
 
+std::optional<std::string> GetEnvVarPresent(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return std::nullopt;  // 变量不在;"在但为空"原样交回
+    }
+    return std::string(value);
+}
+
 std::optional<std::string> HomeDir() {
     return GetEnvVar("HOME");
 }

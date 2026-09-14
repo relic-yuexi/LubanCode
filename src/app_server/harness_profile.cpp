@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace lubancode::app_server {
@@ -65,6 +66,23 @@ std::string McpServerSegmentOf(const std::string& canonical) {
         return std::string();
     }
     return canonical.substr(first + 1, second - first - 1);
+}
+
+// canonical 插件工具名(plugin__<id>__<tool>,BuildPluginToolName 拼形)拆
+// 插件 id 段;形状不对回空。拆法取最后一个 "__":id 与工具名的合法集
+// [A-Za-z0-9_-] 都含单 '_',双下划线作段界;段内再嵌 "__" 的病态名会拆错
+// 位——错位名对不上 components.plugins 名单即配置错误明拒(拒总比错配
+// 安全;装配期另有 manifest 全名精确对账兜底,P5)。
+std::string PluginIdSegmentOf(const std::string& canonical) {
+    const std::string prefix = "plugin__";
+    if (canonical.rfind(prefix, 0) != 0) {
+        return std::string();
+    }
+    const std::size_t sep = canonical.rfind("__");
+    if (sep == std::string::npos || sep <= prefix.size()) {
+        return std::string();  // 没有工具段,或 id 段空
+    }
+    return canonical.substr(prefix.size(), sep - prefix.size());
 }
 
 }  // namespace
@@ -181,7 +199,7 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
         }
     }
 
-    // ---- components.mcpServers ----
+    // ---- components.mcpServers / components.plugins(P2 点名通道)----
     if (raw.contains("components")) {
         const nlohmann::json& components = raw["components"];
         if (!components.is_object()) {
@@ -189,12 +207,13 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
             return result;
         }
         for (auto it = components.begin(); it != components.end(); ++it) {
-            if (it.key() != "mcpServers") {
+            if (it.key() != "mcpServers" && it.key() != "plugins") {
                 result.error = "components 未知键(拒绝采用): " + it.key();
                 return result;
             }
         }
-        if (!GetStringArray(components, "mcpServers", &profile.mcp_servers, &result.error)) {
+        if (!GetStringArray(components, "mcpServers", &profile.mcp_servers, &result.error) ||
+            !GetStringArray(components, "plugins", &profile.plugins, &result.error)) {
             return result;
         }
     }
@@ -302,13 +321,39 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
 
     // ---- 依赖解释(冻结合同 §3:解释不全的档不许采用)----
     // mcp:<server>:<tool> 须 components.mcpServers 含 <server> 且 features
-    // 放行 mcp。P0 阶段只解释 mcp: 前缀(内置/插件 canonical 映射归 P2
-    // 与 ToolOrigin 对账),非 mcp 前缀的 allow 名在这里明拒——P1 的会话
-    // 装配只有 MCP 一条组件路,解释不出的名字不允许进 allow。
+    // 放行 mcp。P2(应用Worker接入单)起另解释内置 skill 工具:裸名
+    // "skill" 须 features 放行 skills。P5 起再解释插件工具名
+    // plugin__<id>__<tool>:<id> 须 components.plugins 点名且 features 放行
+    // plugins。其余非 mcp:/plugin__ 前缀的 allow 名仍明拒——解释不出的
+    // 名字不允许进 allow。
     for (const std::string& canonical : profile.tools.allow) {
+        if (canonical == "skill") {
+            if (!profile.FeatureEnabled("skills")) {
+                result.error = "tools.allow 点名 skill 工具但 features 未放行 skills: " + canonical;
+                return result;
+            }
+            continue;
+        }
+        if (canonical.rfind("plugin__", 0) == 0) {
+            const std::string plugin_id = PluginIdSegmentOf(canonical);
+            if (plugin_id.empty()) {
+                result.error = "canonical 名缺插件段或工具段: " + canonical;
+                return result;
+            }
+            if (std::find(profile.plugins.begin(), profile.plugins.end(), plugin_id) ==
+                profile.plugins.end()) {
+                result.error = "tools.allow 点名的插件不在 components.plugins 里: " + canonical;
+                return result;
+            }
+            if (!profile.FeatureEnabled("plugins")) {
+                result.error = "tools.allow 点名 plugin 工具但 features 未放行 plugins: " + canonical;
+                return result;
+            }
+            continue;
+        }
         if (canonical.rfind("mcp:", 0) != 0) {
-            result.error = "tools.allow 名暂只支持 mcp:<server>:<tool>(其余 canonical "
-                           "映射归 P2): " +
+            result.error = "tools.allow 名暂只支持 mcp:<server>:<tool>、插件名 plugin__<id>__<tool> "
+                           "与内置名 skill(其余 canonical 映射待接线): " +
                            canonical;
             return result;
         }
@@ -334,12 +379,43 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
         result.error = "components.mcpServers 点名服务但 features 未放行 mcp";
         return result;
     }
+    // plugins 点名同理:features 未放行 plugins 是配置矛盾,明拒(放行后
+    // 进入真装载——装配层按发现/信任/装载序明拒或装上,见 session_assembly
+    // 步骤 0;点名 process/native 件仍按 component_unavailable 拒,P5 只接
+    // v2 embedded-lua)。
+    if (!profile.plugins.empty() && !profile.FeatureEnabled("plugins")) {
+        result.error = "components.plugins 点名插件但 features 未放行 plugins";
+        return result;
+    }
+    // 名单查重:同一 id 点两遍会装出两份 Lua state、工具撞名——配置矛盾,
+    // 明拒(P5 真装载后装配层同有一道防御)。
+    {
+        std::set<std::string> seen;
+        for (const std::string& id : profile.plugins) {
+            if (!seen.insert(id).second) {
+                result.error = "components.plugins 名单重复点名: " + id;
+                return result;
+            }
+        }
+    }
 
-    // deny 与 allow 交叠:deny 胜出(裁掉即可,不是错误;P1 无内置工具面,
-    // deny 只作用于 MCP 工具)。
+    // deny 与 allow 交叠:deny 胜出(裁掉即可,不是错误;deny 作用于 MCP
+    // 工具、插件工具与内置 skill 工具)。
     for (const std::string& denied : profile.tools.deny) {
+        if (denied == "skill") {
+            profile.tools.allow.erase(
+                std::remove(profile.tools.allow.begin(), profile.tools.allow.end(), "skill"),
+                profile.tools.allow.end());
+            continue;
+        }
+        if (denied.rfind("plugin__", 0) == 0) {
+            profile.tools.allow.erase(
+                std::remove(profile.tools.allow.begin(), profile.tools.allow.end(), denied),
+                profile.tools.allow.end());
+            continue;
+        }
         if (denied.rfind("mcp:", 0) != 0) {
-            continue;  // 非 mcp 的 deny 名无面可裁,静默(无内置面)
+            continue;  // 其余 deny 名无面可裁,静默(无内置面)
         }
         if (std::find(profile.tools.allow.begin(), profile.tools.allow.end(), denied) !=
             profile.tools.allow.end()) {

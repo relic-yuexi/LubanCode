@@ -43,6 +43,9 @@ std::shared_ptr<lubancode::memory::ProjectMemory> BuildProjectMemory(
     const lubancode::config::Config& config, const std::optional<std::string>& home_lubancode,
     const std::string& executable) {
     std::shared_ptr<lubancode::memory::ProjectMemory> project_memory;
+    // 入参名沿用 home_lubancode(签名不动,调用方照旧);语义上这是记忆
+    // 树根——调用方传状态根(应用Worker接入单 §4.2:记忆/jobs 是运行
+    // 状态,放数据根)。
     if (home_lubancode.has_value()) {
         auto identity = lubancode::memory::ResolveProjectIdentity(
             std::filesystem::current_path(), lubancode::tools::Utf8ToPath(*home_lubancode));
@@ -151,7 +154,8 @@ lubancode::package::PackageMountInput BuildSessionPackageMountInput(
     input.external.agents.insert("Explore");
     // 只取名单喂信任扫描输入——冲突播报归正式装配那一趟(RefreshSkills/
     // LoadSessionSkills),这里静默,否则同名冲突每扫一遍播一遍。
-    for (const auto& meta : lubancode::tools::LoadSkills(CurrentDirUtf8(), lubancode::config::HomeDir(),
+    for (const auto& meta : lubancode::tools::LoadSkills(CurrentDirUtf8(),
+                                                         lubancode::config::PersonalMaterialsHomeDir(),
                                                          lubancode::platform::OfficialSkillsDir(), {},
                                                          /*report_collisions=*/false)) {
         input.external.skills.insert(meta.name);
@@ -180,12 +184,13 @@ lubancode::package::PackageMountInput BuildSessionPackageMountInput(
 // ——会话钉住的就是这一份,store 里后续 promote/rollback 改的是指针账,
 // 不动在跑会话的快照。
 void AddEvolutionStoreSelections(lubancode::package::PackageMountInput& input) {
-    const auto home_lubancode = lubancode::config::HomeLubancodeDir();
-    if (!home_lubancode.has_value()) {
+    // 进化指针账是运行状态,落状态根(应用Worker接入单 §4.2)。
+    const auto state_root = lubancode::config::StateRootDir();
+    if (!state_root.has_value()) {
         return;
     }
     const lubancode::evolution::VersionStore store(
-        lubancode::platform::Utf8ToPath(*home_lubancode) / "package-store");
+        lubancode::platform::Utf8ToPath(*state_root) / "package-store");
     const lubancode::evolution::VersionStore::Snapshot snapshot = store.BuildSnapshot();
     input.store_candidates = store.ScanSelectedCandidates();
     // 哈希对不上的从挂载候选里剔出去(发现账归 /package list,挂载只收完好的)。
@@ -278,14 +283,15 @@ std::function<lubancode::tools::DetachedAgentBackend()> SessionStack::BuildFroze
 // 构造 = 原控制器初始化列表的装配(成员声明序即装配序)。
 SessionStack::SessionStack(const InteractiveSessionOptions& options)
     : config_result(options.config_result),
-      home_dir(lubancode::config::HomeDir()),
+      home_dir(lubancode::config::PersonalMaterialsHomeDir()),
       official_skills_dir(lubancode::platform::OfficialSkillsDir()),
       package_snapshot(BuildStartupPackageSnapshot(config_result.config, options.package_dirs)),
       skills(LoadSessionSkills(home_dir, official_skills_dir, *package_snapshot.load())),
       skills_segment(lubancode::tools::BuildSkillsPromptSegment(skills)),
       home_lubancode(lubancode::config::HomeLubancodeDir()),
       prompts_dir(home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string()),
-      project_memory(BuildProjectMemory(config_result.config, home_lubancode, options.executable)),
+      project_memory(BuildProjectMemory(config_result.config, lubancode::config::StateRootDir(),
+                                        options.executable)),
       // 作用域单 P1/P2:Resolver 按会话口径装配——全局层(~/.lubancode/
       // AGENTS.md,存在才生效)与 fallback 名单(project_doc_fallback_
       // filenames,显式配置才生效)。默认构造不带这两样,行为与从前一致。

@@ -24,13 +24,14 @@ namespace lubancode::cli {
 namespace {
 
 // P0-2:唯一项目持久化根(原 ~/.lubancode/trajectories 迁
-// ~/.lubancode/workspaces;旧根零读零写,不设暗门)。
+// ~/.lubancode/workspaces;旧根零读零写,不设暗门)。P1(应用Worker接入单
+// §4.2)起落状态根:应用根语义=数据根,个人模式与从前同一处。
 std::filesystem::path DefaultWorkspacesRoot() {
-    const auto home = config::HomeLubancodeDir();
-    if (!home.has_value()) {
+    const auto state_root = config::StateRootDir();
+    if (!state_root.has_value()) {
         return {};
     }
-    return tools::Utf8ToPath(*home) / "workspaces";
+    return tools::Utf8ToPath(*state_root) / "workspaces";
 }
 
 // 在 <key>/sessions/ 下找 <session_id> 的目录。找不到给空。

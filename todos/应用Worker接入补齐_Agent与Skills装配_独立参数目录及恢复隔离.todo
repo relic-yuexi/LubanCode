@@ -1,0 +1,292 @@
+# 应用 Worker 接入补齐：Agent、Skills、独立参数目录与恢复隔离
+
+- 日期：2026-09-14。
+- 状态：设计待实施。所有勾选项尚未验收；本次只新增 TODO，不改生产代码。
+- 源码核查参考：`a0d6f9a01a8e78f87dd207b08b9fbdd3b571e5e7`，并读取当前工作树。提交号仅作定位，不代表认证兼容版本。
+- 目标：外部 Node/TypeScript 应用能够启动受控 LubanCode Worker，装入专用 Agent、Skills、MCP，提交任务，查询原执行结果，完成后安全收口。
+- 用户选择：允许用环境变量指定独立参数目录；验收通用MCP接入链路，用测试MCP完成验证。AnySearch仅作可选集成示例，由应用开发者接入，不列为LubanCode交付项。Lua插件仍须定义装配边界，不能把目录发现等同于工具可用。
+- 验证边界：静态源码检查。没有构建、真实模型/MCP调用、隔离实测或崩溃恢复演练。下文新增类型、环境变量与接口语义均为拟议合同。
+
+## 一、职责与接入方式
+
+外部应用管业务计划、额度、任务队列、证据库、报告和通知；LubanCode 管 Agent 执行、工具权限、运行轨迹和执行状态。首个验收客户端可以用 Node 编写，但协议与内核不得含证券、AnySearch 品牌或 Tidewatch 专用业务字段。
+
+首版消费形态：应用后端常驻，一项独立研究启动一只 app-server Worker，新建一场 session。进程退出不删除会话账。后续可复用 Worker，但同进程新会话也必须隔开配置、权限与工具资源；本单不要求先做 Worker 池。
+
+分清六份材料：工作目录、参数根、运行数据根、Agent 档案、Skills 快照、模型连接快照。不能靠 cwd 同时替代这六件事。
+
+## 二、与已有单子的归属
+
+本单是应用 Worker 接入的交付切片，沿已有合同补接线，不另造一套 Session、插件格式或协议版本。
+
+| 事项 | 原合同 owner | 本单负责 |
+| --- | --- | --- |
+| SessionFactory、中立运行装配、SDK寿命 | [LubanCore与CLI分离](LubanCore与CLI分离_核心库独立成宿主底座设计.todo) | AppServer消费共同解析与装配；避免再复制终端初始化 |
+| 能力裁剪、组件与工具选择、快照 | [工业化多协议接入](工业化多协议接入_能力裁剪与工具扩展统一设计.todo) | Agent/Skills实际生效，MCP接入与Lua后续边界 |
+| Provider、模型、密钥与覆盖 | [模型连接解耦](AppServer模型连接解耦_协议配置与会话隔离设计.todo) | 独立Worker启动快照和配置来源检查；不重复实现热切换 |
+| clientOperationId、查询、恢复、事件游标 | [AppServer接入SessionV3](AppServer接入SessionV3_统一入口与事件恢复设计.todo) | 发布最小幂等受理—终态查询闭环及故障测试 |
+| 可信项目映射、文件/进程/网络隔离 | [多租户隔离](多租户隔离_身份授权与隔离Worker落地设计.todo) | 单用户应用Worker也采用明确部署隔离档，验证子进程覆盖 |
+| 提示部件、Soul、系统装配 | [System拼装Hook](System拼装Hook_Soul会话冻结与缓存边界.todo) | 业务正文替换与不可覆盖宿主规则的边界 |
+| Lua/process插件、权限、寿命 | [Extension Runtime](轻量可塑ExtensionRuntime与动态扩展API设计.todo) | 显式装配入口和启动拒绝行为，不另造manifest |
+
+若 owner 单已有实现，直接复用并补验收。本单阶段号不替代原单协议号；需要变更公共合同，须同步原单和参考文档，禁止同名接口各讲一套。
+
+## 三、当前事实：哪些已有，哪些缺接线
+
+以下均以符号为检索锚，行号会随实现变化。
+
+| 编号 | 源码落点 | 已有事实 | 本单缺口 |
+| --- | --- | --- | --- |
+| GAP-01 | [RunAppServerMode](../src/app/cli_app.cpp)、[AssembleSession](../src/app_server/session_assembly.cpp) | 已解析部署档，生产工具表按允许名单装MCP | 未在这条路径装载Lua插件或SkillTool；不能照搬完整终端工具表 |
+| GAP-02 | [HarnessProfile](../src/app_server/harness_profile.hpp)、[解析器](../src/app_server/harness_profile.cpp) | agentRef有字段与解析，features包含skills/plugins | 当前生产入口仍传固定kAppServerDefaultSystemPrompt；开关存在不等于装配完成 |
+| GAP-03 | [AgentCatalog](../src/agent/agent_catalog.hpp)、[SkillLoader](../src/tools/skill_loader.hpp)、[SkillTool](../src/tools/skill_tool.hpp) | 已有Agent目录、Skill扫描、正文加载；终端注册SkillTool | 复用解析器并注入来源策略；不能为headless复制一套解析与隐式扫描 |
+| GAP-04 | [HomeLubancodeDir](../src/config/config.cpp)、[CliOptions](../src/app/cli_options.hpp) | 当前用户根由HomeDir拼接.lubancode；app-server据此选workspaces等路径 | 未见独立应用根公开启动参数；--config是打印配置，不是指定配置文件 |
+
+GAP 记账(2026-09-14,P0/P1 批):
+
+- **GAP-04 已接**：新增 config::ResolveRuntimePaths/StateRootDir/PersonalMaterialsHomeDir(src/config/runtime_paths.{hpp,cpp}+config.cpp),LUBANCODE_HOME 有效时 HomeLubancodeDir 即参数根(不追加 .lubancode);全部状态写入(workspaces/channels 隔离账除外,见下)与 HomeDir() 直读旁路已切 StateRootDir;启动门(RunCli 最前)校验空值/相对/孤立/重叠/托管缺根,拒启不回落。--config 保持打印语义未动。未接尾巴:gateway run 段与 channels 状态根避让 QQ Q1 单;rg-stage 播种脚本不认数据根。能力事实与合同见 docs/reference/capability-contract.md §13。
+- **GAP-01 装配注记(P0 核对)**：生产路径确实未装 Lua/SkillTool,AssembleSession 只按档装 MCP allow 名单(必需件起失败拒整场,可选件降级记账 degradedComponents);"不能照搬完整终端工具表"由"未递档=显式零工具默认档"钉住——隐式降级面在 P1 批已被来源裁剪收紧(托管模式个人材料层整层不读)。Skill/Lua 装配归 P2/P5。
+- **GAP-02 装配注记(P0 核对)**：生产入口仍传 kAppServerDefaultSystemPrompt(cli_app.cpp RunAppServerMode),agentRef 只记账不解析——与 §13.4 能力清单"Agent 装配未接线"一致,归 P2。features.skills/plugins 开关解析在 harness_profile.cpp 已验,装配路 P2 接。
+- **GAP-01 已接(2026-09-14,P2 批,PR #69)**：AssembleSession 装上受控 SkillTool(步骤 2.5:features.skills 放行 ∧ tools.allow 点名内置名 skill,材料根 skills/ 单根显式扫描);Lua 装配仍不进(headless 无插件宿主),但开了 components.plugins 点名通道并按 §7.2 报 component_unavailable 整场明拒(步骤 0)——"点名即拒"替代了 P0 时的"无点名通道故不可达"。真 Lua 装配归 P5。
+- **GAP-02 已接(2026-09-14,P2 批,PR #69)**：生产入口不再传固定 kAppServerDefaultSystemPrompt——档在场即走 ResolveHarnessAgentPlan+ComposeHarnessSystemPrompt(src/app_server/agent_wiring.cpp;cli_app.cpp RunAppServerMode 折来源根、失败拒启),agentRef 真解析进首请求系统提示;features.skills/plugins 开关与装配路打通(§13.4 已搬"已落"栏)。
+- **GAP-03 已接(2026-09-14,P2 批,PR #69)**：SkillLoader 解析器与来源策略复用进 headless(ScanSkillsDir 单根显式,材料根 skills/),SkillTool 注册、SkillMeta 清单、提示清单段三处同源一份扫描件;未复制隐式扫描(终端 LoadSkills 五层合并不进 app-server);脚本权限不自动授予(注册表面=档 allow 名单,无执行类工具)。Skills 来源的部署档声明式 schema(来源清单/required-optional/加载策略)未做,未验边界记在 §十二 P2 勾选账。
+- **GAP-01 Lua 半边已接(2026-09-14,P5 批)**：AssembleSession 步骤 0 的 PluginMounter 把 components.plugins 点名从"整场明拒"变"真装载"——v2 embedded-lua 件经发现根扫描(材料根 plugins/)+PluginTrustStore 信任账+ManifestLuaRuntime 挂载进 SessionAssembly(每场一份,Lua state 不跨会话);工具面走 tools.allow 的 plugin__<id>__<tool> 名(解析层解释+装配期全名对账)。P0 注记里"Lua 装配仍不进(headless 无插件宿主)"就此销账;process/native kind 与 packaged 插件仍未接(如实记在 §13.4)。
+| GAP-05 | [AcceptTurnStart](../src/app_server/server.cpp)、[SessionService](../src/runtime/session_service.cpp) | 输入原件、受理与终态有落盘路径；底层有client_operation_id | 协议1.2未传clientOperationId；需要复用既有2.0 owner合同向外暴露 |
+| GAP-06 | [MakeTurnCompletedParams](../src/app_server/schema.cpp)、[server终态处理](../src/app_server/server.cpp) | 已有finalMessageRefs、usageReported、resultEnvelopePersisted；先记operation.final再发终态 | 补重启后按操作查询、精确引用取结果；不是从零重写ResultEnvelope |
+| GAP-07 | [thread历史处理](../src/app_server/server.cpp) | thread/read读历史；thread/resume只做恢复视图投影 | 查询不能变成续跑；需权威执行状态与显式恢复动作 |
+
+GAP 记账(2026-09-14,P3 批):
+
+- **GAP-05 已接**:协议 1.3(additive,老报文零改动)——thread/start 与 turn/start 增可选 clientOperationId,语义按 [AppServer接入SessionV3](AppServer接入SessionV3_统一入口与事件恢复设计.todo) 单 §4.2 owner 合同(同键同载荷回原受理、同键异载荷 operation_conflict、先意图后副作用),不另造第三套。turn/start:AcceptTurnStart 预查在 busy CAS 之前(同键重发是原操作查询,不吃 already_running),预查与 SubmitInput 锁内裁决同吃 SessionService 内存去重表(表由 SeedOperationLedger 从账面种来,重启/resume 沿来源链重建,§9.1"不能只在内存 map 查重"由 #59 兜底);回执 additive 带操作对账字段(operationId/inputId/duplicate;同键重发回原 turnId,本进程受理过才有,resume 种来的旧键回 null 不猜)。thread/start:workspace 级 session-creates.jsonl 台账(<workspaces>/<workspace_key>/,JournalWriter PowerLoss 档)——requested 行先落稳(落不稳不建场),completed 行建场成功后补,建场明败(trajectory.open_failed/assembly.failed)落 failed 行(重发不卡 unknown);同键命中 completed 回原身份 {threadId, duplicate:true, active}(不建第二场、不重放 thread/started),active=false 即续跑须显式恢复(1.x 面无恢复执行方法,如实)。作用域=主体+workspace(owner 合同"会话创建使用主体与 workspace 范围去重";首版单主体);载荷 hash=sha256(cwd 文本)。台账不可用(纯内存测试/裁决失败)时创建去重如实跳过(Diagnose 留痕),键照旧进输入受理层。
+- **GAP-06 已接**:新只读方法 operation/read(方法名与查询语义照 owner 单 2.0 合同,是"受理—终态查询闭环"的最小操作面投影,不是 2.0 开面)。参数 threadId 必填 + clientOperationId/operationId 至少一枚(双键都给按号定位、键不一致报 operation_id_mismatch 不猜);源定位与 thread/read/trace/query 同路(活场从账本、冷场经 QueryWorkspaceSessions 跨 workspace 索引)。返回:operationId/inputId/receivedAtMs/dispatchedAtMs + status∈{not_found, accepted, running, unknown, final} + final 时 turnId/executionStatus/finalMessageRefs/usageReported/resultEnvelopePersisted=true/finalizedAtMs。稳定正文:finalMessageRefs 是协议事件条目 id(进程内发号,不落账),跨进程取正文按 final 行 turnId 从 v3 投影定位该回合最后一条带非空文本的 assistant 消息(turnId 在受理发号、operation.final、v3 消息信封三处同源),finalMessages=[{ref, messageId, seq, text, hidden}]——读 runtime::FindFinalAssistantText(trajectory_history_view,纯读不改账);v2 场无投影,sourceFormat="v2"+gaps 如实报缺口不冒充。已派发无终态:活场旗+操作号对上才报 running,其余 unknown+gaps 交代(AW-14:缺终态行不是"未执行"也不是"成功")。底层 SessionService::ReadOperationFacts 公开台账读投影(坏行/半截尾行跳过),活场冷场同一读法。
+- **GAP-07 已接**:operation/read 零副作用——不开写柄、不入队、不起回合、不触发模型(测试断言 ModelCalls()==0);thread/read 维持只读未动;权威执行状态即 operation/read 的 status(running 判定=活场 turn_running 旗+running_operation_id 对账);恢复执行仍是显式动作,1.x 协议面没有恢复方法,会话创建去重回执以 active=false 如实交代"场不活、查询可用、续跑无门"。
+- **§13.4 能力清单更新**:capability-contract.md §13.4 增两行(协议幂等受理面/operation/read 只读核对口,附符号)+"客户端自动重试"项标**可用**(故障注入用例:受理落盘失败拒收零执行、终态行丢失回 unknown、重启窗口同键找回不重跑不重投;进程级硬杀未验,已注明归后续真机批次)。
+- **测试**:tests/unit/app_server/test_app_server_operation_idempotency.cpp(册随 tests/CMakeLists.txt glob 循环自动注册,ctest 名 unit.app_server.operation_idempotency),7 用例——turn/start 幂等(同键同载荷/异载荷/模型零重跑)、thread/start 幂等(同键同 cwd 回原场不建第二场/异 cwd conflict/台账两行验)、崩溃窄窗(抹 completed 行→session_create_unknown 不建场)、operation/read 活场 final 对账(按键/按号/双键 mismatch/not_found/v2 缺口)、重启 v3(同 workspaces 根重开服务:按原键找回 final+稳定正文+模型零调用+创建去重跨重启)、账态注入(抹 final 行→unknown+gaps+零副作用)、受理落盘失败(operations.jsonl 目录占位→operation.append_failed 拒收零执行+broken 传播)、schema 口径(空串键报错/双键至少一枚)。v3 用例显式 EnvGuard("1"),v2 用例 pin "0"。
+- **未验边界**:进程级硬杀/真拔电未验(账态注入+重开服务模拟重启面,与 test_session_service_durability 同口径);"第一轮在跑时同键重发先吃预查不吃 busy"的并发时序在单连接读线程下不可注入,代码路径在(预查在 CAS 前)未验;会话创建台账 completed 落账前的真崩溃窗口以账态注入模拟(抹行重发),真进程崩溃归真机批次;FindFinalAssistantText 在活场并发写下一轮时(账尾在动)验卷可能不过,gaps 如实报"稍后重查",冷场必成;operation/read 不做跨场全 workspaces 键扫(必须带 threadId,客户端经 thread/start 去重拿回身份后再查);自动重试"可用"以 CI 全绿为准,红则就地修或改标不可用。
+| GAP-08 | [ReadFileTool](../src/tools/read_file.cpp)、[WriteFileTool](../src/tools/write_file.cpp) | 通用文件工具接受路径，read直接打开文件；cwd不构成隔离 | 权限工具与OS隔离分层；禁止假称指定目录后无法越界 |
+
+## 四、独立参数目录：启动时冻结，不污染个人环境
+
+### 4.1 拟定入口
+
+- [ ] 新增 `LUBANCODE_HOME`：代表应用专用参数根，变量值就是根本身，不再追加 `.lubancode`。未设置时保留当前个人CLI默认行为。
+- [ ] 新增 `LUBANCODE_DATA_HOME`：独立运行数据根；未设置时默认 `<LUBANCODE_HOME>/data`，仅在启用新应用根语义时采用；未设置应用根的旧CLI布局保持原合同，不暗迁移旧账。
+- [ ] 新增显式应用托管模式入口，语义暂记 `LUBANCODE_MANAGED=1`。名称若与隔离owner冲突，沿owner合并为同一入口。托管模式必须先识别，再发现文件、播种默认材料或启动组件。
+- [ ] 根路径仅接受非空绝对路径；未设置与设置为空分开处理。空值、相对路径、无法访问、参数根与数据根不合法重叠均报配置错误；不得静默回个人目录。
+- [ ] 相对组件路径按声明文件所在目录解析；不得随进程cwd改变。规范路径与链接处理遵从隔离合同。
+
+拟定使用示例，尚不可直接运行：
+
+```powershell
+$env:LUBANCODE_HOME = 'D:\TidewatchRuntime\config'
+$env:LUBANCODE_DATA_HOME = 'D:\TidewatchRuntime\state'
+$env:LUBANCODE_MANAGED = '1'
+lubancode app-server --app-server-profile 'D:\TidewatchRuntime\config\deployment.json'
+```
+
+示例只说明部署形态，不要求实现者使用这些目录。Node应给每个child构造专属env，不修改自己的全局环境，也不重定义操作系统HOME/USERPROFILE来冒充应用参数根。
+
+### 4.2 路径布局与解析服务
+
+```text
+config/                       # 参数根，可只读
+  config.json                 # Provider等基础配置
+  deployment.json             # 托管策略与组件选择
+  agents/                     # 允许发现的Agent来源
+  skills/                     # 允许发现的Skill来源
+  packages/                   # 包来源（发现不自动执行）
+state/                        # 运行数据根，可写
+  workspaces/                 # 沿用workspace/session内部布局
+  package-data/               # 插件数据和受控状态
+  browser-artifacts/          # 浏览器材料（启用时）
+  workflow-runs/              # 现有workflow账（启用时）
+  logs/                      # 进程诊断，不取代V3账
+```
+
+- [ ] 引入共同 `RuntimePaths`/等价类型，区分配置读取、状态写入、资源目录、工作目录。类型名服从Core owner，不能只给HomeLubancodeDir换返回值后宣称完成。
+- [ ] 全面盘点模型目录、Agent、Skill、.agents共享来源、Package、信任账、插件数据、memory、sessions、浏览器材料、workflow、锁、缓存、诊断及默认播种。每项列出实际读写根，写入测试清单。
+- [ ] 托管模式默认不读个人`.lubancode`、个人`.agents`、cwd或祖先目录中的配置/AGENTS/Skills/Hook/Soul/自动加载项；只有部署档点名来源才参与。发行内置材料也应列明来源，不能隐式注入编码Agent指令。
+- [ ] 信任账等需要修改的状态放数据根；参数根可挂为只读。显式不可用根直接拒启；合法但缺失的数据目录在获准父目录内创建。
+- [ ] 清理所有初始化前置副作用：app-server进入前的播种和配置扫描也必须吃相同paths与source policy，不能在进入托管分支前已写个人家目录。
+- [ ] 输出脱敏effective-config：根路径、源清单、取值来源、profile/hash、功能状态；不输出密钥或宿主无关路径。参数根与数据根是组织手段，不是OS沙箱。
+
+## 五、Agent装配解耦与覆盖合同
+
+### 5.1 共同材料，薄入口
+
+- [ ] 从现有AgentCatalog、配置合并、提示部件装配提取无终端依赖入口，建议形状 `ResolveSessionSpec(paths, sourcePolicy, deployment, launchOverrides)`。
+- [ ] 返回不可变SessionSpec：Agent身份/版本/来源哈希、业务指令、Skill快照、模型连接公开描述与秘密句柄、工具允许集合、预算、隔离要求。
+- [ ] AppServer消费SessionSpec构建RuntimeBundle；CLI/Gateway逐步复用同一解析规则。不要求本单先完成Core所有重构；可通过窄接口落地，禁止复制另一套AgentLoop或配置优先级。
+- [ ] `agentRef` 必须解析到可用Agent。找不到、重名、缺依赖直接拒启会话；不能回退编码助手默认提示词。解析所得档案要真正进入首个模型请求。
+
+### 5.2 覆盖按字段种类处理
+
+| 材料 | 托管模式规则 |
+| --- | --- |
+| Agent选择 | 获准launch override高于部署档agentRef；不读取个人active agent |
+| 业务系统正文 | 档案正文为基底；显式override支持replace或append，模式必须标出；replace仅替业务正文 |
+| 宿主规则与能力说明 | 独立部件，由实际权限/工具快照生成；正文override、Skill、Hook不能删改授权边界 |
+| 权限、网络、路径、预算上限 | 取宿主部署约束与会话请求的交集/更严限制，不按普通“后值覆盖前值”放宽 |
+| 模型连接 | 复用模型连接解耦单；首版Worker用进程启动配置冻结，未来会话override只在已支持的公开协议下生效 |
+| Skills和组件 | 显式来源与允许名单，禁用项不扫描、不注说明、不起资源；不能merge出用户未点名工具 |
+
+- [ ] 定义 `--system-prompt`、`LUBANCODE_SYSTEM_PROMPT_FILE` 与托管Agent正文override的关系：托管模式只接受部署策略明确允许的覆写源；多处冲突且未定义次序时拒启。普通CLI现有语义另保留。
+- [ ] 将组合顺序、各段hash、来源、最终快照ID落V3可追溯记录。业务文本不得伪装为宿主权限。
+- [ ] 开场后不随文件改动热换正文和工具；新会话使用新快照。若未来支持热更，另走既有会话变更与缓存合同。
+
+## 六、Skills：可发现、可加载，不自动授予脚本权限
+
+- [ ] 复用SkillLoader元数据解析和SkillTool行为，注入显式来源根；不要把整个终端BuildBaseToolRegistry搬进app-server来获得skill工具。
+- [ ] 部署档声明Skills来源、允许canonical ID、required/optional和加载策略。现有schema对未知字段拒绝，新字段须升级公共schema与能力协商，不能假定旧二进制认识。
+- [ ] 默认按需加载：获准清单进提示材料，正文通过受控skill工具读取；固定业务流程允许显式eager注入。两种模式都使用同一份快照，缺必需Skill拒启。
+- [ ] skill工具是否注册与skills功能开关一致；内部工具ID及允许规则沿能力合同统一。启用skills不应自动开放read_file/run_command等通用工具。
+- [ ] 冻结不仅记录hash：启动时保存本场获准Skill材料快照，或每次读时校验hash并拒绝漂移。当前SkillTool按需读正文的机制不能让同场悄悄读到修改版。
+- [ ] 为Skill相对引用提供受控资源读取：只读获准Skill根内材料，路径规范化与链接检查齐全；外链作为数据源请求处理，不自动fetch任意地址。
+- [ ] scripts、CLI命令、MCP需求只作依赖声明。缺获准执行工具时返回capability_unavailable；不得为了满足Skill文字自动挂shell、装包或提升权限。
+- [ ] 同名来源冲突明示，包技能保留package canonical ID。required材料坏格式/缺文件直接拒启；optional跳过须出诊断并写快照。
+- [ ] 冻结来源清单与依赖状态供客户端检查。清单、正文加载结果、实际工具面必须一致。
+
+首个集成样本：一个research Skill指导模型调用测试MCP搜索并附证据。再放一份含shell指令的Skill，验证加载正文后并未得到shell能力。
+
+## 七、通用MCP接入；Lua装配不靠目录猜
+
+### 7.1 首发MCP路径
+
+- [ ] 提供通用测试MCP服务，返回固定材料，并支持认证失败、限流、超时、空结果及取消等可控场景；通过真实MCP连接、tools/list和调用验证装配与允许名单，不用内部假注册表替代协议链。
+- [ ] 服务地址、启动命令、认证、工具清单由应用开发者或部署者配置。AnySearch、论文检索或内部知识库均为可选实例；不在内核、部署schema或验收门槛写死供应商。
+- [ ] 工具Skill说明调用方法，业务Skill说明研究方法，Workflow说明确定步骤。具体业务材料由应用提供；LubanCode只保证加载、执行与约束合同，不交付特定应用流程。替换MCP时由应用校验工具名、参数、结果及Skill匹配，不能承诺仅换URL便兼容。
+- [ ] MCP可执行文件、参数、env由可信部署档给定；远程端点可用的transport以锁定版本实际支持为准。缺transport不得静默换执行方式。
+- [ ] 分开模型凭据与搜索凭据，只给相应组件；禁止默认把Worker全环境传给所有工具进程。
+- [ ] 工具发现、允许、成功调用逐层验收。无凭据、401、429、超时、正文提取失败各有明确状态，搜索空结果不等于请求失败。
+
+### 7.2 Lua插件后续切片
+
+Lua插件在架构上可以进入app-server；目前缺的是生产装配，不是语言不适配。指定目录只是发现入口，还需manifest解析、信任校验、权限交集、宿主能力绑定、工具注册和寿命管理。
+
+- [x] 先定义“不支持即拒绝”的行为：部署档点名Lua插件但当前build未接线时，报component_unavailable，不忽略也不伪报已装载。（2026-09-14,P2 批,PR #69 落地:components.plugins 点名通道+harness_profile 依赖解释+AssembleSession 步骤 0 零副作用整场明拒,thread/start 错误信封 data.code=component_unavailable。P5 批将"整层未接线"收窄为"runtime kind 未接线"——v2 embedded-lua 真装载后,点名 process/native 件仍走此码,语义连续。）
+- [x] 后续复用现有Package/ExtensionRuntime，支持显式插件来源和canonical引用。注册表与插件宿主寿命一致，MCP/Lua各有执行器但共用权限与轨迹入口。（2026-09-14,P5 批:owner 单 src/extension/ 未实现,按其设计最小取用既有真底座——复用 ManifestLuaRuntime/LuaHostState(runtime/plugin_lua_manifest,manifest v2 embedded-lua)、ScanPluginDirectories 发现面(runtime/plugin_tool,与终端同一扫描,不另造清单/manifest 格式)、PluginTrustStore 信任账(config/plugin_trust)。装配序=session_assembly.cpp 步骤 0 的 PluginMounter:发现→点名对账→信任→挂载;工具面=tools.allow 的 plugin__<id>__<tool> 名(解析层依赖解释+装配期 manifest 全名精确对账);寿命=SessionAssembly 成员序钉死(registry 先析构、manifest_lua owner 后关 state,每场现造一份不跨会话);权限/轨迹入口=ManifestLuaToolAdapter 走统一工具闸(needs_confirm 恒真+ApprovalClass::External,模型调用与内置工具同一条审批面,不旁路)。**未接面如实**:process/native kind 点名仍 component_unavailable;packaged(Package 挂载事务)插件不经此通道——Package 路归 owner 单,后续另接。）
+- [x] manifest内容改动使旧信任失效；托管信任来自预先部署的hash与策略，不能后台自动trust。（既有 PluginTrustStore 即此语义(目录路径+content hash 记账,改文件即失效),P5 直接复用:装配只读账(Load 后 IsTrusted/IsDisabled 查询),不 SetTrusted 不落账;账读不出(坏 JSON)只打 stderr 警告,点名件按未信任 plugin_untrusted 明拒;测试 test_plugin_assembly.cpp "未信任整场明拒"用例钉"零 Lua 执行"(顶层必炸标记不出现在错误文本)。）
+- [ ] 验证HTTP、Secret、取消、资源限制、工具结果与错误进入同一执行账。不因“Lua在进程内”省略能力约束。（P5 批部分:HTTP/Secret 能力面已验——授权路径(manifest 声明命中→请求到传输层、Secret 经 resolver 只进发包头不进模型结果)与拒绝路径(未声明 host→真传输权限对账步 network_target_denied 零 DNS 零网络;未声明 secret id→secret_not_declared 且 resolver 零解析),见 tests/unit/app_server/test_plugin_assembly.cpp。**未验**:取消链(ESC/ToolExecutionContext.cancel 贯通)、资源限制(指令/内存/墙钟三道墙)、工具结果与错误进 v3 执行账(tool.execution.* 轨迹面)在 app-server 装配路下的专门用例——取消/预算的机制层由 LuaHook/manifest v2 单测覆盖(test_plugin_lua_host/test_plugin_lua_manifest),装配路未重钉;轨迹账未验。归后续小单。）
+
+Lua完整装配不阻塞MCP首发；发布说明必须明确该边界，不能把后续勾选项标为已完成。
+
+## 八、模型配置与Worker快照
+
+- [ ] 保留当前 `LUBAN_BASE_URL`、`LUBAN_API_KEY`、`LUBAN_MODEL`、`LUBANCODE_WIRE` 入口及已有优先级；无须新造apibase同义字段。
+- [ ] 应用通过child专属env或获准secretRef提供凭据；密钥不得出现在argv、普通API读回、prompt、原始输入账、报告与错误文本中。
+- [ ] 运行快照记录wire/model/脱敏端点/连接配置版本/密钥引用或凭据版本，不记录密钥正文，也不记录可离线猜测密钥的内容哈希。
+- [ ] 单Worker连接冻结；在运行时更换配置仅影响新Worker。多会话热切换归模型连接owner，不以修改进程环境实现。
+- [ ] 配置诊断输出实际生效来源，验证个人provider、compact模型、角色模型未意外覆盖本应用配置；角色路由启用时同样记录并受预算约束。
+
+## 九、幂等受理与重启核对
+
+### 9.1 复用协议2.0合同
+
+- [ ] 沿AppServer SessionV3 owner提供带clientOperationId的input/submit与operation/read；不要往1.2塞不受协商约束的第三套方法。
+- [ ] 会话创建也具备客户端稳定意图ID和查询能力，覆盖“服务端已创建、客户端没收到sessionId”的窗口。
+- [ ] 去重范围含可信应用/主体、会话来源链、操作种类和clientOperationId。相同键相同规范载荷回原回执；不同载荷报冲突，不能另起turn。
+- [ ] 原输入先持久，再写accepted，再返回。受理持久化失败不得继续执行；HTTP/RPC请求ID不替代业务幂等键。
+- [ ] 重启后沿原session/来源链重建去重，不能只在内存map查重。查询不得触发模型或工具。
+
+### 9.2 执行核对与结果
+
+查询至少返回：原operation/session/turn身份、是否受理、queued/running/终态/unknown状态、终态持久化状态、finalMessageRefs、usage是否上报、错误原因，以及获准结果引用。字段命名与现有ResultEnvelope对齐。
+
+- [ ] 复用现有operation.final、finalMessageRefs、usageReported与resultEnvelopePersisted。源码已有这些部分，禁止重建一份互相冲突的结果账。
+- [ ] 缺终态行不是“未执行”；有部分消息不是“成功”。查不到完整事实时返回unknown及缺口，应用选择人工核对或显式恢复。
+- [ ] 读取、attach、resume、continue按原合同分离。恢复默认不执行；真正续跑须持有有效writer所有权并显式请求。
+- [ ] 已完成工具不重跑；副作用不明的外部工具查询其execution身份，无法确认停在unknown。稳定客户端键不等于外部世界恰好一次。
+- [ ] 完成事件先于客户端落库丢失时，客户端可按原键取回同一结果；不能为了补报告重新问模型。
+- [ ] 持久结果引用使用V3身份与来源游标，不让应用猜main.jsonl或把进程事件seq当文件水位。当前V3为`<sessionId>.jsonl`；由服务解析目录与格式。
+- [ ] 查询历史采用有界分页；隐藏材料和附件必须校验访问范围，不能为查某个任务顺带暴露所有workspace。
+
+## 十、目录隔离、取消与资源收口
+
+- [ ] 托管配置声明工作根、只读材料根、可写输出根、数据根及获准网络；最终路径来自可信宿主映射，不接受浏览器传任意cwd作为授权。
+- [ ] 通用文件工具在托管模式下通过共同文件访问策略；覆盖绝对路径、..、大小写、UNC、符号链接、junction及路径解析与打开之间的竞态。单纯字符串前缀比较不合格。
+- [ ] Skill材料读取、MCP进程、Lua宿主能力、process插件、浏览器、下载、日志和临时文件全部纳入范围。后端业务数据库与通知凭据默认不向Worker开放。
+- [ ] OS隔离按目标平台实现并验收。独立账号须实际配置权限；受控工具名单只限制模型调用面，不能替代进程级权限边界。
+- [ ] 声明需强隔离而当前平台无法落实时拒启并报原因；不得悄悄以普通账号全权限运行。普通LocalTrusted模式仍可保留，但不得在能力表中冒充强隔离。
+- [ ] 取消先走runtime协作取消，超时后宿主按部署规则终止进程树。Windows验证MCP/子进程随Worker收口，Linux验证进程组/托管单元实际覆盖。
+- [ ] 强杀后的执行标为待核对，不伪造cancelled/succeeded。会话账保留，任务工作目录清理独立；禁止退出时递归删除数据根。
+- [ ] Worker收到EOF/shutdown、正常结束、异常退出分别验证刷新与子进程清理。未来Worker复用必须另测会话间隔离，本单首发不凭进程复用推定安全。
+
+## 十一、报告交接与能力声明
+
+- [ ] 最终正文通过协议结果引用读取；允许应用要求JSON内含Markdown，但宿主不内置市场报告schema。业务JSON校验、引用审核和Markdown渲染归外部应用。
+- [ ] 首发不要求模型写文件。原生structured output可后补，不能把提示词约定伪装成schema强保证。
+- [ ] artifact读取接口校验本任务归属、相对路径与大小，返回mediaType/bytes/hash；不存在、过期、禁止访问分别报错。
+- [ ] 握手/诊断返回协议版本、构建标识与实际能力：应用根、Agent覆盖、Skills、MCP、Lua、幂等受理、终态查询、隔离等级。未支持能力明确false/unavailable。
+- [ ] 外部应用锁定二进制hash、提交、插件/Skill快照与部署档版本；本单提供通用兼容探针，不实现应用自己的runtime-lock管理器。
+
+## 十二、分阶段交付
+
+### P0 冻结接缝
+
+- [x] 与owner单核对命名/schema/错误码，将拟议环境变量和来源策略写入参考合同。（2026-09-14,P1 批一并落地。七张 owner 单逐一核对:三枚变量名 LUBANCODE_HOME/DATA_HOME/MANAGED 全仓无重名冲突(全 todos 既有 LUBANCODE_* 仅 TRAJECTORY/TELEMETRY/TRAJECTORY_V3_NEW_SESSIONS/QQ_OK;tests/manual/workspace_e2e_probe.py:49 已预占 LUBANCODE_HOME 同语义);LUBANCODE_MANAGED 与隔离单 LocalTrusted/Managed 档、工业化单 service.mode:"managed" 非重名,是语义挂靠——合同写明它就是 Managed 档的进程级入口。错误码:component_unavailable/capability_unavailable 是本单 §六/§7.2 拟议码(P2/P5 生效);路径类配置错误按 CLI 既有风格走启动门 stderr 人话+退出码 1,不另立协议码,与工业化单 §十四点分层码表(capability.invalid_config 等)归并关系已注。合同落位:docs/reference/capability-contract.md 新增 §13(三变量表/来源裁剪表/RuntimePaths 归属/禁止隐式降级铁律)且 §12 owner 表加行;docs/reference/configuration.md §三环境变量表加三行+新增 §十二专节。RuntimePaths 类型名核对为净空白(七张 owner 单均未定义路径服务),首建并挂靠 LubanCore 单阶段 B RuntimeAssembly 条款("配置/工作目录/凭据显式传递"),合同 §13.3 写明 Core 接管时并轨。隔离单 L111"不改进程环境以切换租户"与三变量不冲突的边界(那条管同进程轮流服务多人,本合同管一进程一份 env)写进合同 §13.1 铁律。）
+- [x] 建当前能力清单，保持现有CLI默认行为；新增托管档明确禁止隐式降级。（清单落 docs/reference/capability-contract.md §13.4,逐项对源码符号:部署档解析 LoadHarnessDeploymentFile(src/app_server/harness_profile.cpp)、headless 装配 AssembleSession(src/app_server/session_assembly.cpp)、无档=显式零工具默认档、幂等受理 SessionService::SubmitInput+PR#59、终态 ResultEnvelope RecordTurnFinal/MakeTurnCompletedParams+PR#62、应用根三变量 config::ResolveRuntimePaths(src/config/runtime_paths.cpp);未接线如实标:Agent 装配 agentRef 未进首请求(GAP-02)、SkillTool 未装(GAP-01/03)、Lua 未接(GAP-01,P5)、gateway/channels 状态根未接数据根(避让在跑的 QQ 接入单)、rg-stage 播种脚本未接。禁止隐式降级("LUBANCODE_MANAGED=1 下缺件即拒,不回落个人默认")写死在 §13.1 铁律。CLI 默认行为不变由 AW-01 用例钉(tests/unit/config/test_runtime_paths.cpp:未设变量时个人布局原样)。）
+
+### P1 参数根与冻结配置
+
+- [x] 实现RuntimePaths、启动前来源裁剪和只读参数根，覆盖全部读取/写入入口。（src/config/runtime_paths.{hpp,cpp}:RuntimeEnvSnapshot(注入两套快照即可模拟双根)/ResolveRuntimePaths(空值/相对/孤立 DATA/根重叠/MANAGED 坏值全量校验)/EnsureRuntimeRootsAccessible(获准父目录内建根,同名文件占位明拒)。platform 层新增 GetEnvVarPresent(paths_{win,posix}.cpp:空串与未设分开)。config 层:HomeLubancodeDir() 重定向(LUBANCODE_HOME 有效即参数根,坏值 nullopt 不回个人目录)、StateRootDir() 新口(应用根=DATA_HOME 或 <HOME>/data,个人=旧单根原样)、PersonalMaterialsHomeDir()(个人 .agents/.lubancode skills 材料层应用根下整层裁)、AppRootActive()。启动门插 RunCli 最前(cli_app.cpp,--memory-worker 之前),坏值 stderr+退出码 1。覆盖面:写入/状态全切 StateRootDir——workspaces(RunAppServerMode/ManageSession/trajectory_command/TrajectorySessionLedger::Open)、workflow-runs、browser-artifacts、identity 裁决 home(session_service/session_runtime/agent_channel_engine/app_server/server)、package/hook/plugin 信任账+hooks-outbox、plugin-data/package-data(secret_resolver/tool_runtime)、package-store(session_stack)、memory 树+memory-jobs(BuildProjectMemory 改传 StateRootDir)、cache(provider_catalog)、logs(agent_tool)、rg-stage(search_ripgrep);platform::HomeDir() 直读旁路全数收编(trust/state/outbox/plugin_trust/agent_tool/ripgrep/plugin_tool);全局配置读写统一走 LoadFileConfigs/GlobalConfigFilePath(应用根=<HOME>/config.json 无旧位置迁移,config.cpp 十个写全局函数同口);托管模式 LoadFileConfigs 裁 cwd 项目级。未验边界:gateway run 段(cli_app.cpp)与 channels 状态根仍走 HomeLubancodeDir——避让在跑的 QQ Q1 单(src/channel、src/gateway、channels/qqbot 一片),另立小单收口;ptc_profiles.json 归用户偏好材料留参数根;fetch_ripgrep.py 不认数据根(合同 §13.4 已记)。本地按纪律不构建,验证交 CI。）
+- [x] 跑双应用根隔离测试，确认个人家目录没有读写副作用。（tests/unit/config/test_runtime_paths.cpp,册随 tests/CMakeLists.txt glob 循环自动注册,ctest 名 unit.config.runtime_paths,13 用例:ResolveRuntimePaths 全家福(默认/参数根+默认 data/显式 data/两枚空值/两枚相对/孤立/等于/尾斜杠等值/吞根/合法嵌套/MANAGED 坏值与空串/托管缺根/0 与 1);双根并行快照互不串(dual 用例:两套 RuntimeEnvSnapshot 各自解析,断言 config_root/data_root 互不含对方路径);进程级重定向+假家目录(USERPROFILE/HOME 指临时树)零写入副作用(断言 fake_home/.lubancode 不存在且目录空);显式数据根重定向;AW-01 未设变量个人布局原样;坏值库级不回个人目录;托管模式 LoadFileConfigs 不读 cwd 探针+全局层走参数根(同 cwd 个人模式探针照读,证明裁剪只在托管档);应用根非托管全局层=参数根+项目级照旧;EnsureRuntimeRootsAccessible 建根/幂等/文件占位明拒。与测试套注入的 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 同进程共存:册内 EnvGuard 只 set/unset 自己的变量,不触碰全局注入。交付:PR relic-yuexi/LubanCode#67,head 16a507db;CI 活跃 suite(actions/runs/34775641664,pull_request 事件)conclusion=success,macos-clang 编译+全量测试绿(含本册 13 用例);push 事件的姊妹 suite(34775625427)被 GitHub 自动取消属残影,按判绿规矩不计。Windows 腿按 CI 设计在合入 main 后跑,本批 Windows 编译未验——macOS 绿+源码层 Windows 语义(GetEnvVarPresent 走 _dupenv_s 与 GetEnvVar 同底座)留待 main 上 windows-msvc 腿核。
+  Windows 修正(2026-09-14,PR#67 并 main 后 windows-msvc 腿红,run 34778468908):红因实证为 CRT/Win32 两面分家——_putenv("NAME=") 文档语义即删除,活进程造不出空值条目;_dupenv_s 把 rc==0 统一当未设,环境块里物理存在的空值条目(Node/libuv spawn env 表传空值即落块;SetEnvironmentVariableW(name,L"") 也能造出,本机探针实证)对 CRT 不可见。生产修不修测试:paths_win 的 GetEnvVarPresent 改 GetEnvironmentVariableW 底座(未设=rc 0 且 lasterr==ERROR_ENVVAR_NOT_FOUND;在但空=rc 0 且 lasterr 未设;值经 WideToUtf8 出 UTF-8,config.cpp GetAppRootEnvUtf8 随之去 ACP 二次转),GetEnvVar(_dupenv_s)不动——CRT 面"空=未设"恰是它既有语义。测试 EnvGuard 改双写:值非空 CRT+Win32 都设,空值仅 Win32 面(CRT 面 _putenv 空值=删除,维持"CRT 消费方当未设"),析构两面都删;坏值空串 CASE 从此 Windows 也可进程内注入。合同 §13.1 补 Windows 空值语义铁律,宿主传空值唯一真路=envblock。交付:PR #70(分支 worktree-agent-worker-p0p1-winfix,head ba98c109);PR 腿 macos-clang 绿(活跃 suite 34781338924 conclusion=success);Windows 复验待并 main 后 windows-msvc 腿——修正点正是 run 34778468908 的翻车断言(:331/:332)与 ResolveRuntimePaths 进程级链路,断言一字未动。）
+
+### P2 Agent、Skills与MCP
+
+- [x] 接AgentCatalog与提示部件组合，装受控Skill工具和材料读取。（2026-09-14,P2 批,PR relic-yuexi/LubanCode#69,head 05ad89ee(代码提交 d65e5667),CI:头提交 pull_request 活跃 suite actions/runs/34783182493 rollup conclusion=success(代码轮 34781351697 亦绿),macos-clang 编译+全量测试绿;push 姊妹 run 被 GitHub 自动取消属残影,按判绿规矩不计。**Agent 路(GAP-01/02)**:新增 src/app_server/agent_wiring.{hpp,cpp}——ResolveHarnessAgentPlan 在 RunAppServerMode 启动时解析 agentRef(AgentCatalog 既有目录,解析面=码内内置两枚+材料根 agents/ 一层;发行 yaml 内置层与 cwd 项目层不进 headless,§13.2 来源裁剪),指名不存在/解析坏(AgentCatalogEntry 不可用)即 stderr+退出码 1 拒启,不回落 kAppServerDefaultSystemPrompt;ComposeHarnessSystemPrompt 走 prompt_assembler 既有管线(AssembleSystemPrompt 五层回路,不另写拼装):档案点名 Prompt Profile(AgentPromptSpec.profile,optional)→core 归 Profile 用户层(材料根 prompts/profiles/<名>/);没点名→档案 persona(名+描述);宿主段(运行环境/能力说明/平台/模式)恒在,能力段由 DerivePromptCapabilities 按本场注册表实际工具面开合——业务正文盖不掉宿主规则(§5.2 覆盖合同按字段种类落);project_instructions 恒空(headless 不读 cwd/AGENTS.md);步数闸与档案 runtime.max_steps_per_turn 取更严(0=不限,不限∩N=N,session_assembly 步骤 6);skills.preload 名字必须落在扫描清单,缺名整场明拒(§5.1),命中走 AppendPreloadedSkills(agent_tool 同源件)eager 注入。解析结果启动冻结进 SessionAssemblyRequest::agent_plan(shared_ptr),逐场装配只消费计划,开场后文件改动不热换。**Skill 路(GAP-03)**:AssembleSession 步骤 2.5——装配面=features.skills 放行 ∧ tools.allow 点名内置名 skill(mode=only;inherit/none 无内置面可继承,开关单独不起工具;解析层做依赖解释:点名 skill 未放行 skills 是配置矛盾,deny 可裁);扫描走 ScanSkillsDir 单根显式(材料根 skills/,SkillLoader 既有解析器,标签"材料根级"),不搬终端 LoadSkills 五层合并;清单段/工具/预装正文三面同进同退(§六一致性铁律);装 skill 工具不授予任何执行工具(注册表里只有档点名那几枚,AW-08);BuildSkillsPromptSegment 增可选 source_note(headless 如实说只认材料根一处,缺省路径逐字节不变);tools.allow 复验认 skill 为内置件已装,不冒"缺工具"。无档默认路原样(kAppServerDefaultSystemPrompt,P1 零工具默认档不动)。**能力清单**:docs/reference/capability-contract.md §13.4 Agent 装配/SkillTool 装载搬"已落"栏附符号;§3 档内字段表补 components.plugins 与 allow 裸名 skill;deployment.schema.json 同步;tests/unit/capability 冻结侧校验器补 skill 依赖解释(与生产解析器同一口径)。**测试**:unit.app_server.agent_wiring 新册(解析命中/缺件拒启/内置档案/缺 agentRef 合法落默认人格/Profile 正文进 core 且默认人格不混入/能力段按面开合/persona 路/清单段+预装正文+preload 缺名明拒);unit.app_server.session_assembly 扩(skill 三面同进同退/未点名不起工具/未递根不扫描/插件点名明拒/计划组合覆盖显式件/步数收窄/复验不冒缺工具);unit.app_server.harness_profile 扩(allow skill 依赖解释与 deny 裁/components.plugins 收名单/未放行明拒/未知键仍拒)。**未验边界**:AW-05/06/08 的真模型路只到假模型后端(chat wire 假 HTTP)——真实 provider 调用未验;§五"组合顺序、各段hash、来源、最终快照ID落 V3 可追溯记录"未接(ComposeHarnessSystemPrompt 的 PromptSourceLedger 留在内存,未入 Journal,后续小单);Skill 冻结只做到"清单启动时扫一份、正文按需现读",同场中途改 SKILL.md 的漂移校验(hash 比对)未做(AW-07 后半未验);Skill 相对引用的受控资源读取(§六"只读获准 Skill 根内材料"专用工具)未做——AW-08 的越界拒只由"面上没有文件工具"间接钉;§六部署档声明 Skills 来源/允许 canonical ID/required-optional/加载策略的 schema 升级未做(P2 落的是材料根单一来源约定);Agent 定义 tools.allow/deny 对 headless 工具面的二次收窄未接(工具面归部署档,档案声明不动面——边界记在 §13.4)。Windows 腿按 CI 设计合入 main 后跑,本批 Windows 编译未验。）
+- [x] 测试MCP完整协议链接通；Lua未支持时显式拒绝。暂不等待Lua全装配，也不等待某家外部搜索服务接入。（2026-09-14,P2 批,同 PR #69。**MCP 整链**:integration.app_server.agent_skills 新册——真 exe+假模型+真 python 夹具(tests/fixtures/mcp_test_server.py):initialize 握手+tools/list 复验+tools/call 真执行(echo PING 回显进幕3请求)+协议错误链(rich(unknown kind) 的 JSON-RPC -32602 翻译进工具结果回下一轮模型请求,断言 unknown kind 文本在第二笔请求里);连接失败/工具缺名明拒由 unit.app_server.session_assembly(必需服务坏 command 整场明拒)与既有 integration.app_server.profile_smoke 用例 3(点名不存在工具 thread/start 明拒)/flaky 可选降级钉;超时/进程死/坏响应由既有 integration.protocols.test_mcp_client(FakeTransport+真夹具两套)覆盖,P2 未另造。外部搜索服务(AnySearch 等)未接、未验——按单子口径归应用开发者。**Lua 显式拒绝**:部署档 schema 1 新开 components.plugins 点名通道(harness_profile.cpp 收名单+features.plugins 依赖解释;schema.json/冻结侧同步);当前 build 未接线 app-server 插件装配,点名在 AssembleSession 步骤 0 零副作用整场明拒,error_code=component_unavailable(SessionAssemblyResult 新字段),thread/start 错误信封 message 带码+data.code(additive 字段,程序可认);integration 用例 3 真 exe 断言(错误信封、零模型请求、进程不崩);不忽略不伪报已装载,真装载归 P5。测试名:integration.app_server.agent_skills(册)、unit.app_server.harness_profile(P2 解析两用例)。**未验边界**:Lua P5 全链未做,本批只钉"不支持即拒绝";MCP 远程 transport(非 stdio)未接——transport 以锁定版本实际支持为准(§7.1),当前 config.mcp_servers 只有 stdio 命令型。）
+
+### P3 持久受理—结果核对
+
+- [x] 复用2.0最小操作面，完成会话创建去重、输入去重、重启查询和稳定最终结果读取。（2026-09-14,P3 批。协议 1.3 additive:thread/start|turn/start 可选 clientOperationId + 新只读方法 operation/read,语义全按 [AppServer接入SessionV3](AppServer接入SessionV3_统一入口与事件恢复设计.todo) 单 §4.2/§四 owner 合同,不另造第三套,也不是 2.0 开面。会话创建去重=workspace 级 session-creates.jsonl(requested→completed→failed 三行,PowerLoss 档,先意图后副作用);输入去重=SessionService::SubmitInput 的 #59 底座接上协议面(AcceptTurnStart 预查在 busy CAS 前);重启查询=operation/read 活场冷场同吃台账(SessionService::ReadOperationFacts);稳定结果读取=final 行 turnId → v3 投影 FindFinalAssistantText(纯读不改账,v2 场如实报缺口)。符号:server.cpp SessionCreateLedger/HandleOperationRead/AcceptTurnStart、schema.cpp CheckOperationReadParams、session_service.cpp ReadOperationFacts/LookupClientOperation、trajectory_history_view.cpp FindFinalAssistantText。测试:tests/unit/app_server/test_app_server_operation_idempotency.cpp 七用例(名见 GAP 记账段)。PR/CI:relic-yuexi/LubanCode#68,head 054849a3;pull_request 事件活跃 suite(actions/runs/34784363893)conclusion=success,macos-clang 编译+全量测试绿(含本册 8 用例;中途两轮红——台账开账前未立 workspace 目录、台账误按 workspace_key 造门牌房——均已修,见 PR 内两个 fix 提交);push 事件姊妹 suite(34784361624)被 GitHub 自动取消属残影不计。Windows 腿按 CI 设计在合入 main 后跑,本批 Windows 编译未验。未验边界见 GAP 记账段(进程硬杀、并发时序注入等)。）
+- [x] 故障注入通过后再把自动重试能力声明为可用。（2026-09-14,P3 批。三路注入全落测试:受理落盘失败(operations.jsonl 目录占位→operation.append_failed 拒收零执行,broken 传播同键重发照拒)、终态落账失败(账态注入抹 operation.final 行→operation/read 回 unknown+gaps 交代,不拿残存文本当正式终态,AW-16 查询口径)、重启窗口(同 workspaces 根重开服务:同键找回 final+稳定正文,模型零调用、turn/completed 零重投,AW-12/15)。capability-contract.md §13.4 "客户端自动重试"标可用并注明证据与边界(进程级硬杀未验)。以 CI 全绿为准,红则就地修或改标不可用。）
+
+### P4 部署隔离与收口
+
+- [ ] 在明确目标平台验证文件、网络、凭据、子进程和强杀收口；未验证平台如实标unsupported。
+- [ ] 完成Node外部客户端端到端验收及文档，出具固定版本兼容记录。
+
+### P5 Lua后续项
+
+- [x] 复用ExtensionRuntime完成Lua装配，单独交付manifest信任、HTTP/Secret和会话寿命测试。P5未完成不影响已验收MCP档，但不得宣称应用Worker已支持全部插件。（2026-09-14,P5 批。**口径先说清**:owner 单[轻量可塑ExtensionRuntime]的 src/extension/ 未实现,按任务合同"未实现的部分按其设计最小取用"——复用仓里既有真底座:ManifestLuaRuntime/LuaHostState(manifest v2 embedded-lua,Lua 受控 HTTP 与 Secret 宿主能力单落的)、ScanPluginDirectories 发现面(plugins 单,与终端同一扫描)、PluginTrustStore 信任账(plugins 单第 8 步)、ManifestLuaToolAdapter(统一工具闸)。不另造 manifest 格式、不另造第二套插件清单、不造第二套宿主 API——同名接口各讲一套的禁令未犯。**装载路**:AssembleSession 步骤 0 新增 PluginMounter(src/app_server/session_assembly.cpp)——components.plugins 点名→材料根 plugins/ 扫描→点名对账→信任账(只读,数据根 plugin-trust.json)→LoadManifestLuaPlugin 挂载(顶层零副作用+handler 对账);四路失败稳定码 plugin_missing/plugin_untrusted/plugin_load_failed/component_unavailable(kind 面:点名 process/native 件)整场明拒,错误信封沿用 P2 的 data.code 约定(additive);点名即必需件,无"可选降级"(与 MCP 的差异:components 点名是部署者显式意志,非目录隐式发现)。**权限面**:宿主 API 权限=manifest 清单申请(permissions.network/secrets/limits)∩部署档授权(components.plugins 点名+tools.allow 点名工具+信任账批准 manifest 声明面——owner 单 §21.1"用户批准的是这份指纹与能力集合"语义)∩宿主执行帽(越权请求在传输层权限对账步落锤、Secret 只在调用作用域解析、字节/超时帽);tools 面不旁路——adapter needs_confirm 恒真+ApprovalClass::External(测试钉死)。**寿命**:SessionAssembly 成员序=寿命序,manifest_lua owner 在 registry 前声明(析构反序:adapter 先亡、Lua state 后关);每场装配现造 owner,进程内 Lua state 不跨会话;入口 RunAppServerMode(src/app/cli_app.cpp)递 plugins_root/信任账/plugin_data_root。**tools.allow 新名型**:plugin__<id>__<tool>(harness_profile.cpp 依赖解释:须 components.plugins 含 id+features 放行 plugins;deny 裁;名单查重;tests/unit/capability 冻结侧校验器同口径同步)。**三件测试**(tests/unit/app_server/test_plugin_assembly.cpp 新册,册随 tests/CMakeLists.txt glob 循环自动注册):manifest 信任(信任装载全链/未信任零 Lua 执行/disable 拒/坏 JSON 按 missing 拒带扫描警告/handler 缺按 load_failed 拒)、HTTP·Secret(授权:声明命中请求到 fake transport+Secret 注入 Authorization 头且原文不进模型结果;拒绝:未声明 host 真传输 network_target_denied 零 DNS、未声明 secret id secret_not_declared 且 resolver 零解析)、会话寿命(两场 Lua 全局计数器互不串 A=2/B=1、两场 state 实例独立、第一场销毁后第二场照常调用+第三场可再装配)。装配路衔接另扩 tests/unit/app_server/test_session_assembly.cpp(装载面与注册面分家/mode=none/缺工具复验/process 件 kind 拒/未递根 missing)与 test_harness_profile.cpp(plugin__ 解释五用例)。**能力清单**:docs/reference/capability-contract.md §13.4"Lua/process 插件装载"搬已落栏(如实列:embedded-lua v2 已验到装配+信任+HTTP/Secret+寿命;process/native 未接仍 component_unavailable;packaged 不经此通道;挂载事实未进 thread/started 协议字段),§3 档内字段表与错误码归属段同步。交付:PR relic-yuexi/LubanCode#71,head f891b380(代码提交 11df7f45+编译修正 f891b380:SecretValue 显式接管左值串须拷临时、信任账先落局部变量再取址);CI:头提交 pull_request 活跃 suite actions/runs/34788221097 conclusion=success,macos-clang 编译+全量测试绿(首推 11df7f45 的 suite 34787137750 曾红,红因即上述两处测试编译错,修后绿);push 姊妹 run 被 GitHub 自动取消属残影,按判绿规矩不计。**未验边界**:取消链/资源三道墙/v3 轨迹账在装配路下未重钉(机制层有既有单测,见 §7.2 第四勾);真 provider 全链未跑(测试走假 backend+fake transport);Windows/macOS 编译与跑测交 CI。GAP-01 的"Lua 装配仍不进"注记就此销账。）
+
+## 十三、验收清单
+
+所有用例目前未执行。测试路径由实现者补入，结果记录版本、平台、配置hash、运行ID和日志引用；不得把伪模型测试记成真实provider调用。
+
+| 编号 | 场景 | 通过条件 |
+| --- | --- | --- |
+| AW-01 | 普通CLI未设置新变量 | 默认路径和已支持配置行为保持不变，无自动迁移 |
+| AW-02 | 参数根只读、数据根可写 | 能完成研究；所有状态落数据根；个人目录无读写 |
+| AW-03 | 空/相对/失效根；链接指向外部 | 明确拒启，不fallback；合法新数据根可按策略创建 |
+| AW-04 | 两个Worker各用不同根/模型/Skill | 生效快照、凭据、记录不串；Node无需修改全局env |
+| AW-05 | 指定业务Agent；正文replace/append | 真实发出请求匹配规则，编码助手默认正文不混入；宿主权限不被替换 |
+| AW-06 | agentRef不存在或required材料损坏 | 会话拒启；optional缺失有可读诊断 |
+| AW-07 | Skills按需/eager、正文中途修改 | 清单与正文一致；使用冻结版或明确拒绝漂移 |
+| AW-08 | Skill引用辅助文件与shell脚本 | 获准文件可读；越界遭拒；加载Skill不新增shell权限 |
+| AW-09 | 通用测试MCP发现及实际调用 | 经真实MCP连接执行固定样本工具；认证失败、限流、超时、空结果分别记录；无需外部供应商账号 |
+| AW-10 | 点名尚未支持Lua组件 | 不忽略、不冒充装载成功；实现P5后另测Lua全链 |
+| AW-11 | 创建session回执丢失 | 同键重试找到原session，不创建第二场 |
+| AW-12 | 输入受理后回执丢失 | 同键同载荷跨重启仍只执行一轮；异载荷冲突 |
+| AW-13 | 输入原件/accepted写失败 | 不回accepted、不运行模型，错误可诊断 |
+| AW-14 | 执行中断电，没有终态 | operation/read返回unknown/可解释状态，查询不自动执行 |
+| AW-15 | 终态落盘后事件丢失 | 按原键取同一finalMessageRefs与正文，不重跑模型 |
+| AW-16 | operation.final写入失败 | 不宣称持久成功；查询与实时标记一致，不拿残存文本当正式终态 |
+| AW-17 | 绝对路径/.. /junction/UNC/竞态 | 在声明强隔离平台全部拒绝越权读写，覆盖Skill及工具子进程 |
+| AW-18 | 环境、日志与请求取证 | 模型key不进入MCP/Skill/报告；搜索key不进入模型输入；脱敏输出无测试密钥 |
+| AW-19 | 协作取消与不响应子进程 | 先取消再按期限收进程树，无孤儿；强杀状态待核对 |
+| AW-20 | Node完整外部调用 | 启动握手→新会话→Skill→MCP→结果→按ID再读→正常退出；记录仍能查询 |
+| AW-21 | artifact越权/过期/损坏 | 拒绝跨工作访问；状态与hash准确，不接受任意磁盘路径 |
+| AW-22 | 升级前后读取固定历史样本 | 支持版本正确读取；不支持版本明确拒绝，不悄悄解析成成功 |
+
+AW-09用确定性测试MCP验证完整协议链，不要求真实商业数据源。AW-20至少有一次真实模型调用测试MCP的成功记录，用来核对provider—工具—结果链；模型桩结果另列。AnySearch等外部服务的账号、可用性、费用和业务效果由应用开发者另行验收，不作为LubanCode发布条件。OS隔离必须用真实目标平台验证，静态代码检查不算通过。
+
+## 十四、交付物与完成条件
+
+- [ ] 生产入口、共同解析/装配服务与窄协议适配实现。
+- [ ] 参数目录/schema/来源优先级/密钥边界/Skills装配/结果恢复说明。
+- [ ] 无真实密钥的托管部署样例和独立Node兼容客户端；示例不调用内部C++接口、不读私有文件猜结果。
+- [ ] AW-01—22测试证据与未支持能力列表；每阶段分开报告静态、桩、真实provider、真实平台结果。
+- [ ] 更新相关owner单状态及公开能力文档，不让旧“全部未实现”或“全功能已接通”继续误导。
+- [ ] MCP首发阶段通过P0—P4相关测试才标可供应用接入；Lua仅在P5通过后另标支持。页面、业务监控计划和市场报告质量不属于LubanCode本单验收。

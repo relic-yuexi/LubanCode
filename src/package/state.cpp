@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "config/config.hpp"  // StateRootDir:启停账落状态根(数据根)
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 
@@ -30,12 +31,13 @@ std::string NowUnixText() {
 // ---------------------------------------------------------------------------
 
 std::optional<std::string> PackageStateStore::DefaultStatePath() {
-    const auto home = platform::HomeDir();
-    if (!home.has_value() || home->empty()) {
+    // 状态根:启停账需要修改,放数据根(应用Worker接入单 §4.2);个人模式
+    // 落 <主目录>/.lubancode,与从前同一处。
+    const auto state_root = config::StateRootDir();
+    if (!state_root.has_value()) {
         return std::nullopt;
     }
-    std::filesystem::path dir(*home);
-    dir /= ".lubancode";
+    std::filesystem::path dir = platform::Utf8ToPath(*state_root);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);  // 已存在不算错
     if (ec) {

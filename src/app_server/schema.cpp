@@ -196,6 +196,41 @@ ParamsCheck CheckThreadStartParams(const nlohmann::json& params) {
 
 namespace {
 
+// 可选幂等键的折取(应用Worker接入单 P3,1.3 additive):不给 = 空串
+// (旧行为);给了就必须是非空字符串——空串不是"无键",是坏键,报参数
+// 错不静默吞。
+ParamsCheck TakeOptionalOperationId(const nlohmann::json& params, std::string_view key,
+                                    std::string_view method, std::string& out_value) {
+    out_value.clear();
+    if (!params.contains(key) || params[key].is_null()) {
+        return ParamsCheck{};
+    }
+    if (!params[key].is_string()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": " + std::string(key) + " 必须是字符串"};
+    }
+    std::string value = params[key].get<std::string>();
+    if (value.empty()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": " + std::string(key) + " 不许为空(不带键即旧行为)"};
+    }
+    out_value = std::move(value);
+    return ParamsCheck{};
+}
+
+}  // namespace
+
+ParamsCheck CheckThreadStartParams(const nlohmann::json& params, std::string& out_client_operation_id) {
+    const ParamsCheck base = CheckThreadStartParams(params);
+    if (!base.ok) {
+        return base;
+    }
+    return TakeOptionalOperationId(params, "clientOperationId", kMethodThreadStart,
+                                   out_client_operation_id);
+}
+
+namespace {
+
 // 取必填字符串字段。缺了/类型不对/空串都算参数错。
 ParamsCheck RequireString(const nlohmann::json& params, std::string_view key, std::string_view method,
                           std::string& out_value) {
@@ -248,6 +283,50 @@ ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_
             }
             out_images.push_back(image);
         }
+    }
+    return ParamsCheck{};
+}
+
+ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_thread_id,
+                                 std::string& out_text, std::vector<nlohmann::json>& out_images,
+                                 std::string& out_client_operation_id) {
+    const ParamsCheck base = CheckTurnStartParams(params, out_thread_id, out_text, out_images);
+    if (!base.ok) {
+        return base;
+    }
+    return TakeOptionalOperationId(params, "clientOperationId", kMethodTurnStart,
+                                   out_client_operation_id);
+}
+
+ParamsCheck CheckOperationReadParams(const nlohmann::json& params, std::string& out_thread_id,
+                                      std::string& out_client_operation_id,
+                                      std::string& out_operation_id) {
+    out_client_operation_id.clear();
+    out_operation_id.clear();
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodOperationRead);
+    if (!base.ok) {
+        return base;
+    }
+    const ParamsCheck thread =
+        RequireString(params, "threadId", kMethodOperationRead, out_thread_id);
+    if (!thread.ok) {
+        return thread;
+    }
+    // 两枚定位键:形状校验复用幂等键口径(给了就非空字符串)。
+    ParamsCheck check =
+        TakeOptionalOperationId(params, "clientOperationId", kMethodOperationRead,
+                                out_client_operation_id);
+    if (!check.ok) {
+        return check;
+    }
+    check = TakeOptionalOperationId(params, "operationId", kMethodOperationRead, out_operation_id);
+    if (!check.ok) {
+        return check;
+    }
+    if (out_client_operation_id.empty() && out_operation_id.empty()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(kMethodOperationRead) +
+                               ": clientOperationId 与 operationId 至少给一枚"};
     }
     return ParamsCheck{};
 }

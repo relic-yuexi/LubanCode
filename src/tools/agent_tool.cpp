@@ -29,6 +29,7 @@
 #include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
 #include "config/command_permission.hpp"  // 后台任务命令的 permissions 前缀裁定(问题 7 拆出)
+#include "config/config.hpp"  // StateRootDir:子代理诊断日志落状态根
 #include "platform/log_sink.hpp"  // §5.3 旧预算键的弃用日志
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
@@ -396,11 +397,13 @@ std::optional<std::filesystem::path> SubagentDebugLogDir() {
     }
     std::filesystem::path dir;
     if (mode == "1" || mode == "true" || mode == "yes" || mode == "on") {
-        const auto home = lubancode::platform::HomeDir();
-        if (!home.has_value()) {
+        // 诊断日志是状态,落状态根(应用Worker接入单 §4.2):应用根语义
+        // = 数据根/logs;个人模式 = <主目录>/.lubancode/logs 原样。
+        const auto state_root = lubancode::config::StateRootDir();
+        if (!state_root.has_value()) {
             return std::nullopt;
         }
-        dir = std::filesystem::path(*home) / ".lubancode" / "logs";
+        dir = lubancode::tools::Utf8ToPath(*state_root) / "logs";
     } else {
         dir = lubancode::tools::Utf8ToPath(*value);
     }

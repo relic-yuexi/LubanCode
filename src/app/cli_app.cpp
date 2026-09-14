@@ -8,6 +8,7 @@
 #include "app/plugin_scaffold.hpp"
 // QQ 机器人接入单 Q1:渠道装配与复合泵(gateway run 的 QQ 进程内直连)。
 #include "app/channel_gateway_wiring.hpp"
+#include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
 #include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
 #include "app_server/server.hpp"
 #include "app_server/session_assembly.hpp"  // P1:会话级运行材料装配
@@ -84,10 +85,12 @@
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
+#include "config/plugin_trust.hpp"  // P5:插件信任账(数据根 plugin-trust.json,只读消费)
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
+#include "config/runtime_paths.hpp"  // 启动门:应用根三变量先识别先校验(应用Worker接入单 P1)
 #include "config/settings_local.hpp"
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
@@ -358,8 +361,10 @@ private:
 // code 1(首次自动压缩后)没有任何回执,用户连"该去哪找现场"都不知道。
 void PrintFatalExitDiagnostics(const char* error_category) {
     std::string sessions_hint;
-    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        sessions_hint = *luban_dir + "/sessions";
+    // 会话现场在状态根(应用Worker接入单 §4.2):应用根语义=数据根,
+    // 个人模式与从前同一处。
+    if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+        sessions_hint = *state_root + "/sessions";
     }
     std::cerr << tr("error.fatal_category") << error_category << "\n";
     if (!sessions_hint.empty()) {
@@ -412,11 +417,14 @@ int HandlePluginInitCommand(const PluginInitArgs& init) {
 int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                      const CliOptions& cli_options) {
     lubancode::app_server::ServerOptions options;
-    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        // P0-2:会话账走唯一持久化根 workspaces/。
-        options.workspaces_dir = *luban_dir + "/workspaces";
+    if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+        // P0-2:会话账走唯一持久化根 workspaces/。P1(应用Worker接入单
+        // §4.2):运行数据(workspaces/workflow-runs/browser-artifacts)落
+        // 状态根——应用根语义下即数据根,参数根保持只读材料;个人模式
+        // 与从前同一处。
+        options.workspaces_dir = *state_root + "/workspaces";
         // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
-        options.workflow_runs_dir = *luban_dir + "/workflow-runs";
+        options.workflow_runs_dir = *state_root + "/workflow-runs";
     }
     options.cwd = CurrentDirUtf8();
     // 会话档 meta 真值(阶段 3 冻结项):wire/model 用配置四级合并的
@@ -449,7 +457,8 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
     // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
     // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*
     // 方法回 browser.not_configured,不冒充)。截图 artifact 落
-    // <HomeLubancodeDir>/browser-artifacts(内容寻址)。
+    // <状态根>/browser-artifacts(内容寻址;个人模式=HomeLubancodeDir,
+    // 应用根语义=数据根)。
     if (const char* env_sidecar = std::getenv("LUBAN_BROWSER_SIDECAR");
         env_sidecar != nullptr && *env_sidecar != '\0') {
         options.browser_sidecar_command = "node";
@@ -472,8 +481,8 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             }
         }
     }
-    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        options.browser_artifact_dir = *luban_dir + "/browser-artifacts";
+    if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+        options.browser_artifact_dir = *state_root + "/browser-artifacts";
     }
     // WS 承载(多前端外壳单阶段 A):--app-server-ws <port | host:port>。
     // 裸端口绑回环;显式 host 须是点分 IPv4 或 localhost(ws_sockets 的
@@ -532,15 +541,72 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             harness.has_value() && harness->steps_per_input > 0
                 ? std::min(config_steps, harness->steps_per_input)
                 : config_steps;
-        options.assembly_factory = [config_ptr, harness, planned_steps]() {
+        // P2(应用Worker接入单 §五/§六):档在场即解析 Agent 面——agentRef
+        // 必须落到可用档案(找不到/坏档明拒启,不回落编码默认提示词);
+        // Skill/提示模块的来源根同源折好(材料根下 agents/skills/prompts
+        // 三处;应用根语义即参数根,个人模式即 ~/.lubancode,§13.2 参数根
+        // 内材料照读)。解析结果是冻结件:此后逐场装配只消费这份计划,
+        // 开场后文件改动不热换(§五)。
+        std::shared_ptr<const lubancode::app_server::HarnessAgentPlan> agent_plan;
+        std::optional<std::filesystem::path> skills_root;
+        // P5(应用Worker接入单 §7.2):Lua 插件装配来源——材料根 plugins/
+        // 单根显式扫描(与 agents/skills 同一条来源裁剪,复用终端同一发现
+        // 面,不另造清单);信任账读数据根 plugin-trust.json(只读消费,
+        // 装配不批信任——托管信任来自预先部署的 hash 与策略,不能后台
+        // 自动 trust);.env 数据目录落数据根 plugin-data。账读不出只打警
+        // 告:点名件按未信任处理,装配时 plugin_untrusted 明拒。
+        std::optional<std::filesystem::path> plugins_root;
+        std::optional<std::filesystem::path> plugin_data_root;
+        std::shared_ptr<const lubancode::config::PluginTrustStore> plugin_trust;
+        if (harness.has_value()) {
+            lubancode::app_server::HarnessAgentSources sources;
+            if (const auto material_root = lubancode::config::HomeLubancodeDir();
+                material_root.has_value()) {
+                const std::filesystem::path root = lubancode::tools::Utf8ToPath(*material_root);
+                sources.agents_dir = root / "agents";
+                sources.skills_dir = root / "skills";
+                sources.prompts_dir_utf8 = *material_root + "/prompts";
+                skills_root = sources.skills_dir;
+                plugins_root = root / "plugins";
+            }
+            if (const auto state_root = lubancode::config::StateRootDir(); state_root.has_value()) {
+                plugin_data_root = lubancode::tools::Utf8ToPath(*state_root) / "plugin-data";
+            }
+            auto [trust_store, trust_error] = lubancode::config::PluginTrustStore::Load(
+                lubancode::config::PluginTrustStore::DefaultStorePath());
+            if (trust_error.has_value()) {
+                std::fprintf(stderr,
+                             "[app-server] 插件信任账读取失败,点名插件将按未信任拒: %s\n",
+                             trust_error->c_str());
+            }
+            plugin_trust =
+                std::make_shared<const lubancode::config::PluginTrustStore>(std::move(trust_store));
+            auto plan_result = lubancode::app_server::ResolveHarnessAgentPlan(
+                *harness, std::move(sources), options.session_wire, options.cwd);
+            if (!plan_result.plan.has_value()) {
+                std::fprintf(stderr, "[app-server] Agent 装配失败,拒绝启动: %s\n",
+                             plan_result.error.c_str());
+                return 1;
+            }
+            agent_plan =
+                std::make_shared<const lubancode::app_server::HarnessAgentPlan>(std::move(*plan_result.plan));
+        }
+        options.assembly_factory = [config_ptr, harness, planned_steps, agent_plan, skills_root,
+                                    plugins_root, plugin_data_root, plugin_trust]() {
             lubancode::app_server::SessionAssemblyRequest request;
             request.config = config_ptr;
             request.harness = harness ? &*harness : nullptr;
             request.backend_factory = [config_ptr]() {
                 return lubancode::app::BuildBackend(*config_ptr);
             };
+            // 无档默认路的兜底正文;agent_plan 在场时被提示部件组合覆盖。
             request.system_prompt = lubancode::app_server::kAppServerDefaultSystemPrompt;
             request.max_steps_per_turn = planned_steps;
+            request.agent_plan = agent_plan;
+            request.skills_root = skills_root;
+            request.plugins_root = plugins_root;
+            request.plugin_data_root = plugin_data_root;
+            request.plugin_trust = plugin_trust.get();
             return lubancode::app_server::AssembleSession(std::move(request));
         };
     }
@@ -599,6 +665,29 @@ std::optional<std::string> ValidateOneShotOutputTarget(const std::string& output
 // 一旦经这条路转一圈,就会被拆成不合法的 UTF-8 字节,喂给 nlohmann::json
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args) {
+    // 应用根启动门(应用Worker接入单 §四/P1):LUBANCODE_HOME /
+    // LUBANCODE_DATA_HOME / LUBANCODE_MANAGED 三变量先识别、先校验,再
+    // 干活——空值/相对路径/不合法重叠/托管缺根在这里明拒(退出码 1,
+    // stderr 人话),不静默回个人默认目录。放在一切会碰家目录的动作
+    // (i18n 语言包、配置装载、播种脚手架)之前;--memory-worker 这类
+    // 宿主派的后台进程同样过门,防绕行。
+    {
+        const auto paths = lubancode::config::ResolveRuntimePaths(
+            lubancode::config::CaptureProcessEnv());
+        if (!paths.has_value()) {
+            std::cerr << "[config] " << paths.error() << "\n";
+            return 1;
+        }
+        if (paths->app_root_active) {
+            const auto accessible =
+                lubancode::config::EnsureRuntimeRootsAccessible(*paths);
+            if (!accessible.has_value()) {
+                std::cerr << "[config] " << accessible.error() << "\n";
+                return 1;
+            }
+        }
+    }
+
     if (args.size() == 3 && args[1] == "--memory-worker") {
         const auto result = lubancode::memory::RunPendingMemoryJobs(
             lubancode::tools::Utf8ToPath(args[2]));
@@ -832,8 +921,9 @@ int RunCli(const std::vector<std::string>& args) {
         case CliAction::ManageSession: {
             // 会话管理子命令(archive/unarchive/delete):不进会话,打完
             // 结果就退。i18n 已在函数头初始化;确认屏在 handler 里。
-            const auto luban_dir = lubancode::config::HomeLubancodeDir();
-            if (!luban_dir.has_value()) {
+            // 会话账在状态根(应用Worker接入单 §4.2)。
+            const auto state_root = lubancode::config::StateRootDir();
+            if (!state_root.has_value()) {
                 std::cerr << tr("session.no_home") << "\n";
                 return 1;
             }
@@ -841,7 +931,7 @@ int RunCli(const std::vector<std::string>& args) {
                 std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
             // P0-2:搬删走 workspace 新账(不进会话;索引定位 + 管理面)。
             return HandleSessionManagementCommand(
-                lubancode::tools::Utf8ToPath(*luban_dir) / "workspaces",
+                lubancode::tools::Utf8ToPath(*state_root) / "workspaces",
                 static_cast<int>(parsed_cli.session_command.kind), parsed_cli.session_command.session_ref,
                 parsed_cli.session_command.force, manage_theme, nullptr);
         }

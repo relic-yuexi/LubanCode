@@ -438,6 +438,9 @@ add_library(lubancode_engine STATIC
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
   src/config/plugin_trust.cpp
+  # 应用根语义(应用Worker接入单 P1):LUBANCODE_HOME/DATA_HOME/MANAGED
+  # 三变量的解析、校验与可达性探测;HomeLubancodeDir/StateRootDir 消费。
+  src/config/runtime_paths.cpp
   src/tools/registry.cpp
   src/tools/tool_content.cpp  # MCP 富结果:中立内容块/投影/序列化
   src/tools/tool_text.cpp
@@ -1160,6 +1163,9 @@ add_library(lubancode_app STATIC
   # (G01/G02 生产 headless 显式装配;先解析允许组件再启动)。
   src/app_server/harness_profile.cpp
   src/app_server/session_assembly.cpp
+  # 应用Worker接入单 P2:Agent 档案解析 + Skill 来源 + 提示部件组合
+  # (GAP-01/02/03;prompt_assembler 既有管线,来源显式、缺件明拒)。
+  src/app_server/agent_wiring.cpp
   # 可见调试阶段 3:browser/* 方法面——sidecar 进程管理、RPC 配对、
   # 事件转发、审批与取消、截图 artifact。
   src/app_server/browser_service.cpp

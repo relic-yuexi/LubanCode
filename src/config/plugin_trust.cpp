@@ -10,18 +10,20 @@
 
 #include <nlohmann/json.hpp>
 
+#include "config/config.hpp"  // StateRootDir(同层:plugin_trust 与 config 同在 config 模块)
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 
 namespace lubancode::config {
 
 std::optional<std::string> PluginTrustStore::DefaultStorePath() {
-    const auto home = platform::HomeDir();
-    if (!home.has_value() || home->empty()) {
+    // 状态根:信任账需要修改,放数据根(应用Worker接入单 §4.2);个人模式
+    // 落 <主目录>/.lubancode,与从前同一处。
+    const auto state_root = StateRootDir();
+    if (!state_root.has_value()) {
         return std::nullopt;
     }
-    std::filesystem::path dir(*home);
-    dir /= ".lubancode";
+    std::filesystem::path dir = platform::Utf8ToPath(*state_root);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);  // 已存在不算错
     if (ec) {
