@@ -318,9 +318,9 @@ void RememberSelection(const config::ImPreferenceStore& store, config::ImPrefere
                        const ChannelAccountRef& target) {
     prefs.last = config::ImRecentSelection{target.channel_id, target.account_id};
     prefs.recent_account[target.channel_id] = target.account_id;
-    if (const auto saved = store.Save(prefs); saved.has_value()) {
+    if (const auto saved = store.Save(prefs); !saved.has_value()) {
         std::fprintf(stderr, "[im] 保存最近选择偏好失败(不影响本次启动): %s\n",
-                     saved->c_str());
+                     saved.error().c_str());
     }
 }
 

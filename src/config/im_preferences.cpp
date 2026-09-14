@@ -86,9 +86,9 @@ std::optional<std::string> ImPreferenceStore::Save(const ImPreferences& preferen
     const auto written = platform::AtomicWriteFile(
         file_, root.dump(2) + "\n", platform::WriteDurability::ProcessCrashDurability);
     if (!written.has_value()) {
-        return written.error().code + ": " + written.error().message;
+        return std::unexpected(written.error().code + ": " + written.error().message);
     }
-    return std::nullopt;
+    return {};
 }
 
 }  // namespace lubancode::config

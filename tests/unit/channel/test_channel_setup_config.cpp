@@ -112,9 +112,10 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
     CHECK(account["dm_policy"].get<std::string>() == "pairing");
     CHECK(account["group_policy"].get<std::string>() == "disabled");
     CHECK(account["reply"]["mode"].get<std::string>() == "final");
-    CHECK(account["tools"]["allow"] ==
-          std::vector<std::string>(MakeQqTemplateAccount().tools.allow->begin(),
-                                   MakeQqTemplateAccount().tools.allow->end()));
+    // 只读工具名单与模板同一份(单一临时对象取值——两只临时各取迭代器
+    // 是未定义行为,clang 报 {?})。
+    const ChannelAccountUserConfig expected_template = MakeQqTemplateAccount();
+    CHECK(account["tools"]["allow"] == nlohmann::json{*expected_template.tools.allow});
     CHECK(account["app_id"].get<std::string>() == "102345678");
 
     // secret_file 是受管绝对路径;JSON 里没有密钥值(测试密钥扫描)。
@@ -142,8 +143,10 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
 
 TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号只改选定字段") {
     Fixture fx("keep");
-    // 手摆一份带模型、未知字段、另一账号、渠道级未知键的旧配置。路径
-    // 用 nlohmann 拼进 JSON(反斜杠自动转义,别拿字符串拼接写穿)。
+    // 手摆一份带模型、全局未知字段、另一账号的旧配置。路径用 nlohmann 拼
+    // 进 JSON(反斜杠自动转义)。注意:channels 段内的未知字段走严格解析
+    // (既有合同:渠道段配置错要明报),那样的配置本就装不进来——"未知
+    // 字段原样保留"指 channels 之外的全局字段,见下面的断言与坏段子案。
     const std::string old_external_secret = "old-external-secret";
     nlohmann::json old = nlohmann::json::object();
     old["model"] = "gpt-test";
@@ -153,7 +156,6 @@ TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号�
     other_account["app_id"] = "999";
     other_account["secret_env"] = "OTHER_SECRET_ENV";
     other_account["dm_policy"] = "allowlist";
-    other_account["future_account_key"] = 42;
     nlohmann::json main_account = nlohmann::json::object();
     main_account["enabled"] = false;
     main_account["app_id"] = "old-app";
@@ -162,7 +164,6 @@ TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号�
     main_account["allow_from"] = std::vector<std::string>{"user-a"};
     old["channels"]["qqbot"] = nlohmann::json{
         {"enabled", true},
-        {"future_channel_key", "keep-me"},
         {"default_account", "other"},
         {"accounts", nlohmann::json{{"other", std::move(other_account)},
                                     {"main", std::move(main_account)}}}};
@@ -179,7 +180,6 @@ TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号�
     CHECK(root["model"].get<std::string>() == "gpt-test");
     CHECK(root["future_field"]["nested"][1].get<int>() == 2);
     const nlohmann::json& channel = root["channels"]["qqbot"];
-    CHECK(channel["future_channel_key"].get<std::string>() == "keep-me");
     // default_account 已有指向 other:不偷默认位。
     CHECK(channel["default_account"].get<std::string>() == "other");
 
@@ -187,7 +187,6 @@ TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号�
     const nlohmann::json& other = channel["accounts"]["other"];
     CHECK(other["secret_env"].get<std::string>() == "OTHER_SECRET_ENV");
     CHECK(other["dm_policy"].get<std::string>() == "allowlist");
-    CHECK(other["future_account_key"].get<int>() == 42);
 
     // 已有账号:enabled/app_id/secret_file 换新;旧 dm_policy(allowlist,
     // 用户自己收紧过的权限路由)与 allow_from 原样保留——不用模板扩大。
@@ -230,12 +229,25 @@ TEST_CASE("提交失败不毁旧配置:AppID 缺失(新账号没填)报稳定码
 
 TEST_CASE("提交失败不毁旧配置:既有 channels 段坏,不碰文件") {
     Fixture fx("failch");
-    WriteFile(fx.root / "config.json",
-              R"json({"channels": {"qqbot": {"enabled": "not-a-bool"}}}})json");
-    const auto committed = ChannelConfigService::Commit(fx.options, BaseRequest());
-    REQUIRE_FALSE(committed.has_value());
-    CHECK(committed.error().reason == "setup_channels_invalid");
-    CHECK(ReadFile(fx.root / "config.json").find("not-a-bool") != std::string::npos);
+    SUBCASE("类型错") {
+        WriteFile(fx.root / "config.json",
+                  R"json({"channels": {"qqbot": {"enabled": "not-a-bool"}}}})json");
+        const auto committed = ChannelConfigService::Commit(fx.options, BaseRequest());
+        REQUIRE_FALSE(committed.has_value());
+        CHECK(committed.error().reason == "setup_channels_invalid");
+        CHECK(ReadFile(fx.root / "config.json").find("not-a-bool") != std::string::npos);
+    }
+    SUBCASE("channels 段内未知字段:严格解析拒绝,不写半截") {
+        // 渠道段是严格解析(既有合同:配置错要明报)——段内未知字段本就
+        // 装不进来;向导不替用户猜,原样拒收。全局未知字段另案保留。
+        WriteFile(fx.root / "config.json",
+                  R"json({"future_field": 1, "channels": {"qqbot": {"accounts": {"main": {"future_key": 1}}}}})json");
+        const auto committed = ChannelConfigService::Commit(fx.options, BaseRequest());
+        REQUIRE_FALSE(committed.has_value());
+        CHECK(committed.error().reason == "setup_channels_invalid");
+        CHECK(ReadFile(fx.root / "config.json").find("future_key") != std::string::npos);
+        CHECK(ReadFile(fx.root / "config.json").find("future_field") != std::string::npos);
+    }
 }
 
 TEST_CASE("dry_run:差异到手,一页未写") {

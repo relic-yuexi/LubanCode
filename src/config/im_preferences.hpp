@@ -8,6 +8,7 @@
 // 选择流程,不阻止已有配置使用。非交互命令不写本档。
 #pragma once
 
+#include <expected>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -36,8 +37,9 @@ public:
     // 读档:文件不在/坏了/版本不认 → 空偏好(不抛、不报错打断启动)。
     ImPreferences Load() const;
 
-    // 原子写回(dump(2) + AtomicWriteFile)。目录不在会建。
-    std::optional<std::string> Save(const ImPreferences& preferences) const;
+    // 原子写回(dump(2) + AtomicWriteFile)。目录不在会建。失败带人话
+    //(expected 语义:有值 = 成功;错误在 unexpected)。
+    std::expected<void, std::string> Save(const ImPreferences& preferences) const;
 
     const std::filesystem::path& file() const { return file_; }
 
