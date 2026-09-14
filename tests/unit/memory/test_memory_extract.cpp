@@ -108,8 +108,9 @@ TEST_CASE("ParseExtractionJson: 严格字段与容错围栏") {
     REQUIRE(fenced.has_value());
     CHECK(fenced->candidates.size() == 1);
 
-    // 认不出的 task_type 落 other;candidates 超过 3 条只取前 3。
-    std::string many = R"({"task_type":"weird","candidates":[)"
+    // 认不出的 task_type 落 other;candidates 超过 3 条只取前 3。(新字段
+    // 合同下 summary 必填,这枚夹具补上。)
+    std::string many = R"({"task_type":"weird","summary":"s","candidates":[)"
                        R"({"kind":"fact","title":"1","content":"c"},)"
                        R"({"kind":"fact","title":"2","content":"c"},)"
                        R"({"kind":"fact","title":"3","content":"c"},)"
@@ -119,7 +120,7 @@ TEST_CASE("ParseExtractionJson: 严格字段与容错围栏") {
     CHECK(capped->task_type == "other");
     CHECK(capped->candidates.size() == 3);
 
-    // 前后带解释文字:取首个 { 到末个 }。
+    // 前后带解释文字:首个 { 起配对扫描,首尾纯文字说明无歧义放行。
     const auto chatty = app::ParseExtractionJson("好的,以下是总结:\n" + good + "\n以上。");
     REQUIRE(chatty.has_value());
 
@@ -223,8 +224,7 @@ TEST_CASE("ParseExtractionJson: 本单事故形态——未转义双引号,语�
 
 TEST_CASE("ParseExtractionJson: 合法内容完整保留(转义引号/中文引号/emoji/路径/换行)") {
     const std::string text =
-        R"({"task_type":"code","summary":"用户说\"回退链\"没配好:D:\\repo\\src\\app\\router.cpp 报错\n修好了","retrieval_terms":["回退链😀","router"],"candidates":[])"
-        R"()";
+        R"({"task_type":"code","summary":"用户说\"回退链\"没配好:D:\\repo\\src\\app\\router.cpp 报错\n修好了","retrieval_terms":["回退链😀","router"],"candidates":[]})";
     const auto parsed = app::ParseExtractionJson(text);
     REQUIRE(parsed.has_value());
     CHECK(parsed->summary == "用户说\"回退链\"没配好:D:\\repo\\src\\app\\router.cpp 报错\n修好了");
