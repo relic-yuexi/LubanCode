@@ -1318,11 +1318,11 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
                                 {"requirement", entry.required ? "required" : "optional"},
                                 {"status", entry.loaded ? "loaded" : "missing"}};
             if (!entry.requires_tools.empty()) {
-                nlohmann::json requires = nlohmann::json::array();
+                nlohmann::json declared_tools = nlohmann::json::array();
                 for (const std::string& tool : entry.requires_tools) {
-                    requires.push_back(tool);
+                    declared_tools.push_back(tool);
                 }
-                item["requiresTools"] = std::move(requires);
+                item["requiresTools"] = std::move(declared_tools);
             }
             if (!entry.missing_tools.empty()) {
                 nlohmann::json missing = nlohmann::json::array();
