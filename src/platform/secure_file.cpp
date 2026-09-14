@@ -287,8 +287,13 @@ InterProcessFileLock::InterProcessFileLock(const std::filesystem::path& lock_fil
         return;
     }
     while (true) {
+        // LockFileEx 是六参:LPOVERLAPPED 必给(零初始化即可——Offset/
+        // OffsetHigh=0,锁区间从 0 字节起),字节区间 0..MAXDWORD 罩住整只
+        // 锁文件;独占加 LOCKFILE_EXCLUSIVE_LOCK,不肯等再加
+        // LOCKFILE_FAIL_IMMEDIATELY,抢不到回 FALSE 由本循环按 deadline 重试。
+        OVERLAPPED overlapped{};
         if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD,
-                       MAXDWORD)) {
+                       MAXDWORD, &overlapped)) {
             handle_ = handle;
             holds_ = true;
             return;

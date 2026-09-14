@@ -21,7 +21,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <sddl.h>
+#include <aclapi.h>  // SetNamedSecurityInfoW/SE_FILE_OBJECT(收紧用,windows.h 先行)
+#include <sddl.h>    // ConvertSidToStringSidW/ConvertStringSecurityDescriptorToSecurityDescriptorW
 #else
 #include <sys/stat.h>
 #include <unistd.h>
