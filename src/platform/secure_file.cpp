@@ -149,6 +149,12 @@ std::expected<void, SecureFileError> CreateSecureDirectory(const std::filesystem
         const DWORD error = GetLastError();
         LocalFree(attributes->lpSecurityDescriptor);
         if (error == ERROR_ALREADY_EXISTS) {
+            // 并发撞车:另一路刚建成同目录是正常事(那一路带着安全描述符),
+            // 重验是目录即收;真被非目录占着才报。
+            std::error_code exists_ec;
+            if (std::filesystem::is_directory(path, exists_ec)) {
+                return {};
+            }
             return std::unexpected(Fail("secure_file.path_not_directory",
                                         "路径已被非目录占着: " + PathToUtf8(path)));
         }
@@ -159,6 +165,11 @@ std::expected<void, SecureFileError> CreateSecureDirectory(const std::filesystem
 #else
     if (::mkdir(path.c_str(), 0700) != 0) {
         if (errno == EEXIST) {
+            // 并发撞车:另一路刚建成(0700)是正常事,重验是目录即收。
+            std::error_code exists_ec;
+            if (std::filesystem::is_directory(path, exists_ec)) {
+                return {};
+            }
             return std::unexpected(Fail("secure_file.path_not_directory",
                                         "路径已被非目录占着: " + PathToUtf8(path)));
         }

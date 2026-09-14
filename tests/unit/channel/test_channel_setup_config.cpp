@@ -112,10 +112,10 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
     CHECK(account["dm_policy"].get<std::string>() == "pairing");
     CHECK(account["group_policy"].get<std::string>() == "disabled");
     CHECK(account["reply"]["mode"].get<std::string>() == "final");
-    // 只读工具名单与模板同一份(单一临时对象取值——两只临时各取迭代器
-    // 是未定义行为,clang 报 {?})。
+    // 只读工具名单与模板同一份(圆括号构造走数组路——花括号初始化会把
+    // 两元素列表折成 {"read_file":"search"} 对象,nlohmann 的经典坑)。
     const ChannelAccountUserConfig expected_template = MakeQqTemplateAccount();
-    CHECK(account["tools"]["allow"] == nlohmann::json{*expected_template.tools.allow});
+    CHECK(account["tools"]["allow"] == nlohmann::json(*expected_template.tools.allow));
     CHECK(account["app_id"].get<std::string>() == "102345678");
 
     // secret_file 是受管绝对路径;JSON 里没有密钥值(测试密钥扫描)。
@@ -231,7 +231,7 @@ TEST_CASE("提交失败不毁旧配置:既有 channels 段坏,不碰文件") {
     Fixture fx("failch");
     SUBCASE("类型错") {
         WriteFile(fx.root / "config.json",
-                  R"json({"channels": {"qqbot": {"enabled": "not-a-bool"}}}})json");
+                  R"json({"channels": {"qqbot": {"enabled": "not-a-bool"}}})json");
         const auto committed = ChannelConfigService::Commit(fx.options, BaseRequest());
         REQUIRE_FALSE(committed.has_value());
         CHECK(committed.error().reason == "setup_channels_invalid");
