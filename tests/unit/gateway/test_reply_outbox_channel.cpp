@@ -59,9 +59,10 @@ TEST_CASE("拆段:短文单段;长文按 UTF-8 边界多段且不撕半个字符
         rejoined += segment;
     }
     REQUIRE(rejoined == chinese);  // 拆段无损
-    // 帽边界不落在多字节序列中间:每段末字节是字符首字节或完整字符。
+    // 帽边界不落在多字节序列中间:每段起字节是字符首字节(切点处
+    // text[end] 为 lead byte);段的完整性由无损重组背书。
     for (const auto& segment : segments) {
-        REQUIRE((static_cast<unsigned char>(segment.back()) & 0xC0) != 0x80);
+        REQUIRE((static_cast<unsigned char>(segment.front()) & 0xC0) != 0x80);
     }
 }
 

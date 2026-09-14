@@ -137,9 +137,14 @@ TEST_CASE("进程没跑任务也如实:账在但全 scheduled,execution 栏空")
 
 TEST_CASE("channel 栏:读账号状态快照/入站水位/投递错误,不带密钥与平台事件") {
     Fixture fixture("channel");
-    // channels 根与 profile 根同级(生产布局:<home>/.lubancode/{channels,gateway})。
-    const std::filesystem::path account_dir =
-        fixture.root / "channels" / "qqbot" / "main";
+    // channels 根与 gateway 根同级(生产布局:<home>/.lubancode/{channels,
+    // gateway};ProbeStatusSections 由 paths.root.parent_path() 推导)。
+    const std::filesystem::path channels_root = fixture.root.parent_path() / "channels";
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(channels_root, ec);  // 防跨轮残留
+    }
+    const std::filesystem::path account_dir = channels_root / "qqbot" / "main";
     {
         std::error_code ec;
         std::filesystem::create_directories(account_dir / "ingress", ec);

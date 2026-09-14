@@ -197,7 +197,7 @@ TEST_CASE("重复回执只结一次;旧代次回执隔离") {
     // 旧代次:受理后重启账号(代次 +1),迟到的 send 应答不结算。
     fixture.sidecar.set_send_script(FakeChannelSidecar::SendScript::Silent);
     REQUIRE_FALSE(fixture.manager->SendReply("qqbot", "main", fixture.Send("dl-s1")).has_value());
-    REQUIRE(fixture.manager->RestartAccount("qqbot", "main").has_value());
+    REQUIRE_FALSE(fixture.manager->RestartAccount("qqbot", "main").has_value());
     fixture.manager->Pump("qqbot", "main");  // 握手 + start + 迟到的 send 应答
     fixture.manager->Pump("qqbot", "main");
     for (const auto& outcome :
