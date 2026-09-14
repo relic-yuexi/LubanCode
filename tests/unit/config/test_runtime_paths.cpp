@@ -26,8 +26,11 @@
 #include <windows.h>  // SetEnvironmentVariableW:EnvGuard 的 Win32 面
 #endif
 
+#include "channel/manager.hpp"    // DefaultChannelsStateRoot:渠道状态根唯一口
+#include "channel/tool_guard.hpp"  // DefaultChannelProtectedPaths:护的树随状态根
 #include "config/config.hpp"
 #include "config/runtime_paths.hpp"
+#include "gateway/profile.hpp"    // DefaultGatewayRoot:gateway 状态根唯一口
 #include "platform/paths.hpp"
 #include "ptc/profile.hpp"
 #include "tools/search_ripgrep.hpp"
@@ -591,4 +594,101 @@ TEST_CASE("runtime_paths:ptc 画像存档留参数根,不落数据根") {
 #endif
         CHECK(lubancode::ptc::DefaultProfileStorePath().empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// P1 收尾(三):gateway run 段与渠道账号状态根接数据根(QQ Q1/Q2 并 main
+// 后补的最后一笔)。渠道状态树(ingress 账/account-status/sessions 映射/
+// work 账/pairing/锁/qq spool)与 gateway profile 树(锁/控制/boot 历史/
+// 日志/automation 账/outbox;gateway.json 与它们同树,整树随状态根)都
+// 是运行状态,归数据根;个人布局=~/.lubancode 下原样。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("runtime_paths:渠道与 gateway 状态根随状态根,个人布局原样") {
+    const auto fake_home = FreshRoot("chan-home");
+    const auto app_root = FreshRoot("chan-app");
+    const auto state_root = FreshRoot("chan-state");
+
+    // 个人模式:两棵状态树都在 <home>/.lubancode 下(旧布局,逐字节原样)。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        CHECK(Key(U8(lubancode::channel::DefaultChannelsStateRoot())) ==
+              Key(U8(fake_home / ".lubancode" / "channels")));
+        CHECK(Key(U8(lubancode::gateway::DefaultGatewayRoot())) ==
+              Key(U8(fake_home / ".lubancode" / "gateway")));
+    }
+
+    // 应用根+显式数据根:两棵树都落数据根,不沾参数根、不沾个人家目录。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+        EnvGuard luban_home("LUBANCODE_HOME", U8(app_root));
+        EnvGuard luban_data("LUBANCODE_DATA_HOME", U8(state_root));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        const auto channels = U8(lubancode::channel::DefaultChannelsStateRoot());
+        const auto gateway = U8(lubancode::gateway::DefaultGatewayRoot());
+        CHECK(Key(channels) == Key(U8(state_root / "channels")));
+        CHECK(Key(gateway) == Key(U8(state_root / "gateway")));
+        CHECK(Key(channels) != Key(U8(app_root / "channels")));
+        CHECK(Key(gateway) != Key(U8(app_root / "gateway")));
+        CHECK(channels.find(U8(fake_home)) == std::string::npos);
+        CHECK(gateway.find(U8(fake_home)) == std::string::npos);
+    }
+
+    // 坏值(空 LUBANCODE_HOME):库级无根,两棵树都拿不到路径(调用方按
+    // "无根"明报),不回落个人目录。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+        EnvGuard empty_home("LUBANCODE_HOME", "");
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        CHECK(lubancode::channel::DefaultChannelsStateRoot().empty());
+        CHECK(lubancode::gateway::DefaultGatewayRoot().empty());
+    }
+}
+
+TEST_CASE("runtime_paths:受保护路径闸的渠道状态树随状态根,config.json 留参数根") {
+    const auto fake_home = FreshRoot("guard-home");
+    const auto app_root = FreshRoot("guard-app");
+    const auto state_root = FreshRoot("guard-state");
+
+    EnvGuard home_guard("USERPROFILE", U8(fake_home));
+    EnvGuard luban_home("LUBANCODE_HOME", U8(app_root));
+    EnvGuard luban_data("LUBANCODE_DATA_HOME", U8(state_root));
+#ifndef _WIN32
+    EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+
+    const auto defaults = lubancode::channel::DefaultChannelProtectedPaths();
+    const std::string state_text = U8(state_root);
+    REQUIRE_FALSE(defaults.roots.empty());
+    REQUIRE_FALSE(defaults.files.empty());
+    // 状态件锚数据根:渠道账号状态树、rg-stage、两本信任账(P1 已把信任
+    // 账切到状态根,闸的护面跟上同一棵树)。
+    bool has_channels = false;
+    for (const std::string& root : defaults.roots) {
+        CHECK(root.find(state_text) == 0);
+        if (root.find("channels") != std::string::npos) {
+            has_channels = true;
+            CHECK(Key(root) == Key(U8(lubancode::channel::DefaultChannelsStateRoot())));
+        }
+    }
+    CHECK(has_channels);
+    bool has_global_config = false;
+    for (const std::string& file : defaults.files) {
+        if (file.find("config.json") != std::string::npos) {
+            // 全局配置是材料:锚参数根(应用根语义=参数根),不落数据根。
+            CHECK(file.find(state_text) == std::string::npos);
+            CHECK(Key(file) == Key(U8(app_root / "config.json")));
+            has_global_config = true;
+            continue;
+        }
+        CHECK(file.find(state_text) == 0);
+    }
+    CHECK(has_global_config);
 }

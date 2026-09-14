@@ -25,6 +25,14 @@ inline constexpr std::string_view kDefaultGatewayProfile = "default";
 // 且不得以 '.' 开头(防 "." ".." ".config" 这类)。
 bool IsValidGatewayProfileName(std::string_view name);
 
+// gateway 状态根:<状态根>/gateway(应用根语义下状态根即数据根,个人
+// 布局=~/.lubancode/gateway 原样)。profile 树里的锁/控制命令/boot
+// 历史/日志/automation 账/delivery(outbox/replies/published)都是运行
+// 状态;gateway.json 是用户手写档,但与它们同住一棵 profile 树,整树随
+// 状态根走不拆双根(归属裁定见合同 capability-contract.md §13.2)。无根
+// 可用(应用根变量坏/无主目录)返回空 path,调用方明报不回落个人目录。
+std::filesystem::path DefaultGatewayRoot();
+
 // 一个 profile 的全部落位(纯裁决,零 IO、零建目录)。root =
 // <home>/.lubancode/gateway;profile_dir = root/profiles/<name>。
 struct GatewayProfilePaths {

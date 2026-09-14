@@ -5,28 +5,33 @@
 
 #include <filesystem>
 
-#include "config/config.hpp"     // HomeLubancodeDir
+#include "channel/manager.hpp"   // DefaultChannelsStateRoot:渠道状态树唯一口
+#include "config/config.hpp"     // HomeLubancodeDir/StateRootDir
 #include "platform/paths.hpp"   // PathComparisonKey/Utf8ToPath/PathToUtf8
 
 namespace lubancode::channel {
 
 ChannelProtectedPaths DefaultChannelProtectedPaths() {
     ChannelProtectedPaths out;
-    const auto home = config::HomeLubancodeDir();
-    if (!home.has_value()) {
-        return out;
+    // 全局 config.json(参数根,材料):模型 API key 与渠道 secret 引用都
+    // 住这里——走 HomeLubancodeDir(应用根语义=参数根)。
+    if (const auto home = config::HomeLubancodeDir(); home.has_value()) {
+        const std::filesystem::path home_path = platform::Utf8ToPath(*home);
+        out.files.push_back(platform::PathToUtf8(home_path / "config.json"));
     }
-    const std::filesystem::path home_path = platform::Utf8ToPath(*home);
-    // 全局 config.json:模型 API key 与渠道 secret 引用都住这里。
-    out.files.push_back(platform::PathToUtf8(home_path / "config.json"));
-    // 渠道状态根:账号凭据/锁/ingress 账/pairing 记录(credentials.json.enc
-    // 首版不生成,但树整体受保护)。
-    out.roots.push_back(platform::PathToUtf8(home_path / "channels"));
-    // Package/插件信任账:改一行就能放恶意 sidecar/插件进门。
-    out.files.push_back(platform::PathToUtf8(home_path / "package-trust.json"));
-    out.files.push_back(platform::PathToUtf8(home_path / "plugin-trust.json"));
-    // rg-stage 是随包 rg 的用户级落点,防调包。
-    out.roots.push_back(platform::PathToUtf8(home_path / "rg-stage"));
+    // 以下是运行状态,随状态根走(应用根语义=数据根;个人布局状态根与
+    // 材料根同目录,护的路径与从前逐字节一致)。
+    if (const auto state = config::StateRootDir(); state.has_value()) {
+        // 渠道状态根:账号凭据/锁/ingress 账/pairing 记录(credentials.json.enc
+        // 首版不生成,但树整体受保护)。与 gateway run 装配同一棵树。
+        out.roots.push_back(platform::PathToUtf8(DefaultChannelsStateRoot()));
+        // Package/插件信任账:改一行就能放恶意 sidecar/插件进门。
+        const std::filesystem::path state_path = platform::Utf8ToPath(*state);
+        out.files.push_back(platform::PathToUtf8(state_path / "package-trust.json"));
+        out.files.push_back(platform::PathToUtf8(state_path / "plugin-trust.json"));
+        // rg-stage 是随包 rg 的用户级落点,防调包。
+        out.roots.push_back(platform::PathToUtf8(state_path / "rg-stage"));
+    }
     return out;
 }
 

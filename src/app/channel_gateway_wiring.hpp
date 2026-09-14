@@ -54,7 +54,9 @@ class ChannelGatewayWiring final : public gateway::GatewayWorkPump {
 public:
     struct Options {
         const config::Config* config = nullptr;       // 全局配置(channels 段)
-        std::filesystem::path channels_state_root;    // 默认 ~/.lubancode/channels
+        std::filesystem::path channels_state_root;    // 渠道账号状态根(装配层给;
+                                                       // =<状态根>/channels,个人布局
+                                                       // ~/.lubancode/channels 原样)
         std::string ca_pem;                           // wss 信任锚;空 = 探测平台 PEM
         std::function<std::int64_t()> now_ms;
         // 测试注入位(生产恒空):网关传输工厂与 HTTP。空 = 生产件

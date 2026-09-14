@@ -139,6 +139,9 @@ GatewayStatusSections ProbeStatusSections(const GatewayProfilePaths& paths) {
         }
     }
     // channel 栏:渠道状态根的只读投影(零建目录零写盘;根不在 = 空栏)。
+    // 生产布局里 gateway 根与 channels 根同宿主(都挂 <状态根> 下,gateway/
+    // profile.hpp 与 channel/manager.hpp 两只默认根函数同锚),由 root 的
+    // 父目录推导保持两树同级;测试注入独立根时同样各随其父。
     {
         std::error_code ec;
         const std::filesystem::path channels_root = paths.root.parent_path() / "channels";
