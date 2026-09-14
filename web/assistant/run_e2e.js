@@ -98,9 +98,9 @@ class FakeBackend {
           body: Buffer.concat(chunks).toString('utf8'),
         });
         if (this.mode === 'hold') {
-          res.setHeader('Content-Type', 'text/event-stream');
-          res.writeHead(200);
-          this.held.push(res); // 扣住:不写正文不收尾
+          // 扣住:不发头不发正文(头留到 release 时 replyTo 一次性发,
+          // 否则 Node 会报 headers already sent)。
+          this.held.push(res);
           return;
         }
         this.replyTo(res);
