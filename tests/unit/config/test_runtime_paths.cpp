@@ -50,7 +50,10 @@ struct EnvGuard {
 #ifdef _WIN32
         _putenv((std::string(name_) + "=" + value).c_str());
         // 值是 UTF-8 路径,转宽走正道,不逐字节窄转(非 ASCII 会坏)。
-        SetEnvironmentVariableW(lubancode::platform::Utf8ToWide(name).c_str(),
+        // Win32 面统一用成员 name_(构造函数里参数 name 等值,但析构函数
+        // 没有参数——上一版在 #ifdef _WIN32 块里裸写 name,macos 腿不编
+        // 这块,MSVC 编到才炸 C2065;统一走成员,两函数一个写法)。
+        SetEnvironmentVariableW(lubancode::platform::Utf8ToWide(name_).c_str(),
                                 lubancode::platform::Utf8ToWide(value).c_str());
 #else
         setenv(name_, value.c_str(), 1);
@@ -59,7 +62,7 @@ struct EnvGuard {
     ~EnvGuard() {
 #ifdef _WIN32
         _putenv((std::string(name_) + "=").c_str());
-        SetEnvironmentVariableW(lubancode::platform::Utf8ToWide(name).c_str(), nullptr);
+        SetEnvironmentVariableW(lubancode::platform::Utf8ToWide(name_).c_str(), nullptr);
 #else
         unsetenv(name_);
 #endif
