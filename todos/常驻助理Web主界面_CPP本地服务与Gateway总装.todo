@@ -1,7 +1,7 @@
 # 常驻助理 Web 主界面：C++ 本地服务与 Gateway 总装
 
 日期：2026-09-14。源码核对基线：工作区 `f4559cb1`。
-状态：设计与实施清单。W0/W1 已落（2026-09-15，PR 待补链接）：断线合同、任务归属路由、`lubancode assistant` 本地服务 + 随包网页 + 认证 + 聊天；合同文档 `docs/features/assistant-web/README.md`。W2-W5 未动。
+状态：设计与实施清单。W0/W1 已落（2026-09-15，PR #85，CI rollup success——头提交 0b7f0707 的 macos-clang/lane/changes 全绿，run 34900107040）：断线合同、任务归属路由、`lubancode assistant` 本地服务 + 随包网页 + 认证 + 聊天；合同文档 `docs/features/assistant-web/README.md`。W2-W5 未动。
 
 ## 一、目标先定清
 
