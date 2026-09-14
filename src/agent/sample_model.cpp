@@ -183,7 +183,9 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     // 拿 schema_ok 自己兜底。
     if (!request.output_schema.empty()) {
         const nlohmann::json parsed = nlohmann::json::parse(result.text, nullptr, /*allow_exceptions=*/false);
-        if (parsed.is_null()) {
+        if (parsed.is_discarded()) {
+            // 解析失败在 allow_exceptions=false 下回的是 discarded 值,不是
+            // null——字面 "null" 正文是合法 JSON,得交给 schema 按 type 去拒。
             result.schema_ok = false;
             result.schema_error = "采样正文不是合法 JSON";
         } else if (const auto schema_error = tools::ValidateInputAgainstSchema(parsed, request.output_schema);

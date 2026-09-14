@@ -138,6 +138,7 @@ ModelRouterService::SampleOutcome ModelRouterService::Sample(lubancode::agent::T
     sample.system = call.system;
     sample.messages = call.messages;
     sample.max_tokens = call.max_tokens;
+    sample.output_schema = call.output_schema;  // 本地复检用,不上 wire(P1-A)
     sample.reasoning_effort = outcome.route.effort;
     outcome.result = lubancode::agent::SampleModel(*outcome.backend, sample, options);
     // 记账:角色按默认映射;采样成没成都记(旧口径:调用点先记账再判错)。

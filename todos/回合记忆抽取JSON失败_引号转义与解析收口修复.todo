@@ -1,6 +1,6 @@
 # 回合记忆抽取 JSON 失败：引号转义、解析收口与失败诊断
 
-- 状态：待实施；已查源码、已用项目 JSON 库跑最小复现。
+- 状态：P0-A/P0-B/P1-A 已落地（PR 见下方"落地记录"）；P1-B 评估后暂缓，默认不开；事故原始响应仍缺（未核实标记见 P0-A 首条）。
 - 日期：2026-09-14
 - 级别：P1；字段类型异常越过抽取失败边界，须优先补齐。
 - 范围：memory 抽取提示、解析、采样结果收口、错误显示、旁路诊断与测试。
@@ -117,34 +117,53 @@ last read: '"用户问"�'; expected '}'
 
 ### P0-A：补事故证据与安全诊断
 
-- [ ] 若对应 V3 旁路轨迹仍在，按 purpose=memory_extract 定位 request/output，核对模型、wire、版本、stop_reason、usage 与原文；缺失就如实标注。
-- [ ] 定义结构化抽取错误：syntax_invalid、utf8_invalid、schema_invalid、output_truncated、empty_output、transport_failed；兼容旧 parse_failed 消费方。
-- [ ] 诊断记录关联请求 ID、正文总字节数、错误字节偏移、UTF-8 校验结果与结束原因；区分截取片段偏移和原文偏移。
-- [ ] 终端只显示短错误与定位号；不直接透传含 last read 的库异常。确需查原文时复用受控轨迹，不新建默认明文转储。
-- [ ] 将本单最小复现纳入回归夹具。UTF-8 输出诊断须合法；不得把密钥或整段聊天塞进错误账。
+- [x] 若对应 V3 旁路轨迹仍在，按 purpose=memory_extract 定位 request/output，核对模型、wire、版本、stop_reason、usage 与原文；缺失就如实标注。
+  ——**未核实**：本单没有事故现场的 V3 旁路轨迹文件（日志未附会话目录），原始响应、实际 wire 请求、stop_reason、运行版本仍缺。诊断结构（ExtractionError.request_id/stop_reason/body_bytes）已就位，轨迹在场时这些字段可回查。
+- [x] 定义结构化抽取错误：syntax_invalid、utf8_invalid、schema_invalid、output_truncated、empty_output、transport_failed；兼容旧 parse_failed 消费方。
+  ——`src/app/memory_extract.hpp` 的 `ExtractionErrorCode` 七枚（六类 + route_miss）+ `ExtractionErrorCodeName`；`StableExtractErrorCode(const ExtractionError&)` 出新码，旧 `StableExtractErrorCode(const std::string&)` 保留（parse_failed = syntax/utf8/schema 三类旧统称，注释与测试钉了映射）。
+- [x] 诊断记录关联请求 ID、正文总字节数、错误字节偏移、UTF-8 校验结果与结束原因；区分截取片段偏移和原文偏移。
+  ——`ExtractionError` 五字段齐；语法错偏移按"截取段偏移 + 段首原文偏移"换算回原文偏移（memory_extract.cpp 的 parse catch，`begin + e.byte`）。
+- [x] 终端只显示短错误与定位号；不直接透传含 last read 的库异常。确需查原文时复用受控轨迹，不新建默认明文转储。
+  ——memory_commands.cpp 的失败分支只打 `extraction.error().message`（短文案 + 字节偏移/总字节）；测试断言 message 不含 "last read" / "json.exception"。
+- [x] 将本单最小复现纳入回归夹具。UTF-8 输出诊断须合法；不得把密钥或整段聊天塞进错误账。
+  ——test_memory_extract.cpp 的"本单事故形态"用例（原文复刻 §三输入）；"诊断文案自身是合法 UTF-8"用例跑 `platform::IsValidUtf8(message)`。
 
 验收：能分清“输入字节坏了”和“合法中文落在 JSON 字符串外”；没有原文时给出待核实结论。
+——达成：utf8_invalid/syntax_invalid 分类测试两行分开钉死；事故原文待核实已在上方如实标注。
 
 ### P0-B：收住解析与字段异常
 
-- [ ] 先校验完整响应 UTF-8，再按明确规则处理纯 JSON 或单层围栏；保留已有无歧义前后说明兼容须写明规则并加用例。
-- [ ] 替换首 `{` / 末 `}` 的盲截法；字符串转义、嵌套、多个对象都要有确定结果。
-- [ ] 定义字段合同：顶层必须 object；summary 等字符串字段显式检查；缺必填字段、null、数字、数组须返回字段路径。
-- [ ] 明确候选字段出错策略：结构类型错拒绝整次抽取；无效业务候选可沿既有规则跳过，禁止静默类型转换。
-- [ ] 覆盖整段 JSON 解码与字段提取的 nlohmann 异常边界，向上返回 expected 错误。
-- [ ] FinishMemoryExtraction 检查已知截断结束原因；未知/缺失结束原因单列诊断，不仅凭空值判失败或判完整。
+- [x] 先校验完整响应 UTF-8，再按明确规则处理纯 JSON 或单层围栏；保留已有无歧义前后说明兼容须写明规则并加用例。
+  ——ParseExtractionJson 第 1 步 `FirstInvalidUtf8Offset` 整段预检；包装规则（纯 JSON / 单层围栏 / 前后说明）写进函数头注释与"包装规则"测试用例；前后说明的放行规则钉死：前导与尾巴均不得含结构字符 `{`/`[`。
+- [x] 替换首 `{` / 末 `}` 的盲截法；字符串转义、嵌套、多个对象都要有确定结果。
+  ——字符串感知配对扫描 `MatchBrace`（字符串内 `{}`/`"`/转义全跳过）+ 单层围栏剥离 `StripSingleFence`（嵌套/多围栏/围栏外还有话一律不剥）；多对象、半截对象（外层截断但内层已有 `}`）、字符串内花括号均有测试用例。
+- [x] 定义字段合同：顶层必须 object；summary 等字符串字段显式检查；缺必填字段、null、数字、数组须返回字段路径。
+  ——task_type/summary 必填 string（summary 非空）；`ContractString` 显式判型，错误带 `field_path`（如 `candidates[0].title`）；`{}` 拒、顶层数组拒。
+- [x] 明确候选字段出错策略：结构类型错拒绝整次抽取；无效业务候选可沿既有规则跳过，禁止静默类型转换。
+  ——候选条目非 object、kind/title/summary/content/confidence/occurred_at/keywords/paths 类型错 → 拒整次带路径；kind 枚举外/title 空/content 空/超预算 → 跳过该条；confidence 枚举外清洗成 inferred（不再冒充高置信）。
+- [x] 覆盖整段 JSON 解码与字段提取的 nlohmann 异常边界，向上返回 expected 错误。
+  ——parse 的 parse_error/json::exception 双层 catch（只记 exception id，不带 e.what()）；字段提取整段包 catch 收进 schema_invalid——`value()` 旧路全部换成 `contains + at + is_string`，§三复现的 type_error.302 不再有触发面。
+- [x] FinishMemoryExtraction 检查已知截断结束原因；未知/缺失结束原因单列诊断，不仅凭空值判失败或判完整。
+  ——`IsTruncationStopReason`（max_tokens/length/max_output_tokens，小写化比对）→ output_truncated；未知值与空 stop_reason 照走解析，诊断字段 `stop_reason` 单列原值（测试两行钉死）。
 
 验收：坏 JSON、错字段和半截输出只让本轮抽取失败；不会越界抛出，也不会新增候选/job。
+——达成：test_memory_dispatch_ledger.cpp 的"抽取收口 e2e"三幕（坏 JSON/截断/流内错）断言主回合历史不动、候选区空、零重试。
 
 ### P1-A：压低格式出错率
 
-- [ ] 给基础提示补一份真正可输出的短样例，展示双引号、Windows 反斜杠、换行转义及 candidates=[]。
-- [ ] 统一两条入口：RunMemoryExtraction 与 ModelRouterService 调用链使用同一字段合同和收口函数。
-- [ ] 如复用 SampleRequest.output_schema，先补 SampleCall 透传和 schema_ok 消费；检查公共本地校验对 discarded JSON 的处理，不能只用 is_null 判断 parse 失败。
-- [ ] 核对请求输出上限与最终 wire 上限。增加候选正文预算，先减冗长输出；不要无证据扩大默认上限。
-- [ ] provider 结构化输出另按实际 wire 能力接入。能用才用，不支持则保留本地校验；仅设置 output_schema 不算已接通。
+- [x] 给基础提示补一份真正可输出的短样例，展示双引号、Windows 反斜杠、换行转义及 candidates=[]。
+  ——`src/prompts/features/memory-summary-base.md` 新增"字符转义"节：样例本身是合法 JSON（`\"`、`D:\\repo\\src\\app`、`\n`、`candidates":[]`）；顺带写明中文引号不必转义、content ≤1500 字。
+- [x] 统一两条入口：RunMemoryExtraction 与 ModelRouterService 调用链使用同一字段合同和收口函数。
+  ——两条入口都设 `MemoryExtractionOutputSchema()`、都收口在 `FinishMemoryExtraction`（memory_commands.cpp 的 SampleCall.output_schema + RunMemoryExtraction 的 sample.output_schema）。
+- [x] 如复用 SampleRequest.output_schema，先补 SampleCall 透传和 schema_ok 消费；检查公共本地校验对 discarded JSON 的处理，不能只用 is_null 判断 parse 失败。
+  ——`SampleCall.output_schema` 透传进 `ModelRouterService::Sample`（test_model_router.cpp 有透传断言）；sample_model.cpp 复检改 `is_discarded()` 判 parse 失败，字面 `null` 交给 schema 按 type 拒（test_sample_model.cpp 新用例钉死）；schema_ok=false 时错误诊断并进 `ExtractionError.schema_check_error`。
+- [x] 核对请求输出上限与最终 wire 上限。增加候选正文预算，先减冗长输出；不要无证据扩大默认上限。
+  ——max_tokens=1500 两处调用点原样保留（不无证据扩大）；本路未启用 enforce_output_limit——事故实际出站上限因原文缺失无法核实，待 P0-A 首条的轨迹回查。候选正文预算 `kMaxCandidateContentBytes`（8 KiB，与写路 kMaxTopicBytes 对齐）+ 提示端 1500 字；超预算候选整条跳过（不截断、不静默改写）。
+- [x] provider 结构化输出另按实际 wire 能力接入。能用才用，不支持则保留本地校验；仅设置 output_schema 不算已接通。
+  ——**未接通（按单子口径如实标注）**：api::Request 没有 output_schema 字段（四家协议各异，批六 API 合流再议），本单只做本地复检，provider 侧约束未接。
 
 验收：两条入口对同一文本给出同一结果；本地 schema 校验、provider 约束、最终字段验证各自有证据。
+——两条入口同一收口函数达成；本地 schema 校验与最终字段验证各有测试；provider 约束这层未验证（见上）。
 
 ### P1-B：可选、有预算的格式重试
 
@@ -153,7 +172,8 @@ last read: '"用户问"�'; expected '}'
 - [ ] 原始响应若带入重试，只能当待校验数据；生成结果重新过全部字段与写入闸门。
 - [ ] 两发请求分别记 usage/耗时，记录最终是否采用；最终失败照常跳过，不称已修复。
 
-验收：第一次坏、第二次好只产生一组候选；连续失败不循环，不漏账，不拖成无限等待。
+**P1-B 评估意见（2026-09-14，P0-A/P0-B/P1-A 落地后）：默认不开，暂缓实施。**
+理由：① P0-B 把失败收成六类稳定错误后，格式失败只损失本轮总结，不伤主回合、不丢账，重试的边际收益小；② P1-A 的转义样例 + 字段合同 + schema 复检三道闸先压出错率，效果没有真机数据前加重试是双倍成本拍脑袋；③ 事故原文与真实出错率（§一）未取得，无法估重试命中率，先攒 error_code 账（trajectory 的 memory.extraction.assessed 已带 syntax_invalid/utf8_invalid/schema_invalid 分类）再评估有据；④ 若日后启用，钩子位就留在 memory_commands.cpp 失败分支——ExtractionError 的 code 已能精确筛"仅格式错"（syntax/utf8/schema 三类，transport/cancel 不触发），usage 分笔记账路（BackgroundCallAccounting/ledger）现成，两发各记各账的合同可直接落。等真实 error_code 分布出来再立小单。
 
 ## 六、测试与收官证据
 
@@ -181,3 +201,17 @@ last read: '"用户问"�'; expected '}'
 - 已查当前源码与现有测试，独立 C++ 探针复现同款 parse_error 和字段 type_error。
 - 只新增这份 TODO；未修改生产代码，未跑全仓测试，未调用真实模型。
 - 事故原始响应仍缺；具体是哪一个引号或字节出错，待按 P0-A 核实。
+
+## 八、落地记录（P0-A/P0-B/P1-A，2026-09-14）
+
+- 分支 `worktree-agent-memory-json`，基线 origin/main @ 7f195c50。
+- 改动面：
+  - `src/app/memory_extract.hpp/.cpp`：ExtractionError/ExtractionErrorCode（七枚）、MemoryExtractionOutputSchema、kMaxCandidateContentBytes、解析器三步收口（UTF-8 预检 → 包装规则 → 严格 parse + 字段合同）、FinishMemoryExtraction 六类分诊、StableExtractErrorCode 双版。
+  - `src/agent/sample_model.cpp`：output_schema 复检改 `is_discarded()` 判 parse 失败（字面 `null` 交 schema 按 type 拒）。
+  - `src/app/model_router.hpp/.cpp`：SampleCall.output_schema 透传（本地复检，不上 wire）。
+  - `src/app/commands/memory_commands.cpp`：SampleCall 带 schema、RouteMiss 结构化、终端短文案、新稳定码。
+  - `src/prompts/features/memory-summary-base.md`："字符转义"节 + 可输出样例 + content 预算。
+  - `tests/manual/locomo_retrieval_driver.cpp`：适配新错误类型（.message）。
+- 测试：`tests/unit/memory/test_memory_extract.cpp`（§六 八行表的纯函数层）、`tests/unit/memory/test_memory_dispatch_ledger.cpp`（回合尾三幕 e2e：坏 JSON/截断/流内错）、`tests/unit/agent/test_sample_model.cpp`（discarded 判定）、`tests/unit/memory/test_model_router.cpp`（schema 透传）。
+- §六 三层证据：①纯函数回归 ✓；②fake backend 到回合尾集成 ✓；③真实 provider 验证 **未跑**（无事故原文、未调真模型）——有效输出上限、真实 stop_reason、失败类别分布均未验证，不冒充。
+- P1-B：评估意见见上节，默认不开。

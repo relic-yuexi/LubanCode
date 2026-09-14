@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "agent/model_router.hpp"
 #include "app/model_router.hpp"
 #include "app/session_title.hpp"
@@ -447,4 +449,60 @@ TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 cl
         auto detached = ghost_service.RouteDetached(TaskKind::Microcompact);
         CHECK(detached.backend == nullptr);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 记忆抽取 JSON 收口修复单 P1-A:SampleCall.output_schema 透传——设了 schema
+// 的调用经 ModelRouterService::Sample 一站,复检账(schema_ok/schema_error)
+// 真落回调用方手里;不设 schema 的旧行为一字不差。
+// ---------------------------------------------------------------------------
+TEST_CASE("ModelRouterService::Sample: SampleCall 透传 output_schema 到本地复检") {
+    using lubancode::app::ModelRouterService;
+    // 回坏 JSON 的假 backend:复检路只有 schema 真透传了才会翻 schema_ok。
+    struct BadJsonBackend final : public lubancode::api::Backend {
+        int calls = 0;
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+            const std::atomic<bool>*) override {
+            ++calls;
+            on_event(lubancode::api::TextDelta{"不是 JSON 的白话"});
+            on_event(lubancode::api::ContentBlockDone{0});
+            on_event(lubancode::api::MessageDone{"end_turn", lubancode::api::Usage{}});
+            return {};
+        }
+    };
+    BadJsonBackend backend;
+    auto current_model = std::make_shared<std::string>("session-model");
+    std::string active_provider = "local";
+    const auto result = MergeFromJson(R"({
+        "providers": [{"name": "local", "base_url": "http://localhost:1", "wire": "anthropic", "model": "n1"}],
+        "active_provider": "local"
+    })");
+    ModelRouterService service(result, backend, current_model, active_provider);
+
+    ModelRouterService::SampleCall call;
+    call.system = "指令";
+    lubancode::api::Message message;
+    message.role = lubancode::api::Role::User;
+    message.content.push_back(lubancode::api::TextBlock{"材料"});
+    call.messages.push_back(std::move(message));
+    call.max_tokens = 64;
+
+    // 不设 schema:复检恒过(旧口径)。
+    const auto plain = service.Sample(TaskKind::MemoryExtract, call);
+    REQUIRE(plain.backend != nullptr);
+    REQUIRE(plain.result.ok);
+    CHECK(plain.result.schema_ok);
+    CHECK(plain.recorded);
+
+    // 设 schema:坏正文翻 schema_ok,错误文案带回——证明 schema 传到了
+    // SampleModel 的本地复检。
+    call.output_schema = nlohmann::json{{"type", "object"}};
+    const auto checked = service.Sample(TaskKind::MemoryExtract, call);
+    REQUIRE(checked.backend != nullptr);
+    REQUIRE(checked.result.ok);  // 采样成了,复检只标记
+    CHECK_FALSE(checked.result.schema_ok);
+    CHECK(checked.result.schema_error.find("合法 JSON") != std::string::npos);
+    CHECK(backend.calls == 2);  // 两发都真到了 backend
 }

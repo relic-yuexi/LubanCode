@@ -898,6 +898,141 @@ TEST_CASE("P1 e2e: ExtractTurnMemory 的同轮去重与必跳层") {
 }
 
 // ---------------------------------------------------------------------------
+// 抽取收口修复单(P0-A/P0-B)回合尾 e2e:坏 JSON/截断/流内错三幕——主回合
+// 回答与历史不动、候选/直写一票不入、失败账(error_code/usage)如实落
+// trajectory,只发一发抽取、零重试。
+// ---------------------------------------------------------------------------
+class ScriptedExtractBackend final : public api::Backend {
+public:
+    int calls = 0;
+    std::string main_reply = "主回合的回答:判空补上了,回归全绿。";
+    // 本单事故形态:summary 里混未转义双引号,字符串提前结束。
+    std::string extract_reply = R"({"task_type":"code","summary":"用户问"问题"","candidates":[]})";
+    std::string extract_stop_reason = "end_turn";
+    bool extract_stream_error = false;
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request&,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>*) override {
+        ++calls;
+        const bool is_extract = calls >= 2;  // 第一枪主回合,其后是回合尾抽取
+        if (is_extract && extract_stream_error) {
+            on_event(api::StreamError{"流内业务错"});
+            return {};
+        }
+        on_event(api::MessageStart{"msg", "test-model"});
+        on_event(api::TextDelta{is_extract ? extract_reply : main_reply});
+        on_event(api::ContentBlockDone{0});
+        api::MessageDone done;
+        done.stop_reason = is_extract ? extract_stop_reason : "end_turn";
+        if (is_extract) {
+            done.usage.input_tokens = 21;
+            done.usage.output_tokens = 9;
+        }
+        on_event(done);
+        return {};
+    }
+};
+
+TEST_CASE("抽取收口 e2e: 坏 JSON/截断/流内错的回合尾账,主回合保全") {
+    const fs::path root = TempRoot("e2e-extract-json");
+
+    ScriptedExtractBackend backend;
+    auto current_model = std::make_shared<std::string>("test-model");
+    std::string active_provider = "local";
+    const auto config = RouterConfig();
+    app::ModelRouterService router(config, backend, current_model, active_provider);
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    FakeTurn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) {
+        return true;
+    };
+    const cli::Theme theme;
+    std::string prompts_dir;
+    const std::string text = "修复 router.cpp 的空指针崩溃,把判空补上,回归测试全绿";
+
+    // 一幕一只 trajectory 会话 + 一只账本:跑主回合与回合尾抽取,把 assessed
+    // 事件的稳定码与 usage 带回来。
+    struct Outcome {
+        std::string error_code;
+        bool usage_reported = false;
+        std::int64_t input_tokens = 0;
+        std::int64_t output_tokens = 0;
+    };
+    const auto run_turn = [&](const fs::path& sub_root, const char* turn_id) -> Outcome {
+        runtime::TrajectorySessionLedger::Options ledger_options;
+        ledger_options.workspaces_root = sub_root / "workspaces";
+        ledger_options.workspace_root = sub_root / "repo";
+        ledger_options.workspace_identity = workspace::MakeFallbackIdentity(sub_root / "repo");
+        ledger_options.lubancode_version = "test";
+        auto session = runtime::TrajectorySessionLedger::Open(ledger_options);
+        REQUIRE(session.has_value());
+        app::MemoryTurnLedger ledger(&*session);
+        auto store = MakeMemory(sub_root, &ledger);
+        ledger.BeginTurn(session->session_id(), turn_id, text);
+        const auto run = loop.Run(text, wiring);
+        REQUIRE(run.has_value());
+        const int main_calls = backend.calls;
+        REQUIRE(main_calls == 1);
+        const std::size_t history_after_main = loop.History().size();
+        REQUIRE(history_after_main >= 2);  // 主回合的回答已进历史
+
+        app::SessionTailContext tail;
+        tail.project_memory = store.get();
+        tail.agent = &loop;
+        tail.model_router = &router;
+        tail.prompts_dir = &prompts_dir;
+        tail.theme = &theme;
+        tail.memory_turns = &ledger;
+        app::ExtractTurnMemory(tail, text, /*history_before=*/0);
+
+        // 主回合的账一分不动:历史不减、候选区空、只多发一发抽取、零重试。
+        CHECK(backend.calls == main_calls + 1);
+        CHECK(loop.History().size() == history_after_main);
+        CHECK(store->ListCandidates().empty());
+        CHECK(ledger.funnel().extract_failures == 1);
+        ledger.FinishTurn(6);
+
+        Outcome outcome;
+        const auto assessed =
+            EventsOfKind(session->session_dir() / "main.jsonl", "memory.extraction.assessed");
+        REQUIRE(assessed.size() == 1);
+        const auto& payload = assessed[0]["payload"];
+        CHECK(payload.value("extract_outcome", std::string()) == "failed");
+        outcome.error_code = payload.value("error_code", std::string());
+        outcome.usage_reported = payload.value("usage_reported", false);
+        outcome.input_tokens = payload.value("input_tokens", std::int64_t{0});
+        outcome.output_tokens = payload.value("output_tokens", std::int64_t{0});
+        return outcome;
+    };
+
+    SUBCASE("坏 JSON:syntax_invalid 落账,失败请求的 usage 照记") {
+        const auto outcome = run_turn(root / "badjson", "turn-json-bad");
+        CHECK(outcome.error_code == "syntax_invalid");
+        CHECK(outcome.usage_reported);  // 失败请求照记 usage(合同 6)
+        CHECK(outcome.input_tokens == 21);
+        CHECK(outcome.output_tokens == 9);
+    }
+    SUBCASE("max_tokens 截断:output_truncated,碰巧合法的 JSON 也不采") {
+        backend.extract_stop_reason = "max_tokens";
+        backend.extract_reply = R"({"task_type":"code","summary":"碰巧完整","candidates":[]})";
+        const auto outcome = run_turn(root / "trunc", "turn-json-trunc");
+        CHECK(outcome.error_code == "output_truncated");
+    }
+    SUBCASE("流内错:transport_failed,半截流不冒充完整") {
+        backend.extract_stream_error = true;
+        const auto outcome = run_turn(root / "streamerr", "turn-json-stream");
+        CHECK(outcome.error_code == "transport_failed");
+        CHECK_FALSE(outcome.usage_reported);  // 没报 usage 就不拿 0 冒充
+    }
+}
+
+// ---------------------------------------------------------------------------
 // P1 schema:shadow_gate 的内洽裁——自相矛盾的行不许过(漏判账靠它复算)。
 // ---------------------------------------------------------------------------
 TEST_CASE("schema: shadow_gate 内洽裁与互斥约束") {

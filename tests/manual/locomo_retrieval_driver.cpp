@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
                         extracted = true;
                     } else {
                         ++extract_usage.failures;
-                        extract_error = result.error();
+                        extract_error = result.error().message;
                     }
                     extract_usage.input_tokens += accounting.usage.input_tokens;
                     extract_usage.output_tokens += accounting.usage.output_tokens;

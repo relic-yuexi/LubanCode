@@ -5,7 +5,10 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "app/memory_extract.hpp"
+#include "platform/text_encoding.hpp"
 
 using namespace lubancode;
 
@@ -164,4 +167,348 @@ TEST_CASE("BuildExtractionSystemPrompt: 基础契约 + 分型侧重") {
     // 认不出的分型落 other 模块;提示词非空。
     CHECK_FALSE(app::BuildExtractionSystemPrompt("", "nonsense").empty());
     CHECK(app::BuildExtractionSystemPrompt("", "other").find("不属于") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 回合记忆抽取 JSON 收口修复单(P0-A/P0-B/P1-A):结构化错误、解析收口、
+// 字段合同、结束原因分类。八行场景表的纯函数层全在这。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("错误码枚举名钉死 + 稳定码:结构化新码与旧文案路各记各账") {
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::SyntaxInvalid)) ==
+          "syntax_invalid");
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::Utf8Invalid)) == "utf8_invalid");
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::SchemaInvalid)) ==
+          "schema_invalid");
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::OutputTruncated)) ==
+          "output_truncated");
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::EmptyOutput)) == "empty_output");
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::TransportFailed)) ==
+          "transport_failed");
+    CHECK(std::string(app::ExtractionErrorCodeName(app::ExtractionErrorCode::RouteMiss)) == "route_miss");
+
+    // 结构化版:六类 + route_miss。
+    CHECK(app::StableExtractErrorCode(app::ExtractionError{.code = app::ExtractionErrorCode::Utf8Invalid}) ==
+          "utf8_invalid");
+    CHECK(app::StableExtractErrorCode(app::ExtractionError{.code = app::ExtractionErrorCode::RouteMiss}) ==
+          "route_miss");
+
+    // 旧文案版保留:固定前缀折旧码(parse_failed 是 syntax/utf8/schema 三类
+    // 的旧统称),旧账离线对账继续可用。
+    CHECK(app::StableExtractErrorCode("cheap 路由找不到 provider \"kimi\"") == "route_miss");
+    CHECK(app::StableExtractErrorCode("抽取输出为空") == "empty_output");
+    CHECK(app::StableExtractErrorCode("抽取输出不是合法 JSON: ...") == "parse_failed");
+    CHECK(app::StableExtractErrorCode("网络炸了") == "other");
+}
+
+TEST_CASE("ParseExtractionJson: 本单事故形态——未转义双引号,语法错定位") {
+    // summary 里混入未转义双引号:字符串提前结束,后续汉字落到字符串外。
+    const std::string incident =
+        R"({"task_type":"code","summary":"用户问"问题"","candidates":[]})";
+    const auto broken = app::ParseExtractionJson(incident);
+    REQUIRE_FALSE(broken.has_value());
+    CHECK(broken.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+    // 定位号:错误字节偏移落在原文内(截取偏移换算回原文偏移)。
+    CHECK(broken.error().error_offset != app::kExtractionNoOffset);
+    CHECK(broken.error().error_offset < incident.size());
+    // 输入是合法 UTF-8:这不是编码病,是合法中文落在 JSON 字符串外。
+    CHECK(broken.error().utf8_valid);
+    // 终端短文案:不带库异常原文(last read 可能含半个多字节字符)。
+    CHECK(broken.error().message.find("last read") == std::string::npos);
+    CHECK(broken.error().message.find("json.exception") == std::string::npos);
+    // 稳定码:结构化路记 syntax_invalid,旧文案路记 parse_failed(同范畴)。
+    CHECK(app::StableExtractErrorCode(broken.error()) == "syntax_invalid");
+    CHECK(app::StableExtractErrorCode(broken.error().message) == "parse_failed");
+}
+
+TEST_CASE("ParseExtractionJson: 合法内容完整保留(转义引号/中文引号/emoji/路径/换行)") {
+    const std::string text =
+        R"({"task_type":"code","summary":"用户说\"回退链\"没配好:D:\\repo\\src\\app\\router.cpp 报错\n修好了","retrieval_terms":["回退链😀","router"],"candidates":[])"
+        R"()";
+    const auto parsed = app::ParseExtractionJson(text);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->summary == "用户说\"回退链\"没配好:D:\\repo\\src\\app\\router.cpp 报错\n修好了");
+    REQUIRE(parsed->retrieval_terms.size() == 2);
+    CHECK(parsed->retrieval_terms[0] == "回退链😀");
+
+    // 中文引号与全角标点不是 JSON 语法字符,原样保留;候选字段完整带出。
+    const std::string with_candidate =
+        R"({"task_type":"docs","summary":"改了“安装”一节","candidates":[)"
+        R"({"kind":"preference","title":"文档用中文引号“”","summary":"一行","content":"正文含“引号”。",)"
+        R"("confidence":"user-stated"}]})";
+    const auto carried = app::ParseExtractionJson(with_candidate);
+    REQUIRE(carried.has_value());
+    REQUIRE(carried->candidates.size() == 1);
+    CHECK(carried->candidates[0].title == "文档用中文引号“”");
+    CHECK(carried->candidates[0].confidence == "user-stated");
+}
+
+TEST_CASE("ParseExtractionJson: 漏逗号与全角标点落语法位置——syntax_invalid") {
+    // 漏逗号。
+    const auto missing_comma =
+        app::ParseExtractionJson(R"({"task_type":"code" "summary":"s"})");
+    REQUIRE_FALSE(missing_comma.has_value());
+    CHECK(missing_comma.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+
+    // 全角冒号/全角逗号落在语法位置:语法错,不是字段错。
+    const auto full_width =
+        app::ParseExtractionJson("{\n\"task_type\"：\"code\"，\"summary\":\"s\"\n}");
+    REQUIRE_FALSE(full_width.has_value());
+    CHECK(full_width.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+    CHECK(full_width.error().error_offset != app::kExtractionNoOffset);
+}
+
+TEST_CASE("ParseExtractionJson: 残缺 UTF-8 与合法 UTF-8 语法错分类不同") {
+    // 真残缺 UTF-8:半截三字节序列(E4 B8 尾字节)。
+    const std::string broken_utf8 = "{\"task_type\":\"code\",\"summary\":\"半截\xE4\xB8";
+    const auto utf8_broken = app::ParseExtractionJson(broken_utf8);
+    REQUIRE_FALSE(utf8_broken.has_value());
+    CHECK(utf8_broken.error().code == app::ExtractionErrorCode::Utf8Invalid);
+    CHECK_FALSE(utf8_broken.error().utf8_valid);
+    CHECK(utf8_broken.error().error_offset != app::kExtractionNoOffset);
+    CHECK(utf8_broken.error().error_offset < broken_utf8.size());
+    CHECK(app::StableExtractErrorCode(utf8_broken.error()) == "utf8_invalid");
+
+    // 合法 UTF-8 的语法错(事故原文形态):syntax_invalid,不是编码病。
+    const auto syntax =
+        app::ParseExtractionJson(R"({"task_type":"code","summary":"用户问"问题""})");
+    REQUIRE_FALSE(syntax.has_value());
+    CHECK(syntax.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+    CHECK(syntax.error().utf8_valid);
+}
+
+TEST_CASE("ParseExtractionJson: 字段合同——缺必填/类型错返回字段路径,不抛出") {
+    // {} :缺必填 task_type(旧法靠默认值掩过去,新合同拒绝)。
+    const auto empty = app::ParseExtractionJson("{}");
+    REQUIRE_FALSE(empty.has_value());
+    CHECK(empty.error().code == app::ExtractionErrorCode::SchemaInvalid);
+    CHECK(empty.error().field_path == "task_type");
+
+    // 缺 summary。
+    const auto no_summary = app::ParseExtractionJson(R"({"task_type":"code"})");
+    REQUIRE_FALSE(no_summary.has_value());
+    CHECK(no_summary.error().field_path == "summary");
+
+    // summary null/数字/数组/对象:显式判型,不再 value() 抛 type_error.302。
+    const std::vector<std::string> wrong_summaries = {
+        R"({"task_type":"code","summary":null})",
+        R"({"task_type":"code","summary":42})",
+        R"({"task_type":"code","summary":["a"]})",
+        R"({"task_type":"code","summary":{"a":1}})",
+    };
+    for (const std::string& bad_summary : wrong_summaries) {
+        const auto wrong = app::ParseExtractionJson(bad_summary);
+        REQUIRE_FALSE(wrong.has_value());
+        CHECK(wrong.error().code == app::ExtractionErrorCode::SchemaInvalid);
+        CHECK(wrong.error().field_path == "summary");
+    }
+
+    // 顶层数组:parse 得动,按"顶层必须 object"的合同拒。
+    const auto top_array =
+        app::ParseExtractionJson(R"([{"task_type":"code","summary":"s"}])");
+    REQUIRE_FALSE(top_array.has_value());
+    CHECK(top_array.error().code == app::ExtractionErrorCode::SchemaInvalid);
+
+    // candidates 字段类型错(对象顶数组):拒整次,带路径。
+    const auto candidates_object = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":{"kind":"fact"}})");
+    REQUIRE_FALSE(candidates_object.has_value());
+    CHECK(candidates_object.error().field_path == "candidates");
+
+    // 候选条目非 object:结构类型错拒整次。
+    const auto item_not_object = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":["fact"]})");
+    REQUIRE_FALSE(item_not_object.has_value());
+    CHECK(item_not_object.error().code == app::ExtractionErrorCode::SchemaInvalid);
+    CHECK(item_not_object.error().field_path == "candidates[0]");
+
+    // 候选字段类型错(title 数字、kind 数字、keywords 非数组):拒整次带路径。
+    const auto title_number = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":[{"kind":"fact","title":7,"content":"c"}]})");
+    REQUIRE_FALSE(title_number.has_value());
+    CHECK(title_number.error().field_path == "candidates[0].title");
+
+    const auto kind_number = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":[{"kind":1,"title":"t","content":"c"}]})");
+    REQUIRE_FALSE(kind_number.has_value());
+    CHECK(kind_number.error().field_path == "candidates[0].kind");
+
+    const auto keywords_object = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":[{"kind":"fact","title":"t","content":"c","keywords":{"k":"v"}}]})");
+    REQUIRE_FALSE(keywords_object.has_value());
+    CHECK(keywords_object.error().field_path == "candidates[0].keywords");
+
+    // 无效业务候选:kind 枚举外、title/content 空——跳过该条,不拒整次。
+    const auto skipping = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":[)"
+        R"({"kind":"bogus","title":"t","content":"c"},)"
+        R"({"kind":"fact","title":"","content":"c"},)"
+        R"({"kind":"fact","title":"好候选","content":"正文"}]})");
+    REQUIRE(skipping.has_value());
+    REQUIRE(skipping->candidates.size() == 1);
+    CHECK(skipping->candidates[0].title == "好候选");
+
+    // confidence 枚举外值清洗成 inferred,不冒充高置信。
+    const auto confidence = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":[{"kind":"fact","title":"t","content":"c","confidence":"high"}]})");
+    REQUIRE(confidence.has_value());
+    REQUIRE(confidence->candidates.size() == 1);
+    CHECK(confidence->candidates[0].confidence == "inferred");
+
+    // 候选正文预算:超 8 KiB 的 content 整条跳过,不截断不拒整次。
+    const std::string huge_content(app::kMaxCandidateContentBytes + 1, 'x');
+    const std::string over_budget_json =
+        std::string(R"({"task_type":"code","summary":"s","candidates":[)") +
+        std::string(R"({"kind":"fact","title":"t","content":")") + huge_content + "\"}]}";
+    const auto over_budget = app::ParseExtractionJson(over_budget_json);
+    REQUIRE(over_budget.has_value());
+    CHECK(over_budget->candidates.empty());
+}
+
+TEST_CASE("ParseExtractionJson: 包装规则——围栏/说明/花括号/多对象/半截各归其位") {
+    const std::string good = R"({"task_type":"code","summary":"修了崩溃","retrieval_terms":[],"candidates":[]})";
+
+    // 字符串内花括号 + 前后说明:配对扫描跳过字符串内的 {,取到真正的 }。
+    const auto braces_in_string = app::ParseExtractionJson(
+        "总结如下:\n" +
+        std::string(R"({"task_type":"code","summary":"配置模板是 {braces} 对","candidates":[]})") + "\n以上。");
+    REQUIRE(braces_in_string.has_value());
+    CHECK(braces_in_string->summary == "配置模板是 {braces} 对");
+
+    // 多对象:带前导说明时,配对之后还有结构字符,拒绝碰运气。
+    const auto two_objects =
+        app::ParseExtractionJson("总结:\n" + good + "\n" + good);
+    REQUIRE_FALSE(two_objects.has_value());
+    CHECK(two_objects.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+
+    // 首字符就是 '{' 的多对象(纯 JSON 形态):parse 整段失败,同样拒。
+    const auto back_to_back = app::ParseExtractionJson(good + "\n" + good);
+    REQUIRE_FALSE(back_to_back.has_value());
+    CHECK(back_to_back.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+
+    const auto object_then_array = app::ParseExtractionJson("总结:\n" + good + "\n[1,2]");
+    REQUIRE_FALSE(object_then_array.has_value());
+
+    // 结构化前导(数组在前):拒绝。
+    const auto lead_array = app::ParseExtractionJson("[备注] " + good);
+    REQUIRE_FALSE(lead_array.has_value());
+    CHECK(lead_array.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+
+    // 外层截断但内层已有 '}':不误收半截对象。
+    const auto truncated = app::ParseExtractionJson(
+        R"({"task_type":"code","summary":"s","candidates":[{"kind":"fact"})");
+    REQUIRE_FALSE(truncated.has_value());
+    CHECK(truncated.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+
+    // 嵌套/多围栏:歧义,拒绝。
+    const auto nested_fence =
+        app::ParseExtractionJson("```json\n" + good + "\n```\n```json\n" + good + "\n```");
+    REQUIRE_FALSE(nested_fence.has_value());
+
+    // 前后说明的尾巴是纯文字(无结构字符):无歧义,兼容放行(既有行为)。
+    const auto chatty_tail = app::ParseExtractionJson("好的:\n" + good + "\n以上。");
+    REQUIRE(chatty_tail.has_value());
+}
+
+TEST_CASE("ParseExtractionJson: 诊断文案自身是合法 UTF-8") {
+    // 坏 UTF-8 的诊断输出:错误消息含偏移数字与固定中文,不得再引入坏字节。
+    const std::string broken_utf8 = "abc\xFF\x80def";
+    const auto result = app::ParseExtractionJson(broken_utf8);
+    REQUIRE_FALSE(result.has_value());
+    const std::string message = result.error().message;
+    CHECK(platform::IsValidUtf8(message));
+    CHECK(platform::IsValidUtf8(app::StableExtractErrorCode(result.error())));
+}
+
+TEST_CASE("FinishMemoryExtraction: 结束原因与失败的分类(六类收口)") {
+    // 传输失败:发送失败/流内错 → transport_failed,错误消息消毒后可直出。
+    agent::SampleResult failed;
+    failed.ok = false;
+    failed.error.message = "连接被重置\xE4\xB8";
+    failed.text = "半截";
+    failed.provider_response_id = "resp-1";
+    failed.stop_reason = "max_tokens";  // 传输失败优先于结束原因分类
+    const auto transport = app::FinishMemoryExtraction(failed);
+    REQUIRE_FALSE(transport.has_value());
+    CHECK(transport.error().code == app::ExtractionErrorCode::TransportFailed);
+    CHECK(platform::IsValidUtf8(transport.error().message));
+    CHECK(transport.error().request_id == "resp-1");
+    CHECK(transport.error().body_bytes == 6);  // "半截" UTF-8 6 字节
+    CHECK(app::StableExtractErrorCode(transport.error()) == "transport_failed");
+
+    // 空正文:empty_output。
+    agent::SampleResult empty;
+    empty.ok = true;
+    empty.text = "";
+    const auto no_text = app::FinishMemoryExtraction(empty);
+    REQUIRE_FALSE(no_text.has_value());
+    CHECK(no_text.error().code == app::ExtractionErrorCode::EmptyOutput);
+    CHECK(app::StableExtractErrorCode(no_text.error()) == "empty_output");
+
+    // 已知截断结束原因:output_truncated,即便剩余文本碰巧是合法 JSON。
+    agent::SampleResult truncated;
+    truncated.ok = true;
+    truncated.text = R"({"task_type":"code","summary":"碰巧完整","candidates":[]})";
+    truncated.stop_reason = "max_tokens";
+    truncated.provider_response_id = "resp-2";
+    const auto cut = app::FinishMemoryExtraction(truncated);
+    REQUIRE_FALSE(cut.has_value());
+    CHECK(cut.error().code == app::ExtractionErrorCode::OutputTruncated);
+    CHECK(cut.error().stop_reason == "max_tokens");
+    CHECK(cut.error().body_bytes == truncated.text.size());
+    CHECK(app::StableExtractErrorCode(cut.error()) == "output_truncated");
+
+    // openai 的 length、大写 MAX_TOKENS 同样归截断。
+    truncated.stop_reason = "length";
+    CHECK(app::FinishMemoryExtraction(truncated).error().code ==
+          app::ExtractionErrorCode::OutputTruncated);
+    truncated.stop_reason = "MAX_TOKENS";
+    CHECK(app::FinishMemoryExtraction(truncated).error().code ==
+          app::ExtractionErrorCode::OutputTruncated);
+
+    // 结束原因未知/缺失:不据此判死,照走解析,诊断单列。
+    truncated.stop_reason = "weird_reason";
+    truncated.text = R"({"task_type":"code","summary":"好的","candidates":[]})";
+    const auto odd_reason = app::FinishMemoryExtraction(truncated);
+    REQUIRE(odd_reason.has_value());
+    truncated.stop_reason = "";  // provider 没报
+    truncated.text = R"({"task_type":"code","summary":"半截语法错")";
+    const auto no_reason = app::FinishMemoryExtraction(truncated);
+    REQUIRE_FALSE(no_reason.has_value());
+    CHECK(no_reason.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+    CHECK(no_reason.error().stop_reason.empty());
+
+    // 半截流(无收尾事件):文本非空、stop_reason 空——同上,走解析分类。
+    agent::SampleResult schema_flagged;
+    schema_flagged.ok = true;
+    schema_flagged.text = "不是 JSON";
+    schema_flagged.stop_reason = "end_turn";
+    schema_flagged.schema_ok = false;
+    schema_flagged.schema_error = "采样正文不是合法 JSON";
+    const auto not_json = app::FinishMemoryExtraction(schema_flagged);
+    REQUIRE_FALSE(not_json.has_value());
+    CHECK(not_json.error().code == app::ExtractionErrorCode::SyntaxInvalid);
+    // SampleModel 复检账并进诊断(P1-A 消费 schema_ok)。
+    CHECK(not_json.error().schema_check_error == "采样正文不是合法 JSON");
+
+    // 成功:结束原因已知非截断,解析通过。
+    agent::SampleResult fine;
+    fine.ok = true;
+    fine.text = R"({"task_type":"code","summary":"成了","candidates":[]})";
+    fine.stop_reason = "end_turn";
+    const auto parsed = app::FinishMemoryExtraction(fine);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->summary == "成了");
+}
+
+TEST_CASE("MemoryExtractionOutputSchema: 字段合同与解析器同一把尺子") {
+    const nlohmann::json& schema = app::MemoryExtractionOutputSchema();
+    CHECK(schema.at("type") == "object");
+    CHECK(schema.at("required") == nlohmann::json::array({"task_type", "summary"}));
+    // 顶层声明的四字段与解析合同一致。
+    for (const char* key : {"task_type", "summary", "retrieval_terms", "candidates"}) {
+        CHECK(schema.at("properties").contains(key));
+    }
+    // 调用两次同一份(静态单例)。
+    CHECK(&app::MemoryExtractionOutputSchema() == &schema);
 }
