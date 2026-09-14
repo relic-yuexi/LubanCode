@@ -246,21 +246,25 @@ WindowsTrustExport ExportWindowsTrustRoots() {
 
 // Windows SSL 策略校验的回调状态(mbedtls_ssl_conf_verify 的 p_ctx)。
 struct WindowsVerifyContext {
-    std::string host;             // 连接目标主机名(证书 CN/SAN 校验对象)
     std::string reject_code;      // 系统拒绝时的稳定码(kTlsCode*)
 };
+
+// wincrypt.h 的 CERT_TRUST_IS_NOT_TRUSTED(链上有显式不信任/不可信的
+// 锚,值自 Win SDK 一贯为 0x00000020)。CI 实测部分 SDK/宏组合下该常量
+// 不在展开集内(C2065),按官方文档数值本地兜底,不赌目标宏。
+constexpr DWORD kCertTrustIsNotTrusted = 0x00000020;
 
 std::string WindowsChainErrorToCode(DWORD policy_error, DWORD chain_error_status) {
     if (policy_error == CERT_E_CN_NO_MATCH) {
         return kTlsCodeCertHostnameMismatch;
     }
-    if (policy_error == CERT_E_EXPIRED || policy_error == CERT_E_VALIDITY_PERIOD_NESTED ||
+    if (policy_error == CERT_E_EXPIRED ||
         (chain_error_status & CERT_TRUST_IS_NOT_TIME_VALID) != 0 ||
         (chain_error_status & CERT_TRUST_IS_NOT_TIME_NESTED) != 0) {
         return kTlsCodeCertExpired;
     }
     if (policy_error == CERT_E_UNTRUSTEDROOT ||
-        (chain_error_status & CERT_TRUST_IS_NOT_TRUSTED) != 0) {
+        (chain_error_status & kCertTrustIsNotTrusted) != 0) {
         return kTlsCodeCertNotTrusted;
     }
     if (policy_error == CERT_E_WRONG_USAGE ||
@@ -273,9 +277,17 @@ std::string WindowsChainErrorToCode(DWORD policy_error, DWORD chain_error_status
 // mbedTLS 证书验证回调(SystemDefault 模式,仅 Windows):对 leaf(depth 0)
 // 跑 Windows 链构建 + SSL 策略校验(CertGetCertificateChain +
 // CertVerifyCertificateChainPolicy)。系统拒 -> flags 落 BADCERT 位(稳定码
-// 记进 ctx);系统过 -> flags 清零——系统链构建是权威:它能走 AIA 拉中间
-// 证书、应用 Disallowed 店与系统弱算法策略,本地导出的证书子集做不到,
-// 不拿子集判定压系统判定。其余 depth 不动 flags(链账归系统构建)。
+// 记进 ctx);系统过 -> 只清"链不可信"位——系统链构建是链信任的权威(能
+// 走 AIA 拉中间证书、应用 Disallowed 店与系统弱算法策略,本地导出的证书
+// 子集做不到);主机名/有效期/EKU 的 mbedTLS 判定位保留,双保险不互盖。
+// 其余 depth 不动 flags(链账归系统构建)。
+//
+// SDK 兼容口径:CERT_CHAIN_PARA/CERT_CHAIN_POLICY_PARA 只写 cbSize,
+// 不碰 dwUrlRetrievalTimeout/pvExtraPara(部分 SDK 展开集缺这两个成员,
+// CI 实测 C2039)——URL 拉取走系统默认超时;SSL 主机名校验不靠
+// pvExtraPara 传 SSL_EXTRA_CERT_CHAIN_POLICY_PARA,由 mbedTLS 内置
+// hostname 验证(mbedtls_ssl_set_hostname + BADCERT_CN_MISMATCH)承担,
+// 系统侧的用途/显式不信任判定在链构建与基础 SSL 策略里本就有。
 int WindowsPolicyVerify(void* ctx, mbedtls_x509_crt* crt, int depth, std::uint32_t* flags) {
     auto* verify = static_cast<WindowsVerifyContext*>(ctx);
     if (verify == nullptr || crt == nullptr || flags == nullptr) {
@@ -295,7 +307,6 @@ int WindowsPolicyVerify(void* ctx, mbedtls_x509_crt* crt, int depth, std::uint32
     CERT_CHAIN_PARA chain_para;
     ZeroMemory(&chain_para, sizeof(chain_para));
     chain_para.cbSize = sizeof(chain_para);
-    chain_para.dwUrlRetrievalTimeout = 5'000;  // AIA 拉中间证书的有界等待
     PCCERT_CHAIN_CONTEXT chain = NULL;
     if (!CertGetCertificateChain(NULL, win_cert, NULL, NULL, &chain_para, 0, NULL, &chain) ||
         chain == NULL) {
@@ -304,17 +315,9 @@ int WindowsPolicyVerify(void* ctx, mbedtls_x509_crt* crt, int depth, std::uint32
         *flags |= MBEDTLS_X509_BADCERT_OTHER;
         return 0;
     }
-    wchar_t wide_host[256] = {0};
-    MultiByteToWideChar(CP_UTF8, 0, verify->host.c_str(), -1, wide_host, 256);
-    SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_para;
-    ZeroMemory(&ssl_para, sizeof(ssl_para));
-    ssl_para.cbSize = sizeof(ssl_para);
-    ssl_para.dwAuthType = AUTHTYPE_SERVER;
-    ssl_para.pwszServerName = wide_host;
     CERT_CHAIN_POLICY_PARA policy_para;
     ZeroMemory(&policy_para, sizeof(policy_para));
     policy_para.cbSize = sizeof(policy_para);
-    policy_para.pvExtraPara = &ssl_para;
     CERT_CHAIN_POLICY_STATUS policy_status;
     ZeroMemory(&policy_status, sizeof(policy_status));
     policy_status.cbSize = sizeof(policy_status);
@@ -327,7 +330,9 @@ int WindowsPolicyVerify(void* ctx, mbedtls_x509_crt* crt, int depth, std::uint32
             WindowsChainErrorToCode(policy_status.dwError, chain->TrustStatus.dwErrorStatus);
         *flags |= MBEDTLS_X509_BADCERT_OTHER;
     } else {
-        *flags = 0;  // 系统裁决通过:清内置 flags(子集判定让位权威)
+        // 系统裁决通过:只放行链信任类误报(导入子集缺中间证书/根——
+        // 系统走 AIA 能闭链,子集不能);主机名/时间/用途位保留。
+        *flags &= ~static_cast<std::uint32_t>(MBEDTLS_X509_BADCERT_NOT_TRUSTED);
     }
     CertFreeCertificateChain(chain);
     CertFreeCertificateContext(win_cert);
@@ -517,7 +522,6 @@ std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket sock
                                   static_cast<std::uint32_t>(handshake_timeout_ms));
 #ifdef _WIN32
     WindowsVerifyContext windows_verify;
-    windows_verify.host = host;
     if (trust_mode == TlsTrustMode::SystemDefault) {
         mbedtls_ssl_conf_verify(&context->config, WindowsPolicyVerify, &windows_verify);
     }

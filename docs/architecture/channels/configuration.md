@@ -381,7 +381,7 @@ reload 走 diff：
 wss 的 TLS 验证恒 REQUIRED，无降级开关，失败不改走明文。信任根解析（`src/channel/qq/qq_tls.hpp` 的 `ResolveChannelTrustRoots`）：
 
 - **显式信任锚**（装配 seam `ChannelGatewayWiring::Options::ca_pem`，测试位）：调用方全权指定，不回退平台来源；解析不出证书时明报（装配诊断一行"信任根不可用"），连接时报 `tls_trust_store_empty`。**未接入用户配置**——若未来开放配置须接全配置解析、优先级与文档（QQ 连接诊断单 §四原话）。
-- **平台默认（Windows）**：从系统证书库（Root/Ca，CurrentUser+LocalMachine，剔除 Disallowed 显式不信任）导出信任根喂 mbedTLS，并在 mbedTLS 握手验证里接 Windows 链构建与 SSL 策略校验（`CertGetCertificateChain` + `CertVerifyCertificateChainPolicy`，覆盖主机名/有效期/链信任/用途/系统不信任策略）；系统裁决为权威（可走 AIA 拉中间证书，本地导出子集做不到），系统拒则握手拒。用户无须下载 PEM、造 `/etc/ssl` 目录或设环境变量。
+- **平台默认（Windows）**：从系统证书库（Root/Ca，CurrentUser+LocalMachine，剔除 Disallowed 显式不信任）导出信任根喂 mbedTLS，并在 mbedTLS 握手验证里接 Windows 链构建与 SSL 策略校验（`CertGetCertificateChain` + `CertVerifyCertificateChainPolicy`，覆盖链信任/有效期/用途/系统不信任策略）；系统裁决为链信任权威（可走 AIA 拉中间证书，本地导出子集做不到），系统拒则握手拒，系统过只放行"链不可信"误报位。主机名与有效期/EKU 由 mbedTLS 内置验证（`mbedtls_ssl_set_hostname` + verify flags）承担，与系统判定双保险不互盖。SDK 兼容口径：`CERT_CHAIN_PARA`/`CERT_CHAIN_POLICY_PARA` 只写 `cbSize`（部分 SDK 展开集缺 `dwUrlRetrievalTimeout`/`pvExtraPara` 成员），不传 `pvExtraPara`——SSL 主机名校验不依赖它。用户无须下载 PEM、造 `/etc/ssl` 目录或设环境变量。
 - **平台默认（Linux/macOS）**：探测系统 PEM 路径（`/etc/ssl/cert.pem` 等），行为与既有版本一致；测试 CA 注入不受影响。
 
 稳定错误码：`tls_trust_store_empty` / `tls_trust_store_load_failed` / `tls_cert_expired` / `tls_cert_hostname_mismatch` / `tls_cert_not_trusted` / `tls_cert_policy_rejected` / `tls_cert_verify_failed` / `tls_handshake_timeout` / `tls_handshake_failed`。HTTP 取令牌/查地址（cpr/libcurl 栈）与 WSS（mbedTLS 栈）是两段独立信任路径，分别报错分别验收，HTTP 成功不冒充 WSS 成功。
