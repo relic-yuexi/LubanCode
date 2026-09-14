@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.263] - 2026-09-14
+
+- **QQ 渠道会话总装（Q2）。**渠道来信与本地自动任务经同一 Gateway 公平调度：同一聊天连续多轮共享上下文（常驻 Agent），重启后按账恢复会话映射接续对话，不另开空场；回复投递走耐久回执仓——超长自动拆段、同一 delivery 重试复用相同载荷与 msg_seq、平台回执结算、超时如实标"结果未知"并停自动重发，发送失败绝不重跑 Agent。生成/选定/入箱三处崩溃窗口与权限撤销、来信重放、队列满、写盘失败均有账态注入测试钉死"模型与工具调用不多一次"；`gateway status` 新增渠道栏（连接状态、水位、死信、投递错误，不带密钥）。**接通真实 QQ 只差最后一步**：配置机器人凭据并完成真账号联调（Q3）。
+
 ## [v0.26.262] - 2026-09-14
 
 - **应用 Worker 接入成套。**外部应用（Node/TS 后端等）可受控驱动 LubanCode：`LUBANCODE_HOME`/`LUBANCODE_DATA_HOME`/`LUBANCODE_MANAGED` 三件套给每只 Worker 独立参数根与数据根，个人环境零读写副作用（双根隔离实测）；部署档显式装配 Agent 档案、Skills、MCP 与 Lua 插件（未信任/缺件整场明拒，不静默降级）；协议升至 1.3，thread/turn 受理带 `clientOperationId` 幂等去重，新增 `operation/read` 重启后查终态与稳定结果正文；`examples/node-client` 提供钉版客户端与五幕端到端验收（幂等、双 Worker 隔离、硬杀重启找回、孤儿收口、空值 env 跨进程明拒），固定版本兼容记录见 `docs/reference/app-server-external-client.md`。
