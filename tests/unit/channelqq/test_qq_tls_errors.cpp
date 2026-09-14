@@ -1,7 +1,9 @@
 // QQ TLS 稳定错误码册(Windows 信任根单 §四 P0-B):mbedTLS 验证 flags /
 // 握手错误码的稳定映射、信任根解析(explicit 优先不回退、无效明报、探测
-// seam)。Windows 系统证书店导出与 SSL 策略校验回调(#ifdef _WIN32 块)
-// CI 验不了——单内如实标"未验",归 Q3 Windows 真机复测。
+// seam 只归 Unix 路)。windows-msvc 腿(main push)会真跑
+// ExportWindowsTrustRoots——空显式两案按平台分叉断言,兼作店导出的 CI
+// 冒烟(不崩 + 数账)。SSL 策略校验回调要真 TLS 握手,CI 验不了——单内
+// 如实标"未验",归 Q3 Windows 真机复测。
 #include <doctest/doctest.h>
 
 #include <mbedtls/ssl.h>       // MBEDTLS_ERR_SSL_TIMEOUT 等握手错误码
@@ -58,24 +60,41 @@ TEST_CASE("qq_tls: ResolveChannelTrustRoots——explicit 优先且不回退,无
     CHECK_FALSE(detect_called);
 }
 
-TEST_CASE("qq_tls: ResolveChannelTrustRoots——空显式走平台探测,探测失败明报 none") {
+TEST_CASE("qq_tls: ResolveChannelTrustRoots——空显式走平台默认(探测 seam 只归 Unix 路)") {
     bool detect_called = false;
-    const ResolvedTrustStore none = ResolveChannelTrustRoots("", [&detect_called]() {
+    const ResolvedTrustStore resolved = ResolveChannelTrustRoots("", [&detect_called]() {
         detect_called = true;
         return std::string();  // 模拟 Unix 路径全探测不到
     });
+#ifdef _WIN32
+    // Windows 的平台默认 = 系统证书店导出(探测 seam 不参与):真店非空,
+    // 必给得出信任根——这正是 CI windows 腿上真跑 ExportWindowsTrustRoots
+    // 的路径(枚举生命周期修订后在此冒烟)。
+    CHECK_FALSE(detect_called);
+    CHECK(resolved.source == "windows_system_store");
+    CHECK(resolved.certificate_count > 0);
+    CHECK(resolved.ca_pem.find("BEGIN CERTIFICATE") != std::string::npos);
+    CHECK(resolved.error.empty());
+#else
     CHECK(detect_called);
-    CHECK(none.source == "none");
-    CHECK(none.ca_pem.empty());
-    CHECK_FALSE(none.error.empty());
+    CHECK(resolved.source == "none");
+    CHECK(resolved.ca_pem.empty());
+    CHECK_FALSE(resolved.error.empty());
+#endif
 }
 
 TEST_CASE("qq_tls: ResolveChannelTrustRoots——探测到但文件打不开/读不懂明报") {
     const ResolvedTrustStore unreadable = ResolveChannelTrustRoots("", []() {
         return std::string("/definitely/not/here/ca.pem");
     });
+#ifdef _WIN32
+    // Windows 不走文件探测:注入的路径不参与,结果与系统店导出同上一案。
+    CHECK(unreadable.source == "windows_system_store");
+    CHECK(unreadable.certificate_count > 0);
+#else
     CHECK(unreadable.source == "none");
     CHECK_FALSE(unreadable.error.empty());
+#endif
 }
 
 TEST_CASE("qq_tls: DetectSystemCaPemPath 在本进程不崩(返回值不定,只验调用)") {
