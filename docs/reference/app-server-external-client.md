@@ -37,12 +37,18 @@
 
 ## 三、部署隔离基线(§十/§13.1)
 
-一只 Worker 一套独立材料:`LUBANCODE_HOME`(参数根,可只读)、
+一只 Worker 一套独立材料:`LUBANCODE_HOME`(参数根)、
 `LUBANCODE_DATA_HOME`(数据根,可写)、`LUBANCODE_MANAGED=1`(托管档)。
 宿主给**每个 child 构造专属 env**,不改自己的全局环境;模型凭据经参数根
 `config.json` 交付,不进 argv。空值 env 的跨进程传递只有 envblock 一条真路
 (Node `spawn` 的 env 表空串原样落块),Worker 启动门对"设了但为空"明拒
 (退出码 1 + stderr 人话)。
+
+参数根不是严格零写入:Worker 启动时对材料根**查漏补缺地播种发行提示脚手架**
+(`system_prompt.md`/`SOUL.md`/`souls/`/`prompts/`,只建新绝不覆盖,写失败
+静默跳过——挂只读根时播种自然跳过,运行期有内置回退)。承重边界是**状态
+零进参数根**:workspaces/logs/cache/workflow-runs 等一切状态只落数据根
+(e2e 断言钉死);个人家目录零读写。
 
 ## 四、已验范围(ctest `e2e.app_server.node_client`,真 exe + 假模型)
 
@@ -52,7 +58,7 @@
 
 | 幕 | 验的是什么 | 对账验收单 |
 | --- | --- | --- |
-| 主链路(托管档) | 握手钉 1.3 + 能力表 → 幂等受理闭环(thread/turn 双键)→ `operation/read` final+稳定正文 → 同键重发零重跑/异载荷冲突 → 凭据只走参数根(argv/stdout/stderr/结果全无密钥)→ 状态只落数据根、参数根零写入、个人家目录零读写 → 收口四步退出码 0 | AW-02/11/12/15/18/20 |
+| 主链路(托管档) | 握手钉 1.3 + 能力表 → 幂等受理闭环(thread/turn 双键)→ `operation/read` final+稳定正文 → 同键重发零重跑/异载荷冲突 → 凭据只走参数根(argv/stdout/stderr/结果全无密钥)→ 状态只落数据根、状态零进参数根、个人家目录零读写 → 收口四步退出码 0 | AW-02/11/12/15/18/20 |
 | 双 Worker 并行 | 两套根并跑互不串材料,模型流量与终态正文各归各家 | AW-04(进程级) |
 | 飞行中硬杀 | 假后端扣住应答,Worker 被 SIGKILL/TerminateProcess → 同根重启 `operation/read` 回 `unknown`+`gaps` 不冒充,创建去重回原场 `active=false`,模型零重跑 | AW-14/19(进程级硬杀) |
 | EOF 孤儿收口 | 宿主消亡(毁 stdin)→ Worker 自退退出码 0 → 重启后记录仍能查询 | AW-20 尾 |

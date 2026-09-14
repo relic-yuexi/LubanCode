@@ -331,13 +331,28 @@ async function sceneMainLoop(binary) {
     ok('钥匙不进 stderr', worker.stderrText.indexOf('sk-node-e2e') === -1);
     ok('钥匙不进 operation/read 结果', JSON.stringify(facts).indexOf('sk-node-e2e') === -1);
 
-    // 状态落点:数据根有账、参数根零写入、个人家目录零读写(AW-02)。
+    // 状态落点:数据根有账、状态零进参数根、个人家目录零读写(AW-02)。
+    // 参数根是材料根,发行提示脚手架会查漏补缺地播种(system_prompt.md/
+    // SOUL.md/souls/prompts/,只建新不覆盖)——那是材料不是状态,P1 既定
+    // 行为,如实认账;承重断言是"状态目录一个不进参数根"。
     ok('数据根下 workspaces 在场', fs.existsSync(path.join(field.dataRoot, 'workspaces')));
     const configEntries = walkRelative(field.configRoot);
-    ok('参数根只有部署材料(config.json/deployment.json)',
-      configEntries.length === 2 && configEntries.includes('config.json') &&
-        configEntries.includes('deployment.json'),
+    ok('参数根部署材料在场(config.json/deployment.json)',
+      configEntries.includes('config.json') && configEntries.includes('deployment.json'),
       JSON.stringify(configEntries));
+    const stateEntries = configEntries.filter((name) =>
+      name === 'workspaces' || name.startsWith('workspaces/') ||
+      name === 'logs' || name.startsWith('logs/') ||
+      name === 'cache' || name.startsWith('cache/') ||
+      name === 'data' || name.startsWith('data/') ||
+      name === 'workflow-runs' || name.startsWith('workflow-runs/') ||
+      name === 'browser-artifacts' || name.startsWith('browser-artifacts/'));
+    ok('状态零进参数根(workspaces/logs/cache/data 等一个不在)', stateEntries.length === 0,
+      JSON.stringify(stateEntries));
+    ok('发行提示脚手架播种在参数根(材料,查漏补缺)',
+      configEntries.includes('system_prompt.md') && configEntries.includes('SOUL.md') &&
+        configEntries.includes('prompts/core/10-identity.md'),
+      JSON.stringify(configEntries.slice(0, 6)));
     ok('个人家目录零读写(无 .lubancode/.agents)',
       !fs.existsSync(path.join(field.neutralHome, '.lubancode')) &&
         !fs.existsSync(path.join(field.neutralHome, '.agents')));

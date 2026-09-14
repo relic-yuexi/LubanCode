@@ -16,10 +16,13 @@
 一只 Worker = 一个子进程 = 一套独立材料:
 
 ```text
-LUBANCODE_HOME      参数根(可只读)  config.json、deployment.json、agents/、skills/…
+LUBANCODE_HOME      参数根            config.json、deployment.json、agents/、skills/…
+                                       (启动会查漏补缺播种发行提示脚手架,只建新不覆盖)
 LUBANCODE_DATA_HOME 数据根(可写)    workspaces/(会话账)、logs/、缓存…
 LUBANCODE_MANAGED=1 托管档           个人材料层整层不读,cwd 项目级整层不读
 ```
+
+状态只落数据根;参数根收材料(含发行脚手架的播种副本),个人家目录零读写。
 
 客户端给**每个 child 构造专属 env**——从宿主 env 快照出发,摘掉应用根
 变量残留,再按本 Worker 的根写入;不修改宿主自己的全局环境,也不重定义
