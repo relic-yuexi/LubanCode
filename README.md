@@ -51,6 +51,8 @@ LubanCode 把模型接到本地工具上。模型判断下一步，程序负责�
 
 日常可拿它修 bug、补测试、审 diff。要接自己的前端，可用 app-server；要编排固定流程，可用强类型 Workflow；要研究 Agent 运行过程，可导出轨迹，也可给自建模型做兼容诊断。
 
+想从 QQ、飞书等聊天平台交代任务，统一走 Gateway。当前已有 `lubancode gateway run/status/stop` 与自动任务入口，QQ、飞书适配器尚未接通。[渠道 README](docs/architecture/channels/README.md#启动与多渠道) 写明启动命令、配置归属和后续扩展方式；平台接线完成后，同一 Gateway 可管理多个渠道账号。
+
 ## 轻在哪儿
 
 LubanCode 功能不少，安装和运行却尽量少背东西。Release 用原生程序，不要求 Node.js 或 Python。包里另带一只 `rg`，文件搜索开箱就能用。

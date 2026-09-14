@@ -6,6 +6,94 @@ _本目录是多渠道消息接入的合同冻结文档（设计单阶段 0）�
 
 [文档首页](../../README.md) · [架构首页](../README.md) · [channel.yaml 冻结](channel-manifest.md) · [Bridge 协议冻结](bridge-protocol.md) · [消息合同冻结](message-contracts.md) · [配置层级冻结](configuration.md) · [威胁模型与数据保留](security.md)
 
+## 启动与多渠道
+
+2026-09-13 源码核对：`gateway run/status/stop/job` 已有入口，生产装配已接自动任务与本地结果投递。真实渠道进程、QQ/飞书适配器及渠道会话投递总装尚未完成。下文把现有命令与完成接线后的行为分开写；现在运行 Gateway 不会自动连上 QQ 或飞书。
+
+### 启动、查看、停止
+
+在目标项目目录启动前台 Gateway：
+
+```powershell
+cd D:\lubancode
+lubancode gateway run
+```
+
+另开终端查看或停止同一默认 profile：
+
+```powershell
+lubancode gateway status --json
+lubancode gateway stop
+```
+
+需要命名实例时，三条命令使用同一个 profile 名：
+
+```powershell
+lubancode gateway run --profile assistant
+lubancode gateway status --profile assistant --json
+lubancode gateway stop --profile assistant
+```
+
+`run` 占用前台终端。关掉进程便停工；后台常驻须另配系统监督服务。`install/start/restart/doctor/logs` 尚属目标命令，当前不要照架构命令表执行。`profile` 区分 Gateway 状态与实例锁，不是 QQ/飞书选择器，也不自动隔离系统权限。
+
+模型沿用当前配置；工作目录取启动位置。渠道接线时须冻结 workspace 身份，重启后核对会话映射。更换目录不是把旧 QQ 会话悄悄迁到另一个项目。
+
+### 首次配置与日常使用
+
+接线完成后，首次使用顺序如下：
+
+1. 安装并信任目标渠道包，满足它声明的运行依赖。QQ 可直接实现官方 API，腾讯 SDK 为可选方案；原生适配器无需 Node.js，选择 Node 实现时才需要。各渠道按实际 manifest 检查依赖。
+2. 在全局 `~/.lubancode/config.json` 配账号、AppID 与密钥引用。凭据放运行 Gateway 那台机器；项目配置不能启用渠道。
+3. 启用渠道与账号，启动 Gateway，在本机批准远端用户配对。配对控制入口尚待总装；不能把现有 slash 命令在空 manager 中执行当作批准成功。
+4. 往后只需启动 Gateway，再从已批准的聊天账号发送任务。
+
+以下是 QQ 接线完成后的最小配置形状，字段来自现有解析器。将 `channels` 合并进已有全局配置，不要覆盖模型等其他字段；这段本身不会安装或启动适配器。`QQBOT_CLIENT_SECRET` 指环境变量名，变量值才是 AppSecret。
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "enabled": true,
+      "default_account": "main",
+      "accounts": {
+        "main": {
+          "enabled": true,
+          "transport": "websocket",
+          "app_id": "替换为 QQ AppID",
+          "secret_env": "QQBOT_CLIENT_SECRET",
+          "dm_policy": "pairing",
+          "group_policy": "disabled",
+          "allow_bots": false,
+          "reply": { "mode": "final", "tool_progress": false }
+        }
+      }
+    }
+  }
+}
+```
+
+也可按现有 `secret_file` 字段指定密钥文件；运行时读取与文件权限检查待实现。账号状态沿 `~/.lubancode/channels/qqbot/main/` 存放，和插件代码分开；不要靠给文件起 `.enc` 后缀声称已经加密。
+
+上述配置只定义接入与准入，不承诺工具只读或目录隔离。配对不等于 owner；文件写入、命令、私有记忆仍受宿主政策约束。QQ 首版需配合改造单中的最小工具名单与权限合并实现才交付。
+
+### 后面加飞书怎么做
+
+仍使用 `lubancode gateway run`，不为每个平台造一个顶层启动命令。目标是一个 Gateway 启动所有已安装、已信任且通过激活检查的渠道账号：
+
+```text
+LubanCode Gateway
+  ├─ qqbot / main     → QQ 适配进程
+  └─ feishu / work    → 飞书适配进程（后续实现，ID 暂定）
+```
+
+每个账号各有凭据、连接、锁、入站账、准入规则和会话。飞书账号密钥不交给 QQ；同名用户或会话也不能跨渠道拼成一场。不同平台传来的模型任务共用宿主调度与预算，不能声称天然没有资源竞争。
+
+开发新平台时，新增渠道包和 manifest，实现同一 `lubancode-channel/1` Bridge，映射平台身份、来信和回执。会话、权限、去重、执行账和回复投递复用宿主；平台 SDK 不进入 Agent 内核。飞书具体凭据、事件与传输方式在接入时另行核对，不照抄 QQ 字段便宣称可用。
+
+配置以 `channels.<id>.accounts.<account>` 分组。启用飞书要同时启用渠道与账号；停用 QQ 则关闭对应开关，并按首版约定重启 Gateway 生效。首版不承诺配置热更新。多 profile 仍不能同时占同一渠道账号，账号锁必须拦住重复连接。
+
+实施顺序和验收见 [QQ 接入改造单](../../../todos/QQ机器人接入_Channel桥与SessionV3权限闭环.todo)。QQ 是第一只适配器；多渠道宿主应一次做好，各平台再逐一联调。
+
 ## 1. 这层是干什么的
 
 LubanCode 要接 QQ、微信、飞书这类聊天平台，缺的不是一只新工具，也不是一条 SSE，是一层常驻的 Channel Runtime。平台来信唤醒 Agent，Agent 回话交还平台，ChannelPlugin 管这条来回路。
@@ -199,7 +287,7 @@ Agent reply -> platform：幂等尽力；平台支持 client id 时用 client id
 | 0 | 冻结合同（本目录文档） | 已落地 |
 | 1 | 纯合同代码与假 sidecar：`src/channel/types.*`、channel.yaml parser、ComponentKind 追加 Channel、帧编解码、双向 router、`fake-channel-sidecar`、错误码 | 已落地 |
 | 2 | ChannelManager 与入站耐久：状态机、journal、去重、队列背压、pairing、`/channels` 命令 | 已落地 |
-| 3 | Headless Session 与路由：TurnIngress、provenance、router、session host、ChannelTurn | 待实现 |
+| 3 | Headless Session 与路由：TurnIngress、provenance、router、session host、ChannelTurn | 已有路由和会话宿主组件；真实渠道生产总装与 V3 多轮恢复待完成 |
 | 4 | ReplyAssembler 与 outbox：final/block/native、分块、preview/committed 分账 | 待实现 |
 | 5 | QQ Bot 参考适配器 | 进行中（Q1：进程内直连定案，协议核心 auth/gateway-events/messages/spool 与 mock 测试落地；V3 总装与真实联调见接入单 Q2/Q3） |
 | 6 | WeChat 参考适配器 | 待实现 |

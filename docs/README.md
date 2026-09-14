@@ -19,6 +19,7 @@
 | 第一次安装并跑完一场任务 | [三分钟上手](getting-started/quickstart.md) | [排错手册](getting-started/troubleshooting.md) |
 | 看选型、C++ 取舍与同类差异 | [为什么是 LubanCode](getting-started/why-lubancode.md) | [功能总账](reference/feature-index.md) |
 | 看现有功能 | [功能目录](features/README.md) | [功能总账](reference/feature-index.md) |
+| 查 QQ、飞书等渠道如何启动与扩展（接线待完成） | [渠道启动与多渠道](architecture/channels/README.md#启动与多渠道) | [Gateway 合同](architecture/gateway/README.md) |
 | 查命令、字段、工具参数 | [参考手册](reference/README.md) | [安全模型](development/security.md) |
 | 恢复、压缩或管理上下文 | [会话](features/sessions/README.md) | [压缩机制](features/context/compaction.md) |
 | 接 Provider、Skill、Hook、MCP、LSP 或插件 | [扩展指南](features/extensions/README.md) | [配置手册](reference/configuration.md) |
