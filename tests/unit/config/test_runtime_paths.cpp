@@ -29,6 +29,8 @@
 #include "config/config.hpp"
 #include "config/runtime_paths.hpp"
 #include "platform/paths.hpp"
+#include "ptc/profile.hpp"
+#include "tools/search_ripgrep.hpp"
 
 namespace {
 
@@ -486,4 +488,107 @@ TEST_CASE("runtime_paths:EnsureRuntimeRootsAccessible 在获准父目录内建�
     const auto refused = lubancode::config::EnsureRuntimeRootsAccessible(bad);
     REQUIRE_FALSE(refused.has_value());
     CHECK(refused.error().find("不是目录") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// P1 遗留销账(一):rg-stage 读口随状态根;播种脚本 fetch_ripgrep.sh 的
+// --target 缺省同语义(脚本侧矩阵断言在 ctest scripts.fetch_ripgrep_paths)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("runtime_paths:rg-stage 候选层随状态根,个人布局原样") {
+    using lubancode::tools::CollectRipgrepCandidates;
+    using lubancode::tools::RipgrepSource;
+    const auto fake_home = FreshRoot("rg-home");
+    const auto app_root = FreshRoot("rg-app");
+    const auto state_root = FreshRoot("rg-state");
+
+    // 找 UserStage 那一层(全三层里只此一层),校它落哪——只对目录校,
+    // 不掺平台差异的可执行名(rg/rg.exe)。
+    const auto user_stage_parent = [](const std::vector<lubancode::tools::RipgrepCandidate>& candidates) {
+        for (const auto& candidate : candidates) {
+            if (candidate.source == RipgrepSource::UserStage) {
+                return lubancode::platform::PathToUtf8(candidate.exe.parent_path());
+            }
+        }
+        return std::string{};
+    };
+
+    // 个人模式:UserStage=<home>/.lubancode/rg-stage/libexec 原样(旧布局)。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        const auto parent = user_stage_parent(CollectRipgrepCandidates());
+        REQUIRE_FALSE(parent.empty());
+        CHECK(Key(parent) == Key(U8(fake_home / ".lubancode" / "rg-stage" / "libexec")));
+    }
+
+    // 应用根+显式数据根:UserStage=数据根(不是参数根——工具缓存是状态)。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+        EnvGuard luban_home("LUBANCODE_HOME", U8(app_root));
+        EnvGuard luban_data("LUBANCODE_DATA_HOME", U8(state_root));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        const auto parent = user_stage_parent(CollectRipgrepCandidates());
+        REQUIRE_FALSE(parent.empty());
+        CHECK(Key(parent) == Key(U8(state_root / "rg-stage" / "libexec")));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P1 遗留销账(二):ptc_profiles.json 归用户偏好材料,留参数根不落数据根
+// (合同 §13.2;个人布局=旧位置原样,零迁移零惊扰)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("runtime_paths:ptc 画像存档留参数根,不落数据根") {
+    const auto fake_home = FreshRoot("ptc-home");
+    const auto app_root = FreshRoot("ptc-app");
+    const auto state_root = FreshRoot("ptc-state");
+
+    // 应用根+显式数据根:存档在参数根——即使数据根另设也不切过去。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+        EnvGuard luban_home("LUBANCODE_HOME", U8(app_root));
+        EnvGuard luban_data("LUBANCODE_DATA_HOME", U8(state_root));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        const std::string store = lubancode::ptc::DefaultProfileStorePath();
+        CHECK(Key(store) == Key(U8(app_root / "ptc_profiles.json")));
+        CHECK(Key(store) != Key(U8(state_root / "ptc_profiles.json")));
+    }
+
+    // 应用根、数据根未设:同样在参数根(默认数据根 <HOME>/data 不沾)。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+        EnvGuard luban_home("LUBANCODE_HOME", U8(app_root));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        CHECK(Key(lubancode::ptc::DefaultProfileStorePath()) ==
+              Key(U8(app_root / "ptc_profiles.json")));
+    }
+
+    // 个人模式:旧位置原样(<home>/.lubancode)——旧文件照读,不暗迁移。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        CHECK(Key(lubancode::ptc::DefaultProfileStorePath()) ==
+              Key(U8(fake_home / ".lubancode" / "ptc_profiles.json")));
+    }
+
+    // 坏值:库级无根返回空串(调用方按"没有存档"处理),不回落个人目录。
+    {
+        EnvGuard home_guard("USERPROFILE", U8(fake_home));
+        EnvGuard empty_home("LUBANCODE_HOME", "");
+#ifndef _WIN32
+        EnvGuard posix_home("HOME", U8(fake_home));
+#endif
+        CHECK(lubancode::ptc::DefaultProfileStorePath().empty());
+    }
 }

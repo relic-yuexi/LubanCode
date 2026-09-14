@@ -84,7 +84,7 @@ PTC 的资源墙与受限 token 不是强化沙箱。威胁边界见[安全模�
 
 ## 能力画像
 
-`~/.lubancode/ptc_profiles.json`,键为指纹
+`~/.lubancode/ptc_profiles.json`(应用根语义=LUBANCODE_HOME 参数根下同名文件,归用户偏好材料,不落数据根),键为指纹
 `provider + endpoint + model + wire + python 版本 + harness(ptc-v1)`,
 任一成分变,旧画像查不到,天然降回 `unknown`。四档:
 

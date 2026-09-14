@@ -106,8 +106,11 @@ private:
     std::string last_fault_;
 };
 
-// 画像存档:<home>/.lubancode/ptc_profiles.json,一份 {fingerprint: profile}
-// 的 object。坏文件不当错(返回空表,写回时重建)。
+// 画像存档:ptc_profiles.json,一份 {fingerprint: profile} 的 object。
+// 归属按冻结合同(capability-contract.md §13.2):用户偏好画像算材料不算
+// 状态,留参数根——应用根语义=<LUBANCODE_HOME>/ptc_profiles.json,个人
+// 布局=<home>/.lubancode/ptc_profiles.json 原样;不落数据根,不暗迁移旧
+// 位置文件(读得到、不暗删)。坏文件不当错(返回空表,写回时重建)。
 class PtcProfileStore {
 public:
     explicit PtcProfileStore(std::string path) : path_(std::move(path)) {}
@@ -121,8 +124,9 @@ private:
     std::string path_;
 };
 
-// 存档默认路径:<home>/.lubancode/ptc_profiles.json(找不到 home = 空串,
-// 调用方按"没有存档"处理)。
+// 存档默认路径:参数根/ptc_profiles.json(材料留参数根,见上;个人布局
+// 即旧位置,零迁移)。找不到根(坏值/无 home)= 空串,调用方按"没有存档"
+// 处理,不回落别处。
 std::string DefaultProfileStorePath();
 
 }  // namespace lubancode::ptc

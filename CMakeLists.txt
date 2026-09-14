@@ -68,7 +68,7 @@ option(LUBANCODE_USE_CODELOAD
 set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(内含 rg[.exe];由 scripts/fetch_ripgrep.sh 产出)")
 # 全机共享分期兜底(派工单 §六:新 worktree 断供 bundled rg):没显式传
 # LUBANCODE_BUNDLED_RG_DIR 时,探一次 <home>/.lubancode/rg-stage/libexec——
-# fetch_ripgrep.py --target <home>/.lubancode/rg-stage 的一次性产物,离线、
+# fetch_ripgrep.sh(个人布局下 --target 缺省即落这里)的一次性产物,离线、
 # 确定性、版本照过下面的门。责任边界:rg 分期是 configure 级构建输入,
 # 归开发者调用面(preset/命令行/这条机器级缓存),不归 Agent worktree 的
 # 环境继承,也不归测试夹具;运行时定位照旧只认 ExecutableDir/libexec,

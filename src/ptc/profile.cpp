@@ -234,6 +234,11 @@ bool PtcProfileStore::Save(const PtcProfile& profile, std::string* error) {
 }
 
 std::string DefaultProfileStorePath() {
+    // 归属裁定(应用Worker接入单 P1 遗留销账,合同 §13.2):这份文件是
+    // 用户偏好材料,不是运行状态——留参数根,不切 StateRootDir。生产
+    // 面只读(tool_runtime 按 Find 查画像,写档归人工探针流程),参数根
+    // 挂只读也不破坏读取。个人布局参数根即 <home>/.lubancode,与历史上
+    // 的落位逐字节同位:旧文件照读,不迁移不删。
     const auto home = lubancode::config::HomeLubancodeDir();
     if (!home.has_value()) {
         return {};

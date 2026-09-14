@@ -158,7 +158,7 @@ target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_GATEWAY_RACER_EXE="$<TARGET_FILE:gateway_lock_racer>")
 
 # 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
-#    目录(scripts/fetch_ripgrep.py 的产物,如 build/rg-stage/libexec)。
+#    目录(scripts/fetch_ripgrep.sh 的产物,如 build/rg-stage/libexec)。
 #    configure 时校一遍版本(与 third_party/ripgrep/manifest.json 对账),
 #    再复制进测试运行目录的 libexec/——集成测试走生产同一条定位路
 #    (ExecutableDir/libexec)。没设则真 rg 集成组如实跳过,纯单测照跑
@@ -174,7 +174,7 @@ if(LUBANCODE_BUNDLED_RG_DIR)
   if(NOT EXISTS "${LUBANCODE_RG_EXE}")
     message(FATAL_ERROR
       "LUBANCODE_BUNDLED_RG_DIR 指了,但里面没有 rg 可执行文件: ${LUBANCODE_RG_EXE}\n"
-      "先跑: python scripts/fetch_ripgrep.py --target build/rg-stage --platform <平台>")
+      "先跑: bash scripts/fetch_ripgrep.sh --target build/rg-stage --platform <平台>")
   endif()
   # 配置时校版本:首行 "ripgrep <版本>" 与 manifest 对账(不钉 rev 段)。
   file(READ "${CMAKE_SOURCE_DIR}/third_party/ripgrep/manifest.json" _rg_manifest)
@@ -210,8 +210,9 @@ else()
     "tests: 未设 LUBANCODE_BUNDLED_RG_DIR 且 <home>/.lubancode/rg-stage 无 rg。\n"
     "  影响: integration.ptc.ptc_tool 与 unit.tools.observation_filter 两册会失败(真 rg 依赖,不跳过);"
     "其余真 rg 集成组跳过,纯单测照跑。\n"
-    "  修法(一次,全机 worktree 共享): python scripts/fetch_ripgrep.py --target <home>/.lubancode/rg-stage\n"
-    "  或 configure 显式传 -DLUBANCODE_BUNDLED_RG_DIR=<fetch_ripgrep.py 产物目录>。")
+    "  修法(一次,全机 worktree 共享): bash scripts/fetch_ripgrep.sh --platform <平台>\n"
+    "  (--target 缺省自动落 <home>/.lubancode/rg-stage)\n"
+    "  或 configure 显式传 -DLUBANCODE_BUNDLED_RG_DIR=<fetch_ripgrep.sh 产物目录>。")
 endif()
 
 # 一册源码一条 CTest。仍只编一只 lubancode_tests，免去重复链接；运行时靠
@@ -390,6 +391,21 @@ if(LUBANCODE_NODE_E2E_EXECUTABLE)
     RUN_SERIAL TRUE)
 else()
   message(STATUS "node 未找到: Node 外部客户端 e2e(app_server P4)不注册,该腿如实缺此证据")
+endif()
+
+# 应用Worker接入单 P1 遗留销账:fetch_ripgrep.sh 的数据根解析离线断言。
+# 只跑脚本的 --print-target-root(零网络零下载),矩阵断言
+# RuntimePaths 同一套语义(个人布局/应用根默认 data/显式数据根/坏值明拒)。
+# 有 bash 且非 Windows 才注册——Windows 的 System32\bash.exe 是 WSL bash,
+# 吃不了仓库的 Windows 路径;该腿如实缺证据(与 node e2e 同款注册法),
+# POSIX 腿承担验证。
+find_program(LUBANCODE_BASH_SMOKE_EXECUTABLE bash)
+if(LUBANCODE_BASH_SMOKE_EXECUTABLE AND NOT WIN32)
+  add_test(NAME scripts.fetch_ripgrep_paths
+    COMMAND "${LUBANCODE_BASH_SMOKE_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/scripts/tests/fetch_ripgrep_paths_smoke.sh")
+  set_tests_properties(scripts.fetch_ripgrep_paths PROPERTIES
+    LABELS "scripts;tools" TIMEOUT 60)
 endif()
 
 # Kimi 保留式思考真机探针(Kimi 保留式思考历史回传兼容设计单 P2,

@@ -17,7 +17,7 @@ LubanCode 发行包内携带的第三方组件在此逐件声明:组件名、版
   不进用户 PATH——它只由 LubanCode 的 `search` 工具经 exe 相对路径调用,
   不是给全系统装的 `rg` 命令。
 - 三平台资产(archive、SHA-256、archive 内成员路径)见
-  `third_party/ripgrep/manifest.json`;哈希由 `scripts/fetch_ripgrep.py`
+  `third_party/ripgrep/manifest.json`;哈希由 `scripts/fetch_ripgrep.sh`
   下载后重算核对,Release 流水线再独立重算一遍。
 - 取包取舍:Linux 取上游 amd64 `.deb` 内的 `usr/bin/rg`——实测 static-pie
   静态链接(musl 系,`ldd` 零动态依赖),非 glibc 动态构建。曾因上游
