@@ -385,11 +385,8 @@ class WsClient {
       const timer = setTimeout(() => reject(new Error('请求超时: ' + method)), 60000);
       self.send({ id: id, method: method, params: params || {} });
       const poll = function () {
-        if (self.closed) {
-          clearTimeout(timer);
-          reject(new Error('连接已断: ' + method));
-          return;
-        }
+        // 先查信箱再判断线:应答与 close 帧可能同一段到(shutdown 就是这
+        // 形状——回了再收线),先到先得,不许拿断线盖过应答。
         for (let i = 0; i < self.inbox.length; ++i) {
           if (self.inbox[i].id === id) {
             const reply = self.inbox.splice(i, 1)[0];
@@ -397,6 +394,11 @@ class WsClient {
             resolve(reply);
             return;
           }
+        }
+        if (self.closed) {
+          clearTimeout(timer);
+          reject(new Error('连接已断: ' + method));
+          return;
         }
         setTimeout(poll, 25);
       };
