@@ -1,0 +1,183 @@
+# 回合记忆抽取 JSON 失败：引号转义、解析收口与失败诊断
+
+- 状态：待实施；已查源码、已用项目 JSON 库跑最小复现。
+- 日期：2026-09-14
+- 级别：P1；字段类型异常越过抽取失败边界，须优先补齐。
+- 范围：memory 抽取提示、解析、采样结果收口、错误显示、旁路诊断与测试。
+- 关联：`记忆写入调度_显式保存门控批处理与成本账.todo`、`失败与恢复_写账闸门工具结果与重试收口.todo`。
+- 边界：本单不改记忆权限、review/auto 闸门、召回算法或默认模型；暂不展开批处理调度。
+
+## 一、结论与证据边界
+
+用户日志：
+
+```text
+[memory] 回合总结(code)… · cheap:minimax-m3
+[memory] 回合总结失败,本轮跳过: 抽取输出不是合法 JSON:
+[json.exception.parse_error.101] parse error at line 1, column 43:
+syntax error while parsing object - invalid literal;
+last read: '"用户问"�'; expected '}'
+```
+
+已确认：回合尾抽取拿到文本，截出花括号片段，JSON 解析失败。此处直接返回，尚未处理本次候选。
+提示词要求输出 JSON，宿主却没有给这次请求接结构校验与格式恢复流程。
+
+高疑原因：summary 里混入未转义双引号，字符串提前结束，后续汉字落到字符串外。
+也可能是缺逗号或别处语法损坏，必须看原始响应才能定案。
+
+日志里的 `�` 不能单独证明模型输出、网络或终端编码坏了。用项目现有 nlohmann/json
+头文件已复现：输入全是合法 UTF-8，仅引号出错，异常文本照样带 `�`。
+
+本轮未取得事故对应的原始响应、实际 wire 请求、stop_reason 与运行二进制版本。
+不把当前源码等同于事故当时版本，不据此认定 minimax-m3 本身有缺陷。
+日志上方 `Worked for 22s` 也不能直接当作这次抽取耗时。
+
+## 二、源码调用链
+
+```text
+ExtractTurnMemory
+  → BuildTurnTranscript / BuildExtractionSystemPrompt
+  → ModelRouterService::Sample(MemoryExtract)
+  → SampleModel → MessageAssembler
+  → FinishMemoryExtraction
+  → ParseExtractionJson
+  → 失败：打印提示、记失败账、return
+  → 成功：更新检索词、处理候选、沿既有闸门排写入任务
+```
+
+以下行号取自本次工作区；实施时以符号为准。
+
+| 落点 | 当前行为 | 缺口 |
+| --- | --- | --- |
+| `src/app/commands/memory_commands.cpp:609` | 构造 SampleCall；请求 max_tokens=1500，timeout=45 秒 | 调用未接 schema，也没有格式失败后的重试 |
+| `src/app/model_router.hpp:76`、`src/app/model_router.cpp:127` | SampleCall 只传 system/messages/max_tokens，路由补模型与 effort | 不能从这里传 output_schema 或 enforce_output_limit |
+| `src/agent/sample_model.hpp` 的 SampleRequest | 已有 output_schema，但仅做本地复检，不上 wire | 不能把这个字段当成 provider 强制 JSON 能力 |
+| `src/agent/sample_model.cpp` 的 SampleModel | 拼接 TextBlock，保留 stop_reason；发送无错且无 StreamError 即 ok=true | 采样成功不等于抽取文本完整、合法 |
+| `src/app/memory_extract.cpp:229` | 只查 sampled.ok 和正文是否为空，随后解析 | 未按 stop_reason 分清长度截断；未检查 schema_ok |
+| `src/app/memory_extract.cpp:129` | 从首个 `{` 截到最后一个 `}`，再严格解析 | 围栏可过；多对象、正文含花括号、未转义引号仍会失败或取错片段 |
+| `src/app/memory_extract.cpp:145` | 用 root.value/item.value 取字符串 | 字段类型错会抛 type_error；这些语句在 parse 的 catch 外 |
+| `src/app/memory_extract.cpp:645` | 多种抽取错误统一映成 parse_failed | 分不清语法错、编码错、字段错、截断 |
+| `src/app/commands/memory_commands.cpp:647` | 把异常文本直接送终端，再记失败账并返回 | 异常夹带片段、半个 UTF-8 字符，既难读也难定位 |
+| `src/prompts/features/memory-summary-base.md:7` | 要求只输出 JSON，给了一份格式模板 | 未专门示范正文引号、反斜杠、换行如何转义 |
+
+转写截断用 Utf8PrefixBoundary（memory_extract.cpp 的 ClipBytes/BuildTurnTranscript）。
+MessageAssembler 对 TextDelta 直接追加字节（src/api/assembler.cpp:71）。这些代码不能证明
+整条 wire 链无误，却足以说明：现在不该见到 `�` 就去改中文编码。
+
+另记一项预算边界：1500 是调用方请求值。本路未启用 enforce_output_limit；事故实际出站
+上限须对照 backend 最终请求与配置覆盖，不能只读这一处赋值便当成硬上限。
+
+## 三、最小复现
+
+本轮用 g++ 编译独立小程序，包含项目现有头文件目录：
+`build/release/_deps/nlohmann_json-src/include`。未调用 provider，未改生产源码。
+
+输入：
+
+```json
+{"task_type":"code","summary":"用户问"问题"","candidates":[]}
+```
+
+执行 nlohmann::json::parse 后得到：
+
+```text
+[json.exception.parse_error.101] parse error at line 1, column 42:
+syntax error while parsing object - invalid literal;
+last read: '"用户问"�'; expected '}'
+```
+
+与事故日志差一个字节位置，错误类型、上下文和 expected 内容一致。
+输入里的“问”是完整 UTF-8；异常末尾只留下首字节 E9，随后便接 ASCII 单引号。
+终端显示 `�`，源头在诊断字符串，不必先假定输入乱码。
+
+正确写法：
+
+```json
+{"task_type":"code","summary":"用户问\"问题\"","candidates":[]}
+```
+
+还复现了两项解析边界：
+
+- `{"summary":42}`：parse 成功，随后 value("summary", std::string()) 抛 type_error.302。
+- `{}`：目前接受，summary 落空。缺字段应否接受，需要明确合同，不能靠默认值掩过去。
+
+上述结果只证明故障机制可复现，不证明拿到了事故原文。
+
+## 四、修复合同
+
+1. 模型文本按不可信输入处理；语法、编码、字段错均从抽取接口返回稳定错误，不能越过这层抛出。
+2. 任何失败都不得排候选或记“写入成功”；主回合已完成的回答与工具效果保持原状。
+3. 不用正则盲补引号、逗号、花括号，不从半截对象中捞候选入库。
+4. 围栏兼容限定为明确包装；遇到多对象或歧义文本，拒绝选一个碰运气。
+5. 成功解析也要走既有证据、敏感信息与 review/auto 闸门；修格式不授予额外写权限。
+6. 失败请求照记 usage；重试若启用，每一发另记请求与费用，同一结果只采用一次。
+7. 保留 cheap 路由与现有默认配置，不拿换模型、加 token 当已证实根因。
+
+## 五、分期落地
+
+### P0-A：补事故证据与安全诊断
+
+- [ ] 若对应 V3 旁路轨迹仍在，按 purpose=memory_extract 定位 request/output，核对模型、wire、版本、stop_reason、usage 与原文；缺失就如实标注。
+- [ ] 定义结构化抽取错误：syntax_invalid、utf8_invalid、schema_invalid、output_truncated、empty_output、transport_failed；兼容旧 parse_failed 消费方。
+- [ ] 诊断记录关联请求 ID、正文总字节数、错误字节偏移、UTF-8 校验结果与结束原因；区分截取片段偏移和原文偏移。
+- [ ] 终端只显示短错误与定位号；不直接透传含 last read 的库异常。确需查原文时复用受控轨迹，不新建默认明文转储。
+- [ ] 将本单最小复现纳入回归夹具。UTF-8 输出诊断须合法；不得把密钥或整段聊天塞进错误账。
+
+验收：能分清“输入字节坏了”和“合法中文落在 JSON 字符串外”；没有原文时给出待核实结论。
+
+### P0-B：收住解析与字段异常
+
+- [ ] 先校验完整响应 UTF-8，再按明确规则处理纯 JSON 或单层围栏；保留已有无歧义前后说明兼容须写明规则并加用例。
+- [ ] 替换首 `{` / 末 `}` 的盲截法；字符串转义、嵌套、多个对象都要有确定结果。
+- [ ] 定义字段合同：顶层必须 object；summary 等字符串字段显式检查；缺必填字段、null、数字、数组须返回字段路径。
+- [ ] 明确候选字段出错策略：结构类型错拒绝整次抽取；无效业务候选可沿既有规则跳过，禁止静默类型转换。
+- [ ] 覆盖整段 JSON 解码与字段提取的 nlohmann 异常边界，向上返回 expected 错误。
+- [ ] FinishMemoryExtraction 检查已知截断结束原因；未知/缺失结束原因单列诊断，不仅凭空值判失败或判完整。
+
+验收：坏 JSON、错字段和半截输出只让本轮抽取失败；不会越界抛出，也不会新增候选/job。
+
+### P1-A：压低格式出错率
+
+- [ ] 给基础提示补一份真正可输出的短样例，展示双引号、Windows 反斜杠、换行转义及 candidates=[]。
+- [ ] 统一两条入口：RunMemoryExtraction 与 ModelRouterService 调用链使用同一字段合同和收口函数。
+- [ ] 如复用 SampleRequest.output_schema，先补 SampleCall 透传和 schema_ok 消费；检查公共本地校验对 discarded JSON 的处理，不能只用 is_null 判断 parse 失败。
+- [ ] 核对请求输出上限与最终 wire 上限。增加候选正文预算，先减冗长输出；不要无证据扩大默认上限。
+- [ ] provider 结构化输出另按实际 wire 能力接入。能用才用，不支持则保留本地校验；仅设置 output_schema 不算已接通。
+
+验收：两条入口对同一文本给出同一结果；本地 schema 校验、provider 约束、最终字段验证各自有证据。
+
+### P1-B：可选、有预算的格式重试
+
+- [ ] 前两批完成后再评估一次重试；默认不开。仅对明确格式错使用，取消、权限/鉴权错误不得触发。
+- [ ] 若启用，最多补一发，限定总耗时与 token 预算，沿原路由重新生成；不重跑主 Agent 或工具。
+- [ ] 原始响应若带入重试，只能当待校验数据；生成结果重新过全部字段与写入闸门。
+- [ ] 两发请求分别记 usage/耗时，记录最终是否采用；最终失败照常跳过，不称已修复。
+
+验收：第一次坏、第二次好只产生一组候选；连续失败不循环，不漏账，不拖成无限等待。
+
+## 六、测试与收官证据
+
+扩展现有 `tests/unit/memory/test_memory_extract.cpp`，按需补
+`tests/unit/agent/test_sample_model.cpp`、`tests/unit/memory/test_model_router.cpp`
+及回合尾宿主集成测试。测试这些行为：
+
+| 场景 | 预期 |
+| --- | --- |
+| 引号已转义、中文引号、中文/emoji、Windows 路径、转义换行 | 合法内容完整保留 |
+| 本单引号错误、漏逗号、全角标点落在语法位置 | syntax_invalid；诊断能正确显示 |
+| 真正残缺 UTF-8 与合法 UTF-8 语法错 | 分类不同 |
+| `{}`、顶层数组、字段 null/数字/对象、候选字段类型错 | 按合同拒绝，不抛出 |
+| 围栏、前后说明、字符串内花括号、多对象、外层截断但内层已有 `}` | 只接受无歧义包装，不误收半截对象 |
+| max_tokens/length 结束、缺收尾事件、空正文、StreamError | 分类准确；失败账保留 |
+| JSON 错发生于已完成主回合之后 | 主回答保留，候选/job 数不增加 |
+| 重试成功与连续失败（仅在实现后） | 请求数有界、费用齐全、只采用一次 |
+
+收官时附三层证据：纯函数回归、fake backend 到回合尾的集成、真实配置的 provider 验证。
+真实验证记录模型/wire、有效输出上限、stop_reason、失败类别与样本数；报告本轮观察值，
+不把少量成功样本写成“再不会失败”。没有跑真 provider，就保留未验证标记。
+
+## 七、本轮交付记录
+
+- 已查当前源码与现有测试，独立 C++ 探针复现同款 parse_error 和字段 type_error。
+- 只新增这份 TODO；未修改生产代码，未跑全仓测试，未调用真实模型。
+- 事故原始响应仍缺；具体是哪一个引号或字节出错，待按 P0-A 核实。
