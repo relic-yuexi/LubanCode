@@ -195,7 +195,10 @@ TEST_CASE("TightenFilePermissions:过宽文件收紧后过生产读取器") {
         PACL dacl = nullptr;
         BOOL present = FALSE, defaulted = FALSE;
         const BOOL got = GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted);
-        REQUIRE(got && present && dacl != nullptr);
+        // doctest 在 MSVC 分解不动 && 链(Expression Too Complex)——拆成单目断言
+        REQUIRE(got);
+        REQUIRE(present);
+        REQUIRE(dacl != nullptr);
         REQUIRE(SetNamedSecurityInfoW(const_cast<LPWSTR>(written->wstring().c_str()),
                                       SE_FILE_OBJECT, DACL_SECURITY_INFORMATION |
                                               PROTECTED_DACL_SECURITY_INFORMATION,
