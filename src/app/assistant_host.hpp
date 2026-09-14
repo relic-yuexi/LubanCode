@@ -16,9 +16,12 @@
 //   - 页面立即聊天:只经 AppServer 的 turn/start(一场 thread 同拍一轮,
 //     kErrTurnAlreadyRunning 明拒;clientOperationId 同键回原受理,不双跑);
 //   - 后台/定时任务:Gateway 调度(AutomationStore→GatewayAutomationPump)。
-//     本类留有装配缝(W0 注记):RunGateway→服务提取正由另一工位在做,
-//     这里不提取、不另起工作泵;提取并进后在此挂复合泵,页面任务入口
-//     (W2)经同一 AutomationStore 控制服务进账,不经聊天线。
+//     本类留有装配缝(W0 注记):共用启动服务已提取为 app/gateway_launch
+//     (GatewayLaunchPlan/RunGatewayWithPlan,#82)。那是一只阻塞的整进程
+//     启动器(自带 profile 锁/信号/停机合同),不能当泵内嵌进本宿主——
+//     并轨(助理进程内驱动 Gateway 调度,还是进程分工)归 W2 页面任务
+//     入口接线时定案,这里不硬改;届时页面任务入口经同一 AutomationStore
+//     控制服务进账,不经聊天线。
 //
 // 启动与停止(§四):
 //   - 默认系统分配端口、只绑 127.0.0.1;指定端口被占准确报错不偷换;

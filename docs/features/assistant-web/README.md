@@ -58,11 +58,13 @@ lubancode assistant --port 8765 --profile default
 聊天线与调度线不共享输入入口:页面输入只经 WS 协议,定时输入只经
 AutomationStore。两线复用同一 SessionService 执行事实与 workspaces 账。
 
-**装配缝(W0 注记)**:`RunGateway → 服务提取` 正由并行工位进行;本单
-不提取、不另起工作泵。`AssistantHost`
-(src/app/assistant_host.cpp)的装配序里,Gateway 复合泵的挂点在
-`RunAssistantMode` 第 6 步之后留白(泵就绪后在此挂 ShutdownHook 与
-tick,页面任务入口经同一 AutomationStore 控制服务进账,不经聊天线)。
+**装配缝(W0 注记,2026-09-15 更新)**:共用启动服务已由 #82 提取为
+`app/gateway_launch`(GatewayLaunchPlan/RunGatewayWithPlan,gateway run
+与 `lubancode im` 同用)。它是一只阻塞的整进程启动器——自带 profile 锁、
+信号处理与停机合同,不能当工作泵内嵌进 AssistantHost。并轨方案(助理
+进程内驱动 Gateway 调度,还是两进程分工、页面任务入口经控制命令面进
+AutomationStore)归 W2 页面任务入口接线时定案;本单不硬改,聊天线与
+调度线的输入路由已按上表冻结。
 
 ## 四、助理扩展方法面(additive,只在助理模式挂)
 

@@ -59,7 +59,7 @@ QQ / 飞书（待实现） → 各自适配器 → Channel Bridge → 同一宿�
 
 - [ ] Web 聊天与 QQ 聊天共用服务与权限规则，不强行合并成同一会话。页面可以查看已授权的渠道会话；会话来源、workspace、任务归属和回复目标必须明确。
 - [ ] 每个 task/turn 只由一个执行器持有；AppServer 的立即聊天执行路径与 Gateway 后台路径做明确路由，不能同一输入被两边各跑一次。
-  - [x] W0 冻结（2026-09-15）：聊天线只经 turn/start（一场同拍一轮 + clientOperationId 幂等），定时线只经 AutomationStore；合同与路由表见 `docs/features/assistant-web/README.md` §三。测试：`tests/unit/app_server/test_app_server_detached.cpp`（同键零重跑）、`web/assistant/run_e2e.js` 幕3。Gateway 侧装配缝留给共用启动服务提取工位（W0 注记）。
+  - [x] W0 冻结（2026-09-15）：聊天线只经 turn/start（一场同拍一轮 + clientOperationId 幂等），定时线只经 AutomationStore；合同与路由表见 `docs/features/assistant-web/README.md` §三。测试：`tests/unit/app_server/test_app_server_detached.cpp`（同键零重跑）、`web/assistant/run_e2e.js` 幕3。Gateway 侧装配缝：共用启动服务已由 #82 提取为 `app/gateway_launch`（GatewayLaunchPlan/RunGatewayWithPlan，阻塞整进程启动器，不能当泵内嵌）；与助理宿主的并轨归 W2 页面任务入口接线时定案。
 - [ ] 同进程不等于共享所有可变对象。模型连接按会话/回合冻结，任务启动后改模型配置不追改在途请求；工具表、审批 broker、锁的线程与生命周期合同先写再接线。
 - [ ] 有界网络/订阅队列与执行线程分开，长模型请求不能堵 HTTP、取消、心跳或停止；慢浏览器不得拖住持久提交与任务执行。
 
@@ -73,7 +73,7 @@ lubancode assistant --no-open
 lubancode assistant --port 8765 --profile default
 ```
 
-- [x] 默认解析参数根/状态根和工作目录，获取 profile 锁，启动 C++ 服务及 Gateway 工作泵；监听成功、接口就绪后才打开浏览器。（W1：`src/app/assistant_host.cpp` `RunAssistantMode`；Gateway 工作泵是装配缝，W0 注记留给提取工位）
+- [x] 默认解析参数根/状态根和工作目录，获取 profile 锁，启动 C++ 服务及 Gateway 工作泵；监听成功、接口就绪后才打开浏览器。（W1：`src/app/assistant_host.cpp` `RunAssistantMode`；Gateway 工作泵并轨是装配缝——共用启动服务 `app/gateway_launch`（#82）已存在,与宿主并轨归 W2）
 - [x] 不指定端口时由系统分配可用本地端口；打印实际 URL。指定端口被占用时准确报错，不偷偷换端口。浏览器打开失败仍保留可复制的地址。（W1：`LocalWebServer::Start` 端口门；测试 `test_local_web_server.cpp` 端口冲突案、`run_e2e.js` 幕1/幕6）
 - [x] 默认只绑定 127.0.0.1；若支持 IPv6 回环，单独处理地址和 Host 校验。首版拒绝非回环监听，远程访问不能靠改 host 参数无声开启。（W1：非回环绑定启动即拒，`test_local_web_server.cpp`；IPv6 回环未做，如实留账）
 - [x] 重复启动同一 profile：先验证现存实例身份、健康与控制端点，只打开其页面；探测失败或锁不明则报错，不杀原进程、不复用可疑 URL。同一账号仍不能被其他 profile 重复占用。（W1：锁账 + /healthz 对 bootId + /control/open；`run_e2e.js` 幕6；“同账号不被其他 profile 重复占用”归账号锁批次，未做）
@@ -137,7 +137,7 @@ lubancode assistant --port 8765 --profile default
 
 ## 九、实施批次与验收
 
-1. W0：冻结助理模式/接口/任务归属与断线合同，提取共用启动服务。复用总计划 V0/V1，不先做整套 SDK 重构。——合同部分已落（2026-09-15）：`ServerOptions::WorkLifetime` + 能力声明扩展口 + 路由表（`docs/features/assistant-web/README.md`）；“提取共用启动服务”归并行工位（RunGateway→服务提取），AssistantHost 留装配缝未提取。
+1. W0：冻结助理模式/接口/任务归属与断线合同，提取共用启动服务。复用总计划 V0/V1，不先做整套 SDK 重构。——合同部分已落（2026-09-15）：`ServerOptions::WorkLifetime` + 能力声明扩展口 + 路由表（`docs/features/assistant-web/README.md`）；共用启动服务已由 #82 提取（`app/gateway_launch`，gateway run 与 `lubancode im` 同用），与助理宿主的并轨（阻塞启动器进助理进程，还是进程分工）归 W2 任务入口接线时定案。
 2. W1：C++ 本地 HTTP + 随包网页 + 认证 + 聊天。无 IM 完成配置模型、真实对话、刷新恢复；关网页后已受理任务继续执行。——已落（2026-09-15）：`lubancode assistant`（cli_options/cli_app 新增块）+ `LocalWebServer` + `web/assistant/` 三件 + `config/*` 方法面；真 exe + 假模型 e2e（`e2e.assistant.web`）覆盖启动→配置→对话→刷新恢复→关页任务不死→重复启动/端口/接管。真实模型与真实浏览器未验（如实）。
 3. W2：单次任务、结果、审批、重连补账。网页创建任务，关闭网页，到点完成，重开后能查到结果；两次提交不重复执行。
 4. W3：渠道设置并入主界面，复用 QQ 证书/日志/安全配置修复；平台在线、配对、收发两轮文字验收。IM 快捷命令只做渠道配置/启动便利入口。
