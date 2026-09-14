@@ -505,8 +505,15 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
       registry_factory_(std::move(registry_factory)),
       workspaces_dir_(options_.workspaces_dir) {
     dispatcher_ = std::make_shared<Dispatcher>();
-    dispatcher_->SetInitializeResultFactory(
-        [this]() { return MakeInitializeResult(options_.lubancode_version, PlatformId()); });
+    dispatcher_->SetInitializeResultFactory([this]() {
+        nlohmann::json result = MakeInitializeResult(options_.lubancode_version, PlatformId());
+        // 助理模式扩展口(W0):宿主加 capabilities.mode/workLifetime 与自家
+        // 方法名;空 = 基线原样,独立 app-server 语义零变化。
+        if (options_.initialize_result_extender) {
+            result = options_.initialize_result_extender(std::move(result));
+        }
+        return result;
+    });
     // P9 收尾 + P0-2 换账:会话查询/搬删的执行体吃 workspace 新账
     //(索引投影 + 管理自由函数)。workspaces_dir 空(测试纯内存跑)= 没建,
     // list 给空表。scope=cwd 的默认 workspace 按服务 cwd 裁决。
@@ -538,6 +545,10 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
             });
     }
     RegisterMethods(*dispatcher_);
+    // 助理模式扩展方法面(W0 接缝):stdio dispatcher 铸好后挂宿主方法。
+    if (options_.extra_method_registrar) {
+        options_.extra_method_registrar(*dispatcher_);
+    }
 }
 
 // 服务进程默认 workspace 的 key:按 options_.cwd 四级裁决(P0-1 同一颗
@@ -2465,6 +2476,10 @@ Server::WsServeOutcome Server::ServeWsConnection(WsTransport& transport) {
 }
 
 Server::WsServeOutcome Server::ServeWsSession(std::unique_ptr<WsTransport::Session> session) {
+    return ServeWsSessionBorrowed(session);
+}
+
+Server::WsServeOutcome Server::ServeWsSessionBorrowed(std::unique_ptr<WsTransport::Session>& session) {
     // 每条连接新铸 dispatcher:握手状态机(先 initialize 才放业务)是
     // 连接级的,跨连接复用会把第二条连接卡死在 kErrNotInitialized 之外
     // 的所有岔路上。
@@ -2502,10 +2517,18 @@ Server::WsServeOutcome Server::ServeWsSession(std::unique_ptr<WsTransport::Sessi
     }
     connection->Run();
     const bool exit_requested = connection->close_requested();
-    // 这条连接收线:打断还挂在它身上的回合(分离出去的僵尸线程经
-    // EmitEventSafe 快照,扑不空),thread 账与浏览器会话不动——重连的
-    // 外壳凭 cursor(query 类方法)补账,老 threadId 还能继续用。
-    InterruptRunningTurns();
+    // 这条连接收线:按断线合同分两路(W0 冻结)。
+    //   SessionBound(旧语义,缺省):打断还挂在它身上的回合(分离出去的
+    //     僵尸线程经 EmitEventSafe 快照,扑不空),thread 账与浏览器会话
+    //     不动——重连的外壳凭 cursor(query 类方法)补账,老 threadId 还能
+    //     继续用。"停止连接 = 停止工作"。
+    //   Detached(助理模式):只撤订阅(下面 connection_.reset() 摘掉事件
+    //     出口),已受理的回合照跑到终态、落账。停止任务是 turn/interrupt,
+    //     停止助理是 shutdown——断线不是其中任何一个。重连/刷新走领域
+    //     快照(thread/read、trace/query、operation/read)补账。
+    if (options_.work_lifetime == ServerOptions::WorkLifetime::SessionBound) {
+        InterruptRunningTurns();
+    }
     {
         std::lock_guard<std::mutex> lock(connection_mutex_);
         connection_.reset();
@@ -2515,9 +2538,18 @@ Server::WsServeOutcome Server::ServeWsSession(std::unique_ptr<WsTransport::Sessi
 
 std::shared_ptr<Dispatcher> Server::MakeWsDispatcher() {
     const std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
-    dispatcher->SetInitializeResultFactory(
-        [this]() { return MakeInitializeResult(options_.lubancode_version, PlatformId()); });
+    dispatcher->SetInitializeResultFactory([this]() {
+        nlohmann::json result = MakeInitializeResult(options_.lubancode_version, PlatformId());
+        if (options_.initialize_result_extender) {
+            result = options_.initialize_result_extender(std::move(result));
+        }
+        return result;
+    });
     RegisterMethods(*dispatcher);
+    // 助理模式扩展方法面(W0 接缝):每条 WS 连接的 dispatcher 同样挂上。
+    if (options_.extra_method_registrar) {
+        options_.extra_method_registrar(*dispatcher);
+    }
     return dispatcher;
 }
 

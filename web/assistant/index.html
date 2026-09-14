@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LubanCode 助理</title>
+  <link rel="stylesheet" href="assistant.css" />
+</head>
+<body>
+  <header id="topbar">
+    <span class="brand">LubanCode 助理</span>
+    <span id="conn-state" class="state off">未连接</span>
+    <span id="assistant-meta" class="meta"></span>
+    <nav id="topnav">
+      <button type="button" data-view="chat" class="active" aria-current="page">聊天</button>
+      <button type="button" data-view="config">设置</button>
+      <!-- 任务/结果/审批入口:W2 起接线,先占位(不冒充已实现) -->
+      <button type="button" data-view="tasks" disabled title="任务入口在下一批接线">任务(未开)</button>
+    </nav>
+  </header>
+
+  <main id="layout">
+    <!-- 聊天:历史列表 + 消息流 + 输入 -->
+    <section id="chat-view" class="view">
+      <aside id="history-panel" aria-label="历史会话">
+        <div class="panel-head">
+          <h2>历史</h2>
+          <button type="button" id="new-thread-button">新会话</button>
+        </div>
+        <ul id="thread-list"></ul>
+      </aside>
+      <section id="chat-panel" aria-label="聊天">
+        <div class="toolbar">
+          <span id="thread-id-label"></span>
+          <span id="turn-status-label"></span>
+        </div>
+        <ol id="transcript" aria-live="polite"></ol>
+        <form id="composer">
+          <textarea id="say-input" rows="2" placeholder="问一句(Enter 发送,Shift+Enter 换行)" autocomplete="off"></textarea>
+          <button type="submit" id="send-button">发送</button>
+          <button type="button" id="interrupt-button" title="停止当前任务(不停止助理)">停止任务</button>
+        </form>
+      </section>
+    </section>
+
+    <!-- 设置:模型配置(首配流程)+ 实例信息 -->
+    <section id="config-view" class="view" hidden>
+      <div class="panel" id="config-panel">
+        <h2>模型</h2>
+        <p id="config-status-line" class="hint"></p>
+        <form id="config-form">
+          <label>协议
+            <select id="config-wire">
+              <option value="anthropic">anthropic</option>
+              <option value="chat">chat(OpenAI 兼容)</option>
+              <option value="responses">responses</option>
+            </select>
+          </label>
+          <label>Base URL<input id="config-base-url" type="text" placeholder="https://api.example.com" autocomplete="off" /></label>
+          <label>API Key<input id="config-api-key" type="password" placeholder="只提交不回显" autocomplete="new-password" /></label>
+          <label>模型名<input id="config-model" type="text" placeholder="claude-sonnet-4 / glm-4.7 / …" autocomplete="off" /></label>
+          <div class="row">
+            <button type="submit" id="config-save-button">保存</button>
+            <button type="button" id="config-test-button">测试连接</button>
+            <span id="config-save-result"></span>
+            <span id="config-test-result"></span>
+          </div>
+        </form>
+        <h2>运行信息</h2>
+        <dl id="assistant-info"></dl>
+        <div class="row danger">
+          <button type="button" id="stop-assistant-button" title="停止整个助理进程(在跑任务按打断收口)">停止助理</button>
+          <span class="hint">停止任务是上面的"停止任务";停止助理会结束本进程。</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 任务占位(W2 接线) -->
+    <section id="tasks-view" class="view" hidden>
+      <div class="panel">
+        <h2>任务</h2>
+        <p class="hint">任务入口在下一批(W2)接线:单次任务、结果、审批都会在这里。当前版本先交付聊天与模型配置。</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- 配对/占用提示层 -->
+  <div id="notice-overlay" hidden>
+    <div id="notice-box">
+      <h3 id="notice-title"></h3>
+      <p id="notice-body"></p>
+      <div class="row"><button type="button" id="notice-action" hidden></button></div>
+    </div>
+  </div>
+
+  <script src="assistant_core.js"></script>
+  <script src="assistant_app.js"></script>
+</body>
+</html>

@@ -59,13 +59,24 @@ std::string MakeUpgradeResponse(std::string_view accept_key);
 // 普通请求头解析(只服务上面那一类 GET,别的方法不认)。头部名不区分
 // 大小写;值两侧空白宽容。坏形状(不是请求行开头/没有行尾)给空 method,
 // 调用方按"非 GET"落 400。
+// 助理 Web 单 W1 起 additive 多挑四枚头:Host/Origin/Cookie/Content-Length
+// (本地服务的同源校验与 bootstrap 交换要吃);老调用方零感知。
 struct HttpRequestHead {
     std::string method;        // 请求行的方法(原文,约定大写)
     std::string target;        // 目标路径(不含查询串)
     std::string query;         // 查询串(去开头的 ?;没有则空)
     std::string bearer_token;  // Authorization: Bearer <token>(没有则空)
+    std::string host;          // Host 头(原文;同源/DNS rebinding 校验用)
+    std::string origin;        // Origin 头(浏览器跨站防护校验用;非浏览器可空)
+    std::string cookie;        // Cookie 头(原文整串;会话 cookie 从这里挑)
+    std::size_t content_length = 0;        // Content-Length(没写/坏形状 = 0)
+    bool has_content_length = false;       // 头里到底写没写 Content-Length
 };
 HttpRequestHead ParseHttpRequestHead(std::string_view request_bytes);
+
+// Cookie 头里挑一枚 cookie 的值(按 "; " 分段,名侧空白宽容)。没有给空串。
+// 纯函数,单测直接钉。
+std::string CookieValue(const std::string& cookie_header, std::string_view name);
 
 // 查询串取参数值(?token=... 用;百分号解码,%XX 之外的 % 原样保留)。
 std::string QueryParam(const std::string& query, std::string_view name);

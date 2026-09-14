@@ -1201,6 +1201,10 @@ add_library(lubancode_app STATIC
   src/app_server/ws_frames.cpp
   src/app_server/ws_sockets.cpp
   src/app_server/ws_transport.cpp
+  # 常驻助理 Web 主界面单 W1:本地 Web 承载(同源门/静态白名单/bootstrap
+  # 交换/WS 升级交棒)与 assistant 子命令宿主(Detached 断线合同)。
+  src/app_server/local_web_server.cpp
+  src/app/assistant_host.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp
@@ -1382,6 +1386,23 @@ add_custom_target(lubancode_official_docs ALL
   COMMENT "lubancode: 同步官方 docs 到程序目录"
   VERBATIM)
 add_dependencies(lubancode_official_docs lubancode)
+
+# 助理主界面的随包网页(常驻助理 Web 主界面单 W1,§九发布验收:HTML/JS/
+# CSS 随包、无外部 CDN)。开发构建把 web/assistant 镜到可执行文件旁——
+# assistant 子命令按 <exe-dir>/web/assistant 定位(skills/docs 同款布局,
+# 发布包由安装/打包脚本保持同一相对结构)。资源缺失由 LocalWebServer
+# 启动门明拒(不起空壳服务),这里是镜像不是校验。
+file(GLOB _lubancode_assistant_web_files CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/web/assistant/*")
+add_custom_target(lubancode_assistant_web ALL
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:lubancode>/web"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/web"
+          "$<TARGET_FILE_DIR:lubancode>/web"
+  DEPENDS ${_lubancode_assistant_web_files}
+  COMMENT "lubancode: 同步助理主界面网页到程序目录"
+  VERBATIM)
+add_dependencies(lubancode_assistant_web lubancode)
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像

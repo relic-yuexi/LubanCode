@@ -154,6 +154,19 @@ struct ImCliArgs {
     std::string profile;     // --profile;空 = default
 };
 
+// assistant 子命令(常驻助理 Web 主界面单 W1):`lubancode assistant
+// [--no-open] [--port N] [--profile <名>]`。前台进程起本地 Web 服务(只绑
+// 127.0.0.1;端口缺省系统分配,指定端口被占明报不偷换),监听就绪才开
+// 浏览器。--no-open 只打印可复制的 URL。重复启动同 profile:验旧实例身份
+// 只开其页面,不杀原进程。
+struct AssistantCliArgs {
+    bool no_open = false;    // --no-open:不起浏览器,只打印 URL
+    int port = 0;            // --port N:0 = 系统分配
+    bool port_given = false;
+    std::string profile;     // --profile <名>;空 = default
+
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -183,6 +196,8 @@ enum class CliAction {
     BadChannelSetup,          // channel 参数不对:人话已塞进 error_text
     RunIm,                    // im 子命令:统一 IM 选择与启动入口(§六)
     BadIm,                    // im 参数不对:人话已塞进 error_text
+    RunAssistant,             // assistant 子命令:常驻助理 Web 主界面(W1)
+    BadAssistant,             // assistant 子命令参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -197,6 +212,7 @@ struct ParsedCliArgs {
     ChannelStatusCliArgs channel_status;  // action == RunChannelStatus 时有效
     ChannelCliArgs channel;  // action == RunChannelSetup 时有效
     ImCliArgs im;            // action == RunIm 时有效
+    AssistantCliArgs assistant;  // action == RunAssistant 时有效(W1)
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

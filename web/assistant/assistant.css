@@ -1,0 +1,166 @@
+/* LubanCode 助理主界面(W1)。本地资源,无外部字体/CDN。 */
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --line: #ddd9d0;
+  --ink: #26241f;
+  --ink-soft: #6b675e;
+  --accent: #2f6f4f;
+  --accent-ink: #ffffff;
+  --danger: #a3402f;
+  --user-bubble: #e8f0ea;
+  --assistant-bubble: #ffffff;
+  --tool-bubble: #f1efe9;
+  --focus-ring: 2px solid #2f6f4f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1d1c1a;
+    --panel: #26251f;
+    --line: #3d3b33;
+    --ink: #e8e5dc;
+    --ink-soft: #a5a094;
+    --accent: #6fae8c;
+    --accent-ink: #14201a;
+    --danger: #d9816f;
+    --user-bubble: #2b3a31;
+    --assistant-bubble: #26251f;
+    --tool-bubble: #2e2d26;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  background: var(--bg);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+}
+button {
+  font: inherit;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+button:disabled { color: var(--ink-soft); cursor: not-allowed; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.brand { font-weight: 700; }
+.state { font-size: 13px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); }
+.state.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.state.off { color: var(--ink-soft); }
+.meta { font-size: 12px; color: var(--ink-soft); }
+#topnav { margin-left: auto; display: flex; gap: 6px; }
+
+#layout { flex: 1; min-height: 0; display: flex; }
+.view { flex: 1; min-height: 0; display: flex; }
+.view[hidden] { display: none; }
+
+#history-panel {
+  width: 230px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.panel-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; }
+.panel-head h2 { font-size: 14px; margin: 0; }
+#thread-list { list-style: none; margin: 0; padding: 4px; overflow-y: auto; }
+#thread-list li {
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#thread-list li.active { background: var(--user-bubble); color: var(--ink); }
+
+#chat-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.toolbar { padding: 6px 12px; font-size: 12px; color: var(--ink-soft); display: flex; gap: 12px; }
+#transcript {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 10px 14px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.msg {
+  max-width: 78%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.msg.user { align-self: flex-end; background: var(--user-bubble); }
+.msg.assistant { align-self: flex-start; background: var(--assistant-bubble); border: 1px solid var(--line); }
+.msg.tool { align-self: flex-start; background: var(--tool-bubble); font-family: Consolas, monospace; font-size: 12.5px; color: var(--ink-soft); }
+.msg.error { align-self: stretch; border-left: 3px solid var(--danger); color: var(--danger); background: var(--assistant-bubble); }
+.msg .label { display: block; font-size: 11px; color: var(--ink-soft); margin-bottom: 2px; }
+
+#composer {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  align-items: flex-end;
+}
+#say-input { flex: 1; resize: none; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+
+.panel { margin: 18px auto; max-width: 560px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; }
+.panel h2 { font-size: 16px; margin: 8px 0; }
+#config-form { display: flex; flex-direction: column; gap: 10px; }
+#config-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ink-soft); }
+#config-form input, #config-form select {
+  font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink);
+}
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row.danger { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 12px; }
+.row.danger button { border-color: var(--danger); color: var(--danger); }
+.hint { font-size: 12.5px; color: var(--ink-soft); }
+#assistant-info { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; }
+#assistant-info dt { color: var(--ink-soft); }
+#assistant-info dd { margin: 0; word-break: break-all; }
+
+#notice-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; z-index: 30;
+}
+#notice-box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; max-width: 440px; }
+#notice-box h3 { margin-top: 0; }
+#notice-box[hidden], #notice-overlay[hidden] { display: none; }
+
+/* 窄屏(390px 档):历史折叠,聊天占满。 */
+@media (max-width: 640px) {
+  #history-panel { display: none; }
+  .msg { max-width: 92%; }
+  #topnav { margin-left: 0; }
+}

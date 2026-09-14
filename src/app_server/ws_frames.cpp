@@ -307,6 +307,27 @@ HttpRequestHead ParseHttpRequestHead(std::string_view request_bytes) {
             if (scheme_match) {
                 head.bearer_token = std::string(value.substr(kBearer.size()));
             }
+        } else if (name == "host") {
+            head.host = std::string(value);
+        } else if (name == "origin") {
+            head.origin = std::string(value);
+        } else if (name == "cookie") {
+            head.cookie = std::string(value);
+        } else if (name == "content-length") {
+            // 纯数字才认;非数字留给调用方按"没有 body"处理(只读面)。
+            bool digits = !value.empty() && value.size() <= 10;
+            unsigned long long length = 0;
+            for (const char c : value) {
+                if (c < '0' || c > '9') {
+                    digits = false;
+                    break;
+                }
+                length = length * 10 + static_cast<unsigned long long>(c - '0');
+            }
+            if (digits) {
+                head.content_length = static_cast<std::size_t>(length);
+                head.has_content_length = true;
+            }
         }
         if (line.empty()) {
             break; // 头部收尾,后面不该再有(有也不认)
@@ -333,6 +354,33 @@ int HexValue(char c) {
 }
 
 }  // namespace
+
+std::string CookieValue(const std::string& cookie_header, std::string_view name) {
+    std::size_t pos = 0;
+    while (pos <= cookie_header.size()) {
+        const std::size_t semi = cookie_header.find(';', pos);
+        std::string pair =
+            cookie_header.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        // 名侧空白宽容("a=b; c=d" / "a=b;c=d" 两种摆法都认)。
+        std::size_t start = 0;
+        while (start < pair.size() && (pair[start] == ' ' || pair[start] == '\t')) {
+            ++start;
+        }
+        const std::size_t eq = pair.find('=');
+        if (eq != std::string::npos && std::string_view(pair).substr(start, eq - start) == name) {
+            std::size_t value_end = pair.size();
+            while (value_end > eq + 1 && (pair[value_end - 1] == ' ' || pair[value_end - 1] == '\t')) {
+                --value_end;
+            }
+            return pair.substr(eq + 1, value_end - eq - 1);
+        }
+        if (semi == std::string::npos) {
+            break;
+        }
+        pos = semi + 1;
+    }
+    return std::string();
+}
 
 std::string QueryParam(const std::string& query, std::string_view name) {
     std::size_t pos = 0;

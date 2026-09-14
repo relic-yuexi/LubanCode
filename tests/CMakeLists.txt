@@ -393,6 +393,24 @@ else()
   message(STATUS "node 未找到: Node 外部客户端 e2e(app_server P4)不注册,该腿如实缺此证据")
 endif()
 
+# 常驻助理 Web 主界面单 W1:助理宿主端到端(真 exe + 假模型,零密钥)。
+# web/assistant/run_e2e.js 六幕:启动 URL → 认证门(healthz/静态 401/
+# bootstrap 交换与重放/伪造 Origin)→ 聊天链路(initialize 能力声明 →
+# 首配模型 → 对话 → 幂等重发零重跑)→ 刷新恢复(thread/read)→ 断线
+# 合同(关 WS 后已受理回合跑到 final;占用/接管)→ 重复启动/端口冲突/
+# shutdown。没有 node 的环境不注册,该腿如实缺证据(与上同款注册法)。
+if(LUBANCODE_NODE_E2E_EXECUTABLE)
+  add_test(NAME e2e.assistant.web
+    COMMAND "${LUBANCODE_NODE_E2E_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/web/assistant/run_e2e.js"
+            --binary "$<TARGET_FILE:lubancode>"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(e2e.assistant.web PROPERTIES
+    LABELS "e2e;assistant;e2e.assistant" TIMEOUT 420
+    # 多只真进程 + 假后端 + 端口占用探测,独跑不与其他重测抢资源。
+    RUN_SERIAL TRUE)
+endif()
+
 # 应用Worker接入单 P1 遗留销账:fetch_ripgrep.sh 的数据根解析离线断言。
 # 只跑脚本的 --print-target-root(零网络零下载),矩阵断言
 # RuntimePaths 同一套语义(个人布局/应用根默认 data/显式数据根/坏值明拒)。
