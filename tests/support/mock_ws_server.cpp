@@ -669,14 +669,23 @@ std::expected<MockTlsServer::Connection, std::string> MockTlsServer::AcceptNext(
                         [](void* ctx, const unsigned char* buf, std::size_t len) {
                             const NativeSocket raw =
                                 static_cast<NativeSocket>(reinterpret_cast<long long>(ctx));
-                            const int wrote = static_cast<int>(
-                                ::send(raw, buf, len, 0));
+                            // Winsock 收 char*(MSVC 符号性严格);Linux 写断开的
+                            // 对端须 MSG_NOSIGNAL(macOS 由 accept 后的
+                            // SO_NOSIGPIPE 兜底,与 WriteAllNative 同一套账)。
+#ifdef MSG_NOSIGNAL
+                            const int send_flags = MSG_NOSIGNAL;
+#else
+                            const int send_flags = 0;
+#endif
+                            const int wrote = static_cast<int>(::send(
+                                raw, reinterpret_cast<const char*>(buf), len, send_flags));
                             return wrote <= 0 ? MBEDTLS_ERR_NET_SEND_FAILED : wrote;
                         },
                         [](void* ctx, unsigned char* buf, std::size_t len) {
                             const NativeSocket raw =
                                 static_cast<NativeSocket>(reinterpret_cast<long long>(ctx));
-                            const int got = static_cast<int>(::recv(raw, buf, len, 0));
+                            const int got = static_cast<int>(
+                                ::recv(raw, reinterpret_cast<char*>(buf), len, 0));
                             if (got == 0) {
                                 return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
                             }
