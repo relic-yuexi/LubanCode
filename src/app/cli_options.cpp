@@ -463,38 +463,141 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.gateway = gateway;
             return parsed;
         }
-        // channel 子命令(连接状态单 §三 P0-A):lubancode channel status
-        // <渠道> <账号> [--json]。跨进程只读连接快照;setup 等其余动词是
-        // 配置向导批次的口,这里如实报未实现,不吞参数。
+        // channel 子命令:status(连接状态单 §三 P0-A,跨进程只读连接快照)
+        // 与 setup(QQBot Windows 修复单 §5.1,交互式配置向导)。只认裸词
+        // 打头且此前没有位置参数;形状不对当场退用法。setup 没有任何
+        // --secret/--app-id 旗标——凭据只从向导的隐藏输入或既有
+        // secret_file/secret_env 来,不走 argv。
         if (arg == "channel" && options.positional.empty()) {
-            if (i + 1 >= args.size() || args[i + 1] != "status") {
-                parsed.action = CliAction::BadChannelStatus;
+            const std::size_t rest = args.size() - i - 1;
+            if (rest == 0) {
+                parsed.action = CliAction::BadChannelSetup;
                 parsed.error_text =
-                    "用法: lubancode channel status <渠道> <账号> [--json]"
-                    "(setup 等其余 channel 子命令尚未实现)";
+                    "用法: lubancode channel <status|setup> ...("
+                    "status <渠道> <账号> [--json] 连接快照;"
+                    " setup <平台> [--account <账号>] 配置向导)";
                 return parsed;
             }
-            const std::size_t rest = args.size() - i - 2;
-            if (rest < 2) {
-                parsed.action = CliAction::BadChannelStatus;
-                parsed.error_text = "channel status 需要 <渠道> <账号>(如 qqbot main)";
+            if (args[i + 1] == "status") {
+                const std::size_t status_rest = args.size() - i - 2;
+                if (status_rest < 2) {
+                    parsed.action = CliAction::BadChannelStatus;
+                    parsed.error_text = "channel status 需要 <渠道> <账号>(如 qqbot main)";
+                    return parsed;
+                }
+                ChannelStatusCliArgs channel_status;
+                channel_status.channel_id = args[i + 2];
+                channel_status.account_id = args[i + 3];
+                for (std::size_t extra = i + 4; extra < args.size(); ++extra) {
+                    if (args[extra] == "--json") {
+                        channel_status.json = true;
+                        continue;
+                    }
+                    parsed.action = CliAction::BadChannelStatus;
+                    parsed.error_text = "channel status 认不得参数 \"" + args[extra] +
+                                        "\":只认 --json";
+                    return parsed;
+                }
+                parsed.action = CliAction::RunChannelStatus;
+                parsed.channel_status = channel_status;
                 return parsed;
             }
-            ChannelStatusCliArgs channel_status;
-            channel_status.channel_id = args[i + 2];
-            channel_status.account_id = args[i + 3];
-            for (std::size_t extra = i + 4; extra < args.size(); ++extra) {
-                if (args[extra] == "--json") {
-                    channel_status.json = true;
+            if (args[i + 1] == "setup") {
+                if (rest < 2 || args[i + 2].rfind("--", 0) == 0 || args[i + 2].empty()) {
+                    parsed.action = CliAction::BadChannelSetup;
+                    parsed.error_text = "channel setup 需要一个平台名(如 qqbot): "
+                                        "lubancode channel setup qqbot --account main";
+                    return parsed;
+                }
+                ChannelCliArgs channel_args;
+                channel_args.verb = "setup";
+                channel_args.platform = args[i + 2];
+                for (std::size_t extra = i + 3; extra < args.size(); ++extra) {
+                    if (args[extra] == "--account") {
+                        if (extra + 1 >= args.size() || args[extra + 1].empty() ||
+                            args[extra + 1].rfind("--", 0) == 0) {
+                            parsed.action = CliAction::BadChannelSetup;
+                            parsed.error_text = "--account 需要一个账号名(单段名,如 main)";
+                            return parsed;
+                        }
+                        channel_args.account = args[++extra];
+                        continue;
+                    }
+                    parsed.action = CliAction::BadChannelSetup;
+                    parsed.error_text = "channel setup 认不得参数 \"" + args[extra] +
+                                        "\":只认 --account <账号>";
+                    return parsed;
+                }
+                parsed.action = CliAction::RunChannelSetup;
+                parsed.channel = channel_args;
+                return parsed;
+            }
+            parsed.action = CliAction::BadChannelSetup;
+            parsed.error_text = "channel 认不得子命令 \"" + args[i + 1] +
+                                "\":只认 status(连接快照)与 setup(配置向导)";
+            return parsed;
+        }
+        // im 子命令(§六 6.1):lubancode im [--select] [平台]
+        // [--account <账号>] [--profile <名>];lubancode im setup [...] 只进
+        // 配置管理。只认裸词打头且此前没有位置参数。
+        if (arg == "im" && options.positional.empty()) {
+            ImCliArgs im_args;
+            std::size_t extra = i + 1;
+            if (extra < args.size() && args[extra] == "setup") {
+                im_args.setup = true;
+                ++extra;
+            }
+            if (extra < args.size() && args[extra].rfind("--", 0) != 0 &&
+                !args[extra].empty()) {
+                im_args.platform = args[extra++];  // 位置参数 = 平台名
+            }
+            for (; extra < args.size(); ++extra) {
+                if (args[extra] == "--select") {
+                    im_args.select = true;
                     continue;
                 }
-                parsed.action = CliAction::BadChannelStatus;
-                parsed.error_text = "channel status 认不得参数 \"" + args[extra] +
-                                    "\":只认 --json";
+                if (args[extra] == "--account") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty() ||
+                        args[extra + 1].rfind("--", 0) == 0) {
+                        parsed.action = CliAction::BadIm;
+                        parsed.error_text = "--account 需要一个账号名(单段名,如 main)";
+                        return parsed;
+                    }
+                    im_args.account = args[++extra];
+                    continue;
+                }
+                if (args[extra] == "--profile") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty()) {
+                        parsed.action = CliAction::BadIm;
+                        parsed.error_text = "--profile 需要一个名字(单段名,如 default)";
+                        return parsed;
+                    }
+                    im_args.profile = args[++extra];
+                    continue;
+                }
+                parsed.action = CliAction::BadIm;
+                parsed.error_text =
+                    "im 认不得参数 \"" + args[extra] +
+                    "\":只认 [setup] [平台] --select --account <账号> --profile <名>";
                 return parsed;
             }
-            parsed.action = CliAction::RunChannelStatus;
-            parsed.channel_status = channel_status;
+            if (im_args.platform.empty() && !im_args.account.empty()) {
+                parsed.action = CliAction::BadIm;
+                parsed.error_text = "--account 需要搭配平台: lubancode im <平台> --account <账号>";
+                return parsed;
+            }
+            if (!im_args.profile.empty() && !lubancode::gateway::IsValidGatewayProfileName(im_args.profile)) {
+                parsed.action = CliAction::BadIm;
+                parsed.error_text = "profile 名须是单段名(不带路径): " + im_args.profile;
+                return parsed;
+            }
+            if (im_args.setup && im_args.select) {
+                parsed.action = CliAction::BadIm;
+                parsed.error_text = "im setup 不认 --select(setup 本来就直接进配置管理)";
+                return parsed;
+            }
+            parsed.action = CliAction::RunIm;
+            parsed.im = im_args;
             return parsed;
         }
         if (arg == "--continue") {

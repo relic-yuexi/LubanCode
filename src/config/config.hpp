@@ -1309,6 +1309,16 @@ std::expected<bool, std::string> UpdateProviderModelInConfigFile(const std::stri
 std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,
                                                               const std::string& language);
 
+// 渠道向导的定点更新口(QQBot Windows 修复单 §5.2):读整份原始 JSON
+//(文件不存在回空 object),供调用方只改 channels 子树后走原子写回。
+// WriteConfigObjectAtomic 走 AtomicWriteFile(同目录临时件 + 原子替换),
+// 失败时目标文件保持原样;其余字段(模型、其他账号、未知 JSON 字段)由
+// 调用方原样保留在 root 里,这两个函数不整段重排别人的配置。
+std::expected<nlohmann::json, std::string> ReadConfigObjectForTargetedUpdate(
+    const std::string& file_path);
+std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
+                                                         const nlohmann::json& root);
+
 // providers 段的纯解析与局部回写。回写只改 providers，其余用户字段原样
 // 保留；file_path 不存在时会按需建父目录并起一份 JSON object，便于单测和
 // /provider add 复用。

@@ -132,11 +132,15 @@ bool SidAllowedForCredentialFile(const std::string& sid, const std::string& curr
     return false;
 }
 
-std::expected<void, ChannelCredentialError> CheckFileSecurityWin(const std::wstring& wide_path) {
+// §5.3 权限分类:把"不安全"拆成可处置的几档;CheckFileSecurityWin 消费
+// 同一份结论,读取口径一字不变。
+CredentialFileSecurityReport InspectFileSecurityWin(const std::wstring& wide_path) {
+    CredentialFileSecurityReport report;
     const std::string current_user = CurrentUserSidString();
     if (current_user.empty()) {
-        return std::unexpected(
-            MakeError("secret_file_insecure", "拿不到当前用户 SID,无法核对文件归属"));
+        report.status = CredentialFileSecurityReport::Status::DescriptorUnreadable;
+        report.detail = "拿不到当前用户 SID,无法核对文件归属";
+        return report;
     }
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     PSID owner_sid = nullptr;
@@ -147,9 +151,9 @@ std::expected<void, ChannelCredentialError> CheckFileSecurityWin(const std::wstr
                                                &owner_sid, nullptr, &dacl, nullptr,
                                                &descriptor);
     if (result != ERROR_SUCCESS || descriptor == nullptr) {
-        return std::unexpected(
-            MakeError("secret_file_insecure", "读不到文件安全描述符(错误码 " +
-                                                  std::to_string(result) + ")"));
+        report.status = CredentialFileSecurityReport::Status::DescriptorUnreadable;
+        report.detail = "读不到文件安全描述符(错误码 " + std::to_string(result) + ")";
+        return report;
     }
     LPWSTR owner_wide = nullptr;
     const bool owner_ok = ConvertSidToStringSidW(owner_sid, &owner_wide) && owner_wide != nullptr;
@@ -159,13 +163,16 @@ std::expected<void, ChannelCredentialError> CheckFileSecurityWin(const std::wstr
     }
     if (!owner_ok || owner != current_user) {
         LocalFree(descriptor);
-        return std::unexpected(MakeError("secret_file_insecure",
-                                         "文件归属不是当前用户(owner SID 不符)"));
+        report.status = CredentialFileSecurityReport::Status::OwnerMismatch;
+        report.detail = "文件归属不是当前用户(owner SID 不符)";
+        return report;
     }
     if (dacl == nullptr) {
         // 无 DACL = 全员完全访问,POSIX 侧的 0666 同罪。
         LocalFree(descriptor);
-        return std::unexpected(MakeError("secret_file_insecure", "文件没有 DACL(全员可访问)"));
+        report.status = CredentialFileSecurityReport::Status::NoDacl;
+        report.detail = "文件没有 DACL(全员可访问)";
+        return report;
     }
     for (WORD i = 0; i < dacl->AceCount; ++i) {
         void* ace = nullptr;
@@ -188,13 +195,22 @@ std::expected<void, ChannelCredentialError> CheckFileSecurityWin(const std::wstr
         LocalFree(ace_sid_wide);
         if (!SidAllowedForCredentialFile(ace_sid, current_user)) {
             LocalFree(descriptor);
-            return std::unexpected(
-                MakeError("secret_file_insecure", "DACL 放行了当前用户以外的账户(SID " +
-                                                      ace_sid + ")"));
+            report.status = CredentialFileSecurityReport::Status::DaclTooWide;
+            report.detail = "DACL 放行了当前用户以外的账户(SID " + ace_sid + ")";
+            return report;
         }
     }
     LocalFree(descriptor);
-    return {};
+    report.status = CredentialFileSecurityReport::Status::Ok;
+    return report;
+}
+
+std::expected<void, ChannelCredentialError> CheckFileSecurityWin(const std::wstring& wide_path) {
+    const CredentialFileSecurityReport report = InspectFileSecurityWin(wide_path);
+    if (report.status == CredentialFileSecurityReport::Status::Ok) {
+        return {};
+    }
+    return std::unexpected(MakeError("secret_file_insecure", report.detail));
 }
 
 }  // namespace
@@ -204,23 +220,43 @@ std::expected<void, ChannelCredentialError> CheckCredentialFileSecurity(
     return CheckFileSecurityWin(canonical_path.wstring());
 }
 
+CredentialFileSecurityReport InspectCredentialFileSecurity(
+    const std::filesystem::path& canonical_path) {
+    return InspectFileSecurityWin(canonical_path.wstring());
+}
+
 #else  // POSIX
 
 std::expected<void, ChannelCredentialError> CheckCredentialFileSecurity(
     const std::filesystem::path& canonical_path) {
+    const CredentialFileSecurityReport report = InspectCredentialFileSecurity(canonical_path);
+    if (report.status == CredentialFileSecurityReport::Status::Ok) {
+        return {};
+    }
+    return std::unexpected(MakeError("secret_file_insecure", report.detail));
+}
+
+CredentialFileSecurityReport InspectCredentialFileSecurity(
+    const std::filesystem::path& canonical_path) {
+    CredentialFileSecurityReport report;
     struct stat info {};
     if (::stat(canonical_path.c_str(), &info) != 0) {
-        return std::unexpected(
-            MakeError("secret_file_insecure", "stat 失败: " + std::string(std::strerror(errno))));
+        report.status = CredentialFileSecurityReport::Status::DescriptorUnreadable;
+        report.detail = "stat 失败: " + std::string(std::strerror(errno));
+        return report;
     }
     if (info.st_uid != ::geteuid()) {
-        return std::unexpected(MakeError("secret_file_insecure", "文件归属不是当前用户"));
+        report.status = CredentialFileSecurityReport::Status::OwnerMismatch;
+        report.detail = "文件归属不是当前用户";
+        return report;
     }
     if (info.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) {
-        return std::unexpected(
-            MakeError("secret_file_insecure", "组/其他用户有读写位(须 0600 一档)"));
+        report.status = CredentialFileSecurityReport::Status::DaclTooWide;
+        report.detail = "组/其他用户有读写位(须 0600 一档)";
+        return report;
     }
-    return {};
+    report.status = CredentialFileSecurityReport::Status::Ok;
+    return report;
 }
 
 #endif

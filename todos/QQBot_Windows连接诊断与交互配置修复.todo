@@ -3,7 +3,7 @@
 日期：2026-09-14。
 问题版本：`v0.26.263-beta.1`，Windows x64 发布包。
 复核基线：工作区 `f4559cb1`；同时核对问题版本源码。
-状态：P0-A（§三连接状态）与 P0-B（§四 Windows 信任根）已实现，测试上册，待 CI 与 Windows 真机复测；§五/§六（向导与 IM 入口）另行批次进行中。真实 QQ 联调仍未做（Q3）。
+状态：P0-A（§三连接状态）与 P0-B（§四 Windows 信任根）已实现（PR #81/#84 合入），待 Windows 真机复测；P0-C 批一已落（2026-09-15，分支 `worktree-agent-qqwin-setup`，PR #82，CI 头提交 github-actions 套件 rollup=success——https://github.com/relic-yuexi/LubanCode/pull/82）——§5.1 向导主体、§5.2 安全凭据写入全套、§5.3 修复流主体、§六 im 入口核心链路（选 QQ→向导→启动）。未完成项在各条目【留账】注明；真实 QQ 联调未做（Q3）。
 归属：补充 [QQ 接入总单](QQ机器人接入_Channel桥与SessionV3权限闭环.todo) 的 Q1b 配置入口与 Q3 真实账号验收；不重复 Q2 会话与投递实现。
 
 产品主线补充（2026-09-14）：[常驻助理 Web 主界面总装](常驻助理Web主界面_CPP本地服务与Gateway总装.todo)。先有不依赖 IM 的聊天、任务、结果和审批界面，本单成为“渠道设置”子项目。Web 表单与终端 im 向导复用配置/凭据服务；最近平台只是渠道偏好，不决定整位助理是否启动。
@@ -75,37 +75,41 @@ lubancode channel setup qqbot --account main
 
 ### 5.1 向导流程
 
-- [ ] 显示目标账号与实际配置路径，依次询问 AppID、AppSecret。默认账号 main；已有账号允许保留旧密钥或输入新密钥，绝不回显旧值。
-- [ ] AppSecret 用本地终端隐藏输入，支持粘贴、退格、取消；退出和异常都恢复回显模式。无交互终端时明确报错，自动化沿用已有 secret_file/secret_env，不通过命令行参数传明文 secret。
-- [ ] 输入只留在配置向导内，不进入 Agent、模型提示、会话 JSONL、trace、遥测或 shell 历史。内存中减少副本，用完尽力清理；不承诺 C++ 普通字符串已得到绝对擦除。
-- [ ] 校验 AppID 与密钥非空、编码及控制字符；错误说明不引用用户密钥。配置路径由现有参数根解析，不能硬编码当前 Windows 用户目录。向导显示应用根覆盖后的实际位置。
-- [ ] 默认在当前配置根下 `secrets/` 保存程序管理的凭据，JSON 只存绝对路径 `secret_file`。账号标识限制为安全文件名，拒绝路径分隔符与越界。
-- [ ] 新账号复用 `MakeQqTemplateAccount`：websocket、DM pairing、禁群、final 回复、只读工具上限；成功保存时设置 channels.qqbot.enabled 与目标 account.enabled 为 true，明确 default_account。
-- [ ] 已有账号只修改用户选定字段，保留原权限与路由；显示差异，不用模板静默扩大旧权限。其他账号、模型配置和未知 JSON 字段原样保留。
-- [ ] 保存后分别显示“配置已保存”“尚未验证连接”，给出当前工作目录下的 `lubancode gateway run`。网络验证须有超时；失败不撤销已保存配置，也不谎称在线。
-- [ ] 若提供向导内短时连接检查，复用账号锁，检查后释放连接；已有 Gateway 占用时读取状态，不开第二条竞争连接。配置保存不会热更新正在运行的 Gateway，明确提示重启。
-- [ ] pairing 配套完成本地批准入口与首条私聊提示，纳入 Q1b。配置保存、QQ 在线、身份已配对、模型能回复分四步展示；没有模型配置时准确提示。
+记账（P0-C 批一，`lubancode channel setup qqbot [--account main]` 已落）：符号 `cli/channel_setup_command.cpp`（向导）、`channel/channel_setup.cpp`（ChannelConfigService/注册表）、`channel/credential_store.cpp`（凭据写入）；册 `tests/unit/channel/test_channel_setup_config.cpp`、`tests/unit/channel/test_channel_credential_store.cpp`、`tests/unit/platform/test_hidden_input.cpp`、`tests/unit/app/test_cli_options.cpp`（channel/im 解析）。
+
+- [x] 显示目标账号与实际配置路径，依次询问 AppID、AppSecret。默认账号 main；已有账号允许保留旧密钥或输入新密钥，绝不回显旧值。（向导只报"已配/未配"，不回显旧值）
+- [x] AppSecret 用本地终端隐藏输入，支持粘贴、退格、取消；退出和异常都恢复回显模式。无交互终端时明确报错，自动化沿用已有 secret_file/secret_env，不通过命令行参数传明文 secret。（`platform/hidden_input.{hpp,cpp}`：Windows 摘 ENABLE_ECHO_INPUT、POSIX 摘 ECHO，行编辑保留故粘贴/退格天然可用；RAII 复原 + Ctrl+C 转发处理器先复原；无 TTY 报 `hidden_input_no_tty`；CLI 无任何 --secret 旗标，解析层测试钉死）
+- [x] 输入只留在配置向导内，不进入 Agent、模型提示、会话 JSONL、trace、遥测或 shell 历史。内存中减少副本，用完尽力清理；不承诺 C++ 普通字符串已得到绝对擦除。（隐藏输入不走 shell 历史；密钥只过路 CredentialStore→受管文件；测试密钥扫描册钉"配置 JSON/changes/错误文案"零出现）
+- [x] 校验 AppID 与密钥非空、编码及控制字符；错误说明不引用用户密钥。配置路径由现有参数根解析，不能硬编码当前 Windows 用户目录。向导显示应用根覆盖后的实际位置。（`ChannelConfigService::DefaultOptions` 走 `GlobalConfigFilePath`/`HomeLubancodeDir`；向导打印配置文件与受管密钥目录实际位置）
+- [x] 默认在当前配置根下 `secrets/` 保存程序管理的凭据，JSON 只存绝对路径 `secret_file`。账号标识限制为安全文件名，拒绝路径分隔符与越界。（`IsValidChannelId/IsValidChannelAccountId` 守门；文件名 `<channel>-<account>.<nonce>.secret`）
+- [x] 新账号复用 `MakeQqTemplateAccount`：websocket、DM pairing、禁群、final 回复、只读工具上限；成功保存时设置 channels.qqbot.enabled 与目标 account.enabled 为 true，明确 default_account。（模板序列化与 `MakeQqTemplateAccount` 同源；default_account 只在缺位时立本次账号，已有默认不偷位——与下条"只改选定字段"同规矩）
+- [x] 已有账号只修改用户选定字段，保留原权限与路由；显示差异，不用模板静默扩大旧权限。其他账号、模型配置和未知 JSON 字段原样保留。（定点更新原始全局 JSON；dry_run 差异预览；册钉 allowlist/allow_from/未知字段/其他账号原样）
+- [x] 保存后分别显示“配置已保存”“尚未验证连接”，给出当前工作目录下的 `lubancode gateway run`。网络验证须有超时；失败不撤销已保存配置，也不谎称在线。（向导内短时连接检查未提供——单内"若提供"项，见下条留账；文案如实两分，绝不谎称在线）
+- [ ] 若提供向导内短时连接检查，复用账号锁，检查后释放连接；已有 Gateway 占用时读取状态，不开第二条竞争连接。【留账：向导内网络验证未做；`channel status` 快照读属 P0-A 批（工Y）】。配置保存不会热更新正在运行的 Gateway，明确提示重启。【已落：向导尾部明示"正在运行的 Gateway 不会热加载配置，须重启后生效"】
+- [ ] pairing 配套完成本地批准入口与首条私聊提示，纳入 Q1b。配置保存、QQ 在线、身份已配对、模型能回复分四步展示；没有模型配置时准确提示。【留账：Q1b 配对入口另批】
 
 ### 5.2 安全创建与替换
 
 权限校验要保留。修复目标是让正常配置自动得到合格文件，不是取消 secret_file_insecure。
 
-- [ ] 增加统一凭据写入服务，由向导与迁移入口调用；网络适配器只读凭据，不得偷偷改 ACL。
-- [ ] Windows 创建凭据目录和文件时就附带安全描述符：owner 为当前用户，DACL 关闭继承，默认只允许当前用户。不要先写明文再收紧权限，避免短暂暴露。
-- [ ] 现有读取白名单还允许 SYSTEM、Administrators 与两类应用包 SID。单独审查两类应用包放行依据；向导不主动授予这些组权限，兼容策略调整须补测试与迁移说明，不能顺手放宽白名单。
-- [ ] POSIX 目录按 0700、文件按 0600 创建；核对 owner。Windows 与 POSIX 共享同一写入合同，平台实现分别落地。
-- [ ] 对路径、重解析点/符号链接、文件句柄与最终目标做核对；拒绝借替换目标绕过检查。既有文件更新不跟随任意链接，不递归改父目录权限。
-- [ ] 用同目录安全临时文件写入并落稳，再原子提交。新密钥先存为独立版本，配置原子指向新文件；配置提交失败保留旧配置与旧密钥，并清理本次新件。全部提交后再回收旧受管文件。
-- [ ] 配置更新加锁并核对读取版本，避免两个向导互相覆盖；重新解析写入结果，再用生产凭据读取器检查权限及内容，成功后才显示保存完成。
-- [ ] 中途取消、磁盘满、ACL 设置失败、进程中断都不能留下“启用但无可读密钥”的配置，也不能留下权限宽松的临时文件。恢复只清理由程序标识的孤儿受管文件。
+记账（P0-C 批一）：`channel/credential_store.{hpp,cpp}`（CredentialStore）、`platform/secure_file.{hpp,cpp}`（安全描述符创建 + 跨进程文件锁）、`config::WriteConfigObjectAtomic`（channels 定点写回的原子口）。册同 5.1。
+
+- [x] 增加统一凭据写入服务，由向导与迁移入口调用；网络适配器只读凭据，不得偷偷改 ACL。（网络侧零改动，resolver 仍只读）
+- [x] Windows 创建凭据目录和文件时就附带安全描述符：owner 为当前用户，DACL 关闭继承，默认只允许当前用户。不要先写明文再收紧权限，避免短暂暴露。（CreateFileW/CreateDirectoryW 带 SDDL `O:<sid>D:P(A;OICI;FA;;;<sid>)` 描述符创建，CREATE_NEW；册钉"写后生产读取器复验过"）
+- [x] 现有读取白名单还允许 SYSTEM、Administrators 与两类应用包 SID。单独审查两类应用包放行依据；向导不主动授予这些组权限，兼容策略调整须补测试与迁移说明，不能顺手放宽白名单。（审查记档：S-1-15-2-1/-2 是部分系统目录继承默认项的兼容放行；本批产物 DACL 关继承、ACE 只有当前用户，这两条永远不会出现在向导创建的文件上——白名单原样保留，未放宽也未收紧；后续如收紧须按单补迁移说明）
+- [x] POSIX 目录按 0700、文件按 0600 创建；核对 owner。Windows 与 POSIX 共享同一写入合同，平台实现分别落地。
+- [x] 对路径、重解析点/符号链接、文件句柄与最终目标做核对；拒绝借替换目标绕过检查。既有文件更新不跟随任意链接，不递归改父目录权限。（写入侧 RejectReparsePoint/lstat + O_NOFOLLOW + CREATE_NEW，POSIX 符号链接拒收已册；读取侧沿用 weakly_canonical 解析最终目标的既有口径；未动任何父目录权限）
+- [x] 用同目录安全临时文件写入并落稳，再原子提交。新密钥先存为独立版本，配置原子指向新文件；配置提交失败保留旧配置与旧密钥，并清理本次新件。全部提交后再回收旧受管文件。（独立版本文件 + CREATE_NEW + fsync/FlushFileBuffers；配置走 AtomicWriteFile 原子替换；写失败删新件保旧账；成功后回收不被引用的 `*.secret`）
+- [x] 配置更新加锁并核对读取版本，避免两个向导互相覆盖；重新解析写入结果，再用生产凭据读取器检查权限及内容，成功后才显示保存完成。（secrets 根下 `.setup.lock` 走 LockFileEx/flock 进程锁（崩溃自动释放），锁内整读→改→原子写；提交后重读 + `ParseChannelsUserConfig` + `ResolveChannelCredential` 三重复验过了才报"保存完成"）
+- [x] 中途取消、磁盘满、ACL 设置失败、进程中断都不能留下“启用但无可读密钥”的配置，也不能留下权限宽松的临时文件。恢复只清理由程序标识的孤儿受管文件。（次序保证"配置指向必先有合格文件"；失败路删新件；进程中断的新件由下次提交的孤儿回收清——只清 secrets 根下 `*.secret` 命名的程序产物）
 
 ### 5.3 已有密钥文件不合权限
 
-- [ ] 错误区分 owner 不符、DACL 过宽、无法读取安全描述符；用户说明只显示文件位置与原因，不显示内容。
-- [ ] 向导检测已有受管文件权限过宽时，展示“收紧这份密钥文件权限”的选项，调用同一服务修复并复验；无需用户手敲 PowerShell，不要求整套程序以管理员身份运行。
-- [ ] 外部自定义路径默认提供“重新输入密钥，保存到受管位置”。确需迁移旧内容时，由用户明确选择，安全读取后写入受管文件，更新路径；不删旧外部文件，不擅自改其父目录。
-- [ ] owner 不符或没有改 ACL 权限时，准确报错并提供重新输入到新受管文件的路径；不自动提权、夺取文件所有权或修改整棵用户目录。
-- [ ] `gateway run` 只做校验与诊断，发现不合权限时提示 setup 入口；绝不在后台默默修用户文件。保留 secret_file > secret_env > inline 优先级，高优先级无效不得降级。
+- [x] 错误区分 owner 不符、DACL 过宽、无法读取安全描述符；用户说明只显示文件位置与原因，不显示内容。（`channel::InspectCredentialFileSecurity`：Ok/OwnerMismatch/DaclTooWide/NoDacl/DescriptorUnreadable；读取白名单口径与 CheckCredentialFileSecurity 同一份，一字未改）
+- [x] 向导检测已有受管文件权限过宽时，展示“收紧这份密钥文件权限”的选项，调用同一服务修复并复验；无需用户手敲 PowerShell，不要求整套程序以管理员身份运行。（`CredentialStore::TightenFilePermissions`：Windows 重设 owner+受保护 DACL、POSIX chmod 0600，收完过生产读取器；册钉收紧/幂等/内容不动）
+- [ ] 外部自定义路径默认提供“重新输入密钥，保存到受管位置”。确需迁移旧内容时，由用户明确选择，安全读取后写入受管文件，更新路径；不删旧外部文件，不擅自改其父目录。【已落：默认引导重存受管位置、不删旧外部文件（册钉）；留账：显式"迁移旧内容"入口未做，需时以用户明确选择为前提补】
+- [x] owner 不符或没有改 ACL 权限时，准确报错并提供重新输入到新受管文件的路径；不自动提权、夺取文件所有权或修改整棵用户目录。（TightenFilePermissions 对 OwnerMismatch 拒动手、稳定码报错；向导提示继续走重存受管位置）
+- [ ] `gateway run` 只做校验与诊断，发现不合权限时提示 setup 入口；绝不在后台默默修用户文件。保留 secret_file > secret_env > inline 优先级，高优先级无效不得降级。【留账：gateway run 的诊断提示归 P0-A 批（工Y）；优先级合同现状已保（resolver 未动）】
 
 ## 六、统一 IM 选择与配置界面（2026-09-14 用户补充）
 
@@ -143,9 +147,11 @@ lubancode im（待实现）
 
 图中的共用执行层不表示几个进程共用同一运行中会话，也不表示可绕过账号锁、工作目录绑定或权限准入。各宿主保留自己的连接、输入与投递责任。
 
-- [ ] AppServer 不处理 QQ token、平台重连、配对账和回复 outbox；这些仍归适配器/渠道宿主。Gateway 不为本次 IM 向导新增 AppServer RPC 监听端口。
-- [ ] IM 发来的只是本机启动选择；QQ 聊天正文必须经过 ChannelManager 的持久入站、去重、准入、路由，再进入 ChannelWorkPump → HeadlessExecutor → SessionService，不能从向导直接调用 `turn/start` 绕过渠道权限。
-- [ ] AppServer 与 Gateway 共用执行底座，但各自编排任务。若以后确需远端 Agent Worker，再单列 Gateway → AppServer 的客户端桥设计，明确身份、幂等受理、审批、断线恢复和 outbox 归属；本单不提前改通信拓扑。
+记账（P0-C 批一）：模块落位 `app/im_entry.{hpp,cpp}`（ImEntryController+裁决纯函数）、`channel/channel_setup.{hpp,cpp}`（ChannelSetupRegistry+ChannelConfigService）、`channel/credential_store.{hpp,cpp}`（CredentialStore）、`config/im_preferences.{hpp,cpp}`（ImPreferenceStore）、`app/gateway_launch.{hpp,cpp}`（GatewayLaunchPlan+共用启动服务，自 RunGateway 装配提取）。册 `tests/unit/app/test_im_entry_rules.cpp`、`tests/unit/config/test_im_preferences.cpp`。
+
+- [x] AppServer 不处理 QQ token、平台重连、配对账和回复 outbox；这些仍归适配器/渠道宿主。Gateway 不为本次 IM 向导新增 AppServer RPC 监听端口。（AppServer 零改动；未新增任何监听）
+- [x] IM 发来的只是本机启动选择；QQ 聊天正文必须经过 ChannelManager 的持久入站、去重、准入、路由，再进入 ChannelWorkPump → HeadlessExecutor → SessionService，不能从向导直接调用 `turn/start` 绕过渠道权限。（im 只折过滤器+启动 Gateway，无任何直连会话通道）
+- [x] AppServer 与 Gateway 共用执行底座，但各自编排任务。若以后确需远端 Agent Worker，再单列 Gateway → AppServer 的客户端桥设计，明确身份、幂等受理、审批、断线恢复和 outbox 归属；本单不提前改通信拓扑。（通信拓扑零改动）
 
 #### 本地模块与启动计划
 
@@ -161,22 +167,22 @@ lubancode im（待实现）
 | `GatewayLaunchPlan` | 工作目录、profile、渠道范围、自动任务开关 | 一次启动的不可变选择；不含 AppSecret、token，不修改全局 enabled |
 | 共用 Gateway 启动服务 | 启动计划 → 生命周期/状态/退出结果 | 从现有 RunGateway 装配提取；持锁、装配渠道及工作泵、停止和收口只实现一份 |
 
-- [ ] `gateway run` 生成计划：所有已启用渠道 + 当前 profile 的既有自动任务；`im` 生成计划：所选渠道账号 + 当前 profile 的既有自动任务。二者调用同一启动服务，IM 不以“聊天入口”为由关闭自动任务。启动界面显示实际 profile、workspace 和任务范围。
-- [ ] `im` 默认沿用既有 default profile，并可显式指定 `--profile`；它与相同 profile 的 Gateway 互斥。提示用户停止原实例或选择其他 profile；即使 profile 不同，同一渠道账号锁仍互斥。不得自动制造 profile 绕过冲突。
-- [ ] 从 `RunGateway` 提取启动服务时，使渠道泵可在无自动任务泵时独立运行；不能让现有“先有 automation pump 才装 composite pump”的装配关系成为 IM 隐藏依赖。
-- [ ] 渠道选择只限制渠道入站与渠道投递，不改变自动任务归属；核对恢复扫描与 outbox 扫描的范围。当前 profile 的自动任务照其既定权限执行；若回复目标账号未启用，则保留投递待办并显示原因，不改投当前 QQ、不丢结果。需要全部渠道投递时，明确引导运行完整 Gateway。
-- [ ] IM 启动前向导取消：不创建运行宿主。启动后 Ctrl+C：复用 Gateway 停止接收、收口执行、落账、释放连接与锁的次序，不留下 IM 子进程。
-- [ ] 第一版不支持向已有 Gateway 动态挂载账号。若账号已在运行，显示实例和状态，不用“连接成功”掩盖本次没有启动；未来远程控制接口另列协议与权限设计。
+- [x] `gateway run` 生成计划：所有已启用渠道 + 当前 profile 的既有自动任务；`im` 生成计划：所选渠道账号 + 当前 profile 的既有自动任务。二者调用同一启动服务，IM 不以“聊天入口”为由关闭自动任务。启动界面显示实际 profile、workspace 和任务范围。（`RunGatewayWithPlan`：gateway 无过滤器/im 带单账号过滤器；im 启动打印 profile、工作目录、渠道范围、自动任务范围、切换提示）
+- [x] `im` 默认沿用既有 default profile，并可显式指定 `--profile`；它与相同 profile 的 Gateway 互斥。提示用户停止原实例或选择其他 profile；即使 profile 不同，同一渠道账号锁仍互斥。不得自动制造 profile 绕过冲突。（互斥经 GatewayProcess 取锁/账号锁既有合同，冲突时退 2 并给归属明细；im 不造 profile、不杀进程；解析层校验 profile 单段名）
+- [x] 从 `RunGateway` 提取启动服务时，使渠道泵可在无自动任务泵时独立运行；不能让现有“先有 automation pump 才装 composite pump”的装配关系成为 IM 隐藏依赖。（结构修复：`GatewayLaunchPlan::require_automation_pump=false` 路上 automation 泵失败时 outbox 以独立件打开、渠道装配照走、composite 主泵可空；gateway run 维持硬失败原语义）
+- [x] 渠道选择只限制渠道入站与渠道投递，不改变自动任务归属；核对恢复扫描与 outbox 扫描的范围。当前 profile 的自动任务照其既定权限执行；若回复目标账号未启用，则保留投递待办并显示原因，不改投当前 QQ、不丢结果。需要全部渠道投递时，明确引导运行完整 Gateway。（过滤器只裁 wiring 输入=入站+投递；automation/outbox 吃全量配置，恢复与 outbox 扫描范围不缩；恢复扫描真机核对留 §七验收账）
+- [x] IM 启动前向导取消：不创建运行宿主。启动后 Ctrl+C：复用 Gateway 停止接收、收口执行、落账、释放连接与锁的次序，不留下 IM 子进程。（取消=直接返回不起进程；启动后同 GatewayProcess 收口，im 不另起子进程）
+- [x] 第一版不支持向已有 Gateway 动态挂载账号。若账号已在运行，显示实例和状态，不用“连接成功”掩盖本次没有启动；未来远程控制接口另列协议与权限设计。（已在运行→RunGatewayCommand 退 2 报归属，不杀不抢不冒充）
 
 #### 没有渠道与运行验证
 
-- [ ] `gateway run` 无渠道时明确输出“未启用任何渠道”；有自动任务就处理自动任务，两者都没有则显示“当前空闲，等待任务”。启动时列出工作目录、profile、启用范围与失败账号，不只打印 PID。
-- [ ] `im` 无渠道时进入平台向导；取消就退出；非交互时缺配置则报错退出。渠道已配置但连接失败走诊断，不冒充首次配置。
-- [ ] 验证 Gateway 不依赖 IM：不配渠道，登记一个现有机制支持的单次自动任务，核对执行与本地结果投递。不能用尚未落地的周期调度或入站 Webhook 冒充现有能力。
-- [ ] 验证 AppServer 独立：不启动 Gateway，由现有客户端完成 initialize → thread/start → turn/start → turn/completed，核对事件与结果；不得意外连接 QQ。
-- [ ] 验证 IM 共用路径：真实 QQ 消息能在渠道入站账、会话执行与回复 outbox 对上；重复消息不重跑，停止释放账号锁。另验 IM 启动后当前 profile 的自动任务仍能执行，不领取其他 profile 的任务。
-- [ ] 常驻助理验收另跑完整场景：QQ 上创建获准的任务 → 耐久受理回执 → 到点执行 → 结果送回原会话 → 重启后按账恢复。聊天侧任务创建工具、身份/任务归属、回复目标绑定和平台主动发送权限必须逐项落地；已有本地 job CLI 与 QQ 被动回复不等于这条路径已接通。周期任务、heartbeat、系统服务托管按持久助理总计划 V2/V4 实施，不能用 IM 配置向导代替。
-- [ ] 文档分别使用“AppServer 协议统一应用接入”“Channel Bridge 统一平台适配”“SessionService 复用执行底座”，不再笼统写“所有入口同一协议”。
+- [ ] `gateway run` 无渠道时明确输出“未启用任何渠道”；有自动任务就处理自动任务，两者都没有则显示“当前空闲，等待任务”。启动时列出工作目录、profile、启用范围与失败账号，不只打印 PID。【留账：启动诊断输出归 P0-A 批（工Y，RunGateway 打印面）】
+- [x] `im` 无渠道时进入平台向导；取消就退出；非交互时缺配置则报错退出。渠道已配置但连接失败走诊断，不冒充首次配置。（已配置目标→直接启动走 gateway run 诊断，不冒充首次配置；连接诊断输出本身归 P0-A 批）
+- [ ] 验证 Gateway 不依赖 IM：不配渠道，登记一个现有机制支持的单次自动任务，核对执行与本地结果投递。不能用尚未落地的周期调度或入站 Webhook 冒充现有能力。【留账：真机验收】
+- [ ] 验证 AppServer 独立：不启动 Gateway，由现有客户端完成 initialize → thread/start → turn/start → turn/completed，核对事件与结果；不得意外连接 QQ。【留账：真机验收】
+- [ ] 验证 IM 共用路径：真实 QQ 消息能在渠道入站账、会话执行与回复 outbox 对上；重复消息不重跑，停止释放账号锁。另验 IM 启动后当前 profile 的自动任务仍能执行，不领取其他 profile 的任务。【留账：真机验收（Q3）】
+- [ ] 常驻助理验收另跑完整场景：QQ 上创建获准的任务 → 耐久受理回执 → 到点执行 → 结果送回原会话 → 重启后按账恢复。聊天侧任务创建工具、身份/任务归属、回复目标绑定和平台主动发送权限必须逐项落地；已有本地 job CLI 与 QQ 被动回复不等于这条路径已接通。周期任务、heartbeat、系统服务托管按持久助理总计划 V2/V4 实施，不能用 IM 配置向导代替。【留账：持久助理总计划】
+- [ ] 文档分别使用“AppServer 协议统一应用接入”“Channel Bridge 统一平台适配”“SessionService 复用执行底座”，不再笼统写“所有入口同一协议”。【留账：文档批】
 
 ### 6.1 命令与选择规则
 
@@ -192,32 +198,32 @@ lubancode im setup
 lubancode im setup qqbot --account main
 ```
 
-- [ ] `lubancode im` 是日常入口：没有账号配置时打开平台选择；只有一个可用账号时选它；已有有效最近选择时默认使用最近选择，显示平台、账号与切换提示，然后启动该账号。
-- [ ] `--select` 每次打开选择界面，列出已配账号与“添加新平台/账号”；最近选择排在默认光标位置。`im setup` 始终进入配置管理，不顺带启动连接。
-- [ ] 指定平台/账号时，以显式参数为准；目标没配过就进入对应向导。不能因指定目标不存在而悄悄连上最近账号。未知平台、拼错名称先报错，不写空壳配置。
-- [ ] 只指定平台时：先取该平台有效的最近账号，再取其 `default_account`，再取唯一可用账号；仍有多个则弹选择。全局最近平台不能覆盖显式平台。
-- [ ] 未指定目标且最近记录无效时：唯一可用账号自动选；多个可用账号打开列表；无可用账号进入配置/修复界面，保留已有配置供修改。
-- [ ] 缺必填字段、密钥不可读、权限不合时进入对应修复步骤。已配置但停用的账号显示“已停用”，用户选择后明确询问是否启用，不暗改开关。
-- [ ] 网络超时、平台拒绝鉴权属于连接诊断，不等同“没配置”。保留选择和配置，展示重试、编辑配置、返回列表，不反复弹出全套首次向导。
-- [ ] 选择单账号只形成此次启动过滤器，不把其他账号 enabled 改为 false。过滤器贯穿账号装配、锁、工作泵与投递，不能只筛 UI 标签。
-- [ ] IM 入口复用 Gateway 的启动、锁、调度、停止与工作目录合同，不复制一套运行时。遇到既有 Gateway/账号锁先说明归属，不杀旧进程、不暗起第二实例。
+- [x] `lubancode im` 是日常入口：没有账号配置时打开平台选择；只有一个可用账号时选它；已有有效最近选择时默认使用最近选择，显示平台、账号与切换提示，然后启动该账号。（规则册 `ResolveImTarget` 钉全部次序；启动打印渠道范围与 `--select` 切换提示）
+- [x] `--select` 每次打开选择界面，列出已配账号与“添加新平台/账号”；最近选择排在默认光标位置。`im setup` 始终进入配置管理，不顺带启动连接。（首版终端界面：方向键+数字回退，VT 档 RawInputScope+KeyReader，无 VT 退数字选；最近项标“上次使用”并置默认光标；未实现平台列“尚未支持”不可选）
+- [x] 指定平台/账号时，以显式参数为准；目标没配过就进入对应向导。不能因指定目标不存在而悄悄连上最近账号。未知平台、拼错名称先报错，不写空壳配置。（MissingAccount 明报，交互进向导、非交互退码；UnknownPlatform/PlatformNotImplemented 先退）
+- [x] 只指定平台时：先取该平台有效的最近账号，再取其 `default_account`，再取唯一可用账号；仍有多个则弹选择。全局最近平台不能覆盖显式平台。
+- [x] 未指定目标且最近记录无效时：唯一可用账号自动选；多个可用账号打开列表；无可用账号进入配置/修复界面，保留已有配置供修改。（悬空最近→回退选择流程；唯一停用账号→询问启用；全无→向导）
+- [x] 缺必填字段、密钥不可读、权限不合时进入对应修复步骤。已配置但停用的账号显示“已停用”，用户选择后明确询问是否启用，不暗改开关。（停用询问 y/n；启用走 ChannelConfigService 显式置位；向导含权限收紧/重存修复步骤）
+- [ ] 网络超时、平台拒绝鉴权属于连接诊断，不等同“没配置”。保留选择和配置，展示重试、编辑配置、返回列表，不反复弹出全套首次向导。【留账：连接诊断面归 P0-A 批；“不冒充首次配置”已守（已配置目标直达启动）】
+- [x] 选择单账号只形成此次启动过滤器，不把其他账号 enabled 改为 false。过滤器贯穿账号装配、锁、工作泵与投递，不能只筛 UI 标签。（`FilterConfigForChannelAccount` 裁 wiring 装配输入——账号装配/锁/工作泵/投递同源消费；全局配置一字不动，册钉）
+- [x] IM 入口复用 Gateway 的启动、锁、调度、停止与工作目录合同，不复制一套运行时。遇到既有 Gateway/账号锁先说明归属，不杀旧进程、不暗起第二实例。
 
 ### 6.2 记住最近选择
 
-- [ ] CLI 配置界面独占选择偏好；Gateway 独占运行状态；平台适配器独占连接状态。最近选择不写进 Agent 记忆或会话消息。
-- [ ] 增加独立、可版本化的用户偏好记录，保存最近的 `{channel_id, account_id}` 和各平台最近账号。只存标识，不存 AppID、密钥、token 或聊天内容。
-- [ ] 按现有应用参数根隔离偏好，个人布局与受管应用不串号；同一参数根下换项目仍可沿用选择，但工作目录照本次启动冻结，不迁移旧聊天上下文。
-- [ ] 已有账号被用户选定且配置校验通过、开始启动时更新最近选择；新账号在配置提交成功并用于启动时更新。临时网络失败不抹掉偏好；取消向导、保存失败、仅浏览列表不更新。
-- [ ] 偏好原子保存，并发更新不损坏文件；启动不写持久偏好的非交互命令，不参与“最近使用”排序。偏好丢失/损坏只回到选择流程，不阻止已有配置使用。
-- [ ] 删除账号时清理相关偏好；手工改配置导致记录悬空时按 6.1 回退，不复活已删除账号。
+- [x] CLI 配置界面独占选择偏好；Gateway 独占运行状态；平台适配器独占连接状态。最近选择不写进 Agent 记忆或会话消息。
+- [x] 增加独立、可版本化的用户偏好记录，保存最近的 `{channel_id, account_id}` 和各平台最近账号。只存标识，不存 AppID、密钥、token 或聊天内容。（`config/im_preferences.{hpp,cpp}`：schema 1；册钉只存标识、无敏感字样）
+- [x] 按现有应用参数根隔离偏好，个人布局与受管应用不串号；同一参数根下换项目仍可沿用选择，但工作目录照本次启动冻结，不迁移旧聊天上下文。（落 `<HomeLubancodeDir>/im-preferences.json`，应用根语义自动隔离；工作目录按次冻结在启动服务里）
+- [x] 已有账号被用户选定且配置校验通过、开始启动时更新最近选择；新账号在配置提交成功并用于启动时更新。临时网络失败不抹掉偏好；取消向导、保存失败、仅浏览列表不更新。（启动前经裁决+配置装载校验后记；取消/浏览路径不 Save）
+- [x] 偏好原子保存，并发更新不损坏文件；启动不写持久偏好的非交互命令，不参与“最近使用”排序。偏好丢失/损坏只回到选择流程，不阻止已有配置使用。（AtomicWriteFile；非交互显式启动不更新偏好；坏档回空偏好，册钉）
+- [ ] 删除账号时清理相关偏好；手工改配置导致记录悬空时按 6.1 回退，不复活已删除账号。【已落：悬空回退（裁决册钉）；留账：删除账号命令尚未存在，届时连带清偏好】
 
 ### 6.3 平台接入合同
 
-- [ ] 由渠道能力注册表提供平台 ID、显示名称、实现/可用状态、配置字段、字段校验、敏感输入标记、默认账号模板、连接检查及配对指引。公共向导管导航和提交，平台模块管本平台字段与校验。
-- [ ] QQ 首版填写 AppID/AppSecret；飞书及其他 IM 接入时提供自己的字段和事件接入要求，不照抄 QQ WebSocket 假定。
-- [ ] 只允许选择已有可运行适配器的平台。飞书尚未实现时可显示“尚未支持”，不可进入假成功配置或宣称能连。
-- [ ] 所有平台复用安全凭据写入服务、配置定点更新、取消恢复与脱敏输出。字段扩展不改变原有渠道配置默认行为。
-- [ ] `channel setup qqbot` 如保留，作为统一向导别名；本文第五节 QQ 流程是平台表单实现，不另维护第二套交互状态机。
+- [x] 由渠道能力注册表提供平台 ID、显示名称、实现/可用状态、配置字段、字段校验、敏感输入标记、默认账号模板、连接检查及配对指引。公共向导管导航和提交，平台模块管本平台字段与校验。（`ChannelSetupRegistry`：id/显示名/implemented/字段表(敏感标记)；连接检查与配对指引留账——连接诊断归 P0-A、配对归 Q1b）
+- [x] QQ 首版填写 AppID/AppSecret；飞书及其他 IM 接入时提供自己的字段和事件接入要求，不照抄 QQ WebSocket 假定。（feishu 注册表只占位 implemented=false、字段空，未抄 QQ 字段）
+- [x] 只允许选择已有可运行适配器的平台。飞书尚未实现时可显示“尚未支持”，不可进入假成功配置或宣称能连。（服务层 setup_bad_platform + 界面不可选两条路都拦）
+- [x] 所有平台复用安全凭据写入服务、配置定点更新、取消恢复与脱敏输出。字段扩展不改变原有渠道配置默认行为。（单套 CredentialStore/ChannelConfigService；已有账号定点更新不动默认行为）
+- [x] `channel setup qqbot` 如保留，作为统一向导别名；本文第五节 QQ 流程是平台表单实现，不另维护第二套交互状态机。（`im setup qqbot` 与 `channel setup qqbot` 同一枚 RunChannelSetupCommand）
 
 界面示意（待实现）：
 
@@ -238,10 +244,10 @@ AppSecret：隐藏输入
 
 ### 6.4 后台兼容与验收
 
-- [ ] 现有 `gateway run` 保持运行所有已启用渠道及自动任务的语义，不因最近选择默默缩成单账号。交互终端下完全没配置渠道时，显示可进入 IM 配置的提示选项，允许继续只跑自动任务。
-- [ ] 非交互、服务、管道输入、AppServer 与一次性执行不弹界面、不等键盘。`im` 缺配置或选择不唯一时返回稳定非零码和 setup 提示；显式目标配置完整时可直接启动，不更新交互偏好。
-- [ ] 测试覆盖：首次无配置、最近目标、显式覆盖、只指定平台、多账号选择、停用账号、删除账号、坏偏好、取消、新建失败、连接失败、后台无 TTY、应用根隔离与 Gateway 锁冲突。
-- [ ] 回归：选择 QQ 不停用飞书配置；`gateway run` 不漏原有渠道/自动任务；普通编程启动不意外拉起 IM 向导或网络连接。
+- [ ] 现有 `gateway run` 保持运行所有已启用渠道及自动任务的语义，不因最近选择默默缩成单账号。交互终端下完全没配置渠道时，显示可进入 IM 配置的提示选项，允许继续只跑自动任务。【已落：gateway run 无过滤器、语义不变；留账：无渠道时的 IM 提示选项（RunGateway 打印面，归工Y 批协调）】
+- [x] 非交互、服务、管道输入、AppServer 与一次性执行不弹界面、不等键盘。`im` 缺配置或选择不唯一时返回稳定非零码和 setup 提示；显式目标配置完整时可直接启动，不更新交互偏好。（StdinIsTerminal 守门；非交互退码 1/2 带 setup 提示；显式完整目标直达启动且不写偏好；普通单发/交互主路根本不过 im 路由）
+- [ ] 测试覆盖：首次无配置、最近目标、显式覆盖、只指定平台、多账号选择、停用账号、删除账号、坏偏好、取消、新建失败、连接失败、后台无 TTY、应用根隔离与 Gateway 锁冲突。【已落册（test_im_entry_rules/test_im_preferences/test_channel_setup_config/test_hidden_input）：无配置/最近/悬空/显式/只指定平台/多账号/停用/坏偏好/取消(dry_run+确认取消)/保存失败/无 TTY/应用根隔离(偏好走 HomeLubancodeDir)。留账：删除账号、连接失败、Gateway 锁冲突的端到端册（待 P0-A 的 status 与锁读口）】
+- [ ] 回归：选择 QQ 不停用飞书配置；`gateway run` 不漏原有渠道/自动任务；普通编程启动不意外拉起 IM 向导或网络连接。【已落：过滤器不改全局配置、gateway run 无过滤器、im 须显式敲 `im` 才进（解析层钉）；留账：真机回归】
 
 ## 七、验收与交付顺序
 
@@ -250,10 +256,10 @@ AppSecret：隐藏输入
 3. P0-C：统一 IM 选择入口、最近选择、QQ 表单、安全写入与旧配置迁移；同步 Q1b 配对入口。
 4. Q3：用户本机填凭据，确认测试对象后验证真实账号；更新使用文档与发布说明。
 
-- [ ] Windows 单测：普通用户新建、继承 Users/Everyone 权限、owner 不符、无权改 ACL、中文/空格路径、重解析点、替换时 ACL、并发配置更新与写入中断；不依赖管理员运行。
-- [ ] 终端测试：隐藏输入与取消后回显恢复；密钥不出现在 stdout/stderr、日志、trace、会话或临时配置中。用测试密钥扫描输出，不读取真实用户秘密来做检查。
-- [ ] 连接测试：令牌拒绝、TLS 信任根缺失、主机名不符、超时、READY、RESUMED、掉线、重连、停止；断线后 connected 必须为 false，last_error 保留根因，重复错误输出限频。
-- [ ] 向导测试：全新配置走完即得到两层 enabled、模板策略和安全凭据；旧配置保留模型/未知字段/其他账号；取消和提交失败不毁旧配置。
+- [ ] Windows 单测：普通用户新建、继承 Users/Everyone 权限、owner 不符、无权改 ACL、中文/空格路径、重解析点、替换时 ACL、并发配置更新与写入中断；不依赖管理员运行。【P0-C 批一记账：已册（test_channel_credential_store/test_channel_setup_config，三平台 CI 同跑、Windows 分支在 windows 腿才编跑——该腿 main 才跑）：普通用户新建✓、放宽 DACL(Users/Everyone)后拒收+收紧✓、中文/空格路径✓、版本替换+ACL✓、并发写✓。未验边界（册头如实标注）：owner 不符真文件（普通用户无权 chown/setowner，以分类器拒动分支稳定码代钉）、Windows 重解析点拒收（CI 不保证开发者模式，POSIX 符号链接拒收同款判据已册）、无权改 ACL、写入中断真进程杀】
+- [ ] 终端测试：隐藏输入与取消后回显恢复；密钥不出现在 stdout/stderr、日志、trace、会话或临时配置中。用测试密钥扫描输出，不读取真实用户秘密来做检查。【已落：无 TTY 明报册（test_hidden_input）；密钥扫描册（配置 JSON/changes/错误文案零出现）。留账：真终端回显关/复原与 Ctrl+C 恢复的手动验收（要真控制台，不进 ctest）】
+- [ ] 连接测试：令牌拒绝、TLS 信任根缺失、主机名不符、超时、READY、RESUMED、掉线、重连、停止；断线后 connected 必须为 false，last_error 保留根因，重复错误输出限频。【归 P0-A/P0-B 批（工Y）】
+- [x] 向导测试：全新配置走完即得到两层 enabled、模板策略和安全凭据；旧配置保留模型/未知字段/其他账号；取消和提交失败不毁旧配置。（test_channel_setup_config：新配置两层 enabled+模板+受管凭据+default_account；旧配置保留模型/未知字段/其他账号/权限路由；AppID 缺失与坏 channels 段失败不毁旧配置、不留半截密钥件）
 - [ ] 用干净 Windows 用户环境解压新发布包，不另装 Node、不手工建证书目录、不手工改 ACL；走 setup → gateway run → QQ 在线 → 本机配对 → 两轮文字对话。
 - [ ] 真实测试覆盖重连、停止和硬杀重启；记录版本、系统、通过步骤与未验范围，日志先脱敏。mock 成功、构建成功不能充当平台联调成功。
 - [ ] 随包文档给新向导流程和旧配置迁移入口；清理渠道文档里“QQ 未装配”等过时说明，仍未交付的功能照实标注。

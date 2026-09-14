@@ -19,6 +19,7 @@
 #include "cli/i18n.hpp"
 #include "config/runtime_paths.hpp"
 #include "platform/paths.hpp"
+#include "platform/atomic_write.hpp"  // 渠道向导定点更新的原子写(§5.2)
 // telemetry 值域校验(端云协同可观测单 T2):data_class 四档名与 endpoint
 // 形状(禁 userinfo/query)认 telemetry 合同的同一张表,不在 config 再抄一份。
 #include "telemetry/contract.hpp"
@@ -3706,6 +3707,36 @@ std::expected<void, std::string> WriteConfigObject(const std::string& file_path,
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// 渠道向导的定点更新口(QQBot Windows 修复单 §5.2):channels 段的修改走
+// "锁内整读 → 改 channels 子树 → 原子写回"。写走 AtomicWriteFile(同目录
+// 唯一临时名 + 原子替换),不裸 ofstream——中途断电/磁盘满不留半截配置;
+// 其余字段(模型、其他账号、未知 JSON 字段)由调用方原样保留在 root 里。
+// ---------------------------------------------------------------------------
+
+std::expected<nlohmann::json, std::string> ReadConfigObjectForTargetedUpdate(
+    const std::string& file_path) {
+    return ReadConfigObjectForUpdate(file_path);
+}
+
+std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
+                                                         const nlohmann::json& root) {
+    std::string dump;
+    try {
+        dump = root.dump(2);
+    } catch (const nlohmann::json::type_error& e) {
+        return std::unexpected("配置序列化失败: " + std::string(e.what()));
+    }
+    dump.push_back('\n');
+    const auto written = platform::AtomicWriteFile(
+        platform::Utf8ToPath(file_path), dump, platform::WriteDurability::ProcessCrashDurability);
+    if (!written.has_value()) {
+        return std::unexpected("配置文件 " + file_path + " 原子写失败(" + written.error().code +
+                               "): " + written.error().message);
+    }
+    return {};
+}
 
 std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model) {
     return UpdateStringFieldInConfigFile(file_path, "model", model);
