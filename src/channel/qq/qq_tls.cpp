@@ -198,6 +198,16 @@ bool CertificateIsDisallowed(PCCERT_CONTEXT cert) {
     return false;
 }
 
+// 证书店 -> PEM 拼串。店:Root 与 Ca(中间),CurrentUser 与 LocalMachine
+// 各开一遍(Disallowed 里的证跳过——显式不信任的锚不喂 mbedTLS;链构建
+// 侧还会再拦一道)。打不开店不致命:跳过该店继续拼。
+//
+// context 所有权约定(CI 实测 SIGSEGV 的根因修订):
+// CertEnumCertificatesInStore 释放传入的 pPrevCertContext 并返回下一枚
+// (MSDN:pPrevCertContext is always freed by this function)。因此调用方
+// 对"当前枚"只借读、在推进语句里交还所有权——绝不对它调
+// CertFreeCertificateContext(那是 double free),也绝不跨推进语句引用
+// 它(那是 use-after-free)。循环出口 NULL 自带清账,无泄漏。
 void AppendStoreCertificatesToExport(const wchar_t* store_name, DWORD location,
                                      WindowsTrustExport& out) {
     HCERTSTORE store = CertOpenStore(
@@ -211,26 +221,27 @@ void AppendStoreCertificatesToExport(const wchar_t* store_name, DWORD location,
         }
         return;
     }
-    PCCERT_CONTEXT cert = CertEnumCertificatesInStore(store, NULL);
-    while (cert != NULL) {
-        PCCERT_CONTEXT next = CertEnumCertificatesInStore(store, cert);
-        if (cert->pbCertEncoded != NULL && cert->cbCertEncoded > 0 &&
-            !CertificateIsDisallowed(cert)) {
-            const std::string_view der(reinterpret_cast<const char*>(cert->pbCertEncoded),
-                                       cert->cbCertEncoded);
-            out.pem += "-----BEGIN CERTIFICATE-----\n";
-            std::string encoded = platform::Base64Encode(der);
-            for (std::size_t i = 0; i < encoded.size(); i += 64) {
-                out.pem += encoded.substr(i, 64);
-                out.pem += "\n";
-            }
-            out.pem += "-----END CERTIFICATE-----\n";
-            ++out.count;
-        } else if (cert->pbCertEncoded != NULL && cert->cbCertEncoded > 0) {
-            ++out.skipped_disallowed;
+    for (PCCERT_CONTEXT cert = CertEnumCertificatesInStore(store, NULL); cert != NULL;
+         cert = CertEnumCertificatesInStore(store, cert)) {
+        // 非证书条目(空指针/零长编码)不喂解析,跳过——店内容不保证全可编码。
+        if (cert->pbCertEncoded == NULL || cert->cbCertEncoded == 0) {
+            continue;
         }
-        CertFreeCertificateContext(cert);
-        cert = next;
+        if (CertificateIsDisallowed(cert)) {
+            ++out.skipped_disallowed;
+            continue;
+        }
+        const std::string_view der(reinterpret_cast<const char*>(cert->pbCertEncoded),
+                                   cert->cbCertEncoded);
+        out.pem += "-----BEGIN CERTIFICATE-----\n";
+        std::string encoded = platform::Base64Encode(der);
+        for (std::size_t i = 0; i < encoded.size(); i += 64) {
+            out.pem += encoded.substr(i, 64);
+            out.pem += "\n";
+        }
+        out.pem += "-----END CERTIFICATE-----\n";
+        ++out.count;
+        // 此处到下一次推进前 cert 仍有效;推进语句释放它,PEM 已拷出。
     }
     CertCloseStore(store, 0);
 }
