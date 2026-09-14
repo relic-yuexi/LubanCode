@@ -237,6 +237,37 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# mbedTLS(QQ 机器人接入单 Q1 传输定案,todo §十五):TLS 底座,给 src/channel/qq
+# 的自实现 RFC6455 WebSocket 客户端做 wss。选型否掉了 ixwebsocket(维护者减投,
+# 上游 Windows 腿禁 TLS)/libwebsockets(事件循环集成面大)/libcurl WS(实验性);
+# mbedTLS 纯 C 自包含、CMake 原生、无 perl/无系统 OpenSSL 供给要求,三平台一份
+# 源码——PR 腿只跑 macos 的 CI 风险靠"零平台分叉"压。与 yaml-cpp/lua 同待遇:
+# 不管走没走 vcpkg 都 FetchContent 自建,两条构建路认同一份依赖,vcpkg.json
+# 不动。
+# ---------------------------------------------------------------------------
+_lubancode_tarball(_lubancode_mbedtls_url "Mbed-TLS/mbedtls" "v3.6.3")
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(GEN_FILES OFF CACHE BOOL "" FORCE)
+set(ENABLE_ZLIB_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  mbedtls
+  URL ${_lubancode_mbedtls_url}
+)
+FetchContent_MakeAvailable(mbedtls)
+# 别人家的 C,顶层 -Wall/-W4 会刷一屏没意义的告警,单独关掉(同 lua/yaml-cpp)。
+foreach(_lubancode_mbed_target mbedtls mbedx509 mbedcrypto)
+  if(TARGET ${_lubancode_mbed_target})
+    if(MSVC)
+      target_compile_options(${_lubancode_mbed_target} PRIVATE /w)
+    else()
+      target_compile_options(${_lubancode_mbed_target} PRIVATE -w)
+    endif()
+  endif()
+endforeach()
+unset(_lubancode_mbed_target)
+
+# ---------------------------------------------------------------------------
 # 提示词模块编译期嵌入(0.19.x):src/prompts/{core,features,platforms}/*.md
 # 构建期由 cmake/embed_prompts.cmake 生成 <build>/generated/embedded_prompts.hpp
 # (每个模块一个 constexpr 常量),prompt_assembler.cpp 引用它做运行时条件
@@ -735,6 +766,26 @@ add_library(lubancode_engine STATIC
   src/channel/activation.cpp
   src/channel/credentials.cpp
   src/channel/tool_guard.cpp
+  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件与
+  # 自实现 WS 客户端。ws_frame(RFC6455 帧纯函数)/qq_socket(跨平台 TCP+
+  # select 超时)/qq_tls(mbedTLS 客户端流)/qq_ws_client(升级握手+读写+
+  # close)/qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
+  # qq_http(受控 GET/POST seam,生产走 net/http_transport)/
+  # qq_spool(sidecar spool 先落盘再上报,ACK 后清理)/qq_auth(token 单飞
+  # 刷新)/qq_messages(v2 发送,稳定 msg_seq)/qq_gateway(事件连接状态机:
+  # Identify/Heartbeat/Resume/退避)/qq_adapter(ChannelBridgeTransport 进程内
+  # 实现——Bridge 隔离语义保留,manager 零改动)。
+  src/channel/qq/ws_frame.cpp
+  src/channel/qq/qq_socket.cpp
+  src/channel/qq/qq_tls.cpp
+  src/channel/qq/qq_ws_client.cpp
+  src/channel/qq/qq_proto.cpp
+  src/channel/qq/qq_http.cpp
+  src/channel/qq/qq_spool.cpp
+  src/channel/qq/qq_auth.cpp
+  src/channel/qq/qq_messages.cpp
+  src/channel/qq/qq_gateway.cpp
+  src/channel/qq/qq_adapter.cpp
   # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
   # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
   # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include
@@ -808,6 +859,8 @@ if(WIN32)
   target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32)
 endif()
 target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
+# mbedTLS(QQ Q1):TLS 底座。PRIVATE——qq/ 内部件,头不外递,消费方零感知。
+target_link_libraries(lubancode_engine PRIVATE mbedtls)
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
 # 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
 target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
@@ -1080,6 +1133,9 @@ add_library(lubancode_app STATIC
   src/app/backend_stack.cpp
   src/app/memory_extract.cpp
   src/app/model_router.cpp
+  # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ
+  # 进程内适配器实例化)与双泵叠加件(不动 engine 的 GatewayWorkPump 冻结面)。
+  src/app/channel_gateway_wiring.cpp
   # 终端接线收尾单:子代理面板 presenter(条目列表/查看态视口,自大类搬出)。
   src/app/agent_panel_presenter.cpp
   src/app/session_title.cpp

@@ -6,6 +6,8 @@
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章)
 #include "app/one_shot.hpp"
 #include "app/plugin_scaffold.hpp"
+// QQ 机器人接入单 Q1:渠道装配与复合泵(gateway run 的 QQ 进程内直连)。
+#include "app/channel_gateway_wiring.hpp"
 #include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
 #include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
 #include "app_server/server.hpp"
@@ -850,7 +852,29 @@ int RunCli(const std::vector<std::string>& args) {
                 // ownerEpoch 不在这里预造:GatewayProcess 取到锁后把锁内
                 // epoch(= boot_id)递进泵(process.cpp 的 set_owner_epoch)。
             }
-            gateway_args.pump = &*pump;
+            // QQ 机器人接入单 Q1:渠道装配(QQ 进程内直连,§十五定案)。
+            // channels 段为空时零渠道行为,不挂副泵;装配失败的账号记
+            // skipped 打给 stderr,Gateway 照常起来(渠道失败不拦主业务)。
+            std::unique_ptr<lubancode::app::ChannelGatewayWiring> channel_wiring;
+            std::unique_ptr<lubancode::app::CompositeGatewayPump> composite_pump;
+            {
+                lubancode::app::ChannelGatewayWiring::Options wiring_options;
+                wiring_options.config = &gateway_config->config;
+                wiring_options.channels_state_root =
+                    lubancode::tools::Utf8ToPath(*home_luban) / "channels";
+                channel_wiring = lubancode::app::ChannelGatewayWiring::Create(
+                    std::move(wiring_options));
+                if (channel_wiring != nullptr) {
+                    for (const std::string& line : channel_wiring->skipped()) {
+                        std::cerr << "[gateway] 渠道账号未装配: " << line << "\n";
+                    }
+                    composite_pump = std::make_unique<lubancode::app::CompositeGatewayPump>(
+                        &*pump, std::move(channel_wiring));
+                    gateway_args.pump = composite_pump.get();
+                } else {
+                    gateway_args.pump = &*pump;
+                }
+            }
             const int code = cli::RunGatewayCommand(gateway_args);
             return code;
         }
