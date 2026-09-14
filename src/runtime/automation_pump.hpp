@@ -1,22 +1,31 @@
-// GatewayAutomationPump(常驻总装 V1 第一/第二/第四件事的总装):Gateway
-// 有界主泵的真装配——实现 engine 层的 gateway::GatewayWorkPump 合同口。
+// GatewayAutomationPump(常驻总装 V1 第一/第二/第四件事 + V2 周期调度的
+// 总装):Gateway 有界主泵的真装配——实现 engine 层的 gateway::
+// GatewayWorkPump 合同口。
 //
 // 一个泵实例 = 一只持锁 Gateway 的业务面:
 //   - AutomationStore(任务账) + DurableReplyOutbox(投递账)+ Headless
 //     执行工厂(backend/registry 借用);
-//   - TickOnce 的推进次序(每 tick 有界):消费 job 控制命令 → 恢复扫描
-//     (未结算 occurrence 的跨账裁决)→ outbox 投递 → 至多一枚新执行
+//   - TickOnce 的推进次序(每 tick 有界):消费 job 控制命令(含 V2 领域
+//     操作 update/pause/resume/cancel/import-loop)→ 周期拍点生成
+//     (SweepSchedule:misfire 政策/同 slot 合并/队列帽)→ 恢复扫描(未
+//     结算 occurrence 的跨账裁决)→ outbox 投递 → 至多一枚新执行
 //     (SessionWorkScheduler 公平泵取件,WorkKind::AutomationDue)。
 //
-// 恢复裁决(V1 面-V2 §八全表;从领域 bound 行定位原场,不扫全 workspace):
+// 恢复裁决(V2 面,§八表;从领域 bound 行定位原场,不扫全 workspace):
+//   - bound 行不在(claim 后崩,无开轮事实——领域绑定先于一切模型/工具
+//     动作)→ 重派同一 occurrence(attempt+1,occurrenceId 不洗;§八
+//     "对账后重派同一 work,另记 attempt");attempt 帽(3)到顶 →
+//     needs_review;任务已取消 → cancelled。
 //   - bound 行在、V3 有 assistant、无 selection → 补 selection(冻结策略
 //     重算同一 selectionId,不调模型);
 //   - bound 行在、V3 selection 已在 → 补 outbox 投影;
-//   - bound 行在、V3 无 assistant(未开跑/生成中断)→ needs_review
-//     (V1 不盲目重跑:重派归 V2 的"核实无旧执行后重派同一 work");
-//   - bound 行不在(claim 后崩)→ needs_review(V1 保守:核实手段太贵,
-//     不猜"没开过场")。
+//   - bound 行在、V3 无 assistant(开轮后崩,模型请求可能已发)→
+//     needs_review(§八"未知副作用停住",不盲目重跑);
+//   - heartbeat(notify_on_change)任务:正文与上次已通知版本相同 → 不投
+//     递,记观察账;检查失败永远投递失败通知,不记"无变化"。
 //   执行成功与否与投递分开结算(§九:业务执行成功与投递失败分别显示)。
+//   多次 resume(泵销毁重建)保持同一 work/occurrence 身份、同一
+//   deliveryId——结算过的不重开,不重跑已完成工作。
 //
 // 取件排序复用 SessionWorkScheduler(单子 V1 第一件:"复用现有
 // SessionWorkScheduler"):候选包成 SessionWork{kind=AutomationDue},

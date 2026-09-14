@@ -1,4 +1,4 @@
-// GatewayAutomationPump 实现(常驻总装 V1)。装配合同见头文件。
+// GatewayAutomationPump 实现(常驻总装 V1 + V2 周期调度)。装配合同见头文件。
 #include "runtime/automation_pump.hpp"
 
 #include <utility>
@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/sha256.hpp"
 #include "runtime/session_work_scheduler.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"
@@ -66,22 +67,98 @@ bool GatewayAutomationPump::TickOnce(std::int64_t now_ms) {
         const gateway::ConsumedJobCommands commands =
             gateway::PollJobCommands(options_.paths.control_dir);
         for (const auto& add : commands.adds) {
-            const auto receipt = store_->CreateOnceJob(
-                add.job_id, add.prompt,
-                add.due_at_ms != 0 ? add.due_at_ms : now_ms, now_ms, add.idempotency_key);
-            if (!receipt.accepted && !receipt.duplicate) {
-                // 命令账记不了(job 冲突/写盘失败):消费即删已发生,留给
-                // operator 从日志/状态处置;泵只在账 broken 时停。
+            // V1 语义保留:once 的 due 0 = 立即(slot = now)。V2 计划键
+            // (--every/--cron/…)出现即改形态;坏规格 CreateJob 明拒。
+            gateway::AutomationStore::JobSpec spec;
+            spec.job_id = add.job_id;
+            spec.prompt = add.prompt;
+            spec.kind = gateway::ScheduleKind::Once;
+            spec.due_at_ms = add.due_at_ms != 0 ? add.due_at_ms : now_ms;
+            if (add.schedule.set_interval) {
+                spec.kind = gateway::ScheduleKind::Interval;
+                spec.interval_seconds = add.schedule.interval_seconds;
             }
+            if (add.schedule.set_cron) {
+                spec.kind = gateway::ScheduleKind::Cron;
+                spec.cron_expr = add.schedule.cron_expr;
+            }
+            if (add.schedule.set_timezone) {
+                spec.timezone = add.schedule.timezone;
+            }
+            if (add.schedule.set_misfire) {
+                gateway::MisfirePolicy policy = gateway::MisfirePolicy::Coalesce;
+                if (gateway::ParseMisfirePolicy(add.schedule.misfire, policy)) {
+                    spec.misfire = policy;
+                }
+            }
+            if (add.schedule.set_deadline) {
+                spec.deadline_ms = add.schedule.deadline_ms;
+            }
+            if (add.schedule.set_notify_on_change) {
+                spec.notify_on_change = add.schedule.notify_on_change;
+            }
+            (void)store_->CreateJob(spec, now_ms, add.idempotency_key);
         }
         for (const auto& run_now : commands.run_nows) {
             (void)store_->RequestRunNow(run_now.job_id, now_ms, run_now.idempotency_key);
+        }
+        for (const auto& update : commands.updates) {
+            gateway::AutomationStore::JobUpdatePatch patch;
+            patch.set_prompt = !update.prompt.empty();
+            patch.prompt = update.prompt;
+            patch.set_due_at = update.schedule.set_due_at;
+            patch.due_at_ms = update.schedule.due_at_ms;
+            patch.set_interval = update.schedule.set_interval;
+            patch.interval_seconds = update.schedule.interval_seconds;
+            patch.set_cron = update.schedule.set_cron;
+            patch.cron_expr = update.schedule.cron_expr;
+            patch.set_timezone = update.schedule.set_timezone;
+            patch.timezone = update.schedule.timezone;
+            patch.set_misfire = update.schedule.set_misfire;
+            if (gateway::ParseMisfirePolicy(update.schedule.misfire, patch.misfire)) {
+                // 解析成功才置位;认不得的值原样丢弃(CAS 面由 revision 挡)。
+            } else {
+                patch.set_misfire = false;
+            }
+            patch.set_deadline = update.schedule.set_deadline;
+            patch.deadline_ms = update.schedule.deadline_ms;
+            patch.set_notify_on_change = update.schedule.set_notify_on_change;
+            patch.notify_on_change = update.schedule.notify_on_change;
+            (void)store_->UpdateJob(update.job_id, update.expected_revision, patch, now_ms,
+                                    update.idempotency_key);
+        }
+        for (const auto& state_op : commands.state_ops) {
+            if (state_op.verb == "pause") {
+                (void)store_->PauseJob(state_op.job_id, state_op.expected_revision, now_ms,
+                                       state_op.idempotency_key);
+            } else if (state_op.verb == "resume") {
+                (void)store_->ResumeJob(state_op.job_id, state_op.expected_revision, now_ms,
+                                        state_op.idempotency_key);
+            } else if (state_op.verb == "cancel") {
+                (void)store_->CancelJob(state_op.job_id, state_op.expected_revision, now_ms,
+                                        state_op.idempotency_key);
+            }
+        }
+        for (const auto& import_loop : commands.import_loops) {
+            // /loop 显式导入:产 receipt;同来源幂等(不双跑)。
+            (void)store_->ImportLoop(import_loop.source_session_id,
+                                     import_loop.source_task_id, import_loop.prompt,
+                                     import_loop.interval_seconds, now_ms,
+                                     import_loop.idempotency_key);
         }
     }
     if (store_->broken()) {
         return false;  // 领域账 broken:停泵(写盘失败停止受理/执行)
     }
-    // 2) 恢复扫描:未结算 occurrence 的跨账裁决(V1 面,见头文件表)。
+    // 1.5) 周期拍点生成(V2):按 misfire 政策补拍/跳过,同 slot 合并,
+    // 队列帽满停在原地。暂停接活后不再取新活(生成也停)。
+    if (accepting_.load()) {
+        const auto sweep = store_->SweepSchedule(now_ms);
+        if (!sweep.ok) {
+            return false;
+        }
+    }
+    // 2) 恢复扫描:未结算 occurrence 的跨账裁决(§八;V2 面见头文件表)。
     const RecoveryOutcome recovery = SweepRecovery(now_ms);
     if (!recovery.error.empty()) {
         return false;
@@ -110,8 +187,8 @@ void GatewayAutomationPump::StopAccepting() {
 
 bool GatewayAutomationPump::Close(int grace_ms) {
     (void)grace_ms;
-    // V1 同步泵:Close 时无在飞执行(TickOnce 已收口),writer 析构即关。
-    // 真异步化(V2+)时这里等在飞 turn 收口或置 cancel 后等宽限。
+    // V1/V2 同步泵:Close 时无在飞执行(TickOnce 已收口),writer 析构即
+    // 关。真异步化(后续批次)时这里等在飞 turn 收口或置 cancel 后等宽限。
     closed_.store(true);
     store_.reset();
     outbox_.reset();
@@ -136,11 +213,31 @@ GatewayAutomationPump::RecoveryOutcome GatewayAutomationPump::SweepRecovery(std:
 
 std::optional<std::string> GatewayAutomationPump::RecoverOccurrence(
     const gateway::AutomationOccurrence& occurrence, std::int64_t now_ms, std::string* error) {
-    // bound 行不在:claim 后崩(V1 保守 needs_review——"核实无旧执行再
-    // 重派"归 V2;这里不猜)。
+    // bound 行不在:claim 后崩,无开轮事实(领域绑定先于 V3 work.bound 与
+    // 一切模型/工具动作——绑定行不在 = 这 work 从没开跑)。§八:"对账后
+    // 重派同一 work,另记 attempt"。重派不了(attempt 帽/任务终态)按
+    // needs_review/cancelled 收口,不猜。
     if (occurrence.session_id.empty() || occurrence.turn_id.empty()) {
+        const auto job = store_->FindJob(occurrence.job_id);
+        if (job.has_value() && job->state == gateway::AutomationJobState::Cancelled) {
+            if (store_->SettleOccurrence(occurrence.occurrence_id, "cancelled",
+                                         "job_cancelled_before_redispatch", now_ms)) {
+                return std::string("cancelled");
+            }
+            *error = "automation.append_failed: cancelled 结算落不了盘";
+            return std::nullopt;
+        }
+        if (store_->RedispatchOccurrence(occurrence.occurrence_id, "claimed_without_binding",
+                                         now_ms)) {
+            // 已重派(同 occurrenceId,attempt+1):本 tick 的派发面会认领。
+            return std::nullopt;
+        }
+        if (store_->broken()) {
+            *error = "automation.append_failed: 重派行落不了盘";
+            return std::nullopt;
+        }
         if (store_->SettleOccurrence(occurrence.occurrence_id, "needs_review",
-                                     "claimed_without_binding(V1 保守:核实归 V2)", now_ms)) {
+                                     "redispatch_exhausted(attempt 帽到顶)", now_ms)) {
             return std::string("needs_review");
         }
         *error = "automation.append_failed: needs_review 结算落不了盘";
@@ -179,14 +276,33 @@ std::optional<std::string> GatewayAutomationPump::RecoverOccurrence(
     // 冻结策略重算同一 selectionId(纯函数,不调模型)。
     const ReplySelectionPlan plan = PlanReplySelection(*ledger, occurrence.turn_id);
     if (!plan.ok) {
-        // 无 assistant:生成没完成(claim 后崩在执行中)。V1 不盲目重跑
-        //(§八"工具 started 无 terminal 不默认重跑";重派归 V2)。
+        // 无 assistant:生成没完成(开轮后崩,模型请求可能已发)。§八
+        // "model request 已发送、无完整响应"与"未知副作用停住":不盲目
+        // 重跑,needs_review 停审(重派只盖"未开轮"的窗口)。
         if (store_->SettleOccurrence(occurrence.occurrence_id, "needs_review",
                                      "generation_incomplete: " + plan.error, now_ms)) {
             return std::string("needs_review");
         }
         *error = "automation.append_failed: needs_review 结算落不了盘";
         return std::nullopt;
+    }
+    // heartbeat(恢复路同款):正文与上次已通知版本相同 → 不投递(§七
+    // "无变化默认安静")。检查失败到不了这里(失败不是"无变化",执行
+    // 路已另行投递失败通知)。
+    const auto job = store_->FindJob(occurrence.job_id);
+    std::string heartbeat_sha;
+    if (job.has_value() && job->notify_on_change) {
+        heartbeat_sha = platform::Sha256Hex(plan.text);
+        if (!job->last_observed_sha.empty() && heartbeat_sha == job->last_observed_sha) {
+            (void)store_->RecordObservation(occurrence.occurrence_id, heartbeat_sha, false, false,
+                                            false, now_ms);
+            if (store_->SettleOccurrence(occurrence.occurrence_id, "succeeded",
+                                         "unchanged_notification_suppressed", now_ms)) {
+                return std::string("succeeded");
+            }
+            *error = "automation.append_failed: 结算落不了盘";
+            return std::nullopt;
+        }
     }
     if (!SelectionAlreadyCommitted(*ledger, plan.selection_id)) {
         // 窗口 1:生成结束、selection 未提交——补齐(全程不调模型)。
@@ -229,9 +345,13 @@ std::optional<std::string> GatewayAutomationPump::RecoverOccurrence(
     (void)outbox_->DeliverPending(now_ms);
     // 结算:投递成功与否分开看(§九:执行成功与投递失败分别显示)。
     const auto item = outbox_->Find(gateway::MakeDeliveryId(plan.selection_id, "local:file", 1));
-    const std::string outcome = item.has_value() && item->state == "delivered"
-                                    ? std::string("succeeded")
-                                    : std::string("needs_review");
+    const bool delivered = item.has_value() && item->state == "delivered";
+    // heartbeat 观察:记在结算前;投递成才更新"上次已通知版本"。
+    if (!heartbeat_sha.empty()) {
+        (void)store_->RecordObservation(occurrence.occurrence_id, heartbeat_sha, true, delivered,
+                                        delivered, now_ms);
+    }
+    const std::string outcome = delivered ? std::string("succeeded") : std::string("needs_review");
     const std::string detail = item.has_value()
                                    ? ("delivery_state=" + item->state)
                                    : std::string("delivery_item_missing");
@@ -301,7 +421,7 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     binding.attempt = claimed->attempt;
 
     bool domain_bound = false;
-    std::atomic<bool> cancel_flag{false};
+    std::atomic<bool> cancel_flag{claimed->cancel_requested};
     const auto result = executor.Execute(
         job->prompt, binding,
         [this, occurrence_id, now_ms, &domain_bound](const std::string& session_id,
@@ -322,6 +442,24 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
             }
             return true;
         }
+        // heartbeat(notify_on_change):正文与上次已通知版本相同 → 不投
+        // 递(§七"无变化默认安静");记观察账(不更新已通知版本)。
+        std::string heartbeat_sha;
+        if (job->notify_on_change) {
+            heartbeat_sha = platform::Sha256Hex(result.reply_text);
+            const bool unchanged =
+                !job->last_observed_sha.empty() && heartbeat_sha == job->last_observed_sha;
+            if (unchanged) {
+                (void)store_->RecordObservation(occurrence_id, heartbeat_sha, false, false,
+                                                false, now_ms);
+                if (!store_->SettleOccurrence(occurrence_id, "succeeded",
+                                              "unchanged_notification_suppressed", now_ms)) {
+                    *error = "automation.append_failed: 结算落不了盘";
+                    return false;
+                }
+                return true;
+            }
+        }
         // 入 outbox(同 deliveryId 幂等;原件已在则只落账行)。
         const auto enqueued = outbox_->Enqueue(result.selection_id, result.reply_text,
                                                result.session_id, result.turn_id, now_ms);
@@ -336,6 +474,11 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
         const auto item =
             outbox_->Find(gateway::MakeDeliveryId(result.selection_id, "local:file", 1));
         const bool delivered = item.has_value() && item->state == "delivered";
+        // heartbeat 观察:记在结算前;投递成才更新"上次已通知版本"。
+        if (job->notify_on_change) {
+            (void)store_->RecordObservation(occurrence_id, heartbeat_sha, true, delivered,
+                                            delivered, now_ms);
+        }
         const std::string outcome = delivered ? std::string("succeeded") : std::string("needs_review");
         const std::string detail =
             delivered ? std::string("delivered")
@@ -354,6 +497,29 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     // 重启后的恢复扫描裁决。
     if (result.error_code == "gateway.fault_injected") {
         return true;  // 不结算:恢复路接管
+    }
+    // 取消边界:执行期间收到取消请求(cancel_requested 已把 cancel 旗
+    // 置位,执行在 turn 边界收场)→ cancelled,不判失败(§十 V2 第四件
+    // "已开始的沿取消边界");deadline 到点先请求取消、不判失败的派发面
+    // 在 ClaimDue(过线待办结算 cancelled/deadline_reached)。heartbeat
+    // 的失败通知永远投递(§七"检查失败不能记成无变化")。
+    const bool cancelled_by_request = claimed->cancel_requested;
+    if (job->notify_on_change) {
+        const std::string notice_text =
+            (std::string("自动任务失败: ") + result.error_code + ": " + result.error);
+        (void)outbox_->Enqueue("notice-" + occurrence_id, notice_text, result.session_id,
+                               result.turn_id, now_ms);
+        (void)outbox_->DeliverPending(now_ms);
+        (void)store_->RecordObservation(occurrence_id, platform::Sha256Hex(notice_text), true,
+                                        true, false, now_ms);
+    }
+    if (cancelled_by_request) {
+        if (!store_->SettleOccurrence(occurrence_id, "cancelled", "cancelled_at_turn_boundary",
+                                      now_ms)) {
+            *error = "automation.append_failed: 结算落不了盘";
+            return false;
+        }
+        return true;
     }
     if (!store_->SettleOccurrence(occurrence_id, "failed",
                                   result.error_code + ": " + result.error, now_ms)) {

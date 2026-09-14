@@ -61,6 +61,19 @@ GatewayStatusSections ProbeStatusSections(const GatewayProfilePaths& paths) {
         sections.work_ledger_present =
             std::filesystem::exists(paths.automation_log, ec) && !ec;
         sections.jobs_total = projection.jobs.size();
+        for (const auto& [id, job] : projection.jobs) {
+            switch (job.state) {
+                case AutomationJobState::Active:
+                    ++sections.jobs_active;
+                    break;
+                case AutomationJobState::Paused:
+                    ++sections.jobs_paused;
+                    break;
+                case AutomationJobState::Cancelled:
+                    ++sections.jobs_cancelled;
+                    break;
+            }
+        }
         const std::int64_t now_ms = platform::WallClockNowMs();
         for (const auto& [id, occurrence] : projection.occurrences) {
             switch (occurrence.state) {
@@ -77,6 +90,8 @@ GatewayStatusSections ProbeStatusSections(const GatewayProfilePaths& paths) {
                         ++sections.occurrences_succeeded;
                     } else if (occurrence.outcome == "failed") {
                         ++sections.occurrences_failed;
+                    } else if (occurrence.outcome == "cancelled") {
+                        ++sections.occurrences_cancelled;
                     } else {
                         ++sections.occurrences_needs_review;
                     }
@@ -200,11 +215,15 @@ nlohmann::json SectionsToJson(const GatewayStatusSections& sections) {
     nlohmann::json work = nlohmann::json::object();
     work["ledger_present"] = sections.work_ledger_present;
     work["jobs_total"] = sections.jobs_total;
+    work["jobs_active"] = sections.jobs_active;
+    work["jobs_paused"] = sections.jobs_paused;
+    work["jobs_cancelled"] = sections.jobs_cancelled;
     work["occurrences_due"] = sections.occurrences_due;
     work["occurrences_in_flight"] = sections.occurrences_in_flight;
     work["occurrences_succeeded"] = sections.occurrences_succeeded;
     work["occurrences_failed"] = sections.occurrences_failed;
     work["occurrences_needs_review"] = sections.occurrences_needs_review;
+    work["occurrences_cancelled"] = sections.occurrences_cancelled;
     json["work"] = std::move(work);
     nlohmann::json execution = nlohmann::json::array();
     for (const auto& entry : sections.recent_executions) {
@@ -252,11 +271,15 @@ std::vector<std::string> FormatSectionLines(const GatewayStatusSections& section
     std::vector<std::string> lines;
     lines.push_back("[work] 任务账" + std::string(sections.work_ledger_present ? "" : "(空:尚无任务)"));
     lines.push_back("  任务总数: " + std::to_string(sections.jobs_total) +
+                    "(在跑 " + std::to_string(sections.jobs_active) +
+                    ",暂停 " + std::to_string(sections.jobs_paused) +
+                    ",取消 " + std::to_string(sections.jobs_cancelled) + ")" +
                     ";occurrence: 待跑 " + std::to_string(sections.occurrences_due) +
                     ",在途 " + std::to_string(sections.occurrences_in_flight) +
                     ",成功 " + std::to_string(sections.occurrences_succeeded) +
                     ",失败 " + std::to_string(sections.occurrences_failed) +
-                    ",待审 " + std::to_string(sections.occurrences_needs_review));
+                    ",待审 " + std::to_string(sections.occurrences_needs_review) +
+                    ",取消 " + std::to_string(sections.occurrences_cancelled));
     lines.push_back("[execution] 最近执行");
     if (sections.recent_executions.empty()) {
         lines.push_back("  (尚无执行记录——进程在跑不等于任务跑过)");

@@ -6,8 +6,9 @@
 //           投影(work/execution/delivery),零写盘零建目录;--json 出
 //           机器可读快照。
 //   stop    投本地控制命令并等退出;不越权代杀(超时如实报)。
-//   job     V1 持久任务入口:add/run-now 落控制命令文件(活着的 Gateway
-//           消费进 AutomationStore,不直接改文件);list 只读账。
+//   job     持久任务入口(V1 add/run-now;V2 update/pause/resume/cancel/
+//           import-loop 与 read):写操作落控制命令文件(活着的 Gateway
+//           消费进 AutomationStore,不直接改文件);list/read 只读账。
 // install/start/restart/doctor/logs 是 G2+ 的口,不在此冒充。
 #pragma once
 
@@ -22,13 +23,25 @@ namespace lubancode::cli {
 struct GatewayCommandArgs {
     std::string verb;     // run | status | stop | job
     std::string profile;  // 空 = default
-    bool json = false;    // status/job list --json
+    bool json = false;    // status/job list/job read --json
     // job 子族(verb == "job")。
-    std::string job_verb;         // add | run-now | list
-    std::string prompt;           // add 的任务正文
-    std::string job_id;           // add --id / run-now 位置参数
+    std::string job_verb;         // add | run-now | list | read | update | pause | resume |
+                                  // cancel | import-loop
+    std::string prompt;           // add/update/import-loop 的任务正文
+    std::string job_id;           // add --id / run-now / read / update / pause / resume /
+                                  // cancel 位置参数
     std::string idempotency_key;  // --idem
     long long due_at_ms = 0;      // add --at(0 = 立即)
+    // V2 计划与领域操作参数。
+    long long interval_seconds = 0;  // --every(add/update/import-loop;秒)
+    std::string cron_expr;           // --cron(五字段受限子集)
+    std::string timezone;            // --tz(缺省 UTC;显式存储)
+    std::string misfire;             // --misfire(coalesce|skip;缺省 coalesce)
+    long long deadline_ms = 0;       // --deadline(0 = 不设)
+    bool heartbeat = false;          // --heartbeat(notify_on_change)
+    long long expected_revision = 0; // --rev(update/pause/resume/cancel 的 CAS)
+    std::string source_session_id;   // import-loop 位置参数(原 /loop 会话)
+    std::string source_task_id;      // import-loop --task(原 loop-N)
     // V1 主泵(verb == "run" 时装配层递进;空 = G1 骨架行为,无业务面)。
     // 借用指针,须活过 RunGatewayCommand。
     gateway::GatewayWorkPump* pump = nullptr;

@@ -202,6 +202,7 @@ gateway.shutdown_timeout
 automation.store_unavailable automation.job_not_found   automation.revision_conflict
 automation.claim_busy        automation.schedule_invalid
 automation.timezone_invalid  automation.recovery_needs_review
+automation.job_terminal      automation.import_conflict
 
 task.store_unavailable       task.spec_mismatch        task.side_effect_unknown
 task.process_ownership_unknown
@@ -310,3 +311,59 @@ V1 批落定的实现裁决（单子 §十 V1 五件事的落点）：
 V1 恢复裁决（§八的 V1 面；重派/补跑归 V2）：occurrence claimed 未结算时——bound 行在且 V3 有 assistant 且无 selection → 补 selection（续原卷 `V3Writer::Continue` 追加事实行，不调模型）；selection 已在 → 补 outbox 投影与投递；V3 无 assistant（生成未完成）→ needs_review；bound 行不在（claim 后崩）→ needs_review（V1 保守：核实无旧执行后重派归 V2）。
 
 V1 已验/未验分账见单子 V1 勾选；真起子进程在具名栅栏硬杀的冒烟仍未验（CI 册用"装配销毁重建 + 盘上调用计数"模拟，如实分账）。
+
+## 13. V2 裁决：周期调度与可靠接管（2026-09-15 落，回单子报备）
+
+V2 批落定的实现裁决（单子 §十 V2 五件事的落点）。调度引擎在 `src/gateway/automation_schedule.*`（纯函数零 IO），账面扩展全走 `automation/jobs.jsonl` 纯追加行（新行 type 见下），V1 旧行重放语义不变。
+
+### 13.1 计划形态与拍点
+
+- 三形态：`once`（V1 不变）/ `interval`（锚点等差：slot = anchor + k·interval，k≥1，纯 UTC，时区存而不参与运算）/ `cron`（五字段受限子集：`*`、`N`、`A-B`、`A-B/S`、`*/S`、逗号并列；英文名、`?`、`L/W/#`、`@词`、非五字段一律明拒不猜；dow 的 7 归一为 0）。
+- 时区显式存储（IANA 名或 `UTC±H[:MM]` 固定偏移串），不拿进程本地时区当隐含值。内置规则表（`automation_schedule.cpp` FindZone）：UTC、Asia/Shanghai、Asia/Tokyo、America/New_York（US 2007+ 规则）、Europe/Berlin（EU 规则，过渡点按 UTC 01:00）+ 固定偏移串。认不出的名字 `automation.timezone_invalid` 明拒。不引 tzdata——libc++（macOS 腿）无 C++20 tzdb，手写规则表是三腿可编译的取舍；带 DST 的区只按现行规则算，不做历史考古。
+- **DST 边界两裁**（测试钉，NY/Berlin 双区 + 固定偏移）：春跳缺口内的墙钟拍不存在——不补不挪，直接跳过（下一拍是缺口后第一个命中的墙钟）；秋拨重复时段的墙钟拍只取第一次出现（较早绝对时刻），第二次不再单独触发。拍点一律计划内 UTC 毫秒，occurrenceId 沿 `hash(jobId+revision+slot)` 定式。
+- cron 校验含"两年内至少一拍"（Feb-30 这类永不命中的表达式创建即拒）。
+
+### 13.2 misfire、合并、并发与队列帽
+
+- misfire 政策：`coalesce`（默认）——停机/占用跨多周期时合并补一拍：occurrence 落最老一拍、`missedCount` 记覆盖范围（既无待办时新建；已有 scheduled 待办时 `occurrence.merged` 行并进，不建第二枚）；`skip`——迟到判定 = `now - slot > 宽限`（interval 宽限 = min(周期, 60s)，cron 固定 60s，泵轮询粒度量级）：迟到的拍不补不并、游标直进，最近一拍在宽限内仍算"当前拍"照跑（不算补），连最近一拍都超出宽限则全跳、下一拍等未来。
+- 生成游标 `schedule_cursor` 只前进（`job.schedule_advanced` 行），时钟倒拨不重跑原 slot、不出新拍；cursor 是唯一"哪些拍已消化"的真源，occurrence 集合是派生事实。
+- 同 job 不重叠：有 claimed 未结算的活儿不生成、不进游标（收口后余拍合并补）；最多留一份合并待办。
+- 队列帽：全局 open（scheduled+claimed）occurrence 数达帽（默认 256，`AutomationStore::set_max_open_occurrences` 测试可调）停生成、游标不动、下轮重试（`stalled`），不无限 catch up。恢复扫描单飞沿用 V1（每 tick 至多一枚新执行）。
+- `paused` 不补跑：pause 停生成停派发（已排待办原地等，不结算）；resume 游标直进到 resume 时刻，paused 窗口的拍不回填。
+
+### 13.3 领域操作（CAS + 幂等键）
+
+- `update/pause/resume/cancel` 一律带 `expectedRevision`（必须显式且相等；0 拒）与 `idempotencyKey`（同键同操作同任务回原回执，同键异操作/异任务 `automation.revision_conflict`）。照 GoalService 先例。
+- update：`--prompt/--at/--every/--cron/--tz/--misfire/--deadline/--heartbeat` 出现即改；改周期（every/cron）即重锚（anchor/游标 = update 时刻，revision+1），**排队中的 occurrence 固定建账时的 revision，不随 update 挪**（occurrenceId 定式保证）。once 的 occurrence 建账即落，update 不挪它（改期走 cancel 重建）。
+- cancel：终态。先停未来派发（scheduled 的 occurrence 就地结算 `cancelled`/`job_cancelled`，历史保留不删账），再处理在飞（claimed 的落 `occurrence.cancel_requested`——执行收完按事实结算，取消请求把 cancel 旗置位、执行在 turn 边界收场后按 `cancelled` 收口不判失败）；后续 update/pause/resume/run-now 一律 `automation.job_terminal` 拒。
+- 命令面：CLI `gateway job add|run-now|list|read|update|pause|resume|cancel|import-loop`（写操作落 `control/` 命令文件由活 Gateway 消费，list/read 只读投影零写盘）。
+- deadline：job 可带 `deadlineMs`；过线不生成、待执行 occurrence 在 claim 面结算 `cancelled`/`deadline_reached`（不判 failed、不再执行）。在飞硬掐沿用 V1 墙钟预算（同步泵 turn 边界生效，如实分账）。
+
+### 13.4 恢复裁决（§八表的 V2 落面）
+
+- **claim 后无开轮事实**（领域绑定行不在）：绑定先于 V3 `gateway.work.bound` 与一切模型/工具动作——绑定行不在 = 该 work 从未开跑。重派同一 occurrence（`occurrence.redispatched` 行，attempt+1，occurrenceId 不洗），本 tick 派发面即认领执行；attempt 帽（`kMaxAttempts=3`）到顶结算 `needs_review`/`redispatch_exhausted`；任务已取消结算 `cancelled`。
+- **已绑定（开轮后）**沿 V1 裁决：V3 有 assistant 无 selection → 补 selection（同 selectionId，不调模型）；selection 在 → 补 outbox；无 assistant（模型请求可能已发）→ `needs_review`（未知副作用停住，不盲目重跑）；场对不上（stream 不存在/读不懂）→ `needs_review`。
+- 多次 resume：settled 的 occurrence 永不重开；重派保 occurrenceId/attempts 递增；deliveryId 定式不变——resume 一次不多执行、不多送一份。
+- heartbeat 任务恢复路同执行路：正文未变不投递（记观察账），补投只补有变化的。
+
+### 13.5 heartbeat（观察与通知去重）
+
+- job 带 `notifyOnChange`（CLI `--heartbeat`）：每次成功执行记 `occurrence.observed` 行（结果 sha256、是否变化、是否投递、是否更新已通知版本）；正文与上次已通知版本相同 → 不入 outbox，结算 `succeeded`/`unchanged_notification_suppressed`；不同 → 投递并在投递成后更新 `job.last_observed_sha`。
+- 检查失败不能记成"无变化"：失败路永远投递失败通知（outbox 里 `notice-<occurrenceId>` 前缀的显式通知项，与 reply selection 分账），且不更新已通知版本。fresh/continuation：occurrenceId 定式与 session 策略无关（身份稳定）；`continuation` 需渠道路绑定（V3 线），本批创建面明拒——不假装支持。
+
+### 13.6 /loop 显式导入
+
+- 入口 `gateway job import-loop <来源会话id> "正文" --task loop-N --every 秒 [--idem 键]` → `control/job-import-loop-*.json` → 活 Gateway 消费 → `ImportLoop`：建 interval job（prompt 固定副本，不逐拍现读原 /loop 状态）+ `loop.imported` receipt 行（receiptId = `imp-` + hash(sessionId+taskId)，账上凭来源键反查）。
+- 同来源（sessionId+taskId）幂等：再导回原 receipt，不建第二个 job——无 receipt 不暗搬、不双跑。结构上也不存在暗搬路：Gateway 不扫会话的 loop 状态，导入只走这条显式命令。原 /loop 状态只读留档（Gateway 不写它）；崩在"job 已建、receipt 未落"的极窄窗，凭 `--idem` 幂等键兜底（同键回原 job），裸重导可能出两个 job——如实记窗口，receipt 行落不稳属账 broken 一类。
+
+### 13.8 selectionId 定式修正（V2 对 §12.3 的修订）
+
+V1 冻结的 `selectionId = "sel-" + turnId` 在 V2 周期任务下暴露缺陷：turnId 只在场（session）内唯一，同 profile 多场共存时两场各自的 turn-1 会派生同名 selection——回复原件 `replies/<selectionId>.txt` 内容对不上即按 §11.5 拒绝，第二轮执行断为 `reply_unavailable`（V2 首批 CI 实测）。修正：
+
+- **V2 定式：`selectionId = "sel-" + sessionId + "-" + turnId`**（`PlanReplySelection` 纯函数，执行路与恢复路同一份）；`deliveryId = hash(selectionId + target + ordinal)` 随之派生，公式不变。
+- **V1 兼容**：流上已按旧式 `sel-<turnId>` 提交过 `reply.selection.committed` 的，恢复器沿用旧式 id——V1 期在途 occurrence 的恢复仍派生同一 id，不多送一份。新执行一律新式。
+- 本修订只影响身份定式与原件文件名，不改提交次序、不改 outbox 语义；QQ 渠道线（Q2）随 `ExecuteChannelTurn` 同享此修正。
+
+### 13.9 新账行 type（纯追加，未知 type 读取侧跳过）
+
+`job.updated`（fromRevision/toRevision/patch 键/cursorMs）、`job.paused`、`job.resumed`（cursorThroughMs）、`job.cancelled`、`job.schedule_advanced`（throughSlotMs/policy）、`occurrence.merged`（missedCount/throughSlotMs）、`occurrence.redispatched`（attempt/reason）、`occurrence.observed`（resultSha256/changed/delivered/updateLastObserved）、`occurrence.cancel_requested`、`loop.imported`。V2 已验/未验分账见单子 V2 勾选（放行门四条全过；真起子进程硬杀冒烟、断电一致性、真渠道投递仍属后续批次）。

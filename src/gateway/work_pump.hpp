@@ -59,13 +59,33 @@ public:
 // 消费侧按内容处理,读不懂的命令文件删除并留日志(不追杀,同 stop)。
 // ---------------------------------------------------------------------------
 
+// 计划形态的命令载荷(V2):--at/--every/--cron/--tz/--misfire/--deadline
+// 折进 add;update 只带要改的键(set_* 由 CLI 按出现折)。
+struct GatewayJobSchedulePatch {
+    bool set_due_at = false;
+    std::int64_t due_at_ms = 0;         // once
+    bool set_interval = false;
+    std::int64_t interval_seconds = 0;  // interval
+    bool set_cron = false;
+    std::string cron_expr;              // cron(五字段受限子集)
+    bool set_timezone = false;
+    std::string timezone;               // IANA 名或 UTC±H[:MM];显式存储
+    bool set_misfire = false;
+    std::string misfire;                // coalesce | skip
+    bool set_deadline = false;
+    std::int64_t deadline_ms = 0;
+    bool set_notify_on_change = false;
+    bool notify_on_change = false;      // heartbeat 口:结果未变不投递
+};
+
 struct GatewayJobAddCommand {
-    int schema_version = 1;
-    std::string prompt;            // 任务正文(once 的全部输入)
+    int schema_version = 2;
+    std::string prompt;            // 任务正文
     std::string idempotency_key;   // 调用方幂等键(重发同键)
     std::string job_id;            // 可选指名;空 = 服务发号
-    std::int64_t due_at_ms = 0;    // 0 = 立即
+    std::int64_t due_at_ms = 0;    // once:0 = 立即(V1 语义)
     std::int64_t requested_at_ms = 0;
+    GatewayJobSchedulePatch schedule;  // V2:--every/--cron 等出现即设
 
     nlohmann::json ToJson() const;
 };
@@ -79,17 +99,64 @@ struct GatewayJobRunNowCommand {
     nlohmann::json ToJson() const;
 };
 
+// 领域操作(V2 第二件事):一律带 expected_revision(CAS;0 = 拒)与
+// 幂等键。pause/resume/cancel 同形,靠 verb 分。
+struct GatewayJobUpdateCommand {
+    int schema_version = 1;
+    std::string job_id;
+    std::uint64_t expected_revision = 0;
+    std::string idempotency_key;
+    std::string prompt;                 // 空 = 不改
+    GatewayJobSchedulePatch schedule;   // set_* 带要改的键
+    std::int64_t requested_at_ms = 0;
+
+    nlohmann::json ToJson() const;
+};
+
+struct GatewayJobStateCommand {
+    int schema_version = 1;
+    std::string verb;  // pause | resume | cancel
+    std::string job_id;
+    std::uint64_t expected_revision = 0;
+    std::string idempotency_key;
+    std::int64_t requested_at_ms = 0;
+
+    nlohmann::json ToJson() const;
+};
+
+// /loop 显式导入(V2 第五件事):产 receipt——无 receipt 不暗搬、不双跑。
+struct GatewayJobImportLoopCommand {
+    int schema_version = 1;
+    std::string source_session_id;  // 原 /loop 所在会话
+    std::string source_task_id;     // 原 loop-N
+    std::string prompt;             // 固定副本(不逐拍现读原状态)
+    std::int64_t interval_seconds = 0;
+    std::string idempotency_key;
+    std::int64_t requested_at_ms = 0;
+
+    nlohmann::json ToJson() const;
+};
+
 // CLI 写侧:落一枚 job 命令文件(名字带 pid+序号防互踩)。返回空 = 成功。
 std::string WriteJobAddCommand(const std::filesystem::path& control_dir,
                                const GatewayJobAddCommand& command);
 std::string WriteJobRunNowCommand(const std::filesystem::path& control_dir,
                                   const GatewayJobRunNowCommand& command);
+std::string WriteJobUpdateCommand(const std::filesystem::path& control_dir,
+                                  const GatewayJobUpdateCommand& command);
+std::string WriteJobStateCommand(const std::filesystem::path& control_dir,
+                                 const GatewayJobStateCommand& command);
+std::string WriteJobImportLoopCommand(const std::filesystem::path& control_dir,
+                                      const GatewayJobImportLoopCommand& command);
 
 // 泵消费侧:扫 control/ 下 job- 前缀的命令文件,读、删(读不懂也删,
 // 不追杀)。目录不存在 = 空结果(零副作用;status 等只读命令不建目录)。
 struct ConsumedJobCommands {
     std::vector<GatewayJobAddCommand> adds;
     std::vector<GatewayJobRunNowCommand> run_nows;
+    std::vector<GatewayJobUpdateCommand> updates;
+    std::vector<GatewayJobStateCommand> state_ops;  // pause/resume/cancel
+    std::vector<GatewayJobImportLoopCommand> import_loops;
     std::size_t discarded = 0;  // 读不懂/认不出删掉的文件数(诊断)
 };
 ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir);

@@ -272,15 +272,16 @@ TEST_CASE("闭环:once 任务 -> V3 执行(含工具轮)-> reply selection -> �
         if (event.kind == trajectory::v3::EventKindV3::ReplySelectionCommitted) {
             saw_selection = true;
             REQUIRE(event.payload.contains("selectionId"));
-            CHECK(event.payload["selectionId"] == "sel-" + occurrence.turn_id);
+            CHECK(event.payload["selectionId"] ==
+                  "sel-" + occurrence.session_id + "-" + occurrence.turn_id);  // V2 定式
         }
     }
     CHECK(saw_bound);
     CHECK(saw_selection);
 
     // 本地结果文件:内容 = 冻结正文。
-    const std::string delivery_id = gateway::MakeDeliveryId("sel-" + occurrence.turn_id,
-                                                            "local:file", 1);
+    const std::string delivery_id = gateway::MakeDeliveryId(
+        "sel-" + occurrence.session_id + "-" + occurrence.turn_id, "local:file", 1);
     const auto published = fixture.paths.published_dir / (delivery_id + ".txt");
     REQUIRE(std::filesystem::exists(published));
     std::ifstream published_stream(published, std::ios::binary);
@@ -417,8 +418,8 @@ void RunHardKillWindowCase(const char* tag,
     const auto& occurrence = projection.occurrences.begin()->second;
     CHECK(occurrence.state == gateway::AutomationOccurrence::State::Settled);
     CHECK(occurrence.outcome == "succeeded");
-    const std::string delivery_id =
-        gateway::MakeDeliveryId("sel-" + occurrence.turn_id, "local:file", 1);
+    const std::string delivery_id = gateway::MakeDeliveryId(
+        "sel-" + occurrence.session_id + "-" + occurrence.turn_id, "local:file", 1);
     const auto published = fixture.paths.published_dir / (delivery_id + ".txt");
     REQUIRE(std::filesystem::exists(published));
     std::ifstream stream(published, std::ios::binary);
@@ -481,8 +482,8 @@ TEST_CASE("窗口 3:入 outbox 后、发布本地文件前——重启续投,不
     const auto& occurrence = projection.occurrences.begin()->second;
     CHECK(occurrence.state == gateway::AutomationOccurrence::State::Settled);
     CHECK(occurrence.outcome == "succeeded");
-    const std::string delivery_id =
-        gateway::MakeDeliveryId("sel-" + occurrence.turn_id, "local:file", 1);
+    const std::string delivery_id = gateway::MakeDeliveryId(
+        "sel-" + occurrence.session_id + "-" + occurrence.turn_id, "local:file", 1);
     const auto published = fixture.paths.published_dir / (delivery_id + ".txt");
     REQUIRE(std::filesystem::exists(published));
     std::ifstream stream(published, std::ios::binary);

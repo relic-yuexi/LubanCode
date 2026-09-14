@@ -45,6 +45,57 @@ std::string WriteCommandFile(const std::filesystem::path& path, const nlohmann::
 
 }  // namespace
 
+// 计划载荷的写读两侧共用:出现即写键,读侧按键出现回填 set_*。
+namespace {
+
+nlohmann::json SchedulePatchToJson(const GatewayJobSchedulePatch& patch) {
+    nlohmann::json json = nlohmann::json::object();
+    if (patch.set_due_at) json["dueAtMs"] = patch.due_at_ms;
+    if (patch.set_interval) json["intervalSeconds"] = patch.interval_seconds;
+    if (patch.set_cron) json["cronExpr"] = patch.cron_expr;
+    if (patch.set_timezone) json["timezone"] = patch.timezone;
+    if (patch.set_misfire) json["misfirePolicy"] = patch.misfire;
+    if (patch.set_deadline) json["deadlineMs"] = patch.deadline_ms;
+    if (patch.set_notify_on_change) json["notifyOnChange"] = patch.notify_on_change;
+    return json;
+}
+
+GatewayJobSchedulePatch SchedulePatchFromJson(const nlohmann::json& json) {
+    GatewayJobSchedulePatch patch;
+    auto has = [&json](const char* key) { return json.is_object() && json.contains(key); };
+    if (has("dueAtMs") && json["dueAtMs"].is_number_integer()) {
+        patch.set_due_at = true;
+        patch.due_at_ms = json["dueAtMs"].get<std::int64_t>();
+    }
+    if (has("intervalSeconds") && json["intervalSeconds"].is_number_integer()) {
+        patch.set_interval = true;
+        patch.interval_seconds = json["intervalSeconds"].get<std::int64_t>();
+    }
+    if (has("cronExpr") && json["cronExpr"].is_string()) {
+        patch.set_cron = true;
+        patch.cron_expr = json["cronExpr"].get<std::string>();
+    }
+    if (has("timezone") && json["timezone"].is_string()) {
+        patch.set_timezone = true;
+        patch.timezone = json["timezone"].get<std::string>();
+    }
+    if (has("misfirePolicy") && json["misfirePolicy"].is_string()) {
+        patch.set_misfire = true;
+        patch.misfire = json["misfirePolicy"].get<std::string>();
+    }
+    if (has("deadlineMs") && json["deadlineMs"].is_number_integer()) {
+        patch.set_deadline = true;
+        patch.deadline_ms = json["deadlineMs"].get<std::int64_t>();
+    }
+    if (has("notifyOnChange") && json["notifyOnChange"].is_boolean()) {
+        patch.set_notify_on_change = true;
+        patch.notify_on_change = json["notifyOnChange"].get<bool>();
+    }
+    return patch;
+}
+
+}  // namespace
+
 nlohmann::json GatewayJobAddCommand::ToJson() const {
     nlohmann::json json = nlohmann::json::object();
     json["type"] = "job.add";
@@ -54,6 +105,11 @@ nlohmann::json GatewayJobAddCommand::ToJson() const {
     if (!job_id.empty()) json["jobId"] = job_id;
     json["dueAtMs"] = due_at_ms;
     json["requestedAtMs"] = requested_at_ms;
+    // V2 计划键:出现即写(--every/--cron 等由 CLI 折进 schedule)。
+    const nlohmann::json patch = SchedulePatchToJson(schedule);
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        json[it.key()] = it.value();
+    }
     return json;
 }
 
@@ -67,6 +123,46 @@ nlohmann::json GatewayJobRunNowCommand::ToJson() const {
     return json;
 }
 
+nlohmann::json GatewayJobUpdateCommand::ToJson() const {
+    nlohmann::json json = nlohmann::json::object();
+    json["type"] = "job.update";
+    json["schemaVersion"] = schema_version;
+    json["jobId"] = job_id;
+    json["expectedRevision"] = expected_revision;
+    json["idempotencyKey"] = idempotency_key;
+    if (!prompt.empty()) json["prompt"] = prompt;
+    json["requestedAtMs"] = requested_at_ms;
+    const nlohmann::json patch = SchedulePatchToJson(schedule);
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        json[it.key()] = it.value();
+    }
+    return json;
+}
+
+nlohmann::json GatewayJobStateCommand::ToJson() const {
+    nlohmann::json json = nlohmann::json::object();
+    json["type"] = "job." + verb;
+    json["schemaVersion"] = schema_version;
+    json["jobId"] = job_id;
+    json["expectedRevision"] = expected_revision;
+    json["idempotencyKey"] = idempotency_key;
+    json["requestedAtMs"] = requested_at_ms;
+    return json;
+}
+
+nlohmann::json GatewayJobImportLoopCommand::ToJson() const {
+    nlohmann::json json = nlohmann::json::object();
+    json["type"] = "job.import_loop";
+    json["schemaVersion"] = schema_version;
+    json["sourceSessionId"] = source_session_id;
+    json["sourceTaskId"] = source_task_id;
+    json["prompt"] = prompt;
+    json["intervalSeconds"] = interval_seconds;
+    json["idempotencyKey"] = idempotency_key;
+    json["requestedAtMs"] = requested_at_ms;
+    return json;
+}
+
 std::string WriteJobAddCommand(const std::filesystem::path& control_dir,
                                const GatewayJobAddCommand& command) {
     return WriteCommandFile(CommandFilePath(control_dir, "add"), command.ToJson());
@@ -75,6 +171,23 @@ std::string WriteJobAddCommand(const std::filesystem::path& control_dir,
 std::string WriteJobRunNowCommand(const std::filesystem::path& control_dir,
                                   const GatewayJobRunNowCommand& command) {
     return WriteCommandFile(CommandFilePath(control_dir, "run-now"), command.ToJson());
+}
+
+std::string WriteJobUpdateCommand(const std::filesystem::path& control_dir,
+                                  const GatewayJobUpdateCommand& command) {
+    return WriteCommandFile(CommandFilePath(control_dir, "update"), command.ToJson());
+}
+
+std::string WriteJobStateCommand(const std::filesystem::path& control_dir,
+                                 const GatewayJobStateCommand& command) {
+    // 文件名的 verb 段(pause/resume/cancel);内容里的 type 同款。
+    return WriteCommandFile(CommandFilePath(control_dir, command.verb.c_str()),
+                            command.ToJson());
+}
+
+std::string WriteJobImportLoopCommand(const std::filesystem::path& control_dir,
+                                      const GatewayJobImportLoopCommand& command) {
+    return WriteCommandFile(CommandFilePath(control_dir, "import-loop"), command.ToJson());
 }
 
 ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir) {
@@ -127,6 +240,7 @@ ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir) {
                 command.job_id = get_string("jobId");
                 command.due_at_ms = get_int("dueAtMs");
                 command.requested_at_ms = get_int("requestedAtMs");
+                command.schedule = SchedulePatchFromJson(parsed);
                 consumed.adds.push_back(std::move(command));
                 handled = true;
             } else if (type == "job.run_now" && !get_string("jobId").empty()) {
@@ -135,6 +249,43 @@ ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir) {
                 command.idempotency_key = get_string("idempotencyKey");
                 command.requested_at_ms = get_int("requestedAtMs");
                 consumed.run_nows.push_back(std::move(command));
+                handled = true;
+            } else if (type == "job.update" && !get_string("jobId").empty() &&
+                       get_int("expectedRevision") > 0) {
+                GatewayJobUpdateCommand command;
+                command.job_id = get_string("jobId");
+                command.expected_revision =
+                    static_cast<std::uint64_t>(get_int("expectedRevision"));
+                command.idempotency_key = get_string("idempotencyKey");
+                command.prompt = get_string("prompt");
+                command.requested_at_ms = get_int("requestedAtMs");
+                command.schedule = SchedulePatchFromJson(parsed);
+                consumed.updates.push_back(std::move(command));
+                handled = true;
+            } else if ((type == "job.pause" || type == "job.resume" || type == "job.cancel") &&
+                       !get_string("jobId").empty() && get_int("expectedRevision") > 0) {
+                GatewayJobStateCommand command;
+                command.verb = type.substr(4);  // "job." 之后
+                command.job_id = get_string("jobId");
+                command.expected_revision =
+                    static_cast<std::uint64_t>(get_int("expectedRevision"));
+                command.idempotency_key = get_string("idempotencyKey");
+                command.requested_at_ms = get_int("requestedAtMs");
+                consumed.state_ops.push_back(std::move(command));
+                handled = true;
+            } else if (type == "job.import_loop" && !get_string("sourceSessionId").empty() &&
+                       !get_string("sourceTaskId").empty() &&
+                       parsed.contains("prompt") && parsed["prompt"].is_string() &&
+                       !parsed["prompt"].get<std::string>().empty() &&
+                       get_int("intervalSeconds") > 0) {
+                GatewayJobImportLoopCommand command;
+                command.source_session_id = get_string("sourceSessionId");
+                command.source_task_id = get_string("sourceTaskId");
+                command.prompt = parsed["prompt"].get<std::string>();
+                command.interval_seconds = get_int("intervalSeconds");
+                command.idempotency_key = get_string("idempotencyKey");
+                command.requested_at_ms = get_int("requestedAtMs");
+                consumed.import_loops.push_back(std::move(command));
                 handled = true;
             }
         }

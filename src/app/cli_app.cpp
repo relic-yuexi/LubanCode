@@ -867,6 +867,15 @@ int RunCli(const std::vector<std::string>& args) {
             gateway_args.job_id = parsed_cli.gateway.job_id;
             gateway_args.idempotency_key = parsed_cli.gateway.idempotency_key;
             gateway_args.due_at_ms = parsed_cli.gateway.due_at_ms;
+            gateway_args.interval_seconds = parsed_cli.gateway.interval_seconds;
+            gateway_args.cron_expr = parsed_cli.gateway.cron_expr;
+            gateway_args.timezone = parsed_cli.gateway.timezone;
+            gateway_args.misfire = parsed_cli.gateway.misfire;
+            gateway_args.deadline_ms = parsed_cli.gateway.deadline_ms;
+            gateway_args.heartbeat = parsed_cli.gateway.heartbeat;
+            gateway_args.expected_revision = parsed_cli.gateway.expected_revision;
+            gateway_args.source_session_id = parsed_cli.gateway.source_session_id;
+            gateway_args.source_task_id = parsed_cli.gateway.source_task_id;
             if (gateway_args.verb != "run") {
                 return cli::RunGatewayCommand(gateway_args);
             }

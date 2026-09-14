@@ -146,8 +146,8 @@ Gateway 进程退出码（G1 实现裁决，冻结）：
 | 批 | 内容 | 状态 |
 |---|---|---|
 | V0 | 合同与持久受理底线：文档翻新、work/occurrence/reply 身份与 schema 注册、SessionService 受理四病修复、锁的原子互斥与 ownerEpoch + 双进程竞争测试、PowerLoss 提交原语与原件保留规则 | 已落（2026-09-13，本目录三篇同步） |
-| V1 | 最短纵向闭环：主泵、最小 AutomationStore（once/run-now）、共用 headless 装配、reply selection + 本地 DurableReplyOutbox | 待实现 |
-| V2 | 周期调度与可靠接管（interval/cron、时区/DST、misfire、恢复裁决、heartbeat、/loop 导入） | 待实现 |
+| V1 | 最短纵向闭环：主泵、最小 AutomationStore（once/run-now）、共用 headless 装配、reply selection + 本地 DurableReplyOutbox | 已落（2026-09-13，PR #63；裁决见 contracts.md §12） |
+| V2 | 周期调度与可靠接管（interval/cron、时区/DST、misfire、恢复裁决、heartbeat、/loop 导入） | 已落（2026-09-15，裁决见 contracts.md §13） |
 | V3 | 渠道总装与真 transport（durable work 引用、sidecar、ACK 服从 ingress 耐久回执） | 待实现 |
 | V4 | 服务安装与常驻运维（install/start/restart/doctor/logs、三平台 supervisor） | 待实现 |
 | V5 | 长任务、Goal 与 Workflow（与异步工具单共用执行账） | 待实现 |

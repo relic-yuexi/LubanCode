@@ -800,7 +800,9 @@ add_library(lubancode_engine STATIC
   src/gateway/status.cpp
   # 常驻总装 V1:最小任务账(once/run-now)、本地 DurableReplyOutbox、
   # job 控制命令文件与泵合同口。纯文件账,零 runtime 依赖。
+  # V2:周期调度引擎(interval/cron/时区 DST/misfire,纯函数零 IO)。
   src/gateway/automation_store.cpp
+  src/gateway/automation_schedule.cpp
   src/gateway/reply_outbox.cpp
   src/gateway/work_pump.cpp
   src/insights/finding.cpp
