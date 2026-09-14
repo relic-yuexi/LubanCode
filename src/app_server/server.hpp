@@ -191,6 +191,15 @@ struct ServerOptions {
     // 不递 = 旧注入形态(直驱单测):thread 开张不因装配拒,回合驱动里走
     // 同一条 AssembleSession 兜底,材料一场一份。
     std::function<SessionAssemblyResult()> assembly_factory;
+    // 应用Worker接入单 §八(本单切片):启动冻结的连接快照
+    // (connection_snapshot.hpp)。RunAppServerMode 进程启动读一次配置、冻
+    // 一份进程期内不变(单 Worker 连接冻结);thread/started 回执以
+    // additive 字段 connection 原样带回。null/非 object = 未冻结(老注入
+    // 形态的直驱单测),回执不带该字段,行为零变化。
+    nlohmann::json connection_snapshot;
+    // v3 请求账 identity.provider 的真值(cli_app 折 BoundProviderName)。
+    // 空 = 老测试注入路,identity.provider 照旧空串,账面行为不变。
+    std::string session_provider;
 };
 
 // 一台 app-server。一个进程一台;装配好后 Run() 进主循环(stdio 或 WS

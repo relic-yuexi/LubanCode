@@ -1281,6 +1281,13 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         return nlohmann::json();
     }
     nlohmann::json result{{"threadId", record->thread_id}, {"cwd", record->cwd}};
+    // 应用Worker接入单 §八:启动冻结的连接快照随首场回执带回(additive
+    // 字段;未冻结(老注入路/单测直设)不带,老前端零感知)。快照是
+    // ServerOptions 里的冻结合同——同一 Worker 进程内的每一场都拿同一份,
+    // 运行期改环境变量/配置文件不影响本进程(§八 178 只影响新 Worker)。
+    if (options_.connection_snapshot.is_object() && !options_.connection_snapshot.empty()) {
+        result["connection"] = options_.connection_snapshot;
+    }
     // 可选降级必须写结果(单子 P1):装配期跳过的可选组件(未被档的
     // tools.allow 引用、起服失败的 MCP)如实带回,Profile 决定降级能否
     // 继续——必需组件失败在装配层已整场拒绝,到这里的都是可选降级。
@@ -1855,8 +1862,15 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         runtime::TrajectorySessionLedger* trajectory_ledger =
             record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
         if (trajectory_ledger != nullptr) {
-            runtime::TrajectoryTurnBridge::Identity identity{std::string(), options_.session_wire,
+            // §八:provider 填真值(cli_app 折 BoundProviderName;空 = 注入
+            // 路,账面照旧);连接快照三件(脱敏端点/密钥引用/配置版本)是
+            // 进程级冻结件,经 identity 递给请求账,见 identity 注释。
+            runtime::TrajectoryTurnBridge::Identity identity{options_.session_provider, options_.session_wire,
                                                              "app_server"};
+            identity.connection = options_.connection_snapshot.is_object() &&
+                                          !options_.connection_snapshot.empty()
+                                      ? options_.connection_snapshot
+                                      : nlohmann::json();
             trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
             if (trajectory_bridge != nullptr) {
                 trajectory_hub.emplace(record->session_service->runtime()->ids());

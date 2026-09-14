@@ -1173,6 +1173,9 @@ add_library(lubancode_app STATIC
   # 应用Worker接入单 P2:Agent 档案解析 + Skill 来源 + 提示部件组合
   # (GAP-01/02/03;prompt_assembler 既有管线,来源显式、缺件明拒)。
   src/app_server/agent_wiring.cpp
+  # 应用Worker接入单 §八(尾款):模型连接启动快照(单 Worker 冻结)+
+  # §四.111 脱敏 effective-config 诊断。纯函数件。
+  src/app_server/connection_snapshot.cpp
   # 可见调试阶段 3:browser/* 方法面——sidecar 进程管理、RPC 配对、
   # 事件转发、审批与取消、截图 artifact。
   src/app_server/browser_service.cpp

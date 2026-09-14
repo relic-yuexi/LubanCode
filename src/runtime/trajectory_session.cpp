@@ -521,6 +521,25 @@ nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::Re
         payload["request_snapshot_ref"] = snapshot.ToJson();
         payload["request_snapshot_sha256"] = hooks::Sha256Hex(payload["request_snapshot_ref"].dump());
     }
+    // 应用Worker接入单 §八:连接快照的冻结局(脱敏端点/密钥引用/配置版本)
+    // ——wire/model/provider 已在顶层,这里补的是"连到哪/钥匙在哪/哪版配
+    // 置"。identity 没带(终端/子代理)整块不落,载荷逐字节不变。
+    if (identity.connection.is_object() && !identity.connection.empty()) {
+        nlohmann::json connection = nlohmann::json::object();
+        if (identity.connection.contains("endpoint") && identity.connection["endpoint"].is_string()) {
+            connection["endpoint"] = identity.connection["endpoint"];
+        }
+        if (identity.connection.contains("secretRef") && identity.connection["secretRef"].is_string()) {
+            connection["secretRef"] = identity.connection["secretRef"];
+        }
+        if (identity.connection.contains("configVersion") &&
+            identity.connection["configVersion"].is_string()) {
+            connection["configVersion"] = identity.connection["configVersion"];
+        }
+        if (!connection.empty()) {
+            payload["connection"] = std::move(connection);
+        }
+    }
     return payload;
 }
 
@@ -1277,6 +1296,24 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
                                                       {"wire", identity_.wire},
                                                       {"model", request.model}};
+    // 应用Worker接入单 §八:连接快照的冻结局,与 v2 BuildPreparedPayload
+    // 同一份合同(见那边的注释);identity 没带整块不落。
+    if (identity_.connection.is_object() && !identity_.connection.empty()) {
+        nlohmann::json connection = nlohmann::json::object();
+        if (identity_.connection.contains("endpoint") && identity_.connection["endpoint"].is_string()) {
+            connection["endpoint"] = identity_.connection["endpoint"];
+        }
+        if (identity_.connection.contains("secretRef") && identity_.connection["secretRef"].is_string()) {
+            connection["secretRef"] = identity_.connection["secretRef"];
+        }
+        if (identity_.connection.contains("configVersion") &&
+            identity_.connection["configVersion"].is_string()) {
+            connection["configVersion"] = identity_.connection["configVersion"];
+        }
+        if (!connection.empty()) {
+            provider_snapshot["connection"] = std::move(connection);
+        }
+    }
     if (request.max_tokens.has_value()) {
         provider_snapshot["parameters"] = nlohmann::json{{"maxOutputTokens", *request.max_tokens}};
     }

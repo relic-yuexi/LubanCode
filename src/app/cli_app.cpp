@@ -9,6 +9,7 @@
 // QQ 机器人接入单 Q1:渠道装配与复合泵(gateway run 的 QQ 进程内直连)。
 #include "app/channel_gateway_wiring.hpp"
 #include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
+#include "app_server/connection_snapshot.hpp"  // §八:连接快照冻结 + §四.111 effective-config 诊断
 #include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
 #include "app_server/server.hpp"
 #include "app_server/session_assembly.hpp"  // P1:会话级运行材料装配
@@ -93,6 +94,7 @@
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
 #include "config/runtime_paths.hpp"  // 启动门:应用根三变量先识别先校验(应用Worker接入单 P1)
+#include "hooks/hash.hpp"  // §四.111:部署档内容指纹(effective-config 诊断)
 #include "config/settings_local.hpp"
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
@@ -446,6 +448,15 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             break;
     }
     options.session_model = config_result.config.model;
+    // §八(本单切片):连接快照启动冻结一次——单 Worker 连接冻结的合同就
+    // 是这份冻结合同:本进程读一次配置,此后逐场 thread 复用同一份;运行
+    // 期改环境变量/配置文件不影响本进程(只影响新起的 Worker,§八 178)。
+    // provider 折真名进请求账 identity(BoundProviderName:环境变量把
+    // wire/base_url/model 换脱钩时不冒认旧 provider)。
+    options.connection_snapshot =
+        lubancode::app_server::FreezeConnectionSnapshot(config_result.config, config_result.sources);
+    options.session_provider =
+        lubancode::config::BoundProviderName(config_result.config, config_result.config.active_provider);
     // --yes 折进来(P1:headless 装配上真工具后,显式全放旗标才有了可裁
     // 的对象;与终端同语义——deny 也不拦是用户自己的选择)。
     options.auto_confirm = cli_options.auto_confirm;
@@ -532,6 +543,52 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             return 1;
         }
         harness = std::move(*parsed_profile.profile);
+    }
+    // §四.111:启动时 stderr 打一次脱敏 effective-config(stdout 是协议口,
+    // 诊断一律 stderr)。根路径/来源清单/逐字段取值来源/部署档指纹/功能状
+    // 态——部署者凭它核对应用根与档真生效(验证个人 provider/compact/角色
+    // 模型没有意外覆盖本应用配置,§八 179)。零密钥:凭据只以引用形态出现。
+    {
+        lubancode::app_server::EffectiveConfigInput effective;
+        effective.config = &config_result.config;
+        effective.sources = &config_result.sources;
+        effective.project_config_path = config_result.project_config_file_path;
+        effective.global_config_path = config_result.global_config_file_path;
+        const auto runtime_env = lubancode::config::CaptureProcessEnv();
+        const auto runtime_paths = lubancode::config::ResolveRuntimePaths(runtime_env);
+        if (runtime_paths.has_value() && runtime_paths->app_root_active) {
+            effective.app_root_active = true;
+            effective.managed = runtime_paths->managed;
+            if (runtime_paths->config_root.has_value()) {
+                effective.config_root = lubancode::platform::PathToUtf8(*runtime_paths->config_root);
+            }
+            if (runtime_paths->data_root.has_value()) {
+                effective.data_root = lubancode::platform::PathToUtf8(*runtime_paths->data_root);
+            }
+        } else {
+            // 个人布局:根从既有两口报(启动门已保证变量要么干净要么整个
+            // 拒启,到这里拿不到根就是无主目录一类边角,如实空)。
+            if (const auto home = lubancode::config::HomeLubancodeDir(); home.has_value()) {
+                effective.config_root = *home;
+            }
+            if (const auto state = lubancode::config::StateRootDir(); state.has_value()) {
+                effective.data_root = *state;
+            }
+        }
+        effective.profile_path = cli_options.app_server_profile_path;
+        if (harness.has_value()) {
+            effective.harness = &*harness;
+            // 部署档指纹:文件内容 sha256(锁版本用,与二进制/协议版本同列
+            // 的部署侧兼容凭据)。
+            std::ifstream profile_file(lubancode::tools::Utf8ToPath(cli_options.app_server_profile_path),
+                                       std::ios::binary);
+            if (profile_file.is_open()) {
+                const std::string content((std::istreambuf_iterator<char>(profile_file)),
+                                          std::istreambuf_iterator<char>());
+                effective.profile_sha256 = lubancode::hooks::Sha256Hex(content);
+            }
+        }
+        std::fputs(lubancode::app_server::FormatEffectiveConfigDiagnostics(effective).c_str(), stderr);
     }
     {
         // 装配工厂(一场 thread 一次):部署档 + config 的计划装配。步数
