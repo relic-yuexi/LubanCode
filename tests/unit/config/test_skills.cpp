@@ -458,7 +458,7 @@ TEST_CASE("ParseSkillMarkdown: requires-tools 声明——真 YAML 路收清单,
         REQUIRE(parsed->requires_tools.has_value());
         REQUIRE(parsed->requires_tools->size() == 2);
         CHECK((*parsed->requires_tools)[0] == "run_command");
-        CHECK((*parsed->requires_tools->begin() + 1) == "mcp__srv__echo");
+        CHECK((*parsed->requires_tools)[1] == "mcp__srv__echo");
     }
     SUBCASE("未声明 = nullopt(不冒充空清单)") {
         const auto parsed = tools::ParseSkillMarkdown("---\nname: s\ndescription: d\n---\nbody\n");
