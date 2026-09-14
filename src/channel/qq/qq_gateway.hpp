@@ -25,6 +25,25 @@
 
 namespace lubancode::channel::qq {
 
+// 连接阶段稳定名(连接状态单 §三:取令牌 → 查询地址 → TCP/TLS →
+// WebSocket → Identify/Resume → READY/RESUMED)。阶段事件谁发:
+// fetching_token/fetching_gateway_url 归适配器的 provider(它做 HTTP);
+// connecting/identifying/connected 归网关状态机;stopped 归收口。
+inline constexpr char kStageFetchingToken[] = "fetching_token";
+inline constexpr char kStageFetchingGatewayUrl[] = "fetching_gateway_url";
+inline constexpr char kStageConnecting[] = "connecting";
+inline constexpr char kStageIdentifying[] = "identifying";
+inline constexpr char kStageConnected[] = "connected";
+inline constexpr char kStageStopped[] = "stopped";
+
+// 连接失败的稳定账:失败阶段 + 稳定错误码 + 脱敏说明。provider/transport
+// 的失败都折成它,适配器按它记"最近失败"(退避事件不改写)。
+struct GatewayConnectError {
+    std::string stage;       // kStage* 之一
+    std::string error_code;  // 稳定码(见 qq_gateway.cpp 的码表注释)
+    std::string detail;      // 脱敏人话(不带 token/secret/响应体)
+};
+
 // 出口事件(适配器消费)。
 struct GatewayEvent {
     enum class Kind {
@@ -32,36 +51,47 @@ struct GatewayEvent {
         SessionReady,       // Identify 过(含新 session_id)
         SessionResumed,     // Resume 过
         SessionInvalidated, // op9 不可恢复:session 已清,下一轮重新 Identify
-        Disconnected,       // 连接断(detail 带原因)
+        StageChanged,       // 连接阶段推进(stage 带稳定名)
+        ConnectFailed,      // 一轮连接尝试没到 READY 就断(stage/error_code/detail = 根因)
+        BackoffScheduled,   // 失败后的退避排程(attempt/next_retry_at_ms;不带根因)
+        Disconnected,       // 在线过(READY/RESUMED 后)断线(stage/error_code/detail = 根因)
+        Stopped,            // RunLoop 收口(停止)
     };
     Kind kind = Kind::Disconnected;
     nlohmann::json c2c_d;      // Kind::C2cMessageCreate 时有值
     std::string detail;
     std::int64_t seq = -1;     // Disconnected 时的 last_seq
+    std::string stage;         // StageChanged/ConnectFailed/Disconnected 时有值
+    std::string error_code;    // ConnectFailed/Disconnected 的稳定码
+    int attempt = 0;           // BackoffScheduled:第几次失败(1 起)
+    std::int64_t next_retry_at_ms = 0;  // BackoffScheduled:下一次尝试时刻
 };
 
 // 网关传输 seam(测试注入假流;生产 MakeWsTransportFactory)。
 class IGatewayTransport {
 public:
     virtual ~IGatewayTransport() = default;
-    virtual std::expected<void, std::string> Connect(const std::string& url) = 0;
+    virtual std::expected<void, GatewayConnectError> Connect(const std::string& url) = 0;
     virtual std::expected<void, std::string> SendText(const std::string& text) = 0;
     virtual std::expected<std::string, WsError> ReadMessage(int timeout_ms) = 0;
     virtual void Cancel() = 0;
     virtual void Close(std::uint16_t code, const std::string& reason) = 0;
 };
 
-// 生产传输工厂:真 WsClient(明文 ws:// 与 wss:// 同一路,ca_pem 供 wss)。
-std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(std::string ca_pem);
+// 生产传输工厂:真 WsClient(明文 ws:// 与 wss:// 同一路,ca_pem 供 wss;
+// trust_mode 透传 TLS 层,见 qq_tls.hpp)。
+std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
+    std::string ca_pem, TlsTrustMode trust_mode = TlsTrustMode::ExplicitCa);
 
 class QqGatewaySession {
 public:
     struct Options {
         std::function<std::unique_ptr<IGatewayTransport>()> transport_factory;
         // 取网关 URL(生产:GET /gateway;测试注入固定 ws://127.0.0.1:...)。
-        std::function<std::expected<std::string, std::string>()> gateway_url_provider;
+        // 失败带 GatewayConnectError(取令牌/查地址的失败阶段与稳定码)。
+        std::function<std::expected<std::string, GatewayConnectError>()> gateway_url_provider;
         // 每次连接取当前 access token(鉴权/刷新归 QqTokenManager)。
-        std::function<std::expected<std::string, std::string>()> token_provider;
+        std::function<std::expected<std::string, GatewayConnectError>()> token_provider;
         std::uint32_t intents = kIntentGroupAndC2cEvent;
         std::function<void(const GatewayEvent&)> on_event;
         std::function<std::int64_t()> now_ms;

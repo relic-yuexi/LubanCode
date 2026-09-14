@@ -365,3 +365,25 @@ reload 走 diff：
 - 新 generation 起不来：保旧 generation，报 reload failed。
 
 首版可先 stop-old/start-new，但须把消息空窗与重投写进测试。不可装作原子热切已经完成。
+
+## 13. 连接状态与 TLS 信任根（QQ 连接诊断单 §三/§四）
+
+### 13.1 连接状态（QQ session 独占平台连接状态）
+
+平台连接状态的唯一权威在适配器的网关 session（QQ 独占）；宿主只透传与输出结构化快照，不另养一份猜测状态。快照字段（`src/channel/qq/qq_adapter.hpp` 的 `ConnectionSnapshot`）：`connected`（只在 READY/RESUMED 后成立；断线、停止立即 false）、`thread_alive`（网关线程存活，不等于在线）、`stage`（`fetching_token` → `fetching_gateway_url` → `connecting`（TCP/TLS/WebSocket）→ `identifying`（Identify/Resume）→ `connected`，收口 `stopped`）、`last_failure`（stage + 稳定 error_code + 脱敏 detail + 失败时间；退避事件不改写它）、`failure_history`（连接成功后归档最近 8 笔，当前清空）、`retry_count` 与 `next_retry_at_ms`。
+
+`gateway run` 默认打印开始连接、首次失败、在线、断线与停止；同一稳定码的重复失败 30 秒窗内合并（超窗补一条带累计数），原因变化立即显示。跨进程只读口：Gateway 每 tick 发布脱敏快照 `<渠道状态根>/<channel>/<account>/connection-status.json`（带 boot ID、pid、更新时间；`lubancode channel status <渠道> <账号>` 读它并校验进程存活与 60 秒新鲜度——进程死/快照过期/未连接都退非零，不凭 PID 宣告成功，快照不是连接状态权威）。
+
+零泄露：连接诊断不打印 AppSecret、token、Authorization、原始响应体或带敏感参数的 URL；detail 来自各层稳定账，宿主输出前再过一道控制字符折叠与限长清洗。
+
+### 13.2 TLS 信任根
+
+wss 的 TLS 验证恒 REQUIRED，无降级开关，失败不改走明文。信任根解析（`src/channel/qq/qq_tls.hpp` 的 `ResolveChannelTrustRoots`）：
+
+- **显式信任锚**（装配 seam `ChannelGatewayWiring::Options::ca_pem`，测试位）：调用方全权指定，不回退平台来源；解析不出证书时明报（装配诊断一行"信任根不可用"），连接时报 `tls_trust_store_empty`。**未接入用户配置**——若未来开放配置须接全配置解析、优先级与文档（QQ 连接诊断单 §四原话）。
+- **平台默认（Windows）**：从系统证书库（Root/Ca，CurrentUser+LocalMachine，剔除 Disallowed 显式不信任）导出信任根喂 mbedTLS，并在 mbedTLS 握手验证里接 Windows 链构建与 SSL 策略校验（`CertGetCertificateChain` + `CertVerifyCertificateChainPolicy`，覆盖主机名/有效期/链信任/用途/系统不信任策略）；系统裁决为权威（可走 AIA 拉中间证书，本地导出子集做不到），系统拒则握手拒。用户无须下载 PEM、造 `/etc/ssl` 目录或设环境变量。
+- **平台默认（Linux/macOS）**：探测系统 PEM 路径（`/etc/ssl/cert.pem` 等），行为与既有版本一致；测试 CA 注入不受影响。
+
+稳定错误码：`tls_trust_store_empty` / `tls_trust_store_load_failed` / `tls_cert_expired` / `tls_cert_hostname_mismatch` / `tls_cert_not_trusted` / `tls_cert_policy_rejected` / `tls_cert_verify_failed` / `tls_handshake_timeout` / `tls_handshake_failed`。HTTP 取令牌/查地址（cpr/libcurl 栈）与 WSS（mbedTLS 栈）是两段独立信任路径，分别报错分别验收，HTTP 成功不冒充 WSS 成功。
+
+Windows 证书库导出与 SSL 策略校验（`#ifdef _WIN32` 块）在 CI 的 Windows 车道只编 main 不跑测试——真机行为归 Q3 Windows 发布包复测，单内如实标"未验"。

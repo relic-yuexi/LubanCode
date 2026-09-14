@@ -25,7 +25,9 @@ namespace {
 // 静默假网关传输:连接即过,不推事件,读恒超时(网关线程在退避循环里安静转)。
 class QuietGatewayTransport final : public channel::qq::IGatewayTransport {
 public:
-    std::expected<void, std::string> Connect(const std::string&) override { return {}; }
+    std::expected<void, channel::qq::GatewayConnectError> Connect(const std::string&) override {
+        return {};
+    }
     std::expected<void, std::string> SendText(const std::string&) override { return {}; }
     std::expected<std::string, channel::qq::WsError> ReadMessage(int) override {
         return std::unexpected(channel::qq::WsError{channel::qq::WsError::Kind::Timeout,
@@ -172,6 +174,28 @@ TEST_CASE("qq_wiring: 五闸全过——账号真装配进 ChannelManager 并起
     // 关机次序:Close 停账号收线程(宽限内)。
     CHECK(wiring->Close(5'000));
     wiring.reset();
+}
+
+TEST_CASE("qq_wiring: 信任根诊断——显式无效锚明报,不静默(§四)") {
+    const auto root = MakeTempRoot("trust_invalid");
+    config::Config config;
+    channel::ChannelUserConfig qq;
+    qq.enabled = true;
+    channel::ChannelAccountUserConfig account = channel::MakeQqTemplateAccount();
+    account.enabled = true;
+    account.app_id = "APP1";
+    account.secret = std::string("inline-secret");
+    qq.accounts["main"] = account;
+    config.channels["qqbot"] = qq;
+
+    auto options = MakeOptions(&config, root);
+    options.ca_pem = "not a pem";  // 显式但无效:明报,不静默退回平台探测
+    auto wiring = ChannelGatewayWiring::Create(std::move(options));
+    REQUIRE(wiring != nullptr);
+    REQUIRE_FALSE(wiring->diagnostics().empty());
+    CHECK(wiring->diagnostics().at(0).find("TLS 信任根不可用") != std::string::npos);
+    CHECK(wiring->diagnostics().at(0).find("tls_trust_store_empty") != std::string::npos);
+    CHECK(wiring->Close(5'000));
 }
 
 }  // namespace lubancode::app

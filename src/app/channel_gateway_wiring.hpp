@@ -11,6 +11,11 @@
 // 复合泵:GatewayProcess::Options 只收一只泵,渠道的 Pump(出站帧 flush +
 // 入站字节 drain)是有界同步件,与 automation 主泵同 tick——本件把两只
 // GatewayWorkPump 叠一只,不动 engine 冻结面。
+//
+// 连接状态单 §三/§四:装配时解析 TLS 信任根(诊断行入 diagnostics,由
+// cli 装配段打印——Windows 默认系统证书库,Linux/macOS 系统 PEM,显式
+// ca_pem 为测试位/覆盖位);每 tick 推 ChannelConnectionReporter(宿主
+// 输出连接状态 + 发布跨进程只读快照,boot ID 走 set_owner_epoch 递进)。
 #pragma once
 
 #include <cstdint>
@@ -20,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "app/channel_connection_reporter.hpp"
 #include "channel/manager.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
@@ -49,7 +55,8 @@ private:
     std::unique_ptr<gateway::GatewayWorkPump> secondary_;
 };
 
-// 渠道侧 GatewayWorkPump:TickOnce 推进所有已装配账号的桥泵。
+// 渠道侧 GatewayWorkPump:TickOnce 推进所有已装配账号的桥泵与连接状态
+// 输出/快照发布。
 class ChannelGatewayWiring final : public gateway::GatewayWorkPump {
 public:
     struct Options {
@@ -57,7 +64,9 @@ public:
         std::filesystem::path channels_state_root;    // 渠道账号状态根(装配层给;
                                                        // =<状态根>/channels,个人布局
                                                        // ~/.lubancode/channels 原样)
-        std::string ca_pem;                           // wss 信任锚;空 = 探测平台 PEM
+        std::string ca_pem;                           // wss 信任锚;非空 = 显式信任锚
+                                                       //(测试位/覆盖位,不回退平台
+                                                       // 来源);空 = 平台默认信任根
         std::function<std::int64_t()> now_ms;
         // 测试注入位(生产恒空):网关传输工厂与 HTTP。空 = 生产件
         // (MakeWsTransportFactory/MakeDefaultHttpFunc)。装配后账号会起真
@@ -68,7 +77,8 @@ public:
     };
 
     // 装配。channels 段为空时返回 nullptr(零渠道行为,不挂泵)。
-    // 装配失败的账号记入 skipped(稳定码),不拦 Gateway 起来。
+    // 装配失败的账号记入 skipped(稳定码),不拦 Gateway 起来;信任根解析
+    // 结果记入 diagnostics(cli 装配段打印,含"解析不到"的明报)。
     static std::unique_ptr<ChannelGatewayWiring> Create(Options options);
 
     ~ChannelGatewayWiring() override;
@@ -78,8 +88,9 @@ public:
     bool Close(int grace_ms) override;
     void set_owner_epoch(const std::string& epoch) override;
 
-    // 观测(诊断/测试):不装配的渠道/账号与原因(稳定码)。
+    // 观测(诊断/测试):不装配的渠道/账号与原因(稳定码);信任根诊断行。
     const std::vector<std::string>& skipped() const { return skipped_; }
+    const std::vector<std::string>& diagnostics() const { return diagnostics_; }
     const channel::ChannelManager* manager() const { return manager_.get(); }
     // 渠道 work 泵(Q2)要的可变口:TakeNextWork/SendReply/结算面。
     channel::ChannelManager* mutable_manager() { return manager_.get(); }
@@ -96,8 +107,18 @@ private:
 
     std::unique_ptr<channel::ChannelManager> manager_;
     std::vector<std::unique_ptr<channel::ChannelBridgeTransport>> adapters_;
+    // adapter 的类型化视图(所有权仍在 adapters_;reporter 取快照用)。
+    struct AdapterView {
+        std::string channel_id;
+        std::string account_id;
+        channel::qq::QqBotAdapter* adapter = nullptr;
+    };
+    std::vector<AdapterView> adapter_views_;
     std::vector<std::string> skipped_;
+    std::vector<std::string> diagnostics_;
     std::unique_ptr<gateway::GatewayWorkPump> work_pump_;
+    std::unique_ptr<ChannelConnectionReporter> reporter_;
+    std::string owner_epoch_;  // = Gateway boot_id(set_owner_epoch 递进)
 };
 
 }  // namespace lubancode::app

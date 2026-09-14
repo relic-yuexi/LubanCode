@@ -342,6 +342,40 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.gateway = gateway;
             return parsed;
         }
+        // channel 子命令(连接状态单 §三 P0-A):lubancode channel status
+        // <渠道> <账号> [--json]。跨进程只读连接快照;setup 等其余动词是
+        // 配置向导批次的口,这里如实报未实现,不吞参数。
+        if (arg == "channel" && options.positional.empty()) {
+            if (i + 1 >= args.size() || args[i + 1] != "status") {
+                parsed.action = CliAction::BadChannelStatus;
+                parsed.error_text =
+                    "用法: lubancode channel status <渠道> <账号> [--json]"
+                    "(setup 等其余 channel 子命令尚未实现)";
+                return parsed;
+            }
+            const std::size_t rest = args.size() - i - 2;
+            if (rest < 2) {
+                parsed.action = CliAction::BadChannelStatus;
+                parsed.error_text = "channel status 需要 <渠道> <账号>(如 qqbot main)";
+                return parsed;
+            }
+            ChannelStatusCliArgs channel_status;
+            channel_status.channel_id = args[i + 2];
+            channel_status.account_id = args[i + 3];
+            for (std::size_t extra = i + 4; extra < args.size(); ++extra) {
+                if (args[extra] == "--json") {
+                    channel_status.json = true;
+                    continue;
+                }
+                parsed.action = CliAction::BadChannelStatus;
+                parsed.error_text = "channel status 认不得参数 \"" + args[extra] +
+                                    "\":只认 --json";
+                return parsed;
+            }
+            parsed.action = CliAction::RunChannelStatus;
+            parsed.channel_status = channel_status;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;
