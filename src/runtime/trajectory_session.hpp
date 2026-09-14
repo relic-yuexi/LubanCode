@@ -115,9 +115,9 @@ public:
         std::string channel = "terminal";  // terminal | app_server | subagent
         // 应用Worker接入单 §八(本单切片):连接快照的冻结件
         // (connection_snapshot.hpp 的形状;wire/model/provider 已在 prepared
-        // 载荷顶层,这里补的是 endpoint/secretRef/configVersion 三件,经
-        // v2/v3 两路 BuildPreparedPayload 落进 model.request.prepared 的
-        // connection 块)。非 object(终端/子代理桥不带)= 载荷零变化。
+        // 载荷顶层,这里补的是 endpoint/secretRef/configVersion 三件,只落
+        // v3 的 model.request.prepared connection 块——v2 载荷键表封闭,不
+        // 写,老账形状零变化)。非 object(终端/子代理桥不带)= 载荷零变化。
         // 快照本身是脱敏合同:不含密钥正文,也不含密钥的内容哈希。
         nlohmann::json connection;
     };

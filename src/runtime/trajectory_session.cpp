@@ -521,25 +521,9 @@ nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::Re
         payload["request_snapshot_ref"] = snapshot.ToJson();
         payload["request_snapshot_sha256"] = hooks::Sha256Hex(payload["request_snapshot_ref"].dump());
     }
-    // 应用Worker接入单 §八:连接快照的冻结局(脱敏端点/密钥引用/配置版本)
-    // ——wire/model/provider 已在顶层,这里补的是"连到哪/钥匙在哪/哪版配
-    // 置"。identity 没带(终端/子代理)整块不落,载荷逐字节不变。
-    if (identity.connection.is_object() && !identity.connection.empty()) {
-        nlohmann::json connection = nlohmann::json::object();
-        if (identity.connection.contains("endpoint") && identity.connection["endpoint"].is_string()) {
-            connection["endpoint"] = identity.connection["endpoint"];
-        }
-        if (identity.connection.contains("secretRef") && identity.connection["secretRef"].is_string()) {
-            connection["secretRef"] = identity.connection["secretRef"];
-        }
-        if (identity.connection.contains("configVersion") &&
-            identity.connection["configVersion"].is_string()) {
-            connection["configVersion"] = identity.connection["configVersion"];
-        }
-        if (!connection.empty()) {
-            payload["connection"] = std::move(connection);
-        }
-    }
+    // 注:连接快照的 connection 块只落 v3(V3RequestPrepared,§八"落点沿
+    // V3 请求账合同");v2 载荷键表封闭拒未知键(ValidatePayload),这里
+    // 不写——v2 老账的形状一个字节不动。
     return payload;
 }
 

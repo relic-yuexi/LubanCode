@@ -932,7 +932,8 @@ TEST_CASE("P5 v3 执行账:装配路插件工具的成功与失败各归 tool.ex
     REQUIRE(error_code.empty());
     CHECK(second["status"] == "success");  // 工具失败回喂后模型收尾,回合仍收成功
 
-    // v3 账对账:session 目录下的 main.jsonl。
+    // v3 账对账:v3 场的主账是 <session_dir>/<sessionId>.jsonl(directory.cpp
+    // v3_stream_path:文件名=目录名+.jsonl;v3 场不写 main.jsonl)。
     fs::path session_dir;
     {
         const fs::path workspaces = sessions.Get() / "workspaces";
@@ -945,7 +946,8 @@ TEST_CASE("P5 v3 执行账:装配路插件工具的成功与失败各归 tool.ex
         }
     }
     REQUIRE(!session_dir.empty());
-    const std::vector<nlohmann::json> lines = ReadLedgerLines(session_dir / "main.jsonl");
+    const fs::path ledger_path = session_dir / (thread_id + ".jsonl");
+    const std::vector<nlohmann::json> lines = ReadLedgerLines(ledger_path);
     REQUIRE_FALSE(lines.empty());
 
     // 成功案:pending -> started -> finished,同一 actionId,工具名对账。
@@ -989,7 +991,6 @@ TEST_CASE("P5 v3 执行账:装配路插件工具的成功与失败各归 tool.ex
 
     // 泄露红线:整本账(含 system 消息、载荷、指纹)不见假钥匙,也不见
     // base_url 的路径/查询段(token 就藏在那)。
-    const fs::path ledger_path = session_dir / "main.jsonl";
     std::ifstream ledger_text(ledger_path, std::ios::binary);
     const std::string whole((std::istreambuf_iterator<char>(ledger_text)),
                             std::istreambuf_iterator<char>());
