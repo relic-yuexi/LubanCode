@@ -367,6 +367,31 @@ set_tests_properties(manual.model_probe_stub PROPERTIES
   LABELS "manual;api;manual.api"
   TIMEOUT 120)
 
+# 应用Worker接入单 P4:Node 外部客户端端到端(真 exe + 假模型)。
+# examples/node-client 的参考客户端起真 lubancode app-server(stdio),
+# 走 握手(钉协议 1.3)→ thread/start(clientOperationId)→ turn/start
+# (clientOperationId)→ 终态 → operation/read 复查 → 幂等重发 → 双 Worker
+# 并行隔离 → 飞行中硬杀+重启找回 → EOF 孤儿收口 → 空值 env 的 envblock
+# 跨进程传递 全链。机器上没有 node 就不注册(如 linux-manylinux 容器)——
+# 该腿如实缺这份 e2e 证据,不硬装 node;与 browser.mcp.selftest 同款注册法。
+# 注意不挂 foreach 循环的 ENVIRONMENT 注入:客户端自行为 child 钉
+# LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1(operation/read 的 finalMessages
+# 稳定正文走 v3 投影),不吃 ctest 注入的 0。
+find_program(LUBANCODE_NODE_E2E_EXECUTABLE node)
+if(LUBANCODE_NODE_E2E_EXECUTABLE)
+  add_test(NAME e2e.app_server.node_client
+    COMMAND "${LUBANCODE_NODE_E2E_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/examples/node-client/run_e2e.js"
+            --binary "$<TARGET_FILE:lubancode>"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(e2e.app_server.node_client PROPERTIES
+    LABELS "e2e;app_server;e2e.app_server" TIMEOUT 300
+    # 五幕起落多只真进程与本地回环假后端,独跑不与其他重测抢资源。
+    RUN_SERIAL TRUE)
+else()
+  message(STATUS "node 未找到: Node 外部客户端 e2e(app_server P4)不注册,该腿如实缺此证据")
+endif()
+
 # Kimi 保留式思考真机探针(Kimi 保留式思考历史回传兼容设计单 P2,
 # opt-in,EXCLUDE_FROM_ALL 不进 ctest——没钥匙自己 SKIP 退 0):
 #   direct  直打 Moonshot 真端点四案(K3 两轮纯对话/K2.6 两步工具/

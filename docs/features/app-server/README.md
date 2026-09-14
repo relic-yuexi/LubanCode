@@ -55,7 +55,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 
 ## 协议版本
 
-`1.1`。任何报文形状变更必须 bump,前端拿 `initialize` 结果里的 `protocolVersion` 对表。
+`1.3`。任何报文形状变更必须 bump,前端拿 `initialize` 结果里的 `protocolVersion` 对表。
 
 版本账:
 
@@ -69,6 +69,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `1.1`(阶段 C 注) | 镜像流(2026-08 起,additive):新增 `browser/screencast/start`/`browser/screencast/stop` 方法与 `browser/screencast/frame` 事件。只读、不问审批(与 `snapshot`/`screenshot` 同档);帧字节走同一条截图 artifact 链落盘,协议上只有引用与 `pageId`,绝不出现 base64。老报文形状零改动。 |
 | `1.1`(阶段 D 注) | 参考前端(2026-09 起):WS 端口的只读 HTTP artifact 口子 `GET /artifact/<内容寻址名>`(与 WS 同端口、同 token 门)——事件里只有引用,字节走这条口子,base64 仍永不进协议。承载面(与 `app_server/auth` 同级),不是协议方法面,报文形状零改动,不 bump 版本。 |
 | `1.2` | 旧史只读两法(轨迹 v3 P3,additive):`thread/resume` 与 `thread/read` 从留位转正。载荷 JSON 化 v3 显示投影(`kind=message\|compact_marker`,逐条带 `inCurrentContext`/`removedByCompacts`/`hidden` 等上下文状态标志);分页沿用 `trace/query` 的 `lastSeq` 游标语义。`hidden` 消息默认只回标志不回正文,`includeHidden: true` 才带(§4.28)。v2 旧账如实回 `sourceFormat: "v2"` + 空 `items`,不冒充。老方法老事件形状一字未动。 |
+| `1.3` | 幂等受理与只读核对(应用Worker接入单 P3,additive):`thread/start`/`turn/start` 增可选 `clientOperationId`(同键同载荷回原受理,同键异载荷报 `operation_conflict`;会话创建去重按主体+workspace 落 `session-creates.jsonl` 台账);新增只读方法 `operation/read`(受理/派发/终态核对,重启后按原键找回,零副作用)。不带键 = 1.2 旧行为一字不动。P4 把 `operation/read` 补登进 `initialize` 能力表 `methods`(此前方法在而能力表漏登)。老报文形状零改动。 |
 
 ## 方法面
 
@@ -85,7 +86,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `thread/start` | `cwd?` | `{threadId, cwd}`;会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。 |
+| `thread/start` | `cwd?`, `clientOperationId?`(1.3) | `{threadId, cwd}`;会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。带 `clientOperationId` 时创建幂等(1.3):同键同 cwd 重发回原身份 `{threadId, cwd, duplicate:true, active}`——`active` 如实交代本场是否还在本进程活着(不活=只读面可查、续跑须显式恢复,1.x 面没有恢复执行方法);同键异 cwd 报 `operation_conflict`;意图在而结果无(崩溃窄窗)报 `session_create_unknown`,不建第二场。 |
 | `thread/list` | `scope?/state?/sort?/search?/cwd?/cursor?/limit?` | `{threads:[...], total}`;走 `runtime::SessionCommandService`,与终端 `/sessions` 同一碗饭。缺省全量 + active + updated。`startedAt` 续给(`createdAt` 同源),老前端不断。 |
 | `thread/stop` | `threadId` | 停场;在跑回合按打断收口。 |
 | `thread/archive` | `threadId` | 搬进 `archive/`;成功发 `thread/updated`(state=archived)。开着的 thread 拒 `active_thread`。 |
@@ -100,7 +101,8 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 
 | 方法 | 参数 | 说明 |
 | --- | --- | --- |
-| `turn/start` | `threadId, text, images?` | 立即回 `{threadId, turnId}`,整回合在工作线程跑。`images` 是数组,元素 `{mediaType, data, filename?, width?, height?}`(`data` 是不带 data URL 前缀的 base64)——字段名与 `api::ImageBlock` 对齐,图片原样入会话历史。同一 thread 同拍两轮拒 `-32004`。 |
+| `turn/start` | `threadId, text, images?, clientOperationId?`(1.3) | 立即回 `{threadId, turnId, operationId, inputId}`,整回合在工作线程跑。`images` 是数组,元素 `{mediaType, data, filename?, width?, height?}`(`data` 是不带 data URL 前缀的 base64)——字段名与 `api::ImageBlock` 对齐,图片原样入会话历史。同一 thread 同拍两轮拒 `-32004`。带 `clientOperationId` 时受理幂等(1.3):同键同载荷重发回原受理(`duplicate:true` + 原 `operationId`/`inputId`/`turnId`,不重跑、不重投终态),同键异载荷报 `operation_conflict`(`error.data.code`);重发预查在 busy CAS 之前,同键重发不吃 `-32004`。 |
+| `operation/read` | `threadId, clientOperationId?/operationId?`(至少一枚) | 只读核对(1.3):按操作身份查受理—终态。回 `status`(`not_found`/`accepted`/`running`/`unknown`/`final`)+ `operationId`/`inputId`/`receivedAtMs`,final 时另回 `turnId`/`executionStatus`/`finalMessageRefs`/`usageReported`/`resultEnvelopePersisted`/`finalizedAtMs`;v3 场带稳定正文 `finalMessages`(`sourceFormat:"v3"`),v2 场如实报 `sourceFormat:"v2"` + gaps。零副作用:不开写柄、不入队、不起回合、不触发模型。缺终态行回 `unknown` + `gaps`(强杀/断电后待核对的口径——不是"未执行"也不是"成功")。双键都给而指向不同操作报 `operation_id_mismatch`。 |
 | `turn/interrupt` | `threadId, turnId?` | 置打断旗;审批悬停立即醒;终态 `interrupted`。回合不在跑或点名别的回合报 `-32005`(迟到不追)。 |
 | `turn/steer` | 留位 | 未接线,`initialize` 能力表里在 `pending`。 |
 
@@ -241,7 +243,7 @@ browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`bro
 
 服务器段:`-32000` busy、`-32002` 未握手、`-32003` 已 shutdown、`-32004` 同 thread 同拍两轮、`-32005` 迟到/失效的反向请求答复。
 
-错误响应的 `error.data` 可带稳定 `reason` 串(会话搬删等),前端凭它分支。
+错误响应的 `error.data` 可带稳定 `reason` 串(会话搬删等),前端凭它分支。幂等受理面(1.3)的稳定串走 `error.data.code`:`operation_conflict`(同键异载荷)、`session_create_unknown`(创建崩溃窄窗,`-32603`)、`operation.append_failed`(受理落盘失败拒收)、`operation_id_mismatch`(双键指向不同操作)。
 
 ## SSH 承载
 

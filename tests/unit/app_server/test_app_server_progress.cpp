@@ -553,11 +553,14 @@ TEST_CASE("methods 冻结矩阵:能力表如实报接线面") {
     // 多前端外壳阶段 B 的 browser/pause|resume 两件 + 阶段 C 的
     // browser/screencast/start|stop 两件,协议 1.1 additive)。
     // thread/resume|thread/read 是轨迹 v3 P3 第二棒(协议 1.2)。
+    // operation/read 是应用Worker接入单 P3 的幂等核对法子(协议 1.3;
+    // P4 才补登能力表——此前方法在而矩阵/能力表都漏)。
     const std::vector<std::string> expected_methods = {
         "initialize", "initialized",      "shutdown",     "thread/start", "thread/list",
         "thread/stop", "thread/archive",  "thread/unarchive", "thread/delete",
         "thread/resume", "thread/read",
         "turn/start", "turn/interrupt",   "workflow/query", "trace/query",
+        "operation/read",
         "goal/create", "goal/get",        "goal/edit",     "goal/pause",
         "goal/resume", "goal/clear",      "loop/create",   "loop/list",
         "loop/read",   "loop/pause",      "loop/resume",   "loop/cancel",

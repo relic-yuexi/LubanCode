@@ -591,6 +591,10 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodThreadRead),      std::string(kMethodTurnStart),
         std::string(kMethodTurnInterrupt),   std::string(kMethodWorkflowQuery),
         std::string(kMethodTraceQuery),
+        // 应用Worker接入单 P3 落的方法、P4 补登能力面(报告交接面:
+        // 外部客户端凭 initialize 能力表核对方法面,漏登会让兼容探针
+        // 误判"服务端不认识")。additive,老前端零感知。
+        std::string(kMethodOperationRead),
         // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)。
         std::string(kMethodGoalCreate),      std::string(kMethodGoalGet),
         std::string(kMethodGoalEdit),        std::string(kMethodGoalPause),

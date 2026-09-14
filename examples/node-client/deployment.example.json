@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "service": {
+    "mode": "managed",
+    "listeners": { "stdio": { "enabled": true } },
+    "defaultProfile": "app"
+  },
+  "harnessProfiles": {
+    "app": {
+      "agentRef": "general-purpose",
+      "features": { "default": "disabled", "enabled": [], "disabled": [] },
+      "tools": { "mode": "none", "deny": [] },
+      "exposure": { "default": "direct" }
+    }
+  }
+}
