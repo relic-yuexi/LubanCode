@@ -30,7 +30,7 @@ grep -Fq '"license": "Apache-2.0"' "$VCPKG_MANIFEST" || \
 
 # 随包 ripgrep 的供应链钉子(ripgrep 迁移单 P0-6):manifest 三平台哈希
 # 全为真值、MIT license 原文在、第三方声明在且点到 ripgrep。Release 打包
-# 前由 release.yml 调 fetch_ripgrep.py 再对一遍哈希;这里先把"仓库自己"
+# 前由 release.yml 调 fetch_ripgrep.sh 再对一遍哈希;这里先把"仓库自己"
 # 该有的件查齐——缺了就红,不发半套。
 RG_MANIFEST="$REPO_ROOT/third_party/ripgrep/manifest.json"
 RG_LICENSE="$REPO_ROOT/third_party/ripgrep/LICENSE-MIT"

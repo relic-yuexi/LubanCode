@@ -683,7 +683,7 @@ TEST_CASE("FormatRipgrepDoctorSection: 三层账/命中层与版本/全缺指引
         CHECK(lines[3].find("可用") != std::string::npos);    // PATH 有货但命中在前层
         CHECK(lines[4].find("第 2 层") != std::string::npos);
         CHECK(lines[4].find("rg-stage") != std::string::npos);
-        CHECK(lines[5].find("fetch_ripgrep.py") == std::string::npos);  // 命中时不塞修复指引
+        CHECK(lines[5].find("fetch_ripgrep.sh") == std::string::npos);  // 命中时不塞修复指引
     }
     // 三层全缺:当前用明说稳定错,修复指引带 stage 命令。
     {
@@ -700,6 +700,6 @@ TEST_CASE("FormatRipgrepDoctorSection: 三层账/命中层与版本/全缺指引
         CHECK(lines[2].find("缺") != std::string::npos);
         CHECK(lines[3].find("不可执行") != std::string::npos);  // PATH 坏件如实标注
         CHECK(lines[4].find("search_backend_missing") != std::string::npos);
-        CHECK(lines[5].find("fetch_ripgrep.py") != std::string::npos);  // 修复指引
+        CHECK(lines[5].find("fetch_ripgrep.sh") != std::string::npos);  // 修复指引
     }
 }

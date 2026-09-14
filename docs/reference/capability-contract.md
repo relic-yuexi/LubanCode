@@ -297,7 +297,7 @@ claim 恢复类:
 | 旧位置 `.lubancode.json` 迁移 | 不适用(参数根是新地界,无旧账) | 不适用 |
 | 发行内置材料(官方 skills/内置提示模块) | 读(发行层,非个人家目录) | 读;来源在能力清单列明 |
 
-状态落点:workspaces/会话账、workflow-runs、browser-artifacts、package-trust/package-state/hook-trust/plugin-trust、hooks-outbox、plugin-data/package-data、package-store、cache、logs、memory(含 memory-jobs)全部落**数据根**;参数根可挂只读。个人 CLI(未设应用根)一切落 `~/.lubancode`,行为与从前逐字节一致(AW-01)。
+状态落点:workspaces/会话账、workflow-runs、browser-artifacts、package-trust/package-state/hook-trust/plugin-trust、hooks-outbox、plugin-data/package-data、package-store、cache、logs、memory(含 memory-jobs)全部落**数据根**;参数根可挂只读。个人 CLI(未设应用根)一切落 `~/.lubancode`,行为与从前逐字节一致(AW-01)。归属裁定(P1 遗留销账):`ptc_profiles.json`(PTC 用户偏好画像)归材料不归状态,留**参数根**——应用根语义=`<LUBANCODE_HOME>/ptc_profiles.json`,个人布局=`~/.lubancode/ptc_profiles.json` 原样;旧位置文件照读,不暗迁移、不暗删(生产面只读,写档归人工探针流程,参数根挂只读不破坏)。
 
 ### 13.3 RuntimePaths 归属〔冻结〕
 
@@ -323,6 +323,6 @@ claim 恢复类:
 | turn 终态与 ResultEnvelope(finalMessageRefs、usageReported、resultEnvelopePersisted) | 已落 | `SessionService::RecordTurnFinal`/`MakeTurnCompletedParams`(src/app_server/schema.cpp;PR #62) |
 | 应用根三变量/来源裁剪/参数根-数据根分家 | 已落(本节合同+P1) | `config::ResolveRuntimePaths`/`StateRootDir`(src/config/runtime_paths.cpp) |
 | gateway/channels 状态根接数据根 | **未接**(避让在跑的 QQ 接入单,另立小单) | cli_app.cpp gateway run 段仍走 HomeLubancodeDir |
-| rg-stage 工具缓存的播种脚本 | **未接**(读取走数据根;fetch_ripgrep.py 不认数据根,应用根下的 rg-stage 须部署者自落) | src/tools/search_ripgrep.cpp UserStage 层 |
+| rg-stage 工具缓存的播种脚本 | 已接(P1 遗留销账)——`scripts/fetch_ripgrep.sh` 的 `--target` 缺省按 §13.1 同一套语义解析数据根(显式 `LUBANCODE_DATA_HOME` → `<LUBANCODE_HOME>/data` → 个人 `<home>/.lubancode`),与 C++ 读口(UserStage 层=状态根 rg-stage/libexec)同位;坏值(空值/相对/根重叠/孤立 DATA_HOME)明拒不回个人目录;离线自检口 `--print-target-root`(ctest `scripts.fetch_ripgrep_paths`,POSIX 腿注册)。`--target` 显式给定时旧调用面不变 | src/tools/search_ripgrep.cpp UserStage 层 + scripts/fetch_ripgrep.sh |
 
 错误码归属:路径/来源类配置错误在启动门以 stderr 人话+退出码 1 拒启(与 CLI 既有风格一致),不另立协议错误码;协议面"点名未接线组件报 `component_unavailable`"自 P2 生效(装配失败经 thread/start 错误信封带 `data.code`,additive 字段)——P5 起 v2 embedded-lua 真装载,此码收窄到"runtime kind 未接线"(点名 process/native 件),另增三枚插件装载失败码:`plugin_missing`(点名件不在发现账,含 manifest 坏被扫描剔除)、`plugin_untrusted`(信任账不过:未信任/disable/内容指纹算不出)、`plugin_load_failed`(Lua 挂载坏:entry 读不到/编译坏/handler 对账不过),同一错误信封带出;"缺获准执行工具返回 `capability_unavailable`"(本单 §六冻结)待 Skill 依赖声明 schema 升级时生效。

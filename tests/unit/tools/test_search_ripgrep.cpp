@@ -1080,7 +1080,7 @@ TEST_CASE("ripgrep runner: 三层全缺报 search_backend_missing,文案带修�
     CHECK(result.error().code == SearchBackendError::BackendMissing);
     CHECK(ToString(result.error().code) == "search_backend_missing");
     // 文案带修复指引(doctor 与手动 stage 命令),不裸抛单枚路径。
-    CHECK(result.error().message.find("fetch_ripgrep.py") != std::string::npos);
+    CHECK(result.error().message.find("fetch_ripgrep.sh") != std::string::npos);
     CHECK(result.error().message.find("/doctor search") != std::string::npos);
     CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Missing);
 }
@@ -1103,7 +1103,7 @@ TEST_CASE("ripgrep 全缺指引: 逐层聚账,PATH 计数,含不可执行标注"
          RipgrepFileStatus::Missing}};
     const std::string text = FormatRipgrepAllMissingGuidance(tiers);
     CHECK(text.find("三层全缺") != std::string::npos);
-    CHECK(text.find("fetch_ripgrep.py") != std::string::npos);  // 修复命令在场
+    CHECK(text.find("fetch_ripgrep.sh") != std::string::npos);  // 修复命令在场
     CHECK(text.find("/doctor search") != std::string::npos);    // 诊断指引在场
     CHECK(text.find("共 2 项") != std::string::npos);            // PATH 条目计数
     CHECK(text.find("在,不可执行") != std::string::npos);       // 坏件如实标注

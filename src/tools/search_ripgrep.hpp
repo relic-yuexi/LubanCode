@@ -4,7 +4,9 @@
 // 解析合同(四道墙、JSONL/NUL 分帧、text/bytes 两路)。
 //
 // 生产定位是三层发现(搜索兜底单,2026-09):exe 旁 libexec(随包,首选)
-// → <home>/.lubancode/rg-stage/libexec(fetch_ripgrep.py 的既有 staging 位)
+// → 状态根 rg-stage/libexec(应用根语义=数据根,个人布局=<home>/.lubancode;
+//     播种脚本 scripts/fetch_ripgrep.sh 的 --target 缺省按 RuntimePaths 同
+//     一套语义解析,与这一层同位)
 // → 系统 PATH 的 rg。兜底不是免检:命中件照过版本 smoke 精确校
 // kBundledRipgrepVersion——PATH 上的冒牌件得先长得像钉死版本才被采用。
 // 仍不读 LUBANCODE_RG_PATH 之类点名环境变量、不运行时下载。三层全缺才
@@ -124,7 +126,7 @@ public:
 // ---- 随包定位与文件校验(设计单 4.3) ---------------------------------------
 
 // 钉死的随包版本。运行时校验用这枚编译期常量;与 third_party/ripgrep/
-// manifest.json 的一致性由 scripts/fetch_ripgrep.py 与 Release 流水线对账,
+// manifest.json 的一致性由 scripts/fetch_ripgrep.sh 与 Release 流水线对账,
 // doctor 显示不一致时明报。
 inline constexpr std::string_view kBundledRipgrepVersion = "15.2.0";
 

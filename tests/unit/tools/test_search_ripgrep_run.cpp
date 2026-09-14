@@ -1007,7 +1007,7 @@ TEST_CASE("真 rg: 本仓 src/ 冒烟(grep/glob 双模式,中型语料)") {
 
 TEST_CASE("真 rg 集成组: 未分期入位,如实跳过") {
     MESSAGE("LUBANCODE_BUNDLED_RG_DIR 未设置:真 ripgrep 集成组跳过"
-            "(configure 传 -DLUBANCODE_BUNDLED_RG_DIR=<fetch_ripgrep.py 产物目录> 启用)");
+            "(configure 传 -DLUBANCODE_BUNDLED_RG_DIR=<fetch_ripgrep.sh 产物目录> 启用)");
 }
 
 #endif  // LUBANCODE_TEST_HAS_BUNDLED_RG
