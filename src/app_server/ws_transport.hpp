@@ -94,6 +94,13 @@ public:
     // 应答完连接即关(Connection: close),不污染 WS 面。
     void ServeArtifactGet(net::Socket& socket, const ws::HttpRequestHead& head) const;
 
+    // 把一只已完成升级应答(101 已发出)的 socket 包成 Session(助理 Web
+    // 单 W1:LocalWebServer 自己做同源/cookie 门与升级应答,帧读写仍复用
+    // 这条 Session——掩码解码、自动应 ping、close 收线一套账,不另养)。
+    static std::unique_ptr<Session> AdoptUpgradedSocket(net::Socket socket) {
+        return std::unique_ptr<Session>(new Session(std::move(socket)));
+    }
+
 private:
     WsOptions options_;
     net::Listener listener_;

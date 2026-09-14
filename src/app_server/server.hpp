@@ -184,6 +184,25 @@ struct ServerOptions {
     // (两承载按需起一种,不并跑——stdio 的"EOF 即进程收线"与 WS 的
     // "断线只收连接、进程等重连"语义不同,混跑两头都拧巴)。
     std::optional<WsOptions> ws;
+    // 助理模式断线合同(常驻助理 Web 主界面单 W0,冻结合同):
+    //   SessionBound —— 旧语义,缺省。stdio/WS app-server 的既有合同:
+    //       连接收线(EOF/断线/exit)即打断在跑回合,"停止连接 = 停止工作"。
+    //   Detached —— 助理模式。连接收线只撤订阅(事件出口摘掉),已受理的
+    //       回合照跑到终态、落账;重连/刷新走领域快照(thread/read、
+    //       trace/query、operation/read)补账。停止任务(turn/interrupt)与
+    //       停止助理(shutdown/进程收线)是两个操作,断线不是其中任何一个。
+    //       只经 work_lifetime 与能力声明区分,不全局改旧客户端语义。
+    enum class WorkLifetime { SessionBound, Detached };
+    WorkLifetime work_lifetime = WorkLifetime::SessionBound;
+    // 助理模式的扩展方法面(W0 接缝):每条连接的 dispatcher 铸好后调一次
+    // (stdio 与 WS 两承载同路),宿主在这里挂自己的方法(assistant/*、
+    // config/* 等)。空 = 独立 app-server 旧方法面,零变化。回调须可重复
+    // 调用(每条连接一次),自己管好捕获件的线程归属。
+    std::function<void(Dispatcher&)> extra_method_registrar;
+    // initialize 结果的扩展口(W0 接缝):吃基线 MakeInitializeResult 的
+    // 整份 result,返回扩展后的(宿主在这里加 capabilities.mode、
+    // capabilities.workLifetime 与自家方法名)。空 = 基线原样。
+    std::function<nlohmann::json(nlohmann::json)> initialize_result_extender;
     // 会话装配工厂(工业化多协议接入单 P1,G01/G02 的修复口):thread/
     // start 时每场调一次,产出本场运行材料(backend+工具表+MCP+档案)。
     // 生产由 cli_app 递(部署档先解析、按计划起组件——session_assembly.
@@ -234,6 +253,11 @@ public:
     //(阶段 A 语义),但 accept 不再被在服务的会话堵死:参考前端(阶段 D)
     // 开着 WS 的同时经 HTTP 取 artifact 字节,两头并发。
     WsServeOutcome ServeWsSession(std::unique_ptr<WsTransport::Session> session);
+
+    // 同上,借用式(助理宿主 W1):所有权留在调用方——宿主的接管逻辑要在
+    // 连接服务期间对 Session 调 Close(线程安全),Session 须活到本函数
+    // 返回之后。行为与 ServeWsSession 逐字同线。
+    WsServeOutcome ServeWsSessionBorrowed(std::unique_ptr<WsTransport::Session>& session);
 
     // 喂给 ServeWsConnection 的 dispatcher 工厂:每条 WS 连接新铸一只,
     // 方法表与 stdio 那只同源(RegisterMethods + browser 面 + 能力表)。

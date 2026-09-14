@@ -2,6 +2,7 @@
 // 的函数体,原样搬自原头文件,行为一字未改。
 
 #include "app/cli_options.hpp"
+#include "app/assistant_host.hpp"  // 常驻助理 Web 主界面单 W1:assistant 子命令宿主
 #include "app/interactive_session.hpp"
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章)
 #include "app/one_shot.hpp"
@@ -934,6 +935,14 @@ int RunCli(const std::vector<std::string>& args) {
             return RunImCommand(im_args);
         }
         case CliAction::BadIm:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunAssistant:
+            // 常驻助理 Web 主界面单 W1:前台宿主(本地 Web + AppServer 控制
+            // 入口 + 助理模式断线合同)。装配全在 assistant_host;Gateway
+            // 泵的并轨缝见 assistant_host.hpp 注记(待接 gateway_launch)。
+            return RunAssistantMode(parsed_cli.assistant);
+        case CliAction::BadAssistant:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:

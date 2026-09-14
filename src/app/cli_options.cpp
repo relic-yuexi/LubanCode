@@ -600,6 +600,63 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.im = im_args;
             return parsed;
         }
+        // assistant 子命令(常驻助理 Web 主界面单 W1):lubancode assistant
+        // [--no-open] [--port N] [--profile <名>]。只认裸词打头且此前没有
+        // 位置参数;形状不对当场退用法,不静默当普通位置参数走单发问句。
+        if (arg == "assistant" && options.positional.empty()) {
+            AssistantCliArgs assistant;
+            for (std::size_t extra = i + 1; extra < args.size(); ++extra) {
+                if (args[extra] == "--no-open") {
+                    assistant.no_open = true;
+                    continue;
+                }
+                if (args[extra] == "--port") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadAssistant;
+                        parsed.error_text = "--port 需要一个端口号(1-65535)";
+                        return parsed;
+                    }
+                    const std::string& port_text = args[++extra];
+                    bool port_ok = !port_text.empty() && port_text.size() <= 5;
+                    int port = 0;
+                    for (const char digit : port_text) {
+                        if (digit < '0' || digit > '9') {
+                            port_ok = false;
+                            break;
+                        }
+                        port = port * 10 + (digit - '0');
+                    }
+                    if (port_ok && (port < 1 || port > 65535)) {
+                        port_ok = false;
+                    }
+                    if (!port_ok) {
+                        parsed.action = CliAction::BadAssistant;
+                        parsed.error_text = "--port 认不得 \"" + port_text +
+                                            "\":要 1-65535 的数字端口号";
+                        return parsed;
+                    }
+                    assistant.port = port;
+                    assistant.port_given = true;
+                    continue;
+                }
+                if (args[extra] == "--profile") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty()) {
+                        parsed.action = CliAction::BadAssistant;
+                        parsed.error_text = "--profile 需要一个名字(单段名,如 default)";
+                        return parsed;
+                    }
+                    assistant.profile = args[++extra];
+                    continue;
+                }
+                parsed.action = CliAction::BadAssistant;
+                parsed.error_text = "assistant 认不得参数 \"" + args[extra] +
+                                    "\":只认 --no-open / --port <端口号> / --profile <名>";
+                return parsed;
+            }
+            parsed.action = CliAction::RunAssistant;
+            parsed.assistant = assistant;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;
