@@ -436,6 +436,35 @@ class WsClient {
 // 幕
 // ---------------------------------------------------------------------------
 
+// 开一条控制通道(连接 + 握手)。刚断线就重连时,服务端可能还把死连接
+// 记在"当前控制连接"上(读到 EOF 有个窗口),新连接会收占用通报——
+// 退避重试即过;连续占用才真抛。
+async function openChannel(field) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; ++attempt) {
+    const ws = new WsClient(field.port, field.cookie);
+    await ws.connect();
+    try {
+      const init = await ws.request('initialize', { clientName: 'assistant-e2e' });
+      if (init.error) {
+        throw new Error('initialize 被拒: ' + JSON.stringify(init.error));
+      }
+      ws.initializeResult = init.result;
+      ws.send({ method: 'initialized' });
+      return ws;
+    } catch (error) {
+      const occupied = ws.events.some((event) => event.method === 'assistant/connection/occupied');
+      ws.close();
+      lastError = error;
+      if (!occupied) {
+        throw error;
+      }
+      await sleep(400);
+    }
+  }
+  throw lastError || new Error('openChannel 重试撞满');
+}
+
 async function scene1_start(assistant) {
   console.log('幕1 启动:监听就绪才打印 URL');
   const url = await assistant.start();
@@ -488,9 +517,8 @@ async function scene2_authGate(url) {
 
 async function scene3_chat(field, backend) {
   console.log('幕3 聊天链路:initialize → 首配模型 → 对话 → 幂等重发零重跑');
-  const ws = new WsClient(field.port, field.cookie);
-  await ws.connect();
-  const init = await ws.request('initialize', { clientName: 'assistant-e2e' });
+  const ws = await openChannel(field);
+  const init = { result: ws.initializeResult };
   ok('握手钉 1.3', init.result && init.result.protocolVersion === '1.3');
   ok('能力声明是助理模式(detached)',
     init.result && init.result.capabilities &&
@@ -547,10 +575,7 @@ async function scene4_refreshRestore(field, chat) {
   console.log('幕4 刷新恢复:断开 → 新连接 → thread/read 找回两轮正文');
   chat.ws.close();
   await sleep(200);
-  const ws2 = new WsClient(field.port, field.cookie);
-  await ws2.connect();
-  await ws2.request('initialize', { clientName: 'assistant-e2e' });
-  ws2.send({ method: 'initialized' });
+  const ws2 = await openChannel(field);
 
   const read = await ws2.request('thread/read', { threadId: chat.threadId, lastSeq: 0 });
   const items = (read.result && read.result.items) || [];
@@ -572,10 +597,7 @@ async function scene5_detached(field, backend, chat) {
   console.log('幕5 断线合同:关 WS 后已受理回合照跑到终态');
   backend.mode = 'hold';
   const modelCallsBefore = backend.requests.length;
-  const ws = new WsClient(field.port, field.cookie);
-  await ws.connect();
-  await ws.request('initialize', { clientName: 'assistant-e2e' });
-  ws.send({ method: 'initialized' });
+  const ws = await openChannel(field);
 
   const accepted = await ws.request('turn/start', {
     threadId: chat.threadId, text: '关页之后还跑吗', clientOperationId: 'OP-2',
@@ -589,10 +611,7 @@ async function scene5_detached(field, backend, chat) {
   backend.mode = 'reply';
   backend.release();
   // 重连,领域账核对终态(事件可能错过,账不会)。
-  const ws2 = new WsClient(field.port, field.cookie);
-  await ws2.connect();
-  await ws2.request('initialize', { clientName: 'assistant-e2e' });
-  ws2.send({ method: 'initialized' });
+  const ws2 = await openChannel(field);
   let final = null;
   for (let i = 0; i < 100 && !final; ++i) {
     const read = await ws2.request('operation/read', {
@@ -654,10 +673,7 @@ async function scene6_duplicateAndPorts(binary, root, field, firstExited) {
   squatter.close();
 
   // 停助理:shutdown → 退出码 0;锁释放后可重启。
-  const ws = new WsClient(field.port, field.cookie);
-  await ws.connect();
-  await ws.request('initialize', { clientName: 'assistant-e2e' });
-  ws.send({ method: 'initialized' });
+  const ws = await openChannel(field);
   const shutdownReply = await ws.request('shutdown', {});
   ok('shutdown 应答', !shutdownReply.error, JSON.stringify(shutdownReply));
   const firstExit = await firstExited;

@@ -474,7 +474,7 @@ TEST_CASE("local web:WS 升级过会话门——无 cookie 401,有 cookie 应 10
             head.append(buffer, buffer + got);
         }
         CHECK(head.find("HTTP/1.1 101") != std::string::npos);
-        CHECK(head.find("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOu=") != std::string::npos);
+        CHECK(head.find("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != std::string::npos);
         // 交棒发生(harness 的回调收线;稍等记账)。
         for (int i = 0; i < 100 && harness.ws_sessions.load() == 0; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

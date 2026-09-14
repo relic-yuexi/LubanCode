@@ -40,6 +40,8 @@
 
   let channel = null;
   let takeoverArmed = false; // 显式接管旗(§六:接管只换控制连接)
+  let occupiedAutoRetried = false; // 刷新竞态的自救一次:服务端读到旧连接
+                                   // EOF 有窗口,先退避重连一次再谈接管
   let currentThreadId = '';
   let turnRunning = false;
   let answeredApprovals = new Set();
@@ -246,6 +248,13 @@
         scheduleReconnect();
       },
       onOccupied: function () {
+        // 刷新/断线立刻重连会撞上"服务端还没读到旧连接 EOF"的窗口——
+        // 先自救重试一次;仍占用才是真有别的页面连着,给接管对话。
+        if (!occupiedAutoRetried) {
+          occupiedAutoRetried = true;
+          setTimeout(function () { connectChannel(); }, 400);
+          return;
+        }
         showNotice('已有页面持有控制连接',
           '这个助理已有一页连着。接管会替换那页的控制连接,不影响在跑的任务。',
           '接管', function () {
@@ -263,6 +272,7 @@
         return;
       }
       takeoverArmed = false;
+      occupiedAutoRetried = false;
       setConn('已连接', true);
       channel.request('assistant/status', {}).then(function (reply) {
         const status = reply.result || {};
