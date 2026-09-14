@@ -248,14 +248,23 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             gateway.verb = args[i + 1];
             std::size_t extra = i + 2;
             if (gateway.verb == "job") {
-                // gateway job add "<prompt>" [--at ms] [--id 名] [--idem 键]
+                // gateway job add "<prompt>" [--at ms|--every 秒|--cron 表达式]
+                //     [--tz 名] [--misfire coalesce|skip] [--deadline ms]
+                //     [--heartbeat] [--id 名] [--idem 键]
                 // gateway job run-now <jobId> [--idem 键]
-                // gateway job list
+                // gateway job list / read <jobId>
+                // gateway job update <jobId> --rev N [--prompt "正文"]
+                //     [--every 秒|--cron 表达式|--at ms] [--tz|--misfire|--deadline]
+                // gateway job pause|resume|cancel <jobId> --rev N
+                // gateway job import-loop <sessionId> "<prompt>" --task loop-N
+                //     --every 秒 [--idem 键]
                 if (extra >= args.size()) {
                     parsed.action = CliAction::BadGateway;
                     parsed.error_text =
-                        "用法: lubancode gateway job <add \"正文\"|run-now <jobId>|list> "
-                        "[--at 毫秒] [--id 任务名] [--idem 幂等键]";
+                        "用法: lubancode gateway job <add \"正文\"|run-now <jobId>|list|"
+                        "read <jobId>|update <jobId> --rev N|pause <jobId> --rev N|"
+                        "resume <jobId> --rev N|cancel <jobId> --rev N|"
+                        "import-loop <会话id> \"正文\" --task loop-N --every 秒>";
                     return parsed;
                 }
                 gateway.job_verb = args[extra++];
@@ -266,27 +275,41 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                         return parsed;
                     }
                     gateway.prompt = args[extra++];
-                } else if (gateway.job_verb == "run-now") {
+                } else if (gateway.job_verb == "run-now" || gateway.job_verb == "read" ||
+                           gateway.job_verb == "update" || gateway.job_verb == "pause" ||
+                           gateway.job_verb == "resume" || gateway.job_verb == "cancel") {
                     if (extra >= args.size()) {
                         parsed.action = CliAction::BadGateway;
-                        parsed.error_text = "gateway job run-now 需要任务 id";
+                        parsed.error_text =
+                            "gateway job " + gateway.job_verb + " 需要任务 id";
                         return parsed;
                     }
                     gateway.job_id = args[extra++];
+                } else if (gateway.job_verb == "import-loop") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text =
+                            "gateway job import-loop 需要 <来源会话id> 与 \"任务正文\" 两个参数";
+                        return parsed;
+                    }
+                    gateway.source_session_id = args[extra++];
+                    gateway.prompt = args[extra++];
                 } else if (gateway.job_verb != "list") {
                     parsed.action = CliAction::BadGateway;
                     parsed.error_text =
                         "gateway job 认不得子命令 \"" + gateway.job_verb +
-                        "\":只认 add|run-now|list";
+                        "\":只认 add|run-now|list|read|update|pause|resume|cancel|import-loop";
                     return parsed;
                 }
             }
             for (; extra < args.size(); ++extra) {
                 if (args[extra] == "--json") {
                     if (gateway.verb != "status" &&
-                        !(gateway.verb == "job" && gateway.job_verb == "list")) {
+                        !(gateway.verb == "job" &&
+                          (gateway.job_verb == "list" || gateway.job_verb == "read"))) {
                         parsed.action = CliAction::BadGateway;
-                        parsed.error_text = "--json 只在 gateway status / job list 下有效";
+                        parsed.error_text =
+                            "--json 只在 gateway status / job list / job read 下有效";
                         return parsed;
                     }
                     gateway.json = true;
@@ -310,6 +333,84 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     gateway.due_at_ms = std::atoll(args[++extra].c_str());
                     continue;
                 }
+                if (gateway.verb == "job" && args[extra] == "--every") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--every 需要周期秒数(>= 1)";
+                        return parsed;
+                    }
+                    gateway.interval_seconds = std::atoll(args[++extra].c_str());
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--cron") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text =
+                            "--cron 需要五字段表达式(引号包住,如 \"0 9 * * 1-5\")";
+                        return parsed;
+                    }
+                    gateway.cron_expr = args[++extra];
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--tz") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--tz 需要时区名(如 UTC / Asia/Shanghai)";
+                        return parsed;
+                    }
+                    gateway.timezone = args[++extra];
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--misfire") {
+                    if (extra + 1 >= args.size() ||
+                        (args[extra + 1] != "coalesce" && args[extra + 1] != "skip")) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--misfire 只认 coalesce|skip";
+                        return parsed;
+                    }
+                    gateway.misfire = args[++extra];
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--deadline") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--deadline 需要毫秒时间戳";
+                        return parsed;
+                    }
+                    gateway.deadline_ms = std::atoll(args[++extra].c_str());
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--heartbeat") {
+                    gateway.heartbeat = true;
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--rev") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--rev 需要 expectedRevision(领域操作的 CAS)";
+                        return parsed;
+                    }
+                    gateway.expected_revision = std::atoll(args[++extra].c_str());
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--task") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--task 需要原 /loop 任务名(如 loop-2)";
+                        return parsed;
+                    }
+                    gateway.source_task_id = args[++extra];
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--prompt") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--prompt 需要任务正文(引号包住)";
+                        return parsed;
+                    }
+                    gateway.prompt = args[++extra];
+                    continue;
+                }
                 if (gateway.verb == "job" && args[extra] == "--id") {
                     if (extra + 1 >= args.size()) {
                         parsed.action = CliAction::BadGateway;
@@ -329,8 +430,28 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     continue;
                 }
                 parsed.action = CliAction::BadGateway;
-                parsed.error_text = "gateway " + gateway.verb + " 认不得参数 \"" + args[extra] +
-                                    "\":只认 --profile <名> --json (--at/--id/--idem 属 job)";
+                parsed.error_text =
+                    "gateway " + gateway.verb + " 认不得参数 \"" + args[extra] +
+                    "\":只认 --profile <名> --json(job 族另认 --at/--every/--cron/--tz/"
+                    "--misfire/--deadline/--heartbeat/--rev/--task/--prompt/--id/--idem)";
+                return parsed;
+            }
+            // 写操作族的前置形状检查(细校验归活 Gateway 的账面;这里只挡
+            // 明显缺参:CAS 必须显式、import-loop 必须带来源与周期)。
+            if (gateway.verb == "job" &&
+                (gateway.job_verb == "update" || gateway.job_verb == "pause" ||
+                 gateway.job_verb == "resume" || gateway.job_verb == "cancel") &&
+                gateway.expected_revision <= 0) {
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text = "gateway job " + gateway.job_verb +
+                                    " 需要 --rev <expectedRevision>(领域操作必须显式 CAS)";
+                return parsed;
+            }
+            if (gateway.verb == "job" && gateway.job_verb == "import-loop" &&
+                (gateway.source_task_id.empty() || gateway.interval_seconds <= 0)) {
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text =
+                    "gateway job import-loop 需要 --task <原任务名> 与 --every <周期秒>";
                 return parsed;
             }
             if (!gateway.profile.empty() && !lubancode::gateway::IsValidGatewayProfileName(gateway.profile)) {

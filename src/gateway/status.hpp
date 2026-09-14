@@ -49,11 +49,15 @@ GatewayProbe ProbeGateway(const GatewayProfilePaths& paths);
 struct GatewayStatusSections {
     // work 栏:任务与 occurrence 的账面状态。
     std::size_t jobs_total = 0;
+    std::size_t jobs_active = 0;    // V2:active/paused/cancelled 分报
+    std::size_t jobs_paused = 0;
+    std::size_t jobs_cancelled = 0;
     std::size_t occurrences_due = 0;        // scheduled 且到点(等 claim)
     std::size_t occurrences_in_flight = 0;  // claimed 未结算
     std::size_t occurrences_succeeded = 0;
     std::size_t occurrences_failed = 0;
     std::size_t occurrences_needs_review = 0;
+    std::size_t occurrences_cancelled = 0;  // V2:取消/deadline 到线,不算失败
     // execution 栏:最近一枚 occurrence 的执行落点(空 = 还没跑过)。
     struct ExecutionEntry {
         std::string occurrence_id;

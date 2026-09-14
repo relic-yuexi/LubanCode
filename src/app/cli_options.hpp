@@ -92,22 +92,36 @@ struct TrajectoryCliArgs {
                                     // 重导)与 Harbor adapter 收尾都用它。
 };
 
-// Gateway 子命令(总装单 G1 + V1 job 族):`lubancode gateway run|status|stop
-// [--profile <名>] [--json 只 status 认]`;`gateway job add|run-now|list`
-// 是 V1 的持久任务入口(add/run-now 落控制命令文件,活着的 Gateway 消费;
-// list 只读账)。run 是前台真进程;status/stop/job list 绝不暗起 Gateway
-// (零副作用合同)。
+// Gateway 子命令(总装单 G1 + V1/V2 job 族):`lubancode gateway
+// run|status|stop [--profile <名>] [--json 只 status 认]`;`gateway job
+// add|run-now|list|read|update|pause|resume|cancel|import-loop` 是持久任务
+// 入口(写操作落控制命令文件,活着的 Gateway 消费;list/read 只读账)。
+// run 是前台真进程;status/stop/job list/job read 绝不暗起 Gateway(零副
+// 作用合同)。
 struct GatewayCliArgs {
     std::string verb;    // run | status | stop | job
     std::string profile; // --profile <名>;空 = default
-    bool json = false;   // status --json:机器可读快照(job list 也认)
-    // job 子族(verb == "job"):add 落命令文件等消费;run-now 同;list
-    // 只读 automation 账。
-    std::string job_verb;             // add | run-now | list
-    std::string prompt;               // add 的任务正文
-    std::string job_id;               // add --id / run-now 位置参数
+    bool json = false;   // status --json:机器可读快照(job list/read 也认)
+    // job 子族(verb == "job"):写操作落命令文件等消费;list/read 只读
+    // automation 账。
+    std::string job_verb;             // add | run-now | list | read | update |
+                                      // pause | resume | cancel | import-loop
+    std::string prompt;               // add/update/import-loop 的任务正文
+    std::string job_id;               // add --id / run-now / read / update /
+                                      // pause / resume / cancel 位置参数
     std::string idempotency_key;      // --idem(重发同键回原回执)
     long long due_at_ms = 0;          // add --at(0 = 立即)
+    // V2 计划与领域操作参数(--every/--cron/--tz/--misfire/--deadline/
+    // --heartbeat/--rev/--task)。
+    long long interval_seconds = 0;   // --every(add/update/import-loop;秒)
+    std::string cron_expr;            // --cron(五字段受限子集)
+    std::string timezone;             // --tz(缺省 UTC;显式存储)
+    std::string misfire;              // --misfire(coalesce|skip;缺省 coalesce)
+    long long deadline_ms = 0;        // --deadline(0 = 不设)
+    bool heartbeat = false;           // --heartbeat(notify_on_change)
+    long long expected_revision = 0;  // --rev(update/pause/resume/cancel 的 CAS)
+    std::string source_session_id;    // import-loop 位置参数(原 /loop 会话)
+    std::string source_task_id;       // import-loop --task(原 loop-N)
 };
 
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。

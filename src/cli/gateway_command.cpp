@@ -1,8 +1,10 @@
 #include "cli/gateway_command.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "app/version.hpp"
 #include "gateway/automation_store.hpp"
@@ -80,9 +82,107 @@ int PrintGatewayStatus(const gateway::GatewayProfilePaths& paths, bool json) {
     return probe.state == gateway::GatewayProbe::State::Running ? 0 : 1;
 }
 
-// V1 job 族:add/run-now 落控制命令文件(持久任务创建走本地命令,不直接
-// 改文件);list 只读 automation 账。命令落了但 Gateway 没跑:如实说
-// (下次 run 起来消费),不冒充"任务已建"。
+// job 族(V1 add/run-now/list + V2 update/pause/resume/cancel/read/
+// import-loop):写操作落控制命令文件(持久任务创建/变更走本地命令,
+// 不直接改文件),活着的 Gateway 消费进账;list/read 只读 automation 账。
+// 命令落了但 Gateway 没跑:如实说(下次 run 起来消费),不冒充"任务已建"。
+namespace {
+
+// V2 计划参数(--every/--cron/--tz/--misfire/--deadline/--heartbeat/--at)
+// 折进命令载荷;出现即设。
+gateway::GatewayJobSchedulePatch JobSchedulePatchFromArgs(const GatewayCommandArgs& args) {
+    gateway::GatewayJobSchedulePatch patch;
+    if (args.due_at_ms != 0) {
+        patch.set_due_at = true;
+        patch.due_at_ms = args.due_at_ms;
+    }
+    if (args.interval_seconds > 0) {
+        patch.set_interval = true;
+        patch.interval_seconds = args.interval_seconds;
+    }
+    if (!args.cron_expr.empty()) {
+        patch.set_cron = true;
+        patch.cron_expr = args.cron_expr;
+    }
+    if (!args.timezone.empty()) {
+        patch.set_timezone = true;
+        patch.timezone = args.timezone;
+    }
+    if (!args.misfire.empty()) {
+        patch.set_misfire = true;
+        patch.misfire = args.misfire;
+    }
+    if (args.deadline_ms > 0) {
+        patch.set_deadline = true;
+        patch.deadline_ms = args.deadline_ms;
+    }
+    if (args.heartbeat) {
+        patch.set_notify_on_change = true;
+        patch.notify_on_change = true;
+    }
+    return patch;
+}
+
+std::string ScheduleSummary(const gateway::AutomationJob& job) {
+    switch (job.schedule_kind) {
+        case gateway::ScheduleKind::Once:
+            return "once due " + std::to_string(job.due_at_ms) + "ms";
+        case gateway::ScheduleKind::Interval:
+            return "every " + std::to_string(job.interval_seconds) + "s";
+        case gateway::ScheduleKind::Cron:
+            return "cron \"" + job.cron_expr + "\" @" + job.timezone;
+    }
+    return "once";
+}
+
+nlohmann::json JobToJson(const gateway::AutomationJob& job) {
+    nlohmann::json item = nlohmann::json::object();
+    item["job_id"] = job.job_id;
+    item["state"] = gateway::ToString(job.state);
+    item["schedule_kind"] = gateway::ToString(job.schedule_kind);
+    item["prompt"] = job.prompt;
+    item["revision"] = job.revision;
+    item["due_at_ms"] = job.due_at_ms;
+    item["interval_seconds"] = job.interval_seconds;
+    item["cron_expr"] = job.cron_expr.empty() ? nlohmann::json(nullptr)
+                                              : nlohmann::json(job.cron_expr);
+    item["timezone"] = job.timezone;
+    item["misfire"] = gateway::ToString(job.misfire);
+    item["deadline_ms"] = job.deadline_ms;
+    item["notify_on_change"] = job.notify_on_change;
+    item["imported_from"] = job.imported_from.empty()
+                                ? nlohmann::json(nullptr)
+                                : nlohmann::json(job.imported_from);
+    return item;
+}
+
+nlohmann::json OccurrenceToJson(const gateway::AutomationOccurrence& occurrence) {
+    nlohmann::json item = nlohmann::json::object();
+    item["occurrence_id"] = occurrence.occurrence_id;
+    item["job_id"] = occurrence.job_id;
+    item["slot_ms"] = occurrence.slot_ms;
+    item["reason"] = occurrence.reason;
+    item["missed_count"] = occurrence.missed_count;
+    item["attempt"] = occurrence.attempt;
+    const char* state = occurrence.state == gateway::AutomationOccurrence::State::Scheduled
+                            ? "scheduled"
+                            : (occurrence.state == gateway::AutomationOccurrence::State::Claimed
+                                   ? "claimed"
+                                   : "settled");
+    item["state"] = state;
+    item["outcome"] =
+        occurrence.outcome.empty() ? nlohmann::json(nullptr) : nlohmann::json(occurrence.outcome);
+    item["detail"] =
+        occurrence.detail.empty() ? nlohmann::json(nullptr) : nlohmann::json(occurrence.detail);
+    item["session_id"] = occurrence.session_id.empty() ? nlohmann::json(nullptr)
+                                                       : nlohmann::json(occurrence.session_id);
+    item["turn_id"] =
+        occurrence.turn_id.empty() ? nlohmann::json(nullptr) : nlohmann::json(occurrence.turn_id);
+    return item;
+}
+
+}  // namespace
+
 int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const GatewayCommandArgs& args) {
     const std::int64_t now_ms = platform::WallClockNowMs();
     if (args.job_verb == "add") {
@@ -92,6 +192,7 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
         command.job_id = args.job_id;
         command.due_at_ms = args.due_at_ms;
         command.requested_at_ms = now_ms;
+        command.schedule = JobSchedulePatchFromArgs(args);
         const std::string error = gateway::WriteJobAddCommand(paths.control_dir, command);
         if (!error.empty()) {
             std::fprintf(stderr, "gateway job add 失败: %s\n", error.c_str());
@@ -113,17 +214,121 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
         std::printf("触发命令已落(等待运行中的 Gateway 消费)。\n");
         return 0;
     }
+    if (args.job_verb == "update") {
+        gateway::GatewayJobUpdateCommand command;
+        command.job_id = args.job_id;
+        command.expected_revision = static_cast<std::uint64_t>(args.expected_revision);
+        command.idempotency_key = args.idempotency_key;
+        command.prompt = args.prompt;  // --prompt 出现才有值(空 = 不改)
+        command.schedule = JobSchedulePatchFromArgs(args);
+        command.requested_at_ms = now_ms;
+        const std::string error = gateway::WriteJobUpdateCommand(paths.control_dir, command);
+        if (!error.empty()) {
+            std::fprintf(stderr, "gateway job update 失败: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("更新命令已落(等待运行中的 Gateway 消费)。\n");
+        return 0;
+    }
+    if (args.job_verb == "pause" || args.job_verb == "resume" || args.job_verb == "cancel") {
+        gateway::GatewayJobStateCommand command;
+        command.verb = args.job_verb;
+        command.job_id = args.job_id;
+        command.expected_revision = static_cast<std::uint64_t>(args.expected_revision);
+        command.idempotency_key = args.idempotency_key;
+        command.requested_at_ms = now_ms;
+        const std::string error = gateway::WriteJobStateCommand(paths.control_dir, command);
+        if (!error.empty()) {
+            std::fprintf(stderr, "gateway job %s 失败: %s\n", args.job_verb.c_str(),
+                         error.c_str());
+            return 1;
+        }
+        std::printf("%s 命令已落(等待运行中的 Gateway 消费)。\n", args.job_verb.c_str());
+        return 0;
+    }
+    if (args.job_verb == "import-loop") {
+        gateway::GatewayJobImportLoopCommand command;
+        command.source_session_id = args.source_session_id;
+        command.source_task_id = args.source_task_id;
+        command.prompt = args.prompt;
+        command.interval_seconds = args.interval_seconds;
+        command.idempotency_key = args.idempotency_key;
+        command.requested_at_ms = now_ms;
+        const std::string error = gateway::WriteJobImportLoopCommand(paths.control_dir, command);
+        if (!error.empty()) {
+            std::fprintf(stderr, "gateway job import-loop 失败: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf(
+            "导入命令已落(等待运行中的 Gateway 消费;导入即产 receipt,原 /loop 状态只读"
+            "留档,不会被暗搬)。\n");
+        return 0;
+    }
+    if (args.job_verb == "read") {
+        // read:只读账(零写盘零建目录)。
+        const gateway::AutomationProjection projection = gateway::ReadAutomationProjection(
+            paths.automation_log);
+        std::vector<gateway::AutomationOccurrence> occurrences;
+        for (const auto& [id, occurrence] : projection.occurrences) {
+            if (occurrence.job_id == args.job_id) {
+                occurrences.push_back(occurrence);
+            }
+        }
+        const auto job = projection.jobs.find(args.job_id);
+        if (job == projection.jobs.end()) {
+            std::printf("任务不存在: %s\n", args.job_id.c_str());
+            return 1;
+        }
+        if (args.json) {
+            nlohmann::json json = JobToJson(job->second);
+            nlohmann::json occ_json = nlohmann::json::array();
+            std::sort(occurrences.begin(), occurrences.end(),
+                      [](const gateway::AutomationOccurrence& a,
+                         const gateway::AutomationOccurrence& b) {
+                          return a.slot_ms < b.slot_ms;
+                      });
+            for (const auto& occurrence : occurrences) {
+                occ_json.push_back(OccurrenceToJson(occurrence));
+            }
+            json["occurrences"] = std::move(occ_json);
+            std::printf("%s\n", json.dump().c_str());
+            return 0;
+        }
+        std::printf("%s\t%s\t%s\trev %llu\n", job->second.job_id.c_str(),
+                    gateway::ToString(job->second.state).c_str(),
+                    ScheduleSummary(job->second).c_str(),
+                    static_cast<unsigned long long>(job->second.revision));
+        std::printf("  正文: %s\n", job->second.prompt.c_str());
+        if (occurrences.empty()) {
+            std::printf("  (尚无 occurrence)\n");
+            return 0;
+        }
+        std::sort(occurrences.begin(), occurrences.end(),
+                  [](const gateway::AutomationOccurrence& a,
+                     const gateway::AutomationOccurrence& b) { return a.slot_ms < b.slot_ms; });
+        for (const auto& occurrence : occurrences) {
+            const char* state =
+                occurrence.state == gateway::AutomationOccurrence::State::Scheduled
+                    ? "scheduled"
+                    : (occurrence.state == gateway::AutomationOccurrence::State::Claimed
+                           ? "claimed"
+                           : "settled");
+            std::printf("  %s\tslot %lldms\t%s\tattempt %llu\tmissed %u\t%s\n",
+                        occurrence.occurrence_id.c_str(),
+                        static_cast<long long>(occurrence.slot_ms), state,
+                        static_cast<unsigned long long>(occurrence.attempt),
+                        occurrence.missed_count,
+                        occurrence.outcome.empty() ? "-" : occurrence.outcome.c_str());
+        }
+        return 0;
+    }
     // list:只读账。
     const gateway::AutomationProjection projection = gateway::ReadAutomationProjection(
         paths.automation_log);
     if (args.json) {
         nlohmann::json json = nlohmann::json::array();
         for (const auto& [id, job] : projection.jobs) {
-            nlohmann::json item = nlohmann::json::object();
-            item["job_id"] = job.job_id;
-            item["prompt"] = job.prompt;
-            item["due_at_ms"] = job.due_at_ms;
-            json.push_back(std::move(item));
+            json.push_back(JobToJson(job));
         }
         std::printf("%s\n", json.dump().c_str());
         return 0;
@@ -133,8 +338,9 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
         return 0;
     }
     for (const auto& [id, job] : projection.jobs) {
-        std::printf("%s\tdue %lldms\t%s\n", job.job_id.c_str(),
-                    static_cast<long long>(job.due_at_ms), job.prompt.c_str());
+        std::printf("%s\t%s\t%s\trev %llu\t%s\n", job.job_id.c_str(),
+                    gateway::ToString(job.state).c_str(), ScheduleSummary(job).c_str(),
+                    static_cast<unsigned long long>(job.revision), job.prompt.c_str());
     }
     return 0;
 }
