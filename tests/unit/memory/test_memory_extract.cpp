@@ -412,7 +412,9 @@ TEST_CASE("ParseExtractionJson: 包装规则——围栏/说明/花括号/多对
 
 TEST_CASE("ParseExtractionJson: 诊断文案自身是合法 UTF-8") {
     // 坏 UTF-8 的诊断输出:错误消息含偏移数字与固定中文,不得再引入坏字节。
-    const std::string broken_utf8 = "abc\xFF\x80def";
+    // (字面量在 hex 转义后断开——"\x80def" 会被贪婪吃成一个超长转义。)
+    const std::string broken_utf8 = "abc\xFF\x80"
+                                    "def";
     const auto result = app::ParseExtractionJson(broken_utf8);
     REQUIRE_FALSE(result.has_value());
     const std::string message = result.error().message;
