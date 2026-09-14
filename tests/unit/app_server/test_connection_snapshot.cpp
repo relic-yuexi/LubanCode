@@ -50,6 +50,7 @@
 #include "app_server/server.hpp"
 #include "config/config.hpp"
 #include "platform/paths.hpp"
+#include "tools/path_utils.hpp"
 
 namespace fs = std::filesystem;
 
@@ -416,12 +417,13 @@ TEST_CASE("托管裁剪复查:个人魂/法/AGENTS/个人 config 的标记不进
 #endif
     const auto material = config::HomeLubancodeDir();
     REQUIRE(material.has_value());
-    CHECK(lubancode::platform::PathToUtf8(*material) ==
-          lubancode::platform::PathToUtf8(material_root));
+    CHECK(*material == lubancode::platform::PathToUtf8(material_root));
 
+    // cli_app 生产接线同款折法:材料根(UTF-8)折 fs::path 再拼三处。
+    const fs::path material_path = tools::Utf8ToPath(*material);
     HarnessAgentSources sources;
-    sources.agents_dir = *material / "agents";  // 不存在:无档案,合法(不点名)
-    sources.skills_dir = *material / "skills";
+    sources.agents_dir = material_path / "agents";  // 不存在:无档案,合法(不点名)
+    sources.skills_dir = material_path / "skills";
     sources.prompts_dir_utf8 = *material + "/prompts";
 
     HarnessProfile harness;  // 不点名 agentRef:persona 空,core 落发行内置
