@@ -70,6 +70,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `1.1`(阶段 D 注) | 参考前端(2026-09 起):WS 端口的只读 HTTP artifact 口子 `GET /artifact/<内容寻址名>`(与 WS 同端口、同 token 门)——事件里只有引用,字节走这条口子,base64 仍永不进协议。承载面(与 `app_server/auth` 同级),不是协议方法面,报文形状零改动,不 bump 版本。 |
 | `1.2` | 旧史只读两法(轨迹 v3 P3,additive):`thread/resume` 与 `thread/read` 从留位转正。载荷 JSON 化 v3 显示投影(`kind=message\|compact_marker`,逐条带 `inCurrentContext`/`removedByCompacts`/`hidden` 等上下文状态标志);分页沿用 `trace/query` 的 `lastSeq` 游标语义。`hidden` 消息默认只回标志不回正文,`includeHidden: true` 才带(§4.28)。v2 旧账如实回 `sourceFormat: "v2"` + 空 `items`,不冒充。老方法老事件形状一字未动。 |
 | `1.3` | 幂等受理与只读核对(应用Worker接入单 P3,additive):`thread/start`/`turn/start` 增可选 `clientOperationId`(同键同载荷回原受理,同键异载荷报 `operation_conflict`;会话创建去重按主体+workspace 落 `session-creates.jsonl` 台账);新增只读方法 `operation/read`(受理/派发/终态核对,重启后按原键找回,零副作用)。不带键 = 1.2 旧行为一字不动。P4 把 `operation/read` 补登进 `initialize` 能力表 `methods`(此前方法在而能力表漏登)。老报文形状零改动。 |
+| `1.3`(尾款注) | 连接快照回执(应用Worker接入单 §八 尾款,additive):生产入口(lubancode app-server)启动时从配置冻结一份连接快照,`thread/start` 成功回执增可选 `connection` 字段(wire/model/provider/脱敏端点/密钥引用/配置版本/逐字段来源/角色路由;零密钥——凭据只以引用形态出现,端点只留 scheme://host[:port])。单 Worker 连接冻结:同一服务进程内逐场回同一份冻结合同,运行期改环境变量/配置文件只影响新起的 Worker 进程。v3 会话的 `model.request.prepared` 载荷同步带 `connection` 块(endpoint/secretRef/configVersion)与 provider 真值。未递快照的旧注入形态不带该字段,回执形状零改动。 |
 
 ## 方法面
 
@@ -86,7 +87,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `thread/start` | `cwd?`, `clientOperationId?`(1.3) | `{threadId, cwd}`;会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。带 `clientOperationId` 时创建幂等(1.3):同键同 cwd 重发回原身份 `{threadId, cwd, duplicate:true, active}`——`active` 如实交代本场是否还在本进程活着(不活=只读面可查、续跑须显式恢复,1.x 面没有恢复执行方法);同键异 cwd 报 `operation_conflict`;意图在而结果无(崩溃窄窗)报 `session_create_unknown`,不建第二场。 |
+| `thread/start` | `cwd?`, `clientOperationId?`(1.3) | `{threadId, cwd}`;生产入口另带可选 `connection`(1.3 尾款注:启动冻结的连接快照,同一进程逐场同一份)。会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。带 `clientOperationId` 时创建幂等(1.3):同键同 cwd 重发回原身份 `{threadId, cwd, duplicate:true, active}`——`active` 如实交代本场是否还在本进程活着(不活=只读面可查、续跑须显式恢复,1.x 面没有恢复执行方法);同键异 cwd 报 `operation_conflict`;意图在而结果无(崩溃窄窗)报 `session_create_unknown`,不建第二场。 |
 | `thread/list` | `scope?/state?/sort?/search?/cwd?/cursor?/limit?` | `{threads:[...], total}`;走 `runtime::SessionCommandService`,与终端 `/sessions` 同一碗饭。缺省全量 + active + updated。`startedAt` 续给(`createdAt` 同源),老前端不断。 |
 | `thread/stop` | `threadId` | 停场;在跑回合按打断收口。 |
 | `thread/archive` | `threadId` | 搬进 `archive/`;成功发 `thread/updated`(state=archived)。开着的 thread 拒 `active_thread`。 |

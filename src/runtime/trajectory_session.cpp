@@ -521,6 +521,9 @@ nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::Re
         payload["request_snapshot_ref"] = snapshot.ToJson();
         payload["request_snapshot_sha256"] = hooks::Sha256Hex(payload["request_snapshot_ref"].dump());
     }
+    // 注:连接快照的 connection 块只落 v3(V3RequestPrepared,§八"落点沿
+    // V3 请求账合同");v2 载荷键表封闭拒未知键(ValidatePayload),这里
+    // 不写——v2 老账的形状一个字节不动。
     return payload;
 }
 
@@ -1277,6 +1280,24 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
                                                       {"wire", identity_.wire},
                                                       {"model", request.model}};
+    // 应用Worker接入单 §八:连接快照的冻结局,与 v2 BuildPreparedPayload
+    // 同一份合同(见那边的注释);identity 没带整块不落。
+    if (identity_.connection.is_object() && !identity_.connection.empty()) {
+        nlohmann::json connection = nlohmann::json::object();
+        if (identity_.connection.contains("endpoint") && identity_.connection["endpoint"].is_string()) {
+            connection["endpoint"] = identity_.connection["endpoint"];
+        }
+        if (identity_.connection.contains("secretRef") && identity_.connection["secretRef"].is_string()) {
+            connection["secretRef"] = identity_.connection["secretRef"];
+        }
+        if (identity_.connection.contains("configVersion") &&
+            identity_.connection["configVersion"].is_string()) {
+            connection["configVersion"] = identity_.connection["configVersion"];
+        }
+        if (!connection.empty()) {
+            provider_snapshot["connection"] = std::move(connection);
+        }
+    }
     if (request.max_tokens.has_value()) {
         provider_snapshot["parameters"] = nlohmann::json{{"maxOutputTokens", *request.max_tokens}};
     }

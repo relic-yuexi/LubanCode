@@ -23,7 +23,7 @@
 | 方法 | 形态 | 兼容要点 |
 | --- | --- | --- |
 | `initialize` / `initialized` | 请求 + 通知 | 回 `protocolVersion`/`lubancodeVersion`/`platform`/`capabilities`。业务方法前必须握手,否则 `-32002`。 |
-| `thread/start` | 请求 | 可选 `clientOperationId`(1.3):同键同 cwd 回原身份 `duplicate:true` + `active`;异载荷 `operation_conflict`。 |
+| `thread/start` | 请求 | 可选 `clientOperationId`(1.3):同键同 cwd 回原身份 `duplicate:true` + `active`;异载荷 `operation_conflict`。生产入口的回执另带可选 `connection`(尾款 additive):启动冻结的连接快照(wire/model/provider/脱敏端点 `endpoint`/密钥引用 `secretRef`/配置版本 `configVersion`/逐字段 `sources`/角色路由 `roles`)——零密钥,凭据只以引用形态出现;同一 Worker 进程逐场同一份,凭它核对应用配置真生效。 |
 | `turn/start` | 请求 | 立即回 `{threadId, turnId, operationId, inputId}`;可选 `clientOperationId`(1.3)受理幂等;终态走 `turn/completed` 事件。 |
 | `operation/read` | 请求(只读) | 1.3 新增。`threadId` + `clientOperationId`/`operationId` 至少一枚;回 `status` 五态与 final 事实;零副作用。 |
 | `thread/read` / `trace/query` | 请求(只读) | 历史与事件账查询,分页走 `lastSeq` 游标。 |
