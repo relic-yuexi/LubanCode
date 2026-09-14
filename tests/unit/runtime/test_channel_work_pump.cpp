@@ -490,8 +490,15 @@ TEST_CASE("权限撤销:排队输入执行前重验, revoked 落 rejected 零模
     REQUIRE(fixture.OpenPump(registry).ok);
 
     fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "问题", "m-1"));
-    // 取件前撤准入:两条同档 binding 互相冲突 → binding_conflict。
+    // 取件前撤准入:两条同档(conversation 档)binding 互相冲突 →
+    // binding_conflict,重验不过就地 rejected。
     std::vector<channel::ChannelBindingConfig> bindings(2);
+    for (auto& binding : bindings) {
+        channel::ChannelBindingConversationMatch conversation;
+        conversation.kind = "direct";
+        conversation.id = "dm-a";
+        binding.match.conversation = conversation;
+    }
     fixture.manager->SetChannelBindings("qqbot", std::move(bindings));
     REQUIRE(fixture.Tick());
     fixture.TickUntilQuiet();
@@ -528,8 +535,8 @@ TEST_CASE("写盘失败:outbox 账开不了 → 入箱失败停泵,不再多跑�
     REQUIRE(fixture.OpenPump(registry).ok);
 
     fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "问题", "m-1"));
-    REQUIRE(fixture.Tick());  // 执行成功,入箱失败 → 泵停
-    REQUIRE_FALSE(fixture.Tick());  // broken:不再推进
+    REQUIRE_FALSE(fixture.Tick());  // 执行成功、入箱失败 → 泵停(写盘失败停止推进)
+    REQUIRE_FALSE(fixture.Tick());  // broken:不再推进,不再多跑模型
     REQUIRE(CountOf(fixture.counter_file, "model") == 1);
 }
 
