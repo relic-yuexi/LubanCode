@@ -32,9 +32,12 @@ struct Captured {
             lines.push_back(line);
         };
     }
+    // 取走并清空:断言只对"自上次取走以来"的新输出成立。
     std::vector<std::string> Take() {
         const std::lock_guard<std::mutex> lock(mutex);
-        return lines;
+        std::vector<std::string> out = std::move(lines);
+        lines.clear();
+        return out;
     }
     std::function<void(const std::string&)> emit;
 };
@@ -111,15 +114,21 @@ TEST_CASE("reporter: 开场→失败→在线→断线→停止的边沿都立�
     REQUIRE_FALSE(lines.empty());
     CHECK(lines.back().find("已连接 QQ,等待消息") != std::string::npos);
 
-    // 断线:立即,带根因。
+    // 断线:立即,带根因(断线行 + 失败码变化行,各自立即)。
     source.current.connected = false;
     source.current.last_failure = Fail("read_closed", channel::qq::kStageConnected);
     source.current.next_retry_at_ms = now + 2'000;
     reporter.Observe("boot-1", 42, now += 100);
     lines = captured.Take();
     REQUIRE_FALSE(lines.empty());
-    CHECK(lines.back().find("连接断开") != std::string::npos);
-    CHECK(lines.back().find("read_closed") != std::string::npos);
+    bool saw_disconnect = false;
+    for (const std::string& line : lines) {
+        if (line.find("连接断开") != std::string::npos) {
+            saw_disconnect = true;
+            CHECK(line.find("read_closed") != std::string::npos);
+        }
+    }
+    CHECK(saw_disconnect);
 
     // 停止:立即。
     source.current.stage = channel::qq::kStageStopped;

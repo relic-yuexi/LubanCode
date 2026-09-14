@@ -640,6 +640,13 @@ TEST_CASE("qq_adapter: Health 响应带真实 connected 与 last_error(修三处
         channel::BuildRequestJson(2, channel::BridgeMethod::Start,
                                   nlohmann::json{{"transport", "websocket"}}));
     harness.adapter->WriteToSidecar(start->data(), start->size());
+    // 先等失败账立起来(token 失败已入账、阶段停在取令牌),再发 Health——
+    // 否则网关线程首事件未发,快照阶段还是默认填充值。
+    REQUIRE(WaitQuiet([&harness]() {
+        const ConnectionSnapshot failing = harness.adapter->ConnectionState();
+        return failing.last_failure.has_value() &&
+               failing.last_failure->error_code == "token_invalid_credentials";
+    }));
     // 线程活着但没连上:Health 的 connected 必须 false(不再用线程存活冒充)。
     harness.HostWrite(channel::BuildRequestJson(9, channel::BridgeMethod::Health,
                                                 nlohmann::json{}));

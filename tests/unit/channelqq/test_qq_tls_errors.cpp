@@ -61,6 +61,7 @@ TEST_CASE("qq_tls: ResolveChannelTrustRoots——explicit 优先且不回退,无
 TEST_CASE("qq_tls: ResolveChannelTrustRoots——空显式走平台探测,探测失败明报 none") {
     bool detect_called = false;
     const ResolvedTrustStore none = ResolveChannelTrustRoots("", [&detect_called]() {
+        detect_called = true;
         return std::string();  // 模拟 Unix 路径全探测不到
     });
     CHECK(detect_called);

@@ -465,7 +465,7 @@ TEST_CASE("qq_gateway: 停止时发 Stopped 事件(RunLoop 收口)") {
     FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
     FakeTransport::PushIncoming(
         harness.shared,
-        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-s"}}})");
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-s"}})");
     harness.Start();
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::StageChanged && e.stage == kStageConnected;
