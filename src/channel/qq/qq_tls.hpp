@@ -47,9 +47,11 @@ public:
     TlsClientStream(const TlsClientStream&) = delete;
     TlsClientStream& operator=(const TlsClientStream&) = delete;
 
-    // 在已连的 sock 上做 TLS 握手。host 同时做 SNI 与证书主机名验证。
-    // ca_pem 为 PEM 拼串(可含多证);验证恒 REQUIRED,不提供降级开关。
-    static std::expected<TlsClientStream, TlsError> Connect(TcpSocket* sock,
+    // 接管 socket 所有权并在其上做 TLS 握手。host 同时做 SNI 与证书主机名
+    // 验证。ca_pem 为 PEM 拼串(可含多证);验证恒 REQUIRED,不提供降级开关。
+    // 按值接管是刻意的:socket 与 mbedtls 上下文同住堆上 TlsContext——
+    // BIO 回调的自引用指针在移动语义下必须锚在不动窝的实体上。
+    static std::expected<TlsClientStream, TlsError> Connect(TcpSocket socket,
                                                             const std::string& host,
                                                             const std::string& ca_pem,
                                                             int handshake_timeout_ms);
@@ -61,13 +63,15 @@ public:
                                                      int timeout_ms) const;
     std::expected<void, SocketError> WriteAll(std::string_view bytes, int timeout_ms) const;
 
-    // 尽力发 close_notify 后不再可用(不关底层 socket,socket 归调用方)。
+    // 打断在途读写(shutdown 底层 socket;取消路径用)。
+    void CancelUnderlying();
+
+    // 尽力发 close_notify;socket 随本类析构关闭(所有权在此)。
     void CloseNotify();
 
 private:
-    TlsClientStream(void* context, TcpSocket* sock) : context_(context), sock_(sock) {}
-    void* context_ = nullptr;  // .cpp 内的 TlsContext 实体(mbedtls 全家桶)
-    TcpSocket* sock_ = nullptr;
+    TlsClientStream(void* context) : context_(context) {}
+    void* context_ = nullptr;  // .cpp 内的 TlsContext 实体(mbedtls 全家桶+socket)
 };
 
 }  // namespace lubancode::channel::qq

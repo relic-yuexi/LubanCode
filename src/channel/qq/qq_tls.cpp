@@ -14,14 +14,15 @@ namespace lubancode::channel::qq {
 
 namespace {
 
-// mbedtls 全家桶(实体只在 .cpp 可见,头里是 void*)。
+// mbedtls 全家桶(实体只在 .cpp 可见,头里是 void*)。socket 也住这里:
+// BIO 回调指针锚在堆上不动窝的实体,移动 TlsClientStream 不断链。
 struct TlsContext {
     mbedtls_ssl_context ssl{};
     mbedtls_ssl_config config{};
     mbedtls_x509_crt ca{};
     mbedtls_ctr_drbg_context drbg{};
     mbedtls_entropy_context entropy{};
-    TcpSocket* sock = nullptr;
+    TcpSocket sock{};
 
     TlsContext() {
         mbedtls_ssl_init(&ssl);
@@ -129,36 +130,32 @@ std::string DetectSystemCaPemPath() {
 TlsClientStream::~TlsClientStream() {
     delete static_cast<TlsContext*>(context_);
     context_ = nullptr;
-    sock_ = nullptr;
 }
 
 TlsClientStream::TlsClientStream(TlsClientStream&& other) noexcept
-    : context_(other.context_), sock_(other.sock_) {
+    : context_(other.context_) {
     other.context_ = nullptr;
-    other.sock_ = nullptr;
 }
 
 TlsClientStream& TlsClientStream::operator=(TlsClientStream&& other) noexcept {
     if (this != &other) {
         delete static_cast<TlsContext*>(context_);
         context_ = other.context_;
-        sock_ = other.sock_;
         other.context_ = nullptr;
-        other.sock_ = nullptr;
     }
     return *this;
 }
 
-std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* sock,
+std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket socket,
                                                                   const std::string& host,
                                                                   const std::string& ca_pem,
                                                                   int handshake_timeout_ms) {
-    if (sock == nullptr || !sock->valid()) {
+    if (!socket.valid()) {
         return std::unexpected(TlsError{TlsErrorKind::Failed, "socket not connected"});
     }
 
     auto* context = new TlsContext();
-    context->sock = sock;
+    context->sock = std::move(socket);  // 所有权落进堆上实体
 
     const auto fail = [&](TlsErrorKind kind, std::string detail) {
         delete context;
@@ -196,7 +193,7 @@ std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* soc
     if (rc != 0) {
         return fail(TlsErrorKind::Failed, "set hostname: " + MbedErrorText(rc));
     }
-    mbedtls_ssl_set_bio(&context->ssl, sock, MbedSend, MbedRecv, MbedRecvTimeout);
+    mbedtls_ssl_set_bio(&context->ssl, &context->sock, MbedSend, MbedRecv, MbedRecvTimeout);
 
     while (true) {
         rc = mbedtls_ssl_handshake(&context->ssl);
@@ -221,7 +218,7 @@ std::expected<TlsClientStream, TlsError> TlsClientStream::Connect(TcpSocket* soc
                     "post-handshake verify flags=0x" + std::to_string(flags));
     }
 
-    return TlsClientStream(static_cast<void*>(context), sock);
+    return TlsClientStream(static_cast<void*>(context));
 }
 
 std::expected<std::size_t, SocketError> TlsClientStream::ReadSome(char* buf, std::size_t len,
@@ -271,6 +268,14 @@ std::expected<void, SocketError> TlsClientStream::WriteAll(std::string_view byte
                                            "tls write: " + MbedErrorText(rc)});
     }
     return {};
+}
+
+void TlsClientStream::CancelUnderlying() {
+    auto* context = static_cast<TlsContext*>(context_);
+    if (context == nullptr) {
+        return;
+    }
+    context->sock.ShutdownBoth();
 }
 
 void TlsClientStream::CloseNotify() {

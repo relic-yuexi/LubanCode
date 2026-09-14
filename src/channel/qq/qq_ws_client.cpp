@@ -156,10 +156,12 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
         return std::unexpected(ToWsError(socket.error()));
     }
 
+    // TLS 时 socket 所有权移进 TlsClientStream(堆上 TlsContext,移动安全);
+    // 明文时 socket 归 WsClient::socket_。
     std::optional<TlsClientStream> tls;
     if (parsed->tls) {
-        auto stream = TlsClientStream::Connect(&*socket, parsed->host, options.ca_pem,
-                                               options.connect_timeout_ms);
+        auto stream = TlsClientStream::Connect(std::move(*socket), parsed->host,
+                                                options.ca_pem, options.connect_timeout_ms);
         if (!stream.has_value()) {
             return std::unexpected(WsError{WsError::Kind::Failed,
                                            "tls: " + stream.error().detail, 0});
@@ -320,13 +322,21 @@ std::expected<void, WsError> WsClient::Close(std::uint16_t code, std::string_vie
     const auto got = ReadSome(chunk, sizeof(chunk), 1'500);
     (void)got;
     if (tls_.has_value()) {
+        // TLS 路径:socket 所有权在 TlsClientStream(堆上 context),close_notify
+        // 后重置 optional 即触发析构收 socket。
         tls_->CloseNotify();
+        tls_.reset();
+    } else {
+        socket_.Close();
     }
-    socket_.Close();
     return {};
 }
 
 void WsClient::Cancel() {
+    if (tls_.has_value()) {
+        tls_->CancelUnderlying();
+        return;
+    }
     socket_.ShutdownBoth();
 }
 
