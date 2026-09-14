@@ -87,7 +87,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `thread/start` | `cwd?`, `clientOperationId?`(1.3) | `{threadId, cwd}`;生产入口另带可选 `connection`(1.3 尾款注:启动冻结的连接快照,同一进程逐场同一份)。会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。带 `clientOperationId` 时创建幂等(1.3):同键同 cwd 重发回原身份 `{threadId, cwd, duplicate:true, active}`——`active` 如实交代本场是否还在本进程活着(不活=只读面可查、续跑须显式恢复,1.x 面没有恢复执行方法);同键异 cwd 报 `operation_conflict`;意图在而结果无(崩溃窄窗)报 `session_create_unknown`,不建第二场。 |
+| `thread/start` | `cwd?`, `clientOperationId?`(1.3) | `{threadId, cwd}`;生产入口另带可选 `connection`(1.3 尾款注:启动冻结的连接快照,同一进程逐场同一份)。会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。带 `clientOperationId` 时创建幂等(1.3):同键同 cwd 重发回原身份 `{threadId, cwd, duplicate:true, active}`——`active` 如实交代本场是否还在本进程活着(不活=只读面可查、续跑须显式恢复,1.x 面没有恢复执行方法);同键异 cwd 报 `operation_conflict`;意图在而结果无(崩溃窄窗)报 `session_create_unknown`,不建第二场。部署档声明 `components.skills` 时(additive)另带 `skills`:冻结技能清单 `[{name, requirement: required|optional, status: loaded|missing, requiresTools?, missingTools?}]`——optional 缺件进 `degradedComponents`,required 缺件/坏格式带 `data.code=skill_missing` 整场拒(见 capability-contract §3/§13.4)。 |
 | `thread/list` | `scope?/state?/sort?/search?/cwd?/cursor?/limit?` | `{threads:[...], total}`;走 `runtime::SessionCommandService`,与终端 `/sessions` 同一碗饭。缺省全量 + active + updated。`startedAt` 续给(`createdAt` 同源),老前端不断。 |
 | `thread/stop` | `threadId` | 停场;在跑回合按打断收口。 |
 | `thread/archive` | `threadId` | 搬进 `archive/`;成功发 `thread/updated`(state=archived)。开着的 thread 拒 `active_thread`。 |

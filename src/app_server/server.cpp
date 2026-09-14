@@ -1252,6 +1252,25 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
             return nlohmann::json();
         }
         record->assembly = std::move(assembled.assembly);
+        // 应用Worker接入单 §五 134:v3 场把提示组合事实(次序/各段 hash/
+        // 来源/快照 ID)落进会话账——部署档组合路才有这份记录,普通 CLI
+        // 不经此门。落不住只记诊断不拦建场(可追溯记录写失败由账本健康
+        // 面交代,不该把会话卡死;与 session.title.applied 同口径)。
+        if (record->assembly->prompt_composition.has_value()) {
+            trajectory::v3::V3Writer* v3_writer =
+                record->session_service->trajectory()->v3_main_writer();
+            if (v3_writer != nullptr) {
+                trajectory::v3::EventDraft applied;
+                applied.kind = trajectory::v3::EventKindV3::PromptCompositionApplied;
+                applied.payload = *record->assembly->prompt_composition;
+                const auto receipt =
+                    v3_writer->AppendEvent(std::move(applied), trajectory::Durability::PowerLoss);
+                if (receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
+                    Diagnose("提示组合事实落账失败(不拦建场): " + receipt.error_code + " " +
+                             receipt.error_message);
+                }
+            }
+        }
     }
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
@@ -1287,6 +1306,34 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     // 运行期改环境变量/配置文件不影响本进程(§八 178 只影响新 Worker)。
     if (options_.connection_snapshot.is_object() && !options_.connection_snapshot.empty()) {
         result["connection"] = options_.connection_snapshot;
+    }
+    // §六 冻结技能清单(components.skills 声明时才有):获准名、
+    // required/optional、装载结果与依赖缺口,供客户端开场核对——清单、
+    // 正文加载结果、实际工具面一致(additive 字段,未声明不出)。
+    if (record->assembly != nullptr && !record->assembly->skills_manifest.empty()) {
+        nlohmann::json entries = nlohmann::json::array();
+        for (const SessionAssembly::SkillManifestEntry& entry :
+             record->assembly->skills_manifest) {
+            nlohmann::json item{{"name", entry.name},
+                                {"requirement", entry.required ? "required" : "optional"},
+                                {"status", entry.loaded ? "loaded" : "missing"}};
+            if (!entry.requires_tools.empty()) {
+                nlohmann::json declared_tools = nlohmann::json::array();
+                for (const std::string& tool : entry.requires_tools) {
+                    declared_tools.push_back(tool);
+                }
+                item["requiresTools"] = std::move(declared_tools);
+            }
+            if (!entry.missing_tools.empty()) {
+                nlohmann::json missing = nlohmann::json::array();
+                for (const std::string& tool : entry.missing_tools) {
+                    missing.push_back(tool);
+                }
+                item["missingTools"] = std::move(missing);
+            }
+            entries.push_back(std::move(item));
+        }
+        result["skills"] = std::move(entries);
     }
     // 可选降级必须写结果(单子 P1):装配期跳过的可选组件(未被档的
     // tools.allow 引用、起服失败的 MCP)如实带回,Profile 决定降级能否

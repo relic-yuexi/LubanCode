@@ -41,7 +41,8 @@ StdioTransport::~StdioTransport() {
 
 TransportStartResult StdioTransport::Start(const std::string& command, const std::vector<std::string>& args,
                                             const std::vector<std::pair<std::string, std::string>>& env,
-                                            std::function<void(std::string)> on_line) {
+                                            std::function<void(std::string)> on_line,
+                                            platform::EnvMode env_mode) {
     on_line_ = std::move(on_line);
 
     const platform::SpawnResult spawn = child_.Start(
@@ -75,7 +76,8 @@ TransportStartResult StdioTransport::Start(const std::string& command, const std
             if (stderr_buffer_.size() > kMaxStderrBytes) {
                 stderr_buffer_.erase(0, stderr_buffer_.size() - kMaxStderrBytes);
             }
-        });
+        },
+        /*cwd_utf8=*/std::string(), env_mode);
 
     if (!spawn.success) {
         return TransportStartResult{false, spawn.error};

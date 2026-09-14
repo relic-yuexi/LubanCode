@@ -12,14 +12,17 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include "mcp/client.hpp"
+#include "platform/paths.hpp"
 
 using namespace lubancode;
 
@@ -588,8 +591,7 @@ TEST_CASE("Client + 真实 Python 夹具: 假 MCP 返回一张 PNG,LubanCode 不
     client.Shutdown();
 }
 
-TEST_CASE("Client + 真实 Python 夹具: structuredContent 全链 + 伪 MIME/坏 schema 稳定码收口") {
-    mcp::Client client("test");
+TEST_CASE("Client + 真实 Python 夹具: structuredContent 全链 + 伪 MIME/坏 schema 稳定码收口") {    mcp::Client client("test");
     const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
     REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
     REQUIRE(client.Initialize().has_value());
@@ -629,6 +631,155 @@ TEST_CASE("Client + 真实 Python 夹具: structuredContent 全链 + 伪 MIME/�
     result = client.CallTool("rich", {{"kind", "image"}}, nullptr);
     CHECK(result.is_error);
     CHECK(result.error_code == "mcp.artifact_unavailable");
+
+    client.Shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 4) 应用Worker接入单 §7.1:受控故障场景的逐层验收——401/429/超时/空结果/
+//    取消各有明确状态,空结果不等于请求失败;env_probe 钉"凭据分开传"。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Client + 真实 Python 夹具: auth_gate/rate_limited 归 server_error,带 JSON-RPC code") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+
+    // 认证失败(模拟 401):服务器明确拒绝——不是传输故障,码带得出来。
+    const auto auth = client.CallTool("auth_gate", nlohmann::json::object());
+    CHECK(auth.is_error);
+    CHECK(auth.outcome == "tool_error");
+    CHECK(auth.error_code == "mcp.server_error");
+    CHECK(auth.details.value("jsonrpcCode", std::int64_t{0}) == -32001);
+    CHECK(auth.content.find("401") != std::string::npos);
+
+    // 限流(模拟 429):同类拒绝,code 分得开。
+    const auto limited = client.CallTool("rate_limited", nlohmann::json::object());
+    CHECK(limited.is_error);
+    CHECK(limited.outcome == "tool_error");
+    CHECK(limited.error_code == "mcp.server_error");
+    CHECK(limited.details.value("jsonrpcCode", std::int64_t{0}) == -32002);
+    CHECK(limited.content.find("429") != std::string::npos);
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具: slow 超时按 mcp.timeout 收口,不傻等") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+    // 收窄超时(生产默认 120s 不能进 CI;测试注入 300ms)。
+    client.SetTimeoutsForTest(/*default_timeout_ms=*/5000, /*tool_call_timeout_ms=*/300);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = client.CallTool("slow", {{"ms", 8000}});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(result.is_error);
+    CHECK(result.error_code == "mcp.timeout");
+    CHECK(result.outcome == "timed_out");
+    CHECK(elapsed < std::chrono::seconds(5));
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具: empty 空结果是成功,不是请求失败") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+
+    const auto result = client.CallTool("empty", nlohmann::json::object());
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.empty());  // 没搜到东西 ≠ 调用失败
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具: slow 期间取消——真协议链上发 cancelled 后按取消收口") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+
+    // 夹具不认 notifications/cancelled(单线程睡死),正适合验客户端的
+    // "发了取消通知、宽限期内没等到终态就按取消收口"这条路。
+    std::atomic<bool> cancel_flag{false};
+    std::thread([&cancel_flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancel_flag.store(true);
+    }).detach();
+    mcp::CallOptions options;
+    options.cancel = &cancel_flag;
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = client.CallTool("slow", {{"ms", 30000}}, nullptr, options);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(result.is_error);
+    CHECK(result.error_code == "mcp.cancelled");
+    CHECK(result.outcome == "cancelled_during_run");
+    CHECK(elapsed < std::chrono::seconds(10));  // 100ms 置位 + 2s 宽限,远小于 30s 睡眠
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具: EnvMode::Replace 子进程只见给定 env(凭据分开传)") {
+    // 宿主造一枚"模型密钥",证明 Replace 模式下不进工具进程。
+    struct EnvGuard {
+        explicit EnvGuard(const char* name) : name_(name) {}
+        ~EnvGuard() {
+#ifdef _WIN32
+            _putenv((std::string(name_) + "=").c_str());
+#else
+            unsetenv(name_);
+#endif
+        }
+        void set(const std::string& value) {
+#ifdef _WIN32
+            _putenv((std::string(name_) + "=" + value).c_str());
+#else
+            setenv(name_, value.c_str(), 1);
+#endif
+        }
+        const char* name_;
+    } guard("LUBANCODE_TEST_MODEL_KEY");
+    guard.set("sk-model-secret");
+
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    // 最小集:python 起得来 + 工具凭据一枚。Windows 缺 SystemRoot 连 CRT
+    // 都起不稳(与 ComposeMcpChildEnv 的 base 集同口径)。
+    std::vector<std::pair<std::string, std::string>> env;
+    const auto add_host = [&env](const char* name) {
+        if (const auto value = lubancode::platform::GetEnvVar(name); value.has_value()) {
+            env.emplace_back(name, *value);
+        }
+    };
+    add_host("PATH");
+#ifdef _WIN32
+    add_host("SystemRoot");
+    add_host("SystemDrive");
+    add_host("TEMP");
+    add_host("TMP");
+#else
+    add_host("TMPDIR");
+#endif
+    env.emplace_back("LUBANCODE_TEST_TOOL_CRED", "tok-123");
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, env,
+                                lubancode::platform::EnvMode::Replace)
+                 .success);
+    REQUIRE(client.Initialize().has_value());
+
+    const auto result = client.CallTool(
+        "env_probe",
+        {{"names", nlohmann::json::array({"LUBANCODE_TEST_TOOL_CRED", "LUBANCODE_TEST_MODEL_KEY"})}});
+    CHECK_FALSE(result.is_error);
+    // 工具凭据(部署配置注入)在;模型密钥(宿主其余环境)不在。
+    CHECK(result.content.find("LUBANCODE_TEST_TOOL_CRED=set") != std::string::npos);
+    CHECK(result.content.find("LUBANCODE_TEST_MODEL_KEY=unset") != std::string::npos);
+    // 探针不偷运密钥正文:返回文本里只有 set/unset,没有密钥值。
+    CHECK(result.content.find("sk-model-secret") == std::string::npos);
+    CHECK(result.content.find("tok-123") == std::string::npos);
 
     client.Shutdown();
 }

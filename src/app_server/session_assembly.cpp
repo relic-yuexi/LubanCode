@@ -18,6 +18,7 @@
 #include "platform/paths.hpp"
 #include "runtime/plugin_tool.hpp"  // ScanPluginDirectories/ComputePluginContentHash
 #include "runtime/secret_resolver.hpp"  // StandalonePluginDataDir
+#include "tools/path_utils.hpp"
 #include "tools/skill_loader.hpp"
 
 namespace lubancode::app_server {
@@ -178,6 +179,51 @@ private:
 
 }  // namespace
 
+// MCP 子进程环境(§7.1:凭据分开传,不递 Worker 全环境)。base 集与
+// runtime/plugin_process 的 BuildProcessEnv 同一张合同——PATH/系统基件/
+// 临时目录从宿主取值,部署配置的 mcpServers.env(工具自己的凭据与开关)
+// 注入并同名覆盖;EnvMode::Replace 落锤后,宿主环境的其余变量(模型
+// API key 一类)一概不递。
+std::vector<std::pair<std::string, std::string>> ComposeMcpChildEnv(
+    const std::vector<std::pair<std::string, std::string>>& server_env) {
+    std::vector<std::pair<std::string, std::string>> env;
+    auto add_if_present = [&env](const char* name) {
+        const auto value = platform::GetEnvVar(name);
+        if (value.has_value()) {
+            env.emplace_back(name, *value);
+        }
+    };
+    add_if_present("PATH");
+#ifdef _WIN32
+    add_if_present("SystemRoot");
+    add_if_present("SystemDrive");
+    add_if_present("COMSPEC");
+    add_if_present("WINDIR");
+    add_if_present("TEMP");
+    add_if_present("TMP");
+#else
+    add_if_present("TMPDIR");
+    add_if_present("HOME");
+#endif
+    for (const auto& [key, value] : server_env) {
+        if (key.empty()) {
+            continue;
+        }
+        bool overridden = false;
+        for (auto& [base_key, base_value] : env) {
+            if (base_key == key) {
+                base_value = value;
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) {
+            env.emplace_back(key, value);
+        }
+    }
+    return env;
+}
+
 SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     SessionAssemblyResult result;
     if (!request.backend_factory) {
@@ -240,17 +286,105 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     // 装配面 = features.skills 放行 ∧ tools 面点名 "skill"(mode=only 的
     // allow 名单;inherit/none 无内置面可继承,开关单独不起工具)。清单、
     // 工具、提示段三面同进同退(§六"清单、正文加载结果、实际工具面必须
-    // 一致")。skill 工具只加载 SKILL.md 正文——脚本/CLI/MCP 需求仅是
-    // 依赖声明,装它不自动授予任何执行工具(§六"SKILL.md 正文与脚本分开
-    // 授权";本场注册表里本就只有档点名的那几枚工具)。
+    // 一致")。skill 工具只加载 SKILL.md 正文(相对引用走同工具的受控读
+    // 取口)——脚本/CLI/MCP 需求仅是依赖声明,装它不自动授予任何执行
+    // 工具(§六;本场注册表里本就只有档点名的那几枚工具)。
+    //
+    // components.skills 声明(§六 来源声明式 schema,additive):声明在场
+    // 时获准面 = required ∪ optional,名单外的根内技能不进本场;required
+    // 缺件/坏格式整场明拒(skill_missing,人话带扫描警告摘要);optional
+    // 缺件跳过出诊断(降级账 + 冻结清单)。缺省(未声明)= P2 的"材料根
+    // skills/ 全量"约定照旧。sourceDir 声明来源根(材料根 skills/ 内的
+    // 相对子目录,解析层已验形状)。
     const bool skill_exposed =
         !injection_path && harness != nullptr && harness->FeatureEnabled("skills") &&
         harness->tools.mode == HarnessToolPolicy::Mode::Only &&
         std::find(harness->tools.allow.begin(), harness->tools.allow.end(), std::string("skill")) !=
             harness->tools.allow.end();
+    const bool skills_declared = skill_exposed && harness->DeclaresSkills();
     std::vector<lubancode::tools::SkillMeta> session_skills;
+    std::vector<std::string> skill_scan_warnings;
     if (skill_exposed && request.skills_root.has_value()) {
-        session_skills = lubancode::tools::ScanSkillsDir(*request.skills_root, "材料根级");
+        const std::filesystem::path scan_root =
+            skills_declared && !harness->skills_source_dir.empty()
+                ? *request.skills_root / lubancode::tools::Utf8ToPath(harness->skills_source_dir)
+                : *request.skills_root;
+        session_skills = skills_declared
+                             ? lubancode::tools::ScanSkillsDirReported(scan_root, "材料根级",
+                                                                      &skill_scan_warnings)
+                             : lubancode::tools::ScanSkillsDir(scan_root, "材料根级");
+    }
+    if (skills_declared) {
+        // 获准面过滤:声明即允许清单,名单外不进(清单段/工具/预装三面吃
+        // 的都是过滤后的这份)。
+        std::set<std::string> approved(harness->skills_required.begin(), harness->skills_required.end());
+        approved.insert(harness->skills_optional.begin(), harness->skills_optional.end());
+        std::vector<lubancode::tools::SkillMeta> filtered;
+        for (auto& meta : session_skills) {
+            if (approved.count(meta.name) > 0) {
+                filtered.push_back(std::move(meta));
+            }
+        }
+        session_skills = std::move(filtered);
+        std::set<std::string> scanned;
+        for (const auto& meta : session_skills) {
+            scanned.insert(meta.name);
+        }
+        // required:缺件/坏格式(扫描跳过)整场明拒,不静默降级(§六)。
+        for (const std::string& name : harness->skills_required) {
+            if (scanned.count(name) == 0) {
+                std::string detail = "部署档 required 技能不在扫描账: " + name + "(来源:材料根 skills/" +
+                                     (harness->skills_source_dir.empty() ? std::string()
+                                                                         : harness->skills_source_dir + "/") +
+                                     ")";
+                if (!skill_scan_warnings.empty()) {
+                    detail += "(扫描警告: ";
+                    for (const std::string& warning : skill_scan_warnings) {
+                        detail += warning + "; ";
+                    }
+                    detail += ")";
+                }
+                result.error_code = "skill_missing";
+                result.error = "部署档声明 required 技能缺件或坏格式,装配整场拒绝(skill_missing): " +
+                               std::move(detail);
+                return result;
+            }
+        }
+        // optional:缺件跳过,诊断进降级账 + 冻结清单(§六"optional 跳过须
+        // 出诊断并写快照")。
+        for (const std::string& name : harness->skills_optional) {
+            if (scanned.count(name) == 0) {
+                assembly->degraded_components.push_back("skills/" + name + ": optional 未扫到,跳过");
+            }
+        }
+        // 冻结清单(§六:来源与依赖状态供客户端检查;missing_tools 待步骤 5
+        // 工具面定型后补)。
+        for (const std::string& name : harness->skills_required) {
+            SessionAssembly::SkillManifestEntry entry;
+            entry.name = name;
+            entry.required = true;
+            entry.loaded = scanned.count(name) > 0;
+            for (const auto& meta : session_skills) {
+                if (meta.name == name) {
+                    entry.requires_tools = meta.requires_tools;
+                    break;
+                }
+            }
+            assembly->skills_manifest.push_back(std::move(entry));
+        }
+        for (const std::string& name : harness->skills_optional) {
+            SessionAssembly::SkillManifestEntry entry;
+            entry.name = name;
+            entry.required = false;
+            entry.loaded = scanned.count(name) > 0;
+            for (const auto& meta : session_skills) {
+                if (meta.name == name) {
+                    entry.requires_tools = meta.requires_tools;
+                    break;
+                }
+            }
+            assembly->skills_manifest.push_back(std::move(entry));
+        }
     }
 
     // ---- 步骤 3:backend ----
@@ -266,8 +400,12 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
         std::set<std::string> mounted_names;
         for (auto& [name, server_config] : allowed_servers) {
             auto client = std::make_unique<lubancode::mcp::Client>(name);
+            // §7.1:子进程环境按"base 集 + 部署配置注入"折好后 Replace 落锤
+            // ——不递 Worker 全环境,模型凭据(LUBAN_API_KEY 一类)与工具
+            // 凭据(mcpServers.env)分开传,各进各的进程。
             const auto start = client->StartProcess(server_config->command, server_config->args,
-                                                    server_config->env);
+                                                    ComposeMcpChildEnv(server_config->env),
+                                                    lubancode::platform::EnvMode::Replace);
             std::string reason;
             if (start.success) {
                 const auto initialized = client->Initialize();
@@ -334,15 +472,11 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
                     *runtime.client, runtime.name, tool_info, std::string()));
             }
         }
-        // P2:内置 skill 工具(受控单根清单,与扫描件同一份——发现面、
-        // 提示清单段、SkillTool 构造三处同源,不各扫各的)。
-        if (skill_exposed) {
-            registry->Register(std::make_unique<lubancode::tools::SkillTool>(session_skills));
-        }
         // P5:点名 Lua 插件的工具(只装 allow 点名的;装载面≠注册面,与
         // MCP 同一条规矩——components 点名=装载,tools.allow=出面)。adapter
         // 走统一工具闸:needs_confirm 恒真、ApprovalClass::External,模型
-        // 调用与内置工具过同一条审批/轨迹面,不旁路。
+        // 调用与内置工具过同一条审批/轨迹面,不旁路。注册先于 skill 工具
+        // ——skill 的依赖声明消费要对照完整工具面(MCP+插件)。
         if (assembly->manifest_lua != nullptr) {
             for (const auto& plugin : assembly->manifest_lua->plugins()) {
                 for (const auto& tool : plugin->manifest->tools) {
@@ -353,6 +487,30 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
                     }
                     registry->Register(std::make_unique<lubancode::runtime::ManifestLuaToolAdapter>(
                         plugin.get(), &tool));
+                }
+            }
+        }
+        // P2:内置 skill 工具(受控单根清单,与扫描件同一份——发现面、
+        // 提示清单段、SkillTool 构造三处同源,不各扫各的)。§六 145:构造
+        // 时递本场冻结工具面(注册表 wire 名)——技能声明的 requires-tools
+        // 缺面时加载回 capability_unavailable,不为满足技能文字自动挂工具。
+        if (skill_exposed) {
+            std::set<std::string> face;
+            for (const auto& tool : registry->All()) {
+                face.insert(tool->name());
+            }
+            face.insert("skill");  // 内置件自身在面
+            registry->Register(std::make_unique<lubancode::tools::SkillTool>(session_skills, face));
+            // 冻结清单补依赖缺口(§六:依赖状态供客户端检查;缺面不拒装
+            // ——按需加载时 capability_unavailable,清单如实交代)。
+            for (auto& entry : assembly->skills_manifest) {
+                if (!entry.loaded) {
+                    continue;
+                }
+                for (const std::string& required : entry.requires_tools) {
+                    if (face.count(required) == 0) {
+                        entry.missing_tools.push_back(required);
+                    }
                 }
             }
         }
@@ -431,6 +589,35 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
             return result;
         }
         assembly->agent_profile.system_prompt = std::move(composed.text);
+        // §五 134:组合次序、各段 hash、来源、最终快照 ID 折成可追溯记录
+        //(server 在 v3 场落 prompt.composition.applied 事实行)。业务正文
+        // 哪段来自哪层一目了然——业务文本伪装不了宿主权限(来源逐段在账)。
+        {
+            std::vector<const lubancode::agent::PromptSourceLedgerEntry*> ordered;
+            ordered.reserve(composed.ledger.entries.size());
+            for (const auto& entry : composed.ledger.entries) {
+                ordered.push_back(&entry);
+            }
+            std::sort(ordered.begin(), ordered.end(),
+                      [](const lubancode::agent::PromptSourceLedgerEntry* a,
+                         const lubancode::agent::PromptSourceLedgerEntry* b) { return a->order < b->order; });
+            nlohmann::json segments = nlohmann::json::array();
+            for (const auto* entry : ordered) {
+                segments.push_back(nlohmann::json{
+                    {"order", entry->order},
+                    {"refPath", entry->rel_path},
+                    {"origin", lubancode::agent::ToString(entry->origin)},
+                    {"source", entry->file},
+                    {"contentSha256", entry->content_hash},
+                });
+            }
+            nlohmann::json payload = nlohmann::json{
+                {"promptSnapshotId", composed.snapshot_id},
+                {"agentRef", harness != nullptr ? harness->agent_ref : std::string()},
+                {"segments", std::move(segments)},
+            };
+            assembly->prompt_composition = std::move(payload);
+        }
     } else {
         assembly->agent_profile.system_prompt = request.system_prompt;
     }

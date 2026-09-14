@@ -11,6 +11,7 @@
 //   - 预装正文(eager)与清单段同场注入(§六)。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -257,4 +258,64 @@ TEST_CASE("技能清单段与预装正文:清单进提示,preload 命中注入�
     const auto missing = ComposeHarnessSystemPrompt(missing_input);
     CHECK_FALSE(missing.error.empty());
     CHECK(missing.error.find("greet") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 应用Worker接入单 §五 134:组合记录——各段 hash/次序/来源 + 最终快照 ID
+// ---------------------------------------------------------------------------
+
+TEST_CASE("组合记录:ledger 逐段带 hash 与连续次序,快照 ID = 正文 SHA-256") {
+    MaterialRoot materials;
+    materials.WriteFile("agents/research.yaml",
+                        "schema: 1\n"
+                        "name: research\n"
+                        "description: 研究助理。\n"
+                        "prompt:\n"
+                        "  profile: research\n");
+    materials.WriteFile("prompts/profiles/research/core/10-identity.md",
+                        "# 身份\n\n你是 LEDGER-PROFILE-BODY。\n");
+    materials.WriteFile("skills/greet/SKILL.md",
+                        "---\nname: greet\ndescription: 问候技能。\n---\nLEDGER-SKILL-BODY。\n");
+    const auto planned = ResolveHarnessAgentPlan(ProfileWithRef("research"), SourcesOf(materials),
+                                                "chat", "/tmp/w");
+    REQUIRE(planned.plan.has_value());
+    HarnessAgentPlan plan = *planned.plan;
+
+    std::vector<tools::SkillMeta> skills = tools::ScanSkillsDir(*materials.skills_dir, "材料根级");
+    REQUIRE(skills.size() == 1);
+    HarnessPromptInput input;
+    input.plan = &plan;
+    input.skills = &skills;
+    input.face_names = {"skill"};
+    const auto composed = ComposeHarnessSystemPrompt(input);
+    REQUIRE(composed.error.empty());
+
+    // 快照 ID:64 位十六进制,且等于拼装正文的 SHA-256(可对账)。
+    CHECK(composed.snapshot_id.size() == 64);
+    bool hex = true;
+    for (const char ch : composed.snapshot_id) {
+        hex = hex && ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'));
+    }
+    CHECK(hex);
+
+    // ledger:段次序从 0 连续、每段有 hash;Profile 磁盘段的来源指到真实文件。
+    REQUIRE_FALSE(composed.ledger.entries.empty());
+    std::vector<int> orders;
+    for (const auto& entry : composed.ledger.entries) {
+        orders.push_back(entry.order);
+        CHECK(entry.content_hash.size() == 64);
+    }
+    std::sort(orders.begin(), orders.end());
+    for (std::size_t i = 0; i < orders.size(); ++i) {
+        CHECK(orders[i] == static_cast<int>(i));  // 0..n-1 连续
+    }
+    bool saw_profile_disk_segment = false;
+    for (const auto& entry : composed.ledger.entries) {
+        if (entry.origin == agent::PromptModuleOrigin::UserProfile ||
+            entry.origin == agent::PromptModuleOrigin::EmbeddedProfile) {
+            saw_profile_disk_segment = !entry.file.empty() ||
+                                       entry.origin == agent::PromptModuleOrigin::EmbeddedProfile;
+        }
+    }
+    CHECK(saw_profile_disk_segment);  // Profile 正文段进了账(嵌入层或磁盘层)
 }

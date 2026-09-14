@@ -516,6 +516,41 @@ TEST_CASE("部署档 golden:schemaVersion 只认 1,未知键拒绝") {
     }
 }
 
+// 应用Worker接入单 §六(本批):components.skills 来源声明进机器 schema
+//(additive——老 golden 不带该键照过,上面"档内未知键拒绝"的用例保住
+// 拼错键仍拒)。语义(required/optional/冲突/依赖解释)在生产解析器册
+// tests/unit/app_server/test_harness_profile.cpp 把关,这里只钉 schema 面。
+TEST_CASE("components.skills:声明键过机器 schema,拼错的键仍拒") {
+    const auto schema = ReadJsonFile(kFixturesRoot / "deployment.schema.json");
+    REQUIRE(schema.has_value());
+    const auto base = ReadJsonFile(kFixturesRoot / "profile.zero-tools.json");
+    REQUIRE(base.has_value());
+
+    SUBCASE("required/optional/sourceDir 过 schema") {
+        json doc = *base;
+        doc["harnessProfiles"]["zero-tools"]["components"] = json{
+            {"skills", json{{"required", json::array({"a"})},
+                            {"optional", json::array({"b"})},
+                            {"sourceDir", "team"}}}};
+        const std::string error = ValidateAgainst(doc, *schema, *schema, "<root>");
+        CHECK(error.empty());
+    }
+    SUBCASE("skills 里拼错的键被拒") {
+        json doc = *base;
+        doc["harnessProfiles"]["zero-tools"]["components"] = json{
+            {"skills", json{{"loadPolicy", "eager"}}}};
+        const std::string error = ValidateAgainst(doc, *schema, *schema, "<root>");
+        CHECK_FALSE(error.empty());
+    }
+    SUBCASE("名单里混入非字符串元素被拒") {
+        json doc = *base;
+        doc["harnessProfiles"]["zero-tools"]["components"] = json{
+            {"skills", json{{"required", json::array({1})}}}};
+        const std::string error = ValidateAgainst(doc, *schema, *schema, "<root>");
+        CHECK_FALSE(error.empty());
+    }
+}
+
 TEST_CASE("ToolPolicySpec:新 schema 的矛盾组合在语义层全拒") {
     SUBCASE("inherit 带非空 allow") {
         json policy = {{"mode", "inherit"}, {"allow", json::array({"read_file"})}};

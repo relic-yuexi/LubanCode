@@ -83,9 +83,14 @@ struct HarnessPromptInput {
 struct HarnessPromptResult {
     std::string text;   // 拼装好的系统提示(error 空时有效)
     std::string error;  // 非空 = 明拒(如 skills.preload 缺名)
-    // 来源账:拼装现场逐段记账(§五"组合顺序、各段来源"的最小落账;测试
-    // 与诊断用)。§五的 hash/快照ID 入 V3 账未落,记在单子未验边界。
+    // 来源账:拼装现场逐段记账(§五"组合顺序、各段来源"的账)。各段带
+    // 渲染正文的 content_hash 与拼装次序(prompt_assembler A1 就地记),
+    // server 在 v3 场把整本账折成 prompt.composition.applied 事实行落 V3
+    // 轨迹(§五 134)。
     lubancode::agent::PromptSourceLedger ledger;
+    // 最终拼装正文的 SHA-256(小写 hex64;"最终快照 ID")。error 非空时
+    // 为空串。
+    std::string snapshot_id;
 };
 
 // 把冻结计划折成系统提示(prompt_assembler 既有管线)。skills.preload 的

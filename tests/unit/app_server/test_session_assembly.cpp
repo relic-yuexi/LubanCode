@@ -23,6 +23,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <fstream>
@@ -548,4 +549,199 @@ TEST_CASE("P2 复验:allow 点名 skill 视为已装(内置件),不冒缺工具"
     REQUIRE(result.assembly->registry != nullptr);
     CHECK(result.assembly->registry->Find("skill") != nullptr);
     CHECK(result.error.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 应用Worker接入单 §六(本批):components.skills 声明消费 + §7.1 MCP 子进程环境
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 声明了 skills 的档(required/optional/source_dir 可组合)。
+HarnessProfile MakeDeclaredSkillsProfile(std::vector<std::string> required,
+                                         std::vector<std::string> optional = {},
+                                         std::string source_dir = std::string()) {
+    HarnessProfile profile;
+    profile.name = "skills-declared";
+    profile.tools.mode = HarnessToolPolicy::Mode::Only;
+    profile.tools.allow = {"skill"};
+    profile.features_enabled.insert("skills");
+    profile.skills_required = std::move(required);
+    profile.skills_optional = std::move(optional);
+    profile.skills_source_dir = std::move(source_dir);
+    return profile;
+}
+
+// 临时 skills 根,种两份技能:helper(带依赖声明)与 extra。
+fs::path MakeDeclaredSkillsRoot(const std::string& tag) {
+    static int counter = 0;
+    const fs::path root = fs::temp_directory_path() /
+                          ("lubancode_assembly_declared_" + tag + "_" + std::to_string(counter++));
+    std::error_code ec;
+    fs::create_directories(root / "helper", ec);
+    {
+        std::ofstream out(root / "helper" / "SKILL.md", std::ios::binary);
+        out << "---\nname: helper\ndescription: 助手技能。\nrequires-tools:\n  - run_command\n---\nHELPER-BODY。\n";
+    }
+    fs::create_directories(root / "extra", ec);
+    {
+        std::ofstream out(root / "extra" / "SKILL.md", std::ios::binary);
+        out << "---\nname: extra\ndescription: 附加技能。\n---\nEXTRA-BODY。\n";
+    }
+    return root;
+}
+
+}  // namespace
+
+TEST_CASE("skills 声明消费:required 缺件整场明拒 skill_missing,人话带扫描警告") {
+    const fs::path root = MakeDeclaredSkillsRoot("required-missing");
+    SessionAssemblyRequest request = BaseRequest();
+    HarnessProfile harness = MakeDeclaredSkillsProfile({"no-such-skill"}, {"extra"});
+    request.harness = &harness;
+    request.skills_root = root;
+    const auto result = AssembleSession(std::move(request));
+    CHECK(result.assembly == nullptr);
+    CHECK(result.error_code == "skill_missing");
+    REQUIRE_FALSE(result.error.empty());
+    CHECK(result.error.find("no-such-skill") != std::string::npos);
+    CHECK(result.error.find("skill_missing") != std::string::npos);
+}
+
+TEST_CASE("skills 声明消费:required 坏格式(扫描跳过)同样明拒,警告进人话") {
+    static int counter = 0;
+    const fs::path root = fs::temp_directory_path() /
+                          ("lubancode_assembly_declared_broken_" + std::to_string(counter++));
+    std::error_code ec;
+    fs::create_directories(root / "broken", ec);
+    {
+        std::ofstream out(root / "broken" / "SKILL.md", std::ios::binary);
+        out << "---\nname: broken\ndescription: 没闭合的 frontmatter\n正文。\n";  // 无闭合 ---
+    }
+    SessionAssemblyRequest request = BaseRequest();
+    HarnessProfile harness = MakeDeclaredSkillsProfile({"broken"});
+    request.harness = &harness;
+    request.skills_root = root;
+    const auto result = AssembleSession(std::move(request));
+    CHECK(result.assembly == nullptr);
+    CHECK(result.error_code == "skill_missing");
+    CHECK(result.error.find("broken") != std::string::npos);
+    CHECK(result.error.find("扫描警告") != std::string::npos);
+}
+
+TEST_CASE("skills 声明消费:optional 缺件降级记账,冻结清单如实交代") {
+    const fs::path root = MakeDeclaredSkillsRoot("optional-missing");
+    SessionAssemblyRequest request = BaseRequest();
+    HarnessProfile harness = MakeDeclaredSkillsProfile({"helper"}, {"no-such-skill", "extra"});
+    request.harness = &harness;
+    request.skills_root = root;
+    request.agent_plan = MakePlan();
+    const auto result = AssembleSession(std::move(request));
+    REQUIRE(result.assembly != nullptr);
+    // optional 缺件:诊断进降级账。
+    REQUIRE(result.assembly->degraded_components.size() == 1);
+    CHECK(result.assembly->degraded_components[0].find("no-such-skill") != std::string::npos);
+    // 冻结清单:required/optional/装载状态/依赖声明与缺口。
+    REQUIRE(result.assembly->skills_manifest.size() == 3);
+    CHECK(result.assembly->skills_manifest[0].name == "helper");
+    CHECK(result.assembly->skills_manifest[0].required);
+    CHECK(result.assembly->skills_manifest[0].loaded);
+    REQUIRE(result.assembly->skills_manifest[0].requires_tools.size() == 1);
+    CHECK(result.assembly->skills_manifest[0].requires_tools[0] == "run_command");
+    REQUIRE(result.assembly->skills_manifest[0].missing_tools.size() == 1);
+    CHECK(result.assembly->skills_manifest[0].missing_tools[0] == "run_command");
+    CHECK(result.assembly->skills_manifest[1].name == "no-such-skill");
+    CHECK_FALSE(result.assembly->skills_manifest[1].required);
+    CHECK_FALSE(result.assembly->skills_manifest[1].loaded);
+    CHECK(result.assembly->skills_manifest[2].name == "extra");
+    CHECK(result.assembly->skills_manifest[2].loaded);
+    // 获准面过滤:根内还有未声明的技能吗——本根只有 helper/extra,都被声明;
+    // 再验清单段只列获准两枚(prompt 检查)。
+    const std::string& prompt = result.assembly->agent_profile.system_prompt;
+    CHECK(prompt.find("helper") != std::string::npos);
+    CHECK(prompt.find("extra") != std::string::npos);
+    // 声明的依赖在面上没有:skill 工具按需加载时回 capability_unavailable
+    //(单册外的 test_skills.cpp 钉;这里钉清单把缺口交代出来)。
+}
+
+TEST_CASE("skills 声明消费:名单外的根内技能不进本场(声明即允许清单)") {
+    const fs::path root = MakeDeclaredSkillsRoot("filter");
+    SessionAssemblyRequest request = BaseRequest();
+    HarnessProfile harness = MakeDeclaredSkillsProfile({"helper"});  // extra 未声明
+    request.harness = &harness;
+    request.skills_root = root;
+    request.agent_plan = MakePlan();
+    const auto result = AssembleSession(std::move(request));
+    REQUIRE(result.assembly != nullptr);
+    const std::string& prompt = result.assembly->agent_profile.system_prompt;
+    CHECK(prompt.find("helper") != std::string::npos);
+    CHECK(prompt.find("extra") == std::string::npos);  // 未声明不进清单段
+    REQUIRE(result.assembly->skills_manifest.size() == 1);
+    CHECK(result.assembly->skills_manifest[0].name == "helper");
+}
+
+TEST_CASE("skills 声明消费:sourceDir 声明来源根,扫描落在子目录") {
+    static int counter = 0;
+    const fs::path root = fs::temp_directory_path() /
+                          ("lubancode_assembly_declared_srcdir_" + std::to_string(counter++));
+    std::error_code ec;
+    fs::create_directories(root / "team" / "inner-skill", ec);
+    {
+        std::ofstream out(root / "team" / "inner-skill" / "SKILL.md", std::ios::binary);
+        out << "---\nname: inner-skill\ndescription: 子目录技能。\n---\nINNER-BODY。\n";
+    }
+    SessionAssemblyRequest request = BaseRequest();
+    HarnessProfile harness = MakeDeclaredSkillsProfile({"inner-skill"}, {}, "team");
+    request.harness = &harness;
+    request.skills_root = root;
+    request.agent_plan = MakePlan();
+    const auto result = AssembleSession(std::move(request));
+    REQUIRE(result.assembly != nullptr);
+    const std::string& prompt = result.assembly->agent_profile.system_prompt;
+    CHECK(prompt.find("inner-skill") != std::string::npos);
+    CHECK(result.error.empty());
+}
+
+TEST_CASE("MCP 子进程环境:base 集从宿主取,配置注入覆盖,密钥不递(§7.1)") {
+    // 在宿主环境造一枚"模型密钥",ComposeMcpChildEnv 不得把它递给工具进程。
+    struct EnvGuard {
+        explicit EnvGuard(const char* name) : name_(name) {}
+        ~EnvGuard() {
+#ifdef _WIN32
+            _putenv((std::string(name_) + "=").c_str());
+#else
+            unsetenv(name_);
+#endif
+        }
+        void set(const std::string& value) {
+#ifdef _WIN32
+            _putenv((std::string(name_) + "=" + value).c_str());
+#else
+            setenv(name_, value.c_str(), 1);
+#endif
+        }
+        const char* name_;
+    } guard("LUBANCODE_TEST_MODEL_KEY");
+    guard.set("sk-model-secret");
+
+    const auto env = ComposeMcpChildEnv({{"LUBANCODE_TEST_TOOL_CRED", "tok-123"},
+                                         {"PATH", "/cfg/override/path"}});
+    const auto find = [&env](const std::string& key) -> const std::string* {
+        for (const auto& [k, v] : env) {
+            if (k == key) {
+                return &v;
+            }
+        }
+        return nullptr;
+    };
+    // 工具凭据(部署配置注入)在。
+    const std::string* cred = find("LUBANCODE_TEST_TOOL_CRED");
+    REQUIRE(cred != nullptr);
+    CHECK(*cred == "tok-123");
+    // base 集:PATH 在,且被配置同名覆盖。
+    const std::string* path = find("PATH");
+    REQUIRE(path != nullptr);
+    CHECK(*path == "/cfg/override/path");
+    // 模型密钥(宿主环境的其余变量)不递。
+    CHECK(find("LUBANCODE_TEST_MODEL_KEY") == nullptr);
+    CHECK(find("LUBAN_API_KEY") == nullptr);
 }

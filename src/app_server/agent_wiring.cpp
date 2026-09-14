@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "agent/agent_catalog.hpp"
+#include "platform/sha256.hpp"
 #include "tools/agent_tool.hpp"  // AppendPreloadedSkills:预装技能段的同源件
 
 namespace lubancode::app_server {
@@ -127,6 +128,11 @@ HarnessPromptResult ComposeHarnessSystemPrompt(const HarnessPromptInput& input) 
     }
 
     result.text = agent::AssembleSystemPrompt(options, &result.ledger);
+    // §五 134:最终快照 ID = 拼装正文全文 SHA-256。与 ledger 各段的
+    // content_hash 配套,落 V3 轨迹时可核对"段账拼出的就是发出的"。
+    if (result.error.empty()) {
+        result.snapshot_id = platform::Sha256Hex(result.text);
+    }
     return result;
 }
 

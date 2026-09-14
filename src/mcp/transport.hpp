@@ -67,13 +67,17 @@ public:
     StdioTransport& operator=(const StdioTransport&) = delete;
 
     // 起子进程:command 是可执行文件(比如 "python"),args 是参数列表,
-    // env 是要额外注入子进程环境的键值对(同名覆盖当前进程环境,注入方式
-    // 见 platform/process.hpp 的说明)。on_line 在专属的读线程上,对
-    // stdout 上凑齐的每一整行调用一次,按到达顺序,调用方自己保证线程
-    // 安全(转发进协议层时补一把锁)。
+    // env 是要注入子进程环境的键值对(注入方式见 platform/process.hpp 的
+    // 说明)。env_mode 缺省 Inherit = 继承宿主全部 + env 同名覆盖(终端老
+    // 路);Replace = 子进程只见 env 里列的——托管装配(应用Worker接入单
+    // §7.1:不递 Worker 全环境,凭据分开传)走这条,env 由装配方按
+    // base 集+获准键现折。on_line 在专属的读线程上,对 stdout 上凑齐的
+    // 每一整行调用一次,按到达顺序,调用方自己保证线程安全(转发进协议
+    // 层时补一把锁)。
     TransportStartResult Start(const std::string& command, const std::vector<std::string>& args,
                                 const std::vector<std::pair<std::string, std::string>>& env,
-                                std::function<void(std::string)> on_line);
+                                std::function<void(std::string)> on_line,
+                                platform::EnvMode env_mode = platform::EnvMode::Inherit);
 
     // 整条消息(不带换行)+ \n 一次性写出去,内部加锁防止多个请求线程交错。
     // 进程已经退出/没起成功都返回 false。

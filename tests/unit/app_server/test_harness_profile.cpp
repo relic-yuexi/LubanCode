@@ -346,3 +346,156 @@ TEST_CASE("P5 解析:plugin__<id>__<tool> 进 allow——依赖解释与 deny �
         CHECK(parsed.profile->tools.allow.empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// 应用Worker接入单 §六:components.skills 来源声明式 schema(additive)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 声明了 skills 的档底版:放行 skills + tools 点名 skill,required/optional
+// 由各用例改写。
+json SkillsDeclarationDoc(std::vector<std::string> required, std::vector<std::string> optional) {
+    json doc;
+    doc["schemaVersion"] = 1;
+    doc["service"] = {{"mode", "managed"},
+                      {"listeners", {{"stdio", {{"enabled", true}}}}},
+                      {"defaultProfile", "p"}};
+    json skills = json::object();
+    if (!required.empty()) {
+        skills["required"] = required;
+    }
+    if (!optional.empty()) {
+        skills["optional"] = optional;
+    }
+    doc["harnessProfiles"] = {{"p",
+                               {{"agentRef", "general-purpose"},
+                                {"features",
+                                 {{"default", "disabled"}, {"enabled", json::array({"skills"})}}},
+                                {"components", {{"skills", std::move(skills)}}},
+                                {"tools",
+                                 {{"mode", "only"}, {"allow", json::array({"skill"})}, {"deny", json::array()}}},
+                                {"exposure", {{"default", "direct"}}}}}};
+    return doc;
+}
+
+}  // namespace
+
+TEST_CASE("skills 声明解析:required/optional 收账,sourceDir 形状校验") {
+    SUBCASE("required+optional 原样收") {
+        const auto parsed =
+            app_server::ParseHarnessDeploymentDefault(SkillsDeclarationDoc({"a"}, {"b", "c"}));
+        REQUIRE(parsed.profile.has_value());
+        REQUIRE(parsed.profile->skills_required.size() == 1);
+        CHECK(parsed.profile->skills_required[0] == "a");
+        REQUIRE(parsed.profile->skills_optional.size() == 2);
+        CHECK(parsed.profile->skills_optional[0] == "b");
+        CHECK(parsed.profile->skills_optional[1] == "c");
+        CHECK(parsed.profile->skills_source_dir.empty());
+        CHECK(parsed.profile->DeclaresSkills());
+    }
+    SUBCASE("sourceDir 相对子目录收") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["sourceDir"] = "research/team";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        REQUIRE(parsed.profile.has_value());
+        CHECK(parsed.profile->skills_source_dir == "research/team");
+    }
+    SUBCASE("sourceDir 绝对路径:拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["sourceDir"] = "/abs/skills";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+        CHECK_FALSE(parsed.error.empty());
+    }
+    SUBCASE("sourceDir 带 ..:拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["sourceDir"] = "a/../b";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+    }
+    SUBCASE("sourceDir 反斜杠:拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["sourceDir"] = "a\\b";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+    }
+    SUBCASE("sourceDir 段里带冒号(盘符段会顶掉前缀路径):拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["sourceDir"] = "C:/skills";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+    }
+    SUBCASE("空 sourceDir:拒(缺省不给键,不是给空串)") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["sourceDir"] = "";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+    }
+    SUBCASE("skills 未知键:拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["components"]["skills"]["loadPolicy"] = "eager";
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+        CHECK(parsed.error.find("components.skills 未知键") != std::string::npos);
+    }
+    SUBCASE("空声明对象:合法(等于没声明,P2 全量约定照旧)") {
+        json doc = SkillsDeclarationDoc({}, {});
+        doc["harnessProfiles"]["p"]["components"] = json{{"skills", json::object()}};
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        REQUIRE(parsed.profile.has_value());
+        CHECK_FALSE(parsed.profile->DeclaresSkills());
+    }
+}
+
+TEST_CASE("skills 声明解析:同名冲突与重复点名明示,不猜先后") {
+    SUBCASE("同一枚名 required 与 optional 两现:拒") {
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(SkillsDeclarationDoc({"a"}, {"a"}));
+        CHECK_FALSE(parsed.profile.has_value());
+        REQUIRE_FALSE(parsed.error.empty());
+        CHECK(parsed.error.find("required/optional 两现") != std::string::npos);
+        CHECK(parsed.error.find("a") != std::string::npos);
+    }
+    SUBCASE("required 名单内重复:拒") {
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(SkillsDeclarationDoc({"a", "a"}, {}));
+        CHECK_FALSE(parsed.profile.has_value());
+        CHECK(parsed.error.find("重复点名") != std::string::npos);
+    }
+    SUBCASE("optional 名单内重复:拒") {
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(SkillsDeclarationDoc({}, {"b", "b"}));
+        CHECK_FALSE(parsed.profile.has_value());
+        CHECK(parsed.error.find("两现") != std::string::npos);
+    }
+}
+
+TEST_CASE("skills 声明解析:依赖解释——须放行 skills 且 tools 点名 skill") {
+    SUBCASE("features 未放行 skills:配置矛盾,明拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["features"]["enabled"] = json::array();
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+        REQUIRE_FALSE(parsed.error.empty());
+        CHECK(parsed.error.find("skills") != std::string::npos);
+    }
+    SUBCASE("tools 未点名 skill:声明装不进本场,明拒") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["tools"] = json{{"mode", "only"}, {"allow", json::array()}};
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+        REQUIRE_FALSE(parsed.error.empty());
+        CHECK(parsed.error.find("未点名 skill") != std::string::npos);
+    }
+    SUBCASE("deny 裁掉 skill 后声明仍在:明拒(deny 折算之后对账)") {
+        json doc = SkillsDeclarationDoc({"a"}, {});
+        doc["harnessProfiles"]["p"]["tools"]["deny"] = json::array({"skill"});
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(doc);
+        CHECK_FALSE(parsed.profile.has_value());
+        CHECK(parsed.error.find("未点名 skill") != std::string::npos);
+    }
+    SUBCASE("未声明 skills 的档:tools 不点名 skill 照旧合法(P2 约定)") {
+        const auto deployment = ReadJsonFile(kFixturesRoot / "profile.zero-tools.json");
+        REQUIRE(deployment.has_value());
+        const auto parsed = app_server::ParseHarnessDeploymentDefault(*deployment);
+        REQUIRE(parsed.profile.has_value());
+    }
+}

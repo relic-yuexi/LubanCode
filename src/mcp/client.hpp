@@ -45,8 +45,9 @@ public:
     // 转发给内部的 StdioTransport::Start,返回值同 TransportStartResult。
     TransportStartResult Start(const std::string& command, const std::vector<std::string>& args,
                                 const std::vector<std::pair<std::string, std::string>>& env,
-                                std::function<void(std::string)> on_line) {
-        return impl_.Start(command, args, env, std::move(on_line));
+                                std::function<void(std::string)> on_line,
+                                platform::EnvMode env_mode = platform::EnvMode::Inherit) {
+        return impl_.Start(command, args, env, std::move(on_line), env_mode);
     }
 
     bool WriteLine(const std::string& line) override { return impl_.WriteLine(line); }
@@ -95,9 +96,12 @@ public:
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
 
-    // 生产路径:真起一个子进程当传输层。
+    // 生产路径:真起一个子进程当传输层。env_mode 缺省 Inherit(终端老
+    // 路,宿主全环境 + env 覆盖);Replace = 只见 env 列的——托管装配递
+    // 折好的最小集(应用Worker接入单 §7.1:模型凭据不进工具进程)。
     TransportStartResult StartProcess(const std::string& command, const std::vector<std::string>& args,
-                                       const std::vector<std::pair<std::string, std::string>>& env);
+                                       const std::vector<std::pair<std::string, std::string>>& env,
+                                       platform::EnvMode env_mode = platform::EnvMode::Inherit);
 
     // 测试路径:注入一个假的 Transport(调用方保留所有权,Client 只持有裸指针,
     // 生命周期由调用方保证——测试里 FakeTransport 通常和 Client 同栈帧)。
@@ -168,13 +172,19 @@ private:
     // jsonrpc_request_id_out(逐枚追踪单):非空时回填本次内层 JSON-RPC id,
     // 外层 tool execution 拿它挂账(超时删 pending 后迟到响应的丢弃也靠这
     // 个 id 关联,不投给新调用)。
+    // jsonrpc_error_code_out(应用Worker接入单 §7.1):非空且服务器回了
+    // JSON-RPC error 时,回填 error.code 并置 got_jsonrpc_error=true——
+    // 调用方据此把"服务器拒绝(401/429 一类)"与传输/超时故障分开归类,
+    // 不靠中文正文猜。
     // cancel(P1.6 取消贯通):置位后立即发 notifications/cancelled,再宽限
     // kCancelGraceMs 等终态;仍没等到就按取消收口(错误文案带"已取消"),
     // pending 删除,迟到响应走 late_response_sink 留账。
     std::expected<nlohmann::json, std::string> SendRequestAndWait(const std::string& method,
                                                                     const nlohmann::json& params, int timeout_ms,
                                                                     std::int64_t* jsonrpc_request_id_out = nullptr,
-                                                                    const std::atomic<bool>* cancel = nullptr);
+                                                                    const std::atomic<bool>* cancel = nullptr,
+                                                                    bool* got_jsonrpc_error = nullptr,
+                                                                    std::int64_t* jsonrpc_error_code_out = nullptr);
 
     // 发一个不带 id 的通知,不等回应。
     bool SendNotification(const std::string& method, const nlohmann::json& params);

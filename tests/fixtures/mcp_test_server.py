@@ -7,12 +7,21 @@ initialize / notifications/initialized / tools/list / tools/call,
   describe{topic: string} -> 回 "describe:<topic>"(P1 部署档 golden 的
                              第二只点名工具,与静态样例对得上)
   add{a: number, b: number} -> 返回 a+b 的字符串
-之外还有富结果夹具工具(rich/structured/bad_structured/bad_image)。
+之外还有富结果夹具工具(rich/structured/bad_structured/bad_image),与
+应用Worker接入单 §7.1 的受控故障场景工具(auth_gate/rate_limited/slow/
+empty/env_probe):
+  auth_gate{} -> JSON-RPC error -32001(认证失败,模拟 401)
+  rate_limited{} -> JSON-RPC error -32002(限流,模拟 429)
+  slow{ms: number} -> 睡 ms 毫秒再回显(超时/取消场景的受控开关)
+  empty{} -> 成功但 content 为空(空结果不等于请求失败)
+  env_probe{names: [string]} -> 逐名回报环境变量在不在(只报有无,不回值
+                                ——探针不偷运密钥正文)
 
 不认得的方法:有 id 就回一条 JSON-RPC 错误(-32601),没有 id(通知)就
 静默忽略——跟真实 MCP 服务器该有的行为一致。
 """
 import json
+import os
 import sys
 
 # Windows 下 Python 的 stdin/stdout 默认编码跟着系统代码页走(中文 Windows
@@ -106,6 +115,42 @@ TOOLS = [
         "name": "bad_image",
         "description": "返回伪 MIME 图片(image/png 声明、字节不是 PNG)",
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    # ---- 应用Worker接入单 §7.1:受控故障/观测场景(401/429/超时/空结果) ----
+    {
+        "name": "auth_gate",
+        "description": "回 JSON-RPC 错误 -32001:认证失败(模拟 401)",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "rate_limited",
+        "description": "回 JSON-RPC 错误 -32002:限流(模拟 429)",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "slow",
+        "description": "睡 ms 毫秒后回显(超时/取消场景的受控开关)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"ms": {"type": "number"}},
+            "required": ["ms"],
+        },
+    },
+    {
+        "name": "empty",
+        "description": "成功但 content 为空(空结果不等于请求失败)",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "env_probe",
+        "description": "逐名回报环境变量在不在(只报有无,不回值)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "names": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["names"],
+        },
     },
 ]
 
@@ -264,6 +309,39 @@ def handle_tools_call(msg_id, params):
         send_result(
             msg_id,
             {"content": [{"type": "image", "data": fake, "mimeType": "image/png"}], "isError": False},
+        )
+        return
+
+    if name == "auth_gate":
+        # §7.1 受控场景:服务器拒绝类错误走 JSON-RPC error(code -32001
+        # 自定义,消息里带 401 字样)——客户端须归类成"服务器明确拒绝"
+        # 并带出 code,不当传输故障。
+        send_error(msg_id, -32001, "authentication required (simulated 401): no credentials")
+        return
+
+    if name == "rate_limited":
+        send_error(msg_id, -32002, "rate limit exceeded (simulated 429): retry later")
+        return
+
+    if name == "slow":
+        import time
+
+        ms = arguments.get("ms", 0)
+        time.sleep(ms / 1000.0)
+        send_result(msg_id, {"content": [{"type": "text", "text": "slept %sms" % ms}], "isError": False})
+        return
+
+    if name == "empty":
+        # 成功 + 空结果:不是失败。客户端按 is_error=false 收口,正文为空。
+        send_result(msg_id, {"content": [], "isError": False})
+        return
+
+    if name == "env_probe":
+        names = arguments.get("names", []) or []
+        lines = ["%s=%s" % (str(n), "set" if str(n) in os.environ else "unset") for n in names]
+        send_result(
+            msg_id,
+            {"content": [{"type": "text", "text": "\n".join(lines)}], "isError": False},
         )
         return
 

@@ -12,7 +12,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "tools/skill_loader.hpp"
@@ -428,6 +430,262 @@ TEST_CASE("SkillTool: 缺 name 参数报错") {
     tools::SkillTool tool({});
     const auto result = tool.execute(nlohmann::json::object());
     CHECK(result.is_error);
+}
+
+// ---------------------------------------------------------------------------
+// 3.5) 应用Worker接入单 §六:漂移校验、受控资源读取、依赖声明消费
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 一份带依赖声明的技能正文。
+std::string SkillContentWithRequires(const std::string& name, const std::string& requires_yaml,
+                                     const std::string& body) {
+    std::string front = "---\nname: " + name + "\ndescription: " + name + " 的说明。\n";
+    if (!requires_yaml.empty()) {
+        front += requires_yaml;
+    }
+    return front + "---\n" + body;
+}
+
+}  // namespace
+
+TEST_CASE("ParseSkillMarkdown: requires-tools 声明——真 YAML 路收清单,坏 YAML 回退路不收") {
+    SUBCASE("字符串清单照收") {
+        const auto parsed = tools::ParseSkillMarkdown(
+            "---\nname: s\ndescription: d\nrequires-tools:\n  - run_command\n  - mcp__srv__echo\n---\nbody\n");
+        REQUIRE(parsed.has_value());
+        REQUIRE(parsed->requires_tools.has_value());
+        REQUIRE(parsed->requires_tools->size() == 2);
+        CHECK((*parsed->requires_tools)[0] == "run_command");
+        CHECK((*parsed->requires_tools)[1] == "mcp__srv__echo");
+    }
+    SUBCASE("未声明 = nullopt(不冒充空清单)") {
+        const auto parsed = tools::ParseSkillMarkdown("---\nname: s\ndescription: d\n---\nbody\n");
+        REQUIRE(parsed.has_value());
+        CHECK_FALSE(parsed->requires_tools.has_value());
+    }
+    SUBCASE("类型不对(标量)= 按未声明处理,不弃整份技能") {
+        const auto parsed =
+            tools::ParseSkillMarkdown("---\nname: s\ndescription: d\nrequires-tools: run_command\n---\nbody\n");
+        REQUIRE(parsed.has_value());
+        CHECK_FALSE(parsed->requires_tools.has_value());
+    }
+    SUBCASE("元素混入非标量(嵌套序列)= 整份声明不收") {
+        const auto parsed = tools::ParseSkillMarkdown(
+            "---\nname: s\ndescription: d\nrequires-tools:\n  - [run_command]\n  - ok-tool\n---\nbody\n");
+        REQUIRE(parsed.has_value());
+        CHECK_FALSE(parsed->requires_tools.has_value());
+    }
+}
+
+TEST_CASE("ScanSkillsDir: 扫描件带 SKILL.md 冻结指纹与依赖声明") {
+    TempSkillsRoot root;
+    const std::filesystem::path skills_dir =
+        std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills";
+    root.WriteSkill("proj", "helper", SkillContentWithRequires(
+                                        "helper", "requires-tools:\n  - run_command\n",
+                                        "依赖声明进清单。\n"));
+    const auto skills = tools::ScanSkillsDir(skills_dir, "项目级");
+    REQUIRE(skills.size() == 1);
+    // 指纹 = SKILL.md 全文 SHA-256(64 位十六进制)。
+    CHECK(skills[0].content_hash.size() == 64);
+    bool hex = true;
+    for (const char ch : skills[0].content_hash) {
+        const bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        hex = hex && ok;
+    }
+    CHECK(hex);
+    REQUIRE(skills[0].requires_tools.size() == 1);
+    CHECK(skills[0].requires_tools[0] == "run_command");
+}
+
+TEST_CASE("ScanSkillsDirReported: 坏技能的跳过人话进警告账(供 required 拒启诊断)") {
+    TempSkillsRoot root;
+    const std::filesystem::path skills_dir =
+        std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills";
+    root.WriteSkill("proj", "good", SkillContent("good", "好技能", "正文。\n"));
+    root.WriteSkill("proj", "broken",
+                    "---\nname: broken\ndescription: 坏 frontmatter,没有闭合\n正文\n");
+    std::vector<std::string> warnings;
+    const auto skills = tools::ScanSkillsDirReported(skills_dir, "项目级", &warnings);
+    REQUIRE(skills.size() == 1);
+    CHECK(skills[0].name == "good");
+    REQUIRE_FALSE(warnings.empty());
+    CHECK(warnings[0].find("broken") != std::string::npos);
+}
+
+TEST_CASE("SkillTool 漂移校验:同场改 SKILL.md,再读即拒(§六 143)") {
+    TempSkillsRoot root;
+    const std::filesystem::path skills_dir =
+        std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills";
+    root.WriteSkill("proj", "drifty", SkillContent("drifty", "会被改的技能", "原正文。\n"));
+    auto skills = tools::ScanSkillsDir(skills_dir, "项目级");
+    REQUIRE(skills.size() == 1);
+    tools::SkillTool tool(skills);
+
+    nlohmann::json input;
+    input["name"] = "drifty";
+    const auto before = tool.execute(input);
+    CHECK_FALSE(before.is_error);
+    CHECK(before.content.find("原正文") != std::string::npos);
+
+    // 同场中途改文件:指纹对不上,拒读——不悄悄给修改版。
+    root.WriteSkill("proj", "drifty", SkillContent("drifty", "会被改的技能", "偷改的正文。\n"));
+    const auto after = tool.execute(input);
+    CHECK(after.is_error);
+    CHECK(after.error_code == "skill.drifted");
+    CHECK(after.content.find("漂移") != std::string::npos);
+    CHECK(after.content.find("偷改的正文") == std::string::npos);  // 修改版正文一个字不给
+}
+
+TEST_CASE("SkillTool 受控资源读取:技能内相对材料可读,越根/外链明拒(§六 144)") {
+    TempSkillsRoot root;
+    const std::filesystem::path skills_dir =
+        std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills";
+    root.WriteSkill("proj", "with-refs", SkillContent("with-refs", "带引用材料", "正文见引用。\n"));
+    const std::filesystem::path skill_dir = skills_dir / "with-refs";
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(skill_dir / "references", ec);
+        std::ofstream out(skill_dir / "references" / "style.md", std::ios::binary);
+        out << "引用材料正文。\n";
+        std::ofstream outer(skills_dir / "outside.txt", std::ios::binary);
+        outer << "根内但技能目录外的文件。\n";
+    }
+    const auto skills = tools::ScanSkillsDir(skills_dir, "项目级");
+    REQUIRE(skills.size() == 1);
+    tools::SkillTool tool(skills);
+
+    const auto run = [&tool](const char* path) {
+        nlohmann::json input;
+        input["name"] = "with-refs";
+        input["path"] = path;
+        return tool.execute(input);
+    };
+
+    SUBCASE("技能内相对材料:读到") {
+        const auto ok = run("references/style.md");
+        CHECK_FALSE(ok.is_error);
+        CHECK(ok.content.find("引用材料正文") != std::string::npos);
+    }
+    SUBCASE("子目录形式分隔符也认") {
+        const auto ok = run("references\\style.md");
+        CHECK_FALSE(ok.is_error);
+    }
+    SUBCASE(".. 越根:拒") {
+        const auto escape = run("../outside.txt");
+        CHECK(escape.is_error);
+        CHECK(escape.content.find("越根") != std::string::npos);
+    }
+    SUBCASE("绝对路径:拒") {
+        CHECK(run("/etc/passwd").is_error);
+    }
+    SUBCASE("盘符路径:拒") {
+        CHECK(run("C:/windows/system32/config").is_error);
+    }
+    SUBCASE("段里带冒号(盘符段会顶掉前缀路径):拒") {
+        CHECK(run("C:whatever").is_error);
+        CHECK(run("references/C:evil").is_error);
+    }
+    SUBCASE("UNC:拒") {
+        CHECK(run("\\\\server\\share\\file").is_error);
+    }
+    SUBCASE("外链 http:不自动 fetch,明示走数据源流程") {
+        const auto link = run("https://example.com/data.json");
+        CHECK(link.is_error);
+        CHECK(link.content.find("外链") != std::string::npos);
+        CHECK(link.content.find("数据源") != std::string::npos);
+    }
+    SUBCASE("file:// 也是外链:拒") {
+        CHECK(run("file:///etc/passwd").is_error);
+    }
+    SUBCASE("空段(双斜杠):拒") {
+        CHECK(run("references//style.md").is_error);
+    }
+    SUBCASE("不存在的材料:明说") {
+        const auto missing = run("references/nope.md");
+        CHECK(missing.is_error);
+        CHECK(missing.content.find("不存在") != std::string::npos);
+    }
+    SUBCASE("指向技能目录本身的 path:拒") {
+        CHECK(run(".").is_error);
+    }
+}
+
+TEST_CASE("SkillTool 受控资源读取:目录内符号链接指向外头,解析后拒(§六 144)") {
+    TempSkillsRoot root;
+    const std::filesystem::path skills_dir =
+        std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills";
+    root.WriteSkill("proj", "linked", SkillContent("linked", "带链接的技能", "正文。\n"));
+    const std::filesystem::path skill_dir = skills_dir / "linked";
+    const std::filesystem::path outside = std::filesystem::path(root.Path()) / "proj" / "secret.txt";
+    {
+        std::ofstream out(outside, std::ios::binary);
+        out << "技能目录外的机密。\n";
+    }
+    std::error_code link_ec;
+    std::filesystem::create_symlink(outside, skill_dir / "leak.md", link_ec);
+    if (link_ec) {
+        // 无符号链接权限的环境(部分 Windows 配置):如实缺证据,不冒充。
+        MESSAGE("create_symlink 不可用(", link_ec.message(), "),跳过链接绕过用例");
+        return;
+    }
+    const auto skills = tools::ScanSkillsDir(skills_dir, "项目级");
+    REQUIRE(skills.size() == 1);
+    tools::SkillTool tool(skills);
+    nlohmann::json input;
+    input["name"] = "linked";
+    input["path"] = "leak.md";
+    const auto result = tool.execute(input);
+    CHECK(result.is_error);
+    CHECK(result.content.find("越出技能目录") != std::string::npos);
+    CHECK(result.content.find("机密") == std::string::npos);
+}
+
+TEST_CASE("SkillTool 依赖声明消费:缺获准执行工具回 capability_unavailable(§六 145)") {
+    TempSkillsRoot root;
+    const std::filesystem::path skills_dir =
+        std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills";
+    root.WriteSkill("proj", "needs-shell",
+                    SkillContentWithRequires("needs-shell", "requires-tools:\n  - run_command\n", "要 shell。\n"));
+    root.WriteSkill("proj", "self-contained", SkillContent("self-contained", "无依赖", "自己就够。\n"));
+    const auto skills = tools::ScanSkillsDir(skills_dir, "项目级");
+    REQUIRE(skills.size() == 2);
+
+    SUBCASE("递了冻结工具面:声明的工具不在面上,加载明拒 capability_unavailable") {
+        tools::SkillTool tool(skills, std::set<std::string>{"skill"});
+        nlohmann::json input;
+        input["name"] = "needs-shell";
+        const auto result = tool.execute(input);
+        CHECK(result.is_error);
+        CHECK(result.error_code == "capability_unavailable");
+        CHECK(result.content.find("capability_unavailable") != std::string::npos);
+        CHECK(result.content.find("run_command") != std::string::npos);
+        CHECK(result.content.find("要 shell") == std::string::npos);  // 正文不给——依赖没过
+    }
+    SUBCASE("面上有声明的工具:照常加载") {
+        tools::SkillTool tool(skills, std::set<std::string>{"skill", "run_command"});
+        nlohmann::json input;
+        input["name"] = "needs-shell";
+        const auto result = tool.execute(input);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content.find("要 shell") != std::string::npos);
+    }
+    SUBCASE("没递工具面(终端缺省路):不执法,声明只留在清单") {
+        tools::SkillTool tool(skills);
+        nlohmann::json input;
+        input["name"] = "needs-shell";
+        const auto result = tool.execute(input);
+        CHECK_FALSE(result.is_error);
+    }
+    SUBCASE("无声明技能不受影响") {
+        tools::SkillTool tool(skills, std::set<std::string>{"skill"});
+        nlohmann::json input;
+        input["name"] = "self-contained";
+        const auto result = tool.execute(input);
+        CHECK_FALSE(result.is_error);
+    }
 }
 
 // ---------------------------------------------------------------------------
