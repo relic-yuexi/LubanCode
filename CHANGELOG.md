@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.262] - 2026-09-14
+
+- **应用 Worker 接入成套。**外部应用（Node/TS 后端等）可受控驱动 LubanCode：`LUBANCODE_HOME`/`LUBANCODE_DATA_HOME`/`LUBANCODE_MANAGED` 三件套给每只 Worker 独立参数根与数据根，个人环境零读写副作用（双根隔离实测）；部署档显式装配 Agent 档案、Skills、MCP 与 Lua 插件（未信任/缺件整场明拒，不静默降级）；协议升至 1.3，thread/turn 受理带 `clientOperationId` 幂等去重，新增 `operation/read` 重启后查终态与稳定结果正文；`examples/node-client` 提供钉版客户端与五幕端到端验收（幂等、双 Worker 隔离、硬杀重启找回、孤儿收口、空值 env 跨进程明拒），固定版本兼容记录见 `docs/reference/app-server-external-client.md`。
+- **QQ 渠道底座落进 Gateway。**按官方开放平台文档原生直连（C++ 进程内实现，无 Node、无 sidecar）：access_token 单飞刷新、WebSocket 网关（Identify/心跳/Resume/退避）、v2 私信发送带稳定 msg_seq、先落盘再上报的 spool；五层工具权限交集（渠道∩账号∩binding−deny，具体 binding 抹不掉宽层 deny）、凭据 `secret_file` 与路径/ACL 全链校验（密钥不进 argv/日志/trace）、激活五闸（普通 CLI/one-shot/AppServer 零渠道进程零监听）。**尚未接通聊天**：渠道会话多轮总装（Q2）与真账号联调（Q3）仍在途，当前 `gateway run` 不会连上 QQ。
+
 ## [v0.26.261] - 2026-09-13
 
 - **Gateway 常驻自动任务第一环（V0+V1）。**`gateway job add|run-now` 建本地自动任务（首版 once + 手动触发），常驻主泵到点取件、起 V3 会话执行、结果选定后经耐久回执仓发布到 `out/<id>.txt`；`gateway status` 分四栏报 process/work/execution/delivery，进程活着不再冒充任务成功。受理与锁先上耐久底线：受理账写失败不再回报成功、输入原件先落盘再记账；Gateway/账号/会话锁改原子占位互斥并带 ownerEpoch 真伪鉴别（双进程真实竞争实测）。崩溃恢复按账裁决——已提交事实保留、未知执行停待复核，不盲目重跑工具；真渠道接入与周期调度留后续批次。
