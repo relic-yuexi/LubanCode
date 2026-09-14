@@ -1,6 +1,7 @@
 # QQ 机器人接入：Channel 桥、Session V3 与权限闭环
 
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
+现场修复补单（2026-09-14）：[Windows 连接诊断与交互配置](QQBot_Windows连接诊断与交互配置修复.todo)。覆盖 beta.1 的连接静默、Windows TLS 信任根、密钥文件权限与交互向导；待实现，归入 Q1b/Q3 验收。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
 进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q3 起仍待实现。
