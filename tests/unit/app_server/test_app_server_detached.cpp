@@ -62,6 +62,8 @@ struct HoldGate {
     std::atomic<bool> released{false};
     std::atomic<int> cancelled{0};
     std::atomic<int> emitted{0};
+
+    void Release() { released.store(true); }
 };
 
 class HoldBackend : public api::Backend {
