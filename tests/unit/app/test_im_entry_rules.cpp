@@ -74,7 +74,8 @@ TEST_CASE("显式平台+账号为准:可启动直达,停用走询问,没配过�
     SUBCASE("显式没配过的账号:MissingAccount,不悄悄连别的") {
         ImTargetQuery query;
         query.channels = &channels;
-        query.preferences = &Prefs("qqbot", "main");  // 最近也不能顶替显式目标
+        ImPreferences stale_prefs = Prefs("qqbot", "main");  // 最近也不能顶替显式目标
+        query.preferences = &stale_prefs;
         query.explicit_channel = "qqbot";
         query.explicit_account = "ghost";
         const auto resolution = ResolveImTarget(query);
