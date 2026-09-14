@@ -189,18 +189,21 @@ channel::ChannelInboundEvent MakeDm(const std::string& delivery_id,
     return event;
 }
 
+// 夹具参数(独立于 Q2Fixture:类内默认实参里用带 NSDMI 的嵌套类是
+// clang 禁例"NSDMI 默认实参",故放 namespace 域)。
+struct Q2Params {
+    std::int64_t send_timeout_ms = 600;
+    std::int64_t send_retry_backoff_ms = 200;
+    int max_send_attempts = 3;
+    std::size_t max_pending_total = 256;
+    // 换 workspace 身份(不串场案):不同 ws 目录 → 不同 workspace_key。
+    std::filesystem::path ws_subdir = "ws";
+};
+
 // 纵向装配:manager(真 Bridge 帧)+ outbox + 渠道 work 泵。重建即"进程
 // 重启"(盘上账:ingress/session map/work ledger/outbox/workspaces 全保留)。
 struct Q2Fixture {
-    struct Params {
-        std::int64_t send_timeout_ms = 600;
-        std::int64_t send_retry_backoff_ms = 200;
-        int max_send_attempts = 3;
-        std::size_t max_pending_total = 256;
-        // 换 workspace 身份(不串场案):不同 ws 目录 → 不同 workspace_key。
-        std::filesystem::path ws_subdir = "ws";
-    };
-
+    using Params = Q2Params;
     std::filesystem::path root;
     gateway::GatewayProfilePaths paths;
     std::filesystem::path workspaces_root;
