@@ -1,6 +1,7 @@
 // DurableReplyOutbox 实现(常驻总装 V1)。合同见头文件与 contracts.md §3/§4.4。
 #include "gateway/reply_outbox.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -16,6 +17,11 @@ namespace {
 constexpr const char* kTypeEnqueued = "item.enqueued";
 constexpr const char* kTypeDelivered = "item.delivered";
 constexpr const char* kTypeFlagged = "item.flagged";
+// QQ 渠道族(Q2 §七):尝试/已接受/超时未知/最终失败。
+constexpr const char* kTypeAttempt = "item.attempt";
+constexpr const char* kTypeSent = "item.sent";
+constexpr const char* kTypeOutcomeUnknown = "item.outcome_unknown";
+constexpr const char* kTypeChannelFailed = "item.channel_failed";
 
 std::string GetJsonString(const nlohmann::json& json, const char* key) {
     if (!json.is_object() || !json.contains(key) || !json[key].is_string()) {
@@ -85,11 +91,51 @@ OutboxProjection ReadOutboxProjection(const std::filesystem::path& log_file) {
             item.enqueued_at_ms = GetJsonInt(line, "enqueuedAtMs");
             item.published_path = GetJsonString(line, "publishedPath");
             item.state = "pending";
+            // QQ 渠道 target 字段(Q2;本地族缺省空)。
+            item.target_channel_id = GetJsonString(line, "targetChannelId");
+            item.target_account_id = GetJsonString(line, "targetAccountId");
+            item.target_conversation_id = GetJsonString(line, "targetConversationId");
+            item.target_reply_to_message_id = GetJsonString(line, "targetReplyToMessageId");
+            item.target_msg_seq = static_cast<std::uint32_t>(GetJsonUint(line, "targetMsgSeq"));
+            item.source_ref = GetJsonString(line, "sourceRef");
             if (item.selection_id.empty() || item.reply_sha256.empty()) {
                 ++projection.skipped_lines;
                 continue;
             }
             projection.items[delivery_id] = std::move(item);
+        } else if (type == kTypeAttempt) {
+            const auto found = projection.items.find(delivery_id);
+            if (found == projection.items.end()) {
+                ++projection.skipped_lines;
+                continue;
+            }
+            found->second.state = "sending";
+            ++found->second.attempts;
+        } else if (type == kTypeSent) {
+            const auto found = projection.items.find(delivery_id);
+            if (found == projection.items.end()) {
+                ++projection.skipped_lines;
+                continue;
+            }
+            found->second.state = "sent";
+            found->second.provider_message_id = GetJsonString(line, "providerMessageId");
+            found->second.delivered_at_ms = GetJsonInt(line, "sentAtMs");
+        } else if (type == kTypeOutcomeUnknown) {
+            const auto found = projection.items.find(delivery_id);
+            if (found == projection.items.end()) {
+                ++projection.skipped_lines;
+                continue;
+            }
+            found->second.state = "delivery_unknown";
+            found->second.delivery_error = "channel.delivery_unknown";
+        } else if (type == kTypeChannelFailed) {
+            const auto found = projection.items.find(delivery_id);
+            if (found == projection.items.end()) {
+                ++projection.skipped_lines;
+                continue;
+            }
+            found->second.state = "failed";
+            found->second.delivery_error = GetJsonString(line, "code");
         } else if (type == kTypeDelivered) {
             const auto found = projection.items.find(delivery_id);
             if (found == projection.items.end()) {
@@ -117,6 +163,48 @@ std::string MakeDeliveryId(const std::string& selection_id, const std::string& t
                            std::uint64_t ordinal) {
     const std::string canonical = selection_id + "\n" + target + "\n" + std::to_string(ordinal);
     return "dl-" + platform::Sha256Hex(canonical).substr(0, 16);
+}
+
+std::string MakeChannelDeliveryTarget(const std::string& channel_id,
+                                      const std::string& account_id,
+                                      const std::string& conversation_id) {
+    return "channel:" + channel_id + ":" + account_id + ":" + conversation_id;
+}
+
+std::vector<std::string> SplitReplySegments(const std::string& text, std::size_t max_bytes) {
+    std::vector<std::string> segments;
+    if (max_bytes == 0) {
+        return segments;  // 非法帽:调用方明败,不猜
+    }
+    if (text.size() <= max_bytes) {
+        segments.push_back(text);
+        return segments;
+    }
+    std::size_t cursor = 0;
+    while (cursor < text.size()) {
+        std::size_t end = std::min(cursor + max_bytes, text.size());
+        if (end < text.size()) {
+            // 不切断 UTF-8 多字节序列(§七"冻结正文"不能拼出半个字符):
+            // 回退到边界字节(连续 10xx xxxx 的开头)。
+            while (end > cursor && end < text.size() &&
+                   (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+                --end;
+            }
+            if (end == cursor) {
+                end = std::min(cursor + max_bytes, text.size());  // 防御:不无限回退
+            } else {
+                // 帽内尽量落换行(段界自然,不撕破行中词)。
+                const std::size_t newline = text.rfind('\n', end - 1);
+                if (newline != std::string::npos && newline > cursor &&
+                    end - newline <= max_bytes / 2) {
+                    end = newline + 1;
+                }
+            }
+        }
+        segments.push_back(text.substr(cursor, end - cursor));
+        cursor = end;
+    }
+    return segments;
 }
 
 DurableReplyOutbox::~DurableReplyOutbox() = default;
@@ -248,10 +336,249 @@ DurableReplyOutbox::EnqueueReceipt DurableReplyOutbox::Enqueue(const std::string
     return receipt;
 }
 
+// ---- QQ 渠道族(Q2 §七) ----------------------------------------------------
+
+DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
+    const std::string& selection_id, const std::string& reply_text,
+    const std::string& session_id, const std::string& turn_id, const ChannelTarget& target,
+    std::int64_t now_ms) {
+    // 首版段帽:2000 字节(UTF-8 边界 + 换行偏好)。真平台的长度上限与
+    // 计数口径(每条消息回复次数)归 Q3 实测校准,这里只做保守拆段。
+    constexpr std::size_t kSegmentBytes = 2000;
+    ChannelEnqueueReceipt receipt;
+    std::vector<std::string> segments = SplitReplySegments(reply_text, kSegmentBytes);
+    if (segments.empty()) {
+        receipt.error_code = "outbox.segment_invalid";
+        return receipt;
+    }
+    const std::string target_str =
+        MakeChannelDeliveryTarget(target.channel_id, target.account_id, target.conversation_id);
+    for (std::size_t index = 0; index < segments.size(); ++index) {
+        const std::uint64_t ordinal = index + 1;
+        const std::string delivery_id = MakeDeliveryId(selection_id, target_str, ordinal);
+        receipt.delivery_ids.push_back(delivery_id);
+        const auto existing = items_.find(delivery_id);
+        if (existing != items_.end()) {
+            // 幂等投影:同段已入箱不重复入,正文不重写(入箱即冻结)。
+            receipt.duplicate = true;
+            continue;
+        }
+        // 段原件先落稳:replies/<deliveryId>.txt(段键;与本地族的
+        // replies/<selectionId>.txt 全文原件并存,互不覆盖)。
+        const std::filesystem::path artifact = paths_.replies_dir / (delivery_id + ".txt");
+        const std::string segment_text = segments[index];
+        const std::string segment_sha = platform::Sha256Hex(segment_text);
+        if (const auto existing_text = ReadFileText(artifact); existing_text.has_value()) {
+            if (platform::Sha256Hex(*existing_text) != segment_sha) {
+                receipt.error_code = "outbox.artifact_failed";
+                return receipt;  // 不覆盖已提交原件
+            }
+        } else {
+            std::error_code ec;
+            std::filesystem::create_directories(paths_.replies_dir, ec);
+            const auto write =
+                platform::AtomicWriteFile(artifact, segment_text,
+                                          platform::WriteDurability::ProcessCrashDurability);
+            if (!write.has_value()) {
+                receipt.error_code = "outbox.artifact_failed";
+                return receipt;
+            }
+        }
+        nlohmann::json line = nlohmann::json::object();
+        line["type"] = kTypeEnqueued;
+        line["schemaVersion"] = 1;
+        line["deliveryId"] = delivery_id;
+        line["selectionId"] = selection_id;
+        line["deliveryTarget"] = target_str;
+        line["ordinal"] = ordinal;
+        line["replySha256"] = segment_sha;
+        line["sessionId"] = session_id;
+        line["turnId"] = turn_id;
+        line["enqueuedAtMs"] = now_ms;
+        line["targetChannelId"] = target.channel_id;
+        line["targetAccountId"] = target.account_id;
+        line["targetConversationId"] = target.conversation_id;
+        if (!target.reply_to_message_id.empty()) {
+            line["targetReplyToMessageId"] = target.reply_to_message_id;
+        }
+        line["targetMsgSeq"] = ordinal;  // 稳定 msg_seq = 段序(同锚不同段不撞)
+        if (!target.source_ref.empty()) {
+            line["sourceRef"] = target.source_ref;
+        }
+        if (!AppendLinePowerLoss(line)) {
+            receipt.error_code = "outbox.append_failed";
+            return receipt;
+        }
+        ReplyOutboxItem item;
+        item.delivery_id = delivery_id;
+        item.selection_id = selection_id;
+        item.delivery_target = target_str;
+        item.ordinal = ordinal;
+        item.reply_text = segment_text;
+        item.reply_sha256 = segment_sha;
+        item.session_id = session_id;
+        item.turn_id = turn_id;
+        item.enqueued_at_ms = now_ms;
+        item.state = "pending";
+        item.target_channel_id = target.channel_id;
+        item.target_account_id = target.account_id;
+        item.target_conversation_id = target.conversation_id;
+        item.target_reply_to_message_id = target.reply_to_message_id;
+        item.target_msg_seq = static_cast<std::uint32_t>(ordinal);
+        item.source_ref = target.source_ref;
+        items_[delivery_id] = std::move(item);
+        receipt.accepted = true;
+    }
+    if (!receipt.error_code.empty()) {
+        // 中途失败(段原件/账行写不进):不冒充部分成功——accepted 收回,
+        // 已入箱的段靠同 selection 幂等重入续齐(调用方停泵后恢复路接管)。
+        receipt.accepted = false;
+        receipt.delivery_ids.clear();
+    }
+    return receipt;
+}
+
+bool DurableReplyOutbox::RecordAttempt(const std::string& delivery_id, std::int64_t now_ms) {
+    const auto found = items_.find(delivery_id);
+    if (found == items_.end() || broken_) {
+        return false;
+    }
+    ReplyOutboxItem& item = found->second;
+    if (item.state != "pending" && item.state != "sending") {
+        return false;  // 终态不再发
+    }
+    // 发出前记尝试(§七:先账后网络——崩在发出后,恢复路看见 sending 无
+    // 回执,按超时/unknown 处置,不假称没发过)。
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeAttempt;
+    line["schemaVersion"] = 1;
+    line["deliveryId"] = delivery_id;
+    line["attempt"] = item.attempts + 1;
+    line["atMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        return false;
+    }
+    ++item.attempts;
+    item.state = "sending";
+    return true;
+}
+
+bool DurableReplyOutbox::MarkSent(const std::string& delivery_id,
+                                  const std::string& provider_message_id, std::int64_t now_ms) {
+    const auto found = items_.find(delivery_id);
+    if (found == items_.end() || broken_) {
+        return false;
+    }
+    ReplyOutboxItem& item = found->second;
+    if (item.state == "sent") {
+        return true;  // 幂等:重复回执只收一次
+    }
+    if (item.state != "sending") {
+        return false;
+    }
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeSent;
+    line["schemaVersion"] = 1;
+    line["deliveryId"] = delivery_id;
+    line["providerMessageId"] = provider_message_id;
+    line["sentAtMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        return false;
+    }
+    item.state = "sent";
+    item.provider_message_id = provider_message_id;
+    item.delivered_at_ms = now_ms;
+    return true;
+}
+
+bool DurableReplyOutbox::MarkOutcomeUnknown(const std::string& delivery_id, std::int64_t now_ms) {
+    const auto found = items_.find(delivery_id);
+    if (found == items_.end() || broken_) {
+        return false;
+    }
+    ReplyOutboxItem& item = found->second;
+    if (item.state != "sending") {
+        return false;
+    }
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeOutcomeUnknown;
+    line["schemaVersion"] = 1;
+    line["deliveryId"] = delivery_id;
+    line["atMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        return false;
+    }
+    item.state = "delivery_unknown";
+    item.delivery_error = "channel.delivery_unknown";
+    return true;
+}
+
+bool DurableReplyOutbox::MarkChannelFailed(const std::string& delivery_id,
+                                           const std::string& error_code, std::int64_t now_ms) {
+    const auto found = items_.find(delivery_id);
+    if (found == items_.end() || broken_) {
+        return false;
+    }
+    ReplyOutboxItem& item = found->second;
+    if (item.state == "failed" || item.state == "sent" || item.state == "delivery_unknown") {
+        return false;  // 终态不翻转
+    }
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeChannelFailed;
+    line["schemaVersion"] = 1;
+    line["deliveryId"] = delivery_id;
+    line["code"] = error_code;
+    line["atMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        return false;
+    }
+    item.state = "failed";
+    item.delivery_error = error_code;
+    return true;
+}
+
+std::vector<ReplyOutboxItem> DurableReplyOutbox::PendingChannelItems() const {
+    std::vector<ReplyOutboxItem> out;
+    for (const auto& [id, item] : items_) {
+        if (item.delivery_target == "local:file") {
+            continue;
+        }
+        if (item.state == "pending" || item.state == "sending") {
+            out.push_back(item);
+        }
+    }
+    return out;
+}
+
+bool DurableReplyOutbox::LoadChannelItemText(const std::string& delivery_id,
+                                             std::string* text) const {
+    if (text == nullptr) {
+        return false;
+    }
+    const auto found = items_.find(delivery_id);
+    if (found == items_.end()) {
+        return false;
+    }
+    if (!found->second.reply_text.empty()) {
+        *text = found->second.reply_text;
+        return true;
+    }
+    const auto artifact_text = ReadFileText(paths_.replies_dir / (delivery_id + ".txt"));
+    if (!artifact_text.has_value() ||
+        platform::Sha256Hex(*artifact_text) != found->second.reply_sha256) {
+        return false;  // 原件丢失/损坏:隔离给人工,不猜正文
+    }
+    *text = *artifact_text;
+    return true;
+}
+
 DurableReplyOutbox::DeliverResult DurableReplyOutbox::DeliverPending(std::int64_t now_ms) {
     DeliverResult result;
     for (auto& [id, item] : items_) {
         if (item.state != "pending") continue;
+        if (item.delivery_target != "local:file") {
+            continue;  // QQ 渠道族:归 ChannelWorkPump 的桥投递路,不发本地文件
+        }
         if (broken_) {
             result.error = "channel.outbox_full: outbox 账 broken(写盘失败停止投递)";
             break;

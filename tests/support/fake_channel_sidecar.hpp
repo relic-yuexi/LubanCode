@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -54,6 +55,30 @@ public:
     const std::vector<std::string>& acked_delivery_ids() const { return acked_delivery_ids_; }
     const std::vector<std::string>& diagnostics() const { return diagnostics_; }
 
+    // ---- 发送脚本(QQ 接入单 Q2 测试:manager/outbox 投递族用) ----------
+    // AutoAccept 缺省 = 原行为(立刻回 accepted)。其余:
+    //   RateLimitedFirst  同 client_id 前 rate_limited_first_n 次回
+    //                     rate_limited domain 错,之后成功(退避重试同载荷);
+    //   PermanentReject   回 permanent_reject(msg_id expired 时 detail 带
+    //                     "expired"——分型 reply_window_expired);
+    //   LoginRequired     回 login_required;
+    //   Silent            不应答(超时 → delivery_unknown 测试)。
+    enum class SendScript {
+        AutoAccept,
+        RateLimitedFirst,
+        PermanentReject,
+        LoginRequired,
+        Silent,
+    };
+    void set_send_script(SendScript script) { send_script_ = script; }
+    void set_rate_limited_first(int sends) { rate_limited_first_ = sends; }
+    void set_reject_detail(std::string detail) { reject_detail_ = std::move(detail); }
+    // 该 client_id 收到过几次 channel.send(同载荷重试计数)。
+    int send_count_for(const std::string& client_id) const;
+    // 主动排一条 delivery.receipt 通知(§七回执族的测试口)。
+    void EmitDeliveryReceipt(const std::string& outbound_delivery_id,
+                             const std::string& outcome, const std::string& reason = "");
+
     // 下一次握手时故意回一个不认得的 protocol_version(测试
     // protocol_incompatible 明败路径用)。
     void ForceProtocolMismatchOnNextHandshake() { force_protocol_mismatch_ = true; }
@@ -72,6 +97,11 @@ private:
     std::string channel_id_;
     std::string account_id_;
     int next_provider_message_seq_ = 1;
+
+    SendScript send_script_ = SendScript::AutoAccept;
+    int rate_limited_first_ = 1;
+    std::string reject_detail_ = "content rejected";
+    std::map<std::string, int> send_counts_;
 
     std::vector<RecordedSend> sent_messages_;
     std::vector<std::string> acked_delivery_ids_;

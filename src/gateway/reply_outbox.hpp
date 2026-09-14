@@ -20,7 +20,10 @@
 //     AtomicWriteFile(ProcessCrashDurability)。
 //
 // 发送态(§4.4 拆 V1 本地面):pending -> delivered;hash 不符 -> flagged。
-// 渠道发送(sending/retry_wait/delivery_unknown)归 V3 批的 adapter 面。
+// 渠道发送(QQ 接入单 Q2 §七,contracts.md §4.4 冻结表):
+//   pending -> sending -> sent;sending 超时 -> delivery_unknown(停自动重发,
+//   不虚 exactly-once);平台明确拒绝/限频耗尽 -> failed_*。
+//   发出前记尝试(item.attempt),返回后记 provider_message_id(item.sent)。
 #pragma once
 
 #include <cstdint>
@@ -40,17 +43,28 @@ namespace lubancode::gateway {
 struct ReplyOutboxItem {
     std::string delivery_id;      // 定式散列(dl-<hash16>)
     std::string selection_id;     // 来源 reply selection(恢复后不变)
-    std::string delivery_target;  // V1 恒 "local:file"
-    std::uint64_t ordinal = 1;
+    std::string delivery_target;  // "local:file" | "channel:<ch>:<acct>:<conv>"
+    std::uint64_t ordinal = 1;    // 同 selection 的段序(拆段后 1..k;本地恒 1)
     std::string reply_text;       // 固定正文(入箱即冻结,不随后续变化)
     std::string reply_sha256;     // 正文 hash(入箱时算定)
     std::string session_id;       // 来源 V3 场(诊断/反查)
     std::string turn_id;          // 来源轮
     std::int64_t enqueued_at_ms = 0;
-    std::string state;            // pending | delivered | flagged
-    std::string published_path;   // 发布文件相对 profile 的路径
+    std::string state;            // pending|sending|sent|delivery_unknown|failed
+                                  // |delivered|flagged(本地族)
+    std::string published_path;   // 发布文件相对 profile 的路径(本地族)
     std::string flag_reason;      // flagged 时的人话
     std::int64_t delivered_at_ms = 0;
+    // ---- QQ 渠道 target(Q2 §七第一项;本地族全空) ----
+    std::string target_channel_id;             // "qqbot"
+    std::string target_account_id;             // "main"
+    std::string target_conversation_id;        // direct openid
+    std::string target_reply_to_message_id;    // 被动回复锚(来信 msg_id)
+    std::uint32_t target_msg_seq = 0;          // 稳定 msg_seq(= ordinal;0=未记)
+    std::string provider_message_id;           // QQ 回执(send 响应带的 om_*)
+    std::string delivery_error;                // failed/delivery_unknown 时的稳定码
+    std::int64_t attempts = 0;                 // 发送尝试次数(item.attempt 计数)
+    std::string source_ref;                    // 来源审计 "ingress:<ch>:<acct>:<sid>"
 };
 
 class DurableReplyOutbox {
@@ -89,6 +103,44 @@ public:
                            const std::string& session_id, const std::string& turn_id,
                            std::int64_t now_ms);
 
+    // ---- QQ 渠道 target(Q2 §七) -------------------------------------------
+    struct ChannelTarget {
+        std::string channel_id;
+        std::string account_id;
+        std::string conversation_id;
+        std::string reply_to_message_id;  // 被动回复锚(可空)
+        std::string source_ref;           // "ingress:<ch>:<acct>:<sid>"(结算反查)
+    };
+    // 渠道入箱:冻结正文按段限拆段(UTF-8 边界),每段一枚 item
+    //(deliveryId = MakeDeliveryId(selection, target 串, ordinal))。
+    // 返回本 selection 的全部段 id(含此前已入箱的段;幂等重入同款)。
+    struct ChannelEnqueueReceipt {
+        bool accepted = false;   // 本次至少新入一段
+        bool duplicate = false;  // 全部段已在(幂等重入)
+        std::string error_code;
+        std::vector<std::string> delivery_ids;  // 全部段(ordinal 序)
+    };
+    ChannelEnqueueReceipt EnqueueChannel(const std::string& selection_id,
+                                         const std::string& reply_text,
+                                         const std::string& session_id,
+                                         const std::string& turn_id, const ChannelTarget& target,
+                                         std::int64_t now_ms);
+
+    // 渠道投递驱动(泵侧逐段调;账行为先,状态推进幂等):
+    bool RecordAttempt(const std::string& delivery_id, std::int64_t now_ms);  // 发出前记尝试
+    bool MarkSent(const std::string& delivery_id, const std::string& provider_message_id,
+                  std::int64_t now_ms);  // QQ 已接受
+    bool MarkOutcomeUnknown(const std::string& delivery_id,
+                            std::int64_t now_ms);  // 超时:停自动重发,不虚 exactly-once
+    bool MarkChannelFailed(const std::string& delivery_id, const std::string& error_code,
+                           std::int64_t now_ms);  // 平台明确拒绝/限频耗尽/令牌失效
+    // 只读:待发送/在途的渠道项(pending 与 sending;ordinal 不保证全局序,
+    // 同 selection 的段序由 delivery_id 的 ordinal 编码,泵按入箱序取)。
+    std::vector<ReplyOutboxItem> PendingChannelItems() const;
+    // 取渠道段的冻结正文(内存没有(重开后)从段原件读回并核 hash;
+    // 原件丢失/损坏 = false——已提交原件丢失即隔离,不猜正文)。
+    bool LoadChannelItemText(const std::string& delivery_id, std::string* text) const;
+
     // 本地投递:逐枚 pending 发布到 out/<deliveryId>.txt(原子写),
     // 成功落 item.delivered。已发布文件在且 hash 相符(上次崩在文件后
     // 回执前)→ 补回执不重写;hash 不符 → flagged,不覆盖不删。
@@ -106,6 +158,9 @@ public:
     std::vector<ReplyOutboxItem> ListItems() const;
     std::optional<ReplyOutboxItem> Find(const std::string& delivery_id) const;
     std::size_t PendingCount() const;
+    // 回复原件目录(渠道路的 selection 原件与段原件同落此处;装配层
+    // 递给执行器/恢复器,单一来源)。
+    const std::filesystem::path& replies_dir() const { return paths_.replies_dir; }
 
     bool broken() const { return broken_; }
 
@@ -124,6 +179,17 @@ private:
 // 同一选择恒同一 deliveryId——resume/重扫不另发一份。
 std::string MakeDeliveryId(const std::string& selection_id, const std::string& target,
                            std::uint64_t ordinal);
+
+// 渠道 target 的稳定串(§七第一项):"channel:<ch>:<acct>:<conv>"——进
+// MakeDeliveryId 与 reply.selection.committed 的 deliveryTarget,同源同值。
+std::string MakeChannelDeliveryTarget(const std::string& channel_id,
+                                      const std::string& account_id,
+                                      const std::string& conversation_id);
+
+// 冻结正文拆段(§七第一项"拆段结果"):按字节帽在 UTF-8 边界切,尽量
+// 落在换行处(帽内最后一条换行);0/超帽参数非法回空(调用方明败)。
+// 首版纯文本不做 markdown 感知;真平台长度上限归 Q3 实测校准。
+std::vector<std::string> SplitReplySegments(const std::string& text, std::size_t max_bytes);
 
 // 只读投影(status 分栏/测试用):从 outbox 账重放;文件不存在给空投影
 //(零建目录零写盘)。与 DurableReplyOutbox::Open 同一份重放逻辑。

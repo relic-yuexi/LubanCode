@@ -53,6 +53,26 @@ void FakeChannelSidecar::EmitInboundEvent(const lubancode::channel::ChannelInbou
     SendBack(BuildNotificationJson(BridgeMethod::Inbound, event.ToJson()));
 }
 
+int FakeChannelSidecar::send_count_for(const std::string& client_id) const {
+    const auto found = send_counts_.find(client_id);
+    return found == send_counts_.end() ? 0 : found->second;
+}
+
+void FakeChannelSidecar::EmitDeliveryReceipt(const std::string& outbound_delivery_id,
+                                             const std::string& outcome,
+                                             const std::string& reason) {
+    nlohmann::json params = nlohmann::json::object();
+    params["outbound_delivery_id"] = outbound_delivery_id;
+    if (outcome == "delivered") {
+        params["provider_message_id"] = "om_receipt_" + outbound_delivery_id;
+    }
+    params["outcome"] = outcome;
+    if (!reason.empty()) {
+        params["reason"] = reason;
+    }
+    SendBack(BuildNotificationJson(BridgeMethod::DeliveryReceipt, std::move(params)));
+}
+
 void FakeChannelSidecar::HandleIncomingJson(const nlohmann::json& frame_json) {
     const IncomingMessage message = ParseIncomingMessage(frame_json);
 
@@ -152,9 +172,35 @@ void FakeChannelSidecar::HandleIncomingJson(const nlohmann::json& frame_json) {
             record.client_id = message.params.value("client_id", "");
             record.params = message.params;
             record.provider_message_id = "om_" + std::to_string(next_provider_message_seq_++);
-            SendBack(BuildResultResponseJson(
-                id, {{"provider_message_id", record.provider_message_id}, {"accepted", true}}));
-            sent_messages_.push_back(std::move(record));
+            ++send_counts_[record.client_id];
+            sent_messages_.push_back(record);
+            switch (send_script_) {
+                case SendScript::AutoAccept:
+                    SendBack(BuildResultResponseJson(
+                        id, {{"provider_message_id", record.provider_message_id},
+                             {"accepted", true}}));
+                    return;
+                case SendScript::RateLimitedFirst:
+                    if (send_counts_[record.client_id] <= rate_limited_first_) {
+                        SendBack(BuildDomainErrorResponseJson(id, DomainErrorName::RateLimited,
+                                                              "test rate limited"));
+                        return;
+                    }
+                    SendBack(BuildResultResponseJson(
+                        id, {{"provider_message_id", record.provider_message_id},
+                             {"accepted", true}}));
+                    return;
+                case SendScript::PermanentReject:
+                    SendBack(BuildDomainErrorResponseJson(id, DomainErrorName::PermanentReject,
+                                                          reject_detail_));
+                    return;
+                case SendScript::LoginRequired:
+                    SendBack(BuildDomainErrorResponseJson(id, DomainErrorName::LoginRequired,
+                                                          "test token invalid"));
+                    return;
+                case SendScript::Silent:
+                    return;  // 不应答:超时 → delivery_unknown 测试
+            }
             return;
         }
         case BridgeMethod::Edit: {

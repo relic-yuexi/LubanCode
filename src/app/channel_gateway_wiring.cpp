@@ -219,14 +219,37 @@ bool ChannelGatewayWiring::TickOnce(std::int64_t now_ms) {
         return true;
     }
     PumpAll();
+    if (work_pump_ != nullptr && !work_pump_->TickOnce(now_ms)) {
+        return false;  // 渠道业务泵 broken(账写不进):停业务 tick
+    }
     return true;
 }
 
-void ChannelGatewayWiring::StopAccepting() {}
+void ChannelGatewayWiring::StopAccepting() {
+    if (work_pump_ != nullptr) {
+        work_pump_->StopAccepting();
+    }
+}
+
+void ChannelGatewayWiring::set_owner_epoch(const std::string& epoch) {
+    if (work_pump_ != nullptr) {
+        work_pump_->set_owner_epoch(epoch);
+    }
+}
+
+void ChannelGatewayWiring::set_work_pump(std::unique_ptr<gateway::GatewayWorkPump> work_pump) {
+    work_pump_ = std::move(work_pump);
+}
 
 bool ChannelGatewayWiring::Close(int grace_ms) {
+    // 渠道 work 泵先收口(渠道活场封口;不再碰 manager)。
+    bool ok = true;
+    if (work_pump_ != nullptr && !work_pump_->Close(grace_ms)) {
+        ok = false;
+    }
+    work_pump_.reset();
     if (manager_ == nullptr) {
-        return true;
+        return ok;
     }
     for (const auto& snapshot : manager_->Snapshots()) {
         (void)manager_->StopAccount(snapshot.channel_id, snapshot.account_id);
@@ -241,7 +264,7 @@ bool ChannelGatewayWiring::Close(int grace_ms) {
             }
         }
         if (all_stopped) {
-            return true;
+            return ok;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
