@@ -1851,6 +1851,57 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
                        "reply.selection.committed 必带 turnId(回复属哪一轮)");
         }
     }
+    // ---- 提示组合事实(应用Worker接入单 §五 134;statusless)----
+    else if (line.kind == K::PromptCompositionApplied) {
+        // promptSnapshotId:最终拼装正文全文 SHA-256(快照 ID);agentRef:
+        // 部署档点名(空串合法=未点名走默认人格);segments:逐段来源账
+        //(order 从 0 连续、refPath 非空、origin 非空、contentSha256 hex64,
+        // source 磁盘层为路径、嵌入/现填段为空串)。
+        if (!line.payload.contains("promptSnapshotId") || !line.payload["promptSnapshotId"].is_string() ||
+            !IsHex64(line.payload["promptSnapshotId"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "prompt.composition.applied.promptSnapshotId 应为 64 位十六进制的快照 ID");
+        }
+        if (!line.payload.contains("agentRef") || !line.payload["agentRef"].is_string()) {
+            return Err("schema3.missing_field",
+                       "prompt.composition.applied payload 缺 agentRef(空串=未点名)");
+        }
+        if (!line.payload.contains("segments") || !line.payload["segments"].is_array()) {
+            return Err("schema3.missing_field",
+                       "prompt.composition.applied payload 缺 segments(逐段来源账)");
+        }
+        std::uint64_t expect_order = 0;
+        for (const auto& segment : line.payload["segments"]) {
+            if (!segment.is_object()) {
+                return Err("schema3.bad_type", "prompt.composition.applied.segments 项须为对象");
+            }
+            for (const auto* key : {"order", "refPath", "origin", "source", "contentSha256"}) {
+                if (!segment.contains(key)) {
+                    return Err("schema3.missing_field",
+                               "prompt.composition.applied.segments 项缺字段: " + std::string(key));
+                }
+            }
+            if (!JsonIsNonNegativeInt(segment["order"]) || segment["order"].get<std::uint64_t>() != expect_order) {
+                return Err("schema3.bad_type",
+                           "prompt.composition.applied.segments.order 须从 0 起连续(组合次序稳定)");
+            }
+            ++expect_order;
+            if (!segment["refPath"].is_string() || segment["refPath"].get<std::string>().empty()) {
+                return Err("schema3.bad_type", "prompt.composition.applied.segments.refPath 须为非空串");
+            }
+            if (!segment["origin"].is_string() || segment["origin"].get<std::string>().empty()) {
+                return Err("schema3.bad_type", "prompt.composition.applied.segments.origin 须为非空串");
+            }
+            if (!segment["source"].is_string()) {
+                return Err("schema3.bad_type", "prompt.composition.applied.segments.source 须为串(嵌入段为空)");
+            }
+            if (!segment["contentSha256"].is_string() ||
+                !IsHex64(segment["contentSha256"].get<std::string>())) {
+                return Err("schema3.bad_type",
+                           "prompt.composition.applied.segments.contentSha256 应为 64 位十六进制");
+            }
+        }
+    }
     // pending 类必须带 reason(§4.14)。
     if (line.status == OpStatus::Pending && !line.payload.contains("reason")) {
         return Err("schema3.missing_field",

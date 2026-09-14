@@ -55,11 +55,13 @@ Client::~Client() {
 }
 
 TransportStartResult Client::StartProcess(const std::string& command, const std::vector<std::string>& args,
-                                           const std::vector<std::pair<std::string, std::string>>& env) {
+                                           const std::vector<std::pair<std::string, std::string>>& env,
+                                           platform::EnvMode env_mode) {
     owned_transport_ = std::make_unique<StdioTransportAdapter>();
     transport_ = owned_transport_.get();
     ++transport_generation_;  // 逐枚追踪单:换一代记一笔(重启/换进程分得清)
-    return owned_transport_->Start(command, args, env, [this](std::string line) { OnLine(std::move(line)); });
+    return owned_transport_->Start(command, args, env,
+                                   [this](std::string line) { OnLine(std::move(line)); }, env_mode);
 }
 
 void Client::AttachTransportForTest(Transport* transport) {
@@ -116,7 +118,9 @@ void Client::OnLine(const std::string& line) {
 std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std::string& method,
                                                                        const nlohmann::json& params, int timeout_ms,
                                                                        std::int64_t* jsonrpc_request_id_out,
-                                                                       const std::atomic<bool>* cancel) {
+                                                                       const std::atomic<bool>* cancel,
+                                                                       bool* got_jsonrpc_error,
+                                                                       std::int64_t* jsonrpc_error_code_out) {
     if (transport_ == nullptr) {
         return std::unexpected("MCP 服务器 " + server_name_ + " 传输层未就绪");
     }
@@ -188,12 +192,29 @@ std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std:
 
     const nlohmann::json& response = entry->response;
     if (response.contains("error") && !response["error"].is_null()) {
-        std::string error_message = "MCP 服务器 " + server_name_ + " 返回错误: ";
+        std::string error_message = "MCP 服务器 " + server_name_ + " 返回错误";
         const auto& error = response["error"];
+        // §7.1:JSON-RPC code 随错误带出(认证失败/限流一类服务器拒绝,
+        // 各有明确状态)——调用方拿 code 归类,不在正文里猜。
+        std::int64_t error_code = 0;
+        if (error.contains("code") && error["code"].is_number_integer()) {
+            error_code = error["code"].get<std::int64_t>();
+            error_message += "(code=" + std::to_string(error_code) + ")";
+        }
+        error_message += ": ";
         if (error.contains("message") && error["message"].is_string()) {
             error_message += error["message"].get<std::string>();
         } else {
             error_message += error.dump();
+        }
+        if (got_jsonrpc_error != nullptr) {
+            *got_jsonrpc_error = true;
+        }
+        if (jsonrpc_error_code_out != nullptr) {
+            *jsonrpc_error_code_out = error_code;
+        }
+        if (jsonrpc_request_id_out != nullptr) {
+            *jsonrpc_request_id_out = id;
         }
         return std::unexpected(error_message);
     }
@@ -287,14 +308,24 @@ std::expected<std::vector<ToolInfo>, std::string> Client::ListTools() {
 tools::Tool::Result Client::CallTool(const std::string& tool_name, const nlohmann::json& arguments,
                                      std::int64_t* jsonrpc_request_id_out, const CallOptions& options) {
     const nlohmann::json params = {{"name", tool_name}, {"arguments", arguments}};
-    auto result =
-        SendRequestAndWait("tools/call", params, tool_call_timeout_ms_, jsonrpc_request_id_out, options.cancel);
+    bool got_jsonrpc_error = false;
+    std::int64_t jsonrpc_error_code = 0;
+    auto result = SendRequestAndWait("tools/call", params, tool_call_timeout_ms_, jsonrpc_request_id_out,
+                                     options.cancel, &got_jsonrpc_error, &jsonrpc_error_code);
     if (!result.has_value()) {
-        // 逐枚追踪单:server 进程退出/传输断、超时、取消分开记,不靠中文
-        // 正文分辨。迟到响应的丢弃在 transport 读线程里(HookRunRecord
-        // 之外另记 late_response_dropped,见 client.hpp 注释)。
+        // 逐枚追踪单:server 进程退出/传输断、超时、取消、服务器拒绝
+        //(JSON-RPC error:401/429 一类)分开记,不靠中文正文分辨。迟到
+        // 响应的丢弃在 transport 读线程里(HookRunRecord 之外另记
+        // late_response_dropped,见 client.hpp 注释)。
         tools::Tool::Result failed{result.error(), true};
-        if (result.error().find("被取消") != std::string::npos) {
+        if (got_jsonrpc_error) {
+            // 服务器明确拒绝:状态归 tool_error(请求本身到了对端),稳定
+            // 码 + details.jsonrpcCode 把 401/429 一类分得开(§7.1 逐层
+            // 验收:各有明确状态,空结果不等于请求失败)。
+            failed.outcome = "tool_error";
+            failed.error_code = "mcp.server_error";
+            failed.details["jsonrpcCode"] = jsonrpc_error_code;
+        } else if (result.error().find("被取消") != std::string::npos) {
             failed.outcome = "cancelled_during_run";
             failed.error_code = "mcp.cancelled";
         } else if (result.error().find("超时") != std::string::npos) {

@@ -5,3 +5,7 @@ Load a discovered skill (SKILL.md) by name and get its full instructions. A skil
 ## param.name
 
 Name of the skill to load; the same name as listed in the system prompt
+
+## param.path
+
+Optional. Relative path inside that skill's directory (e.g. references/style.md); reads only materials inside the skill directory. Absolute paths, ../ escapes, symlinks pointing out, and http links are all rejected; treat external links as a separate data-source request

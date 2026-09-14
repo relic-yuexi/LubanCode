@@ -358,6 +358,7 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::ToolCapabilityRecorded: return "tool.capability.recorded";
         case EventKindV3::GatewayWorkBound: return "gateway.work.bound";
         case EventKindV3::ReplySelectionCommitted: return "reply.selection.committed";
+        case EventKindV3::PromptCompositionApplied: return "prompt.composition.applied";
 
     }
     return "unknown";
@@ -491,6 +492,8 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             // Gateway 常驻总装 V0:work↔turn 绑定与回复选择(statusless)。
             EventKindV3::GatewayWorkBound,
             EventKindV3::ReplySelectionCommitted,
+            // 提示组合事实(应用Worker接入单 §五 134,statusless)。
+            EventKindV3::PromptCompositionApplied,
 
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {

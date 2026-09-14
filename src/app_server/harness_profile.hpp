@@ -55,6 +55,14 @@ struct HarnessProfile {
     std::set<std::string> features_disabled;
     // components.mcpServers:本场点名要挂的 MCP 服务(canonical 名)。
     std::vector<std::string> mcp_servers;
+    // components.skills(应用Worker接入单 §六:来源声明式 schema):获准
+    // 技能的 canonical ID 名单,required 缺件/坏格式拒启,optional 缺件跳过
+    // 出诊断;名单外的根内技能不进本场(声明即允许清单)。skills_source_dir
+    // 是相对材料根 skills/ 的子目录(空 = 根本身),声明"来源根"不放开
+    // 任意绝对路径。
+    std::vector<std::string> skills_required;
+    std::vector<std::string> skills_optional;
+    std::string skills_source_dir;
     // components.plugins:本场点名要挂的 Lua/process 插件(canonical 名,
     // 即 manifest.id)。P5 起 v2 embedded-lua 件进入真装载(发现根扫描->
     // 信任账 ->挂载,见 session_assembly 步骤 0);点名 process/native 件
@@ -72,6 +80,8 @@ struct HarnessProfile {
     bool FeatureEnabled(std::string_view feature) const;
     // tools.allow 里引用的 MCP 服务名集合(依赖解释的另一半边)。
     std::set<std::string> ReferencedMcpServers() const;
+    // components.skills 是否声明了任何获准名(required/optional 任一非空)。
+    bool DeclaresSkills() const { return !skills_required.empty() || !skills_optional.empty(); }
 };
 
 struct HarnessParseResult {

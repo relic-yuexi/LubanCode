@@ -199,7 +199,7 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
         }
     }
 
-    // ---- components.mcpServers / components.plugins(P2 点名通道)----
+    // ---- components.mcpServers / components.plugins / components.skills ----
     if (raw.contains("components")) {
         const nlohmann::json& components = raw["components"];
         if (!components.is_object()) {
@@ -207,7 +207,7 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
             return result;
         }
         for (auto it = components.begin(); it != components.end(); ++it) {
-            if (it.key() != "mcpServers" && it.key() != "plugins") {
+            if (it.key() != "mcpServers" && it.key() != "plugins" && it.key() != "skills") {
                 result.error = "components 未知键(拒绝采用): " + it.key();
                 return result;
             }
@@ -215,6 +215,77 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
         if (!GetStringArray(components, "mcpServers", &profile.mcp_servers, &result.error) ||
             !GetStringArray(components, "plugins", &profile.plugins, &result.error)) {
             return result;
+        }
+        // components.skills(应用Worker接入单 §六:来源声明式 schema,
+        // additive——缺省 = P2 的"材料根 skills/ 全量"约定照旧)。
+        if (components.contains("skills")) {
+            const nlohmann::json& skills = components["skills"];
+            if (!skills.is_object()) {
+                result.error = "components.skills 须是对象";
+                return result;
+            }
+            for (auto it = skills.begin(); it != skills.end(); ++it) {
+                if (it.key() != "required" && it.key() != "optional" && it.key() != "sourceDir") {
+                    result.error = "components.skills 未知键(拒绝采用): " + it.key();
+                    return result;
+                }
+            }
+            if (!GetStringArray(skills, "required", &profile.skills_required, &result.error) ||
+                !GetStringArray(skills, "optional", &profile.skills_optional, &result.error)) {
+                return result;
+            }
+            if (skills.contains("sourceDir")) {
+                if (!GetString(skills, "sourceDir", &profile.skills_source_dir) ||
+                    profile.skills_source_dir.empty()) {
+                    result.error = "components.skills.sourceDir 须是非空字符串(材料根 skills/ 内的相对子目录)";
+                    return result;
+                }
+                // 来源根形状:相对路径、'/' 分段、每段非空且不是 . / ..——
+                // 不收绝对路径、反斜杠与盘符,不开任意路径的口子(段里带 ':'
+                // 一律拒:Windows 上 "C:" 这类盘符段会顶掉整条前缀路径)。
+                if (profile.skills_source_dir.find('\\') != std::string::npos ||
+                    profile.skills_source_dir.front() == '/') {
+                    result.error = "components.skills.sourceDir 须是 '/' 分段的相对子目录: " +
+                                   profile.skills_source_dir;
+                    return result;
+                }
+                std::size_t begin = 0;
+                while (begin <= profile.skills_source_dir.size()) {
+                    const std::size_t slash = profile.skills_source_dir.find('/', begin);
+                    const std::string segment = slash == std::string::npos
+                                                    ? profile.skills_source_dir.substr(begin)
+                                                    : profile.skills_source_dir.substr(begin, slash - begin);
+                    if (segment.empty() || segment == "." || segment == ".." ||
+                        segment.find(':') != std::string::npos) {
+                        result.error =
+                            "components.skills.sourceDir 分段须非空、不是 ./.. 也不带冒号: " +
+                            profile.skills_source_dir;
+                        return result;
+                    }
+                    if (slash == std::string::npos) {
+                        break;
+                    }
+                    begin = slash + 1;
+                }
+            }
+            // 同名冲突明示(§六):同一枚名在 required 与 optional 两边都现,
+            // 或一份名单里点两遍——都是配置矛盾,明拒不猜。
+            {
+                std::set<std::string> seen;
+                for (const std::string& name : profile.skills_required) {
+                    if (!seen.insert(name).second) {
+                        result.error = "components.skills.required 名单重复点名: " + name;
+                        return result;
+                    }
+                }
+                for (const std::string& name : profile.skills_optional) {
+                    if (!seen.insert(name).second) {
+                        result.error = "components.skills 同名 required/optional 两现(冲突须明示,不猜先后): " +
+                                       name;
+                        return result;
+                    }
+                }
+            }
         }
     }
 
@@ -422,6 +493,24 @@ HarnessParseResult ParseHarnessDeployment(const nlohmann::json& deployment,
             profile.tools.allow.erase(
                 std::remove(profile.tools.allow.begin(), profile.tools.allow.end(), denied),
                 profile.tools.allow.end());
+        }
+    }
+
+    // components.skills 的依赖解释(§六,deny 折算之后对账):
+    //   - 声明了获准名(required/optional 任一非空)但 features 未放行
+    //     skills —— 配置矛盾,明拒(与 mcpServers/plugins 同款);
+    //   - 声明了获准名但 tools 面没点名 "skill"(post-deny)——技能装载
+    //     三面(清单/工具/预装)都吃这道面,没面 = 声明装不进本场,明拒。
+    if (profile.DeclaresSkills()) {
+        if (!profile.FeatureEnabled("skills")) {
+            result.error = "components.skills 声明获准技能但 features 未放行 skills";
+            return result;
+        }
+        if (std::find(profile.tools.allow.begin(), profile.tools.allow.end(), std::string("skill")) ==
+            profile.tools.allow.end()) {
+            result.error = "components.skills 声明获准技能但 tools 未点名 skill 工具"
+                           "(清单段/工具/预装三面同进同退,没面装不进)";
+            return result;
         }
     }
 

@@ -186,14 +186,27 @@ struct AgentSkillsField {
     }
 
     bool SpawnServer(const std::string& binary, std::string* error) {
+        return SpawnServer(binary, error, {}, {});
+    }
+
+    // extra_argv 追加在部署档旗标后;extra_env 追加在 HOME/USERPROFILE 重定向后。
+    bool SpawnServer(const std::string& binary, std::string* error,
+                     const std::vector<std::string>& extra_argv,
+                     const std::vector<std::pair<std::string, std::string>>& extra_env) {
         std::vector<std::string> argv{binary, "app-server", "--yes", "--app-server-profile",
                                       lubancode::platform::PathToUtf8(deployment_path)};
+        for (const std::string& arg : extra_argv) {
+            argv.push_back(arg);
+        }
         std::vector<std::pair<std::string, std::string>> env;
 #ifdef _WIN32
         env.emplace_back("USERPROFILE", lubancode::platform::PathToUtf8(home_dir));
 #else
         env.emplace_back("HOME", lubancode::platform::PathToUtf8(home_dir));
 #endif
+        for (const auto& [key, value] : extra_env) {
+            env.emplace_back(key, value);
+        }
         proc = lubancode::test_support::InteractiveProcess::Spawn(argv, env, std::string(), error);
         return proc != nullptr;
     }
@@ -600,4 +613,304 @@ TEST_CASE("P2 档案缺件:agentRef 不存在,拒绝启动不回落默认") {
     CHECK(stderr_text.find("no-such-agent") != std::string::npos);
     CHECK(stderr_text.find("拒绝启动") != std::string::npos);
     CHECK(field.model.requests().empty());
+}
+
+// ---------------------------------------------------------------------------
+// 用例 5(应用Worker接入单 §7.1):凭据分开传——模型 key 不进 MCP 工具进程
+// ---------------------------------------------------------------------------
+
+TEST_CASE("env 分离:模型 key 在 Worker 环境,工具进程只见配置注入的凭据") {
+    const std::string binary = FindLubancodeBinary();
+    if (binary.empty() || !PythonAvailable()) {
+        return;
+    }
+    AgentSkillsField field;
+    // config 的 mcpServers.env 注入工具凭据(env_probe 可见)。
+    json approved;
+    approved["command"] = kPythonCmd;
+    approved["args"] = json::array({McpFixturePath()});
+    approved["env"] = json{{"LUBANCODE_TEST_TOOL_CRED", "tok-123"}};
+    json config = {{"wire", "chat"},
+                   {"base_url", "http://127.0.0.1:" + std::to_string(field.model.port())},
+                   {"model", "fake-chat-model"},
+                   {"api_key", "sk-agent-skills"},
+                   {"mcpServers", {{"tools-approved", approved}}}};
+    field.WriteFile(field.home_dir / ".lubancode" / "config.json", config.dump());
+    json deployment = json::parse(AgentSkillsDeployment(), nullptr, false);
+    deployment["harnessProfiles"]["smoke"]["tools"]["allow"] =
+        json::array({"mcp:tools-approved:env_probe"});
+    deployment["harnessProfiles"]["smoke"]["features"]["enabled"] = json::array({"mcp"});
+    deployment["harnessProfiles"]["smoke"]["agentRef"] = "general-purpose";
+    field.WriteDeployment(deployment.dump());
+    // 幕1 调 env_probe(探模型 key 与工具凭据两枚),幕2 终答。
+    field.model.Enqueue(SseResponse({ToolCallFrame("call-env-1", "mcp__tools-approved__env_probe",
+                                                   R"({\"names\":[\"LUBANCODE_TEST_TOOL_CRED\",\"LUBANCODE_TEST_MODEL_KEY\"]})"),
+                                     kFinishToolCalls}));
+    field.model.Enqueue(SseResponse({TextFrame("env-final"), kFinishStop}));
+
+    std::string spawn_error;
+    // Worker 进程环境里带"模型密钥"(模拟宿主 env 里的 LUBAN_API_KEY 一类)。
+    REQUIRE(field.SpawnServer(binary, &spawn_error, {},
+                              {{"LUBANCODE_TEST_MODEL_KEY", "sk-model-secret"}}));
+    const json* thread_response = field.StartThread();
+    REQUIRE(thread_response != nullptr);
+    REQUIRE(thread_response->contains("result"));
+    const std::string thread_id = (*thread_response)["result"].value("threadId", std::string());
+
+    REQUIRE(field.Send(json{{"id", 3},
+                            {"method", "turn/start"},
+                            {"params", json{{"threadId", thread_id}, {"text", "探环境"}}}}
+                               .dump()));
+    REQUIRE(field.PumpUntil([&] { return field.FindEvent("turn/completed") != nullptr; }, 60000));
+
+    const std::vector<lubancode::test_support::FakeHttpRequest> requests = field.model.requests();
+    REQUIRE(requests.size() == 2);
+    // 工具凭据(部署配置注入)递到了;模型密钥(Worker 其余环境)没递。
+    CHECK(requests[1].body.find("LUBANCODE_TEST_TOOL_CRED=set") != std::string::npos);
+    CHECK(requests[1].body.find("LUBANCODE_TEST_MODEL_KEY=unset") != std::string::npos);
+    CHECK(requests[1].body.find("sk-model-secret") == std::string::npos);
+
+    REQUIRE(field.Send(R"({"id":9,"method":"shutdown","params":{}})"));
+    int exit_code = -1;
+    REQUIRE(field.proc->Wait(15000, &exit_code));
+    CHECK(exit_code == 0);
+}
+
+// ---------------------------------------------------------------------------
+// 用例 6(§六):components.skills 声明——冻结清单回执、名单外过滤、
+// 中途改 SKILL.md 漂移拒读(AW-06/07 的声明面)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("skills 声明:thread/start 带冻结清单,漂移同场拒读") {
+    const std::string binary = FindLubancodeBinary();
+    if (binary.empty() || !PythonAvailable()) {
+        return;
+    }
+    AgentSkillsField field;
+    field.WriteGlobalConfig();
+    // 技能:greet(声明 required)+ helper(声明 optional,声明里带依赖)
+    // + lurker(不声明,不该进本场)。
+    field.WriteFile(field.home_dir / ".lubancode" / "skills" / "greet" / "SKILL.md",
+                    "---\nname: greet\ndescription: 问候技能。\n---\nGREET-BODY-V1。\n");
+    field.WriteFile(field.home_dir / ".lubancode" / "skills" / "helper" / "SKILL.md",
+                    "---\nname: helper\ndescription: 助手技能。\nrequires-tools:\n  - run_command\n"
+                    "---\nHELPER-BODY。\n");
+    field.WriteFile(field.home_dir / ".lubancode" / "skills" / "lurker" / "SKILL.md",
+                    "---\nname: lurker\ndescription: 未声明技能。\n---\nLURKER-BODY。\n");
+    json deployment = json::parse(AgentSkillsDeployment(), nullptr, false);
+    deployment["harnessProfiles"]["smoke"]["components"] =
+        json{{"skills", json{{"required", json::array({"greet"})},
+                             {"optional", json::array({"helper", "absent-skill"})}}},
+             {"mcpServers", json::array({"tools-approved"})}};
+    deployment["harnessProfiles"]["smoke"]["agentRef"] = "general-purpose";
+    field.WriteDeployment(deployment.dump());
+    // 幕1 加载 greet;幕2 终答(第二回合再加载 greet 时文件已被改,漂移)。
+    field.model.Enqueue(SseResponse({ToolCallFrame("call-skill-1", "skill", R"({\"name\":\"greet\"})"),
+                                     kFinishToolCalls}));
+    field.model.Enqueue(SseResponse({TextFrame("skills-decl-final"), kFinishStop}));
+    field.model.Enqueue(SseResponse({ToolCallFrame("call-skill-2", "skill", R"({\"name\":\"greet\"})"),
+                                     kFinishToolCalls}));
+    field.model.Enqueue(SseResponse({TextFrame("drift-final"), kFinishStop}));
+
+    std::string spawn_error;
+    REQUIRE(field.SpawnServer(binary, &spawn_error));
+    const json* thread_response = field.StartThread();
+    REQUIRE(thread_response != nullptr);
+    REQUIRE(thread_response->contains("result"));
+    // 冻结清单回执(additive):greet loaded/required,helper loaded/optional 带
+    // 依赖缺口,absent-skill missing/optional。
+    REQUIRE((*thread_response)["result"].contains("skills"));
+    const json& skills = (*thread_response)["result"]["skills"];
+    REQUIRE(skills.is_array());
+    REQUIRE(skills.size() == 3);
+    CHECK(skills[0]["name"] == "greet");
+    CHECK(skills[0]["requirement"] == "required");
+    CHECK(skills[0]["status"] == "loaded");
+    CHECK(skills[1]["name"] == "helper");
+    CHECK(skills[1]["requirement"] == "optional");
+    CHECK(skills[1]["status"] == "loaded");
+    CHECK(skills[1]["requiresTools"] == json::array({"run_command"}));
+    CHECK(skills[1]["missingTools"] == json::array({"run_command"}));
+    CHECK(skills[2]["name"] == "absent-skill");
+    CHECK(skills[2]["status"] == "missing");
+    // optional 缺件出诊断。
+    REQUIRE((*thread_response)["result"].contains("degradedComponents"));
+    CHECK((*thread_response)["result"]["degradedComponents"].size() == 1);
+
+    const std::string thread_id = (*thread_response)["result"].value("threadId", std::string());
+
+    // 回合一:加载 greet 成功;清单里没有 lurker(未声明不进)。
+    REQUIRE(field.Send(json{{"id", 3},
+                            {"method", "turn/start"},
+                            {"params", json{{"threadId", thread_id}, {"text", "加载 greet"}}}}
+                               .dump()));
+    REQUIRE(field.PumpUntil([&] { return field.FindEvent("turn/completed") != nullptr; }, 60000));
+    {
+        const auto requests = field.model.requests();
+        REQUIRE(requests.size() == 2);
+        CHECK(requests[0].body.find("greet") != std::string::npos);     // 清单段只有声明面
+        CHECK(requests[0].body.find("lurker") == std::string::npos);    // 未声明不进清单
+        CHECK(requests[1].body.find("GREET-BODY-V1") != std::string::npos);
+    }
+
+    // 同场中途改 SKILL.md:下一回合再加载,漂移拒读(修改版正文不进上下文)。
+    field.WriteFile(field.home_dir / ".lubancode" / "skills" / "greet" / "SKILL.md",
+                    "---\nname: greet\ndescription: 问候技能。\n---\nGREET-BODY-V2-TAMPERED。\n");
+    REQUIRE(field.Send(json{{"id", 4},
+                            {"method", "turn/start"},
+                            {"params", json{{"threadId", thread_id}, {"text", "再加载 greet"}}}}
+                               .dump()));
+    const auto completed_count = [&field]() {
+        std::size_t count = 0;
+        for (const json& event : field.events) {
+            if (event.contains("method") && event["method"] == "turn/completed") {
+                ++count;
+            }
+        }
+        return count;
+    };
+    REQUIRE(field.PumpUntil([&] { return completed_count() >= 2; }, 60000));
+    {
+        const auto requests = field.model.requests();
+        REQUIRE(requests.size() == 4);
+        CHECK(requests[3].body.find("漂移") != std::string::npos);
+        CHECK(requests[3].body.find("GREET-BODY-V2-TAMPERED") == std::string::npos);
+    }
+
+    REQUIRE(field.Send(R"({"id":9,"method":"shutdown","params":{}})"));
+    int exit_code = -1;
+    REQUIRE(field.proc->Wait(15000, &exit_code));
+    CHECK(exit_code == 0);
+}
+
+// ---------------------------------------------------------------------------
+// 用例 7(§五 133):托管模式拒正文覆写源——--system-prompt 与环境变量各拒一遍
+// ---------------------------------------------------------------------------
+
+TEST_CASE("托管模式覆写门:部署档在场时正文覆写源拒启,普通语义另保留") {
+    const std::string binary = FindLubancodeBinary();
+    if (binary.empty()) {
+        return;
+    }
+    AgentSkillsField field;
+    field.WriteGlobalConfig();
+    field.WriteDeployment(AgentSkillsDeployment());
+
+    SUBCASE("--system-prompt 旗标:拒启") {
+        std::string spawn_error;
+        REQUIRE(field.SpawnServer(binary, &spawn_error,
+                                  {"--system-prompt", "override.md"}, {}));
+        int exit_code = 0;
+        REQUIRE(field.proc->Wait(15000, &exit_code));
+        CHECK(exit_code != 0);
+        const std::string stderr_text = field.proc->StderrText();
+        CHECK(stderr_text.find("托管模式拒绝正文覆写源") != std::string::npos);
+        CHECK(field.model.requests().empty());
+    }
+    SUBCASE("LUBANCODE_SYSTEM_PROMPT_FILE 环境变量:拒启(未定义次序的冲突不猜)") {
+        std::string spawn_error;
+        REQUIRE(field.SpawnServer(binary, &spawn_error, {},
+                                  {{"LUBANCODE_SYSTEM_PROMPT_FILE", "override.md"}}));
+        int exit_code = 0;
+        REQUIRE(field.proc->Wait(15000, &exit_code));
+        CHECK(exit_code != 0);
+        CHECK(field.proc->StderrText().find("托管模式拒绝正文覆写源") != std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 用例 8(§五 134):提示组合落 V3 轨迹——prompt.composition.applied 事实行
+// ---------------------------------------------------------------------------
+
+TEST_CASE("v3 提示组合账:thread 开场落 prompt.composition.applied,段账与快照 ID 齐全") {
+    const std::string binary = FindLubancodeBinary();
+    if (binary.empty() || !PythonAvailable()) {
+        return;
+    }
+    AgentSkillsField field;
+    field.WriteGlobalConfig();
+    field.WriteAgentMaterials();  // research 档案 + Profile 正文 + greet 技能
+    field.WriteDeployment(AgentSkillsDeployment());
+    field.model.Enqueue(SseResponse({TextFrame("v3-composition-final"), kFinishStop}));
+
+    std::string spawn_error;
+    // v3 新场(客户端自钉,不吃 ctest 注入的 0)。
+    REQUIRE(field.SpawnServer(binary, &spawn_error, {},
+                              {{"LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1"}}));
+    const json* thread_response = field.StartThread();
+    REQUIRE(thread_response != nullptr);
+    REQUIRE(thread_response->contains("result"));
+    const std::string thread_id = (*thread_response)["result"].value("threadId", std::string());
+    REQUIRE_FALSE(thread_id.empty());
+
+    // 跑一回合,让账面齐全(system 切换/请求都落账)。
+    REQUIRE(field.Send(json{{"id", 3},
+                            {"method", "turn/start"},
+                            {"params", json{{"threadId", thread_id}, {"text", "跑一回合"}}}}
+                               .dump()));
+    REQUIRE(field.PumpUntil([&] { return field.FindEvent("turn/completed") != nullptr; }, 60000));
+
+    // 找本场 v3 账(<home>/.lubancode/workspaces/**/main.jsonl)。
+    std::optional<fs::path> main_jsonl;
+    {
+        const fs::path workspaces = field.home_dir / ".lubancode" / "workspaces";
+        std::error_code ec;
+        for (const auto& entry : fs::recursive_directory_iterator(workspaces, ec)) {
+            if (ec) {
+                break;
+            }
+            if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
+                main_jsonl = entry.path();
+                break;
+            }
+        }
+    }
+    REQUIRE(main_jsonl.has_value());
+    bool saw_composition = false;
+    {
+        std::ifstream in(*main_jsonl, std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            const json row = json::parse(line, nullptr, false);
+            if (row.is_discarded() || !row.contains("kind")) {
+                continue;
+            }
+            if (row["kind"] != "prompt.composition.applied") {
+                continue;
+            }
+            saw_composition = true;
+            const json& payload = row["payload"];
+            CHECK(payload["promptSnapshotId"].get<std::string>().size() == 64);
+            CHECK(payload["agentRef"] == "research");
+            REQUIRE(payload["segments"].is_array());
+            REQUIRE(payload["segments"].size() >= 2);
+            for (std::size_t i = 0; i < payload["segments"].size(); ++i) {
+                CHECK(payload["segments"][i]["order"] == static_cast<std::int64_t>(i));
+                CHECK(payload["segments"][i]["contentSha256"].get<std::string>().size() == 64);
+                CHECK_FALSE(payload["segments"][i]["refPath"].get<std::string>().empty());
+                CHECK_FALSE(payload["segments"][i]["origin"].get<std::string>().empty());
+            }
+            // Profile 业务正文段在账(来源层标记),宿主段也在(运行环境/能力)。
+            bool saw_profile_segment = false;
+            bool saw_host_segment = false;
+            for (const auto& segment : payload["segments"]) {
+                const std::string origin = segment["origin"];
+                if (origin.find("profile") != std::string::npos) {
+                    saw_profile_segment = true;
+                }
+                if (segment["refPath"].get<std::string>().find("runtime") != std::string::npos ||
+                    origin == "runtime_environment") {
+                    saw_host_segment = true;
+                }
+            }
+            CHECK(saw_profile_segment);
+            CHECK(saw_host_segment);
+        }
+    }
+    CHECK(saw_composition);
+
+    REQUIRE(field.Send(R"({"id":9,"method":"shutdown","params":{}})"));
+    int exit_code = -1;
+    REQUIRE(field.proc->Wait(15000, &exit_code));
+    CHECK(exit_code == 0);
 }

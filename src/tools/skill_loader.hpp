@@ -40,6 +40,15 @@ struct SkillMeta {
     // 统一 Package 封装单阶段 3:来自 Package 的技能带包命名空间,name 是
     // canonical id("<包id>:<名>");standalone 照旧裸名,此字段为空。
     std::string package_id;
+    // 扫描时刻的 SKILL.md 全文 SHA-256(小写 hex64;空 = 未记)。SkillTool
+    // 按需读正文时对照这枚指纹——同场中途改文件会漂移,漂移即拒读(应用
+    // Worker接入单 §六"冻结"铁律:清单在启动时扫一份,正文不能悄悄读到
+    // 修改版;与插件信任账 content-hash 同款手法)。
+    std::string content_hash;
+    // frontmatter 的 requires-tools 声明(可选;工具名按注册表 wire 名写,
+    // 如 run_command、mcp__server__tool)。只作依赖声明:缺获准执行工具时
+    // skill 工具回 capability_unavailable,不自动授予任何执行面(§六)。
+    std::vector<std::string> requires_tools;
 };
 
 // 一只包的 skills 来源根(阶段 3 挂载):skills_dir = <包根>/skills。loader
@@ -55,14 +64,18 @@ struct PackagedSkillRoot {
 
 // SKILL.md 的 frontmatter 解析结果。name/description 缺失时是
 // std::nullopt。body 是 frontmatter 之后的正文;没有 frontmatter 时 body
-// 就是整篇原文,由扫描层按缺必填元数据处理。
+// 就是整篇原文,由扫描层按缺必填元数据处理。requires_tools 是可选的工具
+// 依赖声明(应用Worker接入单 §六:scripts/CLI/MCP 需求只作声明,不据此
+// 授予执行面);坏 YAML 的扁平回退路不认它——只有真 YAML 解析才收。
 struct ParsedSkillFile {
     std::optional<std::string> name;
     std::optional<std::string> description;
+    std::optional<std::vector<std::string>> requires_tools;
     std::string body;
 };
 
-// 用 yaml-cpp 解析 --- 定界的 YAML frontmatter,提取 name/description。
+// 用 yaml-cpp 解析 --- 定界的 YAML frontmatter,提取 name/description
+//(另收可选的 requires-tools 字符串清单)。
 // 对别家客户端遗留的“description: 值里另有冒号”坏 YAML 留一条扁平
 // key:value 回退,提高跨客户端兼容。结构彻底损坏时返回 std::nullopt。
 std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content);
@@ -77,6 +90,15 @@ bool IsValidAgentSkillName(const std::string& name);
 // 打一行警告,不影响其余技能。name 的格式或目录名不合规范时宽容加载,
 // 但也记警告,与 Agent Skills 客户端接入指南一致。
 std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level);
+
+// 同上,但把逐枚跳过/告警的人话(含技能目录名)收进 warnings——部署档
+// 点名 required 技能却没扫到时,装配层靠这份账分辨"缺文件"还是"坏格式
+// 被跳过",拒绝信息里带得上诊断(应用Worker接入单 §六:required 坏格式/
+// 缺文件直接拒启,人话要可查)。warnings 为 null = 不收集,行为与
+// ScanSkillsDir 完全一致。
+std::vector<SkillMeta> ScanSkillsDirReported(const std::filesystem::path& skills_root,
+                                             const std::string& source_level,
+                                             std::vector<std::string>* warnings);
 
 // /skill list 的四层枚举账(列表漏层单):LoadSkills 只回每个名字的胜者,
 // 右下角计数与 /skills 展示都吃那份;这张账把五处 skills 根全数摊开——

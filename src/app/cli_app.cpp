@@ -542,6 +542,19 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                          parsed_profile.error.c_str());
             return 1;
         }
+        // 应用Worker接入单 §五 133:托管模式(部署档在场)只认部署策略明确
+        // 允许的正文覆写源——当前部署档 schema 未开任何覆写通道,--system-prompt
+        // 与 LUBANCODE_SYSTEM_PROMPT_FILE 属普通 CLI 语义,进了托管模式就是
+        // 未定义次序的冲突,一律拒启(不猜优先级,不悄悄吃掉一边)。
+        // 普通交互 CLI 的既有语义不受影响(那边无部署档)。
+        if (!cli_options.system_prompt_file_arg.empty() ||
+            lubancode::platform::GetEnvVar("LUBANCODE_SYSTEM_PROMPT_FILE").has_value()) {
+            std::fprintf(stderr,
+                         "[app-server] 托管模式拒绝正文覆写源:部署档在场时系统正文由档案/部署策略"
+                         "组合,--system-prompt 与 LUBANCODE_SYSTEM_PROMPT_FILE 不参与(覆写源冲突"
+                         "未定义次序,拒启;普通 CLI 语义另保留)。\n");
+            return 1;
+        }
         harness = std::move(*parsed_profile.profile);
     }
     // §四.111:启动时 stderr 打一次脱敏 effective-config(stdout 是协议口,

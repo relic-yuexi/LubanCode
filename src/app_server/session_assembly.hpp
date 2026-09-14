@@ -42,7 +42,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "agent/agent.hpp"  // AgentProfile
 #include "api/backend.hpp"
@@ -72,6 +75,16 @@ struct HeadlessMcpRuntime {
 // 在前,注册表在后——析构反序,注册表里的 McpTool 先亡,Client 引用
 // 不悬垂。
 struct SessionAssembly {
+    // 冻结技能清单的一条(§六:来源声明与依赖状态供客户端检查)。只在
+    // 部署档声明了 components.skills 时填——缺省(P2 约定:材料根全量)
+    // 不出清单,不冒充声明过。
+    struct SkillManifestEntry {
+        std::string name;         // canonical ID
+        bool required = false;    // required(否则 optional)
+        bool loaded = false;      // 扫到并进本场获准清单(optional 缺件 false)
+        std::vector<std::string> requires_tools;      // frontmatter 依赖声明
+        std::vector<std::string> missing_tools;       // 声明了但本场面上没有的
+    };
     std::unique_ptr<lubancode::api::Backend> backend;
     lubancode::agent::AgentProfile agent_profile;
     // 装配降级账:可选组件(tools.allow 未引用)起失败被跳过的事实。
@@ -87,6 +100,12 @@ struct SessionAssembly {
     // 挂载快照:本场真装上的插件("<id>@<version>" 一件一条)。点名=部署
     // 者显式意志,装上与否要看得见(§7.2),不悄悄咽下。
     std::vector<std::string> mounted_plugins;
+    // §六 冻结技能清单(components.skills 声明时才有;见 SkillManifestEntry)。
+    std::vector<SkillManifestEntry> skills_manifest;
+    // §五 提示组合的可追溯记录(prompt.composition.applied 的 payload:
+    // 组合次序/各段 hash/来源/最终快照 ID)。agent_plan 组合路才填;
+    // server 在 v3 场把它落进会话账(内存件只是搬运,不再自造账)。
+    std::optional<nlohmann::json> prompt_composition;
     std::unique_ptr<lubancode::tools::ToolRegistry> registry;  // 用户面:后声明
 };
 
@@ -102,10 +121,21 @@ struct SessionAssemblyResult {
     //   plugin_untrusted —— 信任账不过(未信任/被禁用/内容指纹算不出)
     //   plugin_load_failed —— Lua 挂载失败(entry 读不到/编译坏/handler
     //     对账不过)
+    //   skill_missing —— components.skills 声明的 required 技能不在扫描
+    //     账(缺文件/坏格式被扫描跳过;人话带扫描警告摘要,§六)
     // 经 thread/start 错误信封带出(message 含码,data.code additive,
     // 与 component_unavailable 同一条 P2 约定)。
     std::string error_code;
 };
+
+// MCP 子进程环境(§7.1:凭据分开传,不递 Worker 全环境)。base 集 =
+// 进程基件(PATH/系统变量/临时目录,plugin_process 同一张合同的口径)
+// 从宿主环境取值;server_env 是部署配置(config.json 的 mcpServers.env,
+// 工具自己的凭据走这里)注入,同名覆盖 base。装配方以 EnvMode::Replace
+// 落锤——宿主环境的其余变量(含模型 API key)一概不递。单测可注入:
+// 只依赖 GetEnvVar,无进程副作用。
+std::vector<std::pair<std::string, std::string>> ComposeMcpChildEnv(
+    const std::vector<std::pair<std::string, std::string>>& server_env);
 
 struct SessionAssemblyRequest {
     // 生产配置(mcp_servers 的上层获准来源);空 = 测试注入路(无 MCP)。

@@ -9,6 +9,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "platform/sha256.hpp"
 #include "tools/path_utils.hpp"
 #include "platform/log_sink.hpp"
 
@@ -192,6 +193,23 @@ std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
         };
         result.name = read_string("name");
         result.description = read_string("description");
+        // requires-tools:可选的字符串清单(工具依赖声明,§六)。类型对不上
+        //(标量/映射、元素非串)按未声明处理——声明面不因一处笔误弃整份
+        // 技能,扫描层不在这里硬拒。(注:变量名避开 C++20 关键字 requires。)
+        const YAML::Node declared_tools = root["requires-tools"];
+        if (declared_tools && declared_tools.IsSequence()) {
+            std::vector<std::string> tools;
+            for (const YAML::Node item : declared_tools) {
+                if (!item.IsScalar()) {
+                    tools.clear();
+                    break;
+                }
+                tools.push_back(item.as<std::string>());
+            }
+            if (!tools.empty() || declared_tools.size() == 0) {
+                result.requires_tools = std::move(tools);
+            }
+        }
         return result;
     } catch (const YAML::Exception&) {
         // 接入指南特意建议宽容这类旧件。只回退顶层 name/description，
@@ -203,9 +221,17 @@ std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
 // 裸扫描的实现体:package_id 非空 = 包内挂载扫描(阶段 3)——名字折成
 // canonical("<包id>:<名>")、记 package_id、跳过裸名规范与名不符警告
 //(local id 的命名规矩归 package 层的盘点与 doctor,loader 不重复报)。
+// warnings 非空时逐枚"跳过/告警"人话(含技能目录)收进去,给部署档点名
+// required 的拒启诊断用(§六)。
 std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_root, const std::string& source_level,
-                                         const std::string* package_id) {
+                                         const std::string* package_id, std::vector<std::string>* warnings) {
     std::vector<SkillMeta> metas;
+    const auto note = [warnings](const std::string& warning) {
+        platform::LogSink::Instance().Warn("skills", warning);
+        if (warnings != nullptr) {
+            warnings->push_back(warning);
+        }
+    };
 
     std::error_code ec;
     if (!std::filesystem::exists(skills_root, ec) || ec || !std::filesystem::is_directory(skills_root, ec)) {
@@ -225,7 +251,7 @@ std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_roo
 
         std::ifstream file(skill_md, std::ios::binary);
         if (!file.is_open()) {
-            platform::LogSink::Instance().Warn("skills", "打不开 " + PathToUtf8(skill_md) + ",跳过");
+            note("打不开 " + PathToUtf8(skill_md) + ",跳过");
             continue;
         }
         std::ostringstream buffer;
@@ -234,18 +260,17 @@ std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_roo
 
         const auto parsed = ParseSkillMarkdown(content);
         if (!parsed.has_value()) {
-            platform::LogSink::Instance().Warn(
-                "skills", PathToUtf8(skill_md) + " 的 frontmatter 损坏(没有闭合的 ---),跳过");
+            note(PathToUtf8(skill_md) + " 的 frontmatter 损坏(没有闭合的 ---),跳过");
             continue;
         }
 
         const std::string dir_name = PathToUtf8(entry.path().filename());
         if (!parsed->name.has_value() || parsed->name->empty()) {
-            platform::LogSink::Instance().Warn("skills", PathToUtf8(skill_md) + " 缺必填 name，跳过");
+            note(PathToUtf8(skill_md) + " 缺必填 name,跳过");
             continue;
         }
         if (!parsed->description.has_value() || Trim(*parsed->description).empty()) {
-            platform::LogSink::Instance().Warn("skills", PathToUtf8(skill_md) + " 缺必填 description，跳过");
+            note(PathToUtf8(skill_md) + " 缺必填 description,跳过");
             continue;
         }
         if (package_id == nullptr) {
@@ -253,17 +278,14 @@ std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_roo
             // 不走这两条——canonical 名带点带冒号,本就不合裸名规范;目录名
             // 规矩归 package 层盘点。
             if (!IsValidAgentSkillName(*parsed->name)) {
-                platform::LogSink::Instance().Warn(
-                    "skills", PathToUtf8(skill_md) + " 的 name 不合 Agent Skills 命名规范，仍按兼容模式加载");
+                note(PathToUtf8(skill_md) + " 的 name 不合 Agent Skills 命名规范,仍按兼容模式加载");
             }
             if (*parsed->name != dir_name) {
-                platform::LogSink::Instance().Warn(
-                    "skills", PathToUtf8(skill_md) + " 的 name 与父目录名不一致，仍按 frontmatter 名加载");
+                note(PathToUtf8(skill_md) + " 的 name 与父目录名不一致,仍按 frontmatter 名加载");
             }
         }
         if (Utf8CharacterCount(*parsed->description) > 1024) {
-            platform::LogSink::Instance().Warn(
-                "skills", PathToUtf8(skill_md) + " 的 description 超过 1024 字符，仍按兼容模式加载");
+            note(PathToUtf8(skill_md) + " 的 description 超过 1024 字符,仍按兼容模式加载");
         }
         SkillMeta meta;
         meta.name = package_id != nullptr ? (*package_id + ":" + *parsed->name) : *parsed->name;
@@ -272,6 +294,10 @@ std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_roo
         meta.source_level = source_level;
         meta.managed_official_copy = IsManagedOfficialCopy(content, *parsed);
         meta.package_id = package_id != nullptr ? *package_id : std::string();
+        // 冻结指纹(§六:启动时保存本场获准材料快照的最小形状——清单带
+        // 扫描时刻的 SKILL.md 哈希,按需读时对照,漂移即拒)。
+        meta.content_hash = platform::Sha256Hex(content);
+        meta.requires_tools = parsed->requires_tools.value_or(std::vector<std::string>{});
         metas.push_back(std::move(meta));
     }
 
@@ -279,11 +305,17 @@ std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_roo
 }
 
 std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level) {
-    return ScanSkillsDirImpl(skills_root, source_level, /*package_id=*/nullptr);
+    return ScanSkillsDirImpl(skills_root, source_level, /*package_id=*/nullptr, /*warnings=*/nullptr);
+}
+
+std::vector<SkillMeta> ScanSkillsDirReported(const std::filesystem::path& skills_root,
+                                             const std::string& source_level,
+                                             std::vector<std::string>* warnings) {
+    return ScanSkillsDirImpl(skills_root, source_level, /*package_id=*/nullptr, warnings);
 }
 
 std::vector<SkillMeta> ScanPackagedSkillsDir(const PackagedSkillRoot& root) {
-    return ScanSkillsDirImpl(root.skills_dir, root.source_level, &root.package_id);
+    return ScanSkillsDirImpl(root.skills_dir, root.source_level, &root.package_id, /*warnings=*/nullptr);
 }
 
 std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,

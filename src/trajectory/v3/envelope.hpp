@@ -245,6 +245,12 @@ enum class EventKindV3 {
     // selectionId 不变,不重新散列投递身份)。
     GatewayWorkBound,
     ReplySelectionCommitted,
+
+    // 提示组合事实(应用Worker接入单 §五 134):部署档组合系统提示的
+    // 可追溯记录——组合次序、各段渲染正文 hash、来源层与最终快照 ID。
+    // statusless 事实提交(同 state.goal.applied 族):只记"本场用了哪份
+    // 组合",不改控制状态;业务正文伪装不了宿主权限(来源逐段在账)。
+    PromptCompositionApplied,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

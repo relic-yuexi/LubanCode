@@ -62,7 +62,16 @@
           "additionalProperties": false,
           "properties": {
             "mcpServers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-            "plugins": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            "plugins": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "skills": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "sourceDir": { "type": "string", "minLength": 1 },
+                "required": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "optional": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+              }
+            }
           }
         },
         "tools": { "$ref": "#/definitions/toolPolicy" },

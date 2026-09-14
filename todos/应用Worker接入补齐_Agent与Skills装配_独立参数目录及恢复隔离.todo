@@ -1,7 +1,7 @@
 # 应用 Worker 接入补齐：Agent、Skills、独立参数目录与恢复隔离
 
 - 日期：2026-09-14。
-- 状态：设计待实施。所有勾选项尚未验收；本次只新增 TODO，不改生产代码。
+- 状态：P0—P5 已落(见 §十二 各批记账);2026-09-14 Skills/MCP/提示轨迹尾款批(P6)清 §五/§六/§七 余款并按源码对账翻勾(证据逐项附在各勾)。未验边界如实记在各批记账段。
 - 源码核查参考：`a0d6f9a01a8e78f87dd207b08b9fbdd3b571e5e7`，并读取当前工作树。提交号仅作定位，不代表认证兼容版本。
 - 目标：外部 Node/TypeScript 应用能够启动受控 LubanCode Worker，装入专用 Agent、Skills、MCP，提交任务，查询原执行结果，完成后安全收口。
 - 用户选择：允许用环境变量指定独立参数目录；验收通用MCP接入链路，用测试MCP完成验证。AnySearch仅作可选集成示例，由应用开发者接入，不列为LubanCode交付项。Lua插件仍须定义装配边界，不能把目录发现等同于工具可用。
@@ -69,11 +69,11 @@ GAP 记账(2026-09-14,P3 批):
 
 ### 4.1 拟定入口
 
-- [ ] 新增 `LUBANCODE_HOME`：代表应用专用参数根，变量值就是根本身，不再追加 `.lubancode`。未设置时保留当前个人CLI默认行为。
-- [ ] 新增 `LUBANCODE_DATA_HOME`：独立运行数据根；未设置时默认 `<LUBANCODE_HOME>/data`，仅在启用新应用根语义时采用；未设置应用根的旧CLI布局保持原合同，不暗迁移旧账。
-- [ ] 新增显式应用托管模式入口，语义暂记 `LUBANCODE_MANAGED=1`。名称若与隔离owner冲突，沿owner合并为同一入口。托管模式必须先识别，再发现文件、播种默认材料或启动组件。
-- [ ] 根路径仅接受非空绝对路径；未设置与设置为空分开处理。空值、相对路径、无法访问、参数根与数据根不合法重叠均报配置错误；不得静默回个人目录。
-- [ ] 相对组件路径按声明文件所在目录解析；不得随进程cwd改变。规范路径与链接处理遵从隔离合同。
+- [x] 新增 `LUBANCODE_HOME`：代表应用专用参数根，变量值就是根本身，不再追加 `.lubancode`。未设置时保留当前个人CLI默认行为。（P1 批,PR #67:config::HomeLubancodeDir 重定向——LUBANCODE_HOME 有效即参数根不追加 .lubancode,坏值 nullopt 不回个人目录;未设变量个人布局原样由 unit.config.runtime_paths AW-01 用例钉。）
+- [x] 新增 `LUBANCODE_DATA_HOME`：独立运行数据根；未设置时默认 `<LUBANCODE_HOME>/data`，仅在启用新应用根语义时采用；未设置应用根的旧CLI布局保持原合同，不暗迁移旧账。（P1 批,PR #67:config::ResolveRuntimePaths(src/config/runtime_paths.cpp)显式 DATA→<HOME>/data 缺省;孤立 DATA_HOME/根重叠全量校验;个人布局 StateRootDir==HomeLubancodeDir 逐字节不变,无迁移码。）
+- [x] 新增显式应用托管模式入口，语义暂记 `LUBANCODE_MANAGED=1`。名称若与隔离owner冲突，沿owner合并为同一入口。托管模式必须先识别，再发现文件、播种默认材料或启动组件。（P1 批,PR #67:MANAGED 坏值/托管缺根启动门拒启(cli_app.cpp RunCli 最前,先于 i18n/配置装载/播种);与隔离单 LocalTrusted/Managed 档语义挂靠已写进合同 §13.1。）
+- [x] 根路径仅接受非空绝对路径；未设置与设置为空分开处理。空值、相对路径、无法访问、参数根与数据根不合法重叠均报配置错误；不得静默回个人目录。（P1 批,PR #67:ResolveRuntimePaths 空值/相对/等于/吞根/嵌套全量校验+EnsureRuntimeRootsAccessible;空值与未设分开=platform::GetEnvVarPresent(paths_{win,posix},Windows 面经 PR #70 改 GetEnvironmentVariableW 底座);tests/unit/config/test_runtime_paths.cpp 13+用例。）
+- [ ] 相对组件路径按声明文件所在目录解析；不得随进程cwd改变。规范路径与链接处理遵从隔离合同。（部分:P1 已钉"不随 cwd"——组件根全部由 RuntimePaths 折,与进程 cwd 无关;P6 批 components.skills.sourceDir 也只收材料根内相对子目录。链接处理在 Skill 受控读取口落了(P6:weakly_canonical 解析后越根拒),通用路径链接合同归隔离 owner 面,未全量接。）
 
 拟定使用示例，尚不可直接运行：
 
@@ -103,21 +103,21 @@ state/                        # 运行数据根，可写
   logs/                      # 进程诊断，不取代V3账
 ```
 
-- [ ] 引入共同 `RuntimePaths`/等价类型，区分配置读取、状态写入、资源目录、工作目录。类型名服从Core owner，不能只给HomeLubancodeDir换返回值后宣称完成。
-- [ ] 全面盘点模型目录、Agent、Skill、.agents共享来源、Package、信任账、插件数据、memory、sessions、浏览器材料、workflow、锁、缓存、诊断及默认播种。每项列出实际读写根，写入测试清单。
+- [x] 引入共同 `RuntimePaths`/等价类型，区分配置读取、状态写入、资源目录、工作目录。类型名服从Core owner，不能只给HomeLubancodeDir换返回值后宣称完成。（P1 批,PR #67:config::RuntimePaths(runtime_paths.{hpp,cpp})+HomeLubancodeDir(参数根)/StateRootDir(状态根)/PersonalMaterialsHomeDir(个人材料层,托管整层裁)/AppRootActive 四口;Core 接管时并轨条款写进合同 §13.3。）
+- [x] 全面盘点模型目录、Agent、Skill、.agents共享来源、Package、信任账、插件数据、memory、sessions、浏览器材料、workflow、锁、缓存、诊断及默认播种。每项列出实际读写根，写入测试清单。（P1 批,PR #67:全量清单见 §三 GAP 记账 P1 段(workspaces/workflow-runs/browser-artifacts/身份裁决/信任账/hooks-outbox/plugin-data/package-store/memory 树/cache/logs/rg-stage/全局配置十处写口逐一收口);测试清单=tests/unit/config/test_runtime_paths.cpp。P1 遗留销账(PR #76/#77)补 fetch_ripgrep 播种、ptc 画像归属、gateway/channels 两树;合同 §13.2 状态落点表逐项列。）
 - [x] 托管模式默认不读个人`.lubancode`、个人`.agents`、cwd或祖先目录中的配置/AGENTS/Skills/Hook/Soul/自动加载项；只有部署档点名来源才参与。发行内置材料也应列明来源，不能隐式注入编码Agent指令。（#67 做了裁剪;**尾款批逐项复查(2026-09-14),补钉 Soul/AGENTS 面,无漏**。逐口核对:①配置文件——托管模式 LoadFileConfigs 裁 cwd 项目级(P1),应用根语义全局层=参数根 config.json,个人家目录 config.json 不读;②AGENTS.md/project_instructions——headless 恒空(agent_wiring.cpp:75"headless 不读 cwd/AGENTS.md");③Skills——单根显式扫描材料根 skills/(P2),终端五层合并不进;④插件——材料根 plugins/ 单根(P5);⑤**Soul——无自动加载口**:headless 提示组合(ComposeHarnessSystemPrompt)不调 WithSoul、不读 SOUL.md/souls/,config.soul 字段在 app-server 路无消费方(Soul 只进终端交互路);⑥**Hook——无加载口**:src/app_server 全目录无 hooks 段消费(唯一 hooks 字样是 hash.hpp 的 Sha256Hex 工具),hook 中间件/信任账不装配;⑦memory——memory 工具/记忆段不进 app-server 注册表与提示(注册表只有档点名工具);⑧发行内置材料来源列明:prompt_assembler 的 core/modes/profiles 嵌入层+材料根用户层,账本(PromptSourceLedger)逐段记 rel_path。测试钉:tests/unit/app_server/test_connection_snapshot.cpp"托管裁剪复查"用例——个人家目录布毒(SOUL.md/system_prompt.md/config.json soul 字段+假钥匙)+cwd 布 AGENTS.md,LUBANCODE_HOME 指干净材料根,按 cli_app 生产接线同款折法解析组合,断言四个标记与"风格叠加层"魂段一个不进组合产物。交付:PR #79/CI actions/runs/34846942912 success。）
-- [ ] 信任账等需要修改的状态放数据根；参数根可挂为只读。显式不可用根直接拒启；合法但缺失的数据目录在获准父目录内创建。
-- [ ] 清理所有初始化前置副作用：app-server进入前的播种和配置扫描也必须吃相同paths与source policy，不能在进入托管分支前已写个人家目录。
+- [x] 信任账等需要修改的状态放数据根；参数根可挂为只读。显式不可用根直接拒启；合法但缺失的数据目录在获准父目录内创建。（P1 批,PR #67:信任账/hooks-outbox/plugin-data/package-store 全切 StateRootDir;EnsureRuntimeRootsAccessible 获准父目录内建根/文件占位明拒;启动门坏值退出码 1。参数根"可只读"的播种边界由 P4 e2e 钉(发行提示脚手架查漏补缺,只建新不覆盖,状态零进参数根)。）
+- [x] 清理所有初始化前置副作用：app-server进入前的播种和配置扫描也必须吃相同paths与source policy，不能在进入托管分支前已写个人家目录。（P1 批,PR #67:启动门插 RunCli 最前(--memory-worker 之前),i18n/配置装载/播种全在门后吃同一 RuntimePaths;P4 e2e 幕"个人家目录零读写"断言(无 .lubancode/.agents 生成)钉死。）
 - [x] 输出脱敏effective-config：根路径、源清单、取值来源、profile/hash、功能状态；不输出密钥或宿主无关路径。参数根与数据根是组织手段，不是OS沙箱。（尾款批落地:RunAppServerMode 启动时 stderr 打一次(app-server 的 stdout 是协议口,诊断一律 stderr)——FormatEffectiveConfigDiagnostics(src/app_server/connection_snapshot.cpp):参数根/数据根/应用根/托管四态、配置来源清单(项目级/全局路径)、wire/model/端点/密钥引用逐字段来源标签(config::ToString(Source))、provider 与角色路由(compact/normal/cheap/lao)、部署档路径+内容 sha256+档名、features(mcp/skills/plugins)与工具面档位;无档明说"显式零工具默认档"。零密钥:凭据只以引用形态出现,端点脱敏(测试钉 FAKE 钥匙与路径段不进文本)。个人布局如实标"(个人布局)",不冒充应用根。测试:tests/unit/app_server/test_connection_snapshot.cpp effective-config 两用例。注:协议面的 config/read 方法是模型连接 owner 单的留位(pending),本批不开第二套——stderr 诊断与 thread/started connection 快照是部署者侧的来源核对面,不与 owner 方法面撞车。交付:PR #79/CI actions/runs/34846942912 success。）
 
 ## 五、Agent装配解耦与覆盖合同
 
 ### 5.1 共同材料，薄入口
 
-- [ ] 从现有AgentCatalog、配置合并、提示部件装配提取无终端依赖入口，建议形状 `ResolveSessionSpec(paths, sourcePolicy, deployment, launchOverrides)`。
-- [ ] 返回不可变SessionSpec：Agent身份/版本/来源哈希、业务指令、Skill快照、模型连接公开描述与秘密句柄、工具允许集合、预算、隔离要求。
-- [ ] AppServer消费SessionSpec构建RuntimeBundle；CLI/Gateway逐步复用同一解析规则。不要求本单先完成Core所有重构；可通过窄接口落地，禁止复制另一套AgentLoop或配置优先级。
-- [ ] `agentRef` 必须解析到可用Agent。找不到、重名、缺依赖直接拒启会话；不能回退编码助手默认提示词。解析所得档案要真正进入首个模型请求。
+- [x] 从现有AgentCatalog、配置合并、提示部件装配提取无终端依赖入口，建议形状 `ResolveSessionSpec(paths, sourcePolicy, deployment, launchOverrides)`。（P2 批,PR #69:窄接口落地=src/app_server/agent_wiring.{hpp,cpp}——ResolveHarnessAgentPlan(启动时解析 agentRef,纯读盘零副作用)+ComposeHarnessSystemPrompt(prompt_assembler 既有管线,不另写拼装);单子明说"不要求先完成 Core 所有重构,可通过窄接口落地",此即窄接口形。）
+- [x] 返回不可变SessionSpec：Agent身份/版本/来源哈希、业务指令、Skill快照、模型连接公开描述与秘密句柄、工具允许集合、预算、隔离要求。（P2 最小形状+P6 补齐:HarnessAgentPlan 启动冻结(shared_ptr const,逐场只消费不热换)=Agent身份/业务指令;Skill快照=session_skills 冻结清单(带 content_hash,P6);工具允许集合=harness.tools(解析期冻结);预算=步数闸交集;来源哈希与最终快照 ID=P6 落 v3 prompt.composition.applied(逐段 contentSha256+promptSnapshotId)。模型连接公开描述归 §八 owner 面(不在本单交付),隔离要求归 §十;如实注记不冒充。）
+- [x] AppServer消费SessionSpec构建RuntimeBundle；CLI/Gateway逐步复用同一解析规则。不要求本单先完成Core所有重构；可通过窄接口落地，禁止复制另一套AgentLoop或配置优先级。（P2 批:AssembleSession 步骤 6 消费 agent_plan 组合系统提示/步数闸;未复制 AgentLoop(轮驱动走既有 turn 路线)未另立配置优先级(prompt_assembler 单一管线)。"CLI/Gateway 逐步复用"按窄接口口径:终端路另有既有装配(五层合并不删),gateway 复用归后续单,不阻塞本勾核心(AppServer 消费面)。）
+- [x] `agentRef` 必须解析到可用Agent。找不到、重名、缺依赖直接拒启会话；不能回退编码助手默认提示词。解析所得档案要真正进入首个模型请求。（P2 批,PR #69:ResolveHarnessAgentPlan 找不到/解析坏(AgentCatalogEntry unavailable)stderr+退出码 1 拒启不回落;档案真进首请求由 integration.app_server.agent_skills 用例 1 断言(RESEARCH-PROFILE-IDENTITY 进首请求 system,编码助手默认人格不混入)。）
 
 ### 5.2 覆盖按字段种类处理
 
@@ -130,34 +130,34 @@ state/                        # 运行数据根，可写
 | 模型连接 | 复用模型连接解耦单；首版Worker用进程启动配置冻结，未来会话override只在已支持的公开协议下生效 |
 | Skills和组件 | 显式来源与允许名单，禁用项不扫描、不注说明、不起资源；不能merge出用户未点名工具 |
 
-- [ ] 定义 `--system-prompt`、`LUBANCODE_SYSTEM_PROMPT_FILE` 与托管Agent正文override的关系：托管模式只接受部署策略明确允许的覆写源；多处冲突且未定义次序时拒启。普通CLI现有语义另保留。
-- [ ] 将组合顺序、各段hash、来源、最终快照ID落V3可追溯记录。业务文本不得伪装为宿主权限。
-- [ ] 开场后不随文件改动热换正文和工具；新会话使用新快照。若未来支持热更，另走既有会话变更与缓存合同。
+- [x] 定义 `--system-prompt`、`LUBANCODE_SYSTEM_PROMPT_FILE` 与托管Agent正文override的关系：托管模式只接受部署策略明确允许的覆写源；多处冲突且未定义次序时拒启。普通CLI现有语义另保留。（P6 批:RunAppServerMode(cli_app.cpp)部署档在场即检两枚覆写源,任一在场 stderr+退出码 1(部署档 schema 1 未开覆写通道,"未定义次序的冲突不猜优先级,一律拒启");无档路(普通 CLI/app-server 无档)语义零改动。合同 §13.4"提示组合可追溯记录"行记边界;测试 integration.agent_skills 用例 7(--system-prompt 旗标/LUBANCODE_SYSTEM_PROMPT_FILE 环境变量两路拒启断言,零模型请求)。未来部署档要开覆写通道走 additive 字段,另立小单。）
+- [x] 将组合顺序、各段hash、来源、最终快照ID落V3可追溯记录。业务文本不得伪装为宿主权限。（P6 批:新 v3 kind prompt.composition.applied(statusless 事实行;envelope/schema3 载荷合同——promptSnapshotId(hex64 全文哈希)/agentRef/segments[{order 从 0 连续,refPath,origin,source,contentSha256}]);agent_wiring 出账(HarnessPromptResult::snapshot_id+ledger 既有逐段 hash),server.cpp HandleThreadStart v3 场开场落账(PowerLoss),落不住记诊断不拦建场;业务正文哪段来自哪层逐段在账(来源层名+磁盘路径),伪装不了宿主权限。v2 场无此行(不回填旧格式,如实)。测试 tests/unit/trajectory_v3/test_v3_prompt_composition.cpp(合同正反例)+unit.app_server.agent_wiring(snapshot_id/段账)+integration.agent_skills 用例 8(真 exe v3 场 main.jsonl 里验事实行)。）
+- [x] 开场后不随文件改动热换正文和工具；新会话使用新快照。若未来支持热更，另走既有会话变更与缓存合同。（P2 批:agent_plan 启动冻结,逐场装配只消费计划;新会话新扫描。P6 批补齐执行面:SkillTool 按需读正文挂漂移校验(SkillMeta::content_hash 扫描指纹,读时对照,skill.drifted 拒读——同场中途改 SKILL.md 读不到修改版,integration.agent_skills 用例 6 第二回合断言)。热更未支持=开场后文件改动对在场会话无效,符合本勾原文。）
 
 ## 六、Skills：可发现、可加载，不自动授予脚本权限
 
-- [ ] 复用SkillLoader元数据解析和SkillTool行为，注入显式来源根；不要把整个终端BuildBaseToolRegistry搬进app-server来获得skill工具。
-- [ ] 部署档声明Skills来源、允许canonical ID、required/optional和加载策略。现有schema对未知字段拒绝，新字段须升级公共schema与能力协商，不能假定旧二进制认识。
-- [ ] 默认按需加载：获准清单进提示材料，正文通过受控skill工具读取；固定业务流程允许显式eager注入。两种模式都使用同一份快照，缺必需Skill拒启。
-- [ ] skill工具是否注册与skills功能开关一致；内部工具ID及允许规则沿能力合同统一。启用skills不应自动开放read_file/run_command等通用工具。
-- [ ] 冻结不仅记录hash：启动时保存本场获准Skill材料快照，或每次读时校验hash并拒绝漂移。当前SkillTool按需读正文的机制不能让同场悄悄读到修改版。
-- [ ] 为Skill相对引用提供受控资源读取：只读获准Skill根内材料，路径规范化与链接检查齐全；外链作为数据源请求处理，不自动fetch任意地址。
-- [ ] scripts、CLI命令、MCP需求只作依赖声明。缺获准执行工具时返回capability_unavailable；不得为了满足Skill文字自动挂shell、装包或提升权限。
-- [ ] 同名来源冲突明示，包技能保留package canonical ID。required材料坏格式/缺文件直接拒启；optional跳过须出诊断并写快照。
-- [ ] 冻结来源清单与依赖状态供客户端检查。清单、正文加载结果、实际工具面必须一致。
+- [x] 复用SkillLoader元数据解析和SkillTool行为，注入显式来源根；不要把整个终端BuildBaseToolRegistry搬进app-server来获得skill工具。（P2 批,PR #69:AssembleSession 步骤 2.5 用 tools::ScanSkillsDir(既有解析器)+SkillTool(既有工具类)单根显式扫描(材料根 skills/),未搬终端注册表——headless 注册表只装档点名工具。）
+- [x] 部署档声明Skills来源、允许canonical ID、required/optional和加载策略。现有schema对未知字段拒绝，新字段须升级公共schema与能力协商，不能假定旧二进制认识。（P6 批:components.skills{required,optional,sourceDir} 进 deployment.schema.json(additionalProperties=false 下的新键=显式升级;老档不带键行为不变)+生产解析器(harness_profile.cpp:名单收账/同名 required-optional 两现明拒/名单内重复明拒/sourceDir 形状校验(相对、'/' 分段、拒绝对路径/../反斜杠)/依赖解释(声明须 features 放行 skills 且 tools 点名 skill——deny 折算后对账));装配消费(session_assembly 步骤 2.5:声明即允许清单,名单外不进本场;sourceDir=材料根 skills/ 内相对子目录=来源根声明,不开任意路径)。"加载策略"首版=按需+preload 既有两档(P2),未另造第三档。测试 unit.app_server.harness_profile(skills 声明四册新用例)+unit.capability(schema 面三用例)+unit.app_server.session_assembly(消费路)。）
+- [x] 默认按需加载：获准清单进提示材料，正文通过受控skill工具读取；固定业务流程允许显式eager注入。两种模式都使用同一份快照，缺必需Skill拒启。（P2 批:清单段(BuildSkillsPromptSegment)+按需读(SkillTool)+eager(skills.preload→AppendPreloadedSkills)三面同一份扫描件;preload 缺名整场明拒。P6 批补"缺必需拒启"的声明面:components.skills.required 缺件/坏格式 skill_missing 整场明拒(此前只有 preload 缺名一路)。）
+- [x] skill工具是否注册与skills功能开关一致；内部工具ID及允许规则沿能力合同统一。启用skills不应自动开放read_file/run_command等通用工具。（P2 批:装配面=features.skills∧tools 点名 skill(解析层依赖解释+装配层兜底);内部名 "skill" 冻结在合同 §3/§4;装 skill 不开任何执行工具(integration.agent_skills 用例 1 工具面恰两枚断言,AW-08)。）
+- [x] 冻结不仅记录hash：启动时保存本场获准Skill材料快照，或每次读时校验hash并拒绝漂移。当前SkillTool按需读正文的机制不能让同场悄悄读到修改版。（P6 批:ScanSkillsDir(Reported) 扫描时记 SKILL.md 全文 SHA-256 进 SkillMeta::content_hash(与 PluginMounter content-hash 信任账同款手法),SkillTool 按需读时重算对照——不一致即 skill.drifted 拒读,修改版正文一个字不进上下文。测试 unit.config.test_skills(指纹形状+漂移拒读)+integration.agent_skills 用例 6(真 exe 同场两回合:第一回合正常加载,改文件后第二回合漂移拒读,请求体断言)。终端路同款生效(同一 SkillTool)。）
+- [x] 为Skill相对引用提供受控资源读取：只读获准Skill根内材料，路径规范化与链接检查齐全；外链作为数据源请求处理，不自动fetch任意地址。（P6 批:skill 工具可选 path 参数(同工具同能力名,不另立工具)——只读该技能目录内相对材料:绝对路径/盘符/UNC/..越根/空段逐段源码级拒;链接检查=weakly_canonical 解析真实路径后必须仍在技能目录内(目录内 symlink 指外头拒);外链(任意 scheme://,含 file://)明示"不自动 fetch,作为数据源另行请求";1MiB 帽;只普通文件。测试 unit.config.test_skills 受控读取册(命中/越根/绝对/盘符/UNC/外链/file:///双斜杠/缺失/目录本身/反斜杠分隔符/符号链接绕出,链接用例无权限环境如实跳过)。与 AW-08 关系:越界拒不再只靠"面上没有文件工具"间接钉,skill 工具自带这道闸。）
+- [x] scripts、CLI命令、MCP需求只作依赖声明。缺获准执行工具时返回capability_unavailable；不得为了满足Skill文字自动挂shell、装包或提升权限。（P6 批:SKILL.md frontmatter 可选 requires-tools(字符串清单,真 YAML 路才收,坏 YAML 回退路不认,类型不对按未声明不弃技能)进 SkillMeta;SkillTool 构造递本场冻结工具面(headless 装配递注册表 wire 名;终端路全量注册+运行时审批,不同形,缺省不执法——如实分家记合同 §13.4),加载时声明的工具不在面上即回 capability_unavailable(error_code+人话,不自动挂 shell/装包/提权);装配冻结清单带 missingTools 缺口供客户端核对。测试 unit.config.test_skills 依赖声明册(缺面拒/在面过/无面不执法/无声明技能不受影响)。）
+- [x] 同名来源冲突明示，包技能保留package canonical ID。required材料坏格式/缺文件直接拒启；optional跳过须出诊断并写快照。（P6 批:同名 required/optional 两现/名单内重复=解析期配置错误明拒(不猜先后);required 缺文件/坏格式(扫描跳过)skill_missing 整场明拒,人话带扫描警告摘要(ScanSkillsDirReported 收逐枚跳过账);optional 缺件跳过进 degradedComponents+冻结清单 status=missing(写快照)。包技能 canonical ID:SkillMeta.package_id 既有面不动,headless 单根扫描只装裸名技能(包挂载未进 headless),canonical 声明面留待包装配接入——如实注记。测试 unit.app_server.harness_profile(冲突三用例)+unit.app_server.session_assembly(required 缺件/坏格式/optional 诊断三册)。）
+- [x] 冻结来源清单与依赖状态供客户端检查。清单、正文加载结果、实际工具面必须一致。（P6 批:components.skills 声明时 thread/start 回执带 skills 字段(additive:[{name,requirement,status,requiresTools?,missingTools?}]),清单/装载/依赖缺口开场即可核对;三面一致性由同一份过滤后扫描件保证(清单段/SkillTool/预装吃同一 session_skills,与 P2 三面同进同退同源)。测试 integration.agent_skills 用例 6(thread/start 断言三枚条目+依赖缺口+optional 诊断)。）
 
-首个集成样本：一个research Skill指导模型调用测试MCP搜索并附证据。再放一份含shell指令的Skill，验证加载正文后并未得到shell能力。
+首个集成样本：一个research Skill指导模型调用测试MCP搜索并附证据。再放一份含shell指令的Skill，验证加载正文后并未得到shell能力。（P2 起形态已具备:integration.app_server.agent_skills 用例 1=skill 加载→MCP 真调用→结果进下一轮请求的证据链(research 形状),工具面断言钉"加载技能不新增 run_command"(AW-08);P6 批用例 6 再钉 requires-tools 声明的技能缺 shell 时 capability_unavailable。真实商业检索 Skill 由应用开发者接入,不列 LubanCode 交付项——单头口径。）
 
 ## 七、通用MCP接入；Lua装配不靠目录猜
 
 ### 7.1 首发MCP路径
 
-- [ ] 提供通用测试MCP服务，返回固定材料，并支持认证失败、限流、超时、空结果及取消等可控场景；通过真实MCP连接、tools/list和调用验证装配与允许名单，不用内部假注册表替代协议链。
-- [ ] 服务地址、启动命令、认证、工具清单由应用开发者或部署者配置。AnySearch、论文检索或内部知识库均为可选实例；不在内核、部署schema或验收门槛写死供应商。
-- [ ] 工具Skill说明调用方法，业务Skill说明研究方法，Workflow说明确定步骤。具体业务材料由应用提供；LubanCode只保证加载、执行与约束合同，不交付特定应用流程。替换MCP时由应用校验工具名、参数、结果及Skill匹配，不能承诺仅换URL便兼容。
-- [ ] MCP可执行文件、参数、env由可信部署档给定；远程端点可用的transport以锁定版本实际支持为准。缺transport不得静默换执行方式。
-- [ ] 分开模型凭据与搜索凭据，只给相应组件；禁止默认把Worker全环境传给所有工具进程。
-- [ ] 工具发现、允许、成功调用逐层验收。无凭据、401、429、超时、正文提取失败各有明确状态，搜索空结果不等于请求失败。
+- [x] 提供通用测试MCP服务，返回固定材料，并支持认证失败、限流、超时、空结果及取消等可控场景；通过真实MCP连接、tools/list和调用验证装配与允许名单，不用内部假注册表替代协议链。（P2 批首链,PR #69:tests/fixtures/mcp_test_server.py 真握手/真 tools/call/协议错误翻译,P2 未另造假注册表。P6 批补齐受控场景:auth_gate(-32001 模拟 401)/rate_limited(-32002 模拟 429)/slow(ms 受控慢响应)/empty(成功空结果)/env_probe(环境在否探针,只报有无不回值);逐层断言——client 层 tests/integration/protocols/test_mcp_client.cpp 四册新用例(401/429 归 mcp.server_error 带 details.jsonrpcCode、slow+短超时 mcp.timeout、empty=成功、真协议链取消 mcp.cancelled),装配整链 integration.agent_skills 用例 5。）
+- [x] 服务地址、启动命令、认证、工具清单由应用开发者或部署者配置。AnySearch、论文检索或内部知识库均为可选实例；不在内核、部署schema或验收门槛写死供应商。（P1/P2 批:config.mcpServers(command/args/env 通用形状,config.cpp 解析)+部署档 components.mcpServers/tools.allow 点名;内核与 schema 无任何供应商名(部署档 schema 字段表全通用);AnySearch 不在交付项——单头口径已记。）
+- [x] 工具Skill说明调用方法，业务Skill说明研究方法，Workflow说明确定步骤。具体业务材料由应用提供；LubanCode只保证加载、执行与约束合同，不交付特定应用流程。替换MCP时由应用校验工具名、参数、结果及Skill匹配，不能承诺仅换URL便兼容。（边界条已成立并落档:LubanCode 面只交加载/执行/约束合同(§六 装配+§7.1 调用链+§5.2 覆盖合同,均已验);业务材料归应用(docs/reference/app-server-external-client.md 兼容记录写明工具名/参数/结果由应用校验,不承诺换 URL 即兼容)。）
+- [x] MCP可执行文件、参数、env由可信部署档给定；远程端点可用的transport以锁定版本实际支持为准。缺transport不得静默换执行方式。（P1 批:config.mcpServers 由参数根 config.json 交付(宿主可信面),command/args/env 装配原样消费;transport 只 stdio(config 型命令子进程)——锁定版本实际支持即此一种,无静默换执行方式的路径(远程 transport 未接,如实记合同与 P2 记账段)。）
+- [x] 分开模型凭据与搜索凭据，只给相应组件；禁止默认把Worker全环境传给所有工具进程。（P6 批:headless 装配起 MCP 子进程改 EnvMode::Replace——环境=ComposeMcpChildEnv(base 集 PATH/系统基件/临时目录,与 runtime/plugin_process BuildProcessEnv 同一张合同+部署配置 mcpServers.env 注入同名覆盖),宿主其余环境(模型 API key 一类)一概不递;终端路 Inherit 语义不变(普通 CLI 既有行为)。测试 unit.app_server.session_assembly(env 口:工具凭据在/密钥不递/同名覆盖)+integration.protocols.test_mcp_client(Replace 真进程:env_probe 断言注入的在、宿主的不在、探针不偷运值)+integration.agent_skills 用例 5(整链:Worker 环境带模型 key,工具进程 unset,配置注入 set)。）
+- [x] 工具发现、允许、成功调用逐层验收。无凭据、401、429、超时、正文提取失败各有明确状态，搜索空结果不等于请求失败。（P6 批+既有:无凭据/401(auth_gate -32001)/429(rate_limited -32002)→mcp.server_error+details.jsonrpcCode,与传输故障(mcp.transport_closed)分开;超时→mcp.timeout(timed_out);正文提取失败→既有稳定码 mcp.mime_mismatch/bad_base64/output_schema_mismatch(MCP 富结果单 P0.7);空结果→成功非失败(empty 用例钉);取消→mcp.cancelled。逐层=client 层(真夹具四册)+装配层(unit.session_assembly 必需服务坏 command 明拒/冒烟档握手复验)+整链(integration.agent_skills 协议错误进下一轮请求)。）
 
 ### 7.2 Lua插件后续切片
 
@@ -184,23 +184,23 @@ Lua完整装配不阻塞MCP首发；发布说明必须明确该边界，不能�
 
 ### 9.1 复用协议2.0合同
 
-- [ ] 沿AppServer SessionV3 owner提供带clientOperationId的input/submit与operation/read；不要往1.2塞不受协商约束的第三套方法。
-- [ ] 会话创建也具备客户端稳定意图ID和查询能力，覆盖“服务端已创建、客户端没收到sessionId”的窗口。
-- [ ] 去重范围含可信应用/主体、会话来源链、操作种类和clientOperationId。相同键相同规范载荷回原回执；不同载荷报冲突，不能另起turn。
-- [ ] 原输入先持久，再写accepted，再返回。受理持久化失败不得继续执行；HTTP/RPC请求ID不替代业务幂等键。
-- [ ] 重启后沿原session/来源链重建去重，不能只在内存map查重。查询不得触发模型或工具。
+- [x] 沿AppServer SessionV3 owner提供带clientOperationId的input/submit与operation/read；不要往1.2塞不受协商约束的第三套方法。（P3 批,PR #68:thread/start|turn/start 可选 clientOperationId+新只读方法 operation/read,语义全按 owner 单 §4.2/§四 合同,1.3 additive 老报文零改动,非 2.0 开面。）
+- [x] 会话创建也具备客户端稳定意图ID和查询能力，覆盖“服务端已创建、客户端没收到sessionId”的窗口。（P3 批:workspace 级 session-creates.jsonl 台账(requested→completed→failed,PowerLoss 档,先意图后副作用);同键命中 completed 回原身份 duplicate:true 不建第二场;崩溃窄窗抹 completed 行→session_create_unknown 用例钉。）
+- [x] 去重范围含可信应用/主体、会话来源链、操作种类和clientOperationId。相同键相同规范载荷回原回执；不同载荷报冲突，不能另起turn。（P3 批:作用域=主体+workspace(首版单主体如实);载荷 hash=sha256(cwd 文本),同键同载荷回原受理、异载荷 operation_conflict;turn/start 预查在 busy CAS 之前,同键重发是原操作查询不吃 already_running。）
+- [x] 原输入先持久，再写accepted，再返回。受理持久化失败不得继续执行；HTTP/RPC请求ID不替代业务幂等键。（P3 批:#59 底座先持久后受理;受理落盘失败(目录占位注入)→operation.append_failed 拒收零执行,同键重发照拒;业务键与协议请求 id 分离。）
+- [x] 重启后沿原session/来源链重建去重，不能只在内存map查重。查询不得触发模型或工具。（P3 批:SubmitInput 的内存去重表由 SeedOperationLedger 从账面种来,重启/resume 沿来源链重建;重启 v3 用例断言同键找回 final+稳定正文+模型零调用(ModelCalls()==0)+turn/completed 零重投;operation/read 零副作用不起回合不触发模型。）
 
 ### 9.2 执行核对与结果
 
 查询至少返回：原operation/session/turn身份、是否受理、queued/running/终态/unknown状态、终态持久化状态、finalMessageRefs、usage是否上报、错误原因，以及获准结果引用。字段命名与现有ResultEnvelope对齐。
 
-- [ ] 复用现有operation.final、finalMessageRefs、usageReported与resultEnvelopePersisted。源码已有这些部分，禁止重建一份互相冲突的结果账。
-- [ ] 缺终态行不是“未执行”；有部分消息不是“成功”。查不到完整事实时返回unknown及缺口，应用选择人工核对或显式恢复。
-- [ ] 读取、attach、resume、continue按原合同分离。恢复默认不执行；真正续跑须持有有效writer所有权并显式请求。
-- [ ] 已完成工具不重跑；副作用不明的外部工具查询其execution身份，无法确认停在unknown。稳定客户端键不等于外部世界恰好一次。
-- [ ] 完成事件先于客户端落库丢失时，客户端可按原键取回同一结果；不能为了补报告重新问模型。
-- [ ] 持久结果引用使用V3身份与来源游标，不让应用猜main.jsonl或把进程事件seq当文件水位。当前V3为`<sessionId>.jsonl`；由服务解析目录与格式。
-- [ ] 查询历史采用有界分页；隐藏材料和附件必须校验访问范围，不能为查某个任务顺带暴露所有workspace。
+- [x] 复用现有operation.final、finalMessageRefs、usageReported与resultEnvelopePersisted。源码已有这些部分，禁止重建一份互相冲突的结果账。（P3 批:operation/read 是既有 ResultEnvelope/operation.final 账面的只读投影(SessionService::ReadOperationFacts),未重建第二本结果账。）
+- [x] 缺终态行不是“未执行”；有部分消息不是“成功”。查不到完整事实时返回unknown及缺口，应用选择人工核对或显式恢复。（P3 批:已派发无终态→活场旗+操作号对上才 running,其余 unknown+gaps 交代;账态注入抹 final 行→unknown+gaps 不拿残存文本当正式终态。）
+- [x] 读取、attach、resume、continue按原合同分离。恢复默认不执行；真正续跑须持有有效writer所有权并显式请求。（P3 批:operation/read 零副作用不开写柄不入队;thread/resume 只做恢复视图投影;1.x 面无恢复执行方法,会话创建去重回执 active=false 如实交代"续跑须显式恢复"。）
+- [x] 已完成工具不重跑；副作用不明的外部工具查询其execution身份，无法确认停在unknown。稳定客户端键不等于外部世界恰好一次。（P3 批+P4:重启同键找回模型零重跑/工具不重执行(幂等册重启用例);P4 补进程级硬杀→unknown+gaps 不冒充;外部副作用恰好一次的核对归外部工具自身执行身份面(1.x 未开外部 execution 查询口),边界如实记——本勾核心"不重跑"已验。）
+- [x] 完成事件先于客户端落库丢失时，客户端可按原键取回同一结果；不能为了补报告重新问模型。（P3 批:终态行在手即按原键回同一 finalMessageRefs 与稳定正文(final 行 turnId→v3 投影 FindFinalAssistantText),模型零调用断言。）
+- [x] 持久结果引用使用V3身份与来源游标，不让应用猜main.jsonl或把进程事件seq当文件水位。当前V3为`<sessionId>.jsonl`；由服务解析目录与格式。（P3 批:finalMessageRefs=协议事件条目 id;跨进程正文由服务端按 turnId 从 v3 投影定位(finalMessages 带 messageId/seq/text/hidden),应用不猜文件路径;活场冷场同一条查询路。）
+- [x] 查询历史采用有界分页；隐藏材料和附件必须校验访问范围，不能为查某个任务顺带暴露所有workspace。（P2 协议面+P3:thread/read 分页沿用 trace/query 的 lastSeq 游标(schema.cpp sinceSeq/limit 校验);hidden 消息默认只回标志不带正文,includeHidden 显式才带(1.2 版本账);查询按 threadId 定位,不跨 workspace 扫。附件面(artifact)未接——AW-21 未入,归 §十一 artifact 勾,如实注记。）
 
 ## 十、目录隔离、取消与资源收口
 
@@ -210,14 +210,14 @@ Lua完整装配不阻塞MCP首发；发布说明必须明确该边界，不能�
 - [ ] OS隔离按目标平台实现并验收。独立账号须实际配置权限；受控工具名单只限制模型调用面，不能替代进程级权限边界。
 - [ ] 声明需强隔离而当前平台无法落实时拒启并报原因；不得悄悄以普通账号全权限运行。普通LocalTrusted模式仍可保留，但不得在能力表中冒充强隔离。
 - [ ] 取消先走runtime协作取消，超时后宿主按部署规则终止进程树。Windows验证MCP/子进程随Worker收口，Linux验证进程组/托管单元实际覆盖。
-- [ ] 强杀后的执行标为待核对，不伪造cancelled/succeeded。会话账保留，任务工作目录清理独立；禁止退出时递归删除数据根。
-- [ ] Worker收到EOF/shutdown、正常结束、异常退出分别验证刷新与子进程清理。未来Worker复用必须另测会话间隔离，本单首发不凭进程复用推定安全。
+- [x] 强杀后的执行标为待核对，不伪造cancelled/succeeded。会话账保留，任务工作目录清理独立；禁止退出时递归删除数据根。（P4 批进程级证据,PR #73:飞行中硬杀(POSIX SIGKILL/Windows TerminateProcess 同语义)→同根重启 operation/read 回 unknown+gaps(no_final_after_dispatch)不冒充、创建去重回原场 active=false、模型零重跑;会话账保留(重启可查);无递归删除数据根的代码路径,Worker 复用未做(会话间隔离另测的边界未触发)。真拔电/OS 崩溃未验,归真机批次——与 §十二 P4 记账同口径。）
+- [ ] Worker收到EOF/shutdown、正常结束、异常退出分别验证刷新与子进程清理。未来Worker复用必须另测会话间隔离，本单首发不凭进程复用推定安全。（P4 已验两路:EOF 孤儿自退(毁 stdin→退出码 0→记录仍能查)与显式 shutdown 收口四步(停受理→断调度→排空→回收,客户端 beginClose/waitIdle/shutdown 分步钉);异常退出(崩溃路)的刷新未单列验证,归后续小单;Worker 复用未做,会话间隔离边界保持未触发。）
 
 ## 十一、报告交接与能力声明
 
-- [ ] 最终正文通过协议结果引用读取；允许应用要求JSON内含Markdown，但宿主不内置市场报告schema。业务JSON校验、引用审核和Markdown渲染归外部应用。
-- [ ] 首发不要求模型写文件。原生structured output可后补，不能把提示词约定伪装成schema强保证。
-- [ ] artifact读取接口校验本任务归属、相对路径与大小，返回mediaType/bytes/hash；不存在、过期、禁止访问分别报错。
+- [x] 最终正文通过协议结果引用读取；允许应用要求JSON内含Markdown，但宿主不内置市场报告schema。业务JSON校验、引用审核和Markdown渲染归外部应用。（P3/P4 批:operation/read 的 finalMessages(协议事件条目 id+messageId/seq/text/hidden)即结果引用读取;宿主无市场报告 schema(内核零业务字段);业务校验/渲染归应用由 docs/reference/app-server-external-client.md 兼容记录写明。）
+- [x] 首发不要求模型写文件。原生structured output可后补，不能把提示词约定伪装成schema强保证。（P2/P4 批:零工具默认档/托管档无写文件工具面(装配只装档点名工具),e2e 全程文本结果;无提示词约定冒充 schema 的路径——structured output 未做也未伪装,如实。）
+- [ ] artifact读取接口校验本任务归属、相对路径与大小，返回mediaType/bytes/hash；不存在、过期、禁止访问分别报错。（AW-21 未入:artifact 面不在本单已交付范围,MCP 二进制块已有 artifacts 落盘面(CallToolParseContext)但对外读取接口未开,归后续小单。）
 - [ ] 握手/诊断返回协议版本、构建标识与实际能力：应用根、Agent覆盖、Skills、MCP、Lua、幂等受理、终态查询、隔离等级。未支持能力明确false/unavailable。
 - [ ] 外部应用锁定二进制hash、提交、插件/Skill快照与部署档版本；本单提供通用兼容探针，不实现应用自己的runtime-lock管理器。
 
@@ -272,9 +272,51 @@ GAP 记账(2026-09-14,P4 批):
 
 - [x] 复用ExtensionRuntime完成Lua装配，单独交付manifest信任、HTTP/Secret和会话寿命测试。P5未完成不影响已验收MCP档，但不得宣称应用Worker已支持全部插件。（2026-09-14,P5 批。**口径先说清**:owner 单[轻量可塑ExtensionRuntime]的 src/extension/ 未实现,按任务合同"未实现的部分按其设计最小取用"——复用仓里既有真底座:ManifestLuaRuntime/LuaHostState(manifest v2 embedded-lua,Lua 受控 HTTP 与 Secret 宿主能力单落的)、ScanPluginDirectories 发现面(plugins 单,与终端同一扫描)、PluginTrustStore 信任账(plugins 单第 8 步)、ManifestLuaToolAdapter(统一工具闸)。不另造 manifest 格式、不另造第二套插件清单、不造第二套宿主 API——同名接口各讲一套的禁令未犯。**装载路**:AssembleSession 步骤 0 新增 PluginMounter(src/app_server/session_assembly.cpp)——components.plugins 点名→材料根 plugins/ 扫描→点名对账→信任账(只读,数据根 plugin-trust.json)→LoadManifestLuaPlugin 挂载(顶层零副作用+handler 对账);四路失败稳定码 plugin_missing/plugin_untrusted/plugin_load_failed/component_unavailable(kind 面:点名 process/native 件)整场明拒,错误信封沿用 P2 的 data.code 约定(additive);点名即必需件,无"可选降级"(与 MCP 的差异:components 点名是部署者显式意志,非目录隐式发现)。**权限面**:宿主 API 权限=manifest 清单申请(permissions.network/secrets/limits)∩部署档授权(components.plugins 点名+tools.allow 点名工具+信任账批准 manifest 声明面——owner 单 §21.1"用户批准的是这份指纹与能力集合"语义)∩宿主执行帽(越权请求在传输层权限对账步落锤、Secret 只在调用作用域解析、字节/超时帽);tools 面不旁路——adapter needs_confirm 恒真+ApprovalClass::External(测试钉死)。**寿命**:SessionAssembly 成员序=寿命序,manifest_lua owner 在 registry 前声明(析构反序:adapter 先亡、Lua state 后关);每场装配现造 owner,进程内 Lua state 不跨会话;入口 RunAppServerMode(src/app/cli_app.cpp)递 plugins_root/信任账/plugin_data_root。**tools.allow 新名型**:plugin__<id>__<tool>(harness_profile.cpp 依赖解释:须 components.plugins 含 id+features 放行 plugins;deny 裁;名单查重;tests/unit/capability 冻结侧校验器同口径同步)。**三件测试**(tests/unit/app_server/test_plugin_assembly.cpp 新册,册随 tests/CMakeLists.txt glob 循环自动注册):manifest 信任(信任装载全链/未信任零 Lua 执行/disable 拒/坏 JSON 按 missing 拒带扫描警告/handler 缺按 load_failed 拒)、HTTP·Secret(授权:声明命中请求到 fake transport+Secret 注入 Authorization 头且原文不进模型结果;拒绝:未声明 host 真传输 network_target_denied 零 DNS、未声明 secret id secret_not_declared 且 resolver 零解析)、会话寿命(两场 Lua 全局计数器互不串 A=2/B=1、两场 state 实例独立、第一场销毁后第二场照常调用+第三场可再装配)。装配路衔接另扩 tests/unit/app_server/test_session_assembly.cpp(装载面与注册面分家/mode=none/缺工具复验/process 件 kind 拒/未递根 missing)与 test_harness_profile.cpp(plugin__ 解释五用例)。**能力清单**:docs/reference/capability-contract.md §13.4"Lua/process 插件装载"搬已落栏(如实列:embedded-lua v2 已验到装配+信任+HTTP/Secret+寿命;process/native 未接仍 component_unavailable;packaged 不经此通道;挂载事实未进 thread/started 协议字段),§3 档内字段表与错误码归属段同步。交付:PR relic-yuexi/LubanCode#71,head f891b380(代码提交 11df7f45+编译修正 f891b380:SecretValue 显式接管左值串须拷临时、信任账先落局部变量再取址);CI:头提交 pull_request 活跃 suite actions/runs/34788221097 conclusion=success,macos-clang 编译+全量测试绿(首推 11df7f45 的 suite 34787137750 曾红,红因即上述两处测试编译错,修后绿);push 姊妹 run 被 GitHub 自动取消属残影,按判绿规矩不计。**未验边界**:取消链/资源三道墙/v3 轨迹账在装配路下未重钉(机制层有既有单测,见 §7.2 第四勾);真 provider 全链未跑(测试走假 backend+fake transport);Windows/macOS 编译与跑测交 CI。GAP-01 的"Lua 装配仍不进"注记就此销账。）
 
+### P6 Skills/MCP/提示轨迹尾款(2026-09-14)
+
+- [x] Skills 尾款四件+MCP 可控场景+提示组合落 V3+托管覆写门,§四—§十一 对账翻勾一并交付。（2026-09-14,P6 批。**六件尾款**:
+  **① Skill 漂移校验(§六 143)**:ScanSkillsDirImpl 扫描记 SKILL.md 全文 SHA-256 进 SkillMeta::content_hash(与 PluginMounter 的 ComputePluginContentHash 同款手法);SkillTool::execute 读正文时重算对照,漂移即 skill.drifted 拒读(error_code+unavailable outcome,修改版正文零泄露);终端/headless 同一工具同款生效。
+  **② Skill 受控资源读取(§六 144)**:skill 工具可选 path 参数(同能力名不另立工具):段级源头拒(绝对/盘符/UNC/../空段/目录本身),weakly_canonical 解析真实路径后必须仍在技能目录内(链接绕出拒),外链(任意 scheme:// 含 file://)明示不自动 fetch 走数据源流程,1MiB 帽只读普通文件。
+  **③ Skills 来源声明 schema(§六 140/146/147)**:components.skills{required,optional,sourceDir} additive 进 deployment.schema.json+生产解析器+冻结侧校验器;声明即允许清单(名单外不进本场);required 缺件/坏格式 skill_missing 整场明拒(人话带 ScanSkillsDirReported 扫描警告);optional 缺件进 degradedComponents+冻结清单;同名 required/optional 两现/重复点名明拒;sourceDir 只收材料根 skills/ 内相对子目录;thread/start 回执 additive skills 字段(name/requirement/status/requiresTools/missingTools)。
+  **④ MCP 可控场景(§七 155/159/160)**:mcp_test_server.py 增 auth_gate(-32001 模拟 401)/rate_limited(-32002 模拟 429)/slow(ms 受控)/empty(成功空结果)/env_probe(只报有无不回值);mcp::Client 的 JSON-RPC error 带 code 出来(SendRequestAndWait 新增 got_jsonrpc_error/jsonrpc_error_code_out 出参),CallTool 归类 server 拒绝为 outcome=tool_error+error_code=mcp.server_error+details.jsonrpcCode(与 mcp.transport_closed/timeout/cancelled 分开);headless 装配起 MCP 改 EnvMode::Replace+ComposeMcpChildEnv(base 集=plugin_process 同一张合同+config mcpServers.env 注入)——Worker 全环境(模型 key)不递工具进程,终端 Inherit 不变;逐层断言 client 层四册真夹具用例+装配整链 env 分离用例。
+  **⑤ 提示组合落 V3(§五 134/133)**:新 v3 kind prompt.composition.applied(statusless;schema3 载荷合同:promptSnapshotId hex64/agentRef/segments[{order 从 0 连续,refPath,origin,source,contentSha256 hex64}]);agent_wiring 出账(snapshot_id=正文全文 SHA-256;ledger 既有逐段 hash/次序);server.cpp HandleThreadStart v3 场开场落账(PowerLoss,落不住记诊断不拦建场);§五 133 托管覆写门=RunAppServerMode 部署档在场时 --system-prompt/LUBANCODE_SYSTEM_PROMPT_FILE 任一在场拒启(部署档 schema 未开覆写通道,未定义次序不猜;普通 CLI 语义另保留)。
+  **⑥ 依赖声明消费(§六 145)**:SKILL.md frontmatter 可选 requires-tools(真 YAML 路收清单)进 SkillMeta;headless 装配把冻结工具面(注册表 wire 名)递给 SkillTool,声明的工具不在面即 capability_unavailable(error_code);冻结清单带 missingTools 缺口;终端路缺省不执法(全量注册+运行时审批,不同形,如实分家)。
+  **测试**:unit.config.test_skills 扩(ParseSkillMarkdown requires-tools 四用例/指纹/Reported 警告/漂移/受控读取十二路/依赖声明四路)、unit.app_server.harness_profile 扩(skills 声明四册)、unit.app_server.session_assembly 扩(required 缺件/坏格式/optional 诊断/名单外过滤/sourceDir/MCP env 口)、unit.app_server.agent_wiring 扩(snapshot_id+段账)、unit.capability 扩(schema 面三用例)、unit.trajectory_v3.test_v3_prompt_composition 新册(kind 注册/statusless/载荷正反例)、integration.protocols.test_mcp_client 扩(401/429/超时/空结果/取消/Replace env 六册)、integration.app_server.agent_skills 扩(用例 5 env 分离整链/用例 6 声明+漂移/用例 7 托管覆写门/用例 8 v3 组合账,真 exe;v3 用例 env 显式 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1,不吃 ctest 注入的 0)。
+  **文档**:capability-contract.md(§3 字段表 components.skills 行/依赖解释段/§13.4 三行更新+错误码归属段)、trajectory-v3-schema.md(kind 表+§2.2 无 status 行+提示组合域段落)、docs/features/app-server/README.md(thread/start skills 字段)。
+  **翻勾对账**:§四(72/73/74/75/106/107/109/110)、§五(117-120/133/134/135)、§六(139-147 全)、§七(155-160 全)、§九(185-189/195-201)、§十(211)、§十一(216/217)——逐勾附证据指针,只翻源码核过的。
+  **未验边界**:①skill 受控读取的符号链接用例在无链接权限的 Windows 环境如实跳过(create_symlink 失败即 return,不冒充);路径规范化与打开之间的竞态(TOCTOU)未做 fd 级防护,归 OS 隔离真机面;②漂移校验只盖 SKILL.md 本体,技能目录内其他材料(path 读口)不带指纹——按需读不校验漂移,材料漂移未钉;③headless 单根扫描不装 packaged 技能(package canonical ID 声明面留待包装配接入);④终端路依赖声明不执法(工具面全量注册,口径不同,如实分家);⑤v2 场无 prompt.composition.applied(不回填旧格式);⑥prompt.composition.applied 只在 agent_plan 组合路落账,无档默认路(固定 kAppServerDefaultSystemPrompt)不落;⑦真拔电/OS 崩溃/OS 级强隔离保持未验(与 P4 同口径);⑧部署档正文覆写通道未开(当前合同=托管模式零覆写源,要开走 additive 字段另立小单);⑨Windows/Linux 腿按 CI 设计合 main 后跑,本批 CI 只验 macOS 腿+源码层 Windows 语义。
+  交付:PR 见仓库(worktree-agent-worker-skills-tail);CI/链接随 PR 补记。）
+
 ## 十三、验收清单
 
 所有用例目前未执行。测试路径由实现者补入，结果记录版本、平台、配置hash、运行ID和日志引用；不得把伪模型测试记成真实provider调用。
+
+验证路径补记(2026-09-14,P1—P6 批;表内场景→已落测试路径,均 CI 跑过或随本批进 CI;真机/OS 隔离类照旧未验):
+
+| 编号 | 已落测试路径 |
+| --- | --- |
+| AW-01 | unit.config.runtime_paths("未设变量个人布局原样"用例) |
+| AW-02 | e2e.app_server.node_client 幕"状态落点"(P4);integration.app_server.agent_skills 场地同构 |
+| AW-03 | unit.config.runtime_paths(空值/相对/根重叠全家福+启动门);Windows 空值 envblock 由 e2e 幕 5 钉 |
+| AW-04 | e2e.app_server.node_client(双 Worker 并行幕) |
+| AW-05 | unit.app_server.agent_wiring+integration.app_server.agent_skills 用例 1(档案正文进首请求,默认人格不混入) |
+| AW-06 | integration.app_server.agent_skills 用例 4(agentRef 缺件拒启)+用例 6(required 技能缺件/坏格式 skill_missing 拒启,optional 诊断) |
+| AW-07 | unit.config.test_skills(漂移册)+integration.app_server.agent_skills 用例 6(同场两回合漂移拒读) |
+| AW-08 | unit.config.test_skills(受控读取册+依赖声明册)+integration.app_server.agent_skills 用例 1(工具面恰两枚)+用例 6(声明依赖缺面 capability_unavailable) |
+| AW-09 | integration.protocols.test_mcp_client(401/429/超时/空结果/取消/Replace env 六册新用例+既有整链)+integration.app_server.agent_skills 用例 5(env 分离整链) |
+| AW-10 | integration.app_server.agent_skills 用例 3(component_unavailable/plugin_missing)+用例 3b(P5 真装载) |
+| AW-11 | unit.app_server.operation_idempotency(会话创建台账用例) |
+| AW-12 | 同册(turn/start 幂等/异载荷冲突/重启用例) |
+| AW-13 | 同册(受理落盘失败注入用例) |
+| AW-14 | 同册(账态注入 unknown 用例)+e2e.app_server.node_client(硬杀幕) |
+| AW-15 | 同册(重启 v3 找回 final+正文,模型零调用) |
+| AW-16 | 同册(抹 final 行→unknown+gaps) |
+| AW-17 | 未验(真机/OS 隔离面;受控读取的字符串级拒已由 unit.config.test_skills 盖,OS 级越权未验) |
+| AW-18 | integration.app_server.agent_skills 用例 5(模型 key 不进工具进程;探针不偷运值) |
+| AW-19 | 部分(unit.protocols.test_mcp_client 真夹具取消册=协作取消;宿主按期限终止进程树未接,记 §十) |
+| AW-20 | e2e.app_server.node_client 主链路幕(P4);integration.app_server.agent_skills 全册(Skill/MCP 面) |
+| AW-21 | 未接(artifact 读取接口未开,§十一 注记) |
+| AW-22 | 未验(版本兼容探针未单列;协议版本钉 initialize protocolVersion 不符即拒由 Node 客户端实现) |
 
 | 编号 | 场景 | 通过条件 |
 | --- | --- | --- |
