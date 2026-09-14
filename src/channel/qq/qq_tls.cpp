@@ -94,7 +94,7 @@ int MbedRecvTimeout(void* ctx, unsigned char* buf, std::size_t len, std::uint32_
             case SocketErrorKind::Timeout:
                 return MBEDTLS_ERR_SSL_TIMEOUT;
             case SocketErrorKind::Closed:
-                return MBEDTLS_ERR_PEER_CLOSE_NOTIFY;
+                return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
             default:
                 return MBEDTLS_ERR_NET_RECV_FAILED;
         }
