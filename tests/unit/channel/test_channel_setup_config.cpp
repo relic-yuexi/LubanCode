@@ -50,7 +50,7 @@ struct Fixture {
     ChannelConfigService::Options options;
     explicit Fixture(const char* tag)
         : root(MakeTempDir(tag)),
-          options{platform::PathToUtf8(root / "config.json"), root / "secrets", 2000} {}
+          options{lubancode::platform::PathToUtf8(root / "config.json"), root / "secrets", 2000} {}
 };
 
 ChannelSetupCommitRequest BaseRequest() {
@@ -119,7 +119,7 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
 
     // secret_file 是受管绝对路径;JSON 里没有密钥值(测试密钥扫描)。
     const std::string secret_file = account["secret_file"].get<std::string>();
-    CHECK(std::filesystem::path(platform::Utf8ToPath(secret_file)).is_absolute());
+    CHECK(std::filesystem::path(lubancode::platform::Utf8ToPath(secret_file)).is_absolute());
     CHECK(secret_file.find("secrets") != std::string::npos);
     CHECK_FALSE(account.contains("secret"));
     CHECK_FALSE(account.contains("secret_env"));
@@ -131,7 +131,7 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
     }
 
     // 受管文件内容正确、可被生产读取器读出。
-    const auto path = platform::Utf8ToPath(secret_file);
+    const auto path = lubancode::platform::Utf8ToPath(secret_file);
     CHECK(ReadFile(path) == "FAKE-SECRET-for-test-only");
     ChannelAccountUserConfig reader_account;
     reader_account.secret_file = secret_file;
@@ -157,7 +157,7 @@ TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号�
     nlohmann::json main_account = nlohmann::json::object();
     main_account["enabled"] = false;
     main_account["app_id"] = "old-app";
-    main_account["secret_file"] = platform::PathToUtf8(fx.root / "old-external.key");
+    main_account["secret_file"] = lubancode::platform::PathToUtf8(fx.root / "old-external.key");
     main_account["dm_policy"] = "allowlist";
     main_account["allow_from"] = std::vector<std::string>{"user-a"};
     old["channels"]["qqbot"] = nlohmann::json{
@@ -200,7 +200,7 @@ TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号�
     CHECK(new_secret_file.find("old-external.key") == std::string::npos);
     // 旧外部文件不删(§5.3:不删旧外部文件)。
     CHECK(std::filesystem::exists(fx.root / "old-external.key"));
-    CHECK(ReadFile(platform::Utf8ToPath(new_secret_file)) == "FAKE-SECRET-for-test-only");
+    CHECK(ReadFile(lubancode::platform::Utf8ToPath(new_secret_file)) == "FAKE-SECRET-for-test-only");
 }
 
 TEST_CASE("提交失败不毁旧配置:AppID 缺失(新账号没填)报稳定码") {
@@ -292,8 +292,8 @@ TEST_CASE("孤儿回收:换密钥后旧受管件清走,配置仍可读") {
     const auto second = ChannelConfigService::Commit(fx.options, second_request);
     REQUIRE(second.has_value());
     CHECK(second->secret_file != old_secret_file);
-    CHECK_FALSE(std::filesystem::exists(platform::Utf8ToPath(old_secret_file)));
-    CHECK(ReadFile(platform::Utf8ToPath(second->secret_file)) == "FAKE-SECRET-rotated");
+    CHECK_FALSE(std::filesystem::exists(lubancode::platform::Utf8ToPath(old_secret_file)));
+    CHECK(ReadFile(lubancode::platform::Utf8ToPath(second->secret_file)) == "FAKE-SECRET-rotated");
 
     // 配置解析回读 + 生产读取器仍过(提交后复验的一部分)。
     const nlohmann::json root = nlohmann::json::parse(ReadFile(fx.root / "config.json"));
