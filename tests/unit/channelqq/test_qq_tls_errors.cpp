@@ -4,7 +4,8 @@
 // CI 验不了——单内如实标"未验",归 Q3 Windows 真机复测。
 #include <doctest/doctest.h>
 
-#include <mbedtls/x509_crt.h>
+#include <mbedtls/ssl.h>       // MBEDTLS_ERR_SSL_TIMEOUT 等握手错误码
+#include <mbedtls/x509_crt.h>  // MBEDTLS_X509_BADCERT_* 验证 flags
 
 #include <string>
 
