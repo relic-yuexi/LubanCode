@@ -398,6 +398,10 @@ add_library(lubancode_engine STATIC
   src/platform/sha256.cpp
   # 审计 P2:标准 Base64 内核(五处手写收一)。
   src/platform/base64.cpp
+  # QQBot Windows 修复单 §5.1/§5.2:凭据文件的安全创建原语(带安全描述符
+  # 创建/跨进程文件锁)与终端隐藏输入(回显 RAII)。
+  src/platform/secure_file.cpp
+  src/platform/hidden_input.cpp
   # 审计 P2 候选:路径比较键三处合一(共享向量证一致后收编)。
   src/platform/path_compare.cpp
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
@@ -441,6 +445,9 @@ add_library(lubancode_engine STATIC
   # 应用根语义(应用Worker接入单 P1):LUBANCODE_HOME/DATA_HOME/MANAGED
   # 三变量的解析、校验与可达性探测;HomeLubancodeDir/StateRootDir 消费。
   src/config/runtime_paths.cpp
+  # QQBot Windows 修复单 §6.2:im 入口的最近选择偏好(独立可版本化小档,
+  # 原子保存,只存标识)。
+  src/config/im_preferences.cpp
   src/tools/registry.cpp
   src/tools/tool_content.cpp  # MCP 富结果:中立内容块/投影/序列化
   src/tools/tool_text.cpp
@@ -766,6 +773,10 @@ add_library(lubancode_engine STATIC
   src/channel/activation.cpp
   src/channel/credentials.cpp
   src/channel/tool_guard.cpp
+  # QQBot Windows 修复单 §5.2/§5.1:统一凭据写入服务(安全创建/收紧/
+  # 孤儿回收)与渠道设置服务(平台注册表 + channels 定点提交)。
+  src/channel/credential_store.cpp
+  src/channel/channel_setup.cpp
   # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件与
   # 自实现 WS 客户端。ws_frame(RFC6455 帧纯函数)/qq_socket(跨平台 TCP+
   # select 超时)/qq_tls(mbedTLS 客户端流)/qq_ws_client(升级握手+读写+
@@ -1267,6 +1278,10 @@ add_library(lubancode_app STATIC
   src/app/cli_options.cpp
   src/app/plugin_scaffold.cpp
   src/app/cli_app.cpp
+  # QQBot Windows 修复单 §六:共用 Gateway 启动服务(自 RunGateway 装配提取,
+  # gateway run 与 im 同一份合同)与 `lubancode im` 入口(选择/向导/启动编排)。
+  src/app/gateway_launch.cpp
+  src/app/im_entry.cpp
   src/cli/console_input.cpp
   # 骨架拆解反弹·问题 5:console_input 拆三台机器(composer 主循环/流式
   # footer/turn 监听线程),共享底层(锁/状态行/面板会话/键位翻译/菜单)
@@ -1291,6 +1306,9 @@ add_library(lubancode_app STATIC
   # QQ 连接状态单 §三:`lubancode channel status <渠道> <账号>` 跨进程只读
   # 连接快照(Gateway 发布的脱敏 connection-status.json)。
   src/cli/channel_status_command.cpp
+  # QQBot Windows 修复单 §5.1:`lubancode channel setup <平台>` 配置向导
+  #(真终端 IO 件,与 gateway_command 同待遇归 app target)。
+  src/cli/channel_setup_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

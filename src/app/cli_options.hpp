@@ -134,6 +134,26 @@ struct ChannelStatusCliArgs {
     bool json = false;       // --json:stdout 吐快照 + verdict
 };
 
+// `lubancode channel setup <平台> [--account <账号>]`(QQBot Windows 修复单
+// §5.1):交互式渠道配置向导。AppSecret 走隐藏输入,绝不收命令行明文
+// secret——这里没有任何 --secret 旗标。
+struct ChannelCliArgs {
+    std::string verb;     // 只认 setup
+    std::string platform; // qqbot
+    std::string account;  // --account <名>;空 = main
+};
+
+// `lubancode im [--select] [平台] [--account <账号>] [--profile <名>]` 与
+// `lubancode im setup [平台] [--account <账号>]`(§六 6.1)。im 是日常 IM
+// 入口;im setup 只进配置管理,不启动。
+struct ImCliArgs {
+    bool setup = false;      // im setup
+    bool select = false;     // --select:强制开选择列表
+    std::string platform;    // 位置参数;空 = 不指定
+    std::string account;     // --account;空 = 不指定
+    std::string profile;     // --profile;空 = default
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -159,6 +179,10 @@ enum class CliAction {
     BadGateway,               // gateway 参数不对:人话已塞进 error_text
     RunChannelStatus,         // channel status 子命令:跨进程只读连接快照(§三)
     BadChannelStatus,         // channel 子命令参数不对:人话已塞进 error_text
+    RunChannelSetup,          // channel setup 子命令:渠道配置向导(§5.1)
+    BadChannelSetup,          // channel 参数不对:人话已塞进 error_text
+    RunIm,                    // im 子命令:统一 IM 选择与启动入口(§六)
+    BadIm,                    // im 参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -171,6 +195,8 @@ struct ParsedCliArgs {
     TrajectoryCliArgs trajectory;  // action == RunTrajectory 时有效
     GatewayCliArgs gateway;  // action == RunGateway 时有效
     ChannelStatusCliArgs channel_status;  // action == RunChannelStatus 时有效
+    ChannelCliArgs channel;  // action == RunChannelSetup 时有效
+    ImCliArgs im;            // action == RunIm 时有效
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

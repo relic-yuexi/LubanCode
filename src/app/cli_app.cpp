@@ -8,6 +8,11 @@
 #include "app/plugin_scaffold.hpp"
 // QQ 机器人接入单 Q1:渠道装配与复合泵(gateway run 的 QQ 进程内直连)。
 #include "app/channel_gateway_wiring.hpp"
+// QQBot Windows 修复单 §5.1/§六:共用 Gateway 启动服务(gateway run 与 im
+// 同一份装配/锁/停止合同)、channel setup 向导、im 入口。
+#include "app/gateway_launch.hpp"
+#include "app/im_entry.hpp"
+#include "cli/channel_setup_command.hpp"
 #include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
 #include "app_server/connection_snapshot.hpp"  // §八:连接快照冻结 + §四.111 effective-config 诊断
 #include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
@@ -858,6 +863,9 @@ int RunCli(const std::vector<std::string>& args) {
             // 总装单 G1+V1:gateway run/status/stop/job。run 是前台真进程
             //(V1 起带业务泵);status 是只读 probe + 三栏领域投影;stop 投
             // 本地控制命令;job 是持久任务入口。退出码合同见 gateway 文档。
+            // run 的装配提取为共用启动服务(§6.0):gateway run 与 im 走同
+            // 一份装配/锁/停止合同,gateway 计划 = 全部已启用渠道 + 当前
+            // profile 的既有自动任务。
             cli::GatewayCommandArgs gateway_args;
             gateway_args.verb = parsed_cli.gateway.verb;
             gateway_args.profile = parsed_cli.gateway.profile;
@@ -879,138 +887,14 @@ int RunCli(const std::vector<std::string>& args) {
             if (gateway_args.verb != "run") {
                 return cli::RunGatewayCommand(gateway_args);
             }
-            // V1 主泵装配(app 层:backend/registry 是 app 的材料,engine
-            // 不反向依赖)。模型/工具面按当前配置;工具授权 fail closed
-            //(名单空 = needs_confirm 工具全拒,基础表里免确认的工具照走)。
-            // P1 收尾(应用Worker接入单 §4.2):本段的路径来源统一走状态根
-            // StateRootDir(应用根语义=数据根;个人布局=~/.lubancode 原样,
-            // 行为逐字节不变),不再拿 HomeLubancodeDir 拼运行状态。
-            const auto state_root = lubancode::config::StateRootDir();
-            if (!state_root.has_value()) {
-                std::cerr << "gateway run: 状态根不可用(应用根变量坏或找不到主目录),"
-                             "无法定位运行数据根\n";
-                return 1;
-            }
-            const auto gateway_config = lubancode::config::LoadFromEnv();
-            if (!gateway_config.has_value()) {
-                std::cerr << "gateway run: 配置装载失败——" << gateway_config.error() << "\n";
-                return 1;
-            }
-            auto backend = lubancode::app::BuildBackend(gateway_config->config);
-            lubancode::tools::ToolRegistry registry = lubancode::app::BuildBaseToolRegistry(
-                {}, gateway_config->config.search);
-            // workspace 身份:启动时冻结一次(Q2 §六第二项——渠道路的会话
-            // 映射按它隔离,重启换 cwd 不误续别的项目上下文)。身份裁决的
-            // home 止步=workspaces 树宿主根=状态根(与 app-server 同一口径,
-            // server.cpp SessionCreateLedgerPath)。
-            const std::filesystem::path gateway_cwd = std::filesystem::current_path();
-            const auto workspace_identity = lubancode::workspace::ResolveWorkspaceIdentity(
-                gateway_cwd, lubancode::tools::Utf8ToPath(*state_root));
-            if (!workspace_identity.has_value()) {
-                std::cerr << "gateway run: workspace 身份裁决失败——"
-                          << workspace_identity.error() << "\n";
-                return 1;
-            }
-            const std::filesystem::path workspaces_root =
-                lubancode::tools::Utf8ToPath(*state_root) / "workspaces";
-            std::optional<lubancode::runtime::GatewayAutomationPump> pump;
-            {
-                lubancode::runtime::GatewayAutomationPump::Options pump_options;
-                // gateway 状态根走唯一口(状态根/gateway;profile 树含
-                // gateway.json 整树随状态根,见 gateway/profile.hpp 合同注释)。
-                const std::filesystem::path gateway_root =
-                    lubancode::gateway::DefaultGatewayRoot();
-                const std::string profile_name =
-                    gateway_args.profile.empty()
-                        ? std::string(lubancode::gateway::kDefaultGatewayProfile)
-                        : gateway_args.profile;
-                pump_options.paths =
-                    lubancode::gateway::ResolveGatewayProfilePaths(gateway_root, profile_name);
-                pump_options.workspaces_root = workspaces_root;
-                pump_options.workspace_identity = *workspace_identity;
-                pump_options.cwd_utf8 = lubancode::platform::CurrentDirUtf8();
-                pump_options.lubancode_version = std::string(lubancode::app::kVersion);
-                pump_options.wire_name =
-                    lubancode::config::ProviderWireName(gateway_config->config.wire);
-                pump_options.model = gateway_config->config.model;
-                pump_options.max_steps_per_turn = 32;   // V1 生产缺省:预算三根
-                pump_options.max_wall_secs = 600;       // 硬线至少步数+墙钟两根
-                pump.emplace();
-                const auto open = lubancode::runtime::GatewayAutomationPump::Open(
-                    &*pump, *backend, registry, std::move(pump_options));
-                if (!open.ok) {
-                    std::cerr << "gateway run: 业务泵开不了——" << open.error << "\n";
-                    return 1;
-                }
-                // ownerEpoch 不在这里预造:GatewayProcess 取到锁后把锁内
-                // epoch(= boot_id)递进泵(process.cpp 的 set_owner_epoch)。
-            }
-            // QQ 机器人接入单 Q1:渠道装配(QQ 进程内直连,§十五定案)。
-            // channels 段为空时零渠道行为,不挂副泵;装配失败的账号记
-            // skipped 打给 stderr,Gateway 照常起来(渠道失败不拦主业务)。
-            std::unique_ptr<lubancode::app::ChannelGatewayWiring> channel_wiring;
-            std::unique_ptr<lubancode::app::CompositeGatewayPump> composite_pump;
-            {
-                lubancode::app::ChannelGatewayWiring::Options wiring_options;
-                wiring_options.config = &gateway_config->config;
-                // 渠道账号状态根走唯一口(状态根/channels;ingress 账/
-                // account-status/sessions 映射/work 账/锁/qq spool 全在这棵
-                // 树下,见 channel/manager.hpp 合同注释)。
-                const std::filesystem::path wiring_channels_root =
-                    lubancode::channel::DefaultChannelsStateRoot();
-                wiring_options.channels_state_root = wiring_channels_root;
-                const std::filesystem::path channels_root = wiring_channels_root;
-                channel_wiring = lubancode::app::ChannelGatewayWiring::Create(
-                    std::move(wiring_options));
-                if (channel_wiring != nullptr) {
-                    for (const std::string& line : channel_wiring->skipped()) {
-                        std::cerr << "[gateway] 渠道账号未装配: " << line << "\n";
-                    }
-                    // 连接状态单 §四:装配时检查信任根并明报来源(解析不到
-                    // 也说清楚,现场能定位第一处失败;具体连接状态由 wiring
-                    // 的 reporter 每 tick 打印)。
-                    for (const std::string& line : channel_wiring->diagnostics()) {
-                        std::cerr << "[gateway] " << line << "\n";
-                    }
-                    // QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装)挂进
-                    // wiring——桥泵之后每 tick 推进一轮;outbox 共享
-                    // automation 泵的同一本账(单写者,两泵同 tick 串行)。
-                    if (channel_wiring->manager() != nullptr &&
-                        channel_wiring->manager()->account_count() > 0) {
-                        lubancode::runtime::ChannelWorkPump::Options work_options;
-                        work_options.manager = channel_wiring->mutable_manager();
-                        work_options.outbox = pump->outbox();
-                        work_options.channels_state_root = channels_root;
-                        work_options.workspaces_root = workspaces_root;
-                        work_options.workspace_identity = *workspace_identity;
-                        work_options.cwd_utf8 = lubancode::platform::CurrentDirUtf8();
-                        work_options.lubancode_version = std::string(lubancode::app::kVersion);
-                        work_options.wire_name =
-                            lubancode::config::ProviderWireName(gateway_config->config.wire);
-                        work_options.model = gateway_config->config.model;
-                        work_options.max_steps_per_turn = 32;  // 与 automation 同款预算
-                        work_options.max_wall_secs = 600;
-                        auto work_pump =
-                            std::make_unique<lubancode::runtime::ChannelWorkPump>();
-                        const auto open = lubancode::runtime::ChannelWorkPump::Open(
-                            work_pump.get(), *backend, registry, std::move(work_options));
-                        if (!open.ok) {
-                            std::cerr << "[gateway] 渠道 work 泵开不了——" << open.error
-                                      << "\n";
-                            // 渠道业务面不开:桥照跑(收信入账),Gateway 照常起。
-                        } else {
-                            channel_wiring->set_work_pump(std::move(work_pump));
-                        }
-                    }
-                    composite_pump = std::make_unique<lubancode::app::CompositeGatewayPump>(
-                        &*pump, std::move(channel_wiring));
-                    gateway_args.pump = composite_pump.get();
-                } else {
-                    gateway_args.pump = &*pump;
-                }
-            }
-            const int code = cli::RunGatewayCommand(gateway_args);
-            return code;
+            // 装配提取为共用启动服务(QQBot Windows 修复单 §6.0):gateway
+            // run 与 im 走同一份装配/锁/停止合同,gateway 计划 = 全部已启用
+            // 渠道 + 当前 profile 的既有自动任务。连接诊断(信任根来源、
+            // 渠道装配失败、连接状态)在服务侧随装配打印(连接状态单 §四)。
+            GatewayLaunchPlan plan;
+            plan.profile = gateway_args.profile;
+            plan.require_automation_pump = true;
+            return RunGatewayWithPlan(plan);
         }
         case CliAction::BadGateway:
             std::cerr << parsed_cli.error_text << "\n";
@@ -1025,6 +909,31 @@ int RunCli(const std::vector<std::string>& args) {
             return cli::RunChannelStatusCommand(channel_status_args);
         }
         case CliAction::BadChannelStatus:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunChannelSetup: {
+            // channel setup 子命令(QQBot Windows 修复单 §5.1):交互式渠道
+            // 配置向导,跑完就退。不读会话配置、不进交互主循环。
+            cli::ChannelSetupCommandArgs setup_args;
+            setup_args.platform = parsed_cli.channel.platform;
+            setup_args.account = parsed_cli.channel.account;
+            return cli::RunChannelSetupCommand(setup_args);
+        }
+        case CliAction::BadChannelSetup:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunIm: {
+            // im 子命令(§六 6.1):统一 IM 选择与启动入口。选择/向导/启动
+            // 的编排全在 app::RunImCommand,这里只转发参数。
+            app::ImCommandArgs im_args;
+            im_args.setup = parsed_cli.im.setup;
+            im_args.select = parsed_cli.im.select;
+            im_args.platform = parsed_cli.im.platform;
+            im_args.account = parsed_cli.im.account;
+            im_args.profile = parsed_cli.im.profile;
+            return RunImCommand(im_args);
+        }
+        case CliAction::BadIm:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:

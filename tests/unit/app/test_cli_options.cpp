@@ -386,3 +386,66 @@ TEST_CASE("trajectory export 认 harness-v1 与 --output;training-v1 不认 --ou
     CHECK(ParseCliArgs(Args({"lubancode", "trajectory", "export", "sid", "--format", "csv"}))
               .action == CliAction::BadTrajectory);
 }
+
+// ---------------------------------------------------------------------------
+// channel setup 与 im 子命令(QQBot Windows 修复单 §5.1/§六 6.1)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("channel setup:平台与 --account 落位;形状不对退用法") {
+    const ParsedCliArgs ok =
+        ParseCliArgs(Args({"lubancode", "channel", "setup", "qqbot", "--account", "main"}));
+    CHECK(ok.action == CliAction::RunChannelSetup);
+    CHECK(ok.channel.verb == "setup");
+    CHECK(ok.channel.platform == "qqbot");
+    CHECK(ok.channel.account == "main");
+
+    // 不带 --account:账号空 = main(向导层补默认)。
+    const ParsedCliArgs bare = ParseCliArgs(Args({"lubancode", "channel", "setup", "qqbot"}));
+    CHECK(bare.action == CliAction::RunChannelSetup);
+    CHECK(bare.channel.account.empty());
+
+    // 没有 setup 动词 / 缺平台名 / --account 缺值 / 认不得的旗标:当场退。
+    CHECK(ParseCliArgs(Args({"lubancode", "channel"})).action == CliAction::BadChannelSetup);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "add", "qqbot"})).action ==
+          CliAction::BadChannelSetup);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "setup"})).action == CliAction::BadChannelSetup);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "setup", "qqbot", "--account"})).action ==
+          CliAction::BadChannelSetup);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "setup", "qqbot", "--secret", "x"})).action ==
+          CliAction::BadChannelSetup);  // 不存在 --secret:明文密钥不进 argv
+
+    // 位置参数之后不认子命令(与 app-server 同规矩)。
+    CHECK(ParseCliArgs(Args({"lubancode", "问句", "channel", "setup", "qqbot"})).action ==
+          CliAction::Proceed);
+}
+
+TEST_CASE("im:平台/账号/profile/select 落位;setup 与旗标互斥") {
+    const ParsedCliArgs ok = ParseCliArgs(
+        Args({"lubancode", "im", "qqbot", "--account", "main", "--profile", "personal"}));
+    CHECK(ok.action == CliAction::RunIm);
+    CHECK(ok.im.platform == "qqbot");
+    CHECK(ok.im.account == "main");
+    CHECK(ok.im.profile == "personal");
+    CHECK_FALSE(ok.im.setup);
+    CHECK_FALSE(ok.im.select);
+
+    const ParsedCliArgs bare = ParseCliArgs(Args({"lubancode", "im"}));
+    CHECK(bare.action == CliAction::RunIm);
+    CHECK(bare.im.platform.empty());
+
+    const ParsedCliArgs select = ParseCliArgs(Args({"lubancode", "im", "--select"}));
+    CHECK(select.action == CliAction::RunIm);
+    CHECK(select.im.select);
+    CHECK(select.im.platform.empty());
+
+    const ParsedCliArgs setup = ParseCliArgs(Args({"lubancode", "im", "setup", "qqbot"}));
+    CHECK(setup.action == CliAction::RunIm);
+    CHECK(setup.im.setup);
+    CHECK(setup.im.platform == "qqbot");
+
+    // --account 没平台、setup 带 --select、坏 profile、认不得的旗标:退用法。
+    CHECK(ParseCliArgs(Args({"lubancode", "im", "--account", "main"})).action == CliAction::BadIm);
+    CHECK(ParseCliArgs(Args({"lubancode", "im", "setup", "--select"})).action == CliAction::BadIm);
+    CHECK(ParseCliArgs(Args({"lubancode", "im", "--profile", "a/b"})).action == CliAction::BadIm);
+    CHECK(ParseCliArgs(Args({"lubancode", "im", "qqbot", "--json"})).action == CliAction::BadIm);
+}

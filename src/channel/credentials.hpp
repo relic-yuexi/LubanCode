@@ -72,6 +72,26 @@ std::expected<ResolvedChannelCredential, ChannelCredentialError> ResolveChannelC
 std::expected<void, ChannelCredentialError> CheckCredentialFileSecurity(
     const std::filesystem::path& canonical_path);
 
+// ---------------------------------------------------------------------------
+// 权限分类(§5.3 修复流用):把"不安全"拆成可处置的几档——owner 不符、
+// DACL 过宽、无 DACL、描述符读不出。读取白名单口径与 CheckCredentialFileSecurity
+// 完全同一份(SYSTEM/Administrators/两类应用包 SID 放行的现状照旧;应用包
+// 两条的放行依据单列审查,不在本分类里顺手放宽)。detail 只带路径与原因,
+// 不带文件内容。
+struct CredentialFileSecurityReport {
+    enum class Status {
+        Ok,                  // 归属与权限都合格
+        OwnerMismatch,       // owner 不是当前用户
+        DaclTooWide,         // DACL 放行了白名单以外的账户
+        NoDacl,              // 无 DACL = 全员可访问
+        DescriptorUnreadable,  // 安全描述符/stat 读不出
+    };
+    Status status = Status::Ok;
+    std::string detail;  // 脱敏人话;可带路径,绝不含内容
+};
+CredentialFileSecurityReport InspectCredentialFileSecurity(
+    const std::filesystem::path& canonical_path);
+
 // 渠道子进程环境白名单(Q0 定形;Q1 定案走子进程时 spawn 实装照此继承,
 // 定案进程内直连则本表不消费)。凭据不走环境。
 const std::vector<std::string>& SidecarEnvAllowlist();
