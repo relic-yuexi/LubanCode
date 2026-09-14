@@ -795,11 +795,17 @@ TEST_CASE("托管模式覆写门:部署档在场时正文覆写源拒启,普通�
     AgentSkillsField field;
     field.WriteGlobalConfig();
     field.WriteDeployment(AgentSkillsDeployment());
+    // 覆写文件要真实存在:RunCli 在进 app-server 分支前有交互路的
+    // 人格文件读取(读不到会以另一条人话先退,不到本门)。给真文件,
+    // 让流程走到托管覆写门再拒。
+    const std::string override_path =
+        lubancode::platform::PathToUtf8(field.temp_root / "override.md");
+    field.WriteFile(field.temp_root / "override.md", "OVERRIDE-PERSONA。\n");
 
     SUBCASE("--system-prompt 旗标:拒启") {
         std::string spawn_error;
         REQUIRE(field.SpawnServer(binary, &spawn_error,
-                                  {"--system-prompt", "override.md"}, {}));
+                                  {"--system-prompt", override_path}, {}));
         int exit_code = 0;
         REQUIRE(field.proc->Wait(15000, &exit_code));
         CHECK(exit_code != 0);
@@ -810,7 +816,7 @@ TEST_CASE("托管模式覆写门:部署档在场时正文覆写源拒启,普通�
     SUBCASE("LUBANCODE_SYSTEM_PROMPT_FILE 环境变量:拒启(未定义次序的冲突不猜)") {
         std::string spawn_error;
         REQUIRE(field.SpawnServer(binary, &spawn_error, {},
-                                  {{"LUBANCODE_SYSTEM_PROMPT_FILE", "override.md"}}));
+                                  {{"LUBANCODE_SYSTEM_PROMPT_FILE", override_path}}));
         int exit_code = 0;
         REQUIRE(field.proc->Wait(15000, &exit_code));
         CHECK(exit_code != 0);
@@ -850,61 +856,61 @@ TEST_CASE("v3 提示组合账:thread 开场落 prompt.composition.applied,段账
                                .dump()));
     REQUIRE(field.PumpUntil([&] { return field.FindEvent("turn/completed") != nullptr; }, 60000));
 
-    // 找本场 v3 账(<home>/.lubancode/workspaces/**/main.jsonl)。
-    std::optional<fs::path> main_jsonl;
+    // 找本场 v3 账:v3 场的会话流是 <sessionId>.jsonl(§九 200:v3 为
+    // `<sessionId>.jsonl`,不是 v2 的 main.jsonl),扫 workspaces 树下的
+    // 全部 .jsonl 找 prompt.composition.applied。
+    bool saw_composition = false;
     {
+        std::vector<fs::path> streams;
         const fs::path workspaces = field.home_dir / ".lubancode" / "workspaces";
         std::error_code ec;
         for (const auto& entry : fs::recursive_directory_iterator(workspaces, ec)) {
             if (ec) {
                 break;
             }
-            if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
-                main_jsonl = entry.path();
-                break;
+            if (entry.is_regular_file() && entry.path().extension() == ".jsonl") {
+                streams.push_back(entry.path());
             }
         }
-    }
-    REQUIRE(main_jsonl.has_value());
-    bool saw_composition = false;
-    {
-        std::ifstream in(*main_jsonl, std::ios::binary);
-        std::string line;
-        while (std::getline(in, line)) {
-            const json row = json::parse(line, nullptr, false);
-            if (row.is_discarded() || !row.contains("kind")) {
-                continue;
-            }
-            if (row["kind"] != "prompt.composition.applied") {
-                continue;
-            }
-            saw_composition = true;
-            const json& payload = row["payload"];
-            CHECK(payload["promptSnapshotId"].get<std::string>().size() == 64);
-            CHECK(payload["agentRef"] == "research");
-            REQUIRE(payload["segments"].is_array());
-            REQUIRE(payload["segments"].size() >= 2);
-            for (std::size_t i = 0; i < payload["segments"].size(); ++i) {
-                CHECK(payload["segments"][i]["order"] == static_cast<std::int64_t>(i));
-                CHECK(payload["segments"][i]["contentSha256"].get<std::string>().size() == 64);
-                CHECK_FALSE(payload["segments"][i]["refPath"].get<std::string>().empty());
-                CHECK_FALSE(payload["segments"][i]["origin"].get<std::string>().empty());
-            }
-            // Profile 业务正文段在账(来源层标记),宿主段也在(运行环境/能力)。
-            bool saw_profile_segment = false;
-            bool saw_host_segment = false;
-            for (const auto& segment : payload["segments"]) {
-                const std::string origin = segment["origin"];
-                if (origin.find("profile") != std::string::npos) {
-                    saw_profile_segment = true;
+        REQUIRE_FALSE(streams.empty());
+        for (const fs::path& stream : streams) {
+            std::ifstream in(stream, std::ios::binary);
+            std::string line;
+            while (std::getline(in, line)) {
+                const json row = json::parse(line, nullptr, false);
+                if (row.is_discarded() || !row.contains("kind")) {
+                    continue;
                 }
-                if (segment["refPath"].get<std::string>().find("runtime") != std::string::npos ||
-                    origin == "runtime_environment") {
-                    saw_host_segment = true;
+                if (row["kind"] != "prompt.composition.applied") {
+                    continue;
                 }
+                saw_composition = true;
+                const json& payload = row["payload"];
+                CHECK(payload["promptSnapshotId"].get<std::string>().size() == 64);
+                CHECK(payload["agentRef"] == "research");
+                REQUIRE(payload["segments"].is_array());
+                REQUIRE(payload["segments"].size() >= 2);
+                for (std::size_t i = 0; i < payload["segments"].size(); ++i) {
+                    CHECK(payload["segments"][i]["order"] == static_cast<std::int64_t>(i));
+                    CHECK(payload["segments"][i]["contentSha256"].get<std::string>().size() == 64);
+                    CHECK_FALSE(payload["segments"][i]["refPath"].get<std::string>().empty());
+                    CHECK_FALSE(payload["segments"][i]["origin"].get<std::string>().empty());
+                }
+                // Profile 业务正文段在账(来源层标记),宿主段也在(运行环境/能力)。
+                bool saw_profile_segment = false;
+                bool saw_host_segment = false;
+                for (const auto& segment : payload["segments"]) {
+                    const std::string origin = segment["origin"];
+                    if (origin.find("profile") != std::string::npos) {
+                        saw_profile_segment = true;
+                    }
+                    if (segment["refPath"].get<std::string>().find("runtime") != std::string::npos) {
+                        saw_host_segment = true;
+                    }
+                }
+                CHECK(saw_profile_segment);
+                CHECK(saw_host_segment);
             }
-            CHECK(saw_profile_segment);
-            CHECK(saw_host_segment);
         }
     }
     CHECK(saw_composition);

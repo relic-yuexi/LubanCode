@@ -471,9 +471,9 @@ TEST_CASE("ParseSkillMarkdown: requires-tools 声明——真 YAML 路收清单,
         REQUIRE(parsed.has_value());
         CHECK_FALSE(parsed->requires_tools.has_value());
     }
-    SUBCASE("元素混入非串 = 整份声明不收") {
-        const auto parsed =
-            tools::ParseSkillMarkdown("---\nname: s\ndescription: d\nrequires-tools:\n  - 1\n  - 2\n---\nbody\n");
+    SUBCASE("元素混入非标量(嵌套序列)= 整份声明不收") {
+        const auto parsed = tools::ParseSkillMarkdown(
+            "---\nname: s\ndescription: d\nrequires-tools:\n  - [run_command]\n  - ok-tool\n---\nbody\n");
         REQUIRE(parsed.has_value());
         CHECK_FALSE(parsed->requires_tools.has_value());
     }
