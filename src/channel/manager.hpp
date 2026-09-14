@@ -41,6 +41,15 @@
 
 namespace lubancode::channel {
 
+// 渠道账号状态根:<状态根>/channels(应用根语义下状态根即数据根,个人
+// 布局=~/.lubancode/channels 原样)。ingress 账、account-status.json、
+// sessions 映射、work 账、pairing、账号锁、qq spool 等运行状态全落这棵
+// 树——全是"可重建/随会话走"的状态,归数据根(应用Worker接入单 §4.2、
+// 合同 capability-contract.md §13.2)。装配层与受保护路径闸
+// (tool_guard)都从这里取,不各拼各的。无根可用(应用根变量坏/无主
+// 目录)返回空 path,调用方明报不回落个人目录。
+std::filesystem::path DefaultChannelsStateRoot();
+
 // 唤醒口:manager 每个活跃账号挂一枚源(ready = 该账号有活要让位),
 // idle 摘源。实现方持 token 的存活。
 class ChannelWakeCoordinator {

@@ -152,6 +152,8 @@ Ready               唯一可启动渠道执行载体的状态（受管子进程
 
 源码与数据分家。Package 升级、卸载，不得顺手删账号状态。
 
+状态根落位（应用根语义）：上树挂在渠道账号状态根 `channel::DefaultChannelsStateRoot()` 下——个人布局即 `~/.lubancode/channels` 原样；设了 `LUBANCODE_HOME`/`LUBANCODE_DATA_HOME`（应用 Worker，合同 `docs/reference/capability-contract.md` §13.2）时随状态根落数据根（`<数据根>/channels`）。
+
 ## 6. pairing 不是平台登录
 
 两件事不可混：

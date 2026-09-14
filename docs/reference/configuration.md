@@ -674,5 +674,5 @@ lubancode app-server --app-server-profile 'D:\AppRuntime\config\deployment.json'
 - `LUBANCODE_HOME` 的值就是参数根本身,不再追加 `.lubancode`;全局配置读 `<HOME>/config.json`。
 - 两根都要非空绝对路径。空值、相对路径、建不动、数据根等于或包住参数根——启动即拒(stderr 人话,退出码 1),不静默回个人目录。`LUBANCODE_DATA_HOME` 单独设置(没给 `LUBANCODE_HOME`)也是配置错误。
 - `LUBANCODE_MANAGED=1`(托管模式)下,cwd 里的项目级 `.lubancode/config.json`、个人 `~/.lubancode` 与 `~/.agents` 材料层整层不读;缺件即拒,不回落个人默认。托管必须显式给参数根。
-- 会话账(workspaces)、workflow-runs、browser-artifacts、各类信任账、插件/包数据、缓存、日志在应用根语义下全落数据根;个人 CLI 仍全在 `~/.lubancode`,与从前逐字节一致。
+- 会话账(workspaces)、workflow-runs、browser-artifacts、各类信任账、插件/包数据、缓存、日志、渠道账号状态树(`channels/`)、gateway profile 树(`gateway/`,含 gateway.json)在应用根语义下全落数据根;个人 CLI 仍全在 `~/.lubancode`,与从前逐字节一致。
 - 宿主应用给每个 Worker 子进程构造专属环境,不改自己的全局环境,也不重定义 `HOME`/`USERPROFILE` 冒充参数根。

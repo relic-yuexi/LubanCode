@@ -5,25 +5,22 @@
 #include <string>
 
 #include "app/version.hpp"
-#include "config/config.hpp"
 #include "gateway/automation_store.hpp"
 #include "gateway/control_server.hpp"
 #include "gateway/process.hpp"
 #include "gateway/status.hpp"
 #include "gateway/work_pump.hpp"
 #include "platform/wall_clock.hpp"
-#include "tools/path_utils.hpp"
 
 namespace lubancode::cli {
 
 namespace {
 
+// gateway 状态根走唯一口 gateway::DefaultGatewayRoot()(状态根/gateway,
+// 应用根语义=数据根;个人布局=~/.lubancode/gateway 原样)——run 装配段
+// 与本命令族解同一棵 profile 树,不再各拼各的。
 std::filesystem::path DefaultGatewayRoot() {
-    const auto home = config::HomeLubancodeDir();
-    if (!home.has_value()) {
-        return std::filesystem::path();
-    }
-    return tools::Utf8ToPath(*home) / "gateway";
+    return gateway::DefaultGatewayRoot();
 }
 
 int RunGatewayProcess(const gateway::GatewayProfilePaths& paths, gateway::GatewayWorkPump* pump) {
@@ -179,7 +176,8 @@ int RunGatewayCommand(const GatewayCommandArgs& args) {
         root = DefaultGatewayRoot();
     }
     if (root.empty()) {
-        std::fprintf(stderr, "gateway: 找不到用户主目录,无法定位 ~/.lubancode/gateway\n");
+        std::fprintf(stderr,
+                     "gateway: 状态根不可用(应用根变量坏或找不到主目录),无法定位 gateway 状态树\n");
         return 1;
     }
     const gateway::GatewayProfilePaths paths =

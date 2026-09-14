@@ -802,9 +802,13 @@ int RunCli(const std::vector<std::string>& args) {
             // V1 主泵装配(app 层:backend/registry 是 app 的材料,engine
             // 不反向依赖)。模型/工具面按当前配置;工具授权 fail closed
             //(名单空 = needs_confirm 工具全拒,基础表里免确认的工具照走)。
-            const auto home_luban = lubancode::config::HomeLubancodeDir();
-            if (!home_luban.has_value()) {
-                std::cerr << "gateway run: 找不到用户主目录,无法定位 ~/.lubancode\n";
+            // P1 收尾(应用Worker接入单 §4.2):本段的路径来源统一走状态根
+            // StateRootDir(应用根语义=数据根;个人布局=~/.lubancode 原样,
+            // 行为逐字节不变),不再拿 HomeLubancodeDir 拼运行状态。
+            const auto state_root = lubancode::config::StateRootDir();
+            if (!state_root.has_value()) {
+                std::cerr << "gateway run: 状态根不可用(应用根变量坏或找不到主目录),"
+                             "无法定位运行数据根\n";
                 return 1;
             }
             const auto gateway_config = lubancode::config::LoadFromEnv();
@@ -816,22 +820,26 @@ int RunCli(const std::vector<std::string>& args) {
             lubancode::tools::ToolRegistry registry = lubancode::app::BuildBaseToolRegistry(
                 {}, gateway_config->config.search);
             // workspace 身份:启动时冻结一次(Q2 §六第二项——渠道路的会话
-            // 映射按它隔离,重启换 cwd 不误续别的项目上下文)。
+            // 映射按它隔离,重启换 cwd 不误续别的项目上下文)。身份裁决的
+            // home 止步=workspaces 树宿主根=状态根(与 app-server 同一口径,
+            // server.cpp SessionCreateLedgerPath)。
             const std::filesystem::path gateway_cwd = std::filesystem::current_path();
             const auto workspace_identity = lubancode::workspace::ResolveWorkspaceIdentity(
-                gateway_cwd, lubancode::tools::Utf8ToPath(*home_luban));
+                gateway_cwd, lubancode::tools::Utf8ToPath(*state_root));
             if (!workspace_identity.has_value()) {
                 std::cerr << "gateway run: workspace 身份裁决失败——"
                           << workspace_identity.error() << "\n";
                 return 1;
             }
             const std::filesystem::path workspaces_root =
-                lubancode::tools::Utf8ToPath(*home_luban) / "workspaces";
+                lubancode::tools::Utf8ToPath(*state_root) / "workspaces";
             std::optional<lubancode::runtime::GatewayAutomationPump> pump;
             {
                 lubancode::runtime::GatewayAutomationPump::Options pump_options;
+                // gateway 状态根走唯一口(状态根/gateway;profile 树含
+                // gateway.json 整树随状态根,见 gateway/profile.hpp 合同注释)。
                 const std::filesystem::path gateway_root =
-                    lubancode::tools::Utf8ToPath(*home_luban) / "gateway";
+                    lubancode::gateway::DefaultGatewayRoot();
                 const std::string profile_name =
                     gateway_args.profile.empty()
                         ? std::string(lubancode::gateway::kDefaultGatewayProfile)
@@ -865,8 +873,11 @@ int RunCli(const std::vector<std::string>& args) {
             {
                 lubancode::app::ChannelGatewayWiring::Options wiring_options;
                 wiring_options.config = &gateway_config->config;
+                // 渠道账号状态根走唯一口(状态根/channels;ingress 账/
+                // account-status/sessions 映射/work 账/锁/qq spool 全在这棵
+                // 树下,见 channel/manager.hpp 合同注释)。
                 const std::filesystem::path wiring_channels_root =
-                    lubancode::tools::Utf8ToPath(*home_luban) / "channels";
+                    lubancode::channel::DefaultChannelsStateRoot();
                 wiring_options.channels_state_root = wiring_channels_root;
                 const std::filesystem::path channels_root = wiring_channels_root;
                 channel_wiring = lubancode::app::ChannelGatewayWiring::Create(

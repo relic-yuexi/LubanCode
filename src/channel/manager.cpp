@@ -8,6 +8,7 @@
 #include "channel/bridge_protocol.hpp"
 #include "channel/digest.hpp"
 
+#include "config/config.hpp"  // StateRootDir:DefaultChannelsStateRoot 的根来源
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 
@@ -18,6 +19,17 @@
 #endif
 
 namespace lubancode::channel {
+
+std::filesystem::path DefaultChannelsStateRoot() {
+    // 见 manager.hpp 合同注释:状态整树随状态根走(应用根=数据根,个人=
+    // ~/.lubancode 原样);坏值/无主目录时 StateRootDir 给 nullopt,这里
+    // 回空 path——启动门已对坏值明拒,库级消费按"无根"明报不回落。
+    const auto state_root = config::StateRootDir();
+    if (!state_root.has_value()) {
+        return std::filesystem::path();
+    }
+    return platform::Utf8ToPath(*state_root) / "channels";
+}
 
 namespace {
 

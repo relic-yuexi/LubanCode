@@ -32,7 +32,8 @@ struct GatewayCommandArgs {
     // V1 主泵(verb == "run" 时装配层递进;空 = G1 骨架行为,无业务面)。
     // 借用指针,须活过 RunGatewayCommand。
     gateway::GatewayWorkPump* pump = nullptr;
-    // 测试/嵌入注入:空 = <home>/.lubancode/gateway。
+    // 测试/嵌入注入:空 = gateway 状态根(gateway::DefaultGatewayRoot(),
+    // 即 <状态根>/gateway;个人布局=~/.lubancode/gateway 原样)。
     std::filesystem::path gateway_root;
 };
 

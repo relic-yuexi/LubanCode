@@ -19,7 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include "channel/tool_guard.hpp"
-#include "config/config.hpp"  // HomeLubancodeDir:默认表的形状验证
+#include "config/config.hpp"  // HomeLubancodeDir/StateRootDir:默认表的锚定验证
 
 using namespace lubancode::channel;
 
@@ -154,22 +154,40 @@ TEST_CASE("空护表:闸恒放行;默认表形状正常") {
     ChannelProtectedPaths empty;
     CHECK(Blocked("read_file", R"({"path": "/etc/passwd"})", empty).empty());
 
-    // 默认表:正常环境(home 拿得到)非空;每条都是绝对路径形状。只验
-    // 形状,不碰真实文件。
+    // 默认表:正常环境(两根都拿得到)非空;每条都是绝对路径形状。只验
+    // 形状与锚定,不碰真实文件。锚定分两层(P1 收尾):全局 config.json
+    // 是材料,锚参数根(HomeLubancodeDir);渠道状态树/信任账/rg-stage
+    // 是运行状态,锚状态根(StateRootDir)。个人布局两根同目录,护的
+    // 路径与从前逐字节一致。
     const auto defaults = DefaultChannelProtectedPaths();
-    if (const auto home = lubancode::config::HomeLubancodeDir(); home.has_value()) {
+    const auto materials = lubancode::config::HomeLubancodeDir();
+    const auto state = lubancode::config::StateRootDir();
+    if (materials.has_value() && state.has_value()) {
         REQUIRE_FALSE(defaults.roots.empty());
         REQUIRE_FALSE(defaults.files.empty());
+        // 状态件(channels 树/rg-stage/两本信任账)锚状态根。
+        bool has_channels = false;
+        bool has_rg_stage = false;
         for (const std::string& root : defaults.roots) {
-            CHECK(root.find(*home) == 0);
+            CHECK(root.find(*state) == 0);
+            if (root.find("channels") != std::string::npos) has_channels = true;
+            if (root.find("rg-stage") != std::string::npos) has_rg_stage = true;
         }
-        for (const std::string& file : defaults.files) {
-            CHECK(file.find(*home) == 0);
-        }
+        CHECK(has_channels);
+        CHECK(has_rg_stage);
         bool has_global_config = false;
+        bool has_trust = false;
         for (const std::string& file : defaults.files) {
-            if (file.find("config.json") != std::string::npos) has_global_config = true;
+            if (file.find("config.json") != std::string::npos) {
+                // 材料件锚参数根。
+                CHECK(file.find(*materials) == 0);
+                has_global_config = true;
+                continue;
+            }
+            CHECK(file.find(*state) == 0);
+            if (file.find("-trust.json") != std::string::npos) has_trust = true;
         }
         CHECK(has_global_config);
+        CHECK(has_trust);
     }
 }

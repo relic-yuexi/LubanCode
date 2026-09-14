@@ -137,8 +137,9 @@ TEST_CASE("进程没跑任务也如实:账在但全 scheduled,execution 栏空")
 
 TEST_CASE("channel 栏:读账号状态快照/入站水位/投递错误,不带密钥与平台事件") {
     Fixture fixture("channel");
-    // channels 根与 gateway 根同级(生产布局:<home>/.lubancode/{channels,
-    // gateway};ProbeStatusSections 由 paths.root.parent_path() 推导)。
+    // channels 根与 gateway 根同级(生产布局:两棵状态树同挂 <状态根> 下,
+    // 见 gateway::DefaultGatewayRoot/channel::DefaultChannelsStateRoot;
+    // ProbeStatusSections 由 paths.root.parent_path() 推导)。
     const std::filesystem::path channels_root = fixture.root.parent_path() / "channels";
     {
         std::error_code ec;

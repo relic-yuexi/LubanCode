@@ -7,9 +7,21 @@
 
 #include <nlohmann/json.hpp>
 
+#include "config/config.hpp"  // StateRootDir:DefaultGatewayRoot 的根来源
 #include "platform/paths.hpp"
 
 namespace lubancode::gateway {
+
+std::filesystem::path DefaultGatewayRoot() {
+    // 见 profile.hpp 合同注释:profile 树整棵随状态根走(应用根=数据根,
+    // 个人=~/.lubancode 原样);坏值/无主目录时 StateRootDir 给 nullopt,
+    // 这里回空 path——启动门已对坏值明拒,库级消费按"无根"明报不回落。
+    const auto state_root = config::StateRootDir();
+    if (!state_root.has_value()) {
+        return std::filesystem::path();
+    }
+    return platform::Utf8ToPath(*state_root) / "gateway";
+}
 
 bool IsValidGatewayProfileName(std::string_view name) {
     if (name.empty() || name.size() > 64) return false;

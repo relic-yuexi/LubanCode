@@ -135,6 +135,8 @@ Gateway 进程退出码（G1 实现裁决，冻结）：
 
 会话位置一律走 workspace identity/index/resolver 解析实际目录，不按显示名手拼（见 §8-V0）。workspace-storage-v2 迁移前的旧 trajectories 平铺根口径废除。
 
+状态根落位（应用根语义）：上表的 `~/.lubancode` 前缀即状态根——生产装配走 `gateway::DefaultGatewayRoot()`（`<状态根>/gateway`）与 `config::StateRootDir()`（workspaces 树），个人布局路径原样；设了 `LUBANCODE_HOME`/`LUBANCODE_DATA_HOME`（应用 Worker，合同 `docs/reference/capability-contract.md` §13.2）时整树随状态根落数据根（含 `gateway.json`——用户手写档与锁/账/日志同树，不拆双根）。`gateway status` 渠道栏的 channels 树同挂状态根下。
+
 首版存储裁决不变：append-only event + 原子 snapshot/manifest，不先引 SQLite。spec 可原子换代；事实事件只追加，不可把 JSON 文件当共享可变 map 反复整份覆盖。关键受理、认领、执行授权、回复选择与发送回执要求 PowerLoss 级提交（§10-V0）。
 
 ## 7. 批次地图与当前状态
