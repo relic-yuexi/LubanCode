@@ -1107,7 +1107,44 @@ AutomationStore::SweepResult AutomationStore::SweepSchedule(std::int64_t now_ms)
         if (slots.empty()) continue;
         const std::int64_t last_slot = slots.back();
         if (job.misfire == MisfirePolicy::Skip) {
-            // 跳过:错过的拍不补不并,游标直进;下一拍等未来。
+            // skip:被后继拍顶掉的(迟到)拍不补不并,游标直进;最近一拍
+            // 在宽限内仍算"当前拍"照跑——迟到判定 = now - slot > 宽限
+            //(interval 取 min(周期, 60s),cron 固定 60s:泵轮询粒度量级)。
+            // 已有 scheduled 待办占位则本轮不建(单待办语义,待办顶着跑)。
+            const std::int64_t grace_ms =
+                job.schedule_kind == ScheduleKind::Interval
+                    ? std::min<std::int64_t>(spec.interval_seconds * 1000, 60000)
+                    : 60000;
+            const bool last_current = (now_ms - last_slot) <= grace_ms;
+            const std::size_t dropped = last_current ? slots.size() - 1 : slots.size();
+            if (last_current && !has_scheduled && open_count < max_open_occurrences_) {
+                const std::string occurrence_id =
+                    MakeOccurrenceId(job_id, job.revision, last_slot);
+                if (occurrences_.find(occurrence_id) == occurrences_.end()) {
+                    nlohmann::json created = nlohmann::json::object();
+                    created["type"] = kTypeOccurrenceCreated;
+                    created["schemaVersion"] = 2;
+                    created["jobId"] = job_id;
+                    created["occurrenceId"] = occurrence_id;
+                    created["slotMs"] = last_slot;
+                    created["reason"] = "schedule";
+                    created["missedCount"] = dropped;  // 覆盖范围账
+                    created["revision"] = job.revision;
+                    if (!AppendLinePowerLoss(created)) {
+                        result.ok = false;
+                        return result;
+                    }
+                    AutomationOccurrence occurrence;
+                    occurrence.occurrence_id = occurrence_id;
+                    occurrence.job_id = job_id;
+                    occurrence.slot_ms = last_slot;
+                    occurrence.reason = "schedule";
+                    occurrence.missed_count = static_cast<std::uint32_t>(dropped);
+                    occurrences_[occurrence_id] = occurrence;
+                    ++open_count;
+                    ++result.generated;
+                }
+            }
             nlohmann::json advance = nlohmann::json::object();
             advance["type"] = kTypeJobScheduleAdvanced;
             advance["schemaVersion"] = 2;
@@ -1121,7 +1158,7 @@ AutomationStore::SweepResult AutomationStore::SweepSchedule(std::int64_t now_ms)
                 return result;
             }
             job.schedule_cursor_ms = last_slot;
-            result.skipped_slots += slots.size();
+            result.skipped_slots += dropped;
             continue;
         }
         // coalesce(默认):合并补一拍。已有 scheduled 待办 → 并进它;没有

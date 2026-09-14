@@ -316,7 +316,7 @@ TEST_CASE("claim 后崩(无绑定):重启重派同一 occurrence,attempt+1,不�
     CHECK(occurrence->second.occurrence_id == occurrence_id);  // 身份不洗
 }
 
-TEST_CASE("attempt 帽到顶:三次重派机会用尽 → needs_review,不再派") {
+TEST_CASE("attempt 帽到顶:重派机会用尽 → needs_review,不再派") {
     V2Fixture fixture("exhausted");
     auto backend = fixture.MakeBackend();
     tools::ToolRegistry registry = MakeRegistry();
@@ -324,13 +324,15 @@ TEST_CASE("attempt 帽到顶:三次重派机会用尽 → needs_review,不再派
     REQUIRE(fixture.OpenPump(&pump, *backend, registry).ok);
     REQUIRE(pump.store()->CreateOnceJob("j", "问", 1000, 1000, "").accepted);
     const std::string occurrence_id = gateway::MakeOccurrenceId("j", 1, 1000);
-    // 三轮"claim 后死":attempt 1→2→3 都重派得了;第三次 claim 后到帽。
-    for (int round = 0; round < 3; ++round) {
+    // 两轮"claim 后死"用掉两次重派(attempt 1→2→3);第三次 claim 后帽到顶。
+    for (int round = 0; round < 2; ++round) {
         REQUIRE(pump.store()->ClaimDue("gw-v2-epoch", 2000 + round).has_value());
         REQUIRE(pump.store()->RedispatchOccurrence(occurrence_id, "claimed_without_binding",
                                                    3000 + round));
     }
     REQUIRE(pump.store()->ClaimDue("gw-v2-epoch", 9000).has_value());  // attempt 3
+    CHECK_FALSE(pump.store()->RedispatchOccurrence(occurrence_id, "claimed_without_binding",
+                                                   9100));  // 3+1 > 帽
     REQUIRE(pump.TickOnce(9500));  // 恢复:重派帽到顶 → needs_review
     const auto projection = gateway::ReadAutomationProjection(fixture.paths.automation_log);
     const auto occurrence = projection.occurrences.find(occurrence_id);
@@ -409,9 +411,8 @@ TEST_CASE("heartbeat:正文未变不投递,变化才投;观察账在") {
     CHECK(CountOf(fixture.counter_file, "model") == 3);  // 检查照跑
     const auto projection = gateway::ReadAutomationProjection(fixture.paths.automation_log);
     REQUIRE(projection.occurrences.size() == 3);
-    const auto jobs = projection.occurrences;  // slot 序即 map 序(occ id 不保序,按 slot 排)
     std::vector<gateway::AutomationOccurrence> by_slot;
-    for (const auto& [id, occ] : jobs) {
+    for (const auto& [id, occ] : projection.occurrences) {
         by_slot.push_back(occ);
     }
     std::sort(by_slot.begin(), by_slot.end(),
@@ -419,12 +420,22 @@ TEST_CASE("heartbeat:正文未变不投递,变化才投;观察账在") {
                   return a.slot_ms < b.slot_ms;
               });
     REQUIRE(by_slot.size() == 3);
+    // 诊断落账:哪一拍什么 outcome/detail(失败时 CI 日志直接见因)。
+    for (const auto& occ : by_slot) {
+        MESSAGE("occ slot=", occ.slot_ms, " attempt=", occ.attempt,
+                " outcome=", occ.outcome, " detail=", occ.detail,
+                " changed=", occ.observed_changed, " delivered=", occ.observed_delivered,
+                " session=", occ.session_id.empty() ? "-" : occ.session_id);
+    }
     CHECK(by_slot[0].outcome == "succeeded");
     CHECK(by_slot[1].outcome == "succeeded");
     CHECK(by_slot[1].detail == "unchanged_notification_suppressed");
     CHECK(by_slot[2].outcome == "succeeded");
     // 投递去重:只有拍 1 与拍 3 出箱(拍 2 静默)。
     const auto outbox = gateway::ReadOutboxProjection(fixture.paths.outbox_log);
+    for (const auto& [id, item] : outbox.items) {
+        MESSAGE("outbox ", id, " sel=", item.selection_id, " state=", item.state);
+    }
     CHECK(outbox.items.size() == 2);
     CHECK(outbox.items.begin()->second.state == "delivered");
 }

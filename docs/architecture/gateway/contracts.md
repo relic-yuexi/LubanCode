@@ -325,7 +325,7 @@ V2 批落定的实现裁决（单子 §十 V2 五件事的落点）。调度引�
 
 ### 13.2 misfire、合并、并发与队列帽
 
-- misfire 政策：`coalesce`（默认）——停机/占用跨多周期时合并补一拍：occurrence 落最老一拍、`missedCount` 记覆盖范围（既无待办时新建；已有 scheduled 待办时 `occurrence.merged` 行并进，不建第二枚）；`skip`——错过的拍不补不并，游标直进，下一拍等未来。
+- misfire 政策：`coalesce`（默认）——停机/占用跨多周期时合并补一拍：occurrence 落最老一拍、`missedCount` 记覆盖范围（既无待办时新建；已有 scheduled 待办时 `occurrence.merged` 行并进，不建第二枚）；`skip`——迟到判定 = `now - slot > 宽限`（interval 宽限 = min(周期, 60s)，cron 固定 60s，泵轮询粒度量级）：迟到的拍不补不并、游标直进，最近一拍在宽限内仍算"当前拍"照跑（不算补），连最近一拍都超出宽限则全跳、下一拍等未来。
 - 生成游标 `schedule_cursor` 只前进（`job.schedule_advanced` 行），时钟倒拨不重跑原 slot、不出新拍；cursor 是唯一"哪些拍已消化"的真源，occurrence 集合是派生事实。
 - 同 job 不重叠：有 claimed 未结算的活儿不生成、不进游标（收口后余拍合并补）；最多留一份合并待办。
 - 队列帽：全局 open（scheduled+claimed）occurrence 数达帽（默认 256，`AutomationStore::set_max_open_occurrences` 测试可调）停生成、游标不动、下轮重试（`stalled`），不无限 catch up。恢复扫描单飞沿用 V1（每 tick 至多一枚新执行）。

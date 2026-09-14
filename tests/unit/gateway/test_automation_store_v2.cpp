@@ -107,26 +107,68 @@ TEST_CASE("coalesce:停机跨多周期合并补一拍,occurrence 落最老一拍
     CHECK(again.merged == 0);
 }
 
-TEST_CASE("skip:错过的拍不补不并,游标直进,下一拍等未来") {
+TEST_CASE("skip:迟到的拍不补不并,游标直进;最近一拍在宽限内照跑") {
     AutomationStore store;
     REQUIRE(AutomationStore::Open(&store, FreshLog("skip")).ok);
     REQUIRE(store.CreateJob(IntervalSpec("巡检", 60, MisfirePolicy::Skip), 1000, "").accepted);
     {
+        // 停机到 301000:61k..241k 四拍迟到(后继已到点)全跳;301000 这拍
+        // 在宽限内(min(60s,60s))算当前拍,照跑。
         const auto sweep = store.SweepSchedule(301000);
         CHECK(sweep.ok);
-        CHECK(sweep.generated == 0);
-        CHECK(sweep.skipped_slots == 5);  // 61k..301k 五拍全跳
+        CHECK(sweep.generated == 1);
+        CHECK(sweep.skipped_slots == 4);
     }
-    CHECK(store.ListOccurrences().empty());
+    const auto occurrences = store.ListOccurrences();
+    REQUIRE(occurrences.size() == 1);
+    CHECK(occurrences[0].slot_ms == 301000);
+    CHECK(occurrences[0].missed_count == 4);  // 覆盖范围在账
     const auto job = store.FindJob("job-1");
     REQUIRE(job.has_value());
     CHECK(job->schedule_cursor_ms == 301000);
-    // 到下一拍才出活。
+    // 当前拍收口后,下一拍正常出。
+    REQUIRE(store.ClaimDue("epoch-a", 302000).has_value());
+    REQUIRE(store.SettleOccurrence(MakeOccurrenceId("job-1", 1, 301000), "succeeded", "", 303000));
     const auto next = store.SweepSchedule(361000);
     CHECK(next.generated == 1);
+    CHECK(next.skipped_slots == 0);
+    const auto after = store.ListOccurrences();
+    REQUIRE(after.size() == 2);
+    CHECK(after[1].slot_ms == 361000);
+    CHECK(after[1].missed_count == 0);
+}
+
+TEST_CASE("skip cron 全迟到:最近一拍超出宽限 → 全跳,下一拍等未来") {
+    AutomationStore store;
+    REQUIRE(AutomationStore::Open(&store, FreshLog("skipall")).ok);
+    AutomationStore::JobSpec spec;
+    spec.prompt = "日报";
+    spec.kind = ScheduleKind::Cron;
+    spec.cron_expr = "0 9 * * *";
+    spec.timezone = "UTC";
+    spec.misfire = MisfirePolicy::Skip;
+    // 当日 09:00 已过才建账:首拍在次日。
+    const std::int64_t created = CivilToUtcMs(CivilTime{2026, 6, 1, 10, 0, 0});
+    REQUIRE(store.CreateJob(spec, created, "").accepted);
+    // 停机到 06-03 正午:06-02 与 06-03 的九点两拍,最近一拍已迟 3 小时
+    //(宽限 60s)→ 全跳。
+    const std::int64_t june3_noon = CivilToUtcMs(CivilTime{2026, 6, 3, 12, 0, 0});
+    const auto sweep = store.SweepSchedule(june3_noon);
+    CHECK(sweep.ok);
+    CHECK(sweep.generated == 0);
+    CHECK(sweep.skipped_slots == 2);
+    CHECK(store.ListOccurrences().empty());
+    const auto job = store.FindJob("job-1");
+    REQUIRE(job.has_value());
+    CHECK(job->schedule_cursor_ms == CivilToUtcMs(CivilTime{2026, 6, 3, 9, 0, 0}));
+    // 下一拍到点即扫(宽限内):照常出活。
+    const std::int64_t june4_0900 = CivilToUtcMs(CivilTime{2026, 6, 4, 9, 0, 0});
+    const auto next = store.SweepSchedule(june4_0900);
+    CHECK(next.generated == 1);
+    CHECK(next.skipped_slots == 0);
     const auto occurrences = store.ListOccurrences();
     REQUIRE(occurrences.size() == 1);
-    CHECK(occurrences[0].slot_ms == 361000);
+    CHECK(occurrences[0].slot_ms == june4_0900);
     CHECK(occurrences[0].missed_count == 0);
 }
 
@@ -255,6 +297,9 @@ TEST_CASE("update 改排即重锚:新拍按新 revision 起时间轴,旧待办�
     REQUIRE(store.CreateJob(IntervalSpec("巡检", 60), 1000, "").accepted);
     REQUIRE(store.SweepSchedule(121000).generated == 1);
     const std::string old_id = MakeOccurrenceId("job-1", 1, 61000);
+    // 旧待办先收口(单待办语义:不收口则新拍并进它,不出第二枚)。
+    REQUIRE(store.ClaimDue("epoch-a", 122000).has_value());
+    REQUIRE(store.SettleOccurrence(old_id, "succeeded", "", 123000));
 
     AutomationStore::JobUpdatePatch patch;
     patch.set_interval = true;
@@ -265,7 +310,7 @@ TEST_CASE("update 改排即重锚:新拍按新 revision 起时间轴,旧待办�
     CHECK(job->interval_seconds == 120);
     CHECK(job->anchor_ms == 400000);
     CHECK(job->schedule_cursor_ms == 400000);  // 重锚
-    // 旧待办(61k,rev 1)原样在,新拍按 rev 2 出(400s+120s=520s)。
+    // 旧待办(61k,rev 1)结算账原样在,新拍按 rev 2 出(400s+120s=520s)。
     CHECK(store.FindOccurrence(old_id).has_value());
     const auto sweep = store.SweepSchedule(530000);
     CHECK(sweep.generated == 1);
