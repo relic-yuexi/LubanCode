@@ -285,7 +285,8 @@ GAP 记账(2026-09-14,P4 批):
   **文档**:capability-contract.md(§3 字段表 components.skills 行/依赖解释段/§13.4 三行更新+错误码归属段)、trajectory-v3-schema.md(kind 表+§2.2 无 status 行+提示组合域段落)、docs/features/app-server/README.md(thread/start skills 字段)。
   **翻勾对账**:§四(72/73/74/75/106/107/109/110)、§五(117-120/133/134/135)、§六(139-147 全)、§七(155-160 全)、§九(185-189/195-201)、§十(211)、§十一(216/217)——逐勾附证据指针,只翻源码核过的。
   **未验边界**:①skill 受控读取的符号链接用例在无链接权限的 Windows 环境如实跳过(create_symlink 失败即 return,不冒充);路径规范化与打开之间的竞态(TOCTOU)未做 fd 级防护,归 OS 隔离真机面;②漂移校验只盖 SKILL.md 本体,技能目录内其他材料(path 读口)不带指纹——按需读不校验漂移,材料漂移未钉;③headless 单根扫描不装 packaged 技能(package canonical ID 声明面留待包装配接入);④终端路依赖声明不执法(工具面全量注册,口径不同,如实分家);⑤v2 场无 prompt.composition.applied(不回填旧格式);⑥prompt.composition.applied 只在 agent_plan 组合路落账,无档默认路(固定 kAppServerDefaultSystemPrompt)不落;⑦真拔电/OS 崩溃/OS 级强隔离保持未验(与 P4 同口径);⑧部署档正文覆写通道未开(当前合同=托管模式零覆写源,要开走 additive 字段另立小单);⑨Windows/Linux 腿按 CI 设计合 main 后跑,本批 CI 只验 macOS 腿+源码层 Windows 语义。
-  交付:PR 见仓库(worktree-agent-worker-skills-tail);CI/链接随 PR 补记。）
+  交付:PR relic-yuexi/LubanCode#80,分支 worktree-agent-worker-skills-tail,head d4592683;CI:头提交 pull_request 活跃 suite(actions/runs/34849280974,check-suite 94368286369)rollup conclusion=success——macos-clang 编译+全量测试 31m07s 绿(512 册)。中途三轮红均就地修:①server.cpp 局部变量误用 C++20 关键字 requires(21e65616);②test_skills 断言 *begin()+1 优先级成串加整数(29b0ebaa);③三处测试口径对真行为——YAML `- 1` 本是标量、--system-prompt 指不存在的文件会在交互人格段先退、v3 会话流是 <sessionId>.jsonl 非 main.jsonl(d4592683)。push 事件姊妹 run 被 GitHub 自动取消属残影,按判绿规矩不计;Windows/linux 腿按 CI 设计合 main 后跑。
+  **rebase 记(2026-09-14)**:main 并入 #78/#79 后重放到 4117fe2d 上(提交号 a72e1b8c..83e8ee79)。冲突三处按叠加解:server.cpp thread/start 回执——#79 的 connection 块与 #80 的 skills 冻结清单块同点双存(两块语义不同命:connection=Worker 级冻结快照走 ServerOptions+轮桥 identity;skills=场级 assembly 产物;不并成一条注入链);README thread/start 行两口 additive 说明合并;todo §四——#79 翻的 108/111 与 #80 翻的 106/107/109/110 两全。上文 head/CI 链接是重放前的原账,重放后以 PR 头提交活跃套件为准。）
 
 ## 十三、验收清单
 
