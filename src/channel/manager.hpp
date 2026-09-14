@@ -72,6 +72,9 @@ struct ChannelManagerOptions {
     std::function<std::int64_t()> now_ms;
     // 队列水位(默认 InboxLimits;测试可压小)。
     InboxLimits inbox_limits;
+    // channel.send 回执超时(QQ 接入单 Q2 §七:超时 = delivery_unknown,
+    // 停自动重发,不虚 exactly-once)。测试注入小值。
+    std::int64_t send_timeout_ms = 30'000;
 };
 
 class ChannelManager {
@@ -111,6 +114,20 @@ public:
     // 路由每次现读。空 allow/deny 的缺省份会覆盖旧值(收窄可撤,显式
     // 撤销也是配置)。
     void SetChannelToolsPolicy(const std::string& channel_id, ChannelToolsUserPolicy tools);
+    // 账号运行状态的盘上快照(Q2:状态迁移时写 account-status.json,
+    // 进程外的只读探测面读——gateway status 渠道栏不带密钥与整份平台
+    // 事件)。零写盘;文件不在给 present=false。
+    struct ChannelAccountStatusFile {
+        bool present = false;
+        std::string channel_id;
+        std::string account_id;
+        std::string state;
+        int generation = 0;
+        std::int64_t updated_at_ms = 0;
+        std::string last_reason;
+        std::string last_detail;
+    };
+    static ChannelAccountStatusFile ReadAccountStatusFile(const std::filesystem::path& account_dir);
 
     // 起账号:Disabled -> Validating -> Starting,发 channel.initialize。
     // 后续推进靠 Pump()(收到 initialize result 发 start,收到 start result
@@ -188,6 +205,74 @@ public:
     std::optional<WorkItem> TakeNextWork(const std::string& channel_id,
                                          const std::string& account_id);
 
+    // ---- 出站投递(channel.send 的宿主口;QQ 接入单 Q2 §七) -----------
+    // 发送受理:冻结正文按 conversation 直发,client_delivery_id 是 outbox
+    // 的 delivery id(桥协议 client_id——适配器按它稳定 msg_seq,同
+    // delivery 重试同载荷)。受理即编码写给 sidecar(同步面),回执异步:
+    // 泵侧 DrainChannelDeliveryOutcomes 收账。账号非 Running / transport
+    // 缺 / 正文空 → 拒(错误串)。
+    struct ChannelSendRequest {
+        std::string conversation_id;        // direct 会话 openid
+        std::string text;                   // 冻结正文(单段;拆段归 outbox)
+        std::string reply_to_message_id;    // 被动回复锚(空 = 主动消息)
+        std::string client_delivery_id;     // 稳定发送身份(outbox delivery id)
+    };
+    std::optional<std::string> SendReply(const std::string& channel_id,
+                                         const std::string& account_id,
+                                         const ChannelSendRequest& request);
+
+    // 一笔回执的结算账(泵消费后推进 outbox/ingress)。
+    struct ChannelDeliveryOutcome {
+        enum class Status {
+            Accepted,      // 平台已接受(provider_message_id 有值)
+            RateLimited,   // 限频/暂态失败:可退避重试(同 delivery_id 同载荷)
+            Rejected,      // 平台明确拒绝(回复窗口过期/内容拒绝/无好友/拒收)
+            AuthFailed,    // 令牌失效(账号已转 NeedsLogin)
+            Unknown,       // 超时无回执:delivery_unknown,停自动重发
+        };
+        std::string client_delivery_id;
+        Status status = Status::Unknown;
+        std::string provider_message_id;
+        std::string error_code;   // 稳定码:rate_limited|platform_reject|
+                                  // reply_window_expired|auth_failed|delivery_unknown
+        std::string detail;       // 脱敏细节(不带密钥/整份平台事件)
+        std::int64_t settled_at_ms = 0;
+        int generation = 0;       // 结算时的账号代次(陈旧回执如实带出)
+    };
+    // 收走自上次调用以来的全部回执结算(FIFO;同 delivery 重复回执只结
+    // 一次——首笔为准,后续按重复丢弃)。代次隔离:受理时记的代次与结
+    // 算时不符 = 陈旧回执,不产出结算(留诊断)。
+    std::vector<ChannelDeliveryOutcome> DrainChannelDeliveryOutcomes(const std::string& channel_id,
+                                                                     const std::string& account_id);
+    // 该 delivery 是否有在途 send(泵的崩溃窗口裁决:账上 sending 而桥上
+    // 无在途 = 发出请求丢了,可重驱动)。
+    bool HasPendingSend(const std::string& channel_id, const std::string& account_id,
+                        const std::string& client_delivery_id) const;
+
+    // ---- 渠道 work 泵的恢复/结算面(Q2 §六) ------------------------------
+    // 仍在 Running(claim 后未结算)的入站件——恢复扫描的输入。
+    struct IngressRunningView {
+        std::int64_t sid = 0;
+        std::string conversation_id;
+        ChannelInboundEvent event;
+    };
+    std::vector<IngressRunningView> ListRunningIngress(const std::string& channel_id,
+                                                       const std::string& account_id) const;
+    // 状态推进窄口(泵侧结算;迁移合法性由 ingress 状态机把关,非法回错)。
+    std::optional<std::string> SettleIngressReplied(const std::string& channel_id,
+                                                    const std::string& account_id,
+                                                    std::int64_t sid);
+    std::optional<std::string> SettleIngressDelivered(const std::string& channel_id,
+                                                      const std::string& account_id,
+                                                      std::int64_t sid, bool delivered,
+                                                      const std::string& reason);
+    std::optional<std::string> DeadLetterIngress(const std::string& channel_id,
+                                                 const std::string& account_id, std::int64_t sid,
+                                                 const std::string& reason);
+    // 入站账的只读快照(观测/测试)。
+    std::vector<ChannelIngressStore::Record> IngressRecords(const std::string& channel_id,
+                                                            const std::string& account_id) const;
+
     // ---- pairing 账的口子(阶段 3 命令面:/channel pairing list/approve/reject) ----
 
     struct PendingPairingView {
@@ -206,6 +291,14 @@ public:
                                              std::string* error = nullptr);
 
 private:
+    // 在途 channel.send(受理即记;回执/超时结算后销账)。
+    struct PendingChannelSend {
+        std::int64_t request_id = 0;
+        std::string client_delivery_id;
+        std::string conversation_id;
+        int generation = 0;             // 受理时账号代次(代次隔离)
+        std::int64_t sent_at_ms = 0;
+    };
     struct AccountEntry {
         std::string channel_id;
         std::string account_id;
@@ -227,6 +320,12 @@ private:
         std::unique_ptr<ChannelInbox> inbox;
         std::unique_ptr<PairingStore> pairing;
         std::vector<AccountStatusTransition> transitions;
+        // 出站投递账(Q2 §七):在途 send 与已结算回执(泵收走即清)。
+        std::map<std::int64_t, PendingChannelSend> pending_sends;
+        std::vector<ChannelDeliveryOutcome> delivery_outcomes;
+        // 已结算过的 delivery(重复回执只结一次)。
+        std::map<std::string, int> settled_deliveries;
+        std::vector<std::string> send_diagnostics;
     };
 
     AccountEntry* Find(const std::string& channel_id, const std::string& account_id);
@@ -237,6 +336,8 @@ private:
     std::optional<std::string> TransitionLocked(AccountEntry& entry, ChannelAccountState to,
                                                 const std::string& reason,
                                                 const std::string& detail);
+    // 状态迁移的盘上快照(Q2:account-status.json,原子写,只读探测面)。
+    void PersistAccountStatusLocked(const AccountEntry& entry);
     void FlushOutboundLocked(AccountEntry& entry);
     // 以下两个 *Locked:调用方已持 mutex_(公有口拿锁后转内部,防递归死锁)。
     void HandleBytesFromSidecarLocked(AccountEntry& entry, const std::byte* data,
@@ -246,6 +347,20 @@ private:
     void HandleMessageLocked(AccountEntry& entry, const IncomingMessage& message);
     // channel.inbound 的处理:去重落账 -> ack -> 路由准入 -> inbox/背压。
     void OnInboundLocked(AccountEntry& entry, const ChannelInboundEvent& event);
+    // ---- 出站投递(Q2 §七) ----
+    // 回执结算:推送 outcome 进 delivery_outcomes(调用方已持 mutex_)。
+    void SettleSendLocked(AccountEntry& entry, std::int64_t request_id,
+                          ChannelDeliveryOutcome::Status status,
+                          const std::string& provider_message_id, const std::string& error_code,
+                          const std::string& detail);
+    // channel.send 错误应答的分型(限频/令牌失效/窗口过期/平台拒绝)。
+    void ClassifySendErrorLocked(AccountEntry& entry, std::int64_t request_id,
+                                 const std::string& stable_name, const nlohmann::json& error_data);
+    // delivery.receipt 通知的结算(按 outbound_delivery_id 关联;重复/陈旧
+    // 只留诊断)。
+    void OnDeliveryReceiptLocked(AccountEntry& entry, const nlohmann::json& params);
+    // 在途 send 的超时裁决(delivery_unknown)。
+    void ExpireStaleSendsLocked(AccountEntry& entry);
     // 路由准入(阶段 3):ChannelRouter 全账,pairing 账经 PairingStore 适配。
     // 调用方已持 mutex_。
     RouteDecision RouteInboundLocked(AccountEntry& entry, const ChannelInboundEvent& event);

@@ -74,11 +74,19 @@ public:
     bool TickOnce(std::int64_t now_ms) override;
     void StopAccepting() override;
     bool Close(int grace_ms) override;
+    void set_owner_epoch(const std::string& epoch) override;
 
     // 观测(诊断/测试):不装配的渠道/账号与原因(稳定码)。
     const std::vector<std::string>& skipped() const { return skipped_; }
     const channel::ChannelManager* manager() const { return manager_.get(); }
+    // 渠道 work 泵(Q2)要的可变口:TakeNextWork/SendReply/结算面。
+    channel::ChannelManager* mutable_manager() { return manager_.get(); }
     std::size_t adapter_count() const { return adapters_.size(); }
+
+    // 挂渠道 work 泵(Q2:V3 与 outbox 总装)。TickOnce 在桥泵之后推进它
+    //(先收字节回执,再驱动一轮业务);StopAccepting/Close/owner_epoch
+    // 一并转发。生命周期归本件(先于 manager 析构)。
+    void set_work_pump(std::unique_ptr<gateway::GatewayWorkPump> work_pump);
 
 private:
     ChannelGatewayWiring() = default;
@@ -87,6 +95,7 @@ private:
     std::unique_ptr<channel::ChannelManager> manager_;
     std::vector<std::unique_ptr<channel::ChannelBridgeTransport>> adapters_;
     std::vector<std::string> skipped_;
+    std::unique_ptr<gateway::GatewayWorkPump> work_pump_;
 };
 
 }  // namespace lubancode::app

@@ -219,6 +219,19 @@ std::unique_ptr<ChannelIngressStore> ChannelIngressStore::Open(
             result->error = store->last_error_;
         }
     }
+    // 主账写柄(QQ 接入单 Q2:PowerLoss 档,Open 即持;打不开 = 只读拒绝写)。
+    auto journal = trajectory::JournalWriter::Open(
+        store->journal_path_, trajectory::JournalWriter::OpenMode::Append);
+    if (!journal.has_value()) {
+        store->write_blocked_ = true;
+        store->last_error_ = journal.error();
+        if (result != nullptr) {
+            result->ok = false;
+            result->error = store->last_error_;
+        }
+        return store;
+    }
+    store->journal_writer_ = std::move(*journal);
     return store;
 }
 
@@ -324,20 +337,13 @@ void ChannelIngressStore::ReplayLocked() {
 }
 
 std::optional<std::string> ChannelIngressStore::AppendLine(const std::string& line) {
-    if (write_blocked_) {
+    if (write_blocked_ || !journal_writer_.has_value()) {
         return std::string("账本只读(journal 打不开或建目录失败): ") + last_error_;
     }
-    std::ofstream stream(journal_path_, std::ios::binary | std::ios::app);
-    if (!stream) {
-        write_blocked_ = true;
-        last_error_ = "journal 追加打不开: " + platform::PathToUtf8(journal_path_);
-        return last_error_;
-    }
-    stream.write(line.data(), static_cast<std::streamsize>(line.size()));
-    stream.write("\n", 1);
-    stream.flush();
-    if (!stream) {
-        // 落盘失败:不 ack sidecar,事件交回重发(message-contracts.md §3)。
+    // QQ 接入单 Q2(§六第一项):PowerLoss 档——规范化原文与去重键落稳
+    // 才算 durable,调用方(OnInboundLocked)此后才 ack sidecar。写失败
+    // 一次性进 write_blocked,后续追加全部拒绝(状态追加失败停止推进)。
+    if (!journal_writer_->AppendLine(line, trajectory::Durability::PowerLoss)) {
         write_blocked_ = true;
         last_error_ = "journal 落盘失败: " + platform::PathToUtf8(journal_path_);
         return last_error_;
@@ -485,31 +491,40 @@ std::optional<std::string> ChannelIngressStore::MoveToDeadLetter(std::int64_t si
         return last_error_;
     }
     record->last_transition_reason = reason;
-    // dead-letter.jsonl 留完整档(replay 用)。
+    // dead-letter.jsonl 留完整档(replay 用;旁路账,写不进不阻塞迁移)。
     if (!write_blocked_) {
-        std::error_code ec;
-        std::filesystem::create_directories(dead_letter_path_.parent_path(), ec);
-        std::ofstream stream(dead_letter_path_, std::ios::binary | std::ios::app);
-        if (stream) {
-            nlohmann::json entry = nlohmann::json::object();
-            entry["sid"] = sid;
-            entry["channel_id"] = channel_id_;
-            entry["account_id"] = account_id_;
-            entry["delivery_id"] = record->event.delivery_id;
-            entry["reason"] = reason;
-            entry["at_ms"] = at_ms;
-            entry["event"] = record->event.ToJson();
-            const std::string text = entry.dump();
-            stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-            stream.write("\n", 1);
-            stream.flush();
-        }
+        nlohmann::json entry = nlohmann::json::object();
+        entry["sid"] = sid;
+        entry["channel_id"] = channel_id_;
+        entry["account_id"] = account_id_;
+        entry["delivery_id"] = record->event.delivery_id;
+        entry["reason"] = reason;
+        entry["at_ms"] = at_ms;
+        entry["event"] = record->event.ToJson();
+        (void)AppendDeadLetterLine(entry);
     }
     for (auto it = records_.rbegin(); it != records_.rend(); ++it) {
         if (it->sid == sid) {
             it->state = IngressEventState::DeadLettered;
             break;
         }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> ChannelIngressStore::AppendDeadLetterLine(
+    const nlohmann::json& entry) {
+    if (!dead_letter_writer_.has_value()) {
+        auto writer = trajectory::JournalWriter::Open(
+            dead_letter_path_, trajectory::JournalWriter::OpenMode::Append);
+        if (!writer.has_value()) {
+            return writer.error();
+        }
+        dead_letter_writer_ = std::move(*writer);
+    }
+    if (!dead_letter_writer_->AppendLine(entry.dump(), trajectory::Durability::PowerLoss)) {
+        dead_letter_writer_.reset();  // 下次重开;旁路账失败不阻塞主账
+        return std::string("dead-letter 落盘失败: ") + platform::PathToUtf8(dead_letter_path_);
     }
     return std::nullopt;
 }
@@ -574,6 +589,64 @@ std::vector<ChannelIngressStore::DeadLetterEntry> ChannelIngressStore::DeadLette
 std::int64_t ChannelIngressStore::next_sid() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return next_sid_;
+}
+
+// ---------------------------------------------------------------------------
+// 只读投影(gateway status 渠道栏;零建目录零写盘)
+// ---------------------------------------------------------------------------
+
+ChannelIngressProjection ReadChannelIngressProjection(const std::filesystem::path& account_dir) {
+    ChannelIngressProjection projection;
+    const std::filesystem::path journal = account_dir / "ingress" / "journal.jsonl";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(journal, ec) || ec) {
+        return projection;
+    }
+    projection.ledger_present = true;
+    // sid -> 当前状态(replay 语义同 ReplayLocked:evt 起 durable,tr 覆盖;
+    // 坏行/半行跳过不猜)。
+    std::map<std::int64_t, IngressEventState> states;
+    std::ifstream stream(journal, std::ios::binary);
+    std::string text_line;
+    while (std::getline(stream, text_line)) {
+        if (text_line.empty()) continue;
+        nlohmann::json parsed;
+        try {
+            parsed = nlohmann::json::parse(text_line);
+        } catch (const nlohmann::json::exception&) {
+            continue;
+        }
+        if (!parsed.is_object() || !parsed.contains("t") || !parsed["t"].is_string() ||
+            !parsed.contains("sid") || !parsed["sid"].is_number_integer()) {
+            continue;
+        }
+        const std::string type = parsed["t"].get<std::string>();
+        const std::int64_t sid = parsed["sid"].get<std::int64_t>();
+        if (type == "evt") {
+            states[sid] = IngressEventState::Durable;
+            ++projection.events;
+        } else if (type == "tr") {
+            if (!parsed.contains("to") || !parsed["to"].is_string()) continue;
+            const auto to = IngressEventStateFromName(parsed["to"].get<std::string>());
+            if (to.has_value()) {
+                states[sid] = *to;  // 指空号的 tr 等于没发生(evt 没落成)
+            }
+        }
+    }
+    for (const auto& [sid, state] : states) {
+        ++projection.state_counts[IngressEventStateName(state)];
+    }
+    const std::filesystem::path dead_letter = account_dir / "ingress" / "dead-letter.jsonl";
+    if (std::filesystem::is_regular_file(dead_letter, ec) && !ec) {
+        std::ifstream dead_stream(dead_letter, std::ios::binary);
+        std::string dead_line;
+        while (std::getline(dead_stream, dead_line)) {
+            if (!dead_line.empty()) {
+                ++projection.dead_letter;
+            }
+        }
+    }
+    return projection;
 }
 
 }  // namespace lubancode::channel

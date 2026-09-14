@@ -117,7 +117,8 @@ bool SelectionAlreadyCommitted(const trajectory::v3::V3Ledger& ledger,
 CommitReplySelectionResult CommitReplySelection(trajectory::v3::V3Writer* writer,
                                                 const std::filesystem::path& replies_dir,
                                                 const ReplySelectionPlan& plan,
-                                                const std::string& session_id) {
+                                                const std::string& session_id,
+                                                const std::string& delivery_target) {
     CommitReplySelectionResult result;
     if (!plan.ok) {
         result.error_code = "selection.plan_invalid";
@@ -162,7 +163,7 @@ CommitReplySelectionResult CommitReplySelection(trajectory::v3::V3Writer* writer
     draft.turn_id = plan.turn_id;
     draft.payload = nlohmann::json::object({
         {"selectionId", plan.selection_id},
-        {"deliveryTarget", "local:file"},
+        {"deliveryTarget", delivery_target},
         {"formatVersion", "text/plain@1"},
         {"ordinal", 1},
         {"sourceMessageRef", plan.source_message_ref},
@@ -191,6 +192,29 @@ HeadlessExecutor::HeadlessExecutor(api::Backend& backend, tools::ToolRegistry& r
                                    Options options)
     : backend_(backend), registry_(registry), options_(std::move(options)) {}
 
+std::size_t HeadlessExecutor::live_channel_session_count() const {
+    const std::lock_guard<std::mutex> lock(channel_sessions_mutex_);
+    return channel_sessions_.size();
+}
+
+void HeadlessExecutor::CloseChannelSessions(const std::string& reason) {
+    std::vector<std::unique_ptr<SessionService>> to_close;
+    {
+        const std::lock_guard<std::mutex> lock(channel_sessions_mutex_);
+        for (auto& [key, live] : channel_sessions_) {
+            if (live != nullptr && live->service != nullptr) {
+                to_close.push_back(std::move(live->service));
+            }
+        }
+        channel_sessions_.clear();
+    }
+    for (auto& service : to_close) {
+        if (service != nullptr) {
+            (void)service->Close(reason);  // 收口失败如实丢:场文件在,映射账可续
+        }
+    }
+}
+
 HeadlessExecutor::Result HeadlessExecutor::Execute(
     const std::string& prompt, const HeadlessWorkBinding& binding,
     const std::function<void(const std::string&, const std::string&)>& on_bound,
@@ -218,12 +242,165 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
                        "(LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS 不能为 0)";
         return result;
     }
+    result.session_id = service.trajectory()->session_id();
+
+    // 2-7) 共用核心(fresh-session 行为保持 V1:跑完即 Close)。
+    Result core =
+        RunTurnOnService(service, /*agent_override=*/nullptr, prompt, binding,
+                         /*purpose=*/"automation",
+                         /*turn_actor=*/"scheduled_host",
+                         /*per_turn_tools=*/nullptr, /*binding_extra=*/nlohmann::json::object(),
+                         /*selection_delivery_target=*/"local:file",
+                         on_bound, cancel);
+    if (!core.ok) {
+        return core;
+    }
+    result.session_id = core.session_id;
+    result.turn_id = core.turn_id;
+    result.reply_text = core.reply_text;
+    result.selection_id = core.selection_id;
+    // 8) 封口(occurrence 一场一次,跑完即收;恢复器续卷只补事实行)。
+    const auto close = service.Close("gateway_automation");
+    if (!close.error_code.empty()) {
+        // 收口失败如实带出;执行事实已在账上,不冒充成功也不丢结果。
+        result.ok = true;
+        result.reply_text = core.reply_text;
+        result.selection_id = core.selection_id;
+        result.error = "session close 未净(" + close.error_code + ");结果保留";
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
+HeadlessExecutor::ChannelTurnResult HeadlessExecutor::ExecuteChannelTurn(
+    const ChannelTurnRequest& request,
+    const std::function<void(const std::string&, const std::string&)>& on_bound,
+    const std::atomic<bool>* cancel) {
+    ChannelTurnResult result;
+    bool resumed = false;
+    std::string error_code;
+    std::string error;
+    LiveChannelSession* live = GetOrOpenChannelSession(
+        request.session_key, request.stored_session_id, &resumed, &error_code, &error);
+    if (live == nullptr) {
+        result.error_code = error_code;
+        result.error = error;
+        return result;
+    }
+    result.resumed = resumed;
+    const Result core =
+        RunTurnOnService(*live->service, live->agent.get(), request.prompt, request.binding,
+                         /*purpose=*/"interactive",
+                         /*turn_actor=*/"channel_host",
+                         request.per_turn_tools, request.binding_extra,
+                         request.delivery_target.empty() ? std::string("local:file")
+                                                         : request.delivery_target,
+                         on_bound, cancel);
+    result.ok = core.ok;
+    result.error_code = core.error_code;
+    result.error = core.error;
+    result.session_id = core.session_id;
+    result.turn_id = core.turn_id;
+    result.reply_text = core.reply_text;
+    result.selection_id = core.selection_id;
+    return result;
+}
+
+HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
+    const std::string& session_key, const std::string& stored_session_id, bool* resumed,
+    std::string* error_code, std::string* error) {
+    std::unique_lock<std::mutex> lock(channel_sessions_mutex_);
+    *resumed = false;
+    // 活场命中:挪尾(LRU)。
+    for (auto it = channel_sessions_.begin(); it != channel_sessions_.end(); ++it) {
+        if (it->first == session_key) {
+            auto live = std::move(it->second);
+            channel_sessions_.erase(it);
+            channel_sessions_.emplace_back(session_key, std::move(live));
+            return channel_sessions_.back().second.get();
+        }
+    }
+    // 未命中:按映射 resume-as-new / fresh(§六第四项)。
+    SessionLaunchRequest launch;
+    launch.cwd_utf8 = options_.cwd_utf8;
+    launch.lubancode_version = options_.lubancode_version;
+    launch.workspaces_root = options_.workspaces_root;
+    launch.workspace_identity = workspace::MakeFallbackIdentity(options_.workspace_root);
+    if (!stored_session_id.empty()) {
+        launch.resume_at_launch = true;
+        launch.resume_source_session_id = stored_session_id;
+    }
+    auto live = std::make_unique<LiveChannelSession>();
+    live->service = std::make_unique<SessionService>(launch);
+    if (live->service->runtime() == nullptr) {
+        *error_code = "gateway.launch_failed";
+        *error = live->service->launch_error();
+        return nullptr;
+    }
+    if (!live->service->v3_format()) {
+        (void)live->service->Close("gateway_requires_v3");
+        *error_code = "gateway.requires_v3";
+        *error = "当前配置会开 v2 会话;渠道会话只跑 V3 场";
+        return nullptr;
+    }
+    // 常驻引擎(同场多轮共享 history):resume-as-new 的折叠投影灌回新
+    // Agent——上下文不断,连续来信/重启恢复都接得上。
+    {
+        agent::AgentProfile profile;
+        profile.request.model = options_.model;
+        profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
+        profile.runtime.max_wall_secs = options_.max_wall_secs;
+        profile.runtime.max_total_tokens = options_.max_total_tokens;
+        profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
+        live->agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
+    }
+    if (!stored_session_id.empty() && live->service->trajectory()->resumed_at_launch()) {
+        const std::vector<api::Message> resumed_history =
+            live->service->trajectory()->LaunchResumeHistory();
+        if (!resumed_history.empty()) {
+            live->agent->RestoreSessionHistory(resumed_history);
+        }
+    }
+    const std::string session_id = live->service->trajectory()->session_id();
+    // 活场淘汰(超帽:最旧的一场 Close 封口,后续来信经映射账 resume-as-new
+    // 续上下文,不丢)。
+    if (options_.max_live_channel_sessions > 0 &&
+        channel_sessions_.size() >= options_.max_live_channel_sessions) {
+        auto oldest = std::move(channel_sessions_.front().second);
+        channel_sessions_.erase(channel_sessions_.begin());
+        lock.unlock();
+        (void)oldest->service->Close("channel_session_evict");
+        lock.lock();
+    }
+    LiveChannelSession* raw = live.get();
+    channel_sessions_.emplace_back(session_key, std::move(live));
+    lock.unlock();
+    // 映射记账(resume-as-new 后场 id 变了,这里更新映射;幂等回调)。
+    if (options_.on_session_mapped) {
+        options_.on_session_mapped(session_key, session_id);
+    }
+    *resumed = !stored_session_id.empty();
+    return raw;
+}
+
+// 共用一轮的核心:受理 → 绑定 → hook → 执行 → 收口 → reply selection。
+// 不 Close——automation 调用方跑完封口,渠道路跨轮持有(§六第三项:
+// "提炼执行装配为已有渠道会话的一轮",两路同一份装配)。
+HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
+    SessionService& service, agent::Agent* agent_override, const std::string& prompt,
+    const HeadlessWorkBinding& binding, const char* purpose, const char* turn_actor,
+    const channel::ToolRoutePolicy* per_turn_tools, const nlohmann::json& binding_extra,
+    const std::string& selection_delivery_target,
+    const std::function<void(const std::string&, const std::string&)>& on_bound,
+    const std::atomic<bool>* cancel) {
+    Result result;
     TrajectorySessionLedger* ledger = service.trajectory();
     trajectory::v3::V3Writer* v3_writer = ledger->v3_main_writer();
     result.session_id = ledger->session_id();
 
-    // 2) 受理:幂等键 = workId(同 work 重发不重复执行);原件与账行都
-    //    落稳才回 accepted(V0 受理底线)。
+    // 受理:幂等键 = workId(同 work 重发不重复执行);原件与账行都
+    // 落稳才回 accepted(V0 受理底线)。
     SessionService::InputRequest input;
     input.client_operation_id = binding.work_id;
     input.text = prompt;
@@ -244,8 +421,8 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
     const std::string effective_prompt =
         pop.status == SessionService::PendingPop::Status::Ok ? pop.input.text : prompt;
 
-    // 3) turn 身份与绑定:事件适配器 mint turnId → 领域绑定(on_bound,
-    //    泵落 occurrence.bound)→ V3 gateway.work.bound(恢复反查的锚)。
+    // turn 身份与绑定:事件适配器 mint turnId → 领域绑定(on_bound,泵落
+    // 领域行)→ V3 gateway.work.bound(恢复反查的锚)。
     TurnEventAdapter turn_events = service.runtime()->MakeTurnAdapter();
     const std::string turn_id = turn_events.Start();
     result.turn_id = turn_id;
@@ -264,6 +441,9 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
             {"attempt", binding.attempt},
             {"inputRef", receipt.input_id},
         });
+        if (binding_extra.is_object() && !binding_extra.empty()) {
+            bound_draft.payload["channel"] = binding_extra;  // 渠道审计载荷(Q2)
+        }
         const auto bound_receipt =
             v3_writer->AppendEvent(std::move(bound_draft), trajectory::v3::Durability::PowerLoss);
         if (bound_receipt.status != trajectory::v3::WriteReceipt::Status::Committed) {
@@ -273,7 +453,7 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
         }
     }
 
-    // 4) hook 四点(与渠道路同一 runtime 派发点,不另接一套)。
+    // hook 四点(与渠道路同一 runtime 派发点,不另接一套)。
     hooks::HookDispatcher* dispatcher = options_.hook_dispatcher;
     BindMiddlewareSessionWriter(dispatcher, &DefaultHookServiceCenter(),
                                 v3_writer);
@@ -282,7 +462,7 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
         MiddlewareHookContext context;
         context.turn_id = turn_id;
         context.origin = "human";
-        context.purpose = "automation";
+        context.purpose = purpose;
         context.delivery_mode = "direct";
         return context;
     }();
@@ -308,11 +488,11 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
             api::TextBlock{"[PostUser 钩子附加上下文,非用户手敲]\n" + append});
     }
 
-    // 5) 执行:Agent + TurnWiring + 轮桥 + 工具栅栏(AgentChannelEngine
-    //    的遗留缺口在此补齐:ToolTraceHub 挂桥,真实工具 Action 落账)。
+    // 执行:Agent + TurnWiring + 轮桥 + 工具栅栏(AgentChannelEngine
+    // 的遗留缺口在此补齐:ToolTraceHub 挂桥,真实工具 Action 落账)。
     auto trajectory_bridge = ledger->NewTurnBridge({"", options_.wire_name, "gateway"});
     if (trajectory_bridge != nullptr) {
-        trajectory_bridge->BeginTurn(turn_id, "scheduled_host");
+        trajectory_bridge->BeginTurn(turn_id, turn_actor);
         trajectory_bridge->RecordInput(user_message);
     }
     agent::AgentProfile profile;
@@ -321,7 +501,13 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
     profile.runtime.max_wall_secs = options_.max_wall_secs;
     profile.runtime.max_total_tokens = options_.max_total_tokens;
     profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
-    agent::Agent loop_agent(backend_, registry_, std::move(profile));
+    // 引擎来源:渠道路用调用方随场缓存的(同场多轮共享 history);automation
+    // 现建(每执行一场 fresh V3 + fresh 引擎,V1 行为不变)。
+    std::unique_ptr<agent::Agent> fresh_agent;
+    if (agent_override == nullptr) {
+        fresh_agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
+    }
+    agent::Agent& loop_agent = agent_override != nullptr ? *agent_override : *fresh_agent;
 
     agent::TurnWiring wiring;
     wiring.events = &turn_events;
@@ -330,7 +516,10 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
     // 工具 artifact 落位与 one_shot 同款:会话档内容寻址,随账本持久。
     const std::filesystem::path artifacts_dir = ledger->session_dir() / "artifacts" / "sha256";
     wiring.tool_artifact_dir = artifacts_dir.generic_string();
-    const channel::ToolRoutePolicy& tools_policy = options_.tools;
+    // 本轮有效策略:渠道路递逐轮冻结账(执行前重验准入后的五层交集),
+    // 没递回落会话级 options_.tools(automation 恒走后者,V1 行为零变化)。
+    const channel::ToolRoutePolicy& tools_policy =
+        per_turn_tools != nullptr ? *per_turn_tools : options_.tools;
     wiring.on_tool_confirm = [&tools_policy](const std::string& /*tool_use_id*/,
                                              const std::string& name,
                                              const nlohmann::json& /*input*/) {
@@ -341,15 +530,32 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
         return "无人值守任务没有审批渠道,工具 " + name +
                " 未在允许名单明确放行,已拒绝执行。";
     };
+    // 逐轮收窄闸(§16.2 第三层;渠道路与 AgentChannelEngine 同款):本轮
+    // 冻结策略比会话级暴露面窄时,在执行口拦下——不折会话级 tool_filter
+    //(前缀缓存),被滤的工具连模型都看不见,这里只拦"看得见但本轮禁"。
+    if (per_turn_tools != nullptr) {
+        wiring.on_pre_tool_use_hook =
+            [&tools_policy](const std::string& /*tool_use_id*/, const std::string& name,
+                            const nlohmann::json& /*input*/) {
+                runtime::ToolHookDecision decision;
+                if (!tools_policy.Allows(name)) {
+                    decision.decision = runtime::ToolHookDecision::Decision::Deny;
+                    decision.reason = "工具 " + name +
+                                      " 不在本轮渠道工具上限的允许名单内(执行前重验冻结"
+                                      "的五层交集没列它,或进了任一层 deny)。";
+                }
+                return decision;
+            };
+    }
     if (HasPreRequestMiddleware(dispatcher)) {
-        wiring.on_pre_request_hooks = [dispatcher](const std::string& step_id,
-                                                   const std::string& turn_id_,
-                                                   const nlohmann::json& frozen_request_snapshot,
-                                                   const PreRequestBudget& budget) {
+        wiring.on_pre_request_hooks = [dispatcher, purpose](const std::string& step_id,
+                                                            const std::string& turn_id_,
+                                                            const nlohmann::json& frozen_request_snapshot,
+                                                            const PreRequestBudget& budget) {
             MiddlewareHookContext context;
             context.turn_id = turn_id_;
             context.step_id = step_id;
-            context.purpose = "automation";
+            context.purpose = purpose;
             const PreRequestStages stages =
                 RunPreRequestMiddleware(dispatcher, frozen_request_snapshot, budget, context);
             if (!stages.dispatched || stages.decision == "allow") {
@@ -364,8 +570,8 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
 
     const auto outcome = agent::AgentLoop::Run(loop_agent, user_message, wiring, cancel);
 
-    // 6) 收口:turn 终态如实(成败/取消;预算耗尽/取消不是错误,分型
-    //    如实进 reason)。
+    // 收口:turn 终态如实(成败/取消;预算耗尽/取消不是错误,分型
+    // 如实进 reason)。
     if (trajectory_bridge != nullptr) {
         const bool cancelled = outcome.has_value() && outcome->cancelled;
         const bool ok = outcome.has_value() && !cancelled;
@@ -391,8 +597,8 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
         return result;
     }
 
-    // 7) reply selection:从已提交事实唯一定位(读回本场 V3 流——与恢复
-    //    路同一份 PlanReplySelection,不靠内存 history 猜)。
+    // reply selection:从已提交事实唯一定位(读回本场 V3 流——与恢复
+    // 路同一份 PlanReplySelection,不靠内存 history 猜)。
     const auto v3_stream = trajectory::v3::FindV3SessionStream(ledger->session_dir());
     if (!v3_stream.has_value()) {
         result.error_code = "gateway.reply_unavailable";
@@ -431,7 +637,7 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
         }
     }
     const auto commit = CommitReplySelection(v3_writer, options_.replies_dir, plan,
-                                             result.session_id);
+                                             result.session_id, selection_delivery_target);
     if (!commit.committed) {
         result.error_code = "gateway.reply_unavailable";
         result.error = commit.error;
@@ -447,16 +653,6 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
             result.error = fault;
             return result;
         }
-    }
-    // 8) 封口(occurrence 一场一次,跑完即收;恢复器续卷只补事实行)。
-    const auto close = service.Close("gateway_automation");
-    if (!close.error_code.empty()) {
-        // 收口失败如实带出;执行事实已在账上,不冒充成功也不丢结果。
-        result.ok = true;
-        result.reply_text = plan.text;
-        result.selection_id = plan.selection_id;
-        result.error = "session close 未净(" + close.error_code + ");结果保留";
-        return result;
     }
     result.ok = true;
     result.reply_text = plan.text;

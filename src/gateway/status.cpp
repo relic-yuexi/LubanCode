@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 
+#include "channel/ingress_store.hpp"
+#include "channel/manager.hpp"
 #include "gateway/automation_store.hpp"
 #include "gateway/reply_outbox.hpp"
 #include "platform/paths.hpp"
@@ -49,6 +52,8 @@ std::optional<GatewayLockRecord> ReadLockRecord(const std::filesystem::path& loc
 
 GatewayStatusSections ProbeStatusSections(const GatewayProfilePaths& paths) {
     GatewayStatusSections sections;
+    // 渠道投递错误按账号分组(delivery 栏与 channel 栏合用一次投影)。
+    std::map<std::string, std::vector<std::string>> channel_errors;
     // work 栏:automation 账。
     {
         const AutomationProjection projection = ReadAutomationProjection(paths.automation_log);
@@ -111,13 +116,76 @@ GatewayStatusSections ProbeStatusSections(const GatewayProfilePaths& paths) {
         sections.delivery_ledger_present =
             std::filesystem::exists(paths.outbox_log, ec) && !ec;
         for (const auto& [id, item] : projection.items) {
-            if (item.state == "pending") {
+            if (item.state == "pending" || item.state == "sending") {
                 ++sections.delivery_pending;
                 sections.pending_delivery_ids.push_back(id);
-            } else if (item.state == "delivered") {
+            } else if (item.state == "delivered" || item.state == "sent") {
                 ++sections.delivery_delivered;
             } else {
                 ++sections.delivery_flagged;
+            }
+        }
+        // channel 栏的投递错误:渠道项的终态失败(delivery_unknown/failed),
+        // 按 target 账号分组(只报稳定码,不带平台事件原文)。
+        for (const auto& [id, item] : projection.items) {
+            if (item.delivery_target == "local:file") {
+                continue;
+            }
+            if (item.state != "failed" && item.state != "delivery_unknown") {
+                continue;
+            }
+            channel_errors[item.target_channel_id + "/" + item.target_account_id].push_back(
+                id + ": " + (item.delivery_error.empty() ? item.state : item.delivery_error));
+        }
+    }
+    // channel 栏:渠道状态根的只读投影(零建目录零写盘;根不在 = 空栏)。
+    {
+        std::error_code ec;
+        const std::filesystem::path channels_root = paths.root.parent_path() / "channels";
+        sections.channel_ledger_present =
+            std::filesystem::is_directory(channels_root, ec) && !ec;
+        if (sections.channel_ledger_present) {
+            for (const auto& channel_entry :
+                 std::filesystem::directory_iterator(channels_root, ec)) {
+                if (!channel_entry.is_directory()) {
+                    continue;
+                }
+                const std::string channel_id = channel_entry.path().filename().generic_string();
+                std::error_code account_ec;
+                for (const auto& account_entry :
+                     std::filesystem::directory_iterator(channel_entry.path(), account_ec)) {
+                    if (!account_entry.is_directory()) {
+                        continue;
+                    }
+                    const std::filesystem::path account_dir = account_entry.path();
+                    if (!std::filesystem::exists(account_dir / "ingress", account_ec)) {
+                        continue;  // 不是渠道账号目录(locks 一类不进栏)
+                    }
+                    GatewayStatusSections::ChannelAccountEntry entry;
+                    entry.channel_id = channel_id;
+                    entry.account_id = account_dir.filename().generic_string();
+                    const auto status = channel::ChannelManager::ReadAccountStatusFile(account_dir);
+                    if (status.present) {
+                        entry.connection_state = status.state;
+                        entry.generation = status.generation;
+                    }
+                    const auto ingress = channel::ReadChannelIngressProjection(account_dir);
+                    if (const auto found = ingress.state_counts.find("queued");
+                        found != ingress.state_counts.end()) {
+                        entry.ingress_pending += found->second;
+                    }
+                    if (const auto found = ingress.state_counts.find("running");
+                        found != ingress.state_counts.end()) {
+                        entry.ingress_pending += found->second;
+                    }
+                    entry.dead_letter = ingress.dead_letter;
+                    const auto errors = channel_errors.find(entry.channel_id + "/" +
+                                                           entry.account_id);
+                    if (errors != channel_errors.end()) {
+                        entry.delivery_errors = errors->second;
+                    }
+                    sections.channels.push_back(std::move(entry));
+                }
             }
         }
     }
@@ -155,6 +223,25 @@ nlohmann::json SectionsToJson(const GatewayStatusSections& sections) {
     delivery["delivered"] = sections.delivery_delivered;
     delivery["flagged"] = sections.delivery_flagged;
     json["delivery"] = std::move(delivery);
+    nlohmann::json channels = nlohmann::json::array();
+    for (const auto& entry : sections.channels) {
+        nlohmann::json item = nlohmann::json::object();
+        item["channel_id"] = entry.channel_id;
+        item["account_id"] = entry.account_id;
+        item["connection_state"] =
+            entry.connection_state.empty() ? nlohmann::json("unknown")
+                                           : nlohmann::json(entry.connection_state);
+        item["generation"] = entry.generation;
+        item["ingress_pending"] = entry.ingress_pending;
+        item["dead_letter"] = entry.dead_letter;
+        nlohmann::json errors = nlohmann::json::array();
+        for (const std::string& error : entry.delivery_errors) {
+            errors.push_back(error);
+        }
+        item["delivery_errors"] = std::move(errors);
+        channels.push_back(std::move(item));
+    }
+    json["channel"] = std::move(channels);
     return json;
 }
 
@@ -186,6 +273,19 @@ std::vector<std::string> FormatSectionLines(const GatewayStatusSections& section
     lines.push_back("  待投 " + std::to_string(sections.delivery_pending) +
                     ",已投 " + std::to_string(sections.delivery_delivered) +
                     ",异常 " + std::to_string(sections.delivery_flagged));
+    lines.push_back("[channel] 渠道" +
+                    std::string(sections.channel_ledger_present ? "" : "(空:未装配渠道)"));
+    for (const auto& entry : sections.channels) {
+        std::string line = "  " + entry.channel_id + "/" + entry.account_id + ": 连接 " +
+                           (entry.connection_state.empty() ? std::string("unknown")
+                                                           : entry.connection_state) +
+                           ",待处理 " + std::to_string(entry.ingress_pending) +
+                           ",死信 " + std::to_string(entry.dead_letter);
+        lines.push_back(std::move(line));
+        for (const std::string& error : entry.delivery_errors) {
+            lines.push_back("    投递错误: " + error);
+        }
+    }
     return lines;
 }
 

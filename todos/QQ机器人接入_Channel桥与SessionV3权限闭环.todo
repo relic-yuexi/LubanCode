@@ -3,7 +3,7 @@
 日期：2026-09-13。源码基线：`1e3b460e`，以本次工作区读取为准。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2 起仍待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落，worktree-agent-qq-q2 分支，PR 待开——开后补号与 CI 链接）；Q3 起仍待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -136,24 +136,24 @@ channels/qqbot/
 
 ## 六、接进 Session V3，保住多轮与恢复
 
-- [ ] ChannelIngressStore 改用既有 JournalWriter PowerLoss；规范化原文、稳定去重键一并落稳后才 ACK。状态追加失败停止推进，不继续排队或执行。
-- [ ] 用现有 session_key 再结合 workspace 身份保存会话映射，明确账号锁阻止同一机器人被多个工作目录同时占用。重启换 cwd 不得误续别的项目上下文。
-- [ ] 提炼 HeadlessExecutor 的执行装配为“已有渠道会话的一轮”，复用 SessionService、工具 Action 账、hook、预算、取消与回复选择。保留自动任务 fresh-session 行为。
-- [ ] 重启时通过 V3 resolver 恢复映射场，遵循当前 resume-as-new 合同并更新映射。不能只恢复磁盘账而把 Agent 历史置空。
-- [ ] 输入 client_operation_id 由渠道域、账号、ingress 身份稳定生成。相同来信重发返回原受理；同键异正文 conflict，不重复跑模型。
-- [ ] 提交顺序：ingress durable → 准入/路由冻结 → work claim → SessionService 接纳 → work/session/turn 绑定 → 执行 → reply selection → outbox。每个跨账窗口写恢复判据。
-- [ ] ACK 后内存满、进程退出、running 标记后未开轮等场景，靠领域账和 V3 查回；有不明工具副作用时标 needs_review，不盲重跑。
-- [ ] 新增渠道 work pump，与 AutomationDue 通过现有调度器公平取件；同 session 单飞，全局有并发/队列帽。配对、心跳和停止仍须响应。
+- [x] ChannelIngressStore 改用既有 JournalWriter PowerLoss；规范化原文、稳定去重键一并落稳后才 ACK。状态追加失败停止推进，不继续排队或执行。（Q2 落 `src/channel/ingress_store.*`：`Open` 即持 `trajectory::JournalWriter`（Append 档），`AppendLine` 全部走 `Durability::PowerLoss`，失败一次性 `write_blocked`；dead-letter 旁路账同原语（惰性开柄）。行格式不变（evt/tr/dup），既有册 `test_channel_ingress_store.cpp`/`test_channel_manager.cpp` 零改动照跑。掉电不丢受理属耐久档差异，CI 只能验行为不能验掉电——写"未验"。）
+- [x] 用现有 session_key 再结合 workspace 身份保存会话映射，明确账号锁阻止同一机器人被多个工作目录同时占用。重启换 cwd 不得误续别的项目上下文。（Q2 落 `src/channel/session_map.*`（`ChannelSessionMap`：键 (session_key, workspace_key) → V3 场 id，追加式 JSONL PowerLoss，重放取最后一笔，同键同场幂等）；同时占用由既有 `AccountLock`（AddAccount 即取）挡；映射查不到本 workspace 的键 → 开新场。测试 `test_channel_session_map.cpp` + 泵册 "不同 workspace 不串场"。）
+- [x] 提炼 HeadlessExecutor 的执行装配为“已有渠道会话的一轮”，复用 SessionService、工具 Action 账、hook、预算、取消与回复选择。保留自动任务 fresh-session 行为。（Q2 落 `src/runtime/headless_executor.*`：受理→绑定→hook 四点→执行→收口→reply selection 提炼为私有 `RunTurnOnService`（不 Close——生命周期归调用方）；automation `Execute` 照旧 fresh 场跑完即 Close（V1 行为零变化，`test_gateway_automation_v1.cpp` 八案不动）；新 `ExecuteChannelTurn`：进程内同 session_key 复用同场+同 Agent（上下文随场存活），逐轮冻结策略经 `per_turn_tools` 进确认口与 `on_pre_tool_use_hook` 执行闸；活场超帽（缺省 8）LRU 淘汰，Close 后由映射账续。测试 `test_channel_work_pump.cpp` "连续两条消息共享上下文"/"工具轮走完整链"。）
+- [x] 重启时通过 V3 resolver 恢复映射场，遵循当前 resume-as-new 合同并更新映射。不能只恢复磁盘账而把 Agent 历史置空。（Q2 落 `HeadlessExecutor::GetOrOpenChannelSession`：缓存 miss 而映射有场 → `SessionLaunchRequest{resume_at_launch, resume_source_session_id}` 开新场，`LaunchResumeHistory` 折叠投影灌回常驻 Agent；开场后 `on_session_mapped` 落映射账（幂等）。恢复裁决侧经 `workspace::index::ResolveDirByWorkspaceKey` + `FindV3SessionStream` 定位原场。测试泵册 "停机恢复仍接上上文"（新场 id ≠ 旧场、模型请求含旧对话、映射已更新）。）
+- [x] 输入 client_operation_id 由渠道域、账号、ingress 身份稳定生成。相同来信重发返回原受理；同键异正文 conflict，不重复跑模型。（Q2 落 `ChannelWorkPump::MakeChannelOperationId` = `chan:<ch>:<acct>:in:<sid>`；同信重放经 ingress 去重命中原 sid → 同键 → SessionService 台账（#59/#68 底座）原受理返回。测试泵册 "来信重放"。异正文同键的 operation_conflict 由 SessionService 既有面承担（`test_session_service_durability.cpp` 已钉），渠道路上不可达（正文冻结在 ingress 账）——如实记。）
+- [x] 提交顺序：ingress durable → 准入/路由冻结 → work claim → SessionService 接纳 → work/session/turn 绑定 → 执行 → reply selection → outbox。每个跨账窗口写恢复判据。（Q2 落 `src/runtime/channel_work_pump.*`（`ChannelWorkPump`，GatewayWorkPump 合同口）与 `src/channel/work_ledger.*`（`ChannelWorkLedger`：sid→场/轮绑定行，领域绑定先于 V3 gateway.work.bound，PowerLoss）。次序即 `TickOnce` 流程；恢复判据 = ingress Running + 绑定行 + V3 流三账对账（`RecoverOne`）。）
+- [x] ACK 后内存满、进程退出、running 标记后未开轮等场景，靠领域账和 V3 查回；有不明工具副作用时标 needs_review，不盲重跑。（Q2 恢复裁决表：绑定行在+V3 有 assistant+无 selection → 补 selection（`V3Writer::Continue` 续原卷，不调模型）；selection 在 → 补 outbox 投影（同 deliveryId 幂等）；无 assistant（生成中断）/绑定行不在（claim 后崩）→ dead letter needs_review，绝不盲重跑。队列满走既有 RateLimited 旁路（OnInboundLocked）。测试泵册三窗注入 + "claim 后崩" + "队列满"。）
+- [x] 新增渠道 work pump，与 AutomationDue 通过现有调度器公平取件；同 session 单飞，全局有并发/队列帽。配对、心跳和停止仍须响应。（Q2 落 `ChannelWorkPump`：与 automation 主泵经 `CompositeGatewayPump` 同 tick 各推进至多一轮（公平）+ 账号间轮转；同 session 单飞 = claim 与执行在泵内原子 + `in_flight_sids_`/`active_turns_` 门（多线程泵的闸）；全局帽 `max_active_channel_turns`（缺省 4，取件前查——claim 了不跑会把件搁死在 Running）。配对提示仍 Q1b；桥心跳/停止经 wiring `PumpAll`/`Close` 照旧。测试泵册 "关机次序"。）
 
 ## 七、回复只投递一次执行结果
 
-- [ ] 为 DurableReplyOutbox 加结构化 QQ target：channel/account/conversation/reply message ID；持久化冻结正文、拆段结果、ordinal、稳定 msg_seq 与 QQ 回执。
-- [ ] 相同 delivery_id 的网络重试复用同一发送载荷。不能每试一次就让 SDK 另造 msg_seq；须查 SDK 调用口是否保留显式序号，不满足就封装底层方法。
-- [ ] channel.send 返回 accepted 与 QQ 已接受/最终失败要区分；补 manager 尚未消费的 delivery.receipt 与发送请求关联、超时、代次隔离。
-- [ ] 发出前记尝试，返回后记 provider_message_id。超时可能是 QQ 已收到、回执丢失；若平台没有足够去重/查询保证，记 outcome_unknown 并停自动重发，不能宣称 exactly-once。
-- [ ] 平台明确拒绝、限频、令牌失效、回复窗口过期分别处理。过期不擅自转主动消息；限额以真实账号联调核对。
-- [ ] 恢复只补 selection/outbox 或重投允许重试的已冻结回复，绝不重新执行 Agent。发送错误不得把已成功的业务执行改成执行失败。
-- [ ] `lubancode gateway status` 继续分 process/work/execution/delivery；输出渠道连接与投递错误，但不带原始密钥和整份平台事件。
+- [x] 为 DurableReplyOutbox 加结构化 QQ target：channel/account/conversation/reply message ID；持久化冻结正文、拆段结果、ordinal、稳定 msg_seq 与 QQ 回执。（Q2 落 `src/gateway/reply_outbox.*`：`ReplyOutboxItem` 增 target 五字段 + `provider_message_id`/`delivery_error`/`attempts`/`source_ref`；`EnqueueChannel` 按段帽 2000 字节 UTF-8 边界拆段（`SplitReplySegments`，换行偏好），每段一枚 item（`MakeDeliveryId(selection, "channel:<ch>:<acct>:<conv>", ordinal)`，msg_seq=ordinal，段原件 replies/&lt;deliveryId&gt;.txt 冻结）。真平台长度上限/每消息回复计数归 Q3 实测校准——写"未验"。测试 `test_reply_outbox_channel.cpp` + 泵册 "长文拆段"。）
+- [x] 相同 delivery_id 的网络重试复用同一发送载荷。不能每试一次就让 SDK 另造 msg_seq；须查 SDK 调用口是否保留显式序号，不满足就封装底层方法。（Q2：定案进程内直连无 SDK——`QqMessageSender`（Q1）按 `outbound_delivery_id` 冻结 msg_seq；宿主侧 `manager.SendReply` 恒以 outbox delivery_id 作桥协议 `client_id`，重试同 id 同载荷。测试泵册 "限频"（两次 channel.send 的 params 逐字节同）+ Q1 既有 `test_qq_auth_messages.cpp` "msg_seq 稳定"。）
+- [x] channel.send 返回 accepted 与 QQ 已接受/最终失败要区分；补 manager 尚未消费的 delivery.receipt 与发送请求关联、超时、代次隔离。（Q2 落 `src/channel/manager.*`：`SendReply`（受理即编码发 sidecar，记 PendingChannelSend{request_id, delivery_id, generation}）；send 应答按 matched_request_id 结算（Accepted 带 provider_message_id / domain 错误分型）；`OnDeliveryReceiptLocked` 消费 `channel.delivery.receipt` 通知（按 outbound_delivery_id 关联在途 send）；重复回执只结一次（settled 账只记终态，限频不进——否则合法重试会被误挡）；超时 `ExpireStaleSendsLocked`（Pump 内）；代次隔离（受理代次 ≠ 结算代次 → 陈旧回执丢弃留诊断）。测试 `test_channel_manager_send.cpp` 六案 + 泵册 "重复回执"。注：send 应答路径的代次隔离在同步假 sidecar 下结构不可达（应答总在重启前送达），receipt 路径已钉——写"未验"。）
+- [x] 发出前记尝试，返回后记 provider_message_id。超时可能是 QQ 已收到、回执丢失；若平台没有足够去重/查询保证，记 outcome_unknown 并停自动重发，不能宣称 exactly-once。（Q2：`RecordAttempt`（item.attempt 先账后网络）→ `MarkSent`（provider_message_id）/`MarkOutcomeUnknown`（`channel.delivery_unknown`，终态停自动重发）；超时缺省 30s（`ChannelManagerOptions::send_timeout_ms`）。测试泵册 "超时未知"（恰发一次、超时后不再发、模型不重跑）。真平台回执延迟分布归 Q3——写"未验"。）
+- [x] 平台明确拒绝、限频、令牌失效、回复窗口过期分别处理。过期不擅自转主动消息；限额以真实账号联调核对。（Q2 落 `ClassifySendErrorLocked`：RateLimited/TransportFailed → rate_limited（退避同载荷重试，帽尽 failed）；LoginRequired → auth_failed（账号同步转 NeedsLogin）；detail 含 "expired" → reply_window_expired（不转主动消息，终态）；其余 → platform_reject。测试 `test_channel_manager_send.cpp` "限频分型" 四 subcase。真限频真值/主动消息额度归 Q3/Q5——写"未验"。）
+- [x] 恢复只补 selection/outbox 或重投允许重试的已冻结回复，绝不重新执行 Agent。发送错误不得把已成功的业务执行改成执行失败。（Q2：恢复路只走 `PlanReplySelection`（纯函数）+ `CommitReplySelection`（幂等）+ `EnqueueChannel`（幂等）+ 段重投（同 delivery_id）；ingress 侧执行事实（Running→Replied）与投递态（→Delivered/DeliveryFailed）分开结算。测试泵册三窗 + 全部投递族案（模型计数恒 1）。）
+- [x] `lubancode gateway status` 继续分 process/work/execution/delivery；输出渠道连接与投递错误，但不带原始密钥和整份平台事件。（Q2 落 `src/gateway/status.*`：`GatewayStatusSections` 增 channel 栏（账号连接态（manager 状态迁移时落的 `account-status.json` 原子快照）/ingress 待处理水位/死信/投递错误稳定码），`SectionsToJson`/`FormatSectionLines` 同步；零建目录零写盘。测试 `test_gateway_status_sections.cpp` "channel 栏"。**Q1b 该笔（status 渠道栏）就此销账**。跨进程连接态是最近一笔迁移的盘上快照（非活探针）——如实记。）
 
 ## 八、实施批次与验收
 
@@ -175,9 +175,13 @@ channels/qqbot/
 
 ### Q2：V3 与 outbox 总装
 
-- [ ] 假 provider + 真桥 fixture：连续两条消息共享上下文；不同账号/用户/workspace 不串场；停机恢复仍接上上文。
-- [ ] 写盘失败、队列满、来信重放、权限撤销、三个执行/回复窗口崩溃注入；模型和工具调用计数不多一次。
-- [ ] QQ 超时未知结果、明确拒绝、重复回执、旧代次回执、限频；发送重试不重跑 Agent。现有自动任务本地投递测试仍通过。
+（本批已落 worktree-agent-qq-q2 分支，PR 号与 CI 链接见行 6 进度注；测试名/符号清单见 §六/§七 记账。）
+
+- [x] 假 provider + 真桥 fixture：连续两条消息共享上下文；不同账号/用户/workspace 不串场；停机恢复仍接上上文。（册 `tests/unit/runtime/test_channel_work_pump.cpp`：假 provider（`CaptureBackend`，逐请求落对话 dump——上下文断言看真请求不靠猜）+ 真桥（`FakeChannelSidecar` 走真 Bridge 帧，support 件扩发送脚本/回执口）。四案："连续两条消息共享上下文"（同场+第二轮请求含第一轮对话）/"不同用户不串场"（dm-b 请求无 dm-a 对话、场 id 不同）/"不同 workspace 不串场"（换 ws 目录重启 → 新场，模型看不见旧对话）/"停机恢复仍接上上文"（干净停机 → 重建 → resume-as-new 新场带旧上下文、映射更新）。不同**账号**不串场由账号目录+ingress 账+session_key 含账号三重隔离承担，经理册/映射册已钉——泵册不另起一案。）
+- [x] 写盘失败、队列满、来信重放、权限撤销、三个执行/回复窗口崩溃注入；模型和工具调用计数不多一次。（泵册：`HardKillWindowCase` 窗 1（生成后 selection 前）/窗 2（selection 后 outbox 前）共用骨架——工具轮真执行（工具计数 1）+ 恢复补齐全程模型计数不多一次、回复恰投一份、ingress delivered；窗 3（入箱后发送前，`fault_after_enqueue`）；"claim 后崩"（无绑定行 → dead letter needs_review，零模型）；"来信重放"（同 delivery 重投模型恰 1 次）；"权限撤销"（排队后两条同档 binding 冲突 → TakeNextWork 重验 rejected 零模型）；"队列满"（inbox 帽 1 → 第二件 rate_limited 旁路）；"写盘失败"（outbox 账被目录占住 → 入箱失败停泵、模型恰 1 次）。计数走盘上 calls.log，装配销毁重建后仍有效——"不多一次"是对账不是内存断言。）
+- [x] QQ 超时未知结果、明确拒绝、重复回执、旧代次回执、限频；发送重试不重跑 Agent。现有自动任务本地投递测试仍通过。（泵册："超时未知"（Silent 脚本+短超时 → delivery_unknown 终态、恰发一次、不再自动重发、模型 1 次）/"明确拒绝"（platform_reject 终态不重试）/"重复回执"（send 应答已结，迟到的 delivery.receipt 不翻账）/"限频"（RateLimitedFirst：退避后同 client_id 同载荷重试成功，两次 params 逐字节同、模型 1 次）。**旧代次回执**：`test_channel_manager_send.cpp` "重复回执只结一次;旧代次回执隔离"（RestartAccount 后 receipt 不结算；send 应答路径的代次隔离同步假件下结构不可达，写"未验"）。既有册零改动：`test_gateway_automation_v1.cpp`（本地投递八案）与 `test_reply_outbox.cpp` 照跑——回归交 CI。）
+
+**Q2 未验边界（如实记，归 Q3）**：真平台 msg_id/msg_seq 行为、回复窗口真值、限频真值、回执延迟分布、2000 字节段帽是否贴平台上限、Deduped（40054005）在真链路的语义——本地 mock 不能代替这些结论；send 应答路径的代次隔离与进程内多线程泵的单飞闸（同步泵下结构不可达/未跑）。Q1b 两笔（配对提示限频发送、Gateway 批准控制入口）未随本批带走，仍立账；**status 渠道栏一笔已随本批销**（§七 末行记账）。
 
 ### Q3：真实账号联调
 

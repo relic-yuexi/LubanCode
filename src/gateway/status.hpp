@@ -70,6 +70,20 @@ struct GatewayStatusSections {
     std::vector<std::string> pending_delivery_ids;
     bool work_ledger_present = false;   // automation 账在不在(空栏与坏账分得开)
     bool delivery_ledger_present = false;
+    // channel 栏(QQ 接入单 Q2 §七末行):渠道连接与投递错误——只读盘上
+    // 账(account-status.json + ingress/outbox 投影),不带密钥与整份平台
+    // 事件。
+    struct ChannelAccountEntry {
+        std::string channel_id;
+        std::string account_id;
+        std::string connection_state;  // 账号状态机快照(空 = 快照未见)
+        int generation = 0;
+        std::size_t ingress_pending = 0;  // queued + running
+        std::size_t dead_letter = 0;
+        std::vector<std::string> delivery_errors;  // 渠道投递终态失败(稳定码)
+    };
+    std::vector<ChannelAccountEntry> channels;
+    bool channel_ledger_present = false;  // channels 状态根在不在
 };
 
 // 三栏只读投影(process 栏仍在 GatewayProbe)。纯读,零建目录零写盘。

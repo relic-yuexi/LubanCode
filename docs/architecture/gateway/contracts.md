@@ -140,6 +140,8 @@ sending -> retry_wait | delivery_unknown | dead_letter
 
 `sending` 后崩溃：平台支持 client id / receipt query 就先查再重发；不支持则标 `delivery_unknown`，可按策略重发，但账上明示“可能重复”。不宣称 exactly-once。
 
+Q2 实装注记（QQ 渠道族，`gateway/reply_outbox.*` 的落地态名）：`pending -> sending -> sent`（本地族沿 V1 的 `pending -> delivered`，hash 不符 `flagged`）；`sending` 超时落 `delivery_unknown`（停自动重发）；平台明确拒绝/令牌失效/限频重试耗尽落 `failed`（`delivery_error` 带稳定码）。`claimed`/`acknowledged`/`retry_wait` 的细分档位留后续批次，语义并入 `sending`（在途）与重试节流账——升级时按本表补名，不推翻现账。
+
 ReplyAssembler：只消费 committed `ServerEvent` / Trajectory projection；thinking、usage、secret、内部工具参数默认不出站；preview 与 committed 分账；delivery 失败不回头改 Agent history；同一 committed response 重建出相同 `delivery_id` 与相同 payload hash。
 
 ## 5. RecoveryAction 与失败矩阵

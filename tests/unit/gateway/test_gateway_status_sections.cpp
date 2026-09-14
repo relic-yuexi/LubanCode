@@ -8,7 +8,10 @@
 #include <doctest/doctest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
+
+#include <nlohmann/json.hpp>
 
 #include "gateway/automation_store.hpp"
 #include "gateway/profile.hpp"
@@ -130,4 +133,88 @@ TEST_CASE("进程没跑任务也如实:账在但全 scheduled,execution 栏空")
     CHECK(sections.work_ledger_present);
     CHECK(sections.jobs_total == 1);
     CHECK(sections.recent_executions.empty());  // 没跑过就没记录,不画成功
+}
+
+TEST_CASE("channel 栏:读账号状态快照/入站水位/投递错误,不带密钥与平台事件") {
+    Fixture fixture("channel");
+    // channels 根与 profile 根同级(生产布局:<home>/.lubancode/{channels,gateway})。
+    const std::filesystem::path account_dir =
+        fixture.root / "channels" / "qqbot" / "main";
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(account_dir / "ingress", ec);
+        // 账号状态快照(manager 状态迁移写的)。
+        const nlohmann::json status = nlohmann::json::object({
+            {"schema", 1},
+            {"channelId", "qqbot"},
+            {"accountId", "main"},
+            {"state", "running"},
+            {"generation", 2},
+            {"updatedAtMs", 1724700000000},
+            {"lastReason", ""},
+            {"lastDetail", ""},
+        });
+        std::ofstream status_file(account_dir / "account-status.json", std::ios::binary);
+        status_file << status.dump();
+        // 入站账:一枚 queued(待处理)。
+        std::ofstream journal(account_dir / "ingress" / "journal.jsonl", std::ios::binary);
+        journal << nlohmann::json({{"schema", 1},
+                                   {"t", "evt"},
+                                   {"sid", 1},
+                                   {"dedupe", "p:qqbot:main:pe-1"},
+                                   {"tier", 1},
+                                   {"parts_sha256", "x"},
+                                   {"event", nlohmann::json::object()}})
+                       .dump()
+                << "\n";
+        journal << nlohmann::json({{"schema", 1}, {"t", "tr"}, {"sid", 1},
+                                   {"to", "queued"}, {"reason", ""}})
+                       .dump()
+                << "\n";
+    }
+    // outbox:一枚渠道项终态失败(投递错误栏)。
+    {
+        DurableReplyOutbox outbox;
+        DurableReplyOutbox::Paths paths;
+        paths.log_file = fixture.paths.outbox_log;
+        paths.replies_dir = fixture.paths.replies_dir;
+        paths.published_dir = fixture.paths.published_dir;
+        REQUIRE(DurableReplyOutbox::Open(&outbox, paths).ok);
+        DurableReplyOutbox::ChannelTarget target;
+        target.channel_id = "qqbot";
+        target.account_id = "main";
+        target.conversation_id = "dm-owner";
+        target.source_ref = "ingress:qqbot:main:1";
+        const auto receipt = outbox.EnqueueChannel("sel-ch", "正文", "s", "t", target, 1);
+        REQUIRE(receipt.accepted);
+        REQUIRE(outbox.RecordAttempt(receipt.delivery_ids[0], 2));
+        REQUIRE(outbox.MarkChannelFailed(receipt.delivery_ids[0], "platform_reject", 3));
+    }
+
+    const auto sections = ProbeStatusSections(fixture.paths);
+    CHECK(sections.channel_ledger_present);
+    REQUIRE(sections.channels.size() == 1);
+    const auto& entry = sections.channels[0];
+    CHECK(entry.channel_id == "qqbot");
+    CHECK(entry.account_id == "main");
+    CHECK(entry.connection_state == "running");
+    CHECK(entry.generation == 2);
+    CHECK(entry.ingress_pending == 1);
+    REQUIRE(entry.delivery_errors.size() == 1);
+    CHECK(entry.delivery_errors[0].find("platform_reject") != std::string::npos);
+
+    const nlohmann::json json = SectionsToJson(sections);
+    REQUIRE(json.contains("channel"));
+    REQUIRE(json["channel"].size() == 1);
+    CHECK(json["channel"][0]["connection_state"] == "running");
+    CHECK(json["channel"][0]["delivery_errors"].size() == 1);
+    const auto lines = FormatSectionLines(sections);
+    bool has_channel_line = false;
+    bool has_error_line = false;
+    for (const std::string& line : lines) {
+        if (line.rfind("[channel]", 0) == 0) has_channel_line = true;
+        if (line.find("投递错误") != std::string::npos) has_error_line = true;
+    }
+    CHECK(has_channel_line);
+    CHECK(has_error_line);
 }

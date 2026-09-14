@@ -72,6 +72,8 @@
 #include "runtime/worktree.hpp"
 // Gateway V1 主泵装配(app 层:backend/registry 是 app 的材料)。
 #include "runtime/automation_pump.hpp"
+// QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装)同层装配。
+#include "runtime/channel_work_pump.hpp"
 #include "workspace/identity.hpp"
 #include "cli/markdown.hpp"
 #include "cli/provider_wizard.hpp"
@@ -813,6 +815,18 @@ int RunCli(const std::vector<std::string>& args) {
             auto backend = lubancode::app::BuildBackend(gateway_config->config);
             lubancode::tools::ToolRegistry registry = lubancode::app::BuildBaseToolRegistry(
                 {}, gateway_config->config.search);
+            // workspace 身份:启动时冻结一次(Q2 §六第二项——渠道路的会话
+            // 映射按它隔离,重启换 cwd 不误续别的项目上下文)。
+            const std::filesystem::path gateway_cwd = std::filesystem::current_path();
+            const auto workspace_identity = lubancode::workspace::ResolveWorkspaceIdentity(
+                gateway_cwd, lubancode::tools::Utf8ToPath(*home_luban));
+            if (!workspace_identity.has_value()) {
+                std::cerr << "gateway run: workspace 身份裁决失败——"
+                          << workspace_identity.error() << "\n";
+                return 1;
+            }
+            const std::filesystem::path workspaces_root =
+                lubancode::tools::Utf8ToPath(*home_luban) / "workspaces";
             std::optional<lubancode::runtime::GatewayAutomationPump> pump;
             {
                 lubancode::runtime::GatewayAutomationPump::Options pump_options;
@@ -824,17 +838,8 @@ int RunCli(const std::vector<std::string>& args) {
                         : gateway_args.profile;
                 pump_options.paths =
                     lubancode::gateway::ResolveGatewayProfilePaths(gateway_root, profile_name);
-                pump_options.workspaces_root =
-                    lubancode::tools::Utf8ToPath(*home_luban) / "workspaces";
-                const std::filesystem::path cwd = std::filesystem::current_path();
-                const auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
-                    cwd, lubancode::tools::Utf8ToPath(*home_luban));
-                if (!identity.has_value()) {
-                    std::cerr << "gateway run: workspace 身份裁决失败——" << identity.error()
-                              << "\n";
-                    return 1;
-                }
-                pump_options.workspace_identity = *identity;
+                pump_options.workspaces_root = workspaces_root;
+                pump_options.workspace_identity = *workspace_identity;
                 pump_options.cwd_utf8 = lubancode::platform::CurrentDirUtf8();
                 pump_options.lubancode_version = std::string(lubancode::app::kVersion);
                 pump_options.wire_name =
@@ -860,13 +865,45 @@ int RunCli(const std::vector<std::string>& args) {
             {
                 lubancode::app::ChannelGatewayWiring::Options wiring_options;
                 wiring_options.config = &gateway_config->config;
-                wiring_options.channels_state_root =
+                const std::filesystem::path wiring_channels_root =
                     lubancode::tools::Utf8ToPath(*home_luban) / "channels";
+                wiring_options.channels_state_root = wiring_channels_root;
+                const std::filesystem::path channels_root = wiring_channels_root;
                 channel_wiring = lubancode::app::ChannelGatewayWiring::Create(
                     std::move(wiring_options));
                 if (channel_wiring != nullptr) {
                     for (const std::string& line : channel_wiring->skipped()) {
                         std::cerr << "[gateway] 渠道账号未装配: " << line << "\n";
+                    }
+                    // QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装)挂进
+                    // wiring——桥泵之后每 tick 推进一轮;outbox 共享
+                    // automation 泵的同一本账(单写者,两泵同 tick 串行)。
+                    if (channel_wiring->manager() != nullptr &&
+                        channel_wiring->manager()->account_count() > 0) {
+                        lubancode::runtime::ChannelWorkPump::Options work_options;
+                        work_options.manager = channel_wiring->mutable_manager();
+                        work_options.outbox = pump->outbox();
+                        work_options.channels_state_root = channels_root;
+                        work_options.workspaces_root = workspaces_root;
+                        work_options.workspace_identity = *workspace_identity;
+                        work_options.cwd_utf8 = lubancode::platform::CurrentDirUtf8();
+                        work_options.lubancode_version = std::string(lubancode::app::kVersion);
+                        work_options.wire_name =
+                            lubancode::config::ProviderWireName(gateway_config->config.wire);
+                        work_options.model = gateway_config->config.model;
+                        work_options.max_steps_per_turn = 32;  // 与 automation 同款预算
+                        work_options.max_wall_secs = 600;
+                        auto work_pump =
+                            std::make_unique<lubancode::runtime::ChannelWorkPump>();
+                        const auto open = lubancode::runtime::ChannelWorkPump::Open(
+                            work_pump.get(), *backend, registry, std::move(work_options));
+                        if (!open.ok) {
+                            std::cerr << "[gateway] 渠道 work 泵开不了——" << open.error
+                                      << "\n";
+                            // 渠道业务面不开:桥照跑(收信入账),Gateway 照常起。
+                        } else {
+                            channel_wiring->set_work_pump(std::move(work_pump));
+                        }
                     }
                     composite_pump = std::make_unique<lubancode::app::CompositeGatewayPump>(
                         &*pump, std::move(channel_wiring));

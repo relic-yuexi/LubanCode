@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <random>
 
 #include "channel/bridge_protocol.hpp"
 #include "channel/digest.hpp"
 
+#include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 
 #ifdef _WIN32
@@ -165,7 +167,62 @@ std::optional<std::string> ChannelManager::TransitionLocked(AccountEntry& entry,
         entry.transitions.erase(entry.transitions.begin(),
                                 entry.transitions.end() - static_cast<std::ptrdiff_t>(32));
     }
+    // 盘上状态快照(Q2:gateway status 渠道栏的进程外只读面)。迁移是有
+    // 界事件,每笔写一次原子件;写不进只留账(状态机本身不依赖它)。
+    PersistAccountStatusLocked(entry);
     return std::nullopt;
+}
+
+void ChannelManager::PersistAccountStatusLocked(const AccountEntry& entry) {
+    nlohmann::json status = nlohmann::json::object();
+    status["schema"] = 1;
+    status["channelId"] = entry.channel_id;
+    status["accountId"] = entry.account_id;
+    status["state"] = ChannelAccountStateName(entry.state);
+    status["generation"] = entry.generation;
+    status["updatedAtMs"] = options_.now_ms();
+    const AccountStatusTransition& last = entry.transitions.back();
+    status["lastReason"] = last.reason;
+    status["lastDetail"] = last.detail;
+    const std::filesystem::path file =
+        AccountDir(options_.state_root, entry.channel_id, entry.account_id) / "account-status.json";
+    (void)platform::AtomicWriteFile(file, status.dump(),
+                                    platform::WriteDurability::ProcessCrashDurability);
+}
+
+ChannelManager::ChannelAccountStatusFile ChannelManager::ReadAccountStatusFile(
+    const std::filesystem::path& account_dir) {
+    ChannelAccountStatusFile out;
+    const std::filesystem::path file = account_dir / "account-status.json";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec) || ec) {
+        return out;
+    }
+    std::ifstream stream(file, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    const auto parsed = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        return out;
+    }
+    // json 缺键一律 contains()(const operator[] 查缺键是 UB)。
+    auto read_string = [&parsed](const char* key) {
+        return parsed.contains(key) && parsed[key].is_string()
+                   ? parsed[key].get<std::string>()
+                   : std::string();
+    };
+    out.present = true;
+    out.channel_id = read_string("channelId");
+    out.account_id = read_string("accountId");
+    out.state = read_string("state");
+    if (parsed.contains("generation") && parsed["generation"].is_number_integer()) {
+        out.generation = parsed["generation"].get<int>();
+    }
+    if (parsed.contains("updatedAtMs") && parsed["updatedAtMs"].is_number_integer()) {
+        out.updated_at_ms = parsed["updatedAtMs"].get<std::int64_t>();
+    }
+    out.last_reason = read_string("lastReason");
+    out.last_detail = read_string("lastDetail");
+    return out;
 }
 
 ChannelManager::AddAccountResult ChannelManager::AddAccount(
@@ -371,6 +428,8 @@ void ChannelManager::Pump(const std::string& channel_id, const std::string& acco
     if (!reply.empty()) {
         HandleBytesFromSidecarLocked(*entry, reply.data(), reply.size());
     }
+    // 在途 send 的超时裁决(Q2 §七:超时 = delivery_unknown,停自动重发)。
+    ExpireStaleSendsLocked(*entry);
 }
 
 void ChannelManager::HandleBytesFromSidecar(const std::string& channel_id,
@@ -411,6 +470,17 @@ void ChannelManager::HandleMessageLocked(AccountEntry& entry, const IncomingMess
             dispatch.matched_request_method.has_value()) {
             const BridgeMethod method = *dispatch.matched_request_method;
             if (message.kind == IncomingMessageKind::ErrorResponse) {
+                if (method == BridgeMethod::Send) {
+                    // channel.send 的错误应答(Q2 §七):按 domain 稳定名分型
+                    // 结算,不进传输层状态机(发送失败 ≠ 账号故障)。
+                    if (dispatch.matched_request_id.has_value() &&
+                        entry.pending_sends.count(*dispatch.matched_request_id) > 0) {
+                        ClassifySendErrorLocked(entry, *dispatch.matched_request_id,
+                                                message.error_message,
+                                                message.error_data);
+                    }
+                    return;
+                }
                 // 错误应答:按 domain 稳定名入状态机。
                 NotifyTransportFailureLocked(entry, message.error_message, message.error_message);
                 return;
@@ -454,8 +524,23 @@ void ChannelManager::HandleMessageLocked(AccountEntry& entry, const IncomingMess
                         entry.lock.Release();
                     }
                     return;
+                case BridgeMethod::Send: {
+                    // channel.send 的成功应答(Q2 §七第三项):accepted 与
+                    // QQ 已接受回执一并结算(provider_message_id 记账)。
+                    const std::string provider_message_id =
+                        message.result.is_object() && message.result.contains("provider_message_id") &&
+                                message.result["provider_message_id"].is_string()
+                            ? message.result["provider_message_id"].get<std::string>()
+                            : std::string();
+                    if (dispatch.matched_request_id.has_value()) {
+                        SettleSendLocked(entry, *dispatch.matched_request_id,
+                                         ChannelDeliveryOutcome::Status::Accepted,
+                                         provider_message_id, "", "");
+                    }
+                    return;
+                }
                 default:
-                    return;  // health/send/... 的应答:阶段 3/4 的口,本批不消费
+                    return;  // health/edit/... 的应答:后续批次的口
             }
         }
         return;
@@ -500,9 +585,13 @@ void ChannelManager::HandleMessageLocked(AccountEntry& entry, const IncomingMess
         } else if (incoming.method == BridgeMethod::Fatal) {
             const std::string reason = incoming.params.value("reason", "process_crashed");
             NotifyTransportFailureLocked(entry, reason, incoming.params.value("detail", ""));
+        } else if (incoming.method == BridgeMethod::DeliveryReceipt) {
+            // 平台异步回执(Q2 §七:与 send 请求按 outbound_delivery_id 关联;
+            // 重复/陈旧回执只留诊断)。
+            OnDeliveryReceiptLocked(entry, incoming.params);
         }
-        // 其余通知(delivery.receipt/login.*/capabilities.changed):阶段
-        // 4/5 的口,先入 router 诊断账,不消费。
+        // 其余通知(login.*/capabilities.changed):后续批次的口,先入
+        // router 诊断账,不消费。
     }
 }
 
@@ -804,6 +893,301 @@ std::optional<std::string> ChannelManager::RejectPairing(const std::string& chan
         return std::nullopt;
     }
     return entry->pairing->Reject(code, options_.now_ms(), error);
+}
+
+// ---- 出站投递(Q2 §七) ------------------------------------------------------
+
+std::optional<std::string> ChannelManager::SendReply(const std::string& channel_id,
+                                                     const std::string& account_id,
+                                                     const ChannelSendRequest& request) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return std::string("账号不在册: ") + channel_id + "/" + account_id;
+    }
+    if (entry->transport == nullptr) {
+        return "账号没接 bridge transport,不能发";
+    }
+    if (entry->state != ChannelAccountState::Running) {
+        return std::string("账号不在 Running(当前 ") + ChannelAccountStateName(entry->state) +
+               "),不能发";
+    }
+    if (request.conversation_id.empty() || request.text.empty() ||
+        request.client_delivery_id.empty()) {
+        return "发送请求缺 conversation/text/client_delivery_id";
+    }
+    // 已结算过的 delivery 不再受理(终态不翻转;防跨代次重复投递)。
+    if (entry->settled_deliveries.count(request.client_delivery_id) > 0) {
+        entry->send_diagnostics.push_back("duplicate_send_rejected: " +
+                                          request.client_delivery_id);
+        return std::string("delivery 已结算过,不再发送: ") + request.client_delivery_id;
+    }
+    // 帧(bridge-protocol.md §4 channel.send):client_id 供平台幂等——
+    // 同 delivery 重试同载荷(适配器按它稳定 msg_seq)。
+    nlohmann::json params = nlohmann::json::object();
+    params["conversation"] = nlohmann::json{{"kind", "direct"}, {"id", request.conversation_id}};
+    params["parts"] = nlohmann::json::array({nlohmann::json{{"type", "text"},
+                                                            {"text", request.text}}});
+    if (!request.reply_to_message_id.empty()) {
+        params["reply_to_message_id"] = request.reply_to_message_id;
+    }
+    params["client_id"] = request.client_delivery_id;
+    const std::int64_t request_id = entry->router.EnqueueOutgoingRequest(BridgeMethod::Send, params);
+    FlushOutboundLocked(*entry);  // 受理即编码写给 sidecar(字节面同步)
+
+    PendingChannelSend pending;
+    pending.request_id = request_id;
+    pending.client_delivery_id = request.client_delivery_id;
+    pending.conversation_id = request.conversation_id;
+    pending.generation = entry->generation;
+    pending.sent_at_ms = options_.now_ms();
+    entry->pending_sends.emplace(request_id, std::move(pending));
+    return std::nullopt;
+}
+
+void ChannelManager::SettleSendLocked(AccountEntry& entry, std::int64_t request_id,
+                                      ChannelDeliveryOutcome::Status status,
+                                      const std::string& provider_message_id,
+                                      const std::string& error_code, const std::string& detail) {
+    const auto pending = entry.pending_sends.find(request_id);
+    if (pending == entry.pending_sends.end()) {
+        return;  // 不在途(迟到/陌生):只留诊断,不结算
+    }
+    const PendingChannelSend send = pending->second;
+    entry.pending_sends.erase(pending);
+    if (send.generation != entry.generation) {
+        // 代次隔离(§七第三项):受理与结算之间账号重启过,这笔回执属旧
+        // 代次——不产出结算(重发按同 delivery_id 走新代次,平台按
+        // msg_id+msg_seq 去重兜底)。
+        entry.send_diagnostics.push_back("stale_receipt_dropped: " + send.client_delivery_id +
+                                         " gen " + std::to_string(send.generation) + " -> " +
+                                         std::to_string(entry.generation));
+        return;
+    }
+    // 重复回执只结一次(§七:send 响应与 delivery.receipt 都可能来)。
+    // settled 账只记终态(Accepted/Rejected/AuthFailed/Unknown)——限频是
+    // 可重试态,不进 settled(否则同 delivery 的合法重试会被 SendReply 拒)。
+    const bool terminal = status != ChannelDeliveryOutcome::Status::RateLimited;
+    if (terminal && entry.settled_deliveries.count(send.client_delivery_id) > 0) {
+        entry.send_diagnostics.push_back("duplicate_receipt_ignored: " +
+                                         send.client_delivery_id);
+        return;
+    }
+    if (terminal) {
+        entry.settled_deliveries[send.client_delivery_id] = entry.generation;
+        if (entry.settled_deliveries.size() > 512) {
+            // 有界:旧的先丢(同 delivery 重复回执通常紧跟着来;这里只防无界涨)。
+            entry.settled_deliveries.erase(entry.settled_deliveries.begin());
+        }
+    }
+    ChannelDeliveryOutcome outcome;
+    outcome.client_delivery_id = send.client_delivery_id;
+    outcome.status = status;
+    outcome.provider_message_id = provider_message_id;
+    outcome.error_code = error_code;
+    outcome.detail = detail;
+    outcome.settled_at_ms = options_.now_ms();
+    outcome.generation = entry.generation;
+    entry.delivery_outcomes.push_back(std::move(outcome));
+    if (entry.delivery_outcomes.size() > 256) {
+        entry.delivery_outcomes.erase(entry.delivery_outcomes.begin());
+    }
+}
+
+void ChannelManager::ClassifySendErrorLocked(AccountEntry& entry, std::int64_t request_id,
+                                             const std::string& stable_name,
+                                             const nlohmann::json& error_data) {
+    // 分型(§七第五项):限频/传输暂态 → 可重试;令牌失效 → AuthFailed
+    //(账号已由 NotifyTransportFailureLocked 转 NeedsLogin);明确拒绝按
+    // 细节分回复窗口过期/平台拒绝。
+    const std::string detail =
+        error_data.is_object() && error_data.contains("detail") && error_data["detail"].is_string()
+            ? error_data["detail"].get<std::string>()
+            : std::string();
+    const auto name = DomainErrorNameFromStableName(stable_name);
+    if (name == DomainErrorName::RateLimited || name == DomainErrorName::TransportFailed) {
+        SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::RateLimited, "",
+                         "rate_limited", detail.empty() ? stable_name : detail);
+        return;
+    }
+    if (name == DomainErrorName::LoginRequired) {
+        // 令牌失效:账号状态同步转 NeedsLogin(发送失败 ≠ 账号故障,故
+        // 只这一类穿透到状态机)。
+        NotifyTransportFailureLocked(entry, "login_required", detail);
+        SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::AuthFailed, "",
+                         "auth_failed", detail);
+        return;
+    }
+    if (detail.find("expired") != std::string::npos) {
+        // 回复窗口过期(msg_id 过期):不擅自转主动消息,终态失败。
+        SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::Rejected, "",
+                         "reply_window_expired", detail);
+        return;
+    }
+    SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::Rejected, "",
+                     "platform_reject", detail.empty() ? stable_name : detail);
+}
+
+void ChannelManager::OnDeliveryReceiptLocked(AccountEntry& entry, const nlohmann::json& params) {
+    // 通知无 pending request 可配对——按 outbound_delivery_id 在在途/已结
+    // 算账里关联(§七第三项"与发送请求关联")。
+    if (!params.is_object() || !params.contains("outbound_delivery_id") ||
+        !params["outbound_delivery_id"].is_string()) {
+        entry.send_diagnostics.push_back("delivery.receipt 缺 outbound_delivery_id");
+        return;
+    }
+    const std::string delivery_id = params["outbound_delivery_id"].get<std::string>();
+    const std::string outcome_text =
+        params.contains("outcome") && params["outcome"].is_string()
+            ? params["outcome"].get<std::string>()
+            : std::string();
+    const std::string provider_message_id =
+        params.contains("provider_message_id") && params["provider_message_id"].is_string()
+            ? params["provider_message_id"].get<std::string>()
+            : std::string();
+    const std::string reason = params.contains("reason") && params["reason"].is_string()
+                                   ? params["reason"].get<std::string>()
+                                   : std::string();
+    // 已结算:重复回执只留诊断(SettleSendLocked 同款裁决)。
+    if (entry.settled_deliveries.count(delivery_id) > 0) {
+        entry.send_diagnostics.push_back("duplicate_receipt_ignored: " + delivery_id);
+        return;
+    }
+    // 在途匹配(按 delivery_id 反查 pending)。
+    for (const auto& [request_id, pending] : entry.pending_sends) {
+        if (pending.client_delivery_id != delivery_id) continue;
+        if (pending.generation != entry.generation) {
+            entry.send_diagnostics.push_back("stale_receipt_dropped: " + delivery_id);
+            return;
+        }
+        if (outcome_text == "delivered") {
+            SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::Accepted,
+                             provider_message_id, "", "");
+        } else if (outcome_text == "failed") {
+            if (reason.find("rate") != std::string::npos) {
+                SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::RateLimited,
+                                 "", "rate_limited", reason);
+            } else {
+                SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::Rejected, "",
+                                 "platform_reject", reason);
+            }
+        } else {
+            entry.send_diagnostics.push_back("delivery.receipt 未知 outcome: " + outcome_text);
+        }
+        return;
+    }
+    entry.send_diagnostics.push_back("receipt_unmatched: " + delivery_id);
+}
+
+void ChannelManager::ExpireStaleSendsLocked(AccountEntry& entry) {
+    const std::int64_t now = options_.now_ms();
+    std::vector<std::int64_t> expired;
+    for (const auto& [request_id, pending] : entry.pending_sends) {
+        if (now - pending.sent_at_ms > options_.send_timeout_ms) {
+            expired.push_back(request_id);
+        }
+    }
+    for (const std::int64_t request_id : expired) {
+        // 超时 = delivery_unknown(§七第四项):可能是 QQ 已收到、回执丢失;
+        // 不虚 exactly-once,停自动重发。
+        SettleSendLocked(entry, request_id, ChannelDeliveryOutcome::Status::Unknown, "",
+                         "delivery_unknown", "回执超时");
+    }
+}
+
+std::vector<ChannelManager::ChannelDeliveryOutcome> ChannelManager::DrainChannelDeliveryOutcomes(
+    const std::string& channel_id, const std::string& account_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return {};
+    }
+    std::vector<ChannelDeliveryOutcome> out = std::move(entry->delivery_outcomes);
+    entry->delivery_outcomes.clear();
+    return out;
+}
+
+bool ChannelManager::HasPendingSend(const std::string& channel_id, const std::string& account_id,
+                                    const std::string& client_delivery_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return false;
+    }
+    for (const auto& [request_id, pending] : entry->pending_sends) {
+        if (pending.client_delivery_id == client_delivery_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<ChannelManager::IngressRunningView> ChannelManager::ListRunningIngress(
+    const std::string& channel_id, const std::string& account_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return {};
+    }
+    std::vector<IngressRunningView> out;
+    for (const auto& record : entry->ingress->Records()) {
+        if (record.state != IngressEventState::Running) {
+            continue;
+        }
+        IngressRunningView view;
+        view.sid = record.sid;
+        view.conversation_id = record.event.conversation.id;
+        view.event = record.event;
+        out.push_back(std::move(view));
+    }
+    return out;
+}
+
+std::optional<std::string> ChannelManager::SettleIngressReplied(const std::string& channel_id,
+                                                                const std::string& account_id,
+                                                                std::int64_t sid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return std::string("账号不在册: ") + channel_id + "/" + account_id;
+    }
+    return entry->ingress->Transition(sid, IngressEventState::Replied, "");
+}
+
+std::optional<std::string> ChannelManager::SettleIngressDelivered(const std::string& channel_id,
+                                                                  const std::string& account_id,
+                                                                  std::int64_t sid, bool delivered,
+                                                                  const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return std::string("账号不在册: ") + channel_id + "/" + account_id;
+    }
+    return entry->ingress->Transition(
+        sid, delivered ? IngressEventState::Delivered : IngressEventState::DeliveryFailed,
+        reason);
+}
+
+std::optional<std::string> ChannelManager::DeadLetterIngress(const std::string& channel_id,
+                                                             const std::string& account_id,
+                                                             std::int64_t sid,
+                                                             const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return std::string("账号不在册: ") + channel_id + "/" + account_id;
+    }
+    return entry->ingress->MoveToDeadLetter(sid, reason, options_.now_ms());
+}
+
+std::vector<ChannelIngressStore::Record> ChannelManager::IngressRecords(
+    const std::string& channel_id, const std::string& account_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return {};
+    }
+    return entry->ingress->Records();
 }
 
 }  // namespace lubancode::channel

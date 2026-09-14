@@ -786,6 +786,10 @@ add_library(lubancode_engine STATIC
   src/channel/qq/qq_messages.cpp
   src/channel/qq/qq_gateway.cpp
   src/channel/qq/qq_adapter.cpp
+  # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
+  # resume-as-new 更新映射)与工作绑定账(sid -> 场/轮,恢复反查)。
+  src/channel/session_map.cpp
+  src/channel/work_ledger.cpp
   # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
   # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
   # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include
@@ -969,6 +973,9 @@ add_library(lubancode_runtime STATIC
   # 工具栅栏/预算/取消链/reply selection)与 Gateway 有界主泵总装。
   src/runtime/headless_executor.cpp
   src/runtime/automation_pump.cpp
+  # QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装——ingress/路由/绑定/
+  # 执行/reply selection/outbox/投递的次序链与恢复裁决)。
+  src/runtime/channel_work_pump.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp

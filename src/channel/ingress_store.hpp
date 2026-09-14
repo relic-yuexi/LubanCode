@@ -14,6 +14,8 @@
 //   - replay:Open 时逐行重读,重建内存索引(去重键 → sid、delivery_id →
 //     sid、状态)。半行(崩溃时写了一半)容错跳过并记 warning;中间坏行
 //     同样跳过计数,不崩宿主——账还在,只是那一段查不到。
+//   - 写盘原语(QQ 接入单 Q2,§六第一项):JournalWriter PowerLoss——
+//     规范化原文与稳定去重键一并落稳后才 ack,掉电不丢受理事实。
 //
 // 去重键三级(message-contracts.md §3,从上往下退):
 //   1. provider_event_id 非空  -> p:<ch>:<acct>:<provider_event_id>(永久)
@@ -21,7 +23,8 @@
 //   3. 指纹(前两级都空)      -> f:<sender>:<parts_sha256>:<time_bucket>
 //      只作短窗去重(kFingerprintWindowMs 内查),不冒充永久 id。
 //
-// 依赖铁律沿 channel 库:标准库 + nlohmann::json + channel 内部件。
+// 依赖:标准库 + nlohmann::json + trajectory/journal(既有提交原语,Q2 起
+// 显式引入——channel 库不反向依赖 runtime/app 的铁律不变)。
 #pragma once
 
 #include <cstdint>
@@ -36,6 +39,7 @@
 #include <vector>
 
 #include "channel/types.hpp"
+#include "trajectory/journal.hpp"
 
 namespace lubancode::channel {
 
@@ -170,6 +174,9 @@ public:
 
 private:
     std::optional<std::string> AppendLine(const std::string& line);
+    // dead-letter 旁路账的行写入(尽力而为:主 tr 行已落,旁路档写不进
+    // 不阻塞迁移——last_error_ 留痕)。
+    std::optional<std::string> AppendDeadLetterLine(const nlohmann::json& entry);
     void ReplayLocked();
 
     std::filesystem::path journal_path_;
@@ -179,6 +186,9 @@ private:
     bool write_blocked_ = false;
     std::string last_error_;
     int replayed_bad_lines_ = 0;  // replay 容错跳过的行数(OpenResult 带出)
+    // 提交原语(Q2:PowerLoss)。journal 主账 Open 即持柄;dead-letter 惰性。
+    std::optional<trajectory::JournalWriter> journal_writer_;
+    std::optional<trajectory::JournalWriter> dead_letter_writer_;
 
     mutable std::mutex mutex_;
     std::int64_t next_sid_ = 1;
@@ -187,5 +197,16 @@ private:
     std::unordered_map<std::string, std::int64_t> permanent_keys_;  // key -> sid
     std::unordered_map<std::string, std::int64_t> delivery_ids_;    // delivery_id -> sid
 };
+
+// 只读投影(QQ 接入单 Q2:gateway status 渠道栏用):从 account_dir 下的
+// ingress journal 重放状态计数,零建目录零写盘、不持写柄——别的进程持锁
+// 写账时读到半行属常态,跳过即可。文件不存在给空投影。
+struct ChannelIngressProjection {
+    bool ledger_present = false;             // journal 文件在
+    std::size_t events = 0;                  // evt 行数(durable 过的事件)
+    std::map<std::string, std::size_t> state_counts;  // 状态名 -> 数量
+    std::size_t dead_letter = 0;             // dead-letter.jsonl 行数(在才有)
+};
+ChannelIngressProjection ReadChannelIngressProjection(const std::filesystem::path& account_dir);
 
 }  // namespace lubancode::channel
