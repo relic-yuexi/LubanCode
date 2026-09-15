@@ -377,7 +377,10 @@ TEST_CASE("job_handle:同响应先注册 launch 再处理 wait,已完成结果�
     CHECK(second[0].content.find("\"results\"") < second[0].content.find("\"statuses\""));
     REQUIRE((*wait_done)["results"].size() == 1);
     CHECK((*wait_done)["results"][0]["jobId"] == "job-000001");
-    CHECK((*wait_done)["results"][0]["preview"] == "资料的业务结果");
+    // 预览是 §4.18 合同的带壳投影文本(字节账+文件指引+正文)——断言正文
+    // 在投影里,不苛求裸串。
+    CHECK((*wait_done)["results"][0]["preview"].get<std::string>().find("资料的业务结果") !=
+          std::string::npos);
     // C:同响应的 launch 也接单即配。
     CHECK(second[1].job_admission);
     const auto admission2 = ParseJson(second[1].content);
@@ -406,7 +409,7 @@ TEST_CASE("native_deferred:a 欠账 b 先送,完成结果沿原 call 下次请�
     AsyncHarness h("nativeab", std::move(tools), /*probe=*/std::string("verified"));
 
     h.backend.scripts = {
-        CallsScript({{"call_a", "native_search", "{\"query\":\"资料\"}", /*async=*/true},
+        CallsScript({{"call_a", "native_search", "{\"query\":\"资料\",\"hold\":true}", /*async=*/true},
                      {"call_b", "echo", "{\"text\":\"b 的结果\"}"}},
                     "tool_use"),
         TextScript("先答复不依赖资料的部分"),
@@ -471,11 +474,12 @@ TEST_CASE("native_deferred:a 欠账 b 先送,完成结果沿原 call 下次请�
     }();
     CHECK(second_snapshot == second_snapshot_after);
 
-    // 第三次请求:沿原 call_a 配对(投递正文 = 业务结果预览)。
+    // 第三次请求:沿原 call_a 配对(投递正文 = 业务结果的带壳预览)。
     const std::vector<api::ToolResultBlock> third = LastResultsOf(h.backend.captured_requests[2]);
     REQUIRE(third.size() == 1);
     CHECK(third[0].tool_use_id == "call_a");
-    CHECK(third[0].content == "a 的业务结果");
+    CHECK(third[0].content.find("a 的业务结果") != std::string::npos);
+    h.gate->Open();  // 收尾放行被挂住的 worker(迟到信封按终态后迟到拒收)
 
     // 账面:欠账配齐(tool 消息落账)。
     {

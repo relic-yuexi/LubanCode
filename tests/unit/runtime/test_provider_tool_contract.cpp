@@ -121,6 +121,7 @@ TEST_CASE("快照载荷:basis 三件 + verdicts 逐项三态,过 P0 载荷校验
     // P0 逐 kind 载荷校验器原样吃这份(tool.capability.recorded 的合同)。
     nlohmann::json event = nlohmann::json::object({
         {"type", "event"},
+        {"schemaVersion", 3},
         {"kind", "tool.capability.recorded"},
         {"eventId", "event-000001"},
         {"seq", 1},
