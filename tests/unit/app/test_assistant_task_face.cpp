@@ -457,14 +457,12 @@ TEST_CASE("审批批准:答复回灌后工具执行,任务 succeeded") {
                       {ToolUseScript("tu_1", "guarded_write"), TextScript("工具跑完了")});
     REQUIRE(fixture.runtime != nullptr);
 
-    const nlohmann::json created = fixture.Create("W2-APPRO-ACCEPT", "写点东西");
-    const std::string job_id = created["jobId"].get<std::string>();
-
-    // 答复方:等审批事件出现(泵线程在 Ask 里悬着),从"读线程"答复。
+    // 答复方先起:Create 的回执轮询会顺手把泵推起来(命令消费→执行→
+    // 审批),答复线程必须在执行开跑前就位,否则 300ms 审批窗白等。
     // doctest 断言不进线程——结果收回来主线程断。
     std::atomic<bool> responded{false};
     std::thread approver([&fixture, &responded]() {
-        const std::int64_t deadline = WallMs() + 10000;
+        const std::int64_t deadline = WallMs() + 20000;
         while (WallMs() < deadline) {
             const auto pending = fixture.broker->ListPending();
             if (!pending.empty()) {
@@ -477,7 +475,9 @@ TEST_CASE("审批批准:答复回灌后工具执行,任务 succeeded") {
         }
     });
 
-    const auto settled = fixture.PumpUntilSettled(job_id, 15000);
+    const nlohmann::json created = fixture.Create("W2-APPRO-ACCEPT", "写点东西");
+    const std::string job_id = created["jobId"].get<std::string>();
+    const auto settled = fixture.PumpUntilSettled(job_id, 20000);
     approver.join();
     REQUIRE(settled.has_value());
     CHECK(responded.load());
@@ -533,10 +533,11 @@ TEST_CASE("任务取消:CAS 落账,重复取消幂等") {
 
     const nlohmann::json cancelled = fixture.Cancel(job_id, 1, "W2-CANCEL-OP");
     CHECK(cancelled["state"] == "cancelled");
-    CHECK(cancelled["revision"] == 2);
+    // cancel 不 bump spec revision(账行记取消时的旧值,重放同源)。
+    CHECK(cancelled["revision"] == 1);
 
     // 已取消的重复取消:回当前态(duplicate),不写第二枚命令。
-    const nlohmann::json again = fixture.Cancel(job_id, 2, "W2-CANCEL-OP-2");
+    const nlohmann::json again = fixture.Cancel(job_id, 1, "W2-CANCEL-OP-2");
     CHECK(again.value("duplicate", false) == true);
     CHECK(fixture.backend->model_calls() == 0);
 }

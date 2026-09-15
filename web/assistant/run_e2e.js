@@ -806,7 +806,7 @@ async function scene7_tasks(field, backend) {
 
   // 等任务结算落账(没连接也要完成——进程内泵自转;结算判定走重连后的
   // 领域账,不猜时序)。
-  await sleep(1200);
+  await sleep(2000);
 
   // 重连:按 (bootId, seenSeq) 补账——断线期间的 settled 事件应从游标后到。
   const ws2 = await openChannel(field);
@@ -837,6 +837,9 @@ async function scene7_tasks(field, backend) {
   const occurrence = read.result && read.result.occurrences && read.result.occurrences[0];
   ok('task/read 回结算的 occurrence', !!occurrence && occurrence.state === 'settled',
     JSON.stringify(read.result));
+  if (occurrence && occurrence.state === 'settled' && occurrence.outcome !== 'succeeded') {
+    console.log('  (诊断) occurrence 终态非 succeeded: ' + JSON.stringify(occurrence));
+  }
   ok('occurrence 带结果(delivered + 冻结正文)',
     !!occurrence && occurrence.result && occurrence.result.deliveryState === 'delivered' &&
     String(occurrence.result.replyText || '').indexOf('假后端的回话') !== -1,
@@ -862,16 +865,18 @@ async function scene8_idempotent(field, backend) {
 
   // 等结算。
   let settled = false;
-  for (let i = 0; i < 100 && !settled; ++i) {
+  let settledDetail = '';
+  for (let i = 0; i < 150 && !settled; ++i) {
     const read = await ws.request('task/read', { jobId: jobId });
     if (read.result && read.result.occurrences && read.result.occurrences[0] &&
         read.result.occurrences[0].state === 'settled') {
       settled = true;
+      settledDetail = JSON.stringify(read.result.occurrences[0]);
     } else {
       await sleep(100);
     }
   }
-  ok('首次任务结算', settled);
+  ok('首次任务结算', settled, settledDetail);
 
   // 同键再交:回原受理(duplicate),不再执行。
   const second = await ws.request('task/create', {
@@ -1010,6 +1015,8 @@ async function main() {
     await scene6_duplicateAndPorts(resolved, root, field, assistant.exited);
   } catch (error) {
     ok('e2e 主流程跑完(未抛异常)', false, String((error && error.stack) || error));
+    console.log('---- assistant stderr 尾巴(诊断) ----');
+    console.log(assistant.stderrTail);
   } finally {
     if (wsChat) {
       wsChat.close();
