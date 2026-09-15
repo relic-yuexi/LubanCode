@@ -1,12 +1,14 @@
-# 常驻助理 Web 主界面(W0/W1/W2)
+# 常驻助理 Web 主界面(W0/W1/W2/W3/W4)
 
 [参考手册](../../README.md) · 源单 [todos/常驻助理Web主界面_CPP本地服务与Gateway总装.todo](../../../todos/常驻助理Web主界面_CPP本地服务与Gateway总装.todo)
 
 `lubancode assistant` 的本地宿主:一只前台进程同时装本地 Web 服务(随包
 网页 + 认证)、AppServer 控制入口(1.3 协议)与自动任务底座(W2 起:
 GatewayAutomationPump 进程内直驱)。本页冻结 W0 合同(断线合同、任务
-归属与路由、能力声明)、W1 的面(承载/认证/聊天)与 W2 的面(单次任务/
-结果/审批/重连补账)。W3+ 的渠道设置、周期任务与系统托管不在本页冒充。
+归属与路由、能力声明)、W1 的面(承载/认证/聊天)、W2 的面(单次任务/
+结果/审批/重连补账)、W3 的面(渠道只读投影 + 配对转发)与 W4 的面
+(周期任务/暂停恢复/heartbeat 观察/系统托管只读投影)。W5 的发布包与
+真实常驻验收不在本页冒充。
 
 ## 一、启动与停止(W1 已落)
 
@@ -96,14 +98,20 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
 | `config/status` | 生效配置投影:configured/provider/model/wire/baseUrl/apiKeyConfigured/apiKeySource | **零密钥**:来源只报 inline 或 env:NAME,永不回值 |
 | `config/model/set` | 定点保存模型配置(Add/Replace + SetActive),活配置换血:新 thread 吃新账,已开 thread 材料不动(冻结合同) | 保存与连接检查分开;回执不回显密钥 |
 | `config/test` | 端点 TCP 连通检查(有界 8s) | 如实:只验端点连通,不冒充"鉴权通过" |
-| `task/create` | 建单次任务:{prompt, dueAtMs?, clientOperationId} | **幂等**:同键回原受理(duplicate=true),不写第二枚命令;due 0/缺省=立即;回执等泵消费(≤15s,泵忙如实报错,键在重发不双建) |
-| `task/run-now` | 手动触发:{jobId, clientOperationId} | 幂等同上(runnow_keys) |
-| `task/list` | 任务摘要列表:prompt 摘要/state/scheduleKind/dueAtMs/revision + 最近 occurrence(outcome/detail)+ 结果状态 | 只读投影;不含正文 |
-| `task/read` | 任务全档 + occurrences(含 result:deliveryId/deliveryState/publishedPath/replyText≤64KB) | 结果正文优先发布文件、回落 replies 原件;账行不带正文,按 V1 合同从盘读回 |
+| `task/create` | 建任务(W4 扩周期):{prompt, dueAtMs?, clientOperationId, intervalSeconds?, cronExpr?, timezone?, misfirePolicy?, notifyOnChange?} | **幂等**:同键回原受理(duplicate=true),不写第二枚命令;due 0/缺省=立即;interval 与 cron 互斥;坏规格(六字段 cron/英文名/两年无拍/认不得的时区/interval 越界)在方法面经 `ValidateScheduleSpec` **明拒不猜**,不落命令文件;周期任务建账不建 occurrence(拍点归 SweepSchedule);回执带 schedule 投影(kind/intervalSeconds/cronExpr/timezone/misfirePolicy/notifyOnChange/nextDueMs) |
+| `task/run-now` | 手动触发:{jobId, clientOperationId} | 幂等同上(runnow_keys);暂停中的任务也可手动跑一次 |
+| `task/list` | 任务摘要列表:prompt 摘要/state/scheduleKind/dueAtMs/revision/schedule + 最近 occurrence(outcome/detail/observed)+ 结果状态 | 只读投影;不含正文 |
+| `task/read` | 任务全档 + occurrences(含 result:deliveryId/deliveryState/publishedPath/replyText≤64KB;heartbeat 任务带 observed:{changed,delivered}) | 结果正文优先发布文件、回落 replies 原件;账行不带正文,按 V1 合同从盘读回 |
 | `task/cancel` | 取消:{jobId, expectedRevision(CAS), clientOperationId} | 已取消的重复取消回当前态(duplicate);CAS 拒如实报 |
+| `task/pause` | 暂停(W4):{jobId, expectedRevision(CAS), clientOperationId} | 透传 V2 的 pause CAS 命令(停生成与派发,已排 occurrence 原地等待);重复 pause 回当前态(duplicate);终态拒收 |
+| `task/resume` | 恢复(W4):{jobId, expectedRevision(CAS), clientOperationId} | 透传 V2 的 resume(游标直进 now,paused 窗口的拍不补跑);同上幂等 |
 | `approval/list` | 悬着的审批投影(重连/刷新后可发现) | 不受任务面可用性门 |
 | `approval/respond` | 答复:{requestId, decision: accept\|decline} | 迟到/收口/不认识回 `{resolved:false, reason:"stale_request_id"}`,不冒充已答 |
 | `assistant/events/read` | 事件账补账:{bootId, lastSeq} → {bootId, currentSeq, oldestSeq, reset, events} | 见 §四之二 |
+| `channel/list` | 渠道账号总览(W3):全局 channels 段每账号一份四态投影 + 待批准清单 | 只读;配置读不懂如实回 channelsError;**零凭据**(页面不录入 secret,指引走 CLI) |
+| `channel/status` | 单账号细图(W3):四态 + 连接明细行 + 脱敏快照 | 四态 = #90 `BuildChannelFourState`(配置/在线/配对/模型);在线裁决 = #81 快照合同(connected 且进程活且新鲜) |
+| `channel/pairing/respond` | 配对批准/拒绝转发(W3):{channelId, accountId, token, action: approve\|reject} | **同一控制面**:锁探测门(#90 JudgePairingGate)→ `GatewayPairingCommand` 命令文件 → 等回执,与 CLI `channel pairing approve\|reject` 同一条路,不另开第二份批准口;无持锁 gateway 明拒不冒充批准 |
+| `gateway/service/status` | 系统托管只读投影(W4 接 V4):install.json(installed/版本/exe)+ gateway 实例活态(锁探活) | **零副作用**(不跑外部命令);安装/卸载执行走 CLI `lubancode gateway service install/uninstall`,注册对账走 `gateway doctor`,页面不代跑 |
 
 独立 `app-server` 的方法面与能力表不带这些名字(capabilities.methods
 按模式区分)。
@@ -116,8 +124,9 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
   这是与聊天线"没人听的事件不留"(W0)的分岔:任务/审批是补账面。
   实时推送的 params 带账面 `seq`,页面见过即推进游标。
 - 事件三枚:`assistant/task/event`(kind:job.created/job.updated/
-  occurrence.created/occurrence.changed,带 jobId/occurrenceId/state/
-  outcome/detail/sessionId/turnId)、`assistant/approval/request`(带
+  occurrence.created/occurrence.changed/occurrence.observed——W4 的
+  heartbeat 观察面,带 jobId/occurrenceId/changed/delivered;正文未变
+  的拍 changed=false 如实发)、`assistant/approval/request`(带
   归属与 inputPreview≤1KB;**must_keep**——丢了页面不知道要答)、
   `assistant/approval/resolved`(outcome:accepted/declined/
   timeout_declined/cancelled)。
@@ -166,13 +175,20 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
 ## 六、页面(web/assistant,随包)
 
 原生 HTML/JS/CSS,无外部 CDN、无构建要求。聊天(历史列表/消息流/输入/
-停止任务)、任务(创建/列表/详情/结果/取消)、结果(执行与投递状态分
-栏:成功+delivered / 待投递 / 投递异常+needs_review)、待审批(悬着+
-最近已决,批准/拒绝)、设置(模型配置首配流程 + 运行信息 + 停止助理)。
+停止任务)、任务(创建[单次/间隔/cron]/列表/详情/结果/取消/暂停/恢复/
+立即执行)、结果(执行与投递状态分栏:成功+delivered / 待投递 / 投递
+异常+needs_review)、待审批(悬着+最近已决,批准/拒绝)、设置(模型
+配置首配流程 + 运行信息 + **渠道**(W3:四态卡 + 待批准配对的批准/拒绝
++ 按码批准;凭据不进网页,指引 CLI)+ **系统托管**(W4:install 状态
+只读 + CLI 指引,不代跑安装)+ 停止助理)。
 复用 examples/web-console 的协议客户端经验(assistant_core.js:通道/事
 件账/bootstrap 交换),断线自动重连 + 领域快照补账 + 事件账补账
 (§四之二)。消息按不可信文本渲染(textContent,不 innerHTML);凭据
 不进 localStorage/URL(fragment 交换完即清)。
+
+页面只展示确实交付的能力:计划表单只画单次/interval/cron 三态(服务端
+透传 V2 语义);heartbeat 勾选只对周期任务出现;系统托管只读——安装/
+卸载不在页面代跑;配对码/凭据相关的指引都指向 CLI。
 
 ## 七、验收与未验边界(如实)
 
@@ -184,22 +200,37 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
   (SessionBound 断线即打断;Detached 断线后 final、模型恰好一次)、
   能力声明区分。
 - `unit.app.test_assistant_cli_options` —— 子命令解析。
-- `unit.app.test_assistant_task_face`(W2)—— 方法面全册:任务全链
+- `unit.app.test_assistant_task_face`(W2/W4)—— 方法面全册:任务全链
   (create→执行→settled→结果正文与发布文件)、幂等双提交(任务恰一、
   模型恰一)、审批超时默认拒绝(工具零执行+事件轨迹)、审批批准放行
   (工具执行)、stale 答复、取消 CAS+幂等、任务面不可用稳定错误、
-  事件账 seq/bootId/缺口、任务事件变迁。
-- `e2e.assistant.web`(有 node 的腿)—— 真 exe + 假模型九幕:启动 URL、
+  事件账 seq/bootId/缺口、任务事件变迁;W4 增:周期任务两拍执行+计划
+  投影、坏 cron/坏时区/参数冲突明拒(命令文件零落)、pause/resume CAS+
+  幂等+终态拒收、run-now 幂等、heartbeat 两拍(首拍投递/次拍无变化
+  不投递 + observed 事件两枚)。
+- `unit.app.test_assistant_channel_face`(W3/W4)—— 渠道面册:四态投影
+  (配置在册/在线按快照裁决/配对带清单;code_hash 不出账)、哪步卡住
+  指哪步、channel/list 枚举与空配置如实、配对转发(伪持锁 gateway 同款
+  锁+命令+回执命中;无锁明拒;坏参数明拒)、gateway/service/status
+  (install.json 在/不在)。
+- `e2e.assistant.web`(有 node 的腿)—— 真 exe + 假模型十幕:启动 URL、
   认证门、聊天链路(首配 → 对话 → 幂等重发零重跑)、刷新恢复、断线合同
   (含占用/接管)、**任务全链(建任务→断线→完成→重连补账→查结果)**、
   **幂等双提交(任务恰一/模型恰一)**、**审批(超时拒绝不执行工具/
-  批准后文件落地/stale)**、重复启动/端口冲突/shutdown/锁释放重启。
+  批准后文件落地/stale)**、**周期任务(interval→首拍→暂停不增拍→
+  run-now→恢复→取消;坏 cron/坏时区方法面明拒;channel/服务只读面;
+  无锁配对转发明拒)**、重复启动/端口冲突/shutdown/锁释放重启。
 
 未验边界:
 
 - **真实浏览器 UI 交互**(390px/键盘导航/长消息渲染)未进 CI——协议层
   全验,UI 面待真实浏览器验收批次(可循 browser.mcp.selftest 路)。
 - **真实模型**未碰——e2e 全部假后端;真模型首轮人工验收归发布批次。
+- **真平台渠道**(QQ 在线/配对/收发两轮)未碰——W3 只验只读投影与转发
+  合同(CI 面);真平台归源单 §九 的真机批次(Q3)。
+- **系统托管真机**(schtasks/systemctl/launchd 注册、开机自启、崩溃拉
+  起)不在本单 CI 面;页面只读 install.json,注册对账走 `gateway doctor`
+  (V4 的真机验收归总计划批次)。
 - 端口冲突案只验"被占"分岔;防火墙/杀软拦监听的现场形状未验。
 - **任务面与 gateway 并存的互斥**只验锁语义的单侧(单测钉锁取不到→
   不可用);"真 gateway run + 真 assistant 同机同 profile"的端到端互斥
@@ -208,5 +239,6 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
   在、单测钉过;真实浏览器上"断线回来看到悬着审批"的交互未验。
 - thread/start 回执不带 connection 快照(首配可改配置,冻结快照会误导);
   当前连接真值走 `config/status`。
-- 泵内模型配置是启动快照:首配模型后 `config/model/set` 不追改任务泵
-  (聊天新场吃新账);重启助理后任务泵吃新配置。如实。
+- 任务泵的 backend 是可换血壳(RebuildableBackend),模型名走活账
+  (model_provider 每次执行取 config 快照):首配/换配后**下一次**
+  occurrence 吃新模型,在飞执行不追改。
