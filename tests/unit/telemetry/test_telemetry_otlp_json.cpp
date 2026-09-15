@@ -96,7 +96,7 @@ TEST_CASE("proto JSON 映射: int64 字符串/时间纳秒/枚举数值/typed va
     const nlohmann::json& scope_spans =
         resource_spans.at(0).at("scopeSpans").at(0);
     CHECK(scope_spans.at("scope").at("name") == "lubancode.telemetry");
-    CHECK(scope_spans.at("scope").at("version") == "telemetry-projector-v1");
+    CHECK(scope_spans.at("scope").at("version") == "telemetry-projector-v2");
 
     const nlohmann::json& span = scope_spans.at("spans").at(0);
     CHECK(span.at("traceId").is_string());

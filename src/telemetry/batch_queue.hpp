@@ -46,6 +46,7 @@ struct BatchItem {
     std::string first_event_id;    // 本窗口首事件(账目用)
     std::string last_event_id;     // 本窗口末事件(cursor 推进对账)
     std::string last_event_hash;   // 末事件 hash(cursor 推进对账)
+    std::uint64_t last_event_seq = 0;  // 末行 seq(v3 两类行共用;v2 记 0)
     bool final_window = false;     // 流收口窗(允许 terminal=missing 的 span)
     nlohmann::json resource_attributes = nlohmann::json::object();
     std::vector<TraceSpan> spans;      // traces 批

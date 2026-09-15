@@ -9,7 +9,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <random>
 #include <sstream>
 #include <system_error>
@@ -24,6 +26,8 @@
 #include "telemetry/projector.hpp"
 #include "trajectory/event.hpp"
 #include "trajectory/journal.hpp"
+#include "trajectory/v3/envelope.hpp"
+#include "trajectory/v3/session_switch.hpp"
 
 namespace lubancode::telemetry {
 namespace {
@@ -134,6 +138,102 @@ std::optional<LineIdHash> ParseLineIdHash(const std::string& line) {
         out.schema_version = json.at("schema_version").get<int>();
     }
     return out;
+}
+
+// ---- v3 读法(T07 / V3-GAP-02)----
+
+// 一本 stream 账的统一形状:行身份索引 + 全量投影。v2/v3 各自填,窗口
+// 切片与 cursor/覆盖对账在这上面走同一份逻辑。
+struct StreamLineIdentity {
+    std::string id;    // v2 event_id;v3 messageId/eventId
+    std::string hash;  // 行哈希(验账对不上即停)
+    std::uint64_t seq = 0;  // v3 两类行共用 seq;v2 记 0
+};
+
+struct StreamScan {
+    bool ok = false;
+    std::string error_code;  // telemetry.io_error / telemetry.source_corrupt
+    std::string message;
+    int schema_version = 1;  // resource 面的 trajectory schema major
+    std::vector<StreamLineIdentity> lines;
+    ProjectionReport report;
+};
+
+// v2 老路:Journal 行逐条解身份,投影走 ProjectJournalFile(自带验账)。
+StreamScan ScanV2Stream(const std::filesystem::path& path, const ProjectorOptions& options) {
+    StreamScan scan;
+    auto lines = trajectory::ReadJournalLines(path);
+    if (!lines.has_value()) {
+        scan.error_code = "telemetry.io_error";
+        scan.message = "Journal 读不回: " + platform::PathToUtf8(path);
+        return scan;
+    }
+    ProjectorOptions effective = options;
+    if (!lines->empty()) {
+        if (auto first = ParseLineIdHash(lines->front())) {
+            scan.schema_version = first->schema_version;
+        }
+    }
+    effective.resource.trajectory_schema_version = scan.schema_version;
+    for (const std::string& line : *lines) {
+        auto id_hash = ParseLineIdHash(line);
+        if (!id_hash.has_value()) {
+            scan.error_code = "telemetry.source_corrupt";
+            scan.message = "Journal 行不是合法信封: " + line.substr(0, 64);
+            return scan;
+        }
+        StreamLineIdentity identity;
+        identity.id = id_hash->event_id;
+        identity.hash = id_hash->event_hash;
+        scan.lines.push_back(std::move(identity));
+    }
+    scan.report = ProjectJournalFile(path, effective);
+    if (!scan.report.ok) {
+        scan.error_code = scan.report.error_code;
+        scan.message = scan.report.message;
+        return scan;
+    }
+    scan.ok = true;
+    return scan;
+}
+
+// v3 路:ReadV3Ledger 验卷 + 行身份(timeline 序),投影走 v3 折叠。
+StreamScan ScanV3Stream(const std::filesystem::path& path, const ProjectorOptions& options) {
+    StreamScan scan;
+    scan.schema_version = trajectory::v3::kSchemaVersion;
+    auto ledger = trajectory::v3::ReadV3Ledger(path);
+    if (!ledger.has_value()) {
+        // 坏链/坏行/截断尾:停整条 stream,不跳坏行接着猜(§22.5)。
+        scan.error_code = "telemetry.source_corrupt";
+        scan.message = "v3 账验卷不过: " + platform::PathToUtf8(path) + " (" + ledger.error() +
+                       ")";
+        return scan;
+    }
+    ProjectorOptions effective = options;
+    effective.resource.trajectory_schema_version = scan.schema_version;
+    scan.lines.reserve(ledger->timeline.size());
+    for (const trajectory::v3::V3Ledger::Entry& entry : ledger->timeline) {
+        StreamLineIdentity identity;
+        identity.seq = entry.seq;
+        if (entry.is_message) {
+            const trajectory::v3::MessageLine& line = ledger->messages[entry.index];
+            identity.id = line.message_id;
+            identity.hash = line.line_hash;
+        } else {
+            const trajectory::v3::EventLine& line = ledger->events[entry.index];
+            identity.id = line.event_id;
+            identity.hash = line.line_hash;
+        }
+        scan.lines.push_back(std::move(identity));
+    }
+    scan.report = ProjectV3LedgerFile(*ledger, effective);
+    if (!scan.report.ok) {
+        scan.error_code = scan.report.error_code;
+        scan.message = scan.report.message;
+        return scan;
+    }
+    scan.ok = true;
+    return scan;
 }
 
 }  // namespace
@@ -396,7 +496,80 @@ void TelemetryService::WorkerLoop() {
     PersistState();
 }
 
+// v3 发现(T07):<id>.jsonl 主账 + 递归 subagents/*/<cid>.jsonl 子账。
+// 只收首行 schemaVersion==3 的 .jsonl(识别不出不猜,不出 v3 账本就跳过);
+// 目录名即子 session id(内容身份),相对路径作 stream 身份——重命名目录
+// 组件=换 session id,来源链/归档不产生新流。
+void TelemetryService::DiscoverV3Streams(const SessionEntry& session) {
+    std::vector<std::string> streams;
+    const std::filesystem::path root = session.session_dir;
+    // 递归收 *.jsonl,深度护栏与 WalkSessionTree 同款(max_depth=8);软链接
+    // 目录不跟(default:follow_directory_symlink 关),不越 workspace 读。
+    const std::function<void(const std::filesystem::path&, int)> walk =
+        [&](const std::filesystem::path& dir, int depth) {
+            if (depth > 8) {
+                return;
+            }
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+                std::error_code entry_ec;
+                if (entry.is_regular_file(entry_ec) &&
+                    entry.path().extension() == ".jsonl") {
+                    const auto first = trajectory::v3::ReadV3FirstLine(entry.path());
+                    if (first.has_value() && first->contains("schemaVersion") &&
+                        first->at("schemaVersion").is_number_integer() &&
+                        first->at("schemaVersion").get<int>() == trajectory::v3::kSchemaVersion) {
+                        const std::filesystem::path relative =
+                            std::filesystem::relative(entry.path(), root, entry_ec);
+                        if (entry_ec || relative.empty()) {
+                            continue;  // 相对路径算不出:不猜身份,跳过
+                        }
+                        streams.push_back(relative.generic_string());
+                    }
+                } else if (entry.is_directory(entry_ec)) {
+                    walk(entry.path(), depth + 1);
+                }
+            }
+        };
+    walk(root, 0);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (const std::string& stream : streams) {
+        const std::string key = StreamKey(session.workspace_key, session.session_id, stream);
+        StreamState& state = streams_[key];
+        state.v3 = true;
+    }
+}
+
 void TelemetryService::DiscoverStreams(const SessionEntry& session) {
+    // 格式分派走 T00 读面探针:两种主账并存报歧义,不因先命中忽略另一个。
+    const auto probe = trajectory::v3::ProbeV3SessionStream(session.session_dir);
+    switch (probe.status) {
+        case trajectory::v3::V3StreamProbe::Status::V3Stream:
+            DiscoverV3Streams(session);
+            return;
+        case trajectory::v3::V3StreamProbe::Status::FormatConflict: {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            streams_[StreamKey(session.workspace_key, session.session_id, "main.jsonl")]
+                .error_code = "telemetry.session_format_conflict";
+            return;
+        }
+        case trajectory::v3::V3StreamProbe::Status::NotV3Schema: {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            streams_[StreamKey(session.workspace_key, session.session_id, "main.jsonl")]
+                .error_code = "telemetry.session_format_unsupported";
+            return;
+        }
+        case trajectory::v3::V3StreamProbe::Status::EmptyFirstLine:
+        case trajectory::v3::V3StreamProbe::Status::BadFirstLine: {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            streams_[StreamKey(session.workspace_key, session.session_id, "main.jsonl")]
+                .error_code = "telemetry.session_format_unreadable";
+            return;
+        }
+        default:
+            break;  // V2Layout/StreamMissing/NotSessionDir:走 v2 老路或无事可做
+    }
+
     std::vector<std::string> streams;
     std::error_code ec;
     const std::filesystem::path main_path = session.session_dir / "main.jsonl";
@@ -518,13 +691,6 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         }
     }
 
-    auto lines = trajectory::ReadJournalLines(path);
-    if (!lines.has_value()) {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        streams_[key].error_code = "telemetry.io_error";
-        return;
-    }
-
     StreamState state;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -533,6 +699,11 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
             return;
         }
         state = found->second;
+        // 会话级格式裁定(歧义/异种/坏首行):发现层已给稳定码,不走投影,
+        // 不让投影错误码覆盖它。
+        if (state.error_code.rfind("telemetry.session_format", 0) == 0) {
+            return;
+        }
         // 懒加载 cursor(§26.1"load cursors"落在发现时,不扫全盘)。
         if (state.cursor.stream.empty()) {
             std::string error;
@@ -547,6 +718,10 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
                 } else {
                     state.cursor = *loaded;
                 }
+            } else if (error == "telemetry.cursor_schema_mismatch") {
+                // 旧版 cursor 文件(格式升级):视作无 cursor 从头重投——投影
+                // 版本门在上面把关,不把格式升级当账目损坏停 stream。
+                state.cursor = StreamCursor{};
             } else if (!error.empty()) {
                 state.error_code = error;
                 streams_[key] = state;
@@ -555,17 +730,41 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         }
     }
 
+    // ---- 读账与投影(v3/v2 分派,统一进 StreamScan 的行身份索引)----
+    ProjectorOptions projector_options;
+    projector_options.projection_key = projection_key_;
+    projector_options.resource = options_.resource;
+    projector_options.resource.workspace_key = session.workspace_key;
+    projector_options.data_class = options_.data_class;
+    const StreamScan scan =
+        state.v3 ? ScanV3Stream(path, projector_options) : ScanV2Stream(path, projector_options);
+    if (!scan.ok) {
+        // 坏链/合同违例/读不回:停整条 stream,其他 stream 照跑(§22.5)。
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state.error_code = scan.error_code;
+        state.last_size = size;
+        streams_[key] = state;
+        return;
+    }
+    const std::vector<StreamLineIdentity>& lines = scan.lines;
+
     // ---- 定位 cursor(§14.2:超前/换账/hash 不合,停整条 stream,不猜)----
     std::size_t cursor_index = 0;
     bool has_cursor = !state.cursor.last_event_id.empty();
     if (has_cursor) {
-        std::size_t cursor_found = lines->size();
-        for (std::size_t i = 0; i < lines->size(); ++i) {
-            auto id_hash = ParseLineIdHash((*lines)[i]);
-            if (id_hash.has_value() && id_hash->event_id == state.cursor.last_event_id) {
-                if (id_hash->event_hash != state.cursor.last_event_hash) {
+        std::size_t cursor_found = lines.size();
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].id == state.cursor.last_event_id) {
+                if (lines[i].hash != state.cursor.last_event_hash) {
                     std::lock_guard<std::mutex> lock(state_mutex_);
                     state.error_code = "telemetry.cursor_hash_mismatch";
+                    state.last_size = size;
+                    streams_[key] = state;
+                    return;
+                }
+                if (state.v3 && lines[i].seq != state.cursor.last_event_seq) {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    state.error_code = "telemetry.cursor_seq_mismatch";
                     state.last_size = size;
                     streams_[key] = state;
                     return;
@@ -574,7 +773,7 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
                 break;
             }
         }
-        if (cursor_found == lines->size()) {
+        if (cursor_found == lines.size()) {
             // Journal 里找不到 cursor 的末事件:cursor 超前或 stream 换账。
             std::lock_guard<std::mutex> lock(state_mutex_);
             state.error_code = "telemetry.cursor_ahead";
@@ -597,11 +796,10 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         if (cov != coverage.end() && cov->second.projection_generation == projection_generation_) {
             // coverage 端点在 Journal 里的位置(全本找:落在 cursor 之前 =
             // spool 落后,同样要走退场水位判定,不是账目对不上)。
-            std::size_t coverage_index = lines->size();
-            for (std::size_t i = 0; i < lines->size(); ++i) {
-                auto id_hash = ParseLineIdHash((*lines)[i]);
-                if (id_hash.has_value() && id_hash->event_id == cov->second.last_event_id) {
-                    if (id_hash->event_hash != cov->second.last_event_hash) {
+            std::size_t coverage_index = lines.size();
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+                if (lines[i].id == cov->second.last_event_id) {
+                    if (lines[i].hash != cov->second.last_event_hash) {
                         std::lock_guard<std::mutex> lock(state_mutex_);
                         state.error_code = "telemetry.coverage_hash_mismatch";
                         state.last_size = size;
@@ -612,7 +810,7 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
                     break;
                 }
             }
-            if (coverage_index == lines->size()) {
+            if (coverage_index == lines.size()) {
                 // spool 的覆盖端点不在这本 Journal 上:账目对不上,停。
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 state.error_code = "telemetry.coverage_mismatch";
@@ -624,12 +822,12 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
                 // spool 比 cursor 多(seal 后 cursor 没落盘就崩了)或 cursor
                 // 文件丢了:修前推到 durable 端点,免重投窗口造成跨批重复;
                 // 已 durable 的窗口靠 batch id 去重兜底(§18.5)。
-                auto id_hash = ParseLineIdHash((*lines)[coverage_index]);
                 state.cursor.workspace_key = session.workspace_key;
                 state.cursor.session_id = session.session_id;
                 state.cursor.stream = stream_id;
-                state.cursor.last_event_id = id_hash->event_id;
-                state.cursor.last_event_hash = id_hash->event_hash;
+                state.cursor.last_event_id = lines[coverage_index].id;
+                state.cursor.last_event_hash = lines[coverage_index].hash;
+                state.cursor.last_event_seq = lines[coverage_index].seq;
                 state.cursor.projector_version = std::string(kProjectorVersion);
                 state.cursor.projection_generation = projection_generation_;
                 state.cursor.updated_at_ms = now_ms;
@@ -652,9 +850,8 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
             }
             bool accounted = false;
             if (!retired_watermark.empty()) {
-                for (std::size_t i = cursor_index; i < lines->size(); ++i) {
-                    auto id_hash = ParseLineIdHash((*lines)[i]);
-                    if (id_hash.has_value() && id_hash->event_id == retired_watermark) {
+                for (std::size_t i = cursor_index; i < lines.size(); ++i) {
+                    if (lines[i].id == retired_watermark) {
                         accounted = true;
                         break;
                     }
@@ -673,7 +870,7 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
 
     // ---- 窗口与投影 ----
     const std::size_t window_begin = has_cursor ? cursor_index + 1 : 0;
-    const std::size_t lag = lines->size() > window_begin ? lines->size() - window_begin : 0;
+    const std::size_t lag = lines.size() > window_begin ? lines.size() - window_begin : 0;
     state.lag_events = lag;
     state.last_size = size;
     if (lag == 0 && !final_flush) {
@@ -682,47 +879,28 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         return;
     }
 
-    ProjectorOptions projector_options;
-    projector_options.projection_key = projection_key_;
-    projector_options.resource = options_.resource;
-    projector_options.resource.workspace_key = session.workspace_key;
-    projector_options.data_class = options_.data_class;
-    if (auto first = ParseLineIdHash(lines->front())) {
-        projector_options.resource.trajectory_schema_version = first->schema_version;
-    }
-    const ProjectionReport report = ProjectJournalFile(path, projector_options);
-    if (!report.ok) {
-        // 坏链/合同违例:停整条 stream,其他 stream 照跑(§22.5)。
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state.error_code = report.error_code;
-        streams_[key] = state;
-        return;
-    }
+    const ProjectionReport& report = scan.report;
 
     // 窗口身份:末行(cursor 的推进目标);final 且窗口空时钉在 cursor 处。
     std::string window_first_id;
     std::string last_id;
     std::string last_hash;
+    std::uint64_t last_seq = 0;
     std::set<std::string> window_ids;
-    for (std::size_t i = window_begin; i < lines->size(); ++i) {
-        auto id_hash = ParseLineIdHash((*lines)[i]);
-        if (!id_hash.has_value()) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            state.error_code = "telemetry.source_corrupt";
-            streams_[key] = state;
-            return;
-        }
+    for (std::size_t i = window_begin; i < lines.size(); ++i) {
         if (window_first_id.empty()) {
-            window_first_id = id_hash->event_id;
+            window_first_id = lines[i].id;
         }
-        window_ids.insert(id_hash->event_id);
-        last_id = id_hash->event_id;
-        last_hash = id_hash->event_hash;
+        window_ids.insert(lines[i].id);
+        last_id = lines[i].id;
+        last_hash = lines[i].hash;
+        last_seq = lines[i].seq;
     }
     if (last_id.empty()) {
         window_first_id = state.cursor.last_event_id;
         last_id = state.cursor.last_event_id;
         last_hash = state.cursor.last_event_hash;
+        last_seq = state.cursor.last_event_seq;
     }
 
     // spans 按终事件落窗(§14.1 fast path):终事件在窗内的 span 这一窗
@@ -741,13 +919,15 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         }
     }
 
-    const auto make_cursor = [&](const std::string& id, const std::string& hash) {
+    const auto make_cursor = [&](const std::string& id, const std::string& hash,
+                                 std::uint64_t seq) {
         StreamCursor advanced = state.cursor;
         advanced.workspace_key = session.workspace_key;
         advanced.session_id = session.session_id;
         advanced.stream = stream_id;
         advanced.last_event_id = id;
         advanced.last_event_hash = hash;
+        advanced.last_event_seq = seq;
         advanced.projector_version = std::string(kProjectorVersion);
         advanced.projection_generation = projection_generation_;
         advanced.updated_at_ms = now_ms;
@@ -764,7 +944,9 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
             // durable 已有(崩溃后重投同一窗口):不重发,直接记推进
             //(批已在 sealed 段里,epoch 0 = 永远可推)。
             pending_cursor_advances_[key] =
-                PendingAdvance{make_cursor(item.last_event_id, item.last_event_hash), 0};
+                PendingAdvance{make_cursor(item.last_event_id, item.last_event_hash,
+                                           item.last_event_seq),
+                               0};
             return;
         }
         (void)queue_.TryPush(std::move(item));
@@ -776,10 +958,12 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         item.batch_id =
             DeriveBatchId(session.workspace_key, session.session_id, stream_id, last_id, "traces",
                           final_flush && lag == 0);
-        // §17.1 分档:错误/终态异常/run 终态 = P0;正常 span 收发 = P1。
+        // §17.1 分档:错误/终态异常/session 终态 = P0;正常 span 收发 = P1。
+        // (v2 名 lubancode.agent.run / v3 名 lubancode.session,都算账终态。)
         bool run_terminal = false;
         for (const TraceSpan& span : spans_new) {
-            run_terminal = run_terminal || span.name == "lubancode.agent.run";
+            run_terminal = run_terminal || span.name == "lubancode.agent.run" ||
+                           span.name == "lubancode.session";
         }
         item.priority = (has_error_span || run_terminal) ? Priority::P0 : Priority::P1;
         item.workspace_key = session.workspace_key;
@@ -788,6 +972,7 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         item.first_event_id = window_first_id;
         item.last_event_id = last_id;
         item.last_event_hash = last_hash;
+        item.last_event_seq = last_seq;
         item.final_window = final_flush;
         item.resource_attributes = report.resource_attributes;
         item.spans = std::move(spans_new);
@@ -804,6 +989,7 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         item.first_event_id = window_first_id;
         item.last_event_id = last_id;
         item.last_event_hash = last_hash;
+        item.last_event_seq = last_seq;
         item.final_window = final_flush;
         item.resource_attributes = report.resource_attributes;
         item.metrics = report.metrics;  // 全量累计快照;队里并系合并(§17.2)
@@ -860,6 +1046,7 @@ void TelemetryService::DrainQueue() {
             advanced.stream = item->stream_id;
             advanced.last_event_id = item->last_event_id;
             advanced.last_event_hash = item->last_event_hash;
+            advanced.last_event_seq = item->last_event_seq;
             advanced.projector_version = std::string(kProjectorVersion);
             advanced.projection_generation = projection_generation_;
             advanced.updated_at_ms = now_ms;

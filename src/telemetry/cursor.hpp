@@ -24,15 +24,20 @@
 namespace lubancode::telemetry {
 
 // 固定合同值(§14.2 cursor JSON 的 schema/version)。
+// v2(T07/V3-GAP-02):新增 last_event_seq——v3 两类行共用 seq 发号,cursor
+// 固定末 recordId/seq/hash 三件;旧版文件按 schema 不匹配读不出,调用方
+// 视作无 cursor 从头重投(投影版本门另把关,见 service)。
 inline constexpr std::string_view kCursorSchema = "lubancode.telemetry.cursor";
-inline constexpr int kCursorVersion = 1;
+inline constexpr int kCursorVersion = 2;
 
 struct StreamCursor {
     std::string workspace_key;
     std::string session_id;
-    std::string stream;           // "main.jsonl" / "subagents/<run_id>.jsonl"
+    std::string stream;           // "main.jsonl" / "subagents/<run_id>.jsonl";
+                                   // v3: "<id>.jsonl" / "subagents/<cid>/<cid>.jsonl"
     std::string last_event_id;    // 空 = 尚未投影过(从 Journal 头开始)
     std::string last_event_hash;  // 该行的 event_hash(验账对不上即停)
+    std::uint64_t last_event_seq = 0;  // 该行 seq(v3 两类行共用;v2 记 0)
     std::string projector_version;
     int projection_generation = 1;
     std::int64_t updated_at_ms = 0;

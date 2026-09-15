@@ -32,6 +32,7 @@ StreamCursor MakeCursor() {
     cursor.stream = "main.jsonl";
     cursor.last_event_id = "main-1:evt-00000003";
     cursor.last_event_hash = "abc123";
+    cursor.last_event_seq = 42;  // T07:v3 两类行共用 seq(v2 流记 0)
     cursor.projector_version = std::string(kProjectorVersion);
     cursor.projection_generation = 1;
     cursor.updated_at_ms = 1759000000000LL;
@@ -51,6 +52,7 @@ TEST_CASE("cursor 往返:store 后 load 回同值,不留 .tmp") {
     CHECK(error.empty());
     CHECK(loaded->last_event_id == cursor.last_event_id);
     CHECK(loaded->last_event_hash == cursor.last_event_hash);
+    CHECK(loaded->last_event_seq == 42);  // 末 recordId/seq/hash 三件同往返
     CHECK(loaded->projection_generation == 1);
     CHECK(loaded->projector_version == std::string(kProjectorVersion));
     // 原子替换不留尾巴(§14.2)。
