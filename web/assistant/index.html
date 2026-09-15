@@ -44,15 +44,41 @@
       </section>
     </section>
 
-    <!-- 任务:创建 + 列表(单次任务,W2) -->
+    <!-- 任务:创建 + 列表(单次 W2;周期/暂停/恢复 W4) -->
     <section id="tasks-view" class="view" hidden>
       <div class="panel">
-        <h2>新任务(单次)</h2>
+        <h2>新任务</h2>
         <p id="task-face-hint" class="hint" hidden></p>
         <form id="task-form">
           <textarea id="task-prompt" rows="3" placeholder="要它办的事,一句话写清楚(提交即入账,关掉页面照跑)" autocomplete="off"></textarea>
           <div class="row">
-            <button type="submit" id="task-create-button">创建并执行</button>
+            <label>计划
+              <select id="task-schedule-kind">
+                <option value="once">单次(立即)</option>
+                <option value="interval">周期(间隔)</option>
+                <option value="cron">周期(cron)</option>
+              </select>
+            </label>
+            <span id="task-schedule-once" class="schedule-extra">
+              <label>定时(可选,分钟数)<input id="task-due-in-minutes" type="number" min="0" step="1" placeholder="0=立即" /></label>
+            </span>
+            <span id="task-schedule-interval" class="schedule-extra" hidden>
+              <label>间隔秒<input id="task-interval-seconds" type="number" min="1" step="1" placeholder="3600" /></label>
+            </span>
+            <span id="task-schedule-cron" class="schedule-extra" hidden>
+              <label>cron 表达式<input id="task-cron-expr" type="text" placeholder="*/30 * * * *(五字段:分 时 日 月 周)" autocomplete="off" /></label>
+              <label>时区<input id="task-timezone" type="text" placeholder="Asia/Shanghai" autocomplete="off" /></label>
+            </span>
+            <label id="task-schedule-misfire-wrap">错过的拍
+              <select id="task-misfire">
+                <option value="coalesce">合并补一拍(默认)</option>
+                <option value="skip">跳过不补</option>
+              </select>
+            </label>
+            <label class="checkbox" id="task-notify-wrap" hidden><input id="task-notify-on-change" type="checkbox" /> 有变化才投递(heartbeat)</label>
+          </div>
+          <div class="row">
+            <button type="submit" id="task-create-button">创建任务</button>
             <span id="task-create-result"></span>
           </div>
         </form>
@@ -119,6 +145,32 @@
           <button type="button" id="stop-assistant-button" title="停止整个助理进程(在跑任务按打断收口)">停止助理</button>
           <span class="hint">停止任务是上面的"停止任务";停止助理会结束本进程。</span>
         </div>
+      </div>
+      <div class="panel" id="channel-panel">
+        <div class="panel-head">
+          <h2>渠道</h2>
+          <button type="button" id="channel-refresh-button">刷新</button>
+        </div>
+        <p class="hint">渠道凭据(AppSecret 等)不在网页录入——用 <code>lubancode im</code> 或 <code>lubancode channel setup</code> 配置,这里只读状态。</p>
+        <ul id="channel-account-list" aria-live="polite"></ul>
+        <p id="channel-empty-hint" class="hint">还没有配置渠道账号。</p>
+        <h3>待批准的配对</h3>
+        <p id="pairing-empty-hint" class="hint">没有待批准的配对。</p>
+        <ul id="pairing-list" aria-live="polite"></ul>
+        <form id="pairing-by-code-form" class="row">
+          <select id="pairing-code-channel" aria-label="配对渠道账号"></select>
+          <input id="pairing-code-input" type="text" placeholder="配对码(对方收到的提示里)" autocomplete="off" />
+          <button type="submit">按码批准</button>
+          <span id="pairing-code-result"></span>
+        </form>
+      </div>
+      <div class="panel" id="service-panel">
+        <h2>系统托管(gateway 服务)</h2>
+        <p id="service-status-line" class="hint">读取中…</p>
+        <div class="row">
+          <button type="button" id="service-refresh-button">刷新</button>
+        </div>
+        <p class="hint">安装/卸载走命令行:<code>lubancode gateway service install</code> / <code>uninstall</code>(页面不代跑安装);注册状态对账走 <code>lubancode gateway doctor</code>。</p>
       </div>
     </section>
   </main>

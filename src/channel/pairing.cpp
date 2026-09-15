@@ -445,20 +445,24 @@ std::vector<PairingStore::NoticeLogEntry> PairingStore::NoticeLog() const {
     return notice_log_;
 }
 
-PairingStore::Projection PairingStore::ReadProjection(const std::filesystem::path& account_dir) {
-    // 只读观测面(channel status 四态展示):零建目录零写盘,坏账如实报
-    // parse_ok=false,不冒充"0 个已批准"。
-    Projection projection;
+namespace {
+
+// 只读投影的共用底:读 pairing.json → 解析出记录列。present/parse_ok 如实
+// 回填;解析成功时 records 收全(调用方自己裁决怎么投影)。
+bool ReadPairingRecords(const std::filesystem::path& account_dir, bool* present,
+                        bool* parse_ok, std::vector<PairingStore::Record>* records_out) {
+    *present = false;
+    *parse_ok = true;
     const std::filesystem::path pairing_file = account_dir / "pairing.json";
     std::error_code ec;
     if (!std::filesystem::is_regular_file(pairing_file, ec) || ec) {
-        return projection;  // present=false:账还没立(没人申请过配对)
+        return true;  // present=false:账还没立(没人申请过配对)
     }
-    projection.present = true;
+    *present = true;
     std::ifstream stream(pairing_file, std::ios::binary);
     if (!stream) {
-        projection.parse_ok = false;
-        return projection;
+        *parse_ok = false;
+        return true;
     }
     try {
         const nlohmann::json parsed = nlohmann::json::parse(stream);
@@ -469,24 +473,68 @@ PairingStore::Projection PairingStore::ReadProjection(const std::filesystem::pat
                    parsed["records"].is_array()) {
             records = &parsed["records"];
         } else {
-            projection.parse_ok = false;
-            return projection;
+            *parse_ok = false;
+            return true;
         }
-        const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now().time_since_epoch())
-                                        .count();
         for (const auto& item : *records) {
             auto record = RecordFromJson(item);
             if (!record.has_value()) continue;
-            if (record->status == Record::Status::Approved) {
-                ++projection.approved;
-            } else if (record->status == Record::Status::Pending &&
-                       now_ms < record->expires_at_ms) {
-                ++projection.pending;
-            }
+            records_out->push_back(std::move(*record));
         }
     } catch (const nlohmann::json::exception&) {
-        projection.parse_ok = false;
+        *parse_ok = false;
+    }
+    return true;
+}
+
+std::int64_t SystemNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
+
+PairingStore::Projection PairingStore::ReadProjection(const std::filesystem::path& account_dir) {
+    // 只读观测面(channel status 四态展示):零建目录零写盘,坏账如实报
+    // parse_ok=false,不冒充"0 个已批准"。
+    Projection projection;
+    std::vector<Record> records;
+    ReadPairingRecords(account_dir, &projection.present, &projection.parse_ok, &records);
+    if (!projection.present || !projection.parse_ok) {
+        return projection;
+    }
+    const std::int64_t now_ms = SystemNowMs();
+    for (const auto& record : records) {
+        if (record.status == Record::Status::Approved) {
+            ++projection.approved;
+        } else if (record.status == Record::Status::Pending && now_ms < record.expires_at_ms) {
+            ++projection.pending;
+        }
+    }
+    return projection;
+}
+
+PairingStore::PendingProjection PairingStore::ReadPendingList(
+    const std::filesystem::path& account_dir) {
+    // 待审清单(W3 助理页面的"配对待批准"):与 ReadProjection 同一份解析,
+    // 多带 sender 与过期时刻;code_hash 不出账。已过期的不再列(与
+    // PendingList 同尺——过期码批了也是 expired,列出来误导操作员)。
+    PendingProjection projection;
+    std::vector<Record> records;
+    ReadPairingRecords(account_dir, &projection.present, &projection.parse_ok, &records);
+    if (!projection.present || !projection.parse_ok) {
+        return projection;
+    }
+    const std::int64_t now_ms = SystemNowMs();
+    for (auto& record : records) {
+        if (record.status != Record::Status::Pending || now_ms >= record.expires_at_ms) {
+            continue;
+        }
+        PendingView view;
+        view.sender_id = std::move(record.sender_id);
+        view.expires_at_ms = record.expires_at_ms;
+        projection.pending.push_back(std::move(view));
     }
     return projection;
 }

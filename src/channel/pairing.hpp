@@ -130,6 +130,16 @@ public:
     };
     static Projection ReadProjection(const std::filesystem::path& account_dir);
 
+    // 待审清单的只读投影(W3 助理页面"配对待批准"用;与 ReadProjection
+    // 同一份解析,多带 sender 与过期时刻)。零建目录零写盘;code_hash
+    // 不出账。坏账如实报 parse_ok=false。
+    struct PendingProjection {
+        bool present = false;
+        bool parse_ok = true;
+        std::vector<PendingView> pending;  // 已过期的不再列(与 PendingList 同尺)
+    };
+    static PendingProjection ReadPendingList(const std::filesystem::path& account_dir);
+
 private:
     std::optional<std::string> FinalizeByCode(const std::string& code, std::int64_t now_ms,
                                               Record::Status target, std::string* sender_out,
