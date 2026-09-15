@@ -232,11 +232,20 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
 
     // 1) 开场:三端同一服务路。launch_cwd/one_shot 留缺省——Gateway 场
     //    是常驻自动任务,不是 CLI 单发;training_policy 走 Metadata 缺省。
+    //    身份吃装配层裁决的整份(workspace_identity),不再按
+    //    workspace_root 自算 fallback——git 仓库下四级裁决(git 形态)与
+    //    fallback 算法(路径形态)算出的 key 不同,已开的房对账即
+    //    identity.key_mismatch 隔离(V2 e2e 在源码树 cwd 下撞过:聊天线
+    //    四级裁决开房,泵 fallback 进门对不上)。装配层没递
+    //    workspace_identity 的旧测试形态照 fallback(workspace_root),
+    //    行为不变。
     SessionLaunchRequest launch;
     launch.cwd_utf8 = options_.cwd_utf8;
     launch.lubancode_version = options_.lubancode_version;
     launch.workspaces_root = options_.workspaces_root;
-    launch.workspace_identity = workspace::MakeFallbackIdentity(options_.workspace_root);
+    launch.workspace_identity = options_.workspace_identity.valid()
+                                    ? options_.workspace_identity
+                                    : workspace::MakeFallbackIdentity(options_.workspace_root);
     SessionService service(launch);
     if (service.runtime() == nullptr) {
         result.error_code = "gateway.launch_failed";
@@ -330,12 +339,16 @@ HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
             return channel_sessions_.back().second.get();
         }
     }
-    // 未命中:按映射 resume-as-new / fresh(§六第四项)。
+    // 未命中:按映射 resume-as-new / fresh(§六第四项)。身份同 Execute:
+    //    吃装配层裁决的整份(见上——git 仓库下 fallback 自算会撞
+    //    identity.key_mismatch)。
     SessionLaunchRequest launch;
     launch.cwd_utf8 = options_.cwd_utf8;
     launch.lubancode_version = options_.lubancode_version;
     launch.workspaces_root = options_.workspaces_root;
-    launch.workspace_identity = workspace::MakeFallbackIdentity(options_.workspace_root);
+    launch.workspace_identity = options_.workspace_identity.valid()
+                                    ? options_.workspace_identity
+                                    : workspace::MakeFallbackIdentity(options_.workspace_root);
     if (!stored_session_id.empty()) {
         launch.resume_at_launch = true;
         launch.resume_source_session_id = stored_session_id;
