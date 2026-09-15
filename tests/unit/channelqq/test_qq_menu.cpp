@@ -23,6 +23,7 @@
 #include "channel/qq/qq_auth.hpp"
 #include "channel/qq/qq_menu.hpp"
 
+using namespace lubancode::channel;
 using namespace lubancode::channel::qq;
 
 namespace {
@@ -378,18 +379,23 @@ TEST_CASE("重启不重复创建:远端已同→零写;面板按备注认领复�
     input.panel = SamplePanel();
     const std::string remark = MakePanelRemark("qqbot", "main", "主面板");
     nlohmann::json remote_panel = BuildPanelPayload(SamplePanel(), remark);
+    nlohmann::json panels_body = nlohmann::json{
+        {"records",
+         nlohmann::json::array({
+             nlohmann::json{
+                 {"panel_id", "p_keep_1"},
+                 {"scope", "c2c"},
+                 {"target_type", "all"},
+                 {"panel", remote_panel},
+                 {"version", 2},
+             },
+         })},
+        {"next_cursor", ""},
+        {"is_end", true},
+    };
     fixture.http.replies = {
         {200, (nlohmann::json{{"menu", SampleMenuRemote()}, {"version", 3}}).dump()},
-        {200, (nlohmann::json{{"records",
-                              nlohmann::json::array({nlohmann::json{
-                                  {"panel_id", "p_keep_1"},
-                                  {"scope", "c2c"},
-                                  {"target_type", "all"},
-                                  {"panel", remote_panel},
-                                  {"version", 2}})},
-                              {"next_cursor", ""},
-                              {"is_end", true}}})
-                 .dump()},
+        {200, panels_body.dump()},
     };
     const auto report = publisher.Sync(input);
     CHECK(report.menu_up_to_date);
@@ -426,13 +432,23 @@ TEST_CASE("版本冲突:远端被人工改过→不覆盖,给本地提示") {
     input.account_id = "main";
     input.publish_menu = true;
     input.menu = SampleMenu();
+    // 远端菜单:单条"人工"项(与我们的期望菜单不同)。
+    nlohmann::json manual_menu = nlohmann::json{
+        {"menu",
+         nlohmann::json{
+             {"items",
+              nlohmann::json::array({
+                  nlohmann::json{
+                      {"type", "send_message"},
+                      {"name", "人工"},
+                      {"send_message", "/manual"},
+                  },
+              })},
+         }},
+        {"version", 9},
+    };
     fixture.http.replies = {
-        {200, (nlohmann::json{{"menu", nlohmann::json{{"items", nlohmann::json::array(
-                                                                {nlohmann::json{{"type", "send_message"},
-                                                                                 {"name", "人工"},
-                                                                                 {"send_message", "/manual"}}})}}},
-                              {"version", 9}})
-                 .dump()},
+        {200, manual_menu.dump()},
     };
     const auto report = publisher.Sync(input);
     CHECK(report.menu_conflict);
@@ -531,18 +547,24 @@ TEST_CASE("面板列表分页:next_cursor 翻页到认领") {
     input.account_id = "main";
     input.publish_panel = true;
     input.panel = SamplePanel();
+    nlohmann::json second_page = nlohmann::json{
+        {"records",
+         nlohmann::json::array({
+             nlohmann::json{
+                 {"panel_id", "p_page2"},
+                 {"scope", "c2c"},
+                 {"target_type", "all"},
+                 {"panel", remote_panel},
+                 {"version", 1},
+             },
+         })},
+        {"next_cursor", ""},
+        {"is_end", true},
+    };
     fixture.http.replies = {
-        {200, R"({"records":[{"panel_id":"p_other","panel":{"remark":"别人的"}}],"next_cursor":"c2","is_end":false})"},
-        {200, (nlohmann::json{{"records",
-                              nlohmann::json::array({nlohmann::json{
-                                  {"panel_id", "p_page2"},
-                                  {"scope", "c2c"},
-                                  {"target_type", "all"},
-                                  {"panel", remote_panel},
-                                  {"version", 1}})},
-                              {"next_cursor", ""},
-                              {"is_end", true}}})
-                 .dump()},
+        {200,
+         R"({"records":[{"panel_id":"p_other","panel":{"remark":"别人的"}}],"next_cursor":"c2","is_end":false})"},
+        {200, second_page.dump()},
     };
     const auto report = publisher.Sync(input);
     CHECK(report.error_code.empty());
