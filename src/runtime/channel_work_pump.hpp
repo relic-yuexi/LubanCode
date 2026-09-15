@@ -47,6 +47,7 @@
 #include "gateway/reply_outbox.hpp"
 #include "gateway/work_pump.hpp"
 #include "runtime/channel_automation.hpp"
+#include "runtime/channel_media_service.hpp"
 #include "runtime/headless_executor.hpp"
 #include "workspace/identity.hpp"
 
@@ -100,6 +101,13 @@ public:
         // 被动回复窗(毫秒):文档页首 60 分钟与 msg_id 字段 5 分钟互相矛盾
         // (§11.3),按保守取窗下再留 1 分钟余量;真平台窗口归 Q3 实测校准。
         std::int64_t passive_reply_window_ms = 4 * 60 * 1000;
+        // ---- Q4 媒体接纳(附件收发) ---------------------------------------
+        // 下载 seam:装配层包渠道实现(生产 = qq 适配层的受控下载);
+        // 空 = 渠道未装配下载,附件行如实报不可用,正文路照走。
+        ChannelMediaDownloadFn media_download;
+        ChannelMediaLimits media_limits;
+        // 媒体仓根(空 = workspace 身份根下 channel-media/)。
+        std::filesystem::path media_root;
         std::function<std::int64_t()> now_ms;  // 空 = wall clock
         // 故障注入(测试专用;生产恒空):executor 两窗(生成后/选择提交后)
         // + 泵自己的窗(入 outbox 后、发送前)。
@@ -154,6 +162,13 @@ private:
     };
     AccountBooks* BooksFor(const std::string& channel_id, const std::string& account_id);
     AccountBooks* BooksForSessionKey(const std::string& session_key);
+    // Q4 附件接纳(准入通过、执行前):下载落仓 + 模型投影行。media_service
+    // 未开 = 空投影(附件行由 turn_ingress 的占位说明承担)。
+    std::string IngestAttachmentsPrompt(const channel::ChannelManager::WorkItem& work);
+    // Q4 产物附件:正文拆段 > 1 时末段附带冻结正文原件(任务结果文件,
+    // §十 Q4 最保守路——任务结果的附件随最终回复投递)。
+    std::optional<gateway::DurableReplyOutbox::ChannelAttachment> ReplyFileAttachment(
+        const std::string& selection_id, const std::string& reply_text) const;
 
     bool ApplyDeliveryOutcomes(std::int64_t now_ms);   // 回执 → outbox 推进
     void ReconcileDeliveredSources(std::int64_t now_ms);  // 终态项 → ingress 结算
@@ -183,6 +198,7 @@ private:
     tools::ToolRegistry* registry_ = nullptr;
     Options options_;
     std::optional<HeadlessExecutor> executor_;
+    std::optional<ChannelMediaService> media_service_;  // Q4 附件接纳仓
     std::atomic<bool> accepting_{true};
     std::atomic<bool> closed_{false};
     std::string owner_epoch_;

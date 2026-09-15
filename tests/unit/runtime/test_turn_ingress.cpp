@@ -106,11 +106,11 @@ TEST_CASE("投影:媒体给稳定说明,不冒充文本") {
     event.parts.push_back(Media(channel::ChannelPartType::File, "doc.pdf"));
 
     const auto text = OnlyText(MakeChannelTurnIngress(event, channel::MessageProvenance{}, "k", true));
-    CHECK(text.find("图片:photo.png") != std::string::npos);
-    CHECK(text.find("未解析") != std::string::npos);
-    CHECK(text.find("音频:voice.amr") != std::string::npos);
-    CHECK(text.find("未转录") != std::string::npos);
-    CHECK(text.find("文件:doc.pdf") != std::string::npos);
+    // Q4:附件详情由 ChannelMediaService 的投影行补,这里只占位(不虚报
+    // 已解析,也不再说"未解析"——下载成败是接纳服务的账)。
+    CHECK(text.find("[收到图片:photo.png]") != std::string::npos);
+    CHECK(text.find("[收到音频:voice.amr]") != std::string::npos);
+    CHECK(text.find("[收到文件:doc.pdf]") != std::string::npos);
 }
 
 TEST_CASE("投影:unsupported 给一行说明,空消息给占位") {

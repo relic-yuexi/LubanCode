@@ -1,12 +1,17 @@
 #include "channel/qq/qq_adapter.hpp"
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
+#include <system_error>
 #include <utility>
 
 #include "channel/bridge_protocol.hpp"
 #include "channel/frame.hpp"
 #include "channel/qq/qq_proto.hpp"
+#include "platform/paths.hpp"  // Utf8ToPath(出站媒体原件读取)
 
 namespace lubancode::channel::qq {
 
@@ -63,7 +68,12 @@ nlohmann::json QqBotCapabilities() {
     nlohmann::json capabilities = nlohmann::json::object();
     capabilities["transports"] = nlohmann::json::array({"websocket", "direct"});
     capabilities["delivery"] = nlohmann::json::array({"send"});
-    capabilities["media"] = nullptr;  // Q4 之前不虚报(显式空)
+    // Q4 起媒体管道接通:入站附件经事件引用下载落仓,出站产物分片上传
+    // 后走 msg_type=7。类型收纳口径归宿主白名单(白名单外如实拒),
+    // 这里只报管道能力,不虚报"任意格式可解析"。
+    capabilities["media"] = nlohmann::json{
+        {"inbound", nlohmann::json::array({"image", "audio", "video", "file"})},
+        {"outbound", nlohmann::json::array({"file"})}};
     capabilities["streaming"] = false;
     capabilities["credentials"] = true;
     return capabilities;
@@ -221,6 +231,8 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
         }
         case BridgeMethod::Send: {
             // params: {conversation, parts, reply_to_message_id?, client_id?}
+            // parts:text part 拼正文;file part(Q4)折出站媒体引用——
+            // 一次 send 至多一枚附件(宿主 outbox 每段一件),多枚走多段。
             PendingSend pending;
             pending.request_id = id;
             if (message.params.contains("conversation") &&
@@ -233,13 +245,35 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
             std::string content;
             if (message.params.contains("parts") && message.params.at("parts").is_array()) {
                 for (const auto& part : message.params.at("parts")) {
-                    if (part.is_object() && part.contains("type") &&
-                        part.at("type") == "text" && part.contains("text") &&
-                        part.at("text").is_string()) {
+                    if (!part.is_object()) {
+                        continue;
+                    }
+                    if (part.contains("type") && part.at("type") == "text" &&
+                        part.contains("text") && part.at("text").is_string()) {
                         if (!content.empty()) {
                             content += "\n";
                         }
                         content += part.at("text").get<std::string>();
+                        continue;
+                    }
+                    if (part.contains("type") && part.at("type") == "file" &&
+                        part.contains("local_path") && part.at("local_path").is_string()) {
+                        QqOutboundMedia media;
+                        media.local_path = part.at("local_path").get<std::string>();
+                        if (part.contains("file_name") && part.at("file_name").is_string()) {
+                            media.file_name = part.at("file_name").get<std::string>();
+                        }
+                        if (part.contains("mime_type") && part.at("mime_type").is_string()) {
+                            media.mime_type = part.at("mime_type").get<std::string>();
+                        }
+                        if (part.contains("size") &&
+                            ParseLooseInt64(part.at("size")).has_value()) {
+                            media.size_bytes = *ParseLooseInt64(part.at("size"));
+                        }
+                        if (media.file_name.empty()) {
+                            media.file_name = "attachment";
+                        }
+                        pending.media = std::move(media);
                     }
                 }
             }
@@ -254,9 +288,12 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 pending.request.outbound_delivery_id =
                     message.params.at("client_id").get<std::string>();
             }
-            if (pending.request.openid.empty() || pending.request.content.empty()) {
+            // 纯附件回复(无正文)也是合法发送(§十 10.2:没有文字、只有
+            // 一个文件也算有效回复)——正文与附件至少有其一。
+            if (pending.request.openid.empty() ||
+                (pending.request.content.empty() && !pending.media.has_value())) {
                 ReplyDomainError(id, DomainErrorName::NotCapable,
-                                 "channel.send needs direct conversation id and text");
+                                 "channel.send needs direct conversation id and text or file");
                 return;
             }
             if (pending.request.outbound_delivery_id.empty()) {
@@ -340,6 +377,16 @@ bool QqBotAdapter::StartGatewayLocked() {
         sender_options.tokens = &token_manager_;
         sender_options.api_base = options_.api_base;
         sender_.emplace(std::move(sender_options));
+    }
+    if (!uploader_.has_value()) {
+        QqMediaUploader::Options uploader_options;
+        // 媒体 seam 独立(限额/超时与信令路不同);空则复用信令 http。
+        uploader_options.http = options_.media_http ? options_.media_http : options_.http;
+        uploader_options.tokens = &token_manager_;
+        uploader_options.api_base = options_.api_base;
+        uploader_options.now_ms = options_.now_ms;
+        uploader_options.max_upload_bytes = options_.max_media_bytes;
+        uploader_.emplace(std::move(uploader_options));
     }
     stop_.store(false);
     // 重启(桥 stop -> start)时重置在线账;last_failure 保留到下次成功——
@@ -560,7 +607,61 @@ void QqBotAdapter::SenderLoop() {
         send_queue_.erase(send_queue_.begin());
         lock.unlock();
 
-        QqMessageSender::Outcome outcome = sender_->SendC2c(pending.request);
+        // Q4 富媒体准备:上传原件拿 file_info(同内容 ttl 窗内零网络重试;
+        // 失败折发送同款分型,Permanent 不再自动重试)。无媒体 = 直发。
+        const auto prepare_media = [this,
+                                    &pending]() -> std::optional<QqMessageSender::Outcome> {
+            if (!pending.media.has_value()) {
+                return std::nullopt;
+            }
+            const std::filesystem::path path = platform::Utf8ToPath(pending.media->local_path);
+            std::error_code ec;
+            const std::uintmax_t file_size = std::filesystem::file_size(path, ec);
+            if (ec ||
+                file_size > static_cast<std::uintmax_t>(options_.max_media_bytes)) {
+                QqMessageSender::Outcome outcome;
+                outcome.status = QqMessageSender::Outcome::Status::PermanentFail;
+                outcome.error.kind = QqApiErrorKind::ContentRejected;
+                outcome.error.detail = "attachment unreadable or over cap";
+                return outcome;
+            }
+            std::ifstream input(path, std::ios::binary);
+            if (!input) {
+                QqMessageSender::Outcome outcome;
+                outcome.status = QqMessageSender::Outcome::Status::PermanentFail;
+                outcome.error.kind = QqApiErrorKind::ContentRejected;
+                outcome.error.detail = "attachment unreadable";
+                return outcome;
+            }
+            std::string bytes((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+            const auto uploaded = uploader_->UploadFile(
+                pending.request.openid, pending.media->file_name,
+                pending.media->mime_type, bytes);
+            if (uploaded.status == QqMediaUploader::Outcome::Status::Uploaded) {
+                pending.request.media_file_info = uploaded.file_info;
+                return std::nullopt;
+            }
+            QqMessageSender::Outcome outcome;
+            outcome.status =
+                uploaded.status == QqMediaUploader::Outcome::Status::DeferredRetry
+                    ? QqMessageSender::Outcome::Status::DeferredRetry
+                    : QqMessageSender::Outcome::Status::PermanentFail;
+            outcome.error = uploaded.error;
+            return outcome;
+        };
+
+        // 一发一试:媒体准备(上传)在前,SendC2c 在后;DeferredRetry 退避
+        // 后整装重试(媒体 file_info 缓存命中时零网络)。
+        const auto run_once = [&]() -> QqMessageSender::Outcome {
+            const auto prepared = prepare_media();
+            if (prepared.has_value()) {
+                return *prepared;
+            }
+            return sender_->SendC2c(pending.request);
+        };
+
+        QqMessageSender::Outcome outcome = run_once();
         int attempt = pending.attempts;
         while (outcome.status == QqMessageSender::Outcome::Status::DeferredRetry &&
                attempt < kMaxAttempts) {
@@ -570,7 +671,7 @@ void QqBotAdapter::SenderLoop() {
                 break;  // 停止路径:尽快收口(未完成的发送如实报错)
             }
             ++attempt;
-            outcome = sender_->SendC2c(pending.request);
+            outcome = run_once();
         }
 
         switch (outcome.status) {

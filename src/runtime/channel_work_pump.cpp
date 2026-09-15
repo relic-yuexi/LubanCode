@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "runtime/turn_ingress.hpp"
+#include "platform/paths.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"
 #include "workspace/index.hpp"
@@ -143,8 +144,66 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
                                          pump->options_.now_ms());
         };
     out->executor_.emplace(backend, registry, std::move(executor_options));
+    // Q4 媒体仓:缺省落 workspace 身份根下 channel-media/(不在渠道状态根
+    // ——Q0 工具护单盖整棵渠道状态树,模型 read_file 读不到;workspace 侧
+    // 受控读取口 = 既有 read_file 的路径纪律)。开不了账不拦泵:附件行
+    // 如实报不可用,正文路照走。
+    std::filesystem::path media_root = out->options_.media_root;
+    if (media_root.empty()) {
+        media_root = out->options_.workspace_identity.identity_root / "channel-media";
+    }
+    ChannelMediaService media_service;
+    if (ChannelMediaService::Open(&media_service, media_root)) {
+        out->media_service_.emplace(std::move(media_service));
+    }
     result.ok = true;
     return result;
+}
+
+std::string ChannelWorkPump::IngestAttachmentsPrompt(
+    const channel::ChannelManager::WorkItem& work) {
+    if (!media_service_.has_value()) {
+        return std::string();
+    }
+    const auto receipts = media_service_->Ingest(
+        work.event, work.sid, options_.media_download, options_.media_limits,
+        options_.now_ms());
+    std::string prompt;
+    for (const auto& receipt : receipts) {
+        if (!prompt.empty()) {
+            prompt += "\n";
+        }
+        prompt += receipt.prompt_line;
+    }
+    return prompt;
+}
+
+std::optional<gateway::DurableReplyOutbox::ChannelAttachment>
+ChannelWorkPump::ReplyFileAttachment(const std::string& selection_id,
+                                     const std::string& reply_text) const {
+    // 产物附件合同(Q4 §十,最保守路):任务结果文件 = 本轮 reply selection
+    // 的冻结正文原件(replies/<selectionId>.txt——本地族 out/<id>.txt 的
+    // 渠道对应物)。短回复(单段装得下)即正文,不带文件;拆段 > 1 时末段
+    // 附带完整正文原件,手机上不用连刷多屏。点名发文件
+    // (channel_deliver_artifact)归后续批。
+    if (gateway::SplitReplySegments(reply_text, gateway::kChannelSegmentBytes).size() <= 1) {
+        return std::nullopt;
+    }
+    const std::filesystem::path artifact =
+        options_.outbox->replies_dir() / (selection_id + ".txt");
+    std::error_code ec;
+    if (!std::filesystem::exists(artifact, ec) || ec) {
+        return std::nullopt;  // 原件不在(理论不可达——selection 已提交);不带
+    }
+    gateway::DurableReplyOutbox::ChannelAttachment attachment;
+    attachment.local_path = platform::PathToUtf8(artifact);
+    attachment.file_name = selection_id + ".txt";
+    attachment.mime_type = "text/plain";
+    attachment.size_bytes = static_cast<std::int64_t>(std::filesystem::file_size(artifact, ec));
+    if (ec) {
+        return std::nullopt;
+    }
+    return attachment;
 }
 
 std::string ChannelWorkPump::session_id_for(const std::string& channel_id,
@@ -494,8 +553,11 @@ bool ChannelWorkPump::RecoverOne(const std::string& channel_id, const std::strin
     target.reply_to_message_id = view.event.message_id;
     target.source_ref =
         "ingress:" + channel_id + ":" + account_id + ":" + std::to_string(view.sid);
+    // Q4 产物附件:与执行路同一纯函数(同正文同段数同附件,幂等补投影)。
+    const auto attachment = ReplyFileAttachment(plan.selection_id, plan.text);
     const auto enqueued = options_.outbox->EnqueueChannel(
-        plan.selection_id, plan.text, bound->session_id, bound->turn_id, target, now_ms);
+        plan.selection_id, plan.text, bound->session_id, bound->turn_id, target, now_ms,
+        attachment.has_value() ? &*attachment : nullptr);
     if (!enqueued.accepted && !enqueued.duplicate) {
         return false;  // 入箱失败(账 broken):停泵——执行事实保留,不冒充成功
     }
@@ -580,6 +642,11 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
         request.stored_session_id = *stored;
     }
     request.prompt = PromptFromIngress(ingress);
+    // Q4 附件接纳(准入已过、执行前):下载落仓 + 有界预览行并进 prompt。
+    // 失败附件给稳定说明,不假装读过文件;不拦正文轮。
+    if (const std::string media_prompt = IngestAttachmentsPrompt(work); !media_prompt.empty()) {
+        request.prompt += "\n" + media_prompt;
+    }
     request.binding.work_id = MakeChannelOperationId(channel_id, account_id, work.sid);
     request.binding.source_kind = "channel";
     request.binding.source_id = channel_id + ":" + account_id;
@@ -626,9 +693,11 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     target.conversation_id = work.conversation_id;
     target.reply_to_message_id = work.event.message_id;
     target.source_ref = "ingress:" + channel_id + ":" + account_id + ":" + std::to_string(sid);
+    // Q4 产物附件:长文(拆段 > 1)末段附带任务结果文件(冻结正文原件)。
+    const auto attachment = ReplyFileAttachment(result.selection_id, result.reply_text);
     const auto enqueued = options_.outbox->EnqueueChannel(
         result.selection_id, result.reply_text, result.session_id, result.turn_id, target,
-        now_ms);
+        now_ms, attachment.has_value() ? &*attachment : nullptr);
     // 执行侧结算:Running → Replied(投递态另算;发送失败不把执行改失败)。
     (void)options_.manager->SettleIngressReplied(channel_id, account_id, sid);
     if (!enqueued.accepted && !enqueued.duplicate) {
@@ -957,6 +1026,15 @@ bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
         send.text = text;
         send.reply_to_message_id = send_anchor;
         send.client_delivery_id = item.delivery_id;
+        // Q4:带附件的段(末段)把冻结引用递给渠道(适配器读原件上传)。
+        if (!item.attachment_local_path.empty()) {
+            channel::ChannelManager::OutboundAttachment attachment;
+            attachment.local_path = item.attachment_local_path;
+            attachment.file_name = item.attachment_file_name;
+            attachment.mime_type = item.attachment_mime_type;
+            attachment.size_bytes = item.attachment_size_bytes;
+            send.attachment = std::move(attachment);
+        }
         const auto error = options_.manager->SendReply(item.target_channel_id,
                                                        item.target_account_id, send);
         if (error.has_value()) {

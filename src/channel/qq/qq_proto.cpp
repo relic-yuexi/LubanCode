@@ -396,24 +396,41 @@ std::optional<C2cEventMapping> MapC2cMessageCreate(const nlohmann::json& d,
             if (!attachment.is_object()) {
                 continue;
             }
+            // Q4 附件映射:按官方 content_type 枚举落真类型 part(不再降级
+            // Unsupported)。url 存 remote_ref——下载是宿主接纳服务的账
+            // (准入通过才拉原件),这里只冻结平台给的入口引用。
             ChannelPart part;
-            part.type = ChannelPartType::Unsupported;
-            part.unsupported_reason = "qq attachment download lands in Q4; url kept as remote_ref";
+            std::string content_type;
+            if (const auto mime = GetStringField(attachment, "content_type")) {
+                content_type = *mime;
+                part.mime_type = *mime;
+            }
+            if (content_type.rfind("image/", 0) == 0) {
+                part.type = ChannelPartType::Image;
+            } else if (content_type.rfind("video/", 0) == 0) {
+                part.type = ChannelPartType::Video;
+            } else if (content_type == "voice" || content_type.rfind("audio/", 0) == 0) {
+                part.type = ChannelPartType::Audio;
+            } else {
+                // "file"(平台枚举)与其余未认出的类型:普通文件档——白名单
+                // 收纳与否是宿主接纳服务的账,映射层不虚报能解析。
+                part.type = ChannelPartType::File;
+            }
             if (const auto filename = GetStringField(attachment, "filename")) {
                 part.file_name = *filename;
             }
             if (const auto url = GetStringField(attachment, "url")) {
                 part.remote_ref = *url;
             }
-            if (attachment.contains("size") && attachment.at("size").is_number_integer()) {
-                part.size_bytes = attachment.at("size").get<std::int64_t>();
-            }
-            if (const auto mime = GetStringField(attachment, "content_type")) {
-                part.mime_type = *mime;
+            // size 宽松解析:平台数值字段可能以字符串回传(真机教训)。
+            if (attachment.contains("size")) {
+                if (const auto size = ParseLooseInt64(attachment.at("size"))) {
+                    part.size_bytes = *size;
+                }
             }
             event.parts.push_back(std::move(part));
         }
-        warnings << "attachments_downgraded;";
+        warnings << "attachments_pending_download;";
     }
     mapping.warnings = warnings.str();
     (void)envelope_event_id;  // 事件 id 已含在 payload.id;映射不重复存两份
@@ -461,8 +478,15 @@ std::optional<AccessTokenResponse> ParseAccessTokenResponse(const nlohmann::json
 
 nlohmann::json BuildC2cSendPayload(const C2cSendRequest& request) {
     nlohmann::json body = nlohmann::json::object();
-    body["msg_type"] = 0;
-    body["content"] = request.content;
+    if (!request.media_file_info.empty()) {
+        // Q4 富媒体:msg_type=7 + media.file_info(官方示例不带 content——
+        // 文本与附件由 outbox 拆段分开发送,不混在一条消息里)。
+        body["msg_type"] = 7;
+        body["media"] = nlohmann::json{{"file_info", request.media_file_info}};
+    } else {
+        body["msg_type"] = 0;
+        body["content"] = request.content;
+    }
     if (!request.msg_id.empty()) {
         body["msg_id"] = request.msg_id;
         body["msg_seq"] = request.msg_seq;
@@ -497,6 +521,182 @@ std::optional<C2cSendResponse> ParseC2cSendResponse(const nlohmann::json& body,
     if (body.contains("ext_info") && body.at("ext_info").is_object()) {
         if (const auto ref = GetStringField(body.at("ext_info"), "ref_idx")) {
             out.ref_idx = *ref;
+        }
+    }
+    return out;
+}
+
+// ---- v2 富媒体上传纯函数(Q4) --------------------------------------------
+
+nlohmann::json BuildUploadPrepareRequest(int file_type, std::int64_t file_size,
+                                         const std::string& file_name, const std::string& md5,
+                                         const std::string& sha1, const std::string& md5_10m) {
+    nlohmann::json body = nlohmann::json::object();
+    body["file_type"] = file_type;
+    // 官方字段表:file_size 是字符串(SDK 1.0.4 发 number 属漂移,不采信)。
+    body["file_size"] = std::to_string(file_size);
+    body["file_name"] = file_name;
+    body["md5"] = md5;
+    body["sha1"] = sha1;
+    body["md5_10m"] = md5_10m;
+    return body;
+}
+
+std::optional<UploadPrepareResponse> ParseUploadPrepareResponse(const nlohmann::json& body,
+                                                                std::string* error) {
+    if (!body.is_object()) {
+        if (error != nullptr) {
+            *error = "upload_prepare response not an object";
+        }
+        return std::nullopt;
+    }
+    const auto upload_id = GetStringField(body, "upload_id");
+    if (!upload_id.has_value() || upload_id->empty()) {
+        if (error != nullptr) {
+            *error = "upload_prepare response missing upload_id";
+        }
+        return std::nullopt;
+    }
+    UploadPrepareResponse out;
+    out.upload_id = *upload_id;
+    // block_size/parts[].block_size:官方为字符串(宽松解析——真机教训,
+    // 平台数值字段可能数字/字符串两态)。
+    if (body.contains("block_size")) {
+        if (const auto size = ParseLooseInt64(body.at("block_size"))) {
+            out.block_size = *size;
+        }
+    }
+    if (out.block_size <= 0) {
+        if (error != nullptr) {
+            *error = "upload_prepare response invalid block_size";
+        }
+        return std::nullopt;
+    }
+    if (!body.contains("parts") || !body.at("parts").is_array() ||
+        body.at("parts").empty()) {
+        if (error != nullptr) {
+            *error = "upload_prepare response missing parts";
+        }
+        return std::nullopt;
+    }
+    for (const auto& part : body.at("parts")) {
+        if (!part.is_object()) {
+            if (error != nullptr) {
+                *error = "upload_prepare part not an object";
+            }
+            return std::nullopt;
+        }
+        UploadPreparePart parsed;
+        if (part.contains("index")) {
+            // 官方"从 0 开始"、SDK 漂移从 1 起:原值保留回显,偏移不依赖它。
+            if (const auto index = ParseLooseInt64(part.at("index"))) {
+                parsed.index = *index;
+            }
+        }
+        const auto url = GetStringField(part, "presigned_url");
+        if (!url.has_value() || url->empty()) {
+            if (error != nullptr) {
+                *error = "upload_prepare part missing presigned_url";
+            }
+            return std::nullopt;
+        }
+        parsed.presigned_url = *url;
+        if (part.contains("block_size")) {
+            if (const auto size = ParseLooseInt64(part.at("block_size"))) {
+                parsed.block_size = *size;
+            }
+        }
+        if (parsed.block_size <= 0) {
+            if (error != nullptr) {
+                *error = "upload_prepare part invalid block_size";
+            }
+            return std::nullopt;
+        }
+        out.parts.push_back(std::move(parsed));
+    }
+    // upload_config:官方在嵌套对象下(SDK 1.0.4 误读顶层,不采信)。只记
+    // 账不消费——上传恒串行,防错误并发进循环(§十 10.1)。
+    if (body.contains("upload_config") && body.at("upload_config").is_object()) {
+        const nlohmann::json& config = body.at("upload_config");
+        if (config.contains("concurrency")) {
+            if (const auto value = ParseLooseInt64(config.at("concurrency"))) {
+                out.concurrency = *value;
+            }
+        }
+        if (config.contains("retry_timeout")) {
+            if (const auto value = ParseLooseInt64(config.at("retry_timeout"))) {
+                out.retry_timeout_secs = *value;
+            }
+        }
+        if (config.contains("retry_delay")) {
+            if (const auto value = ParseLooseInt64(config.at("retry_delay"))) {
+                out.retry_delay_secs = *value;
+            }
+        }
+    }
+    return out;
+}
+
+nlohmann::json BuildUploadPartFinishRequest(const std::string& upload_id,
+                                            std::int64_t part_index, std::int64_t block_size,
+                                            const std::string& part_md5) {
+    nlohmann::json body = nlohmann::json::object();
+    body["upload_id"] = upload_id;
+    body["part_index"] = part_index;
+    body["block_size"] = std::to_string(block_size);  // 官方:字符串
+    body["md5"] = part_md5;
+    return body;
+}
+
+std::string UploadPreparePath(const std::string& openid) {
+    return "/v2/users/" + openid + "/upload_prepare";
+}
+
+std::string UploadPartFinishPath(const std::string& openid) {
+    return "/v2/users/" + openid + "/upload_part_finish";
+}
+
+nlohmann::json BuildFileUploadBody(int file_type, const std::string& file_name,
+                                   const std::string& upload_id) {
+    nlohmann::json body = nlohmann::json::object();
+    body["file_type"] = file_type;
+    body["file_name"] = file_name;
+    body["upload_id"] = upload_id;
+    // 可靠 outbox 不走平台直发捷径(§十 10.1: srv_send_msg=true 占主动
+    // 消息频次,发送另走 messages 接口拿全量回执)。
+    body["srv_send_msg"] = false;
+    return body;
+}
+
+std::string FileUploadPath(const std::string& openid) {
+    return "/v2/users/" + openid + "/files";
+}
+
+std::optional<FileUploadResponse> ParseFileUploadResponse(const nlohmann::json& body,
+                                                          std::string* error) {
+    if (!body.is_object()) {
+        if (error != nullptr) {
+            *error = "file upload response not an object";
+        }
+        return std::nullopt;
+    }
+    const auto file_info = GetStringField(body, "file_info");
+    if (!file_info.has_value() || file_info->empty()) {
+        if (error != nullptr) {
+            *error = "file upload response missing file_info";
+        }
+        return std::nullopt;
+    }
+    FileUploadResponse out;
+    out.file_info = *file_info;
+    if (const auto uuid = GetStringField(body, "file_uuid")) {
+        out.file_uuid = *uuid;
+    }
+    // ttl 官方为 integer(秒);宽松解析防字符串态。缺失 = -1(调用方按
+    // 已过期处理,不虚报长期有效)。
+    if (body.contains("ttl")) {
+        if (const auto ttl = ParseLooseInt64(body.at("ttl"))) {
+            out.ttl_secs = *ttl;
         }
     }
     return out;
@@ -539,8 +739,13 @@ QqApiError ClassifyQqSendFailure(int http_status, const std::string& body) {
             case 40054018:
             case 22006:
             case 304080:
+            case 850019:  // Q4 媒体:不支持的文件格式
+            case 850031:  // Q4 媒体:上传文件超过大小限制
                 return QqApiErrorKind::ContentRejected;
             case 50055002:
+            case 850026:  // Q4 媒体:平台转存原始文件失败(可重试)
+            case 850027:  // Q4 媒体:发送数据超时(可重试)
+            case 40093001:  // Q4 媒体:分片上传 BDH 通道异常(官方建议重试)
                 return QqApiErrorKind::ServerError;
             default:
                 return std::nullopt;

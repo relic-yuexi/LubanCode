@@ -34,4 +34,11 @@ using QqHttpFunc =
 // 生产实现:net::PerformFullHttpRequest 适配(连接 10s/硬墙 30s/响应体帽 4 MiB)。
 QqHttpFunc MakeDefaultHttpFunc();
 
+// 媒体路生产实现(Q4:附件下载/分片上传):与 MakeDefaultHttpFunc 同底座,
+// 差别只在限额——连接 10s、硬墙按参数(下载大件比信令慢),响应体帽
+// max_response_body_bytes(传输层在响应回调入口掐流,大件不进内存)。
+// 支持 GET/POST/PUT(分片 PUT 预签名 URL 用;§十五:受控 PUT 属 Q4 扩底盘)。
+QqHttpFunc MakeMediaHttpFunc(std::int64_t hard_timeout_ms,
+                             std::int64_t max_response_body_bytes);
+
 }  // namespace lubancode::channel::qq

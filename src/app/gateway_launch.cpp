@@ -14,6 +14,7 @@
 #include "app/backend_stack.hpp"
 #include "app/version.hpp"
 #include "channel/manager.hpp"  // DefaultChannelsStateRoot
+#include "channel/qq/qq_media.hpp"  // Q4:附件下载 seam 的 QQ 实现
 #include "cli/gateway_command.hpp"
 #include "config/config.hpp"
 #include "gateway/profile.hpp"
@@ -209,6 +210,29 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                 work_options.automation_store =
                     automation_pump_open ? pump->store() : nullptr;
                 work_options.automation_bridge = channel_automation;
+                // Q4 媒体接纳 seam:QQ 定案进程内直连——下载直接绑 qq 实现
+                //(url 安全校验/大小帽/凭据脱敏都在里面;§十 10.1)。多渠道
+                // 之后再改注册制,不提前架框架。
+                {
+                    constexpr std::int64_t kMediaCapBytes =
+                        20 * 1024 * 1024;  // 官方/插件/示例三口径取最小
+                    const auto media_http = channel::qq::MakeMediaHttpFunc(
+                        /*hard_timeout_ms=*/60'000, kMediaCapBytes);
+                    work_options.media_download =
+                        [media_http](const std::string& url)
+                        -> std::expected<runtime::ChannelMediaBytes, std::string> {
+                        channel::qq::QqMediaDownloadLimits limits;
+                        limits.max_bytes = kMediaCapBytes;
+                        const auto downloaded =
+                            channel::qq::DownloadQqAttachment(media_http, url, limits);
+                        if (!downloaded.has_value()) {
+                            // 稳定码 + 脱敏 detail(渠道实现保证 query 不进文案)。
+                            return std::unexpected(downloaded.error().code + ": " +
+                                                   downloaded.error().detail);
+                        }
+                        return runtime::ChannelMediaBytes{std::move(downloaded->bytes)};
+                    };
+                }
                 auto work_pump = std::make_unique<runtime::ChannelWorkPump>();
                 const auto open = runtime::ChannelWorkPump::Open(work_pump.get(), *backend,
                                                                  registry, std::move(work_options));

@@ -191,3 +191,123 @@ TEST_CASE("写盘失败:账 broken 后渠道态推进全拒") {
     REQUIRE_FALSE(outbox.MarkSent("whatever", "om", 1));
     REQUIRE(outbox.broken());
 }
+
+// ---------------------------------------------------------------------------
+// Q4:出站附件(冻结正文 + 附件引用)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Q4 附件入箱:长文末段带附件字段,幂等重入不重写") {
+    OutboxDir dir("attach");
+    DurableReplyOutbox outbox;
+    REQUIRE(DurableReplyOutbox::Open(&outbox, dir.Paths()).ok);
+    // 附件原件(冻结引用的产物文件)。
+    const std::filesystem::path product = dir.root / "product.txt";
+    { std::ofstream stream(product); stream << "完整产物正文,超过一段的全文在附件里"; }
+
+    // 长文:6000 字节 → 3 文本段 + 1 纯附件末段(QQ msg_type=7 不带
+    // content,正文全在前面的段里,谁也不吃掉谁)。
+    std::string long_text;
+    for (int i = 0; i < 2000; ++i) {
+        long_text += "汉字";
+    }
+    DurableReplyOutbox::ChannelAttachment attachment;
+    attachment.local_path = product.generic_string();
+    attachment.file_name = "sel-a1.txt";
+    attachment.mime_type = "text/plain";
+    attachment.size_bytes = 15;
+    const auto receipt = outbox.EnqueueChannel("sel-a1", long_text, "s1", "turn-a",
+                                               Target(), 1000, &attachment);
+    REQUIRE(receipt.accepted);
+    REQUIRE(receipt.delivery_ids.size() == 4);
+    // 末段(纯附件)带附件字段,其余文本段不带。
+    for (std::size_t i = 0; i + 1 < receipt.delivery_ids.size(); ++i) {
+        CHECK(outbox.Find(receipt.delivery_ids[i])->attachment_local_path.empty());
+    }
+    const auto last = outbox.Find(receipt.delivery_ids.back());
+    CHECK(last->attachment_local_path == product.generic_string());
+    CHECK(last->attachment_file_name == "sel-a1.txt");
+    CHECK(last->attachment_mime_type == "text/plain");
+    CHECK(last->attachment_size_bytes == 15);
+    CHECK(last->reply_text.empty());  // 附件段零正文
+    CHECK_FALSE(last->attachment_sha256.empty());  // 入箱时算定
+
+    // 幂等重入:同 selection 同附件 → duplicate,字段不重复落。
+    const auto again = outbox.EnqueueChannel("sel-a1", long_text, "s1", "turn-a",
+                                             Target(), 2000, &attachment);
+    REQUIRE(again.duplicate);
+    REQUIRE(again.delivery_ids == receipt.delivery_ids);
+    // 短文带附件:1 文本段 + 1 附件段。
+    const auto single = outbox.EnqueueChannel("sel-a2", "短文", "s1", "turn-a2",
+                                              Target(), 1000, &attachment);
+    REQUIRE(single.accepted);
+    REQUIRE(single.delivery_ids.size() == 2);
+    CHECK_FALSE(outbox.Find(single.delivery_ids[1])->attachment_local_path.empty());
+}
+
+TEST_CASE("Q4 附件入箱:纯附件回复(空正文)也是合法单段") {
+    OutboxDir dir("attach-only");
+    DurableReplyOutbox outbox;
+    REQUIRE(DurableReplyOutbox::Open(&outbox, dir.Paths()).ok);
+    const std::filesystem::path product = dir.root / "only.txt";
+    { std::ofstream stream(product); stream << "file body"; }
+    DurableReplyOutbox::ChannelAttachment attachment;
+    attachment.local_path = product.generic_string();
+    attachment.file_name = "only.txt";
+    attachment.mime_type = "text/plain";
+    attachment.size_bytes = 9;
+    const auto receipt = outbox.EnqueueChannel("sel-a3", "", "s1", "turn-a3",
+                                               Target(), 1000, &attachment);
+    REQUIRE(receipt.accepted);
+    REQUIRE(receipt.delivery_ids.size() == 1);
+    const auto item = outbox.Find(receipt.delivery_ids[0]);
+    CHECK(item->attachment_local_path == product.generic_string());
+    // 无附件的空正文照旧明败(不造空段)。
+    const auto invalid = outbox.EnqueueChannel("sel-a4", "", "s1", "turn-a4",
+                                               Target(), 1000);
+    CHECK_FALSE(invalid.accepted);
+    CHECK(invalid.error_code == "outbox.segment_invalid");
+}
+
+TEST_CASE("Q4 附件入箱:原件读不了明败;重开投影带附件字段") {
+    OutboxDir dir("attach-missing");
+    DurableReplyOutbox outbox;
+    REQUIRE(DurableReplyOutbox::Open(&outbox, dir.Paths()).ok);
+    DurableReplyOutbox::ChannelAttachment missing;
+    missing.local_path = (dir.root / "gone.txt").generic_string();
+    missing.file_name = "gone.txt";
+    missing.mime_type = "text/plain";
+    const auto receipt = outbox.EnqueueChannel("sel-a5", "正文", "s1", "turn-a5",
+                                               Target(), 1000, &missing);
+    REQUIRE_FALSE(receipt.accepted);
+    CHECK(receipt.error_code == "outbox.attachment_unreadable");
+
+    // 重开投影:附件字段从账行读回(旧账行无新键 = 空)。
+    const std::filesystem::path product = dir.root / "p.txt";
+    { std::ofstream stream(product); stream << "产物"; }
+    DurableReplyOutbox::ChannelAttachment attachment;
+    attachment.local_path = product.generic_string();
+    attachment.file_name = "p.txt";
+    attachment.mime_type = "text/plain";
+    attachment.size_bytes = 6;
+    std::string delivery_id;
+    {
+        DurableReplyOutbox first;
+        REQUIRE(DurableReplyOutbox::Open(&first, dir.Paths()).ok);
+        const auto ok = first.EnqueueChannel("sel-a6", "正文", "s1", "turn-a6",
+                                             Target(), 1000, &attachment);
+        REQUIRE(ok.accepted);
+        delivery_id = ok.delivery_ids[0];
+    }
+    DurableReplyOutbox reopened;
+    REQUIRE(DurableReplyOutbox::Open(&reopened, dir.Paths()).ok);
+    const auto item = reopened.Find(delivery_id);
+    REQUIRE(item.has_value());
+    CHECK(item->attachment_local_path == product.generic_string());
+    CHECK(item->attachment_file_name == "p.txt");
+    CHECK(item->attachment_size_bytes == 6);
+    // 对照:既有无附件项的字段为空(旧账兼容)。
+    CHECK(outbox.Find(outbox.EnqueueChannel("sel-a7", "普通", "s1", "t7",
+                                            Target(), 1000)
+                          .delivery_ids[0])
+              ->attachment_local_path.empty());
+}

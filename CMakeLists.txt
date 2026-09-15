@@ -795,6 +795,8 @@ add_library(lubancode_engine STATIC
   src/channel/qq/qq_spool.cpp
   src/channel/qq/qq_auth.cpp
   src/channel/qq/qq_messages.cpp
+  # QQ 接入单 Q4:富媒体传输(附件受控下载 + 分片两步上传拿 file_info)。
+  src/channel/qq/qq_media.cpp
   src/channel/qq/qq_gateway.cpp
   src/channel/qq/qq_adapter.cpp
   # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
@@ -1003,6 +1005,8 @@ add_library(lubancode_runtime STATIC
   # QQ 接入单 Q5:聊天侧任务桥(渠道会话的模型经 create/list/cancel_
   # reminder 落 automation 域命令;归属闸/幂等键/渠道上下文冻结)。
   src/runtime/channel_automation.cpp
+  # QQ 接入单 Q4:渠道附件接纳服务(白名单/净化/下载落仓/有界预览)。
+  src/runtime/channel_media_service.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp
