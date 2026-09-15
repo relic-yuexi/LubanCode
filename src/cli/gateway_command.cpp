@@ -653,6 +653,8 @@ int RunGatewayLogs(const gateway::GatewayProfilePaths& paths, const GatewayComma
 
 }  // namespace
 
+}  // namespace
+
 int RunGatewayCommand(const GatewayCommandArgs& args) {
     const std::string profile_name =
         args.profile.empty() ? std::string(gateway::kDefaultGatewayProfile) : args.profile;
