@@ -67,6 +67,9 @@ public:
         std::string ca_pem;                           // wss 信任锚;非空 = 显式信任锚
                                                        //(测试位/覆盖位,不回退平台
                                                        // 来源);空 = 平台默认信任根
+        // Gateway 控制命令目录(Q1b 配对批准/拒绝的入站面;profile 树的
+        // control/)。空 = 不接控制面(测试装配可不传)。
+        std::filesystem::path gateway_control_dir;
         std::function<std::int64_t()> now_ms;
         // 测试注入位(生产恒空):网关传输工厂与 HTTP。空 = 生产件
         // (MakeWsTransportFactory/MakeDefaultHttpFunc)。装配后账号会起真
@@ -104,6 +107,9 @@ public:
 private:
     ChannelGatewayWiring() = default;
     void PumpAll();
+    // Q1b 控制面:轮询 pairing 命令 → 应用到 manager(先按配对码认,认
+    // 不出再按 sender 身份认)→ 写回执文件。
+    void ConsumePairingCommands();
 
     std::unique_ptr<channel::ChannelManager> manager_;
     std::vector<std::unique_ptr<channel::ChannelBridgeTransport>> adapters_;
@@ -119,6 +125,7 @@ private:
     std::unique_ptr<gateway::GatewayWorkPump> work_pump_;
     std::unique_ptr<ChannelConnectionReporter> reporter_;
     std::string owner_epoch_;  // = Gateway boot_id(set_owner_epoch 递进)
+    std::filesystem::path control_dir_;  // Q1b 配对控制面(空 = 不接)
 };
 
 }  // namespace lubancode::app

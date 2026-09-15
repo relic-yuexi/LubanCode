@@ -137,6 +137,7 @@ private:
 
     bool ApplyDeliveryOutcomes(std::int64_t now_ms);   // 回执 → outbox 推进
     void ReconcileDeliveredSources(std::int64_t now_ms);  // 终态项 → ingress 结算
+    void PumpPairingNotices(std::int64_t now_ms);      // Q1b:配对提示入 outbox
     bool SweepRecovery(std::int64_t now_ms);           // Running 件的跨账裁决
     bool RecoverOne(const std::string& channel_id, const std::string& account_id,
                     const channel::ChannelManager::IngressRunningView& view,

@@ -13,6 +13,7 @@
 // 同一份装配/锁/停止合同)、channel setup 向导、im 入口。
 #include "app/gateway_launch.hpp"
 #include "app/im_entry.hpp"
+#include "cli/channel_pairing_command.hpp"  // QQ 接入单 Q1b:channel pairing 批准口
 #include "cli/channel_setup_command.hpp"
 #include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
 #include "app_server/connection_snapshot.hpp"  // §八:连接快照冻结 + §四.111 effective-config 诊断
@@ -921,6 +922,21 @@ int RunCli(const std::vector<std::string>& args) {
             return cli::RunChannelSetupCommand(setup_args);
         }
         case CliAction::BadChannelSetup:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunChannelPairing: {
+            // channel pairing approve/reject(QQ 接入单 Q1b):另一终端向
+            // 持锁 Gateway 提交配对裁决;无持锁实例明确报错指引(退 2)。
+            cli::ChannelPairingCommandArgs pairing_args;
+            pairing_args.action = parsed_cli.channel_pairing.action;
+            pairing_args.channel_id = parsed_cli.channel_pairing.channel_id;
+            pairing_args.account_id = parsed_cli.channel_pairing.account_id;
+            pairing_args.token = parsed_cli.channel_pairing.token;
+            pairing_args.profile = parsed_cli.channel_pairing.profile;
+            pairing_args.timeout_ms = parsed_cli.channel_pairing.timeout_ms;
+            return cli::RunChannelPairingCommand(pairing_args);
+        }
+        case CliAction::BadChannelPairing:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunIm: {

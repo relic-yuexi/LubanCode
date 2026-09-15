@@ -419,6 +419,46 @@ TEST_CASE("channel setup:平台与 --account 落位;形状不对退用法") {
           CliAction::Proceed);
 }
 
+TEST_CASE("channel pairing:approve/reject 与旗标落位;形状不对退用法") {
+    const ParsedCliArgs ok = ParseCliArgs(Args(
+        {"lubancode", "channel", "pairing", "approve", "qqbot", "main", "ABCD2345"}));
+    CHECK(ok.action == CliAction::RunChannelPairing);
+    CHECK(ok.channel_pairing.action == "approve");
+    CHECK(ok.channel_pairing.channel_id == "qqbot");
+    CHECK(ok.channel_pairing.account_id == "main");
+    CHECK(ok.channel_pairing.token == "ABCD2345");
+    CHECK(ok.channel_pairing.timeout_ms == 10'000);  // 缺省 10s
+
+    const ParsedCliArgs flagged = ParseCliArgs(Args(
+        {"lubancode", "channel", "pairing", "reject", "qqbot", "main", "sender-9",
+         "--profile", "personal", "--timeout", "30"}));
+    CHECK(flagged.action == CliAction::RunChannelPairing);
+    CHECK(flagged.channel_pairing.action == "reject");
+    CHECK(flagged.channel_pairing.token == "sender-9");  // 身份路:token 不限形状
+    CHECK(flagged.channel_pairing.profile == "personal");
+    CHECK(flagged.channel_pairing.timeout_ms == 30'000);
+
+    // 缺动作/缺 token/坏动作/坏旗标/坏 profile/坏 timeout:当场退。
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "pairing"})).action ==
+          CliAction::BadChannelPairing);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "pairing", "approve", "qqbot", "main"}))
+              .action == CliAction::BadChannelPairing);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "pairing", "nuke", "qqbot", "main", "X"}))
+              .action == CliAction::BadChannelPairing);
+    CHECK(ParseCliArgs(
+              Args({"lubancode", "channel", "pairing", "approve", "qqbot", "main", "X", "--wait"}))
+              .action == CliAction::BadChannelPairing);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "pairing", "approve", "qqbot", "main", "X",
+                             "--profile", "../bad"}))
+              .action == CliAction::BadChannelPairing);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "pairing", "approve", "qqbot", "main", "X",
+                             "--timeout", "0"}))
+              .action == CliAction::BadChannelPairing);
+    CHECK(ParseCliArgs(Args({"lubancode", "channel", "pairing", "approve", "qqbot", "main", "X",
+                             "--timeout", "abc"}))
+              .action == CliAction::BadChannelPairing);
+}
+
 TEST_CASE("im:平台/账号/profile/select 落位;setup 与旗标互斥") {
     const ParsedCliArgs ok = ParseCliArgs(
         Args({"lubancode", "im", "qqbot", "--account", "main", "--profile", "personal"}));

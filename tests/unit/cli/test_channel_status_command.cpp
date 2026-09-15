@@ -113,4 +113,85 @@ TEST_CASE("channel status: 快照缺键(pid/updated_at 缺失)按死/过期处�
     CHECK(no_stamp.report.at("verdict") == "stale_snapshot");
 }
 
+// ---- Q1b 四步状态(QQBot Windows 修复单 §5.1 末条) -------------------------
+
+TEST_CASE("four_state: 四步全绿——四行如实,report 齐字段") {
+    ChannelFourStateInput input;
+    input.account_configured = true;
+    input.online = true;
+    input.online_detail = "boot boot-1";
+    input.pairing_present = true;
+    input.pairing_approved = 2;
+    input.model_configured = true;
+    const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
+    REQUIRE(view.lines.size() == 4);
+    CHECK(view.lines[0].find("1. 配置已存:是") != std::string::npos);
+    CHECK(view.lines[1].find("2. QQ 在线:是") != std::string::npos);
+    CHECK(view.lines[1].find("boot-1") != std::string::npos);
+    CHECK(view.lines[2].find("3. 身份已配对:是") != std::string::npos);
+    CHECK(view.lines[2].find("2 个身份") != std::string::npos);
+    CHECK(view.lines[3].find("4. 模型能回复:是") != std::string::npos);
+    CHECK(view.report.at("config_saved") == true);
+    CHECK(view.report.at("online") == true);
+    CHECK(view.report.at("paired") == true);
+    CHECK(view.report.at("model_ready") == true);
+}
+
+TEST_CASE("four_state: 全空——每步指下一步,不拿后面状态粉饰前面缺口") {
+    ChannelFourStateInput input;  // 全默认否
+    input.config_detail = "账号 main 不在配置里";
+    input.online_detail = "没有连接状态快照";
+    input.model_detail = "缺 model";
+    const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
+    REQUIRE(view.lines.size() >= 7);  // 四步 + 至少三行"下一步"
+    CHECK(view.lines[0].find("否——账号 main 不在配置里") != std::string::npos);
+    CHECK(view.lines[1].find("2. QQ 在线:否") != std::string::npos);
+    CHECK(view.lines[2].find("3. 身份已配对:否") != std::string::npos);
+    CHECK(view.lines[2].find("还没有人配对") != std::string::npos);
+    CHECK(view.lines[3].find("4. 模型能回复:否——缺 model") != std::string::npos);
+    // 下一步指引:第一步指 setup,第二步指 gateway run。
+    bool saw_setup = false;
+    bool saw_run = false;
+    for (const std::string& line : view.lines) {
+        if (line.find("channel setup qqbot") != std::string::npos) saw_setup = true;
+        if (line.find("gateway run") != std::string::npos) saw_run = true;
+    }
+    CHECK(saw_setup);
+    CHECK(saw_run);
+    CHECK(view.report.at("config_saved") == false);
+    CHECK(view.report.at("online") == false);
+    CHECK(view.report.at("paired") == false);
+    CHECK(view.report.at("model_ready") == false);
+}
+
+TEST_CASE("four_state: 待批准一笔——指引 approve 命令与配对码去处") {
+    ChannelFourStateInput input;
+    input.account_configured = true;
+    input.online = true;
+    input.pairing_present = true;
+    input.pairing_pending = 1;
+    input.model_configured = true;
+    const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
+    REQUIRE(view.lines.size() >= 5);
+    CHECK(view.lines[2].find("有待批准的配对 1 笔") != std::string::npos);
+    bool saw_approve = false;
+    for (const std::string& line : view.lines) {
+        if (line.find("channel pairing approve qqbot main") != std::string::npos) {
+            saw_approve = true;
+        }
+    }
+    CHECK(saw_approve);
+    CHECK(view.report.at("pairing_pending") == 1);
+}
+
+TEST_CASE("four_state: 配对账读不懂——如实报未知,不冒充 0 个") {
+    ChannelFourStateInput input;
+    input.pairing_present = true;
+    input.pairing_parse_ok = false;
+    const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
+    CHECK(view.lines[2].find("未知") != std::string::npos);
+    CHECK(view.lines[2].find("pairing.json") != std::string::npos);
+    CHECK(view.report.at("paired") == "unreadable");
+}
+
 }  // namespace lubancode::cli

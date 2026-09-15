@@ -652,6 +652,23 @@ void ChannelManager::OnInboundLocked(AccountEntry& entry, const ChannelInboundEv
     }
     if (route.status == RouteDecision::Status::PendingPairing) {
         entry.ingress->Transition(ingest->sid, IngressEventState::Rejected, "pairing_pending");
+        // Q1b 配对提示:宿主生成的提示经 reply outbox 发给来者。限频——
+        // 同 sender 同账号冷却窗内只发一次(持久已提示账,重启不重发);
+        // 被拒/限速不发 code 的来信(router 返空 code)也不发提示。提示
+        // 只入队不直发:投递走 Q2 既有链路(泵排水进 outbox 渠道段)。
+        if (!route.pairing_code.empty() &&
+            entry.pairing->MarkNoticeSent(event.sender.id, event.conversation.id,
+                                          options_.now_ms())) {
+            PairingNotice notice;
+            notice.conversation_id = event.conversation.id;
+            notice.reply_to_message_id = event.message_id;
+            notice.sender_id = event.sender.id;
+            notice.code = route.pairing_code;
+            notice.text = MakePairingNoticeText(route.pairing_code, entry.channel_id,
+                                                entry.account_id);
+            notice.trigger_sid = ingest->sid;
+            entry.pending_pairing_notices.push_back(std::move(notice));
+        }
         return;
     }
     // 准入过了:主线 Authorized -> Routed(message-contracts.md §4)。
@@ -905,6 +922,40 @@ std::optional<std::string> ChannelManager::RejectPairing(const std::string& chan
         return std::nullopt;
     }
     return entry->pairing->Reject(code, options_.now_ms(), error);
+}
+
+std::optional<std::string> ChannelManager::ApprovePairingBySender(
+    const std::string& channel_id, const std::string& account_id, const std::string& sender_id,
+    std::string* error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        if (error != nullptr) *error = "account_not_found";
+        return std::nullopt;
+    }
+    return entry->pairing->ApproveSender(sender_id, options_.now_ms(), error);
+}
+
+std::optional<std::string> ChannelManager::RejectPairingBySender(
+    const std::string& channel_id, const std::string& account_id, const std::string& sender_id,
+    std::string* error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        if (error != nullptr) *error = "account_not_found";
+        return std::nullopt;
+    }
+    return entry->pairing->RejectSender(sender_id, options_.now_ms(), error);
+}
+
+std::vector<ChannelManager::PairingNotice> ChannelManager::DrainPendingPairingNotices(
+    const std::string& channel_id, const std::string& account_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) return {};
+    std::vector<PairingNotice> out;
+    out.swap(entry->pending_pairing_notices);
+    return out;
 }
 
 // ---- 出站投递(Q2 §七) ------------------------------------------------------

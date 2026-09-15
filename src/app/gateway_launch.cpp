@@ -157,6 +157,15 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         const std::filesystem::path wiring_channels_root =
             channel::DefaultChannelsStateRoot();
         wiring_options.channels_state_root = wiring_channels_root;
+        // Q1b 配对控制面:profile 树的 control/(与 stop.json 同款通道),
+        // 另一终端的 channel pairing approve/reject 命令从这里进来。
+        wiring_options.gateway_control_dir =
+            gateway::ResolveGatewayProfilePaths(gateway::DefaultGatewayRoot(),
+                                                gateway_args.profile.empty()
+                                                    ? std::string(
+                                                          gateway::kDefaultGatewayProfile)
+                                                    : gateway_args.profile)
+                .control_dir;
         const std::filesystem::path channels_root = wiring_channels_root;
         channel_wiring = app::ChannelGatewayWiring::Create(std::move(wiring_options));
         if (channel_wiring != nullptr) {

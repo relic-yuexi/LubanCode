@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -15,8 +16,11 @@
 #include <nlohmann/json.hpp>
 
 #include "app/channel_gateway_wiring.hpp"
+#include "channel/digest.hpp"
+#include "channel/pairing.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "config/config.hpp"
+#include "gateway/pairing_command.hpp"
 #include "platform/wall_clock.hpp"
 
 namespace lubancode::app {
@@ -195,6 +199,105 @@ TEST_CASE("qq_wiring: 信任根诊断——显式无效锚明报,不静默(§四
     REQUIRE_FALSE(wiring->diagnostics().empty());
     CHECK(wiring->diagnostics().at(0).find("TLS 信任根不可用") != std::string::npos);
     CHECK(wiring->diagnostics().at(0).find("tls_trust_store_empty") != std::string::npos);
+    CHECK(wiring->Close(5'000));
+}
+
+TEST_CASE("qq_wiring: Q1b 配对控制面——命令进来,回执出去,账上真批准") {
+    const auto root = MakeTempRoot("pairing_control");
+    // 预置两笔 pending 配对账(wiring 装配前落盘;code 明文 TESTCODE 的
+    // hash + spammer 的身份待审)。
+    const std::filesystem::path account_dir = root / "qqbot" / "main";
+    std::error_code ec;
+    std::filesystem::create_directories(account_dir, ec);
+    const std::int64_t now = platform::WallClockNowMs();
+    {
+        nlohmann::json pairing = nlohmann::json::object();
+        pairing["schema_version"] = 2;
+        nlohmann::json record_base = nlohmann::json::object({
+            {"channel_id", "qqbot"},
+            {"account_id", "main"},
+            {"code_hash", channel::Sha256Hex("TESTCODE")},
+            {"created_at_ms", now},
+            {"expires_at_ms", now + 5 * 60 * 1000},
+            {"status", "pending"},
+        });
+        nlohmann::json records = nlohmann::json::array();
+        nlohmann::json by_code = record_base;
+        by_code["sender_id"] = "stranger-1";
+        records.push_back(by_code);
+        nlohmann::json by_sender = record_base;
+        by_sender["sender_id"] = "spammer";
+        by_sender["code_hash"] = channel::Sha256Hex("XXXXYYYY");
+        records.push_back(by_sender);
+        pairing["records"] = records;
+        pairing["notices"] = nlohmann::json::array();
+        std::ofstream(account_dir / "pairing.json", std::ios::trunc) << pairing.dump();
+    }
+
+    config::Config config;
+    channel::ChannelUserConfig qq;
+    qq.enabled = true;
+    channel::ChannelAccountUserConfig account = channel::MakeQqTemplateAccount();
+    account.enabled = true;
+    account.app_id = "APP1";
+    account.secret = std::string("inline-secret");
+    qq.accounts["main"] = account;
+    config.channels["qqbot"] = qq;
+
+    auto options = MakeOptions(&config, root);
+    options.gateway_control_dir = root / "control";
+    auto wiring = ChannelGatewayWiring::Create(std::move(options));
+    REQUIRE(wiring != nullptr);
+    // GatewayProcess 取锁后会递进 boot_id;wiring 的控制面只认本实例。
+    wiring->set_owner_epoch("boot-q1b");
+
+    // 1) 按配对码批准:token=TESTCODE。
+    gateway::GatewayPairingCommand command;
+    command.boot_id = "boot-q1b";
+    command.command_id = "cmd00001";
+    command.action = "approve";
+    command.channel_id = "qqbot";
+    command.account_id = "main";
+    command.token = "TESTCODE";
+    command.requested_at_ms = now;
+    REQUIRE(gateway::WritePairingCommand(root / "control", command).empty());
+    REQUIRE(wiring->TickOnce(platform::WallClockNowMs()));
+    std::string error;
+    const auto approved = gateway::TakePairingCommandResult(root / "control", "cmd00001", &error);
+    REQUIRE(approved.has_value());
+    CHECK(approved->ok);
+    CHECK(approved->sender_id == "stranger-1");
+    CHECK(approved->detail.find("已批准") != std::string::npos);
+
+    // 2) 按身份拒绝:token 不认的码,落到 sender 身份路。
+    gateway::GatewayPairingCommand reject = command;
+    reject.command_id = "cmd00002";
+    reject.action = "reject";
+    reject.token = "spammer";
+    REQUIRE(gateway::WritePairingCommand(root / "control", reject).empty());
+    REQUIRE(wiring->TickOnce(platform::WallClockNowMs()));
+    const auto rejected = gateway::TakePairingCommandResult(root / "control", "cmd00002", &error);
+    REQUIRE(rejected.has_value());
+    CHECK(rejected->ok);
+    CHECK(rejected->sender_id == "spammer");
+
+    // 3) 不认的 token(code 与身份都对不上):回执如实报 not_found。
+    gateway::GatewayPairingCommand ghost = command;
+    ghost.command_id = "cmd00003";
+    ghost.token = "NOBODY123";
+    REQUIRE(gateway::WritePairingCommand(root / "control", ghost).empty());
+    REQUIRE(wiring->TickOnce(platform::WallClockNowMs()));
+    const auto missed = gateway::TakePairingCommandResult(root / "control", "cmd00003", &error);
+    REQUIRE(missed.has_value());
+    CHECK_FALSE(missed->ok);
+    CHECK(missed->error == "not_found");
+
+    // 4) 账上真变了:approved 1、spammer 被拒(只读投影核)。
+    const auto projection = channel::PairingStore::ReadProjection(account_dir);
+    CHECK(projection.parse_ok);
+    CHECK(projection.approved == 1);
+    CHECK(projection.pending == 0);
+
     CHECK(wiring->Close(5'000));
 }
 

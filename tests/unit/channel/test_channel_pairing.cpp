@@ -4,8 +4,11 @@
 #include <doctest/doctest.h>
 
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+
+#include <nlohmann/json.hpp>
 
 #include "channel/pairing.hpp"
 
@@ -149,4 +152,172 @@ TEST_CASE("默认 code 生成器:长度与字符集") {
             CHECK(c != 'I');
         }
     }
+}
+
+// ---- Q1b:提示限频账 / 被拒守门 / 按身份批准 / v2 账面 / 只读投影 ---------
+
+TEST_CASE("Q1b 提示限频:冷却窗内只记一次,持久后重启不重发") {
+    const auto dir = MakeAccountDir("notice_cooldown");
+    {
+        auto store = OpenStore(dir);
+        CHECK(store->MarkNoticeSent("owner-1", "dm-a", kT0));
+        // 窗内第二笔:拒,不更新账。
+        CHECK_FALSE(store->MarkNoticeSent("owner-1", "dm-b", kT0 + 1000));
+        REQUIRE(store->NoticeLog().size() == 1);
+        CHECK(store->NoticeLog()[0].conversation_id == "dm-a");
+        CHECK(store->NoticeLog()[0].notified_at_ms == kT0);
+        // 另一枚 sender 不受限。
+        CHECK(store->MarkNoticeSent("owner-2", "dm-c", kT0 + 1000));
+        // 冷却窗过了:允许再发,会话更新到最新。
+        CHECK(store->MarkNoticeSent("owner-1", "dm-b", kT0 + kPairingNoticeCooldownMs));
+        REQUIRE(store->NoticeLog().size() == 2);
+        CHECK(store->NoticeLog()[0].conversation_id == "dm-b");
+    }
+    // 重启(重开账):限频账还在,同窗内仍拒——不重发刷屏。
+    {
+        auto store = OpenStore(dir);
+        CHECK_FALSE(store->MarkNoticeSent("owner-1", "dm-b",
+                                          kT0 + kPairingNoticeCooldownMs + 1000));
+        CHECK(store->MarkNoticeSent("owner-1", "dm-b",
+                                    kT0 + 2 * kPairingNoticeCooldownMs));
+    }
+}
+
+TEST_CASE("Q1b 被拒守门:拒绝过的 sender 不再发 code(不再收提示)") {
+    const auto dir = MakeAccountDir("rejected_sender");
+    auto store = OpenStore(dir);
+    const auto code = store->RequestPairing("spammer", kT0, [] { return "GGGG8888"; });
+    REQUIRE(code.has_value());
+    std::string error;
+    REQUIRE(store->Reject(*code, kT0 + 1, &error).has_value());
+    CHECK(store->IsSenderRejected("spammer"));
+    // 冷却期过了也不给新 code:被拒是一笔持久事实,不是限速。
+    CHECK_FALSE(store->RequestPairing("spammer", kT0 + kPairingRequestCooldownMs + kT0,
+                                      [] { return "HHHH9999"; })
+                    .has_value());
+    CHECK(store->last_error() == "sender_rejected");
+    // 别的 sender 照常。
+    REQUIRE(store->RequestPairing("owner-2", kT0 + 100, [] { return "JJJJ2222"; }).has_value());
+}
+
+TEST_CASE("Q1b 按身份批准/拒绝:结算该 sender 最新一枚 pending") {
+    const auto dir = MakeAccountDir("by_sender");
+    auto store = OpenStore(dir);
+    std::string error;
+    // 没有待审:明报 not_found。
+    CHECK_FALSE(store->ApproveSender("nobody", kT0, &error).has_value());
+    CHECK(error == "not_found");
+    // 造一枚 pending。
+    REQUIRE(store->RequestPairing("owner-1", kT0, [] { return "KKKK3333"; }).has_value());
+    const auto approved = store->ApproveSender("owner-1", kT0 + 10, &error);
+    REQUIRE(approved.has_value());
+    CHECK(*approved == "owner-1");
+    CHECK(store->IsSenderApproved("owner-1"));
+    // 已批准再按身份批:already_finalized,不翻旧账。
+    CHECK_FALSE(store->ApproveSender("owner-1", kT0 + 20, &error).has_value());
+    CHECK(error == "already_finalized");
+    // 拒绝路:最新 pending 被 reject。
+    REQUIRE(store->RequestPairing("owner-3", kT0 + 1000, [] { return "LLLL4444"; }).has_value());
+    const auto rejected = store->RejectSender("owner-3", kT0 + 1010, &error);
+    REQUIRE(rejected.has_value());
+    CHECK(*rejected == "owner-3");
+    CHECK(store->IsSenderRejected("owner-3"));
+}
+
+TEST_CASE("Q1b 按身份批准:pending 过期如实报 expired,不当 not_found") {
+    const auto dir = MakeAccountDir("by_sender_expiry");
+    auto store = OpenStore(dir);
+    REQUIRE(store->RequestPairing("owner-1", kT0, [] { return "MMMM5555"; }).has_value());
+    std::string error;
+    CHECK_FALSE(store->ApproveSender("owner-1", kT0 + kPairingCodeTtlMs + 1, &error).has_value());
+    CHECK(error == "expired");
+    CHECK_FALSE(store->IsSenderApproved("owner-1"));
+}
+
+TEST_CASE("Q1b v2 账面:records+notices 同盘持久;旧裸数组读作无提示账") {
+    const auto dir = MakeAccountDir("v2_format");
+    {
+        auto store = OpenStore(dir);
+        REQUIRE(store->RequestPairing("owner-1", kT0, [] { return "NNNN6666"; }).has_value());
+        REQUIRE(store->MarkNoticeSent("owner-1", "dm-a", kT0 + 5));
+        // 盘上是对象(schema_version 2),records 与 notices 两数组。
+        std::ifstream stream(dir / "pairing.json");
+        std::string text((std::istreambuf_iterator<char>(stream)),
+                         std::istreambuf_iterator<char>());
+        CHECK(text.find("\"schema_version\"") != std::string::npos);
+        CHECK(text.find("\"records\"") != std::string::npos);
+        CHECK(text.find("\"notices\"") != std::string::npos);
+    }
+    {
+        auto store = OpenStore(dir);
+        CHECK(store->NoticeLog().size() == 1);
+        CHECK(store->NoticeLog()[0].sender_id == "owner-1");
+        // 旧格式(裸数组)重放:records 还在,notices 读作空(旧进程没发过
+        // 提示,空账即事实——第一次提示不再被旧冷却挡住)。
+        std::vector<PairingStore::Record> records = store->Records();
+        REQUIRE(records.size() == 1);
+        std::error_code ec;
+        std::filesystem::remove(dir / "pairing.json", ec);
+        nlohmann::json legacy = nlohmann::json::array();
+        // 注意:内容不能手拼 string——用 json 对象序列化。
+        // 这里直接把旧账写成单元素数组(RecordToJson 的同形状)。
+        nlohmann::json record = nlohmann::json::object({
+            {"channel_id", "qqbot"},
+            {"account_id", "main"},
+            {"sender_id", "owner-1"},
+            {"code_hash", records[0].code_hash},
+            {"created_at_ms", records[0].created_at_ms},
+            {"expires_at_ms", records[0].expires_at_ms},
+            {"status", "pending"},
+        });
+        legacy.push_back(record);
+        std::ofstream(dir / "pairing.json", std::ios::trunc) << legacy.dump();
+    }
+    {
+        auto store = OpenStore(dir);
+        CHECK(store->NoticeLog().empty());
+        CHECK(store->PendingList(kT0 + 60'000).empty());  // 过期后 pending 不列
+        CHECK(store->MarkNoticeSent("owner-1", "dm-z", kT0 + 60'000));
+    }
+}
+
+TEST_CASE("Q1b 只读投影:零建目录零写盘;批准/待审计数;坏账如实报") {
+    const auto dir = MakeAccountDir("projection");
+    // 账不在:present=false,不建目录。
+    const auto missing = PairingStore::ReadProjection(dir / "ghost");
+    CHECK_FALSE(missing.present);
+    CHECK(missing.parse_ok);
+    CHECK_FALSE(std::filesystem::exists(dir / "ghost"));
+
+    // ReadProjection 的 pending 过滤走真墙钟——这里用真实时间基(非 kT0)。
+    const std::int64_t real_now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count();
+    auto store = OpenStore(dir);
+    REQUIRE(store->RequestPairing("owner-1", real_now, [] { return "PPPP7777"; }).has_value());
+    REQUIRE(store->RequestPairing("owner-2", real_now + 100, [] { return "QQRR8899"; })
+                .has_value());
+    REQUIRE(store->Approve("PPPP7777", real_now + 200).has_value());
+    {
+        const auto projection = PairingStore::ReadProjection(dir);
+        CHECK(projection.present);
+        CHECK(projection.parse_ok);
+        CHECK(projection.approved == 1);
+        CHECK(projection.pending == 1);
+    }
+    // 坏账:parse_ok=false,不冒充 0 个。
+    std::ofstream(dir / "pairing.json", std::ios::trunc) << "{ not json";
+    const auto broken = PairingStore::ReadProjection(dir);
+    CHECK(broken.present);
+    CHECK_FALSE(broken.parse_ok);
+}
+
+TEST_CASE("Q1b 提示正文:含配对指引与 approve 命令,零敏感字段") {
+    const std::string text = MakePairingNoticeText("ABCD2345", "qqbot", "main");
+    CHECK(text.find("ABCD2345") != std::string::npos);
+    CHECK(text.find("lubancode channel pairing approve qqbot main ABCD2345") != std::string::npos);
+    CHECK(text.find("重新发送") != std::string::npos);  // 批准后不自动补跑
+    // 零敏感:不带"secret/token/密钥"字样(码是配对码,一次性,不是凭据)。
+    CHECK(text.find("secret") == std::string::npos);
+    CHECK(text.find("token") == std::string::npos);
 }
