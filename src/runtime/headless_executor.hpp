@@ -108,6 +108,11 @@ public:
         // 会话落位(与 SessionService 三端同形)。
         std::filesystem::path workspaces_root;  // 空 = 生产默认
         std::filesystem::path workspace_root;   // 身份裁决起点(fallback identity)
+        // 装配层裁决的整份身份(W2 起):valid 时开场吃它(与 app-server/
+        // 聊天线同一把尺——git 仓库下四级裁决与 fallback 自算的 key 不同,
+        // 各自进门会撞 identity.key_mismatch);invalid 时按 workspace_root
+        // 自算 fallback(旧测试形态,行为不变)。
+        workspace::WorkspaceIdentity workspace_identity;
         std::string cwd_utf8;
         std::string lubancode_version;
         std::string wire_name;

@@ -106,6 +106,7 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
     HeadlessExecutor::Options executor_options;
     executor_options.workspaces_root = out->options_.workspaces_root;
     executor_options.workspace_root = out->options_.workspace_identity.identity_root;
+    executor_options.workspace_identity = out->options_.workspace_identity;  // W2:整份递(与 automation 同尺)
     executor_options.cwd_utf8 = out->options_.cwd_utf8;
     executor_options.lubancode_version = out->options_.lubancode_version;
     executor_options.wire_name = out->options_.wire_name;

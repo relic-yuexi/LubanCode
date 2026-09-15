@@ -400,6 +400,7 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     HeadlessExecutor::Options executor_options;
     executor_options.workspaces_root = options_.workspaces_root;
     executor_options.workspace_root = options_.workspace_identity.identity_root;
+    executor_options.workspace_identity = options_.workspace_identity;  // W2:整份递(开场与装配层同尺)
     executor_options.cwd_utf8 = options_.cwd_utf8;
     executor_options.lubancode_version = options_.lubancode_version;
     executor_options.wire_name = options_.wire_name;
