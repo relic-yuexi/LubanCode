@@ -190,7 +190,13 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
     payload["kind"] = gateway::ToString(spec.kind);
     payload["timezone"] = timezone;
     payload["duplicate"] = receipt.duplicate;
-    gateway::ScheduleSpec schedule = SpecOfJob(spec);
+    gateway::ScheduleSpec schedule;
+    schedule.kind = spec.kind;
+    schedule.due_at_ms = spec.due_at_ms;
+    schedule.interval_seconds = spec.interval_seconds;
+    schedule.cron_expr = spec.cron_expr;
+    schedule.timezone = spec.timezone;
+    schedule.misfire = spec.misfire;
     schedule.anchor_ms = now_ms;  // interval 锚点语义与 store 建账一致
     const auto next = gateway::FirstSlotAfter(schedule, now_ms);
     if (next.found) {
@@ -391,9 +397,10 @@ public:
         return nlohmann::json::object({
             {"type", "object"},
             {"properties",
-             nlohmann::json::object(
-                 {{"jobId", nlohmann::json::object({{"type", "string"},
-                                                    {"description", "任务 id(list_reminders 查得)"}})}}},
+             nlohmann::json::object({
+                 {"jobId", nlohmann::json::object({{"type", "string"},
+                                                    {"description", "任务 id(list_reminders 查得)"}})},
+             })},
             {"required", nlohmann::json::array({"jobId"})},
         });
     }
