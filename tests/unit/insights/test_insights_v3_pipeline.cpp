@@ -168,11 +168,22 @@ std::string InstallRequestedRound(V3Writer& writer, const std::string& turn_id,
     REQUIRE(prepared.status == WriteReceipt::Status::Committed);
     const auto sent = writer.AppendEvent(
         EventDraft{.kind = EventKindV3::ModelRequestSent,
+                   .status = OpStatus::Done,
                    .turn_id = turn_id,
                    .step_id = step_id,
                    .request_id = request_id},
         Durability::PowerLoss);
     REQUIRE(sent.status == WriteReceipt::Status::Committed);
+    // 响应终态(与生产 CompleteStreamResponse 同族:completed 带身份;
+    // 夹具不流式,直接落终态)。
+    const auto completed = writer.AppendEvent(
+        EventDraft{.kind = EventKindV3::ModelResponseCompleted,
+                   .status = OpStatus::Done,
+                   .turn_id = turn_id,
+                   .step_id = step_id,
+                   .request_id = request_id},
+        Durability::PowerLoss);
+    REQUIRE(completed.status == WriteReceipt::Status::Committed);
 
     MessageDraft assistant;
     assistant.turn_id = turn_id;
@@ -518,8 +529,10 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
         {
             const std::string assistant_id = InstallFailingTool(
                 *writer, "turn-000002", "action-000004", "run_command", "timeout");
-            auto action = ToolActionSession::Reopen("turn-000002", "step-000002",
-                                                    "action-000004");
+            // 账面对齐把手:上一 attempt 已 Failed(§4.14 先终态再重试)。
+            auto action = ToolActionSession::ReopenAligned("turn-000002", "step-000002",
+                                                           "action-000004", std::uint64_t{1},
+                                                           true, ToolActionSession::Terminal::Failed);
             REQUIRE(action.BeginNextAttempt(*writer, "retry", Durability::ProcessCrash)
                         .status == WriteReceipt::Status::Committed);
             REQUIRE(action
@@ -642,6 +655,7 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
                         .status == WriteReceipt::Status::Committed);
             EventDraft failed;
             failed.kind = EventKindV3::ModelRequestFailed;
+            failed.status = OpStatus::Failed;
             failed.turn_id = "turn-000007";
             failed.step_id = "step-turn-000007";
             failed.request_id = request_id;

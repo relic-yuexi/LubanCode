@@ -131,11 +131,24 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         }
         summary.source.stream_terminal_hashes[it.key()] = it.value().get<std::string>();
     }
-    if (source.size() != 3 && source.size() != 4) {
-        *error = "source 未知键";
-        return std::nullopt;
+    // source 键集:三键(session_id/stream_terminal_hashes/integrity)或
+    // 加可选 format(v2.0 起;缺省读作 v2)。多出的键一律拒(不只数键数)。
+    {
+        bool extra_key = false;
+        for (auto it = source.begin(); it != source.end(); ++it) {
+            const bool known = it.key() == "session_id" ||
+                               it.key() == "stream_terminal_hashes" ||
+                               it.key() == "integrity" || it.key() == "format";
+            if (!known) {
+                extra_key = true;
+                break;
+            }
+        }
+        if (extra_key) {
+            *error = "source 未知键";
+            return std::nullopt;
+        }
     }
-    // source.format 可选(v2.0 前的旧摘要与 v2 会话不带);缺省读作 v2。
     if (source.contains("format")) {
         if (!ReadString(source, "format", &summary.source.format) ||
             (summary.source.format != "v2" && summary.source.format != "v3")) {
@@ -156,7 +169,8 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         *error = "coverage 五键不合";
         return std::nullopt;
     }
-    // coverage.limitations 可选(v3 缺件声明;缺省空)。
+    // coverage.limitations 可选(v3 缺件声明;缺省空);除此键外多出的
+    // 键一律拒——不能只数键数(limitations 与未知键同为第 6 键)。
     if (coverage.contains("limitations")) {
         if (!coverage.at("limitations").is_array()) {
             *error = "coverage.limitations 须是数组";
@@ -170,9 +184,22 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
             summary.coverage.limitations.push_back(item.get<std::string>());
         }
     }
-    if (coverage.size() != 5 && coverage.size() != 6) {
-        *error = "coverage 未知键";
-        return std::nullopt;
+    {
+        bool extra_key = false;
+        for (auto it = coverage.begin(); it != coverage.end(); ++it) {
+            const bool known = it.key() == "runs_total" || it.key() == "runs_analyzed" ||
+                               it.key() == "requests_total" ||
+                               it.key() == "requests_with_usage" ||
+                               it.key() == "outcomes_assessed" || it.key() == "limitations";
+            if (!known) {
+                extra_key = true;
+                break;
+            }
+        }
+        if (extra_key) {
+            *error = "coverage 未知键";
+            return std::nullopt;
+        }
     }
     if (!json.contains("work") || !json.at("work").is_object()) {
         *error = "work 须是 object";
