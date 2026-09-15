@@ -433,8 +433,9 @@ MenuPanelSyncReport QqMenuPanelPublisher::Sync(const SyncInput& input) {
                     report.notices.push_back("QQ 菜单首次发布:远端已有菜单,本次按显式启用"
                                              "的配置覆盖(差异已记入本地状态)。");
                 }
-                const auto put = Call("menu_write", kBudgetMenuWrite, "PUT", "/v2/menu",
-                                      &BuildMenuPutBody(input.menu), &report);
+                const nlohmann::json put_body = BuildMenuPutBody(input.menu);
+                const auto put =
+                    Call("menu_write", kBudgetMenuWrite, "PUT", "/v2/menu", &put_body, &report);
                 if (!put.ok) {
                     report.error_code = put.error_code;
                     report.error_detail = put.error_detail;
@@ -513,8 +514,9 @@ MenuPanelSyncReport QqMenuPanelPublisher::Sync(const SyncInput& input) {
 
         if (!owned.has_value()) {
             // 没有 → 创建(唯一会耗 20 块额度的路;配额错误如实报)。
+            const nlohmann::json create_body = BuildPanelCreateBody(input.panel, remark);
             const auto create = Call("panel_write", kBudgetPanelWrite, "POST", "/v2/panels",
-                                     &BuildPanelCreateBody(input.panel, remark), &report);
+                                     &create_body, &report);
             if (!create.ok) {
                 report.error_code = create.error_code;
                 report.error_detail = create.error_detail;
@@ -556,9 +558,10 @@ MenuPanelSyncReport QqMenuPanelPublisher::Sync(const SyncInput& input) {
                     state_dirty = true;
                 }
             } else {
-                const auto update = Call(
-                    "panel_write", kBudgetPanelWrite, "PUT", "/v2/panels/" + owned->panel_id,
-                    &BuildPanelUpdateBody(input.panel, remark), &report);
+                const nlohmann::json update_body = BuildPanelUpdateBody(input.panel, remark);
+                const auto update =
+                    Call("panel_write", kBudgetPanelWrite, "PUT", "/v2/panels/" + owned->panel_id,
+                         &update_body, &report);
                 if (!update.ok) {
                     report.error_code = update.error_code;
                     report.error_detail = update.error_detail;
@@ -610,9 +613,10 @@ MenuPanelSyncReport QqMenuPanelPublisher::Sync(const SyncInput& input) {
                     std::vector<std::string> batch(openids.begin() + offset,
                                                    std::begin(openids) +
                                                        std::min(openids.size(), offset + 20));
+                    const nlohmann::json target_body = BuildPanelTargetBody(op, batch);
                     const auto call = Call("target", kBudgetTarget, "PUT",
                                            "/v2/panels/" + report.panel_id + "/target",
-                                           &BuildPanelTargetBody(op, batch), &report);
+                                           &target_body, &report);
                     if (!call.ok) {
                         report.error_code = call.error_code;
                         report.error_detail = call.error_detail;
