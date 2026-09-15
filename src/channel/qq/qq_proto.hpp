@@ -57,6 +57,11 @@ struct GatewayPayload {
 std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
                                                   std::string* error);
 
+// 宽松整数解析:真机教训(2026-09-15 用户 Q3 实测)——QQ 平台 JSON 不严格,
+// expires_in 等数值字段可能以数字字符串("7200")回传。收数字与纯数字字符串
+// (容首尾空白);浮点、带杂质的字符串、其它类型一律 nullopt,不静默截断。
+std::optional<std::int64_t> ParseLooseInt64(const nlohmann::json& value);
+
 // Hello(op=10)的 d.heartbeat_interval_ms。缺失/非正数返回 nullopt。
 std::optional<std::int64_t> ParseHelloInterval(const nlohmann::json& d);
 

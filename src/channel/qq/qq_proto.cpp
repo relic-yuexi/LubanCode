@@ -1,14 +1,52 @@
 #include "channel/qq/qq_proto.hpp"
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <string_view>
 
 namespace lubancode::channel::qq {
 
 namespace {
 
 bool JsonIsNumber(const nlohmann::json& value) { return value.is_number(); }
+
+bool IsAsciiSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+}  // namespace
+
+std::optional<std::int64_t> ParseLooseInt64(const nlohmann::json& value) {
+    if (value.is_number_integer()) {
+        return value.get<std::int64_t>();
+    }
+    if (!value.is_string()) {
+        // 浮点/布尔/null/缺失不收——平台没发过小数,出现即按异常明拒。
+        return std::nullopt;
+    }
+    std::string_view text = value.get_ref<const std::string&>();
+    while (!text.empty() && IsAsciiSpace(text.front())) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && IsAsciiSpace(text.back())) {
+        text.remove_suffix(1);
+    }
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    std::int64_t parsed = 0;
+    const char* first = text.data();
+    const char* last = text.data() + text.size();
+    const auto result = std::from_chars(first, last, parsed);
+    if (result.ec != std::errc{} || result.ptr != last) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+namespace {
 
 // nlohmann 纪律:const json 上 operator[] 查缺键是 UB——取字段一律先 contains。
 std::optional<std::string> GetStringField(const nlohmann::json& object, const char* key) {
@@ -70,8 +108,10 @@ std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
         // op 的解析函数(ParseHelloInterval 等)自行校验。
         out.d = payload.at("d");
     }
-    if (payload.contains("s") && payload.at("s").is_number_integer()) {
-        out.s = payload.at("s").get<std::int64_t>();
+    if (payload.contains("s")) {
+        if (const auto seq = ParseLooseInt64(payload.at("s"))) {
+            out.s = *seq;
+        }
     }
     if (const auto id = GetStringField(payload, "id")) {
         out.id = *id;
@@ -83,12 +123,11 @@ std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
 }
 
 std::optional<std::int64_t> ParseHelloInterval(const nlohmann::json& d) {
-    if (!d.is_object() || !d.contains("heartbeat_interval_ms") ||
-        !d.at("heartbeat_interval_ms").is_number()) {
+    if (!d.is_object() || !d.contains("heartbeat_interval_ms")) {
         return std::nullopt;
     }
-    const std::int64_t ms = d.at("heartbeat_interval_ms").get<std::int64_t>();
-    if (ms <= 0) {
+    const std::optional<std::int64_t> ms = ParseLooseInt64(d.at("heartbeat_interval_ms"));
+    if (!ms.has_value() || *ms <= 0) {
         return std::nullopt;
     }
     return ms;
@@ -406,8 +445,10 @@ std::optional<AccessTokenResponse> ParseAccessTokenResponse(const nlohmann::json
     }
     AccessTokenResponse out;
     out.access_token = *token;
-    if (body.contains("expires_in") && body.at("expires_in").is_number()) {
-        out.expires_in_secs = body.at("expires_in").get<std::int64_t>();
+    if (body.contains("expires_in")) {
+        if (const auto secs = ParseLooseInt64(body.at("expires_in"))) {
+            out.expires_in_secs = *secs;
+        }
     }
     if (out.expires_in_secs <= 0) {
         if (error != nullptr) {
@@ -466,8 +507,10 @@ QqApiError ClassifyQqSendFailure(int http_status, const std::string& body) {
     out.http_status = http_status;
     // 平台错误体 {"code":...,"message":...};body 非合法 JSON 时 code 留 0。
     nlohmann::json parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-    if (parsed.is_object() && parsed.contains("code") && parsed.at("code").is_number_integer()) {
-        out.platform_code = parsed.at("code").get<std::int64_t>();
+    if (parsed.is_object() && parsed.contains("code")) {
+        if (const auto code = ParseLooseInt64(parsed.at("code"))) {
+            out.platform_code = *code;
+        }
     }
     if (parsed.is_object() && parsed.contains("message") && parsed.at("message").is_string()) {
         out.detail = parsed.at("message").get<std::string>();

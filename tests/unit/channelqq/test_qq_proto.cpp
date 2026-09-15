@@ -283,6 +283,42 @@ TEST_CASE("qq_proto: token 响应解析;缺字段/空值/非法 expires_in 拒�
             .has_value());
 }
 
+// 真机教训(2026-09-15 用户 Q3 实测):QQ 平台数值字段会以数字字符串回传,
+// expires_in "7200" 与 7200 同义;写死 is_number 的解析把令牌链卡死。
+TEST_CASE("qq_proto: 宽松整数解析——数字字符串与数字同收") {
+    CHECK(ParseLooseInt64(nlohmann::json(7200)) == std::int64_t{7200});
+    CHECK(ParseLooseInt64(nlohmann::json("7200")) == std::int64_t{7200});
+    CHECK(ParseLooseInt64(nlohmann::json(" 7200 ")) == std::int64_t{7200});
+    CHECK(ParseLooseInt64(nlohmann::json("-30")) == std::int64_t{-30});
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json("abc")).has_value());
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json("7200x")).has_value());
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json("")).has_value());
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json("   ")).has_value());
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json(1.5)).has_value());
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json(true)).has_value());
+    CHECK_FALSE(ParseLooseInt64(nlohmann::json(nullptr)).has_value());
+
+    std::string error;
+    const auto as_string = ParseAccessTokenResponse(
+        Parse(R"({"access_token":"T2","expires_in":"7200"})"), &error);
+    REQUIRE(as_string.has_value());
+    CHECK(as_string->expires_in_secs == 7200);
+    CHECK_FALSE(ParseAccessTokenResponse(
+                    Parse(R"({"access_token":"T","expires_in":"soon"})"), &error)
+                    .has_value());
+    const auto hello_string = ParseHelloInterval(
+        Parse(R"({"heartbeat_interval_ms":"41250"})"));
+    REQUIRE(hello_string.has_value());
+    CHECK(*hello_string == 41250);
+    const auto payload_seq_string =
+        ParseGatewayPayload(Parse(R"({"op":0,"s":"42","t":"C2C_MESSAGE_CREATE"})"), &error);
+    REQUIRE(payload_seq_string.has_value());
+    CHECK(payload_seq_string->s == std::int64_t{42});
+    const auto classified =
+        ClassifyQqSendFailure(200, R"({"code":"40034100","message":"主动频控"})");
+    CHECK(classified.platform_code == std::int64_t{40034100});
+}
+
 TEST_CASE("qq_proto: 发送载荷照官方请求示例(msg_type=0/content/msg_id/msg_seq)") {
     C2cSendRequest request;
     request.openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4";

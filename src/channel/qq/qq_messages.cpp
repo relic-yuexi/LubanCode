@@ -93,9 +93,9 @@ QqMessageSender::Outcome QqMessageSender::SendC2c(const C2cSendRequest& request)
                                                       /*allow_exceptions=*/false);
             // 腾讯错误体走 HTTP 200 + body {"code":..,"message":..}
             //(官方错误码表即此形态)——2xx 不等于成功,先查 code。
+            // code 宽松解析:真机教训,平台数值字段可能以字符串回传。
             if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("code") &&
-                parsed.at("code").is_number_integer() &&
-                parsed.at("code").get<std::int64_t>() != 0) {
+                ParseLooseInt64(parsed.at("code")).value_or(0) != 0) {
                 QqApiError error = ClassifyQqSendFailure(response->status, response->body);
                 if (error.kind == QqApiErrorKind::Deduped) {
                     Outcome outcome;
