@@ -229,23 +229,23 @@ nlohmann::json AssistantChannelFace::HandleChannelStatus(const nlohmann::json& p
     }
     // 配置探针(单账号):不在册也要如实给四态(卡第一步)。channels 段
     // 读不懂 → result 里如实报(channelsError),四态的第一步照实卡。
-    const channel::ChannelUserConfig* account_config = nullptr;
-    std::string channels_error;
+    // probe 整体存活到投影用完(取 &found->second 进的是它的 map——局部
+    // 拷贝出了函数就悬垂,UB 不能碰)。
+    std::optional<cli::ChannelsConfigProbe> probe;
     if (options_.config_path.has_value()) {
-        const auto probe = cli::LoadChannelsUserConfigFromFile(*options_.config_path);
-        if (probe.ok) {
-            const auto found = probe.channels.find(channel_id);
-            if (found != probe.channels.end()) {
-                account_config = &found->second;
-            }
-        } else {
-            channels_error = probe.detail;
+        probe = cli::LoadChannelsUserConfigFromFile(*options_.config_path);
+    }
+    const channel::ChannelUserConfig* account_config = nullptr;
+    if (probe.has_value() && probe->ok) {
+        const auto found = probe->channels.find(channel_id);
+        if (found != probe->channels.end()) {
+            account_config = &found->second;
         }
     }
     nlohmann::json result =
         BuildAccountProjection(channel_id, account_id, account_config, /*include_detail=*/true);
-    if (!channels_error.empty()) {
-        result["channelsError"] = channels_error;
+    if (probe.has_value() && !probe->ok) {
+        result["channelsError"] = probe->detail;
     }
     return result;
 }

@@ -186,10 +186,12 @@ TEST_CASE("channel/status: 四态如实分栏——配置在册、在线按快�
     CHECK(status.contains("fourStateLines"));
 }
 
-TEST_CASE("channel/status: 快照进程死/账号不在册——哪步卡住指哪步,不粉饰") {
+TEST_CASE("channel/status: 快照进程死/账号配置不齐——哪步卡住指哪步,不粉饰") {
     W3Fixture fixture("stuck");
-    fixture.WriteConfig(R"({"qqbot": {"enabled": true, "accounts": {"main": {}}}})");
-    // 账号在册但未启用 + 无 AppID → 第一步卡;快照 pid 死 → 第二步卡。
+    // 账号在册且启用,但 AppID 未填 → 第一步卡在 AppID。
+    fixture.WriteConfig(R"({"qqbot": {"enabled": true, "accounts": {
+      "main": {"enabled": true, "secret_env": "S"}}}})");
+    // 快照 pid 死 → 第二步卡(即使快照自称 connected)。
     fixture.WriteSnapshot("qqbot", "main", MakeSnapshot(true, 999999, WallMs()));
 
     int error_code = 0;
