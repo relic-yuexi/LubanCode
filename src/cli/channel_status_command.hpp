@@ -12,11 +12,15 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "channel/channel_config.hpp"
 
 namespace lubancode::cli {
 
@@ -70,6 +74,27 @@ struct ChannelFourStateView {
 ChannelFourStateView BuildChannelFourState(const std::string& channel_id,
                                            const std::string& account_id,
                                            const ChannelFourStateInput& input);
+
+// ---- 配置探针(W3 起与助理页面共用;判据单一真源) --------------------------
+// 读配置文件的 channels 段并解析(只读;文件不在/读不懂/channels 段坏都
+// 如实落 detail,不冒充空配置)。
+struct ChannelsConfigProbe {
+    bool ok = false;                    // channels 段读到了且解析过了
+    std::string detail;                 // 失败原因(人话;可空)
+    std::map<std::string, channel::ChannelUserConfig> channels;  // ok 时有效
+};
+ChannelsConfigProbe LoadChannelsUserConfigFromFile(const std::filesystem::path& config_path);
+
+// 账号配置判据(纯逻辑):在册且启用、AppID 与凭据来源都配了才算
+// configured。detail 给"卡在哪"。与 RunChannelStatusCommand 第一步同尺
+// ——助理页面(W3)吃同一份,不开第二份判据。
+struct ChannelAccountConfigProbe {
+    bool configured = false;
+    std::string detail;
+};
+ChannelAccountConfigProbe ProbeChannelAccountConfig(
+    const std::map<std::string, channel::ChannelUserConfig>& channels,
+    const std::string& channel_id, const std::string& account_id);
 
 // 命令入口(cli_app 调):解析参数 → 定位快照 → 裁决 → 打印 → 退出码。
 int RunChannelStatusCommand(const ChannelStatusCommandArgs& args);

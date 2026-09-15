@@ -497,11 +497,31 @@
     }
   });
 
-  // ---- W2:任务 / 结果 / 审批 / 补账 ----
+  // ---- W2:任务 / 结果 / 审批 / 补账;W4:周期/暂停/恢复/run-now ----
 
   function newOperationId() {
     return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
   }
+
+  // ---- W4:创建表单的计划形态切换(只画确实交付的能力) ----
+  const scheduleKind = el('task-schedule-kind');
+  const scheduleOnce = el('task-schedule-once');
+  const scheduleInterval = el('task-schedule-interval');
+  const scheduleCron = el('task-schedule-cron');
+  const scheduleMisfireWrap = el('task-schedule-misfire-wrap');
+  const notifyWrap = el('task-notify-wrap');
+
+  function applyScheduleKind() {
+    const kind = scheduleKind.value;
+    scheduleOnce.hidden = kind !== 'once';
+    scheduleInterval.hidden = kind !== 'interval';
+    scheduleCron.hidden = kind !== 'cron';
+    // misfire/heartbeat 只对周期任务有意义(once 一锤子买卖)。
+    scheduleMisfireWrap.hidden = kind === 'once';
+    notifyWrap.hidden = kind === 'once';
+  }
+  scheduleKind.addEventListener('change', applyScheduleKind);
+  applyScheduleKind();
 
   // 实时事件带的服务端游标:见过即推进(重连补账从这之后续,不重发)。
   function noteEventSeq(params) {
@@ -582,12 +602,36 @@
   };
   const stateLabel = { scheduled: '排队', claimed: '执行中', settled: '已结算' };
   const deliveryLabel = { delivered: '已投递', pending: '待投递', flagged: '投递异常' };
+  const misfireLabel = { coalesce: '错过合并补一拍', skip: '错过跳过' };
 
   function chip(text, cls) {
     const span = document.createElement('span');
     span.className = 'state-chip' + (cls ? ' ' + cls : '');
     span.textContent = text;
     return span;
+  }
+
+  // W4:计划摘要一行(单次/每 N 秒/cron;下次到期与 misfire 政策)。
+  function scheduleLine(task) {
+    const schedule = task.schedule || {};
+    if (schedule.kind === 'interval') {
+      return '周期:每 ' + schedule.intervalSeconds + ' 秒';
+    }
+    if (schedule.kind === 'cron') {
+      return 'cron: ' + (schedule.cronExpr || '?') + '(' + (schedule.timezone || 'UTC') + ')';
+    }
+    return '单次';
+  }
+
+  function nextDueText(task) {
+    const schedule = task.schedule || {};
+    if (!Number.isFinite(schedule.nextDueMs)) return '';
+    const due = Number(schedule.nextDueMs);
+    const delta = due - Date.now();
+    if (schedule.kind === 'once') {
+      return delta <= 0 ? '已到期' : ('还差 ' + Math.round(delta / 1000) + ' 秒');
+    }
+    return delta <= 0 ? '即将执行' : ('下次 ' + Math.round(delta / 1000) + ' 秒后');
   }
 
   function renderTasks() {
@@ -612,9 +656,27 @@
           latest.outcome === 'succeeded' ? 'ok' : (latest.outcome === 'needs_review' || latest.outcome === 'failed' ? 'warn' : '')));
       }
       if (task.state && task.state !== 'active') {
-        head.appendChild(chip(task.state === 'cancelled' ? '任务已取消' : task.state, 'warn'));
+        head.appendChild(chip(task.state === 'cancelled' ? '任务已取消' : (task.state === 'paused' ? '已暂停' : task.state), 'warn'));
       }
       card.appendChild(head);
+
+      // W4:计划摘要行(单次任务也带,口径统一)。
+      const scheduleRow = document.createElement('div');
+      scheduleRow.className = 'schedule-line';
+      let line = scheduleLine(task);
+      const nextText = nextDueText(task);
+      if (nextText && task.state !== 'cancelled') {
+        line += ' · ' + nextText;
+      }
+      const misfire = (task.schedule || {}).misfirePolicy;
+      if ((task.schedule || {}).kind !== 'once' && misfire && misfireLabel[misfire]) {
+        line += ' · ' + misfireLabel[misfire];
+      }
+      if ((task.schedule || {}).notifyOnChange) {
+        line += ' · 有变化才投递';
+      }
+      scheduleRow.textContent = line;
+      card.appendChild(scheduleRow);
 
       const ops = document.createElement('div');
       ops.className = 'ops';
@@ -631,7 +693,36 @@
         }
       });
       ops.appendChild(detailButton);
-      if (task.state === 'active' && (!latest.state || latest.state !== 'settled')) {
+      // W4:立即执行(只对 active 画——V2 语义 paused 任务的 occurrence
+      // 不认领,暂停中手动触发也不会跑,不画假按钮;cancelled 终态同)。
+      if (task.state === 'active') {
+        const runNowButton = document.createElement('button');
+        runNowButton.type = 'button';
+        runNowButton.textContent = '立即执行';
+        runNowButton.addEventListener('click', function () {
+          runNowTask(task.jobId, runNowButton);
+        });
+        ops.appendChild(runNowButton);
+      }
+      if (task.state === 'active') {
+        const pauseButton = document.createElement('button');
+        pauseButton.type = 'button';
+        pauseButton.textContent = '暂停';
+        pauseButton.addEventListener('click', function () {
+          stateTask('task/pause', task.jobId, task.revision, pauseButton);
+        });
+        ops.appendChild(pauseButton);
+      }
+      if (task.state === 'paused') {
+        const resumeButton = document.createElement('button');
+        resumeButton.type = 'button';
+        resumeButton.textContent = '恢复';
+        resumeButton.addEventListener('click', function () {
+          stateTask('task/resume', task.jobId, task.revision, resumeButton);
+        });
+        ops.appendChild(resumeButton);
+      }
+      if (task.state === 'active' || task.state === 'paused') {
         const cancelButton = document.createElement('button');
         cancelButton.type = 'button';
         cancelButton.textContent = '取消任务';
@@ -655,6 +746,15 @@
         host.textContent = '读取失败:' + (reply.error.message || '');
         return;
       }
+      const job = (reply.result && reply.result.job) || {};
+      if (job.schedule && job.schedule.kind && job.schedule.kind !== 'once') {
+        const scheduleLineDiv = document.createElement('div');
+        scheduleLineDiv.className = 'schedule-line';
+        scheduleLineDiv.textContent = scheduleLine(Object.assign({}, job, { schedule: job.schedule })) +
+          (job.schedule.misfirePolicy && misfireLabel[job.schedule.misfirePolicy]
+            ? ' · ' + misfireLabel[job.schedule.misfirePolicy] : '');
+        host.appendChild(scheduleLineDiv);
+      }
       const occurrences = (reply.result && reply.result.occurrences) || [];
       if (occurrences.length === 0) {
         host.textContent = '还没有执行记录。';
@@ -662,9 +762,15 @@
       }
       for (const occurrence of occurrences) {
         const line = document.createElement('div');
-        line.textContent = (stateLabel[occurrence.state] || occurrence.state) +
+        let text = (stateLabel[occurrence.state] || occurrence.state) +
           (occurrence.outcome ? ' · ' + (outcomeLabel[occurrence.outcome] || occurrence.outcome) : '') +
           (occurrence.detail ? ' · ' + occurrence.detail : '');
+        // W4:heartbeat 观察账(有变化才投递的任务:变化/投递如实展示)。
+        if (occurrence.observed) {
+          text += ' · 观察:' + (occurrence.observed.changed ? '有变化' : '无变化') +
+            (occurrence.observed.delivered ? '(已投递)' : '(未投递)');
+        }
+        line.textContent = text;
         host.appendChild(line);
         const result = occurrence.result;
         if (result) {
@@ -693,6 +799,39 @@
       if (reply.error) {
         button.disabled = false;
         button.textContent = '取消失败(核对后重试)';
+        return;
+      }
+      refreshTasks();
+    }).catch(function () { button.disabled = false; });
+  }
+
+  // W4:立即执行(幂等键每次点击一枚——用户显式重跑才创建新工作身份)。
+  function runNowTask(jobId, button) {
+    if (!channel) return;
+    button.disabled = true;
+    channel.request('task/run-now', {
+      jobId: jobId, clientOperationId: newOperationId(),
+    }).then(function (reply) {
+      button.disabled = false;
+      if (reply.error) {
+        button.textContent = '触发失败:' + (reply.error.message || '');
+        return;
+      }
+      button.textContent = '已触发';
+      scheduleTaskRefresh();
+    }).catch(function () { button.disabled = false; });
+  }
+
+  // W4:暂停/恢复(透传 V2 的 CAS 命令;失败带人话,revision 不符提示重试)。
+  function stateTask(method, jobId, revision, button) {
+    if (!channel) return;
+    button.disabled = true;
+    channel.request(method, {
+      jobId: jobId, expectedRevision: revision, clientOperationId: newOperationId(),
+    }).then(function (reply) {
+      if (reply.error) {
+        button.disabled = false;
+        button.textContent = (method === 'task/pause' ? '暂停' : '恢复') + '失败(核对后重试)';
         return;
       }
       refreshTasks();
@@ -845,15 +984,50 @@
       taskCreateResult.textContent = '任务面不可用(见设置页运行信息)';
       return;
     }
+    // W4:按计划形态组装参数(单次/interval/cron 透传 V2 语义;坏规格
+    // 服务端明拒,这里不做客户端"猜测式"校验)。
+    const kind = scheduleKind.value;
+    const request = { prompt: prompt, clientOperationId: newOperationId() };
+    if (kind === 'once') {
+      const minutes = Number(el('task-due-in-minutes').value) || 0;
+      if (minutes > 0) {
+        request.dueAtMs = Date.now() + minutes * 60 * 1000;
+      }
+    } else if (kind === 'interval') {
+      const seconds = Number(el('task-interval-seconds').value) || 0;
+      if (seconds <= 0) {
+        taskCreateResult.textContent = '间隔秒须是正整数(1 秒 ~ 10 年)';
+        return;
+      }
+      request.intervalSeconds = seconds;
+    } else if (kind === 'cron') {
+      const cronExpr = el('task-cron-expr').value.trim();
+      if (!cronExpr) {
+        taskCreateResult.textContent = 'cron 表达式要有(五字段:分 时 日 月 周)';
+        return;
+      }
+      request.cronExpr = cronExpr;
+      const timezone = el('task-timezone').value.trim();
+      if (timezone) {
+        request.timezone = timezone;
+      }
+    }
+    if (kind !== 'once') {
+      request.misfirePolicy = el('task-misfire').value;
+      if (el('task-notify-on-change').checked) {
+        request.notifyOnChange = true;
+      }
+    }
     taskCreateResult.textContent = '提交中…';
-    const opId = newOperationId();
-    channel.request('task/create', { prompt: prompt, clientOperationId: opId }).then(function (reply) {
+    const opId = request.clientOperationId;
+    channel.request('task/create', request).then(function (reply) {
       if (reply.error) {
         taskCreateResult.textContent = '创建失败:' + (reply.error.message || '');
         return;
       }
       const result = reply.result || {};
-      taskCreateResult.textContent = result.duplicate ? '已受理(重复提交回原任务)' : '已受理,执行中';
+      taskCreateResult.textContent = result.duplicate ? '已受理(重复提交回原任务)'
+        : (kind === 'once' ? '已受理,执行中' : '已受理,按计划调度');
       taskPrompt.value = '';
       refreshTasks();
     }).catch(function (error) {
@@ -866,6 +1040,216 @@
 
   el('task-refresh-button').addEventListener('click', function () { refreshTasks(); });
   el('result-refresh-button').addEventListener('click', function () { refreshTasks(); });
+
+  // ---- W3:渠道面(只读四态投影 + 待批准配对 + 转发批准/拒绝) ----
+  const channelAccountList = el('channel-account-list');
+  const channelEmptyHint = el('channel-empty-hint');
+  const pairingList = el('pairing-list');
+  const pairingEmptyHint = el('pairing-empty-hint');
+
+  const fourStateLabel = {
+    config_saved: '配置已存', online: '在线', paired: '身份已配对', model_ready: '模型能回复',
+  };
+
+  function renderFourState(account) {
+    const four = account.fourState || {};
+    const box = document.createElement('div');
+    box.className = 'four-state';
+    // paired 三态:布尔 + "unreadable"(账在但读不懂——如实,不当"未配对")。
+    const steps = [
+      ['config_saved', four.config_saved === true, null],
+      ['online', four.online === true, null],
+      ['paired', four.paired === true, four.paired === 'unreadable' ? '配对账读不懂' : null],
+      ['model_ready', four.model_ready === true, null],
+    ];
+    for (const step of steps) {
+      const row = document.createElement('span');
+      const ok = step[1];
+      row.className = 'state-chip ' + (ok ? 'ok' : 'warn');
+      row.textContent = (ok ? '✓ ' : '✗ ') + (step[2] || fourStateLabel[step[0]] || step[0]);
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  function buildPairingRow(entry, account) {
+    const li = document.createElement('li');
+    li.className = 'pairing-card';
+    const head = document.createElement('div');
+    head.className = 'head';
+    const who = document.createElement('span');
+    who.className = 'tool';
+    who.textContent = entry.senderId || '?';
+    head.appendChild(who);
+    const left = Math.max(0, Math.round((Number(entry.expiresAtMs) - Date.now()) / 1000));
+    head.appendChild(chip(left > 0 ? ('' + left + ' 秒内有效') : '已过期', left > 0 ? '' : 'warn'));
+    head.appendChild(chip(account.channelId + '/' + account.accountId, ''));
+    li.appendChild(head);
+    const ops = document.createElement('div');
+    ops.className = 'ops';
+    const approve = document.createElement('button');
+    approve.type = 'button';
+    approve.textContent = '批准';
+    approve.addEventListener('click', function () {
+      respondPairing(account, entry, 'approve', approve);
+    });
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.textContent = '拒绝';
+    reject.addEventListener('click', function () {
+      respondPairing(account, entry, 'reject', reject);
+    });
+    ops.appendChild(approve);
+    ops.appendChild(reject);
+    li.appendChild(ops);
+    return li;
+  }
+
+  function respondPairing(account, entry, action, button) {
+    if (!channel) return;
+    button.disabled = true;
+    channel.request('channel/pairing/respond', {
+      channelId: account.channelId,
+      accountId: account.accountId,
+      token: entry.senderId,  // 待审清单按 sender 身份认(与 CLI 的单参数口同一条账)
+      action: action,
+    }).then(function (reply) {
+      if (reply.error) {
+        button.disabled = false;
+        button.textContent = action === 'approve' ? '批准失败' : '拒绝失败';
+        button.title = reply.error.message || '';
+        return;
+      }
+      refreshChannels();
+    }).catch(function () { button.disabled = false; });
+  }
+
+  // 按配对码批准(码在对方收到的提示里;单参数口与 CLI 同一条账)。
+  el('pairing-by-code-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!channel) return;
+    const form = event.target;
+    const codeInput = form.querySelector('#pairing-code-input');
+    const resultSpan = form.querySelector('#pairing-code-result');
+    const channelSelect = form.querySelector('#pairing-code-channel');
+    const code = (codeInput.value || '').trim();
+    if (!code) return;
+    const parts = (channelSelect.value || '').split('/');
+    const buttons = form.querySelectorAll('button[type=submit]');
+    for (const button of buttons) { button.disabled = true; }
+    channel.request('channel/pairing/respond', {
+      channelId: parts[0] || 'qqbot',
+      accountId: parts[1] || 'main',
+      token: code,
+      action: 'approve',
+    }).then(function (reply) {
+      for (const button of buttons) { button.disabled = false; }
+      if (reply.error) {
+        resultSpan.textContent = '失败:' + (reply.error.message || '');
+        return;
+      }
+      const result = reply.result || {};
+      resultSpan.textContent = result.resolved
+        ? ('已批准 ' + (result.senderId || '?') + '(提醒 TA 重发消息)')
+        : ('没批上:' + (result.reason || '未知') + (result.detail ? '(' + result.detail + ')' : ''));
+      codeInput.value = '';
+      refreshChannels();
+    }).catch(function (error) {
+      for (const button of buttons) { button.disabled = false; }
+      resultSpan.textContent = '出错:' + String(error.message || error);
+    });
+  });
+
+  function refreshChannels() {
+    if (!channel) return Promise.resolve();
+    return channel.request('channel/list', {}).then(function (reply) {
+      if (reply.error) {
+        channelEmptyHint.textContent = '渠道状态读取失败:' + (reply.error.message || '');
+        channelEmptyHint.hidden = false;
+        return;
+      }
+      const result = reply.result || {};
+      const accounts = result.accounts || [];
+      channelAccountList.textContent = '';
+      channelEmptyHint.hidden = accounts.length > 0;
+      if (accounts.length === 0) {
+        channelEmptyHint.textContent = result.channelsError
+          ? ('渠道配置读不了:' + result.channelsError)
+          : '还没有配置渠道账号。用 lubancode im / lubancode channel setup 配置后,这里展示在线与配对状态。';
+      }
+      let pairings = [];
+      for (const account of accounts) {
+        const card = document.createElement('li');
+        card.className = 'task-card';
+        const head = document.createElement('div');
+        head.className = 'head';
+        const name = document.createElement('span');
+        name.className = 'prompt';
+        name.textContent = account.channelId + ' / ' + account.accountId;
+        head.appendChild(name);
+        card.appendChild(head);
+        card.appendChild(renderFourState(account));
+        for (const line of account.fourStateLines || []) {
+          const row = document.createElement('div');
+          row.className = 'hint';
+          row.textContent = line;
+          card.appendChild(row);
+        }
+        channelAccountList.appendChild(card);
+        for (const entry of account.pendingPairings || []) {
+          pairings.push({ entry: entry, account: account });
+        }
+      }
+      pairingList.textContent = '';
+      pairingEmptyHint.hidden = pairings.length > 0;
+      for (const item of pairings) {
+        pairingList.appendChild(buildPairingRow(item.entry, item.account));
+      }
+      // 按码批准的渠道选择项跟着配置走(没配账号就留空,表单交不了)。
+      const codeChannel = el('pairing-code-channel');
+      codeChannel.textContent = '';
+      for (const account of accounts) {
+        const option = document.createElement('option');
+        option.value = account.channelId + '/' + account.accountId;
+        option.textContent = account.channelId + '/' + account.accountId;
+        codeChannel.appendChild(option);
+      }
+    }).catch(function () { /* 列表失败不掀设置页 */ });
+  }
+
+  el('channel-refresh-button').addEventListener('click', function () { refreshChannels(); });
+
+  // ---- W4:系统托管只读投影(install.json + 实例活态;执行走 CLI) ----
+  function refreshServiceStatus() {
+    if (!channel) return;
+    const line = el('service-status-line');
+    channel.request('gateway/service/status', {}).then(function (reply) {
+      if (reply.error) {
+        line.textContent = '读取失败:' + (reply.error.message || '');
+        return;
+      }
+      const result = reply.result || {};
+      const record = result.installRecord;
+      if (result.installed && record) {
+        line.textContent = '已安装:版本 ' + (record.lubancodeVersion || '?') +
+          ',装于 ' + new Date(Number(record.installedAtMs) || 0).toLocaleString() +
+          '(exe: ' + (record.exePath || '?') + ')';
+      } else if (result.installRecordError) {
+        line.textContent = '安装记录读不懂:' + result.installRecordError;
+      } else {
+        line.textContent = '未安装(要用开机自启/崩溃拉起,在命令行跑 lubancode gateway service install)';
+      }
+      const instance = result.gatewayInstance || {};
+      const instanceText = instance.state === 'running'
+        ? 'gateway 实例在跑(' + (instance.detail || '') + ')'
+        : (instance.state === 'stale_lock' ? '锁是陈旧的(上次进程已退出)'
+          : instance.state === 'lock_unreadable' ? '锁读不懂,人工核一下'
+            : 'gateway 实例没在跑');
+      line.textContent += '。' + instanceText + '。';
+    }).catch(function () { line.textContent = '读取失败(服务已断线?)'; });
+  }
+
+  el('service-refresh-button').addEventListener('click', function () { refreshServiceStatus(); });
 
   // ---- 视图切换 ----
   const views = { chat: el('chat-view'), config: el('config-view'), tasks: el('tasks-view'),
@@ -883,6 +1267,10 @@
       if (name === 'config') refreshConfigStatus();
       if (name === 'tasks' || name === 'results') refreshTasks();
       if (name === 'approvals') refreshApprovals();
+      if (name === 'config') {
+        refreshChannels();
+        refreshServiceStatus();
+      }
     });
   });
 

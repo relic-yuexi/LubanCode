@@ -191,6 +191,67 @@ ChannelFourStateView BuildChannelFourState(const std::string& channel_id,
     return view;
 }
 
+// ---- 配置探针(W3 共用面):读文件 + 判据,单一真源 -------------------------
+
+ChannelsConfigProbe LoadChannelsUserConfigFromFile(const std::filesystem::path& config_path) {
+    ChannelsConfigProbe probe;
+    std::error_code read_ec;
+    if (!std::filesystem::is_regular_file(config_path, read_ec) || read_ec) {
+        probe.detail = "全局配置文件不存在(还没跑过配置向导)";
+        return probe;
+    }
+    std::ifstream stream(config_path, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    const auto parsed = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("channels") ||
+        !parsed["channels"].is_object()) {
+        probe.detail = "配置文件里没有可用的 channels 段";
+        return probe;
+    }
+    std::string channels_error;
+    const auto channels =
+        channel::ParseChannelsUserConfig(parsed["channels"],
+                                         platform::PathToUtf8(config_path), &channels_error);
+    if (!channels.has_value()) {
+        probe.detail = "channels 段解析失败: " + channels_error;
+        return probe;
+    }
+    probe.ok = true;
+    probe.channels = std::move(*channels);
+    return probe;
+}
+
+ChannelAccountConfigProbe ProbeChannelAccountConfig(
+    const std::map<std::string, channel::ChannelUserConfig>& channels,
+    const std::string& channel_id, const std::string& account_id) {
+    ChannelAccountConfigProbe probe;
+    const auto channel_it = channels.find(channel_id);
+    if (channel_it == channels.end()) {
+        probe.detail = "channels 段里没有 " + channel_id;
+        return probe;
+    }
+    const auto account_it = channel_it->second.accounts.find(account_id);
+    if (account_it == channel_it->second.accounts.end()) {
+        probe.detail = "账号 " + account_id + " 不在配置里";
+        return probe;
+    }
+    if (!channel_it->second.enabled || !account_it->second.enabled) {
+        probe.detail = "渠道或账号未启用";
+        return probe;
+    }
+    if (account_it->second.app_id.empty()) {
+        probe.detail = "AppID 未填";
+        return probe;
+    }
+    if (channel::DescribeCredentialSource(account_it->second) ==
+        channel::CredentialSource::Missing) {
+        probe.detail = "凭据来源未配(secret_file/secret_env)";
+        return probe;
+    }
+    probe.configured = true;
+    return probe;
+}
+
 int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
     // 渠道/账号 id 先过守门:它们直接拼状态根下的路径,带路径段 = 越界。
     if (!channel::IsValidChannelId(args.channel_id)) {
@@ -241,49 +302,17 @@ int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
     }
     // 配置:全局 config.json 的 channels 段只读解析(与 channel setup 同源)。
     if (const auto config_file = config::GlobalConfigFilePath(); config_file.has_value()) {
-        four_state.account_configured = false;
-        std::string config_detail;
-        std::error_code read_ec;
-        const std::filesystem::path config_path = platform::Utf8ToPath(*config_file);
-        if (std::filesystem::is_regular_file(config_path, read_ec) && !read_ec) {
-            std::ifstream stream(config_path, std::ios::binary);
-            std::string text((std::istreambuf_iterator<char>(stream)),
-                             std::istreambuf_iterator<char>());
-            const auto parsed = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-            if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("channels") &&
-                parsed["channels"].is_object()) {
-                std::string channels_error;
-                const auto channels = channel::ParseChannelsUserConfig(
-                    parsed["channels"], *config_file, &channels_error);
-                if (!channels.has_value()) {
-                    config_detail = "channels 段解析失败: " + channels_error;
-                } else {
-                    const auto channel_it = channels->find(args.channel_id);
-                    if (channel_it == channels->end()) {
-                        config_detail = "channels 段里没有 " + args.channel_id;
-                    } else {
-                        const auto account_it = channel_it->second.accounts.find(args.account_id);
-                        if (account_it == channel_it->second.accounts.end()) {
-                            config_detail = "账号 " + args.account_id + " 不在配置里";
-                        } else if (!channel_it->second.enabled || !account_it->second.enabled) {
-                            config_detail = "渠道或账号未启用";
-                        } else if (account_it->second.app_id.empty()) {
-                            config_detail = "AppID 未填";
-                        } else if (channel::DescribeCredentialSource(account_it->second) ==
-                                   channel::CredentialSource::Missing) {
-                            config_detail = "凭据来源未配(secret_file/secret_env)";
-                        } else {
-                            four_state.account_configured = true;
-                        }
-                    }
-                }
-            } else {
-                config_detail = "配置文件里没有可用的 channels 段";
-            }
+        const auto probe =
+            LoadChannelsUserConfigFromFile(platform::Utf8ToPath(*config_file));
+        if (probe.ok) {
+            const auto account_probe =
+                ProbeChannelAccountConfig(probe.channels, args.channel_id, args.account_id);
+            four_state.account_configured = account_probe.configured;
+            four_state.config_detail = account_probe.detail;
         } else {
-            config_detail = "全局配置文件不存在(还没跑过配置向导)";
+            four_state.account_configured = false;
+            four_state.config_detail = probe.detail;
         }
-        four_state.config_detail = config_detail;
     }
     // 配对:pairing 账只读投影(零建目录零写盘)。
     const auto pairing_projection = channel::PairingStore::ReadProjection(

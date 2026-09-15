@@ -250,6 +250,34 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .approval-card .outcome { font-size: 12px; color: var(--ink-soft); }
 .approval-card .outcome.timeout { color: var(--danger); }
 
+/* ---- W4:计划摘要行 / 表单的计划形态切换 ---- */
+.schedule-line {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+#task-form .row { flex-wrap: wrap; gap: 8px; align-items: center; }
+#task-form label.checkbox { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; }
+.schedule-extra { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.schedule-extra[hidden] { display: none; }
+#task-schedule-misfire-wrap[hidden] { display: none; }
+
+/* ---- W3:渠道四态 / 待批准配对 ---- */
+#channel-account-list, #pairing-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.four-state { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.pairing-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+.pairing-card .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pairing-card .tool { font-family: Consolas, monospace; font-weight: 600; }
+.pairing-card .ops { margin-top: 8px; display: flex; gap: 8px; }
+#pairing-by-code-form { flex-wrap: wrap; gap: 8px; align-items: center; }
+#pairing-by-code-form input { min-width: 180px; }
+
+
 /* 1440px 宽屏:任务/结果双栏卡片舒展;面板帽放宽。 */
 @media (min-width: 1100px) {
   .panel { max-width: 860px; }

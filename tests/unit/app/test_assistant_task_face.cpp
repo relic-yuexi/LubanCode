@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -220,6 +221,30 @@ struct W2Fixture {
         return std::nullopt;
     }
 
+    // W4:推泵到该 job 攒够 settled_count 枚结算(周期任务多拍判据)。
+    std::vector<gateway::AutomationOccurrence> PumpUntilSettledCount(const std::string& job_id,
+                                                                     std::size_t count,
+                                                                     std::int64_t timeout_ms) {
+        const std::int64_t deadline = WallMs() + timeout_ms;
+        while (WallMs() < deadline) {
+            runtime->TickAndPublish(WallMs());
+            std::vector<gateway::AutomationOccurrence> settled;
+            const gateway::AutomationProjection projection =
+                gateway::ReadAutomationProjection(paths.automation_log);
+            for (const auto& [id, occurrence] : projection.occurrences) {
+                if (occurrence.job_id == job_id &&
+                    occurrence.state == gateway::AutomationOccurrence::State::Settled) {
+                    settled.push_back(occurrence);
+                }
+            }
+            if (settled.size() >= count) {
+                return settled;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return {};
+    }
+
     // create/cancel 的回执要等泵消费命令(生产里泵线程自转;单测同步,
     // 这里把方法调用放后台线程,主线程推泵直到回执)。
     nlohmann::json Create(const std::string& key, const std::string& prompt,
@@ -232,6 +257,45 @@ struct W2Fixture {
                                {"clientOperationId", key},
                                {"dueAtMs", due_at_ms}},
                 error_code, error_message);
+        });
+    }
+
+    // W4:带任意额外参数的创建(周期/heartbeat 面)。
+    nlohmann::json CreateWithParams(const nlohmann::json& params) {
+        return PumpWhileCalling([&]() {
+            int error_code = 0;
+            std::string error_message;
+            return face->HandleTaskCreate(params, error_code, error_message);
+        });
+    }
+
+    // W4:pause/resume(CAS 命令同 cancel 的回执轮询)。
+    nlohmann::json StateOp(const char* method, const std::string& verb,
+                           const std::string& job_id, std::int64_t expected_revision,
+                           const std::string& key) {
+        return PumpWhileCalling([&]() {
+            int error_code = 0;
+            std::string error_message;
+            return verb == "pause" ? face->HandleTaskPause(
+                                         nlohmann::json{{"jobId", job_id},
+                                                        {"expectedRevision", expected_revision},
+                                                        {"clientOperationId", key}},
+                                         error_code, error_message)
+                                   : face->HandleTaskResume(
+                                         nlohmann::json{{"jobId", job_id},
+                                                        {"expectedRevision", expected_revision},
+                                                        {"clientOperationId", key}},
+                                         error_code, error_message);
+        });
+    }
+
+    nlohmann::json RunNow(const std::string& job_id, const std::string& key) {
+        return PumpWhileCalling([&]() {
+            int error_code = 0;
+            std::string error_message;
+            return face->HandleTaskRunNow(
+                nlohmann::json{{"jobId", job_id}, {"clientOperationId", key}}, error_code,
+                error_message);
         });
     }
 
@@ -642,4 +706,230 @@ TEST_CASE("任务事件:created/结算变迁进事件账,seq 单调") {
     CHECK(saw_job_created);
     CHECK(saw_occurrence);
     CHECK(saw_settled);
+}
+
+// ---------------------------------------------------------------------------
+// W4:周期任务(interval/cron 透传、pause/resume CAS、run-now、heartbeat)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("周期任务:interval 创建 → 两拍执行 → 列表带计划与下次到期") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    W2Fixture fixture("interval",
+                      {TextScript("第一拍结果"), TextScript("第二拍结果")});
+    REQUIRE(fixture.runtime != nullptr);
+
+    const nlohmann::json created = fixture.CreateWithParams(nlohmann::json{
+        {"prompt", "周期检查"}, {"clientOperationId", "W4-INTERVAL-1"}, {"intervalSeconds", 1}});
+    REQUIRE(created.contains("jobId"));
+    CHECK(created.value("duplicate", true) == false);
+    // 周期任务建账不建 occurrence(V2 语义:拍点归 SweepSchedule 生成)。
+    CHECK(created.value("occurrenceId", std::string("有")) == std::string());
+    REQUIRE(created.contains("schedule"));
+    CHECK(created["schedule"]["kind"] == "interval");
+    CHECK(created["schedule"]["intervalSeconds"] == 1);
+    CHECK(created["schedule"].contains("nextDueMs"));
+    const std::string job_id = created["jobId"].get<std::string>();
+
+    // 两拍都结算(interval=1s;锚点=创建时刻,首拍在 1s 后)。
+    const auto settled = fixture.PumpUntilSettledCount(job_id, 2, 30000);
+    REQUIRE(settled.size() == 2);
+    for (const auto& occurrence : settled) {
+        CHECK(occurrence.outcome == "succeeded");
+    }
+    CHECK(fixture.backend->model_calls() == 2);
+
+    // 列表投影:计划摘要 + misfire + 下次到期。
+    int error_code = 0;
+    std::string error_message;
+    const nlohmann::json listed = fixture.face->HandleTaskList(nlohmann::json::object(),
+                                                               error_code, error_message);
+    CHECK(error_code == 0);
+    REQUIRE(listed["tasks"].size() == 1);
+    const nlohmann::json& task = listed["tasks"][0];
+    CHECK(task["scheduleKind"] == "interval");
+    REQUIRE(task.contains("schedule"));
+    CHECK(task["schedule"]["kind"] == "interval");
+    CHECK(task["schedule"]["intervalSeconds"] == 1);
+    CHECK(task["schedule"]["misfirePolicy"] == "coalesce");
+    CHECK(task["schedule"].contains("nextDueMs"));
+}
+
+TEST_CASE("周期任务:坏 cron/坏时区/互相冲突的参数在方法面明拒不猜") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    W2Fixture fixture("reject", {TextScript("不该跑")});
+    REQUIRE(fixture.runtime != nullptr);
+
+    const auto expect_reject = [&fixture](const nlohmann::json& params, const char* needle) {
+        int error_code = 0;
+        std::string error_message;
+        const nlohmann::json result = fixture.face->HandleTaskCreate(params, error_code,
+                                                                     error_message);
+        CHECK(error_code == app_server::kErrInvalidParams);
+        CHECK(error_message.find(needle) != std::string::npos);
+    };
+    // 七字段 cron(六字段也拒):受限子集是五字段,明拒不猜。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-1"},
+                                 {"cronExpr", "0 0 * * * *"}},
+                  "cron");
+    // 英文名字段不认。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-2"},
+                                 {"cronExpr", "0 12 * * mon"}},
+                  "cron");
+    // 两年内无拍(Feb-30)。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-3"},
+                                 {"cronExpr", "0 0 30 2 *"}},
+                  "cron");
+    // 认不得的时区。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-4"},
+                                 {"cronExpr", "*/5 * * * *"},
+                                 {"timezone", "Mars/Olympus"}},
+                  "时区");
+    // interval 与 cron 同时给。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-5"},
+                                 {"intervalSeconds", 60},
+                                 {"cronExpr", "*/5 * * * *"}},
+                  "二选一");
+    // interval 越界(超过 10 年上限)。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-6"},
+                                 {"intervalSeconds", 315360001}},
+                  "interval");
+    // 坏 misfire 政策。
+    expect_reject(nlohmann::json{{"prompt", "x"},
+                                 {"clientOperationId", "W4-BAD-7"},
+                                 {"intervalSeconds", 60},
+                                 {"misfirePolicy", "guess"}},
+                  "misfirePolicy");
+    // 全拒:一条命令文件都不落(控制目录零文件)。
+    std::error_code ec;
+    const std::size_t command_files =
+        std::filesystem::exists(fixture.paths.control_dir, ec)
+            ? std::distance(std::filesystem::directory_iterator(fixture.paths.control_dir, ec),
+                            std::filesystem::directory_iterator())
+            : 0;
+    CHECK(command_files == 0);
+    CHECK(fixture.backend->model_calls() == 0);
+}
+
+TEST_CASE("周期任务:pause/resume 透传 CAS;重复操作幂等;终态拒收") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    W2Fixture fixture("pause", {TextScript("不该自己跑")});
+    REQUIRE(fixture.runtime != nullptr);
+
+    // interval 拉长(1 小时):创建后不会有自动拍,pause 面好验。
+    const nlohmann::json created = fixture.CreateWithParams(nlohmann::json{
+        {"prompt", "一小时周期"}, {"clientOperationId", "W4-PAUSE-1"}, {"intervalSeconds", 3600}});
+    const std::string job_id = created["jobId"].get<std::string>();
+    const std::uint64_t revision = created["revision"].get<std::uint64_t>();
+
+    const nlohmann::json paused = fixture.StateOp("task/pause", "pause", job_id,
+                                                  static_cast<std::int64_t>(revision),
+                                                  "W4-PAUSE-OP");
+    CHECK(paused["state"] == "paused");
+
+    // 重复 pause:回当前态(duplicate),不写第二枚命令。
+    const nlohmann::json paused_again = fixture.StateOp("task/pause", "pause", job_id,
+                                                        static_cast<std::int64_t>(revision),
+                                                        "W4-PAUSE-OP-2");
+    CHECK(paused_again.value("duplicate", false) == true);
+    CHECK(paused_again["state"] == "paused");
+
+    // paused 期间推泵:不认领、不执行。
+    for (int i = 0; i < 5; ++i) {
+        fixture.runtime->TickAndPublish(WallMs());
+    }
+    CHECK(fixture.backend->model_calls() == 0);
+
+    // resume:回 active;run-now 手动触发一次执行。
+    const nlohmann::json state = fixture.StateOp("task/resume", "resume", job_id,
+                                                 static_cast<std::int64_t>(revision),
+                                                 "W4-RESUME-OP");
+    CHECK(state["state"] == "active");
+
+    const nlohmann::json run = fixture.RunNow(job_id, "W4-RUNNOW-OP");
+    CHECK(run.value("duplicate", false) == false);
+    REQUIRE(run.contains("occurrenceId"));
+    REQUIRE(fixture.PumpUntilSettled(job_id, 15000).has_value());
+    CHECK(fixture.backend->model_calls() == 1);
+
+    // run-now 幂等:同键再触发回原 occurrence,不再执行。
+    const nlohmann::json run_again = fixture.RunNow(job_id, "W4-RUNNOW-OP");
+    CHECK(run_again.value("duplicate", false) == true);
+    CHECK(fixture.backend->model_calls() == 1);
+
+    // 取消后(终态)pause/resume 如实拒。
+    const nlohmann::json cancelled = fixture.Cancel(job_id, static_cast<std::int64_t>(revision),
+                                                    "W4-CANCEL-OP");
+    REQUIRE(cancelled["state"] == "cancelled");
+    int error_code = 0;
+    std::string error_message;
+    const nlohmann::json refused = fixture.face->HandleTaskPause(
+        nlohmann::json{{"jobId", job_id},
+                       {"expectedRevision", static_cast<std::int64_t>(revision)},
+                       {"clientOperationId", "W4-PAUSE-LATE"}},
+        error_code, error_message);
+    CHECK(error_code == app_server::kErrInvalidParams);
+    CHECK(error_message.find("已取消") != std::string::npos);
+}
+
+TEST_CASE("heartbeat:notifyOnChange 任务两拍——首拍投递、次拍无变化不投递") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    // 两拍同正文(假模型固定文案):第二拍观察账判"未变化",不投递。
+    W2Fixture fixture("heartbeat",
+                      {TextScript("状态没变:仓库干净。"), TextScript("状态没变:仓库干净。")});
+    REQUIRE(fixture.runtime != nullptr);
+
+    const nlohmann::json created = fixture.CreateWithParams(nlohmann::json{
+        {"prompt", "盯仓库"},
+        {"clientOperationId", "W4-HB-1"},
+        {"intervalSeconds", 1},
+        {"notifyOnChange", true}});
+    const std::string job_id = created["jobId"].get<std::string>();
+    REQUIRE(created.contains("schedule"));
+    CHECK(created["schedule"]["notifyOnChange"] == true);
+
+    const auto settled = fixture.PumpUntilSettledCount(job_id, 2, 30000);
+    REQUIRE(settled.size() == 2);
+
+    // task/read 的观察投影:首拍 changed+delivered;次拍 changed=false
+    // (正文未变的拍安静,不是失败)。
+    int error_code = 0;
+    std::string error_message;
+    const nlohmann::json read = fixture.face->HandleTaskRead(nlohmann::json{{"jobId", job_id}},
+                                                             error_code, error_message);
+    CHECK(error_code == 0);
+    REQUIRE(read["occurrences"].size() == 2);
+    std::size_t changed_count = 0;
+    std::size_t unchanged_suppressed = 0;
+    for (const auto& occurrence : read["occurrences"]) {
+        REQUIRE(occurrence.contains("observed"));
+        if (occurrence["observed"]["changed"] == true) {
+            ++changed_count;
+            CHECK(occurrence["observed"]["delivered"] == true);
+        } else {
+            ++unchanged_suppressed;
+            CHECK(occurrence["observed"]["delivered"] == false);
+            CHECK(occurrence["outcome"] == "succeeded");
+        }
+    }
+    CHECK(changed_count == 1);
+    CHECK(unchanged_suppressed == 1);
+
+    // 观察事件进账(V2 的 notice 通知经事件账推前端):首拍 observed
+    // changed=true;次拍 changed=false 的观察也如实发。
+    const auto events = fixture.hub->Read("asst-w2-test", 0);
+    std::size_t observed_events = 0;
+    for (const auto& entry : events.events) {
+        if (entry.method == "assistant/task/event" &&
+            entry.params.value("kind", std::string()) == "occurrence.observed" &&
+            entry.params.value("jobId", std::string()) == job_id) {
+            ++observed_events;
+        }
+    }
+    CHECK(observed_events == 2);
 }

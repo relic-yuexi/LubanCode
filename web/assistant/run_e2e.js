@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// 常驻助理 Web 主界面单 W1/W2 的端到端验收(真 exe + 假模型,零真实密钥、
-// 零真实网络外呼——模型流量全打本地回环假后端)。承载层与协议层的裸
-// 驱动;页(JS)的 UI 交互验收归真实浏览器批次,如实不冒充。
+// 常驻助理 Web 主界面单 W1/W2/W3/W4 的端到端验收(真 exe + 假模型,零真实
+// 密钥、零真实网络外呼——模型流量全打本地回环假后端)。承载层与协议层的
+// 裸驱动;页(JS)的 UI 交互验收归真实浏览器批次,如实不冒充。
 //
-// 九幕:
+// 十幕:
 //   1. 启动:真 `lubancode assistant --no-open`,stderr 打 URL(含一次性
 //      bootstrap 凭据);监听就绪才打印。
 //   2. 认证门(§七):/healthz 只回身份;静态无 cookie 401(配对提示);
@@ -26,6 +26,10 @@
 //   9. 审批(W2):needs_confirm 工具(write_file)推审批到页面——不答复
 //      3 秒超时按拒绝收口(文件不落地);批准后工具执行(文件落地);
 //      迟到答复回 stale。
+//  10. 周期任务与渠道/服务面(W3/W4):interval 任务 → 首拍执行 → 暂停
+//      (不增拍)→ 恢复 → run-now → 取消;坏 cron/坏时区方法面明拒;
+//      channel/list|status 空配置如实;配对转发不冒充批准;gateway/
+//      service/status 只读投影。
 //
 // 用法:node web/assistant/run_e2e.js [--binary <lubancode>]
 // 找不到可执行文件打印 SKIP 退 0,不冒充通过(与 node-client e2e 同口径)。
@@ -1016,6 +1020,142 @@ async function scene9_approvals(field, backend, root) {
   ws.close();
 }
 
+// 幕10(W3/W4):周期任务(interval)→ 暂停 → 恢复 → run-now → 取消;
+// 坏 cron 明拒;渠道/服务只读面。
+async function scene10_recurringAndFaces(field, backend) {
+  console.log('幕10 周期任务:暂停/恢复/run-now;渠道与服务只读面');
+  const ws = await openChannel(field);
+  const methods = (ws.initializeResult.capabilities.methods || []);
+  ok('能力声明带 W3/W4 方法(task/pause、channel/list、gateway/service/status)',
+    methods.indexOf('task/pause') !== -1 && methods.indexOf('task/resume') !== -1 &&
+    methods.indexOf('channel/list') !== -1 && methods.indexOf('channel/status') !== -1 &&
+    methods.indexOf('channel/pairing/respond') !== -1 &&
+    methods.indexOf('gateway/service/status') !== -1,
+    JSON.stringify(methods));
+
+  // -- 坏规格在方法面明拒不猜(七字段 cron),不落命令。
+  const bad = await ws.request('task/create', {
+    prompt: '坏 cron', clientOperationId: 'TASK-BADCRON', cronExpr: '0 0 * * * *',
+  });
+  ok('坏 cron(六字段)明拒', !!bad.error && bad.error.code === -32602,
+    JSON.stringify(bad.error || bad.result));
+  const badTz = await ws.request('task/create', {
+    prompt: '坏时区', clientOperationId: 'TASK-BADTZ', cronExpr: '*/5 * * * *',
+    timezone: 'Mars/Olympus',
+  });
+  ok('认不得的时区明拒', !!badTz.error && badTz.error.code === -32602,
+    JSON.stringify(badTz.error || badTz.result));
+
+  // -- 周期任务全链:interval 3 秒 → 首拍执行 → 暂停(不再拍)→ run-now
+  // (手动触发)→ 恢复 → 取消收尾。
+  const created = await ws.request('task/create', {
+    prompt: '周期任务:三秒一拍盯状态', clientOperationId: 'TASK-RECUR-1',
+    intervalSeconds: 3, misfirePolicy: 'skip',
+  });
+  ok('周期任务受理(带 schedule 投影)',
+    created.result && created.result.jobId && created.result.schedule &&
+    created.result.schedule.kind === 'interval' &&
+    created.result.schedule.intervalSeconds === 3 &&
+    Number.isFinite(created.result.schedule.nextDueMs),
+    JSON.stringify(created.result));
+  if (!created.result || !created.result.jobId) {
+    ws.close();
+    return;
+  }
+  const jobId = created.result.jobId;
+
+  // 等首拍结算(领域账核对,不猜时序)。
+  let firstSettled = null;
+  for (let i = 0; i < 150 && !firstSettled; ++i) {
+    const read = await ws.request('task/read', { jobId: jobId });
+    const occurrence = read.result && read.result.occurrences && read.result.occurrences[0];
+    if (occurrence && occurrence.state === 'settled') {
+      firstSettled = occurrence;
+    } else {
+      await sleep(100);
+    }
+  }
+  ok('周期任务首拍按计划执行(结算)', !!firstSettled, JSON.stringify(firstSettled));
+
+  // 暂停:CAS 落账,state=paused。
+  const revision = created.result.revision;
+  const paused = await ws.request('task/pause', {
+    jobId: jobId, expectedRevision: revision, clientOperationId: 'TASK-RECUR-PAUSE',
+  });
+  ok('task/pause 落账(state=paused)', paused.result && paused.result.state === 'paused',
+    JSON.stringify(paused));
+  await sleep(4000);  // 过一个周期(3s)再放余量
+  const readWhilePaused = await ws.request('task/read', { jobId: jobId });
+  const pausedOccurrences = (readWhilePaused.result && readWhilePaused.result.occurrences) || [];
+  ok('暂停期间不生成新拍(occurrence 不增)', pausedOccurrences.length === 1,
+    'count=' + pausedOccurrences.length);
+
+  // 恢复 → run-now(手动触发一次;V2 语义:paused 的 occurrence 不认领,
+  // 手动跑也走 active 面)→ 取消收尾。
+  const resumed = await ws.request('task/resume', {
+    jobId: jobId, expectedRevision: revision, clientOperationId: 'TASK-RECUR-RESUME',
+  });
+  ok('task/resume 落账(state=active)', resumed.result && resumed.result.state === 'active',
+    JSON.stringify(resumed));
+  const runNow = await ws.request('task/run-now', {
+    jobId: jobId, clientOperationId: 'TASK-RECUR-RUNNOW',
+  });
+  ok('run-now 受理(带 occurrenceId)', runNow.result && !!runNow.result.occurrenceId,
+    JSON.stringify(runNow));
+  let runNowSettled = false;
+  for (let i = 0; i < 150 && !runNowSettled; ++i) {
+    const read = await ws.request('task/read', { jobId: jobId });
+    const occurrences = (read.result && read.result.occurrences) || [];
+    const target = occurrences.find(function (o) {
+      return o.occurrenceId === (runNow.result && runNow.result.occurrenceId);
+    });
+    if (target && target.state === 'settled') {
+      runNowSettled = true;
+    } else {
+      await sleep(100);
+    }
+  }
+  ok('run-now 的 occurrence 结算', runNowSettled);
+  const cancelled = await ws.request('task/cancel', {
+    jobId: jobId, expectedRevision: revision, clientOperationId: 'TASK-RECUR-CANCEL',
+  });
+  ok('周期任务取消收尾', cancelled.result && cancelled.result.state === 'cancelled',
+    JSON.stringify(cancelled));
+
+  // -- W3 渠道/服务只读面:空配置如实,零密钥。
+  const channels = await ws.request('channel/list', {});
+  ok('channel/list 回形状(空配置 accounts 空 + 指引)',
+    channels.result && Array.isArray(channels.result.accounts) &&
+    channels.result.accounts.length === 0 &&
+    String(channels.result.credentialHint || '').indexOf('不在网页录入') !== -1,
+    JSON.stringify(channels.result));
+  const channelStatus = await ws.request('channel/status', {
+    channelId: 'qqbot', accountId: 'main',
+  });
+  ok('channel/status 未配置账号如实(第一步卡)',
+    channelStatus.result && channelStatus.result.fourState &&
+    channelStatus.result.fourState.config_saved === false,
+    JSON.stringify(channelStatus.result));
+  const pairing = await ws.request('channel/pairing/respond', {
+    channelId: 'qqbot', accountId: 'main', token: 'ABCD2345', action: 'approve',
+  });
+  // 不冒充批准的两种如实形状:没有持锁 gateway → 明拒(gateway.not_running);
+  // 本助理任务面持锁(与 gateway 同一把单写者锁)→ 命令投出但没渠道消费,
+  // 如实报"没有回执"。两种都不是成功回执。
+  const pairingErrorText = JSON.stringify(pairing.error || {});
+  ok('配对转发不冒充批准(明拒或如实报无回执)',
+    !!pairing.error &&
+    (pairingErrorText.indexOf('gateway.not_running') !== -1 ||
+      pairingErrorText.indexOf('没有回执') !== -1),
+    pairingErrorText);
+  const service = await ws.request('gateway/service/status', {});
+  ok('gateway/service/status 只读投影(未安装如实)',
+    service.result && service.result.installed === false &&
+    service.result.gatewayInstance && service.result.gatewayInstance.state === 'running',
+    JSON.stringify(service.result));
+  ws.close();
+}
+
 // ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
@@ -1051,6 +1191,7 @@ async function main() {
     await scene7_tasks(field, backend);
     await scene8_idempotent(field, backend);
     await scene9_approvals(field, backend, root);
+    await scene10_recurringAndFaces(field, backend);
     await scene6_duplicateAndPorts(resolved, root, field, assistant.exited);
   } catch (error) {
     ok('e2e 主流程跑完(未抛异常)', false, String((error && error.stack) || error));

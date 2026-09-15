@@ -39,6 +39,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "app/assistant_channels.hpp"
 #include "app/assistant_tasks.hpp"
 #include "app/backend_stack.hpp"
 #include "app/cli_options.hpp"
@@ -51,6 +52,7 @@
 #include "app_server/schema.hpp"
 #include "app_server/server.hpp"
 #include "app_server/session_assembly.hpp"
+#include "channel/manager.hpp"  // DefaultChannelsStateRoot(W3 渠道面)
 #include "config/config.hpp"
 #include "gateway/profile.hpp"
 #include "platform/paths.hpp"
@@ -452,9 +454,18 @@ constexpr const char* kMethodTaskRunNow = "task/run-now";
 constexpr const char* kMethodTaskList = "task/list";
 constexpr const char* kMethodTaskRead = "task/read";
 constexpr const char* kMethodTaskCancel = "task/cancel";
+// W4:周期任务面(pause/resume 透传 V2 CAS 命令;run-now 方法面 W2 已有,
+// W4 补页面按钮)。
+constexpr const char* kMethodTaskPause = "task/pause";
+constexpr const char* kMethodTaskResume = "task/resume";
 constexpr const char* kMethodApprovalList = "approval/list";
 constexpr const char* kMethodApprovalRespond = "approval/respond";
 constexpr const char* kMethodEventsRead = "assistant/events/read";
+// W3:渠道面(只读四态投影 + 配对转发)与 V4 系统托管只读投影。
+constexpr const char* kMethodChannelList = "channel/list";
+constexpr const char* kMethodChannelStatus = "channel/status";
+constexpr const char* kMethodChannelPairingRespond = "channel/pairing/respond";
+constexpr const char* kMethodServiceStatus = "gateway/service/status";
 
 struct AssistantIdentity {
     std::string boot_id;
@@ -695,9 +706,16 @@ nlohmann::json ExtendInitializeResult(nlohmann::json result) {
     capabilities["methods"].push_back(kMethodTaskList);
     capabilities["methods"].push_back(kMethodTaskRead);
     capabilities["methods"].push_back(kMethodTaskCancel);
+    capabilities["methods"].push_back(kMethodTaskPause);
+    capabilities["methods"].push_back(kMethodTaskResume);
     capabilities["methods"].push_back(kMethodApprovalList);
     capabilities["methods"].push_back(kMethodApprovalRespond);
     capabilities["methods"].push_back(kMethodEventsRead);
+    // W3/W4:渠道面(只读投影 + 配对转发)与系统托管只读投影。
+    capabilities["methods"].push_back(kMethodChannelList);
+    capabilities["methods"].push_back(kMethodChannelStatus);
+    capabilities["methods"].push_back(kMethodChannelPairingRespond);
+    capabilities["methods"].push_back(kMethodServiceStatus);
     return result;
 }
 
@@ -977,11 +995,32 @@ int RunAssistantMode(const AssistantCliArgs& args) {
         }
     }
 
+    // ---- 7b. W3 渠道面 + W4 系统托管只读投影(全只读/转发,不占锁:
+    // 渠道连接归 gateway run 持锁实例,助理只是读同一棵状态树;配对批准
+    // 经 gateway 的 pairing 控制命令转发给那只实例)。 ----
+    AssistantChannelFace::Options channel_options;
+    channel_options.channels_state_root = channel::DefaultChannelsStateRoot();
+    channel_options.gateway_paths = gateway_paths;
+    if (const auto config_file = config::GlobalConfigFilePath(); config_file.has_value()) {
+        channel_options.config_path = tools::Utf8ToPath(*config_file);
+    }
+    channel_options.model_probe = [config_state]() -> std::pair<bool, std::string> {
+        const auto snapshot = config_state->Snapshot();
+        const auto ready = config::RequireConfigured(snapshot);
+        if (ready.has_value()) {
+            return {true, std::string()};
+        }
+        return {false, ready.error()};
+    };
+    auto channel_face = std::make_shared<AssistantChannelFace>(std::move(channel_options));
+
     server_options.extra_method_registrar =
-        [config_state, identity, task_face, automation_backend](app_server::Dispatcher& dispatcher) {
+        [config_state, identity, task_face, automation_backend,
+         channel_face](app_server::Dispatcher& dispatcher) {
             RegisterAssistantMethods(dispatcher, config_state, identity, task_face,
                                      automation_backend);
             RegisterAssistantTaskMethods(dispatcher, task_face);
+            RegisterAssistantChannelMethods(dispatcher, channel_face);
         };
     server_options.initialize_result_extender = [](nlohmann::json result) {
         return ExtendInitializeResult(std::move(result));

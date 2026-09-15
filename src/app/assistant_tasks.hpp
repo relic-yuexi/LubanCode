@@ -193,8 +193,12 @@ public:
 
     // ---- 方法实现(handler 的内脏;错误走 out_error_*,返回 result) ----
 
-    // task/create:{prompt, dueAtMs?, clientOperationId}。幂等:同键再交
-    // 回原 jobId(duplicate=true),不写第二枚命令。due 0/缺省 = 立即。
+    // task/create:{prompt, dueAtMs?, clientOperationId, intervalSeconds?,
+    // cronExpr?, timezone?, misfirePolicy?, notifyOnChange?}(W4 扩周期)。
+    // 幂等:同键再交回原 jobId(duplicate=true),不写第二枚命令。due
+    // 0/缺省 = 立即;intervalSeconds 与 cronExpr 互斥,透传 V2 的
+    // AutomationStore schedule 语义(五字段受限 cron、内置时区表——本地
+    // 先过 ValidateScheduleSpec 明拒不猜,不落命令文件)。
     nlohmann::json HandleTaskCreate(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
     // task/run-now:{jobId, clientOperationId}。幂等同上(runnow_keys)。
@@ -210,6 +214,14 @@ public:
     // task/cancel:{jobId, expectedRevision, clientOperationId}。CAS;
     // 已取消的重复取消回当前态(幂等)。
     nlohmann::json HandleTaskCancel(const nlohmann::json& params, int& out_error_code,
+                                    std::string& out_error_message);
+    // task/pause / task/resume(W4):{jobId, expectedRevision,
+    // clientOperationId}。透传 V2 的 pause/resume CAS 命令(pause 停生成
+    // 与派发,resume 游标直进 now 不补跑);重复 pause/resume 回当前态
+    //(幂等)。
+    nlohmann::json HandleTaskPause(const nlohmann::json& params, int& out_error_code,
+                                   std::string& out_error_message);
+    nlohmann::json HandleTaskResume(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
     // approval/list。
     nlohmann::json HandleApprovalList(const nlohmann::json& params, int& out_error_code,
@@ -234,6 +246,13 @@ private:
     bool WaitForCreateReceipt(const std::string& idempotency_key, std::string* out_job_id,
                               std::string* out_occurrence_id, std::uint64_t* out_revision);
     bool WaitForRunNowReceipt(const std::string& idempotency_key, std::string* out_occurrence_id);
+    // pause/resume 的共用实现(verb 进命令文件,轮询到目标态)。cancel
+    // 的回执文案专属,保留独立实现。
+    nlohmann::json HandleTaskStateOp(const char* method, const char* verb,
+                                     const char* target_state_name,
+                                     gateway::AutomationJobState target_state,
+                                     const nlohmann::json& params, int& out_error_code,
+                                     std::string& out_error_message);
 
     gateway::GatewayProfilePaths paths_;
     AssistantEventHub* hub_;
@@ -313,7 +332,16 @@ private:
     std::thread thread_;
     // 上一轮的投影快照(事件 diff 用;只归泵线程碰)。
     std::map<std::string, std::pair<std::string, std::uint64_t>> last_jobs_;      // jobId -> (state, revision)
-    std::map<std::string, std::pair<std::string, std::string>> last_occurrences_;  // occurrenceId -> (state, outcome)
+    // occurrenceId -> (state, outcome, observed 变化面)。observed 三元组
+    // 是 W4 的 heartbeat 观察 diff(变化推 occurrence.observed 事件)。
+    struct OccurrenceSnapshot {
+        std::string state;
+        std::string outcome;
+        bool observed = false;       // 有观察账(sha 非空)
+        bool observed_changed = false;
+        bool observed_delivered = false;
+    };
+    std::map<std::string, OccurrenceSnapshot> last_occurrences_;
 };
 
 }  // namespace lubancode::app

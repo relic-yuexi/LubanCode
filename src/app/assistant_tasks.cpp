@@ -97,6 +97,60 @@ std::string FindFirstOccurrenceOfJob(const gateway::AutomationProjection& projec
     return std::string();
 }
 
+// 入参读布尔(缺键/类型不对给缺省)。
+bool ReadJsonBool(const nlohmann::json& params, const char* key) {
+    if (params.is_object() && params.contains(key) && params[key].is_boolean()) {
+        return params[key].get<bool>();
+    }
+    return false;
+}
+
+// W4:任务的周期计划投影(task/list、task/read、create 回执共用)。
+// 字段与 V2 AutomationStore 的账面语义一一对应:五字段受限 cron 原文、
+// IANA/固定偏移时区原文、misfire 政策、heartbeat 口;nextDueMs 是调度面
+// 将派发的下一拍(游标之后、不早于 now——停机攒下的拍对页面无意义,
+// 派发面的 coalesce/skip 裁决归泵)。once 任务 = dueAtMs(已过的照给,
+// 页面按"到期即跑"理解);非 active 任务不派发,不给 nextDueMs。
+nlohmann::json ScheduleProjectionFor(const gateway::AutomationJob& job, std::int64_t now_ms) {
+    nlohmann::json schedule;
+    schedule["kind"] = job.schedule_kind == gateway::ScheduleKind::Once
+                           ? "once"
+                           : (job.schedule_kind == gateway::ScheduleKind::Interval ? "interval"
+                                                                                   : "cron");
+    if (job.schedule_kind == gateway::ScheduleKind::Interval) {
+        schedule["intervalSeconds"] = job.interval_seconds;
+    } else if (job.schedule_kind == gateway::ScheduleKind::Cron) {
+        schedule["cronExpr"] = job.cron_expr;
+        schedule["timezone"] = job.timezone;
+    }
+    schedule["misfirePolicy"] = gateway::ToString(job.misfire);
+    if (job.deadline_ms > 0) {
+        schedule["deadlineMs"] = job.deadline_ms;
+    }
+    schedule["notifyOnChange"] = job.notify_on_change;
+    if (job.state == gateway::AutomationJobState::Active) {
+        if (job.schedule_kind == gateway::ScheduleKind::Once) {
+            schedule["nextDueMs"] = job.due_at_ms;
+        } else {
+            gateway::ScheduleSpec spec;
+            spec.kind = job.schedule_kind;
+            spec.due_at_ms = job.due_at_ms;
+            spec.interval_seconds = job.interval_seconds;
+            spec.anchor_ms = job.anchor_ms;
+            spec.cron_expr = job.cron_expr;
+            spec.timezone = job.timezone;
+            spec.misfire = job.misfire;
+            const std::int64_t after =
+                job.schedule_cursor_ms > now_ms ? job.schedule_cursor_ms : now_ms;
+            const auto next = gateway::FirstSlotAfter(spec, after);
+            if (next.found) {
+                schedule["nextDueMs"] = next.utc_ms;
+            }
+        }
+    }
+    return schedule;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -356,6 +410,16 @@ bool AssistantAutomationFace::WaitForCreateReceipt(const std::string& idempotenc
         if (key != projection.create_keys.end()) {
             const auto job = projection.jobs.find(key->second);
             if (job != projection.jobs.end()) {
+                // 周期任务(interval/cron,V2 语义)建账不建 occurrence——
+                // 拍点归 SweepSchedule 生成,job 行落了就该回,occurrenceId
+                // 留空(调用方与页面按"按计划调度"理解,不是漏)。once
+                // 任务才等 occurrence 行(#95 的回执合同):
+                if (job->second.schedule_kind != gateway::ScheduleKind::Once) {
+                    *out_job_id = key->second;
+                    *out_revision = job->second.revision;
+                    out_occurrence_id->clear();
+                    return true;
+                }
                 // job 行与 once 首枚 occurrence 行是 CreateJob 里两笔连续
                 // append(各自 PowerLoss flush)——读侧轮询可能停在两行之
                 // 间。"受理即回带 occurrenceId"的合同要求回执等 occurrence
@@ -415,19 +479,65 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
         return nlohmann::json();
     }
     const std::int64_t due_at_ms = ReadJsonInt(params, "dueAtMs");
+    // ---- W4 周期参数(interval/cron 互斥;透传 V2 schedule 语义) ----
+    const std::int64_t interval_seconds = ReadJsonInt(params, "intervalSeconds");
+    const std::string cron_expr = ReadJsonString(params, "cronExpr");
+    const std::string timezone = ReadJsonString(params, "timezone");
+    const std::string misfire_text = ReadJsonString(params, "misfirePolicy");
+    const bool notify_on_change = ReadJsonBool(params, "notifyOnChange");
+    if (interval_seconds > 0 && !cron_expr.empty()) {
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message = "task/create: intervalSeconds 与 cronExpr 二选一,别都给";
+        return nlohmann::json();
+    }
+    gateway::MisfirePolicy misfire = gateway::MisfirePolicy::Coalesce;
+    if (!misfire_text.empty() && !gateway::ParseMisfirePolicy(misfire_text, misfire)) {
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message = "task/create: misfirePolicy 须是 coalesce 或 skip";
+        return nlohmann::json();
+    }
+    // 本地先过 V2 的规格校验(五字段受限 cron 明拒不猜、内置时区表认不
+    // 得明拒、interval 界 1s..10y)——坏规格不落命令文件,不白等回执。
+    gateway::ScheduleSpec spec;
+    spec.due_at_ms = due_at_ms > 0 ? due_at_ms : 0;
+    spec.timezone = timezone.empty() ? std::string("UTC") : timezone;
+    spec.misfire = misfire;
+    if (interval_seconds > 0) {
+        spec.kind = gateway::ScheduleKind::Interval;
+        spec.interval_seconds = interval_seconds;
+        // 锚点缺省 = now(store 的 CreateJob 落);校验要求非零,给当前
+        // 时刻只为过形状——真实锚点由泵侧落账。
+        spec.anchor_ms = WallClockMs();
+    } else if (!cron_expr.empty()) {
+        spec.kind = gateway::ScheduleKind::Cron;
+        spec.cron_expr = cron_expr;
+    } else {
+        spec.kind = gateway::ScheduleKind::Once;
+    }
+    const std::string invalid = gateway::ValidateScheduleSpec(spec);
+    if (!invalid.empty()) {
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message = "task/create: 计划规格不过——" + invalid;
+        return nlohmann::json();
+    }
     // 幂等先查账:同键已受理 → 回原受理(duplicate),不写第二枚命令。
     // automation 的幂等合同(§11.5):同键回原回执,不比载荷。回执与首
-    // 次同款,occurrenceId 也要齐——挡分支若撞上"job 行在、occurrence
-    // 行未落"的两行 append 中间态,短等其上账(首枚回执等到过,常态
-    // 一拍即过;等不到如实回空,不冒充)。
+    // 次同款,once 的 occurrenceId 也要齐——挡分支若撞上"job 行在、
+    // occurrence 行未落"的两行 append 中间态,短等其上账(首枚回执等
+    // 到过,常态一拍即过;等不到如实回空,不冒充)。周期任务建账不建
+    // occurrence(V2 语义)——occurrenceId 本来就空,不等。
     {
         const gateway::AutomationProjection projection =
             gateway::ReadAutomationProjection(paths_.automation_log);
         const auto key = projection.create_keys.find(client_operation_id);
         if (key != projection.create_keys.end()) {
+            const auto job = projection.jobs.find(key->second);
+            const bool once_job =
+                job != projection.jobs.end() &&
+                job->second.schedule_kind == gateway::ScheduleKind::Once;
             std::string occurrence_id = FindFirstOccurrenceOfJob(projection, key->second);
             const std::int64_t wait_deadline = WallClockMs() + 2000;
-            while (occurrence_id.empty() && WallClockMs() < wait_deadline) {
+            while (once_job && occurrence_id.empty() && WallClockMs() < wait_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 occurrence_id = FindFirstOccurrenceOfJob(
                     gateway::ReadAutomationProjection(paths_.automation_log), key->second);
@@ -435,11 +545,11 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
             nlohmann::json result;
             result["duplicate"] = true;
             result["jobId"] = key->second;
-            const auto job = projection.jobs.find(key->second);
             if (job != projection.jobs.end()) {
                 result["revision"] = job->second.revision;
                 result["state"] = gateway::ToString(job->second.state);
                 result["dueAtMs"] = job->second.due_at_ms;
+                result["schedule"] = ScheduleProjectionFor(job->second, WallClockMs());
             }
             if (!occurrence_id.empty()) {
                 result["occurrenceId"] = occurrence_id;
@@ -452,6 +562,26 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
     command.idempotency_key = client_operation_id;
     command.due_at_ms = due_at_ms > 0 ? due_at_ms : 0;  // 0 = 立即(V1 语义)
     command.requested_at_ms = WallClockMs();
+    // 周期透传(V2 计划键:出现即写;泵消费侧折进 AutomationStore)。
+    if (interval_seconds > 0) {
+        command.schedule.set_interval = true;
+        command.schedule.interval_seconds = interval_seconds;
+    } else if (!cron_expr.empty()) {
+        command.schedule.set_cron = true;
+        command.schedule.cron_expr = cron_expr;
+    }
+    if (!timezone.empty()) {
+        command.schedule.set_timezone = true;
+        command.schedule.timezone = timezone;
+    }
+    if (!misfire_text.empty()) {
+        command.schedule.set_misfire = true;
+        command.schedule.misfire = misfire_text;
+    }
+    if (params.is_object() && params.contains("notifyOnChange")) {
+        command.schedule.set_notify_on_change = true;
+        command.schedule.notify_on_change = notify_on_change;
+    }
     const std::string error =
         gateway::WriteJobAddCommand(paths_.control_dir, command);
     if (!error.empty()) {
@@ -474,6 +604,16 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
     result["occurrenceId"] = occurrence_id;
     result["revision"] = revision;
     result["dueAtMs"] = due_at_ms > 0 ? due_at_ms : 0;
+    // 周期任务建账不建 occurrence(V2 语义:拍点归 SweepSchedule 生成),
+    // occurrenceId 空 = 还没有执行记录,不是错误。
+    if (interval_seconds > 0 || !cron_expr.empty()) {
+        const gateway::AutomationProjection projection =
+            gateway::ReadAutomationProjection(paths_.automation_log);
+        const auto job = projection.jobs.find(job_id);
+        if (job != projection.jobs.end()) {
+            result["schedule"] = ScheduleProjectionFor(job->second, WallClockMs());
+        }
+    }
     return result;
 }
 
@@ -560,6 +700,7 @@ nlohmann::json AssistantAutomationFace::HandleTaskList(const nlohmann::json& par
         item["dueAtMs"] = job.due_at_ms;
         item["revision"] = job.revision;
         item["createdAtMs"] = job.created_at_ms;
+        item["schedule"] = ScheduleProjectionFor(job, WallClockMs());
         // 最近一枚 occurrence(按 settled/claimed/scheduled 时间倒序挑)。
         const gateway::AutomationOccurrence* latest = nullptr;
         for (const auto& [occurrence_id, occurrence] : projection.occurrences) {
@@ -665,6 +806,7 @@ nlohmann::json AssistantAutomationFace::HandleTaskRead(const nlohmann::json& par
     job_json["revision"] = job->second.revision;
     job_json["createdAtMs"] = job->second.created_at_ms;
     job_json["idempotencyKey"] = job->second.idempotency_key;
+    job_json["schedule"] = ScheduleProjectionFor(job->second, WallClockMs());
     nlohmann::json occurrences = nlohmann::json::array();
     for (const auto& [occurrence_id, occurrence] : projection.occurrences) {
         if (occurrence.job_id != job_id) {
@@ -686,6 +828,12 @@ nlohmann::json AssistantAutomationFace::HandleTaskRead(const nlohmann::json& par
         item["settledAtMs"] = occurrence.settled_at_ms;
         item["sessionId"] = occurrence.session_id;
         item["turnId"] = occurrence.turn_id;
+        // heartbeat 观察账(W4):有 sha 才给(notifyOnChange 任务的执行
+        // 才落观察行;正文未变的拍 changed=false、delivered=false)。
+        if (!occurrence.observed_sha.empty()) {
+            item["observed"] = nlohmann::json{{"changed", occurrence.observed_changed},
+                                              {"delivered", occurrence.observed_delivered}};
+        }
         const auto result = FindOccurrenceResult(occurrence, outbox);
         if (result.has_value()) {
             item["result"] = *result;
@@ -767,6 +915,98 @@ nlohmann::json AssistantAutomationFace::HandleTaskCancel(const nlohmann::json& p
     out_error_message = "task/cancel: 15 秒内没等到取消生效(泵忙,或 expectedRevision 不符被拒)。"
                         "核对 task/read 的 revision 后重试。";
     return nlohmann::json();
+}
+
+nlohmann::json AssistantAutomationFace::HandleTaskStateOp(
+    const char* method, const char* verb, const char* target_state_name,
+    gateway::AutomationJobState target_state, const nlohmann::json& params, int& out_error_code,
+    std::string& out_error_message) {
+    if (!params.is_object()) {
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message = std::string(method) + ": params 须是对象";
+        return nlohmann::json();
+    }
+    const std::string job_id = ReadJsonString(params, "jobId");
+    const std::int64_t expected_revision = ReadJsonInt(params, "expectedRevision");
+    const std::string client_operation_id = ReadJsonString(params, "clientOperationId");
+    if (job_id.empty() || expected_revision <= 0 || client_operation_id.empty()) {
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message =
+            std::string(method) + ": jobId、expectedRevision(CAS,0 拒)、clientOperationId 都要有";
+        return nlohmann::json();
+    }
+    const gateway::AutomationProjection projection =
+        gateway::ReadAutomationProjection(paths_.automation_log);
+    const auto job = projection.jobs.find(job_id);
+    if (job == projection.jobs.end()) {
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message = std::string(method) + ": 没这个任务 " + job_id;
+        return nlohmann::json();
+    }
+    if (job->second.state == gateway::AutomationJobState::Cancelled) {
+        // 终态之后再 pause/resume:如实拒(不复活终态任务)。
+        out_error_code = app_server::kErrInvalidParams;
+        out_error_message = std::string(method) + ": 任务已取消,终态不再受理 " +
+                            std::string(verb);
+        return nlohmann::json();
+    }
+    // 已在目标态的重复操作:回当前态(幂等,不写第二枚命令)。
+    if (job->second.state == target_state) {
+        nlohmann::json result;
+        result["jobId"] = job_id;
+        result["state"] = target_state_name;
+        result["revision"] = job->second.revision;
+        result["duplicate"] = true;
+        return result;
+    }
+    gateway::GatewayJobStateCommand command;
+    command.verb = verb;
+    command.job_id = job_id;
+    command.expected_revision = static_cast<std::uint64_t>(expected_revision);
+    command.idempotency_key = client_operation_id;
+    command.requested_at_ms = WallClockMs();
+    const std::string error =
+        gateway::WriteJobStateCommand(paths_.control_dir, command);
+    if (!error.empty()) {
+        out_error_code = app_server::kErrInternalError;
+        out_error_message = std::string(method) + ": 命令落不了盘——" + error;
+        return nlohmann::json();
+    }
+    // 轮询到目标态(泵消费命令即落)。CAS 拒绝 = revision 不符,超时后
+    // 如实报,带当前 revision 供重试。
+    const std::int64_t deadline = WallClockMs() + kReceiptWaitMs;
+    while (WallClockMs() < deadline) {
+        const gateway::AutomationProjection now =
+            gateway::ReadAutomationProjection(paths_.automation_log);
+        const auto current = now.jobs.find(job_id);
+        if (current != now.jobs.end() && current->second.state == target_state) {
+            nlohmann::json result;
+            result["jobId"] = job_id;
+            result["state"] = target_state_name;
+            result["revision"] = current->second.revision;
+            result["duplicate"] = false;
+            return result;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    out_error_code = app_server::kErrInternalError;
+    out_error_message = std::string(method) + ": 15 秒内没等到 " + std::string(verb) +
+                        " 生效(泵忙,或 expectedRevision 不符被拒)。核对 task/read 的 revision 后重试。";
+    return nlohmann::json();
+}
+
+nlohmann::json AssistantAutomationFace::HandleTaskPause(const nlohmann::json& params,
+                                                        int& out_error_code,
+                                                        std::string& out_error_message) {
+    return HandleTaskStateOp("task/pause", "pause", "paused", gateway::AutomationJobState::Paused,
+                             params, out_error_code, out_error_message);
+}
+
+nlohmann::json AssistantAutomationFace::HandleTaskResume(const nlohmann::json& params,
+                                                          int& out_error_code,
+                                                          std::string& out_error_message) {
+    return HandleTaskStateOp("task/resume", "resume", "active", gateway::AutomationJobState::Active,
+                             params, out_error_code, out_error_message);
 }
 
 nlohmann::json AssistantAutomationFace::HandleApprovalList(const nlohmann::json& params,
@@ -874,6 +1114,8 @@ void RegisterAssistantTaskMethods(app_server::Dispatcher& dispatcher,
     register_face_method("task/list", true, &AssistantAutomationFace::HandleTaskList);
     register_face_method("task/read", true, &AssistantAutomationFace::HandleTaskRead);
     register_face_method("task/cancel", true, &AssistantAutomationFace::HandleTaskCancel);
+    register_face_method("task/pause", true, &AssistantAutomationFace::HandleTaskPause);
+    register_face_method("task/resume", true, &AssistantAutomationFace::HandleTaskResume);
     register_face_method("approval/list", false, &AssistantAutomationFace::HandleApprovalList);
     register_face_method("approval/respond", false,
                          &AssistantAutomationFace::HandleApprovalRespond);
@@ -1027,31 +1269,58 @@ void AssistantAutomationRuntime::DiffAndPublish() {
             hub_->Push("assistant/task/event", std::move(params));
         }
     }
-    std::map<std::string, std::pair<std::string, std::string>> occurrences_now;
+    std::map<std::string, AssistantAutomationRuntime::OccurrenceSnapshot> occurrences_now;
     for (const auto& occurrence : occurrences) {
         const char* state = occurrence.state == gateway::AutomationOccurrence::State::Scheduled
                                 ? "scheduled"
                                 : (occurrence.state == gateway::AutomationOccurrence::State::Claimed
                                        ? "claimed"
                                        : "settled");
-        occurrences_now[occurrence.occurrence_id] = {state, occurrence.outcome};
+        AssistantAutomationRuntime::OccurrenceSnapshot snapshot;
+        snapshot.state = state;
+        snapshot.outcome = occurrence.outcome;
+        snapshot.observed = !occurrence.observed_sha.empty();
+        snapshot.observed_changed = occurrence.observed_changed;
+        snapshot.observed_delivered = occurrence.observed_delivered;
+        occurrences_now[occurrence.occurrence_id] = snapshot;
         const auto seen = last_occurrences_.find(occurrence.occurrence_id);
-        if (seen != last_occurrences_.end() && seen->second.first == std::string(state) &&
-            seen->second.second == occurrence.outcome) {
-            continue;
+        const bool state_changed =
+            seen == last_occurrences_.end() || seen->second.state != snapshot.state ||
+            seen->second.outcome != snapshot.outcome;
+        if (state_changed) {
+            nlohmann::json params;
+            params["kind"] =
+                seen == last_occurrences_.end() ? "occurrence.created" : "occurrence.changed";
+            params["jobId"] = occurrence.job_id;
+            params["occurrenceId"] = occurrence.occurrence_id;
+            params["state"] = state;
+            params["outcome"] = occurrence.outcome;
+            params["detail"] = occurrence.detail;
+            params["sessionId"] = occurrence.session_id;
+            params["turnId"] = occurrence.turn_id;
+            params["atMs"] = WallClockMs();
+            hub_->Push("assistant/task/event", std::move(params));
         }
-        nlohmann::json params;
-        params["kind"] =
-            seen == last_occurrences_.end() ? "occurrence.created" : "occurrence.changed";
-        params["jobId"] = occurrence.job_id;
-        params["occurrenceId"] = occurrence.occurrence_id;
-        params["state"] = state;
-        params["outcome"] = occurrence.outcome;
-        params["detail"] = occurrence.detail;
-        params["sessionId"] = occurrence.session_id;
-        params["turnId"] = occurrence.turn_id;
-        params["atMs"] = WallClockMs();
-        hub_->Push("assistant/task/event", std::move(params));
+        // W4 heartbeat 观察面:观察账落了(sha 从无到有)或投递标记翻面
+        // → 独立事件(V2 的 notice 通知:changed/delivered 如实,正文未
+        // 变的拍 changed=false 不打扰)。同步泵下观察与结算同拍落账,
+        // occurrence 在 diff 里多半是"新出现就带观察"——新出现也算。
+        const bool observed_before =
+            seen != last_occurrences_.end() && seen->second.observed;
+        const bool observed_face_changed =
+            seen != last_occurrences_.end() &&
+            (seen->second.observed_changed != snapshot.observed_changed ||
+             seen->second.observed_delivered != snapshot.observed_delivered);
+        if (snapshot.observed && (!observed_before || observed_face_changed)) {
+            nlohmann::json params;
+            params["kind"] = "occurrence.observed";
+            params["jobId"] = occurrence.job_id;
+            params["occurrenceId"] = occurrence.occurrence_id;
+            params["changed"] = snapshot.observed_changed;
+            params["delivered"] = snapshot.observed_delivered;
+            params["atMs"] = WallClockMs();
+            hub_->Push("assistant/task/event", std::move(params));
+        }
     }
     last_jobs_ = std::move(jobs_now);
     last_occurrences_ = std::move(occurrences_now);
