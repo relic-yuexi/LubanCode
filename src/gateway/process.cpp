@@ -649,6 +649,11 @@ std::string GatewayProcess::RecordConfigInvalidBoot(const GatewayProfilePaths& p
 // StopGateway
 // ---------------------------------------------------------------------------
 
+std::optional<GatewayLockRecord> ReadGatewayLockFile(const std::filesystem::path& lock_file,
+                                                     std::string* error) {
+    return ReadLockFile(lock_file, error);
+}
+
 GatewayStopOutcome StopGateway(const GatewayProfilePaths& paths, int timeout_ms,
                                const std::function<std::int64_t()>& now_ms) {
     GatewayStopOutcome outcome;

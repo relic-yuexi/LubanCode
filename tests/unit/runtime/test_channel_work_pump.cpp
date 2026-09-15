@@ -198,6 +198,8 @@ struct Q2Params {
     std::size_t max_pending_total = 256;
     // 换 workspace 身份(不串场案):不同 ws 目录 → 不同 workspace_key。
     std::filesystem::path ws_subdir = "ws";
+    // Q1b 配对案:dm_policy=Pairing(未知 sender 走 PendingPairing 水路)。
+    channel::DmPolicy dm_policy = channel::DmPolicy::Open;
 };
 
 // 纵向装配:manager(真 Bridge 帧)+ outbox + 渠道 work 泵。重建即"进程
@@ -251,7 +253,7 @@ struct Q2Fixture {
         config.enabled = true;
         config.transport = "websocket";
         config.secret_env = "QQBOT_SECRET";
-        config.dm_policy = channel::DmPolicy::Open;
+        config.dm_policy = params.dm_policy;
         config.tools.allow = {"repo_probe"};
         REQUIRE(manager->AddAccount("qqbot", "main", config, &transport).status ==
                 channel::ChannelManager::AddAccountResult::Status::Ok);
@@ -809,4 +811,145 @@ TEST_CASE("关机次序:StopAccepting 后不取新活;Close 幂等") {
     REQUIRE(CountOf(fixture.counter_file, "model") == 0);  // 不取新活
     REQUIRE(fixture.pump->Close(0));
     REQUIRE(fixture.pump->Close(0));  // 幂等
+}
+
+// ---------------------------------------------------------------------------
+// QQ 接入单 Q1b:配对提示与批准闭环(假渠道 fixture 纵向链)
+// ---------------------------------------------------------------------------
+
+// 从 sidecar 收到的 channel.send 正文里抠配对码("配对码: XXXXXXXX(")。
+std::string PairingCodeFromSend(const test_support::FakeChannelSidecar::RecordedSend& send) {
+    const std::string text = send.params["parts"][0]["text"].get<std::string>();
+    const std::string mark = "配对码: ";
+    const std::size_t at = text.find(mark);
+    if (at == std::string::npos) return std::string();
+    return text.substr(at + mark.size(), channel::kPairingCodeLength);
+}
+
+TEST_CASE("Q1b 配对闭环:未配对来信→提示带码→批准→重发→进模型") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Params params;
+    params.dm_policy = channel::DmPolicy::Pairing;
+    Q2Fixture fixture("pairing_loop", params);
+    fixture.scripts = {TextScript("批准后的第一答")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+
+    // 1) 未配对来信:零模型调用,回的是宿主提示(带一次性配对码)。
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-stranger", "帮我干活", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 0);
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+    const std::string code = PairingCodeFromSend(fixture.sidecar.sent_messages()[0]);
+    REQUIRE(code.size() == 8);
+    // 提示锚定来者会话与来信消息(被动回复)。
+    REQUIRE(fixture.sidecar.sent_messages()[0].params["conversation"]["id"] == "dm-stranger");
+    REQUIRE(fixture.sidecar.sent_messages()[0].params["reply_to_message_id"] == "m-1");
+    // 原信不进执行:ingress rejected pairing_pending。
+    REQUIRE(fixture.IngressStateNameOf(1) == "rejected");
+
+    // 2) 本地批准(另一终端的 CLI 命令最终走到的口)。
+    std::string error;
+    const auto approved = fixture.manager->ApprovePairing("qqbot", "main", code, &error);
+    REQUIRE(approved.has_value());
+    CHECK(*approved == "sender-dm-stranger");
+    // 配对码一次性:再用同码批,明报。
+    CHECK_FALSE(fixture.manager->ApprovePairing("qqbot", "main", code, &error).has_value());
+    CHECK(error == "already_finalized");
+
+    // 3) 批准后原消息不自动执行(计数仍 0);用户重发才进模型。
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 0);
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-stranger", "重发:帮我干活", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    // 第二条出站 = 模型回复(不是提示:没有"配对码"字样)。
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    const std::string reply =
+        fixture.sidecar.sent_messages()[1].params["parts"][0]["text"].get<std::string>();
+    CHECK(reply.find("批准后的第一答") != std::string::npos);
+    CHECK(reply.find("配对码") == std::string::npos);
+    REQUIRE(fixture.IngressStateNameOf(2) == "delivered");
+}
+
+TEST_CASE("Q1b 提示限频:冷却窗内第二封不重发;重启不重发;窗过出新码") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Params params;
+    params.dm_policy = channel::DmPolicy::Pairing;
+    {
+        Q2Fixture fixture("pairing_rate", params);
+        auto registry = fixture.MakeRegistry();
+        REQUIRE(fixture.OpenPump(registry).ok);
+
+        fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-stranger", "你好", "m-1"));
+        fixture.Tick();
+        fixture.TickUntilQuiet();
+        REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+
+        // 窗内第二封(过 30s code 冷却,不过 5min 提示冷却):不重发提示。
+        fixture.now += channel::kPairingRequestCooldownMs + 2000;
+        fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-stranger", "还在吗", "m-2"));
+        fixture.Tick();
+        fixture.TickUntilQuiet();
+        REQUIRE(fixture.sidecar.sent_messages().size() == 1);  // 只有一条提示
+        REQUIRE(CountOf(fixture.counter_file, "model") == 0);
+        REQUIRE(fixture.pump->Close(0));
+    }
+    // 重启(同账重建):持久已提示账在,同窗内第三封也不重发。
+    {
+        Q2Fixture fixture("pairing_rate", params, /*rebuild=*/true);
+        fixture.now += channel::kPairingRequestCooldownMs + 2000;
+        auto registry = fixture.MakeRegistry();
+        REQUIRE(fixture.OpenPump(registry).ok);
+        fixture.EmitAndIngest(MakeDm("in-3", "pe-3", "dm-stranger", "第三次", "m-3"));
+        fixture.Tick();
+        fixture.TickUntilQuiet();
+        // 新进程的 sidecar 一张白纸:重启后窗内来信零提示(不重发刷屏)。
+        REQUIRE(fixture.sidecar.sent_messages().empty());
+        REQUIRE(CountOf(fixture.counter_file, "model") == 0);
+        // 冷却窗过了:新来信出新提示(新码)。
+        fixture.now += channel::kPairingNoticeCooldownMs;
+        fixture.EmitAndIngest(MakeDm("in-4", "pe-4", "dm-stranger", "第四次", "m-4"));
+        fixture.Tick();
+        fixture.TickUntilQuiet();
+        REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+        const std::string code = PairingCodeFromSend(fixture.sidecar.sent_messages()[0]);
+        REQUIRE(code.size() == 8);
+        // outbox 幂等账:重启前后两枚提示是两枚不同 delivery(不同码不同
+        // selection;盘上账保留,旧的已 sent 不重投)。
+        REQUIRE(fixture.outbox->ListItems().size() == 2);
+    }
+}
+
+TEST_CASE("Q1b 被拒 sender:来信零提示零模型,回执链上安静") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Params params;
+    params.dm_policy = channel::DmPolicy::Pairing;
+    Q2Fixture fixture("pairing_reject", params);
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-spam", "广告", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+    const std::string code = PairingCodeFromSend(fixture.sidecar.sent_messages()[0]);
+    REQUIRE(code.size() == 8);
+    std::string error;
+    REQUIRE(fixture.manager->RejectPairing("qqbot", "main", code, &error).has_value());
+
+    // 拒过之后:同 sender 再来信,零新提示零模型。
+    fixture.now += channel::kPairingNoticeCooldownMs + channel::kPairingRequestCooldownMs;
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-spam", "再来一条广告", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+    REQUIRE(CountOf(fixture.counter_file, "model") == 0);
+    // 但别的 sender 照常领提示。
+    fixture.EmitAndIngest(MakeDm("in-3", "pe-3", "dm-other", "你好", "m-3"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
 }

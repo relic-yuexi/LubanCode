@@ -143,6 +143,19 @@ struct ChannelCliArgs {
     std::string account;  // --account <名>;空 = main
 };
 
+// `lubancode channel pairing approve|reject <渠道> <账号> <配对码或身份>
+// [--profile <名>] [--timeout <秒>]`(QQ 接入单 Q1b):本地批准控制入口。
+// 命令经 Gateway 文件控制面送达持锁实例——普通交互进程不拿空 manager
+// 冒充批准成功(无持锁实例时明确报错指引)。
+struct ChannelPairingCliArgs {
+    std::string action;      // approve | reject
+    std::string channel_id;  // qqbot
+    std::string account_id;  // main
+    std::string token;       // 配对码或 sender 身份
+    std::string profile;     // --profile;空 = default
+    int timeout_ms = 10'000; // --timeout <秒>
+};
+
 // `lubancode im [--select] [平台] [--account <账号>] [--profile <名>]` 与
 // `lubancode im setup [平台] [--account <账号>]`(§六 6.1)。im 是日常 IM
 // 入口;im setup 只进配置管理,不启动。
@@ -194,6 +207,8 @@ enum class CliAction {
     BadChannelStatus,         // channel 子命令参数不对:人话已塞进 error_text
     RunChannelSetup,          // channel setup 子命令:渠道配置向导(§5.1)
     BadChannelSetup,          // channel 参数不对:人话已塞进 error_text
+    RunChannelPairing,        // channel pairing approve/reject 子命令(Q1b)
+    BadChannelPairing,        // channel pairing 参数不对:人话已塞进 error_text
     RunIm,                    // im 子命令:统一 IM 选择与启动入口(§六)
     BadIm,                    // im 参数不对:人话已塞进 error_text
     RunAssistant,             // assistant 子命令:常驻助理 Web 主界面(W1)
@@ -211,6 +226,7 @@ struct ParsedCliArgs {
     GatewayCliArgs gateway;  // action == RunGateway 时有效
     ChannelStatusCliArgs channel_status;  // action == RunChannelStatus 时有效
     ChannelCliArgs channel;  // action == RunChannelSetup 时有效
+    ChannelPairingCliArgs channel_pairing;  // action == RunChannelPairing 时有效
     ImCliArgs im;            // action == RunIm 时有效
     AssistantCliArgs assistant;  // action == RunAssistant 时有效(W1)
 };

@@ -807,6 +807,9 @@ add_library(lubancode_engine STATIC
   # runtime/app/cli)。
   src/gateway/profile.cpp
   src/gateway/control_server.cpp
+  # QQ 接入单 Q1b:渠道配对批准/拒绝的文件控制面(命令/回执,stop 同款
+  # 通道;纯文件账,零 runtime 依赖)。
+  src/gateway/pairing_command.cpp
   src/gateway/process.cpp
   src/gateway/status.cpp
   # 常驻总装 V1:最小任务账(once/run-now)、本地 DurableReplyOutbox、
@@ -1313,6 +1316,9 @@ add_library(lubancode_app STATIC
   # QQBot Windows 修复单 §5.1:`lubancode channel setup <平台>` 配置向导
   #(真终端 IO 件,与 gateway_command 同待遇归 app target)。
   src/cli/channel_setup_command.cpp
+  # QQ 接入单 Q1b:`lubancode channel pairing approve|reject` 本地批准控制
+  # 入口(锁探测 → 文件控制面投命令 → 等回执;不拿空 manager 冒充批准)。
+  src/cli/channel_pairing_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

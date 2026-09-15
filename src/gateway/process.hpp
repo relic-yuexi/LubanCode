@@ -241,6 +241,13 @@ private:
 // stop 命令的等待收口(`lubancode gateway stop` 用)
 // ---------------------------------------------------------------------------
 
+// 只读锁账(外部 CLI 的控制命令投递门用——配对 approve/reject 须确认有
+// 活着的持锁实例,不拿空 manager 冒充批准成功;与 StopGateway 同一份
+// 身份核材料)。文件不在 = nullopt 且 error 空;在但读不懂 = nullopt 带
+// 说明(保守,不投命令)。
+std::optional<GatewayLockRecord> ReadGatewayLockFile(const std::filesystem::path& lock_file,
+                                                     std::string* error);
+
 struct GatewayStopOutcome {
     enum class Status {
         Stopped,      // 干净停下(锁已释放)

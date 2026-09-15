@@ -473,9 +473,10 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             if (rest == 0) {
                 parsed.action = CliAction::BadChannelSetup;
                 parsed.error_text =
-                    "用法: lubancode channel <status|setup> ...("
+                    "用法: lubancode channel <status|setup|pairing> ...("
                     "status <渠道> <账号> [--json] 连接快照;"
-                    " setup <平台> [--account <账号>] 配置向导)";
+                    " setup <平台> [--account <账号>] 配置向导;"
+                    " pairing approve|reject <渠道> <账号> <配对码或身份> 配对批准)";
                 return parsed;
             }
             if (args[i + 1] == "status") {
@@ -532,9 +533,71 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                 parsed.channel = channel_args;
                 return parsed;
             }
+            if (args[i + 1] == "pairing") {
+                // Q1b 本地批准控制入口:`lubancode channel pairing
+                // approve|reject <渠道> <账号> <配对码或身份>`。token 没有
+                // 任何敏感豁免——它本身就是配对码(一次性)或平台身份串。
+                if (rest < 5 || args[i + 2] != "approve" && args[i + 2] != "reject") {
+                    parsed.action = CliAction::BadChannelPairing;
+                    parsed.error_text =
+                        "channel pairing 需要 approve|reject <渠道> <账号> <配对码或身份>"
+                        "(如 lubancode channel pairing approve qqbot main ABCD2345)";
+                    return parsed;
+                }
+                ChannelPairingCliArgs pairing_args;
+                pairing_args.action = args[i + 2];
+                pairing_args.channel_id = args[i + 3];
+                pairing_args.account_id = args[i + 4];
+                pairing_args.token = args[i + 5];
+                for (std::size_t extra = i + 6; extra < args.size(); ++extra) {
+                    if (args[extra] == "--profile") {
+                        if (extra + 1 >= args.size() || args[extra + 1].empty() ||
+                            args[extra + 1].rfind("--", 0) == 0) {
+                            parsed.action = CliAction::BadChannelPairing;
+                            parsed.error_text = "--profile 需要一个 profile 名(单段名)";
+                            return parsed;
+                        }
+                        pairing_args.profile = args[++extra];
+                        continue;
+                    }
+                    if (args[extra] == "--timeout") {
+                        if (extra + 1 >= args.size()) {
+                            parsed.action = CliAction::BadChannelPairing;
+                            parsed.error_text = "--timeout 需要一个秒数(如 --timeout 30)";
+                            return parsed;
+                        }
+                        char* end = nullptr;
+                        const long secs = std::strtol(args[extra + 1].c_str(), &end, 10);
+                        if (end == nullptr || *end != '\0' || secs <= 0 || secs > 600) {
+                            parsed.action = CliAction::BadChannelPairing;
+                            parsed.error_text = "--timeout 认不得 \"" + args[extra + 1] +
+                                                "\":要 1..600 的秒数";
+                            return parsed;
+                        }
+                        pairing_args.timeout_ms = static_cast<int>(secs) * 1000;
+                        ++extra;
+                        continue;
+                    }
+                    parsed.action = CliAction::BadChannelPairing;
+                    parsed.error_text = "channel pairing 认不得参数 \"" + args[extra] +
+                                        "\":只认 --profile <名> 与 --timeout <秒>";
+                    return parsed;
+                }
+                if (!lubancode::gateway::IsValidGatewayProfileName(pairing_args.profile.empty()
+                                                                        ? "default"
+                                                                        : pairing_args.profile)) {
+                    parsed.action = CliAction::BadChannelPairing;
+                    parsed.error_text = "profile 名须是单段名(不带路径): " + pairing_args.profile;
+                    return parsed;
+                }
+                parsed.action = CliAction::RunChannelPairing;
+                parsed.channel_pairing = pairing_args;
+                return parsed;
+            }
             parsed.action = CliAction::BadChannelSetup;
             parsed.error_text = "channel 认不得子命令 \"" + args[i + 1] +
-                                "\":只认 status(连接快照)与 setup(配置向导)";
+                                "\":只认 status(连接快照)、setup(配置向导)与"
+                                " pairing(配对批准)";
             return parsed;
         }
         // im 子命令(§六 6.1):lubancode im [--select] [平台]

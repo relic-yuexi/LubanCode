@@ -10,6 +10,9 @@
 #include "app/channel_connection_reporter.hpp"
 #include "channel/channel_config.hpp"
 #include "channel/manager.hpp"
+#include "channel/pairing.hpp"
+#include "config/config.hpp"
+#include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "platform/wall_clock.hpp"
 
@@ -109,6 +112,85 @@ ChannelStatusVerdict JudgeChannelStatus(const nlohmann::json* snapshot,
     return verdict;
 }
 
+// 四步状态(§5.1 末条):配置 → 在线 → 配对 → 模型,固定次序分栏。哪步
+// 卡住指哪步的下一步,不拿后面的状态粉饰前面的缺口。
+ChannelFourStateView BuildChannelFourState(const std::string& channel_id,
+                                           const std::string& account_id,
+                                           const ChannelFourStateInput& input) {
+    ChannelFourStateView view;
+    nlohmann::json report = nlohmann::json::object();
+
+    // 1) 配置已存。
+    if (input.account_configured) {
+        view.lines.push_back("1. 配置已存:是");
+        report["config_saved"] = true;
+    } else {
+        std::string detail = input.config_detail.empty()
+                                 ? std::string("账号不在全局配置里(或未启用/缺 AppID/凭据)")
+                                 : input.config_detail;
+        view.lines.push_back("1. 配置已存:否——" + detail);
+        view.lines.push_back("   下一步: lubancode channel setup " + channel_id +
+                             " --account " + account_id);
+        report["config_saved"] = false;
+        report["config_detail"] = detail;
+    }
+
+    // 2) QQ 在线(连接快照裁决;不是配置的延续,是独立事实)。
+    if (input.online) {
+        view.lines.push_back("2. QQ 在线:是" +
+                             (input.online_detail.empty() ? std::string()
+                                                          : "(" + input.online_detail + ")"));
+        report["online"] = true;
+    } else {
+        std::string detail = input.online_detail.empty()
+                                 ? std::string("没有可用的在线快照")
+                                 : input.online_detail;
+        view.lines.push_back("2. QQ 在线:否——" + detail);
+        view.lines.push_back("   下一步: 在工作目录运行 lubancode gateway run(或 lubancode im)");
+        report["online"] = false;
+        report["online_detail"] = detail;
+    }
+
+    // 3) 身份已配对(pairing 账只读投影)。
+    if (!input.pairing_parse_ok) {
+        view.lines.push_back("3. 身份已配对:未知——配对账读不懂(<状态根>/channels/" +
+                             channel_id + "/" + account_id + "/pairing.json)");
+        report["paired"] = "unreadable";
+    } else if (input.pairing_approved > 0) {
+        view.lines.push_back("3. 身份已配对:是(已批准 " +
+                             std::to_string(input.pairing_approved) + " 个身份)");
+        report["paired"] = true;
+        report["pairing_approved"] = input.pairing_approved;
+    } else if (input.pairing_pending > 0) {
+        view.lines.push_back("3. 身份已配对:否——有待批准的配对 " +
+                             std::to_string(input.pairing_pending) + " 笔");
+        view.lines.push_back("   下一步: lubancode channel pairing approve " + channel_id + " " +
+                             account_id + " <配对码>(码在用户收到的提示里)");
+        report["paired"] = false;
+        report["pairing_pending"] = input.pairing_pending;
+    } else {
+        view.lines.push_back("3. 身份已配对:否——还没有人配对(让用户先给机器人发条消息)");
+        report["paired"] = false;
+    }
+
+    // 4) 模型能回复(沿 #85 assistant config/status 的 configured 面)。
+    if (input.model_configured) {
+        view.lines.push_back("4. 模型能回复:是");
+        report["model_ready"] = true;
+    } else {
+        std::string detail =
+            input.model_detail.empty() ? std::string("模型配置不完整") : input.model_detail;
+        view.lines.push_back("4. 模型能回复:否——" + detail);
+        view.lines.push_back("   下一步: lubancode assistant 页面里配模型(config/model/set),"
+                             "或检查全局配置的 provider/model/api key");
+        report["model_ready"] = false;
+        report["model_detail"] = detail;
+    }
+
+    view.report = std::move(report);
+    return view;
+}
+
 int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
     // 渠道/账号 id 先过守门:它们直接拼状态根下的路径,带路径段 = 越界。
     if (!channel::IsValidChannelId(args.channel_id)) {
@@ -145,9 +227,95 @@ int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
         snapshot.has_value() ? &*snapshot : nullptr, args.channel_id, args.account_id,
         platform::WallClockNowMs(),
         [](unsigned long pid) { return platform::IsProcessAlive(pid); });
-    if (args.json) {
-        std::printf("%s\n", verdict.report.dump().c_str());
+
+    // ---- 四步状态探针(§5.1 末条):配置 / 在线 / 配对 / 模型 -----------
+    ChannelFourStateInput four_state;
+    four_state.online = verdict.online;
+    if (!verdict.online) {
+        // 未在线摘要:裁决第一行的人话(快照缺失/进程死/未连接的阶段)。
+        if (!verdict.lines.empty()) {
+            four_state.online_detail = verdict.lines.front();
+        }
+    } else if (snapshot.has_value()) {
+        four_state.online_detail = "boot " + SnapshotString(*snapshot, "boot_id");
+    }
+    // 配置:全局 config.json 的 channels 段只读解析(与 channel setup 同源)。
+    if (const auto config_file = config::GlobalConfigFilePath(); config_file.has_value()) {
+        four_state.account_configured = false;
+        std::string config_detail;
+        std::error_code read_ec;
+        const std::filesystem::path config_path = platform::Utf8ToPath(*config_file);
+        if (std::filesystem::is_regular_file(config_path, read_ec) && !read_ec) {
+            std::ifstream stream(config_path, std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(stream)),
+                             std::istreambuf_iterator<char>());
+            const auto parsed = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+            if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("channels") &&
+                parsed["channels"].is_object()) {
+                std::string channels_error;
+                const auto channels = channel::ParseChannelsUserConfig(
+                    parsed["channels"], *config_file, &channels_error);
+                if (!channels.has_value()) {
+                    config_detail = "channels 段解析失败: " + channels_error;
+                } else {
+                    const auto channel_it = channels->find(args.channel_id);
+                    if (channel_it == channels->end()) {
+                        config_detail = "channels 段里没有 " + args.channel_id;
+                    } else {
+                        const auto account_it = channel_it->second.accounts.find(args.account_id);
+                        if (account_it == channel_it->second.accounts.end()) {
+                            config_detail = "账号 " + args.account_id + " 不在配置里";
+                        } else if (!channel_it->second.enabled || !account_it->second.enabled) {
+                            config_detail = "渠道或账号未启用";
+                        } else if (account_it->second.app_id.empty()) {
+                            config_detail = "AppID 未填";
+                        } else if (channel::DescribeCredentialSource(account_it->second) ==
+                                   channel::CredentialSource::Missing) {
+                            config_detail = "凭据来源未配(secret_file/secret_env)";
+                        } else {
+                            four_state.account_configured = true;
+                        }
+                    }
+                }
+            } else {
+                config_detail = "配置文件里没有可用的 channels 段";
+            }
+        } else {
+            config_detail = "全局配置文件不存在(还没跑过配置向导)";
+        }
+        four_state.config_detail = config_detail;
+    }
+    // 配对:pairing 账只读投影(零建目录零写盘)。
+    const auto pairing_projection = channel::PairingStore::ReadProjection(
+        channels_root / args.channel_id / args.account_id);
+    four_state.pairing_present = pairing_projection.present;
+    four_state.pairing_parse_ok = pairing_projection.parse_ok;
+    four_state.pairing_approved = pairing_projection.approved;
+    four_state.pairing_pending = pairing_projection.pending;
+    // 模型:沿 #85 assistant config/status 的 configured 面,不重造判据。
+    const auto model_config = config::LoadFromEnv();
+    if (model_config.has_value()) {
+        const auto model_ready = config::RequireConfigured(*model_config);
+        four_state.model_configured = model_ready.has_value();
+        if (!model_ready.has_value()) {
+            four_state.model_detail = model_ready.error();
+        }
     } else {
+        four_state.model_detail = "配置装载失败: " + model_config.error();
+    }
+    const ChannelFourStateView four = BuildChannelFourState(args.channel_id, args.account_id,
+                                                            four_state);
+
+    if (args.json) {
+        nlohmann::json report = verdict.report;
+        report["four_state"] = four.report;
+        std::printf("%s\n", report.dump().c_str());
+    } else {
+        std::printf("%s/%s 四步状态:\n", args.channel_id.c_str(), args.account_id.c_str());
+        for (const std::string& line : four.lines) {
+            std::printf("%s\n", line.c_str());
+        }
+        std::printf("连接明细:\n");
         for (const std::string& line : verdict.lines) {
             std::printf("%s\n", line.c_str());
         }

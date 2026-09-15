@@ -13,6 +13,7 @@
 #include "channel/qq/qq_http.hpp"
 #include "channel/qq/qq_tls.hpp"
 #include "config/config.hpp"
+#include "gateway/pairing_command.hpp"
 #include "platform/process.hpp"
 #include "platform/wall_clock.hpp"
 
@@ -91,6 +92,7 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     manager_options.state_root = options.channels_state_root;
     manager_options.now_ms = options.now_ms;
     wiring->manager_ = std::make_unique<channel::ChannelManager>(std::move(manager_options));
+    wiring->control_dir_ = options.gateway_control_dir;
 
     // QQ 定案进程内直连(§十五):渠道实现内置受信,不造假包概念。
     const channel::ChannelTrustState builtin_trust{/*installed=*/true, /*trusted=*/true};
@@ -238,10 +240,65 @@ bool ChannelGatewayWiring::TickOnce(std::int64_t now_ms) {
     if (reporter_ != nullptr) {
         reporter_->Observe(owner_epoch_, platform::CurrentProcessId(), now_ms);
     }
+    // Q1b 配对控制面:另一终端的 approve/reject 命令在这里落地(回执文件
+    // 由 CLI 读走;命令消费失败不拦主业务——下一条命令下拍再来)。
+    if (!control_dir_.empty()) {
+        ConsumePairingCommands();
+    }
     if (work_pump_ != nullptr && !work_pump_->TickOnce(now_ms)) {
         return false;  // 渠道业务泵 broken(账写不进):停业务 tick
     }
     return true;
+}
+
+void ChannelGatewayWiring::ConsumePairingCommands() {
+    for (const gateway::GatewayPairingCommand& command :
+         gateway::PollPairingCommands(control_dir_, owner_epoch_)) {
+        gateway::GatewayPairingCommandResult result;
+        result.command_id = command.command_id;
+        result.action = command.action;
+        // "配对码或身份"单参数口:先按 code 认(code 在提示正文里),认
+        // 不出(not_found)再按 sender 身份认(身份在待审清单里)。
+        std::string error;
+        std::optional<std::string> sender;
+        const bool approve = command.action == "approve";
+        sender = approve ? manager_->ApprovePairing(command.channel_id, command.account_id,
+                                                    command.token, &error)
+                         : manager_->RejectPairing(command.channel_id, command.account_id,
+                                                   command.token, &error);
+        if (!sender.has_value() && error == "not_found") {
+            sender = approve
+                         ? manager_->ApprovePairingBySender(command.channel_id,
+                                                            command.account_id, command.token,
+                                                            &error)
+                         : manager_->RejectPairingBySender(command.channel_id,
+                                                           command.account_id, command.token,
+                                                           &error);
+        }
+        result.ok = sender.has_value();
+        result.sender_id = sender.value_or(std::string());
+        result.error = error;
+        if (result.ok) {
+            result.detail = approve ? "已批准配对" : "已拒绝配对";
+            std::fprintf(stderr, "[gateway] 渠道配对: %s %s/%s 身份 %s\n",
+                         approve ? "已批准" : "已拒绝", command.channel_id.c_str(),
+                         command.account_id.c_str(), result.sender_id.c_str());
+        } else if (error == "expired") {
+            result.detail = "配对码已过期——让用户重新发一条消息领取新码";
+        } else if (error == "already_finalized") {
+            result.detail = "这笔配对已经处理过(一次性)";
+        } else if (error == "not_found") {
+            result.detail = "配对码与身份都不在待审账上——先让用户给机器人发条消息";
+        } else if (error == "account_not_found") {
+            result.detail = "这只渠道账号没在本 Gateway 装配(未启用或装配失败)";
+        } else {
+            result.detail = "配对账不可写: " + error;
+        }
+        const std::string write_error = gateway::WritePairingCommandResult(control_dir_, result);
+        if (!write_error.empty()) {
+            std::fprintf(stderr, "[gateway] 渠道配对回执写不进: %s\n", write_error.c_str());
+        }
+    }
 }
 
 void ChannelGatewayWiring::StopAccepting() {

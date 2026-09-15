@@ -298,6 +298,31 @@ public:
     std::optional<std::string> RejectPairing(const std::string& channel_id,
                                              const std::string& account_id, const std::string& code,
                                              std::string* error = nullptr);
+    // 按 sender 身份批准/拒绝(Q1b 控制入口"配对码或身份"的身份路)。
+    std::optional<std::string> ApprovePairingBySender(const std::string& channel_id,
+                                                      const std::string& account_id,
+                                                      const std::string& sender_id,
+                                                      std::string* error = nullptr);
+    std::optional<std::string> RejectPairingBySender(const std::string& channel_id,
+                                                     const std::string& account_id,
+                                                     const std::string& sender_id,
+                                                     std::string* error = nullptr);
+
+    // ---- 配对提示(Q1b:PendingPairing 来信的宿主回执) ---------------------
+    // 一枚待投提示:入站裁决时冻结(会话/被动回复锚/code 明文只此一次)。
+    // 投递走 Q2 既有链路(泵侧入 outbox 渠道段,不旁路)。
+    struct PairingNotice {
+        std::string conversation_id;       // 发给来者的会话
+        std::string reply_to_message_id;   // 被动回复锚(触发来信的 msg id)
+        std::string sender_id;             // 诊断/审计
+        std::string code;                  // 配对码明文(出 manager 即进 outbox 冻结)
+        std::string text;                  // 冻结正文(MakePairingNoticeText)
+        std::int64_t trigger_sid = 0;      // 触发来信的 ingress sid(审计)
+    };
+    // 取走全部待投提示(FIFO;泵每 tick 排水)。崩溃窗口如实记:入队前
+    // 进程死,提示丢失(限频账已记,冷却窗内不重发)——下一条来信重触发。
+    std::vector<PairingNotice> DrainPendingPairingNotices(const std::string& channel_id,
+                                                          const std::string& account_id);
 
 private:
     // 在途 channel.send(受理即记;回执/超时结算后销账)。
@@ -335,6 +360,8 @@ private:
         // 已结算过的 delivery(重复回执只结一次)。
         std::map<std::string, int> settled_deliveries;
         std::vector<std::string> send_diagnostics;
+        // 待投配对提示(Q1b):PendingPairing 裁决时入队,泵排水进 outbox。
+        std::vector<PairingNotice> pending_pairing_notices;
     };
 
     AccountEntry* Find(const std::string& channel_id, const std::string& account_id);

@@ -31,6 +31,10 @@ inline constexpr std::int64_t kPairingCodeTtlMs = 5 * 60 * 1000;
 inline constexpr std::int64_t kPairingRequestCooldownMs = 30 * 1000;
 // code 长度:8 位(大小写字母 + 数字,去掉易混 0/O/1/I)。
 inline constexpr std::size_t kPairingCodeLength = 8;
+// 配对提示限频(QQ 接入单 Q1b):同 sender 同账号的冷却窗,窗内只发一次
+// 提示。持久记账(notices),重启不重发刷屏。取与 code TTL 同长——冷却
+// 到期时上一枚 code 恰好也过期,再提示自然带新 code,不浪费。
+inline constexpr std::int64_t kPairingNoticeCooldownMs = kPairingCodeTtlMs;
 
 class PairingStore {
 public:
@@ -47,6 +51,14 @@ public:
         std::int64_t created_at_ms = 0;
         std::int64_t expires_at_ms = 0;
         enum class Status { Pending, Approved, Rejected, Expired } status = Status::Pending;
+    };
+
+    // 已提示账(Q1b 限频):同 sender 上一次发提示的时刻与发往的会话,
+    // 持久化(重启不重发)。
+    struct NoticeLogEntry {
+        std::string sender_id;
+        std::string conversation_id;
+        std::int64_t notified_at_ms = 0;
     };
 
     // code 随机源(测试注入固定列)。
@@ -76,6 +88,16 @@ public:
     std::optional<std::string> Approve(const std::string& code, std::int64_t now_ms);
     std::optional<std::string> Reject(const std::string& code, std::int64_t now_ms,
                                       std::string* error = nullptr);
+    // 按 sender 身份批准/拒绝(Q1b 控制入口的"配对码或身份"单参数口):
+    // 结算该 sender 最新一枚未过期 pending(过期如实报 expired)。code 在
+    // 提示正文里,身份在待审清单里——两路认同一笔账。
+    std::optional<std::string> ApproveSender(const std::string& sender_id, std::int64_t now_ms,
+                                             std::string* error = nullptr);
+    std::optional<std::string> RejectSender(const std::string& sender_id, std::int64_t now_ms,
+                                            std::string* error = nullptr);
+
+    // sender 是否被拒过(Q1b:被拒名单不再发 code 不再发提示)。
+    bool IsSenderRejected(const std::string& sender_id) const;
 
     // sender 是否已批准(持久;批准记录不过期)。
     bool IsSenderApproved(const std::string& sender_id) const;
@@ -90,11 +112,31 @@ public:
 
     // 快照(测试与诊断)。
     std::vector<Record> Records() const;
+    std::vector<NoticeLogEntry> NoticeLog() const;
+
+    // ---- 提示限频账(Q1b) -----------------------------------------------------
+    // 冷却窗内已提示过 → false(不记账);窗过或从未提示 → 记账并 true。
+    // 持久落盘——重启后同窗内不重发。会话字段随账更新(同 sender 换会话
+    // 再触发,提示发往最新会话)。
+    bool MarkNoticeSent(const std::string& sender_id, const std::string& conversation_id,
+                        std::int64_t now_ms);
+
+    // ---- 跨进程只读投影(channel status 四态展示用;零建目录零写盘) -------
+    struct Projection {
+        bool present = false;   // pairing 账文件在不在
+        bool parse_ok = true;   // 在但读不懂(如实展示,不当 0 个)
+        std::size_t approved = 0;
+        std::size_t pending = 0;
+    };
+    static Projection ReadProjection(const std::filesystem::path& account_dir);
 
 private:
     std::optional<std::string> FinalizeByCode(const std::string& code, std::int64_t now_ms,
                                               Record::Status target, std::string* sender_out,
                                               std::string* error);
+    // 结算一枚 pending 记录的共用实现(按 code / 按身份两向)。
+    std::optional<std::string> FinalizeLatestPending(Record& record, std::int64_t now_ms,
+                                                     Record::Status target, std::string* error);
     bool SaveLocked();
 
     std::filesystem::path pairing_path_;
@@ -105,6 +147,13 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<Record> records_;
+    std::vector<NoticeLogEntry> notice_log_;
 };
+
+// 配对提示正文(Q1b):发给未批准的来者。只含配对指引与 code——零敏感
+// 信息(不带本机路径/密钥/平台原始事件);channel/account 是操作员侧的
+// CLI 参数,进正文让远端用户转述时不歧义。
+std::string MakePairingNoticeText(const std::string& code, const std::string& channel_id,
+                                  const std::string& account_id);
 
 }  // namespace lubancode::channel

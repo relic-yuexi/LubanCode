@@ -207,6 +207,8 @@ bool ChannelWorkPump::TickOnce(std::int64_t now_ms) {
         return false;
     }
     ReconcileDeliveredSources(now_ms);
+    // 2.5) Q1b 配对提示入箱(投递走第 5 步的既有渠道投递驱动)。
+    PumpPairingNotices(now_ms);
     // 3) 恢复扫描(Running 件的跨账裁决;不盲重跑)。
     if (!SweepRecovery(now_ms)) {
         return false;
@@ -307,6 +309,31 @@ std::optional<bool> ChannelWorkPump::SourceDeliveryVerdict(const std::string& so
         return std::nullopt;
     }
     return all_sent;
+}
+
+// Q1b 配对提示排水:manager 的 PendingPairing 提示入 outbox 渠道段——走
+// Q2 既有链路(EnqueueChannel 拆段/幂等 deliveryId + DriveChannelDeliveries
+// 投递/回执结算),不旁路。selection_id 由 code 派生(同 code 重入同
+// deliveryId,幂等);来源审计用独立前缀,不吃 ingress 结算路。
+void ChannelWorkPump::PumpPairingNotices(std::int64_t now_ms) {
+    for (const auto& snapshot : options_.manager->Snapshots()) {
+        for (const auto& notice : options_.manager->DrainPendingPairingNotices(
+                 snapshot.channel_id, snapshot.account_id)) {
+            gateway::DurableReplyOutbox::ChannelTarget target;
+            target.channel_id = snapshot.channel_id;
+            target.account_id = snapshot.account_id;
+            target.conversation_id = notice.conversation_id;
+            target.reply_to_message_id = notice.reply_to_message_id;
+            target.source_ref = "pairing-notice:" + snapshot.channel_id + ":" +
+                                snapshot.account_id + ":" + notice.sender_id;
+            const std::string selection_id = "pairing:" + snapshot.channel_id + ":" +
+                                             snapshot.account_id + ":code:" + notice.code;
+            const auto enqueued = options_.outbox->EnqueueChannel(
+                selection_id, notice.text, /*session_id=*/std::string(),
+                /*turn_id=*/std::string(), target, now_ms);
+            (void)enqueued;  // 幂等重入/账 broken 都不拦泵:broken 由统一闸停
+        }
+    }
 }
 
 void ChannelWorkPump::ReconcileDeliveredSources(std::int64_t /*now_ms*/) {
