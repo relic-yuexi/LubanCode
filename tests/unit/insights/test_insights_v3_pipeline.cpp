@@ -562,7 +562,7 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
                                     {"function", nlohmann::json{{"name", "read_file"},
                                                                 {"arguments", "{}"}}}}})}});
             const WriteReceipt receipt =
-                writer.AppendMessage(std::move(caller), Durability::PowerLoss);
+                (*writer).AppendMessage(std::move(caller), Durability::PowerLoss);
             REQUIRE(receipt.status == WriteReceipt::Status::Committed);
             auto action = ToolActionSession::Admit(*writer, "turn-000005",
                                                    "step-turn-000005", "action-000007",
@@ -598,7 +598,7 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
                                     {"function", nlohmann::json{{"name", "run_command"},
                                                                 {"arguments", "{}"}}}}})}});
             const WriteReceipt receipt =
-                writer.AppendMessage(std::move(caller), Durability::PowerLoss);
+                (*writer).AppendMessage(std::move(caller), Durability::PowerLoss);
             REQUIRE(receipt.status == WriteReceipt::Status::Committed);
             auto action = ToolActionSession::Admit(*writer, "turn-000006",
                                                    "step-turn-000006", "action-000008",
@@ -619,13 +619,13 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
             user.origin = MessageOrigin::Human;
             user.message = nlohmann::json::object({{"role", "user"}, {"content", "会失败的一问"}});
             const WriteReceipt user_receipt =
-                writer.AppendMessage(std::move(user), Durability::PowerLoss);
+                (*writer).AppendMessage(std::move(user), Durability::PowerLoss);
             REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
-            REQUIRE(writer.AdmitMessages({user_receipt.id}).status ==
+            REQUIRE((*writer).AdmitMessages({user_receipt.id}).status ==
                     WriteReceipt::Status::Committed);
-            const std::string request_id = writer.NewRequestId();
+            const std::string request_id = (*writer).NewRequestId();
             std::vector<std::string> input_refs;
-            for (const auto& node : writer.context().chain) {
+            for (const auto& node : (*writer).context().chain) {
                 input_refs.push_back(node.message_ref);
             }
             if (!input_refs.empty()) {
@@ -633,7 +633,7 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
             }
             REQUIRE(writer
                         .PrepareRequest(request_id, "turn-000007", "step-turn-000007",
-                                        "conversation", writer.context().system_message_ref,
+                                        "conversation", (*writer).context().system_message_ref,
                                         input_refs,
                                         SnapshotOf("stub", "openai", "stub-mini",
                                                    {"read_file"}, std::nullopt,
@@ -646,7 +646,7 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
             failed.step_id = "step-turn-000007";
             failed.request_id = request_id;
             failed.payload = nlohmann::json{{"reason", "provider_error"}};
-            REQUIRE(writer.AppendEvent(std::move(failed), Durability::PowerLoss).status ==
+            REQUIRE((*writer).AppendEvent(std::move(failed), Durability::PowerLoss).status ==
                     WriteReceipt::Status::Committed);
         }
         Seal(*writer);
