@@ -631,7 +631,7 @@ TEST_CASE("friction v3: 失败归类/重试/落盘失败/取消/provider 失败;
             if (!input_refs.empty()) {
                 input_refs.erase(input_refs.begin());
             }
-            REQUIRE(writer
+            REQUIRE((*writer)
                         .PrepareRequest(request_id, "turn-000007", "step-turn-000007",
                                         "conversation", (*writer).context().system_message_ref,
                                         input_refs,
