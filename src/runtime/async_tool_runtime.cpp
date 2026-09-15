@@ -14,6 +14,9 @@
 namespace lubancode::runtime {
 namespace {
 
+using agent::ToolCallAdjudication;
+using agent::ToolDispatchPoint;
+using agent::ToolProtocolMode;
 using tools::JobAuthDecision;
 using tools::JobStartRequest;
 using tools::JobStartResult;

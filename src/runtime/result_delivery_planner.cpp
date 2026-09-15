@@ -14,8 +14,9 @@ namespace {
 using trajectory::v3::Durability;
 using trajectory::v3::EventDraft;
 using trajectory::v3::EventKindV3;
-using trajectory::v3::Terminal;
 using trajectory::v3::WriteReceipt;
+// Terminal 是 ToolActionSession 的嵌套枚举,不是命名空间成员——别名引入。
+using Terminal = trajectory::v3::ToolActionSession::Terminal;
 
 trajectory::v3::ToolActionSession ReopenFor(const CompletionNotice& notice) {
     Terminal terminal = Terminal::None;
