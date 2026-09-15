@@ -575,7 +575,9 @@ enum class ErrorKind {
     HttpStatus,  // HTTP 状态码非 2xx
     Parse,       // JSON / SSE 解析不动
     Api,         // 服务端返回的业务错误(error 事件)
-    Cancelled,   // 用户按 ESC 主动打断,不是真出错——调用方不该当错误报给用户
+    Cancelled,   // 取消信号掐断了这次请求(用户按键/本地超时预算/宿主内部停
+                 // 止;真来源由采样层按升旗人归因,传输层只报中性事实),
+                 // 不是真出错——调用方不该当错误报给用户
 };
 
 struct Error {

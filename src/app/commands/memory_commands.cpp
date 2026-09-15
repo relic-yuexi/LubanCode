@@ -70,6 +70,11 @@ void PrintMemoryUsage() {
     TermOut() << tr("cmd.memory.usage");
 }
 
+// 抽取的本地超时预算(秒)。取消误报 ESC 单 Bug 1:预算要进账
+//(prepared 的 timeoutBudgetSecs)也要进终端提示——两处同源,不各写
+// 一份 45。
+constexpr int kMemoryExtractTimeoutSecs = 45;
+
 }  // namespace
 
 void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw_args) {
@@ -619,15 +624,17 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     // ParseExtractionJson 同一份合同,两条入口同一把尺子。不上 wire。
     sample_call.output_schema = MemoryExtractionOutputSchema();
     lubancode::agent::SampleOptions sample_options;
-    sample_options.timeout_secs = 45;
+    sample_options.timeout_secs = kMemoryExtractTimeoutSecs;
     // Token 账本单 A1(旁路落账):抽取请求铸一只旁路桥,prepared/sent/
-    // usage/output 连同 purpose=memory_extract 落 Journal。flag 关的会话
-    //(trajectory 空)一笔不落,行为与从前一致。
+    // usage/output 连同 purpose=memory_extract 落 Journal。v3 场从 Bug 2
+    // 起也接(同 purpose 过门);flag 关的会话(trajectory 空)一笔不落,
+    // 行为与从前一致。
     std::unique_ptr<lubancode::agent::LoopBoundaryRecorder> extract_recorder;
     if (ctx.trajectory != nullptr) {
         lubancode::runtime::TrajectoryTurnBridge::Identity identity{extract_route.provider, ctx.trajectory_wire,
                                                                     "host"};
-        extract_recorder = ctx.trajectory->NewBypassBridge(std::move(identity));
+        extract_recorder = ctx.trajectory->NewBypassBridge(
+            std::move(identity), lubancode::accounting::RequestPurpose::MemoryExtract);
         sample_options.boundary_recorder = extract_recorder.get();
         sample_options.purpose = lubancode::accounting::RequestPurpose::MemoryExtract;
     }
@@ -653,8 +660,15 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     if (!extraction.has_value()) {
         // 终端只出短错误与定位号(P0-A):诊断细节(请求号/字节数/结束原因)
         // 在错误对象里,查原文走受控轨迹,不透传含 last read 的库异常。
-        TermOut() << theme.stats << trf("memory.extract.failed", extraction.error().message)
-                  << theme.reset << "\n";
+        // 本地超时预算到点(Bug 1)单独一行:带预算数,不指控按键——
+        // 来源只有证据才说用户取消,超时的证据就是预算本身。
+        if (extraction.error().code == lubancode::app::ExtractionErrorCode::DeadlineTimeout) {
+            TermOut() << theme.stats << trf("memory.extract.deadline", kMemoryExtractTimeoutSecs)
+                      << theme.reset << "\n";
+        } else {
+            TermOut() << theme.stats << trf("memory.extract.failed", extraction.error().message)
+                      << theme.reset << "\n";
+        }
         if (memory_turns != nullptr) {
             lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
             outcome.ok = false;

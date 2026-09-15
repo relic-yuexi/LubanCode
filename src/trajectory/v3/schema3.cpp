@@ -654,9 +654,10 @@ std::optional<Schema3Error> ValidateMessageLine(const MessageLine& line) {
             if (line.purpose != MessagePurpose::Conversation &&
                 line.purpose != MessagePurpose::Compact &&
                 line.purpose != MessagePurpose::GoalEvaluation &&
-                line.purpose != MessagePurpose::ActionSummary) {
+                line.purpose != MessagePurpose::ActionSummary &&
+                line.purpose != MessagePurpose::MemoryExtract) {
                 return Err("schema3.bad_purpose",
-                           "system 消息 purpose 只能是 conversation/compact/goal_evaluation 或 action_summary");
+                           "system 消息 purpose 只能是 conversation/compact/goal_evaluation/action_summary 或 memory_extract");
             }
             break;
         }

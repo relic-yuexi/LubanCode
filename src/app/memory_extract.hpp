@@ -24,6 +24,9 @@
 namespace lubancode::runtime {
 class TrajectorySessionLedger;
 }
+namespace lubancode::trajectory::v3 {
+class V3Writer;
+}
 
 namespace lubancode::app {
 
@@ -61,6 +64,10 @@ enum class ExtractionErrorCode {
     OutputTruncated,  // provider 结束原因报长度截断(max_tokens/length 一族)
     EmptyOutput,      // 采样"成功"但正文为空
     TransportFailed,  // 发送失败/流内错/看门狗取消
+    // 本地超时预算到点(取消误报 ESC 单 Bug 1):采样层的 local_deadline
+    // 稳定码在这里立名——与 transport_failed 分开数,离线才知道"慢死"与
+    // "网死"各占多少;终端提示带预算,不冤枉用户按键。
+    DeadlineTimeout,
     RouteMiss,        // cheap 路由找不到 provider(旧稳定码 route_miss)
 };
 const char* ExtractionErrorCodeName(ExtractionErrorCode code);
@@ -337,6 +344,12 @@ private:
     void RecordAssessedLocked(std::int64_t foreground_tail_ms);
     void RecordReceiptLocked(const memory::MemoryWriteReceipt& receipt,
                              const std::string& turn_id);
+    // v3 场的写口(取消误报 ESC 单 Bug 2):typed 事件 memory.extraction.
+    // assessed / memory.write.receipted,载荷 camelCase;落不稳只吞(诊断
+    // 口径与 v2 同一条:调度账不许拖垮回合收尾)。
+    void RecordAssessedV3Locked(trajectory::v3::V3Writer& writer, std::int64_t foreground_tail_ms);
+    void RecordReceiptV3Locked(trajectory::v3::V3Writer& writer, const memory::MemoryWriteReceipt& receipt,
+                               const std::string& turn_id);
 
     runtime::TrajectorySessionLedger* trajectory_ = nullptr;  // 空 = 不落盘
     mutable std::mutex mutex_;

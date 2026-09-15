@@ -438,6 +438,30 @@ TEST_CASE("FinishMemoryExtraction: 结束原因与失败的分类(六类收口)"
     CHECK(transport.error().body_bytes == 6);  // "半截" UTF-8 6 字节
     CHECK(app::StableExtractErrorCode(transport.error()) == "transport_failed");
 
+    // 本地超时预算到点(取消误报 ESC 单 Bug 1):采样层带回 Cancelled +
+    // local_deadline 稳定码 → deadline_timeout 单独分类,文案不带按键
+    // 指控,半截 usage/正文照带回,稳定码与 transport_failed 分账。
+    agent::SampleResult deadline;
+    deadline.ok = false;
+    deadline.error.kind = api::ErrorKind::Cancelled;
+    deadline.error.message = "采样超过 45 秒,被本地超时预算停止";
+    deadline.error.api_code = "local_deadline";
+    deadline.usage.input_tokens = 900;
+    deadline.usage_reported = true;
+    deadline.text = "半截总结";
+    const auto timed_out = app::FinishMemoryExtraction(deadline);
+    REQUIRE_FALSE(timed_out.has_value());
+    CHECK(timed_out.error().code == app::ExtractionErrorCode::DeadlineTimeout);
+    CHECK(app::StableExtractErrorCode(timed_out.error()) == "deadline_timeout");
+    CHECK(timed_out.error().message.find("超时") != std::string::npos);
+    CHECK(timed_out.error().message.find("ESC") == std::string::npos);
+    // 同是 Cancelled 但没有 local_deadline 码的(来源未知/用户取消):照走
+    // transport_failed,不借 deadline 的名。
+    agent::SampleResult plain_cancel = deadline;
+    plain_cancel.error.api_code.clear();
+    const auto unknown = app::FinishMemoryExtraction(plain_cancel);
+    CHECK(unknown.error().code == app::ExtractionErrorCode::TransportFailed);
+
     // 空正文:empty_output。
     agent::SampleResult empty;
     empty.ok = true;

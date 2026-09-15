@@ -492,19 +492,25 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
     // ---- watchdog:外部取消与内部超时组合生效(§4.67.5 组合取消) -------
     // 旧口径"外部链在场时选外部令牌、超时不抢断"已废:两头都盯,任一先到
     // 都拉同一枚组合旗。循环 100ms 醒一次(与旧看门狗同粒度)。
+    // cancel_fired(取消误报 ESC 单 Bug 1 §四-3):组合旗不辨来源,看门狗
+    // 知道——1=外部链(用户侧)先升,2=本地 deadline 先到。采样层默认按
+    // 用户取消归因,deadline 先到的由采样后就地改回内部超时,不冤枉按键。
     std::atomic<bool> done{false};
     std::atomic<bool> combined_cancel{false};
+    std::atomic<int> cancel_fired{0};
     const int timeout_secs = options.timeout_secs;
-    std::thread watchdog([&done, &combined_cancel, cancel, timeout_secs]() {
+    std::thread watchdog([&done, &combined_cancel, &cancel_fired, cancel, timeout_secs]() {
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(
                                                   timeout_secs > 0 ? timeout_secs : 24 * 60 * 60);
         while (!done.load()) {
             if (cancel != nullptr && cancel->load()) {
+                cancel_fired.store(1);
                 combined_cancel = true;
                 return;
             }
             if (timeout_secs > 0 && std::chrono::steady_clock::now() >= deadline) {
+                cancel_fired.store(2);
                 combined_cancel = true;
                 return;
             }
@@ -595,7 +601,14 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
         // 组合取消口:看门狗拉的组合旗是唯一取消源(外部与超时都在里头)。
         agent::SampleOptions sample_options;
         sample_options.cancel = &combined_cancel;
-        const agent::SampleResult sampled = agent::SampleModel(backend, sample, sample_options);
+        agent::SampleResult sampled = agent::SampleModel(backend, sample, sample_options);
+        // 归因就地修正(§四-3):组合旗让采样层按申报默认(用户取消)归因,
+        // 看门狗知道真相——deadline 先到就改回内部超时 + 同一枚 local_deadline
+        // 稳定码,不另造第二套归因。
+        if (!sampled.ok && sampled.error.kind == api::ErrorKind::Cancelled && cancel_fired.load() == 2) {
+            sampled.error.message = "验收采样超过本地超时预算,被内部停止";
+            sampled.error.api_code = "local_deadline";
+        }
         // 逐次各记:这轮请求的账先入累计(哪怕接着要 repair——费用照记,
         // §4.67.10"每次 usage 各记,累计不只取末次")。
         AddSampleUsage(out.usage, sampled.usage, sampled.usage_reported);

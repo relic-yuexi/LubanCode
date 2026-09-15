@@ -86,6 +86,11 @@ struct V3SessionBooks {
     // clear 同址换值时新写者地址与旧写者相同(地址复用),单比指针认不出
     // 换场——旧 books(含执行阻断)会原样带进新场。
     std::string bound_session_id;
+    // 最近一只主会话轮桥 BeginTurn 的回合号(取消误报 ESC 单 Bug 2):
+    // v3 旁路桥拿它挂 parentTurnId——记忆抽取在回合尾巴跑,主回合多半已
+    // 收口,"最近一只"就是触发它的那只。只在回合串行推进中写(与本书
+    // 其余可变字段同一纪律);子代理桥绑自己的 books,不碰这只。
+    std::string active_main_turn_id;
     // provider 调用号 -> v3 调用身份:轮桥声明 tool call 时登记(§4.15),
     // 子代理五步的 parentActionRef 从这查(actionId/声明消息/turn/step)。
     struct DeclaredAction {
@@ -407,6 +412,15 @@ class TrajectoryBypassBridge : public agent::LoopBoundaryRecorder {
 public:
     TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder, trajectory::EventScope base_scope,
                            TrajectoryTurnBridge::Identity identity);
+    // v3 写模式(取消误报 ESC 单 Bug 2):v2 recorder 不在,主账是 V3Writer,
+    // 走 v3 的 typed 事件/消息合同,不往 v3 文件硬塞 v2 行。books 是账本的
+    // 会话共享账(借读 active_main_turn_id,旁路行 parentTurnId 挂主回合);
+    // purpose 定本桥服务的请求用途(消息 purpose 映射按它)。identity_scope
+    // 只借 workspace/session/run 三枚身份(wake 投递用),不进事件信封——
+    // v3 行的身份在信封自己的 sessionId/runId。
+    TrajectoryBypassBridge(trajectory::v3::V3Writer* v3_writer, V3SessionBooks* v3_books,
+                           trajectory::EventScope identity_scope, TrajectoryTurnBridge::Identity identity,
+                           accounting::RequestPurpose purpose);
     ~TrajectoryBypassBridge() override;
 
     TrajectoryBypassBridge(const TrajectoryBypassBridge&) = delete;
@@ -431,6 +445,9 @@ public:
 
     // 诊断:最近一枚提交失败 receipts 的稳定码。
     std::vector<std::string> recent_errors() const { return recent_errors_; }
+    // v3 模式的落账错误共享汇(账本持有,/doctor trajectory 从这读);
+    // v2 路不碰,行为与从前一致。
+    void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
     // T1 committed wake(与主桥同款;默认空 = 零行为)。
     void SetCommitWake(telemetry::CommitObserver* wake, std::string stream_id) {
         commit_wake_ = wake;
@@ -449,19 +466,57 @@ private:
     std::string NextInputId();
     std::string NextOutputId();
 
-    trajectory::TrajectoryRecorder& recorder_;
+    // ---- v3 写模式(V3Mode() 为假时一只方法都不进) ----
+    // v3 旁路请求簿:一桥一采样;usage 暂存到 assistant 成行时一并写
+    //(§4.12 usage 唯一 owner 是 assistant message);流 started 懒起
+    //(与主桥同款:零 delta 的旁路采样也保 started+completed 闭环形状)。
+    struct V3RequestBook {
+        std::string step_id;
+        std::string model;
+        std::string turn_id;  // 内部回合号(memory-turn-*)
+        std::optional<nlohmann::json> usage;
+        bool usage_reported = false;
+        std::string provider_response_id;
+        bool output_committed = false;
+        std::string stream_id;
+        std::string reserved_message_id;
+        bool stream_started = false;
+    };
+    std::string V3RequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx);
+    bool V3RequestSent(const std::string& request_id);
+    void V3UsageRecorded(const std::string& request_id, const api::Usage& usage,
+                         bool reported_by_provider, const std::string& provider_response_id);
+    // 失败/取消终态后放行暂存的 usage(model.usage.appended 单独立账,§4.12
+    // 的补报路):半截失败的用量不许跟着 assistant 一起沉没——旁路请求没有
+    // assistant 行可挂,appended 就是唯一落点。
+    void V3FlushUsageAppended(const V3RequestBook& book, const std::string& request_id);
+    bool V3EnsureStreamStarted(const std::string& request_id);
+    bool V3OutputCompleted(const std::string& request_id, const api::Message& assistant,
+                           const std::string& stop_reason, const std::string& provider_response_id);
+    void V3OutputFailed(const std::string& request_id, const std::string& reason);
+    void V3OutputCancelled(const std::string& request_id, agent::OutputCancelSource source);
+    void NoteV3Error(const trajectory::v3::WriteReceipt& receipt, const char* where);
+    void V3NotifyCommitted(const trajectory::v3::WriteReceipt& receipt);
+    bool V3Mode() const { return v3_writer_ != nullptr; }
+
+    trajectory::TrajectoryRecorder* recorder_ = nullptr;  // v2 主账(引用改指针:类要装得下 v3 模式)
+    trajectory::v3::V3Writer* v3_writer_ = nullptr;        // v3 主账
+    V3SessionBooks* v3_books_ = nullptr;                   // v3 会话共享账(借读,不持有)
+    accounting::RequestPurpose purpose_ = accounting::RequestPurpose::OtherHostRequest;
     trajectory::EventScope base_scope_;
     TrajectoryTurnBridge::Identity identity_;
     std::string turn_id_;
     bool turn_open_ = false;
     bool dead_ = false;  // 开不了小 turn(主 turn 在开着)后哑火,不再连发
     std::map<std::string, std::string> request_prepared_;  // request_id -> prepared event id
+    std::map<std::string, V3RequestBook> v3_requests_;     // v3 模式的请求簿
     std::string last_input_event_id_;
     std::uint64_t request_counter_ = 0;
     std::uint64_t turn_counter_ = 0;
     std::uint64_t input_counter_ = 0;
     std::uint64_t output_counter_ = 0;
     std::vector<std::string> recent_errors_;
+    std::vector<std::string>* error_sink_ = nullptr;    // v3 落账错误共享汇(默认空)
     telemetry::CommitObserver* commit_wake_ = nullptr;  // T1 committed wake(默认空)
     std::string wake_stream_id_;
 };
@@ -758,7 +813,14 @@ public:
     // recorder 不在)给 nullptr,调用方按"没接轨迹"走旧路。identity 的
     // provider/wire 照实填该次请求真用的端(compact 的 cheap 路由可能跨
     // provider,与主会话端不是一家);channel 建议 "host"。
-    std::unique_ptr<TrajectoryBypassBridge> NewBypassBridge(TrajectoryTurnBridge::Identity identity);
+    // v3 场(取消误报 ESC 单 Bug 2):purpose 有 v3 消息合同落点的用途
+    //(memory_extract)接 v3 旁路桥——prepared/sent/终态/usage 走 v3
+    // typed 事件,旁路输入输出不进 conversation 链;其余用途(compact 走
+    // v3 compact 运行时、起名/doctor 待各自接)维持 nullptr 旧路,§四清
+    // 册记账,不在本单冒进。
+    std::unique_ptr<TrajectoryBypassBridge> NewBypassBridge(
+        TrajectoryTurnBridge::Identity identity,
+        accounting::RequestPurpose purpose = accounting::RequestPurpose::OtherHostRequest);
 
     // 父账边界:子代理 finished 时补的边界引用(child run id + 子账终态
     // hash),由主桥的 OnToolTrace 落——这里只给查口。

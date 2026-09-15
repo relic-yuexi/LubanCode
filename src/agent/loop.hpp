@@ -74,6 +74,11 @@ struct RequestPreparedContext {
     // wire 消息序——内外消息数量不一一相等是常态(schema §8.1 横切),
     // 不能假定逐条对位。消费方按"不可得"处理,不冒充。
     std::optional<api::WireMessageMap> wire_message_map;
+    // 本采样的本地超时预算(秒;0 = 不设)。主回合(AgentLoop)不设恒 0;
+    // 旁路采样(SampleModel)把自己吃到的 timeout_secs 如实递进来,v3 旁路
+    // 桥据此在 prepared 事件落 timeoutBudgetSecs——"预算多久"离了账就
+    // 没处可查(取消误报 ESC 单 Bug 1:预算要进账,不进猜测)。
+    int timeout_budget_secs = 0;
 };
 
 // model.output.cancelled 的取消来源(主会话输出预留占坑单 §4.2):轨迹是

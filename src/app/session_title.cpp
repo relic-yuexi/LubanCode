@@ -187,6 +187,10 @@ std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backe
     lubancode::agent::SampleOptions sample_options;
     sample_options.timeout_secs = timeout_secs;
     sample_options.cancel = cancel;
+    // 取消误报 ESC 单 Bug 1(§四-3):这面外部旗的升旗人是精炼器自己
+    //(会话拆除的 RequestCancel),不是交互层按键监听——如实申报
+    // Internal,采样层不拿默认值冤枉用户按键。
+    sample_options.cancel_source = lubancode::agent::OutputCancelSource::Internal;
     // Token 账本单 A1(旁路落账):递了桥就把这次精炼请求落成 Journal 里
     // 的 prepared/sent/usage/output(purpose=title_refine)。
     sample_options.boundary_recorder = boundary_recorder;

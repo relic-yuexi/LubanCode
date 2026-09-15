@@ -280,6 +280,12 @@ void TrajectoryTurnBridge::BeginTurn(const std::string& turn_id, const std::stri
         //(§4.2"不能见到 user 角色就自行推断新回合"的反面——回合先立号,
         // 行再归属)。trigger 不单独落账;输入/请求行带 channel 事实。
         v3_turn_ = std::make_unique<V3TurnBooks>();
+        // 主回合号留给旁路桥挂 parentTurnId(取消误报 ESC 单 Bug 2):回合
+        // 尾巴的抽取/摘要要能回答"哪只回合触发的"。EndTurn 不清——尾巴
+        // 活儿多在回合收口之后跑,"最近一只"就是触发者。
+        if (v3_books_ != nullptr) {
+            v3_books_->active_main_turn_id = turn_id;
+        }
         return;
     }
     // 起因照实写进 actor/origin(§5.1/§5.5):真人/排队是 user,宿主起的
@@ -2184,7 +2190,14 @@ void TrajectoryTurnBridge::NoteChildTerminal(const std::string& agent_run_id,
 TrajectoryBypassBridge::TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder,
                                                trajectory::EventScope base_scope,
                                                TrajectoryTurnBridge::Identity identity)
-    : recorder_(recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)) {}
+    : recorder_(&recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)) {}
+
+TrajectoryBypassBridge::TrajectoryBypassBridge(v3::V3Writer* v3_writer, V3SessionBooks* v3_books,
+                                               trajectory::EventScope identity_scope,
+                                               TrajectoryTurnBridge::Identity identity,
+                                               accounting::RequestPurpose purpose)
+    : v3_writer_(v3_writer), v3_books_(v3_books), purpose_(purpose), base_scope_(std::move(identity_scope)),
+      identity_(std::move(identity)) {}
 
 TrajectoryBypassBridge::~TrajectoryBypassBridge() = default;
 
@@ -2209,7 +2222,7 @@ RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::str
     request.scope.actor = actor;
     request.scope.origin = origin;
     request.payload = std::move(payload);
-    const trajectory::RecordReceipt receipt = recorder_.Record(std::move(request), durability);
+    const trajectory::RecordReceipt receipt = recorder_->Record(std::move(request), durability);
     // T1 committed wake(与主桥同款)。
     if (receipt.status == trajectory::RecordReceipt::Status::Committed &&
         commit_wake_ != nullptr) {
@@ -2289,6 +2302,9 @@ void TrajectoryBypassBridge::CloseTurn(bool ok, bool cancelled, const std::strin
 
 std::string TrajectoryBypassBridge::OnRequestPrepared(const api::Request& request,
                                                       const agent::RequestPreparedContext& ctx) {
+    if (V3Mode()) {
+        return V3RequestPrepared(request, ctx);
+    }
     if (turn_open_) {
         // 一桥一采样:上一只小 turn 没收口又来一枚 prepared,是调用方把
         // 桥当长命对象复用了。拒收,不往同一 turn 里混两笔请求账。
@@ -2332,6 +2348,9 @@ std::string TrajectoryBypassBridge::OnRequestPrepared(const api::Request& reques
 }
 
 bool TrajectoryBypassBridge::OnRequestSent(const std::string& request_id) {
+    if (V3Mode()) {
+        return V3RequestSent(request_id);
+    }
     const auto it = request_prepared_.find(request_id);
     if (it == request_prepared_.end()) {
         return true;  // 簿里没有(prepared 没落稳):不拦,账早已如实
@@ -2352,6 +2371,15 @@ void TrajectoryBypassBridge::OnUsageRecorded(const std::string& request_id, cons
                                              bool prefix_append_only, bool cache_read_reported_by_provider,
                                              bool cache_creation_reported_by_provider,
                                              const std::string& usage_anomaly) {
+    if (V3Mode()) {
+        (void)cache_epoch;
+        (void)prefix_append_only;
+        (void)cache_read_reported_by_provider;
+        (void)cache_creation_reported_by_provider;
+        (void)usage_anomaly;
+        V3UsageRecorded(request_id, usage, reported_by_provider, provider_response_id);
+        return;
+    }
     // 读/写明报位分开落,异常账非空才落(与主桥同一条,C2/C4)。
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
                                             {"reported_by_provider", reported_by_provider},
@@ -2387,6 +2415,9 @@ void TrajectoryBypassBridge::OnUsageRecorded(const std::string& request_id, cons
 bool TrajectoryBypassBridge::OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
                                                const std::string& stop_reason,
                                                const std::string& provider_response_id) {
+    if (V3Mode()) {
+        return V3OutputCompleted(request_id, assistant, stop_reason, provider_response_id);
+    }
     nlohmann::json payload = nlohmann::json{{"output_id", NextOutputId()},
                                             {"blocks", MessageToBlocksJson(assistant)},
                                             {"stop_reason", stop_reason.empty() ? "end_turn" : stop_reason}};
@@ -2405,6 +2436,10 @@ bool TrajectoryBypassBridge::OnOutputCompleted(const std::string& request_id, co
 }
 
 void TrajectoryBypassBridge::OnOutputFailed(const std::string& request_id, const std::string& reason) {
+    if (V3Mode()) {
+        V3OutputFailed(request_id, reason);
+        return;
+    }
     const auto receipt =
         Put(EventKind::ModelOutputFailed, request_id, Actor::Model, Origin::ProviderModel,
             nlohmann::json{{"reason", reason.empty() ? "failed" : reason}}, Durability::ProcessCrash);
@@ -2415,6 +2450,10 @@ void TrajectoryBypassBridge::OnOutputFailed(const std::string& request_id, const
 }
 
 void TrajectoryBypassBridge::OnOutputCancelled(const std::string& request_id, agent::OutputCancelSource source) {
+    if (V3Mode()) {
+        V3OutputCancelled(request_id, source);
+        return;
+    }
     // 同 §4.2:旁路取消也按真实来源落名(旧的泛名 "cancelled" 退役;字段
     // 类型不变,旧 stream 照读)。
     const auto receipt =
@@ -2424,6 +2463,306 @@ void TrajectoryBypassBridge::OnOutputCancelled(const std::string& request_id, ag
         NoteError(receipt, "model.output.cancelled(bypass)");
     }
     CloseTurn(false, true, "cancelled");
+}
+
+// ---------------------------------------------------------------------------
+// TrajectoryBypassBridge 的 v3 写模式(取消误报 ESC 单 Bug 2):旁路请求
+// 走 v3 typed 事件合同——system/转写 user 落消息行(purpose 按用途,不进
+// conversation 链),prepared/sent/终态/usage 落事件行。一桥一采样;内部
+// 回合号 memory-turn-<n>,parentTurnId 挂触发它的主回合,请求号走 writer
+// 全局池(request-<n>,与主回合请求同一发号器不撞号)。
+// ---------------------------------------------------------------------------
+
+void TrajectoryBypassBridge::NoteV3Error(const v3::WriteReceipt& receipt, const char* where) {
+    const std::string note = std::string(where) + ":" + receipt.error_code +
+                             (receipt.error_message.empty() ? std::string()
+                                                            : " (" + receipt.error_message + ")");
+    recent_errors_.push_back(note);
+    if (error_sink_ != nullptr) {
+        error_sink_->push_back(note);
+    }
+    platform::LogSink::Instance().Error("trajectory", "v3 旁路落账失败: " + note);
+}
+
+void TrajectoryBypassBridge::V3NotifyCommitted(const v3::WriteReceipt& receipt) {
+    if (receipt.status == v3::WriteReceipt::Status::Committed && commit_wake_ != nullptr) {
+        telemetry::CommitWake wake;
+        wake.workspace_key = base_scope_.workspace_key;
+        wake.session_id = base_scope_.session_id;
+        wake.stream_id = wake_stream_id_;
+        commit_wake_->Notify(wake);
+    }
+}
+
+std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& request,
+                                                      const agent::RequestPreparedContext& ctx) {
+    // 桥只认 memory_extract:工厂(NewBypassBridge)已把门,这里是防御性
+    // 第二道——消息 purpose/回合号前缀都按它铺,别的用途进来只会写错账。
+    if (purpose_ != accounting::RequestPurpose::MemoryExtract) {
+        return std::string();
+    }
+    // 一桥一采样:v2 用小 turn 的开合守门,v3 没有轮账,用请求簿守。
+    if (!v3_requests_.empty()) {
+        return std::string();
+    }
+    // T12-A 同门:compact 换账失败的场,旁路请求也不放行——不发新模型
+    // 请求,空串即"prepared 记不住"的既有语义。
+    if (v3_books_ != nullptr && v3_books_->execution_blocked) {
+        return std::string();
+    }
+    const std::string turn_id = v3_writer_->NewMemoryTurnId();
+    // 1) 本次请求真用的 system:旁路自带抽取提示词,与主链根无关——照实
+    //    落一枚 system 消息(turnId 恒 null,§schema),prepared 引它。
+    std::string system_message_id;
+    if (!request.system.empty()) {
+        v3::MessageDraft system;
+        system.purpose = v3::MessagePurpose::MemoryExtract;
+        system.origin = v3::MessageOrigin::SessionRuntime;
+        system.system_meta = nlohmann::json{{"cause", "memory_extraction_prompt"}};
+        system.message = nlohmann::json{{"role", "system"}, {"content", request.system}};
+        const auto receipt =
+            v3_writer_->AppendMessage(std::move(system), trajectory::Durability::ProcessCrash);
+        V3NotifyCommitted(receipt);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            NoteV3Error(receipt, "memory system(bypass)");
+            return std::string();  // §4.4:引用没落稳,请求不得发出
+        }
+        system_message_id = receipt.id;
+    }
+    // 2) 转写 user 消息:旁路材料,不 Admit 进链——conversation 历史一个
+    //    字不混;parentTurnId 挂触发主回合(在场才挂)。
+    std::string input_message_id;
+    if (!request.messages.empty()) {
+        std::string transcript_text;
+        for (const auto& block : request.messages.front().content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                if (!transcript_text.empty()) transcript_text += "\n";
+                transcript_text += text->text;
+            }
+        }
+        if (!transcript_text.empty()) {
+            v3::MessageDraft user;
+            user.turn_id = turn_id;
+            if (v3_books_ != nullptr && !v3_books_->active_main_turn_id.empty()) {
+                user.parent_turn_id = v3_books_->active_main_turn_id;
+            }
+            user.purpose = v3::MessagePurpose::MemoryExtract;
+            user.origin = v3::MessageOrigin::SessionRuntime;
+            user.display = v3::DisplayMode::Collapsed;  // 内部回合材料默认折叠(§4.67.6 同款)
+            user.message = nlohmann::json{{"role", "user"}, {"content", std::move(transcript_text)}};
+            const auto receipt =
+                v3_writer_->AppendMessage(std::move(user), trajectory::Durability::ProcessCrash);
+            V3NotifyCommitted(receipt);
+            if (receipt.status != v3::WriteReceipt::Status::Committed) {
+                NoteV3Error(receipt, "memory user(bypass)");
+                return std::string();
+            }
+            input_message_id = receipt.id;
+        }
+    }
+    if (system_message_id.empty()) {
+        // 没带 system 的旁路请求:prepared 的 systemMessageRef 是必填引用,
+        // 拿主链根顶替就是造假——如实拒绝接账,采样停在边界。
+        NoteV3Error(v3::WriteReceipt{v3::WriteReceipt::Status::Rejected, "", 0, "",
+                                     "v3bypass.no_system", "旁路请求没带 system,无处落 systemMessageRef"},
+                    "model.request.prepared(bypass)");
+        return std::string();
+    }
+    // 3) prepared:purpose 用请求真用途的合同名(memory_extract);预算
+    //    (timeoutBudgetSecs)在这落——"预算多久"只有这儿知道。
+    const std::string request_id = v3_writer_->NewRequestId();
+    const std::string step_id = v3_writer_->NewStepId();
+    nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
+                                                      {"wire", identity_.wire},
+                                                      {"model", request.model}};
+    if (request.max_tokens.has_value()) {
+        provider_snapshot["parameters"] = nlohmann::json{{"maxOutputTokens", *request.max_tokens}};
+    }
+    if (ctx.timeout_budget_secs > 0) {
+        provider_snapshot["timeoutBudgetSecs"] = ctx.timeout_budget_secs;
+    }
+    const auto prepared = v3_writer_->PrepareRequest(
+        request_id, turn_id, step_id, accounting::PurposeName(ctx.purpose), system_message_id,
+        input_message_id.empty() ? std::vector<std::string>{} : std::vector<std::string>{input_message_id},
+        std::move(provider_snapshot), std::nullopt, trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(prepared);
+    if (prepared.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(prepared, "model.request.prepared(bypass)");
+        return std::string();  // §7.4:prepared 记不住,不发模型
+    }
+    V3RequestBook book;
+    book.step_id = step_id;
+    book.model = request.model;
+    book.turn_id = turn_id;
+    v3_requests_.emplace(request_id, std::move(book));
+    return request_id;
+}
+
+bool TrajectoryBypassBridge::V3RequestSent(const std::string& request_id) {
+    const auto it = v3_requests_.find(request_id);
+    if (it == v3_requests_.end()) {
+        return true;  // 簿里没有(prepared 没落稳):不拦,账早已如实
+    }
+    v3::EventDraft draft;
+    draft.kind = v3::EventKindV3::ModelRequestSent;
+    draft.status = v3::OpStatus::Done;
+    draft.request_id = request_id;
+    draft.turn_id = it->second.turn_id;
+    draft.step_id = it->second.step_id;
+    draft.payload = nlohmann::json{{"channel", identity_.channel},
+                                   {"deliveryScope", "local_transport"}};
+    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.request.sent(bypass)");
+        return false;  // P1-C/FA-03:sent 记不住,采样停在发送边界
+    }
+    return true;
+}
+
+void TrajectoryBypassBridge::V3UsageRecorded(const std::string& request_id, const api::Usage& usage,
+                                             bool reported_by_provider,
+                                             const std::string& provider_response_id) {
+    const auto it = v3_requests_.find(request_id);
+    if (it == v3_requests_.end()) {
+        return;
+    }
+    it->second.usage = reported_by_provider ? std::optional<nlohmann::json>(UsageToJson(usage)) : std::nullopt;
+    it->second.usage_reported = reported_by_provider;
+    it->second.provider_response_id = provider_response_id;
+    if (it->second.output_committed) {
+        V3FlushUsageAppended(it->second, request_id);
+    }
+}
+
+void TrajectoryBypassBridge::V3FlushUsageAppended(const V3RequestBook& book,
+                                                  const std::string& request_id) {
+    v3::EventDraft draft;
+    draft.kind = v3::EventKindV3::ModelUsageAppended;
+    draft.request_id = request_id;
+    draft.turn_id = book.turn_id;
+    draft.step_id = book.step_id;
+    draft.payload = nlohmann::json{
+        {"usage", book.usage.has_value() ? *book.usage : nlohmann::json(nullptr)},
+        {"reportedByProvider", book.usage_reported}};
+    if (!book.provider_response_id.empty()) {
+        draft.payload["providerResponseId"] = book.provider_response_id;
+    }
+    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.usage.appended(bypass)");
+    }
+}
+
+bool TrajectoryBypassBridge::V3EnsureStreamStarted(const std::string& request_id) {
+    const auto it = v3_requests_.find(request_id);
+    if (it == v3_requests_.end()) {
+        return false;  // 簿没有的请求不伪造流
+    }
+    V3RequestBook& book = it->second;
+    if (book.stream_started) {
+        return true;
+    }
+    book.stream_id = v3_writer_->NewStreamId();
+    book.reserved_message_id = v3_writer_->NewMessageId();
+    const auto receipt = v3_writer_->BeginStreamResponse(
+        request_id, book.stream_id, book.turn_id, book.step_id, book.reserved_message_id,
+        trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.response.started(bypass)");
+        return false;  // started 记不住,终态定稿不得越过(§4.4 同款栅栏)
+    }
+    book.stream_started = true;
+    return true;
+}
+
+bool TrajectoryBypassBridge::V3OutputCompleted(const std::string& request_id, const api::Message& assistant,
+                                               const std::string& stop_reason,
+                                               const std::string& provider_response_id) {
+    const auto it = v3_requests_.find(request_id);
+    if (it == v3_requests_.end() || it->second.output_committed) {
+        return false;  // 请求簿没有/已收口:不重复成行
+    }
+    V3RequestBook& book = it->second;
+    // 旁路采样零 delta(SampleModel 不转灌流事件),懒起 started 保闭环
+    // 形状——与主桥"非流式后端零片段路"同一形状(§4.43)。
+    if (!V3EnsureStreamStarted(request_id)) {
+        return false;
+    }
+    nlohmann::json content = nlohmann::json::array();
+    for (const auto& block : assistant.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            content.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
+        } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
+            content.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}});
+        }
+        // 旁路采样无工具调用,ToolUse/ToolResult 不该出现,出现了也不入账。
+    }
+    nlohmann::json body = nlohmann::json{{"role", "assistant"}, {"content", std::move(content)}};
+    const auto receipt = v3_writer_->CompleteStreamResponse(
+        request_id, book.stream_id, book.turn_id, book.step_id, book.reserved_message_id,
+        std::move(body), identity_.provider, identity_.wire, book.model,
+        provider_response_id.empty() ? nlohmann::json(nullptr)
+                                     : nlohmann::json(provider_response_id),
+        book.usage.has_value() ? *book.usage : nlohmann::json(nullptr),
+        stop_reason.empty() ? std::string("end_turn") : stop_reason,
+        v3::MessagePurpose::MemoryExtract, std::nullopt,
+        stop_reason == "length" || stop_reason == "max_tokens"
+            ? std::optional<v3::CompletionStatus>(v3::CompletionStatus::Truncated)
+            : std::nullopt);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.response.completed(bypass)");
+        return false;  // §7.4:输出记不住,不装成功
+    }
+    book.output_committed = true;
+    return true;
+}
+
+void TrajectoryBypassBridge::V3OutputFailed(const std::string& request_id, const std::string& reason) {
+    const auto it = v3_requests_.find(request_id);
+    if (it == v3_requests_.end()) {
+        return;
+    }
+    v3::EventDraft draft;
+    draft.kind = v3::EventKindV3::ModelResponseFailed;
+    draft.status = v3::OpStatus::Failed;
+    draft.request_id = request_id;
+    draft.turn_id = it->second.turn_id;
+    draft.step_id = it->second.step_id;
+    draft.payload = nlohmann::json{{"reason", reason.empty() ? std::string("failed") : reason}};
+    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.response.failed(bypass)");
+    }
+    // 半截失败的 usage 不沉没:没有 assistant 行可挂,appended 是唯一落点。
+    V3FlushUsageAppended(it->second, request_id);
+}
+
+void TrajectoryBypassBridge::V3OutputCancelled(const std::string& request_id,
+                                               agent::OutputCancelSource source) {
+    const auto it = v3_requests_.find(request_id);
+    if (it == v3_requests_.end()) {
+        return;
+    }
+    // 旁路流没起过(采样不转灌流事件,收不到任何 delta):裸 cancelled
+    // 事件 + 真实来源,不伪造流不伪造 assistant;usage 照 appended 出账。
+    v3::EventDraft draft;
+    draft.kind = v3::EventKindV3::ModelResponseCancelled;
+    draft.status = v3::OpStatus::Cancelled;
+    draft.request_id = request_id;
+    draft.turn_id = it->second.turn_id;
+    draft.step_id = it->second.step_id;
+    draft.payload = nlohmann::json{{"reason", agent::OutputCancelSourceText(source)}};
+    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.response.cancelled(bypass)");
+    }
+    V3FlushUsageAppended(it->second, request_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -3005,12 +3344,30 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
 }
 
 std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge(
-    TrajectoryTurnBridge::Identity identity) {
-    // 接线点 1 分期边界:旁路桥(compact/起名/doctor 探针)还只认 v2
-    // recorder;v3 场给 nullptr,调用方按"没接轨迹"走旧路(compact 全链
-    // 属后续棒)。
+    TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose) {
+    // 接线点 1 分期边界(取消误报 ESC 单 Bug 2 收窄一格):v3 场给用途有
+    // 消息合同落点的请求接 v3 旁路桥——本批只有 memory_extract(内部
+    // 回合号/消息 purpose/prepared 合同齐备)。其余用途维持 nullptr:compact
+    // 在 v3 有自己的全链运行时(RunV3Compact),起名/doctor 待各自接(§四
+    // 清册在案),不冒进也不硬塞 V2 行。
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
-        return nullptr;
+        if (purpose != accounting::RequestPurpose::MemoryExtract) {
+            return nullptr;
+        }
+        trajectory::EventScope identity_scope;
+        identity_scope.workspace_key = impl_->active->manifest.workspace_key;
+        identity_scope.session_id = impl_->active->session_id();
+        identity_scope.run_id = impl_->active->manifest.main_run_id;
+        auto bridge = std::make_unique<TrajectoryBypassBridge>(
+            &*impl_->active->v3_main, &*impl_->v3_books, std::move(identity_scope), std::move(identity),
+            purpose);
+        bridge->SetErrorSink(&io_errors_);
+        if (impl_->telemetry_wake != nullptr) {
+            bridge->SetCommitWake(
+                impl_->telemetry_wake,
+                impl_->active->directory.v3_stream_path().filename().generic_string());
+        }
+        return bridge;
     }
     trajectory::TrajectoryRecorder* recorder = main();
     if (recorder == nullptr || impl_ == nullptr || impl_->active == nullptr) {

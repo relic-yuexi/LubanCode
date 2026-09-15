@@ -58,25 +58,14 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
                                                                             "host"};
                 bypass = trajectory->NewBypassBridge(std::move(identity));
             }
-            // 看门狗:到点拉取消旗。SampleModel 的口径是外部取消链优先、
-            // 自带看门狗退位——超时必须自己管,5 秒是硬上限。
-            std::atomic<bool> watch_done{false};
-            std::thread watcher([&watch_done, &shared]() {
-                const auto deadline =
-                    std::chrono::steady_clock::now() + std::chrono::seconds(kTitleRefineTimeoutSecs);
-                while (!watch_done.load() && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-                if (!watch_done.load()) {
-                    shared->cancel.store(true);
-                }
-            });
+            // 看门狗(取消误报 ESC 单 Bug 1 后收编):超时交给 SampleModel
+            // 的合并取消口(预算照进 timeout_secs,deadline 到点归因
+            // local_deadline 并带预算数),会话拆除仍走 RequestCancel 的外
+            // 部旗(升旗人申报 Internal)。本地看门狗线程退役。
             lubancode::agent::BackgroundCallAccounting accounting;
             const auto title = RefineSessionTitle(*backend, model, effort, first_query,
-                                                  /*timeout_secs=*/0, &shared->cancel, &accounting,
+                                                  kTitleRefineTimeoutSecs, &shared->cancel, &accounting,
                                                   bypass.get());
-            watch_done.store(true);
-            watcher.join();
             // 失败半截也出账(旧口径:先记账再判错)。
             outcome.accounting = std::move(accounting);
             if (title.has_value() && !title->empty()) {

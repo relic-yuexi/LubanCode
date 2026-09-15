@@ -300,6 +300,9 @@ public:
     std::string NewGoalEvalTurnId();  // goaleval-turn-<n>,验收内部回合
                                      //(§4.67.6;与 turn/compact-turn 共
                                      // 用号池,三种前缀互不撞名)
+    std::string NewMemoryTurnId();    // memory-turn-<n>,记忆抽取旁路内部
+                                     // 回合(取消误报 ESC 单 Bug 2;同池同
+                                     // 纪律,前缀互不撞名)
     std::string NewStepId();          // step-<n>
     std::string NewRequestId();  // request-<n>
     std::string NewStreamId();   // stream-<n>

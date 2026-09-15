@@ -67,8 +67,15 @@ struct SampleOptions {
     // 不抢断,如实保留)。
     const std::atomic<bool>* cancel = nullptr;
     // > 0 起看门狗:到点拉本地取消旗(与旧六处同一形状:steady clock 差 +
-    // 100ms 轮询)。0 = 不起(compact 两处的旧路)。
+    // 100ms 轮询)。0 = 不起(compact 两处的旧路)。外部链与预算同时在场
+    // 时两头盯(合并取消,见 sample_model.cpp):任一升起都掐流——旧
+    // "外部链在场时超时不抢断"的死档已废。
     int timeout_secs = 0;
+    // 外部取消链的升旗人申报(取消误报 ESC 单 Bug 1:四分归因的"谁升的
+    // 旗")。默认 UserInterrupt——全库把交互层按键监听的旗递进来的路是
+    // 多数;升旗人其实是宿主自己(起名精炼的看门狗/会话拆除一类内部停
+    // 止)的调用方须如实申报 Internal,不许借默认值冤枉用户按键。
+    OutputCancelSource cancel_source = OutputCancelSource::UserInterrupt;
     // ---- Token 账本单 A1(公共 ModelRequestRecorder,§11.2) ----
     // 非空时本次采样按 AgentLoop 同一套边界落账:prepared(带 purpose)
     // -> sent -> usage owner -> output 三态。旁路请求(compact 的
