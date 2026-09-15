@@ -1,7 +1,9 @@
 # 记忆抽取取消误报 ESC 与 Session V3 旁路漏账修复
 
 - 日期：2026-09-15
-- 状态：已修复，验收见 §五 勾选记账（分支 worktree-agent-memory-cancel，PR 号随交活补）。
+- 状态：已修复，验收见 §五 勾选记账。PR #96（https://github.com/relic-yuexi/LubanCode/pull/96），
+  头提交 cb2664eb 的活跃 check suite 全绿（ci run 34973753586：macos-clang/lane/changes=success，
+  layout-links-skill-route=success；linux 腿按矩阵 skipped）。
 - 级别：P1。提示错报取消来源，关键旁路无账可查。
 - 范围：采样取消归因、抽取错误提示、V3 旁路请求记录、抽取评估记录、回归验证。
 - 关联：`回合记忆抽取JSON失败_引号转义与解析收口修复.todo`、`记忆写入调度_显式保存门控批处理与成本账.todo`、`失败与恢复_写账闸门工具结果与重试收口.todo`。
