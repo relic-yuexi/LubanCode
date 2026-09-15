@@ -292,7 +292,9 @@ POST /v2/users/{openid}/files {upload_id, srv_send_msg:false}
 
 **未验边界（如实记，归 Q3 真机）**：真平台主动消息权限与额度（40034100 族真值）、被动回复窗口真值（文档 60min/5min 矛盾，代码按保守 4min 窗）、主动消息触达率与延迟、`INTERACTION_CREATE` 授权事件形状。挂起补投的“互动解锁”在进程重启后丢失（`await_interaction_` 进程内）——重启后主动重试一次、再拒再挂，有界不刷屏，如实记。
 
-**遗留（后续批次）**：notify/agent_task 分型与纯提醒零模型直投（须扩 outbox 来源合同）；修改/暂停工具；创建时策略快照（“只可收窄”半面）；list 工具 join 投递态；QQ 菜单“查看任务”入口（Q7）；群聊建单（交付面 Direct-only，工具已明拒）。PR/CI 链接见本批 PR（头提交活跃 check suite）。
+**遗留（后续批次）**：notify/agent_task 分型与纯提醒零模型直投（须扩 outbox 来源合同）；修改/暂停工具；创建时策略快照（“只可收窄”半面）；list 工具 join 投递态；QQ 菜单“查看任务”入口（Q7）；群聊建单（交付面 Direct-only，工具已明拒）。
+
+**PR/CI**：[PR #94](https://github.com/relic-yuexi/LubanCode/pull/94)（基线 19143af0）；CI 头提交活跃 suite rollup=success——macos-clang 绿，run [34958181654](https://github.com/relic-yuexi/LubanCode/actions/runs/34958181654)（windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）。
 
 ## 十二、Q6：QQ 按钮批准一次工具调用
 
