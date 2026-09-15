@@ -119,16 +119,19 @@ TEST_CASE("快照载荷:basis 三件 + verdicts 逐项三态,过 P0 载荷校验
     REQUIRE(payload["verdicts"].is_object());
     CHECK_FALSE(payload["verdicts"].empty());
     // P0 逐 kind 载荷校验器原样吃这份(tool.capability.recorded 的合同)。
-    nlohmann::json event = nlohmann::json::object({
-        {"type", "event"},
-        {"schemaVersion", 3},
-        {"kind", "tool.capability.recorded"},
-        {"eventId", "event-000001"},
-        {"seq", 1},
-        {"timestamp", 1},
-        {"turnId", nullptr},
-        {"payload", payload},
-    });
+    // 信封底座与 P0 合同册的 EventJson 同款(FromJsonStrict 验全信封)。
+    nlohmann::json event = nlohmann::json::object();
+    event["type"] = "event";
+    event["schemaVersion"] = 3;
+    event["sessionId"] = "20260916-120000-CONTRACT";
+    event["runId"] = "run-000001";
+    event["seq"] = 2;
+    event["timestamp"] = "2026-09-16T04:59:25.314Z";
+    event["eventId"] = "evt-000001";
+    event["kind"] = "tool.capability.recorded";
+    event["payload"] = payload;
+    event["prevHash"] = std::string(trajectory::v3::kGenesisHash);
+    event["lineHash"] = std::string(trajectory::v3::kGenesisHash);
     std::string ec;
     std::string msg;
     auto parsed = trajectory::v3::EventLine::FromJsonStrict(event, &ec, &msg);
