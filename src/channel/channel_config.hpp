@@ -12,9 +12,11 @@
 // 纯函数库:吃 nlohmann::json,不读文件、不读环境变量。
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -107,6 +109,80 @@ struct ChannelBindingConfig {
     ChannelBindingPolicy policy;
 };
 
+// ---------------------------------------------------------------------------
+// Q7:自定义菜单与指令面板(configuration.md §7)
+//
+// 官方接口形状(autogen v2_menu / v2_panels 家族,2026-09-16 逐页核读):
+//   - 菜单 PUT /v2/menu 整覆盖,items ≤10,子菜单 ≤5 且不再嵌套;按钮
+//     四型 switch/send_message/link/menu;send_message 是"点击后填入聊天
+//     输入框"的文本——用户发送后才成为聊天指令,不是立即执行。
+//   - 面板 POST/PUT /v2/panels(元素 ≤20,command 型点击同样只是填入
+//     输入框);c2c 场景 target_type=specific 可按已配对用户关联,关联对象
+//     经 PUT /v2/panels/{id}/target op=add/del 增删(单批 ≤20)。
+//   - 名称长度按平台字符规则校验(一个中文汉字算 2 字符),不按字节猜。
+// 发布是显式开关:menu.publish / panel.enabled 不开就不碰平台配置——
+// 安装与普通启动不自动覆盖用户在开放平台配好的菜单/面板。
+// ---------------------------------------------------------------------------
+
+// 二级菜单项(官方 SubMenuItem;只许 send_message|link,不嵌套)。
+struct ChannelMenuSubItemUserConfig {
+    std::string name;          // ≤14 平台字符(汉字算 2)
+    std::string type;          // send_message | link
+    std::string send_message;  // 点击填入输入框的文本
+    std::string link;          // https:// 跳转
+};
+
+// 一级菜单项(官方 MenuItem)。
+struct ChannelMenuItemUserConfig {
+    std::string name;          // ≤10 平台字符
+    std::string type;          // switch | send_message | link | menu
+    std::string send_message;
+    std::string link;
+    std::string switch_id;     // type=switch:开关标识(只承载用户偏好)
+    bool switch_default = false;
+    std::vector<ChannelMenuSubItemUserConfig> sub_menu_items;  // 仅 type=menu,≤5
+};
+
+// 面板元素(官方 PanelItem)。
+struct ChannelPanelItemUserConfig {
+    std::string name;       // ≤14 平台字符;type=command 时点击填入输入框
+    std::string desc;       // ≤30 平台字符
+    std::string type;       // command | link
+    bool only_admin = false;  // 平台侧展示位;不是宿主授权(§十三)
+    std::string link;
+};
+
+// 指令面板(首版只支持 c2c 场景)。
+struct ChannelPanelUserConfig {
+    bool enabled = false;      // 显式启用才发布
+    std::string scope;         // c2c
+    std::string target_type;   // all | specific(specific = 关联已配对用户)
+    std::string remark;        // 开发者备注(发布时拼所有权前缀,不对用户展示)
+    std::vector<ChannelPanelItemUserConfig> items;  // ≤20
+};
+
+// 菜单 + 面板发布配置。
+struct ChannelMenuUserConfig {
+    bool publish = false;  // 显式启用才发布全局菜单;false 不碰平台菜单
+    std::vector<ChannelMenuItemUserConfig> items;  // ≤10
+    std::optional<ChannelPanelUserConfig> panel;
+};
+
+// 菜单/面板回调的宿主侧命令绑定:send_message/command 填入的文本由用户
+// 发送后,按整串匹配走宿主分派。action 四路:
+//   help/file_help/list_reminders = 宿主控制命令(零模型直答,不扩权);
+//   prompt = 预设输入(照常进渠道路由过五层闸,require_tools 逐名校验,
+//            名单外拒——绑什么工具就得什么权限)。
+struct ChannelCommandBindingUserConfig {
+    std::string match;      // 识别串(去首尾空白后整串等值;用户改过不命中)
+    std::string action;     // help | file_help | list_reminders | prompt
+    std::string prompt;     // action=prompt 时的预设输入
+    std::vector<std::string> require_tools;  // 权限闸:须在本轮冻结策略名单内
+};
+
+// 平台字符计数(官方口径:中文汉字按 2 字符计;ASCII 1,其余 2)。
+std::size_t CountPlatformChars(std::string_view text);
+
 struct ChannelAccountUserConfig {
     bool enabled = false;
     std::string transport;                // websocket | webhook | long_polling(按 manifest 能力收)
@@ -126,6 +202,10 @@ struct ChannelAccountUserConfig {
     std::string group_scope;
     // 账号层工具上限(§7;五层交集的一层)。缺省 = 不添上限。
     ChannelToolsUserPolicy tools;
+    // Q7:菜单/面板发布配置(不写 = 不发布,零行为变化)。
+    std::optional<ChannelMenuUserConfig> menu;
+    // Q7:菜单/面板回调的命令绑定(不写 = 无宿主侧命令,照常进模型)。
+    std::vector<ChannelCommandBindingUserConfig> commands;
 };
 
 struct ChannelUserConfig {

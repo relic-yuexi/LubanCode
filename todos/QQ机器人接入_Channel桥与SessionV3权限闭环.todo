@@ -4,7 +4,7 @@
 现场修复补单（2026-09-14）：[Windows 连接诊断与交互配置](QQBot_Windows连接诊断与交互配置修复.todo)。覆盖 beta.1 的连接静默、Windows TLS 信任根、密钥文件权限与交互向导；待实现，归入 Q1b/Q3 验收。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q1b（配对闭环：提示限频/批准控制面/一次性码）已落 PR #90；Q5（聊天侧建单次/周期任务：工具/归属/交付绑定/认领执行/补投分型，§十一记账）已落 PR #94；Q4（手机发文件闭环：§十收/发两面，mock 链全通）已落 **PR #93**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34961624621](https://github.com/relic-yuexi/LubanCode/actions/runs/34961624621)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验；真平台媒体行为归 Q3）；Q3（真机联调）/Q6-Q7 待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q1b（配对闭环：提示限频/批准控制面/一次性码）已落 PR #90；Q5（聊天侧建单次/周期任务：工具/归属/交付绑定/认领执行/补投分型，§十一记账）已落 PR #94；Q4（手机发文件闭环：§十收/发两面，mock 链全通）已落 **PR #93**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34961624621](https://github.com/relic-yuexi/LubanCode/actions/runs/34961624621)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验；真平台媒体行为归 Q3）；Q3（真机联调）/Q6 待实现；Q7（自定义菜单与指令面板：发布器/命令分派/权限闸，§十三与 13.5 记账）已落待 PR。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -357,15 +357,29 @@ LubanCode 已有 [ApprovalRequest / InteractionDecision](../src/runtime/interact
 
 **两类动作必须区分：** menu.send_message 与 panel.command 按文档是把文字填入输入框；用户发送后才成为聊天指令。旧式快捷菜单还可产生 type=12、feature_id 互动；消息内审批按钮是 type=11、button_data。分别解码，不能假定所有菜单点击都会立即执行请求。
 
-- [ ] 新增 QQ menu-panel 模块与本地配置发布入口；安装或普通启动不自动覆盖用户在开放平台配好的菜单。显式启用后先读远端配置、展示差异、保存版本/摘要，再 PUT；不反复创建面板耗尽额度。
-- [ ] 全局菜单建议“帮助”“文件”“任务”“审批”。“文件”提示从 QQ 原生附件入口发送；当前菜单接口未提供通用文件选择器。按钮 anchor=1 只记作特定手机单聊选图能力，不能宣传可任意选 PDF/ZIP。
-- [ ] c2c specific 面板可关联已配对用户，撤销时移除；面板可见和 only_admin 都不是宿主授权。用户直接手敲同名命令仍走相同身份/任务归属检查。
-- [ ] “查看任务”“暂停任务”“待审批”等控制命令在宿主识别后调用中立服务；只查当前主体有权查看的项目。菜单不展示私有路径、任务名或凭据，不在全局菜单塞个人审批 token。
-- [ ] 菜单 switch 的 ext 标记只用于用户偏好，不可改变工具授权/owner/全局模型。状态缺失或客户端不支持时用明确默认，不从一次 ext 消失推断权限撤销或授予。
-- [ ] 面板发布独立限速与重试：菜单修改文档为 5 QPM，创建面板 10 QPM，目标更新 60 QPM。GET/PUT 版本冲突不覆盖后台人工修改，给本地可见提示。
-- [ ] 把菜单/面板作为可选平台能力；飞书日后用自己的菜单/卡片调用同一任务和审批服务，不向 C++ 通用 schema 塞 QQ 原始 panel JSON。
+- [x] 新增 QQ menu-panel 模块与本地配置发布入口；安装或普通启动不自动覆盖用户在开放平台配好的菜单。显式启用后先读远端配置、展示差异、保存版本/摘要，再 PUT；不反复创建面板耗尽额度。（Q7 落 `src/channel/qq/qq_menu.*`：载荷纯函数（官方六页 fixture 钉死——菜单 PUT 三型示例/GET menu 示例/panels 列表分页/创建响应/target 体，数值字段两态容忍）+ `QqMenuPanelPublisher`——先 GET 远端，远端与本地已发布摘要（`<account_dir>/menu-panel.json` 原子写）一致才写；不一致（人工改过）→ 冲突不覆盖 + 本地 stderr 提示；面板按备注所有权前缀 `lubancode:<ch>:<acct>:<用户备注>` 认领复用，重启不重复创建。发布入口在 `ChannelGatewayWiring`（`src/app/channel_gateway_wiring.*`）：`menu.publish`/`panel.enabled` 显式启用才挂发布器，首拍 TickOnce 同步 + 配对增删后重同步，失败/限速按 retry_at 退避。测试 `tests/unit/channelqq/test_qq_menu.cpp` 九案 + `test_qq_wiring.cpp` "Q7 菜单显式启用才挂发布器;首拍同步落状态文件"案。真平台发布触达归 Q3。）
+- [x] 全局菜单建议“帮助”“文件”“任务”“审批”。“文件”提示从 QQ 原生附件入口发送；当前菜单接口未提供通用文件选择器。按钮 anchor=1 只记作特定手机单聊选图能力，不能宣传可任意选 PDF/ZIP。（Q7 落命令绑定四路 action（`src/channel/channel_commands.*`）：help（命令表自举的帮助正文，零私有信息）/file_help（明写走 QQ 原生附件入口，不虚报通用文件选择器）/list_reminders（Q5 任务桥归属闸直答）/prompt（预设输入进模型，require_tools 过闸）。菜单结构纯配置驱动（账号段 `menu.items`），不硬编码；“审批”入口待 Q6 落地后由配置自行发布（本批不预置）。anchor 字段配置层不收（“认不得的字段”案钉死），不宣传选图能力。）
+- [x] c2c specific 面板可关联已配对用户，撤销时移除；面板可见和 only_admin 都不是宿主授权。用户直接手敲同名命令仍走相同身份/任务归属检查。（Q7 落 `ChannelManager::ApprovedPairingSenders`（pairing 账 Approved 记录去重）+ 发布器目标增量（本地 targets 账差集 → op=add/del 单批 ≤20）；配对 approve/reject 后 wiring 置 pending 重同步（`ConsumePairingCommands` 尾）。only_admin 只透传平台展示位，配置注释与文档明写“不是宿主授权”。手敲同名命令与菜单点击同走 MatchChannelCommand 整串匹配（e2e 钉带空白手敲同命中）。）
+- [x] “查看任务”“暂停任务”“待审批”等控制命令在宿主识别后调用中立服务；只查当前主体有权查看的项目。菜单不展示私有路径、任务名或凭据，不在全局菜单塞个人审批 token。（Q7 落泵侧分派（`ChannelWorkPump::ProcessWorkItem` 新块 + `ReplyMenuCommand`）：命中命令表 → 控制命令零模型直答（list_reminders 经 TurnScope 归属闸，只看自己的——e2e 钉 dm-b 看不到 dm-a 的任务），直答走 outbox 渠道段（source_ref 用 ingress 定式，投递结算照常推 ingress delivered）。帮助正文只由命令表生成，不列私有路径/凭据；“暂停任务”未预置（要选 jobId，按配置走 prompt 路让模型调 cancel_reminder）；“待审批”待 Q6。命令表随 WorkItem 冻结（`WorkItem.commands`，TakeNextWork 快照）。）
+- [x] 菜单 switch 的 ext 标记只用于用户偏好，不可改变工具授权/owner/全局模型。状态缺失或客户端不支持时用明确默认，不从一次 ext 消失推断权限撤销或授予。（Q7 落配置层：switch 型只收 switch_id/switch_default 并原样发布（官方载荷 `switch:{switch_id,default}`）；`MapC2cMessageCreate` 不把 switch ext 解析成任何授权信号（ext 只取 msg_idx 既有口径），工具授权/owner/模型全在宿主路由账，ext 摸不着——配置注释与 configuration.md 钉死“只承载用户偏好”。）
+- [x] 面板发布独立限速与重试：菜单修改文档为 5 QPM，创建面板 10 QPM，目标更新 60 QPM。GET/PUT 版本冲突不覆盖后台人工修改，给本地可见提示。（Q7 落 `MenuQpmLimiter` 滑窗（60s 窗按类配额：menu_write 5/panel_write 10/read 30/target 60）+ 平台 429 → rate_limited 退避；写前对远端摘要与本地已发布摘要，不符即冲突提示不覆盖（测试“版本冲突”与“QPM 限速”案）。40030009 并发冲突→10s 重试、40030013 配额→稳定码不刷屏、401/403→invalidate+auth_failed。）
+- [x] 把菜单/面板作为可选平台能力；飞书日后用自己的菜单/卡片调用同一任务和审批服务，不向 C++ 通用 schema 塞 QQ 原始 panel JSON。（Q7 落分层：通用 schema 只收 `ChannelMenuUserConfig`/`ChannelCommandBindingUserConfig` 中性结构（name/type/desc/match/action/require_tools），官方 payload 折算全在 `channel/qq/qq_menu.*`（渠道私有）；命令分派（channel_commands + 泵）平台中立——飞书菜单/卡片日后填同一张命令表即可。回调沿既有 C2C 事件账（ingress journal evt 行 + `hints.command` 识别位纯追加，不新增事件 kind）——新式菜单/面板点击按官方文档是“填入输入框→用户发送→普通 C2C 信”，与旧式 type=12 互动（不发布不解码，留后续）和 Q6 的 type=11 按钮分家，`qq_proto.cpp` 的识别位两族都不冒充。）
 
-Q7 验收：手机/桌面分别查填入与发送行为；未配对用户虽见全局菜单仍不能执行；指定面板增删目标、全局覆盖冲突、重启不重复创建、配额错误都测。Q7 帮助入口可提前做，任务/审批入口只有 Q5/Q6 可用后才发布。
+Q7 验收：手机/桌面分别查填入与发送行为；未配对用户虽见全局菜单仍不能执行；指定面板增删目标、全局覆盖冲突、重启不重复创建、配额错误都测。（mock 面已钉：`tests/unit/runtime/test_channel_menu_pump.cpp` 两案——全链（配对 sender 菜单点击→控制命令零模型直答、投回原会话锚定来信、归属隔离、预设 prompt 进模型且请求正文=预设原文被替换、权限外 require_tools 拒零模型、帮助正文、手敲带空白同命中）+ 未配对点击（dm pairing → 配对提示带码零模型，ingress rejected:pairing_pending）；发布面（specific 目标增删/冲突不覆盖/重启不重复创建/配额 40030013/分页/限速）见 `test_qq_menu.cpp` 九案；配置面见 `test_channel_menu_config.cpp`；识别位见 `test_qq_proto.cpp` Q7 案。手机/桌面真机填入与发送行为、真平台菜单触达/回调延迟/真实 QPM 真值归 Q3 真机未验。帮助入口已可发布；任务入口随 Q5 已可用；审批入口待 Q6。）
+
+### 13.5 Q7 批次记账（2026-09-16）
+
+**接口核实**：开工前逐字重读官方六页（menu-panel 总览、v2_menu.get/put、v2_panels.get/post、v2_panels_panel_id.put、v2_panels_panel_id_target.put；2026-09-16 版）——菜单 PUT 整覆盖（items ≤10、子菜单 ≤5 不嵌套、四型 switch/send_message/link/menu）、GET 回 `{version, menu?}`；面板创建回 `{panel_id}`（bot 上限 20 块）、元素 ≤20、name ≤14/desc ≤30 平台字符（汉字 2）、备注 ≤255 不对用户展示；列表分页 `{records, next_cursor, is_end}`；target `{op: add|del, user_openids}` 单批 ≤20 无响应体；QPM 真值：菜单写 5、面板写 10、读 30、target 60；错误码族 40030006（面板不存在）/40030009（并发）/40030013（超量）/40030021（all 面板不吃 specific 目标）。send_message/command 均为"点击填入输入框，用户发送后才成为聊天指令"——回调=普通 C2C 信，不新增网关事件。
+
+**落地符号**：`src/channel/channel_config.hpp/cpp`（`ChannelMenuUserConfig`/`ChannelMenuItemUserConfig`/`ChannelMenuSubItemUserConfig`/`ChannelPanelUserConfig`/`ChannelPanelItemUserConfig`/`ChannelCommandBindingUserConfig`/`CountPlatformChars`，账号段新键 `menu`/`commands`）；`src/channel/channel_commands.hpp/cpp`（`MatchChannelCommand`/`MakeChannelHelpText`/`MakeChannelFileHelpText`/`FormatReminderListText`/`MakeMenuCommandDeniedText`/`MakeMenuCommandUnavailableText`/`FormatUtcTimestamp`）；`src/channel/qq/qq_menu.hpp/cpp`（载荷 `BuildMenuPutBody`/`ParseMenuGetBody`/`BuildPanelCreateBody`/`BuildPanelUpdateBody`/`ParsePanelsListBody`/`BuildPanelTargetBody`/`MakePanelRemark` + `MenuQpmLimiter` + `QqMenuPanelPublisher::Sync`）；`src/channel/qq/qq_adapter.hpp`（`token_manager()` 借用口）；`src/channel/manager.hpp/cpp`（`WorkItem.commands` 冻结快照、`ApprovedPairingSenders`）；`src/runtime/channel_work_pump.hpp/cpp`（ProcessWorkItem 命令分派块 + `ReplyMenuCommand`）；`src/channel/qq/qq_proto.cpp`（MapC2cMessageCreate 的 `hints.command/command_args` 识别位）；`src/app/channel_gateway_wiring.hpp/cpp`（`MenuPublisherEntry`/`PumpMenuSync`、配对命令后置 pending）；冻结件同步 configuration.md §7（菜单/面板/命令绑定样例与规矩）。
+
+**测试**：新册 `tests/unit/channelqq/test_qq_menu.cpp`（十一案：载荷 fixture 四 + 发布器七）、`tests/unit/channel/test_channel_menu_config.cpp`（六案）、`tests/unit/channel/test_channel_commands.cpp`（六案）、`tests/unit/runtime/test_channel_menu_pump.cpp`（两案 e2e）；`tests/unit/channelqq/test_qq_proto.cpp` 增 Q7 识别位案、`tests/unit/channelqq/test_qq_wiring.cpp` 增发布装配案。
+
+**未验边界（如实记，归 Q3 真机）**：真平台菜单/面板发布触达与生效延迟、手机/桌面客户端填入与发送的实际行为、真实 QPM 配额（本地滑窗是保守礼貌不是平台真值）、panels 列表 cursor 是否含需 URL 转义字符（现透传拼接）、菜单名称平台字符口径是否恰为"汉字 2"（按文档字面实现）、40030021（all 面板误吃 specific 目标）在真实账号的分型。旧式快捷菜单 type=12 feature_id 互动不发布不解码（未实现，后续需要再立）。
+
+**遗留（后续批次）**："待审批"菜单入口与 `INTERACTION_CREATE` 面归 Q6；"暂停任务"控制命令未预置（配置可走 prompt 路达 cancel_reminder）；switch ext 偏好只透传不落账（用户偏好存储后续需要再做）；菜单/面板发布的 `gateway status` 观测栏未加（发布结果在 stderr + 状态文件）。
+
+**PR/CI**：待 PR 创建后补链。
 
 ## 十四、补充调研证据与交付顺序
 

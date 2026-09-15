@@ -799,6 +799,11 @@ add_library(lubancode_engine STATIC
   src/channel/qq/qq_media.cpp
   src/channel/qq/qq_gateway.cpp
   src/channel/qq/qq_adapter.cpp
+  # QQ 接入单 Q7:菜单/面板回调的宿主侧命令识别与回正文构建(纯函数,
+  # 渠道库);官方 v2_menu/v2_panels 载荷纯函数 + 显式启用的发布器
+  #(读远端→差异/冲突裁决→PUT/复用,独立 QPM 限速)。
+  src/channel/channel_commands.cpp
+  src/channel/qq/qq_menu.cpp
   # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
   # resume-as-new 更新映射)与工作绑定账(sid -> 场/轮,恢复反查)。
   src/channel/session_map.cpp

@@ -198,6 +198,11 @@ private:
     bool ProcessWorkItem(const std::string& channel_id, const std::string& account_id,
                          const channel::ChannelManager::WorkItem& work, std::int64_t now_ms,
                          const std::string& turn_key, const std::atomic<bool>* cancel);
+    // Q7 菜单/面板命令的宿主直答(控制命令/权限外拒绝):零模型,回复走
+    // outbox 渠道段(source_ref 用 ingress 定式,投递结算照常推 ingress)。
+    bool ReplyMenuCommand(const std::string& channel_id, const std::string& account_id,
+                          const channel::ChannelManager::WorkItem& work,
+                          const std::string& reply_text, std::int64_t now_ms);
     // Q6 远端审批:per-turn 确认回调的裁定(显式 allow 放行/hard deny 拒/
     // 审批带发卡等按钮/带外 fail closed 拒)。
     HeadlessExecutor::Options::ToolConfirmDecision DecideChannelToolApproval(

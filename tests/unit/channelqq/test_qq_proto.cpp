@@ -255,6 +255,50 @@ TEST_CASE("qq_proto: 附件按官方 content_type 映射真类型(Q4,不再降�
     CHECK(mapped->warnings.find("attachments_pending_download") != std::string::npos);
 }
 
+TEST_CASE("qq_proto: Q7 命令前缀识别(hints.command/command_args;/起头文本)") {
+    // 菜单 send_message / 面板 command 点击填入的文本(官方:填入输入框,
+    // 用户发送后成为聊天指令)与手敲指令同走 hints.command 识别位。
+    std::string error;
+    const auto mapped = MapC2cMessageCreate(
+        Parse(R"({
+          "id": "M-Q7-1", "author": {"user_openid": "OPEN1", "username": "", "bot": false},
+          "content": " /help 今晚的安排 ", "message_type": 0
+        })"),
+        "", "qqbot", "main", "qq-del-q7", 0, &error);
+    REQUIRE(mapped.has_value());
+    CHECK(mapped->event.hints.command == std::optional<std::string>("help"));
+    CHECK(mapped->event.hints.command_args == std::optional<std::string>("今晚的安排"));
+
+    // 中文命令名同样识别(/帮助)。
+    const auto zh = MapC2cMessageCreate(
+        Parse(R"({
+          "id": "M-Q7-2", "author": {"user_openid": "OPEN1", "username": "", "bot": false},
+          "content": "/查看任务", "message_type": 0
+        })"),
+        "", "qqbot", "main", "qq-del-q7b", 0, &error);
+    REQUIRE(zh.has_value());
+    CHECK(zh->event.hints.command == std::optional<std::string>("查看任务"));
+    CHECK_FALSE(zh->event.hints.command_args.has_value());
+
+    // 非命令文本(无斜杠/裸斜杠)不填识别位。
+    const auto plain = MapC2cMessageCreate(
+        Parse(R"({
+          "id": "M-Q7-3", "author": {"user_openid": "OPEN1", "username": "", "bot": false},
+          "content": "随便聊聊", "message_type": 0
+        })"),
+        "", "qqbot", "main", "qq-del-q7c", 0, &error);
+    REQUIRE(plain.has_value());
+    CHECK_FALSE(plain->event.hints.command.has_value());
+    const auto bare = MapC2cMessageCreate(
+        Parse(R"({
+          "id": "M-Q7-4", "author": {"user_openid": "OPEN1", "username": "", "bot": false},
+          "content": "/", "message_type": 0
+        })"),
+        "", "qqbot", "main", "qq-del-q7d", 0, &error);
+    REQUIRE(bare.has_value());
+    CHECK_FALSE(bare->event.hints.command.has_value());
+}
+
 TEST_CASE("qq_proto: 缺 id/user_openid/content/未知 message_type 拒绝") {
     std::string error;
     CHECK_FALSE(MapC2cMessageCreate(Parse(R"({"content":"x"})"), "", "c", "a", "d", 0,

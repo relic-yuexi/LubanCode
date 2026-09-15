@@ -175,6 +175,26 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
             wiring->adapter_views_.push_back(
                 AdapterView{channel_id, account_id,
                             static_cast<channel::qq::QqBotAdapter*>(adapter_ptr)});
+            // Q7 菜单/面板发布:显式启用(menu.publish 或 panel.enabled)才
+            // 挂发布器;不启用的账号零行为变化(不碰平台菜单/面板)。
+            if (account_config.menu.has_value() &&
+                (account_config.menu->publish ||
+                 (account_config.menu->panel.has_value() && account_config.menu->panel->enabled))) {
+                channel::qq::QqMenuPanelPublisher::Options publisher_options;
+                publisher_options.http = http;
+                publisher_options.tokens =
+                    static_cast<channel::qq::QqBotAdapter*>(adapter_ptr)->token_manager();
+                publisher_options.state_file = options.channels_state_root / channel_id /
+                                               account_id / "menu-panel.json";
+                publisher_options.now_ms = now_ms;
+                MenuPublisherEntry entry;
+                entry.channel_id = channel_id;
+                entry.account_id = account_id;
+                entry.menu = *account_config.menu;
+                entry.publisher =
+                    std::make_unique<channel::qq::QqMenuPanelPublisher>(std::move(publisher_options));
+                wiring->menu_publishers_.push_back(std::move(entry));
+            }
         }
         // 渠道层 bindings/tools(Q0 五层交集的渠道层)。
         wiring->manager_->SetChannelBindings(channel_id, channel_config.bindings);
@@ -245,10 +265,53 @@ bool ChannelGatewayWiring::TickOnce(std::int64_t now_ms) {
     if (!control_dir_.empty()) {
         ConsumePairingCommands();
     }
+    // Q7 菜单/面板发布(显式启用才有账):首拍 + 配对增删后的重同步。
+    // 发布失败不拦主业务(退避重试,单账号不拖死其他)。
+    if (!menu_publishers_.empty()) {
+        PumpMenuSync(now_ms);
+    }
     if (work_pump_ != nullptr && !work_pump_->TickOnce(now_ms)) {
         return false;  // 渠道业务泵 broken(账写不进):停业务 tick
     }
     return true;
+}
+
+void ChannelGatewayWiring::PumpMenuSync(std::int64_t now_ms) {
+    for (auto& entry : menu_publishers_) {
+        if (!entry.pending && now_ms < entry.retry_at_ms) {
+            continue;
+        }
+        channel::qq::QqMenuPanelPublisher::SyncInput input;
+        input.channel_id = entry.channel_id;
+        input.account_id = entry.account_id;
+        input.publish_menu = entry.menu.publish;
+        input.menu = entry.menu;
+        input.publish_panel = entry.menu.panel.has_value() && entry.menu.panel->enabled;
+        if (input.publish_panel) {
+            input.panel = *entry.menu.panel;
+            if (input.panel.target_type == "specific") {
+                // c2c specific:关联对象 = 当前已配对 sender(撤销配对 → 重
+                // 同步时按本地账移除;面板可见不是宿主授权,准入照旧走路由)。
+                input.desired_targets =
+                    manager_->ApprovedPairingSenders(entry.channel_id, entry.account_id);
+            }
+        }
+        const auto report = entry.publisher->Sync(input);
+        for (const auto& notice : report.notices) {
+            std::fprintf(stderr, "[gateway] QQ 菜单 %s/%s: %s\n", entry.channel_id.c_str(),
+                         entry.account_id.c_str(), notice.c_str());
+        }
+        if (!report.error_code.empty()) {
+            std::fprintf(stderr, "[gateway] QQ 菜单 %s/%s 发布失败(%s):%s\n",
+                         entry.channel_id.c_str(), entry.account_id.c_str(),
+                         report.error_code.c_str(), report.error_detail.c_str());
+            entry.retry_at_ms =
+                report.retry_at_ms > now_ms ? report.retry_at_ms : now_ms + 60'000;
+        } else {
+            entry.retry_at_ms = 0;
+        }
+        entry.pending = false;
+    }
 }
 
 void ChannelGatewayWiring::ConsumePairingCommands() {
@@ -283,6 +346,14 @@ void ChannelGatewayWiring::ConsumePairingCommands() {
             std::fprintf(stderr, "[gateway] 渠道配对: %s %s/%s 身份 %s\n",
                          approve ? "已批准" : "已拒绝", command.channel_id.c_str(),
                          command.account_id.c_str(), result.sender_id.c_str());
+            // Q7:c2c specific 面板的关联对象跟配对账走——增删后重同步
+            //(下拍 PumpMenuSync 按 ApprovedPairingSenders 增量)。
+            for (auto& entry : menu_publishers_) {
+                if (entry.channel_id == command.channel_id &&
+                    entry.account_id == command.account_id) {
+                    entry.pending = true;
+                }
+            }
         } else if (error == "expired") {
             result.detail = "配对码已过期——让用户重新发一条消息领取新码";
         } else if (error == "already_finalized") {

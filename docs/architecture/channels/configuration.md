@@ -211,6 +211,41 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
 
 Q6 起各层 tools 段另有 `approve`（可申请审批带，presence 合同与 `allow` 同款：键在=本层参与，未写=不参与）：名单内的须确认工具**不预先授权**——模型可见（看不见无从申请），执行前经渠道按钮问用户（QQ 键盘卡，`channel.approval.requested/resolved` 落 V3），允许才执行这一次；拒绝/超时/取消都不执行，超时默认拒绝不默认放行。`deny` 永远赢：hard deny 不可被按钮覆盖。有效审批带 = 各显式层 `approve` 的交集（与 `allow` 同构）。默认零层声明 = 空带 = 行为与 Q0 一字不差；QQ 模板不列 `approve`。
 
+**Q7 菜单/面板/命令绑定**（QQ 接入单 §十三；账号段可选字段，不写零行为变化）：
+
+```json
+{
+  "menu": {
+    "publish": true,
+    "items": [
+      {"name": "帮助", "type": "send_message", "send_message": "/帮助"},
+      {"name": "官网", "type": "link", "link": "https://example.com"},
+      {"name": "更多", "type": "menu", "sub_menu_items": [
+        {"name": "设置", "type": "send_message", "send_message": "/设置"}
+      ]},
+      {"name": "搜索偏好", "type": "switch", "switch_id": "search", "switch_default": true}
+    ],
+    "panel": {
+      "enabled": true, "scope": "c2c", "target_type": "all", "remark": "主面板",
+      "items": [{"name": "查看任务", "desc": "查看我的定时任务", "type": "command"}]
+    }
+  },
+  "commands": [
+    {"match": "/帮助", "action": "help"},
+    {"match": "/文件说明", "action": "file_help"},
+    {"match": "/查看任务", "action": "list_reminders"},
+    {"match": "/整理", "action": "prompt",
+     "prompt": "请整理我当前的待办并给出摘要。", "require_tools": ["read_file"]}
+  ]
+}
+```
+
+- **发布是显式开关**：`menu.publish` / `panel.enabled` 不开就不碰平台——安装与普通启动不自动覆盖用户在开放平台配好的菜单/面板。发布在 Gateway tick 里做：先读远端，远端与本地已发布摘要一致才写（只有我们改过）；远端被人工改过 → 冲突，不覆盖，给本地可见提示。面板按备注里的所有权前缀（`lubancode:<渠道>:<账号>:<用户备注>`）认领复用，不反复创建耗额度。官方限速：菜单写 5 QPM、面板写 10 QPM、读 30 QPM、目标更新 60 QPM，发布器各接口独立滑窗。
+- **点击不等于执行**：官方 `send_message`/`command` 点击只把文本填入聊天输入框，用户发送后成为普通 C2C 消息——照常走 ingress 账、准入、路由与五层工具闸；`hints.command` 是识别位（`/命令 [参数]`），不是分派。旧式快捷菜单的 type=12 互动不发布不解码；消息内按钮的 type=11 归 Q6（`channel/qq` 的互动位与键盘回调），不在此列。
+- **命令绑定**：`match` 去首尾空白后整串等值才命中（用户改过、带参数的不命中，照常进模型）；`action` 四路——`help`/`file_help`/`list_reminders` 是宿主控制命令（零模型直答，`list_reminders` 走 Q5 任务桥归属闸，只看自己的任务）；`prompt` 把预设输入当作用户发言进模型，`require_tools` 逐名过本轮冻结策略，名单外就地拒——**菜单不扩权，绑什么工具就得什么权限**。`target_type=specific` 的 c2c 面板按已配对用户关联对象，撤销配对后重同步时移除；面板可见与 `only_admin` 都不是宿主授权。
+- `menu.items` ≤10、子菜单 ≤5（不嵌套）、`panel.items` ≤20、`link` 须 `https://`、名称长度按平台字符口径（一个中文汉字算 2 字符）校验。
+
+
 准入次序——先鉴权，后建 session。不通过准入的消息，不建 session，不召回记忆，不调用模型：
 
 ```text

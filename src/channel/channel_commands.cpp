@@ -1,0 +1,225 @@
+// 见 hpp 合同注释(QQ 接入单 Q7)。
+#include "channel/channel_commands.hpp"
+
+#include <sstream>
+#include <utility>
+
+#include "channel/qq/qq_proto.hpp"  // ParseLooseInt64(数值字段两态容忍)
+
+namespace lubancode::channel {
+
+namespace {
+
+// 去首尾空白(空格/制表/CR/LF;不做 Unicode 级 trim——菜单填入的文本由
+// 平台客户端产生,边界空白是 ASCII 的)。
+std::string TrimAscii(const std::string& text) {
+    std::size_t begin = 0;
+    std::size_t end = text.size();
+    while (begin < end) {
+        const char c = text[begin];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            ++begin;
+        } else {
+            break;
+        }
+    }
+    while (end > begin) {
+        const char c = text[end - 1];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            --end;
+        } else {
+            break;
+        }
+    }
+    return text.substr(begin, end - begin);
+}
+
+// Howard Hinnant civil_from_days:天数 → 年月日(UTC,无时区)。
+void CivilFromDays(std::int64_t days, int* y, unsigned* m, unsigned* d) {
+    days += 719468;
+    const std::int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    const std::int64_t doe = days - era * 146097;
+    const std::int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const std::int64_t y_ = yoe + era * 400;
+    const std::int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const std::int64_t mp = (5 * doy + 2) / 153;
+    const std::int64_t d_ = doy - (153 * mp + 2) / 5 + 1;
+    const std::int64_t m_ = mp < 10 ? mp + 3 : mp - 9;
+    *y = static_cast<int>(m_ <= 2 ? y_ + 1 : y_);
+    *m = static_cast<unsigned>(m_);
+    *d = static_cast<unsigned>(d_);
+}
+
+std::string TwoDigits(std::int64_t value) {
+    std::string text = std::to_string(value);
+    if (text.size() < 2) {
+        text.insert(text.begin(), '0');
+    }
+    return text;
+}
+
+std::string JobStateText(const std::string& state) {
+    if (state == "active") return "进行中";
+    if (state == "paused") return "已暂停";
+    if (state == "cancelled") return "已取消";
+    if (state == "completed") return "已完成";
+    return state;
+}
+
+std::string ScheduleKindText(const std::string& kind) {
+    if (kind == "once") return "单次";
+    if (kind == "cron") return "周期";
+    if (kind == "interval") return "间隔";
+    return kind;
+}
+
+}  // namespace
+
+std::optional<ChannelCommandBindingUserConfig> MatchChannelCommand(
+    const std::vector<ChannelCommandBindingUserConfig>& commands, const std::string& text) {
+    const std::string trimmed = TrimAscii(text);
+    if (trimmed.empty()) {
+        return std::nullopt;
+    }
+    for (const auto& binding : commands) {
+        if (binding.match == trimmed) {
+            return binding;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string MakeChannelHelpText(const std::vector<ChannelCommandBindingUserConfig>& commands) {
+    std::ostringstream out;
+    out << "我能做这些:\n";
+    for (const auto& binding : commands) {
+        if (binding.action == "prompt") {
+            // 预设输入:列 match 与 prompt 的引导句(prompt 是配置里明写的
+            // 用户可见预设,不算私有信息)。
+            std::string summary = binding.prompt;
+            // 摘要只取第一行,压进 40 平台字符。
+            const std::size_t newline = summary.find('\n');
+            if (newline != std::string::npos) {
+                summary.resize(newline);
+            }
+            if (CountPlatformChars(summary) > 40) {
+                // 平台字符截断(不拆 UTF-8 多字节尾)。
+                std::size_t platform = 0;
+                std::size_t cut = 0;
+                for (std::size_t i = 0; i < summary.size();) {
+                    const auto raw = static_cast<unsigned char>(summary[i]);
+                    const std::size_t width = (raw & 0x80) == 0 ? 1 : 2;
+                    if (platform + width > 40) {
+                        break;
+                    }
+                    platform += width;
+                    i += (raw & 0x80) == 0 ? 1 : (raw & 0xE0) == 0xC0 ? 2 : (raw & 0xF0) == 0xE0 ? 3 : 4;
+                    cut = i;
+                }
+                summary.resize(cut);
+                summary += "…";
+            }
+            out << "- " << binding.match << ":" << summary << "\n";
+        } else if (binding.action == "help") {
+            out << "- " << binding.match << ":这份帮助\n";
+        } else if (binding.action == "file_help") {
+            out << "- " << binding.match << ":怎么发文件给我\n";
+        } else if (binding.action == "list_reminders") {
+            out << "- " << binding.match << ":查看我的定时任务\n";
+        }
+    }
+    out << "直接发消息也行,不一定走菜单。";
+    return out.str();
+}
+
+std::string MakeChannelFileHelpText() {
+    return "发文件:打开与我的聊天,点输入框左侧的\"+\",从 QQ 原生的文件/图片入口选"
+           "择发送即可。我能收文本、表格、图片等常见格式;菜单里没有通用文件选择"
+           "器,直接走聊天附件最稳。";
+}
+
+std::string FormatReminderListText(const nlohmann::json& payload, std::int64_t now_ms) {
+    (void)now_ms;
+    std::vector<std::pair<std::string, const nlohmann::json*>> jobs;
+    if (payload.is_object() && payload.contains("jobs") && payload.at("jobs").is_array()) {
+        for (const auto& job : payload.at("jobs")) {
+            if (job.is_object() && job.contains("jobId") && job.at("jobId").is_string()) {
+                jobs.emplace_back(job.at("jobId").get<std::string>(), &job);
+            }
+        }
+    }
+    if (jobs.empty()) {
+        return "你还没有定时任务。想要的话直接说,比如\"每晚九点提醒我喝水\"。";
+    }
+    std::ostringstream out;
+    out << "你的定时任务(" << jobs.size() << " 笔):\n";
+    for (const auto& [job_id, job] : jobs) {
+        // nlohmann 对象访问都先 contains(缺键 UB 的教训)。
+        std::string state = "active";
+        if (job->contains("state") && job->at("state").is_string()) {
+            state = job->at("state").get<std::string>();
+        }
+        std::string kind = "once";
+        if (job->contains("kind") && job->at("kind").is_string()) {
+            kind = job->at("kind").get<std::string>();
+        }
+        std::string prompt;
+        if (job->contains("prompt") && job->at("prompt").is_string()) {
+            prompt = job->at("prompt").get<std::string>();
+        }
+        std::string summary = prompt;
+        const std::size_t newline = summary.find('\n');
+        if (newline != std::string::npos) {
+            summary.resize(newline);
+        }
+        out << "- [" << job_id << "] " << JobStateText(state) << " · " << ScheduleKindText(kind);
+        if (!summary.empty()) {
+            out << " · " << summary;
+        }
+        if (job->contains("nextFireMs") &&
+            qq::ParseLooseInt64(job->at("nextFireMs")).has_value()) {
+            out << " · 下次 "
+                << FormatUtcTimestamp(*qq::ParseLooseInt64(job->at("nextFireMs")));
+        }
+        out << "\n";
+    }
+    out << "要取消哪一笔,把 jobId 告诉我。";
+    return out.str();
+}
+
+std::string MakeMenuCommandDeniedText(const std::vector<std::string>& missing_tools) {
+    std::string text = "这个入口当前不在你的授权范围内,没有执行。";
+    if (!missing_tools.empty()) {
+        text += "(需要:";
+        for (std::size_t i = 0; i < missing_tools.size(); ++i) {
+            if (i > 0) {
+                text += ",";
+            }
+            text += missing_tools[i];
+        }
+        text += ")";
+    }
+    text += "需要开通的话,在本机配置里给这只账号放行对应工具。";
+    return text;
+}
+
+std::string MakeMenuCommandUnavailableText() {
+    return "任务查询暂时不可用(任务服务没装配)。稍后再试,或直接发消息给我。";
+}
+
+std::string FormatUtcTimestamp(std::int64_t epoch_ms) {
+    const std::int64_t days = epoch_ms / 86'400'000;
+    const std::int64_t ms_of_day = epoch_ms % 86'400'000;
+    int year = 1970;
+    unsigned month = 1;
+    unsigned day = 1;
+    CivilFromDays(days, &year, &month, &day);
+    const std::int64_t hour = ms_of_day / 3'600'000;
+    const std::int64_t minute = (ms_of_day % 3'600'000) / 60'000;
+    std::ostringstream out;
+    out << year << "-" << TwoDigits(month) << "-" << TwoDigits(day) << " " << TwoDigits(hour)
+        << ":" << TwoDigits(minute) << " UTC";
+    return out.str();
+}
+
+}  // namespace lubancode::channel
