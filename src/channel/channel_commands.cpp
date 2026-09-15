@@ -1,6 +1,7 @@
 // 见 hpp 合同注释(QQ 接入单 Q7)。
 #include "channel/channel_commands.hpp"
 
+#include <cstring>
 #include <sstream>
 #include <utility>
 
@@ -167,7 +168,16 @@ std::string FormatReminderListText(const nlohmann::json& payload, std::int64_t n
         if (job->contains("prompt") && job->at("prompt").is_string()) {
             prompt = job->at("prompt").get<std::string>();
         }
-        std::string summary = prompt;
+        // 摘要:job.prompt 是 Q5 建单时冻结的自包含包装正文(头衔行 + 任务
+        // 描述 + 执行指示),用户清单只该看描述——优先取"任务描述:"段
+        //(ComposeJobPrompt 的冻结形,标记丢了退首行)。
+        std::string summary;
+        const std::size_t marker = prompt.find("任务描述:");
+        if (marker != std::string::npos) {
+            summary = prompt.substr(marker + std::strlen("任务描述:"));
+        } else {
+            summary = prompt;
+        }
         const std::size_t newline = summary.find('\n');
         if (newline != std::string::npos) {
             summary.resize(newline);

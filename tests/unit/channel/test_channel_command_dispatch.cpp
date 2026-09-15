@@ -76,14 +76,17 @@ TEST_CASE("任务清单正文:空表/有任务/下次触发可读") {
     // 空表。
     CHECK(FormatReminderListText(nlohmann::json{{"jobs", nlohmann::json::array()}}, now)
               .find("还没有") != std::string::npos);
-    // 有任务(payload 形状 = ChannelAutomationBridge::ListReminders 的回执)。
+    // 有任务(payload 形状 = ChannelAutomationBridge::ListReminders 的回执;
+    // prompt 是 Q5 建单时冻结的自包含包装正文——清单摘要取"任务描述:"段)。
     const nlohmann::json payload = nlohmann::json::object(
         {{"jobs", nlohmann::json::array({
                       nlohmann::json{{"jobId", "job-1"},
                                      {"state", "active"},
                                      {"kind", "cron"},
                                      {"timezone", "Asia/Shanghai"},
-                                     {"prompt", "每天九点提醒我喝水"},
+                                     {"prompt", "这是用户经 qqbot/main 会话 dm-a 设置的定时任务"
+                                                "(创建者 sender-dm-a)。\n任务描述:每天九点提醒我喝水"
+                                                "\n到点执行:按任务描述组织提醒内容。"},
                                      {"nextFireMs", 1'724'701'140'000}},
                       nlohmann::json{{"jobId", "job-2"},
                                      {"state", "cancelled"},
@@ -98,6 +101,9 @@ TEST_CASE("任务清单正文:空表/有任务/下次触发可读") {
     CHECK(text.find("进行中") != std::string::npos);
     CHECK(text.find("已取消") != std::string::npos);
     CHECK(text.find("喝水") != std::string::npos);
+    // 包装正文的头衔行/执行指示不进用户清单,只留描述。
+    CHECK(text.find("这是用户经") == std::string::npos);
+    CHECK(text.find("到点执行") == std::string::npos);
     CHECK(text.find("2024-") != std::string::npos);  // 下次触发折成可读时刻
     CHECK(text.find("UTC") != std::string::npos);
 }
