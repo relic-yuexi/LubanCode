@@ -126,6 +126,25 @@ class FakeBackend {
     const sse = (name, object) => res.write('event: ' + name + '\ndata: ' + JSON.stringify(object) + '\n\n');
     sse('message_start', { type: 'message_start', message: { id: 'msg_asst_e2e', model: 'fake-model' } });
     if (this.toolMode && typeof body === 'string') {
+      // 顺序有讲究:先判 tool_result 再判"写文件到"——工具结果回传轮的
+      // body 里原始 prompt 还在(messages 全量),先查 prompt 会让每轮都
+      // 回 tool_use,工具轮死循环(步数帽 × 审批窗,任务永远结不了算)。
+      if (body.indexOf('tool_result') !== -1) {
+        // 工具结果回来后的收尾轮。
+        sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        sse('content_block_delta', {
+          type: 'content_block_delta', index: 0,
+          delta: { type: 'text_delta', text: this.options.toolDoneText || '文件事项已收尾' },
+        });
+        sse('content_block_stop', { type: 'content_block_stop', index: 0 });
+        sse('message_delta', {
+          type: 'message_delta', delta: { stop_reason: 'end_turn' },
+          usage: { input_tokens: 19, output_tokens: 5 },
+        });
+        sse('message_stop', { type: 'message_stop' });
+        res.end();
+        return;
+      }
       const writeMatch = /写文件到 ([^\s"']+)/.exec(body);
       if (writeMatch) {
         const targetPath = writeMatch[1].replace(/\\\\/g, '\\');  // JSON 转义还原(幂等)
@@ -145,22 +164,6 @@ class FakeBackend {
         sse('message_delta', {
           type: 'message_delta', delta: { stop_reason: 'tool_use' },
           usage: { input_tokens: 17, output_tokens: 7 },
-        });
-        sse('message_stop', { type: 'message_stop' });
-        res.end();
-        return;
-      }
-      if (body.indexOf('tool_result') !== -1) {
-        // 工具结果回来后的收尾轮。
-        sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-        sse('content_block_delta', {
-          type: 'content_block_delta', index: 0,
-          delta: { type: 'text_delta', text: this.options.toolDoneText || '文件事项已收尾' },
-        });
-        sse('content_block_stop', { type: 'content_block_stop', index: 0 });
-        sse('message_delta', {
-          type: 'message_delta', delta: { stop_reason: 'end_turn' },
-          usage: { input_tokens: 19, output_tokens: 5 },
         });
         sse('message_stop', { type: 'message_stop' });
         res.end();
