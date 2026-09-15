@@ -30,6 +30,7 @@
 #include "gateway/pairing_command.hpp"
 #include "gateway/process.hpp"
 #include "gateway/profile.hpp"
+#include "gateway/service.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/session_lock.hpp"
