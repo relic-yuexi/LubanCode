@@ -822,7 +822,7 @@ void RegisterAssistantTaskMethods(app_server::Dispatcher& dispatcher,
     const auto register_face_method = [&dispatcher,
                                        &face](const char* method, bool require_available,
                                               nlohmann::json (AssistantAutomationFace::*handler)(
-                                                  const nlohmann::json&, std::string&,
+                                                  const nlohmann::json&, int&,
                                                   std::string&)) {
         dispatcher.RegisterMethod(
             method, [face, method, require_available,
