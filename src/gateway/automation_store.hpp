@@ -87,6 +87,20 @@ struct AutomationJob {
     std::string last_observed_sha;        // heartbeat:上次已投递正文 hash
     std::string session_policy = "fresh";  // fresh|continuation(continuation 归 V3 渠道线,本批明拒)
     std::string imported_from;            // 非空 = /loop 显式导入("loop:<sessionId>:<taskId>")
+    // ---- Q5 渠道面(§11.2 "创建者与渠道目标取真实入站上下文") ----
+    // 六字段全空 = 本地任务(CLI/控制命令创建,automation 泵认领,本地
+    // 投递)。渠道创建的任务带创建者三元组(配对身份,越权查询/修改拒)
+    // 与交付三元组(到点结果投回创建时会话,不投当前别的会话)。旧账
+    // 重放缺键落空 = 本地语义,行为不变。
+    std::string owner_channel;
+    std::string owner_account;
+    std::string owner_sender;
+    std::string delivery_channel;     // 空 = 本地交付(local:file)
+    std::string delivery_account;
+    std::string delivery_conversation;
+
+    // 渠道交付的任务(渠道泵认领;automation 泵跳过)。
+    bool ChannelBacked() const { return !delivery_channel.empty(); }
 };
 
 // 一次该跑的事实。
@@ -179,6 +193,13 @@ public:
         std::int64_t deadline_ms = 0;
         bool notify_on_change = false;
         std::string session_policy = "fresh";  // 只认 fresh(continuation 归 V3,明拒)
+        // Q5 渠道面(全空 = 本地任务)。
+        std::string owner_channel;
+        std::string owner_account;
+        std::string owner_sender;
+        std::string delivery_channel;
+        std::string delivery_account;
+        std::string delivery_conversation;
     };
     // 通用创建(V2):once 同笔落首枚 occurrence(= V1 语义);interval/
     // cron 不建 occurrence,归 SweepSchedule 按政策生成。坏规格明拒。
@@ -254,12 +275,17 @@ public:
     static constexpr std::uint64_t kMaxAttempts = 3;
 
     // ---- 派发面(泵用) ------------------------------------------------------
+    // 认领范围(Q5):Any = 不挑(V1 语义);ChannelBackedOnly = 只认渠道
+    // 交付的任务(渠道泵);LocalOnly = 只认本地任务(automation 泵——
+    // 渠道任务的认领/执行/投递归 ChannelWorkPump,两只泵各认各的,不抢)。
+    enum class ClaimScope { Any, ChannelBackedOnly, LocalOnly };
     // 认领:due 的 occurrence 落 occurrence.claimed(PowerLoss)后交出。
     // paused/cancelled 任务的 occurrence 不认领;过 job deadline 的就地
     // 结算 cancelled(deadline_reached)再挑下一枚。append 失败回空 +
     // broken(调用方停泵),不把"想认领"当"已认领"。
     std::optional<AutomationOccurrence> ClaimDue(const std::string& owner_epoch,
-                                                 std::int64_t now_ms);
+                                                 std::int64_t now_ms,
+                                                 ClaimScope scope = ClaimScope::Any);
     // 绑定预留 session/turn 身份(occurrence.bound 行)。绑定是恢复反查的
     // 锚;无绑定 = 未开轮(可重派),有绑定 = 已开轮(按 V3 账裁决)。
     bool BindOccurrence(const std::string& occurrence_id, const std::string& session_id,

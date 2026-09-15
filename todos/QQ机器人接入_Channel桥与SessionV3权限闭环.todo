@@ -4,7 +4,7 @@
 现场修复补单（2026-09-14）：[Windows 连接诊断与交互配置](QQBot_Windows连接诊断与交互配置修复.todo)。覆盖 beta.1 的连接静默、Windows TLS 信任根、密钥文件权限与交互向导；待实现，归入 Q1b/Q3 验收。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q3 起仍待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q1b（配对闭环：提示限频/批准控制面/一次性码）已落 PR #90；Q5（聊天侧建单次/周期任务：工具/归属/交付绑定/认领执行/补投分型，§十一记账）已落本批 PR；Q3（真机联调）起仍待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
@@ -256,14 +256,14 @@ POST /v2/users/{openid}/files {upload_id, srv_send_msg:false}
 
 ### 11.2 从一句话落成一笔任务
 
-- [ ] 新增平台中立的 automation 创建/查询/修改/暂停/取消服务及工具。模型提供结构化意图，宿主验证并落 AutomationStore；QQ 菜单与其他渠道也调用此服务，不绕 shell 执行 CLI。
-- [ ] job 新增 schedule(kind/at 或 cron/interval/tz)、动作类型、workspace、创建者、交付目标、预算、policy ceiling、revision；创建者与渠道目标取真实入站上下文。所有查询/修改核 job 归属，跨用户不泄露任务。
-- [ ] “今晚八点”按冻结的接收时间和账号时区解析为具体日期。回复列完整日期、时间、时区和 jobId；若当晚时间已过或“每天整理一次”缺时间/范围，明确询问，不能静默改成明天或猜一个目录。
-- [ ] 原始来信 ID + 稳定操作身份生成创建幂等键。写盘成功后才说“已设置”；同键异规格报 conflict。创建确认没发到，只补确认投递，不再创建一个 job。
-- [ ] 区分 notify（固定提醒正文）与 agent_task（到点读资料、整理、生成结果）。纯提醒可直接将持久 payload 投递，不必再调一次模型；它须有独立 committed notification 来源，不能伪造 V3 assistant/reply selection。扩展 outbox 来源合同并保持旧回复兼容。
-- [ ] 周期 task 默认每次新开隔离 V3 场，固定工作目录与显式输入；不自动带上 QQ 全部聊天史。所需附件用保留的 artifact 引用，不依赖数天后失效的 URL。
-- [ ] 每次 slot 用计划时间发 occurrenceId=hash(jobId+revision+slot)，时区转换由宿主做。定义 DST 重复/不存在时间、时钟回拨、服务离线、重叠执行政策。建议离线后最多合并补一次，再排未来 slot；每种任务可显式配置 skip/coalesce，不默认补跑几百次。
-- [ ] 取消/修改追加新 revision，未 claim 的旧 occurrence 作废；运行中取消走合作取消，不把已发生副作用说成撤回。执行前重验创建者授权及当前工具政策，只可收窄创建时上限。
+- [x] 新增平台中立的 automation 创建/查询/修改/暂停/取消服务及工具。模型提供结构化意图，宿主验证并落 AutomationStore；QQ 菜单与其他渠道也调用此服务，不绕 shell 执行 CLI。（Q5 落 `src/runtime/channel_automation.*`：`ChannelAutomationBridge`（渠道上下文冻结 TurnScope + 归属闸 + 幂等键派生）与三枚工具 `create_reminder`/`list_reminders`/`cancel_reminder`（`RegisterChannelAutomationTools`，Gateway 装配注册，QQ 模板 allow 已列名——未配对 sender 进不了模型即拿不到工具；终端路/自动任务路无 TurnScope 一律 fail closed）。落账走 V2 store 合同（CreateJob/CancelJob，CAS+幂等）。**修改/暂停工具未落**（创建/查询/取消三面先齐，update/pause 沿既有域命令合同后续接）；QQ 菜单入口归 Q7。测试 `tests/unit/runtime/test_channel_job_pump.cpp` 全链+fail closed 案。）
+- [x] job 新增 schedule(kind/at 或 cron/interval/tz)、动作类型、workspace、创建者、交付目标、预算、policy ceiling、revision；创建者与渠道目标取真实入站上下文。所有查询/修改核 job 归属，跨用户不泄露任务。（Q5 落 `AutomationJob`/`JobSpec` 增 owner 三元组（channel/account/sender 配对身份）与 delivery 三元组（到点结果投回创建会话）：`job.created` 行新增六键，旧账缺键落空=本地任务，行为不变；幂等比较含六字段（同键异归属=异规格 conflict）。归属闸在桥上（`OwnedBy`）：list 只看自己的、cancel 越权回 `channel_job.not_your_job` 且不泄露他人任务存在。schedule/revision/workspace 沿 V2 既有面。**动作类型（notify/agent_task 分型）、预算、policy ceiling 快照未落**——本批任务轮统一走 agent 执行链（见 11.2 第五行遗留）。）
+- [x] “今晚八点”按冻结的接收时间和账号时区解析为具体日期。回复列完整日期、时间、时区和 jobId；若当晚时间已过或“每天整理一次”缺时间/范围，明确询问，不能静默改成明天或猜一个目录。（Q5 定案：自然语言时间解析归模型（at_ms UTC 毫秒或五字段 cron + 显式 IANA 时区）；宿主只验证——`time_in_past` 过期明拒（对照冻结的 received_at，不静默顺延）、坏 cron/坏时区/缺规格明拒、超十年视为算错要求核对。工具回执带 jobId/kind/timezone/nextFireMs（完整计划），模型据此向用户复述。“账号时区”暂无配置面，时区由模型显式递，缺省 UTC。）
+- [x] 原始来信 ID + 稳定操作身份生成创建幂等键。写盘成功后才说“已设置”；同键异规格报 conflict。创建确认没发到，只补确认投递，不再创建一个 job。（Q5 落幂等键 `"chanjob-create:<ch>:<acct>:msg:<消息id>"`：同信重发经 ingress 去重+SessionService 台账不重跑（Q2 既有），同轮重调/桥面重调同键同载荷回原回执（duplicate），同键异规格 automation.revision_conflict 如实回给模型。CreateJob PowerLoss 落账成功工具才回 ok——“写盘成功后才说已设置”；确认回复的投递失败走 Q2 聊天回复链（outbox 冻结正文重投），job 已落账不重建。测试：同轮两次 create 只一笔+同信重放模型计数不多。）
+- [ ] 区分 notify（固定提醒正文）与 agent_task（到点读资料、整理、生成结果）。纯提醒可直接将持久 payload 投递，不必再调一次模型；它须有独立 committed notification 来源，不能伪造 V3 assistant/reply selection。扩展 outbox 来源合同并保持旧回复兼容。（**Q5 本批未落**：任务轮统一走渠道会话执行链（到点执行→reply selection→outbox），纯提醒也过一次模型。notify 零模型直投+独立 notification 来源留待后续批次——须扩 outbox 来源合同，且 Q3 真机未验前主动投递面本身还是未验边界。）
+- [x] 周期 task 默认每次新开隔离 V3 场，固定工作目录与显式输入；不自动带上 QQ 全部聊天史。所需附件用保留的 artifact 引用，不依赖数天后失效的 URL。（Q5 落 `ChannelWorkPump::MakeChannelJobSessionKey` = `channel:<ch>:<acct>:job:<jobId>`：任务自己的隔离渠道场（同 job 跨拍共享自己的上下文，重启经映射账 resume-as-new），不进聊天会话、不带聊天史；prompt 为建单时冻结的自包含规格（描述+会话/创建者上下文+“输出直接发给用户的正文”）。附件 artifact 引用归 Q4 媒件批次联动——本批任务 prompt 不引用附件 URL。）
+- [x] 每次 slot 用计划时间发 occurrenceId=hash(jobId+revision+slot)，时区转换由宿主做。定义 DST 重复/不存在时间、时钟回拨、服务离线、重叠执行政策。建议离线后最多合并补一次，再排未来 slot；每种任务可显式配置 skip/coalesce，不默认补跑几百次。（V2 周期调度已全落（#83：`automation_schedule.*` 受限 cron/内置时区表/DST 两裁/misfire coalesce|skip/游标只前进/同 job 不重叠/队列帽），渠道任务直接复用同一只 store 与调度引擎，零第二套语义；渠道侧新增的只有认领分流 `ClaimDue(ClaimScope)`——渠道泵只认 `ChannelBackedOnly`，automation 泵只认 `LocalOnly`，各恢复面同理跳过对方的 occurrence。）
+- [x] 取消/修改追加新 revision，未 claim 的旧 occurrence 作废；运行中取消走合作取消，不把已发生副作用说成撤回。执行前重验创建者授权及当前工具政策，只可收窄创建时上限。（Q5 落 cancel 工具（`CancelJob` CAS+幂等键 `chanjob-cancel:...`）：scheduled 就地结算 cancelled、claimed 走 cancel_requested 合作取消边界（V2 既有）；执行前重验落 `ChannelManager::ProbeRoute`（只读路由探针，同一只 ChannelRouter 纯函数）：配对/allowlist/绑定冲突现核，不过→occurrence 结算 `cancelled:creator_not_admitted:*`，任务保留（准入恢复后未来拍照跑）。**“只可收窄创建时上限”半面未落**——无创建时策略快照，任务轮 per_turn_tools 吃现时路由策略（可宽可窄），放宽不回卷留待后续；修改/暂停工具同第一行遗留。）
 
 ### 11.3 QQ 主动投递与回复窗口
 
@@ -273,16 +273,26 @@ POST /v2/users/{openid}/files {upload_id, srv_send_msg:false}
 
 **文档自身有矛盾：页首被动有效期写 60 分钟，msg_id 字段写 5 分钟。** 先以保守窗口安排回复，并将真实账号验证列为放行项；不对用户承诺“60 分钟一定能回”。回复次数现写每条 4 次，文件、说明和审批卡片须统一占用计数。
 
-- [ ] 主动投递使用已绑定的 QQ 账号/目标，不附陈旧 msg_id/event_id；建单时检查可投递条件，到点再验。`INTERACTION_CREATE` 的授权事件含 c2c_push/group_push，记录平台授权线索；平台授权与 LubanCode 配对、工具授权仍各管一层。
-- [ ] 识别 40034100（主动频控）、40034105（无权限）、40054004（无好友）、40054013（拒收）、40034122（召回区间额度）、304103/40034005（过期回复）等文档错误。限频延后、明确拒收暂停此目标，执行结果保留供用户查询。
-- [ ] 不因 QQ 拒收重跑 Agent，也不自行换账号、群或平台。状态分别显示 schedule/execution/delivery；菜单“查看任务”可查结果，不能把投递失败伪装为提醒完成。
-- [ ] 将原第七节“过期不转主动消息”限定为普通被动回复：Q5 中用户明确授权的定时交付有独立主动目标，沿专门投递政策；两条路径不可互相偷换。
+- [x] 主动投递使用已绑定的 QQ 账号/目标，不附陈旧 msg_id/event_id；建单时检查可投递条件，到点再验。`INTERACTION_CREATE` 的授权事件含 c2c_push/group_push，记录平台授权线索；平台授权与 LubanCode 配对、工具授权仍各管一层。（Q5 落：交付目标三元组建单时冻结（投回创建会话，不投当前别的会话）；outbox 段入箱时 `reply_to_message_id` 恒空——发送锚由泵按“该会话最近一来信是否在窗内”现取（`FreshInboundAnchor`，窗 `passive_reply_window_ms` 缺省 4 分钟=5 分钟口径下再留余量），窗外不带锚走主动消息，不拿陈旧 msg_id 冒充被动回复。“到点再验”=ProbeRoute 准入核+发送分型。**建单时可投递条件检查未落**（主动消息真权限归 Q3 实测，本批只如实分型不预判）；`INTERACTION_CREATE` 授权线索未落（归 Q3/Q6 互动面）。）
+- [x] 识别 40034100（主动频控）、40034105（无权限）、40054004（无好友）、40054013（拒收）、40034122（召回区间额度）、304103/40034005（过期回复）等文档错误。限频延后、明确拒收暂停此目标，执行结果保留供用户查询。（Q5 落渠道任务段的分型政策（`ApplyDeliveryOutcomes`/`DriveChannelDeliveries`）：限频族（主动额度受限）与 reply_window_expired → **挂起待互动**（`await_interaction_`，不硬发不谎报：账上留 sending 非终态，下一封来信进窗后锚定新 msg_id 补投，同 delivery 同载荷）；明确拒收/令牌失效维持终态失败留账（不换账号不重跑）。具体平台码→域名的映射沿 Q1 qq_messages/qq_proto 既有域名表（本批不碰）。**结果可查**：outbox 账+`list_reminders`（jobId/状态/下次触发）；投递态与执行态分账显示，list 工具尚未 join outbox 投递态（留待 Q7“查看任务”面板一并做）。真限频真值/主动额度归 Q3——本地 mock 不能代替。）
+- [x] 不因 QQ 拒收重跑 Agent，也不自行换账号、群或平台。状态分别显示 schedule/execution/delivery；菜单“查看任务”可查结果，不能把投递失败伪装为提醒完成。（Q5 落：投递失败/挂起不改 occurrence 结算（执行事实 succeeded=“执行完成且已交投递账”，投递态在 outbox item——state/delivery_error/attempts 全留账）；补投重试同 delivery_id 同载荷（msg_seq 稳定），零模型重跑（测试钉：模型计数恒定）。状态分账：schedule=store（游标/occurrence）、execution=occurrence outcome、delivery=outbox item state。菜单入口归 Q7；`gateway status` 渠道栏（Q2）已带投递错误稳定码。）
+- [x] 将原第七节“过期不转主动消息”限定为普通被动回复：Q5 中用户明确授权的定时交付有独立主动目标，沿专门投递政策；两条路径不可互相偷换。（Q5 落：普通聊天回复（source=ingress:*）维持 Q2 规矩——reply_window_expired 终态失败不转主动；渠道任务段（source=chanjob:*）走独立政策——窗外默认主动、受限/过期挂起待互动补投。两条路径按 source_ref 前缀分型写死，互不偷换；测试各钉一案。）
 
 ### 11.4 Q5 验收
 
-- [ ] 今晚指定时间提醒、每天指定时间整理目录；确认时间和 jobId，重发建单只一笔，修改/暂停/取消可查询。
-- [ ] 重启跨过 due、跨午夜、DST、时钟回拨、任务重叠时 slot 不重复；附件数天后仍可读；纯提醒零模型调用。
-- [ ] 平台拒收/限频时任务不重做，结果可查；撤销配对/工具权限后不能继续越权执行。真实 QQ 接收延迟与主动消息权限单独实测。
+- [ ] 今晚指定时间提醒、每天指定时间整理目录；确认时间和 jobId，重发建单只一笔，修改/暂停/取消可查询。（e2e 假渠道+假模型已钉：`tests/unit/runtime/test_channel_job_pump.cpp` “QQ 建周期提醒全链”（cron+Asia/Shanghai+jobId+归属+隔离场+投回原会话）/“同信重发/同轮重调不双建”/“越权取消拒”。**修改/暂停未落**（工具面遗留）；真机验收归 Q3。）
+- [ ] 重启跨过 due、跨午夜、DST、时钟回拨、任务重叠时 slot 不重复；附件数天后仍可读；纯提醒零模型调用。（slot/DST/回拨/重叠由 V2 调度引擎与 store 测试钉（#83，`test_automation_store_v2.cpp`/`test_automation_schedule.cpp`）；渠道面钉了 claim 后崩重派不双跑（`test_channel_job_pump.cpp` “claim 后崩”案）。附件归 Q4；**纯提醒零模型未落**（notify 分型遗留）。真机验收归 Q3。）
+- [ ] 平台拒收/限频时任务不重做，结果可查；撤销配对/工具权限后不能继续越权执行。真实 QQ 接收延迟与主动消息权限单独实测。（e2e 钉：限频挂起→互动补投（模型计数不多）/窗口过期挂起不硬发/撤销准入→occurrence cancelled 零模型（ProbeRoute 重验）。**真平台主动发送、真实回复窗口、主动消息权限、接收延迟全部归 Q3 真机未验**——本地 mock 不能代替这些结论。）
+
+### 11.5 Q5 批次记账（2026-09-15）
+
+**落地符号**：`src/runtime/channel_automation.hpp/cpp`（`ChannelAutomationBridge`/`TurnScope`/`RegisterChannelAutomationTools`/`kChannel*ReminderTool`）；`src/runtime/channel_work_pump.*`（`MakeChannelJobSessionKey`/`SweepChannelJobRecovery`/`RecoverChannelJobOccurrence`/`RunOneChannelJob`/`FreshInboundAnchor`，Options 增 `automation_store`/`automation_bridge`/`passive_reply_window_ms`，`await_interaction_`/`recent_inbound_` 补投账）；`src/gateway/automation_store.*`（`AutomationJob`/`JobSpec` owner/delivery 六字段、`ClaimScope` 认领分流、幂等比较含归属）；`src/channel/manager.*`（`ProbeRoute` 只读路由探针）；`src/runtime/automation_pump.cpp`（候选/恢复面跳过 ChannelBacked，`ClaimDue(LocalOnly)`）；`src/app/gateway_launch.cpp`（桥装配+工具注册+store 借用）；`src/channel/channel_config.cpp`（QQ 模板 allow + 三枚任务工具名）；冻结件同步：configuration.md §7 模板样例与名单说明、security.md 受保护路径闸段。
+
+**测试**：新册 `tests/unit/runtime/test_channel_job_pump.cpp`（八案：周期全链/同信幂等/越权归属/额度受限挂起补投/窗口过期分型/claim 后崩重派/工具面 fail closed/撤销准入重验）；`tests/unit/gateway/test_automation_store_v2.cpp` 增三案（归属落账重放/认领分流/Any 默认面）；`tests/unit/channel/test_channel_config.cpp`+`test_channel_router.cpp` 模板名单更新。
+
+**未验边界（如实记，归 Q3 真机）**：真平台主动消息权限与额度（40034100 族真值）、被动回复窗口真值（文档 60min/5min 矛盾，代码按保守 4min 窗）、主动消息触达率与延迟、`INTERACTION_CREATE` 授权事件形状。挂起补投的“互动解锁”在进程重启后丢失（`await_interaction_` 进程内）——重启后主动重试一次、再拒再挂，有界不刷屏，如实记。
+
+**遗留（后续批次）**：notify/agent_task 分型与纯提醒零模型直投（须扩 outbox 来源合同）；修改/暂停工具；创建时策略快照（“只可收窄”半面）；list 工具 join 投递态；QQ 菜单“查看任务”入口（Q7）；群聊建单（交付面 Direct-only，工具已明拒）。PR/CI 链接见本批 PR（头提交活跃 check suite）。
 
 ## 十二、Q6：QQ 按钮批准一次工具调用
 

@@ -214,6 +214,14 @@ public:
     std::optional<WorkItem> TakeNextWork(const std::string& channel_id,
                                          const std::string& account_id);
 
+    // 只读路由探针(Q5:渠道任务执行前重验创建者准入):按 (渠道,账号,
+    // 会话,sender) 现跑同一只 ChannelRouter 纯函数——配对撤销/allowlist
+    // 移除/策略收窄都如实报,不落 ingress 账、不发配对提示(未知 sender
+    // 回 PendingPairing 且 code 为空)。查无账号给 nullopt。
+    RouteDecision ProbeRoute(const std::string& channel_id, const std::string& account_id,
+                             const ChannelConversation& conversation,
+                             const std::string& sender_id, std::int64_t now_ms) const;
+
     // ---- 出站投递(channel.send 的宿主口;QQ 接入单 Q2 §七) -----------
     // 发送受理:冻结正文按 conversation 直发,client_delivery_id 是 outbox
     // 的 delivery id(桥协议 client_id——适配器按它稳定 msg_seq,同

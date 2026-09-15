@@ -181,7 +181,9 @@ TEST_CASE("QQ 模板:逐字段显式,不改全渠道默认值迁就 QQ") {
     CHECK(template_account.require_mention);
     CHECK(template_account.reply.mode == ReplyMode::Final);
     REQUIRE(template_account.tools.allow.has_value());
-    CHECK(*template_account.tools.allow == std::vector<std::string>{"read_file", "search"});
+    CHECK(*template_account.tools.allow ==
+          std::vector<std::string>{"read_file", "search", "create_reminder", "list_reminders",
+                                   "cancel_reminder"});
 
     // 全渠道默认值不动:别的账号/别的渠道照旧。
     const auto parsed = Parse(R"({"other": {"accounts": {"m": {}}}})");

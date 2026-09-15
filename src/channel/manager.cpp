@@ -712,6 +712,57 @@ RouteDecision ChannelManager::RouteInboundLocked(AccountEntry& entry,
     return RouteChannelEvent(input);
 }
 
+RouteDecision ChannelManager::ProbeRoute(const std::string& channel_id,
+                                         const std::string& account_id,
+                                         const ChannelConversation& conversation,
+                                         const std::string& sender_id,
+                                         std::int64_t now_ms) const {
+    // 只读探针:同一只纯函数路由器,不落账不发提示——pairing 口用只读
+    // 适配(未知 sender 不领新码)。查无账号回 nullopt 语义的空决策
+    //(status 缺省 Rejected,reason 留空,调用方按"探不到"处理)。
+    RouteDecision decision;
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        decision.reason = "account_not_found";
+        return decision;
+    }
+    // 最小事件投影:路由只看会话/sender/bot 位/群提示,正文与消息 id
+    // 不参与准入(与 OnInboundLocked 同一只函数同一份账)。
+    ChannelInboundEvent event;
+    event.channel_id = channel_id;
+    event.account_id = account_id;
+    event.conversation = conversation;
+    event.sender.id = sender_id;
+    event.received_at_ms = now_ms;
+    class ReadOnlyPairing final : public PairingAdmission {
+    public:
+        explicit ReadOnlyPairing(const PairingStore& store) : store_(store) {}
+        bool IsSenderApproved(const std::string& sender_id) const override {
+            return store_.IsSenderApproved(sender_id);
+        }
+        std::optional<std::string> RequestCode(const std::string&, std::int64_t) override {
+            return std::nullopt;  // 探针不发码:配对提示只随真来信走
+        }
+
+    private:
+        const PairingStore& store_;
+    };
+    const ReadOnlyPairing admission(*entry->pairing);
+    RouteInput input;
+    input.event = &event;
+    input.account = &entry->config;  // RouteInput 本就收 const 指针(纯函数路由)
+    const auto tools = channel_tools_.find(channel_id);
+    if (tools != channel_tools_.end()) {
+        input.channel_tools = &tools->second;
+    }
+    const auto bindings = channel_bindings_.find(channel_id);
+    input.bindings = bindings != channel_bindings_.end() ? &bindings->second : nullptr;
+    input.pairing = &admission;
+    input.now_ms = now_ms;
+    return RouteChannelEvent(input);
+}
+
 void ChannelManager::SetChannelBindings(const std::string& channel_id,
                                         std::vector<ChannelBindingConfig> bindings) {
     std::lock_guard<std::mutex> lock(mutex_);

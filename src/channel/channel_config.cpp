@@ -538,10 +538,15 @@ ChannelAccountUserConfig MakeQqTemplateAccount() {
     account.allow_bots = false;
     account.require_mention = true;
     account.reply.mode = ReplyMode::Final;
-    // 显式最小只读名单:两枚名字都核过现有注册表(ReadFileTool::name() =
-    // "read_file",SearchTool::name() = "search")。tool_search/插件/MCP/
+    // 显式最小只读名单 + Q5 聊天侧任务工具:只读两枚名字都核过现有注册表
+    // (ReadFileTool::name() = "read_file",SearchTool::name() = "search");
+    // 任务三枚是 Gateway 装配注册的渠道任务工具(create_reminder/
+    // list_reminders/cancel_reminder,见 runtime/channel_automation)——
+    // 只对过了配对/准入的会话可用(未配对 sender 进不了模型),落账走
+    // automation 域命令与归属闸,不碰文件系统。tool_search/插件/MCP/
     // 子 Agent 的工具名不在这份名单里,五层交集自然拦下。
-    account.tools.allow = std::vector<std::string>{"read_file", "search"};
+    account.tools.allow = std::vector<std::string>{"read_file", "search", "create_reminder",
+                                                   "list_reminders", "cancel_reminder"};
     return account;
 }
 
