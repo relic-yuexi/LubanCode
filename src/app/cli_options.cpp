@@ -347,6 +347,7 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                         return parsed;
                     }
                     gateway.gateway_root_arg = value;
+                    ++extra;  // 消费值参(同 --profile 惯例),别让下轮再扫它
                     continue;
                 }
                 if (gateway.verb == "doctor" && args[extra] == "--wait-ready") {

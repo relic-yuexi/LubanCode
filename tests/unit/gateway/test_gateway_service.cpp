@@ -125,13 +125,15 @@ TEST_CASE("schtasks XML:参数/工作目录落死,延迟启动,失败重启限�
     const std::string xml = BuildScheduledTaskXml(spec);
 
     // 动作:cmd 包一层,exe 绝对路径 + gateway run --profile + --gateway-root
-    // 钉死,stdout/stderr 重定向到 service.log。
+    // 钉死,stdout/stderr 重定向到 service.log。注意 Arguments 走了 XML
+    // 转义(& -> &amp;),按转义后的形式断言。
     CHECK(Contains(xml, "<Command>cmd.exe</Command>"));
     CHECK(Contains(xml, platform::PathToUtf8(spec.exe_path)));
     CHECK(Contains(xml, "gateway run --profile default --gateway-root"));
     CHECK(Contains(xml, platform::PathToUtf8(spec.gateway_root)));
     CHECK(Contains(xml, platform::PathToUtf8(spec.service_log)));
-    CHECK(Contains(xml, "2>&1"));
+    CHECK(Contains(xml, "1&gt;"));      // 1>> 重定向(XML 转义后)
+    CHECK(Contains(xml, "2&gt;&amp;1"));  // stderr 跟上(XML 转义后)
     // 登录触发 + 30s 延迟 + 钉当前用户。
     CHECK(Contains(xml, "<LogonTrigger>"));
     CHECK(Contains(xml, "<Delay>PT30S</Delay>"));
