@@ -742,11 +742,11 @@ TEST_CASE("限频:退避后同载荷重试(同 client_id),成功后不重跑 Age
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
 }
 
-TEST_CASE("长文拆段:两段按序投递,全 sent 才结算 delivered") {
+TEST_CASE("长文拆段:文本段按序投递,Q4 产物附件殿后,全 sent 才结算 delivered") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Q2Fixture fixture("segment");
-    // 800 个汉字(2400 字节)→ 段帽 2000:两段。段序:第一段先发,第二段
-    // 等第一段 sent 再发。
+    // 800 个汉字(2400 字节)→ 段帽 2000:两文本段;Q4 起长回复(拆段>1)
+    // 末尾自动附带任务结果文件(冻结正文原件)——共 3 段,末段纯附件。
     std::string long_text;
     for (int i = 0; i < 800; ++i) {
         long_text += "字";
@@ -759,14 +759,17 @@ TEST_CASE("长文拆段:两段按序投递,全 sent 才结算 delivered") {
     fixture.Tick();
     REQUIRE(fixture.sidecar.sent_messages().size() == 1);  // 段 1 先发
     fixture.TickUntilQuiet();
-    REQUIRE(fixture.sidecar.sent_messages().size() == 2);  // 段 2 接上
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);  // 文本段 2 + 附件段接上
     const auto& first = fixture.sidecar.sent_messages()[0];
     const auto& second = fixture.sidecar.sent_messages()[1];
     REQUIRE(first.params["client_id"] != second.params["client_id"]);
     REQUIRE(first.params["reply_to_message_id"] == "m-1");
     REQUIRE(first.params["parts"][0]["text"] != second.params["parts"][0]["text"]);
+    // 末段是任务结果文件(Q4:拆段>1 自动附带)。
+    const auto& last = fixture.sidecar.sent_messages()[2];
+    REQUIRE(last.params["parts"][0]["type"] == "file");
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
-    REQUIRE(fixture.outbox->ListItems().size() == 2);
+    REQUIRE(fixture.outbox->ListItems().size() == 3);
 }
 
 TEST_CASE("工具轮走完整链:五层交集放行的工具真执行并计数一次") {
@@ -1035,8 +1038,8 @@ TEST_CASE("Q4 发件闭环:长回复拆段,末段带任务结果文件发回") {
 
     REQUIRE(CountOf(fixture.counter_file, "model") == 1);
     const auto& sends = fixture.sidecar.sent_messages();
-    REQUIRE(sends.size() == 4);  // 三段文本 + 一段附件
-    // 前三段纯文本;末段纯附件(冻结正文原件)。
+    REQUIRE(sends.size() == 5);  // 四段文本 + 一段附件
+    // 前四段纯文本;末段纯附件(冻结正文原件)。
     for (std::size_t i = 0; i + 1 < sends.size(); ++i) {
         const auto& parts = sends[i].params.at("parts");
         REQUIRE(parts.size() == 1);

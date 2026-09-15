@@ -177,7 +177,9 @@ std::string Sha1Hex(const std::string& data) {
     out.reserve(40);
     char hex[3];
     for (const std::uint32_t word : h) {
-        for (int shift = 28; shift >= 0; shift -= 8) {
+        // big-endian 字节序:24/16/8/0(28 起会跨字节边界取半字节——
+        // 首轮 CI 红的根因,标准向量钉死)。
+        for (int shift = 24; shift >= 0; shift -= 8) {
             std::snprintf(hex, sizeof(hex), "%02x",
                           static_cast<unsigned>((word >> shift) & 0xff));
             out.append(hex, 2);

@@ -356,10 +356,14 @@ std::vector<ChannelMediaService::AttachmentReceipt> ChannelMediaService::Ingest(
                 receipt.prompt_line += "\n预览(前 " + std::to_string(preview.size()) +
                                        " 字节):\n" + preview;
                 if (preview.size() < bytes.size()) {
-                    receipt.prompt_line += "\n(预览截断;完整内容用 read_file 读取该路径,"
-                                           "大文件用 offset/limit 分段)";
+                    receipt.prompt_line += "\n(预览截断)";
                 }
             }
+            // 受控读取口恒在提示里(§十 Q4:大文件给受控读取口,沿 Skill
+            // 受控资源读取的路径纪律——read_file 绝对路径直读,offset/
+            // limit 有界)。
+            receipt.prompt_line += "\n(完整内容可用 read_file 工具读取该路径;"
+                                   "大文件用 offset/limit 分段读)";
         } else {
             receipt.prompt_line += "\n(非文本类型,未预览;如需处理可用 read_file 读取)";
         }

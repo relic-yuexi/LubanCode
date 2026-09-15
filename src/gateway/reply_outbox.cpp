@@ -179,8 +179,9 @@ std::string MakeChannelDeliveryTarget(const std::string& channel_id,
 
 std::vector<std::string> SplitReplySegments(const std::string& text, std::size_t max_bytes) {
     std::vector<std::string> segments;
-    if (max_bytes == 0) {
-        return segments;  // 非法帽:调用方明败,不猜
+    if (max_bytes == 0 || text.empty()) {
+        return segments;  // 非法帽/空正文:无段(Q4 纯附件回复的空文本
+                          // 段由 EnqueueChannel 的附件参数造,不发空消息)
     }
     if (text.size() <= max_bytes) {
         segments.push_back(text);

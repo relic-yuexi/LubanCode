@@ -217,6 +217,7 @@ TEST_CASE("Ingest:白名单外拒;下载失败如实记账;附件数帽") {
 
     FakeDownload download;
     download.bytes_by_url["https://x.qq.com/ok"] = "ok";
+    download.bytes_by_url["https://x.qq.com/a"] = "a";
 
     auto event = MakeEvent();
     event.parts.push_back(MakeAttachment("bad.exe", "https://x.qq.com/bad", "application/x-msdownload",
@@ -257,7 +258,9 @@ TEST_CASE("Ingest:同 url 幂等不重下;重启(重开仓)从账恢复也复用
         ChannelMediaService service;
         REQUIRE(ChannelMediaService::Open(&service, dir.root));
         FakeDownload download;
-        download.bytes_by_url["https://x.qq.com/same"] = "stable";
+        // 假下载器按完整 url 查表(首次携 token=T1);幂等键在服务里按
+        // 去 query 的根 url,换签(T2/T3)命中账不重下。
+        download.bytes_by_url["https://x.qq.com/same?token=T1"] = "stable";
         auto event = MakeEvent();
         event.parts.push_back(MakeAttachment("s.txt", "https://x.qq.com/same?token=T1",
                                              "text/plain", channel::ChannelPartType::File));

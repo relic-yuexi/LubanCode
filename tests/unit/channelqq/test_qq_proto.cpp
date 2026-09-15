@@ -477,7 +477,7 @@ TEST_CASE("qq_proto: upload_prepare 响应解析(index 0 起与 1 起都稳;嵌�
     const auto one_based = ParseUploadPrepareResponse(Parse(R"({
       "upload_id": "UP2", "block_size": 10485760,
       "parts": [{"index": 1, "presigned_url": "https://cos.test/p1?sign=A", "block_size": 10485760},
-                {"index": 2, "presigned_url": "https://cos.test/p2?sign=B", "block_size": 5242880"}]
+                {"index": 2, "presigned_url": "https://cos.test/p2?sign=B", "block_size": 5242880}]
     })"), &error);
     REQUIRE(one_based.has_value());
     CHECK(one_based->parts[0].index == 1);
