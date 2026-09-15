@@ -797,7 +797,18 @@ async function scene7_tasks(field, backend) {
     (p) => p.jobId === jobId, 15000);
   ok('实时收到任务事件(带服务端游标)', !!firstTaskEvent &&
     Number.isFinite(firstTaskEvent.params.seq), JSON.stringify(firstTaskEvent && firstTaskEvent.params));
-  const seenSeq = firstTaskEvent ? firstTaskEvent.params.seq : 0;
+  // 游标推进按页面真实语义:实时见过的每枚都推进(前端 noteEventSeq),
+  // 这里取实时流里该 jobId 任务事件的最大 seq——快机器上 settled 可能在
+  // 断线前就送达,游标已越过;慢机器上 settled 落在断线窗里,靠补账。
+  await sleep(300);  // 让同批事件到齐再取游标
+  let seenSeq = firstTaskEvent ? firstTaskEvent.params.seq : 0;
+  const liveSeqs = [];
+  for (const event of ws.events) {
+    if (event.method === 'assistant/task/event' && (event.params || {}).jobId === jobId) {
+      liveSeqs.push(event.params.seq);
+      if (event.params.seq > seenSeq) seenSeq = event.params.seq;
+    }
+  }
 
   // 关页:断线期间任务照跑(§八:浏览器不是调度器)。
   ws.close();
@@ -808,21 +819,34 @@ async function scene7_tasks(field, backend) {
   // 领域账,不猜时序)。
   await sleep(2000);
 
-  // 重连:按 (bootId, seenSeq) 补账——断线期间的 settled 事件应从游标后到。
+  // 重连:按 (bootId, seenSeq) 补账——断线窗口里的 settled 事件从游标后到。
   const ws2 = await openChannel(field);
   const caught = await ws2.request('assistant/events/read', { bootId: bootId, lastSeq: seenSeq });
+  const caughtEvents = (caught.result && caught.result.events) || [];
   ok('补账回增量(不重发已见)',
     caught.result && caught.result.reset === false &&
-    caught.result.events.every((e) => e.seq > seenSeq), JSON.stringify(caught.result));
-  const settledEvent = (caught.result.events || []).find((e) =>
+    caughtEvents.every((e) => e.seq > seenSeq),
+    'seenSeq=' + seenSeq + ' live=' + JSON.stringify(liveSeqs) +
+    ' caught=' + JSON.stringify(caught.result));
+  // 两路合并(实时流 + 补账)核对 settled:快机器全在实时,慢机器在补账
+  // ——不丢的判据是两路至少一路有;不重复的判据在下一枚(两路无交集)。
+  const settledLive = ws.events.find((event) =>
+    event.method === 'assistant/task/event' && (event.params || {}).jobId === jobId &&
+    event.params.state === 'settled');
+  const settledCaught = caughtEvents.find((e) =>
     e.method === 'assistant/task/event' && e.params.jobId === jobId && e.params.state === 'settled');
-  ok('补齐断线期间的 settled 事件', !!settledEvent, JSON.stringify(caught.result.events));
+  ok('settled 事件两路可达(实时或补账,不丢)', !!settledLive || !!settledCaught,
+    'live=' + (settledLive ? 'yes' : 'no') + ' caught=' + (settledCaught ? 'yes' : 'no') +
+    ' caughtSeqs=' + JSON.stringify(caughtEvents.map((e) => e.seq)));
+  const settledParams = (settledCaught || settledLive || {}).params;
   ok('settled 带结果口径(outcome=succeeded)',
-    !!settledEvent && settledEvent.params.outcome === 'succeeded',
-    JSON.stringify(settledEvent && settledEvent.params));
-  // 恰好性:补账事件里同 jobId 的任务事件不重发(seq 单调,无重复 seq)。
-  const seqs = (caught.result.events || []).map((e) => e.seq);
-  ok('补账事件 seq 不重复', seqs.length === new Set(seqs).size, JSON.stringify(seqs));
+    !!settledParams && settledParams.outcome === 'succeeded', JSON.stringify(settledParams));
+  // 恰好性:补账事件 seq 不重复,且与实时见过的 seq 不重叠(不重发)。
+  const seqs = caughtEvents.map((e) => e.seq);
+  const overlap = seqs.filter((seq) => liveSeqs.indexOf(seq) !== -1);
+  ok('补账不重发实时已见(seq 无交集、不重复)',
+    seqs.length === new Set(seqs).size && overlap.length === 0,
+    'live=' + JSON.stringify(liveSeqs) + ' caught=' + JSON.stringify(seqs));
 
   // 结果面:task/read 查终态结果(V1 的 out/<deliveryId>.txt 与冻结正文)。
   let read = null;
@@ -911,6 +935,11 @@ async function scene9_approvals(field, backend, root) {
     prompt: '请写文件到 ' + declinedPath, clientOperationId: 'TASK-APPRO-TIMEOUT',
   });
   ok('审批任务受理', timeoutJob.result && !!timeoutJob.result.jobId, JSON.stringify(timeoutJob));
+  if (!timeoutJob.result || !timeoutJob.result.jobId) {
+    backend.toolMode = false;
+    ws.close();
+    return;  // 受理没成,后续无从验;如实留在败项里
+  }
   const request = await ws.waitForEvent('assistant/approval/request',
     (p) => p.jobId === timeoutJob.result.jobId, 15000);
   ok('审批请求推到页面(带任务归属与工具名)', !!request &&
@@ -922,7 +951,8 @@ async function scene9_approvals(field, backend, root) {
   ok('超时按拒绝收口(timeout_declined)', !!resolvedTimeout, JSON.stringify(resolvedTimeout));
 
   let timeoutOutcome = null;
-  for (let i = 0; i < 100 && !timeoutOutcome; ++i) {
+  // 串行泵:审批窗(3s)+ 两轮模型 + 结算,慢机器上宽放等待。
+  for (let i = 0; i < 300 && !timeoutOutcome; ++i) {
     const read = await ws.request('task/read', { jobId: timeoutJob.result.jobId });
     if (read.result && read.result.occurrences && read.result.occurrences[0] &&
         read.result.occurrences[0].state === 'settled') {
@@ -939,6 +969,12 @@ async function scene9_approvals(field, backend, root) {
   const acceptJob = await ws.request('task/create', {
     prompt: '请写文件到 ' + acceptedPath, clientOperationId: 'TASK-APPRO-ACCEPT',
   });
+  ok('批准路任务受理', acceptJob.result && !!acceptJob.result.jobId, JSON.stringify(acceptJob));
+  if (!acceptJob.result || !acceptJob.result.jobId) {
+    backend.toolMode = false;
+    ws.close();
+    return;
+  }
   const acceptRequest = await ws.waitForEvent('assistant/approval/request',
     (p) => p.jobId === acceptJob.result.jobId, 15000);
   ok('第二个审批请求推到页面', !!acceptRequest);
@@ -948,7 +984,7 @@ async function scene9_approvals(field, backend, root) {
   ok('批准回执 resolved=true', respond.result && respond.result.resolved === true,
     JSON.stringify(respond));
   let acceptOutcome = null;
-  for (let i = 0; i < 150 && !acceptOutcome; ++i) {
+  for (let i = 0; i < 300 && !acceptOutcome; ++i) {
     const read = await ws.request('task/read', { jobId: acceptJob.result.jobId });
     if (read.result && read.result.occurrences && read.result.occurrences[0] &&
         read.result.occurrences[0].state === 'settled') {
