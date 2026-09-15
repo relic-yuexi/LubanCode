@@ -99,7 +99,7 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
 | `config/model/set` | 定点保存模型配置(Add/Replace + SetActive),活配置换血:新 thread 吃新账,已开 thread 材料不动(冻结合同) | 保存与连接检查分开;回执不回显密钥 |
 | `config/test` | 端点 TCP 连通检查(有界 8s) | 如实:只验端点连通,不冒充"鉴权通过" |
 | `task/create` | 建任务(W4 扩周期):{prompt, dueAtMs?, clientOperationId, intervalSeconds?, cronExpr?, timezone?, misfirePolicy?, notifyOnChange?} | **幂等**:同键回原受理(duplicate=true),不写第二枚命令;due 0/缺省=立即;interval 与 cron 互斥;坏规格(六字段 cron/英文名/两年无拍/认不得的时区/interval 越界)在方法面经 `ValidateScheduleSpec` **明拒不猜**,不落命令文件;周期任务建账不建 occurrence(拍点归 SweepSchedule);回执带 schedule 投影(kind/intervalSeconds/cronExpr/timezone/misfirePolicy/notifyOnChange/nextDueMs) |
-| `task/run-now` | 手动触发:{jobId, clientOperationId} | 幂等同上(runnow_keys);暂停中的任务也可手动跑一次 |
+| `task/run-now` | 手动触发:{jobId, clientOperationId} | 幂等同上(runnow_keys);V2 语义:paused 任务的 occurrence 不认领——暂停中手动触发也不会跑,页面只对 active 画此按钮 |
 | `task/list` | 任务摘要列表:prompt 摘要/state/scheduleKind/dueAtMs/revision/schedule + 最近 occurrence(outcome/detail/observed)+ 结果状态 | 只读投影;不含正文 |
 | `task/read` | 任务全档 + occurrences(含 result:deliveryId/deliveryState/publishedPath/replyText≤64KB;heartbeat 任务带 observed:{changed,delivered}) | 结果正文优先发布文件、回落 replies 原件;账行不带正文,按 V1 合同从盘读回 |
 | `task/cancel` | 取消:{jobId, expectedRevision(CAS), clientOperationId} | 已取消的重复取消回当前态(duplicate);CAS 拒如实报 |

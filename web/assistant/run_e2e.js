@@ -27,9 +27,9 @@
 //      3 秒超时按拒绝收口(文件不落地);批准后工具执行(文件落地);
 //      迟到答复回 stale。
 //  10. 周期任务与渠道/服务面(W3/W4):interval 任务 → 首拍执行 → 暂停
-//      (不增拍)→ run-now → 恢复 → 取消;坏 cron/坏时区方法面明拒;
-//      channel/list|status 空配置如实;无持锁 gateway 的配对转发明拒;
-//      gateway/service/status 只读投影。
+//      (不增拍)→ 恢复 → run-now → 取消;坏 cron/坏时区方法面明拒;
+//      channel/list|status 空配置如实;配对转发不冒充批准;gateway/
+//      service/status 只读投影。
 //
 // 用法:node web/assistant/run_e2e.js [--binary <lubancode>]
 // 找不到可执行文件打印 SKIP 退 0,不冒充通过(与 node-client e2e 同口径)。
@@ -1020,7 +1020,7 @@ async function scene9_approvals(field, backend, root) {
   ws.close();
 }
 
-// 幕10(W3/W4):周期任务(interval)→ 暂停 → run-now → 恢复 → 取消;
+// 幕10(W3/W4):周期任务(interval)→ 暂停 → 恢复 → run-now → 取消;
 // 坏 cron 明拒;渠道/服务只读面。
 async function scene10_recurringAndFaces(field, backend) {
   console.log('幕10 周期任务:暂停/恢复/run-now;渠道与服务只读面');
@@ -1090,11 +1090,17 @@ async function scene10_recurringAndFaces(field, backend) {
   ok('暂停期间不生成新拍(occurrence 不增)', pausedOccurrences.length === 1,
     'count=' + pausedOccurrences.length);
 
-  // run-now:手动触发一次(暂停的任务也能手动跑)。
+  // 恢复 → run-now(手动触发一次;V2 语义:paused 的 occurrence 不认领,
+  // 手动跑也走 active 面)→ 取消收尾。
+  const resumed = await ws.request('task/resume', {
+    jobId: jobId, expectedRevision: revision, clientOperationId: 'TASK-RECUR-RESUME',
+  });
+  ok('task/resume 落账(state=active)', resumed.result && resumed.result.state === 'active',
+    JSON.stringify(resumed));
   const runNow = await ws.request('task/run-now', {
     jobId: jobId, clientOperationId: 'TASK-RECUR-RUNNOW',
   });
-  ok('暂停中 run-now 受理', runNow.result && !!runNow.result.occurrenceId,
+  ok('run-now 受理(带 occurrenceId)', runNow.result && !!runNow.result.occurrenceId,
     JSON.stringify(runNow));
   let runNowSettled = false;
   for (let i = 0; i < 150 && !runNowSettled; ++i) {
@@ -1110,13 +1116,6 @@ async function scene10_recurringAndFaces(field, backend) {
     }
   }
   ok('run-now 的 occurrence 结算', runNowSettled);
-
-  // 恢复 → 取消收尾(免得 e2e 结束后还有后台拍)。
-  const resumed = await ws.request('task/resume', {
-    jobId: jobId, expectedRevision: revision, clientOperationId: 'TASK-RECUR-RESUME',
-  });
-  ok('task/resume 落账(state=active)', resumed.result && resumed.result.state === 'active',
-    JSON.stringify(resumed));
   const cancelled = await ws.request('task/cancel', {
     jobId: jobId, expectedRevision: revision, clientOperationId: 'TASK-RECUR-CANCEL',
   });
@@ -1140,9 +1139,15 @@ async function scene10_recurringAndFaces(field, backend) {
   const pairing = await ws.request('channel/pairing/respond', {
     channelId: 'qqbot', accountId: 'main', token: 'ABCD2345', action: 'approve',
   });
-  ok('无持锁 gateway 的配对转发明拒(不冒充批准)',
-    !!pairing.error && JSON.stringify(pairing.error).indexOf('gateway.not_running') !== -1,
-    JSON.stringify(pairing.error || pairing.result));
+  // 不冒充批准的两种如实形状:没有持锁 gateway → 明拒(gateway.not_running);
+  // 本助理任务面持锁(与 gateway 同一把单写者锁)→ 命令投出但没渠道消费,
+  // 如实报"没有回执"。两种都不是成功回执。
+  const pairingErrorText = JSON.stringify(pairing.error || {});
+  ok('配对转发不冒充批准(明拒或如实报无回执)',
+    !!pairing.error &&
+    (pairingErrorText.indexOf('gateway.not_running') !== -1 ||
+      pairingErrorText.indexOf('没有回执') !== -1),
+    pairingErrorText);
   const service = await ws.request('gateway/service/status', {});
   ok('gateway/service/status 只读投影(未安装如实)',
     service.result && service.result.installed === false &&

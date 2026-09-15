@@ -693,8 +693,9 @@
         }
       });
       ops.appendChild(detailButton);
-      // W4:立即执行(active/paused 都可手动触发一次;cancelled 终态不画)。
-      if (task.state === 'active' || task.state === 'paused') {
+      // W4:立即执行(只对 active 画——V2 语义 paused 任务的 occurrence
+      // 不认领,暂停中手动触发也不会跑,不画假按钮;cancelled 终态同)。
+      if (task.state === 'active') {
         const runNowButton = document.createElement('button');
         runNowButton.type = 'button';
         runNowButton.textContent = '立即执行';
