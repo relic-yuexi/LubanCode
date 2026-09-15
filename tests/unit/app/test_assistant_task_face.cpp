@@ -224,7 +224,7 @@ struct W2Fixture {
     nlohmann::json Create(const std::string& key, const std::string& prompt,
                           std::int64_t due_at_ms = 0) {
         return PumpWhileCalling([&]() {
-            std::string error_code;
+            int error_code = 0;
             std::string error_message;
             return face->HandleTaskCreate(
                 nlohmann::json{{"prompt", prompt},
@@ -237,7 +237,7 @@ struct W2Fixture {
     nlohmann::json Cancel(const std::string& job_id, std::int64_t expected_revision,
                           const std::string& key) {
         return PumpWhileCalling([&]() {
-            std::string error_code;
+            int error_code = 0;
             std::string error_message;
             return face->HandleTaskCancel(
                 nlohmann::json{{"jobId", job_id},
@@ -334,11 +334,11 @@ TEST_CASE("任务全链:create -> 执行 -> settled -> task/read 结果与发布
     REQUIRE(settled.has_value());
     CHECK(settled->outcome == "succeeded");
 
-    std::string error_code;
+    int error_code = 0;
     std::string error_message;
     const nlohmann::json read = fixture.face->HandleTaskRead(
         nlohmann::json{{"jobId", job_id}}, error_code, error_message);
-    CHECK(error_code.empty());
+    CHECK(error_code == 0);
     REQUIRE(read.contains("occurrences"));
     REQUIRE(read["occurrences"].size() == 1);
     const nlohmann::json& occurrence = read["occurrences"][0];
@@ -366,11 +366,11 @@ TEST_CASE("任务列表:job 摘要 + 最近 occurrence + 结果状态") {
     const std::string job_id = created["jobId"].get<std::string>();
     REQUIRE(fixture.PumpUntilSettled(job_id, 15000).has_value());
 
-    std::string error_code;
+    int error_code = 0;
     std::string error_message;
     const nlohmann::json listed = fixture.face->HandleTaskList(nlohmann::json::object(),
                                                                  error_code, error_message);
-    CHECK(error_code.empty());
+    CHECK(error_code == 0);
     REQUIRE(listed["tasks"].size() == 1);
     const nlohmann::json& task = listed["tasks"][0];
     CHECK(task["jobId"] == job_id);
@@ -404,7 +404,7 @@ TEST_CASE("幂等:同 clientOperationId 双提交回原受理,不双建不双跑
     CHECK(second.value("duplicate", false) == true);
     CHECK(second["jobId"] == job_id);
 
-    std::string error_code;
+    int error_code = 0;
     std::string error_message;
     const nlohmann::json listed = fixture.face->HandleTaskList(nlohmann::json::object(),
                                                                  error_code, error_message);
@@ -501,12 +501,12 @@ TEST_CASE("审批答复:stale 请求如实回,不冒充已答") {
     CHECK(outcome.reason == "stale_request_id");
 
     AssistantAutomationFace face(gateway::GatewayProfilePaths{}, &hub, &broker);
-    std::string error_code;
+    int error_code = 0;
     std::string error_message;
     const nlohmann::json result = face.HandleApprovalRespond(
         nlohmann::json{{"requestId", "appro-nope"}, {"decision", "accept"}}, error_code,
         error_message);
-    CHECK(error_code.empty());
+    CHECK(error_code == 0);
     CHECK(result.value("resolved", true) == false);
     CHECK(result.value("reason", std::string()) == "stale_request_id");
 }

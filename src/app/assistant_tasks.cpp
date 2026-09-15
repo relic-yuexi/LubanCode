@@ -192,7 +192,7 @@ std::pair<bool, std::string> AssistantApprovalBroker::Ask(
     pending.deadline_wall_ms = pending.created_at_ms + pending.timeout_ms;
     pending.answer = std::make_shared<std::promise<std::optional<bool>>>();
     pending.cancelled = std::make_shared<std::atomic<bool>>(false);
-    const auto future = pending.answer->get_future();
+    auto future = pending.answer->get_future();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending.request_id = "appro-" + std::to_string(next_request_++);
@@ -377,7 +377,7 @@ bool AssistantAutomationFace::WaitForRunNowReceipt(const std::string& idempotenc
 }
 
 nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& params,
-                                                          std::string& out_error_code,
+                                                          int& out_error_code,
                                                           std::string& out_error_message) {
     if (!params.is_object()) {
         out_error_code = app_server::kErrInvalidParams;
@@ -453,7 +453,7 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
 }
 
 nlohmann::json AssistantAutomationFace::HandleTaskRunNow(const nlohmann::json& params,
-                                                          std::string& out_error_code,
+                                                          int& out_error_code,
                                                           std::string& out_error_message) {
     if (!params.is_object()) {
         out_error_code = app_server::kErrInvalidParams;
@@ -511,7 +511,7 @@ nlohmann::json AssistantAutomationFace::HandleTaskRunNow(const nlohmann::json& p
 }
 
 nlohmann::json AssistantAutomationFace::HandleTaskList(const nlohmann::json& params,
-                                                        std::string& out_error_code,
+                                                        int& out_error_code,
                                                         std::string& out_error_message) {
     (void)params;
     const gateway::AutomationProjection projection =
@@ -611,7 +611,7 @@ std::optional<nlohmann::json> AssistantAutomationFace::FindOccurrenceResult(
 }
 
 nlohmann::json AssistantAutomationFace::HandleTaskRead(const nlohmann::json& params,
-                                                        std::string& out_error_code,
+                                                        int& out_error_code,
                                                         std::string& out_error_message) {
     const std::string job_id = ReadJsonString(params, "jobId");
     if (job_id.empty()) {
@@ -674,7 +674,7 @@ nlohmann::json AssistantAutomationFace::HandleTaskRead(const nlohmann::json& par
 }
 
 nlohmann::json AssistantAutomationFace::HandleTaskCancel(const nlohmann::json& params,
-                                                          std::string& out_error_code,
+                                                          int& out_error_code,
                                                           std::string& out_error_message) {
     if (!params.is_object()) {
         out_error_code = app_server::kErrInvalidParams;
@@ -745,7 +745,7 @@ nlohmann::json AssistantAutomationFace::HandleTaskCancel(const nlohmann::json& p
 }
 
 nlohmann::json AssistantAutomationFace::HandleApprovalList(const nlohmann::json& params,
-                                                            std::string& out_error_code,
+                                                            int& out_error_code,
                                                             std::string& out_error_message) {
     (void)params;
     nlohmann::json result;
@@ -754,7 +754,7 @@ nlohmann::json AssistantAutomationFace::HandleApprovalList(const nlohmann::json&
 }
 
 nlohmann::json AssistantAutomationFace::HandleApprovalRespond(const nlohmann::json& params,
-                                                              std::string& out_error_code,
+                                                              int& out_error_code,
                                                               std::string& out_error_message) {
     if (!params.is_object()) {
         out_error_code = app_server::kErrInvalidParams;
@@ -782,7 +782,7 @@ nlohmann::json AssistantAutomationFace::HandleApprovalRespond(const nlohmann::js
 }
 
 nlohmann::json AssistantAutomationFace::HandleEventsRead(const nlohmann::json& params,
-                                                          std::string& out_error_code,
+                                                          int& out_error_code,
                                                           std::string& out_error_message) {
     const std::string boot_id = ReadJsonString(params, "bootId");
     const std::int64_t last_seq = ReadJsonInt(params, "lastSeq");
@@ -834,10 +834,10 @@ void RegisterAssistantTaskMethods(app_server::Dispatcher& dispatcher,
                         std::string(method) + ": 任务面不可用——" + face->unavailable_reason(),
                         nlohmann::json{{"code", "assistant.automation_unavailable"}});
                 }
-                std::string error_code;
+                int error_code = 0;
                 std::string error_message;
                 nlohmann::json result = (*face.*handler)(request.params, error_code, error_message);
-                if (!error_code.empty()) {
+                if (error_code != 0) {
                     return app_server::MakeError(request.id, error_code, error_message);
                 }
                 return app_server::MakeResult(request.id, std::move(result));
@@ -910,9 +910,9 @@ AssistantAutomationRuntime::OpenOutcome AssistantAutomationRuntime::Open(
     // 上限(allow=nullopt,受 Agent 工具表与审批闸管)。归属上下文经
     // broker 的 provider 取(泵线程查 store 的 claimed——单飞泵同时至多
     // 一枚在飞,回调发生在执行窗内,查到的就是它)。
-    AssistantApprovalBroker* broker = runtime->broker_.get();
+    AssistantApprovalBroker* broker_ptr = runtime->broker_.get();
     AssistantAutomationRuntime* raw = runtime.get();
-    broker->set_context_provider([raw]() -> std::pair<std::string, std::string> {
+    broker_ptr->set_context_provider([raw]() -> std::pair<std::string, std::string> {
         const gateway::AutomationStore* store = raw->pump_.store();
         if (store == nullptr) {
             return {};
@@ -925,15 +925,17 @@ AssistantAutomationRuntime::OpenOutcome AssistantAutomationRuntime::Open(
         return {};
     });
     pump_options.on_tool_confirm =
-        [broker](const std::string& tool_use_id, const std::string& name,
-                 const nlohmann::json& input)
+        [broker_ptr](const std::string& tool_use_id, const std::string& name,
+                     const nlohmann::json& input)
         -> runtime::HeadlessExecutor::Options::ToolConfirmDecision {
-        const auto allowed = broker->Ask(std::string(), std::string(), tool_use_id, name, input);
+        const auto allowed =
+            broker_ptr->Ask(std::string(), std::string(), tool_use_id, name, input);
         runtime::HeadlessExecutor::Options::ToolConfirmDecision decision;
         decision.allowed = allowed.first;
         decision.denial_text = allowed.second;
         return decision;
     };
+    pump_options.model_provider = runtime->options_.model_provider;
     const auto open = runtime::GatewayAutomationPump::Open(&runtime->pump_, backend, registry,
                                                            std::move(pump_options));
     if (!open.ok) {

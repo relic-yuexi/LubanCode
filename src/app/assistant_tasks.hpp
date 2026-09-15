@@ -195,21 +195,21 @@ public:
 
     // task/create:{prompt, dueAtMs?, clientOperationId}。幂等:同键再交
     // 回原 jobId(duplicate=true),不写第二枚命令。due 0/缺省 = 立即。
-    nlohmann::json HandleTaskCreate(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleTaskCreate(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
     // task/run-now:{jobId, clientOperationId}。幂等同上(runnow_keys)。
-    nlohmann::json HandleTaskRunNow(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleTaskRunNow(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
     // task/list:{}。任务摘要 + 最近 occurrence + 结果状态(outbox 投影)。
-    nlohmann::json HandleTaskList(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleTaskList(const nlohmann::json& params, int& out_error_code,
                                   std::string& out_error_message);
     // task/read:{jobId}。任务全档 + occurrences(含结果正文,读发布文件
     // /replies 原件,有界 64KB)。
-    nlohmann::json HandleTaskRead(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleTaskRead(const nlohmann::json& params, int& out_error_code,
                                   std::string& out_error_message);
     // task/cancel:{jobId, expectedRevision, clientOperationId}。CAS;
     // 已取消的重复取消回当前态(幂等)。
-    nlohmann::json HandleTaskCancel(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleTaskCancel(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
     // approval/list。
     nlohmann::json HandleApprovalList(const nlohmann::json& params, std::string& out_error_code,
@@ -218,7 +218,7 @@ public:
     nlohmann::json HandleApprovalRespond(const nlohmann::json& params, std::string& out_error_code,
                                          std::string& out_error_message);
     // assistant/events/read:{bootId, lastSeq}。
-    nlohmann::json HandleEventsRead(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleEventsRead(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
 
     // 结果正文查找(outbox 投影按 sessionId+turnId 匹配;优先发布文件,
@@ -264,6 +264,9 @@ public:
         int max_steps_per_turn = 32;
         int max_wall_secs = 600;
         std::int64_t max_total_tokens = 0;
+        // 活模型名取值口(W2):非空时泵每次执行取当前模型名(宿主递
+        // config 快照,首配后新任务吃新账);空 = options.model 定死。
+        std::function<std::string()> model_provider;
     };
 
     // 打开:先取 gateway 同 profile 锁(单写者互斥),再开泵。任何一步
