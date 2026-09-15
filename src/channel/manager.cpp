@@ -1026,8 +1026,8 @@ std::optional<std::string> ChannelManager::SendReply(const std::string& channel_
         return std::string("账号不在 Running(当前 ") + ChannelAccountStateName(entry->state) +
                "),不能发";
     }
-    if (request.conversation_id.empty() || request.text.empty() ||
-        request.client_delivery_id.empty()) {
+    if (request.conversation_id.empty() || request.client_delivery_id.empty() ||
+        (request.text.empty() && !request.attachment.has_value())) {
         return "发送请求缺 conversation/text/client_delivery_id";
     }
     // 已结算过的 delivery 不再受理(终态不翻转;防跨代次重复投递)。
@@ -1037,11 +1037,28 @@ std::optional<std::string> ChannelManager::SendReply(const std::string& channel_
         return std::string("delivery 已结算过,不再发送: ") + request.client_delivery_id;
     }
     // 帧(bridge-protocol.md §4 channel.send):client_id 供平台幂等——
-    // 同 delivery 重试同载荷(适配器按它稳定 msg_seq)。
+    // 同 delivery 重试同载荷(适配器按它稳定 msg_seq)。Q4:file part 折
+    // 出站附件引用(适配器读原件上传,走 msg_type=7);纯文本段不带。
     nlohmann::json params = nlohmann::json::object();
     params["conversation"] = nlohmann::json{{"kind", "direct"}, {"id", request.conversation_id}};
-    params["parts"] = nlohmann::json::array({nlohmann::json{{"type", "text"},
-                                                            {"text", request.text}}});
+    nlohmann::json parts = nlohmann::json::array();
+    if (!request.text.empty()) {
+        parts.push_back(nlohmann::json{{"type", "text"}, {"text", request.text}});
+    }
+    if (request.attachment.has_value()) {
+        nlohmann::json file_part = nlohmann::json{
+            {"type", "file"},
+            {"mime_type", request.attachment->mime_type},
+            {"local_path", request.attachment->local_path}};
+        if (!request.attachment->file_name.empty()) {
+            file_part["file_name"] = request.attachment->file_name;
+        }
+        if (request.attachment->size_bytes > 0) {
+            file_part["size"] = request.attachment->size_bytes;
+        }
+        parts.push_back(std::move(file_part));
+    }
+    params["parts"] = std::move(parts);
     if (!request.reply_to_message_id.empty()) {
         params["reply_to_message_id"] = request.reply_to_message_id;
     }

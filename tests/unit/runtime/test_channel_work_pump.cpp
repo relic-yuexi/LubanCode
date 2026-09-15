@@ -12,6 +12,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -223,6 +224,8 @@ struct Q2Fixture {
     std::optional<runtime::ChannelWorkPump> pump;
     workspace::WorkspaceIdentity identity;
     Params params_;
+    // Q4 附件接纳 seam:案内按需装配(默认空 = 渠道未装配下载)。
+    runtime::ChannelMediaDownloadFn media_download;
 
     // rebuild=true:同一 root 上重建(停机恢复/崩溃注入的"新进程")。
     Q2Fixture(const char* tag, Params params = {}, bool rebuild = false)
@@ -303,6 +306,7 @@ struct Q2Fixture {
         options.now_ms = [this] { return now; };
         options.fault_injection = fault;
         options.fault_after_enqueue = fault_after_enqueue;
+        options.media_download = media_download;
         if (broken_outbox) {
             std::error_code ec;
             std::filesystem::create_directories(paths.outbox_log, ec);  // 目录占住账文件
@@ -738,11 +742,11 @@ TEST_CASE("限频:退避后同载荷重试(同 client_id),成功后不重跑 Age
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
 }
 
-TEST_CASE("长文拆段:两段按序投递,全 sent 才结算 delivered") {
+TEST_CASE("长文拆段:文本段按序投递,Q4 产物附件殿后,全 sent 才结算 delivered") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Q2Fixture fixture("segment");
-    // 800 个汉字(2400 字节)→ 段帽 2000:两段。段序:第一段先发,第二段
-    // 等第一段 sent 再发。
+    // 800 个汉字(2400 字节)→ 段帽 2000:两文本段;Q4 起长回复(拆段>1)
+    // 末尾自动附带任务结果文件(冻结正文原件)——共 3 段,末段纯附件。
     std::string long_text;
     for (int i = 0; i < 800; ++i) {
         long_text += "字";
@@ -755,14 +759,17 @@ TEST_CASE("长文拆段:两段按序投递,全 sent 才结算 delivered") {
     fixture.Tick();
     REQUIRE(fixture.sidecar.sent_messages().size() == 1);  // 段 1 先发
     fixture.TickUntilQuiet();
-    REQUIRE(fixture.sidecar.sent_messages().size() == 2);  // 段 2 接上
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);  // 文本段 2 + 附件段接上
     const auto& first = fixture.sidecar.sent_messages()[0];
     const auto& second = fixture.sidecar.sent_messages()[1];
     REQUIRE(first.params["client_id"] != second.params["client_id"]);
     REQUIRE(first.params["reply_to_message_id"] == "m-1");
     REQUIRE(first.params["parts"][0]["text"] != second.params["parts"][0]["text"]);
+    // 末段是任务结果文件(Q4:拆段>1 自动附带)。
+    const auto& last = fixture.sidecar.sent_messages()[2];
+    REQUIRE(last.params["parts"][0]["type"] == "file");
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
-    REQUIRE(fixture.outbox->ListItems().size() == 2);
+    REQUIRE(fixture.outbox->ListItems().size() == 3);
 }
 
 TEST_CASE("工具轮走完整链:五层交集放行的工具真执行并计数一次") {
@@ -952,4 +959,107 @@ TEST_CASE("Q1b 被拒 sender:来信零提示零模型,回执链上安静") {
     fixture.Tick();
     fixture.TickUntilQuiet();
     REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+}
+
+// ---------------------------------------------------------------------------
+// Q4:手机发文件,处理后把产物发回去
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Q4 收件闭环:附件下载落仓,模型请求带文件名与有界预览") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("q4-inbound");
+    fixture.scripts = {TextScript("已收到并读过该文件。")};
+
+    // 假下载器:回一段可读文本(带换行,预览可核)。
+    fixture.media_download = [](const std::string& url)
+        -> std::expected<runtime::ChannelMediaBytes, std::string> {
+        if (url.find("multimedia.nt.qq.com") == std::string::npos) {
+            return std::unexpected("not_found");
+        }
+        return runtime::ChannelMediaBytes{std::string("报表第一行\n报表第二行\n合计 42")};
+    };
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+
+    // 来信:正文 + 一枚文本附件(QQ 事件映射后的真类型 part)。
+    auto event = MakeDm("in-1", "pe-1", "dm-q4", "统计一下这个文件", "m-1");
+    channel::ChannelPart attachment;
+    attachment.type = channel::ChannelPartType::File;
+    attachment.file_name = std::string("../../../report.txt");
+    attachment.remote_ref = std::string("https://multimedia.nt.qq.com/d?token=SECTOK");
+    attachment.mime_type = std::string("text/plain");
+    attachment.size_bytes = 25;
+    event.parts.push_back(attachment);
+    fixture.EmitAndIngest(event);
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+
+    // 模型恰跑一次,请求里带净化名与预览(不整塞正文——有界)。
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    REQUIRE(fixture.backend->dumps().size() == 1);
+    const std::string& prompt = fixture.backend->dumps()[0];
+    REQUIRE(prompt.find("report.txt") != std::string::npos);
+    REQUIRE(prompt.find("报表第一行") != std::string::npos);
+    REQUIRE(prompt.find("已存档") != std::string::npos);
+    // url 的 token 不进模型。
+    REQUIRE(prompt.find("SECTOK") == std::string::npos);
+
+    // 原件落在 workspace 身份根的受控仓(read_file 可达,不在渠道状态根)。
+    const std::filesystem::path media_root = fixture.identity.identity_root / "channel-media";
+    REQUIRE(std::filesystem::exists(media_root / "media.jsonl"));
+    bool found_bin = false;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(media_root / "inbound")) {
+        if (entry.path().extension() == ".bin") {
+            found_bin = true;
+        }
+    }
+    REQUIRE(found_bin);
+    // 回复照常投递。
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+}
+
+TEST_CASE("Q4 发件闭环:长回复拆段,末段带任务结果文件发回") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("q4-outbound");
+    // 超长回复:6000 字节 → 3 文本段 + 1 纯附件末段(msg_type=7 不带
+    // content,正文全在前面的段,谁也不吃掉谁)。
+    std::string long_reply;
+    for (int i = 0; i < 2000; ++i) {
+        long_reply += "结";
+    }
+    fixture.scripts = {TextScript(long_reply)};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-q4b", "整理一下", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    const auto& sends = fixture.sidecar.sent_messages();
+    REQUIRE(sends.size() == 5);  // 四段文本 + 一段附件
+    // 前四段纯文本;末段纯附件(冻结正文原件)。
+    for (std::size_t i = 0; i + 1 < sends.size(); ++i) {
+        const auto& parts = sends[i].params.at("parts");
+        REQUIRE(parts.size() == 1);
+        REQUIRE(parts[0].at("type") == "text");
+    }
+    const auto& last_parts = sends.back().params.at("parts");
+    REQUIRE(last_parts.size() == 1);
+    REQUIRE(last_parts[0].at("type") == "file");
+    REQUIRE(last_parts[0].at("mime_type") == "text/plain");
+    const std::string attached = last_parts[0].at("local_path").get<std::string>();
+    REQUIRE_FALSE(attached.empty());
+    REQUIRE(last_parts[0].at("file_name").get<std::string>().find(".txt") !=
+            std::string::npos);
+    // 附件即冻结正文原件(任务结果文件),盘上可读且内容与全文一致。
+    std::error_code ec;
+    REQUIRE(std::filesystem::exists(std::filesystem::path(attached), ec));
+    std::ifstream stream(std::filesystem::path(attached), std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(stream)),
+                              std::istreambuf_iterator<char>());
+    REQUIRE(content == long_reply);
+    // 全段终态:ingress delivered。
+    REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
 }

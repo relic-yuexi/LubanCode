@@ -111,7 +111,10 @@ struct C2cEventMapping {
 //     单独 d.id)——官方"相同 msg_id 可能重复推送,结合 msg_seq 去重";
 //   - message_type=0/3 落 text part(content 即平台摘要);103 落 text 并置
 //     hints.is_reply(引用正文 Q4 展开);其余未知类型拒绝;
-//   - attachments 首版一律 Unsupported part(媒体下载 Q4),不虚报已接通;
+//   - attachments(Q4)按官方 content_type 枚举落真类型 part(image/* ->
+//     Image、video/* -> Video、voice/audio -> Audio、其余含 "file" ->
+//     File);url 存 remote_ref,下载归宿主接纳服务(准入通过才拉原件),
+//     白名单外类型由接纳层如实拒,映射层不虚报能解析;
 //   - hints.mentions_bot = true(单聊消息天然发给 bot)。
 std::optional<C2cEventMapping> MapC2cMessageCreate(const nlohmann::json& d,
                                                    const std::string& envelope_event_id,
@@ -143,10 +146,15 @@ std::optional<AccessTokenResponse> ParseAccessTokenResponse(const nlohmann::json
 
 struct C2cSendRequest {
     std::string openid;              // 接收方 user_openid
-    std::string content;             // 纯文本(msg_type=0)
+    std::string content;             // 纯文本(msg_type=0);带 media 时不用
     std::string msg_id;              // 被动回复锚(来信 d.id);主动消息留空
     std::uint32_t msg_seq = 1;       // 与 msg_id 联合防重;同回复重试复用同一值
     std::string outbound_delivery_id;  // 宿主 delivery 账(不入平台载荷)
+    // Q4 富媒体:非空 file_info 时载荷走 msg_type=7(media 字段),不带
+    // content——官方示例 msg_type=7 只传 media+msg_id+msg_seq。file_info
+    // 来自 /v2/users/{openid}/files(透传,不自己解码),文本与附件由
+    // outbox 拆成不同段分开发送。
+    std::string media_file_info;
 };
 
 // POST https://api.sgroup.qq.com/v2/users/{openid}/messages 的请求体。
@@ -160,6 +168,60 @@ struct C2cSendResponse {
 };
 std::optional<C2cSendResponse> ParseC2cSendResponse(const nlohmann::json& body,
                                                     std::string* error);
+
+// ---------------------------------------------------------------------------
+// v2 富媒体上传(Q4;官方单聊富媒体/预上传/分片完成三页,2026-09-15 核读)
+// ---------------------------------------------------------------------------
+
+// file_type 业务类型:1=图片(png/jpg)、2=视频(mp4)、3=语音(silk)、4=文件。
+// 上传请求体的 file_size 是字符串(官方字段表;SDK 1.0.4 发 number 属漂移,
+// 按官方页);md5_10m = 前 10002432 字节(约 10MB)的 MD5。
+nlohmann::json BuildUploadPrepareRequest(int file_type, std::int64_t file_size,
+                                         const std::string& file_name, const std::string& md5,
+                                         const std::string& sha1, const std::string& md5_10m);
+
+struct UploadPreparePart {
+    std::int64_t index = 0;         // 官方"从 0 开始";SDK 漂移从 1 起——
+                                    // 上传循环按数组序取偏移,原值只回显
+    std::string presigned_url;      // 预签名 PUT 入口(COS 签名,不带 QQ 头)
+    std::int64_t block_size = 0;    // 该分块字节数(响应为字符串,宽松解析)
+};
+
+struct UploadPrepareResponse {
+    std::string upload_id;
+    std::int64_t block_size = 0;    // 分块基準字节数(响应为字符串,宽松解析)
+    std::vector<UploadPreparePart> parts;
+    // upload_config 官方在嵌套对象下(SDK 1.0.4 误读顶层,不采信);本版
+    // 上传恒串行(concurrency 只记账不消费,防错误并发进循环)。
+    std::int64_t concurrency = 1;
+    std::int64_t retry_timeout_secs = 0;
+    std::int64_t retry_delay_secs = 0;
+};
+std::optional<UploadPrepareResponse> ParseUploadPrepareResponse(const nlohmann::json& body,
+                                                                std::string* error);
+
+// 分片完成:{upload_id, part_index(平台原值), block_size(该片实际字节,
+// 字符串), md5(该片 MD5)}。
+nlohmann::json BuildUploadPartFinishRequest(const std::string& upload_id,
+                                            std::int64_t part_index, std::int64_t block_size,
+                                            const std::string& part_md5);
+std::string UploadPreparePath(const std::string& openid);
+std::string UploadPartFinishPath(const std::string& openid);
+
+// 合并/直传:POST /v2/users/{openid}/files——本机产物走分片合并路
+// (upload_id),url 路只服务于公网资源;srv_send_msg 恒 false(可靠 outbox
+// 不占主动消息频次,发送另走 messages 接口)。
+nlohmann::json BuildFileUploadBody(int file_type, const std::string& file_name,
+                                   const std::string& upload_id);
+std::string FileUploadPath(const std::string& openid);
+
+struct FileUploadResponse {
+    std::string file_uuid;
+    std::string file_info;   // 透传件:发送接口 media.file_info(不解码)
+    std::int64_t ttl_secs = -1;  // 有效期秒;0 = 长期;缺失 = -1(按过期处理)
+};
+std::optional<FileUploadResponse> ParseFileUploadResponse(const nlohmann::json& body,
+                                                          std::string* error);
 
 // ---------------------------------------------------------------------------
 // 平台错误分型(官方发送接口错误码表)

@@ -28,6 +28,7 @@
 #include "channel/qq/qq_auth.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
+#include "channel/qq/qq_media.hpp"
 #include "channel/qq/qq_messages.hpp"
 #include "channel/qq/qq_spool.hpp"
 
@@ -66,6 +67,12 @@ public:
         ResolvedChannelCredential credential;  // 进程内持有,不外泄
         std::filesystem::path state_root;      // spool 落位(宿主递进)
         QqHttpFunc http;                       // 生产 MakeDefaultHttpFunc;测试注假
+        // 媒体路(Q4):上传/下载用的独立 seam(限额与信令路不同;生产
+        // MakeMediaHttpFunc)。空 = 复用 http。
+        QqHttpFunc media_http;
+        std::int64_t media_hard_timeout_ms = 60'000;  // 下载/上传硬墙
+        std::int64_t max_media_bytes = 20 * 1024 * 1024;  // 收发同帽(20 MiB,
+                                                          // 三口径取最小)
         std::function<std::unique_ptr<IGatewayTransport>()> transport_factory;
         std::string ca_pem;                    // wss 信任锚(生产探测/配置)
         std::function<std::int64_t()> now_ms;
@@ -111,14 +118,17 @@ private:
 
     Options options_;
     QqTokenManager token_manager_;
-    // 发送队列项:宿主 channel.send 的 request_id + 冻结载荷。
+    // 发送队列项:宿主 channel.send 的 request_id + 冻结载荷。Q4:可带一枚
+    // 出站媒体(宿主 outbox 冻结的产物引用;发送线程上传后走 msg_type=7)。
     struct PendingSend {
         std::int64_t request_id = 0;
         C2cSendRequest request;
+        std::optional<QqOutboundMedia> media;
         int attempts = 0;
     };
     std::vector<PendingSend> send_queue_;  // 由 host_mutex_ 保护(与 to_host 同锁)
     std::optional<QqMessageSender> sender_;
+    std::optional<QqMediaUploader> uploader_;  // Q4:file_info 两步上传
     std::optional<QqSpoolStore> spool_;
 
     std::unique_ptr<QqGatewaySession> session_;

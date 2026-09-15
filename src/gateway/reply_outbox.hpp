@@ -65,6 +65,13 @@ struct ReplyOutboxItem {
     std::string delivery_error;                // failed/delivery_unknown 时的稳定码
     std::int64_t attempts = 0;                 // 发送尝试次数(item.attempt 计数)
     std::string source_ref;                    // 来源审计 "ingress:<ch>:<acct>:<sid>"
+    // ---- 出站附件(Q4 §十;只有带附件的段填,其余全空) ----
+    std::string attachment_local_path;   // 冻结的产物原件(UTF-8 路径;投递
+                                         // 时适配器读它上传,不拷贝进账)
+    std::string attachment_file_name;    // 展示名(入箱时净化)
+    std::string attachment_mime_type;
+    std::int64_t attachment_size_bytes = 0;
+    std::string attachment_sha256;       // 入箱时算定(冻结校验)
 };
 
 class DurableReplyOutbox {
@@ -114,6 +121,15 @@ public:
     // 渠道入箱:冻结正文按段限拆段(UTF-8 边界),每段一枚 item
     //(deliveryId = MakeDeliveryId(selection, target 串, ordinal))。
     // 返回本 selection 的全部段 id(含此前已入箱的段;幂等重入同款)。
+    // attachment(Q4)非空时挂到末段:正文为空也照拆出一枚空段承载附件
+    //(§十 10.2"没有文字、只有一个文件也算有效回复");附件本体不拷贝,
+    // 账行冻结引用 + sha256。
+    struct ChannelAttachment {
+        std::string local_path;
+        std::string file_name;
+        std::string mime_type;
+        std::int64_t size_bytes = 0;
+    };
     struct ChannelEnqueueReceipt {
         bool accepted = false;   // 本次至少新入一段
         bool duplicate = false;  // 全部段已在(幂等重入)
@@ -124,7 +140,8 @@ public:
                                          const std::string& reply_text,
                                          const std::string& session_id,
                                          const std::string& turn_id, const ChannelTarget& target,
-                                         std::int64_t now_ms);
+                                         std::int64_t now_ms,
+                                         const ChannelAttachment* attachment = nullptr);
 
     // 渠道投递驱动(泵侧逐段调;账行为先,状态推进幂等):
     bool RecordAttempt(const std::string& delivery_id, std::int64_t now_ms);  // 发出前记尝试
@@ -190,6 +207,10 @@ std::string MakeChannelDeliveryTarget(const std::string& channel_id,
 // 落在换行处(帽内最后一条换行);0/超帽参数非法回空(调用方明败)。
 // 首版纯文本不做 markdown 感知;真平台长度上限归 Q3 实测校准。
 std::vector<std::string> SplitReplySegments(const std::string& text, std::size_t max_bytes);
+
+// 渠道段帽(§七:2000 字节保守值)。泵侧判"拆段 > 1 要不要给产物附件"
+// 用同一常量,不另养第二份帽。
+inline constexpr std::size_t kChannelSegmentBytes = 2000;
 
 // 只读投影(status 分栏/测试用):从 outbox 账重放;文件不存在给空投影
 //(零建目录零写盘)。与 DurableReplyOutbox::Open 同一份重放逻辑。

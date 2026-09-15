@@ -220,23 +220,39 @@ TEST_CASE("qq_proto: 官方示例3(引用消息)置 is_reply;msg_elements Q4 展
     CHECK(mapped->warnings.find("quoted_elements_deferred_to_q4") != std::string::npos);
 }
 
-TEST_CASE("qq_proto: 附件降级为 Unsupported(媒体下载 Q4,不虚报)") {
+TEST_CASE("qq_proto: 附件按官方 content_type 映射真类型(Q4,不再降级)") {
     const auto d = Parse(R"({
       "id": "M1", "author": {"user_openid": "OPEN1", "username": "", "bot": false},
       "content": "看图", "message_type": 0,
       "attachments": [{"url": "https://example.test/a.png", "filename": "a.png",
-                       "size": 1024, "content_type": "image/png"}],
+                       "size": 1024, "content_type": "image/png"},
+                      {"url": "https://example.test/v.mp4", "filename": "v.mp4",
+                       "size": "2048", "content_type": "video/mp4"},
+                      {"url": "https://example.test/w.silk", "filename": "w",
+                       "content_type": "voice"},
+                      {"url": "https://example.test/d.bin", "filename": "../d.bin",
+                       "content_type": "file"}],
       "timestamp": "2026-07-21T10:00:00+08:00"
     })");
     std::string error;
     const auto mapped = MapC2cMessageCreate(d, "", "qqbot", "main", "qq-del-4", 0, &error);
     REQUIRE(mapped.has_value());
-    REQUIRE(mapped->event.parts.size() == 2);
-    CHECK(mapped->event.parts[1].type == ChannelPartType::Unsupported);
+    REQUIRE(mapped->event.parts.size() == 5);
+    CHECK(mapped->event.parts[1].type == ChannelPartType::Image);
     CHECK(mapped->event.parts[1].file_name == "a.png");
     CHECK(mapped->event.parts[1].remote_ref == "https://example.test/a.png");
     CHECK(mapped->event.parts[1].size_bytes == 1024);
-    CHECK(mapped->warnings.find("attachments_downgraded") != std::string::npos);
+    CHECK(mapped->event.parts[1].mime_type == "image/png");
+    // size 以字符串回传也解析(真机教训:平台数值字段两态)。
+    CHECK(mapped->event.parts[2].type == ChannelPartType::Video);
+    CHECK(mapped->event.parts[2].size_bytes == 2048);
+    // 平台枚举的非 MIME 值:voice -> Audio,file -> File。
+    CHECK(mapped->event.parts[3].type == ChannelPartType::Audio);
+    CHECK(mapped->event.parts[3].mime_type == "voice");
+    CHECK_FALSE(mapped->event.parts[3].size_bytes.has_value());
+    CHECK(mapped->event.parts[4].type == ChannelPartType::File);
+    CHECK(mapped->event.parts[4].mime_type == "file");
+    CHECK(mapped->warnings.find("attachments_pending_download") != std::string::npos);
 }
 
 TEST_CASE("qq_proto: 缺 id/user_openid/content/未知 message_type 拒绝") {
@@ -403,6 +419,122 @@ TEST_CASE("qq_proto: 错误体 message 进 detail;坏 body 不炸") {
     const auto garbage = ClassifyQqSendFailure(500, "<html>oops</html>");
     CHECK(garbage.kind == QqApiErrorKind::ServerError);
     CHECK(garbage.platform_code == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Q4 富媒体协议面
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_proto: 富媒体发送载荷(msg_type=7 只带 media,不带 content)") {
+    C2cSendRequest request;
+    request.openid = "OPEN1";
+    request.content = "正文不应出现在富媒体载荷";
+    request.msg_id = "M1";
+    request.msg_seq = 2;
+    request.media_file_info = "FILE_INFO_OPAQUE";
+    const auto payload = BuildC2cSendPayload(request);
+    CHECK(payload.at("msg_type") == 7);
+    CHECK(payload.at("media").at("file_info") == "FILE_INFO_OPAQUE");
+    CHECK_FALSE(payload.contains("content"));  // 官方示例:文本与附件不混一条
+    CHECK(payload.at("msg_id") == "M1");
+    CHECK(payload.at("msg_seq") == 2);
+}
+
+TEST_CASE("qq_proto: upload_prepare 请求体(file_size 字符串/md5_10m 字段名)") {
+    const auto body = BuildUploadPrepareRequest(4, 31457280, "report.txt",
+                                                "d41d8c", "da39a3", "0d3f1a");
+    CHECK(body.at("file_type") == 4);
+    // 官方字段表:file_size 是字符串(SDK 1.0.4 发 number 属漂移,不采信)。
+    CHECK(body.at("file_size") == "31457280");
+    CHECK(body.at("file_name") == "report.txt");
+    CHECK(body.at("md5") == "d41d8c");
+    CHECK(body.at("sha1") == "da39a3");
+    CHECK(body.at("md5_10m") == "0d3f1a");
+}
+
+TEST_CASE("qq_proto: upload_prepare 响应解析(index 0 起与 1 起都稳;嵌套 upload_config)") {
+    std::string error;
+    // 官方文档页:index"从 0 开始",block_size 为字符串,配置在 upload_config 下。
+    const auto zero_based = ParseUploadPrepareResponse(Parse(R"({
+      "upload_id": "UP1", "block_size": "10485760",
+      "parts": [{"index": 0, "presigned_url": "https://cos.test/p0?sign=A", "block_size": "10485760"},
+                {"index": 1, "presigned_url": "https://cos.test/p1?sign=B", "block_size": "5242880"}],
+      "upload_config": {"concurrency": 2, "retry_timeout": 300, "retry_delay": 1}
+    })"), &error);
+    REQUIRE(zero_based.has_value());
+    CHECK(zero_based->upload_id == "UP1");
+    CHECK(zero_based->block_size == 10485760);
+    REQUIRE(zero_based->parts.size() == 2);
+    CHECK(zero_based->parts[0].index == 0);
+    CHECK(zero_based->parts[0].block_size == 10485760);
+    CHECK(zero_based->parts[1].index == 1);
+    CHECK(zero_based->parts[1].block_size == 5242880);
+    CHECK(zero_based->concurrency == 2);
+    CHECK(zero_based->retry_timeout_secs == 300);
+    CHECK(zero_based->retry_delay_secs == 1);
+    // SDK 1.0.4 漂移案:index 从 1 起——解析不拒(原值保留回显,上传偏移
+    // 按数组序,不按 index 值;§十 10.1 显式适配)。
+    const auto one_based = ParseUploadPrepareResponse(Parse(R"({
+      "upload_id": "UP2", "block_size": 10485760,
+      "parts": [{"index": 1, "presigned_url": "https://cos.test/p1?sign=A", "block_size": 10485760},
+                {"index": 2, "presigned_url": "https://cos.test/p2?sign=B", "block_size": 5242880}]
+    })"), &error);
+    REQUIRE(one_based.has_value());
+    CHECK(one_based->parts[0].index == 1);
+    CHECK(one_based->parts[1].index == 2);
+    CHECK(one_based->concurrency == 1);  // upload_config 缺省:恒串行
+    // 坏形状:缺 upload_id / 空 parts / 缺 presigned_url 拒绝。
+    CHECK_FALSE(ParseUploadPrepareResponse(Parse(R"({"block_size":"1","parts":[{"index":0,
+      "presigned_url":"u","block_size":"1"}]})"), &error).has_value());
+    CHECK_FALSE(ParseUploadPrepareResponse(Parse(R"({"upload_id":"U","block_size":"1",
+      "parts":[]})"), &error).has_value());
+    CHECK_FALSE(ParseUploadPrepareResponse(Parse(R"({"upload_id":"U","block_size":"1",
+      "parts":[{"index":0,"block_size":"1"}]})"), &error).has_value());
+}
+
+TEST_CASE("qq_proto: 分片完成请求与 files 合并请求(srv_send_msg 恒 false)") {
+    const auto finish = BuildUploadPartFinishRequest("UP1", 0, 10485760, "abc123");
+    CHECK(finish.at("upload_id") == "UP1");
+    CHECK(finish.at("part_index") == 0);
+    CHECK(finish.at("block_size") == "10485760");
+    CHECK(finish.at("md5") == "abc123");
+    const auto merge = BuildFileUploadBody(4, "report.txt", "UP1");
+    CHECK(merge.at("file_type") == 4);
+    CHECK(merge.at("file_name") == "report.txt");
+    CHECK(merge.at("upload_id") == "UP1");
+    CHECK(merge.at("srv_send_msg") == false);  // 可靠 outbox 不占主动消息频次
+    CHECK(UploadPreparePath("O") == "/v2/users/O/upload_prepare");
+    CHECK(UploadPartFinishPath("O") == "/v2/users/O/upload_part_finish");
+    CHECK(FileUploadPath("O") == "/v2/users/O/files");
+}
+
+TEST_CASE("qq_proto: files 响应解析(file_info 透传/ttl 宽松两态)") {
+    std::string error;
+    const auto numeric = ParseFileUploadResponse(Parse(R"({
+      "file_uuid": "F1", "file_info": "opaque-info", "ttl": 3600
+    })"), &error);
+    REQUIRE(numeric.has_value());
+    CHECK(numeric->file_info == "opaque-info");
+    CHECK(numeric->file_uuid == "F1");
+    CHECK(numeric->ttl_secs == 3600);
+    const auto text_ttl = ParseFileUploadResponse(Parse(R"({
+      "file_uuid": "F2", "file_info": "opaque-2", "ttl": "7200"
+    })"), &error);
+    REQUIRE(text_ttl.has_value());
+    CHECK(text_ttl->ttl_secs == 7200);
+    CHECK_FALSE(ParseFileUploadResponse(Parse(R"({"file_uuid":"F"})"), &error).has_value());
+}
+
+TEST_CASE("qq_proto: 媒体错误码分型(850019/850031 永久;850026/40093001 可重试)") {
+    const auto unsupported = ClassifyQqSendFailure(
+        200, R"({"code":850019,"message":"不支持的文件格式"})");
+    CHECK(unsupported.kind == QqApiErrorKind::ContentRejected);
+    const auto too_large = ClassifyQqSendFailure(200, R"({"code":850031,"message":"超大小"})");
+    CHECK(too_large.kind == QqApiErrorKind::ContentRejected);
+    const auto fetch_failed = ClassifyQqSendFailure(200, R"({"code":850026,"message":"下载失败"})");
+    CHECK(fetch_failed.kind == QqApiErrorKind::ServerError);
+    const auto bdh = ClassifyQqSendFailure(200, R"({"code":40093001,"message":"通道异常"})");
+    CHECK(bdh.kind == QqApiErrorKind::ServerError);
 }
 
 }  // namespace lubancode::channel::qq

@@ -529,7 +529,11 @@ std::expected<FullHttpResponse, FullHttpError> PerformFullHttpRequest(const Full
 
     // 重定向一概不跟(libcurl 缺省 CURLOPT_FOLLOWLOCATION=0,cpr 只有显式
     // SetRedirect 才开;这里刻意不设)。3xx 原样交调用方(§8.2)。
-    const cpr::Response raw = request.method == "POST" ? session.Post() : session.Get();
+    // PUT 属 QQ 媒体批次(Q4 分片上传预签名 URL;§十五"受控 PUT 归 Q4
+    // 扩底盘")——GET/POST 原路径零变化。
+    const cpr::Response raw = request.method == "POST" ? session.Post()
+                              : request.method == "PUT" ? session.Put()
+                                                         : session.Get();
     response.status = static_cast<int>(raw.status_code);
 
     // 收场分型,顺序有讲究:取消 > 墙钟 > 响应头帽 > 响应体帽 > curl 错误。

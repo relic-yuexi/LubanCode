@@ -227,12 +227,20 @@ public:
     // 的 delivery id(桥协议 client_id——适配器按它稳定 msg_seq,同
     // delivery 重试同载荷)。受理即编码写给 sidecar(同步面),回执异步:
     // 泵侧 DrainChannelDeliveryOutcomes 收账。账号非 Running / transport
-    // 缺 / 正文空 → 拒(错误串)。
+    // 缺 / 正文与附件全空 → 拒(错误串)。Q4:可带一枚出站附件(纯附件
+    // 回复也是合法发送——§十 10.2"没有文字、只有一个文件也算有效回复")。
+    struct OutboundAttachment {
+        std::string local_path;   // 宿主侧 UTF-8 路径(冻结产物原件)
+        std::string file_name;    // 展示名(入箱时净化)
+        std::string mime_type;
+        std::int64_t size_bytes = 0;
+    };
     struct ChannelSendRequest {
         std::string conversation_id;        // direct 会话 openid
         std::string text;                   // 冻结正文(单段;拆段归 outbox)
         std::string reply_to_message_id;    // 被动回复锚(空 = 主动消息)
         std::string client_delivery_id;     // 稳定发送身份(outbox delivery id)
+        std::optional<OutboundAttachment> attachment;  // Q4 出站附件(可空)
     };
     std::optional<std::string> SendReply(const std::string& channel_id,
                                          const std::string& account_id,

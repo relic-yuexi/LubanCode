@@ -49,11 +49,14 @@ TurnIngress MakeChannelTurnIngress(const channel::ChannelInboundEvent& event,
                                    : part.type == channel::ChannelPartType::Audio  ? "音频"
                                    : part.type == channel::ChannelPartType::Video ? "视频"
                                                                                     : "文件";
+                // Q4:附件详情(存档路径/预览)由 ChannelMediaService 的投影
+                // 行补(下载落仓后);这里只占位,不虚报已解析。media service
+                // 未装配时这行就是全部——如实占位。
                 text += std::string("[收到") + kind;
                 if (part.file_name.has_value() && !part.file_name->empty()) {
                     text += ":" + *part.file_name;
                 }
-                text += part.type == channel::ChannelPartType::Audio ? ",未转录]" : ",未解析]";
+                text += "]";
                 saw_anything = true;
                 break;
             }

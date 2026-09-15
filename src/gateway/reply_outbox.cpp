@@ -98,6 +98,12 @@ OutboxProjection ReadOutboxProjection(const std::filesystem::path& log_file) {
             item.target_reply_to_message_id = GetJsonString(line, "targetReplyToMessageId");
             item.target_msg_seq = static_cast<std::uint32_t>(GetJsonUint(line, "targetMsgSeq"));
             item.source_ref = GetJsonString(line, "sourceRef");
+            // Q4 出站附件(旧账行无这些键,缺省空 = 无附件)。
+            item.attachment_local_path = GetJsonString(line, "attachmentLocalPath");
+            item.attachment_file_name = GetJsonString(line, "attachmentFileName");
+            item.attachment_mime_type = GetJsonString(line, "attachmentMimeType");
+            item.attachment_size_bytes = GetJsonInt(line, "attachmentSizeBytes");
+            item.attachment_sha256 = GetJsonString(line, "attachmentSha256");
             if (item.selection_id.empty() || item.reply_sha256.empty()) {
                 ++projection.skipped_lines;
                 continue;
@@ -173,8 +179,9 @@ std::string MakeChannelDeliveryTarget(const std::string& channel_id,
 
 std::vector<std::string> SplitReplySegments(const std::string& text, std::size_t max_bytes) {
     std::vector<std::string> segments;
-    if (max_bytes == 0) {
-        return segments;  // 非法帽:调用方明败,不猜
+    if (max_bytes == 0 || text.empty()) {
+        return segments;  // 非法帽/空正文:无段(Q4 纯附件回复的空文本
+                          // 段由 EnqueueChannel 的附件参数造,不发空消息)
     }
     if (text.size() <= max_bytes) {
         segments.push_back(text);
@@ -341,15 +348,31 @@ DurableReplyOutbox::EnqueueReceipt DurableReplyOutbox::Enqueue(const std::string
 DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
     const std::string& selection_id, const std::string& reply_text,
     const std::string& session_id, const std::string& turn_id, const ChannelTarget& target,
-    std::int64_t now_ms) {
-    // 首版段帽:2000 字节(UTF-8 边界 + 换行偏好)。真平台的长度上限与
+    std::int64_t now_ms, const ChannelAttachment* attachment) {
+    // 段帽:2000 字节(UTF-8 边界 + 换行偏好)。真平台的长度上限与
     // 计数口径(每条消息回复次数)归 Q3 实测校准,这里只做保守拆段。
-    constexpr std::size_t kSegmentBytes = 2000;
     ChannelEnqueueReceipt receipt;
-    std::vector<std::string> segments = SplitReplySegments(reply_text, kSegmentBytes);
+    std::vector<std::string> segments = SplitReplySegments(reply_text, kChannelSegmentBytes);
+    if (attachment != nullptr) {
+        // 附件独占一枚空文本末段(ordinal = 文本段数 + 1):QQ 富媒体消息
+        // (msg_type=7)不带 content(官方示例口径)——正文全在前面自己的
+        // 段里发,末段纯附件,谁也不吃掉谁。空正文 + 附件 = 只有这枚段。
+        segments.emplace_back();
+    }
     if (segments.empty()) {
         receipt.error_code = "outbox.segment_invalid";
         return receipt;
+    }
+    // 附件冻结校验(Q4):读原件算 sha256(入箱即冻结;原件丢失/读不了
+    // = 明败——已提交产物不能猜)。空 attachment 不走这道。
+    std::string attachment_sha;
+    if (attachment != nullptr) {
+        const auto bytes = ReadFileText(platform::Utf8ToPath(attachment->local_path));
+        if (!bytes.has_value()) {
+            receipt.error_code = "outbox.attachment_unreadable";
+            return receipt;
+        }
+        attachment_sha = platform::Sha256Hex(*bytes);
     }
     const std::string target_str =
         MakeChannelDeliveryTarget(target.channel_id, target.account_id, target.conversation_id);
@@ -405,6 +428,14 @@ DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
         if (!target.source_ref.empty()) {
             line["sourceRef"] = target.source_ref;
         }
+        // Q4:附件只挂末段(纯附件空文本段,正文在前面各段)。
+        if (attachment != nullptr && index + 1 == segments.size()) {
+            line["attachmentLocalPath"] = attachment->local_path;
+            line["attachmentFileName"] = attachment->file_name;
+            line["attachmentMimeType"] = attachment->mime_type;
+            line["attachmentSizeBytes"] = attachment->size_bytes;
+            line["attachmentSha256"] = attachment_sha;
+        }
         if (!AppendLinePowerLoss(line)) {
             receipt.error_code = "outbox.append_failed";
             return receipt;
@@ -426,6 +457,13 @@ DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
         item.target_reply_to_message_id = target.reply_to_message_id;
         item.target_msg_seq = static_cast<std::uint32_t>(ordinal);
         item.source_ref = target.source_ref;
+        if (attachment != nullptr && index + 1 == segments.size()) {
+            item.attachment_local_path = attachment->local_path;
+            item.attachment_file_name = attachment->file_name;
+            item.attachment_mime_type = attachment->mime_type;
+            item.attachment_size_bytes = attachment->size_bytes;
+            item.attachment_sha256 = attachment_sha;
+        }
         items_[delivery_id] = std::move(item);
         receipt.accepted = true;
     }
