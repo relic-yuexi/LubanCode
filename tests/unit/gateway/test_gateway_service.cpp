@@ -19,6 +19,7 @@
 #include "gateway/service.hpp"
 #include "platform/paths.hpp"
 
+using namespace lubancode;
 using namespace lubancode::gateway;
 
 namespace {

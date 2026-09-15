@@ -24,9 +24,11 @@
 #include "gateway/profile.hpp"
 #include "gateway/reply_outbox.hpp"
 #include "gateway/status.hpp"
+#include "platform/paths.hpp"
 #include "platform/wall_clock.hpp"
 #include "trajectory/session_lock.hpp"
 
+using namespace lubancode;
 using namespace lubancode::gateway;
 
 namespace {
