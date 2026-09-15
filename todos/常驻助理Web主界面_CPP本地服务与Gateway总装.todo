@@ -145,7 +145,7 @@ lubancode assistant --port 8765 --profile default
 6. W5：发布包与真实常驻验收，完成后再考虑远程访问、多用户、Tauri 或 Android 外壳。
 
 - [ ] 无渠道验收：干净普通 Windows 账号解压发布包 → 一条启动命令 → 浏览器配置模型 → 两轮真实聊天 → 创建单次任务 → 关页 → 执行 → 重开看结果，全程不装 Node、不手改 JSON。（前半已由 `run_e2e.js`（真 exe + 假模型）覆盖：启动→配置→对话→刷新恢复→关页任务不死；单次任务归 W2，发布包实装与真实浏览器归发布验收批次）
-- [x] 断线验收：刷新、断 WS、第二页接管、浏览器退出不取消后台任务；显式停止任务才取消；旧 AppServer 客户端生命周期回归通过。（W0/W1：`test_app_server_detached.cpp` 两模式对照钉死旧语义不回归、`run_e2e.js` 幕4/幕5（含占用/接管）；显式停止任务走 turn/interrupt 既有面）
+- [x] 断线验收：刷新、断 WS、第二页接管、浏览器退出不取消后台任务；显式停止任务才取消；旧 AppServer 客户端生命周期回归通过。（W0/W1：`test_app_server_detached.cpp` 两模式对照钉死旧语义不回归、`run_e2e.js` 幕4/幕5（含占用/接管）；显式停止任务走 turn/interrupt 既有面。**windows 时序备注（#88 修）**：断线即重连撞"服务端还占着旧控制会话"的窗口是时序敏感面——占用通报的送达靠 `Session::CloseGracefully`（close 帧→关写端→有界排干→关 socket）：直接 closesocket 带未读数据在 Windows 砸 RST、把已排队的通报帧丢掉（macos 照交数据，所以同册 macos 绿 windows 红）；e2e 的 openChannel 对"没等来回执就断线"也按占用退避重试（前两把），断言未放宽）
 - [ ] 故障验收：端口冲突、重复启动、模型拒绝、磁盘满、坏账、崩溃窗口、重复请求、审批过期与投递失败，均有可核对状态，不画假成功。（W1 已覆盖：端口冲突/重复启动/重复请求幂等（幕3/幕6 + 单测）；模型拒绝/磁盘满/坏账/崩溃窗口/审批过期/投递失败留账 W2+）
 - [x] 权限验收：跨站请求、伪造 Origin/Host、bootstrap 重放、下载越界、XSS、密钥回显、错工作区访问；QQ 身份不能借 Web 控制接口变 owner。（W1：跨站/Origin/Host/重放/密钥回显/白名单外 404 全验（`test_local_web_server.cpp` + 幕2）；XSS 靠 textContent + CSP 静态措施，动态用例留真实浏览器批次；QQ 面 W3）
 - [ ] UI 验收：390px/1440px 页面、键盘导航、长消息、工具失败、等待审批、断线提示与历史分页；用真实浏览器交互，不仅检查 HTML 字符串。（未做：真实浏览器交互验收留批次，可循 browser.mcp.selftest 路——W1 明确未验边界）

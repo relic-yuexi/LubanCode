@@ -158,6 +158,18 @@ void WsTransport::Session::Close() {
     socket_.Close();
 }
 
+void WsTransport::Session::CloseGracefully(int drain_ms) {
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        if (!close_sent_) {
+            close_sent_ = true;
+            SendRaw(ws::MakeCloseFrame(1000));
+        }
+    }
+    // 写锁到此放开:排干是纯读端动作,不与 SendMessage 抢锁。
+    socket_.DrainThenClose(drain_ms);
+}
+
 std::unique_ptr<WsTransport::Session> WsTransport::Accept() {
     while (true) {
         std::optional<net::Socket> accepted = listener_.Accept(options_.accept_poll_ms);

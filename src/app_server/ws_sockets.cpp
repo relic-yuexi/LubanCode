@@ -2,6 +2,7 @@
 // (connection.cpp 的 ReadStdinChunk 同路数)。
 #include "app_server/ws_sockets.hpp"
 
+#include <chrono>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -170,6 +171,37 @@ void Socket::SetRecvTimeoutMs(int ms) {
     timeout.tv_usec = (ms % 1000) * 1000;
     ::setsockopt(FromHandle(handle_), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 #endif
+}
+
+void Socket::ShutdownSend() {
+    if (handle_ == kInvalidHandle) {
+        return;
+    }
+#if defined(_WIN32)
+    ::shutdown(FromHandle(handle_), SD_SEND);
+#else
+    ::shutdown(FromHandle(handle_), SHUT_WR);
+#endif
+}
+
+void Socket::DrainThenClose(int drain_ms) {
+    if (handle_ == kInvalidHandle) {
+        return;
+    }
+    // 排干粒度:50ms 一轮。recv 回 0(FIN)/-1(超时=缓冲已空 50ms/真错)
+    // 都算到头——两种形状下 close 都不会再砸出 RST;对面持续灌数据的
+    // 病态场由总时限兜底。
+    SetRecvTimeoutMs(50);
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(drain_ms > 0 ? drain_ms : 0));
+    char sink[2048];
+    while (std::chrono::steady_clock::now() < deadline) {
+        const long got = Recv(sink, sizeof(sink));
+        if (got <= 0) {
+            break;
+        }
+    }
+    Close();
 }
 
 int Socket::LocalPort() const {

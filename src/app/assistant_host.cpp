@@ -910,12 +910,18 @@ int RunAssistantMode(const AssistantCliArgs& args) {
             {
                 std::lock_guard<std::mutex> lock(serve_state.current_mutex);
                 if (serve_state.current != nullptr && !takeover) {
-                    // 占用通报:一帧话 + close。页面显示"被占用,可接管"。
+                    // 占用通报:一帧话 + 体面收线。页面显示"被占用,可接管"。
+                    // 收线必须体面(CloseGracefully):对面升级完多半立刻发了
+                    // initialize,这些字节躺在收端缓冲里,closesocket 带未读
+                    // 数据在 Windows 上砸 RST,RST 把已排队未确认的通报帧
+                    // 一并丢掉——页面/测试收不到通报就只剩"莫名断线"
+                    //(macos 照交数据所以绿,windows 丢所以红)。单连接政策
+                    // 一寸不放,只是把"拒绝的话"送到再收线。
                     const nlohmann::json notice = nlohmann::json{
                         {"method", "assistant/connection/occupied"},
                         {"params", {{"hint", "takeover"}, {"detail", "已有页面持有控制连接"}}}};
                     session->SendMessage(notice.dump());
-                    session->Close();
+                    session->CloseGracefully();
                     return;
                 }
                 if (serve_state.current != nullptr && takeover) {
