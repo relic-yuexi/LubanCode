@@ -602,12 +602,14 @@ TEST_CASE("Q5 认领分流:渠道泵只认渠道任务,automation 泵只认本�
     const auto local = store.ClaimDue("epoch-a", 5000, AutomationStore::ClaimScope::LocalOnly);
     REQUIRE(local.has_value());
     CHECK(local->job_id == "local-j");
-    // ChannelBackedOnly:只认渠道。
+    // ChannelBackedOnly:只认渠道(发号 counter 不吃显式 id,渠道任务是首枚
+    // 发号 job → job-1)。
     const auto channel = store.ClaimDue("epoch-a", 5000,
                                         AutomationStore::ClaimScope::ChannelBackedOnly);
     REQUIRE(channel.has_value());
-    CHECK(channel->job_id == "job-2");
+    CHECK(channel->job_id == "job-1");
     CHECK(channel->occurrence_id != local->occurrence_id);  // 两枚不同 occurrence
+    CHECK(channel->job_id != local->job_id);                 // 渠道≠本地
     // 都被认领后再无 due(Any 也不剩)。
     CHECK_FALSE(store.ClaimDue("epoch-a", 5000).has_value());
     CHECK_FALSE(store.broken());

@@ -399,11 +399,11 @@ TEST_CASE("QQ 建周期提醒全链:建账归属/隔离场/到点执行/结果�
 TEST_CASE("同信重发/同轮重调不双建:幂等键 = 渠道域+账号+消息 id") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Q5Fixture fixture("idem");
-    fixture.scripts = {ToolUseScript("tu-1", "create_reminder",
-                                     CreateOnceInput(fixture.now + 3600000)),
+    // due 固定在建单时刻(scripts 与桥面重调用同一值——幂等比较看载荷)。
+    const std::int64_t due_ms = fixture.now + 3600000;
+    fixture.scripts = {ToolUseScript("tu-1", "create_reminder", CreateOnceInput(due_ms)),
                        // 同轮模型重调一次(同输入):幂等命中,不建第二笔。
-                       ToolUseScript("tu-2", "create_reminder",
-                                     CreateOnceInput(fixture.now + 3600000)),
+                       ToolUseScript("tu-2", "create_reminder", CreateOnceInput(due_ms)),
                        TextScript("已设置一小时的提醒。")};
     tools::ToolRegistry registry;
     REQUIRE(fixture.OpenPumps(registry));
@@ -433,8 +433,7 @@ TEST_CASE("同信重发/同轮重调不双建:幂等键 = 渠道域+账号+消�
     context.message_id = "m-1";
     context.received_at_ms = fixture.now;
     const runtime::ChannelAutomationBridge::TurnScope scope(*fixture.bridge, context);
-    const auto again = fixture.bridge->CreateReminder(
-        nlohmann::json::parse(CreateOnceInput(fixture.now + 3600000)));
+    const auto again = fixture.bridge->CreateReminder(nlohmann::json::parse(CreateOnceInput(due_ms)));
     REQUIRE(again.ok);
     CHECK(again.duplicate);
     CHECK(again.payload["jobId"] == fixture.store()->ListJobs()[0].job_id);
@@ -616,6 +615,7 @@ TEST_CASE("回复窗口过期分型:挂起不转终态失败;普通聊天回复�
 
 TEST_CASE("claim 后崩(渠道任务):重建后重派执行,结果照投,模型恰一次") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    std::int64_t fire_time = 0;
     {
         Q5Fixture fixture("claim-crash");
         fixture.scripts = {ToolUseScript("tu-1", "create_reminder",
@@ -629,14 +629,18 @@ TEST_CASE("claim 后崩(渠道任务):重建后重派执行,结果照投,模型�
         fixture.TickUntilQuiet();
         REQUIRE(CountOf(fixture.counter_file, "model") == 2);
         // 到点后由"进程"直接认领(泵在 claim 后、绑定行落账前瞬间死)。
-        fixture.now = fixture.now + 300000 + 1;
+        fire_time = fixture.now + 300000 + 1;
+        fixture.now = fire_time;
         REQUIRE(fixture.store()
                     ->ClaimDue("crash-epoch", fixture.now,
                                gateway::AutomationStore::ClaimScope::ChannelBackedOnly)
                     .has_value());
     }
     {
+        // 重建:新进程的钟要拨回同一时刻(重建夹具的 now 归零回 T0,
+        // 不拨的话 occurrence 不到点,重派了也不会认领)。
         Q5Fixture fixture("claim-crash", /*rebuild=*/true);
+        fixture.now = fire_time + 1;
         fixture.scripts = {TextScript("提醒:五分钟到了。")};
         tools::ToolRegistry registry;
         REQUIRE(fixture.OpenPumps(registry));
