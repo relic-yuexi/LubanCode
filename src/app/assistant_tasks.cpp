@@ -1303,10 +1303,15 @@ void AssistantAutomationRuntime::DiffAndPublish() {
         }
         // W4 heartbeat 观察面:观察账落了(sha 从无到有)或投递标记翻面
         // → 独立事件(V2 的 notice 通知:changed/delivered 如实,正文未
-        // 变的拍 changed=false 不打扰)。
-        if (seen != last_occurrences_.end() && snapshot.observed &&
-            (!seen->second.observed || seen->second.observed_changed != snapshot.observed_changed ||
-             seen->second.observed_delivered != snapshot.observed_delivered)) {
+        // 变的拍 changed=false 不打扰)。同步泵下观察与结算同拍落账,
+        // occurrence 在 diff 里多半是"新出现就带观察"——新出现也算。
+        const bool observed_before =
+            seen != last_occurrences_.end() && seen->second.observed;
+        const bool observed_face_changed =
+            seen != last_occurrences_.end() &&
+            (seen->second.observed_changed != snapshot.observed_changed ||
+             seen->second.observed_delivered != snapshot.observed_delivered);
+        if (snapshot.observed && (!observed_before || observed_face_changed)) {
             nlohmann::json params;
             params["kind"] = "occurrence.observed";
             params["jobId"] = occurrence.job_id;
