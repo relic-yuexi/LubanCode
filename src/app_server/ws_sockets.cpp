@@ -193,7 +193,7 @@ void Socket::DrainThenClose(int drain_ms) {
     // 病态场由总时限兜底。
     SetRecvTimeoutMs(50);
     const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(drain_ms > 0 ? drain_ms : 0));
+                          std::chrono::milliseconds(drain_ms > 0 ? drain_ms : 0);
     char sink[2048];
     while (std::chrono::steady_clock::now() < deadline) {
         const long got = Recv(sink, sizeof(sink));
