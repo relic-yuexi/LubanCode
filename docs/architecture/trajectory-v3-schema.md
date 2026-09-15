@@ -100,6 +100,7 @@
 | Gateway 常驻(常驻总装 V0;合同与 fixture 已验,生产装配归 V1) | `gateway.work.bound`(work↔turn 绑定事实:恢复器凭 workId 反查原轮,不另派新轮)、`reply.selection.committed`(对外回复的选定事实:原件先落稳、选择事实后提交,resume 后 selectionId 不变) |
 | 提示组合(应用Worker接入单 §五 134) | `prompt.composition.applied`(部署档组合系统提示的可追溯事实:组合次序、各段渲染正文 hash、来源层与最终快照 ID;业务文本伪装不了宿主权限——来源逐段在账) |
 | 记忆(记忆抽取取消误报 ESC 单 Bug 2) | `memory.extraction.assessed`(回合收尾的抽取门控与结果评估:turnId 挂触发主回合;载荷 camelCase——trigger/decision/skipReason 或 extractOutcome+errorCode+extractWallMs+foregroundTailMs+userTextStats/usage)、`memory.write.receipted`(四路写路 save/forget/accept 的排队/被拒回执:source/operation/outcome/layer/jobId 或 errorCode)——全部不带 status,v2 同名事件的 v3 对应 |
+| 渠道远端审批(QQ 接入单 Q6 §12.2) | `channel.approval.requested`(宿主发出的审批卡事实:tokenHash/tool/argsSha256/身份摘要/deadlineMs,token 只入 hash、参数只入 hash——脱敏由宿主摘要层保证)、`channel.approval.resolved`(裁决事实:decision ∈ approved/declined/timeout/cancelled/card_failed,by=操作者或收口原因;interactionId 是平台回调身份)——全部不带 status(账不裁决,决议生效在审批 broker) |
 
 
 ### 2.2 kind → status 固定映射(§4.14)

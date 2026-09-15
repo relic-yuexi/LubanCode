@@ -54,6 +54,10 @@ enum class BridgeMethod {
     Logout,
     InboundAck,
     InboundNack,
+    // 宿主发给 sidecar(Q6 远端审批;不计入 19 枚正文的扩展 method,
+    // capabilities.interactions 协商——旧适配器不认即回 -32601,宿主
+    // 按能力降级不发)。
+    InteractionAck,
     // sidecar 发给宿主(§5,7 项,全部 notification)
     Inbound,
     Status,
@@ -62,6 +66,7 @@ enum class BridgeMethod {
     LoginCompleted,
     CapabilitiesChanged,
     Fatal,
+    InteractionCreate,  // Q6 互动回调(按钮点击)notification
 };
 
 // 线上方法名,如 "channel.initialize"/"channel.inbound.ack"。

@@ -1903,6 +1903,55 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             }
         }
     }
+    // ---- 渠道远端审批(QQ 接入单 Q6;statusless 事实行)----
+    else if (line.kind == K::ChannelApprovalRequested) {
+        // 宿主发出的审批卡事实:token 只入 hash(不透明凭证不入账);工具
+        // 名与规范参数 hash 钉住"批的是什么"(参数变化须重新申请,hash 是
+        // 对账锚);身份摘要带渠道/账号/会话/操作者;期限(deadlineMs)供
+        // 迟到裁决对账。turnId 是信封字段(与 gateway.work.bound 同款锚)。
+        for (const auto* key : {"tokenHash", "tool", "argsSha256", "channelId", "accountId",
+                                "conversationId", "operatorId"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!IsHex64(line.payload["tokenHash"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "channel.approval.requested.tokenHash 应为 64 位十六进制");
+        }
+        if (!IsHex64(line.payload["argsSha256"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "channel.approval.requested.argsSha256 应为 64 位十六进制");
+        }
+        if (!line.payload.contains("deadlineMs") ||
+            !JsonIsNonNegativeInt(line.payload["deadlineMs"])) {
+            return Err("schema3.bad_type", "channel.approval.requested.deadlineMs 应为非负整数");
+        }
+        if (!line.turn_id.has_value()) {
+            return Err("schema3.missing_field",
+                       "channel.approval.requested 必带 turnId(审批属哪一轮)");
+        }
+    } else if (line.kind == K::ChannelApprovalResolved) {
+        // 裁决事实:tokenHash 与 requested 对账;decision ∈ approved/declined/
+        // timeout/cancelled/card_failed(by=操作者 id 或收口原因的稳定串);
+        // interactionId 是平台回调身份(宿主裁决的原料,幂等对账用)。
+        for (const auto* key : {"tokenHash", "decision", "by"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) {
+                return error;
+            }
+        }
+        if (!IsHex64(line.payload["tokenHash"].get<std::string>())) {
+            return Err("schema3.bad_type",
+                       "channel.approval.resolved.tokenHash 应为 64 位十六进制");
+        }
+        const std::string decision = line.payload["decision"].get<std::string>();
+        if (decision != "approved" && decision != "declined" && decision != "timeout" &&
+            decision != "cancelled" && decision != "card_failed") {
+            return Err("schema3.bad_type",
+                       "channel.approval.resolved.decision 须为 approved/declined/timeout/"
+                       "cancelled/card_failed 之一");
+        }
+    }
     // pending 类必须带 reason(§4.14)。
     if (line.status == OpStatus::Pending && !line.payload.contains("reason")) {
         return Err("schema3.missing_field",

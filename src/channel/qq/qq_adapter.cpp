@@ -76,6 +76,10 @@ nlohmann::json QqBotCapabilities() {
         {"outbound", nlohmann::json::array({"file"})}};
     capabilities["streaming"] = false;
     capabilities["credentials"] = true;
+    // Q6 远端审批:按钮回调(channel.interaction.create)+ 回应
+    //(channel.interaction.ack)+ 键盘消息(send.keyboard)。宿主据此协商
+    //——不认这三件的适配器照旧收不到审批请求(fail closed 不变)。
+    capabilities["interactions"] = true;
     return capabilities;
 }
 
@@ -288,10 +292,19 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 pending.request.outbound_delivery_id =
                     message.params.at("client_id").get<std::string>();
             }
+            // Q6 审批卡片:可选 keyboard 对象(markdown + 键盘)。键盘发送
+            // 与 media 互斥(一条消息只有一种 msg_type)。
+            if (message.params.contains("keyboard") &&
+                message.params.at("keyboard").is_object()) {
+                pending.request.keyboard = message.params.at("keyboard");
+                pending.media.reset();
+            }
             // 纯附件回复(无正文)也是合法发送(§十 10.2:没有文字、只有
-            // 一个文件也算有效回复)——正文与附件至少有其一。
+            // 一个文件也算有效回复)——正文与附件至少有其一;键盘卡片的
+            // 正文是 markdown,同样算正文。
             if (pending.request.openid.empty() ||
-                (pending.request.content.empty() && !pending.media.has_value())) {
+                (pending.request.content.empty() && !pending.media.has_value() &&
+                 pending.request.keyboard.empty())) {
                 ReplyDomainError(id, DomainErrorName::NotCapable,
                                  "channel.send needs direct conversation id and text or file");
                 return;
@@ -317,6 +330,25 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 }
             }
             ReplyResult(id, nlohmann::json{{"acked", true}});
+            return;
+        }
+        case BridgeMethod::InteractionAck: {
+            // Q6 互动回应:PUT /interactions/{id} 只能一次,走发送线程
+            // (不在宿主锁内碰网络)。结果回宿主进账。
+            PendingAck ack;
+            ack.request_id = id;
+            ack.interaction_id = message.params.value("interaction_id", std::string());
+            ack.code = static_cast<int>(message.params.value("code", 0));
+            if (ack.interaction_id.empty()) {
+                ReplyDomainError(id, DomainErrorName::NotCapable,
+                                 "channel.interaction.ack needs interaction_id");
+                return;
+            }
+            {
+                const std::lock_guard<std::mutex> lock(host_mutex_);
+                ack_queue_.push_back(std::move(ack));
+            }
+            sender_wake_.notify_all();
             return;
         }
         case BridgeMethod::Health: {
@@ -489,6 +521,35 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             EmitNotification(BridgeMethod::Inbound, event_json);
             return;
         }
+        case GatewayEvent::Kind::InteractionCreate: {
+            // Q6 按钮回调:纯函数映射 → channel.interaction.create 通知。
+            // 不走 spool(互动回调不是 at-least-once 的入站事实:丢了用户
+            // 重点一次按钮即可;宿主侧幂等由审批 broker 保证——重复
+            // token 只返回已处理)。application_id 与连接账号对账(官方
+            // 互动事件页:事件体带 application_id;对不上按无效丢弃留痕,
+            // 不进宿主裁决)。
+            std::string map_error;
+            const auto interaction = MapInteractionCreate(event.interaction_d, &map_error);
+            if (!interaction.has_value()) {
+                EmitNotification(BridgeMethod::Fatal,
+                                 nlohmann::json{{"reason", "invalid_frame"},
+                                                {"detail", "interaction map: " + map_error}});
+                return;
+            }
+            if (!interaction->application_id.empty() &&
+                interaction->application_id != options_.config.app_id) {
+                EmitNotification(
+                    BridgeMethod::Fatal,
+                    nlohmann::json{{"reason", "invalid_frame"},
+                                   {"detail", "interaction application_id mismatch"}});
+                return;
+            }
+            const std::string delivery_id = NextDeliveryId();
+            EmitNotification(BridgeMethod::InteractionCreate,
+                             InteractionEventToJson(*interaction, options_.channel_id,
+                                                    options_.account_id, delivery_id));
+            return;
+        }
         case GatewayEvent::Kind::StageChanged: {
             // 阶段推进只记本地快照账,不刷宿主状态机(宿主只认
             // running/backoff/stopped 粗粒度状态)。
@@ -596,11 +657,19 @@ void QqBotAdapter::SenderLoop() {
     constexpr int kMaxAttempts = 3;
     while (true) {
         std::unique_lock<std::mutex> lock(host_mutex_);
-        sender_wake_.wait(lock, [this]() { return !send_queue_.empty() || stop_.load(); });
-        if (send_queue_.empty()) {
+        sender_wake_.wait(lock, [this]() {
+            return !send_queue_.empty() || !ack_queue_.empty() || stop_.load();
+        });
+        if (send_queue_.empty() && ack_queue_.empty()) {
             if (stop_.load()) {
                 return;  // 停止且队列清空
             }
+            continue;
+        }
+        if (!ack_queue_.empty()) {
+            // Q6 互动回应优先消费(小请求,客户端在等 loading 收口)。
+            lock.unlock();
+            ProcessAcks();
             continue;
         }
         PendingSend pending = std::move(send_queue_.front());
@@ -702,6 +771,29 @@ void QqBotAdapter::SenderLoop() {
                         break;
                 }
                 break;
+        }
+    }
+}
+
+void QqBotAdapter::ProcessAcks() {
+    // Q6 互动回应:发送线程侧消费 ack 队列(PUT 只能一次,失败不重试),
+    // 结果如实回宿主进账。
+    while (true) {
+        std::optional<PendingAck> ack;
+        {
+            const std::lock_guard<std::mutex> lock(host_mutex_);
+            if (ack_queue_.empty()) {
+                return;
+            }
+            ack = std::move(ack_queue_.front());
+            ack_queue_.erase(ack_queue_.begin());
+        }
+        const auto outcome = sender_->AckInteraction(ack->interaction_id, ack->code);
+        if (outcome.status == QqMessageSender::AckStatus::Acked) {
+            ReplyResult(ack->request_id, nlohmann::json{{"acked", true}});
+        } else {
+            ReplyDomainError(ack->request_id, DomainErrorName::PermanentReject,
+                             "interaction ack failed: " + outcome.error.detail);
         }
     }
 }

@@ -48,6 +48,7 @@ struct GatewayConnectError {
 struct GatewayEvent {
     enum class Kind {
         C2cMessageCreate,   // 单聊来信(d 是平台事件体)
+        InteractionCreate,  // 互动回调(Q6 按钮点击;d 是平台事件体)
         SessionReady,       // Identify 过(含新 session_id)
         SessionResumed,     // Resume 过
         SessionInvalidated, // op9 不可恢复:session 已清,下一轮重新 Identify
@@ -59,6 +60,7 @@ struct GatewayEvent {
     };
     Kind kind = Kind::Disconnected;
     nlohmann::json c2c_d;      // Kind::C2cMessageCreate 时有值
+    nlohmann::json interaction_d;  // Kind::InteractionCreate 时有值
     std::string detail;
     std::int64_t seq = -1;     // Disconnected 时的 last_seq
     std::string stage;         // StageChanged/ConnectFailed/Disconnected 时有值
@@ -92,7 +94,9 @@ public:
         std::function<std::expected<std::string, GatewayConnectError>()> gateway_url_provider;
         // 每次连接取当前 access token(鉴权/刷新归 QqTokenManager)。
         std::function<std::expected<std::string, GatewayConnectError>()> token_provider;
-        std::uint32_t intents = kIntentGroupAndC2cEvent;
+        // Q6 起默认订阅单聊 + 互动(审批按钮回调);测试若要钉旧行为可显式
+        // 覆盖为 kIntentGroupAndC2cEvent。
+        std::uint32_t intents = kIntentDefaultBot;
         std::function<void(const GatewayEvent&)> on_event;
         std::function<std::int64_t()> now_ms;
         int hello_timeout_ms = 10'000;

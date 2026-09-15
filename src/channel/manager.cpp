@@ -601,6 +601,9 @@ void ChannelManager::HandleMessageLocked(AccountEntry& entry, const IncomingMess
             // 平台异步回执(Q2 §七:与 send 请求按 outbound_delivery_id 关联;
             // 重复/陈旧回执只留诊断)。
             OnDeliveryReceiptLocked(entry, incoming.params);
+        } else if (incoming.method == BridgeMethod::InteractionCreate) {
+            // Q6 按钮回调:解析进队列,泵消费后裁决并回应。
+            OnInteractionLocked(entry, incoming.params);
         }
         // 其余通知(login.*/capabilities.changed):后续批次的口,先入
         // router 诊断账,不消费。
@@ -1027,7 +1030,8 @@ std::optional<std::string> ChannelManager::SendReply(const std::string& channel_
                "),不能发";
     }
     if (request.conversation_id.empty() || request.client_delivery_id.empty() ||
-        (request.text.empty() && !request.attachment.has_value())) {
+        (request.text.empty() && !request.attachment.has_value() &&
+         request.keyboard.empty())) {
         return "发送请求缺 conversation/text/client_delivery_id";
     }
     // 已结算过的 delivery 不再受理(终态不翻转;防跨代次重复投递)。
@@ -1061,6 +1065,12 @@ std::optional<std::string> ChannelManager::SendReply(const std::string& channel_
     params["parts"] = std::move(parts);
     if (!request.reply_to_message_id.empty()) {
         params["reply_to_message_id"] = request.reply_to_message_id;
+    }
+    // Q6 审批卡片:keyboard 对象随发(适配器按 msg_type=2 markdown+键盘)。
+    // 旧适配器不认这个键会按 unknown field 拒——调用方按失败收口(fail
+    // closed),不静默降级纯文本。
+    if (request.keyboard.is_object() && !request.keyboard.empty()) {
+        params["keyboard"] = request.keyboard;
     }
     params["client_id"] = request.client_delivery_id;
     const std::int64_t request_id = entry->router.EnqueueOutgoingRequest(BridgeMethod::Send, params);
@@ -1251,6 +1261,94 @@ bool ChannelManager::HasPendingSend(const std::string& channel_id, const std::st
         }
     }
     return false;
+}
+
+void ChannelManager::OnInteractionLocked(AccountEntry& entry, const nlohmann::json& params) {
+    // Q6 互动回调入队:身份复核(事件自称的渠道/账号须与连接一致),字段
+    // 缺失按协议错处置(不裁决、不回应——适配器侧已校过 application_id,
+    // 这里再核一层宿主账)。operator 取单聊 user_openid / 群聊 group_member
+    // _openid(群 OpenID 不是人,不当操作者)。
+    ChannelInteraction interaction;
+    interaction.channel_id = entry.channel_id;
+    interaction.account_id = entry.account_id;
+    auto string_field = [&params](const char* key) {
+        return params.contains(key) && params.at(key).is_string()
+                   ? params.at(key).get<std::string>()
+                   : std::string();
+    };
+    interaction.interaction_id = string_field("interactionId");
+    interaction.delivery_id = string_field("deliveryId");
+    interaction.scene = string_field("scene");
+    interaction.button_data = string_field("buttonData");
+    interaction.button_id = string_field("buttonId");
+    const std::string user_openid = string_field("userOpenid");
+    const std::string group_member = string_field("groupMemberOpenid");
+    interaction.operator_id = !group_member.empty() ? group_member : user_openid;
+    if (params.contains("type") && params.at("type").is_number_integer()) {
+        interaction.type = params.at("type").get<std::int64_t>();
+    }
+    if (params.contains("chatType") && params.at("chatType").is_number_integer()) {
+        interaction.chat_type = params.at("chatType").get<std::int64_t>();
+    }
+    if (params.contains("receivedAtMs") && params.at("receivedAtMs").is_number_integer()) {
+        interaction.received_at_ms = params.at("receivedAtMs").get<std::int64_t>();
+    }
+    if (interaction.interaction_id.empty() || interaction.button_data.empty()) {
+        NotifyTransportFailureLocked(entry, "invalid_frame",
+                                     "channel.interaction.create 缺 interactionId/buttonData");
+        return;
+    }
+    // 有界:回调积压帽(正常节奏每审批一枚;帽满丢最旧留诊断——回应侧
+    // 幂等,用户重点按钮即可)。
+    entry.interactions.push_back(std::move(interaction));
+    if (entry.interactions.size() > 64) {
+        entry.send_diagnostics.push_back("interaction_backlog_dropped_oldest");
+        entry.interactions.erase(entry.interactions.begin());
+    }
+}
+
+std::vector<ChannelManager::ChannelInteraction> ChannelManager::DrainChannelInteractions(
+    const std::string& channel_id, const std::string& account_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return {};
+    }
+    std::vector<ChannelInteraction> out = std::move(entry->interactions);
+    entry->interactions.clear();
+    return out;
+}
+
+std::string ChannelManager::AckInteraction(const std::string& channel_id,
+                                           const std::string& account_id,
+                                           const std::string& interaction_id, int code) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        return std::string("账号不在册: ") + channel_id + "/" + account_id;
+    }
+    if (entry->transport == nullptr || entry->state != ChannelAccountState::Running) {
+        return "账号不在 Running,不能回应互动";
+    }
+    if (interaction_id.empty()) {
+        return "回应互动缺 interaction_id";
+    }
+    // 官方:同一 interaction_id 只能回应一次。重复上报的回调(用户连点)
+    // 是新 interaction_id 同 token——裁决侧按 token 幂等;同 id 重复回应
+    // 在这里拦(留诊断),不撞平台的墙。
+    if (entry->acked_interactions.count(interaction_id) > 0) {
+        entry->send_diagnostics.push_back("duplicate_interaction_ack: " + interaction_id);
+        return std::string("interaction 已回应过: ") + interaction_id;
+    }
+    entry->acked_interactions.insert(interaction_id);
+    if (entry->acked_interactions.size() > 512) {
+        entry->acked_interactions.erase(entry->acked_interactions.begin());
+    }
+    nlohmann::json params = nlohmann::json{{"interaction_id", interaction_id},
+                                           {"code", code}};
+    (void)entry->router.EnqueueOutgoingRequest(BridgeMethod::InteractionAck, params);
+    FlushOutboundLocked(*entry);
+    return std::string();
 }
 
 std::vector<ChannelManager::IngressRunningView> ChannelManager::ListRunningIngress(

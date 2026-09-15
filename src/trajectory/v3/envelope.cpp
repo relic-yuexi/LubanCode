@@ -363,6 +363,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::PromptCompositionApplied: return "prompt.composition.applied";
         case EventKindV3::MemoryExtractionAssessed: return "memory.extraction.assessed";
         case EventKindV3::MemoryWriteReceipted: return "memory.write.receipted";
+        case EventKindV3::ChannelApprovalRequested: return "channel.approval.requested";
+        case EventKindV3::ChannelApprovalResolved: return "channel.approval.resolved";
 
     }
     return "unknown";
@@ -501,6 +503,9 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             // 记忆账(取消误报 ESC 单 Bug 2):statusless 事实行。
             EventKindV3::MemoryExtractionAssessed,
             EventKindV3::MemoryWriteReceipted,
+            // 渠道远端审批(QQ 接入单 Q6,statusless 事实行)。
+            EventKindV3::ChannelApprovalRequested,
+            EventKindV3::ChannelApprovalResolved,
 
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {

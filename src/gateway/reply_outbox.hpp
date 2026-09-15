@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -190,6 +191,10 @@ private:
     std::optional<trajectory::JournalWriter> writer_;
     bool broken_ = false;
     std::map<std::string, ReplyOutboxItem> items_;
+    // Q6 起渠道 turn 在专用工作线程跑,EnqueueChannel 与泵 tick 的读写
+    // 并发——本类从"装配期单写者"升为"类内串行"(一把锁包全部读写口;
+    // 写盘在锁内,粒度换简单)。move 不搬锁(移动是装配期独占操作)。
+    mutable std::mutex mutex_;
 };
 
 // deliveryId 定式散列(§11.1):replySelectionId + target + ordinal。

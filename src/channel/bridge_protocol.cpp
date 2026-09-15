@@ -21,6 +21,8 @@ const char* BridgeMethodName(BridgeMethod method) {
         case BridgeMethod::Logout: return "channel.logout";
         case BridgeMethod::InboundAck: return "channel.inbound.ack";
         case BridgeMethod::InboundNack: return "channel.inbound.nack";
+        case BridgeMethod::InteractionAck: return "channel.interaction.ack";
+        case BridgeMethod::InteractionCreate: return "channel.interaction.create";
         case BridgeMethod::Inbound: return "channel.inbound";
         case BridgeMethod::Status: return "channel.status";
         case BridgeMethod::DeliveryReceipt: return "channel.delivery.receipt";
@@ -53,6 +55,8 @@ std::optional<BridgeMethod> BridgeMethodFromName(std::string_view name) {
     if (name == "channel.login.completed") return BridgeMethod::LoginCompleted;
     if (name == "channel.capabilities.changed") return BridgeMethod::CapabilitiesChanged;
     if (name == "channel.fatal") return BridgeMethod::Fatal;
+    if (name == "channel.interaction.ack") return BridgeMethod::InteractionAck;
+    if (name == "channel.interaction.create") return BridgeMethod::InteractionCreate;
     return std::nullopt;
 }
 
@@ -66,6 +70,7 @@ bool IsNotificationMethod(BridgeMethod method) {
         case BridgeMethod::LoginCompleted:
         case BridgeMethod::CapabilitiesChanged:
         case BridgeMethod::Fatal:
+        case BridgeMethod::InteractionCreate:
             return true;
         default:
             return false;
@@ -87,6 +92,7 @@ BridgeDirection MethodDirection(BridgeMethod method) {
         case BridgeMethod::Logout:
         case BridgeMethod::InboundAck:
         case BridgeMethod::InboundNack:
+        case BridgeMethod::InteractionAck:
             return BridgeDirection::HostToSidecar;
         default:
             return BridgeDirection::SidecarToHost;
@@ -343,6 +349,9 @@ constexpr FieldSpec kFieldSpecs[] = {
     {BridgeMethod::Send, false, "parts", "a", true},
     {BridgeMethod::Send, false, "reply_to_message_id", "s", false},
     {BridgeMethod::Send, false, "client_id", "s", false},
+    // Q6 审批卡片:可选 keyboard 对象(自定义键盘载荷,旧适配器不认即
+    // 报 unknown field,宿主按 capabilities.interactions 协商后才发)。
+    {BridgeMethod::Send, false, "keyboard", "o", false},
     {BridgeMethod::Send, true, "provider_message_id", "s", true},
     {BridgeMethod::Send, true, "accepted", "b", true},
     // ---- channel.edit ----
@@ -399,6 +408,17 @@ constexpr FieldSpec kFieldSpecs[] = {
     // ---- channel.fatal(notification) ----
     {BridgeMethod::Fatal, false, "reason", "s", true},
     {BridgeMethod::Fatal, false, "detail", "s", false},
+    // ---- channel.interaction.ack(host->sidecar,Q6) ----
+    {BridgeMethod::InteractionAck, false, "interaction_id", "s", true},
+    {BridgeMethod::InteractionAck, false, "code", "i", true},
+    {BridgeMethod::InteractionAck, true, "acked", "b", true},
+    // ---- channel.interaction.create(notification,sidecar->host,Q6) ----
+    // 完整形状由宿主侧 InteractionEventFromJson 解;这里只钉必带的身份
+    // 与回调数据四键(嵌套不递归)。
+    {BridgeMethod::InteractionCreate, false, "interactionId", "s", true},
+    {BridgeMethod::InteractionCreate, false, "type", "i", true},
+    {BridgeMethod::InteractionCreate, false, "buttonData", "s", true},
+    {BridgeMethod::InteractionCreate, false, "deliveryId", "s", true},
 };
 
 std::optional<std::string> ValidateShape(BridgeMethod method, bool is_result,

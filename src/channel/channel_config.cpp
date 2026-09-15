@@ -108,7 +108,8 @@ bool ParseStringArray(const nlohmann::json& value, const std::string& path,
 }
 
 // tools 上限段(渠道层/账号层共用;QQ 接入单 Q0)。allow 的 presence 显式
-// 保留:键在(哪怕空数组)= 设上限;键不在 = nullopt 不添上限。
+// 保留:键在(哪怕空数组)= 设上限;键不在 = nullopt 不添上限。Q6 的
+// approve 同款(键在 = 本层参与审批带)。
 bool ParseToolsPolicy(const nlohmann::json& value, const std::string& path,
                       const std::string& file_path_for_error, ChannelToolsUserPolicy* out,
                       std::string* error) {
@@ -128,9 +129,17 @@ bool ParseToolsPolicy(const nlohmann::json& value, const std::string& path,
                                   error)) {
                 return false;
             }
+        } else if (it.key() == "approve") {
+            // Q6:可申请审批带(执行前经远端按钮问用户,不预先授权)。
+            std::vector<std::string> approve;
+            if (!ParseStringArray(it.value(), path + ".approve", file_path_for_error, &approve,
+                                  error)) {
+                return false;
+            }
+            out->approve = std::move(approve);
         } else {
             *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + it.key() +
-                     " 是认不得的字段(tools 只收 allow/deny)";
+                     " 是认不得的字段(tools 只收 allow/deny/approve)";
             return false;
         }
     }
@@ -419,9 +428,17 @@ bool ParseBindingPolicy(const nlohmann::json& value, const std::string& path,
                                           file_path_for_error, &out->tools.deny, error)) {
                         return false;
                     }
+                } else if (tool_it.key() == "approve") {
+                    // Q6:binding 层审批带(presence 合同与 allow 同款)。
+                    std::vector<std::string> approve;
+                    if (!ParseStringArray(tool_it.value(), path + ".tools.approve",
+                                          file_path_for_error, &approve, error)) {
+                        return false;
+                    }
+                    out->tools.approve = std::move(approve);
                 } else {
                     *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".tools." +
-                             tool_it.key() + " 是认不得的字段(tools 只收 allow/deny)";
+                             tool_it.key() + " 是认不得的字段(tools 只收 allow/deny/approve)";
                     return false;
                 }
             }

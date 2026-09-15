@@ -558,6 +558,58 @@ TEST_CASE("QQ 模板路由出来:只许 read_file/search,群聊整体 disabled")
     CHECK(Route(bot_dm, template_account, nullptr, &pairing).reason == "bot_rejected");
 }
 
+TEST_CASE("审批带(Q6):approve 显式交集,deny 永远赢,allow 带内预授权不进审批") {
+    // 场景:账号层 allow 只列只读工具(显式预授权),bash_like 走 approve
+    //(可申请远端审批,不预先授权)——暴露面可见(看不见无从申请),执行
+    // 前由确认闸问按钮。
+    ChannelAccountUserConfig account = MakeAccount();
+    account.tools.allow = std::vector<std::string>{"read_file"};
+    account.tools.approve = std::vector<std::string>{"bash_like", "write_file"};
+
+    const auto decision =
+        Route(MakeEvent(ConversationKind::Direct, "dm-1", "owner"), account);
+    REQUIRE(decision.status == RouteDecision::Status::Admitted);
+    // approve 带内:可见(Allows)但非预授权(ExplicitlyAllows),可申请
+    //(Approvable)。
+    CHECK(decision.tools.Allows("bash_like"));
+    CHECK_FALSE(decision.tools.ExplicitlyAllows("bash_like"));
+    CHECK(decision.tools.Approvable("bash_like"));
+    // allow 列名的:预授权(不进审批,直接放行)。
+    CHECK(decision.tools.Allows("read_file"));
+    CHECK(decision.tools.ExplicitlyAllows("read_file"));
+    CHECK_FALSE(decision.tools.Approvable("read_file"));
+    // 两个名单都不在:照旧 fail closed。
+    CHECK_FALSE(decision.tools.Allows("run_command"));
+    CHECK_FALSE(decision.tools.Approvable("run_command"));
+
+    // 交集:渠道层 approve 只列 bash_like → write_file 掉出带(fail closed)。
+    ChannelToolsUserPolicy channel_tools;
+    channel_tools.approve = std::vector<std::string>{"bash_like"};
+    const auto narrowed =
+        Route(MakeEvent(ConversationKind::Direct, "dm-1", "owner"), account, nullptr, nullptr,
+              &channel_tools);
+    REQUIRE(narrowed.status == RouteDecision::Status::Admitted);
+    CHECK(narrowed.tools.Approvable("bash_like"));
+    CHECK_FALSE(narrowed.tools.Approvable("write_file"));
+    CHECK(narrowed.tools.source == "channel+account");
+
+    // hard deny 不可被按钮覆盖:deny 命中 → 不可见、不可申请。
+    ChannelAccountUserConfig denied = account;
+    denied.tools.deny = {"bash_like"};
+    const auto hard = Route(MakeEvent(ConversationKind::Direct, "dm-1", "owner"), denied);
+    REQUIRE(hard.status == RouteDecision::Status::Admitted);
+    CHECK_FALSE(hard.tools.Allows("bash_like"));
+    CHECK_FALSE(hard.tools.Approvable("bash_like"));
+    CHECK_FALSE(hard.tools.ExplicitlyAllows("bash_like"));
+
+    // 零层声明 approve = 空带(Q0 行为零变化)。
+    ChannelAccountUserConfig bare = MakeAccount();
+    const auto none = Route(MakeEvent(ConversationKind::Direct, "dm-1", "owner"), bare);
+    REQUIRE(none.status == RouteDecision::Status::Admitted);
+    CHECK(none.tools.approve.empty());
+    CHECK_FALSE(none.tools.Approvable("bash_like"));
+}
+
 TEST_CASE("配对不升 owner:批准账不进 allow_from,owner 只认本机配置") {
     ChannelAccountUserConfig account = MakeAccount();
     account.dm_policy = DmPolicy::Pairing;

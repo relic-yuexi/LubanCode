@@ -171,6 +171,44 @@ TEST_CASE("tools 上限字段:坏类型/未知字段明拒") {
     CHECK(error.find("tools") != std::string::npos);
 }
 
+TEST_CASE("tools.approve(Q6 审批带):渠道段/账号段/binding 都收,presence 同 allow") {
+    const auto parsed = Parse(R"({
+      "qqbot": {
+        "tools": {"approve": ["bash_like"]},
+        "accounts": {
+          "main": {"tools": {"approve": ["bash_like", "write_file"]}}
+        },
+        "bindings": [
+          {"match": {"account": "main"},
+           "policy": {"tools": {"approve": ["bash_like"]}}}
+        ]
+      }
+    })");
+    REQUIRE(parsed.has_value());
+    const ChannelUserConfig& channel = parsed->at("qqbot");
+    REQUIRE(channel.tools.approve.has_value());
+    CHECK(*channel.tools.approve == std::vector<std::string>{"bash_like"});
+
+    const ChannelAccountUserConfig& main = channel.accounts.at("main");
+    REQUIRE(main.tools.approve.has_value());
+    CHECK(*main.tools.approve == std::vector<std::string>({"bash_like", "write_file"}));
+
+    REQUIRE(channel.bindings.size() == 1);
+    REQUIRE(channel.bindings[0].policy.tools.approve.has_value());
+    CHECK(*channel.bindings[0].policy.tools.approve ==
+          std::vector<std::string>{"bash_like"});
+
+    // 没写 approve:零审批带(默认,Q0 行为零变化)。
+    const auto bare = Parse(R"({"qqbot": {"accounts": {"m": {}}}})");
+    REQUIRE(bare.has_value());
+    CHECK_FALSE(bare->at("qqbot").accounts.at("m").tools.approve.has_value());
+
+    // 坏类型明拒。
+    std::string error;
+    CHECK_FALSE(Parse(R"({"qqbot": {"tools": {"approve": "bash"}}})", &error).has_value());
+    CHECK(error.find("tools.approve") != std::string::npos);
+}
+
 TEST_CASE("QQ 模板:逐字段显式,不改全渠道默认值迁就 QQ") {
     const ChannelAccountUserConfig template_account = MakeQqTemplateAccount();
     CHECK_FALSE(template_account.enabled);

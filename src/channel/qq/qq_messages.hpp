@@ -46,6 +46,18 @@ public:
     // (首版配置不开,载荷不带 msg_id/msg_seq)。
     Outcome SendC2c(const C2cSendRequest& request);
 
+    // ---- Q6 互动回应 -------------------------------------------------------
+    // 互动回调处理结果。官方:同一 interaction_id 只能回应一次、超时失效,
+    // code=0 只表示回调处理成功。这里只管"尽力送达回应",失败不重试
+    //(回应一次限制 + 客户端 loading 已超时,重试无意义),结果如实回给
+    // 调用方进账。
+    enum class AckStatus { Acked, Failed };
+    struct AckOutcome {
+        AckStatus status = AckStatus::Failed;
+        QqApiError error;  // Failed 时的分型账
+    };
+    AckOutcome AckInteraction(const std::string& interaction_id, int code);
+
     // 诊断:当前 msg_seq 记账规模。
     std::size_t frozen_delivery_count() const;
 

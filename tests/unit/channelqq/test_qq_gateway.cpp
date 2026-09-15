@@ -197,14 +197,15 @@ TEST_CASE("qq_gateway: Hello→Identify→READY→C2C Dispatch 全链;seq 记账
                                 R"("message_type":0,"timestamp":"2026-07-21T10:00:00+08:00"}})");
     harness.Start();
 
-    // Identify:op=2,token 带 QQBot 前缀,intents = 1<<25。
+    // Identify:op=2,token 带 QQBot 前缀,intents = 单聊位|互动位(Q6 起
+    // 默认订阅两枚)。
     REQUIRE(FakeTransport::WaitForSent(harness.shared, R"("op":2)"));
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
         REQUIRE_FALSE(harness.shared->sent.empty());
         const auto identify = nlohmann::json::parse(harness.shared->sent[0]);
         CHECK(identify.at("d").at("token") == "QQBot TOKEN");
-        CHECK(identify.at("d").at("intents") == (1u << 25));
+        CHECK(identify.at("d").at("intents") == ((1u << 25) | (1u << 26)));
     }
     // READY 事件 + C2C 事件。
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -282,6 +283,40 @@ TEST_CASE("qq_gateway: 断线退避后 Resume 携带 session_id+seq;RESUMED 事�
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::SessionResumed;
     }));
+}
+
+TEST_CASE("qq_gateway: INTERACTION_CREATE 分发为互动事件,载荷原样带出") {
+    Harness harness;
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(
+        harness.shared,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-1","user":{"id":"bot-1"}}})");
+    // 官方互动事件页单聊例(type=11 消息按钮)。
+    FakeTransport::PushIncoming(harness.shared,
+                                R"({"op":0,"s":2,"t":"INTERACTION_CREATE","d":)"
+                                R"({"application_id":"1904842048","chat_type":2,)"
+                                R"("data":{"resolved":{"button_data":"qai:tok:1"},)"
+                                R"("type":11},"id":"inter-1","scene":"c2c",)"
+                                R"("timestamp":"2026-07-20T21:53:54+08:00","type":11,)"
+                                R"("user_openid":"OPENID1","version":1}})");
+    harness.Start();
+
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::InteractionCreate;
+    }));
+    const auto events = harness.SnapshotEvents();
+    bool seen = false;
+    for (const auto& event : events) {
+        if (event.kind != GatewayEvent::Kind::InteractionCreate) {
+            continue;
+        }
+        seen = true;
+        CHECK(event.interaction_d.at("id").get<std::string>() == "inter-1");
+        CHECK(event.interaction_d.at("type") == 11);
+        CHECK(event.interaction_d.at("data").at("resolved").at("button_data") == "qai:tok:1");
+    }
+    CHECK(seen);
+    CHECK(harness.session->last_seq() == 2);
 }
 
 TEST_CASE("qq_gateway: Invalid Session 不可恢复——清 session,下轮重新 Identify") {

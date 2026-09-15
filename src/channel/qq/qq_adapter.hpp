@@ -114,6 +114,8 @@ private:
     bool StartGatewayLocked();
     void StopGatewayLocked(const std::string& reason);
     void SenderLoop();
+    // Q6:互动回应队列的消费(PUT /interactions/{id},一次,不重试)。
+    void ProcessAcks();
     std::string NextDeliveryId();
 
     Options options_;
@@ -127,6 +129,13 @@ private:
         int attempts = 0;
     };
     std::vector<PendingSend> send_queue_;  // 由 host_mutex_ 保护(与 to_host 同锁)
+    // Q6 互动回应队列(发送线程消费;与 send_queue_ 同锁同唤醒)。
+    struct PendingAck {
+        std::int64_t request_id = 0;
+        std::string interaction_id;
+        int code = 0;
+    };
+    std::vector<PendingAck> ack_queue_;
     std::optional<QqMessageSender> sender_;
     std::optional<QqMediaUploader> uploader_;  // Q4:file_info 两步上传
     std::optional<QqSpoolStore> spool_;

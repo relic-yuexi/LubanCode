@@ -100,10 +100,20 @@ bool ToolRoutePolicy::Allows(const std::string& tool_name) const {
     if (Contains(deny, tool_name)) {
         return false;
     }
-    if (allow.has_value() && !Contains(*allow, tool_name)) {
+    if (allow.has_value() && !Contains(*allow, tool_name) &&
+        !Contains(approve, tool_name)) {
         return false;
     }
     return true;
+}
+
+bool ToolRoutePolicy::Approvable(const std::string& tool_name) const {
+    // deny 永远赢(hard deny 不可被按钮覆盖,§12.2);approve 显式列名
+    // 才在带内(与 ExplicitlyAllows 同款保守:零显式声明 = 不在带内)。
+    if (Contains(deny, tool_name)) {
+        return false;
+    }
+    return Contains(approve, tool_name);
 }
 
 bool ToolRoutePolicy::ExplicitlyAllows(const std::string& tool_name) const {
@@ -231,12 +241,19 @@ RouteDecision RouteChannelEvent(const RouteInput& input) {
     // /security.md §3)。有效工具 = Agent 已有 ∩ 渠道上限 ∩ 账号上限 ∩ 所有
     // 命中 binding 上限 - 各层 deny 并集。每层 allow 未设 = 不添上限;设了
     //(含空名单)= 显式上限。deny 永远赢,具体 binding 抹不掉宽层 deny。
+    // Q6:approve(可申请审批带)同构逐层交集——只在"本层出了手"的层间
+    // 取显式 approve 交集,未设层不参与(与 allow 同一语义);默认零层
+    // 声明 = 空 approve 带 = Q0 行为零变化。
     {
         bool any_layer = false;
+        // approve 的交集过程账:optional 区分"未设层"(不参与)与"显式空
+        // 层"(参与,把带砍空)——落盘前不清进 decision.tools.approve。
+        std::optional<std::vector<std::string>> approve_intersection;
         auto merge_layer = [&](const std::string& label,
                                const std::optional<std::vector<std::string>>& cap_allow,
-                               const std::vector<std::string>& cap_deny) {
-            if (!cap_allow.has_value() && cap_deny.empty()) {
+                               const std::vector<std::string>& cap_deny,
+                               const std::optional<std::vector<std::string>>& cap_approve) {
+            if (!cap_allow.has_value() && cap_deny.empty() && !cap_approve.has_value()) {
                 return;  // 本层没设:不添上限
             }
             any_layer = true;
@@ -262,15 +279,31 @@ RouteDecision RouteChannelEvent(const RouteInput& input) {
                     decision.tools.deny.push_back(denied);
                 }
             }
+            if (cap_approve.has_value()) {
+                if (!approve_intersection.has_value()) {
+                    approve_intersection = *cap_approve;
+                } else {
+                    std::vector<std::string> intersection;
+                    for (const std::string& name : *approve_intersection) {
+                        if (Contains(*cap_approve, name) && !Contains(intersection, name)) {
+                            intersection.push_back(name);
+                        }
+                    }
+                    approve_intersection = std::move(intersection);
+                }
+            }
         };
         if (input.channel_tools != nullptr) {
-            merge_layer("channel", input.channel_tools->allow, input.channel_tools->deny);
+            merge_layer("channel", input.channel_tools->allow, input.channel_tools->deny,
+                        input.channel_tools->approve);
         }
-        merge_layer("account", account.tools.allow, account.tools.deny);
+        merge_layer("account", account.tools.allow, account.tools.deny, account.tools.approve);
         for (std::size_t i = 0; i < matched.size(); ++i) {
             merge_layer("binding[" + std::to_string(i) + "]", matched[i]->policy.tools.allow,
-                        matched[i]->policy.tools.deny);
+                        matched[i]->policy.tools.deny, matched[i]->policy.tools.approve);
         }
+        decision.tools.approve =
+            approve_intersection.value_or(std::vector<std::string>{});
         if (!any_layer) {
             decision.tools.source.clear();
         }

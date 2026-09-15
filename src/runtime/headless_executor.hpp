@@ -207,6 +207,14 @@ public:
         // 空 = 不带)。键值由泵冻结(ingressSid/sessionKey/conversationId/
         // senderId),恢复反查用。
         nlohmann::json binding_extra;
+        // Q6 渠道远端审批:本轮的工具确认回调(泵从 WorkItem 冻结上下文
+        // 拼;null = 无审批路,回落 Options.on_tool_confirm(W2 注入口)
+        // 或既有 fail-closed 合同,行为不变)。同步阻塞——执行线程等远端
+        // 按钮,事件泵不跟堵(泵装配层保证执行在工作线程)。
+        std::function<Options::ToolConfirmDecision(const std::string& tool_use_id,
+                                                  const std::string& name,
+                                                  const nlohmann::json& input)>
+            on_tool_confirm;
     };
     struct ChannelTurnResult {
         bool ok = false;
@@ -234,6 +242,7 @@ private:
     // 生命周期归调用方:automation 跑完 Close,渠道跨轮持有)。
     // agent_override 非空 = 用调用方缓存的引擎(渠道路:同场多轮共享
     // history,上下文不断);空 = 本轮现建(automation:fresh session)。
+    // per_turn_confirm:Q6 渠道远端审批的本轮回调(空 = 无审批路)。
     Result RunTurnOnService(SessionService& service, agent::Agent* agent_override,
                             const std::string& prompt, const HeadlessWorkBinding& binding,
                             const char* purpose, const char* turn_actor,
@@ -242,7 +251,10 @@ private:
                             const std::string& selection_delivery_target,
                             const std::function<void(const std::string&,
                                                      const std::string&)>& on_bound,
-                            const std::atomic<bool>* cancel);
+                            const std::atomic<bool>* cancel,
+                            const std::function<Options::ToolConfirmDecision(
+                                const std::string&, const std::string&, const nlohmann::json&)>*
+                                per_turn_confirm = nullptr);
     // 渠道活场:session_key -> (常驻 SessionService + 常驻 Agent)。同场
     // 多轮共用同一只 Agent——上下文(history/前缀缓存)随场存活;超帽按
     // 最旧淘汰(Close 后由映射账续 resume-as-new,LaunchResumeHistory

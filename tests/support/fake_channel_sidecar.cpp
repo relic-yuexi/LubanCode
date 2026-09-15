@@ -73,6 +73,12 @@ void FakeChannelSidecar::EmitDeliveryReceipt(const std::string& outbound_deliver
     SendBack(BuildNotificationJson(BridgeMethod::DeliveryReceipt, std::move(params)));
 }
 
+void FakeChannelSidecar::EmitInteractionNotification(const nlohmann::json& params) {
+    // Q6:主动排一条 channel.interaction.create 通知(按钮回调;宿主裁决
+    // 后会回 channel.interaction.ack——见 interaction_acks_ 观测账)。
+    SendBack(BuildNotificationJson(BridgeMethod::InteractionCreate, params));
+}
+
 void FakeChannelSidecar::HandleIncomingJson(const nlohmann::json& frame_json) {
     const IncomingMessage message = ParseIncomingMessage(frame_json);
 
@@ -230,6 +236,15 @@ void FakeChannelSidecar::HandleIncomingJson(const nlohmann::json& frame_json) {
         }
         case BridgeMethod::InboundNack: {
             SendBack(BuildResultResponseJson(id, {{"nacked", true}}));
+            return;
+        }
+        case BridgeMethod::InteractionAck: {
+            // Q6:宿主对按钮回调的回应(code 官方口径 0 成功/3 重复/4 没权限)。
+            RecordedInteractionAck ack;
+            ack.interaction_id = message.params.value("interaction_id", "");
+            ack.code = static_cast<int>(message.params.value("code", 0));
+            interaction_acks_.push_back(std::move(ack));
+            SendBack(BuildResultResponseJson(id, {{"acked", true}}));
             return;
         }
         default:

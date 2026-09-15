@@ -29,7 +29,9 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -38,6 +40,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "channel/manager.hpp"
@@ -47,6 +50,7 @@
 #include "gateway/reply_outbox.hpp"
 #include "gateway/work_pump.hpp"
 #include "runtime/channel_automation.hpp"
+#include "runtime/channel_interaction_broker.hpp"
 #include "runtime/channel_media_service.hpp"
 #include "runtime/headless_executor.hpp"
 #include "workspace/identity.hpp"
@@ -113,6 +117,19 @@ public:
         // + 泵自己的窗(入 outbox 后、发送前)。
         std::function<std::string(HeadlessExecutor::Options::FaultPoint)> fault_injection;
         std::function<std::string()> fault_after_enqueue;
+        // ---- Q6 远端审批(QQ 按钮批准一次工具调用) --------------------------
+        // 审批 broker(平台中立件;空 = 审批带工具照 Q0 fail closed 拒,
+        // 行为零变化)。须确认工具在 tools.approve 带内时经它发卡等按钮:
+        // 裁决/超时(默认拒绝)/幂等/身份复核都在 broker。
+        std::shared_ptr<ChannelInteractionBroker> interaction_broker;
+        // 审批窗(毫秒):到期无人答复按拒绝收口(沿 Web 面同款政策,
+        // 不默认放行)。
+        std::int64_t approval_timeout_ms = 300'000;
+        // 渠道 turn 执行线程数(§12.2 第九行:等按钮的线程不能是唯一收
+        // 按钮线程)。0 = 同步 tick(今日行为,测试零变化);>0 = 起专用
+        // 工作线程跑 turn,tick 线程只推进事件/投递/恢复——审批等待期间
+        // QQ 心跳、新来信、控制命令照常运转。生产装配应 ≥1。
+        std::size_t channel_turn_workers = 0;
     };
 
     struct OpenResult {
@@ -179,7 +196,30 @@ private:
                     std::int64_t now_ms);
     bool RunOneChannelTurn(std::int64_t now_ms);       // 至多一轮新执行
     bool ProcessWorkItem(const std::string& channel_id, const std::string& account_id,
-                         const channel::ChannelManager::WorkItem& work, std::int64_t now_ms);
+                         const channel::ChannelManager::WorkItem& work, std::int64_t now_ms,
+                         const std::string& turn_key, const std::atomic<bool>* cancel);
+    // Q6 远端审批:per-turn 确认回调的裁定(显式 allow 放行/hard deny 拒/
+    // 审批带发卡等按钮/带外 fail closed 拒)。
+    HeadlessExecutor::Options::ToolConfirmDecision DecideChannelToolApproval(
+        const std::string& turn_key, const channel::ToolRoutePolicy& tools,
+        const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+        const std::string& channel_id, const std::string& account_id,
+        const std::string& conversation_id, const std::string& session_key,
+        const std::string& sender_id, const std::string& message_id,
+        std::int64_t received_at_ms, const std::atomic<bool>* cancel);
+    // Q6:审批卡入交互 outbox(有期限;重试不突破审批 TTL);驱动与回执
+    // 结算见 DriveApprovalFlow。
+    void EnqueueApprovalCard(const ChannelInteractionBroker::RequestedFact& fact);
+    bool DriveApprovalFlow(std::int64_t now_ms);  // 回调裁决+ack;卡片发送/重试
+    // 审批回执结算(ApplyDeliveryOutcomes 查不到 outbox 项时对账卡片)。
+    // 返回 true = 这笔回执是审批卡片的(已消化)。
+    bool SettleApprovalCardOutcome(const std::string& client_delivery_id,
+                                   channel::ChannelManager::ChannelDeliveryOutcome::Status status,
+                                   const std::string& error_code, std::int64_t now_ms);
+    // Q6:turn 收场后把审批流水落进该场 V3(channel.approval.requested/
+    // resolved;writer 空闲窗口写,同 session 单飞保证无并发)。
+    void WriteApprovalFactsToV3(const std::string& session_id, const std::string& turn_id,
+                                const std::string& turn_key);
     // ---- Q5:渠道任务的认领/执行/恢复/补投 -----------------------------------
     bool SweepChannelJobRecovery(std::int64_t now_ms);  // claimed 未结算的跨账裁决
     bool RecoverChannelJobOccurrence(const gateway::AutomationOccurrence& occurrence,
@@ -210,10 +250,13 @@ private:
     // ---- Q5 渠道任务的补投账(进程内,重启即清) ----
     // 最近一来信锚("<ch>/<acct>/<conv>" → msg_id + 时刻):渠道任务段的
     // 被动回复窗判定原料。重启清空 = 首投按主动消息走,窗判定重新累积。
+    // Q6 异步 turn 起,写在工作线程(ProcessWorkItem)、读在 tick
+    //(FreshInboundAnchor)——过锁。
     struct RecentInbound {
         std::string message_id;
         std::int64_t received_at_ms = 0;
     };
+    mutable std::mutex recent_inbound_mutex_;
     std::map<std::string, RecentInbound> recent_inbound_;
     // 挂起等互动的渠道任务段(主动额度受限/回复窗过期被拒):不硬发不谎报,
     // 下一封来信进窗后锚定补投(§11.3)。重启清空 = 重启后主动重试一次,
@@ -222,9 +265,47 @@ private:
     std::size_t last_account_index_ = 0;  // 账号间轮转公平
     std::size_t active_turns_ = 0;        // 全局并发帽的门(多线程泵)
     // 本进程在跑的轮(sweep 跳过;多线程泵的门)。键 "<ch>/<acct>/<sid>"。
+    // Q6 异步 turn 起,这组账(turn_jobs_mutex_)由 tick 线程与工作线程
+    // 共用,读写都过锁。
     std::set<std::string> in_flight_sids_;
     // 故障注入窗 3:入箱后、发送前死——本 tick 不驱动投递(恢复路接管)。
     bool suppress_delivery_ = false;
+    // ---- Q6:异步 turn 执行线程(channel_turn_workers>0 时) ----------------
+    struct TurnJob {
+        std::string channel_id;
+        std::string account_id;
+        std::string turn_key;
+        channel::ChannelManager::WorkItem work;
+        std::int64_t now_ms = 0;
+        std::shared_ptr<std::atomic<bool>> cancel;  // Close/停机打断审批等待
+    };
+    std::mutex turn_jobs_mutex_;
+    std::condition_variable turn_jobs_wake_;
+    std::deque<TurnJob> turn_jobs_;
+    std::vector<std::shared_ptr<std::atomic<bool>>> inflight_cancels_;
+    std::vector<std::thread> turn_workers_;
+    std::atomic<bool> turn_workers_stop_{false};
+    void TurnWorkerLoop();
+    void ShutDownTurnWorkers();  // 打断在飞、退回未跑、join(Close/析构共用)
+    // ---- Q6:审批卡片的交互 outbox(进程内;重启后旧请求作废不补投) ----
+    // deadline 即审批 TTL:卡片投递失败在窗内退避重试,过线取消等待
+    //(fail closed,不为重试卡片突破审批窗)。
+    struct ApprovalCard {
+        std::string token;
+        std::string delivery_id;  // manager send 的 client_delivery_id(回执对账)
+        std::string channel_id;
+        std::string account_id;
+        std::string conversation_id;
+        std::string reply_to_message_id;
+        std::string markdown;      // 卡片正文(脱敏摘要)
+        nlohmann::json keyboard;   // 冻结的键盘载荷
+        std::int64_t deadline_ms = 0;
+        std::int64_t retry_at_ms = 0;
+        bool inflight = false;  // 已递 manager,等回执
+        bool done = false;      // 终态(已投递/已失败收口)
+    };
+    std::mutex approval_cards_mutex_;
+    std::vector<ApprovalCard> approval_cards_;
 };
 
 }  // namespace lubancode::runtime

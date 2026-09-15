@@ -1002,6 +1002,9 @@ add_library(lubancode_runtime STATIC
   # QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装——ingress/路由/绑定/
   # 执行/reply selection/outbox/投递的次序链与恢复裁决)。
   src/runtime/channel_work_pump.cpp
+  # QQ 接入单 Q6:渠道远端审批 broker(平台中立——pending 表/随机 opaque
+  # token/操作者身份复核/超时默认拒绝/幂等,复用 runtime 四态合同)。
+  src/runtime/channel_interaction_broker.cpp
   # QQ 接入单 Q5:聊天侧任务桥(渠道会话的模型经 create/list/cancel_
   # reminder 落 automation 域命令;归属闸/幂等键/渠道上下文冻结)。
   src/runtime/channel_automation.cpp

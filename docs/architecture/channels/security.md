@@ -56,7 +56,7 @@ Channel Session 没本地用户守着键盘。现有 confirm 档遇上工具审�
 - deny 工具：直接拒绝。
 - project policy 只能继续收窄。
 
-不为"机器人好用"便把 confirm 偷换成 auto，也不在 Gateway 全局改 auto。远端按钮/卡片审批留二期；无 interaction 能力的平台仍 fail closed。模型不可提供 sender id，不可生成 approval id，不可改 hash。
+不为"机器人好用"便把 confirm 偷换成 auto，也不在 Gateway 全局改 auto。Q6 起远端按钮审批落地（`tools.approve` 可申请审批带，各层显式交集）：带内须确认工具对模型可见、执行前经渠道按钮问用户——允许才执行这一次，拒绝/超时/取消都不执行（超时默认拒绝不默认放行）；带外与无 interaction 能力的平台仍 fail closed。deny 永远赢——hard deny 不可被按钮覆盖。模型不可提供 sender id，不可生成 approval id，不可改 hash；操作者身份由宿主从事件信封复核（单聊 user_openid、群聊 group_member_openid，配对 sender 才有效，他人代按不唤醒请求）。
 
 **受保护路径闸**：读文件/搜索类工具统一拦账号凭据与全局密钥配置——全局 `config.json`（锚参数根）、渠道账号状态根（`channel::DefaultChannelsStateRoot()`，个人布局 `<home>/.lubancode/channels/`；应用根语义随状态根落数据根，见合同 `capability-contract.md` §13.2）、信任账（package-trust/plugin-trust）、`rg-stage` 工具缓存——后三样同锚状态根。检查在**实际工具执行入口**做（包装 Tool::execute，不只过滤工具名），按 canonical 路径比对（符号链接/重解析点解析到真实目标；大小写与斜杠变体归一），绕不过。QQ 首版模板的上限是 `read_file`/`search` 两枚核过注册名的只读工具，Q5 起加三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`——落 automation 域命令、按创建者归属闸查询/取消，不读写任意路径）；首版不开放任意 shell——后续要开，须同时接系统执行隔离，不得拿 shell 字符串黑名单冒充沙箱。
 

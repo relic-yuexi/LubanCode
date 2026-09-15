@@ -210,6 +210,13 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                 work_options.automation_store =
                     automation_pump_open ? pump->store() : nullptr;
                 work_options.automation_bridge = channel_automation;
+                // Q6 远端审批(QQ 按钮批准一次工具调用):中立 broker + 专用
+                // turn 工作线程(等按钮的线程不能是唯一收按钮线程,§12.2
+                // 第九行)。审批带工具(tools.approve)发卡问用户,超时默认
+                // 拒绝;带外工具照 Q0 fail closed,行为不变。
+                work_options.interaction_broker =
+                    std::make_shared<runtime::ChannelInteractionBroker>();
+                work_options.channel_turn_workers = 1;
                 // Q4 媒体接纳 seam:QQ 定案进程内直连——下载直接绑 qq 实现
                 //(url 安全校验/大小帽/凭据脱敏都在里面;§十 10.1)。多渠道
                 // 之后再改注册制,不提前架框架。
