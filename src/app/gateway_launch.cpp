@@ -19,6 +19,7 @@
 #include "gateway/profile.hpp"
 #include "gateway/reply_outbox.hpp"
 #include "runtime/automation_pump.hpp"
+#include "runtime/channel_automation.hpp"
 #include "runtime/channel_work_pump.hpp"
 #include "tools/path_utils.hpp"
 #include "platform/paths.hpp"
@@ -148,6 +149,12 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
     // skipped 打给 stderr,Gateway 照常起来(渠道失败不拦主业务)。
     std::unique_ptr<app::ChannelGatewayWiring> channel_wiring;
     std::unique_ptr<app::CompositeGatewayPump> composite_pump;
+    // Q5 聊天侧任务桥:渠道会话的模型经 create/list/cancel_reminder 落
+    // automation 域命令(借用 automation 泵的同一本账,单写者)。store 缺席
+    // (软档)时工具 fail closed。桥须活过 RunGatewayCommand(工具持它)。
+    auto channel_automation = std::make_shared<runtime::ChannelAutomationBridge>(
+        automation_pump_open ? pump->store() : nullptr);
+    runtime::RegisterChannelAutomationTools(registry, channel_automation);
     {
         app::ChannelGatewayWiring::Options wiring_options;
         wiring_options.config = &wiring_config;
@@ -197,6 +204,11 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                 work_options.model = gateway_config->config.model;
                 work_options.max_steps_per_turn = 32;  // 与 automation 同款预算
                 work_options.max_wall_secs = 600;
+                // Q5:automation 账与任务桥递进(渠道任务认领/执行/补投 +
+                // 聊天侧工具的渠道上下文)。
+                work_options.automation_store =
+                    automation_pump_open ? pump->store() : nullptr;
+                work_options.automation_bridge = channel_automation;
                 auto work_pump = std::make_unique<runtime::ChannelWorkPump>();
                 const auto open = runtime::ChannelWorkPump::Open(work_pump.get(), *backend,
                                                                  registry, std::move(work_options));

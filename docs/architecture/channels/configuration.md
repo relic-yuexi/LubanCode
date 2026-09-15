@@ -203,11 +203,11 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
   "allow_bots": false,
   "require_mention": true,
   "reply": {"mode": "final"},
-  "tools": {"allow": ["read_file", "search"]}
+  "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder"]}
 }
 ```
 
-`tools.allow` 是核过注册名的最小只读名单（`read_file`、`search` 均为现有注册工具名）。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在这份名单里，五层交集自然拦下，扩不出上限。首版不开放任意 shell。
+`tools.allow` 是核过注册名的最小只读名单（`read_file`、`search` 均为现有注册工具名）。Q5 起多了三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`，Gateway 装配注册，见 `runtime/channel_automation`）：只对过了配对/准入的会话可用——未配对 sender 进不了模型，拿不到工具；落账走 automation 域命令与归属闸（任务只归创建者查询/取消），不碰文件系统。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在这份名单里，五层交集自然拦下，扩不出上限。首版不开放任意 shell。
 
 准入次序——先鉴权，后建 session。不通过准入的消息，不建 session，不召回记忆，不调用模型：
 

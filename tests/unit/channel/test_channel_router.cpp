@@ -525,14 +525,20 @@ TEST_CASE("QQ 模板路由出来:只许 read_file/search,群聊整体 disabled")
     CHECK(pending.reason == "pairing_pending");
 
     // 批准后放行:工具面被模板的显式最小只读名单收死——tool_search/
-    // 插件/MCP/子 Agent(agent 工具)都不在名单里,扩不出上限。
+    // 插件/MCP/子 Agent(agent 工具)都不在名单里,扩不出上限。Q5 起名单
+    // 多了三枚聊天侧任务工具(只对过了配对/准入的会话可用,落 automation
+    // 域命令,不碰文件系统)。
     pairing.approved["stranger"] = true;
     const auto admitted = Route(dm, template_account, nullptr, &pairing);
     REQUIRE(admitted.status == RouteDecision::Status::Admitted);
     REQUIRE(admitted.tools.allow.has_value());
-    CHECK(*admitted.tools.allow == std::vector<std::string>{"read_file", "search"});
+    CHECK(*admitted.tools.allow == std::vector<std::string>{"read_file", "search",
+                                                            "create_reminder", "list_reminders",
+                                                            "cancel_reminder"});
     CHECK(admitted.tools.Allows("read_file"));
     CHECK(admitted.tools.Allows("search"));
+    CHECK(admitted.tools.Allows("create_reminder"));
+    CHECK(admitted.tools.Allows("cancel_reminder"));
     CHECK_FALSE(admitted.tools.Allows("tool_search"));
     CHECK_FALSE(admitted.tools.Allows("tool_invoke"));
     CHECK_FALSE(admitted.tools.Allows("agent"));

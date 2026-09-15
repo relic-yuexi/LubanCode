@@ -102,6 +102,13 @@ void LoadJobLine(const nlohmann::json& line, AutomationJob* job,
         job->session_policy = session_policy;
     }
     job->imported_from = GetJsonString(line, "importedFrom");
+    // Q5 渠道面:旧账缺键落空 = 本地语义(行为不变)。
+    job->owner_channel = GetJsonString(line, "ownerChannel");
+    job->owner_account = GetJsonString(line, "ownerAccount");
+    job->owner_sender = GetJsonString(line, "ownerSender");
+    job->delivery_channel = GetJsonString(line, "deliveryChannel");
+    job->delivery_account = GetJsonString(line, "deliveryAccount");
+    job->delivery_conversation = GetJsonString(line, "deliveryConversation");
     // 游标:显式 cursorMs 优先;缺省按形态推导(interval=锚点,cron=建账
     // 时刻,once=0)。
     const std::int64_t explicit_cursor = GetJsonInt(line, "cursorMs");
@@ -526,7 +533,13 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
                 original->second.timezone == spec.timezone &&
                 original->second.misfire == spec.misfire &&
                 original->second.deadline_ms == spec.deadline_ms &&
-                original->second.notify_on_change == spec.notify_on_change) {
+                original->second.notify_on_change == spec.notify_on_change &&
+                original->second.owner_channel == spec.owner_channel &&
+                original->second.owner_account == spec.owner_account &&
+                original->second.owner_sender == spec.owner_sender &&
+                original->second.delivery_channel == spec.delivery_channel &&
+                original->second.delivery_account == spec.delivery_account &&
+                original->second.delivery_conversation == spec.delivery_conversation) {
                 receipt.duplicate = true;
                 receipt.job_id = original->second.job_id;
                 return receipt;
@@ -565,6 +578,15 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
     line["deadlineMs"] = spec.deadline_ms;
     line["notifyOnChange"] = spec.notify_on_change;
     line["sessionPolicy"] = spec.session_policy;
+    // Q5 渠道面:创建者/交付目标随建账行冻结(旧读法缺键 = 本地)。
+    if (!spec.owner_channel.empty()) line["ownerChannel"] = spec.owner_channel;
+    if (!spec.owner_account.empty()) line["ownerAccount"] = spec.owner_account;
+    if (!spec.owner_sender.empty()) line["ownerSender"] = spec.owner_sender;
+    if (!spec.delivery_channel.empty()) line["deliveryChannel"] = spec.delivery_channel;
+    if (!spec.delivery_account.empty()) line["deliveryAccount"] = spec.delivery_account;
+    if (!spec.delivery_conversation.empty()) {
+        line["deliveryConversation"] = spec.delivery_conversation;
+    }
     if (spec.kind == ScheduleKind::Interval) {
         line["intervalSeconds"] = spec.interval_seconds;
         line["anchorMs"] = now_ms;
@@ -611,6 +633,12 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
     job.deadline_ms = spec.deadline_ms;
     job.notify_on_change = spec.notify_on_change;
     job.session_policy = spec.session_policy;
+    job.owner_channel = spec.owner_channel;
+    job.owner_account = spec.owner_account;
+    job.owner_sender = spec.owner_sender;
+    job.delivery_channel = spec.delivery_channel;
+    job.delivery_account = spec.delivery_account;
+    job.delivery_conversation = spec.delivery_conversation;
     job.schedule_cursor_ms = cursor;
     jobs_[final_id] = std::move(job);
     if (spec.kind == ScheduleKind::Once) {
@@ -1260,17 +1288,31 @@ AutomationStore::SweepResult AutomationStore::SweepSchedule(std::int64_t now_ms)
 }
 
 std::optional<AutomationOccurrence> AutomationStore::ClaimDue(const std::string& owner_epoch,
-                                                               std::int64_t now_ms) {
+                                                               std::int64_t now_ms,
+                                                               ClaimScope scope) {
     if (broken_) {
         return std::nullopt;
     }
+    // 认领范围谓词(Q5):渠道泵只认渠道任务,automation 泵只认本地任务。
+    const auto in_scope = [scope](const AutomationJob& job) {
+        switch (scope) {
+            case ClaimScope::ChannelBackedOnly:
+                return job.ChannelBacked();
+            case ClaimScope::LocalOnly:
+                return !job.ChannelBacked();
+            case ClaimScope::Any:
+                return true;
+        }
+        return true;
+    };
     // 先清不派发的:cancelled 任务的 scheduled 就地结算 cancelled(防御
     // ——CancelJob 已结算过,这里盖恢复窗);过 deadline 的结算 cancelled
-    // (不判 failed、不再执行)。
+    // (不判 failed、不再执行)。范围外的任务不动(归对口泵清)。
     for (const auto& [id, occurrence] : occurrences_) {
         if (occurrence.state != AutomationOccurrence::State::Scheduled) continue;
         const auto job = jobs_.find(occurrence.job_id);
         if (job == jobs_.end()) continue;
+        if (!in_scope(job->second)) continue;
         if (job->second.state == AutomationJobState::Cancelled) {
             (void)SettleOccurrence(id, "cancelled", "job_cancelled", now_ms);
             continue;
@@ -1290,6 +1332,7 @@ std::optional<AutomationOccurrence> AutomationStore::ClaimDue(const std::string&
         if (occurrence.slot_ms > now_ms) continue;
         const auto job = jobs_.find(occurrence.job_id);
         if (job == jobs_.end() || job->second.state != AutomationJobState::Active) continue;
+        if (!in_scope(job->second)) continue;
         if (job->second.deadline_ms > 0 && now_ms >= job->second.deadline_ms) continue;
         if (picked_id.empty() || occurrence.slot_ms < occurrences_[picked_id].slot_ms) {
             picked_id = id;

@@ -43,8 +43,10 @@
 #include "channel/manager.hpp"
 #include "channel/session_map.hpp"
 #include "channel/work_ledger.hpp"
+#include "gateway/automation_store.hpp"
 #include "gateway/reply_outbox.hpp"
 #include "gateway/work_pump.hpp"
+#include "runtime/channel_automation.hpp"
 #include "runtime/headless_executor.hpp"
 #include "workspace/identity.hpp"
 
@@ -88,6 +90,16 @@ public:
         std::int64_t send_retry_backoff_ms = 1000;
         // 渠道活场上限(透传执行器;0 = 不限)。
         std::size_t max_live_channel_sessions = 8;
+        // ---- Q5:渠道身份建的定时任务(chapter 单 §十一) ----
+        // automation 账借用(automation 泵的同一本账,单写者:Composite
+        // 串行 tick 下两泵不同时碰账)。空 = automation 域不在:任务创建
+        // 工具 fail closed,渠道任务不认领(本地任务仍归 automation 泵)。
+        gateway::AutomationStore* automation_store = nullptr;
+        // 聊天侧任务桥(ProcessWorkItem 冻结渠道上下文进 TurnScope)。
+        std::shared_ptr<ChannelAutomationBridge> automation_bridge;
+        // 被动回复窗(毫秒):文档页首 60 分钟与 msg_id 字段 5 分钟互相矛盾
+        // (§11.3),按保守取窗下再留 1 分钟余量;真平台窗口归 Q3 实测校准。
+        std::int64_t passive_reply_window_ms = 4 * 60 * 1000;
         std::function<std::int64_t()> now_ms;  // 空 = wall clock
         // 故障注入(测试专用;生产恒空):executor 两窗(生成后/选择提交后)
         // + 泵自己的窗(入 outbox 后、发送前)。
@@ -120,11 +132,19 @@ public:
     // 空 = 无映射(还没跑过/别的 workspace 的场)。
     std::string session_id_for(const std::string& channel_id, const std::string& account_id,
                                const std::string& conversation_id) const;
+    // 映射账查询(Q5 渠道任务的隔离场):任务自己的场,不进聊天会话。
+    std::string job_session_id_for(const std::string& channel_id, const std::string& account_id,
+                                   const std::string& job_id) const;
     // 渠道域幂等键(§六第五项):渠道+账号+ingress 身份稳定生成;同信重发
     // 同键(SessionService 台账命中回原受理,不重跑模型)。
     static std::string MakeChannelOperationId(const std::string& channel_id,
                                               const std::string& account_id,
                                               std::int64_t ingress_sid);
+    // Q5 渠道任务隔离场的 session key 定式("channel:<ch>:<acct>:job:<jobId>"
+    // ——账号段与聊天会话同构,账随账号走;kind=job 不与 direct/group 撞)。
+    static std::string MakeChannelJobSessionKey(const std::string& channel_id,
+                                                const std::string& account_id,
+                                                const std::string& job_id);
 
 private:
     // 账号级账套(session map + work ledger;首用懒开)。
@@ -145,10 +165,19 @@ private:
     bool RunOneChannelTurn(std::int64_t now_ms);       // 至多一轮新执行
     bool ProcessWorkItem(const std::string& channel_id, const std::string& account_id,
                          const channel::ChannelManager::WorkItem& work, std::int64_t now_ms);
+    // ---- Q5:渠道任务的认领/执行/恢复/补投 -----------------------------------
+    bool SweepChannelJobRecovery(std::int64_t now_ms);  // claimed 未结算的跨账裁决
+    bool RecoverChannelJobOccurrence(const gateway::AutomationOccurrence& occurrence,
+                                     std::int64_t now_ms);
+    bool RunOneChannelJob(std::int64_t now_ms, std::string* error);  // 至多一枚新执行
     bool DriveChannelDeliveries(std::int64_t now_ms);  // 渠道段发送/重试
     // 源(ingress sid)的全部段是否终态:全 sent → true(delivered);有
     // failed/unknown → false;未齐 → nullopt(等)。
     std::optional<bool> SourceDeliveryVerdict(const std::string& source_ref) const;
+    // Q5 渠道任务段的发送锚:该会话最近一来信在被动回复窗内 → 其 msg_id
+    //(补投锚,被动回复);否则 nullopt(主动消息,不带陈旧锚)。
+    std::optional<std::string> FreshInboundAnchor(const gateway::ReplyOutboxItem& item,
+                                                  std::int64_t now_ms) const;
 
     api::Backend* backend_ = nullptr;
     tools::ToolRegistry* registry_ = nullptr;
@@ -162,6 +191,18 @@ private:
     // 限频重试的节流账(delivery_id → 下一可试时刻;进程内,重启即清——
     // 退避是建议值,不是正确性账)。
     std::map<std::string, std::int64_t> retry_at_;
+    // ---- Q5 渠道任务的补投账(进程内,重启即清) ----
+    // 最近一来信锚("<ch>/<acct>/<conv>" → msg_id + 时刻):渠道任务段的
+    // 被动回复窗判定原料。重启清空 = 首投按主动消息走,窗判定重新累积。
+    struct RecentInbound {
+        std::string message_id;
+        std::int64_t received_at_ms = 0;
+    };
+    std::map<std::string, RecentInbound> recent_inbound_;
+    // 挂起等互动的渠道任务段(主动额度受限/回复窗过期被拒):不硬发不谎报,
+    // 下一封来信进窗后锚定补投(§11.3)。重启清空 = 重启后主动重试一次,
+    // 再拒再挂——有界,不刷屏。
+    std::set<std::string> await_interaction_;
     std::size_t last_account_index_ = 0;  // 账号间轮转公平
     std::size_t active_turns_ = 0;        // 全局并发帽的门(多线程泵)
     // 本进程在跑的轮(sweep 跳过;多线程泵的门)。键 "<ch>/<acct>/<sid>"。

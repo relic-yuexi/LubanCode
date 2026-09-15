@@ -208,6 +208,12 @@ std::vector<std::string> GatewayAutomationPump::UncollectedWorkIds() const {
 GatewayAutomationPump::RecoveryOutcome GatewayAutomationPump::SweepRecovery(std::int64_t now_ms) {
     RecoveryOutcome outcome;
     for (const auto& occurrence : store_->OpenOccurrences()) {
+        // Q5:渠道身份建的任务归 ChannelWorkPump 的恢复面(交付链不同),
+        // 本泵只裁决本地任务。
+        const auto job = store_->FindJob(occurrence.job_id);
+        if (job.has_value() && job->ChannelBacked()) {
+            continue;
+        }
         std::string error;
         const auto settled = RecoverOccurrence(occurrence, now_ms, &error);
         if (!error.empty()) {
@@ -374,10 +380,16 @@ std::optional<std::string> GatewayAutomationPump::RecoverOccurrence(
 
 bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* error) {
     // 公平取件(复用 SessionWorkScheduler):候选包成 SessionWork。
+    // Q5:渠道身份建的任务(ChannelBacked)归 ChannelWorkPump 认领执行,
+    // 本泵只取本地任务(同 tick 各一枚,不抢)。
     std::vector<SessionWork> candidates;
     for (const auto& occurrence : store_->ListOccurrences()) {
         if (occurrence.state == gateway::AutomationOccurrence::State::Scheduled &&
             occurrence.slot_ms <= now_ms) {
+            const auto job = store_->FindJob(occurrence.job_id);
+            if (job.has_value() && job->ChannelBacked()) {
+                continue;
+            }
             SessionWork work;
             work.kind = WorkKind::AutomationDue;
             work.id = occurrence.occurrence_id;
@@ -391,8 +403,10 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
         return true;  // 没有到点的活
     }
     // claim(领域账,ownerEpoch fencing)。ClaimDue 自带 slot-FIFO 挑选,
-    // 认领结果以它为准(排序泵只决定"该不该取活",不重复做挑选)。
-    const auto claimed = store_->ClaimDue(owner_epoch_, now_ms);
+    // 认领结果以它为准(排序泵只决定"该不该取活",不重复做挑选)。Q5:
+    // 只认本地任务(渠道任务的认领在 ChannelWorkPump,ClaimScope 分流)。
+    const auto claimed = store_->ClaimDue(owner_epoch_, now_ms,
+                                          gateway::AutomationStore::ClaimScope::LocalOnly);
     if (!claimed.has_value()) {
         if (store_->broken()) {
             *error = "automation.append_failed: claim 落不了盘";

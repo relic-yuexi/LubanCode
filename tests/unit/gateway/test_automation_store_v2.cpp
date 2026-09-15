@@ -534,3 +534,95 @@ TEST_CASE("重放:周期语义全量回放后状态与关前一致(账是唯一�
         CHECK(projection.loop_imports.size() == 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Q5(QQ 接入单 §11.2):渠道归属/交付面与认领分流
+// ---------------------------------------------------------------------------
+
+namespace {
+
+AutomationStore::JobSpec ChannelJobSpec(const std::string& prompt, std::int64_t due_at_ms,
+                                        const std::string& sender = "sender-a") {
+    AutomationStore::JobSpec spec;
+    spec.prompt = prompt;
+    spec.kind = ScheduleKind::Once;
+    spec.due_at_ms = due_at_ms;
+    spec.owner_channel = "qqbot";
+    spec.owner_account = "main";
+    spec.owner_sender = sender;
+    spec.delivery_channel = "qqbot";
+    spec.delivery_account = "main";
+    spec.delivery_conversation = "dm-a";
+    return spec;
+}
+
+}  // namespace
+
+TEST_CASE("Q5 渠道归属:创建落账/重放保真/幂等比较含归属与交付") {
+    const auto log = FreshLog("channel-owner");
+    {
+        AutomationStore store;
+        REQUIRE(AutomationStore::Open(&store, log).ok);
+        REQUIRE(store.CreateJob(ChannelJobSpec("提醒喝水", 5000), 1000, "key-a").accepted);
+        // 同键同载荷(含归属/交付):回原回执,不双建。
+        const auto duplicate = store.CreateJob(ChannelJobSpec("提醒喝水", 5000), 2000, "key-a");
+        CHECK(duplicate.duplicate);
+        CHECK(duplicate.job_id == "job-1");
+        CHECK(store.ListJobs().size() == 1);
+        // 同键异归属(sender 不同 = 不同规格):conflict,不静默改建。
+        const auto other_owner = ChannelJobSpec("提醒喝水", 5000, "sender-b");
+        const auto conflict = store.CreateJob(other_owner, 3000, "key-a");
+        CHECK_FALSE(conflict.accepted);
+        CHECK(conflict.error_code == "automation.revision_conflict");
+    }
+    {
+        // 重放保真:六字段跨开账不洗(渠道泵/automation 泵分流的依据)。
+        AutomationStore store;
+        REQUIRE(AutomationStore::Open(&store, log).ok);
+        const auto job = store.FindJob("job-1");
+        REQUIRE(job.has_value());
+        CHECK(job->ChannelBacked());
+        CHECK(job->owner_channel == "qqbot");
+        CHECK(job->owner_account == "main");
+        CHECK(job->owner_sender == "sender-a");
+        CHECK(job->delivery_channel == "qqbot");
+        CHECK(job->delivery_account == "main");
+        CHECK(job->delivery_conversation == "dm-a");
+    }
+}
+
+TEST_CASE("Q5 认领分流:渠道泵只认渠道任务,automation 泵只认本地任务") {
+    AutomationStore store;
+    REQUIRE(AutomationStore::Open(&store, FreshLog("claim-scope")).ok);
+    // 本地任务(slot 早)与渠道任务(slot 晚)各一枚,都到点。
+    REQUIRE(store.CreateOnceJob("local-j", "本地活", 1000, 1000, "").accepted);
+    REQUIRE(store.CreateJob(ChannelJobSpec("渠道活", 2000), 1000, "").accepted);
+
+    // LocalOnly:只认本地(即使渠道任务的 slot 也到了)。
+    const auto local = store.ClaimDue("epoch-a", 5000, AutomationStore::ClaimScope::LocalOnly);
+    REQUIRE(local.has_value());
+    CHECK(local->job_id == "local-j");
+    // ChannelBackedOnly:只认渠道(发号 counter 不吃显式 id,渠道任务是首枚
+    // 发号 job → job-1)。
+    const auto channel = store.ClaimDue("epoch-a", 5000,
+                                        AutomationStore::ClaimScope::ChannelBackedOnly);
+    REQUIRE(channel.has_value());
+    CHECK(channel->job_id == "job-1");
+    CHECK(channel->occurrence_id != local->occurrence_id);  // 两枚不同 occurrence
+    CHECK(channel->job_id != local->job_id);                 // 渠道≠本地
+    // 都被认领后再无 due(Any 也不剩)。
+    CHECK_FALSE(store.ClaimDue("epoch-a", 5000).has_value());
+    CHECK_FALSE(store.broken());
+}
+
+TEST_CASE("Q5 认领分流的默认面:Any 保持 V1 语义,本地任务不带渠道字段") {
+    AutomationStore store;
+    REQUIRE(AutomationStore::Open(&store, FreshLog("claim-any")).ok);
+    REQUIRE(store.CreateOnceJob("", "本地缺省", 1000, 1000, "").accepted);
+    const auto job = store.FindJob("job-1");
+    REQUIRE(job.has_value());
+    CHECK_FALSE(job->ChannelBacked());  // 六字段全空 = 本地
+    const auto claimed = store.ClaimDue("epoch-a", 2000);
+    REQUIRE(claimed.has_value());
+    CHECK(claimed->job_id == "job-1");
+}

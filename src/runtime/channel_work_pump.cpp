@@ -73,6 +73,15 @@ std::string ChannelWorkPump::MakeChannelOperationId(const std::string& channel_i
     return "chan:" + channel_id + ":" + account_id + ":in:" + std::to_string(ingress_sid);
 }
 
+std::string ChannelWorkPump::MakeChannelJobSessionKey(const std::string& channel_id,
+                                                      const std::string& account_id,
+                                                      const std::string& job_id) {
+    // Q5:任务自己的隔离场(§11.2 "不自动带上 QQ 全部聊天史")。账号段与
+    // 聊天会话同构(映射账/work ledger 随账号走),kind=job 不与
+    // direct/group 档撞名。
+    return "channel:" + channel_id + ":" + account_id + ":job:" + job_id;
+}
+
 ChannelWorkPump::ChannelWorkPump() = default;
 
 ChannelWorkPump::~ChannelWorkPump() = default;
@@ -156,6 +165,19 @@ std::string ChannelWorkPump::session_id_for(const std::string& channel_id,
     return found.has_value() ? *found : std::string();
 }
 
+std::string ChannelWorkPump::job_session_id_for(const std::string& channel_id,
+                                                const std::string& account_id,
+                                                const std::string& job_id) const {
+    AccountBooks* books = const_cast<ChannelWorkPump*>(this)->BooksFor(channel_id, account_id);
+    if (books == nullptr) {
+        return std::string();
+    }
+    const auto found = books->session_map.Find(
+        MakeChannelJobSessionKey(channel_id, account_id, job_id),
+        options_.workspace_identity.workspace_key);
+    return found.has_value() ? *found : std::string();
+}
+
 ChannelWorkPump::AccountBooks* ChannelWorkPump::BooksFor(const std::string& channel_id,
                                                          const std::string& account_id) {
     const std::lock_guard<std::mutex> lock(books_mutex_);
@@ -214,9 +236,20 @@ bool ChannelWorkPump::TickOnce(std::int64_t now_ms) {
     if (!SweepRecovery(now_ms)) {
         return false;
     }
+    // 3.5) Q5 渠道任务恢复:claimed 未结算的跨账裁决(automation 泵只管
+    // 本地任务,渠道任务的恢复/认领/执行都在本泵)。
+    if (!SweepChannelJobRecovery(now_ms)) {
+        return false;
+    }
     // 4) 至多一轮新执行(公平:与 automation 泵各一;账号间轮转)。
     if (accepting_.load()) {
         if (!RunOneChannelTurn(now_ms)) {
+            return false;
+        }
+        // 4.5) Q5:至多一枚渠道任务执行(周期拍点由 automation 泵的
+        // SweepSchedule 生成——同一本账,两只泵各认各的,不抢)。
+        std::string job_error;
+        if (!RunOneChannelJob(now_ms, &job_error)) {
             return false;
         }
     }
@@ -260,6 +293,14 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                                                     outcome.provider_message_id, now_ms);
                     break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::RateLimited:
+                    if (item->source_ref.rfind("chanjob:", 0) == 0) {
+                        // Q5 渠道任务段:主动消息额度受限(§11.3 40034100
+                        // 一族)——不硬发不谎报:挂起等互动,下一封来信进
+                        // 回复窗后锚定补投。attempt 帽不烧(政策性等待,
+                        // 不是发送失败)。
+                        await_interaction_.insert(outcome.client_delivery_id);
+                        break;
+                    }
                     // 限频:退避后同载荷重试(同 delivery_id → 同 msg_seq);
                     // 重试帽尽 → failed。
                     if (item->attempts >= static_cast<std::int64_t>(options_.max_send_attempts)) {
@@ -271,8 +312,22 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                     }
                     break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::Rejected:
+                    if (item->source_ref.rfind("chanjob:", 0) == 0 &&
+                        outcome.error_code == "reply_window_expired") {
+                        // Q5 渠道任务段:回复窗口过期——不硬发(不拿陈旧
+                        // msg_id 冒充被动回复)、不谎报(不记成功/终态失败),
+                        // 挂起待下次互动补投(§11.3)。普通聊天回复维持 Q2
+                        // 规矩:窗口过期不转主动消息,终态。
+                        await_interaction_.insert(outcome.client_delivery_id);
+                        break;
+                    }
+                    (void)options_.outbox->MarkChannelFailed(
+                        outcome.client_delivery_id,
+                        outcome.error_code.empty() ? "platform_reject" : outcome.error_code,
+                        now_ms);
+                    break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::AuthFailed:
-                    // 平台明确拒绝/令牌失效:终态失败,不自动重试,不重跑 Agent。
+                    // 令牌失效:终态失败,不自动重试,不重跑 Agent。
                     (void)options_.outbox->MarkChannelFailed(
                         outcome.client_delivery_id,
                         outcome.error_code.empty() ? "platform_reject" : outcome.error_code,
@@ -494,6 +549,23 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
                                       const channel::ChannelManager::WorkItem& work,
                                       std::int64_t now_ms) {
     AccountBooks* books = BooksFor(channel_id, account_id);
+    // Q5 补投锚:该会话最近一封被受理的来信(被动回复窗判定的原料)。
+    recent_inbound_[channel_id + "/" + account_id + "/" + work.conversation_id] =
+        RecentInbound{work.event.message_id, work.event.received_at_ms};
+    // Q5 聊天侧任务工具的渠道上下文:本轮存续期间冻结(模型不可伪造),
+    // 轮结束即清——终端路/自动任务路没有 Scope,工具必拒。
+    std::optional<ChannelAutomationBridge::TurnScope> automation_scope;
+    if (options_.automation_bridge != nullptr) {
+        ChannelAutomationBridge::TurnContext context;
+        context.channel_id = channel_id;
+        context.account_id = account_id;
+        context.conversation_id = work.conversation_id;
+        context.conversation_kind = work.event.conversation.kind;
+        context.sender_id = work.sender_id;
+        context.message_id = work.event.message_id;
+        context.received_at_ms = work.event.received_at_ms;
+        automation_scope.emplace(*options_.automation_bridge, context);
+    }
     // 正文投影:渠道事件的冻结投影(媒体占位说明,同一份 MakeChannelTurnIngress)。
     const TurnIngress ingress = MakeChannelTurnIngress(
         work.event, work.route.provenance, work.route.session_key,
@@ -572,6 +644,242 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Q5:渠道身份建的定时任务——认领/执行/恢复/补投(todo §十一)
+// ---------------------------------------------------------------------------
+
+bool ChannelWorkPump::SweepChannelJobRecovery(std::int64_t now_ms) {
+    if (options_.automation_store == nullptr) {
+        return true;
+    }
+    for (const auto& occurrence : options_.automation_store->OpenOccurrences()) {
+        const auto job = options_.automation_store->FindJob(occurrence.job_id);
+        if (!job.has_value() || !job->ChannelBacked()) {
+            continue;  // 本地任务归 automation 泵的恢复面
+        }
+        if (!RecoverChannelJobOccurrence(occurrence, now_ms)) {
+            return false;  // 账写不进:停泵(与 ingress 恢复同一条纪律)
+        }
+    }
+    return !options_.automation_store->broken();
+}
+
+bool ChannelWorkPump::RecoverChannelJobOccurrence(const gateway::AutomationOccurrence& occurrence,
+                                                  std::int64_t now_ms) {
+    gateway::AutomationStore* store = options_.automation_store;
+    const auto job = store->FindJob(occurrence.job_id);
+    if (!job.has_value()) {
+        return store->SettleOccurrence(occurrence.occurrence_id, "failed", "job_missing", now_ms);
+    }
+    // 绑定行不在:claim 后崩,无开轮事实——重派同一 occurrence(attempt+1);
+    // 任务已取消 → cancelled;attempt 帽到顶 → needs_review(§八同款裁决)。
+    if (occurrence.session_id.empty() || occurrence.turn_id.empty()) {
+        if (job->state == gateway::AutomationJobState::Cancelled) {
+            return store->SettleOccurrence(occurrence.occurrence_id, "cancelled",
+                                           "job_cancelled_before_redispatch", now_ms);
+        }
+        if (store->RedispatchOccurrence(occurrence.occurrence_id, "claimed_without_binding",
+                                        now_ms)) {
+            return true;
+        }
+        if (store->broken()) {
+            return false;
+        }
+        return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                       "redispatch_exhausted(attempt 帽到顶)", now_ms);
+    }
+    // 绑定行在:按 V3 账裁决(补 selection / 补 outbox 投影,不调模型)。
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(
+        options_.workspaces_root, options_.workspace_identity.workspace_key);
+    if (!room.has_value()) {
+        return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                       "workspace_room_unresolved", now_ms);
+    }
+    const auto stream =
+        trajectory::v3::FindV3SessionStream(*room / "sessions" / occurrence.session_id);
+    if (!stream.has_value()) {
+        return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                       "v3_stream_not_found", now_ms);
+    }
+    const auto ledger = trajectory::v3::ReadV3Ledger(*stream);
+    if (!ledger.has_value()) {
+        return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                       "v3_stream_unreadable: " + ledger.error(), now_ms);
+    }
+    const ReplySelectionPlan plan = PlanReplySelection(*ledger, occurrence.turn_id);
+    if (!plan.ok) {
+        return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                       "generation_incomplete: " + plan.error, now_ms);
+    }
+    const std::string target_str = gateway::MakeChannelDeliveryTarget(
+        job->delivery_channel, job->delivery_account, job->delivery_conversation);
+    if (!SelectionAlreadyCommitted(*ledger, plan.selection_id)) {
+        auto writer = trajectory::v3::V3Writer::Continue(*stream);
+        if (!writer.has_value()) {
+            return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                           "v3_writer_continue_failed: " + writer.error(), now_ms);
+        }
+        const auto commit = CommitReplySelection(&*writer, options_.outbox->replies_dir(), plan,
+                                                 occurrence.session_id, target_str);
+        if (!commit.committed) {
+            return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                           commit.error_code + ": " + commit.error, now_ms);
+        }
+    }
+    gateway::DurableReplyOutbox::ChannelTarget target;
+    target.channel_id = job->delivery_channel;
+    target.account_id = job->delivery_account;
+    target.conversation_id = job->delivery_conversation;
+    // 锚不冻结:发送时按"最近来信是否在窗内"现取(主动/被动分型)。
+    target.reply_to_message_id = "";
+    target.source_ref = "chanjob:" + job->delivery_channel + ":" + job->delivery_account + ":" +
+                        occurrence.job_id + ":" + occurrence.occurrence_id;
+    const auto enqueued = options_.outbox->EnqueueChannel(
+        plan.selection_id, plan.text, occurrence.session_id, occurrence.turn_id, target, now_ms);
+    if (!enqueued.accepted && !enqueued.duplicate) {
+        // 入箱失败(账 broken):执行事实保留,occurrence 停审,泵停。
+        (void)store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
+                                      "outbox_enqueue_failed", now_ms);
+        return false;
+    }
+    return store->SettleOccurrence(occurrence.occurrence_id, "succeeded",
+                                   "recovered_enqueued_to_channel", now_ms);
+}
+
+bool ChannelWorkPump::RunOneChannelJob(std::int64_t now_ms, std::string* error) {
+    if (options_.automation_store == nullptr) {
+        return true;
+    }
+    // 并发帽先查(claim 了不跑会把件搁死在 Claimed)。
+    if (options_.max_active_channel_turns > 0 &&
+        active_turns_ >= options_.max_active_channel_turns) {
+        return true;
+    }
+    const auto claimed = options_.automation_store->ClaimDue(
+        owner_epoch_, now_ms, gateway::AutomationStore::ClaimScope::ChannelBackedOnly);
+    if (!claimed.has_value()) {
+        if (options_.automation_store->broken()) {
+            *error = "automation.append_failed: 渠道任务 claim 落不了盘";
+            return false;
+        }
+        return true;  // 没到点的渠道任务
+    }
+    ++active_turns_;
+    struct DecOnReturn {
+        ChannelWorkPump* pump;
+        ~DecOnReturn() { --pump->active_turns_; }
+    } active_guard{this};
+    gateway::AutomationStore* store = options_.automation_store;
+    const std::string occurrence_id = claimed->occurrence_id;
+    const auto job = store->FindJob(claimed->job_id);
+    if (!job.has_value()) {
+        (void)store->SettleOccurrence(occurrence_id, "failed", "job_missing", now_ms);
+        return true;
+    }
+    // 执行前重验创建者准入(§11.2 末行):配对/allowlist/渠道策略现核,
+    // 不过 → cancelled(任务保留,准入恢复后未来拍照跑,不删不暂停)。
+    channel::ChannelConversation conversation;
+    conversation.kind = channel::ConversationKind::Direct;
+    conversation.id = job->delivery_conversation;
+    const auto route = options_.manager->ProbeRoute(
+        job->owner_channel, job->owner_account, conversation, job->owner_sender, now_ms);
+    if (route.status != channel::RouteDecision::Status::Admitted) {
+        (void)store->SettleOccurrence(occurrence_id, "cancelled",
+                                      "creator_not_admitted:" + route.reason, now_ms);
+        return true;
+    }
+    // 隔离任务场:同 job 同场(任务自己的上下文跨拍续),不进聊天会话
+    // (§11.2 不自动带聊天史);重启经映射账 resume-as-new。
+    const std::string session_key =
+        MakeChannelJobSessionKey(job->delivery_channel, job->delivery_account, job->job_id);
+    AccountBooks* books = BooksFor(job->delivery_channel, job->delivery_account);
+    HeadlessExecutor::ChannelTurnRequest request;
+    request.session_key = session_key;
+    if (books != nullptr) {
+        const auto stored = books->session_map.Find(session_key,
+                                                    options_.workspace_identity.workspace_key);
+        if (stored.has_value()) {
+            request.stored_session_id = *stored;
+        }
+    }
+    request.prompt = job->prompt;
+    request.binding.work_id = occurrence_id;
+    request.binding.source_kind = "automation";
+    request.binding.source_id = job->job_id;
+    request.binding.owner_epoch = owner_epoch_;
+    request.binding.attempt = claimed->attempt;
+    request.per_turn_tools = &route.tools;
+    request.delivery_target =
+        gateway::MakeChannelDeliveryTarget(job->delivery_channel, job->delivery_account,
+                                           job->delivery_conversation);
+    request.binding_extra = nlohmann::json::object({
+        {"jobId", job->job_id},
+        {"occurrenceId", occurrence_id},
+        {"channelId", job->delivery_channel},
+        {"accountId", job->delivery_account},
+        {"conversationId", job->delivery_conversation},
+        {"senderId", job->owner_sender},
+    });
+
+    const std::string bind_occurrence_id = occurrence_id;
+    std::atomic<bool> cancel_flag{claimed->cancel_requested};
+    const auto result = executor_->ExecuteChannelTurn(
+        request,
+        [store, bind_occurrence_id, now_ms](const std::string& session_id,
+                                            const std::string& turn_id) {
+            // 领域绑定先于 V3 gateway.work.bound(恢复器优先走领域行)。
+            (void)store->BindOccurrence(bind_occurrence_id, session_id, turn_id, now_ms);
+        },
+        &cancel_flag);
+    if (!result.ok) {
+        if (result.error_code == "gateway.fault_injected") {
+            return true;  // 不结算:恢复路接管(模拟进程死在半路)
+        }
+        const bool cancelled = claimed->cancel_requested ||
+                               result.error.find("cancelled") != std::string::npos;
+        const std::string outcome = cancelled ? "cancelled" : "failed";
+        return store->SettleOccurrence(occurrence_id, outcome,
+                                       "turn_failed: " + result.error_code + ": " + result.error,
+                                       now_ms);
+    }
+    // 结果投回创建会话(§11.3:绑定的账号/目标,不附陈旧 msg_id——锚在
+    // 发送时按互动窗现取)。执行与投递分账:occurrence 落账 succeeded 是
+    // "执行完成且已交投递账",投递态在 outbox(可查,不谎报)。
+    gateway::DurableReplyOutbox::ChannelTarget target;
+    target.channel_id = job->delivery_channel;
+    target.account_id = job->delivery_account;
+    target.conversation_id = job->delivery_conversation;
+    target.reply_to_message_id = "";
+    target.source_ref = "chanjob:" + job->delivery_channel + ":" + job->delivery_account + ":" +
+                        job->job_id + ":" + occurrence_id;
+    const auto enqueued = options_.outbox->EnqueueChannel(
+        result.selection_id, result.reply_text, result.session_id, result.turn_id, target,
+        now_ms);
+    if (!enqueued.accepted && !enqueued.duplicate) {
+        (void)store->SettleOccurrence(occurrence_id, "needs_review", "outbox_enqueue_failed",
+                                      now_ms);
+        *error = "outbox.append_failed: 渠道任务结果入不了箱";
+        return false;  // outbox 账写不进:停泵
+    }
+    return store->SettleOccurrence(occurrence_id, "succeeded", "enqueued_to_channel_outbox",
+                                   now_ms);
+}
+
+std::optional<std::string> ChannelWorkPump::FreshInboundAnchor(
+    const gateway::ReplyOutboxItem& item, std::int64_t now_ms) const {
+    const auto found = recent_inbound_.find(item.target_channel_id + "/" +
+                                            item.target_account_id + "/" +
+                                            item.target_conversation_id);
+    if (found == recent_inbound_.end()) {
+        return std::nullopt;
+    }
+    if (now_ms - found->second.received_at_ms > options_.passive_reply_window_ms ||
+        now_ms < found->second.received_at_ms) {
+        return std::nullopt;  // 窗外(或时钟倒拨):不带陈旧锚,走主动消息
+    }
+    return found->second.message_id;
+}
+
 bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
     // 段序:同 selection 按 ordinal 依次,每 tick 每组只驱动最靠前的未终
     // 态段(前段未 sent 不发后段);源里有段终态失败 → 后段就地失败收档。
@@ -611,6 +919,24 @@ bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
                                              item.delivery_id)) {
             continue;
         }
+        // Q5 渠道任务段的发送锚(§11.3):会话绑定恒定;被动回复锚按"该
+        // 会话最近一来信是否在窗内"现取——窗外不带锚(主动消息),不拿
+        // 陈旧 msg_id 冒充被动回复。挂起等互动的段:窗内锚出现才发(补投),
+        // 否则本 tick 跳过(不硬发)。
+        std::string send_anchor = item.target_reply_to_message_id;
+        const bool is_chanjob = item.source_ref.rfind("chanjob:", 0) == 0;
+        if (is_chanjob) {
+            const auto fresh = FreshInboundAnchor(item, now_ms);
+            if (!fresh.has_value()) {
+                if (await_interaction_.count(item.delivery_id) > 0) {
+                    continue;  // 挂起等互动:没新来信不硬发
+                }
+                send_anchor.clear();  // 主动消息(不带陈旧锚)
+            } else {
+                send_anchor = *fresh;
+                await_interaction_.erase(item.delivery_id);  // 补投解锁
+            }
+        }
         // 重试帽:attempts 由 item.attempt 行推进,帽尽即终态失败。
         if (item.attempts >= static_cast<std::int64_t>(options_.max_send_attempts)) {
             (void)options_.outbox->MarkChannelFailed(item.delivery_id, "rate_limited", now_ms);
@@ -629,7 +955,7 @@ bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
         channel::ChannelManager::ChannelSendRequest send;
         send.conversation_id = item.target_conversation_id;
         send.text = text;
-        send.reply_to_message_id = item.target_reply_to_message_id;
+        send.reply_to_message_id = send_anchor;
         send.client_delivery_id = item.delivery_id;
         const auto error = options_.manager->SendReply(item.target_channel_id,
                                                        item.target_account_id, send);
