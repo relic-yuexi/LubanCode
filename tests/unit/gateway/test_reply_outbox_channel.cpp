@@ -289,19 +289,19 @@ TEST_CASE("Q4 附件入箱:原件读不了明败;重开投影带附件字段") {
     attachment.file_name = "p.txt";
     attachment.mime_type = "text/plain";
     attachment.size_bytes = 6;
-    std::string delivery_id;
+    std::vector<std::string> delivery_ids;
     {
         DurableReplyOutbox first;
         REQUIRE(DurableReplyOutbox::Open(&first, dir.Paths()).ok);
         const auto ok = first.EnqueueChannel("sel-a6", "正文", "s1", "turn-a6",
                                              Target(), 1000, &attachment);
         REQUIRE(ok.accepted);
-        delivery_id = ok.delivery_ids.back();
+        delivery_ids = ok.delivery_ids;
     }
     DurableReplyOutbox reopened;
     REQUIRE(DurableReplyOutbox::Open(&reopened, dir.Paths()).ok);
     // 附件挂在末段(纯附件段),不是首段文本段。
-    const auto item = reopened.Find(delivery_id.back());
+    const auto item = reopened.Find(delivery_ids.back());
     REQUIRE(item.has_value());
     CHECK(item->attachment_local_path == product.generic_string());
     CHECK(item->attachment_file_name == "p.txt");
