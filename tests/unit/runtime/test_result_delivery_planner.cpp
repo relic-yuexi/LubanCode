@@ -20,6 +20,7 @@
 #include "trajectory/v3/writer.hpp"
 
 using namespace lubancode;
+using namespace lubancode::runtime;
 namespace v3 = lubancode::trajectory::v3;
 
 namespace {
