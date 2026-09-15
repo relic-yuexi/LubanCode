@@ -913,26 +913,33 @@ std::string MakeApprovalSummary(const std::string& name, const nlohmann::json& i
 // 指定用户——配对 sender 才能按,宿主身份复核是最终防线;click_limit
 // 已废弃不填;unsupport_tips 客户端不支持时提示)。
 nlohmann::json MakeApprovalKeyboard(const std::string& token, const std::string& operator_id) {
-    nlohmann::json keyboard = nlohmann::json::object();
-    nlohmann::json rows = nlohmann::json::array();
-    nlohmann::json buttons = nlohmann::json::array();
-    nlohmann::json approve;
+    // 显式逐层构造(深嵌套 initializer list 在 clang 下解析不稳,不赌推导)。
+    const auto make_action = [&token, &operator_id](bool accept) {
+        nlohmann::json permission = nlohmann::json::object();
+        permission["type"] = 0;
+        permission["specify_user_ids"] = nlohmann::json::array({operator_id});
+        nlohmann::json action = nlohmann::json::object();
+        action["type"] = 1;
+        action["permission"] = std::move(permission);
+        action["data"] = EncodeApprovalButtonData(token, accept);
+        action["unsupport_tips"] = "请升级手机QQ后使用按钮审批";
+        return action;
+    };
+    nlohmann::json approve = nlohmann::json::object();
     approve["id"] = "approve";
     approve["render_data"] = {{"label", "允许这次"}, {"visited_label", "已允许"}, {"style", 1}};
-    approve["action"] = {{"type", 1},
-                         {"permission", {{"type", 0}, {"specify_user_ids", {operator_id}}},
-                         {"data", EncodeApprovalButtonData(token, true)},
-                         {"unsupport_tips", "请升级手机QQ后使用按钮审批"}};
-    nlohmann::json decline;
+    approve["action"] = make_action(true);
+    nlohmann::json decline = nlohmann::json::object();
     decline["id"] = "decline";
     decline["render_data"] = {{"label", "拒绝"}, {"visited_label", "已拒绝"}, {"style", 0}};
-    decline["action"] = {{"type", 1},
-                         {"permission", {{"type", 0}, {"specify_user_ids", {operator_id}}},
-                         {"data", EncodeApprovalButtonData(token, false)},
-                         {"unsupport_tips", "请升级手机QQ后使用按钮审批"}};
+    decline["action"] = make_action(false);
+
+    nlohmann::json buttons = nlohmann::json::array();
     buttons.push_back(std::move(approve));
     buttons.push_back(std::move(decline));
+    nlohmann::json rows = nlohmann::json::array();
     rows.push_back(nlohmann::json{{"buttons", std::move(buttons)}});
+    nlohmann::json keyboard = nlohmann::json::object();
     keyboard["content"] = {{"rows", std::move(rows)}};
     return keyboard;
 }
