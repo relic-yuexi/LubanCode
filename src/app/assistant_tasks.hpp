@@ -212,10 +212,10 @@ public:
     nlohmann::json HandleTaskCancel(const nlohmann::json& params, int& out_error_code,
                                     std::string& out_error_message);
     // approval/list。
-    nlohmann::json HandleApprovalList(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleApprovalList(const nlohmann::json& params, int& out_error_code,
                                       std::string& out_error_message);
     // approval/respond:{requestId, decision:"accept"|"decline"}。
-    nlohmann::json HandleApprovalRespond(const nlohmann::json& params, std::string& out_error_code,
+    nlohmann::json HandleApprovalRespond(const nlohmann::json& params, int& out_error_code,
                                          std::string& out_error_message);
     // assistant/events/read:{bootId, lastSeq}。
     nlohmann::json HandleEventsRead(const nlohmann::json& params, int& out_error_code,
