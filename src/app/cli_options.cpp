@@ -230,18 +230,20 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                                 trajectory.session_id;
             return parsed;
         }
-        // Gateway 子命令(总装单 V0 起,V1 加 job 族):lubancode gateway
-        // <run|status|stop|job ...> [--profile <名>] [--json 只 status/job
-        // list 认]。只认裸词打头且此前没有位置参数;形状不对当场退用法,
-        // 不静默当普通位置参数走单发问句。
+        // Gateway 子命令(总装单 V0 起,V1 加 job 族,V4 加运维族):lubancode
+        // gateway <run|status|stop|job|install|uninstall|start|restart|doctor|
+        // logs ...> [--profile <名>]。只认裸词打头且此前没有位置参数;形状
+        // 不对当场退用法,不静默当普通位置参数走单发问句。
         if (arg == "gateway" && options.positional.empty()) {
-            static const std::set<std::string> kVerbs = {"run", "status", "stop", "job"};
+            static const std::set<std::string> kVerbs = {
+                "run", "status", "stop", "job", "install", "uninstall",
+                "start", "restart", "doctor", "logs"};
             const std::size_t rest = args.size() - i - 1;
             if (rest == 0 || kVerbs.count(args[i + 1]) == 0) {
                 parsed.action = CliAction::BadGateway;
                 parsed.error_text =
-                    "用法: lubancode gateway <run|status|stop|job ...> [--profile <名>] [--json]"
-                    "(install/start/restart/doctor/logs 是后续批次的口,尚未实现)";
+                    "用法: lubancode gateway <run|status|stop|job ...|install|uninstall|"
+                    "start|restart|doctor|logs> [--profile <名>]";
                 return parsed;
             }
             GatewayCliArgs gateway;
@@ -304,12 +306,12 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             }
             for (; extra < args.size(); ++extra) {
                 if (args[extra] == "--json") {
-                    if (gateway.verb != "status" &&
+                    if (gateway.verb != "status" && gateway.verb != "doctor" &&
                         !(gateway.verb == "job" &&
                           (gateway.job_verb == "list" || gateway.job_verb == "read"))) {
                         parsed.action = CliAction::BadGateway;
                         parsed.error_text =
-                            "--json 只在 gateway status / job list / job read 下有效";
+                            "--json 只在 gateway status / doctor / job list / job read 下有效";
                         return parsed;
                     }
                     gateway.json = true;
@@ -322,6 +324,63 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                         return parsed;
                     }
                     gateway.profile = args[++extra];
+                    continue;
+                }
+                if (args[extra] == "--gateway-root") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text =
+                            "--gateway-root 需要一个绝对路径(install 会把它钉进服务单元)";
+                        return parsed;
+                    }
+                    // 绝对路径轻校验(POSIX 首字符 /;Windows 盘符 X:)——
+                    // 相对路径钉进服务单元后,服务换工作目录就找不到状态根。
+                    const std::string& value = args[extra + 1];
+                    const bool absolute =
+                        (!value.empty() && (value[0] == '/' || value[0] == '\\')) ||
+                        (value.size() >= 2 && value[1] == ':');
+                    if (!absolute) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text =
+                            "--gateway-root 须是绝对路径(服务单元钉死用,相对路径换目录即失效): " +
+                            value;
+                        return parsed;
+                    }
+                    gateway.gateway_root_arg = value;
+                    ++extra;  // 消费值参(同 --profile 惯例),别让下轮再扫它
+                    continue;
+                }
+                if (gateway.verb == "doctor" && args[extra] == "--wait-ready") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--wait-ready 需要秒数(如 30)";
+                        return parsed;
+                    }
+                    gateway.wait_ready_secs = std::atoi(args[++extra].c_str());
+                    gateway.wait_ready_given = true;
+                    if (gateway.wait_ready_secs < 0) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--wait-ready 秒数不能为负";
+                        return parsed;
+                    }
+                    continue;
+                }
+                if (gateway.verb == "doctor" && args[extra] == "--ack-safe-mode") {
+                    gateway.ack_safe_mode = true;
+                    continue;
+                }
+                if (gateway.verb == "logs" && args[extra] == "--tail") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--tail 需要行数(如 50)";
+                        return parsed;
+                    }
+                    gateway.tail_lines = std::atoi(args[++extra].c_str());
+                    if (gateway.tail_lines <= 0) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--tail 行数须为正";
+                        return parsed;
+                    }
                     continue;
                 }
                 if (gateway.verb == "job" && args[extra] == "--at") {
@@ -432,8 +491,10 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                 parsed.action = CliAction::BadGateway;
                 parsed.error_text =
                     "gateway " + gateway.verb + " 认不得参数 \"" + args[extra] +
-                    "\":只认 --profile <名> --json(job 族另认 --at/--every/--cron/--tz/"
-                    "--misfire/--deadline/--heartbeat/--rev/--task/--prompt/--id/--idem)";
+                    "\":只认 --profile <名> --json --gateway-root <路径>(job 族另认 "
+                    "--at/--every/--cron/--tz/--misfire/--deadline/--heartbeat/--rev/--task/"
+                    "--prompt/--id/--idem;doctor 另认 --wait-ready/--ack-safe-mode;logs 另认 "
+                    "--tail)";
                 return parsed;
             }
             // 写操作族的前置形状检查(细校验归活 Gateway 的账面;这里只挡

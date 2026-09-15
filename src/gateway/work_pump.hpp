@@ -46,6 +46,12 @@ public:
     // 收执行器与领域 writer(关机次序最后一步)。grace_ms 内收净回 true;
     // 没收净回 false(调用方记 gateway.shutdown_timeout,不假写 clean)。
     virtual bool Close(int grace_ms) = 0;
+
+    // V4(单子 §十 第四行):Close 之后仍未收净的 work 清单(occurrence id
+    // 一类)。GatewayProcess 在 Close 返回 false 时取它,把清单写进 shutdown
+    // 账行(uncollected_work)——如实记录,不结算成 cancelled。缺省空(无
+    // 业务面/同步泵下恒空;异步泵接上后实装)。Close 之前调用无意义。
+    virtual std::vector<std::string> UncollectedWorkIds() const { return {}; }
 };
 
 // ---------------------------------------------------------------------------

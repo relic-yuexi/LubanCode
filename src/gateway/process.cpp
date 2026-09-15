@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <fstream>
 #include <thread>
+#include <utility>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -271,7 +272,7 @@ void GatewayLock::Release() {
 
 nlohmann::json GatewayBootLine::ToJson() const {
     nlohmann::json json = nlohmann::json::object();
-    json["type"] = kind == Kind::Boot ? "boot" : "shutdown";
+    json["type"] = kind == Kind::Boot ? "boot" : (kind == Kind::Shutdown ? "shutdown" : "ack");
     json["boot_id"] = boot_id;
     json["pid"] = pid;
     json["start_token"] = start_token;
@@ -279,6 +280,9 @@ nlohmann::json GatewayBootLine::ToJson() const {
     json["reason"] = reason;
     if (kind == Kind::Shutdown) {
         json["clean"] = clean;
+        if (!uncollected_work.empty()) json["uncollected_work"] = uncollected_work;
+    } else if (kind == Kind::Ack) {
+        // ack 行不带 clean(它不是一次关机,是 operator 的显式确认)。
     } else {
         json["safe_mode"] = safe_mode;
         if (!config_error.empty()) json["config_error"] = config_error;
@@ -295,6 +299,8 @@ std::optional<GatewayBootLine> GatewayBootLine::FromJson(const nlohmann::json& j
         line.kind = Kind::Boot;
     } else if (type == "shutdown") {
         line.kind = Kind::Shutdown;
+    } else if (type == "ack") {
+        line.kind = Kind::Ack;
     } else {
         return std::nullopt;
     }
@@ -317,6 +323,11 @@ std::optional<GatewayBootLine> GatewayBootLine::FromJson(const nlohmann::json& j
     if (json.contains("safe_mode") && json["safe_mode"].is_boolean()) {
         line.safe_mode = json["safe_mode"].get<bool>();
     }
+    if (json.contains("uncollected_work") && json["uncollected_work"].is_array()) {
+        for (const auto& item : json["uncollected_work"]) {
+            if (item.is_string()) line.uncollected_work.push_back(item.get<std::string>());
+        }
+    }
     return line;
 }
 
@@ -327,6 +338,8 @@ int CountUncleanBootStreak(const std::vector<GatewayBootLine>& lines) {
             streak += 1;
         } else if (line.kind == GatewayBootLine::Kind::Shutdown && line.clean) {
             streak = 0;  // 单实例串行:一场干净关机清连击
+        } else if (line.kind == GatewayBootLine::Kind::Ack) {
+            streak = 0;  // V4:operator 显式确认,效力同干净关机(§10.3 ack 口)
         }
     }
     return streak;
@@ -578,13 +591,19 @@ int GatewayProcess::Shutdown(const std::string& reason) {
 
     bool clean = true;
     std::string failed_hook;
+    std::vector<std::string> uncollected;
     if (options_.pump != nullptr) {
         options_.pump->StopAccepting();
         const int grace_ms = options_.config.shutdown_grace_secs * 1000;
         if (!options_.pump->Close(grace_ms)) {
             clean = false;
             failed_hook = "work_pump";
-            Log("error", "主泵未在宽限内收净(grace " + std::to_string(grace_ms) + "ms)");
+            // V4(单子 §十 第四行):宽限到期没收净的 work 如实入账
+            //(uncollected_work),不结算成 cancelled——重启后 reconcile 按
+            // 在飞裁决。清单由泵给(engine 层不依赖 runtime 的账形状)。
+            uncollected = options_.pump->UncollectedWorkIds();
+            Log("error", "主泵未在宽限内收净(grace " + std::to_string(grace_ms) + "ms)," +
+                             std::to_string(uncollected.size()) + " 枚 work 未收净,已入账");
         }
     }
     for (const ShutdownHook& hook : hooks_) {
@@ -610,6 +629,7 @@ int GatewayProcess::Shutdown(const std::string& reason) {
     shutdown.at_ms = options_.now_ms();
     shutdown.reason = reason;
     shutdown.clean = clean;
+    shutdown.uncollected_work = std::move(uncollected);
     const std::string history_error =
         GatewayBootHistory(options_.paths.boot_history).Append(shutdown);
     if (!history_error.empty()) {

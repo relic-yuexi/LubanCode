@@ -187,12 +187,22 @@ void GatewayAutomationPump::StopAccepting() {
 
 bool GatewayAutomationPump::Close(int grace_ms) {
     (void)grace_ms;
-    // V1/V2 同步泵:Close 时无在飞执行(TickOnce 已收口),writer 析构即
-    // 关。真异步化(后续批次)时这里等在飞 turn 收口或置 cancel 后等宽限。
+    // V4(单子 §十 第四行):Close 前抓"仍未收净"的 occurrence——同步泵
+    // 主循环已出、TickOnce 已收口,理论上恒空;真异步化(后续批次)时
+    // 这里是"宽限内没收净"的真实来源,清单经 UncollectedWorkIds() 进
+    // shutdown 账行(uncollected_work),不结算成 cancelled。
+    uncollected_.clear();
+    if (!in_flight_.empty()) {
+        uncollected_.push_back(in_flight_);
+    }
     closed_.store(true);
     store_.reset();
     outbox_.reset();
     return true;
+}
+
+std::vector<std::string> GatewayAutomationPump::UncollectedWorkIds() const {
+    return uncollected_;
 }
 
 GatewayAutomationPump::RecoveryOutcome GatewayAutomationPump::SweepRecovery(std::int64_t now_ms) {
@@ -391,6 +401,13 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
         return true;  // 撞上并发消费(V1 单飞不该发生,防御)
     }
     const std::string occurrence_id = claimed->occurrence_id;
+    // V4:claim→结算的窗口记为在飞(RAII 清口:本函数任何 return 都清)。
+    // 同步泵下关机时不在该窗口内;机制为异步化后的"未收净如实记录"而立。
+    in_flight_ = occurrence_id;
+    struct ClearInFlightOnReturn {
+        GatewayAutomationPump* pump;
+        ~ClearInFlightOnReturn() { pump->in_flight_.clear(); }
+    } in_flight_guard{this};
     const auto job = store_->FindJob(claimed->job_id);
     if (!job.has_value()) {
         (void)store_->SettleOccurrence(occurrence_id, "failed", "job_missing", now_ms);
