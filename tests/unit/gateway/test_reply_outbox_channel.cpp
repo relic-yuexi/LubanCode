@@ -204,8 +204,9 @@ TEST_CASE("Q4 附件入箱:长文末段带附件字段,幂等重入不重写") {
     const std::filesystem::path product = dir.root / "product.txt";
     { std::ofstream stream(product); stream << "完整产物正文,超过一段的全文在附件里"; }
 
-    // 长文:6000 字节 → 4 文本段(UTF-8 边界回退,末段 6 字节)+ 1 纯附件
-    // 末段(QQ msg_type=7 不带 content,正文全在前面的段里,谁也不吃掉谁)。
+    // 长文:12000 字节(汉字×2000 对)→ 7 文本段(UTF-8 边界回退到
+    // 1998/段,末段 12 字节)+ 1 纯附件末段(QQ msg_type=7 不带 content,
+    // 正文全在前面的段里,谁也不吃掉谁)。
     std::string long_text;
     for (int i = 0; i < 2000; ++i) {
         long_text += "汉字";
@@ -218,7 +219,7 @@ TEST_CASE("Q4 附件入箱:长文末段带附件字段,幂等重入不重写") {
     const auto receipt = outbox.EnqueueChannel("sel-a1", long_text, "s1", "turn-a",
                                                Target(), 1000, &attachment);
     REQUIRE(receipt.accepted);
-    REQUIRE(receipt.delivery_ids.size() == 5);
+    REQUIRE(receipt.delivery_ids.size() == 8);
     // 末段(纯附件)带附件字段,其余文本段不带。
     for (std::size_t i = 0; i + 1 < receipt.delivery_ids.size(); ++i) {
         CHECK(outbox.Find(receipt.delivery_ids[i])->attachment_local_path.empty());
