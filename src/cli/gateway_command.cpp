@@ -3,15 +3,19 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "app/version.hpp"
 #include "gateway/automation_store.hpp"
 #include "gateway/control_server.hpp"
+#include "gateway/doctor.hpp"
 #include "gateway/process.hpp"
+#include "gateway/service.hpp"
 #include "gateway/status.hpp"
 #include "gateway/work_pump.hpp"
+#include "platform/paths.hpp"
 #include "platform/wall_clock.hpp"
 
 namespace lubancode::cli {
@@ -367,6 +371,286 @@ int StopGatewayProcess(const gateway::GatewayProfilePaths& paths,
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// V4 运维族:服务安装与常驻运维(单子 §十 V4)。合同见 gateway_command.hpp
+// 头注释与 contracts.md §14;停止语义统一走上面的文件控制面。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 装配服务定义:exe 用当前进程的可执行文件(服务单元钉绝对路径),状态
+// 根钉进 --gateway-root 参数,日志落 profile 树 logs/。拿不到 exe 明错
+// ——钉不了路径就不装。
+bool BuildGatewayServiceSpec(const gateway::GatewayProfilePaths& paths,
+                             const gateway::GatewayProfileConfig& config,
+                             gateway::GatewayServiceSpec* spec, std::string* error) {
+    const auto exe = platform::ExecutablePath();
+    if (!exe.has_value() || exe->empty()) {
+        if (error != nullptr) {
+            *error = "定位不到当前可执行文件,服务单元钉不了 exe 路径(不装)";
+        }
+        return false;
+    }
+    spec->profile = paths.name.empty() ? std::string(gateway::kDefaultGatewayProfile)
+                                       : paths.name;
+    spec->exe_path = *exe;
+    spec->gateway_root = paths.root;
+    spec->working_dir = paths.root;
+    spec->service_log = paths.logs_dir / "service.log";
+    spec->service_err = paths.logs_dir / "service.err.log";
+    spec->lubancode_version = std::string(app::kVersion);
+    spec->shutdown_grace_secs = config.shutdown_grace_secs;
+#ifdef _WIN32
+    // LogonTrigger 钉当前用户(DOMAIN\name);拿不全就留空(= 任意用户
+    // 登录触发,runbook 写明差异)。
+    const auto domain = platform::GetEnvVar("USERDOMAIN");
+    const auto user = platform::GetEnvVar("USERNAME");
+    if (user.has_value()) {
+        spec->user_name = domain.has_value() ? (*domain + "\\" + *user) : *user;
+    }
+#endif
+    return true;
+}
+
+int RunGatewayInstall(const gateway::GatewayProfilePaths& paths) {
+    // install 前校验配置可装载(可启动 dry 的第一道闸):坏配置拒装,退
+    // 稳定码 3(与 run 同码;supervisor 语境下这也是防重启风暴的一半)。
+    const gateway::GatewayConfigLoad config_load = gateway::LoadGatewayConfig(paths.config_file);
+    if (config_load.status == gateway::GatewayConfigLoad::Status::Invalid) {
+        std::fprintf(stderr, "[gateway] 配置坏,拒绝安装(先修 %s):\n%s\n",
+                     platform::PathToUtf8(paths.config_file).c_str(),
+                     config_load.error.c_str());
+        return 3;
+    }
+    gateway::GatewayServiceSpec spec;
+    std::string spec_error;
+    if (!BuildGatewayServiceSpec(paths, config_load.config, &spec, &spec_error)) {
+        std::fprintf(stderr, "[gateway] %s\n", spec_error.c_str());
+        return 1;
+    }
+    const gateway::ServiceRunner runner = gateway::MakeDefaultServiceRunner();
+    const gateway::ServiceInstallOutcome outcome = gateway::InstallGatewayService(
+        spec, gateway::CurrentServicePlatform(), paths.profile_dir, runner);
+    if (!outcome.op.ok) {
+        std::fprintf(stderr, "[gateway] install 失败(%s): %s\n",
+                     outcome.op.error_code.c_str(), outcome.op.detail.c_str());
+        return 1;
+    }
+    std::printf("服务已注册(平台 %s;单元 %s;记录 %s)。\n",
+                gateway::ServicePlatformName(gateway::CurrentServicePlatform()),
+                platform::PathToUtf8(outcome.unit_file).c_str(),
+                platform::PathToUtf8(outcome.record_file).c_str());
+    std::printf("钉死:exe=%s 参数=gateway run --profile %s --gateway-root %s\n",
+                platform::PathToUtf8(spec.exe_path).c_str(), spec.profile.c_str(),
+                platform::PathToUtf8(spec.gateway_root).c_str());
+    std::printf("下一步:gateway start 拉起;gateway doctor --wait-ready 30 验证。\n");
+    // 凭据失效明列(不自动修,向导归 channel setup):跑 doctor 的配置/
+    // 凭据面,只打 Warn 及以上,给装机的人当场看见。
+    gateway::DoctorOptions doctor_options;
+    doctor_options.lubancode_version = std::string(app::kVersion);
+    const gateway::DoctorReport report = gateway::RunGatewayDoctor(paths, doctor_options);
+    for (const auto& check : report.checks) {
+        if (check.severity == gateway::DoctorSeverity::Warn ||
+            check.severity == gateway::DoctorSeverity::Fail) {
+            std::printf("[装机体检] %s: %s\n", check.code.c_str(), check.detail.c_str());
+        }
+    }
+    return 0;
+}
+
+int RunGatewayUninstall(const gateway::GatewayProfilePaths& paths) {
+    const gateway::GatewayConfigLoad config_load = gateway::LoadGatewayConfig(paths.config_file);
+    gateway::GatewayServiceSpec spec;
+    std::string spec_error;
+    if (!BuildGatewayServiceSpec(paths, config_load.config, &spec, &spec_error)) {
+        std::fprintf(stderr, "[gateway] %s\n", spec_error.c_str());
+        return 1;
+    }
+    // 先文件面 stop(drain 语义与 gateway stop 统一):没停干净不摘,如实
+    // 报给人工处置——摘了注册而进程还活着,下次 start 撞锁。
+    const int stop_code = StopGatewayProcess(paths, config_load.config);
+    if (stop_code != 0) {
+        std::fprintf(stderr, "[gateway] 先停干净再 uninstall(上面那条没停净)。\n");
+        return stop_code;
+    }
+    const gateway::ServiceRunner runner = gateway::MakeDefaultServiceRunner();
+    const gateway::ServiceOpOutcome outcome = gateway::UninstallGatewayService(
+        spec, gateway::CurrentServicePlatform(), paths.profile_dir, runner);
+    if (!outcome.ok) {
+        std::fprintf(stderr, "[gateway] uninstall 失败(%s): %s\n",
+                     outcome.error_code.c_str(), outcome.detail.c_str());
+        return 1;
+    }
+    std::printf("服务已摘除;任务账与 boot history 保留在 %s(不删数据)。\n",
+                platform::PathToUtf8(paths.profile_dir).c_str());
+    return 0;
+}
+
+// start/restart 共用:未安装明错(不裸 spawn——CLI 不另养暗 daemon)。
+int RequireServiceInstalled(const gateway::GatewayProfilePaths& paths,
+                            const gateway::GatewayProfileConfig& config,
+                            gateway::GatewayServiceSpec* spec) {
+    std::string spec_error;
+    if (!BuildGatewayServiceSpec(paths, config, spec, &spec_error)) {
+        std::fprintf(stderr, "[gateway] %s\n", spec_error.c_str());
+        return 1;
+    }
+    const gateway::ServiceRunner runner = gateway::MakeDefaultServiceRunner();
+    const gateway::ServiceOpOutcome query =
+        gateway::QueryGatewayService(*spec, gateway::CurrentServicePlatform(), runner);
+    if (!query.ok) {
+        std::fprintf(stderr, "[gateway] service.not_installed: 服务未注册(%s);先 gateway "
+                             "install。手动前台跑用 gateway run。\n",
+                     query.detail.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+int RunGatewayStart(const gateway::GatewayProfilePaths& paths,
+                    const gateway::GatewayProfileConfig& config) {
+    gateway::GatewayServiceSpec spec;
+    const int gate = RequireServiceInstalled(paths, config, &spec);
+    if (gate != 0) return gate;
+    const gateway::ServiceRunner runner = gateway::MakeDefaultServiceRunner();
+    const gateway::ServiceOpOutcome outcome =
+        gateway::StartGatewayService(spec, gateway::CurrentServicePlatform(), runner);
+    if (!outcome.ok) {
+        std::fprintf(stderr, "[gateway] start 失败(%s): %s\n", outcome.error_code.c_str(),
+                     outcome.detail.c_str());
+        return 1;
+    }
+    std::printf("已通过服务管理器拉起(平台 %s);gateway doctor --wait-ready 30 可验证。\n",
+                gateway::ServicePlatformName(gateway::CurrentServicePlatform()));
+    return 0;
+}
+
+int RunGatewayRestart(const gateway::GatewayProfilePaths& paths,
+                      const gateway::GatewayProfileConfig& config) {
+    gateway::GatewayServiceSpec spec;
+    const int gate = RequireServiceInstalled(paths, config, &spec);
+    if (gate != 0) return gate;
+    // 停止语义统一:文件控制面 drain(与 gateway stop 同一条路),收干净
+    // 再经服务管理器拉起。重启后先 reconcile 再接新活由泵保证
+    //(TickOnce 恢复扫描先于新派发)。
+    const int stop_code = StopGatewayProcess(paths, config);
+    if (stop_code != 0) {
+        std::fprintf(stderr, "[gateway] 没停干净,不再拉起(上面那条如实)。\n");
+        return stop_code;
+    }
+    const gateway::ServiceRunner runner = gateway::MakeDefaultServiceRunner();
+    const gateway::ServiceOpOutcome outcome =
+        gateway::StartGatewayService(spec, gateway::CurrentServicePlatform(), runner);
+    if (!outcome.ok) {
+        std::fprintf(stderr, "[gateway] restart 拉起失败(%s): %s\n", outcome.error_code.c_str(),
+                     outcome.detail.c_str());
+        return 1;
+    }
+    std::printf("已停净并经服务管理器重新拉起。\n");
+    return 0;
+}
+
+int RunGatewayDoctor(const gateway::GatewayProfilePaths& paths, const GatewayCommandArgs& args) {
+    // SafeMode 显式 ack 先做(contracts §10.3 留给 V4 的口)。
+    if (args.ack_safe_mode) {
+        const std::string error = gateway::AckSafeMode(paths);
+        if (!error.empty()) {
+            std::fprintf(stderr, "[gateway] ack 落账失败: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("已记 ack_safe_mode:SafeMode 连击清零(账上保留人工确认事实)。\n");
+    }
+    // 健康探针先等(install 后验证/外部监控用);超时如实退 1,不假 ready。
+    if (args.wait_ready_secs > 0) {
+        const gateway::WaitReadyOutcome wait =
+            gateway::WaitForGatewayReady(paths, args.wait_ready_secs, {}, {});
+        std::printf("%s\n", wait.detail.c_str());
+        if (!wait.ready) {
+            return 1;
+        }
+    }
+    gateway::DoctorOptions options;
+    options.service_runner = gateway::MakeDefaultServiceRunner();
+    options.lubancode_version = std::string(app::kVersion);
+    const gateway::DoctorReport report = gateway::RunGatewayDoctor(paths, options);
+    if (args.json) {
+        std::printf("%s\n", report.ToJson().dump().c_str());
+    } else {
+        for (const std::string& line : report.FormatLines()) {
+            std::printf("%s\n", line.c_str());
+        }
+    }
+    return report.ExitCode();
+}
+
+// 读文本文件的尾 N 行(文件不在给空)。
+std::vector<std::string> ReadTailLines(const std::filesystem::path& file, int tail) {
+    std::vector<std::string> lines;
+    std::error_code ec;
+    if (!std::filesystem::exists(file, ec) || ec) return lines;
+    std::ifstream stream(file, std::ios::binary);
+    if (!stream) return lines;
+    std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = text.find('\n', start);
+        std::string line = end == std::string::npos ? text.substr(start)
+                                                    : text.substr(start, end - start);
+        if (!line.empty()) lines.push_back(std::move(line));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if (lines.size() > static_cast<std::size_t>(tail)) {
+        lines.erase(lines.begin(), lines.end() - static_cast<std::size_t>(tail));
+    }
+    return lines;
+}
+
+int RunGatewayLogs(const gateway::GatewayProfilePaths& paths, const GatewayCommandArgs& args) {
+    const int tail = args.tail_lines > 0 ? args.tail_lines : 20;
+    std::printf("== boot history 尾 %d 行(%s) ==\n", tail,
+                platform::PathToUtf8(paths.boot_history).c_str());
+    {
+        const auto lines = ReadTailLines(paths.boot_history, tail);
+        if (lines.empty()) {
+            std::printf("(还没有 boot history)\n");
+        } else {
+            for (const std::string& line : lines) {
+                std::printf("%s\n", line.c_str());
+            }
+        }
+    }
+    std::printf("== gateway.log 尾 %d 行(%s) ==\n", tail,
+                platform::PathToUtf8(paths.log_file).c_str());
+    {
+        const auto lines = ReadTailLines(paths.log_file, tail);
+        if (lines.empty()) {
+            std::printf("(还没有 gateway.log)\n");
+        } else {
+            for (const std::string& line : lines) {
+                std::printf("%s\n", line.c_str());
+            }
+        }
+    }
+    // 服务 stdout/stderr 落位指引(不做聚合,只指路)。
+    std::printf("== 服务输出落位 ==\n");
+    if (gateway::CurrentServicePlatform() == gateway::ServicePlatform::Linux) {
+        std::printf("systemd user 单元走 journal:journalctl --user -u %s\n",
+                    gateway::SystemdUnitName(paths.name.empty()
+                                                 ? std::string(gateway::kDefaultGatewayProfile)
+                                                 : paths.name)
+                        .c_str());
+    } else {
+        std::printf("计划任务/LaunchAgent 的 stdout+stderr 追加在:\n  %s\n",
+                    platform::PathToUtf8(paths.logs_dir / "service.log").c_str());
+        if (gateway::CurrentServicePlatform() == gateway::ServicePlatform::MacOS) {
+            std::printf("launchd stderr 另落在:\n  %s\n",
+                        platform::PathToUtf8(paths.logs_dir / "service.err.log").c_str());
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 int RunGatewayCommand(const GatewayCommandArgs& args) {
@@ -403,6 +687,29 @@ int RunGatewayCommand(const GatewayCommandArgs& args) {
         // Gateway 恰恰是正事),按默认宽限等。
         const gateway::GatewayConfigLoad config_load = gateway::LoadGatewayConfig(paths.config_file);
         return StopGatewayProcess(paths, config_load.config);
+    }
+    // ---- V4 运维族(单子 §十"服务安装与常驻运维") ---------------------
+    if (args.verb == "install") {
+        return RunGatewayInstall(paths);
+    }
+    if (args.verb == "uninstall") {
+        return RunGatewayUninstall(paths);
+    }
+    if (args.verb == "start") {
+        const gateway::GatewayConfigLoad config_load =
+            gateway::LoadGatewayConfig(paths.config_file);
+        return RunGatewayStart(paths, config_load.config);
+    }
+    if (args.verb == "restart") {
+        const gateway::GatewayConfigLoad config_load =
+            gateway::LoadGatewayConfig(paths.config_file);
+        return RunGatewayRestart(paths, config_load.config);
+    }
+    if (args.verb == "doctor") {
+        return RunGatewayDoctor(paths, args);
+    }
+    if (args.verb == "logs") {
+        return RunGatewayLogs(paths, args);
     }
     std::fprintf(stderr, "gateway: 认不得动词 \"%s\"\n", args.verb.c_str());
     return 1;

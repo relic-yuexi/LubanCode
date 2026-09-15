@@ -99,3 +99,12 @@ P0-2 起恒开一场 `TrajectorySessionLedger`（本类持有 Recorder 所有权
 - **V3 schema 注册表**：V0 追加 `gateway.work.bound`、`reply.selection.committed`（statusless 事实行，合同+fixture 先行、生产装配归 V1）——与 tool.job 族同一演进规矩，schemaVersion 纯追加。
 - 写盘图增补：会话目录新增 `operations.jsonl`（受理账，schemaVersion 2）与 `operations-inputs/`（输入原件）；`gateway.lock` 内容加 owner_epoch 字段（旧 schema 锁文件读不懂，保守拒绝留人工）。
 - 未验边界：真拔电、真进程硬杀窗口、claim/开轮执行器（contracts.md §11.6）。
+
+## 7. V4 写盘增补（2026-09-15，服务安装与常驻运维批）
+
+V4 批新增的写盘面（静态核查；真机服务注册未验）：
+
+- **`<profile>/service/`（新目录，install 写侧建）**：`gateway-task.xml`（Windows，注册文件兼树内存档；Windows 宿主上字节 UTF-16）/ `<unit>.unit` / `<label>.plist`（Linux/macOS 树内存档副本，UTF-8）与 `install.json`（安装记录：exe 路径、lubancode 版本、单元落位、grace、安装时刻——普通 ofstream 写，非账行：派生物，uninstall 摘除整目录）。系统侧单元（`~/.config/systemd/user/`、`~/Library/LaunchAgents/`）由 install 写（测试经 `system_unit_dir` 注入临时目录，不写真 home）。
+- **boot-history.jsonl**：新增 `type=ack` 行（doctor `--ack-safe-mode`，GatewayBootHistory::Append 既有写路）；shutdown 行新增可选字段 `uncollected_work`（数组；GatewayProcess::Shutdown 在泵 Close 失败时写，clean=false）。
+- **doctor 的即写即删探针**：`<profile>/doctor-probe-<pid>.tmp`（DefaultDiskWriteProbe，写→flush→删；目录不存在不建、不写——零副作用合同保持：不带 `--ack-safe-mode` 的 doctor 零写盘）。
+- **读侧新增面（零写盘）**：`ServiceInstallRecord::Load`（install.json 只读）、`ReadGlobalConfigText`（doctor 凭据面读全局 config.json 的 channels 段，值不出函数）、ProbeGateway/ProbeStatusSections 既有只读面复用。

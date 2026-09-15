@@ -92,16 +92,20 @@ struct TrajectoryCliArgs {
                                     // 重导)与 Harbor adapter 收尾都用它。
 };
 
-// Gateway 子命令(总装单 G1 + V1/V2 job 族):`lubancode gateway
+// Gateway 子命令(总装单 G1 + V1/V2 job 族 + V4 运维族):`lubancode gateway
 // run|status|stop [--profile <名>] [--json 只 status 认]`;`gateway job
 // add|run-now|list|read|update|pause|resume|cancel|import-loop` 是持久任务
-// 入口(写操作落控制命令文件,活着的 Gateway 消费;list/read 只读账)。
-// run 是前台真进程;status/stop/job list/job read 绝不暗起 Gateway(零副
-// 作用合同)。
+// 入口(写操作落控制命令文件,活着的 Gateway 消费;list/read 只读账);
+// V4 服务安装与常驻运维:`gateway install|uninstall|start|restart|doctor|
+// logs`(install 生成平台服务单元并注册,不 start;start/restart 走服务
+// 管理器不裸 spawn;doctor 体检 + --wait-ready 健康探针)。
+// run 是前台真进程;status/stop/job list/job read/doctor(无 --ack)绝不
+// 暗起 Gateway(零副作用合同)。
 struct GatewayCliArgs {
-    std::string verb;    // run | status | stop | job
+    std::string verb;    // run | status | stop | job | install | uninstall |
+                         // start | restart | doctor | logs
     std::string profile; // --profile <名>;空 = default
-    bool json = false;   // status --json:机器可读快照(job list/read 也认)
+    bool json = false;   // status --json:机器可读快照(job list/read、doctor 也认)
     // job 子族(verb == "job"):写操作落命令文件等消费;list/read 只读
     // automation 账。
     std::string job_verb;             // add | run-now | list | read | update |
@@ -122,6 +126,13 @@ struct GatewayCliArgs {
     long long expected_revision = 0;  // --rev(update/pause/resume/cancel 的 CAS)
     std::string source_session_id;    // import-loop 位置参数(原 /loop 会话)
     std::string source_task_id;       // import-loop --task(原 loop-N)
+    // V4 运维族参数。
+    int wait_ready_secs = 0;          // doctor --wait-ready <秒>(0 = 不等)
+    bool wait_ready_given = false;
+    bool ack_safe_mode = false;       // doctor --ack-safe-mode
+    int tail_lines = 20;              // logs --tail <行>(缺省 20)
+    std::string gateway_root_arg;     // --gateway-root <路径>(install 钉进服务单元;
+                                      // 其余 verb 显式指状态根,空 = 默认)
 };
 
 // channel status 子命令(连接状态单 §三 P0-A):`lubancode channel status

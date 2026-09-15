@@ -113,26 +113,36 @@ private:
 // ---------------------------------------------------------------------------
 
 // boot-history.jsonl 的一行。type=boot:一次启动(带 safe_mode/config_error);
-// type=shutdown:一次关机(clean=false 即非干净,含超时)。
+// type=shutdown:一次关机(clean=false 即非干净,含超时);type=ack:operator
+// 显式确认(V4 doctor --ack-safe-mode),效力同干净关机——连击清零,但
+// 不伪造 shutdown 事实(账上仍看得出这是一次人工 ack,不是进程自己收的)。
 struct GatewayBootLine {
-    enum class Kind { Boot, Shutdown };
+    enum class Kind { Boot, Shutdown, Ack };
     Kind kind = Kind::Boot;
     std::string boot_id;
     unsigned long pid = 0;
     std::string start_token;
     std::int64_t at_ms = 0;
-    std::string reason;         // boot: process_launch|config_invalid;shutdown: stop|signal
+    std::string reason;         // boot: process_launch|config_invalid;shutdown: stop|signal;
+                                // ack: ack_safe_mode
     bool clean = true;          // shutdown 行:true=干净关机
     bool safe_mode = false;     // boot 行
     std::string config_error;   // boot 行可带(gateway.config_invalid 的人话)
+    // V4(单子 §十 第四行):关机宽限到期时仍未收净的 work 清单(occurrence
+    // id)。如实记录,不结算成 cancelled——重启后 reconcile 按在飞裁决
+    //(SweepRecovery 扫 claimed 未结算)。同步泵(V1/V2)恒空;异步泵接上
+    // 后由泵侧填充。GatewayProcess 是自己的账,清单由泵经
+    // UncollectedWorkIds() 递进来,engine 层不依赖 runtime。
+    std::vector<std::string> uncollected_work;
 
     nlohmann::json ToJson() const;
     // 读侧容错:坏行/半截行给 nullopt 由调用方跳过计数,不崩宿主。
     static std::optional<GatewayBootLine> FromJson(const nlohmann::json& json);
 };
 
-// 连续非干净关机连击:逐行走,boot 计一,干净 shutdown 清零(单实例串行,
-// 一次只有一场在跑)。>= threshold 即进 SafeMode(contracts.md §10)。
+// 连续非干净关机连击:逐行走,boot 计一,干净 shutdown 或显式 ack 清零
+//(单实例串行,一次只有一场在跑)。>= threshold 即进 SafeMode(contracts.md
+// §10;ack 口是 V4 doctor 的,见 GatewayBootLine::Kind::Ack)。
 int CountUncleanBootStreak(const std::vector<GatewayBootLine>& lines);
 
 class GatewayBootHistory {

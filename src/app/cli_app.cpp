@@ -885,6 +885,15 @@ int RunCli(const std::vector<std::string>& args) {
             gateway_args.expected_revision = parsed_cli.gateway.expected_revision;
             gateway_args.source_session_id = parsed_cli.gateway.source_session_id;
             gateway_args.source_task_id = parsed_cli.gateway.source_task_id;
+            // V4 运维族参数(doctor --wait-ready/--ack-safe-mode、logs --tail、
+            // 显式状态根 --gateway-root)。
+            gateway_args.wait_ready_secs = parsed_cli.gateway.wait_ready_secs;
+            gateway_args.ack_safe_mode = parsed_cli.gateway.ack_safe_mode;
+            gateway_args.tail_lines = parsed_cli.gateway.tail_lines;
+            gateway_args.gateway_root =
+                parsed_cli.gateway.gateway_root_arg.empty()
+                    ? std::filesystem::path()
+                    : lubancode::platform::Utf8ToPath(parsed_cli.gateway.gateway_root_arg);
             if (gateway_args.verb != "run") {
                 return cli::RunGatewayCommand(gateway_args);
             }

@@ -521,9 +521,52 @@ TEST_CASE("CLI:gateway 子命令解析与用法错误") {
         CHECK(parsed.action == lubancode::app::CliAction::BadGateway);
     }
     {
-        const auto parsed = ParseCliArgs({"lubancode", "gateway", "install"});
+        const auto parsed = ParseCliArgs({"lubancode", "gateway", "deploy"});
         CHECK(parsed.action == lubancode::app::CliAction::BadGateway);
-        CHECK(parsed.error_text.find("尚未实现") != std::string::npos);
+    }
+    {
+        // V4 运维族:install/uninstall/start/restart/doctor/logs 全认。
+        const auto parsed = ParseCliArgs({"lubancode", "gateway", "install", "--profile", "ops"});
+        REQUIRE(parsed.action == lubancode::app::CliAction::RunGateway);
+        CHECK(parsed.gateway.verb == "install");
+        CHECK(parsed.gateway.profile == "ops");
+    }
+    {
+        const auto parsed =
+            ParseCliArgs({"lubancode", "gateway", "doctor", "--wait-ready", "30", "--json"});
+        REQUIRE(parsed.action == lubancode::app::CliAction::RunGateway);
+        CHECK(parsed.gateway.verb == "doctor");
+        CHECK(parsed.gateway.wait_ready_secs == 30);
+        CHECK(parsed.gateway.wait_ready_given);
+        CHECK(parsed.gateway.json);
+    }
+    {
+        const auto parsed =
+            ParseCliArgs({"lubancode", "gateway", "doctor", "--ack-safe-mode"});
+        REQUIRE(parsed.action == lubancode::app::CliAction::RunGateway);
+        CHECK(parsed.gateway.ack_safe_mode);
+    }
+    {
+        const auto parsed = ParseCliArgs({"lubancode", "gateway", "logs", "--tail", "5"});
+        REQUIRE(parsed.action == lubancode::app::CliAction::RunGateway);
+        CHECK(parsed.gateway.verb == "logs");
+        CHECK(parsed.gateway.tail_lines == 5);
+    }
+    {
+        const auto parsed = ParseCliArgs(
+            {"lubancode", "gateway", "start", "--gateway-root", "/tmp/gw-root"});
+        REQUIRE(parsed.action == lubancode::app::CliAction::RunGateway);
+        CHECK(parsed.gateway.gateway_root_arg == "/tmp/gw-root");
+    }
+    {
+        // 参数错:doctor 外不认 --wait-ready;--tail 行数非正拒。
+        const auto parsed = ParseCliArgs({"lubancode", "gateway", "run", "--wait-ready", "5"});
+        CHECK(parsed.action == lubancode::app::CliAction::BadGateway);
+        const auto bad_tail =
+            ParseCliArgs({"lubancode", "gateway", "logs", "--tail", "0"});
+        CHECK(bad_tail.action == lubancode::app::CliAction::BadGateway);
+        const auto bad_json = ParseCliArgs({"lubancode", "gateway", "logs", "--json"});
+        CHECK(bad_json.action == lubancode::app::CliAction::BadGateway);
     }
     {
         const auto parsed = ParseCliArgs({"lubancode", "gateway", "run", "--json"});

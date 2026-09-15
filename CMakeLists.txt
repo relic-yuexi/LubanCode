@@ -816,6 +816,13 @@ add_library(lubancode_engine STATIC
   src/gateway/automation_schedule.cpp
   src/gateway/reply_outbox.cpp
   src/gateway/work_pump.cpp
+  # 常驻总装 V4:服务安装与常驻运维——平台服务单元生成(schtasks XML/
+  # systemd unit/launchd plist,纯函数)+ 服务管理器操作(可注入 runner)
+  # + install.json 安装记录;doctor 体检清单(一项一码)与健康探针
+  # (--wait-ready)。凭据检查复用 channel 纯函数 resolver(同 engine 层,
+  # 与 status.cpp 读 channel 账同款边界)。
+  src/gateway/service.cpp
+  src/gateway/doctor.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp

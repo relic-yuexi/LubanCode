@@ -197,7 +197,10 @@ Gateway 未显式启动时：
 ```text
 gateway.already_running      gateway.not_running        gateway.lock_stale
 gateway.safe_mode            gateway.config_invalid    gateway.control_unreachable
-gateway.shutdown_timeout
+gateway.shutdown_timeout     gateway.not_ready(V4 --wait-ready 超时)
+
+service.manager_unavailable  service.op_failed         service.unit_write_failed
+service.record_write_failed  service.not_installed(CLI 明错文案)
 
 automation.store_unavailable automation.job_not_found   automation.revision_conflict
 automation.claim_busy        automation.schedule_invalid
@@ -213,6 +216,20 @@ channel.delivery_unknown     channel.outbox_full
 
 recovery.source_corrupt      recovery.source_unsupported
 recovery.action_forbidden
+```
+
+V4 doctor 的体检码(一项一码,冻结;severity ok/info/warn/fail 见 §14):
+
+```text
+process.running|not_running|stale_lock|stale_remnant|broken_lock
+config.ok|missing|invalid
+service.registered|not_registered|manager_unavailable|skipped
+install.ok|not_recorded|record_unreadable|exe_missing|version_mismatch
+channels.none_configured|config_invalid  credentials.<ch>.<acct>.ok|.disabled|.insecure_source|.resolve_failed
+credentials.skipped|none_configured       activation.deferred_to_v3
+disk.writable|read_only|no_profile_dir
+ledger.needs_review|in_flight|absent      dead_letter.outbox_flagged|dead_letter.channel
+safe_mode.on|off                          boot.last_shutdown_clean|unclean|no_history
 ```
 
 ## 8. 容量、公平与时间（摘要）
@@ -367,3 +384,44 @@ V1 冻结的 `selectionId = "sel-" + turnId` 在 V2 周期任务下暴露缺陷�
 ### 13.9 新账行 type（纯追加，未知 type 读取侧跳过）
 
 `job.updated`（fromRevision/toRevision/patch 键/cursorMs）、`job.paused`、`job.resumed`（cursorThroughMs）、`job.cancelled`、`job.schedule_advanced`（throughSlotMs/policy）、`occurrence.merged`（missedCount/throughSlotMs）、`occurrence.redispatched`（attempt/reason）、`occurrence.observed`（resultSha256/changed/delivered/updateLastObserved）、`occurrence.cancel_requested`、`loop.imported`。V2 已验/未验分账见单子 V2 勾选（放行门四条全过；真起子进程硬杀冒烟、断电一致性、真渠道投递仍属后续批次）。
+
+## 14. V4 裁决:服务安装与常驻运维(2026-09-15 落,回单子报备)
+
+V4 批(单子 §十"服务安装与常驻运维")落定的合同。运维手册(三平台安装形态、备份升级回滚、未验边界分平台列)见 [runbook.md](runbook.md);本节是可直接对照的唯一真源。
+
+### 14.1 命令族与停止语义
+
+- `gateway install|uninstall|start|restart|doctor|logs [--profile <名>]` 全部落 CLI(`src/cli/gateway_command.cpp`);install 另认 `--gateway-root <绝对路径>`(缺省当前状态根;钉进服务单元,服务起来不依赖用户环境变量),doctor 另认 `--json/--wait-ready <秒>/--ack-safe-mode`,logs 另认 `--tail <行>`。
+- **停止语义统一**:supervisor 语境下的停止就是既有文件控制面(投 stop 命令 → drain → 宽限 → 锁释放;超时 `gateway.shutdown_timeout` 退 4 不代杀)。`uninstall`/`restart` 的停止段走同一条路;没停干净不摘服务、不再拉起。服务管理器只管拉起/摘除/查询。
+- `start/restart` 经服务管理器(schtasks /Run、systemctl --user start、launchctl load/kickstart),**不裸 spawn**;未 install 明错 `service.not_installed`,CLI 不养暗 daemon。手动前台跑仍是 `gateway run`。
+- install 只注册不 start;注册前校验 `gateway.json` 可装载(坏 → 拒装退 3);凭据/配置体检项 Warn 以上当场明列,不自动修(向导归 `lubancode channel setup`)。
+
+### 14.2 服务单元与防重启风暴
+
+- 生成物(`src/gateway/service.*` 纯函数):Windows schtasks XML(Task Schema 1.3;ONLOGON+30s 延迟、`ExecutionTimeLimit=PT0S` 不限时、`RestartOnFailure` 间隔 60s 限 3 次、cmd 重定向 stdout/stderr 到 `<profile>/logs/service.log`);Linux systemd user 单元(`Restart=on-failure` + `RestartPreventExitStatus=3`、`TimeoutStopSec=grace+15`、journal);macOS LaunchAgent plist(`RunAtLoad`、`KeepAlive={Crashed}` 仅崩溃拉起、StandardOut/ErrorPath)。
+- 防重启风暴分平台如实:退出码 3(坏配置)systemd 按码豁免、launchd 干净退出不拉、Windows 无法按码豁免只能限次(能力边界,非实现选择);加上 Gateway 自身坏配置不占锁、稳定退 3。
+- exe 路径/工作目录/参数落死在单元里;安装记录 `<profile>/service/install.json` 钉 exe 路径与 lubancode 版本(doctor 对账 `install.exe_missing`/`install.version_mismatch`);升级回滚步骤在 runbook §6(手动,不做自动回滚)。
+- 服务管理器调用经可注入 runner(`ServiceRunner` seam):CI 验 argv 形状与缺席明错;**真实服务注册三平台真机未验**(runbook §8 分平台列),Windows 真机验收路径先交付。
+
+### 14.3 doctor 码表与健康探针
+
+- 体检码冻结于 §7 下表;severity 四档 ok/info/warn/fail;**退出码稳定:0 全绿 / 1 有 warn / 2 有 fail**(外部监控按退出码,不解析人话)。
+- 凭据面只跑配置/凭据两闸(`ResolveChannelCredential` 全跑,值不出函数);渠道激活闸其余三闸(trust/lock/执行载体)归 V3 总装,报 `activation.deferred_to_v3` 不下"渠道能起"的结论。
+- doctor 零副作用合同(与 status/stop 同款):不带 `--ack-safe-mode` 时零写盘零建目录;disk 探针在既有目录内即写即删,目录不存在报 `disk.no_profile_dir` 不建。
+- `--wait-ready <秒>`:ready = 锁活 + control 快照 state=running + health=ok + 非 SafeMode(**进程 running ≠ ready**);超时如实退 1 报 `gateway.not_ready`。
+- `--ack-safe-mode`:boot-history 落一行 `type=ack`(reason=ack_safe_mode),SafeMode 连击清零,效力同干净关机——这是 §10.3 留给 V4 的显式 ack 口;账上保留人工确认事实,不伪造 shutdown。`CountUncleanBootStreak` 见 ack 行清零。
+
+### 14.4 关机宽限:未收净如实入账
+
+- boot-history 的 shutdown 行新增 `uncollected_work`(occurrence id 数组,仅 Close 未收净时非空):`GatewayWorkPump` 新增虚口 `UncollectedWorkIds()`(缺省空),`GatewayProcess::Shutdown` 在泵 Close 失败时取清单写进账行,`clean=false` 退 4——**不结算成 cancelled,不假报取消成功**。
+- `GatewayAutomationPump` 实现该口:claim→结算窗口记 in_flight(RAII 清口),Close 前抓残留。同步泵(V1/V2)主循环已出、TickOnce 已收口,清单恒空——机制先立,异步泵接上后生效(测试经假泵注入验证 engine 层合同)。
+- **重启先 reconcile 再接新活**:泵 TickOnce 的次序(消费命令 → SweepSchedule → 恢复扫描 → outbox → 至多一枚新执行)保证恢复裁决先于新派发;恢复路裁决(重派同一 occurrence / needs_review 停审)是 V2 §13.4 合同,V4 不改。进程没跑而账有在飞时 doctor 报 `ledger.in_flight`(Warn)。
+
+### 14.5 新账行/字段(纯追加,未知 type 读取侧跳过)
+
+boot-history `type=ack` 行(reason=ack_safe_mode);shutdown 行可选字段 `uncollected_work`(string 数组)。`<profile>/service/` 新目录(gateway 树内生成物存档 + install.json,派生物,uninstall 摘除)。旧读侧(GatewayBootLine::FromJson)容错:未知字段忽略、未知 type 跳过。
+
+### 14.6 已验面与未验边界(如实分账)
+
+已过(CI 可重复册 `unit.gateway.test_gateway_service` 14 案 + `unit.gateway.test_gateway_doctor` 12 案 + `test_gateway_process` V4 解析/关机记账案):三平台单元生成物文本(argv/参数/延迟/重启策略/不限时/日志落位)、XML 转义、install.json 严格解析与对账、注入 runner 的 install/uninstall/start/query argv 形状、管理器缺席/命令失败稳定码、doctor 码表(未初始化/坏配置/坏账/死信/SafeMode ack/关机未收净/安装记录)、wait-ready 判定与超时、假泵注入的 shutdown uncollected_work 记账。
+**未验**:真实服务注册/拉起/登录自启/失败重启/注销存活三平台真机全未验(runbook §8 分平台列);24h 常驻与断网/坏配置不丢账 soak 归 V6;渠道凭据面 doctor 的真渠道行为归 V3 接上后。

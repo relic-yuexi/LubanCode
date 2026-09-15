@@ -40,6 +40,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "gateway/automation_store.hpp"
 #include "gateway/profile.hpp"  // GatewayProfilePaths(automation/delivery 落位)
@@ -103,6 +104,10 @@ public:
     bool TickOnce(std::int64_t now_ms) override;
     void StopAccepting() override;
     bool Close(int grace_ms) override;
+    // V4:Close 之后仍未收净的 occurrence id(同步泵下 TickOnce 已收口,
+    // 恒空;异步泵接上后由宽限等待逻辑填充)。写进 shutdown 账行
+    // uncollected_work,不结算成 cancelled。
+    std::vector<std::string> UncollectedWorkIds() const override;
 
     // ---- 观测/测试 -----------------------------------------------------------
     // 泵内账的只读捷径(status 走 gateway::ProbeStatusSections,不经泵)。
@@ -132,6 +137,11 @@ private:
     std::atomic<bool> accepting_{true};
     std::atomic<bool> closed_{false};
     std::string owner_epoch_;
+    // V4:当前执行中的 occurrence(RunOneOccurrence 的 claim→结算窗)与
+    // Close 时未收净的清单(见 UncollectedWorkIds)。同步泵下主循环退出
+    // 后 TickOnce 已收口,两者恒空——机制先立,异步化后生效。
+    std::string in_flight_;
+    std::vector<std::string> uncollected_;
 };
 
 }  // namespace lubancode::runtime

@@ -4,7 +4,7 @@ _本目录原是旧总装计划（G0 批次）的合同冻结文档。2026-09-13
 
 ---
 
-[文档首页](../../README.md) · [架构首页](../README.md) · [冻结合同](contracts.md) · [现状审计与写盘图](audit-write-map.md) · [渠道合同](../channels/README.md)
+[文档首页](../../README.md) · [架构首页](../README.md) · [冻结合同](contracts.md) · [现状审计与写盘图](audit-write-map.md) · [服务运维手册](runbook.md) · [渠道合同](../channels/README.md)
 
 ## 1. 这层是干什么的
 
@@ -90,16 +90,16 @@ enum class ProcessMode {
 
 ```text
 lubancode gateway run     [--profile <name>]   前台真进程
-lubancode gateway install [--profile <name>]   只管 supervisor
-lubancode gateway start   [--profile <name>]
-lubancode gateway stop    [--profile <name>]
-lubancode gateway restart [--profile <name>]
-lubancode gateway status  [--json] [--deep]
-lubancode gateway doctor  [--json]
-lubancode gateway logs    [--follow]
+lubancode gateway install [--profile <name>]   只管 supervisor(注册不 start)
+lubancode gateway start   [--profile <name>]   经服务管理器拉起,不裸 spawn
+lubancode gateway stop    [--profile <name>]   文件控制面 drain,不越权代杀
+lubancode gateway restart [--profile <name>]   文件面 stop → 服务面 start
+lubancode gateway status  [--json]             只读 probe + 领域三栏
+lubancode gateway doctor  [--json] [--wait-ready <秒>] [--ack-safe-mode]
+lubancode gateway logs    [--tail <行>]
 ```
 
-`run` 是前台真进程。`install/start/stop/restart` 只管 supervisor。CLI 不另养一只暗 daemon。
+`run` 是前台真进程。`install/start/stop/restart` 只管 supervisor。CLI 不另养一只暗 daemon。停止语义统一走文件控制面(投 stop 命令 → drain → 宽限;超时如实退 4 不代杀)——uninstall/restart 的收口同一条路。doctor 一项一码,退出码 0/1/2(全绿/有警/有病);`--wait-ready` 供 install 后验证与外部监控,超时如实退 1。三平台安装形态、运维手册与未验边界见 [runbook](runbook.md)。
 
 Gateway 进程退出码（G1 实现裁决，冻结）：
 
@@ -149,6 +149,6 @@ Gateway 进程退出码（G1 实现裁决，冻结）：
 | V1 | 最短纵向闭环：主泵、最小 AutomationStore（once/run-now）、共用 headless 装配、reply selection + 本地 DurableReplyOutbox | 已落（2026-09-13，PR #63；裁决见 contracts.md §12） |
 | V2 | 周期调度与可靠接管（interval/cron、时区/DST、misfire、恢复裁决、heartbeat、/loop 导入） | 已落（2026-09-15，裁决见 contracts.md §13） |
 | V3 | 渠道总装与真 transport（durable work 引用、sidecar、ACK 服从 ingress 耐久回执） | 待实现 |
-| V4 | 服务安装与常驻运维（install/start/restart/doctor/logs、三平台 supervisor） | 待实现 |
+| V4 | 服务安装与常驻运维（install/uninstall/start/restart/doctor/logs、三平台 supervisor 生成物、健康探针、关机未收净如实入账） | 已落（2026-09-15，裁决见 contracts.md §14；运维手册见 [runbook](runbook.md)；真实服务注册三平台真机未验，分平台列） |
 | V5 | 长任务、Goal 与 Workflow（与异步工具单共用执行账） | 待实现 |
 | V6 | 发布验收（回归、72h soak、容量扫点、安全、能力表） | 待实现 |
