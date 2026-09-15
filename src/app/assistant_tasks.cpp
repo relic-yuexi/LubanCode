@@ -84,6 +84,19 @@ std::optional<std::string> ReadTextBounded(const std::filesystem::path& path, st
     return text;
 }
 
+// 投影里挑 job 的首枚 occurrence(once 任务建账即有);没有回空——
+// CreateJob 的 job 行与 occurrence 行是两笔连续 append,读侧可能停在
+// 两行之间的中间态。
+std::string FindFirstOccurrenceOfJob(const gateway::AutomationProjection& projection,
+                                     const std::string& job_id) {
+    for (const auto& [occurrence_id, occurrence] : projection.occurrences) {
+        if (occurrence.job_id == job_id) {
+            return occurrence_id;
+        }
+    }
+    return std::string();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -342,18 +355,23 @@ bool AssistantAutomationFace::WaitForCreateReceipt(const std::string& idempotenc
         const auto key = projection.create_keys.find(idempotency_key);
         if (key != projection.create_keys.end()) {
             const auto job = projection.jobs.find(key->second);
-            if (job == projection.jobs.end()) {
-                continue;  // 账行竞态(键在、job 行还没落全):再等一拍
-            }
-            *out_job_id = key->second;
-            *out_revision = job->second.revision;
-            for (const auto& [occurrence_id, occurrence] : projection.occurrences) {
-                if (occurrence.job_id == key->second) {
+            if (job != projection.jobs.end()) {
+                // job 行与 once 首枚 occurrence 行是 CreateJob 里两笔连续
+                // append(各自 PowerLoss flush)——读侧轮询可能停在两行之
+                // 间。"受理即回带 occurrenceId"的合同要求回执等 occurrence
+                // 行也上账(windows 腿 e2e 栽过:create_keys 与 job 行已落、
+                // occurrence 行没落,回执 occurrenceId 空)。泵 tick 同步连
+                // 落两行,下一拍必见。
+                const std::string occurrence_id = FindFirstOccurrenceOfJob(projection, key->second);
+                if (!occurrence_id.empty()) {
+                    *out_job_id = key->second;
+                    *out_revision = job->second.revision;
                     *out_occurrence_id = occurrence_id;
-                    break;
+                    return true;
                 }
             }
-            return true;
+            // 键在但 job/occurrence 行还没落全(两行 append 的中间态):
+            // 再等一拍。
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -398,12 +416,22 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
     }
     const std::int64_t due_at_ms = ReadJsonInt(params, "dueAtMs");
     // 幂等先查账:同键已受理 → 回原受理(duplicate),不写第二枚命令。
-    // automation 的幂等合同(§11.5):同键回原回执,不比载荷。
+    // automation 的幂等合同(§11.5):同键回原回执,不比载荷。回执与首
+    // 次同款,occurrenceId 也要齐——挡分支若撞上"job 行在、occurrence
+    // 行未落"的两行 append 中间态,短等其上账(首枚回执等到过,常态
+    // 一拍即过;等不到如实回空,不冒充)。
     {
         const gateway::AutomationProjection projection =
             gateway::ReadAutomationProjection(paths_.automation_log);
         const auto key = projection.create_keys.find(client_operation_id);
         if (key != projection.create_keys.end()) {
+            std::string occurrence_id = FindFirstOccurrenceOfJob(projection, key->second);
+            const std::int64_t wait_deadline = WallClockMs() + 2000;
+            while (occurrence_id.empty() && WallClockMs() < wait_deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                occurrence_id = FindFirstOccurrenceOfJob(
+                    gateway::ReadAutomationProjection(paths_.automation_log), key->second);
+            }
             nlohmann::json result;
             result["duplicate"] = true;
             result["jobId"] = key->second;
@@ -413,11 +441,8 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
                 result["state"] = gateway::ToString(job->second.state);
                 result["dueAtMs"] = job->second.due_at_ms;
             }
-            for (const auto& [occurrence_id, occurrence] : projection.occurrences) {
-                if (occurrence.job_id == key->second) {
-                    result["occurrenceId"] = occurrence_id;
-                    break;
-                }
+            if (!occurrence_id.empty()) {
+                result["occurrenceId"] = occurrence_id;
             }
             return result;
         }

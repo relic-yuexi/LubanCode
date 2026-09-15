@@ -329,6 +329,10 @@ TEST_CASE("任务全链:create -> 执行 -> settled -> task/read 结果与发布
     const nlohmann::json created = fixture.Create("W2-KEY-1", "检查仓库状态");
     REQUIRE(created.contains("jobId"));
     CHECK(created.value("duplicate", true) == false);
+    // 受理即回的合同:occurrenceId 必须齐(job 行与 occurrence 行两笔
+    // append 的中间态不许漏进回执——windows 腿栽过)。
+    CHECK(created.contains("occurrenceId"));
+    CHECK(created["occurrenceId"].get<std::string>().empty() == false);
     const std::string job_id = created["jobId"].get<std::string>();
 
     const auto settled = fixture.PumpUntilSettled(job_id, 15000);
@@ -403,6 +407,9 @@ TEST_CASE("幂等:同 clientOperationId 双提交回原受理,不双建不双跑
     // 结算后再交同键:回原受理(duplicate),不再建任务、不再执行。
     const nlohmann::json second = fixture.Create("W2-IDEM", "跑一次幂等任务");
     CHECK(second.value("duplicate", false) == true);
+    // 幂等回执同款齐整:挡分支也不许漏 occurrenceId(两行 append 中间态)。
+    CHECK(second.contains("occurrenceId"));
+    CHECK(second["occurrenceId"].get<std::string>().empty() == false);
     CHECK(second["jobId"] == job_id);
 
     int error_code = 0;
