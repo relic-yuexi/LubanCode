@@ -81,6 +81,17 @@ public:
         // 后、发布本地文件前"进程死掉"。返回非空即死。
         std::function<std::string(HeadlessExecutor::Options::FaultPoint)> fault_injection;
         std::function<std::string()> fault_after_enqueue;
+        // 工具确认注入口(常驻助理 Web 主界面单 W2):透传执行器。空 =
+        // 既有无人值守合同(ChannelConfirmAllows,allow 名单没列 = 拒)。
+        std::function<HeadlessExecutor::Options::ToolConfirmDecision(
+            const std::string& tool_use_id, const std::string& name,
+            const nlohmann::json& input)>
+            on_tool_confirm;
+        // 活模型名取值口(W2,助理宿主用):非空时每次执行取当前模型名
+        //(宿主递 config 快照,首配后新任务吃新账);空 = options.model
+        // 定死(V1 gateway 行为不变)。调用在泵线程(执行窗内),宿主的
+        // 快照自身线程安全。在飞执行不追改——下一次 occurrence 生效。
+        std::function<std::string()> model_provider;
     };
 
     // 打开两本领域账;打不开给 error(ok=false),装配层让 Gateway 起不来

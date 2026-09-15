@@ -268,6 +268,12 @@ public:
     // 落在这里(单子协议底线第一节)。
     void Shutdown();
 
+    // 宿主侧事件注入口(常驻助理 Web 主界面单 W2):任务/审批事件从
+    // 宿主自己的线程(泵线程/事件线程)进来,快照当前活连接推出去——
+    // 与回合工作线程的 EmitEventSafe 同一条出口,断线窗口里没人听就丢
+    //(补账走宿主的事件账,assistant/events/read)。线程安全。
+    void EmitHostEvent(std::string_view method, const nlohmann::json& params);
+
     // 单测直驱:注入假连接(假 writer/reader),不起进程、不碰 stdio。
     void AttachForTest(std::unique_ptr<StdioConnection> connection);
 

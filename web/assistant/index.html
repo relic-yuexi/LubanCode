@@ -13,9 +13,10 @@
     <span id="assistant-meta" class="meta"></span>
     <nav id="topnav">
       <button type="button" data-view="chat" class="active" aria-current="page">聊天</button>
+      <button type="button" data-view="tasks">任务</button>
+      <button type="button" data-view="results">结果</button>
+      <button type="button" data-view="approvals">审批<span id="approval-badge" class="badge" hidden></span></button>
       <button type="button" data-view="config">设置</button>
-      <!-- 任务/结果/审批入口:W2 起接线,先占位(不冒充已实现) -->
-      <button type="button" data-view="tasks" disabled title="任务入口在下一批接线">任务(未开)</button>
     </nav>
   </header>
 
@@ -41,6 +42,52 @@
           <button type="button" id="interrupt-button" title="停止当前任务(不停止助理)">停止任务</button>
         </form>
       </section>
+    </section>
+
+    <!-- 任务:创建 + 列表(单次任务,W2) -->
+    <section id="tasks-view" class="view" hidden>
+      <div class="panel">
+        <h2>新任务(单次)</h2>
+        <p id="task-face-hint" class="hint" hidden></p>
+        <form id="task-form">
+          <textarea id="task-prompt" rows="3" placeholder="要它办的事,一句话写清楚(提交即入账,关掉页面照跑)" autocomplete="off"></textarea>
+          <div class="row">
+            <button type="submit" id="task-create-button">创建并执行</button>
+            <span id="task-create-result"></span>
+          </div>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>任务</h2>
+          <button type="button" id="task-refresh-button">刷新</button>
+        </div>
+        <ul id="task-list" aria-live="polite"></ul>
+        <p id="task-empty-hint" class="hint">还没有任务。</p>
+      </div>
+    </section>
+
+    <!-- 结果:最近任务结果(执行/投递状态区分) -->
+    <section id="results-view" class="view" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>结果</h2>
+          <button type="button" id="result-refresh-button">刷新</button>
+        </div>
+        <p class="hint">任务结果先落本地:执行成功且投递 delivered 即齐;pending 是还在投;flagged/needs_review 要人工核对。未配渠道不会丢结果。</p>
+        <ul id="result-list" aria-live="polite"></ul>
+        <p id="result-empty-hint" class="hint">还没有可看的结果。</p>
+      </div>
+    </section>
+
+    <!-- 审批:任务执行里的工具确认 -->
+    <section id="approvals-view" class="view" hidden>
+      <div class="panel">
+        <h2>待审批</h2>
+        <p class="hint">自动任务里需要确认的工具会推到这里。不批、关页、断线都不会默认放行;超时按拒绝收口。</p>
+        <ul id="approval-list" aria-live="polite"></ul>
+        <p id="approval-empty-hint" class="hint">没有悬着的审批。</p>
+      </div>
     </section>
 
     <!-- 设置:模型配置(首配流程)+ 实例信息 -->
@@ -72,14 +119,6 @@
           <button type="button" id="stop-assistant-button" title="停止整个助理进程(在跑任务按打断收口)">停止助理</button>
           <span class="hint">停止任务是上面的"停止任务";停止助理会结束本进程。</span>
         </div>
-      </div>
-    </section>
-
-    <!-- 任务占位(W2 接线) -->
-    <section id="tasks-view" class="view" hidden>
-      <div class="panel">
-        <h2>任务</h2>
-        <p class="hint">任务入口在下一批(W2)接线:单次任务、结果、审批都会在这里。当前版本先交付聊天与模型配置。</p>
       </div>
     </section>
   </main>

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// 常驻助理 Web 主界面单 W1 的端到端验收(真 exe + 假模型,零真实密钥、
+// 常驻助理 Web 主界面单 W1/W2 的端到端验收(真 exe + 假模型,零真实密钥、
 // 零真实网络外呼——模型流量全打本地回环假后端)。承载层与协议层的裸
 // 驱动;页(JS)的 UI 交互验收归真实浏览器批次,如实不冒充。
 //
-// 六幕:
+// 九幕:
 //   1. 启动:真 `lubancode assistant --no-open`,stderr 打 URL(含一次性
 //      bootstrap 凭据);监听就绪才打印。
 //   2. 认证门(§七):/healthz 只回身份;静态无 cookie 401(配对提示);
@@ -19,6 +19,13 @@
 //   6. 重复启动与端口:同 profile 第二个实例退码 2 且只开旧实例页面(旧
 //      实例健康);指定端口被占准确报错(非零退出);shutdown 停助理,锁
 //      释放后可重启。
+//   7. 任务全链(W2):task/create(clientOperationId)→ claimed 事件 →
+//      关 WS → 任务照跑 → 重连按 (bootId, seq) 补账(settled 事件不重
+//      不漏)→ task/read 查结果(delivered + 冻结正文 + out/<id>.txt)。
+//   8. 幂等(W2):同键双提交回原任务(duplicate),任务恰一个、模型恰一次。
+//   9. 审批(W2):needs_confirm 工具(write_file)推审批到页面——不答复
+//      3 秒超时按拒绝收口(文件不落地);批准后工具执行(文件落地);
+//      迟到答复回 stale。
 //
 // 用法:node web/assistant/run_e2e.js [--binary <lubancode>]
 // 找不到可执行文件打印 SKIP 退 0,不冒充通过(与 node-client e2e 同口径)。
@@ -78,6 +85,9 @@ function makeTempRoot(tag) {
 // 本地回环假 anthropic 后端。reply 按文本回一幕 SSE;hold 扣住连接不回
 // (断线合同幕的"回合在飞行中"闸),release() 把扣住的连接逐个放行——
 // 同一条连接继续写 SSE 后收尾,不是断流。
+// toolMode(W2 审批幕):请求正文(prompt)里带 "写文件到 <路径>" 时回
+// write_file 的 tool_use(needs_confirm 工具,触发助理审批闸);下一轮
+// 请求带 tool_result 时回正文收尾。
 // ---------------------------------------------------------------------------
 
 class FakeBackend {
@@ -85,17 +95,20 @@ class FakeBackend {
     this.options = options || {};
     this.requests = [];
     this.mode = this.options.mode || 'reply';
+    this.toolMode = this.options.toolMode || false;
+    this.toolUseCounter = 0;
     this.held = [];
     this.server = http.createServer((req, res) => {
       const chunks = [];
       req.on('data', (chunk) => chunks.push(chunk));
       res.on('error', () => { /* 断管忽略 */ });
       req.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
         this.requests.push({
           method: req.method,
           url: req.url,
           headers: req.headers,
-          body: Buffer.concat(chunks).toString('utf8'),
+          body: body,
         });
         if (this.mode === 'hold') {
           // 扣住:不发头不发正文(头留到 release 时 replyTo 一次性发,
@@ -103,15 +116,60 @@ class FakeBackend {
           this.held.push(res);
           return;
         }
-        this.replyTo(res);
+        this.replyTo(res, body);
       });
     });
   }
 
-  replyTo(res) {
+  replyTo(res, body) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     const sse = (name, object) => res.write('event: ' + name + '\ndata: ' + JSON.stringify(object) + '\n\n');
     sse('message_start', { type: 'message_start', message: { id: 'msg_asst_e2e', model: 'fake-model' } });
+    if (this.toolMode && typeof body === 'string') {
+      // 顺序有讲究:先判 tool_result 再判"写文件到"——工具结果回传轮的
+      // body 里原始 prompt 还在(messages 全量),先查 prompt 会让每轮都
+      // 回 tool_use,工具轮死循环(步数帽 × 审批窗,任务永远结不了算)。
+      if (body.indexOf('tool_result') !== -1) {
+        // 工具结果回来后的收尾轮。
+        sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        sse('content_block_delta', {
+          type: 'content_block_delta', index: 0,
+          delta: { type: 'text_delta', text: this.options.toolDoneText || '文件事项已收尾' },
+        });
+        sse('content_block_stop', { type: 'content_block_stop', index: 0 });
+        sse('message_delta', {
+          type: 'message_delta', delta: { stop_reason: 'end_turn' },
+          usage: { input_tokens: 19, output_tokens: 5 },
+        });
+        sse('message_stop', { type: 'message_stop' });
+        res.end();
+        return;
+      }
+      const writeMatch = /写文件到 ([^\s"']+)/.exec(body);
+      if (writeMatch) {
+        const targetPath = writeMatch[1].replace(/\\\\/g, '\\');  // JSON 转义还原(幂等)
+        const toolId = 'toolu_e2e_' + (++this.toolUseCounter);
+        sse('content_block_start', {
+          type: 'content_block_start', index: 0,
+          content_block: { type: 'tool_use', id: toolId, name: 'write_file', input: {} },
+        });
+        sse('content_block_delta', {
+          type: 'content_block_delta', index: 0,
+          delta: {
+            type: 'input_json_delta',
+            partial_json: JSON.stringify({ path: targetPath, content: '审批放行后写下的内容' }),
+          },
+        });
+        sse('content_block_stop', { type: 'content_block_stop', index: 0 });
+        sse('message_delta', {
+          type: 'message_delta', delta: { stop_reason: 'tool_use' },
+          usage: { input_tokens: 17, output_tokens: 7 },
+        });
+        sse('message_stop', { type: 'message_stop' });
+        res.end();
+        return;
+      }
+    }
     sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
     sse('content_block_delta', {
       type: 'content_block_delta', index: 0,
@@ -170,6 +228,8 @@ class AssistantProcess {
       LUBANCODE_MANAGED: '1',
       LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS: '1',
       LUBANCODE_ASSISTANT_WEB: path.resolve(__dirname),
+      // W2 审批幕:超时政策默认拒绝——把窗口压到 3 秒,验收"不答复即拒"。
+      LUBANCODE_ASSISTANT_APPROVAL_TIMEOUT_MS: '3000',
     });
   }
 
@@ -703,6 +763,260 @@ async function scene6_duplicateAndPorts(binary, root, field, firstExited) {
 }
 
 // ---------------------------------------------------------------------------
+// W2 幕:任务/结果/审批/补账
+// ---------------------------------------------------------------------------
+
+// 幕7 任务全链:建任务 → 断线 → 任务完成 → 重连补账 → 查结果。
+// 断线期间的事件不丢(服务端事件账),重连按游标补齐,不重复不丢。
+async function scene7_tasks(field, backend) {
+  console.log('幕7 任务全链:建任务 → 断线 → 完成 → 重连补账 → 查结果');
+  const ws = await openChannel(field);
+  ok('能力声明带任务/审批方法',
+    ws.initializeResult.capabilities.methods.indexOf('task/create') !== -1 &&
+    ws.initializeResult.capabilities.methods.indexOf('approval/respond') !== -1 &&
+    ws.initializeResult.capabilities.methods.indexOf('assistant/events/read') !== -1);
+
+  const status = await ws.request('assistant/status', {});
+  ok('任务面可用(automation.available)', status.result && status.result.automation &&
+    status.result.automation.available === true, JSON.stringify(status.result && status.result.automation));
+  const bootId = status.result.bootId;
+
+  // 事件游标基线(空账也回形状)。
+  const base = await ws.request('assistant/events/read', { bootId: bootId, lastSeq: 0 });
+  ok('events/read 回形状(bootId/seq)',
+    base.result && base.result.bootId === bootId && Number.isFinite(base.result.currentSeq));
+
+  const modelCallsBefore = backend.requests.length;
+  const created = await ws.request('task/create', {
+    prompt: '任务:报告仓库当前状态', clientOperationId: 'TASK-1',
+  });
+  ok('task/create 受理即回(jobId/occurrenceId)',
+    created.result && created.result.jobId && created.result.occurrenceId, JSON.stringify(created));
+  const jobId = created.result.jobId;
+
+  // 等首枚任务事件(同步泵可能一拍内跑完 claim→执行→结算,事件面按
+  // 状态变迁如实发;这里只钉"事件的 jobId 对上、带服务端游标")。
+  const firstTaskEvent = await ws.waitForEvent('assistant/task/event',
+    (p) => p.jobId === jobId, 15000);
+  ok('实时收到任务事件(带服务端游标)', !!firstTaskEvent &&
+    Number.isFinite(firstTaskEvent.params.seq), JSON.stringify(firstTaskEvent && firstTaskEvent.params));
+  // 游标推进按页面真实语义:实时见过的每枚都推进(前端 noteEventSeq),
+  // 这里取实时流里该 jobId 任务事件的最大 seq——快机器上 settled 可能在
+  // 断线前就送达,游标已越过;慢机器上 settled 落在断线窗里,靠补账。
+  await sleep(300);  // 让同批事件到齐再取游标
+  let seenSeq = firstTaskEvent ? firstTaskEvent.params.seq : 0;
+  const liveSeqs = [];
+  for (const event of ws.events) {
+    if (event.method === 'assistant/task/event' && (event.params || {}).jobId === jobId) {
+      liveSeqs.push(event.params.seq);
+      if (event.params.seq > seenSeq) seenSeq = event.params.seq;
+    }
+  }
+
+  // 关页:断线期间任务照跑(§八:浏览器不是调度器)。
+  ws.close();
+  await sleep(600);
+  ok('断线期间模型请求已发(任务在跑)', backend.requests.length >= modelCallsBefore + 1);
+
+  // 等任务结算落账(没连接也要完成——进程内泵自转;结算判定走重连后的
+  // 领域账,不猜时序)。
+  await sleep(2000);
+
+  // 重连:按 (bootId, seenSeq) 补账——断线窗口里的 settled 事件从游标后到。
+  const ws2 = await openChannel(field);
+  const caught = await ws2.request('assistant/events/read', { bootId: bootId, lastSeq: seenSeq });
+  const caughtEvents = (caught.result && caught.result.events) || [];
+  ok('补账回增量(不重发已见)',
+    caught.result && caught.result.reset === false &&
+    caughtEvents.every((e) => e.seq > seenSeq),
+    'seenSeq=' + seenSeq + ' live=' + JSON.stringify(liveSeqs) +
+    ' caught=' + JSON.stringify(caught.result));
+  // 两路合并(实时流 + 补账)核对 settled:快机器全在实时,慢机器在补账
+  // ——不丢的判据是两路至少一路有;不重复的判据在下一枚(两路无交集)。
+  const settledLive = ws.events.find((event) =>
+    event.method === 'assistant/task/event' && (event.params || {}).jobId === jobId &&
+    event.params.state === 'settled');
+  const settledCaught = caughtEvents.find((e) =>
+    e.method === 'assistant/task/event' && e.params.jobId === jobId && e.params.state === 'settled');
+  ok('settled 事件两路可达(实时或补账,不丢)', !!settledLive || !!settledCaught,
+    'live=' + (settledLive ? 'yes' : 'no') + ' caught=' + (settledCaught ? 'yes' : 'no') +
+    ' caughtSeqs=' + JSON.stringify(caughtEvents.map((e) => e.seq)));
+  const settledParams = (settledCaught || settledLive || {}).params;
+  ok('settled 带结果口径(outcome=succeeded)',
+    !!settledParams && settledParams.outcome === 'succeeded', JSON.stringify(settledParams));
+  // 恰好性:补账事件 seq 不重复,且与实时见过的 seq 不重叠(不重发)。
+  const seqs = caughtEvents.map((e) => e.seq);
+  const overlap = seqs.filter((seq) => liveSeqs.indexOf(seq) !== -1);
+  ok('补账不重发实时已见(seq 无交集、不重复)',
+    seqs.length === new Set(seqs).size && overlap.length === 0,
+    'live=' + JSON.stringify(liveSeqs) + ' caught=' + JSON.stringify(seqs));
+
+  // 结果面:task/read 查终态结果(V1 的 out/<deliveryId>.txt 与冻结正文)。
+  let read = null;
+  for (let i = 0; i < 50; ++i) {
+    read = await ws2.request('task/read', { jobId: jobId });
+    if (read.result && read.result.occurrences && read.result.occurrences.length > 0 &&
+        read.result.occurrences[0].state === 'settled') {
+      break;
+    }
+    await sleep(100);
+  }
+  const occurrence = read.result && read.result.occurrences && read.result.occurrences[0];
+  ok('task/read 回结算的 occurrence', !!occurrence && occurrence.state === 'settled',
+    JSON.stringify(read.result));
+  if (occurrence && occurrence.state === 'settled' && occurrence.outcome !== 'succeeded') {
+    console.log('  (诊断) occurrence 终态非 succeeded: ' + JSON.stringify(occurrence));
+  }
+  ok('occurrence 带结果(delivered + 冻结正文)',
+    !!occurrence && occurrence.result && occurrence.result.deliveryState === 'delivered' &&
+    String(occurrence.result.replyText || '').indexOf('假后端的回话') !== -1,
+    JSON.stringify(occurrence && occurrence.result));
+  ok('结果引用发布文件(out/<id>.txt)',
+    !!occurrence && occurrence.result &&
+    /delivery\/out\/dl-[0-9a-f]+\.txt$/.test(occurrence.result.publishedPath || ''),
+    occurrence && occurrence.result && occurrence.result.publishedPath);
+  ws2.close();
+  return { jobId: jobId, bootId: bootId };
+}
+
+// 幕8 幂等:同 clientOperationId 双提交,恰好一个任务、模型恰好一次。
+async function scene8_idempotent(field, backend) {
+  console.log('幕8 幂等:同键双提交不重复执行');
+  const ws = await openChannel(field);
+  const modelCallsBefore = backend.requests.length;
+  const first = await ws.request('task/create', {
+    prompt: '幂等任务:再说一遍状态', clientOperationId: 'TASK-IDEM',
+  });
+  ok('首次提交受理', first.result && !!first.result.jobId);
+  const jobId = first.result.jobId;
+
+  // 等结算。
+  let settled = false;
+  let settledDetail = '';
+  for (let i = 0; i < 150 && !settled; ++i) {
+    const read = await ws.request('task/read', { jobId: jobId });
+    if (read.result && read.result.occurrences && read.result.occurrences[0] &&
+        read.result.occurrences[0].state === 'settled') {
+      settled = true;
+      settledDetail = JSON.stringify(read.result.occurrences[0]);
+    } else {
+      await sleep(100);
+    }
+  }
+  ok('首次任务结算', settled, settledDetail);
+
+  // 同键再交:回原受理(duplicate),不再执行。
+  const second = await ws.request('task/create', {
+    prompt: '幂等任务:再说一遍状态', clientOperationId: 'TASK-IDEM',
+  });
+  ok('同键重发回原任务(duplicate=true)',
+    second.result && second.result.duplicate === true && second.result.jobId === jobId,
+    JSON.stringify(second.result));
+  await sleep(800);
+
+  const listed = await ws.request('task/list', {});
+  const same = (listed.result.tasks || []).filter((t) => t.prompt.indexOf('幂等任务') !== -1);
+  ok('任务恰好一个', same.length === 1, JSON.stringify(same.length));
+  ok('模型恰好一次(重发零重跑)',
+    backend.requests.length === modelCallsBefore + 1,
+    '模型调用 ' + backend.requests.length + ' 次(基线 ' + modelCallsBefore + ')');
+  ws.close();
+}
+
+// 幕9 审批:超时默认拒绝(工具零执行);批准放行(工具执行);stale 如实回。
+async function scene9_approvals(field, backend, root) {
+  console.log('幕9 审批:超时拒绝不执行工具;批准放行;stale 如实');
+  // 路径用正斜杠(嵌进 prompt → 假后端正则提取 → tool_use input 的
+  // JSON 转义链上不生歧义;Windows 侧文件系统照收正斜杠)。
+  const declinedPath = path.join(root, 'approval-declined.txt').replace(/\\/g, '/');
+  const acceptedPath = path.join(root, 'approval-accepted.txt').replace(/\\/g, '/');
+  backend.toolMode = true;
+
+  // -- 超时路:不答复 → 3 秒后按拒绝收口,write_file 不执行。
+  const ws = await openChannel(field);
+  const timeoutJob = await ws.request('task/create', {
+    prompt: '请写文件到 ' + declinedPath, clientOperationId: 'TASK-APPRO-TIMEOUT',
+  });
+  ok('审批任务受理', timeoutJob.result && !!timeoutJob.result.jobId, JSON.stringify(timeoutJob));
+  if (!timeoutJob.result || !timeoutJob.result.jobId) {
+    backend.toolMode = false;
+    ws.close();
+    return;  // 受理没成,后续无从验;如实留在败项里
+  }
+  const request = await ws.waitForEvent('assistant/approval/request',
+    (p) => p.jobId === timeoutJob.result.jobId, 15000);
+  ok('审批请求推到页面(带任务归属与工具名)', !!request &&
+    request.params.toolName === 'write_file' && request.params.jobId === timeoutJob.result.jobId,
+    JSON.stringify(request && request.params));
+  // 不答复,等超时收口。
+  const resolvedTimeout = await ws.waitForEvent('assistant/approval/resolved',
+    (p) => p.requestId === request.params.requestId && p.outcome === 'timeout_declined', 15000);
+  ok('超时按拒绝收口(timeout_declined)', !!resolvedTimeout, JSON.stringify(resolvedTimeout));
+
+  let timeoutOutcome = null;
+  // 串行泵:审批窗(3s)+ 两轮模型 + 结算,慢机器上宽放等待。
+  for (let i = 0; i < 300 && !timeoutOutcome; ++i) {
+    const read = await ws.request('task/read', { jobId: timeoutJob.result.jobId });
+    if (read.result && read.result.occurrences && read.result.occurrences[0] &&
+        read.result.occurrences[0].state === 'settled') {
+      timeoutOutcome = read.result.occurrences[0];
+    } else {
+      await sleep(100);
+    }
+  }
+  ok('超时路任务结算(工具未执行,文件不在)',
+    !!timeoutOutcome && !fs.existsSync(declinedPath),
+    JSON.stringify(timeoutOutcome));
+
+  // -- 批准路:答复回灌 → 工具执行 → 文件落地。
+  const acceptJob = await ws.request('task/create', {
+    prompt: '请写文件到 ' + acceptedPath, clientOperationId: 'TASK-APPRO-ACCEPT',
+  });
+  ok('批准路任务受理', acceptJob.result && !!acceptJob.result.jobId, JSON.stringify(acceptJob));
+  if (!acceptJob.result || !acceptJob.result.jobId) {
+    backend.toolMode = false;
+    ws.close();
+    return;
+  }
+  const acceptRequest = await ws.waitForEvent('assistant/approval/request',
+    (p) => p.jobId === acceptJob.result.jobId, 15000);
+  ok('第二个审批请求推到页面', !!acceptRequest);
+  const respond = await ws.request('approval/respond', {
+    requestId: acceptRequest.params.requestId, decision: 'accept',
+  });
+  ok('批准回执 resolved=true', respond.result && respond.result.resolved === true,
+    JSON.stringify(respond));
+  let acceptOutcome = null;
+  for (let i = 0; i < 300 && !acceptOutcome; ++i) {
+    const read = await ws.request('task/read', { jobId: acceptJob.result.jobId });
+    if (read.result && read.result.occurrences && read.result.occurrences[0] &&
+        read.result.occurrences[0].state === 'settled') {
+      acceptOutcome = read.result.occurrences[0];
+    } else {
+      await sleep(100);
+    }
+  }
+  ok('批准路任务结算且成功', !!acceptOutcome && acceptOutcome.outcome === 'succeeded',
+    JSON.stringify(acceptOutcome));
+  ok('批准后工具真执行(文件落地)',
+    fs.existsSync(acceptedPath) && fs.readFileSync(acceptedPath, 'utf8').indexOf('审批放行后写下的内容') !== -1);
+
+  // -- stale:已 resolved 的审批再答复,如实回 resolved=false。
+  const stale = await ws.request('approval/respond', {
+    requestId: acceptRequest.params.requestId, decision: 'decline',
+  });
+  ok('迟到答复回 stale(不冒充已答)',
+    stale.result && stale.result.resolved === false && stale.result.reason === 'stale_request_id',
+    JSON.stringify(stale.result));
+
+  // -- 补账面:悬着的审批重连后仍可发现(approval/list)。
+  const pendingList = await ws.request('approval/list', {});
+  ok('approval/list 回形状', pendingList.result && Array.isArray(pendingList.result.pending));
+  backend.toolMode = false;
+  ws.close();
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 
@@ -734,9 +1048,14 @@ async function main() {
     wsChat = chat.ws;
     await scene4_refreshRestore(field, chat);
     await scene5_detached(field, backend, chat);
+    await scene7_tasks(field, backend);
+    await scene8_idempotent(field, backend);
+    await scene9_approvals(field, backend, root);
     await scene6_duplicateAndPorts(resolved, root, field, assistant.exited);
   } catch (error) {
     ok('e2e 主流程跑完(未抛异常)', false, String((error && error.stack) || error));
+    console.log('---- assistant stderr 尾巴(诊断) ----');
+    console.log(assistant.stderrTail);
   } finally {
     if (wsChat) {
       wsChat.close();

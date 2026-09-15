@@ -417,6 +417,7 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     HeadlessExecutor::Options executor_options;
     executor_options.workspaces_root = options_.workspaces_root;
     executor_options.workspace_root = options_.workspace_identity.identity_root;
+    executor_options.workspace_identity = options_.workspace_identity;  // W2:整份递(开场与装配层同尺)
     executor_options.cwd_utf8 = options_.cwd_utf8;
     executor_options.lubancode_version = options_.lubancode_version;
     executor_options.wire_name = options_.wire_name;
@@ -428,6 +429,8 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     executor_options.max_wall_secs = options_.max_wall_secs;
     executor_options.max_total_tokens = options_.max_total_tokens;
     executor_options.fault_injection = options_.fault_injection;
+    executor_options.on_tool_confirm = options_.on_tool_confirm;  // W2:助理审批口(空=无人值守 fail closed)
+    executor_options.model = options_.model_provider ? options_.model_provider() : options_.model;
     HeadlessExecutor executor(*backend_, *registry_, std::move(executor_options));
 
     HeadlessWorkBinding binding;

@@ -94,12 +94,16 @@ private:
 // browser/action/completed 是动作终态,browser/screenshot/ready 没有
 // 查询口(丢了就真丢了图)——这四枚必须保;console/network 批量事件
 // 可丢(有 sinceSeq 补账),其余浏览器事件可丢(status/list 可重建)。
+// 助理任务审批(常驻助理 Web 主界面单 W2):任务执行里 needs_confirm
+// 工具的确认请求——丢了页面不知道要答,任务就悬到超时拒绝;补账面
+// (assistant/events/read)兜底,但推送本身不许丢。
 inline bool EventMustKeep(std::string_view method) {
     return method == kEventTurnCompleted || method == kEventQueueOverflow ||
            method == kMethodPermissionRequest || method == kMethodUserAsk ||
            method == kEventBrowserStopped || method == kEventBrowserCrashed ||
            method == kEventBrowserActionCompleted || method == kEventBrowserScreenshotReady ||
-           method == kEventBrowserPaused || method == kEventBrowserResumed;
+           method == kEventBrowserPaused || method == kEventBrowserResumed ||
+           method == "assistant/approval/request";
 }
 
 }  // namespace lubancode::app_server

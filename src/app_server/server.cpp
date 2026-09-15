@@ -2564,6 +2564,10 @@ void Server::EmitEventSafe(std::string_view method, const nlohmann::json& params
     }
 }
 
+void Server::EmitHostEvent(std::string_view method, const nlohmann::json& params) {
+    EmitEventSafe(method, params);
+}
+
 void Server::InterruptRunningTurns() {
     std::vector<std::shared_ptr<ThreadRecord>> records;
     {

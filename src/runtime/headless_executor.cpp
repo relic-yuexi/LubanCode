@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <utility>
 
 #include "agent/loop.hpp"
@@ -231,11 +232,20 @@ HeadlessExecutor::Result HeadlessExecutor::Execute(
 
     // 1) 开场:三端同一服务路。launch_cwd/one_shot 留缺省——Gateway 场
     //    是常驻自动任务,不是 CLI 单发;training_policy 走 Metadata 缺省。
+    //    身份吃装配层裁决的整份(workspace_identity),不再按
+    //    workspace_root 自算 fallback——git 仓库下四级裁决(git 形态)与
+    //    fallback 算法(路径形态)算出的 key 不同,已开的房对账即
+    //    identity.key_mismatch 隔离(V2 e2e 在源码树 cwd 下撞过:聊天线
+    //    四级裁决开房,泵 fallback 进门对不上)。装配层没递
+    //    workspace_identity 的旧测试形态照 fallback(workspace_root),
+    //    行为不变。
     SessionLaunchRequest launch;
     launch.cwd_utf8 = options_.cwd_utf8;
     launch.lubancode_version = options_.lubancode_version;
     launch.workspaces_root = options_.workspaces_root;
-    launch.workspace_identity = workspace::MakeFallbackIdentity(options_.workspace_root);
+    launch.workspace_identity = options_.workspace_identity.valid()
+                                    ? options_.workspace_identity
+                                    : workspace::MakeFallbackIdentity(options_.workspace_root);
     SessionService service(launch);
     if (service.runtime() == nullptr) {
         result.error_code = "gateway.launch_failed";
@@ -329,12 +339,16 @@ HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
             return channel_sessions_.back().second.get();
         }
     }
-    // 未命中:按映射 resume-as-new / fresh(§六第四项)。
+    // 未命中:按映射 resume-as-new / fresh(§六第四项)。身份同 Execute:
+    //    吃装配层裁决的整份(见上——git 仓库下 fallback 自算会撞
+    //    identity.key_mismatch)。
     SessionLaunchRequest launch;
     launch.cwd_utf8 = options_.cwd_utf8;
     launch.lubancode_version = options_.lubancode_version;
     launch.workspaces_root = options_.workspaces_root;
-    launch.workspace_identity = workspace::MakeFallbackIdentity(options_.workspace_root);
+    launch.workspace_identity = options_.workspace_identity.valid()
+                                    ? options_.workspace_identity
+                                    : workspace::MakeFallbackIdentity(options_.workspace_root);
     if (!stored_session_id.empty()) {
         launch.resume_at_launch = true;
         launch.resume_source_session_id = stored_session_id;
@@ -538,6 +552,28 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         return "无人值守任务没有审批渠道,工具 " + name +
                " 未在允许名单明确放行,已拒绝执行。";
     };
+    // 审批注入口(W2,助理任务):宿主递了确认回调时,needs_confirm 工具
+    // 的确认经它走("问页面");拒绝文案由回调带回(超时拒绝不冒充用户
+    // 拒绝)。同步泵串行执行,denial 明细按 tool_use_id 查表无并发。
+    if (options_.on_tool_confirm) {
+        const auto decide = options_.on_tool_confirm;
+        const auto denials = std::make_shared<std::map<std::string, std::string>>();
+        wiring.on_tool_confirm = [decide, denials](const std::string& tool_use_id,
+                                                   const std::string& name,
+                                                   const nlohmann::json& input) {
+            const Options::ToolConfirmDecision decision = decide(tool_use_id, name, input);
+            if (!decision.allowed && !decision.denial_text.empty()) {
+                (*denials)[tool_use_id] = decision.denial_text;
+            }
+            return decision.allowed;
+        };
+        wiring.on_tool_denial_text = [denials](const std::string& tool_use_id,
+                                               const std::string& /*name*/) {
+            const auto found = denials->find(tool_use_id);
+            return found != denials->end() ? found->second
+                                           : std::string("用户拒绝执行该工具");
+        };
+    }
     // 逐轮收窄闸(§16.2 第三层;渠道路与 AgentChannelEngine 同款):本轮
     // 冻结策略比会话级暴露面窄时,在执行口拦下——不折会话级 tool_filter
     //(前缀缓存),被滤的工具连模型都看不见,这里只拦"看得见但本轮禁"。
