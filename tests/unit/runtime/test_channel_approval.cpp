@@ -37,6 +37,7 @@
 #include "tools/path_utils.hpp"
 #include "tools/tool.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "workspace/identity.hpp"
 #include "workspace/index.hpp"
 
@@ -689,8 +690,8 @@ TEST_CASE("QQ 等待审批时新来信照常收账(执行线程不是事件泵�
     bool dm_b_admitted = false;
     for (const auto& record : fixture.manager->IngressRecords("qqbot", "main")) {
         if (record.event.conversation.id == "dm-b" &&
-            record.state != channel::IngressEventState::Pending) {
-            dm_b_admitted = true;
+            record.state != channel::IngressEventState::Durable) {
+            dm_b_admitted = true;  // 已过准入(不停在落盘瞬态)
         }
     }
     CHECK(dm_b_admitted);
