@@ -216,9 +216,23 @@ std::vector<std::string> SplitReplySegments(const std::string& text, std::size_t
 
 DurableReplyOutbox::~DurableReplyOutbox() = default;
 
-DurableReplyOutbox::DurableReplyOutbox(DurableReplyOutbox&&) noexcept = default;
+// Q6:类内加了 mutex(渠道 turn 工作线程与泵 tick 并发),default move 会被
+// 删除——手写,锁不搬(移动是装配期独占操作,无并发)。
+DurableReplyOutbox::DurableReplyOutbox(DurableReplyOutbox&& other) noexcept
+    : paths_(std::move(other.paths_)),
+      writer_(std::move(other.writer_)),
+      broken_(other.broken_),
+      items_(std::move(other.items_)) {}
 
-DurableReplyOutbox& DurableReplyOutbox::operator=(DurableReplyOutbox&&) noexcept = default;
+DurableReplyOutbox& DurableReplyOutbox::operator=(DurableReplyOutbox&& other) noexcept {
+    if (this != &other) {
+        paths_ = std::move(other.paths_);
+        writer_ = std::move(other.writer_);
+        broken_ = other.broken_;
+        items_ = std::move(other.items_);
+    }
+    return *this;
+}
 
 DurableReplyOutbox::OpenResult DurableReplyOutbox::Open(DurableReplyOutbox* out,
                                                         const Paths& paths) {
@@ -280,6 +294,7 @@ DurableReplyOutbox::EnqueueReceipt DurableReplyOutbox::Enqueue(const std::string
                                                                const std::string& session_id,
                                                                const std::string& turn_id,
                                                                std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     EnqueueReceipt receipt;
     const std::string delivery_id = MakeDeliveryId(selection_id, "local:file", 1);
     receipt.delivery_id = delivery_id;
@@ -349,6 +364,7 @@ DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
     const std::string& selection_id, const std::string& reply_text,
     const std::string& session_id, const std::string& turn_id, const ChannelTarget& target,
     std::int64_t now_ms, const ChannelAttachment* attachment) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     // 段帽:2000 字节(UTF-8 边界 + 换行偏好)。真平台的长度上限与
     // 计数口径(每条消息回复次数)归 Q3 实测校准,这里只做保守拆段。
     ChannelEnqueueReceipt receipt;
@@ -477,6 +493,7 @@ DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
 }
 
 bool DurableReplyOutbox::RecordAttempt(const std::string& delivery_id, std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     const auto found = items_.find(delivery_id);
     if (found == items_.end() || broken_) {
         return false;
@@ -503,6 +520,7 @@ bool DurableReplyOutbox::RecordAttempt(const std::string& delivery_id, std::int6
 
 bool DurableReplyOutbox::MarkSent(const std::string& delivery_id,
                                   const std::string& provider_message_id, std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     const auto found = items_.find(delivery_id);
     if (found == items_.end() || broken_) {
         return false;
@@ -530,6 +548,7 @@ bool DurableReplyOutbox::MarkSent(const std::string& delivery_id,
 }
 
 bool DurableReplyOutbox::MarkOutcomeUnknown(const std::string& delivery_id, std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     const auto found = items_.find(delivery_id);
     if (found == items_.end() || broken_) {
         return false;
@@ -553,6 +572,7 @@ bool DurableReplyOutbox::MarkOutcomeUnknown(const std::string& delivery_id, std:
 
 bool DurableReplyOutbox::MarkChannelFailed(const std::string& delivery_id,
                                            const std::string& error_code, std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     const auto found = items_.find(delivery_id);
     if (found == items_.end() || broken_) {
         return false;
@@ -576,6 +596,7 @@ bool DurableReplyOutbox::MarkChannelFailed(const std::string& delivery_id,
 }
 
 std::vector<ReplyOutboxItem> DurableReplyOutbox::PendingChannelItems() const {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     std::vector<ReplyOutboxItem> out;
     for (const auto& [id, item] : items_) {
         if (item.delivery_target == "local:file") {
@@ -590,6 +611,7 @@ std::vector<ReplyOutboxItem> DurableReplyOutbox::PendingChannelItems() const {
 
 bool DurableReplyOutbox::LoadChannelItemText(const std::string& delivery_id,
                                              std::string* text) const {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     if (text == nullptr) {
         return false;
     }
@@ -611,6 +633,7 @@ bool DurableReplyOutbox::LoadChannelItemText(const std::string& delivery_id,
 }
 
 DurableReplyOutbox::DeliverResult DurableReplyOutbox::DeliverPending(std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     DeliverResult result;
     for (auto& [id, item] : items_) {
         if (item.state != "pending") continue;
@@ -698,6 +721,7 @@ DurableReplyOutbox::DeliverResult DurableReplyOutbox::DeliverPending(std::int64_
 }
 
 std::vector<ReplyOutboxItem> DurableReplyOutbox::ListItems() const {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     std::vector<ReplyOutboxItem> items;
     items.reserve(items_.size());
     for (const auto& [id, item] : items_) {
@@ -707,6 +731,7 @@ std::vector<ReplyOutboxItem> DurableReplyOutbox::ListItems() const {
 }
 
 std::optional<ReplyOutboxItem> DurableReplyOutbox::Find(const std::string& delivery_id) const {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
     const auto found = items_.find(delivery_id);
     if (found == items_.end()) {
         return std::nullopt;

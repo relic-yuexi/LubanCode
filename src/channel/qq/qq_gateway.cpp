@@ -165,9 +165,11 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
         const bool stable = RunOneConnection(stop, &session_invalidated);
         if (session_invalidated) {
             session_id_.clear();  // op9 不可恢复:下一轮重新 Identify
-            options_.on_event(GatewayEvent{GatewayEvent::Kind::SessionInvalidated,
-                                           nlohmann::json::object(), "invalid session",
-                                           last_seq_.load()});
+            GatewayEvent event;
+            event.kind = GatewayEvent::Kind::SessionInvalidated;
+            event.detail = "invalid session";
+            event.seq = last_seq_.load();
+            options_.on_event(event);
         }
         if (stop->load()) {
             break;
@@ -336,14 +338,22 @@ bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
                 return fail(kStageIdentifying, "ready_bad_payload", "READY: " + parse_error);
             }
             session_id_ = ready->session_id;
-            options_.on_event(GatewayEvent{GatewayEvent::Kind::SessionReady,
-                                           nlohmann::json::object(), ready->user_id,
-                                           payload->s});
+            {
+                GatewayEvent event;
+                event.kind = GatewayEvent::Kind::SessionReady;
+                event.detail = ready->user_id;
+                event.seq = payload->s;
+                options_.on_event(event);
+            }
         } else if (payload->t == "RESUMED") {
             resumed = true;
-            options_.on_event(GatewayEvent{GatewayEvent::Kind::SessionResumed,
-                                           nlohmann::json::object(), session_id_,
-                                           payload->s});
+            {
+                GatewayEvent event;
+                event.kind = GatewayEvent::Kind::SessionResumed;
+                event.detail = session_id_;
+                event.seq = payload->s;
+                options_.on_event(event);
+            }
         } else {
             // 鉴权窗内来了业务事件(网关通常先回 READY 才推,但不赌):
             // 按序记账并照常派发,不静默吞。
@@ -351,6 +361,12 @@ bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
                 GatewayEvent event;
                 event.kind = GatewayEvent::Kind::C2cMessageCreate;
                 event.c2c_d = payload->d;
+                event.seq = payload->s;
+                options_.on_event(event);
+            } else if (payload->t == "INTERACTION_CREATE") {
+                GatewayEvent event;
+                event.kind = GatewayEvent::Kind::InteractionCreate;
+                event.interaction_d = payload->d;
                 event.seq = payload->s;
                 options_.on_event(event);
             }
@@ -428,11 +444,20 @@ bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
                     event.c2c_d = payload->d;
                     event.seq = payload->s;
                     options_.on_event(event);
+                } else if (payload->t == "INTERACTION_CREATE") {
+                    // Q6 按钮回调:按序记账并派发;宿主裁决后回 PUT
+                    // /interactions/{id}。事件形状校验在适配器(纯函数
+                    // MapInteractionCreate),这里只转手。
+                    GatewayEvent event;
+                    event.kind = GatewayEvent::Kind::InteractionCreate;
+                    event.interaction_d = payload->d;
+                    event.seq = payload->s;
+                    options_.on_event(event);
                 } else if (payload->t == "READY" || payload->t == "RESUMED") {
                     // 鉴权窗已处理过;重复出现按序记账即可。
                 } else {
-                    // intents 只订 GROUP_AND_C2C_EVENT:兄弟事件
-                    // (FRIEND_ADD/C2C_MSG_RECEIVE 等)按序记账,不进模型。
+                    // intents 只订 C2C/互动:兄弟事件(FRIEND_ADD/
+                    // C2C_MSG_RECEIVE 等)按序记账,不进模型。
                 }
                 break;
             case GatewayOp::HeartbeatAck:

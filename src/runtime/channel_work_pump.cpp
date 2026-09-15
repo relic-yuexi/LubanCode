@@ -12,8 +12,11 @@
 
 #include "runtime/turn_ingress.hpp"
 #include "platform/paths.hpp"
+#include "platform/sha256.hpp"
+#include "runtime/channel_session_host.hpp"  // ChannelToolDenialText(Q6 拒绝文案)
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"
+#include "trajectory/v3/writer.hpp"
 #include "workspace/index.hpp"
 
 namespace lubancode::runtime {
@@ -85,7 +88,11 @@ std::string ChannelWorkPump::MakeChannelJobSessionKey(const std::string& channel
 
 ChannelWorkPump::ChannelWorkPump() = default;
 
-ChannelWorkPump::~ChannelWorkPump() = default;
+ChannelWorkPump::~ChannelWorkPump() {
+    // 异步 turn 线程兜底收口(Close 没跑过也不悬线程):打断在飞审批
+    // 等待,join 后再拆成员。
+    ShutDownTurnWorkers();
+}
 
 ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Backend& backend,
                                                   tools::ToolRegistry& registry,
@@ -155,6 +162,13 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
     ChannelMediaService media_service;
     if (ChannelMediaService::Open(&media_service, media_root)) {
         out->media_service_.emplace(std::move(media_service));
+    }
+    // Q6(§12.2 第九行):等按钮的线程不能是唯一收按钮线程——起专用工作
+    // 线程跑渠道 turn,tick 线程只推进事件/投递/恢复。0 = 同步(旧测试
+    // 装配零变化)。审批窗是人工节奏,turn 阻塞在工作线程,tick 不堵:
+    // QQ 心跳、新来信、控制命令照常运转。
+    for (std::size_t i = 0; i < out->options_.channel_turn_workers; ++i) {
+        out->turn_workers_.emplace_back([out]() { out->TurnWorkerLoop(); });
     }
     result.ok = true;
     return result;
@@ -289,6 +303,11 @@ bool ChannelWorkPump::TickOnce(std::int64_t now_ms) {
         return false;
     }
     ReconcileDeliveredSources(now_ms);
+    // 2.6) Q6 审批面:互动回调排水(裁决→回应平台)+ 审批卡投递。放在
+    // 回执结算后(卡片投递结果先知)、新执行前(已批的 turn 快点续跑)。
+    if (!DriveApprovalFlow(now_ms)) {
+        return false;
+    }
     // 2.5) Q1b 配对提示入箱(投递走第 5 步的既有渠道投递驱动)。
     PumpPairingNotices(now_ms);
     // 3) 恢复扫描(Running 件的跨账裁决;不盲重跑)。
@@ -330,11 +349,78 @@ void ChannelWorkPump::StopAccepting() {
 
 bool ChannelWorkPump::Close(int /*grace_ms*/) {
     // 同步泵:无在飞 turn(TickOnce 已收口);渠道活场封口,writer 析构关。
+    // 异步泵(Q6):打断在飞审批等待(cancel 旗 → WaitApproval 悬空收口,
+    // 按拒绝收场),队列里未跑的件退回 ingress 账(重启恢复面接管,不盲
+    // 跑)。
     closed_.store(true);
+    ShutDownTurnWorkers();
     if (executor_.has_value()) {
         executor_->CloseChannelSessions("gateway_channel_shutdown");
     }
     return true;
+}
+
+void ChannelWorkPump::ShutDownTurnWorkers() {
+    if (turn_workers_.empty() && turn_jobs_.empty()) {
+        return;
+    }
+    turn_workers_stop_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+        // 未跑的件退回:claim 了不跑会把件搁死在 Running——按"宿主收口"
+        // 明退,重启恢复面按需 review,不盲重跑。
+        for (const TurnJob& job : turn_jobs_) {
+            (void)options_.manager->DeadLetterIngress(job.channel_id, job.account_id,
+                                                      job.work.sid, "gateway_shutdown");
+        }
+        turn_jobs_.clear();
+        // 在飞的打断:cancel 旗 → 审批等待悬空收口 + 模型流取消链。
+        for (const auto& cancel : inflight_cancels_) {
+            cancel->store(true);
+        }
+    }
+    turn_jobs_wake_.notify_all();
+    for (std::thread& worker : turn_workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    turn_workers_.clear();
+}
+
+void ChannelWorkPump::TurnWorkerLoop() {
+    while (true) {
+        std::optional<TurnJob> job;
+        {
+            std::unique_lock<std::mutex> lock(turn_jobs_mutex_);
+            turn_jobs_wake_.wait(lock, [this]() {
+                return !turn_jobs_.empty() || turn_workers_stop_.load();
+            });
+            if (turn_jobs_.empty()) {
+                if (turn_workers_stop_.load()) {
+                    return;
+                }
+                continue;
+            }
+            job = std::move(turn_jobs_.front());
+            turn_jobs_.pop_front();
+        }
+        const bool ok =
+            ProcessWorkItem(job->channel_id, job->account_id, job->work, job->now_ms,
+                            job->turn_key, job->cancel.get());
+        {
+            std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+            --active_turns_;
+            in_flight_sids_.erase(job->turn_key);
+            for (auto it = inflight_cancels_.begin(); it != inflight_cancels_.end(); ++it) {
+                if (it->get() == job->cancel.get()) {
+                    inflight_cancels_.erase(it);
+                    break;
+                }
+            }
+        }
+        (void)ok;  // 失败已在 ProcessWorkItem 内结算(DeadLetter/停泵诊断)
+    }
 }
 
 bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
@@ -343,6 +429,12 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                  snapshot.channel_id, snapshot.account_id)) {
             const auto item = options_.outbox->Find(outcome.client_delivery_id);
             if (!item.has_value()) {
+                // Q6:审批卡片的回执不在 reply outbox 账上(交互 outbox 是
+                // 泵内队列)——按 delivery_id 对账;对得上就消化这笔回执。
+                if (SettleApprovalCardOutcome(outcome.client_delivery_id, outcome.status,
+                                              outcome.error_code, now_ms)) {
+                    continue;
+                }
                 continue;  // 账上没有(理论不可达):丢弃留诊断
             }
             switch (outcome.status) {
@@ -482,8 +574,14 @@ bool ChannelWorkPump::SweepRecovery(std::int64_t now_ms) {
     for (const auto& snapshot : options_.manager->Snapshots()) {
         for (const auto& view : options_.manager->ListRunningIngress(snapshot.channel_id,
                                                                     snapshot.account_id)) {
-            if (in_flight_sids_.count(snapshot.channel_id + "/" + snapshot.account_id + "/" +
-                                      std::to_string(view.sid)) > 0) {
+            bool in_flight = false;
+            {
+                std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+                in_flight = in_flight_sids_.count(snapshot.channel_id + "/" +
+                                                  snapshot.account_id + "/" +
+                                                  std::to_string(view.sid)) > 0;
+            }
+            if (in_flight) {
                 continue;  // 本进程在跑的轮(多线程泵的门)
             }
             if (!RecoverOne(snapshot.channel_id, snapshot.account_id, view, now_ms)) {
@@ -572,9 +670,12 @@ bool ChannelWorkPump::RecoverOne(const std::string& channel_id, const std::strin
 
 bool ChannelWorkPump::RunOneChannelTurn(std::int64_t now_ms) {
     // 并发帽先查(取件前;claim 了不跑会把件搁死在 Running)。
-    if (options_.max_active_channel_turns > 0 &&
-        active_turns_ >= options_.max_active_channel_turns) {
-        return true;
+    {
+        std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+        if (options_.max_active_channel_turns > 0 &&
+            active_turns_ >= options_.max_active_channel_turns) {
+            return true;
+        }
     }
     const std::vector<channel::ChannelManager::AccountSnapshot> snapshots =
         options_.manager->Snapshots();
@@ -594,13 +695,39 @@ bool ChannelWorkPump::RunOneChannelTurn(std::int64_t now_ms) {
             continue;
         }
         last_account_index_ = (index + 1) % snapshots.size();
-        const std::string in_flight_key = snapshot.channel_id + "/" + snapshot.account_id + "/" +
-                                          std::to_string(work->sid);
-        in_flight_sids_.insert(in_flight_key);
-        ++active_turns_;
-        const bool ok = ProcessWorkItem(snapshot.channel_id, snapshot.account_id, *work, now_ms);
-        --active_turns_;
-        in_flight_sids_.erase(in_flight_key);
+        const std::string turn_key = snapshot.channel_id + "/" + snapshot.account_id + "/" +
+                                     std::to_string(work->sid);
+        {
+            std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+            in_flight_sids_.insert(turn_key);
+            ++active_turns_;
+        }
+        // Q6:异步模式把执行递工作线程(审批等待阻塞在那边,tick 不堵);
+        // 同步模式(旧装配/多数测试)现场跑,行为不变。
+        if (!turn_workers_.empty()) {
+            TurnJob job;
+            job.channel_id = snapshot.channel_id;
+            job.account_id = snapshot.account_id;
+            job.turn_key = turn_key;
+            job.work = std::move(*work);
+            job.now_ms = now_ms;
+            job.cancel = std::make_shared<std::atomic<bool>>(false);
+            {
+                std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+                inflight_cancels_.push_back(job.cancel);
+                turn_jobs_.push_back(std::move(job));
+            }
+            turn_jobs_wake_.notify_one();
+            return true;
+        }
+        std::atomic<bool> cancel_flag{false};
+        const bool ok = ProcessWorkItem(snapshot.channel_id, snapshot.account_id, *work, now_ms,
+                                        turn_key, &cancel_flag);
+        {
+            std::lock_guard<std::mutex> lock(turn_jobs_mutex_);
+            --active_turns_;
+            in_flight_sids_.erase(turn_key);
+        }
         return ok;
     }
     return true;
@@ -609,11 +736,17 @@ bool ChannelWorkPump::RunOneChannelTurn(std::int64_t now_ms) {
 bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
                                       const std::string& account_id,
                                       const channel::ChannelManager::WorkItem& work,
-                                      std::int64_t now_ms) {
+                                      std::int64_t now_ms, const std::string& turn_key,
+                                      const std::atomic<bool>* cancel) {
     AccountBooks* books = BooksFor(channel_id, account_id);
     // Q5 补投锚:该会话最近一封被受理的来信(被动回复窗判定的原料)。
-    recent_inbound_[channel_id + "/" + account_id + "/" + work.conversation_id] =
-        RecentInbound{work.event.message_id, work.event.received_at_ms};
+    // Q6 异步 turn 起,写在工作线程、读在 tick(FreshInboundAnchor)——
+    // 过 recent_inbound_mutex_。
+    {
+        std::lock_guard<std::mutex> lock(recent_inbound_mutex_);
+        recent_inbound_[channel_id + "/" + account_id + "/" + work.conversation_id] =
+            RecentInbound{work.event.message_id, work.event.received_at_ms};
+    }
     // Q5 聊天侧任务工具的渠道上下文:本轮存续期间冻结(模型不可伪造),
     // 轮结束即清——终端路/自动任务路没有 Scope,工具必拒。
     std::optional<ChannelAutomationBridge::TurnScope> automation_scope;
@@ -664,10 +797,37 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
         {"senderId", work.sender_id},
         {"provenance", work.route.provenance.ToJson()},
     });
+    // Q6 远端审批:needs_confirm 工具在 tools.approve 带内时,确认经
+    // ChannelInteractionBroker 发 QQ 按钮卡片问用户(上下文全部本轮冻结,
+    // 模型不可伪造)。空 broker = 无审批路(裁定里带外工具 fail closed,
+    // 行为与 Q0 一致)。
+    if (options_.interaction_broker != nullptr) {
+        const std::string frozen_turn_key = turn_key;
+        const std::string frozen_channel = channel_id;
+        const std::string frozen_account = account_id;
+        const std::string frozen_conversation = work.conversation_id;
+        const std::string frozen_session_key = work.route.session_key;
+        const std::string frozen_sender = work.sender_id;
+        const std::string frozen_message_id = work.event.message_id;
+        const std::int64_t frozen_received_at = work.event.received_at_ms;
+        const channel::ToolRoutePolicy frozen_tools = work.route.tools;
+        ChannelWorkPump* pump = this;
+        request.on_tool_confirm =
+            [pump, frozen_turn_key, frozen_channel, frozen_account, frozen_conversation,
+             frozen_session_key, frozen_sender, frozen_message_id, frozen_received_at,
+             frozen_tools, cancel](const std::string& tool_use_id, const std::string& name,
+                                   const nlohmann::json& input) {
+                return pump->DecideChannelToolApproval(
+                    frozen_turn_key, frozen_tools, tool_use_id, name, input, frozen_channel,
+                    frozen_account, frozen_conversation, frozen_session_key, frozen_sender,
+                    frozen_message_id, frozen_received_at, cancel);
+            };
+    }
 
     const std::int64_t sid = work.sid;
     const std::string bound_session_key = work.route.session_key;
-    std::atomic<bool> cancel_flag{false};
+    std::atomic<bool> local_cancel{false};
+    const std::atomic<bool>* effective_cancel = cancel != nullptr ? cancel : &local_cancel;
     const auto result = executor_->ExecuteChannelTurn(
         request,
         [this, books, sid, bound_session_key, now_ms](const std::string& session_id,
@@ -675,7 +835,10 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
             // 领域绑定先于 V3 work.bound(恢复器优先走领域行定位原场)。
             (void)books->work_ledger.Bind(sid, bound_session_key, session_id, turn_id, now_ms);
         },
-        &cancel_flag);
+        effective_cancel);
+    // Q6:turn 收场(writer 空闲窗口)把审批流水落进该场 V3——requested/
+    // resolved 都是事实行,同 session 单飞保证此刻无并发写。
+    WriteApprovalFactsToV3(result.session_id, result.turn_id, turn_key);
     if (!result.ok) {
         if (result.error_code == "gateway.fault_injected") {
             return true;  // 不结算:恢复路接管(模拟进程死在半路)
@@ -711,6 +874,423 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
         }
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Q6:QQ 按钮批准一次工具调用(todo §十二)——裁决、卡片、回调、账
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 脱敏摘要(§12.2 第五行:卡片展示经脱敏的操作摘要):工具名 + 入参的
+// 字符串字段抽样(每段截 80 字节,至多 3 段),零密钥零全文参数——
+// command/path/file_name 这类"人眼能判断"的字段优先,其余字段只报名。
+std::string MakeApprovalSummary(const std::string& name, const nlohmann::json& input) {
+    std::string summary = name;
+    if (input.is_object()) {
+        for (const auto* key : {"command", "path", "file_path", "file_name", "url", "query",
+                                "pattern", "script"}) {
+            if (summary.size() > 160) {
+                break;
+            }
+            if (input.contains(key) && input.at(key).is_string()) {
+                std::string value = input.at(key).get<std::string>();
+                if (value.size() > 80) {
+                    value.resize(80);
+                    value += "…";
+                }
+                summary += " " + std::string(key) + "=" + value;
+            }
+        }
+        if (input.size() > 0 && summary == name) {
+            summary += " (参数 " + std::to_string(input.size()) + " 项)";
+        }
+    }
+    return summary;
+}
+
+// 审批卡键盘(官方消息按钮页:action.type=1 回调按钮;permission.type=0
+// 指定用户——配对 sender 才能按,宿主身份复核是最终防线;click_limit
+// 已废弃不填;unsupport_tips 客户端不支持时提示)。
+nlohmann::json MakeApprovalKeyboard(const std::string& token, const std::string& operator_id) {
+    // 显式逐层构造(深嵌套 initializer list 在 clang 下解析不稳,不赌推导)。
+    const auto make_action = [&token, &operator_id](bool accept) {
+        nlohmann::json permission = nlohmann::json::object();
+        permission["type"] = 0;
+        permission["specify_user_ids"] = nlohmann::json::array({operator_id});
+        nlohmann::json action = nlohmann::json::object();
+        action["type"] = 1;
+        action["permission"] = std::move(permission);
+        action["data"] = EncodeApprovalButtonData(token, accept);
+        action["unsupport_tips"] = "请升级手机QQ后使用按钮审批";
+        return action;
+    };
+    nlohmann::json approve = nlohmann::json::object();
+    approve["id"] = "approve";
+    approve["render_data"] = {{"label", "允许这次"}, {"visited_label", "已允许"}, {"style", 1}};
+    approve["action"] = make_action(true);
+    nlohmann::json decline = nlohmann::json::object();
+    decline["id"] = "decline";
+    decline["render_data"] = {{"label", "拒绝"}, {"visited_label", "已拒绝"}, {"style", 0}};
+    decline["action"] = make_action(false);
+
+    nlohmann::json buttons = nlohmann::json::array();
+    buttons.push_back(std::move(approve));
+    buttons.push_back(std::move(decline));
+    nlohmann::json rows = nlohmann::json::array();
+    rows.push_back(nlohmann::json{{"buttons", std::move(buttons)}});
+    nlohmann::json keyboard = nlohmann::json::object();
+    keyboard["content"] = {{"rows", std::move(rows)}};
+    return keyboard;
+}
+
+}  // namespace
+
+HeadlessExecutor::Options::ToolConfirmDecision ChannelWorkPump::DecideChannelToolApproval(
+    const std::string& turn_key, const channel::ToolRoutePolicy& tools,
+    const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+    const std::string& channel_id, const std::string& account_id,
+    const std::string& conversation_id, const std::string& session_key,
+    const std::string& sender_id, const std::string& message_id, std::int64_t received_at_ms,
+    const std::atomic<bool>* cancel) {
+    using Decision = HeadlessExecutor::Options::ToolConfirmDecision;
+    const std::int64_t now = options_.now_ms();
+    // 1) 显式预授权(Q0 语义原样):某层 tools.allow 列名且不在 deny——
+    //    不问,直接放行。审批政策不改写既有授权。
+    if (tools.ExplicitlyAllows(name)) {
+        return Decision{true, std::string()};
+    }
+    // 2) hard deny / 暴露面外:按钮不能覆盖 deny(§12.2 第三行);文案沿
+    //    渠道拒绝的既有口径。
+    if (!tools.Allows(name)) {
+        Decision decision;
+        decision.denial_text = ChannelToolDenialText(name);
+        return decision;
+    }
+    // 3) 审批带:approve 带内才可申请远端审批;带外照旧 fail closed。
+    if (!tools.Approvable(name) || options_.interaction_broker == nullptr) {
+        Decision decision;
+        decision.denial_text = ChannelToolDenialText(name);
+        return decision;
+    }
+    // 4) 发卡等按钮:上下文全部宿主冻结;参数 hash 钉住"批的是什么"
+    //    (参数变化=新请求新 token,自然重新申请)。
+    ChannelApprovalContext context;
+    context.channel_id = channel_id;
+    context.account_id = account_id;
+    context.conversation_id = conversation_id;
+    context.session_key = session_key;
+    context.turn_key = turn_key;
+    context.tool_use_id = tool_use_id;
+    context.tool_name = name;
+    context.operator_id = sender_id;
+    context.message_id = message_id;
+    context.summary = MakeApprovalSummary(name, input);
+    context.args_sha256 = platform::Sha256Hex(input.is_null() ? std::string("{}") : input.dump());
+    context.deadline_ms = now + options_.approval_timeout_ms;
+    context.timeout_ms = options_.approval_timeout_ms;
+    context.received_at_ms = received_at_ms;
+    ChannelWorkPump* pump = this;
+    std::string token_out;  // on_requested 同步先于 AskApproval 返回,这里拿得到
+    const auto future = options_.interaction_broker->AskApproval(
+        context, [&token_out, pump](const ChannelInteractionBroker::RequestedFact& fact) {
+            token_out = fact.token;
+            pump->EnqueueApprovalCard(fact);
+        });
+    if (cancel != nullptr) {
+        future->WatchInterrupt(cancel);
+    }
+    const auto response = future->WaitApproval();
+    if (!response.has_value()) {
+        // 悬空收口:超时/取消/卡片失败——等价拒绝,文案照"没人可答"写,
+        // 不冒充用户拒绝(§12.2 第十行)。收口事实分账:cancel 打断走
+        // Cancel;其余(超时)记 Timeout;卡片失败已由投递路 CancelByToken
+        // 摘表,这里的二次收口是 no-op。
+        Decision decision;
+        if (cancel != nullptr && cancel->load()) {
+            options_.interaction_broker->CancelByToken(token_out, "cancelled");
+            decision.denial_text = "本轮被取消,审批悬空收口,未执行工具 " + name + "。";
+        } else {
+            options_.interaction_broker->NoteTimeout(token_out);
+            decision.denial_text =
+                "审批窗内没人答复(超时或审批卡投递失败),按拒绝收口,未执行工具 " +
+                name + "。";
+        }
+        return decision;
+    }
+    if (response->decision == runtime::InteractionDecision::Accept ||
+        response->decision == runtime::InteractionDecision::AcceptForSession) {
+        return Decision{true, std::string()};
+    }
+    Decision decision;
+    decision.denial_text = "用户在 QQ 上拒绝了工具 " + name + " 的执行请求,本次未执行。";
+    return decision;
+}
+
+void ChannelWorkPump::EnqueueApprovalCard(
+    const ChannelInteractionBroker::RequestedFact& fact) {
+    // 交互 outbox(§12.2 第十一行):与已完成 Agent 回复分开、有期限;卡片
+    // 发送失败不重试突破审批 TTL(见 DriveApprovalFlow)。delivery_id 定式
+    // 稳定:同卡重试同 id(平台 msg_seq 稳定),幂等。
+    ApprovalCard card;
+    card.token = fact.token;
+    card.delivery_id = "appr-card-" + fact.token_hash.substr(0, 16);
+    card.channel_id = fact.context.channel_id;
+    card.account_id = fact.context.account_id;
+    card.conversation_id = fact.context.conversation_id;
+    card.reply_to_message_id = fact.context.message_id;  // 被动锚(触发来信在窗内)
+    card.markdown = "**工具审批请求**\n" + fact.context.summary +
+                    "\n允许则执行这一次;拒绝或超时都不执行。";
+    card.keyboard = MakeApprovalKeyboard(fact.token, fact.context.operator_id);
+    card.deadline_ms = fact.context.deadline_ms;
+    {
+        std::lock_guard<std::mutex> lock(approval_cards_mutex_);
+        // 同 token 不重复入队(防御:AskApproval 一次一枚)。
+        for (const ApprovalCard& existing : approval_cards_) {
+            if (existing.token == card.token) {
+                return;
+            }
+        }
+        approval_cards_.push_back(std::move(card));
+    }
+}
+
+bool ChannelWorkPump::DriveApprovalFlow(std::int64_t now_ms) {
+    if (options_.interaction_broker == nullptr) {
+        return true;
+    }
+    // 1) 互动回调排水:裁决 → 回应平台(code=0 处理成功/3 重复/4 没权限)。
+    //    code=0 只表示回调处理成功,不表示工具执行成功(官方口径)。
+    for (const auto& snapshot : options_.manager->Snapshots()) {
+        for (const channel::ChannelManager::ChannelInteraction& interaction :
+             options_.manager->DrainChannelInteractions(snapshot.channel_id,
+                                                        snapshot.account_id)) {
+            // 只认消息按钮回调(type=11);其余互动类型(菜单/授权)不归
+            // 审批裁决——回"操作失败"让客户端收口,不冒充处理成功。
+            if (interaction.type != 11) {
+                (void)options_.manager->AckInteraction(snapshot.channel_id, snapshot.account_id,
+                                                       interaction.interaction_id,
+                                                       /*code=操作失败*/ 1);
+                continue;
+            }
+            std::string token;
+            bool accept = false;
+            if (!DecodeApprovalButtonData(interaction.button_data, &token, &accept)) {
+                // 不是宿主发的审批按钮(菜单指令类):如实回失败,不猜。
+                (void)options_.manager->AckInteraction(snapshot.channel_id, snapshot.account_id,
+                                                       interaction.interaction_id, 1);
+                continue;
+            }
+            const auto resolution = options_.interaction_broker->ResolveByToken(
+                token, accept, interaction.operator_id, interaction.interaction_id);
+            int ack_code = 4;  // 默认"没有权限"——未知 token 不泄露存在性
+            switch (resolution) {
+                case ChannelInteractionBroker::Resolution::Applied:
+                    ack_code = 0;  // 成功
+                    break;
+                case ChannelInteractionBroker::Resolution::Duplicate:
+                    ack_code = 3;  // 重复操作(幂等:只返回已处理)
+                    break;
+                case ChannelInteractionBroker::Resolution::NotAuthorized:
+                    ack_code = 4;  // 他人代按:没有权限
+                    break;
+                case ChannelInteractionBroker::Resolution::Stale:
+                    ack_code = 4;  // 未知/过期/重启后旧卡:没有权限
+                    break;
+            }
+            (void)options_.manager->AckInteraction(snapshot.channel_id, snapshot.account_id,
+                                                   interaction.interaction_id, ack_code);
+        }
+    }
+    // 2) 卡片驱动:到点的重发(窗内)、过期未投递的取消(fail closed——
+    //    没有卡片就没有按钮,等待只会超时,早收口让用户重发指令)。
+    std::vector<ApprovalCard> send_now;
+    std::vector<std::string> cancel_tokens;
+    {
+        std::lock_guard<std::mutex> lock(approval_cards_mutex_);
+        for (ApprovalCard& card : approval_cards_) {
+            if (card.done || card.inflight) {
+                continue;
+            }
+            if (now_ms >= card.deadline_ms) {
+                // 审批窗已过:等 WaitApproval 自己超时收口(默认拒绝),
+                // 卡片不再投递。
+                card.done = true;
+                continue;
+            }
+            if (now_ms < card.retry_at_ms) {
+                continue;
+            }
+            card.inflight = true;
+            send_now.push_back(card);
+        }
+    }
+    for (const ApprovalCard& card : send_now) {
+        channel::ChannelManager::ChannelSendRequest send;
+        send.conversation_id = card.conversation_id;
+        send.text = card.markdown;
+        send.reply_to_message_id = card.reply_to_message_id;
+        send.client_delivery_id = card.delivery_id;
+        send.keyboard = card.keyboard;
+        const auto error =
+            options_.manager->SendReply(card.channel_id, card.account_id, send);
+        if (error.has_value()) {
+            // 受理失败(账号不在 Running/transport 缺):重试或取消按窗判。
+            const bool in_window = now_ms + options_.send_retry_backoff_ms < card.deadline_ms;
+            std::lock_guard<std::mutex> lock(approval_cards_mutex_);
+            for (ApprovalCard& entry : approval_cards_) {
+                if (entry.delivery_id != card.delivery_id) {
+                    continue;
+                }
+                entry.inflight = false;
+                if (in_window) {
+                    entry.retry_at_ms = now_ms + options_.send_retry_backoff_ms;
+                } else {
+                    entry.done = true;
+                    cancel_tokens.push_back(entry.token);
+                }
+            }
+        }
+    }
+    for (const std::string& token : cancel_tokens) {
+        options_.interaction_broker->CancelByToken(token, "card_failed");
+    }
+    // 3) 已终态卡片的清理(投递成功后按钮可能在窗内任何时候被按——
+    //    done 的卡片保留到窗末才清,token 裁决权在 broker)。
+    {
+        std::lock_guard<std::mutex> lock(approval_cards_mutex_);
+        for (auto it = approval_cards_.begin(); it != approval_cards_.end();) {
+            if (it->done && now_ms >= it->deadline_ms) {
+                it = approval_cards_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    return true;
+}
+
+bool ChannelWorkPump::SettleApprovalCardOutcome(
+    const std::string& client_delivery_id,
+    channel::ChannelManager::ChannelDeliveryOutcome::Status status, const std::string& error_code,
+    std::int64_t now_ms) {
+    std::optional<ApprovalCard> matched;
+    bool is_card = false;
+    {
+        std::lock_guard<std::mutex> lock(approval_cards_mutex_);
+        for (ApprovalCard& card : approval_cards_) {
+            if (card.delivery_id != client_delivery_id || !card.inflight) {
+                continue;
+            }
+            is_card = true;
+            card.inflight = false;
+            switch (status) {
+                case channel::ChannelManager::ChannelDeliveryOutcome::Status::Accepted:
+                    // 已投递:按钮等用户按;审批不动(裁决归回调)。
+                    card.done = true;
+                    break;
+                case channel::ChannelManager::ChannelDeliveryOutcome::Status::RateLimited:
+                    // 窗内退避重试,不突破审批 TTL。
+                    if (now_ms + options_.send_retry_backoff_ms < card.deadline_ms) {
+                        card.retry_at_ms = now_ms + options_.send_retry_backoff_ms;
+                    } else {
+                        card.done = true;
+                        matched = card;
+                    }
+                    break;
+                case channel::ChannelManager::ChannelDeliveryOutcome::Status::Rejected:
+                case channel::ChannelManager::ChannelDeliveryOutcome::Status::AuthFailed:
+                case channel::ChannelManager::ChannelDeliveryOutcome::Status::Unknown:
+                    // 明确拒绝/令牌失效/delivery_unknown:按钮可能没到用户
+                    // 手上——取消等待(fail closed),用户重发指令再来。
+                    card.done = true;
+                    matched = card;
+                    break;
+            }
+            break;
+        }
+    }
+    if (matched.has_value()) {
+        options_.interaction_broker->CancelByToken(matched->token, "card_failed");
+    }
+    (void)error_code;
+    return is_card;
+}
+
+void ChannelWorkPump::WriteApprovalFactsToV3(const std::string& session_id,
+                                             const std::string& turn_id,
+                                             const std::string& turn_key) {
+    if (options_.interaction_broker == nullptr || session_id.empty()) {
+        return;
+    }
+    std::vector<ChannelInteractionBroker::RequestedFact> requested;
+    std::vector<ChannelInteractionBroker::ResolvedFact> resolved;
+    options_.interaction_broker->TakeFactsForTurn(turn_key, &requested, &resolved);
+    if (requested.empty() && resolved.empty()) {
+        return;
+    }
+    // 场流定位(RecoverOne 同款路:workspace 房门按 key 反查)。落不进
+    // 账不拦 turn 收场——执行事实优先,审批审计丢失留诊断(stderr)。
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(options_.workspaces_root,
+                                                                 options_.workspace_identity.workspace_key);
+    if (!room.has_value()) {
+        return;
+    }
+    const auto stream = trajectory::v3::FindV3SessionStream(*room / "sessions" / session_id);
+    if (!stream.has_value()) {
+        return;
+    }
+    auto writer = trajectory::v3::V3Writer::Continue(*stream);
+    if (!writer.has_value()) {
+        return;
+    }
+    for (const auto& fact : requested) {
+        trajectory::v3::EventDraft draft;
+        draft.kind = trajectory::v3::EventKindV3::ChannelApprovalRequested;
+        draft.turn_id = turn_id;
+        draft.payload = nlohmann::json::object({
+            {"tokenHash", fact.token_hash},
+            {"tool", fact.context.tool_name},
+            {"argsSha256", fact.context.args_sha256},
+            {"channelId", fact.context.channel_id},
+            {"accountId", fact.context.account_id},
+            {"conversationId", fact.context.conversation_id},
+            {"operatorId", fact.context.operator_id},
+            {"deadlineMs", fact.context.deadline_ms},
+        });
+        (void)writer->AppendEvent(std::move(draft), trajectory::v3::Durability::PowerLoss);
+    }
+    for (const auto& fact : resolved) {
+        const char* decision = "cancelled";
+        switch (fact.outcome) {
+            case ChannelInteractionBroker::Outcome::Approved:
+                decision = "approved";
+                break;
+            case ChannelInteractionBroker::Outcome::Declined:
+                decision = "declined";
+                break;
+            case ChannelInteractionBroker::Outcome::Timeout:
+                decision = "timeout";
+                break;
+            case ChannelInteractionBroker::Outcome::Cancelled:
+                decision = "cancelled";
+                break;
+            case ChannelInteractionBroker::Outcome::Pending:
+                break;
+        }
+        trajectory::v3::EventDraft draft;
+        draft.kind = trajectory::v3::EventKindV3::ChannelApprovalResolved;
+        draft.turn_id = turn_id;
+        draft.payload = nlohmann::json::object({
+            {"tokenHash", fact.token_hash},
+            {"decision", decision},
+            {"by", fact.by},
+        });
+        if (!fact.interaction_id.empty()) {
+            draft.payload["interactionId"] = fact.interaction_id;
+        }
+        (void)writer->AppendEvent(std::move(draft), trajectory::v3::Durability::PowerLoss);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -936,17 +1516,24 @@ bool ChannelWorkPump::RunOneChannelJob(std::int64_t now_ms, std::string* error) 
 
 std::optional<std::string> ChannelWorkPump::FreshInboundAnchor(
     const gateway::ReplyOutboxItem& item, std::int64_t now_ms) const {
-    const auto found = recent_inbound_.find(item.target_channel_id + "/" +
-                                            item.target_account_id + "/" +
-                                            item.target_conversation_id);
-    if (found == recent_inbound_.end()) {
+    std::optional<RecentInbound> recent;
+    {
+        const std::lock_guard<std::mutex> lock(recent_inbound_mutex_);
+        const auto found = recent_inbound_.find(item.target_channel_id + "/" +
+                                                item.target_account_id + "/" +
+                                                item.target_conversation_id);
+        if (found != recent_inbound_.end()) {
+            recent = found->second;
+        }
+    }
+    if (!recent.has_value()) {
         return std::nullopt;
     }
-    if (now_ms - found->second.received_at_ms > options_.passive_reply_window_ms ||
-        now_ms < found->second.received_at_ms) {
+    if (now_ms - recent->received_at_ms > options_.passive_reply_window_ms ||
+        now_ms < recent->received_at_ms) {
         return std::nullopt;  // 窗外(或时钟倒拨):不带陈旧锚,走主动消息
     }
-    return found->second.message_id;
+    return recent->message_id;
 }
 
 bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {

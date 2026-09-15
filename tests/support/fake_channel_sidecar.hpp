@@ -39,6 +39,19 @@ public:
     // §1)。
     void EmitInboundEvent(const lubancode::channel::ChannelInboundEvent& event);
 
+    // ---- Q6 互动回调(QQ 按钮审批)-----------------------------------------
+    // 主动排一条 channel.interaction.create 通知(按钮点击;params 形状见
+    // bridge 协议 InteractionCreate 表项)。
+    void EmitInteractionNotification(const nlohmann::json& params);
+    // 宿主回的 channel.interaction.ack 观测账(裁决结果对账用)。
+    struct RecordedInteractionAck {
+        std::string interaction_id;
+        int code = 0;
+    };
+    const std::vector<RecordedInteractionAck>& interaction_acks() const {
+        return interaction_acks_;
+    }
+
     // ---- 观测账(冒烟测试断言用) ----
     bool handshake_completed() const { return handshake_completed_; }
     bool started() const { return started_; }
@@ -105,6 +118,7 @@ private:
 
     std::vector<RecordedSend> sent_messages_;
     std::vector<std::string> acked_delivery_ids_;
+    std::vector<RecordedInteractionAck> interaction_acks_;
     std::vector<std::string> diagnostics_;
 };
 

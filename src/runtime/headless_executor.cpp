@@ -314,7 +314,7 @@ HeadlessExecutor::ChannelTurnResult HeadlessExecutor::ExecuteChannelTurn(
                          request.per_turn_tools, request.binding_extra,
                          request.delivery_target.empty() ? std::string("local:file")
                                                          : request.delivery_target,
-                         on_bound, cancel);
+                         on_bound, cancel, &request.on_tool_confirm);
     result.ok = core.ok;
     result.error_code = core.error_code;
     result.error = core.error;
@@ -415,7 +415,10 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     const channel::ToolRoutePolicy* per_turn_tools, const nlohmann::json& binding_extra,
     const std::string& selection_delivery_target,
     const std::function<void(const std::string&, const std::string&)>& on_bound,
-    const std::atomic<bool>* cancel) {
+    const std::atomic<bool>* cancel,
+    const std::function<Options::ToolConfirmDecision(const std::string&, const std::string&,
+                                                     const nlohmann::json&)>*
+        per_turn_confirm) {
     Result result;
     TrajectorySessionLedger* ledger = service.trajectory();
     trajectory::v3::V3Writer* v3_writer = ledger->v3_main_writer();
@@ -555,7 +558,29 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     // 审批注入口(W2,助理任务):宿主递了确认回调时,needs_confirm 工具
     // 的确认经它走("问页面");拒绝文案由回调带回(超时拒绝不冒充用户
     // 拒绝)。同步泵串行执行,denial 明细按 tool_use_id 查表无并发。
-    if (options_.on_tool_confirm) {
+    // Q6 渠道远端审批:per_turn_confirm(泵按 WorkItem 冻结上下文拼的
+    // 回调)压过 Options 注入口——渠道轮的审批问渠道按钮,W2 注入口
+    // 管本机助理任务,两不混。回调与审批口同线程先后调用,denials 表
+    // 单线程读写无并发。
+    if (per_turn_confirm != nullptr && *per_turn_confirm != nullptr) {
+        const auto decide = *per_turn_confirm;
+        const auto denials = std::make_shared<std::map<std::string, std::string>>();
+        wiring.on_tool_confirm = [decide, denials](const std::string& tool_use_id,
+                                                   const std::string& name,
+                                                   const nlohmann::json& input) {
+            const Options::ToolConfirmDecision decision = decide(tool_use_id, name, input);
+            if (!decision.allowed && !decision.denial_text.empty()) {
+                (*denials)[tool_use_id] = decision.denial_text;
+            }
+            return decision.allowed;
+        };
+        wiring.on_tool_denial_text = [denials](const std::string& tool_use_id,
+                                               const std::string& /*name*/) {
+            const auto found = denials->find(tool_use_id);
+            return found != denials->end() ? found->second
+                                           : std::string("用户拒绝执行该工具");
+        };
+    } else if (options_.on_tool_confirm) {
         const auto decide = options_.on_tool_confirm;
         const auto denials = std::make_shared<std::map<std::string, std::string>>();
         wiring.on_tool_confirm = [decide, denials](const std::string& tool_use_id,

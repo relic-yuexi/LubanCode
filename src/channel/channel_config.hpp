@@ -74,15 +74,21 @@ struct ChannelBindingMatch {
 // 工具上限(§7/§8;QQ 接入单 Q0):allow 的 presence 是显式合同——
 // nullopt = 本层不添上限;有值(含空名单)= 只许名单内,空名单即禁全部
 // 工具。旧配置没写 tools.allow 的解析结果是 nullopt,行为与从前一字不差。
+// Q6(§12.2)approve:同款 presence 合同——nullopt = 本层不参与审批带;
+// 有值 = 这些工具"可申请审批"(执行前经远端按钮问用户,不预先授权)。
+// deny 永远赢;默认零层声明 = 审批带空 = 行为与从前一字不差。
 struct ChannelToolsUserPolicy {
     std::optional<std::vector<std::string>> allow;
     std::vector<std::string> deny;
+    std::optional<std::vector<std::string>> approve;
 };
 
 struct ChannelBindingToolsPolicy {
     // 未设置(nullopt)= binding 不另设上限;[] = 禁全部工具。
     std::optional<std::vector<std::string>> allow;
     std::vector<std::string> deny;
+    // Q6:binding 层审批带(与 allow 同款 presence 合同)。
+    std::optional<std::vector<std::string>> approve;
 };
 
 struct ChannelBindingMemoryPolicy {

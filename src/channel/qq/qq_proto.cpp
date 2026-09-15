@@ -478,7 +478,15 @@ std::optional<AccessTokenResponse> ParseAccessTokenResponse(const nlohmann::json
 
 nlohmann::json BuildC2cSendPayload(const C2cSendRequest& request) {
     nlohmann::json body = nlohmann::json::object();
-    if (!request.media_file_info.empty()) {
+    if (request.keyboard.is_object() && !request.keyboard.empty()) {
+        // Q6 审批卡片:msg_type=2(markdown)+keyboard 挂在消息底部(官方
+        // 消息按钮页)。markdown 与键盘权限均须平台开通——发送失败经
+        // ClassifyQqSendFailure 如实分型,不静默降级纯文本(降级=按钮
+        // 收不回来=审批永远等不到,fail closed 不许静默)。
+        body["msg_type"] = 2;
+        body["content"] = request.content;
+        body["keyboard"] = request.keyboard;
+    } else if (!request.media_file_info.empty()) {
         // Q4 富媒体:msg_type=7 + media.file_info(官方示例不带 content——
         // 文本与附件由 outbox 拆段分开发送,不混在一条消息里)。
         body["msg_type"] = 7;
@@ -524,6 +532,110 @@ std::optional<C2cSendResponse> ParseC2cSendResponse(const nlohmann::json& body,
         }
     }
     return out;
+}
+
+// ---- INTERACTION_CREATE 互动回调(Q6 远端审批) -----------------------------
+
+std::optional<QqInteractionEvent> MapInteractionCreate(const nlohmann::json& d,
+                                                        std::string* error) {
+    if (!d.is_object()) {
+        if (error != nullptr) {
+            *error = "interaction d not an object";
+        }
+        return std::nullopt;
+    }
+    QqInteractionEvent out;
+    out.interaction_id = GetStringField(d, "id").value_or(std::string());
+    if (out.interaction_id.empty()) {
+        if (error != nullptr) {
+            *error = "interaction missing id";
+        }
+        return std::nullopt;
+    }
+    // data.resolved.button_data 是按钮 data 值的唯一下落(官方互动事件页
+    // 三例:单聊/群聊/授权)。resolved 整块缺失的互动(理论不可达)拒绝——
+    // 审批回调不能猜。
+    if (!d.contains("data") || !d.at("data").is_object() ||
+        !d.at("data").contains("resolved") || !d.at("data").at("resolved").is_object()) {
+        if (error != nullptr) {
+            *error = "interaction missing data.resolved";
+        }
+        return std::nullopt;
+    }
+    const nlohmann::json& resolved = d.at("data").at("resolved");
+    out.button_data = GetStringField(resolved, "button_data").value_or(std::string());
+    out.button_id = GetStringField(resolved, "button_id").value_or(std::string());
+    // 数值字段宽松解析:平台不严格,version/type 可能以字符串回传(真机
+    // 教训,与 expires_in 同款);解不出按缺省,不拦事件——身份裁决在宿主。
+    if (d.contains("type")) {
+        if (const auto type = ParseLooseInt64(d.at("type"))) {
+            out.type = *type;
+        }
+    }
+    if (d.contains("version")) {
+        if (const auto version = ParseLooseInt64(d.at("version"))) {
+            out.version = *version;
+        }
+    }
+    if (d.contains("chat_type")) {
+        if (const auto chat_type = ParseLooseInt64(d.at("chat_type"))) {
+            out.chat_type = *chat_type;
+        }
+    }
+    out.scene = GetStringField(d, "scene").value_or(std::string());
+    out.user_openid = GetStringField(d, "user_openid").value_or(std::string());
+    out.group_openid = GetStringField(d, "group_openid").value_or(std::string());
+    out.group_member_openid =
+        GetStringField(d, "group_member_openid").value_or(std::string());
+    out.application_id = GetStringField(d, "application_id").value_or(std::string());
+    if (const auto timestamp = GetStringField(d, "timestamp")) {
+        if (const auto ms = ParseRfc3339Ms(*timestamp)) {
+            out.received_at_ms = *ms;
+        }
+    }
+    return out;
+}
+
+nlohmann::json InteractionEventToJson(const QqInteractionEvent& event,
+                                      const std::string& channel_id,
+                                      const std::string& account_id,
+                                      const std::string& delivery_id) {
+    nlohmann::json params = nlohmann::json::object();
+    params["channelId"] = channel_id;
+    params["accountId"] = account_id;
+    params["deliveryId"] = delivery_id;
+    params["interactionId"] = event.interaction_id;
+    params["type"] = event.type;
+    params["scene"] = event.scene;
+    params["chatType"] = event.chat_type;
+    if (!event.user_openid.empty()) {
+        params["userOpenid"] = event.user_openid;
+    }
+    if (!event.group_openid.empty()) {
+        params["groupOpenid"] = event.group_openid;
+    }
+    if (!event.group_member_openid.empty()) {
+        params["groupMemberOpenid"] = event.group_member_openid;
+    }
+    params["buttonData"] = event.button_data;
+    if (!event.button_id.empty()) {
+        params["buttonId"] = event.button_id;
+    }
+    if (!event.application_id.empty()) {
+        params["applicationId"] = event.application_id;
+    }
+    params["version"] = event.version;
+    params["receivedAtMs"] = event.received_at_ms;
+    return params;
+}
+
+nlohmann::json BuildInteractionAckPayload(int code) {
+    return nlohmann::json{{"code", code}};
+}
+
+std::string InteractionAckPath(const std::string& interaction_id) {
+    // interaction_id 取事件 d.id 原值,不带事件名前缀(官方回应接口页)。
+    return "/interactions/" + interaction_id;
 }
 
 // ---- v2 富媒体上传纯函数(Q4) --------------------------------------------

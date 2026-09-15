@@ -263,6 +263,15 @@ enum class EventKindV3 {
     //     被拒回执(v2 同名事件的 v3 对应;statusless 事实)。
     MemoryExtractionAssessed,
     MemoryWriteReceipted,
+    // 渠道远端审批(QQ 接入单 Q6 §12.2):渠道会话里须确认工具的审批
+    // 请求与裁决,全 statusless 事实行。requested 记宿主发的审批卡
+    //(token hash、工具名、规范参数 hash、身份摘要、期限——正文参数
+    // 不入账,脱敏由宿主摘要层保证);resolved 记裁决(approved/
+    // declined/timeout/cancelled/card_failed,by=操作者或收口原因)。
+    // 关联锚:信封 turnId + payload toolUseId(与 gateway.work.bound 同款
+    // 反查路)。账不裁决:决议生效在审批 broker,这里只留审计事实。
+    ChannelApprovalRequested,
+    ChannelApprovalResolved,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

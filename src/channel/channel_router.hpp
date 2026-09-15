@@ -62,16 +62,28 @@ struct ToolRoutePolicy {
     // 的交集);deny = 各层 deny 的并集——具体 binding 抹不掉宽层 deny。
     std::optional<std::vector<std::string>> allow;
     std::vector<std::string> deny;
+    // "可申请审批"带(Q6 §12.2:扩展为可申请审批的工具上限):approve 与
+    // allow 同构逐层取显式交集——approve 带内的须确认工具不预先授权,
+    // 执行前经远端审批问用户(按钮允许才跑);不在带内也不在 allow = 照
+    // 旧 fail closed 拒。deny 永远赢:hard deny 不可被按钮覆盖。默认
+    // (零层显式声明)approve 为空 = Q0 行为零变化。
+    std::vector<std::string> approve;
     // 来源账:哪些层出了手(如 "channel+account+binding[1]+binding[3]";
     // 空 = 无层参与,零上限)。
     std::string source;
 
-    // 名字放行判定:deny 永远赢;显式 allow 名单外不放。
+    // 名字放行判定(暴露面):deny 永远赢;显式 allow 名单外、approve 名单
+    // 外不放——approve 带内工具对模型可见(看不见就无从申请,§12.2),
+    // 执行前由确认闸走审批。
     bool Allows(const std::string& tool_name) const;
     // 须确认(needs_confirm)工具的"明确授权"判定(security.md §3):
     // 至少一层显式 allow 列了它(故 allow 必有值),且并完 deny 仍可用。
-    // 没有任何显式 allow = 无明确授权 = 拒——渠道会话没有审批渠道。
+    // 没有任何显式 allow = 无明确授权 = 拒——审批带(Approvable)是
+    // "可以问",不是"预先允许",两不相干。
     bool ExplicitlyAllows(const std::string& tool_name) const;
+    // 审批带判定(Q6):deny 未命中且 approve 名单列了它。命中 = 确认闸
+    // 可走远端审批(不保证批);未命中 = fail closed 照旧拒。
+    bool Approvable(const std::string& tool_name) const;
 };
 
 struct MemoryRoutePolicy {

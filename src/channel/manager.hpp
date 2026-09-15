@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -241,10 +242,39 @@ public:
         std::string reply_to_message_id;    // 被动回复锚(空 = 主动消息)
         std::string client_delivery_id;     // 稳定发送身份(outbox delivery id)
         std::optional<OutboundAttachment> attachment;  // Q4 出站附件(可空)
+        // Q6 审批卡片:非空时作为 keyboard 随消息发给适配器(空 object =
+        // 纯文本,行为不变)。适配器无 interaction 能力会按协议拒绝——
+        // 调用方(审批泵)按失败收口,不静默降级。
+        nlohmann::json keyboard = nlohmann::json::object();
     };
     std::optional<std::string> SendReply(const std::string& channel_id,
                                          const std::string& account_id,
                                          const ChannelSendRequest& request);
+
+    // ---- 互动回调(Q6 远端审批;sidecar 的 channel.interaction.create) ---
+    // 适配器上报的按钮回调(已过 application_id 对账)。
+    struct ChannelInteraction {
+        std::string channel_id;
+        std::string account_id;
+        std::string delivery_id;        // 适配器侧事件身份(诊断)
+        std::string interaction_id;     // 回应接口的路径参数
+        std::int64_t type = 0;          // 11=消息按钮;其余类型宿主不裁决
+        std::string scene;              // c2c/group/guild
+        std::int64_t chat_type = -1;
+        std::string operator_id;        // 单聊=user_openid;群聊=group_member_openid
+        std::string button_data;        // 宿主发的 opaque token(裁决原料)
+        std::string button_id;
+        std::int64_t received_at_ms = 0;
+    };
+    // 收走自上次调用以来的全部互动回调(FIFO)。泵消费后裁决并回 AckInteraction。
+    std::vector<ChannelInteraction> DrainChannelInteractions(const std::string& channel_id,
+                                                             const std::string& account_id);
+    // 回应平台(PUT /interactions/{id};code 官方口径 0 成功/1 失败/2 频繁
+    // /3 重复/4 没权限/5 仅管理员)。受理即入队,结果异步留账;同
+    // interaction_id 只能回应一次(官方限制),调用方自律不重发。
+    // 返回空串 = 受理;非空 = 拒收理由(账号非 Running 等)。
+    std::string AckInteraction(const std::string& channel_id, const std::string& account_id,
+                               const std::string& interaction_id, int code);
 
     // 一笔回执的结算账(泵消费后推进 outbox/ingress)。
     struct ChannelDeliveryOutcome {
@@ -376,6 +406,11 @@ private:
         // 已结算过的 delivery(重复回执只结一次)。
         std::map<std::string, int> settled_deliveries;
         std::vector<std::string> send_diagnostics;
+        // 互动回调(Q6):sidecar 上报的按钮事件,泵收走即清(FIFO)。
+        std::vector<ChannelInteraction> interactions;
+        // 已回应过的 interaction(官方:同一 id 只能回应一次;重复上报
+        // 不再受理回应,幂等留账)。
+        std::set<std::string> acked_interactions;
         // 待投配对提示(Q1b):PendingPairing 裁决时入队,泵排水进 outbox。
         std::vector<PairingNotice> pending_pairing_notices;
     };
@@ -411,6 +446,8 @@ private:
     // delivery.receipt 通知的结算(按 outbound_delivery_id 关联;重复/陈旧
     // 只留诊断)。
     void OnDeliveryReceiptLocked(AccountEntry& entry, const nlohmann::json& params);
+    // channel.interaction.create 通知(Q6):解析入 interactions 队列。
+    void OnInteractionLocked(AccountEntry& entry, const nlohmann::json& params);
     // 在途 send 的超时裁决(delivery_unknown)。
     void ExpireStaleSendsLocked(AccountEntry& entry);
     // 路由准入(阶段 3):ChannelRouter 全账,pairing 账经 PairingStore 适配。

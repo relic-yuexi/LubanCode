@@ -170,4 +170,45 @@ QqMessageSender::Outcome QqMessageSender::SendC2c(const C2cSendRequest& request)
     return outcome;
 }
 
+QqMessageSender::AckOutcome QqMessageSender::AckInteraction(const std::string& interaction_id,
+                                                             int code) {
+    // PUT /interactions/{id}(官方回应接口页):body {"code": N};2xx 空
+    // 对象即成功。同一 id 只能回应一次——失败不重试(重试既可能撞"只能
+    // 一次"的墙,客户端等待也已超时),失败分型如实回给调用方记账。
+    AckOutcome outcome;
+    const auto token = options_.tokens->GetValidToken();
+    if (!token.has_value()) {
+        outcome.error.kind = QqApiErrorKind::NetworkError;
+        outcome.error.detail = "token: " + token.error().detail;
+        return outcome;
+    }
+    QqHttpRequest request;
+    request.method = "PUT";
+    request.url = options_.api_base + InteractionAckPath(interaction_id);
+    request.headers.emplace_back("Content-Type", "application/json");
+    request.headers.emplace_back("Authorization", "QQBot " + *token);
+    request.body = BuildInteractionAckPayload(code).dump();
+    const auto response = options_.http(request);
+    if (!response.has_value()) {
+        outcome.error.kind = QqApiErrorKind::NetworkError;
+        outcome.error.detail = response.error();
+        return outcome;
+    }
+    if (response->status >= 200 && response->status < 300) {
+        const auto parsed =
+            nlohmann::json::parse(response->body, nullptr, /*allow_exceptions=*/false);
+        // 腾讯错误体走 HTTP 200 + body {"code":..}:2xx 不等于成功,先查
+        // code(与 SendC2c 同一教训)。
+        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("code") &&
+            ParseLooseInt64(parsed.at("code")).value_or(0) != 0) {
+            outcome.error = ClassifyQqSendFailure(response->status, response->body);
+            return outcome;
+        }
+        outcome.status = AckStatus::Acked;
+        return outcome;
+    }
+    outcome.error = ClassifyQqSendFailure(response->status, response->body);
+    return outcome;
+}
+
 }  // namespace lubancode::channel::qq

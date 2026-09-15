@@ -28,6 +28,13 @@ namespace lubancode::channel::qq {
 
 // intents 位(官方事件订阅表)。Q1 只订单聊事件;群聊/互动后批再开。
 inline constexpr std::uint32_t kIntentGroupAndC2cEvent = 1u << 25;
+// INTERACTION_CREATE(Q6 远端审批;官方事件订阅表 1<<26)。按钮回调进网关
+// 事件泵,宿主裁决后经 PUT /interactions/{id} 回应。真平台是否对本账号
+// 开放互动订阅——归 Q3 真机未验,文档位先订上。
+inline constexpr std::uint32_t kIntentInteraction = 1u << 26;
+// QQ 适配器的默认订阅:单聊消息 + 互动(审批按钮)。
+inline constexpr std::uint32_t kIntentDefaultBot =
+    kIntentGroupAndC2cEvent | kIntentInteraction;
 
 enum class GatewayOp {
     Dispatch = 0,       // 服务端推送
@@ -155,7 +162,50 @@ struct C2cSendRequest {
     // 来自 /v2/users/{openid}/files(透传,不自己解码),文本与附件由
     // outbox 拆成不同段分开发送。
     std::string media_file_info;
+    // Q6 审批卡片:非空 object 时载荷走 msg_type=2(markdown)+keyboard
+    //(keyboard 挂在 markdown 消息底部,官方消息按钮页)。内容为宿主冻结
+    // 的完整 keyboard JSON(自定义键盘,需平台开通;权限未开通按发送失败
+    // 分型如实报,不静默降级为纯文本)。media 与 keyboard 互斥——装配层
+    // 保证;两者同置按 keyboard 优先并留警告进 warnings 账。
+    nlohmann::json keyboard = nlohmann::json::object();
 };
+
+// ---------------------------------------------------------------------------
+// INTERACTION_CREATE -> 互动回调(Q6 远端审批;官方互动事件页)
+// ---------------------------------------------------------------------------
+
+// 互动事件映射(type=11 消息按钮;其余 type 只记 type 不解析 data)。
+struct QqInteractionEvent {
+    std::string interaction_id;   // d.id:回应接口的路径参数(不带事件名前缀)
+    std::int64_t type = 0;        // 11=消息按钮;12=快捷菜单;18/19=授权……
+    std::string scene;            // c2c=单聊 / group=群聊 / guild=频道
+    std::int64_t chat_type = -1;  // 0=频道 1=群聊 2=单聊(-1=缺失)
+    std::string user_openid;      // 单聊:操作者 OpenID(宿主身份复核用)
+    std::string group_openid;     // 群聊:群 OpenID
+    std::string group_member_openid;  // 群聊:群成员 OpenID(人才是身份,不是群)
+    std::string button_data;      // data.resolved.button_data(宿主发的 opaque token)
+    std::string button_id;        // data.resolved.button_id(可空)
+    std::string application_id;   // 校验:事件所属机器人(与连接账号对账)
+    std::int64_t version = 1;
+    std::int64_t received_at_ms = 0;  // d.timestamp(RFC3339)折算;解析失败 0
+};
+
+// 严格映射:非 object / 缺 id / 缺 data.resolved 拒绝。数值字段宽松解析
+//(ParseLooseInt64:平台可能把 version/type 发成字符串——真机教训)。
+std::optional<QqInteractionEvent> MapInteractionCreate(const nlohmann::json& d,
+                                                        std::string* error);
+
+// 互动事件 -> bridge notification params(sidecar 发宿主;嵌套保留原文)。
+nlohmann::json InteractionEventToJson(const QqInteractionEvent& event,
+                                      const std::string& channel_id,
+                                      const std::string& account_id,
+                                      const std::string& delivery_id);
+
+// PUT /interactions/{interaction_id} 的回应体:{"code": N}。
+// code 官方口径:0 成功 / 1 操作失败 / 2 操作频繁 / 3 重复操作 / 4 没有权限
+// / 5 仅管理员。code=0 只表示回调处理成功,不表示工具执行成功。
+nlohmann::json BuildInteractionAckPayload(int code);
+std::string InteractionAckPath(const std::string& interaction_id);
 
 // POST https://api.sgroup.qq.com/v2/users/{openid}/messages 的请求体。
 nlohmann::json BuildC2cSendPayload(const C2cSendRequest& request);
