@@ -130,7 +130,7 @@ TEST_CASE("快照载荷:basis 三件 + verdicts 逐项三态,过 P0 载荷校验
     std::string ec;
     std::string msg;
     auto parsed = trajectory::v3::EventLine::FromJsonStrict(event, &ec, &msg);
-    REQUIRE_MESSAGE(parsed.has_value(), ec + ": " + msg);
+    REQUIRE_MESSAGE(parsed.has_value(), ec << ": " << msg);
     const auto error = trajectory::v3::ValidateEventLine(*parsed);
     CHECK_FALSE(error.has_value());
 }
