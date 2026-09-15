@@ -13,6 +13,7 @@
 #include "channel/types.hpp"
 #include "runtime/channel_media_service.hpp"
 
+using namespace lubancode;
 using namespace lubancode::runtime;
 
 namespace {
