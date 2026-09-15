@@ -96,6 +96,7 @@ struct JobRecord {
     std::string turn_id;
     std::string step_id;
     std::string tool_name;
+    std::string mode = "job_handle";  // job_handle|native_deferred(P2)
     std::string assistant_message_ref;
     nlohmann::json tool_input;
     JobExecutionPolicy policy;
@@ -493,6 +494,11 @@ struct ToolJobCoordinator::Impl {
         if (!job.admission_facts_complete || !job.action.has_value()) {
             return false;
         }
+        if (job.admission_text.empty()) {
+            // 恢复重建的记录没带正文:接单口径确定,原样重造。
+            job.admission_text = nlohmann::json::object(
+                {{"jobId", job.job_id}, {"status", job.admission_status}}).dump();
+        }
         auto message = job.action->AppendToolMessage(*writer, job.admission_text,
                                                      job.action->selected_event_id(), false);
         if (!ReceiptOk(message)) {
@@ -572,12 +578,17 @@ struct ToolJobCoordinator::Impl {
             return DispatchOutcome::KeepQueued;
         }
         // 调度意图先落账,再起线程(注册落稳前不派发的同款纪律:
-        // dispatched 落稳前不起 worker)。
-        auto pending = job.action->BeginNextAttempt(*writer, "job_dispatch");
-        if (!ReceiptOk(pending)) {
-            NoteWriteFailure("tool.execution.pending(attempt 2)", pending);
-            global->Release();
-            return DispatchOutcome::KeepQueued;
+        // dispatched 落稳前不起 worker)。job_handle 的接单是 attempt 1,
+        // 工作开 attempt 2;native_deferred 没有接单链(原调用欠账),
+        // 工作就是 attempt 1——不 BeginNextAttempt(§4.14:上一 attempt
+        // 未终态不得开下一 attempt,native 的 attempt 1 只有调用证据)。
+        if (job.mode != "native_deferred") {
+            auto pending = job.action->BeginNextAttempt(*writer, "job_dispatch");
+            if (!ReceiptOk(pending)) {
+                NoteWriteFailure("tool.execution.pending(attempt 2)", pending);
+                global->Release();
+                return DispatchOutcome::KeepQueued;
+            }
         }
         job.epoch_counter += 1;
         job.owner_epoch = "epoch-" + std::to_string(job.epoch_counter);
@@ -901,6 +912,7 @@ struct ToolJobCoordinator::Impl {
         record->turn_id = request.turn_id;
         record->step_id = request.step_id;
         record->tool_name = request.tool_name;
+        record->mode = native ? "native_deferred" : "job_handle";
         record->assistant_message_ref = request.assistant_message_ref;
         record->tool_input = request.tool_input;
         record->policy = request.policy;
@@ -1447,6 +1459,10 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         // 账上接单链完整的事实先对齐(缺时由补链路径落);末枚 attempt>1
         // 也说明接单早已配齐(派发只发生在接单配齐之后)。
         job.admission_complete = item.admission_complete || item.attempt > 1;
+        // 接单事实同理:到过 attempt 2(job_handle)⇒ attempt 1 的接单链
+        // 已落账——补链只补消息,不给在跑/无终态的 attempt 伪造终态
+        //(流式提前档的恢复缺口正是这形状:事实在、消息缺、工作在跑)。
+        job.admission_facts_complete = job.admission_complete;
         if (item.disposition == "unsupported_mode") {
             job.state = "unknown";  // 不接管:只登记可见,不可操作
             continue;

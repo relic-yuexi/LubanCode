@@ -365,7 +365,9 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
             notice.preview_truncated = view.preview_truncated;
             notice.failed = view.state != "succeeded";
             notice.failure = view.failure.empty() ? view.state : view.failure;
-            notice.attempt = 2;  // 工作在 attempt 2(接单是 1,P1 账序)
+            // 工作的 attempt 号:job_handle 接单是 1、工作在 2(P1 账序);
+            // native 没有接单链,工作就是 attempt 1(P2 定案)。
+            notice.attempt = job.mode == "native_deferred" ? 1 : 2;
             notice.terminal_kind = TerminalKindOfState(view.state);
             notice.branch = hooks.writer != nullptr ? hooks.writer->session_id() : std::string();
             planner_->NotifyCompletion(std::move(notice));

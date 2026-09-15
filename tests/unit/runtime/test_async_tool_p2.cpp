@@ -365,8 +365,8 @@ TEST_CASE("job_handle:同响应先注册 launch 再处理 wait,已完成结果�
     REQUIRE(outcome2.has_value());
     REQUIRE(h.backend.captured_requests.size() == 4);
 
-    // 第二轮批次(声明序 B/C/D):
-    const std::vector<api::ToolResultBlock> second = LastResultsOf(h.backend.captured_requests[2]);
+    // 第二轮批次(声明序 B/C/D):结果随第四份请求(script3)入史。
+    const std::vector<api::ToolResultBlock> second = LastResultsOf(h.backend.captured_requests[3]);
     REQUIRE(second.size() == 3);
     CHECK(second[0].tool_use_id == "call_B");
     CHECK(second[1].tool_use_id == "call_C");
@@ -513,15 +513,16 @@ TEST_CASE("完成信封隔离:未知 job 与重复终态拒收,计数暴露") {
     // 未知 job:拒收。
     CHECK_FALSE(h.runtime->coordinator()->DebugSubmitEnvelope(
         "job-999999", "epoch-1", tools::Tool::Result{"x", false}));
-    // 合法终态:第一枚收;重复终态:拒收;旧租约:拒收。
+    // 旧租约(job 在跑、租约是 epoch-1):拒收,计 stale。
+    CHECK_FALSE(h.runtime->coordinator()->DebugSubmitEnvelope("job-000001", "epoch-9",
+                                                              tools::Tool::Result{"stale", false}));
+    CHECK(h.runtime->coordinator()->stale_envelopes_rejected() >= 1);
+    // 合法终态:第一枚收;终态后迟到(无论租约新旧):拒收,计 duplicate。
     CHECK(h.runtime->coordinator()->DebugSubmitEnvelope("job-000001", "epoch-1",
                                                         tools::Tool::Result{"ok", false}));
     CHECK_FALSE(h.runtime->coordinator()->DebugSubmitEnvelope("job-000001", "epoch-1",
                                                               tools::Tool::Result{"again", false}));
-    CHECK_FALSE(h.runtime->coordinator()->DebugSubmitEnvelope("job-000001", "epoch-9",
-                                                              tools::Tool::Result{"stale", false}));
     CHECK(h.runtime->coordinator()->duplicate_terminal_envelopes_rejected() >= 1);
-    CHECK(h.runtime->coordinator()->stale_envelopes_rejected() >= 1);
 
     h.runtime->gate()->PumpBatchBoundary();
     h.gate->Open();  // 真.worker 放行收尾
@@ -640,8 +641,12 @@ TEST_CASE("提前派发后流断:账面未知态,恢复 disposition 不盲重跑
     CHECK(outcome->cancelled);
     CHECK(h.runtime->early_dispatched_count() == 1);
 
-    // 账面:registered + dispatched,无终态观测;恢复计划 = unknown_hold
-    //(不盲重跑)。worker 还挂着(hold 闸)——真实"已启动、去向不明"。
+    // 账面:registered + dispatched + started(2),无终态观测;接单事实在、
+    // 接单消息缺(提前档链序:消息等声明落账后补,流断了就没补)。
+    // 恢复计划 = complete_delivery(admission_chain_missing)——补消息不重跑、
+    // 不给在跑的 attempt 伪造终态;工作的执行投影留在 running(归
+    // unknown_hold/接管裁决,下一轮恢复面)。worker 还挂着——真实
+    // "已启动、去向不明"。
     v3::V3Ledger ledger = h.Read();
     for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
         FAIL_CHECK(error.code << ": " << error.message);
@@ -649,13 +654,19 @@ TEST_CASE("提前派发后流断:账面未知态,恢复 disposition 不盲重跑
     const auto plan = tools::ToolJobCoordinator::PlanRecovery(ledger);
     REQUIRE(plan.items.size() == 1);
     CHECK(plan.items[0].job_id == "job-000001");
-    CHECK(plan.items[0].disposition == "unknown_hold");
+    CHECK(plan.items[0].disposition == "complete_delivery");
+    CHECK(plan.items[0].detail == "admission_chain_missing");
+    CHECK(plan.items[0].attempt == 2);
+    CHECK(plan.items[0].attempt_started);
 
-    // 放行真实 worker:单写者收唯一终态(真完成不改成"未执行")。
-    h.gate->Open();
+    // 单写者收唯一终态(真完成不改成"未执行"):确定性走测试信封口
+    //(真实 worker 的迟到信封按终态后迟到拒收,teardown 放行)。
+    REQUIRE(h.runtime->coordinator()->DebugSubmitEnvelope(
+        "job-000001", "epoch-1", tools::Tool::Result{"结果", false}));
     h.runtime->gate()->PumpBatchBoundary();
     const auto view = h.runtime->coordinator()->GetJob("job-000001");
     CHECK(view.state == "succeeded");
+    h.gate->Open();  // 收尾放行被挂住的 worker(迟到信封由协调器拒收)
 }
 
 // ---------------------------------------------------------------------------

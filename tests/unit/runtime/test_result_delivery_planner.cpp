@@ -16,6 +16,7 @@
 
 #include "runtime/result_delivery_planner.hpp"
 #include "trajectory/v3/envelope.hpp"
+#include "trajectory/v3/tool_action.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/writer.hpp"
 
@@ -43,20 +44,42 @@ struct EnvGuard {
     const char* name_;
 };
 
-CompletionNotice MakeNotice(const std::string& job_id, std::uint64_t ordinal,
+// 真结果链:Admit→Start→Finish→PersistedResult(投递账的 resultRef 须指
+// 得到账上的 tool.result.persisted 事件——跨行校验器 async.unknown_result)。
+std::string EmitPersistedAction(v3::V3Writer& writer, const std::string& action_id) {
+    auto session = v3::ToolActionSession::Admit(writer, "turn-000001", "step-000001",
+                                                action_id, "queued", std::nullopt,
+                                                std::nullopt, nlohmann::json::object());
+    session.Start(writer, "args-" + action_id, v3::ToolIdentity{}, std::nullopt,
+                  nlohmann::json::object());
+    session.Finish(writer, std::nullopt, std::nullopt);
+    auto persisted = session.PersistedResult(
+        writer, {nlohmann::json::object({{"artifactId", "res-" + action_id},
+                                         {"kind", "result_metadata"},
+                                         {"path", "artifacts/res.json"},
+                                         {"sha256", std::string(64, 'a')},
+                                         {"bytes", 32},
+                                         {"mediaType", "application/json"}})},
+        std::nullopt, std::nullopt);
+    REQUIRE(persisted.status == v3::WriteReceipt::Status::Committed);
+    return persisted.id;
+}
+
+CompletionNotice MakeNotice(const std::string& job_id, const std::string& action_id,
+                            const std::string& result_ref, std::uint64_t ordinal,
                             const std::string& call_id = "call_a",
                             const std::string& branch = "20260916-120000-PLAN") {
     CompletionNotice notice;
     notice.job_id = job_id;
-    notice.action_id = "action-job-" + job_id.substr(4);
+    notice.action_id = action_id;
     notice.mode = "native_deferred";
     notice.provider_call_id = call_id;
     notice.turn_id = "turn-000001";
     notice.step_id = "step-000001";
-    notice.result_ref = "evt-result-" + job_id;
+    notice.result_ref = result_ref;
     notice.result_version = 1;
     notice.preview = "业务结果 " + job_id;
-    notice.attempt = 2;
+    notice.attempt = 1;
     notice.terminal_kind = 1;
     notice.commit_ordinal = ordinal;
     notice.branch = branch;
@@ -128,7 +151,8 @@ std::string StateOf(const v3::V3Ledger& ledger, const std::string& delivery_id) 
 
 TEST_CASE("mailbox:完成通知只入 mailbox;选取后到的不动已选,下次再取") {
     PlannerHarness h("mailbox");
-    h.planner->NotifyCompletion(MakeNotice("job-000001", 1));
+    const std::string persisted_a = EmitPersistedAction(*h.writer, "action-job-000001");
+    h.planner->NotifyCompletion(MakeNotice("job-000001", "action-job-000001", persisted_a, 1));
     CHECK(h.planner->mailbox_size() == 1);
 
     auto first = h.planner->SelectForRequestBoundary();
@@ -141,7 +165,9 @@ TEST_CASE("mailbox:完成通知只入 mailbox;选取后到的不动已选,下次
     CHECK(h.planner->mailbox_size() == 0);  // 已选中出 mailbox
 
     // 本次选取之后到的完成通知:留给下次(冻结输入不动)。
-    h.planner->NotifyCompletion(MakeNotice("job-000002", 2, "call_b"));
+    const std::string persisted_b = EmitPersistedAction(*h.writer, "action-job-000002");
+    h.planner->NotifyCompletion(
+        MakeNotice("job-000002", "action-job-000002", persisted_b, 2, "call_b"));
     CHECK(h.planner->mailbox_size() == 1);
     auto second = h.planner->SelectForRequestBoundary();
     REQUIRE(second.size() == 1);
@@ -152,20 +178,22 @@ TEST_CASE("mailbox:完成通知只入 mailbox;选取后到的不动已选,下次
 
 TEST_CASE("mailbox:重复/乱序通知按 result_version 去重,同 job 只投一次") {
     PlannerHarness h("dedup");
-    h.planner->NotifyCompletion(MakeNotice("job-000001", 1));
-    h.planner->NotifyCompletion(MakeNotice("job-000001", 1));  // 重复
+    const std::string persisted_a = EmitPersistedAction(*h.writer, "action-job-000001");
+    h.planner->NotifyCompletion(MakeNotice("job-000001", "action-job-000001", persisted_a, 1));
+    h.planner->NotifyCompletion(MakeNotice("job-000001", "action-job-000001", persisted_a, 1));  // 重复
     CHECK(h.planner->mailbox_size() == 1);
     auto first = h.planner->SelectForRequestBoundary();
     REQUIRE(first.size() == 1);
     // 投递中的 job:迟到通知不重复投。
-    h.planner->NotifyCompletion(MakeNotice("job-000001", 1));
+    h.planner->NotifyCompletion(MakeNotice("job-000001", "action-job-000001", persisted_a, 1));
     CHECK(h.planner->pending_native_count() == 0);
     CHECK(h.planner->mailbox_size() == 0);
 }
 
 TEST_CASE("mailbox:不跨目标分支——他分支的通知不投") {
     PlannerHarness h("branch");
-    CompletionNotice foreign = MakeNotice("job-000001", 1);
+    const std::string persisted_a = EmitPersistedAction(*h.writer, "action-job-000001");
+    CompletionNotice foreign = MakeNotice("job-000001", "action-job-000001", persisted_a, 1);
     foreign.branch = "20260916-999999-OTHER";
     h.planner->NotifyCompletion(std::move(foreign));
     CHECK(h.planner->SelectForRequestBoundary().empty());
@@ -174,7 +202,8 @@ TEST_CASE("mailbox:不跨目标分支——他分支的通知不投") {
 
 TEST_CASE("投递账:prepared → acknowledged(evidenceRef 指账上事件)") {
     PlannerHarness h("delivery");
-    h.planner->NotifyCompletion(MakeNotice("job-000001", 1));
+    const std::string persisted_a = EmitPersistedAction(*h.writer, "action-job-000001");
+    h.planner->NotifyCompletion(MakeNotice("job-000001", "action-job-000001", persisted_a, 1));
     auto selected = h.planner->SelectForRequestBoundary();
     REQUIRE(selected.size() == 1);
 
@@ -204,14 +233,18 @@ TEST_CASE("投递账:回执丢失落 uncertain;失败路同款") {
         return std::nullopt;  // 没证据不宣称接纳
     };
     runtime::ResultDeliveryPlannerImpl planner_no_evidence(std::move(hooks));
-    planner_no_evidence.NotifyCompletion(MakeNotice("job-000001", 1));
+    const std::string persisted_a = EmitPersistedAction(*h.writer, "action-job-000001");
+    planner_no_evidence.NotifyCompletion(
+        MakeNotice("job-000001", "action-job-000001", persisted_a, 1));
     REQUIRE(planner_no_evidence.SelectForRequestBoundary().size() == 1);
     planner_no_evidence.NoteRequestPrepared("request-000002");
     planner_no_evidence.NoteResponseOutcome("request-000002", true);
     v3::V3Ledger ledger = h.Read();
     CHECK(StateOf(ledger, "delivery-job-000001-v1") == "uncertain");
 
-    planner_no_evidence.NotifyCompletion(MakeNotice("job-000002", 2, "call_b"));
+    const std::string persisted_b = EmitPersistedAction(*h.writer, "action-job-000002");
+    planner_no_evidence.NotifyCompletion(
+        MakeNotice("job-000002", "action-job-000002", persisted_b, 2, "call_b"));
     REQUIRE(planner_no_evidence.SelectForRequestBoundary().size() == 1);
     planner_no_evidence.NoteRequestPrepared("request-000003");
     planner_no_evidence.NoteResponseOutcome("request-000003", false);
@@ -286,6 +319,7 @@ TEST_CASE("恢复:终态已落未配的 native 欠账,重建 mailbox 补投递�
                                                                 {"async", true}})}});
     emit(v3::EventKindV3::ToolJobDispatched, std::nullopt,
          nlohmann::json{{"tool_call_id", action},
+                        {"attempt", 2},
                         {"jobId", "job-000001"},
                         {"ownerEpoch", "epoch-1"}});
     emit(v3::EventKindV3::ToolExecutionStarted, v3::OpStatus::Running,
