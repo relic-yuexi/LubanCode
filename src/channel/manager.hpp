@@ -211,6 +211,9 @@ public:
         // 取全账(同样的输入同样的决策,不另存第二份真账)。这就是本轮
         // 执行的冻结策略版本——权限撤销后重验不过的输入到不了这里。
         RouteDecision route;
+        // Q7 菜单/面板回调的命令绑定(账号配置的快照,随件冻结):泵侧
+        // 识别菜单填入文本后走宿主分派。不命中命令表的输入不受影响。
+        std::vector<ChannelCommandBindingUserConfig> commands;
     };
     std::optional<WorkItem> TakeNextWork(const std::string& channel_id,
                                          const std::string& account_id);
@@ -335,6 +338,10 @@ public:
         std::int64_t expires_at_ms = 0;
     };
     std::vector<PendingPairingView> PendingPairings(const std::string& channel_id,
+                                                    const std::string& account_id) const;
+    // 已批准的配对 sender 清单(Q7:c2c specific 面板按已配对用户关联/
+    // 撤销时移除的目标账)。查无账号给空表。
+    std::vector<std::string> ApprovedPairingSenders(const std::string& channel_id,
                                                     const std::string& account_id) const;
     // 批准/拒绝。成功返回被批准/拒绝的 sender id;code 不认、过期、已处理
     // 报错(stable reason:not_found/expired/already_finalized)。

@@ -301,4 +301,117 @@ TEST_CASE("qq_wiring: Q1b 配对控制面——命令进来,回执出去,账上�
     CHECK(wiring->Close(5'000));
 }
 
+// ---------------------------------------------------------------------------
+// Q7 菜单/面板发布装配:显式启用才挂发布器;首拍 TickOnce 同步走脚本 HTTP
+// (token/网关地址/菜单/面板同一路 seam,按 URL 分路);未启用账号零装配。
+// ---------------------------------------------------------------------------
+TEST_CASE("qq_wiring: Q7 菜单显式启用才挂发布器;首拍同步落状态文件") {
+    const auto root = MakeTempRoot("menu-publish");
+
+    // 按 URL 分路的脚本 HTTP:token/网关地址给适配器,菜单/面板给发布器。
+    struct ScriptedRoutes {
+        mutable std::mutex mutex;
+        int menu_get_count = 0;
+        int menu_put_count = 0;
+        int panels_get_count = 0;
+        int panels_post_count = 0;
+        channel::qq::QqHttpFunc Func() {
+            return [this](const channel::qq::QqHttpRequest& request)
+                -> std::expected<channel::qq::QqHttpResponse, std::string> {
+                const std::lock_guard<std::mutex> lock(mutex);
+                const std::string& url = request.url;
+                if (url.find("getAppAccessToken") != std::string::npos) {
+                    return channel::qq::QqHttpResponse{
+                        200, R"({"access_token":"T1","expires_in":7200})"};
+                }
+                if (url.find("/gateway") != std::string::npos) {
+                    return channel::qq::QqHttpResponse{200, R"({"url":"wss://x"})"};
+                }
+                if (url.rfind("/v2/menu") == 0 || url.find("/v2/menu") != std::string::npos) {
+                    if (request.method == "PUT") {
+                        ++menu_put_count;
+                        return channel::qq::QqHttpResponse{200, R"({"version":5})"};
+                    }
+                    ++menu_get_count;
+                    return channel::qq::QqHttpResponse{200, R"({"version":0})"};
+                }
+                if (url.find("/v2/panels") != std::string::npos) {
+                    if (request.method == "POST") {
+                        ++panels_post_count;
+                        return channel::qq::QqHttpResponse{200, R"({"panel_id":"p_w1"})"};
+                    }
+                    ++panels_get_count;
+                    return channel::qq::QqHttpResponse{
+                        200, R"({"records":[],"next_cursor":"","is_end":true})"};
+                }
+                return channel::qq::QqHttpResponse{500, "{}"};
+            };
+        }
+    };
+    auto routes = std::make_shared<ScriptedRoutes>();
+
+    config::Config config;
+    channel::ChannelUserConfig qq;
+    qq.enabled = true;
+    channel::ChannelAccountUserConfig publisher_account = channel::MakeQqTemplateAccount();
+    publisher_account.enabled = true;
+    publisher_account.secret = std::string("inline-secret");
+    channel::ChannelMenuUserConfig menu;
+    menu.publish = true;
+    channel::ChannelMenuItemUserConfig help;
+    help.name = "帮助";
+    help.type = "send_message";
+    help.send_message = "/帮助";
+    menu.items.push_back(help);
+    channel::ChannelPanelUserConfig panel;
+    panel.enabled = true;
+    panel.scope = "c2c";
+    panel.target_type = "all";
+    channel::ChannelPanelItemUserConfig item;
+    item.name = "查看任务";
+    item.desc = "查看我的定时任务";
+    item.type = "command";
+    panel.items.push_back(item);
+    menu.panel = panel;
+    publisher_account.menu = menu;
+    qq.accounts["main"] = publisher_account;
+    // 第二只账号不写 menu:不挂发布器,零行为变化。
+    channel::ChannelAccountUserConfig plain_account = channel::MakeQqTemplateAccount();
+    plain_account.enabled = true;
+    plain_account.secret = std::string("inline-secret");
+    qq.accounts["backup"] = plain_account;
+    config.channels["qqbot"] = qq;
+
+    auto options = MakeOptions(&config, root);
+    options.test_http = routes->Func();
+    auto wiring = ChannelGatewayWiring::Create(std::move(options));
+    REQUIRE(wiring != nullptr);
+    CHECK(wiring->adapter_count() == 2);
+    CHECK(wiring->menu_publisher_count() == 1);  // 只挂显式启用那只
+
+    // 首拍:TickOnce 里同步(GET 菜单→PUT;GET panels 空→POST 创建)。
+    REQUIRE(wiring->TickOnce(platform::WallClockNowMs()));
+    CHECK(routes->menu_get_count >= 1);
+    CHECK(routes->menu_put_count == 1);
+    CHECK(routes->panels_post_count == 1);
+    // 状态文件落位(重启不重复创建的账)。
+    std::ifstream state_stream(root / "qqbot" / "main" / "menu-panel.json",
+                               std::ios::binary);
+    REQUIRE(state_stream.is_open());
+    std::string state_bytes;
+    {
+        std::string line;
+        while (std::getline(state_stream, line)) {
+            state_bytes += line;
+        }
+    }
+    const nlohmann::json state =
+        nlohmann::json::parse(state_bytes, nullptr, /*allow_exceptions=*/false);
+    REQUIRE_FALSE(state.is_discarded());
+    CHECK(state.at("menu").at("version") == 5);
+    CHECK(state.at("panel").at("panel_id") == "p_w1");
+
+    CHECK(wiring->Close(5'000));
+}
+
 }  // namespace lubancode::app

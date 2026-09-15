@@ -382,6 +382,35 @@ std::optional<C2cEventMapping> MapC2cMessageCreate(const nlohmann::json& d,
     text_part.text = *content;
     event.parts.push_back(std::move(text_part));
 
+    // Q7 命令前缀识别(message-contracts.md §1 hints.command 的落位):正文
+    // 去首尾空白后以 "/" 起头时,解出命令名与参数——菜单 send_message / 面板
+    // command 填入的文本(如 "/help")与用户手敲指令同走这一位。宿主侧命令
+    // 表匹配认整串原文(中文命令不带斜杠也命中),这里只是识别位不是分派。
+    {
+        std::string trimmed = *content;
+        const auto is_space = [](char c) {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        };
+        std::size_t begin = 0;
+        std::size_t end = trimmed.size();
+        while (begin < end && is_space(trimmed[begin])) ++begin;
+        while (end > begin && is_space(trimmed[end - 1])) --end;
+        trimmed = trimmed.substr(begin, end - begin);
+        if (trimmed.size() > 1 && trimmed[0] == '/') {
+            std::size_t split = 1;
+            while (split < trimmed.size() && !is_space(trimmed[split])) ++split;
+            const std::string name = trimmed.substr(1, split - 1);
+            if (!name.empty() && name.size() <= 64) {
+                event.hints.command = name;
+                std::string args = trimmed.substr(split);
+                const std::size_t args_begin = args.find_first_not_of(" \t\r\n");
+                if (args_begin != std::string::npos) {
+                    event.hints.command_args = args.substr(args_begin);
+                }
+            }
+        }
+    }
+
     std::ostringstream warnings;
     if (message_type == 3) {
         warnings << "ark_card_not_expanded;";  // 卡片按摘要文本入账,结构不进模型

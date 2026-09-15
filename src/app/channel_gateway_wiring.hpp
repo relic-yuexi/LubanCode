@@ -29,6 +29,7 @@
 #include "channel/manager.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
+#include "channel/qq/qq_menu.hpp"
 #include "gateway/work_pump.hpp"
 
 namespace lubancode::config {
@@ -98,6 +99,9 @@ public:
     // 渠道 work 泵(Q2)要的可变口:TakeNextWork/SendReply/结算面。
     channel::ChannelManager* mutable_manager() { return manager_.get(); }
     std::size_t adapter_count() const { return adapters_.size(); }
+    // Q7:显式启用菜单/面板发布的账号数(观测/测试;同步结果看各账号
+    // 状态文件 <state_root>/<ch>/<acct>/menu-panel.json 与 stderr 提示)。
+    std::size_t menu_publisher_count() const { return menu_publishers_.size(); }
 
     // 挂渠道 work 泵(Q2:V3 与 outbox 总装)。TickOnce 在桥泵之后推进它
     //(先收字节回执,再驱动一轮业务);StopAccepting/Close/owner_epoch
@@ -110,6 +114,21 @@ private:
     // Q1b 控制面:轮询 pairing 命令 → 应用到 manager(先按配对码认,认
     // 不出再按 sender 身份认)→ 写回执文件。
     void ConsumePairingCommands();
+    // Q7 菜单/面板发布:显式启用的账号首拍同步 + 配对增删后的重同步;
+    // 限速/失败按报告里的 retry_at 退避。HTTP 在 tick 里做(装配不碰网络)。
+    void PumpMenuSync(std::int64_t now_ms);
+
+    // Q7:显式启用发布的账号(菜单/面板)。publisher 持 http seam + 适配器
+    // 的 token manager(单飞共用)。
+    struct MenuPublisherEntry {
+        std::string channel_id;
+        std::string account_id;
+        channel::ChannelMenuUserConfig menu;  // 期望配置(publish/panel.enabled 已含)
+        std::unique_ptr<channel::qq::QqMenuPanelPublisher> publisher;
+        bool pending = true;          // 首拍待同步
+        std::int64_t retry_at_ms = 0;  // 失败/限速后的下一次可试
+    };
+    std::vector<MenuPublisherEntry> menu_publishers_;
 
     std::unique_ptr<channel::ChannelManager> manager_;
     std::vector<std::unique_ptr<channel::ChannelBridgeTransport>> adapters_;

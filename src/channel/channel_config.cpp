@@ -6,6 +6,20 @@
 
 namespace lubancode::channel {
 
+std::size_t CountPlatformChars(std::string_view text) {
+    // 官方口径:一个中文汉字算 2 字符。按 UTF-8 码点起始字节走——ASCII
+    // 码点 1,其余码点 2(与官方"最多 10 个字符,一个中文汉字算 2 个字符"
+    // 同尺)。坏字节按字节计,不静默吞。
+    std::size_t platform = 0;
+    for (const char byte : text) {
+        const auto raw = static_cast<unsigned char>(byte);
+        if ((raw & 0xC0) != 0x80) {  // 码点起始字节(ASCII 或多字节首字节)
+            platform += (raw & 0x80) == 0 ? 1 : 2;
+        }
+    }
+    return platform;
+}
+
 const char* DmPolicyName(DmPolicy policy) {
     switch (policy) {
         case DmPolicy::Pairing: return "pairing";
@@ -182,6 +196,445 @@ bool ParseReplyConfig(const nlohmann::json& value, const std::string& path,
     return true;
 }
 
+// ---- Q7 菜单/面板/命令绑定解析(configuration.md §7;官方形状见 hpp 注) ----
+
+// 平台字符长度上限校验(汉字算 2,见 CountPlatformChars)。
+bool CheckPlatformChars(const std::string& text, std::size_t limit, const std::string& path,
+                        const std::string& file_path_for_error, std::string* error) {
+    if (CountPlatformChars(text) > limit) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 超长(平台字符上限 " +
+                 std::to_string(limit) + ",中文汉字算 2): \"" + text + "\"";
+        return false;
+    }
+    return true;
+}
+
+// link 型字段:非空且必须 https:// 开头(官方 40030008 预拦)。
+bool CheckLinkUrl(const std::string& link, const std::string& path,
+                  const std::string& file_path_for_error, std::string* error) {
+    if (link.rfind("https://", 0) != 0) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须以 https:// 开头";
+        return false;
+    }
+    return true;
+}
+
+bool ParseMenuSubItem(const nlohmann::json& value, const std::string& path,
+                      const std::string& file_path_for_error, ChannelMenuSubItemUserConfig* out,
+                      std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "name" || key == "type" || key == "send_message" || key == "link") {
+            if (!it.value().is_string()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                         " 必须是字符串";
+                return false;
+            }
+            if (key == "name") {
+                out->name = it.value().get<std::string>();
+            } else if (key == "type") {
+                out->type = it.value().get<std::string>();
+            } else if (key == "send_message") {
+                out->send_message = it.value().get<std::string>();
+            } else {
+                out->link = it.value().get<std::string>();
+            }
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                     " 是认不得的字段(菜单子项只收 name/type/send_message/link)";
+            return false;
+        }
+    }
+    if (out->name.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".name 不能为空";
+        return false;
+    }
+    if (!CheckPlatformChars(out->name, 14, path + ".name", file_path_for_error, error)) {
+        return false;
+    }
+    if (out->type != "send_message" && out->type != "link") {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".type 只认 send_message/link(二级菜单不嵌套)";
+        return false;
+    }
+    if (out->type == "send_message" && out->send_message.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".send_message 缺失(type=send_message 点击填入输入框的文本)";
+        return false;
+    }
+    if (out->type == "link" && !CheckLinkUrl(out->link, path + ".link", file_path_for_error,
+                                             error)) {
+        return false;
+    }
+    return true;
+}
+
+bool ParseMenuItem(const nlohmann::json& value, const std::string& path,
+                   const std::string& file_path_for_error, ChannelMenuItemUserConfig* out,
+                   std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "name" || key == "type" || key == "send_message" || key == "link" ||
+            key == "switch_id") {
+            if (!it.value().is_string()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                         " 必须是字符串";
+                return false;
+            }
+            if (key == "name") {
+                out->name = it.value().get<std::string>();
+            } else if (key == "type") {
+                out->type = it.value().get<std::string>();
+            } else if (key == "send_message") {
+                out->send_message = it.value().get<std::string>();
+            } else if (key == "link") {
+                out->link = it.value().get<std::string>();
+            } else {
+                out->switch_id = it.value().get<std::string>();
+            }
+        } else if (key == "switch_default") {
+            if (!it.value().is_boolean()) {
+                *error =
+                    "配置文件 " + file_path_for_error + " 里的 " + path + ".switch_default 必须是布尔";
+                return false;
+            }
+            out->switch_default = it.value().get<bool>();
+        } else if (key == "sub_menu_items") {
+            if (!it.value().is_array()) {
+                *error =
+                    "配置文件 " + file_path_for_error + " 里的 " + path + ".sub_menu_items 必须是数组";
+                return false;
+            }
+            std::size_t index = 0;
+            for (const auto& sub : it.value()) {
+                ChannelMenuSubItemUserConfig sub_item;
+                if (!ParseMenuSubItem(sub, path + ".sub_menu_items[" + std::to_string(index) + "]",
+                                      file_path_for_error, &sub_item, error)) {
+                    return false;
+                }
+                out->sub_menu_items.push_back(std::move(sub_item));
+                ++index;
+            }
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                     " 是认不得的字段(菜单项只收 name/type/send_message/link/switch_id/"
+                     "switch_default/sub_menu_items)";
+            return false;
+        }
+    }
+    if (out->name.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".name 不能为空";
+        return false;
+    }
+    if (!CheckPlatformChars(out->name, 10, path + ".name", file_path_for_error, error)) {
+        return false;
+    }
+    if (out->type != "switch" && out->type != "send_message" && out->type != "link" &&
+        out->type != "menu") {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".type 只认 switch/send_message/link/menu";
+        return false;
+    }
+    if (out->sub_menu_items.size() > 5) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".sub_menu_items 最多 5 项(官方限制)";
+        return false;
+    }
+    if (out->type == "menu") {
+        if (out->sub_menu_items.empty()) {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                     " 是 type=menu 折叠项但没写 sub_menu_items";
+            return false;
+        }
+    } else if (!out->sub_menu_items.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".sub_menu_items 仅 type=menu 时有效";
+        return false;
+    }
+    if (out->type == "send_message" && out->send_message.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".send_message 缺失(type=send_message 点击填入输入框的文本)";
+        return false;
+    }
+    if (out->type == "link" && !CheckLinkUrl(out->link, path + ".link", file_path_for_error,
+                                             error)) {
+        return false;
+    }
+    if (out->type == "switch" && out->switch_id.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".switch_id 缺失(开关标识只承载用户偏好,不改授权)";
+        return false;
+    }
+    return true;
+}
+
+bool ParsePanelItem(const nlohmann::json& value, const std::string& path,
+                    const std::string& file_path_for_error, ChannelPanelItemUserConfig* out,
+                    std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "name" || key == "desc" || key == "type" || key == "link") {
+            if (!it.value().is_string()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                         " 必须是字符串";
+                return false;
+            }
+            if (key == "name") {
+                out->name = it.value().get<std::string>();
+            } else if (key == "desc") {
+                out->desc = it.value().get<std::string>();
+            } else if (key == "type") {
+                out->type = it.value().get<std::string>();
+            } else {
+                out->link = it.value().get<std::string>();
+            }
+        } else if (key == "only_admin") {
+            if (!it.value().is_boolean()) {
+                *error =
+                    "配置文件 " + file_path_for_error + " 里的 " + path + ".only_admin 必须是布尔";
+                return false;
+            }
+            out->only_admin = it.value().get<bool>();
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                     " 是认不得的字段(面板元素只收 name/desc/type/only_admin/link)";
+            return false;
+        }
+    }
+    if (out->name.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".name 不能为空";
+        return false;
+    }
+    if (!CheckPlatformChars(out->name, 14, path + ".name", file_path_for_error, error)) {
+        return false;
+    }
+    if (!CheckPlatformChars(out->desc, 30, path + ".desc", file_path_for_error, error)) {
+        return false;
+    }
+    if (out->type != "command" && out->type != "link") {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".type 只认 command/link";
+        return false;
+    }
+    if (out->type == "link" && !CheckLinkUrl(out->link, path + ".link", file_path_for_error,
+                                             error)) {
+        return false;
+    }
+    return true;
+}
+
+bool ParsePanelConfig(const nlohmann::json& value, const std::string& path,
+                      const std::string& file_path_for_error, ChannelPanelUserConfig* out,
+                      std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "enabled") {
+            if (!it.value().is_boolean()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".enabled 必须是布尔";
+                return false;
+            }
+            out->enabled = it.value().get<bool>();
+        } else if (key == "scope" || key == "target_type" || key == "remark") {
+            if (!it.value().is_string()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                         " 必须是字符串";
+                return false;
+            }
+            if (key == "scope") {
+                out->scope = it.value().get<std::string>();
+            } else if (key == "target_type") {
+                out->target_type = it.value().get<std::string>();
+            } else {
+                out->remark = it.value().get<std::string>();
+            }
+        } else if (key == "items") {
+            if (!it.value().is_array()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".items 必须是数组";
+                return false;
+            }
+            std::size_t index = 0;
+            for (const auto& item : it.value()) {
+                ChannelPanelItemUserConfig panel_item;
+                if (!ParsePanelItem(item, path + ".items[" + std::to_string(index) + "]",
+                                    file_path_for_error, &panel_item, error)) {
+                    return false;
+                }
+                out->items.push_back(std::move(panel_item));
+                ++index;
+            }
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                     " 是认不得的字段(面板段只收 enabled/scope/target_type/remark/items)";
+            return false;
+        }
+    }
+    if (out->scope != "c2c") {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".scope 首版只认 c2c(QQ 单聊;group/channel/dm 后续批)";
+        return false;
+    }
+    if (!out->target_type.empty() && out->target_type != "all" && out->target_type != "specific") {
+        *error =
+            "配置文件 " + file_path_for_error + " 里的 " + path + ".target_type 只认 all/specific";
+        return false;
+    }
+    if (out->items.size() > 20) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".items 最多 20 项(官方限制)";
+        return false;
+    }
+    if (!CheckPlatformChars(out->remark, 200, path + ".remark", file_path_for_error, error)) {
+        return false;  // 发布时还要拼所有权前缀,给前缀留余量
+    }
+    if (out->enabled && out->items.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 " 启用发布但 items 为空(空面板没有发布意义)";
+        return false;
+    }
+    return true;
+}
+
+bool ParseMenuConfig(const nlohmann::json& value, const std::string& path,
+                     const std::string& file_path_for_error, ChannelMenuUserConfig* out,
+                     std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "publish") {
+            if (!it.value().is_boolean()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".publish 必须是布尔";
+                return false;
+            }
+            out->publish = it.value().get<bool>();
+        } else if (key == "items") {
+            if (!it.value().is_array()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".items 必须是数组";
+                return false;
+            }
+            std::size_t index = 0;
+            for (const auto& item : it.value()) {
+                ChannelMenuItemUserConfig menu_item;
+                if (!ParseMenuItem(item, path + ".items[" + std::to_string(index) + "]",
+                                   file_path_for_error, &menu_item, error)) {
+                    return false;
+                }
+                out->items.push_back(std::move(menu_item));
+                ++index;
+            }
+        } else if (key == "panel") {
+            ChannelPanelUserConfig panel;
+            if (!ParsePanelConfig(it.value(), path + ".panel", file_path_for_error, &panel,
+                                  error)) {
+                return false;
+            }
+            out->panel = std::move(panel);
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                     " 是认不得的字段(菜单段只收 publish/items/panel)";
+            return false;
+        }
+    }
+    if (out->items.size() > 10) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".items 最多 10 项(官方限制)";
+        return false;
+    }
+    if (out->publish && out->items.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 " 启用发布但 items 为空(想清空菜单在开放平台操作,不走配置)";
+        return false;
+    }
+    return true;
+}
+
+bool ParseCommandBinding(const nlohmann::json& value, const std::string& path,
+                         const std::string& file_path_for_error,
+                         ChannelCommandBindingUserConfig* out, std::string* error) {
+    if (!value.is_object()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
+        return false;
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "match" || key == "action" || key == "prompt") {
+            if (!it.value().is_string()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                         " 必须是字符串";
+                return false;
+            }
+            if (key == "match") {
+                out->match = it.value().get<std::string>();
+            } else if (key == "action") {
+                out->action = it.value().get<std::string>();
+            } else {
+                out->prompt = it.value().get<std::string>();
+            }
+        } else if (key == "require_tools") {
+            if (!ParseStringArray(it.value(), path + ".require_tools", file_path_for_error,
+                                  &out->require_tools, error)) {
+                return false;
+            }
+        } else {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
+                     " 是认不得的字段(命令绑定只收 match/action/prompt/require_tools)";
+            return false;
+        }
+    }
+    if (out->match.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".match 不能为空";
+        return false;
+    }
+    if (CountPlatformChars(out->match) > 64) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".match 超长(64 字符)";
+        return false;
+    }
+    if (out->action != "help" && out->action != "file_help" && out->action != "list_reminders" &&
+        out->action != "prompt") {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".action 只认 help/file_help/list_reminders/prompt";
+        return false;
+    }
+    if (out->action == "prompt" && out->prompt.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".prompt 缺失(action=prompt 的预设输入)";
+        return false;
+    }
+    if (out->action != "prompt" && !out->prompt.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".prompt 只在 action=prompt 时有效";
+        return false;
+    }
+    if (out->action != "prompt" && !out->require_tools.empty()) {
+        *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                 ".require_tools 只在 action=prompt 时有效(控制命令不经模型,无工具面)";
+        return false;
+    }
+    for (const auto& tool : out->require_tools) {
+        if (tool.empty()) {
+            *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                     ".require_tools 元素不能为空串";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ParseAccountConfig(const std::string& account_id, const nlohmann::json& value,
                         const std::string& channel_path, const std::string& file_path_for_error,
                         ChannelAccountUserConfig* out, std::string* error) {
@@ -302,12 +755,46 @@ bool ParseAccountConfig(const std::string& account_id, const nlohmann::json& val
             if (!ParseToolsPolicy(field, path + ".tools", file_path_for_error, &out->tools, error)) {
                 return false;
             }
+        } else if (key == "menu") {
+            ChannelMenuUserConfig menu;
+            if (!ParseMenuConfig(field, path + ".menu", file_path_for_error, &menu, error)) {
+                return false;
+            }
+            out->menu = std::move(menu);
+        } else if (key == "commands") {
+            if (!field.is_array()) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                         ".commands 必须是数组";
+                return false;
+            }
+            std::size_t index = 0;
+            for (const auto& item : field) {
+                ChannelCommandBindingUserConfig binding;
+                if (!ParseCommandBinding(item,
+                                         path + ".commands[" + std::to_string(index) + "]",
+                                         file_path_for_error, &binding, error)) {
+                    return false;
+                }
+                out->commands.push_back(std::move(binding));
+                ++index;
+            }
         } else {
             *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
                      " 是认不得的字段(账号段收 enabled/transport/app_id/secret_env/"
                      "secret_file/secret/dm_policy/allow_from/group_policy/group_allow_from/"
-                     "require_mention/allow_bots/agent/reply/group_scope/tools)";
+                     "require_mention/allow_bots/agent/reply/group_scope/tools/menu/commands)";
             return false;
+        }
+    }
+    // 命令绑定的 match 不许重复(重复 = 同一输入两条分派,按文件次序碰运气
+    // 的老毛病不犯)。
+    for (std::size_t i = 0; i < out->commands.size(); ++i) {
+        for (std::size_t j = i + 1; j < out->commands.size(); ++j) {
+            if (out->commands[i].match == out->commands[j].match) {
+                *error = "配置文件 " + file_path_for_error + " 里的 " + path +
+                         ".commands 有重复的 match(\"" + out->commands[i].match + "\")";
+                return false;
+            }
         }
     }
     return true;

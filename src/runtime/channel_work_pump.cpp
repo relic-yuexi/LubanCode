@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "runtime/turn_ingress.hpp"
+#include "channel/channel_commands.hpp"  // Q7 菜单/面板命令分派
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/channel_session_host.hpp"  // ChannelToolDenialText(Q6 拒绝文案)
@@ -767,6 +768,45 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
         work.route.memory.user_memory || work.route.memory.project_memory,
         &work.route.tools);
 
+    // Q7 菜单/面板回调分派:命中命令表的输入(菜单 send_message / 面板
+    // command 填入、用户发送后的文本)走宿主侧动作——控制命令零模型直答,
+    // 预设输入换正文照常过闸进模型。菜单不扩权:require_tools 逐名过本轮
+    // 冻结策略,名单外就地拒;不命中命令表的输入零变化。
+    std::optional<std::string> preset_prompt;
+    if (const auto command =
+            channel::MatchChannelCommand(work.commands, PromptFromIngress(ingress))) {
+        if (command->action != "prompt") {
+            std::string reply;
+            if (command->action == "help") {
+                reply = channel::MakeChannelHelpText(work.commands);
+            } else if (command->action == "file_help") {
+                reply = channel::MakeChannelFileHelpText();
+            } else {  // list_reminders(automation 域不在 → 稳定说明,不装死)
+                if (options_.automation_bridge == nullptr ||
+                    options_.automation_bridge->store() == nullptr) {
+                    reply = channel::MakeMenuCommandUnavailableText();
+                } else {
+                    const auto outcome = options_.automation_bridge->ListReminders();
+                    reply = outcome.ok
+                                ? channel::FormatReminderListText(outcome.payload, now_ms)
+                                : channel::MakeMenuCommandUnavailableText();
+                }
+            }
+            return ReplyMenuCommand(channel_id, account_id, work, reply, now_ms);
+        }
+        std::vector<std::string> missing_tools;
+        for (const auto& tool : command->require_tools) {
+            if (!work.route.tools.Allows(tool)) {
+                missing_tools.push_back(tool);
+            }
+        }
+        if (!missing_tools.empty()) {
+            return ReplyMenuCommand(channel_id, account_id, work,
+                                    channel::MakeMenuCommandDeniedText(missing_tools), now_ms);
+        }
+        preset_prompt = command->prompt;  // 换输入,走完整模型轮(逐轮闸照旧)
+    }
+
     HeadlessExecutor::ChannelTurnRequest request;
     request.session_key = work.route.session_key;
     const auto stored = books->session_map.Find(work.route.session_key,
@@ -774,7 +814,7 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     if (stored.has_value()) {
         request.stored_session_id = *stored;
     }
-    request.prompt = PromptFromIngress(ingress);
+    request.prompt = preset_prompt.has_value() ? *preset_prompt : PromptFromIngress(ingress);
     // Q4 附件接纳(准入已过、执行前):下载落仓 + 有界预览行并进 prompt。
     // 失败附件给稳定说明,不假装读过文件;不拦正文轮。
     if (const std::string media_prompt = IngestAttachmentsPrompt(work); !media_prompt.empty()) {
@@ -872,6 +912,33 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
             suppress_delivery_ = true;
             return true;
         }
+    }
+    return true;
+}
+
+bool ChannelWorkPump::ReplyMenuCommand(const std::string& channel_id,
+                                       const std::string& account_id,
+                                       const channel::ChannelManager::WorkItem& work,
+                                       const std::string& reply_text, std::int64_t now_ms) {
+    // 直答路径:零模型。回复沿 outbox 渠道段(selection 幂等),source_ref
+    // 用 ingress 定式——ReconcileDeliveredSources 照常把这件 ingress 推到
+    // delivered/delivery_failed(与正文路同一条投递结算链)。
+    gateway::DurableReplyOutbox::ChannelTarget target;
+    target.channel_id = channel_id;
+    target.account_id = account_id;
+    target.conversation_id = work.conversation_id;
+    target.reply_to_message_id = work.event.message_id;
+    target.source_ref = "ingress:" + channel_id + ":" + account_id + ":" +
+                        std::to_string(work.sid);
+    const std::string selection_id =
+        "menucmd:" + channel_id + ":" + account_id + ":" + std::to_string(work.sid);
+    const auto enqueued =
+        options_.outbox->EnqueueChannel(selection_id, reply_text, /*session_id=*/std::string(),
+                                        /*turn_id=*/std::string(), target, now_ms);
+    // 执行侧结算:Running → Replied(投递态另算;与正文路同款幂等容忍)。
+    (void)options_.manager->SettleIngressReplied(channel_id, account_id, work.sid);
+    if (!enqueued.accepted && !enqueued.duplicate) {
+        return false;  // outbox 账写不进:停泵
     }
     return true;
 }

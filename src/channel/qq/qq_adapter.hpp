@@ -100,6 +100,9 @@ public:
     // 平台连接状态快照(§三):线程存活/connected/阶段/最近失败/重试账。
     // 脱敏口径:字段全部来自 GatewayEvent 的稳定账,不碰凭据。
     ConnectionSnapshot ConnectionState() const;
+    // token 管理器的进程内借用(Q7 菜单/面板发布器共用——单飞刷新不重复
+    // 取 token)。借用方不得另开刷新路。
+    QqTokenManager* token_manager() { return &token_manager_; }
 
 private:
     // Bridge 帧分派(宿主锁内上下文)。

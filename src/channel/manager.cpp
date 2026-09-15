@@ -917,6 +917,7 @@ std::optional<ChannelManager::WorkItem> ChannelManager::TakeNextWork(
         work.conversation_id = item->conversation_id;
         work.sender_id = item->sender_id;
         work.event = record->event;
+        work.commands = entry->config.commands;  // Q7 命令绑定快照(随件冻结)
         // 路由全账现跑(纯函数:与准入时同一只 RouteChannelEvent,同样的
         // 输入同样的决策)。
         work.route = RouteInboundLocked(*entry, work.event);
@@ -943,6 +944,23 @@ std::vector<ChannelManager::PendingPairingView> ChannelManager::PendingPairings(
         view.sender_id = pending.sender_id;
         view.expires_at_ms = pending.expires_at_ms;
         out.push_back(std::move(view));
+    }
+    return out;
+}
+
+std::vector<std::string> ChannelManager::ApprovedPairingSenders(
+    const std::string& channel_id, const std::string& account_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) return {};
+    std::vector<std::string> out;
+    for (const auto& record : entry->pairing->Records()) {
+        if (record.status != PairingStore::Record::Status::Approved) {
+            continue;
+        }
+        if (std::find(out.begin(), out.end(), record.sender_id) == out.end()) {
+            out.push_back(record.sender_id);
+        }
     }
     return out;
 }
