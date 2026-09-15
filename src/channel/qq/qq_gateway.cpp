@@ -165,9 +165,11 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
         const bool stable = RunOneConnection(stop, &session_invalidated);
         if (session_invalidated) {
             session_id_.clear();  // op9 不可恢复:下一轮重新 Identify
-            options_.on_event(GatewayEvent{GatewayEvent::Kind::SessionInvalidated,
-                                           nlohmann::json::object(), "invalid session",
-                                           last_seq_.load()});
+            GatewayEvent event;
+            event.kind = GatewayEvent::Kind::SessionInvalidated;
+            event.detail = "invalid session";
+            event.seq = last_seq_.load();
+            options_.on_event(event);
         }
         if (stop->load()) {
             break;
@@ -336,14 +338,22 @@ bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
                 return fail(kStageIdentifying, "ready_bad_payload", "READY: " + parse_error);
             }
             session_id_ = ready->session_id;
-            options_.on_event(GatewayEvent{GatewayEvent::Kind::SessionReady,
-                                           nlohmann::json::object(), ready->user_id,
-                                           payload->s});
+            {
+                GatewayEvent event;
+                event.kind = GatewayEvent::Kind::SessionReady;
+                event.detail = ready->user_id;
+                event.seq = payload->s;
+                options_.on_event(event);
+            }
         } else if (payload->t == "RESUMED") {
             resumed = true;
-            options_.on_event(GatewayEvent{GatewayEvent::Kind::SessionResumed,
-                                           nlohmann::json::object(), session_id_,
-                                           payload->s});
+            {
+                GatewayEvent event;
+                event.kind = GatewayEvent::Kind::SessionResumed;
+                event.detail = session_id_;
+                event.seq = payload->s;
+                options_.on_event(event);
+            }
         } else {
             // 鉴权窗内来了业务事件(网关通常先回 READY 才推,但不赌):
             // 按序记账并照常派发,不静默吞。

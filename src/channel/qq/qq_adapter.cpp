@@ -439,18 +439,24 @@ bool QqBotAdapter::StartGatewayLocked() {
     // GatewayConnectError(阶段 + 稳定码 + 脱敏 detail)。
     gateway_options.gateway_url_provider =
         [this]() -> std::expected<std::string, GatewayConnectError> {
-        HandleGatewayEvent(GatewayEvent{GatewayEvent::Kind::StageChanged,
-                                        nlohmann::json::object(), std::string(), -1,
-                                        kStageFetchingToken});
+        {
+            GatewayEvent event;
+            event.kind = GatewayEvent::Kind::StageChanged;
+            event.stage = kStageFetchingToken;
+            HandleGatewayEvent(event);
+        }
         const auto token = token_manager_.GetValidToken();
         if (!token.has_value()) {
             return std::unexpected(GatewayConnectError{
                 kStageFetchingToken, TokenErrorCode(token.error().kind),
                 "token: " + token.error().detail});
         }
-        HandleGatewayEvent(GatewayEvent{GatewayEvent::Kind::StageChanged,
-                                        nlohmann::json::object(), std::string(), -1,
-                                        kStageFetchingGatewayUrl});
+        {
+            GatewayEvent event;
+            event.kind = GatewayEvent::Kind::StageChanged;
+            event.stage = kStageFetchingGatewayUrl;
+            HandleGatewayEvent(event);
+        }
         return FetchGatewayUrl(options_.http, options_.api_base, *token);
     };
     gateway_options.token_provider =
