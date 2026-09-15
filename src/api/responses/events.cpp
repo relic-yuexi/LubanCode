@@ -62,6 +62,11 @@ std::optional<StreamEvent> HandleOutputItemAdded(const json& data) {
     event.index = data.value("output_index", 0);
     event.id = it->value("call_id", "");
     event.name = it->value("name", "");
+    // async 位原样保留(异步工具单 §3):responses 回包 function_call 的
+    // async 标记随调用证据进中立层,不在这里解释。
+    if (auto async_it = it->find("async"); async_it != it->end() && async_it->is_boolean()) {
+        event.async_call = async_it->get<bool>();
+    }
     return event;
 }
 
@@ -394,6 +399,12 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
             start.index = index;
             start.id = item.value("call_id", "");
             start.name = item.value("name", "");
+            // async 位原样保留(异步工具单 §2/§3:OpenAI async tool calling
+            // 的回包调用携带 async)。中立层只存不解释;能力 unknown 时宿主
+            // 按同步配对,不凭它留悬空调用(单 §4)。
+            if (auto async_it = item.find("async"); async_it != item.end() && async_it->is_boolean()) {
+                start.async_call = async_it->get<bool>();
+            }
             events.push_back(std::move(start));
             const std::string arguments = item.value("arguments", "");
             if (!arguments.empty()) {

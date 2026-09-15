@@ -26,6 +26,7 @@
 #include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:token 估算校准的进程级实例
 #include "config/config.hpp"  // HomeLubancodeDir:P0-1 身份裁决的全局件止步
 #include "runtime/id_authority.hpp"
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:AppServer/Detached 面接线(dormant)
 #include "runtime/session_command_service.hpp"
 #include "runtime/trajectory_history_view.hpp"  // 轨迹 v3 P3:thread/resume|read 的旧史投影(显示层不碰 reader.hpp)
 #include "runtime/tool_trace_hub.hpp"
@@ -1937,6 +1938,23 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                 trajectory_hub->AttachTrajectory(trajectory_bridge.get());
                 trajectory_hub->Install(loop, wiring, thread_id, turn_id);
                 wiring.boundary_recorder = trajectory_bridge.get();
+                // 异步工具 P2(AppServer/Detached 面接线):会话级异步运行时
+                // 挂进 SessionService 的 SessionRuntime(零策略 dormant,行为
+                // 与从前一字不差);每轮钉桥 + 闸门/规划进 wiring。Detached 面
+                // 的 job 跨连接存活由协调器的持久账保证(重启恢复走
+                // RestoreFromLedger,P4 接 resume 调度)。
+                if (runtime::AttachDefaultAsyncToolRuntime(*record->session_service->runtime(),
+                                                           options_.session_wire)) {
+                    runtime::AsyncToolRuntime* async_runtime =
+                        record->session_service->runtime()->async_tool_runtime();
+                    if (async_runtime != nullptr) {
+                        async_runtime->InstallTurnBridge(trajectory_bridge.get());
+                        async_runtime->NoteModelIdentity(options_.session_provider,
+                                                        record->assembly->agent_profile.request.model);
+                        wiring.tool_batch_gate = async_runtime->gate();
+                        wiring.delivery_planner = async_runtime->planner();
+                    }
+                }
                 trajectory_bridge->BeginTurn(turn_id, "external_user");
                 trajectory_bridge->RecordInput(user_message);
             }

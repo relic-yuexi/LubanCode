@@ -31,6 +31,7 @@
 #include <nlohmann/json.hpp>
 
 #include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1:model.request.prepared 的 purpose)
+#include "agent/async_tool_seam.hpp"  // ToolBatchGate/ResultDeliveryPlanner(异步工具 P2 批次闸门与投递规划 seam)
 #include "agent/prompt_manifest.hpp"  // PromptManifest(Token 账本单 A1:request_snapshot_ref 的地基)
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
@@ -459,6 +460,17 @@ struct TurnWiring {
                               const nlohmann::json& frozen_request_snapshot,
                               const runtime::PreRequestBudget& budget)>
         on_pre_request_hooks;
+
+    // ---- 异步工具 P2:批次闸门与请求边界投递规划 -----------------------------
+    // 批次闸门(单 §7):流中 call item 完整的提前档探针 + 完整 assistant
+    // 落账后的协议模式裁决(inline/job_handle/native_deferred)+ 完成信封
+    // 回灌口。空 = 没装(单测/未接线宿主),全部调用走 inline 旧路,行为
+    // 与从前一字不差。不持有,调用方保证存活到本轮收口。
+    ToolBatchGate* tool_batch_gate = nullptr;
+    // 投递规划器(单 §7):请求边界(拼请求前)选已提交结果;prepared
+    // 落稳后记账 delivery.prepared;响应收口写 acknowledged/uncertain。
+    // 空 = 没装,一处不调,行为与从前一字不差。不持有,同上。
+    ResultDeliveryPlanner* delivery_planner = nullptr;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

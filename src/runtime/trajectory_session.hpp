@@ -250,6 +250,30 @@ public:
         wake_stream_id_ = std::move(stream_id);
     }
 
+    // ---- 异步工具 P2:闸门/规划器的账面查询口(v3 模式;v2 返回空) ----
+    // provider call id -> 声明上下文(assistant 已落账后可查;会话共享
+    // 声明册,批次闸门 TakeJobOrder 的 originRef 三件从这取)。
+    struct V3CallOrigin {
+        std::string action_id;
+        std::string message_id;  // 声明消息(assistantMessageRef 锚)
+        std::string turn_id;
+        std::string step_id;
+    };
+    std::optional<V3CallOrigin> V3DeclaredCallOrigin(const std::string& provider_call_id) const;
+    // request_id -> 流式预留的 assistant messageId(提前档调用证据锚;
+    // 流没起账/请求簿没有 → nullopt)。
+    std::optional<std::string> V3ReservedAssistantMessageId(const std::string& request_id) const;
+    // request_id -> 响应证据事件 id(投递 acknowledged 的 evidenceRef 用;
+    // 完整 assistant 成行的请求给 model.response.completed 的事件 id,
+    // 其余 nullopt——没证据不宣称接纳)。
+    std::optional<std::string> V3ResponseEvidenceId(const std::string& request_id) const;
+
+    // 会话共享写者与锁(子代理/旁路装配挂异步运行时用;v2 场 nullptr)。
+    trajectory::v3::V3Writer* v3_writer() const { return v3_writer_; }
+    std::shared_ptr<std::recursive_mutex> v3_shared_mutex() const {
+        return v3_books_ != nullptr ? v3_books_->tool_results_mutex : nullptr;
+    }
+
 private:
     api::Backend* action_summary_backend_ = nullptr;
     ActionSummaryProfile action_summary_profile_;
@@ -772,6 +796,11 @@ public:
 
     // main stream(轮次桥从这只造)。
     trajectory::TrajectoryRecorder* main();
+    // v3 主账写者(v2 场 nullptr)。异步工具 P2 的会话级运行时从这取
+    // 共享写者;互斥锁见 v3_tool_results_mutex。
+    trajectory::v3::V3Writer* v3_main_writer();
+    // 会话共享账的写者互斥锁(异步 P2 共享写者用;v2 场 nullptr)。
+    std::shared_ptr<std::recursive_mutex> v3_tool_results_mutex();
 
     // 主会话一轮的桥(turn_runner 每轮 New 一只,绑 main recorder)。
     std::unique_ptr<TrajectoryTurnBridge> NewTurnBridge(TrajectoryTurnBridge::Identity identity);
@@ -989,7 +1018,7 @@ public:
     // v3_compact_runtime 的全链(compact 全链单),v2 会话照旧走本文件
     // 的 RecordCompact* 老路,一字不动。接线点 1 并进后由开卷装配喂真
     // 写者;当前主树尚无 v3 开卷路,恒 nullptr(分派门在,通路等接线)。
-    trajectory::v3::V3Writer* v3_main_writer();
+    // (v3_main_writer 的正式声明在上方"main stream"段;此处不重复。)
 
     // ---- v3 结果仓统计(V3-REAL-A02:/context 消费) ----
     // v3 会话的工具结果在提交边界由 v3::ResultStore 存盘(artifacts/res-*,

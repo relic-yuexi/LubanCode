@@ -15,6 +15,7 @@
 #include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
 #include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进入口
 #include "platform/wall_clock.hpp"  // trace 与批头事件须共用一枚墙钟
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:llm/agent 节点请求边界消费同一 Planner
 #include "runtime/trajectory_session.hpp"  // node attempt 账(workflow 会话归属统一单)
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
@@ -275,6 +276,8 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     // ToolExecutor 的 trace 上下文同口径)。控制口(确认/钩子)原样走
     // TurnWiring。
     agent::TurnWiring wiring = options_.callbacks;
+    // 异步工具 P2:节点尝试域的异步运行时(接线见下方 trajectory 块)。
+    std::unique_ptr<runtime::AsyncToolRuntime> node_async_runtime;
     // node attempt 账(workflow 会话归属统一单):agent 节点的模型边界与
     // 工具事件落本 attempt 的 node stream(ownership 与子代理同款:声明
     // 才进、无主拒)。桥接管 boundary/trace/results 三口——父会话 sink 不
@@ -308,6 +311,25 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         wiring.configure_action_summary = [node_turn](api::Backend* backend, const runtime::ActionSummaryProfile& profile) {
             node_turn->ConfigureActionSummary(backend, profile);
         };
+        // 异步工具 P2(Workflow llm/agent 节点接线):节点尝试域的异步运行
+        // 时——请求边界消费同一只 ResultDeliveryPlanner(不另造)。寿命随
+        // 本次节点尝试(单 §9 Workflow:依赖节点只在业务结果与 output.commit
+        // 落稳后放行,接到 jobId 不等于节点完成——闸门接单不给节点放行,
+        // 节点收口仍走原有 output.commit 链)。零策略 dormant:workflow 的
+        // 异步工具白名单归后续装配(P3)。
+        if (node_turn->v3_writer() != nullptr) {
+            runtime::AsyncToolRuntime::Hooks async_hooks;
+            async_hooks.writer = node_turn->v3_writer();
+            async_hooks.writer_mutex = node_turn->v3_shared_mutex();
+            runtime::AsyncToolRuntimeOptions async_options;
+            node_async_runtime = runtime::AsyncToolRuntime::Create(std::move(async_hooks),
+                                                                   std::move(async_options));
+            if (node_async_runtime != nullptr) {
+                node_async_runtime->InstallTurnBridge(node_turn);
+                wiring.tool_batch_gate = node_async_runtime->gate();
+                wiring.delivery_planner = node_async_runtime->planner();
+            }
+        }
     }
     // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-----------------------
     // 每枚 agent 节点执行时自起一份已见指纹账(节点跑完即弃,不与兄弟

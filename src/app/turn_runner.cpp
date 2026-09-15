@@ -33,6 +33,7 @@
 #include "config/model_catalog.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:批次闸门/投递规划接线(终端宿主)
 #include "runtime/hook_host_services.hpp"
 #include "runtime/middleware_runtime.hpp"
 #include "runtime/middleware_v3_sink.hpp"
@@ -969,6 +970,16 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // harness 拷贝续跑的每只 Run 都带同一枚,StepUsageRecord.turn_id 跨
     // Run 不裂。Stop 续跑环(TurnHarness)拷的就是这份 wiring,不用另钉。
     wiring.turn_id = canonical_turn_id;
+    // 异步工具 P2:会话级异步运行时接线(终端宿主)。每轮把当前轮桥钉进
+    // 运行时(证据/声明册/回合号查询走它),批次闸门与投递规划进 wiring;
+    // 模型身份随轮刷新(能力快照 basis)。没装(旧装配/没开会话)= 全
+    // inline,行为一字不差。
+    if (ctx.async_tool_runtime != nullptr && turn_trajectory != nullptr) {
+        ctx.async_tool_runtime->InstallTurnBridge(turn_trajectory.get());
+        ctx.async_tool_runtime->NoteModelIdentity(ctx.trajectory_provider, ctx.model_id);
+        wiring.tool_batch_gate = ctx.async_tool_runtime->gate();
+        wiring.delivery_planner = ctx.async_tool_runtime->planner();
+    }
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(

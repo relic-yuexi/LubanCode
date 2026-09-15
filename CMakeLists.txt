@@ -513,6 +513,8 @@ add_library(lubancode_engine STATIC
   # 异步工具单 P1:持久 job 宿主侧服务(队列/租约/单写者完成信封/
   # start-get-wait-cancel 四接口/权鉴/资源锁/配额/取消/账态注入恢复)。
   src/tools/tool_job_coordinator.cpp
+  # 异步工具单 P2:job_handle 模式可见工具族(job_get/job_wait/job_cancel)。
+  src/tools/job_tools.cpp
   src/tools/subagent_isolation.cpp
   src/tools/agent_message_tool.cpp
   # 监督器单 P1-0:agent_watch 模型工具(lineage 鉴权、有界快照与 cv 长等)。
@@ -947,6 +949,12 @@ add_library(lubancode_runtime STATIC
   # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
   # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。
   src/runtime/trajectory_session.cpp
+  # 异步工具单 P2:批次闸门/投递规划/能力闸/会话级总成——AgentLoop 的
+  # 协议模式裁决 seam 实现 + ResultDeliveryPlanner + ProviderToolContract
+  # Validator + AsyncToolRuntime(五宿主接线共用,不各造)。
+  src/runtime/provider_tool_contract.cpp
+  src/runtime/result_delivery_planner.cpp
+  src/runtime/async_tool_runtime.cpp
   # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
   # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
   src/runtime/session_soul.cpp

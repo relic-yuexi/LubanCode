@@ -150,6 +150,7 @@ struct V3TurnBooks {
         // 片段按类型攒批,终态前放行尾巴后走 Complete/Interrupt 收口。
         std::string stream_id;             // 流身份(writer 发号,started 时定)
         std::string reserved_message_id;   // started 时预留的 assistant messageId
+        std::string completed_event_id;    // model.response.completed 事件 id(异步 P2 证据)
         bool stream_started = false;       // model.response.started 已落稳
         std::string batch_text;            // 攒批:text(4 KiB 窗口一批)
         std::string batch_reasoning;       // 攒批:reasoning
@@ -1544,7 +1545,8 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
         v3::MessagePurpose::Conversation, std::nullopt,
         stop_reason == "length" || stop_reason == "max_tokens"
             ? std::optional<v3::CompletionStatus>(v3::CompletionStatus::Truncated)
-            : std::nullopt);
+            : std::nullopt,
+        trajectory::Durability::PowerLoss, &req.completed_event_id);
     V3NotifyCommitted(receipt);
     if (receipt.status != v3::WriteReceipt::Status::Committed) {
         NoteV3Error(receipt, "model.response.completed");
@@ -1880,6 +1882,12 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
         if (result == nullptr) {
             continue;
         }
+        // 异步工具 P2:批次闸门接单的回执块——协调器的接单链已把
+        // started/finished/persisted/selected 与接单 tool 消息全链落稳,
+        // 这里跳过,不为同一枚调用重落第二条链。
+        if (result->job_admission) {
+            continue;
+        }
         const auto it = v3_turn_->calls.find(result->tool_use_id);
         if (it != v3_turn_->calls.end() && it->second.tool_message_done) continue;
         if (it == v3_turn_->calls.end() || !it->second.terminal || !it->second.action.has_value()) {
@@ -2131,6 +2139,49 @@ void TrajectoryTurnBridge::V3CancelDanglingActions(const std::string& reason) {
 bool TrajectoryTurnBridge::ShouldBlockExecution(const agent::ToolTraceEvent& started) {
     return started_io_failed_.count(started.execution_id) != 0 ||
            storage_blocked_.count(started.execution_id) != 0;
+}
+
+// ---- 异步工具 P2:闸门/规划器的账面查询口 ---------------------------------
+
+std::optional<TrajectoryTurnBridge::V3CallOrigin> TrajectoryTurnBridge::V3DeclaredCallOrigin(
+    const std::string& provider_call_id) const {
+    if (!V3Mode() || v3_books_ == nullptr) {
+        return std::nullopt;
+    }
+    const auto it = v3_books_->declared_actions.find(provider_call_id);
+    if (it == v3_books_->declared_actions.end()) {
+        return std::nullopt;
+    }
+    V3CallOrigin origin;
+    origin.action_id = it->second.action_id;
+    origin.message_id = it->second.message_id;
+    origin.turn_id = it->second.turn_id;
+    origin.step_id = it->second.step_id;
+    return origin;
+}
+
+std::optional<std::string> TrajectoryTurnBridge::V3ReservedAssistantMessageId(
+    const std::string& request_id) const {
+    if (!V3Mode() || v3_turn_ == nullptr) {
+        return std::nullopt;
+    }
+    const auto it = v3_turn_->requests.find(request_id);
+    if (it == v3_turn_->requests.end() || it->second.reserved_message_id.empty()) {
+        return std::nullopt;
+    }
+    return it->second.reserved_message_id;
+}
+
+std::optional<std::string> TrajectoryTurnBridge::V3ResponseEvidenceId(
+    const std::string& request_id) const {
+    if (!V3Mode() || v3_turn_ == nullptr) {
+        return std::nullopt;
+    }
+    const auto it = v3_turn_->requests.find(request_id);
+    if (it == v3_turn_->requests.end() || it->second.completed_event_id.empty()) {
+        return std::nullopt;  // 没证据不宣称接纳(单 §5)
+    }
+    return it->second.completed_event_id;
 }
 
 void TrajectoryTurnBridge::NoteUnownedToolTrace(const agent::ToolTraceEvent& event) {
@@ -4812,6 +4863,16 @@ trajectory::v3::V3Writer* TrajectorySessionLedger::v3_main_writer() {
         return nullptr;
     }
     return &*impl_->active->v3_main;
+}
+
+// 异步工具 P2:会话共享账的写者互斥锁(闸门/协调器/规划器共享写者用;
+// v2 场 nullptr——不装异步运行时)。
+std::shared_ptr<std::recursive_mutex> TrajectorySessionLedger::v3_tool_results_mutex() {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3() ||
+        !impl_->v3_books.has_value()) {
+        return nullptr;
+    }
+    return impl_->v3_books->tool_results_mutex;
 }
 
 // v3 结果仓统计(V3-REAL-A02):按仓的记账单位现数——res-*.json 一文件

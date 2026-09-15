@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -115,6 +116,13 @@ public:
     // 开不出账的说明(空 = 开出来了)。装配层据此失败会话启动。
     const std::string& trajectory_open_error() const { return trajectory_open_error_; }
 
+    // ---- 异步工具 P2:会话级运行时(批次闸门+投递规划+协调器) ----------
+    // 装配层(终端/app-server)在会话开张、工具表与身份齐备后挂进来;
+    // 没挂(旧装配/单发)各轮照旧全 inline,行为一字不差。不持有轮桥——
+    // 每轮 InstallTurnBridge 换。
+    void AttachAsyncToolRuntime(std::unique_ptr<class AsyncToolRuntime> runtime);
+    AsyncToolRuntime* async_tool_runtime() { return async_tool_runtime_.get(); }
+
     // 开一轮的事件适配器:把 loop 的回调翻成 ServerEvent 流,落到 AttachSink
     // 挂的那只 sink(没挂就只发号不落笔)。每轮各开一只,轮间不共用状态。
     TurnEventAdapter MakeTurnAdapter();
@@ -171,6 +179,9 @@ private:
     // P0-2 轨迹账:每场恒开一只(可选构造;move-only)。
     std::optional<TrajectorySessionLedger> trajectory_;
     std::string trajectory_open_error_;
+
+    // 异步工具 P2:会话级运行时(装配层挂入)。
+    std::unique_ptr<class AsyncToolRuntime> async_tool_runtime_;
 
     std::set<std::string> always_allowed_;
 

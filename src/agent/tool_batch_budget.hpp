@@ -71,17 +71,29 @@ inline ToolBatchBudgetPlan PlanToolBatchBudget(const api::Message& results,
 
 // Validate the closed group before publication and again after the preview hook.
 inline bool ToolBatchPairingMatches(const api::Message& calls, const api::Message& results) {
-    std::set<std::string> expected;
+    std::set<std::string> expected;    // 须配对的调用
+    std::set<std::string> deferrable;  // async 标记:可欠账,也可本批就配
     for (const auto& block : calls.content) {
         if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
             if (call->id.empty() || !expected.insert(call->id).second) return false;
+            // 异步工具单 §4:provider 标了 async 的原生调用允许本批欠账
+            // (native_deferred 的最终结果只配原 call,由规划器在下一次
+            // 请求边界投递;job_handle 接单结果本批就配也合法)。没标
+            // async 或标记不符的一律按普通同步配对,不许凭本地配置留悬
+            // 空调用。
+            if (call->async_call) {
+                deferrable.insert(call->id);
+            }
         }
     }
     for (const auto& block : results.content) {
         const auto* result = std::get_if<api::ToolResultBlock>(&block);
         if (result == nullptr || expected.erase(result->tool_use_id) != 1) return false;
     }
-    return expected.empty();
+    for (const auto& id : expected) {
+        if (deferrable.count(id) == 0) return false;
+    }
+    return true;
 }
 
 }  // namespace lubancode::agent
