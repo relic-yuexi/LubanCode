@@ -1,6 +1,6 @@
 # Insights 接入 Session v3：使用账本、Prompt 审计与报告迁移
 
-- 状态：待实施。2026-09-11 完成静态核查与任务拆分；未改生产代码，未运行本单验收。
+- 状态：T14 细化段已实施（PR #101，分支 worktree-agent-insights-v3，2026-09-16）：I0 领域读模型、I1 的 GateSession 段、I2 全部、I3 全部已落；I1 主体（ReadSessionUsage/owner 投影）与 I4 摘要派生版本由 T06/#53 及本 PR 部分覆盖；I5 生产验收与 I6 未动。未运行本单验收（纪律：验证一律交 CI，PR #101 CI 见 checks）。
 - 核查基线：HEAD `58e949af` 加当前工作区；实施前重查代码与 schema，本文不冻结后续字段变化。
 - 级别：P1；缺账不得报零、重复计费与错误完成率优先处理。
 - 来源：[旧产品设计](LubanCode使用洞察_Token账本与Prompt审计设计.todo)。旧单 A0–A5 的实现记录保留，不代表 v3 已接通；A6/A7 未完项见本单 I6。
@@ -75,26 +75,26 @@
 ### I0：合同与夹具（关联 T00/T11）
 
 - [ ] 冻结代码、schema 与测试入口；逐字段标“已有生产事实/只有设计/缺失”。
-- [ ] 定义领域读模型、准入状态、owner 去重键及统计范围，形成字段映射表；不新造旧信封。
+- [x] 定义领域读模型、准入状态、owner 去重键及统计范围，形成字段映射表；不新造旧信封。（PR #101：`src/insights/v3_facts.*`——V3SessionFacts/V3RequestFacts/V3ToolActionFacts/V3ToolFailureFacts；准入态 integrity_gate 六态含 Unsupported；owner=assistant message.usage、去重按 T06 树范围；不含 v2 信封）
 - [ ] 整理合法 v3 夹具：普通工具回合、重试、中断、usage 缺失/追加、compact、来源链、两层子代理、坏账与缺引用。
 
 ### I1：发现、校验、离线 usage（关联 T06）
 
-- [ ] 迁 ReadSessionUsage 和 GateSession，复用 v3 发现、校验、来源遍历；明确旧格式 unsupported，不迁用户旧档。
+- [x] 迁 ReadSessionUsage 和 GateSession，复用 v3 发现、校验、来源遍历；明确旧格式 unsupported，不迁用户旧档。（ReadSessionUsage 段 T06/PR #53 已销；GateSession 段 PR #101——ProbeV3SessionStream 分派、WalkSessionTree 验卷、封口按账面 session.ended、Unsupported 不迁旧档）
 - [ ] 落 owner 投影与去重，接 `/usage`、聚合与费用估算；失败/迟到观察另栏。
 - [ ] 无 v3 流、坏引用与未报告 usage 均不能显示为成功零消耗。
 
 ### I2：Prompt 审计（关联 T14）
 
-- [ ] 保留 static；迁 runtime 输入读模型、历史引用与快照读取，缺件关闭对应规则。
-- [ ] 对照 compact/system 切换/工具集变化前后实际请求材料；记录 prepared 与 wire 的证据边界。
-- [ ] 更新错误、JSON 与终端文案，移除仍声称依赖旧 request_snapshot_ref 的说明。
+- [x] 保留 static；迁 runtime 输入读模型、历史引用与快照读取，缺件关闭对应规则。（PR #101：CollectRuntimeRequests v3 分派吃 prepared 持久请求视图；v3 无五层 manifest——模块归因规则（S 系按 manifest 的部分）对 v3 关闭，R01 不再要求 snapshot）
+- [x] 对照 compact/system 切换/工具集变化前后实际请求材料；记录 prepared 与 wire 的证据边界。（V01 视图分叉按 inputView.divergent 点名并明示“引用视图不等于逐字 wire”；V02 工具表按 prepared toolNames；V03 同 system/revision 引用不一致。compact 前后对照的细分规则留 I5 真机验收后按需补）
+- [x] 更新错误、JSON 与终端文案，移除仍声称依赖旧 request_snapshot_ref 的说明。（prompt_auditor.hpp 头注与 R01 文案改口径；prompt.v3_* 稳定码族就位）
 
 ### I3：Session Insights 与跨仓聚合（关联 T14）
 
-- [ ] 迁 SessionAnalyzer/FrictionClassifier/FeatureSignal，按 action 与当前域合同计数。
-- [ ] 缺 verification/outcome 等事实的规则不判分，覆盖表明示；不为了凑旧报告临时加事件。
-- [ ] 主子账、resume/fork 祖先在跨 session/跨 workspace 报告中去重；默认当前 workspace，跨仓须显式选择。
+- [x] 迁 SessionAnalyzer/FrictionClassifier/FeatureSignal，按 action 与当前域合同计数。（PR #101：AnalyzeSessionV3——工具按 actionId 折叠、turn 按主账 conversation 请求分组、usage 走 T06 读面；FrictionClassifier v3 半场 friction-v2）
+- [x] 缺 verification/outcome 等事实的规则不判分，覆盖表明示；不为了凑旧报告临时加事件。（summary.coverage.limitations 三条固定声明；UnsupportedFrictionCategoriesV3 在册；不据 session.ended 推断任务完成）
+- [x] 主子账、resume/fork 祖先在跨 session/跨 workspace 报告中去重；默认当前 workspace，跨仓须显式选择。（父子树经 WalkSessionTree 树内去重一次计入；resume 祖先不在树内不重算——测试钉了 resume/两层子代理两案；fork 的 v3 事件未发行（schema 留挂点），账面无 fork 事实不猜。默认 workspace/跨仓显式选择为既有行为不变）
 
 ### I4：派生仓、报告与健康检查
 
@@ -131,3 +131,13 @@
 | CLI 三条命令、doctor、HTML/JSON、脱敏 canary | 同源同数、证据可追、敏感正文不泄漏 |
 
 本单完成标志：I0–I5 有运行证据，T06/T14 可核销；I6 独立标进度。源码静态审查、夹具测试、真实程序接线、真实供应商试验分栏记录，不拿一种充另一种。
+
+## 六、实现记录
+
+### T14 细化段（I0 读模型/I1 GateSession/I2/I3；PR #101，2026-09-16）
+
+- 实现：分支 worktree-agent-insights-v3、commit f8242a20。`src/insights/v3_facts.{hpp,cpp}`（领域读模型）、`integrity_gate.*`（v3 分派/Unsupported/账面封口/partial）、`prompt_auditor.*`（prepared 持久请求视图 + V01–V05 规则 + RuntimeViewsFromV3Facts）、`friction_classifier.*`（friction-v2 + UnsupportedFrictionCategoriesV3）、`session_analyzer.cpp`（AnalyzeSessionV3/FinalizeSessionAnalyze）、`finding.*`（EvidenceItem.seq）、`session_summary.*`/`report_model.hpp`（insights-v2.0、source.format、coverage.limitations）、`redaction.cpp`（allowlist 新键）、`insights_health.cpp`/`html_renderer.cpp`（文案与限制节）。
+- 生产入口：只读查询链（/insights、/prompt audit runtime/outcome、/doctor insights）；不改模型行为。
+- 测试：`tests/unit/insights/test_insights_v3_pipeline.cpp`（册内 EnvGuard("1")；gate 五态分型与 partial、摩擦 v3 正反例、prompt v3 规则与 R01 不误报、resume/两层子代理去重、摘要字节稳定与 stale、schema 往返、allowlist）。v2 老册（test_integrity_gate/test_friction_classifier/test_prompt_auditor/test_session_analyzer/test_usage_fixture_pipeline 等）原样保留作旧档回归。
+- 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；CI 结论见 PR #101 checks。真实 v3 会话的真机 /insights、/prompt audit 抽验未做（I5 生产验收整体未跑）；compact 前后对照的细分 prompt 规则、tokenEstimateRef 离线展开（估算栏消费）留后续批。
+- 旧依赖：insights 的 v2 EventEnvelope 读路（integrity_gate/prompt_auditor/session_analyzer 的 v2 半场）保留给旧档，退役归 T02-B。
