@@ -432,7 +432,7 @@ TEST_CASE("native_deferred:a 欠账 b 先送,完成结果沿原 call 下次请�
         v3::V3Ledger ledger = h.Read();
         const auto errors = v3::ValidateAsyncToolSequence(ledger);
         for (const auto& error : errors) {
-            FAIL_CHECK(error.code + ": " + error.message);
+            FAIL_CHECK(error.code << ": " << error.message);
         }
         auto obligations = v3::ProjectProtocolObligations(ledger);
         const auto* obligation_a = v3::FindProtocolObligation(obligations, "action-job-000001");
@@ -482,7 +482,7 @@ TEST_CASE("native_deferred:a 欠账 b 先送,完成结果沿原 call 下次请�
         v3::V3Ledger ledger = h.Read();
         const auto errors = v3::ValidateAsyncToolSequence(ledger);
         for (const auto& error : errors) {
-            FAIL_CHECK(error.code + ": " + error.message);
+            FAIL_CHECK(error.code << ": " << error.message);
         }
         auto obligations = v3::ProjectProtocolObligations(ledger);
         const auto* obligation_a = v3::FindProtocolObligation(obligations, "action-job-000001");
@@ -528,7 +528,7 @@ TEST_CASE("完成信封隔离:未知 job 与重复终态拒收,计数暴露") {
     v3::V3Ledger ledger = h.Read();
     const auto errors = v3::ValidateAsyncToolSequence(ledger);
     for (const auto& error : errors) {
-        FAIL_CHECK(error.code + ": " + error.message);
+        FAIL_CHECK(error.code << ": " << error.message);
     }
     // 账面终态观测唯一(不因重复信封双写)。
     int terminal_observed = 0;
@@ -596,7 +596,7 @@ TEST_CASE("流式提前档:call item 完整即派发,重复终帧只派发一次
     h.runtime->gate()->PumpBatchBoundary();
     v3::V3Ledger ledger = h.Read();
     for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
-        FAIL_CHECK(error.code + ": " + error.message);
+        FAIL_CHECK(error.code << ": " << error.message);
     }
 }
 
@@ -644,7 +644,7 @@ TEST_CASE("提前派发后流断:账面未知态,恢复 disposition 不盲重跑
     //(不盲重跑)。worker 还挂着(hold 闸)——真实"已启动、去向不明"。
     v3::V3Ledger ledger = h.Read();
     for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
-        FAIL_CHECK(error.code + ": " + error.message);
+        FAIL_CHECK(error.code << ": " << error.message);
     }
     const auto plan = tools::ToolJobCoordinator::PlanRecovery(ledger);
     REQUIRE(plan.items.size() == 1);

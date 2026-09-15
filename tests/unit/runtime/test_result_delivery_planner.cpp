@@ -182,14 +182,14 @@ TEST_CASE("投递账:prepared → acknowledged(evidenceRef 指账上事件)") {
         v3::V3Ledger ledger = h.Read();
         CHECK(StateOf(ledger, "delivery-job-000001-v1") == "prepared");
         for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
-            FAIL_CHECK(error.code + ": " + error.message);
+            FAIL_CHECK(error.code << ": " << error.message);
         }
     }
     h.planner->NoteResponseOutcome("request-000002", true);
     v3::V3Ledger ledger = h.Read();
     CHECK(StateOf(ledger, "delivery-job-000001-v1") == "acknowledged");
     for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
-        FAIL_CHECK(error.code + ": " + error.message);
+        FAIL_CHECK(error.code << ": " << error.message);
     }
 }
 
@@ -217,7 +217,7 @@ TEST_CASE("投递账:回执丢失落 uncertain;失败路同款") {
     v3::V3Ledger ledger2 = h.Read();
     CHECK(StateOf(ledger2, "delivery-job-000002-v1") == "uncertain");
     for (const auto& error : v3::ValidateAsyncToolSequence(ledger2)) {
-        FAIL_CHECK(error.code + ": " + error.message);
+        FAIL_CHECK(error.code << ": " << error.message);
     }
 }
 
@@ -316,7 +316,7 @@ TEST_CASE("恢复:终态已落未配的 native 欠账,重建 mailbox 补投递�
     {
         v3::V3Ledger ledger = h.Read();
         for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
-            FAIL_CHECK(error.code + ": " + error.message);
+            FAIL_CHECK(error.code << ": " << error.message);
         }
         auto obligations = v3::ProjectProtocolObligations(ledger);
         const auto* obligation = v3::FindProtocolObligation(obligations, action);
@@ -334,7 +334,7 @@ TEST_CASE("恢复:终态已落未配的 native 欠账,重建 mailbox 补投递�
 
     v3::V3Ledger ledger = h.Read();
     for (const auto& error : v3::ValidateAsyncToolSequence(ledger)) {
-        FAIL_CHECK(error.code + ": " + error.message);
+        FAIL_CHECK(error.code << ": " << error.message);
     }
     auto obligations = v3::ProjectProtocolObligations(ledger);
     const auto* obligation = v3::FindProtocolObligation(obligations, action);
