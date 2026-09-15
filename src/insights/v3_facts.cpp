@@ -59,12 +59,17 @@ V3SessionFacts BuildSessionFacts(const trajectory::v3::V3Ledger& ledger,
     }
 
     // usage owner 预索引:requestId -> owner assistant(唯一 owner;同
-    // requestId 多条定稿属账面异常,取最后一条并点名)。
+    // requestId 多条定稿属账面异常,取最后一条并点名)。role 在 message
+    // 本体 json 里(信封不带),读 json 判定。
     std::map<std::string, std::size_t> owner_index;
     for (std::size_t i = 0; i < ledger.messages.size(); ++i) {
         const auto& message = ledger.messages[i];
-        if (message.role != trajectory::v3::MessageRole::Assistant ||
-            !message.request_id.has_value() || message.request_id->empty()) {
+        const auto role = message.message.find("role");
+        const bool is_assistant =
+            message.message.is_object() && role != message.message.end() &&
+            role->is_string() && role->get<std::string>() == "assistant";
+        if (!is_assistant || !message.request_id.has_value() ||
+            message.request_id->empty()) {
             continue;
         }
         if (!message.usage.has_value() || message.usage->is_null()) {

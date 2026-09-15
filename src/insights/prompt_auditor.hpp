@@ -33,6 +33,7 @@
 #include "agent/prompt_assembler.hpp"  // PromptModuleSource(用户模块漂移账)
 #include "agent/prompt_manifest.hpp"
 #include "insights/finding.hpp"
+#include "insights/v3_facts.hpp"  // RuntimeViewsFromV3Facts(T14 v3 半场)
 #include "trajectory/event.hpp"
 
 namespace lubancode::insights {
