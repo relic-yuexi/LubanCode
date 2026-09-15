@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.266] - 2026-09-15
+
+- **QQ 真机首块暗礁拔除 + 配对闭环。**真机实测发现平台数值字段会以数字字符串回传（如 `"expires_in":"7200"`），原解析写死数字形态，令牌取不到反复重试还误标密钥错——现五处数值字段统一宽松解析（数字与纯数字字符串同收，杂质明拒），配置无需改动。配对闭环接通：未配对私聊收到带配对码的指引提示（五分钟冷却、重启不重发），另一终端 `lubancode channel pairing approve qqbot main <配对码>` 批准，重发即进模型；`channel status` 四态指路（配置已存 / QQ 在线 / 身份已配对 / 模型能回复），哪步卡住指哪步。
+- **Gateway 服务安装与运维（V4）。**`gateway install/uninstall/start/restart/doctor/logs` 命令族落地：Windows 计划任务、systemd、launchd 三平台服务单元生成（防重启风暴分平台如实设防）；doctor 一项一码体检（注册/锁活态/配置/凭据可读不显值/磁盘/坏账/死信/SafeMode）带 `--wait-ready` 探针；关机时未收净的工作如实入账不谎报取消；换代与回滚步骤见 runbook。
+- **Web 助理聊天已随 beta.1 在途；本版未含 Web 任务面（W2 在途，随下版）。**
+
 ## [v0.26.265] - 2026-09-15
 
 - **QQ 在 Windows 上连得通了。**连接状态说真话：取令牌 → 查地址 → TCP/TLS → WebSocket → Identify → READY 逐阶段报告，`connected` 只在真正就绪后为真，断线/停止立即翻转，失败带阶段与稳定错误码、重复失败限频合并；新命令 `lubancode channel status qqbot main` 跨进程查连接快照。Windows TLS 信任根走系统证书库与系统策略校验（含显式不信任剔除），无需下载 PEM 或手工建目录。三处 Windows 专属缺陷（SDK 版本门槛、证书枚举生命周期、doctest 表达式分解）全修复并在 CI Windows 腿验绿。
