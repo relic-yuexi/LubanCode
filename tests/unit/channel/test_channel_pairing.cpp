@@ -276,8 +276,10 @@ TEST_CASE("Q1b v2 账面:records+notices 同盘持久;旧裸数组读作无提�
     {
         auto store = OpenStore(dir);
         CHECK(store->NoticeLog().empty());
-        CHECK(store->PendingList(kT0 + 60'000).empty());  // 过期后 pending 不列
-        CHECK(store->MarkNoticeSent("owner-1", "dm-z", kT0 + 60'000));
+        // TTL(5 分钟)过了 pending 不再列(裸数组重放的那枚,kT0 基)。
+        const std::int64_t kLater = kT0 + kPairingCodeTtlMs + 1000;
+        CHECK(store->PendingList(kLater).empty());
+        CHECK(store->MarkNoticeSent("owner-1", "dm-z", kLater));
     }
 }
 

@@ -143,21 +143,21 @@ TEST_CASE("four_state: 全空——每步指下一步,不拿后面状态粉饰�
     input.online_detail = "没有连接状态快照";
     input.model_detail = "缺 model";
     const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
+    // 步行里穿插"下一步"行,断言按内容找,不赌行号。
+    const auto has = [&view](const std::string& needle) {
+        for (const std::string& line : view.lines) {
+            if (line.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    };
     REQUIRE(view.lines.size() >= 7);  // 四步 + 至少三行"下一步"
-    CHECK(view.lines[0].find("否——账号 main 不在配置里") != std::string::npos);
-    CHECK(view.lines[1].find("2. QQ 在线:否") != std::string::npos);
-    CHECK(view.lines[2].find("3. 身份已配对:否") != std::string::npos);
-    CHECK(view.lines[2].find("还没有人配对") != std::string::npos);
-    CHECK(view.lines[3].find("4. 模型能回复:否——缺 model") != std::string::npos);
-    // 下一步指引:第一步指 setup,第二步指 gateway run。
-    bool saw_setup = false;
-    bool saw_run = false;
-    for (const std::string& line : view.lines) {
-        if (line.find("channel setup qqbot") != std::string::npos) saw_setup = true;
-        if (line.find("gateway run") != std::string::npos) saw_run = true;
-    }
-    CHECK(saw_setup);
-    CHECK(saw_run);
+    CHECK(has("1. 配置已存:否——账号 main 不在配置里"));
+    CHECK(has("2. QQ 在线:否"));
+    CHECK(has("3. 身份已配对:否"));
+    CHECK(has("还没有人配对"));
+    CHECK(has("4. 模型能回复:否——缺 model"));
+    CHECK(has("channel setup qqbot"));
+    CHECK(has("gateway run"));
     CHECK(view.report.at("config_saved") == false);
     CHECK(view.report.at("online") == false);
     CHECK(view.report.at("paired") == false);
@@ -172,15 +172,15 @@ TEST_CASE("four_state: 待批准一笔——指引 approve 命令与配对码去
     input.pairing_pending = 1;
     input.model_configured = true;
     const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
-    REQUIRE(view.lines.size() >= 5);
-    CHECK(view.lines[2].find("有待批准的配对 1 笔") != std::string::npos);
-    bool saw_approve = false;
-    for (const std::string& line : view.lines) {
-        if (line.find("channel pairing approve qqbot main") != std::string::npos) {
-            saw_approve = true;
+    const auto has = [&view](const std::string& needle) {
+        for (const std::string& line : view.lines) {
+            if (line.find(needle) != std::string::npos) return true;
         }
-    }
-    CHECK(saw_approve);
+        return false;
+    };
+    REQUIRE(view.lines.size() >= 5);
+    CHECK(has("有待批准的配对 1 笔"));
+    CHECK(has("channel pairing approve qqbot main"));
     CHECK(view.report.at("pairing_pending") == 1);
 }
 
@@ -189,8 +189,14 @@ TEST_CASE("four_state: 配对账读不懂——如实报未知,不冒充 0 个")
     input.pairing_present = true;
     input.pairing_parse_ok = false;
     const ChannelFourStateView view = BuildChannelFourState("qqbot", "main", input);
-    CHECK(view.lines[2].find("未知") != std::string::npos);
-    CHECK(view.lines[2].find("pairing.json") != std::string::npos);
+    const auto has = [&view](const std::string& needle) {
+        for (const std::string& line : view.lines) {
+            if (line.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    };
+    CHECK(has("未知"));
+    CHECK(has("pairing.json"));
     CHECK(view.report.at("paired") == "unreadable");
 }
 
