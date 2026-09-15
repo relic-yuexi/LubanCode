@@ -120,10 +120,15 @@ bool ToolRoutePolicy::ExplicitlyAllows(const std::string& tool_name) const {
     // security.md §3:须确认工具只有一条生路——某层显式 allow 列了它
     //(故 allow 必有值),且交集后不在 deny 并集里。零显式 allow = 无
     // 明确授权 = fail closed。
+    // Q6 注意:这里只认 allow 名单,不看 Allows()(它已把 approve 带并进
+    // 暴露面)——审批带是"可以问",不是"预先允许",两不相干。
     if (!allow.has_value()) {
         return false;
     }
-    return Allows(tool_name);
+    if (Contains(deny, tool_name)) {
+        return false;
+    }
+    return Contains(*allow, tool_name);
 }
 
 RouteDecision RouteChannelEvent(const RouteInput& input) {
