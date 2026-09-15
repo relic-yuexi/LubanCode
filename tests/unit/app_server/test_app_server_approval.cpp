@@ -282,6 +282,7 @@ TEST_CASE("审批:decline 拒绝,工具不执行,拒绝理由随 tool_result 回
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -315,6 +316,7 @@ TEST_CASE("审批:cancel 视作拒绝收口(用户主动撤),工具不执行") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -345,6 +347,7 @@ TEST_CASE("审批:acceptForSession 放行,同工具二次免问") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     // 第一轮:答复 acceptForSession。
@@ -384,6 +387,7 @@ TEST_CASE("审批超时:悬空收口,不冒充用户拒绝,工具不执行") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -419,6 +423,7 @@ TEST_CASE("turn/interrupt:审批悬停立即醒,终态 interrupted") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -450,6 +455,7 @@ TEST_CASE("turn/interrupt:回合不在跑时报失效(迟到的打断不受理)"
     ApprovalHarness harness;
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     // 没有回合在跑:打断报 stale。
@@ -465,6 +471,7 @@ TEST_CASE("turn/interrupt:点名的回合不是当前在跑的,报失效") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -501,6 +508,7 @@ TEST_CASE("turn/interrupt:流式打断(无审批在飞),终态 interrupted") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -535,6 +543,7 @@ TEST_CASE("迟到回答:回合已收口,答复报失效不炸") {
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -564,6 +573,7 @@ TEST_CASE("无在飞请求的响应:报失效,服务不炸") {
     ApprovalHarness harness;
     std::string error_code;
     harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
 
     const app_server::InteractionResolution result =
         harness.server->HandleInteractionResponse(harness.MakeApprovalResponse("req-ghost", "accept"));
@@ -673,6 +683,7 @@ TEST_CASE("ask_user:悬停期间 turn/interrupt,提问按取消收口") {
 
     std::string error_code;
     const nlohmann::json start = server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"];
 
     std::thread turn_thread([&] {
@@ -781,6 +792,7 @@ TEST_CASE("interrupt 硬时限:置旗后回合卡死不退,等满时限分离,�
 
     std::string error_code;
     const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());  // thread/start 失败时回执是 null:先拦住再索引(windows 腿 305 教训)
     const std::string thread_id = start["threadId"].get<std::string>();
 
     std::thread turn_thread([&] {

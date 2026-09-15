@@ -1,8 +1,10 @@
 #include "trajectory/directory.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
@@ -11,14 +13,6 @@
 #include "workspace/storage_contracts.hpp"  // 稳定错误码(workspace.not_found)
 
 namespace lubancode::trajectory {
-namespace {
-
-bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
-    // 统一原子写(审计 P1):替掉本文件自备的固定 .tmp 协议。
-    return platform::AtomicWriteFile(path, content).has_value();
-}
-
-}  // namespace
 
 // 单段名校验(§12.1):目录/文件名只认 [A-Za-z0-9._-],拒绝路径分隔符、
 // ".."、"。"盘符冒号一类可逃逸材料。workflow 编排单起 export 进头
@@ -129,10 +123,23 @@ std::expected<void, std::string> WriteSessionJsonAtomic(const std::filesystem::p
                                                         const SessionManifest& manifest) {
     const std::filesystem::path path = session_dir / "session.json";
     const std::string content = manifest.ToJson().dump();
-    if (!WriteTextFileAtomic(path, content)) {
-        return std::unexpected("session.json 原子写失败: " + platform::PathToUtf8(path));
+    // 有界重试(3 把,50ms 退避):session.json 的写是会话开张/收口/状态
+    // 迁移的低频口,不该被一次瞬态 IO(Windows runner 上实测过一次原子
+    // 写失败把整册测试掀翻——杀软扫新建文件/目录条目短暂被占都是这个
+    // 形状)整场打翻。重试只盖"同一进程同一内容的重写",幂等;三把都
+    // 败如实报错,错误话带上底层稳定码与人话,现场能定位是 mkdir/tmp/
+    // replace 哪一段(windows 腿那次就是细节被丢弃,只剩一句"原子写失败")。
+    for (int attempt = 1;; ++attempt) {
+        const auto written = platform::AtomicWriteFile(path, content);
+        if (written.has_value()) {
+            return {};
+        }
+        if (attempt >= 3) {
+            return std::unexpected("session.json 原子写失败(" + written.error().code + "): " +
+                                   platform::PathToUtf8(path) + ": " + written.error().message);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    return {};
 }
 
 std::optional<SessionManifest> ReadSessionJson(const std::filesystem::path& session_dir) {
