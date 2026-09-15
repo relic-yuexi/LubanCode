@@ -123,8 +123,10 @@ public:
     void Notify(const CommitWake& wake) noexcept override;
 
     // 注册一场 session 的账目位置(装配层在 ledger 开张后调;stream 发现
-    // 由周期扫描在 session 目录内做——main.jsonl + subagents/*.jsonl,
-    // 不扫全盘猜文件,§14.3)。
+    // 由周期扫描在 session 目录内做,§14.3 不扫全盘猜文件):v2 布局 =
+    // main.jsonl + subagents/*.jsonl;v3 布局(T07)= <id>.jsonl + 递归
+    // subagents/*/<cid>.jsonl,格式先经 T00 读面探针分派,两种主账并存
+    // 报格式歧义,不因先命中忽略另一个。
     void RegisterSession(const std::string& workspace_key, const std::string& session_id,
                          const std::filesystem::path& session_dir);
 
@@ -174,6 +176,7 @@ private:
         std::uint64_t lag_events = 0;
         std::uintmax_t last_size = 0;  // 上趟文件大小(tick 兜底的省读判据)
         bool final_flushed = false;
+        bool v3 = false;  // v3 session 账(发现时定格;读法/投影随之分派)
     };
     struct PendingAdvance {
         StreamCursor cursor;
@@ -187,6 +190,7 @@ private:
     void DrainQueue();
     void AdvancePendingCursors();
     void DiscoverStreams(const SessionEntry& session);
+    void DiscoverV3Streams(const SessionEntry& session);
     // ---- T2 出口线程(§19;业务线程不等网络,Notify 面零变化)----
     void ExportLoop();
     // 赶一趟出口:按段序逐批 POST;Accepted/Partial(有收)→ ACK 删段;

@@ -25,10 +25,13 @@ namespace lubancode::telemetry {
 
 // Telemetry 投影 schema 名与版本:批内一切派生物以此对账。
 inline constexpr std::string_view kTelemetrySchema = "lubancode.telemetry";
-inline constexpr int kTelemetrySchemaVersion = 1;
+// v2(T07/V3-GAP-02):span attribute 键集新增 lubancode.hook.point /
+// lubancode.hook.matched_handlers(v3 hook dispatch span 材料)。
+inline constexpr int kTelemetrySchemaVersion = 2;
 // 投影器版本(§14.2 cursor 的 projector_version;映射不兼容须升版另开
-// generation,不原地改旧 spool payload)。
-inline constexpr std::string_view kProjectorVersion = "telemetry-projector-v1";
+// generation,不原地改旧 spool payload)。v2:v3 账投影接入(Session/turn/
+// request/tool/compact/Hook 映射),旧 cursor 不套进新投影版本。
+inline constexpr std::string_view kProjectorVersion = "telemetry-projector-v2";
 // Redaction 规则版本(§15.3 RedactionManifest.policy_version)。
 inline constexpr std::string_view kRedactionPolicyVersion = "redact-v1";
 // OTLP 编码名(§3.2:第一版 OTLP/HTTP JSON,不手搓私有协议)。

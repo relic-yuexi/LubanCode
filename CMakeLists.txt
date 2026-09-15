@@ -869,6 +869,9 @@ add_library(lubancode_engine STATIC
   src/telemetry/identity.cpp
   src/telemetry/redactor.cpp
   src/telemetry/projector.cpp
+  # T07 / V3-GAP-02:session v3 账投影(Session/turn/request/tool/compact/
+  # Hook → span 映射;usage owner 与 T06 同源)。
+  src/telemetry/projector_v3.cpp
   src/telemetry/otlp_json.cpp
   # T1(本地 Service 与 Spool):committed wake 窄口、cursor 与 catch-up、
   # 有界优先级队列、segmented spool 与崩溃恢复、TelemetryService 生命周期

@@ -125,6 +125,9 @@ std::optional<StreamCursor> LoadCursor(const std::filesystem::path& cursors_root
     read_string("last_event_id", &cursor.last_event_id);
     read_string("last_event_hash", &cursor.last_event_hash);
     read_string("projector_version", &cursor.projector_version);
+    if (json.contains("last_event_seq") && json.at("last_event_seq").is_number_unsigned()) {
+        cursor.last_event_seq = json.at("last_event_seq").get<std::uint64_t>();
+    }
     if (json.contains("projection_generation") &&
         json.at("projection_generation").is_number_integer()) {
         cursor.projection_generation = json.at("projection_generation").get<int>();
@@ -147,6 +150,7 @@ bool StoreCursor(const std::filesystem::path& cursors_root, const StreamCursor& 
     json["stream"] = cursor.stream;
     json["last_event_id"] = cursor.last_event_id;
     json["last_event_hash"] = cursor.last_event_hash;
+    json["last_event_seq"] = cursor.last_event_seq;
     json["projector_version"] = cursor.projector_version;
     json["projection_generation"] = cursor.projection_generation;
     json["updated_at_ms"] = cursor.updated_at_ms;
