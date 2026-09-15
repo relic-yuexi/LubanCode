@@ -27,6 +27,8 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <memory>
+#include <mutex>
 #include <string>
 
 #include "api/backend.hpp"
@@ -41,6 +43,9 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
 // 会话里切 provider 时,外层包装器、Agent 和工具都还握着 Backend&。这一层
 // 把真正的 client 藏起来并按需替换,引用地址不变;下一次请求自然落到新
 // base_url/wire/key 上。
+// 线程安全(W2 起):Rebuild 与 send_stream 可从不同线程并发——内芯持
+// shared_ptr,send_stream 锁内快照后锁外用,在飞请求持旧内芯跑到完
+//(换血只影响下一次请求,不撕在途流)。
 class RebuildableBackend : public lubancode::api::Backend {
 public:
     explicit RebuildableBackend(const lubancode::config::Config& config);
@@ -53,7 +58,8 @@ public:
         const std::atomic<bool>* cancel = nullptr) override;
 
 private:
-    std::unique_ptr<lubancode::api::Backend> inner_;
+    std::mutex mutex_;
+    std::shared_ptr<lubancode::api::Backend> inner_;
 };
 
 }  // namespace lubancode::app

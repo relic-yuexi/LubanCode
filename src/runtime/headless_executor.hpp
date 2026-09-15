@@ -130,6 +130,20 @@ public:
             AfterSelectionCommitted,  // selection 已落、outbox 未投影
         };
         std::function<std::string(FaultPoint)> fault_injection;
+        // 工具确认注入口(常驻助理 Web 主界面单 W2):非空 = needs_confirm
+        // 工具的确认经它走(宿主把"问页面"接进来;同步阻塞,超时/断答的
+        // 政策由回调自理——超时默认拒绝不默认放行)。空 = 既有无人值守
+        // 合同(ChannelConfirmAllows:allow 名单没列 = 拒,行为零变化)。
+        struct ToolConfirmDecision {
+            bool allowed = false;
+            // 非空 = 拒绝时给模型看的 tool_result 文案(如"审批超时,按
+            // 拒绝收口");空 = 缺省文案("用户拒绝执行该工具")。
+            std::string denial_text;
+        };
+        std::function<ToolConfirmDecision(const std::string& tool_use_id,
+                                          const std::string& name,
+                                          const nlohmann::json& input)>
+            on_tool_confirm;
         // ---- 渠道会话(Q2) ----
         // 开场(含 resume-as-new)后回调:装配层把映射账落稳。幂等由回调
         // 自理(同键同场不重复落)。空 = 不记账(纯测试装配)。

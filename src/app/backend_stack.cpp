@@ -54,13 +54,25 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
 
 RebuildableBackend::RebuildableBackend(const lubancode::config::Config& config) { Rebuild(config); }
 
-void RebuildableBackend::Rebuild(const lubancode::config::Config& config) { inner_ = BuildBackend(config); }
+void RebuildableBackend::Rebuild(const lubancode::config::Config& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    inner_ = BuildBackend(config);
+}
 
 std::expected<void, lubancode::api::Error> RebuildableBackend::send_stream(
     const lubancode::api::Request& request,
     const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    return inner_->send_stream(request, on_event, cancel);
+    std::shared_ptr<lubancode::api::Backend> inner;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        inner = inner_;
+    }
+    if (inner == nullptr) {
+        return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Api,
+                                                     "backend 尚未装配"});
+    }
+    return inner->send_stream(request, on_event, cancel);
 }
 
 }  // namespace lubancode::app

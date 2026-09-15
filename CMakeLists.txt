@@ -1205,6 +1205,9 @@ add_library(lubancode_app STATIC
   # 交换/WS 升级交棒)与 assistant 子命令宿主(Detached 断线合同)。
   src/app_server/local_web_server.cpp
   src/app/assistant_host.cpp
+  # 常驻助理 Web 主界面单 W2:任务/审批/事件账三件(automation 泵进程
+  # 内直驱 + gateway 锁单写者互斥 + 命令文件/只读投影方法面)。
+  src/app/assistant_tasks.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp

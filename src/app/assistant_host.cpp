@@ -39,8 +39,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include "app/assistant_tasks.hpp"
 #include "app/backend_stack.hpp"
 #include "app/cli_options.hpp"
+#include "app/tool_runtime.hpp"
 #include "app/version.hpp"
 #include "app_server/connection_snapshot.hpp"
 #include "app_server/dispatcher.hpp"
@@ -54,6 +56,8 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/registry.hpp"
+#include "workspace/identity.hpp"
 
 namespace lubancode::app {
 
@@ -441,6 +445,16 @@ constexpr const char* kMethodAssistantStatus = "assistant/status";
 constexpr const char* kMethodConfigStatus = "config/status";
 constexpr const char* kMethodConfigModelSet = "config/model/set";
 constexpr const char* kMethodConfigTest = "config/test";
+// W2 任务/审批/补账方法面(全部 additive;名字表与 RegisterAssistantTaskMethods
+// 的注册清单同源)。
+constexpr const char* kMethodTaskCreate = "task/create";
+constexpr const char* kMethodTaskRunNow = "task/run-now";
+constexpr const char* kMethodTaskList = "task/list";
+constexpr const char* kMethodTaskRead = "task/read";
+constexpr const char* kMethodTaskCancel = "task/cancel";
+constexpr const char* kMethodApprovalList = "approval/list";
+constexpr const char* kMethodApprovalRespond = "approval/respond";
+constexpr const char* kMethodEventsRead = "assistant/events/read";
 
 struct AssistantIdentity {
     std::string boot_id;
@@ -476,12 +490,14 @@ nlohmann::json BuildConfigStatus(const config::ConfigResult& config_result) {
 
 void RegisterAssistantMethods(app_server::Dispatcher& dispatcher,
                               const std::shared_ptr<AssistantConfigState>& config_state,
-                              const AssistantIdentity& identity) {
+                              const AssistantIdentity& identity,
+                              const std::shared_ptr<AssistantAutomationFace>& task_face,
+                              const std::shared_ptr<RebuildableBackend>& automation_backend) {
     // assistant/status:实例健康快照(页头用;停止助理走既有 shutdown)。
     dispatcher.RegisterMethod(
         kMethodAssistantStatus,
-        [identity](const app_server::IncomingRequest& request, app_server::DispatchContext&)
-            -> std::optional<nlohmann::json> {
+        [identity, task_face](const app_server::IncomingRequest& request,
+                              app_server::DispatchContext&) -> std::optional<nlohmann::json> {
             if (!request.params.is_object()) {
                 return app_server::MakeError(request.id, app_server::kErrInvalidParams,
                                              "assistant/status: params 须是对象");
@@ -494,6 +510,14 @@ void RegisterAssistantMethods(app_server::Dispatcher& dispatcher,
             result["lubancodeVersion"] = std::string(kVersion);
             result["workLifetime"] = "detached";
             result["uptimeMs"] = WallClockMs() - identity.started_at_ms;
+            // W2:任务面可用性(锁被同 profile gateway 占时如实报,页面
+            // 显示"任务面不可用",聊天线不受影响)。
+            nlohmann::json automation;
+            automation["available"] = task_face->available();
+            if (!task_face->available()) {
+                automation["reason"] = task_face->unavailable_reason();
+            }
+            result["automation"] = std::move(automation);
             return app_server::MakeResult(request.id, std::move(result));
         });
 
@@ -513,7 +537,8 @@ void RegisterAssistantMethods(app_server::Dispatcher& dispatcher,
     // 保存与连接检查分开(§五:"测试连接失败与配置保存成功分开显示")。
     dispatcher.RegisterMethod(
         kMethodConfigModelSet,
-        [config_state](const app_server::IncomingRequest& request, app_server::DispatchContext&)
+        [config_state, automation_backend](const app_server::IncomingRequest& request,
+                                           app_server::DispatchContext&)
             -> std::optional<nlohmann::json> {
             const nlohmann::json& params = request.params;
             if (!params.is_object()) {
@@ -579,10 +604,15 @@ void RegisterAssistantMethods(app_server::Dispatcher& dispatcher,
                                              nlohmann::json{{"code", "config_write_failed"}});
             }
             // 活配置换血:新开 thread 吃新账;已开 thread 的材料不动(冻结
-            // 合同,§六——改配置不追改在途请求)。
+            // 合同,§六——改配置不追改在途请求)。任务泵的 backend 同步
+            // 换内芯(下一次任务执行生效,在飞不追改);模型名经泵的
+            // model_provider 每次执行取活账。
             const auto reloaded = config::LoadFromEnv();
             if (reloaded.has_value()) {
                 config_state->Update(*reloaded);
+                if (automation_backend != nullptr) {
+                    automation_backend->Rebuild(reloaded->config);
+                }
             }
             nlohmann::json result = nlohmann::json::object();
             result["saved"] = true;
@@ -658,6 +688,16 @@ nlohmann::json ExtendInitializeResult(nlohmann::json result) {
     capabilities["methods"].push_back(kMethodConfigStatus);
     capabilities["methods"].push_back(kMethodConfigModelSet);
     capabilities["methods"].push_back(kMethodConfigTest);
+    // W2:任务/审批/补账方法面(方法在;任务面不可用时回稳定错误,
+    // 页面对 pending 方法不画可点控件——可用性走 assistant/status)。
+    capabilities["methods"].push_back(kMethodTaskCreate);
+    capabilities["methods"].push_back(kMethodTaskRunNow);
+    capabilities["methods"].push_back(kMethodTaskList);
+    capabilities["methods"].push_back(kMethodTaskRead);
+    capabilities["methods"].push_back(kMethodTaskCancel);
+    capabilities["methods"].push_back(kMethodApprovalList);
+    capabilities["methods"].push_back(kMethodApprovalRespond);
+    capabilities["methods"].push_back(kMethodEventsRead);
     return result;
 }
 
@@ -875,9 +915,73 @@ int RunAssistantMode(const AssistantCliArgs& args) {
     };
     const AssistantIdentity identity{boot_id, profile, web_server.actual_port(),
                                      platform::CurrentDirUtf8(), started_at_ms};
+
+    // ---- 7. W2 任务底座:事件账 + 审批 broker + automation 泵(进程内
+    // 直驱,详见 docs/features/assistant-web/README.md §三的并轨定案)。
+    // 锁被同 profile gateway 占/账开不了 → 任务面禁用(方法回稳定错误,
+    // 页面如实显示),聊天线照常。backend/registry 是泵的借用件,活到
+    // 本函数栈收口(runtime 先于它们析构)。
+    auto event_hub = std::make_shared<AssistantEventHub>(boot_id);
+    const char* approval_timeout_env = std::getenv("LUBANCODE_ASSISTANT_APPROVAL_TIMEOUT_MS");
+    const std::int64_t approval_timeout_ms =
+        approval_timeout_env != nullptr && *approval_timeout_env != '\0' &&
+                std::atoll(approval_timeout_env) > 0
+            ? std::atoll(approval_timeout_env)
+            : 120 * 1000;
+    auto approval_broker =
+        std::make_shared<AssistantApprovalBroker>(event_hub.get(), approval_timeout_ms);
+    // 泵的 backend 用可换血壳(线程安全):首配模型后 config/model/set
+    // 同步 Rebuild,新任务吃新连接;在飞请求持旧内芯跑到完,不撕流。
+    auto automation_backend = std::make_shared<RebuildableBackend>(
+        config_state->Snapshot().config);
+    auto automation_registry = std::make_unique<tools::ToolRegistry>(
+        BuildBaseToolRegistry({}, config_state->Snapshot().config.search));
+    const gateway::GatewayProfilePaths gateway_paths =
+        gateway::ResolveGatewayProfilePaths(gateway::DefaultGatewayRoot(), profile);
+    auto task_face =
+        std::make_shared<AssistantAutomationFace>(gateway_paths, event_hub.get(),
+                                                   approval_broker.get());
+    std::unique_ptr<AssistantAutomationRuntime> automation_runtime;
+    {
+        AssistantAutomationRuntime::Options automation_options;
+        automation_options.paths = gateway_paths;
+        automation_options.workspaces_root = tools::Utf8ToPath(*state_root) / "workspaces";
+        automation_options.workspace_identity =
+            workspace::ResolveWorkspaceIdentity(std::filesystem::current_path(),
+                                                tools::Utf8ToPath(*state_root))
+                .value_or(workspace::MakeFallbackIdentity(std::filesystem::current_path()));
+        automation_options.cwd_utf8 = platform::CurrentDirUtf8();
+        automation_options.lubancode_version = std::string(kVersion);
+        automation_options.wire_name =
+            config::ProviderWireName(config_state->Snapshot().config.wire);
+        automation_options.model = config_state->Snapshot().config.model;
+        automation_options.approval_timeout_ms = approval_timeout_ms;
+        automation_options.max_steps_per_turn = 32;  // 与 gateway run 同款预算
+        automation_options.max_wall_secs = 600;
+        // 模型名走活账:首配/换配后新任务吃新模型(在飞不追改)。
+        automation_options.model_provider = [config_state]() {
+            return config_state->Snapshot().config.model;
+        };
+        auto opened = AssistantAutomationRuntime::Open(
+            *automation_backend, *automation_registry, std::move(automation_options),
+            event_hub.get(), approval_broker);
+        if (opened.runtime != nullptr) {
+            automation_runtime = std::move(opened.runtime);
+            std::fprintf(stderr,
+                         "  自动任务: 已接线(单次任务/审批/结果;关网页照跑,重开补账)\n");
+        } else {
+            task_face->set_available(false);
+            task_face->set_unavailable_reason(opened.unavailable_reason);
+            std::fprintf(stderr, "[assistant] 任务面不可用: %s(聊天线不受影响)\n",
+                         opened.unavailable_reason.c_str());
+        }
+    }
+
     server_options.extra_method_registrar =
-        [config_state, identity](app_server::Dispatcher& dispatcher) {
-            RegisterAssistantMethods(dispatcher, config_state, identity);
+        [config_state, identity, task_face, automation_backend](app_server::Dispatcher& dispatcher) {
+            RegisterAssistantMethods(dispatcher, config_state, identity, task_face,
+                                     automation_backend);
+            RegisterAssistantTaskMethods(dispatcher, task_face);
         };
     server_options.initialize_result_extender = [](nlohmann::json result) {
         return ExtendInitializeResult(std::move(result));
@@ -888,6 +992,13 @@ int RunAssistantMode(const AssistantCliArgs& args) {
         std::move(server_options),
         [config_state]() { return BuildBackend(config_state->Snapshot().config); },
         nullptr);
+
+    // 事件出口:hub 进账后推当前活连接(server 快照连接,线程安全);
+    // 没人听就只进账,断线不丢——重连走 assistant/events/read 补账。
+    app_server::Server* server_ptr = &server;
+    event_hub->set_sink([server_ptr](const std::string& method, const nlohmann::json& params) {
+        server_ptr->EmitHostEvent(method, params);
+    });
 
     // ---- 7. 服务循环的架子先立起来(accept 线程/信号/看门狗),再开
     // 浏览器——"接口就绪才开浏览器"的接口含 accept 在跑。 ----
@@ -1012,6 +1123,11 @@ int RunAssistantMode(const AssistantCliArgs& args) {
         watchdog.join();
     }
     server.Shutdown();
+    // 任务底座收口:先摘事件出口(sink 捕的是 server 裸指针,不给晚到
+    // 的 Push 悬空机会)→ 审批悬着的按拒绝醒 → 泵线程收 → 泵关账 →
+    // 放 gateway 锁。
+    event_hub->set_sink(nullptr);
+    automation_runtime.reset();
     lock.Release();
     std::fprintf(stderr, "[assistant] 已收口(profile=%s)\n", profile.c_str());
     return exit_code;
