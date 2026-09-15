@@ -25,6 +25,7 @@
 #include "gateway/reply_outbox.hpp"
 #include "gateway/status.hpp"
 #include "platform/paths.hpp"
+#include "platform/process.hpp"
 #include "platform/wall_clock.hpp"
 #include "trajectory/session_lock.hpp"
 
@@ -134,7 +135,9 @@ TEST_CASE("doctor:未初始化场(零目录零写盘)全 Info/Ok,退 0") {
     CHECK(HasCheck(report, "service.skipped"));
     // 零副作用:体检不建目录不落盘。
     std::error_code ec;
-    CHECK_FALSE(std::filesystem::exists(root, ec) || ec);
+    const bool root_exists = std::filesystem::exists(root, ec);
+    CHECK_FALSE(root_exists);
+    CHECK_FALSE(ec);
 }
 
 TEST_CASE("doctor:坏配置退 2,好配置退 0(disk 探针即写即删)") {
