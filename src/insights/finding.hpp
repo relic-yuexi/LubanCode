@@ -7,6 +7,7 @@
 // 升成事实——引用不存在 finding_id 的评议,renderer 丢弃并记错。
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -34,6 +35,9 @@ struct EvidenceItem {
     nlohmann::json value;                  // 数值/字符串/枚举,随 metric 定
     std::optional<std::string> session_id; // 证据落在哪场 session
     std::optional<std::string> event_id;   // 证据落在哪枚事件
+    // v3(T14):证据行的 seq——event_id + seq 直指账面行,报告能从
+    // Insights 跳到对应 v3 消息/工具与原始请求材料。v2 旧档无此键。
+    std::optional<std::uint64_t> seq;
 
     nlohmann::json ToJson() const;
     static std::optional<EvidenceItem> FromJsonStrict(const nlohmann::json& json,

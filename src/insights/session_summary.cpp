@@ -30,6 +30,7 @@ nlohmann::json SessionInsightSummary::ToJson() const {
     }
     source_json["stream_terminal_hashes"] = std::move(hashes);
     source_json["integrity"] = source.integrity;
+    source_json["format"] = source.format;
     json["source"] = std::move(source_json);
     nlohmann::json coverage_json = nlohmann::json::object();
     coverage_json["runs_total"] = coverage.runs_total;
@@ -37,6 +38,9 @@ nlohmann::json SessionInsightSummary::ToJson() const {
     coverage_json["requests_total"] = coverage.requests_total;
     coverage_json["requests_with_usage"] = coverage.requests_with_usage;
     coverage_json["outcomes_assessed"] = coverage.outcomes_assessed;
+    if (!coverage.limitations.empty()) {
+        coverage_json["limitations"] = coverage.limitations;
+    }
     json["coverage"] = std::move(coverage_json);
     nlohmann::json work_json = nlohmann::json::object();
     work_json["turns"] = work.turns;
@@ -127,9 +131,17 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         }
         summary.source.stream_terminal_hashes[it.key()] = it.value().get<std::string>();
     }
-    if (source.size() != 3) {
+    if (source.size() != 3 && source.size() != 4) {
         *error = "source 未知键";
         return std::nullopt;
+    }
+    // source.format 可选(v2.0 前的旧摘要与 v2 会话不带);缺省读作 v2。
+    if (source.contains("format")) {
+        if (!ReadString(source, "format", &summary.source.format) ||
+            (summary.source.format != "v2" && summary.source.format != "v3")) {
+            *error = "source.format 只认 v2|v3";
+            return std::nullopt;
+        }
     }
     if (!json.contains("coverage") || !json.at("coverage").is_object()) {
         *error = "coverage 须是 object";
@@ -140,9 +152,26 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         !ReadUint(coverage, "runs_analyzed", &summary.coverage.runs_analyzed) ||
         !ReadUint(coverage, "requests_total", &summary.coverage.requests_total) ||
         !ReadUint(coverage, "requests_with_usage", &summary.coverage.requests_with_usage) ||
-        !ReadUint(coverage, "outcomes_assessed", &summary.coverage.outcomes_assessed) ||
-        coverage.size() != 5) {
+        !ReadUint(coverage, "outcomes_assessed", &summary.coverage.outcomes_assessed)) {
         *error = "coverage 五键不合";
+        return std::nullopt;
+    }
+    // coverage.limitations 可选(v3 缺件声明;缺省空)。
+    if (coverage.contains("limitations")) {
+        if (!coverage.at("limitations").is_array()) {
+            *error = "coverage.limitations 须是数组";
+            return std::nullopt;
+        }
+        for (const auto& item : coverage.at("limitations")) {
+            if (!item.is_string()) {
+                *error = "coverage.limitations 条目须是字符串";
+                return std::nullopt;
+            }
+            summary.coverage.limitations.push_back(item.get<std::string>());
+        }
+    }
+    if (coverage.size() != 5 && coverage.size() != 6) {
+        *error = "coverage 未知键";
         return std::nullopt;
     }
     if (!json.contains("work") || !json.at("work").is_object()) {

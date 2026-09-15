@@ -72,6 +72,9 @@ nlohmann::json EvidenceItem::ToJson() const {
     if (event_id.has_value()) {
         json["event_id"] = *event_id;
     }
+    if (seq.has_value()) {
+        json["seq"] = *seq;
+    }
     json["metric"] = metric;
     json["value"] = value;
     return json;
@@ -107,7 +110,14 @@ std::optional<EvidenceItem> EvidenceItem::FromJsonStrict(const nlohmann::json& j
         }
         item.event_id = json.at("event_id").get<std::string>();
     }
-    if (json.size() > 4) {
+    if (json.contains("seq")) {
+        if (!json.at("seq").is_number_unsigned()) {
+            *error = "evidence.seq 须是非负整数";
+            return std::nullopt;
+        }
+        item.seq = json.at("seq").get<std::uint64_t>();
+    }
+    if (json.size() > 5) {
         *error = "evidence 未知键";
         return std::nullopt;
     }

@@ -48,13 +48,17 @@ struct SummaryCacheEpoch {
 };
 
 struct SessionInsightSummary {
-    // 与 kInsightsAnalyzerVersion 同步(v1.2 加 cache epoch 分段；旧摘要判 stale 重算)。
-    std::string analyzer_version = "insights-v1.2";
+    // 与 kInsightsAnalyzerVersion 同步(v2.0 起 insights 读 v3 账:T14 领域
+    // 读模型;旧摘要判 stale 重算,不误用 insights-v1 缓存)。
+    std::string analyzer_version = "insights-v2.0";
     struct Source {
         std::string session_id;
         // stream run_id -> terminal event hash;任一变化即 stale。
+        // v3 按 session_id:run_id 记末行 lineHash(每账一条,树内去重)。
         std::map<std::string, std::string> stream_terminal_hashes;
         std::string integrity = "verified";  // verified/provisional
+        // 账格式:"v2"|"v3"(旧摘要缺键读作 v2)。聚合层按它分开完整率分母。
+        std::string format = "v2";
     } source;
     struct Coverage {
         std::uint64_t runs_total = 0;
@@ -62,6 +66,9 @@ struct SessionInsightSummary {
         std::uint64_t requests_total = 0;
         std::uint64_t requests_with_usage = 0;
         std::uint64_t outcomes_assessed = 0;
+        // 覆盖面缺口(v3:无 verification/outcome/审批事实的规则不判分,
+        // 如实记在这里——不把缺件冒充零值)。
+        std::vector<std::string> limitations;
     } coverage;
     struct Work {
         std::uint64_t turns = 0;
