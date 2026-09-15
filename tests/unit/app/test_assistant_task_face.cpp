@@ -41,6 +41,7 @@
 #include "workspace/identity.hpp"
 
 using namespace lubancode;
+using namespace lubancode::app;
 
 namespace {
 
