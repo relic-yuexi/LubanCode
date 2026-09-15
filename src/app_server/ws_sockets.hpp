@@ -40,6 +40,17 @@ public:
     // 把"排干事件"的循环收口。
     void SetRecvTimeoutMs(int ms);
 
+    // 体面收线(占用通报那类"末一帧必须送达"的收口用):
+    //   1. ShutdownSend——关写端,OS 把已排队的出站字节连同 FIN 推干净;
+    //   2. 有界排干读端——把对端已发未读的字节收进来。收不空的 close 在
+    //      Windows 上触发 RST,RST 一出对端会丢掉已排队未读的入站数据
+    //      (macOS/BSD 通常照交,这就是 macos 绿 windows 红的分岔);
+    //   3. Close。
+    // drain_ms 是总时限(收不完就到点硬收——对面死赖着不陪葬)。收口路
+    // 径专用,不改变 Recv/SendAll 的既有语义。
+    void ShutdownSend();
+    void DrainThenClose(int drain_ms);
+
     // 本机侧端口(测试断言与 actual_port 用);拿不到给 0。
     int LocalPort() const;
 

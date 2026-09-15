@@ -66,6 +66,13 @@ public:
         // 尽力收线:发 close 帧再关 socket。
         void Close();
 
+        // 体面收线(占用通报那类"末一帧必须送达对端"的收口):close 帧发
+        // 出后不立刻 closesocket——先关写端(排队字节连同 FIN 推干净),
+        // 再有界排干读端(对端已发未读的字节收进来),最后关。直接
+        // Close() 在"对端已发未读数据"时 Windows 会发 RST,RST 把本方
+        // 已排队未确认的帧一并丢了(占用通报就是这样丢的)。
+        void CloseGracefully(int drain_ms = 200);
+
     private:
         friend class WsTransport;
         Session(net::Socket socket) : socket_(std::move(socket)) {}

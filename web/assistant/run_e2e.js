@@ -438,18 +438,27 @@ class WsClient {
 // 幕
 // ---------------------------------------------------------------------------
 
+// initialize 被协议明拒的标记(区别于"断线没等来回执"的传输形状)。
+class InitializeRejected extends Error {
+  constructor(replyError) {
+    super('initialize 被拒: ' + JSON.stringify(replyError));
+  }
+}
+
 // 开一条控制通道(连接 + 握手)。刚断线就重连时,服务端可能还把死连接
 // 记在"当前控制连接"上(读到 EOF 有个窗口),新连接会收占用通报——
-// 退避重试即过;连续占用才真抛。
+// 退避重试即过。通报帧若被平台 TCP 收线时序吃掉(windows 腿翻过车,
+// 服务端已改体面收线),形状就是"没等来应答就断线"——同样按占用
+// 退避重试;initialize 被协议明拒(有错误回执)才真抛。
 async function openChannel(field) {
   let lastError = null;
-  for (let attempt = 0; attempt < 8; ++attempt) {
+  for (let attempt = 0; attempt < 10; ++attempt) {
     const ws = new WsClient(field.port, field.cookie);
     await ws.connect();
     try {
       const init = await ws.request('initialize', { clientName: 'assistant-e2e' });
       if (init.error) {
-        throw new Error('initialize 被拒: ' + JSON.stringify(init.error));
+        throw new InitializeRejected(init.error);
       }
       ws.initializeResult = init.result;
       ws.send({ method: 'initialized' });
@@ -458,7 +467,12 @@ async function openChannel(field) {
       const occupied = ws.events.some((event) => event.method === 'assistant/connection/occupied');
       ws.close();
       lastError = error;
-      if (!occupied) {
+      if (error instanceof InitializeRejected) {
+        throw error;  // 协议明确拒绝:重试无意义
+      }
+      if (!occupied && attempt >= 2) {
+        // 前两把无条件退避(收线时序的窄窗),再往后没通报还断线就不是
+        // 占用竞态了,如实抛。
         throw error;
       }
       await sleep(400);
