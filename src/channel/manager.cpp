@@ -748,7 +748,7 @@ RouteDecision ChannelManager::ProbeRoute(const std::string& channel_id,
     private:
         const PairingStore& store_;
     };
-    const ReadOnlyPairing admission(*entry->pairing);
+    ReadOnlyPairing admission(*entry->pairing);
     RouteInput input;
     input.event = &event;
     input.account = &entry->config;  // RouteInput 本就收 const 指针(纯函数路由)
