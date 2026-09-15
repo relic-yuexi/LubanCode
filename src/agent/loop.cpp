@@ -968,6 +968,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
+        // 异步工具 P2:请求边界选已提交结果(单 §7)——冻结输入前的唯一
+        // 时点。规划器把选中的投递写成正式 tool 消息落账+接纳(native_
+        // deferred 欠账的配对输出),这里只把消息入内存史,随本步请求发走
+        // (inputMessageRefs 自然带上)。本次选取之后到的完成通知留在
+        // mailbox,留给下一次边界——不修改已冻结输入。没装规划器一处不调,
+        // 行为与从前一字不差。
+        if (wiring.delivery_planner != nullptr) {
+            for (api::Message& delivery : wiring.delivery_planner->SelectForRequestBoundary()) {
+                context_.PushMessage(std::move(delivery));
+            }
+        }
+
         // 成本硬线(真机实测 P2-6):时间/token 两根在步顶查——步数那根由
         // 循环条件执法。断线即收场:不是错误,history 里留着到限为止的全部
         // 来回,部分结果由调用方按 budget_exhausted 带走,缘由写明哪根线断。
@@ -1667,6 +1679,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     trajectory_write_failed = true;
                     return std::unexpected(api::Error{api::ErrorKind::Api, "trajectory write failed", 0});
                 }
+                // 异步工具 P2:请求账已发号落稳,为本次选中的投递落
+                // tool.delivery.prepared(每次发送尝试一条;重试新 requestId
+                // 另立条目,P1 定案 5)。没装规划器/本次无投递是空操作。
+                if (wiring.delivery_planner != nullptr) {
+                    wiring.delivery_planner->NoteRequestPrepared(trajectory_request_id);
+                }
             }
             // permit 从"占额"翻"已发"(reserved-=1,attempted+=1,turn 预算单
             // §3.2)——与轨迹解耦:没接 boundary_recorder 的会话照样提交(纯预
@@ -1851,6 +1869,29 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                                                  ServerToolSearchSummary(e.content),
                                                                  ServerToolSearchFailed(e.content));
                             }
+                        } else if constexpr (std::is_same_v<T, api::ContentBlockDone>) {
+                            // 异步工具 P2·流式提前档(单 §7 后期提速):单枚
+                            // call item 完整——call_id 定型、参数 JSON 收齐
+                            //(assembler 在 Feed 里刚收完尾,completed_tool_
+                            // uses 只收完整块;半截 delta/call_id 未定的块
+                            // 到不了这)——即问批次闸门可不可以提前派发。
+                            // JSON delta 半截不开跑;重复终帧由闸门按 call
+                            // id 幂等去重,只派发一次。流中断而工具已执行的
+                            // 恢复归协调器账面(dispatched 无终态 → unknown_
+                            // hold,不盲重跑)。
+                            if (wiring.tool_batch_gate != nullptr && !e.tool_use_id.empty()) {
+                                for (const api::ToolUseBlock& done : assembler.completed_tool_uses()) {
+                                    if (done.id != e.tool_use_id) {
+                                        continue;
+                                    }
+                                    ToolBatchGate::StreamCallContext stream_context;
+                                    stream_context.turn_id = wiring.turn_id;
+                                    stream_context.step_id = step_id;
+                                    stream_context.trajectory_request_id = trajectory_request_id;
+                                    wiring.tool_batch_gate->OnCallItemComplete(done, stream_context);
+                                    break;
+                                }
+                            }
                         }
                     },
                     event);
@@ -1960,6 +2001,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                                            : OutputCancelSource::StreamError;
                     wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id, cancel_source);
                 }
+                // 异步工具 P2:取消收口——投递回执未明,落 uncertain。
+                if (wiring.delivery_planner != nullptr && !trajectory_request_id.empty()) {
+                    wiring.delivery_planner->NoteResponseOutcome(trajectory_request_id, false);
+                }
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
             }
             // 错误的人话收口(ccmoon 巡检单 P1):HTTP 非 2xx 把状态码与
@@ -1975,6 +2020,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         fail_reason = "HTTP " + std::to_string(err.http_status);
                     }
                     wiring.boundary_recorder->OnOutputFailed(trajectory_request_id, fail_reason);
+                }
+                // 异步工具 P2:请求失败收口——投递回执丢失,落 uncertain
+                //(重试新 requestId 另立条目,不把重试当 exactly-once)。
+                if (wiring.delivery_planner != nullptr && !trajectory_request_id.empty()) {
+                    wiring.delivery_planner->NoteResponseOutcome(trajectory_request_id, false);
                 }
                 std::string message = err.message;
                 if (err.kind == api::ErrorKind::HttpStatus && err.http_status != 0) {
@@ -1993,6 +2043,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (stream_error) {
             if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
                 wiring.boundary_recorder->OnOutputFailed(trajectory_request_id, stream_error_message);
+            }
+            if (wiring.delivery_planner != nullptr && !trajectory_request_id.empty()) {
+                wiring.delivery_planner->NoteResponseOutcome(trajectory_request_id, false);
             }
             return std::unexpected("模型返回错误: " + stream_error_message);
         }
@@ -2048,6 +2101,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                                              stop_reason, stream_request_id)) {
                 return std::unexpected("轨迹账写盘失败,模型输出未落账,不执行工具");
             }
+        }
+        // 异步工具 P2:响应收口——本次请求携带的投递按证据落 tool.delivery.
+        // acknowledged(evidenceRef 由规划器从注入的证据解析取);失败/取消/
+        // 流断走 uncertain(见各收口路)。没装规划器一处不调。
+        if (wiring.delivery_planner != nullptr && !trajectory_request_id.empty()) {
+            wiring.delivery_planner->NoteResponseOutcome(trajectory_request_id, true);
         }
         context_.PushMessage(std::move(assistant_message));
         // 任务级 turn 账的完成确认(设计单 §6.4):完整 assistant message 入
@@ -2207,15 +2266,39 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (trace_armed) {
             batch_id = "batch-" + std::to_string(++batch_counter_);
         }
+        // 异步工具 P2:批次闸门 seam(单 §7)。本批调用先收拢、过"协议模式
+        // 裁决"——inline 收齐续跑 / job_handle 接单即配 / native_deferred
+        // 留欠账。没装闸门(或取消已在身)全 inline,行为与从前一字不差;
+        // 非 inline 调用不走 bridge 内联链(协调器自落调用证据链),批次
+        // 栅栏与 RunOneTool 都跳过。
+        std::vector<api::ToolUseBlock> batch_calls;
+        for (const auto& block : last_assistant.content) {
+            if (std::holds_alternative<api::ToolUseBlock>(block)) {
+                batch_calls.push_back(std::get<api::ToolUseBlock>(block));
+            }
+        }
+        const bool gate_armed = wiring.tool_batch_gate != nullptr && batch_calls.size() > 0 &&
+                                (cancel == nullptr || !cancel->load());
+        std::vector<ToolCallAdjudication> adjudications(batch_calls.size());
+        if (gate_armed) {
+            adjudications = wiring.tool_batch_gate->AdjudicateBatch(batch_calls);
+        }
+        const auto call_is_inline = [&adjudications](std::size_t index) {
+            return index >= adjudications.size() ||
+                   adjudications[index].mode == ToolProtocolMode::Inline;
+        };
         std::vector<std::string> scheduled_ids;  // 本批各枚 execution_id(装 trace 时才有)
         std::vector<std::string> scheduled_tool_use_ids;
         std::vector<std::string> scheduled_names;
+        // 调用下标 -> scheduled_ids 槽位(非 inline 调用不排栅栏,值为 size)
+        std::vector<std::size_t> scheduled_slot(batch_calls.size(), 0);
         if (trace_armed && wiring.on_tool_trace) {
-            for (const auto& block : last_assistant.content) {
-                if (!std::holds_alternative<api::ToolUseBlock>(block)) {
-                    continue;
+            for (std::size_t i = 0; i < batch_calls.size(); ++i) {
+                const api::ToolUseBlock& call = batch_calls[i];
+                if (!call_is_inline(i)) {
+                    scheduled_slot[i] = scheduled_ids.size();
+                    continue;  // job_handle/native_deferred:协调器自落链,不占栅栏
                 }
-                const auto& call = std::get<api::ToolUseBlock>(block);
                 ToolTraceEvent scheduled;
                 scheduled.kind = ToolTraceEventKind::Scheduled;
                 scheduled.batch_id = batch_id;
@@ -2231,6 +2314,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     scheduled.details["transport_tool"] = call.name;
                 }
                 wiring.on_tool_trace(scheduled);
+                scheduled_slot[i] = scheduled_ids.size();
                 scheduled_ids.push_back(scheduled.execution_id);
                 scheduled_tool_use_ids.push_back(call.id);
                 scheduled_names.push_back(call.name);
@@ -2258,14 +2342,60 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
         bool interrupted = false;
-        int tool_index = -1;
-        std::vector<api::ContentBlock> tool_results;
-        for (const auto& block : last_assistant.content) {
-            if (!std::holds_alternative<api::ToolUseBlock>(block)) {
-                continue;
+        // 结果按声明序入账(声明序即配对序):接单块占其位,native 欠账
+        // 留空(ToolBatchPairingMatches 认 async_call 位)。
+        std::vector<std::optional<api::ToolResultBlock>> ordered_results(batch_calls.size());
+        // ---- 第一遍:launch 先注册(单 §7"先注册所有 launch,再处理 wait")。
+        // job_handle 接单即配(接单块 job_admission=true:v3 结果提交路径跳过
+        // ——协调器已把接单链落稳);native_deferred 留欠账(无块,业务结果
+        // 由规划器在下一次请求边界配原 call)。取不到单(拒绝/队满/落账
+        // 失败)回空,该调用第二遍按 inline 真执行,不许悬空。
+        if (gate_armed) {
+            for (std::size_t i = 0; i < batch_calls.size(); ++i) {
+                if (call_is_inline(i)) {
+                    continue;
+                }
+                const api::ToolUseBlock& call = batch_calls[i];
+                const std::optional<tools::Tool::Result> admission =
+                    wiring.tool_batch_gate->TakeJobOrder(call, adjudications[i]);
+                if (admission.has_value() &&
+                    adjudications[i].mode == ToolProtocolMode::JobHandle) {
+                    // job_handle 接单即配:显示起止一对(接单已发生,不走
+                    // RunOneTool 的生命周期)。
+                    if (wiring.events != nullptr) {
+                        wiring.events->OnToolStart(call.id, call.name, call.input,
+                                                   wiring.subordinate_stream);
+                    }
+                    api::ToolResultBlock block;
+                    block.tool_use_id = call.id;
+                    block.content = platform::SanitizeUtf8(admission->content);
+                    block.is_error = admission->is_error;
+                    block.job_admission = true;
+                    ordered_results[i] = std::move(block);
+                    if (wiring.events != nullptr) {
+                        wiring.events->OnToolDone(call.id, call.name, *admission,
+                                                  wiring.subordinate_stream);
+                    }
+                } else if (wiring.events != nullptr &&
+                           adjudications[i].mode == ToolProtocolMode::NativeDeferred) {
+                    // native_deferred:工作已派,结果欠账——显示只起不收
+                    //(收口归规划器投递那一拍)。
+                    wiring.events->OnToolStart(call.id, call.name, call.input,
+                                               wiring.subordinate_stream);
+                }
+                // 接单失败(job_handle):不发起止事件——第二遍 inline 真执行
+                // 时 RunOneTool 自己发,不双发。
             }
-            ++tool_index;
-            const auto& call = std::get<api::ToolUseBlock>(block);
+        }
+        // ---- 第二遍:按声明序执行 inline 调用(wait 也在其中——launch 已
+        // 全部注册,次序纪律成立;job_wait 自己的执行经协调器泵,已完成的
+        // job 结果排在 wait 自身状态结果前由工具结果形状保证)。
+        for (std::size_t i = 0; i < batch_calls.size(); ++i) {
+            const int tool_index = static_cast<int>(i);
+            const api::ToolUseBlock& call = batch_calls[i];
+            if (!call_is_inline(i)) {
+                continue;  // 第一遍已接单/留欠账
+            }
             if (interrupted || (cancel != nullptr && cancel->load())) {
                 interrupted = true;
                 // 未轮到便被 ESC 收掉:记 cancelled_before_start 终态栅栏
@@ -2276,18 +2406,19 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     cancelled.outcome = ToolOutcome::CancelledBeforeStart;
                     cancelled.batch_id = batch_id;
                     cancelled.sequence_in_batch = tool_index;
-                    cancelled.execution_id = scheduled_ids[tool_index];
+                    cancelled.execution_id = scheduled_ids[scheduled_slot[i]];
                     cancelled.tool_use_id = call.id;
                     cancelled.tool_name = call.name;
                     cancelled.timestamp_ms = NowMsEpoch();
                     wiring.on_tool_trace(cancelled);
                 }
-                tool_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
+                ordered_results[i] =
+                    api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true};
                 continue;
             }
             ToolTraceContext trace_ctx;
             if (trace_armed) {
-                trace_ctx.execution_id = scheduled_ids[tool_index];
+                trace_ctx.execution_id = scheduled_ids[scheduled_slot[i]];
                 trace_ctx.batch_id = batch_id;
                 trace_ctx.sequence_in_batch = tool_index;
                 trace_ctx.provider_request_id = stream_request_id;
@@ -2315,15 +2446,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 : refusal.message.substr(0, platform::Utf8PrefixBoundary(refusal.message, 200));
                         refused.batch_id = batch_id;
                         refused.sequence_in_batch = tool_index;
-                        refused.execution_id = scheduled_ids[tool_index];
+                        refused.execution_id = scheduled_ids[scheduled_slot[i]];
                         refused.tool_use_id = call.id;
                         refused.tool_name = call.name;  // 解引用失败:只有 wire 那层可报
                         refused.details = nlohmann::json{{"transport_tool", call.name}};
                         refused.timestamp_ms = NowMsEpoch();
                         wiring.on_tool_trace(refused);
                     }
-                    tool_results.push_back(
-                        api::ToolResultBlock{call.id, platform::SanitizeUtf8(refusal.message), true});
+                    ordered_results[i] =
+                        api::ToolResultBlock{call.id, platform::SanitizeUtf8(refusal.message), true};
                     continue;
                 }
                 // 规范化后的真实目标调用:id 沿用 wire call 的,名字与入参
@@ -2359,7 +2490,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         block.blocks = result.payload.content;
                         block.structured_content = result.payload.structured_content;
                     }
-                    tool_results.push_back(std::move(block));
+                    ordered_results[i] = std::move(block);
                 }
                 if (cancel != nullptr && cancel->load()) {
                     interrupted = true;
@@ -2387,16 +2518,34 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     block.blocks = result.payload.content;
                     block.structured_content = result.payload.structured_content;
                 }
-                tool_results.push_back(std::move(block));
+                ordered_results[i] = std::move(block);
             }
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;
             }
         }
 
+        // 声明序收拢成批次消息:接单块/真实结果按模型给的调用序配对;
+        // native_deferred 的欠账位留空(async_call 位是配对纪律的合法豁免)。
+        std::vector<api::ContentBlock> tool_results;
+        for (std::size_t i = 0; i < ordered_results.size(); ++i) {
+            if (ordered_results[i].has_value()) {
+                tool_results.push_back(std::move(*ordered_results[i]));
+            }
+        }
+
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
+        // 异步工具 P2:全批欠账(native_deferred 一枚结果都没有)不推空
+        // user 消息——原调用按协议保持未配对,配对由规划器在下一次请求
+        // 边界补。普通批次(含中断补账)恒非空,行为不变。
+        if (tool_result_message.content.empty()) {
+            if (wiring.tool_batch_gate != nullptr) {
+                wiring.tool_batch_gate->PumpBatchBoundary();
+            }
+            continue;  // 下一步循环:不带空消息发请求
+        }
         std::string batch_capacity_error;
         api::Request batch_request = request;
         bool batch_measured = false;
@@ -2559,6 +2708,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 return std::unexpected("轨迹账写盘失败,工具结果未落账: " + results_receipt.error_code +
                                        ",不发后续模型请求");
             }
+        }
+
+        // 异步工具 P2:完成信封回灌口(批次收口)——泵一把协调器,收割
+        // worker 完成信封落账,新终态翻完成通知入规划器 mailbox(单 §7
+        // "完成通知只入 mailbox";在途请求的结果留给下次边界)。放在批次
+        // 收口的最后一步:结果链已提交,下一次步顶的请求边界就能选到。
+        if (wiring.tool_batch_gate != nullptr) {
+            wiring.tool_batch_gate->PumpBatchBoundary();
         }
 
         if (!batch_capacity_error.empty()) {

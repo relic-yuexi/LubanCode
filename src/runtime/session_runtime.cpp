@@ -10,6 +10,7 @@
 
 #include "config/config.hpp"      // HomeLubancodeDir:身份裁决的全局件止步
 #include "platform/paths.hpp"
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:会话级运行时(装配层挂入)
 #include "tools/path_utils.hpp"   // Utf8ToPath
 #include "workspace/identity.hpp"
 
@@ -42,6 +43,10 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
 }
 
 SessionRuntime::~SessionRuntime() = default;
+
+void SessionRuntime::AttachAsyncToolRuntime(std::unique_ptr<AsyncToolRuntime> runtime) {
+    async_tool_runtime_ = std::move(runtime);
+}
 
 std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {
     std::filesystem::path home_dir;

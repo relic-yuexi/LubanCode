@@ -790,25 +790,34 @@ TEST_CASE("取消三径:未派发收口/worker 响应/跑完不改写") {
         CHECK(job->cancel_requested);
     }
     SUBCASE("竞态:取消请求后 worker 跑完,真实完成不改写") {
-        Harness h("cancel-race", ToolJobCoordinator::Options{}, AllowAll,
-                  [](const JobExecutionContext&) {
-                      // 不看取消旗,把活干完(竞态:取消与完成同时到)。
-                      return Tool::Result::Text("done anyway");
-                  });
-        std::string assistant = h.AppendAssistantWithCall("call_A1");
-        JobStartResult start = h.coord->StartJob(h.MakeRequest(assistant));
+        // 受控闸(P2 排障补):worker 挂 future,取消意图先落账、再放行完
+        // 成——"取消在先、完成在后"的次序由测试钉死。即回型 worker 在慢
+        // 机器上可能抢在 StartJob 尾泵前完事,CancelJob 变 already_terminal,
+        // cancel_requested 永不落账(潜伏竞态,CI 高负载显形)。
+        auto gate = std::make_shared<Gate>();
+        Harness h2("cancel-race", ToolJobCoordinator::Options{}, AllowAll,
+                   [gate](const JobExecutionContext&) {
+                       gate->released.get();
+                       // 不看取消旗,把活干完(竞态:取消与完成同时到)。
+                       return Tool::Result::Text("done anyway");
+                   });
+        h2.gates.push_back(gate);  // 收尾兜底放行(Harness dtor)
+        std::string assistant = h2.AppendAssistantWithCall("call_A1");
+        JobStartResult start = h2.coord->StartJob(h2.MakeRequest(assistant));
         REQUIRE(start.ok);
-        JobCancelResult cancel = h.coord->CancelJob(start.job_id, "user_escape");
+        JobCancelResult cancel = h2.coord->CancelJob(start.job_id, "user_escape");
         REQUIRE(cancel.ok);
-        JobWaitResult wait = h.coord->WaitJobs({start.job_id}, 5000, true);
+        CHECK(cancel.status == "cancel_requested");  // 取消先落账
+        gate->Open();
+        JobWaitResult wait = h2.coord->WaitJobs({start.job_id}, 5000, true);
         REQUIRE(wait.satisfied);
         CHECK(wait.statuses[0].state == "succeeded");  // 唯一终态按证据收
-        auto jobs = v3::FoldJobExecutions(h.Read());
+        auto jobs = v3::FoldJobExecutions(h2.Read());
         const auto* job = v3::FindJobExecution(jobs, start.job_id);
         REQUIRE(job != nullptr);
         CHECK(job->state == "succeeded");
         CHECK(job->cancel_requested);  // 取消意图保留在账(单 §6)
-        CHECK(v3::ValidateAsyncToolSequence(h.Read()).empty());
+        CHECK(v3::ValidateAsyncToolSequence(h2.Read()).empty());
     }
 }
 

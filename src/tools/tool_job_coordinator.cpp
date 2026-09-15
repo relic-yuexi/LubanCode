@@ -96,6 +96,7 @@ struct JobRecord {
     std::string turn_id;
     std::string step_id;
     std::string tool_name;
+    std::string mode = "job_handle";  // job_handle|native_deferred(P2)
     std::string assistant_message_ref;
     nlohmann::json tool_input;
     JobExecutionPolicy policy;
@@ -110,6 +111,9 @@ struct JobRecord {
     bool cancel_requested = false;
     bool cancel_event_written = false;
     bool admission_complete = false;  // 接单结果链(含 tool 消息)已落稳
+    bool admission_facts_complete = false;  // 提前档:接单事实链先落,消息后补
+    std::string admission_status = "queued";  // 接单事实落稳时的状态(消息正文用)
+    std::string admission_text;               // 接单正文 JSON(消息补落时用)
     std::uint64_t deadline_at_ms = 0;
 
     std::shared_ptr<std::atomic<bool>> cancel_flag =
@@ -408,6 +412,18 @@ struct ToolJobCoordinator::Impl {
         if (job.admission_complete) {
             return true;
         }
+        if (!WriteAdmissionFactsLocked(job)) {
+            return false;
+        }
+        return WriteAdmissionMessageLocked(job);
+    }
+
+    // 接单事实链(attempt 1 的 started/finished/persisted/selected):账面
+    // 事实不依赖声明消息落账,流式提前档在派发前先落这半截。
+    bool WriteAdmissionFactsLocked(JobRecord& job) {
+        if (job.admission_facts_complete) {
+            return true;
+        }
         if (!job.action.has_value()) {
             return false;
         }
@@ -433,11 +449,12 @@ struct ToolJobCoordinator::Impl {
             }
         }
         // 接单正文:{"jobId":...,"status":...}(P0 fixture 同款形状)。
+        // 状态取接单事实落稳那一刻的(job_handle 接单=排队;审批挂起如实
+        // 报 awaiting_approval)——job 后来跑完/收场不改写接单口径,业务
+        // 结果经 get/wait 另取(单 §8)。
+        job.admission_status = job.state == "awaiting_approval" ? "awaiting_approval" : "queued";
         const std::string admission_text =
-            nlohmann::json::object({{"jobId", job.job_id},
-                                    {"status", job.state == "awaiting_approval"
-                                                   ? "awaiting_approval"
-                                                   : "queued"}})
+            nlohmann::json::object({{"jobId", job.job_id}, {"status", job.admission_status}})
                 .dump();
         // 接单 persisted 的 executionEventRef 指向 attempt 1 终态:新起
         // session 用内存 last_event_id,恢复补链用账面锚。
@@ -463,8 +480,27 @@ struct ToolJobCoordinator::Impl {
             NoteWriteFailure("tool.result.selected(接单)", selected);
             return false;
         }
-        auto message = job.action->AppendToolMessage(*writer, persisted_text.preview.text,
-                                                     selected.id, false);
+        job.admission_text = admission_text;
+        job.admission_facts_complete = true;
+        return true;
+    }
+
+    // 接单 tool 消息:须等声明消息(assistant)落账后才许进上下文链
+    // (流式提前档的 CompleteAdmission 在批次收口补这半截)。
+    bool WriteAdmissionMessageLocked(JobRecord& job) {
+        if (job.admission_complete) {
+            return true;
+        }
+        if (!job.admission_facts_complete || !job.action.has_value()) {
+            return false;
+        }
+        if (job.admission_text.empty()) {
+            // 恢复重建的记录没带正文:接单口径确定,原样重造。
+            job.admission_text = nlohmann::json::object(
+                {{"jobId", job.job_id}, {"status", job.admission_status}}).dump();
+        }
+        auto message = job.action->AppendToolMessage(*writer, job.admission_text,
+                                                     job.action->selected_event_id(), false);
         if (!ReceiptOk(message)) {
             NoteWriteFailure("接单 tool 消息", message);
             return false;
@@ -542,12 +578,17 @@ struct ToolJobCoordinator::Impl {
             return DispatchOutcome::KeepQueued;
         }
         // 调度意图先落账,再起线程(注册落稳前不派发的同款纪律:
-        // dispatched 落稳前不起 worker)。
-        auto pending = job.action->BeginNextAttempt(*writer, "job_dispatch");
-        if (!ReceiptOk(pending)) {
-            NoteWriteFailure("tool.execution.pending(attempt 2)", pending);
-            global->Release();
-            return DispatchOutcome::KeepQueued;
+        // dispatched 落稳前不起 worker)。job_handle 的接单是 attempt 1,
+        // 工作开 attempt 2;native_deferred 没有接单链(原调用欠账),
+        // 工作就是 attempt 1——不 BeginNextAttempt(§4.14:上一 attempt
+        // 未终态不得开下一 attempt,native 的 attempt 1 只有调用证据)。
+        if (job.mode != "native_deferred") {
+            auto pending = job.action->BeginNextAttempt(*writer, "job_dispatch");
+            if (!ReceiptOk(pending)) {
+                NoteWriteFailure("tool.execution.pending(attempt 2)", pending);
+                global->Release();
+                return DispatchOutcome::KeepQueued;
+            }
         }
         job.epoch_counter += 1;
         job.owner_epoch = "epoch-" + std::to_string(job.epoch_counter);
@@ -811,6 +852,156 @@ struct ToolJobCoordinator::Impl {
         }
         return settled;
     }
+
+    // start 共通路(P1 批次档 + P2 流式提前档,单 §5 持久顺序):
+    //   调用证据 -> 权鉴 -> 注册落稳 -> 接单(native 不接单:原调用欠账,
+    //   业务结果由规划器配原 call)-> 入队派发。early=true 只落接单事实链
+    //   (tool 消息等 CompleteAdmission 在声明消息落账后补,链序不倒)。
+    JobStartResult StartJobCommon(const JobStartRequest& request, bool early) {
+        JobStartResult result;
+        if (request.tool_name.empty() || request.turn_id.empty() || request.step_id.empty() ||
+            request.assistant_message_ref.empty()) {
+            // originRef 三件(信封 turnId/stepId + payload assistantMessageRef)
+            // 是 registered 的载荷合同,缺一不注册(单 §5)。
+            result.error_code = "job.start.bad_request";
+            result.error = "tool_name/turn_id/step_id/assistant_message_ref 不得为空";
+            return result;
+        }
+        const bool native = request.mode == "native_deferred";
+        if (request.mode != "job_handle" && !native) {
+            result.error_code = "job.start.bad_request";
+            result.error = "mode 只认 job_handle|native_deferred,收到: " + request.mode;
+            return result;
+        }
+        if (native) {
+            // P0 载荷合同:native 注册必带 wireCallRef{provider,wire,callId,async}。
+            const bool ref_ok = request.wire_call_ref.is_object() &&
+                                request.wire_call_ref.contains("provider") &&
+                                request.wire_call_ref.contains("wire") &&
+                                request.wire_call_ref.contains("callId") &&
+                                request.wire_call_ref.contains("async");
+            if (!ref_ok) {
+                result.error_code = "job.start.bad_request";
+                result.error = "native_deferred 须带 wireCallRef{provider,wire,callId,async}";
+                return result;
+            }
+            if (early) {
+                result.error_code = "job.start.unsupported_mode";
+                result.error = "native_deferred 不走流式提前档(账面配对归批次裁决)";
+                return result;
+            }
+        }
+        std::lock_guard<std::mutex> lock(jobs_mutex);
+        if (closing) {
+            result.error_code = "job.start.closing";
+            result.error = "协调器已收场";
+            return result;
+        }
+        if (queue.size() >= limits.queued_max) {
+            result.error_code = "job.start.queue_full";
+            result.error = "待派队列已满(queued_max=" + std::to_string(limits.queued_max) + ")";
+            return result;
+        }
+        // 调用证据(tool.execution.pending):注册的前置(单 §5 持久顺序)。
+        const std::string job_id = "job-" + ZeroPad6(next_job_number);
+        const std::string action_id = "action-job-" + ZeroPad6(next_job_number);
+        next_job_number += 1;
+        auto record = std::make_shared<JobRecord>();
+        record->job_id = job_id;
+        record->action_id = action_id;
+        record->turn_id = request.turn_id;
+        record->step_id = request.step_id;
+        record->tool_name = request.tool_name;
+        record->mode = native ? "native_deferred" : "job_handle";
+        record->assistant_message_ref = request.assistant_message_ref;
+        record->tool_input = request.tool_input;
+        record->policy = request.policy;
+        record->identity.logical_name = request.tool_name;
+        record->identity.registration_source = "host_job_service";
+        record->action = trajectory::v3::ToolActionSession::Admit(
+            *writer, request.turn_id, request.step_id, action_id, "queued",
+            std::optional<std::string>(request.assistant_message_ref), std::nullopt,
+            nlohmann::json{{"toolName", request.tool_name}}, Durability::ProcessCrash);
+        if (!record->action->last_event_id().has_value()) {
+            result.error_code = "job.start.evidence_write_failed";
+            result.error = "tool.execution.pending 落账失败,不注册";
+            return result;
+        }
+        // 权鉴(单 §8:jobId 不是访问凭证;fail-closed)。
+        JobAuthDecision auth = CheckGate(request.tool_name, request.tool_input);
+        if (!auth.allowed && !auth.needs_approval) {
+            auto rejected = record->action->Reject(
+                *writer, auth.reason.empty() ? "authorization_denied" : auth.reason);
+            if (!ReceiptOk(rejected)) {
+                NoteWriteFailure("tool.execution.rejected", rejected);
+            }
+            result.error_code = "job.start.denied";
+            result.error = auth.reason.empty() ? "授权闸门拒绝" : auth.reason;
+            return result;
+        }
+        // 注册落稳(单 §5:注册落稳前不派发)。executionPolicy 落持久档案。
+        EventDraft registered;
+        registered.kind = EventKindV3::ToolJobRegistered;
+        registered.turn_id = request.turn_id;
+        registered.step_id = request.step_id;
+        registered.action_id = action_id;
+        nlohmann::json payload =
+            nlohmann::json::object({{"tool_call_id", action_id},
+                                    {"attempt", 1},
+                                    {"jobId", job_id},
+                                    {"mode", request.mode},
+                                    {"assistantMessageRef", request.assistant_message_ref}});
+        if (native) {
+            payload["wireCallRef"] = request.wire_call_ref;
+        }
+        if (auth.needs_approval) {
+            payload["approvalRequired"] = true;
+        }
+        payload["executionPolicy"] = request.policy.ToJson();
+        registered.payload = std::move(payload);
+        auto registered_receipt = writer->AppendEvent(std::move(registered), Durability::PowerLoss);
+        if (!ReceiptOk(registered_receipt)) {
+            // 注册没落稳:不派发、不接单,action 收口 failed。
+            NoteWriteFailure("tool.job.registered", registered_receipt);
+            record->action->Fail(*writer, "job_register_write_failed");
+            result.error_code = "job.start.register_write_failed";
+            result.error = registered_receipt.error_message;
+            return result;
+        }
+        record->state = auth.needs_approval ? "awaiting_approval" : "queued";
+        jobs[job_id] = record;
+        // 接单结果链(单 §8:start 的接单结果即配齐调用)。审批未过也接单
+        //(消息如实报 awaiting_approval),但不入队(单 §6:审批未过不派发)。
+        // native_deferred 不接单:原调用保持欠账,业务结果由规划器在请求
+        // 边界配原 call(单 §8 native 轨迹)。early 只落事实链,消息由
+        // CompleteAdmission 在声明消息落账后补。
+        if (!native) {
+            const bool chain_ok =
+                early ? WriteAdmissionFactsLocked(*record) : WriteAdmissionChainLocked(*record);
+            if (!chain_ok) {
+                result.error_code = "job.start.admission_write_failed";
+                result.error = "接单结果链落账失败;job 已注册,恢复按 complete_delivery 补链";
+                result.job_id = job_id;
+                result.status = record->state = "registered";  // 不入队:接单没配齐不派发
+                state_cv.notify_all();
+                return result;
+            }
+            if (record->admission_complete) {
+                result.admission_content = record->admission_text;
+            }
+        }
+        if (record->state == "queued") {
+            queue.push_back(job_id);
+            TryDispatchLocked();
+        }
+        PumpLocked();
+        state_cv.notify_all();
+        result.ok = true;
+        result.job_id = job_id;
+        result.action_id = action_id;
+        result.status = record->state;
+        return result;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -867,110 +1058,30 @@ ToolJobCoordinator::~ToolJobCoordinator() {
 // ---------------------------------------------------------------------------
 
 JobStartResult ToolJobCoordinator::StartJob(const JobStartRequest& request) {
-    JobStartResult result;
-    if (request.tool_name.empty() || request.turn_id.empty() || request.step_id.empty() ||
-        request.assistant_message_ref.empty()) {
-        // originRef 三件(信封 turnId/stepId + payload assistantMessageRef)
-        // 是 registered 的载荷合同,缺一不注册(单 §5)。
-        result.error_code = "job.start.bad_request";
-        result.error = "tool_name/turn_id/step_id/assistant_message_ref 不得为空";
-        return result;
-    }
+    return impl_->StartJobCommon(request, /*early=*/false);
+}
+
+JobStartResult ToolJobCoordinator::StartJobEarly(const JobStartRequest& request) {
+    return impl_->StartJobCommon(request, /*early=*/true);
+}
+
+bool ToolJobCoordinator::CompleteAdmission(const std::string& job_id,
+                                           std::string* admission_content) {
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
-    if (impl_->closing) {
-        result.error_code = "job.start.closing";
-        result.error = "协调器已收场";
-        return result;
+    auto it = impl_->jobs.find(job_id);
+    if (it == impl_->jobs.end()) {
+        return false;
     }
-    if (impl_->queue.size() >= impl_->limits.queued_max) {
-        result.error_code = "job.start.queue_full";
-        result.error = "待派队列已满(queued_max=" + std::to_string(impl_->limits.queued_max) + ")";
-        return result;
-    }
-    // 调用证据(tool.execution.pending):注册的前置(单 §5 持久顺序)。
-    const std::string job_id = "job-" + ZeroPad6(impl_->next_job_number);
-    const std::string action_id = "action-job-" + ZeroPad6(impl_->next_job_number);
-    impl_->next_job_number += 1;
-    auto record = std::make_shared<JobRecord>();
-    record->job_id = job_id;
-    record->action_id = action_id;
-    record->turn_id = request.turn_id;
-    record->step_id = request.step_id;
-    record->tool_name = request.tool_name;
-    record->assistant_message_ref = request.assistant_message_ref;
-    record->tool_input = request.tool_input;
-    record->policy = request.policy;
-    record->identity.logical_name = request.tool_name;
-    record->identity.registration_source = "host_job_service";
-    record->action = trajectory::v3::ToolActionSession::Admit(
-        *impl_->writer, request.turn_id, request.step_id, action_id, "queued",
-        std::optional<std::string>(request.assistant_message_ref), std::nullopt,
-        nlohmann::json{{"toolName", request.tool_name}}, Durability::ProcessCrash);
-    if (!record->action->last_event_id().has_value()) {
-        result.error_code = "job.start.evidence_write_failed";
-        result.error = "tool.execution.pending 落账失败,不注册";
-        return result;
-    }
-    // 权鉴(单 §8:jobId 不是访问凭证;fail-closed)。
-    JobAuthDecision auth = impl_->CheckGate(request.tool_name, request.tool_input);
-    if (!auth.allowed && !auth.needs_approval) {
-        auto rejected = record->action->Reject(
-            *impl_->writer, auth.reason.empty() ? "authorization_denied" : auth.reason);
-        if (!ReceiptOk(rejected)) {
-            NoteWriteFailure("tool.execution.rejected", rejected);
+    JobRecord& job = *it->second;
+    if (job.admission_facts_complete && !job.admission_complete) {
+        if (!impl_->WriteAdmissionMessageLocked(job)) {
+            return false;  // 接单链落账失败:恢复按 complete_delivery 补
         }
-        result.error_code = "job.start.denied";
-        result.error = auth.reason.empty() ? "授权闸门拒绝" : auth.reason;
-        return result;
     }
-    // 注册落稳(单 §5:注册落稳前不派发)。executionPolicy 落持久档案。
-    EventDraft registered;
-    registered.kind = EventKindV3::ToolJobRegistered;
-    registered.turn_id = request.turn_id;
-    registered.step_id = request.step_id;
-    registered.action_id = action_id;
-    nlohmann::json payload =
-        nlohmann::json::object({{"tool_call_id", action_id},
-                                {"attempt", 1},
-                                {"jobId", job_id},
-                                {"mode", "job_handle"},
-                                {"assistantMessageRef", request.assistant_message_ref}});
-    if (auth.needs_approval) {
-        payload["approvalRequired"] = true;
+    if (admission_content != nullptr) {
+        *admission_content = job.admission_complete ? job.admission_text : std::string();
     }
-    payload["executionPolicy"] = request.policy.ToJson();
-    registered.payload = std::move(payload);
-    auto registered_receipt = impl_->writer->AppendEvent(std::move(registered), Durability::PowerLoss);
-    if (!ReceiptOk(registered_receipt)) {
-        // 注册没落稳:不派发、不接单,action 收口 failed。
-        NoteWriteFailure("tool.job.registered", registered_receipt);
-        record->action->Fail(*impl_->writer, "job_register_write_failed");
-        result.error_code = "job.start.register_write_failed";
-        result.error = registered_receipt.error_message;
-        return result;
-    }
-    record->state = auth.needs_approval ? "awaiting_approval" : "queued";
-    impl_->jobs[job_id] = record;
-    // 接单结果链(单 §8:start 的接单结果即配齐调用)。审批未过也接单
-    //(消息如实报 awaiting_approval),但不入队(单 §6:审批未过不派发)。
-    if (!impl_->WriteAdmissionChainLocked(*record)) {
-        result.error_code = "job.start.admission_write_failed";
-        result.error = "接单结果链落账失败;job 已注册,恢复按 complete_delivery 补链";
-        result.job_id = job_id;
-        result.status = record->state = "registered";  // 不入队:接单没配齐不派发
-        impl_->state_cv.notify_all();
-        return result;
-    }
-    if (record->state == "queued") {
-        impl_->queue.push_back(job_id);
-        impl_->TryDispatchLocked();
-    }
-    impl_->PumpLocked();
-    impl_->state_cv.notify_all();
-    result.ok = true;
-    result.job_id = job_id;
-    result.status = record->state;
-    return result;
+    return job.admission_complete;
 }
 
 JobStartResult ToolJobCoordinator::GrantApproval(const std::string& job_id) {
@@ -1018,6 +1129,7 @@ JobStatusView ToolJobCoordinator::GetJob(const std::string& job_id) {
         return view;
     }
     view.state = job.state;
+    view.action_id = job.action_id;
     view.cancel_requested = job.cancel_requested;
     view.result_ref = job.result_ref;
     view.result_version = job.result_version;
@@ -1347,6 +1459,10 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         // 账上接单链完整的事实先对齐(缺时由补链路径落);末枚 attempt>1
         // 也说明接单早已配齐(派发只发生在接单配齐之后)。
         job.admission_complete = item.admission_complete || item.attempt > 1;
+        // 接单事实同理:到过 attempt 2(job_handle)⇒ attempt 1 的接单链
+        // 已落账——补链只补消息,不给在跑/无终态的 attempt 伪造终态
+        //(流式提前档的恢复缺口正是这形状:事实在、消息缺、工作在跑)。
+        job.admission_facts_complete = job.admission_complete;
         if (item.disposition == "unsupported_mode") {
             job.state = "unknown";  // 不接管:只登记可见,不可操作
             continue;

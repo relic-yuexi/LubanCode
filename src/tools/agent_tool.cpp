@@ -33,6 +33,7 @@
 #include "platform/log_sink.hpp"  // §5.3 旧预算键的弃用日志
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:任务域批次闸门/投递规划(子代理宿主)
 #include "runtime/id_authority.hpp"    // ProcessIdAuthority:后台任务 bgtask 前缀号(同一发号口)
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
 #include "tools/agent_message_tool.hpp"  // scoped agent_message(P1-1:子代理只投自己直接孩子)
@@ -2233,6 +2234,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     std::string last_denial_hook_reason;
     bool last_denial_by_deny_prefix = false;
     agent::TurnWiring turn_wiring;
+    // 异步工具 P2:任务域异步运行时(子代理宿主接线;任务收场随之收口)。
+    std::unique_ptr<runtime::AsyncToolRuntime> sub_async_runtime;
     // token 估算校准(token 估算校准单):子代理与主会话共用进程级校准器,
     // 同 (provider,model) 同桶——子代理的请求也是真样本,双闸同样吃系数。
     turn_wiring.token_calibrator = &agent::DefaultTokenCalibrator();
@@ -2273,6 +2276,23 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             [&child_bridge](const std::string& batch_id, const api::Message& results) {
                 return child_bridge.OnToolResultsCommitted(batch_id, results);
             };
+        // 异步工具 P2(子代理宿主):任务域异步运行时——agent_tool 的任务
+        // 派发吃同一只批次闸门/投递规划器(不另造)。寿命随本任务:子代理
+        // 不承诺跨进程存活(单 §9 shutdown),job 由协调器在任务收场时收
+        // 口。零策略 dormant:子代理的异步工具白名单归后续装配(P3)。
+        if (child_bridge.v3_writer() != nullptr) {
+            runtime::AsyncToolRuntime::Hooks async_hooks;
+            async_hooks.writer = child_bridge.v3_writer();
+            async_hooks.writer_mutex = child_bridge.v3_shared_mutex();
+            runtime::AsyncToolRuntimeOptions async_options;
+            sub_async_runtime = runtime::AsyncToolRuntime::Create(std::move(async_hooks),
+                                                                  std::move(async_options));
+            if (sub_async_runtime != nullptr) {
+                sub_async_runtime->InstallTurnBridge(&child_bridge);
+                turn_wiring.tool_batch_gate = sub_async_runtime->gate();
+                turn_wiring.delivery_planner = sub_async_runtime->planner();
+            }
+        }
     } else if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
         auto parent_getter = foreground_hooks->parent_execution_id_getter;
         turn_wiring.on_tool_trace = [parent_getter, trace_hook = foreground_hooks->on_tool_trace](

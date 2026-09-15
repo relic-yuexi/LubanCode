@@ -62,6 +62,13 @@ public:
     // 见非零应把这份模型输出按畸形收口。
     int idless_tool_calls_dropped() const { return idless_tool_calls_dropped_; }
 
+    // 流式提前档(异步工具单 P2 §7"后期提速"):到此刻已收尾(call_id 定型、
+    // 参数 JSON 收齐)的本地可执行 tool_use 块,按完成序。批次闸门在
+    // ContentBlockDone 的消费点查它,把完整 call item 交给闸门裁决"可不可
+    // 提前派发"——JSON delta 半截、call_id 未定的块不在这份里,天然派
+    // 不出去。重复终帧不会重复入列(块只收尾一次)。
+    const std::vector<ToolUseBlock>& completed_tool_uses() const { return completed_tool_uses_; }
+
 private:
     struct OpenText {
         std::string text;
@@ -72,6 +79,8 @@ private:
         std::string name;
         std::string partial_json;
         std::string caller;
+        // provider 标的 async 位(异步工具单 §3;responses 才有)。
+        bool async_call = false;
         // 服务端工具搜索的调用(动态工具 P3):入参照走 input_json_delta 累积,
         // 收尾攒成 ServerToolUseBlock——那是 provider 执行过的事实,不是本地
         // 待执行的调用,与普通 ToolUseBlock 分家。
@@ -83,6 +92,7 @@ private:
     };
 
     std::vector<ContentBlock> content_;
+    std::vector<ToolUseBlock> completed_tool_uses_;
     std::optional<OpenText> open_text_;
     std::optional<OpenToolUse> open_tool_;
     std::optional<OpenThinking> open_thinking_;

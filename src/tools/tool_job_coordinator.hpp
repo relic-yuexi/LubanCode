@@ -146,6 +146,12 @@ struct JobStartRequest {
     std::string step_id;
     std::string assistant_message_ref;  // 声明消息(调用证据锚)
     JobExecutionPolicy policy;
+    // 异步工具单 P2·native_deferred(账面合同 P0 已钉):mode 缺省
+    // job_handle;native_deferred 须带 wireCallRef(provider/wire/callId/
+    // async)。native 不写接单链——原调用保持欠账,业务结果由规划器在
+    // 请求边界配原 call(P3 原生试点;P2 只接 seam 与假后端剧本)。
+    std::string mode = "job_handle";
+    nlohmann::json wire_call_ref;  // native_deferred 必带(载荷原样落账)
 };
 
 struct JobStartResult {
@@ -153,11 +159,16 @@ struct JobStartResult {
     std::string error_code;  // job.start.denied|job.start.queue_full|v3writer.*
     std::string error;
     std::string job_id;
-    std::string status;  // queued|awaiting_approval
+    std::string action_id;  // 本 job 的 v3 Action 身份(P2:闸门/规划器引用)
+    std::string status;     // queued|awaiting_approval|registered(提前档接单未补)
+    // 接单回执正文({"jobId":...,"status":...} JSON):批次闸门拿它当
+    // job_handle 调用的即配 tool_result。失败/接单未补时为空。
+    std::string admission_content;
 };
 
 struct JobStatusView {
     std::string job_id;
+    std::string action_id;  // v3 Action 身份(P2:完成通知引用)
     std::string state;  // registered|queued|running|succeeded|failed|cancelled|
                         // unknown|awaiting_approval(单 §6 执行投影)
     bool cancel_requested = false;
@@ -246,6 +257,21 @@ public:
     // search_start 式接单:调用证据 -> 权鉴 -> 注册落稳(落稳前不派发)
     // -> 接单结果链 -> 入队并按配额/资源锁试派发。
     JobStartResult StartJob(const JobStartRequest& request);
+
+    // ---- 流式提前档(异步工具单 P2;单 §7"后期提速"并入) ------------------
+    // SSE 流中单枚 call item 完整即派发:调用证据 -> 权鉴 -> 注册落稳 ->
+    // 接单事实链(attempt 1 的 started/finished/persisted/selected,账面
+    // 事实不依赖声明消息落账)-> 入队派发(worker 先跑)。接单 tool 消息
+    // 留给 CompleteAdmission——声明消息(assistant)落账之后才许进上下文
+    // 链,链序不倒。assistant_message_ref 允许指向流式预留的 messageId
+    // (interrupted 路也会以它成行;进程中途崩溃则留恢复缺口,按账面
+    // disposition 收)。仅 job_handle;native 模式报 unsupported_mode。
+    JobStartResult StartJobEarly(const JobStartRequest& request);
+
+    // 补接单(批次收口:assistant 已落账):幂等;已补/已终态只回 true。
+    // 回 false = 接单链落账失败(job 已注册,恢复按 complete_delivery 补)。
+    // 成功时 admission_content 给接单回执正文。
+    bool CompleteAdmission(const std::string& job_id, std::string* admission_content = nullptr);
 
     // 当前状态;终态带 resultRef 与 ≤32 KiB 有界预览;不自动重跑
     //(重复 Get 零副作用)。内部先泵一把(收割已到信封)。

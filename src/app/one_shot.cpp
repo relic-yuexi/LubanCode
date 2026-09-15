@@ -60,6 +60,7 @@
 #include "cli/image_input.hpp"
 #include "cli/live_transcript.hpp"
 #include "runtime/worktree.hpp"
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:one-shot 宿主接线(dormant)
 #include "runtime/id_authority.hpp"      // ProcessIdAuthority:单发工具栅栏的发号局
 #include "runtime/tool_trace_hub.hpp"    // ToolTraceHub:单发工具事件进轨迹的栅栏
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:单发一场的账本
@@ -532,6 +533,14 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     turn.trajectory_trigger = "external_user";
     turn.trajectory_provider = bound_provider;
     turn.trajectory_wire = lubancode::config::ProviderWireName(config.wire);
+    // 异步工具 P2(one-shot 宿主接线):会话级异步运行时挂进 SessionService
+    // 的 SessionRuntime(零策略 dormant,行为与从前一字不差;开异步工具
+    // 归 P3 装配)。
+    if (oneshot_service.runtime() != nullptr) {
+        lubancode::runtime::AttachDefaultAsyncToolRuntime(
+            *oneshot_service.runtime(), lubancode::config::ProviderWireName(config.wire));
+        turn.async_tool_runtime = oneshot_service.runtime()->async_tool_runtime();
+    }
     const int status = RunTurn(std::move(turn)).status;
     // 收口:turn 终态已由 RunTurn 的桥落账,这里封 run/session(§14.5);
     // 进程被 kill 走不到这行也不丢账——逐事件的 WAL 语义既有,恢复器按

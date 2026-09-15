@@ -261,6 +261,17 @@ P0 记账留下五处"拟议待 P1 确认",定案如下。schema 载荷合同零
 
 P1 宿主侧四接口落地口径(单 §8):start/get/wait/cancel 是宿主侧任务服务(ToolJobCoordinator),不是模型工具——模型可见性归后续批次,不改工具清单。四接口都过授权闸门(jobId 不是访问凭证,工具名与入参走原工具权限/作用域/Hook 的 gate 回调,缺省 fail-closed;派发出队时再复查一次,不因入队时获准就永久放行)。jobId 格式 `job-<六位号>`(账内单调,恢复续号)。start 接单回 `{jobId,status:"queued|awaiting_approval"}`,注册落稳前不派发;get 终态带 resultRef(指向 `tool.result.persisted` 事件)与 ≤32 KiB 有界预览,不自动重跑;wait 有界等待,超时回 pending+状态快照游标,不宣告任务失败;cancel 回取消请求状态(`cancel_requested`|`already_terminal`),不保证已终止。执行前(出队派发时)查授权与取消状态;完成信封由 worker 投递、单写者校验 ownerEpoch 后追加,worker 不直接写 history(单 §5)。
 
+### 四.2 异步工具 P2 运行时接线补遗(纯追加;实现于 `src/agent/async_tool_seam.hpp`、`src/runtime/{async_tool_runtime,provider_tool_contract,result_delivery_planner}.*`、`src/tools/job_tools.*` 与 loop/宿主接线)
+
+P1 五处定案之外,P2 落地的运行时口径(载荷合同零改动,只钉接线语义):
+
+1. **批次闸门 seam**:AgentLoop 的工具批次拆成两遍——先裁决整批(`AdjudicateBatch`:inline 收齐续跑 / job_handle 接单即配 / native_deferred 留欠账)并注册全部 launch,再按声明序执行 inline(wait 在 launch 之后处理,单 §7 次序纪律)。非 inline 调用不走 bridge 内联链(协调器自落调用证据链),批次栅栏与 RunOneTool 都跳过;接单回执块带 host-only 标记 `job_admission`,本轮 v3 结果提交路径(V3ToolResultsCommitted)按它跳过——不为同一枚调用重落第二条链。全批欠账(native 一枚结果都没有)不推空 user 消息;配对纪律 `ToolBatchPairingMatches` 认 `async_call` 位(没标 async 的调用必须同步配对,不许悬空)。
+2. **两档派发点**(2026-09-16 宿主指示并入):默认保守档 = 完整 assistant 落账后派发;流式提前档 = SSE 流中单枚 call item 完整(call_id 定型、参数 JSON 收齐——assembler 只在收尾时入 `completed_tool_uses`,半截 delta 天然到不了)即派发,宿主继续消费流。提前档策略合成:仅 side_effect_class=read_only 且未声明 resource_keys(只读无键不抢串行位)且权鉴现查允许;tool 消息留给 `CompleteAdmission` 在声明消息落账后补(链序不倒:assistant 先、接单消息后)。提前档的调用证据锚 = 流式预留的 assistant messageId(interrupted 路也以它成行;进程中途崩溃留恢复缺口,按账面 disposition 收)。重复终帧按 call id 幂等去重,只派发一次;提前派发后流断 → dispatched 无终态 → 恢复 disposition unknown_hold 不盲重跑。
+3. **投递规划(P2 面)**:完成通知只入 mailbox;请求边界(拼请求前——冻结输入前的唯一时点)选已提交结果。P2 只投 native_deferred 欠账:配对链走 `ToolActionSession::ReopenAligned`(只补 selected+tool 消息,不执行、不造 pending、不改 attempt),配对正文 = ≤32 KiB 业务预览;job_handle 完成通知入 mailbox 只记账(模型经 job_get/job_wait 自取,notify-vs-continue 调度归 P4)。prepared 在请求账发号落稳后记(每次发送尝试一条,重试新 requestId 另立条目——P1 定案 5);acknowledged 的 evidenceRef 指 `model.response.completed` 事件 id(桥的请求簿留档);证据解析不到/失败/流断落 uncertain。恢复(单 §6"原文已落仓、消息未提交")用同一套配对路:`RestoreFromLedger` 把终态已落、义务未配的 native 欠账重建进 mailbox,补投递不重跑。
+4. **能力闸**:ProviderToolContractValidator 纯合成(不接网络)——native_deferred 只在 wire=responses 且调用带 async 标记且外部探针 verified 才 verified;P2 无真探针(生产恒 unknown = fail-closed 降级,归 P3 原生试点)。快照 `tool.capability.recorded` 由运行时在首次裁决懒落一次(basis 带 provider/wire/model/endpoint)。
+5. **模型可见面**:job_get/job_wait/job_cancel 三枚工具(`src/tools/job_tools.*`)挂宿主注册表;job_wait 的结果 JSON 里已完成 job 的业务结果(results)排在自身状态(statuses)之前。start 不单设——白名单工具的普通调用由闸门接单即配。
+6. **宿主接线**:终端(interactive_session/turn_runner)、one-shot(one_shot + headless_executor 网关路)、AppServer(Detached 面)、子代理(agent_tool 任务域寿命,不承诺跨进程存活)经 `AttachDefaultAsyncToolRuntime`/`AsyncToolRuntime::Create` 接同一套闸门与规划器,不各造;生产缺省零策略(tools 白名单空 = 全 inline,权鉴 fail-closed,不派发),行为与从前一字不差。Workflow agent 节点同款接线;llm 采样节点无工具环(单次 SampleModel 请求,无批次/续接边界),不适用闸门——留账 P3 与原生试点一起评估。
+
 
 ## 五、usage 唯一 owner 表(§4.12 定案)
 
