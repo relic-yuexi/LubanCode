@@ -4,7 +4,7 @@
 现场修复补单（2026-09-14）：[Windows 连接诊断与交互配置](QQBot_Windows连接诊断与交互配置修复.todo)。覆盖 beta.1 的连接静默、Windows TLS 信任根、密钥文件权限与交互向导；待实现，归入 Q1b/Q3 验收。
 补充调研：2026-09-13，工作区 HEAD 已到 `5fcfae9e`；复核文件投影、任务账、异步审批，并读取 QQ 在线官方文档。新增第十至十四节，覆盖文件、定时任务、按钮审批和用户给出的菜单面板入口。
 状态：源码审查与实施设计；下列复选框均待实现，不能当作 QQ 已可用。
-进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q1b（配对闭环：提示限频/批准控制面/一次性码）已落 PR #90；Q5（聊天侧建单次/周期任务：工具/归属/交付绑定/认领执行/补投分型，§十一记账）已落本批 PR；Q3（真机联调）起仍待实现。
+进度：Q0（权限与激活合同）已落 PR #64；Q1（传输定案 + 协议核心 + 进程内适配器 + 激活接线 + mock 测试）已落 **PR #66**（CI：头提交活跃 suite macos-clang 绿，run [34793234435](https://github.com/relic-yuexi/LubanCode/actions/runs/34793234435)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验），配对入口与进程外壳拆 Q1b；Q2（V3 与 outbox 总装：§六八项/§七七项全落）已落 **PR #75**（CI：头提交活跃 suite rollup=success——macos-clang 绿，run [34803613704](https://github.com/relic-yuexi/LubanCode/actions/runs/34803613704)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验）；Q1b（配对闭环：提示限频/批准控制面/一次性码）已落 PR #90；Q5（聊天侧建单次/周期任务：工具/归属/交付绑定/认领执行/补投分型，§十一记账）已落 PR #94；Q4（手机发文件闭环：§十收/发两面，mock 链全通）已落 **PR #93**（CI：见 PR checks；真平台媒体行为归 Q3）；Q3（真机联调）/Q6-Q7 待实现。
 
 官方文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html
 
