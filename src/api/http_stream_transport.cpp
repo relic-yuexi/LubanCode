@@ -182,7 +182,10 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
 
     // 收场分型,顺序有讲究:用户取消 > 帧溢出 > 网络错 > HTTP 状态。
     if (cancelled || (cancel != nullptr && cancel->load())) {
-        return std::unexpected(Error{ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
+        // 取消误报 ESC 单 Bug 1:传输层只知道"取消信号升了",不知道谁升的
+        // ——可能是用户按键,也可能是调用方的超时看门狗。文案保持中性,
+        // 不臆断按键;真来源由采样层(SampleModel)按升旗人归因后修正。
+        return std::unexpected(Error{ErrorKind::Cancelled, "请求被取消信号中止", 0});
     }
 
     if (frame_overflow) {

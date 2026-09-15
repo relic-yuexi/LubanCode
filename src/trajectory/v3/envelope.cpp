@@ -143,6 +143,7 @@ const char* MessagePurposeName(MessagePurpose value) {
         case MessagePurpose::Capability: return "capability";
         case MessagePurpose::GoalEvaluation: return "goal_evaluation";
         case MessagePurpose::ActionSummary: return "action_summary";
+        case MessagePurpose::MemoryExtract: return "memory_extract";
     }
     return "unknown";
 }
@@ -154,6 +155,7 @@ std::optional<MessagePurpose> MessagePurposeFromName(std::string_view name) {
     if (name == "capability") return MessagePurpose::Capability;
     if (name == "goal_evaluation") return MessagePurpose::GoalEvaluation;
     if (name == "action_summary") return MessagePurpose::ActionSummary;
+    if (name == "memory_extract") return MessagePurpose::MemoryExtract;
     return std::nullopt;
 }
 
@@ -359,6 +361,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::GatewayWorkBound: return "gateway.work.bound";
         case EventKindV3::ReplySelectionCommitted: return "reply.selection.committed";
         case EventKindV3::PromptCompositionApplied: return "prompt.composition.applied";
+        case EventKindV3::MemoryExtractionAssessed: return "memory.extraction.assessed";
+        case EventKindV3::MemoryWriteReceipted: return "memory.write.receipted";
 
     }
     return "unknown";
@@ -494,6 +498,9 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::ReplySelectionCommitted,
             // 提示组合事实(应用Worker接入单 §五 134,statusless)。
             EventKindV3::PromptCompositionApplied,
+            // 记忆账(取消误报 ESC 单 Bug 2):statusless 事实行。
+            EventKindV3::MemoryExtractionAssessed,
+            EventKindV3::MemoryWriteReceipted,
 
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {

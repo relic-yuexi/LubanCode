@@ -473,7 +473,8 @@ void RestoreIdCounters(std::uint64_t (&counters)[10], const std::vector<nlohmann
     static const Prefix kPrefixes[] = {
         {"msg-", 0},          {"evt-", 1},        {"turn-", 2},        {"step-", 3},
         {"request-", 4},      {"stream-", 5},     {"compact-", 6},     {"action-", 7},
-        {"hookdispatch-", 8}, {"task-", 9},       {"compact-turn-", 2}};
+        {"hookdispatch-", 8}, {"task-", 9},       {"compact-turn-", 2},
+        {"memory-turn-", 2}};
     auto bump = [&](const std::string& id) {
         for (const auto& p : kPrefixes) {
             if (id.rfind(p.prefix, 0) != 0) {
@@ -1142,6 +1143,12 @@ std::string V3Writer::NewCompactTurnId() {
 std::string V3Writer::NewGoalEvalTurnId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->NextId("goaleval-turn", 2);
+}
+std::string V3Writer::NewMemoryTurnId() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    // 记忆抽取旁路的内部回合号(取消误报 ESC 单 Bug 2):与 turn/
+    // compact-turn/goaleval-turn 共用号池,前缀互不撞名(§4.6 同款纪律)。
+    return impl_->NextId("memory-turn", 2);
 }
 std::string V3Writer::NewStepId() {
     std::lock_guard<std::mutex> lock(impl_->mutex);

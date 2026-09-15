@@ -282,6 +282,7 @@ const char* ExtractionErrorCodeName(ExtractionErrorCode code) {
         case ExtractionErrorCode::OutputTruncated: return "output_truncated";
         case ExtractionErrorCode::EmptyOutput: return "empty_output";
         case ExtractionErrorCode::TransportFailed: return "transport_failed";
+        case ExtractionErrorCode::DeadlineTimeout: return "deadline_timeout";
         case ExtractionErrorCode::RouteMiss: return "route_miss";
     }
     return "other";
@@ -595,10 +596,17 @@ std::expected<MemoryExtraction, ExtractionError> FinishMemoryExtraction(const ag
     // 模型文本按不可信输入:每种失败都带稳定分类与定位诊断,不透传库异常。
     if (!sampled.ok) {
         ExtractionError error;
-        error.code = ExtractionErrorCode::TransportFailed;
-        // 错误消息来自 wire,可能夹任意字节——出口先消毒,保证终端文案是
-        // 合法 UTF-8。
-        error.message = "抽取请求失败: " + lubancode::platform::SanitizeExternalText(sampled.error.message);
+        if (sampled.error.kind == api::ErrorKind::Cancelled && sampled.error.api_code == "local_deadline") {
+            // 本地超时预算到点(取消误报 ESC 单 Bug 1):单独分类,不与网络
+            // 失败混账;终端按预算另起一行提示,这里只给不带按键指控的短文案。
+            error.code = ExtractionErrorCode::DeadlineTimeout;
+            error.message = "记忆抽取超过本地超时预算,本轮跳过";
+        } else {
+            error.code = ExtractionErrorCode::TransportFailed;
+            // 错误消息来自 wire,可能夹任意字节——出口先消毒,保证终端文案是
+            // 合法 UTF-8。
+            error.message = "抽取请求失败: " + lubancode::platform::SanitizeExternalText(sampled.error.message);
+        }
         error.request_id = sampled.provider_response_id;
         error.body_bytes = sampled.text.size();
         error.stop_reason = sampled.stop_reason;
@@ -1181,6 +1189,12 @@ void MemoryTurnLedger::FinishTurn(std::int64_t foreground_tail_ms) {
 
 void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {
     if (trajectory_ == nullptr) return;
+    // v3 场走 v3 写口(取消误报 ESC 单 Bug 2):typed 事件 + camelCase 载荷,
+    // 不往 v3 卷塞 v2 行;v2 老路一字不动。
+    if (auto* v3_writer = trajectory_->v3_main_writer()) {
+        RecordAssessedV3Locked(*v3_writer, foreground_tail_ms);
+        return;
+    }
     auto* recorder = trajectory_->main();
     if (recorder == nullptr) return;
 
@@ -1253,9 +1267,94 @@ void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {
     (void)recorder->Record(request, trajectory::Durability::ProcessCrash);
 }
 
+void MemoryTurnLedger::RecordAssessedV3Locked(trajectory::v3::V3Writer& writer,
+                                              std::int64_t foreground_tail_ms) {
+    // v3 的 assessed 事实行(取消误报 ESC 单 Bug 2):字段与 v2 同一套账
+    //(跳过原因/决策/收口材料/墙钟/失败码),键名随 v3 合同走 camelCase;
+    // turnId 挂触发它的主回合,重开会话单凭事件答得出"哪次抽取、预算
+    // 多久、实际多久、谁叫停"。
+    nlohmann::json payload{
+        {"trigger", ExtractionTriggerName(ExtractionTrigger::EveryTurn)},
+        {"turnId", state_.turn_id},
+        {"decision", ExtractionDecisionName(state_.extraction_gate_decision)},
+        {"userTextStats",
+         nlohmann::json{{"unicodeScalarCount", state_.user_text_stats.unicode_scalar_count},
+                        {"cjkCharCount", state_.user_text_stats.cjk_char_count},
+                        {"latinWordCount", state_.user_text_stats.latin_word_count},
+                        {"codeTokenCount", state_.user_text_stats.code_token_count},
+                        {"onlyAcknowledgement", state_.user_text_stats.only_acknowledgement},
+                        {"onlySlashCommand", state_.user_text_stats.only_slash_command}}},
+        {"foregroundTailMs", foreground_tail_ms},
+    };
+    if (gate_context_noted_) {
+        payload["hasToolEvidence"] = turn_has_tool_evidence_;
+    }
+    if (shadow_evaluated_) {
+        payload["shadowGate"] = nlohmann::json{
+            {"durableSignal", state_.durable_signal_reasons.empty() ? "none" : "hit"},
+            {"signals", state_.durable_signal_reasons}};
+    }
+    if (state_.extraction_gate_decision == ExtractionDecision::Skipped) {
+        payload["skipReason"] = ExtractionSkipReasonName(state_.extraction_gate_reason);
+    } else {
+        ExtractOutcome outcome = pending_outcome_;
+        if (!outcome.ok && outcome.error_code.empty()) {
+            outcome.error_code = "aborted";  // 收口没走到,不编数字
+        }
+        payload["extractOutcome"] = outcome.ok ? "completed" : "failed";
+        if (!outcome.ok) payload["errorCode"] = outcome.error_code;
+        payload["extractWallMs"] = outcome.extract_wall_ms;
+        payload["reviewCandidates"] = outcome.review_candidates;
+        payload["autoWritten"] = outcome.auto_written;
+        if (outcome.usage_reported) {
+            payload["usageReported"] = true;
+            payload["inputTokens"] = outcome.input_tokens;
+            payload["outputTokens"] = outcome.output_tokens;
+            payload["cachedTokens"] = outcome.cached_tokens;
+        }
+    }
+    trajectory::v3::EventDraft draft;
+    draft.kind = trajectory::v3::EventKindV3::MemoryExtractionAssessed;
+    if (!state_.turn_id.empty()) {
+        draft.turn_id = state_.turn_id;
+    }
+    draft.payload = std::move(payload);
+    (void)writer.AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+}
+
+void MemoryTurnLedger::RecordReceiptV3Locked(trajectory::v3::V3Writer& writer,
+                                             const memory::MemoryWriteReceipt& receipt,
+                                             const std::string& turn_id) {
+    nlohmann::json payload{
+        {"source", memory::MemoryWriteSourceName(receipt.source)},
+        {"operation", receipt.operation},
+        {"outcome", memory::MemoryWriteReceiptOutcomeName(receipt.outcome)},
+        {"layer", receipt.layer},
+    };
+    if (!receipt.kind.empty()) payload["kind"] = receipt.kind;
+    if (!turn_id.empty()) payload["turnId"] = turn_id;
+    if (receipt.outcome == memory::MemoryWriteReceiptOutcome::Queued) {
+        payload["jobId"] = receipt.job_id;
+    } else {
+        payload["errorCode"] = receipt.error_code;
+    }
+    trajectory::v3::EventDraft draft;
+    draft.kind = trajectory::v3::EventKindV3::MemoryWriteReceipted;
+    if (!turn_id.empty()) {
+        draft.turn_id = turn_id;
+    }
+    draft.payload = std::move(payload);
+    (void)writer.AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+}
+
 void MemoryTurnLedger::RecordReceiptLocked(const memory::MemoryWriteReceipt& receipt,
                                            const std::string& turn_id) {
     if (trajectory_ == nullptr) return;
+    // v3 场走 v3 写口(Bug 2 同门):receipted 事实行,载荷 camelCase。
+    if (auto* v3_writer = trajectory_->v3_main_writer()) {
+        RecordReceiptV3Locked(*v3_writer, receipt, turn_id);
+        return;
+    }
     auto* recorder = trajectory_->main();
     if (recorder == nullptr) return;
 

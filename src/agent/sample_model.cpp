@@ -38,6 +38,7 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     if (options.boundary_recorder != nullptr) {
         RequestPreparedContext prepared_ctx;
         prepared_ctx.purpose = options.purpose;
+        prepared_ctx.timeout_budget_secs = options.timeout_secs;
         recorded_request_id = options.boundary_recorder->OnRequestPrepared(wire, prepared_ctx);
         if (recorded_request_id.empty()) {
             SampleResult blocked;
@@ -62,19 +63,45 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     }
 
     // 看门狗(与旧六处同一形状:steady clock 差 + 100ms 轮询,到点拉本地
-    // 旗)。外部取消链在场时 send_stream 只吃外部链——本地旗没人读,超时
-    // 不抢断,goal evaluator 的旧口径如实保留。join 必须有:本地旗活在
-    // 本栈,detach 出去的线程不许越栈引用。
+    // 旗)。取消误报 ESC 单把取消口收成三形:
+    //   只外部链(无预算):effective = 外部链,零看门狗,旧行为一字不动;
+    //   只预算(无外部链):effective = 本地旗,旧行为一字不动;
+    //   两者同时在场:合并旗——看门狗两头盯(与 goal evaluator 组合旗同
+    //   一形状),任一升起都掐流,并记下谁先升(fired:1=外部链,2=本地
+    //   deadline)。旧"外部链在场时超时不抢断、本地旗无人读"的死档废除
+    //   (§四-2:统一归因时不许漏这个组合)。
+    // join 必须有:本地旗活在本栈,detach 出去的线程不许越栈引用。
     std::atomic<bool> local_cancel{false};
+    std::atomic<bool> merged_cancel{false};
+    std::atomic<int> cancel_fired{0};  // 合并形专用:1=外部链先升,2=deadline 先到
     std::atomic<bool> done{false};
     std::optional<std::thread> watchdog;
-    if (options.timeout_secs > 0) {
+    const bool dual_cancel = options.cancel != nullptr && options.timeout_secs > 0;
+    if (options.timeout_secs > 0 && !dual_cancel) {
         watchdog.emplace([&local_cancel, &done, timeout = options.timeout_secs]() {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
             while (!done.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             if (!done.load()) local_cancel = true;
+        });
+    } else if (dual_cancel) {
+        watchdog.emplace([&merged_cancel, &cancel_fired, &done, external = options.cancel,
+                          timeout = options.timeout_secs]() {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
+            while (!done.load()) {
+                if (external != nullptr && external->load()) {
+                    cancel_fired.store(1);
+                    merged_cancel.store(true);
+                    return;
+                }
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    cancel_fired.store(2);
+                    merged_cancel.store(true);
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
         });
     }
 
@@ -83,8 +110,9 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     std::string stream_error_message;
     std::string stream_error_code;
     std::string assembler_response_id;
-    const std::atomic<bool>* effective_cancel =
-        options.cancel != nullptr ? options.cancel : (options.timeout_secs > 0 ? &local_cancel : nullptr);
+    const std::atomic<bool>* effective_cancel = dual_cancel ? &merged_cancel
+        : (options.cancel != nullptr ? options.cancel
+                                     : (options.timeout_secs > 0 ? &local_cancel : nullptr));
     const auto sent = backend.send_stream(
         wire,
         [&](const api::StreamEvent& event) {
@@ -108,6 +136,48 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     done = true;
     if (watchdog.has_value()) {
         watchdog->join();
+    }
+
+    // ---- 取消归因(取消误报 ESC 单 Bug 1):四分,不臆断按键 ------------
+    // 完成与 deadline 同场的裁决:MessageDone 已见过(stop_reason 非空)=
+    // 完整成功响应——收尾才升的取消旗不改判,响应一字不少就不算取消。
+    // 反过来:取消不能伪造成功,半截就是半截。
+    const bool cancel_after_complete =
+        !sent.has_value() && sent.error().kind == api::ErrorKind::Cancelled && !stream_error &&
+        !assembler.stop_reason().empty();
+    OutputCancelSource cancel_source = OutputCancelSource::StreamError;  // 谁的旗都没升=来源未知
+    bool local_deadline_hit = false;
+    if (dual_cancel) {
+        if (cancel_fired.load() == 1) {
+            cancel_source = options.cancel_source;  // 外部链先升:按升旗人申报
+        } else if (cancel_fired.load() == 2) {
+            cancel_source = OutputCancelSource::Internal;
+            local_deadline_hit = true;
+        }
+    } else if (options.cancel != nullptr && options.cancel->load()) {
+        cancel_source = options.cancel_source;
+    } else if (options.cancel == nullptr && local_cancel.load()) {
+        cancel_source = OutputCancelSource::Internal;
+        local_deadline_hit = true;
+    }
+    // 返回错误的文案随归因修正:HTTP 层只知取消信号,给的是中性话;这里
+    // 才是知道来源的一层。deadline 带预算与稳定码 local_deadline;用户取
+    // 消只在升旗人申报过 UserInterrupt 时才说(证据 = 交互层按键监听);
+    // 来源未知保持中性,不冒充按键。
+    api::Error attributed_error;
+    bool error_attributed = false;
+    if (!sent.has_value() && sent.error().kind == api::ErrorKind::Cancelled && !cancel_after_complete) {
+        attributed_error = sent.error();
+        error_attributed = true;
+        if (local_deadline_hit) {
+            attributed_error.message =
+                "采样超过 " + std::to_string(options.timeout_secs) + " 秒,被本地超时预算停止";
+            attributed_error.api_code = "local_deadline";
+        } else if (cancel_source == OutputCancelSource::UserInterrupt) {
+            attributed_error.message = "用户取消了这次请求";
+        } else if (cancel_source == OutputCancelSource::Internal) {
+            attributed_error.message = "请求被宿主内部取消信号停止";
+        }
     }
 
     SampleResult result;
@@ -141,18 +211,13 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
         api::Message assistant;
         assistant.role = api::Role::Assistant;
         assistant.content = assembler.BuildMessage().content;
-        if (!sent.has_value()) {
+        if (!sent.has_value() && !cancel_after_complete) {
             if (sent.error().kind == api::ErrorKind::Cancelled) {
-                // 取消来源说真话(主会话输出预留占坑单 §4.2):外部取消链真被
-                // 升起来才记 user_interrupt(全库升旗人就是交互层的按键监听);
-                // 本地看门狗超时(外部链不在场,超时才有权拉本地旗)记
-                // internal;谁的旗都没升却回取消分型的,按流侧异常记账。
-                OutputCancelSource cancel_source = OutputCancelSource::StreamError;
-                if (options.cancel != nullptr && options.cancel->load()) {
-                    cancel_source = OutputCancelSource::UserInterrupt;
-                } else if (options.cancel == nullptr && local_cancel.load()) {
-                    cancel_source = OutputCancelSource::Internal;
-                }
+                // 取消来源说真话(主会话输出预留占坑单 §4.2 + 取消误报 ESC
+                // 单 Bug 1):四分归因与返回错误/终端共用同一个 cancel_source
+                // ——用户取消只在升旗人申报时记 user_interrupt;本地 deadline
+                // 与宿主内部停止记 internal;谁的旗都没升却回取消分型的,按
+                // 流侧异常记账,不冒充按键。
                 options.boundary_recorder->OnOutputCancelled(recorded_request_id, cancel_source);
             } else {
                 options.boundary_recorder->OnOutputFailed(recorded_request_id, sent.error().message);
@@ -160,15 +225,16 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
         } else if (stream_error) {
             options.boundary_recorder->OnOutputFailed(recorded_request_id, stream_error_message);
         } else {
+            // 含"完成与 deadline 同场"的裁决胜者:完整成功响应照走 completed。
             options.boundary_recorder->OnOutputCompleted(recorded_request_id, assistant,
                 result.stop_reason.empty() ? "end_turn" : result.stop_reason,
                                                          result.provider_response_id);
         }
     }
 
-    if (!sent.has_value()) {
+    if (!sent.has_value() && !cancel_after_complete) {
         result.ok = false;
-        result.error = sent.error();
+        result.error = error_attributed ? attributed_error : sent.error();
         return result;
     }
     if (stream_error) {

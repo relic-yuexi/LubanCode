@@ -39,6 +39,9 @@ enum class MessageRole { System, User, Assistant, Tool };
 // 不进 main 输入链;goal_continuation 的续跑 user 正文走 Conversation
 //(它真进 main),宿主来源在 origin 区分,不另立 purpose。
 // action_summary(B2):整批结果压缩的摘要模型内部回合,同样不进 main 链。
+// memory_extract(记忆抽取取消误报 ESC 单 Bug 2):回合收尾记忆抽取的
+// 旁路内部回合(system/转写 user/assistant),不进 main 链——旁路桥
+// TrajectoryBypassBridge 的 v3 写模式用它;schema 纯追加,旧账零出现。
 enum class MessagePurpose {
     Conversation,
     Compact,
@@ -47,6 +50,7 @@ enum class MessagePurpose {
     Capability,
     GoalEvaluation,
     ActionSummary,
+    MemoryExtract,
 };
 enum class MessageOrigin {
     Human,
@@ -251,6 +255,14 @@ enum class EventKindV3 {
     // statusless 事实提交(同 state.goal.applied 族):只记"本场用了哪份
     // 组合",不改控制状态;业务正文伪装不了宿主权限(来源逐段在账)。
     PromptCompositionApplied,
+
+    // 记忆账(记忆抽取取消误报 ESC 单 Bug 2,schema 纯追加;旧账零出现):
+    //   memory.extraction.assessed —— 回合收尾的抽取门控与结果评估(v2
+    //     同名事件的 v3 对应;statusless 事实,turnId=触发它的主回合)。
+    //   memory.write.receipted —— 四路写路(save/forget/accept)的排队/
+    //     被拒回执(v2 同名事件的 v3 对应;statusless 事实)。
+    MemoryExtractionAssessed,
+    MemoryWriteReceipted,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

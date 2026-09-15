@@ -266,6 +266,169 @@ TEST_CASE("取消记账(§4.2): 谁的旗都没升的取消分型记 stream_erro
     CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::StreamError);
 }
 
+// ---- 取消误报 ESC 单 Bug 1:四分归因 + 文案随归因 --------------------------
+
+TEST_CASE("取消归因(Bug 1): 本地 deadline 回可识别超时——码/预算文案/事件同源") {
+    BlockingBackend backend;
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.timeout_secs = 1;
+    options.boundary_recorder = &recorder;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+    // 稳定码:抽取层/终端按它分流,不认中文文案。
+    CHECK(result.error.api_code == "local_deadline");
+    // 文案带预算、不提按键。
+    CHECK(result.error.message.find("1 秒") != std::string::npos);
+    CHECK(result.error.message.find("ESC") == std::string::npos);
+    CHECK(result.error.message.find("用户") == std::string::npos);
+    // 事件记录同一枚归因:internal_cancel。
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::Internal);
+}
+
+TEST_CASE("取消归因(Bug 1): 外部链升旗且申报用户——才说用户取消;申报内部则说内部") {
+    // 甲:默认申报(交互层按键监听)→ 用户取消,文案明说,事件 user_interrupt。
+    {
+        BlockingBackend backend;
+        CancelSourceRecorder recorder;
+        std::atomic<bool> cancel{false};
+        SampleOptions options;
+        options.cancel = &cancel;
+        options.boundary_recorder = &recorder;
+        std::thread flip([&cancel]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            cancel = true;
+        });
+        const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+        flip.join();
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+        CHECK(result.error.message == "用户取消了这次请求");
+        CHECK(result.error.api_code.empty());
+        REQUIRE(recorder.cancel_source.has_value());
+        CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::UserInterrupt);
+    }
+    // 乙:升旗人申报内部(起名精炼一类宿主自己拉的旗)→ 内部停止,不冤枉按键。
+    {
+        BlockingBackend backend;
+        CancelSourceRecorder recorder;
+        std::atomic<bool> cancel{false};
+        SampleOptions options;
+        options.cancel = &cancel;
+        options.cancel_source = lubancode::agent::OutputCancelSource::Internal;
+        options.boundary_recorder = &recorder;
+        std::thread flip([&cancel]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            cancel = true;
+        });
+        const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+        flip.join();
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.message == "请求被宿主内部取消信号停止");
+        CHECK(result.error.message.find("用户") == std::string::npos);
+        REQUIRE(recorder.cancel_source.has_value());
+        CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::Internal);
+    }
+}
+
+TEST_CASE("取消归因(Bug 1): 来源未知的取消文案原样保留(中性,不臆断)") {
+    FailingBackend backend;  // 无旗却回 Cancelled:来源未知
+    SampleOptions options;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.message == "被取消");  // backend 原文不被改写
+    CHECK(result.error.api_code.empty());
+}
+
+TEST_CASE("取消归因(Bug 1): 网络失败原样透传,不进取消分账") {
+    FailingBackend backend;
+    backend.kind = lubancode::api::ErrorKind::Network;
+    backend.message = "连接被重置";
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.boundary_recorder = &recorder;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Network);
+    CHECK(result.error.message == "连接被重置");
+    CHECK_FALSE(recorder.cancel_source.has_value());  // 走 failed 收口,不沾取消
+}
+
+// 完整流已收尾(MessageDone 带结束原因)后取消信号才升:成功不被收尾误改。
+class CompleteThenCancelBackend final : public lubancode::api::Backend {
+public:
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request&,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>*) override {
+        on_event(lubancode::api::MessageStart{"resp-race-1", "test-model"});
+        on_event(lubancode::api::TextDelta{"完整回答"});
+        on_event(lubancode::api::ContentBlockDone{0});
+        lubancode::api::MessageDone done;
+        done.stop_reason = "end_turn";
+        done.usage.input_tokens = 77;
+        done.usage.output_tokens = 5;
+        on_event(done);
+        // 收尾之后 transport 才回取消分型(进度回调竞态的现场形状)。
+        return std::unexpected(
+            lubancode::api::Error{lubancode::api::ErrorKind::Cancelled, "请求被取消信号中止", 0});
+    }
+};
+
+TEST_CASE("完成与 deadline 同场(Bug 1): 完整成功响应不被收尾误改取消") {
+    CompleteThenCancelBackend backend;
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.timeout_secs = 1;  // 预算在场,裁决规则须顶住
+    options.boundary_recorder = &recorder;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK(result.ok);  // MessageDone 已见:响应一字不少,不算取消
+    CHECK(result.text == "完整回答");
+    CHECK(result.stop_reason == "end_turn");
+    CHECK(result.usage.input_tokens == 77);  // usage 不抹
+    CHECK(result.provider_response_id == "resp-race-1");
+    CHECK_FALSE(recorder.cancel_source.has_value());  // 记 completed,不记 cancelled
+}
+
+TEST_CASE("合并取消(Bug 1 §四-2): 外部链与预算同场,deadline 先到归 internal") {
+    BlockingBackend backend;
+    CancelSourceRecorder recorder;
+    std::atomic<bool> cancel{false};  // 全程不升:只有 deadline 会到
+    SampleOptions options;
+    options.cancel = &cancel;
+    options.timeout_secs = 1;
+    options.boundary_recorder = &recorder;
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+    CHECK(result.error.api_code == "local_deadline");  // 旧死档:外部链在场超时不抢断——已废
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::Internal);
+}
+
+TEST_CASE("合并取消(Bug 1 §四-2): 外部链先升归升旗人申报") {
+    BlockingBackend backend;
+    CancelSourceRecorder recorder;
+    std::atomic<bool> cancel{false};
+    SampleOptions options;
+    options.cancel = &cancel;
+    options.timeout_secs = 30;  // 预算在场但用户先动手
+    options.boundary_recorder = &recorder;
+    std::thread flip([&cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel = true;
+    });
+    const SampleResult result = SampleModel(backend, OneShot("指令", "材料"), options);
+    flip.join();
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+    CHECK(result.error.message == "用户取消了这次请求");
+    REQUIRE(recorder.cancel_source.has_value());
+    CHECK(*recorder.cancel_source == lubancode::agent::OutputCancelSource::UserInterrupt);
+}
+
 TEST_CASE("output_schema 复检:过/不过两态,不影响 ok") {
     FullBackend ok_backend;
     ok_backend.reply = "{\"decision\": \"achieved\"}";
