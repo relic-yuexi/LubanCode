@@ -219,7 +219,9 @@ TEST_CASE("v3 旁路全流(成功例): 消息行 + prepared/sent/started/complet
     const std::string bypass_turn = user_line->at("turnId").get<std::string>();
     CHECK(bypass_turn.rfind("memory-turn-", 0) == 0);
     CHECK(user_line->value("parentTurnId", std::string()) == "turn-000001");
-    CHECK(user_line->value("display", std::string()) == "collapsed");
+    // display 落盘形如 {"mode":"collapsed"}(§1.2 信封合同),不是裸串。
+    REQUIRE(user_line->contains("display"));
+    CHECK(user_line->at("display").at("mode").get<std::string>() == "collapsed");
 
     // 3) prepared:purpose/预算/引用/模型齐,turnId+stepId 在信封。
     const auto* prepared = FindLine(lines, "event", "kind", "model.request.prepared");
@@ -272,9 +274,11 @@ TEST_CASE("v3 旁路全流(成功例): 消息行 + prepared/sent/started/complet
     }
     REQUIRE(assistant != nullptr);
     CHECK(assistant->value("purpose", std::string()) == "memory_extract");
-    CHECK(assistant->value("display", std::string()) == "hidden");
+    REQUIRE(assistant->contains("display"));
+    CHECK(assistant->at("display").at("mode").get<std::string>() == "hidden");
     CHECK(assistant->value("turnId", std::string()) == bypass_turn);
-    CHECK(assistant->value("parentTurnId", std::string()) == "turn-000001");
+    // assistant 的主回合关联走 turnId(内部回合)——writer 的 CompleteStream
+    // Response 定稿不带 parentTurnId,主回合挂靠在 user 行与 prepared 上。
     CHECK(assistant->at("usage").value("inputTokens", std::int64_t{0}) == 812);
     CHECK(assistant->at("usage").value("outputTokens", std::int64_t{0}) == 96);
     CHECK(assistant->value("provider", std::string()) == "kimi");
