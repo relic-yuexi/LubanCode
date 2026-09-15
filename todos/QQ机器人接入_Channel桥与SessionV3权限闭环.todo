@@ -341,7 +341,7 @@ LubanCode 已有 [ApprovalRequest / InteractionDecision](../src/runtime/interact
 
 **遗留（后续批次）**：外接渠道适配器的 capabilities 协商消费面（多渠道批次）；approve 带的 per-turn 收窄重验（现沿路由冻结账，无独立 policy revision 键）；审批窗配置面（`approval_timeout_ms` 泵级常量，未进用户 config）；群聊审批（映射已备（group_member_openid），群聊准入 Q5 起 Direct-only）；Q7“待审批”菜单入口；审批事件的多 turn 并发账序（TakeFactsForTurn 按 turn 摘取，账内序不保证全局时序——单 turn 内事实行序稳定）。
 
-**PR/CI**：[PR #97](https://github.com/relic-yuexi/LubanCode/pull/97)（基线 4795ecac，头提交 77567fdf）。CI 头提交活跃 suite rollup=success——macos-clang 绿（23m15s），run [34993837617](https://github.com/relic-yuexi/LubanCode/actions/runs/34993837617)；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验。中途四红皆编译/断言面：GatewayEvent 加字段后位置聚合初始化错位、broker 头缺 `<future>`、键盘深嵌套 initializer list clang 解析、ExplicitlyAllows 复用扩带后的 Allows 把审批带工具误报预授权（router+e2e 双册抓红——审批带"可以问"≠"预先允许"的语义钉子）。
+**PR/CI**：[PR #97](https://github.com/relic-yuexi/LubanCode/pull/97)（原基线 4795ecac；2026-09-16 rebase 到 main 890741da——与 #96 在 envelope/schema3 的 V3 kind 注册面撞车，memory.* 与 channel.approval.* 两族叠加解，头提交 536f27a5）。CI 头提交活跃 suite rollup=success——首绿 run [34993837617](https://github.com/relic-yuexi/LubanCode/actions/runs/34993837617)（macos-clang 23m15s），rebase 后复验同绿；windows/linux 腿按 PR 快车道设计不跑，合并后全量复验。中途四红皆编译/断言面：GatewayEvent 加字段后位置聚合初始化错位、broker 头缺 `<future>`、键盘深嵌套 initializer list clang 解析、ExplicitlyAllows 复用扩带后的 Allows 把审批带工具误报预授权（router+e2e 双册抓红——审批带"可以问"≠"预先允许"的语义钉子）。
 
 ## 十三、Q7：自定义菜单与指令面板
 
