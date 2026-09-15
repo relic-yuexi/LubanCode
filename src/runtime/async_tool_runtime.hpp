@@ -79,6 +79,13 @@ public:
 
     static std::unique_ptr<AsyncToolRuntime> Create(Hooks hooks, AsyncToolRuntimeOptions options);
 
+    // 析构只在 cpp 里 default(Impl 是 pimpl,头内 =default 会让任何
+    // 构造此类型的 TU 实例化 ~unique_ptr<Impl> 而碰上不完整类型——
+    // V3Writer 同款纪律)。
+    ~AsyncToolRuntime();
+    AsyncToolRuntime(const AsyncToolRuntime&) = delete;
+    AsyncToolRuntime& operator=(const AsyncToolRuntime&) = delete;
+
     // 每轮开拍前钉当前轮桥:证据/声明册/回合号的查询口走它(轮桥按轮
     // 新建,运行时按会话活;没钉 = 桥面查询全空,闸门提前档不派发、
     // acknowledged 落 uncertain——如实,不冒充)。

@@ -452,6 +452,8 @@ void AsyncToolRuntime::NoteModelIdentity(const std::string& provider, const std:
     impl_->options.model = model;
 }
 
+AsyncToolRuntime::~AsyncToolRuntime() = default;
+
 agent::ToolBatchGate* AsyncToolRuntime::gate() { return impl_.get(); }
 
 agent::ResultDeliveryPlanner* AsyncToolRuntime::planner() { return impl_->planner_.get(); }
