@@ -46,15 +46,14 @@ public:
         return "查询后台任务当前状态。终态带 resultRef 与有界预览;只读,不自动重跑。";
     }
     nlohmann::json input_schema() const override {
-        return nlohmann::json::object({
-            {"type", "object"},
-            {"properties",
-             nlohmann::json::object({
-                 {"jobId", nlohmann::json::object({{"type", "string"},
-                                                   {"description", "start 接单回执里的 jobId"}}),
-             })},
-            {"required", nlohmann::json::array({"jobId"})},
+        nlohmann::json schema = nlohmann::json::object();
+        schema["type"] = "object";
+        schema["properties"] = nlohmann::json::object({
+            {"jobId", nlohmann::json::object({{"type", "string"},
+                                              {"description", "start 接单回执里的 jobId"}})},
         });
+        schema["required"] = nlohmann::json::array({"jobId"});
+        return schema;
     }
     Tool::Result execute(const nlohmann::json& input) override {
         if (!input.is_object() || !input.contains("jobId") || !input["jobId"].is_string()) {

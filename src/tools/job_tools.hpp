@@ -24,6 +24,8 @@
 
 namespace lubancode::tools {
 
+class ToolRegistry;
+
 // 三枚工具共用一只协调器(shared 保序:注册进 ToolRegistry 的工具与
 // AsyncToolRuntime 的协调器同一份,谁先收场都不悬挂)。
 std::unique_ptr<Tool> MakeJobGetTool(std::shared_ptr<ToolJobCoordinator> coordinator);
