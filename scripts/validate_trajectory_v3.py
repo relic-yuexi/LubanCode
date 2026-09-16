@@ -104,6 +104,15 @@ KINDS = {
     "memory.extraction.assessed", "memory.write.receipted",
     # 记忆账续(T08/V3-GAP-03):召回注入事实 + 写入因果边,statusless。
     "memory.recall.injected", "memory.save.requested",
+    # 渠道远端审批(QQ 接入单 Q6;statusless 事实行,#97 落账时漏登此表,
+    # T11 批补记)。
+    "channel.approval.requested", "channel.approval.resolved",
+    # T11 / V3-GAP-06(Session v3 旧设计清理单)五域遗漏事实,均 statusless:
+    # 标题来源分家/环境快照/审批档位/验证与迟到观察/容量压力与预算裁决。
+    "session.environment.captured", "approval.mode.applied",
+    "tool.verification.recorded", "tool.verification.invalidated",
+    "tool.observation.late", "recovery.note.recorded",
+    "context.pressure.recorded",
 
 }
 
@@ -135,6 +144,13 @@ STATUSLESS_KINDS = {
     "goal.checkpoint.recorded", "goal.evidence.recorded",
     "goal.evaluation.requested", "goal.evaluation.completed", "goal.evaluation.rejected",
     "goal.wait.registered", "goal.wait.resolved", "goal.usage.recorded",
+    # 渠道远端审批(QQ 接入单 Q6)与 T11 五域遗漏事实(Session v3 旧设计
+    # 清理单 V3-GAP-06):全部 statusless 事实行。
+    "channel.approval.requested", "channel.approval.resolved",
+    "session.environment.captured", "approval.mode.applied",
+    "tool.verification.recorded", "tool.verification.invalidated",
+    "tool.observation.late", "recovery.note.recorded",
+    "context.pressure.recorded",
 }
 
 GOAL_LIFECYCLES = {
@@ -410,7 +426,10 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             id_field = "taskId"
         elif kind.startswith("subagent."):
             id_field = "actionId"
-        elif kind in ("title.requested", "title.extracted", "session.title.applied"):
+        elif kind in ("title.requested", "title.extracted"):
+            # T11-A:自动生成流必带生成身份;session.title.applied 的 manual/
+            # local 来源没有生成身份,不硬性要求(生成行由载荷 source+
+            # C++ schema3 联合校验)。
             id_field = "titleGenerationId"
         if id_field is not None and not isinstance(obj.get(id_field), str):
             raise ValidationError(f"{kind} 必带 {id_field}")
@@ -622,6 +641,83 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             old, new = payload["oldPreviewBudget"], payload["newPreviewBudget"]
             if not isinstance(old, int) or not isinstance(new, int) or new >= old:
                 raise ValidationError("降档须 newPreviewBudget < oldPreviewBudget")
+        elif kind == "session.title.applied":
+            # T11-A 标题来源分家:source 必填且枚举;generated 行必带信封
+            # titleGenerationId(manual/local 不伪造);inherited 必带
+            # inheritedFrom 指源场事件。
+            require_payload(kind, payload, ["title", "source"])
+            if payload["source"] not in ("manual", "local", "generated", "inherited"):
+                raise ValidationError(
+                    "session.title.applied.source 应为 manual|local|generated|inherited")
+            if payload["source"] == "generated" and not isinstance(
+                    obj.get("titleGenerationId"), str):
+                raise ValidationError(
+                    "session.title.applied(source=generated) 必带 titleGenerationId")
+            if payload["source"] == "inherited" and not is_ref(payload.get("inheritedFrom")):
+                raise ValidationError(
+                    "session.title.applied(source=inherited) 的 inheritedFrom 应为合法引用")
+        elif kind == "title.extracted":
+            # T11-A:自动生成流"判词到手"(是否采用看 applied 有无)。
+            require_payload(kind, payload, ["title"])
+        elif kind == "session.environment.captured":
+            # T11-C 环境快照:引用 + 重现等级 + 缺口 + 脱敏标志。
+            require_payload(kind, payload, ["snapshotRef", "replayLevel", "gaps",
+                                            "configRedacted"])
+            if not is_ref(payload["snapshotRef"]):
+                raise ValidationError("session.environment.captured.snapshotRef 应为合法引用")
+            if not isinstance(payload["gaps"], list) or not all(
+                    isinstance(g, str) for g in payload["gaps"]):
+                raise ValidationError("session.environment.captured.gaps 应为 string 数组")
+            if not isinstance(payload["configRedacted"], bool):
+                raise ValidationError("session.environment.captured.configRedacted 应为 boolean")
+        elif kind == "approval.mode.applied":
+            # T11-B 审批档位事实:机器名枚举 + 来源 + 策略版本。
+            require_payload(kind, payload, ["mode", "source", "policyVersion"])
+            modes = ("default", "accept_edits", "yolo", "auto", "dont_ask")
+            if payload["mode"] not in modes:
+                raise ValidationError("approval.mode.applied.mode 枚举不认得")
+            if payload["source"] not in ("launch", "user_toggle", "resume_recomputed",
+                                         "inherited"):
+                raise ValidationError("approval.mode.applied.source 枚举不认得")
+            if "oldMode" in payload and payload["oldMode"] not in modes:
+                raise ValidationError("approval.mode.applied.oldMode 枚举不认得")
+        elif kind == "tool.verification.recorded":
+            # T11-D 验证事实:关联工具走信封 actionId(可空),本行钉载荷。
+            require_payload(kind, payload, ["verificationId", "kind", "passed", "producer"])
+            if not isinstance(payload["passed"], bool):
+                raise ValidationError("tool.verification.recorded.passed 应为 boolean")
+            if "artifactRefs" in payload and not isinstance(payload["artifactRefs"], list):
+                raise ValidationError("tool.verification.recorded.artifactRefs 应为数组")
+        elif kind == "tool.verification.invalidated":
+            require_payload(kind, payload, ["verificationId", "reason"])
+        elif kind == "tool.observation.late":
+            # T11-D 迟到响应观察:只记观察,不改已提交终态。
+            require_payload(kind, payload, ["cause"])
+            if "jsonrpcRequestId" in payload and (
+                    not isinstance(payload["jsonrpcRequestId"], int)
+                    or isinstance(payload["jsonrpcRequestId"], bool)
+                    or payload["jsonrpcRequestId"] < 0):
+                raise ValidationError("tool.observation.late.jsonrpcRequestId 应为非负整数")
+        elif kind == "recovery.note.recorded":
+            require_payload(kind, payload, ["note"])
+        elif kind == "context.pressure.recorded":
+            # T11-E 容量压力与预算裁决:数字账 + 裁决;禁累计用量字段。
+            require_payload(kind, payload, [
+                "phase", "verdict", "estimatedInputTokens", "reservedOutputTokens",
+                "protocolHeadroomTokens", "windowTokens"])
+            if payload["phase"] != "preflight":
+                raise ValidationError("context.pressure.recorded.phase 现只认 preflight")
+            if payload["verdict"] not in ("reserve_clamped", "exceeded_denied",
+                                          "max_tokens_degraded"):
+                raise ValidationError("context.pressure.recorded.verdict 枚举不认得")
+            for key in ("estimatedInputTokens", "reservedOutputTokens",
+                        "protocolHeadroomTokens", "windowTokens", "remainingTokens"):
+                if key in payload and (not isinstance(payload[key], int)
+                                       or isinstance(payload[key], bool) or payload[key] < 0):
+                    raise ValidationError(f"context.pressure.recorded.{key} 应为非负整数")
+            if "usage" in payload or "cumulativeUsageTokens" in payload:
+                raise ValidationError(
+                    "context.pressure.recorded 禁携带累计用量(usage 唯一 owner 在 assistant)")
         if kind == "model.request.prepared":
             for key in ("contextId", "contextRevision", "systemMessageRef",
                         "inputMessageRefs", "readThroughSeq", "readThroughHash"):

@@ -1430,6 +1430,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 " protocol_margin=" + std::to_string(kContextPreflightHeadroomTokens) +
                                 " window=" + std::to_string(window_tokens) +
                                 " action=max_tokens_degraded to=" + std::to_string(degraded));
+                // T11-E:降档裁决只发边界记录器(v3 落 context.pressure.
+                // recorded 的 max_tokens_degraded;v2 桥按 phase 过滤丢弃,
+                // 老账形状不变),不进宿主压力回调(UI/闸门行为不变)。
+                if (wiring.boundary_recorder != nullptr) {
+                    ContextPressure degraded_pressure;
+                    degraded_pressure.phase = ContextPressure::Phase::PreflightDegraded;
+                    degraded_pressure.estimated_input_tokens = input_tokens;
+                    degraded_pressure.reserved_output_tokens = declared_output_reserve_for_degrade;
+                    degraded_pressure.protocol_headroom_tokens = kContextPreflightHeadroomTokens;
+                    degraded_pressure.window_tokens = window_tokens;
+                    wiring.boundary_recorder->OnContextPressure(degraded_pressure);
+                }
             }
         }
 

@@ -389,6 +389,16 @@ struct ResumeOutcome {
     ReplayControlState control;
     // 旧 session 缺字段时为空，调用侧保留当前启动配置。
     std::optional<ApprovalMode> approval_mode;
+    // T11-A/T11-B(Session v3 旧设计清理单):源场已采用标题与源场档位
+    // "原始事实"(v3 源折 session.title.applied / approval.mode.applied 的
+    // 最后一枚;v2 源折 manifest)。title 供新场继承(inheritedFrom 指源
+    // 事件);approval_mode 只作重算输入——恢复有效档 = 按宽严序取源场
+    // 档与当前策略较严者,不静默提权。
+    std::optional<std::string> source_title;
+    std::string source_title_event_id;
+    std::uint64_t source_title_seq = 0;
+    std::string source_title_line_hash;
+    std::optional<ApprovalMode> source_approval_mode;
     // 第 4 步:悬空工具三道账;unknown 副作用不重跑。
     std::vector<ReplayDanglingTool> dangling_tools;
     // 第 5 步:新 session 开张(run.started(start_reason=resume))。

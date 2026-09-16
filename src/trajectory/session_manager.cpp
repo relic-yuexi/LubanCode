@@ -13,6 +13,8 @@
 #include <tuple>
 #include <utility>
 
+#include "approval_mode.hpp"
+#include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"
@@ -827,6 +829,23 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     session.lock = std::move(*lock_file);
     // v3 没有 session.json 可翻:状态只住内存,封口/恢复按账面事实。
     session.status = SessionStatus::Running;
+    // T11-B:建场基线——起手审批档落 approval.mode.applied(source=launch),
+    // 此后的档位事实变更(切档/恢复重算)都在这本账上可追。落不住不拦
+    // 开场(基线缺件按缺件读,不伪造),错误走日志。
+    {
+        v3::EventDraft baseline;
+        baseline.kind = v3::EventKindV3::ApprovalModeApplied;
+        baseline.payload = nlohmann::json{
+            {"mode", ApprovalModeMachineName(options_.approval_mode)},
+            {"source", "launch"},
+            {"policyVersion", std::string(kApprovalPolicyVersion)}};
+        const auto receipt =
+            session.v3_main->AppendEvent(std::move(baseline), Durability::ProcessCrash);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            platform::LogSink::Instance().Error(
+                "trajectory", "v3 审批档基线落账失败: " + receipt.error_code);
+        }
+    }
     return session;
 }
 
@@ -1578,13 +1597,28 @@ std::expected<void, std::string> SessionManager::UpdateApprovalMode(ApprovalMode
     if (active_->status != SessionStatus::Running) {
         return std::unexpected("session.not_running: 场已不在 running 态,审批档不再回写");
     }
-    // v3 场没有 session.json 可写(多写一枚会把场从 resume 候选里挤掉):
-    // 只改内存份,如实回告——切档本身不失败,持久化跟不上的可见性归
-    // 调用方(与 v2"盘上写失败内存保旧档"同门,只是这里注定不落盘)。
+    // T11-B / V3-GAP-06:v3 场审批档自本批起落 approval.mode.applied 事实行
+    //(档位变更与单次审批分家;载荷带来源/策略版本)。无 session.json 的
+    // 状况不变——盘上事实在 v3 主账,内存 manifest 同步翻。事件落不住时
+    // 如实回告,切档内存份照 v2 老规矩不翻(两本账不岔开)。
     if (active_->is_v3()) {
+        v3::EventDraft applied;
+        applied.kind = v3::EventKindV3::ApprovalModeApplied;
+        applied.payload = nlohmann::json{
+            {"mode", ApprovalModeMachineName(mode)},
+            {"source", "user_toggle"},
+            {"policyVersion", std::string(kApprovalPolicyVersion)}};
+        if (active_->manifest.approval_mode.has_value()) {
+            applied.payload["oldMode"] = ApprovalModeMachineName(*active_->manifest.approval_mode);
+        }
+        const auto receipt =
+            active_->v3_main->AppendEvent(std::move(applied), Durability::ProcessCrash);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            return std::unexpected("session.approval_mode_write_failed: " + receipt.error_code +
+                                   " " + receipt.error_message);
+        }
         active_->manifest.approval_mode = mode;
-        return std::unexpected(
-            "session.v3_approval_mode_memory_only: v3 场审批档只在内存生效(接线点 1 分期)");
+        return {};
     }
     // 先写盘再改内存份:盘上写失败时内存仍是旧档,两本账不会岔开。
     SessionManifest updated = active_->manifest;
@@ -2233,6 +2267,28 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         projection.effective_conversation = outcome.effective_conversation;
         outcome.replay_version = "v3-context-chain-2";  // -2:链折算(D2)
         outcome.imported_state_hash = ComputeReplayStateHash(projection);
+        // T11-A/T11-B:源场"已采用标题"与"最后档位"折成事实(最后一枚
+        // 胜——applied 本就是按序提交的终值)。标题进 control.title 供
+        // 显示/索引;档位只作重算输入,恢复有效档在 ResumeAsNewV3Locked
+        // 按当前策略 clamp 后才进 outcome.approval_mode,不静默提权。
+        for (const auto& event : ledger->events) {
+            if (event.kind == v3::EventKindV3::SessionTitleApplied) {
+                const auto title = event.payload.find("title");
+                if (title != event.payload.end() && title->is_string() &&
+                    !title->get<std::string>().empty()) {
+                    outcome.control.title = title->get<std::string>();
+                    outcome.source_title = title->get<std::string>();
+                    outcome.source_title_event_id = event.event_id;
+                    outcome.source_title_seq = event.seq;
+                    outcome.source_title_line_hash = event.line_hash;
+                }
+            } else if (event.kind == v3::EventKindV3::ApprovalModeApplied) {
+                const auto mode = event.payload.find("mode");
+                if (mode != event.payload.end() && mode->is_string()) {
+                    outcome.source_approval_mode = ParseApprovalModeOrDefault(mode->get<std::string>());
+                }
+            }
+        }
     } else {
         // 逐流验链 + 父子边交叉核(§3.9)。尾行截断是可恢复缺口:按已验证
         // 前缀续(§3.3.2);链断/坏行才是 corrupt。
@@ -2282,6 +2338,8 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         outcome.control = fold.state.control;
         if (source_manifest.has_value() && source_manifest->approval_mode.has_value()) {
             outcome.approval_mode = source_manifest->approval_mode;
+            // T11-B:v2 源的档位原始事实同折一份,v3 新场的恢复重算要用。
+            outcome.source_approval_mode = source_manifest->approval_mode;
         }
         // 已完成的 child 只在 verifier 里核过 terminal hash;正文不进新 main
         //(§10.4"不把正文灌进新 main.jsonl",effective history 只引用 source
@@ -2504,6 +2562,57 @@ ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,
                         attached_receipt.error_message);
     }
     outcome.resume_attached_event_id = attached_receipt.id;
+
+    // 第 6.6 步(v3,T11-A/T11-B):恢复事实重申——不是重放,是"本场从源
+    // 场继承/重算出了什么"的提交。
+    //   标题:源场已采用标题以 source=inherited 重申进新账(inheritedFrom
+    //   五键指源事件),新场自己的 /sessions 索引立即可读,不靠跨场对账;
+    //   显示真值仍以 control.title 折叠(两处同源)。
+    //   审批档:恢复有效档 = 按宽严序取源场档与当前策略(本场起手配置)
+    //   的较严者——不能仅从旧历史恢复更高权限;重算结果落
+    //   approval.mode.applied(source=resume_recomputed,oldMode=源场原始
+    //   档),outcome.approval_mode 给的是重算后的值。
+    if (outcome.source_title.has_value()) {
+        v3::EventDraft inherited;
+        inherited.kind = v3::EventKindV3::SessionTitleApplied;
+        inherited.payload = nlohmann::json{
+            {"title", *outcome.source_title},
+            {"source", "inherited"},
+            {"inheritedFrom",
+             nlohmann::json{{"sessionId", source_id},
+                            {"runId", source_run_id},
+                            {"seq", outcome.source_title_seq},
+                            {"id", outcome.source_title_event_id},
+                            {"hash", outcome.source_title_line_hash}}}};
+        const auto title_receipt =
+            session->v3_main->AppendEvent(std::move(inherited), Durability::PowerLoss);
+        if (title_receipt.status != v3::WriteReceipt::Status::Committed) {
+            return fail("resume.step6_failed",
+                        "继承标题落不了: " + title_receipt.error_code + " " +
+                            title_receipt.error_message);
+        }
+    }
+    {
+        const ApprovalMode effective = StricterApprovalMode(
+            outcome.source_approval_mode.value_or(options_.approval_mode), options_.approval_mode);
+        v3::EventDraft recomputed;
+        recomputed.kind = v3::EventKindV3::ApprovalModeApplied;
+        recomputed.payload = nlohmann::json{
+            {"mode", ApprovalModeMachineName(effective)},
+            {"source", "resume_recomputed"},
+            {"policyVersion", std::string(kApprovalPolicyVersion)}};
+        if (outcome.source_approval_mode.has_value()) {
+            recomputed.payload["oldMode"] = ApprovalModeMachineName(*outcome.source_approval_mode);
+        }
+        const auto mode_receipt =
+            session->v3_main->AppendEvent(std::move(recomputed), Durability::PowerLoss);
+        if (mode_receipt.status != v3::WriteReceipt::Status::Committed) {
+            return fail("resume.step6_failed",
+                        "恢复档位重算落不了: " + mode_receipt.error_code + " " +
+                            mode_receipt.error_message);
+        }
+        outcome.approval_mode = effective;
+    }
 
     // 第 6.5 步(v3,D2):链折算的祖先+直接源有效对话抄进本账并接纳进
     // 链(§4.10 第 3/5 条)。抄本 messageId/身份键带来源场名,与写者

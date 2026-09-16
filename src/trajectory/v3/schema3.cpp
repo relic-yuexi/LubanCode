@@ -73,7 +73,12 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
             K::TaskCancelled})) {
         return IdRequirement{"taskId", true};
     }
-    if (in({K::TitleRequested, K::TitleExtracted, K::SessionTitleApplied})) {
+    // T11-A 标题来源分家:title.requested/extracted 属自动生成流,必带
+    // titleGenerationId;session.title.applied 的 manual/local 来源没有生成
+    // 身份,伪造即造假——该 kind 的 titleGenerationId 改为可选(生成的
+    // adopted 行带,manual/local 不带)。老档(#52 一族 manual 行带伪造号)
+    // 读取兼容:字段在即认,不拒卷。
+    if (in({K::TitleRequested, K::TitleExtracted})) {
         return IdRequirement{"titleGenerationId", true};
     }
     // subagent.* 挂父工具 Action(§4.31:spawn/wait/send/cancel 各自成调用)。
@@ -655,9 +660,13 @@ std::optional<Schema3Error> ValidateMessageLine(const MessageLine& line) {
                 line.purpose != MessagePurpose::Compact &&
                 line.purpose != MessagePurpose::GoalEvaluation &&
                 line.purpose != MessagePurpose::ActionSummary &&
-                line.purpose != MessagePurpose::MemoryExtract) {
+                line.purpose != MessagePurpose::MemoryExtract &&
+                // T11-A(§4.34):自动起名的旁路 system(标题精炼提示词),
+                // schema 纯追加放行;归首问主回合,不进 main 链。
+                line.purpose != MessagePurpose::SessionTitle) {
                 return Err("schema3.bad_purpose",
-                           "system 消息 purpose 只能是 conversation/compact/goal_evaluation/action_summary 或 memory_extract");
+                           "system 消息 purpose 只能是 conversation/compact/goal_evaluation/action_summary/"
+                           "memory_extract 或 session_title");
             }
             break;
         }
@@ -1950,6 +1959,201 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_type",
                        "channel.approval.resolved.decision 须为 approved/declined/timeout/"
                        "cancelled/card_failed 之一");
+        }
+    }
+    // ---- T11 / V3-GAP-06 五域遗漏事实(Session v3 旧设计清理单)----
+    else if (line.kind == K::SessionTitleApplied) {
+        // 来源分家(T11-A):source ∈ manual(/title)/local(首问启发式)/
+        // generated(模型精炼,信封带真 titleGenerationId)/inherited(resume
+        // 继承源场已采用标题,载荷带 inheritedFrom)。title 必填非空;
+        // oldTitle 可空(首枚)。generated 行的生成身份由信封
+        // titleGenerationId 承载(必填,见 IdRequirementForKind 之外的
+        // 此处强校验),manual/local 不伪造——老档 manual 带伪造号的行读取
+        // 兼容,不在此拒卷。
+        if (auto error = CheckStringField(kind_name, line.payload, "title")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "source")) {
+            return error;
+        }
+        const std::string source = line.payload["source"].get<std::string>();
+        if (source != "manual" && source != "local" && source != "generated" &&
+            source != "inherited") {
+            return Err("schema3.bad_type",
+                       "session.title.applied.source 须为 manual/local/generated/inherited 之一");
+        }
+        if (source == "generated" && !line.title_generation_id.has_value()) {
+            return Err("schema3.missing_field",
+                       "session.title.applied(source=generated) 必带 titleGenerationId(生成身份)");
+        }
+        if (source == "inherited") {
+            if (auto error = CheckRefField(kind_name, line.payload, "inheritedFrom", false)) {
+                return error;
+            }
+            if (!line.payload.contains("inheritedFrom")) {
+                return Err("schema3.missing_field",
+                           "session.title.applied(source=inherited) 必带 inheritedFrom 指源场事件");
+            }
+        }
+    } else if (line.kind == K::TitleExtracted) {
+        // 自动生成流的"判词到手"事实(T11-A):提取出的标题非空;迟到生成
+        // 也照记(是否采用看 session.title.applied 有无,不在本行裁决)。
+        if (auto error = CheckStringField(kind_name, line.payload, "title")) {
+            return error;
+        }
+    } else if (line.kind == K::SessionEnvironmentCaptured) {
+        // 环境快照事实(T11-C):完整快照在 blob,事件只带引用 + 重现等级
+        // + 取材缺口;configRedacted 明说脱敏已做(快照里的配置件是调用方
+        // 脱敏后的,脱敏合同在装配层)。没采集的场没有本行,读取侧
+        // 按缺件处理,不从当前环境补造。
+        if (auto error = CheckRefField(kind_name, line.payload, "snapshotRef", true)) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "replayLevel")) {
+            return error;
+        }
+        const auto gaps = line.payload.find("gaps");
+        if (gaps == line.payload.end() || !gaps->is_array() ||
+            !std::all_of(gaps->begin(), gaps->end(),
+                         [](const nlohmann::json& item) { return item.is_string(); })) {
+            return Err("schema3.bad_type", "session.environment.captured.gaps 应为 string 数组");
+        }
+        const auto redacted = line.payload.find("configRedacted");
+        if (redacted == line.payload.end() || !redacted->is_boolean()) {
+            return Err("schema3.bad_type",
+                       "session.environment.captured.configRedacted 应为 boolean");
+        }
+    } else if (line.kind == K::ApprovalModeApplied) {
+        // 审批档位事实(T11-B):档位变更与单次审批分家(单次审批走 channel
+        // .approval.* / 确认门)。mode 用共享机器名(default/accept_edits/
+        // yolo/auto/dont_ask);source 分 launch/user_toggle/resume_recomputed/
+        // inherited;policyVersion 钉裁决语义版本(档位枚举 + 宽严序)。
+        // 账不裁决:生效值在宿主审批档内存态,恢复按当前策略重算。
+        if (auto error = CheckStringField(kind_name, line.payload, "mode")) {
+            return error;
+        }
+        const std::string mode = line.payload["mode"].get<std::string>();
+        if (mode != "default" && mode != "accept_edits" && mode != "yolo" && mode != "auto" &&
+            mode != "dont_ask") {
+            return Err("schema3.bad_type",
+                       "approval.mode.applied.mode 须为 default/accept_edits/yolo/auto/dont_ask");
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "source")) {
+            return error;
+        }
+        const std::string fact_source = line.payload["source"].get<std::string>();
+        if (fact_source != "launch" && fact_source != "user_toggle" &&
+            fact_source != "resume_recomputed" && fact_source != "inherited") {
+            return Err("schema3.bad_type",
+                       "approval.mode.applied.source 须为 launch/user_toggle/resume_recomputed/"
+                       "inherited 之一");
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "policyVersion")) {
+            return error;
+        }
+        const auto old_mode = line.payload.find("oldMode");
+        if (old_mode != line.payload.end() && old_mode->is_string() &&
+            !old_mode->get<std::string>().empty()) {
+            const std::string old = old_mode->get<std::string>();
+            if (old != "default" && old != "accept_edits" && old != "yolo" && old != "auto" &&
+                old != "dont_ask") {
+                return Err("schema3.bad_type",
+                           "approval.mode.applied.oldMode 须为合法档位机器名");
+            }
+        }
+    } else if (line.kind == K::ToolVerificationRecorded) {
+        // 验证事实(T11-D):关联工具走信封 actionId(可空——非工具锚的
+        // 验证点不硬塞);产物与版本按需带(artifactRefs 数组 /
+        // subjectVersion 字符串)。passed 只写真值;producer 说谁验的。
+        if (auto error = CheckStringField(kind_name, line.payload, "verificationId")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "kind")) {
+            return error;
+        }
+        const auto passed = line.payload.find("passed");
+        if (passed == line.payload.end() || !passed->is_boolean()) {
+            return Err("schema3.bad_type", "tool.verification.recorded.passed 应为 boolean");
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "producer")) {
+            return error;
+        }
+        const auto artifacts = line.payload.find("artifactRefs");
+        if (artifacts != line.payload.end()) {
+            if (!artifacts->is_array()) {
+                return Err("schema3.bad_type",
+                           "tool.verification.recorded.artifactRefs 应为数组");
+            }
+        }
+    } else if (line.kind == K::ToolVerificationInvalidated) {
+        // 失效事实(T11-D):只记观察,不改旧 verification.recorded 行,也
+        // 不触发工具重做。reason 说为什么失效(subject_modified 等)。
+        if (auto error = CheckStringField(kind_name, line.payload, "verificationId")) {
+            return error;
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "reason")) {
+            return error;
+        }
+    } else if (line.kind == K::ToolObservationLate) {
+        // 迟到响应观察(T11-D):终态已提交后来到的响应事实。绝不改旧终态
+        // (tool.execution.* 终态唯一),也不触发重做。cause 用稳定码
+        //(mcp_timeout_dropped 等);jsonrpcRequestId 可选(非 JSON-RPC 路
+        // 没有)。
+        if (auto error = CheckStringField(kind_name, line.payload, "cause")) {
+            return error;
+        }
+        const auto jsonrpc = line.payload.find("jsonrpcRequestId");
+        if (jsonrpc != line.payload.end() && !JsonIsNonNegativeInt(*jsonrpc)) {
+            return Err("schema3.bad_type",
+                       "tool.observation.late.jsonrpcRequestId 应为非负整数");
+        }
+    } else if (line.kind == K::RecoveryNoteRecorded) {
+        // 恢复注记(T11-D):恢复侧补的 append-only 观察(未知副作用、四档
+        // 恢复结论的缘由),不改旧行。
+        if (auto error = CheckStringField(kind_name, line.payload, "note")) {
+            return error;
+        }
+    } else if (line.kind == K::ContextPressureRecorded) {
+        // 容量压力与预算裁决(T11-E):发送前的判定事实。verdict ∈
+        // reserve_clamped(应急收窄放行)/exceeded_denied(拒发)/
+        // max_tokens_degraded(优雅降级);四项数字账与 v2 同名事件同口径;
+        // remainingTokens 是窗口减三项后的余量。禁携带 usage 一类累计用量
+        // 字段——用量唯一可累计事实是 assistant message 的 usage owner(§五),
+        // 本行不得成为第二份账。
+        if (auto error = CheckStringField(kind_name, line.payload, "phase")) {
+            return error;
+        }
+        if (line.payload["phase"].get<std::string>() != "preflight") {
+            return Err("schema3.bad_type",
+                       "context.pressure.recorded.phase 现只认 preflight");
+        }
+        if (auto error = CheckStringField(kind_name, line.payload, "verdict")) {
+            return error;
+        }
+        const std::string verdict = line.payload["verdict"].get<std::string>();
+        if (verdict != "reserve_clamped" && verdict != "exceeded_denied" &&
+            verdict != "max_tokens_degraded") {
+            return Err("schema3.bad_type",
+                       "context.pressure.recorded.verdict 须为 reserve_clamped/exceeded_denied/"
+                       "max_tokens_degraded 之一");
+        }
+        for (const auto* key : {"estimatedInputTokens", "reservedOutputTokens",
+                                "protocolHeadroomTokens", "windowTokens"}) {
+            const auto value = line.payload.find(key);
+            if (value == line.payload.end() || !JsonIsNonNegativeInt(*value)) {
+                return Err("schema3.bad_type",
+                           std::string("context.pressure.recorded.") + key + " 应为非负整数");
+            }
+        }
+        const auto remaining = line.payload.find("remainingTokens");
+        if (remaining != line.payload.end() && !JsonIsNonNegativeInt(*remaining)) {
+            return Err("schema3.bad_type",
+                       "context.pressure.recorded.remainingTokens 应为非负整数");
+        }
+        if (line.payload.contains("usage") || line.payload.contains("cumulativeUsageTokens")) {
+            return Err("schema3.bad_type",
+                       "context.pressure.recorded 禁携带累计用量字段(usage 唯一 owner 在 "
+                       "assistant message,§五)");
         }
     }
     // pending 类必须带 reason(§4.14)。

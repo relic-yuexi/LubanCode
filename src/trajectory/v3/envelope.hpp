@@ -287,6 +287,35 @@ enum class EventKindV3 {
     // 反查路)。账不裁决:决议生效在审批 broker,这里只留审计事实。
     ChannelApprovalRequested,
     ChannelApprovalResolved,
+
+    // ---- T11 / V3-GAP-06(Session v3 旧设计清理单):五域遗漏事实,schema
+    // 纯追加,全部 statusless 事实行,旧账零出现。----
+    // 标题来源(T11-A):session.title.applied 的 payload.source 分 manual/
+    // local/generated/inherited;generated 行带真 titleGenerationId(与
+    // title.requested/extracted 同号),manual/local 不伪造生成身份。
+    // 环境快照(T11-C):session.environment.captured——本场 run 的取材事实
+    //(OS/git/provider/能力配置快照经 blob 引用 + 重现等级 + 缺口清单)。
+    // 捕获时间即信封 timestamp;没采集的场,读取侧按缺件处理,不拿今天
+    // 环境补昨天事实。
+    SessionEnvironmentCaptured,
+    // 审批档位(T11-B):approval.mode.applied——档位事实与单次审批(channel
+    // .approval.* / 确认门)分家。payload 带 mode/source/policyVersion
+    //(source ∈ launch/user_toggle/resume_recomputed/inherited);恢复时
+    // 有效档 = min(源场档,当前策略)重算,不静默提权,本行只记事实。
+    ApprovalModeApplied,
+    // 验证/迟到/恢复注记(T11-D):verification 关联工具(actionId)与产物
+    // 版本;失效原因(verification.invalidated)、迟到响应(tool
+    // .observation.late)与恢复注记(recovery.note.recorded)只记观察,
+    // 不覆盖已提交终态,也不触发工具重做。
+    ToolVerificationRecorded,
+    ToolVerificationInvalidated,
+    ToolObservationLate,
+    RecoveryNoteRecorded,
+    // 容量/预算(T11-E):context.pressure.recorded——发送前容量压力与预算
+    // 裁决(verdict ∈ reserve_clamped/exceeded_denied/max_tokens_degraded)。
+    // 不复制累计用量:用量唯一可累计事实仍是 assistant message 的 usage
+    // owner(§五),本行只带当次判定数字与剩余量。
+    ContextPressureRecorded,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "app/session_title_refiner.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -61,6 +62,11 @@ public:
     // 代数:人工 /title、/clear、resume 换场翻号;起飞精炼时记下,落地对代。
     std::uint64_t generation() const { return generation_; }
     void BumpGeneration() { ++generation_; }
+    // T11-A:生成身份(一代精炼一枚,起飞/提取/采用同号;manual/local 不铸)。
+    static std::string TitleGenerationIdOf(std::uint64_t generation);
+    // T11-A:精炼起飞的事实(title.requested,v3 场落账;v2 场 no-op)。
+    // 在 refiner().Start 成功后调——请求真发了才记发起,不冒充。
+    void NoteTitleGenerationStarted(const std::string& model, const std::string& provider);
     // /clear 开新场:翻代、取消在飞精炼、下一问重走本地起名。
     void ResetForNewSession();
     // 精炼器(自带后台线程;Start/TakeFinished/RequestCancel 都归它)。
@@ -72,7 +78,10 @@ private:
     LocalResult AdoptLocalTitle(const std::string& local, bool quiet_on_failure);
     // P0-2:标题事件行落哪本账(ledger 在走 control.title.changed)。
     bool LedgerActive() const;
-    bool AppendTitleEvent(const std::string& title);
+    // T11-A:落标题采用事件,来源分流 manual/local/generated(v2 场由账本
+    // 兜底同归 control.title.changed);generated 带生成身份。
+    bool AppendTitleEvent(const std::string& title, std::string_view source,
+                          const std::string* title_generation_id);
 
     std::string& title_;
     lubancode::runtime::TrajectorySessionLedger* ledger_ = nullptr;  // 标题真账

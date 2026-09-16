@@ -3,11 +3,19 @@
 // 模型路由、peer 同步留 controller。
 #include "app/session_title_account.hpp"
 
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "app/session_title.hpp"
 
 namespace lubancode::app {
+
+// T11-A:生成身份——一代精炼一枚,起飞与落地同号(代数即会话内单调号,
+// 号池不与 writer 主号撞名)。manual/local 来源不铸此号。
+std::string SessionTitleAccount::TitleGenerationIdOf(std::uint64_t generation) {
+    return "titlegen-" + std::to_string(generation);
+}
 
 SessionTitleAccount::SessionTitleAccount(std::string& title,
                                          lubancode::runtime::TrajectorySessionLedger* ledger)
@@ -22,7 +30,8 @@ bool SessionTitleAccount::LedgerActive() const {
            (ledger_->main() != nullptr || ledger_->v3_main_writer() != nullptr);
 }
 
-bool SessionTitleAccount::AppendTitleEvent(const std::string& title) {
+bool SessionTitleAccount::AppendTitleEvent(const std::string& title, std::string_view source,
+                                            const std::string* title_generation_id) {
     if (ledger_ != nullptr) {
         if (!LedgerActive()) {
             return false;
@@ -31,7 +40,16 @@ bool SessionTitleAccount::AppendTitleEvent(const std::string& title) {
         if (!title_.empty() && title_ != title) {
             old = title_;
         }
-        ledger_->RecordTitleChanged(title, old);
+        // T11-A:来源如实分流——manual 走 RecordTitleChanged(/title 命令账);
+        // local/generated 走 v3 分路(v2 场由账本兜底同归 control.title.
+        // changed,老行为不变)。generated 带真 titleGenerationId,不伪造。
+        if (source == "generated" && title_generation_id != nullptr) {
+            ledger_->RecordGeneratedTitleApplied(*title_generation_id, title, old);
+        } else if (source == "local") {
+            ledger_->RecordLocalTitleApplied(title, old);
+        } else {
+            ledger_->RecordTitleChanged(title, old);
+        }
         return true;  // 落账失败由 ledger 记 I/O 错误(/doctor trajectory 可查)
     }
     return false;  // 没账可落(P0-6:旧 store 路已删)
@@ -72,19 +90,34 @@ SessionTitleAccount::AdoptResult SessionTitleAccount::AdoptRefined(
     if (!outcome.ok || outcome.title.empty()) {
         return AdoptResult::Ignored;  // 失败保留本地标题,不重试,不回落 normal
     }
+    // T11-A:提取事实照记(title.extracted,带起飞时的生成身份)——迟到
+    // 的生成也不例外,模型确实回了这句话;是否采用是另一枚事实。
+    if (ledger_ != nullptr) {
+        ledger_->RecordTitleExtracted(TitleGenerationIdOf(outcome.generation), outcome.title);
+    }
     if (outcome.generation != generation_) {
-        return AdoptResult::Ignored;  // 人工 /title、/clear 或 resume 抢先:迟到的自动结果丢弃
+        return AdoptResult::Ignored;  // 人工 /title、/clear 或 resume 抢先:迟到的自动结果不采用
     }
     if (!LedgerActive()) {
         return AdoptResult::Ignored;  // 场子没了:标题无处落,不追着写
     }
+    const std::string generation_id = TitleGenerationIdOf(outcome.generation);
     title_ = outcome.title;
-    if (!AppendTitleEvent(title_)) {
+    if (!AppendTitleEvent(title_, "generated", &generation_id)) {
         // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
         title_.clear();
         return AdoptResult::WriteFailed;
     }
     return AdoptResult::Adopted;
+}
+
+void SessionTitleAccount::NoteTitleGenerationStarted(const std::string& model,
+                                                      const std::string& provider) {
+    // v3-only 事实(title.requested);v2 场账本侧 no-op。落账失败只记
+    // I/O 错误——起飞是既成事实,不因记账失败取消采样。
+    if (ledger_ != nullptr) {
+        ledger_->RecordTitleRequested(TitleGenerationIdOf(generation_), model, provider);
+    }
 }
 
 void SessionTitleAccount::ResetForNewSession() {
@@ -98,7 +131,7 @@ void SessionTitleAccount::ResetForNewSession() {
 SessionTitleAccount::LocalResult SessionTitleAccount::AdoptLocalTitle(const std::string& local,
                                                                       bool quiet_on_failure) {
     title_ = local;
-    if (!AppendTitleEvent(title_)) {
+    if (!AppendTitleEvent(title_, "local", nullptr)) {
         // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
         title_.clear();
         return quiet_on_failure ? LocalResult::NoNeed : LocalResult::WriteFailed;

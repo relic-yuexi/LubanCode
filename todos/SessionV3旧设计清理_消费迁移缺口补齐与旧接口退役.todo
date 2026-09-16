@@ -310,13 +310,36 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 | 子项 | 需要定的合同与实现 | 完成证据 |
 | --- | --- | --- |
-| T11-A 标题 | manual 与 generated 来源分开；自动生成 prompt/assistant 留 message；实际采用独立事件；手动标题不伪造 titleGenerationId | 手动改名/自动失败/迟到生成与用户改名竞态，resume 显示真实已采用标题 |
-| T11-B 审批档 | 档位变更与单次审批分开；保存来源/策略版本；恢复需重算当前授权上限，不能仅从旧历史恢复更高权限 | 变更后崩溃、策略收紧、待答审批恢复，不静默提权 |
-| T11-C 环境 | 捕获时间、OS/git/provider/能力配置快照、redaction 与取材状态；没有采集就 unavailable | 旧场恢复不拿今天环境补昨天事实，秘密 canary 不入档/外发 |
-| T11-D 验证/恢复/迟到 | verification 关联工具/产物与版本；失效原因、未知副作用、迟到响应只记观察，不覆盖已提交终态 | 重复/迟到/变更后旧验证不能封新目标，也不触发工具重做 |
-| T11-E 容量/预算 | 用现行 prepared/估算引用/usage owner 能表达的就复用；剩余压力与预算裁决新增结构化事件，不复制第二份累计用量 | 发送前预算、取消、retry 和恢复累计可对账 |
+| ~~T11-A 标题~~ | manual 与 generated 来源分开；自动生成 prompt/assistant 留 message；实际采用独立事件；手动标题不伪造 titleGenerationId | 手动改名/自动失败/迟到生成与用户改名竞态，resume 显示真实已采用标题 |
+| ~~T11-B 审批档~~ | 档位变更与单次审批分开；保存来源/策略版本；恢复需重算当前授权上限，不能仅从旧历史恢复更高权限 | 变更后崩溃、策略收紧、待答审批恢复，不静默提权 |
+| ~~T11-C 环境~~ | 捕获时间、OS/git/provider/能力配置快照、redaction 与取材状态；没有采集就 unavailable | 旧场恢复不拿今天环境补昨天事实，秘密 canary 不入档/外发 |
+| ~~T11-D 验证/恢复/迟到~~ | verification 关联工具/产物与版本；失效原因、未知副作用、迟到响应只记观察，不覆盖已提交终态 | 重复/迟到/变更后旧验证不能封新目标，也不触发工具重做 |
+| ~~T11-E 容量/预算~~ | 用现行 prepared/估算引用/usage owner 能表达的就复用；剩余压力与预算裁决新增结构化事件，不复制第二份累计用量 | 发送前预算、取消、retry 和恢复累计可对账 |
 
-每域新增 kind 按现行 schema 演进规则发行，不能在同一 schemaVersion 下改旧字段含义。若裁定某旧事实不再需要，需列出现存消费者替代策略/降级输出及测试，才可标 intentional omission；“没有 kind”本身不算完成。
+每域新增 kind 按现行 schema 演进规则发行，不能在同一 schemaVersion 下改旧字段含义。若裁定某旧事实不再需要，需列出现存消费者替代策略/降级输出及测试，才可标 intentional omission；"没有 kind"本身不算完成。
+
+五域核销记录（2026-09-16，按域勾销；实现在下节结案记录）：
+
+- [x] **T11-A 标题**：`session.title.applied` 的 `titleGenerationId` 改条件必选（generated 必带、manual/local 不带，#52 一族伪造号只作老档读取兼容）；`payload.source` ∈ manual/local/generated/inherited 分家；自动生成 prompt/assistant 经旁路桥落正式 message（purpose=session_title，§4.34 归首问主回合，`NewBypassBridge` 放行 title_refine）；`title.requested`/`title.extracted` 与采用行同号贯穿；迟到生成记 extracted 不落 applied；resume 折源场最后一枚 applied 进 `control.title`（显示真实已采用标题），新场以 source=inherited 重申（inheritedFrom 五键指源事件）。已落测试：`test_v3_t11_title.cpp`（schema 正反例/三来源分家/生成流消息归回合/迟到竞态/resume 真值）。
+- [x] **T11-B 审批档**：新 kind `approval.mode.applied`（mode/source/policyVersion/oldMode，statusless）；与单次审批（channel.approval.*/确认门）分家；launch 基线（OpenV3SessionLocked）、用户切档（UpdateApprovalMode v3 路，替代 memory-only）、恢复重算（ResumeAsNewV3Locked，source=resume_recomputed）三路落账；宽严序钉在 `ApprovalModePermissiveness`（policyVersion=approval-policy-v1），恢复有效档 = 源场档与当前策略较严者——变更后崩溃 + 策略收紧不静默提权（v2 源 manifest 档位同样过 clamp）。已落测试：`test_v3_t11_approval_env.cpp`（launch/切档事实、恢复 clamp 正反两向、字节不动）。
+- [x] **T11-C 环境**：新 kind `session.environment.captured`（snapshotRef/replayLevel/gaps/configRedacted）；`CaptureEnvironment` v3 场复用 v2 同一台取材件（GatherGitStatus/BuildEnvironmentCapturePayload/DetermineReplayLevel），捕获时间即信封 timestamp；没采集 = `FindLastEnvironmentCapture` 回 nullopt（unavailable）；resume 换场源场字节不动、新场重采自己的；秘密 canary（inline api_key）经 `BuildRedactedConfigSnapshot` 窄键集后不入账不入 blob（canary 扫整场目录断言）。已落测试：`test_v3_t11_approval_env.cpp` 环境两案。
+- [x] **T11-D 验证/恢复/迟到**：新 kind `tool.verification.recorded`（关联工具走信封 actionId；artifactRefs/facts/subject 按需）、`tool.verification.invalidated`（reason，append-only 不改旧行）、`tool.observation.late`（cause/jsonrpcRequestId，不改已提交终态——tool.execution 终态唯一纪律不动）、`recovery.note.recorded`（note）。写路两条：轮桥 trace 路（Verification/McpLateResponse/RecoveryMarker 三类不再丢弃）+ `Begin/FinishVerification` v3 路（path 锚定，含 undo 失效对账 `InvalidateStaleVerificationsV3`）。读面 `FoldVerificationFacts` 折 fresh——变更后旧验证不封新目标，纯读不触发工具重做（折叠前后工具事件计数不变断言）。已落测试：`test_v3_t11_verification_budget.cpp` 验证/迟到两案。
+- [x] **T11-E 容量/预算**：新 kind `context.pressure.recorded`（phase=preflight，verdict ∈ reserve_clamped/exceeded_denied/max_tokens_degraded，四项数字账与 v2 同名事件同口径 + remainingTokens）；schema 拒携带 usage/cumulativeUsageTokens（不复制第二份累计用量——owner 仍只在 assistant message，测试钉 usage 行恰一枚）；降档裁决经新枚举 `ContextPressure::Phase::PreflightDegraded` 只发边界记录器（v2 老账形状不动，宿主压力回调行为不动）；prepared/估算引用/usage owner 复用不动。已落测试：`test_v3_t11_verification_budget.cpp` 压力案 + schema 反例。
+
+五域 kind 全部按 schema 纯追加发行（envelope/schema3/validate_trajectory_v3.py/schema 文档 §2.1/§2.2 同批），statusless 事实行族；reader 投影（FindLastTitleApplied/FindLastEnvironmentCapture/FindLastApprovalMode/FoldVerificationFacts/FoldPressureFacts）随 kind 同批。TEST-GAP-02（默认-v3 必跑门禁）经核已由 B1 批（PR #43）的 `test_v3_default_smoke.cpp` 落地，本批不重复。
+
+```text
+任务编号：T11 / V3-GAP-06
+状态：verified（五域逐域核销）
+实现：分支 worktree-agent-t11-domains——src/trajectory/v3/envelope.{hpp,cpp}（七枚新 kind：session.environment.captured/approval.mode.applied/tool.verification.recorded/tool.verification.invalidated/tool.observation.late/recovery.note.recorded/context.pressure.recorded）、schema3.cpp（载荷合同 + session.title.applied 的 titleGenerationId 条件必选 + system purpose 放行 session_title）、reader.{hpp,cpp}（五域投影）；src/runtime/trajectory_session.{hpp,cpp}（标题四路 API、旁路桥 title_refine 放行与回合号分铺、OnContextPressure v3 路、V3ToolTrace 三类观察事件、InvalidateStaleVerificationsV3、Begin/FinishVerification v3 路、CaptureEnvironment v3 路）；src/trajectory/session_manager.{hpp,cpp}（切档写账替代 memory-only、launch 基线、resume 折标题/档位 + clamp + inherited/recomputed 事实）；src/approval_mode.hpp（宽严序 + kApprovalPolicyVersion）；src/agent/context.hpp + loop.cpp（PreflightDegraded 枚举 + 降档只发边界记录器）；src/app/session_title_account.{hpp,cpp} + interactive_session.cpp（来源分流、生成身份 titlegen-*、NoteTitleGenerationStarted）；scripts/validate_trajectory_v3.py（新 kind 双册 + 补 #97 漏登的 channel.approval 两枚）；tests/unit/trajectory_v3/test_v3_t11_title.cpp、test_v3_t11_approval_env.cpp、test_v3_t11_verification_budget.cpp（全部 EnvGuard("1") v3 主场）；docs/architecture/trajectory-v3-schema.md（§2.1/§2.2 T11 行 + §十 五行改"已发行"）
+生产入口：CLI 交互会话（/title、起名精炼、Shift+Tab 切档、环境建档、compact 预检、工具验证/迟到、/resume、--continue）
+验证：unit.trajectory_v3.test_v3_t11_title（schema 正反例/manual-local-generated 三来源分家不带伪造号/生成流 prompt-assistant 落 message 归首问回合/迟到竞态 extracted 不落 applied/resume control.title 折真值 + inherited 五键）；test_v3_t11_approval_env（launch/切档/恢复重算三路事实 + clamp 正反两向不静默提权 + 源场字节不动/环境快照 replayLevel+gaps+幂等/canary 扫场不入账/unavailable/resume 新场重采）；test_v3_t11_verification_budget（验证 actionId 关联 + path 锚定 artifactRefs/失效 append-only/FoldVerificationFacts fresh 折算不触发重做/迟到不改唯一终态/三 verdict 数字账对表 + 禁 usage 字段 + owner 恰一枚）；validate_trajectory_v3.py --self-test PASS
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实渠道待答审批（channel.approval.*）的恢复投影未接消费方（Q6 域，账面事实在册）；tool.verification 生产触发点（工具后置条件验证器）尚无发射方——合同与桥路已验，发射方归逐枚追踪单后续批；Telemetry 对 T11 新 kind 不产 span（T07 已钉"未覆盖域无伪造 span"，新 kind 自然落此列，升 kProjectorVersion 补映射归 T07 后续）
+旧依赖：v2 EventEnvelope 各老路（verification.started/outcome.assessed/context.pressure.recorded 的 v2 写口、session.json approval_mode）保留给旧档消费，退役归 T02-B
+文档：docs/architecture/trajectory-v3-schema.md §2.1/§2.2/§十
+销项日期：待 PR CI rollup conclusion=success 后填
+```
+
 
 ### T13 / V3-GAP-08：大功能的移交与旧依赖出口
 

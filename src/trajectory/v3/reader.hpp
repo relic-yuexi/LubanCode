@@ -586,4 +586,63 @@ AsyncModeDecision DecideAsyncModes(const ToolCapabilitySnapshotView& snapshot);
 // 跨会话五键引用只验格式(schema3),解析归目标账——本验不追外账。
 std::vector<Schema3Error> ValidateAsyncToolSequence(const V3Ledger& ledger);
 
+// ---------------------------------------------------------------------------
+// T11 / V3-GAP-06 五域事实的读取投影(Session v3 旧设计清理单)。纯读:
+// 不补造、不改账;没采集的场给 nullopt/空表,消费方按缺件处理,不从
+// 当前环境或当前状态倒填。
+// ---------------------------------------------------------------------------
+
+// 标题(T11-A):账上最后一枚 session.title.applied 的采用事实。
+struct TitleAppliedFact {
+    std::string title;
+    std::string source;  // manual/local/generated/inherited
+    std::string event_id;
+};
+std::optional<TitleAppliedFact> FindLastTitleApplied(const V3Ledger& ledger);
+
+// 环境(T11-C):本场 run 的环境取材事实。没采集 = nullopt(unavailable),
+// 消费方不得拿今天环境补昨天事实。
+struct EnvironmentCaptureFact {
+    std::string replay_level;
+    std::vector<std::string> gaps;
+    std::string event_id;
+};
+std::optional<EnvironmentCaptureFact> FindLastEnvironmentCapture(const V3Ledger& ledger);
+
+// 审批档位(T11-B):账上最后一枚 approval.mode.applied。注意这只是
+// "当时的事实"——恢复有效档须按当前策略重算(取源场档与当前策略较严
+// 者),本投影不裁决。
+struct ApprovalModeFact {
+    std::string mode;  // 机器名(default/accept_edits/yolo/auto/dont_ask)
+    std::string source;
+    std::string event_id;
+};
+std::optional<ApprovalModeFact> FindLastApprovalMode(const V3Ledger& ledger);
+
+// 验证(T11-D):逐枚验证事实 + fresh 折算。fresh = 已录且未被 invalidated
+// ——重复/迟到/失效的验证不封新目标;本投影不触发任何工具重做。
+struct VerificationFact {
+    std::string verification_id;
+    std::string kind;
+    std::optional<std::string> action_id;  // 关联工具(可空)
+    bool passed = false;
+    std::string subject;
+    bool fresh = false;
+    std::string invalidated_reason;  // 非 fresh 且被失效时给原因
+};
+std::vector<VerificationFact> FoldVerificationFacts(const V3Ledger& ledger);
+
+// 容量/预算(T11-E):发送前压力与裁决逐枚对账(数字账在事件里,usage
+// 唯一 owner 仍在 assistant message——本投影不带累计用量)。
+struct PressureFact {
+    std::string verdict;  // reserve_clamped/exceeded_denied/max_tokens_degraded
+    std::optional<std::string> turn_id;
+    std::uint64_t window_tokens = 0;
+    std::uint64_t estimated_input_tokens = 0;
+    std::uint64_t reserved_output_tokens = 0;
+    std::uint64_t remaining_tokens = 0;
+    std::string event_id;
+};
+std::vector<PressureFact> FoldPressureFacts(const V3Ledger& ledger);
+
 }  // namespace lubancode::trajectory::v3
