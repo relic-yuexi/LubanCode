@@ -363,6 +363,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::PromptCompositionApplied: return "prompt.composition.applied";
         case EventKindV3::MemoryExtractionAssessed: return "memory.extraction.assessed";
         case EventKindV3::MemoryWriteReceipted: return "memory.write.receipted";
+        case EventKindV3::MemoryRecallInjected: return "memory.recall.injected";
+        case EventKindV3::MemorySaveRequested: return "memory.save.requested";
         case EventKindV3::ChannelApprovalRequested: return "channel.approval.requested";
         case EventKindV3::ChannelApprovalResolved: return "channel.approval.resolved";
 
@@ -503,6 +505,10 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             // 记忆账(取消误报 ESC 单 Bug 2):statusless 事实行。
             EventKindV3::MemoryExtractionAssessed,
             EventKindV3::MemoryWriteReceipted,
+            // 记忆账续(T08/V3-GAP-03):召回注入事实 + 写入因果边,
+            // statusless。
+            EventKindV3::MemoryRecallInjected,
+            EventKindV3::MemorySaveRequested,
             // 渠道远端审批(QQ 接入单 Q6,statusless 事实行)。
             EventKindV3::ChannelApprovalRequested,
             EventKindV3::ChannelApprovalResolved,

@@ -2420,21 +2420,27 @@ std::expected<void, std::string> ProjectMemory::SetWorkingDirectory(const fs::pa
 }
 
 std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::path& cwd,
-                                            QueryOrigin origin, bool force_retrieval) const {
-    return BuildTurnContextImpl(query, cwd, origin, force_retrieval, /*target_run_id=*/std::string());
+                                            QueryOrigin origin, bool force_retrieval,
+                                            const std::string& turn_id) const {
+    return BuildTurnContextImpl(query, cwd, origin, force_retrieval, /*target_run_id=*/std::string(),
+                                turn_id);
 }
 
-std::string ProjectMemory::BuildTurnContextForDispatch(const std::string& task_prompt, const fs::path& cwd,
-                                                        const std::string& target_run_id) const {
+std::string ProjectMemory::BuildTurnContextForDispatch(const std::string& task_prompt,
+                                                       const fs::path& cwd,
+                                                       const std::string& target_run_id) const {
     // §6.2:子代理不自动扫整库——派工当刻检索一次,结果整段冻结,事件的
     // relations.child_run_id 记 target_run_id(父账上说得清发给了哪只孩子)。
+    // turn_id 不递:派工快照落父账只是一枚事实(父模型没见过这段),v3
+    // 落账侧不给它署主回合的隐藏消息,回合号无从谈起。
     return BuildTurnContextImpl(task_prompt, cwd, QueryOrigin::User, /*force_retrieval=*/false,
-                                target_run_id);
+                                target_run_id, /*turn_id=*/std::string());
 }
 
 std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const fs::path& cwd,
                                                 QueryOrigin origin, bool force_retrieval,
-                                                const std::string& target_run_id) const {
+                                                const std::string& target_run_id,
+                                                const std::string& turn_id) const {
     // 授权闸:全局没授权,或本场关着,一个字节都不进 prompt。
     if (!options_.global_allowed || !options_.enabled) return {};
 
@@ -2701,6 +2707,7 @@ std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const 
         // 快照存实际注入的载荷(选段后的),不是整篇正文。
         InjectedMemoryRecord record;
         record.target_run_id = target_run_id;
+        record.turn_id = turn_id;
         record.memory_level = traced.layer;
         record.memory_id = entry.id;
         record.memory_schema = entry.schema;
@@ -2787,6 +2794,7 @@ std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const 
         }
         InjectedMemoryRecord record;
         record.target_run_id = target_run_id;
+        record.turn_id = turn_id;
         record.memory_level = traced.layer;
         record.memory_id = entry.id;
         record.memory_schema = entry.schema;

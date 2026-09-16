@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -496,6 +497,10 @@ struct SessionManagerOptions {
     // 建场时宿主还不知道最终 system,首行先立"此刻已知"的底,第一次
     // 模型请求带上真 system 时走 §4.3 三步切换。恢复不重拼(§4.3)。
     std::string v3_system_content;
+    // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空稳定
+    // 码即该枚提交按 IoFailed 收,写者句柄随后 broken——T08 召回快照的
+    // fail-closed 测试用,与 subagent_start_fault 同款纪律。
+    std::function<std::optional<std::string>()> v3_main_io_fault;
 };
 
 class SessionManager {

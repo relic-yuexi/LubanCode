@@ -3200,6 +3200,8 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.event_schema_version = options.event_schema_version;
     // 接线点 1:v3 建场的首行基础 system(manager 侧 V3Writer::Start 用)。
     manager_options.v3_system_content = options.v3_system_content;
+    // T08:主账写者的提交故障注入(测试专用;生产恒空)。
+    manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
     // 首枚 run.started 提交事务独占创建,开张失败不在盘上留 0 字节文件。
     manager_options.recorder.defer_stream_create = true;

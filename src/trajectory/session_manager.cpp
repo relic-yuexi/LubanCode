@@ -798,6 +798,8 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     // 以此为权威来源,v2 manifest 不再是唯一出处。
     writer_options.launch_cwd = manifest.launch_cwd;
     writer_options.run_kind = manifest.run_kind;
+    // 测试专用的提交故障注入(生产恒空):armed 才点火,与 P0-C 同款纪律。
+    writer_options.inject_io_failure = options_.v3_main_io_fault;
     auto writer = v3::V3Writer::Start(directory->v3_stream_path(), manifest.session_id,
                                       manifest.main_run_id, options_.v3_system_content,
                                       std::move(system_extra), std::move(writer_options));
