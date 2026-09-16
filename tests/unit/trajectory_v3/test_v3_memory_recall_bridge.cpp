@@ -570,7 +570,9 @@ TEST_CASE("v3 无回合号召回: writer 号池兜底署名,注入本体不丢")
 
     const auto stream = trajectory::v3::FindV3SessionStream(ledger.session_dir());
     REQUIRE(stream.has_value());
-    const nlohmann::json* recall_message = FindRecallMessage(StreamLines(*stream));
+    // 行集须先落具名变量再取指针——临时 vector 活不过整句,指针会悬空。
+    const auto lines = StreamLines(*stream);
+    const nlohmann::json* recall_message = FindRecallMessage(lines);
     REQUIRE(recall_message != nullptr);
     // writer 自家号池(zero-pad,与宿主 turn-<n> 不撞名):署名弱一档,注入不丢。
     const std::string turn_id = recall_message->value("turnId", std::string());
