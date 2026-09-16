@@ -177,6 +177,22 @@ struct Harness {
         const std::lock_guard<std::mutex> lock(events_mutex);
         return events;
     }
+
+    // 事件账当前长度(分轮断言的游标):第一轮的 connected/READY 等历史
+    // 不许污染第二轮的断言,先记长度再只看之后的新事件。
+    std::size_t EventCount() {
+        const std::lock_guard<std::mutex> lock(events_mutex);
+        return events.size();
+    }
+
+    std::vector<GatewayEvent> EventsSince(std::size_t mark) {
+        const std::lock_guard<std::mutex> lock(events_mutex);
+        if (mark >= events.size()) {
+            return {};
+        }
+        return std::vector<GatewayEvent>(events.begin() + static_cast<std::ptrdiff_t>(mark),
+                                         events.end());
+    }
 };
 
 // HELLO fixture:官方字段 heartbeat_interval(A01;来源:
@@ -297,7 +313,15 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::Disconnected;
     }));
-    // 第二轮:HELLO→Resume→两条补发业务消息(尚无 RESUMED)。
+    // 断线后的断言游标:第一轮合法的 connected/READY 历史不算数。
+    const std::size_t mark = harness.EventCount();
+    // 第二轮:HELLO→Resume→两条补发业务消息(尚无 RESUMED)。脚本耗尽错误
+    // 换回 Timeout:鉴权轮对静默是"等"(总期限 10s),不会像 Closed 那样烧
+    // 完脚本就断线——否则晚推的 RESUMED 会落成新连接首帧(非 HELLO)被吞。
+    {
+        const std::lock_guard<std::mutex> lock(harness.shared->mutex);
+        harness.shared->exhausted_error = WsError{WsError::Kind::Timeout, "script exhausted", 0};
+    }
     FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
     FakeTransport::PushIncoming(harness.shared, C2cDispatch(6, "M-R1"));
     FakeTransport::PushIncoming(harness.shared, C2cDispatch(7, "M-R2"));
@@ -306,11 +330,11 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::C2cMessageCreate;
     }));
-    // 关键断言:收到补发不等于恢复完成——此刻不得报 connected/SessionResumed;
+    // 关键断言:收到补发不等于恢复完成——此后不得再报 connected/SessionResumed;
     // 阶段事件里能看到独立的"恢复中"(resuming),不用状态采样断言(退避间歇
     // 会采到 backoff)。
     {
-        const std::vector<GatewayEvent> events = harness.SnapshotEvents();
+        const std::vector<GatewayEvent> events = harness.EventsSince(mark);
         bool saw_resuming_stage = false;
         bool saw_resumed = false;
         bool saw_connected = false;
@@ -331,7 +355,7 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
         CHECK_FALSE(saw_connected);
         CHECK(saw_resuming_stage);
     }
-    // RESUMED 到达:恢复完成,connected。
+    // RESUMED 到达(鉴权轮仍在等,同轮读到):恢复完成,connected。
     FakeTransport::PushIncoming(harness.shared, R"({"op":0,"s":8,"t":"RESUMED","d":{}})");
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::SessionResumed;
@@ -357,6 +381,8 @@ TEST_CASE("qq_gateway: 只有补发没有 RESUMED——总期限超时,不误报
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::Disconnected;
     }));
+    // 断线后的断言游标:第一轮合法的 connected/READY 历史不算数。
+    const std::size_t mark = harness.EventCount();
     // 第二轮:HELLO→Resume→补发一条,然后静默。脚本耗尽错误换回 Timeout
     //(第一轮用 Closed 断线):鉴权窗静默必须折成总期限超时,不是读断线。
     {
@@ -374,7 +400,7 @@ TEST_CASE("qq_gateway: 只有补发没有 RESUMED——总期限超时,不误报
         return e.kind == GatewayEvent::Kind::ConnectFailed &&
                e.error_code == "ready_timeout";
     }));
-    const std::vector<GatewayEvent> events = harness.SnapshotEvents();
+    const std::vector<GatewayEvent> events = harness.EventsSince(mark);
     bool saw_resumed = false;
     bool saw_connected = false;
     for (const auto& event : events) {
@@ -498,7 +524,8 @@ TEST_CASE("qq_gateway: 未知 op 独立处置——记账不崩,不冒充心跳(
 
 TEST_CASE("qq_gateway: 连续 ACK 维持在线;停喂后按限断线(A09)") {
     Harness harness;
-    FakeTransport::PushIncoming(harness.shared, HelloPayload(40));  // 40ms 心跳
+    // 120ms 心跳:给 CI 饥饿留余量(喂 ACK 的测试线程被饿 2 拍以上才算输)。
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(120));
     FakeTransport::PushIncoming(
         harness.shared,
         R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-ack"}})");
@@ -514,21 +541,23 @@ TEST_CASE("qq_gateway: 连续 ACK 维持在线;停喂后按限断线(A09)") {
         }
         return count;
     };
-    const auto wait_beats = [&](int target) {
-        for (int i = 0; i < 400; ++i) {
-            if (count_beats() >= target) {
-                return true;
+    // 见一拍喂一拍:1.5s 窗内每观察到新心跳就补一枚 ACK,连接必须全程
+    // running——ACK 清账有效,死线不误报。窗口按墙钟,不数拍数(饥饿下
+    // 拍数不稳,存活才是断言对象)。
+    int acked = 0;
+    const auto deadline = platform::WallClockNowMs() + 1'500;
+    while (platform::WallClockNowMs() < deadline) {
+        const int beats = count_beats();
+        if (beats > acked) {
+            for (int i = acked; i < beats; ++i) {
+                FakeTransport::PushIncoming(harness.shared, R"({"op":11,"d":null})");
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            acked = beats;
         }
-        return false;
-    };
-    // 每次心跳后喂 ACK:连续 ACK 不断线。
-    for (int round = 1; round <= 3; ++round) {
-        REQUIRE(wait_beats(round));
-        FakeTransport::PushIncoming(harness.shared, R"({"op":11,"d":null})");
+        REQUIRE(harness.session->state_name() == "running");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(acked >= 3);  // 窗内确实经历过多个心跳-ACK 轮回
     CHECK(harness.session->state_name() == "running");
     // 停喂 ACK:连续超限断线(死线账没有被误清零)。
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
