@@ -64,11 +64,54 @@ TEST_CASE("qq_proto: 缺 op / op 非整数 / 非 object 拒绝;d 形状随 op �
     CHECK(ParseGatewayPayload(Parse(R"({"op":0,"d":[1,2]})"), &error).has_value());
 }
 
-TEST_CASE("qq_proto: Hello 心跳间隔解析;缺失/非正数拒绝") {
-    CHECK(ParseHelloInterval(Parse(R"({"heartbeat_interval_ms":45000})")) == 45000);
-    CHECK_FALSE(ParseHelloInterval(Parse(R"({})")).has_value());
-    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval_ms":0})")).has_value());
-    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval_ms":"x"})")).has_value());
+// A01:官方 HELLO fixture(来源独立,不走产品构造器):
+//   https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html
+//   核对日期:2026-09-17。示例原文(逐字节):
+//     {"op":10,"d":{"heartbeat_interval":45000}}
+// 官方字段是 heartbeat_interval(无 _ms 后缀);旧实现的 heartbeat_interval_ms
+// 从来不是平台字段,仅作显式兼容兜底。
+TEST_CASE("qq_proto: 官方 HELLO fixture——heartbeat_interval 解析全矩阵(A01)") {
+    std::string error;
+    // 官方示例原文(数字)。
+    CHECK(ParseHelloInterval(Parse(R"({"heartbeat_interval":45000})"), &error) == 45000);
+    // 数字字符串(平台数值字段两态,真机教训)。
+    CHECK(ParseHelloInterval(Parse(R"({"heartbeat_interval":"41250"})"), &error) == 41250);
+    // 旧名兼容:仅官方字段缺失时兜底。
+    CHECK(ParseHelloInterval(Parse(R"({"heartbeat_interval_ms":30000})"), &error) == 30000);
+    // 并存等值:不猜错。
+    CHECK(ParseHelloInterval(
+              Parse(R"({"heartbeat_interval":30000,"heartbeat_interval_ms":30000})"), &error) ==
+          30000);
+    // 并存冲突:报错,不猜(A01)。
+    CHECK_FALSE(ParseHelloInterval(
+        Parse(R"({"heartbeat_interval":45000,"heartbeat_interval_ms":30000})"), &error)
+        .has_value());
+    CHECK(error.find("conflict") != std::string::npos);
+    // 缺字段。
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({})"), &error).has_value());
+    CHECK(error.find("missing") != std::string::npos);
+    // 空值(null)与类型错。
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":null})"), &error).has_value());
+    CHECK(error.find("not an integer") != std::string::npos);
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":"x"})"), &error).has_value());
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":{"ms":45000}})"), &error)
+                    .has_value());
+    // 零/负数:非正数。
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":0})"), &error).has_value());
+    CHECK(error.find("non-positive") != std::string::npos);
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":-45000})"), &error)
+                    .has_value());
+    // 超大整数:超 24h 帽拒绝(防下游 int 截断翻转)。
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":86400001})"), &error)
+                    .has_value());
+    CHECK(error.find("cap") != std::string::npos);
+    CHECK_FALSE(ParseHelloInterval(Parse(R"({"heartbeat_interval":9223372036854775807})"),
+                                   &error)
+                    .has_value());
+    CHECK(ParseHelloInterval(Parse(R"({"heartbeat_interval":86400000})"), &error) == 86400000);
+    // d 非 object。
+    CHECK_FALSE(ParseHelloInterval(Parse(R"(42)"), &error).has_value());
+    CHECK(error.find("not an object") != std::string::npos);
 }
 
 TEST_CASE("qq_proto: Identify 载荷带 QQBot 前缀与 intents") {
@@ -367,7 +410,7 @@ TEST_CASE("qq_proto: 宽松整数解析——数字字符串与数字同收") {
                     Parse(R"({"access_token":"T","expires_in":"soon"})"), &error)
                     .has_value());
     const auto hello_string = ParseHelloInterval(
-        Parse(R"({"heartbeat_interval_ms":"41250"})"));
+        Parse(R"({"heartbeat_interval":"41250"})"));
     REQUIRE(hello_string.has_value());
     CHECK(*hello_string == 41250);
     const auto payload_seq_string =
@@ -421,7 +464,7 @@ TEST_CASE("qq_proto: 发送响应解析(官方两例)") {
 // 错误分型(官方错误码表全量钉)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("qq_proto: 错误码分型全表") {
+TEST_CASE("qq_proto: 错误码分型全表(code 形状;A03 修订)") {
     struct Case {
         int status;
         std::int64_t code;
@@ -432,12 +475,37 @@ TEST_CASE("qq_proto: 错误码分型全表") {
         {429, 0, QqApiErrorKind::RateLimited},
         {200, 304103, QqApiErrorKind::MsgIdExpired},
         {200, 40034005, QqApiErrorKind::MsgIdExpired},
-        {200, 40034128, QqApiErrorKind::MsgIdExpired},
+        {200, 40034026, QqApiErrorKind::MsgIdExpired},
+        // A03:40034128 官方"被动回复时间或次数超限"——独立分族,不再并入
+        // MsgIdExpired。
+        {200, 40034128, QqApiErrorKind::ReplyQuotaExhausted},
         {200, 40054005, QqApiErrorKind::Deduped},
         {200, 40054004, QqApiErrorKind::NoFriend},
+        // A03:40054006 官方"验证好友关系失败、建议重试"——不再并入 NoFriend
+        // 永久失败。
+        {200, 40054006, QqApiErrorKind::FriendCheckFailed},
         {200, 40054013, QqApiErrorKind::UserRejected},
+        // A03:40054016 机器人已下线。
+        {200, 40054016, QqApiErrorKind::BotOffline},
+        // A03:无权限族(304004 ARK 模板/40034105 主动消息/40034127 markdown
+        // 模板/11253 app privilege)。
+        {200, 304004, QqApiErrorKind::PermissionDenied},
+        {200, 40034105, QqApiErrorKind::PermissionDenied},
+        {200, 40034127, QqApiErrorKind::PermissionDenied},
+        {403, 11253, QqApiErrorKind::PermissionDenied},
+        // A03:11243 令牌校验未过(API 指南)。
+        {401, 11243, QqApiErrorKind::Unauthorized},
+        // A03:40034004 富媒体转存失败,官方建议重试。
+        {200, 40034004, QqApiErrorKind::ServerError},
         {200, 40034006, QqApiErrorKind::ContentRejected},
         {200, 304061, QqApiErrorKind::ContentRejected},
+        // A03:markdown/keyboard 形状族。
+        {200, 50059, QqApiErrorKind::ContentRejected},
+        {200, 304062, QqApiErrorKind::ContentRejected},
+        {200, 40034008, QqApiErrorKind::ContentRejected},
+        {200, 40034011, QqApiErrorKind::ContentRejected},
+        {200, 40034124, QqApiErrorKind::ContentRejected},
+        {200, 40034129, QqApiErrorKind::ContentRejected},
         {401, 0, QqApiErrorKind::Unauthorized},
         {403, 0, QqApiErrorKind::Unauthorized},
         {200, 50055002, QqApiErrorKind::ServerError},
@@ -454,6 +522,100 @@ TEST_CASE("qq_proto: 错误码分型全表") {
         CHECK(error.platform_code == item.code);
         CHECK(error.http_status == item.status);
     }
+}
+
+// A03:共用错误体解析器。err_code 官方示例原文(API 调用指南,核对
+// 2026-09-17):
+//   {"err_code": 40034005, "message": "回复消息msg_id已过期",
+//    "trace_id": "4a8a61565b909f199b1ec169fdd6f49e"}
+TEST_CASE("qq_proto: 错误体两形状解析矩阵(只有 err_code/只有 code/并存/冲突/非法)") {
+    // 官方失败示例原文(只有 err_code + trace_id)。
+    const auto shape_err_only =
+        ParseQqErrorBody(R"({"err_code":40034005,"message":"回复消息msg_id已过期",)"
+                         R"("trace_id":"4a8a61565b909f199b1ec169fdd6f49e"})");
+    CHECK(shape_err_only.body_is_json_object);
+    CHECK_FALSE(shape_err_only.has_code);
+    CHECK(shape_err_only.has_err_code);
+    CHECK(shape_err_only.err_code == std::int64_t{40034005});
+    CHECK_FALSE(shape_err_only.err_code_illegal);
+    CHECK_FALSE(shape_err_only.conflict);
+    CHECK(QqErrorEffectiveCode(shape_err_only) == std::int64_t{40034005});
+    CHECK(shape_err_only.trace_id == "4a8a61565b909f199b1ec169fdd6f49e");
+    // 只有 code(旧形状)。
+    const auto shape_code_only = ParseQqErrorBody(R"({"code":"40034100","message":"频控"})");
+    CHECK(shape_code_only.has_code);
+    CHECK_FALSE(shape_code_only.has_err_code);
+    CHECK(shape_code_only.code == std::int64_t{40034100});  // 数字字符串两态
+    CHECK(QqErrorEffectiveCode(shape_code_only) == std::int64_t{40034100});
+    // 并存等值。
+    const auto shape_equal =
+        ParseQqErrorBody(R"({"code":40054005,"err_code":40054005})");
+    CHECK_FALSE(shape_equal.conflict);
+    CHECK(QqErrorEffectiveCode(shape_equal) == std::int64_t{40054005});
+    // 并存冲突:不猜。
+    const auto shape_conflict =
+        ParseQqErrorBody(R"({"code":40034005,"err_code":40054004})");
+    CHECK(shape_conflict.conflict);
+    CHECK_FALSE(QqErrorEffectiveCode(shape_conflict).has_value());
+    // 字段非法(在但解不出):不许 value_or(0) 当成功。
+    const auto shape_illegal = ParseQqErrorBody(R"({"code":"soon"})");
+    CHECK(shape_illegal.has_code);
+    CHECK(shape_illegal.code_illegal);
+    CHECK_FALSE(QqErrorEffectiveCode(shape_illegal).has_value());
+    const auto shape_illegal_err = ParseQqErrorBody(R"({"err_code":null})");
+    CHECK(shape_illegal_err.has_err_code);
+    CHECK(shape_illegal_err.err_code_illegal);
+    // 无码字段 / 非 JSON。
+    const auto shape_none = ParseQqErrorBody(R"({"id":"ROBOT1.0_out1"})");
+    CHECK_FALSE(shape_none.has_code);
+    CHECK_FALSE(shape_none.has_err_code);
+    CHECK_FALSE(QqErrorEffectiveCode(shape_none).has_value());
+    const auto shape_garbage = ParseQqErrorBody("<html>oops</html>");
+    CHECK_FALSE(shape_garbage.body_is_json_object);
+    // trace_id 超 128 截断(受控诊断)。
+    const std::string long_trace(300, 'x');
+    const auto shape_long =
+        ParseQqErrorBody(R"({"code":1,"trace_id":")" + long_trace + R"("})");
+    CHECK(shape_long.trace_id.size() < 300);
+    CHECK(shape_long.trace_id.find("...") != std::string::npos);
+}
+
+TEST_CASE("qq_proto: err_code 形状分型与 2xx 业务失败(A03)") {
+    // 官方 err_code 失败示例:HTTP 200 + err_code 非 0 = 业务失败。
+    const auto err_only = ClassifyQqSendFailure(
+        200, R"({"err_code":40034005,"message":"回复消息msg_id已过期"})");
+    CHECK(err_only.kind == QqApiErrorKind::MsgIdExpired);
+    CHECK(err_only.platform_code == 40034005);
+    CHECK(err_only.platform_err_code == 40034005);
+    // err_code 字符串整数。
+    const auto err_string = ClassifyQqSendFailure(200, R"({"err_code":"40034100"})");
+    CHECK(err_string.kind == QqApiErrorKind::RateLimited);
+    // 冲突:2xx 下成功合同无法核对 -> InvalidResponse;4xx 下 UnknownError。
+    const auto conflict_2xx = ClassifyQqSendFailure(
+        200, R"({"code":40034005,"err_code":40054004})");
+    CHECK(conflict_2xx.kind == QqApiErrorKind::InvalidResponse);
+    CHECK(conflict_2xx.detail.find("conflict") != std::string::npos);
+    const auto conflict_4xx = ClassifyQqSendFailure(
+        400, R"({"code":40034005,"err_code":40054004})");
+    CHECK(conflict_4xx.kind == QqApiErrorKind::UnknownError);
+    // 非法 code(2xx):不许当成功 -> InvalidResponse。
+    const auto illegal = ClassifyQqSendFailure(200, R"({"code":"soon"})");
+    CHECK(illegal.kind == QqApiErrorKind::InvalidResponse);
+    CHECK(illegal.platform_code == 0);
+    // 非法 err_code(非 2xx):落 HTTP 档,不猜业务码。
+    const auto illegal_err = ClassifyQqSendFailure(429, R"({"err_code":true})");
+    CHECK(illegal_err.kind == QqApiErrorKind::RateLimited);
+    // trace_id 入账。
+    const auto with_trace = ClassifyQqSendFailure(
+        200, R"({"err_code":40054016,"trace_id":"tid-1"})");
+    CHECK(with_trace.kind == QqApiErrorKind::BotOffline);
+    CHECK(with_trace.trace_id == "tid-1");
+    // 畸形 body 不炸(HTML/数组)。
+    const auto garbage = ClassifyQqSendFailure(500, "<html>oops</html>");
+    CHECK(garbage.kind == QqApiErrorKind::ServerError);
+    CHECK(garbage.platform_code == 0);
+    const auto array_body = ClassifyQqSendFailure(200, "[1,2]");
+    CHECK(array_body.kind == QqApiErrorKind::InvalidResponse);
 }
 
 TEST_CASE("qq_proto: 错误体 message 进 detail;坏 body 不炸") {

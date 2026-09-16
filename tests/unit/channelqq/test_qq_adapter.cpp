@@ -56,10 +56,11 @@ public:
                 kStageConnecting, "connect_refused", "connect refused"});
         }
         // 连接即回 Hello——插队头,保证无论测试预置了什么脚本,Hello 总是
-        // 客户端连接后读到的第一条(官方语义如此)。
+        // 客户端连接后读到的第一条(官方语义如此)。字段用官方名
+        // heartbeat_interval(A01;event-emit 页示例,2026-09-17 核对)。
         shared_->incoming.insert(
             shared_->incoming.begin(),
-            R"({"op":10,"d":{"heartbeat_interval_ms":30000}})");
+            R"({"op":10,"d":{"heartbeat_interval":30000}})");
         return {};
     }
 

@@ -189,7 +189,7 @@ TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
         if (!connection.has_value() || !connection->AcceptUpgrade(10'000).has_value()) {
             return;
         }
-        (void)connection->SendText(R"({"op":10,"d":{"heartbeat_interval_ms":1000}})");
+        (void)connection->SendText(R"({"op":10,"d":{"heartbeat_interval":1000}})");
         // 活够久:客户端要读完 Hello 再 Close,提前拆连接会把客户端的
         // Pong/close 回写撞成 -78。
         std::this_thread::sleep_for(std::chrono::milliseconds(2'000));
@@ -207,7 +207,8 @@ TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
     }
     const auto message = client->ReadMessage(5'000);
     REQUIRE(message.has_value());
-    CHECK(message->find(R"("heartbeat_interval_ms")") != std::string::npos);
+    // 服务端原文透传:官方字段名 heartbeat_interval(A01)。
+    CHECK(message->find(R"("heartbeat_interval")") != std::string::npos);
 
     acceptor.join();
     (void)client->Close(1000, "done");

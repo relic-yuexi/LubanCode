@@ -35,6 +35,9 @@ inline constexpr char kStageFetchingToken[] = "fetching_token";
 inline constexpr char kStageFetchingGatewayUrl[] = "fetching_gateway_url";
 inline constexpr char kStageConnecting[] = "connecting";
 inline constexpr char kStageIdentifying[] = "identifying";
+// A02:Resume 发出后到 RESUMED 之前的独立阶段——状态显式"恢复中",不提前
+// 报 connected(官方 Resume 合同:先补发遗漏事件,补完才下发 RESUMED)。
+inline constexpr char kStageResuming[] = "resuming";
 inline constexpr char kStageConnected[] = "connected";
 inline constexpr char kStageStopped[] = "stopped";
 
@@ -128,6 +131,9 @@ public:
         std::function<void(const GatewayEvent&)> on_event;
         std::function<std::int64_t()> now_ms;
         int hello_timeout_ms = 10'000;
+        // A02:鉴权循环的"总期限"(不是单帧超时)。Identify 只认有效 READY;
+        // Resume 收补发事件、等 RESUMED,总期限到仍未完成即断线走退避——
+        // 不拿一条业务补发冒充上线。测试可调小换 CI 速度。
         int ready_timeout_ms = 10'000;
         int missed_ack_limit = 2;    // 连续 N 次心跳无 ACK 判死线
         int max_backoff_ms = 60'000;
@@ -149,9 +155,12 @@ public:
     std::int64_t last_seq() const { return last_seq_.load(); }
     std::string session_id() const;
     int connect_attempts() const { return connect_attempts_.load(); }
+    // A09:未知/服务端不该发的 opcode 记账(会话内累计)——不冒充心跳、
+    // 不断连,观测口供测试与诊断对账。
+    int unexpected_op_count() const { return unexpected_ops_.load(); }
 
 private:
-    enum class State { Idle, Connecting, Authenticating, Running, Backoff, Stopped };
+    enum class State { Idle, Connecting, Authenticating, Resuming, Running, Backoff, Stopped };
     // 一轮连接的生命周期与收口账:stable = 这轮稳定过(收到过 ACK,退避
     // 归零);retry_after_ms = 本轮失败带的服务端 Retry-After 建议(0 = 无)。
     struct RunOutcome {
@@ -169,6 +178,7 @@ private:
     std::atomic<std::int64_t> last_seq_{-1};
     std::string session_id_;  // 空 = 无可恢复会话(下一轮 Identify)
     std::atomic<int> connect_attempts_{0};
+    std::atomic<int> unexpected_ops_{0};
     std::atomic<IGatewayTransport*> in_flight_{nullptr};
 };
 

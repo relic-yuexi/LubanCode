@@ -69,8 +69,16 @@ std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
 // (容首尾空白);浮点、带杂质的字符串、其它类型一律 nullopt,不静默截断。
 std::optional<std::int64_t> ParseLooseInt64(const nlohmann::json& value);
 
-// Hello(op=10)的 d.heartbeat_interval_ms。缺失/非正数返回 nullopt。
-std::optional<std::int64_t> ParseHelloInterval(const nlohmann::json& d);
+// Hello(op=10)心跳间隔(A01 修正):官方字段是 d.heartbeat_interval(来源:
+// bot.q.qq.com event-emit 页示例 {"op":10,"d":{"heartbeat_interval":45000}},
+// 2026-09-17 核对;单位毫秒)。旧实现误读 heartbeat_interval_ms——历史
+// 服务端从未发过此名,只作显式兼容兜底:官方字段缺失时才读,两字段并存
+// 且不等时报冲突错误,不猜。缺失/类型错/非正数/超范围(> 24h 帽,防下游
+// int 截断翻转)各自有明确错误文案(error 出参);返回 nullopt 即连接层
+// 必须按 hello_bad_payload 断线,不得带默认间隔硬跑。
+inline constexpr std::int64_t kHelloIntervalMaxMs = 86'400'000;  // 24 小时帽
+std::optional<std::int64_t> ParseHelloInterval(const nlohmann::json& d,
+                                               std::string* error = nullptr);
 
 // Identify(op=2):token 前缀 "QQBot "(官方鉴权口径,AccessToken 鉴权)。
 nlohmann::json BuildIdentify(const std::string& access_token, std::uint32_t intents);
@@ -274,31 +282,71 @@ std::optional<FileUploadResponse> ParseFileUploadResponse(const nlohmann::json& 
                                                           std::string* error);
 
 // ---------------------------------------------------------------------------
-// 平台错误分型(官方发送接口错误码表)
+// 平台错误体共用解析与错误分型(A03)
+//
+// 官方两代错误形状并存(2026-09-17 核对):
+//   - API 调用指南(api-call-guide 页):{"err_code":..,"message":..,
+//     "trace_id":..};err_code 0=成功、非 0=失败;官方明言"不要依据
+//     message 判定请求是否失败";trace 另经 X-Tps-trace-ID 头暴露。
+//   - 发送接口错误码表(发送页):{"code":..,"message":..}。
+// 数值域同源(指南失败示例即 40034005),两形状的业务码同一张分型表。
 // ---------------------------------------------------------------------------
 
+// 解析只报事实不裁决:哪个字段在、哪个非法(在但解不出——不许 value_or(0)
+// 当成功)、是否冲突(两字段都合法且不等——不许猜哪个对)。
+struct QqErrorBodyShape {
+    bool body_is_json_object = false;
+    bool has_code = false;       // 旧形状字段存在
+    bool has_err_code = false;   // 官方新形状字段存在
+    bool code_illegal = false;   // 字段在但 ParseLooseInt64 解不出
+    bool err_code_illegal = false;
+    bool conflict = false;       // 两字段均合法且值不等
+    std::optional<std::int64_t> code;
+    std::optional<std::int64_t> err_code;
+    std::string trace_id;  // 白名单诊断;超 128 字符截断
+};
+QqErrorBodyShape ParseQqErrorBody(const std::string& body);
+
+// 有效业务码:唯一字段取其值;并存等值取该值。返回 nullopt 的两种情形
+// ——冲突、唯一字段非法——必须由调用方看 conflict/*_illegal 标志区分,
+// 都不得折算成 0(0 = 平台报成功)。
+std::optional<std::int64_t> QqErrorEffectiveCode(const QqErrorBodyShape& shape);
+
 enum class QqApiErrorKind {
-    RateLimited,        // 40034100 / HTTP 429:延后重试
-    MsgIdExpired,       // 304103/40034005/40034128/40034026:回复窗口过期,不重试
-    Deduped,            // 40054005:同 msg_id+msg_seq 平台已收——按已送达收账
-    NoFriend,           // 40054004:无好友关系,永久拒绝
-    UserRejected,       // 40054013:用户拒收,永久拒绝
-    ContentRejected,    // 40034006/304061/40054007/40054018/22006/304080:内容/形状永久拒绝
-    Unauthorized,       // HTTP 401/403:token 失效,强制刷新后可重试
-    ServerError,        // HTTP 5xx / 50055002:可重试
-    InvalidResponse,    // 2xx 但 body 解不出
-    NetworkError,       // 传输失败(调用方折算进来)
-    UnknownError,       // 其余 4xx
+    RateLimited,         // 40034100 / HTTP 429:延后重试
+    MsgIdExpired,        // 304103/40034005/40034026:回复窗口时间过期,不重试
+    ReplyQuotaExhausted, // 40034128:被动回复"时间或次数"超限(官方两义并列,
+                         // 不再混入 MsgIdExpired);锚点已死,不重试同锚
+    Deduped,             // 40054005:同 msg_id+msg_seq 平台已收——按已送达收账
+    NoFriend,            // 40054004:无好友关系,永久拒绝
+    FriendCheckFailed,   // 40054006:验证好友关系失败,官方建议"重试"——可重试
+    UserRejected,        // 40054013:用户拒收,永久拒绝
+    BotOffline,          // 40054016:机器人已下线——状态可恢复,有限重试
+    ContentRejected,     // 40034006/304061/40054007/40054018/22006/304080 及
+                         // markdown/keyboard 形状族(50059/304062/40034008-11/
+                         // 40034124/40034129):内容/形状永久拒绝
+    PermissionDenied,    // 304004/40034105/40034127/11253:平台权限未开,永久
+                         // 拒绝(申请权限前重试无意义)
+    Unauthorized,        // HTTP 401/403 + 业务 11243(令牌校验不过):刷新后可重试
+    ServerError,         // HTTP 5xx / 50055002 / 40034004(转存失败,官方建议
+                         // 重试) / 850026/850027/40093001:可重试
+    InvalidResponse,     // 2xx 但成功合同无法核对(body 解不出/码字段非法或冲突)
+    NetworkError,        // 传输失败(调用方折算进来)
+    UnknownError,        // 其余 4xx / 码冲突
 };
 
 struct QqApiError {
     QqApiErrorKind kind = QqApiErrorKind::UnknownError;
     int http_status = 0;
-    std::int64_t platform_code = 0;  // body 里的 code 字段(有则)
-    std::string detail;              // 脱敏;不带 token/正文
+    std::int64_t platform_code = 0;  // 分型依据:有效业务码(冲突/非法时 0)
+    std::int64_t platform_err_code = 0;  // 官方 err_code 字段原值(有则;分型同表)
+    std::string trace_id;                // 受控诊断(截 128;不带 message)
+    std::string detail;                  // 脱敏;不带 token/正文
 };
 
-// 按 HTTP 状态 + body(腾讯错误体 {"code":..,"message":..} 或 HTML)分型。
+// 按 HTTP 状态 + body 分型(共用错误解析器;code/err_code 两形状同表)。
+// 非法/冲突的码字段不折算为成功:2xx 下判 InvalidResponse,非 2xx 落
+// HTTP 状态档,detail 带字段非法/冲突记号。
 QqApiError ClassifyQqSendFailure(int http_status, const std::string& body);
 
 }  // namespace lubancode::channel::qq

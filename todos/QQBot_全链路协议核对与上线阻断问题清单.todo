@@ -17,31 +17,31 @@
 
 ## 二、P0：先堵住连接、丢信和错投
 
-### A01 [确认] HELLO 字段错误，测试与实现一起写错
+### A01 [已修 2026-09-17] HELLO 字段错误，测试与实现一起写错
 
 证据：[qq_proto.cpp](../src/channel/qq/qq_proto.cpp) `ParseHelloInterval` 只读 `heartbeat_interval_ms`；官方发送 `heartbeat_interval`。`test_qq_proto.cpp`、`test_qq_gateway.cpp`、`test_qq_adapter.cpp`、`test_qq_ws_client.cpp` 均沿用错误字段。
 
-- [ ] 按官方字段解析，内部变量仍可用 `_ms`；区别缺字段、类型错误、非正数与超范围。若保留旧别名，只作明确兼容，两个字段冲突时报错。
-- [ ] 引入来源独立的官方 HELLO fixture。`{"op":10,"d":{"heartbeat_interval":45000}}` 必须进入 Identify；不能让 mock 通过产品构造器生成服务端报文。
-- [ ] 加字符串整数兼容、空值、零、负数、超大整数用例；协议错误不无限重连。
+- [x] 按官方字段解析，内部变量仍可用 `_ms`；区别缺字段、类型错误、非正数与超范围。若保留旧别名，只作明确兼容，两个字段冲突时报错。
+- [x] 引入来源独立的官方 HELLO fixture。`{"op":10,"d":{"heartbeat_interval":45000}}` 必须进入 Identify；不能让 mock 通过产品构造器生成服务端报文。
+- [x] 加字符串整数兼容、空值、零、负数、超大整数用例；协议错误不无限重连。（跨连接的无限重试治理属 A12 的 requires_action 结构，本刀内协议错误即断线并带稳定码 hello_bad_payload+明细，退避封 60s 帽；移交 A12。）
 
-### A02 [确认] 只读一帧鉴权结果，补发消息会被误当成恢复完成
+### A02 [已修 2026-09-17] 只读一帧鉴权结果，补发消息会被误当成恢复完成
 
 证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) `RunOneConnection` 鉴权阶段收到其他 Dispatch 后也落入 `reached_ready=true` / `State::Running`；运行阶段再来的 READY/RESUMED 直接忽略。官方 Resume 会先补发遗漏事件，再发 RESUMED。
 
-- [ ] 改成有总期限的鉴权循环。Identify 只认有效 READY；Resume 接收补发，等 RESUMED 后再宣布恢复完成。处理期间仍须应答控制帧和维持心跳。
-- [ ] 补发事件按 A04 落盘；状态明确显示“恢复中”，不能提前报 connected。session_id、序号和状态事件只在正确分支更新。
-- [ ] 回放 HELLO→Resume→两条业务消息→RESUMED，以及只有业务消息却始终无 RESUMED；后者必须超时，不能误报上线。
+- [x] 改成有总期限的鉴权循环。Identify 只认有效 READY；Resume 接收补发，等 RESUMED 后再宣布恢复完成。处理期间仍须应答控制帧和维持心跳。
+- [x] 补发事件按 A04 落盘；状态明确显示“恢复中”，不能提前报 connected。session_id、序号和状态事件只在正确分支更新。（网关侧经 on_event 交出补发事件即本刀边界；落盘游标语义归 A04 工WW。）
+- [x] 回放 HELLO→Resume→两条业务消息→RESUMED，以及只有业务消息却始终无 RESUMED；后者必须超时，不能误报上线。
 
-### A03 [确认] 漏读 err_code，错误分型和重试决定会走错
+### A03 [已修 2026-09-17] 漏读 err_code，错误分型和重试决定会走错
 
 证据：[qq_proto.cpp](../src/channel/qq/qq_proto.cpp) `ClassifyQqSendFailure`、[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) `ClassifyGatewayHttpFailure` 只读 `code`。官方 API 指南另有 `err_code` 形状；发送接口的去重、过期等业务码不能只靠 HTTP status 判断。[qq_messages.cpp](../src/channel/qq/qq_messages.cpp) 对 2xx 也只查 `code`。
 
-- [ ] 建共用错误解析器，分别保存 HTTP status、code、err_code、trace；明确新旧形状、字段冲突和字段非法时的规则。不能把非法 code 用 `value_or(0)` 当成功。
-- [ ] 各端点校验自身成功合同。`AckInteraction` 当前把非 JSON 的 2xx 也当 Acked；区分文档允许的空成功响应与非空损坏响应，不能一律要求 JSON，也不能一律放行。
-- [ ] 核对业务码：`40054006` 官方指好友关系校验失败、建议重试，当前却并入 NoFriend 永久失败；`40034128` 同含时间/次数超限，不能只归 MsgIdExpired。补无权限、机器人离线、内容拒绝和去重分支。
-- [ ] 100017 只保留待查结论。增加受控诊断：端点类别、HTTP、两个业务码、白名单 trace、Retry-After、body 是否 JSON。收集真实响应结构并对照官方资料，不记令牌、密钥、正文或完整响应。
-- [ ] 回放只有 err_code、只有 code、两者并存、字符串整数、畸形字段、HTTP 200 业务失败、合法空 ACK。发送、上传、互动、菜单、网关各调用点都走同一规则。
+- [x] 建共用错误解析器，分别保存 HTTP status、code、err_code、trace；明确新旧形状、字段冲突和字段非法时的规则。不能把非法 code 用 `value_or(0)` 当成功。
+- [x] 各端点校验自身成功合同。`AckInteraction` 当前把非 JSON 的 2xx 也当 Acked；区分文档允许的空成功响应与非空损坏响应，不能一律要求 JSON，也不能一律放行。
+- [x] 核对业务码：`40054006` 官方指好友关系校验失败、建议重试，当前却并入 NoFriend 永久失败；`40034128` 同含时间/次数超限，不能只归 MsgIdExpired。补无权限、机器人离线、内容拒绝和去重分支。
+- [x] 100017 只保留待查结论。增加受控诊断：端点类别、HTTP、两个业务码、白名单 trace、Retry-After、body 是否 JSON。收集真实响应结构并对照官方资料，不记令牌、密钥、正文或完整响应。
+- [x] 回放只有 err_code、只有 code、两者并存、字符串整数、畸形字段、HTTP 200 业务失败、合法空 ACK。发送、上传、互动、菜单、网关各调用点都走同一规则。
 
 ### A04 [确认] 落盘失败仍推进 Resume 序号，来信可能永远跳过
 
@@ -85,12 +85,12 @@
 
 ## 三、P1：堵住重连、配对和长回复的后续故障
 
-### A09 [确认] 服务端心跳被忽略，未知 opcode 又冒充 Heartbeat
+### A09 [已修 2026-09-17] 服务端心跳被忽略，未知 opcode 又冒充 Heartbeat
 
 证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) 把 Heartbeat 与“服务器不该发”的操作一起忽略，switch 又以 `value_or(Heartbeat)` 处理未知 op。官方 opcode 表允许服务端发送 Heartbeat。
 
-- [ ] 按官方控制帧合同处理服务端心跳，独立处理未知 op；与定时心跳及 ACK 计数统一，避免多发或误判。
-- [ ] 回放认证中/在线时的服务端心跳、连续 ACK、丢 ACK、未知 op、Reconnect、InvalidSession。InvalidSession 的 d 缺失/非法和 WS close code 须明确区分重新 Identify、Resume、暂停。
+- [x] 按官方控制帧合同处理服务端心跳，独立处理未知 op；与定时心跳及 ACK 计数统一，避免多发或误判。
+- [x] 回放认证中/在线时的服务端心跳、连续 ACK、丢 ACK、未知 op、Reconnect、InvalidSession。InvalidSession 的 d 缺失/非法和 WS close code 须明确区分重新 Identify、Resume、暂停。（d=true→Resume、d=false→重新 Identify、d 缺失/非法→按不可恢复处置换新会话；WS close code 走 read_closed 稳定码另路。close code→处置的完整映射归 B01。）
 
 ### A10 [确认] 心跳总期限会被碎片和 Ping/Pong 拖长
 

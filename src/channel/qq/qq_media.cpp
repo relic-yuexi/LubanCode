@@ -341,27 +341,35 @@ std::expected<QqMediaDownloadResult, QqMediaError> DownloadQqAttachment(
 namespace {
 
 // 媒体错误折算 DeferredRetry/PermanentFail(与 QqMessageSender 的发送分型
-// 同一把尺:可重试族只有 RateLimited/ServerError/NetworkError)。
+// 同一把尺:可重试族 RateLimited/ServerError/NetworkError + A03 新增的
+// FriendCheckFailed/BotOffline)。
 QqMediaUploader::Outcome::Status DeferredOrPermanent(const QqApiError& error) {
     switch (error.kind) {
         case QqApiErrorKind::RateLimited:
         case QqApiErrorKind::ServerError:
         case QqApiErrorKind::NetworkError:
+        case QqApiErrorKind::FriendCheckFailed:
+        case QqApiErrorKind::BotOffline:
             return QqMediaUploader::Outcome::Status::DeferredRetry;
         default:
             return QqMediaUploader::Outcome::Status::PermanentFail;
     }
 }
 
-// 平台错误体(2xx + {"code":..})检查:非 0 code 返回分型,nullopt = 无错。
+// 平台错误体检查(共用解析器,A03):code/err_code 两形状;有效码非 0 返回
+// 分型,有效码 0 或无码字段 = 无错;码字段非法/冲突 = 成功合同无法核对,
+// 返回分型(2xx 折 InvalidResponse)——不 value_or(0) 当成功。
 std::optional<QqApiError> ParsePlatformError(int status, const std::string& body) {
-    const auto parsed =
-        nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-    if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("code")) {
-        return std::nullopt;
+    const QqErrorBodyShape shape = ParseQqErrorBody(body);
+    const auto effective = QqErrorEffectiveCode(shape);
+    if (!shape.has_code && !shape.has_err_code) {
+        return std::nullopt;  // 无码字段:不是错误体
     }
-    if (ParseLooseInt64(parsed.at("code")).value_or(0) == 0) {
-        return std::nullopt;
+    if (shape.conflict || !effective.has_value()) {
+        return ClassifyQqSendFailure(status, body);
+    }
+    if (*effective == 0) {
+        return std::nullopt;  // 0 = 平台报成功
     }
     return ClassifyQqSendFailure(status, body);
 }
