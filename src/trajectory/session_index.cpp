@@ -91,14 +91,18 @@ std::string FirstTextOfContent(const nlohmann::json& content) {
 // session.ended 有无折 closed/incomplete(v3 无 manifest,活场无锁概念,
 // "incomplete" 如实)。cwd/run_kind 从 session.started 取(R2 权威来源),
 // 老档缺键 run_kind 读作"未知"不暗填;标题折 session.title.applied。
+// T15-B(V3-GAP-09):archived 是 lifecycle 账上的目录管理状态,与执行
+// closed/interrupted 分开——查询投影合并二者(status 管执行,archived
+// 管归档)。真值在 lifecycle 流水,索引丢了重建仍读回同一状态。
 SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string& workspace_key,
-                          const std::string& session_id) {
+                          const std::string& session_id, bool archived) {
     SessionScan scan;
     WorkspaceSessionSummary& summary = scan.summary;
     summary.workspace_key = workspace_key;
     summary.session_id = session_id;
     summary.session_dir = platform::PathToUtf8(stream.parent_path());
     summary.status = SessionStatusName(SessionStatus::Incomplete);
+    summary.archived = archived;      // T15-B:目录管理状态,来自 lifecycle 账
     summary.run_kind.clear();         // v3 的种类从账上读,缺=未知(R2)
     summary.run_kind_unknown = true;  // 读到 session.started.runKind 才翻 false
 
@@ -204,7 +208,8 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
     return scan;
 }
 
-SessionScan ScanSession(const std::filesystem::path& session_dir, const std::string& workspace_key) {
+SessionScan ScanSession(const std::filesystem::path& session_dir, const std::string& workspace_key,
+                        const std::map<std::string, SessionAdminState>& archive_state) {
     SessionScan scan;
     WorkspaceSessionSummary& summary = scan.summary;
     summary.workspace_key = workspace_key;
@@ -216,7 +221,9 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
         // 先认 v3(session_switch 接线点 2):<id>.jsonl 首行 schemaVersion==3
         // 即 v3 会话,按 v3 摘要;认不出再走 v2 的损坏路径。
         if (const auto v3_stream = v3::FindV3SessionStream(session_dir); v3_stream.has_value()) {
-            return ScanV3Session(*v3_stream, workspace_key, summary.session_id);
+            const auto state = archive_state.find(summary.session_id);
+            const bool archived = state != archive_state.end() && state->second.archived;
+            return ScanV3Session(*v3_stream, workspace_key, summary.session_id, archived);
         }
         // session.json 读不动:目录占位/写坏。照列(可被 doctor 盯上),
         // 标 damaged,不给假摘要。
@@ -328,17 +335,23 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
 // v3 会话无 session.json/main.jsonl,记 <id>.jsonl 字节数(append-only,
 // 字节数变即重扫);旧索引缺 v3_bytes 键按 0 读,首查触发一次重扫——
 // 索引是派生物,重建无损失。
+// T15-B:v3 场归档状态在 lifecycle 账,主账字节不随归档变——指纹加
+// admin_ms(最新 archive/unarchive 笔的 completed_at_ms*2 + archived 位),
+// 归档/解归档后指纹必变,索引重扫折回最新管理状态。v2 场 session.json
+// 的 mtime 已覆盖,admin_ms 恒 0 也无碍。
 struct SessionFingerprint {
     std::uintmax_t session_json_bytes = 0;
     std::int64_t session_json_mtime_ms = 0;
     std::uintmax_t main_bytes = 0;
     std::uintmax_t v3_bytes = 0;
+    std::int64_t admin_ms = 0;
 
     nlohmann::json ToJson() const {
         return nlohmann::json{{"session_json_bytes", session_json_bytes},
                               {"session_json_mtime_ms", session_json_mtime_ms},
                               {"main_bytes", main_bytes},
-                              {"v3_bytes", v3_bytes}};
+                              {"v3_bytes", v3_bytes},
+                              {"admin_ms", admin_ms}};
     }
     static SessionFingerprint FromJson(const nlohmann::json& json) {
         SessionFingerprint fp;
@@ -357,6 +370,9 @@ struct SessionFingerprint {
         if (json.contains("v3_bytes") && json["v3_bytes"].is_number_unsigned()) {
             fp.v3_bytes = json["v3_bytes"].get<std::uintmax_t>();
         }
+        if (json.contains("admin_ms") && json["admin_ms"].is_number_integer()) {
+            fp.admin_ms = json["admin_ms"].get<std::int64_t>();
+        }
         return fp;
     }
 };
@@ -370,7 +386,8 @@ std::int64_t MtimeMs(const std::filesystem::path& path) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
 }
 
-SessionFingerprint FingerprintOf(const std::filesystem::path& session_dir) {
+SessionFingerprint FingerprintOf(const std::filesystem::path& session_dir,
+                                 const std::map<std::string, SessionAdminState>& archive_state) {
     SessionFingerprint fp;
     std::error_code ec;
     if (const auto size = std::filesystem::file_size(session_dir / "session.json", ec); !ec) {
@@ -390,6 +407,11 @@ SessionFingerprint FingerprintOf(const std::filesystem::path& session_dir) {
         if (const auto size = std::filesystem::file_size(*v3_stream, ec); !ec) {
             fp.v3_bytes = size;
         }
+    }
+    // T15-B:管理状态指纹(v3 归档/解归档不改主账字节,靠它感知)。
+    const std::string session_id = platform::PathToUtf8(session_dir.filename());
+    if (const auto state = archive_state.find(session_id); state != archive_state.end()) {
+        fp.admin_ms = state->second.changed_at_ms * 2 + (state->second.archived ? 1 : 0);
     }
     return fp;
 }
@@ -498,6 +520,9 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
         }
         return index;
     }
+    // T15-B:v3 场归档真值在 lifecycle 账——一次扫齐,指纹与 v3 摘要共用。
+    const std::map<std::string, SessionAdminState> archive_state =
+        ScanSessionArchiveState(workspace_dir);
 
     // 旧账:行按 session_id 索引,提问行按 session 分桶。
     std::map<std::string, WorkspaceSessionSummary> old_rows;
@@ -584,14 +609,15 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
         const std::filesystem::path session_dir = entry.path();
         const std::string session_id = platform::PathToUtf8(session_dir.filename());
         seen.insert(session_id);
-        const SessionFingerprint fp = FingerprintOf(session_dir);
+        const SessionFingerprint fp = FingerprintOf(session_dir, archive_state);
         const auto old_fp = old_fps.find(session_id);
         const auto old_row = old_rows.find(session_id);
         if (old_fp != old_fps.end() && old_row != old_rows.end() &&
             old_fp->second.session_json_bytes == fp.session_json_bytes &&
             old_fp->second.session_json_mtime_ms == fp.session_json_mtime_ms &&
             old_fp->second.main_bytes == fp.main_bytes &&
-            old_fp->second.v3_bytes == fp.v3_bytes) {
+            old_fp->second.v3_bytes == fp.v3_bytes &&
+            old_fp->second.admin_ms == fp.admin_ms) {
             // 指纹没动:旧摘要照用(标题随提问行一起回填)。
             index.sessions.push_back(old_row->second);
             const auto prompts = old_prompts.find(session_id);
@@ -605,7 +631,7 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
             continue;
         }
         changed = true;
-        SessionScan scan = ScanSession(session_dir, workspace_key);
+        SessionScan scan = ScanSession(session_dir, workspace_key, archive_state);
         index.sessions.push_back(scan.summary);
         for (auto& prompt : scan.prompts) {
             prompt.title = scan.summary.title;
@@ -643,9 +669,10 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
         nlohmann::json rows = nlohmann::json::array();
         // 指纹随行写回(查询期算好的那份;没动的行也重写一次,保持文件自洽)。
         for (const auto& summary : index.sessions) {
-            rows.push_back(SummaryToJson(summary, FingerprintOf(
-                                                      workspace_dir / "sessions" /
-                                                      platform::Utf8ToPath(summary.session_id))));
+            rows.push_back(SummaryToJson(summary,
+                                         FingerprintOf(workspace_dir / "sessions" /
+                                                           platform::Utf8ToPath(summary.session_id),
+                                                       archive_state)));
         }
         nlohmann::json prompts_json = nlohmann::json::array();
         for (const auto& prompt : index.prompts) {
