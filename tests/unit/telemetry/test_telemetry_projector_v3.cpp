@@ -212,7 +212,9 @@ const TraceSpan* FindSpan(const ProjectionReport& report, const std::string& nam
 
 const TraceSpan* RequireSpan(const ProjectionReport& report, const std::string& name) {
     const TraceSpan* span = FindSpan(report, name);
-    REQUIRE_MESSAGE(span != nullptr, "缺 span: " + name);
+    // doctest 的 MessageBuilder 不吃字面量 + std::string 拼接,先拼好。
+    const std::string note = "缺 span: " + name;
+    REQUIRE_MESSAGE(span != nullptr, note.c_str());
     return span;
 }
 
@@ -421,7 +423,7 @@ TEST_CASE("子代理子账:session span 不暗填 runKind;输入 origin 不改�
         REQUIRE(writer.has_value());
         // 子账开局:委派 user(origin=parent_agent)。
         v3::MessageDraft delegation;
-        delegation.turn_id = writer.NewTurnId();
+        delegation.turn_id = writer->NewTurnId();
         delegation.purpose = v3::MessagePurpose::Conversation;
         delegation.origin = v3::MessageOrigin::ParentAgent;
         delegation.message = nlohmann::json::object({{"role", "user"}, {"content", "查一层"}});
