@@ -772,7 +772,7 @@ private:
         for (const auto& [request_id, outcome] : request_outcomes_) {
             const auto owner = owners_.find(request_id);
             const auto prepared = prepared_.find(request_id);
-            std::string provider = "unknown";
+            std::string provider;
             std::string model;
             if (owner != owners_.end() && owner->second.message != nullptr) {
                 const MessageLine& message = *owner->second.message;
@@ -783,7 +783,7 @@ private:
                 provider = prepared->second.provider;
             }
             if (provider.empty()) {
-                provider = "unknown";
+                provider = "unknown";  // owner/prepared 都没给:不猜,标 unknown
             }
             if (model.empty() && prepared != prepared_.end()) {
                 model = prepared->second.model;
