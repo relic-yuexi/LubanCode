@@ -382,6 +382,7 @@ TEST_CASE("身份分配:账写不进 → 不发号(内存计数不动,重试同�
     REQUIRE_FALSE(outbox.RetireChannelSendIdentity("dl-f", "test", 1100));
 }
 
+TEST_CASE("Q4 附件入箱:纯附件回复(空正文)也是合法单段") {
     OutboxDir dir("attach-only");
     DurableReplyOutbox outbox;
     REQUIRE(DurableReplyOutbox::Open(&outbox, dir.Paths()).ok);
