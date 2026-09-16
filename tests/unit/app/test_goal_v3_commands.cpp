@@ -514,10 +514,12 @@ TEST_CASE("T12-D 溢出门:门挂着不认领新轮,解除后照常泵") {
     CHECK(fixture.turn_texts.empty());
     CHECK(fixture.notes.size() == 1);
 
-    // 门解(compact applied 后装配层清旗):照常认领开轮。
+    // 门解(compact applied 后装配层清旗):照常认领开轮;第二条通知是
+    // iteration 起跑行("[goal goal-1 c1 iteration 1]"),不是溢出提示复读。
     held = false;
     fixture.wiring.PumpContinuation(0);
     REQUIRE(fixture.turn_texts.size() == 1);
     CHECK(fixture.turn_texts[0].find("修好 auth") != std::string::npos);
-    CHECK(fixture.notes.size() == 1);  // 解除后没有新提示
+    REQUIRE(fixture.notes.size() == 2);
+    CHECK(fixture.notes[1].rfind("N: [goal ", 0) == 0);
 }

@@ -5,6 +5,7 @@
 #include "runtime/v3_compact_runtime.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -291,6 +292,9 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     // 结束兜底:任何提前 return 前必须落终态(除非库层已落)。干跑
     //(session 为空)不写账,只填结果字段。
+    // 拥有权注意:CompactSession 的 unique_ptr 必须活到函数尾——begin_session
+    // 里的 BeginOutcome 是局部量,session 裸指针从 owner 取,owner 由本层持有。
+    std::unique_ptr<CompactSession> session_owner;
     CompactSession* session = nullptr;
     const auto finish_rejected = [&](const std::string& reason) {
         if (session != nullptr) {
@@ -321,7 +325,8 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
             return false;
         }
         result.began = true;
-        session = begin.session.get();
+        session_owner = std::move(begin.session);
+        session = session_owner.get();
         return true;
     };
 

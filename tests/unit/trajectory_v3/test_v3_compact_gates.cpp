@@ -428,7 +428,7 @@ TEST_CASE("T12-E hard trim 收口:降档提交换链,原 artifact 不动,梯尽�
 // ---------------------------------------------------------------------------
 TEST_CASE("T12-E 最低档失败门槛:装不下必要来源明报,不硬塞") {
     trajectory::v3::PreviewRequest request;
-    request.max_preview_bytes = 120;  // 连说明区都装不下的档
+    request.max_preview_bytes = 50;  // 连说明区都装不下的档(极小档)
     trajectory::v3::PreviewChannel channel;
     channel.channel = "combined";
     channel.display_path = "artifacts/res-000001.combined.txt";
@@ -437,5 +437,5 @@ TEST_CASE("T12-E 最低档失败门槛:装不下必要来源明报,不硬塞") {
     request.channels.push_back(std::move(channel));
     const auto preview = trajectory::v3::BuildToolPreview(request);
     CHECK(preview.preview_unrepresentable);
-    CHECK(preview.text.size() <= 120);
+    CHECK(preview.text.size() <= 50);
 }
