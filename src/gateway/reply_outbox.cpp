@@ -726,6 +726,9 @@ bool DurableReplyOutbox::RetireChannelSendIdentity(const std::string& delivery_i
                                                    const std::string& reason,
                                                    std::int64_t now_ms) {
     const std::lock_guard<std::mutex> outbox_lock(mutex_);
+    if (broken_) {
+        return false;  // 账 broken:裁决落不了账,不假称已裁决
+    }
     if (live_identities_.count(delivery_id) == 0) {
         return true;  // 幂等:无 live 身份即已裁决
     }

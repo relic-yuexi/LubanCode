@@ -112,6 +112,12 @@ struct ScriptHttp {
 
     QqHttpFunc Func() {
         return [this](const QqHttpRequest& request) -> std::expected<QqHttpResponse, std::string> {
+            // 停止章观测在入口记(阻塞前)——A08 案里 token 请求卡到取消,
+            // 若等返回再记,断言时刻观测账是空的。
+            {
+                const std::lock_guard<std::mutex> lock(mutex);
+                cancel_stamped.push_back(request.cancel != nullptr);
+            }
             if (block_token_until_cancelled &&
                 request.url.find("/app/getAppAccessToken") != std::string::npos &&
                 request.cancel != nullptr) {
@@ -124,7 +130,6 @@ struct ScriptHttp {
             }
             const std::lock_guard<std::mutex> lock(mutex);
             calls.emplace_back(request.url, request.body);
-            cancel_stamped.push_back(request.cancel != nullptr);
             if (request.url.find("/app/getAppAccessToken") != std::string::npos) {
                 return QqHttpResponse{
                     200, R"({"access_token":")" + access_token + R"(","expires_in":7200})"};
@@ -722,7 +727,10 @@ TEST_CASE("qq_adapter: A04 spool 落盘失败——PersistFailed 断线留根因
     }));
 
     // 磁盘恢复:第二轮 Resume 补发同一事件——Inbound 恰一次,不丢信。
+    // (假传输的游标不随"连接插队 Hello"移位,第二轮要自己补推一条 Hello。)
     harness.adapter->SetSpoolAppendFaultForTest(false);
+    ScriptGatewayTransport::Push(
+        harness.gateway, R"({"op":10,"d":{"heartbeat_interval_ms":30000}})");
     ScriptGatewayTransport::Push(harness.gateway,
                                  R"({"op":0,"s":2,"t":"RESUMED","d":{}})");
     ScriptGatewayTransport::Push(
@@ -823,10 +831,11 @@ TEST_CASE("qq_adapter: A08 停止章——出站 HTTP 全带 cancel;停机期限
                                   nlohmann::json{{"transport", "websocket"}}));
     harness.adapter->WriteToSidecar(start->data(), start->size());
     REQUIRE(WaitQuiet([&harness]() { return harness.adapter->gateway_thread_running(); }));
-    // 已发过的 token/gateway 请求都盖了停止章(cancel 指针非空)。
+    // 已发过的 token 请求盖了停止章(cancel 指针非空;gateway url 请求
+    // 还卡在 token 后面,不在此刻的账上)。
     {
         std::lock_guard<std::mutex> lock(harness.http.mutex);
-        REQUIRE(harness.http.cancel_stamped.size() >= 2);
+        REQUIRE(harness.http.cancel_stamped.size() >= 1);
         for (const bool stamped : harness.http.cancel_stamped) {
             CHECK(stamped);
         }

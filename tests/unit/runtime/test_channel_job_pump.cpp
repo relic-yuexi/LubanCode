@@ -617,20 +617,28 @@ TEST_CASE("A06 改锚补投:旧身份裁决留迹,新身份新号(账行可追�
     REQUIRE(fixture.Tick());
     fixture.TickUntilQuiet();
     std::size_t anchored = 0;
+    std::int64_t reanchor_seq = -1;
+    std::int64_t chat_reply_seq = -1;
     for (const auto& send : fixture.sidecar.sent_messages()) {
-        if (send.client_id != chanjob_delivery) {
+        if (!send.params.contains("msg_seq") ||
+            !send.params.contains("reply_to_message_id") ||
+            send.params["reply_to_message_id"] != "m-2") {
             continue;
         }
-        ++anchored;
-        if (anchored == 2) {
-            REQUIRE(send.params.contains("reply_to_message_id"));
-            CHECK(send.params["reply_to_message_id"] == "m-2");
-            // 新锚的第一号(独立计数,与主动首投无撞号)。
-            REQUIRE(send.params.contains("msg_seq"));
-            CHECK(send.params["msg_seq"] == 1);
+        const std::int64_t seq = send.params["msg_seq"].get<std::int64_t>();
+        if (send.client_id == chanjob_delivery) {
+            anchored++;
+            reanchor_seq = seq;
+        } else {
+            chat_reply_seq = seq;  // 同信的聊天回复(in-2 的应答)
         }
     }
-    REQUIRE(anchored == 2);
+    REQUIRE(anchored == 1);
+    // 补投与新来信的聊天回复共用同一发号器:各占一号,不撞号(值是 1/2,
+    // 谁先谁后由选择排序定,不硬钉)。
+    CHECK(reanchor_seq >= 1);
+    CHECK(chat_reply_seq >= 1);
+    CHECK(reanchor_seq != chat_reply_seq);
     // 账行可追溯:同 delivery 留有两笔分配 + 一笔裁决(原因带限频挂起)。
     std::ifstream journal(fixture.paths.outbox_log);
     std::string line;
