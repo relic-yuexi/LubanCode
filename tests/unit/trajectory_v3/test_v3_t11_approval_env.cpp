@@ -266,7 +266,8 @@ TEST_CASE("T11-C 采集: session.environment.captured 落账,canary 不入档") 
     CHECK(captured[0]->at("payload").contains("snapshotRef"));
     // 幂等:一场 run 一次。
     CHECK(ledger->CaptureEnvironment(facts).empty());
-    CHECK(RowsOfKind(ReadLines(stream), "session.environment.captured").size() == 1);
+    const auto again_rows = ReadLines(stream);
+    CHECK(RowsOfKind(again_rows, "session.environment.captured").size() == 1);
     // canary 不入账、不入 blob、不入任何会话文件。
     CHECK(ConcatDirText(ledger->session_dir()).find(kCanary) == std::string::npos);
     CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);

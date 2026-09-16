@@ -222,7 +222,8 @@ TEST_CASE("T11-A schema: 标题族 statusless、来源枚举、生成身份按 s
     CHECK_FALSE(CheckEvent("title.requested", nlohmann::json{{"task", "session_title_refine"}},
                            std::optional<std::string>("titlegen-1"))
                     .has_value());
-    CHECK(HasCode(CheckEvent("title.extracted", nlohmann::json{{"title", ""}}),
+    CHECK(HasCode(CheckEvent("title.extracted", nlohmann::json{{"title", ""}},
+                             std::optional<std::string>("titlegen-1")),
                   "schema3.bad_type"));
     CHECK_FALSE(CheckEvent("title.extracted", nlohmann::json{{"title", "终端光标修复"}},
                            std::optional<std::string>("titlegen-1"))
@@ -347,9 +348,9 @@ TEST_CASE("T11-A 生成流: prompt/assistant 落正式 message(purpose=session_t
         } else if (role == "assistant") {
             ++title_assistants;
             CHECK(row.value("turnId", std::string()) == "turn-1");
-            // usage 唯一 owner:assistant 自带实报。
+            // usage 唯一 owner:assistant 自带实报(§五键名 camelCase)。
             REQUIRE(row.contains("usage"));
-            CHECK(row.at("usage").value("input_tokens", 0) == 120);
+            CHECK(row.at("usage").value("inputTokens", 0) == 120);
         }
     }
     CHECK(title_systems == 1);
@@ -396,7 +397,8 @@ TEST_CASE("T11-A 竞态: 迟到生成记提取事实,不落采用行;采用对�
     CHECK(account.AdoptRefined(on_time) ==
           lubancode::app::SessionTitleAccount::AdoptResult::Adopted);
     CHECK(title == "准点题名");
-    const auto applied = RowsOfKind(ReadLines(stream), "session.title.applied");
+    const auto final_rows = ReadLines(stream);
+    const auto applied = RowsOfKind(final_rows, "session.title.applied");
     REQUIRE(applied.size() == 1);
     CHECK(applied[0]->at("payload").value("source", std::string()) == "generated");
     CHECK(applied[0]->at("titleGenerationId") == "titlegen-1");

@@ -140,9 +140,9 @@ std::string PlantWriterSession(const std::filesystem::path& sessions_dir, const 
         v3::EventDraft applied;
         applied.kind = v3::EventKindV3::SessionTitleApplied;
         // 事实提交族不带 status(校验按 RequiredStatusForKind 穷举表,此 kind
-        // 不在表里,带 status 会被"不携带"分支拒)。
-        applied.title_generation_id = "titlegen-1";
-        applied.payload = nlohmann::json{{"title", "正式标题一"}};
+        // 不在表里,带 status 会被"不携带"分支拒)。T11-A 起载荷必带 source;
+        // 本地来源不伪造 titleGenerationId。
+        applied.payload = nlohmann::json{{"title", "正式标题一"}, {"source", "local"}};
         REQUIRE(writer->AppendEvent(std::move(applied), v3::Durability::ProcessCrash).status ==
                 v3::WriteReceipt::Status::Committed);
     }
@@ -253,8 +253,8 @@ TEST_CASE("标题写读接通: v3 场 /title 落 session.title.applied,投影现
                 continue;
             }
             saw_applied = true;
-            REQUIRE(row.contains("titleGenerationId"));
-            CHECK(!row["titleGenerationId"].get<std::string>().empty());
+            // T11-A:手动来源不带生成身份(titleGenerationId 不伪造)。
+            CHECK_FALSE(row.contains("titleGenerationId"));
             CHECK(row["payload"].value("title", std::string()) == "手动题名");
             CHECK(row["payload"].value("source", std::string()) == "manual");
         }

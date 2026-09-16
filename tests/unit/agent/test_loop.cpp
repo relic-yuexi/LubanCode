@@ -1189,8 +1189,11 @@ TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens �
         }
     }
     // 预检没爆:无 PreflightExceeded 事件(应急的账),压力回调零发。
+    // T11-E 起,降档裁决只发边界记录器(PreflightDegraded,v3 落
+    // context.pressure.recorded 的 max_tokens_degraded;宿主回调不受扰)。
     CHECK(preflight_events == 0);
-    CHECK(recorder.pressure.empty());
+    REQUIRE(recorder.pressure.size() == 1);
+    CHECK(recorder.pressure.front().phase == agent::ContextPressure::Phase::PreflightDegraded);
 }
 
 // ---------------------------------------------------------------------------

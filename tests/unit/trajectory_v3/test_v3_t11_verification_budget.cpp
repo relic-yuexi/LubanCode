@@ -142,6 +142,24 @@ api::Message AssistantWithToolCall(const std::string& call_id) {
     return message;
 }
 
+// 同一 assistant 声明两枚调用(验证案:call_w2 执行+验证,call_w3 再改)。
+api::Message AssistantWithTwoToolCalls(const std::string& first_id, const std::string& second_id) {
+    api::Message message;
+    message.role = api::Role::Assistant;
+    message.content.push_back(api::TextBlock{"分两步改。"});
+    api::ToolUseBlock first;
+    first.id = first_id;
+    first.name = "write_file";
+    first.input = nlohmann::json{{"path", "src/app/main.cpp"}};
+    message.content.push_back(std::move(first));
+    api::ToolUseBlock second;
+    second.id = second_id;
+    second.name = "write_file";
+    second.input = nlohmann::json{{"path", "src/app/main.cpp"}};
+    message.content.push_back(std::move(second));
+    return message;
+}
+
 agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::string& call_id) {
     agent::ToolTraceEvent event;
     event.kind = kind;
@@ -154,9 +172,10 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 }
 
 // 一轮"输入 -> 请求/回复(带工具声明) -> 执行(finished,undo.path 指定
-// 被改文件) -> 结果回喂"的最小完整流;返回这轮请求 id。
+// 被改文件) -> 结果回喂"的最小完整流;返回这轮请求 id。end_turn=false
+// 时收口留给调用方(回合内还要补观察事件——回合门只放行本回合的账)。
 std::string DriveWriteToolTurn(TrajectoryTurnBridge& bridge, const std::string& call_id,
-                               const std::string& mutated_path) {
+                               const std::string& mutated_path, bool end_turn = true) {
     bridge.BeginTurn("turn-1", "external_user");
     bridge.RecordInput(UserMessage("改一下入口"));
     agent::RequestPreparedContext ctx;
@@ -189,7 +208,9 @@ std::string DriveWriteToolTurn(TrajectoryTurnBridge& bridge, const std::string& 
     result.content = "written";
     results.content.push_back(std::move(result));
     bridge.OnToolResultsCommitted("batch-1", results);
-    bridge.EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    if (end_turn) {
+        bridge.EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+    }
     return request_id;
 }
 
@@ -304,9 +325,8 @@ TEST_CASE("T11-D 验证: 关联 actionId;被改文件命中的验证失效,读�
         DriveWriteToolTurn(*bridge, "call_w1", "src/app/main.cpp");
     }
     {
-        // 第二轮:工具再改同文件,验证与工具同回合(ownership 门只认本
-        // 回合声明过的 call)——trace 验证点挂 call_w2;path 锚定验证走
-        // Begin/FinishVerification;第三次改动把 path 验证打失效。
+        // 第二轮:assistant 先声明两枚调用(ownership 门只认本回合声明过的
+        // call),call_w2 执行+验证,call_w3 再改同文件把 path 验证打失效。
         auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
         bridge->BeginTurn("turn-2", "external_user");
         bridge->RecordInput(UserMessage("再改再验"));
@@ -319,10 +339,8 @@ TEST_CASE("T11-D 验证: 关联 actionId;被改文件命中的验证失效,读�
         const std::string request_id = bridge->OnRequestPrepared(request, ctx);
         REQUIRE_FALSE(request_id.empty());
         REQUIRE(bridge->OnRequestSent(request_id));
-        api::Message assistant;
-        assistant.role = api::Role::Assistant;
-        assistant.content.push_back(api::TextBlock{"好。"});
-        REQUIRE(bridge->OnOutputCompleted(request_id, assistant, "end_turn", "resp-2"));
+        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantWithTwoToolCalls("call_w2", "call_w3"),
+                                          "tool_calls", "resp-2"));
         bridge->OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, "call_w2"));
         bridge->OnToolTrace(TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, "call_w2"));
         agent::ToolTraceEvent finished =
@@ -426,8 +444,8 @@ TEST_CASE("T11-D 迟到: tool.observation.late 只记观察,已提交终态不�
     {
         auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
         REQUIRE(bridge != nullptr);
-        DriveWriteToolTurn(*bridge, "call_l1", "docs/a.md");
-        // 终态已提交后,MCP 迟到响应到达:丢响应,留观察。
+        DriveWriteToolTurn(*bridge, "call_l1", "docs/a.md", /*end_turn=*/false);
+        // 终态已提交(本回合内),MCP 迟到响应到达:丢响应,留观察。
         agent::ToolTraceEvent late =
             TraceEvent(agent::ToolTraceEventKind::McpLateResponse, "call_l1");
         late.source_kind = agent::ToolSourceKind::Mcp;
@@ -439,6 +457,7 @@ TEST_CASE("T11-D 迟到: tool.observation.late 只记观察,已提交终态不�
             TraceEvent(agent::ToolTraceEventKind::RecoveryMarker, "call_l1");
         note.note = "unknown_side_effects_not_rerun";
         bridge->OnToolTrace(note);
+        bridge->EndTurn(true, false, "");
     }
 
     const auto rows = ReadLines(stream);
@@ -489,8 +508,8 @@ TEST_CASE("T11-E 压力: 三种裁决落账,数字可对账,不带累计用量")
         assistant.role = api::Role::Assistant;
         assistant.content.push_back(api::TextBlock{"收到。"});
         REQUIRE(bridge->OnOutputCompleted(request_id, assistant, "end_turn", "resp-1"));
-        bridge->EndTurn(true, false, "");
 
+        // 三种裁决都在回合内落(发送前判定发生在回合开着的窗口里)。
         // 应急收窄放行(reserve_clamped)。
         agent::ContextPressure clamped;
         clamped.phase = agent::ContextPressure::Phase::PreflightExceeded;
@@ -516,6 +535,7 @@ TEST_CASE("T11-E 压力: 三种裁决落账,数字可对账,不带累计用量")
         degraded.protocol_headroom_tokens = 32;
         degraded.window_tokens = 1280;
         bridge->OnContextPressure(degraded);
+        bridge->EndTurn(true, false, "");
     }
 
     const auto rows = ReadLines(stream);

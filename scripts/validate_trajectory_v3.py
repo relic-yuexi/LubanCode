@@ -660,11 +660,13 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             # T11-A:自动生成流"判词到手"(是否采用看 applied 有无)。
             require_payload(kind, payload, ["title"])
         elif kind == "session.environment.captured":
-            # T11-C 环境快照:引用 + 重现等级 + 缺口 + 脱敏标志。
+            # T11-C 环境快照:BlobRef 引用 + 重现等级 + 缺口 + 脱敏标志。
             require_payload(kind, payload, ["snapshotRef", "replayLevel", "gaps",
                                             "configRedacted"])
-            if not is_ref(payload["snapshotRef"]):
-                raise ValidationError("session.environment.captured.snapshotRef 应为合法引用")
+            ref = payload["snapshotRef"]
+            if not isinstance(ref, dict) or not is_hex64(ref.get("sha256")):
+                raise ValidationError(
+                    "session.environment.captured.snapshotRef 应为 BlobRef 五键形状")
             if not isinstance(payload["gaps"], list) or not all(
                     isinstance(g, str) for g in payload["gaps"]):
                 raise ValidationError("session.environment.captured.gaps 应为 string 数组")

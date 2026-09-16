@@ -435,7 +435,7 @@ TEST_CASE("MemoryTurnLedger 的 v3 写口: assessed 与 receipted 事实行") {
     CHECK(trajectory::v3::VerifyV3File(*stream).ok);
 }
 
-TEST_CASE("工厂门(§四清册): v3 场只有 memory_extract 接桥,其余维持 nullptr") {
+TEST_CASE("工厂门(§四清册): v3 场 memory_extract 与 title_refine 接桥,其余维持 nullptr") {
     EnvGuard v3gate("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("gate");
     auto opened = TrajectorySessionLedger::Open(LedgerOptions(root));
@@ -443,9 +443,9 @@ TEST_CASE("工厂门(§四清册): v3 场只有 memory_extract 接桥,其余维�
     TrajectorySessionLedger& ledger = *opened;
     TrajectoryTurnBridge::Identity identity{"kimi", "responses", "host"};
     CHECK(ledger.NewBypassBridge(identity, accounting::RequestPurpose::MemoryExtract) != nullptr);
-    // 起名:升旗人是精炼器自己,消息 purpose 的 system 白名单还没放行
-    // session_title——不接,等后续单(§四清册在案)。
-    CHECK(ledger.NewBypassBridge(identity, accounting::RequestPurpose::TitleRefine) == nullptr);
+    // 起名精炼(T11-A 起入册):prompt/assistant 落正式 message
+    //(purpose=session_title,§4.34 归首问主回合),接桥。
+    CHECK(ledger.NewBypassBridge(identity, accounting::RequestPurpose::TitleRefine) != nullptr);
     // doctor 探针:v3 合同未铺,旧路照走。
     CHECK(ledger.NewBypassBridge(identity, accounting::RequestPurpose::DoctorProbe) == nullptr);
     // compact 一族:v3 有自己的全链运行时(RunV3Compact),不走旁路桥。

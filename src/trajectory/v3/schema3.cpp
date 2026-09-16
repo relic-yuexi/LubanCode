@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "trajectory/blob_store.hpp"  // BlobRef 形状(T11-C 环境快照引用)
+
 namespace lubancode::trajectory::v3 {
 
 namespace {
@@ -2006,8 +2008,11 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         // + 取材缺口;configRedacted 明说脱敏已做(快照里的配置件是调用方
         // 脱敏后的,脱敏合同在装配层)。没采集的场没有本行,读取侧
         // 按缺件处理,不从当前环境补造。
-        if (auto error = CheckRefField(kind_name, line.payload, "snapshotRef", true)) {
-            return error;
+        const auto snapshot = line.payload.find("snapshotRef");
+        if (snapshot == line.payload.end() || !snapshot->is_object() ||
+            !trajectory::BlobRef::MatchesShape(*snapshot)) {
+            return Err("schema3.bad_ref",
+                       "session.environment.captured.snapshotRef 应为 BlobRef 五键形状(§8.2)");
         }
         if (auto error = CheckStringField(kind_name, line.payload, "replayLevel")) {
             return error;
