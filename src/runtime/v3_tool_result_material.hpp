@@ -48,10 +48,14 @@ inline trajectory::v3::PreviewRequest PreviewFromPersistedMaterials(
         for (const auto& ref : persisted.result_ref) {
             if (ref.value("kind", std::string()) == output.channel) {
                 const std::string relative = ref.value("path", std::string());
+                // lexically_normal:仓账相对路径存正斜杠,Windows 拼接后若不归一
+                // 会得"..\artifacts/res-x"混血分隔符(2026-09-17 CI 实锤,追回
+                // 断言两头都咬不上);归一成平台首选分隔符,read_file 两种都认。
                 channel.display_path =
                     relative.empty()
                         ? std::string()
-                        : platform::PathToUtf8(session_dir / platform::Utf8ToPath(relative));
+                        : platform::PathToUtf8(
+                              (session_dir / platform::Utf8ToPath(relative)).lexically_normal());
                 break;
             }
         }

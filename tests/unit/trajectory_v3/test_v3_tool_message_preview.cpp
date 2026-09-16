@@ -266,13 +266,9 @@ TEST_CASE("超帽结果(全链):入史前钩子归仓换预览,运行时历史�
     // 模型用 read_file 分段读回),并带 retrieval_hint 指路。
     const std::string absolute_combined =
         platform::PathToUtf8(ledger->session_dir() / "artifacts" / "res-000001.combined.txt");
-    // 预览 JSON 里的路径是 JSON 转义形态(Windows 反斜杠翻倍)——期望串同转义。
-    std::string absolute_json = absolute_combined;
-    for (std::size_t pos = absolute_json.find('\\'); pos != std::string::npos;
-         pos = absolute_json.find('\\', pos + 2)) {
-        absolute_json.insert(pos, 1, '\\');
-    }
-    CHECK(history_content.find("\"" + absolute_json + "\"") != std::string::npos);
+    // full_output 清单是纯文本引用(JoinPaths),路径按平台首选分隔符归一
+    //(生产侧 lexically_normal)——直查原串,不做 JSON 转义。
+    CHECK(history_content.find("\"" + absolute_combined + "\"") != std::string::npos);
     CHECK(history_content.find("retrieval_hint") != std::string::npos);
     CHECK(history_content.find("[开头内容]") != std::string::npos);
     CHECK(history_content.find("[中间内容已省略]") != std::string::npos);
