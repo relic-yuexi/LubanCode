@@ -141,3 +141,4 @@
 - 测试：`tests/unit/insights/test_insights_v3_pipeline.cpp`（册内 EnvGuard("1")；gate 五态分型与 partial、摩擦 v3 正反例、prompt v3 规则与 R01 不误报、resume/两层子代理去重、摘要字节稳定与 stale、schema 往返、allowlist）。v2 老册（test_integrity_gate/test_friction_classifier/test_prompt_auditor/test_session_analyzer/test_usage_fixture_pipeline 等）原样保留作旧档回归。
 - 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；CI 已判绿（头提交 280ad10c rollup=success）。真实 v3 会话的真机 /insights、/prompt audit 抽验未做（I5 生产验收整体未跑）；compact 前后对照的细分 prompt 规则、tokenEstimateRef 离线展开（估算栏消费）留后续批。
 - 旧依赖：insights 的 v2 EventEnvelope 读路（integrity_gate/prompt_auditor/session_analyzer 的 v2 半场）保留给旧档，退役归 T02-B。
+- 并后补修（PR #103，2026-09-16）：windows-msvc 腿一册红（run 35039891518）——partial 案 remove_all 时子账写柄还悬着，Windows 不删打开中的文件且 errorcode 被吞，子账仍在树上被收成 facts（v3_facts 实得 2）；macos POSIX 删得掉所以全绿。夹具平台差，非生产收录判据病：改先 reset 写柄再删、remove_all 失败 REQUIRE 当场炸，断言不放宽。
