@@ -82,6 +82,10 @@ public:
         // NoteSubagentCompletion 单独归账,这里不双计)。可空 = 装配层没有
         // turn 视图,如实不归账。
         std::function<std::optional<lubancode::runtime::TurnMetrics>()> last_turn_metrics;
+        // T12-D(V3-GAP-07):溢出门查询——provider 确认输入超窗后、compact
+        // 未成功前返回 true。true 时泵不认领新 iteration(新轮只会把同一份
+        // 超限请求原样重发);巡检/收口续跑不受影响。可空 = 无此门(照旧泵)。
+        std::function<bool()> overflow_hold;
         // 渲染事件出口(问题 3 第 2 条):is_error 定色,text 是纯文案
         // ——怎么画由装配层(interactive_session_assembly 填)决定。
         std::function<void(bool is_error, const std::string& text)> notify;
@@ -193,6 +197,8 @@ private:
     std::vector<int> v3_round_baseline_task_ids_;
     std::string v3_closing_turn_id_;
     bool v3_closeout_pending_ = false;
+    // T12-D:溢出门的一次性通知账(门挂着时不重复刷屏;门解除后复位)。
+    bool overflow_hold_notified_ = false;
 };
 
 }  // namespace lubancode::app

@@ -72,6 +72,17 @@ std::string ReasonCodeOfError(const Error& error) {
     return "unknown";
 }
 
+bool IsInputContextOverflowCode(std::string_view api_code) {
+    // T12-D(V3-GAP-07):provider 输入超窗稳定码。只认明确说"输入太长"的
+    // 码——HTTP 400 文案里提 context 一类模糊匹配不进表,宁可漏认走普通
+    // 失败路,不冒充超窗触发恢复。
+    static constexpr std::string_view kOverflowCodes[] = {
+        "context_length_exceeded", "context_window_exceeded", "input_context_overflow",
+    };
+    return std::find(std::begin(kOverflowCodes), std::end(kOverflowCodes), api_code) !=
+           std::end(kOverflowCodes);
+}
+
 bool IsRetryableError(const Error& error) {
     switch (error.kind) {
         case ErrorKind::Network:

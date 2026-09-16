@@ -5,6 +5,7 @@
 #include "runtime/v3_compact_runtime.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -285,51 +286,70 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return result;
     }
 
-    if (input.allow_closed_step_compaction && !input.parent_turn_id) {
-        for (auto it = ledger.context.chain.rbegin(); it != ledger.context.chain.rend(); ++it) {
-            const auto* line = ledger.FindMessage(it->message_ref);
-            if (line && line->turn_id) { input.parent_turn_id = line->turn_id; break; }
-        }
-    }
+    // T12-C(V3-GAP-07):parent_turn_id 只认调用方递进的真实主轮号,不从
+    // 链上猜"最近一枚 turn"顶包——idle 手动压缩按实际无活动主轮表达
+    //(parentTurnId 落 null),turn 中途压缩由接线层递 OpenMainTurnId()。
 
-    // ---- 1. 开场:compact.requested + 内部回合(§4.6)。已有进行中的
-    // compact 时库层拒收(busy),不另开场。 ----
-    auto begin = CompactSession::Begin(writer, input.trigger, input.reason,
-                                       input.parent_turn_id, RequirementsToJson(requirements));
-    result.compact_id = begin.info.compact_id;
-    result.turn_id = begin.info.turn_id;
-    if (!begin.info.began) {
-        result.terminal_kind = begin.info.error.rfind("compact.busy", 0) == 0 ? "busy" : "not_begun";
-        result.reason = begin.info.error;
-        return result;
-    }
-    result.began = true;
-    CompactSession& session = *begin.session;
-
-    // 结束兜底:任何提前 return 前必须落终态(除非库层已落)。
+    // 结束兜底:任何提前 return 前必须落终态(除非库层已落)。干跑
+    //(session 为空)不写账,只填结果字段。
+    // 拥有权注意:CompactSession 的 unique_ptr 必须活到函数尾——begin_session
+    // 里的 BeginOutcome 是局部量,session 裸指针从 owner 取,owner 由本层持有。
+    std::unique_ptr<CompactSession> session_owner;
+    CompactSession* session = nullptr;
     const auto finish_rejected = [&](const std::string& reason) {
-        session.Fail(writer, CompactSession::FailKind::Rejected, reason);
+        if (session != nullptr) {
+            session->Fail(writer, CompactSession::FailKind::Rejected, reason);
+        }
         result.terminal_kind = "rejected";
         result.reason = reason;
     };
     const auto finish_failed = [&](const std::string& reason) {
-        session.Fail(writer, CompactSession::FailKind::Failed, reason);
+        if (session != nullptr) {
+            session->Fail(writer, CompactSession::FailKind::Failed, reason);
+        }
         result.terminal_kind = "failed";
         result.reason = reason;
     };
 
+    // 开场(compact.requested + 内部回合,§4.6):已有进行中的 compact 时
+    // 库层拒收(busy),不另开场。干跑不开场(T12-B)。
+    const auto begin_session = [&]() {
+        auto begin = CompactSession::Begin(writer, input.trigger, input.reason,
+                                           input.parent_turn_id, RequirementsToJson(requirements));
+        result.compact_id = begin.info.compact_id;
+        result.turn_id = begin.info.turn_id;
+        if (!begin.info.began) {
+            result.terminal_kind =
+                begin.info.error.rfind("compact.busy", 0) == 0 ? "busy" : "not_begun";
+            result.reason = begin.info.error;
+            return false;
+        }
+        result.began = true;
+        session_owner = std::move(begin.session);
+        session = session_owner.get();
+        return true;
+    };
+
     // ---- 2. 范围计划:链序分块(system 之外),保护集 = 调用方钉的 +
     // 工具动作未收口的 turn;removed = 保护界之前全部(含旧摘要),
-    // retained = 界后尾部。 ----
+    // retained = 界后尾部。纯计算,不落账——真跑/干跑共用同一副牌
+    //(T12-B:同一候选范围与容量规划器)。 ----
     const std::vector<trajectory::v3::ChainNode>& chain = writer.context().chain;
     std::vector<const MessageLine*> chain_messages;  // 根(system)之后,链序
+    std::string plan_error;  // 链上引用缺件:真跑须先开场再落终态(失败有账)
     for (std::size_t i = 1; i < chain.size(); ++i) {
         const MessageLine* line = ledger.FindMessage(chain[i].message_ref);
         if (line == nullptr) {
-            finish_rejected("compact.missing_chain_ref: " + chain[i].message_ref);
-            return result;
+            plan_error = "compact.missing_chain_ref: " + chain[i].message_ref;
+            break;
         }
         chain_messages.push_back(line);
+    }
+    if (!plan_error.empty()) {
+        if (input.dry_run || begin_session()) {
+            finish_rejected(plan_error);  // 真跑已开场:compact.failed 落账
+        }
+        return result;  // begin_session 失败(busy/not_begun)时字段已带原因
     }
 
     std::set<std::string> protected_turns(input.protected_turn_ids.begin(),
@@ -509,20 +529,28 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         }
     }
 
-    // 没有可摘要化历史(空链/全受保护):rejected(no_eligible_history),
-    // 一次模型都不调(§4.9)。
-    if (plan.removed.empty()) {
-        session.Freeze(writer, {}, plan.RetainedIds(), plan.protected_turns);
-        result.terminal_kind = "rejected";
-        result.reason = "no_eligible_history";
-        return result;
-    }
+    // ---- T12-B 干跑的数字面:结构可回收量,同一把尺(bytes/4)。只报
+    // 结构数字,不编造摘要实际 token(tokens_after 恒 0)。 ----
+    const auto fill_dry_numbers = [&]() {
+        std::uint64_t system_message_tokens = 0;
+        if (const MessageLine* system_line = ledger.FindMessage(writer.context().system_message_ref)) {
+            system_message_tokens = EstimateMessageTokens(*system_line);
+        }
+        result.dry_run = true;
+        result.tokens_before = system_message_tokens + plan.RemovedTokens() + plan.RetainedTokens();
+        result.removed_messages = plan.RemovedIds().size();
+        result.retained_messages = plan.RetainedIds().size();
+        result.removed_tokens = plan.RemovedTokens();
+        result.retained_tokens = plan.RetainedTokens();
+        result.removed_turns.clear();
+        for (const auto& block : plan.removed) {
+            result.removed_turns.push_back(block.turn_id.has_value() ? *block.turn_id : "(旧摘要)");
+        }
+        result.protected_turns = plan.protected_turns;
+        result.step_scope = plan.step_scope;
+    };
 
-    // ---- 3. 发送前容量门禁与整轮回退(§4.37/§4.64)。
-    // Ic + Oc + Mc <= Cc;Cc 未知(0)不做门禁,如实标注。撞窗:先移出
-    // 仅供参考的保留尾部(R),再从可压缩历史(H)最新一轮起整轮移出组
-    // 成连续保留尾部 K;目标一次至少让出 minRetreatTokens;每步落
-    // compact.range.retreated;退空仍不过则 rejected,不发请求碰运气。 ----
+    // 压缩专用 system 与估算材料(§4.6):真跑/干跑共用。
     const std::string special_system =
         input.special_system.empty() ? DefaultSpecialSystem() : input.special_system;
     const std::uint64_t system_tokens = EstimateUtf8Div4(special_system);
@@ -664,22 +692,34 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return static_cast<std::uint64_t>(tokens);
     };
 
-    bool reference_included = plan.step_scope.empty();
     const bool gate_active = profile.compact_window_tokens > 0;
-    result.gate_checked = gate_active;
-    result.window_unknown = !gate_active;
-    if (!gate_active) {
-        result.notes.push_back("压缩模型窗口未知,发送前门禁未校验");
-    }
-    int plan_revision = 0;
-    if (gate_active) {
+    // ---- 3. 发送前容量门禁与整轮回退(§4.37/§4.64)。
+    // Ic + Oc + Mc <= Cc;Cc 未知(0)不做门禁,如实标注。撞窗:先移出
+    // 仅供参考的保留尾部(R),再从可压缩历史(H)最新一轮起整轮移出组
+    // 成连续保留尾部 K;目标一次至少让出 minRetreatTokens;每步落
+    // compact.range.retreated;退空仍不过则 rejected,不发请求碰运气。
+    // T12-B:真跑/干跑共用这一只梯子(write_events=false 时不落任何事件,
+    // 回退只模拟)。 ----
+    const auto run_capacity_gate = [&](bool write_events) {
+        struct GateOutcome {
+            bool passed = false;
+            bool reference_included = true;
+        };
+        result.gate_checked = gate_active;
+        result.window_unknown = !gate_active;
+        bool reference_included = plan.step_scope.empty();
+        if (!gate_active) {
+            result.notes.push_back("压缩模型窗口未知,发送前门禁未校验");
+            return GateOutcome{true, reference_included};
+        }
+        int plan_revision = 0;
         while (true) {
             const auto input_tokens_or =
                 estimate_input_via_slot(plan, reference_included,
                                         build_instruction(plan, reference_included));
             if (!input_tokens_or.has_value()) {
                 finish_rejected(input_tokens_or.error());
-                return result;
+                return GateOutcome{false, reference_included};
             }
             const std::uint64_t input_tokens = *input_tokens_or;
             const std::uint64_t budget =
@@ -688,6 +728,9 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                     ? profile.compact_window_tokens - profile.compact_output_reserve_tokens -
                           profile.compact_margin_tokens
                     : 0;
+            result.estimated_input_tokens = input_tokens;
+            result.gate_budget_tokens = budget;
+            result.fits_budget = input_tokens <= budget;
             if (input_tokens <= budget) {
                 break;
             }
@@ -696,13 +739,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 result.notes.push_back("压缩输入估 " + std::to_string(input_tokens) +
                                        " tokens,预算 " + std::to_string(budget) +
                                        ",可回退前缀已退空,停止摘要尝试");
-                return result;
+                return GateOutcome{false, reference_included};
             }
             if (plan_revision >= profile.max_retreat_steps) {
                 finish_rejected("retreat_budget_exhausted");
                 result.notes.push_back("回退修订已达上限 " + std::to_string(profile.max_retreat_steps) +
                                        " 仍装不下,停止摘要尝试");
-                return result;
+                return GateOutcome{false, reference_included};
             }
             // 一次回退:至少让出 minRetreatTokens;整轮较大允许超出,
             // 不拆工具原子组(块即整轮/整段)。
@@ -738,21 +781,24 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 result.notes.push_back("压缩输入估 " + std::to_string(input_tokens) +
                                        " tokens,预算 " + std::to_string(budget) +
                                        ",无可回退前缀,停止摘要尝试");
-                return result;
+                return GateOutcome{false, reference_included};
             }
             ++plan_revision;
             result.retreat_steps = plan_revision;
+            if (!write_events) {
+                continue;  // 干跑:回退只模拟,不落 compact.range.retreated
+            }
             trajectory::v3::EventDraft retreated;
             retreated.kind = trajectory::v3::EventKindV3::CompactRangeRetreated;
-            retreated.turn_id = session.turn_id();
+            retreated.turn_id = session->turn_id();
             retreated.parent_turn_id = input.parent_turn_id;
-            retreated.compact_id = session.compact_id();
+            retreated.compact_id = session->compact_id();
             const auto input_tokens_after_or =
                 estimate_input_via_slot(plan, reference_included,
                                         build_instruction(plan, reference_included));
             if (!input_tokens_after_or.has_value()) {
                 finish_rejected(input_tokens_after_or.error());
-                return result;
+                return GateOutcome{false, reference_included};
             }
             const std::uint64_t input_tokens_after = *input_tokens_after_or;
             retreated.payload = nlohmann::json::object(
@@ -778,11 +824,18 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 writer.AppendEvent(std::move(retreated), trajectory::v3::Durability::ProcessCrash);
             if (receipt.status != WriteReceipt::Status::Committed) {
                 finish_failed("compact.retreat_event_write_failed: " + receipt.error_code);
-                return result;
+                return GateOutcome{false, reference_included};
             }
         }
-    }
-    if (!plan.step_scope.empty()) {
+        return GateOutcome{true, reference_included};
+    };
+
+    // stepScope 收口:回退移动过块,按最终 removed 重列 stepIds(真跑/干跑
+    // 共用)。
+    const auto fixup_step_scope = [&]() {
+        if (plan.step_scope.empty()) {
+            return;
+        }
         std::vector<std::string> steps;
         for (const auto& block : plan.removed) {
             if (block.turn_id == input.parent_turn_id && block.step_id &&
@@ -791,18 +844,67 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         }
         if (steps.empty()) plan.step_scope = nlohmann::json::object();
         else plan.step_scope["stepIds"] = steps;
-    }
-    for (const auto* line : chain_messages) {
-        if (HasPrefixBoundPayload(line->message)) {
-            finish_rejected("compact.signature_prefix_incompatible");
+    };
+    const auto has_prefix_bound = [&]() {
+        for (const auto* line : chain_messages) {
+            if (HasPrefixBoundPayload(line->message)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // ---- T12-B 干跑:同一副牌只算不压,到此收场——不开场、不落任何
+    // 事件、不发模型;门禁回退按同一只梯子模拟。 ----
+    if (input.dry_run) {
+        if (plan.removed.empty()) {
+            finish_rejected("no_eligible_history");  // 干跑无 session:只填结果字段
+            fill_dry_numbers();
             return result;
         }
+        const auto gate = run_capacity_gate(/*write_events=*/false);
+        if (gate.passed) {
+            fixup_step_scope();
+            if (has_prefix_bound()) {
+                finish_rejected("compact.signature_prefix_incompatible");
+                result.notes.push_back("链上有带签名/加密载荷的 thinking 块,真压会按前缀不兼容拒收");
+            } else {
+                result.terminal_kind = "dry_run";
+            }
+        }
+        fill_dry_numbers();
+        return result;
+    }
+
+    // ---- 1. 开场:compact.requested + 内部回合(§4.6)。 ----
+    if (!begin_session()) {
+        return result;
+    }
+
+    // 没有可摘要化历史(空链/全受保护):rejected(no_eligible_history),
+    // 一次模型都不调(§4.9)。
+    if (plan.removed.empty()) {
+        session->Freeze(writer, {}, plan.RetainedIds(), plan.protected_turns);
+        result.terminal_kind = "rejected";
+        result.reason = "no_eligible_history";
+        return result;
+    }
+
+    const auto gate = run_capacity_gate(/*write_events=*/true);
+    const bool reference_included = gate.reference_included;
+    if (!gate.passed) {
+        return result;
+    }
+    fixup_step_scope();
+    if (has_prefix_bound()) {
+        finish_rejected("compact.signature_prefix_incompatible");
+        return result;
     }
     const std::string instruction = build_instruction(plan, reference_included);
 
     // ---- 4. 冻结源版本与压缩/保留范围(§4.5 行 1:执行时冻结)。 ----
     const auto freeze =
-        session.Freeze(writer, plan.RemovedIds(), plan.RetainedIds(), plan.protected_turns,
+        session->Freeze(writer, plan.RemovedIds(), plan.RetainedIds(), plan.protected_turns,
                        trajectory::Durability::ProcessCrash, plan.step_scope);
     if (!freeze.eligible) {
         result.terminal_kind = "rejected";
@@ -816,12 +918,12 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     // ---- 5. 组装压缩请求(§4.6/§4.41):压缩专用 system + 材料清单
     //(链序原样,角色/正文不改)+ 末尾指令;prepared 先落稳才许发。 ----
-    const WriteReceipt special_system_receipt = session.WriteSpecialSystem(writer, special_system);
+    const WriteReceipt special_system_receipt = session->WriteSpecialSystem(writer, special_system);
     if (special_system_receipt.status != WriteReceipt::Status::Committed) {
         finish_failed("compact.special_system_write_failed: " + special_system_receipt.error_code);
         return result;
     }
-    const WriteReceipt prompt_receipt = session.AppendPrompt(
+    const WriteReceipt prompt_receipt = session->AppendPrompt(
         writer, nlohmann::json::object({{"role", "user"}, {"content", instruction}}));
     if (prompt_receipt.status != WriteReceipt::Status::Committed) {
         finish_failed("compact.prompt_write_failed: " + prompt_receipt.error_code);
@@ -881,7 +983,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
             previous.value("model", std::string()) == profile.model &&
             previous.value("outputReserveTokens", std::uint64_t{0}) == profile.compact_output_reserve_tokens &&
             previous.value("windowTokens", nlohmann::json()) == provider_snapshot["windowTokens"];
-        if (same_route && previous.value("contextRevision", std::uint64_t{0}) == session.source_revision() &&
+        if (same_route && previous.value("contextRevision", std::uint64_t{0}) == session->source_revision() &&
             (previous.value("inputFingerprint", std::string()) == input_fingerprint ||
              *prepared_tokens >= previous.value("estimatedInputTokens", std::uint64_t{0}))) {
             finish_rejected("compact.failed_input_not_smaller");
@@ -890,8 +992,8 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         }
     }
     const WriteReceipt prepared = writer.PrepareRequest(
-        request_id, session.turn_id(), step_id, "compact", special_system_receipt.id, input_ids,
-        std::move(provider_snapshot), session.compact_id());
+        request_id, session->turn_id(), step_id, "compact", special_system_receipt.id, input_ids,
+        std::move(provider_snapshot), session->compact_id());
     if (prepared.status != WriteReceipt::Status::Committed) {
         finish_failed("compact.prepared_write_failed: " + prepared.error_code);
         return result;
@@ -917,7 +1019,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     const V3CompactModelReply reply = client.Send(special_system, material);
     if (!reply.ok) {
         if (reply.error_code == "cancelled") {
-            session.Fail(writer, CompactSession::FailKind::Cancelled, "cancelled");
+            session->Fail(writer, CompactSession::FailKind::Cancelled, "cancelled");
             result.terminal_kind = "cancelled";
             result.reason = "cancelled";
         } else {
@@ -933,7 +1035,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         finish_failed("empty_compact_response");
         return result;
     }
-    const WriteReceipt candidate = session.WriteCandidate(
+    const WriteReceipt candidate = session->WriteCandidate(
         writer, nlohmann::json::object({{"role", "assistant"}, {"content", reply.text}}),
         request_id, step_id, profile.provider, profile.wire, profile.model,
         reply.usage.has_value() ? *reply.usage : nlohmann::json(nullptr),
@@ -946,7 +1048,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     // ---- 7. 校验必需内容(§4.7/§4.8):逐项 checks,失败带详情;
     // 未通过不 applied、不改内存、不显示完成。 ----
-    const WriteReceipt validation_started = session.StartValidation(writer);
+    const WriteReceipt validation_started = session->StartValidation(writer);
     if (validation_started.status != WriteReceipt::Status::Committed) {
         finish_failed("compact.validation_write_failed: " + validation_started.error_code);
         return result;
@@ -1109,11 +1211,11 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                   users_preserved ? "" : "current user input was removed");
     }
     // 7.7 源未变化:校验时点再核一遍(§4.8 表行 7;Apply 内还会再核)。
-    add_check("source_revision", writer.context().revision == session.source_revision(),
-              writer.context().revision == session.source_revision()
+    add_check("source_revision", writer.context().revision == session->source_revision(),
+              writer.context().revision == session->source_revision()
                   ? std::string()
                   : "源上下文在校验前已变化(期望 revision " +
-                        std::to_string(session.source_revision()) + ",当前 " +
+                        std::to_string(session->source_revision()) + ",当前 " +
                         std::to_string(writer.context().revision) + ")");
     // 7.8 收益:候选新上下文须严格变小(§4.8 表行 6;收益不足不空转)。
     add_check("benefit", tokens_after < tokens_before,
@@ -1132,7 +1234,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     }
 
     const WriteReceipt validation_completed =
-        session.CompleteValidation(writer, all_passed, std::move(checks));
+        session->CompleteValidation(writer, all_passed, std::move(checks));
     if (validation_completed.status != WriteReceipt::Status::Committed) {
         finish_failed("compact.validation_write_failed: " + validation_completed.error_code);
         return result;
@@ -1154,7 +1256,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
          {"scope", "model_input"},
          {"includesSystem", true},
          {"includesOutputReserve", false}});
-    const auto apply = session.Apply(writer, reply.text, tokens_before, tokens_after,
+    const auto apply = session->Apply(writer, reply.text, tokens_before, tokens_after,
                                      std::move(token_metric));
     if (!apply.ok) {
         result.terminal_kind = apply.error == "compact.source_conflict" ? "rejected" : "failed";

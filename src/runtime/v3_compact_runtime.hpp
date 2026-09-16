@@ -27,6 +27,7 @@
 // applied 重建新链。本运行时不另造恢复路径,只保证每步先落账再动手。
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -104,8 +105,9 @@ struct V3CompactProfile {
 struct V3CompactRunInput {
     std::string trigger;  // manual | auto(§1.15 顶层只此两值)
     std::string reason;   // user_command | threshold | pre_send_overflow | context_overflow
-    // turn 中途自动压缩挂主 turn;空闲手动为 nullopt(§4.6:不假称上一轮
-    // 仍在运行)。
+    // turn 中途自动压缩挂主 turn(T12-C:只认调用方递进的真实主轮号,
+    // 接线层从账本 OpenMainTurnId 取,运行时不从链上猜);空闲手动为
+    // nullopt(§4.6:不假称上一轮仍在运行)。
     std::optional<std::string> parent_turn_id;
     // 校验清单快照(§4.8 内容结构)。认得的键:
     //   schema(版本串)、requiredStringFields[](非空 string)、
@@ -135,6 +137,15 @@ struct V3CompactRunInput {
     //(§4.36 fail closed)。生产装配见 session_commands 的
     // runtime::EstimateBypassRequestTokens。
     std::function<std::expected<nlohmann::json, std::string>(const nlohmann::json&)> estimate;
+
+    // T12-B(V3-GAP-07,SessionV3 旧设计清理单):/compact --dry-run 的干跑位。
+    // 同一候选范围与容量规划器只算不压:不开场(compact.requested 不落)、
+    // 不写任何事件(含 compact.range.retreated)、不发模型、不碰 context;
+    // 门禁回退按同一只梯子模拟。干跑经同一入参(含 estimate 槽——估算器
+    // 是容量规划器本体,纯函数;副作用 Hook 的调用归 CLI 装配层避免,不在
+    // 这里)。结果只报结构可回收量与门禁数字,不编造摘要实际 token
+    //(tokens_after 恒 0)。
+    bool dry_run = false;
 };
 
 struct V3CompactRunResult {
@@ -157,6 +168,19 @@ struct V3CompactRunResult {
     bool gate_checked = false;  // Cc>0 时做过发送前门禁
     bool window_unknown = false;  // Cc=0:门禁没做,如实标注
     std::vector<std::string> notes;  // 人话进度(终端/日志用,不进事件账)
+
+    // ---- T12-B 干跑面(仅 dry_run=true 时填;真跑除注明外不填)----
+    bool dry_run = false;          // 本次是干跑(terminal_kind="dry_run" = 算完了)
+    std::size_t removed_messages = 0;   // 可压范围消息数
+    std::size_t retained_messages = 0;  // 保留尾部消息数
+    std::uint64_t removed_tokens = 0;   // 可压范围 token(bytes/4;结构估算)
+    std::uint64_t retained_tokens = 0;  // 保留尾部 token(bytes/4;结构估算)
+    std::vector<std::string> removed_turns;    // 可压范围轮号;游离段(旧摘要)记 "(旧摘要)"
+    std::vector<std::string> protected_turns;  // 受保护轮(不进可压范围)
+    nlohmann::json step_scope = nlohmann::json::object();  // 容量恢复动当前轮闭合旧 step 的范围
+    std::uint64_t estimated_input_tokens = 0;  // 门禁最后一算(含回退后;真跑也填);无门禁 = 0
+    std::uint64_t gate_budget_tokens = 0;      // Cc-Oc-Mc(真跑也填);无门禁 = 0
+    bool fits_budget = false;                  // 估算输入装得下预算(含回退后)
 };
 
 // ---------------------------------------------------------------------------
@@ -168,6 +192,9 @@ struct V3CompactRunResult {
 // 候选(截断标 truncated) -> 校验 -> applied / 失败三态。
 // writer 是会话 v3 主账的唯一写者;同一主上下文一次只运行一个 compact
 // (已有进行中的 compact 时返回 busy,不另开场)。
+// input.dry_run=true(T12-B):同一候选范围与容量规划器只算不压——不开场、
+// 不落任何事件、不调 client;结果 terminal_kind="dry_run" 携结构数字,
+// tokens_after 恒 0(不编造摘要实际 token)。
 V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                                 V3CompactModelClient& client, const V3CompactProfile& profile,
                                 V3CompactRunInput input);

@@ -2745,3 +2745,65 @@ TEST_CASE("V3-REAL-07: 应急收窄后 PreRequest Hook 拿收窄后的判定预�
     REQUIRE(loop.has_request_budget());
     CHECK(loop.last_request_budget().final_reserve_tokens == 2500);
 }
+
+
+// ---------------------------------------------------------------------------
+// T12-D(V3-GAP-07,SessionV3 旧设计清理单):provider 确认输入超窗——
+// loop 发 SendOverflow 压力相,不把同一份请求再发一遍(overflow 不在
+// 请求级可重试表);触发原因是"输入装不下",与阈值/发送前门禁分账。
+// ---------------------------------------------------------------------------
+namespace {
+
+// 永远回输入超窗 Api 错的假后端(稳定码走 api_code)。
+class OverflowBackend final : public api::Backend {
+public:
+    std::vector<api::Request> captured_requests;
+    std::string error_code = "context_length_exceeded";
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>&,
+        const std::atomic<bool>* = nullptr) override {
+        captured_requests.push_back(request);
+        return std::unexpected(api::Error{api::ErrorKind::Api, "prompt is too long", 0, error_code});
+    }
+};
+
+}  // namespace
+
+TEST_CASE("T12-D: provider 输入超窗发 SendOverflow 压力,原请求不重发") {
+    CHECK(api::IsInputContextOverflowCode("context_length_exceeded"));
+    CHECK(api::IsInputContextOverflowCode("context_window_exceeded"));
+    CHECK(api::IsInputContextOverflowCode("input_context_overflow"));
+    CHECK_FALSE(api::IsInputContextOverflowCode("overloaded_error"));
+    CHECK_FALSE(api::IsInputContextOverflowCode(""));
+
+    OverflowBackend backend;
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.context_window_tokens = 128000},
+                                          .system_prompt = "sys"});
+    std::vector<agent::ContextPressure> pressures;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&pressures](const agent::ContextPressure& pressure) {
+        pressures.push_back(pressure);
+    };
+    loop.SetWiring(std::move(wiring));
+
+    const auto result = loop.Run("短输入", agent::TurnWiring{});
+    // 本地预检过得了(输入短),请求真发了,服务端拒绝;回合明败。
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 1);  // 恰一次:overflow 不重试
+
+    // 压力相序:PreRequest(拼装前的常规通报,projected_overflow=false,
+    // 不触发压缩)在前,SendOverflow(服务端拒后的恢复相)恰一枚在后。
+    REQUIRE(pressures.size() == 2);
+    CHECK(pressures[0].phase == agent::ContextPressure::Phase::PreRequest);
+    CHECK_FALSE(pressures[0].projected_overflow);
+    CHECK(pressures[1].phase == agent::ContextPressure::Phase::SendOverflow);
+    CHECK(pressures[1].window_tokens == 128000);
+
+    // 分账面:别的 Api 稳定码不冒充超窗(overloaded 一类走恢复环自己的路)。
+    CHECK_FALSE(api::IsInputContextOverflowCode("server_error"));
+}

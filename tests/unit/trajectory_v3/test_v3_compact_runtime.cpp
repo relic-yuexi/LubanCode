@@ -992,11 +992,12 @@ TEST_CASE("applied 写盘失败:摘要在档不生效,恢复后旧上下文仍�
 }
 
 namespace {
-std::string AppendCurrentUserFixture(V3Writer& writer) {
+std::string AppendCurrentUserFixture(V3Writer& writer,
+                                     const std::string& text = "Never rerun side effects") {
     MessageDraft draft;
     draft.turn_id = "turn-long";
     draft.origin = MessageOrigin::Human;
-    draft.message = {{"role", "user"}, {"content", "Never rerun side effects"}};
+    draft.message = {{"role", "user"}, {"content", text}};
     const auto receipt = writer.AppendMessage(std::move(draft), Durability::PowerLoss);
     REQUIRE(receipt.status == WriteReceipt::Status::Committed);
     REQUIRE(writer.AdmitMessages({receipt.id}).status == WriteReceipt::Status::Committed);
@@ -1418,4 +1419,242 @@ TEST_CASE("compact freeze rejects a forged scope that removes the latest step") 
     CHECK_FALSE(frozen.eligible);
     CHECK(frozen.error == "invalid_step_scope");
     CHECK(writer->context().chain.size() == 3);
+}
+
+// ---------------------------------------------------------------------------
+// T12-B(V3-GAP-07):/compact --dry-run——同一候选范围与容量规划器只算
+// 不压。零请求、零事件、零消息(账一字不长);数字面与随后的真跑同一
+// 副牌;门禁回退按同一只梯子模拟,不落 compact.range.retreated。
+// ---------------------------------------------------------------------------
+TEST_CASE("T12-B 干跑:零请求零写入,候选范围与真跑一致") {
+    Harness harness("dryrun");
+    std::string turn1_user, turn2_assistant;
+    std::size_t lines_before = 0;
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        std::tie(turn1_user, std::ignore) = harness.SeedTurn(*writer, "turn-000001", BigText(600));
+        std::tie(std::ignore, turn2_assistant) =
+            harness.SeedTurn(*writer, "turn-000002", BigText(600, 'y'));
+        lines_before = ReadJsonLines(harness.jsonl).size();
+
+        StubClient client;  // 干跑绝不调;被调即测试失败
+        V3CompactRunInput input = ManualInput();
+        input.dry_run = true;
+        const V3CompactRunResult dry =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), std::move(input));
+        CHECK(dry.dry_run);
+        CHECK(dry.terminal_kind == "dry_run");
+        CHECK(dry.model_calls == 0);
+        CHECK(client.calls == 0);
+        // 结构数字:同一把尺(bytes/4);不编造摘要实际 token(after 恒 0)。
+        CHECK(dry.tokens_after == 0);
+        CHECK(dry.removed_messages == 4);
+        CHECK(dry.retained_messages == 0);
+        CHECK(dry.removed_turns.size() == 2);
+        CHECK(dry.removed_turns[0] == "turn-000001");
+        CHECK(dry.removed_turns[1] == "turn-000002");
+        CHECK(dry.tokens_before > dry.removed_tokens);  // 含 system(同尺)
+        // 零写入:行数一字不长,没有任何 compact 事件,链未动。
+        CHECK(ReadJsonLines(harness.jsonl).size() == lines_before);
+        auto lines = ReadJsonLines(harness.jsonl);
+        CHECK(EventsOf(lines, "compact.requested").empty());
+        CHECK(EventsOf(lines, "compact.range.retreated").empty());
+
+        // 同一副牌真跑:applied 的 removedMessageRefs 与干跑的可压范围一致,
+        // tokens_before 同一枚数字(同一把尺的可核面)。
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply("# 摘要\n- 两轮并成一轮", {});
+            reply.usage = nlohmann::json::object({{"inputTokens", 90}, {"outputTokens", 9}});
+            return reply;
+        };
+        const V3CompactRunResult real =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), ManualInput());
+        REQUIRE(real.applied);
+        CHECK(real.tokens_before == dry.tokens_before);
+        auto real_lines = ReadJsonLines(harness.jsonl);
+        const auto applied_rows = EventsOf(real_lines, "compact.applied");
+        REQUIRE(applied_rows.size() == 1);
+        const nlohmann::json& applied = *applied_rows.front();
+        REQUIRE(applied["payload"]["removedMessageRefs"].size() == dry.removed_messages);
+        CHECK(applied["payload"]["removedMessageRefs"][0] == turn1_user);
+        CHECK(applied["payload"]["removedMessageRefs"][3] == turn2_assistant);
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("T12-B 干跑撞窗:回退按同一只梯子模拟,不落任何事件") {
+    Harness harness("dryrun-gate");
+    std::size_t lines_before = 0;
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-000001", BigText(600));
+        harness.SeedTurn(*writer, "turn-000002", BigText(600, 'y'));
+        lines_before = ReadJsonLines(harness.jsonl).size();
+
+        // 小窗:材料装不下,先移参考尾部再整轮回退;退到只剩一轮仍不过
+        // 即拒(input_capacity_exceeded)。
+        V3CompactProfile profile = BaseProfile();
+        profile.compact_window_tokens = 500;
+        profile.compact_output_reserve_tokens = 100;
+        profile.compact_margin_tokens = 100;
+        StubClient client;
+        V3CompactRunInput input = ManualInput();
+        input.dry_run = true;
+        const V3CompactRunResult dry =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        CHECK(dry.dry_run);
+        CHECK(dry.terminal_kind == "rejected");
+        CHECK(dry.reason == "input_capacity_exceeded");
+        CHECK(dry.model_calls == 0);
+        CHECK(dry.retreat_steps >= 1);          // 模拟回退发生过
+        CHECK(dry.estimated_input_tokens > 0);  // 门禁数字在
+        CHECK(dry.gate_budget_tokens == 300);
+        CHECK_FALSE(dry.fits_budget);
+        // 零写入:干跑的模拟回退不落 compact.range.retreated,行数不变。
+        CHECK(ReadJsonLines(harness.jsonl).size() == lines_before);
+        auto lines = ReadJsonLines(harness.jsonl);
+        CHECK(EventsOf(lines, "compact.range.retreated").empty());
+        CHECK(EventsOf(lines, "compact.requested").empty());
+
+        // 对照:真跑同一副牌在同样的地方收场,但回退事件落账(行为分账)。
+        const V3CompactRunResult real =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, ManualInput());
+        CHECK_FALSE(real.applied);
+        CHECK(real.reason == "input_capacity_exceeded");
+        CHECK(real.retreat_steps == dry.retreat_steps);
+        auto real_lines = ReadJsonLines(harness.jsonl);
+        CHECK(EventsOf(real_lines, "compact.range.retreated").size() == real.retreat_steps);
+        CHECK(client.calls == 0);  // 拒在路上:一次模型都不调
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("T12-B 干跑空链:如实报 no_eligible_history,零写入") {
+    Harness harness("dryrun-empty");
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        StubClient client;
+        V3CompactRunInput input = ManualInput();
+        input.dry_run = true;
+        const V3CompactRunResult dry =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), std::move(input));
+        CHECK(dry.dry_run);
+        CHECK(dry.terminal_kind == "rejected");
+        CHECK(dry.reason == "no_eligible_history");
+        CHECK(dry.model_calls == 0);
+        CHECK(dry.removed_messages == 0);
+        auto lines = ReadJsonLines(harness.jsonl);
+        CHECK(EventsOf(lines, "compact.requested").empty());
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+// ---------------------------------------------------------------------------
+// T12-C(V3-GAP-07):回合关联——真实 main turnId 递进,内部回合独立;
+// idle 手动按实际无活动主轮表达(不伪造 parent,无 parent 不做 step
+// 压缩);user steer 与中途压缩竞争:源变化拒收,主链与 steer 原样保留,
+// 重试把 steer 收进材料。
+// ---------------------------------------------------------------------------
+TEST_CASE("T12-C idle 手动:parentTurnId 落 null,无 parent 不伪造 step 压缩") {
+    Harness harness("idle-noparent");
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        // 造一个带闭合旧 step 的长轮(旧路会从链上猜 parent 顶包)。
+        AppendCurrentUserFixture(*writer);
+        AppendStepFixture(*writer, "step-old");
+        AppendStepFixture(*writer, "step-latest");
+
+        V3CompactRunInput input = ManualInput();  // idle 手动:parent 空
+        input.allow_closed_step_compaction = true;  // 即便开了也不许凭空猜
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), std::move(input));
+        REQUIRE(result.applied);
+        auto lines = ReadJsonLines(harness.jsonl);
+        const auto requested = EventsOf(lines, "compact.requested");
+        REQUIRE(requested.size() == 1);
+        CHECK((!requested.front()->contains("parentTurnId") ||
+               (*requested.front())["parentTurnId"].is_null()));
+        // 无真实 parent:当前轮闭合旧 step 不动(不伪造范围)。
+        const auto applied = EventsOf(lines, "compact.applied");
+        REQUIRE(applied.size() == 1);
+        CHECK((*applied.front())["payload"]["stepScope"].empty());
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("T12-C user steer 与中途压缩竞争:源变化拒收,steer 原样保留") {
+    Harness harness("steer-race");
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        AppendCurrentUserFixture(*writer);
+        AppendStepFixture(*writer, "step-old");
+        AppendStepFixture(*writer, "step-latest");
+
+        // 中途压缩:真实主轮号递进(接线层从 OpenMainTurnId 拿,这里按
+        // 合同显式递——"turn-long" 是在场主轮)。
+        StubClient client;
+        const auto normal_reply = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        std::string steer_id;
+        client.respond = [&]() {
+            // 压缩模型在飞的当口,user steer 落账:revision 变了。
+            steer_id = AppendCurrentUserFixture(*writer, "user steer text mid-compact");
+            return normal_reply();
+        };
+        const V3CompactRunResult raced =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+        CHECK_FALSE(raced.applied);
+        CHECK(raced.terminal_kind == "rejected");
+        CHECK(raced.reason == "validation_failed");  // source_revision 先拦
+        // compact.requested 挂真实主轮,内部回合独立(compact-turn-*)。
+        {
+            auto lines = ReadJsonLines(harness.jsonl);
+            const auto requested = EventsOf(lines, "compact.requested");
+            REQUIRE(requested.size() == 1);
+            CHECK((*requested.front())["parentTurnId"] == "turn-long");
+            CHECK((*requested.front())["turnId"].get<std::string>().rfind("compact-turn-", 0) == 0);
+        }
+        // 主链原样:闭合旧 step、最新 step、steer 全在;applied 不存在。
+        {
+            auto ledger = ReadV3Ledger(harness.jsonl);
+            REQUIRE(ledger.has_value());
+            const auto projection = ProjectModelContext(*ledger);
+            std::vector<std::string> refs;
+            for (const auto& item : projection.inputs) refs.push_back(item.message_id);
+            CHECK(std::find(refs.begin(), refs.end(), steer_id) != refs.end());
+            CHECK(EventsOf(ReadJsonLines(harness.jsonl), "compact.applied").empty());
+        }
+        // 竞争收场后的重试:steer 已在链上,进材料,正常 applied。
+        client.respond = normal_reply;
+        const V3CompactRunResult retry =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
+        REQUIRE(retry.applied);
+        bool steer_in_material = false;
+        for (const auto& message : client.last_messages) {
+            if (message.value("role", std::string()) == "user" &&
+                message.value("content", std::string()).find("user steer text") != std::string::npos) {
+                steer_in_material = true;
+            }
+        }
+        CHECK(steer_in_material);
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
 }

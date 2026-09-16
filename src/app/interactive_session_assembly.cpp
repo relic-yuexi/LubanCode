@@ -622,6 +622,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             if (turn_views_.empty()) return std::nullopt;
             return turn_views_.back().metrics;
         };
+        // T12-D(V3-GAP-07):provider 确认输入超窗后的溢出门(compact_hysteresis_
+        // 持账,HandleContextPressure 的 SendOverflow 相收不了场时挂、compact
+        // applied 时解)。goal 泵认领前问一道——门开着不重发同一份超限输入。
+        goal_host.overflow_hold = [this]() { return compact_hysteresis_.overflow_held; };
         // 评估端点身份(assistant 落账必带 provider/wire/model)。
         goal_host.evaluation_provider = active_provider;
         goal_host.evaluation_wire = session_runtime_.wire_name();

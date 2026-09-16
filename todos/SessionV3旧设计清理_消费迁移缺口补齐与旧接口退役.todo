@@ -266,12 +266,24 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 ### T12-B–E / V3-GAP-07：compact 剩余四项
 
-- [ ] **B 干跑**：`/compact --dry-run` 从同一候选范围与容量规划器算 before/可压范围/保留项/输出预留；不发模型、不改 context、不调用副作用 Hook。只估计结构可回收量，不编造摘要实际 token。
-- [ ] **C 回合关联**：传入真实 main turnId，内部 compact 使用独立 turnId/parentTurnId；idle 手动压缩按实际无活动主轮表达，不伪造 parent。测试 user steer 与中途压缩竞争。
-- [ ] **D overflow 恢复**：区分阈值、pre-send 与 provider context_overflow；重试须有更小且合法的输入 hash/范围，尝试有界。不能 Goal 新 iteration 重发相同超限请求。
-- [ ] **E hard trim 收口**：`AfterHardTrim` 及工具截断归到 v3 32/16/8/4 KiB 派生预览和 context 提交；原 artifact 不动、调用结果不拆散。重读结果全量文件不能绕过最低档失败门槛。
+- [x] **B 干跑**：`/compact --dry-run` 从同一候选范围与容量规划器算 before/可压范围/保留项/输出预留；不发模型、不改 context、不调用副作用 Hook。只估计结构可回收量，不编造摘要实际 token。（2026-09-16 落：`V3CompactRunInput.dry_run` 同入 `RunV3Compact` 真路——计划/门禁/回退梯真跑干跑共用（`run_capacity_gate(write_events)`），干跑不开场、零事件、零模型；CLI 侧 `RunV3CompactBranch` 干跑分支不进 PreCompact/PostCompact，数字经 `PrintV3CompactDryRun` 打印，tokens_after 恒 0。）
+- [x] **C 回合关联**：传入真实 main turnId，内部 compact 使用独立 turnId/parentTurnId；idle 手动压缩按实际无活动主轮表达，不伪造 parent。测试 user steer 与中途压缩竞争。（2026-09-16 落：账本 `V3SessionBooks.main_turn_open` + `TrajectorySessionLedger::OpenMainTurnId()`（BeginTurn/EndTurn 之间才非空，粘账 active_main_turn_id 不再被误当"在跑"）；`RunV3CompactBranch` 中途压缩递真号、idle 落 null；删掉运行时从链上猜 parent 的兜底。user steer 竞争与 idle 不伪造均入册。）
+- [x] **D overflow 恢复**：区分阈值、pre-send 与 provider context_overflow；重试须有更小且合法的输入 hash/范围，尝试有界。不能 Goal 新 iteration 重发相同超限请求。（2026-09-16 落：三种 reason 齐活——`ContextPressure::Phase::SendOverflow`（loop 检出 `api::IsInputContextOverflowCode` 稳定码即发，overflow 不在请求级可重试表故不原样重发）→ `HandleContextPressure` 以 reason=context_overflow 收一次压缩；收不了场挂 `CompactHysteresis.overflow_held` 溢出门，goal 泵（`GoalSessionWiring::Host.overflow_hold`）认领前问门；门只在 compact applied（收益校验保证严格变小）或换场时解除。压缩侧"更小且合法"（failed_input_not_smaller/inputFingerprint/recoveryAttemptLimit）与回退有界（max_retreat_steps）此前已落，本批不改。）
+- [x] **E hard trim 收口**：`AfterHardTrim` 及工具截断归到 v3 32/16/8/4 KiB 派生预览和 context 提交；原 artifact 不动、调用结果不拆散。重读结果全量文件不能绕过最低档失败门槛。（2026-09-16 落：`ReduceV3ToolPreviewsAfterHardTrim`（session_commands）驱动 writer 既有 `ReduceToolPreviews`——链上超新档的 tool 消息从结果仓原文（ExpandResultPreview → artifacts 通道）重派生，原子换链 + `ProjectV3ContextHistory`/`ReplaceHistory`；新档装不下必要来源整次不做（fail closed）；4 KiB 梯尽如实收场；重读结果在提交边界同吃 writer 档位，绕不过最低档。）
 
 验收：B 零请求、C 身份正确、D 每次失败重试严格有变化且有终点、E 账实/预览/全文三者可核。与 T12-A 合并验 applied 后重启、后续 tool、第二次 compact，D1/D2/D3 已有正常链测试继续守住。
+
+```text
+任务编号：T12-B–E / V3-GAP-07（compact 剩余四项；T12-A 投影失败阻断已随 B1/PR #43 落，不重做）
+状态：verified
+实现：分支 worktree-agent-t12-compact——src/runtime/v3_compact_runtime.hpp/.cpp（dry_run 入参+干跑面：run_capacity_gate(write_events) 真跑/干跑同一梯子；删链上猜 parent 兜底；计划段提前为纯计算）、src/runtime/trajectory_session.hpp/.cpp（V3SessionBooks.main_turn_open + OpenMainTurnId() 活动主轮簿）、src/app/commands/session_commands.hpp/.cpp（RunV3CompactBranch 干跑分支+PrintV3CompactDryRun+NullV3CompactClient、midturn 递 OpenMainTurnId、CompactHysteresis.overflow_held 溢出门、TryRunCompact(reason) 接 context_overflow、ReduceV3ToolPreviewsAfterHardTrim 降档驱动）、src/agent/context.hpp + loop.cpp（Phase::SendOverflow + overflow 稳定码检出即发）、src/api/model_request_recovery.hpp/.cpp（IsInputContextOverflowCode 共表）、src/app_server/server.cpp（send_overflow 相名）、src/app/wirings/goal_session_wiring.hpp/.cpp + interactive_session_assembly.cpp（Host.overflow_hold + 泵认领前问门）
+生产入口：CLI 交互会话（/compact --dry-run、自动/中途/provider 超窗压缩、hard trim 降档收口）；goal 自动续轮的溢出门
+验证：test_v3_compact_runtime 增五案（干跑零写入+与真跑同副牌/干跑撞窗模拟回退不落事件+真跑对照落 retreated/干跑空链 no_eligible/idle 不伪造 parent 无 step 压缩/user steer 中途落账拒收且 steer 原样保留重试入料）；新册 unit.trajectory_v3.test_v3_compact_gates（OpenMainTurnId 生命周期/hard trim 降档 32→16→8→4 梯尽+原 artifact hash 不动+派生消息 origin=context_runtime+重读全量按 4 KiB 档把住/极小档 preview_unrepresentable 明报）；test_loop 增 SendOverflow 相案（恰一次请求不重发+相序与窗口数字）；test_goal_v3_commands 增溢出门案（门挂不认领+提示恰一道+门解照常泵）；D1/D2/D3 正常链既有册未动
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真机（真实 exe+假后端）的 /compact --dry-run 与 AfterHardTrim 降档全链未跑（归 9.2 端到端矩阵批）；多通道（stdout/stderr 分离通道）结果的降档重派生未单测（夹具只造 combined 通道）；溢出门对 LoopTick 自动轮未挂（单内原文只点名 Goal，Loop 归 T13-L 对应替代口）
+旧依赖：v2 老路（HandleCompactCommand 的 dry-run/双账压缩、ShrinkOversizedToolResults 保命索）v2 会话照旧，退役归 T03；AfterHardTrim 在 v2 会话仍只告警不降档（降档梯是 v3 专属账）
+文档：本单 §七 勾销 + 本记录；schema 无新 kind（context.tool_previews.reduced/compact.requested reason 均既有合同），未改 docs
+销项日期：2026-09-16（CI 判绿口径；PR #109，判绿头提交 48d53247，rollup conclusion=success——run https://github.com/relic-yuexi/LubanCode/actions/runs/35091114704 ，macos-clang 腿绿；此前三轮红分别为干跑打印三目类型、测试册 unique_ptr 箭头、begin_session 局部 unique_ptr 析构后的 CompactSession 悬垂（macos 上 applied 连环红+一处 SIGSEGV）与两枚测试账（极小档 120→50、goal 通知数计 iteration 起跑行），均就地修后复绿）
+```
 
 ### T03 / V3-LEGACY-03：旧 compact 退役
 

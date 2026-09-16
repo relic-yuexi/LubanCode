@@ -91,6 +91,11 @@ struct V3SessionBooks {
     // 收口,"最近一只"就是触发它的那只。只在回合串行推进中写(与本书
     // 其余可变字段同一纪律);子代理桥绑自己的 books,不碰这只。
     std::string active_main_turn_id;
+    // T12-C(V3-GAP-07,SessionV3 旧设计清理单):主回合此刻是否真在跑
+    //(BeginTurn 置 / EndTurn 清)。active_main_turn_id 是"最近一只"
+    // 的粘账,分不清在跑与收口;idle 手动压缩要按"实际无活动主轮"表达
+    //(parentTurnId 落 null),turn 中途压缩要递真号——判据就是这只旗。
+    bool main_turn_open = false;
     // provider 调用号 -> v3 调用身份:轮桥声明 tool call 时登记(§4.15),
     // 子代理五步的 parentActionRef 从这查(actionId/声明消息/turn/step)。
     struct DeclaredAction {
@@ -1056,6 +1061,14 @@ public:
     void BlockV3Execution(const std::string& reason);
     // 阻断查询(/doctor、测试、AppServer 状态面):false = 本场可继续。
     bool V3ExecutionBlocked() const;
+
+    // ---- T12-C(V3-GAP-07):当前活动主轮的真实号 ----
+    // v3 场且主回合此刻在跑(BeginTurn 后、EndTurn 前)时给回合号;
+    // 其余(回合收口后的粘账、v2 场、无账)给 nullopt。中途压缩
+    //(pre_send/context_overflow)递它当 parentTurnId;idle 手动压缩拿
+    // nullopt 如实表达"无活动主轮",不伪造 parent。读侧与写侧同一本书,
+    // 回合串行推进中才变——压缩回调活在回合线程,无锁直读。
+    std::optional<std::string> OpenMainTurnId() const;
 
     const std::string& session_id() const;
     std::filesystem::path session_dir() const;

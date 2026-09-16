@@ -231,8 +231,13 @@ constexpr int kRealOverflowPercent = 60;
 //                     (estimated_input + reserved_output + protocol_margin)
 //                     从这里进可观测事件;reserve_clamped = 常规预留装不下、
 //                     已按应急小预留收窄放行(本请求 max_tokens 随之改小)。
+//   SendOverflow —— provider 确认输入超窗(T12-D,V3-GAP-07):本地估算
+//                     过了、服务端仍拒(api 稳定码见 api::IsInputContext-
+//                     OverflowCode)。本环不重发(overflow 不在可重试表);
+//                     宿主在这一相收一次压缩(reason=context_overflow),
+//                     压不动就挂溢出门拦自动续轮的重发。
 struct ContextPressure {
-    enum class Phase { PreRequest, AfterHardTrim, PreflightExceeded };
+    enum class Phase { PreRequest, AfterHardTrim, PreflightExceeded, SendOverflow };
     Phase phase = Phase::PreRequest;
     // 双闸同时过线才为真(压缩触发失衡单 §二):projected(保守托底尺 +
     // 输出预留)过 kProjectedOverflowPercent,且 working_view_tokens(日常

@@ -18,6 +18,7 @@
 #include <expected>
 #include <functional>
 #include <string>
+#include <string_view>
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -60,6 +61,12 @@ std::string HistoryCommitHashOf(const Request& request);
 // Cancelled/Parse、其余 HTTP 状态和确定性 Api code 不重试。provider 的 Retry-After 目前不经过 Backend 接口,拿不到——尊重
 // 它这件事记在案,后端若将来透出,再在阶梯上叠加(不越过总墙钟)。
 bool IsRetryableError(const Error& error);
+
+// provider"输入超窗"稳定码集合(T12-D,V3-GAP-07):服务端确认本次请求
+// 的输入装不下模型窗口。这类错误与瞬时故障分账——重发同一份输入只会再
+// 被拒一次,恢复必须走"输入严格更小"的路(compact/降档/裁输入)。loop
+// 与压缩客户端(SampleModelV3CompactClient)共用这一张表,不各抄一份。
+bool IsInputContextOverflowCode(std::string_view api_code);
 
 // 重试阶梯:五次失败分别等 1~2s / 4~8s / 15~30s / 30~60s /
 // 60~120s,均匀抖动;单次等待不超过 2 分钟。attempt = 刚失败的

@@ -1789,12 +1789,15 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         agent::AgentWiring loop_wiring;
         loop_wiring.on_context_pressure = [this, &thread_id, &turn_id](
                                               const agent::ContextPressure& pressure) {
-            // 上下文压力通报三相明确投影；最终预检不得冒充 hard trim。
+            // 上下文压力通报四相明确投影；最终预检不得冒充 hard trim,
+            // provider 超窗(SendOverflow,T12-D)不冒充预检。
             nlohmann::json context;
             if (pressure.phase == agent::ContextPressure::Phase::PreRequest) {
                 context["phase"] = "pre_request";
             } else if (pressure.phase == agent::ContextPressure::Phase::AfterHardTrim) {
                 context["phase"] = "after_hard_trim";
+            } else if (pressure.phase == agent::ContextPressure::Phase::SendOverflow) {
+                context["phase"] = "send_overflow";
             } else {
                 context["phase"] = "preflight_exceeded";
             }
