@@ -414,10 +414,17 @@ TEST_CASE("gate v3: 子账缺/坏标 partial 不跳整场;缺 blob 点名不记�
                               nlohmann::json({{"inputTokens", 50}, {"outputTokens", 10}}),
                               std::nullopt);
         REQUIRE(spawn.Link(*parent, boot.checkpoint).status == WriteReceipt::Status::Committed);
+        // 先关子账写柄再删:Windows 不许删打开中的文件(macOS POSIX 删得
+        // 掉)。句柄悬着时 remove_all 会静默失败、子账仍在树上被收成
+        // facts——child_missing 的前提就没了(Windows CI 实红过一回:
+        // v3_facts 实得 2)。
+        boot.child_writer.reset();
         Seal(*parent);
-        // 子账开完就删:父账还指着它 → child_missing。
+        // 子账开完就删:父账还指着它 → child_missing。删除失败必须当场
+        // 炸,不许吞 errorcode 静默变形。
         std::error_code ec;
         std::filesystem::remove_all(root.Dir("S-PARENT") / "subagents", ec);
+        REQUIRE(!ec);
     }
     const SessionGateReport report = GateSession(root.Dir("S-PARENT"));
     REQUIRE(report.status == SessionGateStatus::Analyzed);  // 主账好:整场仍可分析
