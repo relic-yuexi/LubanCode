@@ -303,7 +303,12 @@ TEST_CASE("v3 快照不变性: 记忆改版后旧消息行一字不动") {
     REQUIRE(stream.has_value());
     std::string first_snapshot_line;
     std::string first_sha;
-    for (const std::string& line : *trajectory::ReadJournalLines(*stream)) {
+    // 行集先落具名变量:range-for 解引用临时 optional 时,引用绑进临时内部
+    // 的 vector,临时本身在 range 初始化句末即析构——迭代即 UB(glibc 的
+    // free 污染显形 SIGSEGV,libc++/MSVC 侥幸)。与 StreamLines 同一纪律。
+    const auto first_lines = trajectory::ReadJournalLines(*stream);
+    REQUIRE(first_lines.has_value());
+    for (const std::string& line : *first_lines) {
         if (line.find("context_runtime") == std::string::npos) continue;
         first_snapshot_line = line;
         first_sha = nlohmann::json::parse(line).at("message").at("content").get<std::string>();
@@ -326,7 +331,9 @@ TEST_CASE("v3 快照不变性: 记忆改版后旧消息行一字不动") {
 
     bool first_line_intact = false;
     std::size_t snapshot_messages = 0;
-    for (const std::string& line : *trajectory::ReadJournalLines(*stream)) {
+    const auto lines_after = trajectory::ReadJournalLines(*stream);
+    REQUIRE(lines_after.has_value());
+    for (const std::string& line : *lines_after) {
         if (line.find("context_runtime") == std::string::npos) continue;
         ++snapshot_messages;
         if (line == first_snapshot_line) first_line_intact = true;
