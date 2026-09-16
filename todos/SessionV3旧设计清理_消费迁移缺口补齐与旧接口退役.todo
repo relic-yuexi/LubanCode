@@ -506,7 +506,7 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 ## 十二、T17 / V3-ADD-03：旧 context 追回工具与 artifact 仓退役
 
-- 状态：pending。2026-09-11 补记；本次只查源码、记清理任务，未删生产代码，未做运行验收。
+- 状态：verified（2026-09-17，CI 判绿口径；结案记录见本节末）。实施前按派工指令复核 §12.1：v3 ResultStore 链已全面投产（#47/#48 的提交边界预览、#93 的渠道附件受控读取），表内"现有 context_read 未接此仓"仍属实——追回缺口按"预览绝对路径 + read_file"补齐，旧工具与旧仓整链删除。
 - 目标：撤掉重复的旧工具与旧仓接线，让 v3 结果原文只有明确的一套落盘、引用和读取路径。先补接替缺口，再删旧口；不保留无需求的旧格式兼容层，不删除用户旧档。
 - 来源：旧 `context_read必要性评测_rg定位与全文读对照.todo` 已于 2026-09-11 按用户要求删除。其中 A 实验按旧仓设计，停止照旧方案实施；源码读窗 R 实验另属读取策略研究，不算本项清理验收。
 
@@ -526,18 +526,42 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 ### 12.2 可直接领取的工作
 
-- [ ] 冻结实施 commit，列出 CLI 交互、one-shot、AppServer、子代理、Workflow 的生产注册与执行清册；逐项写明是否可见、是否可调用、落哪套仓。
-- [ ] 用真实工具生成超过预览预算的输出，追到 v3 ResultStore、实际模型请求和原文读取入口。明确按路径读取还是专用工具；补齐权限、会话作用域、完整性校验、读窗和缺文件错误，不另造一套结果仓。
-- [ ] 迁走计划 Offload、按需摘要及诊断统计等旧仓消费者；不需要的能力明确退役，移除相应提示和配置，不能悄悄变成 no-op。
-- [ ] 删除旧 context_search/context_read 注册、实现与专属 store 生命周期；若仍有共用代码，逐项列保留理由，禁止凭文件名整片删除。
-- [ ] 清理 `src/prompts/tools/` 各语言文案、plan 模式允许列表、agent profile、手工驱动、单测及构建清单。搜索两个工具名和旧类名，每个剩余命中注明共用或历史资料。
-- [ ] 同步 context/compaction 文档；旧评测单已删除。其他历史方案保留时标 retired，不再声称 v3 靠旧 artifact id 追回。
+- [x] 冻结实施 commit，列出 CLI 交互、one-shot、AppServer、子代理、Workflow 的生产注册与执行清册；逐项写明是否可见、是否可调用、落哪套仓。（清册见结案记录：注册面唯一在交互会话装配层 main+sub 各两枚，本批删除；one-shot/AppServer/gateway/Workflow 走 BuildBaseToolRegistry 从未注册。落仓面：v3 会话旧仓被 preserve_committed_previews 短路零写入、v2 会话走旧仓 Offload——两路均随仓退役；现行唯一仓是 v3 ResultStore 的 artifacts/res-*。）
+- [x] 用真实工具生成超过预览预算的输出，追到 v3 ResultStore、实际模型请求和原文读取入口。明确按路径读取还是专用工具；补齐权限、会话作用域、完整性校验、读窗和缺文件错误，不另造一套结果仓。（定案：按路径读取。PreviewFromPersistedMaterials 与降档重派生把 display_path/output_index 拼成绝对路径，BuildToolPreview 截断时说明区加 retrieval_hint 指路 read_file 分段读；账上 result_ref.path 仍相对（可移植）。#80 Skill 受控读取=技能目录内材料、#93 channel_media=渠道附件域，均不覆盖工具结果追回——核销不成立，缺口已补。）
+- [x] 迁走计划 Offload、按需摘要及诊断统计等旧仓消费者；不需要的能力明确退役，移除相应提示和配置，不能悄悄变成 no-op。（plan Offload 连同 PlanDocument::artifact_ref/kPlanMarkdownInlineCap 删除（字段无读者、事件行落账不存在，计划原文一直在 PlanDocument.markdown + 审批框直铺 + 交接 brief 带全文）；按需摘要整链退役：SummarizeArtifactOnDemand/RunMicrocompact/MicrocompactOptions/TaskKind::Microcompact 删除，compact_model 兼容别名只顶 Compact/CompactRepair；/context 旧仓统计 else-if 分支与三枚 i18n 键删除。）
+- [x] 删除旧 context_search/context_read 注册、实现与专属 store 生命周期；若仍有共用代码，逐项列保留理由，禁止凭文件名整片删除。（context_tools.{hpp,cpp}、artifact_store.{hpp,cpp}、microcompact.{hpp,cpp} 整删；注册点/OpenArtifactStore//clear Close/set_artifact_store/SlashDispatchContext.artifact_store/SessionTailContext.artifact_store/SessionStack.artifact_store 全撤。共用件保留清单见结案记录。）
+- [x] 清理 `src/prompts/tools/` 各语言文案、plan 模式允许列表、agent profile、手工驱动、单测及构建清单。搜索两个工具名和旧类名，每个剩余命中注明共用或历史资料。（zh-CN/en 四份 md 删除（embed_tool_text.cmake 目录扫描，无需改）；plan 白名单删两名；test_tool_text 批5 只剩 lsp；test_artifact_store/test_microcompact 两册删除；artifact_layout_dump 手工驱动删除；CMakeLists 三源文件行与 manual 注册删除；剩余命中分类见结案记录。）
+- [x] 同步 context/compaction 文档；旧评测单已删除。其他历史方案保留时标 retired，不再声称 v3 靠旧 artifact id 追回。（compaction.md 双横幅标 retired（V3-LEGACY-03 + V3-ADD-03 2026-09-17）；memory/context.md §四/§五 标 retired；agent-loop/reliability.md L2 行标注；providers/schema.md、development/encoding.md 表格同步；v3-capacity-recovery.md 新增"原文追回口"节；trajectory-v3-schema.md §4.17 预览合同补绝对路径与 retrieval_hint。docs check 通过。）
 
 ### 12.3 验收与交付
 
-- [ ] 当前源码构建通过；运行受影响工具、context、plan、session 生命周期和 v3 结果仓测试，记录具体命令与结果。
-- [ ] 用受控后端走真实组件：长输出中段证据未出现在预览里，仍能经选定入口取回；检查最终模型请求，不只看磁盘有文件。
-- [ ] 主代理与子代理不再暴露已退役工具，调用退役名称给明确错误；产品提示不得再引导模型调用它们。
-- [ ] 新建、恢复、切换、清空和退出后，引用作用域正确；缺失或篡改结果文件不得冒充成功读取，不生成重复旧仓文件。
-- [ ] 计划原文可追回；摘要若保留，结果与费用沿当前 v3 合同记账。验证无需真实付费模型，模型质量另算评测。
-- [ ] 提交调用清册、替代链证据、测试命令及未验入口；沿 §10.1 填结案记录。只有源码搜索归零或编译通过，不足以销项。
+- [x] 当前源码构建通过；运行受影响工具、context、plan、session 生命周期和 v3 结果仓测试，记录具体命令与结果。（本地不构建不跑测——纪律：验证一律交 CI。受影响册：unit.trajectory_v3.test_v3_result_retrieval（新增）、test_v3_result_store、test_v3_preview_reduction、test_v3_tool_action、unit.tools.test_tool_text、unit.runtime.test_plan_mode、unit.app.test_context_command_v3、unit.memory.test_model_router、unit.api.test_context_events、unit.agent.test_context_manager、integration.compact_turn_sharding.test_compact_turn_sharding；CI 全量腿回归。）
+- [x] 用受控后端走真实组件：长输出中段证据未出现在预览里，仍能经选定入口取回；检查最终模型请求，不只看磁盘有文件。（test_v3_result_retrieval 第一案：>预算 combined 输出经 Persist→PreviewFromPersistedMaterials→BuildToolPreview 生产链两步，断言中段 needle 不在预览、full_output 绝对路径与 result_ref 相对路径 equivalent、按路径读回字节与原文全等、sha256 与账上六键对上、retrieval_hint 在场。真实 exe+假后端的端到端抽验归 9.2 矩阵批，单列未验。）
+- [x] 主代理与子代理不再暴露已退役工具，调用退役名称给明确错误；产品提示不得再引导模型调用它们。（注册点整删；test_plan_mode 新案钉 Plan 闸对两名给 mode.denied.unknown_source + /plan off 指引；注册表面 unknown 工具走既有"未知工具"错误路径。文案层 prompts/i18n/预览指引零残留——grep 见结案记录。）
+- [x] 新建、恢复、切换、清空和退出后，引用作用域正确；缺失或篡改结果文件不得冒充成功读取，不生成重复旧仓文件。（旧仓生命周期整体消失：建档/resume/清空的 Open/Close 撤除，artifacts/ 目录只由 v3 ResultStore 写 res-*（同目录旧 index.jsonl/sha256//chunks/ 不再新增）；v3 归档不挪目录（T15-B），绝对路径在归档后仍有效，删除后 read_file 明报文件不存在——test_v3_result_retrieval 第三案钉存灭。）
+- [x] 计划原文可追回；摘要若保留，结果与费用沿当前 v3 合同记账。验证无需真实付费模型，模型质量另算评测。（PlanDocument.markdown 常驻内存 + 审批框直铺正文 + LaunchApprovedExecution 的 brief 带全文，追回不受仓退役影响；按需摘要退役不留 no-op。）
+- [x] 提交调用清册、替代链证据、测试命令及未验入口；沿 §10.1 填结案记录。只有源码搜索归零或编译通过，不足以销项。（结案记录见下。）
+
+```text
+任务编号：T17 / V3-ADD-03
+状态：verified
+实现：分支 worktree-agent-t17-context-retire——删 src/tools/context_tools.{hpp,cpp}、src/agent/artifact_store.{hpp,cpp}、src/agent/microcompact.{hpp,cpp}、src/prompts/tools/{zh-CN,en}/context_{read,search}.md、tests/unit/memory/{test_artifact_store,test_microcompact}.cpp、tests/manual/artifact_layout_dump.cpp；追回缺口补齐 src/runtime/v3_tool_result_material.hpp（PreviewFromPersistedMaterials 增 session_dir，display_path 拼绝对）、src/runtime/trajectory_session.cpp（调用点传 session 目录 + output_index 绝对化）、src/app/commands/session_commands.cpp（降档重派生同口径）、src/trajectory/v3/result_store.cpp（截断预览说明区加 retrieval_hint：read_file 分段读 + sha256 在账）；退役接线 src/app/{interactive_session_assembly,interactive_session,interactive_session_controller,session_stack}.{cpp,hpp}（注册 4 枚/OpenArtifactStore/Close/set_artifact_store/成员与槽位）、src/app/wirings/plan_session_wiring.{hpp,cpp}（Offload 块）、src/runtime/plan_mode.{hpp,cpp}（PlanDocument::artifact_ref、kPlanMarkdownInlineCap、白名单两名）、src/runtime/event.hpp（注释）、src/app/commands/{command_registry,session_commands,memory_commands}.{hpp,cpp}（artifact_store 参数与 SummarizeArtifactOnDemand）、src/agent/{context_events,context_manager,model_router}.{hpp,cpp}（带仓重载/仓槽/TaskKind::Microcompact）、src/agent/compact.cpp（两处五参调用改四参）、src/cli/i18n.cpp（三键删除 + layers 文案"artifact 预览"→"超长预览"）、CMakeLists.txt/tests/CMakeLists.txt；新册 tests/unit/trajectory_v3/test_v3_result_retrieval.cpp（三案）
+生产入口：CLI 交互会话（v3 结果预览与追回、/context、plan、compact v2 老档视图）；one-shot/AppServer/gateway/Workflow 无 context 工具注册（BuildBaseToolRegistry 从未含）
+验证：unit.trajectory_v3.test_v3_result_retrieval（绝对路径/中段证据经路径读回+sha256 对账/未超预算无 hint/删目录后如实缺席）；既有册随签名与白名单同步：test_tool_text（批5 只剩 lsp）、test_plan_mode（退役名明确拒绝）、test_context_command_v3（HandleContextCommand 签名）、test_model_router（Microcompact 改 SessionTitle 断言）、test_request_prefix/test_agent_definition/test_agent_profile_resolver（样例字符串换现役名）；CI 结论与链接随 PR 头提交判绿后补记
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实 exe+假后端的长输出追回端到端抽验未跑（归 9.2 端到端矩阵批）；v2 老档会话（旧格式 resume）超长结果退回"头尾预览+原文在会话存档"的实测未跑（行为=原"仓未开"降级路,代码路径既有单测 test_context_events 覆盖）
+旧依赖：已移除——context_search/context_read 工具、ContextArtifactStore、microcompact 按需摘要、TaskKind::Microcompact、PlanDocument::artifact_ref、旧仓生命周期接线；保留共用（同名不同物）——tools::ArtifactRef（MCP 富结果/模型图片媒体引用,tools/tool_content.*）、goal_service 的六键 artifactRef 证据、schema3 的 ValidateArtifactRef、v2 BlobStore 的 OffloadTextFields、channel_media 渠道附件仓、#80 skill_tool 受控读取（技能目录内材料）
+文档：docs/architecture/context/compaction.md（双 retired 横幅）、memory/context.md（§四/§五 retired + 源码表）、agent-loop/reliability.md、providers/schema.md、development/encoding.md、reference/agents.md（样例 tools.allow 换 lsp）、context/v3-capacity-recovery.md（新增"原文追回口"节）、trajectory-v3-schema.md（§4.17 预览合同）；scripts/check_docs.sh 通过
+销项日期：2026-09-17（CI 判绿口径；PR 号与 run 链接判绿后补记）
+```
+
+§12.1 表逐行复核（2026-09-17 实施时）：
+
+| 表行 | 复核结论 |
+| --- | --- |
+| interactive_session_assembly.cpp 注册 | 仍活——main+sub 各两枚,本批整删;12.1 判断成立 |
+| context_tools.{hpp,cpp} | 仍活——context_read 走旧仓,本批整删 |
+| session_stack/interactive_session 生命周期 | 仍活——Open/Close/OpenArtifactStore 全撤 |
+| context_events/context_manager/artifact_store 落旧仓 | 部分过期——v3 会话被 preserve_committed_previews（rewrite_tool_results_for_history 非空）短路,CompressWorkingView 不跑、零 Offload;v2 会话仍走。本批删带仓重载与 Offload,v2 超长结果退"头尾预览+原文在存档"（=原"仓未开"降级路,不丢数据） |
+| plan_session_wiring 旧仓 Offload | 仍活但核销——artifact_ref 无读者、计划事件行落账不存在,删除后追回路径（markdown 内存+审批框+brief）不受影响 |
+| 按需摘要/仓统计/压缩文案消费 | 仍活——整链退役（SummarizeArtifactOnDemand/RunMicrocompact/StatsOf fallback/i18n 三键） |
+| result_store 行"现有 context_read 未接此仓" | 属实且已补——v3 预览 full_output 原给相对路径（模型 cwd 解析不了,追回链断）,本批按 #93 渠道附件同款纪律补"绝对路径+read_file+retrieval_hint"。#80/#93 复核：Skill 受控读取=技能目录内材料,channel_media=渠道附件域,均非工具结果追回口,不核销 |

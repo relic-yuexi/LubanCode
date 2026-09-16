@@ -526,8 +526,8 @@ TreatmentOutput ApplyTreatment(const std::string& name, const std::vector<Messag
     if (name == "microcompact") {
         // 产品默认参数(agent/context_events.hpp 的 StructuralCompressionOptions
         // 默认值):long_result_bytes=8192、preview_bytes=256、
-        // min_compressible_bytes=512。一次性"从头定形"视图(fresh memo),
-        // 不带 artifact 仓(store=nullptr,渲染无 artifact_id 变体)。
+        // min_compressible_bytes=512。一次性"从头定形"视图(fresh memo;
+        // T17 后旧 artifact 仓退役,渲染只有无 id 的头尾预览变体)。
         lubancode::agent::StructuralCompressionOptions options{};
         lubancode::agent::StructuralCompressionStats stats;
         out.view = lubancode::agent::CompressWorkingView(history, options, stats);

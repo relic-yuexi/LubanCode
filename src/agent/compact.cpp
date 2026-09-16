@@ -1190,13 +1190,13 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
     }
 
     // L1 工作视图(§3.3):分区按结构压缩后的稳定视图计量,长 ToolResult 按
-    // artifact 外置后的重量算,不拿 durable 里的全文虚算。CompressWorkingView
+    // 外置预览后的重量算,不拿 durable 里的全文虚算。CompressWorkingView
     // 只重写 tool_result 的 content,消息条数与块序不动,视图与原 history
-    // 逐条对得上;临时 memo/stats/store——不落盘、不定形、不碰会话真账。
+    // 逐条对得上;临时 memo/stats——不落盘、不定形、不碰会话真账。
     StructuralCompressionStats stats;
     ResultViewMemo memo;
     const std::vector<api::Message> working =
-        CompressWorkingView(history, budgets.structural, stats, memo, /*store=*/nullptr);
+        CompressWorkingView(history, budgets.structural, stats, memo);
 
     // 旧 archive 剥离(§3.2 + §〇.4):只在首条消息的第一枚文本块上找,与
     // 分层压缩同一只。两形都认——
@@ -2306,7 +2306,7 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
     StructuralCompressionStats working_stats;
     ResultViewMemo working_memo;
     const std::vector<api::Message> working =
-        CompressWorkingView(map_source, structural, working_stats, working_memo, /*store=*/nullptr);
+        CompressWorkingView(map_source, structural, working_stats, working_memo);
     // 事件账(evidence 范围与 WorkState 证据校验的来源):按原 history 算,
     // id 只随消息结构走,与剥档后的 map_source 逐条对得上。
     const std::vector<NormalizedEvent> ledger = BuildEventLedger(history);

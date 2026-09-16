@@ -276,15 +276,15 @@ TEST_CASE("前缀: 默认工具往返,后一份请求是前一份的原样追加
     CHECK(reports[1].epoch_break_reason.empty());
 }
 
-TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消息") {
+TEST_CASE("前缀: 工具结果只追加,不追改旧消息") {
     CaptureBackend backend;
     backend.scripts = {
-        ToolUseScript("call_summary", "context_read"),
+        ToolUseScript("call_summary", "read_file"),
         TextScript("我看完摘要了"),
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FixedTool>(
-        "context_read", "artifact a0001 按需摘要:构建通过。原文未改。"));
+        "read_file", "文件内容已读:构建通过。"));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::TurnWiring callbacks;

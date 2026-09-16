@@ -1467,10 +1467,9 @@ const Entry kZhCN[] = {
     {"router.usage.header", "模型调用分角色账(本会话累计):"},
     {"router.usage.fallback_header", "回退记录:"},
 
-    // ---- 可追回 artifact(渐进式上下文仓第二期) ----
-    {"artifact.store_open_failed", "[artifact] 上下文仓开不了({0}),超长结果退回内存全文,不产生假引用。"},
-    {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
-    {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
+    // (T17/V3-ADD-03:artifact.store_open_failed 与 cmd.context.artifacts*
+    // 三键随旧 ContextArtifactStore 退役;v3 结果仓统计走 cmd.context.
+    // v3_result_store*。)
     // ---- 动态工具 PromptCache 守恒单 P0:deferred_tool_mode 展示位(P1 补 proxy 档) ----
     {"cmd.context.deferred_tool_mode", "deferred_tool_mode = {0}(待检索 {1}/{2} 枚延迟工具)"},
     {"cmd.context.deferred_tool_mode.legacy_hint",
@@ -1481,7 +1480,7 @@ const Entry kZhCN[] = {
      "  native_reference:延迟定义带 defer_loading 常驻声明,发现走 provider 服务端工具搜索(tool_reference 原生展开),模型直接调用真实工具;provider 侧保前缀,本地执行仍走安全正门(设计单:动态工具 PromptCache 守恒与按需调用设计 P3)"},
 
     // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
-    {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚"},
+    {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · 超长预览(L1){1} 枚"},
     {"cmd.context.reclaimable", "结构压缩最近一次请求回收 ~{0} 字节(重复收敛 + 长结果外置)"},
     {"cmd.context.budget", "预算总账:窗口 {0} · 开销 {2} · 可压缩历史 {1}(统一估算口径)"},
     {"cmd.context.budget_detail", "  开销明细:system+模型指令 {0} · 工具声明 {1} · 热区 {2} · 输出预留 {3} · 压缩指令+协议 {4} · 估算误差边 {5}"},

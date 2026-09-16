@@ -27,7 +27,7 @@ nlohmann::json 的 `dump()` 遇到树里混着的**非法 UTF-8 字符串**会�
 | 管道/重定向 stdin | `cli/console_input.cpp` 的 `ReadLine` 非交互分支 | `std::getline` 不做编码处理,GBK/ANSI 原始字节直接进 |
 | 旧会话文件恢复 | `sessions/session_store.cpp` 的 `ParseSessionFile` / `BlockFromJson` | JSONL 是 `nlohmann::json::parse` 读的,不校验;崩溃截断行、老版本写的档都可能带坏串 |
 | 模型流输出 | `api/assembler.cpp` 收块 | 服务端/中转把多字节序列劈在 delta 边界,或干脆吐坏字节 |
-| compact / microcompact 摘要 | `agent/compact.cpp`、`agent/microcompact.cpp` | 摘要文本来自模型输出,同上一行 |
+| compact 摘要 | `agent/compact.cpp` | 摘要文本来自模型输出,同上一行(microcompact 已随 T17 退役) |
 | 工具结果 / 工具输出 | `agent/loop.cpp`、`tools/run_command.cpp` 等 | PowerShell 5.1 解析期错误走系统 ANSI 代码页(国内是 GBK),原生程序绕开控制台编码直接写 |
 | app-server 入站 | `app_server/server.cpp` | JSON parse 不校验 UTF-8 |
 | 子代理 inbox 投递 | `tools/agent_tool.cpp` | 跨会话传话/外部投递不清洗 |

@@ -42,7 +42,6 @@
 #include <variant>
 #include <vector>
 #include <nlohmann/json.hpp>
-#include "agent/artifact_store.hpp"
 #include "agent/compact.hpp"
 #include "agent/context_budget.hpp"
 #include "agent/loop.hpp"
@@ -154,7 +153,6 @@
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
 #include "tools/command_safety.hpp"
-#include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
@@ -209,15 +207,12 @@ namespace {
 
 
 
-// 建档(渐进式上下文仓第二期起,第一轮用户输入**之前**就要建):仓要拿
-// session id 开张,超长结果在第一轮请求里就得能落盘,不能等回合收尾。首条
-// 文本做 slug 的旧建档路已删(P0-6);轨迹账在 SessionRuntime ctor 里已开。
-// 建档成功顺手开仓(开不成只告警:超长结果退回内存全文,不产生假引用)。
+// 建档:首条文本做 slug 的旧建档路已删(P0-6);轨迹账在 SessionRuntime
+// ctor 里已开。每轮重进这里全部幂等(hooks 只是重设)。
 bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text) {
     (void)first_text;
     // P0-2(Trajectory 升为唯一 Session):会话账在 SessionRuntime ctor 里
-    // 已开——session id 与转录路径这一刻就齐,hooks 上下文与上下文仓随
-    // 账开。每轮重进这里全部幂等(仓 Open 重读 index,hooks 只是重设)。
+    // 已开——session id 与转录路径这一刻就齐,hooks 上下文随账开。
     if (session_runtime_.trajectory() != nullptr) {
         if (lubancode::app::HookRuntime() != nullptr) {
             lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
@@ -233,7 +228,6 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
         // 层补白名单+权鉴桥+executor(P3 原生试点)。
         lubancode::runtime::AttachDefaultAsyncToolRuntime(session_runtime_,
                                                           session_runtime_.wire_name());
-        OpenArtifactStore();
         return true;
     }
     // P0-6:旧 SessionStore 建档路已删;没有轨迹账本 = 装配层早已让会话
@@ -387,22 +381,9 @@ void TerminalSessionController::DrainFinishedTitleRefinement() {
     peer_wiring_.SetName(session_title);
 }
 
-// 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
-// /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
-void TerminalSessionController::OpenArtifactStore() {
-    // P0-2:仓住 session artifacts/(blob 内容寻址进 sha256/ 子层,与 MCP
-    // rich、模型图片同根——单子 §三"统一放进 session artifacts/")。旧
-    // sessions/<id>/context 路随旧档退役(P0-5 迁移器搬 blob)。
-    if (session_runtime_.trajectory() != nullptr) {
-        const std::string root =
-            (session_runtime_.trajectory()->session_dir() / "artifacts").generic_string();
-        if (!artifact_store->Open(root, session_runtime_.trajectory()->session_id())) {
-            TermOut() << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
-        }
-        return;
-    }
-    // P0-6:旧存档侧的 context 仓已删;没有轨迹账本时仓不开。
-}
+// (T17/V3-ADD-03:OpenArtifactStore——旧 ContextArtifactStore 的开仓口——已删;
+// v3 会话的工具结果原文由 ResultStore 在提交边界落档(trajectory/v3/
+// result_store),v2 会话超长结果退回内存全文照旧发送,不再落第二套仓。)
 
 // (P0-6:PersistNewMessages——旧 SessionStore 的轮末补抄——已删;
 // 消息事实由 model.output.completed/tool.result.committed typed 事件即时

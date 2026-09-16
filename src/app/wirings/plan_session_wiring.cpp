@@ -245,16 +245,9 @@ void PlanSessionWiring::CollectProposal(std::size_t history_before, const std::s
     plan.source_turn_id = turn_id;
     plan.state = lubancode::runtime::PlanReviewState::Presented;
     plan.content_sha256 = lubancode::hooks::Sha256Hex(plan.markdown);
-    // 超限:正文落 artifact(item 留引用)。仓走 Offload(幂等,tool 名记
-    // "plan");仓没开给 nullopt,序列化层退内联分支。
-    if (plan.markdown.size() > lubancode::runtime::kPlanMarkdownInlineCap && host_.artifact_store != nullptr &&
-        host_.artifact_store->active()) {
-        if (auto ref = host_.artifact_store->Offload(plan.plan_id + "-r" + std::to_string(plan.revision), "plan",
-                                                     plan.markdown, /*source_message_index=*/0);
-            ref.has_value()) {
-            plan.artifact_ref = ref->artifact_id;
-        }
-    }
+    // (T17:超限正文落旧仓的 Offload 已随 ContextArtifactStore 退役——
+    // PlanDocument 无事件行落账,artifact_ref 从无读者;计划原文的可追回
+    // 路径一直是审批框直铺正文与执行交接的 brief 带全文,不受影响。)
     host_.session_runtime->RecordPlanDocument(plan);
     review_pending_ = plan;
     TermOut() << host_.theme->stats

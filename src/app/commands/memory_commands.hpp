@@ -17,7 +17,6 @@
 #include <string>
 
 #include "agent/agent.hpp"        // Agent(批四自立门户)
-#include "agent/artifact_store.hpp"  // ArtifactRef/ContextArtifactStore(按需摘要)
 #include "agent/model_router.hpp"  // TaskKind/ModelRole
 #include "app/memory_extract.hpp"  // MemoryTurnLedger(P0 调度账)
 
@@ -52,21 +51,20 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
 
 // ---- 会话尾款的 memory 接线(终端接线收尾单自大类搬出) --------------------
 //
-// 回合收尾的记忆抽取、artifact 按需摘要——两样都是"回合外面的后台小活",
-// 原先住在大类里,搬到这里;材料经 SessionTailContext 递入。(会话起名
-// 原是第三样,实测问题 7 后搬到会话控制器:首问建档当场起本地标题,
-// 精炼走 SessionTitleRefiner 异步,不再在回合收尾同步等 cheap。)
+// 回合收尾的记忆抽取——"回合外面的后台小活",原先住在大类里,搬到这里;
+// 材料经 SessionTailContext 递入。(会话起名原是另一样,实测问题 7 后搬
+// 到会话控制器:首问建档当场起本地标题,精炼走 SessionTitleRefiner 异步,
+// 不再在回合收尾同步等 cheap。T17:artifact 按需摘要
+// SummarizeArtifactOnDemand 已随旧仓与 context_read 一并退役。)
 struct SessionTailContext {
     lubancode::memory::ProjectMemory* project_memory = nullptr;
     lubancode::agent::Agent* agent = nullptr;          // 活 loop(history 与路由)
     lubancode::app::ModelRouterService* model_router = nullptr;
     const std::string* prompts_dir = nullptr;          // 抽取系统提示的运行时模块
-    lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
     const lubancode::cli::Theme* theme = nullptr;
-    // Token 账本单 A1(旁路落账):flag 开的会话递账本,回合收尾的抽取与
-    // artifact 按需摘要各自铸旁路桥落 Journal(purpose=memory_extract/
-    // compact_map)。空 = 没接轨迹,行为与从前一致。wire 是桥 identity 的
-    // 渠道名(与主 turn 桥同源)。
+    // Token 账本单 A1(旁路落账):flag 开的会话递账本,回合收尾的抽取铸
+    // 旁路桥落 Journal(purpose=memory_extract)。空 = 没接轨迹,行为与
+    // 从前一致。wire 是桥 identity 的渠道名(与主 turn 桥同源)。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     std::string trajectory_wire;
     // 记忆写入调度单 P0:回合级调度账(漏斗/Token/尾延迟 + 写路回执)。
@@ -78,11 +76,6 @@ struct SessionTailContext {
 // (auto 档且证据齐的直写),检索扩展词留给下一轮召回。失败降级一行字,
 // 不影响主会话,也不重试。
 void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text, std::size_t history_before);
-
-// context_read(summarize=true) 的按需摘要:独占 cheap backend 读 artifact
-// 真本,返回给工具回执追加在历史尾部。
-std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionTailContext& ctx,
-                                                                  const lubancode::agent::ArtifactRef& ref);
 
 // 命令分派注册制(会话终章):/memory 的分派位(case 体原样搬自大 switch)。
 struct SlashDispatchContext;

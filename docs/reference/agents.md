@@ -148,7 +148,7 @@ tools:
   allow:
     - read_file
     - search
-    - context_read
+    - lsp
     - todo_write
     - mcp__browser__navigate
     - mcp__browser__screenshot

@@ -11,7 +11,7 @@
 //     模型目录指令走 SetModelInstructions;/worktree 换目录重拼提示走
 //     SetSystemPrompt;/context、/model 改窗口走 SetContextWindowTokens。
 //   - 接线:SetWiring 一只(inbox/压力钩/发号器整份换)。
-//   - 上下文策略:经 context() 直改 ContextManager(压缩开关、artifact 仓)。
+//   - 上下文策略:经 context() 直改 ContextManager(压缩开关)。
 
 #pragma once
 

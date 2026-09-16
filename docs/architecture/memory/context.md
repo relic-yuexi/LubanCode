@@ -15,7 +15,7 @@
 | session JSONL | 跨进程 | 完整事件流水与 compact marker | 只追加，不因 compact 删除旧消息 |
 | project memory | 跨会话 | 稳定项目事实、偏好、反馈 | memory worker 原子写主题 Markdown |
 
-另有一只 artifact 仓。它收超长工具结果原文，给请求视图留 id、指纹与头尾预览。artifact 是大结果的可追回存储，不是第五种对话历史。
+曾有一只独立 artifact 仓收超长工具结果原文（T17，2026-09-17 retired）。现行 v3 会话里，大结果的可追回存储是结果仓 `sessions/<id>/artifacts/res-*`（§四），预览说明区给绝对路径供 `read_file` 分段读回。
 
 这套分账解开三个冲突：
 
@@ -62,7 +62,7 @@ turn 结束，guard 清掉活动上下文。下一条外层用户消息再按新
 | --- | --- | --- |
 | 大文件 | `search` 定位；`read_file offset/limit` 分页 | 单次约 1 MiB，进入工具结果视图 |
 | 海量命令输出 | 进程捕获层 2 MiB 封顶 | 到顶杀进程树，保留前段与标记 |
-| 网页与搜索结果 | 工具自己的数量/字节上限 | 再走结构压缩与 artifact |
+| 网页与搜索结果 | 工具自己的数量/字节上限 | 再走结构压缩与预览外置 |
 | 巨型用户输入 | 没有源头工具可分页 | 只能靠窗口预算；单轮过大时明确拒绝 |
 
 通用阶梯如下：
@@ -70,7 +70,7 @@ turn 结束，guard 清掉活动上下文。下一条外层用户消息再按新
 ```text
 源头限流
 -> L1 请求视图结构压缩
--> artifact 外置与预览
+-> 超长结果外置与预览
 -> L2 冷工具结果微摘要
 -> L3 全局语义 compact
 -> L4 有损 hard trim + 明示告警
@@ -86,30 +86,18 @@ turn 结束，guard 清掉活动上下文。下一条外层用户消息再按新
 
 - 同一只读查询、同一输入键、同一内容指纹：正文只留一份，后来者写引用与次数。
 - 同一读取对象出现新版本：新结果留正文；旧结果标“已改版”，留短预览。
-- 结果很长：原文进 artifact，视图留稳定 id、hash、长度与头尾预览。
+- 结果很长：视图留指纹与头尾预览（T17 后不再落旧仓；原文在会话存档，v3 会话在结果仓 `artifacts/res-*`）。
 - 有副作用的工具：不判重。相同 `run_command` 叫两次，执行语义也可能不同。
 
 决策在一个 cache epoch 内钉住。已经发过全文，下一 step 不会因“现在看起来冷了”追改成摘要。否则旧请求前缀会变化，服务端 prompt cache 失效，模型也会看见一条会变形的历史。
 
-### artifact 为什么要验 hash
+### artifact 为什么要验 hash（retired 2026-09-17，T17/V3-ADD-03）
 
-artifact 索引与 blob 分开落盘。追回正文时重新算 hash。文件若被改或截断，隔离并报错，不拿污染内容冒充原结果。
+旧 ContextArtifactStore 的索引/blob 分层与 `context_search`/`context_read` 两把只读钥匙已退役。v3 会话的原文追回不再走专用工具：结果仓（`sessions/<id>/artifacts/res-*`）在预览说明区给绝对路径，模型用 `read_file` 的 offset/limit 分段读回；sha256 真值记在 `tool.result.persisted` 事件的六键 artifactRef 里，审计侧（ExpandResultPreview/insights）按它探缺口，读回端不重复校验。文件缺失由 `read_file` 明报，不冒充。
 
-模型可用 `context_read` 按 artifact id 搜索或取片段。id 只在当前会话作用域有效，不能拿磁盘路径越权读任意文件。
+## 五、L2 微压缩为何单列（retired 2026-09-17，T17/V3-ADD-03）
 
-## 五、L2 微压缩为何单列
-
-一枚工具结果原文很大，却未必值得把整场对话重写。L2 专收这种局部负担。
-
-它默认不跑。模型发现 L1 预览与分段读取都不合算时，点名一枚 artifact，调用 `context_read(summarize=true)`。护栏如下：
-
-- 一次只收调用方点名的一枚，不扫描冷区。
-- 单枚交给摘要模型的输入最多 24 KiB；过长取头尾，并尽量在行界收口。
-- 输出须是带 `summary` 与 `key_facts` 的 JSON。
-- 少于 20 字节、JSON 坏、请求失败或 45 秒超时，工具报错，不自动重试。
-- 摘要作为新工具结果追加，不回头替换旧预览。
-
-它不改旧 history，不删 artifact，也不拿旧摘要继续摘要。证据链始终指回原 blob；新摘要只住在历史尾部。
+L2 按需局部摘要（`context_read(summarize=true)` → 独占 cheap backend → RunMicrocompact）已随旧仓退役：触发工具删除后没有调用方。需要原文走 v3 结果仓路径 + `read_file`；全局摘要走 L3。本节保留为历史参考。
 
 ## 六、L3 全局 compact 何时触发
 
@@ -284,8 +272,9 @@ worker 在后台：
 | --- | --- | --- |
 | turn context 与 mid-turn 压力 | `src/agent/loop.cpp`、`context_manager.cpp`、`src/app/interactive_session.cpp` | `tests/unit/agent/test_loop.cpp`、`test_request_prefix.cpp` |
 | hard trim | `src/agent/context.cpp` | `tests/unit/api/test_context.cpp` |
-| L1 与 artifact | `src/agent/context_events.cpp`、`artifact_store.cpp` | `tests/unit/api/test_context_events.cpp`、`test_artifact_store.cpp` |
-| L2 microcompact | `src/agent/microcompact.cpp` | `tests/unit/memory/test_microcompact.cpp` |
+| L1 结构压缩 | `src/agent/context_events.cpp` | `tests/unit/api/test_context_events.cpp` |
+| （retired）旧 artifact 仓与 L2 microcompact | 已删（T17，2026-09-17） | 已删（T17） |
+| v3 结果原文追回 | `src/trajectory/v3/result_store.cpp`、`src/runtime/v3_tool_result_material.hpp` | `tests/unit/trajectory_v3/test_v3_result_retrieval.cpp`、`test_v3_result_store.cpp` |
 | L3 compact | `src/agent/compact.cpp` | `tests/unit/agent/test_compact.cpp` |
 | session 回放 | `src/trajectory/replay.cpp`（workspace Journal 折叠） | `tests/unit/trajectory/test_replay_state.cpp`、`test_harness_replay.cpp` |
 | 记忆召回与 worker | `src/memory/project_memory.cpp` | `tests/unit/memory/test_memory_retrieval.cpp`、`test_project_memory.cpp` |

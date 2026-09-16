@@ -340,7 +340,7 @@ Provider catalog 允许任意 capability 名，只要求值是布尔。现有目
 | 角色 | 典型任务 | 默认行为 |
 | --- | --- | --- |
 | `normal` | 普通 turn、compact repair | 当前会话模型 |
-| `cheap` | compact、microcompact、记忆抽取、分类、标题 | 未配置便回落 normal |
+| `cheap` | compact、记忆抽取、分类、标题 | 未配置便回落 normal |
 | `lao` | plan | 未配置便回落 normal |
 
 每个角色可写 provider、model、effort、context window 与 max output。`compact_model` 是兼容旧字段，只顶替 compact 类任务，不扩散到标题或记忆抽取。

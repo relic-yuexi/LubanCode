@@ -94,7 +94,6 @@ TEST_CASE("任务映射:角色跟 TaskKind 走,不跟 agent 身份") {
     CHECK(DefaultRoleForTask(TaskKind::Plan) == ModelRole::Lao);
     CHECK(DefaultRoleForTask(TaskKind::Compact) == ModelRole::Cheap);
     CHECK(DefaultRoleForTask(TaskKind::CompactRepair) == ModelRole::Normal);
-    CHECK(DefaultRoleForTask(TaskKind::Microcompact) == ModelRole::Cheap);
     CHECK(DefaultRoleForTask(TaskKind::MemoryExtract) == ModelRole::Cheap);
     CHECK(DefaultRoleForTask(TaskKind::RetrievalExpansion) == ModelRole::Cheap);
     CHECK(DefaultRoleForTask(TaskKind::Classification) == ModelRole::Cheap);
@@ -426,7 +425,7 @@ TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 cl
         CHECK(routed.backend == &main_backend);
     }
     SUBCASE("后台路由另造独占 backend,当前端也不借主 client") {
-        auto routed = service.RouteDetached(TaskKind::Microcompact);
+        auto routed = service.RouteDetached(TaskKind::SessionTitle);
         REQUIRE(routed.backend != nullptr);
         CHECK(routed.route.model == "fast-m");
         CHECK(routed.route.provider == "local_fast");
@@ -446,7 +445,7 @@ TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 cl
         const auto routed = ghost_service.Route(TaskKind::Compact);
         CHECK(routed.route.model == "m");
         CHECK(routed.backend == nullptr);
-        auto detached = ghost_service.RouteDetached(TaskKind::Microcompact);
+        auto detached = ghost_service.RouteDetached(TaskKind::SessionTitle);
         CHECK(detached.backend == nullptr);
     }
 }

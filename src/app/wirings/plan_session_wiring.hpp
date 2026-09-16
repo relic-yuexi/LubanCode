@@ -17,7 +17,6 @@
 #include <nlohmann/json.hpp>
 
 #include "app/commands/command_flow.hpp"
-#include "agent/artifact_store.hpp"
 #include "agent/prompt_assembler.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/theme.hpp"
@@ -41,7 +40,6 @@ public:
         const lubancode::cli::Theme* theme = nullptr;
         lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // 档位真值
         lubancode::agent::PromptOptions* prompt_options = nullptr;      // plan 段
-        lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 超限落仓
         // 晚绑定槽(控制器在装配尾填):
         std::function<lubancode::agent::Agent*()> main_agent;        // 历史与运行档案
         std::function<lubancode::tools::ToolRegistry*()> registry;   // Plan 闸的注册表元数据
