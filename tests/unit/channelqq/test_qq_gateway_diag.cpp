@@ -256,17 +256,26 @@ TEST_CASE("qq_gateway_diag: 401 集成——鉴权失效受控刷新 token;401 �
         return snapshot.last_failure.has_value() &&
                snapshot.last_failure->error_code == "gateway_url_unauthorized";
     }));
-    // 仅明确鉴权失效才失效缓存:401 后 Invalidate,下一轮重新取 token
-    // (token_calls >= 2);每轮 provider 一次,刷新受控不连环。
-    const auto deadline = platform::WallClockNowMs() + 8'000;
+    // 仅明确鉴权失效才失效缓存:401 后 Invalidate(第一轮 provider 内同步
+    // 执行),下一轮(退避 ~1s)重新取 token(token_calls >= 2);每轮一次,
+    // 刷新受控不连环。窗给 20s:CI 并行腿 CPU 饥饿时退避轮次会被拖慢,
+    // 不把调度延迟误判成"没刷新"。
+    const auto deadline = platform::WallClockNowMs() + 20'000;
     bool refreshed = false;
     while (platform::WallClockNowMs() < deadline) {
-        const std::lock_guard<std::mutex> lock(harness.http.mutex);
-        if (harness.http.token_calls >= 2) {
-            refreshed = true;
-            break;
+        {
+            const std::lock_guard<std::mutex> lock(harness.http.mutex);
+            if (harness.http.token_calls >= 2) {
+                refreshed = true;
+                break;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!refreshed) {
+        const std::lock_guard<std::mutex> lock(harness.http.mutex);
+        MESSAGE("401 受控刷新未观察到: token_calls=", harness.http.token_calls,
+                " gateway_calls=", harness.http.gateway_calls);
     }
     CHECK(refreshed);
 }
