@@ -8,7 +8,8 @@
 // (Ready 后收到首个 Heartbeat ACK)归零。
 //
 // 线程模型:RunLoop 归一只网关线程;CancelInFlight 供停止方从外部打断
-// 在途连接(经原子指针只调 Cancel,不触碰其余状态)。
+// 在途连接(在途传输持共享所有权——取消方拷走 shared_ptr 再调 Cancel,
+// 连接线程清账/析构不产生悬空指针;A08)。
 #pragma once
 
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -79,6 +81,9 @@ struct GatewayEvent {
     enum class Kind {
         C2cMessageCreate,   // 单聊来信(d 是平台事件体)
         InteractionCreate,  // 互动回调(Q6 按钮点击;d 是平台事件体)
+        UnsupportedDispatch, // 收到但未建模的 Dispatch(FRIEND_ADD 等兄弟事件):
+                            // detail = 平台事件类型名。宿主须给明确终结记录
+                            //(A04:计数/留痕),返回 Persisted 后游标才推进。
         SessionReady,       // Identify 过(含新 session_id)
         SessionResumed,     // Resume 过
         SessionInvalidated, // op9 不可恢复:session 已清,下一轮重新 Identify
@@ -92,12 +97,25 @@ struct GatewayEvent {
     nlohmann::json c2c_d;      // Kind::C2cMessageCreate 时有值
     nlohmann::json interaction_d;  // Kind::InteractionCreate 时有值
     std::string detail;
-    std::int64_t seq = -1;     // Disconnected 时的 last_seq
+    std::int64_t seq = -1;     // Disconnected 时的 last_seq;业务事件带自身 s
     std::string stage;         // StageChanged/ConnectFailed/Disconnected 时有值
     std::string error_code;    // ConnectFailed/Disconnected 的稳定码
     int attempt = 0;           // 尝试编号(1 起):ConnectFailed/Disconnected 与
                                // 随后的 BackoffScheduled 同轮同号(§四)
     std::int64_t next_retry_at_ms = 0;  // BackoffScheduled:下一次尝试时刻
+};
+
+// 接收回调的落盘结果(A04:落盘游标)。宿主(适配器)对一条业务事件的
+// 处理是否已达到"可终结"状态——网关据此推进"已安全接收的连续序号"
+//(durable 游标,Resume 从它起)。
+//   - Persisted:已耐久接住(spool 落账)或已有明确终结记录(含"已判
+//     不支持"的计数、判无效的留痕)。游标推进。
+//   - PersistFailed:这条没接住(如磁盘满/权限拒)。网关不推进 durable
+//     游标、不跨过失败事件,按可恢复故障断线退避;Resume 从 durable 游标
+//     起,平台补发包含这条——不丢信。
+enum class GatewayEventAck {
+    Persisted,
+    PersistFailed,
 };
 
 // 网关传输 seam(测试注入假流;生产 MakeWsTransportFactory)。
@@ -128,7 +146,10 @@ public:
         // Q6 起默认订阅单聊 + 互动(审批按钮回调);测试若要钉旧行为可显式
         // 覆盖为 kIntentGroupAndC2cEvent。
         std::uint32_t intents = kIntentDefaultBot;
-        std::function<void(const GatewayEvent&)> on_event;
+        // 业务事件(C2cMessageCreate/InteractionCreate/UnsupportedDispatch)
+        // 的回调返回落盘结果;控制/阶段事件恒按 Persisted 消费。null 回调
+        // 视同 Persisted(观测型装配零负担)。
+        std::function<GatewayEventAck(const GatewayEvent&)> on_event;
         std::function<std::int64_t()> now_ms;
         int hello_timeout_ms = 10'000;
         // A02:鉴权循环的"总期限"(不是单帧超时)。Identify 只认有效 READY;
@@ -152,7 +173,12 @@ public:
 
     // ---- 观测(诊断/测试) ----
     std::string state_name() const;
+    // 已收到的最新序号(心跳口径:平台合同"携带客户端收到的最新的 s",
+    // 不与落盘承诺混)。
     std::int64_t last_seq() const { return last_seq_.load(); }
+    // 已安全接收的连续序号(A04 durable 游标):Resume 从它起。只有宿主
+    // 回调对含该序号的业务事件返回 Persisted 后才推进。
+    std::int64_t durable_seq() const { return durable_seq_.load(); }
     std::string session_id() const;
     int connect_attempts() const { return connect_attempts_.load(); }
     // A09:未知/服务端不该发的 opcode 记账(会话内累计)——不冒充心跳、
@@ -172,14 +198,30 @@ private:
     RunOutcome RunOneConnection(std::atomic<bool>* stop, bool* session_was_invalidated,
                                 int attempt_number);
     void SleepInterruptible(std::atomic<bool>* stop, std::int64_t ms);
+    // 出口事件的统一口:null on_event / 非业务事件按 Persisted 消费。
+    GatewayEventAck EmitEvent(const GatewayEvent& event);
+    // 一条 Dispatch(s>=0)的按序落账:last_seq 先记(已收到);业务事件经
+    // 宿主回调,ack==Persisted 才推进 durable 游标;PersistFailed 回 false
+    //(调用方按可恢复故障断线,不跨过这条)。
+    bool AcceptDispatch(const GatewayPayload& payload);
 
     Options options_;
     std::atomic<State> state_{State::Idle};
+    // 游标两本账(A04):last_seq = 已收到(心跳合同);durable_seq = 已安全
+    // 接收的连续序号(Resume 承诺)。写都归网关线程,读可跨线程。
     std::atomic<std::int64_t> last_seq_{-1};
+    std::atomic<std::int64_t> durable_seq_{-1};
+    // session_id 与在途传输的跨线程访问口:session_id 网关线程写/宿主线程
+    // 读(A08:核对线程约束——std::string 无原子性,过锁);in_flight 共享
+    // 所有权,取消方在锁外调 Cancel。
+    mutable std::mutex session_state_mutex_;
     std::string session_id_;  // 空 = 无可恢复会话(下一轮 Identify)
     std::atomic<int> connect_attempts_{0};
+    // A09:未知/服务端不该发的 opcode 计数(叠加自 #112)。
     std::atomic<int> unexpected_ops_{0};
-    std::atomic<IGatewayTransport*> in_flight_{nullptr};
+    // A08:在途传输共享所有权(取消方拷 shared_ptr 再调 Cancel)。
+    std::mutex in_flight_mutex_;
+    std::shared_ptr<IGatewayTransport> in_flight_;
 };
 
 }  // namespace lubancode::channel::qq

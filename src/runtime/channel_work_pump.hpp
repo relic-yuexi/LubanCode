@@ -294,7 +294,9 @@ private:
     void ShutDownTurnWorkers();  // 打断在飞、退回未跑、join(Close/析构共用)
     // ---- Q6:审批卡片的交互 outbox(进程内;重启后旧请求作废不补投) ----
     // deadline 即审批 TTL:卡片投递失败在窗内退避重试,过线取消等待
-    //(fail closed,不为重试卡片突破审批窗)。
+    //(fail closed,不为重试卡片突破审批窗)。发送身份(A05)归
+    // outbox 持久分配器:同 token 重试同 (锚, msg_seq),与同信下的
+    // 提示/正文/附件共用发号,不撞号。
     struct ApprovalCard {
         std::string token;
         std::string delivery_id;  // manager send 的 client_delivery_id(回执对账)

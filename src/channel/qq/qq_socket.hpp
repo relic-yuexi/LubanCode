@@ -57,10 +57,20 @@ public:
 
     void Close();
 
+    // 原生句柄(只读;A08 建立期取消用——取消方持句柄直接 shutdown,把
+    // 连接方阻塞在 select/recv 的流程立即打断)。句柄随 Close 失效,登记
+    // 方须保证 Close 前先撤销登记(见 WsConnectCancelState)。
+    std::int64_t native_handle() const { return fd_; }
+
 private:
     explicit TcpSocket(std::int64_t fd);
     std::int64_t fd_ = kInvalidFd;
     static constexpr std::int64_t kInvalidFd = -1;
 };
+
+// 对原生句柄直接双向 shutdown(跨线程取消建立中的连接用;A08)。
+// 句柄必须仍在登记方的所有权内——关闭后的 fd 号可能被复用,登记方负责
+// 在 Close 前撤销登记。
+void ShutdownNativeFd(std::int64_t fd);
 
 }  // namespace lubancode::channel::qq

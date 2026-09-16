@@ -150,11 +150,32 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
         return std::unexpected(
             WsError{WsError::Kind::Protocol, "url must be ws:// or wss://", 0});
     }
+    const bool cancellable = options.cancel != nullptr;
+    if (cancellable && options.cancel->IsCancelled()) {
+        return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+    }
 
     auto socket = TcpSocket::Connect(parsed->host, parsed->port, options.connect_timeout_ms);
     if (!socket.has_value()) {
         return std::unexpected(ToWsError(socket.error()));
     }
+    // 建立期取消登记(A08):TCP 连上即登记句柄——TLS 握手、升级握手、
+    // 读响应头全吃同一句柄的 shutdown。登记前已取消 = 立即放弃(句柄随
+    // 局部 TcpSocket 析构关闭)。
+    if (cancellable && !options.cancel->RegisterFd(socket->native_handle())) {
+        return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+    }
+    // 失败收尾统一撤销登记(成功则留给调用方在接管句柄的锁内交接后撤销)
+    // ——fd 关闭后号码可能被复用,不许悬挂。dismiss 由成功路径调用。
+    struct FdRegistrationGuard {
+        WsConnectCancelState* state;
+        bool active = true;
+        ~FdRegistrationGuard() {
+            if (active && state != nullptr) {
+                state->DeregisterFd();
+            }
+        }
+    } registration{cancellable ? options.cancel.get() : nullptr};
 
     // TLS 时 socket 所有权移进 TlsClientStream(堆上 TlsContext,移动安全);
     // 明文时 socket 归 WsClient::socket_。
@@ -164,6 +185,9 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
                                                 options.ca_pem, options.trust_mode,
                                                 options.connect_timeout_ms);
         if (!stream.has_value()) {
+            if (cancellable && options.cancel->IsCancelled()) {
+                return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+            }
             return std::unexpected(WsError{WsError::Kind::Failed,
                                            "tls: " + stream.error().detail, 0,
                                            stream.error().error_code});
@@ -192,6 +216,9 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
     request += "\r\n";
     const auto written = client.WriteAll(request, options.io_timeout_ms);
     if (!written.has_value()) {
+        if (cancellable && options.cancel->IsCancelled()) {
+            return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+        }
         return std::unexpected(ToWsError(written.error()));
     }
 
@@ -212,6 +239,9 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
         char chunk[512];
         const auto got = client.ReadSome(chunk, sizeof(chunk), options.connect_timeout_ms);
         if (!got.has_value()) {
+            if (cancellable && options.cancel->IsCancelled()) {
+                return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+            }
             return std::unexpected(ToWsError(got.error()));
         }
         received.append(chunk, *got);
@@ -235,6 +265,7 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
             WsError{WsError::Kind::Protocol, "sec-websocket-accept mismatch", 0});
     }
 
+    registration.active = false;  // 成功:登记交调用方在锁内接管后撤销
     return client;
 }
 

@@ -7,6 +7,7 @@
 // 泄露禁令:错误文案不带请求头/请求体(token、secret 都在那两处)。
 #pragma once
 
+#include <atomic>
 #include <expected>
 #include <functional>
 #include <string>
@@ -20,6 +21,10 @@ struct QqHttpRequest {
     std::string url;     // 绝对 https URL
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;  // 可空
+    // 停止旗(A08):非空时生产实现把它递给 net 层——连接/上传/等首字节/
+    // 收体任一阶段置位即就地掐流,分型 Cancelled。归发起方所有(适配器
+    // 恒传 &stop_),HTTP seam 不保管寿命。假实现可忽略。
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 struct QqHttpResponse {

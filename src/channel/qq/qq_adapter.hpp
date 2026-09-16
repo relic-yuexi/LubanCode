@@ -107,6 +107,13 @@ public:
     // 平台连接状态快照(§三):线程存活/connected/阶段/最近失败/重试账。
     // 脱敏口径:字段全部来自 GatewayEvent 的稳定账,不碰凭据。
     ConnectionSnapshot ConnectionState() const;
+    // A04:收到但未建模的 Dispatch 事件的明确终结记录(计数;Health 投影)。
+    std::uint64_t unsupported_dispatch_count() const {
+        return unsupported_dispatch_count_.load();
+    }
+    // 故障注入(仅测试):spool 落盘恒败(磁盘满口径)——网关 PersistFailed
+    // → durable 游标不推进 → Resume 补发链路的稳定复现口。生产不得调用。
+    void SetSpoolAppendFaultForTest(bool fail);
     // token 管理器的进程内借用(Q7 菜单/面板发布器共用——单飞刷新不重复
     // 取 token)。借用方不得另开刷新路。
     QqTokenManager* token_manager() { return &token_manager_; }
@@ -118,8 +125,9 @@ private:
     void ReplyDomainError(std::int64_t id, DomainErrorName name, const std::string& detail);
     void EmitNotification(BridgeMethod method, const nlohmann::json& params);
     // 网关事件落地:spool 先落,再编 channel.inbound 通知进 to_host;
-    // 连接事件同步记 ConnectionState 的账。
-    void HandleGatewayEvent(const GatewayEvent& event);
+    // 连接事件同步记 ConnectionState 的账。返回落盘结果(A04)——业务
+    // 事件 spool 失败 = PersistFailed,网关据此不推进 durable 游标。
+    GatewayEventAck HandleGatewayEvent(const GatewayEvent& event);
     // 起网关/发送线程与 spool。返回 false = spool 开不了账(不虚报 started)。
     bool StartGatewayLocked();
     void StopGatewayLocked(const std::string& reason);
@@ -129,6 +137,9 @@ private:
     std::string NextDeliveryId();
 
     Options options_;
+    // 停止旗声明在前(A08):token_manager_/媒体/发送全链的 HTTP seam 在
+    // 构造时就要拿 &stop_ 盖章,成员序须先于它们。
+    std::atomic<bool> stop_{false};
     QqTokenManager token_manager_;
     // 发送队列项:宿主 channel.send 的 request_id + 冻结载荷。Q4:可带一枚
     // 出站媒体(宿主 outbox 冻结的产物引用;发送线程上传后走 msg_type=7)。
@@ -154,7 +165,8 @@ private:
     std::unique_ptr<std::thread> gateway_thread_;
     std::unique_ptr<std::thread> sender_thread_;
     std::condition_variable sender_wake_;
-    std::atomic<bool> stop_{false};
+    // A04:未建模 Dispatch 事件的终结计数(原子;网关线程写/Health 读)。
+    std::atomic<std::uint64_t> unsupported_dispatch_count_{0};
 
     // ConnectionState 的账(网关线程写/宿主线程读,独立小锁,不与
     // host_mutex_ 交叉)。

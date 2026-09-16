@@ -300,4 +300,13 @@ void TcpSocket::Close() {
     }
 }
 
+void ShutdownNativeFd(std::int64_t fd) {
+    if (fd < 0) {
+        return;
+    }
+    // 与 ShutdownBoth 同一 syscall;独立入口供取消方跨线程打断建立中的
+    // 连接(句柄登记制,见 WsConnectCancelState)。
+    ::shutdown(static_cast<NativeSocket>(fd), 2 /* SD_BOTH / SHUT_RDWR */);
+}
+
 }  // namespace lubancode::channel::qq

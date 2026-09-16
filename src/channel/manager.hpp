@@ -244,6 +244,10 @@ public:
         std::string text;                   // 冻结正文(单段;拆段归 outbox)
         std::string reply_to_message_id;    // 被动回复锚(空 = 主动消息)
         std::string client_delivery_id;     // 稳定发送身份(outbox delivery id)
+        // A05:outbox 持久分配的 msg_seq(>0 时随桥协议直达适配器——适配器
+        // 不再重选号,同 delivery 重试/重启恒同 (msg_id, msg_seq);0 = 未
+        // 指定,适配器自行兜底)。
+        std::uint32_t msg_seq = 0;
         std::optional<OutboundAttachment> attachment;  // Q4 出站附件(可空)
         // Q6 审批卡片:非空时作为 keyboard 随消息发给适配器(空 object =
         // 纯文本,行为不变)。适配器无 interaction 能力会按协议拒绝——

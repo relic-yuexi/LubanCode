@@ -163,7 +163,10 @@ struct C2cSendRequest {
     std::string openid;              // 接收方 user_openid
     std::string content;             // 纯文本(msg_type=0);带 media 时不用
     std::string msg_id;              // 被动回复锚(来信 d.id);主动消息留空
-    std::uint32_t msg_seq = 1;       // 与 msg_id 联合防重;同回复重试复用同一值
+    // 与 msg_id 联合防重;同回复重试复用同一值。0 = 调用方未指定(A05:
+    // 宿主 outbox 持久分配的值 >0 时原样直达 QQ,适配器不再重选号;未指定
+    // 时由 QqMessageSender 内存兜底分配——仅覆盖不走 outbox 的调用方)。
+    std::uint32_t msg_seq = 0;
     std::string outbound_delivery_id;  // 宿主 delivery 账(不入平台载荷)
     // Q4 富媒体:非空 file_info 时载荷走 msg_type=7(media 字段),不带
     // content——官方示例 msg_type=7 只传 media+msg_id+msg_seq。file_info

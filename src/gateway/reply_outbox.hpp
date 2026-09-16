@@ -40,6 +40,24 @@
 
 namespace lubancode::gateway {
 
+// QQ 发送身份(A05/A06):同一 (账号, 被动锚 msg_id) 下所有出段——配对
+// 提示/任务回执/审批卡/正文分段/附件——共用一只按账发号的分配器:首次
+// 网络发送前冻结 (delivery, 锚, msg_seq, payload 摘要),账行先落
+//(PowerLoss)再上网络;结果未知的重试恒复用同一身份(重启亦然——账在
+// 盘上)。改锚补投必须先裁决旧身份(Retire),再行分配新身份——旧身份
+// 与裁决原因都留在账里,可追溯,不偷换同一 delivery。
+struct ChannelSendIdentity {
+    std::string anchor_msg_id;   // 被动锚(空 = 主动消息,seq 恒 0)
+    std::uint32_t msg_seq = 0;   // 平台载荷的 msg_seq(主动 = 0)
+    std::string payload_sha256;  // 冻结时的载荷摘要(审计/对账)
+};
+
+// 身份账的投影形态(重放/read-only;类内成员与 OutboxProjection 共用)。
+struct ChannelIdentityBookEntry {
+    ChannelSendIdentity identity;
+    std::int64_t assigned_at_ms = 0;
+};
+
 // 一枚出箱项(投影与投递的事实)。
 struct ReplyOutboxItem {
     std::string delivery_id;      // 定式散列(dl-<hash16>)
@@ -60,8 +78,12 @@ struct ReplyOutboxItem {
     std::string target_channel_id;             // "qqbot"
     std::string target_account_id;             // "main"
     std::string target_conversation_id;        // direct openid
-    std::string target_reply_to_message_id;    // 被动回复锚(来信 msg_id)
-    std::uint32_t target_msg_seq = 0;          // 稳定 msg_seq(= ordinal;0=未记)
+    std::string target_reply_to_message_id;    // 被动回复锚(来信 msg_id;
+                                               // 投递期冻结后由身份账覆盖)
+    std::uint32_t target_msg_seq = 0;          // 已持久分配的 msg_seq(A05:
+                                               // 0=未分配;分配见
+                                               // AssignChannelSendIdentity,
+                                               // 段 ordinal 不充当跨回复序号)
     std::string provider_message_id;           // QQ 回执(send 响应带的 om_*)
     std::string delivery_error;                // failed/delivery_unknown 时的稳定码
     std::int64_t attempts = 0;                 // 发送尝试次数(item.attempt 计数)
@@ -119,6 +141,33 @@ public:
         std::string reply_to_message_id;  // 被动回复锚(可空)
         std::string source_ref;           // "ingress:<ch>:<acct>:<sid>"(结算反查)
     };
+
+    // ---- QQ 发送身份的持久分配(A05/A06;类型在类外,见上方命名空间域) ----
+    struct IdentityReceipt {
+        bool ok = false;
+        // outbox.append_failed 账写不进(停投递)。
+        // identity_anchor_conflict:live 身份在身但锚变了——先 Retire 裁决
+        // 旧尝试(A06),不许静默换锚。
+        // identity_payload_mismatch:同 delivery 同锚但摘要变了——冻结正文
+        // 被换,账坏,交人工。
+        std::string error_code;
+        ChannelSendIdentity identity;
+    };
+    // 幂等分配:同 delivery 已有 live 身份且锚一致 → 返回旧身份(零网络
+    // 零新账);锚不一致 → identity_anchor_conflict。无 live 身份 → 新发号
+    // (同 (账号,锚) 单调 +1)并落账。anchor 为空 = 主动消息身份(seq=0)。
+    IdentityReceipt AssignChannelSendIdentity(const std::string& delivery_id,
+                                              const std::string& account_id,
+                                              const std::string& anchor_msg_id,
+                                              const std::string& payload_sha256,
+                                              std::int64_t now_ms);
+    // 裁决旧身份(改锚补投前必走):live 身份标记终结(账行留原因),此后
+    // Assign 可在新锚下发新号。幂等:无 live 身份时 no-op true。
+    bool RetireChannelSendIdentity(const std::string& delivery_id, const std::string& reason,
+                                   std::int64_t now_ms);
+    // 只读:当前 live 身份(无 = nullopt)。
+    std::optional<ChannelSendIdentity> FindLiveChannelSendIdentity(
+        const std::string& delivery_id) const;
     // 渠道入箱:冻结正文按段限拆段(UTF-8 边界),每段一枚 item
     //(deliveryId = MakeDeliveryId(selection, target 串, ordinal))。
     // 返回本 selection 的全部段 id(含此前已入箱的段;幂等重入同款)。
@@ -186,11 +235,16 @@ private:
     bool AppendLinePowerLoss(const nlohmann::json& line);
     std::filesystem::path ReplyArtifactPath(const std::string& selection_id) const;
     std::filesystem::path PublishedPath(const std::string& delivery_id) const;
+    // 身份账的发号键:"<account>\n<anchor_msg_id>"(账号各管各的 msg_id 空间)。
+    static std::string IdentityKey(const std::string& account_id, const std::string& anchor);
 
     Paths paths_;
     std::optional<trajectory::JournalWriter> writer_;
     bool broken_ = false;
     std::map<std::string, ReplyOutboxItem> items_;
+    // ---- QQ 发送身份账(A05/A06;与 items_ 同锁同账本) ----
+    std::map<std::string, ChannelIdentityBookEntry> live_identities_;  // delivery → 身份
+    std::map<std::string, std::uint32_t> next_seq_by_identity_;        // 发号键 → 已发最大号
     // Q6 起渠道 turn 在专用工作线程跑,EnqueueChannel 与泵 tick 的读写
     // 并发——本类从"装配期单写者"升为"类内串行"(一把锁包全部读写口;
     // 写盘在锁内,粒度换简单)。move 不搬锁(移动是装配期独占操作)。
@@ -219,8 +273,11 @@ inline constexpr std::size_t kChannelSegmentBytes = 2000;
 
 // 只读投影(status 分栏/测试用):从 outbox 账重放;文件不存在给空投影
 //(零建目录零写盘)。与 DurableReplyOutbox::Open 同一份重放逻辑。
+// 身份账(A05)一并重放:live 身份与发号计数(重启后不归零的事实源)。
 struct OutboxProjection {
     std::map<std::string, ReplyOutboxItem> items;  // deliveryId -> item
+    std::map<std::string, ChannelIdentityBookEntry> live_identities;
+    std::map<std::string, std::uint32_t> next_seq_by_identity;
     std::size_t skipped_lines = 0;
 };
 OutboxProjection ReadOutboxProjection(const std::filesystem::path& log_file);

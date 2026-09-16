@@ -349,6 +349,9 @@ constexpr FieldSpec kFieldSpecs[] = {
     {BridgeMethod::Send, false, "parts", "a", true},
     {BridgeMethod::Send, false, "reply_to_message_id", "s", false},
     {BridgeMethod::Send, false, "client_id", "s", false},
+    // A05:宿主 outbox 持久分配的 msg_seq(>0 权威,适配器不再重选号;
+    // 缺省 = 宿主未指定——主动消息恒不发此键)。
+    {BridgeMethod::Send, false, "msg_seq", "u", false},
     // Q6 审批卡片:可选 keyboard 对象(自定义键盘载荷,旧适配器不认即
     // 报 unknown field,宿主按 capabilities.interactions 协商后才发)。
     {BridgeMethod::Send, false, "keyboard", "o", false},

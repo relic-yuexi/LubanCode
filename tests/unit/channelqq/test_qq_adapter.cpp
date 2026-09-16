@@ -55,11 +55,14 @@ public:
             return std::unexpected(GatewayConnectError{
                 kStageConnecting, "connect_refused", "connect refused"});
         }
-        // 连接即回 Hello——插队头,保证无论测试预置了什么脚本,Hello 总是
-        // 客户端连接后读到的第一条(官方语义如此)。字段用官方名
+        // 连接即回 Hello——插在当前游标处(不是队头),保证无论测试预置了
+        // 什么脚本、第几次重连,Hello 总是客户端连接后读到的第一条(官方
+        // 语义如此;插队头会让重连脚本因游标不移位而错读)。字段用官方名
         // heartbeat_interval(A01;event-emit 页示例,2026-09-17 核对)。
         shared_->incoming.insert(
-            shared_->incoming.begin(),
+            shared_->incoming.begin() + static_cast<std::ptrdiff_t>(
+                                            std::min(shared_->cursor,
+                                                     shared_->incoming.size())),
             R"({"op":10,"d":{"heartbeat_interval":30000}})");
         return {};
     }
@@ -102,11 +105,32 @@ private:
 struct ScriptHttp {
     mutable std::mutex mutex;
     std::vector<std::pair<std::string, std::string>> calls;  // url/body
+    // A08 观测:每笔请求的 cancel 指针是否在(适配器的停止章)。
+    std::vector<bool> cancel_stamped;
     std::string access_token = "TT1";
     std::string gateway_url = "wss://fake-gw.test/ws";
+    // 阻塞开关:置位后 token 请求卡到 cancel 旗被置(停机期限判据),
+    // 5s 兜底防挂死。
+    bool block_token_until_cancelled = false;
 
     QqHttpFunc Func() {
         return [this](const QqHttpRequest& request) -> std::expected<QqHttpResponse, std::string> {
+            // 停止章观测在入口记(阻塞前)——A08 案里 token 请求卡到取消,
+            // 若等返回再记,断言时刻观测账是空的。
+            {
+                const std::lock_guard<std::mutex> lock(mutex);
+                cancel_stamped.push_back(request.cancel != nullptr);
+            }
+            if (block_token_until_cancelled &&
+                request.url.find("/app/getAppAccessToken") != std::string::npos &&
+                request.cancel != nullptr) {
+                const auto deadline = std::chrono::steady_clock::now() +
+                                      std::chrono::milliseconds(5'000);
+                while (!request.cancel->load() &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
             const std::lock_guard<std::mutex> lock(mutex);
             calls.emplace_back(request.url, request.body);
             if (request.url.find("/app/getAppAccessToken") != std::string::npos) {
@@ -667,6 +691,170 @@ TEST_CASE("qq_adapter: Health 响应带真实 connected 与 last_error(修三处
         }
     }
     REQUIRE(saw_health);
+}
+
+// ---------------------------------------------------------------------------
+// A04/A05/A08 第二波:落盘游标回执、msg_seq 穿桥、停止章、未建模事件账
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_adapter: A04 spool 落盘失败——PersistFailed 断线留根因,Resume 补发不丢信") {
+    AdapterHarness harness("spool_fault");
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    REQUIRE(WaitQuiet([&harness]() { return harness.adapter->gateway_thread_running(); }));
+
+    // 磁盘满注入:READY 后的来信落不了盘。
+    harness.adapter->SetSpoolAppendFaultForTest(true);
+    ScriptGatewayTransport::Push(
+        harness.gateway,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-sf","user":{"id":"bot-1"}}})");
+    ScriptGatewayTransport::Push(
+        harness.gateway, C2cPayload("OPENF", "ROBOT1.0_mf1", "must not be lost"));
+    // Fatal 留痕(spool_write_failed)——宿主 Degraded 可见。
+    REQUIRE_FALSE(WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
+                       return frame.value("method", "") == "channel.fatal" &&
+                              frame.value("params", nlohmann::json::object())
+                                  .value("reason", "") == "spool_write_failed";
+                   })
+                      .empty());
+    // 连接按可恢复故障断线:根因 = event_persist_failed(durable 游标没
+    // 推进,不跨过失败事件)。
+    REQUIRE(WaitQuiet([&harness]() {
+        const ConnectionSnapshot snapshot = harness.adapter->ConnectionState();
+        return snapshot.last_failure.has_value() &&
+               snapshot.last_failure->error_code == "event_persist_failed";
+    }));
+
+    // 磁盘恢复:第二轮 Resume 补发同一事件——Inbound 恰一次,不丢信。
+    harness.adapter->SetSpoolAppendFaultForTest(false);
+    ScriptGatewayTransport::Push(harness.gateway,
+                                 R"({"op":0,"s":2,"t":"RESUMED","d":{}})");
+    ScriptGatewayTransport::Push(
+        harness.gateway, C2cPayload("OPENF", "ROBOT1.0_mf1", "must not be lost"));
+    const auto frames = WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
+        return frame.value("method", "") == "channel.inbound" &&
+               frame.value("params", nlohmann::json::object())
+                   .value("provider_event_id", "")
+                   .find("ROBOT1.0_mf1") != std::string::npos;
+    });
+    int inbound_count = 0;
+    for (const auto& frame : frames) {
+        if (frame.value("method", "") == "channel.inbound" &&
+            frame.value("params", nlohmann::json::object())
+                    .value("provider_event_id", "")
+                    .find("ROBOT1.0_mf1") != std::string::npos) {
+            ++inbound_count;
+        }
+    }
+    CHECK(inbound_count == 1);  // 失败轮没报,补发轮恰报一次
+}
+
+TEST_CASE("qq_adapter: A05 msg_seq 穿桥直达——宿主冻结号原样进平台载荷") {
+    AdapterHarness harness("msg_seq_bridge");
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    harness.HostWrite(channel::BuildRequestJson(
+        81, channel::BridgeMethod::Send,
+        nlohmann::json{
+            {"conversation", nlohmann::json{{"kind", "direct"}, {"id", "OPENSEQ"}}},
+            {"parts", nlohmann::json::array({nlohmann::json{{"type", "text"},
+                                                            {"text", "frozen seq"}}})},
+            {"reply_to_message_id", "ROBOT1.0_m7"},
+            {"client_id", "out-seq7"},
+            {"msg_seq", 7}}));
+    REQUIRE_FALSE(WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
+                      return frame.contains("id") && frame.at("id") == 81 &&
+                             frame.contains("result");
+                  })
+                      .empty());
+    std::string send_body;
+    {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        for (const auto& [url, body] : harness.http.calls) {
+            if (url.find("/v2/users/OPENSEQ/messages") != std::string::npos) {
+                send_body = body;
+            }
+        }
+    }
+    REQUIRE_FALSE(send_body.empty());
+    const auto payload = nlohmann::json::parse(send_body);
+    CHECK(payload.at("msg_seq") == 7);  // 宿主冻结号,适配器不再重选号
+    CHECK(payload.at("msg_id") == "ROBOT1.0_m7");
+}
+
+TEST_CASE("qq_adapter: A04 未建模 Dispatch 有明确终结记录——Health 投影计数") {
+    AdapterHarness harness("unsupported_events");
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    REQUIRE(WaitQuiet([&harness]() { return harness.adapter->gateway_thread_running(); }));
+    ScriptGatewayTransport::Push(
+        harness.gateway,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-ue","user":{"id":"bot-1"}}})");
+    ScriptGatewayTransport::Push(harness.gateway,
+                                 R"({"op":0,"s":2,"t":"FRIEND_ADD","d":{"openid":"O9"}})");
+    REQUIRE(WaitQuiet(
+        [&harness]() { return harness.adapter->unsupported_dispatch_count() == 1; }));
+    harness.HostWrite(
+        channel::BuildRequestJson(10, channel::BridgeMethod::Health, nlohmann::json{}));
+    bool saw_health = false;
+    for (const auto& frame :
+         WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
+             return frame.contains("id") && frame.at("id") == 10 && frame.contains("result");
+         })) {
+        if (frame.contains("id") && frame.at("id") == 10 && frame.contains("result")) {
+            saw_health = true;
+            CHECK(frame.at("result").at("unsupported_events") == 1);
+        }
+    }
+    REQUIRE(saw_health);
+}
+
+TEST_CASE("qq_adapter: A08 停止章——出站 HTTP 全带 cancel;停机期限内收口") {
+    AdapterHarness harness("stop_cancel");
+    harness.http.block_token_until_cancelled = true;  // 先置位再起线程
+    harness.adapter = std::make_unique<QqBotAdapter>(harness.MakeAdapterOptions());
+    HostInitialize(harness);
+    const auto start = channel::EncodeFrame(
+        channel::BuildRequestJson(2, channel::BridgeMethod::Start,
+                                  nlohmann::json{{"transport", "websocket"}}));
+    harness.adapter->WriteToSidecar(start->data(), start->size());
+    REQUIRE(WaitQuiet([&harness]() { return harness.adapter->gateway_thread_running(); }));
+    // 等第一笔 token 请求真出门(线程起跑与发请求之间有窗口,不能拿
+    // 线程存活冒充请求已发)。
+    REQUIRE(WaitQuiet([&harness]() {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        return !harness.http.cancel_stamped.empty();
+    }));
+    // 出门过的请求都盖了停止章(cancel 指针非空;gateway url 请求还卡在
+    // token 后面,不在此刻的账上)。
+    {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        for (const bool stamped : harness.http.cancel_stamped) {
+            CHECK(stamped);
+        }
+    }
+    // 阻塞中的 token 请求:Stop 后停止旗点亮 → HTTP 掐流 → 线程有界收口
+    //(StopGatewayLocked 在宿主线程 join,凭的就是取消章而不是干等)。
+    const std::int64_t stop_at = platform::WallClockNowMs();
+    const auto stop = channel::EncodeFrame(
+        channel::BuildRequestJson(3, channel::BridgeMethod::Stop, nlohmann::json{}));
+    harness.adapter->WriteToSidecar(stop->data(), stop->size());
+    REQUIRE(WaitQuiet([&harness]() { return !harness.adapter->gateway_thread_running(); }));
+    const std::int64_t stopped_at = platform::WallClockNowMs();
+    // 总停机期限(文档口径 5s;HTTP 硬墙 30s——不靠硬墙,靠取消章)。
+    CHECK(stopped_at - stop_at < 5'000);
 }
 
 }  // namespace lubancode::channel::qq

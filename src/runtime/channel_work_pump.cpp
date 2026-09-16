@@ -449,7 +449,12 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                         // Q5 渠道任务段:主动消息额度受限(§11.3 40034100
                         // 一族)——不硬发不谎报:挂起等互动,下一封来信进
                         // 回复窗后锚定补投。attempt 帽不烧(政策性等待,
-                        // 不是发送失败)。
+                        // 不是发送失败)。补投会换锚(主动→被动):旧发送
+                        // 身份先裁决(A06——平台已拒,账里留迹),新身份
+                        // 待新锚分配,不偷换同一 delivery。
+                        (void)options_.outbox->RetireChannelSendIdentity(
+                            outcome.client_delivery_id, "active_quota_rejected_await_interaction",
+                            now_ms);
                         await_interaction_.insert(outcome.client_delivery_id);
                         break;
                     }
@@ -470,6 +475,11 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                         // msg_id 冒充被动回复)、不谎报(不记成功/终态失败),
                         // 挂起待下次互动补投(§11.3)。普通聊天回复维持 Q2
                         // 规矩:窗口过期不转主动消息,终态。
+                        // A06 改锚补投的裁决:过期锚上的旧尝试先裁决(平台
+                        // 已明确拒绝该锚),新锚进窗后分配可追溯的新身份。
+                        (void)options_.outbox->RetireChannelSendIdentity(
+                            outcome.client_delivery_id, "reply_window_expired_reanchor",
+                            now_ms);
                         await_interaction_.insert(outcome.client_delivery_id);
                         break;
                     }
@@ -1193,11 +1203,37 @@ bool ChannelWorkPump::DriveApprovalFlow(std::int64_t now_ms) {
         }
     }
     for (const ApprovalCard& card : send_now) {
+        // 发送身份(A05):与正文段/提示/附件共用 outbox 持久分配器——
+        // 同一来信下所有回复各占一号,不因撞号把去重回执错挂。重试(窗内
+        // 退避)幂等回旧身份;锚不变,无冲突路径。
+        std::uint32_t card_msg_seq = 0;
+        std::string card_anchor = card.reply_to_message_id;
+        {
+            const std::string payload_sha =
+                platform::Sha256Hex(card.markdown + card.keyboard.dump());
+            const auto assigned = options_.outbox->AssignChannelSendIdentity(
+                card.delivery_id, card.account_id, card.reply_to_message_id, payload_sha,
+                now_ms);
+            if (!assigned.ok) {
+                // 账写不进:卡片这轮不投(退避重试),不冒充已问过用户。
+                std::lock_guard<std::mutex> lock(approval_cards_mutex_);
+                for (ApprovalCard& entry : approval_cards_) {
+                    if (entry.delivery_id == card.delivery_id) {
+                        entry.inflight = false;
+                        entry.retry_at_ms = now_ms + options_.send_retry_backoff_ms;
+                    }
+                }
+                continue;
+            }
+            card_anchor = assigned.identity.anchor_msg_id;
+            card_msg_seq = assigned.identity.msg_seq;
+        }
         channel::ChannelManager::ChannelSendRequest send;
         send.conversation_id = card.conversation_id;
         send.text = card.markdown;
-        send.reply_to_message_id = card.reply_to_message_id;
+        send.reply_to_message_id = card_anchor;
         send.client_delivery_id = card.delivery_id;
+        send.msg_seq = card_msg_seq;
         send.keyboard = card.keyboard;
         const auto error =
             options_.manager->SendReply(card.channel_id, card.account_id, send);
@@ -1642,22 +1678,32 @@ bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
                                              item.delivery_id)) {
             continue;
         }
-        // Q5 渠道任务段的发送锚(§11.3):会话绑定恒定;被动回复锚按"该
-        // 会话最近一来信是否在窗内"现取——窗外不带锚(主动消息),不拿
-        // 陈旧 msg_id 冒充被动回复。挂起等互动的段:窗内锚出现才发(补投),
-        // 否则本 tick 跳过(不硬发)。
-        std::string send_anchor = item.target_reply_to_message_id;
-        const bool is_chanjob = item.source_ref.rfind("chanjob:", 0) == 0;
-        if (is_chanjob) {
-            const auto fresh = FreshInboundAnchor(item, now_ms);
-            if (!fresh.has_value()) {
-                if (await_interaction_.count(item.delivery_id) > 0) {
-                    continue;  // 挂起等互动:没新来信不硬发
+        // 发送身份裁决(A05/A06):live 身份在账上 = 已冻结——结果未知的
+        // 重试、重启后的重投恒复用同一 (锚, msg_seq),不再选锚。没有
+        // live 身份才首次选锚并持久分配(账行 PowerLoss 先落,再上网络)。
+        const auto live_identity =
+            options_.outbox->FindLiveChannelSendIdentity(item.delivery_id);
+        std::string send_anchor;
+        std::uint32_t send_msg_seq = 0;
+        if (live_identity.has_value()) {
+            send_anchor = live_identity->anchor_msg_id;
+            send_msg_seq = live_identity->msg_seq;
+        } else {
+            // 身份未冻结才选锚(A06):直聊段用入箱锚;chanjob 按"该会话
+            // 最近一来信是否在窗内"现取,窗外 = 主动消息(不带陈旧锚)。
+            send_anchor = item.target_reply_to_message_id;
+            const bool is_chanjob = item.source_ref.rfind("chanjob:", 0) == 0;
+            if (is_chanjob) {
+                const auto fresh = FreshInboundAnchor(item, now_ms);
+                if (!fresh.has_value()) {
+                    if (await_interaction_.count(item.delivery_id) > 0) {
+                        continue;  // 挂起等互动:没新来信不硬发
+                    }
+                    send_anchor.clear();  // 主动消息(不带陈旧锚)
+                } else {
+                    send_anchor = *fresh;
+                    await_interaction_.erase(item.delivery_id);  // 补投解锁
                 }
-                send_anchor.clear();  // 主动消息(不带陈旧锚)
-            } else {
-                send_anchor = *fresh;
-                await_interaction_.erase(item.delivery_id);  // 补投解锁
             }
         }
         // 重试帽:attempts 由 item.attempt 行推进,帽尽即终态失败。
@@ -1671,6 +1717,31 @@ bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
                                                      now_ms);
             continue;
         }
+        if (!live_identity.has_value()) {
+            // 首次网络发送前持久冻结发送身份(A05):同 (账号,锚) 跨回复
+            // 共用发号器——配对提示/任务回执/审批卡/正文分段/附件不撞号;
+            // 重启后发号从账重放,不归零。
+            const auto assigned = options_.outbox->AssignChannelSendIdentity(
+                item.delivery_id, item.target_account_id, send_anchor, item.reply_sha256,
+                now_ms);
+            if (!assigned.ok) {
+                if (assigned.error_code == "identity_anchor_conflict") {
+                    // live 身份锚不一致(挂起补投的旧被动身份未裁决):先
+                    // 裁决旧尝试(账里留迹),下一 tick 再分配新身份——
+                    // 不偷换同一 delivery 的在途身份。
+                    (void)options_.outbox->RetireChannelSendIdentity(
+                        item.delivery_id, "anchor_superseded_for_reanchor", now_ms);
+                } else if (assigned.error_code == "identity_payload_mismatch") {
+                    (void)options_.outbox->MarkChannelFailed(
+                        item.delivery_id, "identity_payload_mismatch", now_ms);
+                } else {
+                    return false;  // 账写不进:停泵(outbox 统一闸接管)
+                }
+                continue;
+            }
+            send_anchor = assigned.identity.anchor_msg_id;
+            send_msg_seq = assigned.identity.msg_seq;
+        }
         // 发出前记尝试(§七:先账后网络)。
         if (!options_.outbox->RecordAttempt(item.delivery_id, now_ms)) {
             continue;
@@ -1680,6 +1751,7 @@ bool ChannelWorkPump::DriveChannelDeliveries(std::int64_t now_ms) {
         send.text = text;
         send.reply_to_message_id = send_anchor;
         send.client_delivery_id = item.delivery_id;
+        send.msg_seq = send_msg_seq;
         // Q4:带附件的段(末段)把冻结引用递给渠道(适配器读原件上传)。
         if (!item.attachment_local_path.empty()) {
             channel::ChannelManager::OutboundAttachment attachment;

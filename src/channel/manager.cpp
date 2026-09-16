@@ -1084,6 +1084,10 @@ std::optional<std::string> ChannelManager::SendReply(const std::string& channel_
     if (!request.reply_to_message_id.empty()) {
         params["reply_to_message_id"] = request.reply_to_message_id;
     }
+    // A05:持久分配的 msg_seq 穿桥直达(适配器按权威值发 QQ,不重选号)。
+    if (request.msg_seq > 0) {
+        params["msg_seq"] = request.msg_seq;
+    }
     // Q6 审批卡片:keyboard 对象随发(适配器按 msg_type=2 markdown+键盘)。
     // 旧适配器不认这个键会按 unknown field 拒——调用方按失败收口(fail
     // closed),不静默降级纯文本。

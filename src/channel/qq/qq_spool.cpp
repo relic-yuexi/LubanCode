@@ -53,6 +53,9 @@ std::expected<QqSpoolStore, std::string> QqSpoolStore::Open(
 
 std::optional<std::string> QqSpoolStore::AppendPending(const std::string& delivery_id,
                                                        const nlohmann::json& event_json) {
+    if (append_fault_for_test_.load()) {
+        return "spool write failed: injected disk full (test)";
+    }
     if (!IsValidSpoolDeliveryId(delivery_id)) {
         return "spool delivery id invalid";
     }

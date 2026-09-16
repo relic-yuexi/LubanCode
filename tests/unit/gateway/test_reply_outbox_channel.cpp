@@ -84,7 +84,9 @@ TEST_CASE("渠道入箱:target 字段落账,单段 deliveryId 定式;本地族�
     REQUIRE(item->target_account_id == "main");
     REQUIRE(item->target_conversation_id == "dm-owner");
     REQUIRE(item->target_reply_to_message_id == "m-in-1");
-    REQUIRE(item->target_msg_seq == 1);
+    // A05:msg_seq 不再由 ordinal 顶替——入箱时未分配(0),首次网络发送
+    // 前 AssignChannelSendIdentity 持久发号(见身份分配册)。
+    REQUIRE(item->target_msg_seq == 0);
     REQUIRE(item->source_ref == "ingress:qqbot:main:7");
     REQUIRE(item->ordinal == 1);
     REQUIRE(outbox.PendingChannelItems().size() == 1);
@@ -243,6 +245,141 @@ TEST_CASE("Q4 附件入箱:长文末段带附件字段,幂等重入不重写") {
     REQUIRE(single.accepted);
     REQUIRE(single.delivery_ids.size() == 2);
     CHECK_FALSE(outbox.Find(single.delivery_ids[1])->attachment_local_path.empty());
+}
+
+// ---------------------------------------------------------------------------
+// A05/A06:QQ 发送身份的持久分配——同 (账号,锚) 跨回复共用发号器;
+// 冻结幂等;改锚先裁决;重启(重开)发号不归零。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("身份分配:同锚跨 delivery 单调发号;幂等复用;主动消息 seq=0") {
+    OutboxDir dir("identity_alloc");
+    DurableReplyOutbox outbox;
+    REQUIRE(DurableReplyOutbox::Open(&outbox, dir.Paths()).ok);
+    // 同一封来信(m-in-1)下的两枚回复段 + 一枚配对提示——三枚各占一号,
+    // 不因 ordinal 都是 1 而撞号(旧病的判据)。
+    const auto first = outbox.AssignChannelSendIdentity("dl-a", "main", "m-in-1", "sha-a", 1000);
+    REQUIRE(first.ok);
+    CHECK(first.identity.anchor_msg_id == "m-in-1");
+    CHECK(first.identity.msg_seq == 1);
+    const auto second = outbox.AssignChannelSendIdentity("dl-b", "main", "m-in-1", "sha-b", 1100);
+    REQUIRE(second.ok);
+    CHECK(second.identity.msg_seq == 2);
+    const auto third = outbox.AssignChannelSendIdentity("dl-c", "main", "m-in-1", "sha-c", 1200);
+    REQUIRE(third.ok);
+    CHECK(third.identity.msg_seq == 3);
+    // 幂等:同 delivery 同锚 → 旧身份(零新账)。
+    const auto retry = outbox.AssignChannelSendIdentity("dl-a", "main", "m-in-1", "sha-a", 1300);
+    REQUIRE(retry.ok);
+    CHECK(retry.identity.msg_seq == 1);
+    // 同 delivery 换锚 → 冲突(必须先裁决,A06)。
+    const auto conflict = outbox.AssignChannelSendIdentity("dl-a", "main", "m-in-2", "sha-a", 1400);
+    REQUIRE_FALSE(conflict.ok);
+    CHECK(conflict.error_code == "identity_anchor_conflict");
+    // 裁决后新锚 → 新号(旧身份留在账里,可追溯)。
+    REQUIRE(outbox.RetireChannelSendIdentity("dl-a", "reply_window_expired_reanchor", 1500));
+    const auto reanchored =
+        outbox.AssignChannelSendIdentity("dl-a", "main", "m-in-2", "sha-a", 1600);
+    REQUIRE(reanchored.ok);
+    CHECK(reanchored.identity.anchor_msg_id == "m-in-2");
+    CHECK(reanchored.identity.msg_seq == 1);  // 新锚独立计数(m-in-2 的 1 号)
+    // 主动消息(空锚):seq 恒 0,身份可冻结可复用。
+    const auto active = outbox.AssignChannelSendIdentity("dl-act", "main", "", "sha-act", 1700);
+    REQUIRE(active.ok);
+    CHECK(active.identity.msg_seq == 0);
+    const auto active_retry =
+        outbox.AssignChannelSendIdentity("dl-act", "main", "", "sha-act", 1800);
+    REQUIRE(active_retry.ok);
+    CHECK(active_retry.identity.msg_seq == 0);
+    // 账号隔离:另一账号同锚各自从 1 起。
+    const auto other =
+        outbox.AssignChannelSendIdentity("dl-x", "alt", "m-in-1", "sha-x", 1900);
+    REQUIRE(other.ok);
+    CHECK(other.identity.msg_seq == 1);
+    // 同 delivery 同锚但摘要变了 → 账坏明拒(冻结正文不许换)。
+    const auto mismatch =
+        outbox.AssignChannelSendIdentity("dl-b", "main", "m-in-1", "sha-other", 2000);
+    REQUIRE_FALSE(mismatch.ok);
+    CHECK(mismatch.error_code == "identity_payload_mismatch");
+    // 只读投影与 item 视图同步。
+    const auto live = outbox.FindLiveChannelSendIdentity("dl-b");
+    REQUIRE(live.has_value());
+    CHECK(live->msg_seq == 2);
+}
+
+TEST_CASE("身份分配:重开发号从账重放不归零;旧账 ordinal 顶替值折成身份") {
+    OutboxDir dir("identity_reopen");
+    // 先手写一笔旧式账行(升级前格式:targetMsgSeq 由 ordinal 顶替)——
+    // 升级路径的折算判据。
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir.root / "replies", ec);
+        std::ofstream stream(dir.Paths().log_file, std::ios::app);
+        stream << R"({"type":"item.enqueued","schemaVersion":1,"deliveryId":"dl-legacy-item",)"
+                  R"("selectionId":"sel-legacy","deliveryTarget":"channel:qqbot:main:dm-owner",)"
+                  R"("ordinal":1,"replySha256":"sha-legacy","sessionId":"s1","turnId":"turn-l",)"
+                  R"("enqueuedAtMs":900,"targetChannelId":"qqbot","targetAccountId":"main",)"
+                  R"("targetConversationId":"dm-owner","targetReplyToMessageId":"m-in-1",)"
+                  R"("targetMsgSeq":1,"sourceRef":"ingress:qqbot:main:7"})"
+               << "\n";
+    }
+    std::string new_id = "dl-new";
+    {
+        DurableReplyOutbox outbox;
+        REQUIRE(DurableReplyOutbox::Open(&outbox, dir.Paths()).ok);
+        // 开账即折算:旧账 targetMsgSeq=1 已被记为 m-in-1 的 1 号。
+        const auto legacy_live = outbox.FindLiveChannelSendIdentity("dl-legacy-item");
+        REQUIRE(legacy_live.has_value());
+        CHECK(legacy_live->msg_seq == 1);
+        CHECK(legacy_live->anchor_msg_id == "m-in-1");
+        // 新分配从 max(旧账)=1 之上起:2 号,永不与在途旧号相撞。
+        const auto assigned =
+            outbox.AssignChannelSendIdentity(new_id, "main", "m-in-1", "sha-n", 1100);
+        REQUIRE(assigned.ok);
+        CHECK(assigned.identity.msg_seq == 2);
+    }
+    DurableReplyOutbox reopened;
+    REQUIRE(DurableReplyOutbox::Open(&reopened, dir.Paths()).ok);
+    // 显式身份行重放:dl-new 的 2 号仍在(幂等复用,重启不归零)。
+    const auto again =
+        reopened.AssignChannelSendIdentity(new_id, "main", "m-in-1", "sha-n", 2000);
+    REQUIRE(again.ok);
+    CHECK(again.identity.msg_seq == 2);
+    // 下一枚 3 号:发号计数跨重开连续。
+    const auto next =
+        reopened.AssignChannelSendIdentity("dl-next", "main", "m-in-1", "sha-next", 2100);
+    REQUIRE(next.ok);
+    CHECK(next.identity.msg_seq == 3);
+    // PendingChannelItems 视图带上 live 身份(泵读到的恒是冻结值)。
+    const auto items = reopened.PendingChannelItems();
+    bool saw_legacy = false;
+    for (const auto& item : items) {
+        if (item.delivery_id != "dl-legacy-item") {
+            continue;
+        }
+        saw_legacy = true;
+        CHECK(item.target_msg_seq == 1);
+        CHECK(item.target_reply_to_message_id == "m-in-1");
+    }
+    CHECK(saw_legacy);
+    // 裁决后视图归零(下一轮分配换新身份)。
+    REQUIRE(reopened.RetireChannelSendIdentity("dl-legacy-item", "test", 2200));
+    const auto retired = reopened.FindLiveChannelSendIdentity("dl-legacy-item");
+    REQUIRE_FALSE(retired.has_value());
+}
+
+TEST_CASE("身份分配:账写不进 → 不发号(内存计数不动,重试同号)") {
+    OutboxDir dir("identity_broken");
+    DurableReplyOutbox outbox;
+    DurableReplyOutbox::Paths paths = dir.Paths();
+    std::error_code ec;
+    std::filesystem::create_directories(paths.log_file, ec);  // 目录占住账文件
+    REQUIRE(DurableReplyOutbox::Open(&outbox, paths).ok);
+    const auto failed =
+        outbox.AssignChannelSendIdentity("dl-f", "main", "m-in-1", "sha", 1000);
+    REQUIRE_FALSE(failed.ok);
+    CHECK(failed.error_code == "outbox.append_failed");
+    REQUIRE_FALSE(outbox.RetireChannelSendIdentity("dl-f", "test", 1100));
 }
 
 TEST_CASE("Q4 附件入箱:纯附件回复(空正文)也是合法单段") {

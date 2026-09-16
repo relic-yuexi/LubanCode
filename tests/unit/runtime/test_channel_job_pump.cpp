@@ -578,6 +578,87 @@ TEST_CASE("主动额度受限:不硬发不谎报,挂起;下一封来信进窗后
     REQUIRE(anchored == 2);
 }
 
+// ---------------------------------------------------------------------------
+// A06:改锚补投的身份账——旧尝试先裁决(账行留迹),新投递用新锚新号,
+// 同 delivery 两代身份可追溯;被动窗内重试不偷换身份。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A06 改锚补投:旧身份裁决留迹,新身份新号(账行可追溯)") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q5Fixture fixture("reanchor-identity");
+    fixture.scripts = {ToolUseScript("tu-1", "create_reminder",
+                                     CreateOnceInput(fixture.now + 600000)),
+                       TextScript("已设置十分钟后提醒。"),
+                       TextScript("提醒:该喝水了。"),
+                       TextScript("在的,你说。")};
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+
+    fixture.EmitAndIngest(
+        MakeDmAt("in-1", "pe-1", "dm-a", "十分钟后提醒我喝水", "m-1", fixture.now));
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+
+    fixture.sidecar.set_send_script(FakeChannelSidecar::SendScript::RateLimitedFirst);
+    fixture.sidecar.set_rate_limited_first(1);
+    fixture.now = fixture.now + 600000 + 1;  // 到点(来信出窗):首投走主动
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    const auto chanjob_delivery = fixture.ChanjobItem()->delivery_id;
+    // 首投(主动消息):无锚无 seq——身份冻结为 {空锚, 0}。
+    const auto& proactive = fixture.sidecar.sent_messages()[1];
+    REQUIRE(proactive.client_id == chanjob_delivery);
+    CHECK_FALSE(proactive.params.contains("msg_seq"));
+
+    // 新来信进窗 → 旧身份被裁决(限频挂起的裁决行)→ 新身份按新锚发号。
+    fixture.EmitAndIngest(
+        MakeDmAt("in-2", "pe-2", "dm-a", "在吗", "m-2", fixture.now));
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    std::size_t anchored = 0;
+    std::int64_t reanchor_seq = -1;
+    std::int64_t chat_reply_seq = -1;
+    for (const auto& send : fixture.sidecar.sent_messages()) {
+        if (!send.params.contains("msg_seq") ||
+            !send.params.contains("reply_to_message_id") ||
+            send.params["reply_to_message_id"] != "m-2") {
+            continue;
+        }
+        const std::int64_t seq = send.params["msg_seq"].get<std::int64_t>();
+        if (send.client_id == chanjob_delivery) {
+            anchored++;
+            reanchor_seq = seq;
+        } else {
+            chat_reply_seq = seq;  // 同信的聊天回复(in-2 的应答)
+        }
+    }
+    REQUIRE(anchored == 1);
+    // 补投与新来信的聊天回复共用同一发号器:各占一号,不撞号(值是 1/2,
+    // 谁先谁后由选择排序定,不硬钉)。
+    CHECK(reanchor_seq >= 1);
+    CHECK(chat_reply_seq >= 1);
+    CHECK(reanchor_seq != chat_reply_seq);
+    // 账行可追溯:同 delivery 留有两笔分配 + 一笔裁决(原因带限频挂起)。
+    std::ifstream journal(fixture.paths.outbox_log);
+    std::string line;
+    int assigned_lines = 0;
+    bool retired_seen = false;
+    while (std::getline(journal, line)) {
+        if (line.find("\"msgseq.assigned\"") != std::string::npos &&
+            line.find(chanjob_delivery) != std::string::npos) {
+            ++assigned_lines;
+        }
+        if (line.find("\"msgseq.retired\"") != std::string::npos &&
+            line.find(chanjob_delivery) != std::string::npos &&
+            line.find("active_quota_rejected_await_interaction") != std::string::npos) {
+            retired_seen = true;
+        }
+    }
+    CHECK(assigned_lines == 2);  // 主动一次 + 锚定补投一次
+    CHECK(retired_seen);         // 改锚前旧尝试已裁决
+}
+
 TEST_CASE("回复窗口过期分型:挂起不转终态失败;普通聊天回复维持 Q2 终态规矩") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Q5Fixture fixture("window-expired");
