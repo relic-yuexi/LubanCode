@@ -27,6 +27,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "channel/qq/qq_socket.hpp"
 
@@ -38,8 +39,10 @@ namespace lubancode::channel::qq {
 std::string DetectSystemCaPemPath();
 
 // TLS 稳定错误码(连接状态快照/日志用,见 Windows 信任根单 §四):
-//   tls_trust_store_empty       信任根为空(没给锚也导不出系统根)
-//   tls_trust_store_load_failed 信任根加载/解析失败(Windows 店打不开等)
+//   tls_trust_store_empty       信任根为空(没给锚也导不出系统根——唯一报
+//                               empty 的情形;非空但解析失败不报这个)
+//   tls_trust_store_load_failed 信任根加载/解析失败(非空输入解析不出可用
+//                               证书;带真实 mbedTLS 负码,不折叠成 -1)
 //   tls_cert_expired            证书过期/未生效
 //   tls_cert_hostname_mismatch  主机名不符
 //   tls_cert_not_trusted        链不被信任
@@ -69,16 +72,49 @@ enum class TlsTrustMode {
     SystemDefault,
 };
 
+// 信任根加载报告(证书部分解析误判修复单 §三:替换"count/-1"折叠)。
+// mbedTLS v3.6.3 批量 parse 合同:0 = 全部成功;正数 = 未解析成功的证书
+// 数量(已成功项保留在链上);负数 = 错误(含内存错误,全败)。
+//   - source 参与策略:显式 CA 严格(任何失败张都拒);系统集合部分兼容
+//     (rc>0 且成功链非空时保留成功链,警告失败张,继续正常证书验证)。
+//   - exported_count 是导出/输入侧条目数;parsed_count 是 mbedTLS 成功
+//     解析张数。两者不是一回事——157 导出 99 可解析时,启动日志必须报
+//     两个数,不能拿导出数冒充可用数。
+struct TrustLoadReport {
+    std::string source;      // explicit | windows_system_store | system_pem | none
+    bool input_empty = true;  // 输入 PEM 是否为空(唯一可报 trust_store_empty 的情形)
+    int exported_count = 0;   // 输入侧 PEM 条目数(评估侧 = 链上张数;Windows 导出侧另计)
+    int unique_count = 0;     // 按证书 SHA-256 指纹去重后的张数
+    int parsed_count = 0;     // mbedTLS 成功解析张数(成功链)
+    int failed_count = 0;     // 解析失败张数(批量 rc>0 的值)
+    int parse_rc = 0;         // mbedtls_x509_crt_parse 原始返回值(合同见上)
+    int first_negative_rc = 0;  // 首个负错误码(rc<0 时即 parse_rc;rc>0 时为有界逐证诊断的首个负码)
+    bool ok_to_continue = false;  // 是否可作为信任锚继续(策略判定见上)
+    bool partial = false;         // 部分成功(成功链非空且有失败张;仅系统集合可 ok)
+    std::string error;            // 致命错(不可继续时非空;含真实负码,不折叠成 -1)
+    std::string warning;          // 部分成功警告(可继续且 partial 时非空)
+    // 有界坏证诊断(SHA-256 指纹 + 负错误码;Windows 装配路径再补来源店)。
+    // 限量(不输出 PEM/主体/整店清单),不反复全店扫描——只在装配预检走一次。
+    std::vector<std::string> bad_cert_notes;
+};
+
+// 统一信任加载策略(证书部分解析误判修复单 §三):PEM 拼串 -> 结构化报告。
+// 装配预检(ResolveChannelTrustRoots)与测试用;TlsClientStream::Connect 的
+// 连接路径用同一张判定表(见 .cpp 的 VerdictOfParse),不两套判断走岔。
+TrustLoadReport EvaluateTrustLoad(const std::string& source, const std::string& ca_pem);
+
 // 渠道连接信任根的统一解析(wiring 装配时调一次;结果透给 transport
 // factory)。explicit_ca_pem 非空 = 调用方全权指定信任锚(测试位),不回退
-// 平台来源;无效(解析出 0 张证书)记入 error,由调用方明报,不静默退。
+// 平台来源;无效(含坏证——显式锚严格,部分成功也拒)记入 error,由调用方
+// 明报,不静默退。系统集合部分兼容:坏证跳过、成功链保留,warning 明示。
 //   source 稳定名:explicit | windows_system_store | system_pem | none
 struct ResolvedTrustStore {
     std::string ca_pem;         // 喂 mbedTLS 的 PEM 拼串(空 = 无可用信任根)
     std::string source;
-    int certificate_count = 0;  // 解析出的证书张数
+    int certificate_count = 0;  // 可解析证书张数(= load.parsed_count)
     std::string error;          // 非空 = 加载/解析失败(明报,不静默退)
     std::string detail;         // 人话(路径/店名,不含敏感内容)
+    TrustLoadReport load;       // 结构化加载报告(§三:导出/去重/解析/失败分账)
 };
 // detect_pem_path 是探测 seam(测试注入;空 = 用 DetectSystemCaPemPath)。
 ResolvedTrustStore ResolveChannelTrustRoots(const std::string& explicit_ca_pem,

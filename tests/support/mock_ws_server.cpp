@@ -423,7 +423,8 @@ void MockWsServer::Connection::Drop() {
 // 自签证书
 // ---------------------------------------------------------------------------
 
-std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
+std::expected<MockTlsCert, std::string> GenerateSelfSignedCert(
+    const MockTlsCertOptions& options) {
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context drbg;
     mbedtls_pk_context key;
@@ -462,13 +463,15 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     }
     mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
     mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
-    // CN 直接用回环地址:客户端按 host(127.0.0.1)做名字验证,证书无 SAN
-    // 时 mbedTLS 回落 CN 匹配——回环测试最省事的锚。
-    rc = mbedtls_x509write_crt_set_subject_name(&crt, "CN=127.0.0.1");
+    // CN 默认回环地址:客户端按 host(127.0.0.1)做名字验证,证书无 SAN
+    // 时 mbedTLS 回落 CN 匹配——回环测试最省事的锚。参数化后可造错主机
+    // 名靶子(§六)。
+    const std::string subject = std::string("CN=") + options.subject_cn;
+    rc = mbedtls_x509write_crt_set_subject_name(&crt, subject.c_str());
     if (rc != 0) {
         return fail("subject name", rc);
     }
-    rc = mbedtls_x509write_crt_set_issuer_name(&crt, "CN=127.0.0.1");
+    rc = mbedtls_x509write_crt_set_issuer_name(&crt, subject.c_str());
     if (rc != 0) {
         return fail("issuer name", rc);
     }
@@ -484,7 +487,7 @@ std::expected<MockTlsCert, std::string> GenerateSelfSignedCert() {
     if (rc != 0) {
         return fail("serial", rc);
     }
-    rc = mbedtls_x509write_crt_set_validity(&crt, "20240101000000", "20440101000000");
+    rc = mbedtls_x509write_crt_set_validity(&crt, options.not_before, options.not_after);
     if (rc != 0) {
         return fail("validity", rc);
     }

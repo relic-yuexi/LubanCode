@@ -8,6 +8,45 @@ namespace lubancode::channel::qq {
 
 namespace {
 
+// 诊断头白名单(§四:trace ID / Retry-After)。平台文档未钉死 trace 头名,
+// 常见几种全收,值长掐 128(诊断够用,长值多半不是 trace)。
+constexpr const char* kDiagnosticHeaderWhitelist[] = {
+    "retry-after", "x-trace-id", "trace-id", "x-traceid", "x-request-id",
+    "x-tencent-traceid",
+};
+constexpr std::size_t kMaxDiagnosticHeaders = 4;
+constexpr std::size_t kDiagnosticHeaderValueCap = 128;
+
+std::string ToLowerName(std::string name) {
+    for (char& c : name) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return name;
+}
+
+// 响应头表 -> 白名单诊断投影(限条数与值长)。找不到给空表——诊断头是
+// 可选增强,绝不因缺失改变成败判定。
+std::vector<std::pair<std::string, std::string>> ProjectDiagnosticHeaders(
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& [name, value] : headers) {
+        if (out.size() >= kMaxDiagnosticHeaders) {
+            break;
+        }
+        const std::string lower = ToLowerName(name);
+        for (const char* allowed : kDiagnosticHeaderWhitelist) {
+            if (lower == allowed) {
+                std::string capped = value.substr(0, kDiagnosticHeaderValueCap);
+                out.emplace_back(lower, std::move(capped));
+                break;
+            }
+        }
+    }
+    return out;
+}
+
 // 共用底座:net::PerformFullHttpRequest 一笔适配;分型文案不带请求内容
 //(头里是 token,预签名 url 在 query)。
 QqHttpFunc MakeHttpFuncWithLimits(net::FullHttpLimits limits) {
@@ -40,6 +79,7 @@ QqHttpFunc MakeHttpFuncWithLimits(net::FullHttpLimits limits) {
         QqHttpResponse out;
         out.status = response->status;
         out.body = std::move(response->body);
+        out.diagnostic_headers = ProjectDiagnosticHeaders(response->headers);
         return out;
     };
 }

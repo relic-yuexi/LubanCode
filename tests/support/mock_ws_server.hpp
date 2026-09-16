@@ -78,7 +78,16 @@ struct MockTlsCert {
     std::string ca_pem;       // 自签证书(同时当 CA 与服务端叶子证书)
     std::string private_pem;  // 对应私钥 PEM
 };
-std::expected<MockTlsCert, std::string> GenerateSelfSignedCert();
+
+// 证书生成参数(证书部分解析误判修复单 §六:错主机名/过期案要可控
+// CN 与有效期)。全默认 = 原有行为,老调用零变化。
+struct MockTlsCertOptions {
+    const char* subject_cn = "127.0.0.1";    // 证书 CN(主机名验证的靶子)
+    const char* not_before = "20240101000000";  // 生效(可设过去/未来)
+    const char* not_after = "20440101000000";   // 过期(可设过去造过期证)
+};
+std::expected<MockTlsCert, std::string> GenerateSelfSignedCert(
+    const MockTlsCertOptions& options = {});
 
 // TLS 服务端:监听 + accept + mbedTLS 服务端握手 + 帧收发(与 MockWsServer
 // 的 Connection 同一形状的收发面,后续帧层复用明文的实现——TLS 只换字节层)。

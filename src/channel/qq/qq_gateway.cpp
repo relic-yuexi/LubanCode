@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <random>
 #include <thread>
 #include <utility>
@@ -109,6 +110,102 @@ std::string ReadErrorCode(const WsError& error) {
 
 }  // namespace
 
+GatewayHttpFailureClass ClassifyGatewayHttpFailure(
+    int status, const std::string& body,
+    const std::vector<std::pair<std::string, std::string>>& diagnostic_headers) {
+    GatewayHttpFailureClass out;
+    // 有界 JSON 读平台 code 与 trace_id(§四)。code 宽松收数字/数字串;
+    // message 不透传——平台错误文案可能回显请求参数/敏感值。
+    const auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+    const bool is_json = !parsed.is_discarded() && parsed.is_object();
+    std::string platform_code;
+    std::string trace_id;
+    if (is_json) {
+        if (parsed.contains("code")) {
+            const auto& code = parsed.at("code");
+            if (code.is_number_integer()) {
+                platform_code = std::to_string(code.get<std::int64_t>());
+            } else if (code.is_string()) {
+                platform_code = code.get<std::string>();
+            }
+        }
+        if (parsed.contains("trace_id") && parsed.at("trace_id").is_string()) {
+            trace_id = parsed.at("trace_id").get<std::string>();
+        }
+    }
+    // Retry-After:只认纯数字秒(HTTP-date 不解析)。头名大小写不敏感
+    //(HTTP 头名本就不分大小写;生产链路 MakeHttpFunc 投影时已小写化,
+    // 这里自身再归一,直调/假件给原始大小写也认得)。
+    for (const auto& [name, value] : diagnostic_headers) {
+        std::string lower_name = name;
+        for (char& c : lower_name) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (lower_name == "retry-after" && out.retry_after_ms == 0) {
+            if (!value.empty() &&
+                value.find_first_not_of("0123456789") == std::string::npos) {
+                const long long seconds = std::strtoll(value.c_str(), nullptr, 10);
+                if (seconds > 0) {
+                    out.retry_after_ms = seconds * 1000;
+                }
+            }
+        } else if (trace_id.empty() && lower_name.find("trace") != std::string::npos &&
+                   !value.empty()) {
+            trace_id = value;  // body 没给 trace_id 时用白名单头兜底
+        }
+    }
+    if (trace_id.size() > 128) {
+        trace_id = trace_id.substr(0, 128) + "...";
+    }
+    const std::string trace_note =
+        trace_id.empty() ? std::string() : " trace=" + trace_id;
+    const std::string code_note =
+        platform_code.empty() ? std::string() : " 平台code=" + platform_code;
+
+    if (status == 401) {
+        out.code = "gateway_url_unauthorized";
+        out.detail = "HTTP 401:鉴权失效(token 无效或过期)" + code_note + trace_note;
+        return out;
+    }
+    if (status == 403) {
+        out.code = "gateway_url_forbidden";
+        out.detail = "HTTP 403:权限/配置拒绝" + code_note + trace_note;
+        return out;
+    }
+    if (status == 429) {
+        out.code = "gateway_url_rate_limited";
+        out.detail = "HTTP 429:限流" + code_note + trace_note +
+                     (out.retry_after_ms > 0
+                          ? " retry_after=" + std::to_string(out.retry_after_ms / 1000) + "s"
+                          : std::string(" (无 Retry-After,走本地阶梯)"));
+        return out;
+    }
+    if (status >= 500) {
+        out.code = "gateway_url_server_error";
+        out.detail = "HTTP " + std::to_string(status) + ":服务故障" + code_note + trace_note;
+        return out;
+    }
+    if (status == 400) {
+        if (is_json && !platform_code.empty()) {
+            out.code = "gateway_url_bad_request";
+            out.detail = "HTTP 400:请求被平台拒绝" + code_note + trace_note +
+                         "(未知平台 code,低频重试;不重置密钥)";
+            return out;
+        }
+        out.code = is_json ? "gateway_url_bad_request" : "gateway_url_bad_response";
+        out.detail = is_json ? "HTTP 400:JSON 无平台 code" + trace_note
+                             : "HTTP 400:非 JSON 响应" + trace_note;
+        return out;
+    }
+    // 其余 4xx:不猜原因,只报事实;不把所有 4xx 当永久失败(§四)。
+    out.code = "gateway_url_http_failed";
+    out.detail = "HTTP " + std::to_string(status) + (is_json ? ":JSON" : ":非 JSON") +
+                 code_note + trace_note;
+    return out;
+}
+
 std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
     std::string ca_pem, TlsTrustMode trust_mode) {
     return [ca_pem = std::move(ca_pem), trust_mode]() -> std::unique_ptr<IGatewayTransport> {
@@ -162,7 +259,8 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
     while (!stop->load()) {
         bool session_invalidated = false;
         state_.store(State::Connecting);
-        const bool stable = RunOneConnection(stop, &session_invalidated);
+        const RunOutcome outcome =
+            RunOneConnection(stop, &session_invalidated, /*attempt_number=*/attempt + 1);
         if (session_invalidated) {
             session_id_.clear();  // op9 不可恢复:下一轮重新 Identify
             GatewayEvent event;
@@ -175,7 +273,7 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
             break;
         }
         // 连接稳定过(收到过 ACK)则退避归零;否则沿阶梯走。
-        if (stable) {
+        if (outcome.stable) {
             attempt = 0;
         } else {
             attempt = std::min(attempt + 1, kBackoffSteps);
@@ -184,11 +282,17 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
         const int base_ms = kBackoffSeconds[attempt == 0 ? 0 : attempt - 1] * 1000;
         std::mt19937 rng(static_cast<unsigned>(options_.now_ms() & 0xFFFFFFFF));
         std::uniform_int_distribution<int> jitter(0, base_ms / 10);  // 10% jitter
-        const int backoff_ms = static_cast<int>(
-            (base_ms + jitter(rng)) * options_.backoff_scale);
+        int backoff_ms = static_cast<int>((base_ms + jitter(rng)) * options_.backoff_scale);
+        // §四:429 服从有效 Retry-After(服务端建议高于阶梯时取建议),但封
+        // max_backoff_ms 上限——退避不被服务端钉死。
+        if (outcome.retry_after_ms > backoff_ms) {
+            backoff_ms = static_cast<int>(
+                std::min<std::int64_t>(outcome.retry_after_ms, options_.max_backoff_ms));
+        }
         state_.store(State::Backoff);
         // 退避排程单独成事件:只带 attempt 与下次尝试时刻,不带"原因"——
-        // 根因归 ConnectFailed/Disconnected,退避不许覆盖它(§三)。
+        // 根因归 ConnectFailed/Disconnected,退避不许覆盖它(§三);attempt
+        // 与 ConnectFailed 的尝试编号同轮(§四)。
         GatewayEvent backoff;
         backoff.kind = GatewayEvent::Kind::BackoffScheduled;
         backoff.attempt = attempt;
@@ -200,34 +304,39 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
     options_.on_event(GatewayEvent{GatewayEvent::Kind::Stopped});
 }
 
-bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
-                                        bool* session_was_invalidated) {
+QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
+    std::atomic<bool>* stop, bool* session_was_invalidated, int attempt_number) {
     auto transport = options_.transport_factory();
     if (!transport) {
-        options_.on_event(GatewayConnectEvent(GatewayEvent::Kind::ConnectFailed,
-                                              kStageConnecting, "no_transport",
-                                              "no transport factory"));
-        return false;
+        GatewayEvent event = GatewayConnectEvent(GatewayEvent::Kind::ConnectFailed,
+                                                 kStageConnecting, "no_transport",
+                                                 "no transport factory");
+        event.attempt = attempt_number;
+        options_.on_event(event);
+        return RunOutcome{};
     }
     in_flight_.store(transport.get());
     const auto clear_in_flight = [this]() { in_flight_.store(nullptr); };
     bool reached_ready = false;  // 区分 ConnectFailed(没到 READY)与 Disconnected
 
     // 一轮失败的收口:发 ConnectFailed(未到 READY)或 Disconnected(在线
-    // 过才断)——两者都带阶段/稳定码/根因 detail(§三:Disconnected 不丢
-    // detail)。
+    // 过才断)——两者都带阶段/稳定码/根因 detail 与尝试编号(§三/§四:
+    // Disconnected 不丢 detail,根因与退避通知关联同次尝试)。
     const auto fail = [&](const std::string& stage, const std::string& code,
                           const std::string& reason) {
         clear_in_flight();
         transport->Close(1000, "session end");
-        options_.on_event(GatewayConnectEvent(reached_ready
-                                                  ? GatewayEvent::Kind::Disconnected
-                                                  : GatewayEvent::Kind::ConnectFailed,
-                                              stage, code, reason));
-        return false;
+        GatewayEvent event = GatewayConnectEvent(reached_ready
+                                                      ? GatewayEvent::Kind::Disconnected
+                                                      : GatewayEvent::Kind::ConnectFailed,
+                                                  stage, code, reason);
+        event.attempt = attempt_number;
+        options_.on_event(event);
+        return RunOutcome{};
     };
     const auto fail_error = [&](const GatewayConnectError& error) {
-        return fail(error.stage, error.error_code, error.detail);
+        const RunOutcome outcome = fail(error.stage, error.error_code, error.detail);
+        return RunOutcome{outcome.stable, error.retry_after_ms};
     };
 
     // 取令牌/查地址在 provider 里(适配器已发 fetching_token/
@@ -484,7 +593,7 @@ bool QqGatewaySession::RunOneConnection(std::atomic<bool>* stop,
     // stop 置位:干净收场(也算"稳定结束",不涨退避)。
     clear_in_flight();
     transport->Close(1000, "stop");
-    return ever_acked;
+    return RunOutcome{ever_acked, /*retry_after_ms=*/0};
 }
 
 }  // namespace lubancode::channel::qq

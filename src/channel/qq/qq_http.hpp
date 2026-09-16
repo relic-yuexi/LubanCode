@@ -25,6 +25,10 @@ struct QqHttpRequest {
 struct QqHttpResponse {
     int status = 0;
     std::string body;
+    // 白名单诊断头投影(网关 400 诊断单 §四):只收平台 trace ID /
+    // Retry-After 这类脱敏诊断值,名字小写、限条数与值长(适配层掐)。
+    // 不把所有头搬进来——头表里可能有敏感物,更不许整表进日志。
+    std::vector<std::pair<std::string, std::string>> diagnostic_headers;
 };
 
 // 一笔完整请求;错误文案是脱敏人话(网络/TLS/超时/取消)。
