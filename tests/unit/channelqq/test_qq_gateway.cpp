@@ -312,15 +312,23 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
     {
         const std::vector<GatewayEvent> events = harness.SnapshotEvents();
         bool saw_resuming_stage = false;
+        bool saw_resumed = false;
+        bool saw_connected = false;
         for (const auto& event : events) {
-            CHECK_FALSE(event.kind == GatewayEvent::Kind::SessionResumed);
-            CHECK_FALSE(event.kind == GatewayEvent::Kind::StageChanged &&
-                        event.stage == kStageConnected);
+            if (event.kind == GatewayEvent::Kind::SessionResumed) {
+                saw_resumed = true;
+            }
+            if (event.kind == GatewayEvent::Kind::StageChanged &&
+                event.stage == kStageConnected) {
+                saw_connected = true;
+            }
             if (event.kind == GatewayEvent::Kind::StageChanged &&
                 event.stage == kStageResuming) {
                 saw_resuming_stage = true;
             }
         }
+        CHECK_FALSE(saw_resumed);
+        CHECK_FALSE(saw_connected);
         CHECK(saw_resuming_stage);
     }
     // RESUMED 到达:恢复完成,connected。
@@ -367,11 +375,19 @@ TEST_CASE("qq_gateway: 只有补发没有 RESUMED——总期限超时,不误报
                e.error_code == "ready_timeout";
     }));
     const std::vector<GatewayEvent> events = harness.SnapshotEvents();
+    bool saw_resumed = false;
+    bool saw_connected = false;
     for (const auto& event : events) {
-        CHECK_FALSE(event.kind == GatewayEvent::Kind::SessionResumed);
-        CHECK_FALSE(event.kind == GatewayEvent::Kind::StageChanged &&
-                    event.stage == kStageConnected);
+        if (event.kind == GatewayEvent::Kind::SessionResumed) {
+            saw_resumed = true;
+        }
+        if (event.kind == GatewayEvent::Kind::StageChanged &&
+            event.stage == kStageConnected) {
+            saw_connected = true;
+        }
     }
+    CHECK_FALSE(saw_resumed);
+    CHECK_FALSE(saw_connected);
 }
 
 // Identify 同款:READY 前来的业务事件照常派发,但鉴权仍只认有效 READY。
