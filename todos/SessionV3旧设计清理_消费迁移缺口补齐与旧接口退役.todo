@@ -199,7 +199,7 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；v3_accept_matrix.py 的 memory-on+compact/resume 手工验收场景未扩展（真实 exe+假后端，归生产验收批）；外来信(Incoming)路 origin=User 的召回走 writer 号池兜底署名（回合号在 RunTurn 内才铸），审计链弱一档非假账；子账侧派工冻结的完整隐藏消息/采用链未做（§4.71/T13-M）
 旧依赖：v2 老路（context.injected/memory.save.requested 走 EventEnvelope）保留给旧档消费，退役归 T02-B；MemoryStore 版本/CAS/遗忘屏障、MemorySystem M0–M5 归 T13-M
 文档：docs/architecture/trajectory-v3-schema.md（记忆续行+statusless 名单）、docs/architecture/memory/flow.md（V3-GAP-03 横幅更新）、docs/development/v3-consumer-inventory.md（C3 行迁讫）
-销项日期：CI 判绿后填
+销项日期：2026-09-16（PR #105，判绿头提交 46636e90，CI rollup conclusion=success——macos-clang 550 册全绿，runs/35065386083；首轮红是测试册把 StreamLines 临时 vector 直接喂 FindRecallMessage 的悬空指针（macos 上显形为 json 306），行集先落具名变量即修，非生产代码缺陷）
 ```
 
 ### T09 / V3-GAP-04：AppServer
