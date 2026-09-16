@@ -54,6 +54,10 @@ namespace lubancode::config {
 struct ModelCatalog;
 }
 
+namespace lubancode::runtime {
+class AsyncToolRuntime;  // 异步工具 P2:TurnContext.async_tool_runtime(会话级)
+}  // namespace lubancode::runtime
+
 namespace lubancode::app {
 
 // main.cpp 原文里这些名字是不限定引用的;搬进 app 命名空间后对齐一下。
@@ -151,6 +155,10 @@ struct TurnContext {
     // loop 模型边界与 hub 工具栅栏进同一本 Trajectory Journal(不写
     // SessionStore)。
     lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
+    // 异步工具 P2:会话级异步运行时(SessionRuntime 持有,装配层挂入)。
+    // 非空且本轮有轮桥 = 批次闸门与投递规划钉进 TurnWiring(每轮换桥);
+    // 空(旧装配/没开会话)= 全 inline,行为一字不差。
+    lubancode::runtime::AsyncToolRuntime* async_tool_runtime = nullptr;
     // turn.started 的 trigger(§5.1):external_user | queued_user | peer_agent
     // | scheduled_host | goal_continuation。
     std::string trajectory_trigger = "external_user";

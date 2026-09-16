@@ -85,6 +85,7 @@
 #include "app/commands/workflow_commands.hpp"
 #include "workflow/host_executors.hpp"
 #include "app/version.hpp"
+#include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:会话级异步运行时(终端宿主接线)
 #include "runtime/command_service.hpp"
 #include "runtime/event_sinks.hpp"
 #include "runtime/plan_mode.hpp"
@@ -225,6 +226,13 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
                 (session_runtime_.trajectory()->session_dir() / "main.jsonl").generic_string();
             lubancode::app::UpdateHookRuntimeContext(hook_context);
         }
+        // 异步工具 P2(终端宿主接线):会话级异步运行时挂进 SessionRuntime
+        // ——批次闸门/投递规划/协调器共享会话 v3 写者。生产缺省零策略
+        // (tools 白名单空 = 全 inline,权鉴 fail-closed,不派发),行为与
+        // 从前一字不差;能力快照照实落 fail-closed 判定。开异步工具须装配
+        // 层补白名单+权鉴桥+executor(P3 原生试点)。
+        lubancode::runtime::AttachDefaultAsyncToolRuntime(session_runtime_,
+                                                          session_runtime_.wire_name());
         OpenArtifactStore();
         return true;
     }
@@ -868,6 +876,8 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         turn.trajectory_ledger = session_runtime_.trajectory();
         turn.trajectory_provider = active_provider;
         turn.trajectory_wire = session_runtime_.wire_name();
+        // 异步工具 P2:会话级异步运行时递进 RunTurn(批次闸门/投递规划)。
+        turn.async_tool_runtime = session_runtime_.async_tool_runtime();
         turn.mode_gate = [this](const std::string& tool_name, const nlohmann::json& input) {
             return plan_wiring_.EvaluateGate(tool_name, input);
         };

@@ -265,6 +265,9 @@ public:
     // 收齐:model.response.completed + 完整 assistant message(预留 id)+
     // 接纳进上下文(purpose=conversation 时)。finishReason 由调用方按
     // 协议判定;length 截断给 completion_status=truncated。
+    // completed_event_id 非空时带回 model.response.completed 事件 id
+    //(异步工具 P2:投递 acknowledged 的 evidenceRef 要指事件,本函数的
+    // 返回 receipt 是末步接纳的,不是它)。
     WriteReceipt CompleteStreamResponse(std::string_view request_id, std::string_view stream_id,
                                         std::string_view turn_id, std::string_view step_id,
                                         std::string_view message_id, nlohmann::json message,
@@ -275,7 +278,8 @@ public:
                                         std::optional<std::string> compact_id = std::nullopt,
                                         std::optional<CompletionStatus> completion_status =
                                             std::nullopt,
-                                        Durability durability = Durability::PowerLoss);
+                                        Durability durability = Durability::PowerLoss,
+                                        std::string* completed_event_id = nullptr);
 
     // Esc 中断(§4.63):model.response.cancelled(记录接收水位)+ 已收到
     // 内容组装成正式 assistant(completionStatus=interrupted;usage 缺实报

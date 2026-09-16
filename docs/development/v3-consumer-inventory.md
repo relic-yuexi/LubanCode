@@ -41,6 +41,7 @@ EnvGuard 显式开)、**legacy-only**(吃全局 0 的 v2 行为断言)、
 | `unit.trajectory_v3.test_v3_stream_wiring` | explicit-v3 | EnvGuard("1") |
 | `unit.trajectory_v3.test_v3_verify_doctor_tree` | explicit-v3 | EnvGuard("1") |
 | `unit.app.test_session_service` | legacy-only + 对照 | 含 EnvGuard("0") 显式钉 v2 的服务面用例 |
+| `unit.insights.test_insights_v3_pipeline`(T14 新增) | explicit-v3(防御) | 册内 EnvGuard("1");夹具直写 V3Writer(format-neutral 语义),断言 insights 管线按账面格式分派不按环境变量 |
 | 其余 435 册 | format-neutral 或 legacy-only | 不引用开关变量;与建场相关的册在全局 0 下跑 v2 形状(具体哪些册的断言绑定 v2 行为,随 B2 各域迁移逐册归档,不在 B1 一口吞) |
 
 **v3 域内不经开关的册**(直接 V3Writer/ReadV3Ledger,format-neutral):
@@ -68,14 +69,14 @@ EnvGuard 显式开)、**legacy-only**(吃全局 0 的 v2 行为断言)、
 
 | # | 源符号/文件 | 直接调用方 | 最终入口 | 现行合同 | 替代 API | 退役阻塞 |
 | --- | --- | --- | --- | --- | --- | --- |
-| C1 | `accounting::ListSessionStreams`/`ParseStream`(src/accounting/session_usage_reader.*) | usage_projector、usage 命令、insights(integrity_gate/prompt_auditor) | `/usage`、workspace 汇总、insights 报告 | v3 已分派(T06,2026-09-12):`ReadSessionUsage` 先 `ProbeV3SessionStream`,v3 走 `ReadV3Ledger`+`WalkSessionTree` 递归子 session,`ProjectV3Usage` 吃 assistant usage owner;v2 老路(main.jsonl/平铺子流/EventEnvelope)保留给旧档 | T14 insights 迁完(v3 读面复用 `ProjectV3Usage`/`UsageFromV3Owner`) | T14 insights 迁完 |
+| C1 | `accounting::ListSessionStreams`/`ParseStream`(src/accounting/session_usage_reader.*) | usage_projector、usage 命令、insights(integrity_gate/session_analyzer 的 v3 半场) | `/usage`、workspace 汇总、insights 报告 | v3 已分派(T06,2026-09-12):`ReadSessionUsage` 先 `ProbeV3SessionStream`,v3 走 `ReadV3Ledger`+`WalkSessionTree` 递归子 session,`ProjectV3Usage` 吃 assistant usage owner;v2 老路(main.jsonl/平铺子流/EventEnvelope)保留给旧档。T14(2026-09-16)起 insights 的 v3 半场复用同一读面(`AnalyzeSessionV3` 逐 `ReadSessionUsage`) | v2 老路归 T02-B 随旧档退役 | T02-B |
 | C2 | `telemetry::TelemetryService::DiscoverStreams`/`projector::Fold`(src/telemetry/*) | TelemetryService 自身(spool/cursor/补投) | OTLP 导出链 | v3 已分派(T07,2026-09-16):发现先 `ProbeV3SessionStream`,v3 走递归 `<id>.jsonl`+`subagents/*/<cid>.jsonl`,`ProjectV3LedgerFile` 吃 v3 消息/事件(usage owner 与 T06 同源),cursor 固定末 recordId/seq/hash;v2 老路(EventEnvelope Fold/旧流身份)保留给旧档 | T02-B(删 v2 Fold;投影版本已升 `telemetry-projector-v2` 另开 generation) | T02-B |
 | C3 | `app::MemoryLedgerBridge`(src/app/memory_ledger_bridge.*) | MemoryAccounting 装配 | 主入口 memory-on 场 | 走 `ledger.main()`(v2 recorder);v3 场 main()==nullptr → 召回失败 | v3 受管 writer/context 服务 + 正文快照/refs(T08) | T08 桥迁 + §4.71 排期 |
 | C4 | `app_server/server.cpp` thread 记录(`session_main_path` 拼接、thread/resume 只读预览) | AppServer 协议处理 | AppServer 2.0 WS | 硬拼 `.../main.jsonl`;resume 为只读恢复视图预览 | SessionService 统一描述对象 + 真恢复(T09,AppServer 单实施) | T09 |
-| C5 | `insights::integrity_gate`/`prompt_auditor`/`friction_classifier`(src/insights/*) | insights 聚合入口 | `/doctor` 类分析、workspace 报告 | 查 main.jsonl + EventEnvelope 集合;损坏跳过整场 | v3 reader/verify + partial 报告(T14) | T14 |
+| C5 | `insights::integrity_gate`/`prompt_auditor`/`friction_classifier`(src/insights/*) | insights 聚合入口 | `/insights`、`/prompt audit`、`/doctor insights`、workspace 报告 | v3 已分派(T14,2026-09-16):`GateSession` 先 `ProbeV3SessionStream`,v3 走 `WalkSessionTree`+领域读模型(`v3_facts.*`:prepared 引用/inputView 指纹/usage owner/工具折叠);坏来源/缺 blob/子账缺在 notes 标 partial 不跳整场;封口按账面 `session.ended`(无 session.json);不认的格式标 `Unsupported` 不迁旧档。prompt 审计吃 prepared 持久请求视图(R01 不再要求 v2 manifest);摩擦 v3 半场(`friction-v2`)按 actionId/attempt 取材,无审批/验证事实的类别不判分;usage 走 C1 同一读面(父子树/resume 祖先不重算)。v2 老路保留给旧档 | 已迁;v2 半场归 T02-B 随旧档退役 | T02-B |
 | C6 | `trajectory::ScanStreamFacts`(v2 状态机骨架) | session_manager(恢复器/删除门/归档) | 会话管理命令面 | 只认 v2 事件状态机;v3 场由 B1 起新增 v3 分派(删除门) | v3 首行/终态/锁推导(T15-B 扩全生命周期) | T15-B |
 | C7 | `runtime::TrajectoryTurnBridge` v2 分支(`Put`/EventKind) | loop 边界接线 | 所有模型/工具边界 | v2 recorder 事件;v3 场已走 V3* 系 | v3 桥已并行;T02-A 收窄剩余消费者 | T02(双分支缩减) |
-| C8 | `tools::task_ledger.*`、`tools/agent_tool.cpp`、`runtime/event.hpp`、`runtime/runtime_contract.cpp`、`app/memory_extract.cpp` | 待分类 | 待分类 | 近名命中(RecordRequest/RecordRequestOutcome 等),未逐个追到生产调用 | 待 T00 深挖(B2 起) | 待分类完成 |
+| C8 | `tools::task_ledger.*`、`tools/agent_tool.cpp`、`runtime/event.hpp`、`runtime/runtime_contract.cpp`、`app/memory_extract.cpp` | (已分类,2026-09-16)task_ledger/agent_tool 的 `RecordRequestOutcome` 是 TaskLedger 领域账方法(`AgentTaskEventKind` 自有枚举),不经 trajectory 信封;`runtime/event.hpp` 的 `EventEnvelope` 是 runtime/AppServer 协议信封(thread_id/seq/timestamp_ms,同名不同物),`runtime_contract.cpp` 是它的序列化契约;`app/memory_extract.cpp` 是真实双格写口(v3 writer 优先、v2 recorder 保底,`memory.extraction.assessed` 的 v2 同名事件) | agent 任务账、AppServer 事件流、memory 抽取调度 | 近名命中已逐一追到生产调用:前四者非 v2 信封消费者(保留);memory_extract 的 v2 老路归 T02-B | 不需替代;memory_extract v2 分支挂 T02-B | T02-B(memory_extract);其余无阻塞 |
 
 **保留共用件**(不因目录删除):canonical JSON(`trajectory/canonical.*`)、
 SHA-256 哈希链算法、BlobStore、SessionLock、Durability 三档、JournalWriter
@@ -112,3 +113,4 @@ subagent_child)由 python 生成器产出、`scripts/validate_trajectory_v3.py`
 | T15-A(v3 删除封口门,P0) | `DeleteSessionDir` v3 分派(验卷 + session.ended 封口 + 末行 hash 入 tombstone);格式歧义拒;`LooksLikeV3SessionStream`/`DeleteV3SessionDir` | `unit.trajectory.test_session_admin_v3_delete` |
 | T16 默认-v3 冒烟 | 见 §二表首行 | `unit.trajectory_v3.test_v3_default_smoke` |
 | T00 夹具/清册 | 本文档 + `unit.trajectory_v3.test_v3_shared_fixtures` | — |
+| T14(Insights 接入 v3,B2) | `src/insights/v3_facts.*`(领域读模型)、integrity_gate/prompt_auditor/friction_classifier/session_analyzer 的 v3 半场、summary format/limitations、EvidenceItem.seq、redaction allowlist | `unit.insights.test_insights_v3_pipeline`(gate 分型/partial/摩擦 v3/prompt v3 规则/分析去重/字节稳定/schema 往返) |

@@ -10,6 +10,7 @@
 #include "platform/atomic_write.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/agent_channel_engine.hpp"   // ApplyChannelToolPolicy(共用交集)
+#include "runtime/async_tool_runtime.hpp"     // 异步工具 P2:one-shot/gateway 宿主接线
 #include "runtime/channel_session_host.hpp"   // ChannelConfirmAllows(fail closed)
 #include "runtime/hook_host_services.hpp"     // DefaultHookServiceCenter
 #include "runtime/middleware_runtime.hpp"
@@ -636,6 +637,19 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     ToolTraceHub trace_hub(ProcessIdAuthority());
     trace_hub.AttachTrajectory(trajectory_bridge.get());
     trace_hub.Install(loop_agent, wiring, service.runtime()->thread_id(), turn_id);
+
+    // 异步工具 P2(one-shot/gateway 宿主接线):会话级异步运行时挂进
+    // SessionService 的 SessionRuntime(零策略 dormant,行为与从前一字不
+    // 差);每轮钉桥 + 闸门/规划进 wiring。
+    if (AttachDefaultAsyncToolRuntime(*service.runtime(), options_.wire_name)) {
+        AsyncToolRuntime* async_runtime = service.runtime()->async_tool_runtime();
+        if (async_runtime != nullptr && trajectory_bridge != nullptr) {
+            async_runtime->InstallTurnBridge(trajectory_bridge.get());
+            async_runtime->NoteModelIdentity(std::string(), options_.model);
+            wiring.tool_batch_gate = async_runtime->gate();
+            wiring.delivery_planner = async_runtime->planner();
+        }
+    }
 
     const auto outcome = agent::AgentLoop::Run(loop_agent, user_message, wiring, cancel);
 

@@ -36,9 +36,10 @@ std::vector<InsightsHealthLine> CheckInsightsHealth(const InsightsHealthInput& i
         lines.push_back(std::move(line));
     };
 
-    // 1/2 轨迹与 reader 口径(P0-6:开关已删,账恒开)。
+    // 1/2 轨迹与 reader 口径(P0-6:开关已删,账恒开;T14 起 v3 读面接入)。
     add("trajectory", ' ', "Journal 恒开,唯一事实账");
-    add("reader", ' ', "Trajectory event schema v2(usage owner)+ v1 legacy read;混写 stream 拒收");
+    add("reader", ' ', "Session v3(ReadV3Ledger/树遍历,usage owner=assistant message)"
+                       "+ v2/v1 legacy read;混写 stream 拒收");
 
     // 3 派生目录权限与磁盘。
     if (input.insights_home.has_value()) {

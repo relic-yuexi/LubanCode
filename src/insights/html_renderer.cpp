@@ -444,6 +444,8 @@ std::string RenderInsightsHtml(const InsightsReport& report,
         }
         page << "<ul>\n"
              << "<li>active/corrupt/incomplete 场不悄悄混入完成率与 usage 分母,单列于上。</li>\n"
+             << "<li>Session v3 场(T14):verification/outcome/审批事实现行合同未发行,相关"
+                "规则不判分、指标标缺件——0 不是零验证,不据 session.ended 推断任务完成。</li>\n"
              << "<li>费用 not_priced:汇总层无逐模型拆账(A0 摘要 schema 未带),不拿总额估钱;"
                 "逐笔贴价在 /usage。</li>\n"
              << "<li>选号按 session 开始时间从新到旧(结束时间不在 manifest,不猜)。</li>\n"

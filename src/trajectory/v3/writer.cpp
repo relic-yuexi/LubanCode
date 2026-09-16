@@ -1000,7 +1000,8 @@ WriteReceipt V3Writer::CompleteStreamResponse(
     std::string_view provider, std::string_view wire, std::string_view model,
     nlohmann::json response_model, nlohmann::json usage, std::string_view finish_reason,
     MessagePurpose purpose, std::optional<std::string> compact_id,
-    std::optional<CompletionStatus> completion_status, Durability durability) {
+    std::optional<CompletionStatus> completion_status, Durability durability,
+    std::string* completed_event_id) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->broken) {
         return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
@@ -1022,6 +1023,9 @@ WriteReceipt V3Writer::CompleteStreamResponse(
         WriteReceipt receipt = impl_->CommitEvent(std::move(done), durability);
         if (receipt.status != WriteReceipt::Status::Committed) {
             return receipt;
+        }
+        if (completed_event_id != nullptr) {
+            *completed_event_id = receipt.id;
         }
     }
     // 2. 完整 assistant(预留 id 成行;来源与 usage 自带,§4.44/§4.12)。

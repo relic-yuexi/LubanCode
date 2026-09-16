@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "insights/finding.hpp"
+#include "insights/v3_facts.hpp"
 #include "trajectory/event.hpp"
 
 namespace lubancode::insights {
@@ -39,5 +40,20 @@ const std::vector<std::string>& AllFrictionCategories();
 // 分类(纯函数)。事件按 seq 升序喂;返回按出现序稳定。
 std::vector<FrictionOccurrence> ClassifyFriction(
     const std::vector<trajectory::EventEnvelope>& events);
+
+// ---- v3 半场(T14;规则版本 friction-v2)----
+// 摩擦从 v3 工具/请求事实取材(工具操作按 actionId 折叠、按 attempt 记
+// 重试;执行失败与落盘失败分开;evidence 锚 event_id+seq)。v3 现行合同
+// 没有宿主审批、verification、outcome 事实(T11 域未发行):相应类别不
+// 判分、枚举在册——不把"没记录"推断成"没有审批/没有验证/任务完成"。
+inline constexpr const char* kFrictionRuleVersionV3 = "friction-v2";
+
+// v3 现行 schema 判不了的类别(覆盖面声明用;在册不等于出现过)。
+const std::vector<std::string>& UnsupportedFrictionCategoriesV3();
+
+// 分类 v3(纯函数)。sessions 来自领域读模型(CollectV3SessionFacts);
+// 返回按出现序稳定。
+std::vector<FrictionOccurrence> ClassifyFrictionV3(
+    const std::vector<V3SessionFacts>& sessions);
 
 }  // namespace lubancode::insights

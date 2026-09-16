@@ -73,6 +73,13 @@ struct ToolUseBlock {
     // 调用发自服务端沙箱而非模型直呼。中立层只保存不解释;空 = wire 没给
     //(绝大多数请求都没有),四家 wire 里只有 anthropic 会填。
     std::string caller;
+    // provider 在调用上标的 async 位(异步工具单 §2/§3:OpenAI Async tool
+    // calling 的回包 function_call 携带 async)。中立层只保存不解释——它
+    // 是"这枚调用按原生异步协议欠账"的证据,wireCallRef.async 由账面侧
+    // 从这枚位取;宿主不凭它擅自留悬空调用(能力 unknown 时按同步配对,
+    // 单 §4)。四家 wire 里只有 responses 会填;序列化回 wire 不带它
+    //(声明侧 async 是 P3 原生试点的事)。
+    bool async_call = false;
 };
 
 // 工具执行完,把结果回传给模型。MCP 富结果单起 blocks/structured_content
@@ -92,6 +99,12 @@ struct ToolResultBlock {
     bool capture_complete = true;
     std::string capture_reason;
     bool action_summary_requested = false;  // host only; never serialized as model input
+    // 异步工具单 P2,host only:这枚结果块是批次闸门 job_handle 接单的
+    // 接单回执(ToolJobCoordinator 的接单链已把 tool.execution/tool.result
+    // 全链与接单 tool 消息落稳),本轮的 v3 结果提交路径(V3ToolResults
+    // Committed)按它跳过——不再为同一枚调用重落第二条链。序列化与
+    // token 估算一律无视它。
+    bool job_admission = false;
 
 };
 
@@ -466,6 +479,9 @@ struct ToolUseStart {
     std::string id;
     std::string name;
     std::string caller;  // PTC 的调用方标识(anthropic wire 才有,空 = 没给)
+    // provider 标的 async 位(responses 的 async tool calling;异步工具单
+    // §3)。assembler 原样带进 ToolUseBlock.async_call,中立层不解释。
+    bool async_call = false;
 };
 
 // 服务端工具搜索的调用开始(动态工具 P3):provider 执行的搜索,宿主只攒

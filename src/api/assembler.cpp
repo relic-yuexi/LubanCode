@@ -38,8 +38,11 @@ void MessageAssembler::FinalizeCurrent() {
             open_tool_.reset();
             return;
         } else {
-            content_.push_back(
-                ToolUseBlock{open_tool_->id, open_tool_->name, std::move(input), open_tool_->caller});
+            ToolUseBlock block{open_tool_->id, open_tool_->name, std::move(input), open_tool_->caller};
+            block.async_call = open_tool_->async_call;
+            // 流式提前档探针(异步工具单 P2 §7):单枚 call item 完整即报。
+            completed_tool_uses_.push_back(block);
+            content_.push_back(std::move(block));
         }
         open_tool_.reset();
     } else if (open_thinking_.has_value()) {
@@ -82,6 +85,7 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 open.id = e.id;
                 open.name = e.name;
                 open.caller = e.caller;
+                open.async_call = e.async_call;
                 open_tool_ = std::move(open);
             } else if constexpr (std::is_same_v<T, ToolUseInputDelta>) {
                 if (open_tool_.has_value()) {

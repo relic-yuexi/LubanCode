@@ -513,6 +513,8 @@ add_library(lubancode_engine STATIC
   # 异步工具单 P1:持久 job 宿主侧服务(队列/租约/单写者完成信封/
   # start-get-wait-cancel 四接口/权鉴/资源锁/配额/取消/账态注入恢复)。
   src/tools/tool_job_coordinator.cpp
+  # 异步工具单 P2:job_handle 模式可见工具族(job_get/job_wait/job_cancel)。
+  src/tools/job_tools.cpp
   src/tools/subagent_isolation.cpp
   src/tools/agent_message_tool.cpp
   # 监督器单 P1-0:agent_watch 模型工具(lineage 鉴权、有界快照与 cv 长等)。
@@ -845,6 +847,10 @@ add_library(lubancode_engine STATIC
   # 摘要派生仓(原子写/stale 判定)与一间 session 的分析管线。坏账整间
   # 排除且理由可见;同一封口 session 重算字节相同。
   src/insights/integrity_gate.cpp
+  # T14(Insights 接入 Session v3):验过 v3 树的领域读模型——请求事实
+  # (prepared 引用/视图指纹/usage owner)、工具折叠快照与失败明细;
+  # prompt 审计/摩擦分类/会话分析只吃这份,不再各扫 JSONL。
+  src/insights/v3_facts.cpp
   src/insights/friction_classifier.cpp
   src/insights/feature_signal.cpp
   src/insights/derived_store.cpp
@@ -955,6 +961,12 @@ add_library(lubancode_runtime STATIC
   # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
   # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。
   src/runtime/trajectory_session.cpp
+  # 异步工具单 P2:批次闸门/投递规划/能力闸/会话级总成——AgentLoop 的
+  # 协议模式裁决 seam 实现 + ResultDeliveryPlanner + ProviderToolContract
+  # Validator + AsyncToolRuntime(五宿主接线共用,不各造)。
+  src/runtime/provider_tool_contract.cpp
+  src/runtime/result_delivery_planner.cpp
+  src/runtime/async_tool_runtime.cpp
   # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
   # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
   src/runtime/session_soul.cpp

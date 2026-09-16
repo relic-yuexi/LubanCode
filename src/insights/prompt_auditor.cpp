@@ -12,8 +12,10 @@
 #include "accounting/session_usage_reader.hpp"
 #include "accounting/usage_projector.hpp"
 #include "agent/context.hpp"  // EstimateUtf8Tokens
+#include "insights/v3_facts.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/schema.hpp"
+#include "trajectory/v3/session_switch.hpp"
 
 namespace lubancode::insights {
 namespace {
@@ -572,9 +574,11 @@ void AuditMcpWeight(const std::vector<AuditToolDefinition>& tools,
 
 void AuditSnapshotCoverage(const std::vector<RuntimeRequestView>& requests,
                            std::vector<Finding>& out) {
+    // T14:v3 请求没有 v2 manifest 快照是常态(snapshot 恒 nullopt),不算
+    // 缺件——既无 v2 快照又无 v3 引用账才算真缺材料。
     std::vector<std::string> missing;
     for (const auto& view : requests) {
-        if (!view.snapshot.has_value()) {
+        if (!view.snapshot.has_value() && !view.input_refs_recorded) {
             missing.push_back(view.request_id);
         }
     }
@@ -584,8 +588,8 @@ void AuditSnapshotCoverage(const std::vector<RuntimeRequestView>& requests,
     Finding finding = MakeFinding(
         "prompt.snapshot_missing", FindingSeverity::Info, FindingConfidence::High,
         "有 " + std::to_string(missing.size()) + "/" + std::to_string(requests.size()) +
-            " 笔请求没有可解析的 request snapshot(A1 前的旧账或缺 manifest;这些请求不进层变化分析)",
-        "新请求都带 manifest;旧账不补造", "R01");
+            " 笔请求既无 request snapshot 也无 v3 引用账(A1 前的旧账;这些请求不进层变化分析)",
+        "新请求都带 manifest/引用;旧账不补造", "R01");
     finding.scope = "session";
     finding.evidence.push_back(Ev("requests_without_snapshot", missing));
     out.push_back(std::move(finding));
@@ -724,15 +728,225 @@ void AuditGrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
     out.push_back(std::move(finding));
 }
 
+// ---------------- v3 runtime 规则(T14;材料:prepared 的持久请求视图)----------------
+
+// 证据锚统一带 event_id + seq(v3 行号):报告能从 finding 跳回账面行。
+EvidenceItem V3Ev(std::string metric, nlohmann::json value, const RuntimeRequestView& view) {
+    EvidenceItem item;
+    item.metric = std::move(metric);
+    item.value = std::move(value);
+    item.session_id = view.session_id;
+    item.event_id = view.event_id;
+    if (view.seq > 0) {
+        item.seq = view.seq;
+    }
+    return item;
+}
+
+// V01:实际发送视图与链引用视图分叉(V3-REAL-06 的 divergent 账)。只摆
+// 事实:引用还原 ≠ 逐字 wire,分叉请求的正文对照要去结果仓/artifact。
+void AuditV3WireViewDivergence(const std::vector<RuntimeRequestView>& requests,
+                               std::vector<Finding>& out) {
+    std::vector<const RuntimeRequestView*> divergent;
+    for (const auto& view : requests) {
+        if (view.wire_view_divergent.has_value() && *view.wire_view_divergent) {
+            divergent.push_back(&view);
+        }
+    }
+    if (divergent.empty()) {
+        return;
+    }
+    Finding finding = MakeFinding(
+        "prompt.wire_view_divergent", FindingSeverity::Info, FindingConfidence::High,
+        "有 " + std::to_string(divergent.size()) +
+            " 笔请求的实际发送消息数与链引用数不一致(合批/收编类变换;引用视图"
+            "不等于逐字 wire 正文,材料边界如实记)",
+        "需要逐字对照时看该请求的指纹账与结果仓;本条只标视图分叉", "V01");
+    finding.scope = "session";
+    for (const auto* view : divergent) {
+        finding.evidence.push_back(V3Ev(
+            "divergent_request",
+            nlohmann::json{{"request_id", view->request_id},
+                           {"wire_message_count", view->wire_message_count.value_or(0)},
+                           {"input_refs_count", view->input_message_refs.size()}},
+            *view));
+    }
+    out.push_back(std::move(finding));
+}
+
+// V02:工具表抖动(v3 按 prepared 的 toolNames 表比;没记工具面的请求
+// 不进分母——tool_names_recorded=false 不是"零工具")。
+void AuditV3ToolsetChurn(const std::vector<RuntimeRequestView>& requests,
+                         const RuntimeChangeSummary& account, std::vector<Finding>& out) {
+    if (account.v3_comparable < 2 || account.v3_toolset_changes < 2) {
+        return;
+    }
+    Finding finding = MakeFinding(
+        "cache.toolset_churn", FindingSeverity::Warning, FindingConfidence::High,
+        "连续 " + std::to_string(account.v3_comparable) +
+            " 对可比较请求中,prepared 工具名表变了 " +
+            std::to_string(account.v3_toolset_changes) + " 次(v3 账;工具面在抖)",
+        "固定工具注册与序列化次序;动态索引放前缀尾部", "V02");
+    finding.scope = "session";
+    finding.evidence.push_back(Ev("comparable_pairs", account.v3_comparable));
+    finding.evidence.push_back(Ev("tool_names_changes", account.v3_toolset_changes));
+    const RuntimeRequestView* prev = nullptr;
+    for (const auto& view : requests) {
+        if (prev != nullptr && prev->tool_names_recorded && view.tool_names_recorded &&
+            prev->tool_names != view.tool_names) {
+            finding.evidence.push_back(V3Ev("toolset_change_event", view.request_id, view));
+        }
+        prev = &view;
+    }
+    finding.counter_evidence.push_back(
+        Ev("note", "provider 未明报 cache 能力时,抖动是否真的花钱要看 usage 的 cache_read"));
+    out.push_back(std::move(finding));
+}
+
+// V03:同 system/revision 下两笔 prepared 的输入引用不一致——链版本没动
+// 而请求材料变了,账面异常信号(不是 cache 结论)。
+void AuditV3RequestViewMismatch(const std::vector<RuntimeRequestView>& requests,
+                                const RuntimeChangeSummary& account,
+                                std::vector<Finding>& out) {
+    if (account.v3_prefix_breaks < 1) {
+        return;
+    }
+    Finding finding = MakeFinding(
+        "prompt.request_view_mismatch", FindingSeverity::Info, FindingConfidence::Medium,
+        "同一 system 引用与 contextRevision 下出现 " +
+            std::to_string(account.v3_prefix_breaks) +
+            " 组不同的输入引用(链版本未动而请求材料变了;账面异常,先核账再下结论)",
+        "对照两笔 prepared 的 inputMessageRefs;真不一致查写入侧", "V03");
+    finding.scope = "session";
+    finding.evidence.push_back(Ev("mismatched_pairs", account.v3_prefix_breaks));
+    const RuntimeRequestView* prev = nullptr;
+    for (const auto& view : requests) {
+        const bool comparable =
+            prev != nullptr && prev->input_refs_recorded && view.input_refs_recorded &&
+            prev->session_id == view.session_id &&
+            prev->system_message_ref == view.system_message_ref &&
+            prev->context_revision == view.context_revision;
+        if (comparable && prev->input_message_refs != view.input_message_refs) {
+            finding.evidence.push_back(
+                V3Ev("mismatch_request",
+                     nlohmann::json{{"request_id", view.request_id},
+                                    {"previous_request_id", prev->request_id}},
+                     view));
+        }
+        prev = &view;
+    }
+    out.push_back(std::move(finding));
+}
+
+// V04:估算覆盖面——prepared 未带 tokenEstimateRef 的请求如实计数(§4.36
+// 估算槽位未全接;缺席不造数)。
+void AuditV3TokenEstimateCoverage(const std::vector<RuntimeRequestView>& requests,
+                                  std::vector<Finding>& out) {
+    std::vector<std::string> missing;
+    for (const auto& view : requests) {
+        if (view.input_refs_recorded && !view.has_token_estimate) {
+            missing.push_back(view.request_id);
+        }
+    }
+    if (missing.empty()) {
+        return;
+    }
+    Finding finding = MakeFinding(
+        "prompt.token_estimate_missing", FindingSeverity::Info, FindingConfidence::High,
+        "有 " + std::to_string(missing.size()) + " 笔请求的 prepared 未带 tokenEstimateRef"
+            "(估算栏缺件;token 只按 provider 实报口径,不拿视图猜估算)",
+        "估算槽位全接后此条自消;缺件不补造", "V04");
+    finding.scope = "session";
+    finding.evidence.push_back(Ev("requests_without_estimate", missing));
+    out.push_back(std::move(finding));
+}
+
+// V05:输入规模增长 × cache 命中率下跌的同向观察(v3 版:规模用实际发送
+// 消息数/输入引用数,token 用 owner 实报;只说同向,不写因果)。
+void AuditV3GrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
+                              std::vector<Finding>& out) {
+    const RuntimeRequestView* first = nullptr;
+    const RuntimeRequestView* last = nullptr;
+    for (const auto& view : requests) {
+        if (!view.input_refs_recorded || !view.usage_reported || view.total_input_tokens <= 0) {
+            continue;
+        }
+        const std::int64_t scale = view.wire_message_count.has_value()
+                                       ? static_cast<std::int64_t>(*view.wire_message_count)
+                                       : static_cast<std::int64_t>(view.input_message_refs.size());
+        if (scale <= 0) {
+            continue;
+        }
+        if (first == nullptr) {
+            first = &view;
+        }
+        last = &view;
+    }
+    if (first == nullptr || last == nullptr || first == last) {
+        return;
+    }
+    const auto scale_of = [](const RuntimeRequestView& view) {
+        return view.wire_message_count.has_value()
+                   ? static_cast<std::int64_t>(*view.wire_message_count)
+                   : static_cast<std::int64_t>(view.input_message_refs.size());
+    };
+    const std::int64_t first_scale = scale_of(*first);
+    const std::int64_t last_scale = scale_of(*last);
+    if (first_scale <= 0) {
+        return;
+    }
+    const double growth =
+        static_cast<double>(last_scale - first_scale) / static_cast<double>(first_scale);
+    const int first_ratio = SharePercent(first->cache_read_tokens, first->total_input_tokens);
+    const int last_ratio = SharePercent(last->cache_read_tokens, last->total_input_tokens);
+    if (growth < 2.0 || (first_ratio - last_ratio) < 25) {
+        return;
+    }
+    Finding finding = MakeFinding(
+        "prompt.growth_cache_miss", FindingSeverity::Warning, FindingConfidence::Medium,
+        "请求输入规模(发送消息数)涨了 " + std::to_string(static_cast<int>(growth * 100)) +
+            "%,同期 cache 命中率从 " + std::to_string(first_ratio) + "% 落到 " +
+            std::to_string(last_ratio) + "%(v3 账同向观察,不是因果结论)",
+        "查这段增长来自哪些输入(逐请求引用在账);膨胀段按需化", "V05");
+    finding.scope = "session";
+    finding.evidence.push_back(Ev("first_scale_messages", first_scale));
+    finding.evidence.push_back(Ev("last_scale_messages", last_scale));
+    finding.evidence.push_back(Ev("first_cache_read_percent", first_ratio));
+    finding.evidence.push_back(Ev("last_cache_read_percent", last_ratio));
+    finding.evidence.push_back(V3Ev("first_event", first->request_id, *first));
+    finding.evidence.push_back(V3Ev("last_event", last->request_id, *last));
+    finding.counter_evidence.push_back(
+        Ev("note", "TTL 过期、provider 波动也长这模样;不能凭这一条断 prompt 的罪"));
+    out.push_back(std::move(finding));
+}
+
 }  // namespace
 
-// 相邻请求的层变化账(公有:A4 分析器与功能信号复用)。
+// 相邻请求的层变化账(公有:A4 分析器与功能信号复用;v2/v3 两半场同折)。
 RuntimeChangeSummary SummarizeRuntimeChanges(const std::vector<RuntimeRequestView>& requests) {
     RuntimeChangeSummary account;
     const RuntimeRequestView* prev = nullptr;
     for (const auto& view : requests) {
-        if (!view.snapshot.has_value()) {
-            continue;  // 旧账没有 manifest,不比(另由 R01 点名)
+        // ---- v3 半场:同账相邻请求比工具名表与输入引用。----
+        if (view.input_refs_recorded && prev != nullptr && prev->input_refs_recorded &&
+            prev->session_id == view.session_id) {
+            account.v3_comparable += 1;
+            if (prev->tool_names_recorded && view.tool_names_recorded &&
+                prev->tool_names != view.tool_names) {
+                account.v3_toolset_changes += 1;
+            }
+            if (prev->system_message_ref == view.system_message_ref &&
+                prev->context_revision == view.context_revision &&
+                prev->input_message_refs != view.input_message_refs) {
+                account.v3_prefix_breaks += 1;
+            }
+        }
+        if (view.wire_view_divergent.has_value() && *view.wire_view_divergent) {
+            account.v3_divergent_views += 1;
+        }
+        if (!view.snapshot.has_value() && !view.input_refs_recorded) {
+            continue;  // v2 旧账没有 manifest:不比也不推进相邻账(原行为;
+                       // 另由 R01 点名)。v3 视图落到尾部推进。
         }
         if (prev != nullptr && prev->snapshot.has_value()) {
             account.comparable += 1;
@@ -863,6 +1077,13 @@ std::vector<Finding> AuditPromptRuntime(const RuntimeAuditInput& input) {
     AuditPrefixChurn(account, out);
     AuditSegmentChurn(account, out);
     AuditGrowthVersusCache(input.requests, out);
+    // v3(T14):prepared 持久请求视图的规则;v2 请求这些字段为默认值,
+    // 规则自然不触发(判据都要求 input_refs_recorded / divergent 有账)。
+    AuditV3WireViewDivergence(input.requests, out);
+    AuditV3ToolsetChurn(input.requests, account, out);
+    AuditV3RequestViewMismatch(input.requests, account, out);
+    AuditV3TokenEstimateCoverage(input.requests, out);
+    AuditV3GrowthVersusCache(input.requests, out);
     for (auto& finding : out) {
         const std::size_t colon = finding.rule_version.rfind(':');
         finding.finding_id =
@@ -950,8 +1171,87 @@ RuntimeRequestsRead CollectRuntimeRequestsFromStreams(
     return read;
 }
 
+std::vector<RuntimeRequestView> RuntimeViewsFromV3Facts(
+    const std::vector<V3SessionFacts>& sessions, std::vector<std::string>* warnings) {
+    std::vector<RuntimeRequestView> views;
+    for (const auto& session : sessions) {
+        for (const auto& request : session.requests) {
+            RuntimeRequestView view;
+            view.run_id = request.run_id;
+            view.request_id = request.request_id;
+            view.purpose = request.purpose;
+            view.event_id = request.event_id;
+            view.usage_reported = request.usage_reported;
+            view.total_input_tokens = request.input_tokens + request.cache_read_tokens +
+                                      request.cache_creation_tokens;  // 同 api::TotalInputTokens
+            view.cache_read_tokens = request.cache_read_tokens;
+            view.output_tokens = request.output_tokens;
+            view.session_id = request.session_id;
+            view.seq = request.seq;
+            view.context_revision = request.context_revision;
+            view.system_message_ref = request.system_message_ref;
+            view.input_message_refs = request.input_message_refs;
+            view.input_refs_recorded = true;
+            view.wire_message_count = request.wire_message_count;
+            view.wire_view_divergent = request.wire_view_divergent;
+            view.tool_names_recorded = request.tool_names_recorded;
+            view.tool_names = request.tool_names;
+            view.has_token_estimate = request.has_token_estimate;
+            view.request_outcome = request.outcome;
+            views.push_back(std::move(view));
+        }
+        if (warnings != nullptr) {
+            for (const auto& note : session.notes) {
+                warnings->push_back("prompt.v3_facts_note: " + note);
+            }
+        }
+    }
+    return views;
+}
+
 RuntimeRequestsRead CollectRuntimeRequests(const std::filesystem::path& session_dir) {
     RuntimeRequestsRead read;
+    // ---- 格式分派(T14):先探 v3;v3 走领域读模型,不再解析旧信封。----
+    const auto probe = trajectory::v3::ProbeV3SessionStream(session_dir);
+    switch (probe.status) {
+        case trajectory::v3::V3StreamProbe::Status::V3Stream: {
+            const V3FactsRead facts = CollectV3SessionFacts(session_dir, probe.stream);
+            if (!facts.ok) {
+                read.error_code = "prompt.v3_ledger_unreadable";
+                read.message = facts.message;
+                read.session_id = facts.session_id;
+                return read;
+            }
+            read.session_id = facts.session_id;
+            read.requests = RuntimeViewsFromV3Facts(facts.sessions, &read.warnings);
+            for (const auto& warning : facts.warnings) {
+                read.warnings.push_back("prompt.v3_partial: " + warning);
+            }
+            read.ok = true;
+            if (read.requests.empty()) {
+                read.warnings.push_back("prompt.no_prepared_events: 这场 session 没有模型请求账");
+            }
+            return read;
+        }
+        case trajectory::v3::V3StreamProbe::Status::FormatConflict:
+            read.error_code = "prompt.session_format_conflict";
+            read.message = "两种主账打架,不敢认: " + probe.detail;
+            return read;
+        case trajectory::v3::V3StreamProbe::Status::NotV3Schema:
+            read.error_code = "prompt.session_format_unsupported";
+            read.message = "不认的账格式: " + probe.detail;
+            return read;
+        case trajectory::v3::V3StreamProbe::Status::BadFirstLine:
+        case trajectory::v3::V3StreamProbe::Status::EmptyFirstLine:
+            read.error_code = "prompt.session_format_unreadable";
+            read.message = "主账首行读不出: " + probe.detail;
+            return read;
+        case trajectory::v3::V3StreamProbe::Status::NotSessionDir:
+        case trajectory::v3::V3StreamProbe::Status::V2Layout:
+        case trajectory::v3::V3StreamProbe::Status::StreamMissing:
+        default:
+            break;  // 走 v2 老路
+    }
     const auto stream_files = accounting::ListSessionStreams(session_dir);
     if (!stream_files.has_value()) {
         read.error_code = "prompt.session_not_found";

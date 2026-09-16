@@ -19,9 +19,12 @@ namespace lubancode::insights {
 
 inline constexpr const char* kInsightsReportSchema = "lubancode.insights.report";
 inline constexpr int kInsightsReportSchemaVersion = 1;
-// v1.2:在 v1.1 规则钉死基础上，把 cache_epoch 分段写进 session 摘要；
-// analyzer version 抬升使旧摘要重算，report schema 顶层形状不变。
-inline constexpr const char* kInsightsAnalyzerVersion = "insights-v1.2";
+// v2.0(T14):Insights 读面接入 Session v3——integrity_gate 走
+// ProbeV3SessionStream/ReadV3Ledger/WalkSessionTree,prompt 审计吃
+// prepared 持久请求视图,摩擦走 v3 工具/请求事实;摘要带 source.format
+// 与 coverage.limitations(缺件规则不判分)。analyzer version 抬升使旧
+// 摘要重算;report schema 顶层形状不变(会话条目加可选键)。
+inline constexpr const char* kInsightsAnalyzerVersion = "insights-v2.0";
 
 struct InsightsReport {
     std::string generated_at;  // "YYYY-MM-DDTHH:MM:SSZ",调用方注入
