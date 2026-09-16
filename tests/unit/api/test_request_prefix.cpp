@@ -294,7 +294,7 @@ TEST_CASE("前缀: 工具结果只追加,不追改旧消息") {
     // 载荷里还原,身份(cache_epoch/追加律)齐。
     const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
-    REQUIRE(loop.Run("摘要这枚 artifact", callbacks).has_value());
+    REQUIRE(loop.Run("读这份长文件", callbacks).has_value());
     REQUIRE(backend.captured.size() == 2);
     CHECK(IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
     CHECK(agent::DiffRequests(backend.captured[0], backend.captured[1]).break_reason().empty());
@@ -302,7 +302,7 @@ TEST_CASE("前缀: 工具结果只追加,不追改旧消息") {
     const auto* result = std::get_if<api::ToolResultBlock>(
         &backend.captured[1].messages.back().content.front());
     REQUIRE(result != nullptr);
-    CHECK(result->content.find("按需摘要") != std::string::npos);
+    CHECK(result->content.find("文件内容已读") != std::string::npos);
     REQUIRE(reports.size() == 2);
     CHECK(reports[1].cache_epoch == 1);
     CHECK(reports[1].prefix_append_only);

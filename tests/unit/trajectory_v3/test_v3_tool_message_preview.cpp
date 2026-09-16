@@ -262,8 +262,12 @@ TEST_CASE("超帽结果(全链):入史前钩子归仓换预览,运行时历史�
     CHECK(history_content.size() < fat.size());
     CHECK(history_content.find("truncated: true") != std::string::npos);
     CHECK(history_content.find("capture_complete: true") != std::string::npos);
-    CHECK(history_content.find("full_output: [\"artifacts/res-000001.combined.txt\"]") !=
-          std::string::npos);  // 全文去处可追
+    // 全文去处可追(T17):full_output 给绝对路径(生产链按 session 目录拼,
+    // 模型用 read_file 分段读回),并带 retrieval_hint 指路。
+    const std::string absolute_combined =
+        platform::PathToUtf8(ledger->session_dir() / "artifacts" / "res-000001.combined.txt");
+    CHECK(history_content.find("\"" + absolute_combined + "\"") != std::string::npos);
+    CHECK(history_content.find("retrieval_hint") != std::string::npos);
     CHECK(history_content.find("[开头内容]") != std::string::npos);
     CHECK(history_content.find("[中间内容已省略]") != std::string::npos);
     CHECK(history_content.find("[结尾内容]") != std::string::npos);
