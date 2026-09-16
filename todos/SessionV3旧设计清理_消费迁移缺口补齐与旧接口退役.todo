@@ -171,7 +171,7 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 状态：verified
 实现：src/telemetry/projector_v3.cpp（ProjectV3LedgerFile：V3Fold 六族 span/owner usage 结算/确定性排序）、projector.hpp（映射合同+声明）、service.cpp（DiscoverStreams 格式分派+DiscoverV3Streams 递归发现+StreamScan v2/v3 统一行身份骨架+cursor seq/格式升级处置）、contract.hpp/.cpp（kTelemetrySchemaVersion 2+kProjectorVersion v2+hook 属性键）、cursor.hpp/.cpp（kCursorVersion 2+last_event_seq）、batch_queue.hpp（BatchItem.last_event_seq）、CMakeLists.txt（projector_v3.cpp）
 生产入口：TelemetryService 本地投影+OTLP 出口（装配层 RegisterSession 后台线程，CLI/AppServer 共用）
-验证：新增 unit.telemetry.test_telemetry_projector_v3（六族映射/partial 合同/usage 与 ProjectV3Usage 对表/迟到实报/确定性换钥匙/D1 无正文/子账不暗填 runKind/hook 洋葱终局/坏账不投影）与 integration.telemetry.test_telemetry_otlp_export v3 五案（全链含子账/cursor 三件/整树挪位/重启批 id 不重复/截断停投/格式歧义）；既有 telemetry 册随版本常数同步（golden 夹具、otlp_json/projector/cursor 断言）
+验证：新增 unit.telemetry.test_telemetry_projector_v3（六族映射/partial 合同/usage 与 ProjectV3Usage 对表/迟到实报/确定性换钥匙/D1 无正文/子账不暗填 runKind/hook 洋葱终局/坏账不投影）与 integration.telemetry.test_telemetry_otlp_export v3 五案（全链含子账/cursor 三件/整树挪位/重启批 id 不重复/截断停投/格式歧义）；既有 telemetry 册随版本常数同步（golden 夹具、otlp_json/projector/cursor 断言）；PR #102 CI rollup conclusion=success（2026-09-16，https://github.com/relic-yuexi/LubanCode/actions/runs/35056907085 之后头提交全绿；首轮三轮红分别为 deque→vector 转换、doctest MessageBuilder 拼接、provider 兜底初值，均非映射合同缺陷）
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实 Collector 数据链未验（配置能加载≠数据链通过，单列后续）；估算栏 tokenEstimateRef 离线消费迁移与 T14 共担
 旧依赖：v2 EventEnvelope Fold/旧流身份保留（旧档消费，T02-B 退役；C2 行已记账）
 文档：docs/architecture/trajectory-v3-schema.md §九 Telemetry 行、docs/development/v3-consumer-inventory.md C2 行
