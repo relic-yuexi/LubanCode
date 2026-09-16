@@ -3177,8 +3177,10 @@ std::expected<void, std::string> SessionManager::RecordResumeReference(
 namespace {
 
 // lifecycle intent + result 一笔(自由函数版:operation_id 由操作名 +
-// session_id + 时刻拼单段名;同毫秒同场次同操作的重复请求撞 create-new
-// 占位时加序号后缀重试——幂等语义下重复调用不该被时间戳撞名误伤)。
+// session_id + 时刻拼单段名,同毫秒同场次同操作的重复请求会被
+// lifecycle intent 的 create-new 占位拒——正好是抢占语义,v2 既有册钉着
+// 这条,T15-B 不动它;v3 的 archive/unarchive 幂等靠 ScanSessionArchiveState
+// 提前短路,不靠撞名重试)。
 SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir,
                                       LifecycleOperation operation, const std::string& session_id,
                                       const nlohmann::json& parameters, const nlohmann::json& outcome_json,
@@ -3199,18 +3201,7 @@ SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir
     intent.session_id = session_id;
     intent.requested_at_ms = now_ms;
     intent.parameters = parameters;
-    // 撞名(create-new 占位拒)加 -2..-9 后缀重试:固定钟测试与同毫秒幂等
-    // 重调都不因时间戳复用而误报 lifecycle.intent_exists。
-    auto intent_dir = lifecycle.WriteIntent(intent);
-    for (int retry = 2; retry <= 9 && !intent_dir.has_value(); ++retry) {
-        const std::string exists_marker = "lifecycle.intent_exists";
-        if (intent_dir.error().rfind(exists_marker, 0) != 0) {
-            break;
-        }
-        intent.operation_id = std::string(LifecycleOperationName(operation)) + "-" + session_id +
-                              "-" + std::to_string(now_ms) + "-" + std::to_string(retry);
-        intent_dir = lifecycle.WriteIntent(intent);
-    }
+    const auto intent_dir = lifecycle.WriteIntent(intent);
     if (!intent_dir.has_value()) {
         return SessionAdminOutcome{"lifecycle.intent_failed", intent_dir.error()};
     }
