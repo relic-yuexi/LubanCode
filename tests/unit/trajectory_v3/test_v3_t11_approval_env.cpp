@@ -302,16 +302,19 @@ TEST_CASE("T11-C 恢复: 旧场环境事实不动,新场重采自己的") {
     REQUIRE(source_capture.has_value());
 
     // 恢复换场:昨天的事实留在旧场(字节不动);新场没采集前 unavailable,
-    // 采集后是新场自己今天的快照。
-    const auto summary = ledger->ResumeInteractive(source_id);
+    // 采集后是新场自己今天的快照。恢复走第二只账本(生产形状:恢复总从
+    // 活场出发,封口后的源场由新进程接管)。
+    auto second = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(second.has_value());
+    const auto summary = second->ResumeInteractive(source_id);
     REQUIRE(summary.outcome.error_code.empty());
     CHECK(ReadFileText(source_stream) == source_bytes);
-    const auto new_stream = V3StreamOf(*ledger);
+    const auto new_stream = V3StreamOf(*second);
     CHECK_FALSE(lubancode::trajectory::v3::FindLastEnvironmentCapture(
                     *lubancode::trajectory::v3::ReadV3Ledger(new_stream))
                     .has_value());  // 没采集就 unavailable,不拿源场的补
     facts.model = "kimi-k2.6-today";
-    CHECK(ledger->CaptureEnvironment(facts).empty());
+    CHECK(second->CaptureEnvironment(facts).empty());
     const auto new_capture = lubancode::trajectory::v3::FindLastEnvironmentCapture(
         *lubancode::trajectory::v3::ReadV3Ledger(new_stream));
     REQUIRE(new_capture.has_value());
