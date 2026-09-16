@@ -1,7 +1,7 @@
 # QQ Bot：证书部分解析误判与网关 400 诊断修复
 
-日期：2026-09-16。核查源码：`a8e22357`。
-状态：问题审查与解决方案，待实现、待测试。未改运行时代码，未调用用户 QQ 凭据，未复现其实际证书集合或 HTTP 响应。
+日期：2026-09-16。核查源码：`a8e22357`。实现基线：`f998b841`。
+状态：已实现、单测覆盖、CI 随本 PR 验。真实平台验证（真机 Windows TLS 现场、真实 400 平台 code）仍归 Q3 真机，未做、不虚报。
 归属：[QQ Windows 接入修复单](QQBot_Windows连接诊断与交互配置修复.todo) P0-B 的现场回归补单。该单“已实现”不等于此处真实连接已验收。
 
 ## 一、现场与结论
@@ -36,16 +36,16 @@ mbedTLS 版本由 CMake 固定为 v3.6.3。该版本 [接口合同](https://gith
 
 ## 三、P0：统一信任根加载结果
 
-- [ ] 用结构化 `TrustLoadReport` 替换“count/-1”折叠：source、输入是否为空、exported_count、unique_count、parsed_count、failed_count、parse_rc、首个负错误码、是否允许继续。名称为提案。
-- [ ] 分清 export 与 load。Windows 导出后立即走与连接相同的解析/策略函数，启动日志报可用/失败数量，不能只展示导出数量。受控传递字节长度与内存内摘要，验证装配到消费没有变化；默认日志不输出 PEM、证书主体或完整证书店清单。
-- [ ] mbedTLS 的批量正返回值只给失败数量；要取具体失败原因，在有界诊断路径逐证解析，记录证书 SHA-256 指纹、来源店及负错误码。限制条数，不输出整张证书。正常启动不反复扫描全部系统店。
-- [ ] 保持调用方显式 CA 的严格语义：显式输入含坏证时报告 load_failed，不回退系统证书；错误信息保留源头，不能清空 PEM 后只剩 empty。
-- [ ] 系统证书集合允许部分兼容：rc>0 且 parsed_count>0 时保留成功链、警告失败数量，继续正常证书验证；拒绝“解析跳过”变成“跳过对端验证”。rc<0 包括内存错误，均失败，不因链中残留项而继续。
-- [ ] 空输入/系统店无可用导出才用 `tls_trust_store_empty`；非空但解析失败用 `tls_trust_store_load_failed`，带真实负码；部分成功用 warning，不报 empty。
-- [ ] 连接阶段去掉“先解析计数、释放，再解析”的重复逻辑，直接初始化将用于握手的链并检查加载报告。若装配阶段有预检，必须调用同一策略，不能两套判断走岔。
-- [ ] Root 与 CA 来源分开记录并按证书指纹去重；Windows 系统链/用途/显式不信任规则仍作最终校验，不能把每张中间证书都视作无条件可信根。
-- [ ] 固定 `MBEDTLS_SSL_VERIFY_REQUIRED`，保留主机名、时间、用途及系统策略检查。不关闭验证、不放行任意自签名、不要求用户删除系统证书，不为兼容解析而全局放宽弱算法策略。
-- [ ] 核对实际发布编译配置中的 `MBEDTLS_USE_PSA_CRYPTO`。只有启用时才涉及 `psa_crypto_init` 前置；按需补线程安全初始化。当前未取得发布包编译宏，不把 PSA 未初始化当现场根因。
+- [x] 用结构化 `TrustLoadReport` 替换“count/-1”折叠：source、输入是否为空、exported_count、unique_count、parsed_count、failed_count、parse_rc、首个负错误码、是否允许继续。名称为提案。（`TrustLoadReport` src/channel/qq/qq_tls.hpp + `EvaluateTrustLoad()` src/channel/qq/qq_tls.cpp；`CountParsedCertificates`（非零折叠成 -1 的病根）已删；测试 tests/unit/channelqq/test_qq_tls_trust_load.cpp 全册）
+- [x] 分清 export 与 load。Windows 导出后立即走与连接相同的解析/策略函数，启动日志报可用/失败数量，不能只展示导出数量。受控传递字节长度与内存内摘要，验证装配到消费没有变化；默认日志不输出 PEM、证书主体或完整证书店清单。（`ResolveChannelTrustRoots` Windows 分支导出后即调 `EvaluateTrustLoad`，detail 报"枚举/去重/可解析/跳过"四数；wiring 诊断 src/app/channel_gateway_wiring.cpp 报可用张数与 warning；PEM 原样透传到 transport factory（连接侧解析自动跳坏证保成功链，装配到消费字节不变）；日志无 PEM/主体/整店清单——测试 test_qq_tls_trust_load.cpp"系统 PEM 混合文件部分兼容"案 + test_qq_tls_errors.cpp Windows 店冒烟案）
+- [x] mbedTLS 的批量正返回值只给失败数量；要取具体失败原因，在有界诊断路径逐证解析，记录证书 SHA-256 指纹、来源店及负错误码。限制条数，不输出整张证书。正常启动不反复扫描全部系统店。（`DiagnoseBadCertificates` 限 3 条（kMaxBadCertNotes），note 只带 SHA-256 指纹（前 16 字节十六进制）+ mbedTLS rc；只在装配预检（`EvaluateTrustLoad`）走一次，连接路径不做逐证诊断；Windows 导出记 `fingerprint_store`（指纹→Root/Ca+位置标签）供来源定位——测试"坏证诊断有界"断言（bad_cert_notes ≤3、无 PEM 边界、带 sha256:））
+- [x] 保持调用方显式 CA 的严格语义：显式输入含坏证时报告 load_failed，不回退系统证书；错误信息保留源头，不能清空 PEM 后只剩 empty。（`VerdictOfParse(strict=true)`：rc>0 且成功链非空也拒；`ResolveChannelTrustRoots` explicit 分支 error 保留"显式信任锚含 N 张坏证——严格拒绝，不回退系统证书"；连接层同款——测试"显式锚严格拒绝"案 + "ResolveChannelTrustRoots 显式混合锚严格拒绝不回退"案 + test_qq_wiring.cpp 显式无效锚改断言 load_failed）
+- [x] 系统证书集合允许部分兼容：rc>0 且 parsed_count>0 时保留成功链、警告失败数量，继续正常证书验证；拒绝“解析跳过”变成“跳过对端验证”。rc<0 包括内存错误，均失败，不因链中残留项而继续。（`VerdictOfParse` 非 strict 分支 + `EvaluateTrustLoad` warning 文案；rc<0 全败分支不受链残留影响；VERIFY_REQUIRED 全程未动——测试"系统集合部分兼容"案、"空输入与纯垃圾(负码)"案、"混合集合真握手"案（部分加载下真 TLS 握手照常验证服务端证书））
+- [x] 空输入/系统店无可用导出才用 `tls_trust_store_empty`；非空但解析失败用 `tls_trust_store_load_failed`，带真实负码；部分成功用 warning，不报 empty。（连接层 `TlsClientStream::Connect` 三分支 + wiring `trust_block_code` 同口径判 empty_case；测试"连接层稳定码——空输入 empty、非空解析失败 load_failed"案（修前该案报 empty，正是现场误报）、test_qq_wiring.cpp"tls_trust_store_load_failed"断言）
+- [x] 连接阶段去掉“先解析计数、释放，再解析”的重复逻辑，直接初始化将用于握手的链并检查加载报告。若装配阶段有预检，必须调用同一策略，不能两套判断走岔。（`Connect` 一次 `mbedtls_x509_crt_parse` 进 `TlsContext::ca` 后按 `VerdictOfParse` 判定；`EvaluateTrustLoad`（装配预检）与连接路径共用同一张 `VerdictOfParse` 判定表——qq_tls.cpp 注释明记"不两套判断走岔"）
+- [x] Root 与 CA 来源分开记录并按证书指纹去重；Windows 系统链/用途/显式不信任规则仍作最终校验，不能把每张中间证书都视作无条件可信根。（`WindowsTrustExport` 增 root_count/ca_count/raw_count/fingerprint_store，导出时 SHA-256 指纹去重；Disallowed 跳过与 `WindowsPolicyVerify` 系统终审（链构建+SSL 策略）原样保留——测试"重复证书按指纹去重"案（exported=3/unique=1））
+- [x] 固定 `MBEDTLS_SSL_VERIFY_REQUIRED`，保留主机名、时间、用途及系统策略检查。不关闭验证、不放行任意自签名、不要求用户删除系统证书，不为兼容解析而全局放宽弱算法策略。（authmode/hostname/时间/系统策略检查零改动；测试"显式锚真握手——合法成/错主机名/不信任/过期败"案钉不信任面全保留：wrong CN→hostname_mismatch、无关锚→not_trusted、过期证→expired）
+- [x] 核对实际发布编译配置中的 `MBEDTLS_USE_PSA_CRYPTO`。只有启用时才涉及 `psa_crypto_init` 前置；按需补线程安全初始化。当前未取得发布包编译宏，不把 PSA 未初始化当现场根因。（核对 CMakeLists.txt L248-257：FetchContent v3.6.3，仅关 ENABLE_PROGRAMS/ENABLE_TESTING/GEN_FILES/ZLIB，未定义 `MBEDTLS_USE_PSA_CRYPTO`，mbedTLS 3.6 默认配置该宏关——X.509/TLS 层不经 PSA，`psa_crypto_init` 前置不适用；不据此改现场归因）
 
 目标日志示意，数字仅为测试示例：
 
@@ -59,34 +59,34 @@ mbedTLS 版本由 CMake 固定为 v3.6.3。该版本 [接口合同](https://gith
 
 每次 TLS 失败重连，`RunOneConnection` 都会重新调用 gateway_url_provider。于是多轮尝试中既可能遇到本地 TLS 错误，也可能遇到网关 HTTP 错误；同一日志里出现两者不表示同一根因。
 
-- [ ] 为 QqHttpResponse 增加白名单诊断头投影，例如平台 trace ID、Retry-After；在公共 HTTP 适配层提取，保留响应大小限制。不得把所有头搬进日志。
-- [ ] `FetchGatewayUrl` 对非 2xx 的有界 JSON 响应读取平台 code，映射成本地稳定说明；未知响应只报 status、是否 JSON、允许的 trace ID。原始 message 可能回显敏感值，默认不原样打印。
-- [ ] 区分请求/权限拒绝、鉴权失效、限流、服务器故障与响应格式错误。不能见 400 就重置密钥，也不能把所有 4xx 当永久失败；按实际平台 code 制定处理。
-- [ ] 只有明确 token 失效时才失效缓存并做一次受控刷新；明确权限/配置拒绝进入待处理状态，429 服从有效 Retry-After 并有上限，5xx/网络错误退避。未知 400 保留原因与次数，低频重试并提示诊断，不刷请求。
-- [ ] 已确认的本地证书加载失败在发 token/gateway 请求前发现，阻断无效重试；显式重试/配置变化/重启再加载。网络断线仍按既有退避，不混用策略。
-- [ ] 核对当前默认 api_base=`https://api.sgroup.qq.com`、bots_base 与官方当前入口。官方[事件文档](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html)示例使用 api.bot.qq.com，但域名不同本身不足以证明旧入口失效。先核官方兼容合同及受控实测，再决定默认值迁移；不能盲换域名。
-- [ ] 若缓存 WSS 地址减少重复查询，明确生效时长、失效/重查条件与账号隔离；这不是 TLS 修复前提。鉴权头不得跟随任意跨域重定向；响应 URL 校验沿现有网络策略。
-- [ ] 每次尝试携带 account、attempt_id、阶段与时间，根因和退避通知关联同次尝试；stdout/stderr 展示交错不能被误读为倒序执行。
+- [x] 为 QqHttpResponse 增加白名单诊断头投影，例如平台 trace ID、Retry-After；在公共 HTTP 适配层提取，保留响应大小限制。不得把所有头搬进日志。（`QqHttpResponse::diagnostic_headers` src/channel/qq/qq_http.hpp + `ProjectDiagnosticHeaders` src/channel/qq/qq_http.cpp：白名单 retry-after/x-trace-id/trace-id/x-traceid/x-request-id/x-tencent-traceid，限 4 条、值长 128；响应头/体字节帽沿 net::FullHttpLimits 原样——测试 test_qq_gateway_diag.cpp"trace 走白名单诊断头兜底"案）
+- [x] `FetchGatewayUrl` 对非 2xx 的有界 JSON 响应读取平台 code，映射成本地稳定说明；未知响应只报 status、是否 JSON、允许的 trace ID。原始 message 可能回显敏感值，默认不原样打印。（`ClassifyGatewayHttpFailure` src/channel/qq/qq_gateway.{hpp,cpp} 纯函数：detail 只拼 status/是否 JSON/平台 code 数值/trace 标识；message 不透传——测试"400 JSON 带平台 code"案断言假敏感值不出现）
+- [x] 区分请求/权限拒绝、鉴权失效、限流、服务器故障与响应格式错误。不能见 400 就重置密钥，也不能把所有 4xx 当永久失败；按实际平台 code 制定处理。（稳定码五分：gateway_url_bad_request/forbidden/unauthorized/rate_limited/server_error + bad_response/http_failed 兜底；400 不重置密钥不全局永久失败（按退避低频重试，detail 明示“未知平台 code,低频重试;不重置密钥”）——测试"401/403/5xx/未知 4xx 各归稳定码"案）
+- [x] 只有明确 token 失效时才失效缓存并做一次受控刷新；明确权限/配置拒绝进入待处理状态，429 服从有效 Retry-After 并有上限，5xx/网络错误退避。未知 400 保留原因与次数，低频重试并提示诊断，不刷请求。（provider 判 error_code==gateway_url_unauthorized 才 `token_manager_.Invalidate()`（每轮一次受控）；`GatewayConnectError.retry_after_ms` + RunLoop 退避取 max(阶梯,retry_after) 封 max_backoff_ms 帽——测试"401 集成"案（400 案同时断言 token_calls==1）、"429 Retry-After 数字秒生效,HTTP-date 不解析"与"429 集成"案）
+- [x] 已确认的本地证书加载失败在发 token/gateway 请求前发现，阻断无效重试；显式重试/配置变化/重启再加载。网络断线仍按既有退避，不混用策略。（wiring 把 `trust_load_block_code/detail` 递进 adapter Options；gateway_url_provider 入口短路（stage=connecting，不进联网阶段）；重启进程重新装配即重载——测试"信任根预检失败——阻断 token/gateway 请求"案（多轮退避后 token_calls==0/gateway_calls==0））
+- [x] 核对当前默认 api_base=`https://api.sgroup.qq.com`、bots_base 与官方当前入口。官方[事件文档](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html)示例使用 api.bot.qq.com，但域名不同本身不足以证明旧入口失效。先核官方兼容合同及受控实测，再决定默认值迁移；不能盲换域名。（核对完毕：默认值保持不动——单内口径“域名不同本身不足以证明旧入口失效”，迁移留待官方兼容合同核对+受控实测取得证据后另立小单；本单零域名改动）
+- [x] 若缓存 WSS 地址减少重复查询，明确生效时长、失效/重查条件与账号隔离；这不是 TLS 修复前提。鉴权头不得跟随任意跨域重定向；响应 URL 校验沿现有网络策略。（如实记：WSS 地址缓存未做——非本单前提，每轮仍查网关；鉴权头/重定向策略沿 net 层既有合同零改动）
+- [x] 每次尝试携带 account、attempt_id、阶段与时间，根因和退避通知关联同次尝试；stdout/stderr 展示交错不能被误读为倒序执行。（`RunOneConnection(attempt_number)` 把尝试编号写进 ConnectFailed/Disconnected 事件（与随后 BackoffScheduled.attempt 同轮同号）；`ConnectionFailure.attempt` 入 Health 快照账，at_ms 既有；account 归宿主路由层（快照按 adapter 账号隔离）——测试"400 集成"案断言 failure->attempt>=1）
 
 ## 五、P1：顺路发现的回调生命期缺口
 
 `TlsClientStream::Connect` 内在栈上创建 `WindowsVerifyContext windows_verify`，把地址交给 `mbedtls_ssl_conf_verify`；返回后 ssl/config 在堆上继续存活，回调参数却已悬空。初次握手期间地址有效，因此这不是当前空信任根报错的原因；后续若再次触发验证则有隐患。
 
-- [ ] 将验证上下文移入 TlsContext 或其拥有的稳定堆对象，和 TLS 连接一起释放；移动 TlsClientStream 不改变回调目标地址。
-- [ ] 检查 Windows 链验证回调中的证书链来源、用途、深度 flags、网络取中间证书的超时与取消；已有注释不代替 Windows TLS 实测。本单不靠清空全部 flags 获得成功。
-- [ ] 对地址生命周期作测试或消毒器验证；无法驱动重协商时如实记录未覆盖分支，不称已动态触发悬空读。
+- [x] 将验证上下文移入 TlsContext 或其拥有的稳定堆对象，和 TLS 连接一起释放；移动 TlsClientStream 不改变回调目标地址。（`TlsContext::windows_verify` 为 `std::unique_ptr<WindowsVerifyContext>`（再堆一层），`mbedtls_ssl_conf_verify` 传 `.get()`；TlsContext 本就在堆上、随连接释放，移动 TlsClientStream 只搬 TlsContext*，回调目标地址不变——src/channel/qq/qq_tls.cpp §五注释）
+- [x] 检查 Windows 链验证回调中的证书链来源、用途、深度 flags、网络取中间证书的超时与取消；已有注释不代替 Windows TLS 实测。本单不靠清空全部 flags 获得成功。（核查记录落 qq_tls.cpp WindowsPolicyVerify 注释：链来源=系统默认引擎（hChainEngine=NULL）含系统店+AIA 网络取证，超时未参数化走系统默认（SDK 展开集缺成员的兼容口径维持，如实记“未覆盖参数化超时/取消”）；用途=CERT_CHAIN_POLICY_SSL 基础策略；深度=只 leaf(depth 0)；成功分支只清“链不可信”位，绝不清全部 flags——注释明记）
+- [x] 对地址生命周期作测试或消毒器验证；无法驱动重协商时如实记录未覆盖分支，不称已动态触发悬空读。（windows-msvc CI 腿真跑 SystemDefault 回调路径（test_qq_tls_trust_load.cpp Windows 分支：握手走到系统策略拒绝，detail 带"windows policy rejected"前缀证明回调真执行、地址有效不崩）；消毒器未接入 CI、重协商无法驱动——如实记：堆生命期是构造性保证+回调路径冒烟，“后续再次触发验证”分支未动态触发悬空读验证）
 
 ## 六、为什么现有测试没挡住
 
 [test_qq_tls_errors.cpp](../tests/unit/channelqq/test_qq_tls_errors.cpp) 的 Windows 测试只要求 exported count>0、字符串含 BEGIN CERTIFICATE、error 为空。这与当前导出逻辑一致，却没把完整导出集合送入消费端解析。显式 CA 真握手用例也不能代表混合 Windows 证书集合。
 
-- [ ] 补固定 fixture：合法证书 + 一个带完整 PEM 边界但坏 DER 的证书。先直接验证 pinned mbedTLS 返回正数、成功链非空，再验证旧条件会拒绝，修后系统模式保留成功链。
-- [ ] 补全部合法、全部坏、空输入、部分成功、重复证书、显式坏 CA 不回退、输入过大与内存错误传播；坏证放首/中/尾，避免只碰巧读到首张。
-- [ ] 把处理后的混合证书集合用于本地 TLS 服务端握手：合法主机成功、错主机名/不信任/过期仍失败。只验计数不算 TLS 修复通过。
-- [ ] Windows 系统根实测须验“导出 → 解析报告 → 真 TLS”，记录编译版本、计数、返回码与握手结果；可用无 QQ 凭据的公共 TLS 目标先隔离传输，再做获准账号的 QQ READY/RESUMED 验收。
-- [ ] 网关假响应覆盖 400 JSON/非 JSON、401、403、429、5xx、空/畸形 URL；检查 stable code、受控刷新、退避与日志无 token/secret/原始 body。
-- [ ] 用固定假敏感值做日志泄漏断言；无效信任根时断言不会持续请求 token/gateway。
-- [ ] 三平台按相关测试集回归；Windows 用新发布 ZIP 跑真实现场，不能拿源码提交或导出 157 张当在线证明。
+- [x] 补固定 fixture：合法证书 + 一个带完整 PEM 边界但坏 DER 的证书。先直接验证 pinned mbedTLS 返回正数、成功链非空，再验证旧条件会拒绝，修后系统模式保留成功链。（tests/unit/channelqq/test_qq_tls_trust_load.cpp `BadPemCertificate()`（完整边界+base64 垃圾载荷）；"钉 mbedTLS 批量 parse 合同"案直调 mbedtls_x509_crt_parse 断言 rc==1 且链非空；"混合集合真握手"案 Unix 腿 SystemDefault 成功（修前同一集合被旧折叠逻辑报 trust_store_empty））
+- [x] 补全部合法、全部坏、空输入、部分成功、重复证书、显式坏 CA 不回退、输入过大与内存错误传播；坏证放首/中/尾，避免只碰巧读到首张。（同册：全合法/全部坏（完整边界）/空输入/部分成功/重复（exported=3,unique=1）/显式坏不回退/大输入（300 张+1 坏，约 500KB，账目对且诊断有界）；坏证首/中/尾三排列各自部分成功。如实记：内存错误（ALLOC 失败）无法离线注入，负码传播以"纯垃圾文本→整批负错误码、first_negative_rc<0、不因链残留继续"代钉，ALLOC 路径与格式负码同走 rc<0 全败分支）
+- [x] 把处理后的混合证书集合用于本地 TLS 服务端握手：合法主机成功、错主机名/不信任/过期仍失败。只验计数不算 TLS 修复通过。（同册两案："混合集合真握手"（MockTlsServer 真 mbedTLS 服务端，Unix 成功/Windows 系统策略拒绝冒烟）；"显式锚真握手——合法成/错主机名/不信任/过期败"（夹具 `MockTlsCertOptions` 参数化 CN/有效期——tests/support/mock_ws_server.{hpp,cpp}，老调用默认参零变化））
+- [ ] Windows 系统根实测须验“导出 → 解析报告 → 真 TLS”，记录编译版本、计数、返回码与握手结果；可用无 QQ 凭据的公共 TLS 目标先隔离传输，再做获准账号的 QQ READY/RESUMED 验收。（归 Q3 真机：CI windows 腿只冒烟"系统店导出非空+解析报告+回调路径拒绝"（test_qq_tls_errors.cpp Windows 案 + test_qq_tls_trust_load.cpp Windows 分支），证书店内容不可控、无真实 157 张现场、无发布 ZIP 现场跑——本单不虚报）
+- [x] 网关假响应覆盖 400 JSON/非 JSON、401、403、429、5xx、空/畸形 URL；检查 stable code、受控刷新、退避与日志无 token/secret/原始 body。（tests/unit/channelqq/test_qq_gateway_diag.cpp：分类纯函数全表（400 JSON 带 code/非 JSON/JSON 无 code、401、403、404、429 数字秒与 HTTP-date、500/503、trace 头兜底与超长截断）+ adapter 集成（400/401/429/200 畸形 body 各案，token_calls/gateway_calls/next_retry_at_ms 对账）；空 URL 案=200 畸形 body（gateway_url_bad_response））
+- [x] 用固定假敏感值做日志泄漏断言；无效信任根时断言不会持续请求 token/gateway。（同册：`kFakeSecret`（ZZFAKE-SECRET-VALUE-DO-NOT-PRINT）塞进平台 message，断言分类 detail/集成 last_failure.detail/宿主 channel.status 帧全文均不含；"信任根预检失败"案多轮退避后 token_calls==0 且 gateway_calls==0）
+- [x] 三平台按相关测试集回归；Windows 用新发布 ZIP 跑真实现场，不能拿源码提交或导出 157 张当在线证明。（CI 三腿（ubuntu/macos/windows-msvc）随本 PR 跑 unit.channelqq.* 全册；真机发布 ZIP 现场归 Q3——本单完成线只标“解析与诊断修复通过”，不标“QQ 已可用”）
 
 ## 七、实施次序与完成线
 
@@ -96,3 +96,9 @@ mbedTLS 版本由 CMake 固定为 v3.6.3。该版本 [接口合同](https://gith
 4. 构建并测试新 Windows 包，核对运行版本；现场走到 READY，再验证消息收发及重连。
 
 完成线：不再把非空/部分成功误报为空；服务端不可信仍拒绝；400 有可追查的脱敏原因；真实 QQ 在线与重连证据齐全。未完成真实平台验证前，只标“解析与诊断修复通过”，不标“QQ 已可用”。
+
+## 八、实现记账（2026-09-16，随本 PR）
+
+- 实现：信任根加载合同（`TrustLoadReport`/`EvaluateTrustLoad`/`VerdictOfParse`，删 count/-1 折叠）、Windows 导出去重分记（Root/Ca × CurrentUser/LocalMachine 四店，SHA-256 指纹去重）、连接路径单次解析同表判定、回调堆生命期（P1）、网关 400 诊断（白名单诊断头投影 + `ClassifyGatewayHttpFailure` 五分稳定码 + 401 受控刷新 + 429 Retry-After 服从封帽 + 信任根预检短路阻断无效联网重试 + 尝试编号关联根因与退避）。
+- 新测试册：tests/unit/channelqq/test_qq_tls_trust_load.cpp（加载合同全表 + 真 TLS 握手四案）、tests/unit/channelqq/test_qq_gateway_diag.cpp（分类全表 + adapter 集成六案）；夹具 tests/support/mock_ws_server.{hpp,cpp} 证书参数化（默认参兼容老调用）。CMake glob 自动收录，无注册改动。
+- 未验边界（如实）：①Windows 真机 TLS 现场（导出→解析报告→真 TLS、真实 157 张集合、发布 ZIP 现场跑）归 Q3 真机；②真实网关 400 平台 code 未取得——分类按 status+平台 code 数值如实报“未知 code 低频重试不重置密钥”，取得真 code 后再决定平台侧修复；③MBEDTLS_ALLOC_FAILED 无法离线注入，负码传播以格式负码代钉；④回调“后续再次触发验证”分支（重协商）无法动态驱动，堆生命期为构造性保证+Windows CI 回调路径冒烟；⑤api_base 默认值未迁移（域名差异不足以证旧入口失效，待官方兼容合同+受控实测另立单）。
