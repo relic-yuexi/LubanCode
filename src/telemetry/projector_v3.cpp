@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <string>
@@ -185,7 +186,9 @@ public:
 
     MetricSink& metrics() { return metrics_; }
     std::vector<TraceSpan> TakeSpans() {
-        std::vector<OpenSpan> open = std::move(spans_);
+        std::vector<OpenSpan> open(std::make_move_iterator(spans_.begin()),
+                                   std::make_move_iterator(spans_.end()));
+        spans_.clear();
         std::sort(open.begin(), open.end(), [](const OpenSpan& a, const OpenSpan& b) {
             if (a.anchor_seq != b.anchor_seq) {
                 return a.anchor_seq < b.anchor_seq;
