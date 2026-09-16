@@ -847,6 +847,10 @@ add_library(lubancode_engine STATIC
   # 摘要派生仓(原子写/stale 判定)与一间 session 的分析管线。坏账整间
   # 排除且理由可见;同一封口 session 重算字节相同。
   src/insights/integrity_gate.cpp
+  # T14(Insights 接入 Session v3):验过 v3 树的领域读模型——请求事实
+  # (prepared 引用/视图指纹/usage owner)、工具折叠快照与失败明细;
+  # prompt 审计/摩擦分类/会话分析只吃这份,不再各扫 JSONL。
+  src/insights/v3_facts.cpp
   src/insights/friction_classifier.cpp
   src/insights/feature_signal.cpp
   src/insights/derived_store.cpp

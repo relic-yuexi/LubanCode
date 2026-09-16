@@ -6,6 +6,7 @@
 
 #include "accounting/usage_aggregate.hpp"
 #include "accounting/usage_projector.hpp"
+#include "accounting/session_usage_reader.hpp"
 #include "insights/derived_store.hpp"
 
 namespace lubancode::insights {
@@ -33,6 +34,151 @@ std::optional<std::int64_t> DaysOf(const std::string& yyyymmdd) {
         std::chrono::sys_days{ymd}.time_since_epoch().count());
 }
 
+// v3 半场(T14):usage 走 T06 的同一只读面(ReadSessionUsage:树内递归
+// ProjectV3Usage,父/子/cycle 去重,resume 源不混入);工作账从领域读模型
+// 折(turn 按 conversation 消息分组,工具按 actionId 折叠);verification/
+// outcome/审批事实 v3 未发行——0/空如实,limitations 声明,不判"没验证"。
+void AnalyzeSessionV3(SessionAnalyzeResult& result, const std::filesystem::path& session_dir) {
+    const std::vector<V3SessionFacts>& facts = result.gate.v3_facts;
+    SessionInsightSummary& summary = result.summary;
+    summary.source.format = "v3";
+    summary.coverage.limitations = {
+        "verification: v3 现行合同无该事实(T11 域未发行),相关规则不判分,0 不是零验证",
+        "outcome: v3 现行合同无该事实,完成率指标不可用,不据 session.ended 推断任务完成",
+        "approval: v3 现行合同无宿主审批事实,approval.wait 不判分,不据缺记录推断没有审批",
+    };
+
+    // usage:与 /usage 同一只读面、同一去重口径(T06 范围:本树,祖先不
+    // 混入;相同 owner 同一聚合范围只算一次)。
+    std::vector<accounting::UsageSample> samples;
+    const auto usage = accounting::ReadSessionUsage(session_dir);
+    if (!usage.ok) {
+        result.warnings.push_back("usage.v3_read_failed: " + usage.error_code + ": " +
+                                  usage.message);
+    } else {
+        for (const auto& warning : usage.warnings) {
+            result.warnings.push_back(warning);
+        }
+        samples = std::move(usage.samples);
+        for (const auto& sample : samples) {
+            summary.coverage.requests_total += 1;
+            if (sample.usage.has_value()) {
+                summary.coverage.requests_with_usage += 1;
+                summary.usage.requests_with_usage += 1;
+                summary.usage.input_tokens += sample.usage->input_tokens;
+                summary.usage.cache_read_tokens += sample.usage->cache_read_tokens;
+                summary.usage.cache_creation_tokens += sample.usage->cache_creation_tokens;
+                summary.usage.output_tokens += sample.usage->output_tokens;
+                summary.usage.reasoning_tokens += sample.usage->output_reasoning_tokens;
+            }
+        }
+    }
+    summary.coverage.runs_total = static_cast<std::uint64_t>(facts.size());
+    summary.coverage.runs_analyzed = static_cast<std::uint64_t>(facts.size());
+    summary.usage.requests_total = summary.coverage.requests_total;
+    summary.usage.cost_status = "not_priced";
+
+    FeatureSignalInput signal_input;
+    signal_input.session_id = result.gate.session_id;
+    for (const auto& sample : samples) {
+        const std::int64_t shape = sample.total_billed_shape_tokens;
+        // one_shot 的 main run 与交互 main 同类(与 v2 半场同口径)。
+        if (sample.run_kind == "main_session" || sample.run_kind == "one_shot") {
+            signal_input.main_tokens += shape;
+        } else {
+            signal_input.subagent_tokens += shape;
+        }
+    }
+
+    // 工作账:主账 turn 按 conversation 消息的 turnId 分组(空 turnId 的
+    // 内部回合不算主轮);工具按 actionId 折叠(树内,一次声明一次)。
+    std::set<std::string> turns;
+    std::set<std::string> files_touched;
+    for (const auto& session : facts) {
+        if (!session.is_subagent) {
+            for (const auto& request : session.requests) {
+                if (request.purpose == "conversation" && !request.turn_id.empty()) {
+                    turns.insert(request.turn_id);
+                }
+            }
+        }
+        for (const auto& action : session.tool_actions) {
+            summary.work.tool_calls += 1;
+            // files_touched:声明块参数里的 path/file_path(声明参数口径;
+            // v3 的 effectiveArgsRef 是引用不内联,取不到更实的)。
+            if (action.snapshot.declared_args.has_value() &&
+                action.snapshot.declared_args->is_object()) {
+                for (const char* key : {"path", "file_path"}) {
+                    const auto it = action.snapshot.declared_args->find(key);
+                    if (it != action.snapshot.declared_args->end() && it->is_string()) {
+                        files_touched.insert(it->get<std::string>());
+                    }
+                }
+            }
+        }
+    }
+    summary.work.turns = turns.size();
+    summary.work.files_touched = files_touched.size();
+    // verifications/outcome:v3 无事实,0/空如实(limitations 已声明)。
+    summary.work.verifications = 0;
+    summary.work.outcome = std::string();
+
+    // 摩擦:v3 事实取材(缺审批/验证类不判分)。
+    for (auto& occurrence : ClassifyFrictionV3(facts)) {
+        result.frictions.push_back(std::move(occurrence));
+    }
+
+    // runtime 层变化(prompt audit 的 runtime 半场;直接吃 gate 手里的
+    // 读模型,不二次读盘)。v3 无 v2 epoch 账:prefix_breaks_same_epoch
+    // 不判(0 不是"没断"),信号输入不喂该字段。
+    {
+        RuntimeAuditInput audit_input;
+        audit_input.session_id = result.gate.session_id;
+        audit_input.requests = RuntimeViewsFromV3Facts(facts, &result.warnings);
+        result.prompt_findings = AuditPromptRuntime(audit_input);
+        summary.prompt_findings = result.prompt_findings;
+    }
+
+    // 摩擦折叠:类名去重排序进 summary(§6.5)。
+    {
+        std::set<std::string> categories;
+        for (const auto& occurrence : result.frictions) {
+            categories.insert(occurrence.category);
+            signal_input.friction_counts[occurrence.category] += 1;
+        }
+        summary.friction_events.assign(categories.begin(), categories.end());
+    }
+    result.signals = DetectFeatureSignals(signal_input);
+    summary.feature_signals.clear();
+    for (const auto& signal : result.signals) {
+        summary.feature_signals.push_back(signal.signal_id);
+    }
+}
+
+// 收尾(v2/v3 半场共用):fresh 摘要复用或原子落盘。active 不写长期摘要
+//(§14.2,免与 writer 争);同一封口 session 重算字节相同。
+SessionAnalyzeResult FinalizeSessionAnalyze(SessionAnalyzeResult& result,
+                                            const std::filesystem::path& session_dir,
+                                            const SessionAnalyzeOptions& options) {
+    if (options.write_summary && !result.provisional) {
+        const DerivedReadResult existing = ReadExistingSessionSummary(session_dir);
+        if (existing.exists && existing.parse_ok &&
+            !IsSummaryStale(existing, result.gate.stream_terminal_hashes)) {
+            result.summary_reused = true;
+            result.summary = existing.summary;
+        } else {
+            const DerivedWriteResult written =
+                WriteSessionSummaryAtomic(session_dir, result.summary);
+            if (written.ok) {
+                result.summary_written = true;
+            } else {
+                result.derived_error = written.message;
+            }
+        }
+    }
+    return result;
+}
+
 }  // namespace
 
 SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
@@ -46,6 +192,15 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
     }
     result.analyzed = true;
     result.provisional = result.gate.status != SessionGateStatus::Analyzed;
+
+    // v3 半场(T14):领域读模型驱动,不解析旧信封;v2 老路原样保留。
+    if (result.gate.format == "v3") {
+        result.summary.source.session_id = result.gate.session_id;
+        result.summary.source.stream_terminal_hashes = result.gate.stream_terminal_hashes;
+        result.summary.source.integrity = result.provisional ? "provisional" : "verified";
+        AnalyzeSessionV3(result, session_dir);
+        return FinalizeSessionAnalyze(result, session_dir, options);
+    }
 
     SessionInsightSummary& summary = result.summary;
     summary.source.session_id = result.gate.session_id;
@@ -214,25 +369,7 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
     for (const auto& signal : result.signals) {
         summary.feature_signals.push_back(signal.signal_id);
     }
-
-    // 摘要落盘:active 不写长期摘要(§14.2,免与 writer 争)。
-    if (options.write_summary && !result.provisional) {
-        const DerivedReadResult existing = ReadExistingSessionSummary(session_dir);
-        if (existing.exists && existing.parse_ok &&
-            !IsSummaryStale(existing, result.gate.stream_terminal_hashes)) {
-            result.summary_reused = true;
-            result.summary = existing.summary;
-        } else {
-            const DerivedWriteResult written =
-                WriteSessionSummaryAtomic(session_dir, summary);
-            if (written.ok) {
-                result.summary_written = true;
-            } else {
-                result.derived_error = written.message;
-            }
-        }
-    }
-    return result;
+    return FinalizeSessionAnalyze(result, session_dir, options);
 }
 
 WorkspaceScanReport ScanWorkspaceSessions(const std::filesystem::path& sessions_root,

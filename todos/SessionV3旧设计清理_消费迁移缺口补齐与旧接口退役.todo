@@ -206,13 +206,25 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 落点：`src/insights/integrity_gate.*`、`prompt_auditor.*`、`friction_classifier.*`、相关 session/workspace 分析入口。
 
-- [ ] 完整性检查复用 v3 reader/verify，坏来源/缺 blob/不完整请求在报告中标 partial，而非跳过整场或记零风险。
-- [ ] PromptAudit 读取实际 request refs、wire map、contextRevision 与 tokenEstimateRef，不从最终聊天显示倒推出站 prompt。
-- [ ] Friction 分类从 v3 工具/请求/审批事实取材，保留规则版本和 evidenceRefs；没有相应 T11 事实时输出 unknown，不据未记录推断没有审批/失败。
-- [ ] workspace 汇总按 T06 的范围去重，父/子/恢复链不重算，隐私与 redaction canary 保持。
-- [ ] 完成 T00 清册中 task_ledger、agent_tool、runtime_contract 等命中引用分类；每个真实旧信封消费者另挂子项，不能只靠头文件删除后编译不过再临时补洞。
+```text
+任务编号：T14 / V3-ADD-01
+状态：verified
+实现：commit f8242a20 起五笔（分支 worktree-agent-insights-v3，PR #101，判绿头提交 280ad10c，2026-09-16）——src/insights/v3_facts.*（领域读模型：WalkSessionTree 逐账折 prepared 引用/inputView 指纹/usage owner/工具折叠/失败明细/缺 blob 实探）、integrity_gate.*（ProbeV3SessionStream 分派、封口按账面 session.ended、Unsupported、partial 点名）、prompt_auditor.*（v3 半场规则 V01–V05、R01 不再要求 v2 manifest）、friction_classifier.*（friction-v2、UnsupportedFrictionCategoriesV3）、session_analyzer.cpp（AnalyzeSessionV3、limitations）、finding.*（EvidenceItem.seq）、session_summary.*/report_model（insights-v2.0、format/limitations）、redaction/health/html 同步；tests/unit/insights/test_insights_v3_pipeline.cpp；v3-consumer-inventory.md C1/C5/C8 记账
+生产入口：只读查询链（/insights、/prompt audit runtime/outcome、/doctor insights、workspace 报告）；不改模型行为，不写原账
+验证：unit.insights.test_insights_v3_pipeline（gate 五态分型与 partial 不跳整场/缺 blob 点名、摩擦 v3 正反例（无审批/验证事实不判分）、prompt v3 规则与 R01 不误报、resume 链与两层子代理同范围只算一次、同一封口场摘要字节稳定、schema 往返与 allowlist）；v2 老册原样保留作旧档回归；PR #101 CI rollup conclusion=success（头提交 280ad10c，macos-clang 546 册全绿，2026-09-16；首轮四红均为编译/夹具瑕疵，非生产代码缺陷——缺 include、optional 解引用、schema3 生命周期 status 与 assistant requestId、summary 键集校验，就地修后复绿）
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真机 v3 会话的 /insights 与 /prompt audit 抽验未做（归细化单 I5 生产验收）；tokenEstimateRef 离线展开（估算栏消费）与 compact 前后对照细分规则留后续批
+旧依赖：insights 的 v2 EventEnvelope 读路（integrity_gate/prompt_auditor/session_analyzer 的 v2 半场）保留给旧档，退役归 T02-B；C8 分类后确认 task_ledger/agent_tool/runtime_event 系近名或协议件，真实旧信封消费者仅 memory_extract 的 v2 保底分支（挂 T02-B）
+文档：docs/development/v3-consumer-inventory.md C5/C1/C8 行与 §五索引；todos/Insights接入SessionV3_使用账本与Prompt审计迁移.todo §六实现记录
+销项日期：2026-09-16（CI 判绿口径；真机抽验尾巴见『失败/未验』栏）
+```
 
-验收：同一请求能从 Insights 跳到对应 v3 消息/工具与原始请求材料；损坏/缺件可解释；无关字段缺失不变成“模型没做”。已有 `tests/unit/insights` fixture 迁新格式并保留错误反例。
+- [x] 完整性检查复用 v3 reader/verify，坏来源/缺 blob/不完整请求在报告中标 partial，而非跳过整场或记零风险。（GateSessionV3：子账坏/缺/环与 facts.missing_blob 进 notes，整场仍 Analyzed/Active；截断尾 Incomplete、坏中段 Corrupt 整间排除理由点名）
+- [x] PromptAudit 读取实际 request refs、wire map、contextRevision 与 tokenEstimateRef，不从最终聊天显示倒推出站 prompt。（prepared 的 inputMessageRefs/systemMessageRef/contextRevision/toolNames/tokenEstimateRef 与 inputView 指纹；wire 逐字正文不在账——V01 只标视图分叉并明示证据边界，不冒充 wire）
+- [x] Friction 分类从 v3 工具/请求/审批事实取材，保留规则版本和 evidenceRefs；没有相应 T11 事实时输出 unknown，不据未记录推断没有审批/失败。（friction-v2；evidence 带 event_id+seq；approval/verification 类 UnsupportedFrictionCategoriesV3 在册不判分）
+- [x] workspace 汇总按 T06 的范围去重，父/子/恢复链不重算，隐私与 redaction canary 保持。（usage 走 ReadSessionUsage 同一读面；resume 祖先不在树内不重算；allowlist 增 format/limitations/seq，canary 册与 redaction 断言不泄正文）
+- [x] 完成 T00 清册中 task_ledger、agent_tool、runtime_contract 等命中引用分类；每个真实旧信封消费者另挂子项，不能只靠头文件删除后编译不过再临时补洞。（C8 行逐一追到生产调用：task_ledger/agent_tool 的 RecordRequestOutcome 是领域自有账、runtime::EventEnvelope 是协议信封同名不同物——均保留；memory_extract 双格写口的 v2 分支挂 T02-B）
+
+验收：同一请求能从 Insights 跳到对应 v3 消息/工具与原始请求材料；损坏/缺件可解释；无关字段缺失不变成“模型没做”。已有 `tests/unit/insights` fixture 迁新格式并保留错误反例。（EvidenceItem.seq + event_id 锚账面行；缺件经 notes/limitations 可解释；新册 test_insights_v3_pipeline 的坏尾/坏中段/缺 blob/缺子账全是错误反例注入）
 
 ## 七、收敛执行内核与尚未发行的事实
 
