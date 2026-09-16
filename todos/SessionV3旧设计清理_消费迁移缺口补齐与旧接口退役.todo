@@ -505,7 +505,7 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；勾二 CLI 冒烟走 compact 干跑全链（零模型零写入），真压缩链复用 explicit-v3 册不重复；linux-manylinux 腿未挂 registry/baseline 步骤（该腿仅 main push 跑，build-test 腿已拦 PR 面）；B1 手工分类表中"其余 435 册"的逐册归档仍留给后续批次随迁随归
 旧依赖：全局 0 注入保留给未迁移域（gateway/app_server/goal/channel/app 等），退役门在 B4/T01；分账机制与清单随 B4 一并退役
 文档：docs/development/v3-consumer-inventory.md（§一判定法、§二撤 0 分账表+真实册名口径、§五索引）；本单 §九 T16 五勾勾销
-销项日期：待 PR CI 判绿后填（rollup conclusion=success 的头提交）
+销项日期：2026-09-17（PR #110，判绿头提交 d19429f3，活跃 check suite rollup conclusion=success——run 35126062243，macos-clang 23m31s 全绿；registry 门步骤留痕"42 册撤 0 均自证格式或不经建场口"，baseline 记账步骤留痕。首轮两红均为测试册笔误（optional<unique_ptr> 箭头穿透误判 Open 返回类型——实为 expected<TrajectorySessionLedger,string> 按值，&*ledger 取址），非生产缺陷。push 事件并发 suite 被 cancel 属同组并发残影，不碍判绿口径）
 ```
 
 ## 十一、预计改动范围与保留边界
