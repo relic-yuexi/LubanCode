@@ -672,13 +672,16 @@ TEST_CASE("v3 删除后: 索引残留自愈,列表不再列已删场") {
 TEST_CASE("管理操作路径门: 软链接 session 目录拒绝,不跟链") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("path-symlink");
-    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
-    REQUIRE(ledger.has_value());
-    const std::filesystem::path workspace_dir = WorkspaceDirOf(*ledger);
-    const std::string session_id = ledger->session_id();
-    DriveTurn(*ledger, "路径门的一轮");
-    REQUIRE(ledger->CloseSession("exit").error_code.empty());
-    ledger.reset();  // 放锁
+    std::filesystem::path workspace_dir;
+    std::string session_id;
+    {
+        auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+        REQUIRE(ledger.has_value());
+        workspace_dir = WorkspaceDirOf(*ledger);
+        session_id = ledger->session_id();
+        DriveTurn(*ledger, "路径门的一轮");
+        REQUIRE(ledger->CloseSession("exit").error_code.empty());
+    }  // ledger 离场:独占锁随 RAII 释放
 
     const std::filesystem::path sessions_root = workspace_dir / "sessions";
     const std::filesystem::path real_dir = sessions_root / platform::Utf8ToPath(session_id);
