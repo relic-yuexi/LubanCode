@@ -28,6 +28,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# 同 ctest_format_registry:Windows 控制台 cp1252 编不出中文,切 UTF-8 防文案炸红。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSION_HPP = REPO_ROOT / "src" / "app" / "version.hpp"
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"

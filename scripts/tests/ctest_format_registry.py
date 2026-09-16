@@ -34,6 +34,12 @@ import re
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 cp1252 编不出中文(2026-09-16 CI 实锤:检查全过、OK 文案自己
+# UnicodeEncodeError 炸红)——stdout/stderr 一律切 UTF-8,失配字符降级不炸。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS_DIR = REPO_ROOT / "tests"
 CMAKELISTS = TESTS_DIR / "CMakeLists.txt"
