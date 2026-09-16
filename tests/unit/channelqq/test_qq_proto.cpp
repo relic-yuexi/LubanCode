@@ -511,6 +511,9 @@ TEST_CASE("qq_proto: 错误码分型全表(code 形状;A03 修订)") {
         {200, 50055002, QqApiErrorKind::ServerError},
         {503, 0, QqApiErrorKind::ServerError},
         {400, 99999, QqApiErrorKind::UnknownError},
+        // 未知业务码不盖过 HTTP 档语义:429/5xx 仍按可重试收。
+        {429, 99999, QqApiErrorKind::RateLimited},
+        {503, 99999, QqApiErrorKind::ServerError},
     };
     for (const auto& item : cases) {
         const std::string body =

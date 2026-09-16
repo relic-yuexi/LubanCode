@@ -949,86 +949,81 @@ QqApiError ClassifyQqSendFailure(int http_status, const std::string& body) {
 
     if (effective.has_value()) {
         const std::int64_t code = *effective;
-        switch (code) {
-            case 40034100:
-                out.kind = QqApiErrorKind::RateLimited;
-                break;
-            case 304103:
-            case 40034005:
-            case 40034026:
-                out.kind = QqApiErrorKind::MsgIdExpired;
-                break;
-            case 40034128:
-                // 官方:"被动回复时间或次数超限"——时间与次数两义并列,不
-                // 再混入 MsgIdExpired;对锚点的处置同为放弃(A05/A06 的锚账
-                // 另议),但账上要能看出是哪一族。
-                out.kind = QqApiErrorKind::ReplyQuotaExhausted;
-                break;
-            case 40054005:
-                out.kind = QqApiErrorKind::Deduped;
-                break;
-            case 40054004:
-                out.kind = QqApiErrorKind::NoFriend;
-                break;
-            case 40054006:
-                // 官方:"验证好友关系失败",排查建议就是"重试"——不是
-                // NoFriend 的永久失败。
-                out.kind = QqApiErrorKind::FriendCheckFailed;
-                break;
-            case 40054013:
-                out.kind = QqApiErrorKind::UserRejected;
-                break;
-            case 40054016:
-                out.kind = QqApiErrorKind::BotOffline;
-                break;
-            case 304004:  // 无权限使用该 ARK 模板
-            case 40034105:  // 主动消息发送失败,无权限
-            case 40034127:  // 无 markdown 模板权限
-            case 11253:  // API 指南:app privilege 未过
-                out.kind = QqApiErrorKind::PermissionDenied;
-                break;
-            case 11243:  // API 指南:token 校验未过
-                out.kind = QqApiErrorKind::Unauthorized;
-                break;
-            case 50059:  // 输入类型错误
-            case 304061:
-            case 304062:  // 订阅按钮数量达到上限
-            case 40034006:
-            case 40034008:  // markdown 参数有空值
-            case 40034009:  // markdown 参数有换行符
-            case 40034010:  // 模版参数含 markdown 语法
-            case 40034011:  // 无效的 markdown 内容
-            case 40034124:  // markdown 消息参数错误
-            case 40034129:  // 内联键盘行/列超限
-            case 40054007:
-            case 40054018:
-            case 22006:
-            case 304080:
-            case 850019:  // Q4 媒体:不支持的文件格式
-            case 850031:  // Q4 媒体:上传文件超过大小限制
-                out.kind = QqApiErrorKind::ContentRejected;
-                break;
-            case 50055002:
-            case 40034004:  // 富媒体转存失败,官方建议重试
-            case 850026:  // Q4 媒体:平台转存原始文件失败(可重试)
-            case 850027:  // Q4 媒体:发送数据超时(可重试)
-            case 40093001:  // Q4 媒体:分片上传 BDH 通道异常(官方建议重试)
-                out.kind = QqApiErrorKind::ServerError;
-                break;
-            default:
-                out.kind = QqApiErrorKind::UnknownError;
-                break;
-        }
-        // 业务码分型已定(message 透传口径维持 A17 前现状,不在此扩权)。
-        if (shape.body_is_json_object) {
-            const nlohmann::json parsed =
-                nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-            if (parsed.is_object() && parsed.contains("message") &&
-                parsed.at("message").is_string()) {
-                out.detail = parsed.at("message").get<std::string>();
+        const auto kind_for_code = [&]() -> std::optional<QqApiErrorKind> {
+            switch (code) {
+                case 40034100:
+                    return QqApiErrorKind::RateLimited;
+                case 304103:
+                case 40034005:
+                case 40034026:
+                    return QqApiErrorKind::MsgIdExpired;
+                case 40034128:
+                    // 官方:"被动回复时间或次数超限"——时间与次数两义并列,不
+                    // 再混入 MsgIdExpired;对锚点的处置同为放弃(A05/A06 的
+                    // 锚账另议),但账上要能看出是哪一族。
+                    return QqApiErrorKind::ReplyQuotaExhausted;
+                case 40054005:
+                    return QqApiErrorKind::Deduped;
+                case 40054004:
+                    return QqApiErrorKind::NoFriend;
+                case 40054006:
+                    // 官方:"验证好友关系失败",排查建议就是"重试"——不是
+                    // NoFriend 的永久失败。
+                    return QqApiErrorKind::FriendCheckFailed;
+                case 40054013:
+                    return QqApiErrorKind::UserRejected;
+                case 40054016:
+                    return QqApiErrorKind::BotOffline;
+                case 304004:  // 无权限使用该 ARK 模板
+                case 40034105:  // 主动消息发送失败,无权限
+                case 40034127:  // 无 markdown 模板权限
+                case 11253:  // API 指南:app privilege 未过
+                    return QqApiErrorKind::PermissionDenied;
+                case 11243:  // API 指南:token 校验未过
+                    return QqApiErrorKind::Unauthorized;
+                case 50059:  // 输入类型错误
+                case 304061:
+                case 304062:  // 订阅按钮数量达到上限
+                case 40034006:
+                case 40034008:  // markdown 参数有空值
+                case 40034009:  // markdown 参数有换行符
+                case 40034010:  // 模版参数含 markdown 语法
+                case 40034011:  // 无效的 markdown 内容
+                case 40034124:  // markdown 消息参数错误
+                case 40034129:  // 内联键盘行/列超限
+                case 40054007:
+                case 40054018:
+                case 22006:
+                case 304080:
+                case 850019:  // Q4 媒体:不支持的文件格式
+                case 850031:  // Q4 媒体:上传文件超过大小限制
+                    return QqApiErrorKind::ContentRejected;
+                case 50055002:
+                case 40034004:  // 富媒体转存失败,官方建议重试
+                case 850026:  // Q4 媒体:平台转存原始文件失败(可重试)
+                case 850027:  // Q4 媒体:发送数据超时(可重试)
+                case 40093001:  // Q4 媒体:分片上传 BDH 通道异常(官方建议重试)
+                    return QqApiErrorKind::ServerError;
+                default:
+                    return std::nullopt;  // 未知码:落 HTTP 档,不猜
             }
+        }();
+        if (kind_for_code.has_value()) {
+            out.kind = *kind_for_code;
+            // 业务码分型已定(message 透传口径维持 A17 前现状,不在此扩权)。
+            if (shape.body_is_json_object) {
+                const nlohmann::json parsed =
+                    nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+                if (parsed.is_object() && parsed.contains("message") &&
+                    parsed.at("message").is_string()) {
+                    out.detail = parsed.at("message").get<std::string>();
+                }
+            }
+            return out;
         }
-        return out;
+        // 未知业务码:HTTP 档兜底(429/401/403/5xx 优先,语义不被陌生码
+        //盖过);2xx 带未知非 0 码按 InvalidResponse(平台报了失败但合同
+        //读不出,走人工账)。
     }
 
     // 走到这说明没有有效业务码。码字段在但非法:不许 value_or(0) 当成功
