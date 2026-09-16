@@ -292,6 +292,10 @@ TEST_CASE("T11-C 恢复: 旧场环境事实不动,新场重采自己的") {
     facts.wire = "anthropic";
     facts.model = "kimi-k2.6";
     CHECK(ledger->CaptureEnvironment(facts).empty());
+    // 先封口再定格字节:resume 的换场事务对当前场落的 session.ended 是
+    // 合法封口,不是改写;封口后源场一个字节不许再动。
+    const auto closed = ledger->CloseSession("exit");
+    CHECK(closed.error_code.empty());
     const std::string source_bytes = ReadFileText(source_stream);
     const auto source_capture = lubancode::trajectory::v3::FindLastEnvironmentCapture(
         *lubancode::trajectory::v3::ReadV3Ledger(source_stream));

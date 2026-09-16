@@ -544,10 +544,10 @@ TEST_CASE("T11-E 压力: 三种裁决落账,数字可对账,不带累计用量")
     CHECK(pressure[0]->at("payload").value("verdict", std::string()) == "reserve_clamped");
     CHECK(pressure[1]->at("payload").value("verdict", std::string()) == "exceeded_denied");
     CHECK(pressure[2]->at("payload").value("verdict", std::string()) == "max_tokens_degraded");
-    // 数字账对表:clamped 的 remaining = 1280-(1000+256+32) = -8 → 钳 0。
+    // 数字账对表:clamped 的 1000+256+32=1288 已超窗 1280 → 余量钳 0;
+    // denied 的 1200+64+32=1296 同超窗 → 钳 0(不落无符号下溢)。
     CHECK(pressure[0]->at("payload").value("remainingTokens", std::uint64_t{99}) == 0);
-    CHECK(pressure[1]->at("payload").value("remainingTokens", std::uint64_t{99}) ==
-          1280 - (1200 + 64 + 32));
+    CHECK(pressure[1]->at("payload").value("remainingTokens", std::uint64_t{99}) == 0);
     CHECK(pressure[0]->value("turnId", std::string()) == "turn-1");
     // 不复制第二份累计用量:pressure 行无 usage 键;用量 owner 在 assistant。
     for (const auto* row : pressure) {
