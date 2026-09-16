@@ -198,7 +198,10 @@ TEST_CASE("qq_wiring: 信任根诊断——显式无效锚明报,不静默(§四
     REQUIRE(wiring != nullptr);
     REQUIRE_FALSE(wiring->diagnostics().empty());
     CHECK(wiring->diagnostics().at(0).find("TLS 信任根不可用") != std::string::npos);
-    CHECK(wiring->diagnostics().at(0).find("tls_trust_store_empty") != std::string::npos);
+    // 非空输入解析失败报 load_failed(§三:带真实负码);只有空输入/无导出
+    // 才报 empty。诊断同时说明已阻断 token/gateway 无效重试(§四)。
+    CHECK(wiring->diagnostics().at(0).find("tls_trust_store_load_failed") != std::string::npos);
+    CHECK(wiring->diagnostics().at(0).find("阻断") != std::string::npos);
     CHECK(wiring->Close(5'000));
 }
 

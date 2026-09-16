@@ -41,13 +41,16 @@ TEST_CASE("qq_tls: 握手错误码映射——超时独立成码,其余归 hands
 }
 
 TEST_CASE("qq_tls: ResolveChannelTrustRoots——explicit 优先且不回退,无效明报") {
-    // 非法 PEM(解析 0 证):source 仍 explicit,error 非空(明报,不静默
-    // 退回平台来源——§四)。
+    // 非法 PEM(非空但解析失败):source 仍 explicit,error 非空(明报,不
+    // 静默退回平台来源——§四);报 load_failed 不报 empty(§三:非空解析
+    // 失败带真实负码)。
     const ResolvedTrustStore bad = ResolveChannelTrustRoots("not a pem at all");
     CHECK(bad.source == "explicit");
     CHECK(bad.certificate_count == 0);
     CHECK_FALSE(bad.error.empty());
-    CHECK(bad.ca_pem.empty());  // 无效锚不喂 mbedTLS(连接报 trust_store_empty)
+    CHECK(bad.ca_pem.empty());  // 无效锚不喂 mbedTLS(连接报 load_failed)
+    CHECK(bad.load.parse_rc < 0);  // 纯文本垃圾:整批负错误码
+    CHECK(bad.load.first_negative_rc < 0);
 
     // 探测 seam:显式锚给定时,探测函数不该被调用。
     bool detect_called = false;
