@@ -322,14 +322,26 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 落点：SessionManager 管理方法、目录 lifecycle journal/索引、v3 来源引用与 SessionLock。
 
-- [ ] 用 v3 首行/终态及 writer 锁推导执行状态，不为满足旧函数临时造 session.json。
-- [ ] 归档是目录管理状态，与会话执行 closed/interrupted 分开；复用 workspace lifecycle 提交/索引，已封口 JSONL 不为切 archived 改原行。查询投影合并二者。
-- [ ] archive/unarchive 幂等，运行中/坏档/来源缺件拒绝或给明确处理政策；操作后重建索引仍能读回同样状态。
-- [ ] 删除前核验 incoming refs：resume、fork、子会话、artifact 与 memory 等依赖。首版默认拒删仍被引用的源，不级联删后代，也不偷偷复制一套来源解除依赖。
-- [ ] 生命周期 intent、tombstone、实际目录删除、完成回执之间有可恢复状态；tombstone 保存实际 v3 尾 hash/范围和原因，失败不能先报告删除成功。
-- [ ] 删除动作始终限定规范化 workspace/session 路径，检查软链接和锁；物理删除只在用户明确请求时执行，测试用独立临时根。
+- [x] 用 v3 首行/终态及 writer 锁推导执行状态，不为满足旧函数临时造 session.json。（`ReadV3ExecutionFacts`：ReadV3Ledger 验卷 + session.ended 终态 + 首/末行 hash/行数；ArchiveV3SessionDir/DeleteV3SessionDir 从它推导,活锁走 `RejectIfLocked`/既有锁门。v3 场全程不读不写 session.json。）
+- [x] 归档是目录管理状态，与会话执行 closed/interrupted 分开；复用 workspace lifecycle 提交/索引，已封口 JSONL 不为切 archived 改原行。查询投影合并二者。（真值=lifecycle 账 archive_session/unarchive_session 流水（`ScanSessionArchiveState` 按 (completed_at_ms, operation_id) 折每场最新笔）；`<id>.jsonl` 在归档/解归档前后逐字节不变；`ScanV3Session` 的 summary.status 管执行态、archived 管管理态,索引指纹加 admin_ms 感知归档翻转。v2 场 session.json 老路一字不动。）
+- [x] archive/unarchive 幂等，运行中/坏档/来源缺件拒绝或给明确处理政策；操作后重建索引仍能读回同样状态。（幂等：已归档再 archive 直接成功不落新笔,未归档再 unarchive 同理;RunDirLifecycleOp 撞名加序号后缀重试。拒绝面：活锁 session.locked、未封口 session.archive_rejected、坏账 session.archive_v3_unreadable、两账并存 session.archive_format_ambiguous。删掉 indexes/sessions.json 重建后归档状态从 lifecycle 账读回同样值。）
+- [x] 删除前核验 incoming refs：resume、fork、子会话、artifact 与 memory 等依赖。首版默认拒删仍被引用的源，不级联删后代，也不偷偷复制一套来源解除依赖。（`ScanIncomingSessionRefs`：别场 v3 resume.source.attached 五键、v2 run.started previous_session_id、跨目录 childSessionRef、workspace 项目记忆 .md/.json 溯源,行级宽松解析（别场坏尾不挡引用提取）;命中即 `session.delete_referenced` 点名引用方,目录字节原样。目录内 subagents/ 子账属整场删除,不算跨场级联。首版只挂 v3 删除路,v2 老路不加（退役在途）。）
+- [x] 生命周期 intent、tombstone、实际目录删除、完成回执之间有可恢复状态；tombstone 保存实际 v3 尾 hash/范围和原因，失败不能先报告删除成功。（四段 intent→tombstone→remove→result(completed),result 移到 remove 之后——旧实现 intent+result 一笔先落,remove 失败时收据已报成功,违合同已修;`RecoverPendingDeletes`：tombstone 未落+目录在=标 failed(interrupted_before_tombstone) 不代删,可重删;tombstone 在+目录在=续办 remove+补 completed;目录已删=补 completed;无 tombstone 无目录=failed(directory_missing)。DeleteSessionDir 开头与 RecoverWorkspace 启动各挂一次,幂等。tombstone schema 2 加 first_event_hash/event_count,v2/v3 两路同填。）
+- [x] 删除动作始终限定规范化 workspace/session 路径，检查软链接和锁；物理删除只在用户明确请求时执行，测试用独立临时根。（`GuardAdminTargetPath`：weakly_canonical 规范化+sessions 根前缀判定（UTF-8 文本折小写折斜杠比较）+symlink_status 拒软链接,archive/unarchive/delete 三口共用;锁门维持。生产入口仍是用户显式 /delete 与命令面 DeleteSessionDir;测试册全部独立临时根。）
 
-验收：正常归档/恢复归档、重复调用、活锁/未知锁、坏尾/坏中段、引用阻挡、intent/tombstone/remove 后分别崩溃。原始合法账 hash 在 archive/unarchive 前后不变；删除后可查收据且不会凭索引残留重新执行。
+验收：正常归档/恢复归档、重复调用、活锁/未知锁、坏尾/坏中段、引用阻挡、intent/tombstone/remove 后分别崩溃。原始合法账 hash 在 archive/unarchive 前后不变；删除后可查收据且不会凭索引残留重新执行。（`tests/unit/trajectory/test_session_admin_v3_lifecycle.cpp` 十一案:归档正常路+索引投影+幂等+重建、拒绝面四案、resume/memory/子账引用阻挡三案、tombstone 范围断言、崩溃恢复三段+异常现场、删后索引残留自愈+probe 拒复执行、路径门两案。活锁/坏账由 T15-A 删侧册+本册归档侧合守;未知锁（身份读不出）按 ProbeLockHolder Alive 保守拒,SessionLock 合同既有册钉。）
+
+```text
+任务编号：T15-B / V3-GAP-09
+状态：verified
+实现：分支 worktree-agent-t15b-lifecycle——src/trajectory/session_manager.hpp/.cpp（GuardAdminTargetPath 路径门/ReadV3ExecutionFacts 执行状态推导/ArchiveV3SessionDir+UnarchiveV3SessionDir v3 归档分派/ScanSessionArchiveState lifecycle 折归档/ScanIncomingSessionRefs 引用清册+ScanStreamForRefs 行级宽松提取/WriteDeleteIntent+WriteAdminResultFor 四段拆分/RecoverPendingDeletes 删除续办/SessionTombstone schema 2 加 first_event_hash+event_count/RunDirLifecycleOp 撞名重试/RecoverWorkspace 挂续办）、src/trajectory/session_index.cpp（SessionFingerprint.admin_ms+ScanV3Session 折 archived——执行态与管理态分列,索引重建仍读回）、tests/unit/trajectory/test_session_admin_v3_lifecycle.cpp
+生产入口：CLI 顶层 archive|unarchive|delete、/archive /delete 会话命令、SessionCommandService/AppServer 搬删命令（同走 DeleteSessionDir/ArchiveSessionDir/UnarchiveSessionDir 自由函数）、启动恢复器 RecoverWorkspace
+验证：unit.trajectory.test_session_admin_v3_lifecycle 十一案（归档正文逐字节不变+索引只归档口可见+幂等不落新笔+索引重建读回/活锁/未封口崩溃残留/坏账/两账并存四拒/resume 链引用阻挡点名引用方/memory 溯源阻挡/跨目录子账引用行级提取/tombstone 首/末 hash+行数+completed 收据/intent 断点不代删可重删/tombstone 断点续删补收据/remove 断点补收据/无 tombstone 无目录异常现场/删后索引残留自愈+ProbeResumeSource 拒复执行/软链接拒绝（POSIX）+单段名）;PR #107 CI rollup conclusion=success（2026-09-16,头提交 da9ea3c2,run 35088354791;首轮两红分别为测试册误调 expected 值的 reset()、RunDirLifecycleOp 撞名重试误吞 v2 同毫秒重复管理的 intent_exists 抢占语义——后者撤重试恢复原语义,v3 幂等本就靠 ScanSessionArchiveState 短路,均非生命周期合同缺陷）
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）;软链接路径门断言只在 POSIX 腿跑真 symlink（Windows 建链要特权,#ifndef _WIN32 排除,Windows 腿只验代码路径不误伤普通目录）;v2 删除路的 incoming refs 核验首版不挂（退役在途）;user 层记忆（home 根跨 workspace）的溯源引用不在 workspace 作用域扫描内;archive 对"锁死透（stale）+未封口"场按 archive_rejected 拒——半场账仍走 resume/verify 收口,不拿归档遮
+旧依赖：v2 归档/删除的 session.json 状态机老路保留（旧档消费,退役归 T01/T02-B）;v3 场自身零 session.json 依赖
+文档：本单 §八 T15-B 六勾证据;v3-consumer-inventory 无新行（非消费者迁移）
+销项日期：2026-09-16（CI 判绿口径,PR #107 头提交 da9ea3c2;软链接真链断言只 POSIX 腿跑等尾巴见『失败/未验』栏）
+```
 
 ### T02 / V3-LEGACY-02：先断消费者，再撤旧类型
 

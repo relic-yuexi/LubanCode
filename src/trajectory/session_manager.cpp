@@ -5,10 +5,12 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <random>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <utility>
 
 #include "platform/paths.hpp"
@@ -365,6 +367,10 @@ nlohmann::json SessionTombstone::ToJson() const {
     json["reason"] = reason;
     json["last_event_hash"] =
         last_event_hash.has_value() ? nlohmann::json(*last_event_hash) : nlohmann::json(nullptr);
+    // T15-B:范围三件(首 hash/行数)。schema 1 旧档缺键读默认,不回写。
+    json["first_event_hash"] =
+        first_event_hash.has_value() ? nlohmann::json(*first_event_hash) : nlohmann::json(nullptr);
+    json["event_count"] = event_count;
     json["operation_id"] = operation_id;
     return json;
 }
@@ -386,6 +392,12 @@ std::optional<SessionTombstone> SessionTombstone::FromJson(const nlohmann::json&
     }
     if (json.contains("last_event_hash") && json.at("last_event_hash").is_string()) {
         tombstone.last_event_hash = json.at("last_event_hash").get<std::string>();
+    }
+    if (json.contains("first_event_hash") && json.at("first_event_hash").is_string()) {
+        tombstone.first_event_hash = json.at("first_event_hash").get<std::string>();
+    }
+    if (json.contains("event_count") && json.at("event_count").is_number_unsigned()) {
+        tombstone.event_count = json.at("event_count").get<std::uint64_t>();
     }
     if (json.contains("operation_id") && json.at("operation_id").is_string()) {
         tombstone.operation_id = json.at("operation_id").get<std::string>();
@@ -2864,6 +2876,14 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
         return report;
     }
 
+    // T15-B(勾五):先把挂起的删除四段(intent/tombstone/remove/收据)续办
+    // 到一致——tombstone 已落但目录未删的续删,收据未落的补收据,没到
+    // 承诺点的标 failed 留档。逐笔记人话摘要进 report.notes。
+    for (const DeleteRecoveryEntry& entry : RecoverPendingDeletes(workspace_dir_, clock_->WallMs())) {
+        report.notes.push_back("删除续办[" + entry.action + "] " + entry.operation_id + ": " +
+                               entry.detail);
+    }
+
     // 第一遍:只扫事实。换账新旧两侧可能任意排序(session_id 的时间戳不
     // 保证旧侧在前),先把 old -> next 的换账关系找齐再按依赖次序办。
     struct Scanned {
@@ -3158,7 +3178,9 @@ namespace {
 
 // lifecycle intent + result 一笔(自由函数版:operation_id 由操作名 +
 // session_id + 时刻拼单段名,同毫秒同场次同操作的重复请求会被
-// lifecycle intent 的 create-new 占位拒——正好是抢占语义)。
+// lifecycle intent 的 create-new 占位拒——正好是抢占语义,v2 既有册钉着
+// 这条,T15-B 不动它;v3 的 archive/unarchive 幂等靠 ScanSessionArchiveState
+// 提前短路,不靠撞名重试)。
 SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir,
                                       LifecycleOperation operation, const std::string& session_id,
                                       const nlohmann::json& parameters, const nlohmann::json& outcome_json,
@@ -3197,6 +3219,175 @@ SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir
     return SessionAdminOutcome{};
 }
 
+// ---------------------------------------------------------------------------
+// T15-B(V3-GAP-09 完整生命周期)的管理操作底座
+// ---------------------------------------------------------------------------
+
+// 路径门(T15-B 勾六):管理操作只认"规范化 workspace 根下的 sessions/
+// <单段名>",目标目录不得是软链接,规范化结果不得越出 sessions 根。
+// 输出规范化后的 session_dir(后续 remove_all/读账都吃这份,不碰调用方
+// 原始路径)。逐组件小写比较做前缀判定(Windows 路径大小写不敏感)。
+SessionAdminOutcome GuardAdminTargetPath(const std::filesystem::path& workspace_dir,
+                                         const std::string& session_id,
+                                         std::filesystem::path* session_dir_out) {
+    if (!IsSafeSingleSegment(session_id)) {
+        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    }
+    std::error_code ec;
+    const std::filesystem::path canonical_root = std::filesystem::weakly_canonical(workspace_dir, ec);
+    if (ec) {
+        return SessionAdminOutcome{"session.path_unresolvable",
+                                   platform::PathToUtf8(workspace_dir) + ": " + ec.message()};
+    }
+    const std::filesystem::path sessions_root = canonical_root / "sessions";
+    const std::filesystem::path session_dir = sessions_root / platform::Utf8ToPath(session_id);
+    // 软链接不跟:目标本身是 symlink 时 remove_all/读账都会被引到界外。
+    const auto link_type = std::filesystem::symlink_status(session_dir, ec).type();
+    if (!ec && link_type == std::filesystem::file_type::symlink) {
+        return SessionAdminOutcome{"session.path_symlink",
+                                   "目标 session 目录是软链接,不跟链: " +
+                                       platform::PathToUtf8(session_dir)};
+    }
+    ec.clear();
+    const std::filesystem::path canonical_session = std::filesystem::weakly_canonical(session_dir, ec);
+    if (ec) {
+        return SessionAdminOutcome{"session.path_unresolvable",
+                                   platform::PathToUtf8(session_dir) + ": " + ec.message()};
+    }
+    // 前缀判定:canonical_session 必须仍在 sessions_root 之下(含符号链接
+    // 组件被解析后的越界,如 sessions/<id> 内嵌再指回外部的链)。比较用
+    // 统一 UTF-8 文本(PathToUtf8)+ 折 '/' + 折小写——Windows 路径大小写
+    // 不敏感,path::native() 在 MSVC 又是 wstring,逐组件比两头不讨好。
+    const auto compare_text = [](std::filesystem::path path) {
+        std::string text = platform::PathToUtf8(path);
+        for (char& c : text) {
+            if (c == '\\') {
+                c = '/';
+            } else if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return text;
+    };
+    const std::string root_text = compare_text(sessions_root);
+    const std::string session_text = compare_text(canonical_session);
+    const bool inside =
+        session_text == root_text || (session_text.size() > root_text.size() &&
+                                      session_text.compare(0, root_text.size(), root_text) == 0 &&
+                                      session_text[root_text.size()] == '/');
+    if (!inside) {
+        return SessionAdminOutcome{"session.path_escape",
+                                   "规范化路径越出 workspace sessions 根: " +
+                                       platform::PathToUtf8(canonical_session)};
+    }
+    *session_dir_out = session_dir;
+    return SessionAdminOutcome{};
+}
+
+// v3 主账的执行状态事实(T15-B 勾一):验卷(ReadV3Ledger:严格解析 +
+// 语义 + seq 连续 + 哈希链)+ session.ended 终态 + 首/末行 hash 与行数。
+// 不造 session.json——状态是推导结果,不是盘上材料。
+struct V3ExecutionFacts {
+    bool readable = false;
+    std::string verify_error;      // readable=false 时的原因
+    bool sealed = false;           // session.ended 在账
+    std::string first_line_hash;   // 首行(system message)lineHash
+    std::string last_line_hash;    // 末行 lineHash
+    std::uint64_t line_count = 0;  // 两类行合计
+};
+
+V3ExecutionFacts ReadV3ExecutionFacts(const std::filesystem::path& v3_stream) {
+    V3ExecutionFacts facts;
+    const auto ledger = v3::ReadV3Ledger(v3_stream);
+    if (!ledger.has_value()) {
+        facts.verify_error = ledger.error();
+        return facts;
+    }
+    facts.readable = true;
+    facts.line_count = ledger->lines;
+    for (const auto& event : ledger->events) {
+        if (event.kind == v3::EventKindV3::SessionEnded) {
+            facts.sealed = true;
+            break;
+        }
+    }
+    if (!ledger->timeline.empty()) {
+        const auto& first = ledger->timeline.front();
+        facts.first_line_hash = first.is_message
+                                    ? ledger->messages[first.index].line_hash
+                                    : ledger->events[first.index].line_hash;
+        if (const auto last = ledger->LastEntry(); last.has_value()) {
+            facts.last_line_hash = last->is_message ? ledger->messages[last->index].line_hash
+                                                    : ledger->events[last->index].line_hash;
+        }
+    }
+    return facts;
+}
+
+// 活锁门(archive/unarchive/delete 共用):目标目录有活进程持锁即拒。
+SessionAdminOutcome RejectIfLocked(const std::filesystem::path& session_dir,
+                                   const char* code) {
+    const auto holder = SessionLock::Inspect(session_dir);
+    if (holder.has_value() && ProbeLockHolder(*holder) == LockHolderState::Alive) {
+        return SessionAdminOutcome{code, "活进程正持有此 session"};
+    }
+    return SessionAdminOutcome{};
+}
+
+// 删除四段的 intent 段(T15-B 勾五:durable intent 先行,与 result 分家)。
+// 与 RunDirLifecycleOp 不同:result 不在这里写——删除必须 tombstone/remove
+// 全成之后才许报成功,失败路径写 result(failed) 由恢复器续办。
+std::expected<std::string, std::string> WriteDeleteIntent(const std::filesystem::path& workspace_dir,
+                                                          const std::string& session_id,
+                                                          const nlohmann::json& parameters,
+                                                          std::int64_t now_ms) {
+    const WorkspaceLifecycle lifecycle(workspace_dir);
+    LifecycleIntent intent;
+    intent.operation_id =
+        std::string(LifecycleOperationName(LifecycleOperation::DeleteSession)) + "-" + session_id +
+        "-" + std::to_string(now_ms);
+    intent.operation = LifecycleOperationName(LifecycleOperation::DeleteSession);
+    intent.workspace_key = platform::PathToUtf8(workspace_dir.filename());
+    if (const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+        read.status == workspace::ManifestRead::Status::Ok &&
+        !read.manifest.workspace_key.empty()) {
+        intent.workspace_key = read.manifest.workspace_key;
+    }
+    intent.session_id = session_id;
+    intent.requested_at_ms = now_ms;
+    intent.parameters = parameters;
+    auto intent_dir = lifecycle.WriteIntent(intent);
+    for (int retry = 2; retry <= 9 && !intent_dir.has_value(); ++retry) {
+        if (intent_dir.error().rfind("lifecycle.intent_exists", 0) != 0) {
+            break;
+        }
+        intent.operation_id =
+            std::string(LifecycleOperationName(LifecycleOperation::DeleteSession)) + "-" +
+            session_id + "-" + std::to_string(now_ms) + "-" + std::to_string(retry);
+        intent_dir = lifecycle.WriteIntent(intent);
+    }
+    if (!intent_dir.has_value()) {
+        return std::unexpected(intent_dir.error());
+    }
+    return intent.operation_id;
+}
+
+// 指定 operation_id 的 result(删除四段的收尾段;status 由调用方定)。
+SessionAdminOutcome WriteAdminResultFor(const std::filesystem::path& workspace_dir,
+                                        const std::string& operation_id, const char* status,
+                                        const nlohmann::json& outcome_json, std::int64_t now_ms) {
+    const WorkspaceLifecycle lifecycle(workspace_dir);
+    LifecycleResult result;
+    result.operation_id = operation_id;
+    result.status = status;
+    result.completed_at_ms = now_ms;
+    result.outcome = outcome_json;
+    if (const auto written = lifecycle.WriteResult(result); !written.has_value()) {
+        return SessionAdminOutcome{"lifecycle.result_failed", written.error()};
+    }
+    return SessionAdminOutcome{};
+}
+
 // T15-A(V3-GAP-09 P0,SessionV3 旧设计清理单):<id>.jsonl 是否是一份
 // v3 主账(读首行验 schemaVersion;不看 main.jsonl——并存的歧义判定
 // 需要在两件都在场时仍能认出 v3 侧)。
@@ -3215,80 +3406,175 @@ bool LooksLikeV3SessionStream(const std::filesystem::path& session_dir) {
            version->get<int>() == v3::kSchemaVersion;
 }
 
-// T15-A:v3 主账的删除准入。旧封口门只扫 main.jsonl——对只有 <id>.jsonl
-// 的 v3 场 journal_exists 恒假,未封口的运行档会直穿 remove_all。这里先
-// 验整卷(ReadV3Ledger:严格解析 + 语义 + seq 连续 + 哈希链,即引用完整
-// 性核验),再认 session.ended 终态;任一不满足即拒绝,目录一字不动
-//(不先 remove_all 再报缺口)。末行 hash 进 tombstone。
+// T15-A + T15-B:v3 主账的删除。T15-A 的准入(验整卷 + session.ended
+// 封口 + 活锁 + 格式歧义)不动;T15-B 补三件:
+//   1. incoming refs 核验(勾四):首版默认拒删仍被引用的源——别场
+//      resume/fork 链指它、跨目录子账引用、memory 条目溯源它,都不放行,
+//      错误信息点名引用方;不级联删后代,不偷偷复制解除依赖;
+//   2. 四段顺序(勾五):intent → tombstone → remove → result(completed)。
+//      任何一段失败都不写 completed——旧实现 intent+result 一笔先落、
+//      remove 失败时 result 已报"删除成功",违"失败不能先报告成功";
+//   3. tombstone 存实际范围(首/末行 hash + 行数)与原因。
 SessionAdminOutcome DeleteV3SessionDir(const std::filesystem::path& workspace_dir,
                                        const std::filesystem::path& session_dir,
                                        const std::filesystem::path& v3_stream,
                                        const std::string& session_id, const std::string& reason,
                                        std::int64_t now_ms) {
-    const auto ledger = v3::ReadV3Ledger(v3_stream);
-    if (!ledger.has_value()) {
+    const V3ExecutionFacts facts = ReadV3ExecutionFacts(v3_stream);
+    if (!facts.readable) {
         // 账损坏/状态不可知:拒绝删除,给稳定原因。删了就丢"跑到一半"
         // 的事实,半场账先 resume/verify 收口。
         return SessionAdminOutcome{"session.delete_v3_unreadable",
-                                   "v3 主账验卷不过: " + ledger.error()};
+                                   "v3 主账验卷不过: " + facts.verify_error};
     }
-    bool sealed = false;
-    for (const auto& event : ledger->events) {
-        if (event.kind == v3::EventKindV3::SessionEnded) {
-            sealed = true;
-            break;
-        }
-    }
-    if (!sealed) {
+    if (!facts.sealed) {
         return SessionAdminOutcome{"session.delete_unsealed",
                                    "v3 账没有 session.ended 终态,先 close/verify"};
     }
-    // 末行身份(tombstone 的实际 v3 尾 hash):两类行取各自 lineHash。
-    std::string last_line_hash;
-    if (const auto last = ledger->LastEntry(); last.has_value()) {
-        last_line_hash = last->is_message ? ledger->messages[last->index].line_hash
-                                          : ledger->events[last->index].line_hash;
+    // 勾四:incoming refs 核验(同 workspace 扫别场账 + memory 条目)。
+    const IncomingSessionRefs refs = ScanIncomingSessionRefs(workspace_dir, session_id);
+    if (!refs.empty()) {
+        std::string detail;
+        for (const std::string& id : refs.resume_referrers) {
+            detail += " resume_by=" + id;
+        }
+        for (const std::string& id : refs.subagent_referrers) {
+            detail += " subagent_by=" + id;
+        }
+        for (const std::string& file : refs.memory_files) {
+            detail += " memory=" + file;
+        }
+        return SessionAdminOutcome{"session.delete_referenced",
+                                   "仍被引用,默认拒删;先处理引用方或另待政策:" + detail};
     }
-    // durable intent 先行,再留 tombstone,末后删目录(§3.2;与 v2 路同款)。
-    std::string operation_id;
-    SessionAdminOutcome outcome =
-        RunDirLifecycleOp(workspace_dir, LifecycleOperation::DeleteSession, session_id,
-                          nlohmann::json{{"reason", reason}, {"format", "v3"}},
-                          nlohmann::json{{"tombstone", true}}, now_ms, &operation_id);
-    if (!outcome.ok()) {
-        return outcome;
+    // 四段之一:durable intent(带 reason/format 与范围材料)。
+    const auto operation_id =
+        WriteDeleteIntent(workspace_dir, session_id,
+                          nlohmann::json{{"reason", reason},
+                                         {"format", "v3"},
+                                         {"first_hash", facts.first_line_hash},
+                                         {"last_hash", facts.last_line_hash},
+                                         {"line_count", facts.line_count}},
+                          now_ms);
+    if (!operation_id.has_value()) {
+        return SessionAdminOutcome{"lifecycle.intent_failed", operation_id.error()};
     }
+    // 四段之二:tombstone(实际 v3 首/末 hash/行数与原因;create-new,
+    // 一枚 session 只删一次)。
     SessionTombstone tombstone;
     tombstone.session_id = session_id;
     tombstone.deleted_at_ms = now_ms;
     tombstone.reason = reason;
     tombstone.last_event_hash =
-        last_line_hash.empty() ? std::nullopt : std::optional(last_line_hash);
-    tombstone.operation_id = operation_id;
+        facts.last_line_hash.empty() ? std::nullopt : std::optional(facts.last_line_hash);
+    tombstone.first_event_hash =
+        facts.first_line_hash.empty() ? std::nullopt : std::optional(facts.first_line_hash);
+    tombstone.event_count = facts.line_count;
+    tombstone.operation_id = *operation_id;
     if (const auto written = WriteSessionTombstone(workspace_dir / "tombstones", tombstone);
         !written.has_value()) {
         return SessionAdminOutcome{"session.delete_tombstone_failed", written.error()};
     }
+    // 四段之三:物理删除(限定路径门产出的规范化目录)。
     std::error_code ec;
     std::filesystem::remove_all(session_dir, ec);
     if (ec) {
         return SessionAdminOutcome{"session.delete_remove_failed",
                                    platform::PathToUtf8(session_dir) + ": " + ec.message()};
     }
+    // 四段之四:完成回执(remove 成功之后才许写 completed。
+    const SessionAdminOutcome receipt =
+        WriteAdminResultFor(workspace_dir, *operation_id, "completed",
+                            nlohmann::json{{"tombstone", true},
+                                           {"format", "v3"},
+                                           {"removed", true},
+                                           {"line_count", facts.line_count}},
+                            now_ms);
+    if (!receipt.ok()) {
+        // 目录已删、回执没落下:恢复器(RecoverPendingDeletes)会补收据,
+        // 这里如实报"已删但回执未落"。
+        return SessionAdminOutcome{"session.delete_receipt_pending", receipt.message};
+    }
     return SessionAdminOutcome{};
+}
+
+// T15-B(勾一/勾二):v3 场归档。无 session.json——执行状态从账推导
+//(验卷 + session.ended),归档状态落 lifecycle 账(目录管理状态,与执行
+// closed/interrupted 分开),<id>.jsonl 一字不动(已封口账不为切 archived
+// 改原行)。幂等:已是归档中直接成功,不重复落笔。拒绝面:活锁、账验
+// 不过、未封口、来源缺件(两账并存/主账缺)。
+SessionAdminOutcome ArchiveV3SessionDir(const std::filesystem::path& workspace_dir,
+                                        const std::filesystem::path& session_dir,
+                                        const std::filesystem::path& v3_stream,
+                                        const std::string& session_id, std::int64_t now_ms) {
+    if (const auto locked = RejectIfLocked(session_dir, "session.locked"); !locked.ok()) {
+        return locked;
+    }
+    // 幂等:已是归档中直接成功(勾三),不追加 lifecycle 笔。
+    const auto archive_state = ScanSessionArchiveState(workspace_dir);
+    const auto state_it = archive_state.find(session_id);
+    if (state_it != archive_state.end() && state_it->second.archived) {
+        return SessionAdminOutcome{};
+    }
+    const V3ExecutionFacts facts = ReadV3ExecutionFacts(v3_stream);
+    if (!facts.readable) {
+        return SessionAdminOutcome{"session.archive_v3_unreadable",
+                                   "v3 主账验卷不过: " + facts.verify_error};
+    }
+    if (!facts.sealed) {
+        return SessionAdminOutcome{"session.archive_rejected",
+                                   "v3 账没有 session.ended 终态,执行状态不是 closed;先 "
+                                   "resume/verify 收口再归档"};
+    }
+    return RunDirLifecycleOp(workspace_dir, LifecycleOperation::ArchiveSession, session_id,
+                             nlohmann::json{{"format", "v3"},
+                                            {"first_hash", facts.first_line_hash},
+                                            {"last_hash", facts.last_line_hash},
+                                            {"line_count", facts.line_count}},
+                             nlohmann::json{{"status", "archived"}, {"format", "v3"}}, now_ms,
+                             nullptr);
+}
+
+// T15-B:v3 场解归档。幂等:不在归档中直接成功。
+SessionAdminOutcome UnarchiveV3SessionDir(const std::filesystem::path& workspace_dir,
+                                          const std::filesystem::path& session_dir,
+                                          const std::string& session_id, std::int64_t now_ms) {
+    if (const auto locked = RejectIfLocked(session_dir, "session.locked"); !locked.ok()) {
+        return locked;
+    }
+    const auto archive_state = ScanSessionArchiveState(workspace_dir);
+    const auto state_it = archive_state.find(session_id);
+    if (state_it == archive_state.end() || !state_it->second.archived) {
+        return SessionAdminOutcome{};  // 幂等:本就不在归档中
+    }
+    return RunDirLifecycleOp(workspace_dir, LifecycleOperation::UnarchiveSession, session_id,
+                             nlohmann::json{{"from", "archived"}, {"format", "v3"}},
+                             nlohmann::json{{"status", "closed"}, {"format", "v3"}}, now_ms,
+                             nullptr);
 }
 
 }  // namespace
 
 SessionAdminOutcome ArchiveSessionDir(const std::filesystem::path& workspace_dir,
                                       const std::string& session_id, std::int64_t now_ms) {
-    if (!IsSafeSingleSegment(session_id)) {
-        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    std::filesystem::path session_dir;
+    if (const auto guard = GuardAdminTargetPath(workspace_dir, session_id, &session_dir);
+        !guard.ok()) {
+        return guard;
     }
-    const std::filesystem::path session_dir =
-        workspace_dir / "sessions" / platform::Utf8ToPath(session_id);
+    // T15-B:先分派格式。session.json 在 = v2 原路一字不动;不在时按 v3
+    // 探针走 v3 路;两本主账并存 = 来源缺件,拒绝(勾三)。
     auto manifest = ReadSessionJson(session_dir);
+    const auto v3_probe = v3::ProbeV3SessionStream(session_dir);
     if (!manifest.has_value()) {
+        if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
+            return SessionAdminOutcome{"session.archive_format_ambiguous",
+                                       "同目录并存 main.jsonl 与 <id>.jsonl(v3),先厘清正身"};
+        }
+        if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+            return ArchiveV3SessionDir(workspace_dir, session_dir, v3_probe.stream, session_id,
+                                       now_ms);
+        }
         return SessionAdminOutcome{"session.not_found", session_id};
     }
     // session.json 落后于 Journal 可证事实(崩溃残留 running/preparing)时,
@@ -3327,13 +3613,22 @@ SessionAdminOutcome ArchiveSessionDir(const std::filesystem::path& workspace_dir
 
 SessionAdminOutcome UnarchiveSessionDir(const std::filesystem::path& workspace_dir,
                                         const std::string& session_id, std::int64_t now_ms) {
-    if (!IsSafeSingleSegment(session_id)) {
-        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    std::filesystem::path session_dir;
+    if (const auto guard = GuardAdminTargetPath(workspace_dir, session_id, &session_dir);
+        !guard.ok()) {
+        return guard;
     }
-    const std::filesystem::path session_dir =
-        workspace_dir / "sessions" / platform::Utf8ToPath(session_id);
+    // T15-B:v3 场归档状态在 lifecycle 账,不在 session.json;先分派。
     auto manifest = ReadSessionJson(session_dir);
     if (!manifest.has_value()) {
+        const auto v3_probe = v3::ProbeV3SessionStream(session_dir);
+        if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
+            return SessionAdminOutcome{"session.unarchive_format_ambiguous",
+                                       "同目录并存 main.jsonl 与 <id>.jsonl(v3),先厘清正身"};
+        }
+        if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+            return UnarchiveV3SessionDir(workspace_dir, session_dir, session_id, now_ms);
+        }
         return SessionAdminOutcome{"session.not_found", session_id};
     }
     if (manifest->status != SessionStatusName(SessionStatus::Archived)) {
@@ -3353,11 +3648,14 @@ SessionAdminOutcome UnarchiveSessionDir(const std::filesystem::path& workspace_d
 SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
                                      const std::string& session_id, const std::string& reason,
                                      std::int64_t now_ms) {
-    if (!IsSafeSingleSegment(session_id)) {
-        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    // T15-B(勾五):先续办挂起的删除(上一回崩溃在四段中间的),再办新的
+    // ——旧账不清,新删除会被 create-new 占位/tombstone_exists 误伤。
+    (void)RecoverPendingDeletes(workspace_dir, now_ms);
+    std::filesystem::path session_dir;
+    if (const auto guard = GuardAdminTargetPath(workspace_dir, session_id, &session_dir);
+        !guard.ok()) {
+        return guard;
     }
-    const std::filesystem::path session_dir =
-        workspace_dir / "sessions" / platform::Utf8ToPath(session_id);
     if (!std::filesystem::exists(session_dir)) {
         return SessionAdminOutcome{"session.not_found", session_id};
     }
@@ -3370,9 +3668,10 @@ SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
     // 恒假,封口门直穿 remove_all,运行中的 v3 档也能被删。分派三路:
     //   两本主账并存 -> 格式歧义,拒绝(不因 main.jsonl 先命中就忽略合法
     //                  v3;留人看清哪本是正身,T00 统一识别后另有定夺);
-    //   只 v3 主账   -> v3 删除准入(验卷 + session.ended 封口 + 末行
-    //                  hash 进 tombstone);
-    //   其余         -> v2 原路,一字不动。
+    //   只 v3 主账   -> v3 删除准入(验卷 + session.ended 封口 + incoming
+    //                  refs 核验 + 范围 tombstone + 四段顺序);
+    //   其余         -> v2 原路(四段顺序随 T15-B 对齐,引用核验首版
+    //                  只挂 v3 路——v2 退役在途,不再扩面)。
     {
         std::error_code ec;
         const bool main_exists = std::filesystem::exists(session_dir / "main.jsonl", ec);
@@ -3393,14 +3692,18 @@ SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
         // 未封口的账不许删:删了就丢了"跑到一半"的事实(§14.5 先封再删)。
         return SessionAdminOutcome{"session.delete_unsealed", "run 没 terminal,先 close/verify"};
     }
-    // durable intent 先行,再留 tombstone,末后删目录(§3.2)。
-    std::string operation_id;
-    SessionAdminOutcome outcome =
-        RunDirLifecycleOp(workspace_dir, LifecycleOperation::DeleteSession, session_id,
-                          nlohmann::json{{"reason", reason}}, nlohmann::json{{"tombstone", true}},
-                          now_ms, &operation_id);
-    if (!outcome.ok()) {
-        return outcome;
+    // T15-B(勾五):v2 路同款四段——intent → tombstone → remove →
+    // result(completed)。失败不先报成功;挂起由 RecoverPendingDeletes 续办。
+    const auto operation_id = WriteDeleteIntent(
+        workspace_dir, session_id,
+        nlohmann::json{{"reason", reason},
+                       {"format", "v2"},
+                       {"first_hash", facts.first_event_hash},
+                       {"last_hash", facts.last_event_hash},
+                       {"event_count", facts.event_count}},
+        now_ms);
+    if (!operation_id.has_value()) {
+        return SessionAdminOutcome{"lifecycle.intent_failed", operation_id.error()};
     }
     SessionTombstone tombstone;
     tombstone.session_id = session_id;
@@ -3408,7 +3711,10 @@ SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
     tombstone.reason = reason;
     tombstone.last_event_hash =
         facts.last_event_hash.empty() ? std::nullopt : std::optional(facts.last_event_hash);
-    tombstone.operation_id = operation_id;
+    tombstone.first_event_hash =
+        facts.first_event_hash.empty() ? std::nullopt : std::optional(facts.first_event_hash);
+    tombstone.event_count = facts.event_count;
+    tombstone.operation_id = *operation_id;
     if (const auto written = WriteSessionTombstone(workspace_dir / "tombstones", tombstone);
         !written.has_value()) {
         return SessionAdminOutcome{"session.delete_tombstone_failed", written.error()};
@@ -3419,7 +3725,314 @@ SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
         return SessionAdminOutcome{"session.delete_remove_failed",
                                    platform::PathToUtf8(session_dir) + ": " + ec.message()};
     }
+    if (const SessionAdminOutcome receipt = WriteAdminResultFor(
+            workspace_dir, *operation_id, "completed",
+            nlohmann::json{{"tombstone", true}, {"format", "v2"}, {"removed", true}}, now_ms);
+        !receipt.ok()) {
+        return SessionAdminOutcome{"session.delete_receipt_pending", receipt.message};
+    }
     return SessionAdminOutcome{};
+}
+
+// ---------------------------------------------------------------------------
+// T15-B / V3-GAP-09 的公共生命周期面(声明见 session_manager.hpp)
+// ---------------------------------------------------------------------------
+
+std::map<std::string, SessionAdminState> ScanSessionArchiveState(
+    const std::filesystem::path& workspace_dir) {
+    std::map<std::string, SessionAdminState> states;
+    const std::filesystem::path lifecycle_dir = workspace_dir / "lifecycle";
+    std::error_code ec;
+    if (!std::filesystem::exists(lifecycle_dir, ec)) {
+        return states;
+    }
+    // 逐笔读 intent/result;只认 archive/unarchive 且 result=completed 的
+    // 笔。排序键 (completed_at_ms, operation_id):同毫秒并列时
+    // unarchive_session 字典序在后即赢(先归档再解归档的直觉序)。
+    struct Pending {
+        std::int64_t completed_at_ms = 0;
+        std::string operation_id;
+        bool archived = false;
+    };
+    std::map<std::string, Pending> latest;  // session_id -> 最新成功笔
+    for (const auto& entry : std::filesystem::directory_iterator(lifecycle_dir, ec)) {
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        const auto intent = WorkspaceLifecycle::ReadIntent(entry.path());
+        if (!intent.has_value()) {
+            continue;  // 占位/坏 intent:不是完整事实,不猜
+        }
+        if (intent->operation != LifecycleOperationName(LifecycleOperation::ArchiveSession) &&
+            intent->operation != LifecycleOperationName(LifecycleOperation::UnarchiveSession)) {
+            continue;  // create/delete/resume_reference/memory 域的笔不掺和
+        }
+        const auto result = WorkspaceLifecycle::ReadResult(entry.path());
+        if (!result.has_value() || result->status != "completed") {
+            continue;  // 没收尾/失败的笔不改管理状态
+        }
+        Pending candidate;
+        candidate.completed_at_ms = result->completed_at_ms;
+        candidate.operation_id = intent->operation_id;
+        candidate.archived =
+            intent->operation == LifecycleOperationName(LifecycleOperation::ArchiveSession);
+        const auto existing = latest.find(intent->session_id);
+        const bool newer =
+            existing == latest.end() ||
+            std::tie(candidate.completed_at_ms, candidate.operation_id) >
+                std::tie(existing->second.completed_at_ms, existing->second.operation_id);
+        if (newer) {
+            latest[intent->session_id] = candidate;
+        }
+    }
+    for (const auto& [session_id, pending] : latest) {
+        SessionAdminState state;
+        state.archived = pending.archived;
+        state.changed_at_ms = pending.completed_at_ms;
+        state.operation_id = pending.operation_id;
+        states.emplace(session_id, state);
+    }
+    return states;
+}
+
+namespace {
+
+// 行级宽松扫一份流(引用提取用,不整卷验链——别场坏尾不挡前段引用,
+// 坏行跳过)。两形状通用:v3 行(kind/sourceRef)与 v2 行(kind/payload)。
+struct StreamRefHits {
+    std::vector<std::string> resume_sources;   // v3 sourceRef.sessionId
+    std::vector<std::string> subagent_targets;  // v3 childSessionRef 指到的 id/路径
+    std::vector<std::string> previous_ids;      // v2 run.started previous_session_id
+};
+
+StreamRefHits ScanStreamForRefs(const std::filesystem::path& stream) {
+    StreamRefHits hits;
+    std::ifstream file(stream, std::ios::binary);
+    if (!file.is_open()) {
+        return hits;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        const nlohmann::json row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (row.is_discarded() || !row.is_object()) {
+            continue;  // 坏行跳过:引用提取要覆盖坏尾场,不整卷验
+        }
+        const std::string kind = row.contains("kind") && row["kind"].is_string()
+                                     ? row["kind"].get<std::string>()
+                                     : std::string();
+        if (kind == "resume.source.attached") {
+            if (row.contains("payload") && row["payload"].is_object() &&
+                row["payload"].contains("sourceRef") && row["payload"]["sourceRef"].is_object()) {
+                const auto& ref = row["payload"]["sourceRef"];
+                if (ref.contains("sessionId") && ref["sessionId"].is_string()) {
+                    hits.resume_sources.push_back(ref["sessionId"].get<std::string>());
+                }
+            }
+        } else if (kind == "subagent.linked") {
+            if (row.contains("payload") && row["payload"].is_object() &&
+                row["payload"].contains("childSessionRef") &&
+                row["payload"]["childSessionRef"].is_object()) {
+                const auto& ref = row["payload"]["childSessionRef"];
+                if (ref.contains("sessionId") && ref["sessionId"].is_string()) {
+                    hits.subagent_targets.push_back(ref["sessionId"].get<std::string>());
+                }
+                if (ref.contains("journalPath") && ref["journalPath"].is_string()) {
+                    hits.subagent_targets.push_back(ref["journalPath"].get<std::string>());
+                }
+            }
+        } else if (kind == "run.started") {
+            if (row.contains("payload") && row["payload"].is_object() &&
+                row["payload"].contains("previous_session_id") &&
+                row["payload"]["previous_session_id"].is_string()) {
+                hits.previous_ids.push_back(
+                    row["payload"]["previous_session_id"].get<std::string>());
+            }
+        }
+    }
+    return hits;
+}
+
+// 文本文件是否含目标串(引用溯源扫描;≤2MB,防读巨型异常文件)。
+bool FileMentionsTarget(const std::filesystem::path& file_path, const std::string& target) {
+    std::error_code ec;
+    if (std::filesystem::file_size(file_path, ec) > (2u << 20) || ec) {
+        return false;
+    }
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return content.find(target) != std::string::npos;
+}
+
+}  // namespace
+
+IncomingSessionRefs ScanIncomingSessionRefs(const std::filesystem::path& workspace_dir,
+                                            const std::string& session_id) {
+    IncomingSessionRefs refs;
+    const std::filesystem::path sessions_root = workspace_dir / "sessions";
+    std::error_code ec;
+    if (std::filesystem::exists(sessions_root, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(sessions_root, ec)) {
+            if (!entry.is_directory(ec)) {
+                continue;
+            }
+            const std::string other_id = platform::PathToUtf8(entry.path().filename());
+            if (other_id == session_id) {
+                continue;  // 目标自己目录内的子账随整场删除,不算跨场引用
+            }
+            // 主账两形状都扫(v3 <id>.jsonl 与 v2 main.jsonl);resume 链可
+            // 跨格式存在(v2 场 resume v3 源,反之亦然)。
+            const auto v3_probe = v3::ProbeV3SessionStream(entry.path());
+            std::vector<std::filesystem::path> streams;
+            if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
+                streams.push_back(v3_probe.stream);
+            } else if (v3_probe.status != v3::V3StreamProbe::Status::FormatConflict) {
+                streams.push_back(entry.path() / "main.jsonl");
+            }
+            for (const std::filesystem::path& stream : streams) {
+                if (!std::filesystem::exists(stream, ec)) {
+                    continue;
+                }
+                const StreamRefHits hits = ScanStreamForRefs(stream);
+                for (const std::string& source : hits.resume_sources) {
+                    if (source == session_id) {
+                        refs.resume_referrers.push_back(other_id);
+                    }
+                }
+                for (const std::string& previous : hits.previous_ids) {
+                    if (previous == session_id) {
+                        refs.resume_referrers.push_back(other_id);
+                    }
+                }
+                for (const std::string& target : hits.subagent_targets) {
+                    // journalPath 相对形状(subagents/<cid>/...):只认指向
+                    // 目标 session 目录的跨场摆放;sessionId 直接对号。
+                    if (target == session_id ||
+                        target.find("sessions/" + session_id + "/") != std::string::npos ||
+                        target.find("sessions\\" + session_id + "\\") != std::string::npos) {
+                        refs.subagent_referrers.push_back(other_id);
+                    }
+                }
+            }
+        }
+    }
+    // workspace 项目记忆的溯源引用:条目 .md(frontmatter source_sessions)
+    // 与 .state 下的 job json 都按文本子串探——宁拒不漏(误报只多拒不
+    // 漏删)。user 层记忆在 home 根跨 workspace,不属本 workspace 删除的
+    // 作用域,归 memory 域单子处置。
+    const std::filesystem::path memory_dir = workspace_dir / "memory";
+    if (std::filesystem::exists(memory_dir, ec)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(memory_dir, ec)) {
+            std::error_code type_ec;
+            if (!entry.is_regular_file(type_ec)) {
+                continue;
+            }
+            const std::string name = platform::PathToUtf8(entry.path().filename());
+            const bool candidate = name.ends_with(".md") || name.ends_with(".json");
+            if (!candidate) {
+                continue;
+            }
+            if (FileMentionsTarget(entry.path(), session_id)) {
+                refs.memory_files.push_back(
+                    platform::PathToUtf8(std::filesystem::relative(entry.path(), workspace_dir, ec)));
+            }
+        }
+    }
+    return refs;
+}
+
+std::vector<DeleteRecoveryEntry> RecoverPendingDeletes(const std::filesystem::path& workspace_dir,
+                                                       std::int64_t now_ms) {
+    std::vector<DeleteRecoveryEntry> recovered;
+    const std::filesystem::path lifecycle_dir = workspace_dir / "lifecycle";
+    std::error_code ec;
+    if (!std::filesystem::exists(lifecycle_dir, ec)) {
+        return recovered;
+    }
+    const std::string delete_op = LifecycleOperationName(LifecycleOperation::DeleteSession);
+    for (const auto& entry : std::filesystem::directory_iterator(lifecycle_dir, ec)) {
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        const auto intent = WorkspaceLifecycle::ReadIntent(entry.path());
+        if (!intent.has_value() || intent->operation != delete_op) {
+            continue;
+        }
+        if (WorkspaceLifecycle::ReadResult(entry.path()).has_value()) {
+            continue;  // 已收尾
+        }
+        const std::filesystem::path session_dir =
+            workspace_dir / "sessions" / platform::Utf8ToPath(intent->session_id);
+        const auto tombstone =
+            ReadSessionTombstone(workspace_dir / "tombstones", intent->session_id);
+        const bool dir_exists = std::filesystem::exists(session_dir, ec);
+
+        DeleteRecoveryEntry record;
+        record.operation_id = intent->operation_id;
+        record.session_id = intent->session_id;
+
+        if (!tombstone.has_value()) {
+            // tombstone 未落 = 删除未承诺:不代用户续删,留 failed 收据说明
+            // 断点;目录原样,可重新请求删除。
+            const char* reason =
+                dir_exists ? "interrupted_before_tombstone" : "directory_missing";
+            const SessionAdminOutcome written = WriteAdminResultFor(
+                workspace_dir, intent->operation_id, "failed",
+                nlohmann::json{{"reason", reason},
+                               {"recovered", true},
+                               {"directory_present", dir_exists}},
+                now_ms);
+            if (written.ok()) {
+                record.action = dir_exists ? "failed_interrupted" : "failed_missing";
+                record.detail =
+                    (dir_exists ? "intent 后断:tombstone 未落,目录原样保留,未续删"
+                                : "目录不在且无 tombstone:异常现场,已留 failed 收据") +
+                    std::string(" (") + intent->session_id + ")";
+                recovered.push_back(std::move(record));
+            }
+            continue;
+        }
+        // tombstone 已 durable = 删除已承诺:物理收尾幂等续办。
+        if (dir_exists) {
+            std::error_code remove_ec;
+            std::filesystem::remove_all(session_dir, remove_ec);
+            if (remove_ec) {
+                continue;  // 收不了尾:留着下回再试,不写假收据
+            }
+            const SessionAdminOutcome written = WriteAdminResultFor(
+                workspace_dir, intent->operation_id, "completed",
+                nlohmann::json{{"tombstone", true},
+                               {"recovered", true},
+                               {"removed", true},
+                               {"resumed_after_crash", true}},
+                now_ms);
+            if (written.ok()) {
+                record.action = "completed_resumed_remove";
+                record.detail = "tombstone 后断:已续办物理删除并补收据 (" + intent->session_id +
+                                ")";
+                recovered.push_back(std::move(record));
+            }
+            continue;
+        }
+        // 目录已删、收据未落:补 completed。
+        const SessionAdminOutcome written = WriteAdminResultFor(
+            workspace_dir, intent->operation_id, "completed",
+            nlohmann::json{{"tombstone", true}, {"recovered", true}, {"removed", true}}, now_ms);
+        if (written.ok()) {
+            record.action = "completed_receipt_backlog";
+            record.detail = "remove 后断:目录已删,补完成收据 (" + intent->session_id + ")";
+            recovered.push_back(std::move(record));
+        }
+    }
+    return recovered;
 }
 
 }  // namespace lubancode::trajectory

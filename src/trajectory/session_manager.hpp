@@ -15,6 +15,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -134,14 +135,18 @@ private:
     std::filesystem::path workspace_dir_;
 };
 
-// 删除 session 的 tombstone(§3.2):id、末 hash、删除时间与原因;不留
-// 正文,不作重放材料。
+// 删除 session 的 tombstone(§3.2):id、首/末 hash、行数、删除时间与
+// 原因;不留正文,不作重放材料。T15-B(V3-GAP-09)起补"范围"三件:
+// first_event_hash/event_count 与 last_event_hash 合起来钉住被删账的
+// 实际跨度(schema_version 升 2;旧档缺键读默认,不回写)。
 struct SessionTombstone {
-    int schema_version = 1;
+    int schema_version = 2;
     std::string session_id;
     std::int64_t deleted_at_ms = 0;
     std::string reason;  // user_delete | aborted_before_start
     std::optional<std::string> last_event_hash;  // 空 preparing 无事件 → nullopt
+    std::optional<std::string> first_event_hash;  // T15-B:首行 hash(范围下界)
+    std::uint64_t event_count = 0;  // T15-B:实际行数(v2 事件数/v3 两类行合计)
     std::string operation_id;
 
     nlohmann::json ToJson() const;
@@ -466,6 +471,9 @@ struct WorkspaceRecoveryReport {
     std::vector<SessionRecoveryEntry> sessions;
     // 恢复后本进程接续的 active session(空 = 没有,调用方另开新场)。
     std::string adopted_session_id;
+    // T15-B:恢复期顺办的生命周期清理账(挂起的删除四段续办结果),逐笔
+    // 一条人话摘要;纯追加字段,旧消费方不受影响。
+    std::vector<std::string> notes;
 };
 
 // 换账崩溃后续办策略:默认把空 preparing 的新账开张(续办到底);
@@ -689,5 +697,72 @@ SessionAdminOutcome UnarchiveSessionDir(const std::filesystem::path& workspace_d
 SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
                                      const std::string& session_id, const std::string& reason,
                                      std::int64_t now_ms);
+
+// ---------------------------------------------------------------------------
+// T15-B / V3-GAP-09(Session v3 旧设计清理单):v3 场的完整生命周期面。
+// v3 场无 session.json——执行状态从账首行/终态推导,归档是 lifecycle 账
+// 上的目录管理状态,与执行 closed/interrupted 分开记。
+// ---------------------------------------------------------------------------
+
+// 一场 session 的目录管理状态(v3 归档真值):lifecycle 流水里该 session
+// 最新一笔 completed 的 archive_session/unarchive_session。
+struct SessionAdminState {
+    bool archived = false;
+    std::int64_t changed_at_ms = 0;  // 那笔 result.completed_at_ms
+    std::string operation_id;        // 最新那笔(审计反查)
+};
+
+// 扫 workspace lifecycle 账折"哪些 session 现在归档中"。只认 operation
+// 为 archive_session/unarchive_session 且 result.status==completed 的笔;
+// 按 (completed_at_ms, operation_id) 取每场最新一笔(同毫秒并列时
+// unarchive_session 字典序在后即赢——先归档再解归档的直觉序)。memory
+// 域的 lifecycle 笔(operation=memory_save 等)不掺和。索引重建与
+// archive/unarchive 幂等判定共用这一份。
+std::map<std::string, SessionAdminState> ScanSessionArchiveState(
+    const std::filesystem::path& workspace_dir);
+
+// 目标 session 的 incoming 引用清册(删除准入,T15-B 首版):
+//   resume_referrers   别场账把目标当 resume 源(v3 resume.source.attached
+//                      的 sourceRef.sessionId;v2 run.started 的
+//                      previous_session_id)——删源即坏别场恢复链;
+//   subagent_referrers 别场 spawn 的 childSessionRef 指到目标目录(正常
+//                      形状子账在父目录内随删;跨目录引用属异常摆放);
+//   memory_files       workspace 项目记忆里正文/frontmatter 引用目标
+//                      session id 的条目文件(溯源引用,宁拒不漏)。
+// 逐场行级宽松解析(不整卷验链——别场坏尾不挡引用提取,坏行跳过)。
+struct IncomingSessionRefs {
+    std::vector<std::string> resume_referrers;
+    std::vector<std::string> subagent_referrers;
+    std::vector<std::string> memory_files;
+
+    bool empty() const {
+        return resume_referrers.empty() && subagent_referrers.empty() && memory_files.empty();
+    }
+};
+
+IncomingSessionRefs ScanIncomingSessionRefs(const std::filesystem::path& workspace_dir,
+                                            const std::string& session_id);
+
+// 删除四段(intent → tombstone → remove → result)崩溃后的续办。
+// 对 lifecycle 里 operation=delete_session 且无 result.json 的笔:
+//   无 tombstone + 目录在   → result(failed, interrupted_before_tombstone):
+//                             tombstone 未落即删除未承诺,不代用户续删,
+//                             目录原样,可重新请求删除;
+//   无 tombstone + 目录不在 → result(failed, directory_missing):异常现场
+//                             (手删/外因),留收据说明;
+//   tombstone 在 + 目录在   → 续办 remove_all + result(completed):tombstone
+//                             已 durable 即删除已承诺,物理收尾幂等续办;
+//   tombstone 在 + 目录不在 → 补 result(completed)。
+// 幂等:重复跑结果一致。RecoverWorkspace 启动时与 DeleteSessionDir 开头
+// 各挂一次。
+struct DeleteRecoveryEntry {
+    std::string operation_id;
+    std::string session_id;
+    std::string action;  // completed_resumed_remove | completed_receipt_backlog |
+                         // failed_interrupted | failed_missing
+    std::string detail;  // 人话摘要(路径/原因)
+};
+std::vector<DeleteRecoveryEntry> RecoverPendingDeletes(const std::filesystem::path& workspace_dir,
+                                                       std::int64_t now_ms);
 
 }  // namespace lubancode::trajectory
