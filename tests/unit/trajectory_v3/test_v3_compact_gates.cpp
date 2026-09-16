@@ -233,7 +233,7 @@ TEST_CASE("T12-E hard trim 收口:降档提交换链,原 artifact 不动,梯尽�
             MakeRequest("SYSTEM-PREVIEW", {UserMessage("列出全部文件")}), PreparedContext());
         REQUIRE_FALSE(request_id.empty());
         bridge->OnRequestSent(request_id);
-        bridge.OnUsageRecorded(request_id, SampleUsage(), /*reported_by_provider=*/true, "resp-1",
+        bridge->OnUsageRecorded(request_id, SampleUsage(), /*reported_by_provider=*/true, "resp-1",
                                0, true, false);
         REQUIRE(bridge->OnOutputCompleted(request_id, AssistantWithRunCommandCall("call_fat"),
                                           "tool_calls", "resp-1"));
@@ -377,7 +377,7 @@ TEST_CASE("T12-E hard trim 收口:降档提交换链,原 artifact 不动,梯尽�
             MakeRequest("SYSTEM-PREVIEW", {UserMessage("再读一遍全量")}), PreparedContext());
         REQUIRE_FALSE(request_id.empty());
         bridge->OnRequestSent(request_id);
-        bridge.OnUsageRecorded(request_id, SampleUsage(), /*reported_by_provider=*/true, "resp-2",
+        bridge->OnUsageRecorded(request_id, SampleUsage(), /*reported_by_provider=*/true, "resp-2",
                                0, true, false);
         REQUIRE(bridge->OnOutputCompleted(request_id, AssistantWithRunCommandCall("call_reread"),
                                           "tool_calls", "resp-2"));
