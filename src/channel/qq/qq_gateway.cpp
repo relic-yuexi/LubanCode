@@ -114,11 +114,14 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
     int status, const std::string& body,
     const std::vector<std::pair<std::string, std::string>>& diagnostic_headers) {
     GatewayHttpFailureClass out;
-    // 有界 JSON 读平台 code 与 trace_id(§四)。code 宽松收数字/数字串;
-    // message 不透传——平台错误文案可能回显请求参数/敏感值。
+    // 有界 JSON 读平台 code/err_code 与 trace_id(§四;A03 补官方 err_code
+    // 形状——API 调用指南的 100017 类未知码,受控诊断须两码并记)。code
+    // 宽松收数字/数字串;message 不透传——平台错误文案可能回显请求参数/
+    // 敏感值。
     const auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
     const bool is_json = !parsed.is_discarded() && parsed.is_object();
     std::string platform_code;
+    std::string platform_err_code;
     std::string trace_id;
     if (is_json) {
         if (parsed.contains("code")) {
@@ -127,6 +130,14 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
                 platform_code = std::to_string(code.get<std::int64_t>());
             } else if (code.is_string()) {
                 platform_code = code.get<std::string>();
+            }
+        }
+        if (parsed.contains("err_code")) {
+            const auto& err_code = parsed.at("err_code");
+            if (err_code.is_number_integer()) {
+                platform_err_code = std::to_string(err_code.get<std::int64_t>());
+            } else if (err_code.is_string()) {
+                platform_err_code = err_code.get<std::string>();
             }
         }
         if (parsed.contains("trace_id") && parsed.at("trace_id").is_string()) {
@@ -163,20 +174,26 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
         trace_id.empty() ? std::string() : " trace=" + trace_id;
     const std::string code_note =
         platform_code.empty() ? std::string() : " 平台code=" + platform_code;
+    const std::string err_code_note =
+        platform_err_code.empty() ? std::string() : " err_code=" + platform_err_code;
+    // 受控诊断拼料(A03/100017 待查案):端点类别(稳定码前缀 gateway_url)、
+    // HTTP、两业务码、白名单 trace、Retry-After、body 是否 JSON——零令牌
+    // 零密钥零正文,全在这条 detail 里。
+    const auto notes = [&]() { return code_note + err_code_note + trace_note; };
 
     if (status == 401) {
         out.code = "gateway_url_unauthorized";
-        out.detail = "HTTP 401:鉴权失效(token 无效或过期)" + code_note + trace_note;
+        out.detail = "HTTP 401:鉴权失效(token 无效或过期)" + notes();
         return out;
     }
     if (status == 403) {
         out.code = "gateway_url_forbidden";
-        out.detail = "HTTP 403:权限/配置拒绝" + code_note + trace_note;
+        out.detail = "HTTP 403:权限/配置拒绝" + notes();
         return out;
     }
     if (status == 429) {
         out.code = "gateway_url_rate_limited";
-        out.detail = "HTTP 429:限流" + code_note + trace_note +
+        out.detail = "HTTP 429:限流" + notes() +
                      (out.retry_after_ms > 0
                           ? " retry_after=" + std::to_string(out.retry_after_ms / 1000) + "s"
                           : std::string(" (无 Retry-After,走本地阶梯)"));
@@ -184,13 +201,13 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
     }
     if (status >= 500) {
         out.code = "gateway_url_server_error";
-        out.detail = "HTTP " + std::to_string(status) + ":服务故障" + code_note + trace_note;
+        out.detail = "HTTP " + std::to_string(status) + ":服务故障" + notes();
         return out;
     }
     if (status == 400) {
-        if (is_json && !platform_code.empty()) {
+        if (is_json && (!platform_code.empty() || !platform_err_code.empty())) {
             out.code = "gateway_url_bad_request";
-            out.detail = "HTTP 400:请求被平台拒绝" + code_note + trace_note +
+            out.detail = "HTTP 400:请求被平台拒绝" + notes() +
                          "(未知平台 code,低频重试;不重置密钥)";
             return out;
         }
@@ -202,7 +219,7 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
     // 其余 4xx:不猜原因,只报事实;不把所有 4xx 当永久失败(§四)。
     out.code = "gateway_url_http_failed";
     out.detail = "HTTP " + std::to_string(status) + (is_json ? ":JSON" : ":非 JSON") +
-                 code_note + trace_note;
+                 notes();
     return out;
 }
 
@@ -225,6 +242,8 @@ std::string QqGatewaySession::state_name() const {
             return "connecting";
         case State::Authenticating:
             return "authenticating";
+        case State::Resuming:
+            return "resuming";
         case State::Running:
             return "running";
         case State::Backoff:
@@ -373,24 +392,29 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         if (!payload.has_value() || payload->op != GatewayOp::Hello) {
             return fail(kStageConnecting, "hello_bad_payload", "first message is not HELLO");
         }
-        const auto interval = ParseHelloInterval(payload->d);
+        const auto interval = ParseHelloInterval(payload->d, &parse_error);
         if (!interval.has_value()) {
+            // A01:官方字段 heartbeat_interval;缺字段/类型错/非正数/超范围
+            // 各有明细,连接层按协议错误断线,不带默认间隔硬跑。
             return fail(kStageConnecting, "hello_bad_payload",
-                        "HELLO missing heartbeat_interval_ms");
+                        "HELLO: " + parse_error);
         }
         heartbeat_interval_ms = *interval;
     }
 
-    // 2) Identify / Resume。
-    state_.store(State::Authenticating);
+    // 2) Identify / Resume。Resume 是独立阶段"恢复中"(A02):不提前报
+    //    connected。
+    const bool resuming_session = !session_id_.empty();
+    const char* auth_stage = resuming_session ? kStageResuming : kStageIdentifying;
+    state_.store(resuming_session ? State::Resuming : State::Authenticating);
     options_.on_event(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
-                                          kStageIdentifying, std::string(),
+                                          auth_stage, std::string(),
                                           std::string()));
     const auto token = options_.token_provider();
     if (!token.has_value()) {
         return fail_error(token.error());
     }
-    if (session_id_.empty()) {
+    if (!resuming_session) {
         const auto sent = transport->SendText(BuildIdentify(*token, options_.intents).dump());
         if (!sent.has_value()) {
             return fail(kStageIdentifying, "identify_send_failed",
@@ -400,89 +424,187 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         const auto sent = transport->SendText(
             BuildResume(*token, session_id_, last_seq_.load()).dump());
         if (!sent.has_value()) {
-            return fail(kStageIdentifying, "identify_send_failed",
+            return fail(kStageResuming, "resume_send_failed",
                         "send resume: " + sent.error());
         }
     }
 
-    // 3) 鉴权结果:READY(Identify)/RESUMED(Resume)/Invalid Session/Reconnect。
+    // 心跳与 ACK 统一账(A09):鉴权窗与运行期共用同一套节拍/计数——服务端
+    // 心跳(官方 opcode 表 op1 双向)立即应答一次,应答计入 missed_acks,ACK
+    // 到达清零;多发与误判都不许。
+    int missed_acks = 0;
+    bool ever_acked = false;
+    std::int64_t next_beat = options_.now_ms() + heartbeat_interval_ms;
+    const auto beat = [&](const char* stage) -> std::optional<RunOutcome> {
+        const auto sent = transport->SendText(
+            BuildHeartbeat(last_seq_.load() >= 0
+                               ? std::optional<std::int64_t>(last_seq_.load())
+                               : std::nullopt)
+                .dump());
+        if (!sent.has_value()) {
+            return fail(stage, "heartbeat_send_failed", "send heartbeat: " + sent.error());
+        }
+        ++missed_acks;
+        if (missed_acks > options_.missed_ack_limit) {
+            return fail(stage, "heartbeat_ack_missed",
+                        "heartbeat ack missed " + std::to_string(missed_acks) + " times");
+        }
+        next_beat = options_.now_ms() + heartbeat_interval_ms;
+        return std::nullopt;
+    };
+    // 业务事件派发(鉴权窗补发流与运行期同一条路;A04 的落盘语义在适配器
+    // 的 on_event 消费侧,这里只交出事件)。
+    const auto dispatch_business = [&](const GatewayPayload& payload) {
+        if (payload.t == "C2C_MESSAGE_CREATE") {
+            GatewayEvent event;
+            event.kind = GatewayEvent::Kind::C2cMessageCreate;
+            event.c2c_d = payload.d;
+            event.seq = payload.s;
+            options_.on_event(event);
+        } else if (payload.t == "INTERACTION_CREATE") {
+            GatewayEvent event;
+            event.kind = GatewayEvent::Kind::InteractionCreate;
+            event.interaction_d = payload.d;
+            event.seq = payload.s;
+            options_.on_event(event);
+        }
+        // 其余 t(intents 只订 C2C/互动):兄弟事件按序记账(已记),不进模型。
+    };
+    // Invalid Session 的三分处置(A09):d=true 会话仍可信,断线重连走
+    // Resume;d=false 清 session 重新 Identify;d 缺失/非 bool——官方合同
+    // 里不存在,会话可信度不可判定,按不可恢复处置(清 session 重新
+    // Identify;保守换新会话,不赌 Resume 死循环)。与 WS close code 的
+    // 区分:close 走读错误分支(read_closed 稳定码),不经这里。
+    const auto handle_invalid_session = [&](const nlohmann::json& payload_json) {
+        const auto resumable = ParseInvalidSessionResumable(payload_json);
+        if (!resumable.has_value() || !*resumable) {
+            *session_was_invalidated = true;
+        }
+    };
+
+    // 3) 鉴权循环(A02):总期限 ready_timeout_ms。Identify 只认有效 READY;
+    //    Resume 接收补发业务事件、等 RESUMED 才算恢复完成——单条补发不冒
+    //    充上线,期限到仍未完成即断线退避。期间应答控制帧、维持心跳。
+    bool auth_complete = false;
     bool resumed = false;
-    {
-        const auto message = transport->ReadMessage(options_.ready_timeout_ms);
+    const std::int64_t auth_deadline_ms = options_.now_ms() + options_.ready_timeout_ms;
+    while (!stop->load()) {
+        const std::int64_t now = options_.now_ms();
+        if (now >= auth_deadline_ms) {
+            return fail(auth_stage, "ready_timeout",
+                        std::string(resuming_session ? "no RESUMED within auth window (session_id="
+                                                     : "no READY within auth window (session_id=") +
+                            (resuming_session ? "kept" : "n/a") + ")");
+        }
+        std::int64_t remaining_beat = next_beat - now;
+        if (remaining_beat <= 0) {
+            if (const auto failed = beat(auth_stage)) {
+                return *failed;
+            }
+            remaining_beat = heartbeat_interval_ms;
+        }
+        const std::int64_t read_budget =
+            std::min<std::int64_t>(auth_deadline_ms - now, std::max<std::int64_t>(remaining_beat, 1));
+        const auto message = transport->ReadMessage(static_cast<int>(read_budget));
         if (!message.has_value()) {
-            return fail(kStageIdentifying,
-                        message.error().kind == WsError::Kind::Timeout ? "ready_timeout"
-                                                                        : "ready_failed",
-                        "waiting ready: " + message.error().detail);
+            if (message.error().kind == WsError::Kind::Timeout) {
+                continue;  // 读窗到点:回循环顶(心跳/期限判定)
+            }
+            return fail(auth_stage, ReadErrorCode(message.error()),
+                        "auth read: " + message.error().detail);
         }
         const auto payload_json =
             nlohmann::json::parse(*message, nullptr, /*allow_exceptions=*/false);
         if (payload_json.is_discarded()) {
-            return fail(kStageIdentifying, "ready_bad_payload", "ready payload not json");
+            return fail(auth_stage, "ready_bad_payload", "auth payload not json");
         }
         std::string parse_error;
         const auto payload = ParseGatewayPayload(payload_json, &parse_error);
         if (!payload.has_value()) {
-            return fail(kStageIdentifying, "ready_bad_payload", "ready payload: " + parse_error);
+            return fail(auth_stage, "ready_bad_payload", "auth payload: " + parse_error);
         }
-        if (payload->op == GatewayOp::InvalidSession) {
-            const auto resumable = ParseInvalidSessionResumable(payload_json);
-            if (resumable.has_value() && !*resumable) {
-                *session_was_invalidated = true;
+        if (!payload->op.has_value()) {
+            // 未知 op(如 op12/13 的 HTTP 回调族误入 WS):记账不崩,不当
+            // 心跳(A09)。
+            unexpected_ops_.fetch_add(1);
+            continue;
+        }
+        switch (*payload->op) {
+            case GatewayOp::Dispatch: {
+                if (payload->s >= 0) {
+                    last_seq_.store(payload->s);
+                }
+                if (payload->t == "READY") {
+                    if (resuming_session) {
+                        break;  // Resume 路径不认 READY(合同外),继续等 RESUMED
+                    }
+                    const auto ready = ParseReady(payload->d, &parse_error);
+                    if (!ready.has_value()) {
+                        return fail(kStageIdentifying, "ready_bad_payload",
+                                    "READY: " + parse_error);
+                    }
+                    session_id_ = ready->session_id;  // 只在 READY 分支换会话(A02)
+                    GatewayEvent event;
+                    event.kind = GatewayEvent::Kind::SessionReady;
+                    event.detail = ready->user_id;
+                    event.seq = payload->s;
+                    options_.on_event(event);
+                    auth_complete = true;
+                    break;
+                }
+                if (payload->t == "RESUMED") {
+                    if (!resuming_session) {
+                        break;  // Identify 路径不认 RESUMED(合同外),继续等 READY
+                    }
+                    GatewayEvent event;
+                    event.kind = GatewayEvent::Kind::SessionResumed;
+                    event.detail = session_id_;
+                    event.seq = payload->s;
+                    options_.on_event(event);
+                    resumed = true;
+                    auth_complete = true;
+                    break;
+                }
+                // 补发/早到业务事件:按序记账(已记)并照常派发,不静默吞
+                //(A04 的落盘在消费侧)。
+                dispatch_business(*payload);
+                break;
             }
-            return fail(kStageIdentifying, "invalid_session", "invalid session");
+            case GatewayOp::HeartbeatAck:
+                missed_acks = 0;
+                ever_acked = true;
+                break;
+            case GatewayOp::Heartbeat:
+                // 服务端心跳(官方双向):立即应答,并入同一 ACK 账。
+                if (const auto failed = beat(auth_stage)) {
+                    return *failed;
+                }
+                break;
+            case GatewayOp::Reconnect:
+                return fail(auth_stage, "server_reconnect_requested",
+                            "server requested reconnect");
+            case GatewayOp::InvalidSession:
+                handle_invalid_session(payload_json);
+                return fail(auth_stage, "invalid_session", "invalid session");
+            case GatewayOp::Hello:
+            case GatewayOp::Identify:
+            case GatewayOp::Resume:
+                // 服务端不该发:记账不崩(宽容读),不当心跳。
+                unexpected_ops_.fetch_add(1);
+                break;
         }
-        if (payload->op == GatewayOp::Reconnect) {
-            return fail(kStageIdentifying, "server_reconnect_requested",
-                        "server requested reconnect");
+        if (auth_complete) {
+            break;
         }
-        if (payload->op != GatewayOp::Dispatch) {
-            return fail(kStageIdentifying, "ready_bad_payload",
-                        "unexpected op " + std::to_string(payload->op_raw) +
-                            " while authenticating");
-        }
-        if (payload->t == "READY") {
-            const auto ready = ParseReady(payload->d, &parse_error);
-            if (!ready.has_value()) {
-                return fail(kStageIdentifying, "ready_bad_payload", "READY: " + parse_error);
-            }
-            session_id_ = ready->session_id;
-            {
-                GatewayEvent event;
-                event.kind = GatewayEvent::Kind::SessionReady;
-                event.detail = ready->user_id;
-                event.seq = payload->s;
-                options_.on_event(event);
-            }
-        } else if (payload->t == "RESUMED") {
-            resumed = true;
-            {
-                GatewayEvent event;
-                event.kind = GatewayEvent::Kind::SessionResumed;
-                event.detail = session_id_;
-                event.seq = payload->s;
-                options_.on_event(event);
-            }
-        } else {
-            // 鉴权窗内来了业务事件(网关通常先回 READY 才推,但不赌):
-            // 按序记账并照常派发,不静默吞。
-            if (payload->t == "C2C_MESSAGE_CREATE") {
-                GatewayEvent event;
-                event.kind = GatewayEvent::Kind::C2cMessageCreate;
-                event.c2c_d = payload->d;
-                event.seq = payload->s;
-                options_.on_event(event);
-            } else if (payload->t == "INTERACTION_CREATE") {
-                GatewayEvent event;
-                event.kind = GatewayEvent::Kind::InteractionCreate;
-                event.interaction_d = payload->d;
-                event.seq = payload->s;
-                options_.on_event(event);
-            }
-        }
-        if (payload->s >= 0) {
-            last_seq_.store(payload->s);
-        }
+    }
+    if (!auth_complete) {
+        // stop 置位且未完成鉴权:不报 connected,干净收场(A02)。
+        clear_in_flight();
+        transport->Close(1000, "stop");
+        return RunOutcome{ever_acked, /*retry_after_ms=*/0};
+    }
+    if (resumed) {
+        ever_acked = true;  // RESUMED 本身证明服务端认了会话
     }
 
     // READY/RESUMED 过:connected 成立(§三)。阶段推进放这里,SessionReady/
@@ -492,34 +614,17 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
                                           kStageConnected, std::string(),
                                           std::string()));
 
-    // 4) 运行循环:读分发 + 心跳 + ACK 监视。心跳节拍锚定绝对时刻
-    //    (next_beat),事件密集也不重置心跳窗——重置会饿死心跳,服务端掐线。
+    // 4) 运行循环:读分发 + 心跳 + ACK 监视(与鉴权窗同一套心跳账)。心跳
+    //    节拍锚定绝对时刻(next_beat),事件密集也不重置心跳窗——重置会饿死
+    //    心跳,服务端掐线。
     state_.store(State::Running);
-    int missed_acks = 0;
-    bool ever_acked = resumed;  // Resume 成功本身证明服务端认了会话
-    std::int64_t next_beat = options_.now_ms() + heartbeat_interval_ms;
     while (!stop->load()) {
         const std::int64_t now = options_.now_ms();
         std::int64_t remaining = next_beat - now;
         if (remaining <= 0) {
-            // 心跳到期:发 op1,携带最新 s(官方 opcode 表)。
-            const auto sent =
-                transport->SendText(BuildHeartbeat(last_seq_.load() >= 0
-                                                       ? std::optional<std::int64_t>(
-                                                             last_seq_.load())
-                                                       : std::nullopt)
-                                        .dump());
-            if (!sent.has_value()) {
-                return fail(kStageConnected, "heartbeat_send_failed",
-                            "send heartbeat: " + sent.error());
+            if (const auto failed = beat(kStageConnected)) {
+                return *failed;
             }
-            ++missed_acks;
-            if (missed_acks > options_.missed_ack_limit) {
-                return fail(kStageConnected, "heartbeat_ack_missed",
-                            "heartbeat ack missed " + std::to_string(missed_acks) +
-                                " times");
-            }
-            next_beat = options_.now_ms() + heartbeat_interval_ms;
             remaining = heartbeat_interval_ms;
         }
         const auto message =
@@ -542,52 +647,46 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
             return fail(kStageConnected, "dispatch_bad_payload",
                         "dispatch payload: " + parse_error);
         }
-        switch (payload->op.value_or(GatewayOp::Heartbeat)) {
+        if (!payload->op.has_value()) {
+            // 未知 op:独立处置——记账不崩,不冒充心跳、不触发应答(A09:
+            // 旧 switch 的 value_or(Heartbeat) 会把陌生 op 当心跳放行)。
+            unexpected_ops_.fetch_add(1);
+            continue;
+        }
+        switch (*payload->op) {
             case GatewayOp::Dispatch:
                 if (payload->s >= 0) {
                     last_seq_.store(payload->s);
                 }
-                if (payload->t == "C2C_MESSAGE_CREATE") {
-                    GatewayEvent event;
-                    event.kind = GatewayEvent::Kind::C2cMessageCreate;
-                    event.c2c_d = payload->d;
-                    event.seq = payload->s;
-                    options_.on_event(event);
-                } else if (payload->t == "INTERACTION_CREATE") {
-                    // Q6 按钮回调:按序记账并派发;宿主裁决后回 PUT
-                    // /interactions/{id}。事件形状校验在适配器(纯函数
-                    // MapInteractionCreate),这里只转手。
-                    GatewayEvent event;
-                    event.kind = GatewayEvent::Kind::InteractionCreate;
-                    event.interaction_d = payload->d;
-                    event.seq = payload->s;
-                    options_.on_event(event);
-                } else if (payload->t == "READY" || payload->t == "RESUMED") {
+                if (payload->t == "READY" || payload->t == "RESUMED") {
                     // 鉴权窗已处理过;重复出现按序记账即可。
-                } else {
-                    // intents 只订 C2C/互动:兄弟事件(FRIEND_ADD/
-                    // C2C_MSG_RECEIVE 等)按序记账,不进模型。
+                    break;
                 }
+                dispatch_business(*payload);
                 break;
             case GatewayOp::HeartbeatAck:
                 missed_acks = 0;
                 ever_acked = true;
                 break;
+            case GatewayOp::Heartbeat:
+                // 服务端心跳(官方 opcode 表双向):立即应答,并入同一 ACK 账
+                //(应答后重锚节拍,不与定时心跳叠发)。
+                if (const auto failed = beat(kStageConnected)) {
+                    return *failed;
+                }
+                break;
             case GatewayOp::Reconnect:
                 return fail(kStageConnected, "server_reconnect_requested",
                             "server requested reconnect");
-            case GatewayOp::InvalidSession: {
-                const auto resumable = ParseInvalidSessionResumable(payload_json);
-                if (resumable.has_value() && !*resumable) {
-                    *session_was_invalidated = true;
-                }
+            case GatewayOp::InvalidSession:
+                handle_invalid_session(payload_json);
                 return fail(kStageConnected, "invalid_session", "invalid session");
-            }
             case GatewayOp::Hello:
-            case GatewayOp::Heartbeat:
             case GatewayOp::Identify:
             case GatewayOp::Resume:
-                break;  // 服务器不该发;按序忽略,不断连(宽容读)
+                // 服务端不该发:记账不崩(宽容读),不当心跳。
+                unexpected_ops_.fetch_add(1);
+                break;
         }
     }
     // stop 置位:干净收场(也算"稳定结束",不涨退避)。

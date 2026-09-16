@@ -11,6 +11,8 @@ QqMessageSender::Outcome::Status DeferredOrPermanent(const QqApiError& error) {
         case QqApiErrorKind::RateLimited:
         case QqApiErrorKind::ServerError:
         case QqApiErrorKind::NetworkError:
+        case QqApiErrorKind::FriendCheckFailed:  // 40054006:官方建议重试(A03)
+        case QqApiErrorKind::BotOffline:  // 40054016:下线状态可恢复,有限重试
             return QqMessageSender::Outcome::Status::DeferredRetry;
         default:
             return QqMessageSender::Outcome::Status::PermanentFail;
@@ -91,11 +93,21 @@ QqMessageSender::Outcome QqMessageSender::SendC2c(const C2cSendRequest& request)
         if (response->status >= 200 && response->status < 300) {
             const auto parsed = nlohmann::json::parse(response->body, nullptr,
                                                       /*allow_exceptions=*/false);
-            // 腾讯错误体走 HTTP 200 + body {"code":..,"message":..}
-            //(官方错误码表即此形态)——2xx 不等于成功,先查 code。
-            // code 宽松解析:真机教训,平台数值字段可能以字符串回传。
-            if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("code") &&
-                ParseLooseInt64(parsed.at("code")).value_or(0) != 0) {
+            // 2xx 不等于成功:平台错误体两代形状都可能走 HTTP 200(官方
+            // API 调用指南 {"err_code":..} / 发送页 {"code":..})。共用解析
+            // 器裁决;码字段非法或冲突不折算成 0——成功合同无法核对即按
+            // InvalidResponse 收,不冒充送达(A03)。
+            const QqErrorBodyShape shape = ParseQqErrorBody(response->body);
+            const auto effective = QqErrorEffectiveCode(shape);
+            const bool has_code_field = shape.has_code || shape.has_err_code;
+            if (has_code_field && (shape.conflict || !effective.has_value())) {
+                QqApiError error = ClassifyQqSendFailure(response->status, response->body);
+                Outcome outcome;  // 2xx + 码不可判定:不可重试,走人工账
+                outcome.status = DeferredOrPermanent(error);
+                outcome.error = std::move(error);
+                return outcome;
+            }
+            if (effective.has_value() && *effective != 0) {
                 QqApiError error = ClassifyQqSendFailure(response->status, response->body);
                 if (error.kind == QqApiErrorKind::Deduped) {
                     Outcome outcome;
@@ -195,12 +207,38 @@ QqMessageSender::AckOutcome QqMessageSender::AckInteraction(const std::string& i
         return outcome;
     }
     if (response->status >= 200 && response->status < 300) {
+        // 本端点的成功合同(A03):官方 API 指南列 204 为"成功且无正文"——
+        // PUT 回应允许空成功;空体(含纯空白)放行。非空响应必须对得上账:
+        // 非 JSON / 非 object = 损坏,不冒充 Acked;JSON object 查
+        // code/err_code(缺或 0 = 成功,非 0 = 平台拒绝,非法/冲突 = 无法
+        // 核对)——一律不入 Acked。
+        bool blank = true;
+        for (const char c : response->body) {
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+                blank = false;
+                break;
+            }
+        }
+        if (blank) {
+            outcome.status = AckStatus::Acked;
+            return outcome;
+        }
         const auto parsed =
             nlohmann::json::parse(response->body, nullptr, /*allow_exceptions=*/false);
-        // 腾讯错误体走 HTTP 200 + body {"code":..}:2xx 不等于成功,先查
-        // code(与 SendC2c 同一教训)。
-        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("code") &&
-            ParseLooseInt64(parsed.at("code")).value_or(0) != 0) {
+        if (parsed.is_discarded() || !parsed.is_object()) {
+            outcome.error.kind = QqApiErrorKind::InvalidResponse;
+            outcome.error.http_status = response->status;
+            outcome.error.detail = "interaction ack 2xx body not a json object";
+            return outcome;
+        }
+        const QqErrorBodyShape shape = ParseQqErrorBody(response->body);
+        const auto effective = QqErrorEffectiveCode(shape);
+        const bool has_code_field = shape.has_code || shape.has_err_code;
+        if (has_code_field && (shape.conflict || !effective.has_value())) {
+            outcome.error = ClassifyQqSendFailure(response->status, response->body);
+            return outcome;  // 码不可判定:不冒充 Acked
+        }
+        if (effective.has_value() && *effective != 0) {
             outcome.error = ClassifyQqSendFailure(response->status, response->body);
             return outcome;
         }

@@ -160,6 +160,35 @@ TEST_CASE("qq_gateway_diag: 分类——400 JSON 带平台 code,trace 透传,mes
     CHECK(cls.retry_after_ms == 0);
 }
 
+// A03:err_code 官方形状(API 调用指南)与 100017 待查案的受控诊断——
+// 端点类别(稳定码族)/HTTP/两业务码/白名单 trace/是否 JSON 全入 detail,
+// 零令牌零密钥零正文。
+TEST_CASE("qq_gateway_diag: 分类——err_code 形状与 100017 受控诊断(A03)") {
+    // 只有 err_code(官方指南失败示例形状)。
+    const auto err_only = ClassifyGatewayHttpFailure(
+        400, R"({"err_code":100017,"trace_id":"trace-100017"})", {});
+    CHECK(err_only.code == "gateway_url_bad_request");
+    CHECK(err_only.detail.find("err_code=100017") != std::string::npos);
+    CHECK(err_only.detail.find("平台code=") == std::string::npos);
+    CHECK(err_only.detail.find("trace=trace-100017") != std::string::npos);
+    // 两码并存:都入账,不猜。
+    const auto both = ClassifyGatewayHttpFailure(
+        400, R"({"code":100017,"err_code":11253,"trace_id":"t-b"})", {});
+    CHECK(both.code == "gateway_url_bad_request");
+    CHECK(both.detail.find("平台code=100017") != std::string::npos);
+    CHECK(both.detail.find("err_code=11253") != std::string::npos);
+    // 429 + err_code + Retry-After:限流码族同样带双码诊断。
+    const auto limited = ClassifyGatewayHttpFailure(
+        429, R"({"err_code":11244})", {{"retry-after", "30"}});
+    CHECK(limited.code == "gateway_url_rate_limited");
+    CHECK(limited.detail.find("err_code=11244") != std::string::npos);
+    CHECK(limited.retry_after_ms == 30'000);
+    // 敏感 message 不因新形状漏出。
+    const auto no_leak = ClassifyGatewayHttpFailure(
+        400, std::string(R"({"err_code":100017,"message":"leak )") + kFakeSecret + R"("})", {});
+    CHECK(no_leak.detail.find(kFakeSecret) == std::string::npos);
+}
+
 TEST_CASE("qq_gateway_diag: 分类——400 非 JSON / JSON 无 code") {
     const auto not_json = ClassifyGatewayHttpFailure(400, "plain text error", {});
     CHECK(not_json.code == "gateway_url_bad_response");

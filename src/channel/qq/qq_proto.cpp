@@ -122,13 +122,41 @@ std::optional<GatewayPayload> ParseGatewayPayload(const nlohmann::json& payload,
     return out;
 }
 
-std::optional<std::int64_t> ParseHelloInterval(const nlohmann::json& d) {
-    if (!d.is_object() || !d.contains("heartbeat_interval_ms")) {
-        return std::nullopt;
+std::optional<std::int64_t> ParseHelloInterval(const nlohmann::json& d, std::string* error) {
+    const auto fail_parse = [error](const char* reason) {
+        if (error != nullptr) {
+            *error = reason;
+        }
+        return std::optional<std::int64_t>();
+    };
+    if (!d.is_object()) {
+        return fail_parse("HELLO d not an object");
     }
-    const std::optional<std::int64_t> ms = ParseLooseInt64(d.at("heartbeat_interval_ms"));
-    if (!ms.has_value() || *ms <= 0) {
-        return std::nullopt;
+    // 官方字段 heartbeat_interval(event-emit 页示例);heartbeat_interval_ms
+    // 是旧实现的误读名,只在官方字段缺失时兜底,并存且不等报冲突(A01)。
+    const bool has_official = d.contains("heartbeat_interval");
+    const bool has_legacy = d.contains("heartbeat_interval_ms");
+    if (!has_official && !has_legacy) {
+        return fail_parse("HELLO d missing heartbeat_interval");
+    }
+    if (has_official && has_legacy) {
+        const auto official = ParseLooseInt64(d.at("heartbeat_interval"));
+        const auto legacy = ParseLooseInt64(d.at("heartbeat_interval_ms"));
+        if (official.has_value() && legacy.has_value() && *official != *legacy) {
+            return fail_parse("HELLO heartbeat_interval conflicts with heartbeat_interval_ms");
+        }
+    }
+    const nlohmann::json& value =
+        has_official ? d.at("heartbeat_interval") : d.at("heartbeat_interval_ms");
+    const auto ms = ParseLooseInt64(value);
+    if (!ms.has_value()) {
+        return fail_parse("HELLO heartbeat_interval not an integer (number or numeric string)");
+    }
+    if (*ms <= 0) {
+        return fail_parse("HELLO heartbeat_interval non-positive");
+    }
+    if (*ms > kHelloIntervalMaxMs) {
+        return fail_parse("HELLO heartbeat_interval over 24h cap");
     }
     return ms;
 }
@@ -843,57 +871,168 @@ std::optional<FileUploadResponse> ParseFileUploadResponse(const nlohmann::json& 
     return out;
 }
 
+QqErrorBodyShape ParseQqErrorBody(const std::string& body) {
+    QqErrorBodyShape shape;
+    const auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+    shape.body_is_json_object = parsed.is_object();
+    if (!shape.body_is_json_object) {
+        return shape;
+    }
+    if (parsed.contains("code")) {
+        shape.has_code = true;
+        shape.code = ParseLooseInt64(parsed.at("code"));
+        shape.code_illegal = !shape.code.has_value();
+    }
+    if (parsed.contains("err_code")) {
+        shape.has_err_code = true;
+        shape.err_code = ParseLooseInt64(parsed.at("err_code"));
+        shape.err_code_illegal = !shape.err_code.has_value();
+    }
+    if (shape.code.has_value() && shape.err_code.has_value() && *shape.code != *shape.err_code) {
+        shape.conflict = true;
+    }
+    if (parsed.contains("trace_id") && parsed.at("trace_id").is_string()) {
+        shape.trace_id = parsed.at("trace_id").get<std::string>();
+        if (shape.trace_id.size() > 128) {
+            shape.trace_id = shape.trace_id.substr(0, 128) + "...";
+        }
+    }
+    return shape;
+}
+
+std::optional<std::int64_t> QqErrorEffectiveCode(const QqErrorBodyShape& shape) {
+    if (shape.conflict) {
+        return std::nullopt;  // 两码不等:不猜
+    }
+    if (shape.code.has_value() && shape.err_code.has_value()) {
+        return shape.code;  // 并存等值
+    }
+    if (shape.code.has_value()) {
+        return shape.code;
+    }
+    if (shape.err_code.has_value()) {
+        return shape.err_code;
+    }
+    return std::nullopt;  // 无合法码(缺失或非法),调用方看标志区分
+}
+
 QqApiError ClassifyQqSendFailure(int http_status, const std::string& body) {
     QqApiError out;
     out.http_status = http_status;
-    // 平台错误体 {"code":...,"message":...};body 非合法 JSON 时 code 留 0。
-    nlohmann::json parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-    if (parsed.is_object() && parsed.contains("code")) {
-        if (const auto code = ParseLooseInt64(parsed.at("code"))) {
-            out.platform_code = *code;
-        }
+    const QqErrorBodyShape shape = ParseQqErrorBody(body);
+    out.trace_id = shape.trace_id;
+    if (shape.err_code.has_value()) {
+        out.platform_err_code = *shape.err_code;
     }
-    if (parsed.is_object() && parsed.contains("message") && parsed.at("message").is_string()) {
-        out.detail = parsed.at("message").get<std::string>();
+    const auto effective = QqErrorEffectiveCode(shape);
+    if (effective.has_value()) {
+        out.platform_code = *effective;
+    }
+    const auto trace_note =
+        shape.trace_id.empty() ? std::string() : " trace=" + shape.trace_id;
+
+    // 码字段冲突:两个都合法但不等——不猜哪个对。2xx 下成功合同无法核对
+    // 判 InvalidResponse;非 2xx 判 UnknownError(未知 4xx 档),detail 留
+    // 两值记号供受控诊断。
+    if (shape.conflict) {
+        const std::string codes = "code=" + std::to_string(*shape.code) + " err_code=" +
+                                  std::to_string(*shape.err_code);
+        if (http_status >= 200 && http_status < 300) {
+            out.kind = QqApiErrorKind::InvalidResponse;
+            out.detail = "code/err_code conflict: " + codes + trace_note;
+        } else {
+            out.kind = QqApiErrorKind::UnknownError;
+            out.detail = "code/err_code conflict: " + codes + trace_note;
+        }
+        return out;
     }
 
-    const auto code = out.platform_code;
-    auto kind_for_code = [&]() -> std::optional<QqApiErrorKind> {
-        switch (code) {
-            case 40034100:
-                return QqApiErrorKind::RateLimited;
-            case 304103:
-            case 40034005:
-            case 40034128:
-            case 40034026:
-                return QqApiErrorKind::MsgIdExpired;
-            case 40054005:
-                return QqApiErrorKind::Deduped;
-            case 40054004:
-            case 40054006:
-                return QqApiErrorKind::NoFriend;
-            case 40054013:
-                return QqApiErrorKind::UserRejected;
-            case 40034006:
-            case 304061:
-            case 40054007:
-            case 40054018:
-            case 22006:
-            case 304080:
-            case 850019:  // Q4 媒体:不支持的文件格式
-            case 850031:  // Q4 媒体:上传文件超过大小限制
-                return QqApiErrorKind::ContentRejected;
-            case 50055002:
-            case 850026:  // Q4 媒体:平台转存原始文件失败(可重试)
-            case 850027:  // Q4 媒体:发送数据超时(可重试)
-            case 40093001:  // Q4 媒体:分片上传 BDH 通道异常(官方建议重试)
-                return QqApiErrorKind::ServerError;
-            default:
-                return std::nullopt;
+    if (effective.has_value()) {
+        const std::int64_t code = *effective;
+        const auto kind_for_code = [&]() -> std::optional<QqApiErrorKind> {
+            switch (code) {
+                case 40034100:
+                    return QqApiErrorKind::RateLimited;
+                case 304103:
+                case 40034005:
+                case 40034026:
+                    return QqApiErrorKind::MsgIdExpired;
+                case 40034128:
+                    // 官方:"被动回复时间或次数超限"——时间与次数两义并列,不
+                    // 再混入 MsgIdExpired;对锚点的处置同为放弃(A05/A06 的
+                    // 锚账另议),但账上要能看出是哪一族。
+                    return QqApiErrorKind::ReplyQuotaExhausted;
+                case 40054005:
+                    return QqApiErrorKind::Deduped;
+                case 40054004:
+                    return QqApiErrorKind::NoFriend;
+                case 40054006:
+                    // 官方:"验证好友关系失败",排查建议就是"重试"——不是
+                    // NoFriend 的永久失败。
+                    return QqApiErrorKind::FriendCheckFailed;
+                case 40054013:
+                    return QqApiErrorKind::UserRejected;
+                case 40054016:
+                    return QqApiErrorKind::BotOffline;
+                case 304004:  // 无权限使用该 ARK 模板
+                case 40034105:  // 主动消息发送失败,无权限
+                case 40034127:  // 无 markdown 模板权限
+                case 11253:  // API 指南:app privilege 未过
+                    return QqApiErrorKind::PermissionDenied;
+                case 11243:  // API 指南:token 校验未过
+                    return QqApiErrorKind::Unauthorized;
+                case 50059:  // 输入类型错误
+                case 304061:
+                case 304062:  // 订阅按钮数量达到上限
+                case 40034006:
+                case 40034008:  // markdown 参数有空值
+                case 40034009:  // markdown 参数有换行符
+                case 40034010:  // 模版参数含 markdown 语法
+                case 40034011:  // 无效的 markdown 内容
+                case 40034124:  // markdown 消息参数错误
+                case 40034129:  // 内联键盘行/列超限
+                case 40054007:
+                case 40054018:
+                case 22006:
+                case 304080:
+                case 850019:  // Q4 媒体:不支持的文件格式
+                case 850031:  // Q4 媒体:上传文件超过大小限制
+                    return QqApiErrorKind::ContentRejected;
+                case 50055002:
+                case 40034004:  // 富媒体转存失败,官方建议重试
+                case 850026:  // Q4 媒体:平台转存原始文件失败(可重试)
+                case 850027:  // Q4 媒体:发送数据超时(可重试)
+                case 40093001:  // Q4 媒体:分片上传 BDH 通道异常(官方建议重试)
+                    return QqApiErrorKind::ServerError;
+                default:
+                    return std::nullopt;  // 未知码:落 HTTP 档,不猜
+            }
+        }();
+        if (kind_for_code.has_value()) {
+            out.kind = *kind_for_code;
+            // 业务码分型已定(message 透传口径维持 A17 前现状,不在此扩权)。
+            if (shape.body_is_json_object) {
+                const nlohmann::json parsed =
+                    nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+                if (parsed.is_object() && parsed.contains("message") &&
+                    parsed.at("message").is_string()) {
+                    out.detail = parsed.at("message").get<std::string>();
+                }
+            }
+            return out;
         }
-    };
-    if (const auto by_code = kind_for_code()) {
-        out.kind = *by_code;
+        // 未知业务码:HTTP 档兜底(429/401/403/5xx 优先,语义不被陌生码
+        //盖过);2xx 带未知非 0 码按 InvalidResponse(平台报了失败但合同
+        //读不出,走人工账)。
+    }
+
+    // 走到这说明没有有效业务码。码字段在但非法:不许 value_or(0) 当成功
+    // ——2xx 判 InvalidResponse(成功合同无法核对);非 2xx 落 HTTP 档。
+    const bool illegal_code_field =
+        (shape.has_code && shape.code_illegal) || (shape.has_err_code && shape.err_code_illegal);
+    if (illegal_code_field && http_status >= 200 && http_status < 300) {
+        out.kind = QqApiErrorKind::InvalidResponse;
+        out.detail = std::string("2xx body code field illegal (not an integer)") + trace_note;
         return out;
     }
     if (http_status == 429) {
@@ -912,6 +1051,7 @@ QqApiError ClassifyQqSendFailure(int http_status, const std::string& body) {
         out.kind = QqApiErrorKind::UnknownError;
         return out;
     }
+    // 2xx 无码字段:成功形状(body 是业务数据);message 也不在此透传。
     out.kind = QqApiErrorKind::InvalidResponse;
     return out;
 }

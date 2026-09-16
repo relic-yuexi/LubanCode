@@ -310,4 +310,128 @@ TEST_CASE("qq_messages: 网络失败 DeferredRetry;非 JSON 2xx 不重试") {
           QqMessageSender::Outcome::Status::PermanentFail);
 }
 
+// ---------------------------------------------------------------------------
+// A03:err_code 官方形状、码字段非法/冲突不折算成成功;新业务码分型。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_messages: HTTP 200 + err_code 业务失败按码分型(A03)") {
+    Fixture fixture;
+    fixture.http.replies.push_back({200, R"({"access_token":"T1","expires_in":7200})"});
+    QqTokenManager tokens(fixture.TokenOptions());
+    QqMessageSender::Options options;
+    options.http = fixture.http.Func();
+    options.tokens = &tokens;
+    options.api_base = "https://api.test";
+    QqMessageSender sender(std::move(options));
+    // 官方 API 指南失败示例原文形状(err_code + trace_id)。
+    fixture.http.replies.push_back(
+        {200, R"({"err_code":40034005,"message":"回复消息msg_id已过期",)"
+              R"("trace_id":"4a8a61565b909f199b1ec169fdd6f49e"})"});
+    const auto expired = sender.SendC2c(MakeSend("out-err1"));
+    CHECK(expired.status == QqMessageSender::Outcome::Status::PermanentFail);
+    CHECK(expired.error.kind == QqApiErrorKind::MsgIdExpired);
+    CHECK(expired.error.platform_err_code == 40034005);
+    CHECK(expired.error.trace_id == "4a8a61565b909f199b1ec169fdd6f49e");
+    // err_code 字符串整数(平台数值字段两态)。
+    fixture.http.replies.push_back({200, R"({"err_code":"40034100"})"});
+    const auto throttled = sender.SendC2c(MakeSend("out-err2"));
+    CHECK(throttled.status == QqMessageSender::Outcome::Status::DeferredRetry);
+    CHECK(throttled.error.kind == QqApiErrorKind::RateLimited);
+}
+
+TEST_CASE("qq_messages: 码字段非法/冲突不冒充成功(A03)") {
+    Fixture fixture;
+    fixture.http.replies.push_back({200, R"({"access_token":"T1","expires_in":7200})"});
+    QqTokenManager tokens(fixture.TokenOptions());
+    QqMessageSender::Options options;
+    options.http = fixture.http.Func();
+    options.tokens = &tokens;
+    options.api_base = "https://api.test";
+    QqMessageSender sender(std::move(options));
+    // 2xx + code 字段非法(解不出):成功合同无法核对,不 value_or(0) 当成功。
+    fixture.http.replies.push_back({200, R"({"code":"soon"})"});
+    const auto illegal = sender.SendC2c(MakeSend("out-bad1"));
+    CHECK(illegal.status == QqMessageSender::Outcome::Status::PermanentFail);
+    CHECK(illegal.error.kind == QqApiErrorKind::InvalidResponse);
+    // 2xx + 两码冲突:不猜,不冒充成功。
+    fixture.http.replies.push_back({200, R"({"code":40034005,"err_code":40054004})"});
+    const auto conflict = sender.SendC2c(MakeSend("out-bad2"));
+    CHECK(conflict.status == QqMessageSender::Outcome::Status::PermanentFail);
+    CHECK(conflict.error.kind == QqApiErrorKind::InvalidResponse);
+}
+
+TEST_CASE("qq_messages: 40054006 好友校验失败可重试;40054016 离线可重试(A03)") {
+    Fixture fixture;
+    fixture.http.replies.push_back({200, R"({"access_token":"T1","expires_in":7200})"});
+    QqTokenManager tokens(fixture.TokenOptions());
+    QqMessageSender::Options options;
+    options.http = fixture.http.Func();
+    options.tokens = &tokens;
+    options.api_base = "https://api.test";
+    QqMessageSender sender(std::move(options));
+    // 40054006 官方"验证好友关系失败、建议重试"——不再是 NoFriend 永久失败。
+    fixture.http.replies.push_back({200, R"({"code":40054006,"message":"验证好友关系失败"})"});
+    const auto friend_check = sender.SendC2c(MakeSend("out-f1"));
+    CHECK(friend_check.status == QqMessageSender::Outcome::Status::DeferredRetry);
+    CHECK(friend_check.error.kind == QqApiErrorKind::FriendCheckFailed);
+    // 40054016 机器人已下线——状态可恢复。
+    fixture.http.replies.push_back({200, R"({"code":40054016,"message":"机器人已下线"})"});
+    const auto offline = sender.SendC2c(MakeSend("out-f2"));
+    CHECK(offline.status == QqMessageSender::Outcome::Status::DeferredRetry);
+    CHECK(offline.error.kind == QqApiErrorKind::BotOffline);
+    // 对照:40054004 无好友关系仍是永久失败。
+    fixture.http.replies.push_back({200, R"({"code":40054004})"});
+    const auto no_friend = sender.SendC2c(MakeSend("out-f3"));
+    CHECK(no_friend.status == QqMessageSender::Outcome::Status::PermanentFail);
+    CHECK(no_friend.error.kind == QqApiErrorKind::NoFriend);
+    // 40034128 被动回复时间或次数超限:独立分族,仍是锚点终结。
+    fixture.http.replies.push_back({200, R"({"code":40034128})"});
+    const auto quota = sender.SendC2c(MakeSend("out-f4"));
+    CHECK(quota.status == QqMessageSender::Outcome::Status::PermanentFail);
+    CHECK(quota.error.kind == QqApiErrorKind::ReplyQuotaExhausted);
+    // 40034105 无权限:永久(申请权限前重试无意义)。
+    fixture.http.replies.push_back({200, R"({"code":40034105})"});
+    const auto no_perm = sender.SendC2c(MakeSend("out-f5"));
+    CHECK(no_perm.status == QqMessageSender::Outcome::Status::PermanentFail);
+    CHECK(no_perm.error.kind == QqApiErrorKind::PermissionDenied);
+}
+
+TEST_CASE("qq_messages: AckInteraction 成功合同——空成功放行,损坏不冒充(A03)") {
+    Fixture fixture;
+    fixture.http.replies.push_back({200, R"({"access_token":"T1","expires_in":7200})"});
+    QqTokenManager tokens(fixture.TokenOptions());
+    QqMessageSender::Options options;
+    options.http = fixture.http.Func();
+    options.tokens = &tokens;
+    options.api_base = "https://api.test";
+    QqMessageSender sender(std::move(options));
+    // 204 无正文:官方"成功且无响应体"。
+    fixture.http.replies.push_back({204, ""});
+    CHECK(sender.AckInteraction("inter-1", 0).status == QqMessageSender::AckStatus::Acked);
+    // 200 空体/纯空白:文档允许的空成功。
+    fixture.http.replies.push_back({200, ""});
+    CHECK(sender.AckInteraction("inter-2", 0).status == QqMessageSender::AckStatus::Acked);
+    fixture.http.replies.push_back({200, "  \r\n "});
+    CHECK(sender.AckInteraction("inter-3", 0).status == QqMessageSender::AckStatus::Acked);
+    // 200 err_code=0:平台报成功。
+    fixture.http.replies.push_back({200, R"({"err_code":0})"});
+    CHECK(sender.AckInteraction("inter-4", 0).status == QqMessageSender::AckStatus::Acked);
+    // 200 非空非 JSON:损坏,不冒充 Acked。
+    fixture.http.replies.push_back({200, "not json"});
+    const auto broken = sender.AckInteraction("inter-5", 0);
+    CHECK(broken.status == QqMessageSender::AckStatus::Failed);
+    CHECK(broken.error.kind == QqApiErrorKind::InvalidResponse);
+    // 200 JSON 数组:非 object,损坏。
+    fixture.http.replies.push_back({200, "[1,2]"});
+    CHECK(sender.AckInteraction("inter-6", 0).status == QqMessageSender::AckStatus::Failed);
+    // 200 业务码非 0:平台拒绝(官方回应 code=2 操作频繁)。
+    fixture.http.replies.push_back({200, R"({"code":2,"message":"操作频繁"})"});
+    const auto rejected = sender.AckInteraction("inter-7", 0);
+    CHECK(rejected.status == QqMessageSender::AckStatus::Failed);
+    CHECK(rejected.error.platform_code == 2);
+    // 200 码字段非法:无法核对,不冒充。
+    fixture.http.replies.push_back({200, R"({"code":"frequent"})"});
+    CHECK(sender.AckInteraction("inter-8", 0).status == QqMessageSender::AckStatus::Failed);
+}
+
 }  // namespace lubancode::channel::qq

@@ -18,12 +18,28 @@ std::string DigestJson(const nlohmann::json& value) {
     return Sha256Hex(value.dump());
 }
 
-// 平台错误体 {"code":..,"message":..} 的 code(数值/数字字符串两态)。
+// 平台错误体业务码(A03 共用规则):code/err_code 两形状,唯一字段取其值,
+// 并存等值取该值;字段非法或两码冲突——不猜,返回 nullopt(菜单账按无有效
+// 码走 rejected_<status>,不当成功)。
 std::optional<std::int64_t> PlatformCodeOf(const nlohmann::json& body) {
-    if (!body.is_object() || !body.contains("code")) {
+    if (!body.is_object()) {
         return std::nullopt;
     }
-    return ParseLooseInt64(body.at("code"));
+    std::optional<std::int64_t> code;
+    std::optional<std::int64_t> err_code;
+    if (body.contains("code")) {
+        code = ParseLooseInt64(body.at("code"));
+    }
+    if (body.contains("err_code")) {
+        err_code = ParseLooseInt64(body.at("err_code"));
+    }
+    if (code.has_value() && err_code.has_value()) {
+        return *code == *err_code ? code : std::nullopt;
+    }
+    if (code.has_value()) {
+        return code;
+    }
+    return err_code;
 }
 
 }  // namespace
