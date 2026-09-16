@@ -228,7 +228,7 @@
 
 ## 七、第一波实施记录（A01/A02/A03/A09，2026-09-17）
 
-PR：[relic-yuexi/LubanCode#112](https://github.com/relic-yuexi/LubanCode/pull/112)（分支 `worktree-agent-qq-proto-p0`，基线 `2a6b8d9d`）。CI：以头提交活跃 check suite 的 rollup conclusion 为准（链接随 PR）。
+PR：[relic-yuexi/LubanCode#112](https://github.com/relic-yuexi/LubanCode/pull/112)（分支 `worktree-agent-qq-proto-p0`，基线 `2a6b8d9d`）。CI：头提交 `e905c407` 活跃 check suite（github-actions）conclusion=success——[run 35135563256](https://github.com/relic-yuexi/LubanCode/actions/runs/35135563256)，macos-clang/changes/lane 全绿（PR 快车道只跑 macOS；windows-msvc 合入 main 后跑；cloudflare 套件为全仓恒 queued 的闲置注册，非门槛）。
 
 官方合同当日核对（四页，日期 2026-09-17，fixture 已在测试内标注来源与日期）：
 
