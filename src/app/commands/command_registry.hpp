@@ -25,7 +25,6 @@
 
 #include "api/backend.hpp"
 #include "agent/agent.hpp"
-#include "agent/artifact_store.hpp"
 #include "agent/prompt_assembler.hpp"
 #include "app/backend_stack.hpp"
 #include "app/commands/command_flow.hpp"
@@ -145,7 +144,6 @@ struct SlashDispatchContext {
     std::function<void(const std::optional<lubancode::runtime::SessionSoulSnapshot>&)> adopt_resumed_soul;
     lubancode::cli::ContextTracker* context_tracker = nullptr;
     lubancode::app::ModelRouterService* model_router = nullptr;
-    std::shared_ptr<lubancode::agent::ContextArtifactStore> artifact_store;
 
     // ---- 工具全栈 ----
     lubancode::tools::ToolRegistry* registry = nullptr;

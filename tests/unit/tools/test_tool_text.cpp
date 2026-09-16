@@ -5,7 +5,7 @@
 //   LUBANCODE_LANG=en 走 cli::SetLanguage("en") 同一条选择链,出英文。
 //
 // 批3(代理族:agent/agent_message + persona)、批4(交互:ask_user/todo_write)、
-// 批5(外接:lsp/context_search/context_read)同样两条铁律:缺省零变化、
+// 批5(外接:lsp)同样两条铁律:缺省零变化、
 // en 生效。各批的迁移前原文照 cpp 字面量逐字节抄在这里钉死。
 //
 // 注意:语言是进程级全局状态,LangGuard 兜底还原(同 test_i18n.cpp 的
@@ -37,7 +37,6 @@
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/background_output.hpp"
-#include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/list_sessions_tool.hpp"
 #include "tools/lsp_tool.hpp"
@@ -59,8 +58,6 @@ using lubancode::tools::AgentMessageTool;
 using lubancode::tools::AgentTool;
 using lubancode::tools::AskUserTool;
 using lubancode::tools::BackgroundOutputTool;
-using lubancode::tools::ContextReadTool;
-using lubancode::tools::ContextSearchTool;
 using lubancode::tools::EditFileTool;
 using lubancode::tools::ReadFileTool;
 using lubancode::tools::RunCommandTool;
@@ -180,7 +177,7 @@ TEST_CASE("试点工具: en 下 description 与 schema 参数说明都是英文"
 // 平台分档文案(description 与 command/shell 两参数)按编译平台走对应的键,
 // POSIX 节只在非 Windows 平台可查。
 // 批3-5:代理族(agent/agent_message + persona)、交互(ask_user/todo_write)、
-// 外接(lsp/context_search/context_read)同理,原文逐字节抄来。
+// 外接(lsp)同理,原文逐字节抄来。
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -548,7 +545,8 @@ TEST_CASE("批4 交互: en 下 description 与参数说明都是英文") {
 }
 
 // ---------------------------------------------------------------------------
-// 批5:外接(lsp / context_search / context_read)。
+// 批5:外接(lsp)。(T17/V3-ADD-03:context_search/context_read 两件随旧
+// artifact 仓退役,本批只剩 lsp。)
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -558,16 +556,6 @@ const char* kLspDescBefore =
     "mode=references 查引用(需要 line/character),mode=symbols 列文件里的符号,"
     "mode=diagnostics 看文件的诊断(错误/警告)。line/character 是 1 基,跟编辑器显示一致。"
     "只有 config 的 lsp 段配置过的语言(按文件扩展名路由)才能查。";
-
-const char* kContextSearchDescBefore =
-    "在先前工具输出的落盘全文(artifact)里按关键词检索。工具结果太长时,请求里只留"
-    "[artifact aNNNN ...] 引用(头尾预览);预览不够就用本工具搜全文,拿命中行号与块 id,"
-    "再用 context_read 读出上下文。不可把预览的省略号当全文。";
-
-const char* kContextReadDescBefore =
-    "按稳定 id 读先前工具输出落盘全文(artifact)的一段:给 chunk_id(context_search 命中给的)"
-    "或 line_start(1 起)+line_count。单次最多 32 KiB,超了会拒绝并给可用范围。"
-    "全文真本按 sha256 校验,hash 不合的内容不会被供给。";
 
 }  // namespace
 
@@ -583,31 +571,6 @@ TEST_CASE("批5 外接: 缺省(zh-CN)与改前一字不差") {
     CHECK(lschema["properties"]["line"]["description"] == "行号,1 基(definition/references 必填)");
     CHECK(lschema["properties"]["character"]["description"] == "列号,1 基(definition/references 必填)");
     CHECK(lschema["required"] == nlohmann::json::array({"mode", "file"}));
-
-    ContextSearchTool search(nullptr);
-    CHECK(search.description() == kContextSearchDescBefore);
-    const nlohmann::json sschema = search.input_schema();
-    CHECK(sschema["properties"]["artifact_id"]["description"] == "[artifact aNNNN ...] 标记里的 aNNNN");
-    CHECK(sschema["properties"]["query"]["description"] == "关键词(ASCII 大小写不敏感,中文按原文)");
-    CHECK(sschema["properties"]["max_results"]["description"] == "最多回几条命中(默认 8)");
-    CHECK(sschema["required"] == nlohmann::json::array({"artifact_id", "query"}));
-
-    ContextReadTool read(nullptr);
-    CHECK(read.description() == kContextReadDescBefore);
-    const nlohmann::json rschema = read.input_schema();
-    CHECK(rschema["properties"]["artifact_id"]["description"] == "[artifact aNNNN ...] 标记里的 aNNNN");
-    CHECK(rschema["properties"]["chunk_id"]["description"] == "块 id(如 c0003);给了就按块读");
-    CHECK(rschema["properties"]["line_start"]["description"] == "起始行(1 起;与 chunk_id 二选一)");
-    CHECK(rschema["properties"]["line_count"]["description"] == "读几行;0 = 读到结尾");
-    CHECK(rschema["required"] == nlohmann::json::array({"artifact_id"}));
-    CHECK(!rschema["properties"].contains("summarize"));
-
-    ContextReadTool summarizing_read(
-        nullptr, [](const lubancode::agent::ArtifactRef&)
-                     -> std::expected<std::string, std::string> { return "摘要"; });
-    CHECK(summarizing_read.description().find("额外消耗模型 token") != std::string::npos);
-    CHECK(summarizing_read.input_schema()["properties"]["summarize"]["description"] ==
-          "按需调用 cheap 模型摘要整枚 artifact;会额外消耗 token,不可与 chunk_id/行窗同用");
 }
 
 TEST_CASE("批5 外接: en 下 description 与参数说明都是英文") {
@@ -620,22 +583,6 @@ TEST_CASE("批5 外接: en 下 description 与参数说明都是英文") {
     CHECK(lschema["properties"]["mode"]["description"] == "Query type");
     CHECK(lschema["properties"]["line"]["description"] ==
           "Line number, 1-based (required for definition/references)");
-
-    ContextSearchTool search(nullptr);
-    CHECK(search.description().find("Search the spilled full text of earlier tool outputs") == 0);
-    CHECK(search.input_schema()["properties"]["max_results"]["description"] ==
-          "Maximum number of hits to return (default 8)");
-
-    ContextReadTool read(nullptr);
-    CHECK(read.description().find("Read a segment of the spilled full text") == 0);
-    CHECK(read.input_schema()["properties"]["chunk_id"]["description"] ==
-          "Chunk id (e.g. c0003); when given, read by chunk");
-    ContextReadTool summarizing_read(
-        nullptr, [](const lubancode::agent::ArtifactRef&)
-                     -> std::expected<std::string, std::string> { return "summary"; });
-    CHECK(summarizing_read.description().find("extra cheap-model call") != std::string::npos);
-    CHECK(summarizing_read.input_schema()["properties"]["summarize"]["description"] ==
-          "Summarize the whole artifact on demand with the cheap model; costs extra tokens and cannot be combined with chunk_id or a line window");
 }
 
 // ---------------------------------------------------------------------------

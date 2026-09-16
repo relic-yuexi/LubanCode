@@ -294,9 +294,11 @@ PlanShellVerdict ClassifyPlanShell(const std::string& command, const std::string
 
 bool IsPlanAllowedBuiltinTool(const std::string& name) {
     // 单子首版工具表:放行的内置件。skill 是 P2-3 补的:加载技能只往
-    // 上下文装 SKILL.md 说明,不改状态,Plan 不该管"读"。
-    static constexpr std::array<std::string_view, 12> kAllowed = {
-        "read_file", "search", "context_search", "context_read", "lsp",
+    // 上下文装 SKILL.md 说明,不改状态,Plan 不该管"读"。(T17:
+    // context_search/context_read 已随旧 artifact 仓退役,从白名单移除——
+    // 调用退役名走注册表"未知工具"的明确错误。)
+    static constexpr std::array<std::string_view, 10> kAllowed = {
+        "read_file", "search", "lsp",
         "web_search", "web_fetch", "ask_user", "tool_search", "skill", "agent", "run_command"};
     return std::find(kAllowed.begin(), kAllowed.end(), name) != kAllowed.end();
 }

@@ -9,7 +9,7 @@
 // 覆盖:基建批试点(read_file/write_file)、批1 文件工具余量(edit_file/
 // search)、批2 命令族(run_command/background_output/stop_background)、
 // 批3 代理族(agent/agent_message/persona)、批4 交互(ask_user/todo_write)、
-// 批5 外接(lsp/context_search/context_read)、清底批(web_search/web_fetch/
+// 批5 外接(lsp)、清底批(web_search/web_fetch/
 // tool_search/skill、list_sessions/send_session_message/worktree、
 // memory_save/programmatic_tool_calling)。
 
@@ -41,7 +41,6 @@
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/background_output.hpp"
-#include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/list_sessions_tool.hpp"
 #include "tools/lsp_tool.hpp"
@@ -171,7 +170,7 @@ int main() {
     std::cout << "== todo_write.param.items.status ==\n"
               << ti["status"]["description"].get<std::string>() << "\n";
 
-    // ---- 批5:外接(lsp / context_search / context_read)----
+    // ---- 批5:外接(lsp)。(T17:context_search/context_read 已退役)----
     lubancode::lsp::Manager manager({}, "/work/dir");
     lubancode::tools::LspTool lsp(manager);
     std::cout << "== lsp.description ==\n" << lsp.description() << "\n";
@@ -180,21 +179,6 @@ int main() {
     DumpParam(ls, "file", "lsp.param.file");
     DumpParam(ls, "line", "lsp.param.line");
     DumpParam(ls, "character", "lsp.param.character");
-
-    lubancode::tools::ContextSearchTool search(nullptr);
-    std::cout << "== context_search.description ==\n" << search.description() << "\n";
-    const nlohmann::json ss = search.input_schema();
-    DumpParam(ss, "artifact_id", "context_search.param.artifact_id");
-    DumpParam(ss, "query", "context_search.param.query");
-    DumpParam(ss, "max_results", "context_search.param.max_results");
-
-    lubancode::tools::ContextReadTool context_read(nullptr);
-    std::cout << "== context_read.description ==\n" << context_read.description() << "\n";
-    const nlohmann::json cs = context_read.input_schema();
-    DumpParam(cs, "artifact_id", "context_read.param.artifact_id");
-    DumpParam(cs, "chunk_id", "context_read.param.chunk_id");
-    DumpParam(cs, "line_start", "context_read.param.line_start");
-    DumpParam(cs, "line_count", "context_read.param.line_count");
 
     // ---- 批1 文件工具余量(edit_file / search)与批2 命令族 ----
     // (合并自批1-2 驱动器:变量名避开上文批5 的 search/ss。)

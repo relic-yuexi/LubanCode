@@ -2123,7 +2123,8 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                             summary_event_ref = summary.terminal_event_ref;
                         }
                     }
-                    auto request = PreviewFromPersistedMaterials(persist, persisted, budget);
+                    auto request = PreviewFromPersistedMaterials(persist, persisted, budget,
+                                                                 v3_writer_->path().parent_path());
                     if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete || persist.outputs.size() > 1)) {
                         auto preview = v3::BuildToolPreview(request);
                         if (preview.listing_overflow) {
@@ -2132,7 +2133,10 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                                 hard_fail("tool.preview.index_failed", book.action_id);
                                 continue;
                             }
-                            request.output_index_path = *index;
+                            // output_index 与 full_output 同一追回口径:给模型
+                            // 绝对路径,相对账留 result_ref(T17)。
+                            request.output_index_path = platform::PathToUtf8(
+                                v3_writer_->path().parent_path() / platform::Utf8ToPath(*index));
                             preview = v3::BuildToolPreview(request);
                         }
                         if (preview.preview_unrepresentable || preview.listing_overflow || preview.text.size() > budget) {

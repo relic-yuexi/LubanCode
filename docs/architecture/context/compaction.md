@@ -1,6 +1,8 @@
 # Context 压缩算法深挖
 
-> **V3-LEGACY-03：旧 compact 算法参考，待清理。** 本页的四分区双账、archive/kept_indices、compact_v2 与旧存储回放不再定义默认 v3 路径。新版见[压缩指南](../../features/context/compaction.md)与 [Session v3](../session-v3.md)。共用 loop 仍有 L1/L2/hard trim，不能据旧算法页面推断它们已全部入 v3 链。
+> **V3-LEGACY-03：旧 compact 算法参考，待清理。** 本页的四分区双账、archive/kept_indices、compact_v2 与旧存储回放不再定义默认 v3 路径。新版见[压缩指南](../../features/context/compaction.md)与 [Session v3](../session-v3.md)。共用 loop 仍有 L1/hard trim，不能据旧算法页面推断它们已全部入 v3 链。
+>
+> **V3-ADD-03（T17，2026-09-17 retired）：旧 ContextArtifactStore 与 L2 按需摘要已退役。** `context_search`/`context_read` 两枚工具、旧仓的 blob/chunk/index 落盘、`context_read(summarize=true)` 的 microcompact 链一并删除。v2 旧档会话的超长结果退回"头尾预览 + 原文在会话存档"；v3 会话的原文追回口是结果仓预览说明区的绝对路径 + `read_file` 分段读（见 [v3 容量恢复](v3-capacity-recovery.md)）。
 
 _面向技术面试与源码走查：从 prompt 稳定性、冷热区、程序筛选、分块 map/reduce，一直讲到验收、回放与失败降级。_
 
@@ -89,7 +91,7 @@ request.messages = history_or_summaries;
 | `history_` | 模型下一步要看的活历史 | L3 成功后替换 |
 | `request_history_` | 活历史加本 turn 临时上下文 | 随 history 重建，再补临时上下文 |
 | session JSONL | 完整消息与事件流水 | 不删旧行，只添 compact marker |
-| artifact store | 超长工具结果原文 | 不删，摘要后仍可追回 |
+| artifact store | （T17 retired）旧仓已删；v3 走 ResultStore 的 `artifacts/res-*` | 不删 |
 
 project memory 不在这四本里。它跨会话存稳定事实，每条新用户消息到来时另行召回。compact 不拿它当旧对话一起总结。
 
@@ -98,8 +100,8 @@ project memory 不在这四本里。它跨会话存稳定事实，每条新用�
 | 层 | 手段 | 是否调模型 | 是否改 history | 原文在哪 |
 | --- | --- | --- | --- | --- |
 | L0 | 原样、分页、按需加载 | 否 | 否 | history/session |
-| L1 | 结构去重、版本标记、artifact 预览 | 否 | 否 | history/session/artifact |
-| L2 | 点名 artifact 的按需 microcompact | 是 | 否，只往尾部添工具结果 | session/artifact |
+| L1 | 结构去重、版本标记、超长头尾预览 | 否 | 否 | history/session |
+| L2 | （T17 retired）按需 microcompact 已随旧仓删除 | — | — | — |
 | L3 | 全局 semantic compact | 是 | 是 | session |
 | L4 | sticky hard trim | 否 | 否，只改请求视图 | session/history |
 
@@ -129,28 +131,16 @@ L1 只改请求视图的表示。L2 不改旧表示，只在工具调用处添�
 | 短结果，首次出现 | 放全文 |
 | 同一只读调用、同一内容 | 后来者换成前一事件引用 |
 | 同一资源出了新版本 | 新版保留，旧版给版本提示或预览 |
-| 长结果且 artifact 可用 | 原文落 blob，视图留 id、指纹、头尾预览 |
+| 长结果 | 视图留指纹与头尾预览（T17 后不再落旧仓 blob；原文在会话存档） |
 | 带副作用工具 | 不按内容判重 |
 
 为何副作用工具不判重？两次 `run_command` 即使 stdout 一模一样，也可能各自改过状态。把第二次折成“同前”，会抹掉真实动作。
 
 L1 的决策在 cache epoch 内钉住。已发过的旧结果不会下一 step 忽然从全文变预览，免得请求前缀反复改形。
 
-### L2 microcompact
+### L2 microcompact（retired 2026-09-17，T17/V3-ADD-03）
 
-L2 默认不开工。模型须点名 artifact，显式调用 `context_read(summarize=true)`。宿主才另建一只独占 backend，走 cheap 路由写一份局部摘要。它不扫冷区，不在回合收尾猜哪枚值得花钱。
-
-| 项 | 当前值 |
-| --- | ---: |
-| 单次处理 | 调用方点名的 `1` 枚 artifact |
-| 单枚模型输入上限 | `24 KiB` |
-| cheap 请求超时 | `45 s` |
-
-输入从 artifact blob 重新读，不拿旧摘要再摘要。超过 `24 KiB` 时取头尾各半，再沿行边界与 UTF-8 码点边界收口。
-
-模型要回严格 JSON，至少带 `summary` 与 `key_facts`。解析失败、摘要过短、超时、blob hash 不对，工具返回错误。原文不删，memo 不换。
-
-成功摘要随本次 `context_read` 的 `tool_result` 追加到历史尾部。已发旧消息逐字不动，cache epoch 也不因 L2 改写。`summarize=true` 不可与块 id 或行窗同用。
+按需局部摘要链（`context_read(summarize=true)` → 独占 cheap backend → `RunMicrocompact`）已随旧 ContextArtifactStore 一并退役：触发工具删除后没有调用方，按需摘要不再存在。需要原文时走 v3 结果仓的预览路径 + `read_file`；全局摘要走 L3 compact。本节保留为历史参考。
 
 ## 🎯 L3 何时触发
 
@@ -444,7 +434,7 @@ final text 过短、manifest 解析失败、goal 空、活动待办漏项，整�
 | final manifest 漏 active todo | 整场拒收 | 待办守恒高于省 token |
 | 摘要比原文长 | 单次路径拒收 | 没压缩收益 |
 | compact 中 turn context 存在 | 换史后重新注入请求视图 | 临时上下文不丢也不永久化 |
-| artifact blob 损坏 | 按需摘要工具报错 | 不拿坏原文造摘要，旧 L1 预览不动 |
+| artifact blob 损坏 | （T17 retired）按需摘要链已删;v3 结果仓缺件由账面 result_ref 探缺口 | 不冒充原文齐全 |
 
 ## 🎓 面试追问答法
 
@@ -475,7 +465,7 @@ final text 过短、manifest 解析失败、goal 空、活动待办漏项，整�
 | 单次与分层 compact | `src/agent/compact.cpp`、`compact.hpp` | `tests/unit/agent/test_compact.cpp` |
 | token 与 hard trim | `src/agent/context.cpp`、`context.hpp` | `tests/unit/api/test_context.cpp` |
 | L1 结构压缩 | `src/agent/context_events.cpp` 等 context event 模块 | `tests/unit/api/test_context_events.cpp` |
-| L2 microcompact | `src/agent/microcompact.cpp`、`microcompact.hpp` | `tests/unit/memory/test_microcompact.cpp` |
+| （retired）L2 microcompact | 已删（T17，2026-09-17） | 已删（T17） |
 | 中途压力与换史 | `src/agent/loop.cpp` | `tests/unit/agent/test_loop.cpp`、`test_request_prefix.cpp` |
 | compact event 回放 | `src/sessions/session_store.cpp` | `tests/unit/sessions/test_session_store.cpp` |
 | 自动触发、命令与待办守恒 | `src/app/interactive_session.cpp`、`src/app/commands/session_commands.cpp` | compact 与 session 相关测试 |

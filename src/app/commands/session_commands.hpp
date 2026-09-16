@@ -101,7 +101,8 @@ struct DeferredToolModeSummary {
 // /context 的会话事实(V3-REAL-03/07/08/A02):装配层一并递进来——v3 判定、
 // 最近一次请求的冻结预算(loop 请求定形时刷新)、v3 结果仓统计。预算空指针
 // = 本会话尚未发请求(卡片明说,不拿配置现算冒充);统计 absent = v2 会话
-// 或 v3 结果仓未开(走旧 artifact 口径)。
+// 或 v3 结果仓未开(T17:旧 ContextArtifactStore 口径已退役,不再有
+// fallback 统计行)。
 struct ContextSessionFacts {
     bool v3_session = false;
     const lubancode::runtime::PreRequestBudget* last_request_budget = nullptr;
@@ -120,7 +121,6 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::cli::Theme& theme, int cache_epoch = 1,
                            const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr,
                            const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
-                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
                            const ContextLayersReport* layers = nullptr,
                            const lubancode::agent::ModelRouteTable* roles_table = nullptr,
                            int compact_partition_count = 0,
@@ -155,7 +155,6 @@ struct ContextEstimateInputs {
     // 无路由路径,分角色账退回无模型名的裸账)。指向调用方栈上现算的
     // ModelRouterService::Table() 副本,本结构不拥有。
     const lubancode::agent::ModelRouteTable* roles_table = nullptr;
-    const lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
     // 轨迹账本(可空;V3-REAL-03/08/A02):v3 判定与 v3 结果仓统计从它取
     //(与 CompactSessionInputs 同款非 const——v3_main_writer 取用口非
     // const)。空指针 = 无轨迹现场(单测/旧路径),/context 走 v2 口径。

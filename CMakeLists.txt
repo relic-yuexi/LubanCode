@@ -541,7 +541,6 @@ add_library(lubancode_engine STATIC
   src/tools/todo_tool.cpp
   src/tools/tool_search.cpp
   src/tools/deferred_tool_resolver.cpp
-  src/tools/context_tools.cpp
   src/tools/plugin_loader.cpp
   src/tools/lua_tool.cpp
   src/tools/web_fetch.cpp
@@ -574,7 +573,7 @@ add_library(lubancode_engine STATIC
   # 监督器单 P0-0:进展合同——四本时钟、监督相位、健康态、空转指纹与判定尺。
   src/agent/agent_progress.cpp
   # 骨架拆解批七·病十五:peer 域/会话域/技能域物件迁出 agent/(目录归位,
-  # target 不动——engine 的 tool_trace/artifact_store 仍引它们的纯函数)。
+  # target 不动)。
   src/peers/peer_registry.cpp
   src/peers/peer_mailbox.cpp
   src/peers/peer_session.cpp
@@ -594,7 +593,6 @@ add_library(lubancode_engine STATIC
   # (provider,model) 分桶,滚动窗口中位系数供估算口乘。
   src/agent/token_calibrator.cpp
   src/agent/context_events.cpp
-  src/agent/artifact_store.cpp
   # ccmoon 真机巡检单 P0:模型输出图片(Responses image_generation_call)
   # 的解码/验身/原子落盘。
   src/agent/model_image_store.cpp
@@ -613,7 +611,6 @@ add_library(lubancode_engine STATIC
   src/agent/prefix.cpp
   src/agent/compact.cpp
   src/agent/context_budget.cpp
-  src/agent/microcompact.cpp
   # 存储 v2 P0-6:旧 SessionStore/Catalog/Lifecycle(平铺目录读写)已删,
   # 仍被生产消费的纯工具(时间戳/UTF-8 截断/id 拼装/路径归一/引用消歧)
   # 迁 tools/session_utils;旧格式解析只活在迁移器独立 target。

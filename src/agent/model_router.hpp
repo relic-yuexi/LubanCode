@@ -39,18 +39,18 @@ enum class ModelRole { Cheap, Normal, Lao };
 //                     Plan Mode,本枚举先钉口径,接线点到位即走 lao)。
 //   Compact           /compact 与 auto compact 的 map/reduce 与默认终稿。
 //   CompactRepair     compact 校验失败后的修补或回退(normal)。
-//   Microcompact      点名 artifact 的按需局部摘要(cheap)。
 //   MemoryExtract     回合记忆候选抽取(cheap)。
 //   RetrievalExpansion 检索扩展词(cheap;与抽取同轮产出时同路)。
 //   Classification    低风险分类(cheap)。
 //   SessionTitle      会话标题生成(cheap)。
 //   ResumeSummary     resume 列表摘要(cheap)。
+// (T17:Microcompact——点名 artifact 的按需局部摘要——已随旧 artifact 仓
+// 与 context_read(summarize=true) 退役,枚举移除。)
 enum class TaskKind {
     NormalTurn,
     Plan,
     Compact,
     CompactRepair,
-    Microcompact,
     MemoryExtract,
     RetrievalExpansion,
     Classification,
@@ -107,15 +107,15 @@ struct ModelRouteTable {
     ModelRoute cheap;
     ModelRoute normal;
     ModelRoute lao;
-    // compact_model 旧字段单写(cheap_model 未配置)时:只顶替 Compact/
-    // Microcompact 任务的模型,不接管记忆抽取、标题、resume 摘要(规格
-    // "旧字段只影响 compact,不该突然接管记忆和标题")。
+    // compact_model 旧字段单写(cheap_model 未配置)时:只顶替 Compact
+    // 任务的模型,不接管记忆抽取、标题、resume 摘要(规格"旧字段只影响
+    // compact,不该突然接管记忆和标题";Microcompact 已退役)。
     std::optional<ModelRoute> compact_legacy_override;
     std::vector<std::string> notices;
 
     const ModelRoute& RoleRoute(ModelRole role) const;
-    // 按任务种类取路由:先过默认角色映射;Compact/Microcompact 且旧字段
-    // 在场时优先旧字段(未配 cheap 的兼容期行为)。
+    // 按任务种类取路由:先过默认角色映射;Compact 且旧字段在场时优先
+    // 旧字段(未配 cheap 的兼容期行为)。
     ModelRoute RouteFor(TaskKind kind) const;
 };
 

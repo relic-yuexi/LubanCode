@@ -3,13 +3,13 @@
 //   - 双历史:history_(可持久、可 compact 的真历史)与 request_history_
 //     (模型视图,另含每轮动态上下文);
 //   - 前缀指纹与 cache epoch(agent/prefix.hpp):追加律逐请求记账;
-//   - 无损结构压缩的开关、选项、台账(agent/context_events.hpp);
-//   - 可追回 artifact 仓(agent/artifact_store.hpp)。
+//   - 无损结构压缩的开关、选项、台账(agent/context_events.hpp)。
 //
 // 账本规矩全在原主(前缀缓存守恒单、分层压缩单),这里只搬家不改判:
 // ReplaceHistory(压缩/重建)显式开新 epoch、清台账;保命索真截了东西先记
 // pending_epoch_break_reason,下一份请求的追加律判定用它点名(指纹 diff
 // 只能报 old_message_changed,这里的因更准)。
+// (T17:可追回 artifact 仓槽位已随 ContextArtifactStore 退役。)
 
 #pragma once
 
@@ -19,7 +19,6 @@
 #include <string>
 #include <vector>
 
-#include "agent/artifact_store.hpp"
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
 #include "agent/prefix.hpp"
@@ -77,12 +76,10 @@ public:
     void set_structural_compression_enabled(bool enabled) { structural_compression_enabled_ = enabled; }
     void set_structural_options(const StructuralCompressionOptions& options) { structural_options_ = options; }
     const StructuralCompressionOptions& structural_options() const { return structural_options_; }
-    void set_artifact_store(ContextArtifactStore* store) { artifact_store_ = store; }
 
     // 最近一次请求的结构压缩账(/context 与诊断用)。
     const StructuralCompressionStats& structural_stats() const { return structural_stats_; }
-    // 决策台账只读口(/context 诊断用)。摘要走 context_read 的新工具结果,
-    // 不再回头改这本账。
+    // 决策台账只读口(/context 诊断用)。
     const ResultViewMemo& result_view_memo() const { return result_view_memo_; }
 
     // 拼下一份请求的工作视图:无损结构压缩(首次定形,epoch 内不追改)
@@ -168,7 +165,6 @@ private:
     bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的压缩账(观测用)
-    ContextArtifactStore* artifact_store_ = nullptr;  // 空 = 没仓,退回旧行为
     // 保命索截断的钉子账(V3-REAL-01):每枚结果的裁剪形状随首次采用的档位
     // 快照固定,epoch 内普通追加请求不重裁——系数变化追改旧预览正是缓存
     // 前缀持续分叉的病理;窗口真装不下时硬闸重裁并覆写定形(B1-5)。换形状

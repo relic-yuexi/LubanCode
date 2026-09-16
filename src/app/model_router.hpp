@@ -15,8 +15,8 @@
 //
 // 骨架拆解批一·病四:Route 之外加 Sample 一站——"路由 + 采样 + 记账"的
 // 小模型活一扇门。简单后台活(记忆抽取这类"路由即发、发完记账"的形状)
-// 直接走它;路由策略特殊的调用方(compact 的动态角色回退、microcompact
-// 的独占 backend、evaluator 的 goal 侧账)仍用 Route/RouteDetached 拿路由,
+// 直接走它;路由策略特殊的调用方(compact 的动态角色回退、evaluator 的
+// goal 侧账)仍用 Route/RouteDetached 拿路由,
 // 采样一律走 agent::SampleModel 原语。
 #pragma once
 

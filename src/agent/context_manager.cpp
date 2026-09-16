@@ -83,15 +83,16 @@ ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& bud
         return ContextWorkingView{request_history_, {}};
     }
     // 无损结构压缩(第六期"首次定形"):只改发给模型的视图——每枚
-    // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
-    // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
+    // tool result 第一次进请求视图时定形(短则全文、超长首次即头尾预览、
+    // 重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
     // 追改已经发过的表示。活历史与 session JSONL 一字不动,tool use/
     // result 配对天然不破。压完的视图更小,后面保命索也更少真开刀。
-    // 第二期:带仓时 Artifact 决策先落盘,视图带稳定 artifact_id。
+    // (T17:旧 artifact 仓已退役,超长结果不再落第二套盘;v3 会话的预览
+    // 在提交边界定形,走到这里的只有 v2 旧档会话。)
     std::vector<api::Message> view_source;
     if (structural_compression_enabled_) {
         view_source = CompressWorkingView(request_history_, structural_options_, structural_stats_,
-                                          result_view_memo_, artifact_store_);
+                                          result_view_memo_);
     } else {
         view_source = request_history_;
     }
@@ -132,10 +133,9 @@ std::vector<api::Message> ContextManager::BuildPressureDryRunView() const {
     }
     ResultViewMemo scratch_memo;
     StructuralCompressionStats scratch_stats;
-    // store 传空:dry-run 不落盘 artifact,也不改本对象的决策台账——估
-    // 算归估算,正式 BuildWorkingView 时该落的照落。
-    return CompressWorkingView(request_history_, structural_options_, scratch_stats, scratch_memo,
-                               /*store=*/nullptr);
+    // dry-run 用临时台账:不改本对象的决策台账——估算归估算,正式
+    // BuildWorkingView 时该定形的照定形。
+    return CompressWorkingView(request_history_, structural_options_, scratch_stats, scratch_memo);
 }
 
 ContextManager::PrefixAccount ContextManager::AccountRequest(const api::Request& request, const std::string* wire_dump) {

@@ -327,7 +327,7 @@ compact 先在内存里验收并替换 history，后往 session 追加 `compact_
 
 ### “有哪些真正的重试？”
 
-主模型 transport 没有。memory pending job 可跨进程再捞。L2 microcompact 只在模型显式调用 `context_read(summarize=true)` 时跑；失败便回工具错误，不自动重试。`max_tokens` 可受控续跑，但它是 continuation。
+主模型 transport 没有。memory pending job 可跨进程再捞。（T17，2026-09-17 retired：L2 microcompact 与 `context_read(summarize=true)` 已随旧 ContextArtifactStore 退役。）`max_tokens` 可受控续跑，但它是 continuation。
 
 ## 🔗 源码与测试
 

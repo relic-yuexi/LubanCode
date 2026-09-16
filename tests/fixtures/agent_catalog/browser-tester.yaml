@@ -17,7 +17,7 @@ skills:
 
 tools:
   allow:
-    - context_read
+    - lsp
     - todo_read
     - todo_write
     - mcp__browser__navigate

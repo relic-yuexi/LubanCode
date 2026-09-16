@@ -33,10 +33,6 @@
 #include "api/types.hpp"
 
 namespace lubancode::agent {
-class ContextArtifactStore;
-}
-
-namespace lubancode::agent {
 
 // ---------------------------------------------------------------------------
 // 规范化事件账
@@ -108,7 +104,7 @@ struct StructuralCompressionStats {
 // 不得涂改(agent/prefix.hpp 的追加律)。
 enum class ResultViewKind {
     Full,          // 原文全文(短结果的默认归宿)
-    Artifact,      // 超长,首次即换成 artifact 引用(头尾预览)
+    Artifact,      // 超长,首次即换成头尾预览(中段省略;原文在会话存档)
     DuplicateRef,  // 同键同 hash 的后来者,自述"与事件 eN 相同"
     NewVersion,    // 同键不同 hash 的新版本,自述"替代事件 eN",原文照发
 };
@@ -117,11 +113,6 @@ struct ResultViewDecision {
     ResultViewKind kind = ResultViewKind::Full;
     std::string ref_event_id;   // DuplicateRef/NewVersion 指到的那枚事件
     std::size_t seen_count = 1; // DuplicateRef:同键同 hash 累计出现次数
-    // Artifact(第二期):落盘成功后记稳定 artifact_id("a0007")与 sha256
-    // 短指纹(12 hex)——视图渲染与 memo 重放都用它。空 = 没落盘(无仓或
-    // 落盘失败,后者决策已退回 Full)。
-    std::string artifact_id;
-    std::string artifact_sha;
 };
 
 // 决策台账:tool_use_id -> 首次定形的决策。AgentLoop 每个 epoch 持一份
@@ -134,11 +125,14 @@ struct ResultViewMemo {
 // 结构压缩:返回发给模型的工作视图。原 history 不动、消息条数不变、块序不
 // 变;每枚 tool_result 按首次定形的决策渲染:
 //   - 精确重复:"[已收敛:与事件 e12 的结果完全相同(read_file),累计出现 3 次;全文在会话存档]"
-//   - 新版本:  "[此读取替代事件 e7 的旧版本]\n" + 原文(超长则 artifact)
+//   - 新版本:  "[此读取替代事件 e7 的旧版本]\n" + 原文(超长则头尾预览)
 //   - 超长:    "[artifact e123 · sha=... · 12345 字节 · 头部预览… 尾部预览…]"
 // 硬规矩(前缀缓存守恒单第六期):后来者只自述,绝不回头改早先事件的
 // 表示——e7 不补 superseded,重复不拆第一份。stats 只记本次新做的决策
 // (memo 命中的旧决策不再计)。
+// (T17/V3-ADD-03:带 ContextArtifactStore 的重载已随仓退役。超长结果的
+// Artifact 决策不再落第二套仓——v2 会话退回内存全文(原有降级路),v3
+// 会话的预览在工具结果提交边界定形,本层根本不跑。)
 std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
                                               const StructuralCompressionOptions& options,
                                               StructuralCompressionStats& stats, ResultViewMemo& memo);
@@ -148,16 +142,6 @@ std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& h
 std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
                                               const StructuralCompressionOptions& options,
                                               StructuralCompressionStats& stats);
-
-// 第二期(可追回 artifact):带仓的定形。新事件判成 Artifact 时先走仓的
-// 原子落盘(blob -> chunks -> index),成功把 artifact_id 记进决策、视图
-// 渲染带稳定 id 与检索指引;失败(仓没开/磁盘错/hash 不合)决策退回
-// Full——内存全文照旧发送,绝不换成空引用(规格"原文不丢")。卸载对
-// 同 tool_use_id 幂等,compact/重开 epoch 后重放不重复落盘。
-std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
-                                              const StructuralCompressionOptions& options,
-                                              StructuralCompressionStats& stats, ResultViewMemo& memo,
-                                              ContextArtifactStore* store);
 
 // 内容指纹:FNV-1a 64,十六进制 16 位。不引加密库——指纹只用来判"完全相同"
 // 与做引用锚点,不做安全用途。

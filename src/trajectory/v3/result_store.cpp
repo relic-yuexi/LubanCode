@@ -186,6 +186,15 @@ PreviewResult BuildToolPreview(const PreviewRequest& request) {
                 static_cast<int>(result.full_output.size() - shown);
             header += "omitted_output_count: " + std::to_string(result.omitted_output_count) + "\n";
         }
+        // 追回指引(T17/V3-ADD-03):只在截断时出现——未截断的预览就是全文,
+        // 无需指路。路径由生产链给绝对值(PreviewFromPersistedMaterials 按
+        // session_dir 拼);sha256 真值在账(tool.result.persisted 的
+        // result_ref 六键),读回端不重复校验,文件缺失由 read_file 明报。
+        if (truncated) {
+            header += "retrieval_hint: 未展示的原文按 full_output/captured_output 所列绝对路径"
+                      "用 read_file 读回(大文件用 offset/limit 分段);各文件 sha256 记录在"
+                      "会话账 tool.result.persisted 事件\n";
+        }
         return header;
     };
 

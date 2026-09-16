@@ -326,7 +326,6 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
                                                   "config:" + current_soul_name,
                                                   lubancode::runtime::SessionSoulContentHash(*current_soul),
                                                   /*revision=*/0, /*locked=*/false})),
-      artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       wrapped_backend(real_backend, options.theme, options.spinner_enabled),
       context_tracker(config_result.config.context_window_tokens),
       detached_skills(skills),

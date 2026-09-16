@@ -23,7 +23,6 @@
 #include <vector>
 
 #include "agent/compact.hpp"
-#include "agent/artifact_store.hpp"
 #include "agent/agent.hpp"  // Agent:ReplaceHistory/History(批四自立门户)
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
@@ -95,7 +94,7 @@ std::size_t PressureEstimateTokens(lubancode::agent::Agent& loop,
     lubancode::agent::ResultViewMemo scratch_memo;
     lubancode::agent::StructuralCompressionStats scratch_stats;
     return lubancode::agent::EstimateHistoryTokens(lubancode::agent::CompressWorkingView(
-        history, loop.context().structural_options(), scratch_stats, scratch_memo, /*store=*/nullptr));
+        history, loop.context().structural_options(), scratch_stats, scratch_memo));
 }
 
 // ---- /context 校准行(token 估算校准单)的三个小格式器 ------------------
@@ -176,7 +175,6 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::cli::Theme& theme, int cache_epoch,
                            const lubancode::agent::AgentRuntimeProfile* main_profile,
                            const lubancode::agent::ModelUsageLedger* usage_ledger,
-                           const lubancode::agent::ContextArtifactStore* artifact_store,
                            const ContextLayersReport* layers,
                            const lubancode::agent::ModelRouteTable* roles_table,
                            int compact_partition_count,
@@ -260,9 +258,9 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             }
         }
 
-        // 结构与回收卡片(第三组):artifact 层、分层占用、回收字节、最近
-        // compact——"原文还能去哪找、token 花在哪、何时会压"一张单子。
-        if (artifact_store != nullptr || layers != nullptr || deferred_tool_summary != nullptr) {
+        // 结构与回收卡片(第三组):分层占用、回收字节、最近 compact——
+        // "原文还能去哪找、token 花在哪、何时会压"一张单子。
+        if (layers != nullptr || deferred_tool_summary != nullptr) {
             TermOut() << "\n── " << trf("cmd.context.group.structure") << " ──\n";
         }
         // deferred_tool_mode(动态工具 PromptCache 守恒单 P0 起;P1 补
@@ -287,7 +285,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         if (session_facts.has_result_store_stats) {
             // v3 结果仓(V3-REAL-A02):工具结果在提交边界存盘(res-*),模型
             // 侧收预算内预览——"已保存但当前仍以预览/inline 进模型"如实
-            // 说,不笼统写没落盘,也不冒充 context_search 可检索的旧 artifact。
+            // 说,不笼统写没落盘;原文追回走预览里的绝对路径 + read_file
+            // (T17:旧 context_search/context_read 口径已退役)。
             if (session_facts.result_store_results > 0) {
                 TermOut() << "  "
                           << trf("cmd.context.v3_result_store", session_facts.result_store_results,
@@ -295,13 +294,6 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                           << "\n";
             } else {
                 TermOut() << "  " << tr("cmd.context.v3_result_store_none") << "\n";
-            }
-        } else if (artifact_store != nullptr && artifact_store->active()) {
-            const auto stats = artifact_store->StatsOf();
-            if (stats.artifacts > 0) {
-                TermOut() << "  " << trf("cmd.context.artifacts", stats.artifacts, stats.total_bytes) << "\n";
-            } else {
-                TermOut() << "  " << tr("cmd.context.artifacts_none") << "\n";
             }
         }
         if (session_facts.v3_session) {
@@ -785,8 +777,15 @@ void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
             channel.output_bytes_lower_bound =
                 output.value("byte_count_kind", std::string()) == "lower_bound";
             if (output.contains("ref") && output["ref"].is_object()) {
-                channel.display_path = output["ref"].value("path", std::string());
-                std::ifstream data_file(session_dir / lubancode::tools::Utf8ToPath(channel.display_path),
+                // 降档重派生与提交边界同一追回口径(T17):预览给绝对路径,
+                // 读原文用 session_dir 拼——降档后新预览的 full_output 不能
+                // 又退回模型解析不了的相对路径。
+                const std::string relative = output["ref"].value("path", std::string());
+                channel.display_path =
+                    relative.empty() ? std::string()
+                                     : lubancode::tools::PathToUtf8(
+                                           session_dir / lubancode::tools::Utf8ToPath(relative));
+                std::ifstream data_file(session_dir / lubancode::tools::Utf8ToPath(relative),
                                         std::ios::binary);
                 if (data_file.is_open()) {
                     channel.text = std::string((std::istreambuf_iterator<char>(data_file)),
@@ -2031,7 +2030,7 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
         }
     }
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
-                         loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers,
+                         loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, &layers,
                          in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr,
                          v3_session ? nullptr : &token_calibration_status, session_facts);
 }
@@ -2592,7 +2591,6 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
         roles_table_storage = ctx.model_router->Table();
         context_in.roles_table = &roles_table_storage;
     }
-    context_in.artifact_store = ctx.artifact_store.get();
     context_in.trajectory = ctx.trajectory;
     context_in.last_compact_line = ctx.last_compact_line;
     if (ctx.config != nullptr) {

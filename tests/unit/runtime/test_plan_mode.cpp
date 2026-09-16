@@ -47,11 +47,20 @@ TEST_CASE("plan_mode: Default 一概放行,写盘件也放") {
 }
 
 TEST_CASE("plan_mode: Plan 放行只读白名单") {
-    for (const char* name : {"read_file", "search", "context_search", "context_read", "lsp", "web_search",
+    for (const char* name : {"read_file", "search", "lsp", "web_search",
                              "web_fetch", "ask_user", "tool_search"}) {
         const auto verdict =
             lubancode::runtime::EvaluateModePolicy(lubancode::runtime::CollaborationMode::Plan, Builtin(name));
         CHECK(verdict.allowed);
+    }
+    // T17:context_search/context_read 已退役,不在白名单——Plan 闸给明确
+    // 拒绝文案(不在白名单/未知来源,都带 /plan off 指引)。
+    for (const char* name : {"context_search", "context_read"}) {
+        const auto verdict =
+            lubancode::runtime::EvaluateModePolicy(lubancode::runtime::CollaborationMode::Plan, Builtin(name));
+        CHECK_FALSE(verdict.allowed);
+        CHECK(verdict.code == lubancode::runtime::kErrModeDeniedUnknownSource);
+        CHECK(verdict.reason.find("/plan off") != std::string::npos);
     }
 }
 

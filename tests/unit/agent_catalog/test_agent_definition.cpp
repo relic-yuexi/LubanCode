@@ -63,7 +63,7 @@ skills:
 
 tools:
   allow:
-    - context_read
+    - lsp
     - todo_read
   deny:
     - shell
@@ -110,7 +110,7 @@ permissions:
     CHECK(def.model.role == "inherit");
     CHECK(def.model.effort == "inherit");
     CHECK(def.skills_preload == std::vector<std::string>{"browser-testing"});
-    CHECK(def.tools.allow == std::vector<std::string>{"context_read", "todo_read"});
+    CHECK(def.tools.allow == std::vector<std::string>{"lsp", "todo_read"});
     CHECK(def.tools.deny == std::vector<std::string>{"shell"});
     CHECK(def.mcp_servers == std::vector<std::string>{"browser"});
     CHECK(def.requires_tools == std::vector<std::string>{"mcp__browser__navigate"});

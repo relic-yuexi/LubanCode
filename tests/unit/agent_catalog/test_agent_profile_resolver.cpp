@@ -485,7 +485,7 @@ TEST_CASE("对账:同一 Definition 从 AgentTool 与 Workflow 两条路解析,�
     // 换一份依赖齐整的定义(父面放宽到夹具点名的工具),两条路再对一次,
     // 这次必须双双 ok 且全等。
     const std::vector<std::string> wide_parent_tools = {
-        "read_file", "search", "context_read", "todo_write", "run_command",
+        "read_file", "search", "lsp", "todo_write", "run_command",
         "mcp__browser__navigate", "mcp__browser__screenshot",
     };
     const agent::ResolvedAgentProfile clean_agent_tool = agent::ResolveAgentProfile(

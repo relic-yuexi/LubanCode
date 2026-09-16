@@ -39,8 +39,6 @@ std::string ToString(TaskKind kind) {
             return "全局压缩";
         case TaskKind::CompactRepair:
             return "压缩修补";
-        case TaskKind::Microcompact:
-            return "微压缩";
         case TaskKind::MemoryExtract:
             return "记忆抽取";
         case TaskKind::RetrievalExpansion:
@@ -67,7 +65,6 @@ ModelRole DefaultRoleForTask(TaskKind kind) {
         case TaskKind::CompactRepair:
             return ModelRole::Normal;
         case TaskKind::Compact:
-        case TaskKind::Microcompact:
         case TaskKind::MemoryExtract:
         case TaskKind::RetrievalExpansion:
         case TaskKind::Classification:
@@ -113,9 +110,9 @@ const ModelRoute& ModelRouteTable::RoleRoute(ModelRole role) const {
 
 ModelRoute ModelRouteTable::RouteFor(TaskKind kind) const {
     const ModelRole role = DefaultRoleForTask(kind);
-    // compact_model 兼容别名:只顶替压缩类任务(Compact/Microcompact),
-    // 记忆抽取、标题、resume 摘要照走 cheap 角色的有效值——旧字段影响面
-    // 不悄悄扩大(规格"调用点收拢"节)。
+    // compact_model 兼容别名:只顶替压缩类任务(Compact/CompactRepair,
+    // Microcompact 已随按需摘要退役),记忆抽取、标题、resume 摘要照走
+    // cheap 角色的有效值——旧字段影响面不悄悄扩大(规格"调用点收拢"节)。
     if (compact_legacy_override.has_value() &&
         (kind == TaskKind::Compact || kind == TaskKind::CompactRepair)) {
         return *compact_legacy_override;

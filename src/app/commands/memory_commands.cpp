@@ -14,7 +14,6 @@
 #include <utility>
 
 #include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1)
-#include "agent/microcompact.hpp"  // RunMicrocompact(按需摘要)
 #include "app/memory_extract.hpp"  // ClassifyTaskType/BuildTurnTranscript 一族
 #include "app/model_router.hpp"
 #include "cli/console_input.hpp"
@@ -758,52 +757,9 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     }
 }
 
-std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionTailContext& ctx,
-                                                                  const lubancode::agent::ArtifactRef& ref) {
-    if (ctx.model_router == nullptr || ctx.artifact_store == nullptr || !ctx.artifact_store->active()) {
-        return std::unexpected("按需摘要暂不可用:artifact 仓或模型路由未就绪");
-    }
-    auto routed = ctx.model_router->RouteDetached(lubancode::agent::TaskKind::Microcompact);
-    if (routed.route.model.empty()) {
-        return std::unexpected("按需摘要暂不可用:cheap 模型未配置");
-    }
-    if (routed.backend == nullptr) {
-        return std::unexpected("按需摘要暂不可用:cheap provider 找不到");
-    }
-    lubancode::agent::BackgroundCallAccounting accounting;
-    // Token 账本单 A1:按需摘要(L2)也走旁路桥(purpose=compact_map)。
-    lubancode::agent::MicrocompactOptions micro_options;
-    if (ctx.trajectory != nullptr) {
-        lubancode::runtime::TrajectorySessionLedger* ledger = ctx.trajectory;
-        const std::string wire = ctx.trajectory_wire;
-        const std::string provider = routed.route.provider;
-        micro_options.bypass_recorder = [ledger, wire, provider]()
-                                            -> std::unique_ptr<lubancode::agent::LoopBoundaryRecorder> {
-            lubancode::runtime::TrajectoryTurnBridge::Identity identity{provider, wire, "host"};
-            return ledger->NewBypassBridge(std::move(identity));
-        };
-    }
-    auto summary = lubancode::agent::RunMicrocompact(
-        *routed.backend, routed.route.model, routed.route.effort, *ctx.artifact_store, ref,
-        std::move(micro_options), &accounting);
-    ctx.model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model,
-                                      accounting.usage, accounting.duration_ms,
-                                      accounting.usage_reported);
-    if (!summary.has_value()) {
-        return std::unexpected(summary.error());
-    }
-    std::string out = "artifact " + ref.artifact_id + "(" + ref.tool_name + ")按需摘要 · cheap:" +
-                      routed.route.model + " · 原文未改:\n" + summary->summary;
-    if (!summary->key_facts.empty()) {
-        out += "\n关键事实:";
-        for (const auto& fact : summary->key_facts) {
-            out += "\n- " + fact;
-        }
-    }
-    out += "\n摘要不作最终证据;有疑点请用 context_search/context_read 回看 artifact " +
-           ref.artifact_id + " 原文。";
-    return out;
-}
+// (T17/V3-ADD-03:SummarizeArtifactOnDemand——context_read(summarize=true)
+// 的按需摘要——已随旧 artifact 仓退役:context_tools 与 microcompact 整链
+// 删除,cheap 路由不再有 Microcompact 任务档。)
 
 // 命令分派注册制(会话终章):/memory 的分派位——命令与排版全在本文件,
 // 分派位只递会话状态(工具补注册走回调)。

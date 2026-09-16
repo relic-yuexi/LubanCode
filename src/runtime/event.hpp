@@ -107,8 +107,9 @@ enum class ServerEventKind {
     // Plan 模式(只读研究硬闸单):模式切换与计划审阅,thread 层事件。
     //   CollaborationModeChanged:payload 带 mode/previous_mode/reason/revision。
     //   PlanReviewRequested:Plan turn 收口且见完整 PlanDocument 后由空闲层
-    //     发,payload 带 plan_id/plan_revision/sha256/artifact_ref/available_
-    //     decisions。不冒充普通 tool approval(单子:专用事件)。
+    //     发,payload 带 plan_id/plan_revision/sha256/available_decisions。
+    //     不冒充普通 tool approval(单子:专用事件)。(T17:artifact_ref
+    //     随旧仓退役移除。)
     //   PlanReviewResolved:用户答完,payload 带 decision 与所选
     //     selected_permission_mode(批准时)。
     CollaborationModeChanged,

@@ -34,7 +34,6 @@
 #include <variant>
 #include <vector>
 #include <nlohmann/json.hpp>
-#include "agent/artifact_store.hpp"
 #include "agent/compact.hpp"
 #include "agent/context_budget.hpp"
 #include "agent/loop.hpp"
@@ -145,7 +144,6 @@
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
 #include "tools/command_safety.hpp"
-#include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
@@ -470,7 +468,6 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       current_think_history(stack_.current_think_history),
       active_provider(stack_.active_provider),
       model_router(stack_.model_router),
-      artifact_store(stack_.artifact_store),
       current_model_instructions(stack_.current_model_instructions),
       current_soul_name(stack_.current_soul_name),
       current_soul(stack_.current_soul),
@@ -579,16 +576,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // hub 已安家,挂 undo_file_edit(条件式撤销:凭
     // hub 的账本翻凭据,走与 write/edit 同一道确认门)。
     tool_runtime_->AttachUndoTool(&*trace_hub_);
-    // 可追回 artifact 的两把只读钥匙(第二期):main 与子代理同级都有。
-    // main 的 context_read 另接按需摘要:模型显式写 summarize=true 才花
-    // cheap token,回执自然追加在尾部。子代理只给原文读取,免并发改路由账。
-    registry().Register(std::make_unique<lubancode::tools::ContextSearchTool>(artifact_store));
-    registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(
-        artifact_store, [this](const lubancode::agent::ArtifactRef& ref) {
-            return lubancode::app::SummarizeArtifactOnDemand(MakeTailContext(), ref);
-        }));
-    sub_registry().Register(std::make_unique<lubancode::tools::ContextSearchTool>(artifact_store));
-    sub_registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(artifact_store));
+    // (T17/V3-ADD-03:旧 context_search/context_read 两把钥匙与
+    // ContextArtifactStore 已退役——v3 结果原文的追回口是预览说明区的
+    // 绝对路径 + read_file 分段读,见 trajectory/v3/result_store 与
+    // runtime/v3_tool_result_material。)
     // 子系统接线器(会话终章):goal/loop/plan/peer/录制各配一只 Host(全
     // 借用 + 晚绑定槽),装配与状态归接线器,控制器持句柄调。会话级状态
     //(theme/config/标题活值)留本类,两边不互相摸。
@@ -659,7 +650,6 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         plan_host.theme = &theme;
         plan_host.session_runtime = &session_runtime_;
         plan_host.prompt_options = &prompt_options;
-        plan_host.artifact_store = artifact_store.get();
         plan_host.main_agent = [this]() { return main_agent.has_value() ? &*main_agent : nullptr; };
         plan_host.registry = [this]() { return &registry(); };
         plan_host.agent_tool = [this]() { return session_agent_tool(); };
@@ -1013,10 +1003,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // Soul 会话冻结单 P0(§5.3):恢复源场已提交快照(忽略磁盘新默认
             // 值);源场从未锁定过就按当前默认起未锁定草稿。
             AdoptResumedSessionSoul(session_runtime_.trajectory()->LaunchResumeSoulSnapshot());
-            // resume 的历史开新账(SessionStart source=resume),仓按新场开。
+            // resume 的历史开新账(SessionStart source=resume)。
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
                             nlohmann::json{{"source", "resume"}}, "resume");
-            OpenArtifactStore();
             goal_wiring_.RestoreFromArchive();
             BackfillTitleOnResume();
         }
@@ -1392,8 +1381,6 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
                 });
         }
     }
-    // 可追回 artifact(第二期):重建的 loop 也要接上仓(空仓安全退化)。
-    main_agent->context().set_artifact_store(artifact_store.get());
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
     main_agent->SetContextWindowTokens(context_tracker.window_tokens());
@@ -1645,7 +1632,6 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.soul_session = soul_session.get();
     ctx.context_tracker = &context_tracker;
     ctx.model_router = model_router.get();
-    ctx.artifact_store = artifact_store;
     ctx.registry = &registry();
     ctx.sub_registry = &sub_registry();
     ctx.agent_tool = session_agent_tool();
@@ -1720,8 +1706,8 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
         session_start_ts,
         [this]() {
             // /clear:旧上下文就此终局——SessionEnd(reason=clear) 先发,新的
-            // 空会话用 SessionStart(source=clear) 开账。仓也关掉:工具们持
-            // 同一只仓,scope 只跟当前会话,旧场子的 artifact 查不到。
+            // 空会话用 SessionStart(source=clear) 开账。(T17:旧 artifact 仓
+            // 已退役,不再有随场关闭的仓;v3 结果原文随各场目录隔离。)
             // Soul 会话冻结单 P0(§5.3):clear 的换账确实新建了 sessionId,
             // 会话魂重读 configured 默认、起未锁定草稿——rebuild_loop(false)
             // 在此回调之前已把新 Agent 建起来(可能带着旧快照),这里整份
@@ -1731,7 +1717,6 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
                 main_agent->AdoptSessionSoul(soul_session->name, soul_session->content,
                                              soul_session->locked);
             }
-            artifact_store->Close();
             EmitSessionHook(lubancode::hooks::HookEvent::SessionEnd, nlohmann::json{{"reason", "clear"}}, "clear");
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "clear"}},
                             "clear");
@@ -1764,7 +1749,6 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
         [this]() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
                             "resume");
-            OpenArtifactStore();
             // 持久目标单:goal 事件账随档恢复(默认 paused-on-resume)。
             goal_wiring_.RestoreFromArchive();
             // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼。

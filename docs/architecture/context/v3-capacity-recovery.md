@@ -60,6 +60,15 @@
 
 原始捕获不完整时，摘要无法补回缺失内容，必须保留 incomplete 状态及原因。所有候选都失败时停止本次恢复，保留原账、结果仓、队列与失败原因；已独立提交的成功变更不回滚。
 
+## 原文追回口（T17/V3-ADD-03，2026-09-17 定案）
+
+预览省略的原文必须有一条模型自己走得通的读回路。现行方案：**按路径读取，不设专用工具**。
+
+- 结果仓把原文按 `sessions/<sessionId>/artifacts/res-*` 不可变落档（`res-*.json` 为六键 artifactRef 描述，通道文件为真本）。
+- 预览说明区的 `full_output`/`captured_output`/`[文件: path | 通道: channel]` 标记给**绝对路径**（由 `PreviewFromPersistedMaterials` 按 session 目录拼装；账上 `result_ref.path` 仍存相对路径，保持可移植）。截断的预览额外带 `retrieval_hint` 一行，指路 `read_file` 用 offset/limit 分段读。
+- 权限与读窗复用 `read_file` 既有语义（任意路径、行窗、缺文件明报）；完整性真值在账（`tool.result.persisted` 的六键 sha256），读回端不重复校验；会话作用域即文件真身所在的本场目录——目录删除后 `read_file` 报"文件不存在"，不冒充。
+- 旧 `context_search`/`context_read` 与 ContextArtifactStore 已退役；渠道附件域（ChannelMediaService）沿用同一纪律。
+
 ## 接线与验收
 
 本次源码核查发现：BuildToolPreview 在 src 中只有声明与定义，普通工具返回仍以 result.content 进入运行时历史，v3 写桥也把同一全文写入 tool 消息；ReduceToolPreviews 尚无生产调用点。共用 hard trim 又按动态校正系数重裁旧结果。须先打通首次预览生成、运行时回喂与持久消息一致这条链，不能只修缓存诊断文字。

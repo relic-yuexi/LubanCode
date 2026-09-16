@@ -556,12 +556,6 @@ add_executable(usage_smoke_driver EXCLUDE_FROM_ALL manual/usage_smoke_driver.cpp
 target_link_libraries(usage_smoke_driver PRIVATE lubancode_app)
 target_compile_features(usage_smoke_driver PRIVATE cxx_std_23)
 
-# 可追回 artifact(第二期)的布局实测驱动器:手动跑,验收记录用。
-#   artifact_layout_dump <输出根目录>
-add_executable(artifact_layout_dump EXCLUDE_FROM_ALL manual/artifact_layout_dump.cpp)
-target_link_libraries(artifact_layout_dump PRIVATE lubancode_core)
-target_compile_features(artifact_layout_dump PRIVATE cxx_std_23)
-
 # Workspace 收官验收·量级基线驱动(不进 ctest,验收手动跑):
 #   workspace_scale_driver <输出.json> [--sessions 1,1000,10000]
 #       [--memories 1,1000,10000] [--root <临时根>]

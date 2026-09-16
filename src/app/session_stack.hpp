@@ -5,8 +5,8 @@
 //
 // 寿命规矩随行搬来:worktree_session 先于 ToolRuntime(worktree 工具持它
 // 的引用);ToolRuntime 的三表先于控制器里的 AgentLoop;晚绑定槽
-//(after_worktree_moved/summarize_artifact)由控制器在装配尾填——工厂
-// 起线程前才拷材料的老规矩不变。
+//(after_worktree_moved)由控制器在装配尾填——工厂起线程前才拷材料的
+// 老规矩不变。
 #pragma once
 
 #include <filesystem>
@@ -17,7 +17,6 @@
 #include <string>
 #include <vector>
 
-#include "agent/artifact_store.hpp"
 #include "api/reasoning.hpp"  // ReasoningHistoryMode:current_think_history 的档
 #include "app/backend_stack.hpp"
 #include "app/interactive_session.hpp"  // InteractiveSessionOptions
@@ -120,8 +119,6 @@ struct SessionStack {
     std::shared_ptr<std::string> current_soul;
     std::shared_ptr<lubancode::runtime::SessionSoulSnapshot> soul_session;
     std::string active_provider;
-    // 渐进式上下文仓:会话建档那一刻才 Open,没开的仓一切操作安全退化。
-    std::shared_ptr<lubancode::agent::ContextArtifactStore> artifact_store;
     lubancode::cli::SpinnerBackend wrapped_backend;
     lubancode::cli::ContextTracker context_tracker;
     // 统一模型路由:compact/记忆抽取/标题这类后台小活按 TaskKind 取路由。
@@ -154,8 +151,6 @@ struct SessionStack {
     // ---- 晚绑定槽(会话控制器装配尾填)----
     // worktree 工具 enter/exit 的善后(目录同步)。
     std::function<void()> after_worktree_moved;
-    // main 侧 context_read 的按需摘要(cheap token,会话尾款接线)。
-    std::function<std::string(const lubancode::agent::ArtifactRef&)> summarize_artifact;
 
     // ---- 窄口(ToolRuntime 在构造体内 emplace,统一走这几个)----
     lubancode::tools::ToolRegistry& registry();

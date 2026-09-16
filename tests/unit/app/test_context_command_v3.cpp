@@ -6,7 +6,8 @@
 //   2. 最近请求预算分栏(声明/策略预留/判定预留/实发),没发过请求就明说
 //      ——不拿配置现算冒充历史请求;
 //   3. v3 结果仓统计行(结果已保存,当前仍以预览进模型)与"结构压缩层
-//      未启用"行;v2 会话照旧走旧 artifact/校准口径,一字不动。
+//      未启用"行;v2 会话照旧走校准口径,一字不动(T17:旧 artifact 层
+//      统计行已随 ContextArtifactStore 退役)。
 #include <doctest/doctest.h>
 
 #include <sstream>
@@ -60,7 +61,7 @@ TEST_CASE("v3 会话:/context 打 bytes/4 口径行,不打 v2 校准行") {
         OutputCapture capture;
         app::HandleContextCommand("", tracker, 100, 200, 300, theme, /*cache_epoch=*/2,
                                   /*main_profile=*/nullptr, /*usage_ledger=*/nullptr,
-                                  /*artifact_store=*/nullptr, /*layers=*/nullptr,
+                                  /*layers=*/nullptr,
                                   /*roles_table=*/nullptr, /*compact_partition_count=*/0,
                                   /*deferred_tool_summary=*/nullptr, &calibrated, facts);
         text = capture.text();
@@ -90,7 +91,7 @@ TEST_CASE("v3 会话:最近请求预算分栏,三枚值各有其名") {
         OutputCapture capture;
         app::HandleContextCommand("", tracker, 100, 200, 300, theme, /*cache_epoch=*/2,
                                   /*main_profile=*/nullptr, /*usage_ledger=*/nullptr,
-                                  /*artifact_store=*/nullptr, /*layers=*/nullptr,
+                                  /*layers=*/nullptr,
                                   /*roles_table=*/nullptr, /*compact_partition_count=*/0,
                                   /*deferred_tool_summary=*/nullptr,
                                   /*token_calibration=*/nullptr, facts);
@@ -115,7 +116,7 @@ TEST_CASE("v3 会话:没发过请求就明说,不冒充") {
         OutputCapture capture;
         app::HandleContextCommand("", tracker, 100, 200, 300, theme, /*cache_epoch=*/1,
                                   /*main_profile=*/nullptr, /*usage_ledger=*/nullptr,
-                                  /*artifact_store=*/nullptr, /*layers=*/nullptr,
+                                  /*layers=*/nullptr,
                                   /*roles_table=*/nullptr, /*compact_partition_count=*/0,
                                   /*deferred_tool_summary=*/nullptr,
                                   /*token_calibration=*/nullptr, facts);
@@ -124,7 +125,7 @@ TEST_CASE("v3 会话:没发过请求就明说,不冒充") {
     CHECK(text.find("尚未发请求") != std::string::npos);
 }
 
-TEST_CASE("v2 会话:旧口径一行不改——校准行与 artifact 层照旧") {
+TEST_CASE("v2 会话:旧口径一行不改——校准行照旧") {
     app::ContextSessionFacts facts;  // v2:全默认
     cli::ContextTracker tracker(100000);
     const cli::Theme theme;
@@ -136,7 +137,7 @@ TEST_CASE("v2 会话:旧口径一行不改——校准行与 artifact 层照旧"
         OutputCapture capture;
         app::HandleContextCommand("", tracker, 100, 200, 300, theme, /*cache_epoch=*/1,
                                   /*main_profile=*/nullptr, /*usage_ledger=*/nullptr,
-                                  /*artifact_store=*/nullptr, /*layers=*/nullptr,
+                                  /*layers=*/nullptr,
                                   /*roles_table=*/nullptr, /*compact_partition_count=*/0,
                                   /*deferred_tool_summary=*/nullptr, &calibrated, facts);
         text = capture.text();

@@ -18,7 +18,6 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/agent.hpp"
-#include "agent/artifact_store.hpp"
 #include "agent/compact.hpp"
 #include "agent/prompt_assembler.hpp"
 #include "app/agent_panel_presenter.hpp"
@@ -97,8 +96,8 @@ namespace lubancode::app {
 //   - ProcessLine/DispatchSlashCommand:一行输入的 slash 分流与注册表路由;
 //   - RunSessionTurn:回合入口(User/Incoming 两路保真差异);
 //   - PumpScheduledWork:goal continuation 与 due loop tick 的公平仲裁;
-//   - 存档薄壳四只(EnsureSessionBegun/PersistNewMessages/OpenArtifactStore
-//     + steering 三只):本体在 runtime::SessionRuntime 与 cli 队列层;
+//   - 存档薄壳(EnsureSessionBegun/PersistNewMessages + steering 三只):
+//     本体在 runtime::SessionRuntime 与 cli 队列层;
 //   - 标题编排一组(BeginSessionTitle/StartTitleRefinement/
 //     BackfillTitleOnResume/StartPendingTitleRefinementAfterTurn/
 //     DrainFinishedTitleRefinement/HasFinishedTitleRefinement):判定在
@@ -191,7 +190,6 @@ private:
     bool HasFinishedTitleRefinement();
     // P0-2:待发的标题精修首问(回合内不与主 turn 抢流,收口后补发)。
     std::string pending_title_refinement_query_;
-    void OpenArtifactStore();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,
     // 不在 trace 里留一串无意义词。
@@ -265,7 +263,6 @@ private:
         tail.agent = &*main_agent;
         tail.model_router = model_router.get();
         tail.prompts_dir = &prompts_dir;
-        tail.artifact_store = artifact_store.get();
         tail.theme = &theme;
         // Token 账本单 A1:回合收尾的抽取/按需摘要走旁路桥落轨迹。
         tail.trajectory = session_runtime_.trajectory();
@@ -280,8 +277,6 @@ private:
     // 会话起名(模型分工第一期,cheap 角色):新会话首轮收尾或 resume 进来
     // 一场没标题的旧档时,拿开头几条消息起一枚短标题,成功落 title 事件;
     // 失败安静降级(/sessions 继续用首句摘要)。一场只试一次,不追着重试。
-    // context_read(summarize=true) 的按需摘要口:独占 cheap backend 读
-    // artifact 真本,结果由工具回执追加在历史尾部,不追改旧消息。
     // autosend_failed(可空出参):这一行若是普通正文回合且以请求失败收场
     // (RunTurnResult.status != 0,含异常兜底),写给 true。会话泵的"排队
     // 消息自动发送失败退还"判定就吃这个——不空口猜,拿 RunTurn 真给的
@@ -380,7 +375,6 @@ private:
     const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history;
     std::string& active_provider;
     std::unique_ptr<lubancode::app::ModelRouterService>& model_router;
-    std::shared_ptr<lubancode::agent::ContextArtifactStore>& artifact_store;
     const std::shared_ptr<std::string>& current_model_instructions;
     std::string& current_soul_name;
     const std::shared_ptr<std::string>& current_soul;

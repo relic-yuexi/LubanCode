@@ -155,9 +155,10 @@ bool ParseCollaborationMode(const std::string& s, CollaborationMode& out);
 std::string ToString(PlanReviewState state);
 bool ParsePlanReviewState(const std::string& s, PlanReviewState& out);
 
-// 一份计划成品。markdown 有字节上限(超限走 artifact,item 留 hash/引用,
-// 这里只存引用路径);content_sha256 是"用户审的是哪一稿"的锚,批准必须
-// 同时匹配 id/revision/hash。
+// 一份计划成品。content_sha256 是"用户审的是哪一稿"的锚,批准必须同时
+// 匹配 id/revision/hash。(T17:超限正文落旧 artifact 仓的 artifact_ref 字段
+// 已随仓退役——本结构无事件行落账,原文跟 PlanDocument.markdown 走,审批
+// 框与执行交接的 brief 直铺全文。)
 struct PlanDocument {
     std::string plan_id;      // "plan-<n>",会话内单调
     std::uint64_t revision = 1;  // 同一 plan_id 的第几稿(新稿 supersede 旧稿)
@@ -165,8 +166,6 @@ struct PlanDocument {
     std::string source_turn_id;
     PlanReviewState state = PlanReviewState::Draft;
     std::string content_sha256;  // markdown 的 SHA-256 十六进制
-    // 超限落仓时的 artifact 引用;空 = 正文内联在 session 事件行里。
-    std::string artifact_ref;
 
     bool valid() const { return !plan_id.empty() && !content_sha256.empty(); }
 };
@@ -193,9 +192,5 @@ struct ProposedPlanScan {
 //   - 只有开标签没有闭合置 truncated(流式中途的正常态;收口时仍 truncated
 //     就当普通 text,不弹审批)。
 ProposedPlanScan ScanProposedPlan(const std::string& text);
-
-// PlanDocument markdown 的内联字节上限:超限不塞 session 事件行,先落
-// artifact,事件行留 artifact_ref 与 hash(单子"大稿接 artifact")。
-inline constexpr std::uint64_t kPlanMarkdownInlineCap = 64 * 1024;
 
 }  // namespace lubancode::runtime

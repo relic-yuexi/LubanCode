@@ -1,6 +1,9 @@
 #pragma once
 
+#include <filesystem>
+
 #include "api/types.hpp"
+#include "platform/paths.hpp"
 #include "trajectory/v3/result_store.hpp"
 
 namespace lubancode::runtime {
@@ -23,10 +26,15 @@ inline void PreserveNativeToolPayload(const api::ToolResultBlock& result,
         static_cast<std::uint64_t>(raw.size()), !result.capture_complete});
 }
 
+// session_dir:本场会话目录(result_ref.path 相对此目录)。预览给模型的
+// display_path 拼成绝对路径——模型的工作目录不在会话目录下,相对路径它
+// 解析不了;原文追回口 = read_file 按绝对路径分段读(T17/V3-ADD-03,#93
+// 渠道附件同一纪律)。账上的 result_ref.path 仍存相对路径(可移植,消费
+// 方各自拼 session_dir)。
 inline trajectory::v3::PreviewRequest PreviewFromPersistedMaterials(
     const trajectory::v3::ResultStore::PersistRequest& material,
     const trajectory::v3::ResultStore::PersistedResult& persisted,
-    std::uint64_t budget) {
+    std::uint64_t budget, const std::filesystem::path& session_dir) {
     trajectory::v3::PreviewRequest request;
     request.max_preview_bytes = budget;
     for (const auto& output : material.outputs) {
@@ -39,7 +47,11 @@ inline trajectory::v3::PreviewRequest PreviewFromPersistedMaterials(
         channel.output_bytes_lower_bound = output.output_bytes_lower_bound;
         for (const auto& ref : persisted.result_ref) {
             if (ref.value("kind", std::string()) == output.channel) {
-                channel.display_path = ref.value("path", std::string());
+                const std::string relative = ref.value("path", std::string());
+                channel.display_path =
+                    relative.empty()
+                        ? std::string()
+                        : platform::PathToUtf8(session_dir / platform::Utf8ToPath(relative));
                 break;
             }
         }

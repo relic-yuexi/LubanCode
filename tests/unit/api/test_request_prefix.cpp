@@ -276,15 +276,15 @@ TEST_CASE("前缀: 默认工具往返,后一份请求是前一份的原样追加
     CHECK(reports[1].epoch_break_reason.empty());
 }
 
-TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消息") {
+TEST_CASE("前缀: 工具结果只追加,不追改旧消息") {
     CaptureBackend backend;
     backend.scripts = {
-        ToolUseScript("call_summary", "context_read"),
+        ToolUseScript("call_summary", "read_file"),
         TextScript("我看完摘要了"),
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FixedTool>(
-        "context_read", "artifact a0001 按需摘要:构建通过。原文未改。"));
+        "read_file", "文件内容已读:构建通过。"));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::TurnWiring callbacks;
@@ -294,7 +294,7 @@ TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消�
     // 载荷里还原,身份(cache_epoch/追加律)齐。
     const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
-    REQUIRE(loop.Run("摘要这枚 artifact", callbacks).has_value());
+    REQUIRE(loop.Run("读这份长文件", callbacks).has_value());
     REQUIRE(backend.captured.size() == 2);
     CHECK(IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
     CHECK(agent::DiffRequests(backend.captured[0], backend.captured[1]).break_reason().empty());
@@ -302,7 +302,7 @@ TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消�
     const auto* result = std::get_if<api::ToolResultBlock>(
         &backend.captured[1].messages.back().content.front());
     REQUIRE(result != nullptr);
-    CHECK(result->content.find("按需摘要") != std::string::npos);
+    CHECK(result->content.find("文件内容已读") != std::string::npos);
     REQUIRE(reports.size() == 2);
     CHECK(reports[1].cache_epoch == 1);
     CHECK(reports[1].prefix_append_only);
