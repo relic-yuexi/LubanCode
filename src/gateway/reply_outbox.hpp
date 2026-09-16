@@ -40,6 +40,24 @@
 
 namespace lubancode::gateway {
 
+// QQ 发送身份(A05/A06):同一 (账号, 被动锚 msg_id) 下所有出段——配对
+// 提示/任务回执/审批卡/正文分段/附件——共用一只按账发号的分配器:首次
+// 网络发送前冻结 (delivery, 锚, msg_seq, payload 摘要),账行先落
+//(PowerLoss)再上网络;结果未知的重试恒复用同一身份(重启亦然——账在
+// 盘上)。改锚补投必须先裁决旧身份(Retire),再行分配新身份——旧身份
+// 与裁决原因都留在账里,可追溯,不偷换同一 delivery。
+struct ChannelSendIdentity {
+    std::string anchor_msg_id;   // 被动锚(空 = 主动消息,seq 恒 0)
+    std::uint32_t msg_seq = 0;   // 平台载荷的 msg_seq(主动 = 0)
+    std::string payload_sha256;  // 冻结时的载荷摘要(审计/对账)
+};
+
+// 身份账的投影形态(重放/read-only;类内成员与 OutboxProjection 共用)。
+struct ChannelIdentityBookEntry {
+    ChannelSendIdentity identity;
+    std::int64_t assigned_at_ms = 0;
+};
+
 // 一枚出箱项(投影与投递的事实)。
 struct ReplyOutboxItem {
     std::string delivery_id;      // 定式散列(dl-<hash16>)
@@ -124,18 +142,7 @@ public:
         std::string source_ref;           // "ingress:<ch>:<acct>:<sid>"(结算反查)
     };
 
-    // ---- QQ 发送身份的持久分配(A05/A06) ----------------------------------
-    // 同一 (账号, 被动锚 msg_id) 下所有出段——配对提示/任务回执/审批卡/
-    // 正文分段/附件——共用一只按账发号的分配器:首次网络发送前冻结
-    // (delivery, 锚, msg_seq, payload 摘要),账行先落(PowerLoss)再上
-    // 网络;结果未知的重试恒复用同一身份(重启亦然——账在盘上)。
-    // 改锚补投必须先裁决旧身份(Retire),再行分配新身份——旧身份与
-    // 裁决原因都留在账里,可追溯,不偷换同一 delivery。
-    struct ChannelSendIdentity {
-        std::string anchor_msg_id;   // 被动锚(空 = 主动消息,seq 恒 0)
-        std::uint32_t msg_seq = 0;   // 平台载荷的 msg_seq(主动 = 0)
-        std::string payload_sha256;  // 冻结时的载荷摘要(审计/对账)
-    };
+    // ---- QQ 发送身份的持久分配(A05/A06;类型在类外,见上方命名空间域) ----
     struct IdentityReceipt {
         bool ok = false;
         // outbox.append_failed 账写不进(停投递)。
@@ -267,10 +274,6 @@ inline constexpr std::size_t kChannelSegmentBytes = 2000;
 // 只读投影(status 分栏/测试用):从 outbox 账重放;文件不存在给空投影
 //(零建目录零写盘)。与 DurableReplyOutbox::Open 同一份重放逻辑。
 // 身份账(A05)一并重放:live 身份与发号计数(重启后不归零的事实源)。
-struct ChannelIdentityBookEntry {
-    DurableReplyOutbox::ChannelSendIdentity identity;
-    std::int64_t assigned_at_ms = 0;
-};
 struct OutboxProjection {
     std::map<std::string, ReplyOutboxItem> items;  // deliveryId -> item
     std::map<std::string, ChannelIdentityBookEntry> live_identities;

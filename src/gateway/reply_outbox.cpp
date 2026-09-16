@@ -85,7 +85,7 @@ OutboxProjection ReadOutboxProjection(const std::filesystem::path& log_file) {
         }
         if (type == kTypeIdentityAssigned) {
             // 发送身份分配(A05):live 身份 + 发号计数两本账。
-            DurableReplyOutbox::ChannelSendIdentity identity;
+            ChannelSendIdentity identity;
             identity.anchor_msg_id = GetJsonString(line, "msgId");
             identity.payload_sha256 = GetJsonString(line, "payloadSha256");
             identity.msg_seq = static_cast<std::uint32_t>(GetJsonUint(line, "msgSeq"));
@@ -746,7 +746,7 @@ bool DurableReplyOutbox::RetireChannelSendIdentity(const std::string& delivery_i
     return true;
 }
 
-std::optional<DurableReplyOutbox::ChannelSendIdentity>
+std::optional<ChannelSendIdentity>
 DurableReplyOutbox::FindLiveChannelSendIdentity(const std::string& delivery_id) const {
     const std::lock_guard<std::mutex> outbox_lock(mutex_);
     const auto found = live_identities_.find(delivery_id);
