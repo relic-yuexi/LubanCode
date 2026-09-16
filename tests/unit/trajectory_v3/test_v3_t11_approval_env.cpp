@@ -58,7 +58,10 @@ struct EnvGuard {
 };
 
 fs::path FreshRoot(const char* tag) {
-    const auto dir = fs::temp_directory_path() / ("lubancode-v3-t11-approval-env-" + std::string(tag));
+    // Windows MAX_PATH:CI 临时根本身就近 40 字符,目录名必须短——长名 +
+    // 派生 workspace key + blob 哈希文件名会顶穿 260(2026-09-16 CI 实锤:
+    // blob 临时文件打不开,路径实长 262)。用"t11ae-<tag>"短前缀。
+    const auto dir = fs::temp_directory_path() / ("t11ae-" + std::string(tag));
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
@@ -281,7 +284,7 @@ TEST_CASE("T11-C 采集: session.environment.captured 落账,canary 不入档") 
 
 TEST_CASE("T11-C 恢复: 旧场环境事实不动,新场重采自己的") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
-    const auto root = FreshRoot("resume-env");
+    const auto root = FreshRoot("resume");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());
     const std::string source_id = ledger->session_id();
