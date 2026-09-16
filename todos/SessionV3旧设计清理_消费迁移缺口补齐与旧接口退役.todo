@@ -337,7 +337,7 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实渠道待答审批（channel.approval.*）的恢复投影未接消费方（Q6 域，账面事实在册）；tool.verification 生产触发点（工具后置条件验证器）尚无发射方——合同与桥路已验，发射方归逐枚追踪单后续批；Telemetry 对 T11 新 kind 不产 span（T07 已钉"未覆盖域无伪造 span"，新 kind 自然落此列，升 kProjectorVersion 补映射归 T07 后续）
 旧依赖：v2 EventEnvelope 各老路（verification.started/outcome.assessed/context.pressure.recorded 的 v2 写口、session.json approval_mode）保留给旧档消费，退役归 T02-B
 文档：docs/architecture/trajectory-v3-schema.md §2.1/§2.2/§十
-销项日期：待 PR CI rollup conclusion=success 后填
+销项日期：2026-09-16（PR #108,判绿头提交 a4fc4293,CI rollup conclusion=success——macos-clang 全量 557 册绿;同提交首轮 unit.runtime.agent_supervisor 时序册一次偶发红(等首字节软线拍点竞态,与本 diff 无涉——该轮 diff 仅动一册 T11 测试),重跑同提交复绿。三轮修红均为测试册/校验形状瑕疵:snapshotRef 误按跨会话五键引用校(BlobRef 才是真形状)、回合门内驱动、size_t 下溢、悬垂指针一行式、CloseSession 后 active 残留使同账本 ResumeInteractive 二次封口报错——非生产合同缺陷,仅末项揭示"封口后同进程 resume"的既有边界,生产形状恒从活场恢复,不在本单扩范围)
 ```
 
 
