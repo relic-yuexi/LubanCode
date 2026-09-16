@@ -97,22 +97,41 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     // QQ 定案进程内直连(§十五):渠道实现内置受信,不造假包概念。
     const channel::ChannelTrustState builtin_trust{/*installed=*/true, /*trusted=*/true};
 
-    // 信任根解析(§四):显式 ca_pem(测试位/覆盖位)优先且不回退;空则按
-    // 平台取默认(Windows 系统证书库;Linux/macOS 系统 PEM)。解析不到/
-    // 失败明报进 diagnostics——不静默放行,也不拦装配(连接时按
-    // tls_trust_store_empty 稳定码失败,现场能定位第一处失败)。
+    // 信任根解析(§四 + 证书部分解析误判修复单 §三):显式 ca_pem(测试位/
+    // 覆盖位)优先且不回退;空则按平台取默认(Windows 系统证书库;Linux/
+    // macOS 系统 PEM)。export 与 load 分清:启动日志报"导出/去重/可解析/
+    // 失败"四个数,不拿导出数冒充可用数;部分兼容(系统集合含坏证)保留
+    // 成功链 + warning,服务端证书照常校验。加载失败明报并把稳定码递给
+    // 适配器短路联网重试(§四:本地证书不可用就不发 token/gateway 请求)。
     const channel::qq::ResolvedTrustStore trust =
         channel::qq::ResolveChannelTrustRoots(options.ca_pem);
     const channel::qq::TlsTrustMode trust_mode = options.ca_pem.empty()
                                                      ? channel::qq::TlsTrustMode::SystemDefault
                                                      : channel::qq::TlsTrustMode::ExplicitCa;
     const std::string& ca_pem = trust.ca_pem;
+    std::string trust_block_code;
+    std::string trust_block_detail;
     if (!trust.error.empty()) {
-        wiring->diagnostics_.push_back("TLS 信任根不可用(" + trust.error +
-                                       ")——QQ 连接将失败(tls_trust_store_empty)");
+        // 稳定码:空输入/无导出 = tls_trust_store_empty;非空解析失败 =
+        // tls_trust_store_load_failed(带真实负码,§三)。
+        const bool empty_case = trust.ca_pem.empty() && trust.load.input_empty &&
+                                trust.load.parse_rc == 0 && trust.load.failed_count == 0;
+        trust_block_code = empty_case ? std::string(channel::qq::kTlsCodeTrustStoreEmpty)
+                                      : std::string(channel::qq::kTlsCodeTrustStoreLoadFailed);
+        trust_block_detail = "TLS 信任根不可用: " + trust.error;
+        wiring->diagnostics_.push_back("TLS 信任根不可用(" + trust.error + ")——已阻断 QQ "
+                                       "token/gateway 请求(" + trust_block_code + ")");
     } else {
-        wiring->diagnostics_.push_back("TLS 信任根:" + trust.detail + "(" +
+        wiring->diagnostics_.push_back("TLS 信任根:" + trust.detail + "(可用 " +
                                        std::to_string(trust.certificate_count) + " 张)");
+        if (!trust.load.warning.empty()) {
+            // 部分加载(系统集合兼容坏证):warning 单独一行,数字照报——
+            // "跳过 N 张"不许被读成"少校验 N 张"(对端验证照常)。
+            wiring->diagnostics_.push_back("[gateway] TLS 系统信任:" + trust.load.warning);
+        }
+        for (const std::string& note : trust.load.bad_cert_notes) {
+            wiring->diagnostics_.push_back("[gateway] TLS 坏证诊断:" + note);
+        }
     }
 
     const auto now_ms = options.now_ms ? options.now_ms
@@ -160,6 +179,8 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
             adapter_options.http = http;
             adapter_options.transport_factory = transport_factory;
             adapter_options.ca_pem = ca_pem;
+            adapter_options.trust_load_block_code = trust_block_code;
+            adapter_options.trust_load_block_detail = trust_block_detail;
             adapter_options.now_ms = now_ms;
             auto adapter = std::make_unique<channel::qq::QqBotAdapter>(
                 std::move(adapter_options));

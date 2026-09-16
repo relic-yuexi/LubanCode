@@ -17,6 +17,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -42,7 +44,32 @@ struct GatewayConnectError {
     std::string stage;       // kStage* 之一
     std::string error_code;  // 稳定码(见 qq_gateway.cpp 的码表注释)
     std::string detail;      // 脱敏人话(不带 token/secret/响应体)
+    // §四:服务端 Retry-After 的建议退避下限(毫秒;0 = 无)。RunLoop 的
+    // 退避取 max(阶梯值, retry_after_ms) 再封 max_backoff_ms 帽——429 服从
+    // 有效 Retry-After 且有上限。
+    std::int64_t retry_after_ms = 0;
 };
+
+// 网关 URL 查询的 HTTP 失败分类(网关 400 诊断单 §四):状态 + 有界 body
+// + 白名单诊断头投影 -> 稳定码 + 脱敏说明。纯函数供测试直钉全表。
+//   - 区分请求/权限拒绝(gateway_url_bad_request/forbidden)、鉴权失效
+//     (unauthorized)、限流(rate_limited)、服务故障(server_error)与响应
+//     格式错(bad_response);未知 4xx 只报 status/是否 JSON/平台 code/
+//     trace,不猜原因。
+//   - 平台原始 message 可能回显敏感值,默认不透传——detail 只带状态码、
+//     是否 JSON、平台 code 数值与 trace 标识。
+//   - Retry-After 只认纯数字秒(HTTP-date 不解析);合法时给 retry_after_ms
+//     (毫秒),RunLoop 退避取 max(阶梯, retry_after) 封 max_backoff_ms。
+struct GatewayHttpFailureClass {
+    std::string code;
+    std::string detail;
+    std::int64_t retry_after_ms = 0;
+};
+// diagnostic_headers 是 QqHttpResponse::diagnostic_headers 同款(白名单
+// 投影,小写名);这里不引 qq_http.hpp,保持 gateway 头自足。
+GatewayHttpFailureClass ClassifyGatewayHttpFailure(
+    int status, const std::string& body,
+    const std::vector<std::pair<std::string, std::string>>& diagnostic_headers);
 
 // 出口事件(适配器消费)。
 struct GatewayEvent {
@@ -65,7 +92,8 @@ struct GatewayEvent {
     std::int64_t seq = -1;     // Disconnected 时的 last_seq
     std::string stage;         // StageChanged/ConnectFailed/Disconnected 时有值
     std::string error_code;    // ConnectFailed/Disconnected 的稳定码
-    int attempt = 0;           // BackoffScheduled:第几次失败(1 起)
+    int attempt = 0;           // 尝试编号(1 起):ConnectFailed/Disconnected 与
+                               // 随后的 BackoffScheduled 同轮同号(§四)
     std::int64_t next_retry_at_ms = 0;  // BackoffScheduled:下一次尝试时刻
 };
 
@@ -124,8 +152,16 @@ public:
 
 private:
     enum class State { Idle, Connecting, Authenticating, Running, Backoff, Stopped };
-    // 一轮连接生命周期。返回 false = 这轮断了(外层按 attempt 退避重连)。
-    bool RunOneConnection(std::atomic<bool>* stop, bool* session_was_invalidated);
+    // 一轮连接的生命周期与收口账:stable = 这轮稳定过(收到过 ACK,退避
+    // 归零);retry_after_ms = 本轮失败带的服务端 Retry-After 建议(0 = 无)。
+    struct RunOutcome {
+        bool stable = false;
+        std::int64_t retry_after_ms = 0;
+    };
+    // attempt_number = 本轮尝试编号(1 起);ConnectFailed/Disconnected 事件
+    // 带上它,与随后的 BackoffScheduled.attempt 关联同次尝试(§四)。
+    RunOutcome RunOneConnection(std::atomic<bool>* stop, bool* session_was_invalidated,
+                                int attempt_number);
     void SleepInterruptible(std::atomic<bool>* stop, std::int64_t ms);
 
     Options options_;

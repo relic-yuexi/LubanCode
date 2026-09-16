@@ -18,7 +18,9 @@ namespace lubancode::channel::qq {
 namespace {
 
 // GET /gateway 的响应:{"url": "wss://..."}(官方 API)。失败带稳定码与
-// 阶段(连接状态单 §三:查询地址是独立阶段,不与取令牌混报)。
+// 阶段(连接状态单 §三:查询地址是独立阶段,不与取令牌混报)。非 2xx 走
+// §四分类:平台 code/trace 进稳定说明,原始 message 不透传(可能回显
+// 敏感值);429 带 Retry-After 建议给退避。
 std::expected<std::string, GatewayConnectError> FetchGatewayUrl(const QqHttpFunc& http,
                                                                 const std::string& api_base,
                                                                 const std::string& token) {
@@ -32,9 +34,11 @@ std::expected<std::string, GatewayConnectError> FetchGatewayUrl(const QqHttpFunc
             kStageFetchingGatewayUrl, "gateway_url_http_failed", response.error()});
     }
     if (response->status < 200 || response->status >= 300) {
-        return std::unexpected(GatewayConnectError{
-            kStageFetchingGatewayUrl, "gateway_url_http_failed",
-            "gateway url status " + std::to_string(response->status)});
+        const auto classified = ClassifyGatewayHttpFailure(
+            response->status, response->body, response->diagnostic_headers);
+        return std::unexpected(GatewayConnectError{kStageFetchingGatewayUrl, classified.code,
+                                                   classified.detail,
+                                                   classified.retry_after_ms});
     }
     const auto parsed =
         nlohmann::json::parse(response->body, nullptr, /*allow_exceptions=*/false);
@@ -439,6 +443,16 @@ bool QqBotAdapter::StartGatewayLocked() {
     // GatewayConnectError(阶段 + 稳定码 + 脱敏 detail)。
     gateway_options.gateway_url_provider =
         [this]() -> std::expected<std::string, GatewayConnectError> {
+        // §四:装配预检确认的本地信任根加载失败——直接短路,不发 token/
+        // gateway 请求(本地 TLS 不可用时这些请求注定无效);显式重试/配置
+        // 变化/重启后重新装配才会再加载。网络错误不受此拦。
+        if (!options_.trust_load_block_code.empty()) {
+            return std::unexpected(GatewayConnectError{
+                kStageConnecting, options_.trust_load_block_code,
+                options_.trust_load_block_detail.empty()
+                    ? "信任根加载失败(装配预检),已阻断联网重试"
+                    : options_.trust_load_block_detail});
+        }
         {
             GatewayEvent event;
             event.kind = GatewayEvent::Kind::StageChanged;
@@ -457,7 +471,16 @@ bool QqBotAdapter::StartGatewayLocked() {
             event.stage = kStageFetchingGatewayUrl;
             HandleGatewayEvent(event);
         }
-        return FetchGatewayUrl(options_.http, options_.api_base, *token);
+        const auto gateway_url =
+            FetchGatewayUrl(options_.http, options_.api_base, *token);
+        if (!gateway_url.has_value() &&
+            gateway_url.error().error_code == "gateway_url_unauthorized") {
+            // §四:仅明确鉴权失效(token 无效/过期)才失效缓存做一次受控
+            // 刷新——下一轮连接重新取 token;400/403/429/5xx 一律不刷。
+            // 每轮 provider 只跑一次,刷新天然受控(不连环刷)。
+            token_manager_.Invalidate();
+        }
+        return gateway_url;
     };
     gateway_options.token_provider =
         [this]() -> std::expected<std::string, GatewayConnectError> {
@@ -600,7 +623,8 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
                 connection_.connected = false;
                 connection_.connected_since_ms = 0;
                 connection_.last_failure = ConnectionFailure{
-                    event.stage, event.error_code, event.detail, options_.now_ms()};
+                    event.stage, event.error_code, event.detail, options_.now_ms(),
+                    event.attempt};
                 connection_.updated_at_ms = options_.now_ms();
             }
             EmitNotification(BridgeMethod::Status,

@@ -45,6 +45,7 @@ struct ConnectionFailure {
     std::string error_code;  // 稳定码
     std::string detail;      // 脱敏说明
     std::int64_t at_ms = 0;
+    int attempt = 0;         // 尝试编号(与 BackoffScheduled.attempt 同轮,§四)
 };
 struct ConnectionSnapshot {
     bool thread_alive = false;   // 网关线程存活(≠ connected)
@@ -79,6 +80,12 @@ public:
         // 生产:GET {api_base}/gateway 取 wss URL;测试注固定地址。
         std::string api_base = "https://api.sgroup.qq.com";
         std::string bots_base = "https://bots.qq.com";
+        // §四:装配预检确认的信任根加载失败(稳定码 + 脱敏 detail,wiring
+        // 从 ResolvedTrustStore 递进来)。非空 = gateway_url_provider 入口
+        // 直接短路——本地已知 TLS 不可用就不发 token/gateway 请求,阻断
+        // 无效重试;重启/配置变化后重新装配再加载。网络断线不受此拦。
+        std::string trust_load_block_code;
+        std::string trust_load_block_detail;
     };
 
     explicit QqBotAdapter(Options options);
