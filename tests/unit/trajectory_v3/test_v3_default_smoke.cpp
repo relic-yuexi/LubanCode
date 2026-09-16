@@ -1,18 +1,26 @@
 // T16(V3-ADD-02,B1 批,SessionV3 旧设计清理单):默认-v3 冒烟。
 // 翻默认(v0.26.250)后产品语义 = 未设 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS
-// 时新会话写 v3;ctest 全局钉 0 保 v2 老册,守门册只钉过开关函数本身。
+// 时新会话写 v3;ctest 分账清单(tests/CMakeLists.txt 的
+// LUBANCODE_TESTS_V3_DEFAULT_BOOKS)不给本册注入格式变量,环境与生产一致。
 // 本册钉"完全不设变量"时的真实入口链:
 //   - TrajectorySessionLedger::Open(CLI/AppServer 建场共用路)开的是 v3 场;
 //   - 一轮 turn 的账面形状(user/assistant 入链、prepared 落账);
 //   - compact 管理入口的分派判据(v3_main_writer 非空)在默认态成立;
 //   - CloseSession 封口(session.ended);
-//   - SessionManager::LaunchSession(建场的更底层)同默认开 v3。
-// 子代理账跟随父场(接线点 1 只在建场读开关),不另设变量即可复验。
+//   - SessionManager::LaunchSession(建场的更底层)同默认开 v3;
+//   - 子代理入口(SpawnSubagent,CLI/AppServer 共用)默认场下子账同 v3
+//     (T16 勾二补齐,原仅注释声明"跟随父场");
+//   - CLI /compact 管理入口(RunCompactCommand)默认场下分派 v3 分支干跑
+//     全链——零模型零写入(T16 勾二补齐;真压缩链由 v3_compact_runtime/
+//     v3_compact_gates 册守,冒烟不重复)。
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <expected>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -20,10 +28,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
+#include "api/backend.hpp"
 #include "api/types.hpp"
+#include "app/commands/session_commands.hpp"
+#include "cli/theme.hpp"
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "tools/registry.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"  // NewSessionV3WriteEnabled(前提断言)
@@ -100,6 +113,69 @@ api::Request MakeRequest(const std::string& system, const std::vector<api::Messa
 }
 
 agent::RequestPreparedContext PreparedContext() { return agent::RequestPreparedContext{}; }
+
+api::Message AssistantWithToolCall(const std::string& call_id) {
+    api::Message message;
+    message.role = api::Role::Assistant;
+    message.content.push_back(api::TextBlock{"帮我派个代理。"});
+    api::ToolUseBlock call;
+    call.id = call_id;
+    call.name = "agent";
+    call.input = nlohmann::json{{"task", "查文档"}};
+    message.content.push_back(std::move(call));
+    return message;
+}
+
+api::Message ToolResults(const std::string& call_id, const std::string& content) {
+    api::Message message;
+    message.role = api::Role::User;
+    api::ToolResultBlock result;
+    result.tool_use_id = call_id;
+    result.content = content;
+    message.content.push_back(std::move(result));
+    return message;
+}
+
+agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::string& call_id) {
+    agent::ToolTraceEvent event;
+    event.kind = kind;
+    event.tool_use_id = call_id;
+    event.tool_name = "agent";
+    event.execution_id = "exec-" + call_id;
+    event.effective_input_sha256 =
+        "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
+    event.effective_arguments = nlohmann::json{{"task", "查文档"}};
+    return event;
+}
+
+// 一轮对话 turn:user 入账入链、prepared 落账、assistant 定稿、收口。
+void DriveConversationTurn(TrajectorySessionLedger& ledger, const std::string& turn_id,
+                           const std::string& text, const std::string& response_id) {
+    auto bridge = ledger.NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    bridge->BeginTurn(turn_id, "external_user");
+    bridge->RecordInput(UserMessage(text));
+    const std::string request_id = bridge->OnRequestPrepared(
+        MakeRequest("你是 LubanCode,读写跑都走工具。", {UserMessage(text)}), PreparedContext());
+    REQUIRE_FALSE(request_id.empty());
+    REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("答:" + text.substr(0, 6)),
+                                      "end_turn", response_id));
+    bridge->OnUsageRecorded(request_id, api::Usage{}, /*reported_by_provider=*/false, response_id);
+    bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
+}
+
+// 只计数的假后端:compact 干跑"零模型"断言的底(被调即测试失败)。
+class CountingBackend : public api::Backend {
+public:
+    std::expected<void, api::Error> send_stream(
+        const api::Request&,
+        const std::function<void(const api::StreamEvent&)>&,
+        const std::atomic<bool>*) override {
+        ++calls;
+        return {};
+    }
+    int calls = 0;
+};
 
 std::vector<nlohmann::json> ReadLines(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
@@ -263,4 +339,161 @@ TEST_CASE("默认-v3 冒烟: v3 场 workspace_key 非空,Cwd 列表列得上一�
     all_query.all_workspaces = true;
     const auto all_page = second->ListWorkspaceSessions(all_query);
     CHECK(all_page.total >= cwd_page.total);
+}
+
+// ---------------------------------------------------------------------------
+// T16 勾二补齐:子代理入口默认态(接线点 1 只在建场读开关,子账跟随父场——
+// 本案把 B1 时点的注释声明落成真断言)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("默认-v3 冒烟: 子代理入口默认场下子账同 v3,父账 spawn/linked 在") {
+    EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    const auto root = FreshRoot("subagent-default");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const std::string call_id = "call_default_agent";
+
+    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    bridge->BeginTurn("turn-1", "external_user");
+    bridge->RecordInput(UserMessage("帮我派个代理查文档"));
+    const std::string request_id = bridge->OnRequestPrepared(
+        MakeRequest("你是 LubanCode,读写跑都走工具。", {UserMessage("帮我派个代理查文档")}),
+        PreparedContext());
+    REQUIRE_FALSE(request_id.empty());
+    REQUIRE(bridge->OnOutputCompleted(request_id, AssistantWithToolCall(call_id), "tool_calls",
+                                      "resp-a"));
+    bridge->OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, call_id));
+    bridge->OnToolTrace(TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, call_id));
+
+    // 子代理入口(CLI/AppServer 共用):默认场分派 v3 五步,不读环境变量。
+    auto child = ledger->SpawnSubagent(call_id, "查文档里的入口说明", "");
+    REQUIRE(child.has_value());
+    auto& child_bridge = (*child)->turn_bridge();
+    child_bridge.BeginTurn("turn-child-1", "peer_agent");
+    const std::string child_request = child_bridge.OnRequestPrepared(
+        MakeRequest("你是 LubanCode,读写跑都走工具。", {UserMessage("查文档里的入口说明")}),
+        PreparedContext());
+    REQUIRE_FALSE(child_request.empty());
+    REQUIRE(child_bridge.OnOutputCompleted(child_request, AssistantText("文档说入口在 main.cpp"),
+                                           "end_turn", "resp-child"));
+    child_bridge.EndTurn(true, false, "");
+    REQUIRE_FALSE((*child)->Finish(/*ok=*/true, "done").empty());
+
+    {
+        agent::ToolTraceEvent finished =
+            TraceEvent(agent::ToolTraceEventKind::ExecutionFinished, call_id);
+        finished.outcome = agent::ToolOutcome::Succeeded;
+        bridge->OnToolTrace(finished);
+        bridge->OnToolResultsCommitted("batch-2", ToolResults(call_id, "文档说入口在 main.cpp"));
+        bridge->EndTurn(true, false, "");
+    }
+    REQUIRE(ledger->CloseSession("exit").error_code.empty());
+
+    // 父账:默认场的 spawn/linked 事实在(不是 v2 的 subagents/<run>.jsonl 老账)。
+    const auto parent_rows = ReadLines(ledger->session_dir() /
+                                       platform::Utf8ToPath(ledger->session_id() + ".jsonl"));
+    bool saw_spawn = false;
+    bool saw_linked = false;
+    for (const auto& row : parent_rows) {
+        if (row.value("type", std::string()) != "event") {
+            continue;
+        }
+        saw_spawn = saw_spawn || row.value("kind", std::string()) == "subagent.spawn.requested";
+        saw_linked = saw_linked || row.value("kind", std::string()) == "subagent.linked";
+    }
+    CHECK(saw_spawn);
+    CHECK(saw_linked);
+
+    // 子账:v3 布局 subagents/<child>/<child>.jsonl,首行 system 带派生来源。
+    bool found_child = false;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(ledger->session_dir() / "subagents")) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        found_child = true;
+        const std::string child_name = platform::PathToUtf8(entry.path().filename());
+        const auto child_stream = entry.path() / platform::Utf8ToPath(child_name + ".jsonl");
+        REQUIRE(std::filesystem::exists(child_stream));
+        const auto child_rows = ReadLines(child_stream);
+        REQUIRE_FALSE(child_rows.empty());
+        CHECK(child_rows[0].value("type", std::string()) == "message");
+        CHECK(child_rows[0].at("message").value("role", std::string()) == "system");
+        CHECK(child_rows[0].at("systemMeta").value("cause", std::string()) == "subagent_spawn");
+        CHECK(lubancode::trajectory::v3::VerifyV3File(child_stream).ok);
+    }
+    CHECK(found_child);
+}
+
+// ---------------------------------------------------------------------------
+// T16 勾二补齐:CLI /compact 管理入口(RunCompactCommand)默认场分派 v3 分支
+// ——干跑全链过真入口(T12-B 的容量规划器/门禁/回退梯真跑),零模型零写入。
+// 真压缩链(applied/阻断/降档)由 v3_compact_runtime/v3_compact_gates 册
+// 守;本案只钉"完全不设变量时管理入口走的是 v3 卷"。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("默认-v3 冒烟: CLI compact 管理入口默认场分派 v3 干跑,零模型零写入") {
+    EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    const auto root = FreshRoot("compact-cli-dry-run");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    CHECK(ledger->v3_main_writer() != nullptr);  // 分派判据(默认态)
+
+    // 两轮对话进账(v3_compact_runtime 干跑案同款体量,过 no_eligible 门)。
+    DriveConversationTurn(*ledger, "turn-1", std::string(600, 'a'), "r-1");
+    DriveConversationTurn(*ledger, "turn-2", std::string(600, 'b'), "r-2");
+    const std::filesystem::path stream =
+        ledger->session_dir() / platform::Utf8ToPath(ledger->session_id() + ".jsonl");
+    const std::size_t lines_before = ReadLines(stream).size();
+
+    CountingBackend backend;  // 干跑绝不调;被调即测试失败
+    lubancode::tools::ToolRegistry registry;
+    lubancode::agent::Agent loop(backend, registry,
+                                 lubancode::agent::AgentProfile{
+                                     .request{.model = "kimi-k2.6"},
+                                     .runtime{.context_window_tokens = 200000},
+                                     .system_prompt = "sys"});
+    app::CompactSessionInputs in;
+    in.agent = &loop;
+    const lubancode::cli::Theme theme;
+    in.theme = &theme;
+    int compact_epoch = 0;
+    in.session_compact_epoch = &compact_epoch;
+    std::string last_compact_line;
+    in.last_compact_line = &last_compact_line;
+    in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
+    lubancode::agent::ModelRoute route;
+    route.model = "kimi-k2.6";
+    route.provider = "moonshot";
+    in.route_compact = [&backend, &route]() {
+        lubancode::app::ModelRouterService::Routed routed;
+        routed.route = route;
+        routed.backend = &backend;
+        return routed;
+    };
+    in.route_repair = in.route_compact;
+    in.record_usage = [](const lubancode::agent::ModelRole, const lubancode::agent::ModelRoute&,
+                         const lubancode::agent::BackgroundCallAccounting&) {};
+    in.record_fallback = [](lubancode::agent::TaskKind, lubancode::agent::ModelRole,
+                            lubancode::agent::ModelRole, const std::string&) {};
+    in.trajectory = ledger->get();
+    in.trajectory_wire = "openai-chat-completions";
+
+    app::RunCompactCommand("--dry-run", in);
+
+    // 零模型:干跑只算不压,backend 不发包。
+    CHECK(backend.calls == 0);
+    // 零写入:账一字不长,无 compact 事件;干跑不是 applied,台账不挂。
+    const auto rows = ReadLines(stream);
+    CHECK(rows.size() == lines_before);
+    for (const auto& row : rows) {
+        if (row.value("type", std::string()) == "event") {
+            const std::string kind = row.value("kind", std::string());
+            CHECK_MESSAGE(kind.rfind("compact.", 0) != 0, "干跑不得落 compact 事件: " << kind);
+        }
+    }
+    CHECK(compact_epoch == 0);  // 干跑不算一次压缩收口
+    REQUIRE(ledger->CloseSession("exit").error_code.empty());
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
 }

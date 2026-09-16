@@ -215,6 +215,73 @@ else()
     "  或 configure 显式传 -DLUBANCODE_BUNDLED_RG_DIR=<fetch_ripgrep.sh 产物目录>。")
 endif()
 
+# ---- T16(V3-ADD-02,SessionV3 清理单 §九):CTest 注入按四类分账 -------------
+# v3 写侧已翻默认(产品:未设=开);未迁移域的册仍靠注入 0 保 v2 行为断言。
+# 撤全局 0 按单内口径"随各批迁移"逐步——本清单只收已迁完域
+# (usage/telemetry/insights/memory 桥/lifecycle/compact/T11 + 默认冒烟)的
+# 册:这些册不再注入 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS,ctest 环境与
+# 生产一致(父环境不设 = 默认 v3)。册内 EnvGuard 的针对性格式测试照常
+# (册内覆盖优先于进程环境,不受撤注入影响)。
+#
+# 撤 0 门(单 §九 T16 勾三):清单内每册要么册内自证格式(EnvGuard/EnvUnset
+# 引用变量,或直检 NewSessionV3WriteEnabled),要么完全不经建场口
+# (TrajectorySessionLedger::Open / LaunchSession / SpawnSubagent)——
+# scripts/tests/ctest_format_registry.py --check 在 CI 把这道门,防清单
+# 笔误把 v2 断言册悄悄推上 v3。后续批次迁完新域再扩本清单;B4(T01 收口)
+# 关掉全局 0 注入时,清单与机制一并退役。
+set(LUBANCODE_TESTS_V3_DEFAULT_BOOKS
+  # usage 域(T06,PR #53):夹具直写 V3Writer/价目表,不经建场口。
+  unit.accounting.pricing_cost
+  unit.accounting.usage_aggregate
+  unit.accounting.usage_contracts
+  unit.accounting.v3_session_usage
+  unit.trajectory_v3.v3_usage_owner_hooks
+  # telemetry 域(T07,PR #102):夹具直写盘账,不经建场口。
+  unit.telemetry.telemetry_activation
+  unit.telemetry.telemetry_batch_queue
+  unit.telemetry.telemetry_contract
+  unit.telemetry.telemetry_cursor
+  unit.telemetry.telemetry_exporter
+  unit.telemetry.telemetry_identity
+  unit.telemetry.telemetry_otlp_json
+  unit.telemetry.telemetry_projector
+  unit.telemetry.telemetry_projector_v3
+  unit.telemetry.telemetry_redactor
+  unit.telemetry.telemetry_service
+  unit.telemetry.telemetry_spool
+  integration.telemetry.telemetry_otlp_export
+  # insights 域(T14,PR #101):夹具直写/读盘账,不经建场口。
+  unit.insights.friction_classifier
+  unit.insights.html_renderer
+  unit.insights.insights_contracts
+  unit.insights.insights_generate
+  unit.insights.insights_health
+  unit.insights.insights_report_store
+  unit.insights.insights_v3_pipeline
+  unit.insights.integrity_gate
+  unit.insights.prompt_auditor
+  unit.insights.redaction_canary
+  unit.insights.session_analyzer
+  unit.insights.usage_fixture_pipeline
+  unit.insights.workspace_aggregator
+  # memory 桥域(T08,PR #105):册内全案 EnvGuard("1")。
+  # (unit.app.memory_ledger_bridge 是 v2 老路回归册,不在撤 0 范围。)
+  unit.trajectory_v3.v3_memory_recall_bridge
+  # lifecycle 域(T15,PR #107):册内全案 EnvGuard(v3 案钉 1,v2 回归案钉 0)。
+  unit.trajectory.session_admin_v3_delete
+  unit.trajectory.session_admin_v3_lifecycle
+  # compact 域(T12,PR #109):writer 直驱或册内全案 guard。
+  unit.trajectory_v3.v3_compact
+  unit.trajectory_v3.v3_compact_block
+  unit.trajectory_v3.v3_compact_gates
+  unit.trajectory_v3.v3_compact_runtime
+  # T11 五域(PR #108):册内全案 EnvGuard("1")。
+  unit.trajectory_v3.v3_t11_title
+  unit.trajectory_v3.v3_t11_approval_env
+  unit.trajectory_v3.v3_t11_verification_budget
+  # T16 默认-v3 冒烟(B1 起):册内 EnvUnset 摘变量走真入口。
+  unit.trajectory_v3.v3_default_smoke)
+
 # 一册源码一条 CTest。仍只编一只 lubancode_tests，免去重复链接；运行时靠
 # doctest 的 source-file 过滤隔离。CI 失败会直报
 # integration.process.run_command_process，不再只剩一行 lubancode_tests。
@@ -233,15 +300,20 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
   else()
     set(test_timeout 180)
   endif()
-  set_tests_properties("${test_name}" PROPERTIES
-    LABELS "${test_kind};${test_domain};${test_kind}.${test_domain}"
-    TIMEOUT "${test_timeout}"
-    # v3 写侧已翻默认(产品:未设=开);测试套显式钉 0 保住 v2 老册的
-    # 行为断言——v3 册自带 EnvGuard("1") 显式开,守门案钉"未设=开"。
-    # T16(B1):default-v3 冒烟册(test_v3_default_smoke)册内自行摘掉
-    # 本变量再走真入口,ctest 注入的 0 被它显式覆盖,分类见
-    # docs/development/v3-consumer-inventory.md §二。
-    ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  list(FIND LUBANCODE_TESTS_V3_DEFAULT_BOOKS "${test_name}" _v3_default_idx)
+  if(_v3_default_idx EQUAL -1)
+    # 未迁移域:显式钉 0,保住 v2 老册的行为断言(见上方分账注释)。
+    set_tests_properties("${test_name}" PROPERTIES
+      LABELS "${test_kind};${test_domain};${test_kind}.${test_domain}"
+      TIMEOUT "${test_timeout}"
+      ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  else()
+    # 已迁移域:不注入格式变量,环境与生产默认一致(未设=开 v3);
+    # v3-default 标签供 ctest -L 单跑这组(撤 0 核销面)。
+    set_tests_properties("${test_name}" PROPERTIES
+      LABELS "${test_kind};${test_domain};${test_kind}.${test_domain};v3-default"
+      TIMEOUT "${test_timeout}")
+  endif()
 endforeach()
 
 # 工具文案语言档端到端驱动(不进 ctest,验收手动跑):

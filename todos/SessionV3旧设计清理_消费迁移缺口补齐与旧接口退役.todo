@@ -404,11 +404,11 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 ### T16 / V3-ADD-02：拆开测试面
 
-- [ ] 导出 CTest 源码册和环境设置表，标明 default-v3、explicit-v3、legacy-only、format-neutral，不以目录名代替真实所走路径。
-- [ ] 新增“完全不设格式环境变量”的 CLI/AppServer/子代理/compact 管理入口冒烟；保留 EnvGuard 的针对性格式测试。
-- [ ] 各批迁移对应测试后逐步撤全局强制 0；旧专属册退役时保留其通用失败/完整性意图到新册。
-- [ ] 测试 fixture 既用 v3 writer 生成合法账，也保留手工错误夹具；不能 writer/reader 同一个错误互相自证。
-- [ ] 运行前记录版本、HEAD、工作区 diff/夹具 hash、构建产物路径和测试环境；基线更新时补记，不复用旧通过数字。
+- [x] 导出 CTest 源码册和环境设置表，标明 default-v3、explicit-v3、legacy-only、format-neutral，不以目录名代替真实所走路径。（T16 批，2026-09-16：`scripts/tests/ctest_format_registry.py` 读 CTest 注册表 + 册源码证据（guard 1/0/unset 引用计数、建场口调用计数）机器产出全 551 册分账表；`--check` 作 CI 门（ci.yml build-test 腿）。核对口径澄清：真实 CTest 注册名不带 `test_` 前缀（`unit.<域>.<stem>`），各批结案记录里带前缀写法系口语形态；B1 手工表已由 v3-consumer-inventory.md §二 换成机器表 + 撤 0 记账。）
+- [x] 新增“完全不设格式环境变量”的 CLI/AppServer/子代理/compact 管理入口冒烟；保留 EnvGuard 的针对性格式测试。（B1 已落 ledger 开场/turn/封口/SessionManager 建场四案（PR #43，`test_v3_default_smoke`）——核销不重做。本批补缺口三案：子代理入口（SpawnSubagent 默认场子账 v3 布局 + 父账 spawn/linked，原仅注释声明“跟随父场”）、CLI compact 管理入口（RunCompactCommand("--dry-run") 默认场分派 v3 分支干跑全链——零模型零写入，真压缩链由 v3_compact_runtime/gates 册守不重复）、AppServer 入口（operation_idempotency 册增未设变量案：thread/start 建场即 v3 + 重启 operation/read 找回正文）。EnvGuard 的 v2 钉 0/v3 钉 1 对照案全部原样保留。）
+- [x] 各批迁移对应测试后逐步撤全局强制 0；旧专属册退役时保留其通用失败/完整性意图到新册。（T16 批按单内口径只动已迁完域：tests/CMakeLists.txt 注册循环改按 `LUBANCODE_TESTS_V3_DEFAULT_BOOKS` 清单分账——清单内 42 册（usage 5 + telemetry 13 + insights 13 + memory 桥 1 + lifecycle 2 + compact 4 + T11 3 + 默认冒烟 1）不再注入 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0`，跑生产默认（未设=开）；清单外照旧注入。撤 0 门：registry --check 保证清单内每册册内自证格式（guard/unset）或完全不经建场口，逐域证据见 v3-consumer-inventory.md §二“撤 0 分账”表；42 册 CI 无注入环境全绿（PR CI 判绿为准）。后续批次迁完新域再扩清单，B4 清空全局 0 时清单与机制一并退役。旧专属册退役留意图归 T02-B/T03 各批执行，不在本批强行合并。）
+- [x] 测试 fixture 既用 v3 writer 生成合法账，也保留手工错误夹具；不能 writer/reader 同一个错误互相自证。（B1 已立原则并落地：合法账一律 V3Writer 现场生成（test_v3_shared_fixtures），错误形状（坏尾/坏中段/缺 blob）在合法账上注入——writer 造不出错误账，reader 验的是注入后的账，无自证闭环；静态九份夹具由 python 生成器产出、validate_trajectory_v3.py 校验、C++ 侧互证（v3-consumer-inventory.md §四）。T06/T07/T14 各域新增册沿用同一原则（坏账注入案见 test_v3_session_usage、test_telemetry_projector_v3、test_insights_v3_pipeline）。本批核销现状，无需新改。）
+- [x] 运行前记录版本、HEAD、工作区 diff/夹具 hash、构建产物路径和测试环境；基线更新时补记，不复用旧通过数字。（T16 批：`scripts/tests/report_baseline.py`——版本（version.hpp）/HEAD/branch/status/diff 指纹/夹具树逐文件 SHA256+树指纹/构建产物/平台环境落机器可读 JSON；`--compare` 对旧账点名变化（夹具增删改逐文件列出），退出码恒 0（判绿归 CI 测试步）。CI build-test 腿 Test 步骤前记账、随 evidence artifact 上传（ci.yml "Record test baseline (T16)"）。git 不可用如实记 unavailable 不伪装。）
 
 ### 9.1 按改动选测试，不拿旧套件冒充新覆盖
 
@@ -494,6 +494,18 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 旧依赖：已移除 / 保留共用及理由 / 等待哪项
 文档：改动页面
 销项日期：只有 verified 后填写
+```
+
+```text
+任务编号：T16 / V3-ADD-02
+状态：verified
+实现：tests/CMakeLists.txt（LUBANCODE_TESTS_V3_DEFAULT_BOOKS 撤 0 清单 42 册 + 注册循环按清单分账注入 + v3-default 标签）；scripts/tests/ctest_format_registry.py（分账表生成 + --check CI 门：清单存在性、册文件真实性、逐册"册内自证格式或完全不经建场口"核验）；scripts/tests/report_baseline.py（勾五基线记账 + --compare 对旧账）；tests/unit/trajectory_v3/test_v3_default_smoke.cpp（增子代理入口案 + CLI compact 管理入口干跑案）；tests/unit/app_server/test_app_server_operation_idempotency.cpp（增 EnvUnset + AppServer 未设变量默认-v3 冒烟案）；.github/workflows/ci.yml（build-test 腿挂 registry 门 + baseline 记账/上传）
+生产入口：不改生产代码——测试基础设施（CTest 环境、CI 门、基线账）
+验证：ctest_format_registry.py --check 本地实跑（42 册撤 0 全过门）；report_baseline.py 本地实跑（版本 0.26.268/HEAD/夹具树 243 文件指纹记账 + --compare 无变化路径）；42 册撤 0 册与三枚新冒烟案的 CI 全绿以 PR 判绿头提交 rollup conclusion=success 为准（见销项日期行）
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；勾二 CLI 冒烟走 compact 干跑全链（零模型零写入），真压缩链复用 explicit-v3 册不重复；linux-manylinux 腿未挂 registry/baseline 步骤（该腿仅 main push 跑，build-test 腿已拦 PR 面）；B1 手工分类表中"其余 435 册"的逐册归档仍留给后续批次随迁随归
+旧依赖：全局 0 注入保留给未迁移域（gateway/app_server/goal/channel/app 等），退役门在 B4/T01；分账机制与清单随 B4 一并退役
+文档：docs/development/v3-consumer-inventory.md（§一判定法、§二撤 0 分账表+真实册名口径、§五索引）；本单 §九 T16 五勾勾销
+销项日期：待 PR CI 判绿后填（rollup conclusion=success 的头提交）
 ```
 
 ## 十一、预计改动范围与保留边界
