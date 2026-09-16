@@ -99,6 +99,11 @@ KINDS = {
     "tool.delivery.prepared", "tool.delivery.acknowledged",
     "tool.delivery.uncertain",
     "tool.capability.recorded",
+    # 记忆账(取消误报 ESC 单 Bug 2):extraction.assessed/write.receipted
+    # statusless 事实行。
+    "memory.extraction.assessed", "memory.write.receipted",
+    # 记忆账续(T08/V3-GAP-03):召回注入事实 + 写入因果边,statusless。
+    "memory.recall.injected", "memory.save.requested",
 
 }
 
@@ -145,7 +150,7 @@ GOAL_LIFECYCLES = {
 
 ROLES = {"system", "user", "assistant", "tool"}
 PURPOSES = {"conversation", "compact", "context_summary", "session_title", "capability",
-            "goal_evaluation", "action_summary"}
+            "goal_evaluation", "action_summary", "memory_extract"}
 ORIGINS = {
     "human", "soul", "session_runtime", "compact_runtime", "context_runtime",
     "hook", "skill", "subagent", "parent_agent",

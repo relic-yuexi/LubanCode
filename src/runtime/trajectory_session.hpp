@@ -776,6 +776,10 @@ public:
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。
         std::function<std::optional<std::string>()> subagent_start_fault;
+        // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空
+        // 稳定码即该枚提交按 IoFailed 收,写者随后 broken——T08(V3-GAP-03)
+        // 召回快照 fail-closed 的测试缝,经 SessionManager 递进 writer。
+        std::function<std::optional<std::string>()> v3_main_io_fault;
         // workflow 编排单同款:编排账(workflow run)与 node 账(node
         // attempt)各自的首枚 run.started 提交前问一次,fail closed 测试用。
         std::function<std::optional<std::string>()> workflow_start_fault;

@@ -263,6 +263,21 @@ enum class EventKindV3 {
     //     被拒回执(v2 同名事件的 v3 对应;statusless 事实)。
     MemoryExtractionAssessed,
     MemoryWriteReceipted,
+    // 记忆账续(T08/V3-GAP-03,Session v3 旧设计清理单;schema 纯追加,
+    // 旧账零出现):
+    //   memory.recall.injected —— 一条记忆真正注入模型的完整事实(v2
+    //     context.injected 的 v3 对应;statusless)。主会话注入:正文快照
+    //     落 display=hidden 的正式 user 消息(origin=context_runtime,不冒
+    //     充人类输入)、AdmitMessages 接纳进链,事件载荷带 memoryId/
+    //     revision/contentSha256 与 messageRef——恢复拿快照解释旧请求,不
+    //     再用当下 topic 正文倒推。派工冻结(targetRunId 非空):正文内联
+    //     或 snapshot_ref 落事件载荷,父账不接纳进链(父模型没见过这段)。
+    //   memory.save.requested —— 写入因果边(v2 同名事件的 v3 对应;
+    //     statusless)。requested 只记"谁发起了一笔写",排队成败看
+    //     memory.write.receipted,落盘回执在 workspace lifecycle(memory.
+    //     save.committed)——三态按真实回执分账,不互相冒充。
+    MemoryRecallInjected,
+    MemorySaveRequested,
     // 渠道远端审批(QQ 接入单 Q6 §12.2):渠道会话里须确认工具的审批
     // 请求与裁决,全 statusless 事实行。requested 记宿主发的审批卡
     //(token hash、工具名、规范参数 hash、身份摘要、期限——正文参数

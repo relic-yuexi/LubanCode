@@ -182,13 +182,25 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 落点：`src/app/memory_ledger_bridge.*`、MemoryAccounting、实际召回调用、v3 message/context 提交；完整库改造归总设计 §4.71。
 
-- [ ] 去掉“v3 ledger.main()==nullptr 即召回失败”的旧 Recorder 假设，调用 v3 受管 writer/context 服务。
-- [ ] 召回候选、正式隐藏 user message、context 采用、实际 request refs 各有记录；origin/purpose 防止再次触发人类输入的召回 Hook。
-- [ ] 固定正文快照及 memoryId/revision/hash，恢复不用新 topic 正文解释旧请求；快照提交失败时本次不注入，主任务按 optional/required 策略处理。
-- [ ] 写入 requested/queued/committed 按真实回执分开，worker 不直接抢写 Session；MemoryStore 自己的版本/CAS/遗忘屏障仍按 §4.71 实施。
-- [ ] 用 v3 主场正常 memory-on 场景检查“候选非空但未真正发送”的断点，不能只测 Bridge 的孤立序列化。
+- [x] 去掉“v3 ledger.main()==nullptr 即召回失败”的旧 Recorder 假设，调用 v3 受管 writer/context 服务。（`v3_main_writer()` 优先分派：v3 场召回/写入全走受管 writer；v2 老路原样保留给旧档，退役归 T02-B。）
+- [x] 召回候选、正式隐藏 user message、context 采用、实际 request refs 各有记录；origin/purpose 防止再次触发人类输入的召回 Hook。（`memory.recall.injected` 事实行带 memoryId/level/schema/updatedAt(=revision)/contentSha256/injectedBytes/sourceEvidenceRefs/messageRef；快照落 display=hidden 的正式 user 消息（origin=context_runtime，purpose=conversation，turnId 挂将开的主回合）经 `AdmitMessages` 接纳（context.input.applied），后续 `model.request.prepared` 的 inputMessageRefs 沿链自然带上——test_v3_memory_recall_bridge 主路案四件逐一断言。）
+- [x] 固定正文快照及 memoryId/revision/hash，恢复不用新 topic 正文解释旧请求；快照提交失败时本次不注入，主任务按 optional/required 策略处理。（快照=隐藏消息正文本体+事件指纹，topic 改版后旧行逐字节不动（不变性案）；消息/接纳落不稳回错、BuildTurnContext 跳过该条、trace 记 snapshot_failed、链不长——主任务 optional 放行，§9.2 fail-closed 案钉死。）
+- [x] 写入 requested/queued/committed 按真实回执分开，worker 不直接抢写 Session；MemoryStore 自己的版本/CAS/遗忘屏障仍按 §4.71 实施。（v3 侧 `memory.save.requested` 只记发起（request{operation/layer/kind/memoryId/title}+sourceSession+originator），不冒充后态；queued/rejected 归 #96 的 `memory.write.receipted`（MemoryTurnLedger v3 写口），committed 归 workspace lifecycle 的 memory.save.committed（worker 回执——ProcessJob 只写 memory 目录与 workspace lifecycle，不碰 Session 账）。）
+- [x] 用 v3 主场正常 memory-on 场景检查“候选非空但未真正发送”的断点，不能只测 Bridge 的孤立序列化。（`tests/unit/trajectory_v3/test_v3_memory_recall_bridge.cpp`：真开卷 v3 ledger + 真记忆仓（worker 落盘）+ 真回合桥（BeginTurn/RecordInput/OnRequestPrepared），断言召回候选真正进账、进链、进 prepared 引用；断点前提（main()==nullptr）案首钉死。）
 
 销项分两级：T08 桥迁完可解除对应旧 Recorder 依赖；§4.71 M0–M5 未完继续留 T13-M，不把一枚 context.injected 当整套 Memory 完成。
+
+```text
+任务编号：T08 / V3-GAP-03
+状态：verified
+实现：分支 worktree-agent-memory-bridge——src/app/memory_ledger_bridge.*（v3 分派：RecordRecallInjectionV3 主会话=隐藏快照消息+AdmitMessages+memory.recall.injected / 派工=父账事实 targetRunId+快照不进链；RecordSaveRequestedV3=memory.save.requested 因果边）、src/trajectory/v3/envelope.*（新 kind MemoryRecallInjected/MemorySaveRequested，schema 纯追加）、src/memory/project_memory.*（InjectedMemoryRecord.turn_id；BuildTurnContext 尾参 turn_id）、src/app/interactive_session.cpp（trace_turn_id 铸造提前到召回之前，号仍每轮一枚）、src/trajectory/session_manager.*+src/runtime/trajectory_session.*（v3_main_io_fault 测试缝，同 subagent_start_fault 纪律）、scripts/validate_trajectory_v3.py（补 T08 两 kind 与 #96 漏的 memory.* kind/memory_extract purpose）、tests/unit/trajectory_v3/test_v3_memory_recall_bridge.cpp（八案）
+生产入口：交互会话 memory-on 场（召回注入、派工冻结、写入因果边）；one_shot 从未挂 accounting（v2 时代即无落账，本单不改其行为）
+验证：unit.trajectory_v3.test_v3_memory_recall_bridge（主路四件全链/快照不变性/fail-closed 零注入+链不长/派工不冒领/派工大正文 blob 可读回/写入因果边三态分账/无回合号兜底/schema 名字稳定 statusless 入册），全部 EnvGuard("1") v3 主场；v2 老册 unit.app.test_memory_ledger_bridge 原样保留作旧路回归
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；v3_accept_matrix.py 的 memory-on+compact/resume 手工验收场景未扩展（真实 exe+假后端，归生产验收批）；外来信(Incoming)路 origin=User 的召回走 writer 号池兜底署名（回合号在 RunTurn 内才铸），审计链弱一档非假账；子账侧派工冻结的完整隐藏消息/采用链未做（§4.71/T13-M）
+旧依赖：v2 老路（context.injected/memory.save.requested 走 EventEnvelope）保留给旧档消费，退役归 T02-B；MemoryStore 版本/CAS/遗忘屏障、MemorySystem M0–M5 归 T13-M
+文档：docs/architecture/trajectory-v3-schema.md（记忆续行+statusless 名单）、docs/architecture/memory/flow.md（V3-GAP-03 横幅更新）、docs/development/v3-consumer-inventory.md（C3 行迁讫）
+销项日期：CI 判绿后填
+```
 
 ### T09 / V3-GAP-04：AppServer
 

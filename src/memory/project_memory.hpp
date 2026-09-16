@@ -79,6 +79,11 @@ std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
 // 用来算 hash 与落快照,不进 trace、不进 memory 自身账。
 struct InjectedMemoryRecord {
     std::string target_run_id;  // 空=主会话;非空=派工进该子代理的冻结快照
+    // T08(V3-GAP-03):这次注入挂的主回合号。v3 落账要用它给隐藏 user
+    // 消息署 turnId(schema:user 消息 turnId 必填)——召回发生在回合开跑
+    // 之前,调用方(BuildTurnContext 的 turn_id 形参)把将开那轮的号先递
+    // 进来。空 = 调用方不知道(派工快照/老调用方),落账方自己处置。
+    std::string turn_id;
     std::string memory_level;   // project | user
     std::string memory_id;
     int memory_schema = 0;
@@ -474,9 +479,12 @@ public:
     // 命中时零注入零脚手架(规格"零命中不塞空脚手架")。origin 记这条
     // 查询从哪来:user 才跑检索,合成控制消息(后台完成唤醒等)默认整轮
     // 跳过,只留 trace 来源;确需事实的合成回流可传 force_retrieval。
+    // turn_id(T08/V3-GAP-03):将开这轮的主回合号——v3 落账侧给注入快照
+    // 的隐藏 user 消息署名用;空 = 不署(老调用方/单测,行为同前)。
     [[nodiscard]] std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd,
                                                QueryOrigin origin = QueryOrigin::User,
-                                               bool force_retrieval = false) const;
+                                               bool force_retrieval = false,
+                                               const std::string& turn_id = std::string()) const;
 
     // P0-3(§6.2):子代理派工的冻结召回——父任务派工当刻按 task prompt
     // 检索一次,结果整段冻结下发,子代理不再自己扫库。target_run_id 是
@@ -604,7 +612,8 @@ public:
 private:
     std::string BuildTurnContextImpl(const std::string& query, const std::filesystem::path& cwd,
                                      QueryOrigin origin, bool force_retrieval,
-                                     const std::string& target_run_id) const;
+                                     const std::string& target_run_id,
+                                     const std::string& turn_id = std::string()) const;
     std::expected<std::string, std::string> EnqueueJob(const std::string& operation,
                                                        const SaveRequest* request,
                                                        const std::string& id,

@@ -1,6 +1,6 @@
 # 项目记忆系统流程
 
-> **V3-GAP-03：** 下文召回/写入流程沿现有 memory 实现；MemoryLedgerBridge 尚用旧 recorder，v3 消息与上下文采用链不能据此视为已接。见 [Session v3](../session-v3.md)。
+> **V3-GAP-03（2026-09-16 更新）：** MemoryLedgerBridge 已接 v3 受管 writer/context 服务——v3 场召回注入落 display=hidden 的正式 user 消息并接纳进链（`memory.recall.injected` 事实行带 memoryId/revision/hash/messageRef），写入因果边落 `memory.save.requested`；下文流程本身（检索/审阅/worker 落盘）不变。完整 MemoryStore 版本/CAS/遗忘屏障仍归总设计 §4.71（清理单 T13-M 留账）。v2 场照旧走 recorder 老路，退役归 T02-B。见 [Session v3](../session-v3.md)。
 
 [文档首页](../../README.md) · [项目记忆手册](design.md) · [上下文压缩机制](../../features/context/compaction.md) · [安全模型](../../development/security.md)
 

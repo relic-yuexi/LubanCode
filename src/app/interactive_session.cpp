@@ -746,6 +746,16 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
     // 聚焦,不是"返回"。
     transcript_ui_.ExitFocusView();
+    // T08(V3-GAP-03):trace 回合号提前到这里铸——v3 场 memory 落账桥要给
+    // 召回注入的隐藏 user 消息署 turnId(schema:user 消息 turnId 必填),
+    // 而召回发生在回合开跑之前,得先把将开这轮的号定下来。号仍是每轮
+    // 只铸一枚,下面 memory_turns_/context_tracker/turn_id_for_trace 沿用
+    // 同一枚,账不裂。外来信(Incoming)的回合号由 RunTurn 侧自铸,这里
+    // 不预铸,召回落账遇空回合号走 writer 自家号池兜底。
+    std::string trace_turn_id;
+    if (is_user_turn) {
+        trace_turn_id = session_runtime_.ids().NextTurnId();
+    }
     std::string turn_suffix;
     if (is_user_turn) {
         // @ 提及校验(0.30.x 第三批):目标消失/越出项目根,明报错拦下这轮;
@@ -761,7 +771,9 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         turn_suffix = mention_ledger;
     }
     turn_suffix += project_memory != nullptr
-                       ? project_memory->BuildTurnContext(content, std::filesystem::current_path(), origin)
+                       ? project_memory->BuildTurnContext(content, std::filesystem::current_path(),
+                                                          origin, /*force_retrieval=*/false,
+                                                          trace_turn_id)
                        : std::string();
     // 运行中子代理名册(规格第二节):每条外层用户消息/外来消息到来时给
     // main 一份动态重算的名册——task id + 真 title + 类型 + 待送数,不塞
@@ -794,7 +806,6 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     }
     main_agent->SetTurnContext(std::move(turn_suffix));
     std::size_t history_before = 0;
-    std::string trace_turn_id;
     lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
     if (is_user_turn) {
@@ -809,8 +820,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         }
         // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
         // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
-        // 不混进这里。
-        trace_turn_id = session_runtime_.ids().NextTurnId();
+        // 不混进这里。trace_turn_id 已提前到召回之前铸好(T08,见上)。
         // 记忆写入调度单 P0(§6.1):本轮写入账开张——用户正文统计与
         // 回合号先落,写路回执与抽取调度随后进来。纯观测。
         memory_turns_.BeginTurn(
