@@ -55,11 +55,14 @@ public:
             return std::unexpected(GatewayConnectError{
                 kStageConnecting, "connect_refused", "connect refused"});
         }
-        // 连接即回 Hello——插队头,保证无论测试预置了什么脚本,Hello 总是
-        // 客户端连接后读到的第一条(官方语义如此)。字段用官方名
+        // 连接即回 Hello——插在当前游标处(不是队头),保证无论测试预置了
+        // 什么脚本、第几次重连,Hello 总是客户端连接后读到的第一条(官方
+        // 语义如此;插队头会让重连脚本因游标不移位而错读)。字段用官方名
         // heartbeat_interval(A01;event-emit 页示例,2026-09-17 核对)。
         shared_->incoming.insert(
-            shared_->incoming.begin(),
+            shared_->incoming.begin() + static_cast<std::ptrdiff_t>(
+                                            std::min(shared_->cursor,
+                                                     shared_->incoming.size())),
             R"({"op":10,"d":{"heartbeat_interval":30000}})");
         return {};
     }
@@ -727,10 +730,7 @@ TEST_CASE("qq_adapter: A04 spool 落盘失败——PersistFailed 断线留根因
     }));
 
     // 磁盘恢复:第二轮 Resume 补发同一事件——Inbound 恰一次,不丢信。
-    // (假传输的游标不随"连接插队 Hello"移位,第二轮要自己补推一条 Hello。)
     harness.adapter->SetSpoolAppendFaultForTest(false);
-    ScriptGatewayTransport::Push(
-        harness.gateway, R"({"op":10,"d":{"heartbeat_interval_ms":30000}})");
     ScriptGatewayTransport::Push(harness.gateway,
                                  R"({"op":0,"s":2,"t":"RESUMED","d":{}})");
     ScriptGatewayTransport::Push(
@@ -831,11 +831,16 @@ TEST_CASE("qq_adapter: A08 停止章——出站 HTTP 全带 cancel;停机期限
                                   nlohmann::json{{"transport", "websocket"}}));
     harness.adapter->WriteToSidecar(start->data(), start->size());
     REQUIRE(WaitQuiet([&harness]() { return harness.adapter->gateway_thread_running(); }));
-    // 已发过的 token 请求盖了停止章(cancel 指针非空;gateway url 请求
-    // 还卡在 token 后面,不在此刻的账上)。
+    // 等第一笔 token 请求真出门(线程起跑与发请求之间有窗口,不能拿
+    // 线程存活冒充请求已发)。
+    REQUIRE(WaitQuiet([&harness]() {
+        std::lock_guard<std::mutex> lock(harness.http.mutex);
+        return !harness.http.cancel_stamped.empty();
+    }));
+    // 出门过的请求都盖了停止章(cancel 指针非空;gateway url 请求还卡在
+    // token 后面,不在此刻的账上)。
     {
         std::lock_guard<std::mutex> lock(harness.http.mutex);
-        REQUIRE(harness.http.cancel_stamped.size() >= 1);
         for (const bool stamped : harness.http.cancel_stamped) {
             CHECK(stamped);
         }
