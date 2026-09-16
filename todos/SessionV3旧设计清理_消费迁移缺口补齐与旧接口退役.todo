@@ -157,14 +157,26 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 
 落点：`src/telemetry/projector.*`、`service.*`、identity/cursor/spool 与 OTLP 测试。
 
-- [ ] 替换 DiscoverStreams 与 EventEnvelope Fold，复用 T00、v3 正式消息/事件及 T06 同源 usage 取数。
-- [ ] 制定 Session/turn/request/tool/compact/Hook 到 span 的映射；缺起点、失败终态、未结束跨窗口 span 明确 partial，不从记录时间猜完整时长。
-- [ ] cursor 固定 store/session/stream 身份、投影版本、末 recordId/seq/hash；重命名、来源链、归档不等于新流。旧游标不套进新投影版本。
-- [ ] 继续遵守“投影批次 durable 入 spool 后才推 cursor”；确定 batchId/spanId，重启重投不生成新身份；远端 OTLP 投递不承诺 exactly-once，需区分本地去重与远端重收。
-- [ ] 无 title/verification/approval 等新域材料时标未覆盖，不伪造 span；对应 T11 完成后再增加映射并补版本测试。
-- [ ] 在投影到外发前执行现有 redaction/consent；不能因能读新 message 就把 prompt、工具正文、图片或 memory 私料送出去。
+- [x] 替换 DiscoverStreams 与 EventEnvelope Fold，复用 T00、v3 正式消息/事件及 T06 同源 usage 取数。（发现层先 `ProbeV3SessionStream` 分派：v3 走 `DiscoverV3Streams` 递归收 `<id>.jsonl`+`subagents/*/<cid>.jsonl`（首行 schemaVersion==3 才认，深度 8、软链接不跟），v2 布局维持 main.jsonl+平铺子流老路，两种主账并存报 `telemetry.session_format_conflict` 不猜。投影新增 `ProjectV3LedgerFile` 吃 `ReadV3Ledger` 验过的账；v2 EventEnvelope Fold 保留给旧档，退役归 T02-B。usage 只认 assistant message owner（键集与 T06 `UsageFromV3Owner` 同表），`model.usage.appended` 单列观察不累计。）
+- [x] 制定 Session/turn/request/tool/compact/Hook 到 span 的映射；缺起点、失败终态、未结束跨窗口 span 明确 partial，不从记录时间猜完整时长。（映射合同钉在 `projector.hpp` 头注：session=session.started→session.ended（closeQuality）；turn=首条携带该 turnId 的行起锚、v3 无 turn 终态事件一律 terminal=missing（partial），内部回合沿 parentTurnId 挂主回合；request=sent→response.completed/failed/cancelled（request.failed=传输层终态），attempt 维度 v3 没有不伪造；tool=started→finished/failed/cancelled/rejected/unknown（按 actionId），缺 started 的终态锚在终事件上 terminal=missing_start、时长 0；compact=requested→applied/failed/cancelled/rejected（按 compactId）；hook=dispatch.requested→最后一枚 invocation 终态（按 hookDispatchId），skipped 只计数。终行时间早于起行（时钟回拨）钳回起点记 warning，不停整条流。）
+- [x] cursor 固定 store/session/stream 身份、投影版本、末 recordId/seq/hash；重命名、来源链、归档不等于新流。旧游标不套进新投影版本。（cursor schema 升 v2 加 `last_event_seq`；定位时 v3 流 id+hash+seq 三件全对不上即停（`telemetry.cursor_seq_mismatch`）。流身份=workspace|注册 session|相对路径，路径组件即 session id（内容身份）；整树挪位（归档形状）cursor 续上不重投（集成册钉）。`kProjectorVersion` 升 `telemetry-projector-v2`：LoadState 检出版本差即 generation+1 换钥匙从头重投；旧格式 cursor 文件按"无 cursor"处理（`telemetry.cursor_schema_mismatch` 不停流），不套进新投影版本。）
+- [x] 继续遵守“投影批次 durable 入 spool 后才推 cursor”；确定 batchId/spanId，重启重投不生成新身份；远端 OTLP 投递不承诺 exactly-once，需区分本地去重与远端重收。（机制未动：AdvancePendingCursors 仍按 seal 代数放行；batchId 材料不变（generation|ws|session|stream|末 recordId|signal|final），重启重投同 id 靠 spool HasBatch 去重（集成册钉"每只批 id 只见一次"）；spanId 仍 HMAC(钥匙,锚行 id,角色)，同账同钥匙重放逐字节相同。远端重收面=at-least-once：ACK 删段后的 final-flush 重开发属远端幂等账，不在本地去重范围。）
+- [x] 无 title/verification/approval 等新域材料时标未覆盖，不伪造 span；对应 T11 完成后再增加映射并补版本测试。（投影对 title.*/channel.approval.* 不产 span，测试钉"未覆盖域无伪造 span、域外材料（标题正文）不外发"；T11 各域发行后补映射须再升 kProjectorVersion 另开 generation。）
+- [x] 在投影到外发前执行现有 redaction/consent；不能因能读新 message 就把 prompt、工具正文、图片或 memory 私料送出去。（v3 投影只从 message/event 取封闭键集元数据（枚举/计数/桶/稳定码），正文一律不读不出；span 属性仍过 Redactor 二道门（allowlist+secret 扫描+路径假名），出口 consent/https 门原样；单测钉输出无 prompt/工具参数原文、无 args 引用、无路径。）
 
-验收：本地假 Collector 验正常、超时、重启、ack/落盘断点和重复发送；usage 与 T06 相同范围对得上。真实 Collector 可选验证单列，配置能加载不等于数据链通过。
+验收：本地假 Collector 验正常、超时、重启、ack/落盘断点和重复发送；usage 与 T06 相同范围对得上。真实 Collector 可选验证单列，配置能加载不等于数据链通过。（假 Collector 册 v2 侧既有 12 案不动；v3 侧新增 5 案：全链含子账递归发现+cursor 三件对账、整树挪位续投、断网重启补送+批 id 不重复、截断尾停投 source_corrupt、格式歧义报冲突；usage 对表单测逐项相等。）
+
+```text
+任务编号：T07 / V3-GAP-02
+状态：verified
+实现：src/telemetry/projector_v3.cpp（ProjectV3LedgerFile：V3Fold 六族 span/owner usage 结算/确定性排序）、projector.hpp（映射合同+声明）、service.cpp（DiscoverStreams 格式分派+DiscoverV3Streams 递归发现+StreamScan v2/v3 统一行身份骨架+cursor seq/格式升级处置）、contract.hpp/.cpp（kTelemetrySchemaVersion 2+kProjectorVersion v2+hook 属性键）、cursor.hpp/.cpp（kCursorVersion 2+last_event_seq）、batch_queue.hpp（BatchItem.last_event_seq）、CMakeLists.txt（projector_v3.cpp）
+生产入口：TelemetryService 本地投影+OTLP 出口（装配层 RegisterSession 后台线程，CLI/AppServer 共用）
+验证：新增 unit.telemetry.test_telemetry_projector_v3（六族映射/partial 合同/usage 与 ProjectV3Usage 对表/迟到实报/确定性换钥匙/D1 无正文/子账不暗填 runKind/hook 洋葱终局/坏账不投影）与 integration.telemetry.test_telemetry_otlp_export v3 五案（全链含子账/cursor 三件/整树挪位/重启批 id 不重复/截断停投/格式歧义）；既有 telemetry 册随版本常数同步（golden 夹具、otlp_json/projector/cursor 断言）；PR #102 CI rollup conclusion=success（2026-09-16，https://github.com/relic-yuexi/LubanCode/actions/runs/35056907085 之后头提交全绿；首轮三轮红分别为 deque→vector 转换、doctest MessageBuilder 拼接、provider 兜底初值，均非映射合同缺陷）
+失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真实 Collector 数据链未验（配置能加载≠数据链通过，单列后续）；估算栏 tokenEstimateRef 离线消费迁移与 T14 共担
+旧依赖：v2 EventEnvelope Fold/旧流身份保留（旧档消费，T02-B 退役；C2 行已记账）
+文档：docs/architecture/trajectory-v3-schema.md §九 Telemetry 行、docs/development/v3-consumer-inventory.md C2 行
+销项日期：2026-09-16（CI 判绿口径；真实 Collector 尾巴见『失败/未验』栏）
+```
 
 ### T08 / V3-GAP-03：Memory 桥的最低替代面
 

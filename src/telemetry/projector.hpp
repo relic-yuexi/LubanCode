@@ -24,6 +24,7 @@
 
 #include "telemetry/contract.hpp"
 #include "telemetry/redactor.hpp"
+#include "trajectory/v3/reader.hpp"
 
 namespace lubancode::telemetry {
 
@@ -60,5 +61,43 @@ struct ProjectionReport {
 // 报 telemetry.io_error;验账不过报 telemetry.source_corrupt。
 ProjectionReport ProjectJournalFile(const std::filesystem::path& stream_path,
                                     const ProjectorOptions& options);
+
+// ---------------------------------------------------------------------------
+// v3 半场(T07 / V3-GAP-02,SessionV3 旧设计清理单):session 账投影。
+//
+// 输入是 ReadV3Ledger 已验卷的账(坏账在读取层已拒,本件不做 IO)。映射
+// 合同(单内 T07"Session/turn/request/tool/compact/Hook 到 span 的映射"):
+//   session  session.started → session.ended;closeQuality clean=Ok、
+//            incomplete=Error。attr lubancode.run.kind 取 payload.runKind
+//            (子账不带 runKind 就省略,不暗填)。
+//   turn     首条携带该 turnId 的行(消息或事件)开 span。v3 无 turn 终态
+//            事件——一律按 terminal=missing 收口(partial),不用下一回合
+//            的记录时间猜完整时长。compact/goal/memory 内部回合各有
+//            turnId,各开各的 span;parent 沿 parentTurnId 挂主回合。
+//   request  model.request.sent → model.response.completed/failed/cancelled
+//            (model.request.failed = 传输层失败终态)。v3 每请求唯一
+//            requestId、无 attempt 维度,不伪造 attempt 属性。usage 唯一
+//            可累计 owner 是 assistant message(§五,与 T06 ProjectV3Usage
+//            同源同键);model.usage.appended 只作观察警告,不二次累计;
+//            缺实报 coverage=unknown,不写 0。
+//   tool     tool.execution.started → finished/failed/cancelled/rejected/
+//            unknown(按 actionId;重试 attempt 先收旧 span 再开新)。缺
+//            started 的终态:span 锚在终事件上、时长 0、terminal=
+//            missing_start,不拿 pending 时间猜时长。
+//   compact  compact.requested → applied/failed/cancelled/rejected(按
+//            compactId;requested 缺席时从 started 起锚)。
+//   hook     hook.dispatch.requested → 本 dispatch 最后一枚 invocation 终态
+//            (completed/failed/cancelled/unknown,按 hookDispatchId;洋葱
+//            串行 invocation 的最后一枚终事件为 dispatch 终点)。hook.
+//            skipped 只计数不开 span。
+// title/verification/approval(T11 域)无 v3 span 材料——不伪造 span,
+// 待各域发行后补映射并升投影版本。
+//
+// 确定性与红线同 v2 半场:id 由 identity 层 HMAC 派生、时间全取行内
+// timestamp(单调钟 v3 无,记 0 不猜)、输出按锚行 seq 稳定排序;属性只
+// 从封闭键集取值,不碰 message/event 正文;出厂前过 Redactor 二道门。
+// ---------------------------------------------------------------------------
+ProjectionReport ProjectV3LedgerFile(const trajectory::v3::V3Ledger& ledger,
+                                     const ProjectorOptions& options);
 
 }  // namespace lubancode::telemetry

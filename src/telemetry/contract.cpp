@@ -69,6 +69,9 @@ constexpr std::string_view kSpanAttributeKeys[] = {
     "lubancode.compact.epoch",
     "lubancode.verification.kind",
     "lubancode.verification.passed",
+    // hook dispatch(v3 T07):挂点名是有界枚举;matched_handlers 是计数。
+    "lubancode.hook.point",
+    "lubancode.hook.matched_handlers",
     // 子代理(§11.5:终态 hash 只报在场,不报原值)
     "lubancode.subagent.child_terminal_hash_present",
     // 投影器自留(未收口明标,不冒充成功)

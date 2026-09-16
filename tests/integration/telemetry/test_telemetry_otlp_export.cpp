@@ -39,6 +39,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -60,6 +61,9 @@
 #include "telemetry/service.hpp"
 #include "telemetry/spool.hpp"
 #include "trajectory/recorder.hpp"
+#include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/subagent.hpp"
+#include "trajectory/v3/writer.hpp"
 
 using namespace lubancode::telemetry;
 using namespace lubancode::trajectory;
@@ -1013,4 +1017,460 @@ TEST_CASE("spool clear:两步删除后批账落 tombstone,cursor 对账不报孤
     CHECK(service.Status().spool.sealed_batches >= 1);  // 新账照落
     service.Stop();
     fixture.CloseRun();
+}
+
+// ---------------------------------------------------------------------------
+// T07 / V3-GAP-02:v3 session 账的发现/投影/游标/出口全链。夹具一律
+// V3Writer 现场生成(format-neutral,不设环境变量);假 Collector 复用
+// 上面的回环件,断网/重启/ACK 落盘断点/重复发送的故障注入同款。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+namespace v3 = lubancode::trajectory::v3;
+
+class V3FixedClock : public v3::V3Clock {
+public:
+    std::int64_t WallMs() const override { return 1759468800000LL; }
+};
+
+// v3 一场 session:根账 + 一层子代理子账(递归发现该收两本)。
+struct V3Fixture {
+    V3FixedClock clock;
+    std::filesystem::path root;        // sessions 根
+    std::filesystem::path session_dir;
+    std::string workspace_key = "ws-000000000000";
+    std::string session_id = "S-V3E2E";
+
+    explicit V3Fixture(const char* tag) {
+        root = std::filesystem::temp_directory_path() /
+               ("lubancode-tel-v3-e2e-" + std::string(tag));
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        session_dir = root / session_id;
+        std::filesystem::create_directories(session_dir, ec);
+    }
+
+    std::filesystem::path Ledger() const { return session_dir / (session_id + ".jsonl"); }
+
+    std::optional<v3::V3Writer> Start() {
+        v3::V3WriterOptions options;
+        options.run_kind = "main_session";
+        auto writer = v3::V3Writer::Start(Ledger(), session_id, "run-" + session_id,
+                                          "你是 LubanCode。", nlohmann::json::object(),
+                                          options, &clock);
+        if (!writer.has_value()) {
+            return std::nullopt;
+        }
+        return std::move(*writer);
+    }
+
+    // 一轮请求链:user → prepared → sent → completed → assistant(usage)。
+    void InstallRequest(v3::V3Writer& writer, const std::string& turn_id,
+                        const nlohmann::json& usage) {
+        v3::MessageDraft user;
+        user.turn_id = turn_id;
+        user.purpose = v3::MessagePurpose::Conversation;
+        user.origin = v3::MessageOrigin::Human;
+        user.message = nlohmann::json::object({{"role", "user"}, {"content", "问:" + turn_id}});
+        v3::WriteReceipt user_receipt =
+            writer.AppendMessage(std::move(user), v3::Durability::PowerLoss);
+        REQUIRE(user_receipt.status == v3::WriteReceipt::Status::Committed);
+        REQUIRE(writer.AdmitMessages({user_receipt.id}).status ==
+                v3::WriteReceipt::Status::Committed);
+        std::vector<std::string> input_refs;
+        const auto& chain = writer.context().chain;
+        for (std::size_t i = 1; i < chain.size(); ++i) {
+            input_refs.push_back(chain[i].message_ref);
+        }
+        const std::string request_id = writer.NewRequestId();
+        const std::string step_id = writer.NewStepId();
+        REQUIRE(writer
+                    .PrepareRequest(request_id, turn_id, step_id, "conversation",
+                                    writer.context().system_message_ref, input_refs,
+                                    nlohmann::json{{"provider", "stub"},
+                                                   {"wire", "openai"},
+                                                   {"model", "stub-mini"}},
+                                    std::nullopt, v3::Durability::PowerLoss)
+                .status == v3::WriteReceipt::Status::Committed);
+        {
+            v3::EventDraft sent;
+            sent.kind = v3::EventKindV3::ModelRequestSent;
+            sent.status = v3::OpStatus::Done;
+            sent.request_id = request_id;
+            sent.turn_id = turn_id;
+            sent.step_id = step_id;
+            sent.payload = nlohmann::json{{"deliveryScope", "local_transport"}};
+            REQUIRE(writer.AppendEvent(std::move(sent), v3::Durability::PowerLoss).status ==
+                    v3::WriteReceipt::Status::Committed);
+        }
+        {
+            v3::EventDraft done;
+            done.kind = v3::EventKindV3::ModelResponseCompleted;
+            done.status = v3::OpStatus::Done;
+            done.request_id = request_id;
+            done.turn_id = turn_id;
+            done.step_id = step_id;
+            done.payload = nlohmann::json{{"finishReason", "stop"}};
+            REQUIRE(writer.AppendEvent(std::move(done), v3::Durability::PowerLoss).status ==
+                    v3::WriteReceipt::Status::Committed);
+        }
+        v3::MessageDraft assistant;
+        assistant.turn_id = turn_id;
+        assistant.step_id = step_id;
+        assistant.request_id = request_id;
+        assistant.purpose = v3::MessagePurpose::Conversation;
+        assistant.origin = v3::MessageOrigin::SessionRuntime;
+        assistant.provider = "stub";
+        assistant.wire = "openai";
+        assistant.model = "stub-mini";
+        assistant.response_model = nlohmann::json(nullptr);
+        assistant.usage = usage;
+        assistant.message = nlohmann::json::object({{"role", "assistant"}, {"content", "答"}});
+        v3::WriteReceipt receipt =
+            writer.AppendMessage(std::move(assistant), v3::Durability::PowerLoss);
+        REQUIRE(receipt.status == v3::WriteReceipt::Status::Committed);
+        REQUIRE(writer.AdmitMessages({receipt.id}).status ==
+                v3::WriteReceipt::Status::Committed);
+    }
+
+    // 一层子代理:父账 spawn → 子账起卷 + 一轮请求 → 父账 link。
+    void SpawnChild(const std::string& child_id) {
+        auto parent = v3::V3Writer::Continue(Ledger(), v3::V3WriterOptions{}, &clock);
+        REQUIRE(parent.has_value());
+        InstallRequest(*parent, "turn-000001",
+                       nlohmann::json{{"inputTokens", 100}, {"outputTokens", 20}});
+        const v3::ChildSessionRef child_ref{child_id, "run-" + child_id,
+                                            "subagents/" + child_id + "/" + child_id + ".jsonl"};
+        const v3::ParentActionRef parent_action{session_id, "run-" + session_id, "turn-000001",
+                                                "step-000001", "action-000001", "msg-000001"};
+        auto spawn = v3::SubagentSpawn::Request(*parent, "action-000001", "turn-000001",
+                                                "step-000001", "task-000001", child_ref,
+                                                parent_action, nlohmann::json::object(),
+                                                nlohmann::json::object());
+        auto boot = spawn.BootstrapChild(*parent, "run-" + child_id, "你是子代理。", "查一层。");
+        REQUIRE(boot.child_writer.has_value());
+        InstallRequest(*boot.child_writer, "turn-000001",
+                       nlohmann::json{{"inputTokens", 40}, {"outputTokens", 4}});
+        v3::EventDraft child_end;
+        child_end.kind = v3::EventKindV3::SessionEnded;
+        child_end.payload = nlohmann::json{{"reason", "completed"}, {"closeQuality", "clean"}};
+        REQUIRE(boot.child_writer
+                    ->AppendEvent(std::move(child_end), v3::Durability::PowerLoss)
+                    .status == v3::WriteReceipt::Status::Committed);
+        REQUIRE(spawn.Link(*parent, boot.checkpoint).status ==
+                v3::WriteReceipt::Status::Committed);
+    }
+
+    void EndSession(v3::V3Writer& writer) {
+        v3::EventDraft ended;
+        ended.kind = v3::EventKindV3::SessionEnded;
+        ended.payload = nlohmann::json{{"reason", "completed"}, {"closeQuality", "clean"}};
+        REQUIRE(writer.AppendEvent(std::move(ended), v3::Durability::PowerLoss).status ==
+                v3::WriteReceipt::Status::Committed);
+    }
+
+    // 根账末行(cursor 的推进目标):recordId/seq/hash 三件。
+    struct LastRecord {
+        std::string id;
+        std::string hash;
+        std::uint64_t seq = 0;
+    };
+    LastRecord Last() const {
+        const auto ledger = v3::ReadV3Ledger(Ledger());
+        REQUIRE(ledger.has_value());
+        const auto entry = ledger->LastEntry();
+        REQUIRE(entry.has_value());
+        LastRecord last;
+        last.seq = entry->seq;
+        if (entry->is_message) {
+            last.id = ledger->messages[entry->index].message_id;
+            last.hash = ledger->messages[entry->index].line_hash;
+        } else {
+            last.id = ledger->events[entry->index].event_id;
+            last.hash = ledger->events[entry->index].line_hash;
+        }
+        return last;
+    }
+};
+
+bool V3CursorFileReaches(const std::filesystem::path& root, const std::string& session_id,
+                         const std::string& stream, const std::string& event_id,
+                         std::uint64_t seq) {
+    const auto cursor =
+        (LoadCursor)(root / "cursors", "ws-000000000000", session_id, stream, nullptr);
+    return cursor.has_value() && cursor->last_event_id == event_id &&
+           cursor->last_event_seq == seq;
+}
+
+}  // namespace
+
+TEST_CASE("v3 全链:根账+子账递归发现 → 投影 → spool → 出口 → ACK,cursor 三件对账") {
+    V3Fixture fixture("fullchain");
+    const std::string child_id = "S-V3CHILD";
+    {
+        auto writer = fixture.Start();
+        REQUIRE(writer.has_value());
+        fixture.InstallRequest(*writer, "turn-000001",
+                               nlohmann::json{{"inputTokens", 100}, {"outputTokens", 20}});
+    }
+    fixture.SpawnChild(child_id);
+    {
+        auto writer = v3::V3Writer::Continue(fixture.Ledger(), v3::V3WriterOptions{},
+                                             &fixture.clock);
+        REQUIRE(writer.has_value());
+        fixture.EndSession(*writer);
+    }
+    const V3Fixture::LastRecord last = fixture.Last();
+    const std::string child_stream = "subagents/" + child_id + "/" + child_id + ".jsonl";
+    const auto child_ledger = v3::ReadV3Ledger(fixture.session_dir / child_stream);
+    REQUIRE(child_ledger.has_value());
+    const auto child_entry = child_ledger->LastEntry();
+    REQUIRE(child_entry.has_value());
+    const std::string child_last_id = child_entry->is_message
+                                          ? child_ledger->messages[child_entry->index].message_id
+                                          : child_ledger->events[child_entry->index].event_id;
+
+    FakeCollector collector;
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "lubancode-tel-v3-e2e-fullchain-root";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryService service(MakeOptions(root, collector.endpoint()));
+    REQUIRE(service.Start());
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+
+    // 两本 stream 都发现、都健康。
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.streams.size() == 2 &&
+               std::all_of(status.streams.begin(), status.streams.end(),
+                           [](const TelemetryServiceStatus::StreamStatus& stream) {
+                               return stream.error_code.empty();
+                           });
+    }));
+    // 出口收货:traces 批过 T0 合同闸,span 名是 v3 映射(lubancode.session)。
+    REQUIRE(WaitUntil([&] { return collector.RequestCount() >= 1; }));
+    bool saw_valid_traces = false;
+    for (const CollectedRequest& seen : collector.Requests()) {
+        if (seen.path != "/v1/traces") {
+            continue;
+        }
+        const nlohmann::json body = nlohmann::json::parse(seen.body, nullptr, false);
+        if (body.is_discarded() || ValidateOtlpTracesJson(body).has_value()) {
+            continue;
+        }
+        for (const auto& resource : body.at("resourceSpans")) {
+            for (const auto& scope : resource.at("scopeSpans")) {
+                for (const auto& span : scope.at("spans")) {
+                    if (span.at("name") == "lubancode.session") {
+                        saw_valid_traces = true;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(saw_valid_traces);
+
+    // ACK 全链 + cursor 三件(recordId/seq/hash):根账与子账各推到底。
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.spool.segments == 0 && status.spool.active_batches == 0;
+    }, 15000));
+    REQUIRE(WaitUntil([&] {
+        return V3CursorFileReaches(root, fixture.session_id, fixture.session_id + ".jsonl",
+                                   last.id, last.seq);
+    }));
+    REQUIRE(WaitUntil([&] {
+        return V3CursorFileReaches(root, fixture.session_id, child_stream, child_last_id,
+                                   child_entry->seq);
+    }));
+    service.Stop();
+}
+
+TEST_CASE("v3 cursor 身份:整树挪位(归档形状)不等于新流,断点续投不重发旧窗") {
+    V3Fixture fixture("rename");
+    {
+        auto writer = fixture.Start();
+        REQUIRE(writer.has_value());
+        fixture.InstallRequest(*writer, "turn-000001",
+                               nlohmann::json{{"inputTokens", 10}, {"outputTokens", 2}});
+    }
+    const std::string first_last = fixture.Last().id;
+    const std::uint64_t first_seq = fixture.Last().seq;
+
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "lubancode-tel-v3-e2e-rename-root";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    {
+        TelemetryService service(MakeOptions(root, ""));  // 本地模式,不出网
+        REQUIRE(service.Start());
+        service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+        service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+        REQUIRE(WaitUntil([&] {
+            return V3CursorFileReaches(root, fixture.session_id,
+                                       fixture.session_id + ".jsonl", first_last, first_seq);
+        }));
+        service.Stop();
+    }
+
+    // 整树挪位(归档/换 sessions 根的形状):session 目录名不变(身份定位
+    // 仍认得),同一场 session、同一本账——不是新流。
+    const std::filesystem::path moved_root = fixture.root.parent_path() /
+                                             "lubancode-tel-v3-e2e-rename-moved";
+    std::filesystem::remove_all(moved_root, ec);
+    std::filesystem::rename(fixture.root, moved_root, ec);
+    REQUIRE_FALSE(ec);
+    fixture.session_dir = moved_root / fixture.session_id;
+
+    TelemetryService service(MakeOptions(root, ""));
+    REQUIRE(service.Start());
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+    // cursor 续上:没把这场当新流从头再投——状态面仍指旧末行、零滞后。
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.streams.size() == 1 && status.streams.front().error_code.empty();
+    }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    {
+        const auto status = service.Status();
+        REQUIRE(status.streams.size() == 1);
+        CHECK(status.streams.front().error_code.empty());
+        CHECK(status.streams.front().last_event_id == first_last);
+        CHECK(status.streams.front().lag_events == 0);
+        CHECK(status.spool.active_batches == 0);  // 旧窗不重投
+    }
+    service.Stop();
+}
+
+TEST_CASE("v3 重启重投不生成新身份:collector 每只批 id 只见一次") {
+    V3Fixture fixture("restart");
+    {
+        auto writer = fixture.Start();
+        REQUIRE(writer.has_value());
+        fixture.InstallRequest(*writer, "turn-000001",
+                               nlohmann::json{{"inputTokens", 10}, {"outputTokens", 2}});
+        fixture.InstallRequest(*writer, "turn-000002",
+                               nlohmann::json{{"inputTokens", 11}, {"outputTokens", 3}});
+        // session.ended 收口:final flush 无 open span,重启后不因"重开窗"
+        // 再发一只同 id 批(那属远端重收面,本册只钉本地身份稳定)。
+        fixture.EndSession(*writer);
+    }
+
+    // 第一场:断网(collector 不在),spool 留账,cursor 推进。
+    const int dead_port = ReserveThenReleasePort();
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "lubancode-tel-v3-e2e-restart-root";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    {
+        TelemetryService service(
+            MakeOptions(root, "http://127.0.0.1:" + std::to_string(dead_port)));
+        REQUIRE(service.Start());
+        service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+        service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+        REQUIRE(WaitUntil([&] {
+            const auto status = service.Status();
+            return status.spool.sealed_batches >= 1;
+        }));
+        service.Stop();
+    }
+
+    // 第二场:collector 回来,存量补送;窗口重放同 id 去重,不重复投。
+    FakeCollector collector(dead_port);
+    {
+        TelemetryService service(MakeOptions(root, collector.endpoint()));
+        REQUIRE(service.Start());
+        service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+        service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+        REQUIRE(WaitUntil([&] {
+            const auto status = service.Status();
+            return status.spool.segments == 0 && status.spool.active_batches == 0;
+        }, 15000));
+        service.Stop();
+    }
+    REQUIRE(collector.RequestCount() >= 1);
+    std::map<std::string, int> batch_seen;
+    for (const CollectedRequest& seen : collector.Requests()) {
+        const auto found = seen.headers.find("x-lubancode-batch-id");
+        if (found != seen.headers.end()) {
+            batch_seen[found->second] += 1;
+        }
+    }
+    REQUIRE_FALSE(batch_seen.empty());
+    for (const auto& [batch_id, count] : batch_seen) {
+        // doctest 的 MessageBuilder 不吃 const char* + std::string 拼接,先拼好。
+        const std::string note = "同一 batch id 重复发送: " + batch_id;
+        CHECK_MESSAGE(count == 1, note.c_str());
+    }
+}
+
+TEST_CASE("v3 坏账:截断尾 → 该 stream 停投 telemetry.source_corrupt,服务不倒") {
+    V3Fixture fixture("corrupt");
+    {
+        auto writer = fixture.Start();
+        REQUIRE(writer.has_value());
+        fixture.InstallRequest(*writer, "turn-000001",
+                               nlohmann::json{{"inputTokens", 10}, {"outputTokens", 2}});
+    }
+    // 截掉末 5 字节(崩溃形状):验卷不过。
+    {
+        std::string bytes;
+        {
+            std::ifstream file(fixture.Ledger(), std::ios::binary);
+            REQUIRE(file.is_open());
+            bytes = std::string((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+        }
+        REQUIRE(!bytes.empty());
+        {
+            std::ofstream file(fixture.Ledger(), std::ios::binary | std::ios::trunc);
+            file << bytes.substr(0, bytes.size() - 5);
+        }
+    }
+
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "lubancode-tel-v3-e2e-corrupt-root";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryService service(MakeOptions(root, ""));  // 本地模式,不出网
+    REQUIRE(service.Start());
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.streams.size() == 1 && !status.streams.front().error_code.empty();
+    }));
+    CHECK(service.Status().streams.front().error_code == "telemetry.source_corrupt");
+    CHECK(service.Status().running);  // 服务不倒:别的 stream 照跑
+    service.Stop();
+}
+
+TEST_CASE("v3 格式歧义:main.jsonl 与 <id>.jsonl 并存 → 报冲突,不猜") {
+    V3Fixture fixture("conflict");
+    {
+        auto writer = fixture.Start();
+        REQUIRE(writer.has_value());
+        fixture.InstallRequest(*writer, "turn-000001",
+                               nlohmann::json{{"inputTokens", 10}, {"outputTokens", 2}});
+    }
+    { std::ofstream file(fixture.session_dir / "main.jsonl", std::ios::binary); file << "{}\n"; }
+
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "lubancode-tel-v3-e2e-conflict-root";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryService service(MakeOptions(root, ""));  // 本地模式,不出网
+    REQUIRE(service.Start());
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.streams.size() == 1 && !status.streams.front().error_code.empty();
+    }));
+    CHECK(service.Status().streams.front().error_code == "telemetry.session_format_conflict");
+    service.Stop();
 }

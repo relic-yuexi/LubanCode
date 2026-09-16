@@ -226,7 +226,8 @@ TEST_CASE("golden Journal: span 树/属性/metrics 全投出") {
          it != report.resource_attributes.end(); ++it) {
         CHECK(IsAllowedResourceAttributeKey(it.key()));
     }
-    CHECK(report.resource_attributes.at("lubancode.telemetry.schema_version") == 1);
+    CHECK(report.resource_attributes.at("lubancode.telemetry.schema_version") ==
+          kTelemetrySchemaVersion);  // T07 后 = 2(hook 键集升版)
 }
 
 TEST_CASE("确定性: 同 Journal 同钥匙投影两次逐字节相同") {
