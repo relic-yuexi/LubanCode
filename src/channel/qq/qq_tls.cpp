@@ -631,7 +631,6 @@ ResolvedTrustStore ResolveChannelTrustRoots(const std::string& explicit_ca_pem,
         resolved.source = "explicit";
         resolved.detail = "显式配置的信任锚";
         resolved.load = EvaluateTrustLoad("explicit", explicit_ca_pem);
-        resolved.certificate_count = resolved.load.parsed_count;
         if (!resolved.load.ok_to_continue) {
             resolved.error = "explicit ca_pem: " + resolved.load.error;
             resolved.detail = "显式配置的信任锚(不可用)";
@@ -639,6 +638,7 @@ ResolvedTrustStore ResolveChannelTrustRoots(const std::string& explicit_ca_pem,
                 resolved.detail += ";" + resolved.load.bad_cert_notes[0];
             }
         } else {
+            resolved.certificate_count = resolved.load.parsed_count;
             resolved.ca_pem = explicit_ca_pem;
         }
         return resolved;
@@ -652,7 +652,6 @@ ResolvedTrustStore ResolveChannelTrustRoots(const std::string& explicit_ca_pem,
     resolved.source = "windows_system_store";
     resolved.load = EvaluateTrustLoad("windows_system_store", exported.pem);
     resolved.load.exported_count = exported.raw_count;  // 导出侧真实枚举数
-    resolved.certificate_count = resolved.load.parsed_count;
     if (exported.pem.empty()) {
         resolved.error =
             exported.first_error.empty()
@@ -664,6 +663,7 @@ ResolvedTrustStore ResolveChannelTrustRoots(const std::string& explicit_ca_pem,
         resolved.error = "Windows 系统证书库: " + resolved.load.error;
         return resolved;
     }
+    resolved.certificate_count = resolved.load.parsed_count;
     // 可继续(含部分):PEM 原样透传——mbedTLS 连接侧解析自动跳过坏证、
     // 保留成功项,装配到消费字节不变。
     resolved.ca_pem = exported.pem;
@@ -719,12 +719,12 @@ ResolvedTrustStore ResolveChannelTrustRoots(const std::string& explicit_ca_pem,
     // 成功链 + warning;非空但解析失败报 load_failed 不报 empty。
     resolved.load = EvaluateTrustLoad("system_pem", content);
     resolved.load.exported_count = resolved.load.parsed_count + resolved.load.failed_count;
-    resolved.certificate_count = resolved.load.parsed_count;
     if (!resolved.load.ok_to_continue) {
         resolved.source = "none";
         resolved.error = "系统 CA PEM " + resolved.load.error + ": " + detected;
         return resolved;
     }
+    resolved.certificate_count = resolved.load.parsed_count;
     resolved.source = "system_pem";
     resolved.ca_pem = std::move(content);
     resolved.detail = detected + "(可解析 " + std::to_string(resolved.load.parsed_count) + " 张";
