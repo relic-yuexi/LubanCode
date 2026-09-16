@@ -1,0 +1,227 @@
+# QQ Bot：全链路协议核对与上线阻断问题清单
+
+日期：2026-09-16。源码基线：`30b8f617`。状态：审查与修复方案，尚未实施。
+
+目的：一次查清连接、收信、配对、Agent 执行、审批、回复和重启恢复之间的缺口。不能改完 HELLO 就宣告 QQ 可用。
+
+本轮核对源码、现有测试和 QQ 官方协议，未构建、未跑测试、未用真实账号连网或发消息。下面“确认”指静态证据成立，不代表已在用户机器复现。平台权限、网络环境及发布包行为仍须真机验收。本文列出本轮发现，不作“再无其他缺陷”的保证。
+
+关联：[接入总单](QQ机器人接入_Channel桥与SessionV3权限闭环.todo)、[Windows 配置与诊断](QQBot_Windows连接诊断与交互配置修复.todo)、[证书解析与网关 400](QQBot_证书部分解析误判与网关400诊断修复.todo)。旧单实现勾选只说明那项代码已落，不能代替这里的协议与真机验收。
+
+## 一、先判清这次现场
+
+- Windows 已加载 84 张证书，跳过 1 张；随后收到 HELLO。日志不再指向空信任库。坏证警告本身不是此次断线根因，仍须保留服务端证书验证。
+- `HELLO missing heartbeat_interval_ms` 对应确认缺陷 A01：代码读错平台字段，测试样例也写错。
+- HTTP 400 / `code=100017` 是另一项平台拒绝。现有日志未给出 `err_code`；本轮所查官方页面未找到 100017 的明确解释。不归咎密钥，也不直接断言限流。按 A03 补证据后再分型。
+- READY/RESUMED、连续心跳和实际收发全部通过，才算连通。PID、线程存活、TLS 成功均不够。
+
+## 二、P0：先堵住连接、丢信和错投
+
+### A01 [确认] HELLO 字段错误，测试与实现一起写错
+
+证据：[qq_proto.cpp](../src/channel/qq/qq_proto.cpp) `ParseHelloInterval` 只读 `heartbeat_interval_ms`；官方发送 `heartbeat_interval`。`test_qq_proto.cpp`、`test_qq_gateway.cpp`、`test_qq_adapter.cpp`、`test_qq_ws_client.cpp` 均沿用错误字段。
+
+- [ ] 按官方字段解析，内部变量仍可用 `_ms`；区别缺字段、类型错误、非正数与超范围。若保留旧别名，只作明确兼容，两个字段冲突时报错。
+- [ ] 引入来源独立的官方 HELLO fixture。`{"op":10,"d":{"heartbeat_interval":45000}}` 必须进入 Identify；不能让 mock 通过产品构造器生成服务端报文。
+- [ ] 加字符串整数兼容、空值、零、负数、超大整数用例；协议错误不无限重连。
+
+### A02 [确认] 只读一帧鉴权结果，补发消息会被误当成恢复完成
+
+证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) `RunOneConnection` 鉴权阶段收到其他 Dispatch 后也落入 `reached_ready=true` / `State::Running`；运行阶段再来的 READY/RESUMED 直接忽略。官方 Resume 会先补发遗漏事件，再发 RESUMED。
+
+- [ ] 改成有总期限的鉴权循环。Identify 只认有效 READY；Resume 接收补发，等 RESUMED 后再宣布恢复完成。处理期间仍须应答控制帧和维持心跳。
+- [ ] 补发事件按 A04 落盘；状态明确显示“恢复中”，不能提前报 connected。session_id、序号和状态事件只在正确分支更新。
+- [ ] 回放 HELLO→Resume→两条业务消息→RESUMED，以及只有业务消息却始终无 RESUMED；后者必须超时，不能误报上线。
+
+### A03 [确认] 漏读 err_code，错误分型和重试决定会走错
+
+证据：[qq_proto.cpp](../src/channel/qq/qq_proto.cpp) `ClassifyQqSendFailure`、[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) `ClassifyGatewayHttpFailure` 只读 `code`。官方 API 指南另有 `err_code` 形状；发送接口的去重、过期等业务码不能只靠 HTTP status 判断。[qq_messages.cpp](../src/channel/qq/qq_messages.cpp) 对 2xx 也只查 `code`。
+
+- [ ] 建共用错误解析器，分别保存 HTTP status、code、err_code、trace；明确新旧形状、字段冲突和字段非法时的规则。不能把非法 code 用 `value_or(0)` 当成功。
+- [ ] 各端点校验自身成功合同。`AckInteraction` 当前把非 JSON 的 2xx 也当 Acked；区分文档允许的空成功响应与非空损坏响应，不能一律要求 JSON，也不能一律放行。
+- [ ] 核对业务码：`40054006` 官方指好友关系校验失败、建议重试，当前却并入 NoFriend 永久失败；`40034128` 同含时间/次数超限，不能只归 MsgIdExpired。补无权限、机器人离线、内容拒绝和去重分支。
+- [ ] 100017 只保留待查结论。增加受控诊断：端点类别、HTTP、两个业务码、白名单 trace、Retry-After、body 是否 JSON。收集真实响应结构并对照官方资料，不记令牌、密钥、正文或完整响应。
+- [ ] 回放只有 err_code、只有 code、两者并存、字符串整数、畸形字段、HTTP 200 业务失败、合法空 ACK。发送、上传、互动、菜单、网关各调用点都走同一规则。
+
+### A04 [确认] 落盘失败仍推进 Resume 序号，来信可能永远跳过
+
+证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) 运行阶段先 `last_seq_.store` 再 `on_event`；回调为 void。[qq_adapter.cpp](../src/channel/qq/qq_adapter.cpp) `HandleGatewayEvent` 在 `AppendPending` 失败后只发 Fatal 并返回，无法告知网关这条尚未接住。注释所说“重连会重收”没有游标保证。
+
+- [ ] 分开“收到的序号”和“已安全接收的连续序号”。Resume 从后者开始；心跳序号遵从平台合同，不与落盘承诺混为一谈。
+- [ ] 接收回调返回落盘结果。写盘失败时停止推进连续游标，进入可恢复故障；不得跨过失败事件。未知或不支持事件也要有明确终结记录。
+- [ ] 注入磁盘满、权限拒绝、写后未通知宿主就崩溃；重连补发后不丢消息，重复投递不重复运行 Agent。
+
+### A05 [确认] outbox 的持久 msg_seq 没传到 QQ，崩溃重试不保幂等
+
+证据：[reply_outbox.cpp](../src/gateway/reply_outbox.cpp) 已保存 `target_msg_seq`，但 [channel_work_pump.cpp](../src/runtime/channel_work_pump.cpp) 与 [manager.cpp](../src/channel/manager.cpp) 发请求时未传；[qq_messages.cpp](../src/channel/qq/qq_messages.cpp) `AssignSeq` 另用内存表分配，覆盖 request.msg_seq，成功后删除 delivery 冻结项。重启归零，成功回执丢失后重投同 delivery 也可能换序号。
+
+- [ ] 首次网络发送前持久冻结 account、peer、msg_id/event_id、msg_seq、payload 摘要、delivery_id；穿过 bridge 直达 QQ。不能每次由适配器重新选号。
+- [ ] 同一来信下，配对提示、任务回执、审批卡、正文分段和附件共用持久分配器。outbox 段 ordinal 不能单独充当跨回复的 QQ 序号。
+- [ ] 明确去重响应与本地已发内容的对应关系，不因碰巧撞号就把另一条回复标成送达。
+- [ ] 在“平台已收、HTTP 回包丢”“适配器已回、宿主未记”“重启后重投”三个窗口注入故障；QQ 只见一份，Agent 只运行一次。
+
+### A06 [确认] 定时任务重试会换被动回复锚，破坏同 delivery 身份
+
+证据：[channel_work_pump.cpp](../src/runtime/channel_work_pump.cpp) 每次驱动 chanjob 均重新 `FreshInboundAnchor`，同一 delivery 可换成新来信 msg_id，或从被动变主动。与 A05 的冻结身份冲突。
+
+- [ ] 首次发送前选锚并落盘；结果未知的重试保持原请求身份。确需改锚补投，须先裁决旧尝试，再建立可追溯的新投递，不偷换同一 delivery。
+- [ ] 回放“第一次发出但回包丢失→用户又来信→重试”和跨被动回复窗口；检查重复发送、错挂回复和误用主动额度。
+
+### A07 [确认] 审批卡片字段不符合 Markdown 消息合同
+
+证据：[qq_proto.cpp](../src/channel/qq/qq_proto.cpp) `BuildC2cSendPayload` 在 keyboard 分支设 msg_type=2，却写顶层 content、没有 markdown。官方要求该类型填写 markdown。
+
+- [ ] 按官方请求结构生成 markdown + keyboard；清除冲突字段。用独立预期 JSON 比对最终 HTTP 请求，不只测内部对象。
+- [ ] 卡片权限未开或平台拒绝时，审批保留挂起/失败原因；提供可用控制入口，绝不能自动批准工具。
+- [ ] 真机点允许、拒绝、重复按钮、过期按钮、其他用户按钮；核对签名/归属校验与执行账，越权或重放均不能触发工具。
+
+### A08 [确认] 取消持有裸指针，存在释放竞态；连接阶段也打不断
+
+证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) `CancelInFlight` 从 atomic 取裸指针，连接线程清空后可销毁 unique_ptr；atomic 不延长对象寿命。`WsGatewayTransport::Connect` 只在成功后赋给 client_，外部 Cancel 打不到正在建立的局部连接。[qq_http.cpp](../src/channel/qq/qq_http.cpp) 网络请求传 cancel=nullptr。
+
+- [ ] 采用有生命周期保证的取消句柄/共享所有权及同步协议，禁止“取指针后对象被另线程释放”。Close、Cancel、client_ 发布与清理也须并发安全。
+- [ ] 把停止信号传到 HTTP、DNS/TCP/TLS、WS 读写及媒体上传；定义总停机期限，不能只给读阶段设超时后直接 join。
+- [ ] 用线程屏障稳定复现 load→destroy→Cancel 窗口；在取令牌、握手、收帧、上传各阶段停止，验证不崩溃、不挂住。核对 session_id 访问线程约束。
+
+## 三、P1：堵住重连、配对和长回复的后续故障
+
+### A09 [确认] 服务端心跳被忽略，未知 opcode 又冒充 Heartbeat
+
+证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) 把 Heartbeat 与“服务器不该发”的操作一起忽略，switch 又以 `value_or(Heartbeat)` 处理未知 op。官方 opcode 表允许服务端发送 Heartbeat。
+
+- [ ] 按官方控制帧合同处理服务端心跳，独立处理未知 op；与定时心跳及 ACK 计数统一，避免多发或误判。
+- [ ] 回放认证中/在线时的服务端心跳、连续 ACK、丢 ACK、未知 op、Reconnect、InvalidSession。InvalidSession 的 d 缺失/非法和 WS close code 须明确区分重新 Identify、Resume、暂停。
+
+### A10 [确认] 心跳总期限会被碎片和 Ping/Pong 拖长
+
+证据：[qq_ws_client.cpp](../src/channel/qq/qq_ws_client.cpp) `ReadMessage` 每次 ReadSome 重用完整 timeout_ms；控制帧和零碎字节可让外层迟迟拿不回控制权。[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) 将 int64 间隔转 int，缺少上界；心跳时钟还需与墙钟变更隔离。
+
+- [ ] 整次读取使用单调时钟绝对截止点，读写控制帧都只用剩余预算；校验间隔范围和整数转换。
+- [ ] 慢速碎片、持续 Ping/Pong、密集业务、系统时间前后跳场景下，心跳和停止期限均不失守。同步落盘/事件处理不能无限占住网关线程。
+
+### A11 [确认] 在线后失败会丢 stable 标记，重试次数也与退避档混用
+
+证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) `fail` 总返回空 RunOutcome；ever_acked 只在正常退出返回。稳定连接断线仍涨退避。attempt 既当封顶退避档，又当日志尝试编号。
+
+- [ ] 所有失败路径带回本次连接稳定状态；尝试编号、连续失败次数、退避档分开记，失败和 BackoffScheduled 用同一轮编号。
+- [ ] 先连续失败、后 READY+ACK、再断线；退避应按约定复位。超过七轮仍须看到递增尝试号。
+
+### A12 [确认] Retry-After 被截短，永久错误也无限重试
+
+证据：[qq_gateway.cpp](../src/channel/qq/qq_gateway.cpp) RunLoop 无可重试/需干预分支；服务器建议时长被 max_backoff_ms 截短。解析 seconds*1000 未校验溢出，只接受秒数形状。
+
+- [ ] 结构化返回 retryable、retry_at、requires_action。网络抖动重试；确定无权限、无效配置、协议不兼容暂停并给下一步；未知平台错误有限重试后降级等待。
+- [ ] 服务端等待下限不能被本地最大退避截短；支持或明确诊断 HTTP-date、超大整数。等待期间可立即停止。
+- [ ] 测 Retry-After=120、本地帽60、日期形状、溢出值、401刷新仍失败、403、HTTP400业务限流和未知码；不得忙重连。
+
+### A13 [确认] 令牌坏响应仍报密钥错，短有效期会反复刷新
+
+证据：[qq_auth.cpp](../src/channel/qq/qq_auth.cpp) 非 JSON/字段解析失败归 InvalidCredentials；默认提前300秒刷新，剩余寿命小于余量时缓存立即过期，下一次调用又请求。寿命乘1000及加时刻均无溢出保护。
+
+- [ ] 分开凭据拒绝、响应格式错、限流、临时故障；不可引导用户为解析错误换密钥。
+- [ ] 对照官方令牌续期策略处理“返回同一枚尚未到换发窗口的令牌”；设置短缓存/下次刷新时刻，避免每次 API 都刷新。整数采用范围检查和安全加乘。
+- [ ] 测 expires_in 数字/字符串、短寿命、畸形、超大值、多线程共用、401 后只刷新一次，覆盖整段令牌轮换。
+
+### A14 [确认] 配对通知先记“发过”，崩溃后可能收不到配对码
+
+证据：[manager.cpp](../src/channel/manager.cpp) PendingPairing 分支先 `MarkNoticeSent`，再放入内存 pending_pairing_notices；尚未持久交给 outbox。中间崩溃后，冷却账会压住后续通知。
+
+- [ ] 分开待通知、已入持久 outbox、已投递状态。限频不能吞掉未交付提示；失败后能查询与补发，避免无限刷配对码。
+- [ ] 在标记前后、入 outbox 前后、平台发送前后崩溃；重启后有可见提示或明确待办，未经配对仍不能执行 Agent/工具。
+
+### A15 [确认] 长回复只切段，没有按来信统筹可回复次数
+
+证据：[reply_outbox.cpp](../src/gateway/reply_outbox.cpp) `SplitReplySegments` 按2000字节拆段，未在此限制总段数。官方当前概述及发送页说明单聊每条来信最多回复4次；提示、审批、正文、附件必须合计。
+
+- [ ] 与 A05 共用额度账，发送前规划整份回复。超预算选择合并、摘要配完整文件或明确挂起，不先发半截再反复撞平台限制。
+- [ ] 别只改时间常量：官方发送页开头写60分钟，msg_id 参数处仍写5分钟，文档有冲突。记录依据与真实账号边界测试，再定窗口；支持平台配置变化。
+- [ ] 测长中文、emoji、4/5段、正文加附件、先审批后最终回复、跨窗口任务；用户能取到完整结果，拒收/无权限不得靠偷偷改主动消息绕过。
+
+### A16 [确认] 回放顺序按字符串排，坏账又从积压数中消失
+
+证据：[qq_adapter.cpp](../src/channel/qq/qq_adapter.cpp) `NextDeliveryId` 以未补零计数开头；[qq_spool.cpp](../src/channel/qq/qq_spool.cpp) `ListPending` 按文件名字符串排序（10先于2），坏JSON/不可读/超帽文件被跳过，pending_count 又等于过滤后列表长度。
+
+- [ ] 持久保存接收顺序，按同会话序号回放，兼容旧文件及重启计数重置；不能用随机尾或文件名字典序当消息顺序。
+- [ ] 分别统计可重投、坏账、不可读和待人工处理；坏账隔离留证据，不静默删除或显示积压0。补分页和背压，避免每次状态查询重读全部正文。
+- [ ] 用至少12条同会话消息测试顺序；混入坏文件和权限拒绝，状态与恢复结果须一致。
+
+### A17 [确认] 错误文案仍有直通日志的入口
+
+证据：[qq_proto.cpp](../src/channel/qq/qq_proto.cpp) `ClassifyQqSendFailure` 直接复制平台 message 到 detail；发送/上传错误可沿桥传回宿主。网关已限制 message，并不等于全链都限制了。
+
+- [ ] 共用安全诊断投影：稳定码、HTTP、两个平台码、受控 trace、阶段。限定长度和字符，去掉换行及控制符；平台原文不直接写公共状态或账本。
+- [ ] 用假令牌、假密钥和正文哨兵测试平台回显、HTML错误页、异常 trace/code；日志、状态、TODO、会话和崩溃报告均不得泄漏。
+
+### A18 [确认] 互动 ACK 与耗时上传共用发送线程，优先排队仍会迟到
+
+证据：[qq_adapter.cpp](../src/channel/qq/qq_adapter.cpp) SenderLoop 已优先取 ack_queue，但开始上传/发送及退避后，当前工作未结束便不能消费新 ACK。不是“完全没有优先级”，而是无法抢占在途慢任务。
+
+- [ ] 给互动确认独立执行预算/通道或可中断调度；按官方时限及时确认，并与宿主审批裁决区分。收到点击不等于授权成功。
+- [ ] 上传慢文件时点击按钮，测确认延迟；超时、重复点击、失败重试后不能重复审批或重复执行。
+
+## 四、待验证项：有缺口或合同疑点，不能全算现场已发生
+
+### B01 [待验证] Identify、权限、会话关闭码与平台接入方式
+
+- [ ] [qq_proto.cpp](../src/channel/qq/qq_proto.cpp) BuildIdentify 未带 shard；对照官方单连接合同决定是否显式传合法单分片，不能照抄示例的四分片配置。
+- [ ] 默认 intents 同含 C2C 与互动；核对未开互动权限的账号能否只用基础聊天。能力按账号授权装配，平台无权限应明确报错。
+- [ ] 建 WS close code→Resume/重新Identify/暂停映射；两进程同账号、会话失效、服务器重连指令分别验收。不能将所有关闭原因当普通断线。
+- [ ] 核对账号是否支持 WebSocket、后台事件订阅及沙箱/正式环境。旧 API 域名与官方当前 api.bot.qq.com 的兼容性单独验证；不能仅凭域名变更断言旧域名已停用。
+
+### B02 [待验证] 附件、引用和未支持消息类型的边界
+
+- [ ] 当前 MapC2cMessageCreate 只接受0/3/103；官方另列101/102。明确“支持展开”或“可见不支持提示”，不得把每条合法但未实现的消息都静默丢掉；与 A04 连续游标策略配合。
+- [ ] 独立回放真实形状：附件无正文、voice MIME、SILK/WAV、中文名、超大文件、过期URL、卡片、嵌套引用、重复事件；原件、摘要、引用及用户新指令不能混在一起。
+- [ ] 检查最外层事件id。当前网关转交业务 d，适配器给 MapC2cMessageCreate 的 envelope_event_id 为空；需事件回复时保留 event_id，不能拿 d.id 顶替。
+- [ ] 上传缓存 ttl=0 当前作不失效，负值作过期；核对官方含义，补未知/超大TTL安全运算、已缓存file_info被平台判失效后的重新上传。下载重定向、最终主机/IP、体积上限和取消链用故障服务器验收。
+
+### B03 [待验证] 多账号、菜单、主动任务与长期运行
+
+- [ ] 用两个账号、两个 profile、同 sender 文本和不同 openid 验证身份/配对/outbox/附件缓存隔离；切平台或 `im --select` 不得改写别的账号配置。
+- [ ] 验证菜单发布失败/权限不足不阻断基础消息泵；重复启动不重复发布。按钮与菜单指令都走宿主权限闸。
+- [ ] 核对好友删除、主动拒收/恢复事件与任务补投状态；不得把“任务完成”展示成“用户已收到”。无主动权限时明确挂起等互动。
+- [ ] 压测 next_seq_by_msg_id 等内存账的增长与清理；失败delivery不能无限留存，清理也不能破坏 A05 崩溃去重。检查 spool/outbox/附件磁盘配额和长期退出回收。
+
+### B04 [待验证] 发布包、配置向导与 Windows 回归
+
+- [ ] 使用最终 ZIP，普通用户、干净目录、不预置配置启动 `lubancode im`；选 QQ、隐藏输入密钥、程序安全写入、自动启用账号、启动连接。
+- [ ] 验证旧 secret_file 迁移/修复、当前用户SID、继承ACL、写失败回滚、密钥轮换、取消输入。不能让用户手敲ACL，也不能为图省事放宽到所有人可读。
+- [ ] 覆盖系统混合证书部分成功、显式坏CA严格失败、服务器过期/主机名错/不受信必须拒绝；不可关证书校验换取上线。
+- [ ] 状态区分配置就绪、连接中、恢复中、在线、需干预、已停止。去掉重复 `[gateway]` 前缀，保留一次根因及后续重试时刻。
+- [ ] 保存二进制版本/提交/包摘要、OS和验收记录；源码通过不能替代用户运行的 ZIP 通过。
+
+## 五、实施次序与交付门槛
+
+1. 先修 A01/A02/A03/A09，配独立协议 fixtures；停止“mock 与实现共用同一错误字段”。
+2. 接着修 A04/A05/A06/A08/A14/A16，补持久化和并发故障注入；不能先让真实流量穿过已知丢信/重发窗口。
+3. 再修 A07/A10/A11/A12/A13/A15/A17/A18，核对 B01—B04；按钮、媒体、菜单和任务逐项验，不拿基础文字聊天通畅代替全功能验收。
+4. 各条保留独立状态：代码已改、单测已过、故障注入已过、发布包真机已过。未验项不勾完成。
+
+最低验收矩阵（全部待执行）：
+
+| 层次 | 场景 | 必须看到的证据 |
+| --- | --- | --- |
+| 官方合同 | HELLO、Identify、READY、Resume补发、RESUMED、心跳、HTTP业务错误 | 带来源/日期的独立fixture与请求形状比对；错误形状也测 |
+| 连接 | 连续至少3轮心跳ACK、断网恢复、服务器重连、无权限 | 状态无假上线；重试受控；根因与尝试编号相符 |
+| 收信 | 重复推送、落盘失败、重启回放、坏账 | 每条可追踪；同会话顺序保持；Agent不重复执行 |
+| 配对与权限 | 首次配对、重启、未批准、错误用户、重复审批 | 配对提示可见；未经授权工具零执行 |
+| 回复 | 短文本、长中文、emoji、文件、引用、审批卡 | 手机实际显示完整结果；请求类型正确；额度有账 |
+| 投递恢复 | 平台已收但回包丢、宿主回执丢、进程被杀 | 同delivery同身份；用户不收重复内容；不重跑Agent |
+| 常驻任务 | 主动被拒、跨窗口、新来信、重启后触发 | 执行账与交付账分开；改锚有裁决；不串会话 |
+| 生命周期 | HTTP/TLS/WS/上传中停止、重复启停、双实例 | 规定时限内退出；无悬空指针、残线程和抢会话循环 |
+| Windows发布包 | 首装向导、ACL、系统CA、最终ZIP | 普通用户无需手修权限；真实READY→收信→Agent→手机回复闭环 |
+
+建议真机按“首次配对→短回复→断网恢复→长回复→附件→审批→任务→重启补投”走完整轮，再覆盖一次令牌续期。遇到首个错误须保留脱敏证据，修完从相关阶段及此前回归重跑，不能把后半程默认记成功。
+
+## 六、官方依据
+
+以下页面于2026-09-16核对。外部合同会变；fixture需记录抓取日期和来源。冲突之处留待平台确认及真机验证，不自行补成确定结论。
+
+- [事件订阅与通知](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html)：HELLO、鉴权、Resume补发、intents与分片。
+- [opcode](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/opcode.html)：控制帧方向与含义。
+- [API调用指南](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/api-call-guide.html)：err_code、trace、HTTP与业务结果。
+- [消息收发概述](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)：类型、回复额度与去重。
+- [发送单聊消息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)：Markdown/keyboard、消息锚、业务错误码；注意页内回复窗口表述冲突。
+- [单聊消息事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)：来信、附件、引用及消息类型。
+
+本轮完成项仅为源码/测试审查、官方合同核对和本清单落盘。没有修改运行时代码，没有取得真实QQ收发验收结果。
