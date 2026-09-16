@@ -185,6 +185,14 @@ struct CompactHysteresis {
     bool armed = false;                 // 本场是否已有一次压缩收口
     std::size_t last_post_tokens = 0;   // 上次收口时的压力口径估算
     bool map_path_held = false;         // map 防线拒收后的滞回旗(自动路专用)
+    // ---- T12-D(V3-GAP-07):provider 确认输入超窗后的溢出门 ----
+    // provider 报 context_overflow → 当场收一次压缩(reason=context_
+    // overflow);压不动就置位本门——此后 goal 自动续轮不得开新 iteration
+    //(那只会把同一份超限请求原样重发)。解除只有一条路:compact applied
+    //(收益校验保证严格变小)或换场重建。用户显式输入不受此门(发轮前
+    // 的 ShouldAutoCompact/pre-send 门照常把关)。
+    bool overflow_held = false;
+    std::string overflow_reason;  // 当次压缩收不了场的稳定原因(诊断/展示)
 };
 struct CompactSessionInputs {
     lubancode::agent::Agent* agent = nullptr;
@@ -228,7 +236,12 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in);
 //(终端接线收尾单自大类搬出):压缩 → 校验 → 换历史 → 落盘事件 → 报数。
 // 返回 true = 压缩成功。正戏(HandleCompactCommand)之外还有 PreCompact
 // auto 闸、cheap 失败回退 normal 修一次、分层压缩与 v2 事件。
-bool TryRunCompact(bool midturn, const CompactSessionInputs& in);
+// reason(T12-D,可空):v3 分支 compact.requested 的触发因;空 = 按旧口径
+// (midturn ? pre_send_overflow : threshold)。递 "context_overflow" 的
+// 是 provider 确认输入超窗的恢复路(HandleContextPressure 的 SendOverflow
+// 相)——收不了场时挂 CompactHysteresis 溢出门。
+bool TryRunCompact(bool midturn, const CompactSessionInputs& in,
+                   const std::string& reason = std::string());
 
 // 唤醒识死的小账本(主会话输出预留占坑单 §4.3):预检反复走应急支
 //(封顶后仍装不下、收窄放行 + 收尾交代)的会话,历史真满——后台子代理

@@ -2026,6 +2026,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 if (wiring.delivery_planner != nullptr && !trajectory_request_id.empty()) {
                     wiring.delivery_planner->NoteResponseOutcome(trajectory_request_id, false);
                 }
+                // T12-D(V3-GAP-07):provider 确认输入超窗(context_overflow
+                // 触发相,§4.37 三种 reason 的第三种)。本环不重发——overflow
+                // 不在可重试表,重发同一份输入只会再被拒;宿主在 SendOverflow
+                // 相收一次压缩,压不动就挂溢出门拦 goal 自动续轮的重发。
+                if (api::IsInputContextOverflowCode(err.api_code) && wiring_.on_context_pressure) {
+                    ContextPressure overflow;
+                    overflow.phase = ContextPressure::Phase::SendOverflow;
+                    overflow.window_tokens = window_tokens;
+                    wiring_.on_context_pressure(overflow);
+                }
                 std::string message = err.message;
                 if (err.kind == api::ErrorKind::HttpStatus && err.http_status != 0) {
                     message = "HTTP " + std::to_string(err.http_status) + ": " +

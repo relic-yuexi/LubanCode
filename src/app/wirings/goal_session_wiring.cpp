@@ -437,6 +437,22 @@ bool GoalSessionWiring::PumpV3Continuation(std::int64_t now_ms) {
     if (!view.claimable) {
         return false;
     }
+    // T12-D(V3-GAP-07):溢出门——provider 确认输入超窗、压缩未成功前不认领
+    // 新 iteration:重发同一份超限请求只会再被拒一遍(§4.37 恢复纪律:
+    // 仅重试严格更小且合法的新版本)。门解除(compact applied)后照常泵;
+    // 巡检与收口续跑在认领之前,不受影响。
+    if (host_.overflow_hold != nullptr) {
+        if (host_.overflow_hold()) {
+            if (!overflow_hold_notified_) {
+                overflow_hold_notified_ = true;
+                Notify(/*is_error=*/true,
+                       "上一轮模型请求被服务端确认输入超窗,自动 goal 轮暂缓——上下文没有"
+                       "变小之前重发只会再被拒;请 /compact 压缩历史或精简输入后继续。");
+            }
+            return true;  // 这一拍消费掉,泵不空转
+        }
+        overflow_hold_notified_ = false;
+    }
     // 认领/开轮都会提交(整替 current_),快照指针此后失效:目标原文先拷。
     // causeRef 合同为 §3.1 合法引用或空(§4.67 G0);宿主侧没有可指的
     // 触发行(workItemId 等成因已在快照 pendingIntent 里),不带。

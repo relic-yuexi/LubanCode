@@ -284,8 +284,11 @@ void TrajectoryTurnBridge::BeginTurn(const std::string& turn_id, const std::stri
         // 主回合号留给旁路桥挂 parentTurnId(取消误报 ESC 单 Bug 2):回合
         // 尾巴的抽取/摘要要能回答"哪只回合触发的"。EndTurn 不清——尾巴
         // 活儿多在回合收口之后跑,"最近一只"就是触发者。
+        // T12-C:另立 main_turn_open 旗如实记"此刻在跑"——active_*
+        // 粘账分不清在跑与收口,中途压缩递 parentTurnId 只认这只旗。
         if (v3_books_ != nullptr) {
             v3_books_->active_main_turn_id = turn_id;
+            v3_books_->main_turn_open = true;
         }
         return;
     }
@@ -398,6 +401,11 @@ void TrajectoryTurnBridge::EndTurn(bool ok, bool cancelled, const std::string& r
         // cancelled,配对完整,不留悬空 actionId。
         V3CancelDanglingActions(reason.empty() ? "turn_closed_unresolved" : reason);
         turn_open_ = false;
+        // T12-C:回合收口,活动主轮清旗——active_main_turn_id 照旧粘住
+        //(尾巴活儿挂账用),但"在跑"从这一刻起是 false,idle 压缩不伪称。
+        if (v3_books_ != nullptr) {
+            v3_books_->main_turn_open = false;
+        }
         return;
     }
     CancelDanglingCalls("turn_closed_unresolved");
@@ -4956,6 +4964,19 @@ void TrajectorySessionLedger::BlockV3Execution(const std::string& reason) {
 
 bool TrajectorySessionLedger::V3ExecutionBlocked() const {
     return impl_ != nullptr && impl_->v3_books.has_value() && impl_->v3_books->execution_blocked;
+}
+
+std::optional<std::string> TrajectorySessionLedger::OpenMainTurnId() const {
+    // T12-C:只认"此刻在跑"的旗——active_main_turn_id 是粘账(收口后
+    // 仍指向最近一只),拿它当 parent 就是伪造;idle 压缩如实给 nullopt。
+    if (impl_ == nullptr || !impl_->v3_books.has_value() || !impl_->v3_books->main_turn_open) {
+        return std::nullopt;
+    }
+    const std::string& turn_id = impl_->v3_books->active_main_turn_id;
+    if (turn_id.empty()) {
+        return std::nullopt;
+    }
+    return turn_id;
 }
 
 void TrajectorySessionLedger::PutUserCommand_(trajectory::EventKind kind, nlohmann::json payload) {

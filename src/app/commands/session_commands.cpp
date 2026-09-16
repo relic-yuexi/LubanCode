@@ -10,10 +10,13 @@
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -40,6 +43,8 @@
 #include "runtime/middleware_runtime.hpp"   // LuaHook P1-C:EstimateBypassRequestTokens
 #include "runtime/middleware_v3_sink.hpp"   // LuaHook P1-C:BindMiddlewareSessionWriter
 #include "runtime/v3_compact_runtime.hpp"  // RunV3Compact:v3 会话的 compact 全链
+#include "trajectory/v3/reader.hpp"       // T12-E:ExpandResultPreview(降档取原文)
+#include "trajectory/v3/result_store.hpp"  // T12-E:BuildToolPreview/降档梯
 #include <nlohmann/json.hpp>
 #include "app/commands/settings_commands.hpp"
 #include "app/runtime_profile.hpp"
@@ -572,9 +577,7 @@ public:
             reply.error_code =
                 result.error.kind == lubancode::api::ErrorKind::Cancelled ? "cancelled"
                                                                           : "provider_error";
-            if (result.error.api_code == "context_length_exceeded" ||
-                result.error.api_code == "context_window_exceeded" ||
-                result.error.api_code == "input_context_overflow")
+            if (lubancode::api::IsInputContextOverflowCode(result.error.api_code))
                 reply.error_code = "input_context_overflow";
             reply.error_detail = result.error.message;
             return reply;
@@ -602,6 +605,259 @@ private:
     int output_limit_;
 };
 
+// T12-B:干跑的哑客户端——干跑路不发模型,RunV3Compact 的入参要一枚
+// 客户端引用,给它一枚永远不该被调的(被调即返回 provider_error,测试可钉)。
+class NullV3CompactClient : public lubancode::runtime::V3CompactModelClient {
+public:
+    int calls = 0;
+    lubancode::runtime::V3CompactModelReply Send(
+        const std::string& system, const std::vector<nlohmann::json>& messages) override {
+        (void)system;
+        (void)messages;
+        ++calls;
+        lubancode::runtime::V3CompactModelReply reply;
+        reply.error_code = "provider_error";
+        reply.error_detail = "dry-run must not call the model";
+        return reply;
+    }
+};
+
+// T12-B:干跑数字的打印(只报结构可回收量,不编造摘要实际 token)。
+void PrintV3CompactDryRun(const lubancode::runtime::V3CompactRunResult& result,
+                          const lubancode::agent::CompactOptions& options,
+                          const lubancode::cli::Theme& theme) {
+    auto& out = lubancode::cli::TermOut();
+    out << theme.stats << "v3 compact 干跑(只算不压;未发请求、未动上下文)" << theme.reset << "\n";
+    if (result.terminal_kind == "rejected") {
+        out << theme.error << "按当前口径真压会被拒:" << result.reason << theme.reset << "\n";
+    }
+    out << "  压缩前上下文(估算): " << lubancode::cli::FormatTokenCount(result.tokens_before)
+        << " tokens(bytes/4)\n";
+    out << "  可压范围: " << result.removed_messages << " 条消息,~"
+        << lubancode::cli::FormatTokenCount(result.removed_tokens)
+        << " tokens";
+    if (!result.removed_turns.empty()) {
+        out << "(" << result.removed_turns.front();
+        if (result.removed_turns.size() > 1) {
+            out << " … " << result.removed_turns.back();
+        }
+        out << ")";
+    }
+    out << "\n";
+    out << "  保留尾部: " << result.retained_messages << " 条消息(受保护轮 "
+        << (result.protected_turns.empty() ? std::string("无") : result.protected_turns.size())
+        << " 只)\n";
+    if (!result.step_scope.empty()) {
+        out << "  容量恢复会动当前轮闭合旧 step: " << result.step_scope.dump() << "\n";
+    }
+    if (result.window_unknown) {
+        out << "  " << tr("cmd.compact.window_unknown") << "\n";
+    } else if (result.gate_checked) {
+        out << "  发送前门禁: 估算输入 "
+            << lubancode::cli::FormatTokenCount(result.estimated_input_tokens) << " / 预算 "
+            << lubancode::cli::FormatTokenCount(result.gate_budget_tokens)
+            << "(窗口 " << lubancode::cli::FormatTokenCount(options.budget.window_tokens.value_or(0))
+            << " − 输出预留 " << options.budget.output_reserve_tokens << " − 余量 "
+            << options.budget.protocol_headroom_tokens << ")";
+        if (result.retreat_steps > 0) {
+            out << " → 装不下,需回退 " << result.retreat_steps << " 步";
+        }
+        out << (result.fits_budget ? " → 装得下" : " → 仍装不下") << "\n";
+    }
+    out << "  输出预留: " << options.budget.output_reserve_tokens
+        << " tokens;以上均为结构可回收量估算,摘要实际 token 须真压才可知。\n";
+    for (const std::string& note : result.notes) {
+        out << "  " << theme.stats << note << theme.reset << "\n";
+    }
+}
+
+// T12-E(V3-GAP-07):AfterHardTrim 的 v3 收口——hard trim 动了刀,把损失
+// 落到 32/16/8/4 KiB 派生预览与 context 提交(context.tool_previews.
+// reduced,§4.38)。writer 已有降档原子提交(ReduceToolPreviews:派生 tool
+// 消息 origin=context_runtime、sourceToolMessageRef 指原消息;原消息不改、
+// 不重跑工具、artifact 不动),这里补生产驱动:
+//   1. 取下一档(只降不升;已在 4 KiB 最低档则如实收场——最低档失败门槛
+//      由提交边界的 preview_unrepresentable 把守,重读结果全量文件也绕不
+//      过:重读结果的预览同吃 writer 档位);
+//   2. 链上超新档的 tool 消息逐枚从结果仓原文重派生(ExpandResultPreview
+//      → 读 artifacts 通道 → BuildToolPreview@新档),整枚换位,调用/结果
+//      配对不拆散;
+//   3. 原子换链后 ProjectV3ContextHistory + ReplaceHistory 换进 loop
+//     (与 compact applied 同一安全点;本次请求已按硬截断视图发出,降档
+//      提交使后续请求账实同链)。
+// 某枚在新档装不下(preview_unrepresentable)则整次降档不做(fail
+// closed——保命索对本次请求已兜底,后续请求仍按旧档发,不硬塞残次品)。
+void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
+    auto& out = lubancode::cli::TermOut();
+    const lubancode::cli::Theme& theme = *in.theme;
+    lubancode::runtime::TrajectorySessionLedger* ledger = in.trajectory;
+    lubancode::trajectory::v3::V3Writer* writer = ledger->v3_main_writer();
+    if (writer == nullptr) {
+        return;  // 双保险:v2 会话不走这条收口
+    }
+    const std::uint64_t current_budget = writer->context().preview_budget_bytes;
+    std::uint64_t next_budget = 0;
+    for (const std::uint64_t tier : lubancode::trajectory::v3::kPreviewBudgets) {
+        if (tier < current_budget && tier > next_budget) {
+            next_budget = tier;  // 阶梯里比当前档低的最大一档
+        }
+    }
+    if (next_budget == 0) {
+        out << theme.stats << "工具预览已在最低档 " << current_budget
+            << " bytes,降档梯已尽;本次截断仅为请求视图的保命索,后续请求仍按最低档"
+               "的失败门槛收口(预览装不下即明败,不静默放行全文)。"
+            << theme.reset << "\n";
+        return;
+    }
+    auto ledger_or = lubancode::trajectory::v3::ReadV3Ledger(writer->path());
+    if (!ledger_or.has_value()) {
+        out << theme.error << "工具预览降档读不了账(" << ledger_or.error() << "),本次未提交降档。"
+            << theme.reset << "\n";
+        return;
+    }
+    const std::filesystem::path session_dir = writer->path().parent_path();
+
+    // 链上超新档的 tool 消息 → 从结果仓原文重派生。
+    std::vector<lubancode::trajectory::v3::V3Writer::PreviewReplacement> replacements;
+    std::string hash_material;
+    std::uint64_t tokens_before = 0;
+    std::uint64_t tokens_after = 0;
+    std::set<std::string> affected_actions;
+    const auto actions = lubancode::trajectory::v3::FoldToolActions(*ledger_or);
+    for (const auto& node : writer->context().chain) {
+        const auto* line = ledger_or->FindMessage(node.message_ref);
+        if (line == nullptr || line->message.value("role", std::string()) != "tool") {
+            continue;
+        }
+        const auto content_it = line->message.find("content");
+        if (content_it == line->message.end() || !content_it->is_string()) {
+            continue;
+        }
+        const std::string& content = content_it->get_ref<const std::string&>();
+        if (content.size() <= next_budget) {
+            continue;  // 新档装得下,不必换版本
+        }
+        // 原文:tool 消息 → resultSelectionRef → persisted → artifacts。
+        const auto projection = lubancode::trajectory::v3::ExpandResultPreview(
+            *ledger_or, session_dir, line->message_id);
+        std::string metadata_path;
+        for (const auto& ref : projection.result_refs) {
+            if (ref.value("kind", std::string()) == "result_metadata") {
+                metadata_path = ref.value("path", std::string());
+                break;
+            }
+        }
+        if (metadata_path.empty()) {
+            out << theme.error << "工具预览降档取不到结果原文(" << line->message_id
+                << " 的选用链缺 result_metadata),本次未提交降档。" << theme.reset << "\n";
+            return;
+        }
+        std::ifstream metadata_file(session_dir / lubancode::tools::Utf8ToPath(metadata_path),
+                                     std::ios::binary);
+        if (!metadata_file.is_open()) {
+            out << theme.error << "工具预览降档读不了结果仓描述(" << metadata_path
+                << "),本次未提交降档。" << theme.reset << "\n";
+            return;
+        }
+        std::string metadata_text((std::istreambuf_iterator<char>(metadata_file)),
+                                  std::istreambuf_iterator<char>());
+        const nlohmann::json metadata =
+            nlohmann::json::parse(metadata_text, nullptr, /*allow_exceptions=*/false);
+        if (metadata.is_discarded() || !metadata.is_object() || !metadata.contains("outputs") ||
+            !metadata["outputs"].is_array()) {
+            out << theme.error << "工具预览降档的结果仓描述不可解析(" << metadata_path
+                << "),本次未提交降档。" << theme.reset << "\n";
+            return;
+        }
+        lubancode::trajectory::v3::PreviewRequest preview_request;
+        preview_request.max_preview_bytes = next_budget;
+        for (const auto& output : metadata["outputs"]) {
+            if (!output.is_object()) {
+                continue;
+            }
+            lubancode::trajectory::v3::PreviewChannel channel;
+            channel.channel = output.value("channel", std::string());
+            channel.capture_complete = output.value("capture_complete", true);
+            channel.capture_reason = output.value("capture_reason", std::string());
+            channel.output_bytes = output.value("output_bytes", std::uint64_t{0});
+            channel.output_bytes_lower_bound =
+                output.value("byte_count_kind", std::string()) == "lower_bound";
+            if (output.contains("ref") && output["ref"].is_object()) {
+                channel.display_path = output["ref"].value("path", std::string());
+                std::ifstream data_file(session_dir / lubancode::tools::Utf8ToPath(channel.display_path),
+                                        std::ios::binary);
+                if (data_file.is_open()) {
+                    channel.text = std::string((std::istreambuf_iterator<char>(data_file)),
+                                               std::istreambuf_iterator<char>());
+                }
+            }
+            preview_request.channels.push_back(std::move(channel));
+        }
+        const auto preview = lubancode::trajectory::v3::BuildToolPreview(preview_request);
+        if (preview.preview_unrepresentable || preview.listing_overflow ||
+            preview.text.size() > next_budget) {
+            out << theme.error << "工具预览降到 " << next_budget
+                << " bytes 装不下必要来源(" << line->message_id
+                << "),本次未提交降档——最低档失败门槛不放宽。" << theme.reset << "\n";
+            return;
+        }
+        hash_material += line->message_id;
+        hash_material.push_back('\n');
+        hash_material += std::to_string(content.size());
+        hash_material.push_back('\n');
+        tokens_before += lubancode::runtime::EstimateV3TokensUtf8Div4(content);
+        tokens_after += lubancode::runtime::EstimateV3TokensUtf8Div4(preview.text);
+        for (const auto& action : actions) {
+            for (const auto& version : action.message_versions) {
+                if (version.message_id == line->message_id) {
+                    affected_actions.insert(action.tool_call_id);
+                }
+            }
+        }
+        replacements.push_back(lubancode::trajectory::v3::V3Writer::PreviewReplacement{
+            line->message_id, preview.text, std::nullopt});
+    }
+    if (replacements.empty()) {
+        // 降档无收益不空转提交(§4.38:仅当降档能产生足够收益时选择)。
+        return;
+    }
+    std::vector<std::string> pairing_refs;
+    for (const auto& action : actions) {
+        if (affected_actions.count(action.tool_call_id) == 0) {
+            continue;
+        }
+        if (action.assistant_message_ref.has_value()) {
+            pairing_refs.push_back(*action.assistant_message_ref);
+        }
+        if (action.selected_event_ref.has_value()) {
+            pairing_refs.push_back(*action.selected_event_ref);
+        }
+    }
+    const auto reduced = writer->ReduceToolPreviews(
+        next_budget, lubancode::hooks::Sha256Hex(hash_material), tokens_before, tokens_after,
+        replacements, pairing_refs);
+    if (!reduced.ok) {
+        out << theme.error << "工具预览降档提交失败(" << reduced.error << ");本次请求已按硬截断视图"
+            << "发出,链未动,下次仍按 " << current_budget << " bytes 档发。" << theme.reset << "\n";
+        return;
+    }
+    // 换账:与 compact applied 同一安全点(投影重读验卷,读回即确认)。
+    auto swapped = ledger->ProjectV3ContextHistory();
+    if (swapped.has_value()) {
+        in.agent->ReplaceHistory(std::move(*swapped));
+        out << theme.stats << "工具预览已降档提交(" << current_budget << " → " << next_budget
+            << " bytes," << replacements.size() << " 枚派生版本,原 artifact 未动);后续请求按新档发。"
+            << theme.reset << "\n";
+    } else {
+        // T12-A 同款纪律:链已提交、内存换账失败——设置会话级执行阻断,
+        // 话术照实,不带病继续发。
+        ledger->BlockV3Execution(swapped.error());
+        out << theme.error << "预览降档已提交,运行态未恢复(" << swapped.error()
+            << ");本场已停止后续模型请求,已提交链原样保留——请 /resume 沿已提交链重开。"
+            << theme.reset << "\n";
+    }
+}
+
 }  // namespace
 
 // T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):v3 compact 分支的收场
@@ -625,6 +881,67 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
                                           bool midturn) {
     auto& out = lubancode::cli::TermOut();
     const lubancode::cli::Theme& theme = *in.theme;
+    lubancode::runtime::TrajectorySessionLedger* ledger = in.trajectory;
+    lubancode::trajectory::v3::V3Writer* writer = ledger->v3_main_writer();
+    if (writer == nullptr) {
+        return {};  // 分派门已在外层判过;双保险,不该走到
+    }
+    // T12-B(V3-GAP-07):/compact --dry-run 的 v3 接线——同一候选范围与
+    // 容量规划器只算不压。干跑不进 PreCompact 闸(那是副作用 Hook),
+    // 也不动 PostCompact;路由/预算照常收集(容量规划器的数字面)。
+    bool dry_run = false;
+    std::string focus = args;
+    if (args == "--dry-run") {
+        dry_run = true;
+        focus.clear();
+    } else if (args.rfind("--dry-run ", 0) == 0) {
+        dry_run = true;
+        focus = args.substr(std::string("--dry-run ").size());
+    }
+    // 压缩路由:与 v2 同一只(cheap 角色,回落 normal),不拿会话模型顶包。
+    // 干跑不发包,backend 拿不到也照算(路由名照实进 profile)。
+    const auto routed = in.route_compact();
+    if (routed.backend == nullptr && !dry_run) {
+        out << theme.error << "压缩路由找不到 provider \"" << routed.route.provider
+            << "\",本次 compact 未执行" << theme.reset << "\n";
+        return {};
+    }
+    const lubancode::agent::CompactOptions options = in.build_compact_options();
+    if (dry_run) {
+        NullV3CompactClient null_client;
+        lubancode::runtime::V3CompactProfile profile;
+        profile.provider = routed.route.provider;
+        profile.wire = in.trajectory_wire;
+        profile.model = routed.route.model;
+        profile.compact_window_tokens = options.budget.window_tokens.value_or(std::size_t{0});
+        profile.compact_output_reserve_tokens = options.budget.output_reserve_tokens;
+        profile.compact_margin_tokens = options.budget.protocol_headroom_tokens;
+        profile.main_window_tokens = in.agent->runtime_profile().context_window_tokens;
+        profile.main_output_reserve_tokens =
+            in.agent->runtime_profile().max_output_tokens.value_or(0);
+        lubancode::runtime::V3CompactRunInput run_input;
+        run_input.trigger = trigger;
+        run_input.reason = reason;
+        run_input.dry_run = true;
+        run_input.focus = focus;
+        run_input.requirements_snapshot = nlohmann::json::object(
+            {{"requiredOpenItems", options.required_open_items}});
+        // 估算槽是容量规划器本体(纯函数合同),干跑同用——用户同名替换的
+        // 估算器对干跑数字同样生效,不与真跑各执一把尺。
+        {
+            lubancode::hooks::HookDispatcher* middleware_dispatcher = lubancode::app::HookRuntime();
+            run_input.estimate = [middleware_dispatcher](const nlohmann::json& snapshot) {
+                lubancode::runtime::MiddlewareHookContext estimate_context;
+                estimate_context.purpose = "compact";
+                return lubancode::runtime::EstimateBypassRequestTokens(middleware_dispatcher,
+                                                                       snapshot, estimate_context);
+            };
+        }
+        const lubancode::runtime::V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, null_client, profile, std::move(run_input));
+        PrintV3CompactDryRun(result, options, theme);
+        return {};
+    }
     // PreCompact 钩子闸:与 v2 同一道门,备份场景可以拦这一压。
     {
         lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
@@ -641,26 +958,6 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
                 return {};
             }
         }
-    }
-    lubancode::runtime::TrajectorySessionLedger* ledger = in.trajectory;
-    lubancode::trajectory::v3::V3Writer* writer = ledger->v3_main_writer();
-    if (writer == nullptr) {
-        return {};  // 分派门已在外层判过;双保险,不该走到
-    }
-    // 压缩路由:与 v2 同一只(cheap 角色,回落 normal),不拿会话模型顶包。
-    const auto routed = in.route_compact();
-    if (routed.backend == nullptr) {
-        out << theme.error << "压缩路由找不到 provider \"" << routed.route.provider
-            << "\",本次 compact 未执行" << theme.reset << "\n";
-        return {};
-    }
-    const lubancode::agent::CompactOptions options = in.build_compact_options();
-    // --dry-run 只算不压;v3 侧的干跑口径(链上可回收量)随后续棒补,
-    // 这里明说,不装样子。
-    if (args == "--dry-run") {
-        out << theme.stats << "v3 会话的 /compact --dry-run 尚未接线;本次未发请求、未动上下文。"
-            << theme.reset << "\n";
-        return {};
     }
 
     lubancode::runtime::V3CompactProfile profile;
@@ -683,8 +980,12 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
     lubancode::runtime::V3CompactRunInput run_input;
     run_input.trigger = trigger;
     run_input.reason = reason;
-    // turn 中途的 parentTurnId 由 v3 会话运行时(接线点 1)递主 turn 号;
-    // 终端接线暂未持有 v3 turn 簿,先如实挂 null,不假称。
+    // T12-C(V3-GAP-07):turn 中途的 parentTurnId 递真实主轮号(账本的
+    // 活动主轮簿,BeginTurn/EndTurn 之间才非空);idle 手动/阈值触发按
+    // 实际无活动主轮表达(parentTurnId 落 null),不伪造 parent。
+    if (midturn) {
+        run_input.parent_turn_id = ledger->OpenMainTurnId();
+    }
     run_input.allow_closed_step_compaction = midturn;
     run_input.requirements_snapshot = nlohmann::json::object(
         {{"requiredOpenItems", options.required_open_items}});
@@ -771,6 +1072,10 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
                     in.hysteresis->armed = true;
                     in.hysteresis->last_post_tokens = result.tokens_after;
                     in.hysteresis->map_path_held = false;
+                    // T12-D:上下文已持久变小(收益校验保证严格变小),溢出
+                    // 门解除——后续自动轮可以再发。
+                    in.hysteresis->overflow_held = false;
+                    in.hysteresis->overflow_reason.clear();
                 }
                 if (in.session_compact_epoch != nullptr) {
                     *in.session_compact_epoch += 1;
@@ -787,6 +1092,9 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
             in.hysteresis->armed = true;
             in.hysteresis->last_post_tokens = result.tokens_after;
             in.hysteresis->map_path_held = false;
+            // T12-D:压缩已 applied(上下文严格变小),溢出门解除。
+            in.hysteresis->overflow_held = false;
+            in.hysteresis->overflow_reason.clear();
         }
         if (in.session_compact_epoch != nullptr) {
             *in.session_compact_epoch += 1;
@@ -1788,6 +2096,8 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
         // §2.2:手动 /compact 不受 map 防线滞回旗限制,成功换账即解旗。
         if (in.hysteresis != nullptr) {
             in.hysteresis->map_path_held = false;
+            in.hysteresis->overflow_held = false;  // T12-D:上下文已变小,溢出门解除
+            in.hysteresis->overflow_reason.clear();
         }
         out << theme.stats
             << trf("router.compact_flash", lubancode::cli::FormatTokenCount(compact_result.before_tokens),
@@ -1827,21 +2137,30 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
 
 // ---- 自动压缩的会话现场路(终端接线收尾单自大类搬出;原文随行) ---------
 
-bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
+bool TryRunCompact(bool midturn, const CompactSessionInputs& in, const std::string& reason) {
     auto& out = lubancode::cli::TermOut();
     lubancode::agent::Agent& loop = *in.agent;
     const lubancode::cli::Theme& theme = *in.theme;
     // v3 会话分支(compact 全链单,§4.37 自动路):外层水位触发
     //(reason=threshold)与发送前容量门禁不通过(reason=pre_send_
-    // overflow)都从这进;provider 报输入超窗的 reason=context_overflow
-    // 由恢复调度随后续棒接。v2 会话恒 nullptr,老路一字不动。
+    // overflow)都从这进;T12-D 接齐第三种——provider 确认输入超窗的
+    // reason=context_overflow(loop 的 SendOverflow 压力相递进)。v2 会话
+    // 恒 nullptr,老路一字不动。
     if (in.trajectory != nullptr && in.trajectory->v3_main_writer() != nullptr) {
         out << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start")
             << theme.reset << "\n";
         // 旧返回语义保持:applied(持久事实)= true;运行态失败已由分支
         // 内置阻断,不把"运行态未恢复"伪装成"没压成"。
         const V3CompactBranchOutcome outcome = RunV3CompactBranch(
-            std::string(), in, "auto", midturn ? "pre_send_overflow" : "threshold", midturn);
+            std::string(), in, "auto",
+            reason.empty() ? (midturn ? "pre_send_overflow" : "threshold") : reason, midturn);
+        // T12-D:provider 超窗触发的压缩收不了场(rejected/failed/busy 一律
+        // 算)——挂溢出门,goal 自动续轮不得把同一份超限输入再发一遍;门
+        // 只在 compact applied(上下文严格变小)或换场时解除。
+        if (reason == "context_overflow" && in.hysteresis != nullptr && !outcome.persisted_applied) {
+            in.hysteresis->overflow_held = true;
+            in.hysteresis->overflow_reason = "compact_after_overflow_not_applied";
+        }
         return outcome.persisted_applied;
     }
     // §2.2 滞回旗:map 防线拒收过一次,本会话自动路不再立刻重试 map 路
@@ -1998,6 +2317,8 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
         in.hysteresis->armed = true;
         in.hysteresis->last_post_tokens = after_tokens;
         in.hysteresis->map_path_held = false;
+        in.hysteresis->overflow_held = false;  // T12-D:上下文已变小,溢出门解除
+        in.hysteresis->overflow_reason.clear();
     }
     // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
     out << theme.stats
@@ -2052,11 +2373,29 @@ void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, co
         }
         return;
     }
+    if (pressure.phase == lubancode::agent::ContextPressure::Phase::SendOverflow) {
+        // T12-D(V3-GAP-07):provider 确认输入超窗(§4.37 第三种触发
+        // reason=context_overflow)。服务端拒掉的那份请求不重发(overflow
+        // 不在请求级可重试表);当场收一次压缩,压不动就挂溢出门,goal
+        // 自动续轮的重发由 goal 泵认领前的门拦下。
+        out << theme.stats << "服务端确认输入超窗,先收一次压缩再继续(context_overflow)。"
+            << theme.reset << "\n";
+        TryRunCompact(/*midturn=*/true, in, /*reason=*/"context_overflow");
+        return;
+    }
     // AfterHardTrim:保命索这次真截了单条巨肥工具结果。显式告警,不许静默
     // 降级——用户须知道模型眼下已经看不到那段原文;完整流水仍在存档,
     // /export 可查。
     if (pressure.hard_truncated_results) {
         out << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
+        // T12-E(V3-GAP-07):v3 会话的 hard trim 收口——把这次有损截断落到
+        // 32/16/8/4 KiB 派生预览与 context 提交(context.tool_previews.
+        // reduced,§4.38),后续请求的账实同链;原 artifact 不动,调用/
+        // 结果配对不拆散。本次请求仍按硬截断视图发出(保命索语义),降档
+        // 提交使后续请求一致。
+        if (in.trajectory != nullptr && in.trajectory->v3_main_writer() != nullptr) {
+            ReduceV3ToolPreviewsAfterHardTrim(in);
+        }
     }
 }
 

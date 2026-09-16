@@ -78,6 +78,10 @@ struct GoalV3Fixture {
     // 主轮 usage 注入口(§4.67.7 归账测试用):空 = 装配层没有 turn 视图,
     // 泵如实跳过归账。
     std::function<std::optional<lubancode::runtime::TurnMetrics>()> turn_metrics;
+    // T12-D(V3-GAP-07)溢出门注入口:空 = 门没接(照旧泵);非空时泵在
+    // 认领新 iteration 前问一道,true = 上一份请求被服务端确认输入超窗、
+    // 压缩未成功——不重发同一份超限输入。
+    std::function<bool()> overflow_hold;
     // 命令面用户话走 TermOut(不经 wiring notify):把终端口折进夹具,
     // 命令输出才能被断言(泵/恢复路的提示仍走 notes)。
     std::ostringstream term_captured;
@@ -112,6 +116,7 @@ struct GoalV3Fixture {
             if (cancelled != nullptr) *cancelled = false;
         };
         host.last_turn_metrics = [this]() { return turn_metrics ? turn_metrics() : std::nullopt; };
+        host.overflow_hold = [this]() { return overflow_hold ? overflow_hold() : false; };
         host.notify = [this](bool is_error, const std::string& text) {
             notes.push_back(std::string(is_error ? "E: " : "N: ") + text);
         };
@@ -478,4 +483,41 @@ TEST_CASE("v2 场:没接账本,命令照旧走 v1 coordinator") {
     const auto flow = lubancode::app::HandleGoalCommand(
         ParseAction(GoalCommandAction::Create, "v1 老路"), pack);
     CHECK(flow == lubancode::app::CommandFlow::Continue);
+}
+
+
+// ---------------------------------------------------------------------------
+// T12-D(V3-GAP-07):goal 泵的溢出门——provider 确认输入超窗、压缩未成功
+// 前,泵不认领新 iteration(新轮只会把同一份超限请求原样重发);提示只打
+// 一道;门解除后照常开轮。巡检/收口不受影响(门问在认领之前)。
+// ---------------------------------------------------------------------------
+TEST_CASE("T12-D 溢出门:门挂着不认领新轮,解除后照常泵") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    GoalV3Fixture fixture;
+    bool held = true;
+    fixture.overflow_hold = [&held]() { return held; };
+    fixture.wiring.Ensure(fixture.config);
+    GoalWiring pack = fixture.Pack();
+    REQUIRE(lubancode::app::HandleGoalCommand(
+                ParseAction(GoalCommandAction::Create, "修好 auth;ctest -R auth 全过"), pack) ==
+            lubancode::app::CommandFlow::Continue);
+    REQUIRE(pack.goal_service->current() != nullptr);
+
+    // 门挂:有班可上也不认领——不开轮、不销账、提示恰一道。
+    fixture.wiring.PumpContinuation(0);
+    CHECK(fixture.turn_texts.empty());
+    REQUIRE(fixture.notes.size() == 1);
+    CHECK(fixture.notes[0].rfind("E: ", 0) == 0);
+    CHECK(fixture.notes[0].find("输入超窗") != std::string::npos);
+    // 第二拍:门还挂着,不重复刷屏,仍不开轮。
+    fixture.wiring.PumpContinuation(0);
+    CHECK(fixture.turn_texts.empty());
+    CHECK(fixture.notes.size() == 1);
+
+    // 门解(compact applied 后装配层清旗):照常认领开轮。
+    held = false;
+    fixture.wiring.PumpContinuation(0);
+    REQUIRE(fixture.turn_texts.size() == 1);
+    CHECK(fixture.turn_texts[0].find("修好 auth") != std::string::npos);
+    CHECK(fixture.notes.size() == 1);  // 解除后没有新提示
 }
