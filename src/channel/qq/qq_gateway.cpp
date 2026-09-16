@@ -28,6 +28,10 @@ public:
         options.url = url;
         options.ca_pem = ca_pem_;
         options.trust_mode = trust_mode_;
+        // 建立期取消(A08):外部 Cancel 经 cancel_state_ 打断正在建立的
+        // 局部连接(DNS 后各阶段全吃句柄 shutdown)。
+        auto cancel_state = std::make_shared<WsConnectCancelState>();
+        options.cancel = cancel_state;
         auto client = WsClient::Connect(options);
         if (!client.has_value()) {
             return std::unexpected(GatewayConnectError{
@@ -36,7 +40,14 @@ public:
                                                   : client.error().error_code,
                 "ws connect: " + client.error().detail});
         }
-        client_ = std::move(*client);
+        // 接管与撤销在同一把锁内交接:Cancel 方要么打到登记中的句柄,要么
+        // 打到已就位的 client_,无漏球窗口。
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            client_ = std::move(*client);
+            connect_cancel_ = std::move(cancel_state);
+            connect_cancel_->DeregisterFd();
+        }
         return {};
     }
 
@@ -52,9 +63,25 @@ public:
         return client_.ReadMessage(timeout_ms);
     }
 
-    void Cancel() override { client_.Cancel(); }
+    void Cancel() override {
+        // 建立期:打断 Connect;运行期:shutdown 底层连接,阻塞读立即
+        // 以 Closed 返回。全程持锁——与 Connect 的交接、Close 的清理
+        // 互斥(A08:Close/Cancel/client_ 发布清理并发安全);阻塞读不经
+        // 锁,取消延迟只受 shutdown 本身。
+        std::shared_ptr<WsConnectCancelState> cancel_state;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            cancel_state = connect_cancel_;
+            connect_cancel_.reset();
+            client_.Cancel();
+        }
+        if (cancel_state != nullptr) {
+            cancel_state->Cancel();  // 锁外:只碰自家的原子与登记句柄
+        }
+    }
 
     void Close(std::uint16_t code, const std::string& reason) override {
+        const std::lock_guard<std::mutex> lock(mutex_);
         (void)client_.Close(code, reason);
     }
 
@@ -68,7 +95,8 @@ private:
             case WsError::Kind::Protocol:
                 return "ws_handshake_failed";
             case WsError::Kind::Closed:
-                return "ws_handshake_closed";
+                return error.detail == "connect cancelled" ? std::string("connect_cancelled")
+                                                           : std::string("ws_handshake_closed");
             case WsError::Kind::Failed:
                 return error.detail.rfind("tls: ", 0) == 0
                            ? std::string(kTlsCodeHandshakeFailed)
@@ -79,6 +107,11 @@ private:
 
     std::string ca_pem_;
     TlsTrustMode trust_mode_ = TlsTrustMode::ExplicitCa;
+    // client_ 归网关线程独占使用;Cancel 可从停止线程来,只经 Cancel() 摸
+    // 连接(shutdown 句柄),不读写其余成员。connect_cancel_ 的发布/清理
+    // 过 mutex_(与 Cancel 方同步)。
+    std::mutex mutex_;
+    std::shared_ptr<WsConnectCancelState> connect_cancel_;
     WsClient client_;
 };
 
@@ -255,14 +288,72 @@ std::string QqGatewaySession::state_name() const {
 }
 
 std::string QqGatewaySession::session_id() const {
+    // A08 线程约束:网关线程写/宿主线程读,std::string 过锁(无原子性)。
+    const std::lock_guard<std::mutex> lock(session_state_mutex_);
     return session_id_;
 }
 
 void QqGatewaySession::CancelInFlight() {
-    IGatewayTransport* transport = in_flight_.load();
+    // A08 共享所有权:锁内拷 shared_ptr,锁外调 Cancel——连接线程清账或
+    // 析构 unique_ptr 都不会让这里的指针悬空(Cancel 期间对象保活)。
+    std::shared_ptr<IGatewayTransport> transport;
+    {
+        const std::lock_guard<std::mutex> lock(in_flight_mutex_);
+        transport = in_flight_;
+    }
     if (transport != nullptr) {
         transport->Cancel();
     }
+}
+
+GatewayEventAck QqGatewaySession::EmitEvent(const GatewayEvent& event) {
+    if (!options_.on_event) {
+        return GatewayEventAck::Persisted;  // 观测型装配:无宿主即无落盘语义
+    }
+    return options_.on_event(event);
+}
+
+bool QqGatewaySession::AcceptDispatch(const GatewayPayload& payload) {
+    // 已收到:先记 last_seq(心跳合同口径——不管宿主落盘与否,这条确实
+    // 到了客户端)。durable 游标只在宿主确认接住后推进。
+    if (payload.s >= 0) {
+        last_seq_.store(payload.s);
+    }
+    if (payload.s < 0) {
+        return true;  // 无序号的 Dispatch(协议外形状):不推进游标,照常消化
+    }
+    // 按序推进(乱序/重复推送不回退游标:平台补发的旧序号幂等消化)。
+    const auto advance_durable = [this](std::int64_t s) {
+        const std::int64_t durable = durable_seq_.load();
+        if (s > durable) {
+            durable_seq_.store(s);
+        }
+    };
+    if (payload.t == "READY" || payload.t == "RESUMED") {
+        // 会话帧的落账归网关自身(鉴权窗内同步完成,无宿主落盘语义)——
+        // 网关已安全消费,游标照常推进(重复出现同样幂等)。
+        advance_durable(payload.s);
+        return true;
+    }
+    GatewayEvent event;
+    if (payload.t == "C2C_MESSAGE_CREATE") {
+        event.kind = GatewayEvent::Kind::C2cMessageCreate;
+        event.c2c_d = payload.d;
+    } else if (payload.t == "INTERACTION_CREATE") {
+        event.kind = GatewayEvent::Kind::InteractionCreate;
+        event.interaction_d = payload.d;
+    } else {
+        // 未建模的兄弟事件(FRIEND_ADD/C2C_MSG_RECEIVE…):照实转交宿主留
+        // 明确终结记录(计数/留痕),不静默吞(A04)。
+        event.kind = GatewayEvent::Kind::UnsupportedDispatch;
+        event.detail = payload.t;
+    }
+    event.seq = payload.s;
+    if (EmitEvent(event) != GatewayEventAck::Persisted) {
+        return false;  // 没接住:不推进 durable 游标,调用方走可恢复故障
+    }
+    advance_durable(payload.s);
+    return true;
 }
 
 void QqGatewaySession::SleepInterruptible(std::atomic<bool>* stop, std::int64_t ms) {
@@ -281,12 +372,15 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
         const RunOutcome outcome =
             RunOneConnection(stop, &session_invalidated, /*attempt_number=*/attempt + 1);
         if (session_invalidated) {
-            session_id_.clear();  // op9 不可恢复:下一轮重新 Identify
+            {
+                const std::lock_guard<std::mutex> lock(session_state_mutex_);
+                session_id_.clear();  // op9 不可恢复:下一轮重新 Identify
+            }
             GatewayEvent event;
             event.kind = GatewayEvent::Kind::SessionInvalidated;
             event.detail = "invalid session";
             event.seq = last_seq_.load();
-            options_.on_event(event);
+            (void)EmitEvent(event);
         }
         if (stop->load()) {
             break;
@@ -316,26 +410,42 @@ void QqGatewaySession::RunLoop(std::atomic<bool>* stop) {
         backoff.kind = GatewayEvent::Kind::BackoffScheduled;
         backoff.attempt = attempt;
         backoff.next_retry_at_ms = options_.now_ms() + backoff_ms;
-        options_.on_event(backoff);
+        (void)EmitEvent(backoff);
         SleepInterruptible(stop, backoff_ms);
     }
     state_.store(State::Stopped);
-    options_.on_event(GatewayEvent{GatewayEvent::Kind::Stopped});
+    (void)EmitEvent(GatewayEvent{GatewayEvent::Kind::Stopped});
 }
 
 QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
     std::atomic<bool>* stop, bool* session_was_invalidated, int attempt_number) {
-    auto transport = options_.transport_factory();
+    // 工厂给 unique_ptr,这里即折 shared_ptr:本轮连接与取消方共享所有权
+    //(A08)——CancelInFlight 拷走的引用保活对象,清账/析构不悬空。
+    std::shared_ptr<IGatewayTransport> transport = options_.transport_factory();
     if (!transport) {
         GatewayEvent event = GatewayConnectEvent(GatewayEvent::Kind::ConnectFailed,
                                                  kStageConnecting, "no_transport",
                                                  "no transport factory");
         event.attempt = attempt_number;
-        options_.on_event(event);
+        (void)EmitEvent(event);
         return RunOutcome{};
     }
-    in_flight_.store(transport.get());
-    const auto clear_in_flight = [this]() { in_flight_.store(nullptr); };
+    // guard 兜底所有 return 路径的清账。
+    {
+        const std::lock_guard<std::mutex> lock(in_flight_mutex_);
+        in_flight_ = transport;
+    }
+    const auto clear_in_flight = [this]() {
+        const std::lock_guard<std::mutex> lock(in_flight_mutex_);
+        in_flight_.reset();
+    };
+    struct InFlightGuard {
+        QqGatewaySession* session;
+        ~InFlightGuard() {
+            const std::lock_guard<std::mutex> lock(session->in_flight_mutex_);
+            session->in_flight_.reset();
+        }
+    } in_flight_guard{this};
     bool reached_ready = false;  // 区分 ConnectFailed(没到 READY)与 Disconnected
 
     // 一轮失败的收口:发 ConnectFailed(未到 READY)或 Disconnected(在线
@@ -350,7 +460,7 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
                                                       : GatewayEvent::Kind::ConnectFailed,
                                                   stage, code, reason);
         event.attempt = attempt_number;
-        options_.on_event(event);
+        (void)EmitEvent(event);
         return RunOutcome{};
     };
     const auto fail_error = [&](const GatewayConnectError& error) {
@@ -364,9 +474,8 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
     if (!url.has_value()) {
         return fail_error(url.error());
     }
-    options_.on_event(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
-                                          kStageConnecting, std::string(),
-                                          std::string()));
+    (void)EmitEvent(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
+                                        kStageConnecting, std::string(), std::string()));
     const auto connected = transport->Connect(*url);
     if (!connected.has_value()) {
         return fail_error(connected.error());
@@ -403,13 +512,18 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
     }
 
     // 2) Identify / Resume。Resume 是独立阶段"恢复中"(A02):不提前报
-    //    connected。
-    const bool resuming_session = !session_id_.empty();
+    //    connected。Resume 的 seq 走 durable 游标(A04:已安全接收的连续
+    //    序号)——宿主没接住的事件由平台补发,不靠 last_seq 假称已收。
+    std::string resume_session_id;
+    {
+        const std::lock_guard<std::mutex> lock(session_state_mutex_);
+        resume_session_id = session_id_;
+    }
+    const bool resuming_session = !resume_session_id.empty();
     const char* auth_stage = resuming_session ? kStageResuming : kStageIdentifying;
     state_.store(resuming_session ? State::Resuming : State::Authenticating);
-    options_.on_event(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
-                                          auth_stage, std::string(),
-                                          std::string()));
+    (void)EmitEvent(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
+                                        auth_stage, std::string(), std::string()));
     const auto token = options_.token_provider();
     if (!token.has_value()) {
         return fail_error(token.error());
@@ -422,7 +536,7 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         }
     } else {
         const auto sent = transport->SendText(
-            BuildResume(*token, session_id_, last_seq_.load()).dump());
+            BuildResume(*token, resume_session_id, durable_seq_.load()).dump());
         if (!sent.has_value()) {
             return fail(kStageResuming, "resume_send_failed",
                         "send resume: " + sent.error());
@@ -452,24 +566,9 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         next_beat = options_.now_ms() + heartbeat_interval_ms;
         return std::nullopt;
     };
-    // 业务事件派发(鉴权窗补发流与运行期同一条路;A04 的落盘语义在适配器
-    // 的 on_event 消费侧,这里只交出事件)。
-    const auto dispatch_business = [&](const GatewayPayload& payload) {
-        if (payload.t == "C2C_MESSAGE_CREATE") {
-            GatewayEvent event;
-            event.kind = GatewayEvent::Kind::C2cMessageCreate;
-            event.c2c_d = payload.d;
-            event.seq = payload.s;
-            options_.on_event(event);
-        } else if (payload.t == "INTERACTION_CREATE") {
-            GatewayEvent event;
-            event.kind = GatewayEvent::Kind::InteractionCreate;
-            event.interaction_d = payload.d;
-            event.seq = payload.s;
-            options_.on_event(event);
-        }
-        // 其余 t(intents 只订 C2C/互动):兄弟事件按序记账(已记),不进模型。
-    };
+    // 业务事件派发:鉴权窗补发流与运行期同一条路,统一走 AcceptDispatch
+    //(A04 回执制——last_seq 先记、宿主确认接住才推 durable 游标;未建模
+    // 的兄弟事件转宿主留终结记录)。PersistFailed 由调用方按可恢复故障断线。
     // Invalid Session 的三分处置(A09):d=true 会话仍可信,断线重连走
     // Resume;d=false 清 session 重新 Identify;d 缺失/非 bool——官方合同
     // 里不存在,会话可信度不可判定,按不可恢复处置(清 session 重新
@@ -531,43 +630,57 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         }
         switch (*payload->op) {
             case GatewayOp::Dispatch: {
-                if (payload->s >= 0) {
-                    last_seq_.store(payload->s);
-                }
                 if (payload->t == "READY") {
                     if (resuming_session) {
-                        break;  // Resume 路径不认 READY(合同外),继续等 RESUMED
+                        // Resume 路径不认 READY(合同外),继续等 RESUMED;
+                        // 游标照记(网关自身已安全消费)。
+                        (void)AcceptDispatch(*payload);
+                        break;
                     }
                     const auto ready = ParseReady(payload->d, &parse_error);
                     if (!ready.has_value()) {
                         return fail(kStageIdentifying, "ready_bad_payload",
                                     "READY: " + parse_error);
                     }
-                    session_id_ = ready->session_id;  // 只在 READY 分支换会话(A02)
+                    {  // 只在 READY 分支换会话(A02);写锁(A08 线程约束)
+                        const std::lock_guard<std::mutex> lock(session_state_mutex_);
+                        session_id_ = ready->session_id;
+                    }
                     GatewayEvent event;
                     event.kind = GatewayEvent::Kind::SessionReady;
                     event.detail = ready->user_id;
                     event.seq = payload->s;
-                    options_.on_event(event);
+                    (void)EmitEvent(event);
+                    (void)AcceptDispatch(*payload);  // 会话帧:记账 + 游标推进
                     auth_complete = true;
                     break;
                 }
                 if (payload->t == "RESUMED") {
                     if (!resuming_session) {
-                        break;  // Identify 路径不认 RESUMED(合同外),继续等 READY
+                        // Identify 路径不认 RESUMED(合同外),继续等 READY;
+                        // 游标照记。
+                        (void)AcceptDispatch(*payload);
+                        break;
                     }
                     GatewayEvent event;
                     event.kind = GatewayEvent::Kind::SessionResumed;
-                    event.detail = session_id_;
+                    event.detail = resume_session_id;
                     event.seq = payload->s;
-                    options_.on_event(event);
+                    (void)EmitEvent(event);
+                    (void)AcceptDispatch(*payload);  // 会话帧:记账 + 游标推进
                     resumed = true;
                     auth_complete = true;
                     break;
                 }
-                // 补发/早到业务事件:按序记账(已记)并照常派发,不静默吞
-                //(A04 的落盘在消费侧)。
-                dispatch_business(*payload);
+                // 补发/早到业务事件(官方 Resume 合同:先补发遗漏事件,补完才
+                // 下发 RESUMED):走同一只 AcceptDispatch——按序记账、宿主确认、
+                // 游标推进;PersistFailed 按可恢复故障断线,Resume 从 durable
+                // 游标补发窗含这条,不丢信(A04)。
+                if (!AcceptDispatch(*payload)) {
+                    return fail(auth_stage, "event_persist_failed",
+                                "host did not persist dispatch seq " +
+                                    std::to_string(payload->s) + " (" + payload->t + ")");
+                }
                 break;
             }
             case GatewayOp::HeartbeatAck:
@@ -610,9 +723,8 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
     // READY/RESUMED 过:connected 成立(§三)。阶段推进放这里,SessionReady/
     // SessionResumed 事件在前——适配器先把 connected 记上,阶段再跟着变。
     reached_ready = true;
-    options_.on_event(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
-                                          kStageConnected, std::string(),
-                                          std::string()));
+    (void)EmitEvent(GatewayConnectEvent(GatewayEvent::Kind::StageChanged,
+                                        kStageConnected, std::string(), std::string()));
 
     // 4) 运行循环:读分发 + 心跳 + ACK 监视(与鉴权窗同一套心跳账)。心跳
     //    节拍锚定绝对时刻(next_beat),事件密集也不重置心跳窗——重置会饿死
@@ -655,14 +767,16 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         }
         switch (*payload->op) {
             case GatewayOp::Dispatch:
-                if (payload->s >= 0) {
-                    last_seq_.store(payload->s);
+                // A04 统一落账口:READY/RESUMED(鉴权窗已处理,重复出现按序
+                // 记账)、业务事件、未建模兄弟事件全走 AcceptDispatch——
+                // last_seq 先记(已收到),宿主确认接住才推进 durable 游标;
+                // PersistFailed 按可恢复故障断线,Resume 从 durable 游标
+                // 补发,不跨过失败事件。
+                if (!AcceptDispatch(*payload)) {
+                    return fail(kStageConnected, "event_persist_failed",
+                                "host did not persist dispatch seq " +
+                                    std::to_string(payload->s) + " (" + payload->t + ")");
                 }
-                if (payload->t == "READY" || payload->t == "RESUMED") {
-                    // 鉴权窗已处理过;重复出现按序记账即可。
-                    break;
-                }
-                dispatch_business(*payload);
                 break;
             case GatewayOp::HeartbeatAck:
                 missed_acks = 0;

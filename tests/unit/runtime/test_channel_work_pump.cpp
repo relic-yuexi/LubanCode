@@ -742,6 +742,92 @@ TEST_CASE("限频:退避后同载荷重试(同 client_id),成功后不重跑 Age
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
 }
 
+// ---------------------------------------------------------------------------
+// A05:msg_seq 持久冻结——同来信分段各占一号;限频重试/重启重投沿用原号。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A05 msg_seq 冻结:分段各占一号;限频后进程重启重投沿用原号") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture::Params params;
+    params.send_timeout_ms = 300;
+    params.send_retry_backoff_ms = 100;
+    params.max_send_attempts = 3;
+    std::string delivery_id;
+    {
+        Q2Fixture fixture("seqfreeze", params);
+        fixture.scripts = {TextScript("短回答")};
+        auto registry = fixture.MakeRegistry();
+        REQUIRE(fixture.OpenPump(registry).ok);
+        fixture.sidecar.set_send_script(FakeChannelSidecar::SendScript::RateLimitedFirst);
+        fixture.sidecar.set_rate_limited_first(1);
+
+        fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "问题", "m-1"));
+        REQUIRE(fixture.Tick());  // 首发被限频:身份已冻结(seq=1),尝试已记账
+        REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+        delivery_id = fixture.sidecar.sent_messages()[0].client_id;
+        // 首发载荷:被动锚 + 持久分配的 1 号(不是 ordinal 顶替,是发号器)。
+        const auto& first = fixture.sidecar.sent_messages()[0];
+        REQUIRE(first.params.contains("reply_to_message_id"));
+        CHECK(first.params["reply_to_message_id"] == "m-1");
+        REQUIRE(first.params.contains("msg_seq"));
+        CHECK(first.params["msg_seq"] == 1);
+        // 这里"进程死"(不退避重试):限频窗口 + 重启 = 三窗口之三
+        //(重启后重投必须沿用原号,平台去重才认得是同一条)。
+    }
+    {
+        Q2Fixture fixture("seqfreeze", params, /*rebuild=*/true);
+        auto registry = fixture.MakeRegistry();
+        REQUIRE(fixture.OpenPump(registry).ok);  // 假件恢复 AutoAccept
+        REQUIRE(fixture.Tick());
+        fixture.TickUntilQuiet();
+        // 不重跑 Agent;恰再发一次;重投沿用冻结的 1 号(账上身份,不是
+        // 内存新号)。
+        REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+        REQUIRE(fixture.sidecar.send_count_for(delivery_id) == 1);
+        const auto& resent = fixture.sidecar.sent_messages()[0];
+        CHECK(resent.client_id == delivery_id);
+        REQUIRE(resent.params.contains("msg_seq"));
+        CHECK(resent.params["msg_seq"] == 1);
+        REQUIRE(fixture.outbox->ListItems().size() == 1);
+        REQUIRE(fixture.outbox->ListItems()[0].state == "sent");
+    }
+}
+
+TEST_CASE("A05 msg_seq 发号:同来信多段与第二条回复各占一号,不撞号") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("seqcounter");
+    // 长文两段(拆段 >1 会自动附产物附件段:共 3 段)。
+    std::string long_text;
+    for (int i = 0; i < 800; ++i) {
+        long_text += "字";
+    }
+    fixture.scripts = {TextScript(long_text), TextScript("第二条回答")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "长问题", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    // 同一封来信(m-1)下 3 段:msg_seq 1/2/3(ordinal 顶替的旧病是全 1)。
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto& send = fixture.sidecar.sent_messages()[i];
+        REQUIRE(send.params.contains("msg_seq"));
+        CHECK(send.params["msg_seq"] == static_cast<std::uint64_t>(i + 1));
+        CHECK(send.params["reply_to_message_id"] == "m-1");
+    }
+
+    // 第二封来信(m-2)的新回复:发号器按 (账号,锚) 各自计数,从 1 起。
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "再来", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 4);
+    const auto& second_reply = fixture.sidecar.sent_messages()[3];
+    CHECK(second_reply.params["reply_to_message_id"] == "m-2");
+    REQUIRE(second_reply.params.contains("msg_seq"));
+    CHECK(second_reply.params["msg_seq"] == 1);
+}
+
 TEST_CASE("长文拆段:文本段按序投递,Q4 产物附件殿后,全 sent 才结算 delivered") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Q2Fixture fixture("segment");

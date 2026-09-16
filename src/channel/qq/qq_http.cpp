@@ -57,8 +57,10 @@ QqHttpFunc MakeHttpFuncWithLimits(net::FullHttpLimits limits) {
         full.url = request.url;
         full.headers = request.headers;
         full.body = request.body;
+        // A08:停止旗穿到 net 层——DNS/TCP/TLS/上传/收体各阶段可被打断
+        //(适配器恒在请求上盖章 &stop_)。
         const auto response =
-            net::PerformFullHttpRequest(full, limits, /*cancel=*/nullptr, /*pinned=*/nullptr);
+            net::PerformFullHttpRequest(full, limits, request.cancel, /*pinned=*/nullptr);
         if (!response.has_value()) {
             switch (response.error().kind) {
                 case net::FullHttpErrorKind::Cancelled:

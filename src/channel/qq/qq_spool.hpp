@@ -10,6 +10,7 @@
 // 拼不出目录外路径。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -27,13 +28,27 @@ public:
     static std::expected<QqSpoolStore, std::string> Open(const std::filesystem::path& pending_dir);
 
     QqSpoolStore() = default;
-    QqSpoolStore(QqSpoolStore&& other) noexcept = default;
-    QqSpoolStore& operator=(QqSpoolStore&& other) noexcept = default;
+    // atomic(测试故障旗)不可移——手写搬移:目录随行,故障旗归零(搬移
+    // 是装配期独占操作,测试注入发生在就位之后)。
+    QqSpoolStore(QqSpoolStore&& other) noexcept
+        : pending_dir_(std::move(other.pending_dir_)) {}
+    QqSpoolStore& operator=(QqSpoolStore&& other) noexcept {
+        if (this != &other) {
+            pending_dir_ = std::move(other.pending_dir_);
+            append_fault_for_test_.store(false);
+        }
+        return *this;
+    }
 
     // 落一笔待确认事件(整份规范化事件 JSON)。失败返回人话错误——调用方
     // 停止上报该事件(不丢弃、不假称已耐久)。
     std::optional<std::string> AppendPending(const std::string& delivery_id,
                                              const nlohmann::json& event_json);
+
+    // 故障注入(仅测试):置位后 AppendPending 恒报磁盘满——A04 落盘失败
+    // 路径(网关 PersistFailed → durable 游标不推进 → Resume 补发)的
+    // 稳定复现口。生产代码不得调用。
+    void SetAppendFaultForTest(bool fail) { append_fault_for_test_.store(fail); }
 
     // 重启重投:全部待确认事件,按 delivery_id 排序(重投次序稳定)。
     std::vector<std::pair<std::string, nlohmann::json>> ListPending() const;
@@ -46,8 +61,10 @@ public:
     const std::filesystem::path& dir() const { return pending_dir_; }
 
 private:
-    explicit QqSpoolStore(std::filesystem::path dir) : pending_dir_(std::move(dir)) {}
+    explicit QqSpoolStore(std::filesystem::path dir)
+        : pending_dir_(std::move(dir)) {}
     std::filesystem::path pending_dir_;
+    std::atomic<bool> append_fault_for_test_{false};
 };
 
 // delivery_id 字符集守门(文件名成分)。

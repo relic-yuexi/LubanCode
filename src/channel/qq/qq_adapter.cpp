@@ -66,6 +66,18 @@ std::string TokenErrorCode(QqTokenManager::ErrorKind kind) {
     return "token_network_failed";
 }
 
+// A08 停止章:把停止旗盖进每一笔出站 HTTP(令牌/网关地址/发送/互动回应/
+// 媒体上传全走同一 seam)。生产实现把 cancel 递进 net 层,任一阶段可掐;
+// 假实现可忽略。旗归适配器所有,寿命盖过全部线程(seam 不保管)。
+QqHttpFunc StampStopFlag(QqHttpFunc func, const std::atomic<bool>* stop) {
+    return [func = std::move(func), stop](const QqHttpRequest& request)
+               -> std::expected<QqHttpResponse, std::string> {
+        QqHttpRequest stamped = request;
+        stamped.cancel = stop;
+        return func(stamped);
+    };
+}
+
 }  // namespace
 
 nlohmann::json QqBotCapabilities() {
@@ -89,13 +101,21 @@ nlohmann::json QqBotCapabilities() {
 
 QqBotAdapter::QqBotAdapter(Options options)
     : options_(std::move(options)),
+      stop_(false),
       token_manager_(QqTokenManager::Options{
           options_.config.app_id,
           options_.credential.secret,
-          options_.http,
+          StampStopFlag(options_.http, &stop_),
           options_.now_ms,
           options_.bots_base + "/app/getAppAccessToken",
-          /*refresh_margin_secs=*/300}) {}
+          /*refresh_margin_secs=*/300}) {
+    // A08:令牌管理器已盖停止章;发送/媒体 seam 同样盖章(信令与媒体
+    // 两路共享同一只 stop_)。假 http(测试)收到的请求都带 cancel 指针。
+    options_.http = StampStopFlag(options_.http, &stop_);
+    if (options_.media_http) {
+        options_.media_http = StampStopFlag(options_.media_http, &stop_);
+    }
+}
 
 QqBotAdapter::~QqBotAdapter() {
     StopGatewayLocked("adapter destruct");
@@ -109,6 +129,12 @@ QqBotAdapter::~QqBotAdapter() {
 
 std::size_t QqBotAdapter::spool_pending_count() const {
     return spool_.has_value() ? spool_->pending_count() : 0;
+}
+
+void QqBotAdapter::SetSpoolAppendFaultForTest(bool fail) {
+    if (spool_.has_value()) {
+        spool_->SetAppendFaultForTest(fail);
+    }
 }
 
 void QqBotAdapter::WriteToSidecar(const std::byte* data, std::size_t size) {
@@ -296,6 +322,15 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 pending.request.outbound_delivery_id =
                     message.params.at("client_id").get<std::string>();
             }
+            // A05:宿主(outbox 持久分配器)冻结的 msg_seq 原样穿桥直达 QQ
+            //——>0 即权威值,适配器不再重选号;0 = 宿主未指定(主动消息
+            // 恒 0;兼容旧宿主时被动消息由适配器内存分配兜底)。
+            if (message.params.contains("msg_seq")) {
+                if (const auto seq = ParseLooseInt64(message.params.at("msg_seq"));
+                    seq.has_value() && *seq > 0 && *seq <= 0xFFFFFFFFLL) {
+                    pending.request.msg_seq = static_cast<std::uint32_t>(*seq);
+                }
+            }
             // Q6 审批卡片:可选 keyboard 对象(markdown + 键盘)。键盘发送
             // 与 media 互斥(一条消息只有一种 msg_type)。
             if (message.params.contains("keyboard") &&
@@ -366,6 +401,8 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
             result["stage"] = snapshot.stage;
             result["cursor"] = nullptr;
             result["backlog"] = spool_pending_count();
+            // A04:未建模 Dispatch 的终结计数(收到且已判不支持,不静默吞)。
+            result["unsupported_events"] = unsupported_dispatch_count();
             if (snapshot.last_failure.has_value()) {
                 result["last_error"] = nlohmann::json{
                     {"stage", snapshot.last_failure->stage},
@@ -493,7 +530,9 @@ bool QqBotAdapter::StartGatewayLocked() {
         }
         return *token;
     };
-    gateway_options.on_event = [this](const GatewayEvent& event) { HandleGatewayEvent(event); };
+    gateway_options.on_event = [this](const GatewayEvent& event) {
+        return HandleGatewayEvent(event);
+    };
     gateway_options.now_ms = options_.now_ms;
     session_ = std::make_unique<QqGatewaySession>(std::move(gateway_options));
     gateway_thread_ = std::make_unique<std::thread>([this]() { session_->RunLoop(&stop_); });
@@ -507,23 +546,34 @@ bool QqBotAdapter::StartGatewayLocked() {
 
 void QqBotAdapter::StopGatewayLocked(const std::string& reason) {
     (void)reason;
-    if (gateway_thread_ == nullptr) {
-        return;
-    }
+    // 停止旗先行(A08):HTTP 取消章即刻生效(在途令牌/地址/发送/上传被
+    // net 层掐流),WS 经 CancelInFlight 打断(建立期与运行期都够得着)。
     stop_.store(true);
-    session_->CancelInFlight();
-    gateway_thread_->join();
+    if (session_ != nullptr) {
+        session_->CancelInFlight();
+    }
+    if (gateway_thread_ != nullptr && gateway_thread_->joinable()) {
+        gateway_thread_->join();
+    }
     gateway_thread_.reset();
     session_.reset();
+    // 发送线程收口(A08 总停机期限):SenderLoop 停止后排空队列(未发的
+    // 如实报错回宿主)、退避睡可打断、在途网络吃取消章——join 有界。
+    // 收口后指针清零:桥 stop→start 重开新线程,不再留死发送队列。
     sender_wake_.notify_all();
-    // 发送线程随适配器生命周期存续(队列清空后自然空转;析构收口)。
+    if (sender_thread_ != nullptr && sender_thread_->joinable()) {
+        sender_thread_->join();
+    }
+    sender_thread_.reset();
 }
 
-void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
+GatewayEventAck QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
     switch (event.kind) {
         case GatewayEvent::Kind::C2cMessageCreate: {
             if (!spool_.has_value()) {
-                return;  // 没开账不收事件(防御)
+                // 没开账(防御,理论不可达——start 开账后才连网关):这条
+                // 没接住,交网关按可恢复故障处置。
+                return GatewayEventAck::PersistFailed;
             }
             const std::string delivery_id = NextDeliveryId();
             std::string map_error;
@@ -532,23 +582,25 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
                 delivery_id, options_.now_ms(), &map_error);
             if (!mapping.has_value()) {
                 // 事件解不开:不进 spool 不上报(无效正文不是可投递事实),
-                // Fatal 留痕让宿主记账。
+                // Fatal 留痕让宿主记账。这是明确终结记录(判无效),游标
+                // 照常推进——重发一条解不开的事件只会再判一次无效。
                 EmitNotification(BridgeMethod::Fatal,
                                  nlohmann::json{{"reason", "invalid_frame"},
                                                 {"detail", "c2c map: " + map_error}});
-                return;
+                return GatewayEventAck::Persisted;
             }
             const nlohmann::json event_json = mapping->event.ToJson();
             if (const auto spool_error = spool_->AppendPending(delivery_id, event_json)) {
-                // 落盘失败:停止上报该事件,退避后网关重连会重收(平台 at
-                // least once)。Fatal 让宿主 Degraded 留痕。
+                // 落盘失败(磁盘满/权限拒):没接住——PersistFailed 交网关
+                // 停止推进 durable 游标、按可恢复故障断线;Resume 从 durable
+                // 游标补发含这条,不丢信(A04)。Fatal 让宿主 Degraded 留痕。
                 EmitNotification(BridgeMethod::Fatal,
                                  nlohmann::json{{"reason", "spool_write_failed"},
                                                 {"detail", *spool_error}});
-                return;
+                return GatewayEventAck::PersistFailed;
             }
             EmitNotification(BridgeMethod::Inbound, event_json);
-            return;
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::InteractionCreate: {
             // Q6 按钮回调:纯函数映射 → channel.interaction.create 通知。
@@ -563,7 +615,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
                 EmitNotification(BridgeMethod::Fatal,
                                  nlohmann::json{{"reason", "invalid_frame"},
                                                 {"detail", "interaction map: " + map_error}});
-                return;
+                return GatewayEventAck::Persisted;  // 判无效 = 明确终结
             }
             if (!interaction->application_id.empty() &&
                 interaction->application_id != options_.config.app_id) {
@@ -571,13 +623,19 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
                     BridgeMethod::Fatal,
                     nlohmann::json{{"reason", "invalid_frame"},
                                    {"detail", "interaction application_id mismatch"}});
-                return;
+                return GatewayEventAck::Persisted;  // 判无效 = 明确终结
             }
             const std::string delivery_id = NextDeliveryId();
             EmitNotification(BridgeMethod::InteractionCreate,
                              InteractionEventToJson(*interaction, options_.channel_id,
                                                     options_.account_id, delivery_id));
-            return;
+            return GatewayEventAck::Persisted;
+        }
+        case GatewayEvent::Kind::UnsupportedDispatch: {
+            // A04:收到但未建模的 Dispatch(计数=明确终结记录,不静默吞)。
+            // 计数投影进 Health;进模型/重投都没有意义——按已终结放行游标。
+            unsupported_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::StageChanged: {
             // 阶段推进只记本地快照账,不刷宿主状态机(宿主只认
@@ -585,7 +643,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             const std::lock_guard<std::mutex> lock(connection_mutex_);
             connection_.stage = event.stage.empty() ? kStageConnecting : event.stage;
             connection_.updated_at_ms = options_.now_ms();
-            return;
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::SessionReady:
         case GatewayEvent::Kind::SessionResumed: {
@@ -611,7 +669,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             EmitNotification(BridgeMethod::Status,
                              nlohmann::json{{"state", "running"}, {"connected", true},
                                             {"stage", kStageConnected}});
-            return;
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::ConnectFailed:
         case GatewayEvent::Kind::Disconnected: {
@@ -633,7 +691,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
                                             {"stage", event.stage},
                                             {"error_code", event.error_code},
                                             {"detail", event.detail}});
-            return;
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::BackoffScheduled: {
             // 只记重试账,不碰 last_failure(退避不许覆盖根因,§三)。
@@ -641,7 +699,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             connection_.retry_count = event.attempt;
             connection_.next_retry_at_ms = event.next_retry_at_ms;
             connection_.updated_at_ms = options_.now_ms();
-            return;
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::SessionInvalidated: {
             {
@@ -652,7 +710,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             EmitNotification(BridgeMethod::Status,
                              nlohmann::json{{"state", "backoff"}, {"connected", false},
                                             {"stage", kStageIdentifying}});
-            return;
+            return GatewayEventAck::Persisted;
         }
         case GatewayEvent::Kind::Stopped: {
             // 停止:connected 立即 false(§三)。
@@ -667,7 +725,7 @@ void QqBotAdapter::HandleGatewayEvent(const GatewayEvent& event) {
             EmitNotification(BridgeMethod::Status,
                              nlohmann::json{{"state", "stopped"}, {"connected", false},
                                             {"stage", kStageStopped}});
-            return;
+            return GatewayEventAck::Persisted;
         }
     }
 }
@@ -690,10 +748,25 @@ void QqBotAdapter::SenderLoop() {
         sender_wake_.wait(lock, [this]() {
             return !send_queue_.empty() || !ack_queue_.empty() || stop_.load();
         });
-        if (send_queue_.empty() && ack_queue_.empty()) {
-            if (stop_.load()) {
-                return;  // 停止且队列清空
+        // 停止(A08 有界收口):不再起网络,队列整批排空——未发的如实回
+        // domain 错(宿主按失败结算,不冒充 flushed),随后线程退出。
+        if (stop_.load()) {
+            std::vector<PendingSend> sends = std::move(send_queue_);
+            send_queue_.clear();
+            std::vector<PendingAck> acks = std::move(ack_queue_);
+            ack_queue_.clear();
+            lock.unlock();
+            for (const PendingSend& pending : sends) {
+                ReplyDomainError(pending.request_id, DomainErrorName::TransportFailed,
+                                 "adapter stopped before send");
             }
+            for (const PendingAck& ack : acks) {
+                ReplyDomainError(ack.request_id, DomainErrorName::TransportFailed,
+                                 "adapter stopped before interaction ack");
+            }
+            return;
+        }
+        if (send_queue_.empty() && ack_queue_.empty()) {
             continue;
         }
         if (!ack_queue_.empty()) {
@@ -764,10 +837,18 @@ void QqBotAdapter::SenderLoop() {
         int attempt = pending.attempts;
         while (outcome.status == QqMessageSender::Outcome::Status::DeferredRetry &&
                attempt < kMaxAttempts) {
-            const int backoff_ms = 1000 * (1 << attempt);
-            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
             if (stop_.load()) {
-                break;  // 停止路径:尽快收口(未完成的发送如实报错)
+                break;  // 停止路径:不再退避重试(未完成的发送如实报错)
+            }
+            // 退避睡可打断(A08):每 100ms 查停止旗——停止时立即收口,
+            // 不拖满整段退避。
+            const int backoff_ms = 1000 * (1 << attempt);
+            for (int slept = 0; slept < backoff_ms && !stop_.load(); slept += 100) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(std::min(100, backoff_ms - slept)));
+            }
+            if (stop_.load()) {
+                break;
             }
             ++attempt;
             outcome = run_once();

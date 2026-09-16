@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -175,6 +176,54 @@ TEST_CASE("qq_ws_client: 服务端直发超帽长度立即报协议错") {
     CHECK(result.error().kind == WsError::Kind::Protocol);
 
     acceptor.join();
+}
+
+TEST_CASE("qq_ws_client: A08 建立期取消——握手读阻塞中被外部 Cancel 立即打断") {
+    // 预置取消:Connect 入口即断,零网络。
+    {
+        auto cancel_state = std::make_shared<WsConnectCancelState>();
+        cancel_state->Cancel();
+        WsConnectOptions options;
+        options.url = "ws://127.0.0.1:1/never";
+        options.cancel = cancel_state;
+        const auto client = WsClient::Connect(options);
+        REQUIRE_FALSE(client.has_value());
+        CHECK(client.error().kind == WsError::Kind::Closed);
+        CHECK(client.error().detail == "connect cancelled");
+    }
+    // 握手读阻塞中取消:服务端 accept 后不回响应头——旧实现里这扇窗口
+    // 外部够不着(局部连接),只能干等 select 落锤;新实现登记句柄被
+    // shutdown,立即以 Closed 分型收口。
+    MockWsServer server;
+    const auto port = server.Start();
+    REQUIRE(port.has_value());
+    std::thread acceptor([&]() {
+        auto connection = server.AcceptNext(5'000);
+        if (connection.has_value()) {
+            // 故意不 AcceptUpgrade:连接僵住,客户端在读响应头处阻塞。
+            std::this_thread::sleep_for(std::chrono::milliseconds(2'000));
+        }
+    });
+    auto cancel_state = std::make_shared<WsConnectCancelState>();
+    WsConnectOptions options;
+    options.url = "ws://127.0.0.1:" + std::to_string(*port) + "/stall";
+    options.connect_timeout_ms = 3'000;  // 不取消就得等满这窗
+    options.cancel = cancel_state;
+    std::thread canceller([&cancel_state]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        cancel_state->Cancel();
+    });
+    const auto began = std::chrono::steady_clock::now();
+    const auto client = WsClient::Connect(options);
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - began)
+                                .count();
+    canceller.join();
+    acceptor.join();
+    REQUIRE_FALSE(client.has_value());
+    CHECK(client.error().kind == WsError::Kind::Closed);
+    CHECK(client.error().detail == "connect cancelled");
+    CHECK(elapsed_ms < 2'000);  // 靠取消立即断,不拖满 3s 落锤
 }
 
 TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {

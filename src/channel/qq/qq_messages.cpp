@@ -45,7 +45,11 @@ std::size_t QqMessageSender::frozen_delivery_count() const {
 
 QqMessageSender::Outcome QqMessageSender::SendC2c(const C2cSendRequest& request) {
     C2cSendRequest effective = request;
-    {
+    // A05:宿主(outbox 持久分配器)冻结的 msg_seq(>0)原样直达 QQ——同
+    // delivery 的网络重试(含重启后)恒同 (msg_id, msg_seq),平台去重兜底;
+    // 适配器不再重选号,也不在成功后清宿主的冻结账。0 = 调用方未指定,
+    // 由内存分配兜底(仅覆盖不走 outbox 的调用方,重启即失效)。
+    if (request.msg_seq == 0) {
         const std::lock_guard<std::mutex> lock(mutex_);
         effective.msg_seq = AssignSeq(request);
     }

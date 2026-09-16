@@ -22,6 +22,10 @@ constexpr const char* kTypeAttempt = "item.attempt";
 constexpr const char* kTypeSent = "item.sent";
 constexpr const char* kTypeOutcomeUnknown = "item.outcome_unknown";
 constexpr const char* kTypeChannelFailed = "item.channel_failed";
+// QQ 发送身份(A05/A06):分配/裁决。分配行是发号的唯一事实源——重开
+// (重启)后 next_seq 从这里重放,不归零。
+constexpr const char* kTypeIdentityAssigned = "msgseq.assigned";
+constexpr const char* kTypeIdentityRetired = "msgseq.retired";
 
 std::string GetJsonString(const nlohmann::json& json, const char* key) {
     if (!json.is_object() || !json.contains(key) || !json[key].is_string()) {
@@ -79,7 +83,25 @@ OutboxProjection ReadOutboxProjection(const std::filesystem::path& log_file) {
             ++projection.skipped_lines;
             continue;
         }
-        if (type == kTypeEnqueued) {
+        if (type == kTypeIdentityAssigned) {
+            // 发送身份分配(A05):live 身份 + 发号计数两本账。
+            DurableReplyOutbox::ChannelSendIdentity identity;
+            identity.anchor_msg_id = GetJsonString(line, "msgId");
+            identity.payload_sha256 = GetJsonString(line, "payloadSha256");
+            identity.msg_seq = static_cast<std::uint32_t>(GetJsonUint(line, "msgSeq"));
+            const std::string account = GetJsonString(line, "accountId");
+            const std::int64_t assigned_at = GetJsonInt(line, "atMs");
+            projection.live_identities[delivery_id] =
+                ChannelIdentityBookEntry{identity, assigned_at};
+            const std::string key = account + "\n" + identity.anchor_msg_id;
+            const auto max_seq = projection.next_seq_by_identity.find(key);
+            if (max_seq == projection.next_seq_by_identity.end() ||
+                identity.msg_seq > max_seq->second) {
+                projection.next_seq_by_identity[key] = identity.msg_seq;
+            }
+        } else if (type == kTypeIdentityRetired) {
+            projection.live_identities.erase(delivery_id);
+        } else if (type == kTypeEnqueued) {
             ReplyOutboxItem item;
             item.delivery_id = delivery_id;
             item.selection_id = GetJsonString(line, "selectionId");
@@ -222,7 +244,9 @@ DurableReplyOutbox::DurableReplyOutbox(DurableReplyOutbox&& other) noexcept
     : paths_(std::move(other.paths_)),
       writer_(std::move(other.writer_)),
       broken_(other.broken_),
-      items_(std::move(other.items_)) {}
+      items_(std::move(other.items_)),
+      live_identities_(std::move(other.live_identities_)),
+      next_seq_by_identity_(std::move(other.next_seq_by_identity_)) {}
 
 DurableReplyOutbox& DurableReplyOutbox::operator=(DurableReplyOutbox&& other) noexcept {
     if (this != &other) {
@@ -230,6 +254,8 @@ DurableReplyOutbox& DurableReplyOutbox::operator=(DurableReplyOutbox&& other) no
         writer_ = std::move(other.writer_);
         broken_ = other.broken_;
         items_ = std::move(other.items_);
+        live_identities_ = std::move(other.live_identities_);
+        next_seq_by_identity_ = std::move(other.next_seq_by_identity_);
     }
     return *this;
 }
@@ -252,6 +278,32 @@ DurableReplyOutbox::OpenResult DurableReplyOutbox::Open(DurableReplyOutbox* out,
     std::size_t skipped = 0;
     OutboxProjection projection = ReadOutboxProjection(paths.log_file);
     out->items_ = std::move(projection.items);
+    out->live_identities_ = std::move(projection.live_identities);
+    out->next_seq_by_identity_ = std::move(projection.next_seq_by_identity);
+    // 升级兼容(A05):旧账行的 targetMsgSeq 是 ordinal 顶替的。没有显式
+    // 身份分配行的项,把账面值折成 live 身份——重试沿用旧值不换号;发号
+    // 计数同步取 max,新分配永不与在途旧号相撞。
+    for (auto& [id, item] : out->items_) {
+        if (item.delivery_target == "local:file" || item.target_msg_seq == 0) {
+            continue;
+        }
+        if (out->live_identities_.count(id) > 0) {
+            continue;  // 显式身份行优先
+        }
+        ChannelIdentityBookEntry entry;
+        entry.identity.anchor_msg_id = item.target_reply_to_message_id;
+        entry.identity.msg_seq = item.target_msg_seq;
+        entry.identity.payload_sha256 = item.reply_sha256;
+        entry.assigned_at_ms = item.enqueued_at_ms;
+        out->live_identities_[id] = entry;
+        const std::string key =
+            DurableReplyOutbox::IdentityKey(item.target_account_id, entry.identity.anchor_msg_id);
+        const auto max_seq = out->next_seq_by_identity_.find(key);
+        if (max_seq == out->next_seq_by_identity_.end() ||
+            entry.identity.msg_seq > max_seq->second) {
+            out->next_seq_by_identity_[key] = entry.identity.msg_seq;
+        }
+    }
     skipped = projection.skipped_lines;
     out->paths_ = paths;
     out->writer_.reset();  // lazy:首笔提交才开写者(占位/只读故障首笔暴露)
@@ -440,7 +492,8 @@ DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
         if (!target.reply_to_message_id.empty()) {
             line["targetReplyToMessageId"] = target.reply_to_message_id;
         }
-        line["targetMsgSeq"] = ordinal;  // 稳定 msg_seq = 段序(同锚不同段不撞)
+        // A05:msg_seq 不再由 ordinal 顶替——首次网络发送前经
+        // AssignChannelSendIdentity 按 (账号,锚) 持久发号(跨回复不撞号)。
         if (!target.source_ref.empty()) {
             line["sourceRef"] = target.source_ref;
         }
@@ -471,7 +524,7 @@ DurableReplyOutbox::ChannelEnqueueReceipt DurableReplyOutbox::EnqueueChannel(
         item.target_account_id = target.account_id;
         item.target_conversation_id = target.conversation_id;
         item.target_reply_to_message_id = target.reply_to_message_id;
-        item.target_msg_seq = static_cast<std::uint32_t>(ordinal);
+        item.target_msg_seq = 0;  // 未分配(A05:首次发送前 AssignChannelSendIdentity)
         item.source_ref = target.source_ref;
         if (attachment != nullptr && index + 1 == segments.size()) {
             item.attachment_local_path = attachment->local_path;
@@ -595,6 +648,114 @@ bool DurableReplyOutbox::MarkChannelFailed(const std::string& delivery_id,
     return true;
 }
 
+std::string DurableReplyOutbox::IdentityKey(const std::string& account_id,
+                                             const std::string& anchor) {
+    return account_id + "\n" + anchor;
+}
+
+DurableReplyOutbox::IdentityReceipt DurableReplyOutbox::AssignChannelSendIdentity(
+    const std::string& delivery_id, const std::string& account_id,
+    const std::string& anchor_msg_id, const std::string& payload_sha256, std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
+    IdentityReceipt receipt;
+    if (delivery_id.empty() || account_id.empty()) {
+        receipt.error_code = "identity_invalid_args";
+        return receipt;
+    }
+    const auto live = live_identities_.find(delivery_id);
+    if (live != live_identities_.end()) {
+        // 幂等/裁决合同(A06):live 身份在身——锚一致复用(结果未知的
+        // 重试恒同 (msg_id,msg_seq),平台去重兜底);锚变了必须先裁决。
+        if (live->second.identity.anchor_msg_id != anchor_msg_id) {
+            receipt.error_code = "identity_anchor_conflict";
+            return receipt;
+        }
+        if (!live->second.identity.payload_sha256.empty() &&
+            live->second.identity.payload_sha256 != payload_sha256) {
+            receipt.error_code = "identity_payload_mismatch";
+            return receipt;
+        }
+        receipt.ok = true;
+        receipt.identity = live->second.identity;
+        return receipt;
+    }
+    // 新发号:主动消息(空锚)不带 seq(0);被动消息按 (账号,锚) 单调 +1。
+    ChannelSendIdentity identity;
+    identity.anchor_msg_id = anchor_msg_id;
+    identity.payload_sha256 = payload_sha256;
+    std::string counter_key;
+    std::uint32_t counter_next = 0;
+    if (!anchor_msg_id.empty()) {
+        counter_key = IdentityKey(account_id, anchor_msg_id);
+        counter_next =
+            (next_seq_by_identity_.count(counter_key) > 0
+                 ? next_seq_by_identity_.at(counter_key)
+                 : 0) +
+            1;
+        identity.msg_seq = counter_next;
+    }
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeIdentityAssigned;
+    line["schemaVersion"] = 1;
+    line["deliveryId"] = delivery_id;
+    line["accountId"] = account_id;
+    line["msgId"] = anchor_msg_id;
+    line["msgSeq"] = identity.msg_seq;
+    line["payloadSha256"] = payload_sha256;
+    line["atMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        receipt.error_code = "outbox.append_failed";
+        return receipt;  // 账写不进:号未确认,内存计数不动(重试同号)
+    }
+    if (!counter_key.empty()) {
+        next_seq_by_identity_[counter_key] = counter_next;
+    }
+    live_identities_[delivery_id] = ChannelIdentityBookEntry{identity, now_ms};
+    // 项上的投影同步(item 字段是泵消费的视图;账行不可改,身份行为准)。
+    const auto item = items_.find(delivery_id);
+    if (item != items_.end()) {
+        item->second.target_reply_to_message_id = identity.anchor_msg_id;
+        item->second.target_msg_seq = identity.msg_seq;
+    }
+    receipt.ok = true;
+    receipt.identity = identity;
+    return receipt;
+}
+
+bool DurableReplyOutbox::RetireChannelSendIdentity(const std::string& delivery_id,
+                                                   const std::string& reason,
+                                                   std::int64_t now_ms) {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
+    if (live_identities_.count(delivery_id) == 0) {
+        return true;  // 幂等:无 live 身份即已裁决
+    }
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeIdentityRetired;
+    line["schemaVersion"] = 1;
+    line["deliveryId"] = delivery_id;
+    line["reason"] = reason;
+    line["atMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        return false;
+    }
+    live_identities_.erase(delivery_id);
+    const auto item = items_.find(delivery_id);
+    if (item != items_.end()) {
+        item->second.target_msg_seq = 0;  // 下一轮分配换新身份(账里留旧迹)
+    }
+    return true;
+}
+
+std::optional<DurableReplyOutbox::ChannelSendIdentity>
+DurableReplyOutbox::FindLiveChannelSendIdentity(const std::string& delivery_id) const {
+    const std::lock_guard<std::mutex> outbox_lock(mutex_);
+    const auto found = live_identities_.find(delivery_id);
+    if (found == live_identities_.end()) {
+        return std::nullopt;
+    }
+    return found->second.identity;
+}
+
 std::vector<ReplyOutboxItem> DurableReplyOutbox::PendingChannelItems() const {
     const std::lock_guard<std::mutex> outbox_lock(mutex_);
     std::vector<ReplyOutboxItem> out;
@@ -603,7 +764,15 @@ std::vector<ReplyOutboxItem> DurableReplyOutbox::PendingChannelItems() const {
             continue;
         }
         if (item.state == "pending" || item.state == "sending") {
-            out.push_back(item);
+            ReplyOutboxItem copy = item;
+            // live 身份覆盖视图(A06:重试读到的恒是冻结身份,不因内存
+            // item 字段旧值漂移)。
+            const auto live = live_identities_.find(id);
+            if (live != live_identities_.end()) {
+                copy.target_reply_to_message_id = live->second.identity.anchor_msg_id;
+                copy.target_msg_seq = live->second.identity.msg_seq;
+            }
+            out.push_back(std::move(copy));
         }
     }
     return out;

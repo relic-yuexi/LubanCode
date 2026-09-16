@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -101,6 +102,8 @@ struct Harness {
     std::mutex events_mutex;
     std::vector<GatewayEvent> events;
     std::atomic<bool> stop{false};
+    // A04 故障注入:>=0 时该 seq 的业务事件回 PersistFailed(-1 = 关)。
+    std::atomic<std::int64_t> persist_fail_at_seq{-1};
     std::unique_ptr<QqGatewaySession> session;
     std::unique_ptr<std::thread> thread;
     // url provider 可换(测 provider 侧失败:取令牌/查地址阶段)。测试线程
@@ -131,9 +134,15 @@ struct Harness {
         options.token_provider = []() -> std::expected<std::string, GatewayConnectError> {
             return std::string("TOKEN");
         };
-        options.on_event = [this](const GatewayEvent& event) {
+        options.on_event = [this](const GatewayEvent& event) -> GatewayEventAck {
             const std::lock_guard<std::mutex> lock(events_mutex);
             events.push_back(event);
+            // A04 测试口:按 seq 注入落盘失败(指定序号回 PersistFailed,
+            // 其余 Persisted)——durable 游标推进/Resume 补发的判据。
+            if (persist_fail_at_seq.load() >= 0 && event.seq == persist_fail_at_seq.load()) {
+                return GatewayEventAck::PersistFailed;
+            }
+            return GatewayEventAck::Persisted;
         };
         options.now_ms = []() { return platform::WallClockNowMs(); };
         options.backoff_scale = 0.001;  // 秒级阶梯压成毫秒
@@ -925,6 +934,220 @@ TEST_CASE("qq_gateway: 停止时发 Stopped 事件(RunLoop 收口)") {
     REQUIRE(harness.WaitForEvent(
         [](const GatewayEvent& e) { return e.kind == GatewayEvent::Kind::Stopped; }));
     CHECK(harness.session->state_name() == "stopped");
+}
+
+// ---------------------------------------------------------------------------
+// A04:落盘游标——"已收到"与"已安全接收的连续序号"两本账分开;PersistFailed
+// 不跨过失败事件,Resume 从 durable 游标起补发。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_gateway: A04 落盘失败不推进 durable 游标;Resume 从 durable 起") {
+    Harness harness;
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(
+        harness.shared,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-d"}})");
+    FakeTransport::PushIncoming(harness.shared,
+                                R"({"op":0,"s":2,"t":"C2C_MESSAGE_CREATE","d":{"id":"M2",)"
+                                R"("author":{"user_openid":"OPEN1"},"content":"a",)"
+                                R"("message_type":0}})");
+    harness.persist_fail_at_seq.store(3);  // s=3 落盘失败(磁盘满口径)
+    FakeTransport::PushIncoming(harness.shared,
+                                R"({"op":0,"s":3,"t":"C2C_MESSAGE_CREATE","d":{"id":"M3",)"
+                                R"("author":{"user_openid":"OPEN1"},"content":"b",)"
+                                R"("message_type":0}})");
+    harness.Start();
+    // s=3 没接住:可恢复故障断线(在线过 → Disconnected),稳定码明确。
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::Disconnected &&
+               e.error_code == "event_persist_failed";
+    }));
+    // 两本账分开:last_seq=3(确实收到过,心跳口径),durable=2(宿主只
+    // 接住到 2)。Resume 必须从 2 起——平台补发含 s=3,不丢信。
+    CHECK(harness.session->last_seq() == 3);
+    CHECK(harness.session->durable_seq() == 2);
+
+    // 第二轮:Resume 携带 durable=2;平台补发 s=3;这次接住了。
+    harness.persist_fail_at_seq.store(-1);
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(harness.shared, R"({"op":0,"s":3,"t":"RESUMED","d":{}})");
+    FakeTransport::PushIncoming(harness.shared,
+                                R"({"op":0,"s":4,"t":"C2C_MESSAGE_CREATE","d":{"id":"M3",)"
+                                R"("author":{"user_openid":"OPEN1"},"content":"b",)"
+                                R"("message_type":0}})");
+    REQUIRE(FakeTransport::WaitForSent(harness.shared, R"("op":6)"));
+    {
+        const std::lock_guard<std::mutex> lock(harness.shared->mutex);
+        bool checked = false;
+        for (const std::string& text : harness.shared->sent) {
+            if (text.find(R"("op":6)") != std::string::npos) {
+                const auto resume = nlohmann::json::parse(text);
+                CHECK(resume.at("d").at("session_id") == "sess-d");
+                CHECK(resume.at("d").at("seq") == 2);  // durable,不是 last_seq
+                checked = true;
+            }
+        }
+        CHECK(checked);
+    }
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::SessionResumed;
+    }));
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::C2cMessageCreate && e.seq == 4;
+    }));
+    // 等游标推进越过断点(接住 s=4 → durable=4)。
+    for (int i = 0; i < 200 && harness.session->durable_seq() < 4; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(harness.session->durable_seq() == 4);
+}
+
+TEST_CASE("qq_gateway: A04 未知 Dispatch 有明确终结记录——UnsupportedDispatch 转交宿主") {
+    Harness harness;
+    FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
+    FakeTransport::PushIncoming(
+        harness.shared,
+        R"({"op":0,"s":1,"t":"READY","d":{"session_id":"sess-u"}})");
+    FakeTransport::PushIncoming(harness.shared,
+                                R"({"op":0,"s":2,"t":"FRIEND_ADD","d":{"openid":"O1"}})");
+    harness.Start();
+    REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
+        return e.kind == GatewayEvent::Kind::UnsupportedDispatch;
+    }));
+    {
+        const auto events = harness.SnapshotEvents();
+        bool seen = false;
+        for (const auto& event : events) {
+            if (event.kind != GatewayEvent::Kind::UnsupportedDispatch) {
+                continue;
+            }
+            seen = true;
+            CHECK(event.detail == "FRIEND_ADD");
+            CHECK(event.seq == 2);
+        }
+        CHECK(seen);
+    }
+    // 宿主回 Persisted(默认)→ 游标推进;不静默吞也不卡住。
+    for (int i = 0; i < 200 && harness.session->durable_seq() < 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(harness.session->durable_seq() == 2);
+    CHECK(harness.session->last_seq() == 2);
+}
+
+// ---------------------------------------------------------------------------
+// A08:取消与所有权——外部 Cancel 打得到建立中的连接;连接轮收口后
+// CancelInFlight 不悬空(共享所有权/空指针两路都安全)。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 建立期阻塞的传输:Connect 卡到 Cancel 来(屏障复现"正在建立的局部
+// 连接"),Cancel 计数留观测。
+class BlockingConnectTransport final : public IGatewayTransport {
+public:
+    std::mutex mutex;
+    std::condition_variable entered;
+    bool connect_entered = false;
+    std::atomic<int> cancel_calls{0};
+    std::atomic<bool> cancelled{false};
+
+    std::expected<void, GatewayConnectError> Connect(const std::string&) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            connect_entered = true;
+        }
+        entered.notify_all();
+        // 阻塞直到外部 Cancel(或 5s 兜底——不许测试挂死)。
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(5'000);
+        while (!cancelled.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return std::unexpected(GatewayConnectError{
+            kStageConnecting, cancelled.load() ? "connect_cancelled" : "connect_refused",
+            cancelled.load() ? "cancelled while connecting" : "refused"});
+    }
+    std::expected<void, std::string> SendText(const std::string&) override { return {}; }
+    std::expected<std::string, WsError> ReadMessage(int) override {
+        return std::unexpected(WsError{WsError::Kind::Timeout, "script exhausted", 0});
+    }
+    void Cancel() override {
+        ++cancel_calls;
+        cancelled.store(true);
+    }
+    void Close(std::uint16_t, const std::string&) override {}
+};
+
+}  // namespace
+
+TEST_CASE("qq_gateway: A08 外部 Cancel 打断建立中的连接(共享所有权,不悬空)") {
+    auto transport = std::make_shared<BlockingConnectTransport>();
+    QqGatewaySession::Options options;
+    options.transport_factory = [transport]() -> std::unique_ptr<IGatewayTransport> {
+        // 仍按工厂合同返回 unique_ptr;测试侧另持 shared 观测(模拟"连接
+        // 线程独占 + 取消方共享"的所有权关系)。
+        class SharedHolder final : public IGatewayTransport {
+        public:
+            explicit SharedHolder(std::shared_ptr<BlockingConnectTransport> inner)
+                : inner_(std::move(inner)) {}
+            std::expected<void, GatewayConnectError> Connect(const std::string& url) override {
+                return inner_->Connect(url);
+            }
+            std::expected<void, std::string> SendText(const std::string& text) override {
+                return inner_->SendText(text);
+            }
+            std::expected<std::string, WsError> ReadMessage(int timeout_ms) override {
+                return inner_->ReadMessage(timeout_ms);
+            }
+            void Cancel() override { inner_->Cancel(); }
+            void Close(std::uint16_t code, const std::string& reason) override {
+                inner_->Close(code, reason);
+            }
+
+        private:
+            std::shared_ptr<BlockingConnectTransport> inner_;
+        };
+        return std::make_unique<SharedHolder>(transport);
+    };
+    options.gateway_url_provider =
+        []() -> std::expected<std::string, GatewayConnectError> {
+            return std::string("wss://gateway.test/ws");
+        };
+    options.token_provider =
+        []() -> std::expected<std::string, GatewayConnectError> { return std::string("T"); };
+    int connect_failed = 0;
+    options.on_event = [&connect_failed](const GatewayEvent& event) -> GatewayEventAck {
+        if (event.kind == GatewayEvent::Kind::ConnectFailed &&
+            event.error_code == "connect_cancelled") {
+            ++connect_failed;
+        }
+        return GatewayEventAck::Persisted;
+    };
+    options.now_ms = [] { return platform::WallClockNowMs(); };
+    options.backoff_scale = 0.001;
+    std::atomic<bool> stop{false};
+    QqGatewaySession session(std::move(options));
+    std::thread run([&session, &stop]() { session.RunLoop(&stop); });
+    // 屏障:等 Connect 真进了建立期再取消(旧行为:外部 Cancel 打不到
+    // 建立中的局部连接;新行为:共享所有权够得着)。
+    {
+        std::unique_lock<std::mutex> lock(transport->mutex);
+        transport->entered.wait_for(lock, std::chrono::seconds(2),
+                                    [&transport]() { return transport->connect_entered; });
+    }
+    REQUIRE(transport->connect_entered);
+    session.CancelInFlight();
+    for (int i = 0; i < 400 && transport->cancel_calls.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(transport->cancel_calls.load() >= 1);  // 取消送达建立中的连接
+    stop.store(true);
+    session.CancelInFlight();
+    run.join();
+    // 连接轮收口后再取消:shared_ptr 已清,空指针路径 no-op——不崩。
+    session.CancelInFlight();
+    CHECK(connect_failed >= 1);
 }
 
 }  // namespace lubancode::channel::qq
