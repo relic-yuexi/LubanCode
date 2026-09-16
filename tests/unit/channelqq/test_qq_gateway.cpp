@@ -541,9 +541,11 @@ TEST_CASE("qq_gateway: 连续 ACK 维持在线;停喂后按限断线(A09)") {
         }
         return count;
     };
-    // 见一拍喂一拍:1.5s 窗内每观察到新心跳就补一枚 ACK,连接必须全程
-    // running——ACK 清账有效,死线不误报。窗口按墙钟,不数拍数(饥饿下
-    // 拍数不稳,存活才是断言对象)。
+    // 见一拍喂一拍:先等首拍心跳(隐含 READY 已过、状态已 running——
+    // 网关线程刚起时状态还是 idle),再进 1.5s 喂拍窗:每观察到新心跳就
+    // 补一枚 ACK,连接必须全程 running——ACK 清账有效,死线不误报。窗口
+    // 按墙钟,不数拍数(饥饿下拍数不稳,存活才是断言对象)。
+    REQUIRE(FakeTransport::WaitForSent(harness.shared, R"("op":1)"));
     int acked = 0;
     const auto deadline = platform::WallClockNowMs() + 1'500;
     while (platform::WallClockNowMs() < deadline) {
