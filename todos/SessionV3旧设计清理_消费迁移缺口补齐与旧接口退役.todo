@@ -336,11 +336,11 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 状态：verified
 实现：分支 worktree-agent-t15b-lifecycle——src/trajectory/session_manager.hpp/.cpp（GuardAdminTargetPath 路径门/ReadV3ExecutionFacts 执行状态推导/ArchiveV3SessionDir+UnarchiveV3SessionDir v3 归档分派/ScanSessionArchiveState lifecycle 折归档/ScanIncomingSessionRefs 引用清册+ScanStreamForRefs 行级宽松提取/WriteDeleteIntent+WriteAdminResultFor 四段拆分/RecoverPendingDeletes 删除续办/SessionTombstone schema 2 加 first_event_hash+event_count/RunDirLifecycleOp 撞名重试/RecoverWorkspace 挂续办）、src/trajectory/session_index.cpp（SessionFingerprint.admin_ms+ScanV3Session 折 archived——执行态与管理态分列,索引重建仍读回）、tests/unit/trajectory/test_session_admin_v3_lifecycle.cpp
 生产入口：CLI 顶层 archive|unarchive|delete、/archive /delete 会话命令、SessionCommandService/AppServer 搬删命令（同走 DeleteSessionDir/ArchiveSessionDir/UnarchiveSessionDir 自由函数）、启动恢复器 RecoverWorkspace
-验证：unit.trajectory.test_session_admin_v3_lifecycle 十一案（归档正文逐字节不变+索引只归档口可见+幂等不落新笔+索引重建读回/活锁/未封口崩溃残留/坏账/两账并存四拒/resume 链引用阻挡点名引用方/memory 溯源阻挡/跨目录子账引用行级提取/tombstone 首/末 hash+行数+completed 收据/intent 断点不代删可重删/tombstone 断点续删补收据/remove 断点补收据/无 tombstone 无目录异常现场/删后索引残留自愈+ProbeResumeSource 拒复执行/软链接拒绝（POSIX）+单段名）;PR CI rollup conclusion=success（链接随 PR 补记）
+验证：unit.trajectory.test_session_admin_v3_lifecycle 十一案（归档正文逐字节不变+索引只归档口可见+幂等不落新笔+索引重建读回/活锁/未封口崩溃残留/坏账/两账并存四拒/resume 链引用阻挡点名引用方/memory 溯源阻挡/跨目录子账引用行级提取/tombstone 首/末 hash+行数+completed 收据/intent 断点不代删可重删/tombstone 断点续删补收据/remove 断点补收据/无 tombstone 无目录异常现场/删后索引残留自愈+ProbeResumeSource 拒复执行/软链接拒绝（POSIX）+单段名）;PR #107 CI rollup conclusion=success（2026-09-16,头提交 da9ea3c2,run 35088354791;首轮两红分别为测试册误调 expected 值的 reset()、RunDirLifecycleOp 撞名重试误吞 v2 同毫秒重复管理的 intent_exists 抢占语义——后者撤重试恢复原语义,v3 幂等本就靠 ScanSessionArchiveState 短路,均非生命周期合同缺陷）
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）;软链接路径门断言只在 POSIX 腿跑真 symlink（Windows 建链要特权,#ifndef _WIN32 排除,Windows 腿只验代码路径不误伤普通目录）;v2 删除路的 incoming refs 核验首版不挂（退役在途）;user 层记忆（home 根跨 workspace）的溯源引用不在 workspace 作用域扫描内;archive 对"锁死透（stale）+未封口"场按 archive_rejected 拒——半场账仍走 resume/verify 收口,不拿归档遮
 旧依赖：v2 归档/删除的 session.json 状态机老路保留（旧档消费,退役归 T01/T02-B）;v3 场自身零 session.json 依赖
 文档：本单 §八 T15-B 六勾证据;v3-consumer-inventory 无新行（非消费者迁移）
-销项日期：待 PR 判绿后填写
+销项日期：2026-09-16（CI 判绿口径,PR #107 头提交 da9ea3c2;软链接真链断言只 POSIX 腿跑等尾巴见『失败/未验』栏）
 ```
 
 ### T02 / V3-LEGACY-02：先断消费者，再撤旧类型
