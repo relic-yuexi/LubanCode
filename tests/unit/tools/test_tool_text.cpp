@@ -58,6 +58,7 @@ using lubancode::tools::AgentMessageTool;
 using lubancode::tools::AgentTool;
 using lubancode::tools::AskUserTool;
 using lubancode::tools::BackgroundOutputTool;
+using lubancode::tools::EditFileTool;
 using lubancode::tools::ReadFileTool;
 using lubancode::tools::RunCommandTool;
 using lubancode::tools::SearchTool;
