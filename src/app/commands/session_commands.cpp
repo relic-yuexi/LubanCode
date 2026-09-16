@@ -645,7 +645,9 @@ void PrintV3CompactDryRun(const lubancode::runtime::V3CompactRunResult& result,
     }
     out << "\n";
     out << "  保留尾部: " << result.retained_messages << " 条消息(受保护轮 "
-        << (result.protected_turns.empty() ? std::string("无") : result.protected_turns.size())
+        << (result.protected_turns.empty()
+                ? std::string("无")
+                : std::to_string(result.protected_turns.size()))
         << " 只)\n";
     if (!result.step_scope.empty()) {
         out << "  容量恢复会动当前轮闭合旧 step: " << result.step_scope.dump() << "\n";
