@@ -1402,7 +1402,9 @@ TEST_CASE("v3 重启重投不生成新身份:collector 每只批 id 只见一次
     }
     REQUIRE_FALSE(batch_seen.empty());
     for (const auto& [batch_id, count] : batch_seen) {
-        CHECK_MESSAGE(count == 1, "同一 batch id 重复发送: " + batch_id);
+        // doctest 的 MessageBuilder 不吃 const char* + std::string 拼接,先拼好。
+        const std::string note = "同一 batch id 重复发送: " + batch_id;
+        CHECK_MESSAGE(count == 1, note.c_str());
     }
 }
 
