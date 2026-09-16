@@ -306,15 +306,22 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::C2cMessageCreate;
     }));
-    // 关键断言:收到补发不等于恢复完成——此刻不得报 connected/SessionResumed。
-    CHECK(harness.session->state_name() == "resuming");
+    // 关键断言:收到补发不等于恢复完成——此刻不得报 connected/SessionResumed;
+    // 阶段事件里能看到独立的"恢复中"(resuming),不用状态采样断言(退避间歇
+    // 会采到 backoff)。
     {
         const std::vector<GatewayEvent> events = harness.SnapshotEvents();
+        bool saw_resuming_stage = false;
         for (const auto& event : events) {
             CHECK_FALSE(event.kind == GatewayEvent::Kind::SessionResumed);
             CHECK_FALSE(event.kind == GatewayEvent::Kind::StageChanged &&
                         event.stage == kStageConnected);
+            if (event.kind == GatewayEvent::Kind::StageChanged &&
+                event.stage == kStageResuming) {
+                saw_resuming_stage = true;
+            }
         }
+        CHECK(saw_resuming_stage);
     }
     // RESUMED 到达:恢复完成,connected。
     FakeTransport::PushIncoming(harness.shared, R"({"op":0,"s":8,"t":"RESUMED","d":{}})");
