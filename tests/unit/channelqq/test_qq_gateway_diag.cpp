@@ -201,6 +201,10 @@ TEST_CASE("qq_gateway_diag: 分类——trace 走白名单诊断头兜底,值超
     const auto from_header = ClassifyGatewayHttpFailure(400, "not json",
                                                         {{"x-trace-id", "tid-9"}});
     CHECK(from_header.detail.find("trace=tid-9") != std::string::npos);
+    // 头名大小写不敏感(HTTP 头名本就不分大小写;直调/假件给原始大小写也认)。
+    const auto mixed_case = ClassifyGatewayHttpFailure(400, "not json",
+                                                       {{"X-Trace-Id", "tid-mixed"}});
+    CHECK(mixed_case.detail.find("trace=tid-mixed") != std::string::npos);
     // 非 trace 名不在白名单,不进诊断(头投影在适配层已白名单,这里防御)。
     const auto no_leak = ClassifyGatewayHttpFailure(400, "not json", {{"server", "nginx"}});
     CHECK(no_leak.detail.find("nginx") == std::string::npos);

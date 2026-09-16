@@ -133,9 +133,17 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
             trace_id = parsed.at("trace_id").get<std::string>();
         }
     }
-    // Retry-After:只认纯数字秒(HTTP-date 不解析);诊断头投影里的小写名。
+    // Retry-After:只认纯数字秒(HTTP-date 不解析)。头名大小写不敏感
+    //(HTTP 头名本就不分大小写;生产链路 MakeHttpFunc 投影时已小写化,
+    // 这里自身再归一,直调/假件给原始大小写也认得)。
     for (const auto& [name, value] : diagnostic_headers) {
-        if (name == "retry-after" && out.retry_after_ms == 0) {
+        std::string lower_name = name;
+        for (char& c : lower_name) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (lower_name == "retry-after" && out.retry_after_ms == 0) {
             if (!value.empty() &&
                 value.find_first_not_of("0123456789") == std::string::npos) {
                 const long long seconds = std::strtoll(value.c_str(), nullptr, 10);
@@ -143,7 +151,7 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
                     out.retry_after_ms = seconds * 1000;
                 }
             }
-        } else if (trace_id.empty() && name.find("trace") != std::string::npos &&
+        } else if (trace_id.empty() && lower_name.find("trace") != std::string::npos &&
                    !value.empty()) {
             trace_id = value;  // body 没给 trace_id 时用白名单头兜底
         }
