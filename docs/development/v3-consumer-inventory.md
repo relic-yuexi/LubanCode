@@ -9,10 +9,12 @@
 
 一册测试真实所走的格式路径由三件事决定,核对按此顺序:
 
-1. 进程环境:`tests/CMakeLists.txt` 注册循环给每册统一注入
-   `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0`(全局钉 0,保 v2 老册);
-2. 册内覆盖:引用该变量的 7 册用 `EnvGuard`/`_putenv` 在进程内改写
-   (构造设值、析构 unset);
+1. 进程环境:`tests/CMakeLists.txt` 注册循环按 `LUBANCODE_TESTS_V3_DEFAULT_BOOKS`
+   撤 0 清单分账(T16 批起)——清单内册(已迁域,42 册)不注入格式变量
+   跑生产默认,清单外仍统一注入 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0`
+   保 v2 老册;
+2. 册内覆盖:引用该变量的册用 `EnvGuard`/`EnvUnset`/`_putenv` 在进程内
+   改写(构造设值/摘除、析构还原),册内覆盖优先于进程环境;
 3. 是否经建场开关:`NewSessionV3WriteEnabled` 只在
    `SessionManager::LaunchSession` 与 resume/clear 分派两处读取;
    绕过 SessionManager 直接用 `V3Writer`/`ReadV3Ledger` 的册与开关无关。
@@ -20,47 +22,67 @@
 核对命令(只读,不 build):
 
 ```bash
-ctest --test-dir build/release -C Release -N   # 实际注册名先对表
+python scripts/tests/ctest_format_registry.py        # 全表(册×环境×证据)
+ctest --test-dir build/release -C Release -N         # 实际注册名对表
 grep -rl "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS" tests/unit tests/integration
-grep -rl "NewSessionV3WriteEnabled" tests/unit tests/integration
 ```
 
-## 二、测试分类表(T16,B1 时点)
+## 二、测试分类表(T16;B1 建册,T16 批撤 0 分账落地)
 
-分类四档:**default-v3**(不设变量走产品默认)、**explicit-v3**(册内
-EnvGuard 显式开)、**legacy-only**(吃全局 0 的 v2 行为断言)、
-**format-neutral**(不经会话建场/格式开关)。
+分类四档:**default-v3**(ctest 不注入格式变量,环境=生产默认)、
+**explicit-v3**(册内 EnvGuard 显式开)、**legacy-only**(吃注入 0 的
+v2 行为断言)、**format-neutral**(不经会话建场/格式开关)。
 
-| 册(环境变量相关全集) | 档 | 说明 |
+册名一律用 CTest 注册名(`unit.<域>.<stem>`/`integration.<域>.<stem>`,
+**stem 不带 `test_` 前缀**——文件 `test_x.cpp` 注册为 `…x`;各批结案
+记录里带前缀的写法是口语形态)。
+
+完整分账表(551 册)由机器产出,不再手工维护:
+
+```bash
+python scripts/tests/ctest_format_registry.py            # 打印全表
+python scripts/tests/ctest_format_registry.py --check    # CI 门
+```
+
+判定按三件事归证据(不以目录名代替真实所走路径):ctest 注入(解析
+`tests/CMakeLists.txt` 的 `LUBANCODE_TESTS_V3_DEFAULT_BOOKS` 撤 0 清单)、
+册内覆盖(guard 1/guard 0/unset 的引用计数)、是否经建场口
+(`TrajectorySessionLedger::Open`/`LaunchSession`/`SpawnSubagent`)。
+
+### T16 批(2026-09-16)撤 0 分账:42 册先行
+
+ctest 注入的 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 按单 §九 T16 勾三
+口径"随各批迁移"逐步撤——本批只动已迁完域(usage/telemetry/insights/
+memory 桥/lifecycle/compact/T11 + 默认冒烟)。撤 0 = ctest 不再注入该
+变量,册跑真实产品默认(未设=开 v3)。CI 门(registry --check)保证清单
+内每册"册内自证格式或完全不经建场口",防笔误把 v2 断言册推上 v3。
+
+| 域 | 册(ctest 注册名) | 撤 0 依据(逐册证据) |
 | --- | --- | --- |
-| `unit.trajectory_v3.test_v3_default_smoke`(B1 新增) | default-v3 | 册内 unset 变量,真入口链(ledger 开场/turn/封口/SessionManager 建场)走默认 v3 |
-| `unit.trajectory_v3.test_v3_write_wiring` | explicit-v3 + 守门 | 多数案 EnvGuard("1");末案 unset 钉"未设=开"、显式 0 回 v2 |
-| `unit.trajectory_v3.test_v3_clear_switch` | explicit-v3 | EnvGuard("1") 为主;一案 EnvGuard("0") 钉 v2 老路回归 |
-| `unit.trajectory_v3.test_v3_resume_chain` | explicit-v3 | EnvGuard("1") |
-| `unit.trajectory_v3.test_v3_export_copy_projection` | explicit-v3 | EnvGuard("1") |
-| `unit.trajectory_v3.test_v3_stream_wiring` | explicit-v3 | EnvGuard("1") |
-| `unit.trajectory_v3.test_v3_verify_doctor_tree` | explicit-v3 | EnvGuard("1") |
-| `unit.app.test_session_service` | legacy-only + 对照 | 含 EnvGuard("0") 显式钉 v2 的服务面用例 |
-| `unit.insights.test_insights_v3_pipeline`(T14 新增) | explicit-v3(防御) | 册内 EnvGuard("1");夹具直写 V3Writer(format-neutral 语义),断言 insights 管线按账面格式分派不按环境变量 |
-| 其余 435 册 | format-neutral 或 legacy-only | 不引用开关变量;与建场相关的册在全局 0 下跑 v2 形状(具体哪些册的断言绑定 v2 行为,随 B2 各域迁移逐册归档,不在 B1 一口吞) |
+| usage(T06,#53) | `unit.accounting.pricing_cost`/`usage_aggregate`/`usage_contracts`/`v3_session_usage`、`unit.trajectory_v3.v3_usage_owner_hooks` | 5 册均不经建场口(夹具直写 V3Writer/价目表);撤 0 无行为差 |
+| telemetry(T07,#102) | `unit.telemetry.telemetry_*` 12 册、`integration.telemetry.telemetry_otlp_export` | 13 册均不经建场口(夹具直写盘账) |
+| insights(T14,#101) | `unit.insights.*` 13 册 | 均不经建场口;`insights_v3_pipeline` 另册内 guard1×10(防御,断言按账面格式分派不按环境变量) |
+| memory 桥(T08,#105) | `unit.trajectory_v3.v3_memory_recall_bridge` | 册内全案 guard1(7 案);v2 老册 `unit.app.memory_ledger_bridge` 是旧路回归册,**不在撤 0 范围** |
+| lifecycle(T15,#107) | `unit.trajectory.session_admin_v3_delete`/`session_admin_v3_lifecycle` | 册内全案 guard(v3 案钉 1×5/×13,v2 回归案钉 0×1);撤 0 无行为差 |
+| compact(T12,#109) | `unit.trajectory_v3.v3_compact`/`v3_compact_block`/`v3_compact_gates`/`v3_compact_runtime` | `v3_compact`/`runtime` writer 直驱不经建场;`block`(guard1×3+guard0×1)、`gates`(guard1×2,第三案纯函数)册内自证 |
+| T11 五域(#108) | `unit.trajectory_v3.v3_t11_title`/`v3_t11_approval_env`/`v3_t11_verification_budget` | 3 册册内全案 guard1 |
+| 默认冒烟(B1/T16) | `unit.trajectory_v3.v3_default_smoke` | 册内 EnvUnset×3 摘变量走真入口;本批增子代理与 CLI compact 管理入口两案(勾二补齐) |
 
-**v3 域内不经开关的册**(直接 V3Writer/ReadV3Ledger,format-neutral):
-`test_v3_compact_block`(B1 新增,EnvGuard("1")/("0") 只为场格式)、
-`test_v3_shared_fixtures`(B1 新增)、`test_v3_compact_runtime`、
-`test_v3_compact`、`test_v3_writer`、`test_v3_envelope_schema`、
-`test_v3_hooks`、`test_v3_preview_reduction`、`test_v3_reader_*`、
-`test_v3_restored_history_view`、`test_v3_result_store`、
-`test_v3_session_resume_bridge`、`test_v3_streaming`、`test_v3_subagent`、
-`test_v3_system_chain`、`test_v3_tool_action`、`test_v3_transcript_page`、
-`test_v3_usage_owner_hooks`、`test_v3_fixtures`。
+撤 0 后上述册在 CI 无注入环境下全绿(本批 PR 的 CI 记录为准)。后续批次
+迁完新域(gateway/app_server/goal/channel 等 EnvGuard 册所在域)再扩
+清单;B4(T01 收口)关掉全局 0 注入时,清单、CI 门与分账机制一并退役。
 
-**trajectory 域**(v2 Journal 语义册):`test_session_admin_v3_delete`
-(B1 新增,含 v2 老门回归案)、`test_session_manager_*`、
-`test_session_lock`、`test_session_status_lifecycle`、`test_session_verifier`
-等为 legacy-only 或 format-neutral 混合;B4 撤全局 0 前须逐册归档。
+### 显式格式册(explicit-v3/legacy-only 对照,未撤注入)
 
-撤全局 0 的门(B4):上表"legacy-only"逐册或迁或改断言,不许一刀换 1
-后删失败册(单子 §3.3)。
+`unit.trajectory_v3.v3_write_wiring`(多数案 guard1,末案 unset 钉
+"未设=开"、显式 0 回 v2)、`v3_clear_switch`/`v3_resume_chain`/
+`v3_export_copy_projection`/`v3_stream_wiring`/`v3_verify_doctor_tree`
+(guard1 为主)、`unit.app.session_service`(含 guard0 显式钉 v2 的服务面
+用例)、`unit.app_server.operation_idempotency`(v2 案钉 0、v3 案钉 1,
+T16 批另增未设变量默认-v3 冒烟案)、`unit.gateway.gateway_automation_v1/v2`、
+`unit.app.goal_v3_commands`、`unit.app_server.app_server_detached` 等——
+册名与证据以 registry 脚本产出为准。其余册 format-neutral 或 legacy-only
+混合;B4 撤全局 0 前须逐册归档,不许一刀换 1 后删失败册(单子 §3.3)。
 
 ## 三、消费者清册(T00;T02-A 迁移依据,B4 验空)
 
@@ -109,8 +131,9 @@ subagent_child)由 python 生成器产出、`scripts/validate_trajectory_v3.py`
 
 | 任务 | 落点 | 测试 |
 | --- | --- | --- |
-| T12-A(compact 投影失败执行阻断,P0) | `V3SessionBooks::execution_blocked`(ledger 会话级);`V3RequestPrepared` 准入门;`BlockV3Execution`/`V3ExecutionBlocked`;`RunV3CompactBranch` 拆 `persisted_applied`/`runtime_ready` 两笔账 | `unit.trajectory_v3.test_v3_compact_block` |
-| T15-A(v3 删除封口门,P0) | `DeleteSessionDir` v3 分派(验卷 + session.ended 封口 + 末行 hash 入 tombstone);格式歧义拒;`LooksLikeV3SessionStream`/`DeleteV3SessionDir` | `unit.trajectory.test_session_admin_v3_delete` |
-| T16 默认-v3 冒烟 | 见 §二表首行 | `unit.trajectory_v3.test_v3_default_smoke` |
+| T12-A(compact 投影失败执行阻断,P0) | `V3SessionBooks::execution_blocked`(ledger 会话级);`V3RequestPrepared` 准入门;`BlockV3Execution`/`V3ExecutionBlocked`;`RunV3CompactBranch` 拆 `persisted_applied`/`runtime_ready` 两笔账 | `unit.trajectory_v3.v3_compact_block` |
+| T15-A(v3 删除封口门,P0) | `DeleteSessionDir` v3 分派(验卷 + session.ended 封口 + 末行 hash 入 tombstone);格式歧义拒;`LooksLikeV3SessionStream`/`DeleteV3SessionDir` | `unit.trajectory.session_admin_v3_delete` |
+| T16 默认-v3 冒烟(B1) | 见 §二表首行 | `unit.trajectory_v3.v3_default_smoke` |
+| T16 撤 0 分账(T16 批) | `tests/CMakeLists.txt` 的 `LUBANCODE_TESTS_V3_DEFAULT_BOOKS` 清单 + 注册循环分账;`scripts/tests/ctest_format_registry.py`(分账表 + CI 门);`scripts/tests/report_baseline.py`(勾五基线记账,CI 步骤消费);default_smoke 增子代理/CLI compact 管理入口两案、app_server operation_idempotency 增未设变量冒烟案 | 见 §二"撤 0 分账"表 |
 | T00 夹具/清册 | 本文档 + `unit.trajectory_v3.test_v3_shared_fixtures` | — |
-| T14(Insights 接入 v3,B2) | `src/insights/v3_facts.*`(领域读模型)、integrity_gate/prompt_auditor/friction_classifier/session_analyzer 的 v3 半场、summary format/limitations、EvidenceItem.seq、redaction allowlist | `unit.insights.test_insights_v3_pipeline`(gate 分型/partial/摩擦 v3/prompt v3 规则/分析去重/字节稳定/schema 往返) |
+| T14(Insights 接入 v3,B2) | `src/insights/v3_facts.*`(领域读模型)、integrity_gate/prompt_auditor/friction_classifier/session_analyzer 的 v3 半场、summary format/limitations、EvidenceItem.seq、redaction allowlist | `unit.insights.insights_v3_pipeline`(gate 分型/partial/摩擦 v3/prompt v3 规则/分析去重/字节稳定/schema 往返) |

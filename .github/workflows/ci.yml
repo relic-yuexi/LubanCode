@@ -110,6 +110,17 @@ jobs:
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/generate_provider_catalog.py --check
 
+      # T16(V3-ADD-02,SessionV3 清理单 §九):CTest 册 × 会话格式分账门。
+      # tests/CMakeLists.txt 的撤 0 清单(已迁域册不再注入
+      # LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0)逐册核验:清单册须真实存在,
+      # 且册内自证格式(EnvGuard/EnvUnset)或完全不经建场口——防笔误把
+      # v2 断言册悄悄推上 v3。纯读源码,不依赖构建。
+      - name: Check test format registry (T16)
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/tests/ctest_format_registry.py --check
+
       # 随包 ripgrep(SearchTool 内置 Ripgrep 后端迁移单 P0-5):三平台各自
       # 按 committed manifest 下载固定版本资产、重算 SHA-256 对账、跑
       # --version 精确校版本——这一步既是集成测试的 rg 来源(LUBANCODE_
@@ -163,10 +174,31 @@ jobs:
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
 
+      # T16 勾五:跑测试前把"这一轮跑的到底是什么"记成机器可读的一笔账
+      #(版本/HEAD/工作区 diff 指纹/夹具树 hash/构建产物/环境)。产物随
+      # 测试证据上传;基线更新时对旧账 --compare 点名变化,不复用旧通过
+      # 数字。git 不可用时如实记 unavailable,不伪装干净基线。
+      - name: Record test baseline (T16)
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/tests/report_baseline.py \
+            --out build/test-evidence/test-baseline.json \
+            --build-dir build \
+            --label "${{ matrix.name }} ${{ github.sha }}"
+
       - name: Test
         id: test
         shell: bash
         run: ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+
+      - name: Upload test evidence (T16 baseline)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-baseline-${{ matrix.name }}
+          path: build/test-evidence/test-baseline.json
+          if-no-files-found: warn
 
       # 外壳冒烟挂 windows 腿(打包发布账 §四.3:发布前回归必跑),复用
       # 上面现建的 exe,不另编:静态册验两家壳的静态账(触屏折算 +

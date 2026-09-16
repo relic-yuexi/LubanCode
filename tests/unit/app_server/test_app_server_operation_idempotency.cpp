@@ -60,6 +60,26 @@ struct EnvGuard {
     const char* name_;
 };
 
+// T16(V3-ADD-02):册内摘变量——钉"完全不设"的产品默认态(ctest 注入与
+// CI 父环境的意外设置都清掉),析构还原为未设。
+struct EnvUnset {
+    explicit EnvUnset(const char* name) : name_(name) {
+#ifdef _WIN32
+        _putenv((std::string(name_) + "=").c_str());
+#else
+        unsetenv(name_);
+#endif
+    }
+    ~EnvUnset() {
+#ifdef _WIN32
+        _putenv((std::string(name_) + "=").c_str());
+#else
+        unsetenv(name_);
+#endif
+    }
+    const char* name_;
+};
+
 // 按脚本吐事件的假后端(test_app_server_turn.cpp 同款)。
 class SharedScriptBackend : public api::Backend {
 public:
@@ -493,6 +513,64 @@ TEST_CASE("operation/read 重启后(v3):按原键找回终态与稳定正文,零
     CHECK(dedup["duplicate"] == true);
     CHECK(dedup["active"] == false);
     CHECK(revived.server->active_thread_count() == 0);
+}
+
+// ---------------------------------------------------------------------------
+// T16(V3-ADD-02,SessionV3 清理单 §九 勾二):AppServer 入口的默认-v3 冒烟。
+// 上一案用 EnvGuard("1") 显式开;本案完全不设变量——产品默认(未设=开)
+// 下 thread/start 建的场就是 v3,重启 operation/read 按账面 v3 找回正文。
+// EnvGuard 的针对性格式测试(v2 钉 0 案、v3 钉 1 案)照旧保留,不互替。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("默认-v3 冒烟(T16): 未设格式变量 AppServer 建场即 v3,重启找回正文") {
+    EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    const std::string sessions_dir = MakeTempDir("lubancode_test_op_read_default_v3");
+    const std::string cwd = (tools::Utf8ToPath(sessions_dir) / "ws").generic_string();
+    std::error_code ec;
+    std::filesystem::create_directories(tools::Utf8ToPath(cwd), ec);
+    const std::string model_text = "默认态 AppServer 的最终答复。";
+
+    std::string thread_id;
+    {
+        TestHarness harness(sessions_dir);
+        harness.scripts = {TextOnlyScript(model_text)};
+        std::string error_code;
+        nlohmann::json params;
+        params["cwd"] = cwd;
+        params["clientOperationId"] = "CREATE-DEFAULT-V3";
+        const nlohmann::json start = harness.server->HandleThreadStart(params, error_code);
+        REQUIRE(error_code.empty());
+        thread_id = start["threadId"];
+        const nlohmann::json completed =
+            harness.Turn(thread_id, "问到底", "OP-DEFAULT-V3-1", error_code);
+        REQUIRE(error_code.empty());
+        REQUIRE(completed["status"] == "success");
+        std::string stop_error;
+        harness.server->HandleThreadStop(thread_id, stop_error);
+    }
+
+    // 盘上形状:默认态建的是 v3 场——只有 <id>.jsonl,v2 的 main.jsonl/
+    // session.json 两件都不在。
+    const std::filesystem::path session_dir = SessionDirOf(sessions_dir, thread_id);
+    REQUIRE(!session_dir.empty());
+    CHECK(std::filesystem::exists(session_dir / tools::Utf8ToPath(thread_id + ".jsonl")));
+    CHECK_FALSE(std::filesystem::exists(session_dir / "main.jsonl"));
+    CHECK_FALSE(std::filesystem::exists(session_dir / "session.json"));
+
+    // 重启找回:账面格式 v3、稳定正文可读、查询零执行(与 v3 钉 1 案
+    // 同一副骨架,只换环境——两案合起来钉"显式 1 与未设同走 v3")。
+    TestHarness revived(sessions_dir);
+    std::string read_error;
+    const nlohmann::json read =
+        revived.server->HandleOperationRead(thread_id, "OP-DEFAULT-V3-1", "", read_error);
+    REQUIRE(read_error.empty());
+    CHECK(read["status"] == "final");
+    CHECK(read["sourceFormat"] == "v3");
+    REQUIRE(read.contains("finalMessages"));
+    REQUIRE(read["finalMessages"].is_array());
+    REQUIRE(read["finalMessages"].size() == 1);
+    CHECK(read["finalMessages"][0]["text"] == model_text);
+    CHECK(revived.ModelCalls() == 0);
 }
 
 TEST_CASE("operation/read 账态注入:终态行被抹,回 unknown 不冒充,查询不触发执行") {
