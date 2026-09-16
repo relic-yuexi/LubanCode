@@ -317,7 +317,7 @@ TEST_CASE("qq_gateway_diag: 信任根预检失败——阻断 token/gateway 请�
     DiagHarness harness("trust_blocked");
     auto options = harness.MakeOptions();
     options.trust_load_block_code = kTlsCodeTrustStoreLoadFailed;
-    options.trust_load_block_detail = "TLS 信任根不可用: 显式信任锚含 1 张坏证(测试注入)";
+    options.trust_load_block_detail = "TLS 信任根不可用(装配预检): 显式信任锚含 1 张坏证(测试注入)";
     harness.adapter = std::make_unique<QqBotAdapter>(std::move(options));
     harness.Start();
     // 网关线程在跑(退避轮转),但一次 token/gateway 请求都不发——无效
