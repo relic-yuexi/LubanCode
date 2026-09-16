@@ -51,7 +51,7 @@
 - [x] 接收回调返回落盘结果。写盘失败时停止推进连续游标，进入可恢复故障；不得跨过失败事件。未知或不支持事件也要有明确终结记录。
 - [x] 注入磁盘满、权限拒绝、写后未通知宿主就崩溃；重连补发后不丢消息，重复投递不重复运行 Agent。
 
-记账（2026-09-17，本 PR）：
+记账（2026-09-17，PR #113，CI 头提交 4b28710c rollup 绿）：
 - 符号：`GatewayEventAck{Persisted,PersistFailed}`（qq_gateway.hpp，on_event 新签名——鉴权循环补发路径消费同一签名，A02 工VV 侧对齐）；`QqGatewaySession::durable_seq()/AcceptDispatch()/EmitEvent()`；`GatewayEvent::Kind::UnsupportedDispatch`；`QqBotAdapter::HandleGatewayEvent` 返回回执、`unsupported_dispatch_count()`（Health 投影 `unsupported_events`）；spool 故障注入口 `QqSpoolStore::SetAppendFaultForTest`/`QqBotAdapter::SetSpoolAppendFaultForTest`。
 - 语义：`last_seq_`=已收到（心跳口径，BuildHeartbeat 不变）；`durable_seq_`=宿主回 Persisted 才推进（BuildResume 改走 durable）；PersistFailed 按 `event_persist_failed` 稳定码断线退避，Resume 补发含失败事件；READY/RESUMED 网关自身落账视为安全；判无效（map 失败）与未建模事件=明确终结记录（Fatal 留痕/计数），不阻塞游标。
 - 测试：unit.channelqq.test_qq_gateway（`A04 落盘失败不推进 durable 游标;Resume 从 durable 起`、`A04 未知 Dispatch…UnsupportedDispatch`）；unit.channelqq.test_qq_adapter（`A04 spool 落盘失败——PersistFailed 断线留根因,Resume 补发不丢信`、`A04 未建模 Dispatch…Health 投影计数`）。磁盘满经 spool 注入口；”写后未通知宿主就崩溃”由 spool 重启重投+宿主 provider_event_id 去重承担（既有册 spool 重启重投/来信重放只跑一次模型）。
@@ -66,7 +66,7 @@
 - [x] 明确去重响应与本地已发内容的对应关系，不因碰巧撞号就把另一条回复标成送达。
 - [x] 在”平台已收、HTTP 回包丢””适配器已回、宿主未记””重启后重投”三个窗口注入故障；QQ 只见一份，Agent 只运行一次。
 
-记账（2026-09-17，本 PR）：
+记账（2026-09-17，PR #113，CI 头提交 4b28710c rollup 绿）：
 - 符号：outbox 持久身份账 `DurableReplyOutbox::AssignChannelSendIdentity/RetireChannelSendIdentity/FindLiveChannelSendIdentity`（账行 `msgseq.assigned`/`msgseq.retired`，PowerLoss 先账后网络；发号键=(账号,锚)，重启重放不归零）；桥协议 `channel.send` 增 `msg_seq` 字段（bridge_protocol 字段表）；`ChannelManager::ChannelSendRequest::msg_seq`；`C2cSendRequest::msg_seq` 缺省改 0（>0 权威直达、0=未指定走 `AssignSeq` 内存兜底——仅非 outbox 调用方）；`QqMessageSender::SendC2c` 不再覆盖宿主号、成功后不清宿主冻结账。EnqueueChannel 不再写 ordinal 顶替的 targetMsgSeq；旧账行重开时折成 live 身份并入发号计数（升级不撞号）。审批卡（DriveApprovalFlow）同用分配器。
 - 撞号与去重对应：每 delivery 每 anchor 唯一号；同锚跨回复（提示/回执/分段/附件）单调递增——40054005 去重回执按 delivery_id 结算（manager settled_deliveries），不再可能错挂另一条。
 - 测试：unit.gateway.test_reply_outbox_channel（`身份分配:同锚跨 delivery 单调发号…`、`身份分配:重开发号从账重放不归零;旧账 ordinal 顶替值折成身份`、`身份分配:账写不进 → 不发号`）；unit.runtime.test_channel_work_pump（`A05 msg_seq 冻结:分段各占一号;限频后进程重启重投沿用原号`=窗口三、`A05 msg_seq 发号:同来信多段与第二条回复各占一号`）；窗口一（平台已收回包丢）由 `超时未知:无回执 → delivery_unknown` 承担（恰发一次）；窗口二（适配器已回宿主未记）由 `崩溃窗口 3` 承担；适配器穿桥面 unit.channelqq.test_qq_adapter `A05 msg_seq 穿桥直达`。
@@ -79,7 +79,7 @@
 - [x] 首次发送前选锚并落盘；结果未知的重试保持原请求身份。确需改锚补投，须先裁决旧尝试，再建立可追溯的新投递，不偷换同一 delivery。
 - [x] 回放”第一次发出但回包丢失→用户又来信→重试”和跨被动回复窗口；检查重复发送、错挂回复和误用主动额度。
 
-记账（2026-09-17，本 PR）：
+记账（2026-09-17，PR #113，CI 头提交 4b28710c rollup 绿）：
 - 符号：`ChannelWorkPump::DriveChannelDeliveries` 重构——live 身份在账即复用（不再 FreshInboundAnchor）；改锚两径均先 `RetireChannelSendIdentity`（`reply_window_expired_reanchor`/`active_quota_rejected_await_interaction`）再等新锚分配新身份；Assign 撞 live 锚冲突（`identity_anchor_conflict`）时同样先裁决再下 tick 重试——同 delivery 不偷换在途身份。回包丢失→Unknown 终态不重发（身份冻结不动）。
 - 测试：unit.runtime.test_channel_job_pump `A06 改锚补投:旧身份裁决留迹,新身份新号(账行可追溯)`（两笔 msgseq.assigned + 一笔 msgseq.retired 的账行断言）；回包丢→新来信不重发由 test_channel_work_pump `超时未知` 承担（直聊路径，同款终态规矩）。
 - 未验边界：真平台被动回复窗宽度（文档 5/60 分钟冲突，A15 再校准）与跨窗补投的真机行为（Q3）。
@@ -100,7 +100,7 @@
 - [x] 把停止信号传到 HTTP、DNS/TCP/TLS、WS 读写及媒体上传；定义总停机期限，不能只给读阶段设超时后直接 join。
 - [x] 用线程屏障稳定复现 load→destroy→Cancel 窗口；在取令牌、握手、收帧、上传各阶段停止，验证不崩溃、不挂住。核对 session_id 访问线程约束。
 
-记账（2026-09-17，本 PR）：
+记账（2026-09-17，PR #113，CI 头提交 4b28710c rollup 绿）：
 - 符号：`QqGatewaySession::in_flight_` 改 `shared_ptr` + `in_flight_mutex_`（CancelInFlight 锁内拷、锁外调，清账/析构不悬空）；`session_id_` 过 `session_state_mutex_`（跨线程读写 UB 修除）。`WsConnectCancelState`（qq_ws_client.hpp：TCP 连上登记原生句柄，Cancel 跨线程 shutdown——TLS/握手/读头全阶段即断）；`WsGatewayTransport` 的 `mutex_` 串行 Connect 交接/Cancel/Close（无漏球窗口）。`QqHttpRequest::cancel`（qq_http seam）穿到 `net::PerformFullHttpRequest`；适配器构造时 `StampStopFlag` 盖章全部 HTTP（令牌/地址/发送/互动回应/媒体上传）。`StopGatewayLocked` 停止旗先行→CancelInFlight→join 网关→排空发送队列（未发项如实报错）→join+清 sender_thread_（修 bridge stop→start 死发送队列）；SenderLoop 退避睡 100ms 步进可打断。总停机期限口径：5s（StopGatewayLocked 注释与测试断言；HTTP 硬墙 30s 仅兜底）。
 - 测试：unit.channelqq.test_qq_gateway `A08 外部 Cancel 打断建立中的连接(共享所有权,不悬空)`（屏障:Connect 进入后取消;轮收口后再取消的空指针路径）；unit.channelqq.test_qq_ws_client `A08 建立期取消——握手读阻塞中被外部 Cancel 立即打断`（预置取消 + 握手读阻塞两案，不靠 3s 落锤）；unit.channelqq.test_qq_adapter `A08 停止章——出站 HTTP 全带 cancel;停机期限内收口`（取令牌阻塞中被 Stop 掐流,<5s 收口）。上传阶段的停止=媒体 seam 同一取消章（net 层各阶段掐流已有自身测试）；收帧阶段=WS Cancel 旧有路径 + 本册网关取消复测。
 - 未验边界：真 TLS 握手中途取消的实测时延（本册以明文握手读阻塞近似）；Q3 真机停机窗口实测归档。
