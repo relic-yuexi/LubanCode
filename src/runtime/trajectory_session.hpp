@@ -29,6 +29,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -382,6 +383,9 @@ private:
     // invalidated 且 subject 命中的落 verification.invalidated。
     void InvalidateStaleVerifications(const std::string& mutated_path,
                                       const std::string& invalidated_by_event);
+    // T11-D:stale invalidation 的 v3 实现(tool.verification.invalidated)。
+    void InvalidateStaleVerificationsV3(const std::string& mutated_path,
+                                        const std::string& invalidated_by_action);
     // turn 收口的证据裁断(§5.5 outcome.assessed):有 fresh 证据才落,
     // 引用未失效的 verification.recorded 事件 id。
     void AssessOutcome(bool ok, bool cancelled);
@@ -512,6 +516,8 @@ private:
         bool stream_started = false;
     };
     std::string V3RequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx);
+    // T11-A:旁路用途 → 消息 purpose(memory_extract/title_refine 分铺)。
+    trajectory::v3::MessagePurpose V3MessagePurpose() const;
     bool V3RequestSent(const std::string& request_id);
     void V3UsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id);
@@ -851,11 +857,11 @@ public:
     // recorder 不在)给 nullptr,调用方按"没接轨迹"走旧路。identity 的
     // provider/wire 照实填该次请求真用的端(compact 的 cheap 路由可能跨
     // provider,与主会话端不是一家);channel 建议 "host"。
-    // v3 场(取消误报 ESC 单 Bug 2):purpose 有 v3 消息合同落点的用途
-    //(memory_extract)接 v3 旁路桥——prepared/sent/终态/usage 走 v3
-    // typed 事件,旁路输入输出不进 conversation 链;其余用途(compact 走
-    // v3 compact 运行时、起名/doctor 待各自接)维持 nullptr 旧路,§四清
-    // 册记账,不在本单冒进。
+    // v3 场(取消误报 ESC 单 Bug 2;T11-A 起标题精炼入册):purpose 有
+    // v3 消息合同落点的用途(memory_extract / title_refine)接 v3 旁路桥
+    //——prepared/sent/终态/usage 走 v3 typed 事件,旁路输入输出不进
+    // conversation 链;其余用途(compact 走 v3 compact 运行时、doctor 待
+    // 各自接)维持 nullptr 旧路,§四清册记账,不在本单冒进。
     std::unique_ptr<TrajectoryBypassBridge> NewBypassBridge(
         TrajectoryTurnBridge::Identity identity,
         accounting::RequestPurpose purpose = accounting::RequestPurpose::OtherHostRequest);
@@ -953,10 +959,32 @@ public:
     // /record 选段器(一场 session 一只)。
     RecordSelectionController& record_selection();
 
+    // ---- T11-A / V3-GAP-06:标题来源分家(session v3 旧设计清理单) ----
+    // v3 场标题四路进账,来源如实分流(v2 老路只认 RecordTitleChanged,
+    // 行为一字不动):
+    //   RecordTitleChanged        —— 手动 /title:session.title.applied
+    //                               (source=manual),不伪造 titleGenerationId;
+    //   RecordLocalTitleApplied   —— 首问本地启发式/老档补名(source=local);
+    //   RecordTitleRequested      —— 自动精炼起飞:title.requested(带
+    //                               titleGenerationId 与路由材料);
+    //   RecordTitleExtracted      —— 判词到手:title.extracted(迟到结果
+    //                               也照记,是否采用另算);
+    //   RecordGeneratedTitleApplied —— 精炼被采用:session.title.applied
+    //                               (source=generated,带真 titleGenerationId)。
+    // 自动生成流的 prompt/assistant 由旁路桥落正式 message(purpose=
+    // session_title,§4.34 归首问 turn),不走这批方法。
+    void RecordLocalTitleApplied(const std::string& title, const std::string& old_title);
+    void RecordTitleRequested(const std::string& title_generation_id, const std::string& model,
+                              const std::string& provider);
+    void RecordTitleExtracted(const std::string& title_generation_id, const std::string& title);
+    void RecordGeneratedTitleApplied(const std::string& title_generation_id, const std::string& title,
+                                     const std::string& old_title);
+
     // ---- P0-4:环境快照(§9.1/§9.2) ----
-    // 会话侧身份与材料由装配层采好递进;git/cwd/os 由账本现取。落
-    // run.environment.captured(snapshot blob + replay_level + gaps)。
-    // 一场 run 只落一次,重复调用是幂等 no-op。回空串 = 成功,否则稳定码。
+    // 会话侧身份与材料由装配层采好递进;git/cwd/os 由账本现取。v2 落
+    // run.environment.captured(snapshot blob + replay_level + gaps);v3 场
+    // (T11-C)落 session.environment.captured,载荷同口径 camelCase。一场
+    // run 只落一次,重复调用是幂等 no-op。回空串 = 成功,否则稳定码。
     struct EnvironmentFacts {
         std::string provider;
         std::string wire;
@@ -1106,6 +1134,14 @@ public:
     void RecordTitleChanged(const std::string& title, const std::string& old_title);
     void RecordModeChanged(const std::string& mode, const std::string& reason,
                            const std::string& old_mode);
+
+private:
+    // T11-A:session.title.applied 的共用尾段(source 分流 manual/local/
+    // generated;generated 才带 titleGenerationId)。
+    void AppendTitleAppliedV3_(const std::string& title, const std::string& old_title,
+                               std::string_view source, const std::string* title_generation_id);
+
+public:
 
     // 端云协同可观测单 T1(§25.4 路 1):装配层把 TelemetryService 挂上,
     // 之后本账本铸的每只桥与每笔会话级控制事件提交后都投 committed wake。

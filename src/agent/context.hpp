@@ -236,9 +236,20 @@ constexpr int kRealOverflowPercent = 60;
 //                     OverflowCode)。本环不重发(overflow 不在可重试表);
 //                     宿主在这一相收一次压缩(reason=context_overflow),
 //                     压不动就挂溢出门拦自动续轮的重发。
+//   PreflightDegraded —— 优雅降档(T11-E / V3-GAP-06):输入 + 声明上限
+//                     超窗而输入 + 封顶预留不超,实发 max_tokens 收到
+//                     window − 输入 − 协议余量放行。只发边界记录器
+//                     (boundary_recorder;v3 落 context.pressure.recorded 的
+//                     max_tokens_degraded 裁决),不进宿主压力回调
+//                     (on_context_pressure 是 UI/闸门口径,行为不变)。
 struct ContextPressure {
-    enum class Phase { PreRequest, AfterHardTrim, PreflightExceeded, SendOverflow };
-    Phase phase = Phase::PreRequest;
+    enum class Phase {
+        PreRequest,
+        AfterHardTrim,
+        PreflightExceeded,
+        SendOverflow,
+        PreflightDegraded
+    };    Phase phase = Phase::PreRequest;
     // 双闸同时过线才为真(压缩触发失衡单 §二):projected(保守托底尺 +
     // 输出预留)过 kProjectedOverflowPercent,且 working_view_tokens(日常
     // 尺的真实水位)过 kRealOverflowPercent。虚算单独不触发——单看托底

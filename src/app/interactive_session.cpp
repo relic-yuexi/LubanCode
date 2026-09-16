@@ -303,7 +303,10 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
     inputs.trajectory = session_runtime_.trajectory();
     inputs.trajectory_wire = session_runtime_.wire_name();
     inputs.provider = detached.route.provider;
-    titles_.refiner().Start(std::move(inputs));
+    if (titles_.refiner().Start(std::move(inputs))) {
+        // T11-A:起飞事实(title.requested)在真起飞后才记,不冒充发起。
+        titles_.NoteTitleGenerationStarted(info.model, detached.route.provider);
+    }
 }
 
 // resume 换场善后(实测问题 7):翻标题代数、取消在飞的精炼——上一场的

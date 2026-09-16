@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1828,6 +1829,164 @@ std::vector<Schema3Error> ValidateAsyncToolSequence(const V3Ledger& ledger) {
         }
     }
     return errors;
+}
+
+// ---------------------------------------------------------------------------
+// T11 / V3-GAP-06 五域事实投影(合同见 reader.hpp 尾部注记)
+// ---------------------------------------------------------------------------
+
+std::optional<TitleAppliedFact> FindLastTitleApplied(const V3Ledger& ledger) {
+    std::optional<TitleAppliedFact> fact;
+    for (const EventLine& event : ledger.events) {
+        if (event.kind != EventKindV3::SessionTitleApplied) {
+            continue;
+        }
+        const auto title = event.payload.find("title");
+        if (title == event.payload.end() || !title->is_string() ||
+            title->get<std::string>().empty()) {
+            continue;  // 坏行不冒充采用事实(验卷另有把关)
+        }
+        TitleAppliedFact current;
+        current.title = title->get<std::string>();
+        const auto source = event.payload.find("source");
+        current.source = source != event.payload.end() && source->is_string()
+                             ? source->get<std::string>()
+                             : std::string();
+        current.event_id = event.event_id;
+        fact = std::move(current);
+    }
+    return fact;
+}
+
+std::optional<EnvironmentCaptureFact> FindLastEnvironmentCapture(const V3Ledger& ledger) {
+    std::optional<EnvironmentCaptureFact> fact;
+    for (const EventLine& event : ledger.events) {
+        if (event.kind != EventKindV3::SessionEnvironmentCaptured) {
+            continue;
+        }
+        EnvironmentCaptureFact current;
+        const auto level = event.payload.find("replayLevel");
+        if (level != event.payload.end() && level->is_string()) {
+            current.replay_level = level->get<std::string>();
+        }
+        const auto gaps = event.payload.find("gaps");
+        if (gaps != event.payload.end() && gaps->is_array()) {
+            for (const auto& gap : *gaps) {
+                if (gap.is_string()) {
+                    current.gaps.push_back(gap.get<std::string>());
+                }
+            }
+        }
+        current.event_id = event.event_id;
+        fact = std::move(current);
+    }
+    return fact;
+}
+
+std::optional<ApprovalModeFact> FindLastApprovalMode(const V3Ledger& ledger) {
+    std::optional<ApprovalModeFact> fact;
+    for (const EventLine& event : ledger.events) {
+        if (event.kind != EventKindV3::ApprovalModeApplied) {
+            continue;
+        }
+        ApprovalModeFact current;
+        const auto mode = event.payload.find("mode");
+        if (mode == event.payload.end() || !mode->is_string()) {
+            continue;
+        }
+        current.mode = mode->get<std::string>();
+        const auto source = event.payload.find("source");
+        current.source = source != event.payload.end() && source->is_string()
+                             ? source->get<std::string>()
+                             : std::string();
+        current.event_id = event.event_id;
+        fact = std::move(current);
+    }
+    return fact;
+}
+
+std::vector<VerificationFact> FoldVerificationFacts(const V3Ledger& ledger) {
+    // recorded 建册;invalidated 按 verificationId 对账销 fresh。invalidated
+    // 先于 recorded 到达(乱序信封)按验卷另报,这里只认次序事实。
+    std::vector<VerificationFact> facts;
+    std::map<std::string, std::size_t> by_id;
+    for (const EventLine& event : ledger.events) {
+        if (event.kind == EventKindV3::ToolVerificationRecorded) {
+            VerificationFact fact;
+            const auto id = event.payload.find("verificationId");
+            if (id == event.payload.end() || !id->is_string()) {
+                continue;
+            }
+            fact.verification_id = id->get<std::string>();
+            const auto kind = event.payload.find("kind");
+            if (kind != event.payload.end() && kind->is_string()) {
+                fact.kind = kind->get<std::string>();
+            }
+            if (event.action_id.has_value()) {
+                fact.action_id = event.action_id;
+            }
+            const auto passed = event.payload.find("passed");
+            fact.passed = passed != event.payload.end() && passed->is_boolean() &&
+                          passed->get<bool>();
+            const auto subject = event.payload.find("subject");
+            if (subject != event.payload.end() && subject->is_string()) {
+                fact.subject = subject->get<std::string>();
+            }
+            fact.fresh = true;
+            by_id[fact.verification_id] = facts.size();
+            facts.push_back(std::move(fact));
+        } else if (event.kind == EventKindV3::ToolVerificationInvalidated) {
+            const auto id = event.payload.find("verificationId");
+            if (id == event.payload.end() || !id->is_string()) {
+                continue;
+            }
+            const auto it = by_id.find(id->get<std::string>());
+            if (it == by_id.end()) {
+                continue;
+            }
+            VerificationFact& fact = facts[it->second];
+            fact.fresh = false;
+            const auto reason = event.payload.find("reason");
+            if (reason != event.payload.end() && reason->is_string()) {
+                fact.invalidated_reason = reason->get<std::string>();
+            }
+        }
+    }
+    return facts;
+}
+
+std::vector<PressureFact> FoldPressureFacts(const V3Ledger& ledger) {
+    std::vector<PressureFact> facts;
+    for (const EventLine& event : ledger.events) {
+        if (event.kind != EventKindV3::ContextPressureRecorded) {
+            continue;
+        }
+        PressureFact fact;
+        const auto verdict = event.payload.find("verdict");
+        if (verdict != event.payload.end() && verdict->is_string()) {
+            fact.verdict = verdict->get<std::string>();
+        }
+        if (event.turn_id.has_value()) {
+            fact.turn_id = event.turn_id;
+        }
+        const auto number = [&event](const char* key) -> std::uint64_t {
+            const auto value = event.payload.find(key);
+            if (value != event.payload.end() && value->is_number_unsigned()) {
+                return value->get<std::uint64_t>();
+            }
+            if (value != event.payload.end() && value->is_number_integer()) {
+                return static_cast<std::uint64_t>(value->get<std::int64_t>());
+            }
+            return 0;
+        };
+        fact.window_tokens = number("windowTokens");
+        fact.estimated_input_tokens = number("estimatedInputTokens");
+        fact.reserved_output_tokens = number("reservedOutputTokens");
+        fact.remaining_tokens = number("remainingTokens");
+        fact.event_id = event.event_id;
+        facts.push_back(std::move(fact));
+    }
+    return facts;
 }
 
 }  // namespace lubancode::trajectory::v3

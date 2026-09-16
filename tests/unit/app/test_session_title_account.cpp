@@ -402,7 +402,9 @@ TEST_CASE("v3 场起名门: 首问本地起名照常落账(session.title.applied
     CHECK(result == LocalResult::Set);
     CHECK(fixture.title.find("readme") != std::string::npos);  // 路径取文件主题
 
-    // 真账:v3 主账上长出 session.title.applied(手动/本地来源)。
+    // 真账:v3 主账上长出 session.title.applied(本地来源)。T11-A 起
+    // manual/local 行不带 titleGenerationId——本地启发式没有生成身份,
+    // 伪造即造假;source 如实记 local。
     const std::string session_id = fixture.ledger->session_id();
     const auto stream = fixture.ledger->session_dir() /
                         (session_id + ".jsonl");
@@ -421,7 +423,8 @@ TEST_CASE("v3 场起名门: 首问本地起名照常落账(session.title.applied
                 continue;
             }
             saw_applied = true;
-            CHECK(row.contains("titleGenerationId"));
+            CHECK(row.at("payload").value("source", std::string()) == "local");
+            CHECK_FALSE(row.contains("titleGenerationId"));
         }
     }
     CHECK(saw_applied);

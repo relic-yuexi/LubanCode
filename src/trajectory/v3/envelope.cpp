@@ -367,6 +367,13 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::MemorySaveRequested: return "memory.save.requested";
         case EventKindV3::ChannelApprovalRequested: return "channel.approval.requested";
         case EventKindV3::ChannelApprovalResolved: return "channel.approval.resolved";
+        case EventKindV3::SessionEnvironmentCaptured: return "session.environment.captured";
+        case EventKindV3::ApprovalModeApplied: return "approval.mode.applied";
+        case EventKindV3::ToolVerificationRecorded: return "tool.verification.recorded";
+        case EventKindV3::ToolVerificationInvalidated: return "tool.verification.invalidated";
+        case EventKindV3::ToolObservationLate: return "tool.observation.late";
+        case EventKindV3::RecoveryNoteRecorded: return "recovery.note.recorded";
+        case EventKindV3::ContextPressureRecorded: return "context.pressure.recorded";
 
     }
     return "unknown";
@@ -512,6 +519,15 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             // 渠道远端审批(QQ 接入单 Q6,statusless 事实行)。
             EventKindV3::ChannelApprovalRequested,
             EventKindV3::ChannelApprovalResolved,
+            // T11 / V3-GAP-06 五域遗漏事实(标题来源之外的新 kind,均
+            // statusless;合同见 envelope.hpp T11 注记)。
+            EventKindV3::SessionEnvironmentCaptured,
+            EventKindV3::ApprovalModeApplied,
+            EventKindV3::ToolVerificationRecorded,
+            EventKindV3::ToolVerificationInvalidated,
+            EventKindV3::ToolObservationLate,
+            EventKindV3::RecoveryNoteRecorded,
+            EventKindV3::ContextPressureRecorded,
 
         };
         std::sort(all.begin(), all.end(), [](EventKindV3 a, EventKindV3 b) {

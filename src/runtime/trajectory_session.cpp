@@ -10,6 +10,7 @@
 #include <clocale>
 #include <cstdlib>
 #include <ctime>
+#include <string_view>
 #include <utility>
 
 #include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
@@ -281,6 +282,9 @@ void TrajectoryTurnBridge::BeginTurn(const std::string& turn_id, const std::stri
         //(§4.2"不能见到 user 角色就自行推断新回合"的反面——回合先立号,
         // 行再归属)。trigger 不单独落账;输入/请求行带 channel 事实。
         v3_turn_ = std::make_unique<V3TurnBooks>();
+        // T11-D:验证簿回合制(同 calls_ 的回合纪律)——stale invalidation
+        // 只对本回合已录验证对账,不跨回合追旧账。
+        verifications_.clear();
         // 主回合号留给旁路桥挂 parentTurnId(取消误报 ESC 单 Bug 2):回合
         // 尾巴的抽取/摘要要能回答"哪只回合触发的"。EndTurn 不清——尾巴
         // 活儿多在回合收口之后跑,"最近一只"就是触发者。
@@ -545,12 +549,48 @@ nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::Re
 }  // namespace
 
 void TrajectoryTurnBridge::OnContextPressure(const agent::ContextPressure& pressure) {
-    if (!turn_open_ || pressure.phase != agent::ContextPressure::Phase::PreflightExceeded) {
+    if (!turn_open_ ||
+        (pressure.phase != agent::ContextPressure::Phase::PreflightExceeded &&
+         pressure.phase != agent::ContextPressure::Phase::PreflightDegraded)) {
         return;
     }
     if (V3Mode()) {
-        // v3 的容量/压缩账(compact 一族)不属接线点 1:预检压力是 v2 的
-        // context.pressure.recorded 概念,v3 暂无对应 kind,不伪造。
+        // T11-E / V3-GAP-06:发送前容量压力与预算裁决落 context.pressure.
+        // recorded(statusless)。verdict 三分:应急收窄放行(reserve_clamped)/
+        // 拒发(exceeded_denied)/优雅降档(max_tokens_degraded,Phase::
+        // PreflightDegraded 时)。四项数字账与 v2 同名事件同口径;remaining
+        // 是窗口减三项后的余量。不复制累计用量——usage 唯一 owner 在
+        // assistant message(§五),本行只是当次判定事实。落账失败记错继续
+        // (与 v2 同门:metadata 不改写业务结果,doctor 暴露坏账)。
+        const bool degraded = pressure.phase == agent::ContextPressure::Phase::PreflightDegraded;
+        v3::EventDraft draft;
+        draft.kind = v3::EventKindV3::ContextPressureRecorded;
+        draft.turn_id = turn_id_;
+        const std::uint64_t window = static_cast<std::uint64_t>(pressure.window_tokens);
+        const std::uint64_t estimated = static_cast<std::uint64_t>(pressure.estimated_input_tokens);
+        const std::uint64_t reserve = static_cast<std::uint64_t>(pressure.reserved_output_tokens);
+        const std::uint64_t headroom =
+            static_cast<std::uint64_t>(pressure.protocol_headroom_tokens);
+        const std::uint64_t used = estimated + reserve + headroom;
+        draft.payload = nlohmann::json{
+            {"phase", "preflight"},
+            {"verdict", degraded ? "max_tokens_degraded"
+                                 : (pressure.reserve_clamped ? "reserve_clamped" : "exceeded_denied")},
+            {"estimatedInputTokens", estimated},
+            {"reservedOutputTokens", reserve},
+            {"protocolHeadroomTokens", headroom},
+            {"windowTokens", window},
+            {"remainingTokens", window >= used ? window - used : std::uint64_t{0}}};
+        const auto receipt =
+            v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            NoteV3Error(receipt, "context.pressure.recorded");
+        }
+        return;
+    }
+    // v2 老路只认 PreflightExceeded(Phase::PreflightDegraded 是 T11-E 给
+    // v3 新开的口,v2 老账形状一个字节不动)。
+    if (pressure.phase != agent::ContextPressure::Phase::PreflightExceeded) {
         return;
     }
     const auto receipt = Put(
@@ -1781,17 +1821,91 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
                     !(never_started || OutcomeMapsToCancelled(event))) {
                     book.failed = true;
                 }
+                // §5.5 stale invalidation 的 v3 版(T11-D):改动了文件就逐枚
+                // 对账本轮已录验证,subject 命中的落 tool.verification.
+                // invalidated(reason=subject_modified)。只记观察:不改旧
+                // recorded 行,也不触发工具重做。
+                if (!event.undo.path.empty()) {
+                    InvalidateStaleVerificationsV3(event.undo.path, receipt.id);
+                }
             } else {
                 NoteV3Error(receipt, "tool terminal");
             }
             return;
         }
-        case agent::ToolTraceEventKind::Verification:
+        case agent::ToolTraceEventKind::Verification: {
+            // T11-D:验证事实(tool.verification.recorded)。hub 侧显式验证
+            // 点:label 兼作 kind,after_execution_id 挂被验执行(对回
+            // actionId 进信封——验证关联工具);正文经 verify_detail 进
+            // facts。是否"fresh"由读取侧折算(失效另记 invalidated)。
+            v3::EventDraft recorded;
+            recorded.kind = v3::EventKindV3::ToolVerificationRecorded;
+            recorded.turn_id = turn_id_;
+            recorded.step_id = book.step_id;
+            recorded.action_id = book.action_id;
+            recorded.payload = nlohmann::json{
+                {"verificationId", NextVerificationId()},
+                {"kind", event.label.empty() ? "tool_postcondition" : event.label},
+                {"passed", event.passed},
+                {"producer", "tool_trace"}};
+            if (!event.after_execution_id.empty()) {
+                recorded.payload["subject"] = event.after_execution_id;
+            }
+            if (!event.verify_detail.empty()) {
+                recorded.payload["facts"] = nlohmann::json{{"detail", event.verify_detail}};
+            }
+            const auto receipt =
+                v3_writer_->AppendEvent(std::move(recorded), trajectory::Durability::ProcessCrash);
+            V3NotifyCommitted(receipt);
+            if (receipt.status != v3::WriteReceipt::Status::Committed) {
+                NoteV3Error(receipt, "tool.verification.recorded");
+            }
+            return;
+        }
+        case agent::ToolTraceEventKind::McpLateResponse: {
+            // T11-D:迟到响应只记观察(tool.observation.late)。本 attempt 已
+            // 有终态的,旧终态一个字节不动(tool_action 的"每尝试一个终态"
+            // 纪律);本行不带 status,读面只当事实看,不据此重开执行。
+            v3::EventDraft late;
+            late.kind = v3::EventKindV3::ToolObservationLate;
+            late.turn_id = turn_id_;
+            late.step_id = book.step_id;
+            late.action_id = book.action_id;
+            late.payload = nlohmann::json{{"cause", "mcp_timeout_dropped"}};
+            if (event.jsonrpc_request_id >= 0) {
+                late.payload["jsonrpcRequestId"] = event.jsonrpc_request_id;
+            }
+            if (!event.source_instance.empty()) {
+                late.payload["server"] = event.source_instance;
+            }
+            const auto receipt =
+                v3_writer_->AppendEvent(std::move(late), trajectory::Durability::ProcessCrash);
+            V3NotifyCommitted(receipt);
+            if (receipt.status != v3::WriteReceipt::Status::Committed) {
+                NoteV3Error(receipt, "tool.observation.late");
+            }
+            return;
+        }
+        case agent::ToolTraceEventKind::RecoveryMarker: {
+            // T11-D:恢复注记(recovery.note.recorded)——恢复侧补的
+            // append-only 观察(未知副作用/四档结论的缘由),不改旧行。
+            v3::EventDraft note;
+            note.kind = v3::EventKindV3::RecoveryNoteRecorded;
+            note.turn_id = turn_id_;
+            note.step_id = book.step_id;
+            note.action_id = book.action_id;
+            note.payload = nlohmann::json{{"note", event.note.empty() ? "recovery_marker"
+                                                                      : event.note}};
+            const auto receipt =
+                v3_writer_->AppendEvent(std::move(note), trajectory::Durability::ProcessCrash);
+            V3NotifyCommitted(receipt);
+            if (receipt.status != v3::WriteReceipt::Status::Committed) {
+                NoteV3Error(receipt, "recovery.note.recorded");
+            }
+            return;
+        }
         case agent::ToolTraceEventKind::ResultCommitted:
-        case agent::ToolTraceEventKind::RecoveryMarker:
-        case agent::ToolTraceEventKind::McpLateResponse:
-            return;  // result.committed 从消息正文翻(V3ToolResultsCommitted);
-                     // verification/恢复注记/迟到响应:v3 无对应 kind,不伪造。
+            return;  // result.committed 从消息正文翻(V3ToolResultsCommitted)。
     }
 }
 
@@ -2555,9 +2669,12 @@ void TrajectoryBypassBridge::V3NotifyCommitted(const v3::WriteReceipt& receipt) 
 
 std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& request,
                                                       const agent::RequestPreparedContext& ctx) {
-    // 桥只认 memory_extract:工厂(NewBypassBridge)已把门,这里是防御性
-    // 第二道——消息 purpose/回合号前缀都按它铺,别的用途进来只会写错账。
-    if (purpose_ != accounting::RequestPurpose::MemoryExtract) {
+    // 桥只认 memory_extract / title_refine:工厂(NewBypassBridge)已把门,
+    // 这里是防御性第二道——消息 purpose/回合号铺法都按用途分,别的用途
+    // 进来只会写错账。
+    const v3::MessagePurpose message_purpose = V3MessagePurpose();
+    if (purpose_ != accounting::RequestPurpose::MemoryExtract &&
+        purpose_ != accounting::RequestPurpose::TitleRefine) {
         return std::string();
     }
     // 一桥一采样:v2 用小 turn 的开合守门,v3 没有轮账,用请求簿守。
@@ -2569,27 +2686,50 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
     if (v3_books_ != nullptr && v3_books_->execution_blocked) {
         return std::string();
     }
-    const std::string turn_id = v3_writer_->NewMemoryTurnId();
-    // 1) 本次请求真用的 system:旁路自带抽取提示词,与主链根无关——照实
+    // 回合号铺法按用途分:
+    //   memory_extract——内部回合(memory-turn-*),parentTurnId 挂触发
+    //     主回合(在场才挂),不冒充真人回合;
+    //   title_refine(T11-A,§4.34)——独立 step 归首问主回合:turnId 直接
+    //     用首问回合号,不另铸内部回合,不挂 parentTurnId(自己不挂自己)。
+    //     旁路在回合收口后的空闲边界跑,active_main_turn_id 仍是首问回合
+    //     (BeginTurn 起 EndTurn 不清);取不到主回合号就不接账——不拿内部
+    //     回合冒充,采样本体照跑(丢的只是这笔细账)。
+    std::string turn_id;
+    std::optional<std::string> parent_turn_id;
+    if (purpose_ == accounting::RequestPurpose::MemoryExtract) {
+        turn_id = v3_writer_->NewMemoryTurnId();
+        if (v3_books_ != nullptr && !v3_books_->active_main_turn_id.empty()) {
+            parent_turn_id = v3_books_->active_main_turn_id;
+        }
+    } else {
+        if (v3_books_ == nullptr || v3_books_->active_main_turn_id.empty()) {
+            return std::string();
+        }
+        turn_id = v3_books_->active_main_turn_id;
+    }
+    const char* system_cause = purpose_ == accounting::RequestPurpose::MemoryExtract
+                                   ? "memory_extraction_prompt"
+                                   : "session_title_prompt";
+    // 1) 本次请求真用的 system:旁路自带提示词,与主链根无关——照实
     //    落一枚 system 消息(turnId 恒 null,§schema),prepared 引它。
     std::string system_message_id;
     if (!request.system.empty()) {
         v3::MessageDraft system;
-        system.purpose = v3::MessagePurpose::MemoryExtract;
+        system.purpose = message_purpose;
         system.origin = v3::MessageOrigin::SessionRuntime;
-        system.system_meta = nlohmann::json{{"cause", "memory_extraction_prompt"}};
+        system.system_meta = nlohmann::json{{"cause", system_cause}};
         system.message = nlohmann::json{{"role", "system"}, {"content", request.system}};
         const auto receipt =
             v3_writer_->AppendMessage(std::move(system), trajectory::Durability::ProcessCrash);
         V3NotifyCommitted(receipt);
         if (receipt.status != v3::WriteReceipt::Status::Committed) {
-            NoteV3Error(receipt, "memory system(bypass)");
+            NoteV3Error(receipt, "bypass system");
             return std::string();  // §4.4:引用没落稳,请求不得发出
         }
         system_message_id = receipt.id;
     }
     // 2) 转写 user 消息:旁路材料,不 Admit 进链——conversation 历史一个
-    //    字不混;parentTurnId 挂触发主回合(在场才挂)。
+    //    字不混。
     std::string input_message_id;
     if (!request.messages.empty()) {
         std::string transcript_text;
@@ -2602,10 +2742,8 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
         if (!transcript_text.empty()) {
             v3::MessageDraft user;
             user.turn_id = turn_id;
-            if (v3_books_ != nullptr && !v3_books_->active_main_turn_id.empty()) {
-                user.parent_turn_id = v3_books_->active_main_turn_id;
-            }
-            user.purpose = v3::MessagePurpose::MemoryExtract;
+            user.parent_turn_id = parent_turn_id;
+            user.purpose = message_purpose;
             user.origin = v3::MessageOrigin::SessionRuntime;
             user.display = v3::DisplayMode::Collapsed;  // 内部回合材料默认折叠(§4.67.6 同款)
             user.message = nlohmann::json{{"role", "user"}, {"content", std::move(transcript_text)}};
@@ -2613,7 +2751,7 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
                 v3_writer_->AppendMessage(std::move(user), trajectory::Durability::ProcessCrash);
             V3NotifyCommitted(receipt);
             if (receipt.status != v3::WriteReceipt::Status::Committed) {
-                NoteV3Error(receipt, "memory user(bypass)");
+                NoteV3Error(receipt, "bypass user");
                 return std::string();
             }
             input_message_id = receipt.id;
@@ -2627,8 +2765,8 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
                     "model.request.prepared(bypass)");
         return std::string();
     }
-    // 3) prepared:purpose 用请求真用途的合同名(memory_extract);预算
-    //    (timeoutBudgetSecs)在这落——"预算多久"只有这儿知道。
+    // 3) prepared:purpose 用请求真用途的合同名(memory_extract/title_
+    //    refine);预算(timeoutBudgetSecs)在这落——"预算多久"只有这儿知道。
     const std::string request_id = v3_writer_->NewRequestId();
     const std::string step_id = v3_writer_->NewStepId();
     nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
@@ -2737,6 +2875,19 @@ bool TrajectoryBypassBridge::V3EnsureStreamStarted(const std::string& request_id
     return true;
 }
 
+// T11-A:旁路用途 → 消息 purpose(memory_extract→memory_extract,
+// title_refine→session_title;其余用途工厂已拦,这里给 conversation 仅作
+// 类型兜底,不会真走到)。
+v3::MessagePurpose TrajectoryBypassBridge::V3MessagePurpose() const {
+    if (purpose_ == accounting::RequestPurpose::MemoryExtract) {
+        return v3::MessagePurpose::MemoryExtract;
+    }
+    if (purpose_ == accounting::RequestPurpose::TitleRefine) {
+        return v3::MessagePurpose::SessionTitle;
+    }
+    return v3::MessagePurpose::Conversation;
+}
+
 bool TrajectoryBypassBridge::V3OutputCompleted(const std::string& request_id, const api::Message& assistant,
                                                const std::string& stop_reason,
                                                const std::string& provider_response_id) {
@@ -2767,7 +2918,7 @@ bool TrajectoryBypassBridge::V3OutputCompleted(const std::string& request_id, co
                                      : nlohmann::json(provider_response_id),
         book.usage.has_value() ? *book.usage : nlohmann::json(nullptr),
         stop_reason.empty() ? std::string("end_turn") : stop_reason,
-        v3::MessagePurpose::MemoryExtract, std::nullopt,
+        V3MessagePurpose(), std::nullopt,
         stop_reason == "length" || stop_reason == "max_tokens"
             ? std::optional<v3::CompletionStatus>(v3::CompletionStatus::Truncated)
             : std::nullopt);
@@ -2931,6 +3082,12 @@ void TrajectoryTurnBridge::InvalidateStaleVerifications(const std::string& mutat
     if (mutated.empty()) {
         return;
     }
+    // T11-D 的 v3 路:同判定,事件换 tool.verification.invalidated(statusless
+    // 观察,不改旧 recorded 行)。
+    if (V3Mode()) {
+        InvalidateStaleVerificationsV3(mutated, invalidated_by_event);
+        return;
+    }
     for (VerificationBook& book : verifications_) {
         if (!book.recorded || book.invalidated || book.subject.empty()) {
             continue;
@@ -2949,6 +3106,38 @@ void TrajectoryTurnBridge::InvalidateStaleVerifications(const std::string& mutat
             book.invalidated = true;
         } else {
             NoteError(receipt, "verification.invalidated");
+        }
+    }
+}
+
+// T11-D:stale invalidation 的 v3 实现——被改文件命中的已录验证逐枚落
+// tool.verification.invalidated。被哪枚终态触发经 invalidated_by_action
+// 对账(那是 tool.execution.* 的 event id);本行只记观察,不覆盖已提交
+// 终态,也不触发工具重做。
+void TrajectoryTurnBridge::InvalidateStaleVerificationsV3(const std::string& mutated_path,
+                                                          const std::string& invalidated_by_action) {
+    for (VerificationBook& book : verifications_) {
+        if (!book.recorded || book.invalidated || book.subject.empty()) {
+            continue;
+        }
+        if (NormalizeSubjectPath(book.subject) != mutated_path) {
+            continue;
+        }
+        v3::EventDraft draft;
+        draft.kind = v3::EventKindV3::ToolVerificationInvalidated;
+        draft.turn_id = turn_id_;
+        draft.payload = nlohmann::json{{"verificationId", book.verification_id},
+                                       {"reason", "subject_modified"}};
+        if (!invalidated_by_action.empty()) {
+            draft.payload["invalidatedByAction"] = invalidated_by_action;
+        }
+        const auto receipt =
+            v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+        V3NotifyCommitted(receipt);
+        if (receipt.status == v3::WriteReceipt::Status::Committed) {
+            book.invalidated = true;
+        } else {
+            NoteV3Error(receipt, "tool.verification.invalidated");
         }
     }
 }
@@ -2989,11 +3178,21 @@ void TrajectoryTurnBridge::AssessOutcome(bool ok, bool cancelled) {
 
 std::string TrajectoryTurnBridge::BeginVerification(const std::string& kind, const std::string& subject,
                                                     const std::string& producer) {
+    // T11-D:v3 场起验只建内存簿(号保留),事实在 FinishVerification 一次
+    // 成行(tool.verification.recorded)——v3 没有 started 半行,不伪造
+    // 生命周期。回空 id 仍是"verification 记不住,不得判 verified success"
+    //(§7.4):回合没开/账面坏一律空串。
     if (V3Mode()) {
-        // v3 事件表没有 verification.*(§4.7 的校验账目前只挂 compact 一族);
-        // 回空 id = "verification 记不住,不得判 verified success"(§7.4),
-        // 语义与 v2 落账失败一致,不冒充。
-        return std::string();
+        if (!turn_open_) {
+            return std::string();
+        }
+        VerificationBook book;
+        book.verification_id = NextVerificationId();
+        book.kind = kind;
+        book.subject = subject;
+        book.producer = producer;
+        verifications_.push_back(std::move(book));
+        return verifications_.back().verification_id;
     }
     if (!turn_open_) {
         return std::string();
@@ -3035,6 +3234,57 @@ void TrajectoryTurnBridge::FinishVerification(const std::string& verification_id
         }
     }
     if (target == nullptr) {
+        return;
+    }
+    // T11-D:v3 路:一次成行 tool.verification.recorded。工具关联走信封
+    // actionId(当前回合的工具账里按 subject 反查;查不到就不硬塞——
+    // subject 不是 action 的验证不冒充工具关联)。产物按 path 引用,
+    // command_ref 是判定材料对账。
+    if (V3Mode()) {
+        std::optional<std::string> action_id;
+        if (!target->subject.empty()) {
+            for (const auto& [call_id, call] : v3_turn_->calls) {
+                if (call.action_id == target->subject || call_id == target->subject) {
+                    action_id = call.action_id;
+                    break;
+                }
+            }
+        }
+        v3::EventDraft draft;
+        draft.kind = v3::EventKindV3::ToolVerificationRecorded;
+        draft.turn_id = turn_id_;
+        draft.action_id = action_id;
+        draft.payload = nlohmann::json{
+            {"verificationId", verification_id},
+            {"kind", target->kind},
+            {"passed", passed},
+            {"producer", target->producer.empty() ? std::string("host") : target->producer}};
+        if (!target->subject.empty()) {
+            draft.payload["subject"] = target->subject;
+        }
+        if (command_ref.is_object() && !command_ref.empty()) {
+            draft.payload["commandRef"] = command_ref;
+        }
+        if (facts.is_object() && !facts.empty()) {
+            draft.payload["facts"] = facts;
+        }
+        nlohmann::json refs = nlohmann::json::array();
+        for (const std::string& path : artifact_paths) {
+            refs.push_back(nlohmann::json{{"path", path}});
+        }
+        if (!refs.empty()) {
+            draft.payload["artifactRefs"] = std::move(refs);
+        }
+        const auto receipt =
+            v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+        V3NotifyCommitted(receipt);
+        if (receipt.status == v3::WriteReceipt::Status::Committed) {
+            target->recorded = true;
+            target->passed = passed;
+            target->recorded_event_id = receipt.id;
+        } else {
+            NoteV3Error(receipt, "tool.verification.recorded");
+        }
         return;
     }
     nlohmann::json payload{{"verification_id", verification_id},
@@ -3406,13 +3656,15 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
 
 std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge(
     TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose) {
-    // 接线点 1 分期边界(取消误报 ESC 单 Bug 2 收窄一格):v3 场给用途有
-    // 消息合同落点的请求接 v3 旁路桥——本批只有 memory_extract(内部
-    // 回合号/消息 purpose/prepared 合同齐备)。其余用途维持 nullptr:compact
-    // 在 v3 有自己的全链运行时(RunV3Compact),起名/doctor 待各自接(§四
-    // 清册在案),不冒进也不硬塞 V2 行。
+    // 接线点 1 分期边界(取消误报 ESC 单 Bug 2 收窄一格 + T11-A 扩一格):
+    // v3 场给用途有消息合同落点的请求接 v3 旁路桥——memory_extract(内部
+    // 回合号/消息 purpose/prepared 合同齐备)与 title_refine(T11-A 起自动
+    // 起名的 prompt/assistant 留正式 message,purpose=session_title,§4.34
+    // 归首问主回合)。其余用途维持 nullptr:compact 在 v3 有自己的全链运行
+    // 时(RunV3Compact),doctor 待接(§四清册在案),不冒进也不硬塞 V2 行。
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
-        if (purpose != accounting::RequestPurpose::MemoryExtract) {
+        if (purpose != accounting::RequestPurpose::MemoryExtract &&
+            purpose != accounting::RequestPurpose::TitleRefine) {
             return nullptr;
         }
         trajectory::EventScope identity_scope;
@@ -5098,6 +5350,68 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
     if (environment_captured_) {
         return std::string();  // 一场 run 一次,幂等
     }
+    // T11-C / V3-GAP-06:v3 场落 session.environment.captured。取材件
+    //(GatherGitStatus/BuildEnvironmentCapturePayload/DetermineReplayLevel)
+    // 与 v2 同一台机器——快照正文/脱敏/缺口口径一份;差别的只是事件 kind
+    // 与载荷键名(camelCase)。捕获时间即信封 timestamp(writer 发);resume
+    // 换场后 environment_captured_ 复位,新场重采今天的——旧场的旧行一个
+    // 字节不动,读旧档不拿今天环境补昨天事实。
+    if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
+        trajectory::BlobStore blobs(impl_->active->directory.artifacts_root());
+        trajectory::EnvironmentSnapshotInput input;
+        input.lubancode_version = impl_->lubancode_version;
+        input.os_name = DetectOsName();
+        input.arch = DetectArch();
+        input.locale = DetectLocale();
+        input.timezone = DetectTimezone();
+        input.cwd = platform::PathToUtf8(std::filesystem::current_path());
+        input.repository_root = impl_->workspace_root_text;
+        input.git = trajectory::GatherGitStatus(impl_->workspace_root_text);
+        input.provider = facts.provider;
+        input.wire = facts.wire;
+        input.model = facts.model;
+        input.model_parameters = facts.model_parameters;
+        if (!facts.system_prompt.empty()) {
+            const auto prompt_ref =
+                blobs.Store(facts.system_prompt, "text/markdown", trajectory::Durability::PowerLoss);
+            if (prompt_ref.has_value()) {
+                input.system_prompt_ref = *prompt_ref;
+            }
+        }
+        input.toolset = facts.toolset;
+        input.project_instruction_refs = facts.project_instruction_refs;
+        input.loaded_skill_refs = facts.loaded_skill_refs;
+        input.plugin_refs = facts.plugin_refs;
+        input.config_snapshot_redacted = facts.config_snapshot_redacted;
+        input.allowlisted_env = facts.allowlisted_env;
+
+        const auto capture =
+            trajectory::BuildEnvironmentCapturePayload(input, blobs, trajectory::Durability::PowerLoss);
+        if (!capture.has_value()) {
+            const std::string error = capture.error();
+            io_errors_.push_back(error);
+            platform::LogSink::Instance().Error("trajectory", "环境快照落盘失败: " + error);
+            return error;
+        }
+        v3::EventDraft captured;
+        captured.kind = v3::EventKindV3::SessionEnvironmentCaptured;
+        captured.payload = nlohmann::json{
+            {"snapshotRef", capture->event_payload.value("snapshot_ref", nlohmann::json())},
+            {"replayLevel", capture->event_payload.value("replay_level", std::string())},
+            {"gaps", capture->event_payload.value("gaps", nlohmann::json::array())},
+            // 配置快照是调用方脱敏后的(BuildRedactedConfigSnapshot 的
+            // 窄键集);redaction 状态如实声明,读取侧见 false 按缺件处理。
+            {"configRedacted", facts.config_snapshot_redacted.is_object()}};
+        const auto receipt = impl_->active->v3_main->AppendEvent(
+            std::move(captured), trajectory::Durability::PowerLoss);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            const std::string error = "session.environment.captured:" + receipt.error_code;
+            io_errors_.push_back(error);
+            return receipt.error_code;
+        }
+        environment_captured_ = true;
+        return std::string();
+    }
     trajectory::TrajectoryRecorder* recorder = main();
     if (recorder == nullptr) {
         return "trajectory.no_recorder";
@@ -5545,15 +5859,15 @@ std::string TrajectorySessionLedger::DeleteSessionInWorkspace(const std::string&
 
 void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const std::string& old_title) {
     // v3 场:session.title.applied 落真账(beta.1 反弹二——此前 PutUserCommand_
-    // 只认 v2 main,v3 场 /title 是 no-op,标题列恒空)。手动来源:titleGenerationId
-    // 按合同必填,给稳定的手动形状;来源枚举与自动精炼的完整合同归 T11-A。
+    // 只认 v2 main,v3 场 /title 是 no-op,标题列恒空)。T11-A 起手动来源
+    // 不再伪造 titleGenerationId——manual 行没有生成身份,伪造即造假;
+    // 自动精炼的生成身份由 RecordGeneratedTitleApplied 携真号进来。
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
         v3::EventDraft applied;
         applied.kind = v3::EventKindV3::SessionTitleApplied;
         // 事实提交族(同 state.goal.applied):RequiredStatusForKind 查表无
         // 此 kind,不带 status 才过校验——§2.2 的 .applied→done 是文档语义,
         // 校验按穷举表走,带 status 反被"不携带"分支拒。
-        applied.title_generation_id = "title-manual-" + std::to_string(++command_counter_);
         applied.payload = nlohmann::json{{"title", title}, {"source", "manual"}};
         if (!old_title.empty()) {
             applied.payload["oldTitle"] = old_title;
@@ -5573,6 +5887,92 @@ void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const
     // /title 是真人敲的命令账;自动精炼采纳的标题同走这枚事件(actor
     // 如实分流留给后续批次,先把"标题变过"落成可回放事实)。
     PutUserCommand_(trajectory::EventKind::ControlTitleChanged, std::move(payload));
+}
+
+// ---- T11-A:标题来源分家的 v3 其余三路(声明见 trajectory_session.hpp)。
+
+void TrajectorySessionLedger::AppendTitleAppliedV3_(const std::string& title,
+                                                    const std::string& old_title,
+                                                    std::string_view source,
+                                                    const std::string* title_generation_id) {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
+        // v2 场无 source 分路:local/generated 与 manual 同归
+        // control.title.changed(老行为一字不动——v2 的标题账不认来源)。
+        nlohmann::json payload = nlohmann::json{{"title", title}};
+        if (!old_title.empty()) {
+            payload["old_title"] = old_title;
+        }
+        PutUserCommand_(trajectory::EventKind::ControlTitleChanged, std::move(payload));
+        return;
+    }
+    v3::EventDraft applied;
+    applied.kind = v3::EventKindV3::SessionTitleApplied;
+    if (title_generation_id != nullptr) {
+        applied.title_generation_id = *title_generation_id;
+    }
+    applied.payload = nlohmann::json{{"title", title}, {"source", source}};
+    if (!old_title.empty()) {
+        applied.payload["oldTitle"] = old_title;
+    }
+    const auto receipt =
+        impl_->active->v3_main->AppendEvent(std::move(applied), trajectory::Durability::PowerLoss);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        platform::LogSink::Instance().Error("trajectory",
+                                            std::string("v3 标题落账失败: ") + receipt.error_code);
+    }
+}
+
+void TrajectorySessionLedger::RecordLocalTitleApplied(const std::string& title,
+                                                      const std::string& old_title) {
+    AppendTitleAppliedV3_(title, old_title, "local", nullptr);
+}
+
+void TrajectorySessionLedger::RecordGeneratedTitleApplied(const std::string& title_generation_id,
+                                                          const std::string& title,
+                                                          const std::string& old_title) {
+    AppendTitleAppliedV3_(title, old_title, "generated", &title_generation_id);
+}
+
+void TrajectorySessionLedger::RecordTitleRequested(const std::string& title_generation_id,
+                                                   const std::string& model,
+                                                   const std::string& provider) {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
+        return;
+    }
+    v3::EventDraft requested;
+    requested.kind = v3::EventKindV3::TitleRequested;
+    requested.title_generation_id = title_generation_id;
+    nlohmann::json payload{{"task", "session_title_refine"}};
+    if (!model.empty()) {
+        payload["model"] = model;
+    }
+    if (!provider.empty()) {
+        payload["provider"] = provider;
+    }
+    requested.payload = std::move(payload);
+    const auto receipt = impl_->active->v3_main->AppendEvent(std::move(requested),
+                                                             trajectory::Durability::ProcessCrash);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        platform::LogSink::Instance().Error("trajectory",
+                                            std::string("v3 标题请求落账失败: ") + receipt.error_code);
+    }
+}
+
+void TrajectorySessionLedger::RecordTitleExtracted(const std::string& title_generation_id,
+                                                   const std::string& title) {
+    if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
+        return;
+    }
+    v3::EventDraft extracted;
+    extracted.kind = v3::EventKindV3::TitleExtracted;
+    extracted.title_generation_id = title_generation_id;
+    extracted.payload = nlohmann::json{{"title", title}};
+    const auto receipt = impl_->active->v3_main->AppendEvent(std::move(extracted),
+                                                             trajectory::Durability::ProcessCrash);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        platform::LogSink::Instance().Error("trajectory",
+                                            std::string("v3 标题提取落账失败: ") + receipt.error_code);
+    }
 }
 
 void TrajectorySessionLedger::RecordModeChanged(const std::string& mode, const std::string& reason,
