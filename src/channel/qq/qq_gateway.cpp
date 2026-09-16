@@ -567,8 +567,9 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         return std::nullopt;
     };
     // 业务事件派发:鉴权窗补发流与运行期同一条路,统一走 AcceptDispatch
-    //(A04 回执制——last_seq 先记、宿主确认接住才推 durable 游标;未建模
-    // 的兄弟事件转宿主留终结记录)。PersistFailed 由调用方按可恢复故障断线。
+    //（A04 回执制——last_seq 先记、宿主确认接住才推 durable 游标;未建模
+    // 的兄弟事件转宿主留终结记录;PersistFailed 按可恢复故障断线,见下
+    // 方 switch 的 Dispatch 分支）。
     // Invalid Session 的三分处置(A09):d=true 会话仍可信,断线重连走
     // Resume;d=false 清 session 重新 Identify;d 缺失/非 bool——官方合同
     // 里不存在,会话可信度不可判定,按不可恢复处置(清 session 重新
