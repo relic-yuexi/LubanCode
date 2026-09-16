@@ -1,6 +1,8 @@
 #include "channel/qq/qq_ws_client.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <random>
 
@@ -222,9 +224,13 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
         return std::unexpected(ToWsError(written.error()));
     }
 
-    // 收响应头到 \r\n\r\n(带帽)。
+    // 收响应头到 \r\n\r\n(带帽)。读按 100ms 片轮询(Windows 的 shutdown
+    // 不保证叫醒卡在 select 的读——2026-09-17 CI 实锤:取消后干等对端
+    // 关闭才醒;片间查取消旗,不赌 OS 唤醒语义,总帽仍 connect_timeout)。
     std::string received;
     received.reserve(1024);
+    const auto read_deadline = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(options.connect_timeout_ms);
     while (true) {
         const std::size_t eoh = received.find("\r\n\r\n");
         if (eoh != std::string::npos) {
@@ -237,10 +243,24 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
                 WsError{WsError::Kind::Protocol, "handshake response header over cap", 0});
         }
         char chunk[512];
-        const auto got = client.ReadSome(chunk, sizeof(chunk), options.connect_timeout_ms);
+        const auto remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           read_deadline - std::chrono::steady_clock::now())
+                                           .count());
+        if (remaining_ms <= 0) {
+            if (cancellable && options.cancel->IsCancelled()) {
+                return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+            }
+            return std::unexpected(
+                WsError{WsError::Kind::Timeout, "handshake response header timeout", 0});
+        }
+        const int slice_ms = cancellable ? std::min(remaining_ms, 100) : remaining_ms;
+        const auto got = client.ReadSome(chunk, sizeof(chunk), slice_ms);
         if (!got.has_value()) {
             if (cancellable && options.cancel->IsCancelled()) {
                 return std::unexpected(WsError{WsError::Kind::Closed, "connect cancelled", 0});
+            }
+            if (got.error().kind == SocketErrorKind::Timeout) {
+                continue;  // 片到点没数据也没取消:下一片继续,总帽在循环头判。
             }
             return std::unexpected(ToWsError(got.error()));
         }
