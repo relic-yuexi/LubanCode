@@ -707,11 +707,12 @@ TEST_CASE("qq_adapter: A04 spool 落盘失败——PersistFailed 断线留根因
     ScriptGatewayTransport::Push(
         harness.gateway, C2cPayload("OPENF", "ROBOT1.0_mf1", "must not be lost"));
     // Fatal 留痕(spool_write_failed)——宿主 Degraded 可见。
-    REQUIRE(WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
-        return frame.value("method", "") == "channel.fatal" &&
-               frame.value("params", nlohmann::json::object())
-                   .value("reason", "") == "spool_write_failed";
-    }));
+    REQUIRE_FALSE(WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
+                       return frame.value("method", "") == "channel.fatal" &&
+                              frame.value("params", nlohmann::json::object())
+                                  .value("reason", "") == "spool_write_failed";
+                   })
+                      .empty());
     // 连接按可恢复故障断线:根因 = event_persist_failed(durable 游标没
     // 推进,不跨过失败事件)。
     REQUIRE(WaitQuiet([&harness]() {
