@@ -282,7 +282,7 @@ T11 不要求先把所有新功能做完才迁 usage；消费者只等自己用�
 失败/未验：本地未构建未跑测（纪律：验证一律交 CI）；真机（真实 exe+假后端）的 /compact --dry-run 与 AfterHardTrim 降档全链未跑（归 9.2 端到端矩阵批）；多通道（stdout/stderr 分离通道）结果的降档重派生未单测（夹具只造 combined 通道）；溢出门对 LoopTick 自动轮未挂（单内原文只点名 Goal，Loop 归 T13-L 对应替代口）
 旧依赖：v2 老路（HandleCompactCommand 的 dry-run/双账压缩、ShrinkOversizedToolResults 保命索）v2 会话照旧，退役归 T03；AfterHardTrim 在 v2 会话仍只告警不降档（降档梯是 v3 专属账）
 文档：本单 §七 勾销 + 本记录；schema 无新 kind（context.tool_previews.reduced/compact.requested reason 均既有合同），未改 docs
-销项日期：2026-09-16（CI 判绿口径；PR/CI 链接见下方补记）
+销项日期：2026-09-16（CI 判绿口径；PR #109，判绿头提交 48d53247，rollup conclusion=success——run https://github.com/relic-yuexi/LubanCode/actions/runs/35091114704 ，macos-clang 腿绿；此前三轮红分别为干跑打印三目类型、测试册 unique_ptr 箭头、begin_session 局部 unique_ptr 析构后的 CompactSession 悬垂（macos 上 applied 连环红+一处 SIGSEGV）与两枚测试账（极小档 120→50、goal 通知数计 iteration 起跑行），均就地修后复绿）
 ```
 
 ### T03 / V3-LEGACY-03：旧 compact 退役
