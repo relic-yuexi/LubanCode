@@ -477,7 +477,7 @@ TEST_CASE("默认-v3 冒烟: CLI compact 管理入口默认场分派 v3 干跑,�
                          const lubancode::agent::BackgroundCallAccounting&) {};
     in.record_fallback = [](lubancode::agent::TaskKind, lubancode::agent::ModelRole,
                             lubancode::agent::ModelRole, const std::string&) {};
-    in.trajectory = (*ledger).get();  // optional<unique_ptr> 两层解:裸指针给 in.trajectory
+    in.trajectory = &*ledger;  // Open 回 expected<TrajectorySessionLedger,string>(按值),解引用取址
     in.trajectory_wire = "openai-chat-completions";
 
     app::RunCompactCommand("--dry-run", in);
