@@ -419,15 +419,15 @@ TEST_CASE("wecom_adapter: spool 落盘失败——Fatal 留痕但照常上报(�
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     adapter->SetSpoolAppendFaultForTest(true);
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    // 照常上报:断线补发不存在,内存路不陪葬。
+    // 照常上报:断线补发不存在,内存路不陪葬。Fatal 在 inbound 之前落管,
+    // 同一批 drain 里数(再起一轮 WaitFrames 会因管道已排干而空等)。
     const auto frames = WaitFrames(adapter.get(), kIsInbound);
     REQUIRE(CountFrames(frames, kIsInbound) == 1);
     const auto is_spool_fatal = [](const nlohmann::json& frame) {
         return frame.value("method", "") == "channel.fatal" &&
                frame.at("params").at("reason") == "spool_write_failed";
     };
-    const auto fatals = WaitFrames(adapter.get(), is_spool_fatal);
-    CHECK(CountFrames(fatals, is_spool_fatal) == 1);
+    CHECK(CountFrames(frames, is_spool_fatal) == 1);
 }
 
 TEST_CASE("wecom_adapter: 重启重投——历史 pending 重新上报(宿主按 msgid 去重)") {

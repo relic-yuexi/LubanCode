@@ -344,7 +344,9 @@ TEST_CASE("wecom_gateway: event_callback 只转交;disconnected_event 让位即�
 
 TEST_CASE("wecom_gateway: 心跳按间隔发;回执清账,无人应答判死线重连") {
     Harness harness;
-    harness.ping_interval_ms = 60;  // 拍内可跑多轮心跳
+    // 拍长 150ms:死线要 3 拍无入站(≈450ms),CI 满载 runner 的线程停顿
+    // (百毫秒级)不至于在应答期误判;60ms 在慢机上翻过车。
+    harness.ping_interval_ms = 150;
     harness.Start();
     REQUIRE(harness.WaitForEvent([](const WecomGatewayEvent& e) {
         return e.kind == WecomGatewayEvent::Kind::SessionReady;
