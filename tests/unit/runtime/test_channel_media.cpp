@@ -326,6 +326,17 @@ TEST_CASE("send_file freezes original, isolates turns and rejects paths outside 
     {
         ChannelFileDeliveryScope scope(workspace, staging, "turn-one");
         CHECK(tool->execute({{"path", "../private.txt"}}).is_error);
+#ifndef _WIN32
+        const auto sibling = dir.root / "WORKSPACE";
+        std::filesystem::create_directories(sibling);
+        // Case-insensitive filesystems may alias it to workspace; either way it cannot
+        // be used to cross to a distinct canonical directory.
+        std::error_code case_ec;
+        if (!std::filesystem::equivalent(sibling, workspace, case_ec)) {
+            std::ofstream(sibling / "secret.txt") << "private";
+            CHECK(tool->execute({{"path", platform::PathToUtf8(sibling / "secret.txt")}}).is_error);
+        }
+#endif
         CHECK_FALSE(tool->execute({{"path", "report.txt"}}).is_error);
         CHECK_FALSE(tool->execute({{"path", "report.txt"}}).is_error);
         std::ofstream(workspace / "report.txt") << "modified";

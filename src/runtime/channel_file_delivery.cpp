@@ -7,6 +7,7 @@
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/channel_media_service.hpp"
+#include "agent/model_image_store.hpp"
 
 namespace lubancode::runtime {
 namespace {
@@ -15,8 +16,16 @@ std::filesystem::path Manifest(const std::filesystem::path& root, const std::str
     return root / "requests" / (platform::Sha256Hex(id) + ".json");
 }
 bool Inside(const std::filesystem::path& path, const std::filesystem::path& root) {
+#ifdef _WIN32
     const auto p = platform::PathComparisonKey(path);
     auto r = platform::PathComparisonKey(root);
+#else
+    std::error_code ec;
+    const auto p = std::filesystem::weakly_canonical(path, ec).generic_string();
+    if (ec) return false;
+    auto r = std::filesystem::weakly_canonical(root, ec).generic_string();
+    if (ec) return false;
+#endif
     if (!r.empty() && r.back() != '/') r += '/';
     return !r.empty() && p.rfind(r, 0) == 0;
 }
@@ -92,8 +101,10 @@ tools::Tool::Result ChannelFileDeliveryScope::Stage(const nlohmann::json& input)
     if (!platform::AtomicWriteFile(frozen, *bytes, platform::WriteDurability::ProcessCrashDurability))
         return Reply("文件暂存失败。", true);
     const auto name = SanitizeChannelAttachmentName(platform::PathToUtf8(path.filename()));
+    const auto format = agent::SniffImageFormat(*bytes);
     const nlohmann::json record = {{"path", platform::PathToUtf8(frozen)}, {"name", name},
-        {"sha256", hash}, {"size", bytes->size()}};
+        {"sha256", hash}, {"size", bytes->size()},
+        {"mime", format.mime_type.empty() ? "application/octet-stream" : format.mime_type}};
     if (!platform::AtomicWriteFile(manifest, record.dump(), platform::WriteDurability::ProcessCrashDurability))
         return Reply("投递清单保存失败。", true);
     return Reply("已暂存 " + name + "，随本轮回复投递；尚未确认 QQ 收件。");
@@ -112,7 +123,8 @@ std::optional<gateway::DurableReplyOutbox::ChannelAttachment> StagedChannelFile(
         gateway::DurableReplyOutbox::ChannelAttachment result;
         result.local_path = platform::PathToUtf8(path);
         result.file_name = SanitizeChannelAttachmentName(record.at("name").get<std::string>());
-        result.mime_type = "application/octet-stream";
+        const auto format = agent::SniffImageFormat(*bytes);
+        result.mime_type = format.mime_type.empty() ? "application/octet-stream" : format.mime_type;
         result.size_bytes = static_cast<std::int64_t>(bytes->size());
         return result;
     } catch (const nlohmann::json::exception&) { return std::nullopt; }

@@ -824,6 +824,7 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
                                       std::int64_t now_ms, const std::string& turn_key,
                                       const std::atomic<bool>* cancel) {
     AccountBooks* books = BooksFor(channel_id, account_id);
+    if (books == nullptr || books->session_map.broken()) return false;
     // Q5 补投锚:该会话最近一封被受理的来信(被动回复窗判定的原料)。
     // Q6 异步 turn 起,写在工作线程、读在 tick(FreshInboundAnchor)——
     // 过 recent_inbound_mutex_。

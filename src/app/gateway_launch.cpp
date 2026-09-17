@@ -134,6 +134,7 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         pump_options.lubancode_version = std::string(app::kVersion);
         pump_options.wire_name = config::ProviderWireName(gateway_config->config.wire);
         pump_options.model = gateway_config->config.model;
+        pump_options.skills_prompt = skills_prompt;
         pump_options.max_steps_per_turn = 32;   // V1 生产缺省:预算三根
         pump_options.max_wall_secs = 600;       // 硬线至少步数+墙钟两根
         pump.emplace();
