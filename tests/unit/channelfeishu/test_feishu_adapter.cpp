@@ -143,7 +143,7 @@ std::string EventFrameBytes(std::uint64_t seq, const char* event_id = "ev_adapte
                               R"({"message_id":"om_in_1","chat_id":"oc_1","chat_type":"p2p",)"
                               R"("message_type":"text","content":"{\"text\":")" + text +
                               R"("}"},"sender":)"
-                              R"({"sender_id":{"open_id":"ou_user9"},"sender_type":"user"}}})");
+                              R"({"sender_id":{"open_id":"ou_user9"},"sender_type":"user"}}})";
     return EncodeFeishuFrame(frame);
 }
 
@@ -307,6 +307,18 @@ std::vector<nlohmann::json> WaitFrames(FeishuBotAdapter* adapter,
     return all;
 }
 
+// WaitFrames 返回的是"截至命中帧的全部账"(含此前的 initialize/start 回
+// 包)——按谓词挑出目标帧,不赌下标。
+const nlohmann::json* FindFrame(const std::vector<nlohmann::json>& frames,
+                                const std::function<bool(const nlohmann::json&)>& pred) {
+    for (const auto& frame : frames) {
+        if (pred(frame)) {
+            return &frame;
+        }
+    }
+    return nullptr;
+}
+
 // 在假传输的 sent 账里找一枚 ACK 帧并解出载荷 JSON。
 std::optional<nlohmann::json> FindAckPayload(
     const std::shared_ptr<ScriptGatewayTransport::Shared>& shared) {
@@ -365,8 +377,10 @@ TEST_CASE("feishu_adapter: 坏 protocol_version 明败(protocol_incompatible)") 
     const auto frames = WaitFrames(harness.adapter.get(), [](const nlohmann::json& f) {
         return f.value("id", 0) == 8 && f.contains("error");
     });
-    REQUIRE_FALSE(frames.empty());
-    CHECK(frames[0].at("error").at("message") == "protocol_incompatible");
+    const nlohmann::json* error_frame =
+        FindFrame(frames, [](const nlohmann::json& f) { return f.value("id", 0) == 8; });
+    REQUIRE(error_frame != nullptr);
+    CHECK(error_frame->at("error").at("message") == "protocol_incompatible");
 }
 
 // ---------------------------------------------------------------------------
@@ -385,8 +399,11 @@ TEST_CASE("feishu_adapter: 事件先落 spool 再 emit;inbound.ack 清理;ACK �
     const auto frames = WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
         return frame.value("method", "") == "channel.inbound";
     });
-    REQUIRE_FALSE(frames.empty());
-    const nlohmann::json& event = frames[0].at("params");
+    const nlohmann::json* inbound_frame = FindFrame(frames, [](const nlohmann::json& frame) {
+        return frame.value("method", "") == "channel.inbound";
+    });
+    REQUIRE(inbound_frame != nullptr);
+    const nlohmann::json& event = inbound_frame->at("params");
     CHECK(event.at("channel_id") == "feishu");
     CHECK(event.at("account_id") == "main");
     CHECK(event.at("provider_event_id") == "ev_adapter_1");
@@ -420,8 +437,11 @@ TEST_CASE("feishu_adapter: spool 落盘失败 → Fatal + ACK 500(平台重推�
     const auto fatal = WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
         return frame.value("method", "") == "channel.fatal";
     });
-    REQUIRE_FALSE(fatal.empty());
-    CHECK(fatal[0].at("params").at("reason") == "spool_write_failed");
+    const nlohmann::json* fatal_frame = FindFrame(fatal, [](const nlohmann::json& frame) {
+        return frame.value("method", "") == "channel.fatal";
+    });
+    REQUIRE(fatal_frame != nullptr);
+    CHECK(fatal_frame->at("params").at("reason") == "spool_write_failed");
     // ACK 500:没接住,让平台重推(宿主 ingress 去重兜底)。
     REQUIRE(harness.WaitQuiet([&] {
         const auto ack = FindAckPayload(harness.gateway);
@@ -451,8 +471,12 @@ TEST_CASE("feishu_adapter: spool 重启重投——pending 在新实例上重新
         const auto frames = WaitFrames(second.adapter.get(), [](const nlohmann::json& frame) {
             return frame.value("method", "") == "channel.inbound";
         });
-        REQUIRE_FALSE(frames.empty());
-        const nlohmann::json& event = frames[0].at("params");
+        const nlohmann::json* inbound_frame =
+            FindFrame(frames, [](const nlohmann::json& frame) {
+                return frame.value("method", "") == "channel.inbound";
+            });
+        REQUIRE(inbound_frame != nullptr);
+        const nlohmann::json& event = inbound_frame->at("params");
         CHECK(event.at("provider_event_id") == "ev_restart_1");
         CHECK(second.adapter->spool_pending_count() == 1);  // 重投后仍在账(等 ack)
     }
@@ -480,9 +504,11 @@ TEST_CASE("feishu_adapter: channel.send 走 reply(锚进 URL + Bearer + msg_type
     const auto results = WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
         return frame.value("id", 0) == 3 && frame.contains("result");
     });
-    REQUIRE_FALSE(results.empty());
-    CHECK(results[0].at("result").at("provider_message_id") == "om_replied_1");
-    CHECK(results[0].at("result").at("accepted") == true);
+    const nlohmann::json* result_frame =
+        FindFrame(results, [](const nlohmann::json& f) { return f.value("id", 0) == 3; });
+    REQUIRE(result_frame != nullptr);
+    CHECK(result_frame->at("result").at("provider_message_id") == "om_replied_1");
+    CHECK(result_frame->at("result").at("accepted") == true);
 
     // HTTP 账:令牌一次 + reply 一次;锚进 URL,Bearer 进头,text 进体。
     REQUIRE(harness.WaitQuiet([&] {
@@ -522,8 +548,10 @@ TEST_CASE("feishu_adapter: channel.send 走 reply(锚进 URL + Bearer + msg_type
     const auto rejects = WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
         return frame.value("id", 0) == 4 && frame.contains("error");
     });
-    REQUIRE_FALSE(rejects.empty());
-    CHECK(rejects[0].at("error").at("message") == "not_capable");
+    const nlohmann::json* reject_frame =
+        FindFrame(rejects, [](const nlohmann::json& f) { return f.value("id", 0) == 4; });
+    REQUIRE(reject_frame != nullptr);
+    CHECK(reject_frame->at("error").at("message") == "not_capable");
 
     // 非文本 part:首版只发文本,明拒。
     nlohmann::json file_params = params;
@@ -533,8 +561,10 @@ TEST_CASE("feishu_adapter: channel.send 走 reply(锚进 URL + Bearer + msg_type
     const auto file_rejects = WaitFrames(harness.adapter.get(), [](const nlohmann::json& frame) {
         return frame.value("id", 0) == 5 && frame.contains("error");
     });
-    REQUIRE_FALSE(file_rejects.empty());
-    CHECK(file_rejects[0].at("error").at("message") == "not_capable");
+    const nlohmann::json* file_reject_frame =
+        FindFrame(file_rejects, [](const nlohmann::json& f) { return f.value("id", 0) == 5; });
+    REQUIRE(file_reject_frame != nullptr);
+    CHECK(file_reject_frame->at("error").at("message") == "not_capable");
     CHECK(harness.http.CountUrl("/reply") == 1);  // 没多出一笔
 }
 
