@@ -65,7 +65,7 @@ std::expected<void, std::string> LoadHookPackage(MiddlewarePool& pool,
     if (entry.empty()) {
         return std::unexpected("清单缺 entry 字段: " + manifest_path.string());
     }
-    auto entry_path = ResolveEntryWithinPackage(package_dir, entry);
+    auto entry_path = ResolveHookEntryPath(package_dir, entry);
     if (!entry_path.has_value()) {
         return std::unexpected(entry_path.error());
     }
@@ -78,6 +78,11 @@ std::expected<void, std::string> LoadHookPackage(MiddlewarePool& pool,
         return std::unexpected(added.error().code + ": " + added.error().message);
     }
     return {};
+}
+
+std::expected<std::filesystem::path, std::string> ResolveHookEntryPath(
+    const std::filesystem::path& package_root, const std::string& entry) {
+    return ResolveEntryWithinPackage(package_root, entry);
 }
 
 HookPackageLoadReport LoadHookPackages(MiddlewarePool& pool, const std::filesystem::path& hooks_root,

@@ -47,6 +47,25 @@ DispatchTrigger MakeTrigger(const MiddlewareHookContext& context, nlohmann::json
     return trigger;
 }
 
+// LuaHook 单 P1-D(§六排空):本文件四个派发口的 in-flight 账——
+// BindMiddlewareSessionWriter 换 sink/写者前等它归零,在途 dispatch 不被
+// 拆引用。直接调 MiddlewareDispatcher::Dispatch 的测试路不记(零行为不变)。
+struct MiddlewareDispatchScope {
+    hooks::HookDispatcher* dispatcher;
+    ~MiddlewareDispatchScope() {
+        if (dispatcher != nullptr) {
+            dispatcher->LeaveMiddlewareDispatch();
+        }
+    }
+};
+
+MiddlewareDispatchScope EnterDispatch(hooks::HookDispatcher* dispatcher) {
+    if (dispatcher != nullptr) {
+        dispatcher->EnterMiddlewareDispatch();
+    }
+    return MiddlewareDispatchScope{dispatcher};
+}
+
 // 结局 → 闸门语义:业务 deny 与 required 失败都拦(deny 与脚本错误分开,
 // 但对宿主都是"本轮不继续"); Completed 放行。
 bool OutcomeBlocks(const DispatchOutcome& outcome, std::string* code, std::string* reason) {
@@ -140,6 +159,7 @@ PreUserGate RunPreUserMiddleware(hooks::HookDispatcher* dispatcher, const std::s
     if (middleware == nullptr) {
         return gate;  // 零行为:与迁移前逐字节等价
     }
+    const MiddlewareDispatchScope dispatch_scope = EnterDispatch(dispatcher);
     DispatchTrigger trigger = MakeTrigger(context, nlohmann::json{{"prompt", user_text}});
     // 链尾 = 宿主接纳位:返回待接纳候选(§四)。
     DispatchOutcome outcome = middleware->Dispatch(HookPoint::PreUser, trigger,
@@ -174,6 +194,7 @@ PostUserAppend RunPostUserMiddleware(hooks::HookDispatcher* dispatcher, const st
     if (middleware == nullptr) {
         return append;
     }
+    const MiddlewareDispatchScope dispatch_scope = EnterDispatch(dispatcher);
     DispatchTrigger trigger = MakeTrigger(context, nlohmann::json{{"prompt", admitted_prompt}});
     DispatchOutcome outcome = middleware->Dispatch(HookPoint::PostUser, trigger,
                                                    [](const nlohmann::json& input) { return input; },
@@ -203,6 +224,7 @@ PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
     if (middleware == nullptr) {
         return stages;
     }
+    const MiddlewareDispatchScope dispatch_scope = EnterDispatch(dispatcher);
     stages.dispatched = true;
 
     // ---- 段一 mutate:改输入的最后机会(§4.36)。----
@@ -352,6 +374,7 @@ std::expected<nlohmann::json, std::string> EstimateBypassRequestTokens(
         // 替换可言,回落即正确语义。
         return hooks::middleware::ComputeUtf8BytesDiv4Estimate(request_snapshot);
     }
+    const MiddlewareDispatchScope dispatch_scope = EnterDispatch(dispatcher);
     DispatchTrigger trigger = MakeTrigger(context, request_snapshot, hooks::middleware::Stage::Estimate);
     DispatchOutcome outcome =
         middleware->Dispatch(HookPoint::PreRequest, trigger,

@@ -18,6 +18,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -76,6 +78,9 @@ inline constexpr std::string_view kToolBadInput         = "hook.tool.invalid_arg
 inline constexpr std::string_view kToolCallCap          = "hook.tool.call_cap";
 inline constexpr std::string_view kToolRepeatCap        = "hook.tool.repeat_cap";
 inline constexpr std::string_view kToolRecursionDepth   = "hook.tool.recursion_depth";
+// LuaHook P1-D(§六 clear/exit 排空):排空窗口里新的子执行一律拒——迟到
+// 结果归发起会话,排空后不再接新外部工作。
+inline constexpr std::string_view kToolDrained          = "hook.tool.drained";
 }  // namespace hookapi_err
 
 // Lua 失败表的 C++ 形状(与 plugin_http 的 err 表同款;hook Host API 共用)。
@@ -257,6 +262,10 @@ public:
         int max_same_tool_calls = 3;
         int max_recursion_depth = 2;
         std::uint64_t result_preview_bytes = 32 * 1024;  // 回 Lua 的正文帽
+        // LuaHook P1-D:排空旗(服务中心持活;null = 永不因排空拒)。置位后
+        // 新的子执行按 hook.tool.drained 拒——在途调用照旧跑完,迟到结果仍
+        // 落在发起会话的账上。
+        const std::atomic<bool>* drain = nullptr;
     };
 
     explicit HookToolExecutionService(Options options) : options_(std::move(options)) {}
@@ -351,6 +360,32 @@ public:
     void SetSubExecutionWriter(trajectory::v3::V3Writer* writer) { writer_.store(writer); }
     trajectory::v3::V3Writer* sub_execution_writer() const { return writer_.load(); }
 
+    // ---- LuaHook P1-D 生命周期(§六 clear/exit 排空与迟到结果归属)----
+    // 排空窗口:BeginDrain 起、EndDrain 止。窗口内——
+    //   * 新 invocation 的服务束不再授 http/fs/tools(只留进程内的
+    //     state/log/context;§六"停接新工作");
+    //   * 在途 invocation 的工具桥对新的子执行回 hook.tool.drained(在途
+    //     HTTP/文件调用跑完才算排空,不强拆);
+    //   * 迟到的子执行终态落回发起会话的写者(ledger 在 Build 时钉死),
+    //     不写进排空后新开的 session。
+    // 换场序:BeginDrain -> WaitForDrain(等 in-flight 归零) -> 换绑写者/
+    // 封旧账 -> EndDrain。BindMiddlewareSessionWriter 已按此序自动排空。
+    void BeginDrain(std::string reason);
+    void EndDrain();  // 新会话开卷后恢复接活(排空旗共享,build 里的束同看)
+    bool draining() const { return drain_flag_->load(); }
+    // 排空旗(活指针;服务束/工具桥持有它跨调用看,不拷值)。
+    const std::atomic<bool>* drain_flag() const { return drain_flag_.get(); }
+    std::string drain_reason() const;
+
+    // in-flight invocation 计(MakeLuaHookHandler 进出配对;observer 线程
+    // 由 Dispatch join,不单计)。 WaitForDrain 等它归零。
+    void EnterInvocation();
+    void LeaveInvocation();
+    int in_flight() const;
+    // 等排空:true = 已归零;false = 到点仍有在途(调用方按 §六"无法核实
+    // 保留 unknown"收口,不强等)。
+    bool WaitForDrain(std::chrono::milliseconds timeout);
+
     // per-invocation 服务束:申请 ∩ 授权。package_id 进 state 命名空间与
     // 日志来源;cancel 灌进 HTTP/工具桥的取消链。
     std::unique_ptr<LuaHookServices> Build(const std::vector<std::string>& requested_capabilities,
@@ -360,6 +395,13 @@ public:
 private:
     Grants grants_;
     std::atomic<trajectory::v3::V3Writer*> writer_{nullptr};
+    // 排空旗用 shared_ptr:服务束里的工具桥持裸指针跨调用,中心的这份旗
+    // 即便随中心重置也不悬垂(进程级中心本就长活,双保险)。
+    std::shared_ptr<std::atomic<bool>> drain_flag_ = std::make_shared<std::atomic<bool>>(false);
+    std::string drain_reason_;
+    int in_flight_ = 0;
+    mutable std::mutex drain_mutex_;
+    std::condition_variable drain_cv_;
 };
 
 // 进程级缺省中心(与 app::HookRuntime 同一代价取向:进程一份,退出不析构
