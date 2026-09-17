@@ -43,7 +43,7 @@
 
 ## 记账（2026-09-17 销单）
 
-- 分支/PR：worktree-agent-qq-silent-fail（PR 与 CI 链接见提交说明补录）。
+- 分支/PR：worktree-agent-qq-silent-fail → https://github.com/relic-yuexi/LubanCode/pull/114（CI 结论见该 PR 的 checks）。
 - 符号：
   - `api::DiagnoseUnestimatedInput` / `api::UnestimatedDiagnosis` / `api::kSignatureMetadataBudgetBytes`（src/api/model_input_snapshot.hpp）——四类内容分类与安全诊断（路径/类别/键/块类型/计数，零字段值）。
   - `runtime::MakeTurnFailureNotice` / `ChannelWorkPump::EnqueueTurnFailureNotice`（src/runtime/channel_work_pump.*）——脱敏短编号提示（E-CTX1/CTX2/CNL1/NET1/SES1/INT1/RPL1/RVW1/OTH1），幂等入 outbox（selection_id `turnfail:<ch>:<acct>:<sid>`），A05 (账号,锚) 发号共用。
