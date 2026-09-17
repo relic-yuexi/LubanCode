@@ -166,6 +166,9 @@ TEST_CASE("feishu_wiring: 五闸全过——feishu 账号真装配进 ChannelMan
     channel::ChannelAccountUserConfig account = channel::MakeFeishuTemplateAccount();
     account.enabled = true;
     account.app_id = "cli_app1";
+    // 测试用 inline 明文当来源:模板预指的 secret_env 得清掉(resolver 的
+    // 高优先级来源不静默降级——env 未设置会明报 secret_env_missing)。
+    account.secret_env.reset();
     account.secret = std::string("inline-secret");
     feishu.accounts["work"] = account;
     config.channels["feishu"] = feishu;
@@ -265,6 +268,7 @@ TEST_CASE("feishu_wiring: 混配渠道——qq 与 feishu 各自装配,互不干
         channel::MakeFeishuTemplateAccount();
     feishu_account.enabled = true;
     feishu_account.app_id = "cli_app1";
+    feishu_account.secret_env.reset();  // 同上:inline 来源须清模板预指
     feishu_account.secret = std::string("inline-secret");
     feishu.accounts["work"] = feishu_account;
     config.channels["feishu"] = feishu;
