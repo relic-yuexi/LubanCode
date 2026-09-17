@@ -382,11 +382,22 @@ TEST_CASE("wecom_gateway: 心跳按间隔发;回执清账,无人应答判死线�
     REQUIRE(harness.WaitForEvent([](const WecomGatewayEvent& e) {
         return e.kind == WecomGatewayEvent::Kind::BackoffScheduled;
     }));
-    // 重连各发一次 subscribe(第二连插队回执仍是 0)。
+    // 重连各发一次 subscribe(第二连插队回执仍是 0)。SessionReady 事件与 subscribe
+    // 帧落账之间无固定次序,慢机上可能先见事件后见帧——按计数轮询,不吃时序。
     REQUIRE(harness.WaitForEvent([](const WecomGatewayEvent& e) {
         return e.kind == WecomGatewayEvent::Kind::SessionReady;
     }));
-    CHECK(FakeTransport::CountSent(harness.shared, "aibot_subscribe") >= 2);
+    const auto wait_subscribe_count = [&harness](int want) {
+        const auto deadline = platform::WallClockNowMs() + 5'000;
+        while (platform::WallClockNowMs() < deadline) {
+            if (FakeTransport::CountSent(harness.shared, "aibot_subscribe") >= want) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+    CHECK(wait_subscribe_count(2));
 }
 
 // ---------------------------------------------------------------------------

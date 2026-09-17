@@ -134,8 +134,8 @@ TEST_CASE("wecom_wiring: setup 平台表与模板——BotID/Secret 语义落账
 TEST_CASE("wecom_wiring: setup 提交——wecombot 走自家模板(dry_run 差异)") {
     const auto root = MakeTempRoot("setup_dry");
     channel::ChannelConfigService::Options options;
-    options.config_file = root / "config.json";
-    options.secrets_root = root / "secrets";
+    options.config_file = (root / "config.json").string();
+    options.secrets_root = (root / "secrets").string();
     options.lock_timeout_ms = 2'000;
     channel::ChannelSetupCommitRequest request;
     request.channel_id = "wecombot";
@@ -158,8 +158,8 @@ TEST_CASE("wecom_wiring: setup 提交——wecombot 走自家模板(dry_run 差�
 
 TEST_CASE("wecom_wiring: setup 未知平台报错文案含 wecombot(单一真源)") {
     channel::ChannelConfigService::Options options;
-    options.config_file = std::filesystem::temp_directory_path() / "no-such-config.json";
-    options.secrets_root = std::filesystem::temp_directory_path() / "no-such-secrets";
+    options.config_file = (std::filesystem::temp_directory_path() / "no-such-config.json").string();
+    options.secrets_root = (std::filesystem::temp_directory_path() / "no-such-secrets").string();
     channel::ChannelSetupCommitRequest request;
     request.channel_id = "ghostim";
     request.account_id = "main";
