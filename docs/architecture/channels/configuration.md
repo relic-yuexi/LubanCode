@@ -39,6 +39,12 @@ _阶段 0 冻结件。渠道是全局网络能力，层级规矩比普通模型�
 }
 ```
 
+### 相对时间提醒
+
+`create_reminder` 的时间参数三选一：`delay_seconds`（相对延时）、`at_ms`（UTC 毫秒时刻）、`cron`（周期）。例如“五分钟后提醒我取报告”传 `{"description":"取报告","delay_seconds":300}`，宿主以这条消息的接收时间加 300 秒。重试沿用同一时刻，不把提醒越推越晚。延时须为正整数，最长十年；成功回执提供 `dueAtMs` 和可直接读取的 `dueAtUtc`（ISO 8601 UTC 时间）。
+
+Gateway 的 system 只放工作目录等稳定说明，不注入动态时间。需要当前日期或时刻时，模型调用只读工具 `get_current_time`，取得 `now_ms`、ISO 8601 `utc` 和 `timezone: UTC`；时间只通过工具回执进入历史。QQ 新账号模板默认允许此工具；已有账号若设置了 `tools.allow`，须在各层允许名单补上 `get_current_time`。相对提醒直接传 `delay_seconds`，无需 shell 权限，也不让模型猜时间戳。
+
 ## 2. 层级规矩
 
 四层各守各的口：
@@ -203,7 +209,7 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
   "allow_bots": false,
   "require_mention": true,
   "reply": {"mode": "final"},
-  "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder"]}
+  "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder", "get_current_time"]}
 }
 ```
 

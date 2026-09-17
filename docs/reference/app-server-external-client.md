@@ -3,7 +3,7 @@
 [参考手册](README.md) · [app-server 协议](../features/app-server/README.md) · [能力裁剪合同](capability-contract.md) §13
 
 外部应用接入 LubanCode Worker 的兼容基线与验收口径。出处
-`todos/应用Worker接入补齐_Agent与Skills装配_独立参数目录及恢复隔离.todo`
+对应设计单
 §十一(报告交接与能力声明)、P4。首发参考客户端:
 [examples/node-client](../../examples/node-client/)。
 

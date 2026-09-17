@@ -12,8 +12,8 @@ approve/use/promote/rollback、staging 原子落 version store、点名 canary�
 process Plugin 草稿——判据、形状、四类安全夹具、零进程零挂载，见
 "代码候选草稿（阶段 6 落地）"节）。自动建议未落，命令与行为以实现后的
 程序为准。设计全文见
-`todos/Package驱动的自进化闭环设计.todo`；Package 清单与目录契约见
-`todos/统一Package封装与组件挂载系统设计.todo`。
+原设计单(已归档)；Package 清单与目录契约见
+原设计单(已归档)。
 
 ## 一句话
 

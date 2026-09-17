@@ -80,6 +80,7 @@ public:
     ToolOutcome CreateReminder(const nlohmann::json& input);
     ToolOutcome ListReminders();
     ToolOutcome CancelReminder(const nlohmann::json& input);
+    ToolOutcome GetCurrentTime() const;
 
     const gateway::AutomationStore* store() const { return store_; }
 
@@ -91,8 +92,8 @@ private:
     std::optional<TurnContext> current_;
 };
 
-// 注册三枚渠道任务工具(幂等:同名已在不重复注册)。QQ 模板 allow 列了
-// 这三个名字;本地 CLI 会话/自动任务轮没有 TurnScope,调用一律拒绝。
+// 注册渠道任务工具与只读时钟(幂等:同名已在不重复注册)。
+// 任务操作需要 TurnScope；读时钟不依赖任务账或渠道身份。
 void RegisterChannelAutomationTools(tools::ToolRegistry& registry,
                                     std::shared_ptr<ChannelAutomationBridge> bridge);
 
@@ -100,5 +101,6 @@ void RegisterChannelAutomationTools(tools::ToolRegistry& registry,
 inline constexpr const char* kChannelCreateReminderTool = "create_reminder";
 inline constexpr const char* kChannelListRemindersTool = "list_reminders";
 inline constexpr const char* kChannelCancelReminderTool = "cancel_reminder";
+inline constexpr const char* kChannelGetCurrentTimeTool = "get_current_time";
 
 }  // namespace lubancode::runtime

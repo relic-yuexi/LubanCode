@@ -2,9 +2,11 @@
 #include "runtime/channel_automation.hpp"
 
 #include <chrono>
+#include <limits>
 #include <utility>
 
 #include "channel/qq/qq_proto.hpp"  // ParseLooseInt64(模型数值字段宽松解析)
+#include "runtime/time_context.hpp"
 
 namespace lubancode::runtime {
 
@@ -122,14 +124,19 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
         outcome.error = "description 超长(上限 4000 字节),请精简任务描述。";
         return outcome;
     }
-    // 时间规格:at_ms(once)与 cron(周期)二选一,都得显式。
+    // 三种时间规格互斥；相对时间由宿主计算。
     const bool has_at = input.contains("at_ms");
-    const bool has_cron = input.contains("cron") && input["cron"].is_string() &&
-                          !input["cron"].get<std::string>().empty();
-    if (has_at == has_cron) {
+    const bool has_delay = input.contains("delay_seconds");
+    const bool has_cron = input.contains("cron");
+    if (int(has_at) + int(has_delay) + int(has_cron) != 1) {
         outcome.error_code = "channel_job.bad_input";
-        outcome.error = "时间规格须且只须给一项:at_ms(单次,UTC 毫秒)或 cron(周期,五字段)。"
+        outcome.error = "时间规格须且只须给一项:delay_seconds(几秒后)、at_ms(UTC 毫秒)或 cron(周期)。"
                         "缺时间或歧义时先向用户问清,不要猜。";
+        return outcome;
+    }
+    if (has_cron && (!input["cron"].is_string() || input["cron"].get<std::string>().empty())) {
+        outcome.error_code = "channel_job.bad_input";
+        outcome.error = "cron 须为非空五字段表达式。";
         return outcome;
     }
     std::string timezone = "UTC";
@@ -147,8 +154,22 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
     spec.delivery_channel = ctx->channel_id;
     spec.delivery_account = ctx->account_id;
     spec.delivery_conversation = ctx->conversation_id;
-    if (has_at) {
-        const auto at_ms = channel::qq::ParseLooseInt64(input["at_ms"]);
+    if (has_at || has_delay) {
+        std::optional<std::int64_t> at_ms;
+        if (has_delay) {
+            const auto seconds = channel::qq::ParseLooseInt64(input["delay_seconds"]);
+            if (!seconds || *seconds <= 0 || *seconds > kMaxOnceLeadMs / 1000 ||
+                ctx->received_at_ms <= 0 ||
+                ctx->received_at_ms > std::numeric_limits<std::int64_t>::max() - *seconds * 1000) {
+                outcome.error_code = "channel_job.bad_input";
+                outcome.error = "delay_seconds 须为正整数且不超过十年，来信时间须有效。";
+                return outcome;
+            }
+            // 以原消息时间为锚，同信重试不漂移，幂等载荷保持一致。
+            at_ms = ctx->received_at_ms + *seconds * 1000;
+        } else {
+            at_ms = channel::qq::ParseLooseInt64(input["at_ms"]);
+        }
         if (!at_ms.has_value()) {
             outcome.error_code = "channel_job.bad_input";
             outcome.error = "at_ms 不是合法整数(UTC 毫秒)。";
@@ -204,6 +225,7 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
     }
     if (spec.kind == gateway::ScheduleKind::Once) {
         payload["dueAtMs"] = spec.due_at_ms;
+        payload["dueAtUtc"] = UtcTimeText(spec.due_at_ms);
     }
     outcome.ok = true;
     outcome.duplicate = receipt.duplicate;
@@ -327,13 +349,33 @@ tools::Tool::Result AsToolResult(const ToolOutcome& outcome) {
     return tools::Tool::Result::Text(payload.dump());
 }
 
+class GetCurrentTimeTool final : public tools::Tool {
+public:
+    explicit GetCurrentTimeTool(std::shared_ptr<ChannelAutomationBridge> bridge)
+        : bridge_(std::move(bridge)) {}
+    std::string name() const override { return kChannelGetCurrentTimeTool; }
+    std::string description() const override {
+        return "读取宿主当前时间，返回 UTC 毫秒时间戳和 ISO 8601 日期时间。"
+               "需要判断今天、明天或绝对日期时调用，不沿用旧回执；相对提醒直接用 delay_seconds。";
+    }
+    nlohmann::json input_schema() const override {
+        return {{"type", "object"}, {"properties", nlohmann::json::object()}};
+    }
+    tools::Tool::Result execute(const nlohmann::json&) override {
+        return AsToolResult(bridge_->GetCurrentTime());
+    }
+private:
+    std::shared_ptr<ChannelAutomationBridge> bridge_;
+};
+
 class CreateReminderTool final : public tools::Tool {
 public:
     explicit CreateReminderTool(std::shared_ptr<ChannelAutomationBridge> bridge)
         : bridge_(std::move(bridge)) {}
     std::string name() const override { return kChannelCreateReminderTool; }
     std::string description() const override {
-        return "为当前聊天用户设置一笔定时任务/提醒。时间解析由你完成:把用户的自然语言时间"
+        return "为当前聊天用户设置一笔定时任务/提醒。几分钟后等相对时间必须用 delay_seconds"
+               "（五分钟=300），宿主从来信时刻计算，不要猜测或试探 at_ms。绝对时间"
                "(含时区)折算成 at_ms(单次,UTC 毫秒)或五字段 cron(周期),并显式传 timezone"
                "(IANA 名,如 Asia/Shanghai)。时间已过或含糊时先问用户,不要猜。创建成功回执带"
                " jobId 与下次触发时间,向用户复述完整日期、时间、时区。";
@@ -347,6 +389,9 @@ public:
                                                           {"description", "任务/提醒内容"}})},
                  {"at_ms", nlohmann::json::object({{"type", "integer"},
                                                    {"description", "单次触发时刻(UTC 毫秒)"}})},
+                 {"delay_seconds", nlohmann::json::object({{"type", "integer"},
+                     {"minimum", 1}, {"maximum", kMaxOnceLeadMs / 1000},
+                     {"description", "从本条消息接收时刻起延时秒数；五分钟后传 300。与 at_ms、cron 三选一"}})},
                  {"cron",
                   nlohmann::json::object({{"type", "string"},
                                           {"description", "周期表达式(分 时 日 月 周,五字段)"}})},
@@ -414,10 +459,25 @@ private:
 
 }  // namespace
 
+ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::GetCurrentTime() const {
+    const std::int64_t now = now_ms_ ? now_ms_() : DefaultNowMs();
+    ToolOutcome outcome;
+    outcome.ok = true;
+    outcome.payload = {{"now_ms", now}, {"utc", UtcTimeText(now)}, {"timezone", "UTC"}};
+    return outcome;
+}
+
 void RegisterChannelAutomationTools(tools::ToolRegistry& registry,
                                     std::shared_ptr<ChannelAutomationBridge> bridge) {
     if (bridge == nullptr) {
         return;
+    }
+    if (registry.Find(kChannelGetCurrentTimeTool) == nullptr) {
+        tools::ToolRegistration registration;
+        registration.tool = std::make_unique<GetCurrentTimeTool>(bridge);
+        registration.source_kind = tools::ToolSourceKind::Builtin;
+        registration.effect_class = tools::EffectClass::ReadOnlyLocal;
+        registry.Register(std::move(registration));
     }
     if (registry.Find(kChannelCreateReminderTool) == nullptr) {
         tools::ToolRegistration registration;
