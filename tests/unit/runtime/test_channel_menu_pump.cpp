@@ -30,6 +30,7 @@
 #include "runtime/channel_automation.hpp"
 #include "runtime/channel_work_pump.hpp"
 #include "runtime/headless_executor.hpp"
+#include "runtime/channel_file_delivery.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/tool.hpp"
 #include "workspace/identity.hpp"
@@ -261,7 +262,7 @@ struct MenuPumpFixture {
         config.transport = "websocket";
         config.secret_env = "QQBOT_SECRET";
         config.dm_policy = dm_policy;
-        config.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder"};
+        config.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder", "send_file"};
         config.commands = MenuCommands();
         REQUIRE(manager->AddAccount("qqbot", "main", config, &transport).status ==
                 channel::ChannelManager::AddAccountResult::Status::Ok);
@@ -295,6 +296,7 @@ struct MenuPumpFixture {
         bridge = std::make_shared<runtime::ChannelAutomationBridge>(automation->store(),
                                                                     [this] { return now; });
         runtime::RegisterChannelAutomationTools(registry, bridge);
+        runtime::RegisterChannelFileTool(registry);
         runtime::ChannelWorkPump::Options work_options;
         work_options.manager = manager.get();
         work_options.outbox = automation->outbox();
@@ -305,8 +307,12 @@ struct MenuPumpFixture {
         work_options.lubancode_version = "0.26.267-test";
         work_options.wire_name = "test-wire";
         work_options.model = "test-model";
-        work_options.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder"};
+        work_options.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder", "send_file"};
         work_options.max_steps_per_turn = 8;
+        work_options.skills_prompt = "Available skill: demo-skill";
+        work_options.media_download = [](const std::string&) -> std::expected<runtime::ChannelMediaBytes, std::string> {
+            return runtime::ChannelMediaBytes{std::string("GIF89a\x01\x00\x01\x00\x00\x00\x00", 13)};
+        };
         work_options.automation_store = automation->store();
         work_options.automation_bridge = bridge;
         pump.emplace();
@@ -494,4 +500,40 @@ TEST_CASE("QQ builtins manage isolated contexts without sending slash commands t
     CHECK(fixture.SentTextAt(7).find("暂不支持") != std::string::npos);
     CHECK(fixture.SentTextAt(8).find("未装配") != std::string::npos);
     CHECK(fixture.backend->systems.back().find("宿主时钟") != std::string::npos);
+}
+
+TEST_CASE("QQ accepted pictures reach provider input and generated files enter outbox") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    MenuPumpFixture fixture("vision-file", channel::DmPolicy::Open);
+    fixture.scripts = {TextScript("picture received"),
+        ToolUseScript("send-1", "send_file", R"({"path":"report.txt"})"),
+        TextScript("文件已暂存，随回复投递。")};
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+    std::ofstream(fixture.root / "report.txt") << "report content";
+    auto event = MakeDmAt("image-1", "image-1", "dm-a", "read image", "image-1", fixture.now);
+    channel::ChannelPart part;
+    part.type = channel::ChannelPartType::Image;
+    part.remote_ref = "https://example.qq.com/image";
+    part.mime_type = "image/gif";
+    part.file_name = "test.gif";
+    event.parts.push_back(part);
+    fixture.EmitAndIngest(event);
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.backend->image_counts.size() == 1);
+    CHECK(fixture.backend->image_counts[0] == 1);
+    CHECK(fixture.backend->systems[0].find("demo-skill") != std::string::npos);
+    fixture.EmitAndIngest(MakeDmAt("file-2", "file-2", "dm-a", "send report", "file-2", fixture.now));
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    bool found = false;
+    for (const auto& item : fixture.automation->outbox()->ListItems()) {
+        if (item.attachment_file_name == "report.txt") {
+            found = true;
+            CHECK_FALSE(item.attachment_local_path.empty());
+        }
+    }
+    CHECK(found);
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
 }

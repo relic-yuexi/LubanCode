@@ -17,6 +17,7 @@
 #include "channel/qq/qq_media.hpp"  // Q4:附件下载 seam 的 QQ 实现
 #include "cli/gateway_command.hpp"
 #include "config/config.hpp"
+#include "config/model_catalog.hpp"
 #include "gateway/profile.hpp"
 #include "gateway/reply_outbox.hpp"
 #include "runtime/automation_pump.hpp"
@@ -86,6 +87,9 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         skill_source = "技能来自官方、用户及当前项目的 .agents/skills 与 .lubancode/skills；修改后重启 Gateway。";
     }
     const auto skills_prompt = tools::BuildSkillsPromptSegment(skills, skill_source);
+    const auto model_catalog = config::LoadModelCatalog();
+    const bool accepts_images = config::ClassifyImageInputSupport(model_catalog.FindByProviderAndSlug(
+        gateway_config->config.active_provider, gateway_config->config.model)) != config::ImageInputSupport::TextOnly;
     std::string skills_summary = "已加载技能：" + std::to_string(skills.size()) + "\n" + skill_source + "\n";
     for (const auto& skill : skills) skills_summary += "- " + skill.name + "\n";
     tools::ToolRegistry registry = app::BuildBaseToolRegistry(skills, gateway_config->config.search);
@@ -221,6 +225,7 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                 work_options.model = gateway_config->config.model;
                 work_options.skills_prompt = skills_prompt;
                 work_options.skills_summary = skills_summary;
+                work_options.accepts_images = accepts_images;
                 work_options.max_steps_per_turn = 32;  // 与 automation 同款预算
                 work_options.max_wall_secs = 600;
                 // Q5:automation 账与任务桥递进(渠道任务认领/执行/补投 +

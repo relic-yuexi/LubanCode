@@ -239,6 +239,10 @@ std::string ChannelWorkPump::IngestAttachmentsPrompt(
             prompt += "\n";
         }
         prompt += receipt.prompt_line;
+        if (receipt.ready && receipt.mime_type.rfind("image/", 0) == 0 && !options_.accepts_images) {
+            prompt += "\n[当前模型目录声明只支持文本，图片已存档但未送入视觉输入。请换支持图片的模型。]";
+            continue;
+        }
         if (images != nullptr) {
             if (auto image = LoadChannelImage(receipt)) {
                 images->push_back(std::move(*image));
@@ -910,6 +914,7 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
                 }
                 if (registry_->Find("web_search") == nullptr)
                     reply += "联网搜索须配置全局 search.provider 与 search.api_key，再放行 web_search。\n";
+                reply += options_.accepts_images ? "图片：已接视觉输入，需模型支持。\n" : "图片：当前模型只支持文本。\n";
                 reply += options_.skills_summary;
             } else if (command->action == "file_help") {
                 reply = channel::MakeChannelFileHelpText();

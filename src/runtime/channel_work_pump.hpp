@@ -94,6 +94,7 @@ public:
         std::string model;
         std::string skills_prompt;
         std::string skills_summary;
+        bool accepts_images = true;  // 未声明时沿终端规矩尝试；目录明确纯文本时不送图。
         channel::ToolRoutePolicy tools;  // 会话级基线(逐轮策略来自 route.tools)
         hooks::HookDispatcher* hook_dispatcher = nullptr;
         // 预算三根硬线(0 = 不设;生产装配应设)。
