@@ -56,16 +56,20 @@ return {
     end
     local other = rune_count - cjk
     local tokens = math.ceil(cjk * CJK_TOKENS_PER_CHAR + other * OTHER_TOKENS_PER_CHAR + 0.5)
+    -- 返回形状:表只认 output/effects 两键——测量结果裹进 output 才是
+    -- handler 的产出值(裸字段会被当形状忽略)。
     return {
-      estimator = "cjk_runes_v1",
-      estimatorVersion = 1,
-      scope = "model_input_json_utf8_v1",
-      encoding = "utf-8",
-      rounding = "ceil",
-      inputUtf8Bytes = #all,
-      inputRuneCount = rune_count,
-      estimatedInputTokens = tokens,
-      coverage = "partial",
+      output = {
+        estimator = "cjk_runes_v1",
+        estimatorVersion = 1,
+        scope = "model_input_json_utf8_v1",
+        encoding = "utf-8",
+        rounding = "ceil",
+        inputUtf8Bytes = #all,
+        inputRuneCount = rune_count,
+        estimatedInputTokens = tokens,
+        coverage = "partial",
+      },
     }
   end,
 }

@@ -285,7 +285,7 @@ return {
       "name": "double",
       "trigger": {"input": {"prompt": "原文"}},
       "expect": {"kind": "failed", "errorCode": "hook.next.already_consumed",
-                 "records": {"PreUser/prompt.normalize": {"nextCalls": 2}}}
+                 "records": {"PreUser/prompt.normalize": {"nextCalls": 1}}}
     })json");
     const HookCheckReport report = Check(dir.path);
     REQUIRE(report.static_pass);  // 语法/对账没问题——行为错要跑了才知道

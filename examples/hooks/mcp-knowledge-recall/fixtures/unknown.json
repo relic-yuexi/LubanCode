@@ -8,7 +8,7 @@
   "tools": [{"name": "kb.search", "description": "知识库检索", "content": "", "outcome": "timed_out"}],
   "expect": {
     "kind": "completed",
-    "contextAppendsContain": ["[知识库检索结果未知(executionId=hookexec-", "不自动重试"],
+    "contextAppendsContain": ["[知识库检索结果未知(executionId=hookexec_", "不自动重试"],
     "terminalRuns": 1
   }
 }

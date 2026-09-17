@@ -168,7 +168,7 @@ return {
         const PostUserAppend drained = RunPostUserMiddleware(&wired.wired, "probe:http", context);
         REQUIRE(drained.dispatched);
         REQUIRE(drained.outcome.Ok());
-        CHECK(drained.outcome.value.at("code") == "capability_not_granted");
+        CHECK(drained.outcome.value.at("code") == "hook.capability_not_granted");
         const InvocationRecord* record = drained.outcome.FindRecord("PostUser/probe.http");
         REQUIRE(record != nullptr);
         // handler 正常完成(探针不调 next,直接回值 = 短路;能力拒绝是

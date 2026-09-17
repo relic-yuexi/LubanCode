@@ -8,11 +8,13 @@
 -- 不加工——失败原样留给上层判断,别把错误洗成成功。
 return {
   refine = function(ctx, input, next)
+    -- PostAction 不改输入:next() 不带候选(nil = 原样放行,不产生
+    -- input.rewrite 候选;带了反而会在账上多一枚被拒的改写效果)。
     if type(input) ~= "table" or input.isError then
-      return next(input)
+      return next()
     end
     if input.toolName ~= "search" then
-      return next(input)  -- 别的工具不碰
+      return next()  -- 别的工具不碰
     end
     local effects = {}
     -- 补一段使用说明(supplement:材料附加,不动原文)。
@@ -30,7 +32,7 @@ return {
     end
     -- next 的返回是下游表 {status, value, ...}:输出值从 value 取,
     -- 效果随 handler 返回值携带(out.effects 是下游表,不是返回形状)。
-    local downstream = next(input)
+    local downstream = next()
     return {output = downstream.value, effects = effects}
   end,
 }
