@@ -83,9 +83,17 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     // 0) 平台守门:未知平台/未实现平台先报,不进问答。
     const auto platform = channel::FindChannelSetupPlatform(args.platform);
     if (!platform.has_value()) {
-        std::fprintf(stderr,
-                     "channel setup: 未知平台 \"%s\"。已认得: qqbot(可配置)、feishu(尚未支持)\n",
-                     args.platform.c_str());
+        // 已认得清单从平台表取(单一真源;新平台注册即跟上)。
+        std::string known;
+        for (const channel::ChannelSetupPlatform& candidate :
+             channel::ChannelSetupPlatforms()) {
+            if (!known.empty()) {
+                known += "、";
+            }
+            known += candidate.id + (candidate.implemented ? "(可配置)" : "(尚未支持)");
+        }
+        std::fprintf(stderr, "channel setup: 未知平台 \"%s\"。已认得: %s\n",
+                     args.platform.c_str(), known.c_str());
         return 1;
     }
     if (!platform->implemented) {

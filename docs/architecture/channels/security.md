@@ -28,7 +28,7 @@ _阶段 0 冻结件。列出资产、敌手、入口与防线；定死哪些数�
 | 恶意 Package 偷凭据 | Package trust 门；最小环境变量继承；密钥按声明注入，不递全环境；stdout 只协议、stderr 大小帽与轮转 |
 | bot 自回声 / 跨 bot 往返 | 默认拒 `sender.is_bot`；记本 bot message id 过滤回声；同内容跨 bot 设 hop/digest 窗；Channel 到 Channel 转发须显式工具与目标 allowlist |
 | Webhook 伪造与重放 | raw body 验签（不 parse 后重序列化再验）；时间窗与 replay id；body 上限、content-type、读超时；path 规范化；每 path+IP 限速；loopback bind 默认，公开监听须显式配置；trusted proxies 配置才认反向代理 client IP |
-| sidecar 越权 | 不走 shell 字符串只传 argv；state_dir 单账号隔离；crash/超时/坏帧杀整棵进程树；Package 未信任不执行。首版 sidecar 仍拿当前用户 OS 权限，文档不虚称强沙箱。QQ 已定案进程内直连（Q1）：spawn/环境继承/进程树三面不适用，凭据不出宿主进程；本行防线留给未来受管子进程渠道 |
+| sidecar 越权 | 不走 shell 字符串只传 argv；state_dir 单账号隔离；crash/超时/坏帧杀整棵进程树；Package 未信任不执行。首版 sidecar 仍拿当前用户 OS 权限，文档不虚称强沙箱。QQ（Q1）与企微智能机器人（W1，长连接 BotID+Secret 走 `app_id`/secret 既有字段与密钥规矩）已定案进程内直连：spawn/环境继承/进程树三面不适用，凭据不出宿主进程；本行防线留给未来受管子进程渠道 |
 | 媒体投毒 | 文件名去路径段；临时文件放账号受控目录；MIME 声明与魔数复核；解压包默认不自动展开；远端下载防 SSRF（含重定向、私网、大小、超时）；病毒扫描留可插拔 Hook，未配置不声称扫过 |
 | 平台重放与洪水 | 持久去重键三级退让；每账号/每 conversation 队列上限；每 sender 速率窗；同正文短窗；下载媒体总字节帽；dead letter 上限与保留期；队列满按传输类型回 429/503 或停读，不默丢 |
 | 项目配置越权 | 层级冻结：项目只能收窄（见[配置层级冻结](configuration.md)） |

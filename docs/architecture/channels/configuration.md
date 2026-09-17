@@ -215,6 +215,24 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
 
 `tools.allow` 是核过注册名的最小只读名单（`read_file`、`search` 均为现有注册工具名）。Q5 起多了三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`，Gateway 装配注册，见 `runtime/channel_automation`）：只对过了配对/准入的会话可用——未配对 sender 进不了模型，拿不到工具；落账走 automation 域命令与归属闸（任务只归创建者查询/取消），不碰文件系统。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在这份名单里，五层交集自然拦下，扩不出上限。首版不开放任意 shell。
 
+**企业微信智能机器人首版模板**（`MakeWecombotTemplateAccount()`，W1；字段同 QQ 模板，只改凭据语义——`app_id` 存 BotID，`secret_env` 指长连接专用 Secret）：
+
+```json
+{
+  "transport": "websocket",
+  "app_id": "替换为 BotID",
+  "secret_env": "WECOMBOT_SECRET",
+  "dm_policy": "pairing",
+  "group_policy": "disabled",
+  "allow_bots": false,
+  "require_mention": true,
+  "reply": {"mode": "final"},
+  "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder", "get_current_time"]}
+}
+```
+
+用户侧准备（管理后台智能机器人开 **API 模式选长连接**，拿 BotID + Secret——长连接专用密钥，与回调模式的 Token/AESKey 互斥，二选一）。密钥规矩全沿 QQ：`secret_file` > `secret_env` > inline 明文，setup 向导落受管 `secret_file` 时会清掉 env 引用与旧明文。首版范围：文本进出（voice 回调的平台转写文本进正文；image/file/video 落占位说明），出站 markdown（≤20480 字节 UTF-8 自动分段），群聊映射支持但模板默认禁用；媒体收发、模板卡片、流式、enter_chat 欢迎语、主动推送归 W2。回复限频单会话 30 条/分钟、1000 条/小时（发送线程记账排队）。
+
 Q6 起各层 tools 段另有 `approve`（可申请审批带，presence 合同与 `allow` 同款：键在=本层参与，未写=不参与）：名单内的须确认工具**不预先授权**——模型可见（看不见无从申请），执行前经渠道按钮问用户（QQ 键盘卡，`channel.approval.requested/resolved` 落 V3），允许才执行这一次；拒绝/超时/取消都不执行，超时默认拒绝不默认放行。`deny` 永远赢：hard deny 不可被按钮覆盖。有效审批带 = 各显式层 `approve` 的交集（与 `allow` 同构）。默认零层声明 = 空带 = 行为与 Q0 一字不差；QQ 模板不列 `approve`。
 
 **Q7 菜单/面板/命令绑定**（QQ 接入单 §十三；账号段可选字段，不写零行为变化）：

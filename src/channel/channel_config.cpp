@@ -1054,6 +1054,16 @@ ChannelAccountUserConfig MakeQqTemplateAccount() {
     return account;
 }
 
+ChannelAccountUserConfig MakeWecombotTemplateAccount() {
+    // 企微智能机器人首版模板(设计单 §七):QQ 模板同形,只改凭据语义——
+    // app_id 存 BotID、secret_env 指长连接专用 Secret(与回调模式 Token/
+    // AESKey 互斥,管理后台二选一)。setup 向导落受管 secret_file 时会清
+    // 掉 env 引用(受管文件优先级更高)。
+    ChannelAccountUserConfig account = MakeQqTemplateAccount();
+    account.secret_env = std::optional<std::string>("WECOMBOT_SECRET");
+    return account;
+}
+
 std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
     const nlohmann::json& channels_json, const std::string& file_path_for_error,
     std::string* error) {
