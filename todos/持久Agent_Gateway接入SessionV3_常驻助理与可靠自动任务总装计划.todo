@@ -2,7 +2,7 @@
 
 - 日期：2026-09-13。
 - 状态：新版设计，待实施、待验收。现状按 HEAD `c6b755e4` 及本次工作树静态核查；未重跑构建、测试、真实模型、渠道或系统服务。
-- 替代：[旧总装计划](持久Agent_Gateway自动任务与可靠恢复总装计划.todo)。旧 G0/G1 留作历史证据，不将旧勾选搬成新版验收结果。
+- 替代：旧总装计划《持久Agent_Gateway自动任务与可靠恢复总装计划》（2026-09-17 删档，G0/G1 历史见 git 史），不将旧勾选搬成新版验收结果。
 - 主合同：[Session V3](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)、[V3 schema](../docs/architecture/trajectory-v3-schema.md)。本文新增接口、字段、状态均为提案，未注册前不能写入现行 V3 envelope。
 - 实施范围：`src/gateway`、`src/channel`、`src/runtime`、`src/trajectory/v3`、`src/workspace`、`src/platform`、`src/cli` 及对应测试；自动任务领域目录按本单新增。
 - 首版：单机、单用户、显式启动，先本地定时任务，再接一只真渠道。多租户、集群、跨机迁移另立验收。

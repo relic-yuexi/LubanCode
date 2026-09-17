@@ -6,7 +6,7 @@
 - 基线：`ec1b320`（撰写时 HEAD；实施前须重查）
 - 范围：`run_command` 后台模式、`platform/process`、`BackgroundTaskRegistry`、终端输入/输出/resize 工具、`/background` 管理面、Windows ConPTY、POSIX PTY、相关配置/Prompt/测试/文档
 - 依赖：现有 `BackgroundProcessHandle`、每任务 Job Object/POSIX 进程组、后台 watcher、`background_output`、`stop_background`、终端帧与输入所有权基建
-- 关联：`持久Agent_Gateway自动任务与可靠恢复总装计划.todo` §11.4、`子代理递归派工与结构化任务交接设计.todo`
+- 关联：`旧Gateway总装单(已删,内容由V3单承接) §11.4、`子代理递归派工与结构化任务交接设计.todo`
 - 不在本单：后台 Agent 调度重做、任意 OS 进程跨宿主重启接管、远程 SSH 终端、多人协同终端、完整 shell 历史产品、IDE 内嵌终端替代品、未经选型验收自研 VT 解析器
 
 ## 一、先下断语
