@@ -27,6 +27,7 @@
 #include <nlohmann/json.hpp>
 
 #include "channel/feishu/feishu_frame.hpp"
+#include "channel/feishu/feishu_proto.hpp"
 #include "channel/transport/ws_client.hpp"
 
 namespace lubancode::channel::feishu {
@@ -48,11 +49,10 @@ struct FeishuConnectError {
     bool non_retryable = false;  // true = 凭据类客户端错,RunLoop 不再重连
 };
 
-// 引导产物(适配器的 endpoint_provider 递进来;HTTP 归适配器)。
-struct FeishuEndpoint {
-    std::string url;                        // wss://…(query 含 device_id/service_id)
-    std::int64_t ping_interval_secs = 120;  // ClientConfig.PingInterval
-};
+// 引导产物(适配器的 endpoint_provider 递进来;HTTP 归适配器)。类型即
+// feishu_proto 的 ParseBootstrapResponse 产物——单一形状,不在网关层再造
+// 同形结构。
+using FeishuEndpoint = FeishuBootstrapEndpoint;
 
 // 出口事件(适配器消费)。
 struct FeishuGatewayEvent {
