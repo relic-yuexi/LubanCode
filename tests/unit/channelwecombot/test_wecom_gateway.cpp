@@ -215,10 +215,17 @@ struct Harness {
 };
 
 std::string MsgCallbackFrame(const char* msgid, const char* req_id, const char* content) {
-    return std::string(R"({"cmd":"aibot_msg_callback","headers":{"req_id":")") + req_id +
-           R"("},"body":{"msgid":")" + msgid +
-           R"(","aibotid":"BOT1","chattype":"single","from":{"userid":"U1"},)"
-           R"("msgtype":"text","text":{"content":")" + content + R"("}}}")";
+    // json 现建现 dump:手拼原始串在 CI 上翻过车(引号错一枚整串作废)。
+    return nlohmann::json{
+        {"cmd", "aibot_msg_callback"},
+        {"headers", {{"req_id", req_id}}},
+        {"body", nlohmann::json{{"msgid", msgid},
+                                {"aibotid", "BOT1"},
+                                {"chattype", "single"},
+                                {"from", {{"userid", "U1"}}},
+                                {"msgtype", "text"},
+                                {"text", {{"content", content}}}}},
+    }.dump();
 }
 
 }  // namespace

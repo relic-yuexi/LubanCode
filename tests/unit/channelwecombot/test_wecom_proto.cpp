@@ -1,7 +1,8 @@
 // 企微协议纯函数册(W1,设计单 §六协议细账)。帧构造/入站解析/消息映射/
 // 事件解析/错误分型/分段:全纯函数直钉,零 IO 零外联。报文形状按官方
 // 长连接文档(101463/100719/101138,2026-09-17 核读)钉死;错误码表按
-// 设计单初版表(真机核验归 W2)。
+// 设计单初版表(真机核验归 W2)。fixture 一律 nlohmann 现建现 dump——
+// 手拼原始串数花括号在 CI 上翻过车,结构交给类型系统兜。
 #include <doctest/doctest.h>
 
 #include <string>
@@ -19,12 +20,25 @@ nlohmann::json ParseOk(const std::string& text) {
     return parsed;
 }
 
-// 官方形状的 msg_callback(single/text 最小例)。
+// msg_callback 的 body(single/text 最小例)。
+nlohmann::json MsgCallbackBody(const char* msgid, const char* userid, const char* content) {
+    return nlohmann::json{
+        {"msgid", msgid},
+        {"aibotid", "BOT1"},
+        {"chattype", "single"},
+        {"from", {{"userid", userid}}},
+        {"msgtype", "text"},
+        {"text", {{"content", content}}},
+    };
+}
+
+// 官方形状的 msg_callback 整帧。
 std::string MsgCallback(const char* msgid, const char* userid, const char* content) {
-    return std::string(R"({"cmd":"aibot_msg_callback","headers":{"req_id":"REQ1"},)")
-           + R"("body":{"msgid":")" + msgid + R"(","aibotid":"BOT1",)"
-           + R"("chattype":"single","from":{"userid":")" + userid + R"("},)"
-           + R"("msgtype":"text","text":{"content":")" + content + R"("}}}")";
+    return nlohmann::json{
+        {"cmd", "aibot_msg_callback"},
+        {"headers", {{"req_id", "REQ1"}}},
+        {"body", MsgCallbackBody(msgid, userid, content)},
+    }.dump();
 }
 
 }  // namespace
@@ -68,23 +82,30 @@ TEST_CASE("wecom_proto: 回执帧(errcode/req_id 透传)与两路 callback 分�
     CHECK(*ack->errcode == 0);
     CHECK(ack->errmsg == "ok");
 
-    const auto msg = ParseWecomInboundFrame(ParseOk(MsgCallback("M1", "U1", "hi")), &error);
+    const auto msg = ParseWecomInboundFrame(ParseOk(MsgCallback("MSG1", "U1", "hi")), &error);
     REQUIRE(msg.has_value());
     CHECK(msg->kind == WecomFrameKind::MsgCallback);
     CHECK(msg->cmd == "aibot_msg_callback");
     CHECK(msg->req_id == "REQ1");
-    CHECK(msg->body.at("msgid") == "M1");
+    CHECK(msg->body.at("msgid") == "MSG1");
 
     const auto event = ParseWecomInboundFrame(
-        ParseOk(R"({"cmd":"aibot_event_callback","headers":{"req_id":"REQ2"},)"
-                R"("body":{"msgid":"E1","event":{"eventtype":"enter_chat"}}})"),
+        ParseOk(nlohmann::json{{"cmd", "aibot_event_callback"},
+                               {"headers", {{"req_id", "REQ2"}}},
+                               {"body", {{"msgid", "E1"},
+                                         {"event", {{"eventtype", "enter_chat"}}}}}}
+                    .dump()),
         &error);
     REQUIRE(event.has_value());
     CHECK(event->kind == WecomFrameKind::EventCallback);
     CHECK(event->body.at("event").at("eventtype") == "enter_chat");
 
     const auto unknown = ParseWecomInboundFrame(
-        ParseOk(R"({"cmd":"aibot_send_msg","headers":{"req_id":"REQ3"},"body":{}})"), &error);
+        ParseOk(nlohmann::json{{"cmd", "aibot_send_msg"},
+                               {"headers", {{"req_id", "REQ3"}}},
+                               {"body", nlohmann::json::object()}}
+                    .dump()),
+        &error);
     REQUIRE(unknown.has_value());
     CHECK(unknown->kind == WecomFrameKind::Unknown);
 }
@@ -106,7 +127,7 @@ TEST_CASE("wecom_proto: 坏形状拒绝(非 object/errcode 非整数/无 cmd 无
 
 TEST_CASE("wecom_proto: single/text 映射——身份键/会话键/排重键") {
     std::string error;
-    const auto mapping = MapMsgCallback(ParseOk(MsgCallback("MSG1", "USER1", "在么")).at("body"),
+    const auto mapping = MapMsgCallback(MsgCallbackBody("MSG1", "USER1", "在么"),
                                         "wecombot", "main", "BOT1", "DEL1", 1234, &error);
     REQUIRE(mapping.has_value());
     const ChannelInboundEvent& event = mapping->event;
@@ -128,14 +149,16 @@ TEST_CASE("wecom_proto: single/text 映射——身份键/会话键/排重键") 
 
 TEST_CASE("wecom_proto: group 映射——conversation=chatid,sender=userid") {
     std::string error;
-    const auto body = ParseOk(
-        R"({"cmd":"aibot_msg_callback","headers":{"req_id":"REQG"},)"
-        R"("body":{"msgid":"MG1","aibotid":"BOT1","chatid":"CHAT1",)"
-        R"("chattype":"group","from":{"userid":"U1"},"msgtype":"text",)"
-        R"("text":{"content":"群里说"}})")
-        .at("body");
-    const auto mapping =
-        MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
+    const auto body = nlohmann::json{
+        {"msgid", "MG1"},
+        {"aibotid", "BOT1"},
+        {"chatid", "CHAT1"},
+        {"chattype", "group"},
+        {"from", {{"userid", "U1"}}},
+        {"msgtype", "text"},
+        {"text", {{"content", "群里说"}}},
+    };
+    const auto mapping = MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
     REQUIRE(mapping.has_value());
     CHECK(mapping->event.conversation.kind == ConversationKind::Group);
     CHECK(mapping->event.conversation.id == "CHAT1");
@@ -144,12 +167,15 @@ TEST_CASE("wecom_proto: group 映射——conversation=chatid,sender=userid") {
 
 TEST_CASE("wecom_proto: voice 转写文本进正文;warnings 记账") {
     std::string error;
-    const auto body = ParseOk(
-        R"({"msgid":"MV1","aibotid":"BOT1","chattype":"single",)"
-        R"("from":{"userid":"U1"},"msgtype":"voice","voice":{"content":"转写的话"}})")
-        .at("body");
-    const auto mapping =
-        MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
+    const auto body = nlohmann::json{
+        {"msgid", "MV1"},
+        {"aibotid", "BOT1"},
+        {"chattype", "single"},
+        {"from", {{"userid", "U1"}}},
+        {"msgtype", "voice"},
+        {"voice", {{"content", "转写的话"}}},
+    };
+    const auto mapping = MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
     REQUIRE(mapping.has_value());
     REQUIRE(mapping->event.parts.size() == 1);
     CHECK(mapping->event.parts[0].type == ChannelPartType::Text);
@@ -159,15 +185,21 @@ TEST_CASE("wecom_proto: voice 转写文本进正文;warnings 记账") {
 
 TEST_CASE("wecom_proto: mixed 抽 text 项,其余项落占位 part") {
     std::string error;
-    const auto body = ParseOk(
-        R"({"msgid":"MM1","aibotid":"BOT1","chattype":"single",)"
-        R"("from":{"userid":"U1"},"msgtype":"mixed","msg_item":[)"
-        R"({"msgtype":"text","text":{"content":"第一段"}},)"
-        R"({"msgtype":"image","image":{"url":"https://x","aeskey":"K"}}),)"
-        R"({"msgtype":"text","text":{"content":"第二段"}}]})")
-        .at("body");
-    const auto mapping =
-        MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
+    const auto body = nlohmann::json{
+        {"msgid", "MM1"},
+        {"aibotid", "BOT1"},
+        {"chattype", "single"},
+        {"from", {{"userid", "U1"}}},
+        {"msgtype", "mixed"},
+        {"msg_item", nlohmann::json::array(
+                         {nlohmann::json{{"msgtype", "text"},
+                                         {"text", {{"content", "第一段"}}}},
+                          nlohmann::json{{"msgtype", "image"},
+                                         {"image", {{"url", "https://x"}, {"aeskey", "K"}}}},
+                          nlohmann::json{{"msgtype", "text"},
+                                         {"text", {{"content", "第二段"}}}}})},
+    };
+    const auto mapping = MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
     REQUIRE(mapping.has_value());
     const auto& parts = mapping->event.parts;
     REQUIRE(parts.size() == 3);
@@ -182,11 +214,16 @@ TEST_CASE("wecom_proto: mixed 抽 text 项,其余项落占位 part") {
 TEST_CASE("wecom_proto: image/file/video 落占位 part(媒体归 W2,不虚报)") {
     for (const char* msgtype : {"image", "file", "video"}) {
         std::string error;
-        const auto body = ParseOk(
-            std::string(R"({"msgid":"MI1","aibotid":"BOT1","chattype":"single",)")
-            + R"("from":{"userid":"U1"},"msgtype":")" + msgtype + R"(",")" + msgtype +
-            R"({"url":"https://x","aeskey":"K"}})");
-        const auto mapping = MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
+        const auto body = nlohmann::json{
+            {"msgid", "MI1"},
+            {"aibotid", "BOT1"},
+            {"chattype", "single"},
+            {"from", {{"userid", "U1"}}},
+            {"msgtype", msgtype},
+            {msgtype, {{"url", "https://x"}, {"aeskey", "K"}}},
+        };
+        const auto mapping =
+            MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
         REQUIRE(mapping.has_value());
         REQUIRE(mapping->event.parts.size() == 1);
         CHECK(mapping->event.parts[0].type == ChannelPartType::Unsupported);
@@ -197,11 +234,15 @@ TEST_CASE("wecom_proto: image/file/video 落占位 part(媒体归 W2,不虚报)"
 
 TEST_CASE("wecom_proto: quote 立回复标志;合法 body 字段往返") {
     std::string error;
-    const auto body = ParseOk(
-        R"({"msgid":"MQ1","aibotid":"BOT1","chattype":"single",)"
-        R"("from":{"userid":"U1"},"msgtype":"text","text":{"content":"引用说"},)"
-        R"("quote":{"msgid":"OLD1"}})")
-        .at("body");
+    const auto body = nlohmann::json{
+        {"msgid", "MQ1"},
+        {"aibotid", "BOT1"},
+        {"chattype", "single"},
+        {"from", {{"userid", "U1"}}},
+        {"msgtype", "text"},
+        {"text", {{"content", "引用说"}}},
+        {"quote", {{"msgid", "OLD1"}}},
+    };
     const auto mapping = MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
     REQUIRE(mapping.has_value());
     CHECK(mapping->event.hints.is_reply);
@@ -216,20 +257,34 @@ TEST_CASE("wecom_proto: quote 立回复标志;合法 body 字段往返") {
 TEST_CASE("wecom_proto: 映射拒绝面——缺 msgid/缺 from.userid/群缺 chatid/"
           "chattype 不认/未知 msgtype/aibotid 对不上") {
     std::string error;
-    auto expect_error = [&](const std::string& body_text) {
-        const auto mapping = MapMsgCallback(ParseOk(body_text).at("body"), "wecombot",
-                                            "main", "BOT1", "DEL1", 1, &error);
+    auto expect_error = [&](const nlohmann::json& body) {
+        const auto mapping =
+            MapMsgCallback(body, "wecombot", "main", "BOT1", "DEL1", 1, &error);
         CHECK_FALSE(mapping.has_value());
         CHECK_FALSE(error.empty());
         error.clear();
     };
-    expect_error(R"({"chattype":"single","from":{"userid":"U1"},"msgtype":"text","text":{"content":"x"}})");
-    expect_error(MsgCallback("M1", "", "x"));
-    expect_error(R"({"msgid":"M1","chattype":"group","from":{"userid":"U1"},"msgtype":"text","text":{"content":"x"}})");
-    expect_error(R"({"msgid":"M1","chattype":"channel","from":{"userid":"U1"},"msgtype":"text","text":{"content":"x"}})");
-    expect_error(R"({"msgid":"M1","chattype":"single","from":{"userid":"U1"},"msgtype":"location"})");
+    expect_error(nlohmann::json{{"chattype", "single"},
+                                {"from", {{"userid", "U1"}}},
+                                {"msgtype", "text"},
+                                {"text", {{"content", "x"}}}});  // 缺 msgid
+    expect_error(MsgCallbackBody("M1", "", "x"));                // 缺 from.userid
+    expect_error(nlohmann::json{{"msgid", "M1"},
+                                {"chattype", "group"},           // 群缺 chatid
+                                {"from", {{"userid", "U1"}}},
+                                {"msgtype", "text"},
+                                {"text", {{"content", "x"}}}});
+    expect_error(nlohmann::json{{"msgid", "M1"},
+                                {"chattype", "channel"},         // chattype 不认
+                                {"from", {{"userid", "U1"}}},
+                                {"msgtype", "text"},
+                                {"text", {{"content", "x"}}}});
+    expect_error(nlohmann::json{{"msgid", "M1"},
+                                {"chattype", "single"},
+                                {"from", {{"userid", "U1"}}},
+                                {"msgtype", "location"}});       // 未知 msgtype
     // aibotid 与连接 bot_id 对不上 → 拒(别家 bot 的事件不进本账号)。
-    const auto mismatch = MapMsgCallback(ParseOk(MsgCallback("M1", "U1", "x")).at("body"),
+    const auto mismatch = MapMsgCallback(MsgCallbackBody("M1", "U1", "x"),
                                          "wecombot", "main", "OTHER", "DEL1", 1, &error);
     CHECK_FALSE(mismatch.has_value());
     CHECK(error.find("aibotid") != std::string::npos);
@@ -241,23 +296,27 @@ TEST_CASE("wecom_proto: 映射拒绝面——缺 msgid/缺 from.userid/群缺 ch
 
 TEST_CASE("wecom_proto: 事件回调解析与 disconnected_event 判定") {
     std::string error;
-    const auto info = ParseEventCallback(
-        ParseOk(R"({"msgid":"E1","create_time":1,"aibotid":"BOT1","msgtype":"event",)"
-                R"("event":{"eventtype":"feedback_event"}})")
-            .at("body"),
-        &error);
+    const auto feedback = nlohmann::json{
+        {"msgid", "E1"},
+        {"create_time", 1},
+        {"aibotid", "BOT1"},
+        {"msgtype", "event"},
+        {"event", {{"eventtype", kWecomEventFeedback}}},
+    };
+    const auto info = ParseEventCallback(feedback, &error);
     REQUIRE(info.has_value());
     CHECK(info->eventtype == kWecomEventFeedback);
     CHECK(info->msgid == "E1");
 
-    const auto disconnected = ParseEventCallback(
-        ParseOk(R"({"event":{"eventtype":")" + std::string(kWecomEventDisconnected) + R"("}})")
-            .at("body"),
-        &error);
-    REQUIRE(disconnected.has_value());
-    CHECK(disconnected->eventtype == kWecomEventDisconnected);
+    const auto disconnected =
+        nlohmann::json{{"event", {{"eventtype", kWecomEventDisconnected}}}};
+    const auto kicked = ParseEventCallback(disconnected, &error);
+    REQUIRE(kicked.has_value());
+    CHECK(kicked->eventtype == kWecomEventDisconnected);
 
-    CHECK_FALSE(ParseEventCallback(ParseOk(R"({"event":{}})").at("body"), &error).has_value());
+    CHECK_FALSE(ParseEventCallback(nlohmann::json{{"event", nlohmann::json::object()}},
+                                   &error)
+                    .has_value());
     CHECK_FALSE(ParseEventCallback(nlohmann::json::array(), &error).has_value());
 }
 

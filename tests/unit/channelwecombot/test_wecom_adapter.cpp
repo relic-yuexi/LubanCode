@@ -1,10 +1,11 @@
 // 企微进程内适配器端到端册(W1):真 WecombotAdapter(Transport 字节面),
-// 网关传输注假(自动应答订阅/心跳/回执)。钉:握手能力、入站先落 spool
+// 网关传输注假(自动应答订阅/回执)。钉:握手能力、入站先落 spool
 // 再上报、ACK 清理、重启重投、req_id 锚回话(markdown 透传)、分段、
 // 无锚明拒、限流账、Health 投影。零外联。
 //
 // 两条路数照 QQ 适配器册:manager 集成路径(状态推进)+ 帧级手工路径
-//(直接 WriteToSidecar/DrainFromSidecar)。
+//(直接 WriteToSidecar/DrainFromSidecar)。断言一律按谓词计数/检索帧,
+// 不拿 drain 的总条数立断言——握手回包与 Status 通知随时会混在管道里。
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -30,7 +31,7 @@
 namespace lubancode::channel::wecombot {
 namespace {
 
-// 假网关传输:Connect 插订阅回执;SendText 自动应答 ping/respond(req_id
+// 假网关传输:Connect 插订阅回执;SendText 自动应答 respond(req_id
 // 透传,平台口径);脚本队列推入站;耗尽后静默(Timeout)。
 class ScriptTransport final : public WecomTransport {
 public:
@@ -120,10 +121,17 @@ private:
 };
 
 std::string MsgCallbackFrame(const char* msgid, const char* req_id, const char* content) {
-    return std::string(R"({"cmd":"aibot_msg_callback","headers":{"req_id":")") + req_id +
-           R"("},"body":{"msgid":")" + msgid +
-           R"(","aibotid":"BOT1","chattype":"single","from":{"userid":"U1"},)"
-           R"("msgtype":"text","text":{"content":")" + content + R"("}}}")";
+    // json 现建现 dump:手拼原始串在 CI 上翻过车(引号错一枚整串作废)。
+    return nlohmann::json{
+        {"cmd", "aibot_msg_callback"},
+        {"headers", {{"req_id", req_id}}},
+        {"body", nlohmann::json{{"msgid", msgid},
+                                {"aibotid", "BOT1"},
+                                {"chattype", "single"},
+                                {"from", {{"userid", "U1"}}},
+                                {"msgtype", "text"},
+                                {"text", {{"content", content}}}}},
+    }.dump();
 }
 
 struct AdapterHarness {
@@ -194,6 +202,24 @@ std::vector<nlohmann::json> WaitFrames(WecombotAdapter* adapter,
     return all;
 }
 
+// 断言用:按谓词计数/检索(管道里混着握手回包与 Status 通知,总数不作数)。
+std::size_t CountFrames(const std::vector<nlohmann::json>& frames,
+                        const std::function<bool(const nlohmann::json&)>& pred) {
+    return static_cast<std::size_t>(
+        std::count_if(frames.begin(), frames.end(), pred));
+}
+
+std::vector<nlohmann::json> FilterFrames(const std::vector<nlohmann::json>& frames,
+                                         const std::function<bool(const nlohmann::json&)>& pred) {
+    std::vector<nlohmann::json> out;
+    for (const auto& frame : frames) {
+        if (pred(frame)) {
+            out.push_back(frame);
+        }
+    }
+    return out;
+}
+
 void HostWrite(WecombotAdapter* adapter, const nlohmann::json& frame) {
     const auto encoded = EncodeFrame(frame);
     REQUIRE(encoded.has_value());
@@ -228,6 +254,24 @@ nlohmann::json SendFrame(std::int64_t id, const std::string& conversation_id,
     return BuildRequestJson(id, BridgeMethod::Send, std::move(params));
 }
 
+// 手工路径的标准三步:initialize + start,各自等回包排干管道。
+void HostInitializeAndStart(WecombotAdapter* adapter) {
+    HostWrite(adapter, InitializeFrame(1, "main"));
+    REQUIRE_FALSE(FilterFrames(WaitFrames(adapter, [](const nlohmann::json& frame) {
+                                   return frame.contains("id") && frame.at("id") == 1 &&
+                                          frame.contains("result");
+                               }),
+                                [](const nlohmann::json&) { return true; })
+                      .empty());
+    HostWrite(adapter, StartFrame(2));
+    REQUIRE_FALSE(FilterFrames(WaitFrames(adapter, [](const nlohmann::json& frame) {
+                                   return frame.contains("id") && frame.at("id") == 2 &&
+                                          frame.contains("result");
+                               }),
+                                [](const nlohmann::json&) { return true; })
+                      .empty());
+}
+
 bool WaitQuiet(const std::function<bool()>& done, int timeout_ms = 8'000) {
     const auto deadline = platform::WallClockNowMs() + timeout_ms;
     while (platform::WallClockNowMs() < deadline) {
@@ -238,6 +282,10 @@ bool WaitQuiet(const std::function<bool()>& done, int timeout_ms = 8'000) {
     }
     return false;
 }
+
+const std::function<bool(const nlohmann::json&)> kIsInbound = [](const nlohmann::json& frame) {
+    return frame.value("method", "") == "channel.inbound";
+};
 
 }  // namespace
 
@@ -274,17 +322,14 @@ TEST_CASE("wecom_adapter: initialize 握手——版本对,能力只宣称首版
 TEST_CASE("wecom_adapter: start 起线程;入站先落 spool 再上报;ACK 清理") {
     AdapterHarness harness("inbound");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
-    CHECK(WaitQuiet([&]() { return adapter->spool_pending_count() == 0; }));
 
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    const auto frames = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-        return frame.value("method", "") == "channel.inbound";
-    });
-    REQUIRE(frames.size() == 1);
-    const auto& params = frames[0].at("params");
+    const auto frames = WaitFrames(adapter.get(), kIsInbound);
+    REQUIRE(CountFrames(frames, kIsInbound) == 1);
+    const auto inbound = FilterFrames(frames, kIsInbound).at(0);
+    const auto& params = inbound.at("params");
     CHECK(params.at("provider_event_id") == "MSG1");
     CHECK(params.at("conversation").at("id") == "U1");
     CHECK(params.at("parts").at(0).at("text") == "在么");
@@ -295,110 +340,120 @@ TEST_CASE("wecom_adapter: start 起线程;入站先落 spool 再上报;ACK 清�
                                               nlohmann::json{{"delivery_id",
                                                               params.at("delivery_id")}}));
     const auto acked = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-        return frame.contains("id") && frame.at("id") == 3;
+        return frame.contains("id") && frame.at("id") == 3 && frame.contains("result");
     });
-    REQUIRE(acked.size() == 1);
-    CHECK(acked[0].at("result").at("acked") == true);
+    REQUIRE(CountFrames(acked, [](const nlohmann::json& frame) {
+                return frame.at("result").at("acked") == true;
+            }) == 1);
     CHECK(WaitQuiet([&]() { return adapter->spool_pending_count() == 0; }));
 }
 
 TEST_CASE("wecom_adapter: 事件回调只记账不入模型;Health 投影两本账") {
     AdapterHarness harness("events");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     ScriptTransport::Push(
         harness.gateway,
-        R"({"cmd":"aibot_event_callback","headers":{"req_id":"R1"},"body":{"msgid":"E1",)"
-        R"("event":{"eventtype":"enter_chat"}}})");
+        nlohmann::json{{"cmd", "aibot_event_callback"},
+                       {"headers", {{"req_id", "R1"}}},
+                       {"body", {{"msgid", "E1"},
+                                 {"event", {{"eventtype", "enter_chat"}}}}}}
+            .dump());
     CHECK(WaitQuiet([&]() { return adapter->ignored_event_count() == 1; }));
     // 无 channel.inbound 帧(事件不进模型)。
     const auto frames = DecodeDrained(adapter.get());
-    for (const auto& frame : frames) {
-        CHECK(frame.value("method", "") != "channel.inbound");
-    }
+    CHECK(CountFrames(frames, kIsInbound) == 0);
     // 认不得的 cmd → unsupported 账。
-    ScriptTransport::Push(harness.gateway,
-                          R"({"cmd":"aibot_send_msg","headers":{"req_id":"R2"},"body":{}})");
+    ScriptTransport::Push(
+        harness.gateway,
+        nlohmann::json{{"cmd", "aibot_send_msg"},
+                       {"headers", {{"req_id", "R2"}}},
+                       {"body", nlohmann::json::object()}}
+            .dump());
     CHECK(WaitQuiet([&]() { return adapter->unsupported_frame_count() == 1; }));
 
-    HostWrite(adapter.get(), BuildRequestJson(9, BridgeMethod::Health, nlohmann::json::object()));
+    HostWrite(adapter.get(),
+              BuildRequestJson(9, BridgeMethod::Health, nlohmann::json::object()));
     const auto health = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-        return frame.contains("id") && frame.at("id") == 9;
+        return frame.contains("id") && frame.at("id") == 9 && frame.contains("result");
     });
-    REQUIRE(health.size() == 1);
-    CHECK(health[0].at("result").at("ignored_events") == 1);
-    CHECK(health[0].at("result").at("unsupported_events") == 1);
-    CHECK(health[0].at("result").at("connected") == true);
-    CHECK(health[0].at("result").at("thread_alive") == true);
+    const auto health_results = FilterFrames(health, [](const nlohmann::json& frame) {
+        return frame.contains("result");
+    });
+    REQUIRE(health_results.size() == 1);
+    CHECK(health_results[0].at("result").at("ignored_events") == 1);
+    CHECK(health_results[0].at("result").at("unsupported_events") == 1);
+    CHECK(health_results[0].at("result").at("connected") == true);
+    CHECK(health_results[0].at("result").at("thread_alive") == true);
 }
 
 TEST_CASE("wecom_adapter: 解不开的回调 Fatal 留痕(明确终结,不进 spool)") {
     AdapterHarness harness("invalid");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     // 缺 msgid:映射拒绝。
     ScriptTransport::Push(
         harness.gateway,
-        R"({"cmd":"aibot_msg_callback","headers":{"req_id":"R1"},)"
-        R"("body":{"chattype":"single","from":{"userid":"U1"},"msgtype":"text",)"
-        R"("text":{"content":"x"}}})");
-    const auto frames = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-        return frame.value("method", "") == "channel.fatal";
-    });
-    REQUIRE(frames.size() == 1);
-    CHECK(frames[0].at("params").at("reason") == "invalid_frame");
+        nlohmann::json{{"cmd", "aibot_msg_callback"},
+                       {"headers", {{"req_id", "R1"}}},
+                       {"body", nlohmann::json{{"chattype", "single"},
+                                               {"from", {{"userid", "U1"}}},
+                                               {"msgtype", "text"},
+                                               {"text", {{"content", "x"}}}}}}
+            .dump());
+    const auto is_fatal = [](const nlohmann::json& frame) {
+        return frame.value("method", "") == "channel.fatal" &&
+               frame.at("params").at("reason") == "invalid_frame";
+    };
+    const auto frames = WaitFrames(adapter.get(), is_fatal);
+    REQUIRE(CountFrames(frames, is_fatal) == 1);
     CHECK(adapter->spool_pending_count() == 0);
 }
 
 TEST_CASE("wecom_adapter: spool 落盘失败——Fatal 留痕但照常上报(企微无补发路)") {
     AdapterHarness harness("spool_fail");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     adapter->SetSpoolAppendFaultForTest(true);
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    const auto frames = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-        return frame.value("method", "") == "channel.inbound";
-    });
-    REQUIRE(frames.size() == 1);  // 照常上报:断线补发不存在,内存路不陪葬
-    const auto all = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    // 照常上报:断线补发不存在,内存路不陪葬。
+    const auto frames = WaitFrames(adapter.get(), kIsInbound);
+    REQUIRE(CountFrames(frames, kIsInbound) == 1);
+    const auto is_spool_fatal = [](const nlohmann::json& frame) {
         return frame.value("method", "") == "channel.fatal" &&
                frame.at("params").at("reason") == "spool_write_failed";
-    });
-    CHECK(all.size() == 1);
+    };
+    const auto fatals = WaitFrames(adapter.get(), is_spool_fatal);
+    CHECK(CountFrames(fatals, is_spool_fatal) == 1);
 }
 
 TEST_CASE("wecom_adapter: 重启重投——历史 pending 重新上报(宿主按 msgid 去重)") {
     AdapterHarness harness("replay");
     {
         auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-        HostWrite(adapter.get(), InitializeFrame(1, "main"));
-        HostWrite(adapter.get(), StartFrame(2));
+        HostInitializeAndStart(adapter.get());
         CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
         ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-        CHECK(WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-                  return frame.value("method", "") == "channel.inbound";
-              }).size() == 1);
+        REQUIRE(CountFrames(WaitFrames(adapter.get(), kIsInbound), kIsInbound) == 1);
         CHECK(WaitQuiet([&]() { return adapter->spool_pending_count() == 1; }));
         HostWrite(adapter.get(),
                   BuildRequestJson(3, BridgeMethod::Stop, nlohmann::json::object()));
         CHECK(WaitQuiet([&]() { return !adapter->gateway_thread_running(); }));
     }
-    // 新适配器同状态根:重投这笔(不 ACK 就留着)。
+    // 新适配器同状态根:重投这笔(不 ACK 就留着)。重投 inbound 与 start
+    // 回包的先后不保证——直接等 inbound 本身(它能到就证明 start 过了),
+    // 不经会排干管道的 HostInitializeAndStart。
     {
         auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
         HostWrite(adapter.get(), InitializeFrame(1, "main"));
         HostWrite(adapter.get(), StartFrame(2));
-        const auto frames = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-            return frame.value("method", "") == "channel.inbound";
-        });
-        REQUIRE(frames.size() == 1);
-        CHECK(frames[0].at("params").at("provider_event_id") == "MSG1");
+        const auto frames = WaitFrames(adapter.get(), kIsInbound);
+        REQUIRE(CountFrames(frames, kIsInbound) == 1);
+        const auto inbound = FilterFrames(frames, kIsInbound).at(0);
+        CHECK(inbound.at("params").at("provider_event_id") == "MSG1");
     }
 }
 
@@ -409,23 +464,22 @@ TEST_CASE("wecom_adapter: 重启重投——历史 pending 重新上报(宿主�
 TEST_CASE("wecom_adapter: 被动回复透传回调 req_id;markdown 正文直达") {
     AdapterHarness harness("send");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    REQUIRE(WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-                return frame.value("method", "") == "channel.inbound";
-            }).size() == 1);
+    REQUIRE(CountFrames(WaitFrames(adapter.get(), kIsInbound), kIsInbound) == 1);
 
     auto send_frame = SendFrame(5, "U1", "回了", "MSG1");
     send_frame["params"]["client_id"] = "wecom-out-1";  // 宿主 delivery 账
     HostWrite(adapter.get(), send_frame);
-    const auto result = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    const auto is_result5 = [](const nlohmann::json& frame) {
         return frame.contains("id") && frame.at("id") == 5 && frame.contains("result");
-    });
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].at("result").at("accepted") == true);
-    CHECK(result[0].at("result").at("provider_message_id") == "wecom-out-1");
+    };
+    const auto result = WaitFrames(adapter.get(), is_result5);
+    const auto results = FilterFrames(result, is_result5);
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].at("result").at("accepted") == true);
+    CHECK(results[0].at("result").at("provider_message_id") == "wecom-out-1");
     // 回话帧走同一条连接(网关线程写侧):req_id 透传 + markdown 正文。
     CHECK(WaitQuiet([&]() { return !ScriptTransport::RespondFrames(harness.gateway).empty(); }));
     const auto responds = ScriptTransport::RespondFrames(harness.gateway);
@@ -439,22 +493,20 @@ TEST_CASE("wecom_adapter: 被动回复透传回调 req_id;markdown 正文直达"
 TEST_CASE("wecom_adapter: 超长正文分段(≤20480 字节 UTF-8,同 req_id 多帧)") {
     AdapterHarness harness("chunk");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    REQUIRE(WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-                return frame.value("method", "") == "channel.inbound";
-            }).size() == 1);
-    // 客户端给 send 带显式 client_id(宿主 delivery 账)。
+    REQUIRE(CountFrames(WaitFrames(adapter.get(), kIsInbound), kIsInbound) == 1);
     auto send_frame = SendFrame(5, "U1", std::string(20'500, 'a'), "MSG1");
     send_frame["params"]["client_id"] = "wecom-out-9";
     HostWrite(adapter.get(), send_frame);
-    const auto result = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    const auto is_result5 = [](const nlohmann::json& frame) {
         return frame.contains("id") && frame.at("id") == 5 && frame.contains("result");
-    });
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].at("result").at("provider_message_id") == "wecom-out-9");
+    };
+    const auto result = WaitFrames(adapter.get(), is_result5);
+    const auto results = FilterFrames(result, is_result5);
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].at("result").at("provider_message_id") == "wecom-out-9");
     CHECK(WaitQuiet([&]() { return ScriptTransport::RespondFrames(harness.gateway).size() == 2; }));
     const auto responds = ScriptTransport::RespondFrames(harness.gateway);
     REQUIRE(responds.size() == 2);
@@ -470,49 +522,51 @@ TEST_CASE("wecom_adapter: 超长正文分段(≤20480 字节 UTF-8,同 req_id �
 TEST_CASE("wecom_adapter: 无锚明拒(主动推送归 W2);锚不在 PermanentReject") {
     AdapterHarness harness("noanchor");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
 
     // 没给 reply_to_message_id:NotCapable(W1 只做被动回复)。
     HostWrite(adapter.get(), SendFrame(5, "U1", "主动推"));
-    const auto refused = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    const auto is_error5 = [](const nlohmann::json& frame) {
         return frame.contains("id") && frame.at("id") == 5 && frame.contains("error");
-    });
-    REQUIRE(refused.size() == 1);
-    CHECK(refused[0].at("error").at("message") == "not_capable");
+    };
+    const auto refused = WaitFrames(adapter.get(), is_error5);
+    const auto errors5 = FilterFrames(refused, is_error5);
+    REQUIRE(errors5.size() == 1);
+    CHECK(errors5[0].at("error").at("message") == "not_capable");
 
     // 锚对不上(没收到过这条 msgid):PermanentReject,不发帧。
     HostWrite(adapter.get(), SendFrame(6, "U1", "回了", "MSG-GHOST"));
-    const auto ghost = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    const auto is_error6 = [](const nlohmann::json& frame) {
         return frame.contains("id") && frame.at("id") == 6 && frame.contains("error");
-    });
-    REQUIRE(ghost.size() == 1);
-    CHECK(ghost[0].at("error").at("message") == "permanent_reject");
+    };
+    const auto ghost = WaitFrames(adapter.get(), is_error6);
+    const auto errors6 = FilterFrames(ghost, is_error6);
+    REQUIRE(errors6.size() == 1);
+    CHECK(errors6[0].at("error").at("message") == "permanent_reject");
     CHECK(ScriptTransport::RespondFrames(harness.gateway).empty());
 }
 
 TEST_CASE("wecom_adapter: 平台拒绝回执——errcode 如实透传(永久拒)") {
     AdapterHarness harness("rejected");
     auto adapter = std::make_unique<WecombotAdapter>(harness.MakeAdapterOptions());
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    REQUIRE(WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-                return frame.value("method", "") == "channel.inbound";
-            }).size() == 1);
+    REQUIRE(CountFrames(WaitFrames(adapter.get(), kIsInbound), kIsInbound) == 1);
     {
         const std::lock_guard<std::mutex> lock(harness.gateway->mutex);
         harness.gateway->respond_errcode = 40058;  // 未知码 → Rejected(永久)
     }
     HostWrite(adapter.get(), SendFrame(5, "U1", "回了", "MSG1"));
-    const auto result = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    const auto is_error5 = [](const nlohmann::json& frame) {
         return frame.contains("id") && frame.at("id") == 5 && frame.contains("error");
-    });
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].at("error").at("message") == "permanent_reject");
-    CHECK(result[0].at("error").at("data").at("detail").get<std::string>().find("40058") !=
+    };
+    const auto result = WaitFrames(adapter.get(), is_error5);
+    const auto errors = FilterFrames(result, is_error5);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].at("error").at("message") == "permanent_reject");
+    CHECK(errors[0].at("error").at("data").at("detail").get<std::string>().find("40058") !=
           std::string::npos);
 }
 
@@ -521,14 +575,11 @@ TEST_CASE("wecom_adapter: 连接断掉后递交耗尽——如实报 TransportFa
     WecombotAdapter::Options options = harness.MakeAdapterOptions();
     options.respond_ack_timeout_ms = 100;
     auto adapter = std::make_unique<WecombotAdapter>(std::move(options));
-    HostWrite(adapter.get(), InitializeFrame(1, "main"));
-    HostWrite(adapter.get(), StartFrame(2));
+    HostInitializeAndStart(adapter.get());
     CHECK(WaitQuiet([&]() { return adapter->gateway_thread_running(); }));
     // 先收一封来信记下锚,再掐连接(读流关死 + 后续连接恒失败)。
     ScriptTransport::Push(harness.gateway, MsgCallbackFrame("MSG1", "REQCB1", "在么"));
-    REQUIRE(WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
-                return frame.value("method", "") == "channel.inbound";
-            }).size() == 1);
+    REQUIRE(CountFrames(WaitFrames(adapter.get(), kIsInbound), kIsInbound) == 1);
     {
         const std::lock_guard<std::mutex> lock(harness.gateway->mutex);
         harness.gateway->fail_connect = true;
@@ -541,11 +592,13 @@ TEST_CASE("wecom_adapter: 连接断掉后递交耗尽——如实报 TransportFa
                frame.at("params").value("state", "") == "backoff";
     });
     HostWrite(adapter.get(), SendFrame(5, "U1", "回了", "MSG1"));
-    const auto result = WaitFrames(adapter.get(), [](const nlohmann::json& frame) {
+    const auto is_error5 = [](const nlohmann::json& frame) {
         return frame.contains("id") && frame.at("id") == 5 && frame.contains("error");
-    }, 10'000);
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].at("error").at("message") == "transport_failed");
+    };
+    const auto result = WaitFrames(adapter.get(), is_error5, 10'000);
+    const auto errors = FilterFrames(result, is_error5);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].at("error").at("message") == "transport_failed");
     CHECK(ScriptTransport::RespondFrames(harness.gateway).empty());
 }
 
