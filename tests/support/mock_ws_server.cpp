@@ -15,7 +15,7 @@
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>  // x509write_crt 系列也在这一头里
 
-#include "channel/qq/ws_frame.hpp"
+#include "channel/transport/ws_frame.hpp"
 #include "platform/base64.hpp"
 
 #ifdef _WIN32
@@ -259,9 +259,9 @@ std::expected<std::string, std::string> DecodeClientTextFrame(const std::string&
 }
 
 std::expected<void, std::string> SendServerFrame(NativeSocket fd,
-                                                 lubancode::channel::qq::WsOpcode opcode,
+                                                 lubancode::channel::transport::WsOpcode opcode,
                                                  std::string_view payload) {
-    const auto frame = lubancode::channel::qq::EncodeServerFrame(opcode, payload);
+    const auto frame = lubancode::channel::transport::EncodeServerFrame(opcode, payload);
     if (!WriteAllNative(fd, reinterpret_cast<const char*>(frame.data()), frame.size())) {
         return std::unexpected("write frame failed");
     }
@@ -323,7 +323,7 @@ std::expected<MockWsServer::Connection, std::string> MockWsServer::AcceptNext(
         return std::unexpected("accept failed");
     }
 #ifdef __APPLE__
-    // 写断开的客户端不发 SIGPIPE(册级进程命门,同 qq_socket 的口径)。
+    // 写断开的客户端不发 SIGPIPE(册级进程命门,同 tcp_socket 的口径)。
     {
         int nosigpipe = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
@@ -372,7 +372,7 @@ std::expected<std::string, std::string> MockWsServer::Connection::AcceptUpgrade(
 std::expected<void, std::string> MockWsServer::Connection::SendText(
     std::string_view payload) {
     return SendServerFrame(static_cast<NativeSocket>(fd_),
-                           lubancode::channel::qq::WsOpcode::Text, payload);
+                           lubancode::channel::transport::WsOpcode::Text, payload);
 }
 
 std::expected<void, std::string> MockWsServer::Connection::SendRaw(std::string_view bytes) {
@@ -653,7 +653,7 @@ std::expected<MockTlsServer::Connection, std::string> MockTlsServer::AcceptNext(
         return std::unexpected("accept failed");
     }
 #ifdef __APPLE__
-    // 写断开的客户端不发 SIGPIPE(册级进程命门,同 qq_socket 的口径)。
+    // 写断开的客户端不发 SIGPIPE(册级进程命门,同 tcp_socket 的口径)。
     {
         int nosigpipe = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
@@ -782,8 +782,8 @@ std::expected<std::string, std::string> MockTlsServer::Connection::AcceptUpgrade
 
 std::expected<void, std::string> MockTlsServer::Connection::SendText(
     std::string_view payload) {
-    const auto frame = lubancode::channel::qq::EncodeServerFrame(
-        lubancode::channel::qq::WsOpcode::Text, payload);
+    const auto frame = lubancode::channel::transport::EncodeServerFrame(
+        lubancode::channel::transport::WsOpcode::Text, payload);
     if (!TlsWriteAll(static_cast<mbedtls_ssl_context*>(ssl_),
                      reinterpret_cast<const char*>(frame.data()), frame.size())) {
         return std::unexpected("tls write frame failed");

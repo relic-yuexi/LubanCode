@@ -23,7 +23,7 @@
 #include <string_view>
 #include <vector>
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 // 单条 WS 消息(拼完分片后)的字节上限,与 Bridge 帧 8 MiB 同帽。
 inline constexpr std::size_t kWsMaxMessageBytes = 8 * 1024 * 1024;
@@ -78,7 +78,7 @@ struct WsFrameEvent {
 // 出错后 sticky(见 WsFrameError):协议规矩是断连,不是跳帧容错。
 //
 // 控制帧规矩(RFC 6455 §5.5):不得分片、载荷 <=125 字节;Ping/Pong 载荷
-// 原样带出(客户端上层自动回 Pong,在 qq_ws_client 做,这里不自动回)。
+// 原样带出(客户端上层自动回 Pong,在 ws_client 做,这里不自动回)。
 class WsFrameDecoder {
 public:
     void Feed(const std::byte* data, std::size_t size);
@@ -105,4 +105,4 @@ private:
     std::optional<WsFrameError> error_;
 };
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

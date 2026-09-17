@@ -11,7 +11,7 @@
 #include "channel/qq/qq_adapter.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
-#include "channel/qq/qq_tls.hpp"
+#include "channel/transport/tls.hpp"
 #include "config/config.hpp"
 #include "gateway/pairing_command.hpp"
 #include "platform/process.hpp"
@@ -103,11 +103,11 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     // 失败"四个数,不拿导出数冒充可用数;部分兼容(系统集合含坏证)保留
     // 成功链 + warning,服务端证书照常校验。加载失败明报并把稳定码递给
     // 适配器短路联网重试(§四:本地证书不可用就不发 token/gateway 请求)。
-    const channel::qq::ResolvedTrustStore trust =
-        channel::qq::ResolveChannelTrustRoots(options.ca_pem);
-    const channel::qq::TlsTrustMode trust_mode = options.ca_pem.empty()
-                                                     ? channel::qq::TlsTrustMode::SystemDefault
-                                                     : channel::qq::TlsTrustMode::ExplicitCa;
+    const channel::transport::ResolvedTrustStore trust =
+        channel::transport::ResolveChannelTrustRoots(options.ca_pem);
+    const channel::transport::TlsTrustMode trust_mode = options.ca_pem.empty()
+                                                     ? channel::transport::TlsTrustMode::SystemDefault
+                                                     : channel::transport::TlsTrustMode::ExplicitCa;
     const std::string& ca_pem = trust.ca_pem;
     std::string trust_block_code;
     std::string trust_block_detail;
@@ -116,8 +116,8 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
         // tls_trust_store_load_failed(带真实负码,§三)。
         const bool empty_case = trust.ca_pem.empty() && trust.load.input_empty &&
                                 trust.load.parse_rc == 0 && trust.load.failed_count == 0;
-        trust_block_code = empty_case ? std::string(channel::qq::kTlsCodeTrustStoreEmpty)
-                                      : std::string(channel::qq::kTlsCodeTrustStoreLoadFailed);
+        trust_block_code = empty_case ? std::string(channel::transport::kTlsCodeTrustStoreEmpty)
+                                      : std::string(channel::transport::kTlsCodeTrustStoreLoadFailed);
         trust_block_detail = "TLS 信任根不可用: " + trust.error;
         wiring->diagnostics_.push_back("TLS 信任根不可用(" + trust.error + ")——已阻断 QQ "
                                        "token/gateway 请求(" + trust_block_code + ")");

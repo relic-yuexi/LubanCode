@@ -1,11 +1,11 @@
 // 跨平台阻塞 TCP 字节流(QQ 机器人接入单 Q1):自实现 WS 客户端的传输半层。
 //
-// 只给 src/channel/qq 内部件用(engine 私件),接口刻意收窄:
+// 只给 src/channel 内部件用(engine 私件,QQ/飞书/企微的 WS 渠道共用),接口刻意收窄:
 //   - Connect:DNS(getaddrinfo)+ 非阻塞 connect + select 落锤,带超时;
 //   - ReadSome/WriteAll:select 超时;ReadSome 返回 0 字节一律按 Closed 分型;
 //   - ShutdownBoth:双向 shutdown——收线程阻塞在 ReadSome 上时,另一线程
 //     shutdown 触发其立即返回(取消路径,QQ 网关停止时用);
-//   - 不做重连、不做 TLS(TLS 在 qq_tls)、不做缓冲(拼帧在 ws_frame)。
+//   - 不做重连、不做 TLS(TLS 在 tls)、不做缓冲(拼帧在 ws_frame)。
 //
 // Windows 走 Winsock2(ws2_32 已链 engine),POSIX 走 sys/socket。错误只分
 // 三型:Timeout/Closed/Failed;detail 不带目标地址正文以外的敏感值。
@@ -17,7 +17,7 @@
 #include <string>
 #include <string_view>
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 enum class SocketErrorKind {
     Timeout,
@@ -73,4 +73,4 @@ private:
 // 在 Close 前撤销登记。
 void ShutdownNativeFd(std::int64_t fd);
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

@@ -1,4 +1,4 @@
-#include "channel/qq/qq_tls.hpp"
+#include "channel/transport/tls.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -27,7 +27,7 @@
 #include <wincrypt.h>
 #endif
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 namespace {
 
@@ -961,4 +961,4 @@ void TlsClientStream::CloseNotify() {
     (void)mbedtls_ssl_close_notify(&context->ssl);
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

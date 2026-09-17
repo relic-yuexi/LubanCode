@@ -9,10 +9,10 @@
 #include <string>
 #include <thread>
 
-#include "channel/qq/qq_ws_client.hpp"
+#include "channel/transport/ws_client.hpp"
 #include "mock_ws_server.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 namespace {
 
 using test_support::MockTlsServer;
@@ -20,7 +20,7 @@ using test_support::MockWsServer;
 
 }  // namespace
 
-TEST_CASE("qq_ws_client: 明文握手+收发文本+Ping 自动回 Pong") {
+TEST_CASE("ws_client: 明文握手+收发文本+Ping 自动回 Pong") {
     MockWsServer server;
     const auto port = server.Start();
     REQUIRE(port.has_value());
@@ -83,7 +83,7 @@ TEST_CASE("qq_ws_client: 明文握手+收发文本+Ping 自动回 Pong") {
     (void)client->Close(1000, "done");
 }
 
-TEST_CASE("qq_ws_client: 半帧+分片——服务端切三段发,客户端拼回完整") {
+TEST_CASE("ws_client: 半帧+分片——服务端切三段发,客户端拼回完整") {
     MockWsServer server;
     const auto port = server.Start();
     REQUIRE(port.has_value());
@@ -118,7 +118,7 @@ TEST_CASE("qq_ws_client: 半帧+分片——服务端切三段发,客户端拼�
     (void)client->Close(1000, "done");
 }
 
-TEST_CASE("qq_ws_client: close 帧让 ReadMessage 以 Closed 分型返回") {
+TEST_CASE("ws_client: close 帧让 ReadMessage 以 Closed 分型返回") {
     MockWsServer server;
     const auto port = server.Start();
     REQUIRE(port.has_value());
@@ -146,7 +146,7 @@ TEST_CASE("qq_ws_client: close 帧让 ReadMessage 以 Closed 分型返回") {
     acceptor.join();
 }
 
-TEST_CASE("qq_ws_client: 服务端直发超帽长度立即报协议错") {
+TEST_CASE("ws_client: 服务端直发超帽长度立即报协议错") {
     MockWsServer server;
     const auto port = server.Start();
     REQUIRE(port.has_value());
@@ -178,7 +178,7 @@ TEST_CASE("qq_ws_client: 服务端直发超帽长度立即报协议错") {
     acceptor.join();
 }
 
-TEST_CASE("qq_ws_client: A08 建立期取消——握手读阻塞中被外部 Cancel 立即打断") {
+TEST_CASE("ws_client: A08 建立期取消——握手读阻塞中被外部 Cancel 立即打断") {
     // 预置取消:Connect 入口即断,零网络。
     {
         auto cancel_state = std::make_shared<WsConnectCancelState>();
@@ -226,7 +226,7 @@ TEST_CASE("qq_ws_client: A08 建立期取消——握手读阻塞中被外部 Ca
     CHECK(elapsed_ms < 2'000);  // 靠取消立即断,不拖满 3s 落锤
 }
 
-TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
+TEST_CASE("ws_client: TLS 自签握手收发(wss)") {
     const auto cert = test_support::GenerateSelfSignedCert();
     REQUIRE(cert.has_value());
     test_support::MockTlsServer server;
@@ -263,7 +263,7 @@ TEST_CASE("qq_ws_client: TLS 自签握手收发(wss)") {
     (void)client->Close(1000, "done");
 }
 
-TEST_CASE("qq_ws_client: TLS 信任锚不匹配拒握手(CertVerifyFailed 分型)") {
+TEST_CASE("ws_client: TLS 信任锚不匹配拒握手(CertVerifyFailed 分型)") {
     const auto cert = test_support::GenerateSelfSignedCert();
     REQUIRE(cert.has_value());
     // 另一把无关证书当"锚"——验证必须失败。
@@ -288,4 +288,4 @@ TEST_CASE("qq_ws_client: TLS 信任锚不匹配拒握手(CertVerifyFailed 分型
     acceptor.join();
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

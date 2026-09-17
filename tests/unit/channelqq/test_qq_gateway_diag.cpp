@@ -42,8 +42,8 @@ public:
             GatewayConnectError{kStageConnecting, "unexpected_connect", "should not connect"});
     }
     std::expected<void, std::string> SendText(const std::string&) override { return {}; }
-    std::expected<std::string, WsError> ReadMessage(int) override {
-        return std::unexpected(WsError{WsError::Kind::Timeout, "quiet", 0});
+    std::expected<std::string, transport::WsError> ReadMessage(int) override {
+        return std::unexpected(transport::WsError{transport::WsError::Kind::Timeout, "quiet", 0});
     }
     void Cancel() override {}
     void Close(std::uint16_t, const std::string&) override {}
@@ -354,7 +354,7 @@ TEST_CASE("qq_gateway_diag: 200 畸形响应——bad_response 不联网重试�
 TEST_CASE("qq_gateway_diag: 信任根预检失败——阻断 token/gateway 请求(§四)") {
     DiagHarness harness("trust_blocked");
     auto options = harness.MakeOptions();
-    options.trust_load_block_code = kTlsCodeTrustStoreLoadFailed;
+    options.trust_load_block_code = transport::kTlsCodeTrustStoreLoadFailed;
     options.trust_load_block_detail = "TLS 信任根不可用(装配预检): 显式信任锚含 1 张坏证(测试注入)";
     harness.adapter = std::make_unique<QqBotAdapter>(std::move(options));
     harness.Start();
@@ -362,7 +362,7 @@ TEST_CASE("qq_gateway_diag: 信任根预检失败——阻断 token/gateway 请�
     // 信任根下联网注定徒劳;失败账带装配预检的稳定码。
     REQUIRE(harness.WaitFailure([](const ConnectionSnapshot& snapshot) {
         return snapshot.last_failure.has_value() &&
-               snapshot.last_failure->error_code == kTlsCodeTrustStoreLoadFailed;
+               snapshot.last_failure->error_code == transport::kTlsCodeTrustStoreLoadFailed;
     }));
     const auto failure = harness.adapter->ConnectionState().last_failure;
     REQUIRE(failure.has_value());

@@ -33,8 +33,8 @@ public:
         return {};
     }
     std::expected<void, std::string> SendText(const std::string&) override { return {}; }
-    std::expected<std::string, channel::qq::WsError> ReadMessage(int) override {
-        return std::unexpected(channel::qq::WsError{channel::qq::WsError::Kind::Timeout,
+    std::expected<std::string, channel::transport::WsError> ReadMessage(int) override {
+        return std::unexpected(channel::transport::WsError{channel::transport::WsError::Kind::Timeout,
                                                     "quiet", 0});
     }
     void Cancel() override {}

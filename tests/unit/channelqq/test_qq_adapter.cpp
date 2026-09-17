@@ -43,7 +43,7 @@ public:
         std::vector<std::string> sent;
         bool fail_connect = false;
         // 脚本耗尽后的读错误(默认 Timeout=静默;测试改 Closed 模拟立即断线)。
-        WsError exhausted_error{WsError::Kind::Timeout, "script exhausted", 0};
+        transport::WsError exhausted_error{transport::WsError::Kind::Timeout, "script exhausted", 0};
     };
 
     explicit ScriptGatewayTransport(std::shared_ptr<Shared> shared)
@@ -73,7 +73,7 @@ public:
         return {};
     }
 
-    std::expected<std::string, WsError> ReadMessage(int) override {
+    std::expected<std::string, transport::WsError> ReadMessage(int) override {
         const std::lock_guard<std::mutex> lock(shared_->mutex);
         if (shared_->cursor < shared_->incoming.size()) {
             return shared_->incoming[shared_->cursor++];
@@ -596,7 +596,7 @@ TEST_CASE("qq_adapter: ConnectionState——connected 只在 READY 后成立,断
     {
         const std::lock_guard<std::mutex> lock(harness.gateway->mutex);
         harness.gateway->exhausted_error =
-            WsError{WsError::Kind::Closed, "peer closed", 1000};
+            transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
     }
     REQUIRE(WaitQuiet([&harness]() {
         const ConnectionSnapshot dead = harness.adapter->ConnectionState();

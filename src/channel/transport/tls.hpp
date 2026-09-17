@@ -29,9 +29,9 @@
 #include <string_view>
 #include <vector>
 
-#include "channel/qq/qq_socket.hpp"
+#include "channel/transport/tcp_socket.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 // 平台默认信任 PEM 的探测路径(macOS /etc/ssl/cert.pem;Linux 各发行版
 // ca-certificates 常见两处)。返回空串 = 没探测到。Windows 不走文件探测
@@ -171,4 +171,4 @@ private:
     void* context_ = nullptr;  // .cpp 内的 TlsContext 实体(mbedtls 全家桶+socket)
 };
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport
