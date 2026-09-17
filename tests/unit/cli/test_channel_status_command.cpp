@@ -248,23 +248,23 @@ TEST_CASE("recent_chain: 现场病形状——两条死信直接可见,提示投
     input.ledger_present = true;
     // 现场账:sid=2 送达;sid=3、4 死信(turn_failed)且各有失败提示段。
     // 链输入按 sid 降序(与 ReadChannelIngressRecentChain 的输出序一致)。
+    for (const std::int64_t sid : {4, 3}) {
+        channel::ChannelIngressRecentEntry dead;
+        dead.sid = sid;
+        dead.state = "dead_letter";
+        dead.reason =
+            "turn_failed: gateway.turn_failed: context.unestimated_media_or_reasoning: ...";
+        dead.received_at_ms = 1724700000000 + sid * 60000;
+        dead.dead_letter_at_ms = dead.received_at_ms + 1000;
+        dead.conversation_id = "dm-a";
+        input.ingress.push_back(dead);
+    }
     channel::ChannelIngressRecentEntry delivered;
     delivered.sid = 2;
     delivered.state = "delivered";
     delivered.received_at_ms = 1724700000000;
     delivered.conversation_id = "dm-a";
-    input.ingress = {delivered};
-    for (std::int64_t i = 0; i < 2; ++i) {
-        channel::ChannelIngressRecentEntry dead;
-        dead.sid = 4 - i;
-        dead.state = "dead_letter";
-        dead.reason =
-            "turn_failed: gateway.turn_failed: context.unestimated_media_or_reasoning: ...";
-        dead.received_at_ms = 1724700060000 + i * 60000;
-        dead.dead_letter_at_ms = dead.received_at_ms + 1000;
-        dead.conversation_id = "dm-a";
-        input.ingress.insert(input.ingress.begin(), dead);
-    }
+    input.ingress.push_back(delivered);
     // 投递段:sid=2 正文已送;sid=3 提示已送;sid=4 提示结果未知。
     input.deliveries = {
         {2, false, "sent", "", 1},

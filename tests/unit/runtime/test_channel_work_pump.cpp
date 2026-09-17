@@ -9,6 +9,7 @@
 //   3) QQ 超时未知/明确拒绝/重复回执/限频;发送重试不重跑 Agent。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -1391,8 +1392,9 @@ TEST_CASE("P0 刀二:失败提示的发送身份走 A05 持久分配器,与正�
     Q2Fixture::Params params;
     params.send_timeout_ms = 300;
     Q2Fixture fixture("turnfail-seq", params);
-    // 第一轮长回复(拆两段,同锚 m-1:seq 1、2);第二轮失败 → 提示(锚
-    // m-2:seq 1)。三枚身份同一只 (账号,锚) 分配器,各自账上可查。
+    // 第一轮长回复(拆两文本段 + 一枚附件末段,同锚 m-1:seq 1、2、3);
+    // 第二轮失败 → 提示(锚 m-2:seq 1)。四枚身份同一只 (账号,锚) 分配器,
+    // 各自账上可查。
     fixture.scripts = {RedactedThinkingTextScript(std::string(2600, 'a')), TextScript("x")};
     auto registry = fixture.MakeRegistry();
     REQUIRE(fixture.OpenPump(registry).ok);
@@ -1403,36 +1405,39 @@ TEST_CASE("P0 刀二:失败提示的发送身份走 A05 持久分配器,与正�
     fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
     fixture.Tick();
     fixture.TickUntilQuiet();
-    // 拆段帽 2000 字节:2600 字节 → 2 段。
-    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    // 拆段帽 2000 字节:2600 字节 → 2 文本段;附件(Q4)独占一枚空文本
+    // 末段 → 共 3 段 3 发。
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);
     fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
     fixture.Tick();
     fixture.TickUntilQuiet();
-    REQUIRE(fixture.sidecar.sent_messages().size() == 3);
+    REQUIRE(fixture.sidecar.sent_messages().size() == 4);
 
-    // A05 身份账:正文两段同锚递增;提示段按自己的锚从 1 起——同一只
-    // 分配器,不旁路。
-    std::vector<std::string> reply_delivery_ids;
+    // A05 身份账:同锚下按段序递增;提示段按自己的锚从 1 起——同一只
+    // 分配器,不旁路(ListItems 是 map 序,按 ordinal 排回段序)。
+    std::vector<gateway::ReplyOutboxItem> reply_items;
     std::string notice_delivery_id;
     for (const auto& item : fixture.outbox->ListItems()) {
         if (item.source_ref == "ingress:qqbot:main:1") {
-            reply_delivery_ids.push_back(item.delivery_id);
+            reply_items.push_back(item);
         } else if (item.source_ref == "turnfail:qqbot:main:2") {
             notice_delivery_id = item.delivery_id;
         }
     }
-    REQUIRE(reply_delivery_ids.size() == 2);
+    REQUIRE(reply_items.size() == 3);
     REQUIRE_FALSE(notice_delivery_id.empty());
-    const auto seg1 = fixture.outbox->FindLiveChannelSendIdentity(reply_delivery_ids[0]);
-    const auto seg2 = fixture.outbox->FindLiveChannelSendIdentity(reply_delivery_ids[1]);
+    std::sort(reply_items.begin(), reply_items.end(),
+              [](const gateway::ReplyOutboxItem& a, const gateway::ReplyOutboxItem& b) {
+                  return a.ordinal < b.ordinal;
+              });
+    for (std::size_t i = 0; i < reply_items.size(); ++i) {
+        const auto identity = fixture.outbox->FindLiveChannelSendIdentity(reply_items[i].delivery_id);
+        REQUIRE(identity.has_value());
+        CHECK(identity->anchor_msg_id == "m-1");
+        CHECK(identity->msg_seq == i + 1);
+    }
     const auto notice_identity = fixture.outbox->FindLiveChannelSendIdentity(notice_delivery_id);
-    REQUIRE(seg1.has_value());
-    REQUIRE(seg2.has_value());
     REQUIRE(notice_identity.has_value());
-    CHECK(seg1->anchor_msg_id == "m-1");
-    CHECK(seg2->anchor_msg_id == "m-1");
-    CHECK(seg1->msg_seq == 1);
-    CHECK(seg2->msg_seq == 2);
     CHECK(notice_identity->anchor_msg_id == "m-2");
     CHECK(notice_identity->msg_seq == 1);
 }
