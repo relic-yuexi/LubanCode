@@ -65,11 +65,11 @@ ChannelSetupCommitRequest BaseRequest() {
 
 }  // namespace
 
-TEST_CASE("平台注册表:qqbot 可配,未实现平台如实标注") {
+TEST_CASE("平台注册表:qqbot/feishu 可配,未实现平台如实标注") {
     const auto& platforms = ChannelSetupPlatforms();
     REQUIRE(platforms.size() >= 2);
     bool has_qqbot = false;
-    bool has_unimplemented = false;
+    bool has_feishu = false;
     for (const ChannelSetupPlatform& platform : platforms) {
         if (platform.id == "qqbot") {
             has_qqbot = true;
@@ -79,15 +79,22 @@ TEST_CASE("平台注册表:qqbot 可配,未实现平台如实标注") {
             CHECK_FALSE(platform.fields[0].sensitive);
             CHECK(platform.fields[1].id == "app_secret");
             CHECK(platform.fields[1].sensitive);
-        } else if (!platform.implemented) {
-            has_unimplemented = true;
+        } else if (platform.id == "feishu") {
+            // F1 起飞书有进程内长连接适配器:可进配置向导。
+            has_feishu = true;
+            REQUIRE(platform.implemented);
+            REQUIRE(platform.fields.size() == 2);
+            CHECK(platform.fields[0].id == "app_id");
+            CHECK_FALSE(platform.fields[0].sensitive);
+            CHECK(platform.fields[1].id == "app_secret");
+            CHECK(platform.fields[1].sensitive);
         }
     }
     CHECK(has_qqbot);
-    CHECK(has_unimplemented);  // feishu 尚未支持:列表可见、不可配置
+    CHECK(has_feishu);
     REQUIRE(FindChannelSetupPlatform("qqbot").has_value());
     REQUIRE(FindChannelSetupPlatform("feishu").has_value());
-    CHECK_FALSE(FindChannelSetupPlatform("feishu")->implemented);
+    CHECK(FindChannelSetupPlatform("feishu")->implemented);
     CHECK_FALSE(FindChannelSetupPlatform("nope").has_value());
 }
 
@@ -269,19 +276,22 @@ TEST_CASE("dry_run:差异到手,一页未写") {
 
 TEST_CASE("未实现平台与坏 id 拒收") {
     Fixture fx("reject");
-    SUBCASE("feishu 尚未支持") {
-        ChannelSetupCommitRequest request = BaseRequest();
-        request.channel_id = "feishu";
-        const auto committed = ChannelConfigService::Commit(fx.options, request);
-        REQUIRE_FALSE(committed.has_value());
-        CHECK(committed.error().reason == "setup_bad_platform");
-    }
     SUBCASE("未知平台") {
         ChannelSetupCommitRequest request = BaseRequest();
         request.channel_id = "telegram";
         const auto committed = ChannelConfigService::Commit(fx.options, request);
         REQUIRE_FALSE(committed.has_value());
         CHECK(committed.error().reason == "setup_bad_platform");
+        // 认得清单从平台表拼(R0 记账的手写"认得: qqbot"已改表拼)。
+        CHECK(committed.error().detail.find("qqbot") != std::string::npos);
+        CHECK(committed.error().detail.find("feishu") != std::string::npos);
+    }
+    SUBCASE("账号 id 带路径") {
+        ChannelSetupCommitRequest request = BaseRequest();
+        request.account_id = "../escape";
+        const auto committed = ChannelConfigService::Commit(fx.options, request);
+        REQUIRE_FALSE(committed.has_value());
+        CHECK(committed.error().reason == "setup_bad_id");
     }
     SUBCASE("账号 id 带路径") {
         ChannelSetupCommitRequest request = BaseRequest();

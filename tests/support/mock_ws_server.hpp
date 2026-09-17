@@ -46,9 +46,12 @@ public:
 
         // 服务端方向发文本帧。
         std::expected<void, std::string> SendText(std::string_view payload);
+        // 服务端方向发二进制帧(飞书 F1 的 pbbp2 帧走 BinaryMessage)。
+        std::expected<void, std::string> SendBinary(std::string_view payload);
         // 注原始字节(半帧/粘帧/坏帧注入口)。
         std::expected<void, std::string> SendRaw(std::string_view bytes);
-        // 读客户端发来的下一条文本帧(解客户端 mask)。
+        // 读客户端发来的下一条数据帧(解客户端 mask;text/binary 都收,
+        // 载荷原样返回)。
         std::expected<std::string, std::string> ReadText(int timeout_ms);
         // 收原始字节(验控制帧回执用,如客户端回的 Pong)。
         std::expected<std::string, std::string> ReadRaw(int timeout_ms, std::size_t max_bytes);
@@ -111,6 +114,7 @@ public:
         bool valid() const { return ssl_ != nullptr; }
         std::expected<std::string, std::string> AcceptUpgrade(int timeout_ms);
         std::expected<void, std::string> SendText(std::string_view payload);
+        std::expected<void, std::string> SendBinary(std::string_view payload);
         std::expected<void, std::string> SendRaw(std::string_view bytes);
         std::expected<std::string, std::string> ReadText(int timeout_ms);
         std::expected<std::string, std::string> ReadRaw(int timeout_ms, std::size_t max_bytes);

@@ -54,6 +54,10 @@ struct WsError {
     // 稳定错误码(连接状态快照/日志;空 = 无细码,消费方按 kind/detail
     // 分型)。TLS 失败时透传 kTlsCode* 码。
     std::string error_code;
+    // 升级被拒(非 101)时的完整响应头文本(飞书 F1:Handshake-Status/
+    // Handshake-Msg/Handshake-Autherrcode 凭据类错的裁决依据)。其余失败
+    // 路径恒空。已按 kWsHandshakeHeaderCap 限长,消费方自行挑选白名单头。
+    std::string handshake_headers;
 };
 
 // 单条握手响应/帧头部的读缓冲帽(8 KiB——网关握手响应远小于此)。
@@ -116,8 +120,14 @@ public:
     // 发一条文本帧(mask 随机)。
     std::expected<void, WsError> SendText(std::string_view text);
 
-    // 收下一条完整消息。控制帧在内部消化:Ping 自动回 Pong;Pong 忽略;
-    // Close 返回 Kind::Closed(不再自动回 close——调用方 Close() 收尾)。
+    // 发一条二进制帧(mask 随机)。飞书长连接的消息全走 BinaryMessage
+    //(pbbp2 protobuf 帧,设计单 §5.2);QQ 网关走 SendText,两不互扰。
+    std::expected<void, WsError> SendBinary(std::string_view bytes);
+
+    // 收下一条完整消息(Text/Binary 都收,载荷原样返回;二进制协议的载荷
+    // 只是字节,装在 std::string 里不加解释)。控制帧在内部消化:Ping
+    // 自动回 Pong;Pong 忽略;Close 返回 Kind::Closed(不再自动回 close——
+    // 调用方 Close() 收尾)。
     std::expected<std::string, WsError> ReadMessage(int timeout_ms);
 
     // 主动关闭:发 close 帧(尽力),再等对端 close(短超时,尽力),随后

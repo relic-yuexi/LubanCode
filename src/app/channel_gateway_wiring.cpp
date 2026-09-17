@@ -9,6 +9,8 @@
 #include "app/channel_adapter_registry.hpp"
 #include "channel/activation.hpp"
 #include "channel/credentials.hpp"
+#include "channel/feishu/feishu_gateway.hpp"
+#include "channel/feishu/feishu_http.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
 #include "channel/transport/tls.hpp"
@@ -112,7 +114,7 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
         trust_block_code = empty_case ? std::string(channel::transport::kTlsCodeTrustStoreEmpty)
                                       : std::string(channel::transport::kTlsCodeTrustStoreLoadFailed);
         trust_block_detail = "TLS 信任根不可用: " + trust.error;
-        wiring->diagnostics_.push_back("TLS 信任根不可用(" + trust.error + ")——已阻断 QQ "
+        wiring->diagnostics_.push_back("TLS 信任根不可用(" + trust.error + ")——已阻断渠道 "
                                        "token/gateway 请求(" + trust_block_code + ")");
     } else {
         wiring->diagnostics_.push_back("TLS 信任根:" + trust.detail + "(可用 " +
@@ -136,6 +138,15 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
         options.test_transport_factory
             ? std::move(options.test_transport_factory)
             : channel::qq::MakeWsTransportFactory(ca_pem, trust_mode);
+    // 飞书(F1)同款装配材料:HTTP seam 与 WS 传输工厂。信任根与 qq 共
+    // 用同一次解析(都是 wss,锚一致)。
+    const auto feishu_http = options.test_feishu_http
+                                 ? options.test_feishu_http
+                                 : channel::feishu::MakeDefaultFeishuHttpFunc();
+    const auto feishu_transport_factory =
+        options.test_feishu_transport_factory
+            ? std::move(options.test_feishu_transport_factory)
+            : channel::feishu::MakeFeishuWsTransportFactory(ca_pem, trust_mode);
 
     // 渠道工厂注册表(R0,飞书/企微设计单 §四)的装配材料:测试注入位与
     // 信任根解析结果随 deps 递进注册行——渠道差异全收进注册行,下面的
@@ -146,6 +157,11 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     assembly_deps.qq_ca_pem = ca_pem;
     assembly_deps.qq_trust_load_block_code = trust_block_code;
     assembly_deps.qq_trust_load_block_detail = trust_block_detail;
+    assembly_deps.feishu_http = feishu_http;
+    assembly_deps.feishu_transport_factory = feishu_transport_factory;
+    assembly_deps.feishu_ca_pem = ca_pem;
+    assembly_deps.feishu_trust_load_block_code = trust_block_code;
+    assembly_deps.feishu_trust_load_block_detail = trust_block_detail;
 
     const std::map<std::string, ChannelAdapterRegistration>& registry =
         ChannelAdapterRegistry();

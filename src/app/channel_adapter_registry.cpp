@@ -1,9 +1,10 @@
-// 渠道适配器注册表的注册行(见 hpp 合同注释)。qq/wecombot 注册进表;
-// 新渠道各注册一行即接入装配主循环。
+// 渠道适配器注册表的注册行(见 hpp 合同注释)。qq/wecombot/feishu 注册进
+// 表;新渠道各注册一行即接入装配主循环。
 #include "app/channel_adapter_registry.hpp"
 
 #include <utility>
 
+#include "channel/feishu/feishu_adapter.hpp"
 #include "channel/qq/qq_media.hpp"
 #include "channel/wecombot/wecom_adapter.hpp"
 
@@ -108,6 +109,35 @@ std::optional<ChannelAccountAssemblyResult> AssembleWecombotAccount(
     return result;
 }
 
+// feishu 注册行(F1):FeishuBotAdapter 装配。首版只做文本进出——媒体
+// 下载 seam 空(附件行如实报不可用),无菜单/面板发布器。
+std::optional<ChannelAccountAssemblyResult> AssembleFeishuAccount(
+    const ChannelAssemblyDeps& deps, const ChannelAccountAssembly& account,
+    std::string* /*error*/) {
+    channel::feishu::FeishuBotAdapter::Options adapter_options;
+    adapter_options.channel_id = account.channel_id;
+    adapter_options.account_id = account.account_id;
+    adapter_options.config = account.config;
+    adapter_options.credential = account.credential;
+    adapter_options.state_root = account.channels_state_root;
+    adapter_options.http = deps.feishu_http;
+    adapter_options.transport_factory = deps.feishu_transport_factory;
+    adapter_options.ca_pem = deps.feishu_ca_pem;
+    adapter_options.trust_load_block_code = deps.feishu_trust_load_block_code;
+    adapter_options.trust_load_block_detail = deps.feishu_trust_load_block_detail;
+    adapter_options.now_ms = account.now_ms;
+    auto adapter = std::make_unique<channel::feishu::FeishuBotAdapter>(
+        std::move(adapter_options));
+    auto* adapter_ptr = adapter.get();
+
+    ChannelAccountAssemblyResult result;
+    // 连接状态取数口(reporter 每 tick 调;快照结构字段中性,复用 qq 的
+    // ConnectionSnapshot——F1 不另造同形结构)。
+    result.connection_state = [adapter_ptr]() { return adapter_ptr->ConnectionState(); };
+    result.adapter = std::move(adapter);
+    return result;
+}
+
 }  // namespace
 
 const std::map<std::string, ChannelAdapterRegistration>& ChannelAdapterRegistry() {
@@ -141,6 +171,14 @@ const std::map<std::string, ChannelAdapterRegistration>& ChannelAdapterRegistry(
                      return runtime::ChannelMediaBytes{std::move(downloaded->bytes)};
                  });
              }(),
+             1,
+         }},
+        // feishu(F1,设计单 §一/§五):长连接进程内适配器。媒体 seam 空
+        //(首版只做文本);turn 工作线程与 qq 同口径(≥1)。
+        {"feishu",
+         ChannelAdapterRegistration{
+             AssembleFeishuAccount,
+             /*media_download=*/{},
              1,
          }},
         // wecombot(W1,企微智能机器人长连接,设计单 §六):文本进出

@@ -22,11 +22,14 @@ ChannelSetupError Fail(std::string reason, std::string detail) {
 }
 
 // 渠道模板账号 → 原始 JSON(新账号的骨架;逐字段显式,与 MakeXxxTemplate
-// Account 同源,不在第二处手抄取值)。模板按渠道取(qqbot/wecombot 各归
-// 各的 MakeXxxTemplateAccount;未认得渠道照 QQ 形——Commit 守门已拦)。
+// Account 同源,不在第二处手抄取值)。模板按渠道取(qqbot/wecombot/feishu
+// 各归各的 MakeXxxTemplateAccount;未认得渠道照 QQ 形——Commit 守门已拦)。
 nlohmann::json TemplateAccountToJson(const std::string& channel_id) {
     const ChannelAccountUserConfig template_account =
-        channel_id == "wecombot" ? MakeWecombotTemplateAccount() : MakeQqTemplateAccount();
+        channel_id == "wecombot"
+            ? MakeWecombotTemplateAccount()
+            : (channel_id == "feishu" ? MakeFeishuTemplateAccount()
+                                      : MakeQqTemplateAccount());
     nlohmann::json account;
     account["enabled"] = false;  // Commit 里按 ensure_enabled 显式置位
     account["transport"] = template_account.transport;
@@ -97,7 +100,7 @@ const std::vector<ChannelSetupPlatform>& ChannelSetupPlatforms() {
         ChannelSetupPlatform{
             "qqbot",
             "QQ",
-            true,  // Q1 起有进程内适配器(channel_gateway_wiring 只认 qqbot)
+            true,  // Q1 起有进程内适配器(channel_adapter_registry 注册行)
             {ChannelSetupField{"app_id", "AppID", false},
              ChannelSetupField{"app_secret", "AppSecret", true}},
         },
@@ -111,8 +114,9 @@ const std::vector<ChannelSetupPlatform>& ChannelSetupPlatforms() {
         ChannelSetupPlatform{
             "feishu",
             "飞书",
-            false,  // 适配器未实现:可显示"尚未支持",不可进假成功配置
-            {},
+            true,  // F1 起有进程内长连接适配器(channel_adapter_registry 注册行)
+            {ChannelSetupField{"app_id", "App ID", false},
+             ChannelSetupField{"app_secret", "App Secret", true}},
         },
     };
     return platforms;
@@ -225,14 +229,25 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
             "setup_bad_id",
             "渠道/账号 id 须是单段名(无路径分隔符/控制字符,长度 ≤ 64): " + request.account_id));
     }
+    // 表单字段展示名从平台表取(qq 是 AppID/AppSecret,飞书是 App ID/
+    // App Secret——错误文案与向导问句同一口径,不手抄第二份)。
+    std::string app_id_label = "AppID";
+    std::string secret_label = "AppSecret";
+    for (const ChannelSetupField& field : platform->fields) {
+        if (field.id == "app_id") {
+            app_id_label = field.label;
+        } else if (field.id == "app_secret") {
+            secret_label = field.label;
+        }
+    }
     if (request.app_id.has_value()) {
-        if (const auto invalid = ValidateSingleLine(*request.app_id, "AppID", 128, "setup_app_id_invalid")) {
+        if (const auto invalid = ValidateSingleLine(*request.app_id, app_id_label, 128, "setup_app_id_invalid")) {
             return std::unexpected(*invalid);
         }
     }
     if (request.new_secret.has_value()) {
         if (const auto invalid =
-                ValidateSingleLine(*request.new_secret, "AppSecret", kCredentialFileMaxBytes, "setup_secret_invalid")) {
+                ValidateSingleLine(*request.new_secret, secret_label, kCredentialFileMaxBytes, "setup_secret_invalid")) {
             return std::unexpected(*invalid);
         }
     }

@@ -80,7 +80,8 @@ bool AskYesNo(const std::string& prompt, bool default_yes) {
 }  // namespace
 
 int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
-    // 0) 平台守门:未知平台/未实现平台先报,不进问答。
+    // 0) 平台守门:未知平台/未实现平台先报,不进问答。认得清单从平台表拼
+    // (与注册表同源——新渠道注册后自动跟上,不手抄第二份)。
     const auto platform = channel::FindChannelSetupPlatform(args.platform);
     if (!platform.has_value()) {
         // 已认得清单从平台表取(单一真源;新平台注册即跟上)。
@@ -102,6 +103,16 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
         return 1;
     }
     const std::string account_id = args.account.empty() ? std::string("main") : args.account;
+    // 表单字段展示名(qq:AppID/AppSecret;飞书:App ID/App Secret)。
+    std::string app_id_label = "AppID";
+    std::string secret_label = "AppSecret";
+    for (const channel::ChannelSetupField& field : platform->fields) {
+        if (field.id == "app_id") {
+            app_id_label = field.label;
+        } else if (field.id == "app_secret") {
+            secret_label = field.label;
+        }
+    }
 
     // 1) 终端守门:向导要问答,没交互终端就明报(自动化走 secret_file/
     //    secret_env,不用向导)。先于一切提问,不弹任何 UI。
@@ -151,7 +162,8 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                         account_enabled ? "已启用" : "未启用", has_app_id ? "已填" : "未填",
                         old_secret_file.empty() ? "未配" : "已配");
         } else {
-            std::printf("该账号尚未配置,将按 QQ 模板新建(websocket、私聊配对、群聊禁用、final 回复、只读工具)。\n");
+            std::printf("该账号尚未配置,将按 %s 模板新建(websocket、私聊配对、群聊禁用、final 回复、只读工具)。\n",
+                        platform->display_name.c_str());
         }
     }
 
@@ -184,19 +196,19 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
         }
     }
 
-    // 5) 问答:AppID(可见,可保留)→ AppSecret(隐藏,可保留)。
+    // 5) 问答:App ID(可见,可保留)→ App Secret(隐藏,可保留)。
     std::printf("\n");
     std::optional<std::string> app_id;
     if (has_app_id) {
-        const auto answer = AskLine("AppID", "旧值");
+        const auto answer = AskLine(app_id_label, "旧值");
         if (answer.has_value() && !answer->empty()) {
             app_id = *answer;
         }
     } else {
         while (!app_id.has_value()) {
-            const auto answer = AskLine("AppID", std::string());
+            const auto answer = AskLine(app_id_label, std::string());
             if (!answer.has_value() || answer->empty()) {
-                std::printf("AppID 不能为空,请重新输入(或 Ctrl+C 退出)。\n");
+                std::printf("%s 不能为空,请重新输入(或 Ctrl+C 退出)。\n", app_id_label.c_str());
                 continue;
             }
             app_id = *answer;
@@ -205,10 +217,10 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     std::optional<std::string> new_secret;
     {
         std::string secret_error;
-        const auto answer = AskSecret("AppSecret", old_secret_file.empty() ? std::string() : "旧密钥",
+        const auto answer = AskSecret(secret_label, old_secret_file.empty() ? std::string() : "旧密钥",
                                       &secret_error);
         if (!secret_error.empty()) {
-            std::fprintf(stderr, "\nAppSecret 输入失败: %s\n", secret_error.c_str());
+            std::fprintf(stderr, "\n%s 输入失败: %s\n", secret_label.c_str(), secret_error.c_str());
             std::fprintf(stderr, "未做任何修改。\n");
             return 1;
         }
@@ -216,7 +228,7 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
             new_secret = *answer;
         } else if (answer.has_value() && old_secret_file.empty()) {
             // 空手回车又没有旧密钥:再问一次,连续空手视为取消。
-            const auto retry = AskSecret("AppSecret(不能为空)", std::string(), &secret_error);
+            const auto retry = AskSecret(secret_label + "(不能为空)", std::string(), &secret_error);
             if (!secret_error.empty() || !retry.has_value() || retry->empty()) {
                 std::fprintf(stderr, "\n未填写 AppSecret,取消保存。未做任何修改。\n");
                 return 1;
@@ -270,7 +282,7 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     // 8) 收尾:明示"已保存/尚未验证",给 gateway run 入口;提醒不热更新。
     std::printf("\n配置已保存: %s\n", committed->config_file.c_str());
     std::printf("密钥文件: %s(权限已按仅当前用户收紧)\n", committed->secret_file.c_str());
-    std::printf("尚未验证连接:本向导没有连 QQ。\n");
+    std::printf("尚未验证连接:本向导没有连 %s。\n", platform->display_name.c_str());
     std::printf("启动:在当前目录运行 `lubancode gateway run`(或 `lubancode im`)。\n");
     std::printf("注意:正在运行的 Gateway 不会热加载配置,须重启后生效。\n");
     return 0;
