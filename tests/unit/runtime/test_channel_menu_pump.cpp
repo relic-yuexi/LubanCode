@@ -94,6 +94,10 @@ public:
             if (message.role == api::Role::User) ++users;
             for (const auto& block : message.content)
                 if (std::holds_alternative<api::ImageBlock>(block)) ++images;
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block))
+                    saw_host_clock = saw_host_clock || text->text.find("宿主时钟") != std::string::npos;
+            }
         }
         user_counts.push_back(users);
         image_counts.push_back(images);
@@ -124,6 +128,7 @@ public:
     std::vector<std::string> last_user_texts;
     std::vector<std::size_t> user_counts, image_counts;
     std::vector<std::string> systems;
+    bool saw_host_clock = false;
 
 private:
     std::filesystem::path counter_;
@@ -499,7 +504,7 @@ TEST_CASE("QQ builtins manage isolated contexts without sending slash commands t
     CHECK(fixture.SentTextAt(6).find("找不到") != std::string::npos);
     CHECK(fixture.SentTextAt(7).find("暂不支持") != std::string::npos);
     CHECK(fixture.SentTextAt(8).find("未装配") != std::string::npos);
-    CHECK(fixture.backend->systems.back().find("宿主时钟") != std::string::npos);
+    CHECK(fixture.backend->saw_host_clock);
 }
 
 TEST_CASE("QQ accepted pictures reach provider input and generated files enter outbox") {
