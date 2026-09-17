@@ -437,6 +437,8 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     executor_options.wire_name = options_.wire_name;
     executor_options.model = options_.model;
     executor_options.skills_prompt = options_.skills_prompt;
+    executor_options.context_window_tokens = options_.context_window_tokens;
+    executor_options.on_progress = options_.on_progress;
     executor_options.replies_dir = options_.paths.replies_dir;
     executor_options.tools = options_.tools;
     executor_options.hook_dispatcher = options_.hook_dispatcher;

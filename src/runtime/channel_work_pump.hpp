@@ -93,6 +93,8 @@ public:
         std::string wire_name;
         std::string model;
         std::string skills_prompt;
+        std::size_t context_window_tokens = 0;
+        std::function<void(const std::string&)> on_progress;
         std::string skills_summary;
         bool accepts_images = true;  // 未声明时沿终端规矩尝试；目录明确纯文本时不送图。
         channel::ToolRoutePolicy tools;  // 会话级基线(逐轮策略来自 route.tools)
@@ -185,6 +187,7 @@ public:
                                                 const std::string& job_id);
 
 private:
+    void ReportProgress(const std::string& text) const;
     // 账号级账套(session map + work ledger;首用懒开)。
     struct AccountBooks {
         channel::ChannelSessionMap session_map;

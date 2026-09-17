@@ -118,6 +118,8 @@ public:
         std::string wire_name;
         std::string model;
         std::string skills_prompt;
+        std::size_t context_window_tokens = 0;
+        std::function<void(const std::string&)> on_progress;
         // 回复原件落位(delivery/replies;由泵递进)。
         std::filesystem::path replies_dir;
         // 工具授权(fail closed:allow 名单没列 = 拒,同渠道 §16.1)。

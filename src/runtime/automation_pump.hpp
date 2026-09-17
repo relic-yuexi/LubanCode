@@ -71,6 +71,8 @@ public:
         std::string wire_name;
         std::string model;
         std::string skills_prompt;
+        std::size_t context_window_tokens = 0;
+        std::function<void(const std::string&)> on_progress;
         channel::ToolRoutePolicy tools;
         hooks::HookDispatcher* hook_dispatcher = nullptr;
         // 预算三根硬线(0 = 不设;生产装配应设)。

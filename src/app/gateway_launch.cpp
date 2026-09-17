@@ -135,6 +135,8 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         pump_options.wire_name = config::ProviderWireName(gateway_config->config.wire);
         pump_options.model = gateway_config->config.model;
         pump_options.skills_prompt = skills_prompt;
+        pump_options.context_window_tokens = gateway_config->config.context_window_tokens;
+        pump_options.on_progress = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
         pump_options.max_steps_per_turn = 32;   // V1 生产缺省:预算三根
         pump_options.max_wall_secs = 600;       // 硬线至少步数+墙钟两根
         pump.emplace();
@@ -225,6 +227,8 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                     config::ProviderWireName(gateway_config->config.wire);
                 work_options.model = gateway_config->config.model;
                 work_options.skills_prompt = skills_prompt;
+                work_options.context_window_tokens = gateway_config->config.context_window_tokens;
+                work_options.on_progress = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
                 work_options.skills_summary = skills_summary;
                 work_options.accepts_images = accepts_images;
                 work_options.max_steps_per_turn = 32;  // 与 automation 同款预算

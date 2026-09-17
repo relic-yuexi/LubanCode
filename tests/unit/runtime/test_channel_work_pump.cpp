@@ -17,6 +17,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@
 #include "gateway/reply_outbox.hpp"
 #include "runtime/channel_work_pump.hpp"
 #include "runtime/headless_executor.hpp"
+#include "runtime/headless_progress.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/tool.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -252,6 +254,8 @@ struct Q2Fixture {
     std::filesystem::path counter_file;
     std::int64_t now = 1724700000000;
     std::vector<std::vector<api::StreamEvent>> scripts;
+    std::vector<std::string> progress_lines;
+    std::size_t context_window_tokens = 0;
 
     FakeChannelSidecar sidecar;
     FakeTransport transport{sidecar};
@@ -336,6 +340,8 @@ struct Q2Fixture {
         options.lubancode_version = "0.26.238-test";
         options.wire_name = "test-wire";
         options.model = "test-model";
+        options.context_window_tokens = context_window_tokens;
+        options.on_progress = [this](const std::string& line) { progress_lines.push_back(line); };
         options.tools.allow = {"repo_probe"};
         options.max_steps_per_turn = 8;
         options.send_retry_backoff_ms = params_.send_retry_backoff_ms;
@@ -395,6 +401,7 @@ struct Q2Fixture {
 TEST_CASE("连续两条消息共享上下文:同会话同场,第二轮请求带第一轮对话") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     Q2Fixture fixture("shared");
+    fixture.context_window_tokens = 64000;
     fixture.scripts = {TextScript("第一答:记住了暗号甲。"), TextScript("第二答:暗号是甲。")};
     auto registry = fixture.MakeRegistry();
     REQUIRE(fixture.OpenPump(registry).ok);
@@ -427,6 +434,66 @@ TEST_CASE("连续两条消息共享上下文:同会话同场,第二轮请求带�
     REQUIRE(second.find("第一答") != std::string::npos);
     // 两封信都投递成功(sidecar 收到两条回复)。
     REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    const auto has_progress = [&](const std::string& text) {
+        return std::any_of(fixture.progress_lines.begin(), fixture.progress_lines.end(),
+            [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    CHECK(has_progress("运行窗口=64000"));
+    CHECK(has_progress("模型回合结束"));
+    CHECK(has_progress("回复已入投递队列"));
+    CHECK(has_progress("QQ 已接受回复"));
+}
+
+TEST_CASE("前台用量:缓存计入输入,未知不冒充零,上下文不累计") {
+    std::string log;
+    runtime::HeadlessProgressReporter reporter(
+        [&](const std::string& line) { log += line + "\n"; }, "qqbot/main", "test");
+    agent::ContextPressure pressure;
+    pressure.phase = agent::ContextPressure::Phase::PreRequest;
+    pressure.window_tokens = 10000;
+    pressure.working_view_tokens = 800;
+    pressure.projected_tokens = 2000;
+    reporter.Context(pressure);
+    runtime::ServerEvent event;
+    event.kind = runtime::ServerEventKind::ModelStepStarted;
+    reporter.Observe(event);
+    event.kind = runtime::ServerEventKind::UsageUpdated;
+    event.payload = {{"reported_by_provider", true}, {"input_tokens", 100},
+        {"output_tokens", 20}, {"cache_read_tokens", 900},
+        {"cache_read_reported_by_provider", true}};
+    reporter.Observe(event);
+    CHECK(log.find("输入=1000 输出=20 缓存读=900 缓存写=未报告") != std::string::npos);
+    CHECK(log.find("命中率=90.0%") != std::string::npos);
+    CHECK(log.find("本次输入占运行窗口=1000/10000（10.0%）") != std::string::npos);
+    event.kind = runtime::ServerEventKind::ModelStepStarted;
+    reporter.Observe(event);
+    event.kind = runtime::ServerEventKind::UsageUpdated;
+    event.payload = {{"reported_by_provider", true}, {"input_tokens", 500},
+        {"cache_read_reported_by_provider", true}, {"cache_creation_reported_by_provider", true}};
+    reporter.Observe(event);
+    CHECK(log.find("缓存读=0 缓存写=0") != std::string::npos);
+    CHECK(log.find("本次输入占运行窗口=500/10000（5.0%）") != std::string::npos);
+    event.kind = runtime::ServerEventKind::ModelStepStarted;
+    reporter.Observe(event);
+    event.kind = runtime::ServerEventKind::UsageUpdated;
+    event.payload = nlohmann::json::object();
+    reporter.Observe(event);
+    CHECK(log.find("输入=未报告 输出=未报告") != std::string::npos);
+    event.kind = runtime::ServerEventKind::TurnCompleted;
+    event.outcome = runtime::Outcome::Succeeded;
+    reporter.Observe(event);
+    CHECK(log.find("累计输入=1500 累计输出=20（部分请求未报告）") != std::string::npos);
+    CHECK(log.find("缓存写合计=0（仅已报告）") != std::string::npos);
+}
+
+TEST_CASE("前台显示:单行预览保留完整 UTF8,显示故障不阻断执行") {
+    CHECK(runtime::HeadlessProgressReporter::Preview("中文", 4) == "中…");
+    CHECK(runtime::HeadlessProgressReporter::Preview("a\nb\x1b") == "a b ");
+    runtime::HeadlessProgressReporter reporter(
+        [](const std::string&) { throw std::runtime_error("display failed"); }, "qq", "test");
+    runtime::ServerEvent event;
+    event.kind = runtime::ServerEventKind::TurnStarted;
+    CHECK_NOTHROW(reporter.Observe(event));
 }
 
 TEST_CASE("不同用户不串场:dm-a 与 dm-b 各开各场,互不见对方对话") {
@@ -914,6 +981,10 @@ TEST_CASE("工具轮走完整链:五层交集放行的工具真执行并计数�
     fixture.TickUntilQuiet();
     REQUIRE(CountOf(fixture.counter_file, "model") == 2);
     REQUIRE(CountOf(fixture.counter_file, "tool") == 1);
+    for (const auto* expected : {"请求工具 repo_probe", "开始执行工具 repo_probe", "工具结果 repo_probe"}) {
+        CHECK(std::any_of(fixture.progress_lines.begin(), fixture.progress_lines.end(),
+            [&](const std::string& line) { return line.find(expected) != std::string::npos; }));
+    }
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
     // V3 流:绑定事件带渠道审计载荷。
     const std::string session = fixture.pump->session_id_for("qqbot", "main", "dm-a");
