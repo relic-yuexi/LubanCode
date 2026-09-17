@@ -18,29 +18,8 @@ namespace {
 constexpr int kBackoffSeconds[] = {1, 2, 4, 8, 16, 30, 60};
 constexpr int kBackoffSteps = static_cast<int>(sizeof(kBackoffSeconds) / sizeof(int));
 
-// 真 transport::WsClient 的连接错误 → 稳定码(照 qq_gateway 的映射;
-// TCP/TLS/WS 升级失败在 transport::WsClient::Connect 一口锅)。
-std::string WsErrorConnectCode(const channel::transport::WsError& error) {
-    if (!error.error_code.empty()) {
-        return error.error_code;
-    }
-    switch (error.kind) {
-        case channel::transport::WsError::Kind::Timeout:
-            return "connect_timeout";
-        case channel::transport::WsError::Kind::Protocol:
-            return "ws_handshake_failed";
-        case channel::transport::WsError::Kind::Closed:
-            return error.detail == "connect cancelled" ? std::string("connect_cancelled")
-                                                       : std::string("ws_handshake_closed");
-        case channel::transport::WsError::Kind::Failed:
-            return error.detail.rfind("tls: ", 0) == 0
-                       ? std::string(channel::transport::kTlsCodeHandshakeFailed)
-                       : std::string("connect_failed");
-    }
-    return "connect_failed";
-}
-
-// 运行期读错误 → 稳定码。
+// 运行期读错误 → 稳定码(连接错误在 WsGatewayTransport::Connect 里已折成
+// GatewayConnectError 的稳定码,这里只管读)。
 std::string ReadErrorCode(const channel::transport::WsError& error) {
     switch (error.kind) {
         case channel::transport::WsError::Kind::Timeout:
@@ -209,7 +188,7 @@ void WecomGatewaySession::FailAllPendings(WecomSubmitOutcome::Status status,
 
 std::optional<std::string> WecomGatewaySession::DrainWrites(
     const std::shared_ptr<WecomTransport>& transport) {
-    std::vector<WriteEntry> batch;
+    std::deque<WriteEntry> batch;
     {
         const std::lock_guard<std::mutex> lock(write_mutex_);
         batch.swap(write_queue_);
@@ -322,10 +301,11 @@ WecomGatewaySession::RunOutcome WecomGatewaySession::RunOneConnection(std::atomi
                                std::string(), std::string()));
     const auto connected = transport->Connect(options_.endpoint);
     if (!connected.has_value()) {
+        // Connect 的错误类型已是 GatewayConnectError(稳定码 + 脱敏 detail,
+        // 生产 WsGatewayTransport 已做完 WsError → 稳定码的折算),原样透传。
         fail(WecomGatewayEvent::Kind::ConnectFailed, kStageConnecting,
-             connected.error().error_code.empty()
-                 ? WsErrorConnectCode(connected.error())
-                 : connected.error().error_code,
+             connected.error().error_code.empty() ? std::string("connect_failed")
+                                                  : connected.error().error_code,
              "ws connect: " + connected.error().detail);
         return RunOutcome{};
     }
