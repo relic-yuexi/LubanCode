@@ -1,0 +1,13 @@
+{
+  "name": "already-clean-passes-through",
+  "trigger": {
+    "input": {"prompt": "已经干净"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "expect": {
+    "kind": "completed",
+    "prompt": "已经干净",
+    "terminalRuns": 1
+  }
+}

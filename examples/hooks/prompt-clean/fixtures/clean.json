@@ -1,0 +1,15 @@
+{
+  "name": "trims-and-squeezes",
+  "trigger": {
+    "input": {"prompt": "  你好\n\n\n\n  世界  "},
+    "origin": "human",
+    "purpose": "interactive",
+    "deliveryMode": "steer"
+  },
+  "expect": {
+    "kind": "completed",
+    "prompt": "你好\n\n  世界",
+    "terminalRuns": 1,
+    "records": {"PreUser/prompt.normalize": {"outcome": "completed", "nextCalls": 1}}
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "supplements-search-results",
+  "hookPoint": "PostAction",
+  "trigger": {
+    "input": {"toolName": "search", "content": "十条检索命中", "isError": false},
+    "actionId": "action-000001"
+  },
+  "expect": {
+    "kind": "completed",
+    "value": {"toolName": "search", "content": "十条检索命中"},
+    "terminalRuns": 1,
+    "records": {"PostAction/result.refine": {"outcome": "completed", "nextCalls": 1,
+      "effects": [{"type": "result.supplement", "applied": true,
+                   "payload": {"note": "以上为检索原文;引用时请核对来源。"}}]}}
+  }
+}

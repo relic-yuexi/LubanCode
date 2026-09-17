@@ -1,0 +1,16 @@
+{
+  "name": "cjk-rune-estimate",
+  "hookPoint": "PreRequest",
+  "trigger": {
+    "input": {"system": "你是 LubanCode。", "messages": [{"role": "user", "content": "热换怎么设计的?"}]},
+    "stage": "estimate",
+    "purpose": "interactive"
+  },
+  "expect": {
+    "kind": "completed",
+    "value": {"estimator": "cjk_runes_v1", "estimatedInputTokens": 20,
+              "inputUtf8Bytes": 44, "inputRuneCount": 22, "coverage": "partial"},
+    "terminalRuns": 0,
+    "records": {"PreRequest/context.token_estimate": {"outcome": "completed_short_circuit", "nextCalls": 0}}
+  }
+}

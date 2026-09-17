@@ -1,0 +1,14 @@
+{
+  "name": "unknown-result-no-retry",
+  "trigger": {
+    "input": {"prompt": "知识库超时了"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "tools": [{"name": "kb.search", "description": "知识库检索", "content": "", "outcome": "timed_out"}],
+  "expect": {
+    "kind": "completed",
+    "contextAppendsContain": ["[知识库检索结果未知(executionId=hookexec-", "不自动重试"],
+    "terminalRuns": 1
+  }
+}
