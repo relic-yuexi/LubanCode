@@ -248,3 +248,63 @@ TEST_CASE("dead letter:旁路终态 + 独立账档") {
     // dead-letter.jsonl 留档。
     CHECK(std::filesystem::exists(dir / "ingress" / "dead-letter.jsonl"));
 }
+
+// QQBot 静默失败单 P1:最近来信链的只读投影——不手翻 JSONL 就能看见
+// 每枚来信的最终状态、死信原因与时间。
+TEST_CASE("recent chain:重放最终状态/原因/死信时间,sid 降序,limit 裁剪") {
+    const auto dir = MakeAccountDir("recent_chain");
+    {
+        auto store = OpenStore(dir);
+        // sid=1:送达;sid=2、3:死信(现场病形状:turn_failed);sid=4:受理拒。
+        const auto first = store->Ingest(MakeEvent("in-1", "pe-1", "m-1"));
+        REQUIRE(first.has_value());
+        for (const auto step : {IngressEventState::Authorized, IngressEventState::Routed,
+                                IngressEventState::Queued, IngressEventState::Running,
+                                IngressEventState::Replied, IngressEventState::Delivered}) {
+            REQUIRE_FALSE(store->Transition(first->sid, step, "chain_walk").has_value());
+        }
+        const auto second = store->Ingest(MakeEvent("in-2", "pe-2", "m-2"));
+        REQUIRE(second.has_value());
+        REQUIRE_FALSE(store->MoveToDeadLetter(
+                          second->sid, "turn_failed: gateway.turn_failed: context.unestimated",
+                          1724700060000).has_value());
+        const auto third = store->Ingest(MakeEvent("in-3", "pe-3", "m-3"));
+        REQUIRE(third.has_value());
+        REQUIRE_FALSE(store->MoveToDeadLetter(
+                          third->sid, "turn_failed: gateway.turn_failed: context.unestimated",
+                          1724700120000).has_value());
+        const auto fourth = store->Ingest(MakeEvent("in-4", "pe-4", "m-4"));
+        REQUIRE(fourth.has_value());
+        REQUIRE_FALSE(store->Transition(fourth->sid, IngressEventState::Rejected, "dm_closed").has_value());
+    }
+    // 只读投影(store 已销毁,零写柄)。
+    const auto chain = ReadChannelIngressRecentChain(dir, 8);
+    CHECK(chain.ledger_present);
+    CHECK(chain.dead_letter_count == 2);
+    REQUIRE(chain.entries.size() == 4);
+    // sid 降序:4(rejected)→3(dead_letter)→2(dead_letter)→1(delivered)。
+    CHECK(chain.entries[0].sid == 4);
+    CHECK(chain.entries[0].state == "rejected");
+    CHECK(chain.entries[0].reason == "dm_closed");
+    CHECK(chain.entries[1].sid == 3);
+    CHECK(chain.entries[1].state == "dead_letter");
+    CHECK(chain.entries[1].reason.find("turn_failed") != std::string::npos);
+    CHECK(chain.entries[1].dead_letter_at_ms == 1724700120000);
+    CHECK(chain.entries[2].sid == 2);
+    CHECK(chain.entries[2].dead_letter_at_ms == 1724700060000);
+    CHECK(chain.entries[3].sid == 1);
+    CHECK(chain.entries[3].state == "delivered");
+    CHECK(chain.entries[3].received_at_ms == 1724700000000);
+    CHECK(chain.entries[3].conversation_id == "dm-1");
+    CHECK(chain.entries[3].sender_id == "sender-1");
+    // limit 裁剪:只留最近 2 枚。
+    const auto limited = ReadChannelIngressRecentChain(dir, 2);
+    REQUIRE(limited.entries.size() == 2);
+    CHECK(limited.entries[0].sid == 4);
+    CHECK(limited.entries[1].sid == 3);
+    // 没账的目录:空投影,不建文件。
+    const auto empty_dir = MakeAccountDir("recent_chain_empty");
+    const auto empty = ReadChannelIngressRecentChain(empty_dir, 8);
+    CHECK_FALSE(empty.ledger_present);
+    CHECK(empty.entries.empty());
+}

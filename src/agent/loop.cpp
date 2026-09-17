@@ -1457,8 +1457,21 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (!wire.empty()) {
                 auto snapshot = api::ModelInputSnapshotFromWire(wire);
                 if (!snapshot) return std::unexpected(snapshot.error());
-                if (api::HasUnestimatedInput(*snapshot)) {
-                    return std::unexpected("context.unestimated_media_or_reasoning: explicit budget policy required");
+                const auto unestimated = api::DiagnoseUnestimatedInput(*snapshot);
+                if (unestimated.refused()) {
+                    // 安全诊断(QQBot 静默失败单 P0 刀一):适配器协议、触发
+                    // 字段路径、块类型、预算策略名、计数——不记字段值、原始
+                    // wire 或正文。日志与错误串同源,现场只读排查不再翻 JSONL。
+                    platform::LogSink::Instance().Warn(
+                        "loop", "[context-unestimated] wire=" + agent.profile_.prompt_sections.wire +
+                                    " policy=adapter_bytes_div4 " + unestimated.Summary() +
+                                    " messages=" + std::to_string(request.messages.size()) +
+                                    " step=" + std::to_string(step_index));
+                    return std::unexpected(
+                        "context.unestimated_media_or_reasoning: explicit budget policy required (wire=" +
+                        agent.profile_.prompt_sections.wire + " " + unestimated.Summary() +
+                        ")。本轮请求含无法按文本预算的内容(图片等媒体或加密思考),已拦下未发往模型;"
+                        "请改发纯文字内容;确需发送,请为该类内容配置明确的预算策略。");
                 }
                 const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
                 const auto tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
@@ -2615,7 +2628,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 const auto input = api::ModelInputSnapshotFromWire(wire);
                 if (!input) batch_capacity_error = input.error();
                 else if (unestimated_result_media || api::HasUnestimatedInput(*input)) {
-                    batch_capacity_error = "tool_batch.unestimated_media_or_reasoning";
+                    // 安全诊断同最终闸:结构与计数,不带字段值。
+                    batch_capacity_error = "tool_batch.unestimated_media_or_reasoning (" +
+                                           api::DiagnoseUnestimatedInput(*input).Summary() + ")";
                 } else {
                     const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
                     const auto fixed_bytes = measured.at("inputUtf8Bytes").get<std::size_t>();
@@ -2666,7 +2681,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 const auto input = api::ModelInputSnapshotFromWire(backend_.SerializeForDiagnostics(batch_request));
                 if (!input) batch_capacity_error = input.error();
                 else if (api::HasUnestimatedInput(*input)) {
-                    batch_capacity_error = "tool_batch.unestimated_media_or_reasoning";
+                    batch_capacity_error = "tool_batch.unestimated_media_or_reasoning (" +
+                                           api::DiagnoseUnestimatedInput(*input).Summary() + ")";
                 } else {
                     const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
                     const auto tokens = measured.at("estimatedInputTokens").get<std::size_t>();

@@ -16,7 +16,10 @@
 #include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
 #include "tools/session_utils.hpp"
+#include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
+#include "api/gemini/request.hpp"
+#include "api/responses/request.hpp"
 #include "api/types.hpp"
 #include "api/chat/request.hpp"
 #include "api/model_input_snapshot.hpp"
@@ -44,7 +47,12 @@ public:
     std::vector<api::Request> captured_requests;
     std::optional<std::size_t> cancel_after_event_index;
     bool serialize_adapter_input = false;
+    // 指定 wire 序列化器(四家 wire 的历史回传形状各不同;空 = 旧行为)。
+    std::function<nlohmann::json(const api::Request&)> wire_json;
     std::string SerializeForDiagnostics(const api::Request& request) const override {
+        if (wire_json) {
+            return wire_json(request).dump();
+        }
         return serialize_adapter_input ? api::chat::BuildRequestJson(request).dump() : std::string();
     }
 
@@ -2677,6 +2685,133 @@ TEST_CASE("B2 impossible closed batch persists once then stops before a second r
     CHECK(outcome.error().find("tool_batch.") != std::string::npos);
     CHECK(commits == 1);
     CHECK(executed->call_count == 3);
+    CHECK(backend.captured_requests.size() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// QQBot 配对后第二轮静默失败单 P0 刀一:thinking 历史回传不误伤预算闸。
+// 现场病(minimax/anthropic wire 真机):第一轮带 thinking 的响应进历史,
+// 第二、三轮纯文本被 context.unestimated_media_or_reasoning 在本地拦死。
+// 回归钉四家 wire 的历史回传形状——连续三轮纯文本 + 工具回合全过;
+// 真正无法预算的输入(redacted_thinking)照旧拒收,错误给下一步。
+// ---------------------------------------------------------------------------
+TEST_CASE("thinking history with signatures survives the adapter budget gate on all four wires") {
+    struct WireCase {
+        const char* name;
+        std::function<nlohmann::json(const api::Request&)> serialize;
+    };
+    const std::vector<WireCase> wires = {
+        {"anthropic",
+         [](const api::Request& r) { return api::anthropic::BuildRequestJson(r); }},
+        {"chat", [](const api::Request& r) { return api::chat::BuildRequestJson(r); }},
+        {"gemini", [](const api::Request& r) { return api::gemini::BuildRequestJson(r); }},
+        {"responses",
+         [](const api::Request& r) { return api::responses::BuildRequestJson(r); }},
+    };
+    const auto thinking_text_script = [](const std::string& text, const std::string& sig) {
+        return std::vector<api::StreamEvent>{
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"脱敏思考正文一段", sig},
+            api::ContentBlockDone{0},
+            api::TextDelta{text},
+            api::ContentBlockDone{1},
+            api::MessageDone{"end_turn", api::Usage{}},
+        };
+    };
+    const auto thinking_tool_script = [](const std::string& sig) {
+        return std::vector<api::StreamEvent>{
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"脱敏思考正文一段", sig},
+            api::ContentBlockDone{0},
+            api::ToolUseStart{1, "call-x", "fake_tool"},
+            api::ToolUseInputDelta{1, "{}"},
+            api::ContentBlockDone{1},
+            api::MessageDone{"tool_use", api::Usage{}},
+        };
+    };
+    for (const WireCase& wire : wires) {
+        CAPTURE(wire.name);
+        FakeBackend backend;
+        backend.wire_json = wire.serialize;
+        backend.scripts = {
+            thinking_text_script("第一答:记住了。", "sig-round-1"),
+            TextOnlyScript("第二答。"),
+            TextOnlyScript("第三答。"),
+            thinking_tool_script("sig-tool-round"),
+            TextOnlyScript("工具后的收尾答。"),
+        };
+        tools::ToolRegistry registry;
+        registry.Register(
+            std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
+        agent::AgentProfile profile;
+        profile.request.model = "test-model";
+        profile.system_prompt = "system";
+        profile.runtime.context_window_tokens = 110000;
+        profile.runtime.max_output_tokens = 4096;
+        profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+        agent::Agent loop(backend, registry, profile);
+        agent::TurnWiring wiring;
+        wiring.rewrite_tool_results_for_history = [](api::Message&) {
+            return runtime::ToolResultsCommitReceipt{};
+        };
+        // 三轮连续纯文本(旧病现场:第二轮就被拦)。
+        auto outcome = loop.Run("第一问", wiring);
+        REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+        outcome = loop.Run("第二问", wiring);
+        REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+        outcome = loop.Run("第三问", wiring);
+        REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+        // 工具回合:thinking + tool_use → 工具结果 → 收尾请求同样过闸。
+        outcome = loop.Run("用一下工具", wiring);
+        REQUIRE_MESSAGE(outcome.has_value(), outcome.error());
+        CHECK(backend.captured_requests.size() == 5);
+        // 签名确实进了历史回传(anthropic 形状;其他 wire 或剥或转文本,
+        // 各按各的协议)。
+        if (std::string(wire.name) == "anthropic") {
+            const std::string wire_text =
+                backend.SerializeForDiagnostics(backend.captured_requests.back());
+            CHECK(wire_text.find("\"signature\"") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("redacted thinking in replayed history is still refused with an actionable error") {
+    FakeBackend backend;
+    backend.wire_json = [](const api::Request& r) {
+        return api::anthropic::BuildRequestJson(r);
+    };
+    backend.scripts = {
+        std::vector<api::StreamEvent>{
+            api::MessageStart{"msg", "model"},
+            api::RedactedThinking{"opaque-encrypted-payload"},
+            api::TextDelta{"第一答。"},
+            api::ContentBlockDone{1},
+            api::MessageDone{"end_turn", api::Usage{}},
+        },
+        TextOnlyScript("第二答。"),
+    };
+    tools::ToolRegistry registry;
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    profile.runtime.context_window_tokens = 110000;
+    profile.runtime.max_output_tokens = 4096;
+    profile.runtime.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent::Agent loop(backend, registry, profile);
+    agent::TurnWiring wiring;
+    wiring.rewrite_tool_results_for_history = [](api::Message&) {
+        return runtime::ToolResultsCommitReceipt{};
+    };
+    REQUIRE(loop.Run("第一问", wiring).has_value());
+    const auto outcome = loop.Run("第二问", wiring);
+    // 保护保留:加密思考的 token 价 wire 字节定不了,不许填 0 放行。
+    REQUIRE_FALSE(outcome.has_value());
+    CHECK(outcome.error().find("context.unestimated_media_or_reasoning") != std::string::npos);
+    // 错误文案带结构与用户可理解的下一步(无字段值)。
+    CHECK(outcome.error().find("encrypted_reasoning") != std::string::npos);
+    CHECK(outcome.error().find("请改发纯文字内容") != std::string::npos);
+    CHECK(outcome.error().find("opaque-encrypted-payload") == std::string::npos);
+    // 未发往模型:第二轮请求没出手。
     CHECK(backend.captured_requests.size() == 1);
 }
 

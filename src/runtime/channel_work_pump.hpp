@@ -68,6 +68,16 @@ class ToolRegistry;
 
 namespace lubancode::runtime {
 
+// 执行失败的用户提示(QQBot 静默失败单 P0 刀二):内部 error_code/detail
+// → 短错误编号 + 可行下一步。脱敏——内部报错、路径、密钥不进文案;
+// error_detail 只参与分型,一个字不带入文本。纯函数,单测直接钉。
+struct TurnFailureNotice {
+    std::string short_code;  // 稳定短编号(用户可引用给维护者)
+    std::string text;        // 本次未完成 + 可行下一步
+};
+TurnFailureNotice MakeTurnFailureNotice(const std::string& error_code,
+                                        const std::string& error_detail);
+
 class ChannelWorkPump final : public gateway::GatewayWorkPump {
 public:
     struct Options {
@@ -203,6 +213,16 @@ private:
     bool ReplyMenuCommand(const std::string& channel_id, const std::string& account_id,
                           const channel::ChannelManager::WorkItem& work,
                           const std::string& reply_text, std::int64_t now_ms);
+    // 执行失败的用户提示(P0 刀二):独立、持久、幂等的控制消息入 outbox。
+    // selection_id 定式 "turnfail:<ch>:<acct>:<sid>" 重入同 deliveryId;发送
+    // 身份与额度走 A05 持久分配器(与正文/提示/附件共用 (账号,锚) 发号)。
+    // 提示送达不改写执行失败事实:dead letter 先落,source_ref 用独立前缀,
+    // 不吃 ingress 结算路;提示投递失败时,执行失败与提示失败两层都在本地
+    // 账可查。不重跑 Agent。
+    void EnqueueTurnFailureNotice(const std::string& channel_id, const std::string& account_id,
+                                  std::int64_t sid, const channel::ChannelInboundEvent& event,
+                                  const std::string& error_code, const std::string& error_detail,
+                                  std::int64_t now_ms);
     // Q6 远端审批:per-turn 确认回调的裁定(显式 allow 放行/hard deny 拒/
     // 审批带发卡等按钮/带外 fail closed 拒)。
     HeadlessExecutor::Options::ToolConfirmDecision DecideChannelToolApproval(

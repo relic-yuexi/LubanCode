@@ -69,6 +69,54 @@ std::string PromptFromIngress(const TurnIngress& ingress) {
 
 }  // namespace
 
+// ---- P0 刀二:执行失败的用户提示(脱敏映射) ---------------------------------
+
+TurnFailureNotice MakeTurnFailureNotice(const std::string& error_code,
+                                        const std::string& error_detail) {
+    // 分型只认稳定错误码与关键词;error_detail 不进文案(内部报错可能带
+    // 路径/密钥,一个字都不发到 QQ)。
+    const bool unestimated =
+        error_detail.find("unestimated_media_or_reasoning") != std::string::npos;
+    const bool capacity =
+        error_detail.find("context.adapter_input_exceeds_capacity") != std::string::npos ||
+        error_detail.find("上下文预检未通过") != std::string::npos;
+    const bool cancelled = error_detail.find("cancelled") != std::string::npos ||
+                           error_detail.find("取消") != std::string::npos;
+    if (error_code == "gateway.turn_failed" && unestimated) {
+        return {"E-CTX1",
+                "这条消息没能处理完:对话里有按当前策略无法计入预算的内容(如图片或加密思考),"
+                "本轮已拦下、没有发给模型。请发一条纯文字消息;反复出现请把编号 E-CTX1 告诉维护者。"};
+    }
+    if (error_code == "gateway.turn_failed" && capacity) {
+        return {"E-CTX2",
+                "这条消息没能处理完:对话太长,超出了模型的上下文窗口。请开一个新会话再发,或缩短内容。"};
+    }
+    if (cancelled) {
+        return {"E-CNL1", "这一轮被中断了,消息没有处理完。请重新发送。"};
+    }
+    if (error_code == "gateway.turn_failed") {
+        return {"E-NET1",
+                "这条消息没能处理完:调用模型失败(网络或服务端错误)。请稍后重发;"
+                "反复出现请把编号 E-NET1 告诉维护者。"};
+    }
+    if (error_code == "gateway.launch_failed" || error_code == "gateway.requires_v3") {
+        return {"E-SES1",
+                "这条消息没能处理:会话服务没能启动。请稍后重发;反复出现请把编号 E-SES1 告诉维护者。"};
+    }
+    if (error_code == "gateway.input_rejected") {
+        return {"E-INT1", "这条消息没能被受理。请重新发送;反复出现请把编号 E-INT1 告诉维护者。"};
+    }
+    if (error_code.rfind("selection.", 0) == 0 || error_code == "gateway.reply_unavailable") {
+        return {"E-RPL1",
+                "回复已生成,但整理投递时出了问题。请重发一条消息;反复出现请把编号 E-RPL1 告诉维护者。"};
+    }
+    if (error_code.rfind("needs_review", 0) == 0 || error_detail.rfind("needs_review", 0) == 0) {
+        return {"E-RVW1",
+                "处理这条消息时进程中断,已挂起待人工核对,不会自动补跑。请重发一条新消息。"};
+    }
+    return {"E-OTH1", "这条消息没能处理完。请重发;反复出现请把编号 E-OTH1 告诉维护者。"};
+}
+
 std::string ChannelWorkPump::MakeChannelOperationId(const std::string& channel_id,
                                                     const std::string& account_id,
                                                     std::int64_t ingress_sid) {
@@ -608,9 +656,17 @@ bool ChannelWorkPump::RecoverOne(const std::string& channel_id, const std::strin
                                  const channel::ChannelManager::IngressRunningView& view,
                                  std::int64_t now_ms) {
     AccountBooks* books = BooksFor(channel_id, account_id);
-    const auto dead_letter = [this, &channel_id, &account_id,
-                              sid = view.sid](const std::string& reason) {
-        return options_.manager->DeadLetterIngress(channel_id, account_id, sid, reason);
+    const auto dead_letter = [this, &channel_id, &account_id, &view,
+                              now_ms](const std::string& reason) {
+        const auto error =
+            options_.manager->DeadLetterIngress(channel_id, account_id, view.sid, reason);
+        if (!error.has_value()) {
+            // P0 刀二:恢复裁决的死信同样给用户提示(幂等:同 sid 同
+            // deliveryId,重复恢复不刷屏)。执行失败事实不因提示改写。
+            EnqueueTurnFailureNotice(channel_id, account_id, view.sid, view.event,
+                                     "needs_review", reason, now_ms);
+        }
+        return error;
     };
     const auto bound = books->work_ledger.FindBound(view.sid);
     if (!bound.has_value() || bound->session_id.empty() || bound->turn_id.empty()) {
@@ -894,9 +950,15 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
             return true;  // 不结算:恢复路接管(模拟进程死在半路)
         }
         // 执行失败(模型错/取消/受理拒):如实退场,不盲重跑。
-        (void)options_.manager->DeadLetterIngress(channel_id, account_id, sid,
-                                                  "turn_failed: " + result.error_code + ": " +
-                                                      result.error);
+        const auto dead_letter = options_.manager->DeadLetterIngress(
+            channel_id, account_id, sid, "turn_failed: " + result.error_code + ": " + result.error);
+        if (!dead_letter.has_value()) {
+            // P0 刀二:死信已落,补一条用户提示(幂等;送达不改写执行失败
+            // 事实)。死信写失败(账问题)时不发提示——件还在 Running,恢复
+            // 扫描重裁决时会再走到这里。
+            EnqueueTurnFailureNotice(channel_id, account_id, sid, work.event, result.error_code,
+                                      result.error, now_ms);
+        }
         return true;
     }
     // reply selection 已提交 → outbox 投影(拆段入箱,deliveryId 定式幂等)。
@@ -951,6 +1013,34 @@ bool ChannelWorkPump::ReplyMenuCommand(const std::string& channel_id,
         return false;  // outbox 账写不进:停泵
     }
     return true;
+}
+
+void ChannelWorkPump::EnqueueTurnFailureNotice(
+    const std::string& channel_id, const std::string& account_id, std::int64_t sid,
+    const channel::ChannelInboundEvent& event, const std::string& error_code,
+    const std::string& error_detail, std::int64_t now_ms) {
+    // 独立前缀:不吃 ingress 结算路(ReconcileDeliveredSources 解不出
+    // ingress 定式即跳过)——提示送达与否都不推 ingress 状态,执行失败
+    // 事实只在 dead letter。selection_id 定式按 sid 幂等:重复恢复/重扫
+    // 不刷屏(同 deliveryId,EnqueueChannel 回 duplicate)。
+    gateway::DurableReplyOutbox::ChannelTarget target;
+    target.channel_id = channel_id;
+    target.account_id = account_id;
+    target.conversation_id = event.conversation.id;
+    target.reply_to_message_id = event.message_id;  // 被动锚(触发来信在窗内)
+    target.source_ref = "turnfail:" + channel_id + ":" + account_id + ":" + std::to_string(sid);
+    const TurnFailureNotice notice = MakeTurnFailureNotice(error_code, error_detail);
+    const std::string text =
+        "[未回复说明] " + notice.text + "(编号 " + notice.short_code + ")";
+    const std::string selection_id = "turnfail:" + channel_id + ":" + account_id + ":" +
+                                     std::to_string(sid);
+    const auto enqueued = options_.outbox->EnqueueChannel(
+        selection_id, text, /*session_id=*/std::string(), /*turn_id=*/std::string(), target,
+        now_ms);
+    // 幂等重入/duplicate 不拦泵;账 broken 由统一闸(TickOnce 末尾)停。
+    // 提示发不出去(网络/权限/过期窗)时,执行失败在 dead letter、提示
+    // 投递失败在 outbox 段状态,两层都可本地查(channel status 链视图)。
+    (void)enqueued;
 }
 
 // ---------------------------------------------------------------------------

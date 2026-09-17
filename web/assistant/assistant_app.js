@@ -1048,7 +1048,7 @@
   const pairingEmptyHint = el('pairing-empty-hint');
 
   const fourStateLabel = {
-    config_saved: '配置已存', online: '在线', paired: '身份已配对', model_ready: '模型能回复',
+    config_saved: '配置已存', online: '在线', paired: '身份已配对', model_ready: '模型配置齐全',
   };
 
   function renderFourState(account) {
