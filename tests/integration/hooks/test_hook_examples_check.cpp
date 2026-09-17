@@ -43,14 +43,18 @@ TEST_CASE("官方 hook 示例:每包静态过 + fixtures fake 档全绿") {
         options.run_fixtures = true;
         options.fs_scratch_root = std::filesystem::temp_directory_path();
         const HookCheckReport report = RunHookPackageCheck(package, options);
-        CHECK_MESSAGE(report.static_pass,
-                      package.filename().string() + " 静态未过: " +
-                          (report.checks.empty() ? "(无检查项)"
-                                                 : report.checks.back().item + " " + report.checks.back().detail));
-        CHECK_MESSAGE(report.fixtures_pass(), package.filename().string() + " fixtures 未全绿");
+        // 报错文案先拼进局部变量再递 CHECK_MESSAGE——doctest 的宏不吃
+        // 带拼接的消息表达式(仓库既有测试同款写法)。
+        const std::string static_why =
+            package.filename().string() + " 静态未过: " +
+            (report.checks.empty() ? std::string("(无检查项)")
+                                   : report.checks.back().item + " " + report.checks.back().detail);
+        CHECK_MESSAGE(report.static_pass, static_why);
+        const std::string fixtures_why = package.filename().string() + " fixtures 未全绿";
+        CHECK_MESSAGE(report.fixtures_pass(), fixtures_why);
         for (const auto& fixture : report.fixtures) {
-            CHECK_MESSAGE(fixture.ran && fixture.pass,
-                          package.filename().string() + "/" + fixture.name + ": " + fixture.detail);
+            const std::string why = package.filename().string() + "/" + fixture.name + ": " + fixture.detail;
+            CHECK_MESSAGE(fixture.ran && fixture.pass, why);
         }
         CHECK(report.exit_code() == 0);
     }
