@@ -54,7 +54,8 @@ TEST_CASE("官方 hook 示例:每包静态过 + fixtures fake 档全绿") {
         CHECK_MESSAGE(report.fixtures_pass(), fixtures_why);
         for (const auto& fixture : report.fixtures) {
             const std::string why = package.filename().string() + "/" + fixture.name + ": " + fixture.detail;
-            CHECK_MESSAGE(fixture.ran && fixture.pass, why);
+            const bool fixture_ok = fixture.ran && fixture.pass;  // doctest 不收 && 表达式,先收进布尔
+            CHECK_MESSAGE(fixture_ok, why);
         }
         CHECK(report.exit_code() == 0);
     }
