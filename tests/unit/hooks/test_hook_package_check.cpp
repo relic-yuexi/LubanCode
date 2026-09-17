@@ -176,7 +176,7 @@ TEST_CASE("静态档:能力词表与依赖计划——拼错的 capability/缺�
     TempDir dir("static-plan");
     // 拼错的能力申请。
     {
-        const nlohmann::json manifest = nlohmann::json::parse(kCleanManifest);
+        nlohmann::json manifest = nlohmann::json::parse(kCleanManifest);
         manifest["hooks"][0]["capabilities"] = nlohmann::json::array({"htp"});
         WriteFile(dir.path / "hook.json", manifest.dump());
         WriteFile(dir.path / "main.lua", kCleanLua);
@@ -186,7 +186,7 @@ TEST_CASE("静态档:能力词表与依赖计划——拼错的 capability/缺�
     }
     // 缺依赖:after 指向不存在的逻辑键。
     {
-        const nlohmann::json manifest = nlohmann::json::parse(kCleanManifest);
+        nlohmann::json manifest = nlohmann::json::parse(kCleanManifest);
         manifest["hooks"][0]["after"] = nlohmann::json::array({"PreUser/ghost.step"});
         WriteFile(dir.path / "hook.json", manifest.dump());
         const HookCheckReport report = Check(dir.path, false);
@@ -195,7 +195,7 @@ TEST_CASE("静态档:能力词表与依赖计划——拼错的 capability/缺�
     }
     // entry 越界。
     {
-        const nlohmann::json manifest = nlohmann::json::parse(kCleanManifest);
+        nlohmann::json manifest = nlohmann::json::parse(kCleanManifest);
         manifest["entry"] = "../escape.lua";
         WriteFile(dir.path / "hook.json", manifest.dump());
         const HookCheckReport report = Check(dir.path, false);
