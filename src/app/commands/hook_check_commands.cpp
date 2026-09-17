@@ -16,6 +16,8 @@
 namespace lubancode::app {
 
 namespace {
+using cli::TermErr;
+using cli::TermOut;
 
 bool WriteFileIfAbsent(const std::filesystem::path& path, const std::string& content, std::string& error) {
     std::error_code ec;
