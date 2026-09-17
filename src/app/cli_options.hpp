@@ -191,6 +191,20 @@ struct AssistantCliArgs {
 
 };
 
+// LuaHook 单 P1-D 的 hook 子命令:`lubancode hook validate <包目录> [--json]`
+// 与 `lubancode hook test <包目录> [--json]`(§8.2 校验与试跑;validate 只跑
+// 静态档,test 静态 + fixtures fake 档)。另有 `lubancode hook init <名字>
+// [--dir <父目录>]`:落官方 scaffold(带 fixtures 的可跑样例)。退出码
+// 0 全过 / 1 有 fail / 2 包读不到或用法不对。报告四档分账(静态过/fake
+// 过/真实集成过/未验),不为校验默认访问外部服务或写业务文件。
+struct HookCliArgs {
+    std::string verb;          // validate | test | init
+    std::string package_dir;   // validate/test 的包目录
+    std::string name;          // init 的 hook 名(validate/test 不用)
+    std::string parent_dir;    // init --dir <父目录>;空 = 当前目录
+    bool json = false;         // --json:stdout 吐 JSON 报告
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -224,6 +238,9 @@ enum class CliAction {
     BadIm,                    // im 参数不对:人话已塞进 error_text
     RunAssistant,             // assistant 子命令:常驻助理 Web 主界面(W1)
     BadAssistant,             // assistant 子命令参数不对:人话已塞进 error_text
+    RunHookValidate,          // hook validate/test 子命令:LuaHook P1-D 校验与试跑
+    RunHookInit,              // hook init 子命令:落官方 scaffold
+    BadHook,                  // hook 子命令参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -240,6 +257,7 @@ struct ParsedCliArgs {
     ChannelPairingCliArgs channel_pairing;  // action == RunChannelPairing 时有效
     ImCliArgs im;            // action == RunIm 时有效
     AssistantCliArgs assistant;  // action == RunAssistant 时有效(W1)
+    HookCliArgs hook;        // action == RunHookValidate/RunHookInit 时有效(P1-D)
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

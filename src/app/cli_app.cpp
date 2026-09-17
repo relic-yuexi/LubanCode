@@ -65,6 +65,7 @@
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
 #include "app/commands/evolve_commands.hpp"  // RunEvolveTestCommand(自进化阶段 3 的 CI 口)
+#include "app/commands/hook_check_commands.hpp"  // RunHookCheck/InitCommand(LuaHook P1-D 的 hook 子命令)
 #include "app/version.hpp"
 #include "cli/channel_status_command.hpp"  // 连接状态单 §三:channel status 只读快照
 #include "cli/console_input.hpp"
@@ -974,6 +975,16 @@ int RunCli(const std::vector<std::string>& args) {
             // 自进化阶段 3:CI 非交互评测入口(与 /evolve test 同一枚
             // EvolutionCoordinator::TestDir;退出码按结果)。
             return RunEvolveTestCommand(parsed_cli.evolve_test);
+        case CliAction::RunHookValidate:
+            // LuaHook P1-D:hook validate/test 子命令(静态检查 + fixtures
+            // fake 试跑;报告四档分账)。
+            return RunHookCheckCommand(parsed_cli.hook);
+        case CliAction::RunHookInit:
+            // LuaHook P1-D:hook init 子命令(官方 scaffold)。
+            return RunHookInitCommand(parsed_cli.hook);
+        case CliAction::BadHook:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
         case CliAction::ResetSystemPrompt: {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
             // 本身就是明确意图),打结果就退。
