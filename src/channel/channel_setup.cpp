@@ -50,8 +50,9 @@ nlohmann::json TemplateAccountToJson(const std::string& channel_id) {
 }
 
 // 单行输入的校验(§5.1:非空、编码、控制字符;错误说明不引用用户输入)。
+// what 收 string:qq/飞书的字段展示名(AppID/App ID)都从平台表递进来。
 std::optional<ChannelSetupError> ValidateSingleLine(const std::string& value,
-                                                    const char* what, std::size_t max_bytes,
+                                                    const std::string& what, std::size_t max_bytes,
                                                     const std::string& reason_code) {
     if (value.empty()) {
         return Fail(reason_code, std::string(what) + " 不能为空");
