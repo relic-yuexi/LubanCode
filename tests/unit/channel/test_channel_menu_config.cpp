@@ -291,3 +291,21 @@ TEST_CASE("平台字符计数:汉字 2、ASCII 1") {
     CHECK(CountPlatformChars("查看任务") == 8);
     CHECK(CountPlatformChars("/帮助") == 5);
 }
+
+TEST_CASE("assistant menu preset binds real builtins and still requires explicit publication") {
+    auto config = nlohmann::json::parse(R"({"qqbot":{"accounts":{"main":{"menu":{"preset":"assistant","publish":true}}}}})");
+    std::string error;
+    auto parsed = ParseChannelsUserConfig(config, "test", &error);
+    REQUIRE_MESSAGE(parsed.has_value(), error);
+    const auto& menu = parsed->at("qqbot").accounts.at("main").menu;
+    REQUIRE(menu.has_value());
+    CHECK(menu->publish);
+    REQUIRE(menu->items.size() == 6);
+    CHECK(menu->items[1].send_message == "/new");
+    config["qqbot"]["accounts"]["main"]["menu"]["publish"] = false;
+    parsed = ParseChannelsUserConfig(config, "test", &error);
+    REQUIRE(parsed.has_value());
+    CHECK_FALSE(parsed->at("qqbot").accounts.at("main").menu->publish);
+    config["qqbot"]["accounts"]["main"]["menu"]["items"] = nlohmann::json::array();
+    CHECK_FALSE(ParseChannelsUserConfig(config, "test", &error).has_value());
+}

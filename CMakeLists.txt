@@ -1027,6 +1027,7 @@ add_library(lubancode_runtime STATIC
   src/runtime/channel_automation.cpp
   # QQ 接入单 Q4:渠道附件接纳服务(白名单/净化/下载落仓/有界预览)。
   src/runtime/channel_media_service.cpp
+  src/runtime/channel_file_delivery.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp

@@ -88,6 +88,15 @@ public:
             return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
         }
         CountCall(counter_, "model");
+        std::size_t users = 0, images = 0;
+        for (const auto& message : request.messages) {
+            if (message.role == api::Role::User) ++users;
+            for (const auto& block : message.content)
+                if (std::holds_alternative<api::ImageBlock>(block)) ++images;
+        }
+        user_counts.push_back(users);
+        image_counts.push_back(images);
+        systems.push_back(request.system);
         // 抓最后一条 user 消息的文本块。
         for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it) {
             if (it->role != api::Role::User) {
@@ -112,6 +121,8 @@ public:
     }
 
     std::vector<std::string> last_user_texts;
+    std::vector<std::size_t> user_counts, image_counts;
+    std::vector<std::string> systems;
 
 private:
     std::filesystem::path counter_;
@@ -450,4 +461,37 @@ TEST_CASE("未配对点击:全局菜单对所有人可见,但宿主分派要配�
     const auto records = fixture.manager->IngressRecords("qqbot", "main");
     REQUIRE(records.size() == 1);
     CHECK(channel::IngressEventStateName(records[0].state) == "rejected");
+}
+
+TEST_CASE("QQ builtins manage isolated contexts without sending slash commands to model") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    MenuPumpFixture fixture("builtin-sessions", channel::DmPolicy::Open);
+    fixture.scripts = {TextScript("one"), TextScript("two"), TextScript("three")};
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+    int id = 0;
+    const auto send = [&](const std::string& text) {
+        const auto key = "builtin-" + std::to_string(++id);
+        fixture.EmitAndIngest(MakeDmAt(key, key, "dm-a", text, key, fixture.now));
+        REQUIRE(fixture.Tick());
+        fixture.TickUntilQuiet();
+    };
+    send("remember alpha");
+    const auto first = fixture.pump->session_id_for("qqbot", "main", "dm-a");
+    REQUIRE_FALSE(first.empty());
+    send("/help");
+    send("/new");
+    send("fresh question");
+    CHECK(fixture.backend->user_counts == std::vector<std::size_t>{1, 1});
+    send("/session switch default");
+    send("remember previous");
+    CHECK(fixture.backend->user_counts == std::vector<std::size_t>{1, 1, 2});
+    send("/session switch foreign-id");
+    send("/not-implemented");
+    send("/status");
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
+    CHECK(fixture.SentTextAt(6).find("找不到") != std::string::npos);
+    CHECK(fixture.SentTextAt(7).find("暂不支持") != std::string::npos);
+    CHECK(fixture.SentTextAt(8).find("未装配") != std::string::npos);
+    CHECK(fixture.backend->systems.back().find("宿主时钟") != std::string::npos);
 }

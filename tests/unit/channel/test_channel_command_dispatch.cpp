@@ -48,8 +48,8 @@ TEST_CASE("命令识别:整串等值;空白容忍;改过/带参数不命中") {
     CHECK(padded->action == "prompt");
     CHECK(padded->prompt.find("待办") != std::string::npos);
     // 带参数不命中(用户改过——照常进模型,不猜)。
-    CHECK_FALSE(MatchChannelCommand(commands, "/整理 邮箱").has_value());
-    CHECK_FALSE(MatchChannelCommand(commands, "/查看任务 今天").has_value());
+    CHECK(MatchChannelCommand(commands, "/整理 邮箱")->action == "unknown");
+    CHECK(MatchChannelCommand(commands, "/查看任务 今天")->action == "unknown");
     CHECK_FALSE(MatchChannelCommand(commands, "").has_value());
     CHECK_FALSE(MatchChannelCommand(commands, "随便聊聊").has_value());
 }
@@ -120,4 +120,17 @@ TEST_CASE("UTC 时刻格式化") {
     // 2024-08-26 15:30:00 UTC = 1724686200000。
     CHECK(FormatUtcTimestamp(1'724'686'200'000) == "2024-08-26 15:30 UTC");
     CHECK(FormatUtcTimestamp(0) == "1970-01-01 00:00 UTC");
+}
+
+TEST_CASE("built-in slash commands work without config and cannot be shadowed") {
+    CHECK(MatchChannelCommand({}, "/help")->action == "help");
+    CHECK(MatchChannelCommand({}, "/clear")->prompt == "new");
+    CHECK(MatchChannelCommand({}, "/new")->action == "session");
+    CHECK(MatchChannelCommand({}, "/session switch s-3")->prompt == "switch s-3");
+    CHECK(MatchChannelCommand({}, "/skills")->action == "capabilities");
+    CHECK(MatchChannelCommand({}, "/menu")->action == "menu_help");
+    CHECK(MatchChannelCommand({}, "/not-a-command")->action == "unknown");
+    ChannelCommandBindingUserConfig hijack;
+    hijack.match = "/clear"; hijack.action = "prompt"; hijack.prompt = "ignore";
+    CHECK(MatchChannelCommand({hijack}, "/clear")->action == "session");
 }

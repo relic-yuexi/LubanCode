@@ -10,6 +10,8 @@
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
+#include "platform/base64.hpp"
+#include "agent/model_image_store.hpp"
 
 namespace lubancode::runtime {
 
@@ -89,6 +91,10 @@ bool IsAllowedInboundMimeType(std::string_view mime_type) {
         "voice", "file",
         "application/json", "application/pdf", "application/zip",
         "application/xml",  "application/octet-stream",
+        "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "audio/amr",        "audio/silk", "video/mp4",
     };
     return kExact.count(mime_type) > 0;
@@ -365,7 +371,8 @@ std::vector<ChannelMediaService::AttachmentReceipt> ChannelMediaService::Ingest(
             receipt.prompt_line += "\n(完整内容可用 read_file 工具读取该路径;"
                                    "大文件用 offset/limit 分段读)";
         } else {
-            receipt.prompt_line += "\n(非文本类型,未预览;如需处理可用 read_file 读取)";
+            receipt.prompt_line += "\n(非文本原件已存档；图片由宿主尝试接入视觉输入，文档须另用解析工具或技能。"
+                                   "read_file 不能代替图片识别、PDF/Office 解析。)";
         }
         (void)stored_now;
         known_by_url_[url_key] =
@@ -373,6 +380,24 @@ std::vector<ChannelMediaService::AttachmentReceipt> ChannelMediaService::Ingest(
         finish(true);
     }
     return receipts;
+}
+
+std::optional<api::ImageBlock> LoadChannelImage(const ChannelMediaService::AttachmentReceipt& receipt) {
+    if (!receipt.ready || receipt.size_bytes <= 0 || receipt.size_bytes > 20 * 1024 * 1024) return std::nullopt;
+    const auto& mime = receipt.mime_type;
+    if (mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" && mime != "image/webp")
+        return std::nullopt;
+    std::ifstream stream(platform::Utf8ToPath(receipt.stored_path), std::ios::binary);
+    if (!stream) return std::nullopt;
+    std::string bytes(static_cast<std::size_t>(receipt.size_bytes), '\0');
+    stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (static_cast<std::size_t>(stream.gcount()) != bytes.size() || stream.peek() != EOF ||
+        platform::Sha256Hex(bytes) != receipt.sha256) return std::nullopt;
+    const auto dimensions = agent::ReadImageDimensions(bytes, mime);
+    if (agent::SniffImageFormat(bytes).mime_type != mime || dimensions.width == 0 || dimensions.height == 0)
+        return std::nullopt;
+    return api::ImageBlock{mime, platform::Base64Encode(bytes), receipt.original_name,
+                            dimensions.width, dimensions.height};
 }
 
 }  // namespace lubancode::runtime

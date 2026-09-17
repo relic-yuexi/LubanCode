@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "trajectory/journal.hpp"
 
@@ -59,6 +60,13 @@ public:
     // 观测:映射条数(诊断/测试)。
     std::size_t size() const;
 
+    // 用户可选的逻辑会话。每个 QQ 会话/工作区独立，不能借 session id 越界。
+    std::string ActiveSlot(const std::string& session_key, const std::string& workspace_key) const;
+    std::vector<std::string> Slots(const std::string& session_key, const std::string& workspace_key) const;
+    bool SelectSlot(const std::string& session_key, const std::string& workspace_key,
+                    const std::string& slot, bool create, std::int64_t at_ms);
+    static std::string SlotKey(const std::string& session_key, const std::string& slot);
+
 private:
     std::filesystem::path map_file_;
     bool broken_ = false;
@@ -68,6 +76,8 @@ private:
     // (session_key, workspace_key) -> 最新 session_id。mutex 件不落值语义:
     // 工厂开账,装配方持对象。
     std::map<std::pair<std::string, std::string>, std::string> latest_;
+    std::map<std::pair<std::string, std::string>, std::vector<std::string>> slots_;
+    std::map<std::pair<std::string, std::string>, std::string> active_slots_;
 };
 
 }  // namespace lubancode::channel

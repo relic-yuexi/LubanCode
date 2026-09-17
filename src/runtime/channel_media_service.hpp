@@ -34,6 +34,7 @@
 #include <nlohmann/json.hpp>
 
 #include "channel/types.hpp"
+#include "api/types.hpp"
 #include "trajectory/journal.hpp"
 
 namespace lubancode::runtime {
@@ -113,5 +114,8 @@ private:
     std::map<std::string, KnownAttachment> known_by_url_;
     std::vector<nlohmann::json> ledger_lines_;
 };
+
+// 只从已接纳原件构造视觉块，校验图片头和大小，不靠扩展名假装读图。
+std::optional<api::ImageBlock> LoadChannelImage(const ChannelMediaService::AttachmentReceipt& receipt);
 
 }  // namespace lubancode::runtime

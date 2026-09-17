@@ -515,9 +515,26 @@ bool ParseMenuConfig(const nlohmann::json& value, const std::string& path,
         *error = "配置文件 " + file_path_for_error + " 里的 " + path + " 必须是一个 JSON object";
         return false;
     }
+    if (value.contains("preset")) {
+        if (!value["preset"].is_string() || value["preset"] != "assistant" || value.contains("items")) {
+            *error = path + ".preset 只认 assistant，且不能与 items 同写";
+            return false;
+        }
+        for (const auto& [name, command] : std::vector<std::pair<std::string, std::string>>{
+                 {"帮助", "/help"}, {"新会话", "/new"}, {"会话列表", "/session"},
+                 {"我的提醒", "/reminders"}, {"文件说明", "/files"}, {"功能状态", "/status"}}) {
+            ChannelMenuItemUserConfig item;
+            item.name = name;
+            item.type = "send_message";
+            item.send_message = command;
+            out->items.push_back(std::move(item));
+        }
+    }
     for (auto it = value.begin(); it != value.end(); ++it) {
         const std::string& key = it.key();
-        if (key == "publish") {
+        if (key == "preset") {
+            continue;
+        } else if (key == "publish") {
             if (!it.value().is_boolean()) {
                 *error = "配置文件 " + file_path_for_error + " 里的 " + path + ".publish 必须是布尔";
                 return false;
@@ -547,7 +564,7 @@ bool ParseMenuConfig(const nlohmann::json& value, const std::string& path,
             out->panel = std::move(panel);
         } else {
             *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + key +
-                     " 是认不得的字段(菜单段只收 publish/items/panel)";
+                     " 是认不得的字段(菜单段只收 publish/preset/items/panel)";
             return false;
         }
     }

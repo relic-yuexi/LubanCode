@@ -1,5 +1,6 @@
 // ChannelWorkPump 实现(QQ 接入单 Q2)。装配合同见头文件。
 #include "runtime/channel_work_pump.hpp"
+#include "runtime/channel_file_delivery.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -177,6 +178,7 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
     executor_options.lubancode_version = out->options_.lubancode_version;
     executor_options.wire_name = out->options_.wire_name;
     executor_options.model = out->options_.model;
+    executor_options.skills_prompt = out->options_.skills_prompt;
     // 回复原件落 outbox 账下的 replies/(选择原件与段原件同一目录)。
     executor_options.replies_dir = out->options_.outbox->replies_dir();
     executor_options.tools = out->options_.tools;
@@ -224,7 +226,7 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
 }
 
 std::string ChannelWorkPump::IngestAttachmentsPrompt(
-    const channel::ChannelManager::WorkItem& work) {
+    const channel::ChannelManager::WorkItem& work, std::vector<api::ImageBlock>* images) {
     if (!media_service_.has_value()) {
         return std::string();
     }
@@ -237,6 +239,14 @@ std::string ChannelWorkPump::IngestAttachmentsPrompt(
             prompt += "\n";
         }
         prompt += receipt.prompt_line;
+        if (images != nullptr) {
+            if (auto image = LoadChannelImage(receipt)) {
+                images->push_back(std::move(*image));
+                prompt += "\n[已附加图片视觉输入；能否识图取决于当前模型。]";
+            } else if (receipt.ready && receipt.mime_type.rfind("image/", 0) == 0) {
+                prompt += "\n[图片未接入视觉输入：格式、尺寸或原件校验未通过。不要声称看过图片。]";
+            }
+        }
     }
     return prompt;
 }
@@ -283,7 +293,9 @@ std::string ChannelWorkPump::session_id_for(const std::string& channel_id,
         return std::string();
     }
     const auto found =
-        books->session_map.Find(session_key, options_.workspace_identity.workspace_key);
+        books->session_map.Find(channel::ChannelSessionMap::SlotKey(session_key,
+            books->session_map.ActiveSlot(session_key, options_.workspace_identity.workspace_key)),
+            options_.workspace_identity.workspace_key);
     return found.has_value() ? *found : std::string();
 }
 
@@ -719,7 +731,9 @@ bool ChannelWorkPump::RecoverOne(const std::string& channel_id, const std::strin
     target.source_ref =
         "ingress:" + channel_id + ":" + account_id + ":" + std::to_string(view.sid);
     // Q4 产物附件:与执行路同一纯函数(同正文同段数同附件,幂等补投影)。
-    const auto attachment = ReplyFileAttachment(plan.selection_id, plan.text);
+    auto attachment = StagedChannelFile(options_.outbox->replies_dir() / "files",
+        MakeChannelOperationId(channel_id, account_id, view.sid));
+    if (!attachment) attachment = ReplyFileAttachment(plan.selection_id, plan.text);
     const auto enqueued = options_.outbox->EnqueueChannel(
         plan.selection_id, plan.text, bound->session_id, bound->turn_id, target, now_ms,
         attachment.has_value() ? &*attachment : nullptr);
@@ -845,6 +859,58 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
             std::string reply;
             if (command->action == "help") {
                 reply = channel::MakeChannelHelpText(work.commands);
+            } else if (command->action == "unknown") {
+                reply = "暂不支持这个命令。输入 /help 查看可用命令。";
+            } else if (command->action == "menu_help") {
+                reply = "菜单须由本机配置启用。在全局 config.json 的 QQ 账号段加入：\n"
+                        "\"menu\": {\"publish\": true, \"preset\": \"assistant\"}\n"
+                        "重启 Gateway 后会尝试发布帮助、新会话、会话列表、提醒、文件说明、功能状态。"
+                        "发布失败或远端菜单冲突请查看 Gateway 诊断；本条说明不代表已发布。";
+            } else if (command->action == "session") {
+                const auto& base = work.route.session_key;
+                const auto& workspace = options_.workspace_identity.workspace_key;
+                const auto active = books->session_map.ActiveSlot(base, workspace);
+                const auto slots = books->session_map.Slots(base, workspace);
+                const auto& args = command->prompt;
+                if (args.empty() || args == "list") {
+                    reply = "会话列表（仅当前 QQ 会话、当前工作区）：\n";
+                    for (const auto& slot : slots) {
+                        reply += (slot == active ? "* " : "  ") + slot + "\n";
+                    }
+                    reply += "输入 /session switch <编号> 切换；/new 开新会话。";
+                } else if (args == "current") {
+                    reply = "当前会话：" + active;
+                } else if (args == "new") {
+                    // 同一来信重入仍选同一编号，不重复开场。首次发言时才建 V3。
+                    const auto slot = "s-" + std::to_string(work.sid);
+                    if (!books->session_map.SelectSlot(base, workspace, slot, true, now_ms)) return false;
+                    reply = "已切到新会话 " + slot + "。下一条消息从空上下文开始；历史和提醒照留。";
+                } else if (args.rfind("switch ", 0) == 0) {
+                    const auto slot = args.substr(7);
+                    if (std::find(slots.begin(), slots.end(), slot) == slots.end()) {
+                        reply = "找不到这个会话。输入 /session 查看本聊天可切换的编号。";
+                    } else {
+                        if (!books->session_map.SelectSlot(base, workspace, slot, false, now_ms)) return false;
+                        reply = "已切到会话 " + slot + "。";
+                    }
+                } else {
+                    reply = "用法：/session [list|current|new|switch <编号>]";
+                }
+            } else if (command->action == "capabilities") {
+                reply = "当前工作目录：" + options_.cwd_utf8 + "\n工具状态：\n";
+                for (const auto& name : {"run_command", "web_search", "web_fetch", "skill", "send_file"}) {
+                    reply += std::string(name) + "：";
+                    const auto* tool = registry_->Find(name);
+                    if (tool == nullptr) reply += "未装配";
+                    else if (!work.route.tools.Allows(name)) reply += "渠道策略未放行";
+                    else if (tool->needs_confirm() && !work.route.tools.ExplicitlyAllows(name))
+                        reply += "须审批（未配置审批带时会拒绝）";
+                    else reply += "可用";
+                    reply += "\n";
+                }
+                if (registry_->Find("web_search") == nullptr)
+                    reply += "联网搜索须配置全局 search.provider 与 search.api_key，再放行 web_search。\n";
+                reply += options_.skills_summary;
             } else if (command->action == "file_help") {
                 reply = channel::MakeChannelFileHelpText();
             } else {  // list_reminders(automation 域不在 → 稳定说明,不装死)
@@ -874,8 +940,9 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     }
 
     HeadlessExecutor::ChannelTurnRequest request;
-    request.session_key = work.route.session_key;
-    const auto stored = books->session_map.Find(work.route.session_key,
+    request.session_key = channel::ChannelSessionMap::SlotKey(work.route.session_key,
+        books->session_map.ActiveSlot(work.route.session_key, options_.workspace_identity.workspace_key));
+    const auto stored = books->session_map.Find(request.session_key,
                                                 options_.workspace_identity.workspace_key);
     if (stored.has_value()) {
         request.stored_session_id = *stored;
@@ -883,7 +950,7 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     request.prompt = preset_prompt.has_value() ? *preset_prompt : PromptFromIngress(ingress);
     // Q4 附件接纳(准入已过、执行前):下载落仓 + 有界预览行并进 prompt。
     // 失败附件给稳定说明,不假装读过文件;不拦正文轮。
-    if (const std::string media_prompt = IngestAttachmentsPrompt(work); !media_prompt.empty()) {
+    if (const std::string media_prompt = IngestAttachmentsPrompt(work, &request.images); !media_prompt.empty()) {
         request.prompt += "\n" + media_prompt;
     }
     request.binding.work_id = MakeChannelOperationId(channel_id, account_id, work.sid);
@@ -934,6 +1001,8 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     const std::string bound_session_key = work.route.session_key;
     std::atomic<bool> local_cancel{false};
     const std::atomic<bool>* effective_cancel = cancel != nullptr ? cancel : &local_cancel;
+    ChannelFileDeliveryScope file_scope(platform::Utf8ToPath(options_.cwd_utf8),
+        options_.outbox->replies_dir() / "files", request.binding.work_id);
     const auto result = executor_->ExecuteChannelTurn(
         request,
         [this, books, sid, bound_session_key, now_ms](const std::string& session_id,
@@ -969,7 +1038,8 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     target.reply_to_message_id = work.event.message_id;
     target.source_ref = "ingress:" + channel_id + ":" + account_id + ":" + std::to_string(sid);
     // Q4 产物附件:长文(拆段 > 1)末段附带任务结果文件(冻结正文原件)。
-    const auto attachment = ReplyFileAttachment(result.selection_id, result.reply_text);
+    auto attachment = StagedChannelFile(options_.outbox->replies_dir() / "files", request.binding.work_id);
+    if (!attachment) attachment = ReplyFileAttachment(result.selection_id, result.reply_text);
     const auto enqueued = options_.outbox->EnqueueChannel(
         result.selection_id, result.reply_text, result.session_id, result.turn_id, target,
         now_ms, attachment.has_value() ? &*attachment : nullptr);

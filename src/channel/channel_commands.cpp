@@ -82,17 +82,45 @@ std::optional<ChannelCommandBindingUserConfig> MatchChannelCommand(
     if (trimmed.empty()) {
         return std::nullopt;
     }
+    // 宿主命令保留，不能被 prompt 别名盖掉。参数只交给宿主解析。
+    const auto split = trimmed.find_first_of(" \t\r\n");
+    const auto name = trimmed.substr(0, split);
+    const auto args = split == std::string::npos ? std::string() : TrimAscii(trimmed.substr(split));
+    ChannelCommandBindingUserConfig builtin;
+    builtin.match = name;
+    builtin.prompt = args;
+    if (name == "/help" || name == "/帮助") builtin.action = "help";
+    else if (name == "/session" || name == "/sessions" || name == "/会话") builtin.action = "session";
+    else if (name == "/new" || name == "/clear" || name == "/新会话") {
+        builtin.action = "session";
+        builtin.prompt = "new";
+    } else if (name == "/files" || name == "/文件说明") builtin.action = "file_help";
+    else if (name == "/reminders" || name == "/提醒") builtin.action = "list_reminders";
+    else if (name == "/status" || name == "/tools" || name == "/skills") builtin.action = "capabilities";
+    else if (name == "/menu" || name == "/菜单") builtin.action = "menu_help";
+    if (!builtin.action.empty()) return builtin;
     for (const auto& binding : commands) {
         if (binding.match == trimmed) {
             return binding;
         }
+    }
+    // 未知 slash 不消耗模型调用，也不让模型猜宿主功能。
+    if (trimmed.front() == '/') {
+        builtin.action = "unknown";
+        return builtin;
     }
     return std::nullopt;
 }
 
 std::string MakeChannelHelpText(const std::vector<ChannelCommandBindingUserConfig>& commands) {
     std::ostringstream out;
-    out << "我能做这些:\n";
+    out << "QQ 助手命令:\n"
+           "/help — 帮助\n/session — 会话列表\n/session current — 当前会话\n"
+           "/new 或 /clear — 开新上下文，保留历史与提醒\n"
+           "/session switch <编号> — 切换到列表中的会话\n"
+           "/status — 当前工具与配置状态\n/skills — 技能状态\n"
+           "/files — 文件与图片说明\n/reminders — 我的提醒\n";
+    out << "/menu — 菜单启用说明\n";
     for (const auto& binding : commands) {
         if (binding.action == "prompt") {
             // 预设输入:列 match 与 prompt 的引导句(prompt 是配置里明写的
@@ -134,9 +162,11 @@ std::string MakeChannelHelpText(const std::vector<ChannelCommandBindingUserConfi
 }
 
 std::string MakeChannelFileHelpText() {
-    return "发文件:打开与我的聊天,点输入框左侧的\"+\",从 QQ 原生的文件/图片入口选"
-           "择发送即可。我能收文本、表格、图片等常见格式;菜单里没有通用文件选择"
-           "器,直接走聊天附件最稳。";
+    return "在 QQ 聊天的 + 菜单中发文件或图片。每条最多 4 件，每件最多 20 MiB。"
+           "文本附上预览；PNG/JPEG/GIF/WebP 送入模型视觉输入，仍需模型支持图片。"
+           "PDF、Office 等原件会存档，须有解析工具或技能才能读正文，不会假称已解析。"
+           "要取回生成文件，请说清文件名；助手可用 send_file 投递当前工作区内文件，"
+           "该工具须在渠道权限中放行或批准。";
 }
 
 std::string FormatReminderListText(const nlohmann::json& payload, std::int64_t now_ms) {

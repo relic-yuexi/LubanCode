@@ -92,6 +92,8 @@ public:
         std::string lubancode_version;
         std::string wire_name;
         std::string model;
+        std::string skills_prompt;
+        std::string skills_summary;
         channel::ToolRoutePolicy tools;  // 会话级基线(逐轮策略来自 route.tools)
         hooks::HookDispatcher* hook_dispatcher = nullptr;
         // 预算三根硬线(0 = 不设;生产装配应设)。
@@ -191,7 +193,8 @@ private:
     AccountBooks* BooksForSessionKey(const std::string& session_key);
     // Q4 附件接纳(准入通过、执行前):下载落仓 + 模型投影行。media_service
     // 未开 = 空投影(附件行由 turn_ingress 的占位说明承担)。
-    std::string IngestAttachmentsPrompt(const channel::ChannelManager::WorkItem& work);
+    std::string IngestAttachmentsPrompt(const channel::ChannelManager::WorkItem& work,
+                                        std::vector<api::ImageBlock>* images);
     // Q4 产物附件:正文拆段 > 1 时末段附带冻结正文原件(任务结果文件,
     // §十 Q4 最保守路——任务结果的附件随最终回复投递)。
     std::optional<gateway::DurableReplyOutbox::ChannelAttachment> ReplyFileAttachment(

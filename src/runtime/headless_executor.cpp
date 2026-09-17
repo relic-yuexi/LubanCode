@@ -1,5 +1,7 @@
 // HeadlessExecutor 实现(常驻总装 V1)。装配合同见头文件。
 #include "runtime/headless_executor.hpp"
+#include "agent/prompts.hpp"
+#include "runtime/time_context.hpp"
 
 #include <fstream>
 #include <iterator>
@@ -315,7 +317,7 @@ HeadlessExecutor::ChannelTurnResult HeadlessExecutor::ExecuteChannelTurn(
                          request.per_turn_tools, request.binding_extra,
                          request.delivery_target.empty() ? std::string("local:file")
                                                          : request.delivery_target,
-                         on_bound, cancel, &request.on_tool_confirm);
+                         on_bound, cancel, &request.on_tool_confirm, request.images);
     result.ok = core.ok;
     result.error_code = core.error_code;
     result.error = core.error;
@@ -371,6 +373,7 @@ HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
     // Agent——上下文不断,连续来信/重启恢复都接得上。
     {
         agent::AgentProfile profile;
+        profile.system_prompt = agent::DefaultPersona() + "\n" + options_.skills_prompt;
         profile.request.model = options_.model;
         profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
         profile.runtime.max_wall_secs = options_.max_wall_secs;
@@ -419,7 +422,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     const std::atomic<bool>* cancel,
     const std::function<Options::ToolConfirmDecision(const std::string&, const std::string&,
                                                      const nlohmann::json&)>*
-        per_turn_confirm) {
+        per_turn_confirm, const std::vector<api::ImageBlock>& images) {
     Result result;
     TrajectorySessionLedger* ledger = service.trajectory();
     trajectory::v3::V3Writer* v3_writer = ledger->v3_main_writer();
@@ -430,6 +433,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     SessionService::InputRequest input;
     input.client_operation_id = binding.work_id;
     input.text = prompt;
+    input.images = images;
     const auto receipt = service.SubmitInput(input);
     if (!receipt.accepted && !receipt.duplicate) {
         result.error_code = "gateway.input_rejected";
@@ -509,6 +513,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         return result;
     }
     api::Message user_message{api::Role::User, {api::TextBlock{effective_text}}};
+    for (const auto& image : images) user_message.content.push_back(image);
     for (const std::string& append : post_user.context_appends) {
         user_message.content.push_back(
             api::TextBlock{"[PostUser 钩子附加上下文,非用户手敲]\n" + append});
@@ -522,6 +527,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         trajectory_bridge->RecordInput(user_message);
     }
     agent::AgentProfile profile;
+    profile.system_prompt = agent::DefaultPersona() + "\n" + options_.skills_prompt;
     profile.request.model = options_.model;
     profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
     profile.runtime.max_wall_secs = options_.max_wall_secs;
@@ -534,6 +540,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         fresh_agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
     agent::Agent& loop_agent = agent_override != nullptr ? *agent_override : *fresh_agent;
+    loop_agent.SetTurnContext(agent::EnvironmentSegment(options_.cwd_utf8) + CurrentTimeContext());
 
     agent::TurnWiring wiring;
     wiring.events = &turn_events;
