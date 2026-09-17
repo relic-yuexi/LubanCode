@@ -745,6 +745,24 @@ TEST_CASE("claim 后崩(渠道任务):重建后重派执行,结果照投,模型�
 // 工具面 fail closed:无渠道上下文/无 automation 域/非单聊/时间已过
 // ---------------------------------------------------------------------------
 
+TEST_CASE("current time tool reads the clock on demand without a task store") {
+    std::int64_t now = 1724700000000;
+    auto bridge = std::make_shared<runtime::ChannelAutomationBridge>(nullptr, [&] { return now; });
+    tools::ToolRegistry registry;
+    runtime::RegisterChannelAutomationTools(registry, bridge);
+    auto* clock = registry.Find("get_current_time");
+    REQUIRE(clock != nullptr);
+    CHECK_FALSE(clock->needs_confirm());
+    const auto first = nlohmann::json::parse(clock->execute(nlohmann::json::object()).content);
+    CHECK(first["now_ms"] == now);
+    CHECK(first["utc"] == "2024-08-26T19:20:00Z");
+    CHECK(first["timezone"] == "UTC");
+    now += 300000;
+    const auto next = nlohmann::json::parse(clock->execute(nlohmann::json::object()).content);
+    CHECK(next["now_ms"] == now);
+    CHECK(next["utc"] == "2024-08-26T19:25:00Z");
+}
+
 TEST_CASE("relative reminder uses inbound clock and retries keep the same deadline") {
     Q5Fixture fixture("relative-clock");
     tools::ToolRegistry registry;

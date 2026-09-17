@@ -1050,7 +1050,7 @@ ChannelAccountUserConfig MakeQqTemplateAccount() {
     // automation 域命令与归属闸,不碰文件系统。tool_search/插件/MCP/
     // 子 Agent 的工具名不在这份名单里,五层交集自然拦下。
     account.tools.allow = std::vector<std::string>{"read_file", "search", "create_reminder",
-                                                   "list_reminders", "cancel_reminder"};
+                                                   "list_reminders", "cancel_reminder", "get_current_time"};
     return account;
 }
 

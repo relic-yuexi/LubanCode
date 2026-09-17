@@ -98,6 +98,7 @@ public:
             return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
         }
         CountCall(counter_, "model");
+        systems_.push_back(request.system);
         std::string dump = "SYSTEM:" + request.system + "\n";
         for (const auto& message : request.messages) {
             dump += message.role == api::Role::User ? "U:" : "A:";
@@ -120,12 +121,14 @@ public:
     }
 
     const std::vector<std::string>& dumps() const { return dumps_; }
+    const std::vector<std::string>& systems() const { return systems_; }
 
 private:
     std::filesystem::path counter_;
     std::vector<std::vector<api::StreamEvent>> scripts_;
     std::size_t calls_ = 0;
     std::vector<std::string> dumps_;
+    std::vector<std::string> systems_;
 };
 
 class ControlledTool : public tools::Tool {
@@ -414,8 +417,12 @@ TEST_CASE("连续两条消息共享上下文:同会话同场,第二轮请求带�
     REQUIRE(fixture.backend->dumps().size() == 2);
     const std::string& second = fixture.backend->dumps()[1];
     CHECK(second.find("工作目录:") != std::string::npos);
-    CHECK(second.find("本轮开始时间(宿主时钟):") != std::string::npos);
+    CHECK(second.find("本轮开始时间(宿主时钟):") == std::string::npos);
+    CHECK(second.find("get_current_time") != std::string::npos);
     CHECK(second.find("delay_seconds") != std::string::npos);
+    REQUIRE(fixture.backend->systems().size() == 2);
+    CHECK(fixture.backend->systems()[0] == fixture.backend->systems()[1]);
+    CHECK(fixture.backend->systems()[1].find("本轮开始时间(宿主时钟):") == std::string::npos);
     REQUIRE(second.find("暗号是甲") != std::string::npos);
     REQUIRE(second.find("第一答") != std::string::npos);
     // 两封信都投递成功(sidecar 收到两条回复)。
