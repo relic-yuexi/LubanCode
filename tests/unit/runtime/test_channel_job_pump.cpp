@@ -17,6 +17,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -743,6 +744,45 @@ TEST_CASE("claim 后崩(渠道任务):重建后重派执行,结果照投,模型�
 // ---------------------------------------------------------------------------
 // 工具面 fail closed:无渠道上下文/无 automation 域/非单聊/时间已过
 // ---------------------------------------------------------------------------
+
+TEST_CASE("relative reminder uses inbound clock and retries keep the same deadline") {
+    Q5Fixture fixture("relative-clock");
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+    runtime::ChannelAutomationBridge::TurnContext context;
+    context.channel_id = "qqbot";
+    context.account_id = "main";
+    context.conversation_id = "dm-a";
+    context.sender_id = "sender-dm-a";
+    context.message_id = "relative-1";
+    context.received_at_ms = fixture.now;
+    const runtime::ChannelAutomationBridge::TurnScope scope(*fixture.bridge, context);
+    for (const auto& bad : {nlohmann::json(0), nlohmann::json(-1),
+                           nlohmann::json(0.5), nlohmann::json(315360001LL),
+                           nlohmann::json("nonsense")}) {
+        CHECK_FALSE(fixture.bridge->CreateReminder({{"description", "report"},
+                                                    {"delay_seconds", bad}}).ok);
+    }
+    CHECK_FALSE(fixture.bridge->CreateReminder({{"description", "report"},
+        {"delay_seconds", 300}, {"at_ms", fixture.now + 300000}}).ok);
+    CHECK_FALSE(fixture.bridge->CreateReminder({{"description", "report"},
+        {"delay_seconds", 300}, {"cron", "* * * * *"}}).ok);
+    const nlohmann::json input{{"description", "report"}, {"delay_seconds", 300}};
+    const auto first = fixture.bridge->CreateReminder(input);
+    REQUIRE(first.ok);
+    CHECK(first.payload["dueAtMs"] == context.received_at_ms + 300000);
+    CHECK(first.payload["dueAtUtc"] == "2024-08-26T19:25:00Z");
+    fixture.now += 15000;
+    const auto retry = fixture.bridge->CreateReminder(input);
+    REQUIRE(retry.ok);
+    CHECK(retry.duplicate);
+    CHECK(retry.payload["jobId"] == first.payload["jobId"]);
+    CHECK(retry.payload["dueAtMs"] == first.payload["dueAtMs"]);
+    auto invalid_context = context;
+    invalid_context.received_at_ms = std::numeric_limits<std::int64_t>::max() - 1000;
+    const runtime::ChannelAutomationBridge::TurnScope overflow_scope(*fixture.bridge, invalid_context);
+    CHECK_FALSE(fixture.bridge->CreateReminder(input).ok);
+}
 
 TEST_CASE("工具面 fail closed:上下文缺位与坏输入明拒,不猜") {
     EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");

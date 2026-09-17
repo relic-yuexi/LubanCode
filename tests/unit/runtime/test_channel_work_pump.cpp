@@ -98,7 +98,7 @@ public:
             return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
         }
         CountCall(counter_, "model");
-        std::string dump;
+        std::string dump = "SYSTEM:" + request.system + "\n";
         for (const auto& message : request.messages) {
             dump += message.role == api::Role::User ? "U:" : "A:";
             for (const auto& block : message.content) {
@@ -413,6 +413,9 @@ TEST_CASE("连续两条消息共享上下文:同会话同场,第二轮请求带�
     // 第二轮请求真带了第一轮的对话(上下文共享,不靠猜)。
     REQUIRE(fixture.backend->dumps().size() == 2);
     const std::string& second = fixture.backend->dumps()[1];
+    CHECK(second.find("工作目录:") != std::string::npos);
+    CHECK(second.find("本轮开始时间(宿主时钟):") != std::string::npos);
+    CHECK(second.find("delay_seconds") != std::string::npos);
     REQUIRE(second.find("暗号是甲") != std::string::npos);
     REQUIRE(second.find("第一答") != std::string::npos);
     // 两封信都投递成功(sidecar 收到两条回复)。

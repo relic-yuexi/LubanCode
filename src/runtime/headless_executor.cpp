@@ -7,6 +7,8 @@
 #include <utility>
 
 #include "agent/loop.hpp"
+#include "agent/prompt_assembler.hpp"
+#include "runtime/time_context.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/agent_channel_engine.hpp"   // ApplyChannelToolPolicy(共用交集)
@@ -534,6 +536,9 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         fresh_agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
     agent::Agent& loop_agent = agent_override != nullptr ? *agent_override : *fresh_agent;
+    // 每轮刷新，恢复旧的空 system 会话也不能覆盖当前环境与时钟。
+    loop_agent.SetSystemPrompt(agent::BuildEnvironmentSegment(options_.cwd_utf8) +
+                              CurrentTimeContext());
 
     agent::TurnWiring wiring;
     wiring.events = &turn_events;
