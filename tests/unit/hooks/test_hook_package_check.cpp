@@ -283,7 +283,7 @@ return {
 )lua");
     WriteFile(dir.path / "fixtures" / "double.json", R"json({
       "name": "double",
-      "trigger": {"input": {"prompt": "原文"}},
+      "trigger": {"input": {"prompt": "原文"}, "origin": "human", "purpose": "interactive"},
       "expect": {"kind": "failed", "errorCode": "hook.next.already_consumed",
                  "records": {"PreUser/prompt.normalize": {"nextCalls": 1}}}
     })json");
@@ -292,7 +292,9 @@ return {
     const HookCheckReport::Fixture* fixture = FindFixture(report, "double");
     REQUIRE(fixture != nullptr);
     CHECK(fixture->ran);
-    CHECK(fixture->pass);  // 断言的是"第二次 next 被拒",约束生效即过
+    // 断言的是"第二次 next 被拒",约束生效即过(nextCalls 1:第二次在 Lua
+    // 侧就被拒,没到执行核的 NextCall)。
+    CHECK_MESSAGE(fixture->pass, fixture->detail);
 }
 
 TEST_CASE("fake 档:HTTP 召回 + 工具桥走 fake adapter,context.append 断言到位") {
