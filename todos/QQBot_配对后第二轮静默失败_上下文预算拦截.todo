@@ -1,0 +1,42 @@
+# QQ Bot：配对后第二轮静默失败，上下文预算拦截
+
+日期：2026-09-17。状态：现场只读排查已完成；修复待实施。
+关联：[全链路问题清单](QQBot_全链路协议核对与上线阻断问题清单.todo)。这是新增现场证据，不能用此前静态审查代替。
+
+## 已确认的现场
+
+在 `D:\LubanApp\QQBot` 执行 `lubancode channel status qqbot main`：在线，已批准1个身份，模型配置齐全。“模型能回复”字段只检查配置，不能证明真实调用成功。
+
+只读取账本中的状态、类型和关联标识，未输出聊天正文、密钥或思考内容：
+
+- `channels/qqbot/main/ingress/journal.jsonl`：sid=2 已到 delivered；sid=3、4 都经 authorized→routed→queued→running，随后进入 dead_letter。
+- 两次失败原因相同：`turn_failed: gateway.turn_failed: context.unestimated_media_or_reasoning: explicit budget policy required`。
+- `work.jsonl` 把三条消息绑定到同一 session 的 turn-1/2/3。三条入站消息 parts 都只有 text，不能解释成“用户发了图片”。
+- 对应 Session V3 账中只有一次 model.request.sent 和一次 model.response.completed；有 thinking 类型记录。这提示应查历史适配后的输入，但尚未拿到失败轮最终序列化快照，不能断言就是某个 thinking/signature 字段触发。
+
+## 源码路径与修复
+
+### P0：第二轮请求在本地被拦
+
+[loop.cpp](../src/agent/loop.cpp) 最终请求预算检查调用 `ModelInputSnapshotFromWire` → `HasUnestimatedInput`，命中后直接返回上述错误，尚未调用模型。[model_input_snapshot.hpp](../src/api/model_input_snapshot.hpp) 按媒体类型和 signature/encrypted_content 等结构字段判断。
+
+- [ ] 用脱敏的首轮响应结构构造“两轮纯文本聊天”回归，保留必要协议字段类型，不留思考正文。覆盖真实使用的适配器及思考历史回传。
+- [ ] 在失败轮记录安全诊断：适配器协议、触发字段路径、块类型、预算策略名称、计数；不记字段值、原始wire或正文。定位媒体、签名、加密推理、错误投影究竟是哪一项。
+- [ ] 区分可计量文本、不可见推理、签名元数据和真正媒体。按各协议补明确预算策略或修正错误分类；禁止把未知占用填0、直接删掉保护，或未经协议核对丢弃必要签名。
+- [ ] 验收至少三轮连续纯文本聊天及工具回合；该拒绝保留在确实无法预算的输入上，并给用户可理解的下一步。
+
+### P0：执行失败只有内部账，QQ 用户看不到
+
+[channel_work_pump.cpp](../src/runtime/channel_work_pump.cpp) `ExecuteChannelTurn` 返回失败后，只调 `DeadLetterIngress` 再 return；该分支未创建失败提示投递。这解释本次“在线却不回”。
+
+- [ ] 将失败提示作为独立、持久、幂等的控制消息写入 outbox：说明本次未完成、给短错误编号和可行下一步；不把内部报错/路径/密钥直接发到QQ。
+- [ ] 失败提示与正常回复共用发送额度和稳定序号，不重新运行 Agent；执行失败事实不能因提示送达而改成执行成功。
+- [ ] 网络、权限、过期窗口导致提示也发不出去时，本地状态页仍可查原执行失败与提示投递失败。
+- [ ] 故障注入覆盖执行前预算拒绝、模型超时、执行后异常及提示回执丢失；重复恢复不重复执行或刷屏。
+
+### P1：状态与历史必须能指到失败消息
+
+- [ ] 将“模型能回复：是”改为“模型配置齐全”，另报最近真实调用结果/时间；账号已批准人数不能冒充当前来信身份已获批。
+- [ ] 提供按账号/会话查看最近来信→准入→执行→投递记录的入口，能直接看见此次两条失败；不要求用户手工翻 JSONL。
+
+本轮未改配置、未停启 Gateway、未重发消息、未修改运行时代码。已有失败消息不得自动补跑；修复后须明确区分用户新输入与经授权恢复的旧工作。
