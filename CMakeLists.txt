@@ -1196,6 +1196,10 @@ add_library(lubancode_app STATIC
   # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ
   # 进程内适配器实例化)与双泵叠加件(不动 engine 的 GatewayWorkPump 冻结面)。
   src/app/channel_gateway_wiring.cpp
+  # 渠道适配器注册表(飞书/企微设计单 R0):channel_id → 账号级适配器工厂
+  # + 渠道件(媒体下载 seam/turn 工作线程数)。wiring 装配门、im 文案、
+  # gateway_launch 渠道件装配三处的单一真源。
+  src/app/channel_adapter_registry.cpp
   # QQ 连接状态单 §三:连接状态宿主输出件——适配器快照的限频日志与跨进程
   # 只读快照发布(connection-status.json,带 boot ID 与更新时间)。
   src/app/channel_connection_reporter.cpp

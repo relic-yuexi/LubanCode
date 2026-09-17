@@ -132,8 +132,8 @@ public:
 // 生产传输工厂:真 WsClient(明文 ws:// 与 wss:// 同一路,ca_pem 供 wss;
 // trust_mode 透传 TLS 层,见 transport/tls.hpp)。
 std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
-    std::string ca_pem, transport::TlsTrustMode trust_mode =
-        transport::TlsTrustMode::ExplicitCa);
+    std::string ca_pem,
+    transport::TlsTrustMode trust_mode = transport::TlsTrustMode::ExplicitCa);
 
 class QqGatewaySession {
 public:

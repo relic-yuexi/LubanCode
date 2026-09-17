@@ -3,12 +3,14 @@
 // 体系——这里是向导级一次性菜单,不是常驻 composer。
 #include "app/im_entry.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "app/channel_adapter_registry.hpp"
 #include "app/gateway_launch.hpp"
 #include "app/version.hpp"
 #include "channel/channel_setup.hpp"
@@ -25,6 +27,35 @@ namespace {
 bool AccountUsable(const channel::ChannelUserConfig& channel,
                    const channel::ChannelAccountUserConfig& account) {
     return channel.enabled && account.enabled;
+}
+
+// "认得渠道"文案(单一真源,R0):适配器注册表给已实现渠道,setup 平台表
+// 补认得但未实现的——渠道名不再手写两处(注册新渠道文案自动跟上)。
+struct KnownChannelsText {
+    std::string implemented;  // 已实现渠道(注册表序,";"分隔)
+    std::string pending;      // 认得但未实现,"<id> 尚未支持" 以";"分隔
+};
+
+KnownChannelsText DescribeKnownChannels() {
+    KnownChannelsText text;
+    const std::vector<std::string>& implemented = ImplementedChannelAdapterIds();
+    for (const std::string& channel_id : implemented) {
+        if (!text.implemented.empty()) {
+            text.implemented += ";";
+        }
+        text.implemented += channel_id;
+    }
+    for (const channel::ChannelSetupPlatform& platform : channel::ChannelSetupPlatforms()) {
+        if (std::find(implemented.begin(), implemented.end(), platform.id) !=
+            implemented.end()) {
+            continue;
+        }
+        if (!text.pending.empty()) {
+            text.pending += ";";
+        }
+        text.pending += platform.id + " 尚未支持";
+    }
+    return text;
 }
 
 }  // namespace
@@ -54,7 +85,11 @@ ImTargetResolution ResolveImTarget(const ImTargetQuery& query) {
         const auto platform = channel::FindChannelSetupPlatform(platform_id);
         if (!platform.has_value()) {
             resolution.status = ImTargetResolution::Status::UnknownPlatform;
-            resolution.detail = "未知平台: " + platform_id + "(认得: qqbot;feishu 尚未支持)";
+            const KnownChannelsText known = DescribeKnownChannels();
+            const std::string pending =
+                known.pending.empty() ? std::string() : ";" + known.pending;
+            resolution.detail =
+                "未知平台: " + platform_id + "(认得: " + known.implemented + pending + ")";
             return resolution;
         }
         if (!platform->implemented) {
@@ -337,8 +372,10 @@ int RunImCommand(const ImCommandArgs& args) {
     if (!args.platform.empty()) {
         const auto platform = channel::FindChannelSetupPlatform(args.platform);
         if (!platform.has_value()) {
-            std::fprintf(stderr, "im: 未知平台 \"%s\"。认得: qqbot(feishu 尚未支持)\n",
-                         args.platform.c_str());
+            const KnownChannelsText known = DescribeKnownChannels();
+            std::fprintf(stderr, "im: 未知平台 \"%s\"。认得: %s(%s)\n",
+                         args.platform.c_str(), known.implemented.c_str(),
+                         known.pending.c_str());
             return 1;
         }
         if (!platform->implemented && !args.setup) {

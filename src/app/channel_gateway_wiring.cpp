@@ -6,9 +6,9 @@
 #include <thread>
 #include <utility>
 
+#include "app/channel_adapter_registry.hpp"
 #include "channel/activation.hpp"
 #include "channel/credentials.hpp"
-#include "channel/qq/qq_adapter.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
 #include "channel/transport/tls.hpp"
@@ -18,13 +18,6 @@
 #include "platform/wall_clock.hpp"
 
 namespace lubancode::app {
-
-namespace {
-
-// Q1 只实现 qqbot 的进程内适配器;其余渠道名如实记 skipped。
-constexpr const char* kImplementedChannelId = "qqbot";
-
-}  // namespace
 
 // ---------------------------------------------------------------------------
 // CompositeGatewayPump
@@ -144,12 +137,28 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
             ? std::move(options.test_transport_factory)
             : channel::qq::MakeWsTransportFactory(ca_pem, trust_mode);
 
+    // 渠道工厂注册表(R0,飞书/企微设计单 §四)的装配材料:测试注入位与
+    // 信任根解析结果随 deps 递进注册行——渠道差异全收进注册行,下面的
+    // 装配主循环渠道无关(五闸裁决/AddAccount/起跑/连接报告)。
+    ChannelAssemblyDeps assembly_deps;
+    assembly_deps.qq_http = http;
+    assembly_deps.qq_transport_factory = transport_factory;
+    assembly_deps.qq_ca_pem = ca_pem;
+    assembly_deps.qq_trust_load_block_code = trust_block_code;
+    assembly_deps.qq_trust_load_block_detail = trust_block_detail;
+
+    const std::map<std::string, ChannelAdapterRegistration>& registry =
+        ChannelAdapterRegistry();
     for (const auto& [channel_id, channel_config] : options.config->channels) {
-        if (channel_id != kImplementedChannelId) {
+        // 装配门:查注册表。未注册渠道如实记 skipped,不起任何线程
+        //(语义与 Q1 单值门完全一致)。
+        const auto registration_it = registry.find(channel_id);
+        if (registration_it == registry.end()) {
             wiring->skipped_.push_back("channel " + channel_id +
-                                       ": no in-process adapter implemented (Q1)");
+                                       ": no in-process adapter implemented");
             continue;
         }
+        const ChannelAdapterRegistration& registration = registration_it->second;
         for (const auto& [account_id, account_config] : channel_config.accounts) {
             channel::ChannelCredentialState credential_state;
             const auto credential = channel::ResolveChannelCredential(account_config);
@@ -169,22 +178,24 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
                                            " (" + decision.detail + ")");
                 continue;
             }
-            // 凭据 ready:真值进程内持有,不落日志。
-            channel::qq::QqBotAdapter::Options adapter_options;
-            adapter_options.channel_id = channel_id;
-            adapter_options.account_id = account_id;
-            adapter_options.config = account_config;
-            adapter_options.credential = *credential;
-            adapter_options.state_root = options.channels_state_root;
-            adapter_options.http = http;
-            adapter_options.transport_factory = transport_factory;
-            adapter_options.ca_pem = ca_pem;
-            adapter_options.trust_load_block_code = trust_block_code;
-            adapter_options.trust_load_block_detail = trust_block_detail;
-            adapter_options.now_ms = now_ms;
-            auto adapter = std::make_unique<channel::qq::QqBotAdapter>(
-                std::move(adapter_options));
-            auto* adapter_ptr = adapter.get();
+            // 凭据 ready:真值进程内持有,不落日志。注册行装配适配器与
+            // 渠道挂件(连接状态口/Q7 菜单发布器)。
+            ChannelAccountAssembly assembly;
+            assembly.channel_id = channel_id;
+            assembly.account_id = account_id;
+            assembly.config = account_config;
+            assembly.credential = *credential;
+            assembly.channels_state_root = options.channels_state_root;
+            assembly.now_ms = now_ms;
+            std::string assembly_error;
+            auto assembled =
+                registration.assemble_account(assembly_deps, assembly, &assembly_error);
+            if (!assembled.has_value()) {
+                wiring->skipped_.push_back(channel_id + "/" + account_id + ": " +
+                                           assembly_error);
+                continue;
+            }
+            auto* adapter_ptr = assembled->adapter.get();
             const auto added = wiring->manager_->AddAccount(channel_id, account_id,
                                                             account_config, adapter_ptr);
             if (added.status != channel::ChannelManager::AddAccountResult::Status::Ok) {
@@ -192,28 +203,20 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
                                            added.detail + ")");
                 continue;  // adapter 析构收线程
             }
-            wiring->adapters_.push_back(std::move(adapter));
-            wiring->adapter_views_.push_back(
-                AdapterView{channel_id, account_id,
-                            static_cast<channel::qq::QqBotAdapter*>(adapter_ptr)});
-            // Q7 菜单/面板发布:显式启用(menu.publish 或 panel.enabled)才
-            // 挂发布器;不启用的账号零行为变化(不碰平台菜单/面板)。
-            if (account_config.menu.has_value() &&
-                (account_config.menu->publish ||
-                 (account_config.menu->panel.has_value() && account_config.menu->panel->enabled))) {
-                channel::qq::QqMenuPanelPublisher::Options publisher_options;
-                publisher_options.http = http;
-                publisher_options.tokens =
-                    static_cast<channel::qq::QqBotAdapter*>(adapter_ptr)->token_manager();
-                publisher_options.state_file = options.channels_state_root / channel_id /
-                                               account_id / "menu-panel.json";
-                publisher_options.now_ms = now_ms;
+            wiring->adapters_.push_back(std::move(assembled->adapter));
+            if (assembled->connection_state) {
+                wiring->adapter_views_.push_back(
+                    AdapterView{channel_id, account_id,
+                                std::move(assembled->connection_state)});
+            }
+            // Q7 菜单/面板发布:注册行显式启用(menu.publish 或
+            // panel.enabled)才造发布器;这里只入账。
+            if (assembled->menu_publisher != nullptr) {
                 MenuPublisherEntry entry;
                 entry.channel_id = channel_id;
                 entry.account_id = account_id;
                 entry.menu = *account_config.menu;
-                entry.publisher =
-                    std::make_unique<channel::qq::QqMenuPanelPublisher>(std::move(publisher_options));
+                entry.publisher = std::move(assembled->menu_publisher);
                 wiring->menu_publishers_.push_back(std::move(entry));
             }
         }
@@ -240,9 +243,7 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
             ChannelConnectionReporter::Account reporter_account;
             reporter_account.channel_id = view.channel_id;
             reporter_account.account_id = view.account_id;
-            reporter_account.snapshot = [adapter = view.adapter]() {
-                return adapter->ConnectionState();
-            };
+            reporter_account.snapshot = view.connection_state;
             reporter_deps.accounts.push_back(std::move(reporter_account));
         }
         wiring->reporter_ =
