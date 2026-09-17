@@ -183,8 +183,11 @@ int RunHookInitCommand(const HookCliArgs& args) {
         TermErr() << "hook 名字只认字母/数字/-/_(最长 64): " << args.name << "\n";
         return 2;
     }
+    std::error_code cwd_ec;
+    const std::filesystem::path cwd = std::filesystem::current_path(cwd_ec);
     const std::filesystem::path parent =
-        args.parent_dir.empty() ? std::filesystem::current_path() : platform::Utf8ToPath(args.parent_dir);
+        args.parent_dir.empty() ? (cwd_ec ? std::filesystem::path(".") : cwd)
+                                : platform::Utf8ToPath(args.parent_dir);
     const std::filesystem::path package_dir = parent / args.name;
     std::error_code ec;
     if (std::filesystem::exists(package_dir, ec) || ec) {

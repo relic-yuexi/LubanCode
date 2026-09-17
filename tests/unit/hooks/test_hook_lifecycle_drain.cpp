@@ -101,8 +101,7 @@ const char* kHttpHookJson = R"json({
 struct WiredPool {
     std::shared_ptr<HookStateStore> state = std::make_shared<HookStateStore>();
     HookHostServiceCenter center;
-    MiddlewarePool pool;
-    std::shared_ptr<MiddlewareDispatcher> dispatcher;
+    hooks::HookDispatcher wired;
 
     explicit WiredPool(const std::string& hook_json, const std::string& script,
                        HookHostServiceCenter::Grants extra_grants = {}) {
@@ -114,11 +113,11 @@ struct WiredPool {
         grants.tool_registry = extra_grants.tool_registry;
         grants.allow_tools = extra_grants.allow_tools;
         center.SetGrants(std::move(grants));
-        pool = MiddlewarePool(PoolWithCenter(center));
+        MiddlewarePool pool(PoolWithCenter(center));
         REQUIRE(AddLuaHook(pool, hook_json, script).has_value());
         auto published = pool.Publish();
         REQUIRE(published.has_value());
-        dispatcher = std::make_shared<MiddlewareDispatcher>(std::move(*published));
+        wired.SetMiddleware(std::make_shared<MiddlewareDispatcher>(std::move(*published)));
     }
 };
 
@@ -151,11 +150,11 @@ return {
     // capability_not_granted——证明门口认了这份授权);state 写得进。
     {
         MiddlewareHookContext context;
-        const PostUserAppend before = RunPostUserMiddleware(wired.dispatcher.get(), "probe:http", context);
+        const PostUserAppend before = RunPostUserMiddleware(&wired.wired, "probe:http", context);
         REQUIRE(before.dispatched);
         REQUIRE(before.outcome.Ok());
         CHECK(before.outcome.value.at("code") == "network_failed");
-        const PostUserAppend state_probe = RunPostUserMiddleware(wired.dispatcher.get(), "probe:state", context);
+        const PostUserAppend state_probe = RunPostUserMiddleware(&wired.wired, "probe:state", context);
         REQUIRE(state_probe.dispatched);
         CHECK(wired.state->Get("drain-probe", "seen").has_value());
     }
@@ -166,7 +165,7 @@ return {
     CHECK(wired.center.draining());
     {
         MiddlewareHookContext context;
-        const PostUserAppend drained = RunPostUserMiddleware(wired.dispatcher.get(), "probe:http", context);
+        const PostUserAppend drained = RunPostUserMiddleware(&wired.wired, "probe:http", context);
         REQUIRE(drained.dispatched);
         REQUIRE(drained.outcome.Ok());
         CHECK(drained.outcome.value.at("code") == "capability_not_granted");
@@ -176,7 +175,7 @@ return {
         // Host API 的错,不是 dispatch 失败)。
         CHECK(record->outcome == "completed_short_circuit");
         // state 仍可用(进程内能力排空窗口保留)。
-        const PostUserAppend state_probe = RunPostUserMiddleware(wired.dispatcher.get(), "probe:state", context);
+        const PostUserAppend state_probe = RunPostUserMiddleware(&wired.wired, "probe:state", context);
         REQUIRE(state_probe.dispatched);
         CHECK(state_probe.outcome.value.at("code") == "no_error");
     }
