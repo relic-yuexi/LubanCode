@@ -132,7 +132,20 @@ bool ParseToolsPolicy(const nlohmann::json& value, const std::string& path,
         return false;
     }
     for (auto it = value.begin(); it != value.end(); ++it) {
-        if (it.key() == "allow") {
+        if (it.key() == "preset") {
+            if (!it.value().is_string() || value.contains("allow") || value.contains("approve")) {
+                *error = path + ".preset 须为 readonly/ask/auto，不能同时写 allow/approve";
+                return false;
+            }
+            const auto preset = ChannelToolsPreset(it.value().get<std::string>());
+            if (!preset) {
+                *error = path + ".preset 只认 readonly/ask/auto";
+                return false;
+            }
+            out->preset = preset->preset;
+            out->allow = preset->allow;
+            out->approve = preset->approve;
+        } else if (it.key() == "allow") {
             std::vector<std::string> allow;
             if (!ParseStringArray(it.value(), path + ".allow", file_path_for_error, &allow, error)) {
                 return false;
@@ -153,7 +166,7 @@ bool ParseToolsPolicy(const nlohmann::json& value, const std::string& path,
             out->approve = std::move(approve);
         } else {
             *error = "配置文件 " + file_path_for_error + " 里的 " + path + "." + it.key() +
-                     " 是认不得的字段(tools 只收 allow/deny/approve)";
+                     " 是认不得的字段(tools 只收 preset/allow/deny/approve)";
             return false;
         }
     }
@@ -1047,6 +1060,22 @@ bool IsValidChannelId(const std::string& id) {
 
 bool IsValidChannelAccountId(const std::string& id) { return IsValidChannelId(id); }
 
+std::optional<ChannelToolsUserPolicy> ChannelToolsPreset(const std::string& name) {
+    if (name != "readonly" && name != "ask" && name != "auto") return std::nullopt;
+    ChannelToolsUserPolicy policy;
+    policy.preset = name;
+    policy.allow = std::vector<std::string>{"read_file", "search", "web_fetch", "web_search",
+                                          "skill", "get_current_time", "list_reminders"};
+    policy.approve = std::vector<std::string>{};
+    if (name != "readonly") {
+        policy.allow->insert(policy.allow->end(), {"create_reminder", "cancel_reminder"});
+        const std::vector<std::string> actions{"write_file", "edit_file", "run_command", "send_file"};
+        if (name == "ask") policy.approve = actions;
+        else policy.allow->insert(policy.allow->end(), actions.begin(), actions.end());
+    }
+    return policy;
+}
+
 ChannelAccountUserConfig MakeQqTemplateAccount() {
     // QQ 首版模板(configuration.md §7):逐字段显式。group_policy=disabled、
     // reply.mode=final 与全渠道默认(allowlist/block)不同——这是 QQ 模板
@@ -1059,15 +1088,9 @@ ChannelAccountUserConfig MakeQqTemplateAccount() {
     account.allow_bots = false;
     account.require_mention = true;
     account.reply.mode = ReplyMode::Final;
-    // 显式最小只读名单 + Q5 聊天侧任务工具:只读两枚名字都核过现有注册表
-    // (ReadFileTool::name() = "read_file",SearchTool::name() = "search");
-    // 任务三枚是 Gateway 装配注册的渠道任务工具(create_reminder/
-    // list_reminders/cancel_reminder,见 runtime/channel_automation)——
-    // 只对过了配对/准入的会话可用(未配对 sender 进不了模型),落账走
-    // automation 域命令与归属闸,不碰文件系统。tool_search/插件/MCP/
-    // 子 Agent 的工具名不在这份名单里,五层交集自然拦下。
-    account.tools.allow = std::vector<std::string>{"read_file", "search", "create_reminder",
-                                                   "list_reminders", "cancel_reminder", "get_current_time"};
+    // 新账号由向导默认选询问档；旧账号无 preset 时保留显式名单。
+    // 查询和提醒直接用；写文件/命令/传文件经 Q6 审批，不扩权到插件/MCP。
+    account.tools = *ChannelToolsPreset("ask");
     return account;
 }
 

@@ -34,10 +34,8 @@ nlohmann::json TemplateAccountToJson() {
     account["require_mention"] = template_account.require_mention;
     account["reply"] = nlohmann::json{{"mode", ReplyModeName(template_account.reply.mode)},
                                       {"tool_progress", template_account.reply.tool_progress}};
-    // tools.allow 是 optional<vector>:nlohmann 不认 optional,显式拆包
-    //(模板恒设值;万一缺省落空名单 = 禁全部工具,与解析端空数组语义一致)。
-    account["tools"] = nlohmann::json{
-        {"allow", template_account.tools.allow.value_or(std::vector<std::string>{})}};
+    // 保存档位名，解析时展开同源名单，用户不必追着新增工具改 JSON。
+    account["tools"] = nlohmann::json{{"preset", template_account.tools.preset}};
     return account;
 }
 
@@ -282,6 +280,9 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
         accounts_json = &fresh_accounts;
     }
 
+    if (request.tools_preset && !ChannelToolsPreset(*request.tools_preset)) {
+        return std::unexpected(Fail("setup_tools_invalid", "工具模式只认 readonly/ask/auto"));
+    }
     const bool created_account = !accounts_json->contains(request.account_id);
     result.created_account = created_account;
 
@@ -334,6 +335,13 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
 
     nlohmann::json account_json =
         created_account ? TemplateAccountToJson() : (*accounts_json)[request.account_id];
+    if (request.tools_preset) {
+        auto& tools = account_json["tools"];
+        if (tools.is_null()) tools = nlohmann::json::object();
+        tools.erase("allow");
+        tools.erase("approve");
+        tools["preset"] = *request.tools_preset;
+    }
     if (request.app_id.has_value()) {
         account_json["app_id"] = *request.app_id;
     }
@@ -351,7 +359,13 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
     auto note_change = [&](const std::string& text) { result.changes.push_back(text); };
     if (created_account) {
         note_change("新建账号 " + request.channel_id + "/" + request.account_id +
-                    "(QQ 模板:websocket、私聊配对、群聊禁用、final 回复、只读工具 read_file/search)");
+                    "(QQ 模板:websocket、私聊配对、群聊禁用、final 回复、操作前询问)");
+    }
+    if (request.tools_preset) {
+        const auto& preset = *request.tools_preset;
+        note_change("工具模式: " + std::string(preset == "ask" ? "操作前询问" :
+                    preset == "auto" ? "自动执行常用工具" : "只读查询") +
+                    "；保留禁止项与渠道/路由限制，重启 Gateway 后生效");
     }
     if (request.app_id.has_value() &&
         (old_account == nullptr || !old_account->contains("app_id") ||

@@ -22,6 +22,24 @@ std::optional<std::map<std::string, ChannelUserConfig>> Parse(const std::string&
 
 }  // namespace
 
+TEST_CASE("tool presets reject ambiguous lists and retain explicit deny") {
+    const auto parsed = Parse(R"({"qqbot":{"accounts":{"main":{"tools":{
+        "preset":"ask","deny":["run_command"]}}}}})");
+    REQUIRE(parsed.has_value());
+    const auto& policy = parsed->at("qqbot").accounts.at("main").tools;
+    CHECK(policy.preset == "ask");
+    CHECK(policy.deny == std::vector<std::string>{"run_command"});
+    for (const auto* bad : {R"({"preset":"ask","allow":[]})",
+                            R"({"preset":"auto","approve":[]})",
+                            R"({"preset":"unknown"})", R"({"preset":true})"}) {
+        nlohmann::json root;
+        root["qqbot"]["accounts"]["main"]["tools"] = nlohmann::json::parse(bad);
+        std::string error;
+        CHECK_FALSE(ParseChannelsUserConfig(root, "test", &error).has_value());
+        CHECK(error.find("preset") != std::string::npos);
+    }
+}
+
 TEST_CASE("完整样例(configuration.md §1)解析:字段与默认值") {
     const auto parsed = Parse(R"({
       "qqbot": {
@@ -219,9 +237,10 @@ TEST_CASE("QQ 模板:逐字段显式,不改全渠道默认值迁就 QQ") {
     CHECK(template_account.require_mention);
     CHECK(template_account.reply.mode == ReplyMode::Final);
     REQUIRE(template_account.tools.allow.has_value());
-    CHECK(*template_account.tools.allow ==
-          std::vector<std::string>{"read_file", "search", "create_reminder", "list_reminders",
-                                   "cancel_reminder", "get_current_time"});
+    CHECK(template_account.tools.preset == "ask");
+    REQUIRE(template_account.tools.approve.has_value());
+    CHECK(*template_account.tools.approve ==
+          std::vector<std::string>{"write_file", "edit_file", "run_command", "send_file"});
 
     // 全渠道默认值不动:别的账号/别的渠道照旧。
     const auto parsed = Parse(R"({"other": {"accounts": {"m": {}}}})");

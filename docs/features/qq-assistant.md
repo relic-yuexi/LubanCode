@@ -18,6 +18,22 @@ QQ 命令由宿主处理，无须先配置 `commands`。未知 slash 返回帮�
 
 ## 配置位置
 
+工具权限不必手写名单。新账号向导默认选择“操作前询问”；旧账号运行下面的命令，只选权限，不必重填 AppID 或密钥：
+
+```powershell
+lubancode channel setup qqbot --account main --permissions
+```
+
+| 模式 | 行为 |
+|---|---|
+| 只读查询 | 读文件、查资料、加载技能、查时间和已有提醒 |
+| 操作前询问（推荐） | 查询和管理提醒直接用；改文件、执行命令、回传文件前发 QQ 审批卡 |
+| 自动执行 | 上述常用工具预先授权，不逐次询问；禁止项与渠道/路由限制仍有效 |
+
+旧账号回车保留当前配置。选模式会替换账号的 allow/approve 名单，保留 deny；保存前显示差异并确认，重启 Gateway 后生效。在 QQ 发 `/tools` 或 `/权限`，查看带中文名称的实际工具状态。QQ 消息不能修改本机权限。
+
+配置保存为 `tools.preset`，取值 `readonly`、`ask` 或 `auto`。名单由程序维护；preset 不可与 allow/approve 同写，可与 deny 同写。高级自定义名单仍可用。预设只覆盖常用内置工具，不自动授权插件、MCP 或子代理；也不会凭空提供搜索密钥、模型视觉或文档解析器。审批卡仍需 QQ 平台支持，卡片失败或超时均不执行。
+
 只改启动目录不会改变全局配置位置。未设置 `LUBANCODE_HOME` 时，读用户目录下 `.lubancode/config.json`；设置后读 `<LUBANCODE_HOME>/config.json`。以下字段合入已有配置，别覆盖凭据或其他账号。
 
 联网搜索需配置顶层 `search.provider`（tavily、brave、serper 之一）和 `search.api_key`，并在已声明的各层工具上限中放行 `web_search`。`/status` 会区分工具未装配、渠道未放行与须审批。

@@ -70,6 +70,7 @@ struct ChannelSetupCommitRequest {
     bool ensure_enabled = true;
     // 只算差异不落盘(向导保存前显示差异用)。
     bool dry_run = false;
+    std::optional<std::string> tools_preset;  // nullopt 保留旧策略；选择后保留 deny
 };
 
 struct ChannelSetupCommitResult {

@@ -928,6 +928,7 @@ int RunCli(const std::vector<std::string>& args) {
             cli::ChannelSetupCommandArgs setup_args;
             setup_args.platform = parsed_cli.channel.platform;
             setup_args.account = parsed_cli.channel.account;
+            setup_args.permissions_only = parsed_cli.channel.permissions_only;
             return cli::RunChannelSetupCommand(setup_args);
         }
         case CliAction::BadChannelSetup:

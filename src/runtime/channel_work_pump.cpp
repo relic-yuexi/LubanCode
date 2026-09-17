@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -903,16 +904,30 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
                 }
             } else if (command->action == "capabilities") {
                 reply = "当前工作目录：" + options_.cwd_utf8 + "\n工具状态：\n";
-                for (const auto& name : {"run_command", "web_search", "web_fetch", "skill", "send_file"}) {
-                    reply += std::string(name) + "：";
+                std::map<std::string, std::string> names{
+                    {"read_file", "读取文件"}, {"search", "搜索本机文件"},
+                    {"web_search", "联网搜索"}, {"web_fetch", "读取网页"},
+                    {"skill", "加载技能"}, {"get_current_time", "查询时间"},
+                    {"list_reminders", "查看提醒"}, {"create_reminder", "创建提醒"},
+                    {"cancel_reminder", "取消提醒"}, {"write_file", "写入文件"},
+                    {"edit_file", "修改文件"}, {"run_command", "执行命令"},
+                    {"send_file", "发送文件"}};
+                for (const auto& tool : registry_->All()) names.try_emplace(tool->name(), tool->name());
+                for (const auto& [name, label] : names) {
+                    reply += label + "（" + name + "）：";
                     const auto* tool = registry_->Find(name);
                     if (tool == nullptr) reply += "未装配";
                     else if (!work.route.tools.Allows(name)) reply += "渠道策略未放行";
-                    else if (tool->needs_confirm() && !work.route.tools.ExplicitlyAllows(name))
-                        reply += "须审批（未配置审批带时会拒绝）";
-                    else reply += "可用";
+                    else if (tool->needs_confirm() && !work.route.tools.ExplicitlyAllows(name)) {
+                        if (work.route.tools.Approvable(name) && options_.interaction_broker)
+                            reply += "须在 QQ 点允许这次";
+                        else reply += "不可执行：未启用审批";
+                    } else reply += "可直接使用";
                     reply += "\n";
                 }
+                reply += "切换权限不必填写工具名。在电脑运行：\nlubancode channel setup " +
+                         channel_id + " --account " + account_id + " --permissions\n"
+                         "选择只读查询、操作前询问或自动执行，保存后重启 Gateway。\n";
                 if (registry_->Find("web_search") == nullptr)
                     reply += "联网搜索须配置全局 search.provider 与 search.api_key，再放行 web_search。\n";
                 reply += options_.accepts_images ? "图片：已接视觉输入，需模型支持。\n" : "图片：当前模型只支持文本。\n";

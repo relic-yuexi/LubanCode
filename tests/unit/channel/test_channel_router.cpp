@@ -532,9 +532,7 @@ TEST_CASE("QQ 模板路由出来:只许 read_file/search,群聊整体 disabled")
     const auto admitted = Route(dm, template_account, nullptr, &pairing);
     REQUIRE(admitted.status == RouteDecision::Status::Admitted);
     REQUIRE(admitted.tools.allow.has_value());
-    CHECK(*admitted.tools.allow == std::vector<std::string>{"read_file", "search",
-                                                            "create_reminder", "list_reminders",
-                                                            "cancel_reminder", "get_current_time"});
+    CHECK(admitted.tools.ExplicitlyAllows("get_current_time"));
     CHECK(admitted.tools.Allows("read_file"));
     CHECK(admitted.tools.Allows("search"));
     CHECK(admitted.tools.Allows("create_reminder"));
@@ -544,7 +542,9 @@ TEST_CASE("QQ 模板路由出来:只许 read_file/search,群聊整体 disabled")
     CHECK_FALSE(admitted.tools.Allows("tool_invoke"));
     CHECK_FALSE(admitted.tools.Allows("agent"));
     CHECK_FALSE(admitted.tools.Allows("mcp__anything__else"));
-    CHECK_FALSE(admitted.tools.Allows("run_command"));  // 首版不开任意 shell
+    CHECK(admitted.tools.Allows("run_command"));
+    CHECK(admitted.tools.Approvable("run_command"));
+    CHECK_FALSE(admitted.tools.ExplicitlyAllows("run_command"));
     // 配对批准不升 owner:owner 只认本机配置(allow_from),memory 仍关。
     CHECK_FALSE(admitted.memory.user_memory);
     CHECK_FALSE(admitted.memory.project_memory);
@@ -609,6 +609,33 @@ TEST_CASE("审批带(Q6):approve 显式交集,deny 永远赢,allow 带内预授�
     REQUIRE(none.status == RouteDecision::Status::Admitted);
     CHECK(none.tools.approve.empty());
     CHECK_FALSE(none.tools.Approvable("bash_like"));
+}
+
+TEST_CASE("permission presets keep execution behind approval and deny remains authoritative") {
+    auto account = MakeAccount();
+    const auto event = MakeEvent(ConversationKind::Direct, "dm-1", "owner");
+    account.tools = *ChannelToolsPreset("readonly");
+    auto route = Route(event, account);
+    CHECK(route.tools.ExplicitlyAllows("get_current_time"));
+    CHECK_FALSE(route.tools.Allows("run_command"));
+    CHECK_FALSE(route.tools.Allows("create_reminder"));
+    account.tools = *ChannelToolsPreset("ask");
+    route = Route(event, account);
+    CHECK(route.tools.Approvable("run_command"));
+    CHECK_FALSE(route.tools.ExplicitlyAllows("run_command"));
+    CHECK(route.tools.ExplicitlyAllows("create_reminder"));
+    account.tools = *ChannelToolsPreset("auto");
+    route = Route(event, account);
+    CHECK(route.tools.ExplicitlyAllows("run_command"));
+    account.tools.deny = {"run_command"};
+    route = Route(event, account);
+    CHECK_FALSE(route.tools.Allows("run_command"));
+    CHECK_FALSE(route.tools.ExplicitlyAllows("run_command"));
+    ChannelToolsUserPolicy cap;
+    cap.allow = std::vector<std::string>{"read_file"};
+    route = Route(event, account, nullptr, nullptr, &cap);
+    CHECK(route.tools.Allows("read_file"));
+    CHECK_FALSE(route.tools.Allows("write_file"));
 }
 
 TEST_CASE("配对不升 owner:批准账不进 allow_from,owner 只认本机配置") {

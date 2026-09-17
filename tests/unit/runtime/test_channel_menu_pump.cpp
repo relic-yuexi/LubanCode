@@ -504,6 +504,11 @@ TEST_CASE("QQ builtins manage isolated contexts without sending slash commands t
     CHECK(fixture.SentTextAt(6).find("找不到") != std::string::npos);
     CHECK(fixture.SentTextAt(7).find("暂不支持") != std::string::npos);
     CHECK(fixture.SentTextAt(8).find("未装配") != std::string::npos);
+    CHECK(fixture.SentTextAt(8).find("发送文件（send_file）：可直接使用") != std::string::npos);
+    CHECK(fixture.SentTextAt(8).find("--permissions") != std::string::npos);
+    send("/权限");
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
+    CHECK(fixture.SentTextAt(9).find("查询时间（get_current_time）") != std::string::npos);
     CHECK_FALSE(fixture.backend->saw_host_clock);
     CHECK(fixture.backend->systems[0].find("get_current_time") != std::string::npos);
 }

@@ -96,7 +96,8 @@ std::optional<ChannelCommandBindingUserConfig> MatchChannelCommand(
         builtin.prompt = "new";
     } else if (name == "/files" || name == "/文件说明") builtin.action = "file_help";
     else if (name == "/reminders" || name == "/提醒") builtin.action = "list_reminders";
-    else if (name == "/status" || name == "/tools" || name == "/skills") builtin.action = "capabilities";
+    else if (name == "/status" || name == "/tools" || name == "/skills" ||
+             name == "/permissions" || name == "/权限") builtin.action = "capabilities";
     else if (name == "/menu" || name == "/菜单") builtin.action = "menu_help";
     if (!builtin.action.empty()) return builtin;
     for (const auto& binding : commands) {
@@ -118,7 +119,7 @@ std::string MakeChannelHelpText(const std::vector<ChannelCommandBindingUserConfi
            "/help — 帮助\n/session — 会话列表\n/session current — 当前会话\n"
            "/new 或 /clear — 开新上下文，保留历史与提醒\n"
            "/session switch <编号> — 切换到列表中的会话\n"
-           "/status — 当前工具与配置状态\n/skills — 技能状态\n"
+           "/status — 当前工具与配置状态\n/tools 或 /权限 — 工具清单与权限设置入口\n/skills — 技能状态\n"
            "/files — 文件与图片说明\n/reminders — 我的提醒\n";
     out << "/menu — 菜单启用说明\n";
     for (const auto& binding : commands) {
