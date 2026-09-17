@@ -79,7 +79,7 @@ tools::Tool::Result ChannelFileDeliveryScope::Stage(const nlohmann::json& input)
         channel::DefaultChannelProtectedPaths(), platform::PathToUtf8(scope.workspace_));
     if (!blocked.empty()) return Reply(blocked, true);
     const auto bytes = ReadBounded(path, kMaxBytes);
-    if (!bytes) return Reply("文件读不了，或超过 20 MiB。", true);
+    if (!bytes || bytes->empty()) return Reply("文件读不了、内容为空，或超过 20 MiB。", true);
     const auto hash = platform::Sha256Hex(*bytes);
     const auto frozen = scope.staging_ / (hash + ".bin");
     const auto manifest = Manifest(scope.staging_, scope.operation_id_);
@@ -119,6 +119,11 @@ std::optional<gateway::DurableReplyOutbox::ChannelAttachment> StagedChannelFile(
 }
 
 void RegisterChannelFileTool(tools::ToolRegistry& registry) {
-    if (registry.Find("send_file") == nullptr) registry.Register(std::make_unique<SendFileTool>());
+    if (registry.Find("send_file") != nullptr) return;
+    tools::ToolRegistration registration;
+    registration.tool = std::make_unique<SendFileTool>();
+    registration.effect_class = tools::EffectClass::LocalReversible;
+    registration.idempotency = tools::Idempotency::Idempotent;
+    registry.Register(std::move(registration));
 }
 }  // namespace lubancode::runtime

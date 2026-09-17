@@ -450,6 +450,8 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     }
     const std::string effective_prompt =
         pop.status == SessionService::PendingPop::Status::Ok ? pop.input.text : prompt;
+    const auto& effective_images =
+        pop.status == SessionService::PendingPop::Status::Ok ? pop.input.images : images;
 
     // turn 身份与绑定:事件适配器 mint turnId → 领域绑定(on_bound,泵落
     // 领域行)→ V3 gateway.work.bound(恢复反查的锚)。
@@ -513,7 +515,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         return result;
     }
     api::Message user_message{api::Role::User, {api::TextBlock{effective_text}}};
-    for (const auto& image : images) user_message.content.push_back(image);
+    for (const auto& image : effective_images) user_message.content.push_back(image);
     for (const std::string& append : post_user.context_appends) {
         user_message.content.push_back(
             api::TextBlock{"[PostUser 钩子附加上下文,非用户手敲]\n" + append});

@@ -127,4 +127,4 @@ DOC development/workspace-storage-v2/P0-0-inventory.md
 DOC development/workspace-storage-v2/scale-baseline.md
 DOC features/telemetry/collector.md
 
-features/qq-assistant.md
+DOC features/qq-assistant.md
