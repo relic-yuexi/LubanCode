@@ -102,7 +102,7 @@ public:
     std::string name() const override { return "kb.search"; }
     std::string description() const override { return "fixture"; }
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
-    tools::Tool::Result execute(const nlohmann::json&, const tools::ToolExecutionContext&) override {
+    tools::Tool::Result execute(const nlohmann::json&) override {
         if (on_execute) {
             on_execute();
         }

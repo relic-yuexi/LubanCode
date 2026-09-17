@@ -69,7 +69,7 @@ public:
     std::string name() const override { return "stub.ping"; }
     std::string description() const override { return "stub"; }
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
-    tools::Tool::Result execute(const nlohmann::json&, const tools::ToolExecutionContext&) override {
+    tools::Tool::Result execute(const nlohmann::json&) override {
         ++calls;
         return tools::Tool::Result::Text("pong");
     }

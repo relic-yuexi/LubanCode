@@ -57,7 +57,7 @@ public:
     std::string name() const override { return name_; }
     std::string description() const override { return description_; }
     nlohmann::json input_schema() const override { return schema_; }
-    tools::Tool::Result execute(const nlohmann::json&, const tools::ToolExecutionContext&) override {
+    tools::Tool::Result execute(const nlohmann::json&) override {
         if (!outcome_.empty()) {
             tools::Tool::Result result = tools::Tool::Result::Error(content_);
             result.outcome = outcome_;
