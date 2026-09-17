@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "postaction-refine",
+  "version": "0.1.0",
+  "entry": "main.lua",
+  "hooks": [
+    {
+      "hookPoint": "PostAction",
+      "name": "result.refine",
+      "handler": "refine",
+      "priority": 100
+    }
+  ]
+}

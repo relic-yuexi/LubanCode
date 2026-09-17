@@ -1058,6 +1058,9 @@ add_library(lubancode_runtime STATIC
   # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
   # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
   src/runtime/hook_host_services.cpp
+  # LuaHook 单 P1-D:hook 包校验与试跑引擎(§8.2 静态检查 + fixtures
+  # fake 档;`lubancode hook validate/test` 的芯,CLI 只打印)。
+  src/runtime/hook_package_check.cpp
   # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
@@ -1297,6 +1300,9 @@ add_library(lubancode_app STATIC
   src/app/commands/background_commands.cpp
   # 自进化闭环阶段 1:/evolve status|list|show 只读面。
   src/app/commands/evolve_commands.cpp
+  # LuaHook 单 P1-D:hook validate/test/init 子命令面(引擎在 runtime 的
+  # hook_package_check.cpp,这里只打印与落盘)。
+  src/app/commands/hook_check_commands.cpp
   # 终端接线收尾单:/memory 命令 presenter(自大类搬出)。
   src/app/commands/memory_commands.cpp
   # 终端接线收尾单:/trace 命令 presenter(自大类搬出)。

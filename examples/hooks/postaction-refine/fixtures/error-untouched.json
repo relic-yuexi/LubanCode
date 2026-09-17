@@ -1,0 +1,13 @@
+{
+  "name": "error-results-not-polished",
+  "hookPoint": "PostAction",
+  "trigger": {
+    "input": {"toolName": "search", "content": "检索超时", "isError": true},
+    "actionId": "action-000002"
+  },
+  "expect": {
+    "kind": "completed",
+    "terminalRuns": 1,
+    "records": {"PostAction/result.refine": {"outcome": "completed", "effects": []}}
+  }
+}

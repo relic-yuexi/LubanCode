@@ -640,4 +640,36 @@ bool HookDispatcher::HasExternalRecords() const {
     return !external_pending_.empty();
 }
 
+// ---------------------------------------------------------------------------
+// LuaHook 单 P1-D:中间件 dispatch 的 in-flight 账(§六 clear/exit 排空)。
+// ---------------------------------------------------------------------------
+
+void HookDispatcher::EnterMiddlewareDispatch() {
+    {
+        const std::lock_guard<std::mutex> lock(middleware_drain_->mutex);
+        ++middleware_drain_->in_flight;
+    }
+}
+
+void HookDispatcher::LeaveMiddlewareDispatch() {
+    {
+        const std::lock_guard<std::mutex> lock(middleware_drain_->mutex);
+        if (middleware_drain_->in_flight > 0) {
+            --middleware_drain_->in_flight;
+        }
+    }
+    middleware_drain_->cv.notify_all();
+}
+
+int HookDispatcher::middleware_in_flight() const {
+    const std::lock_guard<std::mutex> lock(middleware_drain_->mutex);
+    return middleware_drain_->in_flight;
+}
+
+bool HookDispatcher::WaitForMiddlewareDrain(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(middleware_drain_->mutex);
+    return middleware_drain_->cv.wait_for(lock, timeout,
+                                          [this] { return middleware_drain_->in_flight == 0; });
+}
+
 }  // namespace lubancode::hooks

@@ -1,0 +1,13 @@
+{
+  "name": "kb-down-still-admits-original",
+  "trigger": {
+    "input": {"prompt": "知识库挂了也照常问"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "expect": {
+    "kind": "completed",
+    "contextAppends": [],
+    "terminalRuns": 1
+  }
+}

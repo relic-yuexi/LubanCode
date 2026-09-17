@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "business-deny",
+  "version": "0.1.0",
+  "entry": "main.lua",
+  "hooks": [
+    {
+      "hookPoint": "PreUser",
+      "name": "prompt.policy",
+      "handler": "gate",
+      "priority": 50,
+      "match": {"origin": "human"}
+    }
+  ]
+}

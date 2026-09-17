@@ -16,6 +16,78 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
     CliOptions& options = parsed.options;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
+        // LuaHook 单 P1-D 的 hook 子命令:`lubancode hook validate <包目录>
+        // [--json]` / `lubancode hook test <包目录> [--json]` / `lubancode
+        // hook init <名字> [--dir <父目录>]`。只认第一个位置参数是裸
+        // "hook" 的情形;形状不对当场退用法,不静默当普通位置参数走单发
+        // 问句。
+        if (arg == "hook" && options.positional.empty()) {
+            static const std::set<std::string> kHookVerbs = {"validate", "test", "init"};
+            const std::size_t rest = args.size() - i - 1;
+            if (rest == 0 || kHookVerbs.count(args[i + 1]) == 0) {
+                parsed.action = CliAction::BadHook;
+                parsed.error_text =
+                    "用法: lubancode hook <validate|test|init> <包目录|名字> [--json] [--dir <父目录>]";
+                return parsed;
+            }
+            HookCliArgs hook;
+            hook.verb = args[i + 1];
+            if (hook.verb == "init") {
+                if (rest < 2) {
+                    parsed.action = CliAction::BadHook;
+                    parsed.error_text = "hook init 缺名字,用法: lubancode hook init <名字> [--dir <父目录>]";
+                    return parsed;
+                }
+                if (args[i + 2].rfind("--", 0) == 0) {
+                    parsed.action = CliAction::BadHook;
+                    parsed.error_text = "hook init 第一个参数须是名字,不是旗标: " + args[i + 2];
+                    return parsed;
+                }
+                hook.name = args[i + 2];
+                for (std::size_t j = i + 3; j < args.size(); ++j) {
+                    if (args[j] == "--dir") {
+                        if (j + 1 >= args.size()) {
+                            parsed.action = CliAction::BadHook;
+                            parsed.error_text = "--dir 需要一个父目录路径";
+                            return parsed;
+                        }
+                        hook.parent_dir = args[++j];
+                        continue;
+                    }
+                    parsed.action = CliAction::BadHook;
+                    parsed.error_text = "hook init 认不得参数 \"" + args[j] +
+                                        "\":只认 <名字> --dir <父目录>";
+                    return parsed;
+                }
+                parsed.action = CliAction::RunHookInit;
+                parsed.hook = std::move(hook);
+                return parsed;
+            }
+            if (rest < 2) {
+                parsed.action = CliAction::BadHook;
+                parsed.error_text = "hook " + hook.verb + " 缺包目录路径";
+                return parsed;
+            }
+            if (args[i + 2].rfind("--", 0) == 0) {
+                parsed.action = CliAction::BadHook;
+                parsed.error_text = "hook " + hook.verb + " 第一个参数须是包目录,不是旗标: " + args[i + 2];
+                return parsed;
+            }
+            hook.package_dir = args[i + 2];
+            for (std::size_t j = i + 3; j < args.size(); ++j) {
+                if (args[j] == "--json") {
+                    hook.json = true;
+                    continue;
+                }
+                parsed.action = CliAction::BadHook;
+                parsed.error_text =
+                    "hook " + hook.verb + " 认不得参数 \"" + args[j] + "\":只认 <包目录> --json";
+                return parsed;
+            }
+            parsed.action = CliAction::RunHookValidate;
+            parsed.hook = std::move(hook);
+            return parsed;
+        }
         // app-server 子命令:只认第一个位置参数是裸 "app-server" 的情形
         // (子命令长这样,单子定调)。认到即设旗标;后续参数照旧并进
         // positional(骨架期子命令不带参数,多给的当普通位置参数走

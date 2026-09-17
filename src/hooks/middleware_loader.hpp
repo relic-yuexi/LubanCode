@@ -38,4 +38,10 @@ std::expected<void, std::string> LoadHookPackage(MiddlewarePool& pool,
                                                  const std::filesystem::path& package_dir,
                                                  SourceLayer layer, const std::string& source_label);
 
+// LuaHook P1-D(validate/test 命令共用):entry 相对路径 -> 包内绝对路径。
+// 绝对路径/越界(../ 逃出包根)拒绝;不依赖当前工作目录。装载与校验同走
+// 这一份,不各写一套越界判断。
+std::expected<std::filesystem::path, std::string> ResolveHookEntryPath(
+    const std::filesystem::path& package_root, const std::string& entry);
+
 }  // namespace lubancode::hooks::middleware

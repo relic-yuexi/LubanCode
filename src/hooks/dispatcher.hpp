@@ -19,6 +19,8 @@
 // 不与自身并发;成员无锁。
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <map>
 #include <memory>
@@ -139,6 +141,17 @@ public:
     }
     middleware::MiddlewareEventSink* middleware_sink() const { return middleware_sink_.get(); }
 
+    // ---- LuaHook 单 P1-D:中间件 dispatch 的 in-flight 账(排空用) ------
+    // 三个 Run*Middleware 统一入口进出配对(直接调 MiddlewareDispatcher::
+    // Dispatch 的测试路不记)。BindMiddlewareSessionWriter 换 sink 前等它
+    // 归零——在途 dispatch 还持着旧 sink 的裸指针,不许换绑时拆它的引用。
+    void EnterMiddlewareDispatch();
+    void LeaveMiddlewareDispatch();
+    int middleware_in_flight() const;
+    // true = 已归零;false = 到点仍有在途(§六"无法核实保留 unknown",
+    // 不强等)。
+    bool WaitForMiddlewareDrain(std::chrono::milliseconds timeout);
+
     // 主线程调用:拷一份当前定义表(含信任/禁用账)。后台执行器存着这份
     // 快照跑——会话中途 trust/disable 只影响之后新起的快照,不在跑的
     // 那份不追改(只读语义)。
@@ -204,6 +217,15 @@ private:
         std::vector<std::string> warnings;
     };
     std::deque<ExternalPending> external_pending_;
+    // LuaHook 单 P1-D:中间件 dispatch 的 in-flight 账。经 shared_ptr 持有:
+    // 本类保留拷贝/移动语义(MakeDispatcher 一类按值回传的测试路在用),
+    // 拷贝出去的两只共享同一份账——生产只有 HookRuntime() 那一只。
+    struct MiddlewareDrainState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        int in_flight = 0;
+    };
+    std::shared_ptr<MiddlewareDrainState> middleware_drain_ = std::make_shared<MiddlewareDrainState>();
 };
 
 }  // namespace lubancode::hooks

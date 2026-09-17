@@ -1485,6 +1485,20 @@ std::expected<hooks::middleware::Handler, std::string> MakeLuaHookHandler(
         [spec, profile, services_center](const hooks::middleware::InvocationCtx& ctx, const nlohmann::json& input,
                         hooks::middleware::NextCall& next)
             -> std::expected<hooks::middleware::HandlerReturn, hooks::middleware::HandlerError> {
+            // LuaHook P1-D(§六):in-flight 账——排空(WaitForDrain)等它归零,
+            // 换场/封账前不许销毁仍被 invocation 引用的写者。中心为空的
+            // 测试路不记(零行为不变)。
+            struct InFlightGuard {
+                HookHostServiceCenter* center;
+                ~InFlightGuard() {
+                    if (center != nullptr) {
+                        center->LeaveInvocation();
+                    }
+                }
+            } in_flight{services_center};
+            if (services_center != nullptr) {
+                services_center->EnterInvocation();
+            }
             LuaHostState::Options options;
             options.script = spec.script;
             options.chunk_name = spec.chunk_name.empty() ? "hook" : spec.chunk_name;

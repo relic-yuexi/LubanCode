@@ -5,6 +5,7 @@
 | [packages/](packages/README.md) | Package 示例:整箱分发,带 package.yaml 清单——browser(官方浏览器包:Agent 加 Skill 加四只 Workflow,浏览器本体归核心)、gui-agent(code-bearing:process 插件加 Skill,默认只发现不挂载) |
 | [agents/](agents/README.md) | 散装 Agent 定义示例(如 code-reviewer.yaml,一只 YAML 一只 Agent) |
 | [plugins/](plugins/README.md) | 散装插件四条路各一枚:Lua、process(Python/Rust/C)、native DLL |
+| [hooks/](hooks/README.md) | Lua hook 包示例六枚(改写/拒绝/HTTP 召回/结果加工/同名替换/MCP 组合),`lubancode hook test` 可验 |
 | [workflows/](workflows/README.md) | 散装工作流示例(三省六部) |
 | [web-console/](web-console/README.md) | 参考前端(多前端外壳单·阶段 D):纯静态 Web 页四件套(聊天/页签/面板/镜像+审批),全程只走 AppServer 协议——验收协议面的工具,不是产品 |
 | [node-client/](node-client/README.md) | Node 外部客户端(应用Worker接入单 P4):起受控 app-server Worker 的最小参考实现(专属 env/幂等受理/收口四步),附五幕端到端验收跑法与托管部署样例 |

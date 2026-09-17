@@ -598,6 +598,11 @@ HookToolExecutionService::Result HookToolExecutionService::Call(
     if (options_.registry == nullptr) {
         return rejected(hookapi_err::kToolRegistryMissing, "宿主未接工具注册表");
     }
+    // LuaHook P1-D(§六排空):排空窗口里不接新外部工作——在途调用照旧跑完,
+    // 迟到终态仍落发起会话的账;这里的拒绝也入账(rejected),审计看得见。
+    if (options_.drain != nullptr && options_.drain->load()) {
+        return rejected(hookapi_err::kToolDrained, "会话排空中,不接新的子执行(迟到结果归发起会话)");
+    }
     tools::Tool* tool = options_.registry->Find(tool_name);
     if (tool == nullptr) {
         return rejected(hookapi_err::kToolUnknown, "工具未注册: " + tool_name);
@@ -752,17 +757,21 @@ std::unique_ptr<LuaHookServices> HookHostServiceCenter::Build(
         return std::find(requested_capabilities.begin(), requested_capabilities.end(), cap) !=
                requested_capabilities.end();
     };
+    // LuaHook P1-D(§六排空):排空窗口里新 invocation 只留进程内能力
+    //(state/log/context);http/fs/tools 是新外部工作,一律不开——在途
+    // invocation 的束在排空前已建,不受此限(工具桥另有活排空旗把门)。
+    const bool drained = drain_flag_->load();
 
     // HTTP/Secret:申请 ∩ 宿主授权;取消旗灌 invocation 的那根(与 guard
     // 同一真值,§8.4 同款纪律)。
-    if (requested(kHookCapHttp) && grants_.http.has_value()) {
+    if (!drained && requested(kHookCapHttp) && grants_.http.has_value()) {
         services->http_granted = true;
         services->http = *grants_.http;
         services->http.cancel = ctx.cancel;
     }
 
     // 文件:读/写分别申请;授权根按申请裁(read-only 申请不附写根)。
-    if (grants_.fs.has_value() && (requested(kHookCapFsRead) || requested(kHookCapFsWrite))) {
+    if (!drained && grants_.fs.has_value() && (requested(kHookCapFsRead) || requested(kHookCapFsWrite))) {
         services->fs_granted = true;
         services->fs = *grants_.fs;
         if (!requested(kHookCapFsWrite)) {
@@ -785,16 +794,69 @@ std::unique_ptr<LuaHookServices> HookHostServiceCenter::Build(
         services->log = grants_.log;
     }
 
-    if (requested(kHookCapTools) && grants_.tool_registry != nullptr) {
+    if (!drained && requested(kHookCapTools) && grants_.tool_registry != nullptr) {
         HookToolExecutionService::Options tool_options;
         tool_options.registry = grants_.tool_registry;
         tool_options.allow_tools = grants_.allow_tools;
+        tool_options.drain = drain_flag_.get();  // 活旗:排空落在束建之后也拒
         if (writer_.load() != nullptr) {
             tool_options.ledger = std::make_shared<V3HookSubExecutionLedger>(*writer_.load());
         }
         services->tools = std::make_unique<HookToolExecutionService>(std::move(tool_options));
     }
     return services;
+}
+
+// ---------------------------------------------------------------------------
+// LuaHook P1-D:排空与 in-flight 账(§六 clear/exit)。
+// ---------------------------------------------------------------------------
+
+void HookHostServiceCenter::BeginDrain(std::string reason) {
+    {
+        const std::lock_guard<std::mutex> lock(drain_mutex_);
+        drain_reason_ = std::move(reason);
+    }
+    // 先立排空旗再撤子执行写者:此后 Build 的束不带 ledger、不带外部能力;
+    // 已建束的迟到终态仍写它们钉死的旧写者(归属正确)。
+    drain_flag_->store(true);
+    writer_.store(nullptr);
+    drain_cv_.notify_all();
+}
+
+void HookHostServiceCenter::EndDrain() {
+    drain_flag_->store(false);
+    const std::lock_guard<std::mutex> lock(drain_mutex_);
+    drain_reason_.clear();
+}
+
+std::string HookHostServiceCenter::drain_reason() const {
+    const std::lock_guard<std::mutex> lock(drain_mutex_);
+    return drain_reason_;
+}
+
+void HookHostServiceCenter::EnterInvocation() {
+    const std::lock_guard<std::mutex> lock(drain_mutex_);
+    ++in_flight_;
+}
+
+void HookHostServiceCenter::LeaveInvocation() {
+    {
+        const std::lock_guard<std::mutex> lock(drain_mutex_);
+        if (in_flight_ > 0) {
+            --in_flight_;
+        }
+    }
+    drain_cv_.notify_all();
+}
+
+int HookHostServiceCenter::in_flight() const {
+    const std::lock_guard<std::mutex> lock(drain_mutex_);
+    return in_flight_;
+}
+
+bool HookHostServiceCenter::WaitForDrain(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(drain_mutex_);
+    return drain_cv_.wait_for(lock, timeout, [this] { return in_flight_ == 0; });
 }
 
 HookHostServiceCenter& DefaultHookServiceCenter() {

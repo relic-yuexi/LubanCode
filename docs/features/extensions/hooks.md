@@ -1,6 +1,6 @@
 # Hooks:生命周期与信任协议
 
-> **V3-LEGACY-05：两套 Hook 暂时并存。** 本页原有配置、并发归并、legacy adapter 与 outbox 说明属于 command hooks；下文旧 Session 生命周期口径不等于 v3 sessionId。Lua 中间件按同名槽位、阶段和依赖派发，已接 PreUser/PostUser/PreRequest 与受控 Host API。新旧边界见 [Session v3](../../architecture/session-v3.md)。
+> **V3-LEGACY-05：两套 Hook 暂时并存。** 本页原有配置、并发归并、legacy adapter 与 outbox 说明属于 command hooks；下文旧 Session 生命周期口径不等于 v3 sessionId。Lua 中间件按同名槽位、阶段和依赖派发，已接 PreUser/PostUser/PreRequest 与受控 Host API。新旧边界见 [Session v3](../../architecture/session-v3.md)；Lua 中间件的作者手册见 [Lua Hooks](../hooks/README.md)。
 
 [文档首页](../../README.md) · [Hooks 流程](../../architecture/hooks-flow.md) · [工具调用流程](../../architecture/tool-calling-flow.md) · [扩展手册](README.md) · [安全模型](../../development/security.md) · [测试手册](../../development/testing.md) · [排错手册](../../getting-started/troubleshooting.md)
 

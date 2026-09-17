@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "replace-estimator",
+  "version": "0.1.0",
+  "entry": "main.lua",
+  "hooks": [
+    {
+      "hookPoint": "PreRequest",
+      "stage": "estimate",
+      "name": "context.token_estimate",
+      "handler": "estimate",
+      "priority": 100
+    }
+  ]
+}

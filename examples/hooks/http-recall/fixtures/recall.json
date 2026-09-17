@@ -1,0 +1,15 @@
+{
+  "name": "appends-recalled-notes",
+  "trigger": {
+    "input": {"prompt": "热换怎么设计的?"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "http": [{"status": 200, "body": "热换归分代热换装单,状态保留另有合同。"}],
+  "expect": {
+    "kind": "completed",
+    "contextAppends": ["知识库补充材料:\n热换归分代热换装单,状态保留另有合同。"],
+    "terminalRuns": 1,
+    "records": {"PostUser/knowledge.recall_http": {"outcome": "completed", "nextCalls": 1}}
+  }
+}
