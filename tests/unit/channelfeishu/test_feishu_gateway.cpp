@@ -396,7 +396,14 @@ TEST_CASE("feishu_gateway: 读超时 2×interval+5s 判死线(半开连接拆除
         return event.kind == FeishuGatewayEvent::Kind::Disconnected &&
                event.error_code == "read_timeout";
     }, 12'000));
-    CHECK(harness.bootstrap_count.load() >= 2);  // 断线重连重新引导
+    // 断线重连重新引导:退避(压毫秒)后第二轮引导——慢机上不是瞬时,
+    // 有界等而不是裸 CHECK(W1 并库后测试机更满,裸断言输过竞态)。
+    const auto bootstrap_deadline = platform::WallClockNowMs() + 4'000;
+    while (platform::WallClockNowMs() < bootstrap_deadline &&
+           harness.bootstrap_count.load() < 2) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(harness.bootstrap_count.load() >= 2);
 }
 
 // ---------------------------------------------------------------------------
