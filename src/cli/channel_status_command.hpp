@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include "channel/channel_config.hpp"
+#include "channel/ingress_store.hpp"
 
 namespace lubancode::cli {
 
@@ -46,10 +47,12 @@ ChannelStatusVerdict JudgeChannelStatus(const nlohmann::json* snapshot,
                                         std::int64_t now_ms,
                                         const std::function<bool(unsigned long)>& is_alive);
 
-// ---- 四步状态(QQBot Windows 修复单 §5.1 末条,Q1b) ------------------------
-// 配置已存 / QQ 在线 / 身份已配对 / 模型能回复——如实分栏,哪步卡住指
+// ---- 四步状态(QQBot Windows 修复单 §5.1 末条,Q1b;P1 修订) ---------------
+// 配置已存 / QQ 在线 / 身份已配对 / 模型配置齐全——如实分栏,哪步卡住指
 // 哪步。输入是各探针的只读结果(纯逻辑,测试直接喂);探针本身在
 // RunChannelStatusCommand 里做(全局配置/连接快照/pairing 账/模型配置)。
+// P1(静默失败单):第四步只报"配置齐全",另报最近真实执行结局(账号
+// ingress 账 + dead-letter 旁路账)——配置齐全不能冒充"模型能回复"。
 struct ChannelFourStateInput {
     // 第一步:全局配置里这只账号已存(在册且启用、AppID 与凭据来源都配了)。
     bool account_configured = false;
@@ -57,7 +60,8 @@ struct ChannelFourStateInput {
     // 第二步:连接快照裁决(在线 = connected 且进程活且新鲜)。
     bool online = false;
     std::string online_detail;  // 未在线时的摘要(阶段/最近失败;可空)
-    // 第三步:配对账只读投影(已批准/待批准计数)。
+    // 第三步:配对账只读投影(已批准/待批准计数)。账号级计数,不冒充
+    // "当前来信身份已获批"——单条来信放不放行看准入策略与配对范围。
     bool pairing_present = false;
     bool pairing_parse_ok = true;
     std::size_t pairing_approved = 0;
@@ -66,14 +70,53 @@ struct ChannelFourStateInput {
     // config::RequireConfigured 过没过,不重造判据)。
     bool model_configured = false;
     std::string model_detail;  // 未配齐时缺什么(可空)
+    // 最近真实执行结局(账号 ingress 账只读投影;没跑过 = present=false,
+    // 不拿配置冒充调用成功)。
+    bool recent_turn_present = false;
+    bool recent_turn_ok = false;
+    std::string recent_turn_detail;   // 失败时的稳定原因(截断;可空)
+    std::int64_t recent_turn_at_ms = 0;
+    std::int64_t recent_turn_sid = 0;
 };
 struct ChannelFourStateView {
-    std::vector<std::string> lines;  // 四行,固定次序(配置→在线→配对→模型)
+    std::vector<std::string> lines;  // 状态行(四步 + 最近执行结局行)
     nlohmann::json report;           // --json 用的 four_state 对象
 };
 ChannelFourStateView BuildChannelFourState(const std::string& channel_id,
                                            const std::string& account_id,
                                            const ChannelFourStateInput& input);
+
+// 从最近来信链取"最近真实执行结局"(P1:CLI channel status 与助理页面
+// 两副面孔共用同一份判据——配置齐全不冒充能回复)。链 sid 降序,第一枚
+// "执行过"的来信(绑过场或死信/已回)即最近结局。
+void DeriveRecentTurnOutcome(const channel::ChannelIngressRecentChain& chain,
+                             ChannelFourStateInput* input);
+
+// ---- 最近来信链(P1:来信→准入→执行→投递,不手翻 JSONL) ------------------
+// 输入是三本账的只读投影(ingress 链/outbox 段/work 绑定),纯逻辑拼行;
+// 探针在 RunChannelStatusCommand 里做。
+struct ChannelRecentChainInput {
+    bool ledger_present = false;
+    std::vector<channel::ChannelIngressRecentEntry> ingress;  // sid 降序
+    // 投递段(outbox 只读投影里按 source_ref 前缀筛出的)。
+    struct Delivery {
+        std::int64_t sid = 0;
+        bool is_failure_notice = false;  // source_ref 前缀 turnfail:(失败提示)
+        std::string state;               // pending|sending|sent|delivered|
+                                         // delivery_unknown|failed|flagged
+        std::string delivery_error;      // failed/unknown 时的稳定码
+        std::uint32_t ordinal = 0;
+    };
+    std::vector<Delivery> deliveries;
+    // 执行绑定(work ledger 只读投影:sid -> V3 场 id)。
+    std::map<std::int64_t, std::string> bound_sessions;
+};
+struct ChannelRecentChainView {
+    std::vector<std::string> lines;
+    nlohmann::json report;  // --json 用的 recent_chain 数组
+};
+ChannelRecentChainView BuildChannelRecentChain(const ChannelRecentChainInput& input,
+                                               std::size_t limit);
 
 // ---- 配置探针(W3 起与助理页面共用;判据单一真源) --------------------------
 // 读配置文件的 channels 段并解析(只读;文件不在/读不懂/channels 段坏都

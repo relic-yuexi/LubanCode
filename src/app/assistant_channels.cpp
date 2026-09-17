@@ -130,6 +130,10 @@ nlohmann::json AssistantChannelFace::BuildAccountProjection(
     } else {
         four_state.model_detail = "本实例未提供模型探针";
     }
+    // 最近真实执行结局(P1:与 CLI channel status 同一份判据——ingress 账
+    // 只读投影,不拿"配置齐全"冒充"能回复")。
+    cli::DeriveRecentTurnOutcome(channel::ReadChannelIngressRecentChain(account_dir, 32),
+                                 &four_state);
 
     const cli::ChannelFourStateView four =
         cli::BuildChannelFourState(channel_id, account_id, four_state);

@@ -9,15 +9,18 @@
 //   3) QQ 超时未知/明确拒绝/重复回执/限频;发送重试不重跑 Agent。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "api/anthropic/client.hpp"
 #include "channel/manager.hpp"
 #include "channel/types.hpp"
 #include "fake_channel_sidecar.hpp"
@@ -80,6 +83,13 @@ public:
     CaptureBackend(std::filesystem::path counter, std::vector<std::vector<api::StreamEvent>> scripts)
         : counter_(std::move(counter)), scripts_(std::move(scripts)) {}
 
+    // 指定 wire 序列化器(P0 刀一案:四家 wire 历史回传形状;空 = 旧行为,
+    // SerializeForDiagnostics 回空、adapter 预算闸不启用)。
+    std::function<nlohmann::json(const api::Request&)> wire_json;
+    std::string SerializeForDiagnostics(const api::Request& request) const override {
+        return wire_json ? wire_json(request).dump() : std::string();
+    }
+
     std::expected<void, api::Error> send_stream(
         const api::Request& request,
         const std::function<void(const api::StreamEvent&)>& on_event,
@@ -141,6 +151,30 @@ std::vector<api::StreamEvent> TextScript(const std::string& text) {
         api::MessageStart{"msg", "test-model"},
         api::TextDelta{text},
         api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{}},
+    };
+}
+
+// P0 刀一案:带签名的 thinking + 正文(anthropic wire 续会话回传的形状;
+// 思考正文用固定占位串,不留真实思考内容)。
+std::vector<api::StreamEvent> ThinkingTextScript(const std::string& sig, const std::string& text) {
+    return {
+        api::MessageStart{"msg", "test-model"},
+        api::ThinkingDelta{"[脱敏思考占位]", sig},
+        api::ContentBlockDone{0},
+        api::TextDelta{text},
+        api::ContentBlockDone{1},
+        api::MessageDone{"end_turn", api::Usage{}},
+    };
+}
+
+// 真无法预算的输入:加密思考块(anthropic redacted_thinking)。
+std::vector<api::StreamEvent> RedactedThinkingTextScript(const std::string& text) {
+    return {
+        api::MessageStart{"msg", "test-model"},
+        api::RedactedThinking{"opaque-redacted-payload"},
+        api::TextDelta{text},
+        api::ContentBlockDone{1},
         api::MessageDone{"end_turn", api::Usage{}},
     };
 }
@@ -1148,4 +1182,292 @@ TEST_CASE("Q4 发件闭环:长回复拆段,末段带任务结果文件发回") {
     REQUIRE(content == long_reply);
     // 全段终态:ingress delivered。
     REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
+}
+
+// ---------------------------------------------------------------------------
+// QQBot 配对后第二轮静默失败单:P0 刀一(预算误伤)+ P0 刀二(失败用户
+// 零感知)。现场病:anthropic wire 真机,第二轮纯文本死信
+// turn_failed: context.unestimated_media_or_reasoning,QQ 端"在线却不回"。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P0 刀一:anthropic wire 思考签名历史回传不误伤,三轮纯文本连聊全过") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("think-replay");
+    fixture.scripts = {ThinkingTextScript("sig-r1", "第一答:记住了。"),
+                       TextScript("第二答。"), TextScript("第三答。")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+    // 真适配器序列化(anthropic wire):adapter 预算闸真开。
+    fixture.backend->wire_json = [](const api::Request& request) {
+        return api::anthropic::BuildRequestJson(request);
+    };
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+
+    // 旧病现场:第二轮纯文本带 thinking+signature 历史回传,曾被预算闸拦死。
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 2);
+    REQUIRE(fixture.IngressStateNameOf(2) == "delivered");
+
+    fixture.EmitAndIngest(MakeDm("in-3", "pe-3", "dm-a", "第三问", "m-3"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 3);
+    REQUIRE(fixture.IngressStateNameOf(3) == "delivered");
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);
+}
+
+TEST_CASE("P0 刀一·保护保留:redacted thinking 历史照旧拒收,不填 0 放行") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("redacted-keep");
+    fixture.scripts = {RedactedThinkingTextScript("第一答。"), TextScript("第二答。")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+    fixture.backend->wire_json = [](const api::Request& request) {
+        return api::anthropic::BuildRequestJson(request);
+    };
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
+
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    // 第二轮没发往模型(本地拦下),死信如账。
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    REQUIRE(fixture.IngressStateNameOf(2) == "dead_letter");
+}
+
+TEST_CASE("P0 刀二·窗一:预算拒绝 → 死信 + 用户提示(E-CTX1),脱敏且不刷屏") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("turnfail-ctx");
+    fixture.scripts = {RedactedThinkingTextScript("第一答。"), TextScript("第二答。")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+    fixture.backend->wire_json = [](const api::Request& request) {
+        return api::anthropic::BuildRequestJson(request);
+    };
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.IngressStateNameOf(2) == "dead_letter");  // 执行失败事实不改写
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);     // 不重跑
+    // 用户提示投出:第二条 send 是失败提示,带短编号与下一步,不带内部
+    // 报错/字段值(脱敏)。
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    const std::string notice =
+        fixture.sidecar.sent_messages()[1].params.at("parts")[0].at("text").get<std::string>();
+    CHECK(notice.find("[未回复说明]") != std::string::npos);
+    CHECK(notice.find("E-CTX1") != std::string::npos);
+    CHECK(notice.find("unestimated_media_or_reasoning") == std::string::npos);
+    CHECK(notice.find("opaque-redacted-payload") == std::string::npos);
+    // 幂等:再 tick 不再入箱不再发(同 sid 同 deliveryId)。
+    fixture.TickUntilQuiet();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    // outbox:提示段有独立来源审计前缀,与正文段分账。
+    bool saw_turnfail_ref = false;
+    for (const auto& item : fixture.outbox->ListItems()) {
+        if (item.source_ref == "turnfail:qqbot:main:2") {
+            saw_turnfail_ref = true;
+            CHECK(item.state == "sent");
+        }
+    }
+    CHECK(saw_turnfail_ref);
+}
+
+TEST_CASE("P0 刀二·窗二:模型调用失败 → 死信 + 用户提示(E-NET1)") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture fixture("turnfail-net");
+    // 脚本只备一轮:第二条消息时后端报 Api 错(模拟超时/服务端错)。
+    fixture.scripts = {TextScript("第一答。")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
+
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.IngressStateNameOf(2) == "dead_letter");
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    const std::string notice =
+        fixture.sidecar.sent_messages()[1].params.at("parts")[0].at("text").get<std::string>();
+    CHECK(notice.find("E-NET1") != std::string::npos);
+    CHECK(notice.find("script exhausted") == std::string::npos);  // 内部报错不出 QQ
+}
+
+TEST_CASE("P0 刀二·窗三:崩溃窗口恢复的死信也提示(E-RVW1),重复恢复不刷屏") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture::Params params;
+    params.send_timeout_ms = 300;
+    {
+        Q2Fixture fixture("turnfail-rvw", params);
+        // 不开泵:取件(claim → Running)后"进程死"——claim 后、绑定行前。
+        fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "问题", "m-1"));
+        REQUIRE(fixture.manager->TakeNextWork("qqbot", "main").has_value());
+    }
+    {
+        Q2Fixture fixture("turnfail-rvw", params, /*rebuild=*/true);
+        auto registry = fixture.MakeRegistry();
+        REQUIRE(fixture.OpenPump(registry).ok);
+        fixture.Tick();
+        fixture.TickUntilQuiet();
+        REQUIRE(fixture.IngressStateNameOf(1) == "dead_letter");
+        REQUIRE(CountOf(fixture.counter_file, "model") == 0);  // 不盲重跑
+        // 用户提示:挂起待核对(E-RVW1)。
+        REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+        const std::string notice =
+            fixture.sidecar.sent_messages()[0].params.at("parts")[0].at("text").get<std::string>();
+        CHECK(notice.find("E-RVW1") != std::string::npos);
+        CHECK(notice.find("needs_review") == std::string::npos);  // 稳定码之外不出内部词
+        // 重复恢复不刷屏:死信是终态,幂等入箱。
+        fixture.TickUntilQuiet();
+        fixture.TickUntilQuiet();
+        REQUIRE(fixture.sidecar.sent_messages().size() == 1);
+    }
+}
+
+TEST_CASE("P0 刀二·窗四:提示回执丢失 → delivery_unknown,两层失败本地可查,不重跑") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture::Params params;
+    params.send_timeout_ms = 300;
+    Q2Fixture fixture("turnfail-receipt", params);
+    fixture.scripts = {RedactedThinkingTextScript("第一答。")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+    fixture.backend->wire_json = [](const api::Request& request) {
+        return api::anthropic::BuildRequestJson(request);
+    };
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.IngressStateNameOf(1) == "delivered");
+    // 回执从这起丢(Silent:不应答 → 超时 delivery_unknown)。
+    fixture.sidecar.set_send_script(FakeChannelSidecar::SendScript::Silent);
+
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    // 层一:执行失败(死信);层二:提示投递结果未知(停自动重发)。
+    REQUIRE(fixture.IngressStateNameOf(2) == "dead_letter");
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    const std::string notice_delivery = fixture.sidecar.sent_messages()[1].client_id;
+    REQUIRE(fixture.sidecar.send_count_for(notice_delivery) == 1);
+    bool saw_notice_unknown = false;
+    for (const auto& item : fixture.outbox->ListItems()) {
+        if (item.source_ref == "turnfail:qqbot:main:2") {
+            saw_notice_unknown = true;
+            CHECK(item.state == "delivery_unknown");
+        }
+    }
+    CHECK(saw_notice_unknown);
+    // 后续 tick:不重跑模型、不重发提示。
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 1);
+    REQUIRE(fixture.sidecar.send_count_for(notice_delivery) == 1);
+}
+
+TEST_CASE("P0 刀二:失败提示的发送身份走 A05 持久分配器,与正文段同账同规则") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q2Fixture::Params params;
+    params.send_timeout_ms = 300;
+    Q2Fixture fixture("turnfail-seq", params);
+    // 第一轮长回复(拆两文本段 + 一枚附件末段,同锚 m-1:seq 1、2、3);
+    // 第二轮失败 → 提示(锚 m-2:seq 1)。四枚身份同一只 (账号,锚) 分配器,
+    // 各自账上可查。
+    fixture.scripts = {RedactedThinkingTextScript(std::string(2600, 'a')), TextScript("x")};
+    auto registry = fixture.MakeRegistry();
+    REQUIRE(fixture.OpenPump(registry).ok);
+    fixture.backend->wire_json = [](const api::Request& request) {
+        return api::anthropic::BuildRequestJson(request);
+    };
+
+    fixture.EmitAndIngest(MakeDm("in-1", "pe-1", "dm-a", "第一问", "m-1"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    // 拆段帽 2000 字节:2600 字节 → 2 文本段;附件(Q4)独占一枚空文本
+    // 末段 → 共 3 段 3 发。
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);
+    fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "第二问", "m-2"));
+    fixture.Tick();
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.sidecar.sent_messages().size() == 4);
+
+    // A05 身份账:同锚下按段序递增;提示段按自己的锚从 1 起——同一只
+    // 分配器,不旁路(ListItems 是 map 序,按 ordinal 排回段序)。
+    std::vector<gateway::ReplyOutboxItem> reply_items;
+    std::string notice_delivery_id;
+    for (const auto& item : fixture.outbox->ListItems()) {
+        if (item.source_ref == "ingress:qqbot:main:1") {
+            reply_items.push_back(item);
+        } else if (item.source_ref == "turnfail:qqbot:main:2") {
+            notice_delivery_id = item.delivery_id;
+        }
+    }
+    REQUIRE(reply_items.size() == 3);
+    REQUIRE_FALSE(notice_delivery_id.empty());
+    std::sort(reply_items.begin(), reply_items.end(),
+              [](const gateway::ReplyOutboxItem& a, const gateway::ReplyOutboxItem& b) {
+                  return a.ordinal < b.ordinal;
+              });
+    for (std::size_t i = 0; i < reply_items.size(); ++i) {
+        const auto identity = fixture.outbox->FindLiveChannelSendIdentity(reply_items[i].delivery_id);
+        REQUIRE(identity.has_value());
+        CHECK(identity->anchor_msg_id == "m-1");
+        CHECK(identity->msg_seq == i + 1);
+    }
+    const auto notice_identity = fixture.outbox->FindLiveChannelSendIdentity(notice_delivery_id);
+    REQUIRE(notice_identity.has_value());
+    CHECK(notice_identity->anchor_msg_id == "m-2");
+    CHECK(notice_identity->msg_seq == 1);
+}
+
+TEST_CASE("P0 刀二:MakeTurnFailureNotice 脱敏映射钉字") {
+    using runtime::MakeTurnFailureNotice;
+    // 预算拒绝 → E-CTX1。
+    CHECK(MakeTurnFailureNotice("gateway.turn_failed",
+                                "context.unestimated_media_or_reasoning: ...").short_code ==
+          "E-CTX1");
+    // 窗口超限 → E-CTX2。
+    CHECK(MakeTurnFailureNotice("gateway.turn_failed",
+                                "context.adapter_input_exceeds_capacity: ...").short_code ==
+          "E-CTX2");
+    CHECK(MakeTurnFailureNotice("gateway.turn_failed",
+                                "上下文预检未通过:输入约 ...").short_code == "E-CTX2");
+    // 其余模型失败 → E-NET1;会话/受理/回执/挂起/取消/未知各归各位。
+    CHECK(MakeTurnFailureNotice("gateway.turn_failed", "boom").short_code == "E-NET1");
+    CHECK(MakeTurnFailureNotice("gateway.launch_failed", "x").short_code == "E-SES1");
+    CHECK(MakeTurnFailureNotice("gateway.requires_v3", "x").short_code == "E-SES1");
+    CHECK(MakeTurnFailureNotice("gateway.input_rejected", "x").short_code == "E-INT1");
+    CHECK(MakeTurnFailureNotice("selection.artifact_failed", "x").short_code == "E-RPL1");
+    CHECK(MakeTurnFailureNotice("gateway.reply_unavailable", "x").short_code == "E-RPL1");
+    CHECK(MakeTurnFailureNotice("needs_review", "needs_review:v3_stream_not_found").short_code ==
+          "E-RVW1");
+    CHECK(MakeTurnFailureNotice("gateway.turn_failed", "user cancelled").short_code == "E-CNL1");
+    CHECK(MakeTurnFailureNotice("whatever", "x").short_code == "E-OTH1");
+    // 脱敏:内部报错(路径/密钥样)一个字不进文案。
+    const auto notice = MakeTurnFailureNotice(
+        "gateway.turn_failed", "connect to https://secret.example/keys?token=ABC failed");
+    CHECK(notice.text.find("secret.example") == std::string::npos);
+    CHECK(notice.text.find("ABC") == std::string::npos);
 }

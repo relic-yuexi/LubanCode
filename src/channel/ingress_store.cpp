@@ -649,4 +649,118 @@ ChannelIngressProjection ReadChannelIngressProjection(const std::filesystem::pat
     return projection;
 }
 
+// ---------------------------------------------------------------------------
+// 最近来信链的只读投影(P1:channel status 链视图;零建目录零写盘)
+// ---------------------------------------------------------------------------
+
+ChannelIngressRecentChain ReadChannelIngressRecentChain(const std::filesystem::path& account_dir,
+                                                        std::size_t limit) {
+    ChannelIngressRecentChain chain;
+    if (limit == 0) {
+        return chain;
+    }
+    const std::filesystem::path journal = account_dir / "ingress" / "journal.jsonl";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(journal, ec) || ec) {
+        return chain;
+    }
+    chain.ledger_present = true;
+    struct EntryState {
+        ChannelIngressRecentEntry entry;
+        bool seen = false;
+    };
+    // 全量重放(账可能很长,但状态机轻;只留最近 limit 枚的窗口裁剪在
+    // 收尾做——tr 行可能落在 evt 行之后很久,窗口须按最终态裁)。
+    std::vector<EntryState> records;
+    std::map<std::int64_t, std::size_t> index_by_sid;
+    std::ifstream stream(journal, std::ios::binary);
+    std::string text_line;
+    while (std::getline(stream, text_line)) {
+        if (text_line.empty()) continue;
+        nlohmann::json parsed;
+        try {
+            parsed = nlohmann::json::parse(text_line);
+        } catch (const nlohmann::json::exception&) {
+            continue;  // 半行/坏行:与 replay 同一容错
+        }
+        if (!parsed.is_object() || !parsed.contains("t") || !parsed["t"].is_string() ||
+            !parsed.contains("sid") || !parsed["sid"].is_number_integer()) {
+            continue;
+        }
+        const std::string type = parsed["t"].get<std::string>();
+        const std::int64_t sid = parsed["sid"].get<std::int64_t>();
+        if (type == "evt") {
+            if (index_by_sid.count(sid) > 0) continue;  // 同 sid 重落:首笔为准
+            EntryState state;
+            state.seen = true;
+            state.entry.sid = sid;
+            state.entry.state = IngressEventStateName(IngressEventState::Durable);
+            if (parsed.contains("event") && parsed.at("event").is_object()) {
+                const nlohmann::json& event = parsed.at("event");
+                if (event.contains("received_at_ms") && event.at("received_at_ms").is_number_integer()) {
+                    state.entry.received_at_ms = event.at("received_at_ms").get<std::int64_t>();
+                }
+                if (event.contains("conversation") && event.at("conversation").is_object() &&
+                    event.at("conversation").contains("id") &&
+                    event.at("conversation").at("id").is_string()) {
+                    state.entry.conversation_id =
+                        event.at("conversation").at("id").get<std::string>();
+                }
+                if (event.contains("sender") && event.at("sender").is_object() &&
+                    event.at("sender").contains("id") &&
+                    event.at("sender").at("id").is_string()) {
+                    state.entry.sender_id = event.at("sender").at("id").get<std::string>();
+                }
+            }
+            index_by_sid[sid] = records.size();
+            records.push_back(std::move(state));
+        } else if (type == "tr") {
+            const auto found = index_by_sid.find(sid);
+            if (found == index_by_sid.end()) continue;
+            if (!parsed.contains("to") || !parsed["to"].is_string()) continue;
+            const auto to = IngressEventStateFromName(parsed["to"].get<std::string>());
+            if (!to.has_value()) continue;
+            records[found->second].entry.state = IngressEventStateName(*to);
+            if (parsed.contains("reason") && parsed["reason"].is_string()) {
+                records[found->second].entry.reason = parsed["reason"].get<std::string>();
+            }
+        }
+    }
+    // dead-letter 旁路账:补死信时间(它才有 at_ms;journal 行不带时间戳)。
+    const std::filesystem::path dead_letter = account_dir / "ingress" / "dead-letter.jsonl";
+    if (std::filesystem::is_regular_file(dead_letter, ec) && !ec) {
+        std::ifstream dead_stream(dead_letter, std::ios::binary);
+        std::string dead_line;
+        while (std::getline(dead_stream, dead_line)) {
+            if (dead_line.empty()) continue;
+            ++chain.dead_letter_count;
+            nlohmann::json parsed;
+            try {
+                parsed = nlohmann::json::parse(dead_line);
+            } catch (const nlohmann::json::exception&) {
+                continue;
+            }
+            if (!parsed.is_object() || !parsed.contains("sid") ||
+                !parsed["sid"].is_number_integer()) {
+                continue;
+            }
+            const std::int64_t sid = parsed["sid"].get<std::int64_t>();
+            const auto found = index_by_sid.find(sid);
+            if (found == index_by_sid.end()) continue;
+            if (parsed.contains("at_ms") && parsed.at("at_ms").is_number_integer()) {
+                records[found->second].entry.dead_letter_at_ms = parsed.at("at_ms").get<std::int64_t>();
+            }
+        }
+    }
+    // 最近 limit 枚(sid 降序)。
+    const std::size_t begin =
+        records.size() > limit ? records.size() - limit : 0;
+    for (std::size_t i = records.size(); i-- > begin;) {
+        if (records[i].seen) {
+            chain.entries.push_back(std::move(records[i].entry));
+        }
+    }
+    return chain;
+}
+
 }  // namespace lubancode::channel

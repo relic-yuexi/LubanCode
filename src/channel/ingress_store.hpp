@@ -209,4 +209,26 @@ struct ChannelIngressProjection {
 };
 ChannelIngressProjection ReadChannelIngressProjection(const std::filesystem::path& account_dir);
 
+// 最近来信链的只读投影(QQBot 静默失败单 P1:channel status 不手翻 JSONL
+// 就能看见 来信→准入→执行 的最近账)。同一份 journal 重放逻辑,保留每枚
+// 事件的最终状态与最近迁移原因;dead-letter 旁路账一并重放(它才有 at_ms
+// ——journal 的 evt/tr 行不带时间戳,来信时间取事件自带的 received_at_ms)。
+// 正文/密钥一概不带:只有 sid、状态、原因、时间与会话/发件人标识。
+struct ChannelIngressRecentEntry {
+    std::int64_t sid = 0;
+    std::string state;          // 最终状态名(dead_letter/rejected/...)
+    std::string reason;         // 最近迁移原因(稳定名;可空)
+    std::int64_t received_at_ms = 0;   // 来信时间(evt 行事件自带)
+    std::int64_t dead_letter_at_ms = 0;  // 死信时间(旁路账;非死信为 0)
+    std::string conversation_id;
+    std::string sender_id;
+};
+struct ChannelIngressRecentChain {
+    bool ledger_present = false;
+    std::size_t dead_letter_count = 0;
+    std::vector<ChannelIngressRecentEntry> entries;  // 最近 limit 条,sid 降序
+};
+ChannelIngressRecentChain ReadChannelIngressRecentChain(const std::filesystem::path& account_dir,
+                                                        std::size_t limit);
+
 }  // namespace lubancode::channel

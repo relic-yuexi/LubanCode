@@ -2,6 +2,7 @@
 #include "cli/channel_status_command.hpp"
 
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <istream>
@@ -11,7 +12,10 @@
 #include "channel/channel_config.hpp"
 #include "channel/manager.hpp"
 #include "channel/pairing.hpp"
+#include "channel/work_ledger.hpp"
 #include "config/config.hpp"
+#include "gateway/profile.hpp"
+#include "gateway/reply_outbox.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "platform/wall_clock.hpp"
@@ -19,6 +23,30 @@
 namespace lubancode::cli {
 
 namespace {
+
+// 时间短说(只读投影用):UTC 秒级展示,不引本地时区依赖;0/坏值如实报。
+std::string FormatRecentTurnTime(std::int64_t at_ms) {
+    if (at_ms <= 0) {
+        return "时间未知";
+    }
+    const std::time_t seconds = static_cast<std::time_t>(at_ms / 1000);
+    std::tm tm_buffer{};
+#ifdef _WIN32
+    const std::tm* tm_value = gmtime_s(&tm_buffer, &seconds) == 0 ? &tm_buffer : nullptr;
+#else
+    const std::tm* tm_value = gmtime_r(&seconds, &tm_buffer);
+#endif
+    if (tm_value == nullptr) {
+        return "时间未知";
+    }
+    char buffer[40] = {0};
+    if (std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d UTC",
+                      tm_value->tm_year + 1900, tm_value->tm_mon + 1, tm_value->tm_mday,
+                      tm_value->tm_hour, tm_value->tm_min, tm_value->tm_sec) <= 0) {
+        return "时间未知";
+    }
+    return buffer;
+}
 
 // 快照字段的安全读取(json 缺键一律 contains(),const operator[] 查缺键
 // 是 UB——纪律第 6 条)。
@@ -173,21 +201,151 @@ ChannelFourStateView BuildChannelFourState(const std::string& channel_id,
         report["paired"] = false;
     }
 
-    // 4) 模型能回复(沿 #85 assistant config/status 的 configured 面)。
+    // 4) 模型配置齐全(P1 修订:沿 #85 的 configured 面,只报配置;"能回复"
+    //    是执行结局,不由配置冒充——另起一行报最近真实调用)。
     if (input.model_configured) {
-        view.lines.push_back("4. 模型能回复:是");
+        view.lines.push_back("4. 模型配置齐全:是");
         report["model_ready"] = true;
     } else {
         std::string detail =
             input.model_detail.empty() ? std::string("模型配置不完整") : input.model_detail;
-        view.lines.push_back("4. 模型能回复:否——" + detail);
+        view.lines.push_back("4. 模型配置齐全:否——" + detail);
         view.lines.push_back("   下一步: lubancode assistant 页面里配模型(config/model/set),"
                              "或检查全局配置的 provider/model/api key");
         report["model_ready"] = false;
         report["model_detail"] = detail;
     }
+    // 最近真实执行结局(账号 ingress 账 + dead-letter 旁路账;配置齐全
+    // 不等于真的能回复——第二三轮静默失败正是栽在这句话上)。
+    if (input.recent_turn_present) {
+        report["recent_turn_ok"] = input.recent_turn_ok;
+        report["recent_turn_sid"] = input.recent_turn_sid;
+        report["recent_turn_at_ms"] = input.recent_turn_at_ms;
+        if (!input.recent_turn_detail.empty()) {
+            report["recent_turn_detail"] = input.recent_turn_detail;
+        }
+        view.lines.push_back(
+            std::string("5. 最近真实调用:") + (input.recent_turn_ok ? "成功" : "失败") + "(来信 sid=" +
+            std::to_string(input.recent_turn_sid) + "," +
+            FormatRecentTurnTime(input.recent_turn_at_ms) + ")" +
+            (input.recent_turn_ok || input.recent_turn_detail.empty()
+                 ? std::string()
+                 : "——" + input.recent_turn_detail));
+    } else {
+        view.lines.push_back("5. 最近真实调用:还没有(这只账号没跑过模型轮;配置齐全不代表"
+                             "调用会成功)");
+        report["recent_turn_ok"] = nullptr;
+    }
 
     view.report = std::move(report);
+    return view;
+}
+
+// ---- 最近来信链(P1:来信→准入→执行→投递) -----------------------------------
+
+void DeriveRecentTurnOutcome(const channel::ChannelIngressRecentChain& chain,
+                             ChannelFourStateInput* input) {
+    for (const auto& entry : chain.entries) {
+        // 链 sid 降序:第一枚"执行过"的来信(绑过场或死信/已回)即最近结局。
+        const bool executed = entry.state == "dead_letter" || entry.state == "replied" ||
+                              entry.state == "delivered" || entry.state == "delivery_failed" ||
+                              entry.state == "completed_without_reply";
+        if (!executed) {
+            continue;
+        }
+        input->recent_turn_present = true;
+        input->recent_turn_ok = entry.state != "dead_letter";
+        input->recent_turn_sid = entry.sid;
+        input->recent_turn_at_ms =
+            entry.state == "dead_letter" && entry.dead_letter_at_ms > 0
+                ? entry.dead_letter_at_ms
+                : entry.received_at_ms;
+        if (!input->recent_turn_ok) {
+            std::string reason = entry.reason;
+            if (reason.size() > 160) {
+                reason.resize(160);
+                reason += "…";
+            }
+            input->recent_turn_detail = reason;
+        }
+        return;
+    }
+}
+
+namespace {
+
+// 段状态的中文短说(pending/sending 归"在途")。
+std::string DeliveryStateText(const std::string& state) {
+    if (state == "sent" || state == "delivered") return "已送达";
+    if (state == "failed" || state == "flagged") return "投递失败";
+    if (state == "delivery_unknown") return "投递结果未知(超时)";
+    if (state == "sending") return "发送中";
+    return "待发送";
+}
+
+}  // namespace
+
+ChannelRecentChainView BuildChannelRecentChain(const ChannelRecentChainInput& input,
+                                               std::size_t limit) {
+    ChannelRecentChainView view;
+    nlohmann::json entries = nlohmann::json::array();
+    if (!input.ledger_present) {
+        view.lines.push_back("最近来信链:还没有来信账(没人给机器人发过消息)");
+        view.report = entries;
+        return view;
+    }
+    view.lines.push_back("最近来信链(最新在前,至多 " + std::to_string(limit) + " 条):");
+    std::size_t shown = 0;
+    for (const auto& entry : input.ingress) {
+        if (shown >= limit) break;
+        ++shown;
+        nlohmann::json report = nlohmann::json::object();
+        report["sid"] = entry.sid;
+        report["state"] = entry.state;
+        report["received_at_ms"] = entry.received_at_ms;
+        if (!entry.reason.empty()) report["reason"] = entry.reason;
+        if (!entry.conversation_id.empty()) report["conversation_id"] = entry.conversation_id;
+        std::string line = "  sid=" + std::to_string(entry.sid) + " [" + entry.state + "] 来信 " +
+                           FormatRecentTurnTime(entry.received_at_ms != 0
+                                                     ? entry.received_at_ms
+                                                     : entry.dead_letter_at_ms);
+        // 准入:旁路终态(rejected/rate_limited/unsupported)即准入面失败。
+        if (entry.state == "rejected" || entry.state == "rate_limited" ||
+            entry.state == "unsupported") {
+            line += " 准入:未过(" + entry.state + ")";
+        } else {
+            line += " 准入:已过";
+        }
+        // 执行:work 绑定在 = 真开过场;dead_letter 的 reason 是执行败因。
+        const auto bound = input.bound_sessions.find(entry.sid);
+        if (entry.state == "dead_letter") {
+            line += " 执行:失败";
+            if (!entry.reason.empty()) {
+                line += "(" + entry.reason + ")";
+                report["reason"] = entry.reason;
+            }
+        } else if (bound != input.bound_sessions.end()) {
+            line += " 执行:已绑场(" + bound->second + ")";
+        } else {
+            line += " 执行:未见绑定";
+        }
+        // 投递:正文段(ingress:)与失败提示段(turnfail:)分说。
+        for (const auto& delivery : input.deliveries) {
+            if (delivery.sid != entry.sid) continue;
+            line += delivery.is_failure_notice ? " 失败提示:" + DeliveryStateText(delivery.state)
+                                               : " 投递:" + DeliveryStateText(delivery.state);
+            if (!delivery.delivery_error.empty() &&
+                (delivery.state == "failed" || delivery.state == "delivery_unknown")) {
+                line += "(" + delivery.delivery_error + ")";
+            }
+        }
+        view.lines.push_back(std::move(line));
+        entries.push_back(std::move(report));
+    }
+    if (shown == 0) {
+        view.lines.push_back("  (账在,还没有事件)");
+    }
+    view.report = std::move(entries);
     return view;
 }
 
@@ -332,20 +490,101 @@ int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
     } else {
         four_state.model_detail = "配置装载失败: " + model_config.error();
     }
+    // 最近真实执行结局 + 来信链(P1):账号三本账只读投影(ingress 链 +
+    // dead-letter 旁路账 + outbox 段 + work 绑定)。零建目录零写盘。
+    const std::filesystem::path account_dir = channels_root / args.channel_id / args.account_id;
+    const auto recent_chain = channel::ReadChannelIngressRecentChain(account_dir, 32);
+    DeriveRecentTurnOutcome(recent_chain, &four_state);
     const ChannelFourStateView four = BuildChannelFourState(args.channel_id, args.account_id,
                                                             four_state);
+    // 链视图的投递段:gateway 各 profile 的 outbox 只读投影按来源前缀筛
+    //(ingress: 正文段;turnfail: 失败提示段——两层失败都在这能看见)。
+    ChannelRecentChainInput chain_input;
+    chain_input.ledger_present = recent_chain.ledger_present;
+    chain_input.ingress = recent_chain.entries;
+    const std::string ingress_prefix =
+        "ingress:" + args.channel_id + ":" + args.account_id + ":";
+    const std::string turnfail_prefix =
+        "turnfail:" + args.channel_id + ":" + args.account_id + ":";
+    std::error_code list_ec;
+    const std::filesystem::path profiles_dir = channels_root.parent_path() / "gateway" / "profiles";
+    if (channels_root.has_parent_path() &&
+        std::filesystem::is_directory(profiles_dir, list_ec) && !list_ec) {
+        std::error_code iter_ec;
+        for (const auto& profile_entry :
+             std::filesystem::directory_iterator(profiles_dir, iter_ec)) {
+            if (iter_ec || !profile_entry.is_directory()) {
+                continue;
+            }
+            const std::filesystem::path outbox_log =
+                profile_entry.path() / "delivery" / "outbox.jsonl";
+            std::error_code file_ec;
+            if (!std::filesystem::is_regular_file(outbox_log, file_ec) || file_ec) {
+                continue;
+            }
+            const auto projection = gateway::ReadOutboxProjection(outbox_log);
+            for (const auto& item_pair : projection.items) {
+                const gateway::ReplyOutboxItem& item = item_pair.second;
+                const std::string& ref = item.source_ref;
+                const bool is_ingress = ref.rfind(ingress_prefix, 0) == 0;
+                const bool is_turnfail = ref.rfind(turnfail_prefix, 0) == 0;
+                if (!is_ingress && !is_turnfail) {
+                    continue;
+                }
+                const std::string sid_text =
+                    ref.substr((is_ingress ? ingress_prefix : turnfail_prefix).size());
+                std::int64_t sid = 0;
+                bool digits = !sid_text.empty() && sid_text.size() < 20;
+                for (const char c : sid_text) {
+                    if (c < '0' || c > '9') {
+                        digits = false;
+                        break;
+                    }
+                }
+                if (!digits) {
+                    continue;
+                }
+                sid = std::stoll(sid_text);
+                ChannelRecentChainInput::Delivery delivery;
+                delivery.sid = sid;
+                delivery.is_failure_notice = is_turnfail;
+                delivery.state = item.state;
+                delivery.delivery_error = item.delivery_error;
+                delivery.ordinal = item.ordinal;
+                chain_input.deliveries.push_back(std::move(delivery));
+            }
+        }
+    }
+    // 执行绑定:work ledger 只读(文件在才开,零建目录)。
+    const std::filesystem::path work_ledger_file = account_dir / "work.jsonl";
+    if (std::filesystem::is_regular_file(work_ledger_file, list_ec) && !list_ec) {
+        channel::ChannelWorkLedger work_ledger;
+        if (channel::ChannelWorkLedger::Open(&work_ledger, work_ledger_file).ok) {
+            for (const auto& entry : chain_input.ingress) {
+                const auto bound = work_ledger.FindBound(entry.sid);
+                if (bound.has_value()) {
+                    chain_input.bound_sessions.emplace(entry.sid, bound->session_id);
+                }
+            }
+        }
+    }
+    const ChannelRecentChainView chain = BuildChannelRecentChain(chain_input, 8);
 
     if (args.json) {
         nlohmann::json report = verdict.report;
         report["four_state"] = four.report;
+        report["recent_chain"] = chain.report;
         std::printf("%s\n", report.dump().c_str());
     } else {
-        std::printf("%s/%s 四步状态:\n", args.channel_id.c_str(), args.account_id.c_str());
+        std::printf("%s/%s 状态:\n", args.channel_id.c_str(), args.account_id.c_str());
         for (const std::string& line : four.lines) {
             std::printf("%s\n", line.c_str());
         }
         std::printf("连接明细:\n");
         for (const std::string& line : verdict.lines) {
+            std::printf("%s\n", line.c_str());
+        }
+        for (const std::string& line : chain.lines) {
             std::printf("%s\n", line.c_str());
         }
     }

@@ -88,7 +88,61 @@ TEST_CASE("all adapter input families retain their selected input fields") {
 TEST_CASE("media and opaque reasoning require a separate capacity policy") {
     CHECK(api::HasUnestimatedInput(nlohmann::json{{"type", "image_url"}, {"image_url", "data:image/png;base64,AAAA"}}));
     CHECK(api::HasUnestimatedInput(nlohmann::json{{"inlineData", {{"data", "AAAA"}}}}));
-    CHECK(api::HasUnestimatedInput(nlohmann::json{{"type", "thinking"}, {"signature", "opaque"}}));
+    CHECK(api::HasUnestimatedInput(nlohmann::json{{"type", "redacted_thinking"}, {"data", "opaque"}}));
+    CHECK(api::HasUnestimatedInput(nlohmann::json{{"type", "reasoning"}, {"encrypted_content", "opaque"}}));
     CHECK_FALSE(api::HasUnestimatedInput(nlohmann::json{{"type", "tool_use"}, {"input", {{"type", "image"}}}}));
     CHECK_FALSE(api::HasUnestimatedInput(nlohmann::json{{"tools", {{{"type", "image"}}}}}));
+}
+
+// QQBot 静默失败单 P0 刀一:四类内容的分类口径。anthropic wire 第二轮把
+// 带 signature 的 thinking 历史回传——签名元数据(防重放必需、体积有界)
+// 不再误伤成"不可估算";真媒体/加密思考照旧拒收。
+TEST_CASE("signature metadata is measurable and no longer trips the unestimated gate") {
+    // 第 2 类:thinking 块带签名(anthropic 续会话回传的协议必需形状)。
+    CHECK_FALSE(api::HasUnestimatedInput(
+        nlohmann::json{{"type", "thinking"}, {"thinking", "想了一段"}, {"signature", "sig-opaque"}}));
+    CHECK_FALSE(api::HasUnestimatedInput(
+        nlohmann::json{{"type", "thinking"}, {"thinking", "想了一段"}, {"signature", ""}}));
+    CHECK_FALSE(api::HasUnestimatedInput(
+        nlohmann::json{{"type", "thinking"}, {"thinking", "想了一段"}, {"signature", nullptr}}));
+    // gemini 的 thoughtSignature 同族(适配器现行不回传,口径先钉住)。
+    CHECK_FALSE(api::HasUnestimatedInput(
+        nlohmann::json{{"text", "正文"}, {"thoughtSignature", "sig-opaque"}}));
+    // 豁免不是填 0:字节进估算器的账(估算器数全 JSON 字节)。
+    const nlohmann::json snapshot = nlohmann::json{{"messages", nlohmann::json::array(
+        {nlohmann::json{{"role", "assistant"}, {"content", nlohmann::json::array(
+            {nlohmann::json{{"type", "thinking"}, {"thinking", "想了一段"}, {"signature", "sig-opaque"}}})}}})}};
+    const auto diagnosis = api::DiagnoseUnestimatedInput(snapshot);
+    CHECK_FALSE(diagnosis.refused());
+    CHECK(diagnosis.signature_metadata_fields == 1);
+    CHECK(diagnosis.signature_metadata_bytes == std::string("sig-opaque").size());
+}
+
+TEST_CASE("oversized or malformed signature fields stay refused") {
+    const std::string oversized(api::kSignatureMetadataBudgetBytes + 1, 's');
+    CHECK(api::HasUnestimatedInput(
+        nlohmann::json{{"type", "thinking"}, {"thinking", "t"}, {"signature", oversized}}));
+    CHECK(api::HasUnestimatedInput(
+        nlohmann::json{{"type", "thinking"}, {"signature", nlohmann::json::array({"a", "b"})}}));
+}
+
+TEST_CASE("unestimated diagnosis reports structure and counts, never values") {
+    const nlohmann::json snapshot = nlohmann::json{
+        {"messages", nlohmann::json::array({
+            nlohmann::json{{"role", "user"}, {"content", "纯文本"}},
+            nlohmann::json{{"role", "assistant"}, {"content", nlohmann::json::array({
+                nlohmann::json{{"type", "redacted_thinking"}, {"data", "SECRET-BLOB"}},
+            })}},
+        })},
+    };
+    const auto diagnosis = api::DiagnoseUnestimatedInput(snapshot);
+    REQUIRE(diagnosis.findings.size() == 1);
+    CHECK(diagnosis.findings[0].kind == "encrypted_reasoning");
+    CHECK(diagnosis.findings[0].block_type == "redacted_thinking");
+    CHECK(diagnosis.findings[0].key == "type");
+    CHECK(diagnosis.findings[0].path.find("messages[1]") != std::string::npos);
+    const std::string summary = diagnosis.Summary();
+    CHECK(summary.find("findings=1") != std::string::npos);
+    CHECK(summary.find("encrypted_reasoning") != std::string::npos);
+    CHECK(summary.find("SECRET-BLOB") == std::string::npos);  // 不记字段值
 }
