@@ -6,7 +6,7 @@ LubanCode 要在宿主界面里打开网页、操作页面、看截图与 Consol
 
 一句话：**Runtime 是本事，Package 是装法。**
 
-本文是冻结合同。谁持有浏览器状态、谁画界面、谁翻协议、谁装箱子，一概照此办理；实现者不必翻设计 TODO，也不会把 Runtime 塞回 Package 或 MCP handler。设计出处见 `todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`。
+本文是冻结合同。谁持有浏览器状态、谁画界面、谁翻协议、谁装箱子，一概照此办理；实现者不必翻设计 TODO，也不会把 Runtime 塞回 Package 或 MCP handler。设计出处见 原设计单(已归档)。
 
 ## 1. 四层各守一摊
 

@@ -66,7 +66,7 @@ Markdown，不把正文拆成 `goal/context/scope/acceptance/deliverable`，也�
 `task` 参数仍可读取、展示与导出，但不可重放成新调用。
 
 `solutions/` 只作教程、配方、样例集合，不进运行时类型系统。Package 外壳见
-`todos/统一Package封装与组件挂载系统设计.todo`（`docs/packages.md` 落纸后以它为准）。
+原设计单(已归档)（`docs/packages.md` 落纸后以它为准）。
 
 ### 1.2 派工任务书六件套模板
 
@@ -583,7 +583,7 @@ Package 的 `agents/` 目录里，每份 Agent 一只 `.yaml`，格式与本页�
 - Package manifest 不重抄组件清单，也不得借清单放宽本页任何一条权限规矩。
 - 整包校验有一处错，Agent 与同包其余组件一件也不挂载。
 
-规矩全文见 `todos/统一Package封装与组件挂载系统设计.todo`。
+规矩全文见 原设计单(已归档)。
 
 ## 12. 夹具
 

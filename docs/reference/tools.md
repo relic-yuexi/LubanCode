@@ -54,7 +54,7 @@
 - 配置 `legacy_expand` 字面量改为报错指路（`proxy_reference` 或 `disabled`）；
 - 测试：`test_tool_search.cpp` 的 legacy 册、`test_request_prefix.cpp` 的 P0 现状回归册（使命是钉住现状，路删了它随之改判成"确认已删"）、`test_tool_runtime_deferral.cpp` 的 loaded 断言。
 
-这份清单同时钉在 `todos/动态工具PromptCache守恒与按需调用设计.todo` 的 P4 条目上。
+这份清单同时钉在 原设计单(已归档) 的 P4 条目上。
 
 ## 可用性总表
 

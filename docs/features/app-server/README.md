@@ -6,6 +6,12 @@
 
 `lubancode app-server` 是无界面后台入口:前端从 stdin 发 JSON-RPC 请求,后台在项目机上读文件、改代码、跑命令,再从 stdout 把正文、工具进度、审批、diff 与结果一笔笔传回来。SSH 只管架通道,活计全落在远端。
 
+### 与 Gateway、IM 的边界
+
+AppServer 让自建应用用同一套请求与事件协议调用 Agent。Gateway 则接渠道消息与自动任务：平台适配器通过 `lubancode-channel/1` Channel Bridge 交消息、取回复。两者共用 SessionService 等执行能力，但 Gateway 当前不通过 AppServer RPC 执行任务；这两套入口协议不能合称一套协议。
+
+拟新增的 `lubancode im` 负责平台选择、账号配置和启动，再复用 Gateway 运行所选账号。该入口尚未实现；它不会新增一套 Agent 执行器，也不改变 AppServer 协议。设计见 IM 入口与协议边界(见对应设计单)。
+
 ```text
 本机 LubanCode 前端
     │ 消息 / 审批 / 打断 / 进度
