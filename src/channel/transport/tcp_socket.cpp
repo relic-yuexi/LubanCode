@@ -1,4 +1,4 @@
-#include "channel/qq/qq_socket.hpp"
+#include "channel/transport/tcp_socket.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -27,7 +27,7 @@ using socklen_t = int;
 #include <unistd.h>
 #endif
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 namespace {
 
@@ -309,4 +309,4 @@ void ShutdownNativeFd(std::int64_t fd) {
     ::shutdown(static_cast<NativeSocket>(fd), 2 /* SD_BOTH / SHUT_RDWR */);
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

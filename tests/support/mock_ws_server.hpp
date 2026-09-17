@@ -1,6 +1,6 @@
 // MockWsServer(QQ 机器人接入单 Q1 的测试夹具):本机回环 WebSocket 服务端。
 //
-// 给 src/channel/qq 的自实现 WS 客户端当对端——真 socket、真升级握手
+// 给自实现 WS 客户端(transport 层)与渠道网关测试当对端——真 socket、真升级握手
 // (算 Sec-WebSocket-Accept)、真帧收发;另留 SendRaw 注原始字节,半帧/
 // 粘帧/坏帧全可注入。TLS 路用 mbedTLS 服务端 + 测试内生成的自签证书
 // (MockTlsServer),与客户端共享同一份 CA PEM——握手是 mbedTLS 真握手,

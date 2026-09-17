@@ -36,7 +36,7 @@ public:
         std::vector<std::string> connect_urls;
         std::vector<std::string> incoming;          // 待吐脚本(测试可动态追加)
         std::size_t incoming_cursor = 0;
-        WsError exhausted_error{WsError::Kind::Timeout, "script exhausted", 0};
+        transport::WsError exhausted_error{transport::WsError::Kind::Timeout, "script exhausted", 0};
         bool fail_connect = false;
     };
 
@@ -58,7 +58,7 @@ public:
         return {};
     }
 
-    std::expected<std::string, WsError> ReadMessage(int timeout_ms) override {
+    std::expected<std::string, transport::WsError> ReadMessage(int timeout_ms) override {
         (void)timeout_ms;
         const std::lock_guard<std::mutex> lock(shared_->mutex);
         if (shared_->incoming_cursor < shared_->incoming.size()) {
@@ -316,7 +316,7 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
         R"({"op":0,"s":5,"t":"READY","d":{"session_id":"sess-rp","user":{"id":"b"}}})");
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
-        harness.shared->exhausted_error = WsError{WsError::Kind::Closed, "peer closed", 1000};
+        harness.shared->exhausted_error = transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
     }
     harness.Start();
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -329,7 +329,7 @@ TEST_CASE("qq_gateway: Resume 补发流——业务事件先行派发,RESUMED �
     // 完脚本就断线——否则晚推的 RESUMED 会落成新连接首帧(非 HELLO)被吞。
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
-        harness.shared->exhausted_error = WsError{WsError::Kind::Timeout, "script exhausted", 0};
+        harness.shared->exhausted_error = transport::WsError{transport::WsError::Kind::Timeout, "script exhausted", 0};
     }
     FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
     FakeTransport::PushIncoming(harness.shared, C2cDispatch(6, "M-R1"));
@@ -384,7 +384,7 @@ TEST_CASE("qq_gateway: 只有补发没有 RESUMED——总期限超时,不误报
         R"({"op":0,"s":3,"t":"READY","d":{"session_id":"sess-nr","user":{"id":"b"}}})");
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
-        harness.shared->exhausted_error = WsError{WsError::Kind::Closed, "peer closed", 1000};
+        harness.shared->exhausted_error = transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
     }
     harness.Start();
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -396,7 +396,7 @@ TEST_CASE("qq_gateway: 只有补发没有 RESUMED——总期限超时,不误报
     //(第一轮用 Closed 断线):鉴权窗静默必须折成总期限超时,不是读断线。
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
-        harness.shared->exhausted_error = WsError{WsError::Kind::Timeout, "script exhausted", 0};
+        harness.shared->exhausted_error = transport::WsError{transport::WsError::Kind::Timeout, "script exhausted", 0};
     }
     FakeTransport::PushIncoming(harness.shared, HelloPayload(30'000));
     FakeTransport::PushIncoming(harness.shared, C2cDispatch(4, "M-NR"));
@@ -612,7 +612,7 @@ TEST_CASE("qq_gateway: 断线退避后 Resume 携带 session_id+seq;RESUMED 事�
     // 然后直接断线(exhausted_error 默认 Timeout 改成 Closed)。
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
-        harness.shared->exhausted_error = WsError{WsError::Kind::Closed, "peer closed", 1000};
+        harness.shared->exhausted_error = transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
     }
     harness.Start();
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -655,7 +655,7 @@ TEST_CASE("qq_gateway: Invalid Session d=true 保留会话再 Resume;d 缺失清
         {
             const std::lock_guard<std::mutex> lock(harness.shared->mutex);
             harness.shared->exhausted_error =
-                WsError{WsError::Kind::Closed, "peer closed", 1000};
+                transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
         }
         harness.Start();
         REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -694,7 +694,7 @@ TEST_CASE("qq_gateway: Invalid Session d=true 保留会话再 Resume;d 缺失清
         {
             const std::lock_guard<std::mutex> lock(harness.shared->mutex);
             harness.shared->exhausted_error =
-                WsError{WsError::Kind::Closed, "peer closed", 1000};
+                transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
         }
         harness.Start();
         REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -752,7 +752,7 @@ TEST_CASE("qq_gateway: Invalid Session 不可恢复——清 session,下轮重�
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
         harness.shared->exhausted_error =
-            WsError{WsError::Kind::Closed, "peer closed", 1000};
+            transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
     }
     harness.Start();
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
@@ -910,7 +910,7 @@ TEST_CASE("qq_gateway: READY 前失败发 ConnectFailed;在线后断线发 Disco
     {
         const std::lock_guard<std::mutex> lock(harness.shared->mutex);
         harness.shared->exhausted_error =
-            WsError{WsError::Kind::Closed, "peer closed", 1000};
+            transport::WsError{transport::WsError::Kind::Closed, "peer closed", 1000};
     }
     REQUIRE(harness.WaitForEvent([](const GatewayEvent& e) {
         return e.kind == GatewayEvent::Kind::Disconnected && e.stage == kStageConnected &&
@@ -1069,8 +1069,8 @@ public:
             cancelled.load() ? "cancelled while connecting" : "refused"});
     }
     std::expected<void, std::string> SendText(const std::string&) override { return {}; }
-    std::expected<std::string, WsError> ReadMessage(int) override {
-        return std::unexpected(WsError{WsError::Kind::Timeout, "script exhausted", 0});
+    std::expected<std::string, transport::WsError> ReadMessage(int) override {
+        return std::unexpected(transport::WsError{transport::WsError::Kind::Timeout, "script exhausted", 0});
     }
     void Cancel() override {
         ++cancel_calls;
@@ -1097,7 +1097,7 @@ TEST_CASE("qq_gateway: A08 外部 Cancel 打断建立中的连接(共享所有�
             std::expected<void, std::string> SendText(const std::string& text) override {
                 return inner_->SendText(text);
             }
-            std::expected<std::string, WsError> ReadMessage(int timeout_ms) override {
+            std::expected<std::string, transport::WsError> ReadMessage(int timeout_ms) override {
                 return inner_->ReadMessage(timeout_ms);
             }
             void Cancel() override { inner_->Cancel(); }

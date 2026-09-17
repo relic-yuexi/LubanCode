@@ -11,15 +11,15 @@
 
 #include <string>
 
-#include "channel/qq/qq_tls.hpp"
+#include "channel/transport/tls.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 namespace {
-// 说明:合法 PEM 的解析计数路径由 test_qq_ws_client.cpp 的真握手用例覆
+// 说明:合法 PEM 的解析计数路径由 test_ws_client.cpp 的真握手用例覆
 // 盖(自签 CA 注入 + 信任锚不匹配拒握手);本册钉纯映射与解析决策。
 }  // namespace
 
-TEST_CASE("qq_tls: 验证 flags -> 稳定码映射(主机名>过期>不信任>兜底)") {
+TEST_CASE("tls: 验证 flags -> 稳定码映射(主机名>过期>不信任>兜底)") {
     CHECK(TlsVerifyFlagsToCode(MBEDTLS_X509_BADCERT_CN_MISMATCH) == kTlsCodeCertHostnameMismatch);
     CHECK(TlsVerifyFlagsToCode(MBEDTLS_X509_BADCERT_EXPIRED) == kTlsCodeCertExpired);
     CHECK(TlsVerifyFlagsToCode(MBEDTLS_X509_BADCERT_NOT_TRUSTED) == kTlsCodeCertNotTrusted);
@@ -33,14 +33,14 @@ TEST_CASE("qq_tls: 验证 flags -> 稳定码映射(主机名>过期>不信任>�
     CHECK(TlsVerifyFlagsToCode(0) == kTlsCodeCertVerifyFailed);
 }
 
-TEST_CASE("qq_tls: 握手错误码映射——超时独立成码,其余归 handshake_failed") {
+TEST_CASE("tls: 握手错误码映射——超时独立成码,其余归 handshake_failed") {
     CHECK(TlsHandshakeCodeToCode(MBEDTLS_ERR_SSL_TIMEOUT) == kTlsCodeHandshakeTimeout);
     CHECK(TlsHandshakeCodeToCode(MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE) ==
           kTlsCodeHandshakeFailed);
     CHECK(TlsHandshakeCodeToCode(0) == kTlsCodeHandshakeFailed);
 }
 
-TEST_CASE("qq_tls: ResolveChannelTrustRoots——explicit 优先且不回退,无效明报") {
+TEST_CASE("tls: ResolveChannelTrustRoots——explicit 优先且不回退,无效明报") {
     // 非法 PEM(非空但解析失败):source 仍 explicit,error 非空(明报,不
     // 静默退回平台来源——§四);报 load_failed 不报 empty(§三:非空解析
     // 失败带真实负码)。
@@ -63,7 +63,7 @@ TEST_CASE("qq_tls: ResolveChannelTrustRoots——explicit 优先且不回退,无
     CHECK_FALSE(detect_called);
 }
 
-TEST_CASE("qq_tls: ResolveChannelTrustRoots——空显式走平台默认(探测 seam 只归 Unix 路)") {
+TEST_CASE("tls: ResolveChannelTrustRoots——空显式走平台默认(探测 seam 只归 Unix 路)") {
     bool detect_called = false;
     const ResolvedTrustStore resolved = ResolveChannelTrustRoots("", [&detect_called]() {
         detect_called = true;
@@ -86,7 +86,7 @@ TEST_CASE("qq_tls: ResolveChannelTrustRoots——空显式走平台默认(探测
 #endif
 }
 
-TEST_CASE("qq_tls: ResolveChannelTrustRoots——探测到但文件打不开/读不懂明报") {
+TEST_CASE("tls: ResolveChannelTrustRoots——探测到但文件打不开/读不懂明报") {
     const ResolvedTrustStore unreadable = ResolveChannelTrustRoots("", []() {
         return std::string("/definitely/not/here/ca.pem");
     });
@@ -100,9 +100,9 @@ TEST_CASE("qq_tls: ResolveChannelTrustRoots——探测到但文件打不开/读
 #endif
 }
 
-TEST_CASE("qq_tls: DetectSystemCaPemPath 在本进程不崩(返回值不定,只验调用)") {
+TEST_CASE("tls: DetectSystemCaPemPath 在本进程不崩(返回值不定,只验调用)") {
     const std::string path = DetectSystemCaPemPath();
     CHECK(path.size() <= 260);  // 没有异常/崩溃即过;具体值随环境
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

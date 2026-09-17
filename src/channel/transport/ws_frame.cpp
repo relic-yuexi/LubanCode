@@ -1,9 +1,9 @@
-#include "channel/qq/ws_frame.hpp"
+#include "channel/transport/ws_frame.hpp"
 
 #include <array>
 #include <cstring>
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 namespace {
 
@@ -243,4 +243,4 @@ std::expected<std::optional<WsFrameEvent>, WsFrameError> WsFrameDecoder::Consume
     return event;
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

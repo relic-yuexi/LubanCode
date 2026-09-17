@@ -1,0 +1,165 @@
+# 飞书与企业微信接入：双长连接适配器设计
+
+日期：2026-09-17。源码基线：`8130ab28`（main）。状态：设计定稿；R0/F1/W1 待实现，复选框不得当作已可用。
+前置研究：2026-09-17 对照 OpenClaw 渠道文档（微信=腾讯闭源 iLink 插件，不可复刻；飞书=官方开放 API）+ 本仓渠道架构探查 + 飞书 Go SDK（larksuite/oapi-sdk-go v3_main `ws/` 包源码逐文件拆阅）+ 企微官方长连接文档。协议细节以本文钉死的真源为准，实现时再核。
+
+真源清单：
+- 飞书长连接协议：larksuite/oapi-sdk-go `v3_main` 分支 `ws/` 包（const.go / model.go / pbbp2.pb.go / client.go / client_session.go / client_message.go / client_lifecycle.go / client_transport.go）。实现时锁 commit。
+- 飞书事件订阅：https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case
+- 飞书发消息/凭据：/open-apis/im/v1/messages、/open-apis/auth/v3/tenant_access_token/internal（REST，官方文档）。
+- 企微智能机器人长连接：https://developer.work.weixin.qq.com/document/path/101463 ；接收消息 path/100719；主动回复 path/101138。
+
+## 一、定案
+
+1. **两家都走 WebSocket 长连接，进程内直连**。沿 QQ Q1 定案：适配器编进宿主可执行，实现 `ChannelBridgeTransport` 字节面（src/channel/manager.hpp:67），无 sidecar 子进程、无 Node、无外部运行时。
+2. **不等阶段 7 webhook 底座**。企微 2026 年起官方支持智能机器人长连接（免公网 IP、免域名、免消息加解密），架构 README §9 阶段表须同步修订：飞书、企微均归 WS 渠道线；webhook 底座只留给真要公网回调的平台（LINE/Zalo 等）。
+3. **个人微信仍为死路**（iLink 闭源插件），不占本单。
+4. 渠道 id：`feishu`（channel_setup.cpp 注册表已占位）、`wecombot`（新增行）。
+5. **首版范围**：文本进、文本出（企微回 markdown，飞书回 text；企微 voice 回调自带转写文本，白捡）。群聊两家默认 `group_policy=disabled`。媒体收发、卡片、流式、欢迎语、主动推送全部后置（§十）。
+6. 复用 QQ 的全部形态定案：一只网关线程 + 一只发送线程；入站先落 spool 再 ACK；发送冻结 msg 锚与重试；账号锁拦重复连接。
+
+## 二、家底与复用
+
+| 组件 | 位置 | 判断 |
+| --- | --- | --- |
+| `ChannelBridgeTransport`（WriteToSidecar/DrainFromSidecar） | src/channel/manager.hpp:67-72 | 唯一缝，两只适配器各实现一份 |
+| 宿主路由/准入/会话/outbox/配对/审批/菜单分派 | src/channel/*、src/runtime/*、src/gateway/* | 平台无关，零改动 |
+| 配置 schema（app_id/secret_env/secret_file/dm_policy/group_policy/reply...） | src/channel/channel_config.hpp:186-209 | 零改动，直接映射（企微 BotID 存进 `app_id` 字段，语义在模板与文档写明） |
+| 状态根 `<root>/channels/<ch>/<acct>/` | manager.hpp:52 | 自动落位 |
+| 传输底座四件 ws_frame/qq_socket/qq_tls/qq_ws_client | src/channel/qq/ | 本就平台无关，R0 升共享层 |
+| `kImplementedChannelId` 单值门 | src/app/channel_gateway_wiring.cpp:25 | R0 注册表化 |
+| 媒体下载 seam + channel_turn_workers 绑 qq | src/gateway/gateway_launch.cpp:220-229 | R0 改注册制（该处注释自认"多渠道之后再改"） |
+| mock WS 服务端 / TLS 服务端 | tests/support/mock_ws_server.* | 飞书/企微网关测试直接复用 |
+
+## 三、批次
+
+```text
+R0 注册表化+底座共享层（前置，合并后）
+  ├─ F1 飞书适配器（worktree 并行）
+  └─ W1 企微适配器（worktree 并行）
+F2/W2 真机联调+媒体+主动推送（后立小单，不在本单勾）
+```
+
+## 四、R0：注册表化与底座共享层（纯重构，QQ 零行为变化）
+
+- [ ] `src/app/channel_gateway_wiring.cpp:25` `kImplementedChannelId` 单值判断退场，改**渠道工厂注册表**（channel_id → 进程内适配器工厂）；qq 注册进表；未注册渠道照旧记 `skipped`（"no in-process adapter implemented"），语义不变。
+- [ ] `src/app/im_entry.cpp` 的"认得渠道"文案（L57、L340 一带）改从注册表取，单一真源。
+- [ ] `src/gateway/gateway_launch.cpp:220-229`：媒体下载 seam、`channel_turn_workers` 装配改按注册渠道走注册制；qq 注册自己的件，行为不变。
+- [ ] 新层 `src/channel/transport/`：`ws_frame`、`qq_socket`、`qq_tls`、`qq_ws_client` 四件迁入并去 `qq_` 前缀（文件名、类名、命名空间中性化，照现有命名风格）；`qq_adapter`/`qq_gateway` 改 include；纯搬家零逻辑变化。CMakeLists 源清单同步。
+- [ ] 测试册随迁：transport 相关册（ws_frame/ws_client/tls_errors/tls_trust_load 及 qq_socket 相关）从 `tests/unit/channelqq/` 移到 `tests/unit/channeltransport/`，ctest 名随之变（一次性记档）；协议/适配器册留 channelqq。tests/ 目录即清单自动 glob，无需手登。
+- [ ] 既有 21 册 channel + 15 册 channelqq（迁移后约 11 册 + transport 4 册）全绿，QQ 行为零变化。
+- 验收：CI 头提交 rollup=success；平台码规矩 windows-msvc 腿绿才合。
+
+## 五、飞书协议细账（F1）
+
+### 5.1 引导（拿 WSS 地址）
+
+JSON `POST https://open.feishu.cn/callback/ws/endpoint`，body `{"AppID":..., "AppSecret":..., "ClientAssertion":""}` → `{"code":0,"msg":"","data":{"URL":"wss://...","ClientConfig":{"ReconnectCount":-1,"ReconnectInterval":120,"ReconnectNonce":30,"PingInterval":120}}}`。业务码：0 OK；1 SystemBusy；1000040343 InternalError。URL 查询参数里服务端已拼好 `device_id`（connID）与 `service_id`。
+
+### 5.2 连接与握手失败
+
+WS 拨 `data.URL`，消息全走 BinaryMessage。升级失败从 HTTP 响应头取：`Handshake-Status`（514=AuthFailed，403=Forbidden，缺省回退 HTTP 码）、`Handshake-Msg`、`Handshake-Autherrcode`（1000040350=ExceedConnLimit）。客户端错（凭据/超限）**不可重试**，服务端错可重试。
+
+### 5.3 帧（protobuf pbbp2，自实现编解码）
+
+```text
+Header { key=1 string, value=2 string }            // 皆 required
+Frame  { SeqID=1 uint64, LogID=2 uint64, service=3 int32,
+         method=4 int32,             // 0=控制帧 1=数据帧
+         headers=5 repeated Header,
+         payload_encoding=6 string?, payload_type=7 string?,
+         payload=8 bytes?, LogIDNew=9 string? }
+```
+
+varint / length-delimited 标准 wire 格式；解析侧 1-4 缺失即坏帧。照 `ws_frame` 纯函数风格自写 `feishu_frame` 编解码 + 字节样例单测。
+
+### 5.4 心跳
+
+激活连接即发一枚 ping（控制帧：headers `{"type":"ping"}`，service=serviceID 数值）；此后按 `PingInterval`（默认 120s；服务端可经 pong 载荷下发的 ClientConfig JSON 覆盖）。pong 载荷空=纯保活；非空=配置更新。**读超时 = 2×pingInterval + 5s**，每收一帧重置——半开连接靠它拆。
+
+### 5.5 事件帧与重组
+
+数据帧 headers 携带 `type`（event/card）、`message_id`、`sum`/`seq`、`trace_id`、`timestamp`。`sum>1` 时按 `message_id` 缓存分片 5 秒拼装（缺片到期静默弃）；首版只认 event，card 静默丢弃（记日志）。载荷 JSON 为飞书事件 v2：`{"schema":"2.0","header":{"event_id","event_type","create_time","token","app_id","tenant_key"},"event":{...}}`。
+
+### 5.6 ACK（3 秒红线）
+
+handler 返回后回帧：**复用原帧**（method/service/SeqID 保留），headers 原样加 `biz_rt`（处理毫秒差），payload=JSON `{"code":200,"headers":{},"data":null}`；handler 失败回 500（平台会重推，manager 去重兜底）。3 秒内未回即触发超时重推。我们 handler = Map+spool 落盘+emit 通知，远在红线内——纪律同 QQ 收信落盘。
+
+### 5.7 im.message.receive_v1 事件体
+
+`event.message{message_id, chat_id, chat_type(p2p/group), message_type, content(嵌 JSON 字符串，text 时 {"text":"..."}), create_time}`；`event.sender.sender_id{open_id,union_id,user_id}`、`sender.sender_type`。映射：sender=`open_id`；`chat_type=p2p`→kind=dm；text→text part；其余 message_type 首版映成标注 unsupported 的占位 part。
+
+### 5.8 凭据与发送（REST）
+
+- `tenant_access_token`：`POST /open-apis/auth/v3/tenant_access_token/internal {"app_id","app_secret"}`，约 2 小时过期。照 `QqTokenManager` 单飞刷新，提前 5 分钟。
+- 回话：`POST /open-apis/im/v1/messages/{message_id}/reply`，Bearer token，body `{"msg_type":"text","content":"{\"text\":...}"}`。锚 message_id（同 QQ msg_id 锚）。超长走 outbox 既有拆段。
+- HTTP 经 `src/net/http_transport` 底座，照 `QqHttpFunc` 一行适配 seam。
+
+### 5.9 重连
+
+凭据类客户端错（AuthFailed/Forbidden/ExceedConnLimit）不重试、账面明确报错；其余无限重连，退避对齐 `QqGatewaySession` 既有 1s..60s 序列（SDK 默认 2min 固定+30s 首试抖动仅作参考，不入码）。
+
+### 5.10 域名与用户侧准备
+
+首版仅 `open.feishu.cn`（larksuite 后置）。用户侧：企业自建应用、事件订阅选"使用长连接接收事件"、订阅 `im.message.receive_v1`、开通发消息权限、发布应用版本。写入 setup 向导文案。
+
+## 六、企微协议细账（W1）
+
+### 6.1 连接与订阅
+
+`wss://openws.work.weixin.qq.com`，WS 升级后即发 JSON 文本帧：
+
+```json
+{"cmd":"aibot_subscribe","headers":{"req_id":"..."},"body":{"bot_id":"...","secret":"..."}}
+```
+
+响应透传 `headers.req_id`、`errcode`（0 成功）、`errmsg`。订阅有频率保护，勿重发。**每 bot 同时仅一连接**，新连踢旧连（旧连收 `disconnected_event` 后断开）——账号锁既有合同拦住。
+
+### 6.2 帧总式与心跳
+
+一切帧皆 JSON 文本：`cmd` + `headers.req_id` + `body`。每 30s 发 `{"cmd":"ping","headers":{"req_id":"..."}}`，响应 errcode=0；久无心跳被服务端断开，自行检测重连。
+
+### 6.3 入站 `aibot_msg_callback`
+
+body：`msgid`（排重键，manager 既有去重按事件 id 吃下）、`aibotid`、`chatid`（仅群聊）、`chattype`（single/group）、`from.userid`（机器人创建者为超管则明文，否则加密——**原样作身份键，不试图解密**）、`msgtype`、可选 `quote`。类型首版处理：`text`（text.content）、`voice`（voice.content 已转写文本，白捡）、`mixed`（msg_item 抽 text 项）；`image`/`file`/`video` 映占位 part，下载归 W2。
+
+### 6.4 入站 `aibot_event_callback`
+
+`event.eventtype`：`enter_chat`/`template_card_event`/`feedback_event`/`disconnected_event`。首版只记日志不入模型。
+
+### 6.5 出站 `aibot_respond_msg`
+
+**透传回调的 `headers.req_id`**，24 小时窗内可回。首版 `msgtype=markdown`（content ≤20480 字节 UTF-8）。注意：用户与同一 bot **最多 3 条消息并发交互**——宿主同会话单飞天然配合，账面记档。频率：单会话回复+推送合计 30 条/分钟、1000 条/小时，发送线程记账限流。
+
+### 6.6 后置件（W2 立单）
+
+媒体下载（URL 5 分钟有效 + AES-256-CBC：aeskey 前 16 字节作 IV、PKCS#7 填至 32 字节倍数）；分片上传三步 init/chunk(≤512KB base64)/finish、media_id 3 天（图 10M/语音 2M/视频 10M/文件 20M）；主动推送 `aibot_send_msg`（chatid/userid+chat_type，自动化任务渠道投递要用）；`enter_chat` 欢迎语 5 秒窗；模板卡片；流式 stream（6 分钟）。
+
+### 6.7 用户侧准备
+
+管理后台智能机器人开 **API 模式选长连接**，拿 BotID + Secret（长连接专用，与回调模式 Token/AESKey 互斥）。写入 setup 向导文案。
+
+## 七、配置与 setup
+
+- [ ] `MakeFeishuTemplateAccount()`（channel_config.cpp）：app_id + secret_env（`FEISHU_APP_SECRET`）+ dm_policy=pairing + group_policy=disabled + allow_bots=false + reply.mode=final。照 QQ 模板五可选项对齐，configuration.md §7 补 JSON 样例。
+- [ ] `MakeWecombotTemplateAccount()`：app_id **存 BotID** + secret_env（`WECOMBOT_SECRET`）+ 其余同上。
+- [ ] channel_setup.cpp：`feishu` 行翻 `implemented=true`（凭据字段 App ID/App Secret）；新增 `wecombot` 行（凭据字段 BotID/Secret）。
+- [ ] 密钥规矩全沿 Q0：secret_file > secret_env > inline、绝对路径/归属/权限检查、不进 argv/日志/模型输入。
+
+## 八、测试账（全零外联）
+
+- [ ] feishu：`test_feishu_frame.cpp`（pbbp2 编解码字节样例）；`test_feishu_proto.cpp`（事件体映射/发送体构造/错误分型）；`test_feishu_gateway.cpp`（mock_ws_server 演：引导→帧→ping/pong→事件→ACK→拆包重组→重连）；`test_feishu_adapter.cpp`（桥字节面/spool/线程模型，照 test_qq_adapter）；`test_feishu_wiring.cpp`（注册表装配）。
+- [ ] wecombot：同构四册（proto/gateway/adapter/wiring），mock 演：subscribe→ping→msg_callback→respond→踢连。
+- [ ] `fake_channel_sidecar` 留给未来 conformance suite，不硬凑进本单。
+
+## 九、验收与纪律（每批同此）
+
+- **禁止本地 build/configure/ctest**——写完码即推分支交 CI，判绿只认 rollup.conclusion；平台码须 windows-msvc 腿绿才合。
+- worktree 从 `origin/main` 开工，开工先 fetch+merge main；git 命令一律显式 `cd /d/lubancode`（或 worktree 根）开头；不绕过 worktree 改主树。
+- push 不通走本机代理 `git -c http.proxy=http://127.0.0.1:10808`；PR 开 `relic-yuexi/LubanCode`；合前先 pull。
+- 合并遵五步纪律；每批合并即 patch+1。
+- 架构文档同步：channels/README §9 阶段表（飞书/企微归 WS 渠道线）、"后面加飞书怎么做"节落成现实、configuration.md 样例、security.md 若涉新凭据面。
+
+## 十、不做清单（首版明确不做）
+
+个人微信（iLink 闭源死路）；飞书交互卡片/富文本 post/语音/群 @/larksuite 海外域；企微模板卡片/流式/欢迎语/媒体收发/主动推送；两家的 webhook 回调模式；多账号热切换与配置热更新（沿首版"改配置须重启"）。

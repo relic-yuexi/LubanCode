@@ -5,9 +5,9 @@
 #include <cstring>
 #include <string>
 
-#include "channel/qq/ws_frame.hpp"
+#include "channel/transport/ws_frame.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 namespace {
 
 const std::uint8_t kMask[4] = {0x01, 0x02, 0x03, 0x04};
@@ -293,4 +293,4 @@ TEST_CASE("ws_frame: 分片进行中来新数据帧是协议错") {
     REQUIRE_FALSE(decoder.TryNext().has_value());
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

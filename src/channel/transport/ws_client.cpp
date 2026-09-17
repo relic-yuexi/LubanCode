@@ -1,4 +1,4 @@
-#include "channel/qq/qq_ws_client.hpp"
+#include "channel/transport/ws_client.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,10 +8,10 @@
 
 #include <mbedtls/sha1.h>
 
-#include "channel/qq/ws_frame.hpp"
+#include "channel/transport/ws_frame.hpp"
 #include "platform/base64.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 namespace {
 
@@ -393,4 +393,4 @@ void WsClient::Cancel() {
     socket_.ShutdownBoth();
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

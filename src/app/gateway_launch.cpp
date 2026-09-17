@@ -2,6 +2,7 @@
 // 参数化成 GatewayLaunchPlan。打印文案一字不改(只挪结构)。
 #include "app/gateway_launch.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -9,12 +10,12 @@
 #include <memory>
 #include <optional>
 
+#include "app/channel_adapter_registry.hpp"
 #include "app/channel_gateway_wiring.hpp"
 #include "app/tool_runtime.hpp"
 #include "app/backend_stack.hpp"
 #include "app/version.hpp"
 #include "channel/manager.hpp"  // DefaultChannelsStateRoot
-#include "channel/qq/qq_media.hpp"  // Q4:附件下载 seam 的 QQ 实现
 #include "cli/gateway_command.hpp"
 #include "config/config.hpp"
 #include "gateway/profile.hpp"
@@ -216,29 +217,21 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                 // 拒绝;带外工具照 Q0 fail closed,行为不变。
                 work_options.interaction_broker =
                     std::make_shared<runtime::ChannelInteractionBroker>();
-                work_options.channel_turn_workers = 1;
-                // Q4 媒体接纳 seam:QQ 定案进程内直连——下载直接绑 qq 实现
-                //(url 安全校验/大小帽/凭据脱敏都在里面;§十 10.1)。多渠道
-                // 之后再改注册制,不提前架框架。
-                {
-                    constexpr std::int64_t kMediaCapBytes =
-                        20 * 1024 * 1024;  // 官方/插件/示例三口径取最小
-                    const auto media_http = channel::qq::MakeMediaHttpFunc(
-                        /*hard_timeout_ms=*/60'000, kMediaCapBytes);
-                    work_options.media_download =
-                        [media_http](const std::string& url)
-                        -> std::expected<runtime::ChannelMediaBytes, std::string> {
-                        channel::qq::QqMediaDownloadLimits limits;
-                        limits.max_bytes = kMediaCapBytes;
-                        const auto downloaded =
-                            channel::qq::DownloadQqAttachment(media_http, url, limits);
-                        if (!downloaded.has_value()) {
-                            // 稳定码 + 脱敏 detail(渠道实现保证 query 不进文案)。
-                            return std::unexpected(downloaded.error().code + ": " +
-                                                   downloaded.error().detail);
-                        }
-                        return runtime::ChannelMediaBytes{std::move(downloaded->bytes)};
-                    };
+                // 渠道件注册制(R0,飞书/企微设计单 §四):媒体下载 seam 与
+                // turn 工作线程数按注册渠道取——qq 注册自己的件,单一真源
+                // 见 channel_adapter_registry(原 Q4 内联绑 qq 实现的段原样
+                // 搬进注册行,行为不变)。turn 工作线程取各渠道需求的最大
+                // 值(线程池共享);media_download 泵是单口,今日只有 qq
+                // 一件——后续渠道各注册各的件时再按渠道分派,不提前架框架。
+                for (const auto& [channel_id, registration] :
+                     app::ChannelAdapterRegistry()) {
+                    (void)channel_id;
+                    work_options.channel_turn_workers =
+                        std::max(work_options.channel_turn_workers,
+                                 registration.channel_turn_workers);
+                    if (!work_options.media_download && registration.media_download) {
+                        work_options.media_download = registration.media_download;
+                    }
                 }
                 auto work_pump = std::make_unique<runtime::ChannelWorkPump>();
                 const auto open = runtime::ChannelWorkPump::Open(work_pump.get(), *backend,

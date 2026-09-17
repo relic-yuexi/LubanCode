@@ -25,7 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include "channel/qq/qq_proto.hpp"  // kIntentGroupAndC2cEvent(默认 intents)
-#include "channel/qq/qq_ws_client.hpp"
+#include "channel/transport/ws_client.hpp"
 
 namespace lubancode::channel::qq {
 
@@ -124,15 +124,16 @@ public:
     virtual ~IGatewayTransport() = default;
     virtual std::expected<void, GatewayConnectError> Connect(const std::string& url) = 0;
     virtual std::expected<void, std::string> SendText(const std::string& text) = 0;
-    virtual std::expected<std::string, WsError> ReadMessage(int timeout_ms) = 0;
+    virtual std::expected<std::string, transport::WsError> ReadMessage(int timeout_ms) = 0;
     virtual void Cancel() = 0;
     virtual void Close(std::uint16_t code, const std::string& reason) = 0;
 };
 
 // 生产传输工厂:真 WsClient(明文 ws:// 与 wss:// 同一路,ca_pem 供 wss;
-// trust_mode 透传 TLS 层,见 qq_tls.hpp)。
+// trust_mode 透传 TLS 层,见 transport/tls.hpp)。
 std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
-    std::string ca_pem, TlsTrustMode trust_mode = TlsTrustMode::ExplicitCa);
+    std::string ca_pem,
+    transport::TlsTrustMode trust_mode = transport::TlsTrustMode::ExplicitCa);
 
 class QqGatewaySession {
 public:

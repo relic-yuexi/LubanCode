@@ -19,11 +19,11 @@
 #include <string>
 #include <string_view>
 
-#include "channel/qq/qq_socket.hpp"
-#include "channel/qq/qq_tls.hpp"
-#include "channel/qq/ws_frame.hpp"
+#include "channel/transport/tcp_socket.hpp"
+#include "channel/transport/tls.hpp"
+#include "channel/transport/ws_frame.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 
 struct WsConnectCancelState;
 
@@ -149,4 +149,4 @@ private:
     std::uint64_t received_messages_ = 0;
 };
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

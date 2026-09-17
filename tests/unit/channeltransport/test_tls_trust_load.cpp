@@ -15,12 +15,12 @@
 #include <thread>
 #include <vector>
 
-#include "channel/qq/qq_socket.hpp"
-#include "channel/qq/qq_tls.hpp"
+#include "channel/transport/tcp_socket.hpp"
+#include "channel/transport/tls.hpp"
 #include "mock_ws_server.hpp"
 #include "platform/base64.hpp"
 
-namespace lubancode::channel::qq {
+namespace lubancode::channel::transport {
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ std::string BadPemCertificate() {
     return pem;
 }
 
-// 链上张数(与 qq_tls.cpp 内部同口径;这里直钉 mbedTLS 行为)。
+// 链上张数(与 tls.cpp 内部同口径;这里直钉 mbedTLS 行为)。
 int ChainSize(const mbedtls_x509_crt* chain) {
     int count = 0;
     for (const mbedtls_x509_crt* it = chain; it != nullptr; it = it->next) {
@@ -61,7 +61,7 @@ int ChainSize(const mbedtls_x509_crt* chain) {
 // 合同钉死了,后面的策略断言才有锚。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("qq_tls_trust_load: 钉 mbedTLS 批量 parse 合同——混合集合返回正数、成功链非空") {
+TEST_CASE("tls_trust_load: 钉 mbedTLS 批量 parse 合同——混合集合返回正数、成功链非空") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const std::string mixed = good->ca_pem + BadPemCertificate();
@@ -81,7 +81,7 @@ TEST_CASE("qq_tls_trust_load: 钉 mbedTLS 批量 parse 合同——混合集合�
     CHECK(parsed == 1);
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——空输入与纯垃圾(负码)") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——空输入与纯垃圾(负码)") {
     const TrustLoadReport empty = EvaluateTrustLoad("system_pem", "");
     CHECK(empty.input_empty);
     CHECK_FALSE(empty.ok_to_continue);
@@ -95,7 +95,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——空输入与纯垃圾(负�
     CHECK_FALSE(garbage.error.empty());
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——全合法集合全成,无警告") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——全合法集合全成,无警告") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const TrustLoadReport report = EvaluateTrustLoad("system_pem", good->ca_pem);
@@ -110,7 +110,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——全合法集合全成,无�
     CHECK(report.bad_cert_notes.empty());
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——系统集合部分兼容,显式锚严格拒绝") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——系统集合部分兼容,显式锚严格拒绝") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const std::string mixed = good->ca_pem + BadPemCertificate();
@@ -141,7 +141,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——系统集合部分兼容,�
     CHECK(explicit_report.error.find("严格拒绝") != std::string::npos);
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——坏证在首/中/尾都部分成功") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——坏证在首/中/尾都部分成功") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const std::string bad = BadPemCertificate();
@@ -159,7 +159,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——坏证在首/中/尾都部�
     }
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——全部坏证不可继续(完整边界)") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——全部坏证不可继续(完整边界)") {
     const std::string all_bad = BadPemCertificate() + BadPemCertificate();
     const TrustLoadReport report = EvaluateTrustLoad("system_pem", all_bad);
     CHECK_FALSE(report.ok_to_continue);
@@ -168,7 +168,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——全部坏证不可继续(�
     CHECK_FALSE(report.error.empty());
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——重复证书按指纹去重") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——重复证书按指纹去重") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const std::string triple = good->ca_pem + good->ca_pem + good->ca_pem;
@@ -179,7 +179,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——重复证书按指纹去重
     CHECK(report.parsed_count == 3);    // mbedTLS 全都解析得动(链上 3 节点)
 }
 
-TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——大输入(数百张)不崩、账目对") {
+TEST_CASE("tls_trust_load: EvaluateTrustLoad——大输入(数百张)不崩、账目对") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     std::string big;
@@ -200,7 +200,7 @@ TEST_CASE("qq_tls_trust_load: EvaluateTrustLoad——大输入(数百张)不崩�
 // ResolveChannelTrustRoots:显式严格不回退;Unix 系统文件路径部分兼容。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("qq_tls_trust_load: ResolveChannelTrustRoots——显式混合锚严格拒绝不回退") {
+TEST_CASE("tls_trust_load: ResolveChannelTrustRoots——显式混合锚严格拒绝不回退") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const std::string mixed = good->ca_pem + BadPemCertificate();
@@ -228,7 +228,7 @@ TEST_CASE("qq_tls_trust_load: ResolveChannelTrustRoots——显式混合锚严�
 // Unix 腿:系统 PEM 文件路径可注入临时文件,系统集合部分兼容可端到端验。
 // Windows 的对应行为(系统店导出→部分兼容)归 Q3 真机:CI 机器证书店
 // 内容不可控,不硬造。
-TEST_CASE("qq_tls_trust_load: ResolveChannelTrustRoots——系统 PEM 混合文件部分兼容") {
+TEST_CASE("tls_trust_load: ResolveChannelTrustRoots——系统 PEM 混合文件部分兼容") {
     const auto good = test_support::GenerateSelfSignedCert();
     REQUIRE(good.has_value());
     const std::filesystem::path dir =
@@ -278,7 +278,7 @@ TEST_CASE("qq_tls_trust_load: ResolveChannelTrustRoots——系统 PEM 混合文
 // TLS 修复通过)。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("qq_tls_trust_load: 混合集合真握手——SystemDefault 保留成功链(Unix)") {
+TEST_CASE("tls_trust_load: 混合集合真握手——SystemDefault 保留成功链(Unix)") {
 #ifndef _WIN32
     const auto cert = test_support::GenerateSelfSignedCert();
     REQUIRE(cert.has_value());
@@ -324,7 +324,7 @@ TEST_CASE("qq_tls_trust_load: 混合集合真握手——SystemDefault 保留成
 #endif
 }
 
-TEST_CASE("qq_tls_trust_load: 连接层稳定码——空输入 empty、非空解析失败 load_failed") {
+TEST_CASE("tls_trust_load: 连接层稳定码——空输入 empty、非空解析失败 load_failed") {
     const auto cert = test_support::GenerateSelfSignedCert();
     REQUIRE(cert.has_value());
     test_support::MockTlsServer server;
@@ -367,7 +367,7 @@ TEST_CASE("qq_tls_trust_load: 连接层稳定码——空输入 empty、非空�
     acceptor.join();
 }
 
-TEST_CASE("qq_tls_trust_load: 显式锚真握手——合法成/错主机名/不信任/过期败") {
+TEST_CASE("tls_trust_load: 显式锚真握手——合法成/错主机名/不信任/过期败") {
     const auto cert = test_support::GenerateSelfSignedCert();
     REQUIRE(cert.has_value());
 
@@ -445,4 +445,4 @@ TEST_CASE("qq_tls_trust_load: 显式锚真握手——合法成/错主机名/不
     }
 }
 
-}  // namespace lubancode::channel::qq
+}  // namespace lubancode::channel::transport

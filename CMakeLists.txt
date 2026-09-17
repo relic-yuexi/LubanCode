@@ -776,19 +776,21 @@ add_library(lubancode_engine STATIC
   # 孤儿回收)与渠道设置服务(平台注册表 + channels 定点提交)。
   src/channel/credential_store.cpp
   src/channel/channel_setup.cpp
-  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件与
-  # 自实现 WS 客户端。ws_frame(RFC6455 帧纯函数)/qq_socket(跨平台 TCP+
-  # select 超时)/qq_tls(mbedTLS 客户端流)/qq_ws_client(升级握手+读写+
-  # close)/qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
+  # 传输底座共享层(飞书/企微设计单 R0,原 src/channel/qq 四件升共享层,
+  # 纯搬家零逻辑变化):ws_frame(RFC6455 帧纯函数)/tcp_socket(跨平台
+  # TCP+select 超时)/tls(mbedTLS 客户端流)/ws_client(升级握手+读写+
+  # close)——平台无关,QQ/飞书/企微的 WS 渠道共用。
+  src/channel/transport/ws_frame.cpp
+  src/channel/transport/tcp_socket.cpp
+  src/channel/transport/tls.cpp
+  src/channel/transport/ws_client.cpp
+  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件。
+  # qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
   # qq_http(受控 GET/POST seam,生产走 net/http_transport)/
   # qq_spool(sidecar spool 先落盘再上报,ACK 后清理)/qq_auth(token 单飞
   # 刷新)/qq_messages(v2 发送,稳定 msg_seq)/qq_gateway(事件连接状态机:
   # Identify/Heartbeat/Resume/退避)/qq_adapter(ChannelBridgeTransport 进程内
   # 实现——Bridge 隔离语义保留,manager 零改动)。
-  src/channel/qq/ws_frame.cpp
-  src/channel/qq/qq_socket.cpp
-  src/channel/qq/qq_tls.cpp
-  src/channel/qq/qq_ws_client.cpp
   src/channel/qq/qq_proto.cpp
   src/channel/qq/qq_http.cpp
   src/channel/qq/qq_spool.cpp
@@ -895,7 +897,7 @@ target_include_directories(lubancode_engine PUBLIC
 target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 if(WIN32)
   # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
-  # 系统依赖会以 link-only 形态传给消费方);crypt32:qq_tls 的 Windows
+  # 系统依赖会以 link-only 形态传给消费方);crypt32:transport/tls 的 Windows
   # 信任根(系统证书店导出 + SSL 策略校验,连接状态单 §四)。
   target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32 crypt32)
 endif()
@@ -1194,6 +1196,10 @@ add_library(lubancode_app STATIC
   # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ
   # 进程内适配器实例化)与双泵叠加件(不动 engine 的 GatewayWorkPump 冻结面)。
   src/app/channel_gateway_wiring.cpp
+  # 渠道适配器注册表(飞书/企微设计单 R0):channel_id → 账号级适配器工厂
+  # + 渠道件(媒体下载 seam/turn 工作线程数)。wiring 装配门、im 文案、
+  # gateway_launch 渠道件装配三处的单一真源。
+  src/app/channel_adapter_registry.cpp
   # QQ 连接状态单 §三:连接状态宿主输出件——适配器快照的限频日志与跨进程
   # 只读快照发布(connection-status.json,带 boot ID 与更新时间)。
   src/app/channel_connection_reporter.cpp

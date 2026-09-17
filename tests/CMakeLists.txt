@@ -65,7 +65,8 @@ add_executable(lubancode_tests
   # Lua 受控 HTTP 单·阶段 2:本机回环假 HTTP 服务(§13.3 假服务矩阵)。
   support/fake_http_server.cpp
   # QQ 机器人接入单 Q1:本机回环 mock WebSocket 服务端(明文与 mbedTLS
-  # 自签两路),供 src/channel/qq 的 WS 客户端/网关/适配器测试用。
+  # 自签两路),供 src/channel/transport 的 WS 客户端/TLS 测试与
+  # src/channel/qq 的网关/适配器测试共用。
   support/mock_ws_server.cpp
   # 工业化多协议接入单 P1:交互式子进程夹具(真进程 stdio 协议冒烟——
   # 发一行、等事件、再发一行,保住写端不被 EOF 提前收线)。
