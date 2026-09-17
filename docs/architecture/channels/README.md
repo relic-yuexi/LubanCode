@@ -290,8 +290,8 @@ Agent reply -> platform：幂等尽力；平台支持 client id 时用 client id
 | 3 | Headless Session 与路由：TurnIngress、provenance、router、session host、ChannelTurn | 已有路由和会话宿主组件；真实渠道生产总装与 V3 多轮恢复待完成 |
 | 4 | ReplyAssembler 与 outbox：final/block/native、分块、preview/committed 分账 | 待实现 |
 | 5 | QQ Bot 参考适配器 | 进行中（Q1：进程内直连定案，协议核心 auth/gateway-events/messages/spool 与 mock 测试落地；V3 总装与真实联调见接入单 Q2/Q3） |
-| 6 | WeChat 参考适配器 | 待实现 |
-| 7 | Webhook 共用底座（LINE/Feishu/Zalo/WeCom callback） | 待实现 |
+| 6 | 企业微信智能机器人适配器（`wecombot`，WS 长连接渠道线，进程内直连） | W1 落地（文本进出：入站 text/voice 转写/mixed 抽文本、出站 markdown；凭据 BotID+Secret 走 `app_id`/secret 既有字段。个人微信因 iLink 闭源插件仍是死路；媒体/模板卡片/流式/欢迎语/主动推送归 W2，真机联调另立小单） |
+| 7 | Webhook 共用底座（LINE/Zalo 等真要公网回调的平台） | 待实现（企微/飞书已走 WS 长连接，不占此线） |
 | 8 | 其余 WebSocket/轮询渠道 | 待实现 |
 | 9 | Gateway 服务化 | 待实现 |
 

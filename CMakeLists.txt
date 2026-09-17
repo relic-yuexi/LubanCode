@@ -805,6 +805,14 @@ add_library(lubancode_engine STATIC
   #(读远端→差异/冲突裁决→PUT/复用,独立 QPM 限速)。
   src/channel/channel_commands.cpp
   src/channel/qq/qq_menu.cpp
+  # 企业微信智能机器人长连接适配器(W1,飞书与企业微信接入设计单 §六):
+  # wecom_proto(帧构造/解析/消息映射/错误分型纯函数)/wecom_gateway
+  # (订阅→心跳→读循环→退避重连;写侧网关线程独占,发送线程经递交口
+  # 排队)/wecom_adapter(ChannelBridgeTransport 进程内实现,spool 复用
+  # qq 件,req_id 锚 + markdown 分段 + 限流账)。
+  src/channel/wecombot/wecom_proto.cpp
+  src/channel/wecombot/wecom_gateway.cpp
+  src/channel/wecombot/wecom_adapter.cpp
   # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
   # resume-as-new 更新映射)与工作绑定账(sid -> 场/轮,恢复反查)。
   src/channel/session_map.cpp

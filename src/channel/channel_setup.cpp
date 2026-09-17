@@ -21,13 +21,18 @@ ChannelSetupError Fail(std::string reason, std::string detail) {
     return ChannelSetupError{std::move(reason), std::move(detail)};
 }
 
-// QQ 模板账号 → 原始 JSON(新账号的骨架;逐字段显式,与 MakeQqTemplateAccount
-// 同源,不在第二处手抄取值)。
-nlohmann::json TemplateAccountToJson() {
-    const ChannelAccountUserConfig template_account = MakeQqTemplateAccount();
+// 渠道模板账号 → 原始 JSON(新账号的骨架;逐字段显式,与 MakeXxxTemplate
+// Account 同源,不在第二处手抄取值)。模板按渠道取(qqbot/wecombot 各归
+// 各的 MakeXxxTemplateAccount;未认得渠道照 QQ 形——Commit 守门已拦)。
+nlohmann::json TemplateAccountToJson(const std::string& channel_id) {
+    const ChannelAccountUserConfig template_account =
+        channel_id == "wecombot" ? MakeWecombotTemplateAccount() : MakeQqTemplateAccount();
     nlohmann::json account;
     account["enabled"] = false;  // Commit 里按 ensure_enabled 显式置位
     account["transport"] = template_account.transport;
+    if (template_account.secret_env.has_value() && !template_account.secret_env->empty()) {
+        account["secret_env"] = *template_account.secret_env;
+    }
     account["dm_policy"] = DmPolicyName(template_account.dm_policy);
     account["group_policy"] = GroupPolicyName(template_account.group_policy);
     account["allow_bots"] = template_account.allow_bots;
@@ -95,6 +100,13 @@ const std::vector<ChannelSetupPlatform>& ChannelSetupPlatforms() {
             true,  // Q1 起有进程内适配器(channel_gateway_wiring 只认 qqbot)
             {ChannelSetupField{"app_id", "AppID", false},
              ChannelSetupField{"app_secret", "AppSecret", true}},
+        },
+        ChannelSetupPlatform{
+            "wecombot",
+            "企业微信智能机器人",
+            true,  // W1 起有进程内适配器(长连接,注册表 wecombot 行)
+            {ChannelSetupField{"app_id", "BotID", false},
+             ChannelSetupField{"app_secret", "Secret", true}},
         },
         ChannelSetupPlatform{
             "feishu",
@@ -191,8 +203,17 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
     // 0) 平台与 id 的守门。
     const auto platform = FindChannelSetupPlatform(request.channel_id);
     if (!platform.has_value()) {
+        // 已认得清单从平台表取(单一真源;新平台注册即跟上,不手写第二处)。
+        std::string known;
+        for (const ChannelSetupPlatform& candidate : ChannelSetupPlatforms()) {
+            if (!known.empty()) {
+                known += "、";
+            }
+            known += candidate.id + (candidate.implemented ? "(可配置)" : "(尚未支持)");
+        }
         return std::unexpected(Fail("setup_bad_platform",
-                                    "未知平台: " + request.channel_id + "(认得: qqbot)"));
+                                    "未知平台: " + request.channel_id +
+                                        "(已认得: " + known + ")"));
     }
     if (!platform->implemented) {
         return std::unexpected(
@@ -333,7 +354,8 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
     }
 
     nlohmann::json account_json =
-        created_account ? TemplateAccountToJson() : (*accounts_json)[request.account_id];
+        created_account ? TemplateAccountToJson(request.channel_id)
+                        : (*accounts_json)[request.account_id];
     if (request.app_id.has_value()) {
         account_json["app_id"] = *request.app_id;
     }
@@ -351,7 +373,8 @@ std::expected<ChannelSetupCommitResult, ChannelSetupError> ChannelConfigService:
     auto note_change = [&](const std::string& text) { result.changes.push_back(text); };
     if (created_account) {
         note_change("新建账号 " + request.channel_id + "/" + request.account_id +
-                    "(QQ 模板:websocket、私聊配对、群聊禁用、final 回复、只读工具 read_file/search)");
+                    "(" + platform->display_name +
+                    " 模板:websocket、私聊配对、群聊禁用、final 回复、只读工具名单)");
     }
     if (request.app_id.has_value() &&
         (old_account == nullptr || !old_account->contains("app_id") ||

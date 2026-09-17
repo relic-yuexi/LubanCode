@@ -1,10 +1,11 @@
-// 渠道适配器注册表的注册行(见 hpp 合同注释)。qq 注册进表;新渠道各
-// 注册一行即接入装配主循环。
+// 渠道适配器注册表的注册行(见 hpp 合同注释)。qq/wecombot 注册进表;
+// 新渠道各注册一行即接入装配主循环。
 #include "app/channel_adapter_registry.hpp"
 
 #include <utility>
 
 #include "channel/qq/qq_media.hpp"
+#include "channel/wecombot/wecom_adapter.hpp"
 
 namespace lubancode::app {
 
@@ -53,11 +54,65 @@ std::optional<ChannelAccountAssemblyResult> AssembleQqAccount(
     return result;
 }
 
+// wecom 注册行(W1,飞书与企业微信接入设计单 §六):WecombotAdapter 装配。
+// 传输工厂复用 deps 的 WS seam(R0 后仍以 qq_ 前缀递进——平台无关件,
+// 命名史遗留);无媒体 seam(W1 不收发媒体)、无菜单发布器。
+std::optional<ChannelAccountAssemblyResult> AssembleWecombotAccount(
+    const ChannelAssemblyDeps& deps, const ChannelAccountAssembly& account,
+    std::string* /*error*/) {
+    channel::wecombot::WecombotAdapter::Options adapter_options;
+    adapter_options.channel_id = account.channel_id;
+    adapter_options.account_id = account.account_id;
+    adapter_options.config = account.config;
+    adapter_options.credential = account.credential;
+    adapter_options.state_root = account.channels_state_root;
+    adapter_options.transport_factory = deps.qq_transport_factory;
+    adapter_options.trust_load_block_code = deps.qq_trust_load_block_code;
+    adapter_options.trust_load_block_detail = deps.qq_trust_load_block_detail;
+    adapter_options.now_ms = account.now_ms;
+    auto adapter = std::make_unique<channel::wecombot::WecombotAdapter>(
+        std::move(adapter_options));
+    auto* adapter_ptr = adapter.get();
+
+    ChannelAccountAssemblyResult result;
+    // 连接状态取数口:reporter 的快照类型还驻 qq_adapter.hpp(Q1 落位,
+    // 字段通道无关),这里做字段平移——中性化泛化归后续小步。
+    result.connection_state = [adapter_ptr]() -> channel::qq::ConnectionSnapshot {
+        const channel::wecombot::ConnectionSnapshot wecom = adapter_ptr->ConnectionState();
+        channel::qq::ConnectionSnapshot out;
+        out.thread_alive = wecom.thread_alive;
+        out.connected = wecom.connected;
+        out.stage = wecom.stage;
+        out.retry_count = wecom.retry_count;
+        out.next_retry_at_ms = wecom.next_retry_at_ms;
+        out.connected_since_ms = wecom.connected_since_ms;
+        out.updated_at_ms = wecom.updated_at_ms;
+        if (wecom.last_failure.has_value()) {
+            channel::qq::ConnectionFailure failure;
+            failure.stage = wecom.last_failure->stage;
+            failure.error_code = wecom.last_failure->error_code;
+            failure.detail = wecom.last_failure->detail;
+            failure.at_ms = wecom.last_failure->at_ms;
+            failure.attempt = wecom.last_failure->attempt;
+            out.last_failure = std::move(failure);
+        }
+        out.failure_history.reserve(wecom.failure_history.size());
+        for (const auto& failure : wecom.failure_history) {
+            out.failure_history.push_back(channel::qq::ConnectionFailure{
+                failure.stage, failure.error_code, failure.detail, failure.at_ms,
+                failure.attempt});
+        }
+        return out;
+    };
+    result.adapter = std::move(adapter);
+    return result;
+}
+
 }  // namespace
 
 const std::map<std::string, ChannelAdapterRegistration>& ChannelAdapterRegistry() {
     static const std::map<std::string, ChannelAdapterRegistration> registry = {
-        // qq(Q1 定案进程内直连,§十五):唯一已实现渠道。媒体下载 seam
+        // qq(Q1 定案进程内直连,§十五):第一只已实现渠道。媒体下载 seam
         // 与 turn 工作线程数也在这里注册(gateway_launch 按注册渠道取,
         // 不再内联绑 qq 实现)。
         {"qqbot",
@@ -86,6 +141,15 @@ const std::map<std::string, ChannelAdapterRegistration>& ChannelAdapterRegistry(
                      return runtime::ChannelMediaBytes{std::move(downloaded->bytes)};
                  });
              }(),
+             1,
+         }},
+        // wecombot(W1,企微智能机器人长连接,设计单 §六):文本进出
+        //(出站 markdown);媒体/卡片/流式/主动推送归 W2,媒体 seam 空、
+        // turn 线程与 qq 同规(等按钮的线程不能是唯一收按钮线程)。
+        {"wecombot",
+         ChannelAdapterRegistration{
+             AssembleWecombotAccount,
+             nullptr,
              1,
          }},
     };
