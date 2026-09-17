@@ -167,6 +167,7 @@ sync_beside_exe_tree() {
 }
 
 sync_beside_exe_tree libexec "随包 ripgrep(libexec)"
+sync_beside_exe_tree web "助理网页"
 if [ -f "$INSTALL_DIR/libexec/rg" ]; then
     chmod +x "$INSTALL_DIR/libexec/rg" 2>/dev/null || true
 fi

@@ -398,6 +398,7 @@ function Invoke-Install {
         }
         Sync-OfficialSkills -SourceExe $exeToInstall -InstallDir $InstallDir
         Sync-OfficialDocs -SourceExe $exeToInstall -InstallDir $InstallDir
+        Sync-OfficialDirectory -SourceExe $exeToInstall -InstallDir $InstallDir -DirectoryName 'web' -DisplayName '助理网页'
         # ripgrep 迁移单 P0-6:随包 rg、许可证、第三方声明三样同步到位——
         # search 的后端就住 libexec\rg.exe,缺了它 search 即稳定报缺件。
         Sync-OfficialLibexec -SourceExe $exeToInstall -InstallDir $InstallDir
