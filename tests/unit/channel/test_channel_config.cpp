@@ -165,16 +165,37 @@ TEST_CASE("tools 上限字段:渠道段/账号段都收,presence 显式保留") 
     REQUIRE(capped.tools.allow.has_value());
     CHECK(capped.tools.allow->empty());
 
-    // 没写 tools:零上限(nullopt)。
-    CHECK_FALSE(channel.accounts.at("no_tools").tools.allow.has_value());
+    // QQ 没写 tools:默认询问档，不要求用户认识工具名。
+    CHECK(channel.accounts.at("no_tools").tools.preset == "ask");
 
-    // 只写 deny 不写 allow:同样合法(nullopt + deny)。
+    // 只写 deny:默认询问档叠加显式禁止。
     const auto deny_only = Parse(
         R"({"qqbot": {"accounts": {"m": {"tools": {"deny": ["shell"]}}}}})");
     REQUIRE(deny_only.has_value());
     const auto& policy = deny_only->at("qqbot").accounts.at("m").tools;
-    CHECK_FALSE(policy.allow.has_value());
+    CHECK(policy.preset == "ask");
     REQUIRE(policy.deny.size() == 1);
+}
+
+TEST_CASE("QQ empty tools uses ask while explicit empty lists and other channels remain explicit") {
+    const auto parsed = Parse(R"({
+        "qqbot":{"accounts":{
+            "empty":{"tools":{}},
+            "blocked":{"tools":{"allow":[]}},
+            "custom":{"tools":{"approve":["run_command"]}}
+        }},
+        "other":{"accounts":{"main":{}}}
+    })");
+    REQUIRE(parsed.has_value());
+    const auto& accounts = parsed->at("qqbot").accounts;
+    CHECK(accounts.at("empty").tools.preset == "ask");
+    CHECK(accounts.at("blocked").tools.preset.empty());
+    REQUIRE(accounts.at("blocked").tools.allow.has_value());
+    CHECK(accounts.at("blocked").tools.allow->empty());
+    CHECK(accounts.at("custom").tools.preset.empty());
+    REQUIRE(accounts.at("custom").tools.approve.has_value());
+    CHECK(*accounts.at("custom").tools.approve == std::vector<std::string>{"run_command"});
+    CHECK_FALSE(parsed->at("other").accounts.at("main").tools.allow.has_value());
 }
 
 TEST_CASE("tools 上限字段:坏类型/未知字段明拒") {

@@ -20,6 +20,8 @@ QQ 命令由宿主处理，无须先配置 `commands`。未知 slash 返回帮�
 
 工具权限不必手写名单。新账号向导默认选择“操作前询问”；旧账号运行下面的命令，只选权限，不必重填 AppID 或密钥：
 
+QQ 账号省略 `tools`、写空对象，或只写 `deny` 时，也默认“操作前询问”。向导保存到 `config.json` 的账号段，只需 `"tools": {"preset": "ask"}`，不把展开后的工具名单写回。选择预设会删除旧 `allow/approve`，保留 `deny`。手写名单仍支持；显式 `allow: []` 保持禁用全部工具。渠道与路由另设的上限仍有效。
+
 ```powershell
 lubancode channel setup qqbot --account main --permissions
 ```

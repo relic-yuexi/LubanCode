@@ -1154,6 +1154,14 @@ std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
                                             file_path_for_error, &account, error)) {
                         return std::nullopt;
                     }
+                    // QQ 无显式模式/名单时开箱走询问档；deny 仍有效。
+                    // 显式空 allow/approve 也是用户策略，不覆盖。
+                    if (channel_id == "qqbot" && account.tools.preset.empty() &&
+                        !account.tools.allow && !account.tools.approve) {
+                        auto defaults = *ChannelToolsPreset("ask");
+                        defaults.deny = std::move(account.tools.deny);
+                        account.tools = std::move(defaults);
+                    }
                     channel.accounts.emplace(account_it.key(), std::move(account));
                 }
             } else if (key == "bindings") {
