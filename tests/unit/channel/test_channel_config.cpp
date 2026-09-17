@@ -237,10 +237,11 @@ TEST_CASE("tools.approve(Q6 审批带):渠道段/账号段/binding 都收,presen
     CHECK(*channel.bindings[0].policy.tools.approve ==
           std::vector<std::string>{"bash_like"});
 
-    // 没写 approve:零审批带(默认,Q0 行为零变化)。
+    // QQ 账号没写工具配置：默认询问档含审批带。
     const auto bare = Parse(R"({"qqbot": {"accounts": {"m": {}}}})");
     REQUIRE(bare.has_value());
-    CHECK_FALSE(bare->at("qqbot").accounts.at("m").tools.approve.has_value());
+    CHECK(bare->at("qqbot").accounts.at("m").tools.preset == "ask");
+    CHECK(bare->at("qqbot").accounts.at("m").tools.approve == ChannelToolsPreset("ask")->approve);
 
     // 坏类型明拒。
     std::string error;

@@ -731,6 +731,9 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         }
         trajectory_bridge->EndTurn(ok, cancelled, reason);
     }
+    turn_events.Finish(!outcome.has_value() ? Outcome::Failed :
+                       outcome->cancelled ? Outcome::Cancelled : Outcome::Succeeded,
+                       outcome.has_value() ? std::string() : outcome.error());
     if (!outcome.has_value()) {
         result.error_code = "gateway.turn_failed";
         result.error = outcome.error();

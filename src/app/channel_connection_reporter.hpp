@@ -76,7 +76,6 @@ private:
         bool was_stopped = false;
         std::string last_stage;
         std::string last_failure_code;
-        int suppressed_repeats = 0;        // 限频窗内被合并的同码失败数
         std::int64_t last_failure_emit_ms = 0;
         std::int64_t last_snapshot_write_ms = 0;
         std::string last_written_body;     // 除 updated_at 外的内容指纹
