@@ -800,6 +800,20 @@ add_library(lubancode_engine STATIC
   src/channel/qq/qq_media.cpp
   src/channel/qq/qq_gateway.cpp
   src/channel/qq/qq_adapter.cpp
+  # 飞书长连接适配器(飞书/企微设计单 F1,§五):pbbp2 帧编解码纯函数/
+  # 协议映射(事件→统一事件、发送体、错误分型)/HTTP seam(引导+令牌+
+  # 回话一行适配 net/http_transport)/tenant_access_token 单飞刷新/回话
+  # 发送(锚 message_id)/网关状态机(引导→拨号→ping→事件拆包重组→
+  # ACK→退避重连,凭据类错不重试)/ChannelBridgeTransport 进程内实现。
+  # 复用件:transport 共享层(WS/TLS)、qq_spool(渠道中性入站账)、
+  # qq_adapter 的 ConnectionSnapshot(中性连接快照)。
+  src/channel/feishu/feishu_frame.cpp
+  src/channel/feishu/feishu_proto.cpp
+  src/channel/feishu/feishu_http.cpp
+  src/channel/feishu/feishu_auth.cpp
+  src/channel/feishu/feishu_messages.cpp
+  src/channel/feishu/feishu_gateway.cpp
+  src/channel/feishu/feishu_adapter.cpp
   # QQ 接入单 Q7:菜单/面板回调的宿主侧命令识别与回正文构建(纯函数,
   # 渠道库);官方 v2_menu/v2_panels 载荷纯函数 + 显式启用的发布器
   #(读远端→差异/冲突裁决→PUT/复用,独立 QPM 限速)。

@@ -1064,6 +1064,25 @@ ChannelAccountUserConfig MakeWecombotTemplateAccount() {
     return account;
 }
 
+ChannelAccountUserConfig MakeFeishuTemplateAccount() {
+    // 飞书首版模板(设计单 §七):照 QQ 模板五可选项对齐——群聊默认
+    // disabled(映射支持,但首版不开)、dm 走 pairing、final 回复、同一份
+    // 最小只读工具名单。secret_env 预指 FEISHU_APP_SECRET:手写配置的
+    // 默认密钥来源(密钥规矩全沿 Q0:secret_file > secret_env > secret)。
+    ChannelAccountUserConfig account;
+    account.enabled = false;  // 用户配齐凭据再自己开
+    account.transport = "websocket";
+    account.dm_policy = DmPolicy::Pairing;
+    account.group_policy = GroupPolicy::Disabled;
+    account.allow_bots = false;
+    account.require_mention = true;
+    account.reply.mode = ReplyMode::Final;
+    account.secret_env = std::string("FEISHU_APP_SECRET");
+    account.tools.allow = std::vector<std::string>{"read_file", "search", "create_reminder",
+                                                   "list_reminders", "cancel_reminder", "get_current_time"};
+    return account;
+}
+
 std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
     const nlohmann::json& channels_json, const std::string& file_path_for_error,
     std::string* error) {

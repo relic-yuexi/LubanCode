@@ -253,6 +253,12 @@ ChannelAccountUserConfig MakeQqTemplateAccount();
 // 与 QQ 模板同形。
 ChannelAccountUserConfig MakeWecombotTemplateAccount();
 
+// 飞书渠道首版模板(飞书/企微设计单 F1,§七):照 QQ 模板五可选项对齐
+//(dm=pairing/group=disabled/allow_bots=false/reply=final/require_mention);
+// secret_env 预指 FEISHU_APP_SECRET(手写配置的默认密钥来源;向导存了
+// 受管 secret_file 后由提交侧清掉此引用)。
+ChannelAccountUserConfig MakeFeishuTemplateAccount();
+
 // ---------------------------------------------------------------------------
 // 解析
 // ---------------------------------------------------------------------------

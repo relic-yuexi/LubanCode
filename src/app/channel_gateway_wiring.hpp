@@ -27,6 +27,8 @@
 #include <vector>
 
 #include "app/channel_connection_reporter.hpp"
+#include "channel/feishu/feishu_gateway.hpp"
+#include "channel/feishu/feishu_http.hpp"
 #include "channel/manager.hpp"
 #include "channel/qq/qq_adapter.hpp"
 #include "channel/qq/qq_gateway.hpp"
@@ -80,6 +82,10 @@ public:
         std::function<std::unique_ptr<channel::qq::IGatewayTransport>()>
             test_transport_factory;
         channel::qq::QqHttpFunc test_http;
+        // 飞书(F1)同款注入位(仅对 feishu 注册行生效)。
+        std::function<std::unique_ptr<channel::feishu::IFeishuGatewayTransport>()>
+            test_feishu_transport_factory;
+        channel::feishu::FeishuHttpFunc test_feishu_http;
     };
 
     // 装配。channels 段为空时返回 nullptr(零渠道行为,不挂泵)。

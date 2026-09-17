@@ -203,7 +203,9 @@ std::expected<void, std::string> SendUpgradeResponse(NativeSocket fd,
     return {};
 }
 
-// 解客户端(带 mask)的单帧文本。QQ 客户端帧必 mask;这里只解 text 帧。
+// 解客户端(带 mask)的单帧数据载荷。QQ 客户端帧必 mask;这里解 text 与
+// binary 两种数据帧(飞书 F1 的 pbbp2 帧走 binary,载荷只是字节,装在
+// std::string 里不加解释);控制帧/分片不在夹具职责内。
 std::expected<std::string, std::string> DecodeClientTextFrame(const std::string& buffer,
                                                               std::size_t& consumed) {
     if (buffer.size() < 2) {
@@ -232,8 +234,8 @@ std::expected<std::string, std::string> DecodeClientTextFrame(const std::string&
         }
         header = 10;
     }
-    if (opcode != 0x1) {
-        return std::unexpected("not a text frame");
+    if (opcode != 0x1 && opcode != 0x2) {
+        return std::unexpected("not a data frame");
     }
     if (!masked) {
         return std::unexpected("client frame not masked");
@@ -373,6 +375,12 @@ std::expected<void, std::string> MockWsServer::Connection::SendText(
     std::string_view payload) {
     return SendServerFrame(static_cast<NativeSocket>(fd_),
                            lubancode::channel::transport::WsOpcode::Text, payload);
+}
+
+std::expected<void, std::string> MockWsServer::Connection::SendBinary(
+    std::string_view payload) {
+    return SendServerFrame(static_cast<NativeSocket>(fd_),
+                           lubancode::channel::transport::WsOpcode::Binary, payload);
 }
 
 std::expected<void, std::string> MockWsServer::Connection::SendRaw(std::string_view bytes) {
@@ -784,6 +792,17 @@ std::expected<void, std::string> MockTlsServer::Connection::SendText(
     std::string_view payload) {
     const auto frame = lubancode::channel::transport::EncodeServerFrame(
         lubancode::channel::transport::WsOpcode::Text, payload);
+    if (!TlsWriteAll(static_cast<mbedtls_ssl_context*>(ssl_),
+                     reinterpret_cast<const char*>(frame.data()), frame.size())) {
+        return std::unexpected("tls write frame failed");
+    }
+    return {};
+}
+
+std::expected<void, std::string> MockTlsServer::Connection::SendBinary(
+    std::string_view payload) {
+    const auto frame = lubancode::channel::transport::EncodeServerFrame(
+        lubancode::channel::transport::WsOpcode::Binary, payload);
     if (!TlsWriteAll(static_cast<mbedtls_ssl_context*>(ssl_),
                      reinterpret_cast<const char*>(frame.data()), frame.size())) {
         return std::unexpected("tls write frame failed");

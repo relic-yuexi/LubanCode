@@ -272,12 +272,19 @@ std::expected<WsClient, WsError> WsClient::Connect(const WsConnectOptions& optio
                                                        : received.find(' ', sp1 + 1);
     if (sp1 == std::string::npos || sp2 == std::string::npos ||
         received.substr(sp1 + 1, sp2 - sp1 - 1) != "101") {
+        // 升级被拒:完整响应头随错误带出(飞书凭据类错靠 Handshake-Status/
+        // Handshake-Autherrcode 头裁决;QQ 不看,零行为变化)。received 已按
+        // kWsHandshakeHeaderCap 限长。
         return std::unexpected(WsError{WsError::Kind::Protocol,
-                                       "upgrade not accepted: " + received.substr(0, 64), 0});
+                                       "upgrade not accepted: " + received.substr(0, 64), 0,
+                                       /*error_code=*/std::string(),
+                                       /*handshake_headers=*/received});
     }
     if (ToLower(HeaderValue(received, "Upgrade")) != "websocket") {
         return std::unexpected(
-            WsError{WsError::Kind::Protocol, "missing upgrade: websocket header", 0});
+            WsError{WsError::Kind::Protocol, "missing upgrade: websocket header", 0,
+                      /*error_code=*/std::string(),
+                      /*handshake_headers=*/received});
     }
     const std::string accept = HeaderValue(received, "Sec-WebSocket-Accept");
     if (accept.empty() || accept != ComputeAccept(key)) {
@@ -293,6 +300,20 @@ std::expected<void, WsError> WsClient::SendText(std::string_view text) {
     std::uint8_t mask_key[4];
     FillRandom(mask_key, sizeof(mask_key));
     const auto frame = EncodeClientFrame(WsOpcode::Text, text, mask_key);
+    const auto written = WriteAll(
+        std::string_view(reinterpret_cast<const char*>(frame.data()), frame.size()),
+        10'000);
+    if (!written.has_value()) {
+        return std::unexpected(ToWsError(written.error()));
+    }
+    ++sent_messages_;
+    return {};
+}
+
+std::expected<void, WsError> WsClient::SendBinary(std::string_view bytes) {
+    std::uint8_t mask_key[4];
+    FillRandom(mask_key, sizeof(mask_key));
+    const auto frame = EncodeClientFrame(WsOpcode::Binary, bytes, mask_key);
     const auto written = WriteAll(
         std::string_view(reinterpret_cast<const char*>(frame.data()), frame.size()),
         10'000);

@@ -97,7 +97,7 @@ AccountInUse        账号锁被另一实例持有
 Ready               唯一可启动渠道执行载体的状态（受管子进程或进程内直连，Q1 定案）
 ```
 
-只有 `Ready` 才能启动渠道执行载体。执行载体形态按渠道实现定案（QQ 已于 Q1 定案进程内直连，见接入单 §十五；未来其他渠道仍可走受管子进程），决策合同传输无关。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。"Package 已安装且已信任"一闸：进程内直连的渠道实现（无渠道包）退化为"渠道实现内置受信"（装配侧恒信任，QQ 即此），不另造假包概念。
+只有 `Ready` 才能启动渠道执行载体。执行载体形态按渠道实现定案（QQ 已于 Q1、飞书于 F1 定案进程内直连，见各家接入单；未来其他渠道仍可走受管子进程），决策合同传输无关。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。"Package 已安装且已信任"一闸：进程内直连的渠道实现（无渠道包）退化为"渠道实现内置受信"（装配侧恒信任，QQ/飞书即此），不另造假包概念。
 
 默认行为表：
 
@@ -133,7 +133,7 @@ Ready               唯一可启动渠道执行载体的状态（受管子进程
 - 拒绝空值、拒绝内部控制字符、拒绝超限文件（上限 8 KiB）。
 - 路径必须绝对；按 canonical 解析（符号链接/重解析点解析到真实目标再验）；目标须是常规文件、归属当前用户，且无组/其他用户读写位（POSIX）或 DACL 无其他账户读权（Windows）。
 
-密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。凭据只进入获准的渠道执行载体——QQ 已定案进程内直连（Q1，接入单 §十五），凭据根本不出宿主进程：无专用启动管道，无子进程环境继承，`SidecarEnvAllowlist` 不消费。未来某渠道若定案受管子进程，则按本节原口径另补"经不落日志的专用启动管道交付、环境走白名单"的实装与冻结件修订。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
+密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。凭据只进入获准的渠道执行载体——QQ（Q1）与飞书（F1）已定案进程内直连，凭据根本不出宿主进程：无专用启动管道，无子进程环境继承，`SidecarEnvAllowlist` 不消费。飞书 AppSecret 与 QQ AppSecret 同一套来源规矩与泄露禁令（引导请求体里的 AppSecret 不进任何错误文案）。未来某渠道若定案受管子进程，则按本节原口径另补"经不落日志的专用启动管道交付、环境走白名单"的实装与冻结件修订。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
 
 ## 5. 状态目录
 
@@ -232,6 +232,35 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
 ```
 
 用户侧准备（管理后台智能机器人开 **API 模式选长连接**，拿 BotID + Secret——长连接专用密钥，与回调模式的 Token/AESKey 互斥，二选一）。密钥规矩全沿 QQ：`secret_file` > `secret_env` > inline 明文，setup 向导落受管 `secret_file` 时会清掉 env 引用与旧明文。首版范围：文本进出（voice 回调的平台转写文本进正文；image/file/video 落占位说明），出站 markdown（≤20480 字节 UTF-8 自动分段），群聊映射支持但模板默认禁用；媒体收发、模板卡片、流式、enter_chat 欢迎语、主动推送归 W2。回复限频单会话 30 条/分钟、1000 条/小时（发送线程记账排队）。
+
+**飞书首版模板**（F1 起，`MakeFeishuTemplateAccount()`；照 QQ 模板五可选项对齐，`secret_env` 预指 `FEISHU_APP_SECRET`——手写配置的默认密钥来源，向导存了受管 `secret_file` 后由提交侧清掉此引用）：
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "default_account": "work",
+      "accounts": {
+        "work": {
+          "enabled": true,
+          "transport": "websocket",
+          "app_id": "cli_xxxxxxxx",
+          "secret_env": "FEISHU_APP_SECRET",
+          "dm_policy": "pairing",
+          "group_policy": "disabled",
+          "allow_bots": false,
+          "require_mention": true,
+          "reply": {"mode": "final"},
+          "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder", "get_current_time"]}
+        }
+      }
+    }
+  }
+}
+```
+
+飞书密钥规矩全沿 Q0（`secret_file` > `secret_env` > `secret` 明文；高优先级来源配置了但无效时明报不降级）。用户侧准备：open.feishu.cn 建企业自建应用、事件订阅选"使用长连接接收事件"、订阅 `im.message.receive_v1`、开通发消息权限、发布应用版本；首版仅国内域，larksuite 后置。
 
 Q6 起各层 tools 段另有 `approve`（可申请审批带，presence 合同与 `allow` 同款：键在=本层参与，未写=不参与）：名单内的须确认工具**不预先授权**——模型可见（看不见无从申请），执行前经渠道按钮问用户（QQ 键盘卡，`channel.approval.requested/resolved` 落 V3），允许才执行这一次；拒绝/超时/取消都不执行，超时默认拒绝不默认放行。`deny` 永远赢：hard deny 不可被按钮覆盖。有效审批带 = 各显式层 `approve` 的交集（与 `allow` 同构）。默认零层声明 = 空带 = 行为与 Q0 一字不差；QQ 模板不列 `approve`。
 

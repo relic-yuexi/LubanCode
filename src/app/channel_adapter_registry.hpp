@@ -20,6 +20,8 @@
 
 #include "channel/channel_config.hpp"
 #include "channel/credentials.hpp"
+#include "channel/feishu/feishu_gateway.hpp"
+#include "channel/feishu/feishu_http.hpp"
 #include "channel/manager.hpp"
 #include "channel/qq/qq_adapter.hpp"
 #include "channel/qq/qq_gateway.hpp"
@@ -50,13 +52,21 @@ struct ChannelAccountAssemblyResult {
 };
 
 // 注册行的装配材料(wiring 的 Create 每次现给):测试注入位与信任根解析
-// 结果。字段归各渠道私有(qq_ 前缀),注册行只取自家认得的。
+// 结果。字段归各渠道私有(qq_/feishu_ 前缀),注册行只取自家认得的;新
+// 渠道带新依赖只加字段,不动别家注册行。
 struct ChannelAssemblyDeps {
     channel::qq::QqHttpFunc qq_http;
     std::function<std::unique_ptr<channel::qq::IGatewayTransport>()> qq_transport_factory;
     std::string qq_ca_pem;
     std::string qq_trust_load_block_code;
     std::string qq_trust_load_block_detail;
+    // 飞书(F1):HTTP seam(引导/令牌/回话同一路)与 WS 传输工厂。
+    channel::feishu::FeishuHttpFunc feishu_http;
+    std::function<std::unique_ptr<channel::feishu::IFeishuGatewayTransport>()>
+        feishu_transport_factory;
+    std::string feishu_ca_pem;
+    std::string feishu_trust_load_block_code;
+    std::string feishu_trust_load_block_detail;
 };
 
 // 渠道注册行。
