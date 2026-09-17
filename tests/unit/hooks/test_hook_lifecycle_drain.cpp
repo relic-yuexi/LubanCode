@@ -185,9 +185,10 @@ return {
 }
 
 TEST_CASE("工具桥:排空旗置位后新的子执行回 hook.tool.drained,在途不受影响") {
-    StubTool tool;
+    auto tool = std::make_unique<StubTool>();
+    StubTool* tool_ptr = tool.get();
     tools::ToolRegistry registry;
-    registry.Register(std::make_unique<StubTool>());
+    registry.Register(std::move(tool));
     HookToolExecutionService::Options options;
     options.registry = &registry;
     options.allow_tools = {"stub.ping"};
@@ -206,7 +207,7 @@ TEST_CASE("工具桥:排空旗置位后新的子执行回 hook.tool.drained,在�
     REQUIRE_FALSE(after.admitted);
     CHECK(after.status == "rejected");
     CHECK(after.error_code == "hook.tool.drained");
-    CHECK(tool.calls == 1);  // 拒掉的没执行
+    CHECK(tool_ptr->calls == 1);  // 拒掉的没执行
 }
 
 TEST_CASE("in-flight:统一入口进出配对,WaitForMiddlewareDrain 等它归零") {

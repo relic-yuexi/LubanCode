@@ -143,9 +143,15 @@ TEST_CASE("静态档:坏形状逐项拒——不是 hook 包/坏 JSON/坏 schema
     WriteFile(dir.path / "main.lua", kCleanLua);
     {
         const HookCheckReport report = Check(dir.path, false);
+        // entry 可读,第一项 manifest 过;ParseHookManifest 拒 schemaVersion 2,
+        // 追加一枚 manifest fail —— static_pass 只看有没有 fail。
         CHECK_FALSE(report.static_pass);
         CHECK(report.exit_code() == 1);
-        CHECK_FALSE(FindCheck(report, "manifest")->pass);
+        bool saw_manifest_fail = false;
+        for (const auto& check : report.checks) {
+            if (check.item == "manifest" && !check.pass) saw_manifest_fail = true;
+        }
+        CHECK(saw_manifest_fail);
         // 静态挂了,后面的检查不跑(不给半份结论)。
         CHECK(FindCheck(report, "lua") == nullptr);
     }

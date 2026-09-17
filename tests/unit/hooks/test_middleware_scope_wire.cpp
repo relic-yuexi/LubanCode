@@ -238,8 +238,8 @@ TEST_CASE("迟到归属:工具执行中途换绑写者,tool.execution.* 终态�
 
     const auto result = services->tools->Call("kb.search", nlohmann::json{{"query", "分代热换"}},
                                               "PostUser/knowledge.recall", "dispatch-late-1",
-                                              "dispatch-late-1#0", std::nullopt, std::nullopt,
-                                              std::nullopt, nullptr);
+                                              "dispatch-late-1#0", std::nullopt, "turn-000001",
+                                              "step-000001", nullptr);
     REQUIRE(result.admitted);
     CHECK(result.status == "finished");
 
