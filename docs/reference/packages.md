@@ -10,9 +10,9 @@ Package 是一只箱子。它只做五件事：
 
 它不跑模型，不出工具，不授予权限。箱里装六类组件：Agent、Prompt Profile、Skill、Workflow、Plugin、MCP server，外加各组件要用的脚本、模板与资料。
 
-本文是冻结合同。实现落地之前，本文与 `tests/fixtures/packages/` 下的夹具就是唯一权威：目录怎么摆、清单怎么写、名字怎么起、哪一步要信任，一概照此办理。设计出处见 `todos/统一Package封装与组件挂载系统设计.todo`；Agent 定义格式另见前置单 `todos/自定义Agent与PromptProfile设计.todo`。
+本文是冻结合同。实现落地之前，本文与 `tests/fixtures/packages/` 下的夹具就是唯一权威：目录怎么摆、清单怎么写、名字怎么起、哪一步要信任，一概照此办理。设计出处见 原设计单(已归档)；Agent 定义格式另见前置单 原设计单(已归档)。
 
-自进化闭环（`todos/Package驱动的自进化闭环设计.todo`）产出的候选包，`package/` 一层照抄本文格式，可独立校验；进化账另落 `evolution.json`，不进清单。
+自进化闭环（原设计单(已归档)）产出的候选包，`package/` 一层照抄本文格式，可独立校验；进化账另落 `evolution.json`，不进清单。
 
 ## 1. 名字分层：Package 与 Plugin 不可同名
 

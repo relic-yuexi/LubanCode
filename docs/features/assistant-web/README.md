@@ -1,6 +1,6 @@
 # 常驻助理 Web 主界面(W0/W1/W2/W3/W4)
 
-[参考手册](../../README.md) · 源单 [todos/常驻助理Web主界面_CPP本地服务与Gateway总装.todo](../../../todos/常驻助理Web主界面_CPP本地服务与Gateway总装.todo)
+[参考手册](../../README.md) · 源单 对应设计单(见对应设计单)
 
 `lubancode assistant` 的本地宿主:一只前台进程同时装本地 Web 服务(随包
 网页 + 认证)、AppServer 控制入口(1.3 协议)与自动任务底座(W2 起:

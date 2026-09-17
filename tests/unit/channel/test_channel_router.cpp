@@ -534,11 +534,12 @@ TEST_CASE("QQ 模板路由出来:只许 read_file/search,群聊整体 disabled")
     REQUIRE(admitted.tools.allow.has_value());
     CHECK(*admitted.tools.allow == std::vector<std::string>{"read_file", "search",
                                                             "create_reminder", "list_reminders",
-                                                            "cancel_reminder"});
+                                                            "cancel_reminder", "get_current_time"});
     CHECK(admitted.tools.Allows("read_file"));
     CHECK(admitted.tools.Allows("search"));
     CHECK(admitted.tools.Allows("create_reminder"));
     CHECK(admitted.tools.Allows("cancel_reminder"));
+    CHECK(admitted.tools.Allows("get_current_time"));
     CHECK_FALSE(admitted.tools.Allows("tool_search"));
     CHECK_FALSE(admitted.tools.Allows("tool_invoke"));
     CHECK_FALSE(admitted.tools.Allows("agent"));

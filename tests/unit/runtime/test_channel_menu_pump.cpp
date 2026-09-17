@@ -504,7 +504,8 @@ TEST_CASE("QQ builtins manage isolated contexts without sending slash commands t
     CHECK(fixture.SentTextAt(6).find("找不到") != std::string::npos);
     CHECK(fixture.SentTextAt(7).find("暂不支持") != std::string::npos);
     CHECK(fixture.SentTextAt(8).find("未装配") != std::string::npos);
-    CHECK(fixture.backend->saw_host_clock);
+    CHECK_FALSE(fixture.backend->saw_host_clock);
+    CHECK(fixture.backend->systems[0].find("get_current_time") != std::string::npos);
 }
 
 TEST_CASE("QQ accepted pictures reach provider input and generated files enter outbox") {

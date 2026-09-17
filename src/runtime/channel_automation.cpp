@@ -349,6 +349,25 @@ tools::Tool::Result AsToolResult(const ToolOutcome& outcome) {
     return tools::Tool::Result::Text(payload.dump());
 }
 
+class GetCurrentTimeTool final : public tools::Tool {
+public:
+    explicit GetCurrentTimeTool(std::shared_ptr<ChannelAutomationBridge> bridge)
+        : bridge_(std::move(bridge)) {}
+    std::string name() const override { return kChannelGetCurrentTimeTool; }
+    std::string description() const override {
+        return "读取宿主当前时间，返回 UTC 毫秒时间戳和 ISO 8601 日期时间。"
+               "需要判断今天、明天或绝对日期时调用，不沿用旧回执；相对提醒直接用 delay_seconds。";
+    }
+    nlohmann::json input_schema() const override {
+        return {{"type", "object"}, {"properties", nlohmann::json::object()}};
+    }
+    tools::Tool::Result execute(const nlohmann::json&) override {
+        return AsToolResult(bridge_->GetCurrentTime());
+    }
+private:
+    std::shared_ptr<ChannelAutomationBridge> bridge_;
+};
+
 class CreateReminderTool final : public tools::Tool {
 public:
     explicit CreateReminderTool(std::shared_ptr<ChannelAutomationBridge> bridge)
@@ -440,10 +459,25 @@ private:
 
 }  // namespace
 
+ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::GetCurrentTime() const {
+    const std::int64_t now = now_ms_ ? now_ms_() : DefaultNowMs();
+    ToolOutcome outcome;
+    outcome.ok = true;
+    outcome.payload = {{"now_ms", now}, {"utc", UtcTimeText(now)}, {"timezone", "UTC"}};
+    return outcome;
+}
+
 void RegisterChannelAutomationTools(tools::ToolRegistry& registry,
                                     std::shared_ptr<ChannelAutomationBridge> bridge) {
     if (bridge == nullptr) {
         return;
+    }
+    if (registry.Find(kChannelGetCurrentTimeTool) == nullptr) {
+        tools::ToolRegistration registration;
+        registration.tool = std::make_unique<GetCurrentTimeTool>(bridge);
+        registration.source_kind = tools::ToolSourceKind::Builtin;
+        registration.effect_class = tools::EffectClass::ReadOnlyLocal;
+        registry.Register(std::move(registration));
     }
     if (registry.Find(kChannelCreateReminderTool) == nullptr) {
         tools::ToolRegistration registration;

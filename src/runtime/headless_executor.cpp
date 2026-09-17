@@ -542,7 +542,13 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         fresh_agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
     agent::Agent& loop_agent = agent_override != nullptr ? *agent_override : *fresh_agent;
-    loop_agent.SetTurnContext(agent::EnvironmentSegment(options_.cwd_utf8) + CurrentTimeContext());
+    // system 只放稳定环境；需要时间时调用工具，不逐轮注入动态值。
+    loop_agent.SetSystemPrompt(
+        agent::DefaultPersona() + "\n" + options_.skills_prompt +
+        "\n# 运行环境\n\n- 工作目录: " + options_.cwd_utf8 +
+        "\n需要当前日期或时间时调用 get_current_time，不要猜测，也不要沿用历史轮次的时间。"
+        "\n相对提醒使用 create_reminder.delay_seconds，由宿主计算，禁止猜测或试探时间戳。"
+        "\n需要读文件、执行命令时调用实际工具，以工具回执为准，不要编造结果。\n");
 
     agent::TurnWiring wiring;
     wiring.events = &turn_events;
