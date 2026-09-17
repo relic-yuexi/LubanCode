@@ -195,13 +195,14 @@ TEST_CASE("feishu_gateway: 激活即发 ping;事件回 ACK(复用原帧 + code 2
     harness.endpoint_url = "ws://127.0.0.1:" + std::to_string(port) +
                            "/callback?device_id=d1&service_id=25";
     harness.Start();
+    // 先收连接、回 101——客户端的 Connect 在升级握手读上阻塞,服务端不
+    // 应答就永远到不了 Connected(不能先等 Connected 再 accept)。
+    auto connection = *server.AcceptNext(5'000);
+    REQUIRE(connection.AcceptUpgrade(5'000).has_value());
     REQUIRE(harness.WaitForEvent([](const FeishuGatewayEvent& event) {
         return event.kind == FeishuGatewayEvent::Kind::Connected;
     }));
     CHECK(harness.bootstrap_count.load() == 1);
-
-    auto connection = *server.AcceptNext(5'000);
-    REQUIRE(connection.AcceptUpgrade(5'000).has_value());
 
     // 激活 ping:连接后第一条,控制帧,type=ping,service=URL 的 service_id。
     const auto ping = ReadFrame(&connection);

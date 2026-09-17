@@ -89,12 +89,13 @@ TEST_CASE("显式平台+账号为准:可启动直达,停用走询问,没配过�
         const auto resolution = ResolveImTarget(query);
         REQUIRE(resolution.status == ImTargetResolution::Status::UnknownPlatform);
     }
-    SUBCASE("未实现平台:feishu 尚未支持") {
+    SUBCASE("已实现平台但没配账号:MissingAccount(feishu F1 起可配置)") {
         ImTargetQuery query;
-        query.channels = &channels;
+        query.channels = &channels;  // channels 里只有 qqbot
         query.explicit_channel = "feishu";
         const auto resolution = ResolveImTarget(query);
-        REQUIRE(resolution.status == ImTargetResolution::Status::PlatformNotImplemented);
+        REQUIRE(resolution.status == ImTargetResolution::Status::MissingAccount);
+        CHECK_FALSE(resolution.target.has_value());
     }
 }
 

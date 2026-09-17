@@ -75,7 +75,7 @@ TEST_CASE("feishu_proto: 引导响应解析——成功带 ClientConfig") {
 TEST_CASE("feishu_proto: 引导响应解析——ClientConfig 缺省 PingInterval=120") {
     std::string error;
     const auto endpoint =
-        ParseBootstrapResponse(ParseJson(R"({"code":0,"data":{"URL":"wss://x"}}")"),
+        ParseBootstrapResponse(ParseJson(R"({"code":0,"data":{"URL":"wss://x"}})"),
                                &error);
     REQUIRE(endpoint.has_value());
     CHECK(endpoint->ping_interval_secs == 120);
@@ -280,7 +280,7 @@ TEST_CASE("feishu_proto: 回话载荷(content 是嵌 JSON 字符串)与路径") 
 TEST_CASE("feishu_proto: 回话响应解析") {
     std::string error;
     const auto ok = ParseReplyResponse(
-        ParseJson(R"({"code":0,"msg":"success","data":{"message_id":"om_201"}}")"),
+        ParseJson(R"({"code":0,"msg":"success","data":{"message_id":"om_201"}})"),
         &error);
     REQUIRE(ok.has_value());
     CHECK(ok->provider_message_id == "om_201");

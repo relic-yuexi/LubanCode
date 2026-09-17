@@ -166,7 +166,7 @@ TEST_CASE("feishu_frame: 未知字段号跳过(前向兼容)") {
     const std::string bytes =
         std::string("\x08\x01\x10\x02\x18\x19\x20\x00", 8) +  // 1-4
         std::string("\x78\x2a", 2) +                            // field 15 varint 42
-        std::string("\x82\x01\x03xyz", 5);                      // field 16 bytes "xyz"
+        std::string("\x82\x01\x03xyz", 6);                      // field 16 bytes "xyz"(6 字节)
     std::string error;
     const auto decoded = DecodeFeishuFrame(bytes, &error);
     REQUIRE(decoded.has_value());

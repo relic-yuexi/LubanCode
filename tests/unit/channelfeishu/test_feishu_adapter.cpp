@@ -137,13 +137,28 @@ std::string EventFrameBytes(std::uint64_t seq, const char* event_id = "ev_adapte
     frame.method = kFrameMethodData;
     frame.headers.push_back(FeishuFrameHeader{kHeaderType, kHeaderValueEvent});
     frame.headers.push_back(FeishuFrameHeader{kHeaderMessageId, "om_in_1"});
-    frame.payload = std::string(R"({"schema":"2.0","header":{"event_id":")") + event_id +
-                              R"(","event_type":"im.message.receive_v1","app_id":"APP1",)"
-                              R"("create_time":"1726500000000"},"event":{"message":)"
-                              R"({"message_id":"om_in_1","chat_id":"oc_1","chat_type":"p2p",)"
-                              R"("message_type":"text","content":"{\"text\":")" + text +
-                              R"("}"},"sender":)"
-                              R"({"sender_id":{"open_id":"ou_user9"},"sender_type":"user"}}})";
+    // 事件载荷用 nlohmann 组装再 dump——content 的嵌 JSON 字符串由
+    // json::dump 负责转义,不经手写字符串拼接(引号账错一针就坏一帧)。
+    nlohmann::json payload;
+    payload["schema"] = "2.0";
+    payload["header"] = nlohmann::json{
+        {"event_id", event_id},
+        {"event_type", "im.message.receive_v1"},
+        {"app_id", "APP1"},
+        {"create_time", "1726500000000"},
+    };
+    payload["event"]["message"] = nlohmann::json{
+        {"message_id", "om_in_1"},
+        {"chat_id", "oc_1"},
+        {"chat_type", "p2p"},
+        {"message_type", "text"},
+        {"content", nlohmann::json{{"text", text}}.dump()},
+    };
+    payload["event"]["sender"] = nlohmann::json{
+        {"sender_id", nlohmann::json{{"open_id", "ou_user9"}}},
+        {"sender_type", "user"},
+    };
+    frame.payload = payload.dump();
     return EncodeFeishuFrame(frame);
 }
 
