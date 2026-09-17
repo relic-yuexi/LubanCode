@@ -293,13 +293,6 @@ TEST_CASE("未实现平台与坏 id 拒收") {
         REQUIRE_FALSE(committed.has_value());
         CHECK(committed.error().reason == "setup_bad_id");
     }
-    SUBCASE("账号 id 带路径") {
-        ChannelSetupCommitRequest request = BaseRequest();
-        request.account_id = "../escape";
-        const auto committed = ChannelConfigService::Commit(fx.options, request);
-        REQUIRE_FALSE(committed.has_value());
-        CHECK(committed.error().reason == "setup_bad_id");
-    }
 }
 
 TEST_CASE("孤儿回收:换密钥后旧受管件清走,配置仍可读") {

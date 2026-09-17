@@ -208,8 +208,8 @@ TEST_CASE("feishu_wiring: 分支裁决——渠道禁用/账号禁用/凭据缺�
     account.secret = std::string("inline-secret");
     feishu.accounts["work"] = account;
     config.channels["feishu"] = feishu;
-    // 未注册渠道(wecombot 属 W1 批次,还没注册行)。
-    config.channels["wecombot"] = channel::ChannelUserConfig{};
+    // 未注册渠道(wecombot 已随 W1 注册进表,拿真没注册行的 telegram 演)。
+    config.channels["telegram"] = channel::ChannelUserConfig{};
 
     auto wiring = ChannelGatewayWiring::Create(MakeOptions(&config, root));
     REQUIRE(wiring != nullptr);
