@@ -7,75 +7,92 @@
   <link rel="stylesheet" href="assistant.css" />
 </head>
 <body>
+  <a class="skip-link" href="#say-input">跳到消息输入框</a>
   <header id="topbar">
-    <span class="brand">LubanCode 助理</span>
-    <span id="conn-state" class="state off">未连接</span>
-    <span id="assistant-meta" class="meta"></span>
-    <nav id="topnav">
-      <button type="button" data-view="chat" class="active" aria-current="page">聊天</button>
-      <button type="button" data-view="tasks">任务</button>
-      <button type="button" data-view="results">结果</button>
-      <button type="button" data-view="approvals">审批<span id="approval-badge" class="badge" hidden></span></button>
-      <button type="button" data-view="config">设置</button>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">L<span>↗</span></span><span>LubanCode<small>你的本地助理</small></span></div>
+    <button type="button" id="new-thread-button"><span aria-hidden="true">＋</span> 新对话 <span class="new-arrow" aria-hidden="true">↗</span></button>
+    <nav id="topnav" aria-label="主导航">
+      <button type="button" data-view="chat" class="active" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v11H9l-4 4V5Z"/><path d="M9 9h6M9 12h4"/></svg>对话</button>
+      <button type="button" data-view="tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3v3m6-3v3M8 11l2 2 5-5m-7 9h8"/></svg>任务</button>
+      <button type="button" data-view="results"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h9l5 5v11H5V4Zm9 0v6h5M8 14h8m-8 3h5"/></svg>结果</button>
+      <button type="button" data-view="approvals"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9S4 17 4 12V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg>审批<span id="approval-badge" class="badge" hidden></span></button>
+      <button type="button" data-view="config"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>设置</button>
     </nav>
+    <aside id="history-panel" aria-label="历史会话">
+      <div class="panel-head"><h2>最近对话</h2><span class="section-dot" aria-hidden="true">· · ·</span></div>
+      <ul id="thread-list"></ul>
+      <p id="history-empty" class="hint">新的想法，从这里开始。</p>
+    </aside>
+    <footer class="sidebar-footer"><span id="conn-state" class="state off" role="status">未连接</span><span id="assistant-meta" class="meta">本地工作空间</span></footer>
   </header>
 
   <main id="layout">
     <!-- 聊天:历史列表 + 消息流 + 输入 -->
     <section id="chat-view" class="view">
-      <aside id="history-panel" aria-label="历史会话">
-        <div class="panel-head">
-          <h2>历史</h2>
-          <button type="button" id="new-thread-button">新会话</button>
-        </div>
-        <ul id="thread-list"></ul>
-      </aside>
       <section id="chat-panel" aria-label="聊天">
         <div class="toolbar">
-          <span id="thread-id-label"></span>
-          <span id="turn-status-label"></span>
+          <div class="toolbar-title"><span class="eyebrow">工作空间</span><h1 id="thread-id-label">新对话</h1></div>
+          <span id="turn-status-label" role="status"></span>
+          <span id="runtime-pill" class="local-pill"><span aria-hidden="true"></span><span id="runtime-label">等待连接</span></span>
         </div>
-        <ol id="transcript" aria-live="polite"></ol>
-        <form id="composer">
-          <textarea id="say-input" rows="2" placeholder="问一句(Enter 发送,Shift+Enter 换行)" autocomplete="off"></textarea>
-          <button type="submit" id="send-button">发送</button>
-          <button type="button" id="interrupt-button" title="停止当前任务(不停止助理)">停止任务</button>
-        </form>
+        <div id="conversation-space">
+          <div id="welcome">
+            <div class="welcome-emblem" aria-hidden="true"><span>✳</span></div>
+            <p class="eyebrow">想法在这里，慢慢成形</p>
+            <h2>有什么事，一起做。</h2>
+            <p class="welcome-copy">读代码、理思路，或把琐事交给我。<br />从一段对话开始。</p>
+            <div class="starters" aria-label="对话灵感">
+              <button type="button" data-prompt="帮我梳理当前项目的结构，找出主要入口。"><span aria-hidden="true">⌘</span><strong>读懂项目</strong><small>从结构和入口开始</small><span class="starter-arrow" aria-hidden="true">↗</span></button>
+              <button type="button" data-prompt="帮我把下面的想法整理成可执行的步骤："><span aria-hidden="true">☷</span><strong>理清思路</strong><small>把想法拆成下一步</small><span class="starter-arrow" aria-hidden="true">↗</span></button>
+              <button type="button" data-prompt="帮我检查下面这段代码，找出问题并说明原因："><span aria-hidden="true">⌁</span><strong>一起写代码</strong><small>检查、解释、改进</small><span class="starter-arrow" aria-hidden="true">↗</span></button>
+            </div>
+          </div>
+          <ol id="transcript" aria-label="对话消息" aria-live="polite"></ol>
+        </div>
+        <div class="composer-wrap">
+          <form id="composer">
+            <label class="sr-only" for="say-input">消息</label>
+            <textarea id="say-input" rows="2" placeholder="说说你想做什么…" autocomplete="off"></textarea>
+            <div class="composer-bottom"><span class="composer-hint">Enter 发送 <span>·</span> Shift + Enter 换行</span><div class="composer-actions"><button type="button" id="interrupt-button" title="停止当前任务，不停止助理" disabled>停止</button><button type="submit" id="send-button">发送 <span aria-hidden="true">↑</span></button></div></div>
+          </form>
+          <p class="composer-footnote">关掉网页，已受理的任务仍会继续。重要结果请核对。</p>
+        </div>
       </section>
     </section>
 
     <!-- 任务:创建 + 列表(单次 W2;周期/暂停/恢复 W4) -->
     <section id="tasks-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">把事情安排好</p><h1>任务</h1><p>现在交代，按时去做。进度和结果都留在这里。</p></div>
       <div class="panel">
         <h2>新任务</h2>
         <p id="task-face-hint" class="hint" hidden></p>
         <form id="task-form">
-          <textarea id="task-prompt" rows="3" placeholder="要它办的事,一句话写清楚(提交即入账,关掉页面照跑)" autocomplete="off"></textarea>
+          <textarea id="task-prompt" rows="3" placeholder="写下要做的事，以及你希望拿到的结果…" autocomplete="off"></textarea>
           <div class="row">
             <label>计划
               <select id="task-schedule-kind">
-                <option value="once">单次(立即)</option>
-                <option value="interval">周期(间隔)</option>
-                <option value="cron">周期(cron)</option>
+                <option value="once">单次任务</option>
+                <option value="interval">按间隔重复</option>
+                <option value="cron">自定时间（cron）</option>
               </select>
             </label>
             <span id="task-schedule-once" class="schedule-extra">
-              <label>定时(可选,分钟数)<input id="task-due-in-minutes" type="number" min="0" step="1" placeholder="0=立即" /></label>
+              <label>延后开始（分钟，可选）<input id="task-due-in-minutes" type="number" min="0" step="1" placeholder="0，立即开始" /></label>
             </span>
             <span id="task-schedule-interval" class="schedule-extra" hidden>
-              <label>间隔秒<input id="task-interval-seconds" type="number" min="1" step="1" placeholder="3600" /></label>
+              <label>重复间隔（秒）<input id="task-interval-seconds" type="number" min="1" step="1" placeholder="3600" /></label>
             </span>
             <span id="task-schedule-cron" class="schedule-extra" hidden>
               <label>cron 表达式<input id="task-cron-expr" type="text" placeholder="*/30 * * * *(五字段:分 时 日 月 周)" autocomplete="off" /></label>
               <label>时区<input id="task-timezone" type="text" placeholder="Asia/Shanghai" autocomplete="off" /></label>
             </span>
-            <label id="task-schedule-misfire-wrap">错过的拍
+            <label id="task-schedule-misfire-wrap">错过执行时间时
               <select id="task-misfire">
-                <option value="coalesce">合并补一拍(默认)</option>
-                <option value="skip">跳过不补</option>
+                <option value="coalesce">补做一次</option>
+                <option value="skip">跳过这次</option>
               </select>
             </label>
-            <label class="checkbox" id="task-notify-wrap" hidden><input id="task-notify-on-change" type="checkbox" /> 有变化才投递(heartbeat)</label>
+            <label class="checkbox" id="task-notify-wrap" hidden><input id="task-notify-on-change" type="checkbox" /> 结果有变化才通知</label>
           </div>
           <div class="row">
             <button type="submit" id="task-create-button">创建任务</button>
@@ -95,12 +112,13 @@
 
     <!-- 结果:最近任务结果(执行/投递状态区分) -->
     <section id="results-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">每件事，都有回音</p><h1>结果</h1><p>查看任务产出，接着往下做。</p></div>
       <div class="panel">
         <div class="panel-head">
           <h2>结果</h2>
           <button type="button" id="result-refresh-button">刷新</button>
         </div>
-        <p class="hint">任务结果先落本地:执行成功且投递 delivered 即齐;pending 是还在投;flagged/needs_review 要人工核对。未配渠道不会丢结果。</p>
+        <p class="hint">任务结果保存在本机。若显示待投递或需核对，可展开查看详情。</p>
         <ul id="result-list" aria-live="polite"></ul>
         <p id="result-empty-hint" class="hint">还没有可看的结果。</p>
       </div>
@@ -108,16 +126,18 @@
 
     <!-- 审批:任务执行里的工具确认 -->
     <section id="approvals-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">关键一步，由你决定</p><h1>审批</h1><p>需要你点头的操作，集中在这里。</p></div>
       <div class="panel">
         <h2>待审批</h2>
-        <p class="hint">自动任务里需要确认的工具会推到这里。不批、关页、断线都不会默认放行;超时按拒绝收口。</p>
+        <p class="hint">确认后才会执行。离线或超过等待时间，都不会自动批准。</p>
         <ul id="approval-list" aria-live="polite"></ul>
-        <p id="approval-empty-hint" class="hint">没有悬着的审批。</p>
+        <p id="approval-empty-hint" class="hint">暂时没有需要确认的操作。</p>
       </div>
     </section>
 
     <!-- 设置:模型配置(首配流程)+ 实例信息 -->
     <section id="config-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">按你的习惯来</p><h1>设置</h1><p>连接模型，管理渠道，查看助理运行状态。</p></div>
       <div class="panel" id="config-panel">
         <h2>模型</h2>
         <p id="config-status-line" class="hint"></p>
@@ -143,7 +163,7 @@
         <dl id="assistant-info"></dl>
         <div class="row danger">
           <button type="button" id="stop-assistant-button" title="停止整个助理进程(在跑任务按打断收口)">停止助理</button>
-          <span class="hint">停止任务是上面的"停止任务";停止助理会结束本进程。</span>
+          <span class="hint">这会结束助理进程。只想中止当前操作，请回对话页点“停止”。</span>
         </div>
       </div>
       <div class="panel" id="channel-panel">
@@ -159,13 +179,13 @@
         <ul id="pairing-list" aria-live="polite"></ul>
         <form id="pairing-by-code-form" class="row">
           <select id="pairing-code-channel" aria-label="配对渠道账号"></select>
-          <input id="pairing-code-input" type="text" placeholder="配对码(对方收到的提示里)" autocomplete="off" />
+          <input id="pairing-code-input" type="text" placeholder="输入对方收到的配对码" autocomplete="off" />
           <button type="submit">按码批准</button>
           <span id="pairing-code-result"></span>
         </form>
       </div>
       <div class="panel" id="service-panel">
-        <h2>系统托管(gateway 服务)</h2>
+        <h2>后台服务</h2>
         <p id="service-status-line" class="hint">读取中…</p>
         <div class="row">
           <button type="button" id="service-refresh-button">刷新</button>
@@ -177,10 +197,10 @@
 
   <!-- 配对/占用提示层 -->
   <div id="notice-overlay" hidden>
-    <div id="notice-box">
+    <div id="notice-box" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-body" tabindex="-1">
       <h3 id="notice-title"></h3>
       <p id="notice-body"></p>
-      <div class="row"><button type="button" id="notice-action" hidden></button></div>
+      <div class="row"><button type="button" id="notice-close">返回</button><button type="button" id="notice-action" hidden></button></div>
     </div>
   </div>
 

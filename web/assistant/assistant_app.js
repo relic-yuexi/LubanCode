@@ -28,6 +28,7 @@
   const sendButton = el('send-button');
   const interruptButton = el('interrupt-button');
   const newThreadButton = el('new-thread-button');
+  const welcome = el('welcome');
   const noticeOverlay = el('notice-overlay');
   const noticeTitle = el('notice-title');
   const noticeBody = el('notice-body');
@@ -73,10 +74,12 @@
   let itemRows = new Map(); // itemId -> {li, textNode}
   function resetTranscript() {
     transcript.textContent = '';
+    welcome.hidden = false;
     itemRows = new Map();
   }
 
   function appendBubble(kind, label, text) {
+    welcome.hidden = true;
     const li = document.createElement('li');
     li.className = 'msg ' + kind;
     if (label) {
@@ -157,8 +160,9 @@
     turnRunning = running;
     sendButton.disabled = running;
     interruptButton.disabled = !running;
-    turnStatusLabel.textContent = running ? '在跑…'
-      : (lastStatus ? ('上次回合: ' + lastStatus) : '');
+    const statuses = { completed: '已完成', succeeded: '已完成', failed: '执行失败', interrupted: '已停止', cancelled: '已取消' };
+    turnStatusLabel.textContent = running ? '正在处理…'
+      : (lastStatus ? (statuses[lastStatus] || lastStatus) : '');
   }
 
   // thread/read 的历史条目 → 流水(恢复用;content 块: text/tool_use/tool_result)
@@ -186,13 +190,21 @@
     return channel.request('thread/list', { scope: 'cwd' }).then(function (reply) {
       knownThreads = (reply.result && reply.result.threads) || [];
       threadList.textContent = '';
+      el('history-empty').hidden = knownThreads.length > 0;
       for (const entry of knownThreads.slice(0, 50)) {
         const li = document.createElement('li');
-        li.textContent = entry.title || entry.firstUserText || String(entry.threadId).slice(0, 12);
-        li.title = (entry.title || '') + ' · ' + (entry.updatedAt || '') +
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = entry.title || entry.firstUserText || String(entry.threadId).slice(0, 12);
+        button.title = (entry.title || '') + ' · ' + (entry.updatedAt || '') +
           ' · ' + (entry.messageCount || 0) + ' 条';
         if (entry.threadId === currentThreadId) li.classList.add('active');
-        li.addEventListener('click', function () { openThread(entry.threadId); });
+        button.addEventListener('click', function () {
+          selectView('chat');
+          openThread(entry.threadId);
+          for (const row of threadList.children) row.classList.toggle('active', row === li);
+        });
+        li.appendChild(button);
         threadList.appendChild(li);
       }
     }).catch(function () { /* 列表失败不掀聊天 */ });
@@ -201,7 +213,9 @@
   function openThread(threadId) {
     currentThreadId = threadId;
     sessionStorage.setItem('assistant.lastThread', threadId);
-    threadIdLabel.textContent = '会话 ' + String(threadId).slice(0, 8);
+    const entry = knownThreads.find(function (thread) { return thread.threadId === threadId; });
+    threadIdLabel.textContent = entry && (entry.title || entry.firstUserText) || '对话 ' + String(threadId).slice(0, 8);
+    threadIdLabel.title = threadIdLabel.textContent;
     resetTranscript();
     setTurnRunning(false, '');
     // 领域快照恢复(§六:刷新恢复走 thread/read,不靠页面攒的账)。
@@ -223,9 +237,14 @@
   function setConn(text, on) {
     connState.textContent = text;
     connState.className = 'state ' + (on ? 'on' : 'off');
+    el('runtime-label').textContent = on ? '本地运行' : '等待连接';
+    el('runtime-pill').classList.toggle('connected', on);
+    el('runtime-pill').title = text;
   }
 
+  let noticePreviousFocus = null;
   function showNotice(title, body, actionText, action) {
+    if (noticeOverlay.hidden) noticePreviousFocus = document.activeElement;
     noticeTitle.textContent = title;
     noticeBody.textContent = body;
     if (actionText) {
@@ -239,11 +258,26 @@
       noticeAction.hidden = true;
     }
     noticeOverlay.hidden = false;
+    el('notice-box').focus();
   }
 
   function hideNotice() {
     noticeOverlay.hidden = true;
+    if (noticePreviousFocus && noticePreviousFocus.isConnected) noticePreviousFocus.focus();
   }
+  el('notice-close').addEventListener('click', hideNotice);
+  noticeOverlay.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') { event.preventDefault(); hideNotice(); }
+    if (event.key !== 'Tab') return;
+    const buttons = Array.from(noticeOverlay.querySelectorAll('button')).filter(function (button) { return !button.hidden && !button.disabled; });
+    const first = buttons[0], last = buttons[buttons.length - 1];
+    if (!first) return;
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === el('notice-box'))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === el('notice-box'))) {
+      event.preventDefault(); first.focus();
+    }
+  });
 
   function attachChannelHandlers() {
     channel.onEvent('item/started', function (params) { handleItemEvent('item/started', params); });
@@ -312,8 +346,8 @@
       setConn('已连接', true);
       channel.request('assistant/status', {}).then(function (reply) {
         const status = reply.result || {};
-        assistantMeta.textContent = 'profile=' + (status.profile || '?') +
-          ' · ' + (status.lubancodeVersion || '') + ' · detached';
+        assistantMeta.textContent = status.cwd || ('工作空间 · ' + (status.profile || 'default'));
+        assistantMeta.title = assistantMeta.textContent;
         const info = el('assistant-info');
         info.textContent = '';
         const automation = status.automation || {};
@@ -435,38 +469,63 @@
   });
 
   // ---- 聊天 ----
-  newThreadButton.addEventListener('click', function () {
-    if (!channel) return;
+  let startingThread = null;
+  function startNewThread() {
+    if (!channel) return Promise.resolve(false);
+    if (startingThread) return startingThread;
+    selectView('chat');
+    newThreadButton.disabled = true;
     const opId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
-    channel.request('thread/start', { clientOperationId: opId }).then(function (reply) {
+    startingThread = channel.request('thread/start', { clientOperationId: opId }).then(function (reply) {
       if (reply.error) {
         appendBubble('error', '开会话失败', reply.error.message || '');
-        return;
+        return false;
       }
       const result = reply.result || {};
       if (result.duplicate && result.threadId) {
         openThread(result.threadId);
-        return;
+        return true;
       }
       currentThreadId = result.threadId || '';
       sessionStorage.setItem('assistant.lastThread', currentThreadId);
-      threadIdLabel.textContent = '会话 ' + String(currentThreadId).slice(0, 8);
+      threadIdLabel.textContent = '新对话';
+      threadIdLabel.title = '';
       resetTranscript();
+      setTurnRunning(false, '');
       refreshThreadList();
+      sayInput.focus();
+      return Boolean(currentThreadId);
     }).catch(function (error) {
       appendBubble('error', '开会话出错', String(error.message || error));
+      return false;
+    }).finally(function () {
+      startingThread = null;
+      newThreadButton.disabled = false;
+    });
+    return startingThread;
+  }
+  newThreadButton.addEventListener('click', function () { startNewThread(); });
+  document.querySelectorAll('[data-prompt]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      sayInput.value = button.dataset.prompt;
+      sayInput.dispatchEvent(new Event('input'));
+      sayInput.focus();
     });
   });
 
-  composer.addEventListener('submit', function (event) {
+  let submitting = false;
+  composer.addEventListener('submit', async function (event) {
     event.preventDefault();
     const text = sayInput.value.trim();
-    if (!text || !channel) return;
+    if (!text || !channel || submitting || turnRunning) return;
+    submitting = true;
     if (!currentThreadId) {
-      appendBubble('error', '提示', '先点"新会话"开一场,再说话。');
-      return;
+      const created = await startNewThread();
+      if (!created) { submitting = false; return; }
     }
+    submitting = false;
     sayInput.value = '';
+    sayInput.style.height = '';
     appendBubble('user', '你', text);
     const opId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
     setTurnRunning(true, '');
@@ -491,10 +550,14 @@
   });
 
   sayInput.addEventListener('keydown', function (event) {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       composer.requestSubmit();
     }
+  });
+  sayInput.addEventListener('input', function () {
+    sayInput.style.height = 'auto';
+    sayInput.style.height = Math.min(sayInput.scrollHeight, 180) + 'px';
   });
 
   // ---- W2:任务 / 结果 / 审批 / 补账;W4:周期/暂停/恢复/run-now ----
@@ -1254,16 +1317,19 @@
   // ---- 视图切换 ----
   const views = { chat: el('chat-view'), config: el('config-view'), tasks: el('tasks-view'),
     results: el('results-view'), approvals: el('approvals-view') };
+  function selectView(name) {
+    for (const key of Object.keys(views)) views[key].hidden = key !== name;
+    document.querySelectorAll('#topnav button[data-view]').forEach(function (button) {
+      const active = button.dataset.view === name;
+      button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
+    });
+  }
   document.querySelectorAll('#topnav button[data-view]').forEach(function (button) {
     button.addEventListener('click', function () {
       const name = button.dataset.view;
-      for (const key of Object.keys(views)) {
-        views[key].hidden = key !== name;
-      }
-      document.querySelectorAll('#topnav button').forEach(function (b) {
-        b.classList.toggle('active', b === button);
-        if (b === button) { b.setAttribute('aria-current', 'page'); } else { b.removeAttribute('aria-current'); }
-      });
+      selectView(name);
       if (name === 'config') refreshConfigStatus();
       if (name === 'tasks' || name === 'results') refreshTasks();
       if (name === 'approvals') refreshApprovals();
