@@ -192,6 +192,14 @@ struct AssistantCliArgs {
 
 };
 
+// kanban 子命令(会话看板单):`lubancode kanban [--no-open] [--output <路径>]`。
+// 只读快照:扫全量 workspace 的会话索引,渲染自包含 HTML 看板(按状态
+// 分列、按项目分组,点开看 session/project 详情),落盘后默认开浏览器。
+struct KanbanCliArgs {
+    bool no_open = false;    // --no-open:不开浏览器,只打印产物路径
+    std::string output;      // --output <路径>;空 = <状态根>/kanban/kanban.html
+};
+
 // LuaHook 单 P1-D 的 hook 子命令:`lubancode hook validate <包目录> [--json]`
 // 与 `lubancode hook test <包目录> [--json]`(§8.2 校验与试跑;validate 只跑
 // 静态档,test 静态 + fixtures fake 档)。另有 `lubancode hook init <名字>
@@ -239,6 +247,8 @@ enum class CliAction {
     BadIm,                    // im 参数不对:人话已塞进 error_text
     RunAssistant,             // assistant 子命令:常驻助理 Web 主界面(W1)
     BadAssistant,             // assistant 子命令参数不对:人话已塞进 error_text
+    RunKanban,                // kanban 子命令:会话看板 HTML 快照(看板单)
+    BadKanban,                // kanban 子命令参数不对:人话已塞进 error_text
     RunHookValidate,          // hook validate/test 子命令:LuaHook P1-D 校验与试跑
     RunHookInit,              // hook init 子命令:落官方 scaffold
     BadHook,                  // hook 子命令参数不对:人话已塞进 error_text
@@ -258,6 +268,7 @@ struct ParsedCliArgs {
     ChannelPairingCliArgs channel_pairing;  // action == RunChannelPairing 时有效
     ImCliArgs im;            // action == RunIm 时有效
     AssistantCliArgs assistant;  // action == RunAssistant 时有效(W1)
+    KanbanCliArgs kanban;    // action == RunKanban 时有效(看板单)
     HookCliArgs hook;        // action == RunHookValidate/RunHookInit 时有效(P1-D)
 };
 

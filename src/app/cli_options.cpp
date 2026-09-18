@@ -857,6 +857,34 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.assistant = assistant;
             return parsed;
         }
+        // kanban 子命令(会话看板单):lubancode kanban [--no-open]
+        // [--output <路径>]。只认裸词打头且此前没有位置参数;形状不对当场
+        // 退用法,不静默当普通位置参数走单发问句。
+        if (arg == "kanban" && options.positional.empty()) {
+            KanbanCliArgs kanban;
+            for (std::size_t extra = i + 1; extra < args.size(); ++extra) {
+                if (args[extra] == "--no-open") {
+                    kanban.no_open = true;
+                    continue;
+                }
+                if (args[extra] == "--output") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty()) {
+                        parsed.action = CliAction::BadKanban;
+                        parsed.error_text = "--output 需要一个文件路径";
+                        return parsed;
+                    }
+                    kanban.output = args[++extra];
+                    continue;
+                }
+                parsed.action = CliAction::BadKanban;
+                parsed.error_text = "kanban 认不得参数 \"" + args[extra] +
+                                    "\":只认 --no-open / --output <路径>";
+                return parsed;
+            }
+            parsed.action = CliAction::RunKanban;
+            parsed.kanban = kanban;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;
