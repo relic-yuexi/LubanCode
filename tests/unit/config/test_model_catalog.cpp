@@ -246,7 +246,7 @@ TEST_CASE("WithModelInstructions: 独立段追加在末尾,人格段/环境段�
     // 原提示(人格段 + 环境段)一个字不少地在前头。
     CHECK(with.compare(0, base.size(), base) == 0);
     CHECK(with.find("你是自定义人格。") != std::string::npos);
-    CHECK(with.find("- 工作目录: D:/work") != std::string::npos);  // 0.19.x:环境段改成运行环境清单行
+    CHECK(with.find("- 会话启动目录: D:/work") != std::string::npos);  // 环境段清单行(基线目录)
     // 模型专属段接在后面,带来源说明,收尾是 base_instructions 本身。
     const std::size_t seg_pos = with.find("模型专属指令");
     REQUIRE(seg_pos != std::string::npos);

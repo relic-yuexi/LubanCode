@@ -152,8 +152,8 @@ TEST_CASE("agent isolation: 写进房、主 cwd 不动、有活房保留并附�
     REQUIRE(backend.captured_requests.size() == 2);
     CHECK(backend.captured_requests[0].system.find("隔离的 git worktree") != std::string::npos);
     CHECK(backend.captured_requests[0].system.find(room_name) != std::string::npos);
-    CHECK(backend.captured_requests[0].system.find("- 工作目录:") ==
-          backend.captured_requests[0].system.rfind("- 工作目录:"));
+    CHECK(backend.captured_requests[0].system.find("- 会话启动目录:") ==
+          backend.captured_requests[0].system.rfind("- 会话启动目录:"));
     REQUIRE_FALSE(backend.captured_requests[0].messages.empty());
     REQUIRE_FALSE(backend.captured_requests[0].messages.front().content.empty());
     const auto* first_text = std::get_if<api::TextBlock>(&backend.captured_requests[0].messages.front().content[0]);

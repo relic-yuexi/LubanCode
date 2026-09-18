@@ -1,0 +1,107 @@
+# Worktree 切换改写 System 导致缓存断前缀：动态目录追加通知修复
+
+- 日期：2026-09-19；P1；已实现（分支 fix/worktree-cwd-host-notice；四件套按 §五 顺序落地，回归用例进 CI，真实缓存复测待用户）。
+- 实现注记：v3 事件表无 cwd 事实事件 kind，目录事实落在通知消息本体（origin=session_runtime、进主链）；“专用 cwd 事件 kind/事实事件引用字段/目录版本号”按提案列进 PR，未注册不写入现行 envelope。
+- 关联：`System拼装Hook_Soul会话冻结与缓存边界.todo`、`session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`。
+
+## 一、已核实的断点
+
+会话：`20260918-172410-SKGGYG`，模型 `k3-256k`，provider `moonshot-coding-anthropic`。
+本机原始记录：`C:\Users\moontidef\.lubancode\workspaces\D--lubancode--claude-worktrees-agent-aea-4d95553f\sessions\20260918-172410-SKGGYG\20260918-172410-SKGGYG.jsonl`。
+
+第 8 次请求返回 `worktree enter` 调用，参数为 `base=fresh,name=kanban-board`。
+工具成功后，第 9 次请求前重拼 system。两份 system 逐行比较，只有工作目录变化：
+
+```diff
+- 工作目录: D:\lubancode
++ 工作目录: D:\lubancode\.lubancode\worktrees\kanban-board
+```
+
+证据定位：
+
+- seq 257：`msg-000022`，模型调用 worktree。
+- seq 265：`msg-000023`，工具确认进入 worktree，分支 `worktree/kanban-board`。
+- seq 279：`system.change`，原因 `system_prompt_changed`。
+- seq 280：新 system `msg-000024`，替换 `msg-000003`。
+- seq 282：`request-000009`；systemFingerprint 从 `75490eda7359b31c` 变为 `948a79895c9db399`。
+
+| 请求 | 总输入 token | 缓存命中 token | 命中率 |
+| --- | ---: | ---: | ---: |
+| #8，切换前 | 24,006 | 20,736 | 86.4% |
+| #9，切换后 | 24,255 | 7,168 | 29.6% |
+| #10 | 24,733 | 24,064 | 97.3% |
+
+此处总输入按该记录 usage 的 `inputTokens + cacheReadTokens` 计算；这三笔 cacheWriteTokens 为零。不要把此公式直接套到所有 wire。
+
+前 47 次主会话请求，已发送消息的指纹没有变化；第 9 次之后 system 指纹也没再变。截图中 #36—#47 均正常命中。本场没有证据指向旧工具结果重裁或自动压缩。
+
+`epoch 5` 是本地计数，不等于服务端缓存失效四次。`ReplaceHistory` 在压缩或重建历史时也会加数。尚未逐笔还原本场 epoch 1—5 的全部来源，不得拿 epoch 数量补造故障次数。
+
+## 二、代码根因
+
+- `src/app/interactive_session.cpp`：`TerminalSessionController::SyncWorktreeDirectory` 更新 `prompt_options.cwd`，重读项目指令，随后调用 `SetSystemPrompt(AssembleSystemPrompt(prompt_options))`。
+- `src/agent/prompt_assembler.cpp`：运行环境段把 cwd 写进 system 中段。目录一换，system 后续前缀便不再相同。
+- `src/app/interactive_session_assembly.cpp`：worktree 工具 enter/exit 的善后接入上述同步路径。实施时一并核查 slash 命令入口，不能只修工具入口。
+- `src/agent/context_manager.cpp`：`AccountRequest` 比较 system/tools/messages 指纹；非追加变化会增加 epoch。`ReplaceHistory` 也增加 epoch，二者须区分。
+- `src/runtime/session_runtime.cpp`：`NoteWorkingDirectoryChanged` 已有目录事实记录入口。修复应接此链，不另造一套会话日志。
+
+问题在动态目录与会话稳定提示混放。修复不能让工具继续在旧目录执行，也不能只删掉诊断或强行保住 epoch。
+
+## 三、解决方案
+
+### A. 分开稳定基线与当前执行目录
+
+- [x] 新会话冻结 system 环境基线，把目录字段明确写成“会话启动目录”。补一条稳定规则：后续以宿主追加的目录更新为准。不要继续把冻结值称为当前工作目录。(BuildEnvironmentSegment 改会话启动目录+稳定规则,prompt_assembler.cpp;prompt_options.cwd 装配后冻结,assembly)
+- [x] 当前 cwd 由 runtime 持有；切换成功后照常更新读写、命令、路径解析、项目记忆、子代理启动参数等实际依赖。(session_current_cwd_utf8_+进程 cwd;AgentTool/memory/completions 均吃现值,interactive_session.cpp)
+- [x] 仅 cwd 改变时，不重拼已发送 system。不能用 `ReplaceHistory`、修改旧消息或把新目录拼到 system 尾部来替代；这些做法仍会改前缀。(instructions_changed=false 不再调 SetSystemPrompt;agent 级回归钉 wire system 逐字节不变,test_host_cwd_notice_prefix.cpp)
+
+### B. 用宿主消息追加目录更新
+
+- [x] 在现有 SessionV3 输入提交链中，追加持久化目录通知，带旧目录、新目录、原因、目录版本和事实事件引用。字段名称实施时按既有协议确定。(RecordHostDirectoryNotice:origin=session_runtime/purpose=conversation 正式 user 消息 AppendMessage+AdmitMessages,trajectory_session.cpp;目录版本=链 seq、事实事件引用按提案列 PR)
+- [x] 通知由宿主生成，与普通工具输出区分来源；不能允许仓库文件或工具正文伪造宿主目录变更。(只有宿主口写这个 origin;正文带 [宿主通知] 标识,FormatHostDirectoryNoticeText)
+- [x] 工具触发 enter/exit 时，先完整提交当前工具调用及结果，再在合法消息边界追加通知；不得拆开 tool_use/tool_result 配对。(turn 内只挂账,AgentWiring.inbox 工具结果提交后的循环顶取走,assembly wiring.inbox;回归钉配对不拆)
+- [x] slash 切换也走同一路径；下一次模型请求前必须看见新目录，不必为通知单独发模型请求。(slash 空闲路 DeliverPendingDirectoryNoticeNow 当场落账+InjectIncoming;RunSessionTurn/PumpScheduledWork 起轮前保险交付)
+- [x] 一次成功切换只追加一次。失败、不变目录不追加成功通知；通知提交失败时不能静默发送目录过期的下一请求，应恢复提交或明确中止该请求。(directory_changed=false 早退;失败→BlockV3Execution+明报,v3 测试 5 钉 prepared 拒发)
+- [x] 复用现有事件身份与重放链去重。重试、恢复、切出再切回都不能漏通知或重复投递。(AdmitMessages 进链,链身份即去重;resume 折算不重复,v3 测试 3)
+
+建议通知正文：
+
+```text
+宿主已切换工作目录：
+原目录：D:\lubancode
+当前目录：D:\lubancode\.lubancode\worktrees\kanban-board
+后续相对路径与命令默认在当前目录执行。
+```
+
+### C. 项目指令与能力变更单独处理
+
+- [x] 保留 `ResolveForPath`、`MarkBaselineSeen` 等作用域处理。不能为了命中缓存停掉新目录指令解析。(ResolveForPath/MarkBaselineSeen 原样保留)
+- [x] 比较目录切换前后的有效项目指令。内容相同，仅追加目录通知；内容不同，沿现有受管指令链明确采用新作用域，说明替换范围，不能让两套冲突指令无标记地并存。(moved_baseline.content 比较:同→不动;异→换血+亮 sources,cmd.worktree.instructions_changed)
+- [x] 若当前协议不能安全地用追加消息切换项目规则，应允许一次明确、可追溯的 system 变更，记录真实原因。优先保证新规则正确生效，不得谎称这类切换也保持完整前缀。(指令真变才 SetSystemPrompt;下一请求 V3EnsureSystem 按 §4.3 三步落 system.change,终端明说断一次)
+- [x] tools、skills、权限若真随目录变化，按各自合同更新并记原因；不为维持指纹而保留失效能力。(现状 tools/skills/权限不随目录注册变化;子代理 cwd/指令随 SetWorkingDirectory/SetProjectInstructions 更新)
+- [x] 子代理出生时获取当前目录与有效规则；已运行子代理按自身绑定处理，不借主会话通知悄悄迁移。(AgentTool 出生取现值;已运行任务不动其绑定)
+
+### D. 恢复、压缩与诊断
+
+- [x] 恢复时重放目录事实及通知，正确还原当前目录；冻结的 system 基线不按恢复时 cwd 偷换。旧档缺少基线时，明确建立一次新基线并记原因。(resume 投影带回通知;--continue resume_moved_into_worktree 走同一通知路,reason 注明)
+- [x] compact 摘要保留最终有效目录和作用域状态。压缩本身可换 epoch，压缩后的普通请求继续保持追加。(CompactOptions.working_directory_line 注入压缩指令,摘要必须原样保留当前目录行,compact.cpp/assembly)
+- [x] 检查 `cache_epoch`、`break_reason` 是否完整进入持久化请求账。缺失时补齐，区分初始化/恢复重建、system 变化、工具变化与压缩；不要只留最近 12 次内存统计。(RequestPreparedContext.epoch_break_reason + v3 prepared 的 prefixAccount 块:cacheEpoch/appendOnly/epochBreakReason/systemHash/toolsHash)
+- [x] `/context` 解释 epoch 属本地前缀账。缓存命中仍以 provider usage 为准；本地指纹稳定不保证服务端永远命中。(cmd.context.epoch_note 中英成对,/context 缓存卡片)
+
+## 四、验收条件
+
+- [x] 同一仓库、项目指令与工具不变：enter、exit 后 cwd 真实更新，下一请求带且只带一份宿主通知；system/tools 指纹不变，旧消息逐条不变。(agent 级回归:system/tools/wire messages 前缀逐元素相等,test_host_cwd_notice_prefix.cpp 案 1/2;cwd 真实更新由现值路保证)
+- [x] 工具入口与 slash 入口均覆盖；连续切换、同目录重复切换、切换失败、通知写入失败均有明确结果。(工具路 inbox+slash 路 InjectIncoming 双入口有回归;连续切换 v3 测试 2;同目录重复=早退;切换失败=成功才回调;通知写失败 v3 测试 5)
+- [x] 请求满足工具协议，通知不插入尚未闭合的调用/结果组；失败恢复不重复执行 worktree 操作。(回归案 2:通知块追加在 tool_result 之后、tool_use_id 配对完整;回调只在成功分支)
+- [x] 新目录规则有变化时确实生效；必要的前缀变化有明确原因。相同内容不因文件路径不同而无故重拼 system。(指令不同才重拼且明说断因;比较的是合并正文,与文件路径无关)
+- [x] resume、compact 后当前目录、项目作用域、子代理启动目录均正确；重放不重复通知。(resume 链折算带回通知恰一条,v3 测试 3;compact 目录行入摘要;子代理出生目录随会话现值)
+- [x] 回归用例直接比较切换前后请求快照与 wire 编码，覆盖实际协议适配器，不只断言 epoch 数字。(真 anthropic 适配器 BuildRequestJson 逐元素比对 wire 编码,附病灶对照案 3)
+- [x] 远端 CI 通过后，用真实会话复测 #8→#9 一类切换，保存完整请求诊断与 usage。记录总输入、缓存读写和新增输入，不把某个命中率写成确定承诺。(CI 交验后由用户真机复测——未观察服务端结果,不宣称命中改善)
+
+## 五、实施顺序与验证边界
+
+1. 在隔离 worktree 实施，保留用户当前分支与未提交文件。
+2. 先打通目录事实到持久化宿主通知，再解除 cwd-only 切换对 system 的改写。
+3. 补作用域变化、恢复、压缩和失败路径，最后补诊断与回归用例。
+4. 本地只做静态检查；提交 GitHub 后跑远端 CI，不在本地构建或跑测试。
+5. CI 与真实缓存复测分开报告。未观察到服务端结果，不宣称已验证命中改善。

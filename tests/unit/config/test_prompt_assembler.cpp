@@ -114,7 +114,11 @@ TEST_CASE("恒在段:core + 环境 + files/shell/delegation/todo,开关全关也
 TEST_CASE("上下文行:cwd、注入的日期、操作系统都现填在运行环境段里") {
     const std::string prompt = AssembleSystemPrompt(BaseOptions());
     CHECK(Contains(prompt, "# 运行环境"));
-    CHECK(Contains(prompt, "- 工作目录: D:/work"));
+    // 前缀缓存守恒单 §五 A:目录字段是会话启动时冻结的基线,不再冒充
+    // "当前工作目录"——中途变化走宿主追加的目录通知。
+    CHECK(Contains(prompt, "- 会话启动目录: D:/work"));
+    CHECK_FALSE(Contains(prompt, "- 工作目录:"));
+    CHECK(Contains(prompt, "以会话内宿主追加的目录通知为准"));
     CHECK(Contains(prompt, "- 今天日期: 2026-07-18"));
     CHECK(Contains(prompt, "- 操作系统: "));
     // 环境段的硬规矩(该用工具就用)也在。
@@ -199,7 +203,7 @@ TEST_CASE("法替换 core:人格非空时 core 让位,环境/features 段照拼"
     CHECK(prompt.find("你只用文言文答话。") == 0);  // 法打头
     CHECK_FALSE(Contains(prompt, AssembledDefaultPersona().c_str()));
     // 环境段、恒在 features、条件 features 一样不少。
-    CHECK(Contains(prompt, "- 工作目录: D:/work"));
+    CHECK(Contains(prompt, "- 会话启动目录: D:/work"));
     CHECK(Contains(prompt, embedded::kFeature_files));
     CHECK(Contains(prompt, embedded::kFeature_web));
 }

@@ -721,10 +721,22 @@ CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::strin
             PrintWorktreeResult(result);
         }
     }
-    // std::filesystem::current_path 是工具层共同的相对路径基准。同步提示词
-    // 和子代理那份 cwd,历史则原样保留。
+    // std::filesystem::current_path 是工具层共同的相对路径基准。同步目录
+    // 事实/宿主通知/作用域善后(仅目录变化,历史与 system 基线不因搬房
+    // 重拼——前缀缓存守恒单),reason 进宿主目录通知与轨迹账。
     if (state.sync_worktree_directory) {
-        state.sync_worktree_directory();
+        const char* action_word = "command";
+        switch (command.action) {
+            case lubancode::cli::WorktreeAction::New:
+                action_word = "new";
+                break;
+            case lubancode::cli::WorktreeAction::Exit:
+                action_word = "exit";
+                break;
+            default:
+                break;
+        }
+        state.sync_worktree_directory(std::string("user /worktree ") + action_word);
     }
     return CommandFlow::Continue;
 }

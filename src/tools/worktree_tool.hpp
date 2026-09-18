@@ -10,8 +10,10 @@
 //      人可问,一律拒),不走 needs_confirm/三档确认。
 //   2. exit remove 遇脏房:必须用户点头,yolo 也不豁免。同上回调。
 //
-// enter/exit 动了进程 cwd,成功后调 on_session_moved(交互入口用它重拼
-// 系统提示、同步子代理 cwd——跟 /worktree 同一条 sync 路)。
+// enter/exit 动了进程 cwd,成功后调 on_session_moved(交互入口用它同步
+// 目录事实、发宿主目录通知、必要时按新作用域重拼系统提示——跟 /worktree
+// 同一条 sync 路)。回调参数是搬房原因(如 "model worktree enter"),进
+// 宿主通知与轨迹账,不冒充用户手笔。
 
 #pragma once
 
@@ -32,9 +34,10 @@ public:
     // true = 点头;false = 拒绝。交互入口注入,不设则两道硬确认一律拒。
     using ConfirmHandler = std::function<std::optional<bool>(const std::string& question_utf8)>;
 
-    // on_session_moved:enter/exit 成功搬了 cwd 之后回调一次(可为空)。
+    // on_session_moved:enter/exit 成功搬了 cwd 之后回调一次(可为空),
+    // 参数是搬房原因(宿主目录通知与轨迹账用)。
     WorktreeTool(lubancode::cli::WorktreeSession& session, ConfirmHandler confirm,
-                 std::function<void()> on_session_moved);
+                 std::function<void(const std::string& reason)> on_session_moved);
 
     std::string name() const override;
     std::string description() const override;
@@ -48,7 +51,7 @@ private:
 
     lubancode::cli::WorktreeSession& session_;
     ConfirmHandler confirm_;
-    std::function<void()> on_session_moved_;
+    std::function<void(const std::string& reason)> on_session_moved_;
 };
 
 }  // namespace lubancode::tools

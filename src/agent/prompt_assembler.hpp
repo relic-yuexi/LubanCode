@@ -8,7 +8,8 @@
 // 开新会话即生效,不用重编不用重启;嵌入版降级为默认值、播种源、回退源。
 //   core 模块(合起来 = 内置默认人格/法的还原源)恒在,法(system_prompt.md
 //   或 --system-prompt)非空时整段让位;
-//   运行环境段(工作目录、当天日期、操作系统 + 工具调用硬规矩)恒在,现填;
+//   运行环境段(会话启动目录[冻结基线]、当天日期、操作系统 + 工具调用硬
+//   规矩)恒在,现填;
 //   features:files/shell/delegation/todo 恒在;skills 有技能才注(后面紧跟
 //   技能清单);web/mcp/lsp 配了对应能力才注;
 //   platform 按 wire 注一个(anthropic / responses / chat_completions)。
@@ -69,7 +70,10 @@ struct PackageProfileRoot {
 };
 
 struct PromptOptions {
-    std::string cwd;             // 运行环境段现填
+    // 会话启动时冻结的基线目录(运行环境段现填)。前缀缓存守恒单 §五 A:
+    // 会话内 cwd 变化(worktree enter/exit)不回写这里,也不触发重拼——
+    // 目录更新走宿主追加的目录通知;当前 cwd 由宿主 runtime 自持。
+    std::string cwd;
     std::string persona;         // 非空 = 法/CLI 人格,整段替换 core 模块
     std::string skills_segment;  // 技能清单段;非空才注 skills 模块 + 清单本身
     std::string project_instructions;  // AGENTS.md 分层内容;非空才注入
@@ -199,7 +203,9 @@ struct PromptModuleSource {
 };
 std::vector<PromptModuleSource> PromptModuleSources(const std::string& prompts_dir);
 
-// 运行环境段:工作目录 + 当天日期 + 操作系统 + "优先调用工具"这条硬规矩。
+// 运行环境段:会话启动目录 + 当天日期 + 操作系统 + "优先调用工具"这条硬
+// 规矩。cwd 是会话启动时冻结的基线(前缀缓存守恒单 §五 A):目录中途变化
+// 走宿主追加的目录通知,不再改写这里——段里写明了这条稳定规则。
 // current_date 空串 = 现取本机日期。
 std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& current_date = std::string());
 

@@ -9,7 +9,9 @@
 // 分三类,各有其名:
 //   - 皮上的活字段:/model、/think 走 SetRequestProfile;/soul 走 SetSoul;
 //     模型目录指令走 SetModelInstructions;/worktree 换目录重拼提示走
-//     SetSystemPrompt;/context、/model 改窗口走 SetContextWindowTokens。
+//     SetSystemPrompt(前缀缓存守恒单 §五 C:仅项目指令作用域真变时走,
+//     目录切换本身不重拼——目录更新走宿主追加的目录通知);/context、
+//     /model 改窗口走 SetContextWindowTokens。
 //   - 接线:SetWiring 一只(inbox/压力钩/发号器整份换)。
 //   - 上下文策略:经 context() 直改 ContextManager(压缩开关)。
 
@@ -252,8 +254,10 @@ public:
     // 窗口是运行档案里唯一的活字段(/context、/model 的目录窗口生效口)。
     void SetContextWindowTokens(std::size_t window_tokens) { profile_.runtime.context_window_tokens = window_tokens; }
 
-    // /worktree 切换目录后只换运行环境段,已有聊天史要照留。主循环在下一
-    // 次请求前换掉系统提示,文件工具则由进程 CWD 即刻接管。
+    // 系统提示的会话级替换口。前缀缓存守恒单之后,/worktree 一类目录切换
+    // 不再走这里(目录更新由宿主以追加消息通知,system 里的目录字段冻结
+    // 为会话启动基线);只有项目指令作用域真变(§五 C)或 /clear 重建这类
+    // 明确、可追溯的变更才换系统提示,已有聊天史照留。
     void SetSystemPrompt(std::string system_prompt) { system_prompt_ = std::move(system_prompt); }
 
     // ---- 接线(病十二:inbox/压力钩/发号器一只门) ----
@@ -331,7 +335,7 @@ private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
     AgentProfile profile_;
-    std::string system_prompt_;              // 皮上的活段(/worktree 重拼;构造时从 profile 落)
+    std::string system_prompt_;  // 皮上的活段(作用域变更时换;构造时从 profile 落)
     std::string turn_context_;
     std::string active_turn_context_;        // 只在 Run() 活着时给 mid-turn compact 重注入
     bool run_active_ = false;

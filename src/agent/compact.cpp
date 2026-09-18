@@ -99,6 +99,13 @@ std::string BuildCompactInstruction(const CompactOptions& options) {
             instruction += std::to_string(i + 1) + ". " + options.required_open_items[i] + "\n";
         }
     }
+    // 前缀缓存守恒单 §五 D:compact 摘要保留最终有效目录——system 里的目录
+    // 是冻结基线,真实 cwd 在会话中途可能已切(worktree),压缩换史后这段
+    // 事实不能丢。
+    if (!options.working_directory_line.empty()) {
+        instruction += "\n\n" + options.working_directory_line +
+                       "\n交接摘要必须原样保留这一行(放在 [工作状态] 栏),后续命令与相对路径都按它执行。";
+    }
     if (!options.focus.empty()) {
         instruction += "\n重点保留:" + options.focus;
     }

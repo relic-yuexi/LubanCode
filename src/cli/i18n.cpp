@@ -978,6 +978,12 @@ const Entry kZhCN[] = {
     {"cmd.worktree.outside_prompt", "进这间园外的房?(会话目录、写权限与项目配置都会搬过去) [y/N]: "},
     {"cmd.worktree.verify_failed", "验明正身没过,拒绝进房:{0}"},
     {"cmd.worktree.cleaned", "顺手清扫了 {0} 间隔离子代理的陈工作树(只清 agent- 前缀且有活已跳过的)。"},
+    // 前缀缓存守恒单:搬房善后的两条人话(指令作用域真变要明说,通知
+    // 落不住要明说)。
+    {"cmd.worktree.instructions_changed",
+     "新目录的项目指令不同,系统提示已按新作用域重建(这一次前缀缓存会断):{0}"},
+    {"cmd.worktree.notice_failed",
+     "宿主目录通知没写进会话账({0}),后续模型请求已阻断;请重试切换,或换目录后重开会话。"},
 
     // ---- /config 诊断 ----
     {"config.header", "lubancode 最终生效的配置:"},
@@ -1390,6 +1396,7 @@ const Entry kZhCN[] = {
     {"cmd.context.bd.cache", "(缓存命中 {0},{1}%)"},
     {"cmd.context.bd.cache_no_ratio", "(缓存命中 {0})"},
     {"cmd.context.epoch", "前缀 epoch {0}:命中 {1} / 总输入 {2}({3}%)"},
+    {"cmd.context.epoch_note", "epoch 是本地前缀账的计数,不等于服务端缓存失效次数;命中以 provider usage 为准。"},
     {"cmd.context.cache_session", "会话累计:命中 {0} / 总输入 {1}({2}%)"},
     {"cmd.context.cache_history_header", "逐请求缓存命中(仅主会话,会话内最近 {0} 次模型请求,跨用户轮次,最旧在前):"},
     {"cmd.context.cache_history_counts", "覆盖 {0} 个用户轮次 / {1} 次模型请求"},
@@ -3113,6 +3120,15 @@ const Entry kEn[] = {
     {"cmd.worktree.outside_prompt", "Enter this worktree outside the managed yard? (session cwd, write access and project config move with it) [y/N]: "},
     {"cmd.worktree.verify_failed", "Identity check failed; refusing to enter: {0}"},
     {"cmd.worktree.cleaned", "Cleaned up {0} stale subagent worktrees (agent- prefix only; ones with pending work were skipped)."},
+    // Prefix-cache conservation: two plain-word lines for the move-aftercare
+    // (scope really changed must be said; a notice that failed to persist must
+    // be said).
+    {"cmd.worktree.instructions_changed",
+     "Project instructions differ in the new directory; the system prompt was rebuilt for the new "
+     "scope (this breaks the prefix cache once): {0}"},
+    {"cmd.worktree.notice_failed",
+     "The host directory notice could not be persisted to the session ledger ({0}); further model "
+     "requests are blocked. Retry the switch, or restart the session from another directory."},
 
     // ---- /config diagnostics ----
     {"config.header", "Effective lubancode configuration:"},
@@ -3595,6 +3611,9 @@ const Entry kEn[] = {
 
     // cmd.context.* 大族仍按下面的 P1 清单回退 zh-CN,这两个口径说明键随
     // "context 状态栏回合内刷新"一起先补上英文,中英成对。
+    {"cmd.context.epoch_note",
+     "(epoch counts local prefix breaks only; it does not equal server-side cache invalidations. Cache "
+     "hits are judged by provider usage)"},
     {"cmd.context.note.semantics",
      "(context = usage of the most recent main-session request; not cumulative spend, sub-agent tokens "
      "not included)"},

@@ -16,7 +16,7 @@ std::string PathToUtf8(const std::filesystem::path& path) {
 }  // namespace
 
 WorktreeTool::WorktreeTool(lubancode::cli::WorktreeSession& session, ConfirmHandler confirm,
-                           std::function<void()> on_session_moved)
+                           std::function<void(const std::string& reason)> on_session_moved)
     : session_(session), confirm_(std::move(confirm)), on_session_moved_(std::move(on_session_moved)) {}
 
 std::string WorktreeTool::name() const {
@@ -160,7 +160,7 @@ Tool::Result WorktreeTool::HandleEnter(const nlohmann::json& input) {
             std::string text = "已住进 worktree 房:\n路径: " + PathToUtf8(result.path) + "\n分支: " + result.branch +
                                "\n整场会话已搬进去:读写、命令都在房内;干完用 worktree exit keep|remove 出房。";
             if (on_session_moved_) {
-                on_session_moved_();
+                on_session_moved_("model worktree enter");
             }
             return {std::move(text), false};
         }
@@ -207,12 +207,12 @@ Tool::Result WorktreeTool::HandleExit(const nlohmann::json& input) {
     switch (result.code) {
         case lubancode::cli::WorktreeResultCode::Kept:
             if (on_session_moved_) {
-                on_session_moved_();
+                on_session_moved_("model worktree exit keep");
             }
             return {"已搬回原目录,房留着: " + PathToUtf8(result.path), false};
         case lubancode::cli::WorktreeResultCode::Removed:
             if (on_session_moved_) {
-                on_session_moved_();
+                on_session_moved_("model worktree exit remove");
             }
             return {"已搬回原目录,房与分支已删: " + PathToUtf8(result.path), false};
         case lubancode::cli::WorktreeResultCode::NoActiveWorktree:

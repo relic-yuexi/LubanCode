@@ -149,8 +149,9 @@ struct SessionStack {
     const std::optional<std::string> active_provider_write_path;
 
     // ---- 晚绑定槽(会话控制器装配尾填)----
-    // worktree 工具 enter/exit 的善后(目录同步)。
-    std::function<void()> after_worktree_moved;
+    // worktree 工具 enter/exit 的善后(目录同步)。参数是搬房原因
+    //(前缀缓存守恒单 §五 B:进宿主目录通知与轨迹账)。
+    std::function<void(const std::string& reason)> after_worktree_moved;
 
     // ---- 窄口(ToolRuntime 在构造体内 emplace,统一走这几个)----
     lubancode::tools::ToolRegistry& registry();

@@ -404,7 +404,8 @@ struct SessionCommandState {
     std::string& start_ts;                   // /clear 翻新会话 id 时间戳
     std::function<void()> on_session_restarted;  // /clear 善后(project memory 源)
     std::function<void(const std::string&)> on_title_changed;  // peer 名册改名,可空
-    std::function<void()> sync_worktree_directory;  // resume 搬房后的善后
+    // resume 搬房后的善后(参数 = 搬房原因,进宿主目录通知与轨迹账)。
+    std::function<void(const std::string& reason)> sync_worktree_directory;
     // /clear 的子代理清场(0.28.x):停掉全部后台任务、把未送达的介入消息
     // 报给人看——面板规格"清场不能无声遗失"的一条。可空(单测不接)。
     std::function<void()> on_agents_cleanup;

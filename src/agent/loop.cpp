@@ -1152,8 +1152,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // resolved_prompt_base)且底账文本仍与 system_prompt_ 同步(没被
         // SetSystemPrompt 之类的活口越过 ResolvedPromptBuilder 直改),就
         // 走完整解析产 manifest;否则走原三行——不接线的路径、或底账已
-        // 与当前系统提示错位的少数口(如 /worktree 重拼),文本与从前
-        // 逐字节一致,只是没有 manifest。
+        // 与当前系统提示错位的少数口(如项目指令作用域变更的重拼),文本
+        // 与从前逐字节一致,只是没有 manifest。
         std::optional<PromptManifest> request_prompt_manifest;
         const bool resolved_prompt_in_sync = agent.profile_.resolved_prompt_base.has_value() &&
                                              agent.profile_.resolved_prompt_base->text == system_prompt_;
@@ -1801,6 +1801,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 prepared_ctx.tools_hash = step_prefix_account.tools_hash;
                 prepared_ctx.cache_epoch = step_prefix_account.cache_epoch;
                 prepared_ctx.prefix_append_only = step_prefix_account.append_only;
+                // 前缀缓存守恒单 §五 D:断因随账(空 = 本步没断),v3 请求账
+                // 的 prefixAccount 块从这带走,不再只留内存统计。
+                prepared_ctx.epoch_break_reason = step_prefix_account.break_reason;
                 // 差距清单 §8.2 第 7 条:内部消息序 -> wire 元素序的拍平
                 // 对照随请求快照递给边界账(四家真后端提供,桩后端 nullopt),
                 // v3 账 prepared 事件的 inputMessageRefs 对 wire 消息序靠它。

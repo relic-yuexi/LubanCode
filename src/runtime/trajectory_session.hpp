@@ -717,6 +717,14 @@ private:
 // trajectory 纯库不认 api。
 std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState& state);
 
+// 宿主目录通知的正文(前缀缓存守恒单 §五 B):落账(v3 链)与内存注入
+// 共用同一只纯函数,两边一字不差——内存史与链投影才对得上账。开头带
+// "[宿主通知]"来源标识(与"[用户排队消息]"同款先例),仓库文件/工具
+// 正文冒充不了这个格式之外的来源分离(origin 字段才是真凭据,这只是
+// 模型可见的自明)。
+std::string FormatHostDirectoryNoticeText(const std::string& old_cwd_utf8, const std::string& new_cwd_utf8,
+                                          const std::string& reason);
+
 // resume 七步的 runtime 摘要(/resume 与 --continue 的接货单)。
 struct TrajectoryResumeSummary {
     trajectory::ResumeOutcome outcome;  // 空 error_code = 成功
@@ -885,6 +893,23 @@ public:
         std::string error;          // 落账/登记失败说明(空 = 顺)
     };
     CwdChangeResult HandleCwdChange(const workspace::WorkspaceIdentity& new_identity);
+
+    // ---- 宿主目录通知(前缀缓存守恒单 §五 B)----
+    // worktree enter/exit 或 slash 搬房成功后,宿主往 SessionV3 输入提交链
+    // 追加一条持久化目录通知:role=user、purpose=Conversation(真进 main
+    // 链,resume 折算沿链自然带回)、origin=SessionRuntime(宿主来源,与
+    // 人类输入/工具输出分得开;只有宿主装配层走这只口,仓库文件与工具
+    // 正文伪造不了这行账)。正文带旧目录/新目录/原因;目录版本由消息在
+    // 链上的 seq 表达(账面可定位,不另发号)。幂等由调用侧保证:一次
+    // 成功切换只调一次,重试/恢复不重复调。主回合开着(turn 内工具触发)
+    // 挂当前 turnId,slash 空闲路自起新回合号——user 消息 turnId 必填
+    //(schema §1.2),与 memory.recall 注入同一纪律。
+    // 返回空串 = 落稳(AppendMessage + AdmitMessages 两步都过);非空 =
+    // 稳定错误码——调用方不得静默发送目录已过期的下一请求(应阻断或明
+    // 确中止,见 BlockV3Execution)。v2 老账消费场没有主写者,如实报
+    // cwd_notice.not_v3,不伪造行。
+    std::string RecordHostDirectoryNotice(const std::string& old_cwd_utf8, const std::string& new_cwd_utf8,
+                                          const std::string& reason);
 
     // ---- P0-3:clear 八步换账 / resume-as-new / replay 读口 ----
 
