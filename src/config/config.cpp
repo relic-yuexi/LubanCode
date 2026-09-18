@@ -2332,6 +2332,22 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
                 config.agent_length_continuations = static_cast<int>(continuations);
             }
         }
+        // 工具批执行策略(只读并行单 P2):字符串只认 exclusive/parallel_read,
+        // 认不得的值静默跳过(救命阀,待遇同 agent 段其余字段)。
+        if (agent.contains("tool_execution") && agent["tool_execution"].is_string()) {
+            const std::string strategy = agent["tool_execution"].get<std::string>();
+            if (strategy == "exclusive" || strategy == "parallel_read") {
+                config.agent_tool_execution = strategy;
+            }
+        }
+        // 读段并发上限:正整数 1..16(1 = 调度器不接管),坏值静默跳过。
+        if (agent.contains("parallel_read_concurrency") &&
+            agent["parallel_read_concurrency"].is_number_integer()) {
+            const long long concurrency = agent["parallel_read_concurrency"].get<long long>();
+            if (concurrency >= 1 && concurrency <= kMaxParallelReadConcurrency) {
+                config.agent_parallel_read_concurrency = static_cast<int>(concurrency);
+            }
+        }
     }
     if (parsed.contains("extra_body")) {
         auto extra_body_result = ParseExtraBodyConfig(parsed["extra_body"], file_path_for_error);
@@ -3428,6 +3444,23 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.agent.length_continuations = *global_file->agent_length_continuations;
     } else {
         result.config.agent.length_continuations = kDefaultLengthContinuations;
+    }
+    // 工具批执行策略与读段并发(只读并行单 P2):项目级压全局,都没写 =
+    // 公开默认(exclusive / 4)。坏值在文件解析层已被静默跳过,这里只会
+    // 见到合法值。
+    if (project_file.has_value() && project_file->agent_tool_execution.has_value()) {
+        result.config.agent.tool_execution = *project_file->agent_tool_execution;
+    } else if (global_file.has_value() && global_file->agent_tool_execution.has_value()) {
+        result.config.agent.tool_execution = *global_file->agent_tool_execution;
+    } else {
+        result.config.agent.tool_execution = kDefaultToolExecutionStrategy;
+    }
+    if (project_file.has_value() && project_file->agent_parallel_read_concurrency.has_value()) {
+        result.config.agent.parallel_read_concurrency = *project_file->agent_parallel_read_concurrency;
+    } else if (global_file.has_value() && global_file->agent_parallel_read_concurrency.has_value()) {
+        result.config.agent.parallel_read_concurrency = *global_file->agent_parallel_read_concurrency;
+    } else {
+        result.config.agent.parallel_read_concurrency = kDefaultParallelReadConcurrency;
     }
     if (project_file.has_value() && project_file->status_panel.has_value()) {
         result.config.status_panel = *project_file->status_panel;

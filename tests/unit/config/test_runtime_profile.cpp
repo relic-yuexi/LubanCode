@@ -88,6 +88,31 @@ TEST_CASE("BuildMainRuntimeProfile:从 config+目录折出 main 的有效份") {
     CHECK(provider_declared.max_output_tokens_source == agent::OutputBudgetSource::ProviderDeclared);
 }
 
+TEST_CASE("BuildMainRuntimeProfile:工具批执行策略默认 Exclusive,显式 parallel_read 才并行(只读并行单 P2)") {
+    config::Config config;
+    config.wire = config::Wire::ChatCompletions;
+    config.model = "qwen3.8-27b";
+    // 不声明:默认 exclusive + 4,不并行。
+    const agent::AgentRuntimeProfile def = app::BuildMainRuntimeProfile(config, nullptr, config.model);
+    CHECK(def.tool_batch_strategy == agent::ToolBatchStrategy::Exclusive);
+    CHECK(def.parallel_read_concurrency == config::kDefaultParallelReadConcurrency);
+
+    // 显式声明:串折档,并发钳进 1..16;子代理整份继承。
+    config.agent.tool_execution = "parallel_read";
+    config.agent.parallel_read_concurrency = 99;  // 超界由 agent 层钳到 16
+    const agent::AgentRuntimeProfile enabled = app::BuildMainRuntimeProfile(config, nullptr, config.model);
+    CHECK(enabled.tool_batch_strategy == agent::ToolBatchStrategy::ParallelRead);
+    CHECK(enabled.parallel_read_concurrency == agent::kMaxParallelReadConcurrency);
+    const agent::AgentRuntimeProfile sub = app::BuildSubagentRuntimeProfile(enabled, config);
+    CHECK(sub.tool_batch_strategy == agent::ToolBatchStrategy::ParallelRead);
+    CHECK(sub.parallel_read_concurrency == agent::kMaxParallelReadConcurrency);
+
+    // 认不得的串(config 层已过滤,这条是防御):按默认档收口。
+    config.agent.tool_execution = "bogus";
+    const agent::AgentRuntimeProfile defensive = app::BuildMainRuntimeProfile(config, nullptr, config.model);
+    CHECK(defensive.tool_batch_strategy == agent::ToolBatchStrategy::Exclusive);
+}
+
 TEST_CASE("main 与 general-purpose 子代理的有效输出上限相同(规格\"预算\"第 1 条)") {
     // 什么都不声明:两边都是 unset,绝无 4096。
     config::Config config;

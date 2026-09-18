@@ -16,6 +16,8 @@
 #include <string>
 #include <utility>
 
+#include "agent/tool_batch_schedule.hpp"  // ToolBatchStrategy:批次执行策略两档(只读并行单 P2)
+
 namespace lubancode::agent {
 
 // 窗口未知(context_window_tokens == 0)时的 token 轴兜底窗口。依据:取
@@ -143,6 +145,15 @@ struct AgentRuntimeProfile {
     // 软线百分比(1~100;0 = 不催):任一硬线跨过 soft% 注入一次催办。
     // 派发层可按任务收窄,main 默认 0(主回合不催,子代理才吃成本闸)。
     int budget_soft_percent = 0;
+
+    // ---- 批次执行策略(只读工具并行与写入串行单 P2)------------------------
+    // 两档:Exclusive(默认,全串行,与拆链前行为一字不差)/ ParallelRead
+    //(连续只读段有界并行,只放行审定过的内置 read_file/search;写/状态
+    // 操作/未知/插件一律独占,Hook 在场或混入 job_handle/native_deferred
+    // 整批回退串行)。并发上限 1 = 调度器不接管,完整串行语义。
+    // 子代理经 InheritForSubagent 同值继承(同一场内的调度策略,不分子母)。
+    ToolBatchStrategy tool_batch_strategy = ToolBatchStrategy::Exclusive;
+    int parallel_read_concurrency = kDefaultParallelReadConcurrency;
 
     // 便捷:是否设了任何一根成本硬线(步数/时间/token)。
     bool HasCostBudget() const {

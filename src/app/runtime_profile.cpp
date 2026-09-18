@@ -26,6 +26,12 @@ agent::AgentRuntimeProfile BuildMainRuntimeProfile(const config::Config& config,
     profile.max_steps_per_turn = config.max_steps_per_turn;
     profile.context_window_tokens = config.context_window_tokens;
     profile.length_continuations = config.agent.length_continuations;
+    // 工具批执行策略(只读并行单 P2):config 层存字符串(不依赖 agent 层),
+    // 这里折成类型档;认不得的值按默认 exclusive 收口(解析层已过滤,这条
+    // 只是防御)。并发上限钳进 1..16。
+    profile.tool_batch_strategy =
+        agent::ParseToolBatchStrategy(config.agent.tool_execution).value_or(agent::ToolBatchStrategy::Exclusive);
+    profile.parallel_read_concurrency = agent::ClampParallelReadConcurrency(config.agent.parallel_read_concurrency);
     return profile;
 }
 
