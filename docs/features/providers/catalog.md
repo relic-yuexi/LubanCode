@@ -297,6 +297,12 @@ scripts/generate_provider_catalog.py   # 生成 / --check 对账 / --self-test �
 - GPT-6 Astra 文档还给出最大输入 922,000；当前目录的 `context_window` 表达完整上下文，不是独立输入上限。输出预留仍按既有预算算法，1M 选择本身不构成不会超限的保证。
 - 新增窗口档位、目录解析与协议回归由 GitHub Actions 执行，本次不在本地编译或跑 CI。
 
+### 2026-09-18 Kimi Coding Plan 端点
+
+新增 `moonshot-coding` 与 `moonshot-coding-anthropic` 两条订阅制端点，依据 [Kimi Code 文档](https://www.kimi.com/code/docs/)：OpenAI 兼容 `https://api.kimi.com/coding/v1`，Anthropic 兼容 `https://api.kimi.com/coding/`（海外分别为 `api.kimi.ai` 同路径，本次未收录）。订阅 Key 在 [Kimi Code 控制台](https://www.kimi.com/code/console) 签发，与开放平台按量 Key 相互独立，故用独立的 `KIMI_API_KEY` 环境变量名。
+
+四枚模型 ID（`k3`、`k3-256k`、`kimi-for-coding`、`kimi-for-coding-highspeed`）来自官方文档；窗口与输出上限按同系模型（K3 / K2.7 Code）拟合，推理方言照抄对应家族形状，`verified` 一律为 `false`——未发真实请求，不冒充真机通过。
+
 ## 11. 排错
 
 **`/provider refresh` 成功，菜单却没变**
