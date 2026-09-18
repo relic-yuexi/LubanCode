@@ -514,8 +514,14 @@ try {
     # 显式确认:备份后整目录替换
     $out2 = & $childPs -NoProfile -ExecutionPolicy Bypass -File $installScript `
         -SourceExe (Join-Path $pkg 'lubancode.exe') -InstallDir $inst -SkipPath -AllowUnknownReplace 2>&1
-    # 假 exe 跑不动 --version,整脚本会在最后一步校验失败退 1;资源替换本身应已完成
-    Assert-Equal -Name '整目录确认后假 exe 版本校验退 1(替换已完成)' -Expected 1 -Actual $LASTEXITCODE
+    # 假 exe 跑不动 --version:Windows 下整脚本会在最后一步校验失败退 1;
+    # Linux 的 pwsh 对不可执行文件兜到 xdg-open,退出码不定,替换结果为准
+    if ($env:OS -eq 'Windows_NT') {
+        Assert-Equal -Name '整目录确认后假 exe 版本校验退 1(替换已完成)' -Expected 1 -Actual $LASTEXITCODE
+    } else {
+        Assert-True -Name '整目录确认后假 exe 兜底退出码可接受(Linux 以替换结果为准)' `
+            -Actual (@(0, 1) -contains $LASTEXITCODE)
+    }
     Assert-FileText -Name '整目录替换后新版官方技能落地' `
         -Path (Join-Path $inst 'skills\mine-skill\SKILL.md') -ExpectedText 'new official'
     Assert-True -Name '替换后用户原件仍在备份里' -Actual (Test-Path -LiteralPath (Join-Path $backupDirs[0].FullName 'skills\mine-skill\SKILL.md'))

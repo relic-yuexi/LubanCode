@@ -665,6 +665,15 @@ function Read-InstallBaseline {
 function Get-InstalledVersionFromExe {
     param([string]$ExePath)
     if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) { return $null }
+    # 非 Windows:不可执行文件交给 pwsh 会兜到 xdg-open(又慢又吵),先看执行位
+    if ($env:OS -ne 'Windows_NT') {
+        try {
+            $mode = [System.IO.File]::GetUnixFileMode($ExePath)
+            if (($mode -band [System.IO.UnixFileMode]::UserExecute) -eq 0) { return $null }
+        } catch {
+            return $null
+        }
+    }
     try {
         $out = & $ExePath --version 2>$null
         foreach ($tok in ("$out" -split '\s+')) {
