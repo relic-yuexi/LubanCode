@@ -232,6 +232,27 @@ function Get-FileSha256 {
     return ($hash | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
+function Split-ManifestRelative {
+    <# 全路径 → 相对根的清单路径(正斜杠);Windows/Linux 分隔符通吃。 #>
+    param([string]$FullPath, [string]$RootFull)
+    $rel = $FullPath.Substring($RootFull.Length).TrimStart('\', '/')
+    return ($rel -replace '\\', '/')
+}
+
+function Join-ManifestRelative {
+    <# 清单路径(正斜杠)拼回平台真实路径。 #>
+    param([string]$Root, [string]$RelPath)
+    return (Join-Path $Root ($RelPath -replace '/', [IO.Path]::DirectorySeparatorChar))
+}
+
+function Test-PathUnderRoot {
+    <# 严格子路径判断(带分隔符,不吃前缀巧合);根自身不算。 #>
+    param([string]$Path, [string]$Root)
+    $rootTrim = $Root.TrimEnd('\', '/')
+    $sep = [IO.Path]::DirectorySeparatorChar
+    return $Path.StartsWith($rootTrim + $sep, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-ManifestRelativePath {
     <#
         纯函数:清单相对路径合法性。拒绝绝对路径、反斜杠、冒号(盘符/UNC/ADS)、
@@ -306,7 +327,7 @@ function Read-ManifestFile {
 function New-ManifestFromTree {
     <# 来源没有官方清单时(本地开发目录等),现场给来源树建一张当新包清单。 #>
     param([string]$RootDir)
-    $rootFull = [IO.Path]::GetFullPath($RootDir).TrimEnd('\')
+    $rootFull = [IO.Path]::GetFullPath($RootDir).TrimEnd('\', '/')
     $files = @()
     $stack = New-Object System.Collections.Generic.Stack[string]
     $stack.Push($rootFull)
@@ -314,7 +335,7 @@ function New-ManifestFromTree {
         $dir = $stack.Pop()
         foreach ($item in (Get-ChildItem -LiteralPath $dir -Force)) {
             $full = $item.FullName
-            $rel = $full.Substring($rootFull.Length).TrimStart('\') -replace '\\', '/'
+            $rel = Split-ManifestRelative -FullPath $full -RootFull $rootFull
             if ($rel -eq 'manifest.json') { continue }
             $isReparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
             if ($isReparse) { throw "来源含链接/reparse,拒绝记账:$rel" }
@@ -398,19 +419,19 @@ function Get-InstallDiskState {
     #>
     param([string]$InstallRoot, [hashtable]$TreeMap)
     $disk = @{}
-    $rootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $rootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\', '/')
     if (-not (Test-Path -LiteralPath $rootFull -PathType Container)) { return $disk }
 
     foreach ($tree in $TreeMap.Keys) {
-        $dest = [IO.Path]::GetFullPath($TreeMap[$tree]).TrimEnd('\')
-        if (-not ($dest.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase))) { continue }
+        $dest = [IO.Path]::GetFullPath($TreeMap[$tree]).TrimEnd('\', '/')
+        if (-not (Test-PathUnderRoot -Path $dest -Root $rootFull)) { continue }
         if (-not (Test-Path -LiteralPath $dest -PathType Container)) { continue }
         $stack = New-Object System.Collections.Generic.Stack[string]
         $stack.Push($dest)
         while ($stack.Count -gt 0) {
             $dir = $stack.Pop()
             foreach ($item in (Get-ChildItem -LiteralPath $dir -Force)) {
-                $rel = $tree + '/' + $item.FullName.Substring($dest.Length).TrimStart('\') -replace '\\', '/'
+                $rel = $tree + '/' + (Split-ManifestRelative -FullPath $item.FullName -RootFull $dest)
                 $isReparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
                 $disk[$rel] = @{
                     path    = $rel
@@ -458,16 +479,16 @@ function Get-DestPathFor {
     if (-not (Test-ManifestRelativePath -RelPath $RelPath)) {
         throw "路径不合法,拒绝落地:$RelPath"
     }
-    $rootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $rootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\', '/')
     $top = ($RelPath -split '/', 2)[0]
     if ($TreeMap.ContainsKey($top) -and $RelPath.Contains('/')) {
         $rest = ($RelPath -split '/', 2)[1]
-        $dest = Join-Path $TreeMap[$top] ($rest -replace '/', '\')
+        $dest = Join-ManifestRelative -Root $TreeMap[$top] -RelPath $rest
     } else {
-        $dest = Join-Path $rootFull ($RelPath -replace '/', '\')
+        $dest = Join-ManifestRelative -Root $rootFull -RelPath $RelPath
     }
     $destFull = [IO.Path]::GetFullPath($dest)
-    if (-not $destFull.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not (Test-PathUnderRoot -Path $destFull -Root $rootFull)) {
         throw "目标越出安装目录:$RelPath -> $destFull"
     }
     return $destFull
@@ -721,7 +742,7 @@ function Invoke-ResourceApply {
     $backupRoot = New-BackupRoot -InstallRoot $InstallRoot
     $conflicts = @()
     $retiredParents = @()
-    $sourceRootFull = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
+    $sourceRootFull = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\', '/')
 
     foreach ($e in $Plan) {
         $needDest = ($e.backup -or $e.action -in @('install-new', 'replace', 'retire'))
@@ -740,7 +761,7 @@ function Invoke-ResourceApply {
         if ($e.backup -and (Test-Path -LiteralPath $dst -PathType Leaf)) {
             $item = Get-Item -LiteralPath $dst -Force
             if ((($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {
-                $backupDest = Join-Path $backupRoot ($e.path -replace '/', '\')
+                $backupDest = Join-ManifestRelative -Root $backupRoot -RelPath $e.path
                 New-Item -ItemType Directory -Path (Split-Path -Parent $backupDest) -Force | Out-Null
                 Copy-Item -LiteralPath $dst -Destination $backupDest -Force
             }
@@ -748,7 +769,7 @@ function Invoke-ResourceApply {
 
         switch ($e.action) {
             'install-new' {
-                $src = Join-Path $sourceRootFull ($e.path -replace '/', '\')
+                $src = Join-ManifestRelative -Root $sourceRootFull -RelPath $e.path
                 if ((Test-Path -LiteralPath $dst -PathType Leaf) -and
                     (([IO.Path]::GetFullPath($src)).Equals($dst, [StringComparison]::OrdinalIgnoreCase))) {
                     break  # 同目录安装,不搬自己
@@ -757,7 +778,7 @@ function Invoke-ResourceApply {
                 Copy-Item -LiteralPath $src -Destination $dst -Force
             }
             'replace' {
-                $src = Join-Path $sourceRootFull ($e.path -replace '/', '\')
+                $src = Join-ManifestRelative -Root $sourceRootFull -RelPath $e.path
                 if (([IO.Path]::GetFullPath($src)).Equals($dst, [StringComparison]::OrdinalIgnoreCase)) {
                     break  # 同目录安装,不搬自己
                 }
@@ -783,13 +804,13 @@ function Invoke-ResourceApply {
     }
 
     # 退役文件的空父目录收尾:只删真正删空的,删到安装根或非空为止
-    $rootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $rootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\', '/')
     foreach ($parent in @($retiredParents | Sort-Object -Property Length -Descending | Select-Object -Unique)) {
         $cur = $parent
         for ($i = 0; $i -lt 64 -and $cur; $i++) {
-            $curFull = [IO.Path]::GetFullPath($cur).TrimEnd('\')
-            # 严格子路径(带斜杠):绝不能把安装根自身删了
-            if (-not $curFull.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) { break }
+            $curFull = [IO.Path]::GetFullPath($cur).TrimEnd('\', '/')
+            # 严格子路径(带分隔符):绝不能把安装根自身删了
+            if (-not (Test-PathUnderRoot -Path $curFull -Root $rootFull)) { break }
             if (-not (Test-Path -LiteralPath $curFull -PathType Container)) { break }
             if (@(Get-ChildItem -LiteralPath $curFull -Force).Count -gt 0) { break }
             try {
@@ -813,13 +834,13 @@ function Invoke-ResourceApply {
 function Invoke-WholesaleReplace {
     <# 无基线+显式确认(-AllowUnknownReplace)时的整目录替换:旧脚本行为,但同源同目标不删自己。 #>
     param([string]$SourceRoot, [string]$InstallRoot, [hashtable]$TreeMap)
-    $sourceRootFull = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
-    $installRootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $sourceRootFull = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\', '/')
+    $installRootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\', '/')
 
     foreach ($tree in $script:ManagedTrees) {
         $srcTree = Join-Path $sourceRootFull $tree
         if (-not (Test-Path -LiteralPath $srcTree -PathType Container)) { continue }
-        $dst = [IO.Path]::GetFullPath($TreeMap[$tree]).TrimEnd('\')
+        $dst = [IO.Path]::GetFullPath($TreeMap[$tree]).TrimEnd('\', '/')
         if ($srcTree.Equals($dst, [StringComparison]::OrdinalIgnoreCase)) {
             Write-Host "[plan] 同目录安装,跳过 $tree"
             continue
@@ -981,7 +1002,7 @@ function Invoke-Install {
     )
 
     if (-not $InstallDir) { $InstallDir = Get-DefaultInstallDir }
-    $installRootFull = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $installRootFull = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\', '/')
     Write-Step "安装目录:$installRootFull"
 
     $treeMap = Get-TreeMap -InstallDir $installRootFull
@@ -1049,7 +1070,7 @@ function Invoke-Install {
     }
 
     $sourceRoot = (Split-Path -Parent $exeToInstall)
-    $sourceRootFull = [IO.Path]::GetFullPath($sourceRoot).TrimEnd('\')
+    $sourceRootFull = [IO.Path]::GetFullPath($sourceRoot).TrimEnd('\', '/')
 
     # ---- 新包清单 ----
     $newManifest = $null
