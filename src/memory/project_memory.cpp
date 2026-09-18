@@ -3129,12 +3129,12 @@ std::expected<void, std::string> ProjectMemory::LaunchWorker() const {
     const fs::path pending = home_lubancode_ / "memory-jobs" / "pending";
     if (!fs::exists(pending, ec)) return {};
     if (executable_.empty()) return std::unexpected("未配置记忆 worker 可执行文件");
-    std::lock_guard<std::mutex> lock(workers_mutex_);
-    std::erase_if(workers_, [](const auto& worker) { return worker->Wait(0); });
+    std::lock_guard<std::mutex> lock(workers_->mutex);
+    std::erase_if(workers_->workers, [](const auto& worker) { return worker->Wait(0); });
     const auto spawned = platform::RunProcessBackground(
         {executable_, "--memory-worker", PathUtf8(home_lubancode_)});
     if (!spawned.success) return std::unexpected(spawned.error);
-    workers_.push_back(spawned.handle);
+    workers_->workers.push_back(spawned.handle);
     return {};
 }
 
