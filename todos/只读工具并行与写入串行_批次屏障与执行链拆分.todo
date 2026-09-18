@@ -1,6 +1,6 @@
 # 只读工具并行与写入串行：批次屏障与执行链拆分
 
-- 状态：P0/P1 已落（2026-09-19，`refactor/tool-exec-chain-split`：执行链拆四阶段 + 宿主共享槽换逐调用账，行为不变，回归册 unit/agent/test_tool_execution_chain.cpp；P2 并行调度未动）；本单只记研究结论与实施要求。
+- 状态：P0/P1 已落（2026-09-19，`refactor/tool-exec-chain-split`：执行链拆四阶段 + 宿主共享槽换逐调用账，行为不变，回归册 unit/agent/test_tool_execution_chain.cpp）；P2 已落（2026-09-19，`feat/parallel-read-scheduling`：连续读段调度 + 有界执行器 + 独占屏障 + 配置与回退，PR #135，CI run 35397986603）；本单只记研究结论与实施要求。
 - 日期：2026-09-19
 - 源码基线：`45f34058`；实施前重查，不把行号当永久入口。
 - 目标：同一 Agent 同一批调用内，连续只读段并行；写入与未知调用独占执行，并挡住后续读取。
@@ -47,14 +47,14 @@
 
 ## 三、执行策略
 
-- [ ] 为并发调度增加明确策略，建议两档 `ParallelRead / Exclusive`，名称可随现有架构调整。默认 `Exclusive`，不声明便不并行。
-- [ ] `EffectClass` 继续服务既有恢复语义；若修订误导分类，先核对权限、恢复和诊断使用处，不能为调度随手改旧合同。
-- [ ] 首批审查 `read_file`、`search`：工具实例、共享 runner、路径解析、缓存、取消和进程封装都须支持并发，审过才开放。
-- [ ] 后续逐个审查 `web_fetch`、`web_search`；确认客户端共享状态、限流与连接配额后再开放，首版可保守串行。
-- [ ] `write_file`、`edit_file`、undo、shell、Git、未知工具、插件、Lua、MCP 以及宿主状态操作默认独占。不得按工具名含 read/get 或命令看起来像查询便自动放行。
-- [ ] `tool_search`、skill、loop/job 控制等逐个查是否改注册表、可见工具或会话状态，未审过便独占。
-- [ ] deferred/tool_invoke 先解析真实目标，再判策略；包装器须正确透传。解析失败按原错误路径收口。
-- [ ] Hook 改参后，以最终参数重验 schema、权限与执行策略。若不能证明 Hook 与整条链可并发，降回串行。
+- [x] 为并发调度增加明确策略，建议两档 `ParallelRead / Exclusive`，名称可随现有架构调整。默认 `Exclusive`，不声明便不并行。（P2 落地：`ToolBatchStrategy` 两档住 `AgentRuntimeProfile.tool_batch_strategy`，配置键 `agent.tool_execution`，缺省 exclusive；册：test_runtime_profile "BuildMainRuntimeProfile:工具批执行策略默认 Exclusive"。）
+- [x] `EffectClass` 继续服务既有恢复语义；若修订误导分类，先核对权限、恢复和诊断使用处，不能为调度随手改旧合同。（P2 未动 EffectClass；放行判定走"审定名单+注册来源+不需确认"三件套，不碰副作用档——正是 job_cancel/loop_control 挂只读标签却在改状态的教训。）
+- [x] 首批审查 `read_file`、`search`：工具实例、共享 runner、路径解析、缓存、取消和进程封装都须支持并发，审过才开放。（审查账：read_file 全局部状态、逐调用独立 ifstream；search 每调用独立 StreamSession+ChildProcess，共享面只剩 smoke 缓存（smoke_mutex_ 既有锁，头文件明写"实例共享、多线程可并发 Run"），取消旗经 ToolExecutionContext 逐调用递进。）
+- [x] 后续逐个审查 `web_fetch`、`web_search`；确认客户端共享状态、限流与连接配额后再开放，首版可保守串行。（P2：不在放行名单即独占，册：test_tool_batch_scheduling "放行名单"断言 web_fetch/web_search 不放。逐个审查留后续批次。）
+- [x] `write_file`、`edit_file`、undo、shell、Git、未知工具、插件、Lua、MCP 以及宿主状态操作默认独占。不得按工具名含 read/get 或命令看起来像查询便自动放行。（白名单只认 read_file/search；册：放行名单断言 job_cancel/read_status 不放、插件来源同名影子不放。）
+- [x] `tool_search`、skill、loop/job 控制等逐个查是否改注册表、可见工具或会话状态，未审过便独占。（白名单收口天然达成：名单外一律独占，无需逐个判。）
+- [x] deferred/tool_invoke 先解析真实目标，再判策略；包装器须正确透传。解析失败按原错误路径收口。（`ProbeParallelReadEligibility` 先解引用按真实目标判，id 沿用 wire；解不开按独占走原拒绝路；册：test_tool_batch_scheduling "tool_invoke 探针"。）
+- [x] Hook 改参后，以最终参数重验 schema、权限与执行策略。若不能证明 Hook 与整条链可并发，降回串行。（重验是 P1 册（test_tool_execution_chain "Hook 改参后……最终参数"）；P2 补降级合同：任一 Pre/Post Hook 在场整批回退串行，册："回退:PreToolUse Hook 在场整批回退串行"。）
 
 ## 四、拆执行链，保留唯一正门
 
@@ -91,7 +91,7 @@ worker：只执行获准工具，持有独立取消上下文与稳定工具生�
 
 - [x] P0：重查基线与上表入口，梳理所有 `RunOneTool` 调用方，确定并发策略、逐调用上下文、Hook 降级与取消合同。（2026-09-19 重查基线 `45f34058`，行号小漂但入口全数对上：inline 批次两处在 `src/agent/loop.cpp`（proxy 解引用路 + 普通路）、`src/workflow/host_executors.cpp` 的 tool 节点、`src/ptc/ptc_tool.cpp` 的 stub 执行器、外加 `tests/unit` 六册直调（instruction_scope_gate / turn_runtime / tool_trace / tool_cancel_context / write_edit / utf8_boundary）。定案：并发策略两档 `ParallelRead/Exclusive` 留 P2 落地，`EffectClass` 合同不动；逐调用上下文双件——引擎侧 `ToolCallFrame`（loop.cpp 匿名域，调用 ID/最终参数/审批表态/trace/取消源全在册）+ 宿主侧 `ToolCallScopeTable`（src/app/tool_call_scope.hpp，按 tool_use_id 记 PreToolUse 表态与审批类别，替掉 turn_runner 与 interactive_session_assembly 的两只共享槽）；Hook 降级合同照 §四"未审定 Hook 整批回退串行"留 P2 执行，本批钉住 Hook 改参后的 schema/权限重验；取消合同维持现状——cancel 旗经 `ToolExecutionContext` 逐调用递进、批次层查旗补 `cancelled_before_start`，worker 阶段不碰 session/history/UI。）
 - [x] P1：先拆同步执行链，保持现有行为；补权限、Hook、结果捕获与取消回归。（2026-09-19，分支 `refactor/tool-exec-chain-split`：`RunOneTool` 内部拆成四只阶段（PrepareToolCall 门禁审批 / MarkExecutionStarted / ExecuteApprovedTool worker / CompleteToolCall 收口），原入口依序调同一套阶段，签名零改动，PTC/workflow/单测调用方不动；回归册 `tests/unit/agent/test_tool_execution_chain.cpp` 九案——started 先于执行且 finished 恰一份、预裁定 Deny 与确认拒都不执行且无 started、逐调用审批账不串槽（表契约 + 端到端两枚不同裁决）、Hook 改参后预裁定/确认口/执行拿的都是最终参数、执行中取消可见且终态恰一份、结果捕获失败按 result_store_failed 收口。证据：PR #130，CI run 35379889056 rollup.conclusion=success（macos-clang 腿，"100% tests passed out of 573"；PR 事件按 lane 只跑 macos 腿，windows-msvc 腿合入 main 的 push 上跑）。）
-- [ ] P2：加连续读段调度、有界执行器与独占屏障；只开放审过的内置读工具，接配置与回退。
+- [x] P2：加连续读段调度、有界执行器与独占屏障；只开放审过的内置读工具，接配置与回退。（2026-09-19，分支 `feat/parallel-read-scheduling`：批次第二遍按声明序划连续读段/独占节点，读段经 `BoundedParallelExecutor` 有界并行（默认 4，`agent.parallel_read_concurrency` 1..16，配置键 `agent.tool_execution` 两档），段与独占节点互为屏障、后面的 read 不提前，`ordered_results` 槽位配对未动；阶段一/二/四留主线程、只有阶段三 `ExecuteApprovedTool` 上 worker（wiring 回调零上 worker，段内全数 join，注册表/工具实例活期以段为界——所有权账立注释，热卸载/切场不得与进行中批次并发，P3 宿主接线时收口）；并发 1 或策略不满足完整走旧串行；Pre/Post Hook 在场或混入 job_handle/native_deferred 整批回退串行；未启动补 cancelled_before_start、已启动按真实终态；worker 异常折 `tool.execute.threw` 稳定错误；`ToolCallScopeTable` 三口加锁（P2 衔接点）。回归册 `tests/unit/agent/test_tool_batch_scheduling.cpp` 二十三案——划批纯函数、两档解析/钳制、放行名单（插件影子/需确认/job_cancel/web_fetch 不放）、tool_invoke 探针（真实目标判、伪拼 ref 独占）、执行器峰值恰等于 limit 与异常 exception_ptr 折算、两读真并发（进门闸，串行必超时）、6 读上限 2 峰值不超、R,R,W,R,R,W 读写区间不重叠+段间先后、write_file/edit_file 不重叠、真工具写后读新值、慢首枚配对回原序、未知工具与宿主状态操作独占、默认 Exclusive/并发 1/Hook 在场/混 job_handle 四路回退串行、段内取消（已启动真实终态）与跨段取消（写节点补 cancelled_before_start 恰一份）、trace 派发模型（两 started 先于任一 finished，finished 恰一份）、审批账并发不串槽；config 两册补 agent.tool_execution 解析/合并与 profile 折档（默认 Exclusive、显式 parallel_read、子代理继承）。证据：PR #135，CI run 35397986603 rollup.conclusion=success（macos-clang 腿 "100% tests passed out of 574"；PR 事件按 lane 只跑 macos 腿，windows-msvc 腿合入 main 的 push 上跑）。）
 - [ ] P3：各宿主接线，补完整并发验收与轨迹检查，更新 `docs/architecture/tool-calling-flow.md`、工具参考与相关配置说明。
 - [ ] 实施代码时新建隔离 worktree，保留用户当前分支与未提交文件。验证沿用用户约定：本地做静态检查，构建/测试提交 GitHub CI；只报告实际观察到的 CI 结果。
 
@@ -99,18 +99,18 @@ worker：只执行获准工具，持有独立取消上下文与稳定工具生�
 
 用可控闸门、条件变量与事件记录断言先后，少靠 sleep 猜并发。以下测试留给实施者编写并交 CI 执行。
 
-- [ ] 读并行：两枚读同时进入执行体，证明不是逐枚串跑；最大在跑数不超配置上限。
-- [ ] 写屏障：覆盖 `R,R,W,R,R,W`，断言写不与前后读重叠；`write_file` 与 `edit_file` 也不重叠。
-- [ ] 写后读：同一路径先写后读，读到新内容；写前读取不被移到写后。
-- [ ] 配对：故意让后声明的读先完成，模型结果仍按原序，ID 无错配、重复或缺失。
-- [ ] 策略：未声明工具、状态操作、未知插件串行；deferred 包装按真实目标判定；Hook 场景按约定降级。
-- [ ] 权限：两枚调用裁决不同，不串用共享槽；拒绝工具不执行，改参后重新校验，失败正确回填。
-- [ ] 取消/异常：覆盖派发前、读段执行中、写节点前、部分完成后；无新调用偷跑，无缺结果，无悬空生命期。
-- [ ] 持久化：started 先于执行；完成只落一次；结果落盘失败、晚到信封与恢复不造成重复副作用。
-- [ ] 资源：覆盖输出预算、富结果、artifact、并发上限、工具卸载/宿主退出及 worker 异常。
-- [ ] 回退：并发度 1 与未开放工具保持旧串行行为；后台混合批次边界如实记录。
-- [ ] 宿主：终端和无 UI 路径均验收，子代理各自批次正常；不能将单批通过说成跨会话隔离通过。
-- [ ] 性能：记录同一输入、同一工具集、同一环境下串行与并行耗时、峰值并发和资源占用。合成慢读验证调度，真实 read/search 验证收益；不预写加速倍数。
+- [x] 读并行：两枚读同时进入执行体，证明不是逐枚串跑；最大在跑数不超配置上限。（册：test_tool_batch_scheduling "读并行:两读同进执行体"（进门闸+峰值恰 2）与"读并行:并发上限生效"（6 读上限 2，峰值恰 2）。）
+- [x] 写屏障：覆盖 `R,R,W,R,R,W`，断言写不与前后读重叠；`write_file` 与 `edit_file` 也不重叠。（册："写屏障:R,R,W,R,R,W"——区间重叠判定+段间先后（前段读 exit < 写 enter、写 exit < 后段读 enter）；"写屏障:write_file 与 edit_file 互不重叠"。）
+- [x] 写后读：同一路径先写后读，读到新内容；写前读取不被移到写后。（册："写后读:同路径先写后读,读到新值(真工具真文件)"——真 WriteFileTool/ReadFileTool,读在写后段,读到新内容。）
+- [x] 配对：故意让后声明的读先完成，模型结果仍按原序，ID 无错配、重复或缺失。（册："配对:后声明的先完成(慢首枚)"——首枚等后两枚退完才退,第二次请求 tool_result 仍按声明序配对。）
+- [x] 策略：未声明工具、状态操作、未知插件串行；deferred 包装按真实目标判定；Hook 场景按约定降级。（册："策略:未知工具独占收口""策略:宿主状态操作串行——读段收口后才轮到它""tool_invoke 探针""回退:PreToolUse Hook 在场整批回退串行"。）
+- [x] 权限：两枚调用裁决不同，不串用共享槽；拒绝工具不执行，改参后重新校验，失败正确回填。（P1 册已钉：test_tool_execution_chain "两枚调用裁决不同""预裁定 Deny 不执行""Hook 改参后拿最终参数""结果捕获失败按 result_store_failed"；P2 补 ToolCallScopeTable 加锁与并发烟测（test_tool_batch_scheduling "审批账:并发 Record/Take 各拿各的"）。）
+- [x] 取消/异常：覆盖派发前、读段执行中、写节点前、部分完成后；无新调用偷跑，无缺结果，无悬空生命期。（册："取消:段内已启动的读按真实终态收口"（执行中）、"取消:读段收口后取消"（未启动/写节点前补 cancelled_before_start,写靶零执行,每枚恰一份结果,Run 报 cancelled）、"异常:worker 抛异常折成稳定错误"。）
+- [ ] 持久化：started 先于执行；完成只落一次；结果落盘失败、晚到信封与恢复不造成重复副作用。（P2 已盖前两截：started 先于执行（P1 册+P2 册 trace 派发模型,两 started 先于任一 finished,finished 恰一份）、结果落盘失败按 result_store_failed（P1 册）；晚到信封/恢复不重复副作用在并行路无新面（未放行 MCP/异步）,专测留 P3 宿主轨迹验收。）
+- [ ] 资源：覆盖输出预算、富结果、artifact、并发上限、工具卸载/宿主退出及 worker 异常。（P2 已盖并发上限（执行器/6 读册）与 worker 异常（exception_ptr 折算册）；输出预算/富结果/artifact 走未动的批次收口路径无并行专测；工具卸载/宿主退出归 P3 宿主验收。）
+- [x] 回退：并发度 1 与未开放工具保持旧串行行为；后台混合批次边界如实记录。（册："回退:默认策略(Exclusive)两读串行""回退:并发上限 1""回退:PreToolUse Hook 在场""回退:混入 job_handle 禁用本次并行"（inline 读照旧串行,接单块照旧）;代码注释明写"不等于串行化已在跑的后台任务"。）
+- [ ] 宿主：终端和无 UI 路径均验收，子代理各自批次正常；不能将单批通过说成跨会话隔离通过。（P3 各宿主接线时验收;P2 宿主面零改动,默认 Exclusive 下各宿主行为与从前一字不差。）
+- [ ] 性能：记录同一输入、同一工具集、同一环境下串行与并行耗时、峰值并发和资源占用。合成慢读验证调度，真实 read/search 验证收益；不预写加速倍数。（合成慢读验证调度已落（进门闸/峰值账,册内可复跑）;串行 vs 并行耗时与真实 read/search 收益测量留 P3/发版验收,不预写倍数。）
 
 ## 八、交付边界
 
