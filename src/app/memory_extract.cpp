@@ -27,8 +27,11 @@ namespace lubancode::app {
 namespace {
 
 // 转写里各部件的截断阈值。
-constexpr std::size_t kMaxTextBytes = 4 * 1024;
-constexpr std::size_t kMaxToolInputBytes = 300;
+constexpr std::size_t kMaxUserBytes = 2 * 1024;
+constexpr std::size_t kMaxFinalAnswerBytes = 3 * 1024;
+constexpr std::size_t kMaxToolsBytes = 2 * 1024;
+constexpr std::size_t kMaxRecentTools = 6;
+constexpr std::size_t kMaxToolInputBytes = 160;
 constexpr std::size_t kMaxToolResultBytes = 240;
 
 std::string ClipBytes(std::string text, std::size_t max_bytes) {
@@ -82,37 +85,70 @@ std::string ClassifyTaskType(const std::string& user_text, const std::vector<std
 }
 
 std::string BuildTurnTranscript(const std::vector<api::Message>& messages, std::size_t max_bytes) {
-    std::string out;
-    const auto append = [&out, max_bytes](std::string line) {
-        if (out.size() >= max_bytes) return;
-        if (out.size() + line.size() + 1 > max_bytes) {
-            const std::size_t room = max_bytes - out.size() - 1;
-            if (room > 20) line.resize(lubancode::platform::Utf8PrefixBoundary(line, room));
-            else line.clear();
-        }
-        if (!line.empty()) {
-            if (!out.empty()) out += "\n";
-            out += line;
-        }
+    const auto append = [](std::string& out, const std::string& text, std::size_t cap) {
+        if (text.empty() || out.size() >= cap) return;
+        if (!out.empty()) out += "\n";
+        const auto room = cap - out.size();
+        const std::string marker = "...[截断]";
+        const bool marked = text.size() > room && room >= marker.size();
+        const auto limit = marked ? room - marker.size() : std::min(room, text.size());
+        out.append(text, 0, platform::Utf8PrefixBoundary(text, limit));
+        if (marked) out += marker;
     };
-
-    for (const api::Message& message : messages) {
+    std::string user;
+    std::string final_answer;
+    struct ToolExcerpt { std::string id; std::string text; };
+    std::vector<ToolExcerpt> tools;
+    std::size_t tool_count = 0;
+    for (const auto& message : messages) {
+        std::string assistant;
         for (const auto& block : message.content) {
             if (const auto* text = std::get_if<api::TextBlock>(&block)) {
                 if (message.role == api::Role::User) {
-                    append("[用户] " + ClipBytes(text->text, kMaxTextBytes));
-                } else {
-                    append("[助手] " + ClipBytes(text->text, kMaxTextBytes));
+                    append(user, text->text, kMaxUserBytes);
+                } else if (message.role == api::Role::Assistant) {
+                    append(assistant, text->text, kMaxFinalAnswerBytes);
                 }
             } else if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
-                append("[工具调用] " + use->name + "(" + ClipBytes(use->input.dump(), kMaxToolInputBytes) + ")");
+                // Never serialize content/patch/body or arbitrary nested inputs.
+                nlohmann::json locator = nlohmann::json::object();
+                for (const auto* key : {"path", "file_path", "command", "cmd", "query", "pattern", "url", "symbol"}) {
+                    if (use->input.is_object() && use->input.contains(key) && use->input[key].is_string()) {
+                        locator[key] = ClipBytes(use->input[key].get<std::string>(), kMaxToolInputBytes);
+                    }
+                }
+                tools.push_back({use->id, "[工具调用] " + ClipBytes(use->name, 80) + "(" +
+                    ClipBytes(locator.dump(), kMaxToolInputBytes) + ")"});
+                ++tool_count;
+                if (tools.size() > kMaxRecentTools) tools.erase(tools.begin());
             } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
-                append(std::string("[工具结果") + (result->is_error ? ",失败" : "") + "] " +
-                       ClipBytes(result->content, kMaxToolResultBytes));
+                const auto found = std::find_if(tools.rbegin(), tools.rend(), [&](const auto& tool) {
+                    return tool.id == result->tool_use_id;
+                });
+                if (found != tools.rend()) {
+                    // One bounded result per call, including failure status. No images or structured payloads.
+                    const auto end = found->text.find("\n[工具结果");
+                    if (end != std::string::npos) found->text.resize(end);
+                    found->text += std::string("\n[工具结果") + (result->is_error ? ",失败" : "") +
+                                   "] " + ClipBytes(result->content, kMaxToolResultBytes);
+                }
             }
-            // ThinkingBlock/ImageBlock 不进转写。
         }
+        if (!assistant.empty()) final_answer = std::move(assistant);
     }
+    std::string out;
+    if (!user.empty()) append(out, "[用户] " + user, max_bytes);
+    if (!final_answer.empty()) append(out, "[助手] " + final_answer, max_bytes);
+    // Reserve user intent and the final conclusion before any tool excerpts.
+    std::string tool_text;
+    for (auto it = tools.rbegin(); it != tools.rend(); ++it) {
+        append(tool_text, it->text, kMaxToolsBytes);
+    }
+    if (!tool_text.empty()) {
+        append(out, "[工具摘录，最近在前；仅供核对，省略内容不得推断]", max_bytes);
+        append(out, tool_text, max_bytes);
+    }
+    if (tool_count > kMaxRecentTools) append(out, "[更早工具记录已省略]", max_bytes);
     return out;
 }
 

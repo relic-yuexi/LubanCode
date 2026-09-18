@@ -30,7 +30,7 @@ class V3Writer;
 
 namespace lubancode::app {
 
-inline constexpr int kMemoryExtractMaxTokens = 1500;
+inline constexpr int kMemoryExtractMaxTokens = 4096;
 
 // 抽取结果(回合总结 + 候选 + 检索扩展词)。
 struct ProposedCandidate {
@@ -99,9 +99,9 @@ inline constexpr std::size_t kMaxCandidateContentBytes = 8 * 1024;
 // 打请求;user_text 是本轮用户消息,tool_names 是本轮调用过的工具名。
 std::string ClassifyTaskType(const std::string& user_text, const std::vector<std::string>& tool_names);
 
-// 把一个回合的消息增量压成给模型看的转写:用户/助手正文收全(各截
-// 4 KiB),工具调用只留名字与紧凑入参,工具结果只留开头一小段;大段日志、
-// 网页/MCP 原文不整包送抽取。max_bytes 是整段转写的字节上限。
+// 本地压缩本轮材料：用户正文 2 KiB、最终助手答复 3 KiB、最近六次工具
+// 摘录共 2 KiB。工具参数只留定位字段，不发补丁/文件正文。忽略中间答复、
+// 思考和图片；max_bytes 是整段转写的严格字节上限，不含系统提示词。
 std::string BuildTurnTranscript(const std::vector<api::Message>& messages, std::size_t max_bytes);
 
 // 抽取提示词:基础契约(features/memory-summary-base.md)+ 分型侧重

@@ -548,7 +548,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
                                     history.end());
 
-    // 工具名清单喂给分型器;转写压缩后整段不超 24 KiB。顺手记一枚
+    // 工具名清单喂给分型器;转写按用户、最终答复、工具摘录分配预算，整段不超 8 KiB。顺手记一枚
     // P1(§7.1)的工具证据位:工具调用或工具结果任一在场即算——ack 门
     // 与耐久信号都看它。
     std::vector<std::string> tool_names;
@@ -597,7 +597,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         return;
     }
 
-    const std::string turn_transcript = BuildTurnTranscript(slice, 24 * 1024);
+    const std::string turn_transcript = BuildTurnTranscript(slice, 8 * 1024);
     if (turn_transcript.empty()) {
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::EmptyTranscript);

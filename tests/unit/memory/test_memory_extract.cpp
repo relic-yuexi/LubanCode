@@ -33,6 +33,7 @@ std::vector<api::Message> ToolRound(const std::string& tool_name, const std::str
     api::Message assistant;
     assistant.role = api::Role::Assistant;
     api::ToolUseBlock use;
+    use.id = "t1";
     use.name = tool_name;
     use.input = nlohmann::json{{"path", "src/main.cpp"}};
     assistant.content.push_back(use);
@@ -83,10 +84,39 @@ TEST_CASE("BuildTurnTranscript: 正文收全,工具摘要截断,总量有上限"
     std::vector<api::Message> huge;
     huge.push_back(UserText(big));
     const std::string bounded = app::BuildTurnTranscript(huge, 2 * 1024);
-    CHECK(bounded.size() <= 2 * 1024 + 100);
+    CHECK(bounded.size() <= 2 * 1024);
 
     // 空输入给空串。
     CHECK(app::BuildTurnTranscript({}, 1024).empty());
+}
+
+TEST_CASE("BuildTurnTranscript: tool floods cannot crowd out final conclusions or copy write payloads") {
+    std::vector<api::Message> messages{UserText("以后按这个结论处理。")};
+    for (int i = 0; i < 100; ++i) {
+        messages.push_back(AssistantText("中间进度不要送给抽取模型"));
+        auto round = ToolRound("read_file", std::string(5000, 'x'));
+        auto& use = std::get<api::ToolUseBlock>(round[0].content[0]);
+        use.input["path"] = "src/step-" + std::to_string(i) + ".cpp";
+        use.input["content"] = "RAW_FILE_PAYLOAD_MUST_NOT_LEAK";
+        for (auto& message : round) messages.push_back(std::move(message));
+    }
+    for (auto& message : ToolRound("run_command", "confirmed failure", true)) {
+        messages.push_back(std::move(message));
+    }
+    messages.push_back(AssistantText("最终结论：worker 句柄提前释放。"));
+    const auto transcript = app::BuildTurnTranscript(messages, 8 * 1024);
+    CHECK(transcript.size() <= 8 * 1024);
+    CHECK(transcript.find("最终结论：worker 句柄提前释放。") != std::string::npos);
+    CHECK(transcript.find("src/step-99.cpp") != std::string::npos);
+    CHECK(transcript.find("src/step-0.cpp") == std::string::npos);
+    CHECK(transcript.find("中间进度") == std::string::npos);
+    CHECK(transcript.find("RAW_FILE_PAYLOAD") == std::string::npos);
+    CHECK(transcript.find("[工具结果,失败] confirmed failure") != std::string::npos);
+    for (std::size_t cap = 0; cap < 80; ++cap) {
+        const auto tiny = app::BuildTurnTranscript(messages, cap);
+        CHECK(tiny.size() <= cap);
+        CHECK(platform::IsValidUtf8(tiny));
+    }
 }
 
 TEST_CASE("ParseExtractionJson: 严格字段与容错围栏") {
