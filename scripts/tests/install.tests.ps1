@@ -141,9 +141,16 @@ Assert-Equal -Name '摘完最后一个目录得到空字符串' `
 Write-Host ""
 Write-Host "==== Get-DefaultInstallDir ====" -ForegroundColor Cyan
 
-Assert-Equal -Name '默认安装目录拼接正确' `
-    -Expected (Join-Path $env:LOCALAPPDATA 'Programs\lubancode') `
-    -Actual (Get-DefaultInstallDir)
+# Linux/macOS 的 pwsh 没有 LOCALAPPDATA,补个假值再验拼接语义
+$savedLocalAppData = $env:LOCALAPPDATA
+if (-not $savedLocalAppData) { $env:LOCALAPPDATA = (Join-Path ([IO.Path]::GetTempPath()) 'fake-localappdata') }
+try {
+    Assert-Equal -Name '默认安装目录拼接正确' `
+        -Expected (Join-Path $env:LOCALAPPDATA 'Programs\lubancode') `
+        -Actual (Get-DefaultInstallDir)
+} finally {
+    if (-not $savedLocalAppData) { Remove-Item Env:\LOCALAPPDATA -ErrorAction SilentlyContinue }
+}
 
 # =====================================================================
 # 清单路径规则(GitHubRelease自动更新单 §四):拒绝绝对路径/盘符/UNC/..

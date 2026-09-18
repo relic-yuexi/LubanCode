@@ -165,6 +165,8 @@ jobs:
           # 官方清单(GitHubRelease自动更新单 §四):包内每个官方文件记
           # 路径/大小/SHA-256/用途,跟包走。装机侧拿它做文件所有权判定;
           # 下面的验包步重算对账,对不上即红,不发糊涂包。
+          # PYTHONUTF8:Windows 控制台 cp1252 打中文会炸,统一按 UTF-8 走
+          export PYTHONUTF8=1
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           ver="${GITHUB_REF_NAME#v}"
           channel=stable
@@ -194,6 +196,7 @@ jobs:
           esac
           root=dist/verify/lubancode
           # 官方清单在包里,且与包内实际内容逐文件对得上账(路径/大小/SHA-256)
+          export PYTHONUTF8=1
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           ver="${GITHUB_REF_NAME#v}"
           channel=stable

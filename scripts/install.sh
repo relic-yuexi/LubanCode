@@ -142,6 +142,9 @@ for _pycand in python3 python; do
         break
     fi
 done
+# Windows 控制台默认 cp1252/GBK,中文输出会 UnicodeEncodeError,统一按 UTF-8 走
+PYTHONUTF8=1
+export PYTHONUTF8
 
 # 调 install_plan.py:参数走位置参数,不经未加引号的命令替换,路径带空格也稳
 run_plan() {

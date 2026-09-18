@@ -18,6 +18,9 @@
 
 set -uo pipefail
 
+# Windows 上 python 往 cp1252 控制台打中文会 UnicodeEncodeError,统一按 UTF-8 走
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+
 TESTS_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$(dirname "$TESTS_DIR")")
 
