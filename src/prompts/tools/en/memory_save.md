@@ -2,6 +2,8 @@
 
 Queue a small, stable project fact, an explicit user preference, or a user-stated correction of how things are done into background memory (a formal write, bypassing the review queue). Call it only when the information has been confirmed by source code, tool results, or the user's own words; a fact must carry verifiable evidence in paths or evidence; feedback only accepts corrections the user stated on the spot (release cadence, acceptance habits), with confidence set to user-stated—model inference must never write directly. Do not store current task progress, guesses, logs, raw web/MCP text, secrets or personal data. When the same topic already exists, reuse the id from the index to update it. Automatic candidates go through turn summaries, not this tool.
 
+A queued receipt is not a committed write. Do not claim the memory is saved or promise future recall. Linked worktrees and subdirectories of the same Git repository share project memory. Recall still depends on scope, relevance, and budget. This tool only accepts project/subtree/path scopes; global writes require the user command /memory remember global and confirmation.
+
 ## param.kind
 
 fact=a verifiable project fact; preference=a project preference the user stated explicitly; feedback=a user-stated correction of how things are done (must be user-stated)
@@ -40,7 +42,7 @@ Optional. Not injected when the current working directory is out of scope; keeps
 
 ## param.scope.kind
 
-Scope the memory applies to; subtree/path must pair with value; user=cross-project user memory (preference/feedback only, must not carry project path evidence, requires the global authorization memory.user_enabled)
+Scope the memory applies to; subtree/path require value; user=cross-project user memory (preference/feedback only, must not carry project-path evidence, requires the global authorization memory.user_enabled)
 
 ## param.scope.value
 

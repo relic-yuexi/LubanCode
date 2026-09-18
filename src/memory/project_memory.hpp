@@ -8,12 +8,15 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+namespace lubancode::platform { struct BackgroundProcessHandle; }
 
 namespace lubancode::memory {
 
@@ -626,6 +629,15 @@ private:
     std::filesystem::path memory_dir_;
     Options options_;
     std::string executable_;
+    // Windows closes the worker's kill-on-close Job with its last handle.
+    // Keep every live worker until completion; a new enqueue may race an exiting worker.
+    // 池子经 shared_ptr 间接持有:mutex 直接做成员会把 ProjectMemory 的移动
+    // 构造隐式删掉,既有册 make_shared<ProjectMemory>(std::move(store)) 编不过。
+    struct WorkerPool {
+        std::mutex mutex;
+        std::vector<std::shared_ptr<platform::BackgroundProcessHandle>> workers;
+    };
+    mutable std::shared_ptr<WorkerPool> workers_ = std::make_shared<WorkerPool>();
     std::string source_session_;
     MemoryAccounting* accounting_ = nullptr;  // P0-3:装配层挂的落账口
     // 记忆写入调度单 P0:写路回执收件口(装配层挂;空 = 没人收)。

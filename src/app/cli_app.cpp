@@ -1303,7 +1303,9 @@ int RunCli(const std::vector<std::string>& args) {
             effective = *setup;
         }
         std::string executable;
-        if (!args.empty()) {
+        if (const auto path = lubancode::platform::ExecutablePath(); path.has_value()) {
+            executable = PathToUtf8(*path);
+        } else if (!args.empty()) {
             std::error_code ec;
             const auto absolute = std::filesystem::absolute(lubancode::tools::Utf8ToPath(args[0]), ec);
             executable = PathToUtf8(ec ? lubancode::tools::Utf8ToPath(args[0]) : absolute);

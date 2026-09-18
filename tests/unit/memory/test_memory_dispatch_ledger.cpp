@@ -954,7 +954,9 @@ TEST_CASE("抽取收口 e2e: 坏 JSON/截断/流内错的回合尾账,主回合�
     };
     const cli::Theme theme;
     std::string prompts_dir;
-    const std::string text = "修复 router.cpp 的空指针崩溃,把判空补上,回归测试全绿";
+    // 文本带"以后"(案一:跨回合偏好/纠错,无需工具证据)——#124 起抽取有
+    // 耐久信号前门控,纯修复叙事会被 no_durable_signal 拦下,收口用例就测不到。
+    const std::string text = "以后修空指针这类崩溃,先补判空再补回归;这次 router.cpp 的空指针修复照这个规矩来";
 
     // 一幕一只 trajectory 会话 + 一只账本:跑主回合与回合尾抽取,把 assessed
     // 事件的稳定码与 usage 带回来。

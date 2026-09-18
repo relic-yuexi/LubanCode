@@ -634,10 +634,12 @@ const char* kWorktreeDescBefore =
 
 const char* kMemorySaveDescBefore =
     "把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。"
-    "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里"
-    "给出可核验证据;feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须"
+    "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里给出可核验证据;"
+    "feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须"
     "user-stated,模型推断不得直写。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
-    "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。";
+    "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。"
+    "\n\n排队成功只代表 queued，尚未确认落盘。不得说“已记住”，不得保证下次必定召回。"
+    "同一 Git 仓库的子目录和 linked worktree 共用项目记忆；召回还要通过范围、相关度和预算筛选。";
 
 const char* kPtcDescBefore =
     "编排一段 Python 脚本批量调用已挂载的只读工具(read_file/search 等):写变量、条件、循环、"
