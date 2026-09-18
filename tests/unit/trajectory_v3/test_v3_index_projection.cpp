@@ -391,7 +391,7 @@ TEST_CASE("投影: v3 续场折 resume.source.attached 来源,非续场留空") 
                             {"runId", "run-0001"},
                             {"seq", 3},
                             {"id", "evt-00000003"},
-                            {"hash", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}};
+                            {"hash", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}};
         REQUIRE(writer->AppendEvent(std::move(inherited), v3::Durability::ProcessCrash).status ==
                 v3::WriteReceipt::Status::Committed);
     }
