@@ -630,3 +630,17 @@ TEST_CASE("Responses native reasoning survives stream assembly and both replay l
     REQUIRE(std::holds_alternative<ThinkingDelta>(events[0]));
     CHECK(std::get<ThinkingDelta>(events[0]).responses_item == native);
 }
+
+
+TEST_CASE("Responses legacy text alone cannot fabricate a server reasoning item") {
+    Request request;
+    Message assistant;
+    assistant.role = Role::Assistant;
+    assistant.content.push_back(ThinkingBlock{"legacy text"});
+    assistant.content.push_back(TextBlock{"answer"});
+    request.messages.push_back(assistant);
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body["input"].size() == 1);
+    CHECK(body["input"][0]["type"] == "message");
+    CHECK(std::get<ThinkingBlock>(request.messages[0].content[0]).text == "legacy text");
+}

@@ -3,6 +3,8 @@
 #include <type_traits>
 #include <variant>
 
+#include "platform/log_sink.hpp"
+
 namespace lubancode::api::responses {
 
 namespace {
@@ -44,10 +46,7 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                             {"name", b.name},
                             {"arguments", b.input.dump()}};
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
-                if (b.responses_item.is_object()) return b.responses_item;
-                // 旧历史只存文字时保留文字,不伪造 id 或加密载荷。
-                return json{{"type", "reasoning"},
-                            {"summary", json::array({json{{"type", "summary_text"}, {"text", b.text}}})}};
+                return b.responses_item;
             } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
                 // 加密思考块(差距清单 §8.2 第 6 条)同款一次性:不透明载荷
                 // 在这副 wire 上没有可回传的形状,占位由调用方跳过。
@@ -185,6 +184,17 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         wire_map->container = "input";
         wire_map->message_to_wire.assign(request.messages.size(), {});
     }
+    bool warned_missing_reasoning_item = false;
+    const auto replay_thinking = [&](const ThinkingBlock& thinking, Role role) {
+        if (!ShouldReplayThinking(request) || role != Role::Assistant) return false;
+        if (thinking.responses_item.is_object()) return true;
+        if (!warned_missing_reasoning_item) {
+            platform::LogSink::Instance().Warn("responses",
+                "历史思考缺少原生 reasoning item,无法回传;旧存档或跨协议消息不能伪造服务端 ID。新响应将完整保存。");
+            warned_missing_reasoning_item = true;
+        }
+        return false;
+    };
     for (std::size_t message_index = 0; message_index < request.messages.size(); ++message_index) {
         const auto& message = request.messages[message_index];
         // System 角色已顶置进 instructions,input 里一条不落(不重复注入)。
@@ -201,7 +211,7 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         if (!has_image) {
             for (const auto& block : message.content) {
                 if ((std::holds_alternative<ThinkingBlock>(block) &&
-                     (!ShouldReplayThinking(request) || message.role != Role::Assistant)) ||
+                     !replay_thinking(std::get<ThinkingBlock>(block), message.role)) ||
                     std::holds_alternative<RedactedThinkingBlock>(block)) {
                     continue;
                 }
@@ -237,7 +247,7 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                         content.push_back(json{{"type", "input_image"},
                                                {"image_url", "data:" + b.media_type + ";base64," + b.data}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
-                        if (ShouldReplayThinking(request) && message.role == Role::Assistant) {
+                        if (replay_thinking(b, message.role)) {
                             flush_content();
                             if (wire_map != nullptr)
                                 wire_map->message_to_wire[message_index].push_back(input.size());

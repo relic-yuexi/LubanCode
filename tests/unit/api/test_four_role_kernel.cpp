@@ -727,7 +727,7 @@ TEST_CASE("差距6: chat/responses/gemini 三家加密思考块不出门") {
     silent.content.push_back(api::ThinkingBlock{"想", "sig"});
     silent.content.push_back(api::RedactedThinkingBlock{"c2VjcmV0LWRhdGEK"});
     thinking_only.messages.push_back(silent);
-    CHECK(api::responses::BuildRequestJson(thinking_only).at("input").size() == 1);
+    CHECK(api::responses::BuildRequestJson(thinking_only).at("input").size() == 0);
     CHECK(api::gemini::BuildRequestJson(thinking_only).at("contents").size() == 1);
 }
 
@@ -833,11 +833,11 @@ TEST_CASE("差距7: responses/gemini 映射逐块裂元素,思考跳过后的空
     REQUIRE(responses.message_to_wire.size() == 6);
     CHECK(responses.message_to_wire[0].empty());
     CHECK(responses.message_to_wire[1] == std::vector<std::size_t>{0});
-    CHECK(responses.message_to_wire[2] == (std::vector<std::size_t>{1, 2, 3, 4}));
-    CHECK(responses.message_to_wire[3] == std::vector<std::size_t>{5});
-    CHECK(responses.message_to_wire[4] == std::vector<std::size_t>{6});
-    CHECK(responses.message_to_wire[5] == std::vector<std::size_t>{7});
-    CHECK(responses.wire_element_count == 8);
+    CHECK(responses.message_to_wire[2] == (std::vector<std::size_t>{1, 2, 3}));
+    CHECK(responses.message_to_wire[3] == std::vector<std::size_t>{4});
+    CHECK(responses.message_to_wire[4] == std::vector<std::size_t>{5});
+    CHECK(responses.message_to_wire[5] == std::vector<std::size_t>{6});
+    CHECK(responses.wire_element_count == 7);
 
     const auto gemini = api::gemini::BuildMessageWireMap(FourRoleConversation());
     CHECK(gemini.container == "contents");
@@ -861,8 +861,8 @@ TEST_CASE("差距7: responses/gemini 映射逐块裂元素,思考跳过后的空
     thinking_only.messages.push_back(silent);
     const auto silent_responses = api::responses::BuildMessageWireMap(thinking_only);
     REQUIRE(silent_responses.message_to_wire.size() == 1);
-    CHECK(silent_responses.message_to_wire[0] == std::vector<std::size_t>{0});
-    CHECK(silent_responses.wire_element_count == 1);
+    CHECK(silent_responses.message_to_wire[0].empty());
+    CHECK(silent_responses.wire_element_count == 0);
     const auto silent_gemini = api::gemini::BuildMessageWireMap(thinking_only);
     REQUIRE(silent_gemini.message_to_wire.size() == 1);
     CHECK(silent_gemini.message_to_wire[0] == std::vector<std::size_t>{0});
@@ -1029,7 +1029,9 @@ TEST_CASE("Thinking replay: default preserves exact text on four wires and expli
     api::Message assistant;
     assistant.role = api::Role::Assistant;
     const std::string original = "  thought\n\t\"quoted\" ";
-    assistant.content.push_back(api::ThinkingBlock{original, "signature"});
+    const nlohmann::json native{{"type", "reasoning"}, {"id", "rs_test"},
+        {"summary", nlohmann::json::array({nlohmann::json{{"type", "summary_text"}, {"text", original}}})}};
+    assistant.content.push_back(api::ThinkingBlock{original, "signature", native});
     assistant.content.push_back(api::TextBlock{"answer"});
     request.messages.push_back(assistant);
     const auto bodies = [&] {

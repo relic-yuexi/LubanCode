@@ -682,3 +682,5 @@ lubancode app-server --app-server-profile 'D:\AppRuntime\config\deployment.json'
 默认有思考就原样回传，不再区分纯聊天、工具交互。`/think history off` 单独关闭回传，`/think history default` 或 `/think history all` 恢复。关闭本轮思考也会暂停回传；本地历史不删，重新开启后仍可回传。这个历史开关只作用于当前会话，切模型不会重置。
 
 Kimi K2.6 自动配套发送 `thinking.keep=all`。其他模型不硬塞这个参数。Chat 按正式 reasoning 字段回传文本，Messages 保留 thinking 签名，Responses 保留完整 reasoning item，Gemini 保留 thought 文本与签名。旧目录里的 `never/tool_episode` 不再裁剪历史思考，字段名仍沿用目录声明。正文中的 `<think>` 不会伪装成接口思考字段；上下文压缩后已移出的原消息不再发送。
+
+Responses 旧存档若只剩文字、缺少服务端原生 reasoning item，无法还原 ID 与加密载荷，会记诊断并跳过这类残缺条目；新响应完整保存后按原条目回传。加密思考仍受现有不透明输入预算检查约束，未配置相应预算策略时可能阻止请求。
