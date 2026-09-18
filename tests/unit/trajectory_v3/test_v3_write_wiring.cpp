@@ -426,12 +426,19 @@ TEST_CASE("开关开: 输入→回复→工具链→结束,验卷过、配对完
         CHECK(summary->status == "closed");
     }
 
-    // --continue(--continue 读回):新账本开 resume_at_launch,链投影灌回。
+    // --continue(--continue 读回):续接源场(2026-09-19 拍板)——同 id
+    // 续写,链投影灌回,不开新账。
+    const std::string source_bytes = [&] {
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    }();
     TrajectorySessionLedger::Options resume_options = LedgerOptions(root);
     resume_options.resume_at_launch = true;
     auto resumed = TrajectorySessionLedger::Open(resume_options);
     REQUIRE(resumed.has_value());
     CHECK(resumed->resumed_at_launch());
+    CHECK(resumed->session_id() == source_id);  // 续接源场,不另开新场
     const auto history = resumed->LaunchResumeHistory();
     REQUIRE(history.size() == 3);
     CHECK(history[0].role == lubancode::api::Role::User);
@@ -439,23 +446,26 @@ TEST_CASE("开关开: 输入→回复→工具链→结束,验卷过、配对完
     CHECK(history[2].role == lubancode::api::Role::User);  // tool 结果以 user 携带(投影口径)
     // v3 源的旧史显示投影(P3)在场。
     CHECK(resumed->LaunchRestoredHistoryView().has_value());
-    // 新场也是 v3(开关仍开):目录合同 + resume.source.attached 五键指源末行。
+    // 落点合同:本场就是源场(同一本账);目录里没有 v2 文件长出来;
+    // 不写 resume.source.attached(续接不是挂靠);前缀字节不动,只 append。
     const std::filesystem::path new_stream = V3StreamOf(*resumed);
-    CHECK(std::filesystem::exists(new_stream));
+    CHECK(new_stream == stream);
     CHECK_FALSE(std::filesystem::exists(resumed->session_dir() / "main.jsonl"));
-    const auto source_rows = ReadLines(stream);
     const auto new_rows = ReadLines(new_stream);
     const auto attached = std::find_if(new_rows.begin(), new_rows.end(), [](const nlohmann::json& row) {
         return row.value("kind", std::string()) == "resume.source.attached";
     });
-    REQUIRE(attached != new_rows.end());
-    REQUIRE(attached->contains("payload"));
-    const auto& source_ref = attached->at("payload").at("sourceRef");
-    CHECK(source_ref.value("sessionId", std::string()) == source_id);
-    CHECK(source_ref.value("id", std::string()) ==
-          source_rows.back().value("eventId", source_rows.back().value("messageId", std::string())));
-    CHECK(source_ref.value("hash", std::string()) ==
-          source_rows.back().value("lineHash", std::string()));
+    CHECK(attached == new_rows.end());
+    {
+        const std::string after = [&] {
+            std::ifstream file(new_stream, std::ios::binary);
+            REQUIRE(file.is_open());
+            return std::string((std::istreambuf_iterator<char>(file)),
+                               std::istreambuf_iterator<char>());
+        }();
+        CHECK(after.size() > source_bytes.size());
+        CHECK(after.compare(0, source_bytes.size(), source_bytes) == 0);
+    }
     CHECK(lubancode::trajectory::v3::VerifyV3File(new_stream).ok);
 }
 

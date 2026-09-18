@@ -405,7 +405,7 @@ TEST_CASE("T11-A 竞态: 迟到生成记提取事实,不落采用行;采用对�
     CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
 }
 
-TEST_CASE("T11-A resume: 折源场真实已采用标题,新场 inherited 重申") {
+TEST_CASE("T11-A resume: 折本场真实已采用标题,续接不洗掉标题事实") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("resume");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
@@ -442,24 +442,22 @@ TEST_CASE("T11-A resume: 折源场真实已采用标题,新场 inherited 重申"
     // 恢复显示真实已采用标题:control.title 折最后一枚 applied。
     REQUIRE(summary.outcome.control.title.has_value());
     CHECK(*summary.outcome.control.title == "精炼题名");
-    // 新场重申 inherited(带五键指源事件);源场文件一个字节不动。
-    const auto new_rows = ReadLines(V3StreamOf(*ledger));
-    const auto inherited = RowsOfKind(new_rows, "session.title.applied");
-    REQUIRE(inherited.size() == 1);
-    CHECK(inherited[0]->at("payload").value("source", std::string()) == "inherited");
-    CHECK(inherited[0]->at("payload").value("title", std::string()) == "精炼题名");
-    const auto& from = inherited[0]->at("payload").at("inheritedFrom");
-    CHECK(from.value("sessionId", std::string()) == source_id);
-    CHECK(from.value("id", std::string()) != "");
-    // 读面:FindLastTitleApplied 两边各自报真值。
-    const auto source_fact = lubancode::trajectory::v3::FindLastTitleApplied(
-        *lubancode::trajectory::v3::ReadV3Ledger(source_stream));
-    REQUIRE(source_fact.has_value());
-    CHECK(source_fact->title == "精炼题名");
-    CHECK(source_fact->source == "generated");
-    const auto new_fact = lubancode::trajectory::v3::FindLastTitleApplied(
+    // 2026-09-19 落点拍板:续接源场(本场就是源场,同 id 续写)。标题
+    // 本就在本场账上,不写 inherited 重申——applied 仍只有本地/生成两枚,
+    // 最后一枚是已采用真值;续接只 append,旧行不动。
+    CHECK(ledger->session_id() == source_id);
+    CHECK(V3StreamOf(*ledger) == source_stream);
+    const auto rows_after = ReadLines(V3StreamOf(*ledger));
+    const auto applied = RowsOfKind(rows_after, "session.title.applied");
+    REQUIRE(applied.size() == 2);
+    CHECK(applied[0]->at("payload").value("source", std::string()) == "local");
+    CHECK(applied[1]->at("payload").value("source", std::string()) == "generated");
+    CHECK(applied[1]->at("payload").value("title", std::string()) == "精炼题名");
+    // 读面:FindLastTitleApplied 报本场真值(generated,不被续接洗掉)。
+    const auto fact = lubancode::trajectory::v3::FindLastTitleApplied(
         *lubancode::trajectory::v3::ReadV3Ledger(V3StreamOf(*ledger)));
-    REQUIRE(new_fact.has_value());
-    CHECK(new_fact->source == "inherited");
+    REQUIRE(fact.has_value());
+    CHECK(fact->title == "精炼题名");
+    CHECK(fact->source == "generated");
     CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*ledger)).ok);
 }

@@ -1882,6 +1882,10 @@ const Entry kZhCN[] = {
     {"cmd.resume.takeover_failed", "[会话存档] 接管 {0} 失败,恢复的历史只在内存里,本场不再落盘。"},
     {"cmd.resume.restored_compact", "已恢复 {0},有效 {1} 条(全量 {2} 条,经 {3} 次压缩)"},
     {"cmd.resume.restored", "已恢复 {0},{1} 条消息"},
+    // 2026-09-19 落点分派后的两套口径:v3 源续接源场(同 id 续写,不开
+    // 新场);v2 源 fork 迁移开新场(新 id)。
+    {"cmd.resume.continued", "已续接 {0},{1} 条消息"},
+    {"cmd.resume.migrated", "已迁移 {0},{1} 条消息(新场 {2})"},
     {"cmd.resume.repaired", "(补了 {0} 条缺失的工具结果)"},
     {"cmd.resume.skipped", "(跳过 {0} 行解析不动的存档)"},
     {"cmd.resume.queue_restored", "(排队消息 {0} 条也回来了,收尾后自动送出)"},

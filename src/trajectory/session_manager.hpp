@@ -404,13 +404,18 @@ struct ResumeOutcome {
     // 第 5 步:新 session 开张(run.started(start_reason=resume))。
     std::string new_run_started_event_id;
     // 第 6 步:resume.source.attached(+ 交互路跨 session command.completed)。
+    // v3 源续接源场(2026-09-19)不写 attached——续接不是挂靠新账,
+    // resume_attached_event_id 留空;交互路 command.completed 照落源账。
     std::string resume_attached_event_id;
     std::string command_completed_event_id;
     // 第 6.5 步(v3 链折算导入,D2):沿源链折出的祖先+直接源有效对话
-    // 抄进新账并接纳进链的条数;0 = 无史可导(空会话/v2 源)。
+    // 抄进新账并接纳进链的条数;0 = 无史可导(空会话/v2 源)。v3 源续接
+    // 源场后本账自足,不抄链,恒 0。
     std::size_t imported_history_count = 0;
     // 第 7 步:session.json running,active 指针已切;新 turn/request/call/
-    // seq 全从新命名空间起号(recorder 新开,天然新号)。
+    // seq 全从新命名空间起号(recorder 新开,天然新号)。v3 源续接时
+    // new_session_id == source_session_id(同场续写,turn/request/seq 沿
+    // 源账命名空间续号,不另起)。
     bool new_session_running = false;
     bool active_switched = false;
 };
@@ -545,11 +550,15 @@ public:
     // ResumeAsNew 开新场,本柄不再接活。
     CloseOutcome Close(const CloseRequest& request, ClearParticipant* participant);
 
-    // resume-as-new(§10.4 七步):只读 source(验账→checkpoint/从头折叠
-    // →悬空分档),再开一间新 session(start_reason=resume,resumed_from=
-    // source)。source Journal 永不 reopen append;已完成的 child 只核
-    // terminal hash,不把正文灌进新 main。active session 存在时先由调用方
-    // Close(switch_to_resume)——本口不管封旧场。
+    // resume(§10.4 七步;2026-09-19 用户拍板改落点):只读 source(验账→
+    // checkpoint/从头折叠→悬空分档)后按源格式分派落点——
+    //   v3 源:续接源场(ResumeInPlaceV3Locked)——不开新账,writer 从源
+    //          账尾 append,列表不新增条目;源账 append-only,旧行不动;
+    //   v2 源:维持 fork 迁移——v2 账写不动,开一间新 session
+    //          (start_reason=resume,resumed_from=source),新场按写侧开关
+    //          落 v3/v2(原路不动)。
+    // 已完成的 child 只核 terminal hash,不把正文灌进新 main。active
+    // session 存在时先由调用方 Close(switch_to_resume)——本口不管封旧场。
     ResumeOutcome ResumeAsNew(const ResumeRequest& request);
 
     // 恢复源只读预检(Resume 接入 v3 单 R3):单段名/目录/格式探针/
@@ -640,12 +649,25 @@ private:
     // 源头五键由调用方从第 1-4 步的验账结果递进(v2/v3 源各取各的事实)。
     // chain_fold 非空(v3 源)时第 6.5 步把链折算的祖先史抄进新账并接纳
     // 进链(§4.10 第 3-5 条,D2);空(v2 源)不动——v2 源无链可遍历。
+    // 2026-09-19 起 v3 源不走这路(改 ResumeInPlaceV3Locked 续接源场);
+    // 本路只收 v2 源的 fork 迁移与未来显式 fork。
     ResumeOutcome ResumeAsNewV3Locked(const ResumeRequest& request, const std::string& source_id,
                                       const std::string& previous_session_id,
                                       const std::string& source_run_id,
                                       const std::string& source_last_event_id,
                                       std::uint64_t source_seq, ResumeOutcome outcome,
                                       const V3ResumeFold* chain_fold);
+    // ResumeAsNew 的 v3 源落点(2026-09-19 用户拍板:"resume 就是 resume"):
+    // 源场重开为当前场——不开新账、不写 resume.source.attached、不抄祖先
+    // 链(本账自足)。V3Writer::Continue 整卷重验后续卷,seq/hash 链断在
+    // 半路拒开;此后的写全是 append,旧行一个字节不动。续接事实落
+    // lifecycle 账(resume_reference,start_reason=resume_in_place)——
+    // v3 schema 没有 session.resume/继续事件,不发明新 kind。审批档重算
+    // 与交互路跨 session command.completed 沿 fork 路同款。
+    ResumeOutcome ResumeInPlaceV3Locked(const ResumeRequest& request, const std::string& source_id,
+                                        const std::string& source_run_id,
+                                        const std::string& source_run_kind,
+                                        ResumeOutcome outcome);
 
     // ---- 恢复器内部(RecoverWorkspace 持锁调用) ----
     // 换账新侧续办:空 preparing 开张(Start)或半开的续写(Continue),

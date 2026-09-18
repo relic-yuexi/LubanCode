@@ -116,6 +116,9 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
     std::string line;
     std::uint64_t prompt_seq = 0;
     bool tail_broken = false;
+    // 续接标记(2026-09-19 resume 续接源场):session.ended 之后又长行,
+    // 说明场子重开续写了——状态折 running;再遇 session.ended 翻回 closed。
+    bool ended_seen = false;
     while (std::getline(file, line)) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
@@ -127,6 +130,10 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
         if (row.is_discarded() || !row.is_object()) {
             tail_broken = true;
             continue;
+        }
+        if (ended_seen) {
+            summary.status = SessionStatusName(SessionStatus::Running);
+            ended_seen = false;
         }
         ++summary.event_count;  // v3 两类行都算,与 v2"总行数"同口径
         const std::int64_t ts_ms =
@@ -208,6 +215,7 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
                 }
             } else if (kind == "session.ended") {
                 summary.status = SessionStatusName(SessionStatus::Closed);
+                ended_seen = true;  // 之后又长行则折 running(续接源场)
             }
         }
     }

@@ -202,21 +202,31 @@ TEST_CASE("T11-B 恢复重算: 变更后崩溃 + 策略收紧,不静默提权") 
         // 重算后的有效档:较严者(default),不是源场的 yolo。
         REQUIRE(summary.outcome.approval_mode.has_value());
         CHECK(*summary.outcome.approval_mode == ApprovalMode::Default);
-        // 新账记录重算事实:oldMode 如实带源场原始档,mode 是重算结果。
+        // 2026-09-19 落点拍板:续接源场——重算事实落本场(=源场)账尾,
+        // oldMode 如实带源场原始档,mode 是重算结果。
+        CHECK(second->session_id() == source_id);
+        CHECK(V3StreamOf(*second) == source_stream);
         const auto rows = ReadLines(V3StreamOf(*second));
         const auto facts = RowsOfKind(rows, "approval.mode.applied");
-        REQUIRE(facts.size() >= 2);  // launch 基线 + resume_recomputed
+        REQUIRE(facts.size() >= 3);  // launch 基线 + user_toggle + resume_recomputed
         const auto& recomputed = *facts.back();
         CHECK(recomputed.at("payload").value("source", std::string()) == "resume_recomputed");
         CHECK(recomputed.at("payload").value("mode", std::string()) == "default");
         CHECK(recomputed.at("payload").value("oldMode", std::string()) == "yolo");
         CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*second)).ok);
     }
-    // 源场账一个字节不动。
-    CHECK(ReadFileText(source_stream) == source_bytes);
+    // 源账 append-only:续接只许 append,封口那刻的前缀一字节不动。
+    {
+        const std::string after = ReadFileText(source_stream);
+        CHECK(after.size() > source_bytes.size());
+        CHECK(after.compare(0, source_bytes.size(), source_bytes) == 0);
+    }
 
-    // 反向:当前策略更宽(launch=yolo),源场 default——按当前策略走
-    //(重算不降格,也不从旧历史提权)。
+    // 反向:当前策略更宽(launch=yolo)。续接落点下,上一回 resume 的
+    // clamp(default)是本场账上的既成事实——重算取较严者仍是 default,
+    // 不从旧历史提权(fork 落点时 clamp 落在别场,再 resume 源场曾见
+    // yolo;续接落点下 clamp 粘在本账,提权只走显式切档)。再续一回
+    // 也不堆场:还是同一场。
     {
         auto third = TrajectorySessionLedger::Open(LedgerOptions(root, ApprovalMode::Yolo));
         REQUIRE(third.has_value());
@@ -224,7 +234,8 @@ TEST_CASE("T11-B 恢复重算: 变更后崩溃 + 策略收紧,不静默提权") 
         const auto summary = third->ResumeInteractive(source_id);
         REQUIRE(summary.outcome.error_code.empty());
         REQUIRE(summary.outcome.approval_mode.has_value());
-        CHECK(*summary.outcome.approval_mode == ApprovalMode::Yolo);
+        CHECK(*summary.outcome.approval_mode == ApprovalMode::Default);
+        CHECK(third->session_id() == source_id);
     }
 }
 
@@ -282,7 +293,7 @@ TEST_CASE("T11-C 采集: session.environment.captured 落账,canary 不入档") 
     CHECK(fact->replay_level == "input_only");
 }
 
-TEST_CASE("T11-C 恢复: 旧场环境事实不动,新场重采自己的") {
+TEST_CASE("T11-C 恢复: 续接场昨天的事实留账,今天重采追加新行") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("resume");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
@@ -295,8 +306,7 @@ TEST_CASE("T11-C 恢复: 旧场环境事实不动,新场重采自己的") {
     facts.wire = "anthropic";
     facts.model = "kimi-k2.6";
     CHECK(ledger->CaptureEnvironment(facts).empty());
-    // 先封口再定格字节:resume 的换场事务对当前场落的 session.ended 是
-    // 合法封口,不是改写;封口后源场一个字节不许再动。
+    // 先封口再定格字节:封口行的字节在续接后也不许动(append-only)。
     const auto closed = ledger->CloseSession("exit");
     CHECK(closed.error_code.empty());
     const std::string source_bytes = ReadFileText(source_stream);
@@ -304,23 +314,35 @@ TEST_CASE("T11-C 恢复: 旧场环境事实不动,新场重采自己的") {
         *lubancode::trajectory::v3::ReadV3Ledger(source_stream));
     REQUIRE(source_capture.has_value());
 
-    // 恢复换场:昨天的事实留在旧场(字节不动);新场没采集前 unavailable,
-    // 采集后是新场自己今天的快照。恢复走第二只账本(生产形状:恢复总从
-    // 活场出发,封口后的源场由新进程接管)。
+    // 恢复读第二只账本(生产形状:恢复总从活场出发,封口后的源场由新
+    // 进程接管)。2026-09-19 落点拍板:续接源场——昨天的事实留在本账
+    //(旧行不动),新 run 重采今天的环境,追加自己的新行。
     auto second = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(second.has_value());
     const auto summary = second->ResumeInteractive(source_id);
     REQUIRE(summary.outcome.error_code.empty());
-    CHECK(ReadFileText(source_stream) == source_bytes);
+    CHECK(second->session_id() == source_id);
     const auto new_stream = V3StreamOf(*second);
-    CHECK_FALSE(lubancode::trajectory::v3::FindLastEnvironmentCapture(
-                    *lubancode::trajectory::v3::ReadV3Ledger(new_stream))
-                    .has_value());  // 没采集就 unavailable,不拿源场的补
+    CHECK(new_stream == source_stream);
+    {
+        const std::string after = ReadFileText(source_stream);
+        CHECK(after.size() > source_bytes.size());
+        CHECK(after.compare(0, source_bytes.size(), source_bytes) == 0);
+    }
     facts.model = "kimi-k2.6-today";
     CHECK(second->CaptureEnvironment(facts).empty());
     const auto new_capture = lubancode::trajectory::v3::FindLastEnvironmentCapture(
         *lubancode::trajectory::v3::ReadV3Ledger(new_stream));
     REQUIRE(new_capture.has_value());
-    CHECK(new_capture->event_id != source_capture->event_id);
+    CHECK(new_capture->event_id != source_capture->event_id);  // 今天的新行
+    // 昨天的事实还在账上(append-only,不洗掉)。
+    const auto ledger_rows = ReadLines(new_stream);
+    std::size_t capture_rows = 0;
+    for (const auto& row : ledger_rows) {
+        if (row.value("kind", std::string()) == "session.environment.captured") {
+            ++capture_rows;
+        }
+    }
+    CHECK(capture_rows == 2);
     CHECK(lubancode::trajectory::v3::VerifyV3File(new_stream).ok);
 }

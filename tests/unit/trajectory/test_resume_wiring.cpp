@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -306,6 +307,14 @@ TEST_CASE("默认 v3: one_shot 源预检明拒,普通 v3 源照常续接") {
     std::error_code size_ec;
     const auto source_bytes_before = std::filesystem::file_size(normal_stream, size_ec);
     REQUIRE_FALSE(size_ec);
+    // 源账前缀字节基准(续接只许 append,前缀一字节不动)。
+    const std::string source_prefix_bytes = [&] {
+        std::ifstream file(normal_stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        return std::string((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+    }();
+    REQUIRE(source_prefix_bytes.size() == static_cast<std::size_t>(source_bytes_before));
     {
         auto options = LedgerOptions(root);
         options.one_shot = true;
@@ -336,16 +345,26 @@ TEST_CASE("默认 v3: one_shot 源预检明拒,普通 v3 源照常续接") {
     CHECK(refused.outcome.error_code == "resume.source_not_resumable");
     CHECK(ledger->session_id() == current_id);
 
-    // 同一当前场续普通 v3 源:照常七步。
+    // 同一当前场续普通 v3 源:续接源场(2026-09-19 拍板)——同 id 续写。
     const TrajectoryResumeSummary resumed = ledger->ResumeInteractive(normal_id, "resume");
     REQUIRE(resumed.outcome.error_code.empty());
     CHECK(resumed.outcome.source_is_v3);
     CHECK(resumed.outcome.source_session_id == normal_id);
-    CHECK(ledger->session_id() != current_id);
-    // 源档全程只读:字节不变;新账另有其址。
-    CHECK(std::filesystem::file_size(normal_stream, size_ec) == source_bytes_before);
+    CHECK(ledger->session_id() == normal_id);  // 续接源场;当前场已封口让位
+    CHECK(ledger->session_dir() == normal_stream.parent_path());
+    // 源账 append-only:只许长,前缀一字节不动(v2 源的迁移路才有"只读
+    // 源档 + 新账另有其址")。
+    const auto source_bytes_after = std::filesystem::file_size(normal_stream, size_ec);
     CHECK_FALSE(size_ec);
-    CHECK(ledger->session_dir() != normal_stream.parent_path());
+    CHECK(source_bytes_after > source_bytes_before);
+    {
+        std::ifstream file(normal_stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string after((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+        CHECK(after.compare(0, static_cast<std::size_t>(source_bytes_before),
+                            source_prefix_bytes) == 0);
+    }
 }
 
 TEST_CASE("ClearSession: 八步换账后账本指新场,选段器重置") {
