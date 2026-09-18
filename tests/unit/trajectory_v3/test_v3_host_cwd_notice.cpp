@@ -96,13 +96,16 @@ std::vector<nlohmann::json> StreamLines(const fs::path& stream) {
     return lines;
 }
 
-// 宿主目录通知的正式消息行(origin=session_runtime,区别于人类输入与
-// 工具输出;工具正文/仓库文件伪造不了这只 origin——写侧只有宿主口)。
+// 宿主目录通知的正式消息行(origin=session_runtime 的 user 消息,区别于
+// 人类输入、工具输出与建场首行 system——后者 origin 也是 session_runtime,
+// 按 role=user 过滤开;工具正文/仓库文件伪造不了这只 origin,写侧只有宿主口)。
 const nlohmann::json* FindNoticeMessage(const std::vector<nlohmann::json>& lines) {
     for (const auto& line : lines) {
         if (line.value("type", std::string()) != "message") continue;
         if (line.value("origin", std::string()) != "session_runtime") continue;
         if (line.value("purpose", std::string()) != "conversation") continue;
+        if (!line.contains("message") || !line.at("message").is_object()) continue;
+        if (line.at("message").value("role", std::string()) != "user") continue;
         return &line;
     }
     return nullptr;
@@ -263,6 +266,8 @@ TEST_CASE("v3 回合署名: turn 内切换挂当前 turnId,空闲切换走 write
     for (const auto& line : lines) {
         if (line.value("type", std::string()) != "message") continue;
         if (line.value("origin", std::string()) != "session_runtime") continue;
+        if (!line.contains("message") || !line.at("message").is_object()) continue;
+        if (line.at("message").value("role", std::string()) != "user") continue;
         notices.push_back(&line);
     }
     REQUIRE(notices.size() == 2);

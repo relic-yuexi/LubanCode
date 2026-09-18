@@ -112,7 +112,8 @@ TEST_CASE("宿主目录通知(空闲路): system/tools 逐字节不变,旧消息
     const int epoch_before_turn1 = loop.cache_epoch();
     CHECK(loop.Run("你好", agent::TurnWiring{}).has_value());
     REQUIRE(backend.captured_requests.size() == 1);
-    const api::Request& request1 = backend.captured_requests[0];
+    // 拷贝存值:vector 后续 push 会扩容,引用会悬空。
+    const api::Request request1 = backend.captured_requests[0];
     const nlohmann::json j1 = WireJson(request1);
 
     // slash 切换:宿主在空闲边界注入目录通知(与控制器
@@ -121,14 +122,15 @@ TEST_CASE("宿主目录通知(空闲路): system/tools 逐字节不变,旧消息
 
     CHECK(loop.Run("继续", agent::TurnWiring{}).has_value());
     REQUIRE(backend.captured_requests.size() == 2);
-    const api::Request& request2 = backend.captured_requests[1];
+    const api::Request request2 = backend.captured_requests[1];
     const nlohmann::json j2 = WireJson(request2);
 
     // (a) 请求快照:system 一字不动;tools 表不动。
     CHECK(request2.system == request1.system);
     CHECK(request2.tools.size() == request1.tools.size());
-    // 旧消息逐条保留,新内容(通知 + 新输入)只在尾部。
-    REQUIRE(request2.messages.size() == request1.messages.size() + 2);
+    // 旧消息逐条保留,新内容只在尾部:首份请求只带首条 user(assistant
+    // 是响应,不进请求),第二份在其后追加 assistant1 + 通知 + 新输入。
+    REQUIRE(request2.messages.size() == request1.messages.size() + 3);
 
     // (b) wire 编码:system/tools 顶层元素相等;messages 数组前 N 条逐元素
     //     相等(这是协议适配器真正发出去的形状)。
@@ -138,7 +140,7 @@ TEST_CASE("宿主目录通知(空闲路): system/tools 逐字节不变,旧消息
     }
     const auto& msgs1 = j1.at("messages");
     const auto& msgs2 = j2.at("messages");
-    REQUIRE(msgs1.size() == 2);  // user + assistant
+    REQUIRE(msgs1.size() == 1);  // 首份请求:只有首条 user
     REQUIRE(msgs2.size() == 4);  // user + assistant + 通知 + 新输入
     for (std::size_t i = 0; i < msgs1.size(); ++i) {
         CHECK(msgs2[i] == msgs1[i]);
@@ -192,9 +194,10 @@ TEST_CASE("宿主目录通知(工具路): 工具结果提交后追加,tool_use/t
     }
 
     // 第二请求(工具结果提交后的下一请求):[user, assistant(tool_use),
-    // user(tool_result + 通知文本块), assistant]。
+    // user(tool_result + 通知文本块)]——收口的 assistant 是本步响应,不进
+    // 请求;通知块追加在 tool_result 之后,没插进未闭合的调用组。
     const auto& msgs2 = j2.at("messages");
-    REQUIRE(msgs2.size() == 4);
+    REQUIRE(msgs2.size() == 3);
     const auto& result_msg = msgs2[2].at("content");
     bool has_tool_result = false;
     bool has_notice_text = false;

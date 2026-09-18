@@ -423,7 +423,7 @@ TEST_CASE("连续两条消息共享上下文:同会话同场,第二轮请求带�
     // 第二轮请求真带了第一轮的对话(上下文共享,不靠猜)。
     REQUIRE(fixture.backend->dumps().size() == 2);
     const std::string& second = fixture.backend->dumps()[1];
-    CHECK(second.find("工作目录:") != std::string::npos);
+    CHECK(second.find("会话启动目录:") != std::string::npos);
     CHECK(second.find("本轮开始时间(宿主时钟):") == std::string::npos);
     CHECK(second.find("get_current_time") != std::string::npos);
     CHECK(second.find("delay_seconds") != std::string::npos);
