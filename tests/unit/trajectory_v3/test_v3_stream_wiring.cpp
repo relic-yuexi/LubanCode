@@ -503,6 +503,18 @@ TEST_CASE("v3 reasoning replay: persisted signature and native item survive hist
     CHECK(thinking.text == "exact\ntext");
     CHECK(thinking.signature == "sig");
     CHECK(thinking.responses_item == native);
+    const std::string source_id = ledger->session_id();
     CHECK(ledger->CloseSession("exit").error_code.empty());
     CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*ledger)).ok);
+    auto receiver = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(receiver.has_value());
+    const auto resumed = receiver->ResumeInteractive(source_id);
+    REQUIRE(resumed.outcome.error_code.empty());
+    REQUIRE(resumed.history.size() == 2);
+    REQUIRE(std::holds_alternative<api::ThinkingBlock>(resumed.history[1].content[0]));
+    const auto& restored = std::get<api::ThinkingBlock>(resumed.history[1].content[0]);
+    CHECK(restored.text == thinking.text);
+    CHECK(restored.signature == thinking.signature);
+    CHECK(restored.responses_item == native);
+    CHECK(receiver->CloseSession("exit").error_code.empty());
 }

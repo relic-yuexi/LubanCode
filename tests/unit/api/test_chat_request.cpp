@@ -124,9 +124,7 @@ TEST_CASE("Chat request: 用户 extra_body 里的 stream_options 压过 capabili
 }
 
 // ---------------------------------------------------------------------------
-// reasoning 回传(reasoning_replay=tool_episode,DeepSeek 协议):纯对话段
-// 略过;工具交互段按原字节原次序回传 reasoning_content,不进 content。
-// 默认策略 never 维持现行行为(一条不带)。
+// 默认原样回传 reasoning_content,不再按是否用过工具裁剪。
 // ---------------------------------------------------------------------------
 
 api::chat::ChatRequestOptions ToolEpisode() {
@@ -135,7 +133,7 @@ api::chat::ChatRequestOptions ToolEpisode() {
     return options;
 }
 
-TEST_CASE("Chat request: 纯对话思考不回传(哪怕开了 tool_episode)") {
+TEST_CASE("Chat request: 纯对话思考照常回传(旧 tool_episode 不裁剪)") {
     api::Request request;
     request.model = "deepseek-v4-pro";
     api::Message user;
@@ -390,7 +388,7 @@ TEST_CASE("Chat request: always——回传字段名听方言声明,不双写") 
 
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["messages"][1]["reasoning"] == "想了一下");
-    CHECK(body["messages"][1].contains("reasoning_content"));
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: 旧方言 never 不再裁掉历史思考") {
@@ -408,7 +406,7 @@ TEST_CASE("Chat request: 旧方言 never 不再裁掉历史思考") {
     assistant.content.push_back(api::ToolUseBlock{"call_1", "read_file", nlohmann::json{{"path", "a"}}});
     request.messages.push_back(assistant);
 
-    // 方言说 never,legacy 配了 tool_episode:正式方言赢,一条不回。
+    // 旧 replay 声明不再丢弃思考,用户未关闭就回传。
     const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), ToolEpisode());
     CHECK(body["messages"][1].contains("reasoning_content"));
 }
@@ -501,12 +499,13 @@ TEST_CASE("Chat request: K2.6 history all 且档位未设——keep 照发,不�
     CHECK(body["messages"][1]["reasoning_content"] == "上一轮的思考");
 }
 
-TEST_CASE("Chat request: K2.6 history all 但思考被关——不发 keep(冲突在入口明报)") {
+TEST_CASE("Chat request: K2.6 history all 但思考被关——停发 keep 和历史思考") {
     api::Request request = KeepAllHistoryRequest();
-    request.reasoning_effort = "none";  // 关思考与保留冲突;配置入口已拒绝
+    request.reasoning_effort = "none";  // 关闭本轮思考也暂停回传
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["thinking"]["type"] == "disabled");
-    CHECK_FALSE(body["thinking"].contains("keep"));  // 自相矛盾的请求不发
+    CHECK_FALSE(body["thinking"].contains("keep"));
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: K3/K2.7 上 history all 不落 keep(固定开启,无请求字段)") {
@@ -564,7 +563,7 @@ TEST_CASE("Chat request: history ProviderDefault 默认带 keep 与纯聊天思�
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["thinking"]["type"] == "enabled");
     CHECK(body["thinking"]["keep"] == "all");
-    // 缺省 replay=tool_episode:纯对话段照旧不回传。
+    // 旧 tool_episode 不影响默认全量回传。
     CHECK(body["messages"][1].contains("reasoning_content"));
 }
 
@@ -717,7 +716,7 @@ TEST_CASE("Chat request: 回传字段名按 provider 声明走,默认仍是 reas
         const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(),
                                                       ToolEpisodeWithReplayField("reasoning"));
         CHECK(body["messages"][1]["reasoning"] == "先想路径");
-        CHECK(body["messages"][1].contains("reasoning_content"));
+        CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
     }
 }
 

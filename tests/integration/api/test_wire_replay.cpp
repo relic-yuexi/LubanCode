@@ -634,12 +634,12 @@ TEST_CASE("wire 回环 chat: Kimi K2.6 工具循环——本 Turn reasoning 回�
     const auto& tool_message = body2.at("messages")[2];
     CHECK(tool_message.at("role") == "tool");
     CHECK(tool_message.at("tool_call_id") == call->id);
-    // 跨 Turn 未开 keep(P1):不宣称 Preserved Thinking,thinking 里没有 keep。
-    CHECK_FALSE(body2.at("thinking").contains("keep"));
+    // 默认跨轮保留,工具交互同样携带 keep。
+    CHECK(body2.at("thinking").at("keep") == "all");
     CHECK_FALSE(body2.contains("reasoning_effort"));
 }
 
-TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinking.keep") {
+TEST_CASE("wire 回环 chat: Kimi K2.5 回传历史思考,不误发 thinking.keep") {
     std::vector<HttpRequest> received;
     ReplayPlan plan;
     plan.sse_rounds = {
@@ -770,7 +770,7 @@ TEST_CASE("wire 回环 chat: vLLM qwen3.8 工具循环——chat_template_kwargs
     const auto& replayed = body2.at("messages")[1];
     // vLLM 0.27 新名 reasoning(不是 DeepSeek 的 reasoning_content),原字节。
     CHECK(replayed.at("reasoning") == "用户问北京气温，需要调用工具查询。");
-    CHECK(replayed.contains("reasoning_content"));
+    CHECK_FALSE(replayed.contains("reasoning_content"));
     REQUIRE(replayed.contains("tool_calls"));
     CHECK(replayed.at("tool_calls")[0].at("id") == call->id);
     CHECK(replayed.at("tool_calls")[0].at("function").at("name") == "get_weather");

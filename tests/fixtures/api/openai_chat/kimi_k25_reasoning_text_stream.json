@@ -18,7 +18,7 @@
     "MessageDone"
   ],
   "expected_replay": [
-    "K2.5 不支持 Preserved Thinking:后续请求不带回 assistant.reasoning_content,也不发送 thinking.keep"
+    "默认原字节回传历史 assistant.reasoning_content,不发送模型未声明的 thinking.keep;客户端发送不等于服务端支持跨轮推理保留。"
   ],
   "usage_expectation": {},
   "stop_reason": "end_turn",

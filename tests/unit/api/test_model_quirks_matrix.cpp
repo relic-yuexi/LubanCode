@@ -869,7 +869,7 @@ TEST_CASE("矩阵 D3: 空 delta——chat 的空 content 不吐事件,流不因�
     CHECK(std::get<api::MessageDone>(done[0]).stop_reason == "end_turn");
 }
 
-TEST_CASE("矩阵 D4: reasoning 与正文交错——事件序保序,assembler 攒出思考在前正文合一") {
+TEST_CASE("矩阵 D4: reasoning 与正文交错——事件与内容块都按到达顺序保留") {
     api::chat::EventParser parser;
     api::MessageAssembler assembler;
     const auto feed = [&](const char* chunk) {
@@ -886,11 +886,12 @@ TEST_CASE("矩阵 D4: reasoning 与正文交错——事件序保序,assembler �
         assembler.Feed(event);
     }
     const api::Message message = assembler.BuildMessage();
-    // chat 没有块边界标记,交错流的块序契约:思考按到达先后在前,正文合一段。
-    REQUIRE(message.content.size() == 3);
+    // 不跨过思考块合并正文,保持原始块顺序。
+    REQUIRE(message.content.size() == 4);
     CHECK(std::get<api::ThinkingBlock>(message.content[0]).text == "想一");
-    CHECK(std::get<api::ThinkingBlock>(message.content[1]).text == "想二");
-    CHECK(std::get<api::TextBlock>(message.content[2]).text == "文一文二");
+    CHECK(std::get<api::TextBlock>(message.content[1]).text == "文一");
+    CHECK(std::get<api::ThinkingBlock>(message.content[2]).text == "想二");
+    CHECK(std::get<api::TextBlock>(message.content[3]).text == "文二");
 }
 
 TEST_CASE("矩阵 D5: 单帧超限——framer 报废后一帧不吐,解析层见不到半截") {
