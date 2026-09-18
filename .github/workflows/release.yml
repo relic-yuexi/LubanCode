@@ -149,7 +149,8 @@ jobs:
           cp -R skills dist/lubancode/
           mkdir -p dist/lubancode/web/assistant
           cp web/assistant/index.html web/assistant/assistant.css web/assistant/assistant_core.js web/assistant/assistant_app.js dist/lubancode/web/assistant/
-          # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走 install.sh
+          # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走
+          # install.sh + install_plan.py(所有权引擎,已有内容的升级靠它判定)
           case "${{ matrix.name }}" in
             windows-x64)
               cp scripts/install.ps1 dist/lubancode/
@@ -157,9 +158,22 @@ jobs:
               ;;
             *)
               cp scripts/install.sh dist/lubancode/
+              cp scripts/install_plan.py dist/lubancode/
               chmod +x dist/lubancode/install.sh
               ;;
           esac
+          # 官方清单(GitHubRelease自动更新单 §四):包内每个官方文件记
+          # 路径/大小/SHA-256/用途,跟包走。装机侧拿它做文件所有权判定;
+          # 下面的验包步重算对账,对不上即红,不发糊涂包。
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          ver="${GITHUB_REF_NAME#v}"
+          channel=stable
+          case "$ver" in *-*) channel=prerelease ;; esac
+          "$PY" scripts/generate_manifest.py \
+            --root dist/lubancode \
+            --version "$ver" \
+            --platform "${{ matrix.name }}" \
+            --channel "$channel"
           cd dist
           case "${{ matrix.archive }}" in
             *.zip)    7z a "../${{ matrix.archive }}" lubancode ;;
@@ -179,6 +193,18 @@ jobs:
             *.tar.gz) tar xzf "${{ matrix.archive }}" -C dist/verify ;;
           esac
           root=dist/verify/lubancode
+          # 官方清单在包里,且与包内实际内容逐文件对得上账(路径/大小/SHA-256)
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          ver="${GITHUB_REF_NAME#v}"
+          channel=stable
+          case "$ver" in *-*) channel=prerelease ;; esac
+          test -f "$root/manifest.json" || { echo "包里缺 manifest.json" >&2; exit 1; }
+          "$PY" scripts/generate_manifest.py \
+            --root "$root" \
+            --version "$ver" \
+            --platform "${{ matrix.name }}" \
+            --channel "$channel" \
+            --check
           for asset in index.html assistant.css assistant_core.js assistant_app.js; do
             test -s "$root/web/assistant/$asset" || { echo "包里缺 web/assistant/$asset" >&2; exit 1; }
           done
