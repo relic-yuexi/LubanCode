@@ -3530,7 +3530,8 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                 TrajectorySessionLedger ledger;
                 ledger.impl_ = std::make_unique<Impl>(std::move(impl));
                 ledger.BindV3Books_();
-                // v3 源:新场沿用源场生效 system(§4.10 默认)。
+                // v3 源:续接场沿用源场生效 system(§4.10 默认;v2 源的
+                // 迁移新场保持基础版,三步切换由后续按需走)。
                 if (resumed.source_is_v3) {
                     ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
                 }
@@ -4910,16 +4911,24 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     if (!summary.outcome.error_code.empty()) {
         return summary;
     }
-    // 换场成功:账本指到新场,选段器重置,history 折叠投影交出去。
+    // 换场成功:账本指到落点场(v3 源=续接的源场,v2 源=迁移新场),选段
+    // 器重置,history 折叠投影交出去。
     impl_->active = manager.active();
     if (impl_->active != nullptr) {
         impl_->main_run_id = impl_->active->manifest.main_run_id;
     }
+    // v3 books 强制重建:续接源场时 active 是同址换值(新写者地址可能
+    // 与旧写者相同,BindV3Books_ 的换场判据认不出),旧 books 里的粘账
+    //(T12-A 执行阻断、turn 粘账)不许带过换场点——resume 重开即重建,
+    // 与 fork 落点同一合同。system 沿 §4.10 由下方 AdoptSourceSystemV3_
+    // 按账面现行版本重采。
+    impl_->v3_books.reset();
     BindV3Books_();
     impl_->child_terminal_hashes.clear();
     record_selection_ = nullptr;
     environment_captured_ = false;
-    // v3 源:新场沿用源场生效 system(§4.10 默认,三步切换补账)。
+    // v3 源:续接场沿用源场生效 system(§4.10 默认,三步切换补账——本场
+    // books 从基础版重起步,账上现行 system 与之不同就照 §4.3 切换)。
     if (summary.outcome.source_is_v3) {
         AdoptSourceSystemV3_(summary.outcome.source_v3_stream);
     }

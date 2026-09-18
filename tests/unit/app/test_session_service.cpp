@@ -316,7 +316,7 @@ TEST_CASE("恢复:v2 源 resume-at-launch 开新段,来源可查(§10.4)") {
     CHECK(closed.error_code.empty());
 }
 
-TEST_CASE("恢复:v3 源 + 开关开,新段同为 v3(两路分派的 v3 侧)") {
+TEST_CASE("恢复:v3 源续接源场,同 id 续写(两路分派的 v3 侧)") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("resume-v3");
     std::string source_id;
@@ -333,10 +333,14 @@ TEST_CASE("恢复:v3 源 + 开关开,新段同为 v3(两路分派的 v3 侧)") {
     runtime::SessionService resumed(resume_request);
     REQUIRE(resumed.trajectory() != nullptr);
     CHECK(resumed.runtime()->trajectory()->resumed_at_launch());
-    CHECK(resumed.trajectory()->session_id() != source_id);
+    // 2026-09-19 落点拍板:v3 源续接源场——同 id 续写,不开新场。
+    CHECK(resumed.trajectory()->session_id() == source_id);
     CHECK(resumed.v3_format());
     CHECK(std::filesystem::exists(V3StreamOf(resumed.trajectory()->session_dir())));
     CHECK_FALSE(std::filesystem::exists(resumed.trajectory()->session_dir() / "main.jsonl"));
+    // 操作台账种账的"直接来源"钥匙为空:本场账就是源场,自有台账全量
+    // 在手,不沿来源链重种(v2 源迁移新场才要那把钥匙)。
+    CHECK(resumed.runtime()->trajectory()->launch_resume_source_session_id().empty());
 
     const auto closed = resumed.Close("exit");
     CHECK(closed.error_code.empty());

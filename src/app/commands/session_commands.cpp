@@ -2965,9 +2965,17 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
             // 单 P1:枚举间 static_cast 禁绝)。
             lubancode::cli::SetConfirmMode(lubancode::cli::ToConfirmMode(*summary.outcome.approval_mode));
         }
-        TermOut() << trf("cmd.resume.restored", summary.outcome.source_session_id,
-                         summary.history.size())
-                  << "(新 session " << summary.outcome.new_session_id << ")\n";
+        // 文案按落点分派(2026-09-19 拍板):v3 源续接源场——同 id 续写,
+        // 不提"新 session";v2 源 fork 迁移开新场,如实报"已迁移"。
+        if (summary.outcome.source_is_v3) {
+            TermOut() << trf("cmd.resume.continued", summary.outcome.source_session_id,
+                             summary.history.size())
+                      << "\n";
+        } else {
+            TermOut() << trf("cmd.resume.migrated", summary.outcome.source_session_id,
+                             summary.history.size(), summary.outcome.new_session_id)
+                      << "\n";
+        }
         TermOut() << trf("cmd.resume.estimate", EstimateHistoryTokens(summary.history)) << "\n";
         if (!summary.outcome.dangling_tools.empty()) {
             TermOut() << theme.stats << "尾部悬空工具 " << summary.outcome.dangling_tools.size()

@@ -2197,6 +2197,7 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     //(R2 与旧设计清理单 T00 共用的读面合同)。
     std::string source_last_event_id;
     std::string source_run_id;
+    std::string source_run_kind;  // v3 源 session.started 的 runKind(续接沿用)
     std::uint64_t source_seq = 0;
     V3ResumeFold chain_fold;       // v3 源的链折算(第 6.5 步导入新场用)
     bool has_chain_fold = false;
@@ -2219,15 +2220,19 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         }
         // v3 源的 one_shot(R2 写读接通后的真闸):session.started 的
         // runKind 是权威;老档没写该键 = 未知,放行走验卷(未知不等于单发)。
+        // run_kind 顺路留底——续接源场时内存 manifest 的 run_kind 以此为
+        // 权威(R2),老档缺键按起手配置读。
         for (const auto& event : ledger->events) {
             if (event.kind != v3::EventKindV3::SessionStarted) {
                 continue;
             }
             const auto run_kind = event.payload.find("runKind");
-            if (run_kind != event.payload.end() && run_kind->is_string() &&
-                run_kind->get<std::string>() == RunKindName(RunKind::OneShot)) {
-                return fail("resume.source_not_resumable",
-                            "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+            if (run_kind != event.payload.end() && run_kind->is_string()) {
+                source_run_kind = run_kind->get<std::string>();
+                if (source_run_kind == RunKindName(RunKind::OneShot)) {
+                    return fail("resume.source_not_resumable",
+                                "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
+                }
             }
             break;
         }
@@ -2353,7 +2358,18 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         source_seq = fold.state.integrity.events_folded;
     }
 
-    // ---- 第 5 步:建新 session 与新 main.jsonl,首条 run.started(resume)。
+    // ---- 第 5 步:落点按源格式分派(2026-09-19 用户拍板:"resume 就是
+    // resume,干嘛新建一个 session")。v3 源续接源场——不开新账、不抄链、
+    // 列表不新增条目,writer 从源账尾 append;v2 源维持 fork 迁移(v2 账
+    // 写不动,新场另开)。源格式与落点由此绑定:fork 只剩 v2 迁移与未来
+    // 显式 fork 两处来路。
+    if (outcome.source_is_v3) {
+        return ResumeInPlaceV3Locked(request, source_id, source_run_id, source_run_kind,
+                                     std::move(outcome));
+    }
+
+    // ---- 第 5 步(v2 源的 fork 路):建新 session 与新 main.jsonl,首条
+    // run.started(resume)。
     std::string previous_session_id = request.previous_session_id;
     if (previous_session_id.empty() && !request.interactive) {
         previous_session_id = source_id;  // --continue:直接前驱就是 source
@@ -2679,6 +2695,164 @@ ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,
         return fail("resume.step5_failed", written.error());
     }
     active_ = std::move(*session);
+    outcome.new_session_running = true;
+    outcome.active_switched = true;
+    return outcome;
+}
+
+// ---------------------------------------------------------------------------
+// v3 源的续接落点(2026-09-19 用户拍板:"resume 就是 resume")。验卷/链
+// 折算/恢复视图是 ResumeAsNew 第 1-4 步的产物(outcome 由调用方整备),
+// 这里只换落点:源场重开为当前场,不开新账、不写 resume.source.attached、
+// 不抄祖先链——本账自足,列表不新增条目。底线不松:源账 append-only
+//(旧行一个字节不动),V3Writer::Continue 续卷前整卷重验,崩溃窗口有账。
+// ---------------------------------------------------------------------------
+ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request,
+                                                    const std::string& source_id,
+                                                    const std::string& source_run_id,
+                                                    const std::string& source_run_kind,
+                                                    ResumeOutcome outcome) {
+    const auto fail = [&outcome](std::string code, std::string message) {
+        outcome.error_code = std::move(code);
+        outcome.message = std::move(message);
+        return outcome;
+    };
+    // 第 5 步(续接):拿独占锁,续卷。源场若还挂在本 manager 的 active 上
+    //(交互 /resume 源即当前场:Close 封口后写者句柄仍攥在自己手里),
+    // 先放干净再续——同一文件不许两个追加句柄。旧锁在 Close 已放,
+    // Release 幂等;外部活锁在第 1 步与 ProbeResumeSource 都拦过了,这里
+    // Acquire 撞上的是极小窗(拿到即拒,不硬闯)。
+    const std::filesystem::path source_dir = SessionDirOf(source_id);
+    if (active_.has_value() && active_->session_id() == source_id) {
+        active_->lock.Release();
+        active_.reset();
+    }
+    auto lock_file = SessionLock::Acquire(source_dir, clock_->LockOwner());
+    if (!lock_file.has_value()) {
+        return fail("resume.step5_failed", "源场独占锁拿不下: " + lock_file.error());
+    }
+    v3::V3WriterOptions writer_options;
+    // launch_cwd/run_kind 是 Start 时写 session.started 用的,续卷不写;
+    // 故障注入照递(测试专用,生产恒空)。
+    writer_options.inject_io_failure = options_.v3_main_io_fault;
+    auto writer = v3::V3Writer::Continue(outcome.source_v3_stream, std::move(writer_options));
+    if (!writer.has_value()) {
+        return fail("resume.step5_failed", "源账续卷验不过: " + writer.error());
+    }
+
+    ActiveSession session;
+    session.directory = TrajectoryDirectory::OpenExisting(source_dir);
+    session.v3_main = std::move(*writer);
+    // manifest 只住内存(v3 场合同,接线点 1):身份在账首行,run_kind 以
+    // session.started 为权威(R2;老档缺键按起手配置读)。previous
+    // session_id 不落——续接没有"前驱",本场就是源场。
+    session.manifest.schema_version = 2;
+    session.manifest.workspace_key = workspace_key_;
+    session.manifest.session_id = source_id;
+    session.manifest.launch_cwd = options_.launch_cwd;
+    session.manifest.main_run_id = source_run_id;
+    session.manifest.run_kind =
+        source_run_kind.empty() ? RunKindName(options_.main_run_kind) : source_run_kind;
+    session.manifest.start_reason = "resume";
+    session.manifest.status = SessionStatusName(SessionStatus::Running);
+    session.manifest.created_at_ms = clock_->WallMs();
+    session.manifest.lubancode_version = options_.lubancode_version;
+    session.manifest.event_schema_version = options_.recorder.event_schema_version;
+    session.lock = std::move(*lock_file);
+    session.status = SessionStatus::Running;
+
+    // 续接事实入账:lifecycle 的 resume_reference(§3.2 恢复引用账)。
+    // v3 schema 没有 session.resume/继续事件,不发明新 kind——事实三件:
+    // 谁被续接(session_id)、为什么(start_reason=resume_in_place)、从哪
+    // 场换过来(previous_session_id,交互路是刚封口的旧场;--continue 无)。
+    const std::string resume_op = NewStampId();
+    LifecycleIntent intent;
+    intent.operation_id = resume_op;
+    intent.operation = LifecycleOperationName(LifecycleOperation::ResumeReference);
+    intent.workspace_key = workspace_key_;
+    intent.session_id = source_id;
+    intent.requested_at_ms = clock_->WallMs();
+    intent.parameters["start_reason"] = "resume_in_place";
+    // previous 只在真有"刚封口的旧场"时记(交互路);源场即当前场的换场
+    // 事务里 previous 与 source 同 id,不记自指。--continue 无 previous。
+    if (!request.previous_session_id.empty() && request.previous_session_id != source_id) {
+        intent.parameters["previous_session_id"] = request.previous_session_id;
+    }
+    intent.parameters["trajectory_format"] = "v3";
+    if (const auto intent_dir = lifecycle().WriteIntent(intent); !intent_dir.has_value()) {
+        return fail("resume.step5_failed", intent_dir.error());
+    }
+
+    // 审批档重算(沿 fork 路 6.6 步同款):恢复有效档 = 按宽严序取源场档
+    // 与当前策略较严者,不静默提权;事实落本场账上(source=resume_
+    // recomputed,oldMode=源场原始档)。
+    {
+        const ApprovalMode effective = StricterApprovalMode(
+            outcome.source_approval_mode.value_or(options_.approval_mode), options_.approval_mode);
+        v3::EventDraft recomputed;
+        recomputed.kind = v3::EventKindV3::ApprovalModeApplied;
+        recomputed.payload = nlohmann::json{
+            {"mode", ApprovalModeMachineName(effective)},
+            {"source", "resume_recomputed"},
+            {"policyVersion", std::string(kApprovalPolicyVersion)}};
+        if (outcome.source_approval_mode.has_value()) {
+            recomputed.payload["oldMode"] = ApprovalModeMachineName(*outcome.source_approval_mode);
+        }
+        const auto mode_receipt =
+            session.v3_main->AppendEvent(std::move(recomputed), Durability::PowerLoss);
+        if (mode_receipt.status != v3::WriteReceipt::Status::Committed) {
+            return fail("resume.step6_failed",
+                        "恢复档位重算落不了: " + mode_receipt.error_code + " " +
+                            mode_receipt.error_message);
+        }
+        outcome.approval_mode = effective;
+        session.manifest.approval_mode = effective;
+    }
+    // 标题不重申:本场 session.title.applied 本就在账上,control.title 折
+    // 叠即得,没有 inherited 的必要(fork 路才要往新账搬)。
+
+    // 交互路的跨 session command.completed:旧场的 requested 只在旧场是 v2
+    // 时才落得了(同 fork 路口径),落在续接后的本场账尾。boundary_command
+    // 空则按启动路口径不写。
+    if (request.interactive && !request.boundary_command.command_id.empty()) {
+        v3::EventDraft completed;
+        completed.kind = v3::EventKindV3::CommandCompleted;
+        completed.status = v3::OpStatus::Done;
+        completed.command_id = request.boundary_command.command_id;
+        completed.payload = nlohmann::json{
+            {"status", "completed"},
+            {"qualifiedRequestedRef",
+             nlohmann::json{{"sessionId", request.boundary_command.requested_session_id},
+                            {"eventId", request.boundary_command.requested_event_id}}},
+            {"boundaryOperationId", request.boundary_command.boundary_operation_id}};
+        const auto completed_receipt =
+            session.v3_main->AppendEvent(std::move(completed), Durability::PowerLoss);
+        if (completed_receipt.status != v3::WriteReceipt::Status::Committed) {
+            return fail("resume.step6_failed",
+                        "跨 session command completed 落不了: " + completed_receipt.error_code);
+        }
+        outcome.command_completed_event_id = completed_receipt.id;
+    }
+
+    LifecycleResult result;
+    result.operation_id = resume_op;
+    result.status = "completed";
+    result.completed_at_ms = clock_->WallMs();
+    result.outcome["session_dir"] = platform::PathToUtf8(session.session_dir());
+    result.outcome["continued_in_place"] = true;
+    result.outcome["trajectory_format"] = "v3";
+    if (const auto written = lifecycle().WriteResult(result); !written.has_value()) {
+        return fail("resume.step5_failed", written.error());
+    }
+
+    // 第 7 步(续接):切 active。new_session_id 即 source id——同场续写,
+    // turn/request/step/action 沿源账命名空间续号(V3Writer::Continue 已
+    // 从账上恢复发号计数器),不另起。
+    active_ = std::move(session);
+    outcome.new_session_id = source_id;
+    outcome.new_main_run_id = source_run_id;
+    outcome.new_run_started_event_id = std::string();  // v3 无 run.started,身份在账首行
+    outcome.imported_history_count = 0;                // 不抄链,本账自足
     outcome.new_session_running = true;
     outcome.active_switched = true;
     return outcome;

@@ -766,9 +766,10 @@ public:
         // run.started 的 v2 usage owner 账(Token 账本单 §6.1.1):
         // main 与 subagent 各自的 stream 统一 v2。
         int event_schema_version = 2;
-        // --continue 启动路(§10.4):不先造空 session,直接开
-        // start_reason=resume 的新场。resume_source_session_id 空 = 取本
-        // workspace 最近一场可恢复的;没有任何可恢复场时回落普通开张
+        // --continue 启动路(§10.4):不先造空 session,直接走 resume——
+        // v3 源续接源场(2026-09-19 拍板),v2 源开 start_reason=resume 的
+        // 迁移新场。resume_source_session_id 空 = 取本 workspace 最近一场
+        // 可恢复的;没有任何可恢复场时回落普通开张
         // (quiet_if_none 语义,与旧路 --continue 一致)。
         bool resume_at_launch = false;
         std::string resume_source_session_id;

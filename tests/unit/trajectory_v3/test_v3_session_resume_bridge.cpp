@@ -4,8 +4,10 @@
 //   - LatestResumableSessionId 无 manifest 的目录认 <id>.jsonl 首行
 //     schemaVersion==3,创建时间取首行 timestamp;
 //   - ResumeAsNew 对 v3 源走 ReadV3Ledger 验卷 + ProjectModelContext 链
-//     投影(§4.10:只取本账链,compact 内部问答天然排除),新场照开;
-//   - v2 源照旧 FoldStreamReplay/checkpoint/悬空三道账;
+//     投影(§4.10:只取本账链,compact 内部问答天然排除)。2026-09-19
+//     用户拍板后落点改为续接源场:同 id 续写,不开新账、不抄链、列表
+//     不新增条目,源账 append-only;
+//   - v2 源照旧 FoldStreamReplay/checkpoint/悬空三道账,fork 迁移开新场;
 //   - session_index(/sessions、选择器的数据源)把 v3 场列进摘要。
 #include <doctest/doctest.h>
 
@@ -24,6 +26,7 @@
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/session_switch.hpp"  // ProbeV3SessionStream(R2 格式探针)
+#include "trajectory/v3/writer.hpp"          // V3Writer::Continue/VerifyV3File(续接续写)
 
 namespace platform = lubancode::platform;
 using namespace lubancode::trajectory;
@@ -111,6 +114,12 @@ std::vector<nlohmann::json> Events(const std::filesystem::path& stream) {
     return events;
 }
 
+std::string ReadFileBytes(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    REQUIRE(file.is_open());
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -145,9 +154,22 @@ TEST_CASE("清单: LatestResumableSessionId 认 v3 场,识别不改盘、不迁�
 // 接线点 3:resume 读回路分派
 // ---------------------------------------------------------------------------
 
-TEST_CASE("v3 resume: 验卷+链投影出有效对话,新场照开,attached 记 v3 版本") {
+TEST_CASE("v3 resume: 验卷+链投影出有效对话,续接源场(同 id 续写,不开新账)") {
     Scaffold scaffold("v3resume");
     const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "compact_full.jsonl");
+    const auto stream = scaffold.sessions_dir / platform::Utf8ToPath(v3_id) /
+                        platform::Utf8ToPath(v3_id + ".jsonl");
+    // 源账字节基准:续接只许 append,前缀一字节不动(append-only 底线)。
+    const std::string source_prefix = ReadFileBytes(stream);
+    std::size_t sessions_before = 0;
+    {
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(scaffold.sessions_dir, ec)) {
+            if (entry.is_directory(ec)) {
+                ++sessions_before;
+            }
+        }
+    }
 
     SessionManager manager(Opts(scaffold.root));
     ResumeRequest request;
@@ -185,20 +207,100 @@ TEST_CASE("v3 resume: 验卷+链投影出有效对话,新场照开,attached 记 
         CHECK(message.source_event_id != "msg-000007");  // compact 候选回复未入链
     }
 
-    // 新场照开(v2 写侧未切,接线点 1 另算):run.started(resume) 是首条,
-    // attached 的 replay_version 记 v3 链投影版本。
+    // 落点是源场(2026-09-19 拍板):同 id 续写,不开新账、不新增列表条目;
+    // active 是续接的源场(v3 写者,run 号即源账 run 号)。
     CHECK(outcome.new_session_running);
-    CHECK(outcome.new_session_id != v3_id);
+    CHECK(outcome.active_switched);
+    CHECK(outcome.new_session_id == v3_id);
+    CHECK(outcome.new_main_run_id == "run-000001");  // fixture 首行 runId
+    CHECK(outcome.imported_history_count == 0);      // 不抄链,本账自足
+    CHECK(outcome.resume_attached_event_id.empty());  // 续接不是挂靠,不写 attached
     ActiveSession* active = manager.active();
     REQUIRE(active != nullptr);
-    const auto events = Events(active->directory.main_stream_path());
-    REQUIRE(events.size() >= 2);
-    CHECK(events[0].at("kind").get<std::string>() == "run.started");
-    CHECK(events[0].at("payload").at("resumed_from_session_id").get<std::string>() == v3_id);
-    CHECK(events[0].at("payload").at("caused_by_event_ref").at("session_id").get<std::string>() ==
-          v3_id);
-    CHECK(events[1].at("kind").get<std::string>() == "resume.source.attached");
-    CHECK(events[1].at("payload").at("replay_version").get<std::string>() == "v3-context-chain-2");
+    CHECK(active->session_id() == v3_id);
+    CHECK(active->is_v3());
+    std::size_t sessions_after = 0;
+    {
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(scaffold.sessions_dir, ec)) {
+            if (entry.is_directory(ec)) {
+                ++sessions_after;
+            }
+        }
+    }
+    CHECK(sessions_after == sessions_before);  // 列表条目不增
+
+    // 源账 append-only:前缀字节原样,新增行只有审批档重算事实——没有
+    // resume.source.attached(不挂靠),没有 session.started(不重开卷)。
+    const std::string after_bytes = ReadFileBytes(stream);
+    CHECK(after_bytes.size() > source_prefix.size());
+    CHECK(after_bytes.compare(0, source_prefix.size(), source_prefix) == 0);
+    const auto rows = Events(stream);
+    REQUIRE(rows.size() > 25);
+    bool saw_attached = false;
+    bool saw_recomputed = false;
+    bool saw_started_after_25 = false;
+    for (std::size_t i = 25; i < rows.size(); ++i) {
+        const std::string kind = rows[i].value("kind", std::string());
+        if (kind == "resume.source.attached") {
+            saw_attached = true;
+        }
+        if (kind == "session.started") {
+            saw_started_after_25 = true;
+        }
+        if (kind == "approval.mode.applied") {
+            saw_recomputed = true;
+            CHECK(rows[i].at("payload").value("source", std::string()) == "resume_recomputed");
+        }
+        CHECK(rows[i].value("sessionId", std::string()) == v3_id);
+    }
+    CHECK_FALSE(saw_attached);
+    CHECK_FALSE(saw_started_after_25);
+    CHECK(saw_recomputed);
+    // 续写通路:active 写者从账尾 append,seq 接上(26+),整卷重验过。
+    {
+        v3::MessageDraft followup;
+        followup.turn_id = "turn-000001";
+        followup.purpose = v3::MessagePurpose::Conversation;
+        followup.origin = v3::MessageOrigin::Human;
+        followup.message =
+            nlohmann::json::object({{"role", "user"}, {"content", "续接后的第一句。"}});
+        const auto receipt =
+            active->v3_main->AppendMessage(std::move(followup), Durability::PowerLoss);
+        REQUIRE(receipt.status == v3::WriteReceipt::Status::Committed);
+        CHECK(receipt.seq == rows.size() + 1);  // 从账尾续号(fixture 25 + 续接事实行)
+        const auto admitted = active->v3_main->AdmitMessages({receipt.id}, Durability::PowerLoss);
+        REQUIRE(admitted.status == v3::WriteReceipt::Status::Committed);
+        const auto report = v3::VerifyV3File(stream);
+        REQUIRE(report.ok);
+        CHECK(report.lines == rows.size() + 2);  // 续接前读的账 + followup + applied
+    }
+    // 续接事实入 lifecycle 账:resume_reference + start_reason=resume_in_place
+    //(v3 schema 没有 session.resume 事件,不发明新 kind)。
+    {
+        bool saw_intent = false;
+        std::error_code ec;
+        for (const auto& op : std::filesystem::directory_iterator(
+                 scaffold.sessions_dir.parent_path() / "lifecycle", ec)) {
+            std::ifstream in(op.path() / "intent.json", std::ios::binary);
+            if (!in.is_open()) {
+                continue;
+            }
+            std::string text((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+            const auto intent = nlohmann::json::parse(text, nullptr, false);
+            if (intent.is_discarded()) {
+                continue;
+            }
+            if (intent.value("operation", std::string()) == "resume_reference" &&
+                intent.value("session_id", std::string()) == v3_id &&
+                intent.contains("parameters") &&
+                intent["parameters"].value("start_reason", std::string()) == "resume_in_place") {
+                saw_intent = true;
+            }
+        }
+        CHECK(saw_intent);
+    }
     // v3 源的悬空三道账不伪造(v2 折叠概念;执行状态恢复是后续棒)。
     CHECK(outcome.dangling_tools.empty());
 }
@@ -227,6 +329,76 @@ TEST_CASE("v3 坏账: 验卷不过明拒 resume.source_corrupt,不开新场") {
     CHECK(outcome.error_code == "resume.source_corrupt");
     CHECK_FALSE(outcome.new_session_running);
     CHECK(manager.active() == nullptr);
+}
+
+// 2026-09-19 落点拍板的用户痛点:两次连续 resume 同一场,列表里场越续
+// 越多。续接源场后不再堆场——每回都是同一场续写,列表条目与账本身份
+// 都不增。
+TEST_CASE("v3 续接不堆场: 连续两次 resume 同一场,列表条目与 id 都不增") {
+    Scaffold scaffold("twice");
+    const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "compact_full.jsonl");
+    const auto stream = scaffold.sessions_dir / platform::Utf8ToPath(v3_id) /
+                        platform::Utf8ToPath(v3_id + ".jsonl");
+    const auto count_sessions = [&] {
+        std::size_t count = 0;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(scaffold.sessions_dir, ec)) {
+            if (entry.is_directory(ec)) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    const std::size_t sessions_before = count_sessions();
+
+    SessionManager manager(Opts(scaffold.root));
+    ResumeRequest request;
+    request.source_session_id = v3_id;
+    const auto first = manager.ResumeAsNew(request);
+    REQUIRE(first.error_code.empty());
+    CHECK(first.new_session_id == v3_id);
+    const std::size_t lines_after_first = Events(stream).size();
+    // 一场账本一活场:先封口再续接(交互 /resume 的换场事务同款)。
+    NullClearParticipant participant;
+    CloseRequest close;
+    close.reason = "switch_to_resume";
+    REQUIRE(manager.Close(close, &participant).error_code.empty());
+    const auto second = manager.ResumeAsNew(request);
+    REQUIRE(second.error_code.empty());
+    CHECK(second.new_session_id == v3_id);  // 还是同一场
+    CHECK(second.source_session_id == v3_id);
+    // 列表条目不增;账继续长(第二次续接又落一笔审批档重算事实)。
+    CHECK(count_sessions() == sessions_before);
+    CHECK(Events(stream).size() > lines_after_first);
+    CHECK(v3::VerifyV3File(stream).ok);
+    // 会话仍只有一场 v3 账:目录里没有 main.jsonl 长出来。
+    CHECK_FALSE(std::filesystem::exists(
+        scaffold.sessions_dir / platform::Utf8ToPath(v3_id) / "main.jsonl"));
+}
+
+// 活锁拒续接(§10.4 末段):外进程持活锁的源场,续接路照拒——一个字节
+// 不写,active 不切。
+TEST_CASE("v3 续接: 源场被外进程持活锁,明拒且账面不动") {
+    Scaffold scaffold("livelock");
+    const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "compact_full.jsonl");
+    const auto stream = scaffold.sessions_dir / platform::Utf8ToPath(v3_id) /
+                        platform::Utf8ToPath(v3_id + ".jsonl");
+    const std::string before = ReadFileBytes(stream);
+    // 手工占一把活锁(owner = 本进程,身份对得上 = 活)。
+    SessionLockOwner owner = SessionManagerClock{}.LockOwner();
+    owner.acquired_at_ms = 1759000000000LL;
+    const auto lock = SessionLock::Acquire(
+        scaffold.sessions_dir / platform::Utf8ToPath(v3_id), owner);
+    REQUIRE(lock.has_value());
+
+    SessionManager manager(Opts(scaffold.root));
+    ResumeRequest request;
+    request.source_session_id = v3_id;
+    const ResumeOutcome outcome = manager.ResumeAsNew(request);
+    CHECK(outcome.error_code == "resume.source_locked");
+    CHECK_FALSE(outcome.new_session_running);
+    CHECK(manager.active() == nullptr);
+    CHECK(ReadFileBytes(stream) == before);  // 拒了就不动源账一个字节
 }
 
 // R2:格式探针——"认不出"拆成可诊断状态,不混作"没档";ResumeAsNew 对
@@ -295,9 +467,9 @@ TEST_CASE("格式探针: 双账冲突/坏首行/异版本各有稳定状态,resu
     CHECK(std::filesystem::file_size(conflict_dir / "main.jsonl") == before_bytes);
 }
 
-TEST_CASE("v2 源行为不变: 照旧 FoldStreamReplay,不标 v3") {
+TEST_CASE("v2 源行为不变: 照旧 fork 迁移开新场(FoldStreamReplay),不标 v3") {
     Scaffold scaffold("v2only");
-    // 只留 v2 场(不种 v3):走原 v2 回路。
+    // 只留 v2 场(不种 v3):走原 v2 回路(fork 迁移,v2 账写不动)。
     SessionManager manager(Opts(scaffold.root));
     ResumeRequest request;
     request.source_session_id = scaffold.v2_id;
@@ -310,6 +482,17 @@ TEST_CASE("v2 源行为不变: 照旧 FoldStreamReplay,不标 v3") {
     CHECK(outcome.replay_version == std::to_string(kReplayProjectionVersion));
     CHECK(outcome.source_verified);
     CHECK(outcome.new_session_running);
+    // fork 语义保留:新场另有其 id(与 v3 源的续接落点相区别),
+    // run.started 带 resumed_from_session_id(列表"(续)"标记的 v2 来路)。
+    CHECK(outcome.new_session_id != scaffold.v2_id);
+    ActiveSession* active = manager.active();
+    REQUIRE(active != nullptr);
+    const auto events = Events(active->directory.main_stream_path());
+    REQUIRE(events.size() >= 2);
+    CHECK(events[0].at("kind").get<std::string>() == "run.started");
+    CHECK(events[0].at("payload").at("resumed_from_session_id").get<std::string>() ==
+          scaffold.v2_id);
+    CHECK(events[1].at("kind").get<std::string>() == "resume.source.attached");
     // v2 空转场的有效对话为空(user 输入没写过,脚手架只开了张)——不冒充。
     CHECK(outcome.effective_conversation.empty());
 }

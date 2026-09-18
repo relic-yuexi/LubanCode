@@ -426,12 +426,19 @@ TEST_CASE("开关开: 输入→回复→工具链→结束,验卷过、配对完
         CHECK(summary->status == "closed");
     }
 
-    // --continue(--continue 读回):新账本开 resume_at_launch,链投影灌回。
+    // --continue(--continue 读回):续接源场(2026-09-19 拍板)——同 id
+    // 续写,链投影灌回,不开新账。
+    const std::string source_bytes = [&] {
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    }();
     TrajectorySessionLedger::Options resume_options = LedgerOptions(root);
     resume_options.resume_at_launch = true;
     auto resumed = TrajectorySessionLedger::Open(resume_options);
     REQUIRE(resumed.has_value());
     CHECK(resumed->resumed_at_launch());
+    CHECK(resumed->session_id() == source_id);  // 续接源场,不另开新场
     const auto history = resumed->LaunchResumeHistory();
     REQUIRE(history.size() == 3);
     CHECK(history[0].role == lubancode::api::Role::User);
@@ -439,23 +446,26 @@ TEST_CASE("开关开: 输入→回复→工具链→结束,验卷过、配对完
     CHECK(history[2].role == lubancode::api::Role::User);  // tool 结果以 user 携带(投影口径)
     // v3 源的旧史显示投影(P3)在场。
     CHECK(resumed->LaunchRestoredHistoryView().has_value());
-    // 新场也是 v3(开关仍开):目录合同 + resume.source.attached 五键指源末行。
+    // 落点合同:本场就是源场(同一本账);目录里没有 v2 文件长出来;
+    // 不写 resume.source.attached(续接不是挂靠);前缀字节不动,只 append。
     const std::filesystem::path new_stream = V3StreamOf(*resumed);
-    CHECK(std::filesystem::exists(new_stream));
+    CHECK(new_stream == stream);
     CHECK_FALSE(std::filesystem::exists(resumed->session_dir() / "main.jsonl"));
-    const auto source_rows = ReadLines(stream);
     const auto new_rows = ReadLines(new_stream);
     const auto attached = std::find_if(new_rows.begin(), new_rows.end(), [](const nlohmann::json& row) {
         return row.value("kind", std::string()) == "resume.source.attached";
     });
-    REQUIRE(attached != new_rows.end());
-    REQUIRE(attached->contains("payload"));
-    const auto& source_ref = attached->at("payload").at("sourceRef");
-    CHECK(source_ref.value("sessionId", std::string()) == source_id);
-    CHECK(source_ref.value("id", std::string()) ==
-          source_rows.back().value("eventId", source_rows.back().value("messageId", std::string())));
-    CHECK(source_ref.value("hash", std::string()) ==
-          source_rows.back().value("lineHash", std::string()));
+    CHECK(attached == new_rows.end());
+    {
+        const std::string after = [&] {
+            std::ifstream file(new_stream, std::ios::binary);
+            REQUIRE(file.is_open());
+            return std::string((std::istreambuf_iterator<char>(file)),
+                               std::istreambuf_iterator<char>());
+        }();
+        CHECK(after.size() > source_bytes.size());
+        CHECK(after.compare(0, source_bytes.size(), source_bytes) == 0);
+    }
     CHECK(lubancode::trajectory::v3::VerifyV3File(new_stream).ok);
 }
 
@@ -545,7 +555,7 @@ TEST_CASE("开关开: 换 system 走三步,prepared 引用新根,旧请求不动
 // 普通 resume(§5.1 行 4):/resume 交互路,ID 顺序不变
 // ---------------------------------------------------------------------------
 
-TEST_CASE("开关开: /resume 封旧场开新 v3 场,旧消息 ID 顺序不变") {
+TEST_CASE("开关开: /resume 续接源场,旧消息 ID 顺序不变") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("open-resume");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
@@ -594,22 +604,24 @@ TEST_CASE("开关开: /resume 封旧场开新 v3 场,旧消息 ID 顺序不变")
     REQUIRE(summary.outcome.effective_conversation.size() == 2);
     CHECK(summary.outcome.effective_conversation[0].source_event_id == user_id);
     CHECK(summary.outcome.effective_conversation[1].source_event_id == assistant_id);
-    // 源场封口(session.ended 落稳),新场是 v3 带 resume.source.attached。
+    // 源场封口(session.ended 落稳),续接源场(2026-09-19 拍板):本场就
+    // 是源场,同 id 续写;不写 resume.source.attached(续接不是挂靠)。
     const auto source_kinds = KindsOf(ReadLines(source_stream));
     CHECK(std::find(source_kinds.begin(), source_kinds.end(), "session.ended") != source_kinds.end());
+    CHECK(ledger->session_id() == source_id);
     const auto new_kinds = KindsOf(ReadLines(V3StreamOf(*ledger)));
-    CHECK(std::find(new_kinds.begin(), new_kinds.end(), "resume.source.attached") != new_kinds.end());
+    CHECK(std::find(new_kinds.begin(), new_kinds.end(), "resume.source.attached") == new_kinds.end());
     CHECK(std::filesystem::exists(V3StreamOf(*ledger)));
-    // 新场继续写:再来一轮,验卷仍过(新旧链同卷)。
+    // 续接场继续写:再来一轮,验卷仍过(同卷续链,旧行不动)。
     {
         auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
         bridge->BeginTurn("turn-9", "external_user");
-        bridge->RecordInput(UserMessage("新场一问"));
+        bridge->RecordInput(UserMessage("续接一问"));
         const std::string request_id =
-            bridge->OnRequestPrepared(MakeRequest("SYSTEM-X", {UserMessage("新场一问")}),
+            bridge->OnRequestPrepared(MakeRequest("SYSTEM-X", {UserMessage("续接一问")}),
                                       PreparedContext());
         REQUIRE_FALSE(request_id.empty());
-        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("新场一答"), "end_turn", "r-2"));
+        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("续接一答"), "end_turn", "r-2"));
         bridge->EndTurn(true, false, "");
     }
     CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*ledger)).ok);

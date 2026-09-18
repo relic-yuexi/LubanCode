@@ -962,8 +962,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 一笔,后面 sync 定义好了再善后。
     bool resume_moved_into_worktree = false;
     // P0-3 轨迹档:--continue 走 §10.4 启动路——账本在 SessionRuntime ctor
-    // 里已按 resume-as-new 开张(start_reason=resume 的新 session,source
-    // 只读),这里只把折叠投影灌进 loop;旧 SessionStore 的 resume 路不碰。
+    // 里已按落点分派开张(v3 源续接源场同 id 续写,2026-09-19 拍板;v2 源
+    // fork 迁移开新场),这里只把折叠投影灌进 loop;旧 SessionStore 的
+    // resume 路不碰。
     if (opts_.continue_last && session_runtime_.trajectory() != nullptr) {
         if (session_runtime_.trajectory()->resumed_at_launch()) {
             const std::vector<lubancode::api::Message> resumed =
@@ -1000,10 +1001,22 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                     TermOut() << theme.stats << tr("cmd.resume.history.end") << theme.reset << "\n";
                 }
             }
-            TermOut() << theme.banner
-                      << trf("cmd.resume.restored", session_runtime_.trajectory()->session_id(),
-                             resumed.size())
-                      << theme.reset << " (resume-as-new)\n";
+            // 文案按落点分派(2026-09-19 拍板):v3 源续接源场——本场就是
+            // 源场,session_id 即源 id,不提"resume-as-new";v2 源 fork 迁移
+            // 开新场,如实报"已迁移"。判据:LaunchRestoredHistoryView 只有
+            // v3 源才有值。
+            if (session_runtime_.trajectory()->LaunchRestoredHistoryView().has_value()) {
+                TermOut() << theme.banner
+                          << trf("cmd.resume.continued",
+                                 session_runtime_.trajectory()->session_id(), resumed.size())
+                          << theme.reset << "\n";
+            } else {
+                TermOut() << theme.banner
+                          << trf("cmd.resume.migrated",
+                                 session_runtime_.trajectory()->launch_resume_source_session_id(),
+                                 resumed.size(), session_runtime_.trajectory()->session_id())
+                          << theme.reset << "\n";
+            }
             TermOut() << trf("cmd.resume.estimate", lubancode::agent::EstimateHistoryTokens(resumed))
                       << "\n";
             // Soul 会话冻结单 P0(§5.3):恢复源场已提交快照(忽略磁盘新默认

@@ -571,10 +571,10 @@ TEST_CASE("停机恢复仍接上上文:重建后 resume-as-new,新场带旧上�
         fixture.EmitAndIngest(MakeDm("in-2", "pe-2", "dm-a", "暗号是什么", "m-2"));
         fixture.Tick();
         fixture.TickUntilQuiet();
-        // resume-as-new:新场 id,映射已更新,上下文接得上。
+        // 续接源场(2026-09-19 拍板):同 id 续写,映射不变,上下文接得上。
         const std::string session2 = fixture.pump->session_id_for("qqbot", "main", "dm-a");
         REQUIRE_FALSE(session2.empty());
-        REQUIRE(session2 != session1);
+        CHECK(session2 == session1);
         REQUIRE(fixture.backend->dumps().size() == 1);
         REQUIRE(fixture.backend->dumps()[0].find("暗号是甲") != std::string::npos);
     }

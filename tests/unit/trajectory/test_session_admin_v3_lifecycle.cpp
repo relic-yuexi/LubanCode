@@ -33,7 +33,9 @@
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
+#include "trajectory/v3/envelope.hpp"  // EventKindV3/EventDraft(引用场手植)
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/writer.hpp"
 #include "workspace/identity.hpp"
 
 namespace platform = lubancode::platform;
@@ -133,7 +135,9 @@ std::filesystem::path WorkspaceDirOf(const TrajectorySessionLedger& ledger) {
     return ledger.session_dir().parent_path().parent_path();
 }
 
-// 开场→一轮→封场。回 session_id(workspace 房已立)。
+// 开场→一轮→封场。回 session_id(workspace 房已立)。resume_source 在
+// 2026-09-19 落点拍板后续接源场(同 id 续写),不再是"造一枚引用源场
+// 的后代场"——要 fork 形状的后代用 PlantReferringFork。
 std::string RunSealedRound(const std::filesystem::path& root, const std::string& text,
                            const std::string& resume_source = {}) {
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root, resume_source));
@@ -142,6 +146,62 @@ std::string RunSealedRound(const std::filesystem::path& root, const std::string&
     DriveTurn(*ledger, text);
     REQUIRE(ledger->CloseSession("exit").error_code.empty());
     return session_id;
+}
+
+// 手工铸一枚带 resume.source.attached(五键指源末行)的引用场:删除守卫
+// 的 incoming refs 扫描只认这一枚事实,不追会话内容。
+std::string PlantReferringFork(const std::filesystem::path& root, const std::string& fork_id,
+                               const std::string& source_id) {
+    const std::filesystem::path source_dir = [&] {
+        std::error_code ec;
+        for (const auto& room : std::filesystem::directory_iterator(root / "workspaces", ec)) {
+            const auto dir = room.path() / "sessions" / platform::Utf8ToPath(source_id);
+            if (std::filesystem::exists(dir, ec)) {
+                return dir;
+            }
+        }
+        return std::filesystem::path();
+    }();
+    REQUIRE_FALSE(source_dir.empty());
+    const std::filesystem::path source_stream =
+        source_dir / platform::Utf8ToPath(source_id + ".jsonl");
+    std::ifstream in(source_stream, std::ios::binary);
+    REQUIRE(in.is_open());
+    std::string line;
+    nlohmann::json last;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        last = nlohmann::json::parse(line, nullptr, false);
+    }
+    REQUIRE_FALSE(last.is_discarded());
+    const std::filesystem::path fork_dir =
+        source_dir.parent_path() / platform::Utf8ToPath(fork_id);
+    std::error_code ec;
+    std::filesystem::create_directories(fork_dir, ec);
+    REQUIRE_FALSE(ec);
+    auto writer = v3::V3Writer::Start(
+        fork_dir / platform::Utf8ToPath(fork_id + ".jsonl"), fork_id, "run-000009",
+        "你是 LubanCode,读写跑都走工具。");
+    REQUIRE(writer.has_value());
+    v3::EventDraft attached;
+    attached.kind = v3::EventKindV3::ResumeSourceAttached;
+    attached.payload = nlohmann::json{{"sourceRef",
+                                       nlohmann::json::object(
+                                           {{"sessionId", source_id},
+                                            {"runId", last.value("runId", std::string())},
+                                            {"seq", last.value("seq", std::uint64_t(0))},
+                                            {"id", last.value("eventId",
+                                                              last.value("messageId",
+                                                                         std::string()))},
+                                            {"hash", last.value("lineHash", std::string())}})}};
+    REQUIRE(writer->AppendEvent(std::move(attached), trajectory::Durability::PowerLoss).status ==
+            v3::WriteReceipt::Status::Committed);
+    return fork_id;
 }
 
 std::string ReadFileBytes(const std::filesystem::path& path) {
@@ -423,8 +483,9 @@ TEST_CASE("v3 删除: 被别场 resume 引用的源拒删,目录原样") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("delete-resume-ref");
     const std::string source_id = RunSealedRound(root, "被引用的源场");
-    // 新场 resume 该源:账里落 resume.source.attached 五键指源。
-    const std::string referrer_id = RunSealedRound(root, "引用源的后代场", source_id);
+    // 一枚带 resume.source.attached 五键指源的引用场(2026-09-19 落点
+    // 拍板后 resume 不再造 fork,存量/手植形状照旧受删除守卫保护)。
+    const std::string referrer_id = PlantReferringFork(root, "20260919-000001-FORKR", source_id);
     REQUIRE_FALSE(referrer_id.empty());
     REQUIRE(referrer_id != source_id);
 
