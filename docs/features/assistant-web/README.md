@@ -159,8 +159,9 @@ AutomationStore。两线复用同一 SessionService 执行事实与 workspaces �
   凭据>`。fragment 不发往服务端;页面 JS `POST /auth/exchange` 换
   `HttpOnly; SameSite=Strict; Path=/` 会话 cookie(24h),交换成功立即
   清 fragment。凭据一次性(用过即焚)、2 分钟时效、恒时比较;重放一律
-  403,不区分话面。无凭据/会话过期:静态 401 + 本地配对提示页,不降级
-  免认证。
+  403,不区分话面。随包 HTML/CSS/JS 页面壳允许未登录加载,供脚本读取
+  fragment 并交换凭据;其中不含用户数据。无凭据/会话过期时,WS 与
+  artifact 仍回 401,不开放聊天、任务或用户文件。
 - **控制口**:`POST /control/open` 吃锁文件里的 control_secret(同用户
   本地进程才读得到锁文件),回新 bootstrap URL——凭据不进 URL 查询串。
 - **有界**:头部 16KB、POST body 8KB、单枚资源 4MB、单枚 artifact 64MB

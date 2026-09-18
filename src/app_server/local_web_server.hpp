@@ -12,8 +12,9 @@
 // 认证(§七"本机也要认证"):不沿用"回环免鉴权"。
 //   - 严格校验 Host(必须 127.0.0.1:<port> / localhost:<port>,防 DNS
 //     rebinding);Origin 若在场必须同源(防跨站)。
-//   - 静态资源与 WS 升级一律要有效会话 cookie(HttpOnly、SameSite=Strict,
-//     由 bootstrap 交换发放)。没有/无效 → 401 + 本地配对提示页,不降级。
+//   - 随包静态页面壳允许未登录加载,以便脚本读取 fragment 并换取 cookie。
+//     WS 与 artifact 仍要有效会话 cookie(HttpOnly、SameSite=Strict,
+//     由 bootstrap 交换发放);没有/无效 → 401,不开放用户数据。
 //   - bootstrap 交换:POST /auth/exchange,body 是 URL fragment 里的一次性
 //     凭据(不进访问日志/错误话);一次性、限时效、恒时比较(由宿主的
 //     WebAuthService 承担),防重放——用过/过期一律 403。

@@ -6,7 +6,7 @@
 // 十幕:
 //   1. 启动:真 `lubancode assistant --no-open`,stderr 打 URL(含一次性
 //      bootstrap 凭据);监听就绪才打印。
-//   2. 认证门(§七):/healthz 只回身份;静态无 cookie 401(配对提示);
+//   2. 认证门(§七):/healthz 只回身份;静态页面壳无 cookie 可加载;
 //      bootstrap 交换 204+Set-Cookie(HttpOnly/SameSite=Strict);重放 403;
 //      伪造 Origin 403;静态有 cookie 200;manifest 外 404。
 //   3. 聊天链路(§五/§六):WS(带 cookie)initialize(1.3 + 助理能力声明)
@@ -562,7 +562,13 @@ async function scene2_authGate(url) {
   ok('healthz 不泄控制凭据', health.body.indexOf('controlSecret') === -1);
 
   const bare = await httpOnce(port, 'GET', '/');
-  ok('静态无 cookie 401(配对提示)', bare.status === 401 && bare.body.indexOf('需要从启动链接进入') !== -1);
+  ok('首次访问可加载页面壳', bare.status === 200 && bare.body.indexOf('assistant_app.js') !== -1);
+  for (const asset of ['/assistant.css', '/assistant_core.js', '/assistant_app.js']) {
+    const response = await httpOnce(port, 'GET', asset);
+    ok('首次访问可加载 ' + asset, response.status === 200 && response.body.length > 0);
+  }
+  const privateArtifact = await httpOnce(port, 'GET', '/artifact/private.png');
+  ok('未认证仍不能读取 artifact', privateArtifact.status === 401);
 
   const fragment = /#b=([0-9a-f]+)/.exec(url)[1];
   const exchange = await httpOnce(port, 'POST', '/auth/exchange', fragment);

@@ -147,6 +147,8 @@ jobs:
           cp THIRD_PARTY_NOTICES.md dist/lubancode/
           cp -R docs dist/lubancode/
           cp -R skills dist/lubancode/
+          mkdir -p dist/lubancode/web/assistant
+          cp web/assistant/index.html web/assistant/assistant.css web/assistant/assistant_core.js web/assistant/assistant_app.js dist/lubancode/web/assistant/
           # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走 install.sh
           case "${{ matrix.name }}" in
             windows-x64)
@@ -177,6 +179,9 @@ jobs:
             *.tar.gz) tar xzf "${{ matrix.archive }}" -C dist/verify ;;
           esac
           root=dist/verify/lubancode
+          for asset in index.html assistant.css assistant_core.js assistant_app.js; do
+            test -s "$root/web/assistant/$asset" || { echo "包里缺 web/assistant/$asset" >&2; exit 1; }
+          done
           test -f "$root/THIRD_PARTY_NOTICES.md" || { echo "包里缺 THIRD_PARTY_NOTICES.md" >&2; exit 1; }
           test -f "$root/licenses/ripgrep-MIT.txt" || { echo "包里缺 licenses/ripgrep-MIT.txt" >&2; exit 1; }
           test -f "$root/LICENSE" || { echo "包里缺 LICENSE" >&2; exit 1; }

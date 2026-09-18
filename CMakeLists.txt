@@ -1434,6 +1434,8 @@ if(LUBANCODE_BUNDLED_RG_DIR AND EXISTS "${LUBANCODE_BUNDLED_RG_DIR}")
 endif()
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/web/assistant/" DESTINATION bin/web/assistant
+        FILES_MATCHING PATTERN "*.html" PATTERN "*.css" PATTERN "assistant_*.js")
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/" DESTINATION share/lubancode/skills)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/" DESTINATION share/lubancode/docs)
 
