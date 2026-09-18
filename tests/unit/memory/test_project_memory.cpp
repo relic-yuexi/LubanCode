@@ -502,8 +502,12 @@ TEST_CASE("ProjectMemory: 真 worker 连续入队不起风暴,全部提交且回
     // 合并唤醒:活 worker(或刚拉的)在场时不重复起进程——旧代码 6 笔必起 6 只。
     CHECK(store.WorkerSpawnCount() <= 3);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    int polls = 0;
     while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        // 模拟空闲唤醒泵的补拉:万一撞上"worker 扫空退出那一拍"的微秒窗,
+        // 这里有界重试兜底(生产路由同款)。
+        if (++polls % 40 == 0) (void)store.EnsureWorkerRunning();
     }
     CHECK(store.Status().pending_jobs == 0);
     CHECK(store.Status().failed_jobs == 0);
@@ -537,8 +541,11 @@ TEST_CASE("ProjectMemory: 真 worker 同 id 更新提交成功但 entry_count �
     REQUIRE(store.set_enabled(true).has_value());
     const auto drain_all = [&]() {
         const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        int polls = 0;
         while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < until) {
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            // 模拟空闲唤醒泵的补拉(生产路由同款)。
+            if (++polls % 40 == 0) (void)store.EnsureWorkerRunning();
         }
         CHECK(store.Status().pending_jobs == 0);
         std::size_t ok = 0;
