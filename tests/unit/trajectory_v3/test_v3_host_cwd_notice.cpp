@@ -226,8 +226,11 @@ TEST_CASE("v3 主路: 宿主目录通知进账进链,prepared 引用沿链带上
         second.messages.push_back(user);
         const std::string second_id = turn->OnRequestPrepared(second, prefix_ctx);
         REQUIRE_FALSE(second_id.empty());
+        // 行集先落具名变量再取指针——range-for 的临时 vector 活不过整句,
+        // 指针出循环即悬空(memory recall 册同款纪律;上一轮的 304 正是它)。
+        const auto rerun_lines = StreamLines(*stream);
         const nlohmann::json* second_prepared = nullptr;
-        for (const auto& line : StreamLines(*stream)) {
+        for (const auto& line : rerun_lines) {
             if (line.value("type", std::string()) != "event") continue;
             if (line.value("kind", std::string()) != "model.request.prepared") continue;
             if (line.value("requestId", std::string()) != second_id) continue;
