@@ -379,9 +379,19 @@ TEST_CASE("投影: v3 续场折 resume.source.attached 来源,非续场留空") 
                 v3::WriteReceipt::Status::Committed);
     }
     {
+        // 继承标题:source=inherited 必带 inheritedFrom 五键指源场事件
+        //(schema3 的 CheckRefField 验形状,hash 须 64 位十六进制)。
         v3::EventDraft inherited;
         inherited.kind = v3::EventKindV3::SessionTitleApplied;
-        inherited.payload = nlohmann::json{{"title", "正式标题一"}, {"source", "inherited"}};
+        inherited.payload = nlohmann::json{
+            {"title", "正式标题一"},
+            {"source", "inherited"},
+            {"inheritedFrom",
+             nlohmann::json{{"sessionId", source_id},
+                            {"runId", "run-0001"},
+                            {"seq", 3},
+                            {"id", "evt-00000003"},
+                            {"hash", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}};
         REQUIRE(writer->AppendEvent(std::move(inherited), v3::Durability::ProcessCrash).status ==
                 v3::WriteReceipt::Status::Committed);
     }
