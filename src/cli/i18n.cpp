@@ -1754,6 +1754,16 @@ const Entry kZhCN[] = {
     {"provider_switch.auth_env_missing", "缺密钥(需要 {0})"},
     {"provider_switch.auth_inline_missing", "缺明文 key"},
 
+    // ---- /provider 选择面板(Provider选择面板单):裸敲 /provider 或裸敲
+    // /provider switch 时的上下挑选面板,纯逻辑在 cli/provider_panel_core ----
+    {"provider_panel.title", "切换 provider"},
+    {"provider_panel.current_line", "当前端: {0}"},
+    {"provider_panel.current_none", "当前端: (未设)"},
+    {"provider_panel.more_above", "… 上方还有 {0} 家"},
+    {"provider_panel.more_below", "… 下方还有 {0} 家"},
+    {"provider_panel.auth_missing", "缺密钥"},
+    {"provider_panel.footer", "↑↓ 选择  Enter 切换  Esc 取消(Ctrl+C 同取消)"},
+
     // ---- /provider switch 缺密钥补救页 ----
     {"provider_remedy.title", "还不能切到 {0}"},
     {"provider_remedy.body_env", "所需环境变量:{0}\n当前进程没有读到值。"},
@@ -3510,6 +3520,16 @@ const Entry kEn[] = {
     {"provider_switch.auth_ready", "ready"},
     {"provider_switch.auth_env_missing", "key missing (needs {0})"},
     {"provider_switch.auth_inline_missing", "inline key missing"},
+
+    // ---- /provider selection panel (provider panel unit): picker for bare
+    // /provider and bare /provider switch; pure logic in cli/provider_panel_core ----
+    {"provider_panel.title", "Switch provider"},
+    {"provider_panel.current_line", "Current: {0}"},
+    {"provider_panel.current_none", "Current: (none)"},
+    {"provider_panel.more_above", "… {0} more above"},
+    {"provider_panel.more_below", "… {0} more below"},
+    {"provider_panel.auth_missing", "key missing"},
+    {"provider_panel.footer", "Up/Down select  Enter switch  Esc cancel (Ctrl+C also cancels)"},
 
     // ---- /provider switch missing-key remediation page ----
     {"provider_remedy.title", "Cannot switch to {0} yet"},
