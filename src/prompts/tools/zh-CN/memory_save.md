@@ -42,7 +42,7 @@ user-stated=用户明说的偏好；verified=已核验的事实；inferred=推�
 
 ## param.scope.kind
 
-只支持 project/subtree/path；subtree/path 须配 value。全局记忆须由用户执行 /memory remember global 并确认，本工具不接受。
+记忆适用的范围；subtree/path 须配 value；user=跨项目用户记忆(仅 preference/feedback，不得带项目路径证据，须全局授权 memory.user_enabled)
 
 ## param.scope.value
 

@@ -42,7 +42,7 @@ Optional. Not injected when the current working directory is out of scope; keeps
 
 ## param.scope.kind
 
-Only project/subtree/path are supported; subtree/path require value. Global writes require the user command /memory remember global and confirmation.
+Scope the memory applies to; subtree/path require value; user=cross-project user memory (preference/feedback only, must not carry project-path evidence, requires the global authorization memory.user_enabled)
 
 ## param.scope.value
 
