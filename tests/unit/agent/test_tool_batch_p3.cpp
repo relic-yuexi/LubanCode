@@ -195,7 +195,7 @@ public:
         }
         // worker 各写各的原子账(不许裸写共享串——那是数据竞态):值对不对
         // 折成布尔,两枚都验过才知道接线真到位。
-        if (ctx.artifact_dir != expected_artifact_dir) {
+        if (ctx.artifact_dir != expected_artifact_dir_) {
             wrong_artifact_dir.store(true);
         }
         {
@@ -397,7 +397,7 @@ TEST_CASE("持久化:并行段 result_committed 逐枚落账,无错配无缺漏"
     agent::Agent loop(backend, registry, MakeProfile());
     TraceCollector collector;
     agent::TurnWiring wiring = collector.Decorate({});
-    wiring.capture_tool_result = [&committed_ids](const api::ToolResultBlock& block) {
+    wiring.capture_tool_result = [&committed_ids, &committed_mutex](const api::ToolResultBlock& block) {
         const std::lock_guard<std::mutex> lock(committed_mutex);
         committed_ids.push_back(block.tool_use_id);
         runtime::ToolResultsCommitReceipt receipt;  // 缺省 Committed
