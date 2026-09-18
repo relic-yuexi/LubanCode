@@ -329,8 +329,9 @@ def plan_has_conflict(plan):
 
 def make_backup_root(record_dir):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    root = os.path.join(os.path.abspath(record_dir), "backups",
-                        stamp + "-" + hashlib.sha1(stamp.encode()).hexdigest()[:8])
+    # 时间戳只到秒,同秒两笔事务会撞名(copytree 直接炸);加随机后缀防撞
+    suffix = os.urandom(4).hex()
+    root = os.path.join(os.path.abspath(record_dir), "backups", stamp + "-" + suffix)
     os.makedirs(root, exist_ok=True)
     return root
 

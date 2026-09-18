@@ -305,7 +305,7 @@ Assert-Equal -Name '计划项总数正好' -Expected 11 -Actual $plan.Count
 Write-Host ""
 Write-Host "==== 所有权落地(v1 记档 → v2 升级)====" -ForegroundColor Cyan
 
-$ioRoot = Join-Path $env:TEMP ("lubancode-own-test-" + [Guid]::NewGuid().ToString('N'))
+$ioRoot = Join-Path ([IO.Path]::GetTempPath()) ("lubancode-own-test-" + [Guid]::NewGuid().ToString('N'))
 try {
     $v1pkg = Join-Path $ioRoot 'v1pkg'
     $v2pkg = Join-Path $ioRoot 'v2pkg'
@@ -484,7 +484,7 @@ try {
 Write-Host ""
 Write-Host "==== 无基线 needs-review / 整目录确认 ====" -ForegroundColor Cyan
 
-$nrRoot = Join-Path $env:TEMP ("lubancode-nr-test-" + [Guid]::NewGuid().ToString('N'))
+$nrRoot = Join-Path ([IO.Path]::GetTempPath()) ("lubancode-nr-test-" + [Guid]::NewGuid().ToString('N'))
 try {
     $pkg = Join-Path $nrRoot 'pkg'
     $inst = Join-Path $nrRoot 'install'
@@ -542,7 +542,7 @@ try {
 Write-Host ""
 Write-Host "==== 同目录安装 ====" -ForegroundColor Cyan
 
-$sdRoot = Join-Path $env:TEMP ("lubancode-samedir-test-" + [Guid]::NewGuid().ToString('N'))
+$sdRoot = Join-Path ([IO.Path]::GetTempPath()) ("lubancode-samedir-test-" + [Guid]::NewGuid().ToString('N'))
 try {
     $pkg = Join-Path $sdRoot 'pkg'
     New-Item -ItemType Directory -Path (Join-Path $pkg 'skills\lubancode-config') -Force | Out-Null
