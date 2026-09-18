@@ -716,10 +716,10 @@ TEST_CASE("差距6: chat/responses/gemini 三家加密思考块不出门") {
     CHECK(chat.at("messages").at(0).at("reasoning_content") == "明文思考");
     CHECK(chat.dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
 
-    // responses/gemini:思考块(明文与加密)都不回传。
+    // responses/gemini 不接收 Anthropic 的加密块,明文思考照常回传。
     CHECK(api::responses::BuildRequestJson(request).dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
     CHECK(api::gemini::BuildRequestJson(request).dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
-    // 只装思考块的 assistant 在这两家不产任何元素(明文与加密同跳过)。
+    // 只装思考块的 assistant 仍保留明文思考元素。
     api::Request thinking_only;
     thinking_only.model = "m";
     api::Message silent;

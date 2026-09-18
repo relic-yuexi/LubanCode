@@ -283,11 +283,8 @@ struct Request {
     // 当前模型声明的推理控制能力。空 = 旧式兼容路径；非空时，各 wire
     // 按规范字段翻译，不借 request.extra_body 偷渡档位或开关。
     ReasoningConfig reasoning;
-    // 跨 Turn 保留式思考的中立意图(Kimi 保留式思考单 P1):All 时 Chat
-    // 家方言声明了 history_control=thinking_keep 的模型落 thinking.keep
-    // 并把 replay 升为 Always;方言没声明的模型一概不发这个形状——不把
-    // K2.6 的 keep 状态硬带给 K3/K2.5。与 reasoning_effort 是两笔账:
-    // 档位管本轮想多深,history 管跨轮保留。
+    // 默认完整回传已有思考;Disabled 或关闭本轮思考时暂停回传。
+    // thinking.keep 等服务端参数仍只在方言声明时发送。
     ReasoningHistoryMode reasoning_history = ReasoningHistoryMode::ProviderDefault;
     // 调用方显式给出的请求级私有参数。推理档位不走这里；provider 级
     // extra_body 先合并，这里后合并，同名顶层键由请求覆盖。

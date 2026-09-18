@@ -676,3 +676,9 @@ lubancode app-server --app-server-profile 'D:\AppRuntime\config\deployment.json'
 - `LUBANCODE_MANAGED=1`(托管模式)下,cwd 里的项目级 `.lubancode/config.json`、个人 `~/.lubancode` 与 `~/.agents` 材料层整层不读;缺件即拒,不回落个人默认。托管必须显式给参数根。
 - 会话账(workspaces)、workflow-runs、browser-artifacts、各类信任账、插件/包数据、缓存、日志、渠道账号状态树(`channels/`)、gateway profile 树(`gateway/`,含 gateway.json)在应用根语义下全落数据根;个人 CLI 仍全在 `~/.lubancode`,与从前逐字节一致。
 - 宿主应用给每个 Worker 子进程构造专属环境,不改自己的全局环境,也不重定义 `HOME`/`USERPROFILE` 冒充参数根。
+
+### 历史思考回传
+
+默认有思考就原样回传，不再区分纯聊天、工具交互。`/think history off` 单独关闭回传，`/think history default` 或 `/think history all` 恢复。关闭本轮思考也会暂停回传；本地历史不删，重新开启后仍可回传。这个历史开关只作用于当前会话，切模型不会重置。
+
+Kimi K2.6 自动配套发送 `thinking.keep=all`。其他模型不硬塞这个参数。Chat 按正式 reasoning 字段回传文本，Messages 保留 thinking 签名，Responses 保留完整 reasoning item，Gemini 保留 thought 文本与签名。旧目录里的 `never/tool_episode` 不再裁剪历史思考，字段名仍沿用目录声明。正文中的 `<think>` 不会伪装成接口思考字段；上下文压缩后已移出的原消息不再发送。

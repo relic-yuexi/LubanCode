@@ -23,11 +23,11 @@ enum class ReasoningHistoryMode {
 
 // 模型对"跨 Turn 保留式思考"的能力档(由方言推导,不按模型名特判):
 // 同一枚 Kimi 可能经直连、聚合端、本地 vLLM 出站,协议责任随实际绑定的
-// provider 声明的方言走——/think history 的切换与切模型重校验都先问它。
+// provider 声明的方言走;它不再决定客户端是否发送历史思考。
 enum class ReasoningHistorySupport {
     None,           // 无方言(自定义旧 provider)或方言未声明历史控制且
-                    // replay != always:不支持,选 all 当场明报
-    ServerFixed,    // replay=always 且无请求控制:服务端固定开启,关不掉,
+                    // replay != always:没有额外服务端保留控制,客户端仍默认回传
+    ServerFixed,    // replay=always 且无请求控制:服务端固定开启,
                     // wire 上也没有请求字段可发
     RequestControl, // 方言声明 history_control=thinking_keep:可选开(K2.6
                     // 的 thinking.keep;开了 replay 同步升 Always)
