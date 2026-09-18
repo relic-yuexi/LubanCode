@@ -1,6 +1,6 @@
 # Worktree 切换改写 System 导致缓存断前缀：动态目录追加通知修复
 
-- 日期：2026-09-19；P1；已实现（分支 fix/worktree-cwd-host-notice；四件套按 §五 顺序落地，回归用例进 CI，真实缓存复测待用户）。
+- 日期：2026-09-19；P1；已实现（分支 fix/worktree-cwd-host-notice，PR #134；CI run 35405525383 rollup=success 全绿；四件套按 §五 顺序落地，回归用例进 CI，真实缓存复测待用户）。
 - 实现注记：v3 事件表无 cwd 事实事件 kind，目录事实落在通知消息本体（origin=session_runtime、进主链）；“专用 cwd 事件 kind/事实事件引用字段/目录版本号”按提案列进 PR，未注册不写入现行 envelope。
 - 关联：`System拼装Hook_Soul会话冻结与缓存边界.todo`、`session轨迹v3_消息主轴树链与四角色壳收敛设计.todo`。
 
