@@ -92,6 +92,36 @@ jobs:
             echo 'legs=[{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
           fi
 
+  # 安装脚本行为用例(GitHubRelease自动更新单 P0):install.ps1 / install.sh
+  # 的所有权判定(备份/保留/冲突/needs-review)与 manifest 生成器,不依赖
+  # 构建产物,一两分钟收工。windows 腿用 Windows PowerShell 5.1(真实装机
+  # 环境),ubuntu 腿 pwsh + bash 双跑;install.sh 端到端仅 unix。
+  install-scripts:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: install-scripts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install script tests (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/tests/install.tests.ps1
+
+      - name: Install script tests (pwsh)
+        if: runner.os != 'Windows'
+        shell: pwsh
+        run: ./scripts/tests/install.tests.ps1
+
+      - name: Install script tests (bash + python)
+        shell: bash
+        run: bash scripts/tests/install.tests.sh
+
   build-test:
     needs: [changes, lane]
     if: needs.changes.outputs.code == 'true'
