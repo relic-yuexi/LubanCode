@@ -30,6 +30,7 @@
 #include "runtime/channel_automation.hpp"
 #include "runtime/channel_work_pump.hpp"
 #include "runtime/headless_executor.hpp"
+#include "runtime/channel_file_delivery.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/tool.hpp"
 #include "workspace/identity.hpp"
@@ -88,6 +89,19 @@ public:
             return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
         }
         CountCall(counter_, "model");
+        std::size_t users = 0, images = 0;
+        for (const auto& message : request.messages) {
+            if (message.role == api::Role::User) ++users;
+            for (const auto& block : message.content)
+                if (std::holds_alternative<api::ImageBlock>(block)) ++images;
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block))
+                    saw_host_clock = saw_host_clock || text->text.find("宿主时钟") != std::string::npos;
+            }
+        }
+        user_counts.push_back(users);
+        image_counts.push_back(images);
+        systems.push_back(request.system);
         // 抓最后一条 user 消息的文本块。
         for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it) {
             if (it->role != api::Role::User) {
@@ -112,6 +126,9 @@ public:
     }
 
     std::vector<std::string> last_user_texts;
+    std::vector<std::size_t> user_counts, image_counts;
+    std::vector<std::string> systems;
+    bool saw_host_clock = false;
 
 private:
     std::filesystem::path counter_;
@@ -250,7 +267,7 @@ struct MenuPumpFixture {
         config.transport = "websocket";
         config.secret_env = "QQBOT_SECRET";
         config.dm_policy = dm_policy;
-        config.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder"};
+        config.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder", "send_file"};
         config.commands = MenuCommands();
         REQUIRE(manager->AddAccount("qqbot", "main", config, &transport).status ==
                 channel::ChannelManager::AddAccountResult::Status::Ok);
@@ -284,6 +301,7 @@ struct MenuPumpFixture {
         bridge = std::make_shared<runtime::ChannelAutomationBridge>(automation->store(),
                                                                     [this] { return now; });
         runtime::RegisterChannelAutomationTools(registry, bridge);
+        runtime::RegisterChannelFileTool(registry);
         runtime::ChannelWorkPump::Options work_options;
         work_options.manager = manager.get();
         work_options.outbox = automation->outbox();
@@ -294,8 +312,12 @@ struct MenuPumpFixture {
         work_options.lubancode_version = "0.26.267-test";
         work_options.wire_name = "test-wire";
         work_options.model = "test-model";
-        work_options.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder"};
+        work_options.tools.allow = {"create_reminder", "list_reminders", "cancel_reminder", "send_file"};
         work_options.max_steps_per_turn = 8;
+        work_options.skills_prompt = "Available skill: demo-skill";
+        work_options.media_download = [](const std::string&) -> std::expected<runtime::ChannelMediaBytes, std::string> {
+            return runtime::ChannelMediaBytes{std::string("GIF89a\x01\x00\x01\x00\x00\x00\x00", 13)};
+        };
         work_options.automation_store = automation->store();
         work_options.automation_bridge = bridge;
         pump.emplace();
@@ -450,4 +472,79 @@ TEST_CASE("未配对点击:全局菜单对所有人可见,但宿主分派要配�
     const auto records = fixture.manager->IngressRecords("qqbot", "main");
     REQUIRE(records.size() == 1);
     CHECK(channel::IngressEventStateName(records[0].state) == "rejected");
+}
+
+TEST_CASE("QQ builtins manage isolated contexts without sending slash commands to model") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    MenuPumpFixture fixture("builtin-sessions", channel::DmPolicy::Open);
+    fixture.scripts = {TextScript("one"), TextScript("two"), TextScript("three")};
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+    int id = 0;
+    const auto send = [&](const std::string& text) {
+        const auto key = "builtin-" + std::to_string(++id);
+        fixture.EmitAndIngest(MakeDmAt(key, key, "dm-a", text, key, fixture.now));
+        REQUIRE(fixture.Tick());
+        fixture.TickUntilQuiet();
+    };
+    send("remember alpha");
+    const auto first = fixture.pump->session_id_for("qqbot", "main", "dm-a");
+    REQUIRE_FALSE(first.empty());
+    send("/help");
+    send("/new");
+    send("fresh question");
+    CHECK(fixture.backend->user_counts == std::vector<std::size_t>{1, 1});
+    send("/session switch default");
+    send("remember previous");
+    CHECK(fixture.backend->user_counts == std::vector<std::size_t>{1, 1, 2});
+    send("/session switch foreign-id");
+    send("/not-implemented");
+    send("/status");
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
+    CHECK(fixture.SentTextAt(6).find("找不到") != std::string::npos);
+    CHECK(fixture.SentTextAt(7).find("暂不支持") != std::string::npos);
+    CHECK(fixture.SentTextAt(8).find("未装配") != std::string::npos);
+    CHECK(fixture.SentTextAt(8).find("发送文件（send_file）：可直接使用") != std::string::npos);
+    CHECK(fixture.SentTextAt(8).find("--permissions") != std::string::npos);
+    send("/权限");
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
+    CHECK(fixture.SentTextAt(9).find("查询时间（get_current_time）") != std::string::npos);
+    CHECK_FALSE(fixture.backend->saw_host_clock);
+    CHECK(fixture.backend->systems[0].find("get_current_time") != std::string::npos);
+}
+
+TEST_CASE("QQ accepted pictures reach provider input and generated files enter outbox") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    MenuPumpFixture fixture("vision-file", channel::DmPolicy::Open);
+    fixture.scripts = {TextScript("picture received"),
+        ToolUseScript("send-1", "send_file", R"({"path":"report.txt"})"),
+        TextScript("文件已暂存，随回复投递。")};
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+    std::ofstream(fixture.root / "report.txt") << "report content";
+    auto event = MakeDmAt("image-1", "image-1", "dm-a", "read image", "image-1", fixture.now);
+    channel::ChannelPart part;
+    part.type = channel::ChannelPartType::Image;
+    part.remote_ref = "https://example.qq.com/image";
+    part.mime_type = "image/gif";
+    part.file_name = "test.gif";
+    event.parts.push_back(part);
+    fixture.EmitAndIngest(event);
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    REQUIRE(fixture.backend->image_counts.size() == 1);
+    CHECK(fixture.backend->image_counts[0] == 1);
+    CHECK(fixture.backend->systems[0].find("demo-skill") != std::string::npos);
+    fixture.EmitAndIngest(MakeDmAt("file-2", "file-2", "dm-a", "send report", "file-2", fixture.now));
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    bool found = false;
+    for (const auto& item : fixture.automation->outbox()->ListItems()) {
+        if (item.attachment_file_name == "report.txt") {
+            found = true;
+            CHECK_FALSE(item.attachment_local_path.empty());
+        }
+    }
+    CHECK(found);
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
 }

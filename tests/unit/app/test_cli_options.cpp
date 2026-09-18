@@ -398,6 +398,11 @@ TEST_CASE("channel setup:平台与 --account 落位;形状不对退用法") {
     CHECK(ok.channel.verb == "setup");
     CHECK(ok.channel.platform == "qqbot");
     CHECK(ok.channel.account == "main");
+    const auto permissions = ParseCliArgs(Args({"lubancode", "channel", "setup", "qqbot",
+                                               "--permissions", "--account", "main"}));
+    CHECK(permissions.action == CliAction::RunChannelSetup);
+    CHECK(permissions.channel.permissions_only);
+    CHECK(permissions.channel.account == "main");
 
     // 不带 --account:账号空 = main(向导层补默认)。
     const ParsedCliArgs bare = ParseCliArgs(Args({"lubancode", "channel", "setup", "qqbot"}));

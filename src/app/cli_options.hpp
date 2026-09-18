@@ -152,6 +152,7 @@ struct ChannelCliArgs {
     std::string verb;     // 只认 setup
     std::string platform; // qqbot
     std::string account;  // --account <名>;空 = main
+    bool permissions_only = false;
 };
 
 // `lubancode channel pairing approve|reject <渠道> <账号> <配对码或身份>

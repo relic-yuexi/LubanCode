@@ -114,7 +114,7 @@ TEST_CASE("reporter: 开场→失败→在线→断线→停止的边沿都立�
     REQUIRE_FALSE(lines.empty());
     CHECK(lines.back().find("已连接 QQ,等待消息") != std::string::npos);
 
-    // 断线:立即,带根因(断线行 + 失败码变化行,各自立即)。
+    // 断线:立即带根因，不再重复报一次连接失败。
     source.current.connected = false;
     source.current.last_failure = Fail("read_closed", channel::qq::kStageConnected);
     source.current.next_retry_at_ms = now + 2'000;
@@ -129,6 +129,9 @@ TEST_CASE("reporter: 开场→失败→在线→断线→停止的边沿都立�
         }
     }
     CHECK(saw_disconnect);
+    CHECK(std::none_of(lines.begin(), lines.end(), [](const std::string& line) {
+        return line.find("连接失败:") != std::string::npos;
+    }));
 
     // 停止:立即。
     source.current.stage = channel::qq::kStageStopped;
@@ -168,7 +171,7 @@ TEST_CASE("reporter: 同码重复失败限频合并;原因变化立即显示") {
     {
         const auto lines = captured.Take();
         REQUIRE(lines.size() == 1);
-        CHECK(lines[0].find("仍在连接失败") != std::string::npos);
+        CHECK(lines[0].find("尚未恢复连接") != std::string::npos);
         CHECK(lines[0].find("connect_refused") != std::string::npos);
     }
 
@@ -180,6 +183,49 @@ TEST_CASE("reporter: 同码重复失败限频合并;原因变化立即显示") {
         REQUIRE(lines.size() == 1);
         CHECK(lines[0].find("tls_cert_not_trusted") != std::string::npos);
     }
+}
+
+TEST_CASE("reporter: 轮询不是失败次数,QQ 重连只报一次根因") {
+    SnapshotSource source;
+    Captured captured;
+    captured.Capture();
+    ChannelConnectionReporter::Deps deps;
+    deps.channels_state_root = MakeTempRoot("reconnect-polling");
+    deps.emit = captured.emit;
+    deps.accounts.push_back(source.AccountOf());
+    ChannelConnectionReporter reporter(std::move(deps));
+    source.current.connected = true;
+    source.current.stage = channel::qq::kStageConnected;
+    reporter.Observe("boot", 42, 1000);
+    captured.Take();
+    source.current.connected = false;
+    source.current.stage = "backoff";
+    source.current.last_failure = Fail("server_reconnect_requested", channel::qq::kStageConnected);
+    source.current.next_retry_at_ms = 64000;
+    reporter.Observe("boot", 42, 2000);
+    auto lines = captured.Take();
+    CHECK(std::count_if(lines.begin(), lines.end(), [](const std::string& line) {
+        return line.find("server_reconnect_requested") != std::string::npos;
+    }) == 1);
+    CHECK(std::any_of(lines.begin(), lines.end(), [](const std::string& line) {
+        return line.find("QQ 要求重新连接") != std::string::npos &&
+               line.find("62 秒后重试") != std::string::npos;
+    }));
+    for (int i = 1; i <= 600; ++i) reporter.Observe("boot", 42, 2000 + i * 100);
+    lines = captured.Take();
+    REQUIRE(lines.size() == 2);
+    for (const auto& line : lines) {
+        CHECK(line.find("尚未恢复连接") != std::string::npos);
+        CHECK(line.find("第 ") == std::string::npos);
+        CHECK(line.find("次") == std::string::npos);
+    }
+    // 恢复时即便来源仍留着旧错误，也不能继续报失败。
+    source.current.connected = true;
+    source.current.stage = channel::qq::kStageConnected;
+    reporter.Observe("boot", 42, 100000);
+    lines = captured.Take();
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0].find("已连接 QQ,等待消息") != std::string::npos);
 }
 
 TEST_CASE("reporter: 快照发布——boot/pid/connected/updated_at;5 秒节流刷新") {

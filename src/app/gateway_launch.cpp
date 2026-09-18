@@ -18,12 +18,15 @@
 #include "channel/manager.hpp"  // DefaultChannelsStateRoot
 #include "cli/gateway_command.hpp"
 #include "config/config.hpp"
+#include "config/model_catalog.hpp"
 #include "gateway/profile.hpp"
 #include "gateway/reply_outbox.hpp"
 #include "runtime/automation_pump.hpp"
 #include "runtime/channel_automation.hpp"
+#include "runtime/channel_file_delivery.hpp"
 #include "runtime/channel_work_pump.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/skill_loader.hpp"
 #include "platform/paths.hpp"
 #include "workspace/identity.hpp"
 
@@ -74,7 +77,23 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         return 1;
     }
     auto backend = app::BuildBackend(gateway_config->config);
-    tools::ToolRegistry registry = app::BuildBaseToolRegistry({}, gateway_config->config.search);
+    // 与终端使用同一个加载器。应用根部署只读该材料根，不串个人技能。
+    std::vector<tools::SkillMeta> skills;
+    std::string skill_source;
+    if (config::AppRootActive()) {
+        skills = tools::ScanSkillsDir(tools::Utf8ToPath(*config::HomeLubancodeDir()) / "skills", "部署级");
+        skill_source = "技能来自 LUBANCODE_HOME/skills；修改后重启 Gateway。";
+    } else {
+        skills = tools::LoadSkills(platform::CurrentDirUtf8(), platform::HomeDir(), platform::OfficialSkillsDir());
+        skill_source = "技能来自官方、用户及当前项目的 .agents/skills 与 .lubancode/skills；修改后重启 Gateway。";
+    }
+    const auto skills_prompt = tools::BuildSkillsPromptSegment(skills, skill_source);
+    const auto model_catalog = config::LoadModelCatalog();
+    const bool accepts_images = config::ClassifyImageInputSupport(model_catalog.FindByProviderAndSlug(
+        gateway_config->config.active_provider, gateway_config->config.model)) != config::ImageInputSupport::TextOnly;
+    std::string skills_summary = "已加载技能：" + std::to_string(skills.size()) + "\n" + skill_source + "\n";
+    for (const auto& skill : skills) skills_summary += "- " + skill.name + "\n";
+    tools::ToolRegistry registry = app::BuildBaseToolRegistry(skills, gateway_config->config.search);
     // workspace 身份:启动时冻结一次(Q2 §六第二项——渠道路的会话
     // 映射按它隔离,重启换 cwd 不误续别的项目上下文)。身份裁决的
     // home 止步=workspaces 树宿主根=状态根(与 app-server 同一口径,
@@ -116,6 +135,9 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         pump_options.lubancode_version = std::string(app::kVersion);
         pump_options.wire_name = config::ProviderWireName(gateway_config->config.wire);
         pump_options.model = gateway_config->config.model;
+        pump_options.skills_prompt = skills_prompt;
+        pump_options.context_window_tokens = gateway_config->config.context_window_tokens;
+        pump_options.on_progress = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
         pump_options.max_steps_per_turn = 32;   // V1 生产缺省:预算三根
         pump_options.max_wall_secs = 600;       // 硬线至少步数+墙钟两根
         pump.emplace();
@@ -157,6 +179,7 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
     auto channel_automation = std::make_shared<runtime::ChannelAutomationBridge>(
         automation_pump_open ? pump->store() : nullptr);
     runtime::RegisterChannelAutomationTools(registry, channel_automation);
+    runtime::RegisterChannelFileTool(registry);
     {
         app::ChannelGatewayWiring::Options wiring_options;
         wiring_options.config = &wiring_config;
@@ -204,6 +227,11 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
                 work_options.wire_name =
                     config::ProviderWireName(gateway_config->config.wire);
                 work_options.model = gateway_config->config.model;
+                work_options.skills_prompt = skills_prompt;
+                work_options.context_window_tokens = gateway_config->config.context_window_tokens;
+                work_options.on_progress = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
+                work_options.skills_summary = skills_summary;
+                work_options.accepts_images = accepts_images;
                 work_options.max_steps_per_turn = 32;  // 与 automation 同款预算
                 work_options.max_wall_secs = 600;
                 // Q5:automation 账与任务桥递进(渠道任务认领/执行/补投 +

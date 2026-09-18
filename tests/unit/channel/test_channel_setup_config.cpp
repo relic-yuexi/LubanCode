@@ -121,8 +121,8 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
     CHECK(account["reply"]["mode"].get<std::string>() == "final");
     // 只读工具名单与模板同一份(圆括号构造走数组路——花括号初始化会把
     // 两元素列表折成 {"read_file":"search"} 对象,nlohmann 的经典坑)。
-    const ChannelAccountUserConfig expected_template = MakeQqTemplateAccount();
-    CHECK(account["tools"]["allow"] == nlohmann::json(*expected_template.tools.allow));
+    CHECK(account["tools"]["preset"] == "ask");
+    CHECK_FALSE(account["tools"].contains("allow"));
     CHECK(account["app_id"].get<std::string>() == "102345678");
 
     // secret_file 是受管绝对路径;JSON 里没有密钥值(测试密钥扫描)。
@@ -146,6 +146,34 @@ TEST_CASE("全新配置:两层 enabled + 模板策略 + 受管凭据 + default_a
     const auto resolved = ResolveChannelCredential(reader_account);
     REQUIRE(resolved.has_value());
     CHECK(resolved->secret == "FAKE-SECRET-for-test-only");
+}
+
+TEST_CASE("permissions wizard migrates explicit lists without changing credentials or denied tools") {
+    Fixture fx("permission-migration");
+    REQUIRE(ChannelConfigService::Commit(fx.options, BaseRequest()).has_value());
+    auto original = nlohmann::json::parse(ReadFile(fx.root / "config.json"));
+    auto& account = original["channels"]["qqbot"]["accounts"]["main"];
+    account["enabled"] = false;
+    account["tools"] = {{"allow", {"read_file", "run_command"}}, {"deny", {"send_file"}}};
+    WriteFile(fx.root / "config.json", original.dump());
+    ChannelSetupCommitRequest request;
+    request.channel_id = "qqbot";
+    request.account_id = "main";
+    request.ensure_enabled = false;
+    request.tools_preset = "ask";
+    request.dry_run = true;
+    REQUIRE(ChannelConfigService::Commit(fx.options, request).has_value());
+    CHECK(nlohmann::json::parse(ReadFile(fx.root / "config.json")) == original);
+    request.tools_preset = "typo";
+    request.dry_run = false;
+    CHECK_FALSE(ChannelConfigService::Commit(fx.options, request).has_value());
+    CHECK(nlohmann::json::parse(ReadFile(fx.root / "config.json")) == original);
+    request.tools_preset = "ask";
+    REQUIRE(ChannelConfigService::Commit(fx.options, request).has_value());
+    auto expected = original;
+    expected["channels"]["qqbot"]["accounts"]["main"]["tools"] =
+        {{"preset", "ask"}, {"deny", {"send_file"}}};
+    CHECK(nlohmann::json::parse(ReadFile(fx.root / "config.json")) == expected);
 }
 
 TEST_CASE("旧配置:未知字段/模型/其他账号原样保留,已有账号只改选定字段") {

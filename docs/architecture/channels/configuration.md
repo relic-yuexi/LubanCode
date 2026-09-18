@@ -209,11 +209,11 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
   "allow_bots": false,
   "require_mention": true,
   "reply": {"mode": "final"},
-  "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder", "get_current_time"]}
+  "tools": {"preset": "ask"}
 }
 ```
 
-`tools.allow` 是核过注册名的最小只读名单（`read_file`、`search` 均为现有注册工具名）。Q5 起多了三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`，Gateway 装配注册，见 `runtime/channel_automation`）：只对过了配对/准入的会话可用——未配对 sender 进不了模型，拿不到工具；落账走 automation 域命令与归属闸（任务只归创建者查询/取消），不碰文件系统。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在这份名单里，五层交集自然拦下，扩不出上限。首版不开放任意 shell。
+模板默认"操作前询问"档：查询与提醒工具预授权，写文件/命令/发文件进审批带（执行前经渠道按钮问用户，见下）。预设展开的 `allow` 是核过注册名的名单（`read_file`、`search` 均为现有注册工具名）。Q5 起多了三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`，Gateway 装配注册，见 `runtime/channel_automation`）：只对过了配对/准入的会话可用——未配对 sender 进不了模型，拿不到工具；落账走 automation 域命令与归属闸（任务只归创建者查询/取消），不碰文件系统。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在预设名单里，五层交集自然拦下，扩不出上限。任意 shell 不预授权，只在审批带内可申请。
 
 **企业微信智能机器人首版模板**（`MakeWecombotTemplateAccount()`，W1；字段同 QQ 模板，只改凭据语义——`app_id` 存 BotID，`secret_env` 指长连接专用 Secret）：
 
@@ -262,7 +262,7 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
 
 飞书密钥规矩全沿 Q0（`secret_file` > `secret_env` > `secret` 明文；高优先级来源配置了但无效时明报不降级）。用户侧准备：open.feishu.cn 建企业自建应用、事件订阅选"使用长连接接收事件"、订阅 `im.message.receive_v1`、开通发消息权限、发布应用版本；首版仅国内域，larksuite 后置。
 
-Q6 起各层 tools 段另有 `approve`（可申请审批带，presence 合同与 `allow` 同款：键在=本层参与，未写=不参与）：名单内的须确认工具**不预先授权**——模型可见（看不见无从申请），执行前经渠道按钮问用户（QQ 键盘卡，`channel.approval.requested/resolved` 落 V3），允许才执行这一次；拒绝/超时/取消都不执行，超时默认拒绝不默认放行。`deny` 永远赢：hard deny 不可被按钮覆盖。有效审批带 = 各显式层 `approve` 的交集（与 `allow` 同构）。默认零层声明 = 空带 = 行为与 Q0 一字不差；QQ 模板不列 `approve`。
+Q6 起各层 tools 段另有 `approve`（可申请审批带，presence 合同与 `allow` 同款：键在=本层参与，未写=不参与）：名单内的须确认工具**不预先授权**——模型可见（看不见无从申请），执行前经渠道按钮问用户（QQ 键盘卡，`channel.approval.requested/resolved` 落 V3），允许才执行这一次；拒绝/超时/取消都不执行，超时默认拒绝不默认放行。`deny` 永远赢：hard deny 不可被按钮覆盖。有效审批带 = 各显式层 `approve` 的交集（与 `allow` 同构）。旧配置零层声明仍为空带。新 QQ 向导默认保存 `tools.preset: "ask"`，展开为常用只读/提醒预授权和写文件/命令/发文件审批带。`readonly` 只开放查询，`auto` 预授权常用工具；preset 与 allow/approve 互斥，deny 仍优先。旧账号可用 `lubancode channel setup qqbot --permissions` 选择模式，无须列工具名。
 
 **Q7 菜单/面板/命令绑定**（QQ 接入单 §十三；账号段可选字段，不写零行为变化）：
 

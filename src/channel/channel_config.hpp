@@ -83,7 +83,10 @@ struct ChannelToolsUserPolicy {
     std::optional<std::vector<std::string>> allow;
     std::vector<std::string> deny;
     std::optional<std::vector<std::string>> approve;
+    std::string preset;  // readonly / ask / auto; 解析时展开，路由仍用同一权限闸
 };
+
+std::optional<ChannelToolsUserPolicy> ChannelToolsPreset(const std::string& name);
 
 struct ChannelBindingToolsPolicy {
     // 未设置(nullopt)= binding 不另设上限;[] = 禁全部工具。

@@ -647,6 +647,10 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                 channel_args.verb = "setup";
                 channel_args.platform = args[i + 2];
                 for (std::size_t extra = i + 3; extra < args.size(); ++extra) {
+                    if (args[extra] == "--permissions") {
+                        channel_args.permissions_only = true;
+                        continue;
+                    }
                     if (args[extra] == "--account") {
                         if (extra + 1 >= args.size() || args[extra + 1].empty() ||
                             args[extra + 1].rfind("--", 0) == 0) {
@@ -659,7 +663,7 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     }
                     parsed.action = CliAction::BadChannelSetup;
                     parsed.error_text = "channel setup 认不得参数 \"" + args[extra] +
-                                        "\":只认 --account <账号>";
+                                        "\":只认 --account <账号>、--permissions";
                     return parsed;
                 }
                 parsed.action = CliAction::RunChannelSetup;

@@ -35,6 +35,7 @@ std::string StageText(const std::string& stage) {
     if (stage == kStageStopped) {
         return "已停止";
     }
+    if (stage == "backoff") return "等待重连";
     return "连接中";
 }
 
@@ -91,6 +92,11 @@ void ChannelConnectionReporter::ObserveAccount(const Account& account,
             deps_.emit(prefix + text);
         }
     };
+    const auto retry_text = [&]() -> std::string {
+        if (snapshot.next_retry_at_ms <= 0) return {};
+        const auto remaining = std::max<std::int64_t>(0, snapshot.next_retry_at_ms - now_ms);
+        return ";" + std::to_string((remaining + 999) / 1000) + " 秒后重试";
+    };
 
     if (!state.introduced) {
         state.introduced = true;
@@ -109,13 +115,14 @@ void ChannelConnectionReporter::ObserveAccount(const Account& account,
                 ? ":" + RedactConnectionDetail(snapshot.last_failure->detail) + "(" +
                       snapshot.last_failure->error_code + ")"
                 : std::string();
-        const std::string retry = snapshot.next_retry_at_ms > 0
-                                      ? ";" + std::to_string(
-                                                   (snapshot.next_retry_at_ms - now_ms + 999) /
-                                                   1000) +
-                                            " 秒后重试"
-                                      : std::string();
-        emit_line("连接断开" + reason + retry);
+        const bool requested = snapshot.last_failure &&
+            snapshot.last_failure->error_code == "server_reconnect_requested";
+        emit_line((requested ? "QQ 要求重新连接" : "连接断开") + reason + retry_text());
+        if (snapshot.last_failure) {
+            // 同一个断线边沿已报根因，不再紧跟一条“连接失败”。
+            state.last_failure_code = snapshot.last_failure->error_code;
+            state.last_failure_emit_ms = now_ms;
+        }
     }
     state.was_connected = snapshot.connected;
 
@@ -128,38 +135,26 @@ void ChannelConnectionReporter::ObserveAccount(const Account& account,
         state.was_stopped = false;
     }
 
-    // 失败:原因变化立即显示;同码重复合并限频(30 秒窗,超窗带累计数)。
-    if (snapshot.last_failure.has_value()) {
+    // 快照是状态，不是事件；重复观察绝不能冒充失败次数。
+    if (snapshot.last_failure.has_value() && !snapshot.connected &&
+        snapshot.stage != channel::qq::kStageStopped) {
         const auto& failure = *snapshot.last_failure;
         const bool code_changed = failure.error_code != state.last_failure_code;
         const bool outside_window =
             now_ms - state.last_failure_emit_ms >= kConnectionFailureRepeatWindowMs;
         if (code_changed) {
-            const std::string retry = snapshot.next_retry_at_ms > 0
-                                          ? ";" + std::to_string(
-                                                       (snapshot.next_retry_at_ms - now_ms +
-                                                        999) /
-                                                       1000) +
-                                                " 秒后重试"
-                                          : std::string();
-            emit_line("连接失败:" + RedactConnectionDetail(failure.detail) + "(" +
-                      failure.error_code + ",阶段 " + failure.stage + ")" + retry);
+            emit_line(std::string(failure.error_code == "server_reconnect_requested"
+                          ? "QQ 要求重新连接:" : "连接失败:") +
+                      RedactConnectionDetail(failure.detail) + "(" +
+                      failure.error_code + ",阶段 " + failure.stage + ")" + retry_text());
             state.last_failure_code = failure.error_code;
             state.last_failure_emit_ms = now_ms;
-            state.suppressed_repeats = 0;
         } else if (outside_window) {
-            // 仍失败,但距上条已隔一个窗:带累计数补一条,不静默(§三
-            // "不能一直沉默")。
-            emit_line("仍在连接失败(" + failure.error_code + ",第 " +
-                      std::to_string(1 + state.suppressed_repeats) + " 次)");
+            emit_line("尚未恢复连接(最近原因 " + failure.error_code + ")" + retry_text());
             state.last_failure_emit_ms = now_ms;
-            state.suppressed_repeats = 0;
-        } else {
-            ++state.suppressed_repeats;
         }
     } else {
         state.last_failure_code.clear();
-        state.suppressed_repeats = 0;
     }
 
     // 阶段推进:同阶段不重复打(重试轮次里反复 fetching/connecting 只在

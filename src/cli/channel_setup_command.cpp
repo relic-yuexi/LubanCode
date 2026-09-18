@@ -77,6 +77,26 @@ bool AskYesNo(const std::string& prompt, bool default_yes) {
     return line == "y" || line == "Y" || line == "yes" || line == "是";
 }
 
+std::optional<std::string> AskToolsPreset(bool existing) {
+    std::printf("\n工具权限（不用填写工具名）:\n"
+                "  1. 只读查询：读文件、查资料、读技能、查时间和已有提醒\n"
+                "  2. 操作前询问（推荐）：查询和管理提醒直接用；改文件、跑命令、发文件前在 QQ 上问你\n"
+                "  3. 自动执行：常用工具不再逐次询问，仍受禁止项和其他权限限制\n");
+    if (existing) std::printf("  回车保留当前配置；选择模式会替换原先的工具名单，保留禁止项。\n");
+    else std::printf("  回车选择 2。\n");
+    for (;;) {
+        std::printf("请选择 1/2/3（输入 q 取消）:");
+        std::fflush(stdout);
+        const auto line = ReadVisibleLine();
+        if (!std::cin || line == "q") return std::nullopt;
+        if (line.empty()) return existing ? std::string() : std::string("ask");
+        if (line == "1") return std::string("readonly");
+        if (line == "2") return std::string("ask");
+        if (line == "3") return std::string("auto");
+        std::printf("请输入 1、2 或 3。\n");
+    }
+}
+
 }  // namespace
 
 int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
@@ -144,12 +164,14 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     std::string old_secret_file;
     bool old_secret_managed = false;
     bool old_secret_secure = false;
+    bool account_exists = false;
     std::string old_security_detail;
     if (config_loaded.has_value()) {
         const auto status =
             channel::InspectChannelAccount(config_loaded->config.channels, options->secrets_root,
                                            platform->id, account_id);
         if (status.exists) {
+            account_exists = true;
             channel_enabled = status.channel_enabled;
             account_enabled = status.enabled;
             has_app_id = status.has_app_id;
@@ -162,9 +184,53 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                         account_enabled ? "已启用" : "未启用", has_app_id ? "已填" : "未填",
                         old_secret_file.empty() ? "未配" : "已配");
         } else {
-            std::printf("该账号尚未配置,将按 %s 模板新建(websocket、私聊配对、群聊禁用、final 回复、只读工具)。\n",
+            std::printf("该账号尚未配置,将按 %s 模板新建(websocket、私聊配对、群聊禁用、final 回复)。\n",
                         platform->display_name.c_str());
         }
+    }
+
+    if (args.permissions_only) {
+        if (!account_exists) {
+            std::fprintf(stderr, "账号尚未配置，请先运行 lubancode channel setup %s --account %s。\n",
+                         platform->id.c_str(), account_id.c_str());
+            return 1;
+        }
+        const auto& current = config_loaded->config.channels.at(platform->id).accounts.at(account_id).tools;
+        // 裸配置(未写权限)在解析侧保持 nullopt;QQ 账号的默认询问档在
+        // 注册侧生效——这里照实显示生效档,标"默认"以区分显式保存的档位。
+        const bool default_ask = platform->id == "qqbot" && current.preset.empty() &&
+                                 !current.allow && !current.approve;
+        const char* label = current.preset == "ask" ? "操作前询问" :
+                            current.preset == "auto" ? "自动执行" :
+                            current.preset == "readonly" ? "只读查询" :
+                            default_ask ? "操作前询问（默认）" : "自定义工具名单";
+        std::printf("当前策略: %s\n", label);
+        const auto selected = AskToolsPreset(true);
+        if (!selected || selected->empty()) {
+            std::printf("未修改权限。\n");
+            return 0;
+        }
+        channel::ChannelSetupCommitRequest request;
+        request.channel_id = platform->id;
+        request.account_id = account_id;
+        request.ensure_enabled = false;
+        request.tools_preset = *selected;
+        request.dry_run = true;
+        const auto preview = channel::ChannelConfigService::Commit(*options, request);
+        if (!preview) {
+            std::fprintf(stderr, "%s\n", preview.error().detail.c_str());
+            return 1;
+        }
+        for (const auto& change : preview->changes) std::printf("  - %s\n", change.c_str());
+        if (!AskYesNo("确认保存权限", false) || !std::cin) return 0;
+        request.dry_run = false;
+        const auto saved = channel::ChannelConfigService::Commit(*options, request);
+        if (!saved) {
+            std::fprintf(stderr, "%s\n", saved.error().detail.c_str());
+            return 1;
+        }
+        std::printf("权限已保存。重启 Gateway 后生效；在 QQ 发 /tools 查看实际可用项。\n");
+        return 0;
     }
 
     // 4) 已有密钥文件权限不合(§5.3):受管件给"收紧"选项;外部路径默认
@@ -247,6 +313,11 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                      true);
     }
 
+    const auto selected_tools = AskToolsPreset(account_exists);
+    if (!selected_tools) {
+        std::printf("已取消保存。\n");
+        return 0;
+    }
     // 7) 差异预览(dry_run,一页未写)→ 确认 → 提交。
     channel::ChannelSetupCommitRequest request;
     request.channel_id = platform->id;
@@ -254,6 +325,7 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     request.app_id = app_id;
     request.new_secret = new_secret;
     request.ensure_enabled = ensure_enabled;
+    if (!selected_tools->empty()) request.tools_preset = *selected_tools;
     request.dry_run = true;
     const auto preview = channel::ChannelConfigService::Commit(options.value(), request);
     if (!preview.has_value()) {

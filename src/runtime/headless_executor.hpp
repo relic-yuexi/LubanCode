@@ -117,6 +117,9 @@ public:
         std::string lubancode_version;
         std::string wire_name;
         std::string model;
+        std::string skills_prompt;
+        std::size_t context_window_tokens = 0;
+        std::function<void(const std::string&)> on_progress;
         // 回复原件落位(delivery/replies;由泵递进)。
         std::filesystem::path replies_dir;
         // 工具授权(fail closed:allow 名单没列 = 拒,同渠道 §16.1)。
@@ -192,6 +195,7 @@ public:
     //   - 无映射 → fresh 开场,同样记映射;
     //   - 不 Close(渠道会话跨轮持有;超帽淘汰/进程退出才封口)。
     struct ChannelTurnRequest {
+        std::vector<api::ImageBlock> images;
         std::string session_key;         // 渠道会话键(路由定,含账号/会话)
         std::string stored_session_id;   // 映射账里的场(空 = 无映射)
         std::string prompt;
@@ -254,7 +258,8 @@ private:
                             const std::atomic<bool>* cancel,
                             const std::function<Options::ToolConfirmDecision(
                                 const std::string&, const std::string&, const nlohmann::json&)>*
-                                per_turn_confirm = nullptr);
+                                per_turn_confirm = nullptr,
+                            const std::vector<api::ImageBlock>& images = {});
     // 渠道活场:session_key -> (常驻 SessionService + 常驻 Agent)。同场
     // 多轮共用同一只 Agent——上下文(history/前缀缓存)随场存活;超帽按
     // 最旧淘汰(Close 后由映射账续 resume-as-new,LaunchResumeHistory

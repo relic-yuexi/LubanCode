@@ -16,6 +16,7 @@ namespace lubancode::cli {
 struct ChannelSetupCommandArgs {
     std::string platform;  // qqbot
     std::string account;   // 空 = main
+    bool permissions_only = false;
 };
 
 // 返回进程退出码:0 保存成功(或差异确认后取消);1 用法/环境/保存失败;

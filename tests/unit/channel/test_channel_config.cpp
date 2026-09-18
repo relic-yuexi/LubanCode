@@ -22,6 +22,24 @@ std::optional<std::map<std::string, ChannelUserConfig>> Parse(const std::string&
 
 }  // namespace
 
+TEST_CASE("tool presets reject ambiguous lists and retain explicit deny") {
+    const auto parsed = Parse(R"({"qqbot":{"accounts":{"main":{"tools":{
+        "preset":"ask","deny":["run_command"]}}}}})");
+    REQUIRE(parsed.has_value());
+    const auto& policy = parsed->at("qqbot").accounts.at("main").tools;
+    CHECK(policy.preset == "ask");
+    CHECK(policy.deny == std::vector<std::string>{"run_command"});
+    for (const auto* bad : {R"({"preset":"ask","allow":[]})",
+                            R"({"preset":"auto","approve":[]})",
+                            R"({"preset":"unknown"})", R"({"preset":true})"}) {
+        nlohmann::json root;
+        root["qqbot"]["accounts"]["main"]["tools"] = nlohmann::json::parse(bad);
+        std::string error;
+        CHECK_FALSE(ParseChannelsUserConfig(root, "test", &error).has_value());
+        CHECK(error.find("preset") != std::string::npos);
+    }
+}
+
 TEST_CASE("完整样例(configuration.md §1)解析:字段与默认值") {
     const auto parsed = Parse(R"({
       "qqbot": {
@@ -147,7 +165,9 @@ TEST_CASE("tools 上限字段:渠道段/账号段都收,presence 显式保留") 
     REQUIRE(capped.tools.allow.has_value());
     CHECK(capped.tools.allow->empty());
 
-    // 没写 tools:零上限(nullopt)。
+    // 没写 tools:零上限(nullopt)——默认询问档在注册侧(AddAccount)生效,
+    // 解析端不物化,presence 合同一字不破。
+    CHECK(channel.accounts.at("no_tools").tools.preset.empty());
     CHECK_FALSE(channel.accounts.at("no_tools").tools.allow.has_value());
 
     // 只写 deny 不写 allow:同样合法(nullopt + deny)。
@@ -155,8 +175,36 @@ TEST_CASE("tools 上限字段:渠道段/账号段都收,presence 显式保留") 
         R"({"qqbot": {"accounts": {"m": {"tools": {"deny": ["shell"]}}}}})");
     REQUIRE(deny_only.has_value());
     const auto& policy = deny_only->at("qqbot").accounts.at("m").tools;
+    CHECK(policy.preset.empty());
     CHECK_FALSE(policy.allow.has_value());
     REQUIRE(policy.deny.size() == 1);
+}
+
+TEST_CASE("bare QQ tools stay nullopt at parse; explicit lists and other channels unaffected") {
+    const auto parsed = Parse(R"({
+        "qqbot":{"accounts":{
+            "empty":{"tools":{}},
+            "blocked":{"tools":{"allow":[]}},
+            "custom":{"tools":{"approve":["run_command"]}}
+        }},
+        "other":{"accounts":{"main":{}}}
+    })");
+    REQUIRE(parsed.has_value());
+    const auto& accounts = parsed->at("qqbot").accounts;
+    // 空 tools 对象与没写同形:nullopt,不物化默认档。
+    const auto& empty = accounts.at("empty").tools;
+    CHECK(empty.preset.empty());
+    CHECK_FALSE(empty.allow.has_value());
+    CHECK_FALSE(empty.approve.has_value());
+    const auto& blocked = accounts.at("blocked").tools;
+    CHECK(blocked.preset.empty());
+    REQUIRE(blocked.allow.has_value());
+    CHECK(blocked.allow->empty());
+    const auto& custom = accounts.at("custom").tools;
+    CHECK(custom.preset.empty());
+    REQUIRE(custom.approve.has_value());
+    CHECK(*custom.approve == std::vector<std::string>{"run_command"});
+    CHECK_FALSE(parsed->at("other").accounts.at("main").tools.allow.has_value());
 }
 
 TEST_CASE("tools 上限字段:坏类型/未知字段明拒") {
@@ -198,7 +246,8 @@ TEST_CASE("tools.approve(Q6 审批带):渠道段/账号段/binding 都收,presen
     CHECK(*channel.bindings[0].policy.tools.approve ==
           std::vector<std::string>{"bash_like"});
 
-    // 没写 approve:零审批带(默认,Q0 行为零变化)。
+    // 没写 approve:零审批带(默认,Q0 行为零变化;默认询问档在注册侧
+    // 生效,不进解析结果)。
     const auto bare = Parse(R"({"qqbot": {"accounts": {"m": {}}}})");
     REQUIRE(bare.has_value());
     CHECK_FALSE(bare->at("qqbot").accounts.at("m").tools.approve.has_value());
@@ -219,9 +268,10 @@ TEST_CASE("QQ 模板:逐字段显式,不改全渠道默认值迁就 QQ") {
     CHECK(template_account.require_mention);
     CHECK(template_account.reply.mode == ReplyMode::Final);
     REQUIRE(template_account.tools.allow.has_value());
-    CHECK(*template_account.tools.allow ==
-          std::vector<std::string>{"read_file", "search", "create_reminder", "list_reminders",
-                                   "cancel_reminder", "get_current_time"});
+    CHECK(template_account.tools.preset == "ask");
+    REQUIRE(template_account.tools.approve.has_value());
+    CHECK(*template_account.tools.approve ==
+          std::vector<std::string>{"write_file", "edit_file", "run_command", "send_file"});
 
     // 全渠道默认值不动:别的账号/别的渠道照旧。
     const auto parsed = Parse(R"({"other": {"accounts": {"m": {}}}})");

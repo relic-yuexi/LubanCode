@@ -1,8 +1,11 @@
 // ChannelWorkPump 实现(QQ 接入单 Q2)。装配合同见头文件。
 #include "runtime/channel_work_pump.hpp"
+#include "runtime/channel_file_delivery.hpp"
+#include "runtime/headless_progress.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -177,6 +180,9 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
     executor_options.lubancode_version = out->options_.lubancode_version;
     executor_options.wire_name = out->options_.wire_name;
     executor_options.model = out->options_.model;
+    executor_options.skills_prompt = out->options_.skills_prompt;
+    executor_options.context_window_tokens = out->options_.context_window_tokens;
+    executor_options.on_progress = out->options_.on_progress;
     // 回复原件落 outbox 账下的 replies/(选择原件与段原件同一目录)。
     executor_options.replies_dir = out->options_.outbox->replies_dir();
     executor_options.tools = out->options_.tools;
@@ -224,7 +230,7 @@ ChannelWorkPump::OpenResult ChannelWorkPump::Open(ChannelWorkPump* out, api::Bac
 }
 
 std::string ChannelWorkPump::IngestAttachmentsPrompt(
-    const channel::ChannelManager::WorkItem& work) {
+    const channel::ChannelManager::WorkItem& work, std::vector<api::ImageBlock>* images) {
     if (!media_service_.has_value()) {
         return std::string();
     }
@@ -237,6 +243,18 @@ std::string ChannelWorkPump::IngestAttachmentsPrompt(
             prompt += "\n";
         }
         prompt += receipt.prompt_line;
+        if (receipt.ready && receipt.mime_type.rfind("image/", 0) == 0 && !options_.accepts_images) {
+            prompt += "\n[当前模型目录声明只支持文本，图片已存档但未送入视觉输入。请换支持图片的模型。]";
+            continue;
+        }
+        if (images != nullptr) {
+            if (auto image = LoadChannelImage(receipt)) {
+                images->push_back(std::move(*image));
+                prompt += "\n[已附加图片视觉输入；能否识图取决于当前模型。]";
+            } else if (receipt.ready && receipt.mime_type.rfind("image/", 0) == 0) {
+                prompt += "\n[图片未接入视觉输入：格式、尺寸或原件校验未通过。不要声称看过图片。]";
+            }
+        }
     }
     return prompt;
 }
@@ -283,7 +301,9 @@ std::string ChannelWorkPump::session_id_for(const std::string& channel_id,
         return std::string();
     }
     const auto found =
-        books->session_map.Find(session_key, options_.workspace_identity.workspace_key);
+        books->session_map.Find(channel::ChannelSessionMap::SlotKey(session_key,
+            books->session_map.ActiveSlot(session_key, options_.workspace_identity.workspace_key)),
+            options_.workspace_identity.workspace_key);
     return found.has_value() ? *found : std::string();
 }
 
@@ -472,6 +492,12 @@ void ChannelWorkPump::TurnWorkerLoop() {
     }
 }
 
+void ChannelWorkPump::ReportProgress(const std::string& text) const {
+    if (options_.on_progress) {
+        try { options_.on_progress("[channel] " + text); } catch (...) {}
+    }
+}
+
 bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
     for (const auto& snapshot : options_.manager->Snapshots()) {
         for (const auto& outcome : options_.manager->DrainChannelDeliveryOutcomes(
@@ -488,11 +514,13 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
             }
             switch (outcome.status) {
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::Accepted:
+                    ReportProgress("QQ 已接受回复 delivery=" + outcome.client_delivery_id);
                     // QQ 已接受(provider_message_id 记账;幂等)。
                     (void)options_.outbox->MarkSent(outcome.client_delivery_id,
                                                     outcome.provider_message_id, now_ms);
                     break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::RateLimited:
+                    ReportProgress("回复投递限频 delivery=" + outcome.client_delivery_id);
                     if (item->source_ref.rfind("chanjob:", 0) == 0) {
                         // Q5 渠道任务段:主动消息额度受限(§11.3 40034100
                         // 一族)——不硬发不谎报:挂起等互动,下一封来信进
@@ -517,6 +545,8 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                     }
                     break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::Rejected:
+                    ReportProgress("平台拒绝回复 delivery=" + outcome.client_delivery_id +
+                                   " code=" + HeadlessProgressReporter::Preview(outcome.error_code));
                     if (item->source_ref.rfind("chanjob:", 0) == 0 &&
                         outcome.error_code == "reply_window_expired") {
                         // Q5 渠道任务段:回复窗口过期——不硬发(不拿陈旧
@@ -537,6 +567,7 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                         now_ms);
                     break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::AuthFailed:
+                    ReportProgress("回复投递鉴权失败 delivery=" + outcome.client_delivery_id);
                     // 令牌失效:终态失败,不自动重试,不重跑 Agent。
                     (void)options_.outbox->MarkChannelFailed(
                         outcome.client_delivery_id,
@@ -544,6 +575,7 @@ bool ChannelWorkPump::ApplyDeliveryOutcomes(std::int64_t now_ms) {
                         now_ms);
                     break;
                 case channel::ChannelManager::ChannelDeliveryOutcome::Status::Unknown:
+                    ReportProgress("回复投递结果未知 delivery=" + outcome.client_delivery_id + "，停止自动重发");
                     // 超时 = delivery_unknown(§七:停自动重发,不虚 exactly-once)。
                     (void)options_.outbox->MarkOutcomeUnknown(outcome.client_delivery_id, now_ms);
                     break;
@@ -719,7 +751,9 @@ bool ChannelWorkPump::RecoverOne(const std::string& channel_id, const std::strin
     target.source_ref =
         "ingress:" + channel_id + ":" + account_id + ":" + std::to_string(view.sid);
     // Q4 产物附件:与执行路同一纯函数(同正文同段数同附件,幂等补投影)。
-    const auto attachment = ReplyFileAttachment(plan.selection_id, plan.text);
+    auto attachment = StagedChannelFile(options_.outbox->replies_dir() / "files",
+        MakeChannelOperationId(channel_id, account_id, view.sid));
+    if (!attachment) attachment = ReplyFileAttachment(plan.selection_id, plan.text);
     const auto enqueued = options_.outbox->EnqueueChannel(
         plan.selection_id, plan.text, bound->session_id, bound->turn_id, target, now_ms,
         attachment.has_value() ? &*attachment : nullptr);
@@ -806,6 +840,8 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
                                       std::int64_t now_ms, const std::string& turn_key,
                                       const std::atomic<bool>* cancel) {
     AccountBooks* books = BooksFor(channel_id, account_id);
+    if (books == nullptr || books->session_map.broken()) return false;
+    ReportProgress(channel_id + "/" + account_id + " 开始处理来信 ingress=" + std::to_string(work.sid));
     // Q5 补投锚:该会话最近一封被受理的来信(被动回复窗判定的原料)。
     // Q6 异步 turn 起,写在工作线程、读在 tick(FreshInboundAnchor)——
     // 过 recent_inbound_mutex_。
@@ -842,9 +878,77 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     if (const auto command =
             channel::MatchChannelCommand(work.commands, PromptFromIngress(ingress))) {
         if (command->action != "prompt") {
+            ReportProgress("宿主命令 " + HeadlessProgressReporter::Preview(command->match) + "（不调用模型）");
             std::string reply;
             if (command->action == "help") {
                 reply = channel::MakeChannelHelpText(work.commands);
+            } else if (command->action == "unknown") {
+                reply = "暂不支持这个命令。输入 /help 查看可用命令。";
+            } else if (command->action == "menu_help") {
+                reply = "菜单须由本机配置启用。在全局 config.json 的 QQ 账号段加入：\n"
+                        "\"menu\": {\"publish\": true, \"preset\": \"assistant\"}\n"
+                        "重启 Gateway 后会尝试发布帮助、新会话、会话列表、提醒、文件说明、功能状态。"
+                        "发布失败或远端菜单冲突请查看 Gateway 诊断；本条说明不代表已发布。";
+            } else if (command->action == "session") {
+                const auto& base = work.route.session_key;
+                const auto& workspace = options_.workspace_identity.workspace_key;
+                const auto active = books->session_map.ActiveSlot(base, workspace);
+                const auto slots = books->session_map.Slots(base, workspace);
+                const auto& args = command->prompt;
+                if (args.empty() || args == "list") {
+                    reply = "会话列表（仅当前 QQ 会话、当前工作区）：\n";
+                    for (const auto& slot : slots) {
+                        reply += (slot == active ? "* " : "  ") + slot + "\n";
+                    }
+                    reply += "输入 /session switch <编号> 切换；/new 开新会话。";
+                } else if (args == "current") {
+                    reply = "当前会话：" + active;
+                } else if (args == "new") {
+                    // 同一来信重入仍选同一编号，不重复开场。首次发言时才建 V3。
+                    const auto slot = "s-" + std::to_string(work.sid);
+                    if (!books->session_map.SelectSlot(base, workspace, slot, true, now_ms)) return false;
+                    reply = "已切到新会话 " + slot + "。下一条消息从空上下文开始；历史和提醒照留。";
+                } else if (args.rfind("switch ", 0) == 0) {
+                    const auto slot = args.substr(7);
+                    if (std::find(slots.begin(), slots.end(), slot) == slots.end()) {
+                        reply = "找不到这个会话。输入 /session 查看本聊天可切换的编号。";
+                    } else {
+                        if (!books->session_map.SelectSlot(base, workspace, slot, false, now_ms)) return false;
+                        reply = "已切到会话 " + slot + "。";
+                    }
+                } else {
+                    reply = "用法：/session [list|current|new|switch <编号>]";
+                }
+            } else if (command->action == "capabilities") {
+                reply = "当前工作目录：" + options_.cwd_utf8 + "\n工具状态：\n";
+                std::map<std::string, std::string> names{
+                    {"read_file", "读取文件"}, {"search", "搜索本机文件"},
+                    {"web_search", "联网搜索"}, {"web_fetch", "读取网页"},
+                    {"skill", "加载技能"}, {"get_current_time", "查询时间"},
+                    {"list_reminders", "查看提醒"}, {"create_reminder", "创建提醒"},
+                    {"cancel_reminder", "取消提醒"}, {"write_file", "写入文件"},
+                    {"edit_file", "修改文件"}, {"run_command", "执行命令"},
+                    {"send_file", "发送文件"}};
+                for (const auto& tool : registry_->All()) names.try_emplace(tool->name(), tool->name());
+                for (const auto& [name, label] : names) {
+                    reply += label + "（" + name + "）：";
+                    const auto* tool = registry_->Find(name);
+                    if (tool == nullptr) reply += "未装配";
+                    else if (!work.route.tools.Allows(name)) reply += "渠道策略未放行";
+                    else if (tool->needs_confirm() && !work.route.tools.ExplicitlyAllows(name)) {
+                        if (work.route.tools.Approvable(name) && options_.interaction_broker)
+                            reply += "须在 QQ 点允许这次";
+                        else reply += "不可执行：未启用审批";
+                    } else reply += "可直接使用";
+                    reply += "\n";
+                }
+                reply += "切换权限不必填写工具名。在电脑运行：\nlubancode channel setup " +
+                         channel_id + " --account " + account_id + " --permissions\n"
+                         "选择只读查询、操作前询问或自动执行，保存后重启 Gateway。\n";
+                if (registry_->Find("web_search") == nullptr)
+                    reply += "联网搜索须配置全局 search.provider 与 search.api_key，再放行 web_search。\n";
+                reply += options_.accepts_images ? "图片：已接视觉输入，需模型支持。\n" : "图片：当前模型只支持文本。\n";
+                reply += options_.skills_summary;
             } else if (command->action == "file_help") {
                 reply = channel::MakeChannelFileHelpText();
             } else {  // list_reminders(automation 域不在 → 稳定说明,不装死)
@@ -874,8 +978,9 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     }
 
     HeadlessExecutor::ChannelTurnRequest request;
-    request.session_key = work.route.session_key;
-    const auto stored = books->session_map.Find(work.route.session_key,
+    request.session_key = channel::ChannelSessionMap::SlotKey(work.route.session_key,
+        books->session_map.ActiveSlot(work.route.session_key, options_.workspace_identity.workspace_key));
+    const auto stored = books->session_map.Find(request.session_key,
                                                 options_.workspace_identity.workspace_key);
     if (stored.has_value()) {
         request.stored_session_id = *stored;
@@ -883,7 +988,7 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     request.prompt = preset_prompt.has_value() ? *preset_prompt : PromptFromIngress(ingress);
     // Q4 附件接纳(准入已过、执行前):下载落仓 + 有界预览行并进 prompt。
     // 失败附件给稳定说明,不假装读过文件;不拦正文轮。
-    if (const std::string media_prompt = IngestAttachmentsPrompt(work); !media_prompt.empty()) {
+    if (const std::string media_prompt = IngestAttachmentsPrompt(work, &request.images); !media_prompt.empty()) {
         request.prompt += "\n" + media_prompt;
     }
     request.binding.work_id = MakeChannelOperationId(channel_id, account_id, work.sid);
@@ -934,6 +1039,8 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     const std::string bound_session_key = work.route.session_key;
     std::atomic<bool> local_cancel{false};
     const std::atomic<bool>* effective_cancel = cancel != nullptr ? cancel : &local_cancel;
+    ChannelFileDeliveryScope file_scope(platform::Utf8ToPath(options_.cwd_utf8),
+        options_.outbox->replies_dir() / "files", request.binding.work_id);
     const auto result = executor_->ExecuteChannelTurn(
         request,
         [this, books, sid, bound_session_key, now_ms](const std::string& session_id,
@@ -949,6 +1056,8 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
         if (result.error_code == "gateway.fault_injected") {
             return true;  // 不结算:恢复路接管(模拟进程死在半路)
         }
+        ReportProgress("本轮失败 ingress=" + std::to_string(sid) + " " +
+                       HeadlessProgressReporter::Preview(result.error_code + ": " + result.error));
         // 执行失败(模型错/取消/受理拒):如实退场,不盲重跑。
         const auto dead_letter = options_.manager->DeadLetterIngress(
             channel_id, account_id, sid, "turn_failed: " + result.error_code + ": " + result.error);
@@ -969,7 +1078,8 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     target.reply_to_message_id = work.event.message_id;
     target.source_ref = "ingress:" + channel_id + ":" + account_id + ":" + std::to_string(sid);
     // Q4 产物附件:长文(拆段 > 1)末段附带任务结果文件(冻结正文原件)。
-    const auto attachment = ReplyFileAttachment(result.selection_id, result.reply_text);
+    auto attachment = StagedChannelFile(options_.outbox->replies_dir() / "files", request.binding.work_id);
+    if (!attachment) attachment = ReplyFileAttachment(result.selection_id, result.reply_text);
     const auto enqueued = options_.outbox->EnqueueChannel(
         result.selection_id, result.reply_text, result.session_id, result.turn_id, target,
         now_ms, attachment.has_value() ? &*attachment : nullptr);
@@ -978,6 +1088,7 @@ bool ChannelWorkPump::ProcessWorkItem(const std::string& channel_id,
     if (!enqueued.accepted && !enqueued.duplicate) {
         return false;  // outbox 账写不进:停泵
     }
+    ReportProgress("回复已入投递队列 ingress=" + std::to_string(sid) + "，等待 QQ 回执");
     // 故障注入窗 3:入 outbox 后、发送前——恢复器应从已入箱项续投,不重跑。
     if (options_.fault_after_enqueue) {
         if (const std::string fault = options_.fault_after_enqueue(); !fault.empty()) {
@@ -1164,11 +1275,14 @@ HeadlessExecutor::Options::ToolConfirmDecision ChannelWorkPump::DecideChannelToo
             token_out = fact.token;
             pump->EnqueueApprovalCard(fact);
         });
+    ReportProgress("等待 QQ 审批：" + HeadlessProgressReporter::Preview(name) +
+                   "，超时 " + std::to_string(options_.approval_timeout_ms / 1000) + " 秒");
     if (cancel != nullptr) {
         future->WatchInterrupt(cancel);
     }
     const auto response = future->WaitApproval();
     if (!response.has_value()) {
+        ReportProgress("审批未获答复或已取消：" + HeadlessProgressReporter::Preview(name) + "，不执行");
         // 悬空收口:超时/取消/卡片失败——等价拒绝,文案照"没人可答"写,
         // 不冒充用户拒绝(§12.2 第十行)。收口事实分账:cancel 打断走
         // Cancel;其余(超时)记 Timeout;卡片失败已由投递路 CancelByToken
@@ -1187,10 +1301,12 @@ HeadlessExecutor::Options::ToolConfirmDecision ChannelWorkPump::DecideChannelToo
     }
     if (response->decision == runtime::InteractionDecision::Accept ||
         response->decision == runtime::InteractionDecision::AcceptForSession) {
+        ReportProgress("审批已允许这次：" + HeadlessProgressReporter::Preview(name));
         return Decision{true, std::string()};
     }
     Decision decision;
     decision.denial_text = "用户在 QQ 上拒绝了工具 " + name + " 的执行请求,本次未执行。";
+    ReportProgress("审批已拒绝：" + HeadlessProgressReporter::Preview(name));
     return decision;
 }
 

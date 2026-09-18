@@ -1,5 +1,8 @@
 // HeadlessExecutor 实现(常驻总装 V1)。装配合同见头文件。
 #include "runtime/headless_executor.hpp"
+#include "runtime/headless_progress.hpp"
+#include "agent/prompts.hpp"
+#include "runtime/time_context.hpp"
 
 #include <fstream>
 #include <iterator>
@@ -315,7 +318,7 @@ HeadlessExecutor::ChannelTurnResult HeadlessExecutor::ExecuteChannelTurn(
                          request.per_turn_tools, request.binding_extra,
                          request.delivery_target.empty() ? std::string("local:file")
                                                          : request.delivery_target,
-                         on_bound, cancel, &request.on_tool_confirm);
+                         on_bound, cancel, &request.on_tool_confirm, request.images);
     result.ok = core.ok;
     result.error_code = core.error_code;
     result.error = core.error;
@@ -371,8 +374,10 @@ HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
     // Agent——上下文不断,连续来信/重启恢复都接得上。
     {
         agent::AgentProfile profile;
+        profile.system_prompt = agent::DefaultPersona() + "\n" + options_.skills_prompt;
         profile.request.model = options_.model;
         profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
+        profile.runtime.context_window_tokens = options_.context_window_tokens;
         profile.runtime.max_wall_secs = options_.max_wall_secs;
         profile.runtime.max_total_tokens = options_.max_total_tokens;
         profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
@@ -419,7 +424,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     const std::atomic<bool>* cancel,
     const std::function<Options::ToolConfirmDecision(const std::string&, const std::string&,
                                                      const nlohmann::json&)>*
-        per_turn_confirm) {
+        per_turn_confirm, const std::vector<api::ImageBlock>& images) {
     Result result;
     TrajectorySessionLedger* ledger = service.trajectory();
     trajectory::v3::V3Writer* v3_writer = ledger->v3_main_writer();
@@ -430,6 +435,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     SessionService::InputRequest input;
     input.client_operation_id = binding.work_id;
     input.text = prompt;
+    input.images = images;
     const auto receipt = service.SubmitInput(input);
     if (!receipt.accepted && !receipt.duplicate) {
         result.error_code = "gateway.input_rejected";
@@ -446,10 +452,19 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     }
     const std::string effective_prompt =
         pop.status == SessionService::PendingPop::Status::Ok ? pop.input.text : prompt;
+    const auto& effective_images =
+        pop.status == SessionService::PendingPop::Status::Ok ? pop.input.images : images;
 
     // turn 身份与绑定:事件适配器 mint turnId → 领域绑定(on_bound,泵落
     // 领域行)→ V3 gateway.work.bound(恢复反查的锚)。
     TurnEventAdapter turn_events = service.runtime()->MakeTurnAdapter();
+    std::shared_ptr<HeadlessProgressReporter> progress;
+    if (options_.on_progress) {
+        progress = std::make_shared<HeadlessProgressReporter>(options_.on_progress,
+            binding.source_kind + " " + binding.source_id + " session=" + result.session_id,
+            options_.model);
+        turn_events.AttachAlongside([progress](const ServerEvent& event) { progress->Observe(event); });
+    }
     const std::string turn_id = turn_events.Start();
     result.turn_id = turn_id;
     if (on_bound) {
@@ -509,6 +524,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         return result;
     }
     api::Message user_message{api::Role::User, {api::TextBlock{effective_text}}};
+    for (const auto& image : effective_images) user_message.content.push_back(image);
     for (const std::string& append : post_user.context_appends) {
         user_message.content.push_back(
             api::TextBlock{"[PostUser 钩子附加上下文,非用户手敲]\n" + append});
@@ -522,8 +538,10 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         trajectory_bridge->RecordInput(user_message);
     }
     agent::AgentProfile profile;
+    profile.system_prompt = agent::DefaultPersona() + "\n" + options_.skills_prompt;
     profile.request.model = options_.model;
     profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
+    profile.runtime.context_window_tokens = options_.context_window_tokens;
     profile.runtime.max_wall_secs = options_.max_wall_secs;
     profile.runtime.max_total_tokens = options_.max_total_tokens;
     profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
@@ -534,9 +552,27 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         fresh_agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
     agent::Agent& loop_agent = agent_override != nullptr ? *agent_override : *fresh_agent;
+    // 缓存 Agent 跨轮活着，显示闭包只活本轮；离场恢复旧接线。
+    struct RestoreWiring {
+        agent::Agent& target;
+        agent::AgentWiring previous;
+        ~RestoreWiring() { target.SetWiring(std::move(previous)); }
+    } restore{loop_agent, loop_agent.wiring()};
+    if (progress) {
+        auto observed_wiring = loop_agent.wiring();
+        const auto previous_pressure = observed_wiring.on_context_pressure;
+        observed_wiring.on_context_pressure = [progress, previous_pressure](const agent::ContextPressure& p) {
+            if (previous_pressure) previous_pressure(p);
+            progress->Context(p);
+        };
+        loop_agent.SetWiring(std::move(observed_wiring));
+        progress->Note("上下文窗口来源：" + std::string(options_.context_window_tokens ? "运行配置" : "引擎兜底") +
+                       "；压缩/截断按实际事件报告");
+    }
     // system 只放稳定环境；需要时间时调用工具，不逐轮注入动态值。
     loop_agent.SetSystemPrompt(
-        "# 运行环境\n\n- 工作目录: " + options_.cwd_utf8 +
+        agent::DefaultPersona() + "\n" + options_.skills_prompt +
+        "\n# 运行环境\n\n- 工作目录: " + options_.cwd_utf8 +
         "\n需要当前日期或时间时调用 get_current_time，不要猜测，也不要沿用历史轮次的时间。"
         "\n相对提醒使用 create_reminder.delay_seconds，由宿主计算，禁止猜测或试探时间戳。"
         "\n需要读文件、执行命令时调用实际工具，以工具回执为准，不要编造结果。\n");
@@ -545,6 +581,15 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     wiring.events = &turn_events;
     wiring.boundary_recorder = trajectory_bridge.get();
     wiring.turn_id = turn_id;
+    if (progress) {
+        wiring.on_request_attempt = [progress](const api::ModelRequestAttempt& attempt,
+                                              api::RequestAttemptPhase phase) {
+            if (phase == api::RequestAttemptPhase::Retrying || phase == api::RequestAttemptPhase::Exhausted)
+                progress->Note(std::string(phase == api::RequestAttemptPhase::Retrying ? "请求重试" : "请求失败") +
+                    " attempt=" + std::to_string(attempt.attempt) + " code=" +
+                    HeadlessProgressReporter::Preview(attempt.error_code));
+        };
+    }
     // 工具 artifact 落位与 one_shot 同款:会话档内容寻址,随账本持久。
     const std::filesystem::path artifacts_dir = ledger->session_dir() / "artifacts" / "sha256";
     wiring.tool_artifact_dir = artifacts_dir.generic_string();
@@ -643,6 +688,17 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     ToolTraceHub trace_hub(ProcessIdAuthority());
     trace_hub.AttachTrajectory(trajectory_bridge.get());
     trace_hub.Install(loop_agent, wiring, service.runtime()->thread_id(), turn_id);
+    if (progress) {
+        const auto previous_trace = wiring.on_tool_trace;
+        wiring.on_tool_trace = [progress, previous_trace, &trace_hub](const agent::ToolTraceEvent& event) {
+            if (previous_trace) previous_trace(event);
+            if (event.kind == agent::ToolTraceEventKind::ExecutionStarted) {
+                progress->Note(std::string(trace_hub.IsExecutionBlocked(event.execution_id)
+                    ? "执行前栅栏拒绝 " : "开始执行工具 ") +
+                    HeadlessProgressReporter::Preview(event.tool_name));
+            }
+        };
+    }
 
     // 异步工具 P2(one-shot/gateway 宿主接线):会话级异步运行时挂进
     // SessionService 的 SessionRuntime(零策略 dormant,行为与从前一字不
@@ -675,6 +731,9 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         }
         trajectory_bridge->EndTurn(ok, cancelled, reason);
     }
+    turn_events.Finish(!outcome.has_value() ? Outcome::Failed :
+                       outcome->cancelled ? Outcome::Cancelled : Outcome::Succeeded,
+                       outcome.has_value() ? std::string() : outcome.error());
     if (!outcome.has_value()) {
         result.error_code = "gateway.turn_failed";
         result.error = outcome.error();

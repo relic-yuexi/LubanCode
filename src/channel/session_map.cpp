@@ -2,6 +2,7 @@
 #include "channel/session_map.hpp"
 
 #include <fstream>
+#include <algorithm>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -31,6 +32,8 @@ ChannelSessionMap::OpenResult ChannelSessionMap::Open(ChannelSessionMap* out,
     }
     out->map_file_ = map_file;
     out->latest_.clear();
+    out->slots_.clear();
+    out->active_slots_.clear();
     out->broken_ = false;
     // 重放:逐行取最后一笔(半行/坏行跳过,不猜)。
     if (std::filesystem::is_regular_file(map_file, ec) && !ec) {
@@ -42,6 +45,18 @@ ChannelSessionMap::OpenResult ChannelSessionMap::Open(ChannelSessionMap* out,
             try {
                 parsed = nlohmann::json::parse(text_line);
             } catch (const nlohmann::json::exception&) {
+                continue;
+            }
+            if (parsed.is_object() && parsed.contains("t") && parsed["t"].is_string() && parsed["t"] == "selected" &&
+                parsed.contains("sessionKey") && parsed["sessionKey"].is_string() &&
+                parsed.contains("workspaceKey") && parsed["workspaceKey"].is_string() &&
+                parsed.contains("slot") && parsed["slot"].is_string()) {
+                const auto key = std::make_pair(parsed["sessionKey"].get<std::string>(),
+                                                parsed["workspaceKey"].get<std::string>());
+                const auto slot = parsed["slot"].get<std::string>();
+                auto& slots = out->slots_[key];
+                if (std::find(slots.begin(), slots.end(), slot) == slots.end()) slots.push_back(slot);
+                out->active_slots_[key] = slot;
                 continue;
             }
             if (!parsed.is_object() || !parsed.contains("t") || !parsed["t"].is_string() ||
@@ -114,6 +129,53 @@ std::optional<std::string> ChannelSessionMap::Find(const std::string& session_ke
 std::size_t ChannelSessionMap::size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return latest_.size();
+}
+
+std::string ChannelSessionMap::SlotKey(const std::string& session_key, const std::string& slot) {
+    return slot == "default" ? session_key : session_key + ":slot:" + slot;
+}
+
+std::string ChannelSessionMap::ActiveSlot(const std::string& session_key,
+                                         const std::string& workspace_key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = active_slots_.find({session_key, workspace_key});
+    return it == active_slots_.end() ? "default" : it->second;
+}
+
+std::vector<std::string> ChannelSessionMap::Slots(const std::string& session_key,
+                                                const std::string& workspace_key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> result{"default"};
+    const auto it = slots_.find({session_key, workspace_key});
+    if (it != slots_.end()) {
+        for (const auto& slot : it->second) if (slot != "default") result.push_back(slot);
+    }
+    return result;
+}
+
+bool ChannelSessionMap::SelectSlot(const std::string& session_key, const std::string& workspace_key,
+                                   const std::string& slot, bool create, std::int64_t at_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (broken_ || slot.empty() || slot.size() > 64 ||
+        slot.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") !=
+            std::string::npos) return false;
+    const auto key = std::make_pair(session_key, workspace_key);
+    auto& slots = slots_[key];
+    const bool known = slot == "default" || std::find(slots.begin(), slots.end(), slot) != slots.end();
+    if (!create && !known) return false;
+    if (!writer_.has_value()) {
+        auto writer = trajectory::JournalWriter::Open(map_file_, trajectory::JournalWriter::OpenMode::Append);
+        if (!writer.has_value()) { broken_ = true; last_error_ = writer.error(); return false; }
+        writer_ = std::move(*writer);
+    }
+    const nlohmann::json line = {{"schema", kSessionMapSchema}, {"t", "selected"},
+        {"sessionKey", session_key}, {"workspaceKey", workspace_key}, {"slot", slot}, {"atMs", at_ms}};
+    if (!writer_->AppendLine(line.dump(), trajectory::Durability::PowerLoss)) {
+        broken_ = true; last_error_ = "会话选择落盘失败"; return false;
+    }
+    if (!known) slots.push_back(slot);
+    active_slots_[key] = slot;
+    return true;
 }
 
 }  // namespace lubancode::channel

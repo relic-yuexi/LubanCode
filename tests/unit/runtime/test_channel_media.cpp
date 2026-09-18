@@ -12,6 +12,9 @@
 
 #include "channel/types.hpp"
 #include "runtime/channel_media_service.hpp"
+#include "runtime/channel_file_delivery.hpp"
+#include "platform/paths.hpp"
+#include "platform/sha256.hpp"
 
 using namespace lubancode;
 using namespace lubancode::runtime;
@@ -305,4 +308,65 @@ TEST_CASE("Ingest:未装配下载 seam 时如实报,不假装读过") {
     REQUIRE(receipts.size() == 1);
     CHECK_FALSE(receipts[0].ready);
     CHECK(receipts[0].error_code == "download_failed:no_downloader");
+}
+
+TEST_CASE("send_file freezes original, isolates turns and rejects paths outside workspace") {
+    MediaDir dir("outbound");
+    const auto workspace = dir.root / "workspace";
+    const auto staging = dir.root / "staging";
+    std::filesystem::create_directories(workspace);
+    std::ofstream(workspace / "report.txt") << "original";
+    std::ofstream(dir.root / "private.txt") << "outside";
+    tools::ToolRegistry registry;
+    RegisterChannelFileTool(registry);
+    auto* tool = registry.Find("send_file");
+    REQUIRE(tool != nullptr);
+    CHECK(tool->needs_confirm());
+    CHECK(tool->execute({{"path", "report.txt"}}).is_error);
+    {
+        ChannelFileDeliveryScope scope(workspace, staging, "turn-one");
+        CHECK(tool->execute({{"path", "../private.txt"}}).is_error);
+#ifndef _WIN32
+        const auto sibling = dir.root / "WORKSPACE";
+        std::filesystem::create_directories(sibling);
+        // Case-insensitive filesystems may alias it to workspace; either way it cannot
+        // be used to cross to a distinct canonical directory.
+        std::error_code case_ec;
+        if (!std::filesystem::equivalent(sibling, workspace, case_ec)) {
+            std::ofstream(sibling / "secret.txt") << "private";
+            CHECK(tool->execute({{"path", platform::PathToUtf8(sibling / "secret.txt")}}).is_error);
+        }
+#endif
+        CHECK_FALSE(tool->execute({{"path", "report.txt"}}).is_error);
+        CHECK_FALSE(tool->execute({{"path", "report.txt"}}).is_error);
+        std::ofstream(workspace / "report.txt") << "modified";
+        CHECK(tool->execute({{"path", "report.txt"}}).is_error);
+    }
+    const auto frozen = StagedChannelFile(staging, "turn-one");
+    REQUIRE(frozen.has_value());
+    std::ifstream bytes(platform::Utf8ToPath(frozen->local_path));
+    std::string text; bytes >> text;
+    CHECK(text == "original");
+    CHECK_FALSE(StagedChannelFile(staging, "turn-two").has_value());
+    CHECK(tool->execute({{"path", "report.txt"}}).is_error);
+}
+
+TEST_CASE("accepted image enters vision only when bytes, hash and dimensions agree") {
+    MediaDir dir("vision");
+    // GIF header with dimensions, same parser used by model image handling.
+    const std::string bytes("GIF89a\x01\x00\x01\x00\x00\x00\x00", 13);
+    const auto path = dir.root / "image.bin";
+    std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+    ChannelMediaService::AttachmentReceipt receipt;
+    receipt.ready = true; receipt.stored_path = platform::PathToUtf8(path);
+    receipt.mime_type = "image/gif"; receipt.original_name = "photo.gif";
+    receipt.size_bytes = bytes.size(); receipt.sha256 = platform::Sha256Hex(bytes);
+    const auto image = LoadChannelImage(receipt);
+    REQUIRE(image.has_value());
+    CHECK(image->width == 1);
+    CHECK(image->filename == "photo.gif");
+    receipt.sha256 = "wrong";
+    CHECK_FALSE(LoadChannelImage(receipt).has_value());
+    receipt.sha256 = platform::Sha256Hex(bytes); receipt.mime_type = "application/pdf";
+    CHECK_FALSE(LoadChannelImage(receipt).has_value());
 }

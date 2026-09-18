@@ -115,3 +115,25 @@ TEST_CASE("session map:写不进的账报 broken,不冒充映射已更新") {
     REQUIRE_FALSE(map.Map("channel:qqbot:main:direct:dm-a", "ws", "s-1", 1));
     REQUIRE(map.broken());
 }
+
+TEST_CASE("logical channel sessions persist selection without crossing owner or workspace") {
+    const auto file = FreshFile("slots");
+    {
+        ChannelSessionMap map;
+        REQUIRE(ChannelSessionMap::Open(&map, file).ok);
+        CHECK(map.ActiveSlot("owner-a", "ws-a") == "default");
+        REQUIRE(map.SelectSlot("owner-a", "ws-a", "s-1", true, 1));
+        REQUIRE(map.Map(ChannelSessionMap::SlotKey("owner-a", "s-1"), "ws-a", "v3-one", 2));
+        CHECK_FALSE(map.SelectSlot("owner-b", "ws-a", "s-1", false, 3));
+        CHECK_FALSE(map.SelectSlot("owner-a", "ws-b", "s-1", false, 3));
+        CHECK_FALSE(map.SelectSlot("owner-a", "ws-a", "../escape", true, 3));
+        REQUIRE(map.SelectSlot("owner-a", "ws-a", "default", false, 4));
+    }
+    ChannelSessionMap reopened;
+    REQUIRE(ChannelSessionMap::Open(&reopened, file).ok);
+    CHECK(reopened.ActiveSlot("owner-a", "ws-a") == "default");
+    REQUIRE(reopened.SelectSlot("owner-a", "ws-a", "s-1", false, 5));
+    CHECK(reopened.Find(ChannelSessionMap::SlotKey("owner-a", "s-1"), "ws-a") == "v3-one");
+    CHECK(reopened.Slots("owner-a", "ws-a").size() == 2);
+    CHECK(reopened.Slots("owner-b", "ws-a").size() == 1);
+}
