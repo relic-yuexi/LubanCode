@@ -34,6 +34,10 @@ struct SessionPickerEntry {
     // run_kind 账上没写(v3 老档,session.started 缺 runKind):行尾标
     // "(种类未知)",不暗当 main_session(R2)。
     bool run_kind_unknown = false;
+    // resume 续场(空=非续场):本场开自另一场,源 session id。续场标题
+    // 继承源场,行内拼"(续)"才不看着像重复场;展开详情(Ctrl+E)另有
+    // "续自 <源 id 前 8 位>"一行。
+    std::string resumed_from;
     // Ctrl+E 展开详情(接线层从 SessionSummary 直转,不用额外读盘):
     // created/updated 用存档侧稳定串,模型名原样;空串由渲染层回退占位。
     std::string created_at;      // "yyyy-mm-dd HH:MM:SS"

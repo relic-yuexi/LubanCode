@@ -41,6 +41,11 @@ struct WorkspaceSessionSummary {
     bool run_kind_unknown = false;
     std::string title;               // 最后一条 control.title.changed(可空)
     std::string first_user_text;     // 首条 input.received 的首段文本(可空)
+    // resume 续场标记(空=非续场):本场开自 resume.source.attached 指的
+    // 另一场(v2 载荷键 source_session_id,v3 是 sourceRef.sessionId,键
+    // 不同事件同名)。续场标题继承源场,不标就看着像列表里重复了一场;
+    // 展示层据此拼"(续)"后缀与"续自 <源 id 前 8 位>"详情。
+    std::string resumed_from_session_id;
     std::string cwd;                 // 最后一条 control.cwd.changed,空回落 launch_cwd
     std::string model;               // 首个 model.request.prepared 的 model(可空)
     std::int64_t created_at_ms = 0;  // session.json created_at_ms

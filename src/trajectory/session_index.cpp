@@ -26,10 +26,12 @@ namespace {
 
 // 索引文件的 schema 标识(合同:派生物可整份丢弃重建,version 只升不降)。
 // v2(Resume 接入 v3 单 R2):v3 行补 cwd/title/run_kind 投影与
-// run_kind_unknown 标记。加载只认当前版本——旧版本整份重扫,投影升级
-// 自动吃到未变化的旧档案("未变化的 v3 主账也要更新摘要")。
+// run_kind_unknown 标记。v3(resume 列表可读性):行补 resumed_from_
+// session_id(resume.source.attached 折的来源场;续场标记)。加载只认
+// 当前版本——旧版本整份重扫,投影升级自动吃到未变化的旧档案("未变化
+// 的 v3 主账也要更新摘要";老缓存升级后该字段从主账重建)。
 constexpr const char* kIndexSchema = "lubancode.workspace.session-index";
-constexpr int kIndexVersion = 2;
+constexpr int kIndexVersion = 3;
 // 提问历史每 workspace 最多留多少行(新→旧截尾;Ctrl+R 一次也只看几百条)。
 constexpr std::size_t kPromptHistoryCap = 2000;
 
@@ -194,6 +196,16 @@ SessionScan ScanV3Session(const std::filesystem::path& stream, const std::string
                 }
             } else if (kind == "session.title.applied") {
                 summary.title = GetJsonString(payload, "title");
+            } else if (kind == "resume.source.attached") {
+                // 续场标记:载荷键与 v2 不同——sourceRef.sessionId(§4.10
+                // 五键指源末行)。多次 resume 各有来源,取最后一枚(reader
+                // 回溯链同口径);空 sessionId 不覆盖已有标记。
+                if (payload.contains("sourceRef") && payload["sourceRef"].is_object()) {
+                    const std::string source = GetJsonString(payload["sourceRef"], "sessionId");
+                    if (!source.empty()) {
+                        summary.resumed_from_session_id = source;
+                    }
+                }
             } else if (kind == "session.ended") {
                 summary.status = SessionStatusName(SessionStatus::Closed);
             }
@@ -319,6 +331,13 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
             if (!stream_kind.empty()) {
                 summary.run_kind = stream_kind;
             }
+        } else if (kind == "resume.source.attached") {
+            // 续场标记:v2 载荷合同键是 source_session_id(schema.cpp 的
+            // 载荷表;v3 才是 sourceRef.sessionId)。空键不覆盖已有标记。
+            const std::string source = GetJsonString(payload, "source_session_id");
+            if (!source.empty()) {
+                summary.resumed_from_session_id = source;
+            }
         }
     }
     if (tail_broken) {
@@ -425,6 +444,7 @@ nlohmann::json SummaryToJson(const WorkspaceSessionSummary& summary, const Sessi
                           {"run_kind_unknown", summary.run_kind_unknown},
                           {"title", summary.title},
                           {"first_user_text", summary.first_user_text},
+                          {"resumed_from_session_id", summary.resumed_from_session_id},
                           {"cwd", summary.cwd},
                           {"model", summary.model},
                           {"created_at_ms", summary.created_at_ms},
@@ -446,6 +466,9 @@ WorkspaceSessionSummary SummaryFromJson(const nlohmann::json& json) {
                        json["archived"].get<bool>();
     summary.title = GetJsonString(json, "title");
     summary.first_user_text = GetJsonString(json, "first_user_text");
+    // 续场标记:老索引行(v3 前)缺键读空=非续场;真值在主账,版本不认
+    // 时整份重扫自然补齐。
+    summary.resumed_from_session_id = GetJsonString(json, "resumed_from_session_id");
     summary.cwd = GetJsonString(json, "cwd");
     summary.model = GetJsonString(json, "model");
     // run_kind:旧索引行缺键回落 main_session(单发轨迹断档单;旧场没有

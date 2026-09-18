@@ -1866,6 +1866,9 @@ const Entry kZhCN[] = {
     {"cmd.sessions.dir_unknown", "(未知)"},
     // 单发轨迹断档单:one_shot 场在 /sessions 里照列照标。
     {"cmd.sessions.oneshot_line", "      单发场(one_shot;审计可读,不续聊)"},
+    // resume 续场:标题继承源场(fork-as-new 不改名),列表里拼后缀区分,
+    // 不标就看着像重复了一场。
+    {"cmd.sessions.resumed_suffix", "(续)"},
     {"cmd.sessions.archived_none", "还没有归档的会话(/archive 归档,归了的场子不进默认列表)。"},
     {"cmd.sessions.archived_header", "已归档 {0} 场(只读列表;想续聊先 lubancode unarchive <id>):"},
     {"cmd.sessions.archived_hint", "这些场子已归档,字节原样保留(归档只读入口)。"},
@@ -1981,6 +1984,10 @@ const Entry kZhCN[] = {
     {"picker.no_text", "(没有用户文本)"},
     {"picker.damaged", "damaged"},
     {"picker.kind_unknown", "种类未知"},
+    // resume 续场:行内标签后缀(标题继承源场,拼了才分得开);展开详情
+    // 另有"续自 <源 id 前 8 位>"一行。
+    {"picker.resumed", "(续)"},
+    {"picker.expand.resumed", "续自: {0}"},
     {"picker.unknown_dir", "(目录未知)"},
     {"picker.unknown_model", "(模型未知)"},
     {"picker.unknown_time", "(时间未知)"},
@@ -3339,6 +3346,7 @@ const Entry kEn[] = {
     {"oneshot.output_not_writable", "--output parent directory is not writable: {0}"},
     {"oneshot.harness_export_failed", "[trajectory] --output export failed ({0}): {1}"},
     {"cmd.sessions.oneshot_line", "      one-shot session (auditable, not resumable)"},
+    {"cmd.sessions.resumed_suffix", "(cont.)"},
     {"cmd.sessions.query_failed", "Session list unreadable, showing what could be read: {0}"},
     {"cmd.sessions.kind_unknown", "      (kind unknown: this archive predates runKind; resumability is decided by the /resume seven-step audit)"},
     {"cmd.resume.query_failed", "Session archive list unreadable: {0}. Check the data root (/doctor), then retry."},
@@ -3659,6 +3667,8 @@ const Entry kEn[] = {
     {"picker.no_text", "(no user text)"},
     {"picker.damaged", "damaged"},
     {"picker.kind_unknown", "kind unknown"},
+    {"picker.resumed", "(cont.)"},
+    {"picker.expand.resumed", "Resumed from: {0}"},
     {"picker.unknown_dir", "(unknown dir)"},
     {"picker.unknown_model", "(unknown model)"},
     {"picker.unknown_time", "(unknown time)"},

@@ -5,6 +5,8 @@
 //     也不被 exclude_one_shot 误伤;
 //   - first_user_text 覆盖 string 与 blocks 文本块两种写法;
 //   - 标题折 session.title.applied(写侧合同在 T11-A,读面先认事件);
+//   - 续场折 resume.source.attached 的 sourceRef.sessionId(resume 列表
+//     可读性单;非续场留空);
 //   - 索引版本只认当前版:旧版本(v1)缓存整份重建,未变化的主账也吃到
 //     新摘要——升级投影不靠"改一字节"触发。
 #include <doctest/doctest.h>
@@ -310,7 +312,7 @@ TEST_CASE("缓存: 旧版本索引整份重建,未变化主账也吃到新投影
         REQUIRE(FindSummary(page, legacy_id) != nullptr);
     }
     auto index_json = ReadIndexJson(scaffold.workspace_dir);
-    CHECK(index_json.value("version", 0) == 2);
+    CHECK(index_json.value("version", 0) == 3);
 
     // 手工把索引降回 v1(投影升级前的缓存形状:行缺 run_kind_unknown 键,
     // run_kind 空串会被旧读法回落 main_session)——不动主账字节。
@@ -333,5 +335,86 @@ TEST_CASE("缓存: 旧版本索引整份重建,未变化主账也吃到新投影
     CHECK(legacy->run_kind_unknown);
     CHECK(legacy->run_kind.empty());
     const auto rebuilt = ReadIndexJson(scaffold.workspace_dir);
-    CHECK(rebuilt.value("version", 0) == 2);
+    CHECK(rebuilt.value("version", 0) == 3);
+}
+
+// resume 续场标记(resume 列表可读性单):ScanV3Session 认 resume.source.
+// attached 折来源场——v3 载荷键是 sourceRef.sessionId(与 v2 的
+// source_session_id 不同,事件同名)。续场标题照 session.title.applied
+// (source=inherited)继承源场,同名同预览;列表靠这枚标记拼"(续)"区分。
+// 非续场(普通场)留空。
+TEST_CASE("投影: v3 续场折 resume.source.attached 来源,非续场留空") {
+    EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    Scaffold scaffold("resumed-mark");
+    // 源场:普通 writer 场(非续场对照)。
+    const std::string source_id =
+        PlantWriterSession(scaffold.sessions_dir, "SRC111", "E:/实验/源", "main_session",
+                           /*blocks_user=*/true, /*string_user=*/false, /*title_event=*/true);
+    // 续场:resume 开张的新 v3 场——resume.source.attached(sourceRef 五键
+    // 指源末行,§4.10)+ 继承标题(source=inherited,与源场同名,正是要
+    // 区分的形状)+ 自己的一句新问。
+    const std::string resumed_id = "20260912-170808-RES222";
+    const std::filesystem::path dir = scaffold.sessions_dir / platform::Utf8ToPath(resumed_id);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    V3WriterOptions options;
+    options.launch_cwd = "E:/实验/源";
+    options.run_kind = "main_session";
+    auto writer = V3Writer::Start(dir / platform::Utf8ToPath(resumed_id + ".jsonl"), resumed_id,
+                                  "main-0001", "你是 LubanCode。", {}, std::move(options));
+    REQUIRE(writer.has_value());
+    {
+        v3::EventDraft attached;
+        attached.kind = v3::EventKindV3::ResumeSourceAttached;
+        attached.payload = nlohmann::json{
+            {"sourceRef", nlohmann::json{{"sessionId", source_id},
+                                         {"runId", "run-0001"},
+                                         {"seq", 4},
+                                         {"id", "evt-00000004"},
+                                         {"hash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}},
+            {"replayVersion", "replay-v1"},
+            {"importedStateHash", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}};
+        REQUIRE(writer->AppendEvent(std::move(attached), v3::Durability::ProcessCrash).status ==
+                v3::WriteReceipt::Status::Committed);
+    }
+    {
+        // 继承标题:source=inherited 必带 inheritedFrom 五键指源场事件
+        //(schema3 的 CheckRefField 验形状,hash 须 64 位十六进制)。
+        v3::EventDraft inherited;
+        inherited.kind = v3::EventKindV3::SessionTitleApplied;
+        inherited.payload = nlohmann::json{
+            {"title", "正式标题一"},
+            {"source", "inherited"},
+            {"inheritedFrom",
+             nlohmann::json{{"sessionId", source_id},
+                            {"runId", "run-0001"},
+                            {"seq", 3},
+                            {"id", "evt-00000003"},
+                            {"hash", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}};
+        REQUIRE(writer->AppendEvent(std::move(inherited), v3::Durability::ProcessCrash).status ==
+                v3::WriteReceipt::Status::Committed);
+    }
+    {
+        MessageDraft user;
+        user.origin = MessageOrigin::Human;
+        user.purpose = MessagePurpose::Conversation;
+        user.turn_id = "turn-1";
+        user.message = nlohmann::json{{"role", "user"}, {"content", "续场接着问"}};
+        REQUIRE(writer->AppendMessage(std::move(user), v3::Durability::ProcessCrash).status ==
+                v3::WriteReceipt::Status::Committed);
+    }
+
+    SessionIndexQuery query;
+    query.current_workspace_key = scaffold.workspace_key;
+    const auto page = QueryWorkspaceSessions(scaffold.root / "workspaces", query);
+    CHECK(page.diagnostic.empty());
+    const WorkspaceSessionSummary* source = FindSummary(page, source_id);
+    REQUIRE(source != nullptr);
+    CHECK(source->resumed_from_session_id.empty());  // 源场:非续场
+    const WorkspaceSessionSummary* resumed = FindSummary(page, resumed_id);
+    REQUIRE(resumed != nullptr);
+    CHECK(resumed->resumed_from_session_id == source_id);  // sourceRef.sessionId 折进来
+    CHECK(resumed->title == "正式标题一");  // 继承标题照折(区分靠标记,不改标题)
+    CHECK(resumed->first_user_text == "续场接着问");
 }
