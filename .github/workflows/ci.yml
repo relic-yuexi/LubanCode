@@ -100,8 +100,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install script tests (PowerShell)
-        shell: ${{ matrix.os == 'windows-latest' && 'powershell' || 'pwsh' }}
+      - name: Install script tests (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/tests/install.tests.ps1
+
+      - name: Install script tests (pwsh)
+        if: runner.os != 'Windows'
+        shell: pwsh
         run: ./scripts/tests/install.tests.ps1
 
       - name: Install script tests (bash + python)
