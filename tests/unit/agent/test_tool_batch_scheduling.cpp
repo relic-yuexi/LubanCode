@@ -322,7 +322,7 @@ private:
 
 // trace 栅栏收集器。
 struct TraceCollector {
-    std::mutex mutex;
+    mutable std::mutex mutex;
     std::vector<agent::ToolTraceEvent> events;
     agent::TurnWiring Decorate(agent::TurnWiring wiring) {
         wiring.on_tool_trace = [this](const agent::ToolTraceEvent& event) {
