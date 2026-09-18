@@ -293,14 +293,41 @@ std::string PlantForkSession(const std::filesystem::path& root, const std::strin
             continue;
         }
         v3::MessageDraft draft;
-        const std::string key = source_id + "/" + row.value("messageId", std::string());
+        // 抄本键:祖源转抄保原键(与生产折算同形)——源行自身已是抄本
+        //(带 sourceMessageRef)时沿用其键,不套两层场名;原生行拼
+        // "<源>/<msgId>"。
+        const std::string key =
+            (row.contains("sourceMessageRef") && row["sourceMessageRef"].is_string())
+                ? row["sourceMessageRef"].get<std::string>()
+                : source_id + "/" + row.value("messageId", std::string());
         draft.message_id_override = key;
         draft.purpose = v3::MessagePurpose::Conversation;
         draft.origin = v3::MessageOriginFromName(row.value("origin", std::string()))
                            .value_or(v3::MessageOrigin::Human);
         draft.message = body;
         draft.source_message_ref = key;
+        // 信封必填件照抄(与生产 fork 抄本同形):user/assistant 的 turnId、
+        // assistant 的 requestId 与 provider/wire/model/responseModel/usage。
+        if (row.contains("turnId") && row["turnId"].is_string()) {
+            draft.turn_id = row["turnId"].get<std::string>();
+        }
+        if (row.contains("requestId") && row["requestId"].is_string()) {
+            draft.request_id = row["requestId"].get<std::string>();
+        }
+        if (row.contains("provider") && row["provider"].is_string()) {
+            draft.provider = row["provider"].get<std::string>();
+        }
+        if (row.contains("wire") && row["wire"].is_string()) {
+            draft.wire = row["wire"].get<std::string>();
+        }
+        if (row.contains("model") && row["model"].is_string()) {
+            draft.model = row["model"].get<std::string>();
+        }
+        if (row.contains("responseModel")) {
+            draft.response_model = row["responseModel"];
+        }
         if (body.value("role", std::string()) == "assistant") {
+            // usage 唯一 owner 在原场(§4.12):抄本不复制,键必现值 null。
             draft.usage = nlohmann::json(nullptr);
         }
         const auto receipt =

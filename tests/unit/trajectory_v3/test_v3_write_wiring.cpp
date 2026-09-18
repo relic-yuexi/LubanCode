@@ -555,7 +555,7 @@ TEST_CASE("开关开: 换 system 走三步,prepared 引用新根,旧请求不动
 // 普通 resume(§5.1 行 4):/resume 交互路,ID 顺序不变
 // ---------------------------------------------------------------------------
 
-TEST_CASE("开关开: /resume 封旧场开新 v3 场,旧消息 ID 顺序不变") {
+TEST_CASE("开关开: /resume 续接源场,旧消息 ID 顺序不变") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const auto root = FreshRoot("open-resume");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
@@ -604,22 +604,24 @@ TEST_CASE("开关开: /resume 封旧场开新 v3 场,旧消息 ID 顺序不变")
     REQUIRE(summary.outcome.effective_conversation.size() == 2);
     CHECK(summary.outcome.effective_conversation[0].source_event_id == user_id);
     CHECK(summary.outcome.effective_conversation[1].source_event_id == assistant_id);
-    // 源场封口(session.ended 落稳),新场是 v3 带 resume.source.attached。
+    // 源场封口(session.ended 落稳),续接源场(2026-09-19 拍板):本场就
+    // 是源场,同 id 续写;不写 resume.source.attached(续接不是挂靠)。
     const auto source_kinds = KindsOf(ReadLines(source_stream));
     CHECK(std::find(source_kinds.begin(), source_kinds.end(), "session.ended") != source_kinds.end());
+    CHECK(ledger->session_id() == source_id);
     const auto new_kinds = KindsOf(ReadLines(V3StreamOf(*ledger)));
-    CHECK(std::find(new_kinds.begin(), new_kinds.end(), "resume.source.attached") != new_kinds.end());
+    CHECK(std::find(new_kinds.begin(), new_kinds.end(), "resume.source.attached") == new_kinds.end());
     CHECK(std::filesystem::exists(V3StreamOf(*ledger)));
-    // 新场继续写:再来一轮,验卷仍过(新旧链同卷)。
+    // 续接场继续写:再来一轮,验卷仍过(同卷续链,旧行不动)。
     {
         auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
         bridge->BeginTurn("turn-9", "external_user");
-        bridge->RecordInput(UserMessage("新场一问"));
+        bridge->RecordInput(UserMessage("续接一问"));
         const std::string request_id =
-            bridge->OnRequestPrepared(MakeRequest("SYSTEM-X", {UserMessage("新场一问")}),
+            bridge->OnRequestPrepared(MakeRequest("SYSTEM-X", {UserMessage("续接一问")}),
                                       PreparedContext());
         REQUIRE_FALSE(request_id.empty());
-        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("新场一答"), "end_turn", "r-2"));
+        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("续接一答"), "end_turn", "r-2"));
         bridge->EndTurn(true, false, "");
     }
     CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*ledger)).ok);
