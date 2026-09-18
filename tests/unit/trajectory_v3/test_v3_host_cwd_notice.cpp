@@ -162,7 +162,7 @@ TEST_CASE("v3 主路: 宿主目录通知进账进链,prepared 引用沿链带上
     CHECK(text == lubancode::runtime::FormatHostDirectoryNoticeText(
                      "D:/tmp/repo", "D:/tmp/repo/.lubancode/worktrees/kanban", "user /worktree new"));
     CHECK(text.find("D:/tmp/repo/.lubancode/worktrees/kanban") != std::string::npos);
-    CHECK(text.find("[宿主通知]") != std::string());
+    CHECK(text.find("[宿主通知]") != std::string::npos);
     const std::string notice_id = notice->value("messageId", std::string());
 
     // (b) 链接纳:context.input.applied 点名通知消息。
