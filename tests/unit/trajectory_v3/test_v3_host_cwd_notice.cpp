@@ -157,10 +157,18 @@ TEST_CASE("v3 主路: 宿主目录通知进账进链,prepared 引用沿链带上
     // (a) 通知消息:origin=session_runtime、display=visible、正文四要素。
     const nlohmann::json* notice = FindNoticeMessage(lines);
     REQUIRE(notice != nullptr);
+    REQUIRE(notice->contains("message"));
+    REQUIRE(notice->at("message").is_object());
     CHECK(notice->at("message").value("role", std::string()) == "user");
-    CHECK_FALSE(notice->value("turnId", std::string()).empty());  // schema:user 必填
+    // schema:user 必填 turnId;用 is_string 守卫,null/异型直接落断言不抛。
+    REQUIRE(notice->contains("turnId"));
+    REQUIRE(notice->at("turnId").is_string());
+    CHECK_FALSE(notice->at("turnId").get<std::string>().empty());
     REQUIRE(notice->contains("display"));
+    REQUIRE(notice->at("display").is_object());
     CHECK(notice->at("display").at("mode").get<std::string>() == "visible");
+    REQUIRE(notice->at("message").contains("content"));
+    REQUIRE(notice->at("message").at("content").is_string());
     const std::string text = notice->at("message").at("content").get<std::string>();
     CHECK(text == lubancode::runtime::FormatHostDirectoryNoticeText(
                      "D:/tmp/repo", "D:/tmp/repo/.lubancode/worktrees/kanban", "user /worktree new"));
@@ -173,6 +181,10 @@ TEST_CASE("v3 主路: 宿主目录通知进账进链,prepared 引用沿链带上
     for (const auto& line : lines) {
         if (line.value("type", std::string()) != "event") continue;
         if (line.value("kind", std::string()) != "context.input.applied") continue;
+        REQUIRE(line.contains("payload"));
+        REQUIRE(line.at("payload").is_object());
+        REQUIRE(line.at("payload").contains("addedMessageRefs"));
+        REQUIRE(line.at("payload").at("addedMessageRefs").is_array());
         for (const auto& ref : line.at("payload").at("addedMessageRefs")) {
             if (ref.get<std::string>() == notice_id) admitted = true;
         }
@@ -189,6 +201,9 @@ TEST_CASE("v3 主路: 宿主目录通知进账进链,prepared 引用沿链带上
         prepared = &line;
     }
     REQUIRE(prepared != nullptr);
+    REQUIRE(prepared->contains("payload"));
+    REQUIRE(prepared->at("payload").is_object());
+    REQUIRE(prepared->at("payload").contains("inputMessageRefs"));
     const auto& input_refs = prepared->at("payload").at("inputMessageRefs");
     REQUIRE(input_refs.size() == 2);
     CHECK(input_refs[0].get<std::string>() == notice_id);
@@ -219,6 +234,9 @@ TEST_CASE("v3 主路: 宿主目录通知进账进链,prepared 引用沿链带上
             second_prepared = &line;
         }
         REQUIRE(second_prepared != nullptr);
+        REQUIRE(second_prepared->contains("payload"));
+        REQUIRE(second_prepared->at("payload").is_object());
+        REQUIRE(second_prepared->at("payload").contains("prefixAccount"));
         const auto& account = second_prepared->at("payload").at("prefixAccount");
         CHECK(account.value("cacheEpoch", std::uint64_t{0}) == 3);
         CHECK(account.value("appendOnly", true) == false);
