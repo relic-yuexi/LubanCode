@@ -233,7 +233,8 @@ function New-DiskEntry {
     param([string]$Path, [string]$Sha, [switch]$IsDir, [switch]$Reparse)
     return @{
         path = $Path; sha256 = $Sha; isDir = [bool]$IsDir; reparse = [bool]$Reparse
-        abspath = Join-Path $env:TEMP $Path
+        # Linux/macOS 的 pwsh 没有 $env:TEMP,用平台临时目录
+        abspath = Join-Path ([IO.Path]::GetTempPath()) ($Path -replace '/', [IO.Path]::DirectorySeparatorChar)
     }
 }
 

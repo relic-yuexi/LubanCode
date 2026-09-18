@@ -352,7 +352,13 @@ if [ "$IS_UNIX" = 1 ]; then
     # 5c. 无基线:删记录,应退 3 且先备份
     rm -f "$SHINST/bin/install-state.json" "$SHINST/bin/manifest.json"
     HOME="$HOME_FAKE" sh "$SHPKG2/install.sh" PREFIX="$SHINST/bin" > "$WORK/sh-legacy.txt" 2>&1
-    assert_rc "install.sh 无基线退 3" 3 $?
+    rc5c=$?
+    if [ "$rc5c" != 3 ]; then
+        echo "--- 5c 实际退出码 $rc5c,install.sh 输出如下 ---"
+        cat "$WORK/sh-legacy.txt"
+        echo "--- 5c 输出结束 ---"
+    fi
+    assert_rc "install.sh 无基线退 3" 3 "$rc5c"
     assert_file_text "退 3 后本地改动仍在" "$SHINST/share/lubancode/skills/lubancode-config/SKILL.md" "local hack"
 
     # 5d. 同目录安装:不搬自己,补记档
