@@ -120,6 +120,16 @@ constexpr int kDefaultRequiredMaxOutputTokens = 8192;
 // 交出工具调用或检查点;更多次是在替用户烧 token,显式配置才能加。0 = 关。
 constexpr int kDefaultLengthContinuations = 1;
 
+// 工具批执行策略(agent.tool_execution,只读工具并行与写入串行单 P2):
+// "exclusive"(默认,全串行)/ "parallel_read"(连续只读段有界并行,只放
+// 行审定过的内置 read_file/search)。并发上限 agent.parallel_read_concurrency
+// 默认 4、取值 1..16;1 = 调度器不接管,完整串行语义。config 层不依赖
+// agent 层,数值与 agent::kDefaultParallelReadConcurrency /
+// kMaxParallelReadConcurrency 同值同注释规矩,改时两处一起改。
+constexpr const char* kDefaultToolExecutionStrategy = "exclusive";
+constexpr int kDefaultParallelReadConcurrency = 4;
+constexpr int kMaxParallelReadConcurrency = 16;
+
 // 子代理派工治理(规格"递归派工不能再靠拿掉工具解决"):
 //   max_depth  前台派工的最大嵌套深度(main=0 层,子代理=1 层,孙代理=2
 //              层……)。默认 3:同级允许拆任务,但树不许无限长;用户可配
@@ -437,9 +447,15 @@ struct StatusPanelConfig {
 //                       "本场就用这个上限"。旧版三处写死 4096 的矮墙已拆。
 //   length_continuations max_tokens 打断在思考段时的自动续跑次数,默认
 //                       kDefaultLengthContinuations(1);main 与子代理同值。
+//   tool_execution      工具批执行策略(只读并行单 P2):"exclusive"(默认)
+//                       / "parallel_read"。坏值静默跳过(救命阀,待遇同上)。
+//   parallel_read_concurrency 读段并发上限,默认 4,正整数 1..16;
+//                       1 = 调度器不接管(完整串行语义)。坏值静默跳过。
 struct AgentRunConfig {
     std::optional<int> max_output_tokens;
     int length_continuations = kDefaultLengthContinuations;
+    std::string tool_execution = kDefaultToolExecutionStrategy;
+    int parallel_read_concurrency = kDefaultParallelReadConcurrency;
 };
 
 // 子代理(subagent)段的运行配置。max_steps_per_turn(旧配置名
@@ -935,12 +951,18 @@ struct FileConfig {
     std::optional<int> subagent_max_tree_nodes;
     // subagent 段的 wall_clock_timeout_secs:非负整数(0 = 不限),坏值跳过。
     std::optional<int> subagent_wall_clock_timeout_secs;
-    // agent 段:{"agent": {"max_output_tokens": N, "length_continuations": N}}。
+    // agent 段:{"agent": {"max_output_tokens": N, "length_continuations": N,
+    // "tool_execution": "parallel_read", "parallel_read_concurrency": N}}。
     // max_output_tokens 正整数(缺失/null = unset,走 provider/目录/兜底);
     // length_continuations 非负整数(0 = 关续跑)。坏值静默跳过——救命阀
     // 字段,配置写错不拦人开工。
     std::optional<int> agent_max_output_tokens;
     std::optional<int> agent_length_continuations;
+    // agent 段的工具批执行策略(只读并行单 P2):tool_execution 只认
+    // "exclusive"/"parallel_read",认不得的值静默跳过;
+    // parallel_read_concurrency 正整数 1..16(1 = 调度不接管),坏值跳过。
+    std::optional<std::string> agent_tool_execution;
+    std::optional<int> agent_parallel_read_concurrency;
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
     // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
     // mcpServers——只从配置文件来,没有环境变量、没有内置默认值这两级)。

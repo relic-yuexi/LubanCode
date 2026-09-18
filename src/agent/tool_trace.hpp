@@ -109,6 +109,10 @@ inline constexpr const char* kErrMcpJsonrpcError = "mcp.jsonrpc_error";
 inline constexpr const char* kErrMcpResponseSchemaInvalid = "mcp.response_schema_invalid";
 inline constexpr const char* kErrPluginLuaError = "plugin.lua_error";
 inline constexpr const char* kErrPluginNativeBoundary = "plugin.native_exception_boundary";
+// 只读并行单 P2:工具在并行 worker 上抛出异常。串行路的异常照旧向调用方
+// 传播;并行 worker 没有传播通道(那会 terminate),折成这份稳定错误——
+// 不吞、不冒充成功,批次里其余调用照常收口。
+inline constexpr const char* kErrToolExecuteThrew = "tool.execute.threw";
 inline constexpr const char* kErrSessionTraceAppendFailed = "session.trace_append_failed";
 inline constexpr const char* kErrSessionResultCommitFailed = "session.result_commit_failed";
 // 写前作用域闸首次拦下(AGENTS.md 作用域单 P0):规则已注入,待重试。

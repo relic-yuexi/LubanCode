@@ -602,6 +602,48 @@ TEST_CASE("MergeConfig: agent 段项目级压全局,都没写 = unset + 默认�
     CHECK(unset->sources.agent == config::Source::Default);
 }
 
+TEST_CASE("ParseFileConfigJson/MergeConfig: agent.tool_execution 与 parallel_read_concurrency(只读并行单 P2)") {
+    // 好值:两档策略字符串 + 1..16 并发;坏值(认不得的串/0/负数/超界)静默跳过。
+    const auto ok = config::ParseFileConfigJson(
+        R"({"agent": {"tool_execution": "parallel_read", "parallel_read_concurrency": 8}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->agent_tool_execution.has_value());
+    CHECK(*ok->agent_tool_execution == "parallel_read");
+    REQUIRE(ok->agent_parallel_read_concurrency.has_value());
+    CHECK(*ok->agent_parallel_read_concurrency == 8);
+
+    const auto bad = config::ParseFileConfigJson(
+        R"({"agent": {"tool_execution": "ParallelRead", "parallel_read_concurrency": 0}})", "x.json");
+    REQUIRE(bad.has_value());
+    CHECK_FALSE(bad->agent_tool_execution.has_value());   // 大小写敏感,认不得静默跳过
+    CHECK_FALSE(bad->agent_parallel_read_concurrency.has_value());  // 0 不在 1..16
+
+    // 合并:项目级压全局;都没写 = 公开默认(exclusive / 4)。
+    config::FileConfig project;
+    project.agent_tool_execution = "parallel_read";
+    project.agent_parallel_read_concurrency = 2;
+    project.source_path = "/tmp/project/.lubancode/config.json";
+    config::FileConfig global;
+    global.agent_parallel_read_concurrency = 6;
+    global.source_path = "/tmp/home/.lubancode/config.json";
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global);
+    REQUIRE(result.has_value());
+    CHECK(result->config.agent.tool_execution == "parallel_read");  // 项目级压全局
+    CHECK(result->config.agent.parallel_read_concurrency == 2);
+
+    const auto global_only = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
+    REQUIRE(global_only.has_value());
+    CHECK(global_only->config.agent.tool_execution == config::kDefaultToolExecutionStrategy);
+    CHECK(global_only->config.agent.parallel_read_concurrency == 6);  // 全局的字段各回各级
+
+    config::FileConfig empty;
+    empty.source_path = "/tmp/.lubancode/config.json";
+    const auto unset = config::MergeConfig(EmptyLubancodeEnv(), empty);
+    REQUIRE(unset.has_value());
+    CHECK(unset->config.agent.tool_execution == "exclusive");
+    CHECK(unset->config.agent.parallel_read_concurrency == config::kDefaultParallelReadConcurrency);
+}
+
 TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_depth 与 max_active(派工治理)") {
     const auto ok = config::ParseFileConfigJson(R"({"subagent": {"max_depth": 2, "max_active": 4}})", "x.json");
     REQUIRE(ok.has_value());

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <memory>
 #include <limits>
 #include <type_traits>
@@ -25,6 +26,7 @@
 #include "agent/token_calibrator.hpp"  // token 估算校准:真实 usage 反推的会话级系数
 #include "agent/tool_result_images.hpp"  // 工具结果图片回喂:请求出门前的 base64 重灌
 #include "agent/tool_batch_budget.hpp"
+#include "agent/tool_batch_schedule.hpp"  // 只读并行单 P2:批次调度核心(策略/划批/有界执行器)
 #include "api/assembler.hpp"
 #include "api/model_input_snapshot.hpp"
 #include "hooks/middleware_builtins.hpp"
@@ -850,6 +852,218 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     tools::Tool::Result result = ExecuteApprovedTool(frame);
     return CompleteToolCall(frame, std::move(result));
 }
+
+// ---------------------------------------------------------------------------
+// 连续读段调度(只读工具并行与写入串行单 P2)--------------------------------
+// 接管批次第二遍的派发次序:按声明序划连续读段与独占节点,读段经有界执行
+// 器并行,独占节点照旧走原同步路(RunOneTool/逐枚直调,一字不差)。段与
+// 独占节点互为屏障——读段全收口(阶段四跑完、结果入槽)才轮到独占节点,
+// 独占收口才启下段;后面的 read 不提到前面的 write 之前。
+//
+// 阶段分工(§四):阶段一/二/四留主线程(门禁审批、execution_started、
+// Post Hook/捕获/回填),只有阶段三(ExecuteApprovedTool)上 worker——
+// worker 不碰 session/history/终端 UI,wiring 回调一个都不在 worker 上跑。
+// 权限链仍是同一套阶段函数,没有第二扇门。
+//
+// 生命期(P2 所有权账):槽(slot)持有值拷的调用/代理证据/trace 上下文,
+// 帧指向槽内成员;槽用 unique_ptr 压住地址,段内 worker 全数 join 后才出
+// 段,注册表/工具实例/wiring 在段收口前恒有效(热卸载/切场不得与进行中
+// 的批次并发,宿主合同)。worker 抛出的异常没有传播通道,由执行器存
+// exception_ptr 交回,主线程折成 tool.execute.threw 稳定错误——串行路的
+// 异常传播合同不变,并行路不吞、不冒充成功。
+// ---------------------------------------------------------------------------
+namespace {
+
+// 批次槽位回填的统一形状(串行/并行两路同一份,配对 id 一律用 wire 那枚)。
+api::ToolResultBlock MakeToolResultBlock(const std::string& tool_use_id, const tools::Tool::Result& result) {
+    api::ToolResultBlock block;
+    block.tool_use_id = tool_use_id;
+    block.content = platform::SanitizeUtf8(result.content);
+    block.is_error = result.is_error;
+    block.capture_complete = result.outcome != "output_limit";
+    if (!block.capture_complete) block.capture_reason = "quota";
+    if (!result.payload.empty()) {
+        block.blocks = result.payload.content;
+        block.structured_content = result.payload.structured_content;
+    }
+    return block;
+}
+
+// worker 异常 -> 稳定错误结果(不冒充成功;终态栅栏照常在阶段四落)。
+tools::Tool::Result ResultFromWorkerException(std::exception_ptr failure) {
+    std::string message = "工具在并行执行线程抛出异常";
+    try {
+        std::rethrow_exception(std::move(failure));
+    } catch (const std::exception& e) {
+        message += ": ";
+        message += e.what();
+    } catch (...) {
+        // 非 std::exception 的抛出物:正文就到这里,账面码已经钉住。
+    }
+    tools::Tool::Result failed{std::move(message), true};
+    failed.outcome = ToString(ToolOutcome::ToolError);
+    failed.error_code = kErrToolExecuteThrew;
+    return failed;
+}
+
+// 读段执行的材料(由 Run() 的一次批次现场装配;引用成员活到批次收口)。
+struct ParallelReadSegmentRun {
+    tools::ToolRegistry& registry;
+    const TurnWiring& wiring;
+    const std::vector<api::ToolUseBlock>& batch_calls;
+    const std::vector<ParallelReadEligibility>& probes;  // 与 batch_calls 同序
+    bool trace_armed = false;
+    const std::string& batch_id;
+    const std::string& stream_request_id;
+    const std::vector<std::string>& scheduled_ids;
+    const std::vector<std::size_t>& scheduled_slot;
+    std::vector<std::optional<api::ToolResultBlock>>& ordered_results;
+    const std::atomic<bool>* cancel = nullptr;
+    bool& interrupted;
+    // 门禁材料:直呼与代理两路各自的过滤谓词与拒文(P1 拆链后的同一套)。
+    const std::function<bool(const tools::Tool&)>& tool_filter;
+    const std::string& filter_denial;
+    const std::function<bool(const tools::Tool&)>& proxy_filter;
+    const std::string& proxy_filter_denial;
+    const std::function<bool(const tools::Tool&)>& turn_gate;
+    const std::string& turn_gate_denial;
+    int concurrency_limit = 1;
+};
+
+void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std::size_t end) {
+    // 槽:逐调用材料。call 是值拷(直呼=wire 调用,代理=解出的真实目标,
+    // id 沿用 wire),frame 的引用全指向槽内/段外的稳定对象。
+    struct Slot {
+        std::size_t index = 0;
+        api::ToolUseBlock call;
+        bool via_proxy = false;
+        tools::ProxyCallContext proxy;
+        ToolTraceContext trace_ctx;
+        std::unique_ptr<ToolCallFrame> frame;
+        bool dispatch = false;                       // 越过 started、已交 worker
+        bool cancelled_before_start = false;         // 未启动被取消,槽位已补合成结果
+        std::optional<tools::Tool::Result> terminal; // 阶段一/二收口的终态
+    };
+    std::vector<std::unique_ptr<Slot>> slots;
+    slots.reserve(end - begin);
+
+    // ---- 阶段一/二(主线程,声明序):门禁审批 + 持久 started ----------------
+    for (std::size_t k = begin; k < end; ++k) {
+        auto slot = std::make_unique<Slot>();
+        slot->index = k;
+        const ParallelReadEligibility& probe = ctx.probes[k];
+        slot->call = probe.eligible ? probe.resolved_call : ctx.batch_calls[k];
+        slot->via_proxy = probe.via_proxy;
+        slot->proxy = probe.proxy;
+        if (ctx.trace_armed) {
+            slot->trace_ctx.execution_id = ctx.scheduled_ids[ctx.scheduled_slot[k]];
+            slot->trace_ctx.batch_id = ctx.batch_id;
+            slot->trace_ctx.sequence_in_batch = static_cast<int>(k);
+            slot->trace_ctx.provider_request_id = ctx.stream_request_id;
+            if (slot->via_proxy) {
+                slot->trace_ctx.transport_tool = ctx.batch_calls[k].name;
+                slot->trace_ctx.tool_ref = slot->proxy.tool_ref;
+                slot->trace_ctx.schema_digest = slot->proxy.schema_digest;
+            }
+        }
+        // 取消检查与串行路同一道门:未启动补 cancelled_before_start,不冒充
+        // 执行过(§五:取消后停派发,已启动的按真实终态)。
+        if (ctx.interrupted || (ctx.cancel != nullptr && ctx.cancel->load())) {
+            ctx.interrupted = true;
+            slot->cancelled_before_start = true;
+            if (ctx.trace_armed) {
+                ToolTraceEvent cancelled;
+                cancelled.kind = ToolTraceEventKind::ExecutionFinished;
+                cancelled.outcome = ToolOutcome::CancelledBeforeStart;
+                cancelled.batch_id = ctx.batch_id;
+                cancelled.sequence_in_batch = static_cast<int>(k);
+                cancelled.execution_id = ctx.scheduled_ids[ctx.scheduled_slot[k]];
+                cancelled.tool_use_id = ctx.batch_calls[k].id;
+                cancelled.tool_name = ctx.batch_calls[k].name;
+                cancelled.timestamp_ms = NowMsEpoch();
+                ctx.wiring.on_tool_trace(cancelled);
+            }
+            ctx.ordered_results[k] =
+                api::ToolResultBlock{ctx.batch_calls[k].id, "用户按 ESC 打断,该工具未执行", true};
+            slots.push_back(std::move(slot));
+            continue;
+        }
+        slot->frame = std::make_unique<ToolCallFrame>(ToolCallFrame{
+            ctx.registry,
+            slot->call,
+            ctx.wiring,
+            slot->via_proxy ? ctx.proxy_filter : ctx.tool_filter,
+            slot->via_proxy ? ctx.proxy_filter_denial : ctx.filter_denial,
+            ctx.trace_armed ? &slot->trace_ctx : nullptr,
+            ctx.cancel,
+            slot->via_proxy ? &slot->proxy : nullptr,
+            ctx.turn_gate,
+            ctx.turn_gate_denial});
+        slot->frame->started_at = std::chrono::steady_clock::now();
+        if (ctx.wiring.events != nullptr) {
+            ctx.wiring.events->OnToolStart(slot->call.id, slot->call.name, slot->call.input,
+                                           ctx.wiring.subordinate_stream);
+        }
+        const ToolCallGate gate = PrepareToolCall(*slot->frame);
+        if (!gate.allowed) {
+            slot->terminal = std::move(gate.done);  // 阶段一内已收口(含显示)
+            slots.push_back(std::move(slot));
+            continue;
+        }
+        const std::optional<tools::Tool::Result> blocked = MarkExecutionStarted(*slot->frame);
+        if (blocked.has_value()) {
+            slot->terminal = std::move(*blocked);  // 副作用闸拦下,已收口
+            slots.push_back(std::move(slot));
+            continue;
+        }
+        slot->dispatch = true;
+        slots.push_back(std::move(slot));
+    }
+
+    // ---- 阶段三(worker,有界并行):只执行获准工具 --------------------------
+    // 任务按声明序入队,结果同序回槽;取消旗随 frame 递进(不肯合作取消的
+    // 工具照旧跑完,不假称终止)。
+    std::vector<std::function<tools::Tool::Result()>> tasks;
+    for (const auto& slot : slots) {
+        if (!slot->dispatch) {
+            continue;
+        }
+        ToolCallFrame* frame = slot->frame.get();
+        tasks.push_back([frame] { return ExecuteApprovedTool(*frame); });
+    }
+    BoundedParallelExecutor executor;
+    BoundedParallelExecutor::RunOutcome run =
+        executor.RunAll(ctx.concurrency_limit, std::move(tasks));
+
+    // ---- 阶段四(主线程,声明序):收口回填 ---------------------------------
+    // 完成事件按声明序发(Post Hook/捕获/显示仍串行,与串行路同款);最终
+    // 模型结果本就按槽位回填,完成先后不改排列。
+    std::size_t dispatch_cursor = 0;
+    for (const auto& slot : slots) {
+        if (slot->cancelled_before_start) {
+            continue;  // 槽位已在取消分支补齐
+        }
+        tools::Tool::Result result = [&]() -> tools::Tool::Result {
+            if (slot->terminal.has_value()) {
+                return std::move(*slot->terminal);  // 阶段一/二内已收口(含显示)
+            }
+            // worker 抛过的异常先折成结果,再走同一只收口口:finished 栅栏/
+            // 捕获/Post Hook/显示一样不少——每枚调用恰一份终态与协议结果。
+            const std::size_t task_index = dispatch_cursor++;
+            tools::Tool::Result raw =
+                run.failures[task_index] != nullptr
+                    ? ResultFromWorkerException(std::move(run.failures[task_index]))
+                    : std::move(run.results[task_index]);
+            return CompleteToolCall(*slot->frame, std::move(raw));
+        }();
+        ctx.ordered_results[slot->index] = MakeToolResultBlock(ctx.batch_calls[slot->index].id, result);
+        if (ctx.cancel != nullptr && ctx.cancel->load()) {
+            ctx.interrupted = true;
+        }
+    }
+}
+
+}  // namespace
 
 namespace {
 
@@ -2537,12 +2751,52 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // ---- 第二遍:按声明序执行 inline 调用(wait 也在其中——launch 已
         // 全部注册,次序纪律成立;job_wait 自己的执行经协调器泵,已完成的
         // job 结果排在 wait 自身状态结果前由工具结果形状保证)。
-        for (std::size_t i = 0; i < batch_calls.size(); ++i) {
+        // P2(只读并行单):ParallelRead 策略放行时,连续可并行只读段经有界
+        // 执行器并行(段内阶段一/二/四仍主线程串行,只有阶段三上 worker),
+        // 其余调用照旧逐枚串行——读段与独占节点互为屏障,声明序不动,后面
+        // 的 read 不提到前面的 write 之前。整批回退串行(行为与从前一字不
+        // 差)的三个条件:
+        //   - 策略 Exclusive(默认)或并发上限 < 2(配置 1 = 完整串行语义);
+        //   - 任一只 Pre/Post 工具 Hook 在场:Hook 可能改文件,把它摁在主
+        //     线程不够——另一只 read 执行时它仍可能在改(单子 §四);
+        //   - 本批混入 job_handle/native_deferred:保留既有异步协议,本次
+        //     并行优化禁用(不等于串行化已在跑的后台任务,单子 §五)。
+        const bool batch_has_non_inline = [&batch_calls, &call_is_inline] {
+            for (std::size_t i = 0; i < batch_calls.size(); ++i) {
+                if (!call_is_inline(i)) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+        const bool tool_hooks_armed = wiring.on_pre_tool_hook != nullptr ||
+                                      wiring.on_pre_tool_use_hook != nullptr ||
+                                      wiring.on_post_tool_hook != nullptr ||
+                                      wiring.on_post_tool_use_hook != nullptr;
+        const int parallel_read_limit = ClampParallelReadConcurrency(profile_.parallel_read_concurrency);
+        const bool parallel_reads_armed =
+            profile_.tool_batch_strategy == ToolBatchStrategy::ParallelRead && parallel_read_limit >= 2 &&
+            !tool_hooks_armed && !batch_has_non_inline;
+        std::vector<ParallelReadEligibility> parallel_probes;
+        if (parallel_reads_armed) {
+            // 资格探针按声明序整批先算:直呼按名+注册来源判,tool_invoke 先
+            // 解引用按真实目标判(解不开按独占收口,原错误路径在下面原样走;
+            // Resolve 是 const 纯查账,独占路再解一次不生副作用)。
+            parallel_probes.reserve(batch_calls.size());
+            for (const api::ToolUseBlock& wire_call : batch_calls) {
+                parallel_probes.push_back(
+                    ProbeParallelReadEligibility(registry_, tool_ref_resolver_.get(), wire_call));
+            }
+        }
+        // 代理调用的执行拒文(批内同值,提出来算一次;原逐枚算的同一份)。
+        const std::string execution_denial_text =
+            agent.profile_.tool_execution_denial.empty()
+                ? std::string(tools::kErrToolRefNotAllowed) + "|该工具不在当前会话的执行策略内,不得重试同一调用。"
+                : agent.profile_.tool_execution_denial;
+        // 独占节点原路执行(与拆链前逐字节同序;continue 换 return,其余不动)。
+        const auto run_exclusive_call_at = [&](std::size_t i) {
             const int tool_index = static_cast<int>(i);
             const api::ToolUseBlock& call = batch_calls[i];
-            if (!call_is_inline(i)) {
-                continue;  // 第一遍已接单/留欠账
-            }
             if (interrupted || (cancel != nullptr && cancel->load())) {
                 interrupted = true;
                 // 未轮到便被 ESC 收掉:记 cancelled_before_start 终态栅栏
@@ -2561,7 +2815,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 }
                 ordered_results[i] =
                     api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true};
-                continue;
+                return;
             }
             ToolTraceContext trace_ctx;
             if (trace_armed) {
@@ -2602,7 +2856,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     }
                     ordered_results[i] =
                         api::ToolResultBlock{call.id, platform::SanitizeUtf8(refusal.message), true};
-                    continue;
+                    return;
                 }
                 // 规范化后的真实目标调用:id 沿用 wire call 的,名字与入参
                 // 换成解出来的那枚。执行资格经 tool_execution_policy(空 =
@@ -2618,31 +2872,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 trace_ctx.transport_tool = call.name;
                 trace_ctx.tool_ref = resolved->tool_ref;
                 trace_ctx.schema_digest = resolved->schema_digest;
-                const std::string execution_denial =
-                    agent.profile_.tool_execution_denial.empty()
-                        ? std::string(tools::kErrToolRefNotAllowed) + "|该工具不在当前会话的执行策略内,不得重试同一调用。"
-                        : agent.profile_.tool_execution_denial;
                 const tools::Tool::Result result =
-                    RunOneTool(registry_, target_call, wiring, tool_execution_policy_, execution_denial,
+                    RunOneTool(registry_, target_call, wiring, tool_execution_policy_, execution_denial_text,
                                trace_armed ? &trace_ctx : nullptr, cancel, &proxy_ctx, tool_turn_gate_,
                                tool_turn_gate_denial_);
-                {
-                    api::ToolResultBlock block;
-                    block.tool_use_id = call.id;  // 配对的是 wire 那枚 tool_invoke 的 id
-                    block.content = platform::SanitizeUtf8(result.content);
-                    block.is_error = result.is_error;
-                    block.capture_complete = result.outcome != "output_limit";
-                    if (!block.capture_complete) block.capture_reason = "quota";
-                    if (!result.payload.empty()) {
-                        block.blocks = result.payload.content;
-                        block.structured_content = result.payload.structured_content;
-                    }
-                    ordered_results[i] = std::move(block);
-                }
+                // 配对的是 wire 那枚 tool_invoke 的 id;断言式兜底与富结果
+                // 投影同下(见 MakeToolResultBlock)。
+                ordered_results[i] = MakeToolResultBlock(call.id, result);
                 if (cancel != nullptr && cancel->load()) {
                     interrupted = true;
                 }
-                continue;
+                return;
             }
             const tools::Tool::Result result =
                 RunOneTool(registry_, call, wiring, tool_filter_, tool_filter_denial_,
@@ -2652,24 +2892,52 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
             // 绕路改历史——已经合法的内容是原样穿透的空操作。
             // MCP 富结果单:payload 富块与 structuredContent 随投影一起入史
-            // (文本结果 blocks 为空,行为与从前一字不差);投影里图片/音频
+            //(文本结果 blocks 为空,行为与从前一字不差);投影里图片/音频
             // 是 artifact 短句,四家 wire 吃它作文本降级。
-            {
-                api::ToolResultBlock block;
-                block.tool_use_id = call.id;
-                block.content = platform::SanitizeUtf8(result.content);
-                block.is_error = result.is_error;
-                block.capture_complete = result.outcome != "output_limit";
-                if (!block.capture_complete) block.capture_reason = "quota";
-                if (!result.payload.empty()) {
-                    block.blocks = result.payload.content;
-                    block.structured_content = result.payload.structured_content;
-                }
-                ordered_results[i] = std::move(block);
-            }
+            ordered_results[i] = MakeToolResultBlock(call.id, result);
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;
             }
+        };
+        for (std::size_t i = 0; i < batch_calls.size();) {
+            if (!call_is_inline(i)) {
+                ++i;  // 第一遍已接单/留欠账
+                continue;
+            }
+            if (parallel_reads_armed && parallel_probes[i].eligible) {
+                // 连续读段:[i, segment_end) 全员可并行;段后头一枚必是独占
+                // 节点或批次尾(§一调度合同:读段全收口才跑独占节点)。
+                std::size_t segment_end = i;
+                while (segment_end < batch_calls.size() && call_is_inline(segment_end) &&
+                       parallel_probes[segment_end].eligible) {
+                    ++segment_end;
+                }
+                ParallelReadSegmentRun segment{
+                    registry_,
+                    wiring,
+                    batch_calls,
+                    parallel_probes,
+                    trace_armed,
+                    batch_id,
+                    stream_request_id,
+                    scheduled_ids,
+                    scheduled_slot,
+                    ordered_results,
+                    cancel,
+                    interrupted,
+                    tool_filter_,
+                    tool_filter_denial_,
+                    tool_execution_policy_,
+                    execution_denial_text,
+                    tool_turn_gate_,
+                    tool_turn_gate_denial_,
+                    parallel_read_limit};
+                RunParallelReadSegment(segment, i, segment_end);
+                i = segment_end;
+                continue;
+            }
+            run_exclusive_call_at(i);
+            ++i;
         }
 
         // 声明序收拢成批次消息:接单块/真实结果按模型给的调用序配对;

@@ -7,13 +7,15 @@
 //(没跑过 Hook/预裁定的旧路,如 workflow 借来的确认口)回缺省值——与旧
 // 槽"没人写过就是默认"同一形状,不冒充、不报错。
 //
-// 线程契约:本批执行链仍是同线程串行,普通 map 即可;P2 并行化后两只
-// 确认口可能同时在跑,这只表要加锁或换并发容器(单子 §四"逐调用上下
-// 文"),届时在此处收口,不动各装配点。
+// 线程契约:P2(只读并行单)起并行读段的确认口可能同时在跑,本表加锁
+// 收口(单子 §四"逐调用上下文"的衔接点):三只口(RecordPre/
+// RecordApprovalClass/Take)同锁互斥,装配点零改动。当前并行段只放行
+// 不需确认的内置读工具,锁是先立契约、防将来放行面扩大时串账。
 
 #pragma once
 
 #include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -32,16 +34,19 @@ class ToolCallScopeTable {
 public:
     // PreToolUse 表态入账(同一 id 重跑 Hook 以最新为准)。
     void RecordPre(const std::string& tool_use_id, lubancode::runtime::ToolHookDecision pre) {
+        const std::lock_guard<std::mutex> lock(mutex_);
         entries_[tool_use_id].pre = std::move(pre);
     }
 
     // 权限预裁定递来的审批类别入账。
     void RecordApprovalClass(const std::string& tool_use_id, lubancode::tools::ApprovalClass approval_class) {
+        const std::lock_guard<std::mutex> lock(mutex_);
         entries_[tool_use_id].approval_class = approval_class;
     }
 
     // 取走本调用的账并清位(确认口一调用取一次)。
     ToolCallScope Take(const std::string& tool_use_id) {
+        const std::lock_guard<std::mutex> lock(mutex_);
         const auto it = entries_.find(tool_use_id);
         if (it == entries_.end()) {
             return ToolCallScope{};
@@ -52,6 +57,7 @@ public:
     }
 
 private:
+    std::mutex mutex_;
     std::map<std::string, ToolCallScope> entries_;
 };
 
