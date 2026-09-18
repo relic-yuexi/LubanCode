@@ -47,6 +47,7 @@
 #include "app/backend_stack.hpp"
 #include "app/commands/command_registry.hpp"  // 命令注册制:47 案分派的注册表与路由
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章):控制器只收装好的件
+#include "app/tool_call_scope.hpp"  // ToolCallScopeTable:审批类别的逐调用账(P1 拆槽)
 // 子系统接线器(会话终章):goal/loop/plan/peer/录制各一只(状态+装配+
 // 泵+恢复),控制器持句柄调;会话级状态(theme/config/标题活值)
 // 留控制器。
@@ -310,13 +311,16 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     // token 估算校准(token 估算校准单):workflow agent 节点与主会话共用
     // 进程级校准器。
     wiring.token_calibrator = &lubancode::agent::DefaultTokenCalibrator();
-    auto approval_class_slot =
-        std::make_shared<lubancode::tools::ApprovalClass>(lubancode::tools::ApprovalClass::None);
-    wiring.on_permission_evaluate = [this, approval_class_slot](const std::string&, const std::string& name,
+    // 审批类别按 tool_use_id 记逐调用账(执行链拆分单 P1):旧路一只跨调用
+    // 共享槽偷渡,同批两枚调用会串槽;本 wiring 不跑 PreToolUse 钩子,
+    // scope.pre 恒为缺省表态,与旧局部空表态同一形状。P2 并行化时表要加锁
+    //(见 tool_call_scope.hpp 的线程契约)。
+    auto call_scopes = std::make_shared<lubancode::app::ToolCallScopeTable>();
+    wiring.on_permission_evaluate = [this, call_scopes](const std::string& tool_use_id, const std::string& name,
                                            lubancode::tools::ApprovalClass approval_class,
                                            const nlohmann::json& input,
                                            const lubancode::runtime::ToolHookDecision& pre) {
-        *approval_class_slot = approval_class;
+        call_scopes->RecordApprovalClass(tool_use_id, approval_class);
         lubancode::runtime::PermissionContext context;
         context.auto_confirm = auto_confirm;
         context.mode = lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
@@ -326,12 +330,12 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         return lubancode::runtime::EvaluatePermission(context, pre, approval_class, name, input);
     };
     wiring.on_permission_evaluate_floored =
-        [this, approval_class_slot](const std::string&, const std::string& name,
+        [this, call_scopes](const std::string& tool_use_id, const std::string& name,
                                     lubancode::tools::ApprovalClass approval_class,
                                     const nlohmann::json& input,
                                     const lubancode::runtime::ToolHookDecision& pre,
                                     lubancode::ApprovalMode effective) {
-            *approval_class_slot = approval_class;
+            call_scopes->RecordApprovalClass(tool_use_id, approval_class);
             lubancode::runtime::PermissionContext context;
             context.auto_confirm = auto_confirm;
             context.mode = effective;  // 公共值域直入,不再过第二枚镜像枚举
@@ -340,7 +344,7 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
             context.deny_commands = &settings_local.deny_commands;
             return lubancode::runtime::EvaluatePermission(context, pre, approval_class, name, input);
         };
-    wiring.on_tool_confirm = [this, approval_class_slot](const std::string& tool_use_id,
+    wiring.on_tool_confirm = [this, call_scopes](const std::string& tool_use_id,
                                                          const std::string& name,
                                                          const nlohmann::json& input) -> bool {
         // 每次现起一只 ToolDisplay:workflow 的工具不在会话条目账上,
@@ -349,11 +353,12 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         lubancode::cli::ToolDisplay display(transcript_ui_.items(), theme,
                                             lubancode::platform::ProbeStdoutConsole().is_console,
                                             todo_state(), /*cancel=*/nullptr, transcript_ui_.expanded_flag());
+        const lubancode::app::ToolCallScope scope = call_scopes->Take(tool_use_id);
         const lubancode::runtime::ToolHookDecision pre;  // workflow 路不跑 PreToolUse 钩子,空表态
         return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
                                               settings_local.allow_commands, settings_local.deny_commands,
                                               /*hook_dispatcher=*/nullptr, pre,
-                                              /*has_permission_hooks=*/false, *approval_class_slot, name, input);
+                                              /*has_permission_hooks=*/false, scope.approval_class, name, input);
     };
     // 权限下限(阶段 5,R 单遗留——"确认口走 ConfirmToolUse 缺省无下限,
     // 等 resolver 接线时一并喂"):`agent: <name>` 节点的自定义 Agent 定义
@@ -361,19 +366,20 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     // 会话档向下并到下限再裁定,父会话开着 yolo 也不免问。与 agent 工具
     // 路的 Hooks::on_tool_confirm_floored 同一先例(0.26.96)。
     wiring.on_tool_confirm_floored =
-        [this, approval_class_slot](const std::string& tool_use_id, const std::string& name,
+        [this, call_scopes](const std::string& tool_use_id, const std::string& name,
                                     const nlohmann::json& input,
                lubancode::ApprovalMode floor) -> bool {
         lubancode::cli::ToolDisplay display(transcript_ui_.items(), theme,
                                             lubancode::platform::ProbeStdoutConsole().is_console,
                                             todo_state(), /*cancel=*/nullptr, transcript_ui_.expanded_flag());
+        const lubancode::app::ToolCallScope scope = call_scopes->Take(tool_use_id);
         const lubancode::runtime::ToolHookDecision pre;
         // 公共值域直入(收口审计单 P1):下限档不再过第二枚镜像枚举翻译。
         const lubancode::ApprovalMode runtime_floor = floor;
         return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
                                               settings_local.allow_commands, settings_local.deny_commands,
                                               /*hook_dispatcher=*/nullptr, pre,
-                                              /*has_permission_hooks=*/false, *approval_class_slot, name, input, {},
+                                              /*has_permission_hooks=*/false, scope.approval_class, name, input, {},
                                               runtime_floor);
     };
     return wiring;

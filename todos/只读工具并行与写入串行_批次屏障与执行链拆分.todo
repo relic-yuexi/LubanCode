@@ -1,0 +1,117 @@
+# 只读工具并行与写入串行：批次屏障与执行链拆分
+
+- 状态：P0/P1 已落（2026-09-19，`refactor/tool-exec-chain-split`：执行链拆四阶段 + 宿主共享槽换逐调用账，行为不变，回归册 unit/agent/test_tool_execution_chain.cpp；P2 并行调度未动）；本单只记研究结论与实施要求。
+- 日期：2026-09-19
+- 源码基线：`45f34058`；实施前重查，不把行号当永久入口。
+- 目标：同一 Agent 同一批调用内，连续只读段并行；写入与未知调用独占执行，并挡住后续读取。
+- 首版范围：普通 inline 工具批次、执行策略、执行链拆分、取消、轨迹与结果配对、宿主接线、配置、测试和文档。
+- 范围边界：首版不承诺跨 Agent、跨会话、跨进程或外部编辑器之间的读写隔离；不把普通结果改成后台 job 接单回执，不扩大流式提前执行范围。
+
+## 一、调度合同
+
+连续读并行，遇写先等齐，写完再往下走。只让 write 之间互斥不够，read 也不能越过 write。
+
+```text
+模型声明序：read(A), read(B), write(A), read(A), read(C), edit(B)
+
+执行次序： [read(A) || read(B)]
+                    ↓ 全段完成并收口
+                 write(A)
+                    ↓ 完成并收口
+            [read(A) || read(C)]
+                    ↓ 全段完成并收口
+                 edit(B)
+```
+
+- 保留模型声明序；按连续区段划批，不把后面的 read 提到前面的 write 之前。
+- 串行调用须等此前读段执行、结果落账与必要后处理收口；自身收口前，后段不得启动。
+- 同批真实结果收齐后，再请求模型。执行并发不要求 provider 支持原生 deferred 协议。
+- 结果按原槽位回填，用原 `tool_use_id` 配对；完成先后不改变最终结果排列。
+- 只并行模型已经声明的独立调用。后一次调用若须读取前一次结果才能构造参数，应留到下一轮模型请求。
+- 初始并发上限建议为 4，允许配置成 1；配置位置与命名沿用仓库现行约定。线程、队列与结果内存都须有界。
+
+## 二、已核源码与现有缺口
+
+| 入口 | 当前证据 | 对本单的约束 |
+| --- | --- | --- |
+| `src/agent/loop.cpp:2425` | 普通 inline 调用按声明序逐枚 `RunOneTool` | 在此引入连续区段调度，不直接整批 launch |
+| `src/agent/loop.cpp:2382` | 已有 `ordered_results` 按调用槽位收集结果 | 沿用配对与原序投递，不另造结果历史 |
+| `src/tools/tool.hpp:18` | `EffectClass` 原本服务恢复分类 | 不能拿只读标签当线程安全承诺 |
+| `src/tools/job_tools.cpp:217` | `job_cancel` 注册成 `ReadOnlyLocal`，执行却取消任务 | 宿主状态操作须串行，不得随只读标签放行 |
+| `src/tools/loop_control_tool.cpp:80` | 修改完成、暂停状态；工具也声明只读分类 | 同上；须区分外部副作用与宿主状态变更 |
+| `src/app/turn_runner.cpp:340` | Hook 与审批共用 `pre_decision_slot`、`approval_class_slot` | 整条 `RunOneTool` 并发会争用调用状态，须拆分并改成逐调用上下文 |
+| `src/agent/loop.cpp:688` 附近 | started 落账后执行工具，随后捕获结果、执行 Post Hook | 保住执行前证据与执行后结果链，不能绕过原正门 |
+| `src/runtime/async_tool_runtime.cpp:494` | 默认异步装配没有工具白名单、auth 与 executor | 现成后台底座不等于普通工具已并行 |
+| `src/tools/tool_job_coordinator.cpp:229` | 非只读任务缺省按工具名占资源键；只读不占该键 | `write_file` 与 `edit_file` 不天然互斥，也挡不住 read；不能靠打开异步白名单完成本单 |
+| `src/agent/loop.cpp:2383` | 后台 launch 先接单，再处理 inline | 开启后台策略后的混合批次须单独审查，不能声称新屏障已管住旧后台任务 |
+
+## 三、执行策略
+
+- [ ] 为并发调度增加明确策略，建议两档 `ParallelRead / Exclusive`，名称可随现有架构调整。默认 `Exclusive`，不声明便不并行。
+- [ ] `EffectClass` 继续服务既有恢复语义；若修订误导分类，先核对权限、恢复和诊断使用处，不能为调度随手改旧合同。
+- [ ] 首批审查 `read_file`、`search`：工具实例、共享 runner、路径解析、缓存、取消和进程封装都须支持并发，审过才开放。
+- [ ] 后续逐个审查 `web_fetch`、`web_search`；确认客户端共享状态、限流与连接配额后再开放，首版可保守串行。
+- [ ] `write_file`、`edit_file`、undo、shell、Git、未知工具、插件、Lua、MCP 以及宿主状态操作默认独占。不得按工具名含 read/get 或命令看起来像查询便自动放行。
+- [ ] `tool_search`、skill、loop/job 控制等逐个查是否改注册表、可见工具或会话状态，未审过便独占。
+- [ ] deferred/tool_invoke 先解析真实目标，再判策略；包装器须正确透传。解析失败按原错误路径收口。
+- [ ] Hook 改参后，以最终参数重验 schema、权限与执行策略。若不能证明 Hook 与整条链可并发，降回串行。
+
+## 四、拆执行链，保留唯一正门
+
+建议将 `RunOneTool` 内部抽成可复用阶段；原同步入口调用同一套阶段，不复制出另一套权限链。
+
+```text
+主线程：解析目标、作用域/模式/schema 检查、Pre Hook、审批、准备逐调用材料
+主线程：确认允许派发，持久记录 execution_started
+worker：只执行获准工具，持有独立取消上下文与稳定工具生命句柄
+主线程：接完成信封、持久记录原始结果、Post Hook、显示事件、结果回填
+```
+
+- [ ] 把调用 ID、原序槽位、最终参数、审批裁决、trace 上下文、artifact 目录及取消源装入逐调用上下文，不借共享槽传递。
+- [ ] worker 不直接写 session/history，不直接操作终端 UI；完成件交回宿主收口。复用已有完成信封经验，避免为了短读任务强塞后台 job 生命周期。
+- [ ] 注册表、工具实例和 Hook 代际在任务结束前须有效；热卸载、切场、销毁不得造成悬空引用。写清所有权与退出策略。
+- [ ] `execution_started` 必须先于真实执行。完成结果仍按原流程捕获与落账，失败不得伪装成功；所有受影响宿主沿用既有持久化失败合同。
+- [ ] 明确 Post Hook 与 trace 的次序，保留原始结果证据。完成事件可以反映实际完成顺序，最终模型结果仍按声明序排列。
+- [ ] 首版遇到未审定的工具 Hook，整批回退串行。仅把 Hook 放到主线程不够：它仍可能在另一个 read 执行时改文件。
+- [ ] 并发配置为 1 或策略不满足时，完整走串行语义；权限确认、拒绝文案、Hook 与审计不能缺环。
+
+## 五、批次、取消与后台边界
+
+- [ ] 先分连续读段与独占节点，再有界派发。不同写工具也共用本批独占屏障，首版不按文件路径放宽。
+- [ ] 取消后停止派发，通知所有在跑任务；未启动调用补 `cancelled_before_start`，已启动调用按真实终态记录。
+- [ ] 工具不合作取消时，不得假称已经终止，不得释放仍被使用的上下文。若采用超时脱离，须持有独立寿命并拒收无效晚到结果。
+- [ ] 拒绝、工具错误、异常、落账失败均须按既有合同收口；每枚调用恰好一份终态与一份协议结果，不重派有副作用调用。
+- [ ] 保住批次输出预算、富结果/artifact、UTF-8 清洗与图片结果。并发度受限不代表输出内存天然受限。
+- [ ] 混入已有 job_handle/native_deferred 调用时，首版可禁用本次并行优化并保留既有协议；明确这不等于串行化已在跑的后台任务。
+- [ ] 若产品要求后台任务与 inline 写也互斥，另补共同调度域、读写占用和资源生命期，完成前不得作全局保证。
+- [ ] 终端、one-shot、AppServer、Gateway、子代理等宿主统一接线。PTC 与 workflow 的同步 `RunOneTool` 调用兼容保留，不擅自并行脚本步骤。
+- [ ] 跨 Agent/会话写串行另列后续扩展：须有共享 workspace 调度域；单个 Agent 的锁不覆盖其他执行者。
+
+## 六、实施顺序
+
+- [x] P0：重查基线与上表入口，梳理所有 `RunOneTool` 调用方，确定并发策略、逐调用上下文、Hook 降级与取消合同。（2026-09-19 重查基线 `45f34058`，行号小漂但入口全数对上：inline 批次两处在 `src/agent/loop.cpp`（proxy 解引用路 + 普通路）、`src/workflow/host_executors.cpp` 的 tool 节点、`src/ptc/ptc_tool.cpp` 的 stub 执行器、外加 `tests/unit` 六册直调（instruction_scope_gate / turn_runtime / tool_trace / tool_cancel_context / write_edit / utf8_boundary）。定案：并发策略两档 `ParallelRead/Exclusive` 留 P2 落地，`EffectClass` 合同不动；逐调用上下文双件——引擎侧 `ToolCallFrame`（loop.cpp 匿名域，调用 ID/最终参数/审批表态/trace/取消源全在册）+ 宿主侧 `ToolCallScopeTable`（src/app/tool_call_scope.hpp，按 tool_use_id 记 PreToolUse 表态与审批类别，替掉 turn_runner 与 interactive_session_assembly 的两只共享槽）；Hook 降级合同照 §四"未审定 Hook 整批回退串行"留 P2 执行，本批钉住 Hook 改参后的 schema/权限重验；取消合同维持现状——cancel 旗经 `ToolExecutionContext` 逐调用递进、批次层查旗补 `cancelled_before_start`，worker 阶段不碰 session/history/UI。）
+- [x] P1：先拆同步执行链，保持现有行为；补权限、Hook、结果捕获与取消回归。（2026-09-19，分支 `refactor/tool-exec-chain-split`：`RunOneTool` 内部拆成四只阶段（PrepareToolCall 门禁审批 / MarkExecutionStarted / ExecuteApprovedTool worker / CompleteToolCall 收口），原入口依序调同一套阶段，签名零改动，PTC/workflow/单测调用方不动；回归册 `tests/unit/agent/test_tool_execution_chain.cpp` 九案——started 先于执行且 finished 恰一份、预裁定 Deny 与确认拒都不执行且无 started、逐调用审批账不串槽（表契约 + 端到端两枚不同裁决）、Hook 改参后预裁定/确认口/执行拿的都是最终参数、执行中取消可见且终态恰一份、结果捕获失败按 result_store_failed 收口。证据：PR 号与 CI run 见下方状态行。）
+- [ ] P2：加连续读段调度、有界执行器与独占屏障；只开放审过的内置读工具，接配置与回退。
+- [ ] P3：各宿主接线，补完整并发验收与轨迹检查，更新 `docs/architecture/tool-calling-flow.md`、工具参考与相关配置说明。
+- [ ] 实施代码时新建隔离 worktree，保留用户当前分支与未提交文件。验证沿用用户约定：本地做静态检查，构建/测试提交 GitHub CI；只报告实际观察到的 CI 结果。
+
+## 七、验收清单
+
+用可控闸门、条件变量与事件记录断言先后，少靠 sleep 猜并发。以下测试留给实施者编写并交 CI 执行。
+
+- [ ] 读并行：两枚读同时进入执行体，证明不是逐枚串跑；最大在跑数不超配置上限。
+- [ ] 写屏障：覆盖 `R,R,W,R,R,W`，断言写不与前后读重叠；`write_file` 与 `edit_file` 也不重叠。
+- [ ] 写后读：同一路径先写后读，读到新内容；写前读取不被移到写后。
+- [ ] 配对：故意让后声明的读先完成，模型结果仍按原序，ID 无错配、重复或缺失。
+- [ ] 策略：未声明工具、状态操作、未知插件串行；deferred 包装按真实目标判定；Hook 场景按约定降级。
+- [ ] 权限：两枚调用裁决不同，不串用共享槽；拒绝工具不执行，改参后重新校验，失败正确回填。
+- [ ] 取消/异常：覆盖派发前、读段执行中、写节点前、部分完成后；无新调用偷跑，无缺结果，无悬空生命期。
+- [ ] 持久化：started 先于执行；完成只落一次；结果落盘失败、晚到信封与恢复不造成重复副作用。
+- [ ] 资源：覆盖输出预算、富结果、artifact、并发上限、工具卸载/宿主退出及 worker 异常。
+- [ ] 回退：并发度 1 与未开放工具保持旧串行行为；后台混合批次边界如实记录。
+- [ ] 宿主：终端和无 UI 路径均验收，子代理各自批次正常；不能将单批通过说成跨会话隔离通过。
+- [ ] 性能：记录同一输入、同一工具集、同一环境下串行与并行耗时、峰值并发和资源占用。合成慢读验证调度，真实 read/search 验证收益；不预写加速倍数。
+
+## 八、交付边界
+
+研究已确认可做，尚未实现，尚无测试或性能结果。接手后按上列条目推进，交付代码、CI 证据与更新后的调用流程文档。只加线程池、只打开后台白名单、只测结果文本相同，均不算完成。
