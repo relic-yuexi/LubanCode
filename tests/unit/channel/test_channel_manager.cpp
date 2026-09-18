@@ -566,7 +566,10 @@ TEST_CASE("Q0:渠道层工具上限进路由——SetChannelToolsPolicy 现读�
     manager.HandleBytesFromSidecar("qqbot", "main", bytes.data(), bytes.size());
     manager.Pump("qqbot", "main");
 
-    // 渠道层上限:只许 read_file。取件时的路由决策带上交集账。
+    // 渠道层上限:只许 read_file。取件时的路由决策带上交集账。账号是裸的
+    //(QQ 默认询问档在注册侧物化):渠道层 ∩ 账号默认档——allow 交集 =
+    // read_file;审批带 = 账号默认档(渠道层未声明 approve,不参与交集),
+    // run_command 可见可申请、不预授权。
     ChannelToolsUserPolicy channel_tools;
     channel_tools.allow = std::vector<std::string>{"read_file"};
     manager.SetChannelToolsPolicy("qqbot", channel_tools);
@@ -574,9 +577,12 @@ TEST_CASE("Q0:渠道层工具上限进路由——SetChannelToolsPolicy 现读�
     REQUIRE(work.has_value());
     REQUIRE(work->route.tools.allow.has_value());
     CHECK(*work->route.tools.allow == std::vector<std::string>{"read_file"});
-    CHECK(work->route.tools.source == "channel");
+    CHECK(work->route.tools.source == "channel+account");
     CHECK(work->route.tools.Allows("read_file"));
-    CHECK_FALSE(work->route.tools.Allows("run_command"));
+    CHECK(work->route.tools.ExplicitlyAllows("read_file"));
+    CHECK(work->route.tools.Allows("run_command"));
+    CHECK_FALSE(work->route.tools.ExplicitlyAllows("run_command"));
+    CHECK_FALSE(work->route.tools.Allows("tool_invoke"));
 }
 
 TEST_CASE("QQ 裸账号默认询问档:注册侧生效,显式策略原样保留") {
