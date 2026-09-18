@@ -821,9 +821,11 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
     TermOut() << tr("cmd.provider.header") << "\n";
     for (const auto& provider : providers) {
         const std::string model = provider.model.empty() ? tr("cmd.provider.model_unset") : provider.model;
+        // 直配兜底(没入册也没选名):wire+base_url 对上即当前端——model 是
+        // 参数可换,认端点不认模型;端点都不沾边就都不标,不冒充。
         const bool is_current = provider.name == active_provider ||
                                 (active_provider.empty() && provider.wire == current_config.wire &&
-                                 provider.base_url == current_config.base_url && provider.model == current_config.model);
+                                 provider.base_url == current_config.base_url);
         const std::string current = is_current ? tr("cmd.provider.current") : "";
         // 鉴权三态:none 写"无需鉴权";env 提变量名;inline 露打码 key。
         std::string auth_display;
