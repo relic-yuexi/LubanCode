@@ -48,7 +48,9 @@ const Entry kZhCN[] = {
      "  lubancode archive <id>    归档一场会话(搬进 sessions/archive/,字节原样,想恢复用\n"
      "  lubancode unarchive <id>  unarchive;归了的场子不进默认列表)\n"
      "  lubancode delete <id>     永久删除一场会话,交互确认后才删;--force 跳过确认,只给\n"
-     "                            脚本显式使用,不可恢复\n"},
+     "                            脚本显式使用,不可恢复\n"
+     "  lubancode kanban          生成会话看板(自包含 HTML,按状态分列、按项目分组,点开看\n"
+     "                            session 与 project 详情;--no-open 只打印路径,--output 改落点)\n"},
     {"help.options",
      "选项:\n"
      "  --version              打印版本号\n"
@@ -2058,7 +2060,10 @@ const Entry kEn[] = {
      "  lubancode archive <id>    archive a session (moved into sessions/archive/, bytes untouched;\n"
      "  lubancode unarchive <id>  unarchive brings it back; archived ones stay out of the default list)\n"
      "  lubancode delete <id>     permanently delete a session after an interactive confirmation;\n"
-     "                            --force skips the confirmation (scripts only), unrecoverable\n"},
+     "                            --force skips the confirmation (scripts only), unrecoverable\n"
+     "  lubancode kanban          generate a session kanban board (self-contained HTML, columns by\n"
+     "                            status, grouped by project; click cards for session/project\n"
+     "                            details; --no-open prints the path, --output changes it)\n"},
     {"help.options",
      "Options:\n"
      "  --version              print the version\n"

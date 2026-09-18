@@ -1389,6 +1389,10 @@ add_library(lubancode_app STATIC
   src/cli/record_command.cpp
   # P0-3:`lubancode trajectory <verify|replay|harness-replay>` 只读诊断子命令。
   src/cli/trajectory_command.cpp
+  # 会话看板单:`lubancode kanban` 只读看板(全量 session 索引 → 自包含
+  # HTML,按状态分列/按项目分组,点开看 session/project 详情)。
+  src/kanban/kanban_html.cpp
+  src/cli/kanban_command.cpp
   # 持久 Agent 总装单 G1:`lubancode gateway run|status|stop` 子命令面。
   src/cli/gateway_command.cpp
   # QQ 连接状态单 §三:`lubancode channel status <渠道> <账号>` 跨进程只读

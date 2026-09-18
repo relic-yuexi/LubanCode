@@ -70,6 +70,7 @@
 #include "cli/channel_status_command.hpp"  // 连接状态单 §三:channel status 只读快照
 #include "cli/console_input.hpp"
 #include "cli/gateway_command.hpp"  // 总装单 G1:gateway run/status/stop 子命令
+#include "cli/kanban_command.hpp"   // 会话看板单:kanban 子命令(只读 HTML 快照)
 #include "cli/trajectory_command.hpp"  // P0-3:trajectory verify/replay/harness-replay 子命令
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -970,6 +971,16 @@ int RunCli(const std::vector<std::string>& args) {
             // 泵的并轨缝见 assistant_host.hpp 注记(待接 gateway_launch)。
             return RunAssistantMode(parsed_cli.assistant);
         case CliAction::BadAssistant:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunKanban: {
+            // 会话看板单:只读快照(全量 session 索引 → 自包含 HTML)。
+            cli::KanbanCommandArgs kanban_args;
+            kanban_args.no_open = parsed_cli.kanban.no_open;
+            kanban_args.output = parsed_cli.kanban.output;
+            return cli::RunKanbanCommand(kanban_args);
+        }
+        case CliAction::BadKanban:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:
