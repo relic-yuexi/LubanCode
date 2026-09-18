@@ -282,7 +282,7 @@ TEST_CASE("v3 resume: 验卷+链投影出有效对话,续接源场(同 id 续写
         std::error_code ec;
         for (const auto& op : std::filesystem::directory_iterator(
                  scaffold.sessions_dir.parent_path() / "lifecycle", ec)) {
-            const std::ifstream in(op.path() / "intent.json", std::ios::binary);
+            std::ifstream in(op.path() / "intent.json", std::ios::binary);
             if (!in.is_open()) {
                 continue;
             }
@@ -360,7 +360,7 @@ TEST_CASE("v3 续接不堆场: 连续两次 resume 同一场,列表条目与 id 
     const std::size_t lines_after_first = Events(stream).size();
     // 一场账本一活场:先封口再续接(交互 /resume 的换场事务同款)。
     NullClearParticipant participant;
-    trajectory::CloseRequest close;
+    CloseRequest close;
     close.reason = "switch_to_resume";
     REQUIRE(manager.Close(close, &participant).error_code.empty());
     const auto second = manager.ResumeAsNew(request);

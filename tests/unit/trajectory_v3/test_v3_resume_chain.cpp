@@ -36,6 +36,7 @@
 #include "workspace/identity.hpp"
 
 namespace platform = lubancode::platform;
+namespace v3 = lubancode::trajectory::v3;
 using namespace lubancode;
 using lubancode::runtime::RestoredHistoryItem;
 using lubancode::runtime::TrajectorySessionLedger;
