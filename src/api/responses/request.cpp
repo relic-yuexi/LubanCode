@@ -44,9 +44,10 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                             {"name", b.name},
                             {"arguments", b.input.dump()}};
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
-                // responses wire 的 reasoning 是一次性的,不参与续会话重放。
-                // 这里给一个 reasoning 占位,调用方(BuildRequestJson)会跳过。
-                return json{{"type", "__thinking_skip__"}};
+                if (b.responses_item.is_object()) return b.responses_item;
+                // 旧历史只存文字时保留文字,不伪造 id 或加密载荷。
+                return json{{"type", "reasoning"},
+                            {"summary", json::array({json{{"type", "summary_text"}, {"text", b.text}}})}};
             } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
                 // 加密思考块(差距清单 §8.2 第 6 条)同款一次性:不透明载荷
                 // 在这副 wire 上没有可回传的形状,占位由调用方跳过。
@@ -199,9 +200,10 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         }
         if (!has_image) {
             for (const auto& block : message.content) {
-                if (std::holds_alternative<ThinkingBlock>(block) ||
+                if ((std::holds_alternative<ThinkingBlock>(block) &&
+                     (!ShouldReplayThinking(request) || message.role != Role::Assistant)) ||
                     std::holds_alternative<RedactedThinkingBlock>(block)) {
-                    continue;  // 思考块不回传:responses wire 的 reasoning 是一次性的
+                    continue;
                 }
                 if (wire_map != nullptr) {
                     wire_map->message_to_wire[message_index].push_back(input.size());
@@ -235,7 +237,12 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                         content.push_back(json{{"type", "input_image"},
                                                {"image_url", "data:" + b.media_type + ";base64," + b.data}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
-                        // 思考块不回传:responses wire 的 reasoning 是一次性的
+                        if (ShouldReplayThinking(request) && message.role == Role::Assistant) {
+                            flush_content();
+                            if (wire_map != nullptr)
+                                wire_map->message_to_wire[message_index].push_back(input.size());
+                            input.push_back(ContentBlockToItem(block, message.role));
+                        }
                     } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
                         // 加密思考块(差距清单 §8.2 第 6 条)同款一次性,
                         // 不透明载荷没有可回传的形状。

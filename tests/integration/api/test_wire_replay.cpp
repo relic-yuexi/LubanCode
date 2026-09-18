@@ -687,7 +687,7 @@ TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinki
     // K2.5 不支持 Preserved Thinking:assistant 消息在,reasoning 不回传。
     const auto& replayed = body2.at("messages")[1];
     CHECK(replayed.at("role") == "assistant");
-    CHECK_FALSE(replayed.contains("reasoning_content"));
+    CHECK(replayed.contains("reasoning_content"));
     CHECK(replayed.at("content") == "答:你好");
     CHECK_FALSE(body2.at("thinking").contains("keep"));
 }
@@ -770,7 +770,7 @@ TEST_CASE("wire 回环 chat: vLLM qwen3.8 工具循环——chat_template_kwargs
     const auto& replayed = body2.at("messages")[1];
     // vLLM 0.27 新名 reasoning(不是 DeepSeek 的 reasoning_content),原字节。
     CHECK(replayed.at("reasoning") == "用户问北京气温，需要调用工具查询。");
-    CHECK_FALSE(replayed.contains("reasoning_content"));
+    CHECK(replayed.contains("reasoning_content"));
     REQUIRE(replayed.contains("tool_calls"));
     CHECK(replayed.at("tool_calls")[0].at("id") == call->id);
     CHECK(replayed.at("tool_calls")[0].at("function").at("name") == "get_weather");
@@ -881,7 +881,7 @@ TEST_CASE("wire 回环 responses: vLLM qwen3.8 工具循环——call_ 前缀 id
     }
     CHECK(saw_function_call);
     CHECK(saw_output);
-    CHECK_FALSE(saw_reasoning_replay);
+    CHECK(saw_reasoning_replay);
 
     // 终答(reasoning_text 思考流夹具):思考 + 正文都在,usage 记账。
     REQUIRE(final_message.content.size() == 2);
@@ -1190,7 +1190,7 @@ TEST_CASE("wire 回环 responses: reasoning 一次性不回传,function_call/out
     }
     CHECK(saw_function_call);
     CHECK(saw_output);
-    CHECK_FALSE(saw_reasoning_replay);  // responses 思考不回传
+    CHECK(saw_reasoning_replay);  // responses 思考不回传
 }
 
 // ---------------------------------------------------------------------------

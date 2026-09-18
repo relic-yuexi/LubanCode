@@ -116,6 +116,8 @@ struct ToolResultBlock {
 struct ThinkingBlock {
     std::string text;
     std::string signature;
+    // Responses 完整 reasoning item,含 id/content/summary/encrypted_content。
+    nlohmann::json responses_item = nullptr;
 };
 
 // 服务端加密/遮蔽的思考块(Anthropic 的 redacted_thinking,轨迹 v3 差距
@@ -471,6 +473,8 @@ struct TextDelta {
 struct ThinkingDelta {
     std::string text;
     std::string signature;
+    // Responses 完整 reasoning item,含 id/content/summary/encrypted_content。
+    nlohmann::json responses_item = nullptr;
 };
 
 // 一次工具调用开始:拿到 id 和工具名,入参还没填。
@@ -709,4 +713,9 @@ struct WireMessageMap {
 std::optional<int> IntKeyFromExtraBody(const nlohmann::json& provider_extra_body,
                                        const nlohmann::json& request_extra_body, const char* key);
 
+// 四条 wire 共用:关闭思考或显式关闭历史回传时停止发送,本地历史不删。
+inline bool ShouldReplayThinking(const Request& request) {
+    return request.reasoning_history != ReasoningHistoryMode::Disabled &&
+           !ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
+}
 }  // namespace lubancode::api

@@ -1,5 +1,11 @@
 # 更新记录
 
+## Unreleased
+
+- 历史思考默认完整回传，不再按纯聊天、工具交互或旧模型 replay 策略裁剪。Kimi K2.6 自动配套发送 `thinking.keep=all`。`/think history off` 单独关闭回传，`/think history default` 或 `all` 恢复；关闭本轮思考也暂停回传，本地历史不删。
+- Responses 保存并回传完整 reasoning item（含加密载荷），Gemini 回传 thought 与签名；会话保存与恢复补齐签名和 Responses 原生条目。
+
+
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
 ## [v0.26.277] - 2026-09-18

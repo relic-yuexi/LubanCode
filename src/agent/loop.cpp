@@ -138,7 +138,8 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message, doubl
                     return EstimateTextTokensForPreflight(b.tool_use_id) +
                            EstimateTextTokensForPreflight(b.content) + image_tokens;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
-                    return EstimateTextTokensForPreflight(b.text) + EstimateTextTokensForPreflight(b.signature);
+                    return EstimateTextTokensForPreflight(b.text) + EstimateTextTokensForPreflight(b.signature) +
+                           (b.responses_item.is_null() ? 0 : EstimateTextTokensForPreflight(b.responses_item.dump()));
                 } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
                     // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
                     // anthropic wire 原样回传,真占输入 token,按字节口径估。

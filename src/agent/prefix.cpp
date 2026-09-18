@@ -158,6 +158,7 @@ void HashMixBlock(std::uint64_t& hash, const api::ContentBlock& block) {
                 HashMix(hash, "h:");
                 HashMix(hash, b.text);
                 HashMix(hash, b.signature);
+                if (!b.responses_item.is_null()) HashMix(hash, b.responses_item.dump());
             }
         },
         block);

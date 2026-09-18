@@ -110,7 +110,7 @@ TEST_CASE("ValidateContextWindowPanelSelection: 所选思考档不在最新候�
     }
 }
 
-TEST_CASE("ValidateContextWindowPanelSelection: 关思考与 history all 冲突,拒绝(与 /think 同谓词)") {
+TEST_CASE("ValidateContextWindowPanelSelection: 关闭思考合法,history all 不再拦截") {
     const auto window = cli::BuildContextWindowCandidates(std::size_t{1000000}, std::size_t{200000});
     // RequestControl 方言 + 声明 none 档:Disabled 进候选,校验仍要拦
     // "关思考 + 跨轮保留"的组合。
@@ -124,8 +124,8 @@ TEST_CASE("ValidateContextWindowPanelSelection: 关思考与 history all 冲突,
         app::ValidateContextWindowPanelSelection("moonshot", "kimi", "moonshot", "kimi", window, effort,
                                                  &with_none, api::ReasoningHistoryMode::All,
                                                  Selection(false, 0, true, "none"));
-    CHECK_FALSE(validation.ok);
-    CHECK(validation.error == "cmd.context_window.reject.history_conflict");
+    CHECK(validation.ok);
+    CHECK(validation.error.empty());
 
     // history 在 default:关思考合法放行(同 /think 的边界)。
     const auto ok_validation =

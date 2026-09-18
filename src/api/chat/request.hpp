@@ -6,21 +6,8 @@
 
 namespace lubancode::api::chat {
 
-// reasoning 回传策略(随 provider capability 走,不按模型名散落特判):
-//   never        一律不回传(现行默认;纯对话省 token 也合规矩)。
-//   tool_episode 按 user-to-user 交互段办事(DeepSeek Chat 的协议):一段
-//                交互只要实际走了工具调用,段内 assistant 的思考正文按
-//                原字节原次序回传成 reasoning_content,后续 user/tool_result
-//                轮次继续保留,不摘要、不加标签、不混进 content;纯对话段
-//                的思考照旧略过。少了这段回传,DeepSeek 带 tools 的后续
-//                请求可能直接吃 400。
-//   always       工作视图里每条带 ThinkingBlock 的原始 assistant 消息都
-//                回传(Kimi K3/K2.7 Code 的 Preserved Thinking 契约):
-//                纯对话、工具调用、最终总结一视同仁,多枚思考块按块序
-//                原字节拼接,一条消息只写一份字段;没思考不造空串,也不
-//                凭正文猜。消息既然留在请求里,配套思考就不能剥掉。
-// anthropic 走自带 signature 的 thinking 块,responses 走服务端状态/
-// reasoning item,都不套这份 Chat 特判。
+// 旧目录/调用方兼容枚举。回传开关统一由 Request.reasoning_history 与
+// reasoning_effort 决定,默认完整保留;不再按工具交互裁剪。
 enum class ReasoningReplayPolicy { Never, ToolEpisode, Always };
 
 // Chat 请求的 transport 选项(随 provider capability 走,不进中立
@@ -35,7 +22,7 @@ enum class ReasoningReplayPolicy { Never, ToolEpisode, Always };
 //                     stream_options 就整个压过这里。
 struct ChatRequestOptions {
     bool stream_usage = false;
-    ReasoningReplayPolicy reasoning_replay = ReasoningReplayPolicy::Never;
+    ReasoningReplayPolicy reasoning_replay = ReasoningReplayPolicy::Always;
     // reasoning_param:推理档位在请求体顶层的参数名。OpenAI 官方是
     // reasoning_effort(默认);有的本地兼容端叫别的名字,provider 可在
     // 配置里声明(ProviderConfig::think_param),经 Config 镜像到这里。

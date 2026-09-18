@@ -552,62 +552,18 @@ ThinkHistorySwitch DecideThinkHistorySwitch(lubancode::api::ReasoningHistoryMode
                                              lubancode::api::ReasoningHistoryMode requested,
                                              const lubancode::api::ReasoningConfig& reasoning,
                                              const std::string& effort) {
+    (void)current;
+    (void)reasoning;
     ThinkHistorySwitch out;
-    out.mode = current;
-    const lubancode::api::ReasoningHistorySupport support =
-        lubancode::api::ReasoningHistorySupportFor(reasoning);
-    if (requested == lubancode::api::ReasoningHistoryMode::ProviderDefault) {
-        out.applied = true;
-        out.mode = lubancode::api::ReasoningHistoryMode::ProviderDefault;
-        switch (support) {
-            case lubancode::api::ReasoningHistorySupport::RequestControl:
-                out.notes.push_back(
-                    "已切回 provider default:新请求不再发 thinking.keep,不宣称跨轮 Preserved Thinking;"
-                    "同一 Turn 的工具循环仍按 tool_episode 回传本枚 Turn 的思考。");
-                break;
-            case lubancode::api::ReasoningHistorySupport::ServerFixed:
-                // 试图"关 history"的明报(P1 第 4 条):K3/K2.7 的保留由服务端
-                // 固定开启,客户端没有关它的旋钮——说了,不猜。
-                out.notes.push_back(
-                    "此模型的 preserved thinking 由服务端固定开启,模型不支持关闭;"
-                    "历史回传仍按 always 全量送回,与这个选择无关。");
-                break;
-            case lubancode::api::ReasoningHistorySupport::None:
-                out.notes.push_back(
-                    "此模型不支持 Preserved Thinking;default 即其常态(历史思考留在本地,不随请求送回)。");
-                break;
+    out.applied = true;
+    out.mode = requested;
+    if (requested == lubancode::api::ReasoningHistoryMode::Disabled) {
+        out.notes.push_back("已关闭历史思考回传;本地历史仍保留。");
+    } else {
+        out.notes.push_back("历史思考默认全量回传,不再区分纯聊天与工具交互。");
+        if (lubancode::api::ReasoningEffortIsOff(effort, reasoning)) {
+            out.notes.push_back("当前思考已关闭;重新开启后恢复回传。");
         }
-        return out;
-    }
-    // requested == All
-    switch (support) {
-        case lubancode::api::ReasoningHistorySupport::RequestControl: {
-            if (lubancode::api::ReasoningEffortIsOff(effort, reasoning)) {
-                // 冲突明报,不猜(P1 第 3 条):保留建立在思考开启之上,用户又
-                // 关了思考——拒绝切换,指路让用户自己定夺。
-                out.notes.push_back(
-                    "冲突:当前思考处于关闭档(none),跨轮保留建立在思考开启之上,不能既关思考又要保留。"
-                    "先把 /think 切回开思考的档,或维持 /think history default。");
-                return out;
-            }
-            out.applied = true;
-            out.mode = lubancode::api::ReasoningHistoryMode::All;
-            out.notes.push_back(
-                "已开跨轮保留:请求将同发 thinking.type=\"enabled\" 与 thinking.keep=\"all\","
-                "历史回传升为 always——纯对话段的思考也随下一份请求原字节送回。");
-            return out;
-        }
-        case lubancode::api::ReasoningHistorySupport::ServerFixed:
-            out.applied = true;
-            out.mode = lubancode::api::ReasoningHistoryMode::All;
-            out.notes.push_back(
-                "此模型的 preserved thinking 由服务端固定开启,wire 上没有可请求的保留字段;"
-                "选择已记档(切到 K2.6 这类可选保留的模型时照常生效)。");
-            return out;
-        case lubancode::api::ReasoningHistorySupport::None:
-            // K2.5 与无方言旧端(P1 第 5 条):当场报不支持,拒绝落账。
-            out.notes.push_back("此模型不支持 Preserved Thinking,开不了 history all。");
-            return out;
     }
     return out;
 }
@@ -615,50 +571,21 @@ ThinkHistorySwitch DecideThinkHistorySwitch(lubancode::api::ReasoningHistoryMode
 bool RevalidateThinkHistoryMode(const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history,
                                 const std::shared_ptr<std::string>& current_think,
                                 const lubancode::config::ModelCatalogEntry* entry) {
-    if (current_think_history == nullptr ||
-        *current_think_history != lubancode::api::ReasoningHistoryMode::All) {
-        return false;  // default 对任何模型都是合法状态,不用动
-    }
-    const lubancode::api::ReasoningConfig empty_reasoning;
-    const lubancode::api::ReasoningConfig& reasoning = entry != nullptr ? entry->reasoning : empty_reasoning;
-    const lubancode::api::ReasoningHistorySupport support =
-        lubancode::api::ReasoningHistorySupportFor(reasoning);
-    if (support == lubancode::api::ReasoningHistorySupport::ServerFixed) {
-        return false;  // 固定开启:All 由服务端兜底,wire 无字段,选择合法保留
-    }
-    if (support == lubancode::api::ReasoningHistorySupport::RequestControl &&
-        !lubancode::api::ReasoningEffortIsOff(*current_think, reasoning)) {
-        return false;  // 可选保留且思考开着:合法,不动
-    }
-    // 到这里只剩两种失效:模型不支持(K2.5/目录外),或可选保留但思考被
-    // 目录默认/继承档位关了。回 default 并明说——不硬带,也不猜。
-    *current_think_history = lubancode::api::ReasoningHistoryMode::ProviderDefault;
-    if (support == lubancode::api::ReasoningHistorySupport::None) {
-        TermOut() << "history: 当前模型不支持 Preserved Thinking,跨轮保留已回落 default"
-                     "(历史思考仍留在本地会话,不删)。"
-                  << "\n";
-    } else {
-        TermOut() << "history: 当前模型思考处于关闭档,与跨轮保留冲突,已回落 default;"
-                     "要保留先把 /think 切回开思考的档再 /think history all。"
-                  << "\n";
-    }
-    return true;
+    // 切模型、关思考都不改用户选择,下次请求按当前开关裁决。
+    (void)current_think_history;
+    (void)current_think;
+    (void)entry;
+    return false;
 }
 
-// 历史保留能力的人话行(/think history 裸敲与 /think 裸敲共用)。
 std::string ThinkHistorySupportLine(const lubancode::api::ReasoningConfig& reasoning) {
-    switch (lubancode::api::ReasoningHistorySupportFor(reasoning)) {
-        case lubancode::api::ReasoningHistorySupport::RequestControl:
-            return "模型能力: 可选跨轮保留(请求发 thinking.keep=\"all\")";
-        case lubancode::api::ReasoningHistorySupport::ServerFixed:
-            return "模型能力: 服务端固定开启保留,不可关闭(wire 无请求字段)";
-        case lubancode::api::ReasoningHistorySupport::None:
-            return "模型能力: 不支持 Preserved Thinking";
-    }
-    return std::string();
+    return reasoning.dialect.history_control == "thinking_keep"
+               ? "历史思考: 默认原样回传,配套发送 thinking.keep=\"all\";关闭思考或 history off 后停发"
+               : "历史思考: 默认按协议原样回传;关闭思考或 history off 后停发";
 }
 
 std::string ThinkHistoryModeName(lubancode::api::ReasoningHistoryMode mode) {
+    if (mode == lubancode::api::ReasoningHistoryMode::Disabled) return "off";
     return mode == lubancode::api::ReasoningHistoryMode::All ? "all" : "default";
 }
 
@@ -673,15 +600,17 @@ void HandleThinkHistoryCommand(const std::string& value,
         // 裸敲:亮当前形状——模式、模型能力、下一份请求会怎么落线。
         TermOut() << "历史保留: " << ThinkHistoryModeName(*current_think_history) << "\n";
         TermOut() << ThinkHistorySupportLine(reasoning) << "\n";
-        TermOut() << "用法: /think history default|all(all = 请求 thinking.keep=\"all\",历史回传升为 always)"
+        TermOut() << "用法: /think history default|all|off(default/all = 全量回传,off = 关闭回传)"
                   << "\n";
         return;
     }
     lubancode::api::ReasoningHistoryMode requested = lubancode::api::ReasoningHistoryMode::ProviderDefault;
     if (value == "all") {
         requested = lubancode::api::ReasoningHistoryMode::All;
+    } else if (value == "off") {
+        requested = lubancode::api::ReasoningHistoryMode::Disabled;
     } else if (value != "default") {
-        TermOut() << "认不得的档: " << value << "(只认 default|all)\n";
+        TermOut() << "认不得的档: " << value << "(只认 default|all|off)\n";
         return;
     }
     const ThinkHistorySwitch decision =
@@ -2371,19 +2300,6 @@ CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::Pa
         ctx.sync_request_policy();
         return CommandFlow::Continue;
     }
-    // 关思考与 history all 的冲突拦截(P1 第 3 条):可选保留的模型上,用户
-    // 已开 all 又把档位切到 none——明报拒绝,不猜(要关思考先把 history 切
-    // 回 default)。其余模型照旧走档位切换。
-    if (!parsed.args.empty() && ctx.current_think_history != nullptr &&
-        *ctx.current_think_history == lubancode::api::ReasoningHistoryMode::All && entry != nullptr &&
-        lubancode::api::ReasoningHistorySupportFor(entry->reasoning) ==
-            lubancode::api::ReasoningHistorySupport::RequestControl &&
-        lubancode::api::ReasoningEffortIsOff(parsed.args, entry->reasoning)) {
-        TermOut() << "冲突: 跨轮保留(history all)建立在思考开启之上,此模型不支持关着思考保留。"
-                     "先 /think history default 再关思考,或换一个开思考的档。"
-                  << "\n";
-        return CommandFlow::Continue;
-    }
     HandleThinkCommand(parsed.args, ctx.current_think, entry, ctx.config->provider_think_levels,
                        ctx.config->think_param);
     // 模型协议兼容实录矩阵单 P1:落线方言一并亮出来——档位只是抽象值,
@@ -2416,31 +2332,19 @@ CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::Pa
             const std::string named = field.empty() ? std::string("reasoning_content") : field;
             return "历史回传: " + policy + " -> " + named + "(" + source + ")";
         };
-        if (model != nullptr && !model->reasoning.dialect.empty()) {
-            // P1:开了 history all 时,回传形状按升级后的 always 报——用户
-            // 该看见下一份请求真正会怎么走,不是方言的静态缺省。
-            std::string replay = model->reasoning.dialect.replay;
-            if (*ctx.current_think_history == lubancode::api::ReasoningHistoryMode::All &&
-                model->reasoning.dialect.history_control == "thinking_keep") {
-                replay = "always";
-            }
-            TermOut() << replay_line(replay, model->reasoning.dialect.replay_field, "模型方言声明")
-                      << "\n";
-        } else {
-            TermOut() << replay_line(ctx.config->reasoning_replay.empty()
-                                         ? std::string("never")
-                                         : ctx.config->reasoning_replay,
-                                     ctx.config->reasoning_replay_field,
-                                     "provider 兼容声明,模型无方言")
-                      << "\n";
-        }
+        const bool replay_enabled =
+            *ctx.current_think_history != lubancode::api::ReasoningHistoryMode::Disabled &&
+            !lubancode::api::ReasoningEffortIsOff(*ctx.current_think,
+                entry != nullptr ? entry->reasoning : lubancode::api::ReasoningConfig{});
+        const std::string field = model != nullptr && !model->reasoning.dialect.replay_field.empty()
+                                      ? model->reasoning.dialect.replay_field
+                                      : ctx.config->reasoning_replay_field;
+        TermOut() << replay_line(replay_enabled ? "always" : "off", field, "用户开关") << "\n";
         // P1:跨轮保留选择一行(验收:本轮开关/effort/replay/history mode
         // 分别可见)。模型能力行顺带说明这个选择在这个模型上是什么身份。
         const lubancode::api::ReasoningConfig empty_reasoning;
         TermOut() << "历史保留: "
-                  << (*ctx.current_think_history == lubancode::api::ReasoningHistoryMode::All
-                          ? std::string("all")
-                          : std::string("default"))
+                  << ThinkHistoryModeName(*ctx.current_think_history)
                   << "\n";
         TermOut() << ThinkHistorySupportLine(entry != nullptr ? entry->reasoning : empty_reasoning) << "\n";
     }

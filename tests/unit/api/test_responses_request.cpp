@@ -1,3 +1,5 @@
+#include "api/assembler.hpp"
+#include "api/responses/events.hpp"
 // 中立 Request -> Responses JSON 的映射逐项验证:BuildRequestJson 是纯函数,
 // 不碰网络,这里直接调用、断言拼出来的 JSON 长什么样。
 
@@ -601,4 +603,30 @@ TEST_CASE("Responses proxy replay: tool_search+tool_invoke 定义恒在,argument
     }
     CHECK(saw_discovery);
     CHECK(saw_proxy);
+}
+
+
+TEST_CASE("Responses native reasoning survives stream assembly and both replay layouts") {
+    const auto native = nlohmann::json::parse(R"({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"  exact\ntext "}],"encrypted_content":"opaque-payload"})");
+    MessageAssembler assembler;
+    assembler.Feed(ThinkingDelta{"  exact\ntext "});
+    ThinkingDelta done;
+    done.responses_item = native;
+    assembler.Feed(done);
+    assembler.Feed(TextDelta{"answer"});
+    assembler.Feed(MessageDone{});
+    Request request;
+    request.model = "test";
+    request.messages.push_back(assembler.BuildMessage());
+    REQUIRE(request.messages[0].content.size() == 2);
+    CHECK(std::get<ThinkingBlock>(request.messages[0].content[0]).responses_item == native);
+    CHECK(BuildRequestJson(request)["input"][0] == native);
+    request.messages[0].content.push_back(ImageBlock{"image/png", "AAAA", "x.png", 1, 1});
+    CHECK(BuildRequestJson(request)["input"][0] == native);
+    request.reasoning_history = ReasoningHistoryMode::Disabled;
+    CHECK(BuildRequestJson(request).dump().find("opaque-payload") == std::string::npos);
+    const auto events = responses::ExpandNonStreamResponse(nlohmann::json{{"output", nlohmann::json::array({native})}}.dump());
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(std::holds_alternative<ThinkingDelta>(events[0]));
+    CHECK(std::get<ThinkingDelta>(events[0]).responses_item == native);
 }

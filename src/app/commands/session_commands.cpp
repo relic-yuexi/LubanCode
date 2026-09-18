@@ -498,7 +498,8 @@ lubancode::api::Message V3MaterialToApiMessage(const nlohmann::json& body) {
             if (type == "text" && part.contains("text") && part["text"].is_string()) {
                 message.content.push_back(lubancode::api::TextBlock{part["text"].get<std::string>()});
             } else if (type == "thinking" && part.contains("text") && part["text"].is_string()) {
-                message.content.push_back(lubancode::api::ThinkingBlock{part["text"].get<std::string>()});
+                message.content.push_back(lubancode::api::ThinkingBlock{part["text"].get<std::string>(),
+                    part.value("signature", std::string()), part.value("responses_item", nlohmann::json(nullptr))});
             }
         }
     };
@@ -2654,15 +2655,7 @@ ContextWindowPanelValidation ValidateContextWindowPanelSelection(
             out.error = "cmd.context_window.reject.effort_stale";
             return out;
         }
-        // 关思考与 history all 的冲突拦截(与 HandleSlashThink 同一谓词,
-        // 单子 §5.3):可选保留的模型上,不能既关思考又要跨轮保留。
-        if (think_history == lubancode::api::ReasoningHistoryMode::All && entry_now != nullptr &&
-            lubancode::api::ReasoningHistorySupportFor(entry_now->reasoning) ==
-                lubancode::api::ReasoningHistorySupport::RequestControl &&
-            lubancode::api::ReasoningEffortIsOff(selection.effort_value, entry_now->reasoning)) {
-            out.error = "cmd.context_window.reject.history_conflict";
-            return out;
-        }
+        (void)think_history;  // 关思考即可暂停回传,不再与 history all 冲突。
     }
     out.ok = true;
     return out;

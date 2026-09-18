@@ -228,7 +228,7 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
                 text += part->text;
                 output_blocks.push_back({{"type", "text"}, {"text", part->text}});
             } else if (const auto* thought = std::get_if<api::ThinkingBlock>(&block)) {
-                output_blocks.push_back({{"type", "thinking"}, {"text", thought->text}, {"signature", thought->signature}});
+                output_blocks.push_back({{"type", "thinking"}, {"text", thought->text}, {"signature", thought->signature}, {"responses_item", thought->responses_item}});
             } else if (const auto* opaque = std::get_if<api::RedactedThinkingBlock>(&block)) {
                 output_blocks.push_back({{"type", "redacted_thinking"}, {"data", opaque->data}});
             } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {

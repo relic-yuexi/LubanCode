@@ -104,6 +104,7 @@ std::string RequestMessageViewFingerprint(const api::Message& message) {
             buffer += "t" + text->text;
         } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
             buffer += "k" + thinking->text + thinking->signature;
+            if (!thinking->responses_item.is_null()) buffer += thinking->responses_item.dump();
         } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
             buffer += "u" + call->id + call->name + call->input.dump();
         } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
@@ -482,7 +483,7 @@ nlohmann::json MessageToBlocksJson(const api::Message& message) {
         if (const auto* text = std::get_if<api::TextBlock>(&block)) {
             blocks.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
         } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
-            blocks.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}});
+            blocks.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}, {"signature", thinking->signature}, {"responses_item", thinking->responses_item}});
         } else if (const auto* image = std::get_if<api::ModelImageBlock>(&block)) {
             // 图片正文永不内联:只落引用块(sha/path),base64 不进 Journal。
             blocks.push_back(nlohmann::json{{"type", "image_ref"},
@@ -1564,7 +1565,7 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
         if (const auto* text = std::get_if<api::TextBlock>(&block)) {
             content.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
         } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
-            content.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}});
+            content.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}, {"signature", thinking->signature}, {"responses_item", thinking->responses_item}});
         } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
             if (call->id.empty()) {
                 continue;  // 空 id 的 call 不入账(与 v2 calls_ 造册口同款)
@@ -2910,7 +2911,7 @@ bool TrajectoryBypassBridge::V3OutputCompleted(const std::string& request_id, co
         if (const auto* text = std::get_if<api::TextBlock>(&block)) {
             content.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
         } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
-            content.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}});
+            content.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}, {"signature", thinking->signature}, {"responses_item", thinking->responses_item}});
         }
         // 旁路采样无工具调用,ToolUse/ToolResult 不该出现,出现了也不入账。
     }
@@ -4777,6 +4778,8 @@ std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState
             } else if (type == "thinking" && block.contains("text")) {
                 api::ThinkingBlock thinking;
                 thinking.text = block["text"].get<std::string>();
+                thinking.signature = block.value("signature", std::string());
+                thinking.responses_item = block.value("responses_item", nlohmann::json(nullptr));
                 projected.content.push_back(std::move(thinking));
             } else if (type == "tool_call" && block.contains("call_id") && block.contains("name")) {
                 api::ToolUseBlock call;

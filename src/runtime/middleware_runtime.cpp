@@ -126,7 +126,7 @@ nlohmann::json ContentBlockToJson(const api::ContentBlock& block) {
         // 计量包含实际回传的明文 reasoning(§4.36);签名不是思考 token 的
         // 计量物,字节长度照算(代理口径,不冒充精确预算)。
         return nlohmann::json{{"type", "thinking"}, {"text", thinking->text},
-                              {"signature", thinking->signature}};
+                              {"signature", thinking->signature}, {"responses_item", thinking->responses_item}};
     }
     if (const auto* model_image = std::get_if<api::ModelImageBlock>(&block)) {
         return nlohmann::json{{"type", "image"}, {"filename", model_image->filename},
