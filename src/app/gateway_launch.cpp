@@ -140,6 +140,16 @@ int RunGatewayWithPlan(const GatewayLaunchPlan& plan) {
         pump_options.on_progress = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
         pump_options.max_steps_per_turn = 32;   // V1 生产缺省:预算三根
         pump_options.max_wall_secs = 600;       // 硬线至少步数+墙钟两根
+        // 批次执行策略(只读并行单 P3 宿主接线):gateway 自动任务会话吃
+        // 全局 config 的 agent.tool_execution/parallel_read_concurrency——与
+        // 终端/单发/app-server 同一条解析轴,缺省 Exclusive 不并行。渠道
+        // 会话的逐轮收窄闸(per_turn_tools)在场时,批内 Hook 在场整批回
+        // 退串行,由 loop 的调度合同管,这里不做第二套裁决。
+        pump_options.tool_batch_strategy =
+            agent::ParseToolBatchStrategy(wiring_config.agent.tool_execution)
+                .value_or(agent::ToolBatchStrategy::Exclusive);
+        pump_options.parallel_read_concurrency =
+            agent::ClampParallelReadConcurrency(wiring_config.agent.parallel_read_concurrency);
         pump.emplace();
         const auto open = runtime::GatewayAutomationPump::Open(&*pump, *backend, registry,
                                                                std::move(pump_options));

@@ -283,6 +283,11 @@ public:
         int max_steps_per_turn = 32;
         int max_wall_secs = 600;
         std::int64_t max_total_tokens = 0;
+        // 批次执行策略(只读并行单 P3 宿主接线):助理自动任务会话从
+        // config 的 agent.tool_execution/parallel_read_concurrency 折好递进
+        //(宿主 assistant_host 填);缺省 Exclusive 与 AgentRuntimeProfile 同档。
+        agent::ToolBatchStrategy tool_batch_strategy = agent::ToolBatchStrategy::Exclusive;
+        int parallel_read_concurrency = agent::kDefaultParallelReadConcurrency;
         // 活模型名取值口(W2):非空时泵每次执行取当前模型名(宿主递
         // config 快照,首配后新任务吃新账);空 = options.model 定死。
         std::function<std::string()> model_provider;

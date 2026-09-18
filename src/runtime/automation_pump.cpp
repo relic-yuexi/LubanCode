@@ -445,6 +445,8 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     executor_options.max_steps_per_turn = options_.max_steps_per_turn;
     executor_options.max_wall_secs = options_.max_wall_secs;
     executor_options.max_total_tokens = options_.max_total_tokens;
+    executor_options.tool_batch_strategy = options_.tool_batch_strategy;
+    executor_options.parallel_read_concurrency = options_.parallel_read_concurrency;
     executor_options.fault_injection = options_.fault_injection;
     executor_options.on_tool_confirm = options_.on_tool_confirm;  // W2:助理审批口(空=无人值守 fail closed)
     executor_options.model = options_.model_provider ? options_.model_provider() : options_.model;

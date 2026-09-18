@@ -136,6 +136,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `tool_search_token_floor` | 非负整数 | `1500` | 延迟挂载的 token 预算门:延迟工具全量常驻的声明 token 本金(名字+描述+schema)低于此值时,总数过了阈值也不启用——本金太小,启用反比全量常驻贵(依据 P0 baseline 实测,见 [工具参考·延迟挂载](tools.md#延迟挂载与工具搜索))。`0` 关掉这道门,只看枚数。 |
 | `deferred_tool_mode` | `auto` / `disabled` / `proxy_reference` / `native_reference` / `legacy_expand`,可留空 | 空 = 按 `auto` 解析 | 延迟工具命中之后的走法。未配置(空)与 `auto` 同待遇,能力驱动——明确支持原生引用的模型(anthropic wire 且目录声明 `deferred_tools`)走 `native_reference`,其余落 `proxy_reference`(2026-09-03 真机 §12.5 质量对照过门后的默认,证据见 `eval/deferred_quality/report.md`);`legacy_expand` 是兼容档,**cache-hostile**(命中后 schema 扩写回顶层,断前缀缓存),迁移窗内保留,启动横幅会明标;`proxy_reference` 通用代理路,前缀缓存不断;`native_reference` 写了但门不开会大声回落;`disabled` 全量常驻,压过两道闸。回退:显式写 `legacy_expand`/`disabled` 任一即压过默认。详见 [工具参考·延迟挂载](tools.md#延迟挂载与工具搜索)。 |
 | `tool_calling` | `json` / `programmatic` / `auto` | `json` | 工具调用后端。`json` 保持现状；`programmatic` 强制 PTC，条件不满足时启动明报回落；`auto` 按能力画像与任务形状选，当前恒落 `json`。只从配置文件读，环境变量不认。见 [PTC 手册](../features/tools/ptc.md)。 |
+| `agent.tool_execution` | `exclusive` / `parallel_read` | `exclusive` | 工具批执行策略(只读并行单)。`exclusive` 全串行,不声明即此档;`parallel_read` 让同一批调用里**连续的只读段**有界并行、写入与未知调用独占执行并挡住后续读取(段与独占节点互为屏障)。只放行审定过的内置 `read_file`/`search`,插件/MCP/需确认工具一律独占;任一只 Pre/Post 工具 Hook 在场或批次混入 job_handle/native_deferred 时整批回退串行。终端、one-shot、app-server、Gateway、子代理同一轴,子代理整份继承。认不得的值按默认档收口。坏值静默跳过。 |
+| `agent.parallel_read_concurrency` | 正整数 `1..16` | `4` | `parallel_read` 策略下读段的并发上限。`1` = 调度器不接管,完整串行语义。越界值按 1/16 钳制。 |
 | `ptc` | JSON object | 见 [PTC 手册](../features/tools/ptc.md) | Python 解释器、资源上限、调用/并发上限、受限 token 与入选工具白名单。项目级整段压过全局。 |
 | `memory` | JSON object | `enabled=false` | 项目记忆开关、读写子开关与召回预算，见下节。只能由全局配置打开。 |
 | `language` | `zh-CN` / `en` / 语言包语言码 | 空 = 跟系统 | 界面语言。 |

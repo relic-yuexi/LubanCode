@@ -284,6 +284,78 @@ TEST_CASE("agent 工具:计数账——一步并行三件工具 steps_used 仍�
     CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::Completed);
 }
 
+// 只读并行单 P3 宿主验收·子代理:主会话把 ParallelRead 策略随 AgentProfile
+// 递进来(SetAgentProfile 连 runtime 一并落账),子代理自己的批次照常并行
+// ——进门闸证明真并发,台账与结果配对不缺环。
+TEST_CASE("agent 工具:子代理批次吃继承的 ParallelRead——两读真并发,配对不缺") {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::size_t entered = 0;
+        int timeouts = 0;
+    };
+    struct GatedRead : tools::Tool {
+        GatedRead(Gate& g, std::atomic<int>& p) : gate(g), peak(p) {}
+        Gate& gate;
+        std::atomic<int>& peak;
+        std::atomic<int> active{0};
+        std::string name() const override { return "read_file"; }
+        std::string description() const override { return "子代理读靶"; }
+        nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+        tools::EffectClass effect_class() const override { return tools::EffectClass::ReadOnlyLocal; }
+        tools::Tool::Result execute(const nlohmann::json&) override { return {"不走旧口", true}; }
+        tools::Tool::Result execute(const nlohmann::json&, const tools::ToolExecutionContext&) override {
+            const int now_active = active.fetch_add(1) + 1;
+            int observed = peak.load(std::memory_order_relaxed);
+            while (now_active > observed &&
+                   !peak.compare_exchange_weak(observed, now_active, std::memory_order_relaxed)) {
+            }
+            {
+                std::unique_lock<std::mutex> lock(gate.mutex);
+                ++gate.entered;
+                gate.cv.notify_all();
+                if (!gate.cv.wait_for(lock, std::chrono::seconds(3),
+                                      [&] { return gate.entered >= 2; })) {
+                    ++gate.timeouts;
+                }
+            }
+            active.fetch_sub(1);
+            return {"sub read ok", false};
+        }
+    };
+
+    FakeBackend backend;
+    backend.scripts = {
+        MultiToolUseScript({"toolu_sub_0", "toolu_sub_1"}, "read_file"),
+        TextOnlyScript("子代理两枚读都办完了"),
+    };
+    Gate gate;
+    std::atomic<int> peak{0};
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<GatedRead>(gate, peak));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    agent::AgentProfile profile;
+    profile.runtime.tool_batch_strategy = agent::ToolBatchStrategy::ParallelRead;
+    profile.runtime.parallel_read_concurrency = 2;
+    agent_tool.SetAgentProfile(std::move(profile));
+
+    nlohmann::json input;
+    input["title"] = "并行读任务";
+    input["prompt"] = "把两枚读都办了";
+    const tools::Tool::Result result = agent_tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    REQUIRE(backend.captured_requests.size() == 2);
+    CHECK(gate.timeouts == 0);      // 两枚同进执行体:子代理批次真并行
+    CHECK(peak.load() == 2);        // 峰值恰 2
+    // 子代理台账:两笔工具流水照记。
+    const auto snapshots = agent_tool.TaskSnapshots();
+    REQUIRE(snapshots.size() == 1);
+    CHECK(snapshots[0].tool_calls.size() == 2);
+    CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::Completed);
+}
+
 // ---------------------------------------------------------------------------
 // 输出预算耗尽(规格根因四,vLLM 0.27.1 + qwen3.8-27b 现场的收场侧):
 // thinking 吃满输出上限、续跑用完仍无正文 → budget_exhausted /

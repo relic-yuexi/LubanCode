@@ -11,7 +11,7 @@
 - `tool call`：assistant 消息里一枚工具调用块。
 - `request`：真正送到 provider 的一次 HTTP/SSE 请求。
 
-一个 step 可以带多枚工具调用。LubanCode 会逐枚执行，收齐结果，再开下一个 step。
+一个 step 可以带多枚工具调用。默认策略下 LubanCode 逐枚执行，收齐结果，再开下一个 step；开 `parallel_read` 策略后，同一 step 里连续的只读段可并行，写入仍独占（见[多枚调用怎样收账](#多枚调用怎样收账)）。
 
 ## 总流程
 
@@ -24,7 +24,7 @@ flowchart TD
     API --> A[流式拼成 assistant 消息]
     A --> Q{含工具调用块?}
     Q -- 否 --> Z[本轮收束]
-    Q -- 是 --> L[逐枚调用 RunOneTool]
+    Q -- 是 --> L[按策略调度:连续读段并行 / 其余独占]
     L --> R[收齐 ToolResultBlock]
     R --> H[作为一条 user 消息追加进 history]
     H --> B
@@ -90,6 +90,8 @@ flowchart TD
 
 JSON 工具调用与 PTC 脚本都走这一个 `RunOneTool`。PTC 只换模型怎样编排调用，不换权限、Hook、schema 与执行边界。
 
+这条链内部分四个阶段：`PrepareToolCall`（门禁审批，上表 1–5 关）→ `MarkExecutionStarted`（持久记录 started，副作用闸）→ `ExecuteApprovedTool`（真正执行，可上 worker 线程）→ `CompleteToolCall`（Post Hook、结果捕获、显示与回填）。串行路四阶段依次同线程跑；并行路只有第三阶段上 worker，阶段一、二、四留在主线程——权限确认、Hook、审计没有第二扇门。
+
 ## 多枚调用怎样收账
 
 同一条 assistant 消息若含三枚调用，程序按出现次序执行。三份结果收进同一条 `role=user` 消息，各自用调用 id 配对：
@@ -99,9 +101,38 @@ assistant: ToolUse(a), ToolUse(b), ToolUse(c)
 user:      ToolResult(a), ToolResult(b), ToolResult(c)
 ```
 
-当前链不是并发执行。这样确认框、Hook、终端转录与副作用次序都有一条清楚的账。
+### 执行策略两档
 
-用户若在中途按 ESC，正在跑的工具等它收口，结果照常入 history；尚未轮到的调用各补一条“未执行”错误结果。配对仍齐，随后退出本轮。
+- **`exclusive`（默认）**：全部逐枚串行。不声明策略就是这档，行为与并行改造前一字不差——确认框、Hook、终端转录与副作用次序都有一条清楚的账。
+- **`parallel_read`**：连续只读段有界并行。配置写在 `agent.tool_execution`，并发上限 `agent.parallel_read_concurrency`（1–16，默认 4；配 1 即回到完整串行语义）。
+
+### 段调度与屏障
+
+`parallel_read` 下，批次按模型声明序切成"连续读段"与"独占节点"：
+
+```text
+模型声明序：read(A), read(B), write(A), read(A), read(C), edit(B)
+
+执行次序： [read(A) || read(B)]
+                    ↓ 全段收口（结果落账、Post Hook 跑完）
+                 write(A)
+                    ↓ 收口
+            [read(A) || read(C)]
+                    ↓ 收口
+                 edit(B)
+```
+
+规矩：
+
+- 只有审定过的内置只读工具（首批 `read_file`、`search`）进段。判定认三件套：名字在册、注册来源是内置（插件/MCP 不许借名影子放行）、工具不需确认。写、undo、shell、Git、未知工具、插件、Lua、MCP、宿主状态操作（`job_cancel` 一类）一律独占——不按名字里含 read/get 就放行。
+- `tool_invoke` 包装先解引用出真实目标再判策略；解不开按独占走原错误路径。
+- 读段与独占节点互为屏障：读段全收口才跑独占节点，独占收口才启下段；后面的 read 不会被提到前面的 write 之前。同一路径先写后读，读到的是新内容。
+- 结果按原槽位回填、原 `tool_use_id` 配对，完成先后不改排列。
+- 三种情况整批回退串行，行为与 `exclusive` 一致：任一只 Pre/Post 工具 Hook 在场（把 Hook 摁在主线程不够——它可能在另一只 read 执行时改文件）；批次混入 job_handle/native_deferred 异步协议；并发上限配 1。
+
+各宿主（终端、one-shot、app-server、Gateway、子代理）吃同一条配置轴：子代理整份继承主会话策略。协议宿主没有终端审批口，确认类工具照旧走各自审批面（app-server 的 permission/request、渠道的 fail-closed 名单），与执行策略互不干扰。
+
+用户若在中途按 ESC，正在跑的工具等它收口，结果照常入 history；尚未轮到的调用各补一条“未执行”错误结果。配对仍齐，随后退出本轮。取消、异常、落账失败的收口合同在串行/并行两路同款：每枚调用恰一份终态与一份协议结果。
 
 ## 结果怎样回模型
 
@@ -143,11 +174,12 @@ user:      ToolResult(a), ToolResult(b), ToolResult(c)
 
 ## 源码入口
 
-- `src/agent/loop.cpp`：`AgentLoop::Run` 与 `RunOneTool`。
+- `src/agent/loop.cpp`：`AgentLoop::Run` 与 `RunOneTool`（四阶段拆链与批次第二遍的段调度接线）。
+- `src/agent/tool_batch_schedule.cpp`：策略两档解析、放行名单、段划批与有界执行器。
 - `src/tools/registry.cpp`：工具注册与查找。
 - `src/tools/schema_check.cpp`：Hook 改参后的 schema 复检。
 - `src/api/assembler.cpp`：流事件拼成中立消息。
 - `src/tools/tool_search.cpp`：延迟工具检索与挂载。
 - `src/ptc/`：程序化调用 runner；最终回到 `RunOneTool`。
 
-相关测试集中在 `tests/unit/agent/test_loop.cpp`、`tests/unit/agent/test_agent_tool.cpp`、`tests/unit/tools/test_tool_search.cpp`、`tests/integration/ptc/test_ptc_tool.cpp`、`tests/unit/api/test_request_prefix.cpp` 与各 wire 请求测试。
+相关测试集中在 `tests/unit/agent/test_loop.cpp`、`tests/unit/agent/test_tool_execution_chain.cpp`（拆链）、`tests/unit/agent/test_tool_batch_scheduling.cpp`（段调度与屏障）、`tests/unit/agent/test_tool_batch_p3.cpp`（持久化/资源/性能）、`tests/unit/agent/test_agent_tool.cpp`、`tests/unit/tools/test_tool_search.cpp`、`tests/integration/ptc/test_ptc_tool.cpp`、`tests/unit/api/test_request_prefix.cpp` 与各 wire 请求测试。

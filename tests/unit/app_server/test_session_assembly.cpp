@@ -745,3 +745,40 @@ TEST_CASE("MCP 子进程环境:base 集从宿主取,配置注入覆盖,密钥不
     CHECK(find("LUBANCODE_TEST_MODEL_KEY") == nullptr);
     CHECK(find("LUBAN_API_KEY") == nullptr);
 }
+
+// 只读并行单 P3 宿主接线:app-server/助理/gateway 渠道会话的 Agent 档案从
+// 本场 config 折批次执行策略——与终端主会话(app::BuildMainRuntimeProfile)
+// 同一条解析轴。config 缺席(测试注入路/防御路)保持缺省 Exclusive,行为
+// 与从前一字不差。
+TEST_CASE("P3 策略折档:config 的 agent.tool_execution 进档案,缺省 Exclusive 不动") {
+    SessionAssemblyRequest request = BaseRequest();
+
+    // 缺席 config:缺省档。
+    const auto bare = AssembleSession(SessionAssemblyRequest(request));
+    REQUIRE(bare.assembly != nullptr);
+    CHECK(bare.assembly->agent_profile.runtime.tool_batch_strategy == agent::ToolBatchStrategy::Exclusive);
+    CHECK(bare.assembly->agent_profile.runtime.parallel_read_concurrency ==
+          agent::kDefaultParallelReadConcurrency);
+
+    // 显式 parallel_read + 超界并发:折档 + 钳到 16。
+    config::Config config;
+    config.agent.tool_execution = "parallel_read";
+    config.agent.parallel_read_concurrency = 99;
+    request.config = &config;
+    const auto enabled = AssembleSession(std::move(request));
+    REQUIRE(enabled.assembly != nullptr);
+    CHECK(enabled.assembly->agent_profile.runtime.tool_batch_strategy ==
+          agent::ToolBatchStrategy::ParallelRead);
+    CHECK(enabled.assembly->agent_profile.runtime.parallel_read_concurrency ==
+          agent::kMaxParallelReadConcurrency);
+
+    // 认不得的串(config 解析层已过滤,防御):按默认档收口。
+    config::Config bogus_config;
+    bogus_config.agent.tool_execution = "bogus";
+    SessionAssemblyRequest bogus = BaseRequest();
+    bogus.config = &bogus_config;
+    const auto defensive = AssembleSession(std::move(bogus));
+    REQUIRE(defensive.assembly != nullptr);
+    CHECK(defensive.assembly->agent_profile.runtime.tool_batch_strategy ==
+          agent::ToolBatchStrategy::Exclusive);
+}

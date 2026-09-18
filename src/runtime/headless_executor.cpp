@@ -380,6 +380,8 @@ HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
         profile.runtime.context_window_tokens = options_.context_window_tokens;
         profile.runtime.max_wall_secs = options_.max_wall_secs;
         profile.runtime.max_total_tokens = options_.max_total_tokens;
+        profile.runtime.tool_batch_strategy = options_.tool_batch_strategy;
+        profile.runtime.parallel_read_concurrency = options_.parallel_read_concurrency;
         profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
         live->agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
@@ -544,6 +546,8 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     profile.runtime.context_window_tokens = options_.context_window_tokens;
     profile.runtime.max_wall_secs = options_.max_wall_secs;
     profile.runtime.max_total_tokens = options_.max_total_tokens;
+    profile.runtime.tool_batch_strategy = options_.tool_batch_strategy;
+    profile.runtime.parallel_read_concurrency = options_.parallel_read_concurrency;
     profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
     // 引擎来源:渠道路用调用方随场缓存的(同场多轮共享 history);automation
     // 现建(每执行一场 fresh V3 + fresh 引擎,V1 行为不变)。
