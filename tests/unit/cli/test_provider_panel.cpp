@@ -149,7 +149,7 @@ TEST_CASE("ProviderPanelCore: 进场光标钳进清单") {
     CHECK(core.state().cursor == 0);
     cli::ProviderPanelCore core2(4, 3, 3);
     CHECK(core2.state().cursor == 3);
-    CHECK(core2.state().offset == 0);  // 窗口尚未出界,不预滚
+    CHECK(core2.state().offset == 1);  // 光标恰在窗外:进场就最小滚动到可见
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ TEST_CASE("ProviderPanelCore: PageUp/PageDown 整屏翻,页界钳住不绕") {
     cli::ProviderPanelCore core(9, 3, 0);
     core.HandleKey(Key(cli::KeyKind::PageDown));  // 0 -> 3
     CHECK(core.state().cursor == 3);
-    CHECK(core.state().offset == 3);
+    CHECK(core.state().offset == 1);  // 最小滚动:光标进窗即可(1..3),不整窗跳页
     core.HandleKey(Key(cli::KeyKind::PageDown));  // 3 -> 6
     core.HandleKey(Key(cli::KeyKind::PageDown));  // 6 -> 8(尾项,钳住)
     CHECK(core.state().cursor == 8);
