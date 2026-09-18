@@ -9,6 +9,7 @@
 - [x] **Esc 误恢复**：已修（PR #52，d6ea2190）。`PromptResumeTarget` 拆三态（选中 / 用户取消 / 无法弹面板）；全仓调用点仅 `session_commands.cpp:2426` 一处，已随改核对。用户取消原地不动、不封场不建场。
 - [x] **标题全空**：已修（PR #52：3e1104ba 标题三层接通 v3——起名门/真账/投影现标题；1f5127f9+bb003e68 session.title.applied 事实提交族合同；a755ed5b launch_cwd 三端收口；另 PR #50 0600b7ad v3 列表投影补齐先落）。CI 册绿；存量 222 场真机对账未做，归入下条尾巴。
 - [ ] **真机复测尾巴**：上述修复尚未随任何 tag 发版（最新 tag v0.26.259-beta.1 早于 PR #52）。待下个 patch 发版、安装后对真机数据根（`C:\Users\moontidef\.lubancode\workspaces`，222 场存量）复测：Esc 取消不再切场、存量场标题/预览现字、缺值如实标未知。复测过了才删本单。
+- [x] **续场同貌反弹（2026-09-18，PR #126）**：真机复测发现 resume 后再进 /resume 列表，源场与续场（fork-as-new 设计使然）同名同预览并排，看着像重复。修法：`WorkspaceSessionSummary` 增 `resumed_from_session_id`（v3 认 `sourceRef.sessionId`、v2 认合同键 `source_session_id`），索引缓存版本 2→3 老账重扫，列表标签拼「(续)」后缀、Ctrl+E 详情注「续自：源 id 前 8 位」。源场只读、fork-as-new 本身不动——这是显示层区分，不是改恢复语义。
 源码基线：d52e7772。截图程序：lubancode 0.26.258，不能默认等同于当前 checkout。
 
 ## 一、问题与裁决
