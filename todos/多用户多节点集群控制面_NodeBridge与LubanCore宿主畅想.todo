@@ -5,7 +5,7 @@
 - 级别：Future / P2；前置未满足前不得排进近期实现
 - 范围：多租户控制面、Node Bridge、多 Session 宿主、Web 工作台、Skill/MCP/Package/Secret、断线续看与故障恢复
 - 硬前置：`LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 完成最终验收
-- 软前置：`持久Agent_Gateway自动任务与可靠恢复总装计划.todo` 至少打通单机常驻、可靠恢复与 durable outbox
+- 软前置：`持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo(旧总装单已删,2026-09-17)` 至少打通单机常驻、可靠恢复与 durable outbox
 - 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`Workspace统一存储_旧Session退场与分级Memory迁移.todo`、`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`docs/reference/packages.md`、`docs/reference/browser-runtime.md`
 - 不在本单：现在拆 LubanCore、立刻开公网服务、首版跨节点热迁移、未经裁决自动重放未知副作用、把现有本机 Gateway 冒充集群 Gateway
 

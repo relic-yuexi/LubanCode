@@ -13,6 +13,10 @@ DOC features/assistant-web/README.md
 DOC features/context/compaction.md
 DOC features/evolution/README.md
 DOC features/extensions/README.md
+DOC features/hooks/README.md
+DOC features/hooks/hook-points.md
+DOC features/hooks/host-api.md
+DOC features/hooks/middleware-config.md
 DOC features/extensions/hooks.md
 DOC features/project-instructions/README.md
 DOC features/providers/catalog.md
@@ -107,6 +111,7 @@ ROUTE features/extensions/README.md
 ROUTE architecture/extensions/tool-extension.md
 ROUTE architecture/extensions/plugin-runtime.md
 ROUTE features/extensions/hooks.md
+ROUTE features/hooks/README.md
 ROUTE development/security.md
 ROUTE architecture/hooks-flow.md
 ROUTE features/terminal/README.md

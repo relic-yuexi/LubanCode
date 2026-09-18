@@ -1,6 +1,6 @@
 // MockWsServer(QQ 机器人接入单 Q1 的测试夹具):本机回环 WebSocket 服务端。
 //
-// 给 src/channel/qq 的自实现 WS 客户端当对端——真 socket、真升级握手
+// 给自实现 WS 客户端(transport 层)与渠道网关测试当对端——真 socket、真升级握手
 // (算 Sec-WebSocket-Accept)、真帧收发;另留 SendRaw 注原始字节,半帧/
 // 粘帧/坏帧全可注入。TLS 路用 mbedTLS 服务端 + 测试内生成的自签证书
 // (MockTlsServer),与客户端共享同一份 CA PEM——握手是 mbedTLS 真握手,
@@ -46,9 +46,12 @@ public:
 
         // 服务端方向发文本帧。
         std::expected<void, std::string> SendText(std::string_view payload);
+        // 服务端方向发二进制帧(飞书 F1 的 pbbp2 帧走 BinaryMessage)。
+        std::expected<void, std::string> SendBinary(std::string_view payload);
         // 注原始字节(半帧/粘帧/坏帧注入口)。
         std::expected<void, std::string> SendRaw(std::string_view bytes);
-        // 读客户端发来的下一条文本帧(解客户端 mask)。
+        // 读客户端发来的下一条数据帧(解客户端 mask;text/binary 都收,
+        // 载荷原样返回)。
         std::expected<std::string, std::string> ReadText(int timeout_ms);
         // 收原始字节(验控制帧回执用,如客户端回的 Pong)。
         std::expected<std::string, std::string> ReadRaw(int timeout_ms, std::size_t max_bytes);
@@ -111,6 +114,7 @@ public:
         bool valid() const { return ssl_ != nullptr; }
         std::expected<std::string, std::string> AcceptUpgrade(int timeout_ms);
         std::expected<void, std::string> SendText(std::string_view payload);
+        std::expected<void, std::string> SendBinary(std::string_view payload);
         std::expected<void, std::string> SendRaw(std::string_view bytes);
         std::expected<std::string, std::string> ReadText(int timeout_ms);
         std::expected<std::string, std::string> ReadRaw(int timeout_ms, std::size_t max_bytes);

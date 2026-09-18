@@ -287,6 +287,15 @@ ChannelManager::AddAccountResult ChannelManager::AddAccount(
     entry->channel_id = channel_id;
     entry->account_id = account_id;
     entry->config = config;
+    // QQ 裸账号(未写 tools/只写 deny)注册时默认"操作前询问"档——默认档
+    // 在使用侧生效,不物化进解析结果(裸配置保持 nullopt,不落盘)。显式
+    // 空名单/approve 或 preset 是用户策略,原样保留;deny 照旧优先。
+    if (channel_id == "qqbot" && entry->config.tools.preset.empty() &&
+        !entry->config.tools.allow && !entry->config.tools.approve) {
+        auto defaults = *ChannelToolsPreset("ask");
+        defaults.deny = std::move(entry->config.tools.deny);
+        entry->config.tools = std::move(defaults);
+    }
     entry->transport = transport;
     entry->lock = std::move(lock_attempt);
     entry->inbox = std::make_unique<ChannelInbox>(options_.inbox_limits);

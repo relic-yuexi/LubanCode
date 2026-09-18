@@ -303,7 +303,7 @@ bool LocalWebServer::HandleConnection(
         return false;
     }
 
-    // ---- 从这里起全要会话 cookie(静态资源/artifact/WS 升级) ----
+    // artifact/WS 要会话 cookie;公开页面壳必须先能加载,才能交换 fragment。
     const std::string cookie_value = ws::CookieValue(head.cookie, options_.cookie_name);
     const bool session_ok =
         !cookie_value.empty() && options_.validate_session && options_.validate_session(cookie_value);
@@ -382,12 +382,8 @@ bool LocalWebServer::HandleConnection(
                          SecurityHeaders(port));
             return false;
         }
-        if (!session_ok) {
-            // 配对提示页(不降级免认证;也不泄资源内容)。
-            SendResponse(socket, "401 Unauthorized", "text/html; charset=utf-8",
-                         PairingPageHtml(), SecurityHeaders(port));
-            return false;
-        }
+        // manifest 只含随包 HTML/CSS/JS,不含用户数据。首次访问没有 cookie,
+        // 也须加载页面和脚本,由脚本读取 #b= 并 POST /auth/exchange。
         const std::filesystem::path relative =
             matched->path == "/" ? std::filesystem::path("index.html")
                                  : std::filesystem::path(matched->path.substr(1));

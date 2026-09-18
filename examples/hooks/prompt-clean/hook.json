@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "prompt-clean",
+  "version": "0.1.0",
+  "entry": "main.lua",
+  "hooks": [
+    {
+      "hookPoint": "PreUser",
+      "name": "prompt.normalize",
+      "handler": "normalize",
+      "priority": 100,
+      "match": {"origin": "human", "purpose": "interactive"}
+    }
+  ]
+}

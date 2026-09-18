@@ -776,19 +776,21 @@ add_library(lubancode_engine STATIC
   # 孤儿回收)与渠道设置服务(平台注册表 + channels 定点提交)。
   src/channel/credential_store.cpp
   src/channel/channel_setup.cpp
-  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件与
-  # 自实现 WS 客户端。ws_frame(RFC6455 帧纯函数)/qq_socket(跨平台 TCP+
-  # select 超时)/qq_tls(mbedTLS 客户端流)/qq_ws_client(升级握手+读写+
-  # close)/qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
+  # 传输底座共享层(飞书/企微设计单 R0,原 src/channel/qq 四件升共享层,
+  # 纯搬家零逻辑变化):ws_frame(RFC6455 帧纯函数)/tcp_socket(跨平台
+  # TCP+select 超时)/tls(mbedTLS 客户端流)/ws_client(升级握手+读写+
+  # close)——平台无关,QQ/飞书/企微的 WS 渠道共用。
+  src/channel/transport/ws_frame.cpp
+  src/channel/transport/tcp_socket.cpp
+  src/channel/transport/tls.cpp
+  src/channel/transport/ws_client.cpp
+  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件。
+  # qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
   # qq_http(受控 GET/POST seam,生产走 net/http_transport)/
   # qq_spool(sidecar spool 先落盘再上报,ACK 后清理)/qq_auth(token 单飞
   # 刷新)/qq_messages(v2 发送,稳定 msg_seq)/qq_gateway(事件连接状态机:
   # Identify/Heartbeat/Resume/退避)/qq_adapter(ChannelBridgeTransport 进程内
   # 实现——Bridge 隔离语义保留,manager 零改动)。
-  src/channel/qq/ws_frame.cpp
-  src/channel/qq/qq_socket.cpp
-  src/channel/qq/qq_tls.cpp
-  src/channel/qq/qq_ws_client.cpp
   src/channel/qq/qq_proto.cpp
   src/channel/qq/qq_http.cpp
   src/channel/qq/qq_spool.cpp
@@ -798,11 +800,33 @@ add_library(lubancode_engine STATIC
   src/channel/qq/qq_media.cpp
   src/channel/qq/qq_gateway.cpp
   src/channel/qq/qq_adapter.cpp
+  # 飞书长连接适配器(飞书/企微设计单 F1,§五):pbbp2 帧编解码纯函数/
+  # 协议映射(事件→统一事件、发送体、错误分型)/HTTP seam(引导+令牌+
+  # 回话一行适配 net/http_transport)/tenant_access_token 单飞刷新/回话
+  # 发送(锚 message_id)/网关状态机(引导→拨号→ping→事件拆包重组→
+  # ACK→退避重连,凭据类错不重试)/ChannelBridgeTransport 进程内实现。
+  # 复用件:transport 共享层(WS/TLS)、qq_spool(渠道中性入站账)、
+  # qq_adapter 的 ConnectionSnapshot(中性连接快照)。
+  src/channel/feishu/feishu_frame.cpp
+  src/channel/feishu/feishu_proto.cpp
+  src/channel/feishu/feishu_http.cpp
+  src/channel/feishu/feishu_auth.cpp
+  src/channel/feishu/feishu_messages.cpp
+  src/channel/feishu/feishu_gateway.cpp
+  src/channel/feishu/feishu_adapter.cpp
   # QQ 接入单 Q7:菜单/面板回调的宿主侧命令识别与回正文构建(纯函数,
   # 渠道库);官方 v2_menu/v2_panels 载荷纯函数 + 显式启用的发布器
   #(读远端→差异/冲突裁决→PUT/复用,独立 QPM 限速)。
   src/channel/channel_commands.cpp
   src/channel/qq/qq_menu.cpp
+  # 企业微信智能机器人长连接适配器(W1,飞书与企业微信接入设计单 §六):
+  # wecom_proto(帧构造/解析/消息映射/错误分型纯函数)/wecom_gateway
+  # (订阅→心跳→读循环→退避重连;写侧网关线程独占,发送线程经递交口
+  # 排队)/wecom_adapter(ChannelBridgeTransport 进程内实现,spool 复用
+  # qq 件,req_id 锚 + markdown 分段 + 限流账)。
+  src/channel/wecombot/wecom_proto.cpp
+  src/channel/wecombot/wecom_gateway.cpp
+  src/channel/wecombot/wecom_adapter.cpp
   # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
   # resume-as-new 更新映射)与工作绑定账(sid -> 场/轮,恢复反查)。
   src/channel/session_map.cpp
@@ -895,7 +919,7 @@ target_include_directories(lubancode_engine PUBLIC
 target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 if(WIN32)
   # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
-  # 系统依赖会以 link-only 形态传给消费方);crypt32:qq_tls 的 Windows
+  # 系统依赖会以 link-only 形态传给消费方);crypt32:transport/tls 的 Windows
   # 信任根(系统证书店导出 + SSL 策略校验,连接状态单 §四)。
   target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32 crypt32)
 endif()
@@ -1036,6 +1060,9 @@ add_library(lubancode_runtime STATIC
   # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
   # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
   src/runtime/hook_host_services.cpp
+  # LuaHook 单 P1-D:hook 包校验与试跑引擎(§8.2 静态检查 + fixtures
+  # fake 档;`lubancode hook validate/test` 的芯,CLI 只打印)。
+  src/runtime/hook_package_check.cpp
   # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
@@ -1196,6 +1223,10 @@ add_library(lubancode_app STATIC
   # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ
   # 进程内适配器实例化)与双泵叠加件(不动 engine 的 GatewayWorkPump 冻结面)。
   src/app/channel_gateway_wiring.cpp
+  # 渠道适配器注册表(飞书/企微设计单 R0):channel_id → 账号级适配器工厂
+  # + 渠道件(媒体下载 seam/turn 工作线程数)。wiring 装配门、im 文案、
+  # gateway_launch 渠道件装配三处的单一真源。
+  src/app/channel_adapter_registry.cpp
   # QQ 连接状态单 §三:连接状态宿主输出件——适配器快照的限频日志与跨进程
   # 只读快照发布(connection-status.json,带 boot ID 与更新时间)。
   src/app/channel_connection_reporter.cpp
@@ -1271,6 +1302,9 @@ add_library(lubancode_app STATIC
   src/app/commands/background_commands.cpp
   # 自进化闭环阶段 1:/evolve status|list|show 只读面。
   src/app/commands/evolve_commands.cpp
+  # LuaHook 单 P1-D:hook validate/test/init 子命令面(引擎在 runtime 的
+  # hook_package_check.cpp,这里只打印与落盘)。
+  src/app/commands/hook_check_commands.cpp
   # 终端接线收尾单:/memory 命令 presenter(自大类搬出)。
   src/app/commands/memory_commands.cpp
   # 终端接线收尾单:/trace 命令 presenter(自大类搬出)。
@@ -1402,6 +1436,8 @@ if(LUBANCODE_BUNDLED_RG_DIR AND EXISTS "${LUBANCODE_BUNDLED_RG_DIR}")
 endif()
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/web/assistant/" DESTINATION bin/web/assistant
+        FILES_MATCHING PATTERN "*.html" PATTERN "*.css" PATTERN "assistant_*.js")
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/" DESTINATION share/lubancode/skills)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/" DESTINATION share/lubancode/docs)
 

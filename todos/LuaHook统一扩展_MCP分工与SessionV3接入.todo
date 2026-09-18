@@ -306,7 +306,7 @@ fork 复用合法检查点和来源引用，不复制活动 VM、continuation �
 - [x] 接 PreUser/PostUser 及请求各阶段，覆盖 CLI、one-shot、app-server 的统一入口。
 - [x] 接 hook 事件、工作版本、continuation、消息/效果收据与 UI 投影，保持一个 writer。
 - [x] 在每个持久化边界注入崩溃，验证补交、暂停、unknown 和已完成项不重跑。
-- [ ] 验证 steer/followup、compact、fork/btw、首行 system、Esc interrupted 和输出预留。（生产 V3Writer 句柄一行挂接与旁路请求切槽归 P1-C；compact 全链运行时另单已合 v0.26.244）
+- [ ] 验证 steer/followup、compact、fork/btw、首行 system、Esc interrupted 和输出预留。（生产 V3Writer 句柄一行挂接与旁路请求切槽归 P1-C；compact 全链运行时另单已合 v0.26.244。2026-09-18 部分落账：followup/btw purpose 隔离、fork 形状（新卷首行完整 system、换场事件只落新账）、迟到归属已钉 `tests/unit/hooks/test_middleware_scope_wire.cpp` 三案（PR #122）；steer 基本盘/compact 事件面/Esc interrupted/输出预留尚无专案，留待补钉。）
 
 验收：只读 replay 无脚本执行；恢复输入匹配最后合法链，无重复注入、工具漏配和跨作用域污染。
 
@@ -321,10 +321,10 @@ fork 复用合法检查点和来源引用，不复制活动 VM、continuation �
 
 ### P1-D：作者体验与生命周期收官
 
-- [ ] 交付完整作者文档、可运行样例、scaffold、validate/test 和面向 LubanCode 的生成指引。
-- [ ] 完成按需加载、版本热换、clear/exit 排空、迟到结果归属与资源回收。
-- [ ] 运行文档 fixtures 和相关集成测试，记录真实平台/服务边界。
-- [ ] 同步 v3 父单实施范围：首版对外 hook 仅 Lua，其他 handler 类型不再成为本轮交付要求。
+- [x] 交付完整作者文档、可运行样例、scaffold、validate/test 和面向 LubanCode 的生成指引。（PR #122：`docs/features/hooks/` 四篇（README/hook-points/middleware-config/host-api）+ `skills/lubancode-hook-authoring/SKILL.md` 官方生成指引；`examples/hooks/` 六件（prompt-clean/business-deny/http-recall/postaction-refine/replace-estimator/mcp-knowledge-recall）各带 fixtures；`lubancode hook init` scaffold 生成即可跑；`hook validate`（静态四查）/`hook test`（fixtures fake 档真跑，注入取消/超时/非法效果/重复 next）落地，退出码 0/1/2，`--json` 分四档报。）
+- [x] 完成按需加载、版本热换、clear/exit 排空、迟到结果归属与资源回收。（PR #122：dispatch 级与中心级 in-flight 账 + `WaitForMiddlewareDrain`/`BeginDrain/EndDrain` 排空（换写者前两层排空 10s 帽）；排空窗口不授 http/fs/tools、工具桥回 `hook.tool.drained`；迟到结果落发起会话（scope_wire 册钉）。**版本热换按用户定案归《Lua插件分代热换装与状态保留设计》新单，本单不做**——docs/features/hooks/README 已记同口径。插件状态持久化未做，文档明列归记忆/状态批次。）
+- [x] 运行文档 fixtures 和相关集成测试，记录真实平台/服务边界。（`tests/integration/hooks/test_hook_examples_check.cpp`——examples 每包全绿是合同；真实集成档按"未验"明列不做半套 `--real` 旗（CLI 离场无会话授权面，须会话内沿既有授权观察）。）
+- [x] 同步 v3 父单实施范围：首版对外 hook 仅 Lua，其他 handler 类型不再成为本轮交付要求。（docs/features/hooks/README 边界节已落同口径。）
 
 验收：用户能让 LubanCode 生成并校验一份 hook；可查执行顺序、改写来源、短路理由和 session 采用结果。真实服务与 fake 测试分别报。
 

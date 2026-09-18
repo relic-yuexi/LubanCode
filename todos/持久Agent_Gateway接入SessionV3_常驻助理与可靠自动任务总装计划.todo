@@ -2,7 +2,7 @@
 
 - 日期：2026-09-13。
 - 状态：新版设计，待实施、待验收。现状按 HEAD `c6b755e4` 及本次工作树静态核查；未重跑构建、测试、真实模型、渠道或系统服务。
-- 替代：[旧总装计划](持久Agent_Gateway自动任务与可靠恢复总装计划.todo)。旧 G0/G1 留作历史证据，不将旧勾选搬成新版验收结果。
+- 替代：旧总装计划《持久Agent_Gateway自动任务与可靠恢复总装计划》（2026-09-17 删档，G0/G1 历史见 git 史），不将旧勾选搬成新版验收结果。
 - 主合同：[Session V3](session轨迹v3_消息主轴树链与四角色壳收敛设计.todo)、[V3 schema](../docs/architecture/trajectory-v3-schema.md)。本文新增接口、字段、状态均为提案，未注册前不能写入现行 V3 envelope。
 - 实施范围：`src/gateway`、`src/channel`、`src/runtime`、`src/trajectory/v3`、`src/workspace`、`src/platform`、`src/cli` 及对应测试；自动任务领域目录按本单新增。
 - 首版：单机、单用户、显式启动，先本地定时任务，再接一只真渠道。多租户、集群、跨机迁移另立验收。
@@ -307,14 +307,14 @@ V3 的“assistant 消息”“当前上下文”“对外最终答复”不能�
 
 ### V3：渠道总装与真 transport
 
-- [ ] 接现有 ChannelManager/IngressStore/ChannelSessionHost，增加 durable work 引用，替换仅内存排队假设。
-- [ ] 落真实 sidecar Transport、进程树收尾、重连、generation、账号锁；保留 FakeChannelSidecar 测试口。
-- [ ] 路由固定 owner/workspace/profile/conversation/thread 身份，补准入、附件原件和背压。
-- [ ] ACK 严格服从 ingress 耐久回执；重复来信复用原 work；已读/已 ACK 不等于 turn 已成功。
-- [ ] 真渠道明确 allowlist 与工具授权交集；未决审批留 waiting/拒绝，不因无人值守自动放行。
-- [ ] 先用假渠道验完整收发，再选一只真渠道。是否沿用旧 QQ Bot 优先级，按可用账号与 adapter 条件决定。
+- [x] 接现有 ChannelManager/IngressStore/ChannelSessionHost，增加 durable work 引用，替换仅内存排队假设。（2026-09-17 审计回账：PR #75 落 `channel_work_pump.hpp`——claim=ingress queued→running 耐久态；`work_ledger.hpp` sid→场/轮绑定账 PowerLoss 先于 V3 `gateway.work.bound`；`ingress_store` 升 JournalWriter PowerLoss；生产装配 `gateway_launch.cpp:236-244`；内存队列降为投影/背压件（`inbox.hpp`）。ChannelSessionHost 旧件退役归后续清理。真进程硬杀/断电窗口归真机批次。）
+- [x] 落真实 sidecar Transport、进程树收尾、重连、generation、账号锁；保留 FakeChannelSidecar 测试口。（定案变更：QQ Q1 定案进程内直连，sidecar 子进程与进程树收尾随之消失，不算未做。真实传输 `qq_gateway`（Identify/Resume/退避 1s..60s/durable 游标，PR #66/#112/#113）；底座共享层 `src/channel/transport/`（R0，PR #118）；generation 代次隔离 `manager.cpp:345/1105-1227`；账号锁 `account_lock.hpp` create-new 原子占位；FakeChannelSidecar 测试口保留在泵册全量使用。真机重连行为归 Q3。）
+- [x] 路由固定 owner/workspace/profile/conversation/thread 身份，补准入、附件原件和背压。（session_key 定式 `channel_router.hpp:51`；workspace 隔离 `session_map.cpp`；配对不升 owner（PR #64）；准入全链 bot/dm/group/mention/binding_conflict + Q1b 提示限频（#90）；附件原件 `channel_media_service.*`（Q4，PR #93）；背压 `inbox.hpp` 三级帽 + 泵级 4/8 帽。群聊 scope 现直聊-only，真验归 Q3。）
+- [x] ACK 严格服从 ingress 耐久回执；重复来信复用原 work；已读/已 ACK 不等于 turn 已成功。（`manager.cpp:626-646` Ingest PowerLoss 失败不 ack、退避重发；spool 先落盘再上报（`qq_spool`）；三级去重键 + `MakeChannelOperationId` 回原受理（泵册"来信重放"案模型恰 1 次）；ingress 状态机 Replied 与 Delivered 分立；执行失败走失败通知+dead letter 不互相改写（PR #114）。真平台回执语义归 Q3。）
+- [x] 真渠道明确 allowlist 与工具授权交集；未决审批留 waiting/拒绝，不因无人值守自动放行。（QQ 模板 pairing+allowlist（#64）未配对零模型；ToolRoutePolicy 五层交集+deny 并集（#64）；审批带 Q6（#97）——300s 超时等价拒绝、卡片失败 fail closed、重启旧卡作废；Web 侧 AssistantApprovalBroker 超时默认拒 120s（#91）；headless 无人值守 fail-closed 零变化。真平台按钮触达归 Q3。）
+- [x] 先用假渠道验完整收发，再选一只真渠道。（假渠道全链 FakeChannelSidecar 走真 Bridge 帧（泵册三窗硬杀/超时未知/限频/长文拆段，#75/#93）；真渠道三只已选已落：QQ（#66）、企微 wecombot（#121）、飞书（#119 进行中）——经 R0 注册表装配（#118）。QQ Q3 真机联调整批仍欠（配对/两轮聊天/重连/真实错误码真值），企微飞书同理。）
 
-放行：重复、乱序、断线、ACK 丢失、send 成功但 receipt 丢失逐项扫；平台无幂等能力时明确展示 delivery_unknown。
+放行：重复、乱序、断线、ACK 丢失、send 成功但 receipt 丢失逐项扫；平台无幂等能力时明确展示 delivery_unknown。（2026-09-17 审计：mock 面逐项有册——重复=去重键/乱序=seq 账/断线=Resume+退避/ACK 丢失=spool 重投/receipt 丢失=重复回执只结一次/delivery_unknown=终态停自动重发；**真平台面全数归 QQ Q3 及企微/飞书真机批次，未验**。）
 
 ### V4：服务安装与常驻运维
 

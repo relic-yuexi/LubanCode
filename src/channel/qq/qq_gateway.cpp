@@ -17,22 +17,22 @@ namespace {
 constexpr int kBackoffSeconds[] = {1, 2, 4, 8, 16, 30, 60};
 constexpr int kBackoffSteps = static_cast<int>(sizeof(kBackoffSeconds) / sizeof(int));
 
-// 真 WsClient 的 IGatewayTransport 适配。
+// 真 transport::WsClient 的 IGatewayTransport 适配。
 class WsGatewayTransport final : public IGatewayTransport {
 public:
-    WsGatewayTransport(std::string ca_pem, TlsTrustMode trust_mode)
+    WsGatewayTransport(std::string ca_pem, transport::TlsTrustMode trust_mode)
         : ca_pem_(std::move(ca_pem)), trust_mode_(trust_mode) {}
 
     std::expected<void, GatewayConnectError> Connect(const std::string& url) override {
-        WsConnectOptions options;
+        transport::WsConnectOptions options;
         options.url = url;
         options.ca_pem = ca_pem_;
         options.trust_mode = trust_mode_;
         // 建立期取消(A08):外部 Cancel 经 cancel_state_ 打断正在建立的
         // 局部连接(DNS 后各阶段全吃句柄 shutdown)。
-        auto cancel_state = std::make_shared<WsConnectCancelState>();
+        auto cancel_state = std::make_shared<transport::WsConnectCancelState>();
         options.cancel = cancel_state;
-        auto client = WsClient::Connect(options);
+        auto client = transport::WsClient::Connect(options);
         if (!client.has_value()) {
             return std::unexpected(GatewayConnectError{
                 kStageConnecting,
@@ -59,7 +59,7 @@ public:
         return {};
     }
 
-    std::expected<std::string, WsError> ReadMessage(int timeout_ms) override {
+    std::expected<std::string, transport::WsError> ReadMessage(int timeout_ms) override {
         return client_.ReadMessage(timeout_ms);
     }
 
@@ -68,7 +68,7 @@ public:
         // 以 Closed 返回。全程持锁——与 Connect 的交接、Close 的清理
         // 互斥(A08:Close/Cancel/client_ 发布清理并发安全);阻塞读不经
         // 锁,取消延迟只受 shutdown 本身。
-        std::shared_ptr<WsConnectCancelState> cancel_state;
+        std::shared_ptr<transport::WsConnectCancelState> cancel_state;
         {
             const std::lock_guard<std::mutex> lock(mutex_);
             cancel_state = connect_cancel_;
@@ -86,33 +86,33 @@ public:
     }
 
 private:
-    // WsError(细码缺位时)-> 连接段稳定码。TCP 连不上/超时与 WS 升级握手
-    // 失败在 WsClient::Connect 一口锅;TLS 细码已透传,其余按 kind 分。
-    static std::string WsErrorConnectCode(const WsError& error) {
+    // transport::WsError(细码缺位时)-> 连接段稳定码。TCP 连不上/超时与 WS 升级握手
+    // 失败在 transport::WsClient::Connect 一口锅;TLS 细码已透传,其余按 kind 分。
+    static std::string WsErrorConnectCode(const transport::WsError& error) {
         switch (error.kind) {
-            case WsError::Kind::Timeout:
+            case transport::WsError::Kind::Timeout:
                 return "connect_timeout";
-            case WsError::Kind::Protocol:
+            case transport::WsError::Kind::Protocol:
                 return "ws_handshake_failed";
-            case WsError::Kind::Closed:
+            case transport::WsError::Kind::Closed:
                 return error.detail == "connect cancelled" ? std::string("connect_cancelled")
                                                            : std::string("ws_handshake_closed");
-            case WsError::Kind::Failed:
+            case transport::WsError::Kind::Failed:
                 return error.detail.rfind("tls: ", 0) == 0
-                           ? std::string(kTlsCodeHandshakeFailed)
+                           ? std::string(transport::kTlsCodeHandshakeFailed)
                            : std::string("connect_failed");
         }
         return "connect_failed";
     }
 
     std::string ca_pem_;
-    TlsTrustMode trust_mode_ = TlsTrustMode::ExplicitCa;
+    transport::TlsTrustMode trust_mode_ = transport::TlsTrustMode::ExplicitCa;
     // client_ 归网关线程独占使用;Cancel 可从停止线程来,只经 Cancel() 摸
     // 连接(shutdown 句柄),不读写其余成员。connect_cancel_ 的发布/清理
     // 过 mutex_(与 Cancel 方同步)。
     std::mutex mutex_;
-    std::shared_ptr<WsConnectCancelState> connect_cancel_;
-    WsClient client_;
+    std::shared_ptr<transport::WsConnectCancelState> connect_cancel_;
+    transport::WsClient client_;
 };
 
 // 组装带阶段/稳定码的连接事件(StageChanged/ConnectFailed/Disconnected 共用)。
@@ -127,15 +127,15 @@ GatewayEvent GatewayConnectEvent(GatewayEvent::Kind kind, const std::string& sta
 }
 
 // 运行期读错误的稳定码(read: 服务端断流/超时/协议错)。
-std::string ReadErrorCode(const WsError& error) {
+std::string ReadErrorCode(const transport::WsError& error) {
     switch (error.kind) {
-        case WsError::Kind::Timeout:
+        case transport::WsError::Kind::Timeout:
             return "read_timeout";
-        case WsError::Kind::Closed:
+        case transport::WsError::Kind::Closed:
             return "read_closed";
-        case WsError::Kind::Protocol:
+        case transport::WsError::Kind::Protocol:
             return "read_protocol";
-        case WsError::Kind::Failed:
+        case transport::WsError::Kind::Failed:
             break;
     }
     return "read_failed";
@@ -257,7 +257,7 @@ GatewayHttpFailureClass ClassifyGatewayHttpFailure(
 }
 
 std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
-    std::string ca_pem, TlsTrustMode trust_mode) {
+    std::string ca_pem, transport::TlsTrustMode trust_mode) {
     return [ca_pem = std::move(ca_pem), trust_mode]() -> std::unique_ptr<IGatewayTransport> {
         return std::make_unique<WsGatewayTransport>(ca_pem, trust_mode);
     };
@@ -487,7 +487,7 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         const auto message = transport->ReadMessage(options_.hello_timeout_ms);
         if (!message.has_value()) {
             return fail(kStageConnecting,
-                        message.error().kind == WsError::Kind::Timeout ? "hello_timeout"
+                        message.error().kind == transport::WsError::Kind::Timeout ? "hello_timeout"
                                                                         : "hello_failed",
                         "waiting hello: " + message.error().detail);
         }
@@ -607,7 +607,7 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
             std::min<std::int64_t>(auth_deadline_ms - now, std::max<std::int64_t>(remaining_beat, 1));
         const auto message = transport->ReadMessage(static_cast<int>(read_budget));
         if (!message.has_value()) {
-            if (message.error().kind == WsError::Kind::Timeout) {
+            if (message.error().kind == transport::WsError::Kind::Timeout) {
                 continue;  // 读窗到点:回循环顶(心跳/期限判定)
             }
             return fail(auth_stage, ReadErrorCode(message.error()),
@@ -743,7 +743,7 @@ QqGatewaySession::RunOutcome QqGatewaySession::RunOneConnection(
         const auto message =
             transport->ReadMessage(static_cast<int>(std::max<std::int64_t>(remaining, 1)));
         if (!message.has_value()) {
-            if (message.error().kind == WsError::Kind::Timeout) {
+            if (message.error().kind == transport::WsError::Kind::Timeout) {
                 continue;  // 到点,回循环顶发心跳
             }
             return fail(kStageConnected, ReadErrorCode(message.error()),

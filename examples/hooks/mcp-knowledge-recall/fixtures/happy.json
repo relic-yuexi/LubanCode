@@ -1,0 +1,15 @@
+{
+  "name": "recalls-via-registered-tool",
+  "trigger": {
+    "input": {"prompt": "分代热换的设计要点"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "tools": [{"name": "kb.search", "description": "知识库检索", "content": "要点三条:分代、热换装、状态保留。"}],
+  "expect": {
+    "kind": "completed",
+    "contextAppendsContain": ["知识库检索结果(executionId=hookexec_", "要点三条:分代、热换装、状态保留。"],
+    "terminalRuns": 1,
+    "records": {"PostUser/knowledge.recall": {"outcome": "completed", "nextCalls": 1}}
+  }
+}

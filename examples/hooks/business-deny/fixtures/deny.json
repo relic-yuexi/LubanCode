@@ -1,0 +1,14 @@
+{
+  "name": "denies-plaintext-secret",
+  "trigger": {
+    "input": {"prompt": "帮我看下这个 key 行不行:sk-proj-0123456789abcdef"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "expect": {
+    "kind": "denied",
+    "denyCode": "secret_in_prompt",
+    "terminalRuns": 0,
+    "records": {"PreUser/prompt.policy": {"outcome": "denied"}}
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "btw-side-question-untouched",
+  "trigger": {
+    "input": {"prompt": "  旁问不动主线  "},
+    "origin": "human",
+    "purpose": "btw"
+  },
+  "expect": {
+    "kind": "completed",
+    "prompt": "  旁问不动主线  ",
+    "records": {"PreUser/prompt.normalize": {"outcome": "skipped_no_match"}}
+  }
+}

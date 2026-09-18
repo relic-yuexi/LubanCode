@@ -335,10 +335,13 @@ std::expected<std::vector<MiddlewareDefinition>, ManifestError> ParseHookManifes
 
     const std::string chunk_name = *entry_file;
     std::vector<MiddlewareDefinition> out;
-    const auto& hooks_array = manifest.at("hooks");
-    if (!hooks_array.is_array()) {
+    // 缺 hooks 与坏型都走稳定错误,不许 at() 抛出(P1-D validate 命令同一条
+    // 路;缺键的清单是坏形状,不是崩溃)。
+    const auto hooks_it = manifest.find("hooks");
+    if (hooks_it == manifest.end() || !hooks_it->is_array()) {
         return std::unexpected(ManifestErr("hooks 不是数组"));
     }
+    const auto& hooks_array = *hooks_it;
     for (const auto& hook : hooks_array) {
         const std::string where = "hooks[" + std::to_string(out.size()) + "] ";
         if (!hook.is_object()) {

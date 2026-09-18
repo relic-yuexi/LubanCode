@@ -1,0 +1,14 @@
+{
+  "name": "clean-input-passes",
+  "trigger": {
+    "input": {"prompt": "正常的问题,没有凭据"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "expect": {
+    "kind": "completed",
+    "prompt": "正常的问题,没有凭据",
+    "terminalRuns": 1,
+    "records": {"PreUser/prompt.policy": {"outcome": "completed", "nextCalls": 1}}
+  }
+}

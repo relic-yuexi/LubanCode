@@ -1,7 +1,7 @@
 # 常驻助理 Web 主界面：C++ 本地服务与 Gateway 总装
 
 日期：2026-09-14。源码核对基线：工作区 `f4559cb1`。
-状态：设计与实施清单。W0/W1 已落（2026-09-15，PR #85，CI rollup success——头提交 0b7f0707 的 macos-clang/lane/changes 全绿，run 34900107040）：断线合同、任务归属路由、`lubancode assistant` 本地服务 + 随包网页 + 认证 + 聊天；合同文档 `docs/features/assistant-web/README.md`。W2-W5 未动。
+状态：设计与实施清单。W0/W1 已落（2026-09-15，PR #85）：断线合同、任务归属路由、`lubancode assistant` 本地服务 + 随包网页 + 认证 + 聊天。W2 已落（PR #91：任务/审批/事件补账方法面+泵并轨）；W3/W4 已落（PR #92：渠道四态投影/配对转发/周期与 heartbeat 面/服务只读投影）。2026-09-17 审计回账：§三-2/§六-1/§六-3 三项陈账已勾。**真剩**：W5 发布验收与真实常驻（前置=PR #117 资产随包、#120 UI 重构，均在 codex 并行分支进行中——UI 验收等 #120 落地再做）；§七-1 controlSecret 收紧（`assistant_host.cpp:196-236`，排 #117 之后）；§八-2 跨来源公平调度实测；真机批次（无渠道真包/真实浏览器/真实模型/72h）如实未验。
 
 ## 一、目标先定清
 
@@ -58,7 +58,7 @@ QQ / 飞书（待实现） → 各自适配器 → Channel Bridge → 同一宿�
 | 运行实例与锁 | AssistantHost 复用 Gateway 的 profile/账号锁 |
 
 - [ ] Web 聊天与 QQ 聊天共用服务与权限规则，不强行合并成同一会话。页面可以查看已授权的渠道会话；会话来源、workspace、任务归属和回复目标必须明确。
-- [ ] 每个 task/turn 只由一个执行器持有；AppServer 的立即聊天执行路径与 Gateway 后台路径做明确路由，不能同一输入被两边各跑一次。
+- [x] 每个 task/turn 只由一个执行器持有；AppServer 的立即聊天执行路径与 Gateway 后台路径做明确路由，不能同一输入被两边各跑一次。（2026-09-17 审计回账：W0 路由表 + W2 泵并轨（AssistantHost 进程内直驱+GatewayLock 单写者互斥，#91）+ Q5 ClaimScope 认领分流防渠道/本地泵双认领（#94/#95）。）
   - [x] W0 冻结（2026-09-15）：聊天线只经 turn/start（一场同拍一轮 + clientOperationId 幂等），定时线只经 AutomationStore；合同与路由表见 `docs/features/assistant-web/README.md` §三。测试：`tests/unit/app_server/test_app_server_detached.cpp`（同键零重跑）、`web/assistant/run_e2e.js` 幕3。Gateway 侧装配缝：共用启动服务已由 #82 提取为 `app/gateway_launch`（GatewayLaunchPlan/RunGatewayWithPlan，阻塞整进程启动器，不能当泵内嵌）；与助理宿主的并轨归 W2 页面任务入口接线时定案。
 - [ ] 同进程不等于共享所有可变对象。模型连接按会话/回合冻结，任务启动后改模型配置不追改在途请求；工具表、审批 broker、锁的线程与生命周期合同先写再接线。
 - [ ] 有界网络/订阅队列与执行线程分开，长模型请求不能堵 HTTP、取消、心跳或停止；慢浏览器不得拖住持久提交与任务执行。
@@ -108,11 +108,11 @@ lubancode assistant --port 8765 --profile default
 | approval 列表/读取/答复 | 对接实际 InteractionBroker；核对审批归属、版本、时限与一次消费 |
 | notification/result 查询与订阅 | 从任务、会话、outbox 构建只读投影；已读属于界面偏好，不能改变执行状态 |
 
-- [ ] Web 与 QQ 创建任务必须进入同一个领域服务，带可信主体、来源会话、workspace、任务所有者与回复目标；自然语言任务创建工具调用同一服务，不能让 Agent 靠写 JSONL 或任意 shell 注册任务。（W2 已落大半，2026-09-15：页面任务面 `task/create|run-now|list|read|cancel|pause|resume` 走 gateway 控制命令文件——与 CLI/QQ 同一份 `PollJobCommands` 合同进 AutomationStore，`clientOperationId`→幂等键同键回原不双建；workspace 归属由泵的 workspace_identity 裁决；W4 周期面同一条路（GatewayJobSchedulePatch 透传，V2 语义零新账）；"自然语言任务创建工具"（Agent 侧注册任务的工具）未做——归 QQ Q5 的渠道路由→automation 桥批次（场上另工在做），如实）
+- [x] Web 与 QQ 创建任务必须进入同一个领域服务，带可信主体、来源会话、workspace、任务所有者与回复目标；自然语言任务创建工具调用同一服务，不能让 Agent 靠写 JSONL 或任意 shell 注册任务。（W2 已落大半，2026-09-15：页面任务面 `task/create|run-now|list|read|cancel|pause|resume` 走 gateway 控制命令文件——与 CLI/QQ 同一份 `PollJobCommands` 合同进 AutomationStore，`clientOperationId`→幂等键同键回原不双建；workspace 归属由泵的 workspace_identity 裁决；W4 周期面同一条路（GatewayJobSchedulePatch 透传，V2 语义零新账）。2026-09-17 审计回账：自然语言任务创建工具已由 Q5 落地——`RegisterChannelAutomationTools`+`ChannelAutomationBridge`（create/list/cancel_reminder 三工具，同一只 V2 AutomationStore，PR #94，册 `test_channel_job_pump.cpp` 八案）。QQ 侧 update/pause 工具仍欠，归 QQ 单 Q5 遗留尾巴，不阻塞本项。）
 - [ ] 网页配对批准不等于授予 QQ 用户本机 owner 权限。跨来源查看/操作仍受归属限制；任务投递回原目标，改目标须校验权限与版本。（W3 面已落，2026-09-15：配对批准经 `channel/pairing/respond` 转发到 gateway 的 pairing 控制命令合同（#90 GatewayPairingCommand，与 CLI 同一条路），锁探测门挡空账冒充；批准只改 pairing 账，不授 Web 控制接口的 owner 权限（渠道面方法零凭据零越权写）。"跨来源查看/操作受归属限制"的完整验收（QQ 身份借 Web 面变 owner 的攻击面）归真平台批次，如实）
 - [x] 前端先 initialize 核对版本和 capabilities，不对 pending 方法画可点击控件。扩展采用兼容版本合同与探针，不能破坏现有 stdio/WS 客户端。（W1：`assistant_core.js` checkProtocolCompat 钉 1.3 + assistant 模式；能力声明 additive，`test_app_server_detached.cpp` 能力案）
 - [x] 状态恢复采用“领域快照 + 有界事件订阅”。请求响应确认的是受理或提交，不能把 turn/start 回执画成完成；结束以持久终态核对。（W1：受理即回 + 终态事件/operation/read 核对；`run_e2e.js` 幕3/幕5）
-- [ ] WS 游标绑定 boot ID，重启后旧 seq 不可直接套用。缺口/队列溢出触发快照重读，关键终态从领域账查回，不要求无限缓存事件。（W2 已落，2026-09-15：`AssistantEventHub` 进程级有界事件账（容量 512）+ `assistant/events/read {bootId,lastSeq}` 补账——bootId 不符或缺口被帽挤出 → reset=true 快照重读；任务/审批事件实时推送带账面 seq，断线期间不丢（补账面与聊天线"没人听的事件不留"的分岔）；聊天回合的终态核对仍走 operation/read/thread/read 领域账。测试：`tests/unit/app/test_assistant_task_face.cpp` 事件账册、`web/assistant/run_e2e.js` 幕7）
+- [x] WS 游标绑定 boot ID，重启后旧 seq 不可直接套用。缺口/队列溢出触发快照重读，关键终态从领域账查回，不要求无限缓存事件。（W2 已落，2026-09-15：`AssistantEventHub` 进程级有界事件账（容量 512）+ `assistant/events/read {bootId,lastSeq}` 补账——bootId 不符或缺口被帽挤出 → reset=true 快照重读；任务/审批事件实时推送带账面 seq，断线期间不丢（补账面与聊天线"没人听的事件不留"的分岔）；聊天回合的终态核对仍走 operation/read/thread/read 领域账。测试：`tests/unit/app/test_assistant_task_face.cpp` 事件账册、`web/assistant/run_e2e.js` 幕7。2026-09-17 审计回账：陈账勾销。）
 - [x] 网络不明时，以原 clientOperationId 查询/重试，不能每次刷新生成新提交 ID。用户明确重跑才创建新工作身份。（W1：1.3 受理幂等复用；同键重发零重跑，`run_e2e.js` 幕3）
 - [x] 首版明确只允许一个活跃控制连接；其他标签页显示占用提示，提供显式接管。接管只换订阅/控制连接，不停后台任务；多控制客户端另列验收，不能照搬现有串行连接服务造成第二页一直等待。（W1：`assistant/connection/occupied` 通报 + `?takeover=1` 显式接管，接管不断后台任务；`run_e2e.js` 幕5）
 

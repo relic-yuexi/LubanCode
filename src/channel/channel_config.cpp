@@ -1094,6 +1094,35 @@ ChannelAccountUserConfig MakeQqTemplateAccount() {
     return account;
 }
 
+ChannelAccountUserConfig MakeWecombotTemplateAccount() {
+    // 企微智能机器人首版模板(设计单 §七):QQ 模板同形,只改凭据语义——
+    // app_id 存 BotID、secret_env 指长连接专用 Secret(与回调模式 Token/
+    // AESKey 互斥,管理后台二选一)。setup 向导落受管 secret_file 时会清
+    // 掉 env 引用(受管文件优先级更高)。
+    ChannelAccountUserConfig account = MakeQqTemplateAccount();
+    account.secret_env = std::optional<std::string>("WECOMBOT_SECRET");
+    return account;
+}
+
+ChannelAccountUserConfig MakeFeishuTemplateAccount() {
+    // 飞书首版模板(设计单 §七):照 QQ 模板五可选项对齐——群聊默认
+    // disabled(映射支持,但首版不开)、dm 走 pairing、final 回复、同一份
+    // 最小只读工具名单。secret_env 预指 FEISHU_APP_SECRET:手写配置的
+    // 默认密钥来源(密钥规矩全沿 Q0:secret_file > secret_env > secret)。
+    ChannelAccountUserConfig account;
+    account.enabled = false;  // 用户配齐凭据再自己开
+    account.transport = "websocket";
+    account.dm_policy = DmPolicy::Pairing;
+    account.group_policy = GroupPolicy::Disabled;
+    account.allow_bots = false;
+    account.require_mention = true;
+    account.reply.mode = ReplyMode::Final;
+    account.secret_env = std::string("FEISHU_APP_SECRET");
+    account.tools.allow = std::vector<std::string>{"read_file", "search", "create_reminder",
+                                                   "list_reminders", "cancel_reminder", "get_current_time"};
+    return account;
+}
+
 std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
     const nlohmann::json& channels_json, const std::string& file_path_for_error,
     std::string* error) {
@@ -1154,14 +1183,9 @@ std::optional<std::map<std::string, ChannelUserConfig>> ParseChannelsUserConfig(
                                             file_path_for_error, &account, error)) {
                         return std::nullopt;
                     }
-                    // QQ 无显式模式/名单时开箱走询问档；deny 仍有效。
-                    // 显式空 allow/approve 也是用户策略，不覆盖。
-                    if (channel_id == "qqbot" && account.tools.preset.empty() &&
-                        !account.tools.allow && !account.tools.approve) {
-                        auto defaults = *ChannelToolsPreset("ask");
-                        defaults.deny = std::move(account.tools.deny);
-                        account.tools = std::move(defaults);
-                    }
+                    // 裸配置(未写权限)保持 nullopt 不物化:默认"操作前询问"
+                    // 档在注册侧(ChannelManager::AddAccount)生效,不落进
+                    // 解析结果——presence 合同(未写=不添上限)一字不破。
                     channel.accounts.emplace(account_it.key(), std::move(account));
                 }
             } else if (key == "bindings") {

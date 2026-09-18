@@ -5,7 +5,7 @@
 - 级别：P1；近期先交付本地 SDK，生产组件按阶段推进。
 - 用户目标：别人能调用 LubanCore 写自己的程序；CLI、Web、后台服务、任务编排都接同一套运行能力。默认本地可用，需要数据库、常驻调度或多节点时，可以接入相应组件。
 - 范围：宿主 API、组件 SPI、会话隔离、存储合同、调度恢复、并发、生产部署、构建安装与迁移。
-- 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`持久Agent_Gateway自动任务与可靠恢复总装计划.todo`、`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`。
+- 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo(旧总装单已删,2026-09-17)`、`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`。
 - 本地存储合同以 `docs/development/workspace-storage-v2/P0-0-contracts.md` 为准。原单引用的 `Workspace统一存储_旧Session退场与分级Memory迁移.todo` 当前未找到，不再把它当唯一依据。
 - 本单统管 SDK 边界与分期。Gateway 单落实常驻、自动任务和恢复；集群单落实节点、租约与控制面。开工相应阶段前同步关联单，消除旧前置与旧描述，不维护两套冲突合同。
 

@@ -1,0 +1,13 @@
+{
+  "name": "tool-not-authorized-passes-through",
+  "trigger": {
+    "input": {"prompt": "没给工具授权时安静放行"},
+    "origin": "human",
+    "purpose": "interactive"
+  },
+  "expect": {
+    "kind": "completed",
+    "contextAppends": [],
+    "terminalRuns": 1
+  }
+}

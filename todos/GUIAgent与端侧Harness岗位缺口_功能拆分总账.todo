@@ -31,7 +31,7 @@ Telemetry/Insights。眼下欠的不是再添几枚工具，而是把这些地�
 - OTLP 投影、脱敏、spool、出口与远端观测策略仍归
   `端云协同可观测架构与Telemetry插件设计.todo`。
 - Gateway 常驻、automation、channel ingress/outbox 仍归
-  `持久Agent_Gateway自动任务与可靠恢复总装计划.todo`。
+  `持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo(旧总装单已删,2026-09-17)`。
 - 多租户、多节点、NodeBridge 与 RuntimeLease 仍归现有集群控制面单。
 
 新单只能吃旧合同，不得另造第二份 session id、event id、tool outcome、

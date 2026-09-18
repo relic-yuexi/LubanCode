@@ -578,3 +578,50 @@ TEST_CASE("Q0:渠道层工具上限进路由——SetChannelToolsPolicy 现读�
     CHECK(work->route.tools.Allows("read_file"));
     CHECK_FALSE(work->route.tools.Allows("run_command"));
 }
+
+TEST_CASE("QQ 裸账号默认询问档:注册侧生效,显式策略原样保留") {
+    const auto root = MakeStateRoot("ask_preset_default");
+    ChannelManager manager(MakeOptions(root));
+    ChannelConversation dm;
+    dm.kind = ConversationKind::Direct;
+    dm.id = "dm-1";
+
+    // 裸账号(没写 tools):默认档 = ask——查询/提醒预授权,写文件/命令/
+    // 发文件走审批带。默认在注册侧物化,不进解析结果(不落盘)。
+    REQUIRE(manager.AddAccount("qqbot", "bare", OpenAccount(), nullptr).status ==
+            ChannelManager::AddAccountResult::Status::Ok);
+    const auto bare = manager.ProbeRoute("qqbot", "bare", dm, "sender-1", 1724700000000);
+    REQUIRE(bare.status == RouteDecision::Status::Admitted);
+    CHECK(bare.tools.Allows("read_file"));
+    CHECK(bare.tools.Approvable("run_command"));
+    CHECK_FALSE(bare.tools.ExplicitlyAllows("run_command"));
+    CHECK(bare.tools.source == "account");
+
+    // 只写 deny:默认档叠加显式禁止,deny 仍压过审批带。
+    ChannelAccountUserConfig deny_only = OpenAccount();
+    deny_only.tools.deny = std::vector<std::string>{"run_command"};
+    REQUIRE(manager.AddAccount("qqbot", "denied", deny_only, nullptr).status ==
+            ChannelManager::AddAccountResult::Status::Ok);
+    const auto denied = manager.ProbeRoute("qqbot", "denied", dm, "sender-1", 1724700000000);
+    REQUIRE(denied.status == RouteDecision::Status::Admitted);
+    CHECK_FALSE(denied.tools.Allows("run_command"));
+    CHECK(denied.tools.Allows("read_file"));
+
+    // 显式空名单是用户策略:禁全部工具,不套默认档。
+    ChannelAccountUserConfig blocked = OpenAccount();
+    blocked.tools.allow = std::vector<std::string>{};
+    REQUIRE(manager.AddAccount("qqbot", "blocked", blocked, nullptr).status ==
+            ChannelManager::AddAccountResult::Status::Ok);
+    const auto capped = manager.ProbeRoute("qqbot", "blocked", dm, "sender-1", 1724700000000);
+    REQUIRE(capped.status == RouteDecision::Status::Admitted);
+    CHECK_FALSE(capped.tools.Allows("read_file"));
+
+    // 非 QQ 渠道裸账号不套默认档:零层声明 = 不添上限。
+    ChannelAccountUserConfig other = OpenAccount();
+    REQUIRE(manager.AddAccount("feishu", "main", other, nullptr).status ==
+            ChannelManager::AddAccountResult::Status::Ok);
+    const auto feishu = manager.ProbeRoute("feishu", "main", dm, "sender-1", 1724700000000);
+    REQUIRE(feishu.status == RouteDecision::Status::Admitted);
+    CHECK(feishu.tools.Allows("run_command"));
+    CHECK(feishu.tools.source.empty());
+}

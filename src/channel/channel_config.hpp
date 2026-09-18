@@ -249,6 +249,19 @@ bool IsValidChannelAccountId(const std::string& id);
 // 动态 tool_search、插件、MCP、子 Agent 都扩不出这份上限。
 ChannelAccountUserConfig MakeQqTemplateAccount();
 
+// 企业微信智能机器人首版模板(W1,飞书与企业微信接入设计单 §七):在 QQ
+// 模板之上改凭据语义——app_id 字段存 BotID(管理后台智能机器人 API 模式
+// 选"长连接"拿到),secret_env 指向长连接专用 Secret(WECOMBOT_SECRET,
+// 与回调模式的 Token/AESKey 互斥);其余字段(配对/禁群/final/工具名单)
+// 与 QQ 模板同形。
+ChannelAccountUserConfig MakeWecombotTemplateAccount();
+
+// 飞书渠道首版模板(飞书/企微设计单 F1,§七):照 QQ 模板五可选项对齐
+//(dm=pairing/group=disabled/allow_bots=false/reply=final/require_mention);
+// secret_env 预指 FEISHU_APP_SECRET(手写配置的默认密钥来源;向导存了
+// 受管 secret_file 后由提交侧清掉此引用)。
+ChannelAccountUserConfig MakeFeishuTemplateAccount();
+
 // ---------------------------------------------------------------------------
 // 解析
 // ---------------------------------------------------------------------------

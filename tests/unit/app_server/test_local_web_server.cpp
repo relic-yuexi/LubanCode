@@ -2,7 +2,7 @@
 //   1. 同源纯函数:Host/Origin 的回环判定、Cookie 挑值;
 //   2. 启动门:manifest 缺资源明错拒启(不起空壳)、非回环绑定拒、指定
 //      端口被占准确报错(带端口号,不偷换);
-//   3. 静态资源:无 cookie 401(配对提示页)、有 cookie 200(带 CSP/
+//   3. 静态资源:无 cookie 可加载页面壳、有 cookie 200(带 CSP/
 //      nosniff)、manifest 外 404、坏 Host 403、跨源 Origin 403;
 //   4. bootstrap 交换:对凭据 204 + Set-Cookie(HttpOnly/SameSite=Strict),
 //      重放 403,坏凭据 403;
@@ -308,17 +308,25 @@ TEST_CASE("local web:指定端口被占准确报错,不偷换端口") {
 // 资源与认证门
 // ---------------------------------------------------------------------------
 
-TEST_CASE("local web:静态资源走会话门,同源门在前") {
+TEST_CASE("local web:静态页面壳允许首次加载,同源门在前") {
     WebServerHarness harness("lubancode_test_webui_static");
     harness.Start();
     const int port = harness.port();
 
-    SUBCASE("无 cookie:401 配对提示页,不泄资源") {
+    SUBCASE("无 cookie:页面与脚本可加载,才能交换 bootstrap") {
+        for (const std::string& target : {"/", "/index.html", "/assistant.css", "/assistant_core.js", "/assistant_app.js"}) {
+            RawHttpClient client(port);
+            const HttpReply reply = client.RoundTrip(Get(port, target));
+            CHECK(reply.status == 200);
+            CHECK_FALSE(reply.body.empty());
+            CHECK(reply.header.find("Content-Security-Policy:") != std::string::npos);
+        }
+    }
+
+    SUBCASE("无 cookie:artifact 仍拒绝访问") {
         RawHttpClient client(port);
-        const HttpReply reply = client.RoundTrip(Get(port, "/"));
+        const HttpReply reply = client.RoundTrip(Get(port, "/artifact/private.png"));
         CHECK(reply.status == 401);
-        CHECK(reply.body.find("需要从启动链接进入") != std::string::npos);
-        CHECK(reply.body.find("assistant page") == std::string::npos);
     }
 
     SUBCASE("有 cookie:200 + CSP/nosniff 头") {

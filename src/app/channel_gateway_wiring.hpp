@@ -6,7 +6,8 @@
 // ChannelManager::AddAccount + StartAccount 真接上。QQ 定案进程内直连
 // (§十五):trust 快照按"渠道实现内置受信"恒信任(不造假包概念),凭据经
 // Q0 resolver 解析后留在宿主进程内,适配器是 ChannelBridgeTransport 的
-// 进程内实现。其余渠道(Q1 未实现适配器)如实记 skipped,不起任何线程。
+// 进程内实现。已注册渠道(channel_adapter_registry,R0 起注册表化)查表
+// 装配;未注册渠道如实记 skipped,不起任何线程。
 //
 // 复合泵:GatewayProcess::Options 只收一只泵,渠道的 Pump(出站帧 flush +
 // 入站字节 drain)是有界同步件,与 automation 主泵同 tick——本件把两只
@@ -26,7 +27,10 @@
 #include <vector>
 
 #include "app/channel_connection_reporter.hpp"
+#include "channel/feishu/feishu_gateway.hpp"
+#include "channel/feishu/feishu_http.hpp"
 #include "channel/manager.hpp"
+#include "channel/qq/qq_adapter.hpp"
 #include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
 #include "channel/qq/qq_menu.hpp"
@@ -78,6 +82,10 @@ public:
         std::function<std::unique_ptr<channel::qq::IGatewayTransport>()>
             test_transport_factory;
         channel::qq::QqHttpFunc test_http;
+        // 飞书(F1)同款注入位(仅对 feishu 注册行生效)。
+        std::function<std::unique_ptr<channel::feishu::IFeishuGatewayTransport>()>
+            test_feishu_transport_factory;
+        channel::feishu::FeishuHttpFunc test_feishu_http;
     };
 
     // 装配。channels 段为空时返回 nullptr(零渠道行为,不挂泵)。
@@ -132,11 +140,12 @@ private:
 
     std::unique_ptr<channel::ChannelManager> manager_;
     std::vector<std::unique_ptr<channel::ChannelBridgeTransport>> adapters_;
-    // adapter 的类型化视图(所有权仍在 adapters_;reporter 取快照用)。
+    // adapter 的连接状态视图(所有权仍在 adapters_;注册行的装配产物递
+    // 来,reporter 取快照用)。
     struct AdapterView {
         std::string channel_id;
         std::string account_id;
-        channel::qq::QqBotAdapter* adapter = nullptr;
+        std::function<channel::qq::ConnectionSnapshot()> connection_state;
     };
     std::vector<AdapterView> adapter_views_;
     std::vector<std::string> skipped_;

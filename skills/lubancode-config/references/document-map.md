@@ -13,6 +13,7 @@
 | 工具、Agent、后台任务、PTC | `reference/tools.md`、`features/tools/ptc.md` | `architecture/tool-calling-flow.md`、`architecture/agent-loop/reliability.md` |
 | Skill、Plugin、MCP、LSP | `features/extensions/README.md` | `architecture/extensions/tool-extension.md`、`architecture/extensions/plugin-runtime.md` |
 | Hooks、权限、settings.local.json | `features/extensions/hooks.md`、`development/security.md` | `architecture/hooks-flow.md` |
+| Lua hook(中间件体系):挂点、清单、覆盖、Host API、校验试跑 | `features/hooks/README.md`、`features/extensions/hooks.md` | `architecture/hooks-flow.md` |
 | 终端、键位、排队输入、面板 | `features/terminal/README.md`、`reference/commands.md` | `architecture/query-data-flow.md` |
 | AGENTS、项目指令、prompt、soul | `features/project-instructions/README.md`、`reference/configuration.md` | `architecture/README.md` |
 | 安装、更新、发行、排错 | `development/build-and-release.md`、`getting-started/troubleshooting.md` | `development/testing.md` |

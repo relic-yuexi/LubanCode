@@ -97,7 +97,7 @@ AccountInUse        账号锁被另一实例持有
 Ready               唯一可启动渠道执行载体的状态（受管子进程或进程内直连，Q1 定案）
 ```
 
-只有 `Ready` 才能启动渠道执行载体。执行载体形态按渠道实现定案（QQ 已于 Q1 定案进程内直连，见接入单 §十五；未来其他渠道仍可走受管子进程），决策合同传输无关。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。"Package 已安装且已信任"一闸：进程内直连的渠道实现（无渠道包）退化为"渠道实现内置受信"（装配侧恒信任，QQ 即此），不另造假包概念。
+只有 `Ready` 才能启动渠道执行载体。执行载体形态按渠道实现定案（QQ 已于 Q1、飞书于 F1 定案进程内直连，见各家接入单；未来其他渠道仍可走受管子进程），决策合同传输无关。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。"Package 已安装且已信任"一闸：进程内直连的渠道实现（无渠道包）退化为"渠道实现内置受信"（装配侧恒信任，QQ/飞书即此），不另造假包概念。
 
 默认行为表：
 
@@ -133,7 +133,7 @@ Ready               唯一可启动渠道执行载体的状态（受管子进程
 - 拒绝空值、拒绝内部控制字符、拒绝超限文件（上限 8 KiB）。
 - 路径必须绝对；按 canonical 解析（符号链接/重解析点解析到真实目标再验）；目标须是常规文件、归属当前用户，且无组/其他用户读写位（POSIX）或 DACL 无其他账户读权（Windows）。
 
-密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。凭据只进入获准的渠道执行载体——QQ 已定案进程内直连（Q1，接入单 §十五），凭据根本不出宿主进程：无专用启动管道，无子进程环境继承，`SidecarEnvAllowlist` 不消费。未来某渠道若定案受管子进程，则按本节原口径另补"经不落日志的专用启动管道交付、环境走白名单"的实装与冻结件修订。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
+密钥交接：不进 argv、不进模型输入、不进会话、不进 trace、不进错误与普通日志。凭据只进入获准的渠道执行载体——QQ（Q1）与飞书（F1）已定案进程内直连，凭据根本不出宿主进程：无专用启动管道，无子进程环境继承，`SidecarEnvAllowlist` 不消费。飞书 AppSecret 与 QQ AppSecret 同一套来源规矩与泄露禁令（引导请求体里的 AppSecret 不进任何错误文案）。未来某渠道若定案受管子进程，则按本节原口径另补"经不落日志的专用启动管道交付、环境走白名单"的实装与冻结件修订。首版不生成 `credentials.json.enc`；接上 OS 密钥库/DPAPI 后再谈登录存储。
 
 ## 5. 状态目录
 
@@ -209,11 +209,58 @@ tools: {"allow": [...]|[], "deny": [...]}     # 渠道段与账号段都可写
   "allow_bots": false,
   "require_mention": true,
   "reply": {"mode": "final"},
+  "tools": {"preset": "ask"}
+}
+```
+
+模板默认"操作前询问"档：查询与提醒工具预授权，写文件/命令/发文件进审批带（执行前经渠道按钮问用户，见下）。预设展开的 `allow` 是核过注册名的名单（`read_file`、`search` 均为现有注册工具名）。Q5 起多了三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`，Gateway 装配注册，见 `runtime/channel_automation`）：只对过了配对/准入的会话可用——未配对 sender 进不了模型，拿不到工具；落账走 automation 域命令与归属闸（任务只归创建者查询/取消），不碰文件系统。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在预设名单里，五层交集自然拦下，扩不出上限。任意 shell 不预授权，只在审批带内可申请。
+
+**企业微信智能机器人首版模板**（`MakeWecombotTemplateAccount()`，W1；字段同 QQ 模板，只改凭据语义——`app_id` 存 BotID，`secret_env` 指长连接专用 Secret）：
+
+```json
+{
+  "transport": "websocket",
+  "app_id": "替换为 BotID",
+  "secret_env": "WECOMBOT_SECRET",
+  "dm_policy": "pairing",
+  "group_policy": "disabled",
+  "allow_bots": false,
+  "require_mention": true,
+  "reply": {"mode": "final"},
   "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder", "get_current_time"]}
 }
 ```
 
-`tools.allow` 是核过注册名的最小只读名单（`read_file`、`search` 均为现有注册工具名）。Q5 起多了三枚聊天侧任务工具（`create_reminder`/`list_reminders`/`cancel_reminder`，Gateway 装配注册，见 `runtime/channel_automation`）：只对过了配对/准入的会话可用——未配对 sender 进不了模型，拿不到工具；落账走 automation 域命令与归属闸（任务只归创建者查询/取消），不碰文件系统。缺省不等于"所有免确认工具都是只读"；动态 tool_search、插件、MCP、子 Agent 的工具名都不在这份名单里，五层交集自然拦下，扩不出上限。首版不开放任意 shell。
+用户侧准备（管理后台智能机器人开 **API 模式选长连接**，拿 BotID + Secret——长连接专用密钥，与回调模式的 Token/AESKey 互斥，二选一）。密钥规矩全沿 QQ：`secret_file` > `secret_env` > inline 明文，setup 向导落受管 `secret_file` 时会清掉 env 引用与旧明文。首版范围：文本进出（voice 回调的平台转写文本进正文；image/file/video 落占位说明），出站 markdown（≤20480 字节 UTF-8 自动分段），群聊映射支持但模板默认禁用；媒体收发、模板卡片、流式、enter_chat 欢迎语、主动推送归 W2。回复限频单会话 30 条/分钟、1000 条/小时（发送线程记账排队）。
+
+**飞书首版模板**（F1 起，`MakeFeishuTemplateAccount()`；照 QQ 模板五可选项对齐，`secret_env` 预指 `FEISHU_APP_SECRET`——手写配置的默认密钥来源，向导存了受管 `secret_file` 后由提交侧清掉此引用）：
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "default_account": "work",
+      "accounts": {
+        "work": {
+          "enabled": true,
+          "transport": "websocket",
+          "app_id": "cli_xxxxxxxx",
+          "secret_env": "FEISHU_APP_SECRET",
+          "dm_policy": "pairing",
+          "group_policy": "disabled",
+          "allow_bots": false,
+          "require_mention": true,
+          "reply": {"mode": "final"},
+          "tools": {"allow": ["read_file", "search", "create_reminder", "list_reminders", "cancel_reminder", "get_current_time"]}
+        }
+      }
+    }
+  }
+}
+```
+
+飞书密钥规矩全沿 Q0（`secret_file` > `secret_env` > `secret` 明文；高优先级来源配置了但无效时明报不降级）。用户侧准备：open.feishu.cn 建企业自建应用、事件订阅选"使用长连接接收事件"、订阅 `im.message.receive_v1`、开通发消息权限、发布应用版本；首版仅国内域，larksuite 后置。
 
 Q6 起各层 tools 段另有 `approve`（可申请审批带，presence 合同与 `allow` 同款：键在=本层参与，未写=不参与）：名单内的须确认工具**不预先授权**——模型可见（看不见无从申请），执行前经渠道按钮问用户（QQ 键盘卡，`channel.approval.requested/resolved` 落 V3），允许才执行这一次；拒绝/超时/取消都不执行，超时默认拒绝不默认放行。`deny` 永远赢：hard deny 不可被按钮覆盖。有效审批带 = 各显式层 `approve` 的交集（与 `allow` 同构）。旧配置零层声明仍为空带。新 QQ 向导默认保存 `tools.preset: "ask"`，展开为常用只读/提醒预授权和写文件/命令/发文件审批带。`readonly` 只开放查询，`auto` 预授权常用工具；preset 与 allow/approve 互斥，deny 仍优先。旧账号可用 `lubancode channel setup qqbot --permissions` 选择模式，无须列工具名。
 
@@ -421,7 +468,7 @@ reload 走 diff：
 
 ### 13.2 TLS 信任根
 
-wss 的 TLS 验证恒 REQUIRED，无降级开关，失败不改走明文。信任根解析（`src/channel/qq/qq_tls.hpp` 的 `ResolveChannelTrustRoots`）：
+wss 的 TLS 验证恒 REQUIRED，无降级开关，失败不改走明文。信任根解析（`src/channel/transport/tls.hpp` 的 `ResolveChannelTrustRoots`）：
 
 - **显式信任锚**（装配 seam `ChannelGatewayWiring::Options::ca_pem`，测试位）：调用方全权指定，不回退平台来源；解析不出证书时明报（装配诊断一行"信任根不可用"），连接时报 `tls_trust_store_empty`。**未接入用户配置**——若未来开放配置须接全配置解析、优先级与文档（QQ 连接诊断单 §四原话）。
 - **平台默认（Windows）**：从系统证书库（Root/Ca，CurrentUser+LocalMachine，剔除 Disallowed 显式不信任）导出信任根喂 mbedTLS，并在 mbedTLS 握手验证里接 Windows 链构建与 SSL 策略校验（`CertGetCertificateChain` + `CertVerifyCertificateChainPolicy`，覆盖链信任/有效期/用途/系统不信任策略）；系统裁决为链信任权威（可走 AIA 拉中间证书，本地导出子集做不到），系统拒则握手拒，系统过只放行"链不可信"误报位。主机名与有效期/EKU 由 mbedTLS 内置验证（`mbedtls_ssl_set_hostname` + verify flags）承担，与系统判定双保险不互盖。SDK 兼容口径：`CERT_CHAIN_PARA`/`CERT_CHAIN_POLICY_PARA` 只写 `cbSize`（部分 SDK 展开集缺 `dwUrlRetrievalTimeout`/`pvExtraPara` 成员），不传 `pvExtraPara`——SSL 主机名校验不依赖它。用户无须下载 PEM、造 `/etc/ssl` 目录或设环境变量。

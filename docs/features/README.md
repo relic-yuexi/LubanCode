@@ -15,6 +15,7 @@
 | [项目指令](project-instructions/README.md) | `/init`、AGENTS 层级、覆盖与大小边界 |
 | [Provider 目录](providers/catalog.md) | 厂家预设、缓存、Schema 与在线更新 |
 | [扩展](extensions/README.md) | Skills、Plugins、MCP、LSP 与 Hooks |
+| [Lua Hooks](hooks/README.md) | 中间件体系:挂点、同名覆盖、Host API 与校验试跑 |
 | [Hooks](extensions/hooks.md) | 事件、协议、信任、决策归并与后台语义 |
 | [PTC](tools/ptc.md) | 程序化工具调用、runner、预算与回落 |
 | [Workflow](workflows/README.md) | 安装、运行、恢复与工作流设计原语 |

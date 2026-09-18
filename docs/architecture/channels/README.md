@@ -8,7 +8,7 @@ _本目录是多渠道消息接入的合同冻结文档（设计单阶段 0）�
 
 ## 启动与多渠道
 
-2026-09-13 源码核对：`gateway run/status/stop/job` 已有入口，生产装配已接自动任务与本地结果投递。真实渠道进程、QQ/飞书适配器及渠道会话投递总装尚未完成。下文把现有命令与完成接线后的行为分开写；现在运行 Gateway 不会自动连上 QQ 或飞书。
+2026-09-13 源码核对（2026-09-17 飞书 F1、企微 W1 后更新）：`gateway run/status/stop/job` 已有入口，生产装配已接自动任务与本地结果投递。QQ（Q1 起）、飞书（F1 起）与企微智能机器人（W1 起）的进程内适配器已落地并走注册表装配；其他平台适配器与渠道会话投递总装尚未完成。下文把现有命令与完成接线后的行为分开写；现在运行 Gateway 只会连上已配置且启用的 QQ/飞书/企微账号。
 
 ### 启动、查看、停止
 
@@ -78,21 +78,23 @@ lubancode gateway stop --profile assistant
 
 ### 后面加飞书怎么做
 
-仍使用 `lubancode gateway run`，不为每个平台造一个顶层启动命令。目标是一个 Gateway 启动所有已安装、已信任且通过激活检查的渠道账号：
+仍使用 `lubancode gateway run`，不为每个平台造一个顶层启动命令。一个 Gateway 启动所有已启用且通过激活检查的渠道账号：
 
 ```text
 LubanCode Gateway
-  ├─ qqbot / main     → QQ 适配进程
-  └─ feishu / work    → 飞书适配进程（后续实现，ID 暂定）
+  ├─ qqbot / main     → QQ 适配进程（进程内直连）
+  └─ feishu / work    → 飞书适配进程（进程内直连，F1 已落地）
 ```
 
 每个账号各有凭据、连接、锁、入站账、准入规则和会话。飞书账号密钥不交给 QQ；同名用户或会话也不能跨渠道拼成一场。不同平台传来的模型任务共用宿主调度与预算，不能声称天然没有资源竞争。
 
-开发新平台时，新增渠道包和 manifest，实现同一 `lubancode-channel/1` Bridge，映射平台身份、来信和回执。会话、权限、去重、执行账和回复投递复用宿主；平台 SDK 不进入 Agent 内核。飞书具体凭据、事件与传输方式在接入时另行核对，不照抄 QQ 字段便宣称可用。
+**飞书现状（F1 批次落地）**：飞书适配器是原生 C++ 进程内直连（`src/channel/feishu/`，实现 `ChannelBridgeTransport` 字节面，无 sidecar、无 Node），走官方长连接协议（HTTP 引导拿 WSS 地址 → WebSocket BinaryMessage 收发 pbbp2 protobuf 帧，心跳/事件 ACK/拆包重组/退避重连）。用户侧准备：在 open.feishu.cn 建企业自建应用，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`，开通发消息权限，发布应用版本。凭据是 App ID + App Secret（`secret_env` 预指 `FEISHU_APP_SECRET`，也可用 `secret_file` 或向导受管文件）。首版只做文本进出（出站 `msg_type=text`）；仅 `open.feishu.cn` 域（larksuite 海外域后置）；媒体、卡片、富文本 post 后置。
+
+开发新平台时，新增渠道包和 manifest，实现同一 `lubancode-channel/1` Bridge，映射平台身份、来信和回执。会话、权限、去重、执行账和回复投递复用宿主；平台 SDK 不进入 Agent 内核。支持官方 WebSocket 长连接的平台（企微智能机器人即此类）照飞书的路子做进程内适配器；真要公网回调的平台（LINE/Zalo 等）走 webhook 共用底座。
 
 配置以 `channels.<id>.accounts.<account>` 分组。启用飞书要同时启用渠道与账号；停用 QQ 则关闭对应开关，并按首版约定重启 Gateway 生效。首版不承诺配置热更新。多 profile 仍不能同时占同一渠道账号，账号锁必须拦住重复连接。
 
-实施顺序和验收见 QQ 接入改造单(见对应设计单)。QQ 是第一只适配器；多渠道宿主应一次做好，各平台再逐一联调。
+实施顺序和验收见 QQ 接入改造单与飞书/企微设计单(见对应设计单)。QQ 是第一只适配器，飞书是第二只；多渠道宿主一次做好，各平台逐一联调。
 
 ## 1. 这层是干什么的
 
@@ -290,9 +292,9 @@ Agent reply -> platform：幂等尽力；平台支持 client id 时用 client id
 | 3 | Headless Session 与路由：TurnIngress、provenance、router、session host、ChannelTurn | 已有路由和会话宿主组件；真实渠道生产总装与 V3 多轮恢复待完成 |
 | 4 | ReplyAssembler 与 outbox：final/block/native、分块、preview/committed 分账 | 待实现 |
 | 5 | QQ Bot 参考适配器 | 进行中（Q1：进程内直连定案，协议核心 auth/gateway-events/messages/spool 与 mock 测试落地；V3 总装与真实联调见接入单 Q2/Q3） |
-| 6 | WeChat 参考适配器 | 待实现 |
-| 7 | Webhook 共用底座（LINE/Feishu/Zalo/WeCom callback） | 待实现 |
-| 8 | 其余 WebSocket/轮询渠道 | 待实现 |
+| 6 | 企业微信智能机器人适配器（`wecombot`，WS 长连接渠道线，进程内直连） | W1 落地（文本进出：入站 text/voice 转写/mixed 抽文本、出站 markdown；凭据 BotID+Secret 走 `app_id`/secret 既有字段。个人微信因 iLink 闭源插件仍是死路；媒体/模板卡片/流式/欢迎语/主动推送归 W2，真机联调另立小单） |
+| 7 | Webhook 共用底座（真要公网回调的平台：LINE/Zalo 等） | 待实现（飞书/企微已定案走官方 WS 长连接，不占此线） |
+| 8 | 其余 WebSocket/轮询渠道 | 飞书长连接适配器已落地（F1：pbbp2 帧/引导/心跳/事件 ACK/拆包重组/退避重连/回话发送/注册表装配，首版文本进出；真机联调与媒体后置）；其余渠道待实现 |
 | 9 | Gateway 服务化 | 待实现 |
 
 ## 10. 兼容承诺
