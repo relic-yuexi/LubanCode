@@ -69,6 +69,17 @@ void PrintMemoryUsage() {
     TermOut() << tr("cmd.memory.usage");
 }
 
+// 入队结果的统一呈现(修复单 §五 B):排队成功只报纯 job_id(不混启动
+// 说明);启动失败另起一行短提示附诊断入口,不吞队列成功值。
+void PrintEnqueueResult(const lubancode::memory::MemoryEnqueueResult& result) {
+    TermOut() << trf("cmd.memory.queued", result.job_id) << "\n";
+    if (result.worker_state == lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
+        TermOut() << trf("cmd.memory.worker_failed",
+                         result.worker_error.empty() ? result.worker_error_code : result.worker_error)
+                  << "\n";
+    }
+}
+
 // 抽取的本地超时预算(秒)。取消误报 ESC 单 Bug 1:预算要进账
 //(prepared 的 timeoutBudgetSecs)也要进终端提示——两处同源,不各写
 // 一份 45。
@@ -104,13 +115,78 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
                   << trf("cmd.memory.learn_status", status.learn) << "\n"
                   << trf("cmd.memory.project", status.workspace_key) << "\n"
                   << trf("cmd.memory.directory", lubancode::tools::PathToUtf8(status.memory_dir)) << "\n"
-                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
+                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs, status.failed_jobs) << "\n";
         if (status.user_enabled) {
             TermOut() << trf("cmd.memory.user_status", status.user_entry_count,
                              lubancode::tools::PathToUtf8(status.user_memory_dir))
                       << "\n";
         }
         TermOut() << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
+        return;
+    }
+    if (action == "jobs") {
+        // 任务台账(修复单 §五 C):当前工作区的待写/失败任务,按工作区
+        // 隔离;retry 唤醒 pending,重试 failed 须显式点名。
+        std::string sub;
+        words >> sub;
+        std::transform(sub.begin(), sub.end(), sub.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (sub == "retry") {
+            std::string target;
+            words >> target;
+            if (!target.empty()) {
+                const auto retried = project_memory->RetryFailedJob(target);
+                TermOut() << (retried.has_value()
+                                  ? trf("cmd.memory.jobs.retry_queued", *retried)
+                                  : trf("cmd.memory.jobs.retry_rejected", retried.error()))
+                          << "\n";
+                return;
+            }
+            const auto woken = project_memory->WakePendingWorker();
+            switch (woken.state) {
+                case lubancode::memory::MemoryWorkerLaunchState::Started:
+                    TermOut() << tr("cmd.memory.jobs.retry_started") << "\n";
+                    break;
+                case lubancode::memory::MemoryWorkerLaunchState::StartFailed:
+                    TermOut() << trf("cmd.memory.worker_failed", woken.error) << "\n";
+                    break;
+                case lubancode::memory::MemoryWorkerLaunchState::Unavailable:
+                    TermOut() << tr("cmd.memory.jobs.retry_unavailable") << "\n";
+                    break;
+                case lubancode::memory::MemoryWorkerLaunchState::Idle:
+                    TermOut() << tr("cmd.memory.jobs.retry_idle") << "\n";
+                    break;
+                case lubancode::memory::MemoryWorkerLaunchState::AlreadyRunning:
+                    TermOut() << tr("cmd.memory.jobs.retry_running") << "\n";
+                    break;
+            }
+            return;
+        }
+        if (!sub.empty()) {
+            PrintMemoryUsage();
+            return;
+        }
+        const auto jobs = project_memory->ListWorkspaceJobs();
+        if (jobs.empty()) {
+            TermOut() << tr("cmd.memory.jobs.empty") << "\n";
+            return;
+        }
+        TermOut() << tr("cmd.memory.jobs.header") << "\n";
+        for (const auto& job : jobs) {
+            TermOut() << trf("cmd.memory.jobs.line", job.job_id, job.state, job.operation, job.layer,
+                             job.wait_hint, job.worker_state)
+                      << "\n";
+            if (!job.title.empty()) {
+                TermOut() << trf("cmd.memory.jobs.title_line", job.title) << "\n";
+            }
+            if (!job.error.empty()) {
+                TermOut() << trf("cmd.memory.jobs.error_line", job.error) << "\n";
+            }
+        }
+        if (!jobs.empty() && !jobs.front().worker_log.empty()) {
+            TermOut() << trf("cmd.memory.jobs.log_line", jobs.front().worker_log) << "\n";
+        }
+        TermOut() << tr("cmd.memory.jobs.hint") << "\n";
         return;
     }
     if (action == "on" || action == "off") {
@@ -202,9 +278,11 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         reason = TrimAscii(std::move(reason));
         if (action == "accept") {
             const auto queued = project_memory->AcceptCandidate(id);
-            TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                             : trf("cmd.memory.queue_failed", queued.error()))
-                      << "\n";
+            if (queued.has_value()) {
+                PrintEnqueueResult(*queued);
+            } else {
+                TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+            }
         } else {
             const auto rejected = project_memory->RejectCandidate(id, std::move(reason));
             TermOut() << (rejected.has_value() ? tr("cmd.memory.reject.done")
@@ -313,10 +391,11 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         if (entries.empty() && user_entries.empty()) {
             TermOut() << tr("cmd.memory.empty") << "\n";
             const auto status = project_memory->Status();
-            if (status.pending_jobs > 0) {
+            if (status.pending_jobs > 0 || status.failed_jobs > 0) {
                 TermOut() << trf("cmd.memory.pending_hint", status.pending_jobs) << "\n";
-                if (const auto launched = project_memory->LaunchWorker(); !launched.has_value()) {
-                    TermOut() << trf("cmd.memory.worker_failed", launched.error()) << "\n";
+                if (const auto woken = project_memory->EnsureWorkerRunning();
+                    woken.state == lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
+                    TermOut() << trf("cmd.memory.worker_failed", woken.error) << "\n";
                 }
             }
             return;
@@ -390,9 +469,11 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         const auto queued = project_memory->EnqueueSave(request, /*user_initiated=*/true,
                                                         lubancode::memory::MemoryWriteSource::ExplicitCommandSave);
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
+        if (queued.has_value()) {
+            PrintEnqueueResult(*queued);
+        } else {
+            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+        }
         return;
     }
     if (action == "forget") {
@@ -410,16 +491,20 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             return;
         }
         const auto queued = project_memory->EnqueueForget(id, layer);
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
+        if (queued.has_value()) {
+            PrintEnqueueResult(*queued);
+        } else {
+            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+        }
         return;
     }
     if (action == "rebuild") {
         const auto queued = project_memory->EnqueueRebuild();
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
+        if (queued.has_value()) {
+            PrintEnqueueResult(*queued);
+        } else {
+            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+        }
         return;
     }
     if (action == "stale") {
@@ -450,9 +535,11 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             return;
         }
         const auto queued = project_memory->EnqueueVerify(id, action == "refresh", layer);
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
+        if (queued.has_value()) {
+            PrintEnqueueResult(*queued);
+        } else {
+            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+        }
         return;
     }
     if (action == "show") {
@@ -708,7 +795,8 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     if (!hints.empty()) project_memory->SetRetrievalHints(std::move(hints));
 
     std::size_t queued = 0;
-    std::size_t written = 0;
+    std::size_t auto_queued = 0;
+    std::size_t start_failed = 0;  // 排队成功但 worker 没起来(修复单 §五 B:两笔账分开)
     for (const auto& proposed : extraction->candidates) {
         lubancode::memory::MemoryCandidate candidate;
         auto kind = lubancode::memory::ParseMemoryKind(proposed.kind);
@@ -741,10 +829,15 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
             request.keywords = candidate.keywords;
             request.paths = candidate.paths;
             request.occurred_at = candidate.occurred_at;
-            if (project_memory->EnqueueSave(request, /*user_initiated=*/false,
-                                            lubancode::memory::MemoryWriteSource::AutoExtraction)
-                    .has_value()) {
-                ++written;
+            const auto enqueued = project_memory->EnqueueSave(
+                request, /*user_initiated=*/false,
+                lubancode::memory::MemoryWriteSource::AutoExtraction);
+            if (enqueued.has_value()) {
+                ++auto_queued;
+                if (enqueued->worker_state ==
+                    lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
+                    ++start_failed;
+                }
                 continue;
             }
         }
@@ -752,8 +845,12 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
             ++queued;
         }
     }
-    if (queued + written > 0) {
-        TermOut() << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
+    if (queued + auto_queued > 0) {
+        TermOut() << theme.stats << trf("memory.extract.done", queued, auto_queued) << theme.reset << "\n";
+        if (start_failed > 0) {
+            TermOut() << theme.stats << trf("cmd.memory.worker_failed_hint_jobs", start_failed)
+                      << theme.reset << "\n";
+        }
     }
     // 记忆写入调度单 P0(§10.2/§10.3):收口账——候选/直写计数与 Token。
     // provider 没报 usage 时 token 三项整组缺席,不拿 0 顶上。
@@ -767,7 +864,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
             sampled.result.usage.cache_read_tokens + sampled.result.usage.cache_creation_tokens;
         outcome.extract_wall_ms = extract_wall_ms;
         outcome.review_candidates = queued;
-        outcome.auto_written = written;
+        outcome.auto_queued = auto_queued;
         memory_turns->NoteExtractionOutcome(outcome);
     }
 }

@@ -8,6 +8,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -433,6 +434,270 @@ private:
     fs::path path_;
     bool acquired_ = false;
 };
+
+// ---------------------------------------------------------------------------
+// worker 监督器(修复单 §五 A):按规范化 state_root 进程级共享。职责:
+//   - 留住每只 worker 的可等待句柄(Windows 每任务 Job 带
+//     KILL_ON_JOB_CLOSE,句柄早释即杀 worker——#124 起池子持有);
+//   - EnsureRunning 串行协调:活 worker 尚在且握着 worker.lock 时合并唤醒,
+//     不再起一批争锁的子进程;已退出时先收退出码再看 pending;
+//   - worker 带着未消费 pending 退出 → 记 worker_exited_with_pending(带
+//     退出码与日志路径),有界退避(1s→30s 封顶)重试,不忙循环。
+// 跨宿主竞争仍由 worker.lock 承接(单宿主管理器不能替代跨进程锁)。
+// ---------------------------------------------------------------------------
+
+std::size_t CountPendingJobs(const fs::path& home) {
+    std::error_code ec;
+    fs::directory_iterator it(AbsoluteNormal(home) / "memory-jobs" / "pending", ec);
+    if (ec) return 0;
+    std::size_t count = 0;
+    for (const auto& item : it) {
+        std::error_code item_ec;
+        if (item.is_regular_file(item_ec) && item.path().extension() == ".json") ++count;
+    }
+    return count;
+}
+
+// 只读探测 worker.lock 是否被持有(存在且未超 DirectoryLock 的 30s 陈旧
+// 线)。不创建、不删、不偷锁。
+bool WorkerLockHeld(const fs::path& home) {
+    const fs::path lock = AbsoluteNormal(home) / "memory-jobs" / "worker.lock";
+    std::error_code ec;
+    if (!fs::exists(lock, ec)) return false;
+    const auto modified = fs::last_write_time(lock, ec);
+    if (ec) return true;  // 在但读不出时间:按持有处理(保守)
+    const auto age = fs::file_time_type::clock::now() - modified;
+    return age <= std::chrono::seconds(30);
+}
+
+}  // namespace
+
+// worker 监督器实现件(hpp 前向声明的 MemoryWorkerSupervisor;放匿名
+// 命名空间之外——类型在头文件里对全库可见,定义得在同一命名空间)。
+struct MemoryWorkerSupervisor {
+    struct Worker {
+        std::shared_ptr<platform::BackgroundProcessHandle> handle;
+        std::string log_path;
+        std::chrono::steady_clock::time_point started_at;
+    };
+    struct Snapshot {
+        std::size_t alive = 0;
+        std::uint64_t spawn_count = 0;
+        bool last_exit_known = false;
+        int last_exit_code = 0;
+        std::string last_log_path;
+        std::string last_incident;
+        std::chrono::steady_clock::time_point next_retry_at{};
+    };
+
+    // 合并唤醒窗口:窗口内刚拉过就不再拉(连续 enqueue 不起风暴)。
+    static constexpr auto kCoalesceWindow = std::chrono::milliseconds(200);
+    // 退避封顶:连击 6 次后固定 30s,不再加密,也不放弃。
+    static constexpr int kBackoffCapStreak = 6;
+
+    static std::chrono::milliseconds BackoffDuration(int streak) {
+        if (streak <= 1) return std::chrono::milliseconds(1000);
+        const int shift = std::min(streak - 1, kBackoffCapStreak - 1);
+        return std::chrono::milliseconds(std::min(1000 << shift, 30000));
+    }
+
+    MemoryWorkerWake EnsureRunning(const fs::path& home, const std::string& executable) {
+        std::lock_guard lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        // 1) 收割已退出的 worker:拿退出码与日志。带着 pending 的**非干净**
+        //    退出(提前退出/崩溃,退出码非零或未知)才是事故:记
+        //    worker_exited_with_pending 并推进有界退避。干净退出(0)后盘上
+        //    又有新 pending,是"worker 扫空退出、新任务恰好进来"的常态,
+        //    下面第 3 步直接补拉,不记退避。
+        std::vector<Worker> survivors;
+        survivors.reserve(alive.size());
+        for (auto& worker : alive) {
+            if (!worker.handle->Wait(0)) {
+                survivors.push_back(std::move(worker));
+                continue;
+            }
+            const auto completion = worker.handle->Peek();
+            last_exit_known = completion.known;
+            last_exit_code = completion.exit_code;
+            last_log_path = worker.log_path;
+            const bool unclean = !completion.known || completion.exit_code != 0;
+            if (unclean && CountPendingJobs(home) > 0) {
+                ++incident_streak;
+                const auto backoff = BackoffDuration(incident_streak);
+                next_retry_at = now + backoff;
+                last_incident =
+                    "worker_exited_with_pending: exit_code=" +
+                    (completion.known ? std::to_string(completion.exit_code) : std::string("unknown")) +
+                    ", log=" + (worker.log_path.empty() ? std::string("none") : worker.log_path) +
+                    ", backoff_ms=" + std::to_string(backoff.count()) +
+                    (incident_streak >= kBackoffCapStreak ? "(已达上限间隔,不再加密;请查日志)" : "");
+            }
+        }
+        alive = std::move(survivors);
+
+        // 2) 盘上没活干:不拉进程,顺手清退避(pending 归零说明上一轮真跑完了)。
+        if (CountPendingJobs(home) == 0) {
+            incident_streak = 0;
+            next_retry_at = {};
+            MemoryWorkerWake wake;
+            wake.state = alive.empty() ? MemoryWorkerLaunchState::Idle
+                                       : MemoryWorkerLaunchState::AlreadyRunning;
+            return wake;
+        }
+
+        // 3) 盘上有活。
+        if (executable.empty()) {
+            MemoryWorkerWake wake;
+            wake.state = MemoryWorkerLaunchState::Unavailable;
+            wake.error_code = "worker_unavailable";
+            wake.error = "未配置记忆 worker 可执行文件";
+            return wake;
+        }
+        if (now < next_retry_at) {
+            // 有界退避中:不拉,也不算失败到底——job 都在 pending,下一个
+            // 观察点(入队/状态页/空闲唤醒)自然再试。
+            MemoryWorkerWake wake;
+            wake.state = MemoryWorkerLaunchState::StartFailed;
+            wake.error_code = "worker_retry_backoff";
+            wake.error = "worker 带待写任务退出,有界退避 "
+                       + std::to_string(
+                              std::chrono::duration_cast<std::chrono::milliseconds>(next_retry_at - now)
+                                  .count())
+                       + "ms 后再试";
+            return wake;
+        }
+        if (!alive.empty() && WorkerLockHeld(home)) {
+            // 活 worker 握着锁:它正在扫队列,这次唤醒并进去(合并唤醒)。
+            MemoryWorkerWake wake;
+            wake.state = MemoryWorkerLaunchState::AlreadyRunning;
+            return wake;
+        }
+        if (!alive.empty()) {
+            // 活 worker 没握锁:要么刚扫空正要退出(空窗),要么锁是别家宿主
+            // 的——再拉一只合并唤醒。窗口内刚拉过的不再拉。
+            const bool fresh = std::any_of(alive.begin(), alive.end(), [&](const Worker& worker) {
+                return now - worker.started_at < kCoalesceWindow;
+            });
+            if (fresh) {
+                MemoryWorkerWake wake;
+                wake.state = MemoryWorkerLaunchState::AlreadyRunning;
+                return wake;
+            }
+        }
+        const auto spawned =
+            platform::RunProcessBackground({executable, "--memory-worker", PathUtf8(home)});
+        if (!spawned.success) {
+            ++incident_streak;
+            const auto backoff = BackoffDuration(incident_streak);
+            next_retry_at = now + backoff;
+            last_incident = "worker_start_failed: " + spawned.error + ", backoff_ms=" +
+                            std::to_string(backoff.count());
+            MemoryWorkerWake wake;
+            wake.state = MemoryWorkerLaunchState::StartFailed;
+            wake.error_code = "worker_start_failed";
+            wake.error = spawned.error;
+            return wake;
+        }
+        Worker worker;
+        worker.handle = spawned.handle;
+        worker.log_path = spawned.log_path;
+        worker.started_at = now;
+        alive.push_back(std::move(worker));
+        ++spawn_count;
+        MemoryWorkerWake wake;
+        wake.state = MemoryWorkerLaunchState::Started;
+        return wake;
+    }
+
+    // 只读快照(不收割、不拉起):/memory jobs、doctor、空闲唤醒判定用。
+    Snapshot TakeSnapshot() {
+        std::lock_guard lock(mutex_);
+        Snapshot snapshot;
+        snapshot.spawn_count = spawn_count;
+        snapshot.last_exit_known = last_exit_known;
+        snapshot.last_exit_code = last_exit_code;
+        snapshot.last_log_path = last_log_path;
+        snapshot.last_incident = last_incident;
+        snapshot.next_retry_at = next_retry_at;
+        for (const auto& worker : alive) {
+            if (!worker.handle->Wait(0)) ++snapshot.alive;
+        }
+        return snapshot;
+    }
+
+    // 退场收尾:有界等活 worker 自己跑完,超时不杀(pending 仍在盘上,
+    // 下次会话恢复)。等在锁外,不挡别处的 EnsureRunning。
+    void WaitForGrace(int grace_ms) {
+        std::vector<std::shared_ptr<platform::BackgroundProcessHandle>> handles;
+        {
+            std::lock_guard lock(mutex_);
+            handles.reserve(alive.size());
+            for (const auto& worker : alive) handles.push_back(worker.handle);
+        }
+        for (const auto& handle : handles) {
+            if (handle != nullptr) (void)handle->Wait(grace_ms);
+        }
+    }
+
+    fs::path state_root;
+    std::mutex mutex_;
+    std::vector<Worker> alive;
+    std::uint64_t spawn_count = 0;
+    bool last_exit_known = false;
+    int last_exit_code = 0;
+    std::string last_log_path;
+    std::string last_incident;  // 最近一次 worker_exited_with_pending/start_failed 的人话
+    int incident_streak = 0;    // 连击次数(退避指数),pending 清零时复位
+    std::chrono::steady_clock::time_point next_retry_at{};
+};
+
+// 进程级注册表:同根(规范化 state_root)多份 ProjectMemory 共用一只监督器。
+// shared_ptr 落进静态表,ProjectMemory 析构/移动/替换都不放掉仍承载写入的
+// worker 句柄;进程退出时句柄随全局析构关闭(KILL_ON_JOB_CLOSE 收尾)。
+std::map<std::string, std::shared_ptr<MemoryWorkerSupervisor>>& SupervisorRegistry() {
+    static std::map<std::string, std::shared_ptr<MemoryWorkerSupervisor>> registry;
+    return registry;
+}
+
+std::shared_ptr<MemoryWorkerSupervisor> SharedWorkerSupervisor(const fs::path& state_root) {
+    static std::mutex registry_mutex;
+    const std::string key = PathUtf8(AbsoluteNormal(state_root));
+    std::lock_guard lock(registry_mutex);
+    auto& registry = SupervisorRegistry();
+    auto found = registry.find(key);
+    if (found != registry.end()) return found->second;
+    auto supervisor = std::make_shared<MemoryWorkerSupervisor>();
+    supervisor->state_root = AbsoluteNormal(state_root);
+    registry.emplace(key, supervisor);
+    return supervisor;
+}
+
+// doctor 的监督器摘要(只读):各 state_root 最近一次事故一句话,只在
+// 有事故时出声。
+std::vector<std::string> MemorySupervisorDiagnostics() {
+    static std::mutex registry_mutex;
+    std::lock_guard lock(registry_mutex);
+    std::vector<std::string> lines;
+    for (const auto& [key, supervisor] : SupervisorRegistry()) {
+        const auto snapshot = supervisor->TakeSnapshot();
+        if (snapshot.last_incident.empty()) continue;
+        lines.push_back("[! ] memory worker(" + key + "): " + snapshot.last_incident);
+    }
+    return lines;
+}
+
+std::string MemoryWorkerLaunchStateName(MemoryWorkerLaunchState state) {
+    switch (state) {
+        case MemoryWorkerLaunchState::Started: return "started";
+        case MemoryWorkerLaunchState::AlreadyRunning: return "already_running";
+        case MemoryWorkerLaunchState::StartFailed: return "start_failed";
+        case MemoryWorkerLaunchState::Unavailable: return "unavailable";
+        case MemoryWorkerLaunchState::Idle: return "idle";
+    }
+    return "unknown";
+}
+
+namespace {
 
 struct StoredEntry {
     MemoryEntry public_entry;
@@ -1554,10 +1819,23 @@ bool IsWithin(const fs::path& child, const fs::path& parent) {
 // schema_version 1,operation="memory_save"),memory 侧自写不引 trajectory 头
 //——那份文件 P0-2 正在动,接缝处能不碰就不碰。result 只许写一次(已存在
 // 即拒),历史结果不改写。
-std::expected<void, std::string> WriteMemorySaveIntent(const fs::path& workspace_dir,
+// 修复单 §五 C:落点由调用方递 lifecycle_root——workspace job 用
+// <workspace>/lifecycle/,用户层 job 用 <memory/user>/.state/lifecycle/
+//(同形回执,用户层的等价完成依据);result 带 workspace_key,收执侧
+// "核对 operation_id/workspace/outcome"三件都能对上。
+fs::path LifecycleRootForMemoryDir(const fs::path& memory_dir, const fs::path& home_lubancode) {
+    if (memory_dir.empty()) return {};
+    const bool user_job = IsWithin(memory_dir, AbsoluteNormal(home_lubancode) / "memory" / "user");
+    const bool workspace_job = IsWithin(memory_dir, AbsoluteNormal(home_lubancode) / "workspaces");
+    if (workspace_job) return memory_dir.parent_path() / "lifecycle";
+    if (user_job) return memory_dir / ".state" / "lifecycle";
+    return {};
+}
+
+std::expected<void, std::string> WriteMemorySaveIntent(const fs::path& lifecycle_root,
                                                        const std::string& operation_id,
                                                        const nlohmann::json& job) {
-    const fs::path intent_path = workspace_dir / "lifecycle" / Utf8Path(operation_id) / "intent.json";
+    const fs::path intent_path = lifecycle_root / Utf8Path(operation_id) / "intent.json";
     std::error_code ec;
     if (fs::exists(intent_path, ec)) {
         return {};  // 崩溃续跑:同 operation_id 只写一次,不覆盖历史意图
@@ -1581,10 +1859,11 @@ std::expected<void, std::string> WriteMemorySaveIntent(const fs::path& workspace
     return AtomicWrite(intent_path, intent.dump(2) + "\n");
 }
 
-std::expected<void, std::string> WriteMemorySaveResult(const fs::path& workspace_dir,
+std::expected<void, std::string> WriteMemorySaveResult(const fs::path& lifecycle_root,
                                                        const std::string& operation_id,
-                                                       const nlohmann::json& outcome) {
-    const fs::path result_path = workspace_dir / "lifecycle" / Utf8Path(operation_id) / "result.json";
+                                                       const nlohmann::json& outcome,
+                                                       const std::string& workspace_key) {
+    const fs::path result_path = lifecycle_root / Utf8Path(operation_id) / "result.json";
     std::error_code ec;
     if (fs::exists(result_path, ec)) {
         return std::unexpected("lifecycle.result_exists: memory save 回执已存在: " + operation_id);
@@ -1593,6 +1872,7 @@ std::expected<void, std::string> WriteMemorySaveResult(const fs::path& workspace
         {"schema_version", 1},
         {"operation_id", operation_id},
         {"status", "completed"},
+        {"workspace_key", workspace_key},
         {"completed_at_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count()},
@@ -1601,11 +1881,48 @@ std::expected<void, std::string> WriteMemorySaveResult(const fs::path& workspace
     return AtomicWrite(result_path, result.dump(2) + "\n");
 }
 
-// 同 operation_id 已有 result = 这笔已提交过(崩溃续跑的重复 commit),
-// 幂等放行(§11.3"重复 commit 幂等"),不把已完成的 job 误挪 failed。
-bool MemorySaveResultExists(const fs::path& workspace_dir, const std::string& operation_id) {
+// 回执读取(收执侧/重试侧共用):committed = outcome 有 committed_at 且无
+// stable_error_code;failed = outcome 带 stable_error_code。status 恒为
+// completed(指这枚回执落齐了,不是指业务成功)。
+struct MemorySaveReceipt {
+    bool exists = false;
+    bool committed = false;
+    std::string error;
+    std::string memory_id;
+    std::string workspace_key;
+};
+MemorySaveReceipt ReadMemorySaveReceipt(const fs::path& lifecycle_root, const std::string& operation_id) {
+    MemorySaveReceipt receipt;
+    const fs::path result_path = lifecycle_root / Utf8Path(operation_id) / "result.json";
     std::error_code ec;
-    return fs::exists(workspace_dir / "lifecycle" / Utf8Path(operation_id) / "result.json", ec);
+    if (!fs::exists(result_path, ec)) return receipt;
+    nlohmann::json result;
+    try {
+        result = nlohmann::json::parse(ReadBounded(result_path, 64 * 1024));
+    } catch (const nlohmann::json::exception&) {
+        return receipt;  // 在但读不出:当作没有,由坏账路径(重试)处置
+    }
+    if (!result.is_object()) return receipt;
+    receipt.exists = true;
+    receipt.workspace_key = result.value("workspace_key", std::string());
+    const nlohmann::json outcome =
+        result.contains("outcome") && result["outcome"].is_object() ? result["outcome"] : nlohmann::json::object();
+    if (outcome.contains("stable_error_code")) {
+        receipt.error = outcome.value("error", outcome.value("stable_error_code", std::string("unknown")));
+        return receipt;
+    }
+    if (outcome.contains("committed_at")) {
+        receipt.committed = true;
+        receipt.memory_id = outcome.value("memory_id", std::string());
+    }
+    return receipt;
+}
+
+// 同 operation_id 已有 committed result = 这笔已提交过(崩溃续跑的重复
+// commit),幂等放行(§11.3"重复 commit 幂等"),不把已完成的 job 误挪
+// failed。失败回执不算 committed,重试侧据此防"已提交却再跑一遍"。
+bool MemorySaveCommittedResultExists(const fs::path& lifecycle_root, const std::string& operation_id) {
+    return ReadMemorySaveReceipt(lifecycle_root, operation_id).committed;
 }
 
 std::string BuildTopicText(const StoredEntry& entry, const std::string& content) {
@@ -1870,17 +2187,26 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
                                PathUtf8(memory_dir));
     }
 
-    // 项目类 job 的提交回执进 workspace lifecycle(intent 先行,result 只写
-    // 一次);用户层 job 没有归属 workspace,失败账仍由 memory-jobs/failed
-    // 承担。operation_id 用 job 文件名(时间戳+序号,天然唯一)。
-    const fs::path workspace_dir = workspace_job ? memory_dir.parent_path() : fs::path();
+    // 提交回执(修复单 §五 C):workspace job 进 <workspace>/lifecycle/,
+    // 用户层 job 进 <memory/user>/.state/lifecycle/——同形回执,用户层
+    // 从此也有等价完成依据("已入库"只认它,pending 消失不算数)。
+    // intent 先行,result 只写一次;operation_id 用 job 文件名(时间戳+
+    // 序号,天然唯一)。
+    const fs::path lifecycle_root = LifecycleRootForMemoryDir(memory_dir, home_lubancode);
     const std::string operation_id =
         "memsave-" + PathUtf8(job_path.filename().replace_extension());
-    if (!workspace_dir.empty()) {
-        if (MemorySaveResultExists(workspace_dir, operation_id)) {
-            return {};  // 已提交过:幂等续跑,不重复动盘
+    if (!lifecycle_root.empty()) {
+        const auto existing = ReadMemorySaveReceipt(lifecycle_root, operation_id);
+        if (existing.committed) {
+            return {};  // 已提交过:幂等续跑,不重复动盘(§11.3 重复 commit 幂等)
         }
-        auto intent = WriteMemorySaveIntent(workspace_dir, operation_id, job);
+        if (existing.exists) {
+            // 已有失败回执:历史结果不改写,这份 pending 是崩溃残留——
+            // 挪 failed 交显式重试(新 job 名 = 新 operation_id)。
+            return std::unexpected("memory.job_receipt_failed: 该 job 已有失败回执(" +
+                                   operation_id + ");用 /memory jobs retry 换新单重排");
+        }
+        auto intent = WriteMemorySaveIntent(lifecycle_root, operation_id, job);
         if (!intent.has_value()) return std::unexpected(intent.error());
     }
 
@@ -1908,7 +2234,7 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
         result = std::unexpected("不认得的 memory job operation: " + operation);
     }
 
-    if (!workspace_dir.empty()) {
+    if (!lifecycle_root.empty()) {
         nlohmann::json outcome;
         if (result.has_value()) {
             // 合同 §四 memory.save.committed 的四件套(upsert 有正文指纹,
@@ -1926,7 +2252,8 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
             outcome["retryable"] = true;
             outcome["error"] = result.error();
         }
-        auto receipt = WriteMemorySaveResult(workspace_dir, operation_id, outcome);
+        auto receipt = WriteMemorySaveResult(lifecycle_root, operation_id, outcome,
+                                             job.value("workspace_key", std::string()));
         if (!receipt.has_value()) {
             return std::unexpected("memory.job_failed: " + receipt.error());
         }
@@ -1944,6 +2271,53 @@ void MoveFailedJob(const fs::path& job_path, const fs::path& failed_dir, const s
         const auto ignored = AtomicWrite(fs::path(PathUtf8(destination) + ".error.txt"), error + "\n");
         (void)ignored;
     }
+}
+
+// ---- /memory jobs 的台账小工具 ----
+
+// 等待时长(按文件 mtime 折人话):"45s"、"3m12s"、"2h05m"、"4d03h"。
+std::string WaitHintForFile(const fs::path& file) {
+    std::error_code ec;
+    const auto modified = fs::last_write_time(file, ec);
+    if (ec) return {};
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::file_clock::now() - modified);
+    auto total = elapsed.count();
+    if (total < 0) return {};
+    const auto seconds = static_cast<std::uint64_t>(total);
+    std::ostringstream out;
+    const auto two = [](std::uint64_t value) {
+        std::ostringstream digits;
+        if (value < 10) digits << '0';
+        digits << value;
+        return digits.str();
+    };
+    if (seconds < 60) {
+        out << seconds << "s";
+    } else if (seconds < 3600) {
+        out << seconds / 60 << "m" << two(seconds % 60) << "s";
+    } else if (seconds < 86400) {
+        out << seconds / 3600 << "h" << two((seconds / 60) % 60) << "m";
+    } else {
+        out << seconds / 86400 << "d" << two((seconds / 3600) % 24) << "h";
+    }
+    return out.str();
+}
+
+// 文件首行(截到 max_bytes;读不出给空串)。
+std::string FirstLineBounded(const fs::path& file, std::size_t max_bytes) {
+    const std::string text = ReadBounded(file, max_bytes);
+    const std::size_t newline = text.find('\n');
+    std::string line = newline == std::string::npos ? text : text.substr(0, newline);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return line;
+}
+
+// failed 文件名回原 job stem:JobStamp 是 "<millis>-<seq>"(无点),撞名
+// 后缀是 ".<stamp>",一律截到第一个 '.'。
+std::string BaseJobStem(const std::string& failed_name) {
+    const std::size_t dot = failed_name.find('.');
+    return dot == std::string::npos ? failed_name : failed_name.substr(0, dot);
 }
 
 }  // namespace
@@ -2402,7 +2776,8 @@ ProjectMemory::ProjectMemory(ProjectIdentity identity, fs::path home_lubancode,
       home_lubancode_(AbsoluteNormal(home_lubancode)),
       memory_dir_(identity_.workspace_dir / "memory"),
       options_(options),
-      executable_(std::move(executable)) {
+      executable_(std::move(executable)),
+      supervisor_(SharedWorkerSupervisor(home_lubancode)) {
     // P0-4:全局目录已是 user-only(§9.3);已存在的目录顺手复紧一遍
     //(幂等,失败留给 /doctor memory 报)。
     std::error_code ec;
@@ -2912,9 +3287,9 @@ std::expected<void, std::string> ProjectMemory::set_learn(LearnMode mode) {
     return {};
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveRequest& request,
-                                                                    bool user_initiated,
-                                                                    MemoryWriteSource source) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueSave(const SaveRequest& request,
+                                                                            bool user_initiated,
+                                                                            MemoryWriteSource source) {
     // 记忆写入调度单 P0:函数体一字未动(搬进 Impl),外壳只加回执投递。
     const auto queued = EnqueueSaveImpl(request, user_initiated);
     EmitWriteReceipt(source, "upsert", &request,
@@ -2922,8 +3297,8 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveReq
     return queued;
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueSaveImpl(const SaveRequest& request,
-                                                                        bool user_initiated) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueSaveImpl(const SaveRequest& request,
+                                                                                bool user_initiated) {
     if (!generate_enabled()) return std::unexpected("本场记忆写入未开启");
     // 存储 v2 P0-4(§6.1):全局层只认用户主动命令——memory_save 工具、
     // 回合尾抽取、候选 accept 都不带 user_initiated,一律拒;项目配置也
@@ -2944,8 +3319,8 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueSaveImpl(const Sav
     return EnqueueJob("upsert", &with_source, with_source.id, nlohmann::json::object(), user_initiated);
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::string& id,
-                                                                      const std::string& layer) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueForget(const std::string& id,
+                                                                              const std::string& layer) {
     // forget 恒为用户命令口(§6.4),回执按 explicit_forget 投。
     const auto queued = EnqueueForgetImpl(id, layer);
     EmitWriteReceipt(MemoryWriteSource::ExplicitForget, "forget", nullptr,
@@ -2953,8 +3328,8 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::
     return queued;
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueForgetImpl(const std::string& id,
-                                                                          const std::string& layer) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueForgetImpl(const std::string& id,
+                                                                                  const std::string& layer) {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
     // 显式层(P0-4 的 forget global|project)路由到指定层;没给层的旧写法
@@ -2975,10 +3350,11 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueForgetImpl(const s
 
 // 记忆写入调度单 P0(§6.2):排队成败的当口投一张回执。sink 空 = 没人
 // 收,纯空操作。queued 有值 = job 已进 pending(outcome=queued,不冒充
-// 落盘);否则 rejected + 稳定码。
+// 落盘);否则 rejected + 稳定码。修复单 §五 B:job_id 取结构化结果里
+// 的纯文件名,不再吃混着启动说明的字符串。
 void ProjectMemory::EmitWriteReceipt(MemoryWriteSource source, const std::string& operation,
                                      const SaveRequest* request, const std::string& layer,
-                                     const std::expected<std::string, std::string>& queued) {
+                                     const std::expected<MemoryEnqueueResult, std::string>& queued) {
     if (write_receipt_sink_ == nullptr) return;
     MemoryWriteReceipt receipt;
     receipt.source = source;
@@ -2987,7 +3363,7 @@ void ProjectMemory::EmitWriteReceipt(MemoryWriteSource source, const std::string
     if (request != nullptr) receipt.kind = MemoryKindName(request->kind);
     if (queued.has_value()) {
         receipt.outcome = MemoryWriteReceiptOutcome::Queued;
-        receipt.job_id = *queued;
+        receipt.job_id = queued->job_id;
     } else {
         receipt.outcome = MemoryWriteReceiptOutcome::Rejected;
         receipt.error_code = StableWriteErrorCode(queued.error());
@@ -2995,13 +3371,13 @@ void ProjectMemory::EmitWriteReceipt(MemoryWriteSource source, const std::string
     write_receipt_sink_->OnMemoryWriteReceipt(receipt);
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueRebuild() {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueRebuild() {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     return EnqueueJob("rebuild", nullptr, std::string());
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueVerify(const std::string& id, bool refresh,
-                                                                      const std::string& layer) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueVerify(const std::string& id, bool refresh,
+                                                                              const std::string& layer) {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
     // 显式层路由同 forget(P0-4);旧写法按 id 自动认层。
@@ -3037,11 +3413,11 @@ std::vector<ProjectMemory::StaleEntry> ProjectMemory::ListStaleEntries() const {
     return out;
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::string& operation,
-                                                                  const SaveRequest* request,
-                                                                  const std::string& id,
-                                                                  nlohmann::json extra,
-                                                                  bool user_initiated) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::EnqueueJob(const std::string& operation,
+                                                                          const SaveRequest* request,
+                                                                          const std::string& id,
+                                                                          nlohmann::json extra,
+                                                                          bool user_initiated) {
     // P0-3:先落 memory.save.requested 因果边(合同 §四)。sink 在场时事件
     // id 进全限定引用;不在场(单发/单测)用 workspace+session 兜底段,
     // 生产写入一律全限定,不再落裸 session id。
@@ -3115,27 +3491,287 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::str
     }
     const fs::path pending = home_lubancode_ / "memory-jobs" / "pending";
     const std::string job_name = JobStamp() + ".json";
-    auto written = AtomicWrite(pending / job_name, job.dump(2) + "\n");
-    if (!written.has_value()) return std::unexpected(written.error());
-    const auto launched = LaunchWorker();
-    if (!launched.has_value()) {
-        return job_name + "（已排队；后台未启动: " + launched.error() + "）";
+    auto written = AtomicWrite(pending / Utf8Path(job_name), job.dump(2) + "\n");
+    if (!written.has_value()) return std::unexpected(written.error());  // queue 持久化失败 = 未入队
+    MemoryEnqueueResult result;
+    result.job_id = job_name;
+    result.queue_state = MemoryQueueState::Persisted;
+    // 回执记账(修复单 §五 C):这笔 job 的"已入库"只认 lifecycle 回执,
+    // 排队当刻先立账,等 DrainWriteCompletions 收。
+    {
+        const fs::path target_memory_dir = Utf8Path(job.value("memory_dir", std::string()));
+        const fs::path lifecycle_root = LifecycleRootForMemoryDir(target_memory_dir, home_lubancode_);
+        if (!lifecycle_root.empty()) {
+            std::string stem = job_name;
+            if (stem.ends_with(".json")) stem.resize(stem.size() - 5);
+            TrackedWrite tracked;
+            tracked.job_id = job_name;
+            tracked.operation_id = "memsave-" + stem;
+            tracked.layer = IsWithin(target_memory_dir, home_lubancode_ / "memory" / "user") ? "user"
+                                                                                            : "project";
+            tracked.title = request != nullptr ? request->title : std::string();
+            tracked.lifecycle_root = lifecycle_root;
+            std::lock_guard lock(tracked_writes_->mutex);
+            tracked_writes_->writes.push_back(std::move(tracked));
+        }
     }
-    return job_name;
+    // 唤醒 worker(监督器内含合并唤醒/有界退避):启动成败另列字段,
+    // 已排队与未启动两个事实都保留,不互相污染。
+    const MemoryWorkerWake wake = supervisor_->EnsureRunning(home_lubancode_, executable_);
+    result.worker_state = wake.state;
+    result.worker_error_code = wake.error_code;
+    result.worker_error = wake.error;
+    return result;
 }
 
-std::expected<void, std::string> ProjectMemory::LaunchWorker() const {
+MemoryWorkerWake ProjectMemory::EnsureWorkerRunning() const {
+    return supervisor_->EnsureRunning(home_lubancode_, executable_);
+}
+
+MemoryWorkerWake ProjectMemory::WakePendingWorker() const { return EnsureWorkerRunning(); }
+
+bool ProjectMemory::HasRunningWorker() const { return supervisor_->TakeSnapshot().alive > 0; }
+
+std::uint64_t ProjectMemory::WorkerSpawnCount() const { return supervisor_->TakeSnapshot().spawn_count; }
+
+void ProjectMemory::WaitForWorkersGracefully(int grace_ms) const {
+    supervisor_->WaitForGrace(grace_ms);
+}
+
+// ---- 任务台账与重试(修复单 §五 C:/memory jobs) ----
+
+std::vector<ProjectMemory::MemoryJobInfo> ProjectMemory::ListWorkspaceJobs() const {
+    std::vector<MemoryJobInfo> out;
+    const fs::path jobs_root = home_lubancode_ / "memory-jobs";
+    const auto snapshot = supervisor_->TakeSnapshot();
+    std::string worker_state;
+    if (snapshot.alive > 0) {
+        worker_state = "running";
+    } else if (snapshot.last_exit_known) {
+        worker_state = "exited(code=" + std::to_string(snapshot.last_exit_code) + ")";
+    } else {
+        worker_state = "none";
+    }
+    const auto collect = [&](const char* state_name, const fs::path& dir, bool with_error) {
+        std::error_code ec;
+        fs::directory_iterator it(dir, ec);
+        if (ec) return;
+        for (const auto& item : it) {
+            std::error_code item_ec;
+            if (!item.is_regular_file(item_ec) || item.path().extension() != ".json") continue;
+            nlohmann::json job;
+            try {
+                job = nlohmann::json::parse(ReadBounded(item.path(), 256 * 1024));
+            } catch (const nlohmann::json::exception&) {
+                continue;  // 坏 job 不进台账(worker 会挪 failed),状态页不数它
+            }
+            if (!job.is_object() || job.value("workspace_key", std::string()) != identity_.workspace_key) {
+                continue;  // 工作区隔离:别区的数不进来
+            }
+            MemoryJobInfo info;
+            info.job_id = PathUtf8(item.path().filename());
+            info.state = state_name;
+            info.operation = job.value("operation", std::string());
+            info.title = job.value("title", std::string());
+            const fs::path memory_dir = Utf8Path(job.value("memory_dir", std::string()));
+            info.layer = IsWithin(memory_dir, home_lubancode_ / "memory" / "user") ? "user" : "project";
+            info.created_at = job.value("created_at", std::string());
+            info.wait_hint = WaitHintForFile(item.path());
+            if (with_error) {
+                const fs::path error_path = fs::path(PathUtf8(item.path()) + ".error.txt");
+                info.error = FirstLineBounded(error_path, 300);
+            }
+            info.worker_state = worker_state;
+            info.worker_log = snapshot.last_log_path;
+            out.push_back(std::move(info));
+        }
+    };
+    collect("pending", jobs_root / "pending", /*with_error=*/false);
+    collect("failed", jobs_root / "failed", /*with_error=*/true);
+    std::sort(out.begin(), out.end(), [](const MemoryJobInfo& a, const MemoryJobInfo& b) {
+        if (a.created_at != b.created_at) return a.created_at < b.created_at;
+        return a.job_id < b.job_id;
+    });
+    return out;
+}
+
+std::expected<std::string, std::string> ProjectMemory::RetryFailedJob(const std::string& job_id) {
+    const fs::path jobs_root = home_lubancode_ / "memory-jobs";
+    std::string name = job_id;
+    if (!name.ends_with(".json")) name += ".json";
+    const fs::path source = jobs_root / "failed" / Utf8Path(name);
     std::error_code ec;
-    const fs::path pending = home_lubancode_ / "memory-jobs" / "pending";
-    if (!fs::exists(pending, ec)) return {};
-    if (executable_.empty()) return std::unexpected("未配置记忆 worker 可执行文件");
-    std::lock_guard<std::mutex> lock(workers_->mutex);
-    std::erase_if(workers_->workers, [](const auto& worker) { return worker->Wait(0); });
-    const auto spawned = platform::RunProcessBackground(
-        {executable_, "--memory-worker", PathUtf8(home_lubancode_)});
-    if (!spawned.success) return std::unexpected(spawned.error);
-    workers_->workers.push_back(spawned.handle);
-    return {};
+    if (!fs::is_regular_file(source, ec)) {
+        return std::unexpected("找不到失败任务: " + job_id + "(/memory jobs 先看名单)");
+    }
+    nlohmann::json job;
+    try {
+        job = nlohmann::json::parse(ReadBounded(source, 256 * 1024));
+    } catch (const nlohmann::json::exception& e) {
+        return std::unexpected("failed job 不是合法 JSON: " + std::string(e.what()));
+    }
+    if (!job.is_object()) return std::unexpected("failed job 形状不对(不是 object)");
+    if (job.value("workspace_key", std::string()) != identity_.workspace_key) {
+        return std::unexpected("该任务不属于当前工作区;查询与重试都按工作区隔离");
+    }
+    // 防重放:原 job 的回执若已是 committed,说明提交真发生过(失败出在
+    // 后续环节),不再跑一遍——那只会重复写正文。
+    const std::string base_stem = BaseJobStem(name);
+    const fs::path memory_dir = Utf8Path(job.value("memory_dir", std::string()));
+    const fs::path lifecycle_root = LifecycleRootForMemoryDir(memory_dir, home_lubancode_);
+    if (!lifecycle_root.empty()) {
+        const auto receipt = ReadMemorySaveReceipt(lifecycle_root, "memsave-" + base_stem);
+        if (receipt.committed) {
+            return std::unexpected("原任务已提交过(回执 memsave-" + base_stem +
+                                   "),不重放;请 /memory list 核对结果");
+        }
+    }
+    // 新 job 名重排:全新 operation_id、全新 lifecycle 账,历史回执与
+    // failed 台账都不回改。
+    job["retried_from"] = base_stem;
+    const std::string new_name = JobStamp() + ".json";
+    auto written = AtomicWrite(jobs_root / "pending" / Utf8Path(new_name), job.dump(2) + "\n");
+    if (!written.has_value()) return std::unexpected(written.error());
+    fs::remove(source, ec);
+    fs::remove(fs::path(PathUtf8(source) + ".error.txt"), ec);
+    // 回执记账与唤醒(与首次入队同一条路)。
+    if (!lifecycle_root.empty()) {
+        TrackedWrite tracked;
+        tracked.job_id = new_name;
+        tracked.operation_id = "memsave-" + BaseJobStem(new_name);
+        tracked.layer = IsWithin(memory_dir, home_lubancode_ / "memory" / "user") ? "user" : "project";
+        tracked.title = job.value("title", std::string());
+        tracked.lifecycle_root = lifecycle_root;
+        std::lock_guard lock(tracked_writes_->mutex);
+        tracked_writes_->writes.push_back(std::move(tracked));
+    }
+    (void)EnsureWorkerRunning();
+    return new_name;
+}
+
+// ---- 提交回执消费(修复单 §五 C 尾) ----
+
+bool ProjectMemory::WakeNeededForWrites() const {
+    std::vector<TrackedWrite> tracked;
+    {
+        std::lock_guard lock(tracked_writes_->mutex);
+        tracked = tracked_writes_->writes;
+    }
+    if (tracked.empty()) return false;
+    const fs::path jobs_root = home_lubancode_ / "memory-jobs";
+    std::error_code ec;
+    for (const auto& item : tracked) {
+        // 回执已落地:收账去。
+        if (fs::exists(item.lifecycle_root / Utf8Path(item.operation_id) / "result.json", ec)) {
+            return true;
+        }
+    }
+    // 排的 job 还在 pending 却已无活 worker:该补拉了(退避由监督器挡,
+    // 退避未到时这里的快照也标着 next_retry_at,不到点不醒,不空转)。
+    if (executable_.empty()) return false;  // 没配 exe 的形态不追这个唤醒
+    const auto snapshot = supervisor_->TakeSnapshot();
+    if (snapshot.alive > 0) return false;
+    if (std::chrono::steady_clock::now() < snapshot.next_retry_at) return false;
+    for (const auto& item : tracked) {
+        if (fs::is_regular_file(jobs_root / "pending" / Utf8Path(item.job_id), ec)) return true;
+    }
+    return false;
+}
+
+std::vector<ProjectMemory::MemoryWriteCompletion> ProjectMemory::DrainWriteCompletions() {
+    std::vector<TrackedWrite> tracked;
+    {
+        std::lock_guard lock(tracked_writes_->mutex);
+        tracked.swap(tracked_writes_->writes);
+    }
+    std::vector<MemoryWriteCompletion> out;
+    std::vector<TrackedWrite> keep;
+    const fs::path jobs_root = home_lubancode_ / "memory-jobs";
+    bool stalled_in_flight = false;
+    for (auto& item : tracked) {
+        const fs::path result_path =
+            item.lifecycle_root / Utf8Path(item.operation_id) / "result.json";
+        std::error_code ec;
+        if (fs::exists(result_path, ec)) {
+            MemoryWriteCompletion completion;
+            completion.job_id = item.job_id;
+            completion.operation_id = item.operation_id;
+            completion.layer = item.layer;
+            completion.title = item.title;
+            nlohmann::json result;
+            try {
+                result = nlohmann::json::parse(ReadBounded(result_path, 64 * 1024));
+            } catch (const nlohmann::json::exception&) {
+                completion.outcome = "failed";
+                completion.error = "提交回执损坏: " + PathUtf8(result_path);
+                out.push_back(std::move(completion));
+                continue;  // 坏回执不回炉重收
+            }
+            // 核对 operation_id(目录绑定 + 内容对上)与 workspace(落点
+            // 目录即工作区边界;result 里也带 workspace_key,同根才认)。
+            if (!result.is_object() ||
+                result.value("operation_id", std::string()) != item.operation_id) {
+                completion.outcome = "failed";
+                completion.error = "回执 operation_id 对不上,弃收";
+                out.push_back(std::move(completion));
+                continue;
+            }
+            const nlohmann::json outcome = result.contains("outcome") && result["outcome"].is_object()
+                                               ? result["outcome"]
+                                               : nlohmann::json::object();
+            if (outcome.contains("stable_error_code")) {
+                completion.outcome = "failed";
+                completion.error = outcome.value("error", outcome.value("stable_error_code", std::string("unknown")));
+            } else if (outcome.contains("committed_at")) {
+                completion.outcome = "committed";
+                completion.memory_id = outcome.value("memory_id", std::string());
+            } else {
+                completion.outcome = "failed";
+                completion.error = "回执无结局字段,弃收";
+            }
+            out.push_back(std::move(completion));
+            continue;
+        }
+        // 回执没落地:pending 还在 = 在途(留着,顺带补拉 worker);
+        // 不在 pending、也不在 failed = 去向不明——不按 pending 消失猜成功。
+        if (fs::is_regular_file(jobs_root / "pending" / Utf8Path(item.job_id), ec)) {
+            stalled_in_flight = true;
+            keep.push_back(std::move(item));
+            continue;
+        }
+        if (fs::is_regular_file(jobs_root / "failed" / Utf8Path(item.job_id), ec)) {
+            MemoryWriteCompletion completion;
+            completion.job_id = item.job_id;
+            completion.operation_id = item.operation_id;
+            completion.layer = item.layer;
+            completion.title = item.title;
+            completion.outcome = "failed";
+            completion.error = FirstLineBounded(
+                fs::path(PathUtf8(jobs_root / "failed" / Utf8Path(item.job_id)) + ".error.txt"), 300);
+            if (completion.error.empty()) completion.error = "worker 判失败(无回执详情)";
+            out.push_back(std::move(completion));
+            continue;
+        }
+        MemoryWriteCompletion completion;
+        completion.job_id = item.job_id;
+        completion.operation_id = item.operation_id;
+        completion.layer = item.layer;
+        completion.title = item.title;
+        completion.outcome = "failed";
+        completion.error = "job 已不在队列且无提交回执,去向不明;请 /memory jobs 核对";
+        out.push_back(std::move(completion));
+    }
+    if (!keep.empty()) {
+        std::lock_guard lock(tracked_writes_->mutex);
+        tracked_writes_->writes.insert(tracked_writes_->writes.end(),
+                                       std::make_move_iterator(keep.begin()),
+                                       std::make_move_iterator(keep.end()));
+    }
+    // 在途但无活 worker:补拉一次(监督器里合并唤醒/有界退避挡着风暴)。
+    if (stalled_in_flight) {
+        (void)EnsureWorkerRunning();
+    }
+    return out;
 }
 
 std::vector<MemoryEntry> ProjectMemory::ListEntries(std::string* error) const {
@@ -3368,7 +4004,7 @@ std::expected<std::string, std::string> ProjectMemory::AddCandidate(MemoryCandid
     return candidate.id;
 }
 
-std::expected<std::string, std::string> ProjectMemory::AcceptCandidate(const std::string& id) {
+std::expected<MemoryEnqueueResult, std::string> ProjectMemory::AcceptCandidate(const std::string& id) {
     // 记忆写入调度单 P0:accept 的早失败也投 candidate_accept 回执
     //(rejected + 稳定码);排队成功经 EnqueueSave 投(source=accept)。
     const auto reject_receipt = [&](const std::string& error) {
@@ -3811,6 +4447,17 @@ std::vector<std::string> CheckGlobalMemoryHealth(const fs::path& home_lubancode)
         lines.push_back("[! ] memory job 失败积压 " + std::to_string(failed_jobs) +
                         " 笔(memory-jobs/failed,各带 .error.txt 回执)");
     }
+    // 修复单 §五 C:doctor 也报待写账与 worker 事故——全只读,不拉进程。
+    const std::size_t pending_jobs = CountPendingJobs(home);
+    if (pending_jobs == 0) {
+        lines.push_back("[ok] memory job 无待写积压");
+    } else {
+        lines.push_back("[! ] memory job 待写 " + std::to_string(pending_jobs) +
+                        " 笔(跨工作区;/memory jobs 按工作区看明细)");
+    }
+    for (const std::string& incident : MemorySupervisorDiagnostics()) {
+        lines.push_back(incident);
+    }
     return lines;
 }
 
@@ -3831,6 +4478,7 @@ std::expected<std::size_t, std::string> RunPendingMemoryJobs(const fs::path& hom
     if (worker_lock == nullptr) return std::unexpected("等待 memory worker 锁超时");
 
     std::size_t completed = 0;
+    int empty_scans = 0;
     while (true) {
         std::vector<fs::path> jobs;
         ec.clear();
@@ -3839,7 +4487,15 @@ std::expected<std::size_t, std::string> RunPendingMemoryJobs(const fs::path& hom
         for (const auto& item : it) {
             if (item.is_regular_file(ec) && item.path().extension() == ".json") jobs.push_back(item.path());
         }
-        if (jobs.empty()) break;
+        if (jobs.empty()) {
+            // 空扫复核(修复单 §五 A 空窗护栏):枚举刚完、宿主恰好在这一拍
+            // 落进新 job 的窗口,由复核补上——锁还在手里,所见即所得。复核
+            // 仍空才真退出。
+            if (++empty_scans >= 2) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            continue;
+        }
+        empty_scans = 0;
         std::sort(jobs.begin(), jobs.end());
         for (const fs::path& job : jobs) {
             auto result = ProcessJob(job, home_lubancode);

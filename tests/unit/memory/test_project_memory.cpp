@@ -424,9 +424,336 @@ TEST_CASE("ProjectMemory: missing worker reports queued but not started") {
     request.content = "Use short explanations.";
     const auto queued = store.EnqueueSave(request);
     REQUIRE(queued.has_value());
-    CHECK(queued->find("后台未启动") != std::string::npos);
+    // 修复单 §五 B:job_id 是纯文件名,不再混"已排队;后台未启动"之类
+    // 说明文字;没配 executable 是 unavailable,不是启动失败,也不是入队
+    // 失败——job 留在 pending,两个事实都在。
+    CHECK(queued->job_id.find(".json") != std::string::npos);
+    CHECK(queued->job_id.find("已排队") == std::string::npos);
+    CHECK(queued->job_id.find("后台未启动") == std::string::npos);
+    CHECK(queued->queue_state == memory::MemoryQueueState::Persisted);
+    CHECK(queued->worker_state == memory::MemoryWorkerLaunchState::Unavailable);
+    CHECK_FALSE(queued->worker_error.empty());
     CHECK(store.Status().pending_jobs == 1);
     CHECK(store.ListEntries().empty());
+}
+
+TEST_CASE("ProjectMemory: 坏 exe 启动失败不丢提示不污染 job_id,job 留在 pending") {
+    const fs::path root = TempRoot("worker-bad-exe");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    const std::string bad_exe =
+        (root / "no-such-dir" / "missing-worker.exe").generic_string();
+    memory::ProjectMemory store(*identity, root / "home", options, bad_exe);
+    REQUIRE(store.set_enabled(true).has_value());
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.title = "style";
+    request.summary = "short";
+    request.content = "Use short explanations.";
+    const auto queued = store.EnqueueSave(request);
+    REQUIRE(queued.has_value());
+    // 两个事实都在:job 已排队(纯净 job_id)+ worker 启动失败(稳定码另列)。
+    CHECK(queued->queue_state == memory::MemoryQueueState::Persisted);
+    CHECK(queued->job_id.find(".json") != std::string::npos);
+    CHECK(queued->job_id.find("已排队") == std::string::npos);
+    CHECK(queued->worker_state == memory::MemoryWorkerLaunchState::StartFailed);
+    CHECK(queued->worker_error_code == "worker_start_failed");
+    CHECK_FALSE(queued->worker_error.empty());
+    CHECK(store.Status().pending_jobs == 1);
+    CHECK(store.Status().failed_jobs == 0);
+    // 没人报"已入库":正式库仍是空的。
+    CHECK(store.ListEntries().empty());
+    const auto completions = store.DrainWriteCompletions();
+    CHECK(completions.empty());  // 在途:回执没落地,不冒充成功
+}
+
+TEST_CASE("ProjectMemory: 真 worker 连续入队不起风暴,全部提交且回执可收") {
+    const fs::path root = TempRoot("worker-batch");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    memory::ProjectMemory store(*identity, root / "home", options, LUBANCODE_MEMORY_WORKER_EXE);
+    REQUIRE(store.set_enabled(true).has_value());
+    std::vector<std::string> job_ids;
+    for (int i = 0; i < 6; ++i) {
+        memory::SaveRequest request;
+        request.kind = memory::MemoryKind::Preference;
+        request.title = "batch preference " + std::to_string(i);
+        request.summary = request.title;
+        request.content = "Use short explanations for item " + std::to_string(i) + ".";
+        request.confidence = "user-stated";
+        const auto queued = store.EnqueueSave(request);
+        REQUIRE(queued.has_value());
+        if (i == 0) {
+            // 首笔真拉起;后续笔要么合并唤醒(already_running),要么前一
+            // 只刚扫空退出、按空窗补拉(started)——都不许是失败态。
+            CHECK(queued->worker_state == memory::MemoryWorkerLaunchState::Started);
+        } else {
+            CHECK(queued->worker_state != memory::MemoryWorkerLaunchState::StartFailed);
+            CHECK(queued->worker_state != memory::MemoryWorkerLaunchState::Unavailable);
+        }
+        job_ids.push_back(queued->job_id);
+    }
+    // 合并唤醒:活 worker(或刚拉的)在场时不重复起进程——旧代码 6 笔必起 6 只。
+    CHECK(store.WorkerSpawnCount() <= 3);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    CHECK(store.Status().pending_jobs == 0);
+    CHECK(store.Status().failed_jobs == 0);
+    REQUIRE(store.ListEntries().size() == 6);
+    // "已入库"只从回执来:6 张 committed,核对 job_id/operation_id 一一对应。
+    std::size_t committed = 0;
+    for (int drain_round = 0; drain_round < 2; ++drain_round) {
+        for (const auto& completion : store.DrainWriteCompletions()) {
+            if (drain_round == 0) {
+                CHECK(completion.outcome == "committed");
+                CHECK_FALSE(completion.memory_id.empty());
+                const std::string stem = completion.job_id.substr(0, completion.job_id.size() - 5);
+                CHECK(completion.operation_id == "memsave-" + stem);
+                ++committed;
+            } else {
+                FAIL("second drain must be empty, got: " + completion.operation_id);
+            }
+        }
+    }
+    CHECK(committed == 6);
+}
+
+TEST_CASE("ProjectMemory: 真 worker 同 id 更新提交成功但 entry_count 不增") {
+    const fs::path root = TempRoot("worker-update");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    memory::ProjectMemory store(*identity, root / "home", options, LUBANCODE_MEMORY_WORKER_EXE);
+    REQUIRE(store.set_enabled(true).has_value());
+    const auto drain_all = [&]() {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        CHECK(store.Status().pending_jobs == 0);
+        std::size_t ok = 0;
+        for (const auto& completion : store.DrainWriteCompletions()) {
+            REQUIRE(completion.outcome == "committed");
+            ++ok;
+        }
+        return ok;
+    };
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Fact;
+    request.id = "fact.update-flow";
+    request.title = "更新流";
+    request.summary = "第一版";
+    request.content = "第一版正文。";
+    request.confidence = "verified";
+    REQUIRE(store.EnqueueSave(request).has_value());
+    CHECK(drain_all() == 1);
+    CHECK(store.ListEntries().size() == 1);
+    request.summary = "第二版";
+    request.content = "第二版正文,换了内容。";
+    REQUIRE(store.EnqueueSave(request).has_value());
+    CHECK(drain_all() == 1);
+    // 同 id 更新:提交成功(回执 committed),条目总数不必增加。
+    CHECK(store.ListEntries().size() == 1);
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].summary == "第二版");
+}
+
+TEST_CASE("ProjectMemory: 写完 result、删 pending 前崩溃,恢复不重复提交") {
+    const fs::path root = TempRoot("worker-crash");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    REQUIRE(store.set_enabled(true).has_value());
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Fact;
+    request.id = "fact.crash-window";
+    request.title = "崩溃窗口";
+    request.summary = "提交后删除前的窗口";
+    request.content = "回执已写、pending 未删。";
+    request.source_session = "session-crash";
+    const auto queued = store.EnqueueSave(request);
+    REQUIRE(queued.has_value());
+    const fs::path job_file = root / "home" / "memory-jobs" / "pending" / fs::path(queued->job_id);
+    REQUIRE(fs::exists(job_file));
+    const std::string job_body = Read(job_file);
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    REQUIRE(store.ListEntries().size() == 1);
+    // 模拟崩溃残留:回执(committed)在盘,pending 文件又回来了。
+    Write(job_file, job_body);
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    // 幂等:不再动正文,条目仍 1,来源会话不翻倍(job 的 source_session 进
+    // 账的是全限定引用,非空即可)。
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 1);
+    REQUIRE(entries[0].source_sessions.size() == 1);
+    CHECK_FALSE(entries[0].source_sessions[0].empty());
+    // 回执账只认一次:drain 收到的是首笔的 committed,重复件不产第二张。
+    std::size_t notices = 0;
+    for (const auto& completion : store.DrainWriteCompletions()) {
+        CHECK(completion.outcome == "committed");
+        ++notices;
+    }
+    CHECK(notices == 1);
+}
+
+TEST_CASE("ProjectMemory: /memory jobs 台账按工作区隔离,failed 可显式重试且防重放") {
+    const fs::path root = TempRoot("jobs-ledger");
+    fs::create_directories(root / "repo-a" / ".git");
+    fs::create_directories(root / "repo-b" / ".git");
+    const auto identity_a = memory::ResolveProjectIdentity(root / "repo-a", root / "home");
+    const auto identity_b = memory::ResolveProjectIdentity(root / "repo-b", root / "home");
+    REQUIRE(identity_a.has_value());
+    REQUIRE(identity_b.has_value());
+    REQUIRE(identity_a->workspace_key != identity_b->workspace_key);
+    memory::Options options;
+    options.global_allowed = true;
+    memory::ProjectMemory store_a(*identity_a, root / "home", options);
+    memory::ProjectMemory store_b(*identity_b, root / "home", options);
+    REQUIRE(store_a.set_enabled(true).has_value());
+    REQUIRE(store_b.set_enabled(true).has_value());
+
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.title = "隔离账";
+    request.summary = "隔离账";
+    request.content = "A 工作区的一笔待写。";
+    const auto queued = store_a.EnqueueSave(request);
+    REQUIRE(queued.has_value());
+    const auto jobs_a = store_a.ListWorkspaceJobs();
+    REQUIRE(jobs_a.size() == 1);
+    CHECK(jobs_a[0].job_id == queued->job_id);
+    CHECK(jobs_a[0].state == "pending");
+    CHECK(jobs_a[0].operation == "upsert");
+    CHECK(jobs_a[0].title == "隔离账");
+    CHECK_FALSE(jobs_a[0].wait_hint.empty());
+    // 工作区隔离:B 看不到 A 的任务。
+    CHECK(store_b.ListWorkspaceJobs().empty());
+    // B 重试 A 的 job 也被拒。
+    CHECK_FALSE(store_b.RetryFailedJob(queued->job_id).has_value());
+
+    // 坏 job(operation 不认得)→ worker 挪 failed,A 的台账看得到失败详情。
+    nlohmann::json bogus{
+        {"schema", 1},
+        {"operation", "bogus"},
+        {"workspace_key", identity_a->workspace_key},
+        {"project_root", (root / "repo-a").generic_string()},
+        {"workspace_dir", identity_a->workspace_dir.generic_string()},
+        {"memory_dir", (root / "home" / "workspaces" / identity_a->workspace_dir.filename()
+                        / "memory")
+                           .generic_string()},
+        {"created_at", "2026-09-19T00:00:00Z"},
+    };
+    const fs::path bogus_name = "9999999999-0.json";
+    Write(root / "home" / "memory-jobs" / "pending" / bogus_name, bogus.dump(2) + "\n");
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    // 隔离账那笔正常提交离队;坏 job 落 failed,A 的台账看得到失败详情。
+    auto after = store_a.ListWorkspaceJobs();
+    REQUIRE(after.size() == 1);
+    REQUIRE(after[0].state == "failed");
+    const std::string bogus_id = after[0].job_id;
+    CHECK(after[0].error.find("不认得") != std::string::npos);
+
+    // 重试 failed:换新单回 pending,旧 failed 台账销账。
+    const auto retried = store_a.RetryFailedJob(bogus_id);
+    REQUIRE(retried.has_value());
+    CHECK(*retried != bogus_id);
+    CHECK(fs::exists(root / "home" / "memory-jobs" / "pending" / fs::path(*retried)));
+    CHECK_FALSE(fs::exists(root / "home" / "memory-jobs" / "failed" / fs::path(bogus_id)));
+    // 重放过的 bogus 仍会失败,但落的是全新 operation_id 的账。
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    bool failed_again = false;
+    for (const auto& job : store_a.ListWorkspaceJobs()) {
+        if (job.job_id == *retried) {
+            CHECK(job.state == "failed");
+            failed_again = true;
+        }
+    }
+    CHECK(failed_again);
+
+    // 防重放:failed 件的原回执已是 committed 的,拒绝重试。
+    const std::string committed_id = "9999999998-0";
+    nlohmann::json committed_job = bogus;
+    committed_job["workspace_key"] = identity_a->workspace_key;
+    Write(root / "home" / "memory-jobs" / "failed" / fs::path(committed_id + ".json"),
+          committed_job.dump(2) + "\n");
+    const fs::path lifecycle_root = identity_a->workspace_dir / "lifecycle";
+    Write(lifecycle_root / "memsave-9999999998-0" / "result.json",
+          std::string(R"({"schema_version":1,"operation_id":"memsave-9999999998-0",)"
+                      R"("status":"completed","workspace_key":")" +
+                      identity_a->workspace_key +
+                      R"(","outcome":{"memory_id":"fact.x","committed_at":"2026-09-19T00:00:00Z"}})")
+              + "\n");
+    const auto replay = store_a.RetryFailedJob(committed_id);
+    REQUIRE_FALSE(replay.has_value());
+    CHECK(replay.error().find("已提交过") != std::string::npos);
+    // 不存在的 id 明确报错。
+    CHECK_FALSE(store_a.RetryFailedJob("1789000000000-9").has_value());
+}
+
+TEST_CASE("ProjectMemory: 用户层 job 也有同形回执,drain 只认回执不认 pending 消失") {
+    const fs::path root = TempRoot("user-receipt");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.user_enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    REQUIRE(store.set_enabled(true).has_value());
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.title = "答复语言";
+    request.summary = "答复用中文";
+    request.content = "答复语言用中文。";
+    request.confidence = "user-stated";
+    request.scope.level = "user";
+    request.scope.kind = "user";
+    const auto queued = store.EnqueueSave(request, /*user_initiated=*/true);
+    REQUIRE(queued.has_value());
+    // 在途:没有回执,drain 不出声。
+    CHECK(store.DrainWriteCompletions().empty());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    // 用户层的等价完成依据:memory/user/.state/lifecycle 的同形回执。
+    const std::string stem = queued->job_id.substr(0, queued->job_id.size() - 5);
+    const fs::path receipt =
+        root / "home" / "memory" / "user" / ".state" / "lifecycle" / ("memsave-" + stem) / "result.json";
+    REQUIRE(fs::exists(receipt));
+    const auto completions = store.DrainWriteCompletions();
+    REQUIRE(completions.size() == 1);
+    CHECK(completions[0].outcome == "committed");
+    CHECK(completions[0].layer == "user");
+    CHECK(completions[0].operation_id == "memsave-" + stem);
+    CHECK(completions[0].memory_id.starts_with("preference."));
+    CHECK(store.DrainWriteCompletions().empty());  // 去重:收一笔销一笔
+
+    // pending 消失但没有回执的,不冒充成功:按去向不明报失败。
+    memory::SaveRequest ghost;
+    ghost.kind = memory::MemoryKind::Preference;
+    ghost.title = "幽灵任务";
+    ghost.summary = "幽灵任务";
+    ghost.content = "等下会被人为拿走的任务。";
+    const auto ghost_queued = store.EnqueueSave(ghost);
+    REQUIRE(ghost_queued.has_value());
+    std::error_code ec;
+    fs::remove(root / "home" / "memory-jobs" / "pending" / fs::path(ghost_queued->job_id), ec);
+    const auto ghost_notices = store.DrainWriteCompletions();
+    REQUIRE(ghost_notices.size() == 1);
+    CHECK(ghost_notices[0].outcome == "failed");
+    CHECK(ghost_notices[0].error.find("去向不明") != std::string::npos);
 }
 
 TEST_CASE("ProjectMemory: 全局未授权时本场命令与工具都开不了记忆") {

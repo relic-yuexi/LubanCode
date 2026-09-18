@@ -851,6 +851,7 @@ const Entry kZhCN[] = {
      "  /memory edit <id> 标题 [:: 正文] 改候选\n"
      "  /memory reject <id> [理由]      拒绝候选(同主题不再重提)\n"
      "  /memory list [project|global]   列记忆(默认两层合并;global 是管理读口)\n"
+     "  /memory jobs [retry [failed的job]] 看当前工作区待写/失败任务;retry 唤醒\n"
      "  /memory remember project fact|preference|feedback 标题 [:: 正文]\n"
      "  /memory remember global preference|feedback 标题 [:: 正文]\n"
      "                                  (全局记忆:只认这条用户命令,每次写入须确认)\n"
@@ -883,8 +884,23 @@ const Entry kZhCN[] = {
     {"cmd.memory.edit.done", "[memory] 候选已改,仍在待审区。"},
     {"cmd.memory.project", "工作区: {0}"},
     {"cmd.memory.directory", "目录: {0}"},
-    {"cmd.memory.counts", "条目: {0}；待办: {1}"},
+    {"cmd.memory.counts", "已入库条目: {0}；待写任务: {1}；写入失败: {2}"},
     {"cmd.memory.pending_hint", "还有 {0} 条写入任务未落盘，已尝试唤起后台 worker；排队不等于保存成功。"},
+    {"cmd.memory.worker_failed_hint_jobs",
+     "[memory] {0} 条自动写入已排队，但后台 worker 未启动；任务保留在队列，可 /memory jobs 查看重试。"},
+    {"cmd.memory.jobs.empty", "[memory] 当前工作区没有待写或失败的任务。"},
+    {"cmd.memory.jobs.header", "当前工作区的写入任务(排队不等于已入库):"},
+    {"cmd.memory.jobs.line", "- {0} [{1}] {2}({3}) 等待 {4} worker:{5}"},
+    {"cmd.memory.jobs.title_line", "    标题: {0}"},
+    {"cmd.memory.jobs.error_line", "    失败: {0}"},
+    {"cmd.memory.jobs.log_line", "    worker 日志: {0}"},
+    {"cmd.memory.jobs.hint", "retry 唤醒待写:/memory jobs retry;重试失败任务须显式点名:/memory jobs retry <job>。"},
+    {"cmd.memory.jobs.retry_started", "[memory] 已拉起后台 worker，待写任务开始消费。"},
+    {"cmd.memory.jobs.retry_running", "[memory] 后台 worker 已在运行，无需重复拉起。"},
+    {"cmd.memory.jobs.retry_idle", "[memory] 没有待写任务，无需 worker。"},
+    {"cmd.memory.jobs.retry_unavailable", "[memory] 本场未配置记忆 worker 可执行文件，任务保留在队列。"},
+    {"cmd.memory.jobs.retry_queued", "[memory] 已按新单重排进队列: {0}"},
+    {"cmd.memory.jobs.retry_rejected", "[memory] 重试被拒: {0}"},
     {"cmd.memory.master", "[memory] 本场已{0}。"},
     {"cmd.memory.toggle", "[memory] {0}子开关已{1}。"},
     {"cmd.memory.retrieval", "召回"},
@@ -898,7 +914,9 @@ const Entry kZhCN[] = {
     {"memory.extract.running", "[memory] 回合总结({0})…"},
     {"memory.extract.failed", "[memory] 回合总结失败,本轮跳过: {0}"},
     {"memory.extract.deadline", "[memory] 记忆抽取超过 {0} 秒,本轮跳过"},
-    {"memory.extract.done", "[memory] 新候选 {0} 条待审(/memory review);自动入库 {1} 条。"},
+    {"memory.extract.done", "[memory] 新候选 {0} 条待审(/memory review);自动写入已排队 {1} 条(排队不等于已入库)。"},
+    {"memory.write.committed_notice", "[memory] 已入库: {0}({1})"},
+    {"memory.write.failed_notice", "[memory] 写入失败: {0}({1});/memory jobs 看详情"},
     {"cmd.memory.stale.empty", "[memory] 没有指纹漂移或已过期的记忆。"},
     {"cmd.memory.stale.header", "陈旧清单(fingerprint=文件已变,expired=已过期):"},
     {"cmd.memory.stale.fingerprint", "相关文件已变化"},
@@ -2957,6 +2975,7 @@ const Entry kEn[] = {
      "  /memory edit <id> title [:: body]        edit a candidate\n"
      "  /memory reject <id> [reason]             reject a candidate (same topic won't return)\n"
      "  /memory list [project|global]            list memories (both layers by default)\n"
+     "  /memory jobs [retry [failed job]]        list this workspace's write jobs; retry wakes them\n"
      "  /memory remember project fact|preference|feedback title [:: body]\n"
      "  /memory remember global preference|feedback title [:: body]\n"
      "                                           (global memory: this user command only, confirmed each time)\n"
@@ -2990,8 +3009,26 @@ const Entry kEn[] = {
     {"cmd.memory.edit.done", "[memory] Candidate updated; still pending review."},
     {"cmd.memory.project", "Workspace: {0}"},
     {"cmd.memory.directory", "Directory: {0}"},
-    {"cmd.memory.counts", "Entries: {0}; pending: {1}"},
+    {"cmd.memory.counts", "Stored entries: {0}; pending writes: {1}; failed writes: {2}"},
     {"cmd.memory.pending_hint", "{0} writes are still pending; attempting to start the worker. Queued does not mean saved."},
+    {"cmd.memory.worker_failed_hint_jobs",
+     "[memory] {0} auto-write(s) queued, but the background worker did not start; jobs stay queued, see /memory "
+     "jobs to retry."},
+    {"cmd.memory.jobs.empty", "[memory] No pending or failed write jobs in this workspace."},
+    {"cmd.memory.jobs.header", "Write jobs in this workspace (queued is not committed):"},
+    {"cmd.memory.jobs.line", "- {0} [{1}] {2} ({3}) waiting {4} worker: {5}"},
+    {"cmd.memory.jobs.title_line", "    title: {0}"},
+    {"cmd.memory.jobs.error_line", "    failure: {0}"},
+    {"cmd.memory.jobs.log_line", "    worker log: {0}"},
+    {"cmd.memory.jobs.hint",
+     "Wake pending jobs with /memory jobs retry; retrying a failed job must name it: /memory jobs retry <job>."},
+    {"cmd.memory.jobs.retry_started", "[memory] Background worker started; pending jobs are being consumed."},
+    {"cmd.memory.jobs.retry_running", "[memory] A background worker is already running."},
+    {"cmd.memory.jobs.retry_idle", "[memory] No pending jobs; no worker needed."},
+    {"cmd.memory.jobs.retry_unavailable",
+     "[memory] No memory worker executable configured in this session; jobs stay queued."},
+    {"cmd.memory.jobs.retry_queued", "[memory] Re-queued under a new job: {0}"},
+    {"cmd.memory.jobs.retry_rejected", "[memory] Retry refused: {0}"},
     {"cmd.memory.master", "[memory] Project memory is now {0} for this session."},
     {"cmd.memory.toggle", "[memory] The {0} sub-switch is now {1}."},
     {"cmd.memory.retrieval", "retrieval"},
@@ -3005,7 +3042,10 @@ const Entry kEn[] = {
     {"memory.extract.running", "[memory] turn summary ({0})..."},
     {"memory.extract.failed", "[memory] turn summary failed; skipped this turn: {0}"},
     {"memory.extract.deadline", "[memory] memory extraction exceeded {0}s; skipped this turn"},
-    {"memory.extract.done", "[memory] {0} new candidate(s) pending (/memory review); {1} auto-saved."},
+    {"memory.extract.done",
+     "[memory] {0} new candidate(s) pending (/memory review); {1} auto-write(s) queued (queued is not committed)."},
+    {"memory.write.committed_notice", "[memory] Committed to store: {0} ({1})"},
+    {"memory.write.failed_notice", "[memory] Write failed: {0} ({1}); see /memory jobs"},
     {"cmd.memory.stale.empty", "[memory] No drifted or expired memories."},
     {"cmd.memory.stale.header", "Stale list (fingerprint = files changed, expired = past expires_at):"},
     {"cmd.memory.stale.fingerprint", "related files changed"},

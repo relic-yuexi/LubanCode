@@ -343,7 +343,7 @@ TEST_CASE("MemoryTurnLedger: 漏斗计数与回执分账(无轨迹)") {
     outcome.cached_tokens = 512;
     outcome.extract_wall_ms = 812;
     outcome.review_candidates = 1;
-    outcome.auto_written = 0;
+    outcome.auto_queued = 0;
     ledger2.NoteExtractionOutcome(outcome);
     ledger2.FinishTurn(930);
     CHECK(ledger2.funnel().extract_batches == 1);
@@ -567,7 +567,7 @@ TEST_CASE("typed event: assessed 与 receipted 落 main.jsonl 且过 schema") {
     outcome.cached_tokens = 512;
     outcome.extract_wall_ms = 812;
     outcome.review_candidates = 1;
-    outcome.auto_written = 0;
+    outcome.auto_queued = 2;
     ledger.NoteExtractionOutcome(outcome);
     // 同轮的 auto 直写回执。
     memory::MemoryWriteReceipt auto_write;
@@ -615,6 +615,10 @@ TEST_CASE("typed event: assessed 与 receipted 落 main.jsonl 且过 schema") {
     CHECK(second.value("cached_tokens", std::int64_t{0}) == 512);
     CHECK(second.value("extract_wall_ms", std::int64_t{0}) == 812);
     CHECK(second.value("review_candidates", std::uint64_t{0}) == 1);
+    // 修复单 §五 D:自动直写排队数落新名 auto_queued;旧名只在旧账里。
+    CHECK(second.value("auto_queued", std::uint64_t{0}) == 2);
+    CHECK(second.contains("auto_written") == false);
+    CHECK(app::AutoQueuedFromAssessedPayload(second) == 2);
     CHECK(second.value("foreground_tail_ms", std::int64_t{0}) == 930);
 
     const auto receipted = EventsOfKind(main_stream, "memory.write.receipted");
@@ -670,7 +674,7 @@ TEST_CASE("schema: assessed/receipted 的互斥约束拒越界") {
     called["extract_outcome"] = "completed";
     called["extract_wall_ms"] = 5;
     called["review_candidates"] = std::uint64_t{0};
-    called["auto_written"] = std::uint64_t{0};
+    called["auto_queued"] = std::uint64_t{0};
     called["usage_reported"] = true;
     called["input_tokens"] = 1;
     called["output_tokens"] = 1;
@@ -684,6 +688,18 @@ TEST_CASE("schema: assessed/receipted 的互斥约束拒越界") {
     CHECK(trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryExtractionAssessed,
                                                  unreported)
               .has_value());
+
+    // 修复单 §五 D:旧账的 auto_written 是同一计数(旧排队数)的历史名,
+    // schema 认它(读侧兼容,不回改历史账);新写只落 auto_queued。
+    auto legacy = called;
+    legacy.erase("auto_queued");
+    legacy["auto_written"] = std::uint64_t{3};
+    CHECK_FALSE(trajectory::ValidatePayloadWithVersion(
+                    2, trajectory::EventKind::MemoryExtractionAssessed, legacy)
+                    .has_value());
+    CHECK(app::AutoQueuedFromAssessedPayload(legacy) == 3);   // 旧名解释为旧排队计数
+    CHECK(app::AutoQueuedFromAssessedPayload(called) == 0);   // 新名优先
+    CHECK(app::AutoQueuedFromAssessedPayload(nlohmann::json::object()) == 0);
 
     nlohmann::json receipt;
     receipt["source"] = "model_tool_save";
@@ -1048,7 +1064,7 @@ TEST_CASE("schema: shadow_gate 内洽裁与互斥约束") {
         called["extract_outcome"] = "completed";
         called["extract_wall_ms"] = 5;
         called["review_candidates"] = std::uint64_t{0};
-        called["auto_written"] = std::uint64_t{0};
+        called["auto_queued"] = std::uint64_t{0};
         return called;
     };
     // 合法 hit:verdict 与名单同进。

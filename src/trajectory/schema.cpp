@@ -541,6 +541,9 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::MemoryExtractionAssessed, "extract_outcome", "s", false},
     {EventKind::MemoryExtractionAssessed, "error_code", "s", false},
     {EventKind::MemoryExtractionAssessed, "review_candidates", "u", false},
+    // 修复单 §五 D:自动直写排队数的新名;auto_written 是旧账同数的历史
+    // 名,读侧兼容(两键都可选,新写只落新键),不回改历史账。
+    {EventKind::MemoryExtractionAssessed, "auto_queued", "u", false},
     {EventKind::MemoryExtractionAssessed, "auto_written", "u", false},
     // 记忆写入调度单 P0(§6.2):写路回执。outcome 只有 queued|rejected
     // ——排队≠落盘,不冒充 committed。job_id 与 error_code 按 outcome
@@ -585,7 +588,7 @@ std::optional<SchemaError> ValidatePayloadWithVersion(int schema_version, EventK
                                                               "output_tokens",   "cached_tokens",
                                                               "extract_wall_ms", "extract_outcome",
                                                               "error_code",      "review_candidates",
-                                                              "auto_written"};
+                                                              "auto_queued",     "auto_written"};
             for (const char* name : kCallOnlyFields) {
                 if (payload.contains(name)) {
                     return SchemaError{"schema.payload_forbidden_field",

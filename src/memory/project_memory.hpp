@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -134,13 +135,13 @@ public:
 // 枚举线上名稳定(§15:同一冻结输入跨平台判断一致),改名即改合同。
 // ---------------------------------------------------------------------------
 
-// 写入来源五路:§6.2 的四路 + 抽取 auto 直写(§10.2 auto_written 的分子)。
+// 写入来源五路:§6.2 的四路 + 抽取 auto 直写(§10.2 auto_queued 的分子)。
 enum class MemoryWriteSource {
     ExplicitCommandSave,  // /memory remember(§6.2 explicit_command_save)
     ModelToolSave,        // 主模型 memory_save 工具(§6.2 model_tool_save)
     ExplicitForget,       // /memory forget(§6.2 explicit_forget)
     CandidateAccept,      // /memory accept(§6.2 candidate_accept)
-    AutoExtraction,       // 回合尾抽取的 auto 档直写(§10.2 auto_written)
+    AutoExtraction,       // 回合尾抽取的 auto 档直写(§10.2 auto_queued)
 };
 std::string MemoryWriteSourceName(MemoryWriteSource source);
 
@@ -171,6 +172,46 @@ public:
 // 把 EnqueueXxx 的拒绝人话折成稳定码。认不出的落 "other",不猜——
 // 错误文案改动只会降级成 other,不会错归因。
 std::string StableWriteErrorCode(const std::string& error);
+
+// ---------------------------------------------------------------------------
+// 结构化入队结果(修复单 §五 B):queue 持久化与 worker 启动是两笔账,
+// 不许再混进一个字符串。排队成功 = expected 的成功值;只有 queue 持久化
+// 失败才判"未入队"(unexpected)。job_id 是纯文件名(含 .json),诊断
+// 文字一律走 worker_error/worker_error_code,不污染 job_id(回执、
+// /memory jobs 查账都靠它)。
+// ---------------------------------------------------------------------------
+
+// queue 侧只有一态:persisted(已原子写进 pending)。将来若加内存排队
+// 再扩,现在不预造假态。
+enum class MemoryQueueState { Persisted };
+
+// worker 侧四态(修复单 §五 B):
+//   Started         这次调用真拉起了一只 worker
+//   AlreadyRunning  已有活 worker(或退避合并窗口内的合并唤醒),不再起一只
+//   StartFailed     拉了没起来,或带 pending 退出后的有界退避中——job 仍在
+//                   pending,两个事实都在,不算入队失败
+//   Unavailable     本对象没配 executable(单测/单发形态),不冒充启动成功
+//   Idle            盘上已无待写任务,无需 worker(EnsureWorkerRunning 的
+//                   常态回执;入队结果撞见它 = job 刚落盘就被现役 worker 吃掉)
+enum class MemoryWorkerLaunchState { Started, AlreadyRunning, StartFailed, Unavailable, Idle };
+std::string MemoryWorkerLaunchStateName(MemoryWorkerLaunchState state);
+
+struct MemoryEnqueueResult {
+    std::string job_id;  // pending/<job_id> 的文件名,如 "1789753353477-0.json"
+    MemoryQueueState queue_state = MemoryQueueState::Persisted;
+    MemoryWorkerLaunchState worker_state = MemoryWorkerLaunchState::Unavailable;
+    std::string worker_error_code;  // StartFailed/Unavailable 时的稳定码(可为空)
+    std::string worker_error;       // StartFailed/Unavailable 时的短说明(可为空)
+};
+
+// EnsureWorkerRunning 的回执:worker 池这次协调的结局(不带 queue 账,
+// 只报 worker 侧)。state 语义同 MemoryWorkerLaunchState;error 字样随
+// state 走。会话启动/唤醒路(/memory jobs retry、session_stack)用它。
+struct MemoryWorkerWake {
+    MemoryWorkerLaunchState state = MemoryWorkerLaunchState::Unavailable;
+    std::string error_code;
+    std::string error;
+};
 
 // fact=可核验的项目事实;preference=用户主动选定的项目技术偏好;
 // feedback=用户对 LubanCode 行事方式的明确纠正(版本节奏、验收习惯、提交
@@ -436,6 +477,10 @@ struct RecallTrace {
     std::size_t injected_bytes = 0;  // 去重后有效字节
 };
 
+// worker 监督器的实现件(定义在 project_memory.cpp;这里只见前向声明,
+// ProjectMemory 经 shared_ptr 间接持有——保住移动构造)。
+struct MemoryWorkerSupervisor;
+
 class ProjectMemory {
 public:
     ProjectMemory(ProjectIdentity identity, std::filesystem::path home_lubancode,
@@ -510,7 +555,8 @@ public:
     // (短哈希账本挡死缠烂打)。返回候选 id;被挡时返回错误。
     std::expected<std::string, std::string> AddCandidate(MemoryCandidate candidate);
     // 接受:候选转正式 upsert job(同 id 语义沿用),候选文件删除。
-    std::expected<std::string, std::string> AcceptCandidate(const std::string& id);
+    // 成功值是结构化入队结果(§五 B):job_id + worker 启动账。
+    std::expected<MemoryEnqueueResult, std::string> AcceptCandidate(const std::string& id);
     // 改标题/正文后仍留待审区。
     std::expected<void, std::string> EditCandidate(const std::string& id, const std::string& title,
                                                    const std::string& content);
@@ -579,20 +625,22 @@ public:
     // P0-4 起全局层写入也只认 user_initiated=true 的路。
     // 记忆写入调度单 P0:source 只喂写路回执(§6.2),不碰 user_initiated
     // 的既有语义与因果边——默认值保持老调用方的口径(model_tool)。
-    std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request,
-                                                        bool user_initiated = false,
-                                                        MemoryWriteSource source = MemoryWriteSource::ModelToolSave);
+    // 修复单 §五 B:成功值是结构化结果——job_id 纯净,worker 启动成败
+    // 另列字段;只有 queue 持久化失败才回 unexpected。
+    std::expected<MemoryEnqueueResult, std::string> EnqueueSave(
+        const SaveRequest& request, bool user_initiated = false,
+        MemoryWriteSource source = MemoryWriteSource::ModelToolSave);
     // P0-4:显式层路由——layer 为 "user"/"project" 时按命令指定的层动
     // (forget global 的删除边界 §6.4:只认用户命令,本口即命令口);空串
     // 保持旧写法(按 id 自动认层)。
-    std::expected<std::string, std::string> EnqueueForget(const std::string& id,
-                                                          const std::string& layer = std::string());
-    std::expected<std::string, std::string> EnqueueRebuild();
+    std::expected<MemoryEnqueueResult, std::string> EnqueueForget(const std::string& id,
+                                                                  const std::string& layer = std::string());
+    std::expected<MemoryEnqueueResult, std::string> EnqueueRebuild();
     // 核验:原 id 复活——重算指纹、盖 last_verified_at、status 回 active。
     // refresh=true 时连 status 一并回炉(verify 只盖时间戳)。layer 同
     // EnqueueForget 的显式层路由。
-    std::expected<std::string, std::string> EnqueueVerify(const std::string& id, bool refresh,
-                                                          const std::string& layer = std::string());
+    std::expected<MemoryEnqueueResult, std::string> EnqueueVerify(const std::string& id, bool refresh,
+                                                                  const std::string& layer = std::string());
 
     // 陈旧清单:指纹漂移的与已过期的,附原因(/memory stale 用)。
     struct StaleEntry {
@@ -609,19 +657,79 @@ public:
     std::vector<MemoryEntry> ListGlobalEntriesForManagement(std::string* error = nullptr) const;
     RuntimeStatus Status() const;
 
-    // 有 pending job 时起一枚会话级后台 worker。失败不删 job，下次还能捞。
-    std::expected<void, std::string> LaunchWorker() const;
+    // ---- worker 监督(修复单 §五 A/P0-B) ----
+    // 有 pending job 时确保有一只后台 worker 在跑。共享监督器按规范化
+    // state_root 进程级共享:同根多份 ProjectMemory 共用一只池,不再每次
+    // enqueue 都拉一批争锁的子进程;活 worker 尚在时合并唤醒,已退出时
+    // 先收退出码再看 pending。带 pending 退出记 worker_exited_with_pending,
+    // 有界退避(1s→30s 封顶)重试,达上限提示,不忙循环。失败不删 job,
+    // 下次还能捞。
+    MemoryWorkerWake EnsureWorkerRunning() const;
+    // 池里还有活 worker 吗(/memory jobs 的 worker 行与防风暴测试用)。
+    bool HasRunningWorker() const;
+    // 本进程经共享监督器累计拉起的 worker 数(诊断/防风暴断言)。
+    std::uint64_t WorkerSpawnCount() const;
+    // 退出收尾(修复单 §五 A"正常退出先给一段有界收尾时间"):有界等活
+    // worker 自己跑完;超时不杀——pending 仍在盘上,下次会话恢复。会话
+    // 退场路调,grace_ms=0 只看一眼。
+    void WaitForWorkersGracefully(int grace_ms) const;
+
+    // ---- 任务台账与重试(修复单 §五 C:/memory jobs) ----
+    // 当前工作区的待写/失败任务清单(按 workspace_key 过滤,别区的数不
+    // 算进来)。只读。
+    struct MemoryJobInfo {
+        std::string job_id;        // 文件名(含 .json)
+        std::string state;         // pending | failed
+        std::string operation;     // upsert | forget | verify | rebuild | ...
+        std::string title;         // job 自带的 title(可空)
+        std::string layer;         // project | user(按 memory_dir 判)
+        std::string created_at;    // job 的 created_at(可空)
+        std::string wait_hint;     // 人话等待时长,如 "3m12s"(按文件 mtime)
+        std::string error;         // failed 时的 .error.txt 首行(可空)
+        std::string worker_state;  // 监督器池状态人话(running/exited(code=N)/none)
+        std::string worker_log;    // 最近一只 worker 的日志路径(可空)
+    };
+    std::vector<MemoryJobInfo> ListWorkspaceJobs() const;
+    // 唤醒 pending(相当于 /memory jobs retry 不带参数):EnsureWorkerRunning
+    // 的直通口。
+    MemoryWorkerWake WakePendingWorker() const;
+    // 重试一笔 failed 任务(显式选择):校验工作区归属;原 job 已有 committed
+    // 回执的拒重放;否则按新 job 名重排回 pending(新 operation_id,全新
+    // lifecycle 账,不回改历史),返回新 job_id。
+    std::expected<std::string, std::string> RetryFailedJob(const std::string& job_id);
+
+    // ---- 提交回执消费(修复单 §五 C 尾:"已入库"只认回执) ----
+    // 本会话经 EnqueueXxx 排的 job 逐笔记账;DrainWriteCompletions 只从
+    // lifecycle/result.json 回收取数(核对 operation_id 与所在 lifecycle
+    // 根,workspace 根按目录绑定工作区),pending 消失不冒充成功。同一
+    // operation_id 只报一次。用户层 job 用 memory/user/.state/lifecycle 的
+    // 同形回执(等价完成依据)。主线程调用(空闲唤醒泵与回合边界)。
+    struct MemoryWriteCompletion {
+        std::string job_id;
+        std::string operation_id;
+        std::string layer;      // project | user
+        std::string title;      // 排队时记下的标题(可空)
+        std::string outcome;    // committed | failed
+        std::string memory_id;  // committed 时的正式 id(可空)
+        std::string error;      // failed 时的原因(可空)
+    };
+    // 空闲唤醒源用:有没有值得立刻收的账(回执已落地,或排的 job 还在
+    // pending 却已无活 worker——后者顺带在 DrainWriteCompletions 里补拉)。
+    bool WakeNeededForWrites() const;
+    // 收一次账:已落地的回执折成完成通知并销账;还在 pending 且无活
+    // worker 的,过一次 EnsureWorkerRunning(有界退避在监督器里挡着)。
+    std::vector<MemoryWriteCompletion> DrainWriteCompletions();
 
 private:
     std::string BuildTurnContextImpl(const std::string& query, const std::filesystem::path& cwd,
                                      QueryOrigin origin, bool force_retrieval,
                                      const std::string& target_run_id,
                                      const std::string& turn_id = std::string()) const;
-    std::expected<std::string, std::string> EnqueueJob(const std::string& operation,
-                                                       const SaveRequest* request,
-                                                       const std::string& id,
-                                                       nlohmann::json extra = nlohmann::json::object(),
-                                                       bool user_initiated = false);
+    std::expected<MemoryEnqueueResult, std::string> EnqueueJob(const std::string& operation,
+                                                               const SaveRequest* request,
+                                                               const std::string& id,
+                                                               nlohmann::json extra = nlohmann::json::object(),
+                                                               bool user_initiated = false);
     std::filesystem::path CandidatesDir() const;
 
     ProjectIdentity identity_;
@@ -629,29 +737,39 @@ private:
     std::filesystem::path memory_dir_;
     Options options_;
     std::string executable_;
-    // Windows closes the worker's kill-on-close Job with its last handle.
-    // Keep every live worker until completion; a new enqueue may race an exiting worker.
-    // 池子经 shared_ptr 间接持有:mutex 直接做成员会把 ProjectMemory 的移动
-    // 构造隐式删掉,既有册 make_shared<ProjectMemory>(std::move(store)) 编不过。
-    struct WorkerPool {
-        std::mutex mutex;
-        std::vector<std::shared_ptr<platform::BackgroundProcessHandle>> workers;
+    // worker 监督器(修复单 §五 A):按规范化 state_root 进程级共享的实现
+    // 件定义在 project_memory.cpp(MemoryWorkerSupervisor),这里只见前向
+    // 声明。shared_ptr 间接持有保住移动构造(mutex 直接做成员会把它删掉)。
+    mutable std::shared_ptr<MemoryWorkerSupervisor> supervisor_;
+    // 本会话排队后等回执的 job(DrainWriteCompletions 的账)。Enqueue 与
+    // Drain 可能落在不同线程(渠道会话),自带一把小锁;经 shared_ptr 间
+    // 接持有,不删 ProjectMemory 的移动构造(与监督器同款手法)。
+    struct TrackedWrite {
+        std::string job_id;
+        std::string operation_id;
+        std::string layer;  // project | user
+        std::string title;
+        std::filesystem::path lifecycle_root;  // 这笔 job 的回执落点(SetWorkingDirectory 换区后仍准)
     };
-    mutable std::shared_ptr<WorkerPool> workers_ = std::make_shared<WorkerPool>();
+    struct TrackedWriteStore {
+        std::mutex mutex;
+        std::vector<TrackedWrite> writes;
+    };
+    mutable std::shared_ptr<TrackedWriteStore> tracked_writes_ = std::make_shared<TrackedWriteStore>();
     std::string source_session_;
     MemoryAccounting* accounting_ = nullptr;  // P0-3:装配层挂的落账口
     // 记忆写入调度单 P0:写路回执收件口(装配层挂;空 = 没人收)。
     MemoryWriteReceiptSink* write_receipt_sink_ = nullptr;
     // EnqueueSave/EnqueueForget 的原函数体(逻辑一字不动),public 口只加
     // 回执投递。
-    std::expected<std::string, std::string> EnqueueSaveImpl(const SaveRequest& request,
-                                                            bool user_initiated);
-    std::expected<std::string, std::string> EnqueueForgetImpl(const std::string& id,
-                                                              const std::string& layer);
+    std::expected<MemoryEnqueueResult, std::string> EnqueueSaveImpl(const SaveRequest& request,
+                                                                    bool user_initiated);
+    std::expected<MemoryEnqueueResult, std::string> EnqueueForgetImpl(const std::string& id,
+                                                                      const std::string& layer);
     // EnqueueSave/EnqueueForget 的回执投递(源语义见 struct 注释)。
     void EmitWriteReceipt(MemoryWriteSource source, const std::string& operation,
                           const SaveRequest* request, const std::string& layer,
-                          const std::expected<std::string, std::string>& queued);
+                          const std::expected<MemoryEnqueueResult, std::string>& queued);
     // 回合总结产出的检索扩展词(下一轮 BuildTurnContext 合并进查询)。
     std::vector<std::string> retrieval_hints_;
 };
