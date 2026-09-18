@@ -636,8 +636,8 @@ std::optional<lubancode::api::Message> TerminalSessionController::TakePendingDir
     }
     lubancode::api::Message inject;
     inject.role = lubancode::api::Role::User;
-    inject.content.push_back(lubancode::runtime::FormatHostDirectoryNoticeText(
-        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason));
+    inject.content.push_back(lubancode::api::TextBlock{lubancode::runtime::FormatHostDirectoryNoticeText(
+        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason)});
     return inject;
 }
 
@@ -651,8 +651,8 @@ bool TerminalSessionController::DeliverPendingDirectoryNoticeNow() {
     }
     lubancode::api::Message inject;
     inject.role = lubancode::api::Role::User;
-    inject.content.push_back(lubancode::runtime::FormatHostDirectoryNoticeText(
-        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason));
+    inject.content.push_back(lubancode::api::TextBlock{lubancode::runtime::FormatHostDirectoryNoticeText(
+        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason)});
     if (main_agent.has_value()) {
         main_agent->context().InjectIncoming(std::move(inject));
     }
