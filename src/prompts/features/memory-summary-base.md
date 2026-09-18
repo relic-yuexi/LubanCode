@@ -1,16 +1,16 @@
 # 回合总结与记忆候选提取
 
-你拿到的是一段终端 AI 编程工具里刚结束的一个回合(用户消息、助手回答、工具调用摘要)。请先在心里推测用户这一回合的目的,再按下面分型提示词的侧重,产出一回合总结,并提取值得长期记住的候选。
+你拿到刚结束一轮对话的材料。直接提取已确认结论，不展开分析，不复述过程。按下面格式输出简短总结和一条最值得长期保存的候选。
 
 ## 输出格式(严格遵守)
 
 只输出一个 JSON object,不加代码围栏、不加任何解释文字:
 
 ```
-{"task_type":"code|research|config|docs|other","summary":"不超过 120 字的回合总结","retrieval_terms":["下一轮检索用的关键词或同义改写,最多 8 个"],"candidates":[{"kind":"fact|preference|feedback","title":"短主题","summary":"一行摘要","content":"精炼正文,含 ## Why 小节写来龙去脉(没有根据就省略,不编故事)","keywords":["精确检索词"],"paths":["支撑证据的项目内相对路径"],"occurred_at":"事件发生日期,材料里明确给出才填(YYYY-MM-DD 或 ISO 时间)","confidence":"user-stated|verified|inferred"}]}
+{"task_type":"code|research|config|docs|other","summary":"不超过 60 字的回合总结","retrieval_terms":["下一轮检索用的关键词或同义改写,最多 4 个"],"candidates":[{"kind":"fact|preference|feedback","title":"短主题","summary":"一行摘要","content":"不超过 200 字，写结论和必要证据","keywords":["精确检索词"],"paths":["支撑证据的项目内相对路径"],"occurred_at":"事件发生日期,材料里明确给出才填(YYYY-MM-DD 或 ISO 时间)","confidence":"user-stated|verified|inferred"}]}
 ```
 
-candidates 可以为空数组,最多 3 条。retrieval_terms 是给下一轮记忆检索用的扩展词:同义词、更标准的叫法、涉及的符号名/路径,不要放整句话。occurred_at 只认材料里明确写出的日期(如"5月8日发布""2023-07-01 上线");材料没写、只有"上周""前几天"这类相对说法时省略该字段,不许推算或猜测日期。
+candidates 可以为空数组，最多 1 条。summary 最多 60 字；候选 title 最多 20 字、summary 最多 40 字、content 最多 200 字。retrieval_terms 最多 4 项，候选 keywords 和 paths 各最多 4 项，只留必要证据。整个 JSON 尽量控制在 600 token 内，先删次要内容，务必闭合 JSON。occurred_at 只认材料里明确写出的日期；没有日期便省略，不许推算。
 
 ## 字符转义(严格遵守)
 
@@ -20,7 +20,7 @@ JSON 字符串里,英文双引号写成 `\"`,反斜杠(含 Windows 路径)写成
 {"task_type":"code","summary":"用户要求把 D:\\repo\\src\\app 的日志改成两行:\n一行时间,一行正文","retrieval_terms":["日志格式"],"candidates":[]}
 ```
 
-正文中出现引号时照此转义;中文引号""与全角标点不是 JSON 语法字符,原样写,不必转义。candidates 为空时给 `[]`,不要省略。候选 content 写精炼正文,不超过 1500 字,不要整段照抄材料。
+正文中出现引号时照此转义；候选为空时给 `[]`。不抄材料，不写长篇背景。
 
 ## 摘要与标题的成色(检索命中靠它们)
 
@@ -30,7 +30,7 @@ summary 与 candidates 的 summary/title 是记忆检索的词面,写得虚,下�
 - 何时:材料里有日期就把日期原词写进 summary(与 occurred_at 同款规矩,没有就省略)。
 - 何地/何事:一句话说清在哪、做了什么、结果如何。
 - candidates 的 title 必含核心实体(人名/模块/符号至少一个),不写"一次经验""某个事实"这类空标题。
-- 长度上限不变:回合总结 120 字、候选摘要一行,不加长——塞实体是替换虚词,不是扩容。
+- 遵守前面的短输出预算；用实体替换空话，不加长。
 
 ## 候选只收四类
 

@@ -572,7 +572,7 @@ std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backen
     message.role = api::Role::User;
     message.content.push_back(api::TextBlock{transcript});
     sample.messages.push_back(std::move(message));
-    sample.max_tokens = 1500;
+    sample.max_tokens = kMemoryExtractMaxTokens;
 
     agent::SampleOptions sample_options;
     sample_options.timeout_secs = timeout_secs;
@@ -625,7 +625,14 @@ std::expected<MemoryExtraction, ExtractionError> FinishMemoryExtraction(const ag
         // 半截候选,宁缺毋滥。未知/缺失结束原因不在这判死,交解析,诊断单列。
         ExtractionError error;
         error.code = ExtractionErrorCode::OutputTruncated;
-        error.message = "抽取输出被截断(结束原因: " + sampled.stop_reason + ")";
+        error.message = "抽取输出被截断(结束原因: " + sampled.stop_reason +
+                        ");请求已执行，输出未入库，不自动重试";
+        if (sampled.usage_reported) {
+            error.message += "; usage: input=" + std::to_string(sampled.usage.input_tokens) +
+                             ", output=" + std::to_string(sampled.usage.output_tokens);
+        } else {
+            error.message += "; 服务端未报告 usage";
+        }
         error.request_id = sampled.provider_response_id;
         error.body_bytes = sampled.text.size();
         error.stop_reason = sampled.stop_reason;
@@ -1010,6 +1017,21 @@ std::vector<std::string> EvaluateDurableSignals(const std::string& user_text,
     }
     // 案六:compact 未审材料——P3 有 extraction buffer 才评,名字冻结,
     // P1 恒不命中。
+    return signals;
+}
+
+std::vector<std::string> EvaluateTurnDurableSignals(const std::string& user_text,
+                                                   const std::string& assistant_text,
+                                                   bool has_tool_evidence) {
+    auto signals = EvaluateDurableSignals(user_text, ComputeMeaningfulTextStats(user_text),
+                                         has_tool_evidence, false);
+    if (has_tool_evidence) {
+        const auto conclusions = EvaluateDurableSignals(assistant_text, {}, true, false);
+        for (const auto& signal : conclusions) {
+            if (signal == "preference_or_correction" || signal == "explicit_remember_unsaved") continue;
+            if (std::find(signals.begin(), signals.end(), signal) == signals.end()) signals.push_back(signal);
+        }
+    }
     return signals;
 }
 

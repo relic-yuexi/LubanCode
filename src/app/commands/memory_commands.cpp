@@ -312,6 +312,13 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
         if (entries.empty() && user_entries.empty()) {
             TermOut() << tr("cmd.memory.empty") << "\n";
+            const auto status = project_memory->Status();
+            if (status.pending_jobs > 0) {
+                TermOut() << trf("cmd.memory.pending_hint", status.pending_jobs) << "\n";
+                if (const auto launched = project_memory->LaunchWorker(); !launched.has_value()) {
+                    TermOut() << trf("cmd.memory.worker_failed", launched.error()) << "\n";
+                }
+            }
             return;
         }
         for (const auto& entry : entries) {
@@ -522,7 +529,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     // 记忆写入调度单 P0:前置门的每个早退都记一笔稳定 reason(§10.1 漏斗
     // 的 skipped_* 分子)。P1 起前置门添了真闸:同轮去重(§7.1 案二)与
     // 必跳层文本门(案三至案六 + §7.3 门槛)——这两处拦下就真不发请求,
-    // 不只是记账;§7.2 耐久信号仍只走 shadow。
+    // 不只是记账；耐久信号也会在发请求前拦下无长期价值的回合。
     if (project_memory == nullptr || !project_memory->generate_enabled()) {
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::Disabled);
@@ -545,9 +552,15 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     // P1(§7.1)的工具证据位:工具调用或工具结果任一在场即算——ack 门
     // 与耐久信号都看它。
     std::vector<std::string> tool_names;
+    std::string assistant_text;
     bool has_tool_evidence = false;
     for (const auto& message : slice) {
         for (const auto& block : message.content) {
+            if (message.role == api::Role::Assistant) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                    assistant_text += text->text + "\n";
+                }
+            }
             if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
                 tool_names.push_back(use->name);
                 has_tool_evidence = true;
@@ -570,8 +583,17 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     // P1(§7.1 案三至案六 + §7.3 门槛):必跳层的文本侧判定。纯词法、
     // 不构造 prompt——"好""继续""/help"一类不再叫模型。
     const MeaningfulTextStats text_stats = ComputeMeaningfulTextStats(user_text);
+    const auto durable_signals = EvaluateTurnDurableSignals(user_text, assistant_text, has_tool_evidence);
+    if (memory_turns != nullptr) memory_turns->NoteDurableSignals(durable_signals);
     if (const auto blocked = EvaluateMustSkipTextGate(text_stats, has_tool_evidence)) {
-        if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(*blocked);
+        // A short explicit preference or a tool-backed conclusion still matters.
+        if (*blocked != ExtractionSkipReason::ShortText || durable_signals.empty()) {
+            if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(*blocked);
+            return;
+        }
+    }
+    if (durable_signals.empty()) {
+        if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(ExtractionSkipReason::NoDurableSignal);
         return;
     }
 
@@ -591,14 +613,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         }
         return;
     }
-    // P1(§7.2 shadow):耐久信号只记判断、不拦调用——开着环境变量才评,
-    // 评过与命中逐回合落 assessed 事件,离线重放可复算漏判。到这一步
-    // 必未同轮变更(案二已收手),turn_mutated 恒 false。
-    if (memory_turns != nullptr && MemoryGateShadowEnabled()) {
-        memory_turns->NoteDurableSignals(EvaluateDurableSignals(user_text, text_stats,
-                                                                has_tool_evidence,
-                                                                /*turn_mutated=*/false));
-    }
+    // Local durable-signal gating above runs before transcript/prompt construction.
     if (memory_turns != nullptr) memory_turns->NoteExtractionCalled();
 
     // 抽取走 cheap 角色(模型分工第一期):低风险后台小活,配了 cheap_model
@@ -617,7 +632,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         message.role = api::Role::User;
         message.content.push_back(api::TextBlock{turn_transcript});
         sample_call.messages.push_back(std::move(message));
-        sample_call.max_tokens = 1500;
+        sample_call.max_tokens = kMemoryExtractMaxTokens;
     }
     // 字段合同随请求带给 SampleModel 做本地复检(P1-A):与
     // ParseExtractionJson 同一份合同,两条入口同一把尺子。不上 wire。

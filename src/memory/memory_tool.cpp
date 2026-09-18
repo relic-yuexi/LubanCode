@@ -54,12 +54,11 @@ nlohmann::json MemorySaveTool::input_schema() const {
                          {
                              {"kind",
                               {{"type", "string"},
-                               {"enum", {"project", "subtree", "path", "user"}},
+                               {"enum", {"project", "subtree", "path"}},
                                {"description",
                                 tools::ToolText("memory_save", "param.scope.kind",
                                          "记忆适用的范围；subtree/path 须配 value；"
-                                         "user=跨项目用户记忆(仅 preference/feedback，"
-                                         "不得带项目路径证据，须全局授权 memory.user_enabled)")}}},
+                                         "全局记忆须由用户执行 /memory remember global 并确认，本工具不接受。")}}},
                              {"value",
                               {{"type", "string"},
                                {"description", tools::ToolText("memory_save", "param.scope.value",
@@ -151,7 +150,10 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
     auto queued = memory_->EnqueueSave(request, /*user_initiated=*/false,
                                        MemoryWriteSource::ModelToolSave);
     if (!queued.has_value()) return {queued.error(), true};
-    return {"记忆已排进后台队列: " + *queued, false};
+    return {"记忆已排进后台队列: " + *queued +
+            "\n状态: queued，尚未确认落盘。请勿说已经记住或保证下次必定召回。"
+            "项目记忆按工作区身份共享；同一 Git 仓库的子目录和 linked worktree 共用项目记忆。"
+            "召回还须通过范围、相关度和预算筛选。可用 /memory list 核对入库结果。", false};
 }
 
 }  // namespace lubancode::memory

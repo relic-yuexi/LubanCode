@@ -221,6 +221,15 @@ TEST_CASE("ComputeMeaningfulTextStats: only_slash_command") {
 // ---------------------------------------------------------------------------
 // §7.2 耐久信号(shadow 首折):宁可保守,正反例钉住冻结名单。
 // ---------------------------------------------------------------------------
+TEST_CASE("Turn durable gate: skip ordinary research, keep explicit preferences and verified conclusions") {
+    CHECK(app::EvaluateTurnDurableSignals("这篇文章讲了什么内容", "文章介绍一段历史。", true).empty());
+    CHECK(app::EvaluateTurnDurableSignals("介绍一下这座城市", "这座城市靠海。", false).empty());
+    CHECK_FALSE(app::EvaluateTurnDurableSignals("以后简短", "好。", false).empty());
+    CHECK_FALSE(app::EvaluateTurnDurableSignals("帮我看看这个文件哪里坏了", "根因是 worker 句柄提前释放。", true).empty());
+    CHECK(app::EvaluateTurnDurableSignals("帮我看看这个文件哪里坏了", "根因是 worker 句柄提前释放。", false).empty());
+    CHECK(app::EvaluateTurnDurableSignals("介绍一下这座城市", "记住，以后都要简短。", true).empty());
+}
+
 TEST_CASE("EvaluateDurableSignals: 逐案正反例") {
     const auto signals = [](const std::string& text, bool tools, bool mutated) {
         return app::EvaluateDurableSignals(text, Stats(text), tools, mutated);

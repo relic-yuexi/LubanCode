@@ -2,6 +2,8 @@
 
 把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里给出可核验证据;feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须user-stated,模型推断不得直写。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。
 
+排队成功只代表 queued，尚未确认落盘。不得说“已记住”，不得保证下次必定召回。同一 Git 仓库的子目录和 linked worktree 共用项目记忆；召回还要通过范围、相关度和预算筛选。
+
 ## param.kind
 
 fact=可核验的项目事实；preference=用户明确说出的本项目偏好；feedback=用户明说的行事纠正(须 user-stated)
@@ -40,7 +42,7 @@ user-stated=用户明说的偏好；verified=已核验的事实；inferred=推�
 
 ## param.scope.kind
 
-记忆适用的范围；subtree/path 须配 value；user=跨项目用户记忆(仅 preference/feedback，不得带项目路径证据，须全局授权 memory.user_enabled)
+只支持 project/subtree/path；subtree/path 须配 value。全局记忆须由用户执行 /memory remember global 并确认，本工具不接受。
 
 ## param.scope.value
 

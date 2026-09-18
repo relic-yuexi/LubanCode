@@ -483,6 +483,14 @@ TEST_CASE("FinishMemoryExtraction: 结束原因与失败的分类(六类收口)"
     CHECK(cut.error().stop_reason == "max_tokens");
     CHECK(cut.error().body_bytes == truncated.text.size());
     CHECK(app::StableExtractErrorCode(cut.error()) == "output_truncated");
+    CHECK(cut.error().message.find("未报告 usage") != std::string::npos);
+    truncated.usage_reported = true;
+    truncated.usage.input_tokens = 812;
+    truncated.usage.output_tokens = 1500;
+    const auto billed_cut = app::FinishMemoryExtraction(truncated);
+    REQUIRE_FALSE(billed_cut.has_value());
+    CHECK(billed_cut.error().message.find("input=812, output=1500") != std::string::npos);
+    CHECK(billed_cut.error().message.find("不自动重试") != std::string::npos);
 
     // openai 的 length、大写 MAX_TOKENS 同样归截断。
     truncated.stop_reason = "length";

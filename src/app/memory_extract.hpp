@@ -30,6 +30,8 @@ class V3Writer;
 
 namespace lubancode::app {
 
+inline constexpr int kMemoryExtractMaxTokens = 1500;
+
 // 抽取结果(回合总结 + 候选 + 检索扩展词)。
 struct ProposedCandidate {
     std::string kind;         // fact | preference | feedback
@@ -143,7 +145,7 @@ const nlohmann::json& MemoryExtractionOutputSchema();
 // ---------------------------------------------------------------------------
 // 记忆写入调度单 P0(§六/§10):调度账。P0 批纯 instrumentation——
 // 枚举、计数、事件不改现行 every-turn 路一个字节的控制流;P1 批起
-// §7 门控上线(必跳层 + 同轮去重是真闸,§7.2 耐久信号走 shadow)。
+// 门控上线：必跳层、同轮去重、耐久信号都在请求前执行。
 // ---------------------------------------------------------------------------
 
 // 用户正文的有效成分统计(§3.2 MeaningfulTextStats)。中文没有天然
@@ -179,8 +181,8 @@ const char* ExtractionDecisionName(ExtractionDecision decision);
 
 // 跳过原因(§7 的稳定 reason,§15 跨平台一致)。P0 在线的四条是现行
 // ExtractTurnMemory 的既有前置门;P1 起又接了四条(同轮去重/短文本/
-// 纯确认/纯命令);NoDurableSignal 的判定在 shadow 里记账,P3 的 gated
-// 模式才拿它拦调用;ExtractModeOff 留给 P2 的 extract.mode 轴。
+// 纯确认/纯命令)；NoDurableSignal 在发请求前拦截；
+// ExtractModeOff 留给独立配置轴。
 enum class ExtractionSkipReason {
     // P0 在线(现行前置门,§2.1):
     Disabled,         // project_memory 空 / generate_enabled=false(§10.1 skipped_disabled)
@@ -194,14 +196,13 @@ enum class ExtractionSkipReason {
     SlashCommandOnly,     // 纯宿主命令(§7.1 案五)
     // 冻结待接:
     ExtractModeOff,   // P2 的 extract.mode=off(现行配置口径落 Disabled)
-    NoDurableSignal,  // §7.2 判空;P1 只在 shadow 账里记,P3 gated 才拦
+    NoDurableSignal,  // 无耐久信号，不发抽取请求
 };
 const char* ExtractionSkipReasonName(ExtractionSkipReason reason);
 
 // ---------------------------------------------------------------------------
 // 记忆写入调度单 P1(§7):零成本门控。必跳层与最短正文门是真闸
-//(拦下就不构造 prompt);"耐久信号"层是 shadow——只记判断不拦调用,
-// 量漏判用。全部纯函数,词法判定,不打请求。
+//(拦下就不构造 prompt)；耐久信号也是真闸。全部纯函数，词法判定，不打请求。
 // ---------------------------------------------------------------------------
 
 // §7.3 最短正文门:cjk>=8 OR 拉丁词>=3 OR(代码记号>=2 且伴随自然语言)。
@@ -221,8 +222,8 @@ std::optional<ExtractionSkipReason> EvaluateMustSkipTextGate(const MeaningfulTex
                                                              bool has_tool_evidence);
 
 // §7.2 耐久信号(P1 shadow 首折,宁可保守):过门后"值不值得送审"的
-// 词法判断。命中项的名字进账本(shadow 报告逐回合可复算);P1 不用它
-// 拦调用,gated 模式(P3 起)才接进控制流。名字冻结名单:
+// 词法判断。命中项进账本；EvaluateTurnDurableSignals 合并用户意图和
+// 有工具证据的助手结论，供请求前门控使用。名字冻结名单:
 //   preference_or_correction   跨回合偏好/禁忌/纠错(案一)
 //   config_or_build_change     配置/依赖/构建/发布合同变更,须有工具证据(案二)
 //   test_conclusion            测试/诊断的稳定结论,须有工具证据(案三)
@@ -237,6 +238,12 @@ std::vector<std::string> EvaluateDurableSignals(const std::string& user_text,
 // 1/true/on 才评耐久信号,默认关——typed event 与 P0 同形,要量漏判再
 // 开。配置文件轴是 P2 的活,这里只认环境变量。
 bool MemoryGateShadowEnabled();
+
+// User intent plus tool-backed assistant conclusions; assistant prose alone
+// cannot invent an explicit user preference or a request to remember.
+std::vector<std::string> EvaluateTurnDurableSignals(const std::string& user_text,
+                                                   const std::string& assistant_text,
+                                                   bool has_tool_evidence);
 
 // 抽取失败的稳定码(§10.3 时延/失败账的 reason 枚举)。
 // 结构化版(P0-A 起):六类新码 + route_miss;旧文案版保留——旧账与旧

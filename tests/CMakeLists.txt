@@ -141,6 +141,12 @@ target_compile_definitions(lubancode_tests PRIVATE
 #    孩子……),BundledRipgrepRunner 经 exe_override 起它——真 rg 不肯
 #    配合的路径全靠它。不依赖任何仓库头,独立编。
 add_executable(fake_ripgrep support/fake_ripgrep.cpp)
+add_executable(memory_worker_fixture support/memory_worker_fixture.cpp)
+target_link_libraries(memory_worker_fixture PRIVATE lubancode_core)
+target_compile_features(memory_worker_fixture PRIVATE cxx_std_23)
+add_dependencies(lubancode_tests memory_worker_fixture)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_MEMORY_WORKER_EXE="$<TARGET_FILE:memory_worker_fixture>")
 target_compile_features(fake_ripgrep PRIVATE cxx_std_20)
 add_dependencies(lubancode_tests fake_ripgrep)
 target_compile_definitions(lubancode_tests PRIVATE

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -378,6 +379,54 @@ TEST_CASE("MemorySaveTool: 默认关闭、敏感内容与合法排队") {
     const auto result = tool.execute(input);
     CHECK_FALSE(result.is_error);
     CHECK(result.content.find("后台队列") != std::string::npos);
+}
+
+TEST_CASE("ProjectMemory: background worker survives LaunchWorker and drains repeated saves") {
+    const fs::path root = TempRoot("worker-lifetime");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    memory::ProjectMemory store(*identity, root / "home", options, LUBANCODE_MEMORY_WORKER_EXE);
+    REQUIRE(store.set_enabled(true).has_value());
+    for (int round = 0; round < 2; ++round) {
+        memory::SaveRequest request;
+        request.kind = memory::MemoryKind::Preference;
+        request.title = "worker preference " + std::to_string(round);
+        request.summary = request.title;
+        request.content = "Use short explanations.";
+        request.confidence = "user-stated";
+        REQUIRE(store.EnqueueSave(request).has_value());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        CHECK(store.Status().pending_jobs == 0);
+        CHECK(store.Status().failed_jobs == 0);
+        CHECK(store.ListEntries().size() == static_cast<std::size_t>(round + 1));
+    }
+}
+
+TEST_CASE("ProjectMemory: missing worker reports queued but not started") {
+    const fs::path root = TempRoot("worker-missing");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    REQUIRE(store.set_enabled(true).has_value());
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.title = "style";
+    request.summary = "short";
+    request.content = "Use short explanations.";
+    const auto queued = store.EnqueueSave(request);
+    REQUIRE(queued.has_value());
+    CHECK(queued->find("后台未启动") != std::string::npos);
+    CHECK(store.Status().pending_jobs == 1);
+    CHECK(store.ListEntries().empty());
 }
 
 TEST_CASE("ProjectMemory: 全局未授权时本场命令与工具都开不了记忆") {
