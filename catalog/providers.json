@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "2026-09-09",
+  "revision": "2026-09-18",
   "providers": {
     "openai": {
       "name": "OpenAI",
@@ -13585,6 +13585,298 @@
         },
         "kimi-k2.7-code-highspeed": {
           "name": "Kimi K2.7 Code HighSpeed",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 30720,
+                "min": 0
+              }
+            ],
+            "thinkingTokenLimits": {
+              "max": 30720,
+              "min": 0
+            }
+          }
+        }
+      }
+    },
+    "moonshot-coding": {
+      "name": "Kimi Coding Plan（国内）",
+      "description": "Kimi Coding Plan（国内）, 订阅制 Coding Plan 端点",
+      "wire": "openai-chat-completions",
+      "base_url": "https://api.kimi.com/coding/v1",
+      "key_env": "KIMI_API_KEY",
+      "default_model": "k3",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://www.kimi.com/code/docs/",
+      "models": {
+        "k3": {
+          "name": "Kimi K3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ],
+            "dialect": {
+              "toggle": "none",
+              "replay": "always",
+              "history_control": "none",
+              "verified": false
+            }
+          }
+        },
+        "k3-256k": {
+          "name": "Kimi K3 256K",
+          "context_window": 262144,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max"
+            ],
+            "dialect": {
+              "toggle": "none",
+              "replay": "always",
+              "history_control": "none",
+              "verified": false
+            }
+          }
+        },
+        "kimi-for-coding": {
+          "name": "Kimi for Coding",
+          "context_window": 1048576,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "dialect": {
+              "toggle": "none",
+              "effort_path": "none",
+              "budget_path": "none",
+              "replay": "always",
+              "history_control": "none",
+              "verified": false
+            }
+          }
+        },
+        "kimi-for-coding-highspeed": {
+          "name": "Kimi for Coding HighSpeed",
+          "context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "dialect": {
+              "toggle": "none",
+              "effort_path": "none",
+              "budget_path": "none",
+              "replay": "always",
+              "history_control": "none",
+              "verified": false
+            }
+          }
+        }
+      }
+    },
+    "moonshot-coding-anthropic": {
+      "name": "Kimi Coding Plan（国内, Anthropic 兼容）",
+      "description": "Kimi Coding Plan（国内, Anthropic 兼容）, 订阅制 Coding Plan 端点",
+      "wire": "anthropic-messages",
+      "base_url": "https://api.kimi.com/coding/",
+      "key_env": "KIMI_API_KEY",
+      "default_model": "k3",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://www.kimi.com/code/docs/",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "models": {
+        "k3": {
+          "name": "Kimi K3",
+          "context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max",
+              "none"
+            ]
+          }
+        },
+        "k3-256k": {
+          "name": "Kimi K3 256K",
+          "context_window": 262144,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "high",
+                  "max"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "high",
+              "max",
+              "none"
+            ]
+          }
+        },
+        "kimi-for-coding": {
+          "name": "Kimi for Coding",
+          "context_window": 1048576,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "budget",
+                "max": 30720,
+                "min": 0
+              }
+            ],
+            "thinkingTokenLimits": {
+              "max": 30720,
+              "min": 0
+            }
+          }
+        },
+        "kimi-for-coding-highspeed": {
+          "name": "Kimi for Coding HighSpeed",
           "context_window": 262144,
           "max_output": 32768,
           "capabilities": {

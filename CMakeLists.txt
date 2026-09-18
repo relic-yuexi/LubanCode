@@ -1105,6 +1105,9 @@ add_library(lubancode_core STATIC
   # ContextWindow 交互面板单:窗口候选(§四)/思考档位裁决(§五)/按键
   # 状态机/帧拼装,纯逻辑(TTY 宿主在 app 层的 context_window_panel.cpp)。
   src/cli/context_window_panel_core.cpp
+  # Provider选择面板单:条目生成/按键状态机(滚动窗口)/帧拼装,纯逻辑
+  # (TTY 宿主在 app 层的 provider_panel.cpp)。
+  src/cli/provider_panel_core.cpp
   src/cli/wizard_panel.cpp
   src/cli/slash_commands.cpp
   src/cli/choice_menu.cpp
@@ -1378,6 +1381,8 @@ add_library(lubancode_app STATIC
   # ContextWindow 交互面板单:面板的 TTY 宿主(要用 console_input 的锁与
   # EnsureStreamScreenRowsLocked,与 session_picker_panel 同一待遇归 app)。
   src/cli/context_window_panel.cpp
+  # Provider选择面板单:面板的 TTY 宿主(同上,归 app)。
+  src/cli/provider_panel.cpp
   src/cli/spinner.cpp
   # 骨架拆解批二:SpinnerBackend 自 backend_stack 挪来(UI 件归显示层)。
   src/cli/spinner_backend.cpp

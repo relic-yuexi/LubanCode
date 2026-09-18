@@ -33,6 +33,7 @@
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"  // ApprovalModeStartSlot:审批档诊断行(单子 §七)
+#include "cli/provider_panel_core.hpp"  // /provider 选择面板(Provider选择面板单)
 #include "cli/provider_switch.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/slash_commands.hpp"
@@ -1180,9 +1181,47 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
     };
 
     switch (command.action) {
-        case lubancode::cli::ProviderCommandAction::List:
+        case lubancode::cli::ProviderCommandAction::List: {
+            // 裸敲 /provider(Provider选择面板单):TTY 且已配有 provider 时先
+            // 开选择面板——上下挑一家 Enter 直切,预检/补救/热切换走 Switch
+            // 分支同一条路,不重写切换;Esc 取消或面板开不起来回落打印列表,
+            // 裸敲"查当前端"的老语义不丢。显式 /provider list 仍只打印。
+            const bool bare_command = TrimAscii(args).empty();
+            if (bare_command && is_console && lubancode::platform::StdinIsInteractive() &&
+                !config.providers.empty()) {
+                const std::vector<lubancode::cli::ProviderPanelEntry> entries =
+                    lubancode::cli::BuildProviderPanelEntries(config.providers, active_provider);
+                lubancode::cli::ProviderPanelView view;
+                view.entries = entries;
+                view.visible_capacity = lubancode::cli::kProviderPanelDefaultVisibleRows;
+                const std::size_t start =
+                    lubancode::cli::FindProviderPanelIndex(entries, active_provider);
+                view.cursor = start == static_cast<std::size_t>(-1) ? 0 : start;
+                const lubancode::cli::ProviderPanelResult result =
+                    lubancode::cli::RunProviderPanel(view, theme);
+                if (result.opened && result.saved && result.index < entries.size()) {
+                    const std::string& picked = entries[result.index].name;
+                    const lubancode::config::ProviderConfig* provider =
+                        lubancode::config::FindProvider(config.providers, picked);
+                    if (provider != nullptr) {
+                        if (lubancode::config::ResolveProviderAuth(*provider).status ==
+                                lubancode::config::ProviderAuthResolution::Status::Missing &&
+                            !remediate_missing_auth(picked)) {
+                            return;  // 补救页退出:当前 provider、模型、后端都不动
+                        }
+                        // 钥匙撞车单:切过去前把撞车叫出来(变量赢,打码)。
+                        if (const std::optional<std::string> key_warning =
+                                lubancode::config::ProviderAuthConflictWarning(*provider)) {
+                            TermOut() << *key_warning << "\n";
+                        }
+                        execute_switch(picked, "");
+                        return;
+                    }
+                }
+            }
             PrintProviderList(config.providers, config, active_provider);
             return;
+        }
         case lubancode::cli::ProviderCommandAction::Refresh: {
             TermOut() << tr("provider_catalog.refreshing") << "\n";
             const auto refreshed = lubancode::config::RefreshProviderCatalog();
@@ -1335,42 +1374,61 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return;
         }
         case lubancode::cli::ProviderCommandAction::SwitchInteractive: {
-            // 裸敲 /provider switch:意图是换一家,不倒总帮助。TTY 开原地面板;
-            // 非 TTY 只给 switch 专用短用法,不打印 add/remove/set 全家桶。
+            // 裸敲 /provider switch:意图是换一家,不倒总帮助。TTY 开选择面板
+            // (Provider选择面板单):上下移动、Enter 切换、Esc 取消,长列表滚
+            // 动;确认后的预检/补救/热切换/横幅走 Switch 分支同一条路,只把
+            // "选名字"换成面板,不重写切换。非 TTY 只给 switch 专用短用法,
+            // 不打印 add/remove/set 全家桶。
             const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
             if (!can_panel) {
                 TermOut() << tr("cmd.provider.switch.usage_short") << "\n";
                 return;
             }
-            std::string filter;
-            std::string cursor_name;  // 补钥页返回列表时"刚才的选择仍在"
-            while (true) {
-                std::string notice;
-                const auto picked = lubancode::cli::RunProviderSwitchPicker(
-                    config.providers, active_provider, filter, notice, cursor_name, theme);
-                filter = picked.filter;
-                cursor_name.clear();
-                if (picked.pick == lubancode::cli::ProviderSwitchPick::Cancelled) {
-                    return;  // 取消不改当前 provider,不写配置
-                }
+            if (config.providers.empty()) {
+                // 空清单:新面板没有可选项,保留旧选择器的"添加/取消"两项,
+                // 首次配置的用户仍能从这条路进添加向导。
+                const auto picked =
+                    lubancode::cli::RunProviderSwitchPicker(config.providers, active_provider, "", {},
+                                                            "", theme);
                 if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
                     add_via_wizard("");
+                }
+                return;
+            }
+            std::string cursor_name;  // 补钥页返回列表时"刚才的选择仍在"
+            while (true) {
+                const std::vector<lubancode::cli::ProviderPanelEntry> entries =
+                    lubancode::cli::BuildProviderPanelEntries(config.providers, active_provider);
+                lubancode::cli::ProviderPanelView view;
+                view.entries = entries;
+                view.visible_capacity = lubancode::cli::kProviderPanelDefaultVisibleRows;
+                std::size_t start = lubancode::cli::FindProviderPanelIndex(entries, cursor_name);
+                if (start == static_cast<std::size_t>(-1) && cursor_name.empty()) {
+                    start = lubancode::cli::FindProviderPanelIndex(entries, active_provider);
+                }
+                view.cursor = start == static_cast<std::size_t>(-1) ? 0 : start;
+                const lubancode::cli::ProviderPanelResult result =
+                    lubancode::cli::RunProviderPanel(view, theme);
+                cursor_name.clear();
+                if (!result.opened) {
+                    // 终端支持读键却不支持重画:面板没起来,给短用法指老路。
+                    TermOut() << tr("cmd.provider.switch.usage_short") << "\n";
                     return;
                 }
-                if (picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
-                    run_edit(picked.name);  // e 快捷键:原地进编辑向导
-                    return;
+                if (!result.saved || result.index >= entries.size()) {
+                    return;  // 取消不改当前 provider,不写配置
                 }
+                const std::string picked = entries[result.index].name;
                 const lubancode::config::ProviderConfig* provider =
-                    lubancode::config::FindProvider(config.providers, picked.name);
+                    lubancode::config::FindProvider(config.providers, picked);
                 if (provider == nullptr) {
                     continue;  // 列表里有名字却找不到:极少见,回列表
                 }
                 if (lubancode::config::ResolveProviderAuth(*provider).status ==
                     lubancode::config::ProviderAuthResolution::Status::Missing) {
-                    cursor_name = picked.name;
-                    if (!remediate_missing_auth(picked.name)) {
-                        continue;  // 返回列表:选择与筛选词都还原
+                    cursor_name = picked;
+                    if (!remediate_missing_auth(picked)) {
+                        continue;  // 返回列表:刚才的选择仍停在原处
                     }
                 }
                 // 钥匙撞车单:同 Switch 分支,切过去前把撞车叫出来(变量赢,打码)。
@@ -1378,7 +1436,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                         lubancode::config::ProviderAuthConflictWarning(*provider)) {
                     TermOut() << *key_warning << "\n";
                 }
-                execute_switch(picked.name, "");
+                execute_switch(picked, "");
                 return;
             }
         }
