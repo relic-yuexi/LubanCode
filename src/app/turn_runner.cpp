@@ -24,6 +24,7 @@
 #include "agent/turn_harness.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/terminal_turn_sink.hpp"
+#include "app/tool_call_scope.hpp"  // ToolCallScopeTable:审批链中间产物的逐调用账(P1 拆槽)
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -337,20 +338,22 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             return "PreRequest 钩子拦下本次请求[" + stages.decision + "]: " + stages.reason;
         };
     }
-    // PreToolUse 的归并决策要在确认回调里继续用(allow 跳过用户确认、
-    // ask 强制问一句)——确认回调的签名不带它,靠这个共享槽传:RunOneTool
-    // 先跑 PreToolUse 再问确认,槽里的决策就是当前这次工具调用的。子代理
-    // 转发的是同一批 std::function(闭包随行),槽照常可用。
-    auto pre_decision_slot = std::make_shared<lubancode::runtime::ToolHookDecision>();
-    auto approval_class_slot =
-        std::make_shared<lubancode::tools::ApprovalClass>(lubancode::tools::ApprovalClass::None);
+    // PreToolUse 的归并决策与审批类别要在确认回调里继续用(allow 跳过用户
+    // 确认、ask 强制问一句)——确认回调的签名不带它们,旧路靠两只跨调用共
+    // 享槽(pre_decision_slot/approval_class_slot)偷渡:同批两枚调用裁决不
+    // 同就会串槽。执行链拆分单 P1 起按 tool_use_id 记逐调用账:PreToolUse/
+    // 权限预裁定各写自己那枚,确认口取走自己那枚(取走即清,不跨调用残留)。
+    // 子代理/PTC 转发的是同一批 std::function(闭包随行),账照常可用;P2
+    // 并行化时两只确认口可能同时在跑,表要加锁(见 tool_call_scope.hpp 的
+    // 线程契约)——本批执行链仍是同线程串行,先保行为不变。
+    auto call_scopes = std::make_shared<lubancode::app::ToolCallScopeTable>();
     if (has_tool_hooks) {
-        wiring.on_pre_tool_use_hook = [hook_dispatcher, pre_decision_slot](
-                                          const std::string& /*tool_use_id*/, const std::string& name,
+        wiring.on_pre_tool_use_hook = [hook_dispatcher, call_scopes](
+                                          const std::string& tool_use_id, const std::string& name,
                                           const nlohmann::json& input) -> lubancode::runtime::ToolHookDecision {
             lubancode::runtime::ToolHookDecision decision =
                 lubancode::runtime::EmitPreToolUse(hook_dispatcher, name, input);
-            *pre_decision_slot = decision;
+            call_scopes->RecordPre(tool_use_id, decision);
             return decision;
         };
 
@@ -383,11 +386,11 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
 
     wiring.on_permission_evaluate =
         [auto_confirm, &always_allowed_tools, &allow_commands, &deny_commands, hook_dispatcher, &display,
-         approval_class_slot](
+         call_scopes](
             const std::string& tool_use_id, const std::string& name,
             lubancode::tools::ApprovalClass approval_class, const nlohmann::json& input,
             const lubancode::runtime::ToolHookDecision& pre) {
-            *approval_class_slot = approval_class;
+            call_scopes->RecordApprovalClass(tool_use_id, approval_class);
             const auto options = BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools, allow_commands,
                                                          deny_commands, hook_dispatcher);
             lubancode::runtime::PermissionContext permission;
@@ -404,13 +407,14 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         };
 
     wiring.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
-                              &deny_commands, hook_dispatcher, pre_decision_slot, approval_class_slot,
+                              &deny_commands, hook_dispatcher, call_scopes,
                               has_permission_hooks, approval_observer](const std::string& tool_use_id,
                                                                       const std::string& name,
                                                                       const nlohmann::json& input) -> bool {
+        const lubancode::app::ToolCallScope scope = call_scopes->Take(tool_use_id);
         return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
-                              deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
-                              *approval_class_slot, name, input, approval_observer);
+                              deny_commands, hook_dispatcher, scope.pre, has_permission_hooks,
+                              scope.approval_class, name, input, approval_observer);
     };
 
     // P2(显示系统剥离单):异步审批通道——同一份裁定与问话逻辑包成
@@ -422,13 +426,14 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // 路(子代理/PTC 转发、单测)不走这里,照旧同步、不许多线程化。
     wiring.on_tool_confirm_async =
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
-         pre_decision_slot, approval_class_slot, has_permission_hooks,
+         call_scopes, has_permission_hooks,
          approval_observer](const lubancode::runtime::ApprovalRequest& request)
         -> std::shared_ptr<lubancode::runtime::InteractionFuture> {
+        const lubancode::app::ToolCallScope scope = call_scopes->Take(request.tool_use_id);
         const bool allowed =
             ConfirmToolUse(request.tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
-                           deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
-                           *approval_class_slot, request.tool_name, request.input, approval_observer);
+                           deny_commands, hook_dispatcher, scope.pre, has_permission_hooks,
+                           scope.approval_class, request.tool_name, request.input, approval_observer);
         lubancode::runtime::ApprovalResponse response;
         response.decision = allowed ? lubancode::runtime::InteractionDecision::Accept
                                     : lubancode::runtime::InteractionDecision::Decline;
@@ -477,11 +482,11 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         hooks.on_permission_evaluate = wiring.on_permission_evaluate;
         hooks.on_permission_evaluate_floored =
             [auto_confirm, &always_allowed_tools, &allow_commands, &deny_commands, hook_dispatcher, &display,
-             approval_class_slot](const std::string& tool_use_id, const std::string& name,
+             call_scopes](const std::string& tool_use_id, const std::string& name,
                                   lubancode::tools::ApprovalClass approval_class, const nlohmann::json& input,
                                   const lubancode::runtime::ToolHookDecision& pre,
                                   lubancode::ApprovalMode effective) {
-                *approval_class_slot = approval_class;
+                call_scopes->RecordApprovalClass(tool_use_id, approval_class);
                 auto options = BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools, allow_commands,
                                                        deny_commands, hook_dispatcher);
                 lubancode::runtime::PermissionContext permission;
@@ -503,13 +508,14 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         // 档向下并到下限),不因父会话开着 yolo 而免问。
         hooks.on_tool_confirm_floored =
             [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands,
-             hook_dispatcher, pre_decision_slot, approval_class_slot, has_permission_hooks,
+             hook_dispatcher, call_scopes, has_permission_hooks,
              approval_observer](const std::string& tool_use_id, const std::string& name,
                                  const nlohmann::json& input, lubancode::ApprovalMode floor) -> bool {
             const lubancode::ApprovalMode runtime_floor = floor;
+            const lubancode::app::ToolCallScope scope = call_scopes->Take(tool_use_id);
             return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
-                                  deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
-                                  *approval_class_slot, name, input, approval_observer, runtime_floor);
+                                  deny_commands, hook_dispatcher, scope.pre, has_permission_hooks,
+                                  scope.approval_class, name, input, approval_observer, runtime_floor);
         };
         // ESC/Ctrl+C 打断信号透传:没这一行,子代理内部工具循环永远拿到
         // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到

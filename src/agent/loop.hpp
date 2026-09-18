@@ -570,6 +570,10 @@ public:
 // 确认档(needs_confirm + PermissionRequest)-> 执行 -> PostToolUse -> 编码
 // 清洗 -> 工具终态上事件流。JSON 后端的工具循环与 PTC 的每一枚 stub 调用共用
 // 这一条路,不许有第二条绕过 hooks/权限的暗门。
+// 拆执行链(只读工具并行单 P1)后内部抽成四只可复用阶段(门禁审批/
+// execution_started/worker 执行/收口),调用材料装在逐调用上下文里,阶段
+// 间不借共享槽——签名与调用方零改动,行为一字不差;P2 并行调度在同一套
+// 阶段上接管,不开第二扇权限门。
 // filter_denial:过滤谓词不放行时的说明文案。支持 "稳定码|人话" 两截
 //(同 on_mode_policy 的口径):有 '|' 且前截非空时,前截进 error_code、
 // 后截给模型;无 '|' = 老口径(码退 registry.not_mounted)。默认空 =
