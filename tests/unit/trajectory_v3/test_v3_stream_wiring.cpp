@@ -472,3 +472,37 @@ TEST_CASE("流未起即取消: 裸 cancelled 事件,无 assistant,不伪造") {
     CHECK(AssistantFinalizationProblems(rows).empty());
     CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
 }
+
+
+TEST_CASE("v3 reasoning replay: persisted signature and native item survive history projection") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("reasoning-replay");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const nlohmann::json native{{"type", "reasoning"}, {"id", "rs_history"},
+                                {"summary", nlohmann::json::array()}, {"encrypted_content", "opaque"}};
+    {
+        auto bridge = ledger->NewTurnBridge({"test", "openai-responses", "terminal"});
+        bridge->BeginTurn("turn-1", "external_user");
+        bridge->RecordInput(UserMessage("question"));
+        const auto id = bridge->OnRequestPrepared(
+            MakeRequest("SYSTEM-STREAM", {UserMessage("question")}), agent::RequestPreparedContext{});
+        REQUIRE_FALSE(id.empty());
+        bridge->OnRequestSent(id);
+        api::Message assistant = AssistantText("answer");
+        assistant.content.insert(assistant.content.begin(), api::ThinkingBlock{"exact\ntext", "sig", native});
+        REQUIRE(bridge->OnOutputCompleted(id, assistant, "end_turn", "response-1"));
+        bridge->EndTurn(true, false, "");
+    }
+    const auto fold = ledger->FoldMainReplay();
+    REQUIRE(fold.ok());
+    const auto history = lubancode::runtime::ProjectHistoryFromReplay(fold.state);
+    REQUIRE(history.size() == 2);
+    REQUIRE(std::holds_alternative<api::ThinkingBlock>(history[1].content[0]));
+    const auto& thinking = std::get<api::ThinkingBlock>(history[1].content[0]);
+    CHECK(thinking.text == "exact\ntext");
+    CHECK(thinking.signature == "sig");
+    CHECK(thinking.responses_item == native);
+    CHECK(ledger->CloseSession("exit").error_code.empty());
+    CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*ledger)).ok);
+}
