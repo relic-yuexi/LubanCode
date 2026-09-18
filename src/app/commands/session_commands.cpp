@@ -1303,7 +1303,13 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
         }
         TermOut() << trf("cmd.sessions.archived_header", page.total) << "\n";
         for (const auto& entry : page.entries) {
-            const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
+            // 续场标题继承源场(fork-as-new 不改名),拼"(续)"后缀区分,
+            // 不标列表里就像重复了一场。
+            std::string label = !entry.title.empty() ? entry.title : entry.first_user_text;
+            if (!entry.resumed_from_session_id.empty()) {
+                label += " ";
+                label += tr("cmd.sessions.resumed_suffix");
+            }
             TermOut() << "  " << entry.session_id << "\n"
                       << trf("cmd.sessions.entry",
                               lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.updated_at_ms),
@@ -1346,8 +1352,13 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
               << "\n";
     for (std::size_t i = 0; i < page.entries.size(); ++i) {
         const auto& entry = page.entries[i];
-        // 标题优先,没设过标题回退首句摘要。
-        const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
+        // 标题优先,没设过标题回退首句摘要。续场拼"(续)"后缀:标题是
+        // 从源场继承的,不标就与源场同名同预览,看着像重复了一场。
+        std::string label = !entry.title.empty() ? entry.title : entry.first_user_text;
+        if (!entry.resumed_from_session_id.empty()) {
+            label += " ";
+            label += tr("cmd.sessions.resumed_suffix");
+        }
         TermOut() << "  " << (i + 1) << ") " << entry.session_id << "\n"
                   << trf("cmd.sessions.entry",
                           lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms),
@@ -1519,6 +1530,7 @@ ResumeTargetChoice PromptResumeTarget(const lubancode::runtime::TrajectorySessio
                 now, SessionTsToEpoch(lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms)));
             row.damaged = entry.damaged;
             row.run_kind_unknown = entry.run_kind_unknown;
+            row.resumed_from = entry.resumed_from_session_id;  // 续场:行尾"(续)"+详情"续自"
             row.created_at = lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms);
             row.updated_at = lubancode::trajectory::FormatMillisAsLocalTimestamp(entry.updated_at_ms);
             row.model = entry.model;

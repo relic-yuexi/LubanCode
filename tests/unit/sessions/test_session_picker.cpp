@@ -339,6 +339,40 @@ TEST_CASE("渲染帧: 诊断非空的空列表报读取失败;种类未知行有
     CHECK(frame.lines[4].find("种类未知") != std::string::npos);
 }
 
+// resume 续场标记(resume 列表可读性单):续场标题继承源场,行内标签拼
+// "(续)"才分得开;展开详情(Ctrl+E)另注"续自 <源 id 前 8 位>",非续场
+// 两样都不带。
+TEST_CASE("续场标记: 行标签拼(续),展开详情注续自来源前 8 位") {
+    SessionPickerEntry plain = Entry("20260901-090000-PLAIN1", "源场的标题", "源场的首句", "c");
+    SessionPickerEntry resumed = Entry("20260902-100000-RESUM2", "源场的标题", "源场的首句", "c");
+    resumed.resumed_from = "20260901-090000-SRCIDX";
+
+    SessionPickerCore core(4);
+    core.SetEntries({plain, resumed});
+    const auto frame = BuildSessionPickerFrame(core, 80);
+    CHECK(frame.lines[4].find("(续)") == std::string::npos);  // 非续场不带
+    CHECK(frame.lines[5].find("(续)") != std::string::npos);  // 续场同名也分得开
+
+    // 展开详情选中续场:多一行"续自: <源 id 前 8 位>"。
+    core.HandleKey(Key(K::Down));
+    REQUIRE(core.selected() == 1);
+    core.HandleKey(Key(K::CtrlE));
+    REQUIRE(core.state().expanded);
+    const auto expanded = BuildSessionPickerFrame(core, 80);
+    bool resumed_line = false;
+    bool full_id_leaked = false;
+    for (const auto& line : expanded.lines) {
+        if (line.find("续自") != std::string::npos && line.find("20260901") != std::string::npos) {
+            resumed_line = true;
+        }
+        if (line.find("SRCIDX") != std::string::npos) {
+            full_id_leaked = true;  // 详情只给前 8 位,不搬整枚源 id
+        }
+    }
+    CHECK(resumed_line);
+    CHECK_FALSE(full_id_leaked);
+}
+
 TEST_CASE("相对时间: 分钟/小时/天分档,未来时间按刚刚") {
     const long long now = 1000000;
     CHECK(FormatSessionAgo(now, now) == "just now");

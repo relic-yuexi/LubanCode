@@ -438,8 +438,13 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
             // 相对时间(排序为 Created 时给 created 那份)+ 首句预览。
             const std::string& ago = state.sort == SessionPickerSort::Updated ? entry.updated_ago
                                                                               : entry.created_ago;
-            const std::string label =
+            std::string label =
                 !entry.title.empty() ? entry.title : (entry.preview.empty() ? std::string(tr("picker.no_text")) : entry.preview);
+            if (!entry.resumed_from.empty()) {
+                // 续场标记:标题继承源场,resume 列表里不标就像重复了一场。
+                label += " ";
+                label += tr("picker.resumed");
+            }
             std::string line = prefix + ago + "    " + label;
             if (entry.damaged) {
                 line += "  [" + std::string(tr("picker.damaged")) + "]";
@@ -473,6 +478,13 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
                 frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
                 frame.lines.push_back(std::string("      ") + tr("picker.expand.id") + " " + entry.id);
                 frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                if (!entry.resumed_from.empty()) {
+                    // 续场详情:注明开自哪一场(源 id 前 8 位,列表后缀的
+                    // 全量出处;不截全文,列表行挤不下)。
+                    frame.lines.push_back(std::string("      ") +
+                                          trf("picker.expand.resumed", entry.resumed_from.substr(0, 8)));
+                    frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                }
                 frame.lines.push_back(
                     std::string("      ") + tr("picker.expand.model") + " " +
                     (entry.model.empty() ? std::string(tr("picker.unknown_model")) : entry.model) + " · " +
