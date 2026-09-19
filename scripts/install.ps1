@@ -9,24 +9,19 @@
         .\install.ps1 -InstallDir D:\tools\lb   自定义安装目录(默认 %LOCALAPPDATA%\Programs\lubancode)
         .\install.ps1 -Scan                     扫描+预演:列出将替换/保留/备份/冲突项,不动安装
         .\install.ps1 -BackupOnly               完整备份现有受管内容+列盘面清单,不安装
-        .\install.ps1 -Baseline C:\old\pkg      旧安装无清单时,拿同版本可信原包(目录或 zip)建基线
-        .\install.ps1 -AllowUnknownReplace      旧安装无清单时,先完整备份再整目录替换(需显式确认)
+        .\install.ps1 -Baseline C:\old\pkg      兼容旧参数;现在无需基线,统一按新包文件白名单覆盖
+        .\install.ps1 -AllowUnknownReplace      兼容旧参数;仍逐文件覆盖,不会整目录删除
         .\install.ps1 -SkipPath                 不写用户 PATH(测试/CI 用,避免污染真实环境)
 
     不需要管理员权限——只动当前用户的安装目录和 HKCU 用户级 PATH,不碰系统级 PATH。
 
-    资源覆盖策略(GitHubRelease自动更新单 §四/§五):文件所有权按"上次可信官方
-    清单"(安装记录 install-state.json 里存的上次 manifest)判定,不按目录名判定:
-      - 官方件本地未改 → 换新(旧内容先备份);内容已是新版则不动
-      - 官方件本地改过 → 原件原地保留+备份,新版不落此路径,报冲突
-      - 清单外的未知/用户文件 → 一律保留;新版恰好也要这个路径 → 同样算冲突
-      - 官方件本地删掉 → 不悄悄复活,报告
-      - 官方在新版删了它、本地未改 → 备份后随旧版退役
-    旧安装没有清单(基线)且与新包路径相撞:先完整备份,报 needs-review 停手
-    (退出码 3),等 -Baseline 建基线或 -AllowUnknownReplace 显式确认;纯新增
-    不相撞则直接装。来源与目标同一目录时不删目录再搬自己(同路径直接跳过)。
-    用户数据(~/.lubancode、项目 .lubancode/.agents、LUBANCODE_HOME 重定向)
-    不在安装目录里,本脚本从头到尾不碰。
+    资源覆盖策略:以新包清单内的具体文件路径为白名单。
+      - 程序、README、LICENSE、声明、安装脚本及受管资源树内的包内文件逐项覆盖
+      - 同名文件即使改过,也先备份再换新;内容相同则跳过
+      - 目录只递归合并,新包没有的旧文件或自建文件一律保留
+      - config.toml、.env、.lubancode/、.agents/ 等用户配置与数据不参与覆盖
+      - 目录或链接挡住文件路径时报告冲突,不跟随链接写到安装根外
+    无需旧清单或联网下载旧包。来源与安装目录相同时不搬自己。
 
     manifest 路径规则(与 scripts/generate_manifest.py、scripts/install_plan.py
     同一契约):只认包内相对路径;拒绝绝对路径、反斜杠、冒号(盘符/UNC/ADS)、
@@ -491,6 +486,17 @@ function Get-DestPathFor {
     if (-not (Test-PathUnderRoot -Path $destFull -Root $rootFull)) {
         throw "目标越出安装目录:$RelPath -> $destFull"
     }
+    $parent = Split-Path -Parent $destFull
+    while ($parent -and (Test-PathUnderRoot -Path $parent -Root $rootFull)) {
+        if (Test-Path -LiteralPath $parent) {
+            $parentItem = Get-Item -LiteralPath $parent -Force
+            if (-not $parentItem.PSIsContainer -or
+                (($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                throw "目标父路径不是普通目录,拒绝写入:$parent"
+            }
+        }
+        $parent = Split-Path -Parent $parent
+    }
     return $destFull
 }
 
@@ -535,6 +541,14 @@ function Build-FilePlan {
         if ($null -ne $n) { $entry.path = [string]$n['path'] }
         elseif ($null -ne $o) { $entry.path = [string]$o['path'] }
         else { $entry.path = [string]$d['path'] }
+
+        # 用户配置和用户数据从不参与安装,即使来源或旧清单误收了它们。
+        if ($entry.path -match '^(config\.toml|\.env|\.lubancode|\.agents)(/|$)') {
+            $entry.action = 'keep-user-data'
+            $entry.reason = '用户配置或数据,不写不删'
+            $plan += [PSCustomObject]$entry
+            continue
+        }
 
         if ($null -ne $d -and ($d['reparse'] -or $d['isDir'])) {
             # 普通容器目录(清单没把它当文件)不进计划;链接/reparse 即便清单
@@ -997,6 +1011,29 @@ function Resolve-BaselineManifest {
     return (New-ManifestFromTree -RootDir $dir)
 }
 
+function Build-PackageFilePlan {
+    # 新包的文件路径就是覆盖白名单;目录只合并,不删除包外文件。
+    param([hashtable]$NewMap, [hashtable]$DiskMap)
+    $allowed = @{}
+    $current = @{}
+    $rootFiles = @('lubancode.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
+        'README.md', 'README.en.md', 'install.ps1', 'uninstall.ps1')
+    foreach ($key in $NewMap.Keys) {
+        $path = [string]$NewMap[$key].path
+        $top = ($path -split '/', 2)[0]
+        if (($rootFiles -contains $path) -or
+            ($path.Contains('/') -and $script:ManagedTrees -contains $top)) {
+            $allowed[$key] = $NewMap[$key]
+            # 将同名现有普通文件作为替换对象,不要求旧版清单。
+            if ($DiskMap.ContainsKey($key) -and -not $DiskMap[$key].isDir -and -not $DiskMap[$key].reparse) {
+                $current[$key] = @{ path = $path; sha256 = (Get-DiskHash $DiskMap[$key]) }
+            }
+        }
+    }
+    # OldMap 仅含新包同名路径,所以不会产生 retire 或 missing-kept。
+    return (Build-FilePlan -NewMap $allowed -OldMap $current -DiskMap $DiskMap)
+}
+
 # ===================== 主流程 =====================
 
 function Invoke-Install {
@@ -1113,111 +1150,37 @@ function Invoke-Install {
         return
     }
 
-    # ---- 基线:显式 -Baseline 优先,否则读安装记录 ----
-    $oldManifest = $null
-    if ($Baseline) {
-        try {
-            $oldManifest = Resolve-BaselineManifest -Baseline $Baseline
-        } catch {
-            Write-ErrStep $_.Exception.Message
-            if ($tempDownloadDir -and (Test-Path -LiteralPath $tempDownloadDir)) {
-                Remove-Item -LiteralPath $tempDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            exit 1
-        }
-        if ($null -eq $oldManifest) {
-            Write-ErrStep "-Baseline 无法建立基线。"
-            exit 1
-        }
-        $installMode = 'baseline-dir'
-    } else {
-        $oldManifest = Read-InstallBaseline -InstallRoot $installRootFull
+    # 旧参数继续接受,但不再整目录替换,也无需下载旧版包。
+    if ($Baseline -or $AllowUnknownReplace) {
+        Write-Step '现在统一按新包文件白名单覆盖;旧参数无需再传,包外文件一律保留。'
     }
-
     $newMap = Get-ManifestFileMap -Manifest $newManifest
     $disk = Get-InstallDiskState -InstallRoot $installRootFull -TreeMap $treeMap
-
-    # ---- 无基线且相撞:完整备份 + needs-review(除非显式确认) ----
-    if ($null -eq $oldManifest) {
-        $collide = $false
-        foreach ($k in @($newMap.Keys)) {
-            if ($disk.ContainsKey($k)) { $collide = $true; break }
-        }
-        if ($collide -and $Scan) {
-            Show-NeedsReview -DiskMap $disk -NewMap $newMap
-            Write-Step "预演结束,未动任何文件。"
-            exit 3
-        }
-        if ($collide -and -not $AllowUnknownReplace) {
-            $backupRoot = Invoke-FullBackup -InstallRoot $installRootFull -TreeMap $treeMap
-            Write-Step "旧安装没有清单(基线),已先做完整备份,未动安装:$backupRoot"
-            Show-NeedsReview -DiskMap $disk -NewMap $newMap
-            if ($tempDownloadDir -and (Test-Path -LiteralPath $tempDownloadDir)) {
-                Remove-Item -LiteralPath $tempDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            exit 3
-        }
-        if ($collide) {
-            # -AllowUnknownReplace:完整备份后整目录替换
-            $backupRoot = Invoke-FullBackup -InstallRoot $installRootFull -TreeMap $treeMap
-            Write-Step "完整备份完成:$backupRoot"
-            Invoke-WholesaleReplace -SourceRoot $sourceRootFull -InstallRoot $installRootFull -TreeMap $treeMap
-            Write-InstallRecords -NewManifest $newManifest -SourceRoot $sourceRootFull -InstallRoot $installRootFull `
-                -SourceMeta $sourceMeta -InstallMode 'allow-unknown-replace' -Conflicts @()
-            Write-Step "整目录替换完成(备份在 $backupRoot)。"
-        } else {
-            # 无基线也不相撞:纯新增,现有旁杂文件全部保留
-            $plan = Build-FilePlan -NewMap $newMap -OldMap @{} -DiskMap $disk
-            if ($Scan) {
-                Show-PlanReport -Plan $plan -NewManifest $newManifest -OldManifest $null
-                Write-Step "预演结束,未动任何文件。"
-                return
-            }
-            New-Item -ItemType Directory -Path $installRootFull -Force | Out-Null
-            try {
-                $result = Invoke-ResourceApply -Plan $plan -NewManifest $newManifest -SourceRoot $sourceRootFull `
-                    -InstallRoot $installRootFull -TreeMap $treeMap -SourceMeta $sourceMeta -InstallMode 'no-baseline-install'
-            } catch {
-                Write-ErrStep "同步程序或官方资源失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
-                if ($tempDownloadDir -and (Test-Path -LiteralPath $tempDownloadDir)) {
-                    Remove-Item -LiteralPath $tempDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
-                }
-                exit 1
-            }
-            Write-Step "应用完成。备份根:$($result.backupRoot)"
-        }
-    } else {
-        # ---- 有基线:按所有权逐文件判定 ----
-        $oldMap = Get-ManifestFileMap -Manifest $oldManifest
-        $plan = Build-FilePlan -NewMap $newMap -OldMap $oldMap -DiskMap $disk
-        if ($Scan) {
-            Show-PlanReport -Plan $plan -NewManifest $newManifest -OldManifest $oldManifest
-            Write-Step "预演结束,未动任何文件。"
-            return
-        }
-        New-Item -ItemType Directory -Path $installRootFull -Force | Out-Null
-        try {
-            $result = Invoke-ResourceApply -Plan $plan -NewManifest $newManifest -SourceRoot $sourceRootFull `
-                -InstallRoot $installRootFull -TreeMap $treeMap -SourceMeta $sourceMeta -InstallMode $installMode
-        } catch {
-            Write-ErrStep "同步程序或官方资源失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
-            if ($tempDownloadDir -and (Test-Path -LiteralPath $tempDownloadDir)) {
-                Remove-Item -LiteralPath $tempDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            exit 1
-        }
-        Write-Step "应用完成。备份根:$($result.backupRoot)"
-        if ($result.conflicts.Count -gt 0) {
-            Write-Host "冲突/本地差异 $($result.conflicts.Count) 项(原件保留,已备份):" -ForegroundColor Yellow
-            foreach ($c in $result.conflicts) {
-                Write-Host "  $($c.kind) $($c.path)" -ForegroundColor Yellow
-            }
-            Write-Host "处理完冲突(删掉本地改动的文件或改回官方内容)后重跑安装,即可换上官方新版。" -ForegroundColor Yellow
+    $plan = Build-PackageFilePlan -NewMap $newMap -DiskMap $disk
+    if ($Scan) {
+        Show-PlanReport -Plan $plan -NewManifest $newManifest -OldManifest $null
+        Write-Step '预演结束,未动任何文件。'
+        return
+    }
+    New-Item -ItemType Directory -Path $installRootFull -Force | Out-Null
+    try {
+        $result = Invoke-ResourceApply -Plan $plan -NewManifest $newManifest -SourceRoot $sourceRootFull `
+            -InstallRoot $installRootFull -TreeMap $treeMap -SourceMeta $sourceMeta -InstallMode 'package-whitelist'
+    } catch {
+        Write-ErrStep "安装失败(若程序占用,请关闭后重试):$($_.Exception.Message)"
+        exit 1
+    } finally {
+        if ($tempDownloadDir -and (Test-Path -LiteralPath $tempDownloadDir)) {
+            Remove-Item -LiteralPath $tempDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-
-    if ($tempDownloadDir -and (Test-Path -LiteralPath $tempDownloadDir)) {
-        Remove-Item -LiteralPath $tempDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Step "白名单文件已应用,包外文件保留。备份根:$($result.backupRoot)"
+    if ($result.conflicts.Count -gt 0) {
+        foreach ($conflict in $result.conflicts) {
+            Write-Host "路径冲突,未覆盖:$($conflict.path) ($($conflict.kind))" -ForegroundColor Yellow
+        }
+        Write-ErrStep '部分路径被目录或链接占用,安装未完成;请处理冲突后重试。'
+        exit 3
     }
 
     if ($SkipPath) {
