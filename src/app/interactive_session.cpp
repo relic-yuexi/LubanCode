@@ -239,12 +239,16 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
 //
 // 病:标题要等主回合收尾才同步生成——十分钟的活就十分钟后才见标题;主答
 // 出来了还得再等 cheap 6 秒才还提示符;cheap 未单配时还回落 normal,低价
-// 值标题打了主模型。
+// 值标题打了主模型。触发时机提前单前的老病另有一条:三道起飞门(账房/
+// 模型/provider)全静默退,精炼压根没起飞用户也看不见,标题永远停在本地
+// 档还以为模型懒。
 //
 // 修:两层。第一层本地标题,首问建档当场就位,零模型 token;第二层精修,
-// 首个主回合收口后的空闲边界异步发(P0-2:回合里发与主 turn 撞同一
-// stream 的 turn 账),完工由空闲唤醒收货,结果原子替换,失败保留本地
-// 标题。
+// v3 场(默认)发车即起飞——首问主回合 BeginTurn 铸号后立即异步发
+//(旁路桥的 title_refine 账归首问主回合号,v3 无轮账互斥,与主 turn 并行
+// 不撞;HTTP 走独占 detached backend),v2 场(逃生口)照旧收口后的空闲
+// 边界发。三道门改亮:起飞拦下打一行诊断。完工由空闲唤醒收货,结果原子
+// 替换,失败保留本地标题。
 
 // 第一层:首条真实 query 建档成功当场起本地临时标题(清洗首行、截到合宜
 // 长度),落 title 事件——/sessions 立刻有名字,session_title 非空后本场
@@ -257,9 +261,9 @@ void TerminalSessionController::BeginSessionTitle(const std::string& first_query
     switch (result) {
         case lubancode::app::SessionTitleAccount::LocalResult::Set:
             TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
-            // P0-2:精修不在回合里发——旁路小 turn 与主 turn 不能同流并存
-            //(状态机一 stream 一 open turn),首问回合正要开,现在发必撞
-            // 车。挂账,回合收口后的发货点
+            // 精修挂账:v3 场由 KickoffTitleRefinementNow 在首问主回合
+            // BeginTurn 铸号后立即取走起飞(发车即起飞);v2 场一 stream
+            // 一 open turn,回合内发必撞,留到收口后的空闲边界
             //(StartPendingTitleRefinementAfterTurn)再发。
             pending_title_refinement_query_ = first_query;
             break;
@@ -334,9 +338,33 @@ void TerminalSessionController::BackfillTitleOnResume() {
     }
 }
 
-// 主 turn 收口后的发货点(P0-2 + 通知时序缺陷单):挂账的首问现在起飞
-// 精修。只在会话空闲边界(主循环顶)调——回合里发必与主 turn 撞同一
-// stream 的 turn 账,这只口子不挪。发完不等:收货是 DrainFinished 的事。
+// 发车即起飞(标题触发提前单):首问主回合 BeginTurn 铸号后、首模型请求
+// 发出前的立即发货点(挂 RunTurn 的 after_turn_bridge_open 回调)。只在
+// v3 场动身——旁路桥的 title_refine 账归首问主回合号
+//(v3_books 的 active_main_turn_id,BeginTurn 起 EndTurn 不清),v3 无
+// 轮账互斥,V3Writer 提交全程持锁,与主 turn 的落账在盘上串行,并行起飞
+// 不撞;v2 状态机一 stream 一 open turn,回合内起飞桥必哑火
+//(state.turn_overlap → prepared 落不住 → 采样停在发送边界),按兵不动,
+// 收口后的老发货点照旧。非首问 pending 空,零开销即回。失败亮报即止:
+// 一场只试一次,收口点不补发(哑门是配置问题,补发一样失败)。
+void TerminalSessionController::KickoffTitleRefinementNow() {
+    if (pending_title_refinement_query_.empty()) {
+        return;
+    }
+    lubancode::runtime::TrajectorySessionLedger* ledger = session_runtime_.trajectory();
+    if (ledger == nullptr || ledger->v3_main_writer() == nullptr) {
+        return;  // v2 场(或没开账):等收口后的老发货点
+    }
+    const std::string query = std::move(pending_title_refinement_query_);
+    pending_title_refinement_query_.clear();
+    StartTitleRefinement(query);
+}
+
+// 主 turn 收口后的发货点(P0-2 + 通知时序缺陷单;触发时机提前单起降级为
+// v2 兜底):挂账的首问现在起飞精修。v3 场已在回合内起飞过,pending 早已
+// 空,此处天然 no-op;v2 场(一 stream 一 open turn,回合内发必撞)由此
+// 起飞。只在会话空闲边界(主循环顶)调,这只口子不挪。发完不等:收货是
+// DrainFinished 的事。
 void TerminalSessionController::StartPendingTitleRefinementAfterTurn() {
     if (pending_title_refinement_query_.empty()) {
         return;
@@ -824,9 +852,10 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
         // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
         EnsureSessionBegun(content);
-        // 两层标题(实测问题 7):首问建档当场起本地临时标题;模型精修
-        // 只挂账——首个主回合收口后的空闲边界再起飞(P0-2),完工由空闲
-        // 唤醒收货,不等用户再敲一行。
+        // 两层标题(实测问题 7;触发时机提前单):首问建档当场起本地临时
+        // 标题;模型精修挂账——v3 场在本回合 BeginTurn 铸号后由
+        // KickoffTitleRefinementNow 立即起飞(发车即起飞),v2 场留到收口后
+        // 的空闲边界。完工由空闲唤醒收货,不等用户再敲一行。
         BeginSessionTitle(content);
         // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
         // mid-turn 评估用同一份,发轮前对齐一次。
@@ -997,6 +1026,11 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         turn.approval_observer = [this](bool asked, bool allowed) {
             loop_wiring_.NotePermissionWait(asked, allowed);
         };
+        // 会话标题精炼·发车即起飞(标题触发提前单):首问主回合 BeginTurn
+        // 铸号后立即起飞精炼(HTTP 采样走独占 detached backend,与主 turn
+        // 并行)。v2 判定在 Kickoff 里——一 stream 一 open turn,回合内起飞
+        // 必撞,照旧走收口后的 StartPendingTitleRefinementAfterTurn。
+        turn.after_turn_bridge_open = [this]() { KickoffTitleRefinementNow(); };
     }
     const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
     // 四层生命周期单 P2:PostTurn——终局收口(恰好一次)。RunTurn 返回时
@@ -1214,10 +1248,12 @@ void TerminalSessionController::Run() {
             lubancode::app::BuildStatusPanelData(status_inputs_, config.tool_calling),
             config.status_panel.items, config.status_panel.separator);
 
-        // 两层标题编排(实测问题 7):这里是主 turn 收口后的空闲边界——
-        // 挂账的精修首问现在起飞(P0-2:回合里发与主 turn 撞同一 stream 的
-        // turn 账);已完工的结果当场收(记 cheap 账、对代采纳、改名)。
-        // 非阻塞一眼——没落地就等空闲唤醒把主循环叫回来再收。
+        // 两层标题编排(实测问题 7;触发时机提前单):v3 场的精修已在首问
+        // 主回合铸号后立即起飞(发车即起飞),此处只剩收货;v2 场(一
+        // stream 一 open turn,回合内发必撞)的挂账精修仍在此起飞——这里
+        // 是主 turn 收口后的空闲边界。已完工的结果当场收(记 cheap 账、
+        // 对代采纳、改名)。非阻塞一眼——没落地就等空闲唤醒把主循环叫回来
+        // 再收。
         StartPendingTitleRefinementAfterTurn();
         DrainFinishedTitleRefinement();
 

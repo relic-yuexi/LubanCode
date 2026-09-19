@@ -99,8 +99,9 @@ namespace lubancode::app {
 //   - 存档薄壳(EnsureSessionBegun/PersistNewMessages + steering 三只):
 //     本体在 runtime::SessionRuntime 与 cli 队列层;
 //   - 标题编排一组(BeginSessionTitle/StartTitleRefinement/
-//     BackfillTitleOnResume/StartPendingTitleRefinementAfterTurn/
-//     DrainFinishedTitleRefinement/HasFinishedTitleRefinement):判定在
+//     KickoffTitleRefinementNow/BackfillTitleOnResume/
+//     StartPendingTitleRefinementAfterTurn/DrainFinishedTitleRefinement/
+//     HasFinishedTitleRefinement):判定在
 //     SessionTitleAccount,这里只管
 //     打印/发精炼/同步 peer 名册;
 //   - CollectPromptHistory/BuildTerminalTitleText:Ctrl+R 数据源与终端
@@ -171,25 +172,35 @@ private:
     // 会话起手对齐(hooks 上下文的 session id/转录路径 + 上下文仓开张):
     // 轨迹账在 SessionRuntime ctor 里已开,这里只做幂等的对齐与开仓。
     bool EnsureSessionBegun(const std::string& first_text);
-    // ---- 两层会话标题(实测问题 7) ----
+    // ---- 两层会话标题(实测问题 7;触发时机提前单重排) ----
     // 第一层:首问建档当场起本地临时标题(零模型 token),/sessions 立刻
-    // 有名字。第二层精修不在回合里发(P0-2:旁路小 turn 与主 turn 不能
-    // 同流并存)——首问只挂账,首个主回合收口后的空闲边界再起飞;完工由
-    // 空闲唤醒收货,不等用户再敲一行。
+    // 有名字。第二层精修的起飞点:v3 场(默认)发车即起飞——首问主回合
+    // BeginTurn 铸号后立即走(KickoffTitleRefinementNow,挂 RunTurn 的
+    // after_turn_bridge_open 回调);v2 场(逃生口)照旧收口后起飞
+    //(StartPendingTitleRefinementAfterTurn 降级为兜底)。完工由空闲唤醒
+    // 收货,不等用户再敲一行。
     void BeginSessionTitle(const std::string& first_query);
     void StartTitleRefinement(const std::string& first_query);
+    // 发车即起飞(标题触发提前单):首问主回合铸号后的立即发货点。只在
+    // v3 场动身——旁路桥的 title_refine 账归首问主回合号,无轮账互斥;
+    // v2 场一 stream 一 open turn,回合内起飞必撞,按兵不动走老路。
+    void KickoffTitleRefinementNow();
     // resume 换场善后:翻标题代数、取消在飞精炼;旧档没标题就补本地标题。
     void BackfillTitleOnResume();
-    // 主 turn 收口后的发货点(只在会话空闲边界调):挂账的首问现在起飞
-    // 精修——回合里发必与主 turn 撞同一 stream 的 turn 账。
+    // 主 turn 收口后的发货点(只在会话空闲边界调):v2 场的起飞口;v3 场
+    // 已在回合内起飞过,pending 早已空,此处天然 no-op。
     void StartPendingTitleRefinementAfterTurn();
     // 收货点:完工的精修结果记 usage、对代采纳、同步 peer 名册。自动标题
     // 只属会话元数据,不往对话正文插异步通知行。
     void DrainFinishedTitleRefinement();
     // 只读:有完工的精修结果待收(空闲唤醒的 ready 条件,主线程拍里问)。
     bool HasFinishedTitleRefinement();
-    // P0-2:待发的标题精修首问(回合内不与主 turn 抢流,收口后补发)。
+    // P0-2:待发的标题精修首问。v3 场在首问主回合铸号后被
+    // KickoffTitleRefinementNow 取走立即起飞;v2 场留到收口后的空闲边界。
     std::string pending_title_refinement_query_;
+    // 哑门改亮(标题触发提前单):账房没开张拦下首问起名的那行诊断只打
+    // 一次——BeginSessionTitle 每轮用户输入都进,不挂闸会打车轮。
+    bool title_ledger_down_reported_ = false;
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,
     // 不在 trace 里留一串无意义词。

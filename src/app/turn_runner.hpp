@@ -195,6 +195,14 @@ struct TurnContext {
     // 续跑轮并入同一 turn 的账;缺省 nullptr(单发/单测)= RunTurn 就地起
     // 一只本地适配器,同一套接线。终端渲染照旧逐字节——改的是水的来路。
     lubancode::runtime::TurnEventAdapter* turn_events = nullptr;
+
+    // ---- 会话标题精炼:发车即起飞(标题触发提前单)----
+    // 主回合 BeginTurn 铸号、RecordInput 落完之后的首模型请求之前回调一次。
+    // 宿主(终端会话)在此立即起飞标题精炼——v3 场旁路桥的 title_refine
+    // 账归首问主回合号(active_main_turn_id,BeginTurn 起 EndTurn 不清),
+    // 此刻起飞与主 turn 并行不撞账;HTTP 采样走独占 detached backend。
+    // 空(单发/单测/没挂)= 不起飞,一字不变。
+    std::function<void()> after_turn_bridge_open;
 };
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记

@@ -1132,6 +1132,15 @@ RunTurnResult RunTurn(TurnContext ctx) {
         turn_trajectory->BeginTurn(canonical_turn_id, ctx.trajectory_trigger);
         turn_trajectory->RecordInput(prepared_input->message);
     }
+    // 会话标题精炼·发车即起飞(标题触发提前单):主回合号此刻已铸
+    //(BeginTurn),首问的标题精炼在主模型请求发出之前起飞——v3 场旁路
+    // 桥归首问主回合号,与主 turn 并行不撞账;宿主回调里自按 v3 判定,
+    // v2 场按兵不动(一 stream 一 open turn,回合内起飞必撞,照旧走收口
+    // 后的老发货点)。非首问:宿主侧 pending 空,零开销即回。回调为空
+    //(单发/单测)= 一字不变。
+    if (ctx.after_turn_bridge_open) {
+        ctx.after_turn_bridge_open();
+    }
     try {
         lubancode::agent::DriveOptions drive_options;
         drive_options.cancel = &cancel_flag;
