@@ -51,7 +51,10 @@ std::optional<lubancode::updater::Manifest> ParseOk(const std::string& text) {
     if (problems.empty()) {
         CHECK(manifest.has_value());
     } else {
-        CHECK_MESSAGE(false, "应通过却拒了:" + problems.front());
+        // doctest 的 *_MESSAGE 变参只吃 const char* 一类(MessageBuilder* 技巧),
+        // std::string 没有 operator* 重载,须先 .c_str()。
+        const std::string why = "应通过却拒了:" + problems.front();
+        CHECK_MESSAGE(false, why.c_str());
     }
     return manifest;
 }
