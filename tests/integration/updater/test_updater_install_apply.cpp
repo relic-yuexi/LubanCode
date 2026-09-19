@@ -496,7 +496,8 @@ TEST_CASE("apply+账: install-state 往返——manifest 原件照抄,provenance
     const auto read = ReadInstallState(paths);
     REQUIRE(read.has_value());
     CHECK(read->version == "9.9.9");
-    CHECK(read->platform.has_value() && *read->platform == "test-os");
+    REQUIRE(read->platform.has_value());  // doctest 禁 CHECK 里写 &&,拆两条
+    CHECK(*read->platform == "test-os");
     CHECK(read->channel == "stable");
     CHECK(read->installer == "test-updater");
     CHECK(read->transaction == "txn-9");
