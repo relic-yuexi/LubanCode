@@ -311,8 +311,8 @@ void TerminalTurnSink::ApplyEvent(const runtime::ServerEvent& event, std::uint64
                 lubancode::cli::ContextTracker::UsageReportFlags flags;
                 flags.known = true;
                 flags.usage_reported = report.reported_by_provider;
-                flags.cache_read_reported_by_provider = report.cache_read_reported_by_provider;
-                flags.cache_creation_reported_by_provider = report.cache_creation_reported_by_provider;
+                flags.cache_read_reported = report.cache_read_reported_by_provider;
+                flags.cache_creation_reported = report.cache_creation_reported_by_provider;
                 flags.anomalous = !report.usage_anomaly.empty();
                 ingredients_.context_tracker->ApplyUsage(report.usage, event.turn_id, report.step_index, diag,
                                                          flags);
