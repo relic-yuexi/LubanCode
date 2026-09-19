@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -64,6 +66,69 @@ std::uint64_t GetUint(const nlohmann::json& payload, const char* key) {
         return static_cast<std::uint64_t>(it->get<std::int64_t>());
     }
     return 0;
+}
+
+// 上下文预算单(P1):control.context_window.changed 的窗口值解析。v2 事件
+// 合同把 context_window 定为字符串,数字形态一并兼容;字符串认十进制裸数
+// 与 k/m 后缀("1048576"/"128k",与 config::ParseContextWindowTokens 同一
+// 口径的只读子集,不引 config 依赖)。折不出正数返回 nullopt——不拿 0
+// 冒充预算,调用方按"事件未携带有效值"处理。
+std::optional<std::uint64_t> ParseContextWindowPayload(const nlohmann::json& payload, const char* key) {
+    const auto it = payload.find(key);
+    if (it == payload.end() || it->is_null()) {
+        return std::nullopt;
+    }
+    std::uint64_t value = 0;
+    if (it->is_number_unsigned()) {
+        value = it->get<std::uint64_t>();
+    } else if (it->is_number_integer()) {
+        const std::int64_t signed_value = it->get<std::int64_t>();
+        if (signed_value <= 0) {
+            return std::nullopt;
+        }
+        value = static_cast<std::uint64_t>(signed_value);
+    } else if (it->is_string()) {
+        const std::string text = it->get<std::string>();
+        std::size_t digits = 0;
+        while (digits < text.size() && text[digits] >= '0' && text[digits] <= '9') {
+            ++digits;
+        }
+        if (digits == 0) {
+            return std::nullopt;  // 非数字起头(空串/单位起头):不带值
+        }
+        value = 0;
+        for (std::size_t i = 0; i < digits; ++i) {
+            if (value > (std::numeric_limits<std::uint64_t>::max() - 9) / 10) {
+                return std::nullopt;  // 溢出:不截断冒充
+            }
+            value = value * 10 + static_cast<std::uint64_t>(text[i] - '0');
+        }
+        std::string suffix = text.substr(digits);
+        for (char& c : suffix) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (suffix == "k") {
+            if (value > std::numeric_limits<std::uint64_t>::max() / 1000) {
+                return std::nullopt;
+            }
+            value *= 1000;
+        } else if (suffix == "m") {
+            if (value > std::numeric_limits<std::uint64_t>::max() / 1000000) {
+                return std::nullopt;
+            }
+            value *= 1000000;
+        } else if (!suffix.empty()) {
+            return std::nullopt;  // 认不得的后缀:不带值,不猜
+        }
+    } else {
+        return std::nullopt;
+    }
+    if (value == 0) {
+        return std::nullopt;
+    }
+    return value;
 }
 
 // 折叠内部索引:call_id/request_id/turn_id -> 向量位次。折叠器单线程;
@@ -398,7 +463,13 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             state->control.mode = GetString(payload, "mode");
             return true;
         case EventKind::ControlContextWindowChanged:
-            state->control.context_window = GetUint(payload, "context_window");
+            // 上下文预算单(P1):v2 事件合同里 context_window 是字符串
+            // ("1048576" 这类十进制真值;durability 测试还写过 "128k" 形
+            // 状),数字形态一并兼容,折不出正数视为未携带(不冒充 0)。
+            state->control.context_window = ParseContextWindowPayload(payload, "context_window");
+            state->control.context_window_provider = GetString(payload, "provider");
+            state->control.context_window_model = GetString(payload, "model");
+            state->control.context_window_source = GetString(payload, "source");
             return true;
         case EventKind::CompactApplied:
             state->control.compact_epoch = static_cast<int>(GetUint(payload, "epoch"));
@@ -729,6 +800,9 @@ nlohmann::json ReplayControlState::ToJson() const {
     out["cwd"] = cwd.value_or(std::string());
     out["mode"] = mode.value_or(std::string());
     out["context_window"] = context_window.has_value() ? nlohmann::json(*context_window) : nlohmann::json();
+    out["context_window_provider"] = context_window_provider;
+    out["context_window_model"] = context_window_model;
+    out["context_window_source"] = context_window_source;
     out["compact_epoch"] = compact_epoch;
     out["last_compact_new_state_hash"] = last_compact_new_state_hash;
     out["open_queue_items"] = open_queue_items;
@@ -755,6 +829,11 @@ std::optional<ReplayControlState> ReplayControlState::FromJson(const nlohmann::j
     if (window != json.end() && window->is_number_unsigned()) {
         control.context_window = window->get<std::uint64_t>();
     }
+    // 预算身份三件(上下文预算单 P1):旧 checkpoint 的 JSON 没有这几键,
+    // 缺省空串 = 身份不明,与"事件未携带"同一待遇。
+    control.context_window_provider = GetString(json, "context_window_provider");
+    control.context_window_model = GetString(json, "context_window_model");
+    control.context_window_source = GetString(json, "context_window_source");
     control.compact_epoch =
         json.contains("compact_epoch") && json["compact_epoch"].is_number_integer()
             ? json["compact_epoch"].get<int>()

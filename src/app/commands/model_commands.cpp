@@ -416,7 +416,8 @@ CommandFlow HandleSlashModel(SlashDispatchContext& dispatch, const lubancode::cl
                                      ? dispatch.config_result->global_config_file_path
                                      : *dispatch.config_file_path;
     model_ctx.apply_context_window = [tracker = dispatch.context_tracker](std::size_t tokens) {
-        tracker->set_window_tokens(tokens);
+        // 上下文预算单 §三:目录应用走配置来路。
+        tracker->SetWindowBudget(tokens, lubancode::cli::ContextWindowSource::Config);
     };
     model_ctx.fetch_models = [config = dispatch.config]()
         -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {

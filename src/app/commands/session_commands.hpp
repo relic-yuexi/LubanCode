@@ -160,12 +160,32 @@ struct ContextEstimateInputs {
     // const)。空指针 = 无轨迹现场(单测/旧路径),/context 走 v2 口径。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     const std::string* last_compact_line = nullptr;
+    // 上下文预算单(§三/§四):带参分支走统一预算入口——身份与目录(超限
+    // 校验、写账)从这三样取。可空 = 单测/单发现场,退化为只改 tracker
+    // 不写账(裸敲明细分支不用它们)。
+    const std::string* active_provider = nullptr;
+    const std::string* current_model = nullptr;
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;
     // compact_partition_count(§八,Compact 四分区单·阶段 1):/context 展示
     // "compact turn 策略"一行用;0 = 现场没带到(不打那一行)。
     int compact_partition_count = 0;
 };
 void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                        const lubancode::cli::Theme& theme);
+
+// 上下文预算单 §四:恢复预算的裁决 + 应用 + 落账(/resume 与 --continue
+// 共用的同一处)。读控制态折出的会话预算,按"本次明确覆盖 > 匹配身份的
+// 会话预算 > 当前配置"裁决;套用进 tracker(来路 Resumed,发首个请求前
+// 完成,主 Agent 的窗口由发轮前同步点接上),并对落点场写一枚快照
+//(applied → source=resumed;回落 → source=initial)。每条路都打一行
+// 来源说明,回落不装恢复。control 为空(--continue 没恢复到旧场)时只写
+// initial 快照。
+void ApplyResumedContextWindow(lubancode::cli::ContextTracker& tracker,
+                               lubancode::runtime::TrajectorySessionLedger* trajectory,
+                               const lubancode::config::ModelCatalog* model_catalog,
+                               const std::string& now_provider, const std::string& now_model,
+                               const lubancode::trajectory::ReplayControlState* control,
+                               const lubancode::cli::Theme& theme);
 
 // ---- /compact 的会话接线(终端接线收尾单自大类搬出) ----------------------
 //

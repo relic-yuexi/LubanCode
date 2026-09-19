@@ -770,7 +770,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         //(那两道门在装配层 session_stack/one_shot 过),native 半边开不了;
         // 与 native_reference 在直构路不开同一待遇,不绕过目录判定(单子
         // 红线 2)。推荐档 2026-09-03 真机质量对照过门后 = proxy_reference
-        //(证据:eval/deferred_quality/report.md)。
+        //(证据档已删,存 git 历史)。
         mode = lubancode::tools::kRecommendedDeferredToolMode;
     } else if (const auto configured = lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
                configured.has_value() && *configured != lubancode::tools::DeferredToolMode::NativeReference) {

@@ -102,9 +102,15 @@ ContextWindowCandidates BuildContextWindowCandidates(std::optional<std::size_t> 
         // 不见 1048576 这类厂商原数;非整档上限如 786432 顶到 512K 为止)。
         out.current_over_limit = current_window > *declared_limit;
     } else {
-        // 能力未知(§4.2 第 6 条):保守展示,只有当前值,标未验证;不凭
-        // 名字猜档位,不提供猜测的高档。
+        // 能力未知(上下文预算单 §三,2026-09-19 修复):不再锁死本地预算
+        // ——提供常用十进制档位并保留当前非整档值,全部标"本地预算;模型
+        // 上限未知"(unverified)。未验证档允许手动选择,但不显示成模型
+        // 已支持;不把当前预算冒充能力上限。不凭名字猜真实上限,不提供
+        // 百万以上的猜测延伸档(能力没核实,翻倍延伸是冒充)。
         out.unverified = true;
+        for (const std::size_t common : kContextWindowCommonCandidates) {
+            values.push_back(common);
+        }
     }
     // 当前值必在候选(§4.2 第 4/5 条):超限照实保留(标异常),未改这
     // 项可维持既有预算。0 = 运行态没有可用预算(异常态),不硬塞进候选。
@@ -120,6 +126,25 @@ ContextWindowCandidates BuildContextWindowCandidates(std::optional<std::size_t> 
     std::sort(values.begin(), values.end());
     values.erase(std::unique(values.begin(), values.end()), values.end());
     out.values = std::move(values);
+    return out;
+}
+
+// 统一值校验(上下文预算单 §三):/context 命令与面板保存同一把尺——
+// 不能面板拦住、命令绕过。0 不是有效预算,一律拒绝;已知上限时超限
+// 拒绝(不静默截断到最近档),拒绝时带上上限值给文案。ok = 放行。
+ContextWindowValueCheck CheckContextWindowValue(std::optional<std::size_t> declared_limit,
+                                                 std::size_t value) {
+    ContextWindowValueCheck out;
+    if (value == 0) {
+        return out;  // 0 不是有效预算(解析层已拦,这里再钉一道)
+    }
+    if (declared_limit.has_value() && *declared_limit > 0) {
+        out.limit = *declared_limit;
+        if (value > *declared_limit) {
+            return out;  // 超限:拒绝并说明,不夹档
+        }
+    }
+    out.ok = true;
     return out;
 }
 
@@ -429,7 +454,9 @@ ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelVie
             view.window.values[index] == view.window.current_window) {
             label += " (" + std::string(tr("cw_panel.over_limit")) + ")";
         }
-        if (view.window.unverified && view.window.values[index] == view.window.current_window) {
+        // 上限未知(§三):每一档都标未验证——本地预算,不是模型已支持
+        // 的能力;不只是当前值(旧档非整档值与预设档同一待遇)。
+        if (view.window.unverified) {
             label += " (" + std::string(tr("cw_panel.unverified")) + ")";
         }
         return label;

@@ -26,6 +26,17 @@ namespace lubancode::cli {
 // 占用超过窗口这个百分比时,判定"该自动压缩了"。
 constexpr int kAutoCompactThresholdPercent = 80;
 
+// 窗口预算的来路(上下文预算单 §三:能力上限与本地设置分开)。tracker
+// 是会话内有效预算的唯一持有者——状态栏、面板、Agent 同步、自动压缩都
+// 读它;来路随值一并记账。"本次明确覆盖压过会话预算"的恢复裁决、面板
+// 的"本地预算/未验证"标注都靠它说话,不靠猜。
+enum class ContextWindowSource {
+    Default,  // 进程起手没动过(配置默认值)
+    Config,   // 配置/目录应用(settings、ApplyModelCatalog、CommandService 的 apply 口)
+    Manual,   // 用户本次明确设置(/context、面板保存)——恢复裁决里压过会话预算
+    Resumed,  // 恢复裁决套用(§四:写账-恢复-应用一条线)
+};
+
 class ContextTracker {
 public:
     explicit ContextTracker(std::size_t window_tokens);
@@ -270,6 +281,30 @@ public:
     // /context <档位> 用:会话级临时改窗口大小,不改配置文件。
     void set_window_tokens(std::size_t window_tokens) { window_tokens_ = window_tokens; }
 
+    // ---- 上下文预算单(§三/§四/§五) ---------------------------------------
+    //
+    // 统一预算入口:值 + 来路 + 身份一起落。来路上,配置/目录路径走
+    // Config(覆盖旧来路),手动路径走 Manual,恢复裁决走 Resumed;裸
+    // set_window_tokens 保持兼容(来路不动——只改值的旧调用点不该顺手
+    // 把"用户明确设置"标起来)。
+    void SetWindowBudget(std::size_t window_tokens, ContextWindowSource source,
+                         const std::string& provider = std::string(),
+                         const std::string& model = std::string());
+    ContextWindowSource window_source() const { return window_source_; }
+    const std::string& window_provider() const { return window_provider_; }
+    const std::string& window_model() const { return window_model_; }
+    // 恢复裁决的"本次明确覆盖"判据:本进程内用户明确设置过预算。
+    bool window_manually_set() const { return window_source_ == ContextWindowSource::Manual; }
+
+    // §五:具名会话重置。保留当前有效窗口与其来路/身份(/clear 不改预算),
+    // 清掉:当前实测占用、最近 input/cache read、usage_stale、本场累计、
+    // 逐请求历史、请求总数、轮次登记账。server_prefix_caching 是 /doctor
+    // 对端点属性的观测(归 provider 不归会话),保留。不用 ApplyUsage(空
+    // 对象)顶替:它只把旧数标 stale 还会污染请求账(§五明文)。清场后
+    // 旧场迟到的带号 usage 会被丢弃,直到新场首个轮次经 BeginUserTurn
+    // 重新登记——防旧数写回(§五末条)。
+    void ResetSession();
+
     // 占用百分比,四舍五入到整数;window_tokens_ 是 0 时按 0 处理(不除零、
     // 不炸)。
     int UsagePercent() const;
@@ -284,6 +319,14 @@ private:
 
     std::size_t current_tokens_ = 0;
     std::size_t window_tokens_;
+    // 预算来路与身份(§三):随窗口值一并记账,恢复裁决与显示标注读它。
+    ContextWindowSource window_source_ = ContextWindowSource::Default;
+    std::string window_provider_;
+    std::string window_model_;
+    // §五:清场后丢弃旧场迟到 usage 的闸——BeginUserTurn(新场首个轮次
+    // 登记)重置。只在 turn_id 非空时生效:没带号的账(单发/单测路径)
+    // 没有身份可核,按老行为放行,不误伤。
+    bool drop_usage_until_next_turn_ = false;
     std::int64_t last_cache_read_tokens_ = 0;
     std::int64_t last_input_tokens_ = 0;
     bool usage_stale_ = false;
@@ -298,5 +341,42 @@ private:
     int next_turn_ordinal_ = 0;
     static constexpr std::size_t kMaxTurnLabels = 32;
 };
+
+// ---------------------------------------------------------------------------
+// 上下文预算单 §四:resume 的预算恢复裁决(纯函数,/resume 与 --continue
+// 共用,单测钉死)。
+//
+// 优先级(合同原文):本次明确覆盖 > 匹配身份的会话预算 > 当前配置/
+// 目录/默认规则。身份核对不过(旧档没带身份,或带了但与当前模型对不
+// 上)不套用——不能拿模型 A 的预算套给模型 B;已知上限被旧值超了也
+// 不套用(不静默截断,阻止按错误预算发请求,待 /context 纠正)。所有
+// 分支都给 note(i18n key),调用方照实说明来源,回落不装恢复。
+// ---------------------------------------------------------------------------
+
+struct RestoredWindowInput {
+    // 源场折叠出的预算(ReplayControlState.context_window 一族)。没有
+    // 折出值 = 旧档无预算记录。
+    bool session_window_present = false;
+    std::size_t session_window_tokens = 0;
+    std::string session_provider;  // 空 = 事件未携带身份
+    std::string session_model;     // 空 = 事件未携带身份
+    // 本进程的"本次明确覆盖"(tracker.window_manually_set())。
+    bool manual_override = false;
+    // 恢复落点此刻的有效身份。
+    std::string now_provider;
+    std::string now_model;
+    // 当前模型的目录声明上限(可空 = 未知)。
+    std::optional<std::size_t> declared_limit;
+};
+
+struct RestoredWindowDecision {
+    bool apply = false;         // true = 调用方应把 tokens 套进 tracker(Resumed)
+    std::size_t tokens = 0;     // apply 时的值
+    // 裁决说明(i18n key,调用方打印):resume_window.manual_kept /
+    // restored / identity_mismatch / over_limit_rejected / no_record。
+    const char* note = "resume_window.no_record";
+};
+
+RestoredWindowDecision ResolveRestoredContextWindow(const RestoredWindowInput& input);
 
 }  // namespace lubancode::cli

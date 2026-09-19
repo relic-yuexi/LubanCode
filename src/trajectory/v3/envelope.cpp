@@ -310,6 +310,7 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::TitleRequested: return "title.requested";
         case EventKindV3::TitleExtracted: return "title.extracted";
         case EventKindV3::SessionTitleApplied: return "session.title.applied";
+        case EventKindV3::SessionContextWindowApplied: return "session.context_window.applied";
         case EventKindV3::ResumeSourceAttached: return "resume.source.attached";
         case EventKindV3::SubagentSpawnRequested: return "subagent.spawn.requested";
         case EventKindV3::SubagentLinked: return "subagent.linked";
@@ -456,6 +457,7 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::TitleRequested,
             EventKindV3::TitleExtracted,
             EventKindV3::SessionTitleApplied,
+            EventKindV3::SessionContextWindowApplied,
             EventKindV3::ResumeSourceAttached,
             EventKindV3::SubagentSpawnRequested,
             EventKindV3::SubagentLinked,

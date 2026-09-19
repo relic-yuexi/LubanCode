@@ -25,6 +25,7 @@
 
 #include <filesystem>
 #include <expected>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -112,6 +113,15 @@ struct ResumeResult {
     std::size_t total_lines = 0;        // 全量流水行数(含压缩前)
     int compact_epoch = 0;              // 接旧的压缩序号
     std::string title;                 // 存档里最后一条 title 事件
+    // 上下文预算单 P1:源场折叠出的窗口预算(末枚 control 事件的真值)。
+    // nullopt = 旧档没有预算记录,前端按当前配置起,别猜。身份
+    // (provider/model)随行——空串 = 事件未携带,套用前须按当前模型
+    // 核对,不能拿模型 A 的预算套给模型 B。是否套用归前端裁决(runtime
+    // 不持有前端的 tracker)。
+    std::optional<std::uint64_t> context_window;
+    std::string context_window_provider;
+    std::string context_window_model;
+    std::string context_window_source;  // manual/initial/resumed;空 = 未携带
 };
 
 // ---------------------------------------------------------------------------

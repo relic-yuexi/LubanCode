@@ -1,0 +1,232 @@
+# 上下文预算、会话恢复、清场统计与多选提示修复
+
+- 状态：已实现（分支 fix/context-budget-resume-clear-multiselect，PR #143；
+  CI run 35446838289 success——rollup.conclusion=success，本 PR 按 lane 逻辑跑
+  macos-clang 编译测试腿，windows-msvc 腿不触发：未动 memory_worker 平台码）。
+  §三第 5 条（k3-256k 端点核对）与 §七 真终端交互项待真机验收。
+- 日期：2026-09-19
+- 源码基线：d20547e4。后续按函数名定位，勿只靠行号。
+- 级别：P1。预算失配与跨会话旧统计优先；多选提示随同修复。
+- 范围：/context、/context-window、/resume、--continue、/clear、ask_user 多选。
+
+## 一、现场与证据边界
+
+用户在 moonshot-coding-anthropic/k3-256k 上看到：
+
+    k3-256k · D:\lubancode · main · context 6% · 66.3k/1.05M · 缓存命中 65.3k(99%)
+
+现象有四组：
+
+1. /context-window 写着“模型上限未知”，窗口只见 1.05M（未验证），左右键调不动。
+2. 用户认为模型应为 256K，并怀疑 resume 丢了设置。
+3. /clear 后仍显示同一组占用与缓存数字。
+4. ask_user 多选题高亮第 3 项，按 Enter 只报“请至少勾选一项”，看不到空格操作提示。
+
+已核实：
+
+- 用户级 config.json 中，k3-256k 对应 provider 的 context_window 为 1048576。
+  十进制显示约 1.05M；这只是本地配置，不是服务端规格证据。
+- 用户级 models.json 收录了此 provider/model，但没有 context_window 声明。
+- BuildContextWindowCandidates 遇到未知上限，只保留当前预算；左右键只有一档可走。
+- /clear 重建 Agent，却没有重置独立存活的 ContextTracker。
+- 多选 Enter 负责提交，空格负责勾选；报错行会替换操作提示。
+
+尚未核实：
+
+- 现场 exe 是否对应当前源码；用户这次是否先手调预算、退出，再恢复。
+- k3-256k 端点真实上限及计数口径。不能凭名字断言 256000 或 262144。
+- 这次 resume 是否为故障直接触发点。当前 /resume 与启动恢复接线未见预算回填，
+  足以列为缺口，但不能写成已复现“resume 将 256K 改成 1M”。
+
+本次只写方案，不改用户配置，不代用户提交 ask_user，也不把截图中的提问当新任务。
+
+## 二、源码入口
+
+- src/cli/context_window_panel_core.cpp：BuildContextWindowCandidates、
+  ResolveThinkEffortCapability、BuildContextWindowPanelFrame。
+- src/cli/context_window_panel.hpp：候选合同与可调状态。
+- src/app/commands/session_commands.cpp：HandleSlashContextWindow、
+  ValidateContextWindowPanelSelection、HandleSlashClear、HandleSlashResume；
+  /context 参数解析后直接 set_window_tokens。
+- src/config/model_catalog.cpp：ComputeCatalogApplication；已显式配置窗口时不覆盖。
+- src/app/session_stack.cpp：ContextTracker 从 config.context_window_tokens 初始化。
+- src/app/interactive_session_assembly.cpp：RebuildLoop、MakeSessionCommandState、
+  opts_.continue_last 启动恢复段；状态栏持有同一 tracker。
+- src/cli/context_tracker.hpp：当前占用、最近缓存、本场累计、请求历史与轮次标签。
+- src/trajectory/replay.cpp、schema.cpp、event.cpp：已有 control.context_window.changed
+  和 control.context_window；有事件定义不等于修改入口已经写账、恢复入口已经应用。
+- src/runtime/command_service.cpp：另一条 Resume 路径，须一同审计。
+- src/cli/ask_user_prompt.cpp：传入 menu_multi_hint 与 menu_select_one。
+- src/cli/choice_menu.cpp：ChoiceMenuCore::HandleKey。
+- src/cli/console_input.cpp：ReadChoiceMenu 两处 hint 渲染分支。
+- src/cli/i18n.cpp：中英文提示。
+
+## 三、预算：把能力上限与本地设置分开
+
+[x] 统一一份有效预算解析结果，至少带：值、来源、provider/model 身份、
+    模型上限（可空）、是否经能力声明核实。状态栏、面板、Agent、自动压缩共用。
+[x] 上限未知不再锁死本地预算。提供常用十进制档位并保留当前非整档值，
+    全部标明“本地预算；模型上限未知”。手输入口沿用 /context，不另造解析器。
+    未验证档允许手动选择，但不能显示成模型已支持；不把当前预算冒充能力上限。
+[x] 上限已知时，面板继续按声明筛候选。当前值超限照实保留并警示，允许调低。
+    直接 /context 也走同一校验，不能面板拦住、命令绕过；超限修改应拒绝并说明。
+    旧存档已有超限值不得静默截断，应明确提示并阻止按错误预算继续发请求，待纠正。
+[x] 当前值、候选箭头、页脚随实际可调状态一致。思考强度只有一档时说明缘由，
+    不因修窗口而猜造思考档位或擅加关闭选项。
+[ ] 核对端点声明后再补 k3-256k 模型能力；若确认 256K，修正对应配置/目录来源。
+    不批量改其他 provider，不按模型名称自动推断，不在 TODO 阶段改用户文件。
+[x] 审计启动与切模型的显式配置优先级。配置中存在字段与用户本次主动覆盖须能区分；
+    若向导把默认值写成显式值，须补来源或迁移规则，不能靠猜来降级优先级。
+
+## 四、resume：写账、恢复、应用要接成一条线
+
+[x] 先补复现：在有明确模型身份的会话设 /context 256k，退出，分别 /resume 与
+    --continue；记录旧场事件、恢复值、tracker、Agent 和状态栏，核实值在哪一步丢失。
+[x] 将 /context 与面板保存汇入同一预算修改入口；有效修改写入现有窗口事件。
+    同时保留 provider/model 身份与来源。取消或无变更不写事件。
+[x] 检查写账失败策略：不能显示“已保存、恢复可用”却没有持久记录。
+    对外报告应区分仅本次生效与已持久化；重试不得重复应用或重复落账。
+[x] 新场保存初始有效预算快照，避免只记后续修改而丢掉开场预算。
+[x] /resume、--continue 共用恢复裁决：先确定有效 provider/model，再取匹配预算。
+    本次明确覆盖 > 匹配身份的会话预算 > 当前配置/目录/默认规则。
+    恢复字段缺失时回落并说明来源；不能拿模型 A 的预算套给模型 B。
+[x] 同一处应用恢复结果到 tracker 与 Agent，再刷新状态栏；发首个请求前完成。
+    老档兼容、恢复失败、切换目标后再恢复都要覆盖。不得擅改既有 v3 同 ID 续接语义。
+[x] 恢复历史后的占用若仅能估算，标“估算”；旧 usage 若展示，标历史观测。
+    当前进程上一场统计不得混入恢复目标。不要把无实测写成真实零占用或零命中。
+
+## 五、clear：清历史，也清掉旧统计
+
+[x] 给 ContextTracker 增加具名会话重置入口。保留当前有效窗口设置，清掉：
+    当前实测占用、最近 input/cache read、usage_stale、本场累计、请求历史、
+    请求总数、轮次标签和序号。服务端缓存状态等观测值也须核定所属范围后处理。
+    不用 ApplyUsage(空对象)代替重置：它可能只把旧数标 stale，还会污染请求账。
+[x] 只在 ClearSession 成功后执行重置；失败保留旧场状态。与 Agent 重建、
+    新场 ID、状态栏刷新放到同一成功收尾，避免新历史配旧统计。
+[x] 成功返回输入框前刷新状态栏。新场无请求时隐藏缓存命中，显示“暂无实测”或
+    明确标注估算。系统提示和工具仍占 token，不可声称请求总上下文已经归零。
+[x] 审计 /context 明细、状态面板、ModelRouter 用量账和最近压缩摘要；按会话范围
+    重置或切换。旧场持久记录保留，进程级累计不能冒充新场累计。
+[x] 防止旧场迟到回调把数字写回来：核对 session/turn 身份，丢弃不属于新场的统计更新。
+[x] /clear 保留当前模型与有效窗口；本项不借机把 1.05M 改成 256K。
+    窗口失配由第三节解决，统计残留由本节解决。
+
+## 六、ask_user：报错不能吞掉操作说明
+
+[x] 保持多选语义：上下移动，空格切换勾选，Enter 提交；高亮不等于勾选。
+    无勾选 Enter 不默认选中当前项，避免误交答案。
+[x] 操作提示常驻，校验错误另起一行；窄屏优先保住“空格勾选、Enter 提交”。
+    中英文同步。两个菜单渲染分支都覆盖，翻页提示也不得吞掉核心按键说明。
+[x] 空提交文案明确写“请先按空格勾选，选好后按 Enter 提交”。
+    勾选后撤掉错误提示，保持焦点与已选状态；重画不留残字、不闪旧行。
+[x] “自己填写”和“聊聊这个问题”保留各自动作语义；不把空格当成聊天提交，
+    不破坏单选 Enter、自填编辑、Esc 取消与 Ctrl+C 处理。
+
+## 七、验收清单
+
+[x] 未知上限、当前 1048576：面板可切到 256000，可保存且 Agent 同步；
+    当前非整档值仍可见，所选档均标未验证，取消不改值。
+[x] 已知 256K、当前超限：明确报超限，可纠正到合法档；命令与面板校验一致。
+[x] provider 配置缺失、目录缺失、零/非法值、非整档、小窗口与大窗口均不崩溃。
+[x] 保存预算后分别走 /resume、--continue，进程重启后仍恢复；旧档无字段能回落。
+    模型身份不匹配、本次明确覆盖、写账失败与恢复失败各有独立用例。
+[x] 用模拟 usage 种入 66.3k 占用和 65.3k 缓存；/clear 成功后这些数字及累计消失，
+    窗口设置保留，首次新 usage 正常更新。clear 失败不清旧值，迟到回调不串场。
+[x] 验证 /clear 后有效对话历史已清空，不以“状态栏数字消失”代替历史检查。
+[ ] ask_user 真终端：无勾选 Enter 可见错误和操作提示；空格勾选后 Enter 成功。
+    单选、自填、聊天、Esc、多项勾选、窄屏、缩放和中英文均过。
+[x] 纯逻辑回归放入既有 test_context_window.cpp、test_context_window_command.cpp、
+    ContextTracker/ChoiceMenu 测试；恢复与清场另补生命周期集成回归。
+[x] 实现使用独立 worktree，保留当前工作区其他改动；本地只做允许的静态检查，
+    提交 PR 后跑 GitHub CI。记录实际 CI 与终端验收结果，不以源码检查冒充实跑。
+
+完成标准：四组现场问题都有对应回归，预算来源可追，恢复不丢设置，清场不串旧账，
+多选不用猜按键。当前文件仅为设计与实施清单，不代表以上修复已完成。
+
+## 八、实现注记（2026-09-19，分支 fix/context-budget-resume-clear-multiselect）
+
+四组修复的落点与取舍，按节对账：
+
+§三 预算分离：
+- ContextTracker 成为有效预算的唯一持有者，新增 WindowSource 来路
+  （Default/Config/Manual/Resumed）与 provider/model 身份，随值一并记账
+  （SetWindowBudget）；裸 set_window_tokens 保持兼容、不动来路。
+- BuildContextWindowCandidates 上限未知时改给常用十进制档并保留当前非整档
+  值，整体标 unverified；不给百万以上猜测延伸档。面板帧对 unverified 的
+  每一档都标"未验证"（原先只标当前值）。
+- 新增 CheckContextWindowValue 统一值校验：/context 带参与面板保存同一把
+  尺（ApplyContextWindowToSession），超限拒绝并说明，不静默截断；/context
+  明细末尾对"当前预算超目录已知上限"给显式警示行。
+- k3-256k 端点核对（§三第 5 条）留待真机：CI 与代码阶段无法核对端点真实
+  上限，也不改用户配置文件——该项未勾，见 §七 真机清单。
+- 显式配置优先级审计结论：MergeConfig 的 sources（Source::Default 区分内
+  置默认与显式配置）+ ComputeCatalogApplication 的 *_explicitly_configured
+  已能区分"配置存在字段"；恢复优先级本次落成（手动 > 会话账 > 配置），
+  向导不写 context_window（配置整条换 provider 时不带该字段），无需迁移。
+
+§四 resume 一条线：
+- 事件写账：TrajectorySessionLedger::RecordContextWindowChanged（v2 落
+  control.context_window.changed 字符串真值+provider/model/source；v3 新增
+  session.context_window.applied 事件，camelCase 载荷，schema3/reader 四处
+  接线）。回执如实：写不住回 false，调用方报"仅本次生效"（i18n
+  cmd.context.window_changed_persisted / window_changed 分家）。
+- 折叠：v2 fold 解析字符串值（十进制裸数与 k/m 后缀）+身份三件入
+  ReplayControlState（ToJson/FromJson 带上，旧 checkpoint 缺键读空=身份不
+  明）；v3 源 resume 折 FindLastContextWindowApplied（末枚胜）。
+- 恢复裁决：ResolveRestoredContextWindow 纯函数（cli/context_tracker），
+  /resume（HandleSlashResume）与 --continue（装配层）共用
+  ApplyResumedContextWindow；本次明确覆盖 > 匹配身份会话账 > 当前配置；
+  身份不全/对不上不套用，超已知上限拒绝套用（不按错误预算发请求，明报
+  待纠正）；每条路打一行来源说明（resume_window.* i18n，中英成对）。
+- 初始快照：launch（非 resume 开张）、/clear 新场、resume 落点三路各写一
+  枚 source=initial/resumed 的底账。
+- v3 同 ID 续接语义未动：恢复只 append 一枚预算事实行，不改续接判定。
+- /resume 成功后同时 ResetSession 本进程统计（上一场统计不混入恢复目标）。
+- CommandService::ResumeThread（app-server 路）回执外带折叠值+身份，套用
+  归前端裁决——runtime 不持有前端 tracker。
+
+§五 clear：
+- ContextTracker::ResetSession：保留窗口与来路/身份，清占用/最近缓存/
+  usage_stale/本场累计/逐请求历史/请求总数/轮次账；server_prefix_caching
+  是端点属性观测，保留。不用 ApplyUsage(空对象)顶替。
+- HandleSlashClear 成功收尾：ResetSession + model_router->ledger().Clear()
+  + last_compact_line 清空 + 新场 initial 快照，全部在 ClearSession 成功
+  之后（失败早退保留旧场状态）。状态栏无实测时本就隐藏 tokens 段
+  （used_tokens>0 条件渲染），清账后自然消失，不显示假零。
+- 迟到闸：ResetSession 后丢弃带号 usage 直到新场首个 BeginUserTurn；不带
+  号的账没有身份可核，按老行为放行（单发/单测路径），注记在头文件。
+
+§六 ask_user：
+- 报错行另起一行、操作提示常驻末行：ReadChoiceMenu（问话面板路）错误行
+  恒占一席、位置不漂移；ReadChoiceMenuSearch（搜索路）注意行（错误/翻页）
+  在上、多选/自填的操作提示常驻最末行，单选搜索菜单维持旧行为。窄屏截断
+  从行尾截，"空格勾选 · Enter 提交"排在提示最前。
+- 空提交文案 ask_user.menu_select_one_multi（中英）："请先按空格勾选,选好
+  后按 Enter 提交"。
+- 语义未动：高亮不等于勾选、无勾选 Enter 不默认选中当前项、动作项空格
+  不触发、Esc/Ctrl+C 取消——补钉 choice menu 单测。
+
+测试（§七映射）：
+- tests/unit/cli/test_context_window.cpp：未知上限开档/全档标未验证/
+  CheckContextWindowValue。
+- tests/unit/agent/test_context_tracker.cpp：SetWindowBudget 来路、
+  ResetSession（模拟 66.3k/65.3k 清场）、迟到闸、恢复裁决七分支。
+- tests/unit/trajectory/test_replay_state.cpp：v2 折叠（字符串真值+身份、
+  k/m 后缀、坏值不带、ToJson round-trip、旧 JSON 身份读空）。
+- tests/unit/cli/test_choice_menu.cpp：无勾选 Enter 不默认选中、错误随下
+  一键撤销。
+- tests/integration/trajectory/test_context_window_budget_lifecycle.cpp
+  （新册）：v3 schema 合同、写路+读面投影、/resume 三环复现（写账-折叠-
+  应用）、--continue 进程重启、/clear 换场快照、v2 旧档（字符串折叠+无字
+  段回落 no_record）、零值守卫。
+- 写账失败的 IO 故障注入未单独成册：现有注入钩子（v3_main_io_fault）只
+  打首枚提交，会连开场一起打断；以回执契约（false→"仅本次生效"文案）+
+  零值守卫用例代偿，真机清单里带一笔。
+
+待真机验收（CI 盖不住，§七第 2/7 条相关）：
+- ask_user 真终端交互：无勾选 Enter 的双行显示、空格勾选后 Enter、单选/
+  自填/聊天/Esc/多项勾选/窄屏/缩放/中英文。
+- k3-256k 端点真实上限核对（§三第 5 条）：确认后补目录声明，不批量改其
+  他 provider。
+- /context-window 面板在真终端的左右键切换（未知上限多档）与取消不改值。
+- 写账失败的真机复现（磁盘满/权限）下"仅本次生效"提示的实际显示。

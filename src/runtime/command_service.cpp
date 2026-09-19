@@ -273,6 +273,12 @@ ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& ru
     out.total_lines = static_cast<std::size_t>(summary.outcome.source_event_count);
     out.compact_epoch = summary.outcome.control.compact_epoch;
     out.title = summary.outcome.control.title.value_or(std::string());
+    // 上下文预算单 P1:折叠出的预算随回执外带(身份/来源照抄),套用归
+    // 前端自己的预算仲裁——这里没有 tracker,不做主。
+    out.context_window = summary.outcome.control.context_window;
+    out.context_window_provider = summary.outcome.control.context_window_provider;
+    out.context_window_model = summary.outcome.control.context_window_model;
+    out.context_window_source = summary.outcome.control.context_window_source;
     return out;
 }
 
