@@ -377,21 +377,22 @@ TEST_CASE("FindResumable: 同 digest 未终结续跑,异目标 superseded+清场
         return target;
     };
 
-    // t1:同 digest、verified——可续的第一笔。
+    // t2:异 digest、staged,带 staging 目录——作废+清场。账号时间戳排最前,
+    // 裁决按文件名排序走:异目标先撞上、被作废,然后才轮到可续的同目标。
+    Transaction t2(paths, "20260920T115959Z-000000t2", FixedNow);
+    t2.Create(make_target(digest_y));
+    t2.Transition(kTxnStaged);
+    std::error_code ec;
+    std::filesystem::create_directories(t2.StageDir() / "pkg", ec);
+    { std::ofstream(t2.StageDir() / "pkg" / "seed.txt", std::ios::binary) << "x"; }
+
+    // t1:同 digest、verified——排序在 t2 后,是返回的那笔。
     Transaction t1(paths, "20260920T120000Z-000000t1", FixedNow);
     t1.Create(make_target(digest_x));
     t1.Transition(kTxnDownloading);
     nlohmann::json v = nlohmann::json::object();
     v["archive_sha256"] = "sha256:" + digest_x;
     t1.Transition(kTxnVerified, std::move(v));
-
-    // t2:异 digest、staged,带 staging 目录——作废+清场。
-    Transaction t2(paths, "20260920T120001Z-000000t2", FixedNow);
-    t2.Create(make_target(digest_y));
-    t2.Transition(kTxnStaged);
-    std::error_code ec;
-    std::filesystem::create_directories(t2.StageDir() / "pkg", ec);
-    { std::ofstream(t2.StageDir() / "pkg" / "seed.txt", std::ios::binary) << "x"; }
 
     // t3:同 digest 但 committed(终态)——跳过,不动。
     Transaction t3(paths, "20260920T120002Z-000000t3", FixedNow);
@@ -412,14 +413,14 @@ TEST_CASE("FindResumable: 同 digest 未终结续跑,异目标 superseded+清场
 
     const ResumableDecision decision = FindResumable(paths, digest_x, FixedNow);
     REQUIRE(decision.resume.has_value());
-    CHECK(decision.resume->id() == "20260920T120000Z-000000t1");  // 排序第一的同 digest
+    CHECK(decision.resume->id() == "20260920T120000Z-000000t1");  // t2 作废后轮到的同 digest
     CHECK(decision.resume->state() == "verified");
     REQUIRE(decision.superseded_ids.size() == 1);
-    CHECK(decision.superseded_ids[0] == "20260920T120001Z-000000t2");
+    CHECK(decision.superseded_ids[0] == "20260920T115959Z-000000t2");
 
     // t2 被作废:failed + reason superseded + detail 逐字照 python;
     // staging 清掉。
-    const auto t2_bytes = ReadBytes(paths.updates / "20260920T120001Z-000000t2.json");
+    const auto t2_bytes = ReadBytes(paths.updates / "20260920T115959Z-000000t2.json");
     REQUIRE(t2_bytes.has_value());
     const nlohmann::json t2_data = nlohmann::json::parse(*t2_bytes, nullptr, false);
     CHECK(t2_data["state"] == "failed");

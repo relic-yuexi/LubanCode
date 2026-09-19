@@ -178,8 +178,11 @@ TEST_CASE("ReadCurrent: current 非单段名拒(launcher 严格口径)") {
     const auto root = TempRoot("read-current-seg");
     const LayoutPaths paths = MakeLayoutPaths(root);
 
+    // 经 nlohmann dump 落盘:反斜杠这类字符要按 JSON 规矩转义,直拼进
+    // 字面量会变成 \b 一类合法转义(退格符),测的就不是原字符了。
     for (const std::string bad : {"../evil", "a/b", "a\\b", ".", ".."}) {
-        WriteBytes(paths.current, R"({"schema": 1, "current": ")" + bad + R"("})");
+        const nlohmann::json pointer = {{"schema", 1}, {"current", bad}};
+        WriteBytes(paths.current, pointer.dump());
         CHECK_FALSE(ReadCurrent(paths).has_value());
     }
 }
