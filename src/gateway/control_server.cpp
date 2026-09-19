@@ -162,15 +162,20 @@ bool PollStopCommand(const std::filesystem::path& control_dir, const std::string
     if (!std::filesystem::exists(command_file, ec) || ec) {
         return false;
     }
-    // 打不开≠读到坏内容:Windows 上刚被原子换名落地的文件会被防病毒/
-    // 索引过滤驱动短拒数十毫秒(manifest.cpp 三案 CI 实测;job 命令文件
-    // 的同款病灶见 work_pump.cpp)。打不开就不删——文件留着下一拍再读,
-    // 删了 stop 命令就真丢了(进程不会停)。
-    std::ifstream stream(command_file, std::ios::binary);
-    if (!stream) {
-        return false;
+    // 读与删分段:MSVC 的 ifstream 句柄不带 FILE_SHARE_DELETE,stream
+    // 开着调 remove 必吃共享违例——先读完、关柄,再删。打不开≠读到坏
+    // 内容:Windows 上刚被原子换名落地的文件会被防病毒/索引过滤驱动短
+    // 拒数十毫秒(manifest.cpp 三案 CI 实测;job 命令文件的同款病灶见
+    // work_pump.cpp)。打不开就不删——文件留着下一拍再读,删了 stop
+    // 命令就真丢了(进程不会停)。
+    std::string text;
+    {
+        std::ifstream stream(command_file, std::ios::binary);
+        if (!stream) {
+            return false;
+        }
+        text.assign((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     }
-    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     // 读到就删(消费即取走):boot_id 对不上也删——那是上一只实例的陈旧
     // 命令,不追杀新实例。
     bool for_us = false;

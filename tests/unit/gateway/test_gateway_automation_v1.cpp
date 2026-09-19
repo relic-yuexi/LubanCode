@@ -16,6 +16,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -584,6 +586,27 @@ TEST_CASE("命令文件消费:坏内容删除留数,打不开留待下一拍") {
         std::ofstream stream(control / name, std::ios::binary | std::ios::trunc);
         stream << text;
     };
+    const auto count_left = [&control]() {
+        std::error_code lec;
+        std::size_t left = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(control, lec)) {
+            if (entry.path().filename().string().rfind("job-", 0) == 0) {
+                ++left;
+            }
+        }
+        return left;
+    };
+    // 消费即删的收口:Windows 上新建/换名文件可能被过滤驱动短时拦一下,
+    // 删除晚一两拍——有界轮询到目录清空(期间重消费是幂等重复,不算错)。
+    const auto poll_until_clean = [&control, &count_left]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (count_left() != 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            (void)gateway::PollJobCommands(control);
+        }
+        return count_left() == 0;
+    };
+
     // 半截 JSON(撕裂写):读得懂"是坏的" → 删 + 计 discarded。
     write_raw("job-add-9-1.json", "{\"type\": \"job.add\", \"prom");
     // 认不出的 type:同上。
@@ -598,20 +621,14 @@ TEST_CASE("命令文件消费:坏内容删除留数,打不开留待下一拍") {
     REQUIRE(consumed.adds.size() == 1);
     CHECK(consumed.adds[0].prompt == "正经任务");
     CHECK(consumed.discarded == 2);
-    std::size_t left = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(control, ec)) {
-        if (entry.path().filename().string().rfind("job-", 0) == 0) {
-            ++left;
-        }
-    }
-    CHECK(left == 0);  // 消费即删:坏的两枚、好的一枚,都不在
+    CHECK(poll_until_clean());  // 消费即删:坏的两枚、好的一枚,最终都不在
 
 #ifdef _WIN32
     // 根因钉(windows 独有病灶,POSIX 无强制文件锁模拟不了):命令文件
-    // 打不开时不许当坏命令删——CI run 35403217677 / 35374324620 的
-    // windows-msvc 腿,create 命令在换名短拒窗里被删,受理回执 15 秒等
-    // 不到,task/create 回 null,助理审批用例 305 / terminate 双爆。独占
-    // 句柄(_SH_DENYRW)模拟过滤驱动的"在但打不开"。
+    // 打不开时不许当坏命令删——删了 create 命令就真丢,受理回执 15 秒等
+    // 不到,task/create 回 null,助理审批册 305 / terminate 双爆(CI run
+    // 35403217677 / 35374324620 的 windows-msvc 腿)。独占句柄
+    // (_SH_DENYRW)模拟过滤驱动的"在但打不开"。
     gateway::GatewayJobAddCommand blocked;
     blocked.prompt = "被短拒的任务";
     blocked.idempotency_key = "cmdio-2";
@@ -632,9 +649,20 @@ TEST_CASE("命令文件消费:坏内容删除留数,打不开留待下一拍") {
         CHECK(std::filesystem::exists(command_file, ec));  // 文件还在,留给下一拍
     }
     std::fclose(exclusive);
-    const auto retried = gateway::PollJobCommands(control);
-    REQUIRE(retried.adds.size() == 1);
-    CHECK(retried.adds[0].prompt == "被短拒的任务");
-    CHECK_FALSE(std::filesystem::exists(command_file, ec));  // 这次消费即删
+    // 松手后下一拍消费;删除可能又遇瞬态拦,同样有界收口。
+    bool consumed_after_release = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto again = gateway::PollJobCommands(control);
+        if (again.adds.size() == 1 && again.adds[0].prompt == "被短拒的任务") {
+            consumed_after_release = true;
+        }
+        if (count_left() == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(consumed_after_release);
+    CHECK(count_left() == 0);
 #endif
 }

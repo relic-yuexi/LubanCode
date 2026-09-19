@@ -226,19 +226,24 @@ ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir) {
     }
     std::sort(files.begin(), files.end());
     for (const std::filesystem::path& file : files) {
-        std::ifstream stream(file, std::ios::binary);
-        if (!stream) {
-            // 打不开≠读不懂:Windows 上原子换名落地的短窗里,防病毒/索引
-            // 过滤驱动会把目标文件的打开短拒数十毫秒(manifest.cpp 三案
-            // CI 实测的同款病灶;本根因的 CI 案:35403217677 / 35374324620
-            // 的 windows-msvc 腿——create 命令被当坏命令删掉,受理回执
-            // 15 秒等不到,上游 task/create 回 null,审批用例 305/terminate
-            // 双爆)。内容没读着就不能按坏数据处置:文件留在原地,泵的
-            // 轮询节拍就是重试;真打不开也只是每拍一次空探,零副作用。
-            continue;
+        // 读与删分段:MSVC 的 ifstream 句柄不带 FILE_SHARE_DELETE(fstream
+        // 长期缺口),stream 开着调 remove 必吃共享违例——旧码在 stream
+        // 存活期里删,windows 腿上删除静默失败,命令文件每拍重消费,靠
+        // store 幂等兜底白烧。先读完、关柄,再删。
+        std::string text;
+        {
+            std::ifstream stream(file, std::ios::binary);
+            if (!stream) {
+                // 打不开≠读不懂:Windows 上原子换名落地的短窗里,防病毒/
+                // 索引过滤驱动会把目标文件的打开短拒数十毫秒(manifest.cpp
+                // 三案 CI 实测的同款病灶)。内容没读着就不能按坏数据处置:
+                // 文件留在原地,泵的轮询节拍就是重试;真打不开也只是每拍
+                // 一次空探,零副作用。
+                continue;
+            }
+            text.assign((std::istreambuf_iterator<char>(stream)),
+                        std::istreambuf_iterator<char>());
         }
-        const std::string text((std::istreambuf_iterator<char>(stream)),
-                               std::istreambuf_iterator<char>());
         nlohmann::json parsed;
         bool ok = false;
         try {
