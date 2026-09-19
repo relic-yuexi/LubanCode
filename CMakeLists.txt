@@ -374,7 +374,10 @@ if(WIN32)
     src/platform/dynamic_library_win.cpp
     src/platform/console_win.cpp
     src/platform/peer_transport_win.cpp
-    src/platform/clipboard_win.cpp)
+    src/platform/clipboard_win.cpp
+    # 更新器 C++ 化批二第③单:文件占用/重解析点/EXE 归属的平台补件
+    # (Windows 腿:CreateFileW 独占写探测 + GetFileAttributesW 专查 reparse)。
+    src/platform/file_in_use_win.cpp)
 else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
@@ -383,7 +386,8 @@ else()
     src/platform/dynamic_library_posix.cpp
     src/platform/console_posix.cpp
     src/platform/peer_transport_posix.cpp
-    src/platform/clipboard_posix.cpp)
+    src/platform/clipboard_posix.cpp
+    src/platform/file_in_use_posix.cpp)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -956,6 +960,15 @@ add_library(lubancode_engine STATIC
   # 包外一概不动,目录/reparse 挡路即 conflict 阻断(退出码 3)。纯函数
   # 零 IO,批三 apply 落地层吃这张表。
   src/updater/whitelist_plan.cpp
+  # 更新助手 C++ 化·批二第③单:安装布局层(versions/staging/backups/
+  # updates 相对布局、三态探测、current.json 指针与 install-state.json
+  # schema 2 读写)+ 八相事务账(updates/<txn>.json schema 1,字段名与
+  # python 版逐字相同,黄金文件对拍)+ 安装根独占锁(updates/.lock,
+  # create-new 原子占位,照 GatewayLock 范式)。纯库,依赖 platform/
+  # trajectory 身份核;批三引擎层在此底座上叠。
+  src/updater/layout.cpp
+  src/updater/txn.cpp
+  src/updater/lock.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
