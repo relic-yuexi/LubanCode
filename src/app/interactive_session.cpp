@@ -705,7 +705,15 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
 CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
     // P0-2:统一过 TrajectoryCommandExecutor(flag 开的会话记 command
     // lifecycle;flag 关零变透传)。
-    return lubancode::app::ExecuteSessionCommand(dispatch_ctx_, parsed);
+    const CommandFlow flow = lubancode::app::ExecuteSessionCommand(dispatch_ctx_, parsed);
+    // 会话边界命令(按代理状态投影单 P1):clear/resume 换代——旧
+    // session_generation 的视图账、每页 UI 状态整册作废,任务号重用也
+    // 串不到旧页。命令本身成功与否都换(边界过了就是新会话)。
+    if (parsed.command == lubancode::cli::SlashCommand::Clear ||
+        parsed.command == lubancode::cli::SlashCommand::Resume) {
+        view_registry_.BeginNewSession();
+    }
+    return flow;
 }
 
 
@@ -959,6 +967,8 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     turn.recorder = is_user_turn ? record_wiring_.recorder() : nullptr;
     turn.silent = silent;
     turn.turn_events = &turn_events;
+    // 按代理状态投影单 P1:本轮的收账/绘制分账挂进登记簿。
+    turn.view_registry = &view_registry_;
     // 模型输出图片与工具二进制 artifact 的落盘口(P0-2 归拢):session
     // artifacts/sha256/ 内容寻址,同字节只落一份。账本没开(Run() 已拦,
     // 这里只剩极端竞态窗口)就不挂目录,引擎遇图明败,不吞图。

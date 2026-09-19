@@ -697,10 +697,28 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // viewed_task_id 现取,整块换进上方会话视口——导航坞只放导航。
     lubancode::cli::SessionAgentPanelHost().SetProvider(
         [this]() { return agent_panel_presenter_.Entries(session_agent_tool()); });
-    lubancode::cli::SetAgentViewSwitchHook(
-        [this](int viewed_task_id, int tail_rows) {
+    // 按代理状态投影单 P1:换页钩子接登记簿——身份先切(绘制闸立即生效),
+    // main 页的重铺走成对协议(关闸取快照 → 打印 → 钉水位),sub 页照旧
+    // 走 presenter。调用方(console_input 的 print_view_frame)已把整段
+    // 包进画笔护栏(WithMainRenderLock),在飞的 main 绘制让路。
+    lubancode::cli::SetAgentViewSwitchHook([this](int viewed_task_id, int tail_rows) {
+        view_registry_.SwitchViewed(viewed_task_id);
+        if (viewed_task_id == 0) {
+            const AgentViewRegistry::MainTurnSnapshot snapshot = view_registry_.TakeMainLedgeForRepaint();
+            transcript_ui_.PrintViewedTranscript(0, tail_rows, snapshot.view.get());
+            view_registry_.MarkMainPrinted(snapshot.revision);
+        } else {
             transcript_ui_.PrintViewedTranscript(viewed_task_id, tail_rows);
-        });
+        }
+    });
+    // 换页画笔护栏/修订号提供/会话世代提供:cli 侧三个槽各接登记簿一口。
+    lubancode::cli::SetViewSwitchGuard([this](const std::function<void()>& body) {
+        view_registry_.WithMainRenderLock(body);
+    });
+    lubancode::cli::SetMainViewRevisionProvider(
+        [this]() -> std::uint64_t { return view_registry_.MainRevision(); });
+    lubancode::cli::SetAgentViewGenerationProvider(
+        [this]() -> std::uint64_t { return view_registry_.session_generation(); });
 
     // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
@@ -747,6 +765,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         // 头行从假条目表出,正文给一行占位——刮屏驱动器照旧只认屏面。
         lubancode::cli::SetAgentViewSwitchHook([demo_count, demo_idle, this](int viewed_task_id, int tail_rows) {
             (void)tail_rows;  // 演示代理没有实时流,重铺拍与整铺同款
+            // 登记簿身份照切(按代理状态投影单 P1):演示页也要关 main 的
+            // 绘制闸,截图驱动里切页后 main 不得再往屏上落字。
+            view_registry_.SwitchViewed(viewed_task_id);
             std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
             TermOut() << "\n";
             if (viewed_task_id == 0) {
@@ -1211,6 +1232,11 @@ TerminalSessionController::~TerminalSessionController() {
     // 面板接线宿主整体收清(provider/actions 双清;终端接线收尾单)。
     lubancode::cli::SessionAgentPanelHost().Reset();
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
+    // 按代理状态投影单 P1:换页护栏/修订号/世代三个槽一并摘掉(回调都
+    // 抓着 this),登记簿本尊随成员析构退场。
+    lubancode::cli::SetViewSwitchGuard(nullptr);
+    lubancode::cli::SetMainViewRevisionProvider(nullptr);
+    lubancode::cli::SetAgentViewGenerationProvider(nullptr);
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetBackgroundStatusProvider(nullptr);

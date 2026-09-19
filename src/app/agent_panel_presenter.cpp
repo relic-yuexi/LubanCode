@@ -599,6 +599,154 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
     return lines;
 }
 
+// sub 侧快照适配器(合同见 agent_panel_presenter.hpp)。工具按
+// tool_use_id 原位配对(同 BuildAgentTaskBlocks 的规矩:同 id 首枚 result
+// 生效,重复/迟到不串账);稳定 item ID 优先用事件的 item_id,旧账退
+// "task-<id>-ev-<序>" 合成号。终态映射:tool_status → TurnItemViewState,
+// 流式尾巴(streaming=true)保持 Running——统一 renderer 拿它画"进行中"。
+lubancode::cli::AgentFrameSnapshot BuildAgentFrameSnapshotFromTaskEvents(
+    const lubancode::cli::AgentViewKey& key, const std::vector<lubancode::tools::AgentTaskEvent>& events,
+    bool running, const std::string& title, std::uint64_t content_revision, std::uint64_t stats_revision) {
+    using lubancode::tools::AgentTaskEvent;
+    using lubancode::tools::AgentTaskEventKind;
+    using lubancode::tools::AgentTaskToolStatus;
+    auto view = std::make_shared<runtime::TurnView>();
+    view->turn_id = key.task_id != 0 ? "task-" + std::to_string(key.task_id) : std::string();
+    view->status = running ? runtime::TurnItemViewState::Running : runtime::TurnItemViewState::Succeeded;
+    // 工具配对:tool_use_id -> (start 序号, result 事件指针)。
+    std::map<std::string, std::size_t> tool_start_of_id;
+    std::map<std::size_t, const AgentTaskEvent*> tool_result_of_start;
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        const AgentTaskEvent& event = events[i];
+        if (event.kind == AgentTaskEventKind::ToolStart && !event.tool_use_id.empty()) {
+            tool_start_of_id.emplace(event.tool_use_id, i);
+        } else if (event.kind == AgentTaskEventKind::ToolResult && !event.tool_use_id.empty()) {
+            const auto found = tool_start_of_id.find(event.tool_use_id);
+            if (found != tool_start_of_id.end() &&
+                tool_result_of_start.find(found->second) == tool_result_of_start.end()) {
+                tool_result_of_start[found->second] = &event;  // 同 id 首枚生效
+            }
+        }
+    }
+    const auto item_id_of = [&](std::size_t index, const AgentTaskEvent& event) {
+        return event.item_id.empty() ? "task-" + std::to_string(key.task_id) + "-ev-" + std::to_string(index)
+                                     : event.item_id;
+    };
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        const AgentTaskEvent& event = events[i];
+        runtime::TurnItemView item;
+        item.item_id = item_id_of(i, event);
+        item.seq = i;
+        switch (event.kind) {
+            case AgentTaskEventKind::UserMessage:
+                item.kind = runtime::TurnItemViewKind::User;
+                item.status = runtime::TurnItemViewState::Succeeded;
+                item.result_text = event.text;
+                break;
+            case AgentTaskEventKind::SteeringMessage:
+                item.kind = runtime::TurnItemViewKind::Warning;
+                item.status = runtime::TurnItemViewState::Succeeded;
+                item.result_text = event.text;
+                break;
+            case AgentTaskEventKind::AssistantText:
+                item.kind = runtime::TurnItemViewKind::Text;
+                item.status = runtime::TurnItemViewState::Running;
+                item.result_text = event.text;
+                break;
+            case AgentTaskEventKind::AssistantReasoning:
+                item.kind = runtime::TurnItemViewKind::Thinking;
+                item.status = runtime::TurnItemViewState::Running;
+                item.result_text = event.text;
+                break;
+            case AgentTaskEventKind::ToolStart: {
+                item.kind = runtime::TurnItemViewKind::Tool;
+                item.tool_use_id = event.tool_use_id;
+                item.tool_name = event.tool_name;
+                item.input = event.input_json.empty()
+                                 ? nlohmann::json::object()
+                                 : nlohmann::json::parse(event.input_json, nullptr, false);
+                const auto paired = tool_result_of_start.find(i);
+                if (paired == tool_result_of_start.end()) {
+                    item.status = runtime::TurnItemViewState::Running;
+                    break;
+                }
+                const AgentTaskEvent& result = *paired->second;
+                item.result_text = result.result;
+                item.result_is_error = result.is_error;
+                switch (result.tool_status) {
+                    case AgentTaskToolStatus::Succeeded:
+                        item.status = runtime::TurnItemViewState::Succeeded;
+                        break;
+                    case AgentTaskToolStatus::Failed:
+                        item.status = runtime::TurnItemViewState::Failed;
+                        break;
+                    case AgentTaskToolStatus::Declined:
+                        item.status = runtime::TurnItemViewState::Declined;
+                        break;
+                    case AgentTaskToolStatus::Cancelled:
+                        item.status = runtime::TurnItemViewState::Cancelled;
+                        break;
+                    case AgentTaskToolStatus::Interrupted:
+                        item.status = runtime::TurnItemViewState::Interrupted;
+                        break;
+                    case AgentTaskToolStatus::Skipped:
+                        item.status = runtime::TurnItemViewState::Skipped;
+                        break;
+                    case AgentTaskToolStatus::None:
+                        item.status = result.is_error ? runtime::TurnItemViewState::Failed
+                                                      : runtime::TurnItemViewState::Succeeded;
+                        break;
+                }
+                break;
+            }
+            case AgentTaskEventKind::ToolResult:
+                // 孤儿 result(没配上 start 的迟到/旧账边缘):单画一张只有
+                // 结果的卡,不吞(与 BuildAgentTaskBlocks 同规矩)。
+                {
+                    bool paired = false;
+                    for (const auto& [start_index, result] : tool_result_of_start) {
+                        (void)start_index;
+                        if (result == &event) {
+                            paired = true;
+                            break;
+                        }
+                    }
+                    if (paired) {
+                        continue;  // 已并入 ToolStart 那枚
+                    }
+                    item.kind = runtime::TurnItemViewKind::Tool;
+                    item.tool_name = event.tool_name;
+                    item.result_text = event.result;
+                    item.result_is_error = event.is_error;
+                    item.status = event.is_error ? runtime::TurnItemViewState::Failed
+                                                 : runtime::TurnItemViewState::Succeeded;
+                }
+                break;
+            case AgentTaskEventKind::CompactCheckpoint:
+                item.kind = runtime::TurnItemViewKind::Warning;
+                item.status = runtime::TurnItemViewState::Succeeded;
+                break;
+            case AgentTaskEventKind::Completion:
+                item.kind = runtime::TurnItemViewKind::Text;
+                item.status = runtime::TurnItemViewState::Succeeded;
+                item.result_text = event.text;
+                view->status = runtime::TurnItemViewState::Succeeded;
+                break;
+            case AgentTaskEventKind::Failure:
+                item.kind = runtime::TurnItemViewKind::Error;
+                item.status = runtime::TurnItemViewState::Failed;
+                item.result_text = event.text;
+                view->status = runtime::TurnItemViewState::Failed;
+                break;
+        }
+        view->items.push_back(std::move(item));
+    }
+    view->metrics.tool_count = static_cast<int>(tool_start_of_id.size());
+    return lubancode::cli::AgentFrameSnapshotFromTurnView(key, std::move(view), content_revision,
+                                                          /*activity_revision=*/content_revision,
+                                                          stats_revision, running);
+}
+
 // 事件账 -> 会话块(同构渲染单 P0/P1)。工具/思考卡按事件顺序攒组,遇
 // markdown/通知事件先冲组;工具配对按 tool_use_id 对账(同 id 首枚 result
 // 生效,多工具 start/result 交错时按 id 原位收口,不串结果、不吞卡),旧账
