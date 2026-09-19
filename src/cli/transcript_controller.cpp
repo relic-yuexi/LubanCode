@@ -13,6 +13,7 @@
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "cli/turn_renderer.hpp"
+#include "cli/ui_trace.hpp"
 #include "platform/console.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
@@ -54,7 +55,33 @@ void TranscriptUiController::SetHooks(Hooks hooks) { hooks_ = std::move(hooks); 
 // 只认终端层 console_input 那本 view_body_top——铺帧前现记现擦,不跨
 // 调用攒绝对行号。这里(PrintViewedTranscript)只从终端层摆好的光标处
 // 起打印。
-void TranscriptUiController::PrintViewedTranscript(int viewed_task_id, int tail_rows) {
+void TranscriptUiController::PrintViewedTranscript(int viewed_task_id, int tail_rows,
+                                                   const runtime::TurnView* live_main_turn) {
+    // 每页 UI 状态(按代理状态投影单 P1):换页时存旧取新——旧页的展开
+    // 档/聚焦态进册,新页从册里还原;同一页的重铺拍(tail_rows>0)不动册。
+    {
+        const std::uint64_t generation = lubancode::cli::CurrentAgentViewGeneration();
+        const AgentViewKey key_old = AgentViewKeyFor(generation, ui_state_page_);
+        const AgentViewKey key_new = AgentViewKeyFor(generation, viewed_task_id);
+        if (key_old != key_new) {
+            AgentUiState leaving;
+            leaving.view_expanded = agent_view_expanded_;
+            leaving.expand_latest = expand_latest_.load(std::memory_order_acquire);
+            leaving.expand_all = expanded_.load(std::memory_order_acquire);
+            leaving.focus_view_active = focus_view_active_;
+            AgentUiStates().Save(key_old, std::move(leaving));
+            const AgentUiState entering = AgentUiStates().Load(key_new);
+            if (key_new.is_main()) {
+                expand_latest_.store(entering.expand_latest, std::memory_order_release);
+                expanded_.store(entering.expand_all, std::memory_order_release);
+                focus_view_active_ = entering.focus_view_active;
+                agent_view_expanded_ = false;
+            } else {
+                agent_view_expanded_ = entering.view_expanded;
+            }
+            ui_state_page_ = viewed_task_id;
+        }
+    }
     std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
     lubancode::cli::EraseStreamFooterLocked();
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
@@ -62,16 +89,34 @@ void TranscriptUiController::PrintViewedTranscript(int viewed_task_id, int tail_
     const auto print_line = [&](const std::string& line) { TermOut() << line << "\n"; };
 
     if (viewed_task_id == 0) {
-        // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件),最近
-        // 几条摘要重铺,视口/标题/收件目标一同复位。
+        // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件)。
         print_line(theme_.stats + tr("agent_panel.main_header") + theme_.reset);
         print_line(theme_.stats + tr("agent_panel.back_to_main") + theme_.reset);
-        const int width_for_items = width;
-        const std::size_t from = items_.size() > 5 ? items_.size() - 5 : 0;
-        for (std::size_t i = from; i < items_.size(); ++i) {
-            print_line(lubancode::cli::FormatTranscriptItem(
-                items_[i], theme_, width_for_items, /*expanded=*/false,
-                static_cast<int>(i) == focus_index_));
+        if (live_main_turn != nullptr) {
+            // 活回合账(按代理状态投影单 P1):整轮重铺当前回合——与
+            // Ctrl+L 同一颗 renderer,含正文、思考与工具条目的当前状态。
+            // 这份账由登记簿成对递入(重铺期间泵画笔锁被换页事务持有,
+            // 快照与打印水位天然对齐);之后的新事件按水位接续落笔,
+            // 不重不漏。
+            TurnRenderOptions render_options;
+            render_options.width = width;
+            render_options.plain = theme_.reset.empty();
+            render_options.expanded = expanded_.load(std::memory_order_acquire);
+            render_options.include_text = true;
+            const std::vector<std::string> lines = lubancode::cli::RenderTurnView(*live_main_turn, theme_,
+                                                                                 render_options);
+            for (const std::string& line : lines) {
+                print_line(line);
+            }
+        } else {
+            // 没有活回合账(空闲/老会话):最近几条摘要重铺,老路原样。
+            const int width_for_items = width;
+            const std::size_t from = items_.size() > 5 ? items_.size() - 5 : 0;
+            for (std::size_t i = from; i < items_.size(); ++i) {
+                print_line(lubancode::cli::FormatTranscriptItem(
+                    items_[i], theme_, width_for_items, /*expanded=*/false,
+                    static_cast<int>(i) == focus_index_));
+            }
         }
     } else {
         std::vector<std::string> body;
@@ -101,6 +146,15 @@ void TranscriptUiController::PrintViewedTranscript(int viewed_task_id, int tail_
     }
     TermOut().flush();
     lubancode::cli::RedrawStreamFooterLocked();
+    // P0 证据基建:查看帧也是一次帧提交——owner 记这帧铺的是哪页,writer
+    // 标来路。事后对账"main 的 sink commit 与 sub 页的 view_frame commit
+    // 谁先谁后"全靠这笔。
+    if (lubancode::cli::ui_trace::Enabled()) {
+        lubancode::cli::ui_trace::NoteCommitted(
+            AgentViewKeyFor(lubancode::cli::CurrentAgentViewGeneration(), viewed_task_id), 0,
+            live_main_turn != nullptr ? "view_frame:live_main" : "view_frame",
+            live_main_turn != nullptr ? live_main_turn->items.size() : 0, "transcript_controller");
+    }
 }
 
 // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。

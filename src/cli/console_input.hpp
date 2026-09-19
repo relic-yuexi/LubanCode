@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "cli/agent_panel.hpp"  // AgentPanelEntry/Actions(面板纯逻辑层)
+#include "cli/agent_view_state.hpp"  // AgentUiStateStore(每页交互状态册,P1)
 #include "cli/choice_menu.hpp"
 #include "cli/format_utils.hpp"  // StatusPanelData(状态行数据源)
 #include "cli/history_search.hpp"  // PromptHistoryDataset(Ctrl+R 数据)
@@ -301,6 +302,29 @@ using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
 // 流式监听)调钩子前都已按账擦净旧帧、把光标摆到帧顶;流式路钩子自己
 // (在 StdoutWriteMutex 内)先擦 footer 再铺、铺完画回。传空钩子即清除。
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook);
+
+// ---- 按代理状态投影单 P1:cli 侧的接线口 --------------------------------
+// 换页事务的画笔护栏:空闲 composer 与流式监听线程的 print_view_frame 把
+// "擦旧帧 + 调视图切换钩子铺新帧"整段包进这道护栏——会话侧接
+// AgentViewRegistry::WithMainRenderLock(持有活回合的泵画笔锁),在飞的
+// main 绘制让路,新页铺完才放,擦与铺之间不再插进别人的字。传空即清除
+// (无活回合/单测,直走)。
+void SetViewSwitchGuard(std::function<void(const std::function<void()>&)> guard);
+
+// main 查看页的修订号提供口(忙路实时流订阅):流式监听线程的 50ms 拍
+// 拿 CurrentMainViewRevision 判断"正看着的 main 又出活了没",到节流拍
+// 重铺当前回合。会话侧接 AgentViewRegistry::MainRevision。
+void SetMainViewRevisionProvider(std::function<std::uint64_t()> provider);
+std::uint64_t CurrentMainViewRevision();
+
+// 会话世代提供口(AgentViewKey 的 session_generation,会话侧接登记簿;
+// 空 = 0)。/clear、/resume 换代,旧世代的每页状态整册作废。
+void SetAgentViewGenerationProvider(std::function<std::uint64_t()> provider);
+std::uint64_t CurrentAgentViewGeneration();
+
+// 每页交互状态册(滚动锚/展开档/草稿,切走保留切回还原):空闲与流式
+// 两条查看路径共用;键 = CurrentAgentViewGeneration() + viewed_task_id。
+AgentUiStateStore& AgentUiStates();
 
 // 作废查看帧的跨读取账(查看态回流零扰动单):非静默轮的正文会在屏上
 // 落笔、可能写进查看帧区,那之后帧的绝对行号不可信。RunTurn 在非静默轮

@@ -246,6 +246,42 @@ std::optional<int>& ComposerTargetSlot() {
     static std::optional<int> target;
     return target;
 }
+
+// ---- 按代理状态投影单 P1:cli 侧的三个槽 --------------------------------
+// 每页交互状态册(滚动/展开/草稿,切走保留切回还原):composer(空闲
+// 切看)与监听线程(流式切看)共用,内部自带小锁。
+// [共享] composer/监听线程/导出口 AgentUiStates。
+AgentUiStateStore& AgentUiStateSlot() {
+    static AgentUiStateStore store;
+    return store;
+}
+
+// 会话世代的提供槽(AgentViewKey 要带 session_generation,cli 不认 app 的
+// 登记簿,由会话侧递进来;空 = 0,单测/演示默认世代)。
+// [共享] composer/监听线程(组 AgentViewKey)/导出口 SetAgentViewGenerationProvider。
+std::function<std::uint64_t()>& AgentViewGenerationSlot() {
+    static std::function<std::uint64_t()> provider;
+    return provider;
+}
+
+// 换页事务的画笔护栏槽:擦旧帧+铺新帧的整个过程包进这道护栏,护栏内
+// 持有活回合的泵画笔锁(会话侧接线 AgentViewRegistry::WithMainRenderLock)
+// ——在飞的 main 绘制让路,新页铺完才放。空(没接/无活回合)= 直走。
+// [共享] composer(空闲 print_view_frame)/监听线程(流式 print_view_frame)
+// /导出口 SetViewSwitchGuard。
+std::function<void(const std::function<void()>&)>& AgentViewSwitchGuardSlot() {
+    static std::function<void(const std::function<void()>&)> guard;
+    return guard;
+}
+
+// main 查看页的修订号提供槽(忙路实时流订阅用):监听线程的 50ms 拍拿它
+// 判断"正看着的 main 又出了多少活",到节流拍重铺当前回合。空 = 恒 0
+// (没有活回合账,不触发重铺;sub 页照旧走台账 content_revision)。
+// [共享] 监听线程(查看页实时流)/导出口 SetMainViewRevisionProvider。
+std::function<std::uint64_t()>& MainViewRevisionSlot() {
+    static std::function<std::uint64_t()> provider;
+    return provider;
+}
 std::mutex& ComposerTargetMutex() {
     static std::mutex m;
     return m;
@@ -1555,6 +1591,31 @@ void InvalidateViewFrameLedger() {
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook) {
     AgentViewSwitchHookSlot() = std::move(hook);
 }
+
+// ---- 按代理状态投影单 P1:导出口(槽位合同见上面那组 [共享] 注释)----
+void SetViewSwitchGuard(std::function<void(const std::function<void()>&)> guard) {
+    AgentViewSwitchGuardSlot() = std::move(guard);
+}
+
+void SetMainViewRevisionProvider(std::function<std::uint64_t()> provider) {
+    MainViewRevisionSlot() = std::move(provider);
+}
+
+void SetAgentViewGenerationProvider(std::function<std::uint64_t()> provider) {
+    AgentViewGenerationSlot() = std::move(provider);
+}
+
+std::uint64_t CurrentAgentViewGeneration() {
+    const auto& provider = AgentViewGenerationSlot();
+    return provider ? provider() : 0;
+}
+
+std::uint64_t CurrentMainViewRevision() {
+    const auto& provider = MainViewRevisionSlot();
+    return provider ? provider() : 0;
+}
+
+AgentUiStateStore& AgentUiStates() { return AgentUiStateSlot(); }
 
 void ResetAgentPanelSession() { PanelSessionSlot().Reset(); }
 
