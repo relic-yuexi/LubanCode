@@ -717,6 +717,7 @@ BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene) {
     }
     model.activity_rows = scene.activity_rows;
     model.queue_rows = scene.queue_rows;
+    model.global_notice_rows = scene.global_notice_rows;  // P3:显式全局通知区
     model.agent_dock_rows = scene.dock_rows;
     model.agent_dock_tints = scene.dock_tints;
     if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
