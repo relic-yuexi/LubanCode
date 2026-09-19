@@ -451,10 +451,17 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // Submit 落空,presenter 当场跑,行为与旧路一字不差。
     // on_tool_confirm_async 缺位的旧路(子代理/PTC 转发、单测)不走这里,
     // 照旧同步、不许多线程化。
+    // P3 目标绑定:世代(/clear、/resume 换代后旧审批串不进来)+本轮
+    // canonical turn id(回合收口按它收口)。ctx.turn_id_for_trace 在 RunTurn
+    // 铸号后已写回 canonical 那枚;这里提局部量进捕获(lambda 捕获表本就
+    // 逐项点名,不整只捕 ctx)。
+    const std::uint64_t approval_session_generation =
+        ctx.view_registry != nullptr ? ctx.view_registry->session_generation() : 0;
+    const std::string approval_turn_id = ctx.turn_id_for_trace;
     wiring.on_tool_confirm_async =
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
-         call_scopes, has_permission_hooks,
-         approval_observer](const lubancode::runtime::ApprovalRequest& request)
+         call_scopes, has_permission_hooks, approval_observer, approval_session_generation,
+         approval_turn_id](const lubancode::runtime::ApprovalRequest& request)
         -> std::shared_ptr<lubancode::runtime::InteractionFuture> {
         const lubancode::app::ToolCallScope scope = call_scopes->Take(request.tool_use_id);
         auto presenter = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands,
@@ -466,12 +473,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         };
         if (auto decision = lubancode::cli::SessionApprovalChannel().Submit(
                 /*owner_task_id=*/0, request.tool_name, std::move(presenter),
-                // P3 目标绑定:世代(/clear、/resume 换代后旧审批串不进来)+
-                // 本轮 canonical turn id(回合收口按它收口)。ctx.turn_id_for_trace
-                // 在 RunTurn 铸号后已写回 canonical 那枚。
-                /*session_generation=*/ctx.view_registry != nullptr ? ctx.view_registry->session_generation()
-                                                                    : 0,
-                /*turn_id=*/ctx.turn_id_for_trace)) {
+                /*session_generation=*/approval_session_generation,
+                /*turn_id=*/approval_turn_id)) {
             return std::make_shared<ChannelApprovalFuture>(std::move(*decision));
         }
         const bool allowed = presenter();
