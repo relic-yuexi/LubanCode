@@ -337,3 +337,66 @@ TEST_CASE("宿主(one-shot/--yes):auto_confirm 全放,批次照常并行收口")
     CHECK_FALSE(blocks[2]->is_error);
     CHECK(rig.ToolItemCount(runtime::ServerEventKind::ItemCompleted) == 3);
 }
+
+// ---------------------------------------------------------------------------
+// 标题触发提前单(发车即起飞):after_turn_bridge_open 的调用时序——必须
+// 在首模型请求发出之前被调(宿主在那里起飞标题精炼,与主请求并行),且
+// 每轮恰一次。断先后不靠 sleep:backend 收到首请求时回调必已发生,否则
+// 记违规。
+// ---------------------------------------------------------------------------
+TEST_CASE("发车即起飞: after_turn_bridge_open 在首模型请求前被调,每轮恰一次") {
+    TurnRig rig(agent::ToolBatchStrategy::Exclusive, /*concurrency=*/1);
+    std::atomic<int> kicks{0};
+    std::atomic<bool> kicked_before_first_request{false};
+    // 哨探:首枚请求到达时回调必已发生——"发车即起飞"的时序就是这个先
+    // 后(主请求未发,精炼先/并行起飞)。
+    struct ProbeBackend final : public api::Backend {
+        std::vector<std::vector<api::StreamEvent>> scripts;
+        std::vector<api::Request> captured;
+        std::atomic<int>* kicks;
+        std::atomic<bool>* ok;
+        std::expected<void, api::Error> send_stream(
+            const api::Request& request, const std::function<void(const api::StreamEvent&)>& on_event,
+            const std::atomic<bool>* = nullptr) override {
+            if (captured.empty() && kicks->load() == 0) {
+                ok->store(false);  // 首请求前回调没来:时序违规
+            }
+            captured.push_back(request);
+            if (captured.size() <= scripts.size()) {
+                for (const auto& event : scripts[captured.size() - 1]) {
+                    on_event(event);
+                }
+            }
+            return {};
+        }
+    };
+    // TurnRig 的 loop 绑的是它自己的 backend,这里换绑探针:重新造一只
+    // Agent 指向探针(TurnContext 只认 ctx.loop)。
+    ProbeBackend probe;
+    probe.kicks = &kicks;
+    probe.ok = &kicked_before_first_request;
+    probe.scripts = {TextScript("收到")};
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system prompt";
+    std::unique_ptr<agent::Agent> probe_loop =
+        std::make_unique<agent::Agent>(probe, rig.registry, std::move(profile));
+
+    app::TurnContext ctx = rig.MakeContext("问一句");
+    ctx.loop = probe_loop.get();
+    ctx.after_turn_bridge_open = [&kicks] { ++kicks; };
+    kicked_before_first_request = true;  // 先立真,首请求发现回调没来才翻假
+    const app::RunTurnResult result = app::RunTurn(ctx);
+
+    CHECK(result.status == 0);
+    CHECK(kicks.load() == 1);  // 每轮恰一次
+    CHECK(kicked_before_first_request.load());  // 首模型请求前已回调
+    REQUIRE(probe.captured.size() == 1);
+
+    // 不挂回调(单发/单测的缺省):一字不变,照常跑完。
+    rig.backend.scripts = {TextScript("再办一句")};
+    app::TurnContext plain = rig.MakeContext("再问一句");
+    const app::RunTurnResult plain_result = app::RunTurn(plain);
+    CHECK(plain_result.status == 0);
+    CHECK(kicks.load() == 1);  // 没挂就不再调
+}

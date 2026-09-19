@@ -1,10 +1,13 @@
 // 会话标题的异步精炼器(实测问题 7):两层标题的第二层。
 //
-// Start 由会话在首个主回合收口后的空闲边界调(ec8b22df 起:旁路小 turn
-// 与主 turn 不能同流并存,一 stream 一 open turn,回合里发必撞车):独占
-// 裸 backend(ModelRouterService 的 RouteDetached 造,不与主会话共用
-// client,不抢流式回调)、只发一次 cheap 采样——首问截段 600 字节、
-// max_tokens=24、5 秒看门狗、无工具。起飞后谁也不等它,提示符照还。
+// Start 由会话在首问主回合铸号后(v3 场,触发时机提前单:发车即起飞,
+// BeginTurn 后首模型请求前)或收口后的空闲边界(v2 场兜底)调。v3 场
+// 回合内起飞不撞账:旁路桥的 title_refine 请求归首问主回合号
+//(active_main_turn_id),v3 无轮账互斥,V3Writer 提交全程持锁,与主
+// turn 的写在盘上串行;HTTP 侧走独占裸 backend(ModelRouterService 的
+// RouteDetached 造,不与主会话共用 client,不抢流式回调)、只发一次
+// cheap 采样——首问截段 600 字节、max_tokens=24、5 秒看门狗、无工具。
+// 起飞后谁也不等它,提示符照还。
 //
 // 完工的叫醒:Ready()(只读、线程安全)在结果备好待收时翻真,装配层把
 // 它挂进 IdleWakeCoordinator——空闲 composer 的 100ms 拍一看真,ReadLine
