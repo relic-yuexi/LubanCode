@@ -57,6 +57,7 @@ public:
         ++session_generation_;
         viewed_task_id_ = 0;
         ++view_epoch_;
+        ++layout_revision_;
         ledge_view_.reset();
         ledge_revision_ = 0;
         main_revision_ = 0;
@@ -111,6 +112,31 @@ public:
         return view_epoch_;
     }
 
+    // ---- 帧令牌(P2:切页事务与 FrameToken) -------------------------------
+
+    // 此刻"画 target 这页"的令牌(锁外快照用)。target 的存在性由调用方
+    //(面板台账)先核;这里只发号。
+    cli::FrameToken TokenFor(int task_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return cli::FrameToken{cli::AgentViewKey{session_generation_, task_id}, view_epoch_, layout_revision_};
+    }
+
+    // 写屏前的核对(统一提交锁内调):令牌三要素全对上当前态才放行。快速
+    // A→B→A 的第一轮 A(旧 epoch)、resize 前算好的帧(旧 layout)都被
+    // 这一句拦下——丢的是画面指令,事件照收账。
+    bool TokenCurrent(const cli::FrameToken& token) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return token.view.session_generation == session_generation_ && token.view.task_id == viewed_task_id_ &&
+               token.view_epoch == view_epoch_ && token.layout_revision == layout_revision_;
+    }
+
+    // 布局翻版(resize/Ctrl+L/Ctrl+O/展开档切换):layout_revision +1,
+    // 在飞的旧布局帧全部失配。返回新版本号。
+    std::uint64_t BumpLayoutRevision() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ++layout_revision_;
+    }
+
     // ---- main 活回合账(ledge)---------------------------------------------
     //
     // RunTurn 起回合时登记(collector 指针 + 泵画笔锁),收口时 EndMainTurn
@@ -118,6 +144,10 @@ public:
     // 指针;指针只在本锁内读写。
 
     void BeginMainTurn(const runtime::TurnCollector* collector, std::recursive_mutex* render_mutex) {
+        // render_mutex 参数实为统一提交锁(P2):调度器路径传
+        // SessionUiDispatcher::commit_mutex,旧路传 sink 自持那把;护栏
+        // WithMainRenderLock 拿它把换页事务与在飞渲染串起来。参数名保持
+        // 旧签名,免动全部调用点。
         std::lock_guard<std::mutex> lock(mutex_);
         collector_ = collector;
         render_mutex_ = render_mutex;
@@ -238,6 +268,7 @@ private:
     std::uint64_t session_generation_ = 1;  // 从 1 起;0 留给"无登记簿"的单测默认键
     int viewed_task_id_ = 0;                // 正看哪页;0 = main
     std::uint64_t view_epoch_ = 1;
+    std::uint64_t layout_revision_ = 1;     // 帧令牌第三要素:resize/Ctrl+L/Ctrl+O 翻版
 
     const runtime::TurnCollector* collector_ = nullptr;  // 活回合的账本(RunTurn 栈上)
     std::recursive_mutex* render_mutex_ = nullptr;        // 活回合的泵画笔锁(sink 持有)

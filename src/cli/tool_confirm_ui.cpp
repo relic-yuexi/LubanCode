@@ -94,15 +94,22 @@ void ShowAutomaticToolDiff(ToolDisplay& display, const std::string& tool_use_id,
     // diff,存进条目;不再铺一块马上擦掉的临时预览,免得白滚视口、
     // 滚失 Running 锚点。工具完成后在原锚点一次画出留存 diff。
     // 管道模式 ShowDiffPreview 内部直接返回,输出照旧是稳定纯文本。
+    // P2(收拢写者):显示动作经会话级 UI 调度提交——统一提交锁内落笔,
+    // 与在飞的事件渲染互斥。槽未接(单发/单测)就地直走。
     const bool file_tool = name == "write_file" || name == "edit_file";
     if (file_tool) {
-        display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/true);
+        RunUiSync([&] { display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/true); });
     }
 }
 
 bool AskToolConfirm(const ToolConfirmRequest& request) {
     // 单子字段别名:函数体与搬家前(turn_runner.cpp 的 ConfirmToolUse 问话
-    // 半边)一字不差。
+    // 半边)一字不差,除两处 P2(收拢写者)的纪律:
+    //   1. 开屏前先排干会话级 UI 调度的余量(RunUiSync 空体)——此前提交
+    //      的事件画完再开菜单,补上旧路 DispatchInline 自带的"画前排干";
+    //   2. 工具条目的显示态迁移(待确认/擦除)经 RunUiSync 提交,统一
+    //      提交锁内落笔;菜单问话本身不动锁——键盘交互期间不持有任何
+    //      状态锁/终端锁(单子 §五)。
     const std::string& tool_use_id = request.tool_use_id;
     const std::string& name = request.name;
     const nlohmann::json& input = request.input;
@@ -112,6 +119,8 @@ bool AskToolConfirm(const ToolConfirmRequest& request) {
     ToolDisplay& display = *request.display;
     const std::function<void(bool asked, bool allowed)>& approval_observer = request.approval_observer;
     const bool file_tool = name == "write_file" || name == "edit_file";
+
+    RunUiSync([] {});  // 画前排干:菜单开屏时此前的事件已落笔
 
     // UI-B:真的要问了——条目先改成"待确认"态(黄灯 + 待确认),确认块
     // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
@@ -132,18 +141,24 @@ bool AskToolConfirm(const ToolConfirmRequest& request) {
     // 状态块、挂起 ticker、让监听线程交出读权——确认菜单与 ask_user
     // 菜单同一套屏面所有权,不另开第二条路。)
     const lubancode::cli::StreamFooterSuspendScope footer_suspend;
-    const int pending_idx = display.OnConfirmRequest(tool_use_id);
+    // P2:条目转"待确认"态是显示迁移,提交进调度;diff 预览同款。问话
+    //(ReadChoiceMenu)留在本线程——读键不能在 UI 线程/持锁进行。
+    int pending_idx = -1;
+    RunUiSync([&] {
+        pending_idx = display.OnConfirmRequest(tool_use_id);
+        if (file_tool && display.is_console) {
+            display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/false);
+        }
+    });
+    if (!(file_tool && display.is_console)) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        PrintConfirmDetails(name, input);
+    }
     // 审批悬起旁听(loop 单遗留:WaitingPermission 真接线):真要问用户了,
     // 先报 asked;答完在收尾处报 answered。装配层拿它推 scheduler 的
     // WaitingPermission 账(等审批不烧 iteration,悬起期间后续拍 coalesce)。
     if (approval_observer) {
         approval_observer(/*asked=*/true, /*allowed=*/false);
-    }
-    if (file_tool && display.is_console) {
-        display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/false);
-    } else {
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        PrintConfirmDetails(name, input);
     }
     // M10:esc_rejects=true——按 Esc 直接返回 nullopt,走到下面拒绝
     // 分支,不留在输入行里继续等。
@@ -188,7 +203,8 @@ bool AskToolConfirm(const ToolConfirmRequest& request) {
             }
         }
     }
-    display.OnConfirmAnswered(pending_idx, allowed, tool_use_id);
+    // P2:答完收画面(确认块擦除/条目终态)同款提交进调度。
+    RunUiSync([&] { display.OnConfirmAnswered(pending_idx, allowed, tool_use_id); });
     // 审批悬起旁听:答完了(asked=false 那一枚),allowed 是裁定。
     if (approval_observer) {
         approval_observer(/*asked=*/false, allowed);

@@ -47,12 +47,15 @@ std::chrono::milliseconds UiEventPump::FrameIntervalFromEnv() {
     return cached;
 }
 
-UiEventPump::UiEventPump(Renderer renderer, std::chrono::milliseconds frame_interval)
-    : renderer_(std::move(renderer)), frame_interval_(frame_interval) {
+UiEventPump::UiEventPump(Renderer renderer, std::chrono::milliseconds frame_interval,
+                         std::recursive_mutex* shared_commit)
+    : renderer_(std::move(renderer)), frame_interval_(frame_interval), shared_commit_(shared_commit) {
     consumer_ = std::thread([this] { ConsumerMain(); });
 }
 
 UiEventPump::~UiEventPump() { StopAndDrain(); }
+
+std::recursive_mutex& UiEventPump::CommitMutex() { return shared_commit_ != nullptr ? *shared_commit_ : render_mutex_; }
 
 void UiEventPump::PostDelta(const runtime::ServerEvent& event) {
     bool stopped_now = false;
@@ -81,7 +84,7 @@ void UiEventPump::PostDelta(const runtime::ServerEvent& event) {
         // 停表后的迟到流式事件(Stop 钩子续跑的正文):退化成就地画,
         // 与老路一字不差。画笔锁在队列锁外拿——锁序恒 render->queue,
         // 两锁绝不 nested 反持。
-        std::lock_guard<std::recursive_mutex> render(render_mutex_);
+        std::lock_guard<std::recursive_mutex> render(CommitMutex());
         renderer_(event);
         return;
     }
@@ -91,7 +94,7 @@ void UiEventPump::PostDelta(const runtime::ServerEvent& event) {
 }
 
 void UiEventPump::DispatchInline(const runtime::ServerEvent& event) {
-    std::lock_guard<std::recursive_mutex> render(render_mutex_);
+    std::lock_guard<std::recursive_mutex> render(CommitMutex());
     DrainLocked();  // 先排干 pending 的流式事件:正文先于工具卡,次序同老路
     renderer_(event);
 }
@@ -112,7 +115,7 @@ void UiEventPump::StopAndDrain() {
     if (consumer_.joinable()) {
         consumer_.join();
     }
-    std::lock_guard<std::recursive_mutex> render(render_mutex_);
+    std::lock_guard<std::recursive_mutex> render(CommitMutex());
     DrainLocked();  // 余量在调用线程就地画完,一个 delta 不丢
 }
 
@@ -171,7 +174,7 @@ void UiEventPump::ConsumerMain() {
         // (UB),挪出回调之后才有得接;出了异常也记一帧时戳,别叫坏帧
         // 之后的重试连环空转。
         try {
-            std::lock_guard<std::recursive_mutex> render(render_mutex_);
+            std::lock_guard<std::recursive_mutex> render(CommitMutex());
             DrainLocked();
             if (batch_has_delta) {
                 last_frame = std::chrono::steady_clock::now();

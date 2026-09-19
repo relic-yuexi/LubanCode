@@ -67,6 +67,28 @@ struct AgentViewKeyHash {
 };
 
 // ---------------------------------------------------------------------------
+// 帧令牌(单子 §五:切页事务与 FrameToken)
+// ---------------------------------------------------------------------------
+
+// 一帧的三重身份:这帧画的是哪页(AgentViewKey)、第几代换页(view_epoch,
+// 登记簿每换一页 +1)、第几版布局(layout_revision,resize/Ctrl+L/Ctrl+O
+// 这类整屏重排各 +1)。规矩:布局在锁外算好,写屏前在统一提交锁内再验
+// 令牌——快速 A→B→A 时第一轮 A 的过期绘制(旧 epoch / 旧布局)不得
+// 通过。令牌失配丢的只是画面指令,事件与账面照收(登记簿的收账/水位
+// 合同不变)。
+struct FrameToken {
+    AgentViewKey view;
+    std::uint64_t view_epoch = 0;
+    std::uint64_t layout_revision = 0;
+
+    bool operator==(const FrameToken& other) const {
+        return view == other.view && view_epoch == other.view_epoch &&
+               layout_revision == other.layout_revision;
+    }
+    bool operator!=(const FrameToken& other) const { return !(*this == other); }
+};
+
+// ---------------------------------------------------------------------------
 // 每页交互状态(AgentUiState,单子 §四.2)
 // ---------------------------------------------------------------------------
 

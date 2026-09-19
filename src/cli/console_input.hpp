@@ -311,6 +311,29 @@ void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows
 // (无活回合/单测,直走)。
 void SetViewSwitchGuard(std::function<void(const std::function<void()>&)> guard);
 
+// ---- 按代理状态投影单 P2:收拢写者,原子换页 ----------------------------
+// 会话级 UI 调度的提交口:监听线程/composer 的换页事务、插行、footer
+// 重画这些"回来时要已画完"的屏面动作经 RunUiSync 提交——先排干队列
+// 余量、再在统一提交锁内就地执行(调用线程即执行线程,零跨线程等待)。
+// 槽未接(单发/单测)就地直走。装配层接 SessionUiDispatcher::RunSync。
+void SetUiDispatchEntrance(std::function<void(const std::function<void()>&)> entrance);
+void RunUiSync(const std::function<void()>& body);
+
+// 布局翻版通知:resize/Ctrl+L/Ctrl+O 这类整屏重排/展开档切换时调——
+// 会话侧接登记簿的 BumpLayoutRevision,在飞的旧布局帧(FrameToken 第三
+// 要素失配)写屏前被拦。槽未接时空操作。
+void SetLayoutInvalidationHook(std::function<void()> hook);
+void NotifyLayoutInvalidated();
+
+// 换页缓存作废钩子:切页事务在统一提交锁内调——把旧页的画笔锚点账
+// (ToolDisplay 的原地改写锚点、StreamBodyTracker 的正文块锚点)与
+// footer 的帧 diff 账整份作废,跨页坐标不复用(单子 §五"同一提交内
+// 作废旧正文、footer、painter 锚点及 diff 缓存")。调用方须已持
+// StdoutWriteMutex;钩子实现不得再拿这把锁。RunTurn 起回合时挂上
+// (指向本轮的 display/body_tracker),收口摘除。
+void SetViewSwitchInvalidateHook(std::function<void()> hook);
+void RunViewSwitchInvalidate();
+
 // main 查看页的修订号提供口(忙路实时流订阅):流式监听线程的 50ms 拍
 // 拿 CurrentMainViewRevision 判断"正看着的 main 又出活了没",到节流拍
 // 重铺当前回合。会话侧接 AgentViewRegistry::MainRevision。

@@ -1311,6 +1311,10 @@ add_library(lubancode_app STATIC
   src/cli/ui_trace.cpp
   # 终端画面隔网先行批:流式事件与终端之间的 UI 队列 + 过渡消费侧。
   src/app/ui_event_pump.cpp
+  # 按代理状态投影单 P2(收拢写者,原子换页):会话级 UI 调度——命令
+  # 队列 + 消费线程 + 统一提交锁;审批的独立响应通道(cli)。
+  src/app/session_ui_dispatcher.cpp
+  src/cli/approval_channel.cpp
   src/app/hook_runtime.cpp
   src/app_server/protocol.hpp
   src/app_server/schema.cpp

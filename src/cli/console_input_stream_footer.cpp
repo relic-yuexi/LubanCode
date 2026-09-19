@@ -5,6 +5,7 @@
 // 组行、面板会话、键位翻译在 console_input.cpp,经 console_input_internal.hpp
 // 对齐签名。全部落笔都在 StdoutWriteMutex 之内(规约见 console_input.hpp)。
 #include "cli/agent_panel_host.hpp"
+#include "cli/approval_channel.hpp"  // P2:别页悬着的审批在固定通知位标记
 #include "cli/console_input.hpp"
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
@@ -661,6 +662,7 @@ void RedrawStreamFooterLocked() {
     std::vector<AgentHealthTint> dock_rows_tints;  // 监督色(P1-1):与行按位对齐
     std::string footer_rule_tag;
     int dock_selected_task_id = 0;
+    int dock_viewed_task_id = 0;  // 此刻真正在看的页(审批通知位按它判"别页")
     if (SessionAgentPanelHost().provider()) {
         const std::vector<AgentPanelEntry> panel_entries = SessionAgentPanelHost().provider()();
         const AgentPanelSession::Snapshot snap0 =
@@ -668,6 +670,7 @@ void RedrawStreamFooterLocked() {
         const std::vector<int> nav_ids =
             DockNavigationIds(panel_entries, snap0.idle_expanded, snap0.target_task_id.value_or(0));
         PanelSessionSlot().OnEntriesChanged(nav_ids);
+        dock_viewed_task_id = snap0.viewed_task_id;
         if (!panel_entries.empty()) {
             const AgentPanelSession::Snapshot panel_snapshot = PanelSessionSlot().SnapshotFor(nav_ids);
             const int panel_budget = (std::max)(2, (std::min)(info->height / 2, 24));
@@ -680,6 +683,7 @@ void RedrawStreamFooterLocked() {
             dock_rows_text = RenderAgentDockLines(dock_layout, info->width);
             dock_rows_tints = DockRowTints(dock_layout);
             dock_selected_task_id = panel_snapshot.selected_task_id;
+            dock_viewed_task_id = panel_snapshot.viewed_task_id;
             if (panel_snapshot.target_task_id.has_value()) {
                 for (const auto& entry : panel_entries) {
                     if (entry.task_id == *panel_snapshot.target_task_id) {
@@ -735,6 +739,16 @@ void RedrawStreamFooterLocked() {
     scene.dock_rows = dock_rows_text;
     scene.dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
     scene.rule_tag = footer_rule_tag;
+    // P2(通知与审批走独立区域):别的页有悬着的审批请求时,上横线右端
+    // 挂一枚固定通知位标记——不抢当前页、不进正文;用户切回那页,监听
+    // 线程的下一拍菜单才开(单子 §三"导航与固定通知位标记")。空闲路
+    // 不标:工具只活在回合里,回合收口前 future 必已裁定,空闲无悬账。
+    if (SessionApprovalChannel().HasPendingOutside(dock_viewed_task_id)) {
+        // 文案先按中文字面落(与监听线程粘贴截断提示同款取舍,i18n 归档单)。
+        scene.rule_tag = footer_rule_tag.empty()
+                             ? std::string("main 待审批")
+                             : footer_rule_tag + " · main 待审批";
+    }
     scene.selected_task_id = dock_selected_task_id;
     scene.menu_rows = f.composer.hint_lines;  // slash 候选(编辑器自有)
     scene.width = width;

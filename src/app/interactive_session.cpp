@@ -1021,6 +1021,9 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     turn.turn_events = &turn_events;
     // 按代理状态投影单 P1:本轮的收账/绘制分账挂进登记簿。
     turn.view_registry = &view_registry_;
+    // 按代理状态投影单 P2:本轮的事件提交会话级 UI 调度(统一提交锁内
+    // 落笔,产生事件的线程不碰终端)。
+    turn.ui_dispatcher = &ui_dispatcher_;
     // 模型输出图片与工具二进制 artifact 的落盘口(P0-2 归拢):session
     // artifacts/sha256/ 内容寻址,同字节只落一份。账本没开(Run() 已拦,
     // 这里只剩极端竞态窗口)就不挂目录,引擎遇图明败,不吞图。

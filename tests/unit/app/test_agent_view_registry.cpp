@@ -187,3 +187,44 @@ TEST_CASE("P1 查看页对账: SyncViewed——登记簿滞留旧页时按面板
     CHECK(registry.view_epoch() == epoch_before);
     registry.DetachMainTurn();
 }
+
+// ---------------------------------------------------------------------------
+// P2:帧令牌(FrameToken = {AgentViewKey, view_epoch, layout_revision})。
+// 布局在锁外算好、写屏前在统一提交锁内再验——换页纪元与布局翻版任一
+// 动过,旧帧不通过;快速 A→B→A 第一轮 A 的过期绘制同理被拦。
+// ---------------------------------------------------------------------------
+TEST_CASE("P2 帧令牌: 令牌当前性——换页/换代/布局翻版各令旧帧失配") {
+    app::AgentViewRegistry registry;
+    const cli::FrameToken main_now = registry.TokenFor(0);
+    CHECK(registry.TokenCurrent(main_now));  // 此刻画 main 的帧:放行
+
+    // 换页:A→B,A 的帧失配;B 的帧放行。快速 A→B→A:第一轮 A 的帧
+    //(旧 epoch)仍失配——不得通过。
+    registry.SwitchViewed(5);
+    CHECK_FALSE(registry.TokenCurrent(main_now));
+    const cli::FrameToken sub_now = registry.TokenFor(5);
+    CHECK(registry.TokenCurrent(sub_now));
+    registry.SwitchViewed(0);
+    CHECK_FALSE(registry.TokenCurrent(main_now));  // 回 A 了,但旧 epoch 的帧不放行
+    CHECK_FALSE(registry.TokenCurrent(sub_now));
+    const cli::FrameToken main_again = registry.TokenFor(0);
+    CHECK(registry.TokenCurrent(main_again));
+
+    // 布局翻版(resize/Ctrl+L/Ctrl+O):同页同纪元,布局要素变了也失配。
+    registry.BumpLayoutRevision();
+    CHECK_FALSE(registry.TokenCurrent(main_again));
+    CHECK(registry.TokenCurrent(registry.TokenFor(0)));  // 新版放行
+
+    // 换代(/clear):整册作废,旧世代的令牌一律失配。
+    const cli::FrameToken before_clear = registry.TokenFor(0);
+    registry.BeginNewSession();
+    CHECK_FALSE(registry.TokenCurrent(before_clear));
+}
+
+TEST_CASE("P2 帧令牌: 令牌身份——别页的令牌在自家页也失配") {
+    app::AgentViewRegistry registry;
+    const cli::FrameToken sub_token = registry.TokenFor(9);
+    // 正看 main(0),画 sub 的帧:页不对,失配。
+    CHECK_FALSE(registry.TokenCurrent(sub_token));
+    CHECK(registry.TokenCurrent(registry.TokenFor(0)));
+}

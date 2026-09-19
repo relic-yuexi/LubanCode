@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -24,8 +25,10 @@
 #include "agent/turn_harness.hpp"
 #include "app/agent_view_registry.hpp"  // 按代理状态投影单 P1:收账/绘制分账
 #include "app/hook_runtime.hpp"
+#include "app/session_ui_dispatcher.hpp"  // 按代理状态投影单 P2:会话级 UI 调度
 #include "app/terminal_turn_sink.hpp"
 #include "app/tool_call_scope.hpp"  // ToolCallScopeTable:审批链中间产物的逐调用账(P1 拆槽)
+#include "cli/approval_channel.hpp"  // 按代理状态投影单 P2:审批的独立响应通道
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -146,6 +149,26 @@ public:
 
 private:
     lubancode::runtime::ApprovalResponse response_;
+};
+
+// P2(按代理状态投影单:确认菜单改"提交审批请求→UI 显示→独立响应通道
+// 返回决策"):通道版的悬起 future——工具线程在 future 上等,监听线程
+// 出菜单、答完把裁定送回(ESC 打断时 DenyAllPending 收口,不悬死)。
+class ChannelApprovalFuture final : public lubancode::runtime::InteractionFuture {
+public:
+    explicit ChannelApprovalFuture(std::future<bool> decision) : decision_(std::move(decision)) {}
+
+    std::optional<lubancode::runtime::ApprovalResponse> WaitApproval() override {
+        const bool allowed = decision_.get();
+        lubancode::runtime::ApprovalResponse response;
+        response.decision = allowed ? lubancode::runtime::InteractionDecision::Accept
+                                     : lubancode::runtime::InteractionDecision::Decline;
+        return response;
+    }
+    std::optional<lubancode::runtime::QuestionResponse> WaitQuestion() override { return std::nullopt; }
+
+private:
+    std::future<bool> decision_;
 };
 
 }  // namespace
@@ -418,23 +441,33 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
                               scope.approval_class, name, input, approval_observer);
     };
 
-    // P2(显示系统剥离单):异步审批通道——同一份裁定与问话逻辑包成
-    // InteractionBroker 的终端实现。终端这条路是"当场问完"的同步短路:
-    // AskApproval 里直接跑完整段(档位裁定 + PermissionRequest 钩子 +
-    // 三档菜单/[y/a/N] + settings.local.json 追问),Wait 立刻拿结果,
-    // 行为与今日一字不差;远端前端(app-server/Web/Tauri)后续换成登记
-    // request_id 悬起的实现,内核零改动。on_tool_confirm_async 缺位的旧
-    // 路(子代理/PTC 转发、单测)不走这里,照旧同步、不许多线程化。
+    // P2(显示系统剥离单 + 按代理状态投影单:确认菜单走审批通道):同一份
+    // 裁定与问话逻辑,问话半边不再由本线程占屏——presenter 提交进
+    // cli::SessionApprovalChannel,监听线程(流式期间的键盘所有者)取走
+    // 出菜单,答完经独立响应通道(future)把裁定送回;工具线程只等结果,
+    // 一个终端字节不写。当前查看页不是 owner(main)时请求不显屏,底栏
+    // 通知位标"待审批",切回那页才开。通道没服务者(单发/管道/监听未起)
+    // Submit 落空,presenter 当场跑,行为与旧路一字不差。
+    // on_tool_confirm_async 缺位的旧路(子代理/PTC 转发、单测)不走这里,
+    // 照旧同步、不许多线程化。
     wiring.on_tool_confirm_async =
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
          call_scopes, has_permission_hooks,
          approval_observer](const lubancode::runtime::ApprovalRequest& request)
         -> std::shared_ptr<lubancode::runtime::InteractionFuture> {
         const lubancode::app::ToolCallScope scope = call_scopes->Take(request.tool_use_id);
-        const bool allowed =
-            ConfirmToolUse(request.tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
-                           deny_commands, hook_dispatcher, scope.pre, has_permission_hooks,
-                           scope.approval_class, request.tool_name, request.input, approval_observer);
+        auto presenter = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands,
+                          hook_dispatcher, has_permission_hooks, approval_observer, scope,
+                          request]() -> bool {
+            return ConfirmToolUse(request.tool_use_id, auto_confirm, always_allowed_tools, theme, display,
+                                  allow_commands, deny_commands, hook_dispatcher, scope.pre, has_permission_hooks,
+                                  scope.approval_class, request.tool_name, request.input, approval_observer);
+        };
+        if (auto decision = lubancode::cli::SessionApprovalChannel().Submit(
+                /*owner_task_id=*/0, request.tool_name, std::move(presenter))) {
+            return std::make_shared<ChannelApprovalFuture>(std::move(*decision));
+        }
+        const bool allowed = presenter();
         lubancode::runtime::ApprovalResponse response;
         response.decision = allowed ? lubancode::runtime::InteractionDecision::Accept
                                     : lubancode::runtime::InteractionDecision::Decline;
@@ -747,6 +780,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
     lubancode::runtime::TurnView* turn_view_out = ctx.turn_view_out;
     lubancode::runtime::TurnEventAdapter* turn_events = ctx.turn_events;
     lubancode::app::AgentViewRegistry* view_registry = ctx.view_registry;
+    // P2(收拢写者):会话级 UI 调度。空(单发/单测)= sink 用本地泵,
+    // 以下一切照旧;非空 = 事件提交调度、统一提交锁内落笔。
+    lubancode::app::SessionUiDispatcher* ui_dispatcher = ctx.ui_dispatcher;
 
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!silent) {
@@ -969,10 +1005,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
     sink_ingredients.trace_projection_installed = turn_trace_hub != nullptr;
     sink_ingredients.cancel_flag = &cancel_flag;
     sink_ingredients.view_registry = view_registry;
+    sink_ingredients.ui_dispatcher = ui_dispatcher;
     TerminalTurnSink terminal_sink(std::move(sink_ingredients));
-    // 按代理状态投影单 P1:本轮的视图账在登记簿挂号(collector + 泵画笔
-    // 锁)。 RAII 收口——函数任何一路返回都摘号,登记簿绝不留悬垂指针。
-    // 挂号后:收账经 ApplyToMainTurn 进锁,换页/重铺事务拿画笔锁与在飞的
+    // 按代理状态投影单 P1/P2:本轮的视图账在登记簿挂号(collector + 统一
+    // 提交锁)。 RAII 收口——函数任何一路返回都摘号,登记簿绝不留悬垂指针。
+    // 挂号后:收账经 ApplyToMainTurn 进锁,换页/重铺事务拿提交锁与在飞的
     // 绘制互斥,切回 main 重铺从 ledge 接水位。
     struct MainTurnRegistration {
         AgentViewRegistry* registry;
@@ -983,7 +1020,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
         }
     } main_turn_registration{view_registry};
     if (view_registry != nullptr) {
-        view_registry->BeginMainTurn(&view_collector, &terminal_sink.RenderMutex());
+        view_registry->BeginMainTurn(&view_collector, &terminal_sink.CommitMutex());
         // 查看页对账:空闲路 Esc 复位不经换页钩子,登记簿可能还停在旧页
         // ——起跑前按面板状态机现值同步,main 页不被误闸。
         view_registry->SyncViewed(lubancode::cli::CurrentAgentViewedTaskId());
@@ -1066,6 +1103,14 @@ RunTurnResult RunTurn(TurnContext ctx) {
     lubancode::cli::SetStreamScreenScrollHook([&display, &body_tracker](int rows) {
         display.OnScreenScrolledLocked(rows);
         body_tracker.OnScreenScrolledLocked(rows);
+    });
+    // 换页缓存作废钩子(P2:切页事务在统一提交锁内调)——旧页的画笔
+    // 锚点账(ToolDisplay 原地改写)与正文块锚点整份作废,跨页坐标不
+    // 复用;切回时重铺按登记簿快照另起。与 print hook 同款线程纪律:
+    // 调用方持 StdoutWriteMutex,这里不再拿。
+    lubancode::cli::SetViewSwitchInvalidateHook([&display, &body_tracker] {
+        display.painter.ForgetAnchorsLocked();
+        body_tracker.InvalidateBlockAnchor();
     });
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
@@ -1197,17 +1242,18 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。
     listener.Stop();
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
+    lubancode::cli::SetViewSwitchInvalidateHook(nullptr);  // 同上:换页作废钩子不活过本轮的 painter
     // 画面隔网先行批:收 UI 泵——停消费线程、把余下的流式事件在本线程排
     // 干。此后(收口 chrome、FinalizeRepaint、Stop 钩子续跑、统计行)的
     // 画面全回到本线程,与老路一字不差;续跑轮迟到的流式事件在停表之后,
     // 泵自动退化成就地画。收口事件(usage/Finish)本就只走就地路,不丢。
     terminal_sink.StopUiPump();
-    // 收口 chrome 的画笔护栏(P1):StopUiPump 之后本线程就是唯一的写者,
-    // 这把锁把"收口 chrome/FinalizeRepaint/统计行"与"换页事务(登记簿
-    // 的 WithMainRenderLock)"串起来——收口途中切页,擦旧帧铺新帧不会插
-    // 进半句 chrome。递归锁:Stop 钩子续跑环里 wiring 的事件再进
-    // DispatchInline 同线程重入,合法。
-    std::unique_lock<std::recursive_mutex> finish_render_hold(terminal_sink.RenderMutex());
+    // 收口 chrome 的提交护栏(P1 起,P2 换统一提交锁):StopUiPump 之后
+    // 本线程就是唯一的写者,这把锁把"收口 chrome/FinalizeRepaint/统计行"
+    // 与"换页事务(登记簿的 WithMainRenderLock)"串起来——收口途中切页,
+    // 擦旧帧铺新帧不会插进半句 chrome。递归锁:Stop 钩子续跑环里 wiring
+    // 的事件再进就地退化路同线程重入,合法。
+    std::unique_lock<std::recursive_mutex> finish_render_hold(terminal_sink.CommitMutex());
     // streaming→idle 的交接是一笔事务,次序钉死不许倒:
     //   1) 收 streaming footer(EndStreamFooter 里的 EraseStreamFooterLocked,
     //      按上一帧的账整框擦净、光标拨回正文续写位);
