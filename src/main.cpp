@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "app/cli_app.hpp"
+#include "cli/ui_trace.hpp"  // ui_trace::EnableFromEnv(混屏取证,默认关)
 #include "platform/console.hpp"
 #include "platform/paths.hpp"
 
@@ -19,6 +20,7 @@
 // #ifdef _WIN32(平台差异其余都收进 platform/ 了)。
 int wmain(int argc, wchar_t** argv) {
     lubancode::platform::SetupConsoleUtf8();
+    lubancode::cli::ui_trace::EnableFromEnv();
 
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc));
@@ -32,6 +34,7 @@ int wmain(int argc, wchar_t** argv) {
 
 // POSIX 下 argv 天然就是字节串(约定 UTF-8),直通。
 int main(int argc, char** argv) {
+    lubancode::cli::ui_trace::EnableFromEnv();
     std::vector<std::string> args(argv, argv + argc);
     return lubancode::app::RunCli(args);
 }
