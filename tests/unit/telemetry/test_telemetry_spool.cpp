@@ -192,3 +192,47 @@ TEST_CASE("容量清理:超帽按最老先删并记账,清得动不降级(§18.4
     spool.SealNow(1500);
     CHECK(spool.Stats(1600).cleaned_segments_total == 2);
 }
+
+TEST_CASE("出口读段分段:在册判定与 payload 整读拆口") {
+    // 出口线程的读货正门(集成册间歇超时的放大器之一):旧口
+    // ReadSealedBatches 在 spool_mutex_ 下整读段文件,共享 runner 的过滤
+    // 驱动可把一次读拖数秒,饿住 worker 的同锁 SealIfDue/AppendBatch。
+    // 拆开后:在册判定(SealedSegmentPayloadPath)是内存册一瞥,持锁调;
+    // 整读(ReadSegmentPayloadRecords)不碰共享态,锁外调。本例钉拆口的
+    // 合同:路径判定、锁外读与旧口等价、退场段的两种 nullopt。
+    SpoolDirs dirs("exportread");
+    SpoolOptions options;
+    options.segment_items_cap = 2;
+    TelemetrySpool spool(dirs.spool(), dirs.quarantine(), options);
+    spool.OpenAndRecover(1000);
+    CHECK(spool.AppendBatch(MakeRecord("b1", "main-1:evt-00000001"), 1100));
+    CHECK(spool.AppendBatch(MakeRecord("b2", "main-1:evt-00000002"), 1200));
+    REQUIRE(spool.sealed_segments().size() == 1);
+
+    // 在册判定:回 payload 路径;不在册(已 ACK/TTL 退场)nullopt。
+    const auto payload_path = spool.SealedSegmentPayloadPath(1);
+    REQUIRE(payload_path.has_value());
+    CHECK(*payload_path == dirs.spool() / "seg-00000001.otlpjson");
+    CHECK_FALSE(spool.SealedSegmentPayloadPath(99).has_value());
+
+    // 锁外整读:与旧口 ReadSealedBatches 同货。
+    const auto records = TelemetrySpool::ReadSegmentPayloadRecords(*payload_path);
+    REQUIRE(records.has_value());
+    REQUIRE(records->size() == 2);
+    const auto legacy = spool.ReadSealedBatches(1);
+    REQUIRE(legacy.has_value());
+    REQUIRE(legacy->size() == 2);
+    CHECK((*records)[0].batch_id == (*legacy)[0].batch_id);
+    CHECK((*records)[1].batch_id == (*legacy)[1].batch_id);
+    CHECK((*records)[0].payload == (*legacy)[0].payload);
+    CHECK_FALSE(spool.ReadSealedBatches(99).has_value());
+    // 文件不在(读与删并发的极限位):nullopt,调用方按"段已退场"跳过。
+    CHECK_FALSE(TelemetrySpool::ReadSegmentPayloadRecords(dirs.spool() /
+                                                          "seg-00000099.otlpjson")
+                    .has_value());
+
+    // ACK 退场后:在册判定翻 nullopt(出口下趟不再读它)。
+    const auto deleted = spool.AckBatches({"b1", "b2"});
+    REQUIRE(deleted.size() == 1);
+    CHECK_FALSE(spool.SealedSegmentPayloadPath(1).has_value());
+}

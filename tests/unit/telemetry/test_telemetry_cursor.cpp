@@ -5,10 +5,16 @@
 //   - 坏 JSON = telemetry.cursor_corrupt,不猜。
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
+
+#ifdef _WIN32
+#include <cstdio>
+#include <share.h>
+#endif
 
 #include "telemetry/contract.hpp"
 #include "telemetry/cursor.hpp"
@@ -107,3 +113,39 @@ TEST_CASE("cursor:坏 JSON 与身份错位明拒,不猜") {
     CHECK_FALSE(LoadCursor(root, "..", "20260830-031522-TEST01", "main.jsonl", &error).has_value());
     CHECK(error == "telemetry.cursor_bad_identity");
 }
+
+#ifdef _WIN32
+TEST_CASE("cursor 落盘:换名被并发句柄短拒,有界重试后如实落 false(windows 独有病灶)") {
+    // MSVC ifstream/_fsopen 的句柄不带 FILE_SHARE_DELETE:句柄活期间
+    // MoveFileExW 原子替换必吃共享违例(manifest.cpp CI 实测"写侧 320 次
+    // 换名被拒 48-57 次"的同族)。遥测册的 WaitUntil 每 10ms 轮询
+    // LoadCursor,worker 的 StoreCursor 撞上开着的句柄就是一次短拒——
+    // 重试档(10×10ms)内的自愈由服务册的"松手后追平"用例验;本例单线程
+    // 钉死另一头:拒窗长于档位时有界返回 false,不吊死,松手后首写即成。
+    // 独占句柄(_SH_DENYRW)模拟过滤驱动/轮询读者的"在但换不了名"——
+    // 共享违例认句柄不认线程,本线程持柄照样换不了名,无需双线程对表;
+    // POSIX rename 无共享违例,此病灶模拟不了,仅 windows 验。
+    const std::filesystem::path root = FreshRoot("transient");
+    const StreamCursor cursor = MakeCursor();
+    REQUIRE(StoreCursor(root, cursor));
+    const auto path =
+        CursorFilePath(root, cursor.workspace_key, cursor.session_id, cursor.stream);
+
+    std::FILE* stubborn = _wfsopen(path.c_str(), L"rb", _SH_DENYRW);
+    REQUIRE(stubborn != nullptr);
+    StreamCursor next = MakeCursor();
+    next.last_event_id = "main-1:evt-00000009";
+    const auto began = std::chrono::steady_clock::now();
+    CHECK_FALSE(StoreCursor(root, next));  // 拒窗持住:重试耗尽,如实落 false
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - began);
+    CHECK(elapsed.count() >= 100);  // 10×10ms 档真跑了重试,不是一击就弃
+    CHECK(elapsed.count() < 2000);  // 有界:不是无限等
+    std::fclose(stubborn);
+    CHECK(StoreCursor(root, next));  // 松手后首写即成
+    const auto healed =
+        LoadCursor(root, cursor.workspace_key, cursor.session_id, cursor.stream, nullptr);
+    REQUIRE(healed.has_value());
+    CHECK(healed->last_event_id == "main-1:evt-00000009");
+}
+#endif

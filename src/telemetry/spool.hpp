@@ -170,8 +170,16 @@ public:
 
     // 读回一只已封段的全部批(T2 exporter 出队取货:payload 已是 T0 编码器
     // 产好的 OTLP JSON,直接上 HTTP,不重编码)。nullopt = 段不在册/读失
-    // 败(对账时按"段已退场"处理,不猜)。
+    // 败(对账时按"段已退场"处理,不猜)。合同不挪,拆两段供出口线程用:
+    //   - SealedSegmentPayloadPath:内存册一瞥,快,须在 spool_mutex_ 下调
+    //     (出口线程的 Service 持锁面);
+    //   - ReadSegmentPayloadRecords:纯文件整读 + 行解,不碰共享态,可
+    //     锁外调——共享 runner 的过滤驱动可把一次读拖数秒,持锁读会饿
+    //     worker 的同锁 SealIfDue/AppendBatch(cursor 停转)。
     std::optional<std::vector<SpoolBatchRecord>> ReadSealedBatches(std::uint64_t segment_id) const;
+    std::optional<std::filesystem::path> SealedSegmentPayloadPath(std::uint64_t segment_id) const;
+    static std::optional<std::vector<SpoolBatchRecord>> ReadSegmentPayloadRecords(
+        const std::filesystem::path& payload_path);
 
     // 容量/TTL 清理(§18.4)。开张与每次 seal 后调。
     void Cleanup(std::int64_t now_ms);

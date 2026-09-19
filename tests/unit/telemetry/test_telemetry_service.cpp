@@ -31,6 +31,10 @@
 #include "telemetry/spool.hpp"
 #include "trajectory/recorder.hpp"
 
+#ifdef _WIN32
+#include <share.h>
+#endif
+
 using namespace lubancode::telemetry;
 using namespace lubancode::trajectory;
 
@@ -590,3 +594,57 @@ TEST_CASE("final flush:开着的 span 在 Stop 后按 missing 收口入账") {
     }
     CHECK(saw_missing_request);
 }
+
+#ifdef _WIN32
+TEST_CASE("windows 短拒不丢账:cursor 落盘被独占句柄拦,松手后追平") {
+    // 间歇超时的机理钉(windows 独有,POSIX rename 无共享违例):测试侧
+    // WaitUntil 每 10ms LoadCursor 轮询,worker 的 cursor 原子替换撞上
+    // 开着的句柄就短拒(MSVC fstream 不带 FILE_SHARE_DELETE);旧账在
+    // AdvancePendingCursors 里落盘失败也销 pending 推进,最后一只窗口
+    // 的推进被静默丢掉,cursor 文件从此停在旧位置——窗口不再长大,永久
+    // 停摆。新账:落盘失败留 pending,tick 重投,松手即追平。独占句柄
+    // (_SH_DENYRW)锁 1.5s,盖过 StoreCursor 的 10×10ms 重试档与数个
+    // 40ms tick,期间第二窗的推进必然落盘失败。
+    JournalFixture fixture("cursorhold");
+    fixture.CompleteTurn("turn-0001");
+    const std::string first_last = fixture.LastEventId();
+
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       "lubancode-tel-svc-cursorhold";
+    TelemetryService service(MakeOptions(root));
+    REQUIRE(service.Start());
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
+    REQUIRE(WaitUntil([&] { return CursorFileReaches(root, first_last); }));
+
+    const std::filesystem::path cursor_path = root / "cursors" / fixture.workspace_key /
+                                              fixture.session_id / "main.jsonl.json";
+    std::FILE* exclusive = _wfsopen(cursor_path.c_str(), L"rb", _SH_DENYRW);
+    REQUIRE(exclusive != nullptr);
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        std::fclose(exclusive);
+    });
+
+    fixture.CompleteTurn("turn-0002");
+    const std::string second_last = fixture.LastEventId();
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
+    // 锁窗内追不上;松手后有界追平(旧账:pending 已销,永久停摆,此断言红)。
+    REQUIRE(WaitUntil([&] { return CursorFileReaches(root, second_last); }, 8000));
+    releaser.join();
+    service.Stop();
+
+    // 第二窗的常规件 traces 批只此一份(推进重投靠批 id 去重,不重发)。
+    // Stop 的 final flush 会按 missing 收口开着的 run span(run 未 CloseRun),
+    // 另发一只锚在同窗口末的 final 件——那是设计行为(§26.3),分开数;
+    // metrics 批与 traces 同窗口末,也不在此数。
+    std::size_t second_window_batches = 0;
+    for (const SpoolBatchRecord& batch : ReadAllSealedBatches(root)) {
+        if (batch.signal == "traces" && batch.last_event_id == second_last &&
+            !batch.final_window) {
+            second_window_batches += 1;
+        }
+    }
+    CHECK(second_window_batches == 1);
+}
+#endif
