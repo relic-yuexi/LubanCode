@@ -98,7 +98,9 @@ std::optional<ContentRange> ParseContentRange(std::string_view value) {
 // 错误响应体的短摘:压成一行、截到 limit,只给人看的报错文案用。
 std::string SingleLineExcerpt(std::string_view body, std::size_t limit) {
     std::string out;
-    out.reserve(std::min(body.size(), limit));
+    // (std::min):cpr/curl 的 Windows 头链子会把 min/max 宏带进来,裸用
+    // std::min 会被宏展开打成 C2589(windows.h 未处处 NOMINMAX)。
+    out.reserve((std::min)(body.size(), limit));
     for (const char ch : body) {
         if (out.size() >= limit) break;
         out.push_back(ch == '\r' || ch == '\n' ? ' ' : ch);
