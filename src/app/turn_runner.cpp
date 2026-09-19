@@ -22,6 +22,7 @@
 #include "agent/model_image_store.hpp"  // LandModelImage:on_model_image 落盘口的实现
 #include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:token 估算校准的进程级实例
 #include "agent/turn_harness.hpp"
+#include "app/agent_view_registry.hpp"  // 按代理状态投影单 P1:收账/绘制分账
 #include "app/hook_runtime.hpp"
 #include "app/terminal_turn_sink.hpp"
 #include "app/tool_call_scope.hpp"  // ToolCallScopeTable:审批链中间产物的逐调用账(P1 拆槽)
@@ -745,6 +746,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const std::string& turn_id_for_trace = ctx.turn_id_for_trace;
     lubancode::runtime::TurnView* turn_view_out = ctx.turn_view_out;
     lubancode::runtime::TurnEventAdapter* turn_events = ctx.turn_events;
+    lubancode::app::AgentViewRegistry* view_registry = ctx.view_registry;
 
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!silent) {
@@ -901,7 +903,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 安全点(轮起):后台子代理投递的 hooks 记录在这里归并落账。告警走
     // stderr(静默档也要让人看见降级),信息行只在非静默档打。
     for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
-        if (!silent) {
+        if (!silent && (view_registry == nullptr || view_registry->MainVisibleForChrome())) {
             TermOut() << theme.stats << "[hooks] " << notice << theme.reset << "\n";
         } else {
             TermErr() << "[hooks] " << notice << "\n";
@@ -966,7 +968,33 @@ RunTurnResult RunTurn(TurnContext ctx) {
     sink_ingredients.recorder = recorder;
     sink_ingredients.trace_projection_installed = turn_trace_hub != nullptr;
     sink_ingredients.cancel_flag = &cancel_flag;
+    sink_ingredients.view_registry = view_registry;
     TerminalTurnSink terminal_sink(std::move(sink_ingredients));
+    // 按代理状态投影单 P1:本轮的视图账在登记簿挂号(collector + 泵画笔
+    // 锁)。 RAII 收口——函数任何一路返回都摘号,登记簿绝不留悬垂指针。
+    // 挂号后:收账经 ApplyToMainTurn 进锁,换页/重铺事务拿画笔锁与在飞的
+    // 绘制互斥,切回 main 重铺从 ledge 接水位。
+    struct MainTurnRegistration {
+        AgentViewRegistry* registry;
+        ~MainTurnRegistration() {
+            if (registry != nullptr) {
+                registry->DetachMainTurn();
+            }
+        }
+    } main_turn_registration{view_registry};
+    if (view_registry != nullptr) {
+        view_registry->BeginMainTurn(&view_collector, &terminal_sink.RenderMutex());
+        // 查看页对账:空闲路 Esc 复位不经换页钩子,登记簿可能还停在旧页
+        // ——起跑前按面板状态机现值同步,main 页不被误闸。
+        view_registry->SyncViewed(lubancode::cli::CurrentAgentViewedTaskId());
+    }
+    // 收口 chrome 的页可见性(P1):静默档之外,还要看"此刻看的是不是
+    // main"。查看子代理页时收口分界线/统计行/footer 不往别人的页上写;
+    // 内容都在视图账与台账里,切回重铺看得见。每处现查——流式中途随时
+    // 可能换页。
+    const auto main_chrome_visible = [&]() -> bool {
+        return !silent && (view_registry == nullptr || view_registry->MainVisibleForChrome());
+    };
     turn_event_stream.AttachAlongside(
         [&terminal_sink](const lubancode::runtime::ServerEvent& event) { terminal_sink.Emit(event); });
     turn_event_stream.Start(canonical_turn_id);
@@ -1048,8 +1076,8 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 不先收成裸文本再回头涂),这里只按间距表垫一口块后气口(UserPrompt ->
     // 任意 = 1),信息收尾不贴脸。管道/重定向没有 composer 收框,保持稳定
     // 纯文本,不补这一口。
-    PrintDivider(theme, is_console && !silent);
-    if (is_console && !silent && !user_input.empty()) {
+    PrintDivider(theme, is_console && main_chrome_visible());
+    if (is_console && main_chrome_visible() && !user_input.empty()) {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         for (int g = 0;
              g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::UserPrompt,
@@ -1070,7 +1098,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 条 6(画面隔网):能力探测失败不再悄悄藏掉输入框——真控制台但原地
     // 重画探不到时明报一行降级,键入照收(TurnInputListener 不依赖 footer,
     // 排队/打断全在),别让用户以为程序哑了。
-    if (is_console && !silent && !stream_footer_enabled) {
+    if (is_console && main_chrome_visible() && !stream_footer_enabled) {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         TermOut() << theme.stats << lubancode::cli::tr("footer.repaint_unsupported") << theme.reset
                   << "\n";
@@ -1165,6 +1193,12 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 画面全回到本线程,与老路一字不差;续跑轮迟到的流式事件在停表之后,
     // 泵自动退化成就地画。收口事件(usage/Finish)本就只走就地路,不丢。
     terminal_sink.StopUiPump();
+    // 收口 chrome 的画笔护栏(P1):StopUiPump 之后本线程就是唯一的写者,
+    // 这把锁把"收口 chrome/FinalizeRepaint/统计行"与"换页事务(登记簿
+    // 的 WithMainRenderLock)"串起来——收口途中切页,擦旧帧铺新帧不会插
+    // 进半句 chrome。递归锁:Stop 钩子续跑环里 wiring 的事件再进
+    // DispatchInline 同线程重入,合法。
+    std::unique_lock<std::recursive_mutex> finish_render_hold(terminal_sink.RenderMutex());
     // streaming→idle 的交接是一笔事务,次序钉死不许倒:
     //   1) 收 streaming footer(EndStreamFooter 里的 EraseStreamFooterLocked,
     //      按上一帧的账整框擦净、光标拨回正文续写位);
@@ -1192,7 +1226,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
 
     // markdown 两段式的后一段:回合正常收束(没报错、没被 ESC 打断)才把
     // 最后一块正文按渲染版重画;半截话/报错现场保持原样,不赌。
-    if (result.has_value() && !result->cancelled) {
+    if (result.has_value() && !result->cancelled && main_chrome_visible()) {
         body_tracker.FinalizeRepaint();
     }
 
@@ -1212,7 +1246,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
         }
     }
 
-    if (!silent) {
+    if (main_chrome_visible()) {
         TermOut() << "\n";
     }
 
@@ -1258,12 +1292,23 @@ RunTurnResult RunTurn(TurnContext ctx) {
             case lubancode::cli::TurnFooterTone::Worked:
                 break;
         }
-        view_collector.FinishTurn(view_status, wall_ms, /*approval_wait=*/0);
-        if (turn_view_out != nullptr) {
-            *turn_view_out = view_collector.view();  // 会话层存档:Crtl+L/resume 重放用
+        // 收口对账(P1):FinishTurn 与会话存档一笔进登记簿的锁(修订号
+        // 随收口 +1),终账钉进 ledge——切回 main 的重铺吃这份终账。
+        const auto finish_view = [&] {
+            view_collector.FinishTurn(view_status, wall_ms, /*approval_wait=*/0);
+            if (turn_view_out != nullptr) {
+                *turn_view_out = view_collector.view();  // 会话层存档:Crtl+L/resume 重放用
+            }
+        };
+        if (view_registry != nullptr) {
+            view_registry->ApplyToMainTurn(finish_view);
+            view_registry->EndMainTurn(view_collector.view());
+        } else {
+            finish_view();
         }
-        // 静默档(查看态回流)不落:屏幕此刻归用户正看的查看帧。
-        if (!silent) {
+        // 静默档(查看态回流)不落:屏幕此刻归用户正看的查看帧;非静默但
+        // 当前页不是 main 同样不落(P1 收口 chrome 按页让路)。
+        if (main_chrome_visible()) {
             PrintTurnFooter(theme, is_console, wall_ms, tone);
         }
     };
@@ -1380,9 +1425,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
 
     // 安全点(轮收):后台子代理这轮攒下的 hooks 记录归并落账,报信一行。
     for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
-        if (!silent) {
+        if (main_chrome_visible()) {
             TermOut() << theme.stats << "[hooks] " << notice << theme.reset << "\n";
         } else {
+            // 静默档/离屏档都走 stderr:告警不进别人的页,也不许无声无息。
             TermErr() << "[hooks] " << notice << "\n";
         }
     }
@@ -1410,7 +1456,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // (Ctrl+O)才展开这行。管道/重定向(is_console 为假)没有状态栏,长行
     // 照打——稳定纯文本输出是 automation 的契约,不能静默吞。
     const bool stats_verbose = (transcript_expanded != nullptr && transcript_expanded->load()) || !is_console;
-    if (usage_stats.request_count() > 0 && !silent && stats_verbose) {
+    if (usage_stats.request_count() > 0 && main_chrome_visible() && stats_verbose) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
         // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存那一节
         // 先拼好塞进 {1}。
