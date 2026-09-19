@@ -1,9 +1,11 @@
 // Telemetry 投影 cursor 的实现。合同见 cursor.hpp 文件头。
 #include "telemetry/cursor.hpp"
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -14,6 +16,17 @@
 
 namespace lubancode::telemetry {
 namespace {
+
+// Windows 瞬态文件语义的有界重试档(manifest.cpp 同款纪律,实测依据见
+// src/workspace/manifest.cpp 的 kTransient* 注释):cursor 文件的原子替换
+// (MoveFileExW REPLACE)会被并发读者的 ifstream 句柄短拒——MSVC fstream
+// 不带 FILE_SHARE_DELETE,遥测册的 WaitUntil 每 10ms 轮询 LoadCursor,
+// worker 的 StoreCursor 撞上开着的句柄就是一次换名被拒(写侧 320 次换
+// 名被拒 48-57 次的实测同族)。10 次×10ms=100ms 预算给足轮询句柄的
+// 存活窗;正常路径首次即成,零等待零重试。POSIX rename 原子、无共享
+// 违例,重试路径零开销零行为变化。
+constexpr int kTransientWriteAttempts = 10;
+constexpr std::chrono::milliseconds kTransientWriteBackoff{10};
 
 // 单段名校验:目录/文件名只认 [A-Za-z0-9._-](与 trajectory 目录同规矩),
 // 拒路径分隔符与 ".." 一类可逃逸材料。workspace_key 是哈希形、session_id
@@ -34,8 +47,18 @@ bool IsValidSingleSegment(std::string_view name) {
 
 bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
     // 统一原子写(审计 P1):唯一临时名 + 平台原子替换,替掉本文件原先
-    // 自备的固定 .tmp 协议。耐久档与旧实现持平(可见性原子)。
-    return platform::AtomicWriteFile(path, content).has_value();
+    // 自备的固定 .tmp 协议。耐久档与旧实现持平(可见性原子)。换名瞬拒
+    // 有界重试(依据见 kTransientWrite* 注释):重试耗尽才如实落 false,
+    // 由调用方留账重试,不静默吞。
+    for (int attempt = 0;; ++attempt) {
+        if (platform::AtomicWriteFile(path, content).has_value()) {
+            return true;
+        }
+        if (attempt >= kTransientWriteAttempts) {
+            return false;
+        }
+        std::this_thread::sleep_for(kTransientWriteBackoff);
+    }
 }
 
 }  // namespace

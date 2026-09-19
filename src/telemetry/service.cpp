@@ -1081,7 +1081,16 @@ void TelemetryService::AdvancePendingCursors() {
             ++it;
             continue;
         }
-        StoreCursor(options_.telemetry_root / "cursors", it->second.cursor);
+        if (!StoreCursor(options_.telemetry_root / "cursors", it->second.cursor)) {
+            // 落盘失败(含瞬态重试耗尽):推进账留着,下一趟 tick 重投。
+            // 旧账在这里落盘失败也销 pending、还前推内存面 cursor——文件
+            // 从此卡在旧位置,窗口不再长大就永久停摆(windows 腿集成册
+            // :1012 的间歇超时机理:轮询读者的 ifstream 句柄短拒了换名,
+            // 最后一只窗口的推进被静默丢掉)。文件才是 durable 真身,
+            // cursor 只许推过真落了盘的窗口(§14.2)。
+            ++it;
+            continue;
+        }
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             auto found = streams_.find(it->first);
@@ -1271,8 +1280,22 @@ bool TelemetryService::RunExportPass() {
                 continue;
             }
             if (!records.has_value()) {
-                std::lock_guard<std::mutex> lock(spool_mutex_);
-                records = spool_->ReadSealedBatches(segment.segment_id);
+                // 段在册一瞥持锁,payload 整读挪锁外:共享 runner 的过滤
+                // 驱动可把一次段文件读拖数秒(manifest.cpp 三案同族),持
+                // spool_mutex_ 整读会饿住 worker 的同锁 SealIfDue/
+                // AppendBatch——cursor 停转,集成册"等后台投递推进"的间
+                // 歇超时即此。payload 封口后不可变(只在 ACK/TTL 时删):
+                // 读间段被删,POSIX 读完整旧内容(at-least-once,后端按
+                // batch id 幂等),Windows 删失败走 AckBatches 的"段留
+                // tombstone"旧账,两头都不撕账。
+                std::optional<std::filesystem::path> payload_path;
+                {
+                    std::lock_guard<std::mutex> lock(spool_mutex_);
+                    payload_path = spool_->SealedSegmentPayloadPath(segment.segment_id);
+                }
+                if (payload_path.has_value()) {
+                    records = TelemetrySpool::ReadSegmentPayloadRecords(*payload_path);
+                }
             }
             const SpoolBatchRecord* record = nullptr;
             if (records.has_value()) {

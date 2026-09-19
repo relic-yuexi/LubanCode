@@ -61,8 +61,11 @@ jobs:
             # 病灶(防病毒/索引过滤驱动,见 src/gateway/work_pump.cpp 注释)
             # 与助理任务/审批册(35403217677/35374324620 两案 windows 腿间歇
             # 红)只在 windows 上显形——改到这些路径的 PR 须双平台验。
+            # telemetry 面(35411986773 案集成册 :1012 间歇红):cursor 原子
+            # 替换会被并发读者句柄短拒、出口持锁整读段文件会被过滤驱动拖
+            # 数秒,同为 windows 独有病灶,同列。
             case "$f" in
-              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp)
+              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*)
                 memory_worker=true ;;
             esac
             case "$f" in
@@ -83,7 +86,7 @@ jobs:
   # 5daf4989 在 main 上就是这么翻的),按事件现挑腿单,build-test 用
   # fromJSON 接。分支快车道(agent/ci 分支)只烧 macos 一腿最快出信号;
   # main 和记忆 worker/Windows 进程/Windows 瞬态文件语义敏感面(gateway
-  # 命令文件 IO、助理任务册)改动跑双平台，其余 PR 只跑 macOS。
+  # 命令文件 IO、助理任务册、telemetry 册)改动跑双平台，其余 PR 只跑 macOS。
   lane:
     needs: changes
     if: needs.changes.outputs.code == 'true'

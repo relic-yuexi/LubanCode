@@ -781,19 +781,19 @@ void TelemetrySpool::Cleanup(std::int64_t now_ms) {
 
 std::map<std::string, StreamCoverage> TelemetrySpool::Coverage() const { return coverage_; }
 
-std::optional<std::vector<SpoolBatchRecord>> TelemetrySpool::ReadSealedBatches(
+std::optional<std::filesystem::path> TelemetrySpool::SealedSegmentPayloadPath(
     std::uint64_t segment_id) const {
-    bool in_ledger = false;
     for (const SealedSegment& segment : sealed_) {
         if (segment.segment_id == segment_id) {
-            in_ledger = true;
-            break;
+            return spool_dir_ / (SegmentStem(segment_id) + ".otlpjson");
         }
     }
-    if (!in_ledger) {
-        return std::nullopt;  // 段不在册:已 ACK 删除或 TTL 清理退场
-    }
-    const auto content = ReadTextFile(spool_dir_ / (SegmentStem(segment_id) + ".otlpjson"));
+    return std::nullopt;  // 段不在册:已 ACK 删除或 TTL 清理退场
+}
+
+std::optional<std::vector<SpoolBatchRecord>> TelemetrySpool::ReadSegmentPayloadRecords(
+    const std::filesystem::path& payload_path) {
+    const auto content = ReadTextFile(payload_path);
     if (!content.has_value()) {
         return std::nullopt;
     }
@@ -816,6 +816,16 @@ std::optional<std::vector<SpoolBatchRecord>> TelemetrySpool::ReadSealedBatches(
     return records;
 }
 
+std::optional<std::vector<SpoolBatchRecord>> TelemetrySpool::ReadSealedBatches(
+    std::uint64_t segment_id) const {
+    // 在册判定 + 整读一口价(T1 生命周期测试用);出口线程走拆开的两段
+    // (见 spool.hpp 注释:整读持锁会饿 worker 的同锁 SealIfDue)。
+    const auto payload_path = SealedSegmentPayloadPath(segment_id);
+    if (!payload_path.has_value()) {
+        return std::nullopt;
+    }
+    return ReadSegmentPayloadRecords(*payload_path);
+}
 
 bool TelemetrySpool::HasBatch(const std::string& batch_id) const {
     for (const SealedSegment& segment : sealed_) {

@@ -10,8 +10,9 @@
 //   - consent 门:公网 endpoint 无授权不发业务数据,授权后才真发;
 //   - spool clear 两步删除后 cursor 对账不误报。
 //
-// 端口策:绑 127.0.0.1:0 拿空闲端口;“断网”场景先绑后关,collector 重启
-// 再绑回同端口(SO_REUSEADDR)。
+// 端口策:绑 127.0.0.1:0 拿空闲端口;“断网”场景全程持有绑定不还池
+//(HeldDeadPort,防并行测试复占把死端口变活端口);collector 重启场景
+// 先 Release 再绑回同端口(SO_REUSEADDR)。
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -306,27 +307,55 @@ private:
     std::vector<CollectedRequest> received_;
 };
 
-// 绑一个端口拿号再放掉("断网"用:连上去就是拒绝)。
-int ReserveThenReleasePort() {
-    EnsureSocketsReady();
-    const socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    REQUIRE(fd != kInvalidSocket);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    sockaddr_in bound{};
+// 死端口持有者:绑 127.0.0.1:0 拿号后保持绑定、不 listen、不关。持有期间
+// 端口对任何人都呈"没人监听"(连接即拒),同 runner 的并行测试与别的进程
+// 都抢不走——旧口 ReserveThenReleasePort 还池后,端口号可被并行测试的
+// bind(0) 复占,"死端口"变活端口:出口连上去不拒,每次挂满 timeout 4000ms,
+// 断网语义整个塌掉。死端口的语义本来就要"没人监听",持有不释放正是该语
+// 义。模拟 collector 重启再绑回同端口前,先 Release()(还池与重绑之间留
+// 一句缝,远小于旧口整场测试的敞口)。
+class HeldDeadPort {
+public:
+    HeldDeadPort() {
+        EnsureSocketsReady();
+        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(fd_ != kInvalidSocket);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        REQUIRE(::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        sockaddr_in bound{};
 #ifdef _WIN32
-    int len = sizeof(bound);
+        int len = sizeof(bound);
 #else
-    socklen_t len = sizeof(bound);
+        socklen_t len = sizeof(bound);
 #endif
-    REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &len) == 0);
-    const int port = ntohs(bound.sin_port);
-    CloseSocket(fd);
-    return port;
-}
+        REQUIRE(::getsockname(fd_, reinterpret_cast<sockaddr*>(&bound), &len) == 0);
+        port_ = ntohs(bound.sin_port);
+    }
+    ~HeldDeadPort() {
+        if (fd_ != kInvalidSocket) {
+            CloseSocket(fd_);
+            fd_ = kInvalidSocket;
+        }
+    }
+    HeldDeadPort(const HeldDeadPort&) = delete;
+    HeldDeadPort& operator=(const HeldDeadPort&) = delete;
+
+    int port() const { return port_; }
+    std::string endpoint() const { return "http://127.0.0.1:" + std::to_string(port_); }
+    void Release() {
+        if (fd_ != kInvalidSocket) {
+            CloseSocket(fd_);
+            fd_ = kInvalidSocket;
+        }
+    }
+
+private:
+    socket_t fd_ = kInvalidSocket;
+    int port_ = 0;
+};
 
 bool WaitUntil(const std::function<bool()>& predicate, int timeout_ms = 10000) {
     const auto deadline =
@@ -630,9 +659,9 @@ TEST_CASE("ACK 丢:collector 收货不回 -> 传输错可重试;重发同 batch 
 }
 
 TEST_CASE("断网:连不上按传输临时错(§19.2)") {
-    const int dead_port = ReserveThenReleasePort();
+    HeldDeadPort dead_port;
     OtlpExporterOptions options;
-    options.endpoint = "http://127.0.0.1:" + std::to_string(dead_port);
+    options.endpoint = dead_port.endpoint();
     options.timeout_ms = 2000;
     OtlpHttpExporter exporter(options);
     const ExportAttempt attempt = exporter.Export(MakeTracesRecord("batch-dead"), nullptr);
@@ -720,13 +749,12 @@ TEST_CASE("断网->补送:collector 挂了 spool 留账,重启后全数补送") 
     fixture.CompleteTurn("turn-0001");
     fixture.CloseRun();
 
-    const int dead_port = ReserveThenReleasePort();
+    HeldDeadPort dead_port;
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
                                        "lubancode-tel-e2e-recover";
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
-    TelemetryService service(
-        MakeOptions(root, "http://127.0.0.1:" + std::to_string(dead_port)));
+    TelemetryService service(MakeOptions(root, dead_port.endpoint()));
     REQUIRE(service.Start());
     service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
     service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
@@ -741,7 +769,8 @@ TEST_CASE("断网->补送:collector 挂了 spool 留账,重启后全数补送") 
 
     // collector 重启(同端口):spool 存量全数补送,段删净。
     {
-        FakeCollector collector(dead_port);
+        dead_port.Release();  // 让位给"重启"的 collector 绑回同端口
+        FakeCollector collector(dead_port.port());
         REQUIRE(WaitUntil([&] {
             const auto status = service.Status();
             return status.spool.segments == 0 && status.spool.active_batches == 0;
@@ -864,13 +893,12 @@ TEST_CASE("flush:黑洞出口有界返回;出口恢复后 flush 出清") {
     fixture.CompleteTurn("turn-0001");
     fixture.CloseRun();
 
-    const int dead_port = ReserveThenReleasePort();
+    HeldDeadPort dead_port;
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
                                        "lubancode-tel-e2e-flush";
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
-    TelemetryService service(
-        MakeOptions(root, "http://127.0.0.1:" + std::to_string(dead_port)));
+    TelemetryService service(MakeOptions(root, dead_port.endpoint()));
     REQUIRE(service.Start());
     service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
     service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
@@ -886,7 +914,8 @@ TEST_CASE("flush:黑洞出口有界返回;出口恢复后 flush 出清") {
     CHECK(elapsed.count() < 3000);
 
     {
-        FakeCollector collector(dead_port);
+        dead_port.Release();  // 让位给"恢复"的 collector 绑回同端口
+        FakeCollector collector(dead_port.port());
         CHECK(service.Flush(8000));
         CHECK(service.Status().spool.segments == 0);
     }
@@ -982,13 +1011,12 @@ TEST_CASE("spool clear:两步删除后批账落 tombstone,cursor 对账不报孤
     // 注意:run 先不关——清账之后还要追加 turn-0003 验"新账照投不误报孤儿",
     // 关了 run 再写事件会被账本拒(state.run_closed)。
 
-    const int dead_port = ReserveThenReleasePort();
+    HeldDeadPort dead_port;
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
                                        "lubancode-tel-e2e-clear";
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
-    TelemetryService service(
-        MakeOptions(root, "http://127.0.0.1:" + std::to_string(dead_port)));
+    TelemetryService service(MakeOptions(root, dead_port.endpoint()));
     REQUIRE(service.Start());
     service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
     service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
@@ -1361,14 +1389,13 @@ TEST_CASE("v3 重启重投不生成新身份:collector 每只批 id 只见一次
     }
 
     // 第一场:断网(collector 不在),spool 留账,cursor 推进。
-    const int dead_port = ReserveThenReleasePort();
+    HeldDeadPort dead_port;
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() / "lubancode-tel-v3-e2e-restart-root";
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     {
-        TelemetryService service(
-            MakeOptions(root, "http://127.0.0.1:" + std::to_string(dead_port)));
+        TelemetryService service(MakeOptions(root, dead_port.endpoint()));
         REQUIRE(service.Start());
         service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
         service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "S-V3E2E.jsonl"});
@@ -1380,7 +1407,8 @@ TEST_CASE("v3 重启重投不生成新身份:collector 每只批 id 只见一次
     }
 
     // 第二场:collector 回来,存量补送;窗口重放同 id 去重,不重复投。
-    FakeCollector collector(dead_port);
+    dead_port.Release();  // 让位给"回来"的 collector 绑回同端口
+    FakeCollector collector(dead_port.port());
     {
         TelemetryService service(MakeOptions(root, collector.endpoint()));
         REQUIRE(service.Start());
