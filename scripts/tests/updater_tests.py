@@ -421,6 +421,7 @@ def section_e2e():
     try:
         root = make_flat_install(base, "1.0.0")
         exe_v1 = open(os.path.join(root, EXE_NAME), "rb").read()
+        os.makedirs(os.path.join(root, "skills", "user-extra"), exist_ok=True)
         with open(os.path.join(root, "skills", "user-extra", "NOTE.md"), "w") as f:
             f.write("用户旁文件\n")
         archive2, digest2 = make_release(base, "2.0.0")
