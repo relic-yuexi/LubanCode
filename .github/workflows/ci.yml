@@ -53,8 +53,15 @@ jobs:
           memory_worker=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # 根 CMakeLists.txt(精确匹配,子目录 */CMakeLists.txt 不沾)是
+            # 依赖接线与编译选项唯一出处:FetchContent 新第三方、MSVC 告警
+            # 压制、vcpkg/FetchContent 双路分派——这些只在 windows 腿显形
+            # (vcpkg 路仅 Windows runner 真跑、/w 是 MSVC 专属)。vcpkg.json
+            # 依赖变动被上面豁免、指望 CMakeLists.txt 把门,门自己也得验。
+            # 更新器批一③(miniz 接线)实测:不改这里,普通 PR 快车道只烧
+            # macOS,windows 腿根本不出场。
             case "$f" in
-              src/memory/*|src/platform/process_win.cpp|tests/support/memory_worker_fixture.cpp)
+              src/memory/*|src/platform/process_win.cpp|tests/support/memory_worker_fixture.cpp|CMakeLists.txt)
                 memory_worker=true ;;
             esac
             # Windows 瞬态文件语义敏感面:gateway 控制/任务命令文件的换名短拒
@@ -86,7 +93,8 @@ jobs:
   # 5daf4989 在 main 上就是这么翻的),按事件现挑腿单,build-test 用
   # fromJSON 接。分支快车道(agent/ci 分支)只烧 macos 一腿最快出信号;
   # main 和记忆 worker/Windows 进程/Windows 瞬态文件语义敏感面(gateway
-  # 命令文件 IO、助理任务册、telemetry 册)改动跑双平台，其余 PR 只跑 macOS。
+  # 命令文件 IO、助理任务册、telemetry 册)与依赖接线(根 CMakeLists.txt)
+  # 改动跑双平台，其余 PR 只跑 macOS。
   lane:
     needs: changes
     if: needs.changes.outputs.code == 'true'
