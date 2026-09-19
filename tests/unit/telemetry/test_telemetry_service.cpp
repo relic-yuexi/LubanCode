@@ -634,11 +634,14 @@ TEST_CASE("windows 短拒不丢账:cursor 落盘被独占句柄拦,松手后追�
     releaser.join();
     service.Stop();
 
-    // 第二窗的 traces 批只此一份(推进重投靠批 id 去重,不重发;metrics 批
-    // 与 traces 同窗口末,分开数)。
+    // 第二窗的常规件 traces 批只此一份(推进重投靠批 id 去重,不重发)。
+    // Stop 的 final flush 会按 missing 收口开着的 run span(run 未 CloseRun),
+    // 另发一只锚在同窗口末的 final 件——那是设计行为(§26.3),分开数;
+    // metrics 批与 traces 同窗口末,也不在此数。
     std::size_t second_window_batches = 0;
     for (const SpoolBatchRecord& batch : ReadAllSealedBatches(root)) {
-        if (batch.signal == "traces" && batch.last_event_id == second_last) {
+        if (batch.signal == "traces" && batch.last_event_id == second_last &&
+            !batch.final_window) {
             second_window_batches += 1;
         }
     }
