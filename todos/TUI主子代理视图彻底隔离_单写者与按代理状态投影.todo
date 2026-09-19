@@ -1,6 +1,6 @@
 # TUI 主子代理视图彻底隔离：单写者与按代理状态投影
 
-- 状态：部分实现（P0+P1，分支 feat/tui-agent-view-projection-p0p1，PR #144；CI <待回填>；P2/P3 待续。真实终端复现项待主控真机验收。
+- 状态：部分实现（P0+P1，分支 feat/tui-agent-view-projection-p0p1，PR #144；CI run 35448977703 success（macos-clang 绿，587/587；PR 分支按巷道只烧 macos，windows-msvc 腿合并后 main push 补跑）；P2/P3 待续。真实终端复现项待主控真机验收。
 - 日期：2026-09-19
 - 级别：P1（画面串流）；输入、审批、取消若串到别的任务，按 P0 阻断发布。
 - 取证基线：`d20547e4`。截图所用二进制路径、构建提交、终端宿主待核实，不能认作同版运行证据。
