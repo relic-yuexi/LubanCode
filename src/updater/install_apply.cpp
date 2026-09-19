@@ -202,7 +202,7 @@ std::expected<ApplyReport, std::string> ApplyWhitelistPlan(
         const fs::path src = pkg_dir / rel;
 
         if (auto chain = CheckParentChain(dst, install_root); !chain.has_value()) {
-            return chain;
+            return std::unexpected(chain.error());
         }
 
         // 落地期占位复查(计划之后盘面又变了):目标被目录/reparse 占住,
