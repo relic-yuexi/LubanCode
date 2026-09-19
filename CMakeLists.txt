@@ -950,6 +950,12 @@ add_library(lubancode_engine STATIC
   # 网络依赖,后续批次(下载/解包/事务)在此底座上叠。
   src/updater/paths.cpp
   src/updater/manifest.cpp
+  # 更新助手 C++ 化·批一第②单(白名单覆盖决策表):新包 manifest × 盘面
+  # 实况 → 覆盖动作清单。行为权威是 install.ps1 终稿(PR #140)的
+  # Build-PackageFilePlan——包根文件表+受管树白名单,同名先备份再换新,
+  # 包外一概不动,目录/reparse 挡路即 conflict 阻断(退出码 3)。纯函数
+  # 零 IO,批三 apply 落地层吃这张表。
+  src/updater/whitelist_plan.cpp
   # 更新助手 C++ 化·批二第①单(解包层):zip(mz_zip_reader 逐文件流式
   # 回调口)与 tar.gz(tinfl 流式解 gzip + 自写 tar 头遍历,ustar/GNU 长
   # 名/pax 覆写/base-256 尺寸都认)双格式安全解包——成员名全过
