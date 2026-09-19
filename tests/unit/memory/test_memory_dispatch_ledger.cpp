@@ -438,7 +438,7 @@ TEST_CASE("ProjectMemory: remember/forget/accept/memory_save 四路回执") {
         CHECK(receipt.source == memory::MemoryWriteSource::ExplicitCommandSave);
         CHECK(receipt.outcome == memory::MemoryWriteReceiptOutcome::Queued);
         CHECK(receipt.operation == "upsert");
-        CHECK(receipt.job_id == *queued);
+        CHECK(receipt.job_id == queued->job_id);
         CHECK_FALSE(receipt.job_id.empty());
         CHECK(receipt.layer == "project");
         CHECK(receipt.kind == "fact");
@@ -467,7 +467,7 @@ TEST_CASE("ProjectMemory: remember/forget/accept/memory_save 四路回执") {
         REQUIRE(sink.receipts.size() == 2);
         CHECK(sink.receipts[1].outcome == memory::MemoryWriteReceiptOutcome::Queued);
         CHECK(sink.receipts[1].operation == "forget");
-        CHECK(sink.receipts[1].job_id == *queued);
+        CHECK(sink.receipts[1].job_id == queued->job_id);
         CHECK(sink.receipts[1].kind.empty());
     }
 
@@ -495,7 +495,7 @@ TEST_CASE("ProjectMemory: remember/forget/accept/memory_save 四路回执") {
         REQUIRE(sink.receipts.size() == 2);
         CHECK(sink.receipts[1].source == memory::MemoryWriteSource::CandidateAccept);
         CHECK(sink.receipts[1].outcome == memory::MemoryWriteReceiptOutcome::Queued);
-        CHECK(sink.receipts[1].job_id == *queued);
+        CHECK(sink.receipts[1].job_id == queued->job_id);
     }
 
     SUBCASE("memory_save 工具:model_tool_save 回执") {
