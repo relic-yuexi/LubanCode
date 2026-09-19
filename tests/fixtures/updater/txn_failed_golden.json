@@ -1,0 +1,39 @@
+{
+  "blocking": [
+    {
+      "action": "conflict-modified",
+      "path": "skills/lubancode-config/SKILL.md"
+    },
+    {
+      "action": "conflict-collision",
+      "path": "docs/README.md"
+    }
+  ],
+  "created_at_utc": "2026-09-20T12:00:00Z",
+  "id": "20260920T120000Z-1a2b3c4d",
+  "kind": "update",
+  "notes": [
+    "2026-09-20T12:00:00Z \u4e0b\u8f7d\u5b8c\u6210,\u6838\u5bf9\u6458\u8981\u901a\u8fc7"
+  ],
+  "reason": "\u6fc0\u6d3b\u4e2d\u9014\u5931\u8d25: \u65e7\u6839 EXE \u632a\u4e0d\u8fdb\u5907\u4efd",
+  "schema": 1,
+  "state": "failed",
+  "state_at_utc": "2026-09-20T12:00:00Z",
+  "target": {
+    "asset_id": 987654321,
+    "asset_name": "lubancode-0.26.280-windows-x64.zip",
+    "asset_size": 536870912,
+    "digest_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dirname": "0.26.280-bbbbbbbb",
+    "download_url": null,
+    "exe_version": "0.26.280",
+    "platform": "windows-x64",
+    "release_id": 123456789,
+    "repo": "relic-yuexi/LubanCode",
+    "tag": "v0.26.280",
+    "version": "0.26.280"
+  },
+  "target_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "target_dirname": "0.26.280-bbbbbbbb",
+  "target_version": "0.26.280"
+}
