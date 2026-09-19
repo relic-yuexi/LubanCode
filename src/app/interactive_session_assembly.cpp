@@ -1033,6 +1033,17 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // Soul 会话冻结单 P0(§5.3):恢复源场已提交快照(忽略磁盘新默认
             // 值);源场从未锁定过就按当前默认起未锁定草稿。
             AdoptResumedSessionSoul(session_runtime_.trajectory()->LaunchResumeSoulSnapshot());
+            // 上下文预算单 §四:--continue 的预算恢复裁决 + 应用——与交互
+            // /resume 同一处(session_commands 的 ApplyResumedContextWindow),
+            // 先确定有效 provider/model 再取匹配预算,套用进 tracker,发首
+            // 个请求前由发轮前同步点对齐主 Agent。
+            ApplyResumedContextWindow(
+                context_tracker, session_runtime_.trajectory(), &model_catalog, active_provider,
+                *current_model,
+                session_runtime_.trajectory()->LaunchResumeControlState().has_value()
+                    ? &*session_runtime_.trajectory()->LaunchResumeControlState()
+                    : nullptr,
+                theme);
             // resume 的历史开新账(SessionStart source=resume)。
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
                             nlohmann::json{{"source", "resume"}}, "resume");
@@ -1052,6 +1063,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                       << "--continue 源场 Soul 快照材料坏,本次未恢复旧魂(已按新会话开张): "
                       << soul_error << theme.reset << "\n";
         }
+    }
+    // 上下文预算单 §四:新场初始有效预算快照——开场配置/目录应用后的
+    // 有效值如实落账;只记后续修改会把开场预算丢掉,resume 便没有底账
+    // 可比。--continue 恢复场由上面的 ApplyResumedContextWindow 落裁决账,
+    // 不在此重复。
+    if (session_runtime_.trajectory() != nullptr && !session_runtime_.trajectory()->resumed_at_launch()) {
+        (void)session_runtime_.trajectory()->RecordContextWindowChanged(
+            context_tracker.window_tokens(), 0, active_provider, *current_model, "initial");
     }
     // -----------------------------------------------------------------------
     // 跨会话传话:登记名册、起 pipe/socket 服务与心跳。只在交互会话启用

@@ -441,8 +441,13 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         TermOut() << parsed.error() << "\n";
         return;
     }
-    context_tracker.set_window_tokens(*parsed);
-    TermOut() << trf("cmd.context.window_changed", *parsed) << "\n";
+    // 上下文预算单(§三/§四):统一预算入口——校验与面板同一把尺(超限
+    // 拒绝并说明,不静默截断),有效修改写窗口事件;现场材料缺(单测/
+    // 单发)退化为只改 tracker 不写账。
+    ApplyContextWindowToSession(context_tracker, in.trajectory, in.model_catalog,
+                                in.active_provider != nullptr ? *in.active_provider : std::string(),
+                                in.current_model != nullptr ? *in.current_model : std::string(),
+                                *parsed, theme);
 }
 
 // Token 账本单 A1:compact 子请求(map/reduce)的旁路桥工厂。路由解完才
@@ -1881,6 +1886,107 @@ bool DeleteCurrentSession(lubancode::runtime::TrajectorySessionLedger* ledger,
 // ---- /context 会话现场收集 与 /compact 会话接线(终端接线收尾单自大类
 // 搬出;输出走 TerminalPort)。函数体原文随行,行为一字不差。 ------------
 
+// 上下文预算单(§三/§四):统一预算修改入口——/context 带参与面板保存
+// 共用一只。校验同一把尺(CheckContextWindowValue:面板拦的命令也拦,
+// 超限拒绝不静默截断);值有变才写账(取消/无变更不写事件,重试不重复
+// 落账);写不住如实说"仅本次生效",不装"已保存、恢复可用"。
+bool ApplyContextWindowToSession(lubancode::cli::ContextTracker& tracker,
+                                 lubancode::runtime::TrajectorySessionLedger* trajectory,
+                                 const lubancode::config::ModelCatalog* catalog,
+                                 const std::string& provider, const std::string& model,
+                                 std::size_t tokens, const lubancode::cli::Theme& theme) {
+    std::optional<std::size_t> declared_limit;
+    if (catalog != nullptr) {
+        const lubancode::config::ModelCatalogEntry* entry = catalog->FindByProviderAndSlug(provider, model);
+        if (entry != nullptr && entry->context_window_tokens.has_value()) {
+            declared_limit = entry->context_window_tokens;
+        }
+    }
+    const auto check = lubancode::cli::CheckContextWindowValue(declared_limit, tokens);
+    if (!check.ok) {
+        TermOut() << theme.error << trf("cmd.context_window.reject.over_limit", tokens, check.limit)
+                  << theme.reset << "\n";
+        return false;
+    }
+    const std::size_t old_window = tracker.window_tokens();
+    tracker.SetWindowBudget(tokens, lubancode::cli::ContextWindowSource::Manual, provider, model);
+    bool persisted = false;
+    if (trajectory != nullptr && tokens != old_window) {
+        persisted = trajectory->RecordContextWindowChanged(tokens, old_window, provider, model,
+                                                           "manual");
+    }
+    TermOut() << trf(persisted ? "cmd.context.window_changed_persisted"
+                               : "cmd.context.window_changed",
+                     tokens)
+              << "\n";
+    // 缩到当前占用之下:只提示压力,不清历史、不立即发压缩请求(§4.2)。
+    if (tracker.ShouldAutoCompact()) {
+        TermOut() << tr("cmd.context.compact_hint") << "\n";
+    }
+    return true;
+}
+
+void ApplyResumedContextWindow(lubancode::cli::ContextTracker& tracker,
+                               lubancode::runtime::TrajectorySessionLedger* trajectory,
+                               const lubancode::config::ModelCatalog* model_catalog,
+                               const std::string& now_provider, const std::string& now_model,
+                               const lubancode::trajectory::ReplayControlState* control,
+                               const lubancode::cli::Theme& theme) {
+    lubancode::cli::RestoredWindowInput input;
+    if (control != nullptr) {
+        input.session_window_present = control->context_window.has_value();
+        input.session_window_tokens =
+            control->context_window.has_value()
+                ? static_cast<std::size_t>(control->context_window.value_or(0))
+                : 0;
+        input.session_provider = control->context_window_provider;
+        input.session_model = control->context_window_model;
+    }
+    input.manual_override = tracker.window_manually_set();
+    input.now_provider = now_provider;
+    input.now_model = now_model;
+    if (model_catalog != nullptr) {
+        const lubancode::config::ModelCatalogEntry* entry =
+            model_catalog->FindByProviderAndSlug(now_provider, now_model);
+        if (entry != nullptr && entry->context_window_tokens.has_value()) {
+            input.declared_limit = entry->context_window_tokens;
+        }
+    }
+    const lubancode::cli::RestoredWindowDecision decision =
+        lubancode::cli::ResolveRestoredContextWindow(input);
+    if (decision.apply) {
+        tracker.SetWindowBudget(decision.tokens, lubancode::cli::ContextWindowSource::Resumed,
+                                now_provider, now_model);
+        TermOut() << theme.stats << trf("resume_window.restored", decision.tokens) << theme.reset
+                  << "\n";
+    } else {
+        const std::string identity =
+            input.session_provider + "/" + input.session_model;
+        const std::string now_identity = now_provider + "/" + now_model;
+        TermOut() << theme.stats
+                  << trf(decision.note,
+                         input.session_window_present
+                             ? std::to_string(input.session_window_tokens)
+                             : std::string("0"),
+                         identity.empty() ? std::string("?") : identity,
+                         now_identity,
+                         input.declared_limit.value_or(0))
+                  << theme.reset << "\n";
+    }
+    // 落点场的预算底账(§四"新场保存初始有效预算快照"):套用了记
+    // source=resumed 的裁决结果,回落也把当前有效值记成 initial——后续
+    // 再 resume 有底账可比,不靠猜。写不住明说(裁决本身已生效,只是本
+    // 次进程退出后可能丢)。
+    if (trajectory != nullptr) {
+        const bool written = trajectory->RecordContextWindowChanged(
+            tracker.window_tokens(), 0, now_provider, now_model,
+            decision.apply ? "resumed" : "initial");
+        if (!written) {
+            TermOut() << theme.stats << tr("resume_window.snapshot_failed") << theme.reset << "\n";
+        }
+    }
+}
+
 void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                        const lubancode::cli::Theme& theme) {
     lubancode::agent::Agent& loop = *in.agent;
@@ -2050,6 +2156,21 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                          loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, &layers,
                          in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr,
                          v3_session ? nullptr : &token_calibration_status, session_facts);
+    // §三:当前预算超目录已知上限的显式警示(旧档带进来的超限值不静默
+    // 截断,明说待纠正;不带目录材料的现场跳过)。挂在明细卡末尾,预算
+    // 与上限同屏可比。
+    if (args.empty() && in.model_catalog != nullptr && in.active_provider != nullptr &&
+        in.current_model != nullptr) {
+        const lubancode::config::ModelCatalogEntry* entry =
+            in.model_catalog->FindByProviderAndSlug(*in.active_provider, *in.current_model);
+        if (entry != nullptr && entry->context_window_tokens.has_value() &&
+            context_tracker.window_tokens() > *entry->context_window_tokens) {
+            TermOut() << theme.error
+                      << trf("cmd.context.window_over_limit", context_tracker.window_tokens(),
+                             *entry->context_window_tokens)
+                      << theme.reset << "\n";
+        }
+    }
 }
 
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) {
@@ -2575,6 +2696,27 @@ CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::Pa
             session_state.on_session_restarted();
         }
         session_state.title.clear();
+        // §五(清话统计修复):ClearSession 成功后才清统计——tracker 具名
+        // 重置(窗口与来路保留,占用/缓存/累计/请求账全清,旧场迟到 usage
+        // 丢弃闸上膛)、分角色用量账清零、最近压缩台账清空。失败路在上面
+        // 早退,旧场统计原样保留。与 Agent 重建、新场 ID 同一成功收尾,
+        // 不留"新历史配旧统计"。
+        if (ctx.context_tracker != nullptr) {
+            ctx.context_tracker->ResetSession();
+        }
+        if (ctx.model_router != nullptr) {
+            ctx.model_router->ledger().Clear();  // 进程级累计不冒充新场累计
+        }
+        if (ctx.last_compact_line != nullptr) {
+            ctx.last_compact_line->clear();  // 旧场的压缩摘要不带到新场
+        }
+        // §四:新场初始有效预算快照——/clear 保留窗口设置(§五明文:本项
+        // 不借机改预算),把这份有效值如实落进新账,后续 resume 有底账。
+        if (ctx.trajectory != nullptr && ctx.active_provider != nullptr && ctx.current_model != nullptr) {
+            (void)ctx.trajectory->RecordContextWindowChanged(
+                ctx.context_tracker != nullptr ? ctx.context_tracker->window_tokens() : 0, 0,
+                *ctx.active_provider, *ctx.current_model, "initial");
+        }
         TermOut() << tr("cmd.clear.done") << "\n";
         return CommandFlow::Continue;
     }
@@ -2610,6 +2752,10 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     }
     context_in.trajectory = ctx.trajectory;
     context_in.last_compact_line = ctx.last_compact_line;
+    // 上下文预算单(§三/§四):带参分支的统一预算入口材料——身份与目录。
+    context_in.active_provider = ctx.active_provider;
+    context_in.current_model = ctx.current_model.get();
+    context_in.model_catalog = ctx.model_catalog;
     if (ctx.config != nullptr) {
         context_in.compact_partition_count = ctx.config->compact_partition_count;
     }
@@ -2763,17 +2909,16 @@ CommandFlow HandleSlashContextWindow(SlashDispatchContext& ctx,
         return CommandFlow::Continue;
     }
 
-    // 两项都过了才动手。窗口走 /context 同一只 tracker(下一轮发轮前对齐
-    // 进主 Agent,interactive_session.cpp 的发轮同步点);effort 走 /think
-    // 同一只 current_think,sync_request_policy 让下一份请求即时带上——
-    // 不是只改显示值(§七.5)。不向子代理广播,不改独立角色模型的预算。
+    // 两项都过了才动手。窗口走统一预算入口(§四:/context 带参与面板保存
+    // 同一处——校验同一把尺,有效修改写窗口事件,写不住如实报告;下一轮
+    // 发轮前对齐进主 Agent,interactive_session.cpp 的发轮同步点);effort
+    // 走 /think 同一只 current_think,sync_request_policy 让下一份请求即时
+    // 带上——不是只改显示值(§七.5)。不向子代理广播,不改独立角色模型
+    // 的预算。
     if (selection.window_changed) {
-        ctx.context_tracker->set_window_tokens(selection.window_tokens);
-        TermOut() << trf("cmd.context.window_changed", selection.window_tokens) << "\n";
-        // 缩到当前占用之下:只提示压力,不清历史、不立即发压缩请求(§4.2)。
-        if (ctx.context_tracker->ShouldAutoCompact()) {
-            TermOut() << tr("cmd.context.compact_hint") << "\n";
-        }
+        ApplyContextWindowToSession(*ctx.context_tracker, ctx.trajectory, ctx.model_catalog,
+                                    *ctx.active_provider, *ctx.current_model,
+                                    selection.window_tokens, *ctx.theme);
     }
     if (selection.effort_changed) {
         *ctx.current_think = selection.effort_value;
@@ -2962,6 +3107,25 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
             // 单 P1:枚举间 static_cast 禁绝)。
             lubancode::cli::SetConfirmMode(lubancode::cli::ToConfirmMode(*summary.outcome.approval_mode));
         }
+        // 上下文预算单 §四:当前进程上一场统计不得混入恢复目标——tracker
+        // 具名重置(窗口随后由恢复裁决重定)、分角色账与压缩台账同步清
+        // 场;旧场持久记录保留,显示不把无实测写成零占用(状态栏按无实测
+        // 隐藏)。
+        if (ctx.context_tracker != nullptr) {
+            ctx.context_tracker->ResetSession();
+        }
+        if (ctx.model_router != nullptr) {
+            ctx.model_router->ledger().Clear();
+        }
+        if (ctx.last_compact_line != nullptr) {
+            ctx.last_compact_line->clear();
+        }
+        // 上下文预算单 §四:预算恢复裁决 + 应用(与 --continue 同一处)。
+        // 套用进 tracker 后由发轮前同步点对齐主 Agent——恢复值在任何请求
+        // 发出前生效;不擅改 v3 同 ID 续接语义(账面只多一枚预算事实行)。
+        ApplyResumedContextWindow(*ctx.context_tracker, ctx.trajectory, ctx.model_catalog,
+                                  *ctx.active_provider, *ctx.current_model, &summary.outcome.control,
+                                  theme);
         // 文案按落点分派(2026-09-19 拍板):v3 源续接源场——同 id 续写,
         // 不提"新 session";v2 源 fork 迁移开新场,如实报"已迁移"。
         if (summary.outcome.source_is_v3) {

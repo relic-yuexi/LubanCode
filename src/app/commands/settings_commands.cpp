@@ -643,7 +643,10 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
         TermOut() << trf("catalog.apply_think", *apply.think) << "\n";
     }
     if (apply.context_window_tokens.has_value()) {
-        context_tracker.set_window_tokens(*apply.context_window_tokens);
+        // 上下文预算单 §三:目录应用是配置来路——来路随值落账,恢复裁决
+        // 的"本次明确覆盖"判定才分得清配置默认与用户手动。
+        context_tracker.SetWindowBudget(*apply.context_window_tokens,
+                                         lubancode::cli::ContextWindowSource::Config);
         TermOut() << trf("catalog.apply_window", *apply.context_window_tokens) << "\n";
     }
     if (*current_model_instructions != apply.base_instructions) {
@@ -874,7 +877,8 @@ bool ExecuteProviderSwitch(const std::string& switch_name, const std::string& sw
     session_wire = lubancode::config::ProviderWireName(config.wire);
     real_backend.Rebuild(config);
     prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
-    context_tracker.set_window_tokens(config.context_window_tokens);
+    context_tracker.SetWindowBudget(config.context_window_tokens,
+                                     lubancode::cli::ContextWindowSource::Config);
     // 校验、取 key、重建后端都成功了才清。清完先按新配置重画横幅，
     // 随后的目录应用与切换提示仍留在屏上；Agent 历史照旧保留。
     if (is_console) {
