@@ -965,6 +965,11 @@ public:
     // 启动路源场 soul 快照材料坏(没坏/没 resume 给空串):装配层据此
     // 明说——报错不静默换魂(§5.3)。
     std::string launch_resume_soul_error() const;
+    // 上下文预算单 P1:--continue 启动路 resume 折叠出的控制态(交互
+    // /resume 走 TrajectoryResumeSummary.outcome.control,两路同一形状)。
+    // 没 resume 给 nullopt;在场但 context_window 缺 = 旧档无预算记录,
+    // 恢复裁决按"字段缺失回落"处理,不猜。
+    std::optional<trajectory::ReplayControlState> LaunchResumeControlState() const;
 
     // 折叠本场 main.jsonl(纯读,writer 持句柄照读——journal 以共享读开)。
     // /export、/copy、session view 的数据源(§14.5:一律读 ReplayState)。
@@ -1160,6 +1165,17 @@ public:
     void RecordTitleChanged(const std::string& title, const std::string& old_title);
     void RecordModeChanged(const std::string& mode, const std::string& reason,
                            const std::string& old_mode);
+
+    // ---- 上下文预算单 P1:窗口预算的写账口(/context、面板、开场快照与
+    // 恢复裁决共用)----
+    // 有效修改落 control.context_window.changed(v2 场)/ session.context_
+    // window.applied(v3 场),载荷带 provider/model 身份与 source 来路
+    // (manual|initial|resumed)。old_window 传 0 = 首枚/无旧值。返回
+    // true = 已提交;false = 账本没开/写不住——调用方须如实报告"仅本次
+    // 生效",不得宣称恢复可用。幂等由调用方保证(值没变别写,§四合同)。
+    bool RecordContextWindowChanged(std::size_t window_tokens, std::size_t old_window_tokens,
+                                    const std::string& provider, const std::string& model,
+                                    const std::string& source);
 
 private:
     // T11-A:session.title.applied 的共用尾段(source 分流 manual/local/

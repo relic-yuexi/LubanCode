@@ -126,7 +126,14 @@ struct ReplayControlState {
     std::optional<std::string> title;
     std::optional<std::string> cwd;
     std::optional<std::string> mode;
+    // 上下文预算(上下文预算单 P1):窗口值随 control.context_window.changed
+    // 折叠(末枚胜)。provider/model 是"这份预算给谁"的身份——事件里没带
+    // (旧档/最小写入)就保持空串,恢复裁决按"身份不明"回落,不拿模型 A
+    // 的预算套给模型 B,也不凭空猜匹配。source 同理(manual/initial/resumed)。
     std::optional<std::uint64_t> context_window;
+    std::string context_window_provider;  // 空 = 事件未携带身份
+    std::string context_window_model;     // 空 = 事件未携带身份
+    std::string context_window_source;    // 空 = 事件未携带来源
     int compact_epoch = 0;
     std::string last_compact_new_state_hash;
     std::vector<std::string> open_queue_items;  // enqueued 未终态

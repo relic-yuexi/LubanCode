@@ -1858,6 +1858,39 @@ std::optional<TitleAppliedFact> FindLastTitleApplied(const V3Ledger& ledger) {
     return fact;
 }
 
+std::optional<ContextWindowAppliedFact> FindLastContextWindowApplied(const V3Ledger& ledger) {
+    std::optional<ContextWindowAppliedFact> fact;
+    for (const EventLine& event : ledger.events) {
+        if (event.kind != EventKindV3::SessionContextWindowApplied) {
+            continue;
+        }
+        const auto window = event.payload.find("contextWindow");
+        // 与 schema3 的 JsonIsNonNegativeInt 同口径:有符号/无符号正整数
+        // 都认(nlohmann 的 int 字面量落有符号档),0/负数/非数不冒充。
+        const bool window_valid =
+            window != event.payload.end() &&
+            ((window->is_number_unsigned() && window->get<std::uint64_t>() > 0) ||
+             (window->is_number_integer() && window->get<std::int64_t>() > 0));
+        if (!window_valid) {
+            continue;  // 坏行不冒充预算事实(验卷另有把关)
+        }
+        ContextWindowAppliedFact current;
+        current.context_window = window->get<std::uint64_t>();
+        const auto read_string = [&event](const char* key) {
+            const auto field = event.payload.find(key);
+            return field != event.payload.end() && field->is_string()
+                       ? field->get<std::string>()
+                       : std::string();
+        };
+        current.provider = read_string("provider");
+        current.model = read_string("model");
+        current.source = read_string("source");
+        current.event_id = event.event_id;
+        fact = std::move(current);
+    }
+    return fact;
+}
+
 std::optional<EnvironmentCaptureFact> FindLastEnvironmentCapture(const V3Ledger& ledger) {
     std::optional<EnvironmentCaptureFact> fact;
     for (const EventLine& event : ledger.events) {

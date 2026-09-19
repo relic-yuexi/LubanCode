@@ -2,6 +2,7 @@
 #include "trajectory/v3/schema3.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1995,6 +1996,41 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (!line.payload.contains("inheritedFrom")) {
                 return Err("schema3.missing_field",
                            "session.title.applied(source=inherited) 必带 inheritedFrom 指源场事件");
+            }
+        }
+    } else if (line.kind == K::SessionContextWindowApplied) {
+        // 上下文预算单(P1):窗口预算的事实提交。contextWindow 必填
+        // 正整数(token 数);oldContextWindow 可空(首枚/未变更不写)。
+        // provider/model 是"这份预算给谁"的身份——恢复裁决靠它防拿模型
+        // A 的预算套给模型 B,可空(旧档/单测的最小写入),空按身份不明
+        // 读,不猜。source ∈ manual(/context 与面板)/initial(开场快照)/
+        // resumed(恢复裁决落账),可空按 manual 读(老行为不分来源)。
+        if (!line.payload.contains("contextWindow") ||
+            !JsonIsNonNegativeInt(line.payload["contextWindow"])) {
+            return Err("schema3.bad_type",
+                       "session.context_window.applied.contextWindow 应为非负整数(token 数)");
+        }
+        if (line.payload.contains("contextWindow") &&
+            line.payload["contextWindow"].get<std::uint64_t>() == 0) {
+            return Err("schema3.bad_type",
+                       "session.context_window.applied.contextWindow 应为正整数(0 不是有效预算)");
+        }
+        if (line.payload.contains("oldContextWindow") && !line.payload["oldContextWindow"].is_null() &&
+            !JsonIsNonNegativeInt(line.payload["oldContextWindow"])) {
+            return Err("schema3.bad_type",
+                       "session.context_window.applied.oldContextWindow 应为非负整数或省略");
+        }
+        for (const auto* key : {"provider", "model", "source"}) {
+            if (line.payload.contains(key) && !line.payload[key].is_string()) {
+                return Err("schema3.bad_type",
+                           std::string("session.context_window.applied.") + key + " 应为 string");
+            }
+        }
+        if (line.payload.contains("source")) {
+            const std::string source = line.payload["source"].get<std::string>();
+            if (!source.empty() && source != "manual" && source != "initial" && source != "resumed") {
+                return Err("schema3.bad_type",
+                           "session.context_window.applied.source 须为 manual/initial/resumed 之一");
             }
         }
     } else if (line.kind == K::TitleExtracted) {
