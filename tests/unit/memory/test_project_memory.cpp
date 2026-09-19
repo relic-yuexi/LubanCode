@@ -523,7 +523,8 @@ TEST_CASE("ProjectMemory: 真 worker 连续入队不起风暴,全部提交且回
                 CHECK(completion.operation_id == "memsave-" + stem);
                 ++committed;
             } else {
-                FAIL("second drain must be empty, got: " + completion.operation_id);
+                const std::string leak = "second drain must be empty, got: " + completion.operation_id;
+                FAIL(leak.c_str());
             }
         }
     }
