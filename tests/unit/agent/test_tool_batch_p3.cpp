@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -413,9 +414,29 @@ TEST_CASE("持久化:并行段 result_committed 逐枚落账,无错配无缺漏"
         CHECK(committed_ids[0] == "u0");
         CHECK(committed_ids[1] == "u1");
     }
+    // result_committed 栅栏只带 execution_id(批次尾逐枚发):从 started
+    // 事件建 tool_use_id -> execution_id 映射,断言每枚的栅栏恰好落账。
     using agent::ToolTraceEventKind;
-    CHECK(collector.Count(ToolTraceEventKind::ResultCommitted, "u0") == 1);
-    CHECK(collector.Count(ToolTraceEventKind::ResultCommitted, "u1") == 1);
+    std::map<std::string, std::string> execution_of;
+    for (const auto& event : collector.Take()) {
+        if (event.kind == ToolTraceEventKind::ExecutionStarted) {
+            execution_of[event.tool_use_id] = event.execution_id;
+        }
+    }
+    REQUIRE(execution_of.size() == 2);
+    for (const std::string& call_id : {"u0", "u1"}) {
+        const auto found = execution_of.find(call_id);
+        REQUIRE(found != execution_of.end());
+        std::size_t committed_for_call = 0;
+        for (const auto& event : collector.Take()) {
+            if (event.kind == ToolTraceEventKind::ResultCommitted &&
+                event.execution_id == found->second) {
+                ++committed_for_call;
+            }
+        }
+        CHECK(committed_for_call == 1);
+    }
+    CHECK(collector.Count(ToolTraceEventKind::ResultCommitted) == 2);
 }
 
 // ---------------------------------------------------------------------------
