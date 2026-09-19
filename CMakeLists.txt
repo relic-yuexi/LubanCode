@@ -983,6 +983,14 @@ add_library(lubancode_engine STATIC
   src/updater/layout.cpp
   src/updater/txn.cpp
   src/updater/lock.cpp
+  # 更新助手 C++ 化·批三第①单(引擎主链):无副作用探针(probe——隔离
+  # 数据根跑 <exe> --version,首行认 "lubancode <版本>" 协议)+ 五动词
+  # 事务引擎(engine——锁/续跑/磁盘预检/下载或本地包/解包/验包/预检缝/
+  # 激活/健康检查/提交/回滚/gc/status,编排照 scripts/updater.py 的
+  # cmd_update L1185-1287)。CLI 装配与所有权预检(install_scan+
+  # whitelist_plan)是批三③的活,引擎只留 PrecheckFn 缝。
+  src/updater/probe.cpp
+  src/updater/engine.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
