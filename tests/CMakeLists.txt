@@ -391,16 +391,6 @@ target_compile_definitions(search_golden_driver PRIVATE
   LUBANCODE_SEARCH_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/search"
   LUBANCODE_SOURCE_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
-# LoCoMo-MC10 检索层评测(记忆系统评测单 §E1):吃 eval/locomo/perturbed.jsonl
-# (本地数据,gitignore),每场走正门 EnqueueSave→worker→BuildTurnContext 量
-# 生产召回路,逐题落排级账。不进 ctest(要本地数据)。判据与分桶在 python
-# 汇总侧 scripts/eval_locomo_retrieval_report.py。
-add_executable(locomo_retrieval_driver EXCLUDE_FROM_ALL manual/locomo_retrieval_driver.cpp)
-# --extract 模式要真模型路(BuildBackend/ModelRouterService/RunMemoryExtraction),
-# 链到 app 层;官方摘要模式只用 engine 件,同一只 driver 两副面孔。
-target_link_libraries(locomo_retrieval_driver PRIVATE lubancode_app)
-target_compile_features(locomo_retrieval_driver PRIVATE cxx_std_23)
-
 # ripgrep 迁移单 P0-7:性能与稳定门驱动(不进 ctest,手动跑——要真 rg、要
 # 长跑):
 #   search_perf_driver bench  <rg> <输出JSON> [--small-dir/--small-file/
