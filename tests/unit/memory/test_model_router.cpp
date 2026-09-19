@@ -451,6 +451,41 @@ TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 cl
 }
 
 // ---------------------------------------------------------------------------
+// 标题触发提前单·哑门触发条件钉:标题精炼起飞前的两道静默门(路由模型空 /
+// provider 找不到),此前拦下即无声无息——用户只见标题永远停在本地档。
+// 这里钉的是"什么时候拦":门拦下后亮报与否是 controller 的活,判定本体
+// 就是这两只查询。
+// ---------------------------------------------------------------------------
+TEST_CASE("标题精炼哑门: 会话模型空时 SessionTitle 路由 model 空(门二触发条件)") {
+    using lubancode::app::ModelRouterService;
+    struct NullBackend final : public lubancode::api::Backend {
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>&,
+            const std::atomic<bool>*) override {
+            return {};
+        }
+    };
+    NullBackend backend;
+    // 会话模型空(欢迎页空配置进主界面的形状)+ cheap/normal 全未配:
+    // SessionTitle 回落 normal,normal 沿会话模型——一路空到底。
+    auto current_model = std::make_shared<std::string>("");
+    std::string active_provider = "local";
+    const auto result = MergeFromJson(R"({
+        "providers": [{"name": "local", "base_url": "http://localhost:1", "wire": "anthropic", "model": ""}],
+        "active_provider": "local"
+    })");
+    ModelRouterService service(result, backend, current_model, active_provider);
+    CHECK(service.RouteInfo(TaskKind::SessionTitle).model.empty());
+
+    // 对照:会话模型补上(用户选了模型),同配置下路由立刻有 model——门
+    // 开不开只看这一格。
+    auto with_model = std::make_shared<std::string>("session-model");
+    ModelRouterService live(result, backend, with_model, active_provider);
+    CHECK_FALSE(live.RouteInfo(TaskKind::SessionTitle).model.empty());
+}
+
+// ---------------------------------------------------------------------------
 // 记忆抽取 JSON 收口修复单 P1-A:SampleCall.output_schema 透传——设了 schema
 // 的调用经 ModelRouterService::Sample 一站,复检账(schema_ok/schema_error)
 // 真落回调用方手里;不设 schema 的旧行为一字不差。

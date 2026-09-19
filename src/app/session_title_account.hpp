@@ -72,12 +72,14 @@ public:
     // 精炼器(自带后台线程;Start/TakeFinished/RequestCancel 都归它)。
     SessionTitleRefiner& refiner() { return refiner_; }
     bool auto_attempted() const { return auto_attempted_; }
+    // P0-2:标题事件行落哪本账(ledger 在走 control.title.changed)。只读
+    // 查询升 public(标题触发提前单·哑门改亮):controller 的门一亮报要
+    // 问账房活不活,判定本体仍在这里。
+    bool LedgerActive() const;
 
 private:
     // 起本地标题的共用尾段:title 占内存 -> 落事件行 -> 失败回退。
     LocalResult AdoptLocalTitle(const std::string& local, bool quiet_on_failure);
-    // P0-2:标题事件行落哪本账(ledger 在走 control.title.changed)。
-    bool LedgerActive() const;
     // T11-A:落标题采用事件,来源分流 manual/local/generated(v2 场由账本
     // 兜底同归 control.title.changed);generated 带生成身份。
     bool AppendTitleEvent(const std::string& title, std::string_view source,
