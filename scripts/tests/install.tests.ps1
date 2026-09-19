@@ -580,6 +580,8 @@ try {
 }
 
 Write-Host ""
+. (Join-Path $scriptDir 'install.legacy.tests.ps1')
+
 Write-Host "共 $($script:passCount + $script:failCount) 项,通过 $($script:passCount),失败 $($script:failCount)" -ForegroundColor $(if ($script:failCount -eq 0) { 'Green' } else { 'Red' })
 
 if ($script:failCount -gt 0) {

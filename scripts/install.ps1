@@ -22,7 +22,8 @@
       - 清单外的未知/用户文件 → 一律保留;新版恰好也要这个路径 → 同样算冲突
       - 官方件本地删掉 → 不悄悄复活,报告
       - 官方在新版删了它、本地未改 → 备份后随旧版退役
-    旧安装没有清单(基线)且与新包路径相撞:先完整备份,报 needs-review 停手
+    旧安装没有清单时,自动查询同版本官方发行包,校验摘要和本机 exe 后重建基线。
+    查询失败或无法确认归属且与新包路径相撞:先完整备份,报 needs-review 停手
     (退出码 3),等 -Baseline 建基线或 -AllowUnknownReplace 显式确认;纯新增
     不相撞则直接装。来源与目标同一目录时不删目录再搬自己(同路径直接跳过)。
     用户数据(~/.lubancode、项目 .lubancode/.agents、LUBANCODE_HOME 重定向)
@@ -536,6 +537,14 @@ function Build-FilePlan {
         elseif ($null -ne $o) { $entry.path = [string]$o['path'] }
         else { $entry.path = [string]$d['path'] }
 
+        # 用户配置和用户数据从不参与安装,即使来源或旧清单误收了它们。
+        if ($entry.path -match '^(config\.toml|\.env|\.lubancode|\.agents)(/|$)') {
+            $entry.action = 'keep-user-data'
+            $entry.reason = '用户配置或数据,不写不删'
+            $plan += [PSCustomObject]$entry
+            continue
+        }
+
         if ($null -ne $d -and ($d['reparse'] -or $d['isDir'])) {
             # 普通容器目录(清单没把它当文件)不进计划;链接/reparse 即便清单
             # 不认识也点名留观(绝不去动);只有清单要文件的路径被目录/链接
@@ -997,6 +1006,90 @@ function Resolve-BaselineManifest {
     return (New-ManifestFromTree -RootDir $dir)
 }
 
+function Get-LegacyReleaseAssets {
+    param([string]$Repo, [string]$Version)
+    # exe 早期只报三段版本;正式版与 beta 都是候选,最终由 exe 哈希认定。
+    if ($Version -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') { return }
+    $pattern = '^v?' + [regex]::Escape($Version) + '(?:-[0-9A-Za-z.-]+)?$'
+    for ($page = 1; $page -le 10; $page++) {
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=100&page=$page" `
+            -UseBasicParsing -TimeoutSec 30 -Headers @{ 'User-Agent' = 'lubancode-installer' }
+        $releases = @($response)
+        foreach ($release in $releases) {
+            if ($release.draft -or $release.tag_name -notmatch $pattern) { continue }
+            foreach ($asset in @($release.assets)) {
+                if ($asset.name -like '*windows-x64.zip') { $asset }
+            }
+        }
+        if ($releases.Count -lt 100) { break }
+    }
+}
+
+function Read-VerifiedLegacyArchive {
+    param([string]$Archive, [string]$Digest, [string]$InstalledExeHash, [string]$ExtractRoot)
+    if ($Digest -notmatch '^sha256:([0-9a-fA-F]{64})$') {
+        throw '旧版官方包缺少 sha256 摘要,不能自动建立基线。'
+    }
+    $expected = $Matches[1]
+    if ((Get-FileSha256 -Path $Archive) -ne $expected) { throw '旧版官方包摘要不符。' }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        foreach ($entry in $zip.Entries) {
+            $relative = $entry.FullName.TrimEnd('/')
+            if (-not (Test-ManifestRelativePath -RelPath $relative)) {
+                throw "旧版包含非法路径:$relative"
+            }
+        }
+    } finally { $zip.Dispose() }
+    Expand-Archive -LiteralPath $Archive -DestinationPath $ExtractRoot
+    $executables = @(Get-ChildItem -LiteralPath $ExtractRoot -Filter 'lubancode.exe' -Recurse -File)
+    if ($executables.Count -ne 1) { throw '旧版包程序入口不唯一。' }
+    # 不执行下载来的程序;只比字节,不能拿另一个同版本构建冒充基线。
+    if ((Get-FileSha256 -Path $executables[0].FullName) -ne $InstalledExeHash) { return $null }
+    # 从已验摘要的原包重算每个文件,不把本机现状当成官方内容。
+    return (New-ManifestFromTree -RootDir $executables[0].DirectoryName)
+}
+
+function Resolve-AutomaticBaseline {
+    param([string]$InstallRoot, [string]$Repo)
+    $installedExe = Join-Path $InstallRoot 'lubancode.exe'
+    if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { return $null }
+    $version = Get-InstalledVersionFromExe -ExePath $installedExe
+    if ($version -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') { return $null }
+    Write-Step "旧安装没有清单,查询 $version 官方原包以辨认文件归属..."
+    $workRoot = Join-Path ([IO.Path]::GetTempPath()) ('lubancode-legacy-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $installedHash = Get-FileSha256 -Path $installedExe
+        $assets = @(Get-LegacyReleaseAssets -Repo $Repo -Version $version)
+        New-Item -ItemType Directory -Path $workRoot | Out-Null
+        $index = 0
+        foreach ($asset in $assets) {
+            if ($asset.digest -notmatch '^sha256:[0-9a-fA-F]{64}$') { continue }
+            $index++
+            $archive = Join-Path $workRoot "$index.zip"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive -UseBasicParsing -TimeoutSec 120
+            $manifest = Read-VerifiedLegacyArchive -Archive $archive -Digest $asset.digest `
+                -InstalledExeHash $installedHash -ExtractRoot (Join-Path $workRoot "$index")
+            if ($null -ne $manifest) {
+                Write-Step '已核对官方包摘要及本机 exe,按旧官方文件清单逐项更新;用户文件保留。'
+                return $manifest
+            }
+        }
+        Write-Host '未找到与本机 exe 完全匹配的可信官方原包,保留原安装。' -ForegroundColor Yellow
+    } catch {
+        Write-Host "自动建立旧版基线失败:$($_.Exception.Message)" -ForegroundColor Yellow
+    } finally {
+        # 仅清理本函数在系统临时目录下创建的随机目录。
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+        if ((Test-PathUnderRoot -Path ([IO.Path]::GetFullPath($workRoot)) -Root $tempRoot) -and
+            (Test-Path -LiteralPath $workRoot)) {
+            Remove-Item -LiteralPath $workRoot -Recurse -Force
+        }
+    }
+    return $null
+}
+
 # ===================== 主流程 =====================
 
 function Invoke-Install {
@@ -1136,6 +1229,11 @@ function Invoke-Install {
 
     $newMap = Get-ManifestFileMap -Manifest $newManifest
     $disk = Get-InstallDiskState -InstallRoot $installRootFull -TreeMap $treeMap
+
+    if ($null -eq $oldManifest -and -not $Baseline -and -not $AllowUnknownReplace -and $installExists) {
+        $oldManifest = Resolve-AutomaticBaseline -InstallRoot $installRootFull -Repo $Repo
+        if ($null -ne $oldManifest) { $installMode = 'automatic-legacy-baseline' }
+    }
 
     # ---- 无基线且相撞:完整备份 + needs-review(除非显式确认) ----
     if ($null -eq $oldManifest) {
