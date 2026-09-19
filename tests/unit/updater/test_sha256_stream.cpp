@@ -155,10 +155,14 @@ TEST_CASE("miniz 冒烟: mz_zip_writer 造两文件 zip,mz_zip_reader 读回") {
     {
         mz_zip_archive zip = {};
         REQUIRE(mz_zip_writer_init_file(&zip, zip_path.string().c_str(), 0));
+        // 压缩档位是 miniz 的匿名枚举(signed),mz_uint 形参收它 MSVC /W4 报
+        // C4245,显式转一道。
+        constexpr mz_uint kDeflate = static_cast<mz_uint>(MZ_DEFAULT_COMPRESSION);
+        constexpr mz_uint kStore = static_cast<mz_uint>(MZ_NO_COMPRESSION);
         REQUIRE(mz_zip_writer_add_mem(&zip, "docs/hello.txt", text_payload.data(),
-                                      text_payload.size(), MZ_DEFAULT_COMPRESSION));
+                                      text_payload.size(), kDeflate));
         REQUIRE(mz_zip_writer_add_mem(&zip, "payload.bin", bin_payload.data(),
-                                      bin_payload.size(), MZ_NO_COMPRESSION));
+                                      bin_payload.size(), kStore));
         REQUIRE(mz_zip_writer_finalize_archive(&zip));
         mz_zip_writer_end(&zip);
     }
