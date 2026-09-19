@@ -1509,4 +1509,41 @@ int RunInteractiveCommand(const std::string& command_utf8) {
     return ::system(command_utf8.c_str());
 }
 
+int RunAttachedProcess(const std::vector<std::string>& argv, std::string* error) {
+    // 固定启动器转发(GitHubRelease自动更新单 P1):fork+execvp,fd/工作
+    // 目录/环境/进程组全继承;终端信号(Ctrl+C)由内核分发给整个前台进程
+    // 组,子进程自己处理;我们只 waitpid 收退出码。
+    if (argv.empty() || argv.front().empty()) {
+        if (error != nullptr) *error = "RunAttachedProcess: argv 为空";
+        return -1;
+    }
+    std::vector<char*> c_argv;
+    c_argv.reserve(argv.size() + 1);
+    for (const std::string& arg : argv) {
+        c_argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    c_argv.push_back(nullptr);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        if (error != nullptr) *error = "fork 失败";
+        return -1;
+    }
+    if (pid == 0) {
+        ::execvp(c_argv[0], c_argv.data());
+        // exec 失败:_exit 别冲掉父进程的缓冲
+        ::_exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            if (error != nullptr) *error = "waitpid 失败";
+            return -1;
+        }
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+}
+
 }  // namespace lubancode::platform

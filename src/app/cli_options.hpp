@@ -214,6 +214,18 @@ struct HookCliArgs {
     bool json = false;         // --json:stdout 吐 JSON 报告
 };
 
+// update 子命令(GitHubRelease自动更新单 P1,§三):`lubancode update`
+// [--check | --dry-run | --rollback] [--prerelease] [--from <发行包>]
+// [--json 只 check 认]。默认动作是一键整包更新(检查在事务里再核一遍);
+// 本地版本高于 Latest 不降级;预发布须显式 --prerelease。`--check-update`
+// 与交互 `/update check` 保留,与这里接同一份检查服务。
+struct UpdateCliArgs {
+    std::string verb;       // "" = 一键更新 | check | dry-run | rollback
+    bool prerelease = false;  // --prerelease:显式选预发布通道
+    bool json = false;        // --json:check 的机器可读输出
+    std::string from_archive; // --from <发行包路径>;空 = 走 GitHub 资产
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -252,6 +264,8 @@ enum class CliAction {
     RunHookValidate,          // hook validate/test 子命令:LuaHook P1-D 校验与试跑
     RunHookInit,              // hook init 子命令:落官方 scaffold
     BadHook,                  // hook 子命令参数不对:人话已塞进 error_text
+    RunUpdate,                // update 子命令:一键整包更新(GitHubRelease P1)
+    BadUpdate,                // update 子命令参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -270,6 +284,7 @@ struct ParsedCliArgs {
     AssistantCliArgs assistant;  // action == RunAssistant 时有效(W1)
     KanbanCliArgs kanban;    // action == RunKanban 时有效(看板单)
     HookCliArgs hook;        // action == RunHookValidate/RunHookInit 时有效(P1-D)
+    UpdateCliArgs update;    // action == RunUpdate 时有效(GitHubRelease P1)
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

@@ -28,7 +28,7 @@ SCHEMA = 1
 MANIFEST_NAME = "manifest.json"
 
 # 树内目录 → role;根级文件按文件名 → role;其余 asset
-ROLE_TOP_DIRS = ("skills", "docs", "web", "libexec", "licenses")
+ROLE_TOP_DIRS = ("skills", "docs", "web", "libexec", "licenses", "updater")
 ROLE_ROOT_FILES = {
     "lubancode": "exe",
     "lubancode.exe": "exe",

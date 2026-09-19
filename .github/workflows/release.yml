@@ -1,11 +1,17 @@
-# 发布流水线:推 v* tag 时三平台各打一个包挂上
-# GitHub Release。构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
+# 发布流水线:推 v* tag 时三平台各打一个包,先传 CI 中转工件(artifacts),
+# 集中发布任务(publish)等全部必需平台归档到齐、逐包重核(manifest 对账、
+# updater 树在位)、汇总 update-meta.json 之后,再建 draft Release、挂资产、
+# 最后发布并标 Latest(GitHubRelease自动更新单 §八:先 draft 后 publish,
+# 不让用户查到"已发布但 Windows 包还没好"的半套版本)。
+# 构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
 # 直通 github 官方地址),静态链接。产物包结构(都跟 exe 平级,包根目录):
 #   windows-x64.zip  ->  lubancode.exe、libexec/rg.exe、LICENSE、licenses/
 #                        ripgrep-MIT.txt、THIRD_PARTY_NOTICES.md、skills/、
-#                        双语 README、docs/、安装/卸载脚本
+#                        双语 README、docs/、安装/卸载脚本、updater/(
+#                        updater.py + install_plan.py,一键整包更新用)
 #   linux/macos.tar.gz -> lubancode、libexec/rg、LICENSE、licenses/、
-#                         THIRD_PARTY_NOTICES.md、skills/、双语 README、docs/、install.sh
+#                         THIRD_PARTY_NOTICES.md、skills/、双语 README、docs/、
+#                         install.sh、updater/
 # libexec/rg 由 scripts/fetch_ripgrep.sh 按 third_party/ripgrep/manifest.json
 # 钉死的哈希/版本拉取(缺 rg 或缺 license 流水线必红,不发半套)。
 # 装/卸载脚本源码在仓库 scripts/ 目录,详见脚本内注释。
@@ -34,7 +40,6 @@ jobs:
             exe: build/Release/lubancode.exe
             archive: lubancode-${{ github.ref_name }}-windows-x64.zip
             container: null
-            notes: true
           - name: linux-x64
             os: ubuntu-latest
             exe: build/lubancode
@@ -150,7 +155,9 @@ jobs:
           mkdir -p dist/lubancode/web/assistant
           cp web/assistant/index.html web/assistant/assistant.css web/assistant/assistant_core.js web/assistant/assistant_app.js dist/lubancode/web/assistant/
           # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走
-          # install.sh + install_plan.py(所有权引擎,已有内容的升级靠它判定)
+          # install.sh + install_plan.py(所有权引擎,已有内容的升级靠它判定)。
+          # 受管更新助手(GitHubRelease自动更新单 P1)三平台都打 updater/ 树:
+          # lubancode update 靠它跑事务,技能保护复用同一份决策表。
           case "${{ matrix.name }}" in
             windows-x64)
               cp scripts/install.ps1 dist/lubancode/
@@ -162,6 +169,9 @@ jobs:
               chmod +x dist/lubancode/install.sh
               ;;
           esac
+          mkdir -p dist/lubancode/updater
+          cp scripts/updater.py dist/lubancode/updater/
+          cp scripts/install_plan.py dist/lubancode/updater/
           # 官方清单(GitHubRelease自动更新单 §四):包内每个官方文件记
           # 路径/大小/SHA-256/用途,跟包走。装机侧拿它做文件所有权判定;
           # 下面的验包步重算对账,对不上即红,不发糊涂包。
@@ -202,6 +212,8 @@ jobs:
           channel=stable
           case "$ver" in *-*) channel=prerelease ;; esac
           test -f "$root/manifest.json" || { echo "包里缺 manifest.json" >&2; exit 1; }
+          test -f "$root/updater/updater.py" || { echo "包里缺 updater/updater.py(更新助手)" >&2; exit 1; }
+          test -f "$root/updater/install_plan.py" || { echo "包里缺 updater/install_plan.py(所有权决策表)" >&2; exit 1; }
           "$PY" scripts/generate_manifest.py \
             --root "$root" \
             --version "$ver" \
@@ -251,12 +263,102 @@ jobs:
           rm -rf "$smoke"
           echo "archive verify passed: ${{ matrix.archive }}"
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v3
+      # §八 集中发布门禁:矩阵腿只交 CI 中转工件,不直接发 Release。集中
+      # 发布任务等三平台都到齐、逐包重核后再 draft -> publish,杜绝"Windows
+      # 包还没好、Release 已经挂了 Linux 包"的半套状态。
+      - name: Hand archive to publish gate
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.archive }}
-          generate_release_notes: ${{ matrix.notes }}
-          # 内测通道(2026-09-09):tag 带 '-' 后缀(vX.Y.Z-beta.1 一类)按
-          # prerelease 发,不抢稳定版的 Latest 帽;正式 tag 照旧当 Latest。
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          name: release-pkg-${{ matrix.name }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # 集中发布(GitHubRelease自动更新单 §八):等全部必需平台归档到齐 →
+  # 逐包重核(解包 + manifest --check + updater 树在位)→ 汇总
+  # update-meta.json(资产摘要账,客户端查新用)→ 建 draft Release →
+  # 挂全部资产 → 发布并标 Latest。任何一步红,Release 停在 draft(或根本
+  # 没建),用户侧查不到半套版本。
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Gather platform archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-pkg-*
+          merge-multiple: true
+
+      - name: Require all platform archives
+        shell: bash
+        run: |
+          set -e
+          tag="${GITHUB_REF_NAME}"
+          test -f "dist/lubancode-${tag}-windows-x64.zip"  || { echo "缺 windows-x64 归档" >&2; exit 1; }
+          test -f "dist/lubancode-${tag}-linux-x64.tar.gz" || { echo "缺 linux-x64 归档" >&2; exit 1; }
+          test -f "dist/lubancode-${tag}-macos-arm64.tar.gz" || { echo "缺 macos-arm64 归档" >&2; exit 1; }
+
+      - name: Re-verify every archive (manifest + updater tree)
+        shell: bash
+        run: |
+          set -e
+          export PYTHONUTF8=1
+          PY=python3
+          tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
+          channel=stable
+          case "$ver" in *-*) channel=prerelease ;; esac
+          for entry in "windows-x64:zip" "linux-x64:tar.gz" "macos-arm64:tar.gz"; do
+            platform="${entry%%:*}"
+            kind="${entry##*:}"
+            archive="dist/lubancode-${tag}-${platform}.${kind}"
+            rm -rf "dist/verify-${platform}" && mkdir -p "dist/verify-${platform}"
+            case "$kind" in
+              zip)    7z x "$archive" -o"dist/verify-${platform}" >/dev/null ;;
+              tar.gz) tar xzf "$archive" -C "dist/verify-${platform}" ;;
+            esac
+            root="dist/verify-${platform}/lubancode"
+            test -f "$root/manifest.json" || { echo "$platform:包里缺 manifest.json" >&2; exit 1; }
+            test -f "$root/updater/updater.py" || { echo "$platform:缺 updater/updater.py" >&2; exit 1; }
+            "$PY" scripts/generate_manifest.py \
+              --root "$root" --version "$ver" --platform "$platform" \
+              --channel "$channel" --check
+            echo "re-verify passed: $archive"
+          done
+
+      - name: Compose update-meta.json
+        shell: bash
+        run: |
+          set -e
+          python3 scripts/compose_update_meta.py --dist dist --tag "${GITHUB_REF_NAME}"
+          cat dist/update-meta.json
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          args=(--draft --title "${GITHUB_REF_NAME}" --generate-notes)
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" dist/lubancode-* dist/update-meta.json "${args[@]}"
+
+      - name: Publish (draft -> release, Latest hat for stable)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            # 内测通道(2026-09-09):prerelease 不抢稳定版的 Latest 帽
+            gh release edit "${GITHUB_REF_NAME}" --draft=false
+          else
+            gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
+          fi
+          gh release view "${GITHUB_REF_NAME}" --json isDraft,isPrerelease,url

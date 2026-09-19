@@ -50,7 +50,10 @@ const Entry kZhCN[] = {
      "  lubancode delete <id>     永久删除一场会话,交互确认后才删;--force 跳过确认,只给\n"
      "                            脚本显式使用,不可恢复\n"
      "  lubancode kanban          生成会话看板(自包含 HTML,按状态分列、按项目分组,点开看\n"
-     "                            session 与 project 详情;--no-open 只打印路径,--output 改落点)\n"},
+     "                            session 与 project 详情;--no-open 只打印路径,--output 改落点)\n"
+     "  lubancode update          一键整包更新:查版、下载校验、技能保护预检、整包切换、健康\n"
+     "                            检查、可回滚;--check 只查不动,--dry-run 预演,--rollback\n"
+     "                            切回上次可用整包,--prerelease 显式选预发布,--from 用本地包\n"},
     {"help.options",
      "选项:\n"
      "  --version              打印版本号\n"
@@ -837,7 +840,7 @@ const Entry kZhCN[] = {
     {"cmd.update.current", "没有发现更新。当前 {0}，远端 {1}。"},
     {"cmd.update.available", "有新版可用。当前 {0}，最新 {1}。"},
     {"cmd.update.release", "发布页: {0}"},
-    {"cmd.update.install_hint", "下载新版发行包并运行包内安装脚本；程序与官方 skills 会一并更新，用户技能不动。"},
+    {"cmd.update.install_hint", "一条命令换新版：lubancode update（校验、技能保护、整包切换、可回滚都在事务里）；或下载发行包运行包内安装脚本。用户技能不动。"},
 
     // ---- /memory ----
     {"cmd.memory.usage",
@@ -2075,7 +2078,11 @@ const Entry kEn[] = {
      "                            --force skips the confirmation (scripts only), unrecoverable\n"
      "  lubancode kanban          generate a session kanban board (self-contained HTML, columns by\n"
      "                            status, grouped by project; click cards for session/project\n"
-     "                            details; --no-open prints the path, --output changes it)\n"},
+     "                            details; --no-open prints the path, --output changes it)\n"
+     "  lubancode update          one-click whole-package update: check, download & verify, skill\n"
+     "                            protection precheck, atomic switch, health check, rollback-able;\n"
+     "                            --check only reports, --dry-run previews, --rollback switches\n"
+     "                            back, --prerelease opts into prereleases, --from uses a local archive\n"},
     {"help.options",
      "Options:\n"
      "  --version              print the version\n"
@@ -2929,7 +2936,7 @@ const Entry kEn[] = {
     {"cmd.update.current", "No update found. Current: {0}; latest: {1}."},
     {"cmd.update.available", "An update is available. Current: {0}; latest: {1}."},
     {"cmd.update.release", "Release page: {0}"},
-    {"cmd.update.install_hint", "Download the new release and run its installer. The program and official skills update together; user skills stay untouched."},
+    {"cmd.update.install_hint", "One command does it: lubancode update (verification, skill protection, whole-package switch, and rollback all live in one transaction); or download the release and run its installer. User skills stay untouched."},
 
     // ---- 跨会话传话 /peers /send /peerperm ----
     {"cmd.peers.start_failed", "[peers] cross-session messaging failed to start: {0}"},

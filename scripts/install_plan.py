@@ -39,7 +39,7 @@ import sys
 SCHEMA = 1
 STATE_NAME = "install-state.json"
 MANIFEST_NAME = "manifest.json"
-ROLE_TOP_DIRS = ("skills", "docs", "web", "libexec", "licenses")
+ROLE_TOP_DIRS = ("skills", "docs", "web", "libexec", "licenses", "updater")
 ROLE_ROOT_FILES = {
     "lubancode": "exe",
     "lubancode.exe": "exe",
@@ -531,7 +531,7 @@ def parse_map_args(map_args):
             die("--map 形如 skills=/目标/路径,收到:%s" % m)
         tree, dest = m.split("=", 1)
         if tree not in ROLE_TOP_DIRS:
-            die("--map 只收受管树(skills/docs/web/libexec/licenses),收到:%s" % tree)
+            die("--map 只收受管树(skills/docs/web/libexec/licenses/updater),收到:%s" % tree)
         maps[tree] = dest
     return maps
 

@@ -1407,6 +1407,12 @@ add_library(lubancode_app STATIC
   # QQ 接入单 Q1b:`lubancode channel pairing approve|reject` 本地批准控制
   # 入口(锁探测 → 文件控制面投命令 → 等回执;不拿空 manager 冒充批准)。
   src/cli/channel_pairing_command.cpp
+  # GitHubRelease自动更新单 P1:`lubancode update` 一键整包更新子命令
+  #(检查复用 config::update_checker;事务交受管更新助手 updater.py)。
+  src/cli/update_command.cpp
+  # GitHubRelease自动更新单 P1:固定启动器——安装根 exe 按 current.json
+  # 转发到 versions/<当前>/ 的真实 EXE。
+  src/app/launcher.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

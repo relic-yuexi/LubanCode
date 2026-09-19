@@ -131,6 +131,15 @@ jobs:
         shell: bash
         run: bash scripts/tests/install.tests.sh
 
+      # 一键整包更新器(GitHubRelease自动更新单 P1):状态机、指针原子性、
+      # 坏包/摘要不符/路径穿越/磁盘不足各失败路保旧版、needs-review 续跑、
+      # 回滚与清理,不依赖构建产物。EXE 探针用例假 exe 是 shell 脚本,只在
+      # POSIX 段跑(Windows 腿照跑 A-D/I/J 各段);真机进程占用/断电类
+      # 如实留单子未勾。
+      - name: Updater tests (bash + python)
+        shell: bash
+        run: bash scripts/tests/updater.tests.sh
+
   build-test:
     needs: [changes, lane]
     if: needs.changes.outputs.code == 'true'

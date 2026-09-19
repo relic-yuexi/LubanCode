@@ -384,6 +384,7 @@ nlohmann::json ServiceInstallRecord::ToJson() const {
     json["profile"] = profile;
     json["exe_path"] = exe_path;
     json["lubancode_version"] = lubancode_version;
+    json["entry_point"] = entry_point;
     json["task_name"] = task_name;
     json["unit_name"] = unit_name;
     json["launchd_label"] = launchd_label;
@@ -436,6 +437,16 @@ std::optional<ServiceInstallRecord> ServiceInstallRecord::FromJsonStrict(
     record.service_log = json["service_log"].get<std::string>();
     record.shutdown_grace_secs = json["shutdown_grace_secs"].get<int>();
     record.installed_at_ms = json["installed_at_ms"].get<std::int64_t>();
+    // entry_point 是 P1 加的可选字段:旧记录没有 = direct
+    if (json.contains("entry_point")) {
+        if (!json["entry_point"].is_string()) {
+            return fail("entry_point 必须是字符串");
+        }
+        record.entry_point = json["entry_point"].get<std::string>();
+        if (record.entry_point != "direct" && record.entry_point != "launcher") {
+            return fail("认不得的 entry_point: " + record.entry_point);
+        }
+    }
     if (record.schema_version != 1) {
         return fail("认不得的 schema_version: " + std::to_string(record.schema_version));
     }
@@ -553,6 +564,7 @@ ServiceInstallOutcome InstallGatewayService(const GatewayServiceSpec& spec,
     record.profile = spec.profile;
     record.exe_path = platform::PathToUtf8(spec.exe_path);
     record.lubancode_version = spec.lubancode_version;
+    record.entry_point = spec.entry_point;
     record.task_name = ScheduledTaskName(spec.profile);
     record.unit_name = SystemdUnitName(spec.profile);
     record.launchd_label = LaunchdLabel(spec.profile);
