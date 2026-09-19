@@ -1,8 +1,12 @@
 // SHA-256 内核实现(合同见 sha256.hpp)。算法体自 channel/digest.cpp 原样
 // 搬来(其尾段/填充写法比 hooks 版的整串拷贝更省),与 hooks/hash.cpp 的
 // 输出逐向量相等(见 tests/unit/platform/test_sha256.cpp 的对账)。
+// 更新器 C++ 化批一第③单:内核改造成增量形态——Sha256Stream 持状态分块
+// 喂,一次性口退为 wrapper。压缩轮、K 常量、填充规则一字未动,动的只是
+// 数据怎么进压缩轮。
 #include "platform/sha256.hpp"
 
+#include <cassert>
 #include <cstring>
 
 namespace lubancode::platform {
@@ -70,48 +74,8 @@ void CompressBlock(std::uint32_t state[8], const std::uint8_t block[64]) {
     state[7] += h;
 }
 
-}  // namespace
-
-std::array<std::byte, 32> Sha256Digest(std::span<const std::byte> data) {
-    std::uint32_t state[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                              0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-
-    const auto* bytes = reinterpret_cast<const std::uint8_t*>(data.data());
-    const std::size_t size = data.size();
-    const std::size_t full_blocks = size / 64;
-    for (std::size_t i = 0; i < full_blocks; ++i) {
-        CompressBlock(state, bytes + i * 64);
-    }
-
-    // 尾段 + 0x80 填充 + 长度(64 位大端),不足 64 字节补零,可能多出一个块。
-    std::uint8_t tail[128] = {};
-    const std::size_t remainder = size - full_blocks * 64;
-    for (std::size_t i = 0; i < remainder; ++i) {
-        tail[i] = bytes[full_blocks * 64 + i];
-    }
-    tail[remainder] = 0x80;
-    const std::size_t tail_blocks = (remainder < 56) ? 1 : 2;
-    const std::uint64_t bit_length = static_cast<std::uint64_t>(size) * 8;
-    std::uint8_t* length_slot = tail + tail_blocks * 64 - 8;
-    for (int i = 0; i < 8; ++i) {
-        length_slot[i] = static_cast<std::uint8_t>(bit_length >> (56 - i * 8));
-    }
-    for (std::size_t i = 0; i < tail_blocks; ++i) {
-        CompressBlock(state, tail + i * 64);
-    }
-
-    std::array<std::byte, 32> digest{};
-    for (int i = 0; i < 8; ++i) {
-        digest[i * 4] = static_cast<std::byte>(state[i] >> 24);
-        digest[i * 4 + 1] = static_cast<std::byte>(state[i] >> 16);
-        digest[i * 4 + 2] = static_cast<std::byte>(state[i] >> 8);
-        digest[i * 4 + 3] = static_cast<std::byte>(state[i]);
-    }
-    return digest;
-}
-
-std::string Sha256Hex(std::span<const std::byte> data) {
-    const std::array<std::byte, 32> digest = Sha256Digest(data);
+// 大端摘要序列化 + 小写十六进制(FinalHex 与一次性口共用)。
+std::string BytesToHex(const std::array<std::byte, 32>& digest) {
     static constexpr char kHex[] = "0123456789abcdef";
     std::string out;
     out.reserve(digest.size() * 2);
@@ -121,6 +85,95 @@ std::string Sha256Hex(std::span<const std::byte> data) {
         out.push_back(kHex[value & 0x0f]);
     }
     return out;
+}
+
+}  // namespace
+
+Sha256Stream::Sha256Stream()
+    : state_{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19},
+      buffer_{},
+      buffer_size_(0),
+      total_bytes_(0),
+      finalized_(false) {}
+
+void Sha256Stream::Update(std::span<const std::byte> chunk) {
+    assert(!finalized_ && "Sha256Stream: Final 后不可再 Update(合同见头注)");
+
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(chunk.data());
+    std::size_t size = chunk.size();
+    total_bytes_ += size;
+
+    // 残余优先:先把 buffer_ 凑满一格,凑满即压、清零。空块(size == 0)
+    // 直接落到下面的整块/尾段两段,均为 no-op。
+    if (buffer_size_ > 0 && size > 0) {
+        const std::size_t fill = (64 - buffer_size_ < size) ? 64 - buffer_size_ : size;
+        std::memcpy(buffer_ + buffer_size_, bytes, fill);
+        buffer_size_ += fill;
+        bytes += fill;
+        size -= fill;
+        if (buffer_size_ == 64) {
+            CompressBlock(state_, buffer_);
+            buffer_size_ = 0;
+        }
+    }
+
+    // 中段整块直压(零拷贝),尾段进 buffer_ 等下一次 Update 或 Final。
+    const std::size_t full_blocks = size / 64;
+    for (std::size_t i = 0; i < full_blocks; ++i) {
+        CompressBlock(state_, bytes + i * 64);
+    }
+    const std::size_t remainder = size - full_blocks * 64;
+    if (remainder > 0) {
+        std::memcpy(buffer_, bytes + full_blocks * 64, remainder);
+        buffer_size_ = remainder;
+    }
+}
+
+std::array<std::byte, 32> Sha256Stream::FinalDigest() {
+    assert(!finalized_ && "Sha256Stream: 只许 Final 一次(合同见头注)");
+
+    // 尾段 + 0x80 填充 + 长度(64 位大端),不足 64 字节补零,可能多出一个
+    // 块——与拆前一次性实现的填充同构,buffer_ 备足了 128 字节。
+    buffer_[buffer_size_] = 0x80;
+    const std::size_t tail_blocks = (buffer_size_ < 56) ? 1 : 2;
+    std::memset(buffer_ + buffer_size_ + 1, 0, tail_blocks * 64 - buffer_size_ - 1);
+    const std::uint64_t bit_length = total_bytes_ * 8;
+    std::uint8_t* length_slot = buffer_ + tail_blocks * 64 - 8;
+    for (int i = 0; i < 8; ++i) {
+        length_slot[i] = static_cast<std::uint8_t>(bit_length >> (56 - i * 8));
+    }
+    for (std::size_t i = 0; i < tail_blocks; ++i) {
+        CompressBlock(state_, buffer_ + i * 64);
+    }
+    finalized_ = true;
+
+    std::array<std::byte, 32> digest{};
+    for (int i = 0; i < 8; ++i) {
+        digest[i * 4] = static_cast<std::byte>(state_[i] >> 24);
+        digest[i * 4 + 1] = static_cast<std::byte>(state_[i] >> 16);
+        digest[i * 4 + 2] = static_cast<std::byte>(state_[i] >> 8);
+        digest[i * 4 + 3] = static_cast<std::byte>(state_[i]);
+    }
+    return digest;
+}
+
+std::string Sha256Stream::FinalHex() {
+    return BytesToHex(FinalDigest());
+}
+
+// ---- 一次性口:流式内核的薄 wrapper,签名与语义照旧 ------------------------
+
+std::array<std::byte, 32> Sha256Digest(std::span<const std::byte> data) {
+    Sha256Stream stream;
+    stream.Update(data);
+    return stream.FinalDigest();
+}
+
+std::string Sha256Hex(std::span<const std::byte> data) {
+    Sha256Stream stream;
+    stream.Update(data);
+    return stream.FinalHex();
 }
 
 }  // namespace lubancode::platform
