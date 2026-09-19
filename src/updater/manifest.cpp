@@ -49,6 +49,7 @@ std::optional<Manifest> ParseManifestText(std::string_view text,
         return std::nullopt;
     }
 
+    bool ok = true;
     const bool schema_is_one = parsed.contains("schema") &&
                                parsed["schema"].is_number_integer() &&
                                (parsed["schema"].is_number_unsigned()
@@ -56,10 +57,12 @@ std::optional<Manifest> ParseManifestText(std::string_view text,
                                     : parsed["schema"].get<std::int64_t>() == 1);
     if (!schema_is_one) {
         AddProblem(problems, "schema 不认(期望 1)");
+        ok = false;
     }
     if (!parsed.contains("algo") || !parsed["algo"].is_string() ||
         parsed["algo"].get<std::string>() != "sha256") {
         AddProblem(problems, "algo 不认(期望 sha256)");
+        ok = false;
     }
     if (!parsed.contains("files") || !parsed["files"].is_array()) {
         AddProblem(problems, "files 不是数组");
@@ -67,7 +70,6 @@ std::optional<Manifest> ParseManifestText(std::string_view text,
     }
 
     Manifest manifest;
-    bool ok = true;
     for (const auto& entry : parsed["files"]) {
         if (!entry.is_object()) {
             AddProblem(problems, "files 成员不是对象");
