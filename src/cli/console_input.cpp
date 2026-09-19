@@ -246,6 +246,42 @@ std::optional<int>& ComposerTargetSlot() {
     static std::optional<int> target;
     return target;
 }
+
+// ---- 按代理状态投影单 P1:cli 侧的三个槽 --------------------------------
+// 每页交互状态册(滚动/展开/草稿,切走保留切回还原):composer(空闲
+// 切看)与监听线程(流式切看)共用,内部自带小锁。
+// [共享] composer/监听线程/导出口 AgentUiStates。
+AgentUiStateStore& AgentUiStateSlot() {
+    static AgentUiStateStore store;
+    return store;
+}
+
+// 会话世代的提供槽(AgentViewKey 要带 session_generation,cli 不认 app 的
+// 登记簿,由会话侧递进来;空 = 0,单测/演示默认世代)。
+// [共享] composer/监听线程(组 AgentViewKey)/导出口 SetAgentViewGenerationProvider。
+std::function<std::uint64_t()>& AgentViewGenerationSlot() {
+    static std::function<std::uint64_t()> provider;
+    return provider;
+}
+
+// 换页事务的画笔护栏槽:擦旧帧+铺新帧的整个过程包进这道护栏,护栏内
+// 持有活回合的泵画笔锁(会话侧接线 AgentViewRegistry::WithMainRenderLock)
+// ——在飞的 main 绘制让路,新页铺完才放。空(没接/无活回合)= 直走。
+// [共享] composer(空闲 print_view_frame)/监听线程(流式 print_view_frame)
+// /导出口 SetViewSwitchGuard。
+std::function<void(const std::function<void()>&)>& AgentViewSwitchGuardSlot() {
+    static std::function<void(const std::function<void()>&)> guard;
+    return guard;
+}
+
+// main 查看页的修订号提供槽(忙路实时流订阅用):监听线程的 50ms 拍拿它
+// 判断"正看着的 main 又出了多少活",到节流拍重铺当前回合。空 = 恒 0
+// (没有活回合账,不触发重铺;sub 页照旧走台账 content_revision)。
+// [共享] 监听线程(查看页实时流)/导出口 SetMainViewRevisionProvider。
+std::function<std::uint64_t()>& MainViewRevisionSlot() {
+    static std::function<std::uint64_t()> provider;
+    return provider;
+}
 std::mutex& ComposerTargetMutex() {
     static std::mutex m;
     return m;
@@ -1084,7 +1120,12 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         // 缓冲高(ScreenInfo 的约定),至少留一行。
         const int viewport_rows = info->viewport_height > 0 ? info->viewport_height : info->height;
         window_budget = ChoiceMenuSearchWindowRows(viewport_rows, options.max_visible_rows);
-        const int worst_rows = 2 + static_cast<int>((std::min)(items.size(), window_budget));
+        // §六:多选/自填菜单可能多出一行注意行(错误/翻页),进门一次腾
+        // 够,别让 invalid 出现时把列表顶出屏。
+        const int hint_reserve =
+            (options.multi_select || options.editable_index.has_value()) ? 1 : 0;
+        const int worst_rows =
+            2 + hint_reserve + static_cast<int>((std::min)(items.size(), window_budget));
         if (!EnsureStreamScreenRowsLocked(worst_rows)) {
             if (exit_reason != nullptr) {
                 *exit_reason = ReadExitReason::Cancel;
@@ -1115,7 +1156,34 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         const std::vector<std::size_t>& view = menu.view();
         const std::size_t visible =
             view.empty() ? 0 : (std::min)(view.size() - menu.scroll(), menu.window_rows());
-        const int rows_now = 2 + (view.empty() ? 1 : static_cast<int>(visible));
+        // §六(多选提示修复):多选/自填菜单的操作提示常驻——invalid 错误
+        // 与翻页提示另起一行,不再替换"空格勾选、Enter 提交"。单选搜索
+        // 菜单维持旧行为(一行,invalid > editable > paging > hint)。
+        const bool ops_persistent = options.multi_select || options.editable_index.has_value();
+        int hint_rows = 1;
+        std::string attention_line;  // 空 = 没有"注意行"(错误/翻页)
+        std::string ops_line;        // 常驻操作提示(或单选时的那一行)
+        if (ops_persistent) {
+            ops_line = menu.cursor_on_editable() ? options.editable_hint : options.hint;
+            if (menu.state().invalid) {
+                attention_line = options.invalid_hint;
+                hint_rows = 2;
+            } else if (menu.scrollable()) {
+                attention_line = kChoiceMenuPagingHint;  // 翻页提示也不吞按键说明
+                hint_rows = 2;
+            }
+        } else {
+            if (menu.state().invalid) {
+                ops_line = options.invalid_hint;
+            } else if (menu.cursor_on_editable()) {
+                ops_line = options.editable_hint;
+            } else if (menu.scrollable()) {
+                ops_line = kChoiceMenuPagingHint;
+            } else {
+                ops_line = options.hint;
+            }
+        }
+        const int rows_now = 1 + (view.empty() ? 1 : static_cast<int>(visible)) + hint_rows;
         const int clear_rows = (std::max)(frame_rows, rows_now);
         TermOut() << kSyncOutputBegin << "\x1b[?25l";
         for (int r = 0; r < clear_rows; ++r) {
@@ -1166,21 +1234,17 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
             TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(std::string("无匹配项"), width - 1)
                       << theme.reset;
         }
-        // hint 行:invalid 最优先,editable 行内编辑次之,能翻页给翻页提示,
-        // 其余照老规则用调用方的 hint。
-        platform::SetCursorPos(0, start_row + rows_now - 1);
-        std::string hint;
-        if (menu.state().invalid) {
-            hint = options.invalid_hint;
-        } else if (menu.cursor_on_editable()) {
-            hint = options.editable_hint;
-        } else if (menu.scrollable()) {
-            hint = kChoiceMenuPagingHint;
-        } else {
-            hint = options.hint;
+        // hint 区(§六):注意行(错误/翻页)在上、常驻操作提示在最末行;
+        // 单选搜索菜单只有一行,老行为。错误消失后注意行被上面的清行擦
+        // 净,不留残字。
+        if (!attention_line.empty()) {
+            platform::SetCursorPos(0, start_row + rows_now - 2);
+            TermOut() << (menu.state().invalid ? theme.error : theme.stats)
+                      << TruncateUtf8ToDisplayWidth(attention_line, width - 1) << theme.reset;
         }
-        TermOut() << (menu.state().invalid ? theme.error : theme.stats)
-                  << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
+        platform::SetCursorPos(0, start_row + rows_now - 1);
+        TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(ops_line, width - 1) << theme.reset
+                  << kSyncOutputEnd;
         TermOut().flush();
         frame_rows = rows_now;
         return true;
@@ -1335,6 +1399,12 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             }
         }
     }
+    // §六(多选提示修复):多选/自填菜单会多一行报错行(invalid 时),进门
+    // 把行预算留足——操作提示常驻末行,错误行在其上方,错误消失后该行
+    // 清空不留残字。
+    if (options.multi_select || options.editable_index.has_value()) {
+        ++menu_rows;
+    }
     {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         if (!EnsureStreamScreenRowsLocked(menu_rows)) {
@@ -1452,18 +1522,29 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             platform::ClearRowHardFrom(0, start_row + row, width);
             ++row;
         }
+        // hint 区(§六 多选提示修复):报错行另起一行,操作提示常驻末行
+        // ——报错不再吞掉"空格勾选、Enter 提交"。多选/自填菜单的错误行
+        // 恒占一席(没错误就空着),操作提示钉在末行不漂移;错误消失后被
+        // 清行擦净,不留残字、不闪旧行;焦点与已勾选状态由状态机保持。
+        // 单选菜单维持旧行为:一行。
+        const bool invalid_possible = options.multi_select || options.editable_index.has_value();
+        const std::string ops_hint =
+            (options.editable_index.has_value() && menu.state().cursor == *options.editable_index)
+                ? options.editable_hint
+                : options.hint;
         platform::ClearRowHardFrom(0, start_row + row, width);
         platform::SetCursorPos(0, start_row + row);
-        std::string hint;
         if (menu.state().invalid) {
-            hint = options.invalid_hint;
-        } else if (options.editable_index.has_value() && menu.state().cursor == *options.editable_index) {
-            hint = options.editable_hint;
-        } else {
-            hint = options.hint;
+            TermOut() << theme.error
+                      << TruncateUtf8ToDisplayWidth(options.invalid_hint, width - 1) << theme.reset;
         }
-        TermOut() << (menu.state().invalid ? theme.error : theme.stats)
-                  << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
+        if (invalid_possible) {
+            ++row;  // 错误行的席位:错误在与不在,末行位置都不动
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            platform::SetCursorPos(0, start_row + row);
+        }
+        TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(ops_hint, width - 1) << theme.reset
+                  << kSyncOutputEnd;
         TermOut().flush();
         return true;
     };
@@ -1555,6 +1636,31 @@ void InvalidateViewFrameLedger() {
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook) {
     AgentViewSwitchHookSlot() = std::move(hook);
 }
+
+// ---- 按代理状态投影单 P1:导出口(槽位合同见上面那组 [共享] 注释)----
+void SetViewSwitchGuard(std::function<void(const std::function<void()>&)> guard) {
+    AgentViewSwitchGuardSlot() = std::move(guard);
+}
+
+void SetMainViewRevisionProvider(std::function<std::uint64_t()> provider) {
+    MainViewRevisionSlot() = std::move(provider);
+}
+
+void SetAgentViewGenerationProvider(std::function<std::uint64_t()> provider) {
+    AgentViewGenerationSlot() = std::move(provider);
+}
+
+std::uint64_t CurrentAgentViewGeneration() {
+    const auto& provider = AgentViewGenerationSlot();
+    return provider ? provider() : 0;
+}
+
+std::uint64_t CurrentMainViewRevision() {
+    const auto& provider = MainViewRevisionSlot();
+    return provider ? provider() : 0;
+}
+
+AgentUiStateStore& AgentUiStates() { return AgentUiStateSlot(); }
 
 void ResetAgentPanelSession() { PanelSessionSlot().Reset(); }
 

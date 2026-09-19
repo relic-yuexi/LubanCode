@@ -199,29 +199,64 @@ void TurnInputListener::ThreadMain() {
     bool delete_armed = false;
     std::chrono::steady_clock::time_point delete_armed_until{};
 
-    const auto print_view_frame = [&](int viewed_after) {
-        // 流式期间也按 Panel 整页换源。先正式收掉 footer，再清可视内容区；
-        // view hook 铺完目标会话后会把独立 footer 原样画回。
-        std::optional<platform::ScreenInfo> before;
+    // 每页 UI 状态的当前页标记(按代理状态投影单 P1):草稿存取对着它
+    // 换册;print_view_frame 换页时更新。
+    int ui_state_page = CurrentAgentViewedTaskId();
+    const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
+        // 每页草稿账(P1):切走前把当前页 composer 草稿存册,新页的旧草稿
+        // 还原(无则清空)。滚动/展开档不在这动——那两本由转录控制器在
+        // 铺帧时对同一册存取。
         {
-            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-            EraseStreamFooterLocked();
-            before = ClearVisibleAgentPanelLocked();
+            const std::uint64_t generation = CurrentAgentViewGeneration();
+            const AgentViewKey key_old = AgentViewKeyFor(generation, ui_state_page);
+            const AgentViewKey key_new = AgentViewKeyFor(generation, viewed_after);
+            if (key_old != key_new) {
+                AgentUiState leaving = AgentUiStates().Load(key_old);
+                leaving.draft_text = Utf32ToUtf8(editor.CurrentRenderState().line);
+                AgentUiStates().Save(key_old, std::move(leaving));
+                const AgentUiState entering = AgentUiStates().Load(key_new);
+                if (!entering.draft_text.empty()) {
+                    editor.LoadText(Utf8ToUtf32(entering.draft_text));
+                } else {
+                    editor.BeginLine(/*composer=*/true);
+                }
+                edit.reset();
+                delete_armed = false;
+                ui_state_page = viewed_after;
+            }
         }
-        const auto& view_hook = AgentViewSwitchHookSlot();
-        if (view_hook) {
-            view_hook(viewed_after, /*tail_rows=*/0);
-        }
-        // 跨读取账同步(见 ReadLineKeyByKey 里那本的同款注释):流式期间切看
-        // 的帧也记账——不过本轮流式正文还会继续写屏,RunTurn 收口(非静默)
-        // 会把账作废,这里的记录只在"切看后本轮再没写过屏"时才活得过收口;
-        // main 帧直接作废。
-        ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
-        if (viewed_after != 0 && before.has_value()) {
-            view_ledger.body_top = before->cursor_y;
-            view_ledger.width = before->width;
+        // 换页事务(P1):擦旧帧 + 铺新帧整段进画笔护栏——在飞的 main 绘制
+        // 让路,擦与铺之间插不进别人的字。没接护栏(无活回合/单测)直走。
+        const auto frame_body = [&] {
+            // 流式期间也按 Panel 整页换源。先正式收掉 footer，再清可视内容区；
+            // view hook 铺完目标会话后会把独立 footer 原样画回。
+            std::optional<platform::ScreenInfo> before;
+            {
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                EraseStreamFooterLocked();
+                before = ClearVisibleAgentPanelLocked();
+            }
+            const auto& view_hook = AgentViewSwitchHookSlot();
+            if (view_hook) {
+                view_hook(viewed_after, tail_rows);
+            }
+            // 跨读取账同步(见 ReadLineKeyByKey 里那本的同款注释):流式期间切看
+            // 的帧也记账——不过本轮流式正文还会继续写屏,RunTurn 收口(非静默)
+            // 会把账作废,这里的记录只在"切看后本轮再没写过屏"时才活得过收口;
+            // main 帧直接作废。
+            ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+            if (viewed_after != 0 && before.has_value()) {
+                view_ledger.body_top = before->cursor_y;
+                view_ledger.width = before->width;
+            } else {
+                view_ledger.body_top = -1;
+            }
+        };
+        const auto& view_guard = AgentViewSwitchGuardSlot();
+        if (view_guard) {
+            view_guard(frame_body);
         } else {
-            view_ledger.body_top = -1;
+            frame_body();
         }
     };
 
@@ -256,6 +291,54 @@ void TurnInputListener::ThreadMain() {
         print_view_frame(viewed_now);
         rendered_viewed_task_id = viewed_now;
         return true;
+    };
+
+    // 查看页实时流(忙路,按代理状态投影单 P1 与空闲路同一套修订号订阅):
+    // 正看一只运行中子代理、它的 content_revision 动了、距上次重铺 ≥1s
+    // ——重铺查看帧(头几行+最近 N 行,滚屏历史不刷屏)。main 页不走这套:
+    // 忙路里 main 是当前页时 sink 在活画;不是当前页时收口/切回都有成对
+    // 重铺(登记簿的水位协议),不需要秒级轮询。
+    std::uint64_t busy_live_revision = 0;
+    std::chrono::steady_clock::time_point busy_live_last_refresh{};
+    const auto viewed_content_revision = [&](int task_id) -> std::uint64_t {
+        if (task_id == 0) {
+            return CurrentMainViewRevision();
+        }
+        const AgentPanelProvider& provider = SessionAgentPanelHost().provider();
+        if (!provider) {
+            return 0;
+        }
+        for (const AgentPanelEntry& entry : provider()) {
+            if (entry.task_id == task_id) {
+                return entry.content_revision;
+            }
+        }
+        return 0;
+    };
+    const auto refresh_busy_live_view = [&]() {
+        if (rendered_viewed_task_id == 0) {
+            return;  // main 页见上注:sink 活画/成对重铺管
+        }
+        const std::uint64_t revision = viewed_content_revision(rendered_viewed_task_id);
+        if (revision == 0) {
+            return;  // 没有实时流(终态/演示假代理/未接线)
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (busy_live_last_refresh.time_since_epoch().count() == 0) {
+            // 进查看态后的首拍只记水位不铺,与空闲 composer 的 live_view 同款。
+            busy_live_revision = revision;
+            busy_live_last_refresh = now;
+            return;
+        }
+        if (revision == busy_live_revision || now - busy_live_last_refresh < std::chrono::seconds(1)) {
+            return;
+        }
+        busy_live_revision = revision;
+        busy_live_last_refresh = now;
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        const int viewport_rows =
+            info.has_value() ? (std::max)(6, info->viewport_height - info->viewport_height / 4) : 20;
+        print_view_frame(rendered_viewed_task_id, viewport_rows);
     };
 
     // 取回一条排队消息进编辑器(光标落末尾),Del 待确认解除。
@@ -341,6 +424,8 @@ void TurnInputListener::ThreadMain() {
         if (sync_agent_panel_view()) {
             refresh_footer();
         }
+        // 查看页实时流(忙路):当前 sub 的修订号动了就按节流重铺查看帧。
+        refresh_busy_live_view();
         // 先等“有键可读”，再去抢输入权。旧代码把这 50ms 等待也攥在锁
         // 里，POSIX 的 DSR 光标查询便无门可入；更糟的是监听线程可能先
         // 吞掉 CPR 应答。poll 不消费字节，等完再抢锁；若前台编辑器或

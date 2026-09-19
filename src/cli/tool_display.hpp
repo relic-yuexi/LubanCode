@@ -238,6 +238,18 @@ struct ToolDisplay {
     // 函数注释里记的那次真机实测教训。
     const std::atomic<bool>* expanded_ = nullptr;
 
+    // 按代理状态投影单 P1:动态绘制闸。false 时本实例"只记账不上屏"——
+    // transcript 条目照建、快照照更、状态照走,一个终端字节不写。与
+    // silent_(回合级静态档,查看态回流用整轮)分账:这枚由
+    // TerminalTurnSink 按当前查看页逐事件翻——main 流式中途切走子代理
+    // 页,main 的画面立即让路,账一分不少;切回按水位接续。atomic:
+    // 泵消费线程/控制路线程写,读在同一些线程(事件粒度,不做行级分割)。
+    std::atomic<bool> page_visible_{true};
+
+    // 绘制闸开关(sink 在每枚事件应用后、落笔前置位)。
+    void SetPageVisible(bool visible) { page_visible_.store(visible, std::memory_order_release); }
+    bool PageVisible() const { return page_visible_.load(std::memory_order_acquire); }
+
     // TurnInputListener 在另一线程响应 Ctrl+O。它不能直接读主线程正在改的
     // transcript；这里留一份只在事件收账后更新的快照，锁内只做单项复制。
     mutable std::mutex transcript_snapshot_mutex_;
@@ -304,7 +316,7 @@ struct ToolDisplay {
             item.summary_lines = {lubancode::cli::tr("transcript.batch_skipped")};
             item.end_time = std::chrono::steady_clock::now();
             UpdateSnapshotItem(idx);
-            if (is_console) {
+            if (is_console && PageVisible()) {
                 painter.Repaint(item);
             }
         }
@@ -341,7 +353,7 @@ struct ToolDisplay {
 
     void OnToolStart(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        if (!is_console && !silent_) {
+        if (!is_console && !silent_ && PageVisible()) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             TermOut() << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
                       << "\n";
@@ -387,7 +399,7 @@ struct ToolDisplay {
             item.start_time = std::chrono::steady_clock::now();
             item.end_time = {};
             UpdateSnapshotItem(active_main);
-            if (is_console) {
+            if (is_console && PageVisible()) {
                 if (painter.HasAnchor(item.id)) {
                     painter.Repaint(item);
                 } else {
@@ -407,7 +419,7 @@ struct ToolDisplay {
                 item.summary_lines = {"Running..."};
                 item.start_time = std::chrono::steady_clock::now();
                 UpdateSnapshotItem(active_main);
-                if (is_console) {
+                if (is_console && PageVisible()) {
                     painter.Repaint(item);
                 }
             } else {
@@ -421,7 +433,7 @@ struct ToolDisplay {
                 }
                 UpdateSnapshotItem(active_main);
                 RegisterToolUse(tool_use_id, active_main);  // P4:id -> 条目登记
-                if (is_console) {
+                if (is_console && PageVisible()) {
                     painter.PaintNew(item);
                 }
             }
@@ -502,9 +514,9 @@ struct ToolDisplay {
         if (resolved == active_main) {
             active_main = -1;
         }
-        if (is_console) {
+        if (is_console && PageVisible()) {
             painter.Repaint(item);
-        } else if (!silent_) {
+        } else if (!is_console && !silent_ && PageVisible()) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             TermOut() << tr("pipe.tool_done") << name << ": " << PipeSummary(item, name) << "\n";
             // 管道模式沿用 M11 的行为:todo_write 成功后紧跟着把清单打出来,
@@ -579,8 +591,10 @@ struct ToolDisplay {
             std::chrono::duration<double>(std::chrono::steady_clock::now() - item.start_time).count();
         item.title = lubancode::cli::trf("transcript.thinking_running_timed", lubancode::cli::FormatSeconds(seconds));
         UpdateSnapshotItem(active_thinking);
-        // 逐帧露尾只在能原地改写的终端开;pipe/重定向一个字节不铺。
-        if (is_console && painter.CanRepaintInPlace()) {
+        // 逐帧露尾只在能原地改写的终端开;pipe/重定向一个字节不铺;
+        // 当前页不是 main(绘制闸关)同样不铺——账(thinking_buffer/
+        // full_output)照记,切回重铺时全在。
+        if (is_console && PageVisible() && painter.CanRepaintInPlace()) {
             const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
             // Ctrl+O 翻档会 ForgetAnchors(整组重打后旧绝对坐标不可信)——
             // 锚点没了就重新 PaintNew 落一枚新锚,后续 delta 继续原地刷;
@@ -631,12 +645,12 @@ struct ToolDisplay {
             item.title = lubancode::cli::trf("transcript.thinking_done", lubancode::cli::FormatSeconds(seconds));
         }
         UpdateSnapshotItem(idx);
-        if (is_console) {
+        if (is_console && PageVisible()) {
             // 有锚点原地收折(标题行数变少,Repaint 自己擦净旧行);没重画
             // 能力的终端由 Repaint 的追加分支落这一行。
             const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
             painter.Repaint(item);
-        } else if (!silent_) {
+        } else if (!is_console && !silent_ && PageVisible()) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             TermOut() << "\n"
                       << theme.tool_line

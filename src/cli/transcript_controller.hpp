@@ -63,9 +63,12 @@ public:
     bool HandleKey(UiKeyAction action);
 
     // 视图切换钩子(SetAgentViewSwitchHook)的正主:viewed_task_id 指向哪只
-    // 子代理,就把它的 transcript 整块铺进上方;0 = 重铺 main 最近条目。
-    // tail_rows>0 时只铺头三行+最近 N 行(实时流重铺拍,不刷滚屏)。
-    void PrintViewedTranscript(int viewed_task_id, int tail_rows = 0);
+    // 子代理,就把它的 transcript 整块铺进上方;0 = 重铺 main——有活回合
+    // 账(按代理状态投影单 P1:登记簿递进来的 TurnView)时整轮重铺当前
+    // 回合(不是最近五条摘要),没有才退回最近条目摘要。tail_rows>0 时
+    // 只铺头三行+最近 N 行(实时流重铺拍,不刷滚屏)。
+    void PrintViewedTranscript(int viewed_task_id, int tail_rows = 0,
+                               const runtime::TurnView* live_main_turn = nullptr);
 
     // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
     // expand_latest(RepaintScreen 路传):Ctrl+O 的最近一条档随重画走,
@@ -93,6 +96,10 @@ private:
     std::atomic<bool> expand_latest_{false};  // Ctrl+O:inline 展开最近一条
     // 子代理查看态的 Ctrl+O(查看帧里流式思考/正文尾巴的展开开关)。
     bool agent_view_expanded_ = false;
+    // 每页 UI 状态的当前页标记(按代理状态投影单 P1):铺帧换页时对
+    // AgentUiStates 那本册做"存旧取新"——各页的展开档/滚动位切走保留、
+    // 切回还原,不串档。
+    int ui_state_page_ = 0;
 
     Hooks hooks_;
 };

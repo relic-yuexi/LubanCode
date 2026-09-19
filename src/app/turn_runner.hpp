@@ -59,6 +59,10 @@ class AsyncToolRuntime;  // 异步工具 P2:TurnContext.async_tool_runtime(会�
 }  // namespace lubancode::runtime
 
 namespace lubancode::app {
+class AgentViewRegistry;  // 按代理状态投影单 P1:TurnContext.view_registry(会话级)
+}  // namespace lubancode::app
+
+namespace lubancode::app {
 
 // main.cpp 原文里这些名字是不限定引用的;搬进 app 命名空间后对齐一下。
 using lubancode::cli::StreamBodyTracker;
@@ -203,6 +207,13 @@ struct TurnContext {
     // 此刻起飞与主 turn 并行不撞账;HTTP 采样走独占 detached backend。
     // 空(单发/单测/没挂)= 不起飞,一字不变。
     std::function<void()> after_turn_bridge_open;
+
+    // ---- 按代理状态投影单 P1:会话级视图登记簿 ----
+    // 会话持有(InteractiveSession),空(单发/单测/旧装配)= 不分账:
+    // sink 收账直走、绘制恒开,行为与从前一字不差。非空 = 本轮的视图账经
+    // 登记簿进锁、修订号由它发号;main 离屏期间收账照走、绘制被闸,切回
+    // 重铺按水位接续;收口 chrome 也按"当前页是不是 main"让路。
+    lubancode::app::AgentViewRegistry* view_registry = nullptr;
 };
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记

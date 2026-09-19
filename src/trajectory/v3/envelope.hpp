@@ -153,6 +153,11 @@ enum class EventKindV3 {
     TitleRequested,
     TitleExtracted,
     SessionTitleApplied,
+    // 上下文预算单(P1):会话窗口预算的事实提交(与 session.title.applied
+    // 同族的控制状态行,不带 status)。payload 合同:contextWindow(正整
+    // 数,token 数)必填;oldContextWindow/provider/model/source(写账来路
+    // manual|initial|resumed)可选——旧档与最小写入不带,读取侧按缺省读。
+    SessionContextWindowApplied,
     ResumeSourceAttached,
     SubagentSpawnRequested,
     SubagentLinked,

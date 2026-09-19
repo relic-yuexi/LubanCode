@@ -943,36 +943,46 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // tail_rows>0 是实时流的重铺拍(只铺头几行+最近 N 行,见 console_input.hpp
     // 的钩子注释)。
     const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
-        transcript_body_top.reset();  // 视口换源:主转录帧账随之作废(画面已被查看帧接管)
-        std::optional<platform::ScreenInfo> before;
-        if (tail_rows == 0) {
-            // 真切页(main <-> agent):上半屏是一块独立 Panel，整块换源。
-            // 旧页哪怕滚过屏、锚点漂过，也不能在新页留半截正文。
-            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-            EraseStreamFooterLocked();
-            before = ClearVisibleAgentPanelLocked();
-            view_body_top.reset();
+        // 换页事务(按代理状态投影单 P1):擦旧帧+铺新帧整段进画笔护栏,
+        // 在飞的 main 绘制让路(空闲通常无活回合,护栏空转直走)。
+        const auto frame_body = [&] {
+            transcript_body_top.reset();  // 视口换源:主转录帧账随之作废(画面已被查看帧接管)
+            std::optional<platform::ScreenInfo> before;
+            if (tail_rows == 0) {
+                // 真切页(main <-> agent):上半屏是一块独立 Panel，整块换源。
+                // 旧页哪怕滚过屏、锚点漂过，也不能在新页留半截正文。
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                EraseStreamFooterLocked();
+                before = ClearVisibleAgentPanelLocked();
+                view_body_top.reset();
+            } else {
+                // 同一 agent 的实时尾帧刷新仍走原位擦铺，免得每秒整屏闪一下。
+                erase_previous_view_body();
+                before = platform::GetScreenInfo();
+            }
+            const auto& view_hook = AgentViewSwitchHookSlot();
+            if (view_hook) {
+                view_hook(viewed_after, tail_rows);
+            }
+            if (before.has_value()) {
+                view_body_top = before->cursor_y;
+            }
+            // 跨读取账同步(见 ViewFrameLedgerSlot 注释):查看帧记"顶行+缓冲宽",
+            // main 帧(退场/回 main)作废——重进 composer 时凭它判断上一帧还在
+            // 不在原处。
+            ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+            if (viewed_after != 0 && before.has_value()) {
+                view_ledger.body_top = before->cursor_y;
+                view_ledger.width = before->width;
+            } else {
+                view_ledger.body_top = -1;
+            }
+        };
+        const auto& view_guard = AgentViewSwitchGuardSlot();
+        if (view_guard) {
+            view_guard(frame_body);
         } else {
-            // 同一 agent 的实时尾帧刷新仍走原位擦铺，免得每秒整屏闪一下。
-            erase_previous_view_body();
-            before = platform::GetScreenInfo();
-        }
-        const auto& view_hook = AgentViewSwitchHookSlot();
-        if (view_hook) {
-            view_hook(viewed_after, tail_rows);
-        }
-        if (before.has_value()) {
-            view_body_top = before->cursor_y;
-        }
-        // 跨读取账同步(见 ViewFrameLedgerSlot 注释):查看帧记"顶行+缓冲宽",
-        // main 帧(退场/回 main)作废——重进 composer 时凭它判断上一帧还在
-        // 不在原处。
-        ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
-        if (viewed_after != 0 && before.has_value()) {
-            view_ledger.body_top = before->cursor_y;
-            view_ledger.width = before->width;
-        } else {
-            view_ledger.body_top = -1;
+            frame_body();
         }
     };
 

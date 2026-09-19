@@ -312,6 +312,12 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ControlModeChanged, "reason", "s", false},
     {EventKind::ControlContextWindowChanged, "context_window", "s", true},
     {EventKind::ControlContextWindowChanged, "old_context_window", "s", false},
+    // 上下文预算单(P1):预算身份与来路(provider/model/source)可随行,
+    // 旧档不带。恢复裁决靠身份防拿模型 A 的预算套给模型 B;source ∈
+    // manual/initial/resumed。
+    {EventKind::ControlContextWindowChanged, "provider", "s", false},
+    {EventKind::ControlContextWindowChanged, "model", "s", false},
+    {EventKind::ControlContextWindowChanged, "source", "s", false},
     {EventKind::ControlCheckpointCreated, "checkpoint_id", "s", true},
     {EventKind::ControlCheckpointCreated, "source_seq", "u", true},
     {EventKind::ControlCheckpointCreated, "source_event_hash", "s", true},

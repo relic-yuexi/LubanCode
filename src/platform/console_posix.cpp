@@ -401,6 +401,10 @@ bool ProbeSyncOutputSupport() {
 }
 
 std::optional<int> ConsoleWidth() {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->console_width) {
+        return hooks->console_width();
+    }
     struct winsize ws{};
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0) {
         return std::nullopt;
@@ -409,6 +413,11 @@ std::optional<int> ConsoleWidth() {
 }
 
 bool SupportsScreenRepaint() {
+    // 测试替身先查(静态缓存进程内只探一次,翻不回来,替身必须绕开)。
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny();
+        hooks != nullptr && hooks->override_screen_repaint) {
+        return hooks->wants_screen_repaint;
+    }
     static const bool supported = [] {
         const char* term = std::getenv("TERM");
         if (term != nullptr && std::string_view(term) == "dumb") {
@@ -422,6 +431,10 @@ bool SupportsScreenRepaint() {
 }
 
 std::optional<ScreenInfo> GetScreenInfo() {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->get_screen_info) {
+        return hooks->get_screen_info();
+    }
     if (isatty(STDOUT_FILENO) == 0 || isatty(STDIN_FILENO) == 0) {
         return std::nullopt;
     }
@@ -531,6 +544,12 @@ std::optional<ScreenInfo> GetScreenInfo() {
 }
 
 void SetCursorPos(int x, int y) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->set_cursor_pos) {
+        hooks->set_cursor_pos(x, y);
+        return;
+    }
+
     std::cout << "\x1b[" << (y + 1) << ";" << (x + 1) << "H" << std::flush;
 }
 
@@ -541,6 +560,12 @@ void ClearScreen() {
 }
 
 void ClearRowFrom(int x, int y, int count) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->clear_row_from) {
+        hooks->clear_row_from(x, y, count);
+        return;
+    }
+
     if (count <= 0) {
         return;
     }
@@ -549,6 +574,12 @@ void ClearRowFrom(int x, int y, int count) {
 }
 
 void ClearRowHardFrom(int x, int y, int count) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->clear_row_hard_from) {
+        hooks->clear_row_hard_from(x, y, count);
+        return;
+    }
+
     if (count <= 0) {
         return;
     }
@@ -557,6 +588,11 @@ void ClearRowHardFrom(int x, int y, int count) {
 }
 
 int PanViewportDown(int rows) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->pan_viewport_down) {
+        return hooks->pan_viewport_down(rows);
+    }
+
     // POSIX 坐标系里窗口即缓冲(ScreenInfo 的 height 本就是窗口行数),
     // 没有"窗口之下还有缓冲行"这回事,平移无从谈起——保锚可见退回"贴底
     // 滚内容"一条路,由 cli 层的帧账原语自理。
@@ -565,6 +601,11 @@ int PanViewportDown(int rows) {
 }
 
 std::optional<std::string> ReadRowText(int row) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->read_row_text) {
+        return hooks->read_row_text(row);
+    }
+
     // POSIX 终端没有"读回屏幕一行"的可移植原语(大抵要靠 alt screen 自管
     // 帧缓冲才做得到),恒 nullopt:改宽残帧的清扫在 POSIX 退化为纯模型路
     // (窗口即缓冲,改宽重排的失配面也比 conhost 小得多),行为不劣化。

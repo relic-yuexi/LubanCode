@@ -31,11 +31,11 @@
 | `disabled` | 全量常驻 | — | 恒定 | 压过两道闸，强制全量 |
 | `auto` | 同命中档 | 同命中档 | 同命中档 | 能力驱动（未配置空串即此档）：明确支持原生引用的模型走 `native_reference`，其余落宿主推荐档 `proxy_reference` |
 
-`legacy_expand` 是 **cache-hostile** 的：发现一次工具，`system`（延迟索引删行）与 `tools`（schema 扩写）两处旧前缀同时改，长会话攒下的消息缓存接不上。真机对照实测（`eval/deferred_quality/report.md`）：8 任务里 7 任务命中即断 cache epoch，非缓存 input 重付全场最高。启动时若显式在此档运行，横幅会明标这一条。
+`legacy_expand` 是 **cache-hostile** 的：发现一次工具，`system`（延迟索引删行）与 `tools`（schema 扩写）两处旧前缀同时改，长会话攒下的消息缓存接不上。真机对照实测（2026-09-03，证据档已删、存 git 历史）：8 任务里 7 任务命中即断 cache epoch，非缓存 input 重付全场最高。启动时若显式在此档运行，横幅会明标这一条。
 
 ### 切默认与迁移窗（P4）
 
-真机质量对照（同模型、同任务、同温度跑 `disabled`/`proxy_reference`/`legacy_expand` 三档，单子 §12.5）已于 2026-09-03 跑完并过门（ccmoon/gpt-5.6-sol，30 枚 MCP stub 工具，8 任务 × 3 档 + T2 复测；proxy 任务成功 9/9、参数首发合格 11/11、误选 0，不退步于另两档；证据与成本全账见 `eval/deferred_quality/report.md`）。切默认三步已同笔落地：
+真机质量对照（同模型、同任务、同温度跑 `disabled`/`proxy_reference`/`legacy_expand` 三档，单子 §12.5）已于 2026-09-03 跑完并过门（ccmoon/gpt-5.6-sol，30 枚 MCP stub 工具，8 任务 × 3 档 + T2 复测；proxy 任务成功 9/9、参数首发合格 11/11、误选 0，不退步于另两档；证据与成本全账已随 `eval/` 删档，存 git 历史）。切默认三步已同笔落地：
 
 1. `src/tools/deferred_tool_resolver.hpp` 的 `kRecommendedDeferredToolMode` 从 `LegacyExpand` 翻成 `ProxyReference`（`auto` 档与直构路的回落点）；
 2. `ParseDeferredToolMode` 的空串分支改为 `nullopt`，未配置空串与 `auto` 同待遇走 `ResolveDeferredToolMode` 能力解析（装配层）与推荐档（直构路）；

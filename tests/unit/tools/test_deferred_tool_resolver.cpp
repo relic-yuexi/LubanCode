@@ -153,7 +153,7 @@ TEST_CASE("ResolveDeferredToolMode: 两道门全开才 native,门不开大声回
 // "auto" 档(动态工具 P4·§十三 P4-2/P4-3 的机制半边):能力驱动——两道门
 // 都开走 native(P4-3"native 成为明确支持模型的默认"的机制),门不开落
 // 宿主推荐档(kRecommendedDeferredToolMode,2026-09-03 真机 §12.5 质量
-// 对照过门后已翻 proxy,证据 eval/deferred_quality/report.md;空串与
+// 对照过门后已翻 proxy,证据档已删、存 git 历史;空串与
 // auto 同待遇)。与"点名 native 被拒"的待遇不同:点名的回落是意外要大声
 // 报,auto 的回落是合同行为静默落,只在落 native 时给一行 mode_note。
 // ---------------------------------------------------------------------------

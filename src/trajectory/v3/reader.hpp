@@ -600,6 +600,18 @@ struct TitleAppliedFact {
 };
 std::optional<TitleAppliedFact> FindLastTitleApplied(const V3Ledger& ledger);
 
+// 上下文预算(上下文预算单 P1):账上最后一枚 session.context_window.
+// applied。身份(provider/model)可空——空 = 写入时未携带,恢复裁决按
+// "身份不明"处理,不猜。本投影只报事实,是否套用归恢复侧裁决。
+struct ContextWindowAppliedFact {
+    std::uint64_t context_window = 0;  // token 数(事件合同保证正整数)
+    std::string provider;              // 空 = 未携带
+    std::string model;                 // 空 = 未携带
+    std::string source;                // manual/initial/resumed;空按 manual 读
+    std::string event_id;
+};
+std::optional<ContextWindowAppliedFact> FindLastContextWindowApplied(const V3Ledger& ledger);
+
 // 环境(T11-C):本场 run 的环境取材事实。没采集 = nullopt(unavailable),
 // 消费方不得拿今天环境补昨天事实。
 struct EnvironmentCaptureFact {

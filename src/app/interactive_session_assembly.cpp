@@ -697,10 +697,28 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // viewed_task_id 现取,整块换进上方会话视口——导航坞只放导航。
     lubancode::cli::SessionAgentPanelHost().SetProvider(
         [this]() { return agent_panel_presenter_.Entries(session_agent_tool()); });
-    lubancode::cli::SetAgentViewSwitchHook(
-        [this](int viewed_task_id, int tail_rows) {
+    // 按代理状态投影单 P1:换页钩子接登记簿——身份先切(绘制闸立即生效),
+    // main 页的重铺走成对协议(关闸取快照 → 打印 → 钉水位),sub 页照旧
+    // 走 presenter。调用方(console_input 的 print_view_frame)已把整段
+    // 包进画笔护栏(WithMainRenderLock),在飞的 main 绘制让路。
+    lubancode::cli::SetAgentViewSwitchHook([this](int viewed_task_id, int tail_rows) {
+        view_registry_.SwitchViewed(viewed_task_id);
+        if (viewed_task_id == 0) {
+            const AgentViewRegistry::MainTurnSnapshot snapshot = view_registry_.TakeMainLedgeForRepaint();
+            transcript_ui_.PrintViewedTranscript(0, tail_rows, snapshot.view.get());
+            view_registry_.MarkMainPrinted(snapshot.revision);
+        } else {
             transcript_ui_.PrintViewedTranscript(viewed_task_id, tail_rows);
-        });
+        }
+    });
+    // 换页画笔护栏/修订号提供/会话世代提供:cli 侧三个槽各接登记簿一口。
+    lubancode::cli::SetViewSwitchGuard([this](const std::function<void()>& body) {
+        view_registry_.WithMainRenderLock(body);
+    });
+    lubancode::cli::SetMainViewRevisionProvider(
+        [this]() -> std::uint64_t { return view_registry_.MainRevision(); });
+    lubancode::cli::SetAgentViewGenerationProvider(
+        [this]() -> std::uint64_t { return view_registry_.session_generation(); });
 
     // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
@@ -747,6 +765,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         // 头行从假条目表出,正文给一行占位——刮屏驱动器照旧只认屏面。
         lubancode::cli::SetAgentViewSwitchHook([demo_count, demo_idle, this](int viewed_task_id, int tail_rows) {
             (void)tail_rows;  // 演示代理没有实时流,重铺拍与整铺同款
+            // 登记簿身份照切(按代理状态投影单 P1):演示页也要关 main 的
+            // 绘制闸,截图驱动里切页后 main 不得再往屏上落字。
+            view_registry_.SwitchViewed(viewed_task_id);
             std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
             TermOut() << "\n";
             if (viewed_task_id == 0) {
@@ -1033,6 +1054,16 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // Soul 会话冻结单 P0(§5.3):恢复源场已提交快照(忽略磁盘新默认
             // 值);源场从未锁定过就按当前默认起未锁定草稿。
             AdoptResumedSessionSoul(session_runtime_.trajectory()->LaunchResumeSoulSnapshot());
+            // 上下文预算单 §四:--continue 的预算恢复裁决 + 应用——与交互
+            // /resume 同一处(session_commands 的 ApplyResumedContextWindow),
+            // 先确定有效 provider/model 再取匹配预算,套用进 tracker,发首
+            // 个请求前由发轮前同步点对齐主 Agent。
+            const std::optional<lubancode::trajectory::ReplayControlState> launch_control =
+                session_runtime_.trajectory()->LaunchResumeControlState();
+            ApplyResumedContextWindow(context_tracker, session_runtime_.trajectory(), &model_catalog,
+                                       active_provider, *current_model,
+                                       launch_control.has_value() ? &*launch_control : nullptr,
+                                       theme);
             // resume 的历史开新账(SessionStart source=resume)。
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
                             nlohmann::json{{"source", "resume"}}, "resume");
@@ -1052,6 +1083,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                       << "--continue 源场 Soul 快照材料坏,本次未恢复旧魂(已按新会话开张): "
                       << soul_error << theme.reset << "\n";
         }
+    }
+    // 上下文预算单 §四:新场初始有效预算快照——开场配置/目录应用后的
+    // 有效值如实落账;只记后续修改会把开场预算丢掉,resume 便没有底账
+    // 可比。--continue 恢复场由上面的 ApplyResumedContextWindow 落裁决账,
+    // 不在此重复。
+    if (session_runtime_.trajectory() != nullptr && !session_runtime_.trajectory()->resumed_at_launch()) {
+        (void)session_runtime_.trajectory()->RecordContextWindowChanged(
+            context_tracker.window_tokens(), 0, active_provider, *current_model, "initial");
     }
     // -----------------------------------------------------------------------
     // 跨会话传话:登记名册、起 pipe/socket 服务与心跳。只在交互会话启用
@@ -1211,6 +1250,11 @@ TerminalSessionController::~TerminalSessionController() {
     // 面板接线宿主整体收清(provider/actions 双清;终端接线收尾单)。
     lubancode::cli::SessionAgentPanelHost().Reset();
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
+    // 按代理状态投影单 P1:换页护栏/修订号/世代三个槽一并摘掉(回调都
+    // 抓着 this),登记簿本尊随成员析构退场。
+    lubancode::cli::SetViewSwitchGuard(nullptr);
+    lubancode::cli::SetMainViewRevisionProvider(nullptr);
+    lubancode::cli::SetAgentViewGenerationProvider(nullptr);
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetBackgroundStatusProvider(nullptr);

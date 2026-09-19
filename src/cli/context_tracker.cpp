@@ -46,6 +46,11 @@ void ContextTracker::Update(const api::Usage& usage) {
 
 void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
                                 const CacheDiagnostics& diag, const UsageReportFlags& flags) {
+    // §五:清场后、新场首个轮次登记前,旧场迟到的带号 usage 整笔丢弃
+    // ——不带号的账没有身份可核,按老行为放行(单发/单测路径)。
+    if (drop_usage_until_next_turn_ && !turn_id.empty()) {
+        return;
+    }
     // 四项全零 = provider 没在流末给 usage(见头文件注释):不清零、不
     // 覆盖,现有数字原样保住,只标旧值。C2 后"明报全零"另有 flags 说话
     // ——flags.known 时 usage_reported 才是权威,数字全零不再被当成没报。
@@ -123,7 +128,72 @@ void ContextTracker::RegisterTurnIfMissing(const std::string& turn_id) {
     BeginUserTurn(turn_id, std::string());
 }
 
+void ContextTracker::SetWindowBudget(std::size_t window_tokens, ContextWindowSource source,
+                                      const std::string& provider, const std::string& model) {
+    window_tokens_ = window_tokens;
+    window_source_ = source;
+    window_provider_ = provider;
+    window_model_ = model;
+}
+
+void ContextTracker::ResetSession() {
+    // §五:窗口设置与来路保留,观测值全清(合同清单逐项对齐):当前实测
+    // 占用、最近 input/cache read、usage_stale、本场累计、逐请求历史、
+    // 请求总数、轮次登记账与序号。server_prefix_caching 是端点属性观测
+    // (归 provider),保留——新场首次 /doctor cache 前它仍是"上一次对
+    // 这个端点的观测",不冒充新场实测。
+    current_tokens_ = 0;
+    last_cache_read_tokens_ = 0;
+    last_input_tokens_ = 0;
+    usage_stale_ = false;
+    session_cache_read_total_ = 0;
+    session_input_total_ = 0;
+    cache_history_.clear();
+    total_model_requests_ = 0;
+    turn_labels_.clear();
+    next_turn_ordinal_ = 0;
+    // 旧场迟到闸:清场到新场首个 BeginUserTurn 之间的带号 usage 丢弃。
+    drop_usage_until_next_turn_ = true;
+}
+
+RestoredWindowDecision ResolveRestoredContextWindow(const RestoredWindowInput& input) {
+    RestoredWindowDecision out;
+    // 1. 本次明确覆盖最优先:用户这进程里亲手设过,不拿旧档压回去。
+    if (input.manual_override) {
+        out.note = "resume_window.manual_kept";
+        return out;
+    }
+    // 2. 旧档没有预算记录:沿用当前配置/目录,明说回落。
+    if (!input.session_window_present || input.session_window_tokens == 0) {
+        out.note = "resume_window.no_record";
+        return out;
+    }
+    // 3. 身份核对:身份不全或对不上,都不能确认这份预算属于当前模型
+    // ——不套用(不能拿模型 A 的预算套给模型 B),回落并说明。
+    if (input.session_provider.empty() || input.session_model.empty() ||
+        input.session_provider != input.now_provider || input.session_model != input.now_model) {
+        out.note = "resume_window.identity_mismatch";
+        return out;
+    }
+    // 4. 超限拒绝:目录已知上限被旧值超过,不静默截断、不按错误预算
+    // 继续——回落当前配置,明报旧值与上限,待用户 /context 纠正。
+    if (input.declared_limit.has_value() && *input.declared_limit > 0 &&
+        input.session_window_tokens > *input.declared_limit) {
+        out.note = "resume_window.over_limit_rejected";
+        return out;
+    }
+    // 5. 匹配身份的会话预算:套用(值与当前不同才真动,调用方比对)。
+    out.apply = true;
+    out.tokens = input.session_window_tokens;
+    out.note = "resume_window.restored";
+    return out;
+}
+
 void ContextTracker::BeginUserTurn(const std::string& turn_id, const std::string& label) {
+    // 新场的首个轮次登记:迟到的丢弃闸到此收口,之后的 usage 正常记账。
+    if (drop_usage_until_next_turn_) {
+        drop_usage_until_next_turn_ = false;
+    }
     for (auto& entry : turn_labels_) {
         if (entry.turn_id == turn_id) {
             if (!label.empty()) {

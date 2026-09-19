@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/agent_view_state.hpp"  // AgentFrameSnapshot(统一快照合同,P1)
 #include "cli/transcript.hpp"  // SessionBlock(查看态会话块模型)
 #include "tools/task_ledger.hpp"  // AgentTaskSummary/AgentTaskEvent(台账条目)
 
@@ -38,6 +39,17 @@ namespace lubancode::app {
 // 的层级,不按"是不是 Main"写死)。公开给单测直接钉投影与配对规矩。
 std::vector<lubancode::cli::SessionBlock> BuildAgentTaskBlocks(
     const std::vector<lubancode::tools::AgentTaskEvent>& events, const lubancode::cli::Theme& theme);
+
+// sub 侧快照适配器(按代理状态投影单 P1:main/sub 适配成同一份
+// AgentFrameSnapshot):任务事件账 → TurnView 形状的条目序列(稳定
+// item ID 优先用事件的 item_id,旧账退合成号),工具按 tool_use_id 配对
+// 成单枚 Tool 条目(终态细分如实映射)。revisions 由调用方从台账递入
+// (content_revision 是任务自己的消息修订号轴)。渲染组件照旧吃
+// TaskTranscriptLines——这份合同给统一 renderer(P2 收拢写者后接管),
+// 这里先把"同一份快照"立起来钉上单测。
+lubancode::cli::AgentFrameSnapshot BuildAgentFrameSnapshotFromTaskEvents(
+    const lubancode::cli::AgentViewKey& key, const std::vector<lubancode::tools::AgentTaskEvent>& events,
+    bool running, const std::string& title, std::uint64_t content_revision, std::uint64_t stats_revision);
 
 class AgentPanelPresenter {
 public:

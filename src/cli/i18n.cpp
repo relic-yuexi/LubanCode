@@ -662,6 +662,8 @@ const Entry kZhCN[] = {
     {"cmd.context_window.reject.model_changed",
      "面板打开期间模型已切换({0} → {1}),本次不写入;请对当前模型重开面板。"},
     {"cmd.context_window.reject.window_stale", "所选窗口档已不在当前候选里(模型声明变了),未写入;请重开面板再选。"},
+    {"cmd.context_window.reject.over_limit",
+     "上下文窗口 {0} 超出模型已知上限 {1},未写入;请选不超限的档位(上限以目录声明为准)。"},
     {"cmd.context_window.reject.effort_stale", "所选思考档已不在当前候选里(模型能力声明变了),未写入;请重开面板再选。"},
     {"cmd.context_window.reject.history_conflict",
      "冲突: 跨轮保留(history all)建立在思考开启之上,此模型不支持关着思考保留。先 /think history default 再关思考,或换一个开思考的档。"},
@@ -1220,6 +1222,9 @@ const Entry kZhCN[] = {
     {"ask_user.menu_hint", "Enter 选择 · ↑/↓ 移动 · 直接键入可自填 · Esc 取消"},
     {"ask_user.menu_multi_hint", "空格勾选 · Enter 提交 · ↑/↓ 移动 · Esc 取消"},
     {"ask_user.menu_select_one", "请至少勾选一项"},
+    // 上下文预算单 §六(多选提示):空提交的报错必须自带操作说明——报错
+    // 行不再吞掉常驻按键提示,文案本身就教人怎么勾。
+    {"ask_user.menu_select_one_multi", "请先按空格勾选,选好后按 Enter 提交"},
     {"ask_user.menu_edit_hint", "直接输入答案 · Backspace 删除 · Enter 提交 · Esc 取消"},
     {"ask_user.custom_prompt", "请输入你的答案: "},
     {"ask_user.cancelled", "用户取消了选择"},
@@ -1401,6 +1406,10 @@ const Entry kZhCN[] = {
     {"cmd.context.usage", "上下文占用: {0} / {1} tokens ({2}%)"},
     {"cmd.context.compact_hint", "  —— 接近上限了,建议 /compact 一下"},
     {"cmd.context.window_changed", "上下文窗口已改成 {0} tokens(只本会话生效,没改配置文件)。"},
+    {"cmd.context.window_changed_persisted",
+     "上下文窗口已改成 {0} tokens(本会话生效;已写会话账,/resume、--continue 可恢复)。"},
+    {"cmd.context.window_over_limit",
+     "当前预算 {0} tokens 超出模型已知上限 {1}——按错误预算发请求有风险,请 /context 调低;上限以目录声明为准。"},
     // /context 裸敲的分组标题(第四期起分组卡片式布局)。
     {"cmd.context.group.usage", "占用"},
     {"cmd.context.group.cache", "缓存"},
@@ -1928,6 +1937,17 @@ const Entry kZhCN[] = {
     {"cmd.resume.wire_mismatch", "[提醒] 存档时用的 wire 是 {0},当前是 {1}。"},
     {"cmd.resume.history.header", "恢复历史 · {0}"},
     {"cmd.resume.history.end", "── 历史到此,可接着聊 ──"},
+    // ---- 上下文预算单 P1(§四):resume 的预算恢复裁决说明。每条路都说
+    // 清来源,回落不装恢复。参数:{0}=旧档值,{1}=旧档身份,{2}=当前身份,
+    // {3}=已知上限。
+    {"resume_window.restored", "已恢复会话预算 {0} tokens(来源:会话账,与当前模型身份核对通过)。"},
+    {"resume_window.manual_kept", "本次已手动设置上下文预算,保留当前值,不套旧档预算。"},
+    {"resume_window.no_record", "旧档没有预算记录,沿用当前配置。"},
+    {"resume_window.identity_mismatch",
+     "旧档预算 {0} 属 {1},与当前模型 {2} 对不上,未套用;沿用当前配置。"},
+    {"resume_window.over_limit_rejected",
+     "旧档预算 {0}({1})超当前模型 {2} 的已知上限 {3},未套用——不按错误预算发请求;请 /context 纠正。"},
+    {"resume_window.snapshot_failed", "预算快照写账失败:本次裁决已生效,但进程退出后可能丢;可重敲一次让账落稳。"},
     // ---- 归档与永久删除(会话管理器单第四、五步) ----
     {"cmd.session.archive.usage", "用法:lubancode archive <id|标题> · lubancode unarchive <id>"},
     {"cmd.session.delete.usage",
@@ -2307,6 +2327,7 @@ const Entry kEn[] = {
     {"ask_user.menu_hint", "Enter to select · ↑/↓ to navigate · type for Other · Esc to cancel"},
     {"ask_user.menu_multi_hint", "Space to toggle · Enter to submit · ↑/↓ to navigate · Esc to cancel"},
     {"ask_user.menu_select_one", "Select at least one option"},
+    {"ask_user.menu_select_one_multi", "Press Space to tick options first, then Enter to submit"},
     {"ask_user.menu_edit_hint", "Type your answer · Backspace deletes · Enter submits · Esc cancels"},
     {"ask_user.custom_prompt", "Enter your answer: "},
     {"ask_user.cancelled", "The user cancelled the question"},
@@ -2786,6 +2807,9 @@ const Entry kEn[] = {
      "The model changed while the panel was open ({0} → {1}); nothing was written. Reopen the panel for the current model."},
     {"cmd.context_window.reject.window_stale",
      "The chosen window size is no longer among the candidates (model declaration changed); nothing was written. Reopen the panel."},
+    {"cmd.context_window.reject.over_limit",
+     "Context window {0} exceeds the model's known limit {1}; nothing was written. Pick a size within "
+     "the limit (limits follow the catalog declaration)."},
     {"cmd.context_window.reject.effort_stale",
      "The chosen effort level is no longer among the candidates (capability declaration changed); nothing was written. Reopen the panel."},
     {"cmd.context_window.reject.history_conflict",
@@ -3482,6 +3506,16 @@ const Entry kEn[] = {
     {"cmd.resume.worktree_back", "Moved back into the session worktree: {0}"},
     {"cmd.resume.history.header", "Restored history · {0}"},
     {"cmd.resume.history.end", "── End of history; continue below ──"},
+    // Context budget fix (§四): budget restore arbitration notes.
+    {"resume_window.restored", "Restored session budget {0} tokens (source: session ledger; identity matched)."},
+    {"resume_window.manual_kept", "A manual window override is in effect this run; keeping it instead of the archived budget."},
+    {"resume_window.no_record", "The archived session has no budget record; keeping the current configuration."},
+    {"resume_window.identity_mismatch",
+     "Archived budget {0} belongs to {1}, which is not the current model {2}; not applied. Keeping the current configuration."},
+    {"resume_window.over_limit_rejected",
+     "Archived budget {0} ({1}) exceeds the known limit {3} of {2}; not applied — no requests on a wrong "
+     "budget. Correct it with /context."},
+    {"resume_window.snapshot_failed", "Failed to persist the budget snapshot; this decision is in effect but may not survive restart."},
     // ---- Archive & permanent delete (session manager, steps 4-5) ----
     {"cmd.session.archive.usage", "Usage: lubancode archive <id|title> · lubancode unarchive <id>"},
     {"cmd.session.delete.usage",

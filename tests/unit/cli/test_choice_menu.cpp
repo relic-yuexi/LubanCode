@@ -43,6 +43,25 @@ TEST_CASE("choice menu: 多选用空格勾选,空选择不许提交") {
     CHECK(menu.SelectedIndices() == std::vector<std::size_t>{0, 1});
 }
 
+TEST_CASE("choice menu: 无勾选 Enter 不默认选中当前项,错误随下一键撤销(§六)") {
+    ChoiceMenuCore menu(3, true);
+    menu.HandleKey(KeyEvent::Simple(KeyKind::Down));  // 高亮第 2 项
+    menu.HandleKey(KeyEvent::Simple(KeyKind::Enter));  // 无勾选提交
+    CHECK_FALSE(menu.state().submitted);
+    CHECK(menu.state().invalid);
+    // 高亮不等于勾选:不许默认选中当前项误交答案。
+    CHECK(menu.SelectedIndices().empty());
+    CHECK(menu.state().cursor == 1);  // 焦点不动
+
+    // 勾选后错误提示撤掉,已选状态保持;再 Enter 成功提交。
+    menu.HandleKey(KeyEvent::Char(U' '));
+    CHECK_FALSE(menu.state().invalid);
+    CHECK_FALSE(menu.state().submitted);
+    CHECK(menu.SelectedIndices() == std::vector<std::size_t>{1});
+    menu.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(menu.state().submitted);
+}
+
 TEST_CASE("choice menu: Esc 取消") {
     ChoiceMenuCore menu(2, false);
     menu.HandleKey(KeyEvent::Simple(KeyKind::Esc));

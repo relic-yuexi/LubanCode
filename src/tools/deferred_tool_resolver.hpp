@@ -50,8 +50,8 @@ enum class DeferredToolMode {
 // ---------------------------------------------------------------------------
 // P4 默认切换开关(§十三 P4-2/P4-3):宿主推荐档。"auto" 配置值在 native
 // 两道门不开时回落到它;未配置(空串)同样按 auto 解析。2026-09-03 真机
-// §12.5 质量对照过门后由 LegacyExpand 翻成 ProxyReference(证据:
-// eval/deferred_quality/report.md——proxy 任务成功 9/9 不低于两档,参数
+// §12.5 质量对照过门后由 LegacyExpand 翻成 ProxyReference(证据档已删、
+// 存 git 历史——proxy 任务成功 9/9 不低于两档,参数
 // 首发合格 11/11 持平,误选三档全零;legacy 的 cache-hostile 真机可见,
 // 7/8 任务命中即断 cache epoch,非缓存重付全场最高)。翻转 SOP 三处同笔:
 // 这枚常量 + ParseDeferredToolMode 空串分支 + 文档默认值行,钉在

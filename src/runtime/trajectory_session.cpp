@@ -3379,6 +3379,8 @@ struct TrajectorySessionLedger::Impl {
     // --continue 启动路的 resume 投影(没 resume 为空)。
     bool launch_resumed = false;
     std::vector<api::Message> launch_resume_history;
+    // 上下文预算单 P1:--continue 折叠出的控制态(resume 成功才有值)。
+    std::optional<trajectory::ReplayControlState> launch_resume_control;
     // Soul 会话冻结单 P0:启动路 resume 带回的源场 soul 快照(nullopt =
     // 源场未锁定过魂);launch_resume_soul_error 非空 = 源场快照材料坏
     //(那种情况 resume 整个回落普通开张,不带着坏材料硬恢复)。
@@ -3528,6 +3530,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                 impl.active = impl.manager->active();
                 impl.main_run_id = impl.active->manifest.main_run_id;
                 impl.launch_resumed = true;
+                // 上下文预算单 P1:控制态整份留底——预算恢复裁决与交互
+                // /resume 走同一只仲裁(装配层 ApplyResumedContextWindow)。
+                impl.launch_resume_control = resumed.control;
                 impl.launch_resume_history = ProjectHistoryFromReplay(
                     [&resumed] {
                         trajectory::ReplayState projection;
@@ -5062,6 +5067,13 @@ std::string TrajectorySessionLedger::launch_resume_soul_error() const {
     return impl_ != nullptr ? impl_->launch_resume_soul_error : std::string();
 }
 
+std::optional<trajectory::ReplayControlState> TrajectorySessionLedger::LaunchResumeControlState() const {
+    if (impl_ == nullptr || !impl_->launch_resumed) {
+        return std::nullopt;
+    }
+    return impl_->launch_resume_control;
+}
+
 std::string TrajectorySessionLedger::CommitSoulSnapshot(const SessionSoulSnapshot& snapshot) {
     if (impl_ == nullptr || impl_->active == nullptr) {
         return "soul_snapshot.no_active_session: 轨迹账未开张,快照只留内存";
@@ -5962,6 +5974,86 @@ void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const
     // /title 是真人敲的命令账;自动精炼采纳的标题同走这枚事件(actor
     // 如实分流留给后续批次,先把"标题变过"落成可回放事实)。
     PutUserCommand_(trajectory::EventKind::ControlTitleChanged, std::move(payload));
+}
+
+bool TrajectorySessionLedger::RecordContextWindowChanged(std::size_t window_tokens,
+                                                          std::size_t old_window_tokens,
+                                                          const std::string& provider,
+                                                          const std::string& model,
+                                                          const std::string& source) {
+    if (impl_ == nullptr || impl_->active == nullptr || window_tokens == 0) {
+        return false;
+    }
+    // v3 场:session.context_window.applied(与 session.title.applied 同族的
+    // 控制状态事实,camelCase 载荷)。提交失败如实回 false——调用方区分
+    // "已持久化可恢复"与"仅本次生效",不装已保存。
+    if (impl_->active->is_v3()) {
+        v3::EventDraft applied;
+        applied.kind = v3::EventKindV3::SessionContextWindowApplied;
+        applied.payload = nlohmann::json{{"contextWindow", window_tokens}};
+        if (old_window_tokens > 0) {
+            applied.payload["oldContextWindow"] = old_window_tokens;
+        }
+        if (!provider.empty()) {
+            applied.payload["provider"] = provider;
+        }
+        if (!model.empty()) {
+            applied.payload["model"] = model;
+        }
+        if (!source.empty()) {
+            applied.payload["source"] = source;
+        }
+        const auto receipt =
+            impl_->active->v3_main->AppendEvent(std::move(applied), trajectory::Durability::PowerLoss);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            platform::LogSink::Instance().Error(
+                "trajectory", std::string("v3 窗口预算落账失败: ") + receipt.error_code);
+            return false;
+        }
+        NotifyCommitted_();
+        return true;
+    }
+    // v2 场:control.context_window.changed(值按事件合同写成十进制字符串,
+    // 折叠侧 ParseContextWindowPayload 认得)。身份与来路随行,旧读者按
+    // 未知字段另账处理。走独立 Record 而非 PutUserCommand_:回执要如实交
+    // 给调用方(写不住不能只打日志了事)。
+    trajectory::TrajectoryRecorder* recorder = main();
+    if (recorder == nullptr) {
+        return false;
+    }
+    nlohmann::json payload = nlohmann::json{{"context_window", std::to_string(window_tokens)}};
+    if (old_window_tokens > 0) {
+        payload["old_context_window"] = std::to_string(old_window_tokens);
+    }
+    if (!provider.empty()) {
+        payload["provider"] = provider;
+    }
+    if (!model.empty()) {
+        payload["model"] = model;
+    }
+    if (!source.empty()) {
+        payload["source"] = source;
+    }
+    trajectory::RecordRequest request;
+    request.kind = trajectory::EventKind::ControlContextWindowChanged;
+    request.scope = recorder->base_scope();
+    // 手动改(/context、面板)是真人动作;开场快照与恢复裁决是宿主动作,
+    // actor 如实分流,不把系统行为记成用户输入。
+    const bool manual = source.empty() || source == "manual";
+    request.scope.actor = manual ? trajectory::Actor::User : trajectory::Actor::Host;
+    request.scope.origin =
+        manual ? trajectory::Origin::ExternalUser : trajectory::Origin::ScheduledHost;
+    request.scope.visibility = {trajectory::Visibility::HostOnly};
+    request.scope.training_policy = trajectory::TrainingPolicy::Exclude;
+    request.payload = std::move(payload);
+    const auto receipt = recorder->Record(std::move(request), trajectory::Durability::PowerLoss);
+    if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
+        platform::LogSink::Instance().Error(
+            "trajectory", std::string("窗口预算落账失败: ") + receipt.error_code);
+        return false;
+    }
+    NotifyCommitted_();
+    return true;
 }
 
 // ---- T11-A:标题来源分家的 v3 其余三路(声明见 trajectory_session.hpp)。

@@ -2299,6 +2299,27 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
                 if (mode != event.payload.end() && mode->is_string()) {
                     outcome.source_approval_mode = ParseApprovalModeOrDefault(mode->get<std::string>());
                 }
+            } else if (event.kind == v3::EventKindV3::SessionContextWindowApplied) {
+                // 上下文预算单(P1):窗口预算折进 control(末枚胜,同标题
+                // 口径)。身份/来源照抄——恢复裁决在 runtime 侧,这里只交
+                // 事实,不裁"该不该套用"。
+                const auto window = event.payload.find("contextWindow");
+                const bool window_valid =
+                    window != event.payload.end() &&
+                    ((window->is_number_unsigned() && window->get<std::uint64_t>() > 0) ||
+                     (window->is_number_integer() && window->get<std::int64_t>() > 0));
+                if (window_valid) {
+                    outcome.control.context_window = window->get<std::uint64_t>();
+                    const auto read_string = [&event](const char* key) {
+                        const auto field = event.payload.find(key);
+                        return field != event.payload.end() && field->is_string()
+                                   ? field->get<std::string>()
+                                   : std::string();
+                    };
+                    outcome.control.context_window_provider = read_string("provider");
+                    outcome.control.context_window_model = read_string("model");
+                    outcome.control.context_window_source = read_string("source");
+                }
             }
         }
     } else {
