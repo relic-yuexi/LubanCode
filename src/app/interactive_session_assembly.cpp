@@ -1149,9 +1149,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 // 屏幕查询失败没画出来，后续快照也不会再有机会显示它。先在
                 // 终端历史留下用户回显，再把同一批正文注入下一次模型请求。
                 // P2(收拢写者):回显是屏面动作,经会话级 UI 调度提交(统一
-                // 提交锁内落笔;这里在 RunTurn 线程的请求边界上)。
+                // 提交锁内落笔;这里在 RunTurn 线程的请求边界上)。theme 是
+                // 成员,内层 lambda 捕 this。
                 lubancode::cli::RunUiSync(
-                    [&queued, &theme]() { lubancode::cli::EchoDeliveredQueuedMessages(queued, theme); });
+                    [this, &queued]() { lubancode::cli::EchoDeliveredQueuedMessages(queued, theme); });
                 lubancode::api::Message inject;
                 inject.role = lubancode::api::Role::User;
                 std::vector<lubancode::cli::QueueId> claimed_ids;
