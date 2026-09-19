@@ -1,4 +1,4 @@
-# Loaded by install.tests.ps1; package whitelist migration, no real installation.
+﻿# Loaded by install.tests.ps1; package whitelist migration, no real installation.
 $legacyRoot = Join-Path ([IO.Path]::GetTempPath()) ('lubancode-legacy-test-' + [Guid]::NewGuid().ToString('N'))
 try {
     $oldPackage = Join-Path $legacyRoot 'old'

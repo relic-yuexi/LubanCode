@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     lubancode 安装脚本(Windows,PowerShell 5.1 兼容)
 

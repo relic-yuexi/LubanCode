@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     install.ps1 的 PATH 纯逻辑、清单校验与资源所有权判定验证脚本。
 
