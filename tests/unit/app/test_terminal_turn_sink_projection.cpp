@@ -850,9 +850,11 @@ TEST_CASE("P2 原子换页: 快速往返 20 轮——末帧只见当前页,旧 e
     };
 
     // 20 轮往返:每轮先提交一批 main delta(在飞),随即换页——提交与
-    // 换页的真实次序由调度线程竞着跑,任何交错下画面都不许串页。
+    // 换页的真实次序由调度线程竞着跑,任何交错下画面都不许串页。每枚
+    // delta 带换行:一枚一行,不靠 80 列折行对齐(折行会把标记劈成两半,
+    // find 落空——那是测试的账,不是产品的病)。
     for (int round = 0; round < 20; ++round) {
-        harness.turn.sink->Emit(MakeDelta("item-text", "MAINWAVE" + std::to_string(round) + " "));
+        harness.turn.sink->Emit(MakeDelta("item-text", "MAINWAVE" + std::to_string(round) + "\n"));
         if (round % 2 == 0) {
             switch_to_sub(7);
         } else {
@@ -865,12 +867,19 @@ TEST_CASE("P2 原子换页: 快速往返 20 轮——末帧只见当前页,旧 e
     harness.dispatcher.Quiesce();
     REQUIRE(registry.MainRevision() >= 1);
 
-    // 末帧只见当前页:sub 帧在,main 的字一个不见(旧帧已擦、在飞的旧
-    // epoch 绘制被闸)。
-    const std::string visible = screen.VisibleText();
-    CHECK(visible.find("sub agent #7 view frame") != std::string::npos);
-    for (int round = 0; round < 20; ++round) {
-        CHECK(visible.find("MAINWAVE" + std::to_string(round)) == std::string::npos);
+    // 末帧只见当前页:视口内 sub 帧在、main 的字一个不见(旧帧已擦、
+    // 在飞的旧 epoch 绘制被闸)。只断言视口行——清屏语义本就只清视口,
+    // 滚出窗的内容留在滚屏历史是生产规矩,不算串页。
+    CHECK(screen.RowText(0).has_value());
+    CHECK(screen.RowText(0).value().find("sub agent #7 view frame") != std::string::npos);
+    for (int row = 0; row < VirtualScreen::kViewport; ++row) {
+        const auto text = screen.RowText(row);
+        if (!text.has_value()) {
+            break;
+        }
+        for (int round = 0; round < 20; ++round) {
+            CHECK(text.value().find("MAINWAVE" + std::to_string(round)) == std::string::npos);
+        }
     }
 
     // 账一分不少:切回 main 重铺,20 轮 delta 全在终账里。
