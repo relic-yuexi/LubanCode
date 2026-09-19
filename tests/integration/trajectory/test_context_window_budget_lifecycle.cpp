@@ -206,7 +206,7 @@ TEST_CASE("预算 schema: session.context_window.applied 注册、statusless、�
                                           {"source", "manual"}})
                     .has_value());
     // contextWindow 缺/零/类型不对:拒。
-    CHECK(HasCode(CheckEvent("session.context_window.applied", nlohmann::json{}),
+    CHECK(HasCode(CheckEvent("session.context_window.applied", nlohmann::json::object()),
                   "schema3.bad_type"));
     CHECK(HasCode(CheckEvent("session.context_window.applied",
                              nlohmann::json{{"contextWindow", 0}}),
@@ -367,8 +367,10 @@ TEST_CASE("v3 /clear: ClearSession 换场,初始快照落新场,旧场不动") {
     REQUIRE(new_fact.has_value());
     CHECK(new_fact->context_window == 256000);
     CHECK(new_fact->source == "initial");
-    // 旧场字节不动(封口只读)。
-    CHECK(ReadLines(old_stream).size() == old_rows.size());
+    // 旧场不再被新场快照污染:clear 的收口行会写进旧账(那是封场事实),
+    // 但预算事实仍是清场前那一枚,新快照不落旧场。
+    CHECK(RowsOfKind(ReadLines(old_stream), "session.context_window.applied").size() ==
+          RowsOfKind(old_rows, "session.context_window.applied").size());
 }
 
 // ---------------------------------------------------------------------------
