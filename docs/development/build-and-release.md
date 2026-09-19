@@ -209,9 +209,9 @@ Workspace 统一存储（v2）落地后的升级语义，随包发布时照此�
 
 ## 12. 常见构建故障
 
-Windows 旧安装若没有 `manifest.json` 或 `install-state.json`，新版 `install.ps1` 会按本机版本查询官方发行包（最多查最近 1000 条 Release，包含 beta），下载后核对 GitHub 资产 SHA-256，再核对包内 exe 与本机 exe 的哈希。两处都吻合，才从原包重建官方文件清单：未改的官方文件换新或退役，自建文件保留，改过的官方文件单独报冲突。`-Scan` 也可下载临时原包做核对，但不改安装目录，临时文件用完即删。
+Windows `install.ps1` 按新包清单中的具体文件路径覆盖：程序、README、LICENSE、声明、安装脚本，以及 `docs/`、`libexec/`、`licenses/`、`skills/`、`updater/`、`web/` 内的包内文件。同名文件先备份再替换，内容相同则跳过。目录只合并，新包没带的文件一律保留，包括用户自建技能和旧版遗留文件。无需旧版清单，也不联网下载旧包。
 
-`config.toml`、`.env`、`.lubancode/` 与 `.agents/` 不参与逐文件安装，即使包清单误收也不写不删。断网、旧包缺摘要、找不到匹配构建时，仍保留旧安装并报 `needs-review`；可用 `-Baseline <同版本可信原包>` 离线补基线。无需默认开启整目录替换。
+`config.toml`、`.env`、`.lubancode/` 与 `.agents/` 不参与覆盖，即使包清单误收也不写不删。新包覆盖路径内若有自行修改，原件先存入安装目录的 `backups/`。`-Scan` 可预览文件计划；`-Baseline`、`-AllowUnknownReplace` 只兼容旧调用，不再触发整目录替换。`manifest.json` 与 `install-state.json` 由安装器更新记账。
 
 | 现象 | 先查 |
 | --- | --- |

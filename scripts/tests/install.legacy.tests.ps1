@@ -1,7 +1,5 @@
-# Loaded by install.tests.ps1; downloads are mocked, never touches a real installation.
+# Loaded by install.tests.ps1; package whitelist migration, no real installation.
 $legacyRoot = Join-Path ([IO.Path]::GetTempPath()) ('lubancode-legacy-test-' + [Guid]::NewGuid().ToString('N'))
-$savedVersionFunction = ${function:Get-InstalledVersionFromExe}
-$savedAssetsFunction = ${function:Get-LegacyReleaseAssets}
 try {
     $oldPackage = Join-Path $legacyRoot 'old'
     $newPackage = Join-Path $legacyRoot 'new'
@@ -21,55 +19,32 @@ try {
     Set-Content (Join-Path $newPackage 'skills/official.md') 'new official'
     Set-Content (Join-Path $newPackage 'skills/edited.md') 'new official edit'
     Set-Content (Join-Path $newPackage 'config.toml') 'must never overwrite config'
+    Set-Content (Join-Path $newPackage 'notes.txt') 'not an official root file'
+    Set-Content (Join-Path $legacyInstall '.env') 'user secret'
+    Set-Content (Join-Path $newPackage '.env') 'not a user secret'
     Remove-Item -LiteralPath (Join-Path $newPackage 'skills/retired.md')
-    $legacyZip = Join-Path $legacyRoot 'official.zip'
-    Compress-Archive -Path $oldPackage -DestinationPath $legacyZip
-    $legacyDigest = 'sha256:' + (Get-FileSha256 $legacyZip)
-    $legacyExeHash = Get-FileSha256 (Join-Path $legacyInstall 'lubancode.exe')
-
-    $wrongDigestRejected = $false
-    try {
-        Read-VerifiedLegacyArchive -Archive $legacyZip -Digest ('sha256:' + ('0' * 64)) `
-            -InstalledExeHash $legacyExeHash -ExtractRoot (Join-Path $legacyRoot 'bad') | Out-Null
-    } catch { $wrongDigestRejected = $true }
-    Assert-True '旧官方包摘要不符时拒绝建立基线' $wrongDigestRejected
-    Assert-Equal '同版本不同 exe 不能冒充官方基线' $null (Read-VerifiedLegacyArchive `
-        -Archive $legacyZip -Digest $legacyDigest -InstalledExeHash ('0' * 64) -ExtractRoot (Join-Path $legacyRoot 'mismatch'))
-
-    function Get-InstalledVersionFromExe { param($ExePath) return '0.26.277' }
-    function Get-LegacyReleaseAssets {
-        param($Repo, $Version)
-        return [PSCustomObject]@{ digest = $legacyDigest; browser_download_url = 'https://example.invalid/official.zip' }
-    }
-    function Invoke-WebRequest {
-        param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec)
-        Copy-Item -LiteralPath $legacyZip -Destination $OutFile
-    }
-    $autoBaseline = Resolve-AutomaticBaseline -InstallRoot $legacyInstall -Repo 'test/test'
-    Assert-True '无清单旧安装自动找回可信基线' ($null -ne $autoBaseline)
-    Assert-Equal '自动基线不认领自建技能' $false ((Get-ManifestFileMap $autoBaseline).ContainsKey('skills/mine.md'))
     $legacyTrees = Get-TreeMap $legacyInstall
     $newManifest = New-ManifestFromTree $newPackage
-    $migrationPlan = Build-FilePlan -NewMap (Get-ManifestFileMap $newManifest) `
-        -OldMap (Get-ManifestFileMap $autoBaseline) `
+    $migrationPlan = Build-PackageFilePlan -NewMap (Get-ManifestFileMap $newManifest) `
         -DiskMap (Get-InstallDiskState -InstallRoot $legacyInstall -TreeMap $legacyTrees)
-    Invoke-ResourceApply -Plan $migrationPlan -NewManifest $newManifest -SourceRoot $newPackage `
+    $migrationResult = Invoke-ResourceApply -Plan $migrationPlan -NewManifest $newManifest -SourceRoot $newPackage `
         -InstallRoot $legacyInstall -TreeMap $legacyTrees -SourceMeta @{ repo = 'test/test' } `
-        -InstallMode 'automatic-legacy-baseline' | Out-Null
+        -InstallMode 'package-whitelist'
     Assert-FileText '旧安装迁移更新程序' (Join-Path $legacyInstall 'lubancode.exe') 'new executable'
     Assert-FileText '旧安装迁移更新官方技能' (Join-Path $legacyInstall 'skills/official.md') 'new official'
-    Assert-FileText '旧安装迁移保留自行修改' (Join-Path $legacyInstall 'skills/edited.md') 'my edit'
+    Assert-FileText '白名单同名文件即使改过也更新' (Join-Path $legacyInstall 'skills/edited.md') 'new official edit'
     Assert-FileText '旧安装迁移保留自建技能' (Join-Path $legacyInstall 'skills/mine.md') 'my skill'
     Assert-FileText '旧安装迁移保留普通用户文件' (Join-Path $legacyInstall 'notes.txt') 'my note'
     Assert-FileText '清单误收 config.toml 也不能覆盖' (Join-Path $legacyInstall 'config.toml') 'user configuration'
-    Assert-Equal '已退役官方文件清理' $false (Test-Path (Join-Path $legacyInstall 'skills/retired.md'))
+    Assert-FileText '清单误收 .env 也不能覆盖' (Join-Path $legacyInstall '.env') 'user secret'
+    Assert-FileText '覆盖前备份同名修改文件' (Join-Path $migrationResult.backupRoot 'skills/edited.md') 'my edit'
+    Assert-Equal '新版不含的旧文件仍然保留' $true (Test-Path (Join-Path $legacyInstall 'skills/retired.md'))
 
-    function Get-LegacyReleaseAssets { param($Repo, $Version) throw 'offline' }
-    Assert-Equal '断网时不捏造基线' $null (Resolve-AutomaticBaseline -InstallRoot $legacyInstall -Repo 'test/test')
+    $repeatPlan = Build-PackageFilePlan -NewMap (Get-ManifestFileMap $newManifest) `
+        -DiskMap (Get-InstallDiskState -InstallRoot $legacyInstall -TreeMap $legacyTrees)
+    Assert-Equal '再次安装相同包无需覆盖或删除文件' 0 @($repeatPlan | Where-Object { $_.action -in @('replace', 'install-new', 'retire') }).Count
+
 } finally {
-    Set-Item Function:Get-InstalledVersionFromExe $savedVersionFunction
-    Set-Item Function:Get-LegacyReleaseAssets $savedAssetsFunction
-    Remove-Item Function:Invoke-WebRequest -ErrorAction SilentlyContinue
     $legacyTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
     if ((Test-PathUnderRoot -Path ([IO.Path]::GetFullPath($legacyRoot)) -Root $legacyTemp) -and
         (Test-Path -LiteralPath $legacyRoot)) {
