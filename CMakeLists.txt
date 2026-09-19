@@ -983,7 +983,8 @@ add_library(lubancode_engine STATIC
   src/updater/layout.cpp
   src/updater/txn.cpp
   src/updater/lock.cpp
-)target_include_directories(lubancode_engine PUBLIC
+)
+target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/generated)
