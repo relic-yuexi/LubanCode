@@ -1,7 +1,9 @@
 # 上下文预算、会话恢复、清场统计与多选提示修复
 
-- 状态：已实现（分支 fix/context-budget-resume-clear-multiselect；PR 与 CI 结果见 §八
-  注记尾部，完工回填）。§三第 5 条（k3-256k 端点核对）与 §七 真终端交互项待真机验收。
+- 状态：已实现（分支 fix/context-budget-resume-clear-multiselect，PR #143；
+  CI run 35446838289 success——rollup.conclusion=success，本 PR 按 lane 逻辑跑
+  macos-clang 编译测试腿，windows-msvc 腿不触发：未动 memory_worker 平台码）。
+  §三第 5 条（k3-256k 端点核对）与 §七 真终端交互项待真机验收。
 - 日期：2026-09-19
 - 源码基线：d20547e4。后续按函数名定位，勿只靠行号。
 - 级别：P1。预算失配与跨会话旧统计优先；多选提示随同修复。
