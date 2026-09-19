@@ -39,6 +39,8 @@
 #include "platform/sha256.hpp"
 #include "updater/engine.hpp"
 #include "updater/layout.hpp"
+#include "updater/manifest.hpp"
+#include "updater/probe.hpp"
 #include "updater/txn.hpp"
 
 namespace {
@@ -668,7 +670,8 @@ TEST_CASE("engine.update:needs-review 停档续跑——同事务、不重下") 
     CHECK(LedgerField(ledgers[0], "state") == std::optional<std::string>("needs-review"));
     const auto ledger = ReadJson(ledgers[0]);
     REQUIRE(ledger.has_value());
-    CHECK((*ledger)["blocking"].is_array() && (*ledger)["blocking"].size() == 1);
+    CHECK((*ledger)["blocking"].is_array());
+    CHECK((*ledger)["blocking"].size() == 1);
     CHECK_FALSE(fs::exists(root / "current.json"));  // 安装未变
     CHECK(fs::is_regular_file(root / "staging" / txn_id / "archive.bin"));  // 留档续跑
 
@@ -745,7 +748,8 @@ TEST_CASE("engine.update:激活后失败——平铺恢复旧 EXE 并必摘 curr
     CHECK((*ledger)["state"] == "rolled-back");
     CHECK((*ledger)["restored_flat"] == true);
     // 交接顶上去的新 EXE 停进 launcher-parked,旧 EXE 的原件在 legacy。
-    CHECK(fs::is_regular_file(root / "backups" / txn_id / "launcher-parked-" + kExeName));
+    const std::string parked_name = std::string("launcher-parked-") + kExeName;
+    CHECK(fs::is_regular_file(root / "backups" / txn_id / parked_name));
     CHECK(ReadFile(root / "backups" / txn_id / "legacy" / kExeName) == old_exe_bytes);
 }
 
