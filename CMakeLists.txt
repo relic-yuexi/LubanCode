@@ -956,6 +956,12 @@ add_library(lubancode_engine STATIC
   # 包外一概不动,目录/reparse 挡路即 conflict 阻断(退出码 3)。纯函数
   # 零 IO,批三 apply 落地层吃这张表。
   src/updater/whitelist_plan.cpp
+  # 更新助手 C++ 化·批二第②单(大文件断点续传下载器):Range 续传 +
+  # 流式分块收体 + 整文件 Sha256Stream 对账 + 重试退避/硬顶/取消旗。语义
+  # 真源 scripts/updater.py download_with_resume;HTTP 栈 cpr(样板
+  # provider_catalog 的 Session/代理 与 http_stream_transport 的流式回调/
+  # 取消旗/LowSpeed 骨架)。批三引擎层(事务/进度行)在这上面叠。
+  src/updater/download.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
