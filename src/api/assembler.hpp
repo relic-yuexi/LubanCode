@@ -89,6 +89,7 @@ private:
     struct OpenThinking {
         std::string text;
         std::string signature;
+        nlohmann::json responses_item = nullptr;
     };
 
     std::vector<ContentBlock> content_;

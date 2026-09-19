@@ -165,13 +165,13 @@ TEST_CASE("Chat 基线: system 是 messages 首条 system 消息,content 纯字�
     CHECK(system_count == 1);
 }
 
-TEST_CASE("Chat 基线: user 正文成 user 消息,thinking 默认不回传") {
+TEST_CASE("Chat 基线: user 正文成 user 消息,thinking 默认回传") {
     const auto body = api::chat::BuildRequestJson(CanonicalConversation());
     const auto& messages = body.at("messages");
     CHECK(messages[1].at("role") == "user");
     CHECK(messages[1].at("content") == "读一下入口文件");
-    // 默认回传策略 Never:思考正文一字不出门,不造空串。
-    CHECK_FALSE(messages[2].contains("reasoning_content"));
+    // 思考按独立字段回传,不混进普通正文。
+    CHECK(messages[2]["reasoning_content"] == "先想想从哪儿读");
     CHECK_FALSE(messages[2].contains("reasoning"));
     CHECK(messages[2].at("content") == "我来读");
     CHECK(messages[5].at("role") == "assistant");
@@ -279,19 +279,21 @@ TEST_CASE("Gemini 基线: system 落 systemInstruction,不进 contents") {
     }
 }
 
-TEST_CASE("Gemini 基线: user/model 两个角色,thinking 跳过") {
+TEST_CASE("Gemini 基线: user/model 两个角色,thinking 原样回传") {
     const auto body = api::gemini::BuildRequestJson(CanonicalConversation());
     const auto& contents = body.at("contents");
     REQUIRE(contents.size() == 7);
     CHECK(contents[0].at("role") == "user");
     CHECK(contents[0].at("parts").at(0).at("text") == "读一下入口文件");
     CHECK(contents[1].at("role") == "model");
-    CHECK(contents[1].at("parts").at(0).at("text") == "我来读");
+    CHECK(contents[1].at("parts").at(0).at("thought") == true);
+    CHECK(contents[1].at("parts").at(0).at("text") == "先想想从哪儿读");
+    CHECK(contents[1].at("parts").at(1).at("text") == "我来读");
     CHECK(contents[6].at("role") == "model");
     CHECK(contents[6].at("parts").at(0).at("text") == "读完了,入口很干净");
-    // 思考正文不回传(Gemini 的 thought 一次性)。
+    // 思考正文照常回传。
     const std::string dumped = body.dump();
-    CHECK(dumped.find("先想想从哪儿读") == std::string::npos);
+    CHECK(dumped.find("先想想从哪儿读") != std::string::npos);
 }
 
 TEST_CASE("Gemini 基线: 工具调用成 model 的 functionCall 单条 content") {

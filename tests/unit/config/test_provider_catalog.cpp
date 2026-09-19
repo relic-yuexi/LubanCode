@@ -295,7 +295,7 @@ TEST_CASE("Moonshot 四枚模型的请求 golden:该发的发,不该发的一概
     CHECK(k26_body["thinking"]["type"] == "enabled");
     CHECK_FALSE(k26_body.contains("reasoning_effort"));
     CHECK_FALSE(k26_body.contains("thinking_budget"));
-    CHECK_FALSE(k26_body["messages"][1].contains("reasoning_content"));
+    CHECK(k26_body["messages"][1].contains("reasoning_content"));
     // none 档:关思考的请求照发(生效与否服务端说了算)。
     const auto k26_off = api::chat::BuildRequestJson(build_request("kimi-k2.6", "none"));
     CHECK(k26_off["thinking"]["type"] == "disabled");
@@ -305,7 +305,7 @@ TEST_CASE("Moonshot 四枚模型的请求 golden:该发的发,不该发的一概
     const auto k25_body = api::chat::BuildRequestJson(build_request("kimi-k2.5", "high"));
     CHECK(k25_body["thinking"]["type"] == "enabled");
     CHECK_FALSE(k25_body["thinking"].contains("keep"));
-    CHECK_FALSE(k25_body["messages"][1].contains("reasoning_content"));
+    CHECK(k25_body["messages"][1].contains("reasoning_content"));
 }
 
 // ---------------------------------------------------------------------------

@@ -13,23 +13,21 @@ namespace lubancode::api {
 //
 // 没有方言(empty)时 serializer 走 legacy 兼容路径(generic toggle ->
 // thinking.type 那套),该路径视为 unverified,等 fixture 补齐后收紧。
-// 跨 Turn 保留式思考的中立意图(Kimi 保留式思考单 P1)。与 replay 是两笔
-// 账:replay 管客户端怎样序列化已有的 ThinkingBlock;history 管用户要不要
-// 显式请求服务端把跨 Turn 的思考纳入本轮推理。它是中立意图——不直接写死
-// thinking.keep;Chat/Kimi 方言把 All 落成 thinking.keep="all" 并把 replay
-// 升为 Always;不支持的模型在配置入口明报,不静默忽略。
+// 历史思考默认完整回传;default 与 all 都保留,off 才关闭。
+// 服务端额外的保留参数仍按方言发送,不按模型名猜。
 enum class ReasoningHistoryMode {
-    ProviderDefault,  // 不显式请求跨 Turn 保留(模型方言自带的缺省形状)
-    All,              // 显式请求完整保留(方言声明了请求控制才落线)
+    ProviderDefault,
+    All,
+    Disabled,
 };
 
 // 模型对"跨 Turn 保留式思考"的能力档(由方言推导,不按模型名特判):
 // 同一枚 Kimi 可能经直连、聚合端、本地 vLLM 出站,协议责任随实际绑定的
-// provider 声明的方言走——/think history 的切换与切模型重校验都先问它。
+// provider 声明的方言走;它不再决定客户端是否发送历史思考。
 enum class ReasoningHistorySupport {
     None,           // 无方言(自定义旧 provider)或方言未声明历史控制且
-                    // replay != always:不支持,选 all 当场明报
-    ServerFixed,    // replay=always 且无请求控制:服务端固定开启,关不掉,
+                    // replay != always:没有额外服务端保留控制,客户端仍默认回传
+    ServerFixed,    // replay=always 且无请求控制:服务端固定开启,
                     // wire 上也没有请求字段可发
     RequestControl, // 方言声明 history_control=thinking_keep:可选开(K2.6
                     // 的 thinking.keep;开了 replay 同步升 Always)

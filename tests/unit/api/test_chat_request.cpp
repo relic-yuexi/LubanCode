@@ -124,9 +124,7 @@ TEST_CASE("Chat request: 用户 extra_body 里的 stream_options 压过 capabili
 }
 
 // ---------------------------------------------------------------------------
-// reasoning 回传(reasoning_replay=tool_episode,DeepSeek 协议):纯对话段
-// 略过;工具交互段按原字节原次序回传 reasoning_content,不进 content。
-// 默认策略 never 维持现行行为(一条不带)。
+// 默认原样回传 reasoning_content,不再按是否用过工具裁剪。
 // ---------------------------------------------------------------------------
 
 api::chat::ChatRequestOptions ToolEpisode() {
@@ -135,7 +133,7 @@ api::chat::ChatRequestOptions ToolEpisode() {
     return options;
 }
 
-TEST_CASE("Chat request: 纯对话思考不回传(哪怕开了 tool_episode)") {
+TEST_CASE("Chat request: 纯对话思考照常回传(旧 tool_episode 不裁剪)") {
     api::Request request;
     request.model = "deepseek-v4-pro";
     api::Message user;
@@ -156,7 +154,7 @@ TEST_CASE("Chat request: 纯对话思考不回传(哪怕开了 tool_episode)") {
     REQUIRE(body["messages"].size() == 3);  // system 为空不发,三条原样
     CHECK(body["messages"][1]["role"] == "assistant");
     CHECK(body["messages"][1]["content"] == "你好!");
-    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+    CHECK(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: 思考+工具调用,原样回传 reasoning_content 与 tool_calls") {
@@ -217,7 +215,7 @@ TEST_CASE("Chat request: 先工具后总结的交互段,下一轮 user 请求仍
     CHECK(body["messages"][3]["content"] == "结论是 X");
 }
 
-TEST_CASE("Chat request: 默认策略 never——工具段也不回传(现行行为不变)") {
+TEST_CASE("Chat request: 默认回传——工具段也带思考") {
     api::Request request;
     request.model = "glm-5.2";
     api::Message user;
@@ -231,7 +229,7 @@ TEST_CASE("Chat request: 默认策略 never——工具段也不回传(现行行
     request.messages.push_back(assistant);
 
     const auto body = api::chat::BuildRequestJson(request);
-    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+    CHECK(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: 一条 assistant 多枚 tool call,reasoning 只写一次") {
@@ -393,7 +391,7 @@ TEST_CASE("Chat request: always——回传字段名听方言声明,不双写") 
     CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
 }
 
-TEST_CASE("Chat request: 方言声明压过 legacy 回落——两头各试一回") {
+TEST_CASE("Chat request: 旧方言 never 不再裁掉历史思考") {
     api::Request request;
     request.model = "kimi-k2.5";
     request.reasoning = AlwaysDialect("never");
@@ -408,9 +406,9 @@ TEST_CASE("Chat request: 方言声明压过 legacy 回落——两头各试一�
     assistant.content.push_back(api::ToolUseBlock{"call_1", "read_file", nlohmann::json{{"path", "a"}}});
     request.messages.push_back(assistant);
 
-    // 方言说 never,legacy 配了 tool_episode:正式方言赢,一条不回。
+    // 旧 replay 声明不再丢弃思考,用户未关闭就回传。
     const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), ToolEpisode());
-    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+    CHECK(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: legacy ChatRequestOptions 也认 always(自定义 provider 回落档)") {
@@ -501,12 +499,13 @@ TEST_CASE("Chat request: K2.6 history all 且档位未设——keep 照发,不�
     CHECK(body["messages"][1]["reasoning_content"] == "上一轮的思考");
 }
 
-TEST_CASE("Chat request: K2.6 history all 但思考被关——不发 keep(冲突在入口明报)") {
+TEST_CASE("Chat request: K2.6 history all 但思考被关——停发 keep 和历史思考") {
     api::Request request = KeepAllHistoryRequest();
-    request.reasoning_effort = "none";  // 关思考与保留冲突;配置入口已拒绝
+    request.reasoning_effort = "none";  // 关闭本轮思考也暂停回传
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["thinking"]["type"] == "disabled");
-    CHECK_FALSE(body["thinking"].contains("keep"));  // 自相矛盾的请求不发
+    CHECK_FALSE(body["thinking"].contains("keep"));
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: K3/K2.7 上 history all 不落 keep(固定开启,无请求字段)") {
@@ -530,7 +529,7 @@ TEST_CASE("Chat request: K3/K2.7 上 history all 不落 keep(固定开启,无请
     CHECK(body["messages"][1]["reasoning_content"] == "想了一下");  // always 照旧
 }
 
-TEST_CASE("Chat request: K2.5 上 history all 不落 keep 也不回传(选择被入口拒绝)") {
+TEST_CASE("Chat request: K2.5 回传已有思考但不发不支持的 keep") {
     api::Request request;
     request.model = "kimi-k2.5";
     // K2.5 形状:thinking.type 可开关、replay=never、无 history_control。
@@ -555,17 +554,17 @@ TEST_CASE("Chat request: K2.5 上 history all 不落 keep 也不回传(选择被
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["thinking"]["type"] == "enabled");
     CHECK_FALSE(body["thinking"].contains("keep"));
-    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+    CHECK(body["messages"][1].contains("reasoning_content"));
 }
 
-TEST_CASE("Chat request: history ProviderDefault——keep 一概不发(P0 行为不变)") {
+TEST_CASE("Chat request: history ProviderDefault 默认带 keep 与纯聊天思考") {
     api::Request request = KeepAllHistoryRequest();
     request.reasoning_history = api::ReasoningHistoryMode::ProviderDefault;
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["thinking"]["type"] == "enabled");
-    CHECK_FALSE(body["thinking"].contains("keep"));
-    // 缺省 replay=tool_episode:纯对话段照旧不回传。
-    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+    CHECK(body["thinking"]["keep"] == "all");
+    // 旧 tool_episode 不影响默认全量回传。
+    CHECK(body["messages"][1].contains("reasoning_content"));
 }
 
 TEST_CASE("Chat request: ApplyRequestProfile 把 history 模式带进请求") {
@@ -905,4 +904,25 @@ TEST_CASE("Chat proxy replay: tool_search+tool_invoke 定义恒在,arguments JSO
     CHECK(parsed_args["arguments"]["query"] == "repo:lubancode cache");
     CHECK(parsed_args["arguments"]["per_page"] == 50);
     CHECK(body["messages"][2]["tool_call_id"] == "call_invoke");
+}
+
+
+TEST_CASE("Chat request: Kimi default keep, off, and restored prefix") {
+    auto request = KeepAllHistoryRequest();
+    request.reasoning_history = api::ReasoningHistoryMode::ProviderDefault;
+    request.reasoning_effort.clear();
+    const auto original = api::chat::BuildRequestJson(request);
+    CHECK(original["thinking"]["keep"] == "all");
+    const std::string text = " \n\t\"quoted\" \r\n";
+    std::get<api::ThinkingBlock>(request.messages[1].content[0]).text = text;
+    const auto first = api::chat::BuildRequestJson(request);
+    CHECK(first["messages"][1]["reasoning_content"] == text);
+    request.messages.push_back(request.messages.back());
+    CHECK(api::chat::BuildRequestJson(request)["messages"][1] == first["messages"][1]);
+    request.reasoning_history = api::ReasoningHistoryMode::Disabled;
+    const auto off = api::chat::BuildRequestJson(request);
+    CHECK_FALSE(off["messages"][1].contains("reasoning_content"));
+    CHECK_FALSE(off.contains("thinking"));
+    request.reasoning_history = api::ReasoningHistoryMode::ProviderDefault;
+    CHECK(api::chat::BuildRequestJson(request)["messages"][1] == first["messages"][1]);
 }

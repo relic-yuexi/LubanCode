@@ -26,7 +26,8 @@ std::size_t BlockChars(const api::ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                 return b.tool_use_id.size() + b.content.size();
             } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
-                return b.text.size() + b.signature.size();
+                return b.text.size() + b.signature.size() +
+                       (b.responses_item.is_null() ? 0 : b.responses_item.dump().size());
             } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
                 // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):不透明载荷
                 // 计字节,与 thinking 同位。
@@ -345,7 +346,8 @@ std::size_t EstimateMessageTokens(const api::Message& message, double calibratio
                     return EstimateUtf8Tokens(b.tool_use_id) + EstimateUtf8Tokens(b.content) +
                            image_tokens;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
-                    return EstimateUtf8Tokens(b.text) + EstimateUtf8Tokens(b.signature);
+                    return EstimateUtf8Tokens(b.text) + EstimateUtf8Tokens(b.signature) +
+                           (b.responses_item.is_null() ? 0 : EstimateUtf8Tokens(b.responses_item.dump()));
                 } else if constexpr (std::is_same_v<T, api::RedactedThinkingBlock>) {
                     // 加密思考块(轨迹 v3 差距清单 §8.2 第 6 条):载荷真上
                     // wire,按默认尺折 token。

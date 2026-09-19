@@ -19,7 +19,7 @@
     "MessageDone"
   ],
   "expected_replay": [
-    "K2.6 开 /think history all 后:请求同发 thinking.type=enabled 与 thinking.keep=all,跨 Turn 的 assistant.reasoning_content 原字节回传,replay 升为 always"
+    "默认原字节回传全部历史 assistant.reasoning_content,并发送 thinking.type=enabled 与 thinking.keep=all;用户关闭时停发。"
   ],
   "usage_expectation": {},
   "stop_reason": "end_turn",

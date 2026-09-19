@@ -71,9 +71,11 @@ TEST_CASE("Gemini request: 历史翻 contents,工具调用/结果各成一条") 
     CHECK(body["contents"][0]["parts"][1]["inlineData"]["mimeType"] == "image/png");
     CHECK(body["contents"][0]["parts"][1]["inlineData"]["data"] == "AAAA");
 
-    // assistant:文本一条(思考块不回传),工具调用单独一条 role=model。
+    // assistant:思考与文本同框,工具调用单独一条 role=model。
     CHECK(body["contents"][1]["role"] == "model");
-    CHECK(body["contents"][1]["parts"][0]["text"] == "我来读");
+    CHECK(body["contents"][1]["parts"][0]["text"] == "想一想");
+    CHECK(body["contents"][1]["parts"][0]["thoughtSignature"] == "sig");
+    CHECK(body["contents"][1]["parts"][1]["text"] == "我来读");
     CHECK(body["contents"][2]["role"] == "model");
     CHECK(body["contents"][2]["parts"][0]["functionCall"]["name"] == "read_file");
     CHECK(body["contents"][2]["parts"][0]["functionCall"]["args"]["path"] == "a.cpp");

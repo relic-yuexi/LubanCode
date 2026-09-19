@@ -506,7 +506,7 @@ TEST_CASE("wire 回环 chat: DeepSeek tool_episode 第二轮 reasoning_content �
 // 不靠 legacy reasoning_replay——目录方言说了算)。
 //   K3   always:跨轮纯对话,第二轮请求原样带回 reasoning,不发 thinking
 //   K2.6 tool_episode:本 Turn 工具循环回传,不发 reasoning_effort
-//   K2.5 never:思考照收,历史不回传,thinking.keep 一概不发
+//   K2.5:历史思考回传,不发送 thinking.keep
 // ---------------------------------------------------------------------------
 
 TEST_CASE("wire 回环 chat: Kimi K3 跨轮 always——第二轮请求带回第一轮 reasoning_content,不发 thinking") {
@@ -634,12 +634,12 @@ TEST_CASE("wire 回环 chat: Kimi K2.6 工具循环——本 Turn reasoning 回�
     const auto& tool_message = body2.at("messages")[2];
     CHECK(tool_message.at("role") == "tool");
     CHECK(tool_message.at("tool_call_id") == call->id);
-    // 跨 Turn 未开 keep(P1):不宣称 Preserved Thinking,thinking 里没有 keep。
-    CHECK_FALSE(body2.at("thinking").contains("keep"));
+    // 默认跨轮保留,工具交互同样携带 keep。
+    CHECK(body2.at("thinking").at("keep") == "all");
     CHECK_FALSE(body2.contains("reasoning_effort"));
 }
 
-TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinking.keep") {
+TEST_CASE("wire 回环 chat: Kimi K2.5 回传历史思考,不误发 thinking.keep") {
     std::vector<HttpRequest> received;
     ReplayPlan plan;
     plan.sse_rounds = {
@@ -687,7 +687,7 @@ TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinki
     // K2.5 不支持 Preserved Thinking:assistant 消息在,reasoning 不回传。
     const auto& replayed = body2.at("messages")[1];
     CHECK(replayed.at("role") == "assistant");
-    CHECK_FALSE(replayed.contains("reasoning_content"));
+    CHECK(replayed.contains("reasoning_content"));
     CHECK(replayed.at("content") == "答:你好");
     CHECK_FALSE(body2.at("thinking").contains("keep"));
 }
@@ -791,12 +791,12 @@ TEST_CASE("wire 回环 chat: vLLM qwen3.8 工具循环——chat_template_kwargs
 // vLLM 本地模型勘察单 P2(§七测试矩阵补齐):responses 面与 messages 面
 // 两轮回环。responses:流式 function_call 项的 call_id 是 call_ 前缀
 //(非流式项带 fc_/chatcmpl-tool- 双 id,客户端认 call_id),第二轮 input
-// 里 function_call/function_call_output 成对、思考项一次性不回传。
+// 里 function_call/function_call_output 成对、思考项原样回传。
 // messages:第一轮 thinking 块 + 32 位 hex 假签 + tool_use(chatcmpl-tool-
 // 前缀),第二轮 thinking 块带 signature 原字节回传——假签不验格式。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("wire 回环 responses: vLLM qwen3.8 工具循环——call_ 前缀 id,思考项一次性不回传") {
+TEST_CASE("wire 回环 responses: vLLM qwen3.8 工具循环——call_ 前缀 id,思考项原样回传") {
     std::vector<HttpRequest> received;
     ReplayPlan plan;
     plan.sse_rounds = {
@@ -881,7 +881,7 @@ TEST_CASE("wire 回环 responses: vLLM qwen3.8 工具循环——call_ 前缀 id
     }
     CHECK(saw_function_call);
     CHECK(saw_output);
-    CHECK_FALSE(saw_reasoning_replay);
+    CHECK(saw_reasoning_replay);
 
     // 终答(reasoning_text 思考流夹具):思考 + 正文都在,usage 记账。
     REQUIRE(final_message.content.size() == 2);
@@ -1190,14 +1190,14 @@ TEST_CASE("wire 回环 responses: reasoning 一次性不回传,function_call/out
     }
     CHECK(saw_function_call);
     CHECK(saw_output);
-    CHECK_FALSE(saw_reasoning_replay);  // responses 思考不回传
+    CHECK(saw_reasoning_replay);  // responses 思考原样回传
 }
 
 // ---------------------------------------------------------------------------
 // google-generate-content:thought -> functionCall -> 回传 -> 终答
 // ---------------------------------------------------------------------------
 
-TEST_CASE("wire 回环 gemini: thought 一次性不重放,functionCall/functionResponse 配对回传") {
+TEST_CASE("wire 回环 gemini: thought 原样回传,functionCall/functionResponse 配对回传") {
     std::vector<HttpRequest> received;
     ReplayPlan plan;
     plan.sse_rounds = {

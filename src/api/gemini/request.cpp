@@ -183,7 +183,11 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body, 
                     } else if constexpr (std::is_same_v<T, ImageBlock>) {
                         parts.push_back(json{{"inlineData", json{{"mimeType", b.media_type}, {"data", b.data}}}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
-                        // 思考不回传:Gemini 的 thought 一次性,续会话不重放。
+                        if (ShouldReplayThinking(request) && message.role == Role::Assistant) {
+                            json thought{{"text", b.text}, {"thought", true}};
+                            if (!b.signature.empty()) thought["thoughtSignature"] = b.signature;
+                            parts.push_back(std::move(thought));
+                        }
                     } else if constexpr (std::is_same_v<T, RedactedThinkingBlock>) {
                         // 加密思考块(差距清单 §8.2 第 6 条)同款一次性:
                         // 不透明载荷没有可回传的形状,跳过。

@@ -8,7 +8,8 @@
   "captured_at": "2026-08-30",
   "request_expectation": {
     "thinking": {
-      "type": "enabled"
+      "type": "enabled",
+      "keep": "all"
     }
   },
   "expected_events": [
@@ -21,7 +22,7 @@
     "MessageDone"
   ],
   "expected_replay": [
-    "同一工具循环的后续请求按 tool_episode 原字节带回 assistant.reasoning_content,tool_call id 原样;不携带 reasoning_effort 与 thinking_budget"
+    "默认原字节回传全部历史 assistant.reasoning_content,并发送 thinking.type=enabled 与 thinking.keep=all;用户关闭时停发。"
   ],
   "usage_expectation": {},
   "stop_reason": "tool_use",

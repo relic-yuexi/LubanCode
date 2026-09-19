@@ -1665,6 +1665,10 @@ std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledge
                         part.contains("text")) {
                         message.blocks.push_back(
                             nlohmann::json{{"type", "text"}, {"text", part["text"]}});
+                    } else if (message.role == ReplayMessage::Role::Assistant && part.is_object() &&
+                               part.value("type", std::string()) == "thinking" && part.contains("text")) {
+                        // 原块保留签名和原生 reasoning item,不能在恢复时只挑正文。
+                        message.blocks.push_back(part);
                     }
                 }
             }
@@ -1775,6 +1779,9 @@ void AppendConversationText(const nlohmann::json& content, ReplayMessage* out) {
     for (const auto& part : content) {
         if (part.is_object() && part.value("type", std::string()) == "text" && part.contains("text")) {
             append_text(part["text"]);
+        } else if (out->role == ReplayMessage::Role::Assistant && part.is_object() &&
+                   part.value("type", std::string()) == "thinking" && part.contains("text")) {
+            out->blocks.push_back(part);
         }
     }
 }

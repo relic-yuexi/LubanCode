@@ -716,10 +716,10 @@ TEST_CASE("差距6: chat/responses/gemini 三家加密思考块不出门") {
     CHECK(chat.at("messages").at(0).at("reasoning_content") == "明文思考");
     CHECK(chat.dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
 
-    // responses/gemini:思考块(明文与加密)都不回传。
+    // responses/gemini 不接收 Anthropic 的加密块,明文思考照常回传。
     CHECK(api::responses::BuildRequestJson(request).dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
     CHECK(api::gemini::BuildRequestJson(request).dump().find("c2VjcmV0LWRhdGEK") == std::string::npos);
-    // 只装思考块的 assistant 在这两家不产任何元素(明文与加密同跳过)。
+    // 只装思考块的 assistant 仍保留明文思考元素。
     api::Request thinking_only;
     thinking_only.model = "m";
     api::Message silent;
@@ -728,7 +728,7 @@ TEST_CASE("差距6: chat/responses/gemini 三家加密思考块不出门") {
     silent.content.push_back(api::RedactedThinkingBlock{"c2VjcmV0LWRhdGEK"});
     thinking_only.messages.push_back(silent);
     CHECK(api::responses::BuildRequestJson(thinking_only).at("input").size() == 0);
-    CHECK(api::gemini::BuildRequestJson(thinking_only).at("contents").size() == 0);
+    CHECK(api::gemini::BuildRequestJson(thinking_only).at("contents").size() == 1);
 }
 
 TEST_CASE("差距6: ShouldRecoverTaggedThinking 认加密思考为思考在场") {
@@ -865,8 +865,8 @@ TEST_CASE("差距7: responses/gemini 映射逐块裂元素,思考跳过后的空
     CHECK(silent_responses.wire_element_count == 0);
     const auto silent_gemini = api::gemini::BuildMessageWireMap(thinking_only);
     REQUIRE(silent_gemini.message_to_wire.size() == 1);
-    CHECK(silent_gemini.message_to_wire[0].empty());
-    CHECK(silent_gemini.wire_element_count == 0);
+    CHECK(silent_gemini.message_to_wire[0] == std::vector<std::size_t>{0});
+    CHECK(silent_gemini.wire_element_count == 1);
 }
 
 TEST_CASE("差距7: 横切钉子——四家映射的元素计数与实际出口容器长度恒等") {
@@ -1020,4 +1020,39 @@ TEST_CASE("差距8: ForceMaxOutputTokensOverride 只在有覆盖时落笔,不无
     gemini_override.ForceMaxOutputTokensOverride(gemini_request, 256);
     REQUIRE(gemini_request.extra_body.contains("generationConfig"));
     CHECK(gemini_request.extra_body.at("generationConfig").at("maxOutputTokens") == 256);
+}
+
+
+TEST_CASE("Thinking replay: default preserves exact text on four wires and explicit off is reversible") {
+    api::Request request;
+    request.model = "test";
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    const std::string original = "  thought\n\t\"quoted\" ";
+    const nlohmann::json native{{"type", "reasoning"}, {"id", "rs_test"},
+        {"summary", nlohmann::json::array({nlohmann::json{{"type", "summary_text"}, {"text", original}}})}};
+    assistant.content.push_back(api::ThinkingBlock{original, "signature", native});
+    assistant.content.push_back(api::TextBlock{"answer"});
+    request.messages.push_back(assistant);
+    const auto bodies = [&] {
+        return std::vector<nlohmann::json>{api::chat::BuildRequestJson(request),
+            api::anthropic::BuildRequestJson(request), api::responses::BuildRequestJson(request),
+            api::gemini::BuildRequestJson(request)};
+    };
+    const auto initial = bodies();
+    CHECK(initial[0]["messages"][0]["reasoning_content"] == original);
+    CHECK(initial[1]["messages"][0]["content"][0]["thinking"] == original);
+    CHECK(initial[1]["messages"][0]["content"][0]["signature"] == "signature");
+    CHECK(initial[2]["input"][0]["summary"][0]["text"] == original);
+    CHECK(initial[3]["contents"][0]["parts"][0]["text"] == original);
+    CHECK(initial[3]["contents"][0]["parts"][0]["thoughtSignature"] == "signature");
+    request.reasoning_history = api::ReasoningHistoryMode::Disabled;
+    for (const auto& body : bodies()) CHECK(body.dump().find("quoted") == std::string::npos);
+    request.reasoning_history = api::ReasoningHistoryMode::ProviderDefault;
+    CHECK(bodies() == initial);
+    request.reasoning_effort = "none";
+    for (const auto& body : bodies()) CHECK(body.dump().find("quoted") == std::string::npos);
+    request.reasoning_effort.clear();
+    CHECK(bodies() == initial);
+    CHECK(std::get<api::ThinkingBlock>(request.messages[0].content[0]).text == original);
 }

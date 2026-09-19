@@ -102,10 +102,12 @@ TEST_CASE("response.output_item.done 类型是 function_call 时映射出 Conten
     CHECK(std::get<ContentBlockDone>(*event).index == 1);
 }
 
-TEST_CASE("response.output_item.done 类型是 reasoning 时静默跳过(没有对应的开块)") {
+TEST_CASE("response.output_item.done 类型是 reasoning 时保留完整原生条目") {
     auto event = parse_event(Frame(
         R"({"sequence_number":14,"item":{"summary":[{"type":"summary_text","text":"..."}],"type":"reasoning","id":"msg_5bd0c6df-19b8-4a04-bc00-8042a224exxx"},"output_index":1,"type":"response.output_item.done"})"));
-    CHECK_FALSE(event.has_value());
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<ThinkingDelta>(*event));
+    CHECK(std::get<ThinkingDelta>(*event).responses_item["summary"][0]["text"] == "...");
 }
 
 TEST_CASE("response.reasoning_summary_text.delta 映射出 ThinkingDelta,done 静默跳过") {

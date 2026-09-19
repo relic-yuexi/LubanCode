@@ -237,6 +237,9 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
         }
         json content = json::array();
         for (const auto& block : message.content) {
+            if ((std::holds_alternative<ThinkingBlock>(block) ||
+                 std::holds_alternative<RedactedThinkingBlock>(block)) &&
+                (!ShouldReplayThinking(request) || message.role != Role::Assistant)) continue;
             content.push_back(ContentBlockToJson(block));
         }
         // Tool 角色折 user 容器(协议无 tool 角);逐条对位、相邻不合并

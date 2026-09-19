@@ -83,6 +83,11 @@ std::optional<StreamEvent> HandleOutputItemDone(const json& data) {
         return std::nullopt;
     }
     const std::string type = it->value("type", "");
+    if (type == "reasoning") {
+        ThinkingDelta event;
+        event.responses_item = *it;
+        return event;
+    }
     if (type == "web_search_call") {
         BuiltinToolDone event;
         event.id = it->value("id", "");
@@ -361,30 +366,17 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
         const std::string type = item.value("type", "");
         const int index = static_cast<int>(i);
         if (type == "reasoning") {
-            // vLLM:思考正文在 content[].reasoning_text(summary 恒空);
-            // OpenAI 官方:summary[].summary_text。两边各取在场的那种,
-            // 逐非空段一枚 ThinkingDelta(与流式路 done/part 系不发事件的
-            // 口径对齐:这里也没有开块/收块事件)。
-            if (auto content = item.find("content"); content != item.end() && content->is_array()) {
-                for (const auto& part : *content) {
-                    if (part.value("type", "") == "reasoning_text") {
-                        const std::string text = part.value("text", "");
-                        if (!text.empty()) {
-                            events.push_back(ThinkingDelta{text});
-                        }
-                    }
-                }
-            } else if (auto summary = item.find("summary"); summary != item.end() &&
-                                                          summary->is_array() && !summary->empty()) {
-                for (const auto& part : *summary) {
-                    // OpenAI 官方形状:{"type":"summary_text","text":"..."}
-                    // ——段类型叫 summary_text,正文键还是 text。
-                    const std::string text = part.value("text", "");
-                    if (!text.empty()) {
-                        events.push_back(ThinkingDelta{text});
-                    }
-                }
+            ThinkingDelta event;
+            event.responses_item = item;
+            const auto content = item.find("content");
+            const auto summary = item.find("summary");
+            const json* parts = content != item.end() && content->is_array() && !content->empty()
+                ? &*content : summary != item.end() && summary->is_array() ? &*summary : nullptr;
+            if (parts != nullptr) for (const auto& part : *parts) {
+                if (part.is_object() && part.contains("text") && part["text"].is_string())
+                    event.text += part["text"].get<std::string>();
             }
+            events.push_back(std::move(event));
         } else if (type == "message") {
             if (auto content = item.find("content"); content != item.end() && content->is_array()) {
                 for (const auto& part : *content) {

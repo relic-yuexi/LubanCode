@@ -49,7 +49,8 @@ void MessageAssembler::FinalizeCurrent() {
         // 模型流里的思考正文/签名可能带坏串(服务端或中转的问题),进历史
         // 前洗掉,免得下一轮重放时 wire 序列化 316。
         content_.push_back(ThinkingBlock{platform::SanitizeExternalText(open_thinking_->text),
-                                         platform::SanitizeExternalText(open_thinking_->signature)});
+                                         platform::SanitizeExternalText(open_thinking_->signature),
+                                         open_thinking_->responses_item});
         open_thinking_.reset();
     } else if (open_text_.has_value()) {
         // 同上:模型输出的文本块进历史前清洗。
@@ -74,10 +75,29 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 open_text_->text += e.text;
             } else if constexpr (std::is_same_v<T, ThinkingDelta>) {
                 if (!open_thinking_.has_value()) {
+                    FinalizeCurrent();
                     open_thinking_ = OpenThinking{};
                 }
                 open_thinking_->text += e.text;
                 open_thinking_->signature += e.signature;
+                if (e.responses_item.is_object()) {
+                    open_thinking_->responses_item = e.responses_item;
+                    // done 条目含完整正文;没有 delta 的端也能留全思考。
+                    std::string text;
+                    const auto& item = e.responses_item;
+                    const auto content = item.find("content");
+                    const auto summary = item.find("summary");
+                    const nlohmann::json* parts = content != item.end() && content->is_array() && !content->empty()
+                        ? &*content : summary != item.end() && summary->is_array() ? &*summary : nullptr;
+                    if (parts != nullptr && !parts->empty()) {
+                        for (const auto& part : *parts) {
+                            if (part.is_object() && part.contains("text") && part["text"].is_string())
+                                text += part["text"].get<std::string>();
+                        }
+                        open_thinking_->text = std::move(text);
+                    }
+                    FinalizeCurrent();
+                }
             } else if constexpr (std::is_same_v<T, ToolUseStart>) {
                 FinalizeCurrent();  // 上一个块(多半是文本)先收尾
                 OpenToolUse open;

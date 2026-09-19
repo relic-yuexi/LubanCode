@@ -145,7 +145,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
             // thought:true 的 part 是思考正文,映射成 ThinkingDelta;
             // 普通文本走 TextDelta。到帧就吐,不攒。
             if (part.value("thought", false)) {
-                events.push_back(ThinkingDelta{text->get<std::string>(), std::string()});
+                events.push_back(ThinkingDelta{text->get<std::string>(), part.value("thoughtSignature", std::string())});
+                if (part.contains("thoughtSignature")) events.push_back(ContentBlockDone{0});
             } else {
                 events.push_back(TextDelta{text->get<std::string>()});
             }

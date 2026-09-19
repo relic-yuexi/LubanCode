@@ -18,8 +18,7 @@ namespace lubancode::api::gemini {
 //   - user 的工具结果 -> 单独一条 role:"user" 的 content,
 //     parts[{functionResponse:{name,response}}](协议只认函数名,不认调用
 //     id,所以先扫一遍历史把 tool_use_id 对回函数名);
-//   - 思考块(ThinkingBlock)不回传:Gemini 的 thought 是一次性的,续会话
-//     不重放(与 responses wire 同一取舍);
+//   - 思考块默认带 thought/text/thoughtSignature 回传,用户关闭才跳过;
 //   - max_tokens -> generationConfig.maxOutputTokens;
 //   - reasoning_effort 非空 -> generationConfig.thinkingConfig；模型档案的
 //     wireDialect 决定写 thinkingLevel 或 thinkingBudget，none/minimal 关。

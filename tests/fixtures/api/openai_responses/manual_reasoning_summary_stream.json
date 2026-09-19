@@ -8,10 +8,26 @@
   "source_section": "Response 响应 chunk 对象(流式输出)示例:网页抓取(response.output_item.added(reasoning) -> response.reasoning_summary_text.delta/done -> response.output_item.done(reasoning) -> message 输出)",
   "captured_at": "2026-08-27",
   "doc_snapshot_hash": "6917b0a1aad63824c585bfe0cb22c392795a3605c992f5886fb120765c37ad54",
-  "request_expectation": {"reasoning": {"effort": "high"}},
-  "expected_events": ["ThinkingDelta", "TextDelta", "MessageDone"],
-  "expected_replay": ["reasoning item 可按手册 input 段回传(type=reasoning, id=上轮 id, summary 数组);现行实现一次性不回传"],
-  "usage_expectation": {"input_tokens": 45, "output_tokens": 320, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "request_expectation": {
+    "reasoning": {
+      "effort": "high"
+    }
+  },
+  "expected_events": [
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "TextDelta",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "历史 reasoning item 按服务端原始结构回传,包括 id、summary/content 与 encrypted_content;工具调用仍按 call_id 配对。"
+  ],
+  "usage_expectation": {
+    "input_tokens": 45,
+    "output_tokens": 320,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0
+  },
   "stop_reason": "end_turn",
   "notes": "手册网页抓取示例节选(reasoning 序列 + 最终 message + completed),中间 web_search/web_extractor 事件与本场景无关未收。reasoning summary 是服务端摘要,不是模型内部完整思维链(工单不顺手做第一条)。"
 }
