@@ -616,6 +616,10 @@ bool ProbeSyncOutputSupport() {
 }
 
 std::optional<int> ConsoleWidth() {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->console_width) {
+        return hooks->console_width();
+    }
     const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h_out == nullptr || h_out == INVALID_HANDLE_VALUE) {
         return std::nullopt;
@@ -628,6 +632,10 @@ std::optional<int> ConsoleWidth() {
 }
 
 bool SupportsScreenRepaint() {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny();
+        hooks != nullptr && hooks->override_screen_repaint) {
+        return hooks->wants_screen_repaint;
+    }
     // 真探测,跟 TranscriptPainter 实际用来定锚点的 API 同一把尺——之前
     // 写死 true,mintty/ConPTY 之类 GetConsoleScreenBufferInfo 靠不住的
     // 环境里 TranscriptPainter 会以为自己能原地改写,实际锚点全程拿不到
@@ -638,6 +646,10 @@ bool SupportsScreenRepaint() {
 }
 
 std::optional<ScreenInfo> GetScreenInfo() {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->get_screen_info) {
+        return hooks->get_screen_info();
+    }
     const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
     CONSOLE_SCREEN_BUFFER_INFO info{};
     if (!GetConsoleScreenBufferInfo(h_out, &info)) {
@@ -655,6 +667,11 @@ std::optional<ScreenInfo> GetScreenInfo() {
 }
 
 void SetCursorPos(int x, int y) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->set_cursor_pos) {
+        hooks->set_cursor_pos(x, y);
+        return;
+    }
     const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleCursorPosition(h_out, COORD{static_cast<SHORT>(x), static_cast<SHORT>(y)});
 }
@@ -668,6 +685,11 @@ void ClearScreen() {
 }
 
 void ClearRowFrom(int x, int y, int count) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->clear_row_from) {
+        hooks->clear_row_from(x, y, count);
+        return;
+    }
     if (count <= 0) {
         return;
     }
@@ -678,6 +700,11 @@ void ClearRowFrom(int x, int y, int count) {
 }
 
 void ClearRowHardFrom(int x, int y, int count) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->clear_row_hard_from) {
+        hooks->clear_row_hard_from(x, y, count);
+        return;
+    }
     if (count <= 0) {
         return;
     }
@@ -765,6 +792,10 @@ bool WriteNativeRow(int x, int y, const NativeRowCell* cells, int cell_count) {
 }
 
 int PanViewportDown(int rows) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->pan_viewport_down) {
+        return hooks->pan_viewport_down(rows);
+    }
     if (rows <= 0) {
         return 0;
     }
@@ -831,6 +862,10 @@ int PanViewportDown(int rows) {
 }
 
 std::optional<std::string> ReadRowText(int row) {
+    if (const ConsoleTestHooks* hooks = detail::ConsoleTestHooksIfAny(); hooks != nullptr &&
+                                        hooks->read_row_text) {
+        return hooks->read_row_text(row);
+    }
     const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h_out == nullptr || h_out == INVALID_HANDLE_VALUE) {
         return std::nullopt;

@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -351,5 +352,47 @@ std::optional<std::string> ReadLineCooked();
 // 进程启动时的控制台编码初始化:Windows 把输入/输出代码页都设成 UTF-8
 // (搬自 main.cpp 的 wmain);POSIX 天然 UTF-8,空操作。
 void SetupConsoleUtf8();
+
+// ---------------------------------------------------------------------------
+// 控制台原语的测试替身注入口(按代理状态投影单 P0:混屏取证)
+//
+// 真实终端行为只有真终端才有;CI(管道 stdout)上原语全部降级——
+// GetScreenInfo 空、SupportsScreenRepaint 假,坐标类断言无从谈起。这一口
+// 让测试装一块"虚拟屏":GetScreenInfo/SetCursorPos/ClearRowFrom/
+// PanViewportDown/ConsoleWidth 改走替身,整套既有写屏栈(StreamBodyTracker
+// 的锚点账、TranscriptPainter 的原地改写、帧账原语)原封不动地跑在虚拟
+// 屏上——写屏的坐标、次序、末帧内容全部可断言,不再只看最终字符串。
+//
+// 规矩:
+//   - 只给测试用。生产路径永不安装;安装是进程级的,测试收尾必须
+//     SetConsoleTestHooks({}) 拆掉,别把替身漏给同进程的其他册。
+//   - SupportsScreenRepaint 每次调用先查替身(POSIX 侧有进程级缓存,
+//     静态初始化后翻不回来,替身必须绕开缓存)。
+//   - TermOut 的字节流另走 TerminalPort::Redirect;替身只管屏幕原语。
+//     两配合即成"带坐标的写屏观察器"。
+// ---------------------------------------------------------------------------
+struct ConsoleTestHooks {
+    // 空 std::function = 这一项不接管,走真实实现。
+    std::function<std::optional<ScreenInfo>()> get_screen_info;
+    std::function<void(int, int)> set_cursor_pos;
+    std::function<void(int, int, int)> clear_row_from;      // (x, y, count)
+    std::function<void(int, int, int)> clear_row_hard_from; // (x, y, count)
+    std::function<int(int)> pan_viewport_down;              // rows -> 实际平移
+    std::function<std::optional<int>()> console_width;
+    std::function<std::optional<std::string>(int)> read_row_text;
+    // SupportsScreenRepaint 的替身结论(没有函数,直接是布尔;false 时
+    // 这一项也不接管——用 wants_screen_repaint 区分"没填"与"填 false")。
+    bool wants_screen_repaint = false;
+    bool override_screen_repaint = false;
+};
+
+// 安装(整份替换);传默认值即拆净。读写内部有锁,但安装/拆卸应当只在
+// 测试的 setup/teardown 做,不在渲染途中换屏。
+void SetConsoleTestHooks(ConsoleTestHooks hooks);
+
+namespace detail {
+// 当前替身(没有装返回 nullptr)。热路径上一枚原子读。
+const ConsoleTestHooks* ConsoleTestHooksIfAny();
+}  // namespace detail
 
 }  // namespace lubancode::platform
