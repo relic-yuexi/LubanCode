@@ -25,6 +25,11 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <cstdio>
+#include <share.h>
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include "api/backend.hpp"
@@ -561,4 +566,75 @@ TEST_CASE("关机次序:StopAccepting 后不取新活;Close 幂等收净") {
     CHECK(CountOf(fixture.counter_file, "model") == 0);  // 没执行任何任务
     CHECK(pump.Close(1000));  // 收执行器与 writer
     CHECK(pump.Close(1000));  // 幂等
+}
+
+// ---------------------------------------------------------------------------
+// 命令文件 IO 的容错合同:读不懂(内容坏)删除留数;打不开(Windows 换名
+// 后的过滤驱动短拒窗)内容未知,留待下一拍——删了就是把命令真丢。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("命令文件消费:坏内容删除留数,打不开留待下一拍") {
+    const auto root = std::filesystem::temp_directory_path() / "lubancode-gw-v1-cmdio";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root / "control", ec);
+    const auto control = root / "control";
+
+    const auto write_raw = [&control](const char* name, const std::string& text) {
+        std::ofstream stream(control / name, std::ios::binary | std::ios::trunc);
+        stream << text;
+    };
+    // 半截 JSON(撕裂写):读得懂"是坏的" → 删 + 计 discarded。
+    write_raw("job-add-9-1.json", "{\"type\": \"job.add\", \"prom");
+    // 认不出的 type:同上。
+    write_raw("job-add-9-2.json", "{\"type\": \"mystery\"}");
+    // 正经命令一枚。
+    gateway::GatewayJobAddCommand good;
+    good.prompt = "正经任务";
+    good.idempotency_key = "cmdio-1";
+    REQUIRE(gateway::WriteJobAddCommand(control, good).empty());
+
+    const auto consumed = gateway::PollJobCommands(control);
+    REQUIRE(consumed.adds.size() == 1);
+    CHECK(consumed.adds[0].prompt == "正经任务");
+    CHECK(consumed.discarded == 2);
+    std::size_t left = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(control, ec)) {
+        if (entry.path().filename().string().rfind("job-", 0) == 0) {
+            ++left;
+        }
+    }
+    CHECK(left == 0);  // 消费即删:坏的两枚、好的一枚,都不在
+
+#ifdef _WIN32
+    // 根因钉(windows 独有病灶,POSIX 无强制文件锁模拟不了):命令文件
+    // 打不开时不许当坏命令删——CI run 35403217677 / 35374324620 的
+    // windows-msvc 腿,create 命令在换名短拒窗里被删,受理回执 15 秒等
+    // 不到,task/create 回 null,助理审批用例 305 / terminate 双爆。独占
+    // 句柄(_SH_DENYRW)模拟过滤驱动的"在但打不开"。
+    gateway::GatewayJobAddCommand blocked;
+    blocked.prompt = "被短拒的任务";
+    blocked.idempotency_key = "cmdio-2";
+    REQUIRE(gateway::WriteJobAddCommand(control, blocked).empty());
+    std::filesystem::path command_file;
+    for (const auto& entry : std::filesystem::directory_iterator(control, ec)) {
+        if (entry.path().filename().string().rfind("job-", 0) == 0) {
+            command_file = entry.path();
+        }
+    }
+    REQUIRE_FALSE(command_file.empty());
+    std::FILE* exclusive = _wfsopen(command_file.c_str(), L"rb", _SH_DENYRW);
+    REQUIRE(exclusive != nullptr);
+    {
+        const auto denied = gateway::PollJobCommands(control);
+        CHECK(denied.adds.empty());     // 没消费
+        CHECK(denied.discarded == 0);   // 也没当坏命令计数
+        CHECK(std::filesystem::exists(command_file, ec));  // 文件还在,留给下一拍
+    }
+    std::fclose(exclusive);
+    const auto retried = gateway::PollJobCommands(control);
+    REQUIRE(retried.adds.size() == 1);
+    CHECK(retried.adds[0].prompt == "被短拒的任务");
+    CHECK_FALSE(std::filesystem::exists(command_file, ec));  // 这次消费即删
+#endif
 }

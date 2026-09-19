@@ -62,7 +62,9 @@ public:
 // 形态同 stop.json:命令落在 control/ 目录,泵轮询消费即删。job 命令
 // 要串行多枚,一枚一文件:control/job-add-<pid>-<seq>.json、
 // control/job-run-now-<pid>-<seq>.json。文件名不承载语义,只防互踩;
-// 消费侧按内容处理,读不懂的命令文件删除并留日志(不追杀,同 stop)。
+// 消费侧按内容处理,读不懂的命令文件删除并留日志(不追杀,同 stop);
+// 打不开的(Windows 上刚被原子换名落地的文件会被过滤驱动短拒数十毫秒)
+// 内容未知,留待下一拍再试——删了就是把命令真丢。
 // ---------------------------------------------------------------------------
 
 // 计划形态的命令载荷(V2):--at/--every/--cron/--tz/--misfire/--deadline
@@ -156,14 +158,15 @@ std::string WriteJobImportLoopCommand(const std::filesystem::path& control_dir,
                                       const GatewayJobImportLoopCommand& command);
 
 // 泵消费侧:扫 control/ 下 job- 前缀的命令文件,读、删(读不懂也删,
-// 不追杀)。目录不存在 = 空结果(零副作用;status 等只读命令不建目录)。
+// 不追杀;打不开留待下一拍——见上)。目录不存在 = 空结果(零副作用;
+// status 等只读命令不建目录)。
 struct ConsumedJobCommands {
     std::vector<GatewayJobAddCommand> adds;
     std::vector<GatewayJobRunNowCommand> run_nows;
     std::vector<GatewayJobUpdateCommand> updates;
     std::vector<GatewayJobStateCommand> state_ops;  // pause/resume/cancel
     std::vector<GatewayJobImportLoopCommand> import_loops;
-    std::size_t discarded = 0;  // 读不懂/认不出删掉的文件数(诊断)
+    std::size_t discarded = 0;  // 读不懂/认不出删掉的文件数(打不开的不算——没读着)
 };
 ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir);
 

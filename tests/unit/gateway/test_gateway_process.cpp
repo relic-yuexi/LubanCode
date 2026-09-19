@@ -17,6 +17,11 @@
 #include <string>
 #include <thread>
 
+#ifdef _WIN32
+#include <cstdio>
+#include <share.h>
+#endif
+
 #include "app/cli_options.hpp"
 #include "gateway/control_server.hpp"
 #include "gateway/process.hpp"
@@ -328,6 +333,29 @@ TEST_CASE("进程:stop 控制命令定向 boot_id,陈旧命令不追杀新实例
     process.RequestStop("test");
     runner.join();
     CHECK(exit_code.load() == 0);
+}
+
+TEST_CASE("stop 命令:打不开不删,下一拍照常生效") {
+    const auto root = MakeTempRoot("stopopen");
+    const auto paths = PathsOf(root);
+    GatewayStopCommand mine;
+    mine.boot_id = "boot-open-test";
+    mine.requested_at_ms = 1;
+    REQUIRE(WriteStopCommand(paths.control_dir, mine).empty());
+#ifdef _WIN32
+    // 根因钉(与 job 命令文件同款病灶,见 gateway/work_pump.cpp 注释):
+    // Windows 上刚被原子换名落地的文件会被防病毒/索引过滤驱动短拒数十
+    // 毫秒。这一拍打不开就不许删——删了 stop 命令就真丢了(进程不会停)。
+    // 独占句柄(_SH_DENYRW)模拟"文件在、打不开"。
+    const auto stop_file = paths.control_dir / "stop.json";
+    std::FILE* exclusive = _wfsopen(stop_file.c_str(), L"rb", _SH_DENYRW);
+    REQUIRE(exclusive != nullptr);
+    CHECK_FALSE(PollStopCommand(paths.control_dir, "boot-open-test"));
+    CHECK(std::filesystem::exists(stop_file));  // 没删,留给下一拍
+    std::fclose(exclusive);
+#endif
+    CHECK(PollStopCommand(paths.control_dir, "boot-open-test"));
+    CHECK_FALSE(std::filesystem::exists(paths.control_dir / "stop.json"));
 }
 
 TEST_CASE("进程:StopGateway 投命令并等到干净退出") {

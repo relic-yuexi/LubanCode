@@ -1,12 +1,15 @@
 // job 控制命令文件的读写两侧(GatewayWorkPump 的合同口在头文件;本件
-// 只装命令文件 IO)。stop.json 同款纪律:写侧原子落,读侧消费即删,
-// 读不懂删掉留数,不追杀。
+// 只装命令文件 IO)。stop.json 同款纪律:写侧原子落(Windows 换名瞬拒
+// 有界重试),读侧消费即删——读不懂(内容坏)删掉留数不追杀;打不开
+// (Windows 换名后的过滤驱动短拒窗)内容未知,留待下一拍,不删。
 #include "gateway/work_pump.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iterator>
+#include <thread>
 
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
@@ -17,6 +20,15 @@ namespace lubancode::gateway {
 namespace {
 
 std::atomic<std::uint64_t> g_command_seq{0};
+
+// Windows 换名瞬拒的有界重试档(与 workspace/manifest.cpp 同款纪律):原子
+// 换名(MoveFileExW REPLACE)与防病毒/索引过滤驱动会让目标文件的打开
+// 被短拒数十毫秒(该件三案 CI 实测:写侧 320 次换名被拒 48-57 次)。读
+// 侧同窗照打在刚落地的命令文件上——读侧重试靠泵的轮询节拍(文件留在
+// 原地下一拍再试,见 PollJobCommands);写侧重试在此处,10 次×10ms 预算
+// 给足余量。POSIX rename 原子、无共享违例,重试路径零开销零行为变化。
+constexpr int kTransientWriteAttempts = 10;
+constexpr std::chrono::milliseconds kTransientWriteBackoff{10};
 
 // 一枚命令文件名:job-add-<pid>-<seq>.json / job-run-now-<pid>-<seq>.json。
 // 文件名只防互踩,不承载语义。
@@ -34,13 +46,21 @@ std::string WriteCommandFile(const std::filesystem::path& path, const nlohmann::
     if (ec && !path.parent_path().empty()) {
         return "建控制目录失败: " + ec.message();
     }
-    const auto write = platform::AtomicWriteFile(path, json.dump(),
-                                                 platform::WriteDurability::AtomicVisibility);
-    if (!write.has_value()) {
-        return "写命令文件失败(" + write.error().code + "): " +
-               platform::PathToUtf8(path);
+    // 原子换名的瞬态拒(依据见 kTransientWrite* 注释)有界重试:命令丢了
+    // 上游只剩 15 秒回执超时一路红(受理幂等键在,重发不双建,但这一单
+    // 就红了)。正常路径首次即成,零等待零重试。
+    for (int attempt = 0;; ++attempt) {
+        const auto write = platform::AtomicWriteFile(path, json.dump(),
+                                                     platform::WriteDurability::AtomicVisibility);
+        if (write.has_value()) {
+            return std::string();
+        }
+        if (attempt >= kTransientWriteAttempts) {
+            return "写命令文件失败(" + write.error().code + "): " +
+                   platform::PathToUtf8(path);
+        }
+        std::this_thread::sleep_for(kTransientWriteBackoff);
     }
-    return std::string();
 }
 
 }  // namespace
@@ -207,17 +227,25 @@ ConsumedJobCommands PollJobCommands(const std::filesystem::path& control_dir) {
     std::sort(files.begin(), files.end());
     for (const std::filesystem::path& file : files) {
         std::ifstream stream(file, std::ios::binary);
+        if (!stream) {
+            // 打不开≠读不懂:Windows 上原子换名落地的短窗里,防病毒/索引
+            // 过滤驱动会把目标文件的打开短拒数十毫秒(manifest.cpp 三案
+            // CI 实测的同款病灶;本根因的 CI 案:35403217677 / 35374324620
+            // 的 windows-msvc 腿——create 命令被当坏命令删掉,受理回执
+            // 15 秒等不到,上游 task/create 回 null,审批用例 305/terminate
+            // 双爆)。内容没读着就不能按坏数据处置:文件留在原地,泵的
+            // 轮询节拍就是重试;真打不开也只是每拍一次空探,零副作用。
+            continue;
+        }
+        const std::string text((std::istreambuf_iterator<char>(stream)),
+                               std::istreambuf_iterator<char>());
         nlohmann::json parsed;
         bool ok = false;
-        if (stream) {
-            const std::string text((std::istreambuf_iterator<char>(stream)),
-                                   std::istreambuf_iterator<char>());
-            try {
-                parsed = nlohmann::json::parse(text);
-                ok = true;
-            } catch (const nlohmann::json::exception&) {
-                ok = false;
-            }
+        try {
+            parsed = nlohmann::json::parse(text);
+            ok = true;
+        } catch (const nlohmann::json::exception&) {
+            ok = false;
         }
         bool handled = false;
         if (ok && parsed.is_object() && parsed.contains("type") && parsed["type"].is_string()) {
