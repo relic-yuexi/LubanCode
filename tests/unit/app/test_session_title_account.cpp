@@ -246,8 +246,10 @@ TEST_CASE("首问本地起名:一场一次,已有标题不起,全空白留空") 
     CHECK(fx4.account->BeginLocalTitle("   \n  ") == LocalResult::NoUsableText);
     CHECK(fx4.title.empty());
 
-    // 没账本的场子:不起名。
+    // 没账本的场子:不起名。(标题触发提前单·哑门一触发条件钉:LedgerActive
+    // 假 = 本地起名与精炼挂账全不发生——此前静默,亮报在 controller。)
     TitleFixture fx5(/*with_ledger=*/false);
+    CHECK_FALSE(fx5.account->LedgerActive());
     CHECK(fx5.account->BeginLocalTitle("首问") == LocalResult::NoNeed);
     CHECK(fx5.title.empty());
 }

@@ -8,15 +8,25 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
+#include "accounting/purpose.hpp"  // RequestPurpose(发车即起飞册:主/旁路请求账)
+#include "agent/loop.hpp"          // RequestPreparedContext
 #include "api/backend.hpp"
 #include "api/types.hpp"
-#include "app/session_title.hpp"        // kTitleRefineMaxTokens(单子预算钉)
+#include "app/session_title.hpp"  // kTitleRefineMaxTokens(单子预算钉)
+#include "app/session_title_account.hpp"  // SessionTitleAccount(发车即起飞册)
 #include "app/session_title_refiner.hpp"
-#include "runtime/idle_wake.hpp"        // IdleWakeCoordinator(唤醒源形制钉)
+#include "runtime/idle_wake.hpp"  // IdleWakeCoordinator(唤醒源形制钉)
+#include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger(真账本)
+#include "workspace/identity.hpp"          // MakeFallbackIdentity(测试场身份)
 
 namespace {
 
@@ -315,4 +325,163 @@ TEST_CASE("唤醒源形制(装配同款):running 不醒、finished 醒、收完�
     REQUIRE(wakes.AnyReady());  // 完工:叫醒主循环收货
     REQUIRE(refiner.TakeFinished().has_value());
     CHECK_FALSE(wakes.AnyReady());  // 收完:不再醒,不空转
+}
+
+// ---------------------------------------------------------------------------
+// 触发时机提前单(发车即起飞):v3 场首问主回合 BeginTurn 铸号后立即起飞,
+// worker 线程的旁路桥与主线程的主 turn 账并行落同一本 v3 流——V3Writer
+// 提交全程持锁,盘上串行;title.requested/extracted/applied 三枚事实事件
+// 保真(选 a 路:桥材料随身带,起飞即落,不延迟不弃账),主 turn 的请求账
+// 一枚不少。旧注释"回合里发必撞车"是 v2 状态机(一 stream 一 open turn)
+// 的机理,v3 无轮账互斥,此处用真账本定谳。
+// ---------------------------------------------------------------------------
+TEST_CASE("发车即起飞: 主 turn open 时起飞,v3 账并行不撞,三枚事实事件保真") {
+    // v3 显式开(与本仓其余案同一纪律:显式置值,ctest 注入不猜)。
+#ifdef _WIN32
+    _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1");
+#else
+    setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1", 1);
+#endif
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() /
+        ("lubancode-title-kickoff-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ec;
+    std::filesystem::create_directories(dir / "repo", ec);
+    lubancode::runtime::TrajectorySessionLedger::Options options;
+    options.workspaces_root = dir / "workspaces";
+    options.workspace_identity = lubancode::workspace::MakeFallbackIdentity(dir / "repo");
+    options.lubancode_version = "test";
+    auto opened = lubancode::runtime::TrajectorySessionLedger::Open(options);
+    REQUIRE(opened.has_value());
+    auto ledger = std::move(*opened);
+    REQUIRE(ledger.v3_main_writer() != nullptr);  // 前提:确是 v3 场
+    const std::string session_id = ledger.session_id();
+    const std::filesystem::path stream = ledger.session_dir() / (session_id + ".jsonl");
+
+    // 首问主回合:BeginTurn 铸号 + 输入落账(此刻是"发车即起飞"的起飞点,
+    // 主模型请求尚未发出)。
+    auto turn_bridge = ledger.NewTurnBridge({"fake", "anthropic", "terminal"});
+    REQUIRE(turn_bridge != nullptr);
+    turn_bridge->BeginTurn("turn-1", "external_user");
+    lubancode::api::Message user_message;
+    user_message.role = lubancode::api::Role::User;
+    user_message.content.push_back(lubancode::api::TextBlock{"做一个图书管理系统"});
+    turn_bridge->RecordInput(user_message);
+
+    // 标题账房 + 立即起飞(生产同款 Inputs:trajectory 递 v3 账本,worker
+    // 线程自铸旁路桥)。Start 立即回——起飞不等网络,不挡主回合。
+    std::string title;
+    lubancode::app::SessionTitleAccount account(title, &ledger);
+    SessionTitleRefiner::Inputs inputs = MakeInputs(MakeRecordingBackend(nullptr, /*delay_ms=*/80));
+    inputs.generation = account.generation();
+    inputs.trajectory = &ledger;
+    inputs.trajectory_wire = "anthropic";
+    inputs.provider = "fake";
+    SessionTitleRefiner& refiner = account.refiner();
+    CHECK(refiner.Start(std::move(inputs)));
+    CHECK(refiner.Busy());
+    // 起飞事实(title.requested)在真起飞后记——与 controller 同款次序。
+    account.NoteTitleGenerationStarted("cheap-m", "fake");
+
+    // 主 turn 的模型请求此刻才发(与标题采样真并行):worker 在写旁路账,
+    // 主线程写主 turn 账,同一本流,V3Writer 的锁管串行。
+    std::string main_request_id;
+    {
+        lubancode::agent::RequestPreparedContext ctx;
+        ctx.purpose = lubancode::accounting::RequestPurpose::MainTurn;
+        lubancode::api::Request request;
+        request.model = "main-m";
+        request.system = "SYSTEM-X";
+        request.messages.push_back(user_message);
+        main_request_id = turn_bridge->OnRequestPrepared(request, ctx);
+        REQUIRE_FALSE(main_request_id.empty());
+        REQUIRE(turn_bridge->OnRequestSent(main_request_id));
+        lubancode::api::Usage usage;
+        usage.input_tokens = 900;
+        usage.output_tokens = 24;
+        turn_bridge->OnUsageRecorded(main_request_id, usage, true, "resp-1");
+        lubancode::api::Message assistant;
+        assistant.role = lubancode::api::Role::Assistant;
+        assistant.content.push_back(lubancode::api::TextBlock{"办完了。"});
+        REQUIRE(turn_bridge->OnOutputCompleted(main_request_id, assistant, "end_turn", "resp-1"));
+    }
+
+    // 等标题采样完工(模拟空闲唤醒拍只问 Ready),收货、记提取与采用。
+    REQUIRE(AwaitReady(refiner, 2000));
+    const auto outcome = refiner.TakeFinished();
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->ok);
+    CHECK(outcome->title == "实现图书系统");
+    CHECK(account.AdoptRefined(*outcome) == lubancode::app::SessionTitleAccount::AdoptResult::Adopted);
+    CHECK(title == "实现图书系统");
+    // 主回合收口。
+    turn_bridge->EndTurn(true, false, "");
+
+    // 数账(v3 流逐行):三枚事实事件同号贯穿;title_refine 的消息归首问
+    // 主回合 turn-1;主 turn 的 prepared 一枚不少。
+    std::ifstream file(stream, std::ios::binary);
+    REQUIRE(file.is_open());
+    int requested = 0;
+    int extracted = 0;
+    int applied_generated = 0;
+    int applied_local = 0;
+    int title_users_on_turn1 = 0;
+    int main_prepared = 0;
+    std::string generation_id;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        const nlohmann::json row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (row.is_discarded()) {
+            continue;
+        }
+        const std::string kind = row.value("kind", std::string());
+        if (kind == "title.requested") {
+            ++requested;
+            generation_id = row.value("titleGenerationId", std::string());
+        } else if (kind == "title.extracted") {
+            ++extracted;
+            CHECK(row.value("titleGenerationId", std::string()) == generation_id);
+        } else if (kind == "session.title.applied") {
+            if (row.at("payload").value("source", std::string()) == "generated") {
+                ++applied_generated;
+                CHECK(row.value("titleGenerationId", std::string()) == generation_id);
+            } else {
+                ++applied_local;
+            }
+        } else if (kind == "model.request.prepared") {
+            const std::string purpose =
+                row.value("payload", nlohmann::json::object()).value("purpose", std::string());
+            if (purpose == "title_refine") {
+                // title_refine 的请求归首问主回合(a 路:不延迟,起飞即落)。
+                CHECK(row.value("turnId", std::string()) == "turn-1");
+            } else {
+                ++main_prepared;
+            }
+        } else if (row.value("type", std::string()) == "message" &&
+                   row.value("purpose", std::string()) == "session_title" &&
+                   row.at("message").value("role", std::string()) == "user") {
+            ++title_users_on_turn1;
+            CHECK(row.value("turnId", std::string()) == "turn-1");
+        }
+    }
+    CHECK(requested == 1);
+    CHECK(extracted == 1);
+    CHECK(applied_generated == 1);
+    CHECK(applied_local == 0);  // 本案直接走生成流,本地标题不在场
+    CHECK(main_prepared == 1);  // 主 turn 的请求账一枚不少
+    CHECK(title_users_on_turn1 == 1);
+
+    std::filesystem::remove_all(dir, ec);
+#ifdef _WIN32
+    _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=");
+#else
+    unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
 }

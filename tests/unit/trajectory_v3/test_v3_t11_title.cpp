@@ -461,3 +461,107 @@ TEST_CASE("T11-A resume: 折本场真实已采用标题,续接不洗掉标题事
     CHECK(fact->source == "generated");
     CHECK(lubancode::trajectory::v3::VerifyV3File(V3StreamOf(*ledger)).ok);
 }
+
+// ---------------------------------------------------------------------------
+// 触发时机提前单(发车即起飞):主 turn 还开着(BeginTurn 后、EndTurn 前)
+// 旁路桥照常接账——v3 无轮账互斥,title_refine 归首问主回合号,与主 turn
+// 的请求并行落账不撞。这是"首问发出后立即起飞"的账面依据:旧注释"回合
+// 里发必撞车"是 v2 状态机(一 stream 一 open turn)的机理,v3 侧
+// active_main_turn_id 自 BeginTurn 起就有值,提前起飞无需等收口。
+// ---------------------------------------------------------------------------
+TEST_CASE("发车即起飞: 主 turn open 时旁路桥照常接账,与主 turn 请求并行不撞") {
+    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("kickoff");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    const fs::path stream = V3StreamOf(*ledger);
+
+    // 首问主回合开跑:BeginTurn 铸号、输入落账,首模型请求在飞(只落
+    // prepared+sent,模拟请求未回——精炼恰在此刻起飞)。
+    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+    bridge->BeginTurn("turn-1", "external_user");
+    bridge->RecordInput(UserMessage("帮我修终端光标跳动"));
+    std::string main_request_id;
+    {
+        agent::RequestPreparedContext ctx;
+        ctx.purpose = accounting::RequestPurpose::MainTurn;
+        api::Request request;
+        request.model = "kimi-k2.6";
+        request.system = "SYSTEM-X";
+        request.messages.push_back(UserMessage("帮我修终端光标跳动"));
+        main_request_id = bridge->OnRequestPrepared(request, ctx);
+        REQUIRE_FALSE(main_request_id.empty());
+        REQUIRE(bridge->OnRequestSent(main_request_id));
+    }
+
+    // 发车即起飞:主 turn 未收口,旁路桥此刻接 title_refine 的账(全链)。
+    auto bypass = ledger->NewBypassBridge({"moonshot", "openai-chat-completions", "host"},
+                                          accounting::RequestPurpose::TitleRefine);
+    REQUIRE(bypass != nullptr);
+    std::string refine_id;
+    {
+        agent::RequestPreparedContext refine_ctx;
+        refine_ctx.purpose = accounting::RequestPurpose::TitleRefine;
+        refine_ctx.timeout_budget_secs = 5;
+        api::Request refine;
+        refine.model = "kimi-k2.6";
+        refine.system = "给下面这条用户请求起一个会话标题。";
+        refine.messages.push_back(UserMessage("原请求: 帮我修终端光标跳动"));
+        refine_id = bypass->OnRequestPrepared(refine, refine_ctx);
+        REQUIRE_FALSE(refine_id.empty());  // active_main_turn_id 已铸,接得上账
+        REQUIRE(bypass->OnRequestSent(refine_id));
+        api::Usage refine_usage;
+        refine_usage.input_tokens = 120;
+        refine_usage.output_tokens = 8;
+        bypass->OnUsageRecorded(refine_id, refine_usage, true, "resp-title");
+        api::Message refine_assistant;
+        refine_assistant.role = api::Role::Assistant;
+        refine_assistant.content.push_back(api::TextBlock{"修终端光标跳动"});
+        REQUIRE(bypass->OnOutputCompleted(refine_id, refine_assistant, "end_turn", "resp-title"));
+    }
+
+    // 主 turn 的请求这才回来,回合收口——两边的账交错落同一本流。
+    {
+        api::Usage usage;
+        usage.input_tokens = 900;
+        usage.output_tokens = 24;
+        bridge->OnUsageRecorded(main_request_id, usage, true, "resp-1");
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content.push_back(api::TextBlock{"先看看配置。"});
+        REQUIRE(bridge->OnOutputCompleted(main_request_id, assistant, "end_turn", "resp-1"));
+        bridge->EndTurn(true, false, "");
+    }
+
+    const auto rows = ReadLines(stream);
+    // title_refine 的消息照归首问主回合 turn-1,与收口后起飞的形状一字
+    // 不差(§4.34 的归回合规则不因起飞时机变)。
+    int title_systems = 0;
+    int title_users = 0;
+    int title_assistants = 0;
+    for (const auto& row : rows) {
+        if (row.value("type", std::string()) != "message" ||
+            row.value("purpose", std::string()) != "session_title") {
+            continue;
+        }
+        const std::string role = row.at("message").value("role", std::string());
+        if (role == "system") {
+            ++title_systems;
+        } else if (role == "user") {
+            ++title_users;
+            CHECK(row.value("turnId", std::string()) == "turn-1");
+        } else if (role == "assistant") {
+            ++title_assistants;
+            CHECK(row.value("turnId", std::string()) == "turn-1");
+        }
+    }
+    CHECK(title_systems == 1);
+    CHECK(title_users == 1);
+    CHECK(title_assistants == 1);
+    // 主 turn 的账一枚不少(prepared/sent/usage/output 各就各位),旁路
+    // 起飞没碰坏主 turn 的落账。
+    CHECK_FALSE(RowsOfKind(rows, "model.request.prepared").empty());
+    CHECK_FALSE(RowsOfKind(rows, "model.request.sent").empty());
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+}

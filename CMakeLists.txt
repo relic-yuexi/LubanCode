@@ -956,13 +956,20 @@ add_library(lubancode_engine STATIC
   # 包外一概不动,目录/reparse 挡路即 conflict 阻断(退出码 3)。纯函数
   # 零 IO,批三 apply 落地层吃这张表。
   src/updater/whitelist_plan.cpp
+  # 更新助手 C++ 化·批二第①单(解包层):zip(mz_zip_reader 逐文件流式
+  # 回调口)与 tar.gz(tinfl 流式解 gzip + 自写 tar 头遍历,ustar/GNU 长
+  # 名/pax 覆写/base-256 尺寸都认)双格式安全解包——成员名全过
+  # NormalizeMemberName(批一①契约),链接/设备/管道成员整包拒,解压总
+  # 量帽 declared×6,POSIX 执行位。语义对齐 scripts/updater.py 的
+  # unpack_archive;流式纪律见 archive.hpp 头注。
+  src/updater/archive_zip.cpp
+  src/updater/archive_tar.cpp
   # 更新助手 C++ 化·批二第②单(大文件断点续传下载器):Range 续传 +
   # 流式分块收体 + 整文件 Sha256Stream 对账 + 重试退避/硬顶/取消旗。语义
   # 真源 scripts/updater.py download_with_resume;HTTP 栈 cpr(样板
   # provider_catalog 的 Session/代理 与 http_stream_transport 的流式回调/
   # 取消旗/LowSpeed 骨架)。批三引擎层(事务/进度行)在这上面叠。
-  src/updater/download.cpp
-)
+  src/updater/download.cpp)
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/include
