@@ -345,7 +345,7 @@ TEST_CASE("宿主(one-shot/--yes):auto_confirm 全放,批次照常并行收口")
 // 记违规。
 // ---------------------------------------------------------------------------
 TEST_CASE("发车即起飞: after_turn_bridge_open 在首模型请求前被调,每轮恰一次") {
-    TurnRig rig(agent::ToolBatchStrategy::Serial, /*concurrency=*/1);
+    TurnRig rig(agent::ToolBatchStrategy::Exclusive, /*concurrency=*/1);
     std::atomic<int> kicks{0};
     std::atomic<bool> kicked_before_first_request{false};
     // 哨探:首枚请求到达时回调必已发生——"发车即起飞"的时序就是这个先
