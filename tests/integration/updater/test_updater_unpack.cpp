@@ -346,9 +346,13 @@ class TarBuilder {
         if (!prefix.empty()) {
             std::memcpy(block.data() + 345, prefix.data(), prefix.size());
         }
-        // 校验和:chksum 域按 8 个空格算的无符号和,写 "%06o\0 "。
+        // 校验和:chksum 域(148..155)按 8 个空格算的无符号和,写
+        // "%06o\0 "——读侧同口径(spec 如此,按零算会差 256)。
         std::uint64_t sum = 0;
-        for (const unsigned char c : block) {
+        for (std::size_t i = 0; i < block.size(); ++i) {
+            const unsigned char c = (i >= 148 && i < 156)
+                                         ? static_cast<unsigned char>(' ')
+                                         : block[i];
             sum += c;
         }
         PutOctalField(block.data() + 148, 7, sum);
