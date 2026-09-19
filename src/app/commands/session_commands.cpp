@@ -441,13 +441,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         TermOut() << parsed.error() << "\n";
         return;
     }
-    // 上下文预算单(§三/§四):统一预算入口——校验与面板同一把尺(超限
-    // 拒绝并说明,不静默截断),有效修改写窗口事件;现场材料缺(单测/
-    // 单发)退化为只改 tracker 不写账。
-    ApplyContextWindowToSession(context_tracker, in.trajectory, in.model_catalog,
-                                in.active_provider != nullptr ? *in.active_provider : std::string(),
-                                in.current_model != nullptr ? *in.current_model : std::string(),
-                                *parsed, theme);
+    context_tracker.set_window_tokens(*parsed);
+    TermOut() << trf("cmd.context.window_changed", *parsed) << "\n";
 }
 
 // Token 账本单 A1:compact 子请求(map/reduce)的旁路桥工厂。路由解完才
@@ -1989,6 +1984,21 @@ void ApplyResumedContextWindow(lubancode::cli::ContextTracker& tracker,
 
 void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                        const lubancode::cli::Theme& theme) {
+    // 上下文预算单(§三/§四):带参分支先走统一预算入口——校验与面板同一
+    // 把尺(超限拒绝并说明,不静默截断),有效修改写窗口事件;现场材料缺
+    //(单测/单发)退化为只改 tracker 不写账。明细分支(裸敲)不受影响。
+    if (!args.empty()) {
+        const auto parsed = lubancode::config::ParseContextWindowTokens(args);
+        if (!parsed.has_value()) {
+            TermOut() << parsed.error() << "\n";
+            return;
+        }
+        ApplyContextWindowToSession(*in.context_tracker, in.trajectory, in.model_catalog,
+                                    in.active_provider != nullptr ? *in.active_provider : std::string(),
+                                    in.current_model != nullptr ? *in.current_model : std::string(),
+                                    *parsed, theme);
+        return;
+    }
     lubancode::agent::Agent& loop = *in.agent;
     lubancode::cli::ContextTracker& context_tracker = *in.context_tracker;
     // 裸敲才收集三类 token 估算(带参数走切窗口分支,收了也白收)。
