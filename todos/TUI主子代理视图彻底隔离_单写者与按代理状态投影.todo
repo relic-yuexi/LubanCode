@@ -1,6 +1,6 @@
 # TUI 主子代理视图彻底隔离：单写者与按代理状态投影
 
-- 状态：部分实现（P0+P1+P2 已落。P0+P1：PR #144，CI run 35448977703 success；P2：分支 feat/tui-view-isolation-p2——会话级 SessionUiDispatcher 收拢写者、切页事务五步+FrameToken、审批改通道，收编细节见 docs/development/tui-write-paths.md）。P3 待续。真实终端复现项待主控真机验收。
+- 状态：已实现（P0-P3 全落。P0+P1：PR #144，CI run 35448977703 success；P2：PR #151——会话级 SessionUiDispatcher 收拢写者、切页事务五步+FrameToken、审批改通道；P3：输入与生命周期收口——审批/排队/停止的目标绑定、P2 过渡批四枚直笔 writer 全收编、显式全局通知区、退出/清会话/恢复的生命周期次序，收编销号清单见 docs/development/tui-write-paths.md §六）。真实终端复现项待主控真机验收。
 - 日期：2026-09-19
 - 级别：P1（画面串流）；输入、审批、取消若串到别的任务，按 P0 阻断发布。
 - 取证基线：`d20547e4`。截图所用二进制路径、构建提交、终端宿主待核实，不能认作同版运行证据。
@@ -170,11 +170,20 @@ main 复用 `TurnCollector/TurnView`，subagent 复用任务事件及 `AgentPane
 
 ### P3：输入与生命周期收口
 
-- [ ] 审核提交、排队、取消、审批的目标绑定；任务号重用、退出后回调均不得串账。
-- [ ] 移除旧查看模式写屏分支与隐式 main fallback；保留明确非 TTY 输出通路。
-- [ ] 补文档和中英文提示，说明焦点、查看、输入和停止目标。
+- [x] 审核提交、排队、取消、审批的目标绑定；任务号重用、退出后回调均不得串账。（排队:提交时绑定 target key(切页不改收件人——tests/unit/agent/test_queue_model.cpp "P3 目标绑定"钉),队列区按当前页过滤+别页条数点行(FilterQueueByTarget/CountQueueOutsideTarget);任务号:TaskLedger 进程级单调发号+换代清账,裸 id 即稳定键(queue_model.hpp 不变量注释);审批:Slot 绑 request id/owner/turn/generation 四层——确认只解一笔,DenyPendingForOwner(面板 x 停止/清除,忙闲两路)、DenyPendingForTurn(RunTurn 收口按 canonical 号)、DenyStaleGenerations(/clear、/resume 换代)按各键拒收,旧按钮随退场/换代失效;前台子代理确认也走通道绑 owner(用户看着那只子代理菜单才开,别页悬账进通知位);通知位标签按 owner 页出"main/#N 待审批",多页并悬合成一处——tests/unit/cli/test_approval_channel.cpp P3 五册钉）
+- [x] 移除旧查看模式写屏分支与隐式 main fallback；保留明确非 TTY 输出通路。（会话层残存的查看态写屏分支改道:hooks 归并告警/上下文耗尽保留行交 ReportDiagnosticLine——交互终端进显式全局通知区(SessionGlobalNotices,底栏帧顶有界+过期自收,不落正文),管道/重定向原样走旧输出合同(stdout/stderr 一字不改),plain 主题退化纯文本;"silent=viewing"只剩回流轮屏面所有权用途(零扰动铺帧),隔离本身早已归登记簿闸门,不再由 silent 承担;交互路的隐式 main fallback 消除——registry 恒在,null 回落只在单发/管道路(输出合同)存活）
+- [x] 补文档和中英文提示，说明焦点、查看、输入和停止目标。（docs/features/terminal/README.md §11.1"谁在屏上、话发给谁、停掉谁":❯候选/◉当前页/页头身份/输入目标跟页走/排队目标冻结/停止按任务号回执/审批只属所属页/全局通知区;i18n 成对补键 composer.target_placeholder(发给 #N 占位)、ui.pending_approval_tag/_multi(通知位)、queue.other_target_count(别页条数),zh/en 两表同批;docs/development/tui-write-paths.md 全面改版销过渡批）
 
-验收：用户看得出正在看谁、发给谁、停掉谁；后台结束不抢页、不改草稿、不重画别页输入框。
+P3 过渡批收编（write-paths 文档 P2 名单照单销号）:
+- [x] 空闲 composer 整帧异步化（走调度器）:redraw_with_panel/reanchor_prompt_and_redraw/retire_idle_chrome 整段经 RunUiSync（排干+统一提交锁内落笔;空闲期队列本空,排干近零开销,忙闲两路整帧从此同一道提交锁）
+- [x] footer 心跳收编:StreamFooterHeartbeat 每拍屏面动作(RunTick)经 PostUiCommand 投进调度队列,消费线程统一提交锁内执行;丢拍闸(上一拍未消费则弃本拍)防慢终端囤积;槽未接就地直走(单发/单测旧貌);workflow 同款心跳一并继承
+- [x] ask_user 通道化(菜单渲染进调度口):开屏前排干+问题打印/拒答回显/答完确认行/报错行全过 RunUiSync,菜单读键留调用线程——与工具确认菜单(P2)同款取舍
+- [x] TermErr 显式全局通知区:GlobalNoticeBoard(有界 3 条+8s 过期+同文续命)挂 chrome 帧顶独立区,ReportDiagnosticLine 按终端能力分流(交互进区,非交互原样 stderr——输出合同不动);已接线:footer 心跳异常、[hooks] 归并告警、上下文耗尽保留
+
+P3 生命周期（退出、清会话、恢复会话）:
+- [x] 撤销订阅、关闭投递入口、处理剩余状态事件、拒绝旧 generation 渲染、最后释放终端——析构不补画复活旧页。（/clear、/resume:BeginNewSession 换代(旧册作废/帧令牌整批失配)+DenyStaleGenerations 拒旧世代悬账+通知区清板——tests/unit/app/test_terminal_turn_sink_projection.cpp "P3 生命周期"册钉(旧令牌失配不写新会话/悬账拒收/新世代干净开张/旧句不复活);退出:Run() 尾按次序收口——调度 Flush 排干剩余状态事件→审批 DenyAllPending+ClearServer→通知区清板→cli 侧七枚槽位+面板宿主全摘(投递入口关闭,迟到写屏查无此口)→成员逆序析构(调度器先停、登记簿后走,声明序已保证),终端最后释放; sinks 不越回合存活(RunTurn 栈约束),换代后无悬垂渲染方）
+
+验收：用户看得出正在看谁、发给谁、停掉谁；后台结束不抢页、不改草稿、不重画别页输入框。（虚拟屏册+纯逻辑册覆盖:审批页归属/退场失效/换代拒收、队列目标绑定与过滤、心跳投递口降级纪律、全局通知区有界过期、换代生命周期;真机矩阵项——实终端的通知区观感、审批通知位切换手感、心跳收编后的长跑稳定性——待主控真机验收,与 P0-P2 的真机验收项同列）
 
 ## 八、验收矩阵
 
@@ -201,9 +210,9 @@ main 复用 `TurnCollector/TurnView`，subagent 复用任务事件及 `AgentPane
 
 ## 九、收官条件
 
-- [ ] 所有矩阵项有通过证据或明确阻断说明；核心混屏、目标串错、旧帧写回不得带病收官。
-- [ ] 当前页正文、底栏、输入目标来自同一 owner 快照，后台更新仅影响后台状态和导航摘要。
-- [ ] main/sub 往返不漏记录、不重记用量、不丢草稿、不把历史反复刷进 shell scrollback。
-- [ ] 真实终端重演用户截图场景，main 后续事件再也不能覆盖 sub 页面。
+- [x] 所有矩阵项有通过证据或明确阻断说明；核心混屏、目标串错、旧帧写回不得带病收官。（虚拟屏册/纯逻辑册/CI 全绿为通过证据:P0 复现册、P1 投影/成对协议/收口账、P2 提交序/往返 20 轮/停表退化、P3 换代生命周期+审批绑定+队列过滤;阻断说明:真实终端重演(末条)待主控真机验收,单列环境与录像后销）
+- [x] 当前页正文、底栏、输入目标来自同一 owner 快照，后台更新仅影响后台状态和导航摘要。（P1/P2 落:换页事务同源快照+绘制闸;P3 补输入目标显式化——占位提示"发给 #N"+横线右端任务名,审批通知位/队列区都按 owner 页投影）
+- [x] main/sub 往返不漏记录、不重记用量、不丢草稿、不把历史反复刷进 shell scrollback。（P1 水位协议+P2 往返册钉;P3 复核未动这两本账）
+- [ ] 真实终端重演用户截图场景，main 后续事件再也不能覆盖 sub 页面。（**待主控真机验收**——单列环境、尺寸、构建提交和录像证据;虚拟屏册已把同一交错序列钉死(离屏零 commit/账照走),真机重演是最后一道)
 
-本单交付仅为源码调查与待办设计，不代表实现、CI 或终端验收已完成。
+本单交付仅为源码调查与待办设计，不代表实现、CI 或终端验收已完成。（P0-P3 源码与测试册已全部落地,真机验收项如上标注;此句按单子原文保留为口径提醒。）
