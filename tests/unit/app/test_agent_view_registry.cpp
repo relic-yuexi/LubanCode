@@ -53,7 +53,9 @@ TEST_CASE("P1 闸门: 离屏拒画、回屏放行——重铺成对协议后按�
     const std::uint64_t second = registry.ApplyToMainTurn([&] { collector.OnTextDelta("b", false); });
     CHECK_FALSE(registry.MainShouldDraw(second));  // 离屏:账照走,画被拒
 
-    // 成对重铺:关闸取快照(含离屏期间的账),打印,钉水位。
+    // 成对重铺:切回 main(生产里换页钩子先切身份)、关闸取快照(含离屏
+    // 期间的账),打印,钉水位。
+    registry.SwitchViewed(0);
     const app::AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
     REQUIRE(snapshot.live);
     REQUIRE(snapshot.view != nullptr);

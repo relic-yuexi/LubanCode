@@ -742,9 +742,11 @@ lubancode::cli::AgentFrameSnapshot BuildAgentFrameSnapshotFromTaskEvents(
         view->items.push_back(std::move(item));
     }
     view->metrics.tool_count = static_cast<int>(tool_start_of_id.size());
-    return lubancode::cli::AgentFrameSnapshotFromTurnView(key, std::move(view), content_revision,
-                                                          /*activity_revision=*/content_revision,
-                                                          stats_revision, running);
+    lubancode::cli::AgentFrameSnapshot snapshot = lubancode::cli::AgentFrameSnapshotFromTurnView(
+        key, std::move(view), content_revision,
+        /*activity_revision=*/content_revision, stats_revision, running);
+    snapshot.title = title;
+    return snapshot;
 }
 
 // 事件账 -> 会话块(同构渲染单 P0/P1)。工具/思考卡按事件顺序攒组,遇

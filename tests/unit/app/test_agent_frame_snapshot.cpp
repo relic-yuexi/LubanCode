@@ -108,20 +108,21 @@ TEST_CASE("P1 快照: sub 侧适配——事件账折成同一份合同,工具�
     CHECK(snapshot.stats_revision == 9);
     REQUIRE(snapshot.turn != nullptr);
 
-    // 稳定 item ID:事件带 item_id 的原样用。
+    // 稳定 item ID:事件带 item_id 的原样用;条目按事件序,工具卡落在
+    // start 位置(终态并入),ToolResult 不另占一枚。
     std::vector<std::string> ids;
     for (const auto& item : snapshot.turn->items) {
         ids.push_back(item.item_id);
     }
-    REQUIRE(ids.size() == 5);  // user/thinking/text/tool/completion(ToolResult 并入 start)
+    REQUIRE(ids.size() == 5);  // user/thinking/tool(start 吃终态)/text/completion
     CHECK(ids[0] == "item-1");
     CHECK(ids[1] == "item-2");
-    CHECK(ids[2] == "item-4");
-    CHECK(ids[3] == "item-3");
+    CHECK(ids[2] == "item-3");
+    CHECK(ids[3] == "item-4");
     CHECK(ids[4] == "item-6");
 
     // 工具配对:start 那枚吃进终态,同 id 的 result 不另开卡。
-    const runtime::TurnItemView& tool_item = snapshot.turn->items[3];
+    const runtime::TurnItemView& tool_item = snapshot.turn->items[2];
     CHECK(tool_item.kind == runtime::TurnItemViewKind::Tool);
     CHECK(tool_item.tool_use_id == "toolu_A");
     CHECK(tool_item.status == runtime::TurnItemViewState::Succeeded);
@@ -131,7 +132,7 @@ TEST_CASE("P1 快照: sub 侧适配——事件账折成同一份合同,工具�
 
     // 种类映射:思考/正文/收尾各归各位。
     CHECK(snapshot.turn->items[1].kind == runtime::TurnItemViewKind::Thinking);
-    CHECK(snapshot.turn->items[2].kind == runtime::TurnItemViewKind::Text);
+    CHECK(snapshot.turn->items[3].kind == runtime::TurnItemViewKind::Text);
     CHECK(snapshot.turn->items[4].kind == runtime::TurnItemViewKind::Text);
 }
 
