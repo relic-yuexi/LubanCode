@@ -1,0 +1,209 @@
+# TUI 主子代理视图彻底隔离：单写者与按代理状态投影
+
+- 状态：部分实现（P0+P1，分支 feat/tui-agent-view-projection-p0p1，PR #<待填>；CI <run id 待填> <结论待填>；P2/P3 待续。真实终端复现项待主控真机验收。
+- 日期：2026-09-19
+- 级别：P1（画面串流）；输入、审批、取消若串到别的任务，按 P0 阻断发布。
+- 取证基线：`d20547e4`。截图所用二进制路径、构建提交、终端宿主待核实，不能认作同版运行证据。
+- 范围：CLI/TUI 事件消费、代理导航、正文、底栏、输入、通知、审批和终端重绘。
+- 关联：`CtrlO展开收起_旧界面堆叠与思考提示失真.todo`。共用帧账与展开状态，不另造清屏补丁。该单较早，实施前按当前代码重核。
+
+## 一、先定规矩
+
+main 与 subagent 都是一页会话。看谁，正文、思考、工具记录、忙碌提示、用量和输入目标就归谁。main 没有越过当前页面往屏上写字的特权。
+
+后台继续跑、继续记账；前台只画当前页。导航栏可以展示其他代理的名称、进度、未读数和待处理标记，不能往正文塞它们的思考、工具结果或完成答复。
+
+推荐路线：每个代理各存可重建视图，整个 TUI 只留一个终端写者。切页和事件更新走同一条调度链。`silent` 可保留给批处理等显式静默用途，不能再充当运行中切页的隔离开关。
+
+## 二、截图与当前源码能说明什么
+
+截图里，Explore #1 行有查看标记，横线右端也挂了它的任务名；上方仍有 `agent_watch`、主代理思考提示等内容。单凭 `❯` 只能判断导航焦点，不能证明切页；当前代码另用 `◉` 表示正在查看。截图支持用户所述混屏现象，但不能逐条判定上方消息由哪个任务发出。
+
+以下缺口由当前源码确认，足以构成混屏通路；具体哪一笔触发截图，仍需带任务身份的终端录制。
+
+### 1. 静默档在回合开始时冻结
+
+- `src/app/turn_runner.cpp:741` 读取 `ctx.silent`；`:934-939` 用它创建 `ToolDisplay` 与 `StreamBodyTracker`。
+- `src/cli/tool_display.hpp:212-229` 把 silent 存进对象，painter 是否启用也在构造时决定。
+- `src/cli/live_transcript.hpp:712-745`：`OnDelta` 只检查对象内 `silent_`，随后拿 stdout 锁写正文；没有随当前查看代理换源。
+- `src/app/interactive_session.cpp:1416-1451` 在后台结果回流、另开 main 回合前检查查看态，再传 `silent=viewing`。这能覆盖“先切页，再开始回流”，不能覆盖“main 已在跑，中途切页”，也不能保证静默回合途中切回 main 后立即恢复显示。
+
+### 2. 事件收账与画屏仍绑在一起
+
+- `src/app/terminal_turn_sink.cpp:24-40`：流内事件投 `UiEventPump`，控制事件走 `DispatchInline`；`subordinate` 事件直接跳过本 sink。
+- 同文件 `RenderEvent` 同时更新 `TurnCollector`、工具状态，并调用 `display` / `body_tracker`。usage 等分支还承担统计更新。
+- `src/app/terminal_turn_sink.hpp` 明确说明流内消费线程、控制事件产生线程都可能落笔，泵内锁负责串行；这还不是整个终端的唯一写者。
+
+不能在 `Emit` 顶部按当前页直接 return。那会连同视图账、工具配对和统计一并截掉。必须先更新所属代理状态，再决定是否重画。
+
+### 3. 清屏、换源、旧画笔续写之间留着缝
+
+- `src/cli/console_input_turn_listener.cpp:202-227`：持 stdout 锁收底栏、清屏，放锁后再调用 view hook；注释也承认本轮流式正文仍会继续写屏。
+- `src/cli/transcript_controller.cpp:57-105`：hook 另取 stdout 锁，打印目标正文，再画回底栏。两次拿锁之间，旧事件可插入。
+- `StreamBodyTracker` 与工具 painter 各留续写坐标。清屏不等于撤销它们的写权；换页后旧 delta、块收束、工具 done 或回合 footer 仍可能碰新页。
+
+stdout 互斥锁只能让字节不交叉，不能回答“这笔字属于哪一页”。锁内必须校验页面归属与帧代次。
+
+### 4. 正文换了，底栏却仍混用 main 状态
+
+- `src/cli/console_input_stream_footer.cpp:663-693` 根据查看任务改标题与 composer 收件人。
+- 同文件 `:697-735` 仍从会话 `SessionSteeringQueue()` 取队列，用 `f.working` 生成活动行，并设 `ComposerMode::BusyQueue`。这里没有按查看代理统一投影。
+- `src/cli/console_input.cpp` 的 `BuildBottomChromeModel` 调 `BuildStatusLine` 和 `SessionSkillCount()`；这些调用没有接入一份“当前代理完整快照”。须核对字段来源，不能把全局 main 用量伪装成子代理用量。
+
+因此，不能只改正文过滤。活动行、用量、权限提示、技能数、队列也要明确归属。共享工作区和 Git 分支可以保留，但应与代理身份分开；截图状态栏的 `main` 也可能是 Git 分支，不能据此单独定罪。
+
+### 5. 忙闲两套查看路径尚未对齐
+
+- 空闲 composer 在 `console_input_composer.cpp:1156-1268` 跟踪 `content_revision`，按修订号刷新查看页。
+- 忙路 `console_input_turn_listener.cpp:245-257` 只比较 `viewed_task_id`，相同就退出；当前文件没有对应正文修订刷新逻辑。
+- `transcript_controller.cpp:66-77` 回 main 仅重打最近五条紧凑条目；子代理从 `build_task_transcript` 取快照。正在流出的 main 正文不能只靠这五条摘要还原。
+- `agent_panel.cpp:82-85` 将 Enter 解释为进入查看，方向键只改选择；`:173-175` 在查看任务消失时回 main。需要保留明确语义，补齐正文与目标同步。
+
+## 三、目标界面
+
+从上到下只留五块：
+
+1. 当前页身份：`Explore #1 · 审查 runtime+agent · 运行中`。
+2. 当前代理正文：可滚动、可展开，流式思考和工具记录仍归这页。
+3. 当前代理活动、待发队列和输入框：`发给 Explore #1`，提示对应操作。
+4. 当前代理统计；缺失项显示“暂无”，不借 main 数据补空。共享目录、Git 分支另标清楚。
+5. 代理导航：main 与其他任务的名称、状态、未读标记；只在这一块允许跨代理摘要。
+
+导航焦点与查看页分开：方向键移动候选，Enter 正式换页。`❯` 标候选，`◉` 标当前页，页头始终写当前身份。无需为了修混屏偷偷改成方向键立即切换。
+
+后台完成不抢焦点。需要审批时，在导航和固定通知位标“main 待审批”，用户打开后才显示带来源的审批层。通知不追加进当前代理正文。
+
+## 四、状态与事件设计
+
+以下名字是拟议接口，不表示仓库已有实现。
+
+### 1. 代理身份贯穿状态与动作
+
+定义 `AgentViewKey = {session_generation, agent/task identity}`。main 也是合法成员；UI 边界可把现有 `task_id=0` 映射进来。会话清空、恢复、任务号重用时，旧 generation 的事件不能污染新会话。
+
+事件沿用既有 session、turn、item 等身份字段，缺失的在宿主适配层补齐；不得从当前查看页反推事件主人。另记录 source revision/sequence，用于幂等应用、乱序检测和快照衔接。实施时先核对既有事件合同，避免重复造号。
+
+跨代理传信生成接收方视图事件，保留来源关联。子代理结果送进 main 后，属于 main 的那笔回流不能因来源是当前子代理就显示到子代理页。
+
+### 2. 每页各有一本状态账
+
+`AgentViewState` 保存转录投影、当前活动、工具状态、用量、待发消息与未读位置。原始事件/SessionV3 仍是事实来源，UI 快照只是缓存。
+
+`AgentUiState` 保存滚动锚点、是否跟随末尾、展开条目、草稿、光标、选区与历史导航位置。切走后保留，切回后还原。后台到消息不强迫用户跳回页尾。
+
+main 复用 `TurnCollector/TurnView`，subagent 复用任务事件及 `AgentPanelPresenter`。适配成同一份只读 `AgentFrameSnapshot`，供统一 renderer 消费。先统一显示合同，无须同时重写持久化协议。
+
+快照包含稳定 item ID、内容 revision、活动与统计 revision。新订阅先建立水位，再取快照并接续事件；重复序号不重放，有缺口重新取快照。不得用“切页时暂停收事件”换取表面干净。
+
+### 3. 先记账，再通知画屏
+
+事件路径：`runtime event → 按身份更新状态 → 标记该页 dirty → UI 调度器 → 当前页快照 → 终端帧`。
+
+后台事件只改所属状态、未读和导航摘要。当前页事件使当前正文或底栏失效。数据序号不能因页面不可见而跳过；可以合并多次重绘请求，不能丢工具终态、错误、审批和最终正文。
+
+缓存设上限；长历史按页从既有存档读取。投影积压时用最新快照追平，不无限囤积待画 delta。UI 阻塞不拖住网络读取，也不能擅自截断持久化内容。
+
+## 五、终端只留一处落笔
+
+把现有 `UiEventPump`、footer 心跳、输入监听与控制事件收进会话级 UI 调度。复用既有队列和帧组件，最终只由一个写者执行终端操作。`DispatchInline` 改成提交 UI 命令；业务线程不再直接擦屏、改光标或输出提示。
+
+确认菜单改为“提交审批请求 → UI 显示 → 独立响应通道返回决策”。业务线程可等待审批结果，UI 线程不得等待业务线程；不得持状态锁或终端锁等用户输入。
+
+`ToolDisplay`、`StreamBodyTracker` 应拆开“收集内容/格式化”与“写物理屏幕”。既有纯格式化器可留，旧 painter 不能继续私藏跨页坐标。
+
+### 切页事务
+
+1. UI 队列接收 `SwitchView(target)`，核对目标仍存在，保存旧页草稿与滚动状态。
+2. 增加 `view_epoch`，取得目标不可变快照，计算整帧；取快照时不持终端锁。
+3. 同一提交内更新 active view、输入目标与标题，作废旧正文、footer、painter 锚点及 diff 缓存。
+4. 擦净受管区域，画目标正文与一套底栏，恢复目标草稿和光标，登记新帧归属与尺寸。
+5. 提交期间到达的事件照常收账，随后补画新 revision。旧 epoch 的渲染产物直接丢弃；丢的是画面指令，不是事件。
+
+`FrameToken = {AgentViewKey, view_epoch, layout_revision}`。布局在锁外计算后，写屏前再验 token。快速 A→B→A 时，第一轮 A 的过期绘制也不得通过。resize、Ctrl+L、Ctrl+O 都走同一调度口。
+
+过渡批若暂时保留多线程 writer，所有写屏入口必须在统一提交锁内核对 token；仅在锁外查一次 viewed_task_id 仍有竞态。禁止边拿 stdout 锁边等待泵排空；先梳理旧锁顺序，再迁移，不能把互相等待带进新路。
+
+### 屏幕与滚动
+
+先复用 `BottomChromeModel`、帧 diff、受管区域账和 TerminalPort，正文也改成保留帧。长正文按当前页滚动锚点裁剪，切页不向 shell scrollback 追加整份历史。
+
+首批无需引入新 TUI 库，也无需强制 alternate screen。应用内滚动提供各代理历史；显式导出/查看完整转录须标明代理。若现有终端后端无法可靠守住受管区域，再单独评估 alternate screen，不把切换缓冲区当事件隔离方案。
+
+## 六、所有旁路也得归页
+
+- 流式正文、思考、工具开始/结束、内置工具、错误、重试、压缩提示、usage、最终统计、回合收束：均附来源，由同一调度口处理。
+- stdout/stderr、日志、Hook 输出、外部进程输出：交互模式走带来源事件或诊断文件；无法归属的诊断进入显式全局通知区，不能默认落当前正文。审计 `TermOut/TermErr` 和平台终端操作，不能只扫 `std::cout`。
+- 活动行、模型、context、cache、技能、权限：按字段实际作用域投影。全局配置标共享，任务字段取当前任务；缺少可靠数据就留空。
+- 排队消息绑定提交时的 target key，之后切页不改收件人；列表按目标过滤，保留未发送草稿。
+- Esc 先关当前 overlay，再按既有层级退查看态/导航；停止当前任务用明确动作并显示目标。全体停止仍保留显式二段确认，禁止看着 sub 却无提示取消 main。
+- 审批请求绑定 request ID、owner key、turn ID；确认只能解开这一笔。任务退场、超时或取消后，旧审批按钮失效。
+- main 完成、子代理完成、后台回流、任务退场不重置别页。完成任务保留可查看记录；明确清除当前任务才按统一切页事务回 main，并给出一次说明。
+- 退出、清会话、恢复会话：撤销订阅，关闭投递入口，处理剩余状态事件，拒绝旧 generation 渲染，最后释放终端；不能让析构补画复活旧页。
+- 非 TTY、重定向和 plain 输出保持独立输出合同；交互视图过滤不能无声吞掉脚本输出。
+
+## 七、分期落地
+
+### P0：建立能抓住混屏的证据
+
+- [x] 给测试事件加稳定 owner 标记；记录事件接收、状态应用、帧提交的身份与 revision，诊断写文件，不刷屏。（cli/ui_trace + AgentViewKey;LUBANCODE_UI_TRACE=<路径> 开文件台账;tests/unit/cli/test_ui_trace.cpp）
+- [x] 在现有真实终端 driver 里复现：main 流式途中切 sub，main 继续思考、出工具结果、结束回合。（测试替身已复现：tests/unit/app/test_terminal_turn_sink_projection.cpp——虚拟屏+平台 ConsoleTestHooks，写屏坐标/次序/末帧可断言，CI 跑；**真实终端 driver 复现待主控真机验收**）
+- [x] 补齐正文、footer、审批、Hook、异常和最终统计写屏入口清单，注明调用线程与锁顺序。（docs/development/tui-write-paths.md）
+
+验收：在修复前能稳定观察到非当前代理内容进入受管正文，或得到足以精确定位的交错序列；记录实际二进制及构建提交。若截图场景暂未复现，保留源码缺口结论，不能写成已复现。
+
+### P1：先统一身份与状态，不丢账
+
+- [x] 分离 `TerminalTurnSink` 收账和绘制；main/sub 适配成同一份快照合同。（ApplyEvent/DrawEvent 分家 + AgentViewRegistry 台账 + AgentFrameSnapshot 双适配器;tests/unit/app/test_terminal_turn_sink_projection.cpp、test_agent_frame_snapshot.cpp）
+- [x] 加入按页活动、统计、草稿、队列和滚动状态；补齐 owner 与 session generation。（AgentViewState/AgentUiState + AgentUiStateStore;/clear、/resume 经 BeginNewSession 换代;待发队列仍走既有目标绑定全局账,未读标记留 P2 通知区——如实记,不算完成项）
+- [x] 让忙闲两路共用 revision 订阅，回 main 能恢复完整当前回合。（登记簿水位协议 + 忙路 sub 实时流(content_revision 1s 节流)+ PrintViewedTranscript 活回合整轮重铺;忙路接线本身只有编译级覆盖,行为由投影册钉——真机验收项同上）
+
+验收：后台不绘制时，转录、工具配对、用量和回流照常更新；切回能接上最后水位，无漏字、重字、重复工具。
+
+### P2：收拢写者，原子换页
+
+- [ ] 将正文、footer、按键换页、完成收束迁到会话级 UI 调度；撤掉后台直接落笔。
+- [ ] 实现切页事务与 FrameToken；废除跨页坐标复用。
+- [ ] 从同一快照构建正文、活动、统计和输入目标；通知与审批走独立区域。
+- [ ] 对齐 resize、Ctrl+L、Ctrl+O、长正文、快速切换和任务退场。
+
+验收：任何落笔均来自有效当前帧或明确全局区域；不存在清屏与换源之间插入 main 输出的缝。
+
+### P3：输入与生命周期收口
+
+- [ ] 审核提交、排队、取消、审批的目标绑定；任务号重用、退出后回调均不得串账。
+- [ ] 移除旧查看模式写屏分支与隐式 main fallback；保留明确非 TTY 输出通路。
+- [ ] 补文档和中英文提示，说明焦点、查看、输入和停止目标。
+
+验收：用户看得出正在看谁、发给谁、停掉谁；后台结束不抢页、不改草稿、不重画别页输入框。
+
+## 八、验收矩阵
+
+| 场景 | 必须观察到的结果 |
+| --- | --- |
+| main 思考/正文中切 sub；main 随后出工具结果、usage、done | sub 正文和活动栏无 main 内容；main 导航进度可更新 |
+| sub A、sub B、main 同时输出，快速往返 20 次 | 每次切页后只见当前页，旧 epoch 不能覆盖新帧 |
+| 后台回流在切页前开始、切页后开始；途中切回 main | 两个方向均能恢复实时内容，静默启动不会使 main 永久不刷新 |
+| main 长 Markdown 块、工具卡尚未收束时切页 | FinalizeRepaint、工具 done、回合 footer 不碰新页坐标 |
+| main 忙而当前 sub 更新；main 已闲而 sub 更新 | 忙闲两路都能刷新 sub 正文，不只更新导航字数 |
+| 查看已完成 sub，main 继续忙 | 当前活动显示已完成，不显示 main 的“思考中/耗时” |
+| 各页填写不同草稿，排队后换页，再取消任务 | 草稿和光标各自恢复，排队目标不变，取消目标清楚 |
+| 后台 main/sub 请求审批；当前页也有审批 | 各笔请求各自确认，不抢正文，不误答别笔 |
+| 长页滚到中间，后台继续输出，再缩窄、Ctrl+L、Ctrl+O | 滚动锚点与展开档保留，只有一套底栏，无尾部残影 |
+| 任务完成、明确清除、会话重置后旧事件到达 | 完成不抢页；清除按事务回退；旧 generation 不写新会话 |
+| 队列洪峰与慢终端 | 可合并重绘但不丢事实；输入可响应，缓存受限，无死锁 |
+| plain、管道、重定向 | 输出合同未遭交互页过滤破坏 |
+
+测试分三层：状态投影测试；含可控交错屏障的帧/事件调度测试；真实终端屏幕格子或录屏验收。测试替身必须能观察非当前页写屏、坐标和末帧内容，不能只检查最终字符串或 selected ID。
+
+复用入口：`tests/unit/agent/test_agent_panel.cpp`、`tests/unit/app/test_agent_task_transcript.cpp`、`tests/unit/cli/test_body_render_pipeline.cpp`、`test_render_boundaries.cpp`，以及现有 transcript/footer/frame 测试；真实终端从 `tests/manual/agent_panel_driver.cpp`、`agent_stream_driver.cpp` 扩展。
+
+实现提交后走 GitHub CI；本地仅按用户允许范围做静态检查。真实终端验收单列环境、尺寸、构建提交和录像证据。单元测试通过不等于截图问题消失；不能拼接异版对象/库后把驱动结果当真机证据。
+
+## 九、收官条件
+
+- [ ] 所有矩阵项有通过证据或明确阻断说明；核心混屏、目标串错、旧帧写回不得带病收官。
+- [ ] 当前页正文、底栏、输入目标来自同一 owner 快照，后台更新仅影响后台状态和导航摘要。
+- [ ] main/sub 往返不漏记录、不重记用量、不丢草稿、不把历史反复刷进 shell scrollback。
+- [ ] 真实终端重演用户截图场景，main 后续事件再也不能覆盖 sub 页面。
+
+本单交付仅为源码调查与待办设计，不代表实现、CI 或终端验收已完成。
