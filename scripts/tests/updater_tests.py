@@ -519,12 +519,13 @@ def section_needs_review():
         check("冲突报预检", "冲突" in out, out[-400:])
         pointer = current_of(root)
         check_eq("指针不动", dirname2, pointer["current"] if pointer else None)
-        txns = txn_files(root)
-        record = read_txn(root, txns[-1])
+        # 同秒生成的事务名带随机后缀,按目标版本挑账,不赌排序
+        record = next(read_txn(root, name) for name in txn_files(root)
+                      if read_txn(root, name).get("target_version") == "3.0.0")
         check_eq("事务停 needs-review", "needs-review", record.get("state"))
         check("冲突明细入账", record.get("blocking"), json.dumps(record)[:200])
         # staging 保留(续跑免重下)
-        staged_txn = txns[-1][:-5]
+        staged_txn = record["id"]
         check("staging 留档待续", os.path.isdir(os.path.join(root, "staging", staged_txn)))
 
         # 解决:还原官方件,重跑 -> 同一笔事务续上
@@ -581,10 +582,11 @@ def section_rollback():
         rc0, _ = run_updater(["update", "--install-root", root2, "--version", "2.0.0",
                               "--archive", archive2, "--digest", "sha256:" + digest2])
         check_eq("前置单版本", 0, rc0)
-        # 手工抹掉 previous,模拟无可回滚
+        # 手工抹掉 previous,模拟无可回滚(schema 字段要留着,否则指针整份作废)
         pointer2 = current_of(root2)
-        pointer2["previous"] = None
-        updater.atomic_write_json(os.path.join(root2, "current.json"), pointer2)
+        updater.atomic_write_json(os.path.join(root2, "current.json"),
+                                  {"schema": 1, "current": pointer2["current"],
+                                   "previous": None})
         rc, out = run_updater(["rollback", "--install-root", root2])
         check_eq("无 previous 退 1", 1, rc)
         check("无 previous 明说", "上次可用" in out, out[-300:])

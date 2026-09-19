@@ -939,9 +939,6 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.update = update;
             return parsed;
         }
-            parsed.kanban = kanban;
-            return parsed;
-        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;
