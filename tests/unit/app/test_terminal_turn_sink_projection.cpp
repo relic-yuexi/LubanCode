@@ -267,7 +267,7 @@ private:
     void Install() {
         DoResetLocked();
         buffer_ = std::make_unique<ScreenBuf>(this);
-        cli::TermPort().Redirect(buffer_->stream(), buffer_->stream());
+        cli::TermPort().Redirect(&buffer_->stream(), &buffer_->stream());
         platform::ConsoleTestHooks hooks;
         hooks.get_screen_info = [this]() -> std::optional<platform::ScreenInfo> {
             std::lock_guard<std::mutex> lock(mutex);
@@ -420,27 +420,27 @@ struct LiveTurnHarness {
     std::unique_ptr<cli::StreamBodyTracker> body;
     std::unique_ptr<runtime::TurnCollector> collector;
     runtime::TurnUsageStats usage;
-    std::unique_ptr<TerminalTurnSink> sink;
+    std::unique_ptr<app::TerminalTurnSink> sink;
 
-    explicit LiveTurnHarness(AgentViewRegistry* registry_to_wire) {
+    explicit LiveTurnHarness(app::AgentViewRegistry* registry_to_wire) {
         display = std::make_unique<cli::ToolDisplay>(transcript, theme, /*console=*/true, nullptr,
                                                      &cancel_flag, &expanded, /*silent=*/false);
         body = std::make_unique<cli::StreamBodyTracker>(theme, /*enabled=*/true, /*silent=*/false);
         collector = std::make_unique<runtime::TurnCollector>(runtime::ProcessIdAuthority(), "turn-projection");
         collector->StartTurn("用户的问题", 1000);
-        TerminalTurnSink::Ingredients ingredients;
+        app::TerminalTurnSink::Ingredients ingredients;
         ingredients.display = display.get();
         ingredients.body_tracker = body.get();
         ingredients.view_collector = collector.get();
         ingredients.usage_stats = &usage;
         ingredients.cancel_flag = &cancel_flag;
         ingredients.view_registry = registry_to_wire;
-        sink = std::make_unique<TerminalTurnSink>(std::move(ingredients));
+        sink = std::make_unique<app::TerminalTurnSink>(std::move(ingredients));
     }
 };
 
 // 等修订号到位(泵消费线程异步,delta 走投递路)。
-bool WaitRevision(AgentViewRegistry& registry, std::uint64_t target,
+bool WaitRevision(app::AgentViewRegistry& registry, std::uint64_t target,
                   std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -567,7 +567,7 @@ TEST_CASE("P0 取证: 无投影旧路——切看 sub 后 main 的字仍进屏,�
 // ---------------------------------------------------------------------------
 TEST_CASE("P1 投影: main 流式途中切 sub——离屏零 commit,账照走,切回按水位接续") {
     VirtualScreen screen;
-    AgentViewRegistry registry;  // 独立登记簿(测试内新建,不碰会话单例)
+    app::AgentViewRegistry registry;  // 独立登记簿(测试内新建,不碰会话单例)
     {
         LiveTurnHarness harness(&registry);
         registry.BeginMainTurn(harness.collector.get(), &harness.sink->RenderMutex());
@@ -603,7 +603,7 @@ TEST_CASE("P1 投影: main 流式途中切 sub——离屏零 commit,账照走,�
         CHECK(visible.find("read_file") == std::string::npos);
 
         // 账一分不少:视图账里有离屏期间的正文与工具配对,usage 记了。
-        const AgentViewRegistry::MainTurnSnapshot ledger = registry.MainLedgeSnapshot();
+        const app::AgentViewRegistry::MainTurnSnapshot ledger = registry.MainLedgeSnapshot();
         REQUIRE(ledger.view != nullptr);
         std::string joined_items;
         int tool_items = 0;
@@ -623,7 +623,7 @@ TEST_CASE("P1 投影: main 流式途中切 sub——离屏零 commit,账照走,�
         // 切回 main:成对重铺(画笔锁内清屏、切身份、取快照 → 打印 → 钉水位)。
         registry.WithMainRenderLock([&] {
             registry.SwitchViewed(0);
-            const AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
+            const app::AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
             {
                 std::lock_guard<std::mutex> stdout_lock(cli::StdoutWriteMutex());
                 ClearViewportForViewSwitch();
@@ -669,7 +669,7 @@ TEST_CASE("P1 投影: main 流式途中切 sub——离屏零 commit,账照走,�
 // ---------------------------------------------------------------------------
 TEST_CASE("P1 成对协议: 重铺事务持画笔锁——事务内事件不重放、不漏字") {
     VirtualScreen screen;
-    AgentViewRegistry registry;
+    app::AgentViewRegistry registry;
     LiveTurnHarness harness(&registry);
     registry.BeginMainTurn(harness.collector.get(), &harness.sink->RenderMutex());
 
@@ -681,7 +681,7 @@ TEST_CASE("P1 成对协议: 重铺事务持画笔锁——事务内事件不重�
     std::atomic<bool> transaction_done{false};
     std::thread listener([&] {
         registry.WithMainRenderLock([&] {
-            const AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
+            const app::AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
             // 事务打印窗口:此刻另一线程投递增量(模拟 SSE 在飞)。
             std::thread producer([&] {
                 harness.sink->Emit(MakeDelta("item-text", "during transaction.\n"));
@@ -737,7 +737,7 @@ TEST_CASE("P1 成对协议: 重铺事务持画笔锁——事务内事件不重�
 // ---------------------------------------------------------------------------
 TEST_CASE("P1 收口账: 回合在离屏期收口——终账在 ledge,切回重铺全文可见") {
     VirtualScreen screen;
-    AgentViewRegistry registry;
+    app::AgentViewRegistry registry;
     LiveTurnHarness harness(&registry);
     registry.BeginMainTurn(harness.collector.get(), &harness.sink->RenderMutex());
 
@@ -755,7 +755,7 @@ TEST_CASE("P1 收口账: 回合在离屏期收口——终账在 ledge,切回重
     // 切回重铺:终账全文可见。
     registry.WithMainRenderLock([&] {
         registry.SwitchViewed(0);
-        const AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
+        const app::AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
         cli::TurnRenderOptions options;
         options.width = VirtualScreen::kWidth;
         options.include_text = true;
