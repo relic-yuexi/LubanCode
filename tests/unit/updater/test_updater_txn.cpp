@@ -440,11 +440,19 @@ TEST_CASE("FindResumable: 同 digest 未终结续跑,异目标 superseded+清场
         nlohmann::json::parse(*ReadBytes(paths.updates / "20260920T120004Z-000000t5.json"));
     CHECK(t5_data["state"] == "needs-review");
 
-    // 同 digest 换成 digest_y:可续的是……没有非终态的 y(t2 已作废,t4 终态),
-    // 且无人再被作废。
+    // 同 digest 换成 digest_y:没有非终态的 y 可续(t2 已作废、t4 终态)。
+    // 但仍在途的 x 账(t1 verified、t5 needs-review)按同一规矩被作废清场
+    // ——find_resumable 对任何异目标的在途事务都作废,不挑时序(python 同款)。
     const ResumableDecision none = FindResumable(paths, digest_y, FixedNow);
     CHECK_FALSE(none.resume.has_value());
-    CHECK(none.superseded_ids.empty());
+    REQUIRE(none.superseded_ids.size() == 2);
+    CHECK(none.superseded_ids[0] == "20260920T120000Z-000000t1");
+    CHECK(none.superseded_ids[1] == "20260920T120004Z-000000t5");
+    // t1 的账面也被改写成 failed/superseded。
+    const nlohmann::json t1_after =
+        nlohmann::json::parse(*ReadBytes(paths.updates / "20260920T120000Z-000000t1.json"));
+    CHECK(t1_after["state"] == "failed");
+    CHECK(t1_after["reason"] == "superseded");
 
     // needs-review 单独在账上时:同 digest 直接续它(冲突处理完重跑不重下)。
     const auto root2 = TempRoot("resumable-review");
