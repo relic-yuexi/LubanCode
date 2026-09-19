@@ -38,6 +38,7 @@
 
 #include "api/types.hpp"
 #include "app/agent_view_registry.hpp"
+#include "app/session_ui_dispatcher.hpp"
 #include "app/terminal_turn_sink.hpp"
 #include "cli/agent_view_state.hpp"
 #include "cli/console_input.hpp"  // StdoutWriteMutex:换页打印的锁纪律与生产一致
@@ -422,7 +423,8 @@ struct LiveTurnHarness {
     runtime::TurnUsageStats usage;
     std::unique_ptr<app::TerminalTurnSink> sink;
 
-    explicit LiveTurnHarness(app::AgentViewRegistry* registry_to_wire) {
+    explicit LiveTurnHarness(app::AgentViewRegistry* registry_to_wire,
+                             app::SessionUiDispatcher* dispatcher_to_wire = nullptr) {
         display = std::make_unique<cli::ToolDisplay>(transcript, theme, /*console=*/true, nullptr,
                                                      &cancel_flag, &expanded, /*silent=*/false);
         body = std::make_unique<cli::StreamBodyTracker>(theme, /*enabled=*/true, /*silent=*/false);
@@ -435,8 +437,19 @@ struct LiveTurnHarness {
         ingredients.usage_stats = &usage;
         ingredients.cancel_flag = &cancel_flag;
         ingredients.view_registry = registry_to_wire;
+        ingredients.ui_dispatcher = dispatcher_to_wire;
         sink = std::make_unique<app::TerminalTurnSink>(std::move(ingredients));
     }
+};
+
+// P2 调度版装配:sink 的事件提交会话级调度,产生事件的线程不碰终端。
+// 成员序:dispatcher 先声明(后析构),turn 的 sink 析构(DetachRenderer)
+// 发生在 dispatcher 还活着的时候。
+struct DispatchedHarness {
+    app::SessionUiDispatcher dispatcher;
+    LiveTurnHarness turn;
+    explicit DispatchedHarness(app::AgentViewRegistry* registry_to_wire)
+        : turn(registry_to_wire, &dispatcher) {}
 };
 
 // 等修订号到位(泵消费线程异步,delta 走投递路)。
@@ -570,7 +583,7 @@ TEST_CASE("P1 投影: main 流式途中切 sub——离屏零 commit,账照走,�
     app::AgentViewRegistry registry;  // 独立登记簿(测试内新建,不碰会话单例)
     {
         LiveTurnHarness harness(&registry);
-        registry.BeginMainTurn(harness.collector.get(), &harness.sink->RenderMutex());
+        registry.BeginMainTurn(harness.collector.get(), &harness.sink->CommitMutex());
 
         // main 在屏:第一段正文活画。
         harness.sink->Emit(MakeDelta("item-text", "first paragraph before switch.\n"));
@@ -671,7 +684,7 @@ TEST_CASE("P1 成对协议: 重铺事务持画笔锁——事务内事件不重�
     VirtualScreen screen;
     app::AgentViewRegistry registry;
     LiveTurnHarness harness(&registry);
-    registry.BeginMainTurn(harness.collector.get(), &harness.sink->RenderMutex());
+    registry.BeginMainTurn(harness.collector.get(), &harness.sink->CommitMutex());
 
     harness.sink->Emit(MakeDelta("item-text", "before transaction.\n"));
     REQUIRE(WaitRevision(registry, 1));
@@ -739,7 +752,7 @@ TEST_CASE("P1 收口账: 回合在离屏期收口——终账在 ledge,切回重
     VirtualScreen screen;
     app::AgentViewRegistry registry;
     LiveTurnHarness harness(&registry);
-    registry.BeginMainTurn(harness.collector.get(), &harness.sink->RenderMutex());
+    registry.BeginMainTurn(harness.collector.get(), &harness.sink->CommitMutex());
 
     registry.WithMainRenderLock([&] { registry.SwitchViewed(3); });
     harness.sink->Emit(MakeDelta("item-text", "offline final answer.\n"));
@@ -769,5 +782,127 @@ TEST_CASE("P1 收口账: 回合在离屏期收口——终账在 ledge,切回重
     });
     CHECK(screen.VisibleText().find("offline final answer") != std::string::npos);
     CHECK(registry.MainLedgeSnapshot().live == false);
+    registry.DetachMainTurn();
+}
+
+// ---------------------------------------------------------------------------
+// P2(收拢写者,原子换页):调度器路的投影回归。
+//   1) 提交不落笔:事件全走调度命令,Quiesce 后账画两讫;停表后 Emit
+//      退化就地(与旧泵同款);
+//   2) 快速往返:main 流式途中 A→B→A 抖 20 轮,每轮都有在飞 delta——
+//      末帧只见当前页,旧 epoch 的 main 绘制不覆盖新帧;账一分不少;
+//   3) 提交序:控制路(工具卡)不再由业务线程就地画,但正文先于工具卡
+//      的次序在队列 FIFO 里保住。
+// ---------------------------------------------------------------------------
+TEST_CASE("P2 调度: 事件提交命令——账画两讫,停表后退化就地") {
+    VirtualScreen screen;
+    app::AgentViewRegistry registry;
+    DispatchedHarness harness(&registry);
+    registry.BeginMainTurn(harness.turn.collector.get(), &harness.turn.sink->CommitMutex());
+
+    // 业务线程只提交(流内 delta 与控制路 usage 都进队列)。
+    harness.turn.sink->Emit(MakeDelta("item-text", "dispatched paragraph.\n"));
+    harness.turn.sink->Emit(MakeToolStart("item-tool", "toolu_1", "read_file"));
+    harness.turn.sink->Emit(MakeToolDone("item-tool", "toolu_1", "read_file", "file body"));
+    harness.turn.sink->Emit(MakeUsage());
+    REQUIRE(WaitRevision(registry, 4));  // 收账在消费线程上走,修订号到位
+    harness.dispatcher.Quiesce();        // 画面全落定
+
+    const std::string visible = screen.VisibleText();
+    CHECK(visible.find("dispatched paragraph") != std::string::npos);
+    CHECK(visible.find("read_file") != std::string::npos);
+
+    // 停表后迟到的 Emit:就地画(旧泵同款)——StopUiPump 返回即可见。
+    harness.turn.sink->StopUiPump();
+    harness.turn.sink->Emit(MakeDelta("item-text", "late inline tail.\n"));
+    CHECK(screen.VisibleText().find("late inline tail") != std::string::npos);
+    registry.DetachMainTurn();
+}
+
+TEST_CASE("P2 原子换页: 快速往返 20 轮——末帧只见当前页,旧 epoch 不覆盖新帧") {
+    VirtualScreen screen;
+    app::AgentViewRegistry registry;
+    DispatchedHarness harness(&registry);
+    registry.BeginMainTurn(harness.turn.collector.get(), &harness.turn.sink->CommitMutex());
+
+    // 与生产同款的换页事务:统一提交锁内(调度 RunSync 的"排干+就地"在
+    // 测试里由 WithMainRenderLock + 手工事务模拟)清可视区、切纪元、铺帧、
+    // 钉水位。
+    const auto switch_to_sub = [&](int id) {
+        registry.WithMainRenderLock([&] {
+            registry.SwitchViewed(id);
+            std::lock_guard<std::mutex> stdout_lock(cli::StdoutWriteMutex());
+            ClearViewportForViewSwitch();
+            cli::TermOut() << "== sub agent #" << id << " view frame ==";
+            cli::TermOut() << "\n";
+            cli::TermOut().flush();
+        });
+    };
+    const auto switch_to_main = [&] {
+        registry.WithMainRenderLock([&] {
+            registry.SwitchViewed(0);
+            const app::AgentViewRegistry::MainTurnSnapshot snapshot = registry.TakeMainLedgeForRepaint();
+            std::lock_guard<std::mutex> stdout_lock(cli::StdoutWriteMutex());
+            ClearViewportForViewSwitch();
+            PrintMainFrameLines(*snapshot.view);
+            registry.MarkMainPrinted(snapshot.revision);
+        });
+    };
+
+    // 20 轮往返:每轮先提交一批 main delta(在飞),随即换页——提交与
+    // 换页的真实次序由调度线程竞着跑,任何交错下画面都不许串页。
+    for (int round = 0; round < 20; ++round) {
+        harness.turn.sink->Emit(MakeDelta("item-text", "MAINWAVE" + std::to_string(round) + " "));
+        if (round % 2 == 0) {
+            switch_to_sub(7);
+        } else {
+            switch_to_main();
+        }
+    }
+    // 收在 sub 页(偶数轮):末帧是 sub 的。Quiesce 之后所有提交都落定
+    //(修订号多少取决于相邻同 item delta 在队尾并了几枚,不钉数值)。
+    switch_to_sub(7);
+    harness.dispatcher.Quiesce();
+    REQUIRE(registry.MainRevision() >= 1);
+
+    // 末帧只见当前页:sub 帧在,main 的字一个不见(旧帧已擦、在飞的旧
+    // epoch 绘制被闸)。
+    const std::string visible = screen.VisibleText();
+    CHECK(visible.find("sub agent #7 view frame") != std::string::npos);
+    for (int round = 0; round < 20; ++round) {
+        CHECK(visible.find("MAINWAVE" + std::to_string(round)) == std::string::npos);
+    }
+
+    // 账一分不少:切回 main 重铺,20 轮 delta 全在终账里。
+    switch_to_main();
+    const std::string back = screen.VisibleText();
+    for (int round = 0; round < 20; ++round) {
+        CHECK(back.find("MAINWAVE" + std::to_string(round)) != std::string::npos);
+    }
+    harness.turn.sink->StopUiPump();
+    registry.DetachMainTurn();
+}
+
+TEST_CASE("P2 提交序: 正文先于工具卡——FIFO 保住旧 DispatchInline 的次序钉") {
+    VirtualScreen screen;
+    app::AgentViewRegistry registry;
+    DispatchedHarness harness(&registry);
+    registry.BeginMainTurn(harness.turn.collector.get(), &harness.turn.sink->CommitMutex());
+
+    // 先投正文(流内路),紧跟着控制路(工具起止):提交序即执行序,
+    // 工具卡永远垫在已落笔的正文之后。
+    harness.turn.sink->Emit(MakeDelta("item-text", "body before tool card.\n"));
+    harness.turn.sink->Emit(MakeToolStart("item-tool", "toolu_1", "read_file"));
+    harness.turn.sink->Emit(MakeToolDone("item-tool", "toolu_1", "read_file", "result"));
+    REQUIRE(WaitRevision(registry, 3));
+    harness.dispatcher.Quiesce();
+    harness.turn.sink->StopUiPump();
+
+    const std::string visible = screen.VisibleText();
+    const std::size_t body_at = visible.find("body before tool card");
+    const std::size_t tool_at = visible.find("read_file");
+    CHECK(body_at != std::string::npos);
+    CHECK(tool_at != std::string::npos);
+    CHECK(body_at < tool_at);  // 正文先落笔
     registry.DetachMainTurn();
 }

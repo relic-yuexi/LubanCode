@@ -175,6 +175,9 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
     const int count = static_cast<int>(items_.size());
     switch (action) {
         case UiKeyAction::ToggleExpand: {
+            // 布局翻版(P2):展开档切换作废在飞帧的布局令牌——旧布局的
+            // 绘制写屏前被拦,这里的重铺走新版式。
+            lubancode::cli::NotifyLayoutInvalidated();
             // 子代理查看态的 Ctrl+O(追加需求"查看态实时思考流"):展开/收起
             // 查看帧里流式的思考/正文尾巴,与 main 流式思考同款折叠规矩——
             // 展开档铺"思考中 · N 字"的正文(约一屏,超了截断收口),紧凑

@@ -282,6 +282,33 @@ std::function<std::uint64_t()>& MainViewRevisionSlot() {
     static std::function<std::uint64_t()> provider;
     return provider;
 }
+
+// ---- 按代理状态投影单 P2:cli 侧的三个槽(收拢写者,原子换页) --------
+// 会话级 UI 调度的提交口(监听线程/composer 的换页事务、插行、footer
+// 重画)。空(单发/单测)= RunUiSync 就地直走。
+// [共享] composer/监听线程/导出口 SetUiDispatchEntrance。
+std::function<void(const std::function<void()>&)>& UiDispatchEntranceSlot() {
+    static std::function<void(const std::function<void()>&)> entrance;
+    return entrance;
+}
+
+// 布局翻版通知槽:resize/Ctrl+L/Ctrl+O 时叫一声,会话侧接登记簿的
+// BumpLayoutRevision(FrameToken 第三要素)。空 = NotifyLayoutInvalidated
+// 空操作。
+// [共享] composer/监听线程/转录控制器/导出口 SetLayoutInvalidationHook。
+std::function<void()>& LayoutInvalidationHookSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
+
+// 换页缓存作废钩子槽:切页事务(统一提交锁内、持 stdout 锁)调——旧页
+// 的画笔锚点账与 footer 帧 diff 账整份作废,跨页坐标不复用。空 = 直走。
+// [共享] composer/监听线程(print_view_frame)/RunTurn 挂接
+// (SetViewSwitchInvalidateHook)。
+std::function<void()>& ViewSwitchInvalidateHookSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
 std::mutex& ComposerTargetMutex() {
     static std::mutex m;
     return m;
@@ -1640,6 +1667,46 @@ void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows
 // ---- 按代理状态投影单 P1:导出口(槽位合同见上面那组 [共享] 注释)----
 void SetViewSwitchGuard(std::function<void(const std::function<void()>&)> guard) {
     AgentViewSwitchGuardSlot() = std::move(guard);
+}
+
+// ---- 按代理状态投影单 P2:导出口(收拢写者,原子换页) ------------------
+void SetUiDispatchEntrance(std::function<void(const std::function<void()>&)> entrance) {
+    UiDispatchEntranceSlot() = std::move(entrance);
+}
+
+void RunUiSync(const std::function<void()>& body) {
+    // 槽在,先排干再在统一提交锁内执行(调用线程即执行线程);槽空
+    //(单发/单测/旧装配)就地直走。
+    const auto& entrance = UiDispatchEntranceSlot();
+    if (entrance) {
+        entrance(body);
+        return;
+    }
+    body();
+}
+
+void SetLayoutInvalidationHook(std::function<void()> hook) {
+    LayoutInvalidationHookSlot() = std::move(hook);
+}
+
+void NotifyLayoutInvalidated() {
+    const auto& hook = LayoutInvalidationHookSlot();
+    if (hook) {
+        hook();
+    }
+}
+
+void SetViewSwitchInvalidateHook(std::function<void()> hook) {
+    ViewSwitchInvalidateHookSlot() = std::move(hook);
+}
+
+void RunViewSwitchInvalidate() {
+    // 约定与 print hook 同款:调用方已持 StdoutWriteMutex,钩子实现不得
+    // 再拿这把锁。
+    const auto& hook = ViewSwitchInvalidateHookSlot();
+    if (hook) {
+        hook();
+    }
 }
 
 void SetMainViewRevisionProvider(std::function<std::uint64_t()> provider) {

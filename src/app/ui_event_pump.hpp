@@ -53,8 +53,12 @@ public:
     // frame_interval:按帧落屏的节拍;0 = 老路(投递即醒立即画,两轨中的
     // 直写轨)。默认取环境变量 LUBANCODE_UI_FRAME_MS(缺省 33ms,即约
     // 30 帧;0 关掉帧节拍回老路)。
+    // shared_commit(P2):外置提交锁。给了就用调用方那把(无调度器的旧
+    // 装配里,sink 自持一把供收口 chrome/换页护栏与泵互斥);缺省 nullptr
+    // 用泵内部那把。锁的语义不变——串行化一切渲染,锁序恒 commit->stdout。
     explicit UiEventPump(Renderer renderer,
-                         std::chrono::milliseconds frame_interval = FrameIntervalFromEnv());
+                         std::chrono::milliseconds frame_interval = FrameIntervalFromEnv(),
+                         std::recursive_mutex* shared_commit = nullptr);
     ~UiEventPump();  // StopAndDrain 兜底(幂等,正常路早收过)
 
     UiEventPump(const UiEventPump&) = delete;
@@ -72,11 +76,10 @@ public:
     // 关账:停消费线程、排干余量(见文件头)。幂等。
     void StopAndDrain();
 
-    // 画笔锁的直通口(按代理状态投影单 P1):换页/重铺事务要在"泵不再
-    // 渲染"的窗口里擦旧帧铺新帧,拿这把锁与消费线程/就地路互斥。递归:
-    // 事务内嵌事务(护栏套护栏)合法。P2 收拢写者后这只口子退役,调度
-    // 队列接管同一职责。
-    std::recursive_mutex& render_mutex() { return render_mutex_; }
+    // 画笔锁的公共直通口已退役(按代理状态投影单 P2):会话级
+    // SessionUiDispatcher 的 commit_mutex() 接管同一职责;未接调度器的
+    // 旧装配(单发/单测)由 TerminalTurnSink::CommitMutex() 提供泵共享的
+    // 那把。泵内部照旧全程握锁渲染,只是不再对外裸奔。
 
     // 环境变量 LUBANCODE_UI_FRAME_MS 读帧间隔(进程内读一次):>0 为毫秒
     // 数(钳到 [1,1000]),0/非法/缺省回 33ms。单测不碰环境,直接给构造
@@ -87,12 +90,15 @@ private:
     // 画笔锁已持的前提下:取走全部 pending、逐枚交给 renderer。
     void DrainLocked();
     void ConsumerMain();
+    // 生效的提交锁:外置(shared_commit_)优先,否则泵内部那把。
+    std::recursive_mutex& CommitMutex();
 
     Renderer renderer_;
     const std::chrono::milliseconds frame_interval_;
     std::mutex queue_mutex_;               // 只护 pending_,不跨渲染持有
     std::condition_variable wake_;         // 投递即醒;谓词 stopped_||!pending_
     std::deque<runtime::ServerEvent> pending_;
+    std::recursive_mutex* shared_commit_ = nullptr;  // 外置提交锁(P2;可空)
     std::recursive_mutex render_mutex_;    // 画笔锁:串行化一切渲染(递归:换页事务可嵌套)
     // stopped_ 须先于 consumer_ 声明:成员按声明序构造,消费线程一起跑就
     // 会读 stopped_,读到一枚尚未初始化的原子是构造序竞态(栈槽复用时,

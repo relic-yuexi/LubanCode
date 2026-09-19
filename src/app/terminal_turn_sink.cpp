@@ -27,6 +27,14 @@
 
 namespace lubancode::app {
 
+TerminalTurnSink::~TerminalTurnSink() {
+    StopUiPump();
+    if (dispatcher_ != nullptr && renderer_id_ != 0) {
+        dispatcher_->DetachRenderer(renderer_id_);
+        renderer_id_ = 0;
+    }
+}
+
 void TerminalTurnSink::Emit(const runtime::ServerEvent& event) {
     // P0 证据基建:接收关卡——从路事件也记(标 sub: 前缀),跳过发生在
     // 记账之后,事后能对账"谁的事件在什么时候进过 UI 边界"。
@@ -43,15 +51,25 @@ void TerminalTurnSink::Emit(const runtime::ServerEvent& event) {
     if (event.payload.value("subordinate", false)) {
         return;
     }
-    // 条 1(画面隔网):流内事件只投队列(产生线程不碰终端),控制路
-    // 事件就地画(画前泵排干 pending,次序与老路一致)。分类见
-    // IsStreamOrigin——SSE 回调能产生的就那几种,后续批网络真分家时,
-    // 投递路的范围顺着那只口子扩。
-    if (IsStreamOrigin(event)) {
-        ui_pump_.PostDelta(event);
+    // P2(收拢写者):调度器在,流内与控制路一律提交命令——产生事件的
+    // 线程一个终端字节不写,FIFO 保住"正文先于工具卡落笔"。停表后迟到
+    // 的 Emit(Stop 钩子续跑/收口后的残留)退化成就地画,与旧泵同款。
+    if (dispatcher_ != nullptr && !stopped_) {
+        dispatcher_->PostEvent(renderer_id_, event);
         return;
     }
-    ui_pump_.DispatchInline(event);
+    if (dispatcher_ != nullptr && stopped_) {
+        std::lock_guard<std::recursive_mutex> commit(CommitMutex());
+        HandleEvent(event);
+        return;
+    }
+    // 旧路(本地泵):流内事件只投队列,控制路事件就地画(画前泵排干
+    // pending,次序与老路一致)。
+    if (IsStreamOrigin(event)) {
+        ui_pump_->PostDelta(event);
+        return;
+    }
+    ui_pump_->DispatchInline(event);
 }
 
 bool TerminalTurnSink::IsStreamOrigin(const runtime::ServerEvent& event) {
@@ -68,7 +86,21 @@ bool TerminalTurnSink::IsStreamOrigin(const runtime::ServerEvent& event) {
     return false;
 }
 
-void TerminalTurnSink::StopUiPump() { ui_pump_.StopAndDrain(); }
+void TerminalTurnSink::StopUiPump() {
+    // P2(收拢写者):调度器路径的关账=静默屏障——pending 排干、消费
+    // 线程在飞的这批也跑完,此后本线程就是唯一写者,收口 chrome 接着拿
+    // CommitMutex,与旧泵"join 之后才收口"同一严格序。渲染世代不摘:
+    // sink 还活着(随 RunTurn 栈走),收口前后的迟到 Emit 退化就地;
+    // 析构再摘。
+    if (dispatcher_ != nullptr) {
+        if (!stopped_) {
+            stopped_ = true;
+            dispatcher_->Quiesce();
+        }
+        return;
+    }
+    ui_pump_->StopAndDrain();
+}
 
 std::string TerminalTurnSink::TraceKindOf(const runtime::ServerEvent& event) {
     using runtime::ServerEventKind;

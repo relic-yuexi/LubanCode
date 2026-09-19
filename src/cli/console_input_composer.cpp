@@ -943,47 +943,52 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // tail_rows>0 是实时流的重铺拍(只铺头几行+最近 N 行,见 console_input.hpp
     // 的钩子注释)。
     const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
-        // 换页事务(按代理状态投影单 P1):擦旧帧+铺新帧整段进画笔护栏,
-        // 在飞的 main 绘制让路(空闲通常无活回合,护栏空转直走)。
-        const auto frame_body = [&] {
-            transcript_body_top.reset();  // 视口换源:主转录帧账随之作废(画面已被查看帧接管)
-            std::optional<platform::ScreenInfo> before;
-            if (tail_rows == 0) {
-                // 真切页(main <-> agent):上半屏是一块独立 Panel，整块换源。
-                // 旧页哪怕滚过屏、锚点漂过，也不能在新页留半截正文。
-                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                EraseStreamFooterLocked();
-                before = ClearVisibleAgentPanelLocked();
-                view_body_top.reset();
+        // 换页事务(P2:收拢写者,原子换页):整段经会话级 UI 调度提交
+        //(RunUiSync——排干余量、统一提交锁内就地执行;空闲路调用线程即
+        // 主线程)。擦旧帧+铺新帧之间的缝由提交锁封死;旧页画笔锚点/footer
+        // 帧 diff 账在事务内作废,跨页坐标不复用。
+        RunUiSync([&] {
+            const auto frame_body = [&] {
+                transcript_body_top.reset();  // 视口换源:主转录帧账随之作废(画面已被查看帧接管)
+                std::optional<platform::ScreenInfo> before;
+                if (tail_rows == 0) {
+                    // 真切页(main <-> agent):上半屏是一块独立 Panel，整块换源。
+                    // 旧页哪怕滚过屏、锚点漂过，也不能在新页留半截正文。
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    RunViewSwitchInvalidate();  // 旧页锚点/diff 账作废(跨页不复用)
+                    EraseStreamFooterLocked();
+                    before = ClearVisibleAgentPanelLocked();
+                    view_body_top.reset();
+                } else {
+                    // 同一 agent 的实时尾帧刷新仍走原位擦铺，免得每秒整屏闪一下。
+                    erase_previous_view_body();
+                    before = platform::GetScreenInfo();
+                }
+                const auto& view_hook = AgentViewSwitchHookSlot();
+                if (view_hook) {
+                    view_hook(viewed_after, tail_rows);
+                }
+                if (before.has_value()) {
+                    view_body_top = before->cursor_y;
+                }
+                // 跨读取账同步(见 ViewFrameLedgerSlot 注释):查看帧记"顶行+缓冲宽",
+                // main 帧(退场/回 main)作废——重进 composer 时凭它判断上一帧还在
+                // 不在原处。
+                ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+                if (viewed_after != 0 && before.has_value()) {
+                    view_ledger.body_top = before->cursor_y;
+                    view_ledger.width = before->width;
+                } else {
+                    view_ledger.body_top = -1;
+                }
+            };
+            const auto& view_guard = AgentViewSwitchGuardSlot();
+            if (view_guard) {
+                view_guard(frame_body);
             } else {
-                // 同一 agent 的实时尾帧刷新仍走原位擦铺，免得每秒整屏闪一下。
-                erase_previous_view_body();
-                before = platform::GetScreenInfo();
+                frame_body();
             }
-            const auto& view_hook = AgentViewSwitchHookSlot();
-            if (view_hook) {
-                view_hook(viewed_after, tail_rows);
-            }
-            if (before.has_value()) {
-                view_body_top = before->cursor_y;
-            }
-            // 跨读取账同步(见 ViewFrameLedgerSlot 注释):查看帧记"顶行+缓冲宽",
-            // main 帧(退场/回 main)作废——重进 composer 时凭它判断上一帧还在
-            // 不在原处。
-            ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
-            if (viewed_after != 0 && before.has_value()) {
-                view_ledger.body_top = before->cursor_y;
-                view_ledger.width = before->width;
-            } else {
-                view_ledger.body_top = -1;
-            }
-        };
-        const auto& view_guard = AgentViewSwitchGuardSlot();
-        if (view_guard) {
-            view_guard(frame_body);
-        } else {
-            frame_body();
-        }
+        });
     };
 
     if (box) {
@@ -1089,6 +1094,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 重复行随整帧重画归零。resize 后 conhost 会把宽行重排成多行,旧锚点
     // 全部失准,增量 diff 修不回来——只有整屏重建一条路干净。
     const auto rebuild_screen = [&]() {
+        // 整屏重建 = 布局翻版(P2):resize/Ctrl+L 都从这一个口进——先作废
+        // 帧令牌的布局要素(在飞的旧布局绘制写屏前被拦),整段再经会话级
+        // UI 调度提交(排干+统一提交锁内就地执行)。
+        NotifyLayoutInvalidated();
+        RunUiSync([&]() {
         const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
         if (!clear_info.has_value()) {
             return;
@@ -1138,6 +1148,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 redraw_with_panel(editor.CurrentRenderState(), panel_entries());
             }
         }
+        });
     };
 
     // 收帮助层(再按和弦/Esc/场景换):整屏重建一条路——可视区清干净、

@@ -60,6 +60,7 @@ class AsyncToolRuntime;  // 异步工具 P2:TurnContext.async_tool_runtime(会�
 
 namespace lubancode::app {
 class AgentViewRegistry;  // 按代理状态投影单 P1:TurnContext.view_registry(会话级)
+class SessionUiDispatcher;  // 按代理状态投影单 P2:TurnContext.ui_dispatcher(会话级)
 }  // namespace lubancode::app
 
 namespace lubancode::app {
@@ -214,6 +215,14 @@ struct TurnContext {
     // 登记簿进锁、修订号由它发号;main 离屏期间收账照走、绘制被闸,切回
     // 重铺按水位接续;收口 chrome 也按"当前页是不是 main"让路。
     lubancode::app::AgentViewRegistry* view_registry = nullptr;
+
+    // ---- 按代理状态投影单 P2:会话级 UI 调度 ----
+    // 会话持有(InteractiveSession),空(单发/单测/旧装配)= sink 用本地
+    // 泵,行为与从前一字不差。非空 = sink 的事件(流内+控制路)一律提交
+    // 调度命令、统一提交锁内落笔——产生事件的线程不碰终端;确认菜单的
+    // 问话走审批通道(监听线程出菜单),换页事务/插行/重铺经 RunUiSync
+    // 同一把提交锁。
+    lubancode::app::SessionUiDispatcher* ui_dispatcher = nullptr;
 };
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记

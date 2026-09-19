@@ -1,6 +1,6 @@
 # TUI 主子代理视图彻底隔离：单写者与按代理状态投影
 
-- 状态：部分实现（P0+P1，分支 feat/tui-agent-view-projection-p0p1，PR #144；CI run 35448977703 success（macos-clang 绿，587/587；PR 分支按巷道只烧 macos，windows-msvc 腿合并后 main push 补跑）；P2/P3 待续。真实终端复现项待主控真机验收。
+- 状态：部分实现（P0+P1+P2 已落。P0+P1：PR #144，CI run 35448977703 success；P2：分支 feat/tui-view-isolation-p2——会话级 SessionUiDispatcher 收拢写者、切页事务五步+FrameToken、审批改通道，收编细节见 docs/development/tui-write-paths.md）。P3 待续。真实终端复现项待主控真机验收。
 - 日期：2026-09-19
 - 级别：P1（画面串流）；输入、审批、取消若串到别的任务，按 P0 阻断发布。
 - 取证基线：`d20547e4`。截图所用二进制路径、构建提交、终端宿主待核实，不能认作同版运行证据。
@@ -161,12 +161,12 @@ main 复用 `TurnCollector/TurnView`，subagent 复用任务事件及 `AgentPane
 
 ### P2：收拢写者，原子换页
 
-- [ ] 将正文、footer、按键换页、完成收束迁到会话级 UI 调度；撤掉后台直接落笔。
-- [ ] 实现切页事务与 FrameToken；废除跨页坐标复用。
-- [ ] 从同一快照构建正文、活动、统计和输入目标；通知与审批走独立区域。
-- [ ] 对齐 resize、Ctrl+L、Ctrl+O、长正文、快速切换和任务退场。
+- [x] 将正文、footer、按键换页、完成收束迁到会话级 UI 调度；撤掉后台直接落笔。（SessionUiDispatcher:流内+控制路事件一律提交命令,产生事件的线程零落笔;DispatchInline 的就地画退役,停表后迟到 Emit 退化就地;监听线程插行/footer 重画/排队回显/换页事务经 RunUiSync(排干+统一提交锁内就地);收口 chrome 持 CommitMutex——过渡批保留的直笔 writer(心跳/空闲 composer/ask_user/同步回落确认)全在统一提交锁内核对,单子 §五过渡条款;心跳与空闲整帧的异步化留 P3）
+- [x] 实现切页事务与 FrameToken；废除跨页坐标复用。（FrameToken={AgentViewKey,view_epoch,layout_revision} 进登记簿,TokenFor/TokenCurrent/BumpLayoutRevision;换页事务五步:RunUiSync 内核目标存在→存旧页草稿+滚动窗档、纪元+快照(无终端锁)→SetViewSwitchInvalidateHook 作废 painter 锚点/footer diff 账→擦净铺新帧恢复草稿→水位接续;resize/Ctrl+L(rebuild_screen)/Ctrl+O 三路都翻 layout_revision;跨页坐标不复用:切页即 ForgetAnchorsLocked+InvalidateBlockAnchor）
+- [x] 从同一快照构建正文、活动、统计和输入目标；通知与审批走独立区域。（换页事务的正文/标题/收件目标同源于登记簿快照与面板台账(SetComposerTarget 随帧);审批走 SessionApprovalChannel:工具线程 Submit 挂 future,监听线程按 owner 页归属出菜单,别页请求在底栏固定通知位标"main 待审批"不进正文,ESC 打断 DenyAllPending 收口;ask_user 与心跳通知位仍留 P3）
+- [x] 对齐 resize、Ctrl+L、Ctrl+O、长正文、快速切换和任务退场。（三路整屏重建共 rebuild_screen 一个口:布局翻版+RunUiSync;长正文滚动窗档(view_tail_rows)入册随切页存取;快速往返 20 次的虚拟屏回归钉死旧 epoch 不覆盖新帧;任务退场走目标核对回 main——真机矩阵项待主控验收）
 
-验收：任何落笔均来自有效当前帧或明确全局区域；不存在清屏与换源之间插入 main 输出的缝。
+验收：任何落笔均来自有效当前帧或明确全局区域；不存在清屏与换源之间插入 main 输出的缝。（虚拟屏册覆盖:提交序、A→B→A 二十轮、停表后退化;真机验收项见 §八说明）
 
 ### P3：输入与生命周期收口
 

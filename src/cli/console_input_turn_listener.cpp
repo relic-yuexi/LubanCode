@@ -5,6 +5,7 @@
 // console_input_composer.cpp)天然错开;它画的 footer 与读的队列账在
 // console_input_stream_footer.cpp 与队列层。类注释见 console_input.hpp。
 #include "cli/agent_panel_host.hpp"
+#include "cli/approval_channel.hpp"  // P2:审批通道的服务者(监听线程出菜单)
 #include "cli/console_input.hpp"
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
@@ -74,11 +75,15 @@ TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme
                 // Windows 上便是 0xC0000409,整场连同会话一起倒下。这里先
                 // 收掉 footer,用不抛异常的窄 stdio 留下原始病名。主线程仍
                 // 能收束本轮、回到下一枚提示符。
+                SessionApprovalChannel().DenyAllPending();  // 审批 future 不悬死工具线程
+                SessionApprovalChannel().ClearServer();     // 服务者没了,后续 Submit 走就地问
                 std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                 DisableStreamFooter();
                 std::fprintf(stderr, "\n[input-listener] %s\n", e.what());
                 std::fflush(stderr);
             } catch (...) {
+                SessionApprovalChannel().DenyAllPending();
+                SessionApprovalChannel().ClearServer();
                 std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                 DisableStreamFooter();
                 std::fprintf(stderr, "\n[input-listener] unknown exception\n");
@@ -109,6 +114,10 @@ void TurnInputListener::Stop() {
 }
 
 void TurnInputListener::ThreadMain() {
+    // 审批通道的服务者登记(P2:确认菜单改"提交审批请求→UI 显示→独立
+    // 响应通道返回决策"):监听线程在场,工具线程的审批才走通道;线程
+    // 退出即注销——此后 Submit 的调用方(续跑轮的同步路)就地问,老路。
+    SessionApprovalChannel().RegisterServer();
     // 监听期间两端都进逐键、无回显模式。Windows 虽用
     // ReadConsoleInputW，也得关 LINE/ECHO；否则字符仍躺到回车才放行，
     // conhost 还会把它画到 footer 的物理光标处。
@@ -158,11 +167,14 @@ void TurnInputListener::ThreadMain() {
         const AgentPanelActions& actions = SessionAgentPanelHost().actions();
         if (outcome.stop_all && actions.cancel_all) {
             const int stopped = actions.cancel_all();
-            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-            EraseStreamFooterLocked();
-            TermOut() << "\n" << theme_.stats << trf("agent_panel.stop_all_notice", stopped) << theme_.reset << "\n";
-            TermOut().flush();
-            RunStreamScreenPrintHook();
+            RunUiSync([&] {
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                EraseStreamFooterLocked();
+                TermOut() << "\n" << theme_.stats << trf("agent_panel.stop_all_notice", stopped) << theme_.reset
+                          << "\n";
+                TermOut().flush();
+                RunStreamScreenPrintHook();
+            });
         }
         if (outcome.stop_current && outcome.stop_current_task_id > 0) {
             const AgentPanelProvider& provider = SessionAgentPanelHost().provider();
@@ -175,15 +187,17 @@ void TurnInputListener::ThreadMain() {
                     // 停止回执(与空闲路同一套文案):流式期间插打一行,正文
                     // 行数账由 print hook 作废;行随后显"停止中"。
                     const bool accepted = actions.cancel_task(entry.task_id);
-                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                    EraseStreamFooterLocked();
-                    TermOut() << "\n"
-                              << theme_.stats
-                              << (accepted ? trf("agent_panel.stop_notice", entry.task_id)
-                                           : trf("agent_panel.stop_not_running", entry.task_id))
-                              << theme_.reset << "\n";
-                    TermOut().flush();
-                    RunStreamScreenPrintHook();
+                    RunUiSync([&] {
+                        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                        EraseStreamFooterLocked();
+                        TermOut() << "\n"
+                                  << theme_.stats
+                                  << (accepted ? trf("agent_panel.stop_notice", entry.task_id)
+                                               : trf("agent_panel.stop_not_running", entry.task_id))
+                                  << theme_.reset << "\n";
+                        TermOut().flush();
+                        RunStreamScreenPrintHook();
+                    });
                 } else if (!entry.running && actions.clear_task) {
                     actions.clear_task(entry.task_id);
                 }
@@ -203,61 +217,103 @@ void TurnInputListener::ThreadMain() {
     // 换册;print_view_frame 换页时更新。
     int ui_state_page = CurrentAgentViewedTaskId();
     const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
-        // 每页草稿账(P1):切走前把当前页 composer 草稿存册,新页的旧草稿
-        // 还原(无则清空)。滚动/展开档不在这动——那两本由转录控制器在
-        // 铺帧时对同一册存取。
-        {
-            const std::uint64_t generation = CurrentAgentViewGeneration();
-            const AgentViewKey key_old = AgentViewKeyFor(generation, ui_state_page);
-            const AgentViewKey key_new = AgentViewKeyFor(generation, viewed_after);
-            if (key_old != key_new) {
-                AgentUiState leaving = AgentUiStates().Load(key_old);
-                leaving.draft_text = Utf32ToUtf8(editor.CurrentRenderState().line);
-                AgentUiStates().Save(key_old, std::move(leaving));
-                const AgentUiState entering = AgentUiStates().Load(key_new);
-                if (!entering.draft_text.empty()) {
-                    editor.LoadText(Utf8ToUtf32(entering.draft_text));
-                } else {
-                    editor.BeginLine(/*composer=*/true);
+        // 换页事务(P2:收拢写者,原子换页)——整段经会话级 UI 调度提交
+        //(RunUiSync:先排干队列余量,再在统一提交锁内就地执行)。五步:
+        //   1) 核对目标仍在(panel 台账);不在按回 main 处理。
+        //   2) 存旧页草稿/滚动档(进册),换页纪元 + 取目标快照由 view hook
+        //      在登记簿锁内办,不持终端锁。
+        //   3) 同一提交内作废旧页画笔锚点/footer 帧 diff 账
+        //     (RunViewSwitchInvalidate,stdout 锁内)。
+        //   4) 擦受管区域 → 铺目标帧 → 画回 footer,草稿光标随编辑器还原。
+        //   5) 期间到达的事件照常收账(收账恒跑),随后按打印水位补画;
+        //      旧 epoch 的绘制被登记簿闸门拦下。
+        // 槽未接(单发/单测)时 RunUiSync 就地直走,行为与 P1 一致。
+        RunUiSync([&] {
+            // 步 1:目标核对。viewed_after 非零却不在面板台账(任务刚退场),
+            // 按回 main 收口,不给"擦了屏铺不出新页"留缝。
+            if (viewed_after != 0) {
+                const AgentPanelProvider& provider = SessionAgentPanelHost().provider();
+                bool exists = false;
+                if (provider) {
+                    for (const AgentPanelEntry& entry : provider()) {
+                        if (entry.task_id == viewed_after) {
+                            exists = true;
+                            break;
+                        }
+                    }
                 }
-                edit.reset();
-                delete_armed = false;
-                ui_state_page = viewed_after;
+                if (!exists) {
+                    viewed_after = 0;
+                }
             }
-        }
-        // 换页事务(P1):擦旧帧 + 铺新帧整段进画笔护栏——在飞的 main 绘制
-        // 让路,擦与铺之间插不进别人的字。没接护栏(无活回合/单测)直走。
-        const auto frame_body = [&] {
-            // 流式期间也按 Panel 整页换源。先正式收掉 footer，再清可视内容区；
-            // view hook 铺完目标会话后会把独立 footer 原样画回。
-            std::optional<platform::ScreenInfo> before;
+            // 每页草稿账(P1):切走前把当前页 composer 草稿存册,新页的旧草稿
+            // 还原(无则清空)。滚动/展开档不在这动——那两本由转录控制器在
+            // 铺帧时对同一册存取。
             {
-                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                EraseStreamFooterLocked();
-                before = ClearVisibleAgentPanelLocked();
+                const std::uint64_t generation = CurrentAgentViewGeneration();
+                const AgentViewKey key_old = AgentViewKeyFor(generation, ui_state_page);
+                const AgentViewKey key_new = AgentViewKeyFor(generation, viewed_after);
+                if (key_old != key_new) {
+                    AgentUiState leaving = AgentUiStates().Load(key_old);
+                    leaving.draft_text = Utf32ToUtf8(editor.CurrentRenderState().line);
+                    if (tail_rows > 0) {
+                        leaving.view_tail_rows = tail_rows;  // 滚动窗档随这一拍入册
+                    }
+                    AgentUiStates().Save(key_old, std::move(leaving));
+                    const AgentUiState entering = AgentUiStates().Load(key_new);
+                    if (!entering.draft_text.empty()) {
+                        editor.LoadText(Utf8ToUtf32(entering.draft_text));
+                    } else {
+                        editor.BeginLine(/*composer=*/true);
+                    }
+                    edit.reset();
+                    delete_armed = false;
+                    ui_state_page = viewed_after;
+                    // 切回的页若存过滚动窗档(长页查看中途切走),首轮铺帧
+                    // 用回那档——滚动锚点跨页保留(单子 §五"恢复草稿光标"的
+                    // 滚动半边)。
+                    if (tail_rows == 0 && entering.view_tail_rows > 0) {
+                        tail_rows = entering.view_tail_rows;
+                    }
+                }
             }
-            const auto& view_hook = AgentViewSwitchHookSlot();
-            if (view_hook) {
-                view_hook(viewed_after, tail_rows);
-            }
-            // 跨读取账同步(见 ReadLineKeyByKey 里那本的同款注释):流式期间切看
-            // 的帧也记账——不过本轮流式正文还会继续写屏,RunTurn 收口(非静默)
-            // 会把账作废,这里的记录只在"切看后本轮再没写过屏"时才活得过收口;
-            // main 帧直接作废。
-            ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
-            if (viewed_after != 0 && before.has_value()) {
-                view_ledger.body_top = before->cursor_y;
-                view_ledger.width = before->width;
+            const auto frame_body = [&] {
+                // 流式期间也按 Panel 整页换源。先正式收掉 footer,再清可视内容区;
+                // view hook 铺完目标会话后会把独立 footer 原样画回。
+                std::optional<platform::ScreenInfo> before;
+                {
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    // 步 3:旧页的画笔锚点账与 footer 帧 diff 账整份作废——
+                    // 跨页坐标不复用(切回时重铺按快照另起,旧锚点全作废)。
+                    RunViewSwitchInvalidate();
+                    EraseStreamFooterLocked();
+                    before = ClearVisibleAgentPanelLocked();
+                }
+                // 步 2 的身份半边在钩子里:登记簿换页纪元 +1、取目标快照
+                //(锁内、无终端锁);步 4 的铺帧随后,同一提交。
+                const auto& view_hook = AgentViewSwitchHookSlot();
+                if (view_hook) {
+                    view_hook(viewed_after, tail_rows);
+                }
+                // 跨读取账同步(见 ReadLineKeyByKey 里那本的同款注释):流式期间切看
+                // 的帧也记账——不过本轮流式正文还会继续写屏,RunTurn 收口(非静默)
+                // 会把账作废,这里的记录只在"切看后本轮再没写过屏"时才活得过收口;
+                // main 帧直接作废。
+                ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+                if (viewed_after != 0 && before.has_value()) {
+                    view_ledger.body_top = before->cursor_y;
+                    view_ledger.width = before->width;
+                } else {
+                    view_ledger.body_top = -1;
+                }
+            };
+            const auto& view_guard = AgentViewSwitchGuardSlot();
+            if (view_guard) {
+                view_guard(frame_body);
             } else {
-                view_ledger.body_top = -1;
+                frame_body();
             }
-        };
-        const auto& view_guard = AgentViewSwitchGuardSlot();
-        if (view_guard) {
-            view_guard(frame_body);
-        } else {
-            frame_body();
-        }
+        });
     };
 
     // footer 快照:整份 RenderState 搬进 footer 状态(队列区在
@@ -269,9 +325,13 @@ void TurnInputListener::ThreadMain() {
     // 菜单)。footer.enabled 为假时这些都是空操作,
     // 退回老的"不回显、只 Enter 时整条落队"。
     auto refresh_footer = [&] {
-        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-        SetStreamFooterComposer(editor.CurrentRenderState());
-        RedrawStreamFooterLocked();
+        // P2 收拢写者:footer 重画也是一次屏面动作,经调度提交(统一提交锁
+        // 内落笔)。槽未接就地直走,与旧路一字不差。
+        RunUiSync([&] {
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            SetStreamFooterComposer(editor.CurrentRenderState());
+            RedrawStreamFooterLocked();
+        });
     };
 
     // 屏上已经铺的是哪只会话。状态机可能由三条路改动：按键切页、footer
@@ -395,14 +455,19 @@ void TurnInputListener::ThreadMain() {
     // 置 cancel_flag、擦脚注、打一行 "[已打断]"、通知正文块作废锚点、关脚注。
     auto interrupt_turn = [&] {
         cancel_flag_.store(true);
+        // 审批通道(P2):轮要收场,悬着的审批请求全部按拒绝收口——工具
+        // 线程还在 future 上等,不拒就死锁。
+        SessionApprovalChannel().DenyAllPending();
         // 用户打断广播(监督器单 P1-0):叫醒可能睡在 agent_watch 等待里的
         // watcher——取消旗它们看得见,但没有这声 notify 就要等到超时。
         BroadcastTurnInterrupted();
-        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-        EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
-        TermOut() << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
-        TermOut().flush();
-        RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
+        RunUiSync([&] {
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
+            TermOut() << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
+            TermOut().flush();
+            RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
+        });
         // 打断后本轮就要收场:关掉脚注,别让残余正文再把提示行重画回来。
         DisableStreamFooter();
     };
@@ -426,6 +491,28 @@ void TurnInputListener::ThreadMain() {
         }
         // 查看页实时流(忙路):当前 sub 的修订号动了就按节流重铺查看帧。
         refresh_busy_live_view();
+        // 审批服务(P2:独立响应通道的问话半边):当前查看页有悬着的审批
+        // 请求就取最早一笔,在本线程出菜单、答完把裁定送回 future。别的页
+        // 的请求不显屏——底栏固定通知位标着(HasPendingOutside),用户切
+        // 回那页的下一拍才开菜单。开菜单期间本线程就是屏面所有者
+        //(RepaintSuspendScope 挂起 footer/心跳),与旧路同款。
+        if (auto approval = SessionApprovalChannel().TakeForViewer(rendered_viewed_task_id)) {
+            // presenter 抛异常也按拒绝收口——工具线程还在 future 上等,
+            // 菜单炸了不许把审批悬成死锁。
+            bool allowed = false;
+            try {
+                allowed = approval->presenter();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[approval] presenter failed: %s\n", e.what());
+                std::fflush(stderr);
+            } catch (...) {
+                std::fprintf(stderr, "[approval] presenter failed: unknown\n");
+                std::fflush(stderr);
+            }
+            SessionApprovalChannel().Resolve(approval->id, allowed);
+            // 菜单收场擦过屏面,footer 需要一帧补画(挂起解除后首帧)。
+            refresh_footer();
+        }
         // 先等“有键可读”，再去抢输入权。旧代码把这 50ms 等待也攥在锁
         // 里，POSIX 的 DSR 光标查询便无门可入；更糟的是监听线程可能先
         // 吞掉 CPR 应答。poll 不消费字节，等完再抢锁；若前台编辑器或
@@ -467,12 +554,15 @@ void TurnInputListener::ThreadMain() {
         // 不自动提交,但用户得知道截断发生过——静默少一截比等不到更坑。
         // 文案先按中文字面落(i18n.cpp 归别的单,键表不在此扩)。
         if (key->kind == PK::Paste && key->truncated) {
-            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-            EraseStreamFooterLocked();
-            TermOut() << "\n"
-                      << theme_.error << "粘贴未收到结束标记,已保留已收部分(未提交)" << theme_.reset << "\n";
-            TermOut().flush();
-            RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着)
+            RunUiSync([&] {
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                EraseStreamFooterLocked();
+                TermOut() << "\n"
+                          << theme_.error << "粘贴未收到结束标记,已保留已收部分(未提交)" << theme_.reset
+                          << "\n";
+                TermOut().flush();
+                RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着)
+            });
         }
 
         // 取回键(Shift+←,备用 Ctrl+←):正文空、非编辑态、队列里有可取的
@@ -542,12 +632,12 @@ void TurnInputListener::ThreadMain() {
             has_last_ctrlc = true;
             last_ctrlc_time = now;
             if (double_tap) {
-                {
+                RunUiSync([&] {
                     std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                     EraseStreamFooterLocked();
                     TermOut() << "\n" << theme_.stats << tr("input.ctrlc_exit") << theme_.reset << "\n";
                     TermOut().flush();
-                }  // 退出前先放锁——std::exit 会跑静态对象析构,别让它们卡死在这把锁上。
+                });  // 退出前先放锁——std::exit 会跑静态对象析构,别让它们卡死在这把锁上。
                 std::exit(130);  // 130 = 128+SIGINT,"被 Ctrl+C 中断"的约定退出码
             }
             // 单击对齐 Esc 的两层语义:编辑态先取消编辑;队列非空时同样
@@ -568,16 +658,21 @@ void TurnInputListener::ThreadMain() {
             if (transcript_expanded_ != nullptr) {
                 const bool expanded = !transcript_expanded_->load(std::memory_order_acquire);
                 transcript_expanded_->store(expanded, std::memory_order_release);
-                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                EraseStreamFooterLocked();
-                TermOut() << "\n" << theme_.stats
-                          << (expanded ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset << "\n";
-                if (expand_renderer_) {
-                    TermOut() << expand_renderer_(expanded);
-                }
-                TermOut().flush();
-                RunStreamScreenPrintHook();  // 模式行和转录快照都不在正文行数账里,旧锚点作废
-                RedrawStreamFooterLocked();
+                // 布局翻版(P2):展开档切换作废在飞帧的布局令牌——旧布局
+                // 的绘制写屏前被拦,这里自己整段重铺。
+                NotifyLayoutInvalidated();
+                RunUiSync([&] {
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    EraseStreamFooterLocked();
+                    TermOut() << "\n" << theme_.stats
+                              << (expanded ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset << "\n";
+                    if (expand_renderer_) {
+                        TermOut() << expand_renderer_(expanded);
+                    }
+                    TermOut().flush();
+                    RunStreamScreenPrintHook();  // 模式行和转录快照都不在正文行数账里,旧锚点作废
+                    RedrawStreamFooterLocked();
+                });
             }
             continue;
         }
@@ -684,7 +779,7 @@ void TurnInputListener::ThreadMain() {
                 // 目标的命令不进队列),拒绝时编辑事务保持开着,正文留着再改。
                 const std::string edited_text = editor_text_utf8();
                 if (!QueueTextAdmittedDuringBusy(edited_text, edit->target)) {
-                    {
+                    RunUiSync([&] {
                         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                         EraseStreamFooterLocked();
                         TermOut() << "\n"
@@ -693,7 +788,7 @@ void TurnInputListener::ThreadMain() {
                                   << theme_.reset << "\n";
                         TermOut().flush();
                         RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着)
-                    }
+                    });
                     refresh_footer();
                     continue;
                 }
@@ -703,13 +798,13 @@ void TurnInputListener::ThreadMain() {
                 } else {
                     edit.reset();
                     delete_armed = false;
-                    {
+                    RunUiSync([&] {
                         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                         EraseStreamFooterLocked();
                         TermOut() << "\n" << theme_.stats << tr("queue.commit_conflict") << theme_.reset << "\n";
                         TermOut().flush();
                         RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着)
-                    }
+                    });
                 }
                 refresh_footer();
                 continue;
@@ -743,7 +838,7 @@ void TurnInputListener::ThreadMain() {
                 const MessageTarget target = agent_target.has_value() ? MessageTarget::Agent(*agent_target)
                                                                       : MessageTarget::Main();
                 if (!QueueTextAdmittedDuringBusy(text, target)) {
-                    {
+                    RunUiSync([&] {
                         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                         EraseStreamFooterLocked();
                         TermOut() << "\n"
@@ -751,7 +846,7 @@ void TurnInputListener::ThreadMain() {
                                   << "\n";
                         TermOut().flush();
                         RunStreamScreenPrintHook();  // 插打了整行,正文块的行数账作废(锁还攥着)
-                    }
+                    });
                 } else {
                     steering.Enqueue(target, text);
                     // 用户排入待发消息也是"用户输入到了"(监督器单 P1-0):
@@ -804,6 +899,10 @@ void TurnInputListener::ThreadMain() {
     }
     // 交出还没了结的编辑事务:Stop() 在 join 之后读它并按 Esc 同款收尾。
     open_edit_ = edit;
+    // 审批服务者注销:迟到的 Submit 不再挂起(调用方就地问)。悬着的
+    // 请求按拒绝收口——监听线程都不在了,没人会答。
+    SessionApprovalChannel().DenyAllPending();
+    SessionApprovalChannel().ClearServer();
 }
 
 }  // namespace lubancode::cli

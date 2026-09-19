@@ -719,6 +719,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         [this]() -> std::uint64_t { return view_registry_.MainRevision(); });
     lubancode::cli::SetAgentViewGenerationProvider(
         [this]() -> std::uint64_t { return view_registry_.session_generation(); });
+    // P2(收拢写者,原子换页):会话级 UI 调度的三个口——cli 侧提交入口
+    //(换页事务/插行/footer 重画经它在统一提交锁内落笔)、布局翻版通知
+    //(resize/Ctrl+L/Ctrl+O 作废帧令牌的布局要素)。
+    lubancode::cli::SetUiDispatchEntrance([this](const std::function<void()>& body) {
+        ui_dispatcher_.RunSync(body);
+    });
+    lubancode::cli::SetLayoutInvalidationHook(
+        [this]() { (void)view_registry_.BumpLayoutRevision(); });
 
     // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
@@ -1140,7 +1148,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 // 取走即不再属于 footer 的活队列；若入队那一帧恰因终端隐藏/
                 // 屏幕查询失败没画出来，后续快照也不会再有机会显示它。先在
                 // 终端历史留下用户回显，再把同一批正文注入下一次模型请求。
-                lubancode::cli::EchoDeliveredQueuedMessages(queued, theme);
+                // P2(收拢写者):回显是屏面动作,经会话级 UI 调度提交(统一
+                // 提交锁内落笔;这里在 RunTurn 线程的请求边界上)。
+                lubancode::cli::RunUiSync(
+                    [&queued, &theme]() { lubancode::cli::EchoDeliveredQueuedMessages(queued, theme); });
                 lubancode::api::Message inject;
                 inject.role = lubancode::api::Role::User;
                 std::vector<lubancode::cli::QueueId> claimed_ids;
@@ -1250,11 +1261,15 @@ TerminalSessionController::~TerminalSessionController() {
     // 面板接线宿主整体收清(provider/actions 双清;终端接线收尾单)。
     lubancode::cli::SessionAgentPanelHost().Reset();
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
-    // 按代理状态投影单 P1:换页护栏/修订号/世代三个槽一并摘掉(回调都
-    // 抓着 this),登记簿本尊随成员析构退场。
+    // 按代理状态投影单 P1/P2:换页护栏/修订号/世代与调度提交/布局翻版
+    // 五个槽一并摘掉(回调都抓着 this),登记簿与调度器本尊随成员析构
+    // 退场(调度器先停线程——声明在登记簿之后,逆序析构)。
     lubancode::cli::SetViewSwitchGuard(nullptr);
     lubancode::cli::SetMainViewRevisionProvider(nullptr);
     lubancode::cli::SetAgentViewGenerationProvider(nullptr);
+    lubancode::cli::SetUiDispatchEntrance(nullptr);
+    lubancode::cli::SetLayoutInvalidationHook(nullptr);
+    lubancode::cli::SetViewSwitchInvalidateHook(nullptr);
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetBackgroundStatusProvider(nullptr);

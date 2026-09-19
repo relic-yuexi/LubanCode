@@ -22,6 +22,7 @@
 #include "agent/prompt_assembler.hpp"
 #include "app/agent_panel_presenter.hpp"
 #include "app/agent_view_registry.hpp"  // 按代理状态投影单 P1:会话级视图登记簿
+#include "app/session_ui_dispatcher.hpp"  // 按代理状态投影单 P2:会话级 UI 调度
 #include "app/backend_stack.hpp"
 #include "app/commands/command_flow.hpp"
 #include "app/commands/command_registry.hpp"
@@ -453,6 +454,11 @@ private:
     // RunTurn 经 TurnContext 拿它,换页钩子经它切身份/取成对快照/钉水位,
     // /clear 与 /resume 在这换代。
     lubancode::app::AgentViewRegistry view_registry_;
+    // 会话级 UI 调度(按代理状态投影单 P2:收拢写者):命令队列 + 消费
+    // 线程 + 统一提交锁。sink 的事件、监听线程的换页事务/插行、确认
+    // 菜单的显示半边全从这一个口过。声明在 view_registry_ 之后(逆序
+    // 析构:先停线程,登记簿再走),命令不跨这二者引用。
+    lubancode::app::SessionUiDispatcher ui_dispatcher_;
     // @ 提及支件(会话终章自大类搬出):索引缓存 + 提交前校验/账单。
     MentionSupport mention_support_;
 

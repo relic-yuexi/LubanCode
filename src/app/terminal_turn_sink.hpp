@@ -45,6 +45,7 @@
 #include <nlohmann/json.hpp>
 
 #include "app/ui_event_pump.hpp"
+#include "app/session_ui_dispatcher.hpp"
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
 
@@ -68,6 +69,7 @@ class WorkflowRecorder;
 namespace lubancode::app {
 
 class AgentViewRegistry;
+class SessionUiDispatcher;
 
 class TerminalTurnSink final : public runtime::EventSink {
 public:
@@ -78,6 +80,12 @@ public:
     //   view_registry(可空):会话级视图登记簿——收账经它进锁、修订号
     //     由它发号、绘制闸按它的当前页/打印水位判定。空(单发/单测/旧
     //     装配)= 不分账,收账直接走、绘制恒开,行为与从前一字不差。
+    //   ui_dispatcher(可空,P2 收拢写者):会话级 UI 调度。给了它,流内
+    //     与控制路事件一律提交为调度命令、在统一提交锁内落笔——产生
+    //     事件的线程(SSE 回调/工具执行/收口)一个终端字节不写,旧路
+    //     DispatchInline 的"产生线程就地画"退役;StopUiPump 之后迟到
+    //     的 Emit 退化回就地(与旧泵停表同款)。空 = 旧路(本地泵),
+    //     行为与从前一字不差。
     struct Ingredients {
         cli::ToolDisplay* display = nullptr;
         cli::StreamBodyTracker* body_tracker = nullptr;
@@ -88,31 +96,48 @@ public:
         bool trace_projection_installed = false;
         const std::atomic<bool>* cancel_flag = nullptr;
         AgentViewRegistry* view_registry = nullptr;
+        SessionUiDispatcher* ui_dispatcher = nullptr;
     };
 
-    explicit TerminalTurnSink(Ingredients ingredients)
-        : ingredients_(std::move(ingredients)),
-          // 画面隔网先行批:渲染闭包挂上 UI 泵——流内事件(SSE 回调产生的
-          // 那几种)只投队列、由泵的消费线程画;控制路事件就地画(画前排
-          // 干)。泵成员声明在最后,析构最先收(StopAndDrain),渲染闭包
-          // 引用的 this 在此期间仍完整。
-          ui_pump_([this](const runtime::ServerEvent& event) { HandleEvent(event); }) {}
+    // P2:调度器路径下本地泵不构造(optional 按需起),事件全走调度;
+    // 旧路照旧——泵声明在最后,析构最先收(StopAndDrain),渲染闭包
+    // 引用的 this 在此期间仍完整。
+    ~TerminalTurnSink() override;
 
-    // 条 1(画面隔网):网络路只投事件,不碰终端——SSE 流内回调可能产生
-    // 的事件(正文/思考 delta、内置工具起止)从 Emit 进来后只进 UI 队列,
-    // 产生事件的线程一个终端字节都不写;其余事件(本地工具起止/usage/
-    // 批次边界/收口)仍由产生线程就地画——确认菜单等同步交互钉在那些
-    // 路上,画前泵先把 pending 的流式事件排干,次序与老路一致(正文永远
-    // 先于工具卡落笔)。从路(subordinate)照旧整枚跳过。
+    explicit TerminalTurnSink(Ingredients ingredients)
+        : ingredients_(std::move(ingredients)), dispatcher_(ingredients_.ui_dispatcher) {
+        if (dispatcher_ == nullptr) {
+            ui_pump_.emplace([this](const runtime::ServerEvent& event) { HandleEvent(event); },
+                             UiEventPump::FrameIntervalFromEnv(), &own_commit_mutex_);
+            renderer_id_ = 0;
+        } else {
+            renderer_id_ = dispatcher_->AttachRenderer(
+                [this](const runtime::ServerEvent& event) { HandleEvent(event); });
+        }
+    }
+
+    // 条 1(画面隔网)+ P2(收拢写者):网络路只投事件,不碰终端——SSE
+    // 流内回调可能产生的事件(正文/思考 delta、内置工具起止)从 Emit 进
+    // 来后只进 UI 队列,产生事件的线程一个终端字节都不写;控制路事件
+    // (本地工具起止/usage/批次边界/收口)有调度器时同样只提交命令
+    // (FIFO 保住"正文先于工具卡"),没调度器(单发/单测)照旧由产生线程
+    // 就地画(画前泵排干)。StopUiPump 之后迟到的 Emit(Stop 钩子续跑)
+    // 一律退化成就地画。从路(subordinate)照旧整枚跳过。
     void Emit(const runtime::ServerEvent& event) override;
 
-    // 关账(turn 收尾,listener 停下之后调):停泵的消费线程、排干余量。
+    // 关账(turn 收尾,listener 停下之后调):停泵/停提交、排干余量。
     // 此后的画面(收口 chrome、FinalizeRepaint、Stop 钩子续跑、统计行)
     // 全回到调用线程,与老路一字不差。幂等;析构兜底再收一次。
     void StopUiPump();
 
-    // 泵画笔锁的直通口(P1 换页事务用,见 UiEventPump::render_mutex)。
-    std::recursive_mutex& RenderMutex() { return ui_pump_.render_mutex(); }
+    // 统一提交锁(P2):调度器路径给调度器那把(会话级);旧路给泵共享
+    // 的 sink 自持那把。一切落笔(换页事务、收口 chrome、确认菜单的显示
+    // 半边)在它内核对页身份——RunTurn 起回合时把它登记进
+    // AgentViewRegistry::BeginMainTurn,WithMainRenderLock 的护栏由此
+    // 与在飞的调度渲染互斥。
+    std::recursive_mutex& CommitMutex() {
+        return dispatcher_ != nullptr ? dispatcher_->commit_mutex() : own_commit_mutex_;
+    }
 
 private:
     // 工具条目对账:item_id -> (tool_use_id, name)。ItemCompleted 的载荷不带
@@ -146,7 +171,14 @@ private:
 
     Ingredients ingredients_;
     std::map<std::string, OpenTool> open_tools_;
-    UiEventPump ui_pump_;
+    // P2 收拢写者:调度器(可空)与旧路本地泵(可空 optional)二选一。
+    // own_commit_mutex_ 是旧路泵的共享提交锁(声明先于 pump_,泵构造时
+    // 借指针);调度器路径用调度器那把,这把闲着。
+    SessionUiDispatcher* dispatcher_ = nullptr;
+    std::uint64_t renderer_id_ = 0;         // 调度器渲染世代(旧路恒 0)
+    bool stopped_ = false;                  // StopUiPump 已收(此后 Emit 就地画)
+    std::recursive_mutex own_commit_mutex_;
+    std::optional<UiEventPump> ui_pump_;
 };
 
 }  // namespace lubancode::app
