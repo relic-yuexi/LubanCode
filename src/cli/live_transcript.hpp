@@ -718,6 +718,14 @@ public:
     // 静默档攒下的正文全文(截 kFullOutputCapBytes);非静默档恒空串。
     std::string TakeSilentBody() { return std::move(silent_body_); }
 
+    // 按代理状态投影单 P1:动态绘制闸。false 时 OnDelta 走静默路(只攒
+    // 台账不上屏)、OnBlockBreak/FinalizeRepaint 不碰屏幕——main 流式中途
+    // 切走子代理页,正文立即让路;正文真值在视图账(TurnCollector)里,
+    // 切回重铺按水位接续,一个字不丢。与 silent_(回合级静态档)分账,
+    // 由 TerminalTurnSink 逐事件置位。
+    void SetPageVisible(bool visible) { page_visible_.store(visible, std::memory_order_release); }
+    bool PageVisible() const { return page_visible_.load(std::memory_order_acquire); }
+
     // 流式正文增量:原样打印 + 记账。条 4(画面隔网):正文拼装与
     // Markdown 解析挪到输出锁外——锁外先把这笔增量切段(段落边界/围栏
     // 账)、把要收束重画的段落渲染成行,锁内只剩脚注擦画、落笔与锚点账。
@@ -725,7 +733,7 @@ public:
     // M10 的锁规矩不变:流式期间的 std::cout 写都拿 StdoutWriteMutex,
     // 跟监听线程的 "[已打断]"/"[已排队]" 错开。
     void OnDelta(const std::string& text) {
-        if (silent_) {
+        if (silent_ || !PageVisible()) {
             silent_body_ += text;
             if (silent_body_.size() > lubancode::cli::kFullOutputCapBytes) {
                 silent_body_ = lubancode::cli::TruncateUtf8Bytes(silent_body_,
@@ -817,6 +825,20 @@ public:
                                                  lubancode::cli::DetectConsoleWidth().value_or(80),
                                                  scan_.rendered_before);
         }
+        // 绘制闸关着(main 不在当前页):一笔屏幕都不碰,只清块账——块
+        // 里的正文没上过屏,真值在视图账,切回重铺接得上。
+        if (!PageVisible()) {
+            in_block_ = false;
+            buffer_.clear();
+            scan_.line_probe.clear();
+            scan_.fence_open = false;
+            scan_.last_newlines = 0;
+            scan_.last_pairs = 0;
+            scan_.blank_run = true;
+            scan_.rendered_before = false;
+            separate_next_body_ = false;
+            return;
+        }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         // 工具条目要开画/换请求了:脚注这行先擦掉,免得它残留在工具输出或
         // 下一轮"思考中"转轮当中(转轮跟 footer 同处一行会打架)。下一块
@@ -852,7 +874,7 @@ public:
     //(此刻 UI 泵已收,画面单线程)。条 4 同款:解析在锁外,锁内只做
     // 几何与落笔。
     void FinalizeRepaint() {
-        if (!enabled_ || !in_block_) {
+        if (!enabled_ || !in_block_ || !PageVisible()) {
             return;
         }
         const BodyRenderPlan plan = PrepareBodyRenderPlan(buffer_, theme_,
@@ -1043,6 +1065,7 @@ private:
     const lubancode::cli::Theme& theme_;
     bool enabled_;
     bool silent_ = false;
+    std::atomic<bool> page_visible_{true};  // 动态绘制闸(P1,见 SetPageVisible 注释)
     std::string silent_body_;
     bool in_block_ = false;
     bool unsafe_ = false;

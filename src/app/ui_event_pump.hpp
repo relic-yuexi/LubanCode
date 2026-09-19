@@ -72,6 +72,12 @@ public:
     // 关账:停消费线程、排干余量(见文件头)。幂等。
     void StopAndDrain();
 
+    // 画笔锁的直通口(按代理状态投影单 P1):换页/重铺事务要在"泵不再
+    // 渲染"的窗口里擦旧帧铺新帧,拿这把锁与消费线程/就地路互斥。递归:
+    // 事务内嵌事务(护栏套护栏)合法。P2 收拢写者后这只口子退役,调度
+    // 队列接管同一职责。
+    std::recursive_mutex& render_mutex() { return render_mutex_; }
+
     // 环境变量 LUBANCODE_UI_FRAME_MS 读帧间隔(进程内读一次):>0 为毫秒
     // 数(钳到 [1,1000]),0/非法/缺省回 33ms。单测不碰环境,直接给构造
     // 函数传显式值。
@@ -87,7 +93,7 @@ private:
     std::mutex queue_mutex_;               // 只护 pending_,不跨渲染持有
     std::condition_variable wake_;         // 投递即醒;谓词 stopped_||!pending_
     std::deque<runtime::ServerEvent> pending_;
-    std::mutex render_mutex_;              // 画笔锁:串行化一切渲染
+    std::recursive_mutex render_mutex_;    // 画笔锁:串行化一切渲染(递归:换页事务可嵌套)
     // stopped_ 须先于 consumer_ 声明:成员按声明序构造,消费线程一起跑就
     // 会读 stopped_,读到一枚尚未初始化的原子是构造序竞态(栈槽复用时,
     // 脏字节恰是上一只泵置过的 true,消费线程会假性收工)。

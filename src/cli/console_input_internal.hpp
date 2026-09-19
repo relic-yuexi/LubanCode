@@ -65,6 +65,17 @@ ViewFrameLedger& ViewFrameLedgerSlot();
 // 监听线程(流式切看)都调它铺帧。
 std::function<void(int, int)>& AgentViewSwitchHookSlot();
 
+// ---- 按代理状态投影单 P1:cli 侧槽位(导出口合同见 console_input.hpp)----
+// 每页交互状态册:composer(空闲切看)与监听线程(流式切看)在换页时
+// 存/取旧新两页的滚动档/展开档/草稿。
+AgentUiStateStore& AgentUiStateSlot();
+// 会话世代提供槽(组 AgentViewKey 用;空 = 0)。
+std::function<std::uint64_t()>& AgentViewGenerationSlot();
+// 换页事务的画笔护栏槽:print_view_frame 的"擦旧帧+铺新帧"整段包进去。
+std::function<void(const std::function<void()>&)>& AgentViewSwitchGuardSlot();
+// main 查看页修订号提供槽(忙路实时流订阅;空 = 恒 0)。
+std::function<std::uint64_t()>& MainViewRevisionSlot();
+
 // composer 收件目标(查看态那只子代理的任务号):composer 写(每次读取
 // 开头/首帧)、footer 写(RedrawStreamFooterLocked)、监听线程读(落队带
 // 目标),读写都过 ComposerTargetMutex。

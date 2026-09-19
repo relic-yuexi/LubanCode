@@ -21,6 +21,7 @@
 #include "agent/compact.hpp"
 #include "agent/prompt_assembler.hpp"
 #include "app/agent_panel_presenter.hpp"
+#include "app/agent_view_registry.hpp"  // 按代理状态投影单 P1:会话级视图登记簿
 #include "app/backend_stack.hpp"
 #include "app/commands/command_flow.hpp"
 #include "app/commands/command_registry.hpp"
@@ -436,6 +437,11 @@ private:
     // 视口的数据行在这拼(台账缓存跟实例走),导航坞布局/条目状态机是
     // 已拆好的 cli/agent_panel 组件。
     lubancode::app::AgentPanelPresenter agent_panel_presenter_;
+    // 会话级视图登记簿(按代理状态投影单 P1):session_generation、当前
+    // 查看页、main 活回合账(收账/绘制分家的那本)与每页 UI 状态册。
+    // RunTurn 经 TurnContext 拿它,换页钩子经它切身份/取成对快照/钉水位,
+    // /clear 与 /resume 在这换代。
+    lubancode::app::AgentViewRegistry view_registry_;
     // @ 提及支件(会话终章自大类搬出):索引缓存 + 提交前校验/账单。
     MentionSupport mention_support_;
 
