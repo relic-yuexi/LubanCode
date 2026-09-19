@@ -381,3 +381,115 @@ TEST_CASE("悬空工具三道账: started 无终态 / 终态无 result 分档,un
     // 终态无 result:分档变 terminal_no_result。
     CHECK(dangling2[0].state == "terminal_no_result");
 }
+
+TEST_CASE("控制态折叠: 窗口预算字符串值与身份/来源随行(上下文预算单 §四)") {
+    const auto dir = std::filesystem::temp_directory_path() / "lubancode-traj-replay-window";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir / "artifacts", ec);
+
+    EventScope scope;
+    scope.workspace_key = "demo-000000000000";
+    scope.session_id = "20260919-031522-7K4M2P";
+    scope.run_id = "main-0001";
+    scope.run_kind = RunKind::MainSession;
+    scope.visibility = {Visibility::HostOnly};
+    FixedNsClock clock;
+    auto recorder =
+        TrajectoryRecorder::Start(dir / "main.jsonl", dir / "artifacts", scope, RecorderOptions{}, &clock);
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder
+                ->WriteRunStarted(nlohmann::json{{"run_kind", "main_session"},
+                                                 {"start_reason", "process_launch"}},
+                                  Durability::PowerLoss)
+                .status == RecordReceipt::Status::Committed);
+    const auto put_as = [&](EventKind kind, nlohmann::json payload) {
+        RecordRequest req;
+        req.kind = kind;
+        req.scope = recorder->base_scope();
+        req.payload = std::move(payload);
+        return recorder->Record(std::move(req), Durability::PowerLoss);
+    };
+
+    // 开场快照(十进制字符串真值 + 身份与来源)。
+    REQUIRE(put_as(EventKind::ControlContextWindowChanged,
+                   nlohmann::json{{"context_window", "1048576"},
+                                  {"provider", "prov"},
+                                  {"model", "kimi"},
+                                  {"source", "initial"}})
+                .status == RecordReceipt::Status::Committed);
+    // 手动改小:末枚胜。
+    REQUIRE(put_as(EventKind::ControlContextWindowChanged,
+                   nlohmann::json{{"context_window", "256000"},
+                                  {"old_context_window", "1048576"},
+                                  {"provider", "prov"},
+                                  {"model", "kimi"},
+                                  {"source", "manual"}})
+                .status == RecordReceipt::Status::Committed);
+
+    const auto report = FoldStreamReplay(dir / "main.jsonl");
+    REQUIRE(report.ok());
+    REQUIRE(report.state.control.context_window.has_value());
+    CHECK(*report.state.control.context_window == 256000);  // 末枚胜
+    CHECK(report.state.control.context_window_provider == "prov");
+    CHECK(report.state.control.context_window_model == "kimi");
+    CHECK(report.state.control.context_window_source == "manual");
+
+    // ToJson/FromJson round-trip:身份三件不丢,旧 JSON(无这三键)读回空。
+    const nlohmann::json json = report.state.control.ToJson();
+    const auto back = ReplayControlState::FromJson(json);
+    REQUIRE(back.has_value());
+    CHECK(back->context_window == report.state.control.context_window);
+    CHECK(back->context_window_provider == "prov");
+    CHECK(back->context_window_model == "kimi");
+    CHECK(back->context_window_source == "manual");
+    const auto legacy = ReplayControlState::FromJson(nlohmann::json{{"title", "t"}, {"compact_epoch", 2}});
+    REQUIRE(legacy.has_value());
+    CHECK(legacy->context_window_provider.empty());  // 旧 checkpoint:身份不明
+    CHECK_FALSE(legacy->context_window.has_value());
+}
+
+TEST_CASE("控制态折叠: 窗口值认 k/m 后缀,坏值不带(不冒充 0)") {
+    const auto dir = std::filesystem::temp_directory_path() / "lubancode-traj-replay-window2";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir / "artifacts", ec);
+
+    EventScope scope;
+    scope.workspace_key = "demo-000000000000";
+    scope.session_id = "20260919-031522-7K4M3Q";
+    scope.run_id = "main-0001";
+    scope.run_kind = RunKind::MainSession;
+    scope.visibility = {Visibility::HostOnly};
+    FixedNsClock clock;
+    auto recorder =
+        TrajectoryRecorder::Start(dir / "main.jsonl", dir / "artifacts", scope, RecorderOptions{}, &clock);
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder
+                ->WriteRunStarted(nlohmann::json{{"run_kind", "main_session"},
+                                                 {"start_reason", "process_launch"}},
+                                  Durability::PowerLoss)
+                .status == RecordReceipt::Status::Committed);
+    const auto put_as = [&](EventKind kind, nlohmann::json payload) {
+        RecordRequest req;
+        req.kind = kind;
+        req.scope = recorder->base_scope();
+        req.payload = std::move(payload);
+        return recorder->Record(std::move(req), Durability::PowerLoss);
+    };
+    // durability 老测试写过的 "128k" 形状:折叠认得(k=1000 口径)。
+    REQUIRE(put_as(EventKind::ControlContextWindowChanged, nlohmann::json{{"context_window", "128k"}})
+                .status == RecordReceipt::Status::Committed);
+    const auto report = FoldStreamReplay(dir / "main.jsonl");
+    REQUIRE(report.ok());
+    REQUIRE(report.state.control.context_window.has_value());
+    CHECK(*report.state.control.context_window == 128000);
+
+    // 折不动的值(认不得的后缀):不带预算,不冒充 0。
+    REQUIRE(put_as(EventKind::ControlContextWindowChanged,
+                   nlohmann::json{{"context_window", "abc"}})
+                .status == RecordReceipt::Status::Committed);
+    const auto report3 = FoldStreamReplay(dir / "main.jsonl");
+    REQUIRE(report3.ok());
+    CHECK_FALSE(report3.state.control.context_window.has_value());
+}

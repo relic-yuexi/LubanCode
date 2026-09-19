@@ -115,12 +115,25 @@ TEST_CASE("BuildContextWindowCandidates: 常用档按已知上限过滤") {
     }
 }
 
-TEST_CASE("BuildContextWindowCandidates: 能力未知保守展示,当前值必在候选") {
+TEST_CASE("BuildContextWindowCandidates: 上限未知不再锁死本地预算,常用档全给") {
+    // 上下文预算单 §三(2026-09-19 修复):模型上限未知时,本地预算不被
+    // 锁死——常用十进制档全给,当前非整档值保留,整体标未验证(本地预算,
+    // 不冒充模型已支持)。现场:k3-256k 只有本地配置 1048576,目录没声明
+    // 上限——用户要能调到 256000。
     const auto out = cli::BuildContextWindowCandidates(std::nullopt, std::size_t{300000});
     CHECK(out.unverified);
     CHECK_FALSE(out.limit_known);
-    REQUIRE(out.values.size() == 1);
-    CHECK(out.values[0] == 300000);  // 只有当前值,标未验证,不猜高档
+    CHECK_FALSE(out.current_over_limit);
+    // 常用十进制档 + 当前非整档值,升序去重。
+    CHECK(out.values == std::vector<std::size_t>{8000, 16000, 32000, 64000, 128000,
+                                                 200000, 256000, 300000, 400000, 512000, 1000000});
+    // 现场形状:当前 1048576(本地配置的 MiB 数),可切到 256000。
+    const auto live = cli::BuildContextWindowCandidates(std::nullopt, std::size_t{1048576});
+    CHECK(live.unverified);
+    CHECK(std::find(live.values.begin(), live.values.end(), std::size_t{256000}) != live.values.end());
+    CHECK(std::find(live.values.begin(), live.values.end(), std::size_t{1048576}) != live.values.end());
+    CHECK(std::find(live.values.begin(), live.values.end(), std::size_t{2000000}) ==
+          live.values.end());  // 不给百万以上的猜测延伸档
 }
 
 TEST_CASE("BuildContextWindowCandidates: 当前值超限照实保留并标异常,不夹档") {
@@ -146,7 +159,38 @@ TEST_CASE("BuildContextWindowCandidates: 零上限按未知处理,不生成零�
     const auto out = cli::BuildContextWindowCandidates(std::size_t{0}, std::size_t{256000});
     CHECK(out.unverified);
     CHECK_FALSE(out.limit_known);
-    CHECK(out.values == std::vector<std::size_t>{256000});
+    // 未知口径:常用档 + 当前值,全部标未验证(§三)。
+    CHECK(out.values == std::vector<std::size_t>{8000, 16000, 32000, 64000, 128000,
+                                                 200000, 256000, 400000, 512000, 1000000});
+}
+
+// ---------------------------------------------------------------------------
+// 统一值校验(§三:命令与面板同一把尺)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CheckContextWindowValue: 超限拒绝、零拒绝、未知上限放行") {
+    SUBCASE("已知上限,值超限:拒绝并带回上限") {
+        const auto out = cli::CheckContextWindowValue(std::size_t{256000}, std::size_t{300000});
+        CHECK_FALSE(out.ok);
+        CHECK(out.limit == 256000);
+    }
+    SUBCASE("已知上限,值等于上限:放行") {
+        const auto out = cli::CheckContextWindowValue(std::size_t{256000}, std::size_t{256000});
+        CHECK(out.ok);
+    }
+    SUBCASE("未知上限:任何正数放行(本地预算不锁死)") {
+        const auto out = cli::CheckContextWindowValue(std::nullopt, std::size_t{1048576});
+        CHECK(out.ok);
+        CHECK(out.limit == 0);
+    }
+    SUBCASE("零上限按未知:放行") {
+        const auto out = cli::CheckContextWindowValue(std::size_t{0}, std::size_t{256000});
+        CHECK(out.ok);
+    }
+    SUBCASE("零值:拒绝") {
+        const auto out = cli::CheckContextWindowValue(std::nullopt, std::size_t{0});
+        CHECK_FALSE(out.ok);
+    }
 }
 
 TEST_CASE("BuildContextWindowCandidates: 十进制档位标签可由配置解析器无损读回") {
@@ -490,12 +534,19 @@ TEST_CASE("BuildContextWindowPanelFrame: 变更后 Selected 带 Unsaved;焦点�
     CHECK(frame2.lines[6].rfind("> ", 0) == 0);
 }
 
-TEST_CASE("BuildContextWindowPanelFrame: 未知能力不画箭头,附不可调说明") {
+TEST_CASE("BuildContextWindowPanelFrame: 上限未知全档标未验证,可调但不冒充已核实") {
     cli::ContextWindowPanelView view = MakeView();
-    // 窗口能力未知:单候选,不画 "< >",当前值标未验证。
+    // 窗口能力未知(§三,2026-09-19 修复):常用档全给、可调——本地预算
+    // 不被未知上限锁死;每一档都标未验证,说明行写"本地预算;模型上限
+    // 未知"。
     view.window = cli::BuildContextWindowCandidates(std::nullopt, std::size_t{300000});
-    view.window_index = 0;
-    view.original_window_index = 0;
+    REQUIRE(std::find(view.window.values.begin(), view.window.values.end(), std::size_t{300000}) !=
+            view.window.values.end());
+    view.window_index =
+        static_cast<std::size_t>(std::find(view.window.values.begin(), view.window.values.end(),
+                                           std::size_t{300000}) -
+                                 view.window.values.begin());
+    view.original_window_index = view.window_index;
     // 思考能力未知:行不可调,保留说明("Capabilities unknown" 一类)。
     view.effort.control = cli::ThinkEffortControl::Unknown;
     view.effort.options.clear();
@@ -505,8 +556,14 @@ TEST_CASE("BuildContextWindowPanelFrame: 未知能力不画箭头,附不可调�
 
     const auto frame = cli::BuildContextWindowPanelFrame(view, 80);
     CHECK(frame.lines[3] == "  " + cli::tr("cw_panel.context_desc"));
-    CHECK(frame.lines[4].rfind("  < ", 0) != 0);  // 不画暗示可切换的箭头(§三)
-    CHECK(frame.lines[4].find(cli::tr("cw_panel.unverified")) != std::string::npos);
+    CHECK(frame.lines[4].rfind("  < ", 0) == 0);  // 多候选,画箭头(可调)
+    CHECK(frame.lines[4].find("300K") != std::string::npos);
+    CHECK(frame.lines[4].find(cli::tr("cw_panel.unverified")) != std::string::npos);  // 全档标未验证
+    // 换到预设档 256K:同样标未验证——不显示成模型已支持。
+    view.window_index = view.window_index - 1;  // 256000(300000 的前一档)
+    const auto frame_preset = cli::BuildContextWindowPanelFrame(view, 80);
+    CHECK(frame_preset.lines[4].find("256K") != std::string::npos);
+    CHECK(frame_preset.lines[4].find(cli::tr("cw_panel.unverified")) != std::string::npos);
     CHECK(frame.lines[8].find("Medium") != std::string::npos);
     CHECK(frame.lines[8].find(cli::tr("cw_panel.unknown_caps")) != std::string::npos);
     CHECK(frame.lines[8].rfind("  < ", 0) != 0);

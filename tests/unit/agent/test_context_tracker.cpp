@@ -484,3 +484,176 @@ TEST_CASE("C4 异常样本: 数字保留原数,本场命中率分子分母不认
     // session 累计只含自洽那笔:900/1000 仍是 90%。
     CHECK(tracker.session_cache_hit_percent() == 90);
 }
+
+// ---------------------------------------------------------------------------
+// 上下文预算单(§三/§四/§五):预算来路、会话重置、迟到闸与恢复裁决。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SetWindowBudget: 值与来路/身份一起落,window_manually_set 按来路判") {
+    cli::ContextTracker tracker(200000);
+    CHECK(tracker.window_source() == cli::ContextWindowSource::Default);
+    CHECK_FALSE(tracker.window_manually_set());
+
+    tracker.SetWindowBudget(1048576, cli::ContextWindowSource::Config);
+    CHECK(tracker.window_tokens() == 1048576);
+    CHECK_FALSE(tracker.window_manually_set());
+
+    tracker.SetWindowBudget(256000, cli::ContextWindowSource::Manual, "moonshot", "kimi");
+    CHECK(tracker.window_tokens() == 256000);
+    CHECK(tracker.window_manually_set());
+    CHECK(tracker.window_provider() == "moonshot");
+    CHECK(tracker.window_model() == "kimi");
+
+    // 裸 set_window_tokens 只改值,不来路——旧调用点不顺手标成手动。
+    tracker.SetWindowBudget(400000, cli::ContextWindowSource::Resumed, "p", "m");
+    tracker.set_window_tokens(512000);
+    CHECK(tracker.window_tokens() == 512000);
+    CHECK(tracker.window_source() == cli::ContextWindowSource::Resumed);
+    CHECK_FALSE(tracker.window_manually_set());
+}
+
+TEST_CASE("ResetSession: 清统计留窗口(§五:模拟 66.3k 占用 + 65.3k 缓存清场)") {
+    cli::ContextTracker tracker(1048576);
+    tracker.BeginUserTurn("turn-1", "第一问");
+    tracker.ApplyUsage(api::Usage{1000, 0, 65300, 0}, "turn-1", 0);
+    tracker.ApplyUsage(api::Usage{66300, 100, 65300, 0}, "turn-1", 1);
+    REQUIRE(tracker.current_tokens() > 0);
+    REQUIRE(tracker.last_cache_read_tokens() == 65300);
+    REQUIRE(tracker.session_input_total() > 0);
+    REQUIRE(tracker.total_model_requests() == 2);
+    REQUIRE_FALSE(tracker.cache_request_history().empty());
+    REQUIRE_FALSE(tracker.turn_labels().empty());
+    tracker.set_server_prefix_caching(true);
+
+    tracker.SetWindowBudget(256000, cli::ContextWindowSource::Manual, "prov", "model");
+    tracker.ResetSession();
+
+    // 窗口与来路保留(§五:/clear 不改预算)。
+    CHECK(tracker.window_tokens() == 256000);
+    CHECK(tracker.window_manually_set());
+    CHECK(tracker.window_provider() == "prov");
+    // 观测值全清:占用、最近缓存、累计、请求账、轮次账、旧值标记。
+    CHECK(tracker.current_tokens() == 0);
+    CHECK(tracker.last_cache_read_tokens() == 0);
+    CHECK(tracker.last_total_input_tokens() == 0);
+    CHECK(tracker.last_cache_hit_percent() == -1);  // 没实测:不冒充 0%
+    CHECK(tracker.session_cache_hit_percent() == -1);
+    CHECK(tracker.cache_request_history().empty());
+    CHECK(tracker.total_model_requests() == 0);
+    CHECK(tracker.turn_labels().empty());
+    CHECK_FALSE(tracker.usage_stale());
+    // 端点属性观测保留(归 provider 不归会话)。
+    CHECK(tracker.server_prefix_caching().has_value());
+
+    // 首次新 usage 正常更新(§七:新场首笔实测照记)。
+    tracker.BeginUserTurn("turn-1", "新场第一问");
+    tracker.ApplyUsage(api::Usage{2000, 10, 0, 0}, "turn-1", 0);
+    CHECK(tracker.current_tokens() == 2010);
+    CHECK(tracker.total_model_requests() == 1);
+}
+
+TEST_CASE("ResetSession: 迟到闸——清场后旧场带号 usage 丢弃,不带号照旧") {
+    cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-9", "旧场");
+    tracker.ApplyUsage(api::Usage{5000, 0, 0, 0}, "turn-9", 0);
+    CHECK(tracker.current_tokens() == 5000);
+
+    tracker.ResetSession();
+    // 旧场的迟到回执(带号):丢弃,数字不写回。
+    tracker.ApplyUsage(api::Usage{9999, 0, 9999, 0}, "turn-9", 1);
+    CHECK(tracker.current_tokens() == 0);
+    CHECK(tracker.total_model_requests() == 0);
+    // 不带号的账没有身份可核:按老行为放行(单发/单测路径)。
+    tracker.ApplyUsage(api::Usage{700, 0, 0, 0});
+    CHECK(tracker.current_tokens() == 700);
+    // 新场首个轮次登记后,闸收口,带号 usage 正常记账。
+    tracker.ResetSession();
+    tracker.BeginUserTurn("turn-1", "新场");
+    tracker.ApplyUsage(api::Usage{300, 0, 100, 0}, "turn-1", 0);
+    CHECK(tracker.current_tokens() == 400);
+}
+
+TEST_CASE("ResolveRestoredContextWindow: 本次明确覆盖 > 匹配身份会话账 > 回落") {
+    SUBCASE("本次手动设置压过会话账") {
+        cli::RestoredWindowInput in;
+        in.session_window_present = true;
+        in.session_window_tokens = 1048576;
+        in.session_provider = "prov";
+        in.session_model = "kimi";
+        in.manual_override = true;
+        in.now_provider = "prov";
+        in.now_model = "kimi";
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK_FALSE(out.apply);
+        CHECK(std::string(out.note) == "resume_window.manual_kept");
+    }
+    SUBCASE("旧档无记录:回落当前配置") {
+        cli::RestoredWindowInput in;
+        in.now_provider = "prov";
+        in.now_model = "kimi";
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK_FALSE(out.apply);
+        CHECK(std::string(out.note) == "resume_window.no_record");
+    }
+    SUBCASE("身份匹配:套用会话账") {
+        cli::RestoredWindowInput in;
+        in.session_window_present = true;
+        in.session_window_tokens = 256000;
+        in.session_provider = "prov";
+        in.session_model = "kimi";
+        in.now_provider = "prov";
+        in.now_model = "kimi";
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK(out.apply);
+        CHECK(out.tokens == 256000);
+        CHECK(std::string(out.note) == "resume_window.restored");
+    }
+    SUBCASE("身份对不上:不拿模型 A 的预算套给模型 B") {
+        cli::RestoredWindowInput in;
+        in.session_window_present = true;
+        in.session_window_tokens = 256000;
+        in.session_provider = "prov-a";
+        in.session_model = "model-a";
+        in.now_provider = "prov-b";
+        in.now_model = "model-b";
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK_FALSE(out.apply);
+        CHECK(std::string(out.note) == "resume_window.identity_mismatch");
+    }
+    SUBCASE("旧档身份不全:不能确认属于当前模型,回落") {
+        cli::RestoredWindowInput in;
+        in.session_window_present = true;
+        in.session_window_tokens = 256000;
+        in.session_model = "kimi";  // provider 缺
+        in.now_provider = "prov";
+        in.now_model = "kimi";
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK_FALSE(out.apply);
+        CHECK(std::string(out.note) == "resume_window.identity_mismatch");
+    }
+    SUBCASE("旧值超已知上限:拒绝套用,不静默截断") {
+        cli::RestoredWindowInput in;
+        in.session_window_present = true;
+        in.session_window_tokens = 1048576;
+        in.session_provider = "prov";
+        in.session_model = "kimi";
+        in.now_provider = "prov";
+        in.now_model = "kimi";
+        in.declared_limit = std::size_t{256000};
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK_FALSE(out.apply);
+        CHECK(std::string(out.note) == "resume_window.over_limit_rejected");
+    }
+    SUBCASE("上限未知:不拦,本地预算不锁死") {
+        cli::RestoredWindowInput in;
+        in.session_window_present = true;
+        in.session_window_tokens = 1048576;
+        in.session_provider = "prov";
+        in.session_model = "kimi";
+        in.now_provider = "prov";
+        in.now_model = "kimi";
+        const auto out = cli::ResolveRestoredContextWindow(in);
+        CHECK(out.apply);
+        CHECK(out.tokens == 1048576);
+    }
+}
