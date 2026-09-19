@@ -472,13 +472,14 @@ def section_e2e():
                  record.get("state"))
         check("staging 清空", not os.listdir(os.path.join(root, "staging")))
 
-        # 幂等重跑:免下载,不添新目录
+        # 幂等重跑:免下载,不添新目录(committed 是终态,重跑新开一笔账是
+        # 如实记账,不算重复安装)
         rc, out = run_updater(["update", "--install-root", root, "--version", "2.0.0",
                                "--archive", archive2, "--digest", "sha256:" + digest2])
         check_eq("幂等重跑退 0", 0, rc)
         check("幂等重跑免下载", "已在且核对通过" in out, out[-300:])
         check_eq("版本目录不重复", 1, len(os.listdir(os.path.join(root, "versions"))))
-        check_eq("幂等重跑不添事务", 1, len(txn_files(root)))
+        check_eq("幂等重跑新开一笔账", 2, len(txn_files(root)))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
