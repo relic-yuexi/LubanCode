@@ -120,6 +120,10 @@ std::vector<SessionUiDispatcher::Entry> SessionUiDispatcher::StealPending() {
         stolen.push_back(std::move(pending_.front()));
         pending_.pop_front();
     }
+    // 在飞记账与出队同一把队锁:Quiesce 的判据(pending 空 && inflight 0)
+    // 不存在"已出队、还没计账"的窗——否则静默屏障会提前放行,收口 chrome
+    // 与在飞渲染之间又见了缝。
+    inflight_ += stolen.size();
     return stolen;
 }
 
@@ -150,10 +154,8 @@ void SessionUiDispatcher::Quiesce() {
 
 void SessionUiDispatcher::RunEntriesOnCaller(std::vector<Entry> entries) {
     if (!entries.empty()) {
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex_);
-            inflight_ += entries.size();
-        }
+        // inflight_ 的加账在出队处(StealPending/消费线程的同一把队锁),
+        // 这里只减账:执行中始终计入,Quiesce 不会提前放行。
         for (Entry& entry : entries) {
             std::lock_guard<std::recursive_mutex> commit(commit_mutex_);
             ExecuteEntryLocked(entry);
@@ -193,14 +195,13 @@ void SessionUiDispatcher::ExecuteEntryLocked(const Entry& entry) {
             entry.done->set_value();
         }
     } catch (...) {
+        // 异步动作的异常进 promise(等待方拿到),不穿线程——消费线程
+        // 暴毙会拖垮整场会话。done 为空的防御路同样吞掉,stderr 留名。
         if (entry.done != nullptr) {
             entry.done->set_exception(std::current_exception());
         }
-        // RunSync 直呼的命令没有 done(直接调 body),异常穿透;这里只兜
-        // 异步动作:吞进 promise,日志一行。
-        if (entry.done == nullptr) {
-            throw;
-        }
+        std::fprintf(stderr, "[session-ui] action failed\n");
+        std::fflush(stderr);
     }
 }
 
@@ -232,6 +233,8 @@ void SessionUiDispatcher::ConsumerMain() {
                 batch.push_back(std::move(pending_.front()));
                 pending_.pop_front();
             }
+            // 在飞记账与出队同锁(见 StealPending 同款注释)。
+            inflight_ += batch.size();
         }
         RunEntriesOnCaller(std::move(batch));
         batch.clear();
