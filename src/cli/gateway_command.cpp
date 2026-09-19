@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "app/version.hpp"
+#include "app/launcher.hpp"  // GitHubRelease自动更新单 P1:固定入口布局识别
 #include "gateway/automation_store.hpp"
 #include "gateway/control_server.hpp"
 #include "gateway/doctor.hpp"
@@ -380,7 +381,9 @@ namespace {
 
 // 装配服务定义:exe 用当前进程的可执行文件(服务单元钉绝对路径),状态
 // 根钉进 --gateway-root 参数,日志落 profile 树 logs/。拿不到 exe 明错
-// ——钉不了路径就不装。
+// ——钉不了路径就不装。固定入口(GitHubRelease自动更新单 P1,§六):本
+// 进程住在 versions/<v>/ 里时改钉安装根启动器——单元路径不随版本目录搬
+// 家,更新只换 current 指针;doctor 按 entry_point=launcher 分账。
 bool BuildGatewayServiceSpec(const gateway::GatewayProfilePaths& paths,
                              const gateway::GatewayProfileConfig& config,
                              gateway::GatewayServiceSpec* spec, std::string* error) {
@@ -391,9 +394,24 @@ bool BuildGatewayServiceSpec(const gateway::GatewayProfilePaths& paths,
         }
         return false;
     }
+    const launcher::LayoutInfo layout = launcher::ClassifyExecutionLayout(*exe);
     spec->profile = paths.name.empty() ? std::string(gateway::kDefaultGatewayProfile)
                                        : paths.name;
-    spec->exe_path = *exe;
+    if (layout.layout == launcher::Layout::VersionedEntry &&
+        !layout.install_root.empty()) {
+        spec->exe_path = layout.install_root /
+                         platform::Utf8ToPath(
+#ifdef _WIN32
+                             "lubancode.exe"
+#else
+                             "lubancode"
+#endif
+                         );
+        spec->entry_point = "launcher";
+    } else {
+        spec->exe_path = *exe;
+        spec->entry_point = "direct";
+    }
     spec->gateway_root = paths.root;
     spec->working_dir = paths.root;
     spec->service_log = paths.logs_dir / "service.log";

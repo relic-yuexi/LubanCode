@@ -3,6 +3,7 @@
 
 #include "app/cli_options.hpp"
 #include "app/assistant_host.hpp"  // 常驻助理 Web 主界面单 W1:assistant 子命令宿主
+#include "app/launcher.hpp"  // GitHubRelease自动更新单 P1:固定启动器转发
 #include "app/interactive_session.hpp"
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章)
 #include "app/one_shot.hpp"
@@ -15,6 +16,7 @@
 #include "app/im_entry.hpp"
 #include "cli/channel_pairing_command.hpp"  // QQ 接入单 Q1b:channel pairing 批准口
 #include "cli/channel_setup_command.hpp"
+#include "cli/update_command.hpp"  // GitHubRelease自动更新单 P1:update 子命令
 #include "app_server/agent_wiring.hpp"  // P2:Agent/Skill 装配计划(应用Worker接入单)
 #include "app_server/connection_snapshot.hpp"  // §八:连接快照冻结 + §四.111 effective-config 诊断
 #include "app_server/harness_profile.hpp"  // P1:部署档解析(G01 生产装配)
@@ -747,6 +749,14 @@ std::optional<std::string> ValidateOneShotOutputTarget(const std::string& output
 // 一旦经这条路转一圈,就会被拆成不合法的 UTF-8 字节,喂给 nlohmann::json
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args) {
+    // 固定启动器转发(GitHubRelease自动更新单 P1,§六):本进程若站在安装
+    // 根的启动器位(current.json 与 versions/ 在旁),把参数原样转发给
+    // versions/<current>/ 的真实 EXE——参数、工作目录、环境、标准输入输出、
+    // 退出码、Ctrl+C 全保留——然后以子进程退出码收场。其余布局照常往下
+    // 走。放在一切家目录动作之前:启动器自己不碰用户数据。
+    if (const auto relayed = launcher::MaybeRelayToCurrent(args); relayed.has_value()) {
+        return *relayed;
+    }
     // 应用根启动门(应用Worker接入单 §四/P1):LUBANCODE_HOME /
     // LUBANCODE_DATA_HOME / LUBANCODE_MANAGED 三变量先识别、先校验,再
     // 干活——空值/相对路径/不合法重叠/托管缺根在这里明拒(退出码 1,
@@ -995,6 +1005,20 @@ int RunCli(const std::vector<std::string>& args) {
             // LuaHook P1-D:hook init 子命令(官方 scaffold)。
             return RunHookInitCommand(parsed_cli.hook);
         case CliAction::BadHook:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunUpdate: {
+            // GitHubRelease自动更新单 P1(§三):一键整包更新入口。检查/预演/
+            // 回滚/更新接同一更新服务(检查复用 config::CheckForUpdate 的
+            // 语义版本比较;事务细节交给受管更新助手 updater.py)。
+            cli::UpdateCommandArgs update_args;
+            update_args.verb = parsed_cli.update.verb;
+            update_args.prerelease = parsed_cli.update.prerelease;
+            update_args.json = parsed_cli.update.json;
+            update_args.from_archive = parsed_cli.update.from_archive;
+            return cli::RunUpdateCommand(update_args);
+        }
+        case CliAction::BadUpdate:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::ResetSystemPrompt: {

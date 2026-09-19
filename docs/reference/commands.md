@@ -16,6 +16,7 @@ command | lubancode "补充要求"
 lubancode app-server
 lubancode trajectory <verb> <session-id|workspace-key>
 lubancode gateway <run|status|stop> [options]
+lubancode update [--check|--dry-run|--rollback] [--prerelease] [--from <发行包>]
 lubancode archive <id|标题>
 lubancode unarchive <id>
 lubancode delete <id|标题> [--force]
@@ -30,8 +31,21 @@ lubancode delete <id|标题> [--force]
 | `app-server` | 无界面后台协议模式：stdin/stdout 上逐行 JSON-RPC，不碰终端、不画界面（见 [app-server 协议](../features/app-server/README.md)）。SSH 远程项目经 `ssh <host> lubancode app-server` 拉起。 |
 | `trajectory` | 验证、回放、用量、清理与导出本地 Trajectory；不发模型请求。 |
 | `gateway` | 前台运行、查询或停止 Gateway 骨架；当前只落 `run/status/stop`，后续运维面不冒充已成。 |
+| `update` | 一键整包更新（见下节）：查版、下载校验、技能保护预检、指针切换、健康检查，全程事务可回滚。 |
 | `archive` / `unarchive` / `delete` | 会话管理子命令，打完结果就退（见下）。 |
 | EOF | 交互模式退出；空行只重新显示提示符。 |
+
+### 更新子命令
+
+- `lubancode update`：一键整包更新。默认稳定通道，本地版本不低于远端时不降级（回退走 `--rollback`）。流程：查版（复用既有语义版本比较）→ 钉死 Release ID/asset ID/摘要下载 → 隔离解包并逐文件核对 manifest → 技能保护预检（复用安装脚本同一套所有权决策表；冲突未决停在 needs-review，退出码 2）→ `current.json` 同文件系统原子换指针（写前持久化事务与回退指针）→ 隔离数据根健康检查（跑新 EXE 的 `--version` 探针，不碰真实用户数据）→ 提交并清理。旧版本目录原地不动，旧进程继续用旧资源；Windows 不替换运行中的 EXE、不强杀。中途断掉重跑同一命令即可续上（不重下载）。
+- `lubancode update --check [--json]`：只查不改：版本、通道、安装布局、可用资产与其摘要。与 `--check-update`、交互 `/update check` 同一份检查服务。
+- `lubancode update --dry-run`：预演：列下载、迁移、保留、备份、冲突各项，不改安装、不动用户数据。
+- `lubancode update --rollback`：切回上次可用整包；先对新指针跑探针，不硬切。
+- `--prerelease`：显式选预发布通道（默认稳定）。
+- `--from <发行包>`：GitHub 不通时用本地官方包，走同一校验、保护与事务流程；摘要对本地包自算并钉进事务。
+- 退出码：0 成功/已是最新；1 失败（旧版继续可用）；2 needs-review（冲突待处理）；3 rolled-back（已恢复旧版）。
+- 安装布局：更新后为固定入口布局——安装根的 `lubancode`（`.exe`）是自举式启动器，按 `current.json` 把参数原样转发给 `versions/<当前版本>/` 的真实 EXE；参数、工作目录、环境、标准输入输出、退出码与 Ctrl+C 行为全保留。程序从自己的版本目录定位随包资源。旧平铺安装首次更新时自动迁移：受管树先完整备份，旧根 EXE 改名挪进备份，新版 EXE 落根位当启动器。
+- 边界（如实交代）：更新器事务需要本机有 python3（POSIX 系统自带；Windows 没装时命令会明确指引改走包内安装脚本，同为受保护流程）；后台自动更新（检查缓存/退出后安装）在 P2，本批只有手动一键。
 
 ### 会话管理子命令
 
@@ -140,7 +154,7 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 
 查询 GitHub `releases/latest`，按 SemVer 比较当前版本与最新正式 Release。裸敲与 `check` 同义；别的参数会打印用法。
 
-发现新版时，只打印版本、发布页和安装提示，不在运行中的进程里覆盖自己。下载新版发行包，再运行包内安装脚本；程序与官方 Skills 一并更新，`~/.lubancode/skills` 下的用户技能不动。检查失败只报网络、HTTP、JSON 或版本错误。
+发现新版时，打印版本、发布页与一键更新提示（`lubancode update`）；本命令只查不装。程序与官方 Skills 的更新由 `lubancode update` 或包内安装脚本完成，`~/.lubancode/skills` 下的用户技能不动。检查失败只报网络、HTTP、JSON 或版本错误。
 
 ## 项目与工作目录
 

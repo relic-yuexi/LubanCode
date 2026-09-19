@@ -51,7 +51,7 @@ $AppName = 'lubancode'
 $ExeName = 'lubancode.exe'
 
 # 受管官方树(整棵由清单说了算);根级官方件(EXE/LICENSE/声明等)也入清单
-$script:ManagedTrees = @('skills', 'docs', 'web', 'libexec', 'licenses')
+$script:ManagedTrees = @('skills', 'docs', 'web', 'libexec', 'licenses', 'updater')
 $script:RecordFiles = @('manifest.json', 'install-state.json')
 $script:ManifestReservedNames = @(
     'CON', 'PRN', 'AUX', 'NUL',

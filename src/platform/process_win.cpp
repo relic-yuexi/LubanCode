@@ -1472,4 +1472,40 @@ int RunInteractiveCommand(const std::string& command_utf8) {
     return _wsystem(wide.c_str());
 }
 
+int RunAttachedProcess(const std::vector<std::string>& argv, std::string* error) {
+    // 固定启动器转发(GitHubRelease自动更新单 P1):不重定向、不加 Job——
+    // 子进程与用户共享控制台,Ctrl+C 由控制台分发给两边的默认处理;我们
+    // 只等它退出、把退出码原样交回。
+    if (argv.empty() || argv.front().empty()) {
+        if (error != nullptr) *error = "RunAttachedProcess: argv 为空";
+        return -1;
+    }
+    const std::wstring exe = Utf8ToWide(argv.front());
+    std::vector<std::string> rest(argv.begin() + 1, argv.end());
+    const std::wstring cmdline = BuildProcessCommandLine(argv.front(), rest);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
+    cmdline_buf.push_back(L'\0');
+    // lpApplicationName 显式给 exe(命令行首段也带引号,CommandLineToArgvW
+    // 逆转义下两头一致);不设 STARTF_USESTDHANDLES = 继承控制台。
+    const BOOL ok = CreateProcessW(exe.c_str(), cmdline_buf.data(), nullptr, nullptr,
+                                   TRUE, 0, nullptr, nullptr, &si, &pi);
+    if (!ok) {
+        if (error != nullptr) {
+            *error = "启动子进程失败 " + argv.front() + "(Windows 错误码 " +
+                     std::to_string(GetLastError()) + ")";
+        }
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = static_cast<DWORD>(-1);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(exit_code);
+}
+
 }  // namespace lubancode::platform

@@ -173,4 +173,131 @@ std::expected<UpdateInfo, std::string> CheckForUpdate(const std::string& current
     return ParseLatestReleaseJson(response.text, current_version);
 }
 
+// ---------------------------------------------------------------------------
+// P1:update 子命令的 Release 解析与抓取
+// ---------------------------------------------------------------------------
+
+std::expected<ReleaseInfo, std::string> ParseReleaseInfoJson(const std::string& text) {
+    const nlohmann::json release = nlohmann::json::parse(text, nullptr, false);
+    if (release.is_discarded() || !release.is_object()) {
+        return std::unexpected("GitHub 返回的 Release 不是合法 JSON object");
+    }
+    if (!release.contains("tag_name") || !release["tag_name"].is_string() ||
+        release["tag_name"].get_ref<const std::string&>().empty()) {
+        return std::unexpected("GitHub Release 缺少 tag_name");
+    }
+    const auto parsed = ParseSemanticVersion(release["tag_name"].get<std::string>());
+    if (!parsed.has_value()) return std::unexpected("Release " + parsed.error());
+
+    ReleaseInfo info;
+    info.tag_name = release["tag_name"].get<std::string>();
+    info.version = parsed->normalized;
+    if (release.contains("html_url") && release["html_url"].is_string()) {
+        info.html_url = release["html_url"].get<std::string>();
+    }
+    if (release.contains("id") && release["id"].is_number_unsigned()) {
+        info.id = release["id"].get<std::uint64_t>();
+    }
+    if (release.contains("prerelease") && release["prerelease"].is_boolean()) {
+        info.prerelease = release["prerelease"].get<bool>();
+    }
+    if (release.contains("assets") && release["assets"].is_array()) {
+        for (const auto& asset : release["assets"]) {
+            if (!asset.is_object() || !asset.contains("name") || !asset["name"].is_string()) {
+                continue;
+            }
+            ReleaseAssetInfo entry;
+            entry.name = asset["name"].get<std::string>();
+            if (asset.contains("id") && asset["id"].is_number_unsigned()) {
+                entry.id = asset["id"].get<std::uint64_t>();
+            }
+            if (asset.contains("size") && asset["size"].is_number_unsigned()) {
+                entry.size = asset["size"].get<std::uint64_t>();
+            }
+            if (asset.contains("digest") && asset["digest"].is_string()) {
+                entry.digest = asset["digest"].get<std::string>();
+            }
+            if (asset.contains("browser_download_url") &&
+                asset["browser_download_url"].is_string()) {
+                entry.download_url = asset["browser_download_url"].get<std::string>();
+            }
+            info.assets.push_back(std::move(entry));
+        }
+    }
+    return info;
+}
+
+namespace {
+
+std::expected<std::string, std::string> GetReleaseJson(const char* url,
+                                                       int connect_timeout_ms,
+                                                       int request_timeout_secs) {
+    const cpr::Header headers{{"User-Agent", "lubancode-update-check"},
+                              {"Accept", "application/vnd.github+json"},
+                              {"X-GitHub-Api-Version", "2022-11-28"}};
+    const cpr::Response response = cpr::Get(
+        cpr::Url{url}, headers,
+        cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms)},
+        cpr::Timeout{std::chrono::seconds(request_timeout_secs)});
+    if (response.error) return std::unexpected("查询 GitHub Release 失败: " + response.error.message);
+    if (response.status_code < 200 || response.status_code >= 300) {
+        return std::unexpected("查询 GitHub Release 失败: HTTP " +
+                               std::to_string(response.status_code));
+    }
+    if (response.text.size() > 4 * 1024 * 1024) {
+        return std::unexpected("GitHub Release 响应超过 4 MiB，已拒绝解析");
+    }
+    return response.text;
+}
+
+}  // namespace
+
+std::expected<ReleaseInfo, std::string> FetchLatestRelease(int connect_timeout_ms,
+                                                            int request_timeout_secs) {
+    const auto text = GetReleaseJson(kLatestReleaseApiUrl, connect_timeout_ms, request_timeout_secs);
+    if (!text.has_value()) return std::unexpected(text.error());
+    auto info = ParseReleaseInfoJson(*text);
+    if (info.has_value()) info->prerelease = false;  // latest 语义:不含预发布
+    return info;
+}
+
+std::expected<ReleaseInfo, std::string> FetchNewestPrerelease(int connect_timeout_ms,
+                                                              int request_timeout_secs) {
+    const auto text = GetReleaseJson(kReleasesListApiUrl, connect_timeout_ms, request_timeout_secs);
+    if (!text.has_value()) return std::unexpected(text.error());
+    const nlohmann::json list = nlohmann::json::parse(*text, nullptr, false);
+    if (list.is_discarded() || !list.is_array()) {
+        return std::unexpected("GitHub releases 列表不是 JSON 数组");
+    }
+    for (const auto& item : list) {
+        if (!item.is_object()) continue;
+        if (!item.contains("prerelease") || !item["prerelease"].is_boolean() ||
+            !item["prerelease"].get<bool>()) {
+            continue;
+        }
+        // 列表元素与单枚 Release 同构,直接序列化给共享解析器
+        const auto info = ParseReleaseInfoJson(item.dump());
+        if (info.has_value()) return info;
+    }
+    return std::unexpected("没有找到预发布 Release");
+}
+
+std::expected<ReleaseAssetInfo, std::string> PickAssetForPlatform(const ReleaseInfo& release,
+                                                                  const std::string& platform) {
+    const std::string marker = "-" + platform + ".";
+    for (const auto& asset : release.assets) {
+        const std::size_t at = asset.name.find(marker);
+        if (at == std::string::npos) continue;
+        if (at + marker.size() <= asset.name.size()) return asset;  // 后缀是 .zip/.tar.gz
+    }
+    return std::unexpected("Release " + release.tag_name + " 里找不到平台 " + platform +
+                           " 的资产");
+}
+
+std::string ExeVersionFromTag(std::string_view tag) {
+    if (!tag.empty() && (tag.front() == 'v' || tag.front() == 'V')) tag.remove_prefix(1);
+    const std::size_t dash = tag.find('-');
+    return std::string(tag.substr(0, dash == std::string_view::npos ? tag.size() : dash));
+}
+
 }  // namespace lubancode::config

@@ -213,12 +213,23 @@ DoctorReport RunGatewayDoctor(const GatewayProfilePaths& paths, const DoctorOpti
                                          "安装记录钉的 exe 不在了: " + record->exe_path +
                                              "(重装或 gateway install 覆盖)"});
             } else if (!options.lubancode_version.empty() &&
-                       options.lubancode_version != record->lubancode_version) {
+                       options.lubancode_version != record->lubancode_version &&
+                       record->entry_point != "launcher") {
                 report.checks.push_back(
                     {"install.version_mismatch", DoctorSeverity::Warn,
                      "服务单元钉的是 " + record->lubancode_version + ",当前 exe 是 " +
                          options.lubancode_version +
                          "(升级后重跑 gateway install 刷新记录;回滚步骤见 runbook)"});
+            } else if (record->entry_point == "launcher") {
+                // 固定入口(P1,§六):单元钉的是安装根启动器,版本随 current
+                // 指针走,记录里的版本只是装时快照——差异不是病,不用重装。
+                report.checks.push_back({"install.ok", DoctorSeverity::Ok,
+                                         "固定入口 " + record->exe_path + "(装时 " +
+                                             record->lubancode_version + ",现在 " +
+                                             (options.lubancode_version.empty()
+                                                  ? "?"
+                                                  : options.lubancode_version) +
+                                             ",随 current 指针走)"});
             } else {
                 report.checks.push_back({"install.ok", DoctorSeverity::Ok,
                                          "exe " + record->exe_path + " 版本 " +

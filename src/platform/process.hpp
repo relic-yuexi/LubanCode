@@ -233,6 +233,14 @@ unsigned long CurrentProcessId();
 // 调用方须已收掉屏幕上的常驻帧(composer 框等),给编辑器让出整屏。
 int RunInteractiveCommand(const std::string& command_utf8);
 
+// 附着式子进程(GitHubRelease自动更新单 P1:固定启动器转发 + 更新助手
+// 流式输出共用):argv[0] 是可执行文件,不经过 shell;stdin/stdout/stderr、
+// 工作目录、环境、控制台(Ctrl+C)全部继承本进程;不捕获、不加 Job/进程组
+// ——子进程与用户直连,我们只负责等它退出并把退出码原样交回。POSIX 下
+// 子进程被信号打死返回 128+信号号;起不来返回 -1 并写 error。
+// Windows 实现走 CreateProcessW + CommandLineToArgvW 逆转义拼命令行。
+int RunAttachedProcess(const std::vector<std::string>& argv, std::string* error);
+
 #ifdef _WIN32
 
 // Windows 专属重载:cmdline 是完整的"可执行文件 + 参数"命令行,调用方

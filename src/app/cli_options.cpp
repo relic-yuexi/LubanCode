@@ -885,6 +885,63 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.kanban = kanban;
             return parsed;
         }
+        // update 子命令(GitHubRelease自动更新单 P1,§三):lubancode update
+        // [--check | --dry-run | --rollback] [--prerelease] [--from <发行包>]
+        // [--json 只 check 认]。只认裸词打头且此前没有位置参数。
+        if (arg == "update" && options.positional.empty()) {
+            UpdateCliArgs update;
+            for (std::size_t extra = i + 1; extra < args.size(); ++extra) {
+                if (args[extra] == "--check" || args[extra] == "--dry-run" ||
+                    args[extra] == "--rollback") {
+                    if (!update.verb.empty()) {
+                        parsed.action = CliAction::BadUpdate;
+                        parsed.error_text = "update 的动作只能给一个:--check / --dry-run / --rollback";
+                        return parsed;
+                    }
+                    update.verb = args[extra].substr(2);
+                    continue;
+                }
+                if (args[extra] == "--prerelease") {
+                    update.prerelease = true;
+                    continue;
+                }
+                if (args[extra] == "--json") {
+                    update.json = true;
+                    continue;
+                }
+                if (args[extra] == "--from") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty()) {
+                        parsed.action = CliAction::BadUpdate;
+                        parsed.error_text = "--from 需要一个发行包路径(zip / tar.gz)";
+                        return parsed;
+                    }
+                    update.from_archive = args[++extra];
+                    continue;
+                }
+                parsed.action = CliAction::BadUpdate;
+                parsed.error_text = "update 认不得参数 \"" + args[extra] +
+                                    "\":只认 --check / --dry-run / --rollback / --prerelease"
+                                    " / --from <发行包> / --json";
+                return parsed;
+            }
+            if (update.json && update.verb != "check") {
+                parsed.action = CliAction::BadUpdate;
+                parsed.error_text = "--json 只在 update --check 下有效";
+                return parsed;
+            }
+            if (update.verb == "rollback" && (update.prerelease || !update.from_archive.empty())) {
+                parsed.action = CliAction::BadUpdate;
+                parsed.error_text = "--rollback 不认 --prerelease / --from(回滚用本地上次可用整包)";
+                return parsed;
+            }
+            // --dry-run 也认 --prerelease:预演预发布通道不是错误。
+            parsed.action = CliAction::RunUpdate;
+            parsed.update = update;
+            return parsed;
+        }
+            parsed.kanban = kanban;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;

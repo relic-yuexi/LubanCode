@@ -64,6 +64,9 @@ struct GatewayServiceSpec {
     std::filesystem::path service_log;      // Windows/macOS 服务 stdout 落位
     std::filesystem::path service_err;      // macOS stderr 落位(Windows 与 log 合流)
     std::string lubancode_version;          // 进 install.json 对账(升级回滚)
+    // 固定入口(GitHubRelease自动更新单 P1,§六):版本化布局下钉安装根
+    // 启动器路径,服务单元不随版本目录搬家;direct = 老行为(钉本进程 exe)。
+    std::string entry_point = "direct";     // direct | launcher
     int shutdown_grace_secs = 30;           // systemd TimeoutStopSec = grace + 15
     int restart_count = 3;                  // Windows RestartOnFailure 次数
     int restart_interval_secs = 60;         // Windows RestartOnFailure 间隔
@@ -119,6 +122,7 @@ struct ServiceInstallRecord {
     std::string profile;
     std::string exe_path;         // UTF-8
     std::string lubancode_version;
+    std::string entry_point = "direct";  // direct | launcher(P1:固定入口对账用)
     std::string task_name;        // windows
     std::string unit_name;        // linux
     std::string launchd_label;    // macos

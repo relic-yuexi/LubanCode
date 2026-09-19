@@ -494,3 +494,55 @@ TEST_CASE("im:平台/账号/profile/select 落位;setup 与旗标互斥") {
     CHECK(ParseCliArgs(Args({"lubancode", "im", "--profile", "a/b"})).action == CliAction::BadIm);
     CHECK(ParseCliArgs(Args({"lubancode", "im", "qqbot", "--json"})).action == CliAction::BadIm);
 }
+
+// ---------------------------------------------------------------------------
+// update 子命令(GitHubRelease自动更新单 P1,§三)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("update: 裸词是一键更新,动词各落各") {
+    const ParsedCliArgs bare = ParseCliArgs(Args({"lubancode", "update"}));
+    CHECK(bare.action == CliAction::RunUpdate);
+    CHECK(bare.update.verb.empty());
+    CHECK_FALSE(bare.update.prerelease);
+
+    const auto check = ParseCliArgs(Args({"lubancode", "update", "--check"}));
+    CHECK(check.action == CliAction::RunUpdate);
+    CHECK(check.update.verb == "check");
+
+    const auto dry = ParseCliArgs(Args({"lubancode", "update", "--dry-run"}));
+    CHECK(dry.action == CliAction::RunUpdate);
+    CHECK(dry.update.verb == "dry-run");
+
+    const auto rollback = ParseCliArgs(Args({"lubancode", "update", "--rollback"}));
+    CHECK(rollback.action == CliAction::RunUpdate);
+    CHECK(rollback.update.verb == "rollback");
+}
+
+TEST_CASE("update: 通道与本地包旗标") {
+    const auto pre = ParseCliArgs(Args({"lubancode", "update", "--prerelease"}));
+    CHECK(pre.action == CliAction::RunUpdate);
+    CHECK(pre.update.prerelease);
+
+    const auto from = ParseCliArgs(
+        Args({"lubancode", "update", "--from", "D:/dl/lubancode-v0.26.300-windows-x64.zip"}));
+    CHECK(from.action == CliAction::RunUpdate);
+    CHECK(from.update.from_archive == "D:/dl/lubancode-v0.26.300-windows-x64.zip");
+
+    const auto check_json = ParseCliArgs(Args({"lubancode", "update", "--check", "--json"}));
+    CHECK(check_json.action == CliAction::RunUpdate);
+    CHECK(check_json.update.json);
+}
+
+TEST_CASE("update: 形状不对当场退用法") {
+    CHECK(ParseCliArgs(Args({"lubancode", "update", "--check", "--dry-run"})).action ==
+          CliAction::BadUpdate);
+    CHECK(ParseCliArgs(Args({"lubancode", "update", "--json"})).action == CliAction::BadUpdate);
+    CHECK(ParseCliArgs(Args({"lubancode", "update", "--rollback", "--prerelease"})).action ==
+          CliAction::BadUpdate);
+    CHECK(ParseCliArgs(Args({"lubancode", "update", "--rollback", "--from", "x.zip"})).action ==
+          CliAction::BadUpdate);
+    CHECK(ParseCliArgs(Args({"lubancode", "update", "--from"})).action == CliAction::BadUpdate);
+    CHECK(ParseCliArgs(Args({"lubancode", "update", "--nonsense"})).action == CliAction::BadUpdate);
+    // 位置参数之后不认:不当单发问句吞
+    CHECK(ParseCliArgs(Args({"lubancode", "问点啥", "update"})).action == CliAction::Proceed);
+}

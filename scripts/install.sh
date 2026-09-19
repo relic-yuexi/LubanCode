@@ -128,6 +128,8 @@ fi
 TREE_WEB="$INSTALL_DIR/web"
 TREE_LIBEXEC="$INSTALL_DIR/libexec"
 TREE_LICENSES="$INSTALL_DIR/licenses"
+# 受管更新助手(GitHubRelease自动更新单 P1):lubancode update 靠它跑事务
+TREE_UPDATER="$INSTALL_DIR/updater"
 
 # 记录件(manifest.json / install-state.json)都落在可执行文件旁边
 RECORD_DIR="$INSTALL_DIR"
@@ -156,7 +158,8 @@ run_plan() {
     fi
     set -- "$mode" --source "$SCRIPT_DIR" --record-dir "$RECORD_DIR" \
         --map "skills=$TREE_SKILLS" --map "docs=$TREE_DOCS" --map "web=$TREE_WEB" \
-        --map "libexec=$TREE_LIBEXEC" --map "licenses=$TREE_LICENSES" "$@"
+        --map "libexec=$TREE_LIBEXEC" --map "licenses=$TREE_LICENSES" \
+        --map "updater=$TREE_UPDATER" "$@"
     if [ -n "$extra_baseline" ]; then
         set -- "$@" --baseline-dir "$BASELINE_ARG"
     fi
@@ -168,7 +171,7 @@ has_existing_content() {
     [ -f "$INSTALL_DIR/$EXE_BASENAME" ] && return 0
     [ -f "$STATE_FILE" ] && return 0
     [ -f "$RECORD_DIR/manifest.json" ] && return 0
-    for d in "$TREE_SKILLS" "$TREE_DOCS" "$TREE_WEB" "$TREE_LIBEXEC" "$TREE_LICENSES"; do
+    for d in "$TREE_SKILLS" "$TREE_DOCS" "$TREE_WEB" "$TREE_LIBEXEC" "$TREE_LICENSES" "$TREE_UPDATER"; do
         if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
             return 0
         fi
@@ -212,7 +215,7 @@ full_backup_sh() {
     stamp=$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%SZ')
     backup_root="$RECORD_DIR/backups/$stamp-sh$$"
     mkdir -p "$backup_root"
-    for spec in "skills=$TREE_SKILLS" "docs=$TREE_DOCS" "web=$TREE_WEB" "libexec=$TREE_LIBEXEC" "licenses=$TREE_LICENSES"; do
+    for spec in "skills=$TREE_SKILLS" "docs=$TREE_DOCS" "web=$TREE_WEB" "libexec=$TREE_LIBEXEC" "licenses=$TREE_LICENSES" "updater=$TREE_UPDATER"; do
         tree=${spec%%=*}
         dir=${spec#*=}
         if [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
@@ -244,7 +247,7 @@ if [ "$BACKUP_ONLY" = 1 ]; then
     backup_root=$(full_backup_sh)
     info "完整备份完成:$backup_root"
     echo "[backup-only] 盘面文件清单:"
-    for d in "$TREE_SKILLS" "$TREE_DOCS" "$TREE_WEB" "$TREE_LIBEXEC" "$TREE_LICENSES"; do
+    for d in "$TREE_SKILLS" "$TREE_DOCS" "$TREE_WEB" "$TREE_LIBEXEC" "$TREE_LICENSES" "$TREE_UPDATER"; do
         [ -d "$d" ] && find "$d" -type f | sort
     done
     find "$RECORD_DIR" -maxdepth 1 -type f ! -name 'manifest.json' ! -name 'install-state.json' | sort
@@ -336,6 +339,7 @@ elif [ "$SRC_EXE" != "$DEST" ]; then
     sync_official_tree web "助理网页" "$TREE_WEB"
     sync_official_tree libexec "随包 ripgrep(libexec)" "$TREE_LIBEXEC"
     sync_official_tree licenses "第三方许可证(licenses)" "$TREE_LICENSES"
+    sync_official_tree updater "受管更新助手(updater)" "$TREE_UPDATER"
     if [ -f "$TREE_LIBEXEC/rg" ]; then
         chmod +x "$TREE_LIBEXEC/rg" 2>/dev/null || true
     fi
