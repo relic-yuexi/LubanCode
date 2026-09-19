@@ -98,7 +98,11 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
             question.question,
         };
         menu_options.hint = tr(question.multi_select ? "ask_user.menu_multi_hint" : "ask_user.menu_hint");
-        menu_options.invalid_hint = tr("ask_user.menu_select_one");
+        // §六:空提交文案自带操作说明——多选教人"空格勾选、Enter 提交",
+        // 单选保持旧口径。报错行另起一行,不再吞掉常驻按键提示(渲染侧
+        // console_input 同步改)。
+        menu_options.invalid_hint =
+            tr(question.multi_select ? "ask_user.menu_select_one_multi" : "ask_user.menu_select_one");
         menu_options.editable_hint = tr("ask_user.menu_edit_hint");
         lubancode::cli::ReadExitReason menu_exit = lubancode::cli::ReadExitReason::Cancel;
         const auto selected = lubancode::cli::ReadChoiceMenu(items, menu_options, theme, &menu_exit);

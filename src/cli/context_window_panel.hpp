@@ -14,7 +14,8 @@
 // 不另起第二套配置系统。
 //
 // 窗口是本地预算,不是服务端扩容:调到 1M 不代表端点真有 1M 能力——候选
-// 生成按目录声明上限过滤,能力未知时保守只显当前值并标未验证(§四)。
+// 生成按目录声明上限过滤;能力未知时给常用十进制档并整体标未验证
+//(§三,2026-09-19 修复:本地预算不再被未知上限锁死,也不冒充已核实)。
 #pragma once
 
 #include <cstddef>
@@ -39,7 +40,8 @@ inline constexpr std::size_t kContextWindowCommonCandidates[] = {
 };
 
 // 窗口候选的裁决结果。values 升序去重,当前预算必在其中(哪怕超限——
-// 照实显示标异常,不悄悄夹档);limit_known=false 时只有当前值,标未验证。
+// 照实显示标异常,不悄悄夹档);limit_known=false 时常用档全给并整体标
+// 未验证(本地预算,§三)。
 struct ContextWindowCandidates {
     std::vector<std::size_t> values;
     bool limit_known = false;          // 目录声明了模型上限
@@ -55,8 +57,22 @@ struct ContextWindowCandidates {
 // 不见 1048576 这类厂商原数,非整档上限如 786432 顶到 512K)。当前值照实
 // 保留在候选(§4.2 第 4/5 条,哪怕超限——标 current_over_limit,不悄悄
 // 夹档);去重排序。
+// 上限未知(上下文预算单 §三,2026-09-19 修复):不再锁死本地预算——
+// 常用十进制档全给,当前非整档值保留,整体标 unverified(本地预算;模
+// 型上限未知)。未验证档允许手动选择,但不能显示成模型已支持;不凭名
+// 字猜真实上限,不给百万以上的猜测延伸档。
 ContextWindowCandidates BuildContextWindowCandidates(std::optional<std::size_t> declared_limit,
                                                      std::size_t current_window);
+
+// 预算修改值的统一校验(§三):/context 命令与面板保存同一把尺,不能面
+// 板拦住、命令绕过。0 一律拒绝;已知上限时超限拒绝(不静默截断),limit
+// 带回上限值供拒绝文案。ok = 放行。
+struct ContextWindowValueCheck {
+    bool ok = false;
+    std::size_t limit = 0;  // 拒绝且因超限时有效
+};
+ContextWindowValueCheck CheckContextWindowValue(std::optional<std::size_t> declared_limit,
+                                                std::size_t value);
 
 // 候选标签:整档 200K / 400K / 1M / 128K;非整档真值(1048576 这类厂商
 // MiB 数)按十进制 K/M 折算("1.05M"/"131.1K"),不打裸数字(用户定案,
