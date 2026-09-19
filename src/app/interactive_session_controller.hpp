@@ -525,8 +525,8 @@ private:
     // ---- 子系统接线器(会话终章) ----
     // goal/loop/plan/peer/录制各一只:状态+装配+泵+存档恢复归接线器,
     // 控制器持句柄调;会话级状态(theme/config/标题活值)留本类。
-    // idle_wakes 是会话级的(子代理/loop/后台命令/标题精修四路并存),
-    // loop 接线器借去挂源。
+    // idle_wakes 是会话级的(子代理/loop/后台命令/标题精修/记忆回执五路
+    // 并存),loop 接线器借去挂源。
     lubancode::runtime::IdleWakeCoordinator idle_wakes_;
     lubancode::runtime::IdleWakeCoordinator::Subscription subagent_wake_token_;
     // 后台命令任务的唤醒源(background 管理面单):watcher 报终态那一刻
@@ -535,6 +535,10 @@ private:
     // 标题精修完工的唤醒源(通知时序缺陷单):精修完成不借下一次用户输入
     // 收货——Ready 翻真就让空闲 composer 让位,主循环当场记账改名打通知。
     lubancode::runtime::IdleWakeCoordinator::Subscription title_wake_token_;
+    // 记忆提交回执的唤醒源(记忆误报修复单 §五 C):本会话排的写入 job
+    // 回执落地(或 job 悬在 pending 却无活 worker)那一刻让位,主循环顶
+    // 收账打"已入库/写入失败"——不让后台线程直接打断输入区。
+    lubancode::runtime::IdleWakeCoordinator::Subscription memory_receipts_wake_token_;
     GoalSessionWiring goal_wiring_;
     LoopSessionWiring loop_wiring_;
     PlanSessionWiring plan_wiring_;

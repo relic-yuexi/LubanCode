@@ -45,8 +45,8 @@ struct MemoryCommandContext {
 };
 
 // /memory 的全部动作:status/on/off/use/learn/review/accept/reject/edit/
-// why/list/remember/forget/rebuild/stale/verify/refresh/show/open/migrate。
-// 用法不对打用法;project_memory 未装配打 unavailable。
+// why/list/jobs/retry/remember/forget/rebuild/stale/verify/refresh/show/
+// open/migrate。用法不对打用法;project_memory 未装配打 unavailable。
 void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw_args);
 
 // ---- 会话尾款的 memory 接线(终端接线收尾单自大类搬出) --------------------

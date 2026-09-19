@@ -1128,6 +1128,25 @@ std::string StableExtractErrorCode(const std::string& error) {
     return "other";
 }
 
+std::uint64_t AutoQueuedFromAssessedPayload(const nlohmann::json& payload) {
+    // 修复单 §五 D 的读侧统一口:新键优先,旧键是同一计数的历史名(排队
+    // 数,不是落盘数)。nlohmann 缺键经 value() 安全取默认,不碰 UB。
+    if (!payload.is_object()) return 0;
+    for (const char* key : {"autoQueued", "auto_queued"}) {
+        const auto found = payload.find(key);
+        if (found != payload.end() && found->is_number_unsigned()) {
+            return found->get<std::uint64_t>();
+        }
+    }
+    for (const char* key : {"autoWritten", "auto_written"}) {
+        const auto found = payload.find(key);
+        if (found != payload.end() && found->is_number_unsigned()) {
+            return found->get<std::uint64_t>();
+        }
+    }
+    return 0;
+}
+
 namespace {
 
 // §10.1 漏斗的 skip 计数器与 reason 的对账(一处收口,漏斗不散架)。
@@ -1298,7 +1317,7 @@ void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {
         if (!outcome.ok) payload["error_code"] = outcome.error_code;
         payload["extract_wall_ms"] = outcome.extract_wall_ms;
         payload["review_candidates"] = outcome.review_candidates;
-        payload["auto_written"] = outcome.auto_written;
+        payload["auto_queued"] = outcome.auto_queued;
         if (outcome.usage_reported) {
             payload["usage_reported"] = true;
             payload["input_tokens"] = outcome.input_tokens;
@@ -1363,7 +1382,7 @@ void MemoryTurnLedger::RecordAssessedV3Locked(trajectory::v3::V3Writer& writer,
         if (!outcome.ok) payload["errorCode"] = outcome.error_code;
         payload["extractWallMs"] = outcome.extract_wall_ms;
         payload["reviewCandidates"] = outcome.review_candidates;
-        payload["autoWritten"] = outcome.auto_written;
+        payload["autoQueued"] = outcome.auto_queued;
         if (outcome.usage_reported) {
             payload["usageReported"] = true;
             payload["inputTokens"] = outcome.input_tokens;

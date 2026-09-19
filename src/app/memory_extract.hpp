@@ -252,6 +252,12 @@ std::vector<std::string> EvaluateTurnDurableSignals(const std::string& user_text
 std::string StableExtractErrorCode(const ExtractionError& error);
 std::string StableExtractErrorCode(const std::string& error);
 
+// 修复单 §五 D:assessed 事件里的"自动直写排队数"读侧统一口。新版账写
+// autoQueued(v3)/auto_queued(v2);旧账的 autoWritten/auto_written 是同一
+// 个数的旧名(排队计数,不是落盘计数),读侧兼容解释,不回改历史账。
+// 两个键都在时认新键;都没有给 0。
+std::uint64_t AutoQueuedFromAssessedPayload(const nlohmann::json& payload);
+
 // 一场会话的调度漏斗(§10.1"每场至少聚合")。P0 在线的计数器填得出;
 // P1/P3 的计数器先立在表里恒 0,接线那批才动。
 struct ExtractionFunnel {
@@ -336,7 +342,7 @@ public:
         std::int64_t cached_tokens = 0;  // cache_read + cache_creation
         std::int64_t extract_wall_ms = 0;
         std::size_t review_candidates = 0;  // 进待审区的候选数
-        std::size_t auto_written = 0;       // auto 档直写排队数
+        std::size_t auto_queued = 0;        // auto 档直写排队数(修复单 §五 D:只数排队,不冒充入库)
         std::string error_code;             // ok=false 时的稳定码
     };
     void NoteExtractionOutcome(const ExtractOutcome& outcome);

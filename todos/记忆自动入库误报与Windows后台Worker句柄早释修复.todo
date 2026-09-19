@@ -1,0 +1,229 @@
+# 记忆自动入库误报与 Windows 后台 Worker 句柄早释修复
+
+- 状态：下半截（P0-B+回归矩阵）已落地——PR #133（CI run 35423130856，windows-msvc+macos-clang 双腿绿）；上半截（P0-A 句柄池持有+部分文案）已由 PR #124 并入；源码排查与现场只读核对完成；现场三笔旧任务的备份核对与恢复消费仍待主人点名
+- 日期：2026-09-19
+- 级别：P0（写入任务无法完成、成功提示失真）
+- 源码基线：45f34058；行号以本次检出为准，后续按函数名定位
+- 范围：记忆队列、后台进程所有权、抽取提示、状态页、写入回执、回归用例
+- 关联：`记忆写入调度_显式保存门控批处理与成本账.todo`
+
+## 一、先下断语
+
+这次有两层毛病。
+
+第一层已经坐实：自动抽取只排进写入队列，界面便报“自动入库”。
+`/memory` 所说“待办 3”指三笔后台任务，不是三条待审候选。
+`/memory list` 只读正式库，尚未提交的任务自然不在里面。
+
+第二层有明确源码缺陷：Windows 后台进程绑定了带
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 标志的 Job Object，调用方却没留住句柄。
+`LaunchWorker()` 返回时，局部返回值析构，关闭 Job 句柄，尚未完成的 worker 随即被杀。
+因此不能只改一句文案了事。须先修进程寿命，再把排队、提交、失败三笔账分开。
+
+现场三笔任务仍未消费，与这条缺陷吻合。尚未核实现场 exe 对应提交，也未捕获当时
+子进程退出码，故不把“本次必然由早释触发”写成已完成真机复现。
+
+## 二、现场证据
+
+2026-09-19 约 01:46（Asia/Shanghai）只读检查：
+
+- 工作区键：`lubancode-4d95553fc4115958`。
+- 记忆目录：`C:\Users\moontidef\.lubancode\workspaces\D--lubancode--claude-worktrees-agent-aea-4d95553f\memory`。
+- 正式目录只有一份偏好正文，与用户贴出的 gh 代理条目相符；另有 index/catalog 等管理文件。
+- `C:\Users\moontidef\.lubancode\memory-jobs\pending` 内找到同工作区三笔 upsert：
+  - `1789753353477-0.json`
+  - `1789753353484-1.json`
+  - `1789753353713-2.json`
+- 三笔创建于 2026-09-19 01:42:33 本地时间，均指向上述 memory 目录，project_root 均存在。
+- 三个 `lifecycle/memsave-<文件名去后缀>/intent.json` 均不存在；`result.json` 也均不存在。
+- 检查时 memory-jobs 根只见 pending，未见 worker.lock 或 failed 目录。
+- 观察到正在运行的程序：`C:\Users\moontidef\AppData\Local\Programs\lubancode\lubancode.exe`。
+  文件版本资源未给出版本，不能据此认定与当前源码同版。
+
+以上说明任务确实留在磁盘队列，不能归为 list 显示漏项。没有 intent 只说明未留下处理
+回执，不能单凭这一点判定子进程从未启动。排查未重跑这些任务，未改正式记忆与队列。
+
+## 三、源码证据与调用链
+
+### 3.1 排队数冒充入库数
+
+`src/app/commands/memory_commands.cpp:729`，`ExtractTurnMemory()`：
+
+```text
+EnqueueSave(... AutoExtraction).has_value()
+  -> ++written
+  -> memory.extract.done(queued, written)
+```
+
+`src/cli/i18n.cpp:898` 把 written 印成“自动入库”；英文 :3001 印成 auto-saved。
+这里没有等待 worker，也没有读取提交回执。
+`src/app/memory_extract.hpp:332` 的 auto_written 注释已经承认它数的是“直写排队数”；
+`memory_extract.cpp:1243/:1308` 仍以 auto_written / autoWritten 写入账本，名称同样容易误导。
+
+### 3.2 worker 句柄在启动函数返回时丢失
+
+`src/memory/project_memory.cpp:3127`，`ProjectMemory::LaunchWorker()`：
+
+```text
+局部 spawned = RunProcessBackground(executable, --memory-worker, state_root)
+只检查 spawned.success
+return
+spawned.handle 最后一个所有者销毁
+```
+
+`src/platform/process_win.cpp:984` 附近，`RunProcessBackground()`：
+
+- 创建每任务 Job Object，设置 KILL_ON_JOB_CLOSE。
+- 把子进程绑进 Job，把句柄存到 BackgroundProcessHandle::Impl::job。
+- 返回 shared_ptr handle；函数内没有另一个长期所有者接管它。
+
+同文件 :249，`BackgroundProcessHandle::~BackgroundProcessHandle()` 关闭 job。
+两段代码合起来：绑定成功且子进程尚未结束时，LaunchWorker 返回就会杀掉 worker。
+子进程若抢先写完，偶尔也能成功；不能用偶然成功推翻这条寿命缺陷。
+会话级 Job 另有句柄，不会抵消每任务 Job 的关闭行为。
+
+### 3.3 启动失败仍走成功分支，提示随返回字符串丢掉
+
+`project_memory.cpp:3116-3124`，`EnqueueJob()` 先原子写 pending，再启动 worker。
+启动失败时仍返回 expected 的成功值：`job_name + "（已排队；后台未启动: ...）"`。
+抽取调用方只查 has_value，不展示字符串，照样增加 written。
+`EmitWriteReceipt()` 还会把整串文字当 job_id，影响按 ID 查账。
+`LaunchWorker()` 遇 executable 为空也返回成功；这是测试便利，不能当生产启动成功。
+
+### 3.4 正式条目、待写任务、待审候选各走一处
+
+- `ListEntries()`（:3138）读 `LoadCatalog(memory_dir_)`；catalog 缺失或坏掉才回扫正文。
+- `Status()`（:3162 起）按 workspace_key 数 pending 与 failed，另数候选。
+- `/memory`（memory_commands.cpp:107）只打印 entry_count、pending_jobs；没有显示已有 failed_jobs。
+- `cmd.memory.counts`（i18n.cpp:884）把 pending_jobs 译成含糊的“待办”。
+- worker（project_memory.cpp:3814，`RunPendingMemoryJobs()`）拿全局锁、扫描任务、调用 ProcessJob。
+- `ProcessJob()`（:1850）先落 intent，再写正式库与 result，成功后外层才删 pending。
+- `src/app/session_stack.cpp:43` 启动会话时也调用 LaunchWorker，仍受同一寿命缺陷影响。
+
+### 3.5 现有测试绕过了实际启动链
+
+例如 `tests/unit/memory/test_project_memory.cpp:111`：构造空 executable 的 ProjectMemory，
+EnqueueSave 后手动调用 RunPendingMemoryJobs。它能验证存储，却抓不住启动后句柄早释。
+不能拿这类测试通过，代替 Windows 真子进程验收。
+
+## 四、修复合同
+
+1. auto 表示合格记忆无需人工审核；不等于异步写入已提交。
+2. 排队成功只报“已排队”；正式提交并取得回执后才能报“已入库”。
+3. 不把 pending job 混进 `/memory list`，不虚增正式条目数掩盖 worker 故障。
+4. 已持久化的 job 必须有纯净、稳定的 job_id；错误文字另列字段。
+5. 启动失败保留任务，显示原因与重试入口；不得叫模型重抽来补写。
+6. 不移除通用进程层 KILL_ON_JOB_CLOSE，不牺牲普通后台命令的停止与退出收尾。
+7. 一笔更新也可提交成功，条目总数未必增加；不能要求“成功三笔必定增加三个 ID”。
+8. 查询按工作区隔离；重试不得把别的工作区任务数量算到当前会话。
+
+## 五、实现方案
+
+### A. 给 memory worker 安排长期所有者
+
+在 memory 服务装配处设置 worker supervisor，按规范化 state_root 共享；同根多份
+ProjectMemory 共用，不让每次 EnqueueSave 都生成一批互相争锁的子进程。
+supervisor 留住 BackgroundSpawnResult.handle、pid、log_path，直到确认进程退出并收账。
+ProjectMemory 只请求 EnsureRunning，不独自丢弃或替换仍存活的句柄。
+
+EnsureRunning 与退出回收须串行协调：活 worker 尚在时合并唤醒请求；已退出时收退出码，
+再查 pending。须堵住“worker 扫到空、准备退出，新任务恰好进来”的空窗。
+保留文件锁承接跨宿主竞争；单宿主管理器不能替代跨进程锁。
+
+启动成功只代表进程创建成功。进程提前退出而任务仍在，记 worker_exited_with_pending，
+保留退出码和日志路径，按有界退避重试；达到上限后提示，不能忙循环反复拉起。
+正常退出先给 worker 一段有界收尾时间；超时仍保留 pending，下次会话恢复。
+manager 析构、会话 clear、项目对象替换时，不能把仍承载写入的唯一句柄随手释放。
+
+### B. 返回结构化入队结果
+
+把 expected<string, error> 的成功值收敛为结构体，至少含：
+
+```text
+job_id             纯文件 ID，不拼说明文字
+queue_state        persisted
+worker_state       started / already_running / start_failed / unavailable
+worker_error_code  可选稳定码
+worker_error       可选短说明
+```
+
+适配 EnqueueSave、候选接受、显式 remember、工具保存及共享 EnqueueJob 调用方。
+queue 持久化失败才判“未入队”；已排队但启动失败须同时保留这两个事实。
+测试通过显式禁用启动或注入 launcher 表明用途，不再拿空 executable 冒充启动成功。
+
+### C. 修提示与诊断
+
+立即把尾部提示改为：“新候选 0 条待审；自动写入已排队 3 条。”中英文一起改。
+启动失败追加短提示，附诊断入口；不要吞掉队列成功值里的错误。
+状态页改成“已入库条目 1；待写任务 3；写入失败 0；待审候选 0”。
+这里“待写任务”可包含正在处理但未从 pending 删除的任务，不伪造精确 running 数。
+
+新增 `/memory jobs` 查看当前工作区任务：job_id、排队时间、等待时长、worker 状态、
+失败码、日志位置；`/memory jobs retry` 唤醒 pending。
+重试 failed 须显式选择，并检查原 job 与已有 result，避免重放已提交任务。
+已有 Doctor 路径也接入摘要，正常状态查询保持只读。
+
+完成通知从现有 lifecycle/result.json 获取，核对 operation_id、workspace、outcome 后
+再显示“已入库”。经现有 UI 事件泵投递，去重；不让后台线程直接打断输入区。
+用户层无同形 workspace 回执，须补等价完成依据，不能按 pending 消失便猜成功。
+
+### D. 把账本命名与提交凭据对齐
+
+内部 written / auto_written 改为 auto_queued；新版账本写 autoQueued 或 auto_queued，
+随所在 schema 风格统一。历史字段明确解释为旧排队计数，读侧兼容，不能回改历史账。
+committed 数只从真正提交回执汇总，queued receipt 的 job_id 不得混入诊断文字。
+复用既有 ProcessJob intent/result 和成功重放幂等检查，不另造平行提交账。
+区分回执写失败、正文写失败、catalog 更新失败及子进程启动失败，保留可追踪原因。
+
+## 六、分批落地与验收
+
+### P0-A：修寿命与误报
+
+- [ ] 引入 worker 长期所有者，保存句柄、退出码与日志位置。
+- [ ] 修中英文自动入库文案；状态页显示待写、失败、待审三类数字。
+- [ ] 返回结构化入队结果；启动失败不丢提示、不污染 job_id。
+- [ ] 核对当前发布 exe 与源码版本，记录修复版本。
+
+验收：Windows 走真实 LaunchWorker，调用返回后子进程仍能完成写入。
+生产库出现正文、catalog 与成功回执后，才出现完成提示。
+
+### P0-B：补恢复与可诊断入口
+
+- [x] 接入退出回收、等待超限提示、有界重试与 pending 唤醒。（PR #133；共享监督器按规范化 state_root 进程级共享：收割记退出码/日志，带 pending 的非干净退出记 worker_exited_with_pending，有界退避 1s→30s 封顶不忙循环；worker 空扫 150ms 复核+宿主侧"活 worker 未握锁即补拉"堵空窗；会话退场 2s 有界收尾。测试：`真 worker 连续入队不起风暴`/`missing worker reports queued but not started`/`坏 exe 启动失败不丢提示`）
+- [x] 补 `/memory jobs`、retry、Doctor 信息，按工作区过滤。（PR #133；`/memory jobs` 列 job_id/排队时间/等待时长/worker 状态/失败码/日志，按 workspace_key 隔离；`retry` 唤醒 pending，retry failed 须显式点名且 committed 回执拒重放、新 job 名全新 lifecycle 账；doctor 补待写积压与 worker 事故摘要（只读）。测试：`/memory jobs 台账按工作区隔离,failed 可显式重试且防重放`）
+- [x] 消费提交回执，补 UI 完成通知与账本字段兼容。（PR #133；"已入库"只认 lifecycle/result.json（核对 operation_id/落点/outcome），经 IdleWakeCoordinator 空闲唤醒主线程收账、收一笔销一笔；用户层 job 落 memory/user/.state/lifecycle 同形回执；pending 消失不冒充成功。账本 auto_written→auto_queued（v2）/autoQueued（v3），schema 两键都认、旧键读侧兼容。测试：`用户层 job 也有同形回执`/`写完 result、删 pending 前崩溃`/dispatch ledger 册 autoQueued+旧键兼容用例）
+- [x] 核对 failed 重试、宿主关闭、重启恢复与并发退出窗口。（PR #133，CI run 35423130856 双腿绿；failed 重试防重放见上；宿主关闭=会话退场 WaitForWorkersGracefully(2s) 超时不杀留 pending；重启恢复=会话启动 EnsureWorkerRunning 消费遗留 job；并发退出窗口=空扫复核+合并唤醒+worker.lock 跨宿主承接，防风暴断言 `WorkerSpawnCount()<=3`）
+
+验收：任务从已排队走到已提交或明确失败；没有只留“成功”提示却无人消费的死队列。
+
+### 回归矩阵
+
+- [x] Windows 真子进程：子进程延迟写完成标记，LaunchWorker 返回后仍须存活。
+      使用握手/屏障固定顺序，不靠”睡几毫秒大概赶得上”。（PR #124 起夹具先睡 250ms 再消费=屏障；PR #133 沿用并扩：`background worker survives LaunchWorker and drains repeated saves`/`真 worker 连续入队不起风暴`。CI 35423130856 windows-msvc 腿真跑）
+- [x] 自动提取三条全新、合规且不同 ID 的记忆：候选 0，最终三笔提交，list 能看到它们。
+      （分段覆盖：抽取→auto 直写排队走 dispatch ledger e2e 册（ExtractTurnMemory 真路径）；排队→真 worker 提交→list 见 `真 worker 连续入队不起风暴`（6 笔不同 ID 全提交、failed=0）。文案改”自动写入已排队”不再报”自动入库”）
+- [x] 同 ID 更新：提交完成但 entry_count 不必增加；提示与回执保持一致。
+      （`真 worker 同 id 更新提交成功但 entry_count 不增`：两轮回执均 committed，条目恒 1，正文换新）
+- [x] 不存在的 exe、空 exe、子进程初始化失败：保留 pending，显示原因，禁止报已入库。
+      （`坏 exe 启动失败不丢提示不污染 job_id`/`missing worker reports queued but not started`：queue=Persisted+worker_state=StartFailed/Unavailable 两笔账并存，drain 不出 committed）
+- [x] 慢 worker、连续三笔 enqueue、最后一次空扫描时入队：不早杀、不漏唤醒、不起风暴。
+      （`真 worker 连续入队不起风暴`：6 笔 spawn≤3、全提交；空扫描窗口由 worker 空扫复核+补拉断言覆盖，测试轮询循环按秒 EnsureWorkerRunning 模拟空闲泵）
+- [x] 锁竞争、不可写目录、坏 job：正确区分重试与 failed，当前工作区能查到失败详情。
+      （`/memory jobs 台账…防重放`：坏 job 落 failed 带 .error.txt 详情，台账可见，重试换新单；锁竞争由既有并发册 `worker 争锁` 照跑）
+- [x] 写完 result、删 pending 前崩溃：恢复不重复提交；重启消费剩余任务。
+      （`写完 result、删 pending 前崩溃,恢复不重复提交`：committed 回执幂等跳过，来源会话不翻倍；重启消费=会话启动 EnsureWorkerRunning）
+- [x] review 候选流程、显式 remember、memory_save、accept/forget/rebuild/verify 不回归。
+      （既有册全量照跑：候选审阅箱/全局闸/workspace storage/retrieval/timeline 册等，CI 双腿绿）
+- [x] 中英文文案与旧账本读取兼容；普通后台命令 Stop/宿主退出仍能收整棵进程树。
+      （i18n 中英两表同步改 counts/extract.done/jobs 新键；旧账本 auto_written/autoWritten 键 schema 仍认、`AutoQueuedFromAssessedPayload` 读侧兼容有册；进程树收整不动——通用进程层 KILL_ON_JOB_CLOSE 未拆（合同 §四.6），既有 background 管理面册照跑）
+- [x] Windows 重点跑真实 launcher 集成用例；Linux/macOS 跑队列和监督逻辑回归。
+      （src/memory/* 改动自动触发双平台腿：windows-msvc+macos-clang 都真跑 fixture 子进程用例；Linux 侧 manylinux 腿随 main 合并跑）
+
+测试放 GitHub CI 执行，记录实际结果；本地只做静态核对，不把计划用例写成已通过。
+修复后再对现场三笔旧任务备份核对、恢复消费；本排查单不擅自重放正式记忆。
+
+## 七、本次交付边界
+
+本次只查代码与磁盘，写这份修复单。未改生产代码，未运行本地构建或测试，未提交或推送。
+“文案把排队说成入库”“Windows 句柄早释链路”已由当前源码确认；现场因果仍待同版本
+真实 launcher 回归与退出证据补齐。

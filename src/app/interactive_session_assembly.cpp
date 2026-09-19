@@ -786,6 +786,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     title_wake_token_ = idle_wakes_.AddSource("session_title", [this]() {
         return HasFinishedTitleRefinement();
     });
+    // 记忆提交回执的唤醒源(记忆误报修复单 §五 C):"已入库"只认
+    // lifecycle/result.json 回执;回执落地、或排的 job 悬在 pending 却无
+    // 活 worker 时让位,主循环顶 DrainMemoryWriteCompletions 收账。主线程
+    // 收,后台线程不碰输入区。
+    memory_receipts_wake_token_ = idle_wakes_.AddSource("memory_receipts", [this]() {
+        return project_memory != nullptr && project_memory->WakeNeededForWrites();
+    });
     lubancode::cli::SetIdleWakeHook([this]() { return idle_wakes_.AnyReady(); });
 
     // 底栏状态行的后台任务段数据源(background 管理面单):BuildStatusLine

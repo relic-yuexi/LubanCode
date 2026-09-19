@@ -147,13 +147,20 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
         }
     }
     // 记忆写入调度单 P0:回执按 model_tool_save 投(§6.2 四路之二)。
+    // 修复单 §五 B:job_id 是纯文件名;worker 启动失败另附一行,不混进 id。
     auto queued = memory_->EnqueueSave(request, /*user_initiated=*/false,
                                        MemoryWriteSource::ModelToolSave);
     if (!queued.has_value()) return {queued.error(), true};
-    return {"记忆已排进后台队列: " + *queued +
-            "\n状态: queued，尚未确认落盘。请勿说已经记住或保证下次必定召回。"
-            "项目记忆按工作区身份共享；同一 Git 仓库的子目录和 linked worktree 共用项目记忆。"
-            "召回还须通过范围、相关度和预算筛选。可用 /memory list 核对入库结果。", false};
+    std::string note = "记忆已排进后台队列: " + queued->job_id +
+                       "\n状态: queued，尚未确认落盘。请勿说已经记住或保证下次必定召回。"
+                       "项目记忆按工作区身份共享；同一 Git 仓库的子目录和 linked worktree 共用项目记忆。"
+                       "召回还须通过范围、相关度和预算筛选。可用 /memory list 核对入库结果。";
+    if (queued->worker_state == MemoryWorkerLaunchState::StartFailed) {
+        note += "\n注意: 后台写入进程这次没启动(" +
+                (queued->worker_error.empty() ? queued->worker_error_code : queued->worker_error) +
+                ");任务已保留在队列,可让用户执行 /memory jobs 查看并重试。";
+    }
+    return {note, false};
 }
 
 }  // namespace lubancode::memory

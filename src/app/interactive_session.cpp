@@ -1242,6 +1242,27 @@ void TerminalSessionController::Run() {
             }
         }
 
+        // 记忆提交回执收账(记忆误报修复单 §五 C):"已入库"只认
+        // lifecycle/result.json 回执——回执落地(operation_id/workspace/
+        // outcome 都核对过)才报成功;pending 消失不冒充。经空闲唤醒源
+        // (memory_receipts)让位到这,主线程收,去重靠 ProjectMemory 的
+        // 排队记账(收一笔销一笔)。
+        if (project_memory != nullptr) {
+            for (const auto& completion : project_memory->DrainWriteCompletions()) {
+                const std::string name =
+                    completion.title.empty() ? completion.memory_id : completion.title;
+                if (completion.outcome == "committed") {
+                    TermOut() << theme.stats
+                              << trf("memory.write.committed_notice", name, completion.memory_id)
+                              << theme.reset << "\n";
+                } else {
+                    TermOut() << theme.stats
+                              << trf("memory.write.failed_notice", name, completion.error)
+                              << theme.reset << "\n";
+                }
+            }
+        }
+
         // 0.28.x 会话泵:把流式期间排下的消息送上路。子代理目标先转投任务
         // inbox(SendTaskMessage 那套,共用面板定向介入的通道);main 目标取
         // 队头自动发送——泵的取件范围是排队的 slash(本地命令,轮末必达)
@@ -1500,6 +1521,12 @@ void TerminalSessionController::Run() {
     // app-server 共用;reason="exit" 现行口径)。
     if (session_runtime_.trajectory() != nullptr) {
         (void)lubancode::runtime::SessionService::CloseRuntime(session_runtime_, "exit");
+    }
+    // 记忆 worker 有界收尾(记忆误报修复单 §五 A):正常退出给活 worker
+    // 两秒自己跑完;超时不杀——pending 仍在盘上,原子写保证半途被收也
+    // 一致,下次会话恢复消费。
+    if (project_memory != nullptr) {
+        project_memory->WaitForWorkersGracefully(2000);
     }
 }
 

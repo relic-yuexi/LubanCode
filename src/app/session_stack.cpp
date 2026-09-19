@@ -54,8 +54,12 @@ std::shared_ptr<lubancode::memory::ProjectMemory> BuildProjectMemory(
                 std::move(*identity), lubancode::tools::Utf8ToPath(*home_lubancode),
                 MemoryOptionsFromConfig(config.memory), executable);
             if (project_memory->generate_enabled()) {
-                if (const auto launched = project_memory->LaunchWorker(); !launched.has_value()) {
-                    TermOut() << trf("cmd.memory.worker_failed", launched.error()) << "\n";
+                // 修复单 §五 A:改走共享监督器——盘上有遗留 job 才拉 worker,
+                // 活 worker 在就合并唤醒;只有真启动失败才打警告(退避/无
+                // 待写不算失败)。
+                const auto launched = project_memory->EnsureWorkerRunning();
+                if (launched.state == lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
+                    TermOut() << trf("cmd.memory.worker_failed", launched.error) << "\n";
                 }
             }
         } else if (config.memory.enabled) {
