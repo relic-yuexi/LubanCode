@@ -538,3 +538,64 @@ TEST_CASE("队列区成行:排队 slash 带'轮末执行'标记,普通文字不�
     CHECK(rows[2].find("轮末执行") == std::string::npos);  // 普通文字不带
     CHECK(rows[2].find("普通话") != std::string::npos);
 }
+
+// ---- P3(按代理状态投影单 §六):队列按目标过滤,列表分页投影 ------------------
+
+using lubancode::cli::CountQueueOutsideTarget;
+using lubancode::cli::FilterQueueByTarget;
+
+TEST_CASE("P3 目标过滤: 各页队列区只摆本页条目,别页条数点一行") {
+    std::vector<QueuedMessage> items;
+    items.push_back(QueuedMessage{1, MessageTarget::Main(), "给 main 的"});
+    items.push_back(QueuedMessage{2, MessageTarget::Agent(3), "给三号的"});
+    items.push_back(QueuedMessage{3, MessageTarget::Main(), "还是给 main 的"});
+    items.push_back(QueuedMessage{4, MessageTarget::Agent(5), "给五号的"});
+
+    // main 页:只见 main 的两条;别页(#3、#5)共两条,点一行。
+    const auto main_rows_items = FilterQueueByTarget(items, MessageTarget::Main());
+    REQUIRE(main_rows_items.size() == 2);
+    CHECK(main_rows_items[0].id == 1);
+    CHECK(main_rows_items[1].id == 3);
+    CHECK(CountQueueOutsideTarget(items, MessageTarget::Main()) == 2);
+
+    // #3 页:只见 #3 的一条。
+    const auto sub_items = FilterQueueByTarget(items, MessageTarget::Agent(3));
+    REQUIRE(sub_items.size() == 1);
+    CHECK(sub_items[0].id == 2);
+    CHECK(CountQueueOutsideTarget(items, MessageTarget::Agent(3)) == 3);
+
+    // 成行:main 页队列区带"另有 N 条排在别的页"尾巴;过滤后 #3 那条
+    // 不再混进 main 的队列区。
+    QueueViewOptions opt;
+    opt.visible_cap = 4;
+    opt.outside_target_count = CountQueueOutsideTarget(items, MessageTarget::Main());
+    const auto rows = BuildSteeringQueueRows(main_rows_items, opt);
+    REQUIRE(rows.size() == 4);  // 标题 + 两条 + 别页一行
+    CHECK(rows.back().find("2") != std::string::npos);
+
+    // 本页一条没有、别页有:标题不画,别页那行照点(过滤不悄悄藏账)。
+    const auto none_here = FilterQueueByTarget(items, MessageTarget::Agent(9));
+    CHECK(none_here.empty());
+    QueueViewOptions opt2;
+    opt2.outside_target_count = CountQueueOutsideTarget(items, MessageTarget::Agent(9));
+    const auto rows2 = BuildSteeringQueueRows(none_here, opt2);
+    REQUIRE(rows2.size() == 1);
+}
+
+TEST_CASE("P3 目标绑定: 切页不改收件人——排队后换页,条目目标原样") {
+    // 排队消息绑定提交时 target key(§六):条目进队后目标冻结,查看页
+    // 怎么切都不改投;显示层过滤只动"摆哪些",不动条目本体。
+    SteeringQueue q;
+    const auto id = q.Enqueue(MessageTarget::Agent(3), "给三号的话");
+    CHECK(id != 0);
+    // "切页"后快照:目标仍是 #3。
+    const auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 1);
+    CHECK(snapshot[0].target == MessageTarget::Agent(3));
+    CHECK(!(snapshot[0].target == MessageTarget::Main()));
+    // 投递也只认 #3:main 的取件口拿不走它。
+    CHECK(q.TakeDeliverable(MessageTarget::Main()).empty());
+    const auto delivered = q.TakeDeliverable(MessageTarget::Agent(3));
+    REQUIRE(delivered.size() == 1);
+    CHECK(delivered[0].id == id);
+}

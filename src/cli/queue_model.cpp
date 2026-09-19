@@ -605,7 +605,12 @@ std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>
                                                 const QueueViewOptions& options) {
     std::vector<std::string> rows;
     if (items.empty()) {
-        return rows;  // 规格明确:没队列连标题都不画
+        // 本页目标一条没有:标题不画(规格);别页还有账时点一行,过滤不
+        // 悄悄藏账(P3)。
+        if (options.outside_target_count > 0) {
+            rows.push_back("  " + trf("queue.other_target_count", options.outside_target_count));
+        }
+        return rows;
     }
     const std::string key_hint = options.key_hint.empty() ? QueueRecallHint() : options.key_hint;
     switch (options.title_mode) {
@@ -683,7 +688,34 @@ std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>
         }
         rows.push_back("  \xE2\x86\xB3 " + prefix + FirstLineOf(item.text));  // "  ↳ "
     }
+    // 别页的排队账(按代理状态投影单 P3):本页队列区只摆本页目标,别页的
+    // 条数点一行——过滤不许变成"悄悄消失",切回那页自然看得见全账。
+    if (options.outside_target_count > 0) {
+        rows.push_back("  " + trf("queue.other_target_count", options.outside_target_count));
+    }
     return rows;
+}
+
+std::vector<QueuedMessage> FilterQueueByTarget(const std::vector<QueuedMessage>& items,
+                                               const MessageTarget& target) {
+    std::vector<QueuedMessage> kept;
+    kept.reserve(items.size());
+    for (const QueuedMessage& item : items) {
+        if (item.target == target) {
+            kept.push_back(item);
+        }
+    }
+    return kept;
+}
+
+std::size_t CountQueueOutsideTarget(const std::vector<QueuedMessage>& items, const MessageTarget& target) {
+    std::size_t count = 0;
+    for (const QueuedMessage& item : items) {
+        if (!(item.target == target)) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 // ---------------------------------------------------------------------------

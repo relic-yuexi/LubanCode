@@ -40,6 +40,7 @@ struct ChromeAssistRow {
 };
 
 struct BottomChromeFrame {
+    std::vector<std::string> global_notice_rows; // 显式全局通知区(P3;无法归属的诊断,常态零行)
     std::vector<std::string> help_rows;       // 场景帮助层(0.32.x ? 开合;空 = 没开)
     std::vector<std::string> activity_rows;   // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;      // 待发队列(空队列零行)
@@ -63,17 +64,19 @@ struct BottomChromeFrame {
     int selected_task_id = 0;  // 导航当前选中(0=main,-1=汇总哨兵)
     std::uint64_t revision = 0;  // 帧身份:内容变必变
 
-    // 整帧行数(帮助+活动条+队列+速览+横线+输入+状态+资料+坞+提示)。
+    // 整帧行数(通知+帮助+活动条+队列+速览+横线+输入+状态+资料+坞+提示)。
     int TotalRows() const {
-        return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
+        return static_cast<int>(global_notice_rows.size()) + static_cast<int>(help_rows.size()) +
+               static_cast<int>(activity_rows.size()) +
                static_cast<int>(queue_rows.size()) + (assist_row.empty() ? 0 : 1) +
                composer_rows + rule_rows + status_rows + static_cast<int>(data_rows.size()) +
                static_cast<int>(agent_dock_rows.size()) + static_cast<int>(mode_notice_rows.size()) +
                static_cast<int>(transient_rows.size());
     }
-    // 坞首行相对帧顶的偏移:帮助/队列/速览之后、框与状态栏与资料行之下。
+    // 坞首行相对帧顶的偏移:通知/帮助/队列/速览之后、框与状态栏与资料行之下。
     int AgentDockFirstRow() const {
-        return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
+        return static_cast<int>(global_notice_rows.size()) + static_cast<int>(help_rows.size()) +
+               static_cast<int>(activity_rows.size()) +
                static_cast<int>(queue_rows.size()) + (assist_row.empty() ? 0 : 1) +
                composer_rows + rule_rows + status_rows + static_cast<int>(data_rows.size()) +
                static_cast<int>(mode_notice_rows.size());
@@ -117,6 +120,10 @@ struct ComposerViewModel {
 // 形态:不画横线、不留白、不摆状态行与资料行。
 struct BottomChromeModel {
     std::vector<std::string> help_rows;        // 场景帮助层(空 = 没开,垫帧最顶)
+    // 显式全局通知区(P3,按代理状态投影单 §六):无法归属页面的诊断进这
+    // 块,画在帧最顶(帮助层之上)——不落正文、不抢当前页,谁在看都同一
+    // 位置。行由调用方从 SessionGlobalNotices 现拉,布局只管摆位。
+    std::vector<std::string> global_notice_rows;
     std::vector<std::string> activity_rows;    // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;       // 待发队列(空队列零行)
     ChromeAssistRow assist_row;                // 左右槽速览行,排在 status/skills 上一行

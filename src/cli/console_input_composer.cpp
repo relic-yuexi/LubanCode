@@ -25,6 +25,7 @@
 
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/global_notice.hpp"  // P3:显式全局通知区(诊断不落正文)
 #include "cli/i18n.hpp"
 #include "cli/image_input.hpp"  // kMaxImageBytes(Alt+V 贴图的上限)
 #include "cli/keymap.hpp"
@@ -592,12 +593,20 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (snapshot.empty()) {
             return {};
         }
+        // P3(§六"列表按目标过滤"):本页队列区只摆发给当前查看页的条目;
+        // 别页条数点一行。取回编辑(Shift+←)摸整本账,不受显示过滤影响。
+        const int viewed_for_queue =
+            panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
+        const MessageTarget page_target = viewed_for_queue == 0
+                                              ? MessageTarget::Main()
+                                              : MessageTarget::Agent(viewed_for_queue);
         QueueViewOptions view;
         view.visible_cap = kMaxVisibleQueuedLines;
         view.title_mode = steering.immediate_delivery_requested() ? QueueTitleMode::Immediate
                               : queue_edit.has_value() ? QueueTitleMode::Editing
                                                        : QueueTitleMode::EndOfTurn;
-        return BuildSteeringQueueRows(snapshot, view);
+        view.outside_target_count = CountQueueOutsideTarget(snapshot, page_target);
+        return BuildSteeringQueueRows(FilterQueueByTarget(snapshot, page_target), view);
     };
 
     // 一本帧账:待发队列在 composer 上横线之上,导航坞在状态栏之下贴底,
@@ -623,6 +632,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         scene.rule_tag = tag;
         scene.selected_task_id = selected_task_id;
         scene.menu_rows = menu_rows;
+        // P3(显式全局通知区):无法归属页面的诊断进帧顶独立区,不落正文;
+        // 输入目标(发给谁):查看态收件人是那只子代理,草稿真空时占位明写。
+        scene.global_notice_rows = SessionGlobalNotices().ActiveRows();
+        if (composer && state.line.empty()) {
+            if (const std::optional<int> target = GetComposerTarget(); target.has_value()) {
+                scene.placeholder = trf("composer.target_placeholder", *target);
+            }
+        }
         scene.width = info_now.has_value() ? info_now->width : 80;
         return scene;
     };
@@ -706,78 +723,90 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
 
     auto redraw_with_panel = [&](const RenderState& raw_state, const std::vector<AgentPanelEntry>& entries) {
-        // 搜索开着:菜单行换装成命中清单(查询变化就地重跑匹配)。
-        const std::vector<std::string> menu_rows = menu_rows_for(raw_state);
-        std::string tag;
-        const std::vector<std::string> dock = build_dock(entries, tag);
-        const std::vector<std::string> queue_rows = queue_rows_now();
-        const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
-        const BottomChromeModel model = BuildBottomChromeModel(
-            build_scene(raw_state, queue_rows, dock, tag, snapshot.selected_task_id, menu_rows));
-        BottomChromeFrame frame;
-        RedrawEditArea(start_row, model, theme, prev_body_row_count, previous_frame,
-                       prev_frame_origin, vt_enabled, &frame);
-        panel_fingerprint = fingerprint_of(entries, frame, snapshot);
+        // P3(过渡批收编:空闲整帧过统一提交口):空闲 composer 的整帧重画
+        // 也经 RunUiSync 提交——先排干调度余量、再在统一提交锁内落笔。空闲
+        // 期调度队列本空,排干近似零开销;纪律上从此忙闲两路的整帧都过同一
+        // 道提交锁,与在飞的事件渲染互斥。槽未接(单发/单测)就地直走。
+        RunUiSync([&] {
+            // 搜索开着:菜单行换装成命中清单(查询变化就地重跑匹配)。
+            const std::vector<std::string> menu_rows = menu_rows_for(raw_state);
+            std::string tag;
+            const std::vector<std::string> dock = build_dock(entries, tag);
+            const std::vector<std::string> queue_rows = queue_rows_now();
+            const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
+            const BottomChromeModel model = BuildBottomChromeModel(
+                build_scene(raw_state, queue_rows, dock, tag, snapshot.selected_task_id, menu_rows));
+            BottomChromeFrame frame;
+            RedrawEditArea(start_row, model, theme, prev_body_row_count, previous_frame,
+                           prev_frame_origin, vt_enabled, &frame);
+            panel_fingerprint = fingerprint_of(entries, frame, snapshot);
+        });
     };
 
     // 内容铺完后的重锚(UI 按键回调路 / 视图切换路共用):重打上横线与提示
     // 符、重测锚点、作废旧帧、整帧重画。铺出的正文把旧 chrome 自然顶进滚屏。
+    // P3:整段经 RunUiSync 提交(与整帧重画同一道统一提交锁)。
     const auto reanchor_prompt_and_redraw = [&]() {
-        // 重锚 = 上方刚铺了新正文,场景换了:帮助层跟着旧锚一起退场,
-        // 不然重画会把帮助表盖在新铺的正文上(焦点导航/查看切换这类路)。
-        help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
-        if (box) {
-            const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
-            const int console_width = rule_info.has_value() ? rule_info->width : 80;
-            TermOut() << BoxRuleLine(theme, console_width) << "\n";
-            for (int i = 0; i < kComposerTopPaddingRows; ++i) {
-                TermOut() << "\n";
+        RunUiSync([&] {
+            // 重锚 = 上方刚铺了新正文,场景换了:帮助层跟着旧锚一起退场,
+            // 不然重画会把帮助表盖在新铺的正文上(焦点导航/查看切换这类路)。
+            help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
+            if (box) {
+                const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
+                const int console_width = rule_info.has_value() ? rule_info->width : 80;
+                TermOut() << BoxRuleLine(theme, console_width) << "\n";
+                for (int i = 0; i < kComposerTopPaddingRows; ++i) {
+                    TermOut() << "\n";
+                }
             }
-        }
-        TermOut() << prompt;
-        TermOut().flush();
-        if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
-            after_info.has_value()) {
-            start_row = after_info->cursor_y;
-            prompt_end_col = after_info->cursor_x;
-        }
-        prev_body_row_count = 0;
-        previous_frame.reset();
-        prev_frame_origin = -1;
+            TermOut() << prompt;
+            TermOut().flush();
+            if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
+                after_info.has_value()) {
+                start_row = after_info->cursor_y;
+                prompt_end_col = after_info->cursor_x;
+            }
+            prev_body_row_count = 0;
+            previous_frame.reset();
+            prev_frame_origin = -1;
+        });
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     };
 
     const auto retire_idle_chrome = [&]() {
-        if (!box) {
-            return;
-        }
-        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
-        if (!info.has_value()) {
-            return;  // 拿不到屏幕信息就不硬擦,退回旧行为(换行让位)
-        }
-        int top = prev_frame_origin;
-        if (top < 0) {
-            top = start_row > kComposerTopPaddingRows
-                      ? start_row - kComposerTopPaddingRows - 1
-                      : 0;
-        }
-        int bottom = top + prev_body_row_count;
-        if (bottom >= info->height) {
-            bottom = info->height - 1;
-        }
-        for (int r = top; r <= bottom; ++r) {
-            if (r >= 0) {
-                platform::ClearRowHardFrom(0, r, info->width);
+        // P3:让位擦帧也是屏面动作,经统一提交口(与重画同一道锁)。
+        RunUiSync([&] {
+            if (!box) {
+                return;
             }
-        }
-        platform::SetCursorPos(0, top);
-        previous_frame.reset();
-        prev_frame_origin = -1;
-        prev_body_row_count = 0;
-        // 帮助层长在底栏帧最顶:底栏整帧退场,帮助跟着退,不单独留一块
-        // 没人认领的表在屏上。收起路(再按/Esc)不走这里,那条要整屏重建
-        // 恢复可视对话;这里只是让位(外部编辑器/转录导航/查看态切换)。
-        help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
+            const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+            if (!info.has_value()) {
+                return;  // 拿不到屏幕信息就不硬擦,退回旧行为(换行让位)
+            }
+            int top = prev_frame_origin;
+            if (top < 0) {
+                top = start_row > kComposerTopPaddingRows
+                          ? start_row - kComposerTopPaddingRows - 1
+                          : 0;
+            }
+            int bottom = top + prev_body_row_count;
+            if (bottom >= info->height) {
+                bottom = info->height - 1;
+            }
+            for (int r = top; r <= bottom; ++r) {
+                if (r >= 0) {
+                    platform::ClearRowHardFrom(0, r, info->width);
+                }
+            }
+            platform::SetCursorPos(0, top);
+            previous_frame.reset();
+            prev_frame_origin = -1;
+            prev_body_row_count = 0;
+            // 帮助层长在底栏帧最顶:底栏整帧退场,帮助跟着退,不单独留一块
+            // 没人认领的表在屏上。收起路(再按/Esc)不走这里,那条要整屏重建
+            // 恢复可视对话;这里只是让位(外部编辑器/转录导航/查看态切换)。
+            help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
+        });
     };
 
     // Ctrl+G 外部编辑器(0.30.x 第三批):收掉底栏帧把整屏让给编辑器,

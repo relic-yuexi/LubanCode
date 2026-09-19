@@ -26,6 +26,8 @@
 #include "agent/prompts.hpp"
 #include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:子代理共用的校准器实例
 #include "agent/turn_harness.hpp"
+#include "cli/approval_channel.hpp"  // P3(按代理状态投影单):前台子代理的确认走审批通道,owner=本任务页
+#include "cli/console_input.hpp"     // CurrentAgentViewGeneration:审批提交带的世代绑定
 #include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
 #include "config/command_permission.hpp"  // 后台任务命令的 permissions 前缀裁定(问题 7 拆出)
@@ -2634,13 +2636,43 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
             // 有效权限必须同时覆盖预裁定和确认：父 Yolo 可能在确认口之前
             // 就 Allow。resolver 已完成集合求交，这里只把同一结果接进两道门。
+            // P3(审批的 owner 绑定,按代理状态投影单 §六):前台子代理的确认
+            // 也不再由本线程直接占屏——通道有服务者(交互会话的监听线程)时
+            // 提交进审批通道,owner = 本任务页:用户看着这只子代理菜单才开,
+            // 看着别页时底栏通知位标"#N 待审批";任务退场/打断由通道按
+            // owner/世代收口,旧按钮不悬死。没服务者(单发/单测/监听未起)
+            // Submit 落空,当场问,行为与旧路一字不差。
+            const int confirm_owner_task_id = task != nullptr ? task->snapshot.id : 0;
             if (permission_floor.has_value() && foreground_hooks->on_tool_confirm_floored) {
                 auto floored = foreground_hooks->on_tool_confirm_floored;
                 const lubancode::ApprovalMode floor = *permission_floor;
-                turn_wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id,
-                                                               const std::string& name,
-                                                               const nlohmann::json& input) {
-                    return floored(tool_use_id, name, input, floor);
+                turn_wiring.on_tool_confirm = [floored, floor, confirm_owner_task_id](
+                                                  const std::string& tool_use_id, const std::string& name,
+                                                  const nlohmann::json& input) {
+                    auto presenter = [floored, floor, tool_use_id, name, input]() -> bool {
+                        return floored(tool_use_id, name, input, floor);
+                    };
+                    if (auto decision = lubancode::cli::SessionApprovalChannel().Submit(
+                            confirm_owner_task_id, name, presenter,
+                            lubancode::cli::CurrentAgentViewGeneration())) {
+                        return decision->get();
+                    }
+                    return presenter();
+                };
+            } else if (foreground_hooks->on_tool_confirm) {
+                auto plain_confirm = foreground_hooks->on_tool_confirm;
+                turn_wiring.on_tool_confirm = [plain_confirm, confirm_owner_task_id](
+                                                  const std::string& tool_use_id, const std::string& name,
+                                                  const nlohmann::json& input) {
+                    auto presenter = [plain_confirm, tool_use_id, name, input]() -> bool {
+                        return plain_confirm(tool_use_id, name, input);
+                    };
+                    if (auto decision = lubancode::cli::SessionApprovalChannel().Submit(
+                            confirm_owner_task_id, name, presenter,
+                            lubancode::cli::CurrentAgentViewGeneration())) {
+                        return decision->get();
+                    }
+                    return presenter();
                 };
             } else {
                 turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;

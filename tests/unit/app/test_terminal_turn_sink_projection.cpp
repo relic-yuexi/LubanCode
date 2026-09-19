@@ -41,6 +41,7 @@
 #include "app/session_ui_dispatcher.hpp"
 #include "app/terminal_turn_sink.hpp"
 #include "cli/agent_view_state.hpp"
+#include "cli/approval_channel.hpp"  // P3:换代把悬着的审批按拒收口
 #include "cli/console_input.hpp"  // StdoutWriteMutex:换页打印的锁纪律与生产一致
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
@@ -914,4 +915,63 @@ TEST_CASE("P2 提交序: 正文先于工具卡——FIFO 保住旧 DispatchInlin
     CHECK(tool_at != std::string::npos);
     CHECK(body_at < tool_at);  // 正文先落笔
     registry.DetachMainTurn();
+}
+
+// ---------------------------------------------------------------------------
+// P3 生命周期:会话换代(/clear、/resume)——旧世代的迟到帧令牌不写新会话,
+// 审批悬账随换代按拒收口(future 不悬死工具线程);新世代从干净账开张。
+// ---------------------------------------------------------------------------
+TEST_CASE("P3 生命周期: 换代收口——旧令牌失配不写新会话,审批悬账随换代拒收") {
+    VirtualScreen screen;
+    app::AgentViewRegistry registry;
+    {
+        DispatchedHarness harness(&registry);
+        registry.BeginMainTurn(harness.turn.collector.get(), &harness.turn.sink->CommitMutex());
+
+        // 旧世代:main 页活画一笔。
+        harness.turn.sink->Emit(MakeDelta("item-text", "old session sentence.\n"));
+        REQUIRE(WaitRevision(registry, 1));
+        CHECK(screen.VisibleText().find("old session sentence") != std::string::npos);
+
+        // 旧世代挂一笔审批悬账(工具线程在 future 上等裁定),并取一枚
+        // 换代前的帧令牌(锁外算好的旧帧)。
+        cli::ApprovalChannel channel;
+        channel.RegisterServer();
+        auto stale_approval =
+            channel.Submit(0, "write_file", [] { return true; }, registry.session_generation(), "t-old");
+        REQUIRE(stale_approval.has_value());
+        const cli::FrameToken old_token = registry.TokenFor(0);
+        const std::uint64_t old_generation = registry.session_generation();
+
+        // 换代(会话边界:BeginNewSession + 悬账按世代拒收,与会话侧接线同款)。
+        registry.BeginNewSession();
+        channel.DenyStaleGenerations(registry.session_generation());
+        CHECK(registry.session_generation() != old_generation);
+        CHECK(stale_approval->get() == false);  // 悬账按拒收口,不悬死
+        CHECK(channel.PendingCount() == 0);
+
+        // 旧帧令牌失配:锁外算好的旧帧写屏前核对不过——旧世代的迟到绘制
+        // 不落新会话的屏。
+        CHECK_FALSE(registry.TokenCurrent(old_token));
+        CHECK(registry.TokenCurrent(registry.TokenFor(0)));  // 新世代新帧放行
+
+        // 新世代开张:新回合账起头(修订号从零),新正文照常活画;旧句
+        // 不重铺(世代册已作废)。
+        registry.BeginMainTurn(harness.turn.collector.get(), &harness.turn.sink->CommitMutex());
+        harness.turn.sink->Emit(MakeDelta("item-text", "new session sentence.\n"));
+        REQUIRE(WaitRevision(registry, 1));
+        CHECK(screen.VisibleText().find("new session sentence") != std::string::npos);
+        const auto occurrences = [](const std::string& haystack, const std::string& needle) {
+            std::size_t count = 0;
+            for (std::size_t at = haystack.find(needle); at != std::string::npos;
+                 at = haystack.find(needle, at + needle.size())) {
+                ++count;
+            }
+            return count;
+        };
+        CHECK(occurrences(screen.VisibleText(), "old session sentence") == 1);  // 没被复活重铺
+
+        registry.DetachMainTurn();
+        channel.ClearServer();
+    }
 }

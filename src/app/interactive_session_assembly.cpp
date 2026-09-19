@@ -100,6 +100,7 @@
 #include "runtime/session_work_scheduler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:PlanDocument 内容锚
 #include "cli/agent_panel_host.hpp"
+#include "cli/approval_channel.hpp"  // P3:任务退场把悬着的审批按拒收口
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -725,6 +726,12 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     lubancode::cli::SetUiDispatchEntrance([this](const std::function<void()>& body) {
         ui_dispatcher_.RunSync(body);
     });
+    // P3(过渡批收编):异步命令投递口——footer 心跳那一类周期性屏面动作
+    // 进调度队列,由消费线程在统一提交锁内执行。future 丢弃(心跳不等
+    // 回执,慢终端靠丢拍闸不囤积)。
+    lubancode::cli::SetUiCommandPoster([this](std::function<void()> command) {
+        (void)ui_dispatcher_.PostAction(std::move(command));
+    });
     lubancode::cli::SetLayoutInvalidationHook(
         [this]() { (void)view_registry_.BumpLayoutRevision(); });
 
@@ -732,9 +739,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
     lubancode::cli::AgentPanelActions panel_actions;
     panel_actions.cancel_task = [this](int task_id) {
+        // P3(§六"任务退场后旧审批按钮失效"):任务退场把它悬着的审批按拒
+        // 收口——菜单/通知位随即失效,不等人来答一笔死账。
+        lubancode::cli::SessionApprovalChannel().DenyPendingForOwner(task_id);
         return session_agent_tool() != nullptr && session_agent_tool()->CancelTask(task_id);
     };
     panel_actions.clear_task = [this](int task_id) {
+        lubancode::cli::SessionApprovalChannel().DenyPendingForOwner(task_id);
         return session_agent_tool() != nullptr && session_agent_tool()->ClearFinishedTask(task_id);
     };
     panel_actions.cancel_all = [this]() {

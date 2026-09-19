@@ -319,6 +319,15 @@ void SetViewSwitchGuard(std::function<void(const std::function<void()>&)> guard)
 void SetUiDispatchEntrance(std::function<void(const std::function<void()>&)> entrance);
 void RunUiSync(const std::function<void()>& body);
 
+// ---- 按代理状态投影单 P3:异步调度命令 ------------------------------------
+// 会话级 UI 调度的异步投递口(P2 过渡批收编):不需要"回来时已画完"的
+// 周期性屏面动作(footer 心跳那一类)经 PostUiCommand 提交——命令进调度
+// 队列,由消费线程在统一提交锁内执行,投递线程继续跑自己的节拍。槽未接
+// (单发/单测/旧装配)就地直走,行为与 P2 一致。装配层接
+// SessionUiDispatcher::PostAction(future 丢弃:调用方不等)。
+void SetUiCommandPoster(std::function<void(std::function<void()>)> poster);
+void PostUiCommand(std::function<void()> command);
+
 // 布局翻版通知:resize/Ctrl+L/Ctrl+O 这类整屏重排/展开档切换时调——
 // 会话侧接登记簿的 BumpLayoutRevision,在飞的旧布局帧(FrameToken 第三
 // 要素失配)写屏前被拦。槽未接时空操作。
@@ -667,6 +676,10 @@ bool TurnActivityActive();
 // footer 的公共心跳：普通 turn 与同步 workflow 都靠它每 200ms 推一帧。
 // 活动条亮着时报秒数+扫光拍(同秒同高亮位零落笔,扫光只在原生直写档
 // 亮)，cancel 置位后切成 Stopping；没有活动条时只补画 footer/代理坞。
+// P3(过渡批收编):心跳线程不再自己执笔——每拍的屏面动作打包成命令经
+// PostUiCommand 投进会话级 UI 调度,由消费线程在统一提交锁内执行;调度
+// 里还压着一拍没消费就丢弃本拍(慢终端不囤积心跳)。槽未接(单发/单测)
+// 就地直走,行为与 P2 一致。
 // Stop 幂等，调用方须在 EndTurnActivity/
 // EndStreamFooter 之前停妥，免得后台线程追着已经收场的帧写。
 class StreamFooterHeartbeat {
@@ -683,10 +696,14 @@ public:
 
 private:
     void ThreadMain();
+    void RunTick();  // 一拍的全部屏面动作(提交锁内执行,可在消费线程上跑)
 
     std::atomic<std::int64_t> started_at_ms_{0};
     const std::atomic<bool>* cancel_ = nullptr;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> tick_pending_{false};          // 一拍在途的丢拍闸(不囤积)
+    std::atomic<bool> stopping_reported_{false};     // cancel→Stopping 只报一次
+    std::atomic<bool> mode_notice_was_visible_{false};
     std::thread thread_;
 };
 

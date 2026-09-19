@@ -292,6 +292,14 @@ std::function<void(const std::function<void()>&)>& UiDispatchEntranceSlot() {
     return entrance;
 }
 
+// P3:异步命令投递口(footer 心跳那类周期性屏面动作)。空 = PostUiCommand
+// 就地直走。装配层接 SessionUiDispatcher::PostAction。
+// [共享] footer 心跳线程/导出口 SetUiCommandPoster。
+std::function<void(std::function<void()>)>& UiCommandPosterSlot() {
+    static std::function<void(std::function<void()>)> poster;
+    return poster;
+}
+
 // 布局翻版通知槽:resize/Ctrl+L/Ctrl+O 时叫一声,会话侧接登记簿的
 // BumpLayoutRevision(FrameToken 第三要素)。空 = NotifyLayoutInvalidated
 // 空操作。
@@ -1683,6 +1691,22 @@ void RunUiSync(const std::function<void()>& body) {
         return;
     }
     body();
+}
+
+// ---- 按代理状态投影单 P3:导出口(异步调度命令) --------------------------
+void SetUiCommandPoster(std::function<void(std::function<void()>)> poster) {
+    UiCommandPosterSlot() = std::move(poster);
+}
+
+void PostUiCommand(std::function<void()> command) {
+    // 槽在,投进调度队列由消费线程在统一提交锁内执行;槽空就地直走
+    //(与 P2 的 RunUiSync 同款降级纪律)。
+    const auto& poster = UiCommandPosterSlot();
+    if (poster) {
+        poster(std::move(command));
+        return;
+    }
+    command();
 }
 
 void SetLayoutInvalidationHook(std::function<void()> hook) {

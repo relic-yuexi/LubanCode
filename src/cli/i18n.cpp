@@ -193,6 +193,11 @@ const Entry kZhCN[] = {
     {"input.interrupted", "[已打断]"},
     {"input.queued", "[已排队] "},
     {"input.queue_more", "另有 {0} 条"},
+    // ---- 按代理状态投影单 P3:焦点/查看/输入目标/停止目标/审批通知位 ----
+    {"composer.target_placeholder", "发给 #{0}……(Esc 退查看态即回 main)"},
+    {"ui.pending_approval_tag", "{0} 待审批"},
+    {"ui.pending_approval_multi", "{0} 处待审批"},
+    {"queue.other_target_count", "另有 {0} 条排在别的页"},
     // ---- 0.28.x 排队消息(工具边界送达 + Shift+左键取回编辑) ----
     {"queue.key_hint", "Shift+←"},
     {"queue.key_hint_fallback", "Shift+← / Ctrl+←"},
@@ -2281,6 +2286,11 @@ const Entry kEn[] = {
     {"input.interrupted", "[interrupted]"},
     {"input.queued", "[queued] "},
     {"input.queue_more", "{0} more queued"},
+    // ---- view isolation P3: focus / viewing / input target / stop target / approval notice ----
+    {"composer.target_placeholder", "Message to #{0}... (Esc leaves the view back to main)"},
+    {"ui.pending_approval_tag", "{0} awaiting approval"},
+    {"ui.pending_approval_multi", "{0} approvals pending"},
+    {"queue.other_target_count", "{0} queued for other pages"},
     // ---- 0.28.x queued messages (delivered at tool boundary, Shift+Left to edit) ----
     {"queue.key_hint", "Shift+Left"},
     {"queue.key_hint_fallback", "Shift+Left / Ctrl+Left"},

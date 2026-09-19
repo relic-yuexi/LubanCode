@@ -28,10 +28,11 @@
 #include "app/session_ui_dispatcher.hpp"  // 按代理状态投影单 P2:会话级 UI 调度
 #include "app/terminal_turn_sink.hpp"
 #include "app/tool_call_scope.hpp"  // ToolCallScopeTable:审批链中间产物的逐调用账(P1 拆槽)
-#include "cli/approval_channel.hpp"  // 按代理状态投影单 P2:审批的独立响应通道
+#include "cli/approval_channel.hpp"  // 按代理状态投影单 P2:审批的独立响应通道(P3 补目标绑定)
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/global_notice.hpp"  // P3:无法归属的诊断进显式全局通知区
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "cli/tool_confirm_ui.hpp"
@@ -464,7 +465,13 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
                                   scope.approval_class, request.tool_name, request.input, approval_observer);
         };
         if (auto decision = lubancode::cli::SessionApprovalChannel().Submit(
-                /*owner_task_id=*/0, request.tool_name, std::move(presenter))) {
+                /*owner_task_id=*/0, request.tool_name, std::move(presenter),
+                // P3 目标绑定:世代(/clear、/resume 换代后旧审批串不进来)+
+                // 本轮 canonical turn id(回合收口按它收口)。ctx.turn_id_for_trace
+                // 在 RunTurn 铸号后已写回 canonical 那枚。
+                /*session_generation=*/ctx.view_registry != nullptr ? ctx.view_registry->session_generation()
+                                                                    : 0,
+                /*turn_id=*/ctx.turn_id_for_trace)) {
             return std::make_shared<ChannelApprovalFuture>(std::move(*decision));
         }
         const bool allowed = presenter();
@@ -830,6 +837,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 永不收尾的 TurnStarted;预留号不回滚,下一轮开张前必换新。
     const std::string canonical_turn_id =
         turn_id_for_trace.empty() ? lubancode::runtime::ProcessIdAuthority().NextTurnId() : turn_id_for_trace;
+    // P3(审批的 turn 绑定):canonical 号写回 ctx——BuildTurnWiring(稍后调)
+    // 里提交审批通道时按它绑定;回合收口的 DenyPendingForTurn 也按它收口。
+    // 宿主发过号时这是原值回写,零变化;现发的那枚由此对齐"本轮所有账只
+    // 认这一枚"的口径。
+    ctx.turn_id_for_trace = canonical_turn_id;
 
     // hooks 上下文:先换号,再发 UserPromptSubmit(session/cwd 等会话字段保持
     // 会话层设好的值),确认档可能被 Shift+Tab 切过,按当前值报。turn_id 只
@@ -936,13 +948,17 @@ RunTurnResult RunTurn(TurnContext ctx) {
         }
     }
 
-    // 安全点(轮起):后台子代理投递的 hooks 记录在这里归并落账。告警走
-    // stderr(静默档也要让人看见降级),信息行只在非静默档打。
+    // 安全点(轮起):后台子代理投递的 hooks 记录在这里归并落账。P3 起交
+    // 显式全局通知区——这类无法归属页面的系统侧提醒不落当前正文(单子
+    // §六);非交互(管道/重定向)保持旧输出合同:可见档 stdout、否则
+    // stderr,一字不差。
     for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
-        if (!silent && (view_registry == nullptr || view_registry->MainVisibleForChrome())) {
-            TermOut() << theme.stats << "[hooks] " << notice << theme.reset << "\n";
-        } else {
-            TermErr() << "[hooks] " << notice << "\n";
+        if (!lubancode::cli::ReportDiagnosticLine("[hooks] " + notice)) {
+            if (!silent && (view_registry == nullptr || view_registry->MainVisibleForChrome())) {
+                TermOut() << theme.stats << "[hooks] " << notice << theme.reset << "\n";
+            } else {
+                TermErr() << "[hooks] " << notice << "\n";
+            }
         }
     }
 
@@ -1241,6 +1257,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // Run() 已经返回,不管是不是被打断——先收输入线程，保证它不再碰转录
     // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。
     listener.Stop();
+    // P3(审批的 turn 绑定收口):监听线程的尾账已 DenyAllPending,这里再
+    // 按本轮 canonical 号收一次——防御别名路(续跑轮的 wiring 拷贝里还捏
+    // 着旧闭包),本轮的悬账随本轮走,future 不悬死工具线程。
+    lubancode::cli::SessionApprovalChannel().DenyPendingForTurn(canonical_turn_id);
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
     lubancode::cli::SetViewSwitchInvalidateHook(nullptr);  // 同上:换页作废钩子不活过本轮的 painter
     // 画面隔网先行批:收 UI 泵——停消费线程、把余下的流式事件在本线程排
