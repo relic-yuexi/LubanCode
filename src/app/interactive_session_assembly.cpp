@@ -1037,13 +1037,12 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // /resume 同一处(session_commands 的 ApplyResumedContextWindow),
             // 先确定有效 provider/model 再取匹配预算,套用进 tracker,发首
             // 个请求前由发轮前同步点对齐主 Agent。
-            ApplyResumedContextWindow(
-                context_tracker, session_runtime_.trajectory(), &model_catalog, active_provider,
-                *current_model,
-                session_runtime_.trajectory()->LaunchResumeControlState().has_value()
-                    ? &*session_runtime_.trajectory()->LaunchResumeControlState()
-                    : nullptr,
-                theme);
+            const std::optional<lubancode::trajectory::ReplayControlState> launch_control =
+                session_runtime_.trajectory()->LaunchResumeControlState();
+            ApplyResumedContextWindow(context_tracker, session_runtime_.trajectory(), &model_catalog,
+                                       active_provider, *current_model,
+                                       launch_control.has_value() ? &*launch_control : nullptr,
+                                       theme);
             // resume 的历史开新账(SessionStart source=resume)。
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
                             nlohmann::json{{"source", "resume"}}, "resume");
