@@ -1973,6 +1973,12 @@ const Entry kZhCN[] = {
     {"cmd.title.set_pending", "标题已设为: {0}(首条消息落盘后写入存档)"},
     {"cmd.title.local_set", "会话标题(取自首问): {0}"},
     {"cmd.title.write_failed", "[会话存档] 标题写入失败,只在本次会话内存里生效。"},
+    // 标题触发提前单·哑门改亮:三道起飞门拦下与采样真失败,各打一行——
+    // 此前全静默,用户只见标题永远停在本地档。
+    {"cmd.title.refine.no_ledger", "[会话标题] 精炼没起飞:会话账房没开张,标题停在本地档。"},
+    {"cmd.title.refine.no_model", "[会话标题] 精炼没起飞:标题路由没配上模型,标题停在本地档。"},
+    {"cmd.title.refine.no_provider", "[会话标题] 精炼没起飞:provider「{0}」在配置里找不到,标题停在本地档。"},
+    {"cmd.title.refine.failed", "[会话标题] 精炼失败,标题保留本地档。"},
     {"cmd.peers.start_failed", "[跨会话] 传话未启用: {0}"},
     {"cmd.peers.off", "跨会话传话在本场未启用(只有交互会话才有)。"},
     {"cmd.peers.empty", "当前没有其它可见的会话。"},
@@ -2956,6 +2962,25 @@ const Entry kEn[] = {
     {"cmd.update.release", "Release page: {0}"},
     {"cmd.update.install_hint", "One command does it: lubancode update (verification, skill protection, whole-package switch, and rollback all live in one transaction); or download the release and run its installer. User skills stay untouched."},
 
+    // ---- 会话标题 /title 族(标题触发提前单:全族补译,并添哑门亮报四枚) ----
+    {"cmd.title.none", "No title set for this session yet (/title <title> to set one)."},
+    {"cmd.title.current", "Current title: {0}"},
+    {"cmd.title.set", "Title set to: {0}"},
+    {"cmd.title.set_pending", "Title set to: {0} (written to the archive once the first message lands)"},
+    {"cmd.title.local_set", "Session title (from the first question): {0}"},
+    {"cmd.title.write_failed",
+     "[session store] Title write failed; it lives in memory for this session only."},
+    {"cmd.title.refine.no_ledger",
+     "[session title] Refinement did not start: the session ledger has no active writer; the local "
+     "title stays."},
+    {"cmd.title.refine.no_model",
+     "[session title] Refinement did not start: no model routed for the title task; the local title "
+     "stays."},
+    {"cmd.title.refine.no_provider",
+     "[session title] Refinement did not start: provider '{0}' is not in the config; the local title "
+     "stays."},
+    {"cmd.title.refine.failed", "[session title] Refinement failed; the local title stays."},
+
     // ---- 跨会话传话 /peers /send /peerperm ----
     {"cmd.peers.start_failed", "[peers] cross-session messaging failed to start: {0}"},
     {"cmd.peers.off", "Cross-session messaging is not enabled for this session (interactive sessions only)."},
@@ -3781,7 +3806,7 @@ const Entry kEn[] = {
     //   cmd.mcp.* / cmd.lsp.* / cmd.skills.* / cmd.context.* / cmd.compact.* / compact.* /
     //   cmd.think.* / cmd.model.* / cmd.write_config* / cmd.session_only /
     //   cmd.prompt.* / law.* / resetprompt.* / session.* / cmd.sessions.* / cmd.resume.* /
-    //   cmd.export.* / cmd.title.* / cmd.clear.* / ui.* / diff.* / settings.local.*
+    //   cmd.export.* / cmd.clear.* / ui.* / diff.* / settings.local.*
 };
 
 std::map<std::string, std::string, std::less<>> BuildMap(const Entry* entries, std::size_t count) {

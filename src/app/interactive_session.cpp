@@ -271,24 +271,42 @@ void TerminalSessionController::BeginSessionTitle(const std::string& first_query
             TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
             break;
         default:
-            break;  // NoNeed/NoUsableText:安静,不打车轮
+            // 哑门一改亮(标题触发提前单):账房没开张(v2/v3 主写者都缺)
+            // 拦下首问起名——此前静默,本地标题与精炼都不发生,用户无从
+            // 知道。打一行说明,只打一次(每轮用户输入都进这里,不挂闸
+            // 会打车轮)。人工 pending/已有标题的 NoNeed 照旧安静。
+            if (!title_ledger_down_reported_ && session_title.empty() && !titles_.LedgerActive()) {
+                TermOut() << theme.stats << tr("cmd.title.refine.no_ledger") << theme.reset << "\n";
+                title_ledger_down_reported_ = true;
+            }
+            break;  // NoNeed/NoUsableText 其余缘由:安静,不打车轮
     }
 }
 
 // 第二层:起飞精修(2026-09-01 主人裁决:cheap/lao 未特殊配置时默认
 // 走 normal——标题精修照发,不再因"回落 normal"短路。低价值标题不值得
 // 打主模型的旧取舍作废)。只喂首问,与 normal 主请求各走各的独占
-// client,不抢流式回调,不占主会话 context;由 StartPending…AfterTurn
-// 在主回合收口后的空闲边界调,完工走空闲唤醒收货。
+// client,不抢流式回调,不占主会话 context;v3 场由 Kickoff…Now 在首问
+// 主回合铸号后立即调(发车即起飞),v2 场由 StartPending…AfterTurn 在
+// 主回合收口后的空闲边界调,完工走空闲唤醒收货。
 void TerminalSessionController::StartTitleRefinement(const std::string& first_query) {
     const auto info = model_router->RouteInfo(lubancode::agent::TaskKind::SessionTitle);
     if (info.model.empty()) {
+        // 哑门二改亮(标题触发提前单):标题路由没有可用模型——cheap/normal
+        // 都没配、会话模型也空。此前静默 return,精炼一直不起飞也没一行
+        // 交代。一场只此一行:起飞点每场只到一次。
+        TermOut() << theme.stats << tr("cmd.title.refine.no_model") << theme.reset << "\n";
         return;
     }
     // 独占裸 backend(RouteDetached):不与主会话共用 client,也不借同步
     // 路由的缓存 client 并发——标题线程自己持有、自己释放。
     auto detached = model_router->RouteDetached(lubancode::agent::TaskKind::SessionTitle);
     if (detached.backend == nullptr) {
+        // 哑门三改亮(标题触发提前单):路由 provider 在配置里找不到条目
+        //(配过 cheap 带 provider,后来条目改名/删除——回落表还抓着旧名),
+        // detached backend 建不起来。此前同样静默。
+        TermOut() << theme.stats << trf("cmd.title.refine.no_provider", detached.route.provider)
+                  << theme.reset << "\n";
         return;
     }
     lubancode::app::SessionTitleRefiner::Inputs inputs;
@@ -403,6 +421,11 @@ void TerminalSessionController::DrainFinishedTitleRefinement() {
         return;
     }
     if (adopted != lubancode::app::SessionTitleAccount::AdoptResult::Adopted) {
+        // 采样真失败(网络/超时/空回)打一行——起飞了但没成,此前也静默,
+        // 用户分不清"没起飞"与"飞了没成"。迟到/取消是正常竞态,不打扰。
+        if (!outcome->ok) {
+            TermOut() << theme.stats << tr("cmd.title.refine.failed") << theme.reset << "\n";
+        }
         return;  // 失败/迟到/场子没了:本地标题保住,不重试
     }
     // 跨会话名册同步改名(与人工 /title 同一条路)——采纳即改,不等通知。
