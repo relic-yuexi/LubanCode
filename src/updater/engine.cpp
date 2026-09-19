@@ -29,6 +29,7 @@
 #include "updater/layout.hpp"
 #include "updater/lock.hpp"
 #include "updater/manifest.hpp"
+#include "updater/paths.hpp"
 #include "updater/probe.hpp"
 #include "updater/txn.hpp"
 
