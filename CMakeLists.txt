@@ -914,6 +914,13 @@ add_library(lubancode_engine STATIC
   # 重试/退避/partial success 分型、§8.4 consent 与回环/公网分界、
   # §15.4 凭证 seam(装配层适配 runtime::SecretResolver)。
   src/telemetry/exporter.cpp
+  # 更新助手 C++ 化·批一第①单(契约层移植):四方契约(generate_manifest.py/
+  # install_plan.py/install.ps1/此处)的 C++ 侧——包内相对路径筛查、大小写
+  # 折叠键、归档成员名筛查、用户数据路径判定(paths.cpp)与 manifest.json
+  # schema 1 的读/验/折 + CanonicalJsonDump(manifest.cpp)。纯库,零平台/
+  # 网络依赖,后续批次(下载/解包/事务)在此底座上叠。
+  src/updater/paths.cpp
+  src/updater/manifest.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
