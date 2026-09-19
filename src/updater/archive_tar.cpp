@@ -254,6 +254,11 @@ class TarGzSource {
                 }
                 continue;
             }
+            // 队列已清空:把已消费前缀剃掉再吹,head_ 归零与新产出对齐
+            // (不清前缀又把 head_ 拨零,会把陈字节重新投递一遍——大流
+            // 跨轮吹气即串流,CI 第二跑的 200KB 案与多成员案红在此)。
+            pending_.clear();
+            head_ = 0;
             if (!PumpDeflate()) {
                 return false;
             }
@@ -283,7 +288,9 @@ class TarGzSource {
             member_out_ += out_cap;
             pending_.insert(pending_.end(), win_.data() + slot,
                             win_.data() + slot + out_cap);
-            head_ = 0;
+            // 消费位点 head_ 不动——归零只归 EnsurePending 在队列清空时
+            // 做(剃前缀 + 归零);这里归零会把已消费的陈字节重投一遍,
+            // 大流跨轮吹气即串流(CI 第二跑两案红在此)。
             return true;
         }
         switch (st) {
