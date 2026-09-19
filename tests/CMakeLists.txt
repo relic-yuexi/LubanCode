@@ -81,6 +81,10 @@ target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 自签证书生成),engine 对 mbedtls 是 PRIVATE 链,这里显式补上(include
 # 路径随 target 的 PUBLIC usage 递)。
 target_link_libraries(lubancode_tests PRIVATE mbedtls)
+# 更新器 C++ 化批一第③单:miniz 冒烟册(tests/unit/updater)直接用
+# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——engine 对 miniz 是
+# PRIVATE 链,这里照 mbedTLS 的先例显式补上。
+target_link_libraries(lubancode_tests PRIVATE miniz)
 # 批二余款:测试共用的回合事件录音器(Callbacks 显示回调退役,观察点
 # 改吃事件流)住 support/。
 target_include_directories(lubancode_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)

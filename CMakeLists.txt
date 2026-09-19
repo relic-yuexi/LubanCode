@@ -268,6 +268,35 @@ endforeach()
 unset(_lubancode_mbed_target)
 
 # ---------------------------------------------------------------------------
+# miniz 3.0.2(更新器 C++ 化批一第③单):zip 读写底座,批二解包层用它拆
+# 更新整包。与 yaml-cpp/lua/mbedTLS 同待遇:不管走没走 vcpkg 都
+# FetchContent 源码自建,两条构建路认同一份源码,vcpkg.json 不动。tag
+# 3.0.2 对应上游 amd_92ec3a8。默认形态(非 amalgamated)只编 miniz.c/
+# miniz_zip.c/miniz_tinfl.c/miniz_tdef.c——正是 zip reader/writer 与
+# tinfl 要的源;示例/模糊测试在子项目形态默认关,这里再显式钉一遍,
+# 防上游默认翻转。cmake_minimum_required 还停在 3.0,靠上面给 yaml-cpp
+# 设的 CMAKE_POLICY_VERSION_MINIMUM 3.5 过门。
+# ---------------------------------------------------------------------------
+_lubancode_tarball(_lubancode_miniz_url "richgel999/miniz" "3.0.2")
+# vcpkg 路顶层没钉全局静态(那条 set 只在非 vcpkg 分支里),这里补钉:
+# 两条构建路 miniz 一律静态,exe 不带 miniz.dll。
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+set(INSTALL_PROJECT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  miniz
+  URL ${_lubancode_miniz_url}
+)
+FetchContent_MakeAvailable(miniz)
+# 别人家的 C90,顶层 -Wall/-W4 会刷一屏没意义的告警,单独关掉(同 mbedTLS)。
+if(MSVC)
+  target_compile_options(miniz PRIVATE /w)
+else()
+  target_compile_options(miniz PRIVATE -w)
+endif()
+
+# ---------------------------------------------------------------------------
 # 提示词模块编译期嵌入(0.19.x):src/prompts/{core,features,platforms}/*.md
 # 构建期由 cmake/embed_prompts.cmake 生成 <build>/generated/embedded_prompts.hpp
 # (每个模块一个 constexpr 常量),prompt_assembler.cpp 引用它做运行时条件
@@ -932,6 +961,10 @@ target_link_libraries(lubancode_engine PRIVATE mbedtls)
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
 # 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
 target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
+# miniz(更新器批一③):zip 读写底座,批二解包层才真用上;本单只把链接
+# 关系立起来让引擎目标编译通过。PRIVATE——更新器将属 engine 内部件,
+# 头不外递,消费方零感知(同 mbedtls 的挂法)。
+target_link_libraries(lubancode_engine PRIVATE miniz)
 target_compile_features(lubancode_engine PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_engine PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
