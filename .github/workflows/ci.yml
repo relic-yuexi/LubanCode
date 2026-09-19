@@ -57,6 +57,14 @@ jobs:
               src/memory/*|src/platform/process_win.cpp|tests/support/memory_worker_fixture.cpp)
                 memory_worker=true ;;
             esac
+            # Windows 瞬态文件语义敏感面:gateway 控制/任务命令文件的换名短拒
+            # 病灶(防病毒/索引过滤驱动,见 src/gateway/work_pump.cpp 注释)
+            # 与助理任务/审批册(35403217677/35374324620 两案 windows 腿间歇
+            # 红)只在 windows 上显形——改到这些路径的 PR 须双平台验。
+            case "$f" in
+              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp)
+                memory_worker=true ;;
+            esac
             case "$f" in
               src/*|tests/*|catalog/*|cmake/*|CMakeLists.txt|*/CMakeLists.txt|third_party/*|scripts/*|skills/*|.github/workflows/ci.yml)
                 case "$f" in
@@ -74,7 +82,8 @@ jobs:
   # 表没有它,写在 jobs.<id>.if 里整炉 0 秒死于 workflow file issue——
   # 5daf4989 在 main 上就是这么翻的),按事件现挑腿单,build-test 用
   # fromJSON 接。分支快车道(agent/ci 分支)只烧 macos 一腿最快出信号;
-  # main 和记忆 worker/Windows 进程改动跑双平台，其余 PR 只跑 macOS。
+  # main 和记忆 worker/Windows 进程/Windows 瞬态文件语义敏感面(gateway
+  # 命令文件 IO、助理任务册)改动跑双平台，其余 PR 只跑 macOS。
   lane:
     needs: changes
     if: needs.changes.outputs.code == 'true'

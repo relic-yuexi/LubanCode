@@ -12,10 +12,16 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
+
+#ifdef _WIN32
+#include <cstdio>
+#include <share.h>
+#endif
 
 #include "app/cli_options.hpp"
 #include "gateway/control_server.hpp"
@@ -328,6 +334,45 @@ TEST_CASE("进程:stop 控制命令定向 boot_id,陈旧命令不追杀新实例
     process.RequestStop("test");
     runner.join();
     CHECK(exit_code.load() == 0);
+}
+
+TEST_CASE("stop 命令:打不开不删,下一拍照常生效") {
+    const auto root = MakeTempRoot("stopopen");
+    const auto paths = PathsOf(root);
+    GatewayStopCommand mine;
+    mine.boot_id = "boot-open-test";
+    mine.requested_at_ms = 1;
+    REQUIRE(WriteStopCommand(paths.control_dir, mine).empty());
+    const auto stop_file = paths.control_dir / "stop.json";
+#ifdef _WIN32
+    // 根因钉(与 job 命令文件同款病灶,见 gateway/work_pump.cpp 注释):
+    // Windows 上刚被原子换名落地的文件会被防病毒/索引过滤驱动短拒数十
+    // 毫秒。这一拍打不开就不许删——删了 stop 命令就真丢了(进程不会停)。
+    // 独占句柄(_SH_DENYRW)模拟"文件在、打不开"。
+    std::FILE* exclusive = _wfsopen(stop_file.c_str(), L"rb", _SH_DENYRW);
+    REQUIRE(exclusive != nullptr);
+    CHECK_FALSE(PollStopCommand(paths.control_dir, "boot-open-test"));
+    std::error_code keep_ec;
+    CHECK(std::filesystem::exists(stop_file, keep_ec));  // 没删,留给下一拍
+    std::fclose(exclusive);
+#endif
+    // 松手后下一拍读到即生效;删除可能遇瞬态拦,有界收口(文件还在就
+    // 重读重删,读到即 honored)。
+    bool honored = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (PollStopCommand(paths.control_dir, "boot-open-test")) {
+            honored = true;
+        }
+        std::error_code gone_ec;
+        if (!std::filesystem::exists(stop_file, gone_ec)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(honored);
+    std::error_code gone_ec;
+    CHECK_FALSE(std::filesystem::exists(stop_file, gone_ec));
 }
 
 TEST_CASE("进程:StopGateway 投命令并等到干净退出") {

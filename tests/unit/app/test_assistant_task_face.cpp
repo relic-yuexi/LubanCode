@@ -432,6 +432,10 @@ TEST_CASE("任务列表:job 摘要 + 最近 occurrence + 结果状态") {
     W2Fixture fixture("list", {TextScript("列表任务的结果")});
     REQUIRE(fixture.runtime != nullptr);
     const nlohmann::json created = fixture.Create("W2-KEY-LIST", "跑一次");
+    // 回执防御:create 命令丢失/泵忙时方法面回 null(15 秒受理超时)。后
+    // 面的下标访问打在 null 上会抛 305 炸整册——先钉住,把失败变成带人话
+    // 的断言(用例语义不变)。
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     REQUIRE(fixture.PumpUntilSettled(job_id, 15000).has_value());
 
@@ -498,6 +502,9 @@ TEST_CASE("审批超时:默认拒绝,工具零执行,事件轨迹如实") {
     REQUIRE(fixture.runtime != nullptr);
 
     const nlohmann::json created = fixture.Create("W2-APPRO-TIMEOUT", "写点东西");
+    // 同上:create 回 null 时下标访问抛 type_error.305(CI run 35403217677
+    // 的 windows 腿即栽在此)——钉成带人话的断言失败。
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     // 不答复:审批 300ms 超时 → 拒绝 → 工具不执行。
     const auto settled = fixture.PumpUntilSettled(job_id, 15000);
@@ -545,8 +552,21 @@ TEST_CASE("审批批准:答复回灌后工具执行,任务 succeeded") {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
+    // 栈回卷必 join:本用例体里任何早退(断言失败/异常)销毁 joinable
+    // 线程都是 std::terminate——CI run 35374324620 的 "Terminate handler
+    // called" 即此放大(真因是 create 回 null 抛 305)。RAII 保底,语义
+    // 不变(正常路径在下面显式 join,这里空跑)。
+    struct JoinApproverOnExit {
+        std::thread& thread;
+        ~JoinApproverOnExit() {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    } join_approver_on_exit{approver};
 
     const nlohmann::json created = fixture.Create("W2-APPRO-ACCEPT", "写点东西");
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     const auto settled = fixture.PumpUntilSettled(job_id, 20000);
     approver.join();
@@ -595,6 +615,7 @@ TEST_CASE("任务取消:CAS 落账,重复取消幂等") {
     // due 放在未来一小时的 once:创建即入账,但不到点不执行。
     const nlohmann::json created = fixture.Create("W2-CANCEL", "一小时后跑",
                                                    WallMs() + 3600 * 1000);
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     // 推几拍(确认 scheduled 不被认领)。
     for (int i = 0; i < 3; ++i) {
@@ -669,6 +690,7 @@ TEST_CASE("任务事件:created/结算变迁进事件账,seq 单调") {
     W2Fixture fixture("events", {TextScript("事件链结果")});
     REQUIRE(fixture.runtime != nullptr);
     const nlohmann::json created = fixture.Create("W2-EVENTS", "跑事件链");
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     REQUIRE(fixture.PumpUntilSettled(job_id, 15000).has_value());
 
@@ -824,6 +846,7 @@ TEST_CASE("周期任务:pause/resume 透传 CAS;重复操作幂等;终态拒收"
     // interval 拉长(1 小时):创建后不会有自动拍,pause 面好验。
     const nlohmann::json created = fixture.CreateWithParams(nlohmann::json{
         {"prompt", "一小时周期"}, {"clientOperationId", "W4-PAUSE-1"}, {"intervalSeconds", 3600}});
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     const std::uint64_t revision = created["revision"].get<std::uint64_t>();
 
@@ -889,6 +912,7 @@ TEST_CASE("heartbeat:notifyOnChange 任务两拍——首拍投递、次拍无�
         {"clientOperationId", "W4-HB-1"},
         {"intervalSeconds", 1},
         {"notifyOnChange", true}});
+    REQUIRE_MESSAGE(created.is_object(), "task/create 没回执(命令丢失或泵忙),回 null");
     const std::string job_id = created["jobId"].get<std::string>();
     REQUIRE(created.contains("schedule"));
     CHECK(created["schedule"]["notifyOnChange"] == true);

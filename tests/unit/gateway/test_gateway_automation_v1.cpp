@@ -16,6 +16,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +24,13 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <cstdio>
+#include <share.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -561,4 +568,101 @@ TEST_CASE("关机次序:StopAccepting 后不取新活;Close 幂等收净") {
     CHECK(CountOf(fixture.counter_file, "model") == 0);  // 没执行任何任务
     CHECK(pump.Close(1000));  // 收执行器与 writer
     CHECK(pump.Close(1000));  // 幂等
+}
+
+// ---------------------------------------------------------------------------
+// 命令文件 IO 的容错合同:读不懂(内容坏)删除留数;打不开(Windows 换名
+// 后的过滤驱动短拒窗)内容未知,留待下一拍——删了就是把命令真丢。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("命令文件消费:坏内容删除留数,打不开留待下一拍") {
+    const auto root = std::filesystem::temp_directory_path() / "lubancode-gw-v1-cmdio";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root / "control", ec);
+    const auto control = root / "control";
+
+    const auto write_raw = [&control](const char* name, const std::string& text) {
+        std::ofstream stream(control / name, std::ios::binary | std::ios::trunc);
+        stream << text;
+    };
+    const auto count_left = [&control]() {
+        std::error_code lec;
+        std::size_t left = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(control, lec)) {
+            if (entry.path().filename().string().rfind("job-", 0) == 0) {
+                ++left;
+            }
+        }
+        return left;
+    };
+    // 消费即删的收口:Windows 上新建/换名文件可能被过滤驱动短时拦一下,
+    // 删除晚一两拍——有界轮询到目录清空(期间重消费是幂等重复,不算错)。
+    const auto poll_until_clean = [&control, &count_left]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (count_left() != 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            (void)gateway::PollJobCommands(control);
+        }
+        return count_left() == 0;
+    };
+
+    // 半截 JSON(撕裂写):读得懂"是坏的" → 删 + 计 discarded。
+    write_raw("job-add-9-1.json", "{\"type\": \"job.add\", \"prom");
+    // 认不出的 type:同上。
+    write_raw("job-add-9-2.json", "{\"type\": \"mystery\"}");
+    // 正经命令一枚。
+    gateway::GatewayJobAddCommand good;
+    good.prompt = "正经任务";
+    good.idempotency_key = "cmdio-1";
+    REQUIRE(gateway::WriteJobAddCommand(control, good).empty());
+
+    const auto consumed = gateway::PollJobCommands(control);
+    REQUIRE(consumed.adds.size() == 1);
+    CHECK(consumed.adds[0].prompt == "正经任务");
+    CHECK(consumed.discarded == 2);
+    CHECK(poll_until_clean());  // 消费即删:坏的两枚、好的一枚,最终都不在
+
+#ifdef _WIN32
+    // 根因钉(windows 独有病灶,POSIX 无强制文件锁模拟不了):命令文件
+    // 打不开时不许当坏命令删——删了 create 命令就真丢,受理回执 15 秒等
+    // 不到,task/create 回 null,助理审批册 305 / terminate 双爆(CI run
+    // 35403217677 / 35374324620 的 windows-msvc 腿)。独占句柄
+    // (_SH_DENYRW)模拟过滤驱动的"在但打不开"。
+    gateway::GatewayJobAddCommand blocked;
+    blocked.prompt = "被短拒的任务";
+    blocked.idempotency_key = "cmdio-2";
+    REQUIRE(gateway::WriteJobAddCommand(control, blocked).empty());
+    std::filesystem::path command_file;
+    for (const auto& entry : std::filesystem::directory_iterator(control, ec)) {
+        if (entry.path().filename().string().rfind("job-", 0) == 0) {
+            command_file = entry.path();
+        }
+    }
+    REQUIRE_FALSE(command_file.empty());
+    std::FILE* exclusive = _wfsopen(command_file.c_str(), L"rb", _SH_DENYRW);
+    REQUIRE(exclusive != nullptr);
+    {
+        const auto denied = gateway::PollJobCommands(control);
+        CHECK(denied.adds.empty());     // 没消费
+        CHECK(denied.discarded == 0);   // 也没当坏命令计数
+        CHECK(std::filesystem::exists(command_file, ec));  // 文件还在,留给下一拍
+    }
+    std::fclose(exclusive);
+    // 松手后下一拍消费;删除可能又遇瞬态拦,同样有界收口。
+    bool consumed_after_release = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto again = gateway::PollJobCommands(control);
+        if (again.adds.size() == 1 && again.adds[0].prompt == "被短拒的任务") {
+            consumed_after_release = true;
+        }
+        if (count_left() == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(consumed_after_release);
+    CHECK(count_left() == 0);
+#endif
 }

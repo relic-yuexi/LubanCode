@@ -1,8 +1,11 @@
 #include "gateway/control_server.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <sstream>
+#include <thread>
 
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:旧写法替换失败会先删正式文件)
 #include "platform/paths.hpp"
@@ -11,15 +14,28 @@ namespace lubancode::gateway {
 
 namespace {
 
+// Windows 换名瞬拒的有界重试档(与 workspace/manifest.cpp、gateway/
+// work_pump.cpp 同款纪律):原子换名(MoveFileExW REPLACE)与防病毒/索引
+// 过滤驱动会让换代目标的替换/打开被短拒数十毫秒(该件三案 CI 实测:写
+// 侧 320 次换名被拒 48-57 次)。stop.json 是换代写(读者句柄会让替换被
+// 拒),丢了它进程不停——有界重试,正常路径首次即成,POSIX 零开销。
+constexpr int kTransientWriteAttempts = 10;
+constexpr std::chrono::milliseconds kTransientWriteBackoff{10};
+
 // 原子换代写,统一走 platform::AtomicWriteFile(§8.2"spec 可原子换代"):
 // 唯一临时名、平台原子替换、失败不删正式文件、结构化错误。控制快照不是
 // append 账,是可换代的投影;但事实事件(boot history)仍只追加。
 std::string AtomicWriteText(const std::filesystem::path& target, const std::string& text) {
-    const auto result = platform::AtomicWriteFile(target, text);
-    if (!result.has_value()) {
-        return result.error().code + ": " + result.error().message;
+    for (int attempt = 0;; ++attempt) {
+        const auto result = platform::AtomicWriteFile(target, text);
+        if (result.has_value()) {
+            return std::string();
+        }
+        if (attempt >= kTransientWriteAttempts) {
+            return result.error().code + ": " + result.error().message;
+        }
+        std::this_thread::sleep_for(kTransientWriteBackoff);
     }
-    return std::string();
 }
 
 std::string ReadTextFile(const std::filesystem::path& file) {
@@ -146,10 +162,23 @@ bool PollStopCommand(const std::filesystem::path& control_dir, const std::string
     if (!std::filesystem::exists(command_file, ec) || ec) {
         return false;
     }
+    // 读与删分段:MSVC 的 ifstream 句柄不带 FILE_SHARE_DELETE,stream
+    // 开着调 remove 必吃共享违例——先读完、关柄,再删。打不开≠读到坏
+    // 内容:Windows 上刚被原子换名落地的文件会被防病毒/索引过滤驱动短
+    // 拒数十毫秒(manifest.cpp 三案 CI 实测;job 命令文件的同款病灶见
+    // work_pump.cpp)。打不开就不删——文件留着下一拍再读,删了 stop
+    // 命令就真丢了(进程不会停)。
+    std::string text;
+    {
+        std::ifstream stream(command_file, std::ios::binary);
+        if (!stream) {
+            return false;
+        }
+        text.assign((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    }
     // 读到就删(消费即取走):boot_id 对不上也删——那是上一只实例的陈旧
     // 命令,不追杀新实例。
     bool for_us = false;
-    const std::string text = ReadTextFile(command_file);
     if (!text.empty()) {
         try {
             const nlohmann::json parsed = nlohmann::json::parse(text);
