@@ -23,6 +23,9 @@ namespace lubancode::cli {
 
 namespace {
 
+// 布局识别在 app::launcher(cli 命名空间里裸名找不到,起个别名)
+namespace launcher = ::lubancode::app::launcher;
+
 // gateway 状态根走唯一口 gateway::DefaultGatewayRoot()(状态根/gateway,
 // 应用根语义=数据根;个人布局=~/.lubancode/gateway 原样)——run 装配段
 // 与本命令族解同一棵 profile 树,不再各拼各的。

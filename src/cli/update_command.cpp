@@ -24,6 +24,9 @@ namespace lubancode::cli {
 
 namespace {
 
+// 布局识别在 app::launcher(cli 命名空间里裸名找不到,起个别名)
+namespace launcher = ::lubancode::app::launcher;
+
 constexpr const char* kUpdateRepo = "relic-yuexi/LubanCode";
 
 std::string PlatformSlug() {
