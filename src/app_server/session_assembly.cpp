@@ -14,6 +14,7 @@
 #include <set>
 #include <utility>
 
+#include "agent/tool_batch_schedule.hpp"  // 只读并行单 P3:config 的策略两档折进 Agent 档案
 #include "mcp/mcp_tool.hpp"
 #include "platform/paths.hpp"
 #include "runtime/plugin_tool.hpp"  // ScanPluginDirectories/ComputePluginContentHash
@@ -634,6 +635,19 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
         }
     }
     assembly->agent_profile.runtime.max_steps_per_turn = planned_steps;
+    // 批次执行策略(只读并行单 P3 宿主接线):app-server/助理/gateway 渠道
+    // 会话的 Agent 档案从本场 config 折策略两档——与终端主会话
+    //(app/runtime_profile 的 BuildMainRuntimeProfile)同一条解析轴,
+    // 不自造默认硬盖;config 缺席(测试注入路)保持 AgentRuntimeProfile
+    // 的缺省 Exclusive,行为与从前一字不差。认不得的串按默认档收口
+    //(解析层已过滤,这条只是防御,与 BuildMainRuntimeProfile 同款)。
+    if (request.config != nullptr) {
+        assembly->agent_profile.runtime.tool_batch_strategy =
+            agent::ParseToolBatchStrategy(request.config->agent.tool_execution)
+                .value_or(agent::ToolBatchStrategy::Exclusive);
+        assembly->agent_profile.runtime.parallel_read_concurrency =
+            agent::ClampParallelReadConcurrency(request.config->agent.parallel_read_concurrency);
+    }
 
     result.assembly = std::move(assembly);
     return result;

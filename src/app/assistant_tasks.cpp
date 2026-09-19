@@ -1173,6 +1173,8 @@ AssistantAutomationRuntime::OpenOutcome AssistantAutomationRuntime::Open(
     pump_options.max_steps_per_turn = runtime->options_.max_steps_per_turn;
     pump_options.max_wall_secs = runtime->options_.max_wall_secs;
     pump_options.max_total_tokens = runtime->options_.max_total_tokens;
+    pump_options.tool_batch_strategy = runtime->options_.tool_batch_strategy;
+    pump_options.parallel_read_concurrency = runtime->options_.parallel_read_concurrency;
     // 审批口:needs_confirm 工具问页面(超时默认拒绝);工具面不设渠道
     // 上限(allow=nullopt,受 Agent 工具表与审批闸管)。归属上下文经
     // broker 的 provider 取(泵线程查 store 的 claimed——单飞泵同时至多

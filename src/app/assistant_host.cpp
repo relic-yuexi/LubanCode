@@ -976,6 +976,13 @@ int RunAssistantMode(const AssistantCliArgs& args) {
         automation_options.approval_timeout_ms = approval_timeout_ms;
         automation_options.max_steps_per_turn = 32;  // 与 gateway run 同款预算
         automation_options.max_wall_secs = 600;
+        // 批次执行策略(只读并行单 P3 宿主接线):与聊天线(app-server 装配
+        // 折 config)同一条解析轴,任务线也吃当时的活账快照。
+        automation_options.tool_batch_strategy =
+            agent::ParseToolBatchStrategy(config_state->Snapshot().config.agent.tool_execution)
+                .value_or(agent::ToolBatchStrategy::Exclusive);
+        automation_options.parallel_read_concurrency = agent::ClampParallelReadConcurrency(
+            config_state->Snapshot().config.agent.parallel_read_concurrency);
         // 模型名走活账:首配/换配后新任务吃新模型(在飞不追改)。
         automation_options.model_provider = [config_state]() {
             return config_state->Snapshot().config.model;

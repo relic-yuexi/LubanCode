@@ -130,6 +130,12 @@ public:
         int max_steps_per_turn = 0;
         int max_wall_secs = 0;
         std::int64_t max_total_tokens = 0;
+        // 批次执行策略(只读并行单 P3 宿主接线):gateway/助理的自动任务
+        // 会话从 config 的 agent.tool_execution/parallel_read_concurrency 折
+        // 好递进(装配层 gateway_launch/assistant_tasks);缺省 Exclusive 与
+        // AgentRuntimeProfile 同档——不声明不并行,行为与从前一字不差。
+        agent::ToolBatchStrategy tool_batch_strategy = agent::ToolBatchStrategy::Exclusive;
+        int parallel_read_concurrency = agent::kDefaultParallelReadConcurrency;
         // 故障注入(测试专用;生产恒空):返回非空 = 在该点按"进程死掉"
         // 收场——不落后续任何账,Execute 返回 fault 错误码。放行门册用
         // 它钉三处硬杀窗口。
