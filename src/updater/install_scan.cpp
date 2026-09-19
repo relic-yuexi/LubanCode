@@ -34,15 +34,24 @@ std::vector<std::filesystem::path> SortedEntries(const std::filesystem::path& di
     return entries;
 }
 
-// 相对树根的 '/' 分隔相对路径(规整成 manifest 口径的拼法)。
-std::string RelUnderTree(const std::filesystem::path& full,
-                         const std::filesystem::path& tree_root) {
-    std::error_code ec;
-    const std::filesystem::path rel = std::filesystem::relative(full, tree_root, ec);
-    if (ec || rel.empty()) {
+// 纯词法的路径后缀截取:full 去掉 base 前缀的余段,拼成 '/' 分隔相对
+// 路径。绝不用 std::filesystem::relative——那走 weakly_canonical,会把
+// symlink/junction 条目解析到链接对面(macOS 腿实测翻车:键成了
+// "skills/../../outside");扫描键只要词法后缀。
+std::string LexicalSuffix(const std::filesystem::path& full,
+                          const std::filesystem::path& base) {
+    auto fi = full.begin();
+    auto bi = base.begin();
+    for (; bi != base.end() && fi != full.end() && *bi == *fi; ++bi, ++fi) {
+    }
+    std::filesystem::path rest;
+    for (; fi != full.end(); ++fi) {
+        rest /= *fi;
+    }
+    if (rest.empty()) {
         return lubancode::platform::PathToUtf8(full.filename());
     }
-    return rel.generic_string();
+    return rest.generic_string();
 }
 
 }  // namespace
@@ -93,7 +102,7 @@ std::map<std::string, DiskEntry> ScanInstallDisk(
                 std::error_code entry_ec;
                 const bool is_dir = std::filesystem::is_directory(entry, entry_ec) && !entry_ec;
                 const bool reparse = IsLinkLike(entry);
-                const std::string rel = tree + "/" + RelUnderTree(entry, tree_root);
+                const std::string rel = tree + "/" + LexicalSuffix(entry, tree_root);
                 DiskEntry item;
                 item.abspath = entry;
                 item.is_dir = is_dir;
@@ -185,10 +194,10 @@ std::vector<PlanEntry> OrphanReparseConflicts(
             continue;  // 用户数据闸在最前(PS/python 决策表同序)
         }
         PlanEntry item;
-        std::error_code ec;
-        const std::filesystem::path rel =
-            std::filesystem::relative(entry.abspath, install_root, ec);
-        item.path = (!ec && !rel.empty()) ? rel.generic_string() : key;
+        // 点名路径也走纯词法截尾:relative() 会穿链接把 symlink/junction
+        // 条目解析到对面(见 LexicalSuffix 注)。
+        std::string rel = LexicalSuffix(entry.abspath, install_root);
+        item.path = !rel.empty() ? std::move(rel) : key;
         item.action = Action::ConflictReparse;
         item.backup = false;
         item.reason = "盘面是链接/reparse,不写不删";
