@@ -69,6 +69,10 @@ struct RequestPreparedContext {
     std::string tools_hash;
     int cache_epoch = 0;
     bool prefix_append_only = true;
+    // 本步前缀断因(空 = 本步没断;ContextManager::AccountRequest 的
+    // break_reason——system/tools 变化、旧消息改写、压缩重建各报各的)。
+    // 前缀缓存守恒单 §五 D:随请求账持久化,不再只留内存统计。
+    std::string epoch_break_reason;
     // 内部消息序 -> wire 元素序的拍平对照(轨迹 v3 差距清单 §8.2 第 7
     // 条):backend 提供(四家真后端)就有值,trace/桩后端缺省 nullopt。
     // v3 账 model.request.prepared 的 inputMessageRefs 拿它对实际发出的

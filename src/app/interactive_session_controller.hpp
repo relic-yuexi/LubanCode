@@ -219,7 +219,31 @@ private:
     std::string BuildTerminalTitleText(const std::string& state_word) const;
     // 会话尾款 memory 接线的材料包(终端接线收尾单:三只函数在
     // commands/memory_commands,这里只递材料)。
-    void SyncWorktreeDirectory();
+    // worktree 搬房善后(前缀缓存守恒单):reason 是搬房原因(模型工具/
+    // slash 命令/resume 恢复),进宿主目录通知与轨迹账。
+    void SyncWorktreeDirectory(const std::string& reason = std::string());
+    // ---- 宿主目录通知(前缀缓存守恒单 §五 B)----
+    // 一次成功切换只追加一次:搬房善后发现目录真变了,把通知材料挂账
+    // (turn 内工具触发的先挂起,等工具结果提交后的合法消息边界——即
+    // AgentWiring.inbox 的轮询点——再落账注入;slash 空闲路当场落)。
+    // 失败/同目录不追加。
+    struct PendingDirectoryNotice {
+        std::string old_cwd_utf8;
+        std::string new_cwd_utf8;
+        std::string reason;
+    };
+    // 落账(RecordHostDirectoryNotice)+ 摘走挂账。落账失败:阻断本场
+    // 后续模型请求(BlockV3Execution,复用 compact 的执行阻断门——"不能
+    // 静默发送目录过期的下一请求")并回 false,调用方明报。
+    bool CommitHostDirectoryNotice();
+    // inbox 轮询点的取件口:有挂账且落账成功,折成一条带来源标识的注入
+    // 消息(loop 的 InjectIncoming 会按消息边界规则入史);没挂账/落账
+    // 失败给 nullopt。
+    std::optional<lubancode::api::Message> TakePendingDirectoryNoticeAsMessage();
+    // 空闲路(slash/善后)的立即注入:落账成功后直接进 main 内存史,
+    // 下一请求(下一轮 RunSessionTurn 的首步)必见新目录,不为通知单独
+    // 发请求。回 false = 落账失败(已阻断,调用方报错)。
+    bool DeliverPendingDirectoryNoticeNow();
     // 压缩接线的材料包(终端接线收尾单:/compact 正戏与自动压缩路都在
     // commands/session_commands,这里只递材料)。
     // 压缩参数的现场收集(窗口预算认压缩路由声明/目录条目;活动待办守恒)。
@@ -417,6 +441,16 @@ private:
 
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
+    // 宿主目录通知的挂账(前缀缓存守恒单 §五 B):worktree enter/exit 在
+    // 工具执行中途触发搬房善后,此刻工具结果尚未提交——通知不能抢在
+    // tool_use/tool_result 配对收口之前入史,先挂在这,AgentWiring.inbox
+    // 在下一请求边界的轮询点取走。slash 空闲路当场消化,不留挂账。只从
+    // 主线程(slash 分派/loop 轮询)读写,无并发。
+    std::optional<PendingDirectoryNotice> pending_directory_notice_;
+    // 会话当前 cwd 的真值(UTF-8):与冻结基线 prompt_options.cwd 分家
+    //(§五 A)。启动时初始化,每次搬房善后更新;宿主目录通知的"原目录"
+    // 从这取。与 pending_directory_notice_ 同纪律:只主线程读写。
+    std::string session_current_cwd_utf8_;
     // Package 快照镜像(阶段 6):命令面 ctx.package_mount 借用的那份账的
     // 拥有者——reload 换档时先换镜像再重指 ctx,借用在会话内永不悬垂。
     // 与 stack_.package_snapshot(原子槽)同折同换,由 ReloadPackages 维护。

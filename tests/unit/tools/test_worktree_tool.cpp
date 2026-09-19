@@ -143,12 +143,17 @@ TEST_CASE("worktree 工具:进园外的房,confirm 通道说了算") {
     TempRepo temp;
     cli::WorktreeSession session(temp.Runner());
     int moved = 0;
+    std::string moved_reason;
+    const auto count_move = [&moved, &moved_reason](const std::string& reason) {
+        ++moved;
+        moved_reason = reason;  // 前缀缓存守恒单 §五 B:搬房原因进宿主目录通知
+    };
     tools::WorktreeTool tool(
         session, /*confirm=*/[](const std::string& question) -> std::optional<bool> {
             REQUIRE(question.find("user-room") != std::string::npos);
             return false;  // 用户摇头
         },
-        [&moved]() { ++moved; });
+        count_move);
 
     std::filesystem::current_path(temp.repo);
     const auto refused = tool.execute(nlohmann::json{{"action", "enter"}, {"name", "user-room"}});
@@ -158,22 +163,21 @@ TEST_CASE("worktree 工具:进园外的房,confirm 通道说了算") {
     CHECK(moved == 0);
     CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(temp.repo));  // 没搬
 
-    // 用户点头:进得去,房名上状态,搬目录回调触发
+    // 用户点头:进得去,房名上状态,搬目录回调触发(原因带动作名)
     tools::WorktreeTool agree_tool(
-        session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return true; },
-        [&moved]() { ++moved; });
+        session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return true; }, count_move);
     const auto entered = agree_tool.execute(nlohmann::json{{"action", "enter"}, {"name", "user-room"}});
     CHECK_FALSE(entered.is_error);
     CHECK(entered.content.find("已住进 worktree 房") != std::string::npos);
     CHECK(session.active_name() == "user-room");
     CHECK(moved == 1);
+    CHECK(moved_reason == "model worktree enter");
     CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(temp.outside));
 
     // 脏房 exit remove:confirm 点头才删;摇头则房原样保留
     temp.dirty = true;
     tools::WorktreeTool deny_tool(
-        session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return false; },
-        [&moved]() { ++moved; });
+        session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return false; }, count_move);
     const auto kept_dirty = deny_tool.execute(nlohmann::json{{"action", "exit"}, {"mode", "remove"}});
     CHECK(kept_dirty.is_error);
     CHECK(kept_dirty.content.find("已被拒绝") != std::string::npos);
@@ -181,11 +185,12 @@ TEST_CASE("worktree 工具:进园外的房,confirm 通道说了算") {
     CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(temp.outside));  // 拒绝后不出房
 
     tools::WorktreeTool force_tool(
-        session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return true; }, [&moved]() { ++moved; });
+        session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return true; }, count_move);
     const auto removed = force_tool.execute(nlohmann::json{{"action", "exit"}, {"mode", "remove"}});
     CHECK_FALSE(removed.is_error);
     CHECK_FALSE(std::filesystem::exists(temp.outside));
     CHECK(moved == 2);
+    CHECK(moved_reason == "model worktree exit remove");
 }
 
 TEST_CASE("worktree 工具:没人可问(管道模式)时硬确认一律拒") {

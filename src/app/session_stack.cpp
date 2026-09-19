@@ -429,9 +429,9 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
                                                      /*esc_rejects=*/true);
         return answer.has_value() && (*answer == "y" || *answer == "Y");
     };
-    runtime_options.on_worktree_moved = [raw = stack.get()]() {
+    runtime_options.on_worktree_moved = [raw = stack.get()](const std::string& reason) {
         if (raw->after_worktree_moved) {
-            raw->after_worktree_moved();
+            raw->after_worktree_moved(reason);
         }
     };
     // 动态工具 P3(Claude NativeReference·§四/红线 2):有效模式在装配层

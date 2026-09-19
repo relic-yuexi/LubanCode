@@ -570,9 +570,11 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
                        "；压缩/截断按实际事件报告");
     }
     // system 只放稳定环境；需要时间时调用工具，不逐轮注入动态值。
+    // (前缀缓存守恒单 §五 A 同款口径:目录字段是开场冻结的基线,称"会话
+    // 启动目录",不冒充当前值。)
     loop_agent.SetSystemPrompt(
         agent::DefaultPersona() + "\n" + options_.skills_prompt +
-        "\n# 运行环境\n\n- 工作目录: " + options_.cwd_utf8 +
+        "\n# 运行环境\n\n- 会话启动目录: " + options_.cwd_utf8 +
         "\n需要当前日期或时间时调用 get_current_time，不要猜测，也不要沿用历史轮次的时间。"
         "\n相对提醒使用 create_reminder.delay_seconds，由宿主计算，禁止猜测或试探时间戳。"
         "\n需要读文件、执行命令时调用实际工具，以工具回执为准，不要编造结果。\n");

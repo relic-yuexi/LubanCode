@@ -257,7 +257,7 @@ TEST_CASE("agent 工具:软结构 prompt 原样成为首轮 user message,运行�
         }
     }
     CHECK(first_user_text == prompt);
-    CHECK(request.system.find("- 工作目录: /work/dir") != std::string::npos);
+    CHECK(request.system.find("- 会话启动目录: /work/dir") != std::string::npos);
     CHECK(request.system.find(prompt) == std::string::npos);
     const auto snapshots = agent_tool.TaskSnapshots();
     REQUIRE(snapshots.size() == 1);

@@ -89,6 +89,10 @@ std::optional<CompactManifest> ParseCompactManifest(const std::string& summary_t
 // 压缩参数。
 struct CompactOptions {
     std::string focus;  // /compact <重点>:额外重点保留一段
+    // 会话当前目录事实(前缀缓存守恒单 §五 D):非空时压缩指令里注一行
+    // "当前工作目录",摘要据此保留最终有效目录——压缩换史不丢目录状态。
+    // 空 = 调用方没递(单测/无会话场景),指令不注。
+    std::string working_directory_line;
     // 单发压缩指令的正文来自 src/prompts/features/compact-handoff.md
     // (编译期嵌入);prompts_dir 非空时先读用户覆盖(与 memory-summary
     // 同一条 ModuleTextByPath 路)。空 = 只用嵌入版(单测/无会话场景)。

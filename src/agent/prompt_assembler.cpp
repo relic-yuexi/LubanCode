@@ -392,9 +392,16 @@ std::vector<PromptModuleSource> PromptModuleSources(const std::string& prompts_d
 }
 
 std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& current_date) {
-    return "# 运行环境\n\n- 工作目录: " + cwd + "\n- 今天日期: " +
-           (current_date.empty() ? TodayLocalDate() : current_date) + "\n- 操作系统: " + kOsLabel +
-           "\n\n凡是能动手做的事(读文件、跑命令、改文件……),优先调用工具去做,不要凭空猜测或编造结果——"
+    // 前缀缓存守恒单(§五 A):这里的 cwd 是会话启动时冻结的基线值,不是
+    // 当前工作目录——目录中途变化走会话内的宿主追加通知,不重拼 system
+    //(system 中段一改,已发送前缀整段作废)。字段名与稳定规则都写明,
+    // 不把冻结值冒充"当前"。
+    return "# 运行环境\n\n- 会话启动目录: " + cwd +
+           "\n- 今天日期: " + (current_date.empty() ? TodayLocalDate() : current_date) +
+           "\n- 操作系统: " + kOsLabel +
+           "\n\n工作目录如中途变化(进/出 worktree 等),以会话内宿主追加的目录通知为准,"
+           "后续相对路径与命令默认在通知给出的当前目录执行;上面的启动目录只是基线,不随之改写。\n\n"
+           "凡是能动手做的事(读文件、跑命令、改文件……),优先调用工具去做,不要凭空猜测或编造结果——"
            "这条不受上面人格设定的影响,该用工具时就用。";
 }
 

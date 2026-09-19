@@ -87,10 +87,11 @@ void PrintLspCommand(std::optional<lubancode::lsp::Manager>& lsp_manager);
 // ---------------------------------------------------------------------------
 
 // /worktree 借用的会话侧状态:WorktreeSession 是会话与模型侧工具共用的
-// 那一只,sync 在 enter/exit 搬了 cwd 之后由会话做提示词/子代理善后。
+// 那一只,sync 在 enter/exit 搬了 cwd 之后由会话做目录事实/宿主通知/作用域
+// 善后,参数是搬房原因(前缀缓存守恒单 §五 B)。
 struct WorkspaceCommandState {
     lubancode::cli::WorktreeSession& worktree;
-    std::function<void()> sync_worktree_directory;
+    std::function<void(const std::string& reason)> sync_worktree_directory;
 };
 
 // /worktree new|list|exit:两道硬确认(脏房强删、园子外的房)就地收。

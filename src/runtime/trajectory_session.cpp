@@ -1309,7 +1309,6 @@ void TrajectoryTurnBridge::V3RecordInput(const api::Message& user_message) {
 
 std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
                                                     const agent::RequestPreparedContext& ctx) {
-    (void)ctx;
     // T12-A(V3-GAP-07 P0):请求最终准入门。compact applied 落稳但内存换账
     // 失败后,本场 books 置阻断——这里拦在引用对表之前:空串即"prepared
     // 记不住不发模型"的既有语义,loop 本步明败,模型请求/新工具/自动续跑
@@ -1355,6 +1354,19 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     }
     if (request.max_tokens.has_value()) {
         provider_snapshot["parameters"] = nlohmann::json{{"maxOutputTokens", *request.max_tokens}};
+    }
+    // 前缀缓存守恒单 §五 D:cache_epoch/追加律/断因完整进持久化请求账
+    //(此前只 cache_epoch 随 usage 落,prepared 侧不落、断因两边都不落,
+    // 验尸时对不上)。provider_snapshot 的键摊平进 prepared payload 顶层,
+    // 这块落在 prefixAccount 下;断因空串如实落空——本步没断不是缺失字段。
+    if (ctx.has_prefix_account) {
+        provider_snapshot["prefixAccount"] = nlohmann::json{
+            {"cacheEpoch", static_cast<std::uint64_t>(ctx.cache_epoch)},
+            {"appendOnly", ctx.prefix_append_only},
+            {"epochBreakReason", ctx.epoch_break_reason},
+            {"systemHash", ctx.system_hash},
+            {"toolsHash", ctx.tools_hash},
+        };
     }
     // V3-REAL-06(最小可验修复):prepared 的 input_refs 指向链上消息原文,
     // 而实际发送的 request.messages 是 loop 定形的副本——同批工具结果可能
@@ -4723,6 +4735,53 @@ TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChang
     }
     result.same_workspace = true;
     return result;
+}
+
+std::string FormatHostDirectoryNoticeText(const std::string& old_cwd_utf8, const std::string& new_cwd_utf8,
+                                          const std::string& reason) {
+    // 正文按单子 §五 B 的建议格式,补原因行;开头带来源标识。
+    return "[宿主通知] 已切换会话工作目录:\n原目录: " + old_cwd_utf8 + "\n当前目录: " + new_cwd_utf8 +
+           "\n原因: " + reason + "\n后续相对路径与命令默认在当前目录执行。";
+}
+
+std::string TrajectorySessionLedger::RecordHostDirectoryNotice(const std::string& old_cwd_utf8,
+                                                               const std::string& new_cwd_utf8,
+                                                               const std::string& reason) {
+    // 前缀缓存守恒单 §五 B:宿主目录通知进 SessionV3 输入提交链。v2 老账
+    // 消费场没有主写者,如实报错不伪造行(新场自 P0-2 起恒 v3,这条只在
+    // 旧档旁路里才可能碰到)。
+    if (impl_ == nullptr || !impl_->v3_books.has_value() || impl_->v3_books->writer == nullptr) {
+        return "cwd_notice.not_v3: 当前会话账没有 v3 主写者,宿主目录通知无处落";
+    }
+    v3::V3Writer* writer = impl_->v3_books->writer;
+    // turnId 必填(schema §1.2 user 消息):主回合开着挂当前回合(工具触发
+    // 的 enter/exit 就发生在这一轮),空闲 slash 路自起新号——与 memory
+    // .recall 注入同一纪律,不冒充任何真人回合。
+    std::string turn_id = OpenMainTurnId().value_or(std::string());
+    if (turn_id.empty()) {
+        turn_id = writer->NewTurnId();
+    }
+    const std::string text = FormatHostDirectoryNoticeText(old_cwd_utf8, new_cwd_utf8, reason);
+    v3::MessageDraft draft;
+    draft.message_id_override = writer->NewMessageId();
+    draft.turn_id = turn_id;
+    draft.purpose = v3::MessagePurpose::Conversation;
+    draft.origin = v3::MessageOrigin::SessionRuntime;  // 宿主来源,不冒充人类输入
+    draft.display = v3::DisplayMode::Visible;
+    draft.message = nlohmann::json{{"role", "user"}, {"content", text}};
+    // 通知是"下一请求必须带上"的输入:两步都按 PowerLoss 落,任何一步没
+    // 落稳都报错给调用方(阻断或明确中止),不静默发目录过期的请求。
+    const auto committed = writer->AppendMessage(std::move(draft), trajectory::Durability::PowerLoss);
+    if (committed.status != v3::WriteReceipt::Status::Committed) {
+        return "cwd_notice.append_failed: " + committed.error_code;
+    }
+    const auto admitted = writer->AdmitMessages({committed.id}, trajectory::Durability::PowerLoss);
+    if (admitted.status != v3::WriteReceipt::Status::Committed) {
+        // 消息已落盘但没进链:惰性行,链投影不含它——如实报错,调用方按
+        // 失败处置(阻断),不拿半截账冒充成功。
+        return "cwd_notice.admit_failed: " + admitted.error_code;
+    }
+    return {};
 }
 
 // ---------------------------------------------------------------------------

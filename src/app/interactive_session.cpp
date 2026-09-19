@@ -506,12 +506,20 @@ void TerminalSessionController::EnsureMemoryTool() {
     }
 }
 
-void TerminalSessionController::SyncWorktreeDirectory() {
+void TerminalSessionController::SyncWorktreeDirectory(const std::string& reason) {
     // 切 worktree 收面板:查看态目标跟着旧房的任务走,别把消息投去旧目标。
     lubancode::cli::ResetAgentPanelSession();
     // @ 提及索引跟着根走:根变了重扫(下一拍 Snapshot 自办)。
     mention_support_.Invalidate();
-    prompt_options.cwd = CurrentDirUtf8();
+    // 前缀缓存守恒单 §五 A:prompt_options.cwd 是会话启动时冻结的基线,
+    // 这里不再回写——目录一换就重拼 system,后续前缀整段作废(实测
+    // 86%→30% 那场病理)。当前 cwd 的真值走 session_current_cwd_utf8_
+    // 与进程 cwd(std::filesystem::current_path),读写/命令/路径解析/
+    // 项目记忆/子代理启动参数照常跟它走。
+    const std::string old_cwd = session_current_cwd_utf8_;
+    const std::string new_cwd = lubancode::platform::CurrentDirUtf8();
+    const bool directory_changed = old_cwd != new_cwd;
+    session_current_cwd_utf8_ = new_cwd;
     // P0-1(§4.5):轨迹账按冻结身份对账——同一 common git dir 内进出房,
     // workspace 不变,落 cwd.changed + checkout 登记;真跨了 workspace 则
     // 封旧场开新场(交互面的 /worktree 只在同仓内动,跨场属 Gateway/多项目
@@ -529,10 +537,14 @@ void TerminalSessionController::SyncWorktreeDirectory() {
             TermOut() << trf("cmd.memory.switch_failed", updated.error()) << "\n";
         }
     }
-    // 作用域单 P1:搬房后基线走会话那只 Resolver(全局层/fallback 与启动
-    // 同一口径),顺手带出逐 source 账。
+    // 作用域单 P1 + 前缀缓存守恒单 §五 C:搬房后基线走会话那只 Resolver
+    //(全局层/fallback 与启动同一口径),顺手带出逐 source 账。内容没变
+    // 就一个字不动 system(仅目录变化不重拼);内容真变了,沿现有受管指
+    // 令链换作用域——允许这一次明确、可追溯的 system 变更(下一请求的
+    // V3EnsureSystem 会按 §4.3 三步落账),不谎称保前缀。
     const lubancode::config::InstructionChain moved_baseline =
         stack_.instruction_resolver->ResolveForPath(std::filesystem::current_path());
+    const bool instructions_changed = moved_baseline.content != project_instructions;
     project_instructions = moved_baseline.content;
     project_instruction_sources.clear();
     for (const std::filesystem::path& source : moved_baseline.sources) {
@@ -540,19 +552,111 @@ void TerminalSessionController::SyncWorktreeDirectory() {
     }
     prompt_options.project_instructions = project_instructions;
     prompt_options.project_instruction_sources = project_instruction_sources;
-    main_agent->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
+    if (instructions_changed) {
+        // 重拼吃的是冻结基线目录(prompt_options.cwd 未随切换改写),只有
+        // 指令段换血。
+        main_agent->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
+        std::string scope_line;
+        for (const std::string& source : project_instruction_sources) {
+            scope_line += scope_line.empty() ? source : ", " + source;
+        }
+        TermOut() << theme.stats
+                  << trf("cmd.worktree.instructions_changed",
+                         scope_line.empty() ? std::string("(无项目指令)") : scope_line)
+                  << theme.reset << "\n";
+    }
     // 作用域单 P0:搬房后基线换了一截——新 root->cwd 链重新预登记(旧指纹
     // 是内容寻址,留着无害);Resolver 本身无状态,不必换。
     lubancode::tools::MarkBaselineSeen(*stack_.instruction_resolver, *stack_.instruction_scope_state,
                                        std::filesystem::current_path(), project_instructions);
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
-        agent_tool->SetWorkingDirectory(prompt_options.cwd);
+        agent_tool->SetWorkingDirectory(new_cwd);
         agent_tool->SetProjectInstructions(project_instructions);
     }
     // cwd 的事实账在 trajectory(control.cwd.changed,SessionRuntime 的
     // NoteWorkingDirectoryChanged 路);旧存档 cwd 事件行已随 P0-6 删。
     RefreshWorkflowCompletions();
+    // §五 B:宿主目录通知——一次成功切换只追加一次;同目录/失败不追加。
+    if (!directory_changed) {
+        return;
+    }
+    PendingDirectoryNotice notice;
+    notice.old_cwd_utf8 = old_cwd;
+    notice.new_cwd_utf8 = new_cwd;
+    notice.reason = reason.empty() ? "宿主切换工作目录" : reason;
+    pending_directory_notice_ = std::move(notice);
+    // 主回合开着 = 工具触发的 enter/exit 正在 turn 里跑:通知不能抢在
+    // tool_use/tool_result 配对提交之前,挂账等 AgentWiring.inbox 在下一
+    // 请求边界(工具结果已入史)取走落账注入。slash 空闲路当场交付——
+    // 下一轮 RunSessionTurn 的首步必见新目录,不为通知单独发请求。
+    const bool turn_open =
+        session_runtime_.trajectory() != nullptr && session_runtime_.trajectory()->OpenMainTurnId().has_value();
+    if (!turn_open) {
+        DeliverPendingDirectoryNoticeNow();
+    }
+}
+
+bool TerminalSessionController::CommitHostDirectoryNotice() {
+    if (!pending_directory_notice_.has_value()) {
+        return false;  // 没挂账:无事可做,不是失败
+    }
+    const PendingDirectoryNotice notice = *pending_directory_notice_;
+    lubancode::runtime::TrajectorySessionLedger* ledger = session_runtime_.trajectory();
+    if (ledger == nullptr) {
+        // 没有账本(装配失败的会话):如实报错并放弃通知——不静默让下一
+        // 请求带着过期目录跑。
+        pending_directory_notice_.reset();
+        TermErr() << theme.error << tr("error.prefix")
+                  << trf("cmd.worktree.notice_failed", "trajectory unavailable") << theme.reset << "\n";
+        return false;
+    }
+    const std::string error = ledger->RecordHostDirectoryNotice(
+        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason);
+    if (!error.empty()) {
+        // 通知没落稳:不能静默发送目录过期的下一请求。复用 compact 的
+        // 执行阻断门(T12-A)——本场后续所有轮桥的 prepared 一律拒发,
+        // 换场(resume/clear)才解除;挂账保留,错误明说。
+        ledger->BlockV3Execution("cwd_notice.commit_failed");
+        TermErr() << theme.error << tr("error.prefix") << trf("cmd.worktree.notice_failed", error)
+                  << theme.reset << "\n";
+        return false;
+    }
+    pending_directory_notice_.reset();
+    return true;
+}
+
+std::optional<lubancode::api::Message> TerminalSessionController::TakePendingDirectoryNoticeAsMessage() {
+    if (!pending_directory_notice_.has_value()) {
+        return std::nullopt;
+    }
+    const PendingDirectoryNotice notice = *pending_directory_notice_;
+    if (!CommitHostDirectoryNotice()) {
+        return std::nullopt;  // 落账失败:不注入,books 阻断门拦下一请求
+    }
+    lubancode::api::Message inject;
+    inject.role = lubancode::api::Role::User;
+    inject.content.push_back(lubancode::api::TextBlock{lubancode::runtime::FormatHostDirectoryNoticeText(
+        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason)});
+    return inject;
+}
+
+bool TerminalSessionController::DeliverPendingDirectoryNoticeNow() {
+    if (!pending_directory_notice_.has_value()) {
+        return true;
+    }
+    const PendingDirectoryNotice notice = *pending_directory_notice_;
+    if (!CommitHostDirectoryNotice()) {
+        return false;
+    }
+    lubancode::api::Message inject;
+    inject.role = lubancode::api::Role::User;
+    inject.content.push_back(lubancode::api::TextBlock{lubancode::runtime::FormatHostDirectoryNoticeText(
+        notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason)});
+    if (main_agent.has_value()) {
+        main_agent->context().InjectIncoming(std::move(inject));
+    }
+    return true;
 }
 
 // 处理"确定不是空行、不是裸词 exit/quit"的一行输入,不管这行是刚
@@ -618,6 +722,10 @@ bool TerminalSessionController::PumpScheduledWork() {
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
     }();
+    // 前缀缓存守恒单 §五 B 的保险:goal continuation/loop tick 这类自动轮
+    // 不经 RunSessionTurn,起轮前先把挂账的宿主目录通知交付掉——下一
+    // 请求必见新目录。落账失败(已阻断)时这里带过,prepared 侧拦请求。
+    DeliverPendingDirectoryNoticeNow();
     std::vector<lubancode::runtime::SessionWork> candidates;
     // 有 ready continuation:候选里放一枚占位,真取件(TakeReadyIteration
     // 落 started 事件)等选中后再做——没选中就不动 goal 的账。
@@ -682,6 +790,12 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
                                                bool* autosend_failed, bool silent,
                                                memory::QueryOrigin origin, bool* cancelled_out) {
     const TurnSource source = ingress.source;
+    // 前缀缓存守恒单 §五 B 的保险:worktree 工具挂账的宿主目录通知若还没
+    // 交付(比如工具成功后回合被 ESC 打断,inbox 轮询点没走到),在下一轮
+    // 开跑前补上——下一次模型请求必须看见新目录,不为通知单独发请求。
+    // 落账失败(已阻断)时这里如实带过,后续 V3RequestPrepared 会拦住
+    // 请求,不会带着过期目录静默发出去。
+    DeliverPendingDirectoryNoticeNow();
     // P3 取消闸(§五.4):新一轮开跑,上一轮的取消账翻篇——闸只压"取消后
     // 的第一圈泵"。
     last_turn_cancelled_ = false;

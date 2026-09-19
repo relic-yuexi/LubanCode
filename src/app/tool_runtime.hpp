@@ -204,10 +204,11 @@ public:
         // 非空才注册 "worktree" 工具(交互入口传;单发/管道模式没人可问
         // 硬确认,不挂)。confirm 是工具自己的问话通道(进园子外的房、脏房
         // 强删两道硬安全线,确认档压不住);on_session_moved 在 enter/exit
-        // 搬了 cwd 之后回调,交互入口用它重拼系统提示、同步子代理 cwd。
+        // 搬了 cwd 之后回调(参数 = 搬房原因),交互入口用它同步目录事实、
+        // 发宿主目录通知、必要时按新作用域重拼系统提示。
         lubancode::cli::WorktreeSession* worktree_session = nullptr;
         lubancode::tools::WorktreeTool::ConfirmHandler worktree_confirm;
-        std::function<void()> on_worktree_moved;
+        std::function<void(const std::string& reason)> on_worktree_moved;
         // Package 会话钉快照的现行供应商(统一封装单阶段 3/6):返回一份
         // shared_ptr 拷贝(快照不可变,在跑引用钉住各自那份)。构造时取一次
         // 跑 code 挂载事务(只在会话启动跑);agent 工具派发自定义 Agent 时

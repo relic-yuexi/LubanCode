@@ -890,6 +890,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // skills 有技能才注、mcp/web/lsp 配了才注、平台段按 wire。法(persona)
     // 非空时 core 模块让位,环境/features 段照拼。
     prompt_options.cwd = CurrentDirUtf8();
+    // 前缀缓存守恒单 §五 A:prompt_options.cwd 自此冻结为"会话启动目录"
+    // 基线,搬房不再回写;会话当前 cwd 的真值在 session_current_cwd_utf8_
+    //(宿主目录通知的"原目录"从这取)。
+    session_current_cwd_utf8_ = prompt_options.cwd;
     prompt_options.persona = persona;
     prompt_options.skills_segment = skills_segment;
     prompt_options.project_instructions = project_instructions;
@@ -1069,6 +1073,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         lubancode::agent::AgentWiring wiring = main_agent->wiring();
         wiring.inbox = [this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
             PumpSteeringToSubagents();
+            // 前缀缓存守恒单 §五 B:worktree enter/exit 在工具执行中途挂账的
+            // 宿主目录通知,在这个边界交付——此刻本轮工具调用及结果已完整
+            // 提交(tool_use/tool_result 配对收口),通知追加在合法消息边界,
+            // 下一请求必见新目录。落账失败不注入(books 阻断门拦请求),不
+            // 静默发目录过期的下一请求。
+            if (std::optional<lubancode::api::Message> notice = TakePendingDirectoryNoticeAsMessage()) {
+                return notice;
+            }
             // 问题二(忙碌期排队的 /context 被当普通消息送模型):取件口
             // 在队列层对 slash 条目让路——这里取到的只有普通文字,slash 留在
             // 队列,由轮末会话泵(主循环取件 → ProcessLine)
@@ -1132,11 +1144,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 }
             });
     }
-    // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
-    stack_.after_worktree_moved = [this]() { SyncWorktreeDirectory(); };
-    // --continue 若把会话搬回了存档里的房,提示词与子代理 cwd 跟着同步。
+    // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上
+    //(reason 由工具层带:enter/exit 各报各的)。
+    stack_.after_worktree_moved = [this](const std::string& reason) { SyncWorktreeDirectory(reason); };
+    // --continue 若把会话搬回了存档里的房,目录事实/宿主通知/子代理 cwd
+    // 跟着同步(基线 system 不按恢复时 cwd 偷换,§五 D)。
     if (resume_moved_into_worktree) {
-        SyncWorktreeDirectory();
+        SyncWorktreeDirectory("--continue resume into archived worktree");
     }
     // Plan 模式单:起手档(--mode/env/settings 在 RunCli 算好)。--continue
     // 恢复出旧档的场合:档里有 mode 行的,旧账真值已灌进 runtime,起手档
@@ -1697,7 +1711,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     // AGENTS.md 作用域单 P1-1:/instructions 与 /doctor instructions 用会话
     // 那只 Resolver(与写前闸、基线预登记同一份账)。
     ctx.instruction_resolver = stack_.instruction_resolver.get();
-    ctx.sync_worktree_directory = [this]() { SyncWorktreeDirectory(); };
+    ctx.sync_worktree_directory = [this](const std::string& reason) { SyncWorktreeDirectory(reason); };
     ctx.ensure_memory_tool = [this]() { EnsureMemoryTool(); };
     ctx.ensure_goal_coordinator = [this]() { goal_wiring_.Ensure(config); };
     ctx.ensure_loop_scheduler = [this]() { loop_wiring_.Ensure(); };
@@ -1759,7 +1773,7 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             titles_.BumpGeneration();
             titles_.refiner().RequestCancel();
         },
-        [this]() { SyncWorktreeDirectory(); },
+        [this](const std::string& reason) { SyncWorktreeDirectory(reason); },
         [this]() { CleanupBackgroundAgents(/*dispose_queue=*/true); },
         &worktree_session,
         wire_str,
@@ -1782,6 +1796,15 @@ lubancode::agent::CompactOptions TerminalSessionController::BuildCompactOptions(
     // ~/.lubancode/prompts/features/compact-handoff.md 覆盖(与 memory-summary
     // 同一条路);空目录回落编译期嵌入版。
     options.prompts_dir = prompts_dir;
+    // 前缀缓存守恒单 §五 D:压缩指令带上"当前工作目录"事实(会话启动
+    // 目录是冻结基线,真实 cwd 中途可能已切)——摘要据此保留最终有效目录。
+    if (session_current_cwd_utf8_ != prompt_options.cwd) {
+        options.working_directory_line =
+            "当前工作目录: " + session_current_cwd_utf8_ + "(会话启动目录: " + prompt_options.cwd +
+            ";目录以本行为准)";
+    } else {
+        options.working_directory_line = "当前工作目录: " + session_current_cwd_utf8_;
+    }
     // 窗口预算认压缩路由自己的声明:高级段 model_roles 声明了 context_
     // window 就用它;没有再查模型目录条目;目录里也查不到(自定义模型、
     // 中转起名)就留空——Compact() 不做窗口拦截,但输出会明说"窗口未知,

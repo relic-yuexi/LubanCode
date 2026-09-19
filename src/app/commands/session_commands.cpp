@@ -207,6 +207,10 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                                      lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
                                      hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
                       << "\n";
+            // 前缀缓存守恒单 §五 D:epoch 只数本地前缀断点(压缩/换梁也算),
+            // 不等于服务端缓存失效次数;本地指纹稳定也不保证服务端命中——
+            // 命中以 provider usage 为准,不写成确定承诺。
+            TermOut() << "  " << tr("cmd.context.epoch_note") << "\n";
             // 会话累计总账:Σ命中 / Σ输入。跟单轮口径分开,并明确标注
             // "会话累计"——它回答"整个 session 发了多少输入、多少走了
             // 缓存读",不是"每轮都这么多"。
@@ -2987,7 +2991,7 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
         }
         if (session_state.sync_worktree_directory && ctx.worktree_session != nullptr &&
             ctx.worktree_session->active()) {
-            session_state.sync_worktree_directory();
+            session_state.sync_worktree_directory("resume into archived worktree");
         }
         return CommandFlow::Continue;
     }

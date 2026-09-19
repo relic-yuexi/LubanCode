@@ -208,7 +208,8 @@ struct SlashDispatchContext {
     std::function<void()> refresh_skills;                 // /skill /record install
     std::function<void()> refresh_workflow_completions;   // /workflow alias 目录/启停变化
     std::function<void()> refresh_project_instructions;   // /init
-    std::function<void()> sync_worktree_directory;        // /worktree 搬房善后
+    // /worktree 搬房善后(参数 = 搬房原因,进宿主目录通知与轨迹账)。
+    std::function<void(const std::string& reason)> sync_worktree_directory;
     std::function<void()> ensure_memory_tool;             // /memory on/learn 后补注册
     std::function<void()> ensure_goal_coordinator;
     std::function<void()> ensure_loop_scheduler;
