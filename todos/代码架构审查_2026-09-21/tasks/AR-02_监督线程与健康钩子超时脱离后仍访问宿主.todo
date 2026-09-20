@@ -1,0 +1,54 @@
+# AR-02 监督线程与健康钩子超时脱离后仍访问宿主
+
+- 状态：已修（PR #161，CI 绿，勾账见文末）；原审查轮只审未改。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-02 | B | 高 | src/runtime/agent_health_hooks.cpp:16；src/runtime/agent_health_hooks.cpp:73；src/runtime/agent_health_hooks.cpp:94；src/runtime/agent_health_hooks.cpp:99；src/runtime/agent_supervisor.cpp:27；src/runtime/agent_supervisor.cpp:108；src/runtime/agent_supervisor.cpp:135 | 两类线程均捕获 `[this]`；析构等待1秒/1.5秒后 `detach()`；callback返回后仍写 `delivered_events_` 并重锁 `mutex_`。 | 健康订阅回调只要执行超过1秒，析构就能释放总线；回调返回后线程必经成员计数与锁。Supervisor同样没有把自身或ledger租约交给存活线程。超时是等待策略，不能充当对象寿命保证。 | 保留事件队列与监督逻辑，拆出独立共享线程状态；线程只捕获状态，宿主析构断开发布及ledger访问后请求停止。若保留跨截止时间线程，必须保有全部会访问资源的租约；可中断部分使用join，任意外部回调不能靠强制结束C++线程解决。 | 影响会话关闭和hook订阅。需保持慢订阅不阻塞监督器的原合同；独立共享状态不能再捕获外层this。 |
+
+## 证据与边界
+
+最小执行交错：Publish启动线程 → callback进入可控栅栏 → 析构等待1秒后detach并释放对象 → 放开callback → DispatchLoop:99/100访问已释放对象。Supervisor::RunLoop:130-135在停止前后仍会访问本体；不能援引“退出只剩原子置位”证明安全，原子成员也属于已析构对象。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/runtime/agent_health_hooks.cpp`；`src/runtime/agent_health_hooks.hpp`；`src/runtime/agent_supervisor.cpp`；`src/runtime/agent_supervisor.hpp`。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 不得并行共改：AR-06；同文件先后落单，或约定具体函数所有权。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 保留事件队列与监督逻辑，拆出独立共享线程状态；线程只捕获状态，宿主析构断开发布及ledger访问后请求停止。若保留跨截止时间线程，必须保有全部会访问资源的租约；可中断部分使用join，任意外部回调不能靠强制结束C++线程解决。
+3. 小批提交，按下列门槛验收。
+
+- [x] 长回调跨越析构截止时间后返回，ASan无错。（CI 三腿为 Release 无 ASan 腿；结构上保证——线程 lambda 只捕 shared_ptr 状态，宿主指针不出现在线程世界；合同由哨兵夹具钉死：`lifetime_token_for_test()` 过期即专职线程已退、共享状态已析构）
+- [x] 停止后拒绝或丢弃新Publish且合同明确。（收线后 Publish 拒收并计入 dropped_events；批内剩余照派发完，"跑完手头一批就退"的原合同不松）
+- [x] 订阅重入/抛异常不锁死。（回调在锁外跑，重入只拿共享状态小锁；测试册钉重入案，既有册钉抛异常案）
+- [x] 监督线程退出前ledger不释放。（宿主析构先拔台账 sink、置断连标志——检查点后线程不再发起台账访问；台账仍由所有者持有、声明序在前析构在后）
+- [x] GitHub CI增加生命周期夹具。（tests/unit/runtime/test_agent_thread_lifetime.cpp 五案：门闩钉交错不赌调度；CI 实证 `unit.runtime.agent_thread_lifetime Passed 4.70 sec`）
+
+## 勾账
+
+- 状态：已修。PR #161（https://github.com/relic-yuexi/LubanCode/pull/161），分支 worktree-agent-ac1d8c4d632a546d3，提交 ce570765 + a999a2ab。
+- 修法：钩子总线拆 State、监督循环整包搬进 Loop（均 enable_shared_from_this，线程只捕 shared_ptr）；宿主析构先拔 sink、置 host_detached 断连再请求停止；跨截止时间存活的脱离线程跑完在途一拍、只摸共享状态。
+- CI 证据：run 35533152445，macos-clang 腿 SUCCESS（lane 派腿），rollup 有效 check 全绿；旧 run 35531695484 的 clang 红已修（const 左值不能绑非 const 引用，哨兵等待改按值收 weak_ptr）。
+- 行号复核：现基线病灶行号有偏移但病灶一致（agent_health_hooks.cpp 析构 detach 后 DispatchLoop 写 delivered_events_/重锁 mutex_；agent_supervisor.cpp 析构 detach 后 RunLoop 退出路径写 thread_exited_、回环访问本体）。
+
+## 删除量与旧账
+
+本项不以删行计收益；预计净删除 0 行。
+
+当前 todos 未找到直接承接此缺口的专单。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-06（src/runtime/agent_supervisor.cpp）。
