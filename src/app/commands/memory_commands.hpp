@@ -19,6 +19,7 @@
 #include "agent/agent.hpp"        // Agent(批四自立门户)
 #include "agent/model_router.hpp"  // TaskKind/ModelRole
 #include "app/memory_extract.hpp"  // MemoryTurnLedger(P0 调度账)
+#include "app/turn_memory_extractor.hpp"  // TurnMemoryExtractor(回合总结异步化)
 
 namespace lubancode::memory {
 class ProjectMemory;
@@ -56,6 +57,11 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
 // 到会话控制器:首问建档当场起本地标题,精炼走 SessionTitleRefiner 异步,
 // 不再在回合收尾同步等 cheap。T17:artifact 按需摘要
 // SummarizeArtifactOnDemand 已随旧仓与 context_read 一并退役。)
+//
+// 记忆回合总结异步化单:前置门留前台(纯本地,微秒级),门过即把采样+
+// 解析丢进 TurnMemoryExtractor 的后台线程——收口即刻还输入框,learn 开着
+// 的每一场不再同步等 cheap 往返。收账(usage/候选入队/台账落袋)在主线程
+// 空闲拍走 SettleTurnMemory。
 struct SessionTailContext {
     lubancode::memory::ProjectMemory* project_memory = nullptr;
     lubancode::agent::Agent* agent = nullptr;          // 活 loop(history 与路由)
@@ -70,12 +76,40 @@ struct SessionTailContext {
     // 记忆写入调度单 P0:回合级调度账(漏斗/Token/尾延迟 + 写路回执)。
     // 空 = 没开账(单测),抽取一切照旧。
     lubancode::app::MemoryTurnLedger* memory_turns = nullptr;
+    // ---- 回合总结异步化单 ----
+    // 门过起飞的后台执行器(会话控制器持一只,活一场会话)。空 = 没接
+    // 执行器:门过也只能记一笔失败账让位(同步等待网络的旧路已退役,
+    // 不留两套行为)。
+    lubancode::app::TurnMemoryExtractor* extractor = nullptr;
+    // 起飞时的会话世代(/clear、/resume 翻号)与本轮轮号:迟到收账对档,
+    // 换代弃旧账。轮号也进 MemoryTurnLedger 的悬账(账落对档)。
+    std::uint64_t session_generation = 0;
+    std::string turn_id;
 };
 
-// 回合收尾抽取:只看本轮增量,借 cheap 路由产严格 JSON;候选进待审区
-// (auto 档且证据齐的直写),检索扩展词留给下一轮召回。失败降级一行字,
-// 不影响主会话,也不重试。
-void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text, std::size_t history_before);
+// ExtractTurnMemory 的收口档(调用方据此决定回合账怎么落):
+enum class TurnMemoryDispatch {
+    Skipped,      // 前置门拦下(learn off/短文本/同轮去重/…):不发,账已前台记完
+    Dispatched,   // 门过:后台已起飞,回合账悬起(SuspendTurn),迟到收账走 SettleTurnMemory
+    DroppedBusy,  // 门过但单飞在途(上一枚没收走):本轮让位不发,账已前台记完
+    DroppedRoute, // 门过但路由落空/执行器没接:不发,零账与 route_miss 已前台记完
+};
+
+// 回合收尾抽取(前台半边):只看本轮增量;前置门全在本地(必跳层/同轮
+// 去重/短文本/耐久信号/转写与提示拼装),门过把采样丢后台——不等网络。
+// 返回收口档:门拦的回合调用方立即 FinishTurn,Dispatched 的回合
+// SuspendTurn 悬账。前台不再打 [memory] 起跑行(收口即刻还输入框),
+// 完成与失败的行都在收账点(SettleTurnMemory)打。
+TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text,
+                                     std::size_t history_before);
+
+// 迟到收账(主线程空闲拍):完工的抽取结果记 usage 账(由调用方在世代门
+// 之前记,弃账也照记)、检索扩展词、候选入队(auto 档直写闸照旧)、台账
+// 补 outcome 落袋,打完成/失败行。tail_wall_ms = 回合收口到收账完成的墙钟
+// (MemoryTurnLedger 的并档口径,见 FinishTurn 注释)。世代门(换代弃迟到)
+// 在调用方,这里只管对档落袋。
+void SettleTurnMemory(const SessionTailContext& ctx, const TurnMemoryExtractor::Outcome& outcome,
+                      std::int64_t tail_wall_ms);
 
 // 命令分派注册制(会话终章):/memory 的分派位(case 体原样搬自大 switch)。
 struct SlashDispatchContext;

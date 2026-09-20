@@ -833,6 +833,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     memory_receipts_wake_token_ = idle_wakes_.AddSource("memory_receipts", [this]() {
         return project_memory != nullptr && project_memory->WakeNeededForWrites();
     });
+    // 记忆回合总结完工的唤醒源(回合总结异步化单):抽取在后台跑完(成功/
+    // 失败/取消都算——usage 是真花的,失败也要叫醒来收账)翻真让位,主
+    // 循环顶 DrainFinishedTurnMemory 收账(记 usage、过世代门、对档落袋
+    // 入队)。运行中不醒(Ready 才是唤醒条件),收完翻假不空转。
+    memory_extract_wake_token_ = idle_wakes_.AddSource("memory_extract", [this]() {
+        return HasFinishedTurnMemory();
+    });
     lubancode::cli::SetIdleWakeHook([this]() { return idle_wakes_.AnyReady(); });
 
     // 底栏状态行的后台任务段数据源(background 管理面单):BuildStatusLine
@@ -1295,6 +1302,7 @@ TerminalSessionController::~TerminalSessionController() {
     subagent_wake_token_.reset();
     background_wake_token_.reset();
     title_wake_token_.reset();
+    memory_extract_wake_token_.reset();
     loop_wiring_.Shutdown();
 }
 

@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -31,6 +32,12 @@ class V3Writer;
 namespace lubancode::app {
 
 inline constexpr int kMemoryExtractMaxTokens = 4096;
+
+// 抽取请求的本地超时预算(秒):SampleModel 的看门狗到点归因
+// local_deadline(DeadlineTimeout),不是网络错误。原先住在
+// commands/memory_commands.cpp 的匿名段,回合总结异步化单起公开——后台
+// 执行器与收账点的文案同用一把尺。
+inline constexpr int kMemoryExtractTimeoutSecs = 45;
 
 // 抽取结果(回合总结 + 候选 + 检索扩展词)。
 struct ProposedCandidate {
@@ -121,6 +128,10 @@ std::expected<MemoryExtraction, ExtractionError> ParseExtractionJson(const std::
 // 发一次抽取请求(同步,带看门狗取消)。失败只返回错误,调用方降级。
 // reasoning_effort 非空时随请求带上(cheap 路由的档位);accounting 非空时
 // 把这次调用的 usage/时长记进去(分角色记账,不混普通 turn 的账)。
+// cancel/boundary_recorder 是回合总结异步化单添的口:外部取消链(会话
+// 拆除/换代的 RequestCancel)与旁路桥(轨迹 Journal 的
+// purpose=memory_extract 落账)原先只在同步前台路拼,后台执行器同一条
+// 路也要走——默认空,旧行为不变。
 // 采样走 agent::SampleModel 原语(批一·病四)。
 std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backend& backend,
                                                                  const std::string& model,
@@ -128,7 +139,9 @@ std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backen
                                                                  const std::string& transcript,
                                                                  int timeout_secs,
                                                                  const std::string& reasoning_effort = std::string(),
-                                                                 agent::BackgroundCallAccounting* accounting = nullptr);
+                                                                 agent::BackgroundCallAccounting* accounting = nullptr,
+                                                                 agent::LoopBoundaryRecorder* boundary_recorder = nullptr,
+                                                                 const std::atomic<bool>* cancel = nullptr);
 
 // 采样结果的抽取侧收口:RunMemoryExtraction 与走 ModelRouterService::Sample
 // 一站的调用方共用——失败回 transport_failed、空文回 empty_output、已知
@@ -315,9 +328,28 @@ public:
     // ---- 回合生命周期(回合收尾路调;主线程) ----
     // session_id 可空(flag 关的会话没有轨迹场号)。
     void BeginTurn(std::string session_id, std::string turn_id, const std::string& user_text);
-    // 回合收尾账落袋:foreground_tail_ms = 回合收尾到抽取返回的墙钟
-    //(§10.3);trajectory 在场时落 memory.extraction.assessed。
+    // 回合收尾账落袋:foreground_tail_ms = 回合收尾到抽取终态的墙钟
+    //(§10.3;异步化后口径并档:门拦回合 = 前台门的耗时,门过回合见
+    // SettleSuspendedTurn——都是"抽取路径的墙钟尾巴",离线一张表可比,
+    // 不混入等待用户输入的时间)。trajectory 在场时落
+    // memory.extraction.assessed。
     void FinishTurn(std::int64_t foreground_tail_ms);
+    // ---- 悬账(回合总结异步化单:门过起飞的回合,收口不等网络) ----
+    struct ExtractOutcome;  // 嵌套类型后文才完整定义,悬账口先用(clang 严)
+    // 收口悬账:回合账(state_ 与门决策)留着,轮号记进悬账槽;turn 关
+    // (写路回执不再挂轮号,对齐 FinishTurn 的回合间口径)。迟到收账
+    //(SettleSuspendedTurn)补 outcome 落袋;下一轮 BeginTurn 先到,悬账
+    // 以 aborted 口径落袋(decision=Called 而 outcome 缺席——真账,不编
+    // 数字),不阻塞新轮。
+    void SuspendTurn();
+    // 迟到收账:对上悬账轮号才补 outcome 并落 assessed;对不上(回合已
+    // 翻篇/换代弃过)不动,只把真失败数进漏斗。settle_wall_ms = 回合
+    // 收口到收账完成的墙钟(并档口径见 FinishTurn)。返回是否真落了袋。
+    bool SettleSuspendedTurn(const std::string& turn_id, std::int64_t settle_wall_ms,
+                             const ExtractOutcome* outcome);
+    // 换代弃账(/clear、/resume):悬账清掉不落盘——旧场的回合账不写进
+    // 新场的卷里,宁缺毋滥。漏斗计数在场,漏斗不受影响。
+    void AbandonSuspendedTurn();
 
     // ---- 抽取观测点(ExtractTurnMemory 的前置门与收口;纯记账) ----
     void NoteExtractionSkipped(ExtractionSkipReason reason);
@@ -368,6 +400,9 @@ private:
     mutable std::mutex mutex_;
     MemoryTurnState state_;
     bool turn_open_ = false;
+    // 悬账轮号(回合总结异步化单):SuspendTurn 记下,Settle/Abandon 或
+    // 下一轮 BeginTurn 清掉。空 = 没有悬着的回合账。
+    std::string suspended_turn_id_;
     // called 之后的收口材料(FinishTurn 落袋)。
     bool extraction_called_ = false;
     ExtractOutcome pending_outcome_;

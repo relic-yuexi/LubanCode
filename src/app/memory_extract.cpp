@@ -594,7 +594,9 @@ std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backen
                                                                  const std::string& transcript,
                                                                  int timeout_secs,
                                                                  const std::string& reasoning_effort,
-                                                                 agent::BackgroundCallAccounting* accounting) {
+                                                                 agent::BackgroundCallAccounting* accounting,
+                                                                 agent::LoopBoundaryRecorder* boundary_recorder,
+                                                                 const std::atomic<bool>* cancel) {
     // 采样走 SampleModel 原语(批一·病四):攒流/usage/兜错/看门狗的路只有
     // 一份,这里只剩提示拼装与解析。两条入口(RunMemoryExtraction 与
     // ModelRouterService::Sample 链)共用 FinishMemoryExtraction 收口——
@@ -612,6 +614,18 @@ std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backen
 
     agent::SampleOptions sample_options;
     sample_options.timeout_secs = timeout_secs;
+    // 回合总结异步化单:外部取消链与旁路桥原先只在同步前台路由调用方拼
+    // (memory_commands 的旧路),后台执行器同一条路——cancel 在场时升旗
+    // 人是宿主自己(会话拆除/换代的 RequestCancel),如实申报 Internal,
+    // 不冤枉用户按键;boundary_recorder 只借不持,桥随调用方栈生灭。
+    sample_options.cancel = cancel;
+    if (cancel != nullptr) {
+        sample_options.cancel_source = agent::OutputCancelSource::Internal;
+    }
+    sample_options.boundary_recorder = boundary_recorder;
+    if (boundary_recorder != nullptr) {
+        sample_options.purpose = lubancode::accounting::RequestPurpose::MemoryExtract;
+    }
     const agent::SampleResult sampled = agent::SampleModel(backend, sample, sample_options);
 
     // usage 出账(分角色记账):抽取这轮采样不混普通 turn 的账。
@@ -1175,6 +1189,13 @@ MemoryTurnLedger::~MemoryTurnLedger() = default;
 void MemoryTurnLedger::BeginTurn(std::string session_id, std::string turn_id,
                                  const std::string& user_text) {
     const std::lock_guard<std::mutex> lock(mutex_);
+    // 悬账冲账(回合总结异步化单):上一轮门过起飞、收账还没赶上新轮
+    // 开张——悬账以 aborted 口径落袋(decision=Called 而 outcome 缺席,
+    // RecordAssessedLocked 的既有兜底),不编数字,也不阻塞新轮。
+    if (!suspended_turn_id_.empty()) {
+        RecordAssessedLocked(0);
+        suspended_turn_id_.clear();
+    }
     state_ = MemoryTurnState{};
     state_.session_id = std::move(session_id);
     state_.turn_id = std::move(turn_id);
@@ -1261,7 +1282,53 @@ void MemoryTurnLedger::FinishTurn(std::int64_t foreground_tail_ms) {
         RecordAssessedLocked(foreground_tail_ms);
     }
     turn_open_ = false;
+    suspended_turn_id_.clear();  // FinishTurn 落过袋的回合没有悬账(纪律:二选一)
     state_.turn_id.clear();  // 回合间的写路回执(slash 命令)不带回合号
+}
+
+void MemoryTurnLedger::SuspendTurn() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!turn_open_) {
+        return;
+    }
+    // 悬账:state_(门决策/漏斗材料)原样留着等迟到收账补 outcome;轮先
+    // 关(回合间口径:写路回执不挂轮号)。悬账期间 slash 写路回执还会写
+    // state_ 的写入账——那是回合间的事,RecordAssessedLocked 不读它,串
+    // 不进这轮的 assessed。
+    suspended_turn_id_ = state_.turn_id;
+    turn_open_ = false;
+    state_.turn_id.clear();
+}
+
+bool MemoryTurnLedger::SettleSuspendedTurn(const std::string& turn_id, std::int64_t settle_wall_ms,
+                                           const ExtractOutcome* outcome) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (suspended_turn_id_.empty() || suspended_turn_id_ != turn_id) {
+        // 对不上档:悬账已被冲(BeginTurn 记了 aborted)或弃过(换代)。
+        // 真失败仍数进漏斗——漏斗是"一场会话"的聚合,不因回合翻篇丢数。
+        if (outcome != nullptr && !outcome->ok) {
+            ++funnel_.extract_failures;
+        }
+        return false;
+    }
+    if (outcome != nullptr) {
+        pending_outcome_ = *outcome;
+        if (!outcome->ok) {
+            ++funnel_.extract_failures;
+        }
+    }
+    RecordAssessedLocked(settle_wall_ms);
+    suspended_turn_id_.clear();
+    state_ = MemoryTurnState{};  // 悬账期间攒下的回合间回执不串进下一笔
+    pending_outcome_ = ExtractOutcome{};
+    return true;
+}
+
+void MemoryTurnLedger::AbandonSuspendedTurn() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    // 换代弃账:不落盘、不记漏斗(这一轮连"评估完成"都到不了新场的账
+    // 上)。state_ 留给下一轮 BeginTurn 重置。
+    suspended_turn_id_.clear();
 }
 
 void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {

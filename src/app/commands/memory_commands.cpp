@@ -80,10 +80,9 @@ void PrintEnqueueResult(const lubancode::memory::MemoryEnqueueResult& result) {
     }
 }
 
-// 抽取的本地超时预算(秒)。取消误报 ESC 单 Bug 1:预算要进账
-//(prepared 的 timeoutBudgetSecs)也要进终端提示——两处同源,不各写
-// 一份 45。
-constexpr int kMemoryExtractTimeoutSecs = 45;
+// (抽取的本地超时预算 kMemoryExtractTimeoutSecs:原先住这,回合总结
+// 异步化单起公开进 app/memory_extract.hpp——后台执行器的看门狗与收账
+// 点的终端提示同用一把尺。)
 
 }  // namespace
 
@@ -608,7 +607,11 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
 
 // ---- 会话尾款的 memory 接线(终端接线收尾单自大类搬出;原文随行) -------
 
-void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text, std::size_t history_before) {
+TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text,
+                                     std::size_t history_before) {
+    // 回合总结异步化单:前置门(这一整段)留在前台——全纯本地(词法
+    // 判定/历史切片/转写与提示拼装),微秒级;门过即后台起飞,收口不等
+    // 网络。起飞后的收账见 SettleTurnMemory(主线程空闲拍)。
     lubancode::memory::ProjectMemory* project_memory = ctx.project_memory;
     const lubancode::cli::Theme& theme = *ctx.theme;
     lubancode::app::ModelRouterService& model_router = *ctx.model_router;
@@ -621,7 +624,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::Disabled);
         }
-        return;
+        return TurnMemoryDispatch::Skipped;
     }
 
     const auto& history = ctx.agent->History();
@@ -629,7 +632,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::NoNewHistory);
         }
-        return;
+        return TurnMemoryDispatch::Skipped;
     }
     if (memory_turns != nullptr) memory_turns->NoteHistoryGrew();
     std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
@@ -664,7 +667,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     // (存过东西的回合 history 必然增长过,与 no_new_history 无冲突。)
     if (memory_turns != nullptr && memory_turns->turn_mutated()) {
         memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::AlreadyMutated);
-        return;
+        return TurnMemoryDispatch::Skipped;
     }
 
     // P1(§7.1 案三至案六 + §7.3 门槛):必跳层的文本侧判定。纯词法、
@@ -676,12 +679,12 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         // A short explicit preference or a tool-backed conclusion still matters.
         if (*blocked != ExtractionSkipReason::ShortText || durable_signals.empty()) {
             if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(*blocked);
-            return;
+            return TurnMemoryDispatch::Skipped;
         }
     }
     if (durable_signals.empty()) {
         if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(ExtractionSkipReason::NoDurableSignal);
-        return;
+        return TurnMemoryDispatch::Skipped;
     }
 
     const std::string turn_transcript = BuildTurnTranscript(slice, 8 * 1024);
@@ -689,7 +692,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::EmptyTranscript);
         }
-        return;
+        return TurnMemoryDispatch::Skipped;
     }
 
     const std::string task_type = ClassifyTaskType(user_text, tool_names);
@@ -698,98 +701,114 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::PromptMissing);
         }
-        return;
+        return TurnMemoryDispatch::Skipped;
     }
     // Local durable-signal gating above runs before transcript/prompt construction.
     if (memory_turns != nullptr) memory_turns->NoteExtractionCalled();
 
-    // 抽取走 cheap 角色(模型分工第一期):低风险后台小活,配了 cheap_model
-    // 用便宜的,没配回落 normal(与 main 同模型,行为与从前一致)。状态栏
-    // 短闪一行:任务种类 + 角色:模型(规格"运行提示")。采样走
-    // ModelRouterService::Sample 一站(批一·病四):路由/采样/记账一扇门。
-    const auto extract_route = model_router.RouteInfo(lubancode::agent::TaskKind::MemoryExtract);
-    TermOut() << theme.stats
-              << trf("router.task_flash", trf("memory.extract.running", task_type),
-                     "cheap:" + extract_route.model)
-              << theme.reset << "\n";
-    lubancode::app::ModelRouterService::SampleCall sample_call;
-    sample_call.system = system_prompt;
-    {
-        api::Message message;
-        message.role = api::Role::User;
-        message.content.push_back(api::TextBlock{turn_transcript});
-        sample_call.messages.push_back(std::move(message));
-        sample_call.max_tokens = kMemoryExtractMaxTokens;
-    }
-    // 字段合同随请求带给 SampleModel 做本地复检(P1-A):与
-    // ParseExtractionJson 同一份合同,两条入口同一把尺子。不上 wire。
-    sample_call.output_schema = MemoryExtractionOutputSchema();
-    lubancode::agent::SampleOptions sample_options;
-    sample_options.timeout_secs = kMemoryExtractTimeoutSecs;
-    // Token 账本单 A1(旁路落账):抽取请求铸一只旁路桥,prepared/sent/
-    // usage/output 连同 purpose=memory_extract 落 Journal。v3 场从 Bug 2
-    // 起也接(同 purpose 过门);flag 关的会话(trajectory 空)一笔不落,
-    // 行为与从前一致。
-    std::unique_ptr<lubancode::agent::LoopBoundaryRecorder> extract_recorder;
-    if (ctx.trajectory != nullptr) {
-        lubancode::runtime::TrajectoryTurnBridge::Identity identity{extract_route.provider, ctx.trajectory_wire,
-                                                                    "host"};
-        extract_recorder = ctx.trajectory->NewBypassBridge(
-            std::move(identity), lubancode::accounting::RequestPurpose::MemoryExtract);
-        sample_options.boundary_recorder = extract_recorder.get();
-        sample_options.purpose = lubancode::accounting::RequestPurpose::MemoryExtract;
-    }
-    // 记忆写入调度单 P0(§10.3):抽取墙钟——发起到采样返回的墙钟。
-    const auto extract_started = std::chrono::steady_clock::now();
-    const auto sampled =
-        model_router.Sample(lubancode::agent::TaskKind::MemoryExtract, sample_call, sample_options);
-    const std::int64_t extract_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             std::chrono::steady_clock::now() - extract_started)
-                                             .count();
-    std::expected<MemoryExtraction, ExtractionError> extraction;
-    if (sampled.backend == nullptr) {
-        // 路由落空:旧口径也记一笔零账(calls=1,零 token,"未报告"),不吞。
-        model_router.ledger().Record(lubancode::agent::ModelRole::Cheap, sampled.route.model,
-                                      lubancode::api::Usage{}, /*duration_ms=*/0, /*reported=*/false);
-        ExtractionError route_miss;
-        route_miss.code = lubancode::app::ExtractionErrorCode::RouteMiss;
-        route_miss.message = "cheap 路由找不到 provider \"" + sampled.route.provider + "\"";
-        extraction = std::unexpected(route_miss);
-    } else {
-        extraction = FinishMemoryExtraction(sampled.result);
-    }
-    if (!extraction.has_value()) {
-        // 终端只出短错误与定位号(P0-A):诊断细节(请求号/字节数/结束原因)
-        // 在错误对象里,查原文走受控轨迹,不透传含 last read 的库异常。
-        // 本地超时预算到点(Bug 1)单独一行:带预算数,不指控按键——
-        // 来源只有证据才说用户取消,超时的证据就是预算本身。
-        if (extraction.error().code == lubancode::app::ExtractionErrorCode::DeadlineTimeout) {
-            TermOut() << theme.stats << trf("memory.extract.deadline", kMemoryExtractTimeoutSecs)
-                      << theme.reset << "\n";
-        } else {
-            TermOut() << theme.stats << trf("memory.extract.failed", extraction.error().message)
-                      << theme.reset << "\n";
-        }
+    // ---- 回合总结异步化单:门过,起飞(前台不再有网络等待) ----
+    // 前台显示:收口不打 [memory] 起跑行——learn 开着的每一场,收口即刻
+    // 还输入框;完成/失败的行挪到收账点(SettleTurnMemory)。
+    if (ctx.extractor == nullptr || ctx.extractor->Busy()) {
+        // 单飞让位:同场在途至多一枚(上一枚在跑或结果待收)。让位的回合
+        // 如实记一笔——不冒充网络失败,也不冒充 aborted(那是"收口没走
+        // 到"):这是主动让位,下一轮照常抽。执行器没接是装配缺口,另立
+        // 稳定码,不和让位混账。
         if (memory_turns != nullptr) {
             lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
             outcome.ok = false;
-            outcome.usage_reported = sampled.result.usage_reported;
-            outcome.input_tokens = sampled.result.usage.input_tokens;
-            outcome.output_tokens = sampled.result.usage.output_tokens;
-            outcome.cached_tokens = sampled.result.usage.cache_read_tokens +
-                                    sampled.result.usage.cache_creation_tokens;
-            outcome.extract_wall_ms = extract_wall_ms;
-            outcome.error_code = StableExtractErrorCode(extraction.error());
+            outcome.error_code = ctx.extractor == nullptr ? "no_extractor" : "in_flight_dropped";
             memory_turns->NoteExtractionOutcome(outcome);
+        }
+        return ctx.extractor == nullptr ? TurnMemoryDispatch::DroppedRoute : TurnMemoryDispatch::DroppedBusy;
+    }
+    // 独占裸 backend(RouteDetached):不与主会话共用 client,也不借同步
+    // 路由的缓存 client 并发——抽取线程自己持有、自己释放。provider 找
+    // 不到条目时 backend 为空,不偷偷换回当前端。
+    auto detached = model_router.RouteDetached(lubancode::agent::TaskKind::MemoryExtract);
+    if (detached.backend == nullptr) {
+        // 路由落空:旧口径补零账(calls=1,零 token,"未报告"),不吞。
+        model_router.ledger().Record(lubancode::agent::ModelRole::Cheap, detached.route.model,
+                                      lubancode::api::Usage{}, /*duration_ms=*/0, /*reported=*/false);
+        ExtractionError route_miss;
+        route_miss.code = lubancode::app::ExtractionErrorCode::RouteMiss;
+        route_miss.message = "cheap 路由找不到 provider \"" + detached.route.provider + "\"";
+        if (memory_turns != nullptr) {
+            lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
+            outcome.ok = false;
+            outcome.error_code = StableExtractErrorCode(route_miss);
+            memory_turns->NoteExtractionOutcome(outcome);
+        }
+        // 本地判定(无网络往返),前台直接亮报一行即止。
+        TermOut() << theme.stats << trf("memory.extract.failed", route_miss.message) << theme.reset << "\n";
+        return TurnMemoryDispatch::DroppedRoute;
+    }
+    lubancode::app::TurnMemoryExtractor::Inputs inputs;
+    inputs.backend = std::move(detached.backend);
+    inputs.model = std::move(detached.route.model);
+    inputs.effort = std::move(detached.route.effort);
+    inputs.system_prompt = system_prompt;   // 前台拼好的冻结快照
+    inputs.transcript = turn_transcript;    // 同上:迟到不串新轮的材料边界
+    inputs.task_type = task_type;
+    inputs.session_generation = ctx.session_generation;
+    inputs.turn_id = ctx.turn_id;
+    inputs.trajectory = ctx.trajectory;
+    inputs.trajectory_wire = ctx.trajectory_wire;
+    inputs.provider = detached.route.provider;
+    if (!ctx.extractor->Start(std::move(inputs))) {
+        // 竞态兜底:门后单飞被抢(与门前的 Busy 检查同一口径)。
+        if (memory_turns != nullptr) {
+            lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
+            outcome.ok = false;
+            outcome.error_code = "in_flight_dropped";
+            memory_turns->NoteExtractionOutcome(outcome);
+        }
+        return TurnMemoryDispatch::DroppedBusy;
+    }
+    return TurnMemoryDispatch::Dispatched;
+}
+
+// 迟到收账(回合总结异步化单;主线程空闲拍调,见控制器的
+// DrainFinishedTurnMemory):完工的抽取结果入队候选、记台账落袋、打
+// 完成/失败行。usage 的分角色记账在调用方(世代门之前——弃账也照记,
+// token 是真花了的);世代门(换代弃迟到)也在调用方,这里只管对档。
+void SettleTurnMemory(const SessionTailContext& ctx, const TurnMemoryExtractor::Outcome& outcome,
+                      std::int64_t tail_wall_ms) {
+    lubancode::memory::ProjectMemory* project_memory = ctx.project_memory;
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    lubancode::app::MemoryTurnLedger* memory_turns = ctx.memory_turns;
+
+    lubancode::app::MemoryTurnLedger::ExtractOutcome ledger_outcome;
+    ledger_outcome.usage_reported = outcome.accounting.usage_reported;
+    ledger_outcome.input_tokens = outcome.accounting.usage.input_tokens;
+    ledger_outcome.output_tokens = outcome.accounting.usage.output_tokens;
+    ledger_outcome.cached_tokens = outcome.accounting.usage.cache_read_tokens +
+                                    outcome.accounting.usage.cache_creation_tokens;
+    ledger_outcome.extract_wall_ms = outcome.extract_wall_ms;
+
+    if (!outcome.ok) {
+        // 终端只出短错误与定位号(P0-A):诊断细节在错误对象里,查原文走
+        // 受控轨迹。本地超时预算到点单独一行,不指控按键。
+        if (outcome.error.code == lubancode::app::ExtractionErrorCode::DeadlineTimeout) {
+            TermOut() << theme.stats << trf("memory.extract.deadline", kMemoryExtractTimeoutSecs)
+                      << theme.reset << "\n";
+        } else {
+            TermOut() << theme.stats << trf("memory.extract.failed", outcome.error.message)
+                      << theme.reset << "\n";
+        }
+        ledger_outcome.ok = false;
+        ledger_outcome.error_code = StableExtractErrorCode(outcome.error);
+        if (memory_turns != nullptr) {
+            memory_turns->SettleSuspendedTurn(outcome.turn_id, tail_wall_ms, &ledger_outcome);
         }
         return;
     }
 
     // 检索扩展词:合并进 ProjectMemory,下一轮 BM25/词法查询用;learns off
     // 或失败时不清旧值,自然退回纯词法。
-    std::vector<std::string> hints = extraction->retrieval_terms;
-    hints.reserve(hints.size() + extraction->candidates.size());
-    for (const auto& candidate : extraction->candidates) {
+    std::vector<std::string> hints = outcome.extraction.retrieval_terms;
+    hints.reserve(hints.size() + outcome.extraction.candidates.size());
+    for (const auto& candidate : outcome.extraction.candidates) {
         for (const auto& keyword : candidate.keywords) hints.push_back(keyword);
     }
     if (!hints.empty()) project_memory->SetRetrievalHints(std::move(hints));
@@ -797,7 +816,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     std::size_t queued = 0;
     std::size_t auto_queued = 0;
     std::size_t start_failed = 0;  // 排队成功但 worker 没起来(修复单 §五 B:两笔账分开)
-    for (const auto& proposed : extraction->candidates) {
+    for (const auto& proposed : outcome.extraction.candidates) {
         lubancode::memory::MemoryCandidate candidate;
         auto kind = lubancode::memory::ParseMemoryKind(proposed.kind);
         if (!kind.has_value()) continue;
@@ -809,7 +828,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         candidate.paths = proposed.paths;
         candidate.confidence = proposed.confidence;
         candidate.occurred_at = proposed.occurred_at;
-        candidate.task_type = task_type;
+        candidate.task_type = outcome.task_type;
 
         // auto 档直写闸:inferred 只进候选区;fact 须 verified 且带证据,
         // feedback 须用户明说,否则也落待审区让人把关(规格"inferred 只准
@@ -854,18 +873,11 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     }
     // 记忆写入调度单 P0(§10.2/§10.3):收口账——候选/直写计数与 Token。
     // provider 没报 usage 时 token 三项整组缺席,不拿 0 顶上。
+    ledger_outcome.ok = true;
+    ledger_outcome.review_candidates = queued;
+    ledger_outcome.auto_queued = auto_queued;
     if (memory_turns != nullptr) {
-        lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
-        outcome.ok = true;
-        outcome.usage_reported = sampled.result.usage_reported;
-        outcome.input_tokens = sampled.result.usage.input_tokens;
-        outcome.output_tokens = sampled.result.usage.output_tokens;
-        outcome.cached_tokens =
-            sampled.result.usage.cache_read_tokens + sampled.result.usage.cache_creation_tokens;
-        outcome.extract_wall_ms = extract_wall_ms;
-        outcome.review_candidates = queued;
-        outcome.auto_queued = auto_queued;
-        memory_turns->NoteExtractionOutcome(outcome);
+        memory_turns->SettleSuspendedTurn(outcome.turn_id, tail_wall_ms, &ledger_outcome);
     }
 }
 
