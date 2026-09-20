@@ -1,0 +1,47 @@
+# AR-01 子代理后台线程退场仍借用已析构门面
+
+- 状态：待修；本次只审查，未改源码。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-01 | B | 高 | src/tools/agent_tool.cpp:792；src/tools/agent_tool.cpp:1802；src/tools/agent_tool.cpp:1838；src/tools/agent_task_coordinator.cpp:90；src/tools/agent_task_coordinator.cpp:119；src/tools/task_ledger.cpp:1067；src/tools/task_ledger.cpp:1769 | worker 捕获 `[this, task, ...]`；析构调用 `JoinAllBounded()`；超时 `thread.detach()`；终态路径直接 `thread.join()`。 | 后台回调超出10秒后仍能返回到 RunTask、git_runner_、coordinator_，但 AgentTool 析构已可完成。TaskRecord 的 shared_ptr 只保住记录，保不住门面及借用工具表。另一分支把业务 Failed 当线程已退出：监督器强收尚在运行的任务后，ReapSettledThreads/JoinAllBounded 会无期限 join，所谓有界退出失效。 | 保留协调器作为运行 owner，将后台实际执行所需配置、服务和工具租约收进独立共享 RunState；worker 不捕获 AgentTool裸this。另设线程退出回执，只依据该回执回收thread；业务终态只用于展示。明确关闭截止时间与后台资源归属，禁止以业务终态证明OS线程结束。 | 影响递归派工、后台任务、worktree收场与宿主退出。不能简单换shared_ptr<AgentTool>制造引用环，也不能直接去掉detach后无限等待。 |
+
+## 证据与边界
+
+可达链：AgentTool 析构 → RequestClose → JoinAllBounded → 超时 detach；后台 lambda 在 catch 后仍访问 git_runner_ 并经 coordinator_ 落结果。独立的卡住链：ForceFinalizeWallClock 仅改 snapshot.state=Failed，不证明 worker return；TaskSettled 与 HasRunningTasks 均只看 snapshot.state。此处未声称某次生产已崩溃，证据是静态寿命路径。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/tools/agent_tool.cpp`；`src/tools/agent_tool.hpp`；`src/tools/agent_task_coordinator.cpp`；`src/tools/agent_task_coordinator.hpp`。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 不得并行共改：AR-06；同文件先后落单，或约定具体函数所有权。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 保留协调器作为运行 owner，将后台实际执行所需配置、服务和工具租约收进独立共享 RunState；worker 不捕获 AgentTool裸this。另设线程退出回执，只依据该回执回收thread；业务终态只用于展示。明确关闭截止时间与后台资源归属，禁止以业务终态证明OS线程结束。
+3. 小批提交，按下列门槛验收。
+
+- [ ] 用可控阻塞Backend/工具在关闭超时后才返回，确认无悬空访问。
+- [ ] 先强收业务终态再延迟worker退出，确认主线程不提前join。
+- [ ] 并发关闭与递归派工只能稳定拒绝。
+- [ ] worktree收场仍保留待审改动。
+- [ ] 在GitHub CI运行ASan及生命周期用例，不跑本地CI。
+
+## 删除量与旧账
+
+本项不以删行计收益；预计净删除 0 行。
+
+关联现存 todos/AppServer接入SessionV3_统一入口与事件恢复设计.todo 的宿主退出与后台交接边界；那份设计不能替代本处线程所有权验收。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-06（src/tools/agent_tool.cpp）。

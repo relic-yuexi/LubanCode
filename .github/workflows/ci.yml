@@ -27,6 +27,7 @@ jobs:
     outputs:
       code: ${{ steps.c.outputs.code }}
       memory_worker: ${{ steps.c.outputs.memory_worker }}
+      agent_lifetime: ${{ steps.c.outputs.agent_lifetime }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,14 +46,23 @@ jobs:
           fi
           if ! git cat-file -e "$BASE" 2>/dev/null; then
             echo 'memory_worker=true' >> "$GITHUB_OUTPUT"
+            echo 'agent_lifetime=true' >> "$GITHUB_OUTPUT"
             echo "base unreachable, run full" >&2
-            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo 'code=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           code=false
           memory_worker=false
+          agent_lifetime=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # AR-01(子代理线程寿命)起:子代理派工/装配面改动跑 linux-asan
+            # 腿——悬垂访问这类病在常规腿上安静,AddressSanitizer 一眼红;
+            # 其余 PR 零新增开销(与 memory_worker 同款按路径点腿)。
+            case "$f" in
+              src/tools/*|src/app/tool_runtime.*|tests/unit/agent/*|.github/workflows/ci.yml)
+                agent_lifetime=true ;;
+            esac
             # 根 CMakeLists.txt(精确匹配,子目录 */CMakeLists.txt 不沾)是
             # 依赖接线与编译选项唯一出处:FetchContent 新第三方、MSVC 告警
             # 压制、vcpkg/FetchContent 双路分派——这些只在 windows 腿显形
@@ -87,6 +97,7 @@ jobs:
           done <<< "$(git diff --name-only "$BASE" "$GITHUB_SHA")"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "memory_worker=$memory_worker" >> "$GITHUB_OUTPUT"
+          echo "agent_lifetime=$agent_lifetime" >> "$GITHUB_OUTPUT"
 
   # 腿单预备(2026-09-06):job 级 if 不认 matrix 上下文(GitHub 上下文可用
   # 表没有它,写在 jobs.<id>.if 里整炉 0 秒死于 workflow file issue——
@@ -481,3 +492,78 @@ jobs:
           chmod +x lubancode
           ./lubancode --version
           ./lubancode --help | sed -n '1,3p'
+
+  # ---- AR-01(子代理线程寿命):AddressSanitizer 腿 ----------------------------
+  # 悬垂访问/线程寿命这类病在常规腿上安静——后台 worker 晚归读已析构门面,
+  # 多数时候只是"碰巧没红"。本腿用 clang+ASan 全量编测试二进制,只跑
+  # unit.agent/unit.runtime 两域(派工/装配面的主战场),按 changes 门的
+  # agent_lifetime 输出点腿:子代理派工/装配面改动才出场,其余 PR 零开销。
+  # 不 FetchContent 静编 OpenSSL(ubuntu runner 自带 libssl-dev 即够),也不
+  # 分期随包 rg(这两域的册不依赖它)——省下的时间换 ASan 的插桩开销。
+  linux-asan:
+    name: linux-asan
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.agent_lifetime == 'true'
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pick clang
+        shell: bash
+        run: |
+          set -e
+          CC=$(command -v clang) CXX=$(command -v clang++)
+          echo "CC=$CC" >> "$GITHUB_ENV"
+          echo "CXX=$CXX" >> "$GITHUB_ENV"
+          "$CXX" --version | sed -n '1p'
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-linux-asan-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-linux-asan-
+
+      - name: Configure (ASan)
+        shell: bash
+        env:
+          CC: ${{ env.CC }}
+          CXX: ${{ env.CXX }}
+        run: |
+          set -ex
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DLUBANCODE_USE_CODELOAD=OFF \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_CXX_STANDARD=23 \
+            -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DOPENSSL_ROOT_DIR=/usr
+
+      - name: Build tests
+        shell: bash
+        run: cmake --build build --config Release --target lubancode_tests -j 4
+
+      - name: Test (agent + runtime, ASan)
+        id: test
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: |
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\." \
+            --parallel 4 --output-on-failure --no-tests=error
+
+      - name: Report failed CTest cases
+        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        shell: bash
+        run: |
+          failed_log="build/Testing/Temporary/LastTestsFailed.log"
+          if [ -f "$failed_log" ]; then
+            failed_cases="$(tr '\n' ';' < "$failed_log")"
+            echo "::error title=Failed CTest cases (asan):: $failed_cases"
+            cat "$failed_log"
+          fi

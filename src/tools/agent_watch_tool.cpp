@@ -84,6 +84,10 @@ nlohmann::json AgeOrNull(const std::chrono::steady_clock::time_point now,
 
 }  // namespace
 
+AgentWatchTool::AgentWatchTool(AgentTool* agent_tool, int caller_task_id)
+    : coordinator_(agent_tool != nullptr ? agent_tool->coordinator() : nullptr),
+      caller_task_id_(caller_task_id) {}
+
 std::string AgentWatchTool::name() const {
     return "agent_watch";
 }
@@ -154,10 +158,10 @@ nlohmann::json AgentWatchTool::input_schema() const {
 }
 
 Tool::Result AgentWatchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
-    if (agent_tool_ == nullptr) {
+    if (coordinator_ == nullptr) {
         return {lubancode::cli::tr("agent_watch.unavailable"), true};
     }
-    TaskLedger& ledger = agent_tool_->ledger();
+    TaskLedger& ledger = coordinator_->ledger();
 
     // ---- typed 校验(单子 §9.2;additionalProperties=false 由这里执法)----
     if (!input.is_object()) {

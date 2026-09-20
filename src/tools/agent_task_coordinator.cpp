@@ -76,18 +76,34 @@ Tool::Result AgentTaskCoordinator::Dispatch(const AgentDispatchRequest& request)
     return engine_(request);
 }
 
-void AgentTaskCoordinator::TrackThread(int task_id, std::thread thread) {
+void AgentTaskCoordinator::TrackThread(int task_id, std::thread thread,
+                                        std::shared_ptr<std::atomic<bool>> exit_receipt) {
     std::lock_guard<std::mutex> lock(threads_mutex_);
-    threads_.push_back(TaskThreadEntry{task_id, std::move(thread)});
+    if (closing_.load(std::memory_order_acquire)) {
+        // 收口竞速窗:派工引擎过 closing 检查后、本口入账前,JoinAllBounded
+        // 已经把线程表搬空——这只线程没人再收柄了。detach 放行(闭包自持
+        // 冻结 run_state 与 TaskRecord,晚归不悬垂),免得 joinable 的
+        // std::thread 挂在表里等协调器谢幕时 std::terminate。
+        thread.detach();
+        return;
+    }
+    TaskThreadEntry entry;
+    entry.task_id = task_id;
+    entry.thread = std::move(thread);
+    entry.exit_receipt = std::move(exit_receipt);
+    threads_.push_back(std::move(entry));
 }
 
-void AgentTaskCoordinator::ReapSettledThreads() {
-    // 已收尾的 std::thread 收柄对账按自家任务号查(原 LaunchBackground 的
-    // 规矩原样迁来):台账里混着无线程的前台任务,按下标对齐会把早终态的
-    // 旧任务误当这只线程已收尾,join 押死孵化(病灶一)。
+void AgentTaskCoordinator::ReapExitedThreads() {
+    // 已收尾的 std::thread 收柄(原 LaunchBackground 的规矩)。AR-01 起对账
+    // 只认线程退出回执:worker 闭包最后一笔才置位,置位即 OS 线程已(或正
+    // 要)return,join 立即回。旧账按 TaskSettled(业务终态)判——监督器强收
+    // 或父收树把台账翻成 Failed 时线程可能还在跑,那一路 join 会无期限押死
+    // 派工线程;业务终态从此只用于展示,不用于证明线程结束。
     std::lock_guard<std::mutex> lock(threads_mutex_);
     for (std::size_t i = 0; i < threads_.size();) {
-        if (ledger_.TaskSettled(threads_[i].task_id) && threads_[i].thread.joinable()) {
+        if (threads_[i].exit_receipt != nullptr && threads_[i].exit_receipt->load(std::memory_order_acquire) &&
+            threads_[i].thread.joinable()) {
             threads_[i].thread.join();
             threads_.erase(threads_.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
@@ -97,9 +113,11 @@ void AgentTaskCoordinator::ReapSettledThreads() {
 }
 
 void AgentTaskCoordinator::JoinAllBounded() {
-    // 退出兜底(原 ~AgentTool):先广播取消,再给每只后台线程一枚有界 join
-    // 窗口;join 等不到的 detach 放它走——台账已是终态(或由看门狗强制收
-    // 账),detach 不丢账;线程闭包自持 TaskRecord 的 shared_ptr,晚归不悬垂。
+    // 退出兜底(原 ~AgentTool):先广播取消,再给每只后台线程一枚有界等窗
+    // ——等的是线程退出回执,不是台账终态。回执在手就 join(线程已退,join
+    // 立即回);窗口尽了还没等到就 detach 放它走——worker 闭包自持冻结
+    // run_state(钉住协调器与台账)与 TaskRecord 的 shared_ptr,晚归不悬垂、
+    // 不丢账,也不冻退出。
     ledger_.BroadcastCancel();
     std::vector<TaskThreadEntry> entries;
     {
@@ -112,17 +130,16 @@ void AgentTaskCoordinator::JoinAllBounded() {
         if (!thread.joinable()) {
             continue;
         }
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        bool settled = false;
+        const auto deadline = std::chrono::steady_clock::now() + shutdown_join_window_;
+        bool exited = false;
         while (std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            settled = !ledger_.HasRunningTasks();
-            if (settled) {
+            if (entry.exit_receipt != nullptr && entry.exit_receipt->load(std::memory_order_acquire)) {
+                exited = true;
                 break;
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        if (settled) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 给收尾尾格一点余量
+        if (exited) {
             thread.join();
         } else {
             thread.detach();  // 挂死绝境:放线程走,不冻退出
@@ -131,6 +148,10 @@ void AgentTaskCoordinator::JoinAllBounded() {
     // 任务线程收完,监督线也停(单子 P0-2:session close 时 watcher 都要收净;
     // 析构里的 detach 只是兜底)。
     supervisor_.RequestStop();
+}
+
+void AgentTaskCoordinator::ClearFacadeTool() {
+    facade_tool_.store(nullptr, std::memory_order_release);
 }
 
 }  // namespace lubancode::tools
