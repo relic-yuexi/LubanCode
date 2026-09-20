@@ -52,9 +52,14 @@ using lubancode::updater::RunUpdaterEngine;
 
 #ifdef _WIN32
 constexpr const char* kExeName = "lubancode.exe";
+constexpr const char* kRgName = "rg.exe";
 #else
 constexpr const char* kExeName = "lubancode";
+constexpr const char* kRgName = "rg";
 #endif
+
+// 包内 rg 的相对路径(引擎验包认 libexec/<平台名>,造包同名对齐)。
+std::string RgPath() { return std::string("libexec/") + kRgName; }
 
 // ---------------------------------------------------------------------------
 // 基础件
@@ -291,7 +296,7 @@ Package BuildPackage(const PackageSpec& spec) {
     // 清单收的文件:EXE(stub 夹具)+ libexec/rg + 额外件。
     std::vector<std::pair<std::string, std::string>> listed;
     listed.emplace_back(kExeName, StubExeBytes());
-    listed.emplace_back("libexec/rg", "#!fake ripgrep\n");
+    listed.emplace_back(RgPath(), "#!fake ripgrep\n");
     for (const auto& [path, data] : spec.extra_files) {
         listed.emplace_back(path, data);
     }
@@ -322,7 +327,7 @@ Package BuildPackage(const PackageSpec& spec) {
         entries.push_back(ZipEntry{"manifest.json", 0100644, manifest_bytes});
     }
     for (const auto& [path, data] : listed) {
-        const std::uint32_t mode = path == kExeName || path == "libexec/rg" ? 0100755u : 0100644u;
+        const std::uint32_t mode = path == kExeName || path == RgPath() ? 0100755u : 0100644u;
         entries.push_back(ZipEntry{path, mode, data});
     }
     for (const ZipEntry& extra : spec.extra_entries) {
@@ -363,7 +368,7 @@ std::string MakeVersionDir(const fs::path& root, const std::string& version) {
     const std::string exe_bytes = StubExeBytes();
     const std::string rg_bytes = "#!fake ripgrep\n";
     WriteFile(dir / kExeName, exe_bytes);
-    WriteFile(dir / "libexec" / "rg", rg_bytes);
+    WriteFile(dir / "libexec" / kRgName, rg_bytes);
 #ifndef _WIN32
     std::error_code ec;
     fs::permissions(dir / kExeName, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
@@ -381,7 +386,7 @@ std::string MakeVersionDir(const fs::path& root, const std::string& version) {
         nlohmann::json{{"path", kExeName},
                        {"size", exe_bytes.size()},
                        {"sha256", lubancode::platform::Sha256Hex(exe_bytes)}},
-        nlohmann::json{{"path", "libexec/rg"},
+        nlohmann::json{{"path", RgPath()},
                        {"size", rg_bytes.size()},
                        {"sha256", lubancode::platform::Sha256Hex(rg_bytes)}},
     });
@@ -604,7 +609,7 @@ TEST_CASE("engine.update:平铺 -> 版本化端到端 + 幂等重跑免下载") 
     CHECK((*pointer)["previous"] == nullptr);
     const fs::path version_dir = root / "versions" / pkg.dirname;
     CHECK(ReadFile(version_dir / kExeName) == StubExeBytes());
-    CHECK(fs::is_regular_file(version_dir / "libexec" / "rg"));
+    CHECK(fs::is_regular_file(version_dir / "libexec" / kRgName));
     CHECK(fs::is_regular_file(version_dir / "manifest.json"));
     CHECK(fs::is_regular_file(version_dir / "README.md"));
 
@@ -1058,14 +1063,14 @@ TEST_CASE("engine.probe:真 EXE 探针 + 真主程序端到端更新") {
         nlohmann::json{{"path", kExeName},
                        {"size", exe_bytes.size()},
                        {"sha256", lubancode::platform::Sha256Hex(exe_bytes)}},
-        nlohmann::json{{"path", "libexec/rg"},
+        nlohmann::json{{"path", RgPath()},
                        {"size", rg_bytes.size()},
                        {"sha256", lubancode::platform::Sha256Hex(rg_bytes)}},
     });
     const std::string zip = BuildStoredZip({
         ZipEntry{"manifest.json", 0100644, lubancode::updater::CanonicalJsonDump(manifest)},
         ZipEntry{kExeName, 0100755, exe_bytes},
-        ZipEntry{"libexec/rg", 0100755, rg_bytes},
+        ZipEntry{RgPath(), 0100755, rg_bytes},
     });
     const std::string digest_hex = lubancode::platform::Sha256Hex(zip);
     const std::string dirname = version + "-" + digest_hex.substr(0, 8);
