@@ -1,11 +1,16 @@
-// 统一原子写 platform::AtomicWriteFile 的六景回归(src 重复职责收口审计
-// P1:目标已存在/目标不存在/替换失败/临时写失败/两写者并发/中断残留)。
+// 统一原子写 platform::AtomicWriteFile 的回归(src 重复职责收口审计
+// P1:目标已存在/目标不存在/替换失败/临时写失败/两写者并发/中断残留;
+// FD-04:提交阶段合同——未提交与"已替换未耐久"分开,失败注入分阶段)。
 // 合同要点:
 //   - 任何失败路径不删正式文件换取成功(Windows 上老写法"rename 不动就
 //     先 remove(target) 再 rename"留出文件不存在窗口,正是本件要杀的);
 //   - 唯一临时名:并发写同一目标不互踩;
 //   - 失败后自己的临时件删净;
-//   - 两档持久明分:AtomicVisibility / ProcessCrashDurability 都能写。
+//   - 两档持久明分:AtomicVisibility / ProcessCrashDurability 都能写;
+//   - 失败带阶段(FD-04):换名前失败 outcome=NotCommitted(盘上原样),
+//     换名后目录刷盘失败 outcome=CommittedDurabilityUnconfirmed(新内容
+//     已可见,不得当未写盘处理);
+//   - 成功回执分档:AtomicVisibility 成功不冒充已确认耐久。
 #include <doctest/doctest.h>
 
 #include <atomic>
@@ -21,6 +26,8 @@
 
 using lubancode::platform::AtomicWriteFile;
 using lubancode::platform::WriteDurability;
+using lubancode::platform::WriteFailureKind;
+using lubancode::platform::WriteOutcome;
 
 namespace {
 
@@ -55,6 +62,14 @@ std::set<std::string> TempLeftovers(const std::filesystem::path& dir) {
     }
     return found;
 }
+
+// 失败注入钩子的 RAII 还原:REQUIRE 半路炸了也不许把注入漏给后面的用例。
+struct HookGuard {
+    ~HookGuard() {
+        lubancode::platform::SetFileFlushFailureForTest(false);
+        lubancode::platform::SetDirectoryFlushFailureForTest(false);
+    }
+};
 
 }  // namespace
 
@@ -207,4 +222,145 @@ TEST_CASE("AtomicWriteFile: 空内容与父目录缺失都合法") {
     REQUIRE(AtomicWriteFile(root / "empty.json", "").has_value());
     CHECK(std::filesystem::file_size(root / "empty.json") == 0);
     CHECK(ReadAll(root / "empty.json").empty());
+}
+
+// ---- FD-04 提交阶段合同 ----------------------------------------------------
+
+TEST_CASE("AtomicWriteFile: 成功回执分档——耐久未请求不冒充已确认") {
+    const auto root = MakeTempRoot("receipt");
+    const auto visible = root / "visible.json";
+    const auto durable = root / "durable.json";
+
+    const auto vis = AtomicWriteFile(visible, "v", WriteDurability::AtomicVisibility);
+    REQUIRE(vis.has_value());
+    // AtomicVisibility 成功只保证换名可见;回执不得标成耐久已确认。
+    CHECK(vis->outcome == WriteOutcome::CommittedDurabilityNotRequested);
+
+    const auto dur = AtomicWriteFile(durable, "d", WriteDurability::ProcessCrashDurability);
+    REQUIRE(dur.has_value());
+    CHECK(dur->outcome == WriteOutcome::CommittedDurable);
+}
+
+TEST_CASE("AtomicWriteFile: 换名前失败——outcome=NotCommitted,盘上旧内容原样") {
+    const auto root = MakeTempRoot("pre-commit-fail");
+    const auto target = root / "state.json";
+    WriteAll(target, "old");
+
+    // 建目录挡路(mkdir_failed)。
+    const auto blocker = root / "blocker";
+    WriteAll(blocker, "not a dir");
+    const auto mkdir_result = AtomicWriteFile(blocker / "x.json", "new");
+    REQUIRE_FALSE(mkdir_result.has_value());
+    CHECK(mkdir_result.error().code == "atomic.mkdir_failed");
+    CHECK(mkdir_result.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(mkdir_result.error().failure_kind == WriteFailureKind::Permanent);
+
+    // 文件名分量超长(tmp_open_failed)。
+    const std::string long_name(300, 'n');
+    const auto open_result = AtomicWriteFile(root / long_name, "new");
+    REQUIRE_FALSE(open_result.has_value());
+    CHECK(open_result.error().code == "atomic.tmp_open_failed");
+    CHECK(open_result.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(open_result.error().failure_kind == WriteFailureKind::Permanent);
+
+    // 铺底:把 target 换成一份长内容,后面统一断言"换名前失败不动它"。
+    WriteAll(target, std::string(4000, 'x'));
+    const auto occupied = root / "occupied";
+    std::error_code ec;
+    std::filesystem::create_directory(occupied, ec);
+    const auto replace_result = AtomicWriteFile(occupied, "new");
+    REQUIRE_FALSE(replace_result.has_value());
+    CHECK(replace_result.error().code == "atomic.replace_failed");
+    CHECK(replace_result.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(std::filesystem::is_directory(occupied));
+
+    // 盘面:换名前失败一概旧内容原样,没有临时件尾巴。
+    CHECK(ReadAll(target) == std::string(4000, 'x'));
+    CHECK(TempLeftovers(root).empty());
+}
+
+TEST_CASE("AtomicWriteFile: 注入文件刷盘失败——未提交,旧内容原样") {
+    HookGuard guard;
+    lubancode::platform::SetFileFlushFailureForTest(true);
+
+    const auto root = MakeTempRoot("inject-file-flush");
+    const auto target = root / "state.json";
+    WriteAll(target, "old");
+
+    // ProcessCrashDurability 档的文件刷盘发生在换名之前:这一步失败,
+    // 换名没发生,target 必须还是旧内容——这就是"未提交"阶段。
+    const auto result = AtomicWriteFile(target, "new", WriteDurability::ProcessCrashDurability);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == "atomic.tmp_write_failed");
+    CHECK(result.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(result.error().failure_kind == WriteFailureKind::Permanent);
+    CHECK(ReadAll(target) == "old");
+    CHECK(TempLeftovers(root).empty());
+
+    // 同一注入下 AtomicVisibility 档不受影响:文件刷盘不在该档合同里。
+    const auto vis = AtomicWriteFile(root / "vis.json", "v", WriteDurability::AtomicVisibility);
+    REQUIRE(vis.has_value());
+    CHECK(vis->outcome == WriteOutcome::CommittedDurabilityNotRequested);
+}
+
+TEST_CASE("AtomicWriteFile: 注入目录刷盘失败——已提交可见,只报耐久未确认") {
+    HookGuard guard;
+    lubancode::platform::SetDirectoryFlushFailureForTest(true);
+
+    const auto root = MakeTempRoot("inject-dir-flush");
+    const auto target = root / "state.json";
+    WriteAll(target, "old");
+
+    // 换名已生效、父目录条目没确认落盘:同一个 unexpected 形状,但盘面
+    // 是新内容已可见。上层不得当"未写盘"回滚内存,更不得删 target。
+    const auto result = AtomicWriteFile(target, "new", WriteDurability::ProcessCrashDurability);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == "atomic.durability_flush_failed");
+    CHECK(result.error().outcome == WriteOutcome::CommittedDurabilityUnconfirmed);
+    CHECK(result.error().failure_kind == WriteFailureKind::Permanent);
+    CHECK(ReadAll(target) == "new");
+    CHECK(TempLeftovers(root).empty());
+
+    // 同一注入下 AtomicVisibility 档照常成功:目录刷盘不在该档合同里。
+    const auto vis = AtomicWriteFile(root / "vis.json", "v", WriteDurability::AtomicVisibility);
+    REQUIRE(vis.has_value());
+    CHECK(vis->outcome == WriteOutcome::CommittedDurabilityNotRequested);
+}
+
+TEST_CASE("AtomicWriteFile: 裸文件名无父目录——耐久档按合同视为已确认") {
+    // 唯一文件名落在进程当前目录(测试可写),完事删净。钉死现行合同:
+    // 无父段可开目录句柄,FlushParentDirectory 空路径直接成功,回执记
+    // CommittedDurable(文件数据那一层照刷)。
+    static std::atomic<int> seq{0};
+    const std::string name = "lubancode-atomic-bare-" + std::to_string(seq.fetch_add(1)) + ".json";
+    const auto result =
+        AtomicWriteFile(std::filesystem::path(name), "bare", WriteDurability::ProcessCrashDurability);
+    REQUIRE(result.has_value());
+    CHECK(result->outcome == WriteOutcome::CommittedDurable);
+    CHECK(ReadAll(name) == "bare");
+    std::error_code ignored;
+    std::filesystem::remove(std::filesystem::path(name), ignored);
+}
+
+TEST_CASE("AtomicWriteFile: 替换失败的短拒分类——Windows 记可重试,POSIX 记真失败") {
+    const auto root = MakeTempRoot("replace-kind");
+    const auto target = root / "occupied";
+    std::error_code ec;
+    std::filesystem::create_directory(target, ec);
+    REQUIRE(std::filesystem::is_directory(target));
+
+    const auto result = AtomicWriteFile(target, "x");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == "atomic.replace_failed");
+    CHECK(result.error().outcome == WriteOutcome::NotCommitted);
+#ifdef _WIN32
+    // Windows 的原子换名有防病毒/过滤驱动短拒类(work_pump.cpp 三案 CI
+    // 实测注记):replace_failed 记 TransientReject,调用方有界重试;少数
+    // 永久因(目标是目录)混在同类里——重试无害,换名原子、失败时 target
+    // 未动,有界重试后仍失败照实报。
+    CHECK(result.error().failure_kind == WriteFailureKind::TransientReject);
+#else
+    CHECK(result.error().failure_kind == WriteFailureKind::Permanent);
+#endif
+    CHECK(std::filesystem::is_directory(target));
 }

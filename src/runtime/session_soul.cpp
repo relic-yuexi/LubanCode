@@ -101,14 +101,23 @@ std::string SessionSoulSnapshotFileName() {
     return "soul-snapshot.json";
 }
 
+std::expected<platform::AtomicWriteReceipt, platform::AtomicWriteError> WriteSessionSoulSnapshotPhased(
+    const std::filesystem::path& session_dir, const SessionSoulSnapshot& snapshot) {
+    // 平台统一原子写(见 platform/atomic_write.hpp 的合同):换名原子可见;
+    // 失败分阶段——换名前失败旧快照原样,换名后的目录刷盘失败是新快照已
+    // 可见、仅耐久未确认,不得当未写盘回滚。快照是恢复材料,
+    // ProcessCrashDurability 升一档——锁定那一刻写下的快照,崩溃后也要
+    // 读得回。
+    return platform::AtomicWriteFile(session_dir / SessionSoulSnapshotFileName(),
+                                     SessionSoulSnapshotToJson(snapshot).dump(2),
+                                     platform::WriteDurability::ProcessCrashDurability);
+}
+
 std::expected<void, std::string> WriteSessionSoulSnapshot(const std::filesystem::path& session_dir,
                                                           const SessionSoulSnapshot& snapshot) {
-    // 平台统一原子写(见 platform/atomic_write.hpp 的合同):换名原子可见,
-    // 失败目标保持原样。快照是恢复材料,ProcessCrashDurability 升一档
-    //——锁定那一刻写下的快照,崩溃后也要读得回。
-    const auto written = platform::AtomicWriteFile(session_dir / SessionSoulSnapshotFileName(),
-                                                   SessionSoulSnapshotToJson(snapshot).dump(2),
-                                                   platform::WriteDurability::ProcessCrashDurability);
+    // FD-04 收尾前的兼容口:把结构化回执降成错误串;调用方
+    // (TrajectorySessionLedger::CommitSoulSnapshot)迁到 Phased 口后删。
+    const auto written = WriteSessionSoulSnapshotPhased(session_dir, snapshot);
     if (!written.has_value()) {
         return std::unexpected(written.error().code + ": " + written.error().message);
     }

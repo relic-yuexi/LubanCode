@@ -3753,20 +3753,36 @@ std::expected<nlohmann::json, std::string> ReadConfigObjectForTargetedUpdate(
     return ReadConfigObjectForUpdate(file_path);
 }
 
-std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
-                                                         const nlohmann::json& root) {
+std::expected<platform::AtomicWriteReceipt, platform::AtomicWriteError> WriteConfigObjectAtomicPhased(
+    const std::string& file_path, const nlohmann::json& root) {
     std::string dump;
     try {
         dump = root.dump(2);
     } catch (const nlohmann::json::type_error& e) {
-        return std::unexpected("配置序列化失败: " + std::string(e.what()));
+        // 序列化失败发生在碰盘之前:按未提交结构化上报,code 用 config.
+        // 前缀,不冒充 atomic.* 平台码。
+        return std::unexpected(platform::AtomicWriteError{
+            "config.serialize_failed", "配置序列化失败: " + std::string(e.what()),
+            platform::WriteOutcome::NotCommitted, platform::WriteFailureKind::Permanent});
     }
     dump.push_back('\n');
-    const auto written = platform::AtomicWriteFile(
-        platform::Utf8ToPath(file_path), dump, platform::WriteDurability::ProcessCrashDurability);
-    if (!written.has_value()) {
-        return std::unexpected("配置文件 " + file_path + " 原子写失败(" + written.error().code +
-                               "): " + written.error().message);
+    return platform::AtomicWriteFile(platform::Utf8ToPath(file_path), dump,
+                                     platform::WriteDurability::ProcessCrashDurability);
+}
+
+std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
+                                                         const nlohmann::json& root) {
+    // FD-04 收尾前的兼容口:把结构化回执降成字符串。新调用方一律走
+    // WriteConfigObjectAtomicPhased 拿阶段;调用方迁完删此口。
+    const auto phased = WriteConfigObjectAtomicPhased(file_path, root);
+    if (!phased.has_value()) {
+        const platform::AtomicWriteError& error = phased.error();
+        std::string text = "配置文件 " + file_path + " 原子写失败(" + error.code + "): " + error.message;
+        if (error.outcome == platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+            // 给降级口的最后一点诚实:这格失败盘上已是新内容。
+            text += "(新内容已写进文件并可见,仅断电耐久未确认;不得按未写盘处理)";
+        }
+        return std::unexpected(std::move(text));
     }
     return {};
 }
