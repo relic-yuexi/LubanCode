@@ -949,3 +949,26 @@ TEST_CASE("UsageStats: provider 不回 usage 记 unknown,不伪造 0%") {
     CHECK(stats.cache_hit_percent() == -1);           // 整轮一笔实测都没有
     CHECK(stats.request_count() == 1);                // 请求照数
 }
+
+// ---- P3(按代理状态投影单):异步调度命令的投递口 ------------------------------
+
+TEST_CASE("P3 PostUiCommand: 槽在经槽投递,槽空就地直走(心跳收编的降级纪律)") {
+    // 心跳那类周期性屏面动作经 PostUiCommand 提交:会话装配接调度器的
+    // PostAction(消费线程统一提交锁内执行);槽未接(单发/单测)就地直走。
+    // 全局槽,测完必须复位,不污染同二进制的其他册。
+    cli::SetUiCommandPoster(nullptr);
+    bool ran = false;
+    cli::PostUiCommand([&] { ran = true; });
+    CHECK(ran);  // 槽空:就地直走(P2 之前的同款行为)
+
+    bool posted = false;
+    cli::SetUiCommandPoster([&](std::function<void()> command) {
+        posted = true;
+        command();  // 假投递口:登记后照跑,模拟消费线程
+    });
+    ran = false;
+    cli::PostUiCommand([&] { ran = true; });
+    CHECK(posted);
+    CHECK(ran);
+    cli::SetUiCommandPoster(nullptr);  // 复位
+}

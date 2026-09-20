@@ -15,6 +15,10 @@ std::string BoxRuleLine(const Theme& theme, int console_width) {
 
 std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
     std::string value;
+    value += "g:";
+    for (const auto& row : frame.global_notice_rows) {
+        value += row + "\n";
+    }
     value += "h:";
     for (const auto& row : frame.help_rows) {
         value += row + "\n";
@@ -220,6 +224,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     // 可选行全舍了还装不下,composer 的物理行围光标开窗——窗口尾部贴光标,
     // 保底一行,留白跟着免掉。0 = 不限(单测与无终端环境的老行为)。
     std::size_t help_count = model.help_rows.size();
+    std::size_t global_notice_count = model.global_notice_rows.size();
     std::size_t activity_count = model.activity_rows.size();
     std::size_t queue_count = model.queue_rows.size();
     std::size_t assist_count = model.assist_row.empty() ? 0 : 1;
@@ -247,6 +252,9 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                 room -= granted;
                 return static_cast<std::size_t>(granted);
             };
+            // 全局通知区最保(P3):诊断是系统侧要让人知道的事,先于帮助层
+            // 拿余量;板本身有界(≤3 行),不会吃掉整个帧。
+            global_notice_count = take(model.global_notice_rows.size());
             notice_count = take((std::min)(std::size_t{1}, model.mode_notice_rows.size()));
             help_count = take(model.help_rows.size());
             activity_count = take(model.activity_rows.size());
@@ -260,6 +268,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             // 连横线+状态行都容不下时它们也让位——"输入行必画得下"是底线,
             // 别的一切都排它后头。
             help_count = 0;
+            global_notice_count = 0;
             activity_count = 0;
             queue_count = 0;
             assist_count = 0;
@@ -291,6 +300,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         }
         dropped_optional_rows =
             static_cast<int>(model.help_rows.size() - help_count +
+                             model.global_notice_rows.size() - global_notice_count +
                              model.activity_rows.size() - activity_count +
                              model.queue_rows.size() - queue_count +
                              (model.assist_row.empty() ? 0 : 1) - assist_count +
@@ -331,6 +341,14 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         layout.frame.rows.push_back(InlineFrameRow{0, width, hard, std::move(text)});
     };
 
+    // 全局通知区(P3):垫在帮助层之上、帧最顶——无法归属的诊断有自己
+    // 的显式位置,不混进正文、不冒充某页的输出。黄色(tool_line)与模式
+    // 说明同一档;plain 主题自动退回纯文本。
+    for (std::size_t i = 0; i < global_notice_count; ++i) {
+        push(false, theme.tool_line +
+                        TruncateUtf8ToDisplayWidth("! " + model.global_notice_rows[i], width - 1) +
+                        theme.reset);
+    }
     for (std::size_t i = 0; i < help_count; ++i) {
         // 帮助层垫帧最顶:与队列同款淡色包装,超宽按屏宽截断。
         push(false, tinted(model.help_rows[i]));
@@ -446,6 +464,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     // 行数账记"真画出来的":预算钳掉的可选行不进账/指纹——同一窗口高下
     // 画面相同即指纹相同,跳帧判断不被"画不出来的行"搅动。
     chrome.help_rows.assign(model.help_rows.begin(), model.help_rows.begin() + help_count);
+    chrome.global_notice_rows.assign(model.global_notice_rows.begin(),
+                                     model.global_notice_rows.begin() + global_notice_count);
     chrome.activity_rows.assign(model.activity_rows.begin(), model.activity_rows.begin() + activity_count);
     chrome.queue_rows.assign(model.queue_rows.begin(), model.queue_rows.begin() + queue_count);
     chrome.assist_row = assist_count > 0 ? model.assist_row : ChromeAssistRow{};

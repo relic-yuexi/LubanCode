@@ -183,6 +183,9 @@ void TurnInputListener::ThreadMain() {
                 if (entry.task_id != outcome.stop_current_task_id) {
                     continue;
                 }
+                // P3(§六"任务退场后旧审批按钮失效"):停止/清除先把它悬着的
+                // 审批按拒收口——通知位与菜单随即失效,不等人来答死账。
+                SessionApprovalChannel().DenyPendingForOwner(entry.task_id);
                 if (entry.running && actions.cancel_task) {
                     // 停止回执(与空闲路同一套文案):流式期间插打一行,正文
                     // 行数账由 print hook 作废;行随后显"停止中"。

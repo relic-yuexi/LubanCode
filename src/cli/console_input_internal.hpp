@@ -126,6 +126,9 @@ struct BottomChromeScene {
     std::vector<std::string> activity_rows;  // Working 活动条(Busy;空闲空)
     bool help_visible = false;               // ? 帮助层(空闲场景;Busy 无帮助层)
     std::vector<std::string> queue_rows;     // 待发队列(调用方按场景拼好)
+    // P3 显式全局通知区:无法归属页面的诊断(调用方从 SessionGlobalNotices
+    // 现拉),画帧最顶——不落正文、不抢当前页。
+    std::vector<std::string> global_notice_rows;
     std::vector<std::string> dock_rows;      // 导航坞行(调用方拼好,与 tints 按位对齐)
     std::vector<AgentHealthTint> dock_tints;
     std::string rule_tag;                    // 上横线右端短标签(查看态)

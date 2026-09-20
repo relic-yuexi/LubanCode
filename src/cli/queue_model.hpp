@@ -59,6 +59,11 @@ std::string QueueRecallHint();
 using QueueId = std::uint64_t;  // 0 = 无效 id
 
 // 队列消息的收件目标(规格"队列按目标分账"节)。值语义,可比较。
+// 任务号不变量(P3 复核):AgentTool 的任务号由 TaskLedger 进程级单调发号
+// (next_task_id_ 只增不减),一场进程内不重用;/clear、退出时队列整本
+// 清账(TakeAllForDisposal),换代不留旧条目——所以裸 task_id 即可当
+// 稳定键,不必再叠 session_generation(审批通道那边的世代绑定是第二道
+// 保险,语义不同:那边防的是"悬账跨世代被答")。
 struct MessageTarget {
     enum class Kind { MainSession, Subagent };
     Kind kind = Kind::MainSession;
@@ -358,6 +363,9 @@ struct QueueViewOptions {
     std::size_t visible_cap = 3;         // 逐条摆的上限,超出加"另有 N 条"
     QueueTitleMode title_mode = QueueTitleMode::Boundary;
     std::string key_hint;                // 取回键提示("Shift+←" 等;空串 = 不带键提示段)
+    // 别页目标的条数(P3 按目标过滤后补一行"N 条排在别的页";0 = 不打)。
+    // 调用方先 CountQueueOutsideTarget 再填进来。
+    std::size_t outside_target_count = 0;
 };
 
 // 队列区成行:空队列没有行(连标题都不画);非空时标题一行 + 条目行
@@ -366,5 +374,14 @@ struct QueueViewOptions {
 // 首行(全文取回编辑器里看)。i18n 成对。
 std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>& items,
                                                 const QueueViewOptions& options);
+
+// 按目标过滤(按代理状态投影单 P3,§六"列表按目标过滤"):队列账是全局
+// 一本,各页的队列区只摆发给当前页的条目——正看 sub #3 就只见 [#3] 的,
+// main 的不混进来。取回编辑(Shift+←)不受过滤影响:它走 BeginEditLatest,
+// 摸的还是整本账,用户排在别页的条目不会因此取不回。纯函数,单测钉。
+std::vector<QueuedMessage> FilterQueueByTarget(const std::vector<QueuedMessage>& items,
+                                               const MessageTarget& target);
+// 过滤后落在别页的条数(队列区尾巴那行"N 条排在别的页"用;0 = 不打)。
+std::size_t CountQueueOutsideTarget(const std::vector<QueuedMessage>& items, const MessageTarget& target);
 
 }  // namespace lubancode::cli

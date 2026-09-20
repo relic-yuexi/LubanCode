@@ -31,24 +31,35 @@ std::string TrimAscii(std::string value) {
 
 void PrintAskUserDeclined(const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme,
                           const std::optional<std::string>& discussion = std::nullopt) {
-    std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-    TermOut() << theme.stats << "• " << tr("ask_user.declined") << theme.reset << "\n";
-    TermOut() << theme.stats << "  └─ " << question.question << " (";
-    for (std::size_t i = 0; i < question.options.size(); ++i) {
-        TermOut() << (i == 0 ? "" : " / ") << question.options[i].label;
-    }
-    TermOut() << ")" << theme.reset << "\n";
-    if (discussion.has_value()) {
-        TermOut() << theme.stats << "     " << tr("ask_user.discussion_recorded") << theme.reset << " "
-                  << *discussion << "\n";
-    }
-    TermOut().flush();
+    // P3(过渡批收编:ask_user 菜单渲染进调度口):回显行与工具确认菜单的
+    // 显示半边同款纪律——经 RunUiSync 提交,统一提交锁内落笔;槽未接就地
+    // 直走,与旧路一字不差。
+    lubancode::cli::RunUiSync([&] {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        TermOut() << theme.stats << "• " << tr("ask_user.declined") << theme.reset << "\n";
+        TermOut() << theme.stats << "  └─ " << question.question << " (";
+        for (std::size_t i = 0; i < question.options.size(); ++i) {
+            TermOut() << (i == 0 ? "" : " / ") << question.options[i].label;
+        }
+        TermOut() << ")" << theme.reset << "\n";
+        if (discussion.has_value()) {
+            TermOut() << theme.stats << "     " << tr("ask_user.discussion_recorded") << theme.reset << " "
+                      << *discussion << "\n";
+        }
+        TermOut().flush();
+    });
 }
 
 }  // namespace
 
 std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme) {
+    // P3(过渡批收编:ask_user 菜单渲染进调度口)——与工具确认菜单(P2)同款
+    // 纪律:开屏前先排干会话级 UI 调度的余量(此前提交的事件画完再开问),
+    // 问话的显示半边经 RunUiSync 提交(统一提交锁内落笔);菜单读键留在
+    // 本线程——读键不能在 UI 线程/持锁进行。槽未接(单发/单测)就地直走,
+    // 行为与旧路一字不差。
+    lubancode::cli::RunUiSync([] {});
     // 交互菜单取得整块屏面所有权:脚注框收起 + 子代理状态块整块收走 +
     // ticker 挂起(零输出)+ 监听线程让出读权,全程一个作用域管到底;
     // 标题/问题/选项/提示行从正文末尾连着铺,等待期间无人改写这片区域。
@@ -57,7 +68,7 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
     const lubancode::cli::StreamFooterSuspendScope footer_suspend;
     const bool interactive_menu =
         lubancode::platform::StdinIsInteractive() && lubancode::platform::ProbeStdoutConsole().is_console;
-    {
+    lubancode::cli::RunUiSync([&] {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         TermOut() << "\n";
         if (!interactive_menu) {
@@ -76,7 +87,7 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
             TermOut() << "  " << (question.options.size() + 2) << ". " << tr("ask_user.discuss") << "\n";
         }
         TermOut().flush();
-    }
+    });
 
     std::vector<std::size_t> indexes;
     std::optional<std::string> inline_custom_answer;
@@ -167,8 +178,10 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
             if (valid && !indexes.empty()) {
                 break;
             }
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            TermOut() << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
+            lubancode::cli::RunUiSync([&] {
+                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                TermOut() << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
+            });
         }
     }
 
@@ -191,8 +204,10 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
                 PrintAskUserDeclined(question, theme, value);
                 return lubancode::tools::AskUserResponse::Discuss(value);
             }
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            TermOut() << theme.error << tr("ask_user.discuss_empty") << theme.reset << "\n";
+            lubancode::cli::RunUiSync([&] {
+                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                TermOut() << theme.error << tr("ask_user.discuss_empty") << theme.reset << "\n";
+            });
         }
     }
 
@@ -219,15 +234,17 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
                 answers.push_back(value);
                 break;
             }
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            TermOut() << theme.error << tr("ask_user.custom_empty") << theme.reset << "\n";
+            lubancode::cli::RunUiSync([&] {
+                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                TermOut() << theme.error << tr("ask_user.custom_empty") << theme.reset << "\n";
+            });
         }
     }
     if (inline_custom_answer.has_value() && !inline_custom_answer->empty()) {
         answers.push_back(*inline_custom_answer);
     }
 
-    {
+    lubancode::cli::RunUiSync([&] {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         TermOut() << theme.banner << "✓ "
                   << (question.header.empty() ? tr("ask_user.panel_title") : question.header) << theme.reset
@@ -236,7 +253,7 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
             TermOut() << (i == 0 ? " " : ", ") << answers[i];
         }
         TermOut() << "\n";
-    }
+    });
     return lubancode::tools::AskUserResponse::Answered(std::move(answers));
 }
 

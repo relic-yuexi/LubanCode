@@ -2634,15 +2634,50 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
             // 有效权限必须同时覆盖预裁定和确认：父 Yolo 可能在确认口之前
             // 就 Allow。resolver 已完成集合求交，这里只把同一结果接进两道门。
+            // P3(审批的 owner 绑定,按代理状态投影单 §六):前台子代理的确认
+            // 先绑成本任务的 presenter(档位下限照管),再经宿主的
+            // on_tool_confirm_routed 路由:终端宿主拿 owner=本任务页提交
+            // 审批通道:用户看着那只子代理菜单才开,看着别页时底栏通知位
+            // 标"#N 待审批";任务退场/打断由通道按 owner/世代收口,旧按钮
+            // 不悬死。宿主没接路由(单发/单测/旧装配)当场跑 presenter,
+            // 行为与旧路一字不差。tools 域不认终端件(守门册盯着),通道
+            // 本体住在宿主层,这里只见纯 std 类型的路由口。
+            const int confirm_owner_task_id = task != nullptr ? task->snapshot.id : 0;
+            const auto route_or_run = [routed = foreground_hooks->on_tool_confirm_routed,
+                                       confirm_owner_task_id](std::function<bool()> presenter,
+                                                               const std::string& name) -> bool {
+                if (routed) {
+                    return routed(confirm_owner_task_id, presenter, name);
+                }
+                return presenter();
+            };
             if (permission_floor.has_value() && foreground_hooks->on_tool_confirm_floored) {
                 auto floored = foreground_hooks->on_tool_confirm_floored;
                 const lubancode::ApprovalMode floor = *permission_floor;
-                turn_wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id,
-                                                               const std::string& name,
-                                                               const nlohmann::json& input) {
-                    return floored(tool_use_id, name, input, floor);
+                turn_wiring.on_tool_confirm = [route_or_run, floored, floor](
+                                                  const std::string& tool_use_id, const std::string& name,
+                                                  const nlohmann::json& input) {
+                    return route_or_run(
+                        [floored, floor, tool_use_id, name, input]() -> bool {
+                            return floored(tool_use_id, name, input, floor);
+                        },
+                        name);
+                };
+            } else if (foreground_hooks->on_tool_confirm) {
+                auto plain_confirm = foreground_hooks->on_tool_confirm;
+                turn_wiring.on_tool_confirm = [route_or_run, plain_confirm](
+                                                  const std::string& tool_use_id, const std::string& name,
+                                                  const nlohmann::json& input) {
+                    return route_or_run(
+                        [plain_confirm, tool_use_id, name, input]() -> bool {
+                            return plain_confirm(tool_use_id, name, input);
+                        },
+                        name);
                 };
             } else {
+                // 确认口空 = 宿主没给问话能力(单测/旧装配的常态):原样转
+                // 发空函数——引擎按"无确认回调"处置,不许包成非空调用
+                // (包了就是 bad_function_call)。
                 turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
             }
         } else {

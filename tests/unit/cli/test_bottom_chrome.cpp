@@ -108,6 +108,33 @@ TEST_CASE("帧账:指纹把各分区隔开,行内容跨区撞车也不误判相�
     CHECK(Contains(BottomChromeFingerprint(a), "d:"));
 }
 
+TEST_CASE("P3 全局通知区: 垫帧最顶、进指纹、进总行数与布局") {
+    // 无法归属页面的诊断有自己的显式位置(按代理状态投影单 §六):帧最顶、
+    // 帮助层之上;内容变指纹必变(进出通知区自然触发重画);不落正文。
+    BottomChromeFrame frame;
+    frame.global_notice_rows = {"[hooks] 后台记录已归并"};
+    frame.queue_rows = {"待发送消息 1 条", "> 唯一一条"};
+    CHECK(frame.TotalRows() == 4 + 3);  // 原四行 + 通知一行 + 队列三行
+    CHECK(frame.AgentDockFirstRow() == 1 + 2 + 1 + 2 + 1);  // 通知 + 队列2 + 输入1 + 横线2 + 状态1
+
+    BottomChromeFrame other = frame;
+    CHECK(BottomChromeFingerprint(frame) == BottomChromeFingerprint(other));
+    other.global_notice_rows.push_back("[footer-heartbeat] 慢了一拍");
+    CHECK(BottomChromeFingerprint(frame) != BottomChromeFingerprint(other));
+
+    // 布局:通知行画在帧首行,plain 主题纯文本。
+    BottomChromeModel model = FramedModel(ComposerState({U"草稿"}, 0, 0), ComposerMode::Idle);
+    model.global_notice_rows = {"[hooks] 后台记录已归并"};
+    const auto layout = BuildBottomChromeLayout(model, Theme{}, /*width=*/40);
+    REQUIRE(layout.frame.rows.size() >= 2);
+    CHECK(Contains(layout.frame.rows.front().text, "[hooks] 后台记录已归并"));
+    CHECK(layout.chrome.global_notice_rows.size() == 1);
+    // 预算绝境:通知行属可舍之列,"输入行必画得下"仍是底线。
+    const auto squeezed = BuildBottomChromeLayout(model, Theme{}, /*width=*/40, /*budget=*/3);
+    CHECK(squeezed.chrome.global_notice_rows.empty());
+    CHECK(squeezed.frame.rows.size() >= 1);
+}
+
 TEST_CASE("模式说明状态:5999ms 可见、6000ms 到期且连按重置") {
     using Clock = ModeNoticeState::Clock;
     const Clock::time_point t0{};

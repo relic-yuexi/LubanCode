@@ -108,11 +108,13 @@
 #include "runtime/session_work_scheduler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:PlanDocument 内容锚
 #include "cli/agent_panel_host.hpp"
+#include "cli/approval_channel.hpp"  // P3:换代/退场把悬着的审批按拒收口
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/global_notice.hpp"  // P3:显式全局通知区(换代清板/诊断不落正文)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:查看帧折行记账
 #include "cli/i18n.hpp"
 #include "cli/live_transcript.hpp"
@@ -757,12 +759,17 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
     // P0-2:统一过 TrajectoryCommandExecutor(flag 开的会话记 command
     // lifecycle;flag 关零变透传)。
     const CommandFlow flow = lubancode::app::ExecuteSessionCommand(dispatch_ctx_, parsed);
-    // 会话边界命令(按代理状态投影单 P1):clear/resume 换代——旧
+    // 会话边界命令(按代理状态投影单 P1/P3):clear/resume 换代——旧
     // session_generation 的视图账、每页 UI 状态整册作废,任务号重用也
     // 串不到旧页。命令本身成功与否都换(边界过了就是新会话)。
     if (parsed.command == lubancode::cli::SlashCommand::Clear ||
         parsed.command == lubancode::cli::SlashCommand::Resume) {
         view_registry_.BeginNewSession();
+        // P3 生命周期(§六"退出后回调不得串账"):旧世代的悬账随换代收口
+        // ——审批通道里绑过世代的请求按拒收口(future 不悬死工具线程),
+        // 全局通知区清板(旧会话的系统侧提醒不带到新会话的屏上)。
+        lubancode::cli::SessionApprovalChannel().DenyStaleGenerations(view_registry_.session_generation());
+        lubancode::cli::SessionGlobalNotices().Clear();
     }
     return flow;
 }
@@ -1478,10 +1485,14 @@ void TerminalSessionController::Run() {
                         transcript.push_back(std::move(item));
                     }
                     // 查看态不打裸行(事件照进 main 台账,回 main 时可见),
-                    // 与完成通知同一档规矩。
-                    if (lubancode::cli::CurrentAgentViewedTaskId() == 0) {
-                        TermOut() << theme.error << tr("session.context_exhaustion_hold") << theme.reset << "\n";
-                        TermOut().flush();
+                    // 与完成通知同一档规矩。P3:交互终端改走显式全局通知区
+                    // ——系统侧提醒不落任何页的正文;管道/重定向保持旧合同。
+                    if (!lubancode::cli::ReportDiagnosticLine(tr("session.context_exhaustion_hold"))) {
+                        if (lubancode::cli::CurrentAgentViewedTaskId() == 0) {
+                            TermOut() << theme.error << tr("session.context_exhaustion_hold") << theme.reset
+                                      << "\n";
+                            TermOut().flush();
+                        }
                     }
                 }
             } else {
@@ -1586,6 +1597,29 @@ void TerminalSessionController::Run() {
             break;
         }
     }
+    // P3 生命周期收口(单子 §六"退出、清会话、恢复会话"):按次序撤订阅、
+    // 关投递入口、清悬账、最后才轮到成员析构释放终端——
+    //   1. 处理剩余状态事件:调度队列排干(Flush 在统一提交锁内逐枚执行,
+    //      事实账不丢);
+    //   2. 悬账收口:审批通道整批拒收 + 服务者注销(future 不悬死工具线程),
+    //      全局通知区清板;
+    //   3. 关闭投递入口:cli 侧的调度/换页/世代槽位全部摘除——此后任何迟
+    //      到的写屏请求都查无此口,不再有"析构补画复活旧页"的通路;面板
+    //      提供者也摘(旧会话的代理台账不再对外供货);
+    //   4. 成员逆序析构(调度器先停、登记簿后走,声明序已保证),终端最后
+    //      释放。
+    ui_dispatcher_.Flush();
+    lubancode::cli::SessionApprovalChannel().DenyAllPending();
+    lubancode::cli::SessionApprovalChannel().ClearServer();
+    lubancode::cli::SessionGlobalNotices().Clear();
+    lubancode::cli::SetAgentViewSwitchHook(nullptr);
+    lubancode::cli::SetViewSwitchGuard(nullptr);
+    lubancode::cli::SetUiDispatchEntrance(nullptr);
+    lubancode::cli::SetUiCommandPoster(nullptr);
+    lubancode::cli::SetLayoutInvalidationHook(nullptr);
+    lubancode::cli::SetMainViewRevisionProvider(nullptr);
+    lubancode::cli::SetAgentViewGenerationProvider(nullptr);
+    lubancode::cli::SessionAgentPanelHost().Reset();  // provider/actions/transcript 三清
     // P0-3 轨迹:退出即封口(§14.5 /exit 与 EOF——收口活动流、run terminal、
     // session.ended、session.json closed)。封不干净标 incomplete,不写
     // clean closed;这里的账面结果不打扰终端,要看得走 /doctor trajectory。

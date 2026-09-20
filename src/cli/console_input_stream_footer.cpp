@@ -25,6 +25,7 @@
 
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/global_notice.hpp"  // P3:显式全局通知区(诊断不落正文)
 #include "cli/i18n.hpp"
 #include "cli/image_input.hpp"  // kMaxImageBytes(Alt+V 贴图的上限)
 #include "cli/keymap.hpp"
@@ -662,7 +663,8 @@ void RedrawStreamFooterLocked() {
     std::vector<AgentHealthTint> dock_rows_tints;  // 监督色(P1-1):与行按位对齐
     std::string footer_rule_tag;
     int dock_selected_task_id = 0;
-    int dock_viewed_task_id = 0;  // 此刻真正在看的页(审批通知位按它判"别页")
+    int dock_viewed_task_id = 0;  // 此刻真正在看的页(审批通知位/队列过滤按它判)
+    std::optional<int> footer_composer_target;  // 本帧 composer 收件人(占位提示用)
     if (SessionAgentPanelHost().provider()) {
         const std::vector<AgentPanelEntry> panel_entries = SessionAgentPanelHost().provider()();
         const AgentPanelSession::Snapshot snap0 =
@@ -689,6 +691,7 @@ void RedrawStreamFooterLocked() {
                     if (entry.task_id == *panel_snapshot.target_task_id) {
                         footer_rule_tag = entry.title;
                         SetComposerTarget(entry.task_id);  // 流式 composer 的收件人 = 查看态那只子代理
+                        footer_composer_target = entry.task_id;
                         break;
                     }
                 }
@@ -701,8 +704,16 @@ void RedrawStreamFooterLocked() {
     // 待发区行:现拉会话层队列的轻量快照(标题模式随状态变:Esc 立即送/
     // 编辑中/等下一个工具边界),行怎么摆是 BuildSteeringQueueRows 的纯逻辑,
     // 单测钉在那边。空队列连标题都不画(规格)。
+    // P3(§六"列表按目标过滤"):本页队列区只摆发给当前查看页的条目——正
+    // 看 sub #3 就只见 [#3] 的,main 的不混进来;别页条数点一行,过滤不
+    // 悄悄藏账。取回编辑(Shift+←)摸整本账,不受这层显示过滤影响。
     SteeringQueue& steering = SessionSteeringQueue();
+    const MessageTarget queue_page_target = dock_viewed_task_id == 0
+                                                ? MessageTarget::Main()
+                                                : MessageTarget::Agent(dock_viewed_task_id);
     const std::vector<QueuedMessage> steering_snapshot = steering.Snapshot();
+    const std::vector<QueuedMessage> steering_page =
+        FilterQueueByTarget(steering_snapshot, queue_page_target);
     QueueViewOptions queue_view;
     queue_view.visible_cap = kMaxVisibleQueuedLines;
     queue_view.title_mode = steering.immediate_delivery_requested() ? QueueTitleMode::Immediate
@@ -710,10 +721,8 @@ void RedrawStreamFooterLocked() {
                                               [](const QueuedMessage& item) { return item.edit_open; })
                                       ? QueueTitleMode::Editing
                                       : QueueTitleMode::Boundary;
-    const std::vector<std::string> queue_rows_text =
-        steering_snapshot.empty()
-            ? std::vector<std::string>{}
-            : BuildSteeringQueueRows(steering_snapshot, queue_view);
+    queue_view.outside_target_count = CountQueueOutsideTarget(steering_snapshot, queue_page_target);
+    const std::vector<std::string> queue_rows_text = BuildSteeringQueueRows(steering_page, queue_view);
 
     // Composer 合流 P1(收口审计单 §二 P1 收口):footer 与空闲 composer 组
     // 同一只 BottomChromeModel——这里只备场景差量(mode/activity/placeholder/
@@ -732,6 +741,12 @@ void RedrawStreamFooterLocked() {
     scene.editor = f.composer;
     scene.prompt = "> ";
     scene.placeholder = f.hint;
+    // 输入目标(P3"用户看得出发给谁"):查看态 composer 的收件人是那只子
+    // 代理,草稿为空时占位提示明写"发给 #N"——收件人不再只藏在横线右端
+    // 的短标签里。
+    if (footer_composer_target.has_value() && f.composer.line.empty()) {
+        scene.placeholder = trf("composer.target_placeholder", *footer_composer_target);
+    }
     if (f.working) {
         scene.activity_rows = {BuildFooterWorkingLine(f, width)};
     }
@@ -739,15 +754,24 @@ void RedrawStreamFooterLocked() {
     scene.dock_rows = dock_rows_text;
     scene.dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
     scene.rule_tag = footer_rule_tag;
-    // P2(通知与审批走独立区域):别的页有悬着的审批请求时,上横线右端
-    // 挂一枚固定通知位标记——不抢当前页、不进正文;用户切回那页,监听
-    // 线程的下一拍菜单才开(单子 §三"导航与固定通知位标记")。空闲路
-    // 不标:工具只活在回合里,回合收口前 future 必已裁定,空闲无悬账。
-    if (SessionApprovalChannel().HasPendingOutside(dock_viewed_task_id)) {
-        // 文案先按中文字面落(与监听线程粘贴截断提示同款取舍,i18n 归档单)。
-        scene.rule_tag = footer_rule_tag.empty()
-                             ? std::string("main 待审批")
-                             : footer_rule_tag + " · main 待审批";
+    // P3(显式全局通知区):无法归属页面的诊断进帧顶的独立区,不落正文。
+    // 现拉现画,过期自收;指纹含它,通知进出自然触发重画。
+    scene.global_notice_rows = SessionGlobalNotices().ActiveRows();
+    // P2(通知与审批走独立区域)/P3(owner 绑定收口):别的页有悬着的审批
+    // 请求时,上横线右端挂固定通知位——标签按请求的 owner 页出("main 待
+    // 审批"/"#3 待审批",多页并悬合成一处),不抢当前页、不进正文;用户
+    // 切回那页,监听线程的下一拍菜单才开(单子 §三)。空闲路不标:工具只
+    // 活在回合里,回合收口前 future 必已裁定,空闲无悬账。
+    if (const std::vector<std::string> approval_labels =
+            SessionApprovalChannel().PendingOwnerLabelsOutside(dock_viewed_task_id);
+        !approval_labels.empty()) {
+        std::string tag;
+        if (approval_labels.size() == 1) {
+            tag = trf("ui.pending_approval_tag", approval_labels.front());
+        } else {
+            tag = trf("ui.pending_approval_multi", approval_labels.size());
+        }
+        scene.rule_tag = footer_rule_tag.empty() ? tag : footer_rule_tag + " · " + tag;
     }
     scene.selected_task_id = dock_selected_task_id;
     scene.menu_rows = f.composer.hint_lines;  // slash 候选(编辑器自有)
@@ -1209,48 +1233,89 @@ void StreamFooterHeartbeat::Stop() {
 
 void StreamFooterHeartbeat::ThreadMain() {
     try {
-        bool stopping_reported = false;
-        bool mode_notice_was_visible = ModeNoticeSlot().VisibleMode().has_value();
+        mode_notice_was_visible_.store(ModeNoticeSlot().VisibleMode().has_value());
         while (!stop_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (stop_.load(std::memory_order_acquire)) return;
 
-            const bool mode_notice_visible = ModeNoticeSlot().VisibleMode().has_value();
-            const bool mode_notice_changed = mode_notice_visible != mode_notice_was_visible;
-            mode_notice_was_visible = mode_notice_visible;
-            // 活动态的公开口各自拿 stdout 锁；非活动态才在这里拿锁，调用
-            // “Locked” 重画口。两者倒过来套会在 MSVC 下撞递归上锁异常。
-            if (TurnActivityActive()) {
-                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now().time_since_epoch())
-                                        .count();
-                const auto elapsed = (std::max<std::int64_t>)(
-                    0, now_ms - started_at_ms_.load(std::memory_order_acquire)) / 1000;
-                if (cancel_ != nullptr && cancel_->load(std::memory_order_acquire) &&
-                    !stopping_reported) {
-                    SetTurnActivityInterruptRequested();
-                    stopping_reported = true;
-                }
-                // 扫光复活(思考活动条扫光复活单):心跳只报秒数,拍号由
-                // UpdateTurnActivityElapsed 内部自长;同秒同高亮位的拍在
-                // 那里就收手,帧审计零新增落笔。
-                UpdateTurnActivityElapsed(elapsed);
-                if (mode_notice_changed) {
-                    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-                    if (!RepaintSuspendedLocked()) RedrawStreamFooterLocked();
-                }
-            } else {
-                std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-                if (RepaintSuspendedLocked()) continue;
-                RedrawStreamFooterLocked();
+            // P3(过渡批收编):本拍的屏面动作打包成命令投进会话级 UI 调度
+            // ——消费线程在统一提交锁内执行,心跳线程只管节拍,不执笔。
+            // 丢拍闸:上一拍还没被消费(慢终端/长帧),这一拍直接扔——心跳
+            // 是周期性补帧,不是事实账,不囤积。槽未接(单发/单测)就地
+            // 直走,行为与 P2 一致。
+            if (tick_pending_.exchange(true, std::memory_order_acq_rel)) {
+                continue;
             }
+            PostUiCommand([this] {
+                // 拍内异常不叫心跳停摆:记一笔诊断(交互进全局通知区,否则
+                // stderr——与旧 ThreadMain 的收口同款),丢拍闸照样复位,
+                // 下一拍照常。
+                try {
+                    RunTick();
+                } catch (const std::exception& e) {
+                    const std::string line = std::string("[footer-heartbeat] ") + e.what();
+                    if (!ReportDiagnosticLine(line)) {
+                        TermErr() << "\n" << line << "\n";
+                        TermErr().flush();
+                    }
+                } catch (...) {
+                    if (!ReportDiagnosticLine("[footer-heartbeat] unknown exception")) {
+                        TermErr() << "\n[footer-heartbeat] unknown exception\n";
+                        TermErr().flush();
+                    }
+                }
+                tick_pending_.store(false, std::memory_order_release);
+            });
         }
     } catch (const std::exception& e) {
-        TermErr() << "\n[footer-heartbeat] " << e.what() << "\n";
-        TermErr().flush();
+        tick_pending_.store(false, std::memory_order_release);
+        const std::string line = std::string("[footer-heartbeat] ") + e.what();
+        if (!ReportDiagnosticLine(line)) {
+            TermErr() << "\n" << line << "\n";
+            TermErr().flush();
+        }
     } catch (...) {
-        TermErr() << "\n[footer-heartbeat] unknown exception\n";
-        TermErr().flush();
+        tick_pending_.store(false, std::memory_order_release);
+        if (!ReportDiagnosticLine("[footer-heartbeat] unknown exception")) {
+            TermErr() << "\n[footer-heartbeat] unknown exception\n";
+            TermErr().flush();
+        }
+    }
+}
+
+// 一拍的全部屏面动作。P2 时这段住在心跳线程里;P3 起经 PostUiCommand 提交,
+// 可能跑在调度消费线程(统一提交锁内)或投递线程(槽未接的就地路)——
+// 函数自持 stdout 锁纪律,两条线程都合法。
+void StreamFooterHeartbeat::RunTick() {
+    const bool mode_notice_visible = ModeNoticeSlot().VisibleMode().has_value();
+    const bool mode_notice_changed =
+        mode_notice_visible != mode_notice_was_visible_.load(std::memory_order_acquire);
+    mode_notice_was_visible_.store(mode_notice_visible, std::memory_order_release);
+    // 活动态的公开口各自拿 stdout 锁；非活动态才在这里拿锁，调用
+    // “Locked” 重画口。两者倒过来套会在 MSVC 下撞递归上锁异常。
+    if (TurnActivityActive()) {
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        const auto elapsed =
+            (std::max<std::int64_t>)(0, now_ms - started_at_ms_.load(std::memory_order_acquire)) / 1000;
+        if (cancel_ != nullptr && cancel_->load(std::memory_order_acquire) &&
+            !stopping_reported_.load(std::memory_order_acquire)) {
+            SetTurnActivityInterruptRequested();
+            stopping_reported_.store(true, std::memory_order_release);
+        }
+        // 扫光复活(思考活动条扫光复活单):心跳只报秒数,拍号由
+        // UpdateTurnActivityElapsed 内部自长;同秒同高亮位的拍在
+        // 那里就收手,帧审计零新增落笔。
+        UpdateTurnActivityElapsed(elapsed);
+        if (mode_notice_changed) {
+            std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+            if (!RepaintSuspendedLocked()) RedrawStreamFooterLocked();
+        }
+    } else {
+        std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+        if (RepaintSuspendedLocked()) return;
+        RedrawStreamFooterLocked();
     }
 }
 
