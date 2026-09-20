@@ -1,0 +1,63 @@
+# SV-02 同机来信正文与 Hold 决定分锁入队，审批可漏过
+
+- 状态：已实施，合同夹具与迁移同笔落码，待远端 CI 验收后勾账。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-02 | B | 高 | src/peers/peer_session.cpp:215<br>src/peers/peer_session.cpp:267<br>src/peers/peer_mailbox.cpp:97<br>src/app/wirings/peer_session_wiring.cpp:79<br>src/app/wirings/peer_session_wiring.cpp:111 | 先 mailbox_.Offer(*parsed, NowUnix())，后 held_ids_.insert(message_id)；DrainIncoming 先 mailbox_.Drain()，再查 held_ids_。 | 传输线程把正文放进邮箱后，主线程可在 Hold 标记落入另一张集合前取走来信。incoming.held 此时为 false，RefillPool 放入 ready_messages，BuildInboxPoll 以 user 消息送入模型；本来应询问用户的跨目录来信绕过询问。 | 将有效接收决定随信封存进同一队列项，在 PeerMailbox 的同一临界区完成发布；Drain 返回正文及冻结决定。删除 PeerRuntime 的平行 held_ids_/held_mutex_ 元数据账；保留去重、限流与 UI 审批流程。 | 高：消息批准边界。队列接口会波及 peer 单测，但无需改通信 wire 信封或 GUI 文案。去重重试的 held/delivered 回执语义须写明，不能把 held 误报可执行。 |
+
+### 两条真实线程路径
+
+`Start()` 在 peer_session.cpp:84-85 把请求回调交给管道服务；`HandleRequestOnTransportThread` 负责接收。主线程的 `PeerSessionWiring::BuildInboxPoll` 则在轮次边界调用 `RefillPool`。
+
+可复核次序：接收线程 `Offer(A)` 成功 → 主线程 `Drain()` 取出 A → 主线程查 `held_ids_` 未命中并送 ready → 接收线程才插入 Hold 标记。两边各有 mutex，却没有涵盖“正文加决定”的同一原子发布。这里没有断言死锁。
+
+`self()` 返回引用虽未加锁，目前所查生产使用只读取初始化后不变的 peer_id；这不列作另一条数据竞争问题。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：独占 peers 三件及其测试即可；与其他 SV 项可并行。app/wirings/peer_session_wiring.cpp 仅作调用证据，不必为本条改动。
+- 允许修改的现有文件：
+
+- `src/peers/peer_mailbox.hpp`
+- `src/peers/peer_mailbox.cpp`
+- `src/peers/peer_session.hpp`
+- `src/peers/peer_session.cpp`
+- `tests/unit/peer/test_peer_mailbox.cpp`
+- `tests/unit/peer/test_peer_loop.cpp`
+- `tests/integration/peer/test_peer_transport.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [ ] 用同步闸停在 Offer 与后续步骤之间，主线程并发 Drain；Hold 来信始终只能进入 held_stash。
+- [ ] 用户批准前，BuildInboxPoll 不产出这封来信；拒绝后不再进入 ready 队列。
+- [ ] Accept/Refuse、重复 message_id、限流、队列满及 Drain 顺序保持原合同。
+- [ ] 所有接收决策随队列项一次发布，不再用跨容器查表恢复 Hold。
+- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+
+## 合并/删除口径
+
+本条不是重复代码合并项；预计可删除行数记 0。职责拆分或修正合同带来的搬移，不当成删除收益。
+
+## 既有工作关联
+
+- 现有验收入口：tests/unit/peer/test_peer_mailbox.cpp、tests/unit/peer/test_peer_loop.cpp、tests/integration/peer/test_peer_transport.cpp；本轮未找到专门覆盖此原子性窗口的既有 TODO。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
