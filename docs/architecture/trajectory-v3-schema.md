@@ -160,7 +160,12 @@ idle
 
 step 摘要覆盖已执行工具时，候选 manifest 必带 `executed_actions`。每项逐字保留宿主提供的 `actionId`、`operation`（工具名与参数）、`executionStatus`、`resultOutcome`、`evidenceRefs`；遗漏或改写则拒收候选。这样，后续模型仍能区分已经执行的操作、执行终态与回喂结果，不把旧操作当作待执行工作。操作参数本身过大、保留这些事实后没有缩减收益时，停止本次摘要。
 
-冻结前核对源 revision、step 身份、移除消息与保留消息。摘要内部请求只含选中闭合组和保留用户输入，不夹带未闭合工具调用。发现签名或不透明思考载荷时，本实现报 `compact.signature_prefix_incompatible`，不复制旧签名后假称兼容。当前生产持久化路径不写 `signature`/`encrypted_content`，也不落 `redacted_thinking`（thinking 块只存 type/text，签名丢弃），此检查是对未来保真写侧的保守前置防线，生产输入上通常不触发；adapter 级“目标模型是否要求签名前缀一致”的真核验尚未接线，留待后续单。范围替换会改请求前缀，不能据此保证服务端缓存命中。
+冻结前核对源 revision、step 身份、移除消息与保留消息。摘要内部请求只含选中闭合组和保留用户输入，不夹带未闭合工具调用。签名与加密思考载荷按两个阶段分开处理（原始账本、摘要材料视图、后续回放是三份不同的账）：
+
+- **摘要材料（A）**：生产持久化已保真保存 thinking 块的 `signature`/`responses_item`（恢复侧亦读回）。发给摘要模型的材料经 `BuildCompactMaterialView` 投影——规范 thinking 块的签名与原生 item 不出网（跨模型重放旧签名会被服务端拒，也不许冒充摘要模型的新思考），可读思考正文按普通文本材料保留并标明来源，不透明块（redacted 等）不解密、不进材料。容量门禁、指纹与 prepared 快照全按该投影口径。业务 JSON（工具入参/结果）里的同名键不扫描、不误报——载荷识别只认规范消息块与协议元数据。
+- **压缩后主模型回放（B）**：只扫保留尾部（removed 已被摘要替换，不因其签名阻断会话）。按协议适配层三态裁决：`unsupported` 拒绝并报 `compact.replay_prefix_incompatible`（阶段、模型、范围点名）；`unknown`（当前生产装配的缺省——方言只声明"签名必须随块回传"的义务，未声明前缀替换后仍有效）放行，保留尾部按原样保真回放并在结果与 notes 如实标注未经证实，不报成已确认不兼容；`supported` 放行并记已证实。裁决入 `model.request.prepared` 快照（`replaySupport`/`retainedPrefixBoundPayload`），dry-run 与实跑共用同一判定。
+
+范围替换会改请求前缀，不能据此保证服务端缓存命中。
 
 采用顺序(§4.8,写死):锁上下文提交口 -> 核对源版本 -> 预构造新内存视图并验预算 -> 摘要与引用落稳 -> `compact.applied` 按 PowerLoss 档落稳 -> 发布预构造内存视图 -> 放锁。
 

@@ -32,12 +32,16 @@ std::uint64_t EstimateUtf8Div4(std::string_view utf8) {
     return (static_cast<std::uint64_t>(utf8.size()) + 3) / 4;
 }
 
-std::uint64_t EstimateMessageTokens(const MessageLine& line) {
-    const auto canonical = trajectory::CanonicalJsonDump(line.message);
+std::uint64_t EstimateJsonMessageTokens(const nlohmann::json& message) {
+    const auto canonical = trajectory::CanonicalJsonDump(message);
     if (!canonical.has_value()) {
         return 0;
     }
     return EstimateUtf8Div4(*canonical);
+}
+
+std::uint64_t EstimateMessageTokens(const MessageLine& line) {
+    return EstimateJsonMessageTokens(line.message);
 }
 
 std::size_t CountUtf8Chars(std::string_view text) {
@@ -220,26 +224,101 @@ struct ScopePlan {
     }
 };
 
-// Opaque/signed thinking cannot be transplanted across a changed prefix
-// without an adapter-specific proof. Fail closed until that proof is supplied.
-// The production persistence path never writes these fields today (thinking
-// blocks keep type/text only, signatures are dropped), so this stays a
-// conservative front line for future faithful writers; a real adapter-level
-// check of whether the target model requires prefix-consistent signatures is
-// not wired yet.
-bool HasPrefixBoundPayload(const nlohmann::json& value) {
-    if (value.is_object()) {
-        for (auto it = value.begin(); it != value.end(); ++it) {
-            if ((it.key() == "signature" || it.key() == "encrypted_content") &&
-                !it.value().is_null() && it.value() != "") return true;
-            if (it.key() == "type" && (it.value() == "redacted_thinking" ||
-                it.value() == "reasoning.encrypted")) return true;
-            if (HasPrefixBoundPayload(it.value())) return true;
-        }
-    } else if (value.is_array()) {
-        for (const auto& item : value) if (HasPrefixBoundPayload(item)) return true;
+// ---------------------------------------------------------------------------
+// 签名/加密思考载荷:规范块的"看见"层(A/B 两道检查共用)
+// ---------------------------------------------------------------------------
+//
+// 写侧早已保真保存 thinking 的 signature/responses_item
+//(trajectory_session.cpp 的主桥/旁路桥/v2 投影三处),恢复侧也读回。旧压缩
+// 门禁按 JSON 键名递归扫全链、见着就一刀切拒——工具参数里的普通
+// signature 字段也被误报,且不分材料投影与主模型回放两个阶段。这里换成
+// 只认规范消息块与协议元数据:content 块数组(§4.42)里 type=="thinking"
+// 的块的 signature / responses_item,以及不透明思考块(redacted_thinking /
+// reasoning.encrypted;现写侧不落,防御性认)。业务 JSON(工具入参/结果)
+// 里的同名键不递归、不误报,空串/空值同样不算。
+
+struct CanonicalThinkingPayload {
+    int signed_thinking = 0;  // thinking.signature 非空(anthropic 签名/gemini thoughtSignature 中立层同位)
+    int native_items = 0;     // thinking.responses_item 非 null(Responses 原生 reasoning item)
+    int opaque_blocks = 0;    // redacted_thinking / reasoning.encrypted 一类不透明块
+
+    void Add(const CanonicalThinkingPayload& other) {
+        signed_thinking += other.signed_thinking;
+        native_items += other.native_items;
+        opaque_blocks += other.opaque_blocks;
     }
-    return false;
+    bool Any() const { return signed_thinking > 0 || native_items > 0 || opaque_blocks > 0; }
+    int Total() const { return signed_thinking + native_items + opaque_blocks; }
+};
+
+CanonicalThinkingPayload ScanCanonicalThinkingPayload(const nlohmann::json& message) {
+    CanonicalThinkingPayload payload;
+    const auto content_it = message.find("content");
+    if (content_it == message.end() || !content_it->is_array()) {
+        return payload;  // 纯文本 content:没有规范块数组可扫
+    }
+    for (const auto& part : *content_it) {
+        if (!part.is_object()) {
+            continue;
+        }
+        const std::string type = part.value("type", std::string());
+        if (type == "thinking") {
+            const auto signature_it = part.find("signature");
+            if (signature_it != part.end() && signature_it->is_string() &&
+                !signature_it->get<std::string>().empty()) {
+                ++payload.signed_thinking;
+            }
+            const auto item_it = part.find("responses_item");
+            if (item_it != part.end() && !item_it->is_null() && item_it->is_object()) {
+                ++payload.native_items;
+            }
+        } else if (type == "redacted_thinking" || type == "reasoning.encrypted") {
+            ++payload.opaque_blocks;
+        }
+    }
+    return payload;
+}
+
+// A 阶段投影:账本消息 → 摘要请求的材料视图。规范 thinking 块的协议载荷
+// (signature/responses_item)不出网——旧签名跨模型重放会被服务端拒,也不
+// 许伪装成摘要模型的新思考;可读思考正文按普通文本材料保留(标明来源,
+// 历史文本不冒充摘要指令),不透明块不解密、不猜内容、不进材料。只建
+// 视图,原始账本一字不动:不删签名、不改加密字节、不伪造 item id。
+nlohmann::json BuildCompactMaterialView(const nlohmann::json& message) {
+    const auto content_it = message.find("content");
+    if (content_it == message.end() || !content_it->is_array()) {
+        return message;
+    }
+    nlohmann::json projected = message;
+    nlohmann::json content = nlohmann::json::array();
+    bool changed = false;
+    for (const auto& part : *content_it) {
+        if (part.is_object()) {
+            const std::string type = part.value("type", std::string());
+            if (type == "thinking") {
+                changed = true;
+                std::string text;
+                if (const auto text_it = part.find("text");
+                    text_it != part.end() && text_it->is_string()) {
+                    text = text_it->get<std::string>();
+                }
+                if (!NormalizeWhitespace(text).empty()) {
+                    content.push_back(
+                        nlohmann::json{{"type", "text"}, {"text", "[历史思考记录]\n" + text}});
+                }
+                continue;
+            }
+            if (type == "redacted_thinking" || type == "reasoning.encrypted") {
+                changed = true;  // 不透明载荷:材料里没有它的一席,不编内容
+                continue;
+            }
+        }
+        content.push_back(part);
+    }
+    if (changed) {
+        projected["content"] = std::move(content);
+    }
+    return projected;
 }
 
 // 折叠状态是否已收口(未收口的 turn 整轮保护,§4.8"工具配对"行)。
@@ -650,18 +729,25 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return ids;
     };
 
+    // A 阶段投影的唯一取用口:估算、指纹、prepared 与实发材料全吃这份
+    // 视图——容量门禁必须按最终发送视图估,不许旧材料算预算、新材料
+    // 上网。material_ids 只回链上已验过的 id,这里不再判空。
+    const auto material_view = [&](const std::string& id) {
+        return BuildCompactMaterialView(ledger.FindMessage(id)->message);
+    };
+
     const auto estimate_input = [&](const ScopePlan& current, bool reference_included,
                                     const std::string& instruction) {
         std::uint64_t tokens = system_tokens + EstimateUtf8Div4(instruction);
         for (const auto& id : material_ids(current, reference_included))
-            tokens += EstimateMessageTokens(*ledger.FindMessage(id));
+            tokens += EstimateJsonMessageTokens(material_view(id));
         return tokens;
     };
 
     // P1-C(compact 旁路请求切槽):估算经宿主 PreRequest/estimate 槽位。
-    // 快照口径与主线请求同一 scope(system + 有序材料 + 指令);槽失败即
-    // 压缩收口(fail closed),不回落内置公式假装核过。input.estimate 为
-    // 空 = 旧路,一字不变。
+    // 快照口径与主线请求同一 scope(system + 有序材料 + 指令),材料按
+    // A 投影视图给;槽失败即压缩收口(fail closed),不回落内置公式假装
+    // 核过。input.estimate 为空 = 旧路(公式同吃投影),一字不差。
     const auto estimate_input_via_slot = [&](const ScopePlan& current, bool reference_included,
                                              const std::string& instruction)
         -> std::expected<std::uint64_t, std::string> {
@@ -672,7 +758,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         snapshot["system"] = special_system;
         nlohmann::json messages = nlohmann::json::array();
         for (const auto& id : material_ids(current, reference_included))
-            messages.push_back(ledger.FindMessage(id)->message);
+            messages.push_back(material_view(id));
         snapshot["messages"] = std::move(messages);
         snapshot["instruction"] = instruction;
         auto estimated = input.estimate(snapshot);
@@ -845,17 +931,69 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         if (steps.empty()) plan.step_scope = nlohmann::json::object();
         else plan.step_scope["stepIds"] = steps;
     };
-    const auto has_prefix_bound = [&]() {
-        for (const auto* line : chain_messages) {
-            if (HasPrefixBoundPayload(line->message)) {
-                return true;
+    // ---- 签名/加密思考载荷的两道检查(修复合同:A 材料 / B 回放)----
+    // A(摘要材料):removed 只进 BuildCompactMaterialView 的投影——签名/
+    // 原生 item 不出网,可读正文按普通材料。投影不拒绝,材料天然安全;
+    // removed 里的载荷不阻断整个会话。
+    // B(压缩后主模型回放):扫保留尾部(不是全链——removed 已变摘要),
+    // 按适配层三态裁决:Unsupported 拒绝并报阶段/模型;Unknown 放行保真
+    // 回放并如实标注(不报成已确认不兼容);Supported 放行记已证实。
+    // 必须在回退定界之后调用:回退移动过块,retained 以最终计划为准。
+    const auto decide_payload_replay = [&]() -> bool {
+        CanonicalThinkingPayload removed_payload;
+        for (const auto& block : plan.removed) {
+            for (const auto* message : block.messages) {
+                removed_payload.Add(ScanCanonicalThinkingPayload(message->message));
             }
         }
-        return false;
+        CanonicalThinkingPayload retained_payload;
+        for (const auto& block : plan.retained) {
+            for (const auto* message : block.messages) {
+                retained_payload.Add(ScanCanonicalThinkingPayload(message->message));
+            }
+        }
+        result.retained_prefix_bound_payload = retained_payload.Any();
+        result.replay_support = input.replay_support;
+        if (removed_payload.Any()) {
+            result.notes.push_back(
+                "compact.material.payload_projected: 可压范围含 " +
+                std::to_string(removed_payload.Total()) +
+                " 枚签名/加密思考块,摘要材料按普通文本投影,签名与原生 item 不出网");
+        }
+        if (!retained_payload.Any()) {
+            return true;
+        }
+        const std::string identity =
+            (profile.main_provider.empty() && profile.main_wire.empty() && profile.main_model.empty())
+                ? std::string("身份未声明")
+                : profile.main_provider + "/" + profile.main_wire + "/" + profile.main_model;
+        switch (input.replay_support) {
+            case V3CompactReplaySupport::Unsupported:
+                finish_rejected("compact.replay_prefix_incompatible");
+                result.notes.push_back(
+                    "保留尾部含 " + std::to_string(retained_payload.Total()) +
+                    " 枚签名/加密思考块;协议适配层声明主模型 " + identity +
+                    " 不能在拟议前缀下回放——拒绝在压缩后续接阶段(摘要+保留尾部)");
+                return false;
+            case V3CompactReplaySupport::Supported:
+                result.notes.push_back(
+                    "compact.replay.verified: 保留尾部含 " + std::to_string(retained_payload.Total()) +
+                    " 枚签名/加密思考块,协议适配层证实主模型 " + identity + " 可在拟议前缀下原样回放");
+                return true;
+            case V3CompactReplaySupport::Unknown:
+                break;
+        }
+        result.notes.push_back(
+            "compact.replay.unverified: 保留尾部含 " + std::to_string(retained_payload.Total()) +
+            " 枚签名/加密思考块;主模型 " + identity +
+            " 的拟议前缀回放兼容性未经协议适配层证实——按原样保真回放"
+            "(签名/加密字节不动),不判为不兼容");
+        return true;
     };
 
     // ---- T12-B 干跑:同一副牌只算不压,到此收场——不开场、不落任何
-    // 事件、不发模型;门禁回退按同一只梯子模拟。 ----
+    // 事件、不发模型;门禁回退与签名/加密载荷的兼容决策按同一只梯子
+    // 模拟(dry-run 输出与实跑同一份决策)。 ----
     if (input.dry_run) {
         if (plan.removed.empty()) {
             finish_rejected("no_eligible_history");  // 干跑无 session:只填结果字段
@@ -865,10 +1003,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         const auto gate = run_capacity_gate(/*write_events=*/false);
         if (gate.passed) {
             fixup_step_scope();
-            if (has_prefix_bound()) {
-                finish_rejected("compact.signature_prefix_incompatible");
-                result.notes.push_back("链上有带签名/加密载荷的 thinking 块,真压会按前缀不兼容拒收");
-            } else {
+            if (decide_payload_replay()) {
                 result.terminal_kind = "dry_run";
             }
         }
@@ -896,9 +1031,8 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         return result;
     }
     fixup_step_scope();
-    if (has_prefix_bound()) {
-        finish_rejected("compact.signature_prefix_incompatible");
-        return result;
+    if (!decide_payload_replay()) {
+        return result;  // B 阶段拒绝:compact.failed 已落账,链一字未动
     }
     const std::string instruction = build_instruction(plan, reference_included);
 
@@ -947,12 +1081,17 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
          {"outputReserveTokens", profile.compact_output_reserve_tokens},
          {"windowTokens", gate_active ? nlohmann::json(profile.compact_window_tokens)
                                       : nlohmann::json(nullptr)},
-         {"estimatedInputTokens", *prepared_tokens}});
+         {"estimatedInputTokens", *prepared_tokens},
+         // 材料视图与回放裁决入账:指纹吃投影、决策可追溯,dry-run/实跑/
+         // resume 对得上同一份口径。
+         {"materialView", "compact-material-projection-v1"},
+         {"replaySupport", V3CompactReplaySupportName(input.replay_support)},
+         {"retainedPrefixBoundPayload", result.retained_prefix_bound_payload}});
     nlohmann::json fingerprint_messages = nlohmann::json::array();
     for (const auto& id : input_ids) {
         if (id == prompt_receipt.id)
             fingerprint_messages.push_back({{"role", "user"}, {"content", instruction}});
-        else fingerprint_messages.push_back(ledger.FindMessage(id)->message);
+        else fingerprint_messages.push_back(material_view(id));
     }
     const auto fingerprint_source = trajectory::CanonicalJsonDump(nlohmann::json{
         {"system", special_system}, {"messages", fingerprint_messages},
@@ -1000,7 +1139,8 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     }
 
     // ---- 6. 发给压缩模型;收回复按 assistant 留档(候选,§4.5 行 5)。
-    // 无正文/失败不造空 assistant;截断候选标 truncated 不 applied。 ----
+    // 无正文/失败不造空 assistant;截断候选标 truncated 不 applied。材料按
+    // A 投影视图发(签名/原生 item 不出网)。 ----
     std::vector<nlohmann::json> material;
     material.reserve(input_ids.size());
     for (const auto& id : input_ids) {
@@ -1013,7 +1153,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
             finish_failed("compact.material_missing: " + id);
             return result;
         }
-        material.push_back(line->message);
+        material.push_back(BuildCompactMaterialView(line->message));
     }
     ++result.model_calls;
     const V3CompactModelReply reply = client.Send(special_system, material);

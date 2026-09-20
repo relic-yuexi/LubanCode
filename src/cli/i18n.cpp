@@ -1477,6 +1477,13 @@ const Entry kZhCN[] = {
     {"cmd.compact.failed", "压缩失败: {0}"},
     {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens(统一估算口径)"},
     {"cmd.compact.window_unknown", "(压缩模型窗口未知,本次未做窗口校验)"},
+    // ---- 签名/加密思考载荷的回放决策(干跑与实跑同一份判定)----
+    {"cmd.compact.replay_note_supported",
+     "(保留尾部含签名/加密思考块:协议适配层已证实可在压缩后的前缀下回放)"},
+    {"cmd.compact.replay_note_unknown",
+     "(保留尾部含签名/加密思考块:回放兼容性未经协议适配层证实,按原样保真回放,签名与加密字节不动)"},
+    {"cmd.compact.replay_note_unsupported",
+     "(保留尾部含签名/加密思考块:协议适配层声明不可在压缩后的前缀下回放,真压会被拒)"},
     {"cmd.compact.hierarchical", "历史装不进单次压缩:按任务阶段分了 {0} 块(map)归并成终稿(reduce 轮次 {1})。"},
     {"cmd.compact.manifest", "manifest 守恒校验通过:约束 {0} 条 / 待办 {1} 条"},
     {"cmd.compact.dryrun.header", "/compact --dry-run:只算不动手,历史与请求都没改。"},
@@ -3772,6 +3779,13 @@ const Entry kEn[] = {
 
     // ---- compact (0.27.x): new layered-compaction keys, zh+en paired ----
     {"cmd.compact.window_unknown", "(compact model window unknown; no window check was performed this time)"},
+    // ---- replay verdicts for signed/encrypted thinking payloads (dry-run and real run share one verdict) ----
+    {"cmd.compact.replay_note_supported",
+     "(retained tail carries signed/encrypted thinking blocks: protocol adapter verified they replay under the post-compact prefix)"},
+    {"cmd.compact.replay_note_unknown",
+     "(retained tail carries signed/encrypted thinking blocks: replay compatibility unverified by the protocol adapter; replayed verbatim, signatures and encrypted bytes untouched)"},
+    {"cmd.compact.replay_note_unsupported",
+     "(retained tail carries signed/encrypted thinking blocks: protocol adapter declares them non-replayable under the post-compact prefix; a real run will be refused)"},
     {"cmd.compact.hierarchical", "History exceeded a single compact request: split into {0} episode chunks (map) and merged into the final summary (reduce passes: {1})."},
     {"cmd.compact.manifest", "manifest conservation check passed: {0} constraints / {1} open items"},
     {"cmd.compact.dryrun.header", "/compact --dry-run: calculation only; history and requests untouched."},

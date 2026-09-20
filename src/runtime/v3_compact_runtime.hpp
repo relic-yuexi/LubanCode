@@ -64,11 +64,44 @@ struct V3CompactModelReply {
 class V3CompactModelClient {
 public:
     virtual ~V3CompactModelClient() = default;
-    // system:压缩专用 system 正文;messages:材料消息(role/content 原样,
-    // 链序)+ 末尾一条压缩指令。同步;永不抛。
+    // system:压缩专用 system 正文;messages:摘要材料投影视图(
+    // BuildCompactMaterialView 的产出,链序)+ 末尾一条压缩指令。视图里
+    // 规范 thinking 块的 signature/responses_item 与不透明思考块已剥离:
+    // 可读思考正文按普通文本材料重放,不冒充摘要模型的新思考。适配端只读
+    // 视图,不回写账本——原始消息一字不动。同步;永不抛。
     virtual V3CompactModelReply Send(const std::string& system,
                                      const std::vector<nlohmann::json>& messages) = 0;
 };
+
+// ---------------------------------------------------------------------------
+// B 阶段(压缩后主模型回放)兼容裁决三态
+// ---------------------------------------------------------------------------
+
+// "摘要 + 保留尾部"换掉前缀后,保留尾部里的签名/加密 reasoning/原生 item
+// 能否继续回放,由协议适配层(方言/能力声明)裁决;本运行时不按模型名猜,
+// 也不把未声明报成已确认不兼容。三态:
+//   Unsupported——适配层明证不可回放:拒绝压缩(阶段 B),报模型与范围;
+//   Unknown——能力未声明(当前生产装配的缺省):放行,保留尾部按原样
+//             保真回放(签名/加密字节不动),结果与 notes 如实标注未证实;
+//   Supported——适配层明证可回放:放行,notes 记已证实。
+enum class V3CompactReplaySupport {
+    Unsupported,
+    Unknown,
+    Supported,
+};
+
+// 三态的账面名(prepared 快照/结果/诊断共用;测试与接线可对表)。
+inline const char* V3CompactReplaySupportName(V3CompactReplaySupport support) {
+    switch (support) {
+        case V3CompactReplaySupport::Supported:
+            return "supported";
+        case V3CompactReplaySupport::Unsupported:
+            return "unsupported";
+        case V3CompactReplaySupport::Unknown:
+            break;
+    }
+    return "unknown";
+}
 
 // ---------------------------------------------------------------------------
 // 容量与策略(§4.40/§4.64)
@@ -94,6 +127,12 @@ struct V3CompactProfile {
     std::string provider;
     std::string wire;
     std::string model;
+    // 主模型身份(B 阶段回放判定的报错/诊断点名用;空 = 调用方未给,
+    // 诊断降级为不点名,不猜)。B 阶段回放的是"摘要+保留尾部"续接,
+    // 责任模型是主模型,不是压缩路由。
+    std::string main_provider;
+    std::string main_wire;
+    std::string main_model;
     // 估算口径名(进 tokenMetric 与回退事件)。
     std::string estimator = "utf8_bytes_div4";
 };
@@ -146,6 +185,14 @@ struct V3CompactRunInput {
     // 这里)。结果只报结构可回收量与门禁数字,不编造摘要实际 token
     //(tokens_after 恒 0)。
     bool dry_run = false;
+
+    // B 阶段(压缩后主模型回放)的兼容裁决来源:协议适配层对"签名/加密
+    // reasoning/原生 item 在拟议前缀下能否原样回放"的声明。默认 Unknown
+    // ——当前生产装配没有已接线的适配层证据(方言只声明"签名必须随块
+    // 回传"的义务,不声明"前缀替换后仍有效"),拿不到就如实交未知,
+    // 不按模型名猜,也不把未知报成已确认不兼容。接线层将来接通方言/
+    // 能力真证时在此填写。
+    V3CompactReplaySupport replay_support = V3CompactReplaySupport::Unknown;
 };
 
 struct V3CompactRunResult {
@@ -157,7 +204,9 @@ struct V3CompactRunResult {
     std::string terminal_kind;
     // 终态 reason(拒绝/失败的稳定码:validation_failed / no_eligible_
     // history / input_capacity_exceeded / retreat_budget_exhausted /
-    // source_conflict / provider_error / empty_compact_response / …)
+    // source_conflict / provider_error / empty_compact_response /
+    // compact.replay_prefix_incompatible(保留尾部含签名/加密载荷且适配层
+    // 明证不可回放)/ …)
     std::string reason;
     // 同一口径(bytes/4)的前后上下文数字;applied 时即 applied 事件里的
     // contextTokensBefore/After(显示侧压缩分界线吃这两枚,§4.11)。
@@ -181,6 +230,14 @@ struct V3CompactRunResult {
     std::uint64_t estimated_input_tokens = 0;  // 门禁最后一算(含回退后;真跑也填);无门禁 = 0
     std::uint64_t gate_budget_tokens = 0;      // Cc-Oc-Mc(真跑也填);无门禁 = 0
     bool fits_budget = false;                  // 估算输入装得下预算(含回退后)
+
+    // ---- 签名/加密思考载荷的兼容决策面(P0 诊断;dry-run 与实跑同填,
+    // 与窗口未知是两笔账)----
+    // 保留尾部(压缩后主模型续接的部分)是否含签名/加密思考载荷——只认
+    // 规范消息块与协议元数据,业务 JSON 里的同名键不误报。
+    bool retained_prefix_bound_payload = false;
+    // 本次 B 阶段判定依据的三态裁决(入参透传,决策来源可追溯)。
+    V3CompactReplaySupport replay_support = V3CompactReplaySupport::Unknown;
 };
 
 // ---------------------------------------------------------------------------
