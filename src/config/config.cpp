@@ -417,6 +417,38 @@ void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider
     config.active_provider = provider.name;
 }
 
+std::string ProviderConnectionFingerprint(const ProviderConfig& provider) {
+    // 口径 = ApplyProviderToRuntimeConfig 的字段集 + 解析后的鉴权值:展开
+    // 会改到什么,指纹就认什么。key_env/api_key 不按原文单列,只认
+    // ResolveProviderAuth 折出来的实际生效那把——换变量名而生效值没变,
+    // 后端行为没变,不该动缓存。
+    const ProviderAuthResolution auth = ResolveProviderAuth(provider);
+    nlohmann::json fingerprint = nlohmann::json::object();
+    fingerprint["wire"] = static_cast<int>(provider.wire);
+    fingerprint["base_url"] = provider.base_url;
+    fingerprint["auth_mode"] = static_cast<int>(provider.auth);
+    fingerprint["auth_key"] =
+        auth.status == ProviderAuthResolution::Status::Ready ? *auth.key : std::string();
+    fingerprint["model"] = provider.model;
+    fingerprint["context_window_tokens"] = provider.context_window_tokens;
+    fingerprint["native_web_search"] = provider.native_web_search;
+    fingerprint["stream_usage"] = provider.stream_usage;
+    fingerprint["stream_usage_declared"] = provider.stream_usage_declared;
+    fingerprint["reasoning_replay"] = provider.reasoning_replay;
+    fingerprint["reasoning_delta_field"] = provider.reasoning_delta_field;
+    fingerprint["reasoning_replay_field"] = provider.reasoning_replay_field;
+    fingerprint["extra_body"] = provider.extra_body;
+    fingerprint["extra_headers"] = provider.extra_headers;
+    fingerprint["supported_think_levels"] = provider.supported_think_levels;
+    fingerprint["think_param"] = provider.think_param;
+    fingerprint["think_passthrough"] = provider.think_passthrough;
+    fingerprint["metrics_url"] = provider.metrics_url;
+    fingerprint["max_output_tokens"] = provider.max_output_tokens.has_value()
+                                           ? nlohmann::json(*provider.max_output_tokens)
+                                           : nlohmann::json(nullptr);
+    return fingerprint.dump();
+}
+
 bool ApplyConfiguredActiveProvider(ConfigResult& result) {
     if (result.config.active_provider.empty()) {
         return false;

@@ -99,9 +99,6 @@ public:
     lubancode::agent::ModelUsageLedger& ledger() const { return ledger_; }
 
 private:
-    // 把目标 provider 展开成可直接交 BuildBackend 的运行配置。同步缓存
-    // 与独占请求共用这一口,鉴权/header/reasoning 字段不走岔。
-    std::optional<lubancode::config::Config> ConfigForProvider(const std::string& provider) const;
     // 跨 provider 的裸 client 缓存。mutable:Route 逻辑上只读,缓存是实现
     // 细节;同步小活仍只在主线程用。会并行或嵌套发出的任务须走
     // RouteDetached,不许借这份缓存并发或重入发请求。
@@ -113,7 +110,18 @@ private:
     // 引用会话的活跃端名:/provider switch 改的就是那块内存,路由表下一
     // 次 Route() 现读现折,不会拿旧端名建 backend。
     const std::string& active_provider_;
-    mutable std::map<std::string, std::unique_ptr<lubancode::api::Backend>> provider_backends_;
+    // 缓存条目 = 建缓存时的连接指纹 + client。惰性失效(HC-01):每次
+    // 命中前先重查条目并比指纹,目标被编辑或删除就地弃缓存。client 用
+    // shared_ptr 存:失效换槽时,旧 client 活到最后一枚引用松手——当前
+    // Route() 只在主线程回合边界同步用(换槽即销毁无碍),将来若把
+    // Routed 的借用指针升级成强引用,在途请求天然持旧端;worker/嵌套
+    // 一律 RouteDetached 独占,不碰这份缓存——主后端(会话壳)与
+    // detached 后端寿命不同的合同不变。
+    struct ProviderBackendEntry {
+        std::string fingerprint;
+        std::shared_ptr<lubancode::api::Backend> backend;
+    };
+    mutable std::map<std::string, ProviderBackendEntry> provider_backends_;
     mutable lubancode::agent::ModelUsageLedger ledger_;
 };
 
@@ -122,6 +130,17 @@ private:
 // 来源句写明哪一级;两级都没配的留空 spec(走回退链)。纯函数,单测钉
 // 优先级与来源。
 std::vector<lubancode::agent::ModelRoleSpec> BuildRoleSpecs(const lubancode::config::ConfigResult& config_result);
+
+// HC-01(Provider 展开收口):把"基础运行配置 + 目标 provider 名"折成
+// BuildBackend 可直接吃的派生配置。目标为空或即活跃端 → 原样副本(活跃
+// 配置已是 ApplyConfiguredActiveProvider 展开过的);跨端 → 走
+// config::ApplyProviderToRuntimeConfig 显式展开口,连接与能力字段逐项
+// 来自目标条目,超时这类非连接全局项按原规则继承;找不到条目 →
+// nullopt。Route 的同步缓存与 RouteDetached 的独占后端共用这一口,鉴权/
+// header/能力字段不走岔。纯函数,单测钉字段口径。
+std::optional<lubancode::config::Config> DeriveProviderRuntimeConfig(lubancode::config::Config base,
+                                                                    const std::string& provider,
+                                                                    const std::string& active_provider);
 
 // /model roles 的短表(纯函数,单测钉格式):一行一角色,列 = 角色/
 // provider/model/effort/来源。回落的角色来源列写"回落到 normal(...)",
