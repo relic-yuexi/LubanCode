@@ -335,6 +335,7 @@ public:
     // memory.extraction.assessed。
     void FinishTurn(std::int64_t foreground_tail_ms);
     // ---- 悬账(回合总结异步化单:门过起飞的回合,收口不等网络) ----
+    struct ExtractOutcome;  // 嵌套类型后文才完整定义,悬账口先用(clang 严)
     // 收口悬账:回合账(state_ 与门决策)留着,轮号记进悬账槽;turn 关
     // (写路回执不再挂轮号,对齐 FinishTurn 的回合间口径)。迟到收账
     //(SettleSuspendedTurn)补 outcome 落袋;下一轮 BeginTurn 先到,悬账
