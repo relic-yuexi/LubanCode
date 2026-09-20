@@ -209,6 +209,10 @@ Workspace 统一存储（v2）落地后的升级语义，随包发布时照此�
 
 ## 12. 常见构建故障
 
+Windows `install.ps1` 按新包清单中的具体文件路径覆盖：程序、README、LICENSE、声明、安装脚本，以及 `docs/`、`libexec/`、`licenses/`、`skills/`、`updater/`、`web/` 内的包内文件。同名文件先备份再替换，内容相同则跳过。目录只合并，新包没带的文件一律保留，包括用户自建技能和旧版遗留文件。无需旧版清单，也不联网下载旧包。
+
+`config.toml`、`.env`、`.lubancode/` 与 `.agents/` 不参与覆盖，即使包清单误收也不写不删。新包覆盖路径内若有自行修改，原件先存入安装目录的 `backups/`。`-Scan` 可预览文件计划；`-Baseline`、`-AllowUnknownReplace` 只兼容旧调用，不再触发整目录替换。`manifest.json` 与 `install-state.json` 由安装器更新记账。
+
 | 现象 | 先查 |
 | --- | --- |
 | configure 卡在下载 | 网络、`LUBANCODE_USE_CODELOAD`、vcpkg toolchain |
