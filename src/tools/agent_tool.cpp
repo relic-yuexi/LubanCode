@@ -3499,8 +3499,8 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
             task_outcome.reason = TaskOutcomeReason::UserStop;
             task_outcome.message = "用户中止了这只子代理";
             task_outcome.partial_result = partial;
-            run_result = text.empty() ? Result{ComposeOutcomeText(task_outcome), true}
-                                      : Result{text + "\n" + ComposeOutcomeText(task_outcome), false};
+            run_result = text.empty() ? Tool::Result{ComposeOutcomeText(task_outcome), true}
+                                      : Tool::Result{text + "\n" + ComposeOutcomeText(task_outcome), false};
             break;
         case agent::TurnVerdict::Reason::StepLimit:
             task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
