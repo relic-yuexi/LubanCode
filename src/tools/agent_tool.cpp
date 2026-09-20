@@ -831,7 +831,7 @@ AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::str
         if (request.env != nullptr && request.env->run_state != nullptr) {
             return ExecuteAgentDispatchOnRunState(request, request.env->run_state, request.fail_account);
         }
-        std::lock_guard<std::mutex> lock(route->mutex);
+        std::lock_guard<std::recursive_mutex> lock(route->mutex);
         if (route->facade == nullptr) {
             return {"会话的子代理派工口已收场,本次调用不再执行。请在新的会话里重新派工。", true};
         }
@@ -849,7 +849,7 @@ AgentTool::~AgentTool() {
     // 线程退出回执有界收口(见 JoinAllBounded 注释)——等不到回执就 detach,
     // worker 闭包自持冻结 run_state,晚归不悬垂。
     {
-        std::lock_guard<std::mutex> lock(engine_route_->mutex);
+        std::lock_guard<std::recursive_mutex> lock(engine_route_->mutex);
         engine_route_->facade = nullptr;
     }
     coordinator_->ClearFacadeTool();
