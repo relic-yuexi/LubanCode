@@ -434,6 +434,61 @@ void TerminalSessionController::DrainFinishedTitleRefinement() {
     peer_wiring_.SetName(session_title);
 }
 
+// ---- 记忆回合总结的异步编排(回合总结异步化单) --------------------------
+//
+// 发货点(前台):前置门 + 起飞,任何一步都不碰网络等待。门拦/让位/路由
+// 落空的回合,账已在前台记完,FinishTurn 即刻落袋;Dispatched 的回合账
+// 悬起(SuspendTurn),迟到收账时补 outcome 落袋。
+void TerminalSessionController::DispatchTurnMemory(
+    const std::string& content, std::size_t history_before, const std::string& turn_id,
+    std::chrono::steady_clock::time_point tail_started) {
+    memory_tail_started_ = tail_started;
+    lubancode::app::SessionTailContext tail = MakeTailContext();
+    tail.turn_id = turn_id;  // 轮号随回合变,材料包之外的唯一活参
+    const auto dispatch = lubancode::app::ExtractTurnMemory(tail, content, history_before);
+    if (dispatch == lubancode::app::TurnMemoryDispatch::Dispatched) {
+        memory_turns_.SuspendTurn();  // 悬账:迟到收账补 outcome 落袋
+        return;
+    }
+    memory_turns_.FinishTurn(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - memory_tail_started_)
+                                 .count());
+}
+
+// 只读:有完工的抽取结果待收(空闲唤醒的 ready 条件;运行中不醒)。
+bool TerminalSessionController::HasFinishedTurnMemory() {
+    return memory_extractor_.Ready();
+}
+
+// 收货点(非阻塞):完工的结果记 usage(分角色台账;context_tracker 一个
+// 字不碰——抽取采样不混主会话 context 占用)、过世代门、对档落袋入队。
+// 换代弃旧账:起飞时的世代对不上当前——迟到结果一票不落新场(候选/
+// 检索词/回合台账全弃),悬账清掉不落盘;usage 照记,token 是真花了的。
+void TerminalSessionController::DrainFinishedTurnMemory() {
+    std::optional<lubancode::app::TurnMemoryExtractor::Outcome> outcome =
+        memory_extractor_.TakeFinished();
+    if (!outcome.has_value()) {
+        return;
+    }
+    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
+                                  outcome->accounting.usage, outcome->accounting.duration_ms,
+                                  outcome->accounting.usage_reported);
+    if (outcome->session_generation != view_registry_.session_generation()) {
+        // 换代(/clear、/resume)后的迟到:旧场的回合账不写进新场的卷里,
+        // 宁缺毋滥(世代拒旧账,先例:审批 DenyStaleGenerations、标题精炼
+        // 换代弃迟到)。
+        memory_turns_.AbandonSuspendedTurn();
+        return;
+    }
+    lubancode::app::SessionTailContext tail = MakeTailContext();
+    tail.turn_id = outcome->turn_id;
+    const std::int64_t tail_wall_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                              memory_tail_started_)
+            .count();
+    lubancode::app::SettleTurnMemory(tail, *outcome, tail_wall_ms);
+}
+
 // (T17/V3-ADD-03:OpenArtifactStore——旧 ContextArtifactStore 的开仓口——已删;
 // v3 会话的工具结果原文由 ResultStore 在提交边界落档(trajectory/v3/
 // result_store),v2 会话超长结果退回内存全文照旧发送,不再落第二套仓。)
@@ -770,6 +825,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
         // 全局通知区清板(旧会话的系统侧提醒不带到新会话的屏上)。
         lubancode::cli::SessionApprovalChannel().DenyStaleGenerations(view_registry_.session_generation());
         lubancode::cli::SessionGlobalNotices().Clear();
+        // 回合总结异步化单:换代弃旧账——取消在飞的抽取(在途采样别再烧
+        // token),悬账清掉;真迟到了也过不了收货点的世代门(usage 照记,
+        // 候选/台账一票不落新场)。
+        memory_extractor_.RequestCancel();
+        memory_turns_.AbandonSuspendedTurn();
     }
     return flow;
 }
@@ -1140,7 +1200,8 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         }
     }
     // 记忆写入调度单 P0(§10.3):前台尾延迟的起点——回合收尾(RunTurn
-    // 返回)到抽取返回的墙钟,量完在抽取调用后交给账本。
+    // 返回)到抽取终态的墙钟(回合总结异步化后口径并档:门拦回合 = 前台
+    // 门的耗时,门过回合 = 收口到迟到收账完成),量完交给账本。
     const auto memory_tail_started =
         is_user_turn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (is_user_turn) {
@@ -1174,13 +1235,12 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         }
         // (会话起名原先也在这收尾处同步等 cheap——实测问题 7 后搬到发轮
         // 前:首问建档当场起本地标题,精炼异步跑,轮末这条路不碰标题。)
-        // 回合收尾总结与候选抽取(learn off 时是空操作)。
-        lubancode::app::ExtractTurnMemory(MakeTailContext(), content, history_before);
-        // 记忆写入调度单 P0:回合账落袋(前台尾延迟 + 决策/Token/漏斗;
-        // trajectory 在场时落 memory.extraction.assessed)。
-        memory_turns_.FinishTurn(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::steady_clock::now() - memory_tail_started)
-                                     .count());
+        // 回合收尾总结与候选抽取(learn off 时是空操作):前置门留前台
+        //(纯本地、微秒级),门过即后台起飞——收口即刻还输入框,不再
+        // 同步等 cheap 路由的网络往返(learn 开着的每一场都卡,同一病症
+        // 的先例就是上面的会话起名)。Dispatched 的回合账悬起,迟到收账
+        // 在空闲拍(DrainFinishedTurnMemory)。
+        DispatchTurnMemory(content, history_before, trace_turn_id, memory_tail_started);
     }
     // 排队账快照落档(路径二):轮内可能进过队/边界注入送走过,趁收尾把
     // 最新一份快照追进存档,/exit 或崩掉后 resume 接得回来。
@@ -1299,6 +1359,10 @@ void TerminalSessionController::Run() {
         // 再收。
         StartPendingTitleRefinementAfterTurn();
         DrainFinishedTitleRefinement();
+        // 记忆回合总结的迟到收账(回合总结异步化单):后台抽取完工(成功/
+        // 失败/取消都算)当场记 usage、过世代门、对档落袋入队——不借下一
+        // 次用户输入收货,空闲唤醒(Ready)把主循环叫回来。
+        DrainFinishedTurnMemory();
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,折成
         // SessionNotice 走通知口(骨架拆解反弹·问题 2:原先直接 TermOut,
@@ -1554,6 +1618,9 @@ void TerminalSessionController::Run() {
         // 已完工——空闲唤醒以空串让位回来,当场静默落账改名。exit/EOF
         // 也先走这一步,迟到的标题不因退出被整笔丢掉(usage 也照记)。
         DrainFinishedTitleRefinement();
+        // 记忆回合总结的同款第二收货点(回合总结异步化单):退出前把在途
+        // 抽取的完工结果收掉——usage 照记、账落袋,不因退出整笔丢掉。
+        DrainFinishedTurnMemory();
         if (!line.has_value()) {
             if (lubancode::cli::ComposerStashHasContent()) {
                 TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";

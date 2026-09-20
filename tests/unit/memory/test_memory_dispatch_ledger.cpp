@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -870,12 +871,29 @@ TEST_CASE("P1 e2e: ExtractTurnMemory 的同轮去重与必跳层") {
         tail.prompts_dir = &prompts_dir;
         tail.theme = &theme;
         tail.memory_turns = &ledger;
-        app::ExtractTurnMemory(tail, text, /*history_before=*/0);
+        // 回合总结异步化:门过即后台起飞——前置门真路径的 Dispatched 档
+        // 与回合账悬起。detached 真 client 连本地死端口即刻失败,成败账
+        // 不是本幕的事(收口合同在收口 e2e 与执行器册);这里钉"现行路
+        // 不因 shadow 改一字"——门照过、真起飞、shadow 照落。
+        app::TurnMemoryExtractor extractor;
+        tail.extractor = &extractor;
+        tail.session_generation = 1;
+        tail.turn_id = "turn-e2e-shadow";
+        CHECK(app::ExtractTurnMemory(tail, text, /*history_before=*/0) ==
+              app::TurnMemoryDispatch::Dispatched);
+        CHECK(extractor.Busy());
+        ledger.SuspendTurn();
+        const auto settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!extractor.Ready() && std::chrono::steady_clock::now() < settle_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        REQUIRE(extractor.Ready());
+        const auto extracted = extractor.TakeFinished();
+        REQUIRE(extracted.has_value());
+        app::SettleTurnMemory(tail, *extracted, /*tail_wall_ms=*/9);
 
-        // 过了门:真发一枪(现行路不因 shadow 改一字)。
-        CHECK(backend.calls == main_calls + 1);
+        // 过了门:真起飞(现行路不因 shadow 改一字)。
         CHECK(ledger.funnel().extract_batches == 1);
-        ledger.FinishTurn(9);
 
         const fs::path main_stream = session->session_dir() / "main.jsonl";
         // 全链逐行过 schema(P1 新键在内,新事件不许破坏整链)。
@@ -926,13 +944,18 @@ public:
     std::string extract_reply = R"({"task_type":"code","summary":"用户问"问题"","candidates":[]})";
     std::string extract_stop_reason = "end_turn";
     bool extract_stream_error = false;
+    // 回合总结异步化:直连抽取路用(extract_only 时恒走抽取脚本;计数递
+    // 外部账——backend 本体随线程闭包销毁,join 后读成员是悬垂)。
+    bool extract_only = false;
+    int* external_calls = nullptr;
 
     std::expected<void, api::Error> send_stream(
         const api::Request&,
         const std::function<void(const api::StreamEvent&)>& on_event,
         const std::atomic<bool>*) override {
         ++calls;
-        const bool is_extract = calls >= 2;  // 第一枪主回合,其后是回合尾抽取
+        if (external_calls != nullptr) ++*external_calls;
+        const bool is_extract = extract_only || calls >= 2;  // 第一枪主回合,其后是回合尾抽取
         if (is_extract && extract_stream_error) {
             on_event(api::StreamError{"流内业务错"});
             return {};
@@ -981,6 +1004,7 @@ TEST_CASE("抽取收口 e2e: 坏 JSON/截断/流内错的回合尾账,主回合�
         bool usage_reported = false;
         std::int64_t input_tokens = 0;
         std::int64_t output_tokens = 0;
+        int extract_calls = 0;  // 抽取侧(直连 backend)的调用数:零重试的对账
     };
     const auto run_turn = [&](const fs::path& sub_root, const char* turn_id) -> Outcome {
         runtime::TrajectorySessionLedger::Options ledger_options;
@@ -1000,21 +1024,51 @@ TEST_CASE("抽取收口 e2e: 坏 JSON/截断/流内错的回合尾账,主回合�
         const std::size_t history_after_main = loop.History().size();
         REQUIRE(history_after_main >= 2);  // 主回合的回答已进历史
 
+        // 回合总结异步化:抽取走后台执行器(直连脚本化假后端——真链路的
+        // RouteDetached 造独立 client,脚本注不进去;门过起飞的档位在
+        // shadow 幕钉,这幕钉收口合同:主回合保全、稳定码与 usage 落账、
+        // 零重试)。材料按前台同款拼好(冻结快照),单飞起飞、悬账、收账
+        // 全按控制器的次序走。门过的等价记账(NoteExtractionCalled)照真
+        // 路径补上,decision 才进得了悬账。
+        ledger.NoteExtractionCalled();
+        int extract_calls = 0;
+        app::TurnMemoryExtractor extractor;
+        auto extract_backend = std::make_unique<ScriptedExtractBackend>();
+        extract_backend->extract_only = true;
+        extract_backend->extract_reply = backend.extract_reply;
+        extract_backend->extract_stop_reason = backend.extract_stop_reason;
+        extract_backend->extract_stream_error = backend.extract_stream_error;
+        extract_backend->external_calls = &extract_calls;
+        app::TurnMemoryExtractor::Inputs inputs;
+        inputs.backend = std::move(extract_backend);
+        inputs.model = "test-model";
+        inputs.system_prompt = app::BuildExtractionSystemPrompt(prompts_dir, "other");
+        REQUIRE_FALSE(inputs.system_prompt.empty());
+        inputs.transcript = app::BuildTurnTranscript(loop.History(), 8 * 1024);
+        inputs.task_type = app::ClassifyTaskType(text, {});
+        inputs.session_generation = 1;
+        inputs.turn_id = turn_id;
+        CHECK(extractor.Start(std::move(inputs)));
+        CHECK(extractor.Busy());
+        ledger.SuspendTurn();  // 收口悬账(DispatchTurnMemory 同款次序)
+        const auto settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!extractor.Ready() && std::chrono::steady_clock::now() < settle_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        REQUIRE(extractor.Ready());
+        const auto extracted = extractor.TakeFinished();
+        REQUIRE(extracted.has_value());
         app::SessionTailContext tail;
         tail.project_memory = store.get();
-        tail.agent = &loop;
-        tail.model_router = &router;
-        tail.prompts_dir = &prompts_dir;
         tail.theme = &theme;
         tail.memory_turns = &ledger;
-        app::ExtractTurnMemory(tail, text, /*history_before=*/0);
+        app::SettleTurnMemory(tail, *extracted, /*tail_wall_ms=*/6);
 
-        // 主回合的账一分不动:历史不减、候选区空、只多发一发抽取、零重试。
-        CHECK(backend.calls == main_calls + 1);
+        // 主回合的账一分不动:历史不减、候选区空、只一发抽取、零重试。
         CHECK(loop.History().size() == history_after_main);
         CHECK(store->ListCandidates().empty());
         CHECK(ledger.funnel().extract_failures == 1);
-        ledger.FinishTurn(6);
+        CHECK(extract_calls == 1);
 
         Outcome outcome;
         const auto assessed =
@@ -1026,6 +1080,7 @@ TEST_CASE("抽取收口 e2e: 坏 JSON/截断/流内错的回合尾账,主回合�
         outcome.usage_reported = payload.value("usage_reported", false);
         outcome.input_tokens = payload.value("input_tokens", std::int64_t{0});
         outcome.output_tokens = payload.value("output_tokens", std::int64_t{0});
+        outcome.extract_calls = extract_calls;
         return outcome;
     };
 

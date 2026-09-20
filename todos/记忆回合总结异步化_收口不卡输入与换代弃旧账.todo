@@ -1,0 +1,78 @@
+# 记忆回合总结异步化——收口不卡输入与换代弃旧账
+
+- 状态：已实现(本分支)。落点:src/app/turn_memory_extractor.{hpp,cpp}(后台执行器,
+  单飞/世代/有界退出,骨架对齐 SessionTitleRefiner);commands/memory_commands.cpp 的
+  ExtractTurnMemory 拆两半——前置门留前台返回 TurnMemoryDispatch 档,采样+解析丢后台,
+  新增 SettleTurnMemory 迟到收账(usage 记账归调用方,候选入队/台账落袋/亮报归它);
+  memory_extract.cpp 的 RunMemoryExtraction 添 cancel/旁路桥透传口,MemoryTurnLedger 添
+  SuspendTurn/SettleSuspendedTurn(轮号对档)/AbandonSuspendedTurn(换代弃)三口,
+  kMemoryExtractTimeoutSecs 公开进头;interactive_session{,_controller.hpp,_assembly.cpp}
+  接 DispatchTurnMemory/DrainFinishedTurnMemory(主循环顶+ReadLine 后两收货点)与
+  memory_extract 空闲唤醒源,/clear、/resume 换代块加 RequestCancel+弃悬账。测试:
+  tests/unit/app/test_turn_memory_extractor.cpp 真线程册(起飞/单飞/取消/退出有界/Ready
+  形制/收账全链/悬账三态/换代弃/门拦);test_memory_dispatch_ledger.cpp 两处门过 e2e 改
+  异步形态。验收走 CI,真机(learn on 收口即刻可输入)留给主控。
+- 日期：2026-09-20
+- 源码基线：597b5ddb。按函数名定位,勿只靠行号。
+- 级别：P1。learn 开着的每一场都卡,前台可感知。
+- 范围：回合收口的记忆抽取异步化。ExtractionTrigger 的 P3 档位
+  (BatchWatermark/IdleTimeout/BeforeCompact/SessionEnd)不在本单。
+
+## 一、病
+
+learn 开着(research 档)时,每个合格回合收口,会话主线程同步等一趟
+cheap 路由的采样+抽取往返:
+
+    [memory] 回合总结(research)… · cheap:k3-256k
+
+网络往返期间会话泵卡死:输入框不可用,下一问敲不进去,spinner 停在
+这一行。慢网/大 transcript 时体感数秒到数十秒。
+
+## 二、病灶坐标(读码定谳)
+
+- src/app/interactive_session.cpp TerminalSessionController 回合收尾
+  (RunTurn 返回后,is_user_turn 分支):同步调
+  `lubancode::app::ExtractTurnMemory(MakeTailContext(), content, history_before)`,
+  之后 `memory_turns_.FinishTurn(...)` 记前台尾延迟。
+- ExtractTurnMemory 全链在 src/app/memory_extract.cpp:前置门
+  (必跳层/同轮去重/短文本/耐久信号,本地纯计算)→ RunMemoryExtraction
+  (网络,带看门狗取消)→ ParseExtractionJson → 候选入队。
+- 同文件注释留有先例:会话起名原先也在收尾处同步等 cheap,"实测问题 7"
+  后搬到发轮前、精炼异步跑(#148)。记忆抽取的材料是回合终态
+  (BuildTurnTranscript 要整轮结果),搬发轮前不可行——只能异步化。
+
+## 三、方案方向
+
+- 前置门留前台(纯本地,快);采样+解析+入队丢后台线程。
+- 回合收口即刻还输入框:前台不再等网络。
+- 迟到收账异步落:usage 分角色记账、memory_turns_.FinishTurn(尾延迟口径
+  改为"门过到收账完成",如实改名或并档,不混旧口径)、trajectory 事件。
+- 前台显示:收口不打 [memory] 行;后台失败打一行 stats 风格亮报
+  (对齐 cmd.title.refine.* 先例),正常完成静默或轻提示,不刷屏。
+
+## 四、竞态清单(单子的骨)
+
+- 换代(/clear、/resume、BeginNewSession):在途抽取的迟到结果必须弃,
+  按会话世代拒旧账——先例:审批 DenyStaleGenerations、标题精炼换代。
+- 退出(/exit、进程退场):次序对齐 TUI 退出收口先例(调度 Flush 排干
+  →槽位全摘→成员逆序析构);在途抽取等待有界,超时弃,不挂死进程。
+- 下一轮已发车:抽取材料已冻结(history_before 快照),迟到入队不得
+  串进新轮;入队侧按任务/世代归属。
+- 并发上限:同场在途抽取至多一枚(每回合一发,发车前查在途;连续快问
+  快答时不积压多枚并发采样)。
+
+## 五、验收
+
+- 单测(真线程册,先例 test_session_title_refiner):
+  门过即后台起飞、门拦不发起、迟到结果换代被弃、退出有界收口、
+  在途不重发、usage/账本落对档。
+- 现有记忆册全绿(test_memory_extract* 一族),不破既有输出合同。
+- CI:windows-msvc 腿绿才合(改 src/,全量腿会出)。
+- 真机(主控验收):learn on 发一轮,收口即刻可输入;[memory] 行不挂前台;
+  /clear 后无迟到记忆写入。
+
+## 六、明示不做
+
+- 不动 learn 配置语义、不动抽取提示词与解析合同。
+- 不上 P3 档位(BatchWatermark/IdleTimeout/BeforeCompact/SessionEnd)。
+- 不改 /memory 命令族与记忆诚实账(#133)的回执合同。

@@ -6,6 +6,7 @@
 // controller 之外的层。
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -32,6 +33,7 @@
 #include "app/commands/session_commands.hpp"
 #include "app/interactive_session.hpp"
 #include "app/memory_extract.hpp"
+#include "app/turn_memory_extractor.hpp"  // TurnMemoryExtractor(回合总结异步化)
 #include "app/mention_support.hpp"
 #include "app/session_stack.hpp"
 #include "app/session_notice.hpp"  // SessionNoticeSink(非 turn 事件的通知口)
@@ -221,6 +223,20 @@ private:
                         bool* autosend_failed = nullptr, bool silent = false,
                         memory::QueryOrigin origin = memory::QueryOrigin::User,
                         bool* cancelled_out = nullptr);
+    // ---- 记忆回合总结的异步编排(回合总结异步化单) ----
+    // 回合收尾的发货点(前台):ExtractTurnMemory 的前置门留前台(纯本
+    // 地、微秒级),门过即后台起飞——收口即刻还输入框,learn 开着的每
+    // 一场不再同步等 cheap 往返。tail_started 是尾延迟口径的起点(回合
+    // 收口拍),Dispatched 的回合账悬起(SuspendTurn),迟到收账走
+    // DrainFinishedTurnMemory。
+    void DispatchTurnMemory(const std::string& content, std::size_t history_before,
+                            const std::string& turn_id, std::chrono::steady_clock::time_point tail_started);
+    // 收货点(空闲唤醒/主循环顶;非阻塞):完工的结果记 usage(分角色,
+    // 迟到被弃也照记)、过世代门(换代弃旧账——候选/台账一票不落新
+    // 场)、对档落袋入队。次序对齐标题精炼的 DrainFinished 先例。
+    void DrainFinishedTurnMemory();
+    // 只读:有完工的抽取结果待收(空闲唤醒的 ready 条件)。
+    bool HasFinishedTurnMemory();
     void PumpSteeringToSubagents();
     // (P0-6:PersistSteeringQueue/RestoreSteeringQueueFrom——旧存档的排队
     // 事件快照路——已删;queue 的持久账走 trajectory 的
@@ -306,6 +322,10 @@ private:
         tail.trajectory_wire = session_runtime_.wire_name();
         // 记忆写入调度单 P0:抽取前置门与收口都向这本账报数。
         tail.memory_turns = &memory_turns_;
+        // 回合总结异步化单:门过起飞的后台执行器与起飞世代(轮号随回合
+        // 变,由 DispatchTurnMemory 单独塞)。
+        tail.extractor = &memory_extractor_;
+        tail.session_generation = view_registry_.session_generation();
         return tail;
     }
     void EnsureMemoryTool();
@@ -494,6 +514,14 @@ private:
     // 回执)。声明在 session_runtime_ 之后——构造时账本已开张(或确定
     // 没开);装配尾声把收件口挂进 project_memory。
     lubancode::app::MemoryTurnLedger memory_turns_;
+    // 回合总结异步化单:抽取的后台执行器(单飞;门过起飞、空闲拍收账)。
+    // 声明在 memory_turns_/session_runtime_ 之后 = 逆序析构先走:析构里
+    // 取消 + 有界等待 + detach,trajectory(session_runtime_ 持)还没死,
+    // 迟归 worker 的旁路桥提交不悬垂。
+    lubancode::app::TurnMemoryExtractor memory_extractor_;
+    // 上一枚起飞回合的尾延迟起点(回合收口拍):迟到收账时折"收口到
+    // 收账完成"的墙钟(MemoryTurnLedger 的并档口径)。只主线程读写。
+    std::chrono::steady_clock::time_point memory_tail_started_{};
     // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落
     // 进来的同一本账,远端审批 accept_for_session 也写它)。声明在
     // session_runtime_ 之后——构造序先本体后引用,别名绑的是活对象
@@ -562,6 +590,10 @@ private:
     // 回执落地(或 job 悬在 pending 却无活 worker)那一刻让位,主循环顶
     // 收账打"已入库/写入失败"——不让后台线程直接打断输入区。
     lubancode::runtime::IdleWakeCoordinator::Subscription memory_receipts_wake_token_;
+    // 记忆回合总结完工的唤醒源(回合总结异步化单):抽取在后台跑完
+    //(成功/失败/取消都算——usage 是真花的)那一刻让位,主循环顶
+    // DrainFinishedTurnMemory 收账;运行中不醒(Ready 才是唤醒条件)。
+    lubancode::runtime::IdleWakeCoordinator::Subscription memory_extract_wake_token_;
     GoalSessionWiring goal_wiring_;
     LoopSessionWiring loop_wiring_;
     PlanSessionWiring plan_wiring_;

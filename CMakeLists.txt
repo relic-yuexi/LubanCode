@@ -1334,6 +1334,9 @@ add_library(lubancode_app STATIC
   # 实测问题 7:会话标题的异步精炼器(独立线程 + 独占 backend,主回合与
   # 提示符一概不等它)。
   src/app/session_title_refiner.cpp
+  # 记忆回合总结异步化:回合收尾抽取的后台执行器(单飞;门过起飞、
+  # 空闲拍收账,收口即刻还输入框)。
+  src/app/turn_memory_extractor.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp
