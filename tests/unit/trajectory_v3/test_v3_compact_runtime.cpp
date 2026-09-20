@@ -1234,6 +1234,12 @@ TEST_CASE("业务 JSON 的 signature/encrypted_content 键不当思考签名") {
         REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
         MessageDraft declaration;
         declaration.turn_id = "turn-old";
+        declaration.request_id = "request-biz";
+        declaration.provider = "test";
+        declaration.wire = "openai-chat-completions";
+        declaration.model = "test";
+        declaration.response_model = nlohmann::json(nullptr);
+        declaration.usage = nlohmann::json(nullptr);
         declaration.origin = MessageOrigin::SessionRuntime;
         // 工具入参对象里的同名业务键(含空值):旧递归键名扫描会误报。
         declaration.message = nlohmann::json::object(
@@ -1250,6 +1256,7 @@ TEST_CASE("业务 JSON 的 signature/encrypted_content 键不当思考签名") {
         REQUIRE(declaration_receipt.status == WriteReceipt::Status::Committed);
         MessageDraft tool;
         tool.turn_id = "turn-old";
+        tool.action_id = "action-biz";
         tool.origin = MessageOrigin::SessionRuntime;
         tool.message = nlohmann::json::object(
             {{"role", "tool"}, {"tool_call_id", "call-biz"}, {"content", "结果正文"}});
