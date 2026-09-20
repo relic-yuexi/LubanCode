@@ -1245,7 +1245,7 @@ TEST_CASE("业务 JSON 的 signature/encrypted_content 键不当思考签名") {
         declaration.message = nlohmann::json::object(
             {{"role", "assistant"},
              {"tool_calls", nlohmann::json::array({nlohmann::json::object(
-                                {{"id", "call-biz"},
+                                {{"id", "action-biz"},
                                  {"function", nlohmann::json::object({
                                      {"name", "verify"},
                                      {"arguments", nlohmann::json::object({{"signature", "business-sig"},
@@ -1259,7 +1259,7 @@ TEST_CASE("业务 JSON 的 signature/encrypted_content 键不当思考签名") {
         tool.action_id = "action-biz";
         tool.origin = MessageOrigin::SessionRuntime;
         tool.message = nlohmann::json::object(
-            {{"role", "tool"}, {"tool_call_id", "call-biz"}, {"content", "结果正文"}});
+            {{"role", "tool"}, {"tool_call_id", "action-biz"}, {"content", "结果正文"}});
         const WriteReceipt tool_receipt = writer->AppendMessage(std::move(tool), Durability::PowerLoss);
         REQUIRE(tool_receipt.status == WriteReceipt::Status::Committed);
         REQUIRE(writer->AdmitMessages({user_receipt.id, declaration_receipt.id, tool_receipt.id}).status ==
