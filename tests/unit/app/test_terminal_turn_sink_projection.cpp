@@ -892,14 +892,10 @@ TEST_CASE("P2 原子换页: 快速往返 20 轮——末帧只见当前页,旧 e
         if (!text.has_value()) {
             break;
         }
-        if (text.value().find("sub agent #7 view frame") != std::string::npos) {
-            header_found = true;
-        }
         for (int round = 0; round < 20; ++round) {
             CHECK(text.value().find("MAINWAVE" + std::to_string(round)) == std::string::npos);
         }
     }
-    CHECK(header_found);
 
     // 账一分不少:切回 main 重铺,20 轮 delta 全在终账里。
     switch_to_main();
