@@ -1,0 +1,100 @@
+# Compact 签名载荷一刀切拒绝：摘要投影与回放兼容修复
+
+- 状态：源码已实施，远端 CI 验证中；真实 provider 验证留主控。
+- 日期：2026-09-21。实施：2026-09-21（worktree-agent-a3046a85736bbe27e，基线 693d3ddb）。
+- 用户现场：`/compact` 先提示"压缩模型窗口未知"，随后报 `compact.signature_prefix_incompatible`。
+- 目标：正常保存签名或加密 reasoning 的会话能走受支持的压缩路径；真正不兼容时，报清模型、阶段与原因，不破坏原始历史。
+
+## 一、这是什么 bug
+
+这是 thinking 保真保存与旧压缩门禁没有接齐的集成缺陷。
+
+会话写侧已经保存 `signature`、`responses_item`，恢复侧也读回这些字段。压缩侧却仍保留早期兜底：递归扫描整条当前会话链，发现非空 `signature`、`encrypted_content`，或指定加密块类型，就拒绝压缩。它没有按协议、目标模型、摘要材料范围和保留尾部逐项判断。
+
+因此，"存在签名/加密载荷"直接变成了"前缀不兼容"。错误码看似已经判明协议冲突，实际只命中了字段检查。它会挡住本可通过独立摘要材料投影处理的历史；但也不能反过来宣称所有签名载荷都可随意换前缀回放。
+
+"压缩模型窗口未知"是另一个预算诊断：`compact_window_tokens == 0` 时跳过发送前容量门禁并继续。它不是本次签名拒绝的原因。两件事须分开修，不能用补窗口配置冒充修好压缩。
+
+现场尚未读取原始会话账本，也未确认正在运行的二进制版本、provider/wire/model；具体哪个消息字段触发，留待脱敏复现。源码缺口已经确认。
+
+## 二、源码证据
+
+| 入口 | 已核事实 |
+| --- | --- |
+| `src/runtime/v3_compact_runtime.cpp`，`HasPrefixBoundPayload`，约 222–243 行 | 按键名递归扫 JSON；没有 provider/模型能力判断，也没限定为规范 reasoning 块。注释仍说生产写侧不会保存签名，已落后于代码。 |
+| 同文件，`has_prefix_bound`，约 848–854 行 | 扫 `chain_messages` 全链，不只扫 removed 或真正发送的材料。 |
+| 同文件，约 865–900 行 | dry-run 与实跑都一刀切拒绝；实跑在摘要请求前返回。 |
+| 同文件，约 695–713 行 | 窗口未知只记 note，容量门禁返回通过；不是签名错误来源。 |
+| `src/runtime/trajectory_session.cpp`，约 486、1580、2926、4846 行 | 写入及恢复 thinking 的签名、Responses 原生 item。 |
+| `src/app/commands/session_commands.cpp`，`V3MaterialToApiMessage`，约 474–507 行 | 摘要材料仍转回含签名、原生 item 的 `ThinkingBlock`。仅删拒绝判断会把旧载荷带进改过 system/前缀的摘要请求，跨模型时风险更明显。 |
+| `src/runtime/v3_compact_runtime.hpp`，`V3CompactModelClient` | 接口合同仍要求 role/content 原样材料；引入独立投影须同步修改合同与快照。 |
+| `tests/unit/trajectory_v3/test_v3_compact_runtime.cpp`，约 1105–1118 行 | 现有测试固定要求 signed thinking 拒绝，并检查调用数为 0、context revision 不变。应改成按协议与阶段分支的测试，保留失败原子性断言。 |
+| `docs/architecture/trajectory-v3-schema.md`，约 163 行 | 仍说生产持久化不保存签名；需随实现纠正。 |
+
+## 三、修复合同
+
+- [x] 保住原始账本。不得删签名、改加密字节、伪造 signature/item ID，也不得用全局关闭 thinking 作为修复。（投影只建视图，writer 一字不动；册里钉账本签名原样。）
+- [x] 保住默认思考回放约定：可用且协议支持便回放，用户明确关闭才按关闭策略处理。普通请求与 resume 不受摘要材料转换牵连。（普通请求/resume 路一字未动。）
+- [x] 拆成两道检查：A 是发给摘要模型的材料；B 是压缩成功后，主模型接着使用的"摘要 + 保留尾部"。A 安全不代表 B 安全。（`decide_payload_replay`：removed 只投影、retained 才判回放。）
+- [x] 检查规范消息块及协议元数据，不递归搜索任意业务 JSON 键名。工具参数或结果中的普通 `signature` 字段不得误报。（`ScanCanonicalThinkingPayload` 只认 content 块数组；册里钉业务键不误报。）
+- [x] 依据实际 provider/wire/model 和能力声明决策，不凭模型名称猜测。未知能力须单独标为未知，不能报成已确认不兼容。（`V3CompactReplaySupport` 三态；生产装配缺省 Unknown 并如实标注。）
+
+## 四、实施步骤
+
+### P0：补可复现证据与诊断
+
+- [ ] 对照运行版本与源码版本，脱敏提取最小复现：触发消息引用、规范块类型、字段类别、所在范围、摘要模型与主模型身份。诊断不输出签名、加密正文或密钥。（需用户现场会话账本与运行版本，留主控；源码侧的块形态/字段类别已按写侧三处核实。）
+- [x] 区分摘要材料不支持、保留尾部回放不支持、协议能力未知。保留稳定机器码，同时给一句可读原因。（`compact.material.payload_projected` / `compact.replay.unverified` / `compact.replay.verified` / 拒绝码 `compact.replay_prefix_incompatible`，各配人话 note。）
+- [x] dry-run 输出同一份兼容决策；不调模型、不落修改事件。（干跑与实跑共用 `decide_payload_replay`；册里钉 events 为空。）
+
+### P1：建立独立摘要材料投影
+
+- [x] 建议引入 `BuildCompactMaterialView`，从已选完整消息/工具组建立只供摘要请求使用的视图。原始 message refs、来源范围与转换策略可追溯。（v3_compact_runtime.cpp 匿名 namespace；prepared 快照记 `materialView=compact-material-projection-v1`。）
+- [x] 用有边界的转录材料承载用户输入、助手可见回答、工具调用与结果；保留角色、顺序、调用配对与内容边界，防止历史文本冒充摘要指令。（投影只替换 thinking 块本身，角色/顺序/配对不动；思考正文带 `[历史思考记录]` 标注。）
+- [x] 不将历史签名、加密 reasoning 或 provider 原生 item 当作摘要模型的原生思考块重放。可读 thinking 文本是否作为材料，沿用明确产品策略；若纳入，标明来源，仅作普通材料，不伪装成模型新思考。（产品策略=历史思考默认完整回传，故纳入为普通文本。）
+- [x] 不解密、不猜测不透明载荷。摘要依靠可见对话与工具证据；若缺少必需语义，按材料不足或不可压缩范围处理，不编造摘要。（redacted/encrypted 块剥出材料、不编内容。）
+- [x] 同步改 `V3MaterialToApiMessage`、客户端接口注释、prepared 快照、估算槽与重试路径。容量门禁必须估算最终发送视图，不得旧材料算预算、新材料上网络。（估算内置公式与槽路、指纹、实发材料全走 `material_view` 单一取用口。）
+
+### P2：检查压缩后的主模型回放
+
+- [ ] 由协议适配层说明签名/原生 item 能否在拟议前缀下继续回放，以及工具交互组是否必须原样保留。实施时查当前官方协议证据，并配 wire 测试；本单不预判各厂商规则。（三态接口已立：`V3CompactRunInput.replay_support`；官方证据实施时已查——Anthropic 要求工具回路签名块完整回传、OpenAI encrypted_content 按保留 item 回放、Gemini 修剪历史有 thoughtSignature 失效风险，均未给"前缀替换后仍有效"的正面保证，故生产装配如实交 Unknown。适配层方言接线与各家 wire 测试留后续单。）
+- [x] 将计划压缩的旧历史与保留尾部分开。旧历史只进入安全摘要材料时，不因其签名阻断整个会话。（B 检查只扫 retained。）
+- [x] 保留尾部若含受约束载荷，按能力原样保留完整块/交互组；若仍不兼容，尝试在既有允许范围内调整闭合组边界，再重新检查材料、主模型请求和预算。（保真回放=不动签名/字节；既有回退梯子本就整轮移动块、配对不拆。"调整闭合组边界"分支待 Unsupported 来源接线后由现有回退机制承接。）
+- [x] 不能移动未闭合工具组、受保护轮次，也不能擅自丢弃尾部思考。找不到合法计划就明确拒绝，指出阶段、范围与可执行处置；不无限重试。（拒绝码带阶段/模型/范围；保护集与配对逻辑不动。）
+- [x] applied 前检查最终主模型投影；确认合法且预算通过才提交上下文替换。失败、取消、写账失败均不得留下半条新链。（B 判定在 Freeze 前、`post_compact_budget` 第二道门禁既有；册里钉 revision 不变。）
+- [x] 手动、自动、dry-run、重试、resume 共用投影与策略，避免当前会话能续、重启后又还原成非法回放。（单入口 `RunV3Compact`；resume 走 `ProjectV3ContextHistory` 读账本原样，保留尾部保真。）
+
+### P3：窗口提示与文档
+
+- [ ] 追踪有效压缩路由对应的窗口来源，覆盖专用压缩模型、cheap 路由及回落主模型；同一身份才能使用相应已知窗口，不拿别的模型容量顶替。（窗口来源追踪未动——与签名拒绝是两笔账，留独立小单。）
+- [x] 窗口未知如实提示一次；明确这是"跳过容量检查"，不要和签名失败混成同一原因。（`window_unknown` 独立字段 + note + i18n；新决策面分行输出。）
+- [x] 更新过时源码注释、V3 schema 与压缩文档，写清原始账本、摘要材料视图和后续回放三者区别。（trajectory-v3-schema.md §2.3、v3-capacity-recovery.md 失败边界表、runtime 头注与接口注释。）
+
+## 五、验收门槛
+
+- [x] 无签名历史：原有压缩、容量回退、工具配对与收益检查不退化。（既有册全保留；投影对无签名材料是恒等变换。）
+- [x] 签名仅在 removed：受支持方案能生成摘要；摘要请求不含原生旧签名/加密 item；原始账本字节不变。（册"签名仅在可压范围"。）
+- [x] 签名在 retained：支持时保真续接；不支持或能力未知时走明确分支。不能只让摘要成功，随后主请求报错。（册"签名在保留尾部"两分支：Unknown 保真回放+标注、Unsupported 摘要前拒绝；Supported 分支接口已立、生产无来源，以册内 Unknown 路径承接保真续接。）
+- [x] 业务 JSON 含 `signature`/`encrypted_content`：不当作思考签名；空字段也不误报。（册"业务 JSON"。）
+- [ ] 分别覆盖 Anthropic signed/redacted thinking、Responses 原生 reasoning/encrypted item、Gemini thought signature、普通 Chat reasoning；按各自真实能力判定，不统一假定可删或不可压。（中立层统一 signature/responses_item 位已按写侧真实落点识别与投影；分协议真机行为未验，留主控。）
+- [x] 主模型与摘要模型相同/不同、用户开启/关闭历史思考均有回归；摘要转换不改用户默认回放设置。（默认回放路径一字未动、`RequestProfile` 不碰；既有册覆盖同模型路由。跨模型组合的真机回归留主控。）
+- [x] 未闭合工具组、当前受保护轮、材料不足、超窗、取消、写账失败：拒绝或失败后 context revision 与有效链不变；失败收口事件仍按原合同保存。（Unsupported 册 revision 不变；既有失败册全保留。）
+- [x] dry-run 与实跑计划/诊断一致；最终 wire 与预算输入一致；重复压缩及压缩后 resume 均能继续合法工具调用。（册"干跑与实跑同一份回放判定"；指纹与估算同吃投影。）
+- [ ] 可用真实 provider 做至少一条带签名会话的"压缩 → 继续工具调用 → 重启恢复 → 再续接"验证。只跑 mock 不宣称生产兼容；未验证协议逐项标注。（未做，留主控。）
+
+## 六、交付边界
+
+- 实施时开独立 worktree，不切换用户当前分支。
+- 推 GitHub 跑 CI，按仓库约定做必要静态检查；不在本地跑整套 CI。
+- PR 分清源码回归、远端 CI、真实 provider 验证三份结果。不得拿某一协议通过代替全部协议通过。
+- 本次只新增 TODO，未修改运行代码，未运行测试，未修复现场。（实施棒已修改运行代码；测试与修复验证交远端 CI。）
+
+## 七、实施落点（2026-09-21）
+
+- `src/runtime/v3_compact_runtime.hpp`：`V3CompactReplaySupport` 三态枚举与账面名；`V3CompactProfile` 增主模型身份三字段；`V3CompactRunInput.replay_support`（默认 Unknown）；`V3CompactRunResult` 增 `retained_prefix_bound_payload`/`replay_support`；客户端接口注释改投影视图合同。
+- `src/runtime/v3_compact_runtime.cpp`：删递归键名扫描 `HasPrefixBoundPayload`，换 `ScanCanonicalThinkingPayload`（只认规范 content 块数组）；新增 `BuildCompactMaterialView`（A 投影：签名/原生 item 不出网，思考正文标来源按普通材料，不透明块剥出）；估算内置公式、估算槽快照、指纹、实发材料全走 `material_view` 单一取用口；`decide_payload_replay` 在回退定界后判 B（Unsupported 拒 `compact.replay_prefix_incompatible`，Unknown 保真放行并标注）；prepared 快照记 `materialView`/`replaySupport`/`retainedPrefixBoundPayload`。
+- `src/app/commands/session_commands.cpp`：`V3MaterialToApiMessage` 的 thinking 块改普通 TextBlock（防御层，签名/原生 item 不再折回 `ThinkingBlock`）；profile 填主模型身份；`replay_support` 保持 Unknown 并注释来源缺口；干跑打印增三态决策行。
+- `src/cli/i18n.cpp`：`cmd.compact.replay_note_supported/unknown/unsupported` 中英成对。
+- `tests/unit/trajectory_v3/test_v3_compact_runtime.cpp`：旧册"signed 必拒"换四册——removed 投影与账本保真 / retained 按 Unknown 与 Unsupported 分流（原子性断言保留）/ 业务 JSON 同名键不误报 / 干跑与实跑同一判定；签名块 fixture 对齐生产写侧形态（text 键，旧册误用 wire 形 thinking 键）。
+- `docs/architecture/trajectory-v3-schema.md` §2.3、`docs/architecture/context/v3-capacity-recovery.md`：三份账（原始账本/摘要材料视图/后续回放）与三态裁决口径。
+- 验证边界：本地不 build 不 ctest（仓库铁律）；单测与平台腿交远端 CI；真实 provider 端到端（压缩→工具调用→重启恢复→再续接）留主控。

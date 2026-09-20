@@ -471,9 +471,13 @@ std::function<std::unique_ptr<lubancode::agent::LoopBoundaryRecorder>()> Compact
 
 namespace {
 
-// v3 材料消息(role/content 原样 json)→ api::Message。与 resume 投影
-// (ProjectHistoryFromReplay)同一套块翻译:text/thinking/tool_call 三形,
-// tool 消息按 ToolResultBlock 配对;解析不动的部分如实丢弃,不猜形状。
+// v3 材料消息(摘要材料投影视图 json)→ api::Message。与 resume 投影
+// (ProjectHistoryFromReplay)同一套块翻译:text/tool_call 两形,tool 消息
+// 按 ToolResultBlock 配对;解析不动的部分如实丢弃,不猜形状。运行时已在
+// BuildCompactMaterialView 把规范 thinking 块投影成普通 text 块;这里对
+// 漏网的 thinking 块做同一道防御——可读正文按普通材料带走并标明来源,
+// signature/responses_item 一律不带出(旧签名跨模型重放会被服务端拒,也不
+// 许冒充摘要模型的新思考),绝不再折回 ThinkingBlock。
 lubancode::api::Message V3MaterialToApiMessage(const nlohmann::json& body) {
     lubancode::api::Message message;
     const std::string role = body.value("role", std::string("user"));
@@ -502,8 +506,10 @@ lubancode::api::Message V3MaterialToApiMessage(const nlohmann::json& body) {
             if (type == "text" && part.contains("text") && part["text"].is_string()) {
                 message.content.push_back(lubancode::api::TextBlock{part["text"].get<std::string>()});
             } else if (type == "thinking" && part.contains("text") && part["text"].is_string()) {
-                message.content.push_back(lubancode::api::ThinkingBlock{part["text"].get<std::string>(),
-                    part.value("signature", std::string()), part.value("responses_item", nlohmann::json(nullptr))});
+                const std::string text = part["text"].get<std::string>();
+                if (!text.empty()) {
+                    message.content.push_back(lubancode::api::TextBlock{"[历史思考记录]\n" + text});
+                }
             }
         }
     };
@@ -662,6 +668,18 @@ void PrintV3CompactDryRun(const lubancode::runtime::V3CompactRunResult& result,
             out << " → 装不下,需回退 " << result.retreat_steps << " 步";
         }
         out << (result.fits_budget ? " → 装得下" : " → 仍装不下") << "\n";
+    }
+    // 签名/加密思考载荷的兼容决策与窗口未知是两笔账,分行如实报:
+    // 干跑与实跑吃同一份判定。
+    if (result.retained_prefix_bound_payload) {
+        const char* key = "cmd.compact.replay_note_unknown";
+        if (result.replay_support == lubancode::runtime::V3CompactReplaySupport::Supported) {
+            key = "cmd.compact.replay_note_supported";
+        } else if (result.replay_support ==
+                   lubancode::runtime::V3CompactReplaySupport::Unsupported) {
+            key = "cmd.compact.replay_note_unsupported";
+        }
+        out << "  " << theme.stats << tr(key) << theme.reset << "\n";
     }
     out << "  输出预留: " << options.budget.output_reserve_tokens
         << " tokens;以上均为结构可回收量估算,摘要实际 token 须真压才可知。\n";
@@ -919,6 +937,9 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
         profile.provider = routed.route.provider;
         profile.wire = in.trajectory_wire;
         profile.model = routed.route.model;
+        profile.main_provider = in.agent->provider();
+        profile.main_wire = in.trajectory_wire;
+        profile.main_model = in.agent->request_profile().model;
         profile.compact_window_tokens = options.budget.window_tokens.value_or(std::size_t{0});
         profile.compact_output_reserve_tokens = options.budget.output_reserve_tokens;
         profile.compact_margin_tokens = options.budget.protocol_headroom_tokens;
@@ -970,6 +991,14 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
     profile.provider = routed.route.provider;
     profile.wire = in.trajectory_wire;
     profile.model = routed.route.model;
+    // B 阶段(压缩后主模型回放)判定的责任身份是主模型,不是压缩路由:
+    // 拒绝与诊断按这份点名。
+    profile.main_provider = in.agent->provider();
+    profile.main_wire = in.trajectory_wire;
+    profile.main_model = in.agent->request_profile().model;
+    // run_input.replay_support 保持缺省 Unknown:当前装配没有已接线的
+    // 协议适配层证据(方言只声明"签名必须随块回传"的义务,不声明"前缀
+    // 替换后仍有效")——拿不到就如实交未知,保真回放并标注,不猜。
     // Cc/Oc/Mc 认压缩路由自己的声明(BuildCompactOptions 现算的同一本账):
     // 窗口未知留 0——门禁不做,结果里明说,不假装核过。
     profile.compact_window_tokens =

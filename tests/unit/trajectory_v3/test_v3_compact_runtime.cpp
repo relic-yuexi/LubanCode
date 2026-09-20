@@ -186,6 +186,9 @@ V3CompactProfile BaseProfile() {
     profile.provider = "moonshot";
     profile.wire = "openai-chat-completions";
     profile.model = "kimi-k2.6";
+    profile.main_provider = "moonshot";
+    profile.main_wire = "openai-chat-completions";
+    profile.main_model = "kimi-k2.6";
     profile.compact_window_tokens = 0;  // 门禁关:成功链路不掺容量变量
     return profile;
 }
@@ -1004,7 +1007,7 @@ std::string AppendCurrentUserFixture(V3Writer& writer,
     return receipt.id;
 }
 std::string AppendStepFixture(V3Writer& writer, const std::string& step,
-                              bool open_call = false, bool signed_thinking = false) {
+                              bool open_call = false) {
     MessageDraft draft;
     draft.turn_id = "turn-long";
     draft.step_id = step;
@@ -1018,12 +1021,43 @@ std::string AppendStepFixture(V3Writer& writer, const std::string& step,
     draft.message = {{"role", "assistant"}, {"content", BigText(5000)}};
     if (open_call) draft.message["tool_calls"] = nlohmann::json::array({
         {{"id", "action-open"}, {"function", {{"name", "write"}, {"arguments", "{}"}}}}});
-    if (signed_thinking) draft.message["content"] = nlohmann::json::array({
-        {{"type", "thinking"}, {"thinking", BigText(5000)}, {"signature", "opaque-sig"}}});
     auto receipt = writer.AppendMessage(std::move(draft), Durability::PowerLoss);
     REQUIRE(receipt.status == WriteReceipt::Status::Committed);
     REQUIRE(writer.AdmitMessages({receipt.id}).status == WriteReceipt::Status::Committed);
     return receipt.id;
+}
+// 带签名/原生 item 的 thinking 块按生产写侧形态落账(trajectory_session
+// 主桥的形状:type/text/signature/responses_item),返回消息 id。旧册的
+// 签名块误用了 wire 形状(thinking 键),与写侧不符,新册一律走这只。
+std::string AppendSignedThinkingMessage(V3Writer& writer, const std::string& turn_id,
+                                        std::string signature = "opaque-sig",
+                                        nlohmann::json responses_item = nlohmann::json(nullptr)) {
+    MessageDraft draft;
+    draft.turn_id = turn_id;
+    draft.request_id = "request-signed";
+    draft.provider = "test";
+    draft.wire = "openai-chat-completions";
+    draft.model = "test";
+    draft.response_model = nlohmann::json(nullptr);
+    draft.usage = nlohmann::json(nullptr);
+    draft.origin = MessageOrigin::SessionRuntime;
+    nlohmann::json content = nlohmann::json::array(
+        {{{"type", "thinking"}, {"text", BigText(5000)}, {"signature", std::move(signature)},
+          {"responses_item", std::move(responses_item)}},
+         {{"type", "text"}, {"text", "带思考的回答"}}});
+    draft.message = {{"role", "assistant"}, {"content", std::move(content)}};
+    auto receipt = writer.AppendMessage(std::move(draft), Durability::PowerLoss);
+    REQUIRE(receipt.status == WriteReceipt::Status::Committed);
+    REQUIRE(writer.AdmitMessages({receipt.id}).status == WriteReceipt::Status::Committed);
+    return receipt.id;
+}
+bool NotesStartWith(const V3CompactRunResult& result, const std::string& prefix) {
+    for (const auto& note : result.notes) {
+        if (note.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 V3CompactRunInput LongTurnInput() {
     auto input = ManualInput();
@@ -1102,20 +1136,163 @@ TEST_CASE("open tool group stops the old-step prefix without inventing replies")
     for (const auto& message : client.last_messages) CHECK_FALSE(message.contains("tool_calls"));
 }
 
-TEST_CASE("signed thinking refuses a changed prefix before calling summary model") {
-    Harness harness("signed-step");
+// ---------------------------------------------------------------------------
+// 签名/加密思考载荷按阶段分流(修复合同 A/B):可压范围只进摘要材料投影
+//(签名/原生 item 不出网、原始账本字节不动);保留尾部按适配层三态——
+// 能力未知放行保真回放并如实标注,适配层明证不可才拒(原子性与旧册同
+// 款:一次模型都不调、revision 不动)。业务 JSON 的同名键不误报。
+// ---------------------------------------------------------------------------
+TEST_CASE("签名仅在可压范围:材料投影剥载荷,原始账本保真") {
+    Harness harness("signed-material");
     auto writer = harness.Start();
     REQUIRE(writer);
-    AppendCurrentUserFixture(*writer);
-    AppendStepFixture(*writer, "step-old", false, true);
-    AppendStepFixture(*writer, "step-latest");
+    harness.SeedTurn(*writer, "turn-old", BigText(600));
+    const std::string signed_id = AppendSignedThinkingMessage(
+        *writer, "turn-old", "opaque-sig",
+        nlohmann::json{{"id", "rs_1"}, {"type", "reasoning.encrypted"}, {"encrypted_content", "payload"}});
+    auto client = StepSummaryClient();
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), ManualInput());
+    REQUIRE(result.applied);
+    // 摘要请求材料:签名/原生 item 不出网;可读思考正文按普通材料留。
+    REQUIRE(client.last_messages.size() >= 3);
+    bool saw_projected_thinking = false;
+    for (const auto& message : client.last_messages) {
+        const std::string dump = message.dump();
+        CHECK(dump.find("opaque-sig") == std::string::npos);
+        CHECK(dump.find("responses_item") == std::string::npos);
+        CHECK(dump.find("encrypted_content") == std::string::npos);
+        saw_projected_thinking =
+            saw_projected_thinking || dump.find("[历史思考记录]") != std::string::npos;
+    }
+    CHECK(saw_projected_thinking);
+    CHECK_FALSE(result.retained_prefix_bound_payload);
+    CHECK(NotesStartWith(result, "compact.material.payload_projected"));
+    // 原始账本:签名/原生 item 原样在档,一个字节没动。
+    auto ledger = ReadV3Ledger(harness.jsonl);
+    REQUIRE(ledger);
+    const auto* line = ledger->FindMessage(signed_id);
+    REQUIRE(line != nullptr);
+    CHECK(line->message["content"][0]["signature"] == "opaque-sig");
+    CHECK(line->message["content"][0]["responses_item"]["id"] == "rs_1");
+    CHECK(line->message["content"][0]["responses_item"]["encrypted_content"] == "payload");
+}
+
+TEST_CASE("签名在保留尾部:按适配层裁决分流") {
+    bool adapter_refuses = false;
+    SUBCASE("能力未知:保真回放并如实标注,不报成不兼容") { adapter_refuses = false; }
+    SUBCASE("适配层明证不可:调摘要模型前拒绝") { adapter_refuses = true; }
+    Harness harness("signed-retained");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    harness.SeedTurn(*writer, "turn-old", BigText(900));
+    harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
+    const std::string signed_id = AppendSignedThinkingMessage(*writer, "turn-keep", "opaque-sig");
+    auto input = ManualInput();
+    input.protected_turn_ids = {"turn-keep"};
+    if (adapter_refuses) {
+        input.replay_support = lubancode::runtime::V3CompactReplaySupport::Unsupported;
+    }
     const auto revision = writer->context().revision;
     auto client = StepSummaryClient();
-    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), LongTurnInput());
-    CHECK_FALSE(result.applied);
-    CHECK(result.reason == "compact.signature_prefix_incompatible");
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), input);
+    CHECK(result.retained_prefix_bound_payload);
+    if (adapter_refuses) {
+        CHECK(result.replay_support == lubancode::runtime::V3CompactReplaySupport::Unsupported);
+        CHECK_FALSE(result.applied);
+        CHECK(result.terminal_kind == "rejected");
+        CHECK(result.reason == "compact.replay_prefix_incompatible");
+        CHECK(client.calls == 0);
+        CHECK(writer->context().revision == revision);
+        return;
+    }
+    CHECK(result.replay_support == lubancode::runtime::V3CompactReplaySupport::Unknown);
+    REQUIRE(result.applied);
+    CHECK(NotesStartWith(result, "compact.replay.unverified"));
+    // 保留尾部进参考材料时同样被投影:签名不出网。
+    for (const auto& message : client.last_messages) {
+        CHECK(message.dump().find("opaque-sig") == std::string::npos);
+    }
+    // 原始账本:保留尾部的签名原样在档(保真续接)。
+    auto ledger = ReadV3Ledger(harness.jsonl);
+    REQUIRE(ledger);
+    const auto* line = ledger->FindMessage(signed_id);
+    REQUIRE(line != nullptr);
+    CHECK(line->message["content"][0]["signature"] == "opaque-sig");
+}
+
+TEST_CASE("业务 JSON 的 signature/encrypted_content 键不当思考签名") {
+    Harness harness("business-signature");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    {
+        MessageDraft user;
+        user.turn_id = "turn-old";
+        user.purpose = MessagePurpose::Conversation;
+        user.origin = MessageOrigin::Human;
+        user.message = nlohmann::json::object({{"role", "user"}, {"content", BigText(900)}});
+        const WriteReceipt user_receipt = writer->AppendMessage(std::move(user), Durability::PowerLoss);
+        REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
+        MessageDraft declaration;
+        declaration.turn_id = "turn-old";
+        declaration.origin = MessageOrigin::SessionRuntime;
+        // 工具入参对象里的同名业务键(含空值):旧递归键名扫描会误报。
+        declaration.message = nlohmann::json::object(
+            {{"role", "assistant"},
+             {"tool_calls", nlohmann::json::array({nlohmann::json::object(
+                                {{"id", "call-biz"},
+                                 {"function", nlohmann::json::object({
+                                     {"name", "verify"},
+                                     {"arguments", nlohmann::json::object({{"signature", "business-sig"},
+                                                                           {"encrypted_content", "xx"},
+                                                                           {"empty_signature", ""}})}})}})})}});
+        const WriteReceipt declaration_receipt =
+            writer->AppendMessage(std::move(declaration), Durability::PowerLoss);
+        REQUIRE(declaration_receipt.status == WriteReceipt::Status::Committed);
+        MessageDraft tool;
+        tool.turn_id = "turn-old";
+        tool.origin = MessageOrigin::SessionRuntime;
+        tool.message = nlohmann::json::object(
+            {{"role", "tool"}, {"tool_call_id", "call-biz"}, {"content", "结果正文"}});
+        const WriteReceipt tool_receipt = writer->AppendMessage(std::move(tool), Durability::PowerLoss);
+        REQUIRE(tool_receipt.status == WriteReceipt::Status::Committed);
+        REQUIRE(writer->AdmitMessages({user_receipt.id, declaration_receipt.id, tool_receipt.id}).status ==
+                WriteReceipt::Status::Committed);
+    }
+    auto client = StepSummaryClient();
+    const auto result =
+        lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), ManualInput());
+    REQUIRE(result.applied);
+    CHECK_FALSE(result.retained_prefix_bound_payload);
+    CHECK_FALSE(NotesStartWith(result, "compact.material.payload_projected"));
+    // 业务参数是材料的一部分,投影不碰:参数原样进摘要请求。
+    bool saw_business_key = false;
+    for (const auto& message : client.last_messages) {
+        saw_business_key = saw_business_key || message.dump().find("business-sig") != std::string::npos;
+    }
+    CHECK(saw_business_key);
+}
+
+TEST_CASE("干跑与实跑同一份回放判定") {
+    Harness harness("signed-dryrun");
+    auto writer = harness.Start();
+    REQUIRE(writer);
+    harness.SeedTurn(*writer, "turn-old", BigText(900));
+    harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
+    AppendSignedThinkingMessage(*writer, "turn-keep", "opaque-sig");
+    auto input = ManualInput();
+    input.protected_turn_ids = {"turn-keep"};
+    input.dry_run = true;
+    auto client = StepSummaryClient();
+    const auto result = lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), input);
+    CHECK(result.terminal_kind == "dry_run");
+    CHECK(result.retained_prefix_bound_payload);
+    CHECK(result.replay_support == lubancode::runtime::V3CompactReplaySupport::Unknown);
+    CHECK(NotesStartWith(result, "compact.replay.unverified"));
     CHECK(client.calls == 0);
-    CHECK(writer->context().revision == revision);
+    // 干跑不落任何事件、不碰链。
+    auto lines = ReadJsonLines(harness.jsonl);
+    CHECK(EventsOf(lines, "compact.requested").empty());
+    CHECK(EventsOf(lines, "compact.failed").empty());
 }
 
 TEST_CASE("closed tool step removes declaration and selected result together") {
