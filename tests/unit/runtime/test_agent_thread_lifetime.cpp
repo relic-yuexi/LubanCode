@@ -99,8 +99,8 @@ struct Gate {
 };
 
 // 哨兵过期等待:死线内等共享状态析构(专职线程退出、最后一个引用归零),
-// 超时明败。
-bool WaitTokenExpired(std::weak_ptr<const void>& token) {
+// 超时明败。按值收:weak_ptr 拷贝只动控制块计数,调用侧好传 const。
+bool WaitTokenExpired(std::weak_ptr<const void> token) {
     for (int i = 0; i < 500; ++i) {
         if (token.expired()) {
             return true;
