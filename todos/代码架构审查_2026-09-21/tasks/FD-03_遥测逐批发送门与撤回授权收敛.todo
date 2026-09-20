@@ -1,0 +1,50 @@
+# FD-03 遥测逐批发送门与撤回授权收敛
+
+- 状态：源码已实施，远端 CI 验证中。
+- 日期：2026-09-21。实施：2026-09-21（worktree-agent-af8316276c5e9dfda，自 origin/main 分支）。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：B；严重度：高；重构批次：2。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。FD-03 先行，FD-10 接手时以 ExportPermitLocked/AdvanceExportGenerationLocked 为接缝——出口授权状态机全在 export_mutex_ 下，勿在锁外读写。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-03 | B | 高 | src/telemetry/service.cpp:1204；src/telemetry/service.cpp:1246；src/telemetry/service.cpp:1312；src/telemetry/service.cpp:1404；src/telemetry/service.cpp:1489；src/telemetry/service.hpp:154 | `RunExportPass` 入口才查 `export_paused_ \|\| !export_gate_reason_.empty()`；批内直接 `exporter_->Export(*record, &export_cancel_)`；`RevokeConsent` 只更新 gate，不撤销批内发送资格。 | 出口线程取到多批快照，首批发送期间用户 pause/revoke；调用返回后，当前 pass 仍会继续发第二批。头文件承诺非回环出口立即关门，执行点却只在整趟入口验门。现有测试在投影前 pause，revoke 测状态后立刻 Stop，没有覆盖批中撤回。 | 把授权/暂停/停止收成出口状态机，逐次发起请求前取得同代发送资格。revoke/pause 推进 generation 并取消在途传输；重入循环不得清掉新代取消标志。已发字节不可追回，但 API 返回后不许再获得新发送资格。probe 用独立取消源。 | 只锁状态转换，不持锁跨网络；取消不等于服务端未收到，ACK 与重发仍守现有 at-least-once 合同。 |
+
+## 修改边界
+
+- `src/telemetry/service.hpp`
+- `src/telemetry/service.cpp`
+- `tests/integration/telemetry/test_telemetry_otlp_export.cpp`
+
+## 实施顺序
+
+- [ ] 加确定时序的批中撤回用例。
+- [ ] 集中出口 gate/generation/cancel 所有权。
+- [ ] 逐批取得发送资格，再清理旧的入口一次性判定。
+
+## 验收门
+
+- [ ] 用闩锁阻住首批 fake export，期间 revoke，放开后确认第二批不启动。
+- [ ] 同场景覆盖 pause/resume；恢复仅发未确认批。
+- [ ] probe、stop、revoke 不得互相清掉取消。
+- [ ] 验证在途取消后的 ACK/重试账，不把取消当未发送证明。
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+
+## 合并取舍与估量
+
+只处理本单钉住的合同，不借题改邻接模块。
+
+预计可删除行数：0。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：端云协同可观测架构与Telemetry插件设计.todo。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：FD-10（src/telemetry/service.cpp, src/telemetry/service.hpp, tests/integration/telemetry/test_telemetry_otlp_export.cpp）。

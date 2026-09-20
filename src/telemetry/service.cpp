@@ -392,13 +392,16 @@ bool TelemetryService::Start() {
         export_stats_.configured = true;
         export_stats_.endpoint_display = SanitizeEndpointForDisplay(options_.exporter.endpoint);
         export_stats_.endpoint_loopback = EndpointIsLoopback(options_.exporter.endpoint);
+        // 授权状态机开新纪元(FD-03):代回到 1,撤回/取消残留清零。
+        export_generation_ = 1;
+        export_revoked_ = false;
+        export_cancel_.store(false);
         EvaluateExportGateLocked();
     }
     started_at_ms_ = platform::WallClockNowMs();
     stop_.store(false);
     worker_ = std::thread([this] { WorkerLoop(); });
     if (exporter_ != nullptr) {
-        export_cancel_.store(false);
         export_thread_ = std::thread([this] { ExportLoop(); });
     }
     running_.store(true);
@@ -410,13 +413,16 @@ void TelemetryService::Stop() {
         return;
     }
     stop_.store(true);
-    export_cancel_.store(true);  // §26.4 正在传输的请求发取消
     {
         std::lock_guard<std::mutex> lock(wake_mutex_);
         wake_cv_.notify_all();
     }
     {
         std::lock_guard<std::mutex> lock(export_mutex_);
+        // §26.4 正在传输的请求发取消。停止也是授权面变化:同锁推代
+        //(FD-03),probe 的独立取消源一并置位,收场有界。
+        AdvanceExportGenerationLocked();
+        probe_cancel_.store(true);
         export_wake_ = true;
         export_cv_.notify_all();
     }
@@ -1175,6 +1181,27 @@ void TelemetryService::EvaluateExportGateLocked() {
     export_stats_.gate_reason = export_gate_reason_;
 }
 
+void TelemetryService::AdvanceExportGenerationLocked() {
+    // export_mutex_ 已持有。闭门变化(pause-on/revoke/stop/永久错)统一
+    // 走此口:推代 + 取消在途(FD-03)。在途请求持旧代资格,见到取消即
+    // 以 Cancelled 收场——不算失败账,批不 ACK,留给后继代重发。
+    export_generation_ += 1;
+    export_cancel_.store(true);
+}
+
+bool TelemetryService::ExportPermitLocked() {
+    // export_mutex_ 已持有。逐批发送资格(FD-03):四门全过才放行。
+    if (stop_.load() || export_paused_ || export_revoked_ || !export_gate_reason_.empty()) {
+        return false;
+    }
+    // 放行即本批的同代资格。此处也是取消残留的唯一清理点:闭门变化与
+    // 本判定同一把锁串行,且闭门必令本判定 false——能走到这里,残留
+    // 必属旧代,清掉不会误伤新代的取消;新代取消若已置,本判定根本
+    // 过不来(门已被闭门方关上)。重入循环因此清不掉新代取消标志。
+    export_cancel_.store(false);
+    return true;
+}
+
 void TelemetryService::ExportLoop() {
     while (!stop_.load()) {
         RunExportPass();
@@ -1200,15 +1227,9 @@ bool TelemetryService::RunExportPass() {
     if (exporter_ == nullptr || spool_ == nullptr) {
         return true;
     }
-    {
-        std::lock_guard<std::mutex> lock(export_mutex_);
-        if (export_paused_ || !export_gate_reason_.empty()) {
-            // 停出口(pause/门关):投影照跑,spool 照落(§24.2 pause 语义;
-            // 门关原因进状态面)。flush 等待方要知道"没得发"。
-            flush_cv_.notify_all();
-            return true;
-        }
-    }
+    // FD-03:门不再在整趟入口一次性判——授权/暂停/撤回/停止逐批发起
+    // 前重取(ExportPermitLocked)。整趟期间闭门的变化拦得住下一只批;
+    // 投影照跑,spool 照落(§24.2 pause 语义,门关原因进状态面)。
 
     // 段序快照(§18.2 段内批序即落盘序):严格 FIFO,一只批卡住,后面
     // 的不抢跑——at-least-once 的顺序账面干净,双限兜住毒批。
@@ -1241,9 +1262,23 @@ bool TelemetryService::RunExportPass() {
     static thread_local std::mt19937_64 rng(std::random_device{}());
     std::vector<std::string> acks;
     bool stopped = false;
+    bool authority_blocked = false;  // FD-03:批间失去发送资格(非传输错)
     for (const SegmentSnapshot& segment : snapshot) {
         std::optional<std::vector<SpoolBatchRecord>> records;
         for (const std::string& batch_id : segment.batch_ids) {
+            // FD-03 逐批发送资格:每只批动手前在锁内重验 pause/revoke/
+            // 门/停止。首批在途期间闭门,调用返回后本趟不再发下一批。
+            {
+                std::lock_guard<std::mutex> lock(export_mutex_);
+                if (!ExportPermitLocked()) {
+                    authority_blocked = true;
+                    // flush 等待方要知道"没得发"。
+                    flush_cv_.notify_all();
+                }
+            }
+            if (authority_blocked) {
+                break;
+            }
             const std::int64_t now_ms = platform::WallClockNowMs();
             int attempts = 0;
             std::int64_t next_eligible_ms = 0;
@@ -1309,9 +1344,9 @@ bool TelemetryService::RunExportPass() {
             if (record == nullptr) {
                 continue;  // 段在快照后已退场(并发 ACK/TTL):不是错,跳过
             }
-            if (!stop_.load()) {
-                export_cancel_.store(false);  // 只在关停时置位,这里清残留
-            }
+            // 取消残留已在逐批资格点清过(FD-03 唯一清理点);此处不再
+            // 无锁 store(false)——旧写法会把 revoke/pause/stop 刚置的新代
+            // 取消一并抹掉。
             {
                 std::lock_guard<std::mutex> lock(export_mutex_);
                 export_stats_.in_flight = 1;
@@ -1364,6 +1399,7 @@ bool TelemetryService::RunExportPass() {
                     // §19.2:永久错停该 endpoint generation,报 doctor。
                     std::lock_guard<std::mutex> lock(export_mutex_);
                     export_gate_reason_ = "telemetry.export.http_permanent";
+                    AdvanceExportGenerationLocked();  // 停代也是闭门变化(FD-03)
                     export_stats_.gate_reason = export_gate_reason_;
                     export_stats_.last_error_at_ms = now_ms;
                     export_stats_.last_error_code = attempt.error_code;
@@ -1372,7 +1408,10 @@ bool TelemetryService::RunExportPass() {
                     break;
                 }
                 case ExportOutcomeKind::Cancelled: {
-                    stopped = true;  // 关停:立刻收
+                    // 关停/撤回/暂停掐的在途(FD-03):立刻收趟。取消不算
+                    // 失败账,批不 ACK——服务端可能已收到,重发按 batch id
+                    // 幂等(at-least-once 不因取消破账)。
+                    stopped = true;
                     break;
                 }
             }
@@ -1380,7 +1419,7 @@ bool TelemetryService::RunExportPass() {
                 break;
             }
         }
-        if (stopped) {
+        if (stopped || authority_blocked) {
             break;
         }
     }
@@ -1391,8 +1430,8 @@ bool TelemetryService::RunExportPass() {
         std::lock_guard<std::mutex> lock(export_mutex_);
         flush_cv_.notify_all();
     }
-    if (stopped) {
-        return false;  // 卡在退避/永久错/取消:flush 等待方按未出清看
+    if (stopped || authority_blocked) {
+        return false;  // 卡在退避/永久错/取消/失格:flush 等待方按未出清看
     }
     {
         // 出清 = 没有段剩(ACK 后段已删,以 spool 现账为准)。
@@ -1403,7 +1442,15 @@ bool TelemetryService::RunExportPass() {
 
 void TelemetryService::SetExportPaused(bool paused) {
     std::lock_guard<std::mutex> lock(export_mutex_);
-    export_paused_ = paused;
+    if (export_paused_ != paused) {
+        export_paused_ = paused;
+        export_generation_ += 1;  // 授权面变化推代(FD-03)
+        if (paused) {
+            // 暂停即收回在途与后续发送资格:掐在途,恢复前不再发新批。
+            export_cancel_.store(true);
+        }
+        // 恢复不碰取消标志:旧代残留由下一张发送资格统一清。
+    }
     export_stats_.paused = paused;
     export_wake_ = true;
     export_cv_.notify_all();
@@ -1432,8 +1479,8 @@ bool TelemetryService::Flush(std::int64_t bounded_ms) {
     std::unique_lock<std::mutex> lock(export_mutex_);
     while (true) {
         // 出清判据:没在等退避的批,且 spool 里没有 sealed 段,或出口被
-        // pause/门关(§24.2 不强制等公网无限久)。
-        bool blocked = export_paused_ || !export_gate_reason_.empty();
+        // pause/撤回/门关(§24.2 不强制等公网无限久;FD-03 撤回同列)。
+        bool blocked = export_paused_ || export_revoked_ || !export_gate_reason_.empty();
         bool waiting_retry = false;
         for (const auto& [id, retry] : export_retry_) {
             (void)id;
@@ -1481,6 +1528,10 @@ bool TelemetryService::GrantConsent() {
     }
     std::lock_guard<std::mutex> lock(export_mutex_);
     EvaluateExportGateLocked();
+    // 再授权(FD-03):清撤回标记,授权面推代(开门变化不碰取消——旧代
+    // 残留由下一张发送资格统一清)。
+    export_revoked_ = false;
+    export_generation_ += 1;
     export_wake_ = true;
     export_cv_.notify_all();
     return true;
@@ -1490,8 +1541,15 @@ bool TelemetryService::RevokeConsent() {
     const bool removed = consent_store_.has_value() ? consent_store_->Remove() : true;
     std::lock_guard<std::mutex> lock(export_mutex_);
     EvaluateExportGateLocked();
+    // FD-03:撤回不只改门面——收回发送资格。推代 + 取消在途;再授权前
+    // 逐批资格一律不发(回环端点同样生效,门面 gate_reason 仍按端点推
+    // 导)。已发字节追不回:取消不等于服务端没收到,本批不 ACK、下代
+    // 重发,at-least-once 合同不破。
+    export_revoked_ = true;
+    AdvanceExportGenerationLocked();
     export_wake_ = true;
     export_cv_.notify_all();
+    flush_cv_.notify_all();
     return removed;
 }
 
@@ -1536,8 +1594,11 @@ std::optional<ExportAttempt> TelemetryService::ProbeEndpoint() const {
     if (exporter_ == nullptr) {
         return std::nullopt;
     }
-    export_cancel_.store(false);
-    return exporter_->Probe(&export_cancel_);
+    // FD-03:probe 独立取消源。旧实现复用 export_cancel_ 并先清零——会把
+    // stop/revoke 刚给出口在途请求置的取消一并抹掉。probe 只管自己的
+    // 取消旗,出口的取消只有发送资格点能动。
+    probe_cancel_.store(false);
+    return exporter_->Probe(&probe_cancel_);
 }
 
 TelemetryServiceStatus TelemetryService::Status() const {

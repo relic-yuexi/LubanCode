@@ -110,6 +110,7 @@ struct FakeResponse {
     std::map<std::string, std::string> headers;  // 额外响应头(Retry-After)
     bool drop = false;                           // 收了不回(ACK 丢)
     bool hold_until_stop = false;                // 收体后保持连接，不回响应
+    bool hold_with_latch = false;                // 收体后扣住响应等放闸(FD-03 闩锁)
 };
 
 class FakeCollector {
@@ -148,6 +149,15 @@ public:
         if (thread_.joinable()) {
             thread_.join();
         }
+        {
+            // 闩上没放的连接直接收口(测试提前收场的兜底),别让 fd 漏。
+            // join 之后再扫:serve 线程已停,不会有新压进来的。
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (HeldConn& held : held_) {
+                CloseSocket(held.fd);
+            }
+            held_.clear();
+        }
     }
 
     std::string endpoint() const { return "http://127.0.0.1:" + std::to_string(port_); }
@@ -156,6 +166,20 @@ public:
     void Queue(FakeResponse response) {
         std::lock_guard<std::mutex> lock(mutex_);
         script_.push_back(std::move(response));
+    }
+
+    // FD-03 闩锁放闸:把扣住的响应按扣住顺序补发。此后闩常开(一次放
+    // 闸放尽存量;再闩需新造 collector)。
+    void ReleaseHeld() {
+        std::vector<HeldConn> to_send;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            to_send.swap(held_);
+        }
+        for (HeldConn& held : to_send) {
+            (void)SendAll(held.fd, BuildResponseBytes(held.response));
+            CloseSocket(held.fd);
+        }
     }
 
     std::vector<CollectedRequest> Requests() const {
@@ -169,6 +193,11 @@ public:
     }
 
 private:
+    struct HeldConn {
+        socket_t fd = kInvalidSocket;
+        FakeResponse response;
+    };
+
     void ServeLoop() {
         while (!stop_.load()) {
             sockaddr_in client{};
@@ -182,8 +211,9 @@ private:
             if (client_fd == kInvalidSocket) {
                 return;  // listener 关了(析构)
             }
-            ServeOne(client_fd);
-            CloseSocket(client_fd);
+            if (ServeOne(client_fd)) {
+                CloseSocket(client_fd);
+            }
         }
     }
 
@@ -200,7 +230,8 @@ private:
         return true;
     }
 
-    void ServeOne(socket_t client_fd) {
+    // 回 false = 连接被 ServeOne 另有归属(闩锁扣进 held_),调用方别关。
+    bool ServeOne(socket_t client_fd) {
         // 收头(带超时,防坏连接吊死测试)。
 #ifdef _WIN32
         DWORD timeout = 4000;
@@ -216,13 +247,13 @@ private:
         while (data.find("\r\n\r\n") == std::string::npos && data.size() < 64 * 1024) {
             const int n = ::recv(client_fd, buffer, sizeof(buffer), 0);
             if (n <= 0) {
-                return;
+                return true;
             }
             data.append(buffer, static_cast<std::size_t>(n));
         }
         const std::size_t header_end = data.find("\r\n\r\n");
         if (header_end == std::string::npos) {
-            return;
+            return true;
         }
         CollectedRequest request;
         std::istringstream head(data.substr(0, header_end));
@@ -261,7 +292,7 @@ private:
         while (request.body.size() < content_length) {
             const int n = ::recv(client_fd, buffer, sizeof(buffer), 0);
             if (n <= 0) {
-                return;
+                return true;
             }
             request.body.append(buffer, static_cast<std::size_t>(n));
         }
@@ -276,17 +307,30 @@ private:
             }
             received_.push_back(std::move(request));
         }
+        if (response.hold_with_latch) {
+            // FD-03 闩锁:请求照收照计数,响应扣住不回,连接移交 held_;
+            // accept 循环照常接客(后续连接的到达可观察,probe 等并发交
+            // 错靠它定位),ReleaseHeld() 才补发。
+            std::lock_guard<std::mutex> lock(mutex_);
+            held_.push_back(HeldConn{client_fd, std::move(response)});
+            return false;
+        }
         if (response.hold_until_stop) {
             // 与 drop 的立即断连分开：这条连接在 collector 收场前不回 ACK，
             // 避免脚本耗尽后默认 200 把待验 spool 提前清掉。
             while (!stop_.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            return;
+            return true;
         }
         if (response.drop) {
-            return;  // ACK 丢:收货不回
+            return true;  // ACK 丢:收货不回
         }
+        (void)SendAll(client_fd, BuildResponseBytes(response));
+        return true;
+    }
+
+    static std::string BuildResponseBytes(const FakeResponse& response) {
         std::string out = "HTTP/1.1 " + std::to_string(response.status) + " x\r\n";
         out += "Content-Type: application/json\r\n";
         out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
@@ -295,7 +339,7 @@ private:
             out += name + ": " + value + "\r\n";
         }
         out += "\r\n" + response.body;
-        (void)SendAll(client_fd, out);
+        return out;
     }
 
     socket_t listener_ = kInvalidSocket;
@@ -304,6 +348,7 @@ private:
     std::atomic<bool> stop_{false};
     mutable std::mutex mutex_;
     std::deque<FakeResponse> script_;
+    std::vector<HeldConn> held_;  // 闩住的连接(FD-03)
     std::vector<CollectedRequest> received_;
 };
 
@@ -1002,6 +1047,182 @@ TEST_CASE("pause:停出口,投影与 spool 照常落(§24.2)") {
     }, 10000));
     CHECK(collector.RequestCount() >= 1);
     service.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// FD-03:遥测逐批发送门与撤回授权收敛。闩锁响应(hold_with_latch)拦住
+// 首批 fake export,期间 pause/revoke,放闸后验证第二批不启动;交错全
+// 靠闩锁与 in_flight/RequestCount 观察点定位,不赌 sleep 时序。
+// ---------------------------------------------------------------------------
+
+// 共用开场:出口先暂停攒两只 sealed 批,再开闸放一趟;首批吃闩锁挂住。
+// 回首批的 batch id。前置 REQUIRE 全在内部钉死。
+std::string EnterFirstBatchInFlight(FakeCollector& collector, TelemetryService& service,
+                                    JournalFixture& fixture) {
+    service.SetExportPaused(true);  // 先攒批,不出口
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.spool.sealed_batches >= 1;
+    }));
+    fixture.CompleteTurn("turn-0002");
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.spool.sealed_batches >= 2;
+    }));
+    service.SetExportPaused(false);  // 开闸:一趟快照带两批,首批吃闩
+    REQUIRE(WaitUntil([&] {
+        return collector.RequestCount() == 1 &&
+               service.Status().exporter.in_flight == 1;
+    }));
+    const auto first = collector.Requests();
+    REQUIRE(first.size() == 1);
+    return first.front().headers.at("x-lubancode-batch-id");
+}
+
+TEST_CASE("FD-03 批中撤回:首批在途时 revoke,放闸后第二批不启动;再授权按 at-least-once 补送") {
+    JournalFixture fixture("fd03revoke");
+    fixture.CompleteTurn("turn-0001");
+
+    FakeCollector collector;
+    collector.Queue(FakeResponse{.hold_with_latch = true});  // 首批闩住
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       "lubancode-tel-e2e-fd03-revoke";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryService service(MakeOptions(root, collector.endpoint()));
+    REQUIRE(service.Start());
+    const std::string first_batch_id =
+        EnterFirstBatchInFlight(collector, service, fixture);
+
+    // 首批在途时撤回授权(FD-03:revoke 推代 + 取消在途 + 收回逐批资格;
+    // 回环端点门面不动,但发送资格同样收回)。
+    service.RevokeConsent();
+    collector.ReleaseHeld();  // 放闸:collector 补一记 200(服务端可能已收到)
+
+    REQUIRE(WaitUntil([&] { return service.Status().exporter.in_flight == 0; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(collector.RequestCount() == 1);  // 第二批不启动
+    {
+        const auto status = service.Status();
+        // 取消不当未发送证明、也不进失败账:无 ACK、无重试账,批账全在。
+        CHECK(status.exporter.exported_batches_total == 0);
+        CHECK(status.exporter.retried_batches_total == 0);
+        CHECK(status.spool.sealed_batches >= 2);
+    }
+
+    // 再授权:新代取得资格,首批按同 batch id 重发(对端幂等),第二批
+    // 随后出清——at-least-once 不因取消破账。
+    REQUIRE(service.GrantConsent());
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.spool.segments == 0 && status.spool.active_batches == 0;
+    }, 15000));
+    const auto requests = collector.Requests();
+    REQUIRE(requests.size() >= 3);
+    CHECK(requests[0].headers.at("x-lubancode-batch-id") == first_batch_id);
+    CHECK(requests[1].headers.at("x-lubancode-batch-id") == first_batch_id);  // 重发同 id
+    CHECK(requests[1].body == requests[0].body);                              // 同负载
+    CHECK(requests[2].headers.at("x-lubancode-batch-id") != first_batch_id);  // 第二批
+    CHECK(service.Status().exporter.exported_batches_total >= 2);
+    service.Stop();
+    fixture.CloseRun();
+}
+
+TEST_CASE("FD-03 批中暂停:首批在途时 pause,放闸后第二批不启动;恢复仅发未确认批") {
+    JournalFixture fixture("fd03pause");
+    fixture.CompleteTurn("turn-0001");
+
+    FakeCollector collector;
+    collector.Queue(FakeResponse{.hold_with_latch = true});
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       "lubancode-tel-e2e-fd03-pause";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryService service(MakeOptions(root, collector.endpoint()));
+    REQUIRE(service.Start());
+    const std::string first_batch_id =
+        EnterFirstBatchInFlight(collector, service, fixture);
+
+    service.SetExportPaused(true);  // 首批在途时暂停(FD-03:推代 + 取消在途)
+    collector.ReleaseHeld();        // 放闸:200 迟到,取消已置
+
+    REQUIRE(WaitUntil([&] { return service.Status().exporter.in_flight == 0; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(collector.RequestCount() == 1);  // 暂停中第二批不启动
+    CHECK(service.Status().exporter.paused);
+    CHECK(service.Status().spool.sealed_batches >= 2);  // 批账不丢
+
+    // 恢复:只发未确认批——首批(cancel 后无 ACK)按同 id 重发,第二批
+    // 出清;已确认的批不再发。
+    service.SetExportPaused(false);
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.spool.segments == 0 && status.spool.active_batches == 0;
+    }, 15000));
+    const auto requests = collector.Requests();
+    REQUIRE(requests.size() >= 3);
+    CHECK(requests[1].headers.at("x-lubancode-batch-id") == first_batch_id);
+    CHECK(requests[2].headers.at("x-lubancode-batch-id") != first_batch_id);
+    // 出清后稳态:确认过的批不再发。
+    const std::size_t settled = requests.size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(collector.RequestCount() == settled);
+    service.Stop();
+    fixture.CloseRun();
+}
+
+TEST_CASE("FD-03 probe 独立取消源:pause 在途期间 probe 不抹出口取消,自身照跑") {
+    JournalFixture fixture("fd03probe");
+    fixture.CompleteTurn("turn-0001");
+
+    FakeCollector collector;
+    collector.Queue(FakeResponse{.hold_with_latch = true});
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       "lubancode-tel-e2e-fd03-probe";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryService service(MakeOptions(root, collector.endpoint()));
+    REQUIRE(service.Start());
+    const std::string first_batch_id =
+        EnterFirstBatchInFlight(collector, service, fixture);
+
+    service.SetExportPaused(true);  // 取消已置(在途将被掐)
+    // probe 与出口并发:走独立取消源,不许把出口刚置的取消抹掉(旧实现
+    // 复用 export_cancel_ 且先清零,正是这一抹)。probe 请求此刻到达
+    // collector(闩只扣响应,accept 照接)——到达即可观察,不赌时序。
+    std::thread prober([&service] { (void)service.ProbeEndpoint(); });
+    const bool probe_arrived = WaitUntil([&] { return collector.RequestCount() == 2; });
+    collector.ReleaseHeld();  // 放闸:出口取消仍在,probe 照常收 200
+    prober.join();            // 先收线程再断言,REQUIRE 挂了也不至于 terminate
+    REQUIRE(probe_arrived);
+    {
+        const auto requests = collector.Requests();
+        CHECK(requests[1].headers.find("x-lubancode-batch-id") == requests[1].headers.end());
+        const nlohmann::json body = nlohmann::json::parse(requests[1].body, nullptr, false);
+        REQUIRE(body.is_object());
+        REQUIRE(body.contains("resourceSpans"));
+        REQUIRE(body.at("resourceSpans").is_array());
+        CHECK(body.at("resourceSpans").empty());  // 探针无业务数据(§24.2)
+    }
+
+    REQUIRE(WaitUntil([&] { return service.Status().exporter.in_flight == 0; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(collector.RequestCount() == 2);  // probe 没抹掉取消:第二批仍不启动
+
+    service.SetExportPaused(false);  // 恢复后补送出清
+    REQUIRE(WaitUntil([&] {
+        const auto status = service.Status();
+        return status.spool.segments == 0 && status.spool.active_batches == 0;
+    }, 15000));
+    const auto requests = collector.Requests();
+    REQUIRE(requests.size() >= 4);  // 批1 + probe + 批1重发 + 批2
+    CHECK(requests[2].headers.at("x-lubancode-batch-id") == first_batch_id);
+    CHECK(requests[3].headers.at("x-lubancode-batch-id") != first_batch_id);
+    service.Stop();
+    fixture.CloseRun();
 }
 
 TEST_CASE("spool clear:两步删除后批账落 tombstone,cursor 对账不报孤儿(§24.2/§18.5)") {
