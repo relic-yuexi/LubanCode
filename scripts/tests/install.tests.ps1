@@ -478,11 +478,10 @@ try {
 }
 
 # =====================================================================
-# 无基线旧安装:needs-review 停手(子进程跑,断言退出码 3)与
-# -AllowUnknownReplace 备份后整目录替换。
+# 无基线旧安装:按新包白名单覆盖;旧参数也不能删除包外文件。
 # =====================================================================
 Write-Host ""
-Write-Host "==== 无基线 needs-review / 整目录确认 ====" -ForegroundColor Cyan
+Write-Host "==== 无基线白名单覆盖 / 旧参数兼容 ====" -ForegroundColor Cyan
 
 $nrRoot = Join-Path ([IO.Path]::GetTempPath()) ("lubancode-nr-test-" + [Guid]::NewGuid().ToString('N'))
 try {
@@ -496,22 +495,22 @@ try {
     Set-Content -LiteralPath (Join-Path $inst 'lubancode.exe') -Value 'fake exe old' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $inst 'skills\mine-skill\SKILL.md') -Value 'precious user skill' -Encoding UTF8
 
-    # 子进程整脚本跑:默认应 needs-review 退 3,先备份,不动安装。
+    # 子进程跑默认入口:无需基线,备份后逐文件覆盖。
     # Windows 有 powershell(5.1),ubuntu 只有 pwsh——按环境挑。
     $childPs = 'powershell'
     if (-not (Get-Command powershell -ErrorAction SilentlyContinue)) { $childPs = 'pwsh' }
     $out = & $childPs -NoProfile -ExecutionPolicy Bypass -File $installScript `
         -SourceExe (Join-Path $pkg 'lubancode.exe') -InstallDir $inst -SkipPath 2>&1
-    Assert-Equal -Name '无基线默认 needs-review 退出码 3' -Expected 3 -Actual $LASTEXITCODE
-    Assert-FileText -Name 'needs-review 后用户技能仍在原地' `
-        -Path (Join-Path $inst 'skills\mine-skill\SKILL.md') -ExpectedText 'precious user skill'
-    Assert-FileText -Name 'needs-review 后旧 exe 仍未被换' -Path (Join-Path $inst 'lubancode.exe') -ExpectedText 'fake exe old'
+    Assert-True -Name '无基线安装不再因缺清单退 3(假 exe 最后校验可退 1)' -Actual ($LASTEXITCODE -in @(0, 1))
+    Assert-FileText -Name '白名单同名技能已换新' `
+        -Path (Join-Path $inst 'skills\mine-skill\SKILL.md') -ExpectedText 'new official'
+    Assert-FileText -Name '无基线也能换新 exe' -Path (Join-Path $inst 'lubancode.exe') -ExpectedText 'fake exe new'
     $backupDirs = @(Get-ChildItem -LiteralPath (Join-Path $inst 'backups') -Directory -ErrorAction SilentlyContinue)
-    Assert-Equal -Name 'needs-review 前先做了一次完整备份' -Expected 1 -Actual $backupDirs.Count
+    Assert-Equal -Name '白名单覆盖前保存旧文件' -Expected 1 -Actual $backupDirs.Count
     Assert-FileText -Name '完整备份里有用户技能原件' `
         -Path (Join-Path $backupDirs[0].FullName 'skills\mine-skill\SKILL.md') -ExpectedText 'precious user skill'
 
-    # 显式确认:备份后整目录替换
+    # 旧参数兼容:仍按白名单逐项更新
     $out2 = & $childPs -NoProfile -ExecutionPolicy Bypass -File $installScript `
         -SourceExe (Join-Path $pkg 'lubancode.exe') -InstallDir $inst -SkipPath -AllowUnknownReplace 2>&1
     # 假 exe 跑不动 --version:Windows 下整脚本会在最后一步校验失败退 1;
@@ -580,6 +579,8 @@ try {
 }
 
 Write-Host ""
+. (Join-Path $scriptDir 'install.legacy.tests.ps1')
+
 Write-Host "共 $($script:passCount + $script:failCount) 项,通过 $($script:passCount),失败 $($script:failCount)" -ForegroundColor $(if ($script:failCount -eq 0) { 'Green' } else { 'Red' })
 
 if ($script:failCount -gt 0) {

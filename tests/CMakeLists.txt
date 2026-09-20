@@ -180,6 +180,17 @@ add_dependencies(lubancode_tests updater_lock_racer)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_UPDATER_RACER_EXE="$<TARGET_FILE:updater_lock_racer>")
 
+# ---- 更新器 C++ 化批三第①单:引擎册的假 EXE 探针靶子 ----------------------
+# updater_probe_stub:--version 印 "lubancode <版本>"的最小可执行,版本走
+# 环境变量 LUBANCODE_PROBE_STUB_VERSION 注入(测试册设好再跑引擎,探针子
+# 进程继承)。引擎册的坏包/端到端矩阵用它充当包内 EXE;真 EXE 探针另有
+# 专测,直接用 LUBANCODE_BINARY_DIR 的主程序。
+add_executable(updater_probe_stub support/updater_probe_stub.cpp)
+target_compile_features(updater_probe_stub PRIVATE cxx_std_23)
+add_dependencies(lubancode_tests updater_probe_stub)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_UPDATER_PROBE_STUB_EXE="$<TARGET_FILE:updater_probe_stub>")
+
 # 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
 #    目录(scripts/fetch_ripgrep.sh 的产物,如 build/rg-stage/libexec)。
 #    configure 时校一遍版本(与 third_party/ripgrep/manifest.json 对账),

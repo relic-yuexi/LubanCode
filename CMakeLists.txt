@@ -983,6 +983,25 @@ add_library(lubancode_engine STATIC
   src/updater/layout.cpp
   src/updater/txn.cpp
   src/updater/lock.cpp
+  # 更新助手 C++ 化·批三第①单(引擎主链):无副作用探针(probe——隔离
+  # 数据根跑 <exe> --version,首行认 "lubancode <版本>" 协议)+ 五动词
+  # 事务引擎(engine——锁/续跑/磁盘预检/下载或本地包/解包/验包/预检缝/
+  # 激活/健康检查/提交/回滚/gc/status,编排照 scripts/updater.py 的
+  # cmd_update L1185-1287)。CLI 装配与所有权预检(install_scan+
+  # whitelist_plan)是批三③的活,引擎只留 PrecheckFn 缝。
+  src/updater/probe.cpp
+  src/updater/engine.cpp
+  # 更新助手 C++ 化·批三第②单(扫描/apply/交接):盘面扫描层
+  # (install_scan——受管树全递归+根件入账、FoldKey 键、reparse 专探、
+  # 惰性 sha256 流式补、孤儿 reparse 点名阻断)、白名单 apply 落地层
+  # (install_apply——Replace 先备份再落盘、目录按需建、占位/父链体检、
+  # 拷贝+fsync、install-state 走 layout 写路回填)与平铺交接层
+  # (flat_handover——完整备份两步落位、旧根 EXE rename 让位不强杀、
+  # 回滚摘 current.json)。行为权威 install.ps1 终稿(PR #140)与
+  # scripts/install_plan.py / scripts/updater.py,批三③引擎层在此叠。
+  src/updater/install_scan.cpp
+  src/updater/install_apply.cpp
+  src/updater/flat_handover.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
