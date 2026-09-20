@@ -71,8 +71,11 @@ jobs:
             # telemetry 面(35411986773 案集成册 :1012 间歇红):cursor 原子
             # 替换会被并发读者句柄短拒、出口持锁整读段文件会被过滤驱动拖
             # 数秒,同为 windows 独有病灶,同列。
+            # 平台原子写本体(FD-04 提交阶段合同):MoveFileExW 换名、目录
+            # FlushFileBuffers 与过滤驱动短拒分类都在 windows 上显形,改到
+            # 这三个文件的 PR 须双平台验。
             case "$f" in
-              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*)
+              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*|src/platform/atomic_write.cpp|src/platform/atomic_write.hpp|tests/unit/platform/test_atomic_write.cpp)
                 memory_worker=true ;;
             esac
             case "$f" in
