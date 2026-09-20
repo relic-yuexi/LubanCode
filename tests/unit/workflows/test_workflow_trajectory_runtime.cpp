@@ -469,3 +469,62 @@ edges:
         CHECK(EveryEdgeOk(report));
     }
 }
+
+// AR-03(Workflow 并行项共写同一节点执行记录):map 并发两项 + 子账(node
+// stream)开张故障——失败路径也要各写各的执行账。旧实现这里在锁外写共享
+// 槽,两项并发踩;修复后 attempt/错误收进各 RunNode 的本地账,提交口持锁
+// 落投影。功能性合同:两项都 fail closed,map 汇总照常收束,verify 过。
+TEST_CASE("runtime 集成 5:并发 map 撞子账故障——项级失败互不串账(AR-03)") {
+    const char* yaml = R"YAML(
+schema_version: 1
+id: map-nodefault
+version: 1.0.0
+name: mn
+entry: enrich
+limits:
+  max_concurrency: 2
+nodes:
+  enrich:
+    type: map
+    items: "${inputs.papers}"
+    body: read_one
+    max_concurrency: 2
+  read_one:
+    type: transform
+    operation: echo
+  fin:
+    type: end
+edges:
+  - { from: enrich, on: success, to: fin }
+)YAML";
+    const WorkflowDefinition def = ParseOrDie(yaml);
+    auto opened = OpenLedger(FreshDir("lubancode-wf-traj-mapnodefault"), {},
+                             [] { return std::string("io.create_failed"); });
+    REQUIRE(opened.has_value());
+    auto ledger = std::make_unique<lubancode::runtime::TrajectorySessionLedger>(std::move(*opened));
+
+    auto executor = std::make_shared<BehaviorExecutor>();
+    RuntimeOptions options;
+    options.executors[NodeKind::Transform] = executor;
+    options.trajectory_ledger = ledger.get();
+    const WorkflowRunSummary summary = WorkflowRuntime(std::move(options)).Run(
+        def, RunInputs{nlohmann::json{{"papers", nlohmann::json::array({"p0", "p1"})}}});
+
+    // map 容忍项级失败(join 后 failures 计数):run 收在成功态。
+    REQUIRE(summary.state == RunState::Succeeded);
+    // 两项都没执行(fail closed:子账开不出,执行器零调用)。
+    CHECK(executor->calls.count("read_one") == 0);
+    // 节点投影是完整一笔(不是两项字段互相踩出来的碎片):状态与错误码
+    // 齐整,map 自己的账也是 Succeeded。
+    CHECK(summary.nodes.at("read_one").state == NodeState::Failed);
+    CHECK(summary.nodes.at("read_one").error_code == "trajectory_node_start_failed");
+    CHECK_FALSE(summary.nodes.at("read_one").error_message.empty());
+    CHECK(summary.nodes.at("enrich").state == NodeState::Succeeded);
+    // 编排账在场,verify 全过(并发失败路径不裂账)。
+    const fs::path run_dir = WorkflowRunDir(*ledger, summary.run_id);
+    const auto orchestration = KindsOf(run_dir / "workflow.jsonl");
+    CHECK(std::count(orchestration.begin(), orchestration.end(), "workflow.node.failed") == 2);
+    const auto report = ledger->VerifySession();
+    CHECK(report.error_code.empty());
+    CHECK(EveryEdgeOk(report));
+}
