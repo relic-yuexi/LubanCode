@@ -1,6 +1,6 @@
 # HC-01：收敛Provider展开规则并给角色后端缓存明确失效条件
 
-状态：已落码，验收交 CI（证据见文末勾账）。
+状态：已销单。PR #165（CI run 35541691854 rollup 绿，2026-09-21）；待合并。
 
 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
 
@@ -47,6 +47,11 @@ if (cached != provider_backends_.end()) { return cached->second.get(); }
 - 缓存版本键：新增 `config::ProviderConnectionFingerprint(ProviderConfig)`（src/config/config.cpp），口径 = ApplyProviderToRuntimeConfig 字段集 + ResolveProviderAuth 解析后鉴权值；model_reasoning_effort 不进指纹。`ModelRouterService::BackendForProvider` 命中前先 FindProvider 再比指纹：条目被删 → 清缓存交空指针；被编辑 → 弃旧重建。缓存值改 shared_ptr（换槽时旧 client 活到在途引用松手；Route 仍只在主线程回合边界同步用，worker/嵌套走 RouteDetached 独占——主后端与 detached 后端寿命合同不变）。
 - 配置提交点：settings_commands.cpp 三处 /provider set 分支（native_web_search/extra_body/extra_header）由"先改内存后落盘"倒序为"先落盘成功再改内存"，与既有 auth、Remove 分支同序——失败提交不再半改内存，缓存读不到半更新。
 - 合同测试（tests/unit/memory/test_model_router.cpp，先于动刀落笔）："HC-01 Provider 展开合同"钉字段逐项来自目标端 + 非连接全局项继承 + 活跃端/空名/ghost 三口径；"HC-01 缓存失效合同"钉复用/编辑重建/指纹外字段不误伤/删除交空。
+
+验收证据（2026-09-21）：
+- PR：https://github.com/relic-yuexi/LubanCode/pull/165
+- CI：run 35541691854（worktree-agent-ab2c81a7c69aeeacd 分支，pull_request 事件）rollup=success，25m45s；macos-clang 腿 Test 602 例全过（含 unit.memory.model_router 18 例）。首跑 35540203149 曾红：两处均为测试判据自身毛病（"原样副本"期望值写岔、"编辑后重建"以指针不等为证被同址复用打脸），源码零改动，de5acf08 修正后全绿。
+- 接缝：HC-07 可直接复用 DeriveProviderRuntimeConfig（展开口径）与 ProviderConnectionFingerprint（版本键）立"持久提交与内存发布顺序"合同。
 
 相关已有 TODO：`../../AppServer模型连接解耦_协议配置与会话隔离设计.todo` §3 要求“显式选择 Provider 后，地址、wire、鉴权和私有参数必须来自同一套连接”；本单修当前终端角色路由，不等待整套协议重构。
 
