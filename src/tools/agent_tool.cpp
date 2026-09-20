@@ -2663,16 +2663,22 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                         },
                         name);
                 };
-            } else {
-                turn_wiring.on_tool_confirm = [route_or_run, confirm = foreground_hooks->on_tool_confirm](
+            } else if (foreground_hooks->on_tool_confirm) {
+                auto plain_confirm = foreground_hooks->on_tool_confirm;
+                turn_wiring.on_tool_confirm = [route_or_run, plain_confirm](
                                                   const std::string& tool_use_id, const std::string& name,
                                                   const nlohmann::json& input) {
                     return route_or_run(
-                        [confirm, tool_use_id, name, input]() -> bool {
-                            return confirm(tool_use_id, name, input);
+                        [plain_confirm, tool_use_id, name, input]() -> bool {
+                            return plain_confirm(tool_use_id, name, input);
                         },
                         name);
                 };
+            } else {
+                // 确认口空 = 宿主没给问话能力(单测/旧装配的常态):原样转
+                // 发空函数——引擎按"无确认回调"处置,不许包成非空调用
+                // (包了就是 bad_function_call)。
+                turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
             }
         } else {
             // 后台任务没人可问:审批先查放行账快照(修"后台审批不查放行账",
