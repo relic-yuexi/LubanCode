@@ -110,7 +110,7 @@ PeerOfferResult PeerMailbox::Offer(PeerEnvelope envelope, long long now_unix, bo
         times.pop_front();
     }
     if (times.size() >= rate_limit_) {
-        return PeerOfferStatus::RateLimited;
+        return PeerOfferResult{PeerOfferStatus::RateLimited, false};
     }
 
     // 3) 相同正文短窗去重:来回重发同一句话,只当一封。
@@ -121,13 +121,13 @@ PeerOfferResult PeerMailbox::Offer(PeerEnvelope envelope, long long now_unix, bo
     }
     for (const auto& [at, hash] : texts) {
         if (hash == text_hash) {
-            return PeerOfferStatus::DuplicateText;
+            return PeerOfferResult{PeerOfferStatus::DuplicateText, false};
         }
     }
 
     // 4) 队列硬上限:到了就不再收,发件方会拿到 expired。
     if (queue_.size() >= capacity_) {
-        return PeerOfferStatus::QueueFull;
+        return PeerOfferResult{PeerOfferStatus::QueueFull, false};
     }
 
     // 决定随正文同一临界区入队:Offer 返回那一刻,队列项上已经带着完整
