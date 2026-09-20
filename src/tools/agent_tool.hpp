@@ -174,6 +174,15 @@ public:
                            const nlohmann::json& input, lubancode::ApprovalMode floor)>
             on_tool_confirm_floored;
 
+        // 确认的页归属路由(按代理状态投影单 P3):前台子代理的确认不再由
+        // 任务线程直接占屏——宿主给了这枚,任务线程把"本任务号 + 已绑好
+        // 档位的问话(presenter)"交给它路由(终端宿主拿去提交审批通道,
+        // owner=任务页);没给(单发/单测/旧装配)当场跑 presenter,行为与
+        // 从前一致。纯 std 类型,不引终端件——tools 域不许 include cli/*,
+        // 通道的接线住在宿主层。
+        std::function<bool(int owner_task_id, std::function<bool()> presenter, const std::string& name)>
+            on_tool_confirm_routed;
+
         // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
         // 转发给父级的同名回调,子代理这边不重复实现匹配/执行逻辑。
         std::function<std::optional<std::string>(const std::string& tool_use_id, const std::string& name,

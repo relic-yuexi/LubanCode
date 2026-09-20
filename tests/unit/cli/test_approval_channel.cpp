@@ -186,12 +186,16 @@ TEST_CASE("ApprovalChannel P3: 换代收口——DenyStaleGenerations 拒旧世�
     REQUIRE(unbound.has_value());
 
     // /clear、/resume 换代到 3:旧世代(gen=2)的悬账整批拒收;同世代与
-    // 未绑定的照常。
+    // 未绑定的照常(取走后按号裁定,future 各自拿到值)。
     channel.DenyStaleGenerations(3);
     CHECK(stale->get() == false);
     CHECK(channel.PendingCount() == 2);
-    CHECK(channel.TakeForViewer(0).has_value());
-    CHECK(channel.TakeForViewer(0).has_value());
+    const auto taken_fresh = channel.TakeForViewer(0);
+    const auto taken_unbound = channel.TakeForViewer(0);
+    REQUIRE(taken_fresh.has_value());
+    REQUIRE(taken_unbound.has_value());
+    channel.Resolve(taken_fresh->id, true);
+    channel.Resolve(taken_unbound->id, true);
     CHECK(fresh->get() == true);
     CHECK(unbound->get() == true);
     channel.ClearServer();

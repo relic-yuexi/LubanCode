@@ -523,6 +523,21 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         // "没人可问"的同步短路正是要保住的路径)。主轮回合有 async 就走
         // async,子代理转发保持同步,两不串。
         hooks.on_tool_confirm = wiring.on_tool_confirm;
+        // P3(按代理状态投影单 §六,审批的 owner 绑定):前台子代理的确认
+        // 经这枚路由口走审批通道——任务线程把"本任务号 + 已绑好档位的
+        // presenter"递上来,这边提交通道(owner=任务页,世代随会话),用户
+        // 看着那只子代理菜单才开,别页悬账进底栏通知位;通道没服务者
+        //(单发/管道/监听未起)Submit 落空,当场跑 presenter,行为与旧路
+        // 一字不差。tools 域不认终端件,路由口是纯 std 类型,通道本体
+        // 住在这(宿主层)。
+        hooks.on_tool_confirm_routed =
+            [](int owner_task_id, std::function<bool()> presenter, const std::string& name) -> bool {
+            if (auto decision = lubancode::cli::SessionApprovalChannel().Submit(
+                    owner_task_id, name, presenter, lubancode::cli::CurrentAgentViewGeneration())) {
+                return decision->get();
+            }
+            return presenter();
+        };
         hooks.on_permission_evaluate = wiring.on_permission_evaluate;
         hooks.on_permission_evaluate_floored =
             [auto_confirm, &always_allowed_tools, &allow_commands, &deny_commands, hook_dispatcher, &display,
