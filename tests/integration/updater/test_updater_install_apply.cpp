@@ -591,10 +591,13 @@ TEST_CASE("flat: Windows 自持句柄锁死旧 EXE——明报不强杀,松手�
     const auto blocked = HandoverFlatLauncher(paths, "txn-l", version_dir);
     REQUIRE_FALSE(blocked.has_value());
     CHECK(blocked.error().find("绝不强杀") != std::string::npos);
-    CHECK(ReadBytes(paths.exe).value() == "OLD-EXE");  // 没被强杀/强删
+    // 句柄还攥着:读口也吃 sharing violation,内容读不出(空串不是证据),
+    // 只验尸位还在与 legacy 未动;内容账等松手后对
+    CHECK(fs::exists(paths.exe));
     CHECK_FALSE(fs::exists(paths.backups / "txn-l" / "legacy" / paths.exe.filename()));
 
     CloseHandle(held);
+    CHECK(ReadBytes(paths.exe).value() == "OLD-EXE");  // 松手后:原封未动
     const auto retried = HandoverFlatLauncher(paths, "txn-l", version_dir);
     REQUIRE(retried.has_value());
     CHECK(ReadBytes(paths.backups / "txn-l" / "legacy" / paths.exe.filename()).value() == "OLD-EXE");
