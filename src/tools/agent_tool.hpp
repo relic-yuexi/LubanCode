@@ -479,8 +479,12 @@ public:
     // 与从前逐字节一致。
     void SetAgentTypesProvider(std::function<std::vector<AgentTypeInfo>()> provider) {
         agent_types_provider_ = std::move(provider);
-        std::lock_guard<std::mutex> lock(agent_types_cache_.mutex);
-        agent_types_cache_.loaded = false;
+        {
+            std::lock_guard<std::mutex> lock(agent_types_cache_.mutex);
+            agent_types_cache_.loaded = false;
+        }
+        // 快照翻新在锁外跑(CachedAgentTypes 自拿同一把锁,锁内调用即
+        // 自锁死——ToolRuntime 装配就卡在这,agent/装配一族册全数挂死)。
         run_state_->agent_types = CachedAgentTypes();
     }
 
