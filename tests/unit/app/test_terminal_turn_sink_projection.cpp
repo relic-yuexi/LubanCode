@@ -110,6 +110,13 @@ public:
         return text;
     }
 
+    // 视口顶的绝对行号(断言"视口行"用——清屏与铺帧都只管视口,滚出窗的
+    // 历史留在缓冲里是生产规矩;绝对行 0 在视口平移后是历史,不是画面)。
+    int ViewportTop() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return viewport_y;
+    }
+
     // 安装(构造即装,析构即拆):ConsoleTestHooks + TermPort 双改道。
     explicit VirtualScreen() {
         Install();
@@ -870,18 +877,24 @@ TEST_CASE("P2 原子换页: 快速往返 20 轮——末帧只见当前页,旧 e
 
     // 末帧只见当前页:视口内 sub 帧在、main 的字一个不见(旧帧已擦、
     // 在飞的旧 epoch 绘制被闸)。只断言视口行——清屏语义本就只清视口,
-    // 滚出窗的内容留在滚屏历史是生产规矩,不算串页。
-    CHECK(screen.RowText(0).has_value());
-    CHECK(screen.RowText(0).value().find("sub agent #7 view frame") != std::string::npos);
-    for (int row = 0; row < VirtualScreen::kViewport; ++row) {
+    // 滚出窗的内容留在滚屏历史是生产规矩,不算串页。视口行按 ViewportTop
+    // 现查(绝对行 0 在视口平移后是历史行;消费快慢决定平移多少,断言
+    // 不能押在绝对行号上——那是测试的账,不是产品的病)。
+    const int view_top = screen.ViewportTop();
+    bool header_found = false;
+    for (int row = view_top; row < view_top + VirtualScreen::kViewport; ++row) {
         const auto text = screen.RowText(row);
         if (!text.has_value()) {
             break;
+        }
+        if (text.value().find("sub agent #7 view frame") != std::string::npos) {
+            header_found = true;
         }
         for (int round = 0; round < 20; ++round) {
             CHECK(text.value().find("MAINWAVE" + std::to_string(round)) == std::string::npos);
         }
     }
+    CHECK(header_found);
 
     // 账一分不少:切回 main 重铺,20 轮 delta 全在终账里。
     switch_to_main();
