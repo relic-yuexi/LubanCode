@@ -122,10 +122,13 @@ class AgentTool;
 
 // 引擎路由槽(AR-01):协调器的 engine 回调经它取门面。env 为空的请求
 //(main 直派)只可能发生在宿主主线程——门面析构也在主线程,天然串行;
-// 槽本身再加一把无争用的互斥兜底,防"测试自造空 env 句柄跨线程派工"这
-// 类越界用法把窗口顶开。门面析构进场先摘针,晚到的空 env 派工稳定收口。
+// 槽本身再加一把互斥兜底,防"测试自造空 env 句柄跨线程派工"这类越界
+// 用法把窗口顶开。门面析构进场先摘针,晚到的空 env 派工稳定收口。
+// 递归互斥:子表挂的兼容壳(AgentDispatchTool(AgentTool&))env 也为空,
+// 前台 main 直派嵌套 main 直派会在同一线程上重入这把锁——平锁即死锁
+//(主路也靠它,agent_tool/interactive_session 一族册全数卡死)。
 struct AgentEngineRoute {
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     AgentTool* facade = nullptr;
 };
 

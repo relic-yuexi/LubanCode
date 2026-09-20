@@ -222,7 +222,9 @@ TEST_CASE("线程寿命: 门面析构有界返回,晚归 worker 靠冻结 run_st
     REQUIRE(WaitUntil([&] { return !coordinator->ledger().HasRunningTasks(); }, std::chrono::seconds(10)));
     const auto snapshots = coordinator->ledger().Snapshots();
     REQUIRE(snapshots.size() == 1);
-    CHECK(snapshots[0].state == tools::AgentTaskState::Done);
+    // 析构的取消广播先于放闸落进任务账:终态收成 Cancelled(不是 Done),
+    // 结论文本照留——"取消归取消,晚归的账一笔不丢"正是要验的合同。
+    CHECK(snapshots[0].state == tools::AgentTaskState::Cancelled);
     CHECK(snapshots[0].result == "晚归结论:账落齐了");
 
     // 收柄按回执行到点:线程已退,ReapExitedThreads 不 hang。
@@ -298,7 +300,8 @@ TEST_CASE("线程寿命: 墙钟强收翻 Failed 后,再派工与析构都不提�
     REQUIRE(task2.has_value());
     CHECK(task1->state == tools::AgentTaskState::Failed);
     CHECK(task1->outcome.reason == tools::TaskOutcomeReason::WallClockTimeout);
-    CHECK(task2->state == tools::AgentTaskState::Done);
+    // 二号被析构的取消广播收成 Cancelled,结论文本照留。
+    CHECK(task2->state == tools::AgentTaskState::Cancelled);
     CHECK(task2->result == "晚归结论:强收没吃掉我");
     // 析构已发生,协调器仍被晚归线程钉活——查账不崩,收口旗常真。
     CHECK(coordinator->closing());
@@ -358,6 +361,14 @@ TEST_CASE("线程寿命: 晚归 worker 的 worktree 收场照跑,有活的房保
             registry->Register(std::make_unique<tools::WriteFileTool>());
             return registry;
         });
+        // 后台免问只有预放行一条路:不放行 write_file,工具调用会被
+        // "后台无法弹权限确认"拒掉,房永远干净、收场即删——测不到
+        // "有活的房保留待审"。
+        agent_tool->SetBackgroundPermissionSource([]() {
+            tools::BackgroundPermissionLedger ledger;
+            ledger.always_allowed.insert("write_file");
+            return ledger;
+        });
         coordinator->SetShutdownJoinWindow(std::chrono::milliseconds(150));
 
         const auto launch = agent_tool->execute(
@@ -373,7 +384,8 @@ TEST_CASE("线程寿命: 晚归 worker 的 worktree 收场照跑,有活的房保
     REQUIRE(WaitUntil([&] { return !coordinator->ledger().HasRunningTasks(); }, std::chrono::seconds(15)));
     const auto snapshots = coordinator->ledger().Snapshots();
     REQUIRE(snapshots.size() == 1);
-    CHECK(snapshots[0].state == tools::AgentTaskState::Done);
+    // 取消广播先落,终态 Cancelled;但房里的待审改动与房态账不受影响。
+    CHECK(snapshots[0].state == tools::AgentTaskState::Cancelled);
     CHECK(snapshots[0].worktree_awaiting_review);
     CHECK_FALSE(snapshots[0].isolation_branch.empty());
     CHECK(snapshots[0].result.find("晚归写手") != std::string::npos);
