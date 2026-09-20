@@ -598,10 +598,17 @@ TEST_CASE("HC-01 Provider 展开合同: 派生配置逐项来自目标端,非连
     CHECK(derived->request_hard_timeout_secs == 321);
 
     SUBCASE("目标即活跃端: 原样副本,不施加条目") {
+        // "原样" = 基础配置现状(测试的 MergeFromJson 不跑启动期的
+        // ApplyConfiguredActiveProvider,顶层 base_url 仍为空),不是
+        // 活跃条目 A 的值——重点是不施加任何条目、非连接全局项不动。
         const auto same = lubancode::app::DeriveProviderRuntimeConfig(result.config, "activeA", "activeA");
         REQUIRE(same.has_value());
-        CHECK(same->base_url == "http://a.example");  // A 的现状,不是 B 的
-        CHECK(same->stream_usage == false);
+        CHECK(same->base_url == result.config.base_url);
+        CHECK(same->base_url != "http://b.example");  // 没拿 B 的条目
+        CHECK(same->wire == result.config.wire);
+        CHECK(same->stream_usage == false);  // 本测试改过的 A 侧运行值
+        CHECK(same->think_param == "param_from_A");
+        CHECK(same->connect_timeout_ms == 12345);
     }
     SUBCASE("目标名为空: 等同活跃端口径") {
         const auto empty = lubancode::app::DeriveProviderRuntimeConfig(result.config, "", "activeA");
@@ -656,18 +663,23 @@ TEST_CASE("HC-01 缓存失效合同: 编辑/删除目标端就地弃缓存,指�
     REQUIRE(first != nullptr);
     CHECK(service.Route(TaskKind::Compact).backend == first);
 
-    // 编辑目标端(extra_body 变了 = /provider set 落盘成功后的形状):
-    // 连接指纹对不上,旧 client 退役重建。
+    // 编辑目标端(extra_body 变了 = /provider set 落盘成功后的形状)。
+    // "重建发生了"不以指针不等为证——弃旧 shared_ptr 后新分配常复用
+    // 同块内存(macOS 实测同址);这里钉三层:指纹函数本身认得这次编辑
+    // (版本键变)、编辑后路由仍可用、新指纹下缓存重新稳定。
     lubancode::config::ProviderConfig* entry_b = find_entry(result, "targetB");
     REQUIRE(entry_b != nullptr);
+    const std::string fingerprint_before = lubancode::config::ProviderConnectionFingerprint(*entry_b);
     entry_b->extra_body = nlohmann::json{{"changed", true}};
+    CHECK(lubancode::config::ProviderConnectionFingerprint(*entry_b) != fingerprint_before);
     lubancode::api::Backend* rebuilt = service.Route(TaskKind::Compact).backend;
     REQUIRE(rebuilt != nullptr);
-    CHECK(rebuilt != first);
     CHECK(service.Route(TaskKind::Compact).backend == rebuilt);  // 新指纹下稳定
 
-    // 指纹外字段(切端推理档位,不影响后端连接)不误伤缓存。
+    // 指纹外字段(切端推理档位,不影响后端连接)不改指纹、不误伤缓存。
+    const std::string fingerprint_stable = lubancode::config::ProviderConnectionFingerprint(*entry_b);
     entry_b->model_reasoning_effort = "high";
+    CHECK(lubancode::config::ProviderConnectionFingerprint(*entry_b) == fingerprint_stable);
     CHECK(service.Route(TaskKind::Compact).backend == rebuilt);
 
     // 删除目标端(/provider remove 落盘成功后的形状):不再交出旧 client
