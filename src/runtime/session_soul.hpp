@@ -26,6 +26,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/atomic_write.hpp"  // FD-04:WriteSessionSoulSnapshotPhased 的回执/错误类型
+
 namespace lubancode::runtime {
 
 // 一份会话 Soul 快照。会话存续期由装配层持有(共享指针,后台派工的冻结
@@ -65,8 +67,15 @@ std::expected<SessionSoulSnapshot, std::string> SessionSoulSnapshotFromJson(cons
 // 先写同目录临时文件再原子换名,读回校验 content_hash 与正文一致——
 // 材料坏了给错误,resume 侧据此报错,不静默换魂。
 std::string SessionSoulSnapshotFileName();
-// 写失败给错误串(目录没有写口/盘满);成功覆盖旧快照(以后一次成功
-// 保存为准,§5.2)。
+// 阶段性写口(FD-04):保留平台结构化回执——成功回 CommittedDurable;
+// 失败带 outcome,换名前失败旧快照原样(NotCommitted),换名后的目录
+// 刷盘失败新快照已可见(CommittedDurabilityUnconfirmed),不得按未写盘
+// 处理。新调用方一律走这里。
+std::expected<platform::AtomicWriteReceipt, platform::AtomicWriteError> WriteSessionSoulSnapshotPhased(
+    const std::filesystem::path& session_dir, const SessionSoulSnapshot& snapshot);
+// 兼容口:把阶段回执降成错误串(目录没有写口/盘满也在此列);成功覆盖
+// 旧快照(以后一次成功保存为准,§5.2)。FD-04 收尾、调用方迁完 Phased
+// 后删。
 std::expected<void, std::string> WriteSessionSoulSnapshot(const std::filesystem::path& session_dir,
                                                           const SessionSoulSnapshot& snapshot);
 // 文件不存在给 nullopt(源会话从未锁定过魂);存在但坏了给错误串。
