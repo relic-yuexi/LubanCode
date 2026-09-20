@@ -1,0 +1,48 @@
+# AR-04 Workflow控制节点绕过全局预算入口
+
+- 状态：待修；本次只审查，未改源码。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-04 | B | 高 | src/workflow/definition.hpp:41；src/workflow/runtime.cpp:582；src/workflow/runtime.cpp:1211；src/workflow/runtime.cpp:1400；src/workflow/runtime.cpp:1511；src/workflow/runtime.cpp:2066；src/workflow/runtime.cpp:2088 | map/reduce直接 `RunNode(ctx, body)`；控制分支在预算闸前 `continue`；`if (!result.ok) account.tool_calls += 1`。 | max_steps声明全局帽，但map/reduce每项不记全局steps；parallel只为各分支各数guard。控制节点还绕开主循环中的tokens/tool_calls/timeout准入。成功工具调用根本不增加tool_calls，失败的非工具节点却增加。长foreach/reduce能在单并发下持续越预算，不能用“在飞请求难精确预估”解释。 | 将所有真实节点attempt准入收进同一运行预算账户，按执行身份预留步数/工具调用并累计实际token；每项或重试开始前检查时限和已用量。保留BudgetGate纯判定件，删控制分支自数guard作为全局预算的替代。工具调用计数由实际Tool节点/工具执行回执驱动。 | 影响所有workflow控制节点；调整既有错误计数语义属于行为修复，须固定旧档读取规则。并发未完成请求可有已预留额度，不承诺预知实际token。 |
+
+## 证据与边界
+
+反例由代码直接推出：foreach含N项，每项返回大于token帽的用量，run_item仍继续下一项；本轮走map分支:2048后于:2066 continue，绕过:2088预算闸。工具计数:583-584仅在!ok自增，与definition.hpp:43“工具调用次数帽（重试也计）”不符。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/workflow/runtime.cpp`；`src/workflow/runtime.hpp`；`src/workflow/host_executors.hpp`；`src/workflow/host_executors.cpp`。
+- 前置：AR-03（以全局排期复核为准）。
+- 不得并行共改：AR-03、AR-09；同文件先后落单，或约定具体函数所有权。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 将所有真实节点attempt准入收进同一运行预算账户，按执行身份预留步数/工具调用并累计实际token；每项或重试开始前检查时限和已用量。保留BudgetGate纯判定件，删控制分支自数guard作为全局预算的替代。工具调用计数由实际Tool节点/工具执行回执驱动。
+3. 小批提交，按下列门槛验收。
+
+- [ ] foreach第一项用量越帽后不再执行第二项。
+- [ ] map/parallel只能派发已获额度的项。
+- [ ] 成功Tool attempt也计数，失败LLM不冒充工具调用。
+- [ ] reduce与重试消耗步数。
+- [ ] 所有入口超时同码收口。
+- [ ] 远程CI验证。
+
+## 删除量与旧账
+
+本项不以删行计收益；预计净删除 0 行。
+
+关联 todos/Workflow接入SessionV3_编排账与节点恢复设计.todo 的并发与恢复验收。
+## 全局排期复核
+
+- 前置／文件接手次序：AR-03
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-03（src/workflow/runtime.cpp, src/workflow/runtime.hpp）；AR-09（src/workflow/runtime.cpp）。

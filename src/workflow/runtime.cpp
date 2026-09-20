@@ -177,6 +177,33 @@ void PublishNodeRecord(WorkflowRunSummary& account, std::mutex* nodes_mutex,
     account.nodes[node_id] = record;
 }
 
+// 控制节点(AR-04):end/checkpoint/switch 与 loop/async/parallel/map/
+// foreach/reduce 容器。它们的访问步数在派发口(主循环 / RunLoop 的
+// parallel body 派发)记;真实节点的步数由 RunNode 的预算准入口按
+// attempt 预留——一本账,两个收口。
+bool IsControlNodeKind(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::End:
+        case NodeKind::Checkpoint:
+        case NodeKind::Switch:
+        case NodeKind::Loop:
+        case NodeKind::Async:
+        case NodeKind::Parallel:
+        case NodeKind::Join:
+        case NodeKind::Map:
+        case NodeKind::Foreach:
+        case NodeKind::Reduce:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 总时限文案(AR-04 同码收口):主图准入口与 async 等待监察同一句。
+std::string TotalTimeoutMessage(const WorkflowLimits& limits) {
+    return "总时限越过 " + std::to_string(limits.timeout_secs) + "s";
+}
+
 }  // namespace
 
 // ---- 状态机 -----------------------------------------------------------------
@@ -326,6 +353,104 @@ bool WorkflowRuntime::WithinBudget(const WorkflowLimits& limits, const WorkflowR
         .tokens = limits.tokens,
     });
     return !gate.OverrunCount(account.tool_calls) && !gate.OverrunTokens(account.tokens_used);
+}
+
+bool WorkflowRuntime::OverrunTotalTimeout(const WorkflowLimits& limits, std::int64_t started_ms) const {
+    // 总时限(批五口径,AR-04 同码收口):elapsed 尺进公共预算闸,Overrun
+    // 严格 >;timeout_secs <= 0 = 不设尺。
+    const runtime::BudgetGate gate(runtime::BudgetScales{
+        .elapsed_ms = limits.timeout_secs > 0
+                          ? std::optional<std::int64_t>(limits.timeout_secs * 1000)
+                          : std::nullopt,
+    });
+    const std::int64_t now_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    return gate.OverrunElapsed(now_ms - started_ms);
+}
+
+void WorkflowRuntime::FlagAccountBudgetExhausted(WorkflowRunSummary& account, std::mutex* nodes_mutex,
+                                                 const BudgetDenial& denial) const {
+    const auto write = [&]() {
+        account.state = RunState::BudgetExhausted;
+        account.error_code = denial.code;
+        account.error_message = denial.message;
+    };
+    if (nodes_mutex == nullptr) {
+        write();
+        return;
+    }
+    std::lock_guard<std::mutex> lock(*nodes_mutex);
+    write();
+}
+
+std::optional<WorkflowRuntime::BudgetDenial> WorkflowRuntime::AdmitControlVisit(
+    const ExecutionContext& ctx) {
+    // 控制节点访问的步数闸:count 尺进公共预算闸,Overrun 口径(已越帽,
+    // 严格 >)——与旧主循环闸逐字节同判。
+    if (ctx.steps == nullptr) return std::nullopt;
+    const WorkflowLimits& limits = ctx.definition->limits;
+    const int used = ctx.steps->fetch_add(1) + 1;
+    if (!runtime::BudgetGate(runtime::BudgetScales{
+            .count = static_cast<std::int64_t>(limits.max_steps),
+        }).OverrunCount(used)) {
+        return std::nullopt;
+    }
+    BudgetDenial denial{"max_steps", "步数越过 max_steps(" + std::to_string(limits.max_steps) + ")"};
+    FlagAccountBudgetExhausted(*ctx.account, ctx.nodes_mutex, denial);
+    return denial;
+}
+
+std::optional<WorkflowRuntime::BudgetDenial> WorkflowRuntime::AdmitNodeAttempt(
+    const ExecutionContext& ctx, const WorkflowNode& node) {
+    WorkflowRunSummary& account = *ctx.account;
+    const WorkflowLimits& limits = ctx.definition->limits;
+    std::optional<BudgetDenial> denial;
+
+    // 1) 步数:预留一步再对账(重试的每个 attempt 都预留——重试也消耗
+    //    步数,不开免单账)。
+    if (ctx.steps != nullptr) {
+        const int used = ctx.steps->fetch_add(1) + 1;
+        if (runtime::BudgetGate(runtime::BudgetScales{
+                .count = static_cast<std::int64_t>(limits.max_steps),
+            }).OverrunCount(used)) {
+            denial = BudgetDenial{"max_steps",
+                                  "步数越过 max_steps(" + std::to_string(limits.max_steps) + ")"};
+        }
+    }
+    // 2) 总时限:所有入口同一把尺、同一个码(timeout)与同一句文案。
+    if (!denial.has_value() && OverrunTotalTimeout(limits, ctx.started_ms)) {
+        denial = BudgetDenial{"timeout", TotalTimeoutMessage(limits)};
+    }
+    // 3) run 级共账:读改写持 nodes_mutex(与收账口同一把锁——AR-03 留的
+    //    接缝,AR-04 收编)。Tool 节点按 Headroom 口径预留一次工具调用
+    //    (帽满即拦,不虚增账面;成功/失败/重试的 attempt 都计,由实际
+    //    Tool 节点驱动);tokens 对已累计实际值对账——在飞请求的实际
+    //    用量不预知,单次可越,下一项开跑前拦。
+    const bool reserves_tool_call = node.kind == NodeKind::Tool;
+    const auto judge_shared_account = [&]() {
+        if (denial.has_value()) return;  // 早退的拒绝不动共账
+        if (!WithinBudget(limits, account)) {
+            denial = BudgetDenial{"budget_exhausted", "预算越帽(tool_calls/tokens)"};
+            return;
+        }
+        if (!reserves_tool_call) return;
+        if (runtime::BudgetGate(runtime::BudgetScales{
+                .count = static_cast<std::int64_t>(limits.tool_calls),
+            }).HeadroomCount(account.tool_calls)) {
+            denial = BudgetDenial{"budget_exhausted", "预算越帽(tool_calls/tokens)"};
+            return;
+        }
+        account.tool_calls += 1;
+    };
+    if (ctx.nodes_mutex != nullptr) {
+        std::lock_guard<std::mutex> lock(*ctx.nodes_mutex);
+        judge_shared_account();
+    } else {
+        judge_shared_account();
+    }
+    if (denial.has_value()) {
+        FlagAccountBudgetExhausted(account, ctx.nodes_mutex, *denial);
+    }
+    return denial;
 }
 
 std::string WorkflowRuntime::NextNodeFor(const WorkflowDefinition& def, const std::string& node_id,
@@ -542,6 +667,46 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             emit_node_event(kEventNodeCompleted, nlohmann::json{{"outcome", "cancelled"}});
             return "cancelled";
         }
+        // 预算准入(AR-04):每个真实 attempt 开跑前过同一道门——预留步数
+        // (重试也计)、查总时限、Tool 身份预留工具调用、对账已累计
+        // tokens。采纳的悬置候选是上个进程已付账的执行,只续校验与提交,
+        // 不再审一次、不再收一遍额度。
+        if (!adopted_candidate) {
+            auto denial = AdmitNodeAttempt(ctx, node);
+            if (denial.has_value()) {
+                local.state = NodeState::Failed;
+                local.error_code = denial->code;
+                local.error_message = denial->message;
+                publish();
+                const std::string node_run_id = node_run_id_base + "-a" + std::to_string(attempt);
+                if (ctx.journal != nullptr) {
+                    with_nodes_lock([&] {
+                        ctx.journal->Append(kEventNodeCompleted, node.id, attempt,
+                                            nlohmann::json{{"outcome", "error"},
+                                                           {"code", denial->code},
+                                                           {"error", denial->message}});
+                    });
+                }
+                if (ctx.trajectory != nullptr) {
+                    (void)ctx.trajectory->RecordNodeFailed(node.id, node_run_id, attempt,
+                                                           denial->code, denial->message, 0, 0,
+                                                           std::string());
+                }
+                if (ctx.v3_account != nullptr) {
+                    // 派发事实已落,拒绝事实也要落稳(fail closed)。
+                    if (!ctx.v3_account->RecordNodeFailed(identity, denial->code, denial->message,
+                                                          0, 0)) {
+                        emit_node_event(kEventNodeCompleted,
+                                        nlohmann::json{{"outcome", "error"},
+                                                       {"code", denial->code}});
+                        return kOutcomeLedgerBroken;
+                    }
+                }
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", denial->code}});
+                return "budget_exhausted";
+            }
+        }
         local.state = NodeState::Running;
         local.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
         publish();
@@ -626,15 +791,13 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         }
         local.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
         local.tokens_used += result.tokens_used;
-        // 收账口(run 级共账,持锁):tokens/tool_calls 在此累加,节点投影
-        // 一并整笔提交。AR-04(控制节点绕过全局预算入口)的接缝留在
-        // 这道口——run 共账的读改写都该从同一把锁下走,届时把预算闸
-        // 挪进来,旁路口一并收编。
+        // 收账口(run 级共账,持锁):tokens 在此累计实际用量,节点投影
+        // 一并整笔提交。AR-04 起 tool_calls 不在这记——旧账"失败的任意
+        // 节点都冒充一次工具调用"删了;工具计数改由预算准入口按 Tool
+        // 节点 attempt 预留(成功/失败/重试都计),与 tokens 的读改写
+        // 同走这把锁。
         with_nodes_lock([&] {
             account.tokens_used += result.tokens_used;
-            if (!result.ok) {
-                account.tool_calls += 1;
-            }
             account.nodes[node.id] = local;
         });
 
@@ -853,15 +1016,8 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
         ctx.v3_account->RecordNodeWaiting(node.id, "io", "等待 async body 完成", node.async_body);
     }
 
-    if (++*ctx.steps > ctx.definition->limits.max_steps) {
-        account.state = RunState::BudgetExhausted;
-        std::scoped_lock lock(*ctx.nodes_mutex);
-        NodeRunRecord& record = account.nodes[node.id];
-        record.state = NodeState::Failed;
-        record.error_code = "max_steps";
-        record.error_message = "async body 越过 max_steps";
-        return "budget_exhausted";
-    }
+    // 步数/预算准入(AR-04):body 的 attempt 在 RunNode 的准入口过闸
+    // (预留步数、查时限、对账共账),这里不再另设一道手动步数闸。
 
     std::atomic<bool> body_cancel{false};
     ExecutionContext body_ctx = ctx;
@@ -880,9 +1036,9 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
             cancelled = true;
             body_cancel.store(true);
         }
-        const std::int64_t now_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
-        if (ctx.definition->limits.timeout_secs > 0 &&
-            now_ms - ctx.started_ms > ctx.definition->limits.timeout_secs * 1000) {
+        // 总时限(AR-04 同码收口):与所有准入口同一把尺、同一个码——
+        // async 的等待边界不另立门户。
+        if (OverrunTotalTimeout(ctx.definition->limits, ctx.started_ms)) {
             timed_out = true;
             body_cancel.store(true);
         }
@@ -911,7 +1067,7 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
     if (timed_out) {
         record.state = NodeState::Failed;
         record.error_code = "timeout";
-        record.error_message = "async 等待撞到 workflow 总时限";
+        record.error_message = TotalTimeoutMessage(ctx.definition->limits);
         account.state = RunState::BudgetExhausted;
         account.error_code = "timeout";
         account.error_message = record.error_message;
@@ -930,6 +1086,16 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
         record.state = NodeState::Cancelled;
         record.error_code = "cancelled";
         return "cancelled";
+    }
+    if (outcome == "budget_exhausted") {
+        // body 的预算准入口已把 run 共账收成 BudgetExhausted;等待壳在
+        // future 汇合后那句 account.state = Running 别把终态盖掉,这里
+        // 恢复(码与话沿用准入口落的)。
+        record.state = NodeState::Failed;
+        record.error_code = account.error_code;
+        record.error_message = account.error_message;
+        account.state = RunState::BudgetExhausted;
+        return "budget_exhausted";
     }
     const NodeRunRecord& body_record = account.nodes.at(node.async_body);
     record.state = outcome == "skipped" ? NodeState::Skipped : NodeState::Failed;
@@ -1111,31 +1277,22 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
                 publish();
                 return "cancelled";
             }
-            if (ctx.steps != nullptr && ++*ctx.steps > def.limits.max_steps) {
-                account.state = RunState::BudgetExhausted;
-                account.error_code = "max_steps";
-                account.error_message =
-                    "步数越过 max_steps(" + std::to_string(def.limits.max_steps) + ")";
-                local.state = NodeState::Failed;
-                local.error_code = "max_steps";
-                local.error_message = account.error_message;
-                publish();
-                return "budget_exhausted";
-            }
-            if (!WithinBudget(def.limits, account)) {
-                account.state = RunState::BudgetExhausted;
-                account.error_code = "budget_exhausted";
-                account.error_message = "预算越帽(tool_calls/tokens)";
-                local.state = NodeState::Failed;
-                publish();
-                return "budget_exhausted";
-            }
+            // 预算准入(AR-04):body 的真实节点 attempt 在 RunNode 的
+            // 准入口过闸(步数/时限/共账),这里不再另设手动闸;parallel
+            // 容器的访问在派发口记步——与主循环同一本账。
             const auto body = def.node_map.find(body_id);
             if (body == def.node_map.end()) return fail("unknown_loop_body", "loop body 节点不存在: " + body_id);
             ctx.store->UpdateMeta(body_id, nlohmann::json{{"iteration", iteration}});
             nlohmann::json output;
             std::string outcome;
             if (body->second.kind == NodeKind::Parallel) {
+                if (auto denial = AdmitControlVisit(ctx); denial.has_value()) {
+                    local.state = NodeState::Failed;
+                    local.error_code = denial->code;
+                    local.error_message = denial->message;
+                    publish();
+                    return "budget_exhausted";
+                }
                 outcome = RunParallel(ctx, body->second);
                 if (const auto joined = ctx.store->GetOutput(body_id); joined.has_value()) {
                     output = *joined;
@@ -1148,6 +1305,14 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
                 local.error_code = "orchestration_ledger_broken";
                 publish();
                 return kOutcomeLedgerBroken;
+            }
+            if (outcome == "budget_exhausted") {
+                // 码与话已由准入口落在 run 共账,loop 账如实引用。
+                local.state = NodeState::Failed;
+                local.error_code = account.error_code;
+                local.error_message = account.error_message;
+                publish();
+                return "budget_exhausted";
             }
             if (outcome == "cancelled") {
                 local.state = NodeState::Cancelled;
@@ -1267,6 +1432,9 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     std::atomic<int> succeeded{0};
     std::atomic<int> failed{0};
     std::atomic<bool> cancelled{false};
+    // 预算尽(AR-04):任一分支的 attempt 被全局准入口拦下即立旗——
+    // worker 不再领新分支,只派已获额度的项。
+    std::atomic<bool> budget_stopped{false};
 
     const auto worker = [&]() {
         while (true) {
@@ -1274,6 +1442,7 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
                 cancelled.store(true);
                 return;
             }
+            if (budget_stopped.load()) return;
             const std::size_t index = next_index.fetch_add(1);
             if (index >= count) return;
             const std::string& branch_id = node.branches[index];
@@ -1292,15 +1461,13 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
                 failed.fetch_add(1);
                 continue;
             }
-            // 分支可以是一条链:沿 success 边跑到头。
+            // 分支可以是一条链:沿 success 边跑到头。AR-04:旧实现的分支
+            // 自数 guard(max_steps 逐分支各数各的)删了——链上每个真实
+            // 节点 attempt 都经 RunNode 的预算准入口进全局账,一把尺罩
+            // 到底,环与长链也越不出 max_steps。
             std::string cursor = branch_id;
             std::string branch_outcome;
-            int guard = 0;
             while (!cursor.empty()) {
-                if (++guard > def.limits.max_steps) {
-                    branch_outcome = "error";
-                    break;
-                }
                 const auto step_it = def.node_map.find(cursor);
                 if (step_it == def.node_map.end()) {
                     branch_outcome = "error";
@@ -1312,6 +1479,11 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
                 const std::string outcome = RunNode(ctx, step);
                 if (outcome == kOutcomeLedgerBroken) {
                     branch_outcome = outcome;
+                    break;
+                }
+                if (outcome == "budget_exhausted") {
+                    branch_outcome = outcome;
+                    budget_stopped.store(true);
                     break;
                 }
                 if (outcome == "error" || outcome == "cancelled") {
@@ -1386,11 +1558,21 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
         }
     }
 
-    // join 政策(单子"并行与汇合规矩"五种)。
+    // join 政策(单子"并行与汇合规矩"五种)。预算尽在先:全局预算是
+    // 硬墙,不是汇合态度问题,join 不判。
     if (cancelled.load()) {
         local.state = NodeState::Cancelled;
         publish();
         return "cancelled";
+    }
+    for (const auto& result : results) {
+        if (result.outcome == "budget_exhausted") {
+            local.state = NodeState::Failed;
+            local.error_code = account.error_code;
+            local.error_message = account.error_message;
+            publish();
+            return "budget_exhausted";
+        }
     }
     switch (node.join) {
         case JoinPolicy::All:
@@ -1492,6 +1674,9 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     std::vector<MapSlot> slots(count);  // 预分配,worker 只写自己的下标
     int failures = 0;
     bool ledger_broken = false;  // 编排账断:项级失败之外的单列旗(零派发)
+    // 预算尽(AR-04):任一项的 attempt 被全局准入口拦下即立旗——
+    // worker 不再领新项,只派已获额度的项。
+    std::atomic<bool> budget_stopped{false};
     const bool sequential = node.kind == NodeKind::Foreach;
     std::mutex slots_mutex;  // failures 计数与诊断类共写互斥(json 非线程安全)
 
@@ -1513,6 +1698,10 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         if (outcome == kOutcomeLedgerBroken) {
             std::lock_guard<std::mutex> lock(slots_mutex);
             ledger_broken = true;
+            return false;
+        }
+        if (outcome == "budget_exhausted") {
+            budget_stopped.store(true);
             return false;
         }
         {
@@ -1543,10 +1732,11 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         const std::size_t threads = std::min<std::size_t>(static_cast<std::size_t>(cap), count);
         const auto worker = [&]() {
             while (true) {
+                if (ctx.cancel != nullptr && ctx.cancel->load()) return;
+                if (budget_stopped.load()) return;
                 const std::size_t index = next_index.fetch_add(1);
                 if (index >= count) return;
                 (void)run_item(index);
-                if (ctx.cancel != nullptr && ctx.cancel->load()) return;
             }
         };
         pool.reserve(threads);
@@ -1564,6 +1754,15 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         local.error_code = "orchestration_ledger_broken";
         publish();
         return kOutcomeLedgerBroken;
+    }
+    if (budget_stopped.load()) {
+        // 项级预算尽:码与话已由准入口落在 run 共账,map 账如实引用;
+        // 不进 failures 判定(预算不是项失败)。
+        local.state = NodeState::Failed;
+        local.error_code = account.error_code;
+        local.error_message = account.error_message;
+        publish();
+        return "budget_exhausted";
     }
     // join 后拼装:预分配的 array,逐槽按下标落——不靠 operator[] 的
     // 缺省插入语义(libstdc++/libc++ 行为虽同,显式 resize 更不给巧合留门)。
@@ -1634,6 +1833,14 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
             local.error_code = "orchestration_ledger_broken";
             publish();
             return kOutcomeLedgerBroken;
+        }
+        if (outcome == "budget_exhausted") {
+            // 码与话已由准入口落在 run 共账,reduce 账如实引用。
+            local.state = NodeState::Failed;
+            local.error_code = account.error_code;
+            local.error_message = account.error_message;
+            publish();
+            return "budget_exhausted";
         }
         if (outcome != "success") {
             local.state = NodeState::Failed;
@@ -1971,7 +2178,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     account.state = RunState::Running;
     EmitRunEvent(account, kEventRunStarted, nlohmann::json{{"state", ToString(account.state)}});
 
-    int steps = account_ctx != nullptr ? account_ctx->seed_steps : 0;
+    std::atomic<int> steps(account_ctx != nullptr ? account_ctx->seed_steps : 0);
     std::atomic<std::uint64_t> dispatch_seq{0};
     ExecutionContext ctx;
     ctx.definition = &definition;
@@ -2002,18 +2209,6 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             account.error_message = "用户取消";
             break;
         }
-        // 步数闸(批五):count 尺声明进公共预算闸,Overrun 口径(已越帽,
-        // 严格 >)——(++steps > max_steps) 逐字节同判。
-        if (++steps;
-            runtime::BudgetGate(runtime::BudgetScales{
-                .count = static_cast<std::int64_t>(definition.limits.max_steps),
-            }).OverrunCount(steps)) {
-            account.state = RunState::BudgetExhausted;
-            account.error_code = "max_steps";
-            account.error_message =
-                "步数越过 max_steps(" + std::to_string(definition.limits.max_steps) + ")";
-            break;
-        }
         const auto node_it = definition.node_map.find(current);
         if (node_it == definition.node_map.end()) {
             account.state = RunState::Failed;
@@ -2022,6 +2217,13 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             break;
         }
         const WorkflowNode& node = node_it->second;
+        // 步数闸(AR-04 收口):控制节点(end/checkpoint/switch 与容器)的
+        // 访问在派发口记步——count 尺进公共预算闸,Overrun 口径(已越帽,
+        // 严格 >),与旧主循环闸逐字节同判。真实节点的步数由 RunNode 的
+        // 预算准入口按 attempt 预留(重试也计):一本账,不再各数各的。
+        if (IsControlNodeKind(node.kind) && AdmitControlVisit(ctx).has_value()) {
+            break;  // 准入口已把 run 收成 BudgetExhausted(max_steps)
+        }
 
         // end / checkpoint 是控制节点,不走执行器。
         if (node.kind == NodeKind::End) {
@@ -2144,6 +2346,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                 account.error_code = "cancelled";
                 break;
             }
+            if (join_outcome == "budget_exhausted") break;
             if (join_outcome == "error") {
                 account.state = RunState::Failed;
                 account.error_code = "join_failed";
@@ -2179,6 +2382,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                 account.error_code = "cancelled";
                 break;
             }
+            if (map_outcome == "budget_exhausted") break;
             if (map_outcome == "error") {
                 account.state = RunState::Failed;
                 account.error_code = "map_failed";
@@ -2195,6 +2399,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                 halt_ledger_broken();
                 break;
             }
+            if (reduce_outcome == "budget_exhausted") break;
             if (reduce_outcome == "error") {
                 account.state = RunState::Failed;
                 account.error_code = "reduce_failed";
@@ -2207,27 +2412,9 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             continue;
         }
 
-        // 预算对账(节点跑之前):越帽收 budget_exhausted,不悄悄续跑。
-        if (!WithinBudget(definition.limits, account)) {
-            account.state = RunState::BudgetExhausted;
-            account.error_code = "budget_exhausted";
-            account.error_message = "预算越帽(tool_calls/tokens)";
-            break;
-        }
-        // 时限(批五):elapsed 尺声明进公共预算闸,Overrun 口径(严格 >,
-        // 与旧判同线);timeout_secs <= 0 = 不设尺。
-        const std::int64_t now_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
-        const runtime::BudgetGate timeout_gate(runtime::BudgetScales{
-            .elapsed_ms = definition.limits.timeout_secs > 0
-                              ? std::optional<std::int64_t>(definition.limits.timeout_secs * 1000)
-                              : std::nullopt,
-        });
-        if (timeout_gate.OverrunElapsed(now_ms - started_ms)) {
-            account.state = RunState::BudgetExhausted;
-            account.error_code = "timeout";
-            account.error_message = "总时限越过 " + std::to_string(definition.limits.timeout_secs) + "s";
-            break;
-        }
+        // 预算与时限对账(AR-04):主循环不再单独判——RunNode 的预算准入
+        // 口按 attempt 收口(步数/总时限/tool_calls/tokens),容器内部
+        // 的执行与控制节点同走那道门,没有旁路口。
 
         // 恢复路径:已成功的节点不再跑(副作用不重复做,单子"Run Journal"
         // 一节),沿 success 边直接过。
@@ -2242,6 +2429,8 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             halt_ledger_broken();
             break;
         }
+        // 预算尽:准入口已把 run 收成 BudgetExhausted(码与话在共账上)。
+        if (outcome == "budget_exhausted") break;
         // skip 的节点(unavailable)计入缺失账(单子验收:报告明写缺了谁)。
         if (outcome == "skipped") {
             account.unavailable_sources.push_back(node.id);

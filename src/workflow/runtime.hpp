@@ -252,7 +252,9 @@ private:
         // 派发序号(一场 run 一只,node_run_id 带 -d<N> 防 loop 重入撞名)。
         std::atomic<std::uint64_t>* dispatch_seq = nullptr;
         const std::atomic<bool>* cancel = nullptr;
-        int* steps = nullptr;  // 主图与 loop body 共用同一把 max_steps 尺
+        // 全局步数账(AR-04):控制节点访问与真实节点 attempt 共用同一本;
+        // map/parallel 的 worker 并发预留,故原子。
+        std::atomic<int>* steps = nullptr;
         std::int64_t started_ms = 0;  // async 等待也守整场 run 的总时限
         // 并行分支共写 account.nodes(std::map 并发写会坏)。AR-03 起
         // 规矩:各执行把 attempt/时间/错误收在自己的本地 NodeRunRecord,
@@ -264,13 +266,44 @@ private:
         std::mutex* nodes_mutex = nullptr;
     };
 
-    // 单节点全生命周期(含 retry)。返回 outcome(success/error/empty/skipped)。
+    // 单节点全生命周期(含 retry)。返回 outcome(success/error/empty/
+    // skipped;AR-04 起预算拒绝另收 budget_exhausted,编排账断收
+    // ledger_broken)。
     // committed_output 可空:非空时把落账产物当场交还(map 并发逐项跑 body,
     // store 的 body 键是共用垫,回头 GetOutput 会拿到别人的那份)。
     // item_index >= 0(map/foreach 的 body):node_run_id 带 "-i<下标>" 路号——
     // 同一 body 并发跑多路时事件账才分得清谁是谁,面板/诊断不串线。
     std::string RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
                         nlohmann::json* committed_output = nullptr, int item_index = -1);
+
+    // ---- 预算准入(AR-04:控制节点绕过全局预算入口)------------------------
+    // 一次准入拒绝的码与话(run 共账同时收成 BudgetExhausted)。
+    struct BudgetDenial {
+        std::string code;
+        std::string message;
+    };
+    // 真实节点 attempt 的统一准入口——所有执行身份(主图/loop body/async
+    // body/parallel 分支链/map 项/reduce 项/重试)都从这道门进:
+    //   1) 预留一步(Overrun 严格 >,与旧主循环闸同判;重试每个 attempt
+    //      都预留,不开免单账);
+    //   2) 总时限(所有入口同一把 elapsed 尺、同一个码,见下);
+    //   3) run 级共账(读改写持 nodes_mutex,与收账口同一把锁):Tool
+    //      节点按 Headroom 口径预留一次工具调用(帽满即拦,成功/失败/
+    //      重试都计——由实际 Tool 节点驱动,非 Tool 失败不冒充);tokens
+    //      对已累计实际值对账,在飞请求的实际用量不预知,单次可越、下一
+    //      项开跑前拦。
+    // 放行返回 nullopt;拒绝返回码与话。
+    std::optional<BudgetDenial> AdmitNodeAttempt(const ExecutionContext& ctx, const WorkflowNode& node);
+    // 控制节点(end/checkpoint/switch 与 loop/async/parallel/map/reduce
+    // 容器)访问的步数闸:派发口记步,与 attempt 准入共用同一本步数账。
+    std::optional<BudgetDenial> AdmitControlVisit(const ExecutionContext& ctx);
+    // 总时限判定:elapsed 尺进公共预算闸(Overrun 严格 >,timeout_secs
+    // <= 0 不设尺)。所有入口同码收口的"码"就是它。
+    bool OverrunTotalTimeout(const WorkflowLimits& limits, std::int64_t started_ms) const;
+    // 把 run 共账收成 BudgetExhausted(持锁写终态;并发拒绝写的值一样,
+    // 也得走锁——TSan 不认"写的值相同")。
+    void FlagAccountBudgetExhausted(WorkflowRunSummary& account, std::mutex* nodes_mutex,
+                                    const BudgetDenial& denial) const;
     // async:I/O 等待边界。body 在工作线程跑,外壳守取消与总时限;
     // 返回 success/error/skipped/cancelled/budget_exhausted。
     std::string RunAsync(const ExecutionContext& ctx, const WorkflowNode& node);

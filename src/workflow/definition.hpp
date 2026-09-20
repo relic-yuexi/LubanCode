@@ -38,10 +38,15 @@ inline constexpr int kCurrentSchemaVersion = 1;
 struct WorkflowLimits {
     int max_concurrency = 4;        // 并行分支同时放行的上限(全局帽)
     int max_nodes = 64;             // 展开后的节点数帽(map 展开用)
-    int max_steps = 128;            // 全局步数帽(含循环迭代)
+    int max_steps = 128;            // 全局步数帽(含循环迭代;AR-04 起
+                                    // 控制节点访问与每个真实 attempt——
+                                    // 含重试——统一记同一本账)
     std::int64_t timeout_secs = 600;  // 总时限
-    int tool_calls = 100;           // 工具调用次数帽(重试也计数,不开免单账)
-    std::int64_t tokens = 120000;   // token 帽(输入+输出累计)
+    int tool_calls = 100;           // 工具调用次数帽(AR-04 起 Tool 节点
+                                    // 按 attempt 预留计数:成功/失败/重试
+                                    // 都算,非 Tool 失败不冒充)
+    std::int64_t tokens = 120000;   // token 帽(输入+输出累计;开跑前按
+                                    // 已累计实际值对账,不预知在飞请求)
 
     bool operator==(const WorkflowLimits&) const = default;
 };
