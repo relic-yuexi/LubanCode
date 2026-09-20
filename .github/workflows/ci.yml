@@ -495,7 +495,7 @@ jobs:
 
   # ---- AR-01(子代理线程寿命):AddressSanitizer 腿 ----------------------------
   # 悬垂访问/线程寿命这类病在常规腿上安静——后台 worker 晚归读已析构门面,
-  # 多数时候只是"碰巧没红"。本腿用 clang+ASan 全量编测试二进制,只跑
+  # 多数时候只是"碰巧没红"。本腿用 gcc+ASan 全量编测试二进制,只跑
   # unit.agent/unit.runtime 两域(派工/装配面的主战场),按 changes 门的
   # agent_lifetime 输出点腿:子代理派工/装配面改动才出场,其余 PR 零开销。
   # 不 FetchContent 静编 OpenSSL(ubuntu runner 自带 libssl-dev 即够),也不
@@ -509,11 +509,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Pick clang
+      # 用 g++ 不用 clang:Ubuntu 24.04 自带的 clang 18 编 <expected> 报"no
+      # template named 'expected'"(PCH/std 组合的已知坑);g++ 与 linux-
+      # manylinux 腿同门,工具链已被证明能编全套,ASan 支持同级。
+      - name: Pick gcc
         shell: bash
         run: |
           set -e
-          CC=$(command -v clang) CXX=$(command -v clang++)
+          CC=$(command -v gcc) CXX=$(command -v g++)
           echo "CC=$CC" >> "$GITHUB_ENV"
           echo "CXX=$CXX" >> "$GITHUB_ENV"
           "$CXX" --version | sed -n '1p'
@@ -522,8 +525,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-linux-asan-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
-          restore-keys: deps-linux-asan-
+          key: deps-linux-asan-gcc-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-linux-asan-gcc-
 
       - name: Configure (ASan)
         shell: bash
