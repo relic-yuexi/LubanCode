@@ -18,6 +18,8 @@
 #include "config/config.hpp"
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
+#include "platform/paths.hpp"
+#include "platform/process.hpp"
 #include "tools/registry.hpp"
 #include "workspace/manifest.hpp"  // 账本制:房的自描述对钥匙
 
@@ -356,6 +358,8 @@ TEST_CASE("ProjectMemory: 两个 worker 争锁仍会捞净队列") {
     CHECK(*first_count + *second_count == 8);
     CHECK(store.ListEntries().size() == 8);
     CHECK(store.Status().pending_jobs == 0);
+    // SV-01:争锁归争锁,独占不破——没有 job 因两头争读被误进 failed。
+    CHECK(store.Status().failed_jobs == 0);
 }
 
 TEST_CASE("MemorySaveTool: 默认关闭、敏感内容与合法排队") {
@@ -2077,4 +2081,302 @@ TEST_CASE("ProjectMemory migrate: 中途失败旧主题与 catalog 仍可用") {
     // 第一份是原地改写,回退须从备份还原成旧格式,不是删掉。
     CHECK(Read(memory_dir / "facts" / "first.md").starts_with("<!-- lubancode-memory"));
     CHECK(store.BuildTurnContext("Kfirst 是什么", repo).find("第一份正文") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// SV-01(2026-09-21 架构审查):目录锁所有权合同。旧 DirectoryLock 按 mtime
+// 年龄判死夺锁,活 worker 干满 30 秒就被第二只 worker 抢走同一路径。这里
+// 钉新合同:活持有者不因锁龄被夺、死持有者/PID 复用隔离留证后接手、释放
+// 核 owner、旧格式空锁不猜死直删、owner 读不懂明报不动。跨进程交错用
+// memory_lock_racer(真子进程)按 ready/release 文件屏障控制,不靠两头掐表。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 把路径 mtime 拨回十分钟前:跨过旧的 30 秒陈旧线,证明裁决不再认年龄。
+std::error_code BackdateMtime(const fs::path& path) {
+    std::error_code ec;
+    fs::last_write_time(path, fs::file_time_type::clock::now() - std::chrono::minutes(10), ec);
+    return ec;
+}
+
+// 有没有 <锁名>.stale-* 的隔离留证。
+bool HasStaleLockEvidence(const fs::path& parent, const std::string& lock_name) {
+    std::error_code ec;
+    fs::directory_iterator it(parent, ec);
+    if (ec) return false;
+    for (const auto& item : it) {
+        if (platform::PathToUtf8(item.path().filename()).starts_with(lock_name + ".stale-")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("OwnerLock: 活持有者不因锁龄被夺——mtime 拨老,后来者仍被拒") {
+    const fs::path root = TempRoot("owner-age");
+    const fs::path lock_dir = root / "worker.lock";
+    memory::OwnerLock holder;
+    const auto got = memory::OwnerLock::TryAcquire(lock_dir, &holder);
+    REQUIRE(got.status == memory::OwnerLock::Status::Acquired);
+    REQUIRE(holder.holds());
+    CHECK(fs::exists(lock_dir / "owner"));
+
+    // 跨过旧的 30 秒陈旧线:探测与取锁都不认 mtime,只认持有者身份。
+    REQUIRE(!BackdateMtime(lock_dir));
+    CHECK(memory::OwnerLock::HolderAlive(lock_dir));
+    memory::OwnerLock contender;
+    const auto refused = memory::OwnerLock::TryAcquire(lock_dir, &contender);
+    CHECK(refused.status == memory::OwnerLock::Status::HeldByLiveHolder);
+    CHECK_FALSE(contender.holds());
+    CHECK(refused.detail.find("pid") != std::string::npos);
+    // 锁原封不动:没被删,也没被隔离。
+    CHECK(fs::exists(lock_dir / "owner"));
+    CHECK_FALSE(HasStaleLockEvidence(root, "worker.lock"));
+
+    holder.Release();
+    CHECK_FALSE(fs::exists(lock_dir));
+}
+
+TEST_CASE("OwnerLock: 释放核 owner——自己的锁删净,账被换过的不删") {
+    const fs::path root = TempRoot("owner-release");
+    // 自己的锁:析构释放删净。
+    {
+        const fs::path mine = root / "mine.lock";
+        memory::OwnerLock lock;
+        REQUIRE(memory::OwnerLock::TryAcquire(mine, &lock).status ==
+                memory::OwnerLock::Status::Acquired);
+        CHECK(fs::exists(mine / "owner"));
+    }
+    CHECK_FALSE(fs::exists(root / "mine.lock"));
+
+    // 账被换过(接管/改写):pid 对得上但 owner token 对不上——旧句柄不得
+    // 删掉后来者的锁。
+    const fs::path taken = root / "taken.lock";
+    memory::OwnerLock stale;
+    REQUIRE(memory::OwnerLock::TryAcquire(taken, &stale).status ==
+            memory::OwnerLock::Status::Acquired);
+    const std::string hijacked =
+        "{\"schema_version\":1,\"pid\":" + std::to_string(platform::CurrentProcessId()) +
+        ",\"process_start_token\":\"\",\"owner_token\":\"0000000000000000\",\"acquired_at_ms\":0}";
+    Write(taken / "owner", hijacked);
+    stale.Release();
+    CHECK(fs::exists(taken / "owner"));
+    std::error_code ec;
+    fs::remove_all(taken, ec);
+}
+
+TEST_CASE("OwnerLock: PID 复用(起始 token 对不上)算死,陈锁隔离后接手") {
+    const fs::path root = TempRoot("owner-pid-reuse");
+    const fs::path lock_dir = root / "worker.lock";
+    fs::create_directories(lock_dir);
+    // 账里 pid 是自己但起始 token 对不上:这个 PID 已被另一个进程顶替,
+    // 旧锁是残留——判死,隔离后接手(锁龄无关)。
+    const std::string reused =
+        "{\"schema_version\":1,\"pid\":" + std::to_string(platform::CurrentProcessId()) +
+        ",\"process_start_token\":\"ffffffffffff\",\"owner_token\":\"abcdef0123456789\","
+        "\"acquired_at_ms\":1}";
+    Write(lock_dir / "owner", reused);
+    CHECK_FALSE(memory::OwnerLock::HolderAlive(lock_dir));
+    memory::OwnerLock taker;
+    const auto got = memory::OwnerLock::TryAcquire(lock_dir, &taker);
+    REQUIRE(got.status == memory::OwnerLock::Status::Acquired);
+    CHECK(got.detail.find("陈锁已隔离留证") != std::string::npos);
+    CHECK(HasStaleLockEvidence(root, "worker.lock"));
+}
+
+TEST_CASE("OwnerLock: 旧格式空锁(无 owner)隔离留证,在建窗口按持有拒") {
+    const fs::path root = TempRoot("owner-legacy");
+    // 老的:空目录超龄 → 隔离留证后接手,不猜死直删。
+    const fs::path legacy = root / "worker.lock";
+    fs::create_directories(legacy);
+    REQUIRE(!BackdateMtime(legacy));
+    CHECK_FALSE(memory::OwnerLock::HolderAlive(legacy));
+    memory::OwnerLock taker;
+    const auto got = memory::OwnerLock::TryAcquire(legacy, &taker);
+    REQUIRE(got.status == memory::OwnerLock::Status::Acquired);
+    CHECK(got.detail.find("旧格式锁(无 owner)已隔离留证") != std::string::npos);
+    CHECK(fs::exists(legacy / "owner"));               // 新锁已立
+    CHECK(HasStaleLockEvidence(root, "worker.lock"));  // 旧目录还在,没被直删
+
+    // 年轻的:刚建的空目录(占目录与写 owner 之间的窗口)→ 按持有拒。
+    const fs::path young = root / "fresh.lock";
+    fs::create_directories(young);
+    CHECK(memory::OwnerLock::HolderAlive(young));
+    memory::OwnerLock impatient;
+    const auto refused = memory::OwnerLock::TryAcquire(young, &impatient);
+    CHECK(refused.status == memory::OwnerLock::Status::HeldByLiveHolder);
+    CHECK_FALSE(impatient.holds());
+    CHECK(fs::exists(young));
+}
+
+TEST_CASE("OwnerLock: owner 在但读不懂——明报不动,探测保守按持有") {
+    const fs::path root = TempRoot("owner-broken");
+    const fs::path lock_dir = root / "worker.lock";
+    fs::create_directories(lock_dir);
+    Write(lock_dir / "owner", "not-json{{{");
+    memory::OwnerLock taker;
+    const auto refused = memory::OwnerLock::TryAcquire(lock_dir, &taker);
+    CHECK(refused.status == memory::OwnerLock::Status::BrokenLock);
+    CHECK(refused.detail.find("不是合法 JSON") != std::string::npos);
+    CHECK_FALSE(taker.holds());
+    CHECK(fs::exists(lock_dir / "owner"));  // 原样没动
+    CHECK(memory::OwnerLock::HolderAlive(lock_dir));
+    CHECK_FALSE(HasStaleLockEvidence(root, "worker.lock"));
+}
+
+TEST_CASE("OwnerLock: 他进程暴毙——陈锁隔离留证,队列恢复且回执只有一张") {
+    const fs::path root = TempRoot("owner-crash");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    REQUIRE(store.set_enabled(true).has_value());
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Fact;
+    request.id = "fact.lock-crash-recovery";
+    request.title = "暴毙恢复";
+    request.summary = request.title;
+    request.content = "worker 暴毙后队列照常恢复。";
+    REQUIRE(store.EnqueueSave(request).has_value());
+    CHECK(store.Status().pending_jobs == 1);
+
+    // 真子进程占住 worker.lock 后 std::_Exit(9) 暴毙:owner 账留盘,持有者
+    // 死透(句柄由内核回收)。
+    const fs::path jobs_root = root / "home" / "memory-jobs";
+    const fs::path ready = root / "racer-ready.txt";
+    const auto crashed = platform::RunProcess(
+        {std::string(LUBANCODE_MEMORY_LOCK_RACER_EXE), "crash",
+         platform::PathToUtf8(jobs_root / "worker.lock"), platform::PathToUtf8(ready)},
+        /*timeout_ms=*/30000);
+    REQUIRE_FALSE(crashed.spawn_failed);
+    REQUIRE_FALSE(crashed.timed_out);
+    REQUIRE(crashed.exit_code == 9);
+    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+
+    CHECK_FALSE(memory::OwnerLock::HolderAlive(jobs_root / "worker.lock"));
+    CHECK(fs::exists(jobs_root / "worker.lock" / "owner"));  // 账还在
+    CHECK(store.Status().pending_jobs == 1);                 // 没被死掉的 worker 吃掉
+
+    // 队列恢复:接手者隔离陈锁后照常干活;同一 operation_id 只一张回执。
+    const auto processed = memory::RunPendingMemoryJobs(root / "home");
+    REQUIRE(processed.has_value());
+    CHECK(*processed == 1);
+    CHECK(store.ListEntries().size() == 1);
+    CHECK(store.Status().pending_jobs == 0);
+    CHECK(store.Status().failed_jobs == 0);
+    CHECK(HasStaleLockEvidence(jobs_root, "worker.lock"));
+    std::size_t committed = 0;
+    for (const auto& completion : store.DrainWriteCompletions()) {
+        REQUIRE(completion.outcome == "committed");
+        ++committed;
+    }
+    CHECK(committed == 1);
+    CHECK(store.DrainWriteCompletions().empty());
+}
+
+TEST_CASE("OwnerLock: 他进程活持有——跨进程拒绝且不认锁龄,放行后接手") {
+    const fs::path root = TempRoot("owner-cross");
+    const fs::path lock_dir = root / "worker.lock";
+    const fs::path ready = root / "racer-ready.txt";
+    const fs::path release = root / "racer-release.txt";
+
+    const auto spawned = platform::RunProcessBackground(
+        {std::string(LUBANCODE_MEMORY_LOCK_RACER_EXE), "hold", platform::PathToUtf8(lock_dir),
+         platform::PathToUtf8(ready), platform::PathToUtf8(release)});
+    REQUIRE(spawned.success);
+    // 栅栏:ready 文件出现才算 racer 真取到锁。
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!fs::exists(ready) && std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+
+    CHECK(memory::OwnerLock::HolderAlive(lock_dir));
+    memory::OwnerLock contender;
+    auto refused = memory::OwnerLock::TryAcquire(lock_dir, &contender);
+    CHECK(refused.status == memory::OwnerLock::Status::HeldByLiveHolder);
+    CHECK_FALSE(contender.holds());
+
+    // 锁龄拨过旧的 30 秒线:他进程的活持有者照旧不被夺。
+    REQUIRE(!BackdateMtime(lock_dir));
+    refused = memory::OwnerLock::TryAcquire(lock_dir, &contender);
+    CHECK(refused.status == memory::OwnerLock::Status::HeldByLiveHolder);
+    CHECK(fs::exists(lock_dir / "owner"));
+    CHECK(memory::OwnerLock::HolderAlive(lock_dir));
+
+    // 放行令 → racer 退出(析构按 owner 核账放锁)→ 后来者接手。
+    Write(release, "go\n");
+    const auto exit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!spawned.handle->Wait(0) && std::chrono::steady_clock::now() < exit_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE(spawned.handle->Wait(0));
+    REQUIRE(spawned.handle->Peek().known);
+    CHECK(spawned.handle->Peek().exit_code == 0);
+    const auto gone_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (fs::exists(lock_dir) && std::chrono::steady_clock::now() < gone_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK_FALSE(fs::exists(lock_dir));  // racer 删净了自己的锁
+    memory::OwnerLock next;
+    const auto got = memory::OwnerLock::TryAcquire(lock_dir, &next);
+    CHECK(got.status == memory::OwnerLock::Status::Acquired);
+}
+
+TEST_CASE("ProjectMemory: 活 worker 握锁超龄,监督器不补拉不夺锁") {
+    const fs::path root = TempRoot("worker-lock-age");
+    fs::create_directories(root / "repo" / ".git");
+    const auto identity = memory::ResolveProjectIdentity(root / "repo", root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options, LUBANCODE_MEMORY_WORKER_EXE);
+    REQUIRE(store.set_enabled(true).has_value());
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.title = "锁龄偏好";
+    request.summary = request.title;
+    request.content = "活 worker 不因锁龄被夺。";
+    request.confidence = "user-stated";
+    REQUIRE(store.EnqueueSave(request).has_value());
+    CHECK(store.WorkerSpawnCount() == 1);  // 首笔拉起一只
+
+    // 复刻旧病根交错:worker 尚活、连续处理超过 30 秒、锁目录 mtime 不续
+    // 期——宿主自己占住 worker.lock 并把 mtime 拨老,顶那只"活着的 A"。
+    const fs::path lock_dir = root / "home" / "memory-jobs" / "worker.lock";
+    memory::OwnerLock holder;
+    REQUIRE(memory::OwnerLock::TryAcquire(lock_dir, &holder).status ==
+            memory::OwnerLock::Status::Acquired);
+    REQUIRE(!BackdateMtime(lock_dir));
+
+    // 跨过 200ms 合并唤醒窗口持续叫 EnsureWorkerRunning:旧代码这里会因
+    // 锁龄判"没握锁"再起一只 B;新合同只认持有者身份,一概合并唤醒。
+    const auto begin = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - begin < std::chrono::milliseconds(1200)) {
+        const auto wake = store.EnsureWorkerRunning();
+        CHECK(wake.state == memory::MemoryWorkerLaunchState::AlreadyRunning);
+        CHECK(store.WorkerSpawnCount() == 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    CHECK(store.WorkerSpawnCount() == 1);     // 锁龄没引起补拉
+    CHECK(store.Status().pending_jobs == 1);  // 现役 worker 的独占没被夺走
+
+    holder.Release();  // 放手,让真 worker 吃队列
+    const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    int polls = 0;
+    while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < drain_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        // 空窗补拉兜底(生产路由同款)。
+        if (++polls % 40 == 0) (void)store.EnsureWorkerRunning();
+    }
+    CHECK(store.Status().pending_jobs == 0);
+    CHECK(store.Status().failed_jobs == 0);
+    REQUIRE(store.ListEntries().size() == 1);
 }
