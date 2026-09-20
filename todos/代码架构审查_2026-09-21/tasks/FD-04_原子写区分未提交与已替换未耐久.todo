@@ -1,6 +1,6 @@
 # FD-04 原子写区分未提交与已替换未耐久
 
-- 状态：已实现，PR 待 CI（合同与两口迁移已落，其余调用点迁移与兼容口删除留后继）。
+- 状态：已实现，PR #160 CI 全绿待合并（macos-clang + windows-msvc 双腿绿，rollup 6 SUCCESS/0 fail，run 35532316967）。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：B；严重度：高；重构批次：2。
@@ -23,7 +23,7 @@
 
 ## 实施顺序
 
-- [x] 先定义并记录提交阶段，不破坏正常写入。（本单 PR：`WriteOutcome` 四态 + `AtomicWriteReceipt` 成功回执 + `AtomicWriteError.outcome/failure_kind` 两字段；全部既有调用点只消费 has_value/布尔，源兼容零改动。）
+- [x] 先定义并记录提交阶段，不破坏正常写入。（PR #160：`WriteOutcome` 四态 + `AtomicWriteReceipt` 成功回执 + `AtomicWriteError.outcome/failure_kind` 两字段；全部既有调用点只消费 has_value/布尔，源兼容零改动。）
 - [x] 迁移公共配置写口与会话快照，再逐个迁其余耐久调用；分PR但串行交付接口。（本 PR 迁 `WriteConfigObjectAtomicPhased` 与 `WriteSessionSoulSnapshotPhased` 两口并留兼容口；其余 ProcessCrashDurability 调用(reply_outbox/workflow account/updater txn/layout/engine/qq_spool/qq_menu/manager/channel_media/channel_file_delivery/headless_executor/session_service/channel_connection_reporter/im_preferences/trajectory harness_exporter)待后继 PR 逐个迁。）
 - [ ] 所有使用者迁完后删歧义返回口。（两个兼容口已标注"FD-04 收尾、调用方迁完 Phased 后删"。）
 
@@ -35,7 +35,7 @@
 - [ ] HC-07 的保存失败分支按新合同验收，不能盲目回滚成旧内存。（后继单 HC-07 消费 `WriteConfigObjectAtomicPhased` 的 outcome。）
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
-  - 本单证据：PR 号与 CI 结论开 PR 后回填。
+  - 本单证据：PR #160，head f17a810a，run 35532316967——macos-clang pass(25m56s)、windows-msvc pass，rollup 6 SUCCESS/0 failure/0 cancelled（debian/ubuntu 腿按设计 skipped）。另有 ci.yml 一笔：平台原子写三件列入 windows 敏感面过滤器，本 PR 的 windows 腿由此出场（平台码分支须 windows 腿绿才合）。
 
 ## 合并取舍与估量
 
