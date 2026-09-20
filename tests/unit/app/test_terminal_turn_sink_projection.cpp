@@ -109,6 +109,14 @@ public:
         return text;
     }
 
+    // 视口顶的绝对行号(pan_viewport_down 平移后 >0)。断言"帧在视口顶"
+    // 用它换算,不假设视口恒在 0 行——长缓冲下"保锚可见"原语会把视口
+    // 跟着内容往下挪,那是生产语义,不是串页。
+    int ViewportTop() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return viewport_y;
+    }
+
     // 安装(构造即装,析构即拆):ConsoleTestHooks + TermPort 双改道。
     explicit VirtualScreen() {
         Install();
@@ -869,10 +877,16 @@ TEST_CASE("P2 原子换页: 快速往返 20 轮——末帧只见当前页,旧 e
 
     // 末帧只见当前页:视口内 sub 帧在、main 的字一个不见(旧帧已擦、
     // 在飞的旧 epoch 绘制被闸)。只断言视口行——清屏语义本就只清视口,
-    // 滚出窗的内容留在滚屏历史是生产规矩,不算串页。
-    CHECK(screen.RowText(0).has_value());
-    CHECK(screen.RowText(0).value().find("sub agent #7 view frame") != std::string::npos);
-    for (int row = 0; row < VirtualScreen::kViewport; ++row) {
+    // 滚出窗的内容留在滚屏历史是生产规矩,不算串页。视口行按当前视口顶
+    // 换算:main 重铺随轮数长高,晚轮一笔未闸 delta 画过视口底时,帧账
+    // "保锚可见"原语(EnsureViewportRowsForAnchorLocked)会平移视口跟住
+    // 内容——长缓冲的生产语义。视口挪了,帧就落在 viewport_y 行而非
+    // 0 行;钉死 0 行是把"视口恰好没挪过"当成了不变量(linux 腿首跑
+    // 即红在这)。视口之上的旧行是滚屏历史,同样不算串页。
+    const int viewport_top = screen.ViewportTop();
+    CHECK(screen.RowText(viewport_top).has_value());
+    CHECK(screen.RowText(viewport_top).value().find("sub agent #7 view frame") != std::string::npos);
+    for (int row = viewport_top; row < viewport_top + VirtualScreen::kViewport; ++row) {
         const auto text = screen.RowText(row);
         if (!text.has_value()) {
             break;
