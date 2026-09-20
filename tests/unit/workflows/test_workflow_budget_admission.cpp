@@ -23,12 +23,13 @@
 
 namespace {
 
-// fake clock:手动拨。
+// fake clock:手动拨。计数改原子——async 时限册里 body 工作线程拨钟、
+// 等待壳的时限监察同时读钟(TSan 腿首战实锤的竞争),裸 int64 过不了。
 class FakeClock : public lubancode::workflow::JournalClock {
 public:
-    std::int64_t now_ms_ = 1000000;
-    std::int64_t NowMs() const override { return now_ms_; }
-    void Advance(std::int64_t ms) { now_ms_ += ms; }
+    std::atomic<std::int64_t> now_ms_{1000000};
+    std::int64_t NowMs() const override { return now_ms_.load(); }
+    void Advance(std::int64_t ms) { now_ms_.fetch_add(ms); }
 };
 
 // 记账 executor:按脚本走(耗尽重复最后一格),调用数原子计数——
