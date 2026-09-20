@@ -294,8 +294,8 @@ TEST_CASE("线程寿命: 墙钟强收翻 Failed 后,再派工与析构都不提�
     REQUIRE(snapshots.size() == 2);
     const auto task1 = coordinator->ledger().Detail(1);
     const auto task2 = coordinator->ledger().Detail(2);
-    REQUIRE(task1 != nullptr);
-    REQUIRE(task2 != nullptr);
+    REQUIRE(task1.has_value());
+    REQUIRE(task2.has_value());
     CHECK(task1->state == tools::AgentTaskState::Failed);
     CHECK(task1->outcome.reason == tools::TaskOutcomeReason::WallClockTimeout);
     CHECK(task2->state == tools::AgentTaskState::Done);
