@@ -63,10 +63,11 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
 bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int request_timeout_secs);
 
 
-// /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
-// 怎么造一份(SKILL.md 起手 frontmatter 的最小样例)。
+// /skills 命令:列出扫描到的技能,按来源分组,走主题配色(plain 主题下
+// 退化为无色同构输出);一个都没有时打印两处目录路径,顺带说明怎么造一份
+// (SKILL.md 起手 frontmatter 的最小样例)。
 void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, const std::string& project_dir,
-                         const std::optional<std::string>& home_dir);
+                         const std::optional<std::string>& home_dir, const lubancode::cli::Theme& theme);
 
 
 // /skill 的参数只认第一个单词作动词,余下整段留给 URL、本地路径或技能名。命令

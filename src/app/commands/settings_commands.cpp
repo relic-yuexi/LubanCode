@@ -218,17 +218,19 @@ bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int re
     return true;
 }
 
-// /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
-// 怎么造一份(SKILL.md 起手 frontmatter 的最小样例)。
+// /skills 命令:列出扫描到的技能,按来源分组;主题配色(banner 标题 /
+// 青分组头 / 绿名 / 暗说明),plain 主题与管道下自动退化为无色同构输出。
+// 一个都没有时打印两处目录路径,顺带说明怎么造一份(SKILL.md 起手
+// frontmatter 的最小样例)。
 void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, const std::string& project_dir,
-                         const std::optional<std::string>& home_dir) {
+                        const std::optional<std::string>& home_dir, const lubancode::cli::Theme& theme) {
     if (skills.empty()) {
         TermOut() << trf("cmd.skills.empty", project_dir,
                           home_dir.has_value() ? *home_dir : tr("path.no_home"))
                    << "\n";
         return;
     }
-    TermOut() << trf("cmd.skills.header", skills.size()) << "\n";
+    TermOut() << theme.banner << trf("cmd.skills.header", skills.size()) << theme.reset << "\n";
     const std::vector<std::string> preferred_order = {"项目级", "主目录级", "官方"};
     std::set<std::string> printed;
     auto print_group = [&](const std::string& source) {
@@ -238,18 +240,40 @@ void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, 
         }
         if (group.empty()) return;
         printed.insert(source);
-        TermOut() << "\n" << source << " · " << group.size() << "\n";
+        TermOut() << "\n" << theme.spinner << source << " · " << group.size() << theme.reset << "\n";
         for (const auto* skill : group) {
-            TermOut() << "  " << skill->name << "\n"
-                      << "    "
-                      << (skill->description.empty() ? tr("cmd.skills.no_desc") : skill->description) << "\n";
+            TermOut() << "  " << theme.prompt << "● " << skill->name << theme.reset << "\n";
+            const std::string desc =
+                skill->description.empty() ? tr("cmd.skills.no_desc") : skill->description;
+            // 说明压暗、首行挂 ⎿ 肘符;多行说明按列对齐续行,不顶格。
+            TermOut() << theme.stats << "    ⎿ ";
+            bool first_line = true;
+            std::size_t pos = 0;
+            while (true) {
+                const std::size_t nl = desc.find('\n', pos);
+                if (!first_line) {
+                    TermOut() << "      ";
+                }
+                std::string line = desc.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                TermOut() << line;
+                if (nl == std::string::npos) {
+                    break;
+                }
+                TermOut() << "\n";
+                first_line = false;
+                pos = nl + 1;
+            }
+            TermOut() << theme.reset << "\n";
         }
     };
     for (const auto& source : preferred_order) print_group(source);
     for (const auto& skill : skills) {
         if (printed.count(skill.source_level) == 0) print_group(skill.source_level);
     }
-    TermOut() << "\n" << tr("cmd.skills.manage_hint") << "\n";
+    TermOut() << "\n" << theme.stats << tr("cmd.skills.manage_hint") << theme.reset << "\n";
 }
 
 // /skill 的参数只认第一个单词作动词,余下整段留给 URL、本地路径或技能名。命令
@@ -2362,7 +2386,7 @@ CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::Pa
 
 CommandFlow HandleSlashSkills(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
-    PrintSkillsCommand(*ctx.skills, lubancode::platform::CurrentDirUtf8(), *ctx.home_dir);
+    PrintSkillsCommand(*ctx.skills, lubancode::platform::CurrentDirUtf8(), *ctx.home_dir, *ctx.theme);
     return CommandFlow::Continue;
 }
 
