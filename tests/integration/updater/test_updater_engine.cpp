@@ -696,19 +696,21 @@ TEST_CASE("engine.update:激活后失败——版本化回滚指回 previous 退
     const fs::path root = TempRoot("rollback-versioned");
     const std::string old_dir = MakeVersionedInstall(root, "1.0.0");
     EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+    // 触发器:第 2 次探针(健康检查)故意印坏版本——验包探针过、健康探针
+    // 不过,才是 python health_and_commit 失败回滚的正路(账落盘层的
+    // std::runtime_error 不进引擎分流,python 里同样裸炸,不算这条路)。
+    const fs::path counter = root.parent_path() / (root.filename().string() + "-probe-count");
+    EnvVarGuard fail_on("LUBANCODE_PROBE_STUB_FAIL_ON", "2");
+    EnvVarGuard counter_path("LUBANCODE_PROBE_STUB_COUNTER", lubancode::platform::PathToUtf8(counter));
     const Package pkg = BuildPackage({.version = "2.0.0"});
     const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
     WriteFile(archive, pkg.bytes);
-    // install-state.json 占成目录:健康检查过了,写安装账必炸 -> 走回滚路。
-    // (MakeVersionedInstall 先落了同名文件,得挪掉再占。)
-    std::error_code ec;
-    fs::remove(root / "install-state.json", ec);
-    fs::create_directories(root / "install-state.json", ec);
 
     Lines out;
     CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
                            nullptr) == 3);
     CHECK(out.contains("rolled-back: "));
+    CHECK(out.contains("新版健康检查失败"));
     const auto pointer = ReadJson(root / "current.json");
     REQUIRE(pointer.has_value());
     CHECK((*pointer)["current"] == old_dir);
@@ -729,11 +731,13 @@ TEST_CASE("engine.update:激活后失败——平铺恢复旧 EXE 并必摘 curr
     const std::string old_exe_bytes = "old flat exe bytes";
     WriteFile(root / kExeName, old_exe_bytes);
     WriteFile(root / "skills" / "keep.md", "用户文件");
+    // 同上:第 2 次探针(健康检查)故意失败 -> 回滚 -> 平铺恢复旧 EXE 必摘指针。
+    const fs::path counter = root.parent_path() / (root.filename().string() + "-probe-count");
+    EnvVarGuard fail_on("LUBANCODE_PROBE_STUB_FAIL_ON", "2");
+    EnvVarGuard counter_path("LUBANCODE_PROBE_STUB_COUNTER", lubancode::platform::PathToUtf8(counter));
     const Package pkg = BuildPackage({.version = "2.0.0"});
     const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
     WriteFile(archive, pkg.bytes);
-    std::error_code ec;
-    fs::create_directories(root / "install-state.json", ec);  // 写账必炸的堵点
 
     Lines out;
     CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
@@ -862,12 +866,15 @@ TEST_CASE("engine.gc:留 current+previous,旧版删掉,清单外件抢救") {
     args.install_root = root;
     Lines out;
     CHECK(RunUpdaterEngine(args, out.sink(), nullptr) == 0);
+    // python gc 的清单外口径连 manifest.json 自己也算(listed 只收 files 条
+    // 目),抢救 2 件:notes/user.txt + manifest.json——真源如此,照抄。
     CHECK(out.contains("[gc] 已移除旧版本 " + stale_dir +
-                       ";清单外文件 1 个保存在 backups/stranded-" + stale_dir + "/"));
+                       ";清单外文件 2 个保存在 backups/stranded-" + stale_dir + "/"));
     CHECK(fs::is_directory(root / "versions" / current_dir));
     CHECK(fs::is_directory(root / "versions" / previous_dir));
     CHECK_FALSE(fs::exists(root / "versions" / stale_dir));
     CHECK(ReadFile(root / "backups" / ("stranded-" + stale_dir) / "notes" / "user.txt") == "用户笔记");
+    CHECK(fs::is_regular_file(root / "backups" / ("stranded-" + stale_dir) / "manifest.json"));
     CHECK(ReadFile(root / "versions" / current_dir / "keep.txt") == "当前版本的清单外件不动");
 }
 
@@ -981,7 +988,7 @@ TEST_CASE("engine.plan:预演不动安装") {
     CHECK(RunUpdaterEngine(args, out.sink(), nullptr) == 0);
     CHECK(out.contains("== 更新预演(不改安装、不动用户数据)=="));
     CHECK(out.contains("当前布局: flat"));
-    CHECK(out.contains("本地包核对: 3 个官方文件(解临时目录核对,不动安装)"));
+    CHECK(out.contains("本地包核对: 2 个官方文件(解临时目录核对,不动安装)"));
     CHECK(out.contains("磁盘预检: "));
     // 不动安装:无指针、无版本目录、无事务账。
     CHECK_FALSE(fs::exists(root / "current.json"));
