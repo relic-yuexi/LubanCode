@@ -283,6 +283,10 @@ AttemptResult AttemptDownload(const std::string& url, const fs::path& partial, s
 
     cpr::Header headers{{"User-Agent", "lubancode-updater"}};
     if (offset > 0) headers["Range"] = "bytes=" + std::to_string(offset) + "-";
+    for (const auto& [name, value] : options.extra_headers) {
+        if (name == "Range") continue;  // 续传边界由本件钉死,调用方不许越权
+        headers[name] = value;
+    }
 
     cpr::Session session;
     session.SetUrl(cpr::Url{url});

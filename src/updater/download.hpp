@@ -29,6 +29,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace lubancode::updater {
 
@@ -39,6 +41,11 @@ struct DownloadOptions {
     int connect_timeout_secs = 60;   // 连接阶段上限(秒)
     int low_speed_limit = 1;         // LowSpeed 停滞探测(字节/秒),停滞即断线重试
     int low_speed_window_secs = 30;  // 停滞判定窗口(秒)
+    // 额外请求头(python download_with_resume 的 headers 形参):批三引擎层
+    // 给 GitHub 资产 API 递 Accept: application/octet-stream(缺了它 API 回
+    // JSON 元数据而不是资产体)。同名时覆盖 UA/Range 之外的键,UA/Range 仍
+    // 由本件钉死。
+    std::vector<std::pair<std::string, std::string>> extra_headers;
 };
 
 // Range 断点续传下载:url 的体流式写到 "<dest>.part",逐块喂摘要、逐块验
