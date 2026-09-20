@@ -829,7 +829,7 @@ AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::str
     std::shared_ptr<AgentEngineRoute> route = engine_route_;
     coordinator_->SetEngine([route](const AgentDispatchRequest& request) -> Tool::Result {
         if (request.env != nullptr && request.env->run_state != nullptr) {
-            return ExecuteAgentDispatchOnRunState(request, request.env->run_state);
+            return ExecuteAgentDispatchOnRunState(request, request.env->run_state, request.fail_account);
         }
         std::lock_guard<std::mutex> lock(route->mutex);
         if (route->facade == nullptr) {
@@ -1079,7 +1079,7 @@ Tool::Result ExecuteAgentDispatchOnRunState(const AgentDispatchRequest& dispatch
     // 短命账,计数即弃——不回门面借 main_handle(冻结路上门面可能已亡)。
     AgentDispatchHandle stub_account;
     AgentDispatchHandle& fail_account = fail_account_in != nullptr ? *fail_account_in : stub_account;
-    const auto reject = [&fail_account](const std::string& cause, const std::string& message) -> Result {
+    const auto reject = [&fail_account](const std::string& cause, const std::string& message) -> Tool::Result {
         if (fail_account.param_fail_cause() == cause) {
             fail_account.set_param_fail_streak(fail_account.param_fail_streak() + 1);
         } else {
@@ -1405,7 +1405,7 @@ Tool::Result ExecuteAgentDispatchOnRunState(const AgentDispatchRequest& dispatch
         }
         resolved_storage = agent::ResolveAgentProfile(agent::BuildSubagentResolveRequest(
             custom->definition, state->agent_profile, std::move(parent_tool_names),
-            state->default_max_steps_per_turn, state->default_max_turns, state->context_window_tokens_, environment, overrides));
+            state->default_max_steps_per_turn, state->default_max_turns, state->context_window_tokens, environment, overrides));
         if (!resolved_storage->ok()) {
             return {"自定义 Agent \"" + agent_type + "\" 解析不过,已拒发(定义或环境有错,重试同样的入参"
                     "不会成功;先 /agent doctor " + agent_type + " 看诊断):\n" +
@@ -1528,7 +1528,7 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
     std::optional<ScopedIsolation> scope_guard;
     std::optional<IsolationScope> scope_storage;
     if (request.isolate) {
-        Result setup_error;
+        Tool::Result setup_error;
         room = SetupIsolationRoom(request.caller_cwd, request.caller_base, state->git_runner, setup_error);
         if (!room.has_value()) {
             return setup_error;
@@ -1617,7 +1617,7 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
             caller.agent_run_id, &spawn_failure);
     }
     if (trajectory_spawn_armed && trajectory == nullptr) {
-        Result result{SubagentStartFailedText(spawn_failure), true};
+        Tool::Result result{SubagentStartFailedText(spawn_failure), true};
         if (room.has_value()) {
             // 隔离房照常收尾:早退不漏清理(有活留房附路径,与正常路同款)。
             const auto finish = FinishIsolationRoom(*room, state->git_runner);
@@ -1660,7 +1660,7 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
         // 越界,明拒不给空指针解引用。
         return {"前台派工缺少主回合后端(装配越界),已拒发。", true};
     }
-    Result result = RunSubagentTask(state, *run_backend, effective_registry, task->snapshot.prompt, agent_type, budget,
+    Tool::Result result = RunSubagentTask(state, *run_backend, effective_registry, task->snapshot.prompt, agent_type, budget,
                             foreground_hooks, task,
                             /*detached=*/run_detached,
                             /*prepared_system_prompt=*/nullptr,
@@ -1736,7 +1736,7 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
     // 父已在房里的,派工口已拒(nested_worktree_not_supported)。
     std::optional<lubancode::cli::AgentWorktree> room;
     if (request.isolate) {
-        Result setup_error;
+        Tool::Result setup_error;
         room = SetupIsolationRoom(request.caller_cwd, request.caller_base, state->git_runner, setup_error);
         if (!room.has_value()) {
             return setup_error;
@@ -1940,7 +1940,7 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
             }
             ToolRegistry& effective_registry = isolated_registry != nullptr ? *isolated_registry : *registry;
             DetachedRequestBackend backend(*detached);
-            Result result;
+            Tool::Result result;
             try {
                 result = RunSubagentTask(frozen, backend, effective_registry, prompt, agent_type, budget,
                                          nullptr, task, detached.get(), &system_prompt,
@@ -2191,7 +2191,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         task_agent_profile.tool_filter = [](const Tool& tool) { return ExploreAllows(tool); };
         // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
         // 文案写清限制来自只读角色,并给出角色内的替代去路。
-        task_agent_profile.state->tool_filterdenial =
+        task_agent_profile.tool_filter_denial =
             "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
             "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。";
     } else if (resolved != nullptr) {
@@ -2199,7 +2199,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         // 全放行谓词(自定义 Agent 不吃装配层的延迟过滤)——照旧,一字不动。
         if (resolved->profile.tool_filter != nullptr) {
             task_agent_profile.tool_filter = resolved->profile.tool_filter;
-            task_agent_profile.state->tool_filterdenial = resolved->profile.state->tool_filterdenial;
+            task_agent_profile.tool_filter_denial = resolved->profile.tool_filter_denial;
         } else {
             task_agent_profile.tool_filter = [](const Tool&) { return true; };
         }
@@ -2226,9 +2226,9 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         task_agent_profile.tool_execution_policy = resolved->profile.tool_filter;
         task_agent_profile.tool_execution_denial =
             std::string(tools::kErrToolRefNotAllowed) + "|" +
-            (resolved->profile.state->tool_filterdenial.empty()
+            (resolved->profile.tool_filter_denial.empty()
                  ? std::string("此工具不在该自定义 Agent 的 tools 允许面内,不得重试同一调用。")
-                 : resolved->profile.state->tool_filterdenial);
+                 : resolved->profile.tool_filter_denial);
     }
     // 阶段 2:prompt.soul: off 的自定义 Agent 不带魂(契约 §4.2——Soul 只
     // 许继承或关,不许在 Agent 文件里另塞正文)。前台任务的魂从皮
@@ -2965,7 +2965,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                 };
             turn_wiring.on_post_tool_use_hook =
                 [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
-                                const nlohmann::json& input, const Result& result) {
+                                const nlohmann::json& input, const Tool::Result& result) {
                     lubancode::hooks::HookPayload payload;
                     payload.event = lubancode::hooks::HookEvent::PostToolUse;
                     payload.fields["tool_name"] = name;
@@ -3483,7 +3483,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     endgame.require_final_text = true;  // 子代理要文本结论
     const agent::TurnVerdict verdict = agent::ClassifyTurnEnd(endgame);
 
-    Result run_result;
+    Tool::Result run_result;
     switch (verdict.reason) {
         case agent::TurnVerdict::Reason::WallClockTimeout:
             // 墙钟超时(规格三):接口超时全失效的最后一道闸。失败页写明超时
