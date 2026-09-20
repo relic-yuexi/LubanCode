@@ -16,9 +16,16 @@
 // 在发送线程内闭环,supervisor 只把健康翻成 Recovering 供显示与账面。
 // 自动重派新 Agent 永远不做(单子 §8.4)。
 //
-// 锁序:supervisor 自有 mutex 只保护登记表;一切台账调用(ledger_)都在
-// 松开自有 mutex 之后进行,FormAliveVitals 的 visitor 在台账锁内跑、不回拿
-// supervisor mutex——两个方向不交叉,无环。
+// 线程寿命(AR-02,2026-09-21 架构审查):监督线程绝不捕宿主 this,监督
+// 循环连同它的锁、期限表、观察表整包住进共享状态 Loop(shared_ptr 保
+// 命)。宿主析构先断开台账访问(置断连标志:线程不再发起新的台账访问,
+// 在途访问由有界收线窗兜住)再请求停止;跨截止时间存活的脱离线程只摸
+// Loop,退出路径也只碰 Loop 的原子与锁。台账仍由所有者持有、寿命盖过
+// 本类(声明序在前,析构在后)。
+//
+// 锁序:Loop 自有 mutex 只保护登记表;一切台账调用(ledger)都在松开
+// 自有 mutex 之后进行,FormAliveVitals 的 visitor 在台账锁内跑、不回拿
+// Loop mutex——两个方向不交叉,无环。
 #pragma once
 
 #include <atomic>
@@ -45,7 +52,9 @@ public:
 
     // ledger 由所有者(AgentTaskCoordinator)持有,寿命盖过本类。
     explicit AgentSupervisor(tools::TaskLedger& ledger);
-    ~AgentSupervisor();  // 有界停线:监督线程最迟一个 tick 内退,挂死则 detach 放行
+    // 有界停线:监督线程最迟一个 tick 内退,挂死则 detach 放行(脱离
+    // 线程只摸共享状态 Loop,见上)。
+    ~AgentSupervisor();
 
     AgentSupervisor(const AgentSupervisor&) = delete;
     AgentSupervisor& operator=(const AgentSupervisor&) = delete;
@@ -61,9 +70,9 @@ public:
 
     // 尺子(测试注入用小阈值;默认见 SupervisionThresholds)。
     void SetThresholds(agent::SupervisionThresholds thresholds);
-    const agent::SupervisionThresholds& thresholds() const { return thresholds_; }
+    const agent::SupervisionThresholds& thresholds() const;
     // 空转收口的宽限:停止信号发出后任务线程这么久没报终态,才强收账。
-    void SetNoProgressGraceSecs(int secs) { no_progress_grace_secs_ = secs > 0 ? secs : 1; }
+    void SetNoProgressGraceSecs(int secs);
 
     // 会话收场:停监督线程(JoinAllBounded 之前调,跑完这拍就退)。
     void RequestStop();
@@ -76,53 +85,32 @@ public:
     // ---- P2:只读钩子与指标 --------------------------------------------------
     // AgentHealthChanged 钩子总线(后台安全队列):会话装配层 Subscribe,
     // 慢/坏钩子不卡监督拍。监督器与台账侧事件(恢复/不明/强收)都进这里。
-    AgentHealthHookBus& health_hooks() { return health_hooks_; }
+    AgentHealthHookBus& health_hooks() { return *health_hooks_; }
     // 六枚低基数指标(单子 §11.3):事件计数 + 台账现值,Snapshot 出
     // telemetry::MetricSample(可走 OTLP 编码器)。
     std::vector<telemetry::MetricSample> MetricsSnapshot() const { return metrics_.Snapshot(); }
+    // 测试口:线程世界(共享状态 Loop+监督线程)同寿哨兵——weak 过期即
+    // 监督线程已退出、共享状态已析构,此后进程里再无摸它的代码。
+    std::weak_ptr<const void> lifetime_token_for_test() const { return loop_; }
 
 private:
-    struct Deadline {
-        enum class Kind { WallClock, WallGrace, NoProgressGrace };
-        Kind kind = Kind::WallClock;
-        Clock::time_point at{};
-        std::shared_ptr<tools::TaskRecord> task;
-        int wall_timeout_secs = 0;  // WallClock:强收文案用
-        int grace_secs = 30;        // WallClock:停止信号后的宽限
-    };
+    // 线程世界(定义在 .cpp):监督循环、锁、期限表与观察表整包。监督
+    // 线程只捕 shared_ptr<Loop>,宿主门面只转发。
+    struct Loop;
 
-    void EnsureThreadStarted();
-    void RunLoop();
-    // 一拍健康判:取视景 -> 纯函数判 -> 执行动作。返回是否有人要叫醒下一拍。
-    void HealthPass(bool host_resume_suspected);
-    void ProcessDueDeadlines(const Clock::time_point now);
-    void FireWallClock(const Deadline& deadline);
-    void FireWallGrace(const Deadline& deadline);
-    void FireNoProgressGrace(const Deadline& deadline);
-    Clock::time_point NextDeadlineLocked() const;
-    void PushNoticeDeduped(const std::shared_ptr<tools::TaskRecord>& task, std::uint64_t health_epoch,
-                           const std::string& reason_code, const std::string& text);
     // 台账侧监督事件(恢复起讫/工具不明/强收)的进料口:投钩子总线 + 记
     // 指标。在台账锁内被调,只入队/拿自家小锁,不回拿台账锁。
     void OnLedgerSupervisionEvent(const agent::AgentSupervisionEvent& event);
 
     tools::TaskLedger& ledger_;
-    agent::SupervisionThresholds thresholds_;
-    int no_progress_grace_secs_ = 15;
-    // P2:钩子总线与指标(声明在 ledger_ 之后,析构先于台账)。总线自带
-    // 专职派发线程(首个事件到达才起),慢/坏钩子不占监督拍。
-    AgentHealthHookBus health_hooks_;
+    // P2 指标:只有台账 sink(析构头部即拔)与外部快照摸,监督线程不碰。
     AgentSupervisorMetrics metrics_;
-
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::thread thread_;
-    std::atomic<bool> thread_exited_{false};
-    bool thread_started_ = false;
-    bool stop_requested_ = false;
-    std::vector<Deadline> deadlines_;
-    std::vector<std::shared_ptr<tools::TaskRecord>> watches_;
-    Clock::time_point last_tick_{};
+    // P2 钩子总线:shared_ptr 持有(事件只经台账 sink 进总线,sink 拔掉
+    // 后无人再摸;总线自带专职派发线程,慢/坏钩子不占监督拍)。
+    std::shared_ptr<AgentHealthHookBus> health_hooks_;
+    // 线程世界:声明在最后,析构先于以上——其实次序无关紧要(各自
+    // shared_ptr 独立保命),排在这只为读起来顺。
+    std::shared_ptr<Loop> loop_;
 };
 
 }  // namespace lubancode::runtime

@@ -10,8 +10,14 @@
 //     完整工具参数(单子 §五·11)。
 //
 // 订阅方自备线程安全(回调在总线自己的派发线程上跑,同一时刻只有一条
-// 线程在跑回调)。析构有界收线:最迟一个派发窗口内退,挂死则 detach
-// 放行——与 AgentSupervisor 同一条纪律。
+// 线程在跑回调)。析构有界收线:至多一个派发窗口内退,极端挂死(钩子里
+// 死循环)才 detach 放行——与 AgentSupervisor 同一条纪律。
+//
+// 线程寿命(AR-02,2026-09-21 架构审查):派发线程绝不捕宿主 this,只捕
+// 共享状态 State 的 shared_ptr。超时 detach 后宿主已析构,线程跑完手头
+// 一批、只摸 State(shared_ptr 保命),退出路径也只碰 State 的原子与锁。
+// 收线合同:停止后新 Publish 拒收并计入 dropped_events;批内剩余事件
+// 照派发完。
 #pragma once
 
 #include <atomic>
@@ -32,7 +38,7 @@ class AgentHealthHookBus {
 public:
     using Callback = std::function<void(const agent::AgentSupervisionEvent&)>;
 
-    AgentHealthHookBus() = default;
+    AgentHealthHookBus();
     ~AgentHealthHookBus();
 
     AgentHealthHookBus(const AgentHealthHookBus&) = delete;
@@ -43,33 +49,28 @@ public:
     void Subscribe(Callback callback);
 
     // 发布(监督线程/任务线程调):只入队,不跑钩子。队列有界,溢出丢最老
-    // 并计数(dropped_events)——监督器的拍永远不被下游背压拖住。
+    // 并计数(dropped_events)——监督器的拍永远不被下游背压拖住。收线后
+    // 拒收:RequestStop/析构之后再发的事件直接丢弃并计入 dropped_events。
     void Publish(const agent::AgentSupervisionEvent& event);
 
     // 收线:跑完手头一批就退(析构兜底也走这)。
     void RequestStop();
 
-    // 诊断口:累计被丢的事件数(队列打满 = 下游跟不上,账要看得见)。
-    std::uint64_t dropped_events() const { return dropped_events_.load(std::memory_order_acquire); }
-    std::uint64_t delivered_events() const { return delivered_events_.load(std::memory_order_acquire); }
+    // 诊断口:累计被丢的事件数(队列打满 = 下游跟不上,收线后拒收同计,
+    // 账要看得见)。
+    std::uint64_t dropped_events() const;
+    std::uint64_t delivered_events() const;
     // 测试口:同步派发一轮(线程外直跑,不依赖派发线程的时序)。
     void DrainForTest();
+    // 测试口:线程世界(共享状态+专职线程)同寿哨兵——weak 过期即专职
+    // 线程已退出、共享状态已析构,此后进程里再无摸它的代码。
+    std::weak_ptr<const void> lifetime_token_for_test() const;
 
 private:
-    void EnsureThreadStarted();
-    void DispatchLoop();
-    void DrainBatch();
-
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::vector<agent::AgentSupervisionEvent> queue_;
-    std::vector<Callback> callbacks_;
-    std::thread thread_;
-    std::atomic<bool> thread_exited_{false};
-    bool thread_started_ = false;
-    bool stop_requested_ = false;
-    std::atomic<std::uint64_t> dropped_events_{0};
-    std::atomic<std::uint64_t> delivered_events_{0};
+    // 线程世界:派发线程摸的全部状态都在这(宿主门面只转发)。shared_ptr
+    // 由线程 lambda 持有一份,detach 放行后宿主析构也不悬垂。
+    struct State;
+    std::shared_ptr<State> state_;
 };
 
 }  // namespace lubancode::runtime
