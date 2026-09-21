@@ -440,6 +440,10 @@ add_library(lubancode_engine STATIC
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
   # 同一把尺,两把 v1 材料各自冻结)。
   src/platform/dir_fingerprint.cpp
+  # FD-06(架构审查 2026-09-21):共享密钥扫描自 insights/redaction 下沉
+  # 的中立纯算法件(零业务依赖)——insights/telemetry/trajectory 三家
+  # 共用,trajectory 借此不再反向 include insights(拆模块环)。
+  src/privacy/secret_scan.cpp
   src/api/sse_framing.cpp
   src/api/http_stream_transport.cpp  # 批六:四家 wire client 共用的 cpr 传输骨架
   # 监督器单 P0-1:主/子共用的请求级恢复链(错误分型->稳定码、重试白名单、

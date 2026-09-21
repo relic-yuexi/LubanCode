@@ -18,9 +18,9 @@
 #include "insights/derived_store.hpp"  // kDerivedAnalyzerDir(status 的摘要计数)
 #include "insights/html_renderer.hpp"
 #include "insights/insights_health.hpp"
-#include "insights/redaction.hpp"
 #include "insights/report_store.hpp"
 #include "platform/paths.hpp"
+#include "privacy/secret_scan.hpp"
 #include "trajectory/directory.hpp"  // ReadSessionJson(workspace readable name)
 #include "workspace/index.hpp"       // 账本制:逐房 manifest 自描述
 #include "workspace/manifest.hpp"
@@ -634,7 +634,7 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
         return;
     }
     if (parsed.json) {
-        TermOut() << lubancode::insights::RedactSecrets(json_text) << "\n";
+        TermOut() << lubancode::privacy::RedactSecrets(json_text) << "\n";
     }
     for (const auto& line :
          FormatInsightsDigestLines(result, written.paths.json_path,

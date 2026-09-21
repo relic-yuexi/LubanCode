@@ -29,7 +29,6 @@
 #include <nlohmann/json.hpp>
 
 #include "hooks/hash.hpp"
-#include "insights/redaction.hpp"
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "trajectory/blob_store.hpp"

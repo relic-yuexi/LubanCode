@@ -8,7 +8,8 @@
 //   2. 正文回读——BlobRef 解引用 + 上限,超限/缺失给稳定结构码。
 //
 // 纪律与 training_exporter 同源:纯读、不联网、不回写 Journal;secret 扫描
-// 复用 insights 冻结的模式表,不在 trajectory 重造第二份。本件是内部件
+// 吃 privacy/secret_scan 中立件(FD-06 下沉,原 insights 冻结的模式表),
+// 不在 trajectory 重造第二份,也不反向 include insights。本件是内部件
 // (exporter 实现的共享腹部),不进公共 API——依赖铁律不变:trajectory
 // 纯库,不 include app/cli/runtime。
 #pragma once
@@ -27,10 +28,10 @@
 #include <nlohmann/json.hpp>
 
 #include "hooks/hash.hpp"
-#include "insights/redaction.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"
+#include "privacy/secret_scan.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/replay.hpp"
@@ -200,14 +201,14 @@ inline bool LooksLikeBinary(std::string_view text) {
     return controls * 10 > text.size() * 3;
 }
 
-// 一段要进导出件的正文的全套隐私扫描。secret 扫描复用 insights 冻结的
-// 模式表(Token 账本单 A0),不在 trajectory 重造第二份(telemetry
-// redactor 同款先例)。
+// 一段要进导出件的正文的全套隐私扫描。secret 扫描吃 privacy/secret_scan
+// 中立件(FD-06 下沉,原 insights 冻结的模式表/Token 账本单 A0),不在
+// trajectory 重造第二份(telemetry redactor 同款先例)。
 inline void ScanTextForPrivacy(std::string_view text, const std::string& event_id,
                                std::vector<PrivacyFinding>* findings) {
-    for (const auto& hit : insights::ScanSecrets(text)) {
+    for (const auto& hit : privacy::ScanSecrets(text)) {
         findings->push_back(PrivacyFinding{
-            std::string("privacy.secret.") + insights::SecretKindName(hit.kind), event_id});
+            std::string("privacy.secret.") + privacy::SecretKindName(hit.kind), event_id});
     }
     ScanTextForPaths(text, event_id, findings);
     if (LooksLikeBinary(text)) {
