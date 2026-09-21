@@ -1,6 +1,6 @@
 # FD-10 遥测降级状态纳入统一快照锁
 
-- 状态：源码已实施，PR 与 CI 证据待回填（见验收门 CI 节）。
+- 状态：源码已实施，PR #175 远端 CI 双平台腿绿（run 35565095605，rollup success）。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：B；严重度：高；重构批次：2。
@@ -33,12 +33,12 @@
 - [x] 以可注入spool失败让worker写降级原因，同时反复Status读取；在支持平台跑TSan。
   - 证据：上述册双读者（读者线程热循环 + 主线程轮询）并发 Status，断言 degraded 布尔与 reason 两面不撕、值域只有 {空, telemetry.spool_rejected}、读者在场期间亲见降级面。TSan 一节：仓库 CI 的 workflow-tsan 腿按路径门只覆盖 src/workflow/*（ci.yml :82-85），telemetry 路径不在其列，本单不改 ci.yml（超修改边界）——竞争的机器验证靠不上现有腿，合同面以栅栏夹具钉住，此为已知边界如实记下。
 - [x] 所有运行期degraded_reason读写遵同一锁；启动期赋值区分线程尚未开启。
-  - 证据：grep 复核 service.cpp 内 degraded_reason_ 六处出现（399/1063 一带写口、1607 一带读口）全部在 state_mutex_ scope 内；启动期赋值虽在 worker 起身前，也走同锁（hpp 注释"纪律不分期"）。
+  - 证据：grep 复核 service.cpp 内 degraded_reason_ 六处出现（写口 369/374/387-388/1073-1074，读口 1626-1627）全部在 state_mutex_ scope 内；启动期赋值虽在 worker 起身前，也走同锁（hpp 注释"纪律不分期"）。
 - [x] Status不跨网络/磁盘阻塞，不引入state→spool→export嵌套锁。
   - 证据：Status 的 state 快照 scope 即取即放，随后才分别取 queue（无锁 stats）/spool（spool_mutex_）/export（export_mutex_）快照，三锁互不嵌套；锁序维持 hpp 既有约定 spool -> state，新增两段 state 锁都是叶子 scope。
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
-  - 本单证据：待 PR 建出后回填（见状态行）。
+  - 本单证据：PR #175，head 6c818bbb，run 35565095605（run_number 1814）——windows-msvc pass（1h3m39s，integration.telemetry.telemetry_otlp_export Passed 16.85s、unit.telemetry.telemetry_service Passed 4.11s）、macos-clang pass（20m9s，integration.telemetry.telemetry_otlp_export Passed 18.01s），rollup conclusion success。src/telemetry/* 在 windows 敏感面，双平台腿由此出场且都绿。
 
 ## 合并取舍与估量
 
