@@ -6,8 +6,13 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <future>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "channel/qq/qq_auth.hpp"
@@ -17,6 +22,13 @@ namespace lubancode::channel::qq {
 namespace {
 
 // 可编程假 HTTP:按请求次序回脚本;记录收到的请求(供断言)。
+// 闸门回包(SV-06 并发夹具):先报 entered、等 release 再回包——把一笔
+// 回应扣在在途,主线程好安排第二只调用进场读到代次(定序确定性)。
+struct ReplyGate {
+    std::promise<void> entered;
+    std::promise<void> release;
+};
+
 struct ScriptedHttp {
     struct Call {
         std::string method;
@@ -28,6 +40,7 @@ struct ScriptedHttp {
         int status = 200;
         std::string body;
         std::string error;  // 非空 = 传输失败
+        std::shared_ptr<ReplyGate> gate;  // 非空 = 扣住等放行
     };
 
     mutable std::mutex mutex;
@@ -36,13 +49,21 @@ struct ScriptedHttp {
 
     QqHttpFunc Func() {
         return [this](const QqHttpRequest& request) -> std::expected<QqHttpResponse, std::string> {
-            const std::lock_guard<std::mutex> lock(mutex);
-            calls.push_back(Call{request.method, request.url, request.body, request.headers});
-            if (replies.empty()) {
-                return QqHttpResponse{500, R"({"code":50055002})"};
+            Reply reply;
+            {
+                const std::lock_guard<std::mutex> lock(mutex);
+                calls.push_back(Call{request.method, request.url, request.body, request.headers});
+                if (replies.empty()) {
+                    reply = Reply{500, R"({"code":50055002})", "", nullptr};
+                } else {
+                    reply = replies.front();
+                    replies.erase(replies.begin());
+                }
             }
-            const Reply reply = replies.front();
-            replies.erase(replies.begin());
+            if (reply.gate) {
+                reply.gate->entered.set_value();
+                reply.gate->release.get_future().wait();
+            }
             if (!reply.error.empty()) {
                 return std::unexpected(reply.error);
             }
@@ -54,12 +75,16 @@ struct ScriptedHttp {
 struct Fixture {
     ScriptedHttp http;
     std::atomic<std::int64_t> now{10'000};
+    std::atomic<int> now_probes{0};  // token 缓存进门查到期即探测(并发夹具定序用)
     QqTokenManager::Options TokenOptions() {
         QqTokenManager::Options options;
         options.app_id = "APP1";
         options.client_secret = "SECRET1";
         options.http = http.Func();
-        options.now_ms = [this]() { return now.load(); };
+        options.now_ms = [this]() {
+            now_probes.fetch_add(1, std::memory_order_relaxed);
+            return now.load();
+        };
         options.token_url = "https://bots.test/app/getAppAccessToken";
         options.refresh_margin_secs = 300;
         return options;
@@ -154,6 +179,79 @@ TEST_CASE("qq_auth: 错误分型——401 凭据/429 限频/5xx 服务/网络") 
         // 网络错误文案不携带 secret。
         CHECK(error.error().detail.find("SECRET1") == std::string::npos);
     }
+}
+
+// ---------------------------------------------------------------------------
+// SV-06 同代并发合同(经 QqTokenManager 门面过共用缓存状态机)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("qq_auth: 并发取 token 单飞——一次成功两调用共享(SV-06)") {
+    Fixture fixture;
+    // 预热一枚 token,再拨过到期时刻(7200-300=6900s)。
+    fixture.http.replies.push_back({200, R"({"access_token":"T1","expires_in":7200})"});
+    QqTokenManager tokens(fixture.TokenOptions());
+    REQUIRE(tokens.GetValidToken().has_value());
+    fixture.now += 7'000'000;
+    // 闸门回包:把重刷扣在在途,等第二只调用进场。
+    auto gate = std::make_shared<ReplyGate>();
+    fixture.http.replies.push_back(
+        {200, R"({"access_token":"T2","expires_in":7200})", "", gate});
+    std::optional<std::expected<std::string, QqTokenManager::Error>> r1;
+    std::optional<std::expected<std::string, QqTokenManager::Error>> r2;
+    std::thread leader([&] { r1 = tokens.GetValidToken(); });
+    gate->entered.get_future().wait();
+    fixture.now_probes = 0;  // leader 进场探针已花掉,重置后只数后来者
+    std::thread waiter([&] { r2 = tokens.GetValidToken(); });
+    while (fixture.now_probes.load(std::memory_order_relaxed) < 1) {
+        std::this_thread::yield();
+    }
+    gate->release.set_value();
+    leader.join();
+    waiter.join();
+
+    REQUIRE(r1.has_value());
+    REQUIRE(r2.has_value());
+    REQUIRE(r1->has_value());
+    REQUIRE(r2->has_value());
+    CHECK(r1->value() == "T2");
+    CHECK(r2->value() == "T2");
+    CHECK(fixture.http.calls.size() == 2);  // 预热 1 + 并发 1,单飞不放大
+}
+
+TEST_CASE("qq_auth: 并发取 token 单飞——同代失败共享,独立调用重试(SV-06)") {
+    Fixture fixture;
+    fixture.http.replies.push_back({200, R"({"access_token":"T1","expires_in":7200})"});
+    QqTokenManager tokens(fixture.TokenOptions());
+    REQUIRE(tokens.GetValidToken().has_value());
+    fixture.now += 7'000'000;
+    auto gate = std::make_shared<ReplyGate>();
+    fixture.http.replies.push_back({401, R"({"code":-1})", "", gate});
+    std::optional<std::expected<std::string, QqTokenManager::Error>> r1;
+    std::optional<std::expected<std::string, QqTokenManager::Error>> r2;
+    std::thread leader([&] { r1 = tokens.GetValidToken(); });
+    gate->entered.get_future().wait();
+    fixture.now_probes = 0;
+    std::thread waiter([&] { r2 = tokens.GetValidToken(); });
+    while (fixture.now_probes.load(std::memory_order_relaxed) < 1) {
+        std::this_thread::yield();
+    }
+    gate->release.set_value();
+    leader.join();
+    waiter.join();
+
+    REQUIRE(r1.has_value());
+    REQUIRE(r2.has_value());
+    REQUIRE_FALSE(r1->has_value());
+    REQUIRE_FALSE(r2->has_value());
+    CHECK(r1->error().kind == QqTokenManager::ErrorKind::InvalidCredentials);
+    CHECK(r2->error().kind == QqTokenManager::ErrorKind::InvalidCredentials);
+    CHECK(fixture.http.calls.size() == 2);  // 失败也只发一次,等待者共享错误
+    // 独立后来调用:失败不永久缓存,照常重试。
+    fixture.http.replies.push_back({200, R"({"access_token":"T3","expires_in":7200})"});
+    const auto third = tokens.GetValidToken();
+    REQUIRE(third.has_value());
+    CHECK(*third == "T3");
+    CHECK(fixture.http.calls.size() == 3);
 }
 
 // ---------------------------------------------------------------------------
