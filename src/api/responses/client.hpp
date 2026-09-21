@@ -13,7 +13,9 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
-#include "config/config.hpp"
+// FD-05:超时默认值(config::kDefault*)来自 config/model_protocol.hpp,
+// 不再拖整份配置合同。
+#include "config/model_protocol.hpp"
 
 namespace lubancode::api::responses {
 
