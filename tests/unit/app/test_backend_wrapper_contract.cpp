@@ -260,7 +260,7 @@ TEST_CASE("HC-08 真叶比对:Chat client 装两层包装,五口与裸叶一字�
 TEST_CASE("HC-08 Agent 预算路径:真 Chat 叶两层包装,应急收窄值落在最终出门体") {
     // 本机回环假 SSE 服务当模型端,收真 POST body——出门体以此为准,不拿
     // Request 字段冒充。
-    test_support::FakeHttpServer server;
+    lubancode::test_support::FakeHttpServer server;
     const std::string sse =
         "data: {\"id\":\"hc08\",\"object\":\"chat.completion.chunk\",\"model\":\"m\","
         "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"短交接\"},"
@@ -269,7 +269,7 @@ TEST_CASE("HC-08 Agent 预算路径:真 Chat 叶两层包装,应急收窄值落�
         "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n"
         "data: [DONE]\n\n";
-    test_support::FakeHttpResponse response;
+    lubancode::test_support::FakeHttpResponse response;
     response.status = 200;
     response.headers.emplace_back("Content-Type", "text/event-stream");
     response.body = sse;
