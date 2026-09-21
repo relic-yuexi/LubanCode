@@ -180,6 +180,19 @@ add_dependencies(lubancode_tests memory_lock_racer)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_MEMORY_LOCK_RACER_EXE="$<TARGET_FILE:memory_lock_racer>")
 
+# ---- SV-11(workspace manifest 读改写串行化):登记锁跨进程靶子 -------------
+# workspace_manifest_racer:真子进程占在 <workspace_dir>/.manifest.lock 上
+# (hold 等放行令/crash 暴毙不放锁),或按生产同一条 OpenOrRegisterWorkspace
+# 与测试进程真并发开房(register)。tests/integration/workspace 的竞争册经
+# platform::RunProcessBackground 起它,按 ready/release/go 文件屏障控制交错
+# (照 memory_lock_racer 的册写法)。
+add_executable(workspace_manifest_racer support/workspace_manifest_racer.cpp)
+target_link_libraries(workspace_manifest_racer PRIVATE lubancode_core)
+target_compile_features(workspace_manifest_racer PRIVATE cxx_std_23)
+add_dependencies(lubancode_tests workspace_manifest_racer)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_WORKSPACE_RACER_EXE="$<TARGET_FILE:workspace_manifest_racer>")
+
 # ---- 更新器 C++ 化批二第③单:安装锁双进程竞争靶子 ------------------------
 # updater_lock_racer:真起两只并发抢同一把 updates/.lock 的可执行,跑生产
 # 同一份 InstallRootLock::TryAcquire。tests/integration/updater 的竞争册经

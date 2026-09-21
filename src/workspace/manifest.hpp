@@ -9,6 +9,9 @@
 //   - manifest.workspace_key 与算法重算不合即 identity.key_mismatch 隔离
 //     + doctor,不自动改名合并。
 //   - checkouts[] 只是可重建登记,不是身份源;路径搬家不凭同名目录自动并账。
+//   - 读改写串行(SV-11):开房登记走 <workspace_dir>/.manifest.lock 跨进程
+//     事务锁(workspace::ManifestLock,合同见 manifest_lock.hpp)——锁后
+//     重读再并账;时间戳单调不倒退;争用/疑点如实回 workspace.locked。
 #pragma once
 
 #include <cstdint>
@@ -72,6 +75,19 @@ std::expected<void, std::string> WriteWorkspaceManifestAtomic(const std::filesys
 //     upsert checkout(按规范化 root 匹配;同 root 只更新 last_seen)。
 // created_out 非空时回填是否首仓;workspace_dir_out 非空时回填实际房门
 // (门牌目录,消费方不得再拿 workspace_key 拼目录)。
+//
+// 读改写串行(SV-11):整段"读→校验→upsert→写"包在
+// <workspace_dir>/.manifest.lock 跨进程事务锁里(workspace::ManifestLock):
+//   - 锁后重读——两个 linked worktree 同房并发开张,后到者看见先到者已
+//     落盘的登记再并账,union 保留、first_seen 不被后写重置;
+//   - last_opened_at_ms / checkout.last_seen_at_ms 取盘上值与 now 的单调
+//     最大值,后写的旧钟不许把账改回去;
+//   - 争用有界等待(20×100ms):烧完仍撞回 workspace.locked(错误码
+//     contracts::kErrWorkspaceLocked),不无限等、不悄悄覆盖旧账;真 IO
+//     失败回 workspace.open_failed;
+//   - 持有者暴毙/PID 复用:身份核判死,陈锁整目录隔离留证后接手;
+//   - 锁粒度 = 一间房:不同 workspace 并发开张互不阻塞;index.json 记账
+//     在锁外(可重建缓存,丢写容错合同不变)。
 std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
     const std::filesystem::path& workspaces_root, const WorkspaceIdentity& identity,
     std::int64_t now_ms, bool* created_out = nullptr,

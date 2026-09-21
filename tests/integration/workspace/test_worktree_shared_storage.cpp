@@ -18,20 +18,24 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "memory/project_memory.hpp"
 #include "platform/paths.hpp"
+#include "platform/process.hpp"  // SV-11:racer 真子进程
 #include "runtime/session_runtime.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/directory.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/session_index.hpp"
 #include "workspace/identity.hpp"
-#include "workspace/index.hpp"  // 账本制:key 反查房门
+#include "workspace/index.hpp"           // 账本制:key 反查房门
 #include "workspace/manifest.hpp"
+#include "workspace/manifest_lock.hpp"  // SV-11:读改写事务锁
+#include "workspace/storage_contracts.hpp"
 
 using namespace lubancode;
 
@@ -93,6 +97,61 @@ memory::SaveRequest MakeFact(const std::string& id, const std::string& content) 
     request.paths = {"build.sh"};
     request.confidence = "verified";
     return request;
+}
+
+// ---------------------------------------------------------------------------
+// SV-11(workspace manifest 读改写串行化)的 racer 册式:真子进程经
+// workspace_manifest_racer 占锁/暴毙/按生产同一口开房,ready/release/go
+// 文件做屏障,不靠两头掐表。
+// ---------------------------------------------------------------------------
+
+// 等一个文件出现(屏障),20ms 一拍,deadline 兜底。
+bool WaitForFile(const fs::path& path, int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::error_code ec;
+        if (fs::exists(path, ec)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+// 等后台子进程退出并回填退出码。
+bool WaitForExit(const platform::BackgroundSpawnResult& spawned, int* exit_code, int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!spawned.handle->Wait(0) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!spawned.handle->Wait(0)) return false;
+    const auto completion = spawned.handle->Peek();
+    if (!completion.known) return false;
+    *exit_code = static_cast<int>(completion.exit_code);
+    return true;
+}
+
+// 房里有没有 .manifest.lock.stale-* 的隔离留证。
+bool HasStaleLockEvidence(const fs::path& workspace_dir) {
+    std::error_code ec;
+    fs::directory_iterator it(workspace_dir, ec);
+    if (ec) return false;
+    for (const auto& item : it) {
+        if (platform::PathToUtf8(item.path().filename()).starts_with(".manifest.lock.stale-")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 按 checkout 找登记行;找不到回 nullptr。
+const workspace::WorkspaceCheckout* FindCheckout(const workspace::WorkspaceManifest& manifest,
+                                                 const fs::path& checkout_root) {
+    const std::string root_text = workspace::NormalizeIdentityPathText(checkout_root);
+    for (const auto& checkout : manifest.checkouts) {
+        if (checkout.root == root_text) return &checkout;
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -294,4 +353,191 @@ TEST_CASE("跨 workspace 切换: 封旧开新,回执两笔,旧账一字不搬") 
     // 旧账验得过,新账验得过;两本各是各。
     CHECK(trajectory::VerifySessionDir(first_session_dir).ok);
     CHECK(trajectory::VerifySessionDir(second_session_dir).ok);
+}
+
+// ---------------------------------------------------------------------------
+// SV-11:manifest 读改写串行化(跨进程)。病灶:A 读 [main]、B 读 [main]、
+// A 写 [main,A]、B 写 [main,B]——后写覆盖先写,登记凭空消失。事务锁把
+// "读→校验→upsert→写"整段串行,锁后重读再并账。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("manifest 事务锁: 双进程同房并发注册,union 保留,时间戳不倒退") {
+    const fs::path root = TempRoot("sv11-union");
+    const fs::path repo = root / "demo-repo";
+    const fs::path worktree = root / "demo-repo-wt";
+    const fs::path home = root / "home";
+    MakeRepo(repo);
+    MakeLinkedWorktree(repo, worktree, "wt");
+    const fs::path workspaces = home / "workspaces";
+
+    const auto main_identity = workspace::ResolveWorkspaceIdentity(repo, {}).value();
+    const auto wt_identity = workspace::ResolveWorkspaceIdentity(worktree, {}).value();
+    REQUIRE(main_identity.workspace_key == wt_identity.workspace_key);
+
+    // 底账:主树先开一笔(now=5000)。
+    REQUIRE(workspace::OpenOrRegisterWorkspace(workspaces, main_identity, 5000).has_value());
+    const fs::path workspace_dir =
+        *workspace::index::ResolveDirByWorkspaceKey(workspaces, main_identity.workspace_key);
+
+    // racer 按生产同一口再开主树(now=2000,钟比底账慢——不许把账写回去);
+    // 测试端同拍开 worktree(now=3000):两进程真并发,同房争锁。
+    const fs::path ready = root / "racer-ready.txt";
+    const fs::path go = root / "racer-go.txt";
+    const auto spawned = platform::RunProcessBackground(
+        {std::string(LUBANCODE_WORKSPACE_RACER_EXE), "register",
+         platform::PathToUtf8(workspaces), platform::PathToUtf8(repo), "2000",
+         platform::PathToUtf8(ready), platform::PathToUtf8(go)});
+    REQUIRE(spawned.success);
+    REQUIRE(WaitForFile(ready, 20000));
+    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+
+    Write(go, "go\n");  // 发令枪:两边同一拍起跑
+    auto mine = workspace::OpenOrRegisterWorkspace(workspaces, wt_identity, 3000);
+    REQUIRE(mine.has_value());
+
+    int exit_code = -1;
+    REQUIRE(WaitForExit(spawned, &exit_code, 30000));
+    REQUIRE(exit_code == 0);  // racer 侧开房也成功
+
+    // 两边都成功,manifest 保留 union:first_seen 不被后写重置,慢钟不把
+    // last_seen/last_opened 改回去。
+    const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+    REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
+    CHECK(read.manifest.created_at_ms == 5000);
+    CHECK(read.manifest.last_opened_at_ms == 5000);
+    const auto* main_row = FindCheckout(read.manifest, main_identity.checkout_root);
+    const auto* wt_row = FindCheckout(read.manifest, wt_identity.checkout_root);
+    REQUIRE(main_row != nullptr);
+    REQUIRE(wt_row != nullptr);
+    CHECK(main_row->first_seen_at_ms == 5000);
+    CHECK(main_row->last_seen_at_ms == 5000);  // racer 的 2000 不倒退账
+    CHECK(wt_row->first_seen_at_ms == 3000);
+    CHECK(wt_row->last_seen_at_ms == 3000);
+}
+
+TEST_CASE("manifest 事务锁: 他进程活持有——有界等待烧完回 workspace.locked,放行后接手") {
+    const fs::path root = TempRoot("sv11-held");
+    const fs::path repo = root / "demo-repo";
+    MakeRepo(repo);
+    const fs::path workspaces = root / "workspaces";
+    const auto identity = workspace::ResolveWorkspaceIdentity(repo, {}).value();
+
+    REQUIRE(workspace::OpenOrRegisterWorkspace(workspaces, identity, 1000).has_value());
+    const fs::path workspace_dir =
+        *workspace::index::ResolveDirByWorkspaceKey(workspaces, identity.workspace_key);
+
+    // 真子进程占住登记锁,等放行令。
+    const fs::path ready = root / "racer-ready.txt";
+    const fs::path release = root / "racer-release.txt";
+    const auto spawned = platform::RunProcessBackground(
+        {std::string(LUBANCODE_WORKSPACE_RACER_EXE), "hold",
+         platform::PathToUtf8(workspace_dir), platform::PathToUtf8(ready),
+         platform::PathToUtf8(release)});
+    REQUIRE(spawned.success);
+    REQUIRE(WaitForFile(ready, 20000));
+    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+
+    // 有界等待(20×100ms)烧完:如实回 workspace.locked,不悄悄覆盖旧账。
+    auto refused = workspace::OpenOrRegisterWorkspace(workspaces, identity, 2000);
+    CHECK_FALSE(refused.has_value());
+    CHECK(refused.error().find(std::string(workspace::contracts::kErrWorkspaceLocked)) !=
+          std::string::npos);
+    const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+    REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
+    CHECK(read.manifest.last_opened_at_ms == 1000);  // 旧账没被 2000 覆盖
+    REQUIRE(read.manifest.checkouts.size() == 1);
+    CHECK(read.manifest.checkouts[0].last_seen_at_ms == 1000);
+
+    // 放行令 → racer 退出放锁 → 后来者接手。
+    Write(release, "go\n");
+    int exit_code = -1;
+    REQUIRE(WaitForExit(spawned, &exit_code, 20000));
+    REQUIRE(exit_code == 0);
+    auto after = workspace::OpenOrRegisterWorkspace(workspaces, identity, 3000);
+    REQUIRE(after.has_value());
+    CHECK(after->last_opened_at_ms == 3000);
+}
+
+TEST_CASE("manifest 事务锁: 持锁者暴毙——陈锁隔离留证,开房照常") {
+    const fs::path root = TempRoot("sv11-crash");
+    const fs::path repo = root / "demo-repo";
+    const fs::path worktree = root / "demo-repo-wt";
+    MakeRepo(repo);
+    MakeLinkedWorktree(repo, worktree, "wt");
+    const fs::path workspaces = root / "workspaces";
+    const auto main_identity = workspace::ResolveWorkspaceIdentity(repo, {}).value();
+    const auto wt_identity = workspace::ResolveWorkspaceIdentity(worktree, {}).value();
+
+    REQUIRE(workspace::OpenOrRegisterWorkspace(workspaces, main_identity, 1000).has_value());
+    const fs::path workspace_dir =
+        *workspace::index::ResolveDirByWorkspaceKey(workspaces, main_identity.workspace_key);
+
+    // 真子进程占锁后 std::_Exit(9) 暴毙:owner 账留盘,持有者死透。
+    const fs::path ready = root / "racer-ready.txt";
+    const auto crashed = platform::RunProcess(
+        {std::string(LUBANCODE_WORKSPACE_RACER_EXE), "crash",
+         platform::PathToUtf8(workspace_dir), platform::PathToUtf8(ready)},
+        /*timeout_ms=*/30000);
+    REQUIRE_FALSE(crashed.spawn_failed);
+    REQUIRE_FALSE(crashed.timed_out);
+    REQUIRE(crashed.exit_code == 9);
+    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+    CHECK_FALSE(workspace::ManifestLock::HolderAlive(workspace_dir));
+    CHECK(fs::exists(workspace::ManifestLockDir(workspace_dir) / "owner"));  // 账还在
+
+    // 接手者隔离陈锁后照常开房;旧账一个字节不丢。
+    auto recovered = workspace::OpenOrRegisterWorkspace(workspaces, wt_identity, 2000);
+    REQUIRE(recovered.has_value());
+    const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+    REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
+    const auto* main_row = FindCheckout(read.manifest, main_identity.checkout_root);
+    const auto* wt_row = FindCheckout(read.manifest, wt_identity.checkout_root);
+    REQUIRE(main_row != nullptr);
+    REQUIRE(wt_row != nullptr);
+    CHECK(main_row->first_seen_at_ms == 1000);
+    CHECK(main_row->last_seen_at_ms == 1000);
+    CHECK(wt_row->first_seen_at_ms == 2000);
+    CHECK(HasStaleLockEvidence(workspace_dir));  // 隔离留证在案
+    CHECK_FALSE(fs::exists(workspace::ManifestLockDir(workspace_dir)));  // 新锁用完已清
+}
+
+TEST_CASE("manifest 事务锁: 锁粒度是一间房——他房登记不等不拒") {
+    const fs::path root = TempRoot("sv11-scope");
+    const fs::path repo_a = root / "repo-a";
+    const fs::path repo_b = root / "repo-b";
+    MakeRepo(repo_a);
+    MakeRepo(repo_b);
+    const fs::path workspaces = root / "workspaces";
+    const auto identity_a = workspace::ResolveWorkspaceIdentity(repo_a, {}).value();
+    const auto identity_b = workspace::ResolveWorkspaceIdentity(repo_b, {}).value();
+    REQUIRE(identity_a.workspace_key != identity_b.workspace_key);
+
+    REQUIRE(workspace::OpenOrRegisterWorkspace(workspaces, identity_a, 1000).has_value());
+    const fs::path room_a =
+        *workspace::index::ResolveDirByWorkspaceKey(workspaces, identity_a.workspace_key);
+
+    // A 房的锁被真子进程占着:B 房照开,不等待不回绝。
+    const fs::path ready = root / "racer-ready.txt";
+    const fs::path release = root / "racer-release.txt";
+    const auto spawned = platform::RunProcessBackground(
+        {std::string(LUBANCODE_WORKSPACE_RACER_EXE), "hold", platform::PathToUtf8(room_a),
+         platform::PathToUtf8(ready), platform::PathToUtf8(release)});
+    REQUIRE(spawned.success);
+    REQUIRE(WaitForFile(ready, 20000));
+    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+
+    auto opened_b = workspace::OpenOrRegisterWorkspace(workspaces, identity_b, 1000);
+    REQUIRE(opened_b.has_value());
+    CHECK(opened_b->last_opened_at_ms == 1000);
+
+    // 同一把锁下 A 房仍如实回绝(对照:不是把整棵 workspaces 根都放行了)。
+    auto refused_a = workspace::OpenOrRegisterWorkspace(workspaces, identity_a, 2000);
+    CHECK_FALSE(refused_a.has_value());
+    CHECK(refused_a.error().find(std::string(workspace::contracts::kErrWorkspaceLocked)) !=
+          std::string::npos);
+
+    Write(release, "go\n");
+    int exit_code = -1;
+    REQUIRE(WaitForExit(spawned, &exit_code, 20000));
+    REQUIRE(exit_code == 0);
 }

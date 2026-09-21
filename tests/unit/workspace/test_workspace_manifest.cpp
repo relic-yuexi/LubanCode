@@ -3,16 +3,19 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
+#include "platform/paths.hpp"
 #include "trajectory/metrics.hpp"
 #include "workspace/identity.hpp"
-#include "workspace/index.hpp"  // 账本制:门牌与房门反查
+#include "workspace/index.hpp"          // 账本制:门牌与房门反查
 #include "workspace/manifest.hpp"
+#include "workspace/manifest_lock.hpp"  // SV-11:读改写事务锁
 #include "workspace/storage_contracts.hpp"
 
 using namespace lubancode;
@@ -39,6 +42,26 @@ std::string ReadAll(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
     std::string out((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     return out;
+}
+
+// 把目录 mtime 拨回十分钟前(锁龄检验用;SV-11 的锁不认龄,拨旧也不许夺)。
+std::error_code BackdateMtime(const fs::path& path) {
+    std::error_code ec;
+    fs::last_write_time(path, fs::file_time_type::clock::now() - std::chrono::minutes(10), ec);
+    return ec;
+}
+
+// 房里有没有 .manifest.lock.stale-* 的隔离留证。
+bool HasStaleLockEvidence(const fs::path& workspace_dir) {
+    std::error_code ec;
+    fs::directory_iterator it(workspace_dir, ec);
+    if (ec) return false;
+    for (const auto& item : it) {
+        if (platform::PathToUtf8(item.path().filename()).starts_with(".manifest.lock.stale-")) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -226,4 +249,95 @@ TEST_CASE("doctor 报表:manifest 对账进 /doctor trajectory 的账") {
     REQUIRE_FALSE(broken.manifest_issues.empty());
     CHECK(broken.manifest_issues[0].find(std::string(workspace::contracts::kErrIdentityKeyMismatch)) !=
           std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// SV-11:manifest 读改写串行化。时间戳单调是锁内并账的一部分;锁本身的
+// 跨进程互斥/暴毙/隔离在 integration/workspace 的 racer 册验。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("manifest:时间戳单调——now 比盘上账旧时不把账改回去") {
+    const fs::path root = TempRoot("monotonic");
+    const auto identity = workspace::MakeFallbackIdentity(root / "proj");
+    REQUIRE(workspace::OpenOrRegisterWorkspace(root / "workspaces", identity, 5000).has_value());
+
+    // 后写的钟慢(跨进程钟差):last_opened/last_seen 不倒退,first_seen
+    // 永不改写,created 以旧账为准。
+    auto older = workspace::OpenOrRegisterWorkspace(root / "workspaces", identity, 3000);
+    REQUIRE(older.has_value());
+    CHECK(older->created_at_ms == 5000);
+    CHECK(older->last_opened_at_ms == 5000);
+    REQUIRE(older->checkouts.size() == 1);
+    CHECK(older->checkouts[0].first_seen_at_ms == 5000);
+    CHECK(older->checkouts[0].last_seen_at_ms == 5000);
+
+    // linked worktree 登记后再用旧钟开:同 root 只更新 last_seen,也不倒退。
+    workspace::WorkspaceIdentity wt_identity = identity;
+    wt_identity.checkout_root = fs::weakly_canonical(root / "proj-wt");
+    wt_identity.launch_cwd = wt_identity.checkout_root;
+    REQUIRE(workspace::OpenOrRegisterWorkspace(root / "workspaces", wt_identity, 4000).has_value());
+    auto again = workspace::OpenOrRegisterWorkspace(root / "workspaces", wt_identity, 3500);
+    REQUIRE(again.has_value());
+    REQUIRE(again->checkouts.size() == 2);
+    CHECK(again->checkouts[1].first_seen_at_ms == 4000);
+    CHECK(again->checkouts[1].last_seen_at_ms == 4000);  // 3500 不把 4000 改回去
+    CHECK(again->last_opened_at_ms == 5000);             // 全房 last_opened 取最大
+}
+
+TEST_CASE("ManifestLock: 同房二取被拒,释放后再取;探测与取锁同判") {
+    const fs::path root = TempRoot("lock-basic");
+    workspace::ManifestLock first;
+    const auto got = workspace::ManifestLock::TryAcquire(root, &first);
+    REQUIRE(got.status == workspace::ManifestLock::Status::Acquired);
+    CHECK(first.holds());
+    CHECK(workspace::ManifestLock::HolderAlive(root));
+
+    // 活持有者不因锁龄被夺:拨旧十分钟后照旧拒。
+    REQUIRE(!BackdateMtime(workspace::ManifestLockDir(root)));
+    workspace::ManifestLock second;
+    const auto refused = workspace::ManifestLock::TryAcquire(root, &second);
+    CHECK(refused.status == workspace::ManifestLock::Status::HeldByLiveHolder);
+    CHECK(refused.detail.find("pid") != std::string::npos);
+    CHECK_FALSE(second.holds());
+    CHECK(fs::exists(workspace::ManifestLockDir(root) / "owner"));  // 锁原封不动
+    CHECK_FALSE(HasStaleLockEvidence(root));
+
+    first.Release();
+    CHECK_FALSE(fs::exists(workspace::ManifestLockDir(root)));
+    CHECK_FALSE(workspace::ManifestLock::HolderAlive(root));
+    const auto again = workspace::ManifestLock::TryAcquire(root, &second);
+    CHECK(again.status == workspace::ManifestLock::Status::Acquired);
+}
+
+TEST_CASE("ManifestLock: owner 在但读不懂——明报不动,探测保守按持有") {
+    const fs::path root = TempRoot("lock-broken");
+    fs::create_directories(workspace::ManifestLockDir(root));
+    Write(workspace::ManifestLockDir(root) / "owner", "not-json{{{");
+    workspace::ManifestLock taker;
+    const auto refused = workspace::ManifestLock::TryAcquire(root, &taker);
+    CHECK(refused.status == workspace::ManifestLock::Status::BrokenLock);
+    CHECK(refused.detail.find("不是合法 JSON") != std::string::npos);
+    CHECK_FALSE(taker.holds());
+    CHECK(fs::exists(workspace::ManifestLockDir(root) / "owner"));  // 原样没动
+    CHECK(workspace::ManifestLock::HolderAlive(root));
+    CHECK_FALSE(HasStaleLockEvidence(root));
+}
+
+TEST_CASE("ManifestLock: 无 owner 空锁目录——年轻按在建拒,老了隔离留证") {
+    const fs::path root = TempRoot("lock-legacy");
+    fs::create_directories(workspace::ManifestLockDir(root));
+    // 年轻的空锁目录:视作对手"占目录与写 owner 之间"的在建窗口,保守拒。
+    workspace::ManifestLock taker;
+    const auto young = workspace::ManifestLock::TryAcquire(root, &taker);
+    CHECK(young.status == workspace::ManifestLock::Status::HeldByLiveHolder);
+    CHECK(young.detail.find("正在建立") != std::string::npos);
+    CHECK_FALSE(taker.holds());
+    CHECK(fs::exists(workspace::ManifestLockDir(root)));
+
+    // 老的(旧格式残留):整目录隔离留证,再占新锁。
+    REQUIRE(!BackdateMtime(workspace::ManifestLockDir(root)));
+    const auto aged = workspace::ManifestLock::TryAcquire(root, &taker);
+    CHECK(aged.status == workspace::ManifestLock::Status::Acquired);
+    CHECK(aged.detail.find("隔离留证") != std::string::npos);
+    CHECK(HasStaleLockEvidence(root));
 }
