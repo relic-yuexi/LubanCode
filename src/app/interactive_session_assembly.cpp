@@ -1689,11 +1689,12 @@ std::vector<std::string> TerminalSessionController::ReloadPackages() {
         warnings.push_back(report.error);
         return warnings;  // 旧快照未动,下游一个不刷
     }
-    // 换档三步:原子槽换新折 → 镜像换新折(ctx 借用的账)→ ctx 重指。
-    // 命令都在主线程跑,这三步之间没有并发窗口。
+    // 换档两步:原子槽换新折 → 镜像换新折(prompt_options 的包层根借用)。
+    // 命令都在主线程跑,这两步之间没有并发窗口。HC-06 第三小批起命令面
+    // 的挂载账不再从这里重指——/package、/agents、/workflow 都改经
+    // package_snapshot_provider 现取现行快照,旧快照由在跑的引用各自钉着。
     stack_.package_snapshot.store(report.snapshot);
     package_snapshot_view_ = report.snapshot;
-    dispatch_ctx_.package_mount = &package_snapshot_view_->mount();
     // 下游刷新:技能清单(含包根,重灌 skill 工具与 agent 工具段)、
     // Profile 根(主 Agent 与 agent 工具两处)、workflow 补全。RefreshSkills
     // 内部自带 RebuildLoop,系统提示段下一轮即新。
@@ -1718,34 +1719,18 @@ void TerminalSessionController::RefreshProjectInstructions() {
 // 分派材料的装配:全借用/回调,handler 不拥有会话资源。回调一律窄口
 // (控制器方法一跳),域文件不反向 include 会话层。
 void TerminalSessionController::AssembleDispatchContext() {
+    // HC-06 第三小批:分派材料按域折窄——各域 handler 吃自己域头里声明的
+    // 窄 context,SlashDispatchContext 只剩 /insights 与 /prompt(audit
+    // 委托)两枚 FD-06 占件的过渡袋(那两域文件在跑单占着,合入后整束
+    // 删)。全借用/回调,handler 不拥有会话资源;回调一律窄口(控制器
+    // 方法一跳),域文件不反向 include 会话层。
     lubancode::app::SlashDispatchContext& ctx = dispatch_ctx_;
     ctx.opts = &opts_;
-    ctx.config_result = &config_result;
-    ctx.config = &config;
     ctx.theme = &theme;
-    ctx.model_catalog = &model_catalog;
-    ctx.settings_local = &settings_local;
-    ctx.spinner_enabled = spinner_enabled;
-    ctx.wire_str = &wire_str;
-    ctx.active_provider = &active_provider;
-    ctx.active_provider_write_path = &active_provider_write_path;
-    ctx.config_file_path = &config_file_path;
-    ctx.home_dir = &home_dir;
     ctx.home_lubancode = &home_lubancode;
-    // 阶段 6:挂载账借镜像持有的现行快照(reload 换档时镜像先换、这里后
-    // 指);供应商口拷 shared_ptr 出去,workflow 跑一趟钉一份。
-    ctx.package_mount = &package_snapshot_view_->mount();
-    ctx.package_snapshot_provider = [this]() { return stack_.CurrentPackageSnapshot(); };
     ctx.prompts_dir = &prompts_dir;
     ctx.persona = &persona;
-    ctx.global_skills_root = &global_skills_root;
-    ctx.project_skills_root = &project_skills_root;
-    ctx.recordings_root = &recordings_root;
-    ctx.skills = &skills;
-    ctx.real_backend = &real_backend;
-    ctx.current_model = current_model;
-    ctx.current_think = current_think;
-    ctx.current_think_history = current_think_history;
+    ctx.config_file_path = &config_file_path;
     ctx.current_model_instructions = current_model_instructions;
     ctx.current_soul = current_soul;
     ctx.current_soul_name = &current_soul_name;
@@ -1753,70 +1738,15 @@ void TerminalSessionController::AssembleDispatchContext() {
     // configured 默认的 current_soul 指针冒充(§六)。
     ctx.soul_session = soul_session.get();
     ctx.context_tracker = &context_tracker;
-    ctx.model_router = model_router.get();
     ctx.registry = &registry();
-    ctx.sub_registry = &sub_registry();
-    ctx.agent_tool = session_agent_tool();
-    ctx.todo_state = &todo_state();
-    ctx.loaded_tools = &loaded_tools();
-    ctx.mcp_servers = &mcp_servers();
-    ctx.lsp_manager = &lsp_manager();
-    ctx.plugin_mounted = &plugin_mounted();
-    ctx.plugin_warnings = &plugin_warnings();
-    ctx.main_tool_filter = &main_tool_filter();
-    ctx.main_deferral = main_deferral;
-    ctx.main_proxy_reference = main_proxy;
-    ctx.main_native_reference = main_native;
-    ctx.tool_search_threshold = tool_search_threshold;
-    ctx.tool_search_token_floor = tool_search_token_floor;
-    ctx.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
-    ctx.worktree_session = &worktree_session;
-    ctx.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
-    ctx.session_runtime = &session_runtime_;
+    ctx.prompt_options = &prompt_options;
     // P0-2 轨迹:命令生命周期记账的账本(flag 开才有)。
     ctx.trajectory = session_runtime_.trajectory();
-    // T1 遥测:doctor 遥测健康检查的状态面(可空 = 未开)。/telemetry 已迁
-    // 窄材料(HC-06),经底下 SessionCommandMaterials 递。
-    ctx.telemetry_service = telemetry_service_.get();
-    ctx.session_events = &session_events_;
-    ctx.session_title = &session_title;
-    ctx.last_compact_line = &last_compact_line;
-    ctx.prompt_options = &prompt_options;
-    ctx.project_memory = project_memory.get();
-    ctx.peer_wiring = &peer_wiring_;
-    ctx.record_wiring = &record_wiring_;
-    ctx.rebuild_loop = [this](bool preserve_history) { RebuildLoop(preserve_history); };
     ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
-    // Soul 会话冻结单 P0:/resume 的魂恢复口(§5.3)。
-    ctx.adopt_resumed_soul = [this](const std::optional<lubancode::runtime::SessionSoulSnapshot>& resumed) {
-        AdoptResumedSessionSoul(resumed);
-    };
-    ctx.refresh_skills = [this]() { RefreshSkills(); };
-    ctx.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
-    ctx.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
-    // AGENTS.md 作用域单 P1-1:/instructions 与 /doctor instructions 用会话
-    // 那只 Resolver(与写前闸、基线预登记同一份账)。
-    ctx.instruction_resolver = stack_.instruction_resolver.get();
-    ctx.sync_worktree_directory = [this](const std::string& reason) { SyncWorktreeDirectory(reason); };
-    ctx.ensure_goal_coordinator = [this]() { goal_wiring_.Ensure(config); };
-    ctx.ensure_loop_scheduler = [this]() { loop_wiring_.Ensure(); };
-    ctx.make_goal_wiring = [this]() {
-        return goal_wiring_.MakeCommandWiring(session_agent_tool(), loop_wiring_.scheduler());
-    };
-    ctx.make_loop_wiring = [this]() { return loop_wiring_.MakeCommandWiring(); };
-    ctx.make_compact_inputs = [this]() { return MakeCompactInputs(); };
-    ctx.make_session_command_state = [this]() { return MakeSessionCommandState(); };
-    ctx.handle_plan_command = [this](const std::string& args) { return plan_wiring_.HandleCommand(args); };
-    ctx.switch_collaboration_mode = [this](lubancode::runtime::CollaborationMode mode, const std::string& reason) {
-        plan_wiring_.SwitchMode(mode, reason);
-    };
-    ctx.reset_plan_review = [this]() { plan_wiring_.DiscardReview(); };
-    ctx.build_workflow_tool_options = [this]() { return BuildWorkflowToolOptions(); };
-    ctx.build_workflow_agent_callbacks = [this]() { return BuildWorkflowAgentCallbacks(); };
-    // HC-06(材料收窄):命令表在绑定期折好——已收窄域(Trace/Hook/
-    // Telemetry + 第二小批 Model/Memory/Usage/Package)捕获窄材料,过渡域
-    // 仍指 ctx。表声明在 dispatch_ctx_ 之后 = 析构先于它,闭包里的借用不
-    // 悬垂。
+    // HC-06(材料收窄):命令表在绑定期折好——已收窄域(第一小批 Trace/
+    // Hook/Telemetry、第二小批 Model/Memory/Usage/Package、第三小批 Session
+    // 查询/运行/生命周期三面与其余各域)捕获窄材料,过渡域仍指 ctx。表
+    // 声明在 dispatch_ctx_ 之后 = 析构先于它,闭包里的借用不悬垂。
     lubancode::app::SessionCommandMaterials materials;
     materials.dispatch = &ctx;
     materials.trace.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
@@ -1914,8 +1844,195 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.package.dev_package_dirs = &opts_.package_dirs;
     materials.package.config = &config;
     materials.package.skills = &skills;
-    materials.package.package_mount = &package_snapshot_view_->mount();
+    // HC-06 第三小批:挂载账改经 provider 现取现行快照——reload 换档后旧
+    // 快照会释放,装配期冻死的挂载指针会悬垂(第二小批的旧口径,已排
+    // 掉);provider 每次返回现行 shared_ptr,命令期间由持有者保活,与
+    // workflow/agent 域同一纪律。
+    materials.package.package_snapshot_provider = [this]() { return stack_.CurrentPackageSnapshot(); };
     materials.package.reload_packages = [this]() { return ReloadPackages(); };
+    // ---- HC-06 第三小批:Session 查询/运行/生命周期三面 --------------------
+    // 会话查询面(/context /context-window):快照点与旧 SlashDispatchContext
+    // 字段同点同源(指针字段即成员地址,shared_ptr 构造后不换新)。
+    materials.session_query.config = &config;
+    materials.session_query.theme = &theme;
+    materials.session_query.model_catalog = &model_catalog;
+    materials.session_query.active_provider = &active_provider;
+    materials.session_query.current_model = current_model;
+    materials.session_query.current_think = current_think;
+    materials.session_query.current_think_history = current_think_history;
+    materials.session_query.current_model_instructions = current_model_instructions;
+    materials.session_query.current_soul = current_soul;
+    materials.session_query.soul_session = soul_session.get();
+    materials.session_query.context_tracker = &context_tracker;
+    materials.session_query.model_router = model_router.get();
+    materials.session_query.registry = &registry();
+    materials.session_query.loaded_tools = &loaded_tools();
+    materials.session_query.main_tool_filter = &main_tool_filter();
+    materials.session_query.main_deferral = main_deferral;
+    materials.session_query.main_proxy_reference = main_proxy;
+    materials.session_query.main_native_reference = main_native;
+    materials.session_query.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.session_query.last_compact_line = &last_compact_line;
+    materials.session_query.prompt_options = &prompt_options;
+    materials.session_query.trajectory = session_runtime_.trajectory();
+    materials.session_query.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
+    // 运行面(/compact /record)。
+    materials.session_run.theme = &theme;
+    materials.session_run.record_wiring = &record_wiring_;
+    materials.session_run.make_compact_inputs = [this]() { return MakeCompactInputs(); };
+    // 生命周期面(/clear /sessions /archive /delete /resume /export /title
+    // /exit /help /plan)。
+    materials.session_lifecycle.config = &config;
+    materials.session_lifecycle.theme = &theme;
+    materials.session_lifecycle.model_catalog = &model_catalog;
+    materials.session_lifecycle.spinner_enabled = spinner_enabled;
+    materials.session_lifecycle.active_provider = &active_provider;
+    materials.session_lifecycle.current_model = current_model;
+    materials.session_lifecycle.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.session_lifecycle.agent_tool = session_agent_tool();
+    materials.session_lifecycle.context_tracker = &context_tracker;
+    materials.session_lifecycle.model_router = model_router.get();
+    materials.session_lifecycle.session_runtime = &session_runtime_;
+    materials.session_lifecycle.trajectory = session_runtime_.trajectory();
+    materials.session_lifecycle.session_title = &session_title;
+    materials.session_lifecycle.last_compact_line = &last_compact_line;
+    materials.session_lifecycle.worktree_session = &worktree_session;
+    // Soul 会话冻结单 P0:/resume 的魂恢复口(§5.3)。
+    materials.session_lifecycle.adopt_resumed_soul =
+        [this](const std::optional<lubancode::runtime::SessionSoulSnapshot>& resumed) {
+            AdoptResumedSessionSoul(resumed);
+        };
+    materials.session_lifecycle.make_session_command_state = [this]() { return MakeSessionCommandState(); };
+    materials.session_lifecycle.handle_plan_command = [this](const std::string& args) {
+        return plan_wiring_.HandleCommand(args);
+    };
+    materials.session_lifecycle.switch_collaboration_mode =
+        [this](lubancode::runtime::CollaborationMode mode, const std::string& reason) {
+            plan_wiring_.SwitchMode(mode, reason);
+        };
+    materials.session_lifecycle.reset_plan_review = [this]() { plan_wiring_.DiscardReview(); };
+    // ---- 设置域(provider/config/update/language/think/skills/skill/keymap/copy)
+    materials.settings.config_result = &config_result;
+    materials.settings.config = &config;
+    materials.settings.theme = &theme;
+    materials.settings.model_catalog = &model_catalog;
+    materials.settings.settings_local = &settings_local;
+    materials.settings.spinner_enabled = spinner_enabled;
+    materials.settings.wire_str = &wire_str;
+    materials.settings.active_provider = &active_provider;
+    materials.settings.active_provider_write_path = &active_provider_write_path;
+    materials.settings.config_file_path = &config_file_path;
+    materials.settings.home_dir = &home_dir;
+    materials.settings.home_lubancode = &home_lubancode;
+    materials.settings.global_skills_root = &global_skills_root;
+    materials.settings.project_skills_root = &project_skills_root;
+    materials.settings.skills = &skills;
+    materials.settings.real_backend = &real_backend;
+    materials.settings.current_model = current_model;
+    materials.settings.current_think = current_think;
+    materials.settings.current_think_history = current_think_history;
+    materials.settings.current_model_instructions = current_model_instructions;
+    materials.settings.context_tracker = &context_tracker;
+    materials.settings.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.settings.session_runtime = &session_runtime_;
+    materials.settings.trajectory = session_runtime_.trajectory();
+    materials.settings.prompt_options = &prompt_options;
+    materials.settings.rebuild_loop = [this](bool preserve_history) { RebuildLoop(preserve_history); };
+    materials.settings.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
+    materials.settings.refresh_skills = [this]() { RefreshSkills(); };
+    // ---- 工作面域(init/instructions/worktree/mcp/lsp/todos/plugins/plugin/tools)
+    materials.workspace.config = &config;
+    materials.workspace.theme = &theme;
+    materials.workspace.registry = &registry();
+    materials.workspace.todo_state = &todo_state();
+    materials.workspace.loaded_tools = &loaded_tools();
+    materials.workspace.mcp_servers = &mcp_servers();
+    materials.workspace.lsp_manager = &lsp_manager();
+    materials.workspace.plugin_mounted = &plugin_mounted();
+    materials.workspace.plugin_warnings = &plugin_warnings();
+    materials.workspace.main_deferral = main_deferral;
+    materials.workspace.main_proxy_reference = main_proxy;
+    materials.workspace.main_native_reference = main_native;
+    materials.workspace.tool_search_threshold = tool_search_threshold;
+    materials.workspace.tool_search_token_floor = tool_search_token_floor;
+    materials.workspace.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
+    materials.workspace.worktree_session = &worktree_session;
+    // AGENTS.md 作用域单 P1-1:/instructions 与 /doctor instructions 用会话
+    // 那只 Resolver(与写前闸、基线预登记同一份账)。
+    materials.workspace.instruction_resolver = stack_.instruction_resolver.get();
+    materials.workspace.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
+    materials.workspace.sync_worktree_directory = [this](const std::string& reason) {
+        SyncWorktreeDirectory(reason);
+    };
+    // ---- /doctor 域(T1 遥测/P0-4 轨迹的状态面;可空字段如实递空)
+    materials.doctor.config = &config;
+    materials.doctor.theme = &theme;
+    materials.doctor.active_provider = &active_provider;
+    materials.doctor.active_provider_write_path = &active_provider_write_path;
+    materials.doctor.home_lubancode = &home_lubancode;
+    materials.doctor.real_backend = &real_backend;
+    materials.doctor.current_model = current_model;
+    materials.doctor.current_think = current_think;
+    materials.doctor.context_tracker = &context_tracker;
+    materials.doctor.registry = &registry();
+    materials.doctor.sub_registry = &sub_registry();
+    materials.doctor.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
+    materials.doctor.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.doctor.session_runtime = &session_runtime_;
+    materials.doctor.trajectory = session_runtime_.trajectory();
+    materials.doctor.telemetry_service = telemetry_service_.get();
+    materials.doctor.instruction_resolver = stack_.instruction_resolver.get();
+    // ---- agent 域(/agents /agent;包层挂载经 provider 现取,不冻指针)
+    materials.agent.package_snapshot_provider = [this]() { return stack_.CurrentPackageSnapshot(); };
+    materials.agent.skills = &skills;
+    materials.agent.registry = &registry();
+    materials.agent.mcp_servers = &mcp_servers();
+    // ---- peer 域(peers/send/peerperm)
+    materials.peer.theme = &theme;
+    materials.peer.spinner_enabled = spinner_enabled;
+    materials.peer.peer_wiring = &peer_wiring_;
+    // ---- background 域
+    materials.background.theme = &theme;
+    // ---- 渠道域(普通交互进程没挂 ChannelManager——configuration.md §3
+    // 的铁律;命令面只显示配置侧与 gateway 引导)。
+    materials.channel.config = &config;
+    materials.channel.channel_manager = nullptr;
+    // ---- /evolve 域(观察账/演化目录/分层账)
+    materials.evolve.home_lubancode = &home_lubancode;
+    materials.evolve.recordings_root = &recordings_root;
+    materials.evolve.project_memory = project_memory.get();
+    // ---- goal/loop 域(装配 ensure 与材料包)
+    materials.goal.theme = &theme;
+    materials.goal.ensure_goal_coordinator = [this]() { goal_wiring_.Ensure(config); };
+    materials.goal.make_goal_wiring = [this]() {
+        return goal_wiring_.MakeCommandWiring(session_agent_tool(), loop_wiring_.scheduler());
+    };
+    materials.loop.ensure_loop_scheduler = [this]() { loop_wiring_.Ensure(); };
+    materials.loop.make_loop_wiring = [this]() { return loop_wiring_.MakeCommandWiring(); };
+    // ---- workflow 域(包层挂载与跑一趟钉的快照都经 provider 现取)
+    materials.workflow.theme = &theme;
+    materials.workflow.model_catalog = &model_catalog;
+    materials.workflow.spinner_enabled = spinner_enabled;
+    materials.workflow.active_provider = &active_provider;
+    materials.workflow.home_dir = &home_dir;
+    materials.workflow.home_lubancode = &home_lubancode;
+    materials.workflow.package_snapshot_provider = [this]() { return stack_.CurrentPackageSnapshot(); };
+    materials.workflow.prompts_dir = &prompts_dir;
+    materials.workflow.skills = &skills;
+    materials.workflow.real_backend = &real_backend;
+    materials.workflow.current_model = current_model;
+    materials.workflow.current_think = current_think;
+    materials.workflow.model_router = model_router.get();
+    materials.workflow.registry = &registry();
+    materials.workflow.agent_tool = session_agent_tool();
+    materials.workflow.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.workflow.session_runtime = &session_runtime_;
+    materials.workflow.trajectory = session_runtime_.trajectory();
+    materials.workflow.session_events = &session_events_;
+    materials.workflow.prompt_options = &prompt_options;
+    materials.workflow.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
+    materials.workflow.build_workflow_tool_options = [this]() { return BuildWorkflowToolOptions(); };
+    materials.workflow.build_workflow_agent_callbacks = [this]() { return BuildWorkflowAgentCallbacks(); };
     slash_command_table_ = lubancode::app::BuildSessionSlashCommandTable(materials);
 }
 

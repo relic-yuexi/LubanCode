@@ -2,7 +2,6 @@
 // session_commands.hpp 的实现:上下文/压缩/会话存档命令的函数体。
 #include "app/commands/session_commands.hpp"
 
-#include "app/commands/command_registry.hpp"     // SlashDispatchContext(分派注册制)
 #include "app/wirings/record_session_wiring.hpp"  // 录制接线器(会话终章)
 #include "cli/record_command.hpp"                 // /record 的 presenter(cli 层)
 #include "tools/agent_tool.hpp"                   // 归档/删除的后台忙查
@@ -2633,7 +2632,8 @@ void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, co
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):会话域的分派位。case 体原样自
-// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// interactive_session 的大 switch 搬来;HC-06 第三小批起材料按查询/运行/
+// 生命周期三面经各自窄 context(session_commands.hpp)递入。
 // ---------------------------------------------------------------------------
 
 void PrintSlashHelp() {
@@ -2646,7 +2646,8 @@ void PrintSlashHelp() {
     TermOut() << tr("slash_help.keys");
 }
 
-CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashHelp(const SessionLifecycleContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)ctx;
     (void)parsed;
     PrintSlashHelp();
@@ -2746,7 +2747,8 @@ private:
 
 }  // namespace
 
-CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashClear(const SessionLifecycleContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     const lubancode::cli::Theme& theme = *ctx.theme;
     // stash 是"还没说出口的话",不跟 history 一锅清(规格:草稿各自存账);
@@ -2818,7 +2820,8 @@ CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::Pa
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashContext(const SessionQueryContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed) {
     // /context presenter(终端接线收尾单):三类 token 与分层预算的现场收集
     // 在本文件,分派位只装材料。
     lubancode::app::ContextEstimateInputs context_in;
@@ -2904,7 +2907,7 @@ ContextWindowPanelValidation ValidateContextWindowPanelSelection(
     return out;
 }
 
-CommandFlow HandleSlashContextWindow(SlashDispatchContext& ctx,
+CommandFlow HandleSlashContextWindow(const SessionQueryContext& ctx,
                                      const lubancode::cli::ParsedSlashCommand& parsed) {
     const lubancode::cli::Theme& theme = *ctx.theme;
     if (!parsed.args.empty()) {
@@ -3025,13 +3028,15 @@ CommandFlow HandleSlashContextWindow(SlashDispatchContext& ctx,
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashCompact(const SessionRunContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed) {
     // /compact presenter:接线全在本文件,材料包由 make_compact_inputs 装好。
     lubancode::app::RunCompactCommand(parsed.args, ctx.make_compact_inputs());
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashRecord(const SessionRunContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed) {
     // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp;材料包由
     // 录制接线器装。
     lubancode::cli::RecordCommandContext record_ctx = ctx.record_wiring->MakeCommandContext();
@@ -3039,12 +3044,14 @@ CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::P
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashSessions(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashSessions(const SessionLifecycleContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed) {
     PrintSessionsCommand(ctx.trajectory, parsed.args);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashArchive(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashArchive(const SessionLifecycleContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed) {
     // /archive(会话管理器单第四步):刷盘关柄→搬 archive/→退出。后台子代理
     // 还在跑时拒绝——归档的是会话档,别把还在写档的代理晾在半路。
     const lubancode::cli::Theme& theme = *ctx.theme;
@@ -3072,7 +3079,8 @@ CommandFlow HandleSlashArchive(SlashDispatchContext& ctx, const lubancode::cli::
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashDelete(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashDelete(const SessionLifecycleContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed) {
     // /delete(第五步):永久删除当前会话。回合在跑/工具在飞/审批悬着时拒
     // 绝——slash 分派本身只在输入线程空闲时进,但后台子代理可能在飞,这里
     // 如实拦。确认屏在 handler。
@@ -3102,7 +3110,8 @@ CommandFlow HandleSlashDelete(SlashDispatchContext& ctx, const lubancode::cli::P
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashResume(const SessionLifecycleContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed) {
     const lubancode::cli::Theme& theme = *ctx.theme;
     // P0-3 轨迹档(§10.4):resume 走七步——source 只读(验账→折叠→悬空
     // 分档),当前场以 switch_to_resume 封口,新场 start_reason=resume 开张;
@@ -3250,7 +3259,8 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashExport(const SessionLifecycleContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed) {
     // P0-3 轨迹档(§14.5:/export 一律读账本投影,不从旁路 history 或
     // SessionStore 取数)。轨迹 v3 收尾棒:v3 场(主账 <id>.jsonl)走显示
     // 时间线投影(ReadV3Ledger + ProjectHistoryTimeline,经 runtime 适配层
@@ -3317,7 +3327,8 @@ CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::P
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashTitle(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashTitle(const SessionLifecycleContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed) {
     // P0-2:标题真账走 control.title.changed(resume 折叠回
     // ReplayControlState.title);旧 SessionStore 的 title 事件行不再写。
     if (ctx.trajectory != nullptr) {
@@ -3342,7 +3353,8 @@ CommandFlow HandleSlashTitle(SlashDispatchContext& ctx, const lubancode::cli::Pa
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashExit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashExit(const SessionLifecycleContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)ctx;
     (void)parsed;
     return CommandFlow::Exit;

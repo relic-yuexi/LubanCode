@@ -148,9 +148,15 @@ std::string BuildGoalLoopStatusSegment(const lubancode::runtime::goal::GoalState
 // 标 subagent),usage 折进 goal 的 usage 账。有 goal 在跑才记,没有零影响。
 void NoteSubagentCompletionForGoal(const GoalWiring& wiring);
 
-// 命令分派注册制(会话终章):/goal 的分派位(case 体原样搬自大 switch;
-// 装配 ensure 与材料包走 SlashDispatchContext 的回调)。
-struct SlashDispatchContext;
-CommandFlow HandleSlashGoal(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// 命令分派注册制(会话终章):/goal 的分派位(case 体原样搬自大 switch)。
+// HC-06 第三小批起材料经 goal 域窄 context 递入(全借用,绑定期一次配齐)。
+struct GoalCommandContext {
+    const lubancode::cli::Theme* theme = nullptr;
+    std::function<void()> ensure_goal_coordinator;
+    std::function<GoalWiring()> make_goal_wiring;
+};
+
+CommandFlow HandleSlashGoal(const GoalCommandContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

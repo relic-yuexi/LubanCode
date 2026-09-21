@@ -8,12 +8,15 @@
 #include "app/cli_options.hpp"            // EvolveTestArgs(CI 子命令)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 
+#include <filesystem>
+#include <optional>
 #include <string>
 
-namespace lubancode::app {
+namespace lubancode::memory {
+class ProjectMemory;  // /evolve 的分层账(指针借用,定义在 memory/project_memory.hpp)
+}  // namespace lubancode::memory
 
-// 定义在 command_registry.hpp(struct;前置声明与定义统一,防 MSVC C4099)。
-struct SlashDispatchContext;
+namespace lubancode::app {
 
 enum class EvolveCommandAction {
     Invalid,
@@ -45,8 +48,16 @@ struct ParsedEvolveCommand {
 // Invalid,由 handler 统一打用法。
 ParsedEvolveCommand ParseEvolveCommand(const std::string& args);
 
+// /evolve 域窄材料(HC-06 第三小批):观察账/演化目录的锚点与分层账。全
+// 借用,绑定期一次配齐;字段与旧 SlashDispatchContext 同名同型。
+struct EvolveCommandContext {
+    const std::optional<std::string>* home_lubancode = nullptr;  // 演化目录锚点
+    const std::filesystem::path* recordings_root = nullptr;      // 观察账的录制源
+    lubancode::memory::ProjectMemory* project_memory = nullptr;  // 分层账;可空
+};
+
 // /evolve 的分派位(命令注册表登册用)。
-CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
+CommandFlow HandleSlashEvolve(const EvolveCommandContext& ctx,
                               const lubancode::cli::ParsedSlashCommand& parsed);
 
 // CI 非交互入口:luban evolve test <candidate-dir> [--baseline <package-dir>]

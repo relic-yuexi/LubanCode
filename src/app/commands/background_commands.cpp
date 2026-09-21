@@ -3,7 +3,6 @@
 // stop_background 同一本账),不碰网络、不发模型请求。文案走字面量,
 // 给开发者的运维视图,与清单页同一副笔法。
 #include "app/commands/background_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -543,7 +542,7 @@ void RunBackgroundStopAll(const lubancode::cli::Theme& theme) {
 
 }  // namespace
 
-CommandFlow HandleSlashBackground(SlashDispatchContext& ctx,
+CommandFlow HandleSlashBackground(const BackgroundCommandContext& ctx,
                                   const lubancode::cli::ParsedSlashCommand& parsed) {
     const lubancode::cli::Theme& theme = *ctx.theme;
     const ParsedBackgroundCommand command = ParseBackgroundCommand(parsed.args);

@@ -71,7 +71,10 @@ void HandlePromptCommand(const std::string& args, const std::string& law_source,
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):魂/法域的分派位。case 体原样自
-// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// interactive_session 的大 switch 搬来。HC-06 第三小批后本域仍在过渡袋
+// (SlashDispatchContext)上——/prompt 的 audit 子命令委托在
+// prompt_audit_commands,那件文件被在跑的 FD-06 占着;FD-06 合入后本域
+// 立窄 context 迁走,过渡袋整束删除。
 // ---------------------------------------------------------------------------
 struct SlashDispatchContext;
 CommandFlow HandleSlashSoul(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);

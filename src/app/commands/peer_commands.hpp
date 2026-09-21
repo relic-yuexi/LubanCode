@@ -39,11 +39,20 @@ CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& ar
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):跨会话传话域的分派位(peers/send/peerperm)。
-// case 体原样自 interactive_session 的大 switch 搬来。
+// case 体原样自 interactive_session 的大 switch 搬来;HC-06 第三小批起
+// 材料经 peer 域窄 context 递入(全借用,绑定期一次配齐)。
 // ---------------------------------------------------------------------------
-struct SlashDispatchContext;
-CommandFlow HandleSlashPeers(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashSend(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashPeerperm(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+struct PeerCommandContext {
+    const lubancode::cli::Theme* theme = nullptr;
+    bool spinner_enabled = false;
+    class PeerSessionWiring* peer_wiring = nullptr;  // /peers /send /peerperm
+};
+
+CommandFlow HandleSlashPeers(const PeerCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSend(const PeerCommandContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPeerperm(const PeerCommandContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

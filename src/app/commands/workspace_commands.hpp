@@ -12,6 +12,7 @@
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -23,6 +24,14 @@
 #include "runtime/worktree.hpp"
 #include "lsp/manager.hpp"
 #include "tools/registry.hpp"
+
+namespace lubancode::config {
+struct Config;                  // 工作面的配置面(指针借用,定义在 config/config.hpp)
+class ProjectInstructionResolver;  // /instructions 的解析口(config/project_instructions.hpp)
+}  // namespace lubancode::config
+namespace lubancode::tools {
+struct TodoListState;  // /todos 的台账(定义在 tools/todo_tool.hpp)
+}  // namespace lubancode::tools
 
 namespace lubancode::app {
 
@@ -101,21 +110,53 @@ CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::strin
 // /background:挪去 background_commands.hpp(管理面单:show/logs/stop)。
 
 // ---------------------------------------------------------------------------
-// 命令分派注册制(会话终章):工作面域的分派位(init/worktree/mcp/lsp/
-// todos/plugins/plugin/tools)。case 体原样自 interactive_session
-// 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// 工作面域窄材料(HC-06 第三小批):init/instructions/worktree/mcp/lsp/
+// todos/plugins/plugin/tools 的分派材料。字段与旧 SlashDispatchContext
+// 同名同型,全借用(指针/引用/回调),会话控制器在绑定期一次配齐。
 // ---------------------------------------------------------------------------
-struct SlashDispatchContext;
-CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+struct WorkspaceCommandContext {
+    lubancode::config::Config* config = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+    lubancode::tools::ToolRegistry* registry = nullptr;
+    const std::shared_ptr<lubancode::tools::TodoListState>* todo_state = nullptr;
+    const std::vector<std::string>* loaded_tools = nullptr;
+    const std::vector<McpServerRuntime>* mcp_servers = nullptr;
+    std::optional<lubancode::lsp::Manager>* lsp_manager = nullptr;
+    const std::vector<PluginMountInfo>* plugin_mounted = nullptr;
+    const std::vector<std::string>* plugin_warnings = nullptr;
+    bool main_deferral = false;
+    bool main_proxy_reference = false;
+    bool main_native_reference = false;
+    int tool_search_threshold = 0;
+    int tool_search_token_floor = 0;
+    lubancode::app::ToolRuntime* tool_runtime = nullptr;  // process_manifests/explore_registry
+    lubancode::cli::WorktreeSession* worktree_session = nullptr;
+    // AGENTS.md 作用域单 P1:/instructions 的解析口;空 = 调用方没接,命令面
+    // 自己按 SessionResolverOptions 现起一只。
+    const lubancode::config::ProjectInstructionResolver* instruction_resolver = nullptr;
+    std::function<void()> refresh_project_instructions;  // /init
+    // /worktree 搬房善后(参数 = 搬房原因,进宿主目录通知与轨迹账)。
+    std::function<void(const std::string&)> sync_worktree_directory;
+};
+
+CommandFlow HandleSlashInit(const WorkspaceCommandContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
 // /instructions(AGENTS.md 作用域单 P1-1):逐 source 亮账(裸敲/path/reload)。
-CommandFlow HandleSlashInstructions(SlashDispatchContext& ctx,
+CommandFlow HandleSlashInstructions(const WorkspaceCommandContext& ctx,
                                     const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashWorktree(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashMcp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashLsp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashTodos(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashPlugins(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashWorktree(const WorkspaceCommandContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashMcp(const WorkspaceCommandContext& ctx,
+                           const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashLsp(const WorkspaceCommandContext& ctx,
+                           const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashTodos(const WorkspaceCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPlugins(const WorkspaceCommandContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPlugin(const WorkspaceCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashTools(const WorkspaceCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

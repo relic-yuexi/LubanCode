@@ -1,7 +1,6 @@
 // peer_commands.hpp 的实现:三个命令的函数体,原样搬自会话主循环的
 // slash case,行为一字未改。
 #include "app/commands/peer_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "app/wirings/peer_session_wiring.hpp"  // peer 接线器(会话终章)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
@@ -146,18 +145,18 @@ CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& ar
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):跨会话传话域的分派位(材料走 peer 接线器)。
 // ---------------------------------------------------------------------------
-CommandFlow HandleSlashPeers(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashPeers(const PeerCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PeerCommandState peer_state = ctx.peer_wiring->MakeCommandState();
     return HandlePeersCommand(peer_state, *ctx.theme, ctx.spinner_enabled);
 }
 
-CommandFlow HandleSlashSend(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashSend(const PeerCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     PeerCommandState peer_state = ctx.peer_wiring->MakeCommandState();
     return HandleSendCommand(peer_state, parsed.args, *ctx.theme);
 }
 
-CommandFlow HandleSlashPeerperm(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashPeerperm(const PeerCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     PeerCommandState peer_state = ctx.peer_wiring->MakeCommandState();
     return HandlePeerpermCommand(peer_state, parsed.args);
 }

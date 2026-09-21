@@ -1,7 +1,6 @@
 // /workflow 命令终端薄壳实现(自然语言编排单第 1 批)。
 
 #include "app/commands/workflow_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:`agent:` 节点校验表的 Catalog 根
 #include "app/tool_runtime.hpp"  // ResolveCustomAgentMaterial(阶段 6:agent 节点解析钉快照)
 #include "package/mounting.hpp"               // MountWorkflowSources(阶段 3 包层挂载)
@@ -1622,7 +1621,7 @@ namespace {
 
 // catalog 上下文的现场装配(两案共用):project_root 现取 cwd,user_root/
 // home_lubancode 按主目录,能力表取当前主表,技能名做撞名检查。
-lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatchContext& ctx) {
+lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(const WorkflowDispatchContext& ctx) {
     lubancode::app::WorkflowCommandContext wf_ctx;
     wf_ctx.project_root = std::filesystem::current_path();
     wf_ctx.user_root = ctx.home_dir->has_value()
@@ -1633,10 +1632,14 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
                                 ? std::optional<std::filesystem::path>(
                                       lubancode::tools::Utf8ToPath(**ctx.home_lubancode))
                                 : std::nullopt;
-    // 统一 Package 封装单阶段 3:包层成品件从会话钉快照折来(canonical id
-    // 登册;快照缺席 = 空表,行为与从前一致)。
-    if (ctx.package_mount != nullptr) {
-        wf_ctx.packaged_workflows = lubancode::package::MountWorkflowSources(*ctx.package_mount);
+    // 统一 Package 封装单阶段 3:包层成品件从现行快照折来(canonical id
+    // 登册;快照缺席 = 空表,行为与从前一致)。HC-06 第三小批:改经
+    // package_snapshot_provider 现取——reload 换档后旧快照会释放,冻指针
+    // 会悬垂;provider 返回现行 shared_ptr,本函数持它期间保活。
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot =
+        ctx.package_snapshot_provider ? ctx.package_snapshot_provider() : nullptr;
+    if (package_snapshot != nullptr) {
+        wf_ctx.packaged_workflows = lubancode::package::MountWorkflowSources(package_snapshot->mount());
     }
     wf_ctx.registry = ctx.registry;
     for (const auto& skill : *ctx.skills) {
@@ -1646,8 +1649,8 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
     // agent 工具派发口同一套根),可用条目名(canonical+裸名)进表。
     if (ctx.agent_tool != nullptr) {
         const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
-            ComputeAgentScanRoots(ctx.package_mount != nullptr
-                                      ? lubancode::package::MountAgentEntries(*ctx.package_mount)
+            ComputeAgentScanRoots(package_snapshot != nullptr
+                                      ? lubancode::package::MountAgentEntries(package_snapshot->mount())
                                       : std::vector<lubancode::agent::PackagedAgentEntry>{}));
         for (const lubancode::agent::AgentCatalogEntry* entry : catalog.Available()) {
             wf_ctx.agent_names.push_back(entry->name);
@@ -1674,7 +1677,7 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
 }
 
 // run/alias 直呼共用的执行器装配(终端接线收尾单收口,与正门同源)。
-lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispatchContext& ctx) {
+lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(const WorkflowDispatchContext& ctx) {
     lubancode::app::WorkflowExecutorContext wf_exec;
     wf_exec.registry = ctx.registry;
     wf_exec.backend = ctx.real_backend;
@@ -1707,9 +1710,15 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
         ctx.prompt_options != nullptr ? ctx.prompt_options->project_instructions : std::string();
     wf_exec.subagent_prompt_material.skills_segment =
         ctx.prompt_options != nullptr ? ctx.prompt_options->skills_segment : std::string();
-    if (ctx.package_mount != nullptr) {
-        wf_exec.subagent_prompt_material.package_profile_roots =
-            lubancode::package::MountProfileRoots(*ctx.package_mount);
+    if (ctx.package_snapshot_provider != nullptr) {
+        // 包层 Profile 根从现行快照现取(与 catalog 同一纪律:reload 后旧
+        // 快照会释放,不冻指针);本趟执行钉的快照在 wf_exec.package_snapshot。
+        if (const std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot =
+                ctx.package_snapshot_provider();
+            snapshot != nullptr) {
+            wf_exec.subagent_prompt_material.package_profile_roots =
+                lubancode::package::MountProfileRoots(snapshot->mount());
+        }
     }
     wf_exec.resolve_llm_binding = [router = ctx.model_router](
                                       const lubancode::workflow::WorkflowNode& node)
@@ -1738,7 +1747,7 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     return wf_exec;
 }
 
-std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
+std::string RunWorkflowFromTerminal(const WorkflowDispatchContext& ctx,
     const lubancode::app::WorkflowCommandContext& wf_ctx,
     const std::string& workflow_id, const std::string& raw_args) {
     lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
@@ -1778,7 +1787,8 @@ std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
 
 }  // namespace
 
-CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashWorkflow(const WorkflowDispatchContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed) {
     // Workflows 自然语言编排单:正门 /workflow。catalog 现扫现用,不占会话
     // 状态;能力表取自当前主表(此刻挂着的工具)。
     lubancode::app::WorkflowCommandContext wf_ctx = BuildWorkflowCatalogContext(ctx);
@@ -1793,7 +1803,8 @@ CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli:
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashUnknown(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashUnknown(const WorkflowDispatchContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed) {
     // Workflows 单:不认得的 / 词先查 WorkflowCatalog——查着了是 /<alias>
     // 直呼(整行参数按 input_schema 解析,不当一坨 prompt),查不着才打
     // "不认得"。内建词永远居首,撞名禁用的 alias 也不接(只留 /workflow

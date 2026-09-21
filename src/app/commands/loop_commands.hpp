@@ -111,7 +111,13 @@ std::string FormatLoopInterval(std::chrono::seconds interval);
 std::string FormatLoopDelta(std::int64_t now_ms, std::int64_t at_ms);
 
 // 命令分派注册制(会话终章):/loop 的分派位(case 体原样搬自大 switch)。
-struct SlashDispatchContext;
-CommandFlow HandleSlashLoop(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// HC-06 第三小批起材料经 loop 域窄 context 递入(全借用,绑定期一次配齐)。
+struct LoopCommandContext {
+    std::function<void()> ensure_loop_scheduler;
+    std::function<LoopWiring()> make_loop_wiring;
+};
+
+CommandFlow HandleSlashLoop(const LoopCommandContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

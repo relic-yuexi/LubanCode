@@ -1,8 +1,9 @@
 // prompt_commands.hpp 的实现:魂/法/提示词命令的函数体。
 #include "app/commands/prompt_commands.hpp"
 
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(FD-06 占件的过渡袋)
 #include "app/commands/prompt_audit_commands.hpp"  // /prompt audit 的分派壳递这(A3)
+#include "app/interactive_session.hpp"  // InteractiveSessionOptions(/prompt 裸敲的 law_source)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;

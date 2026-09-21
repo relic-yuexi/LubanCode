@@ -789,10 +789,14 @@ void RunPackageEnableDisable(const PackageCommandContext& ctx, const std::string
         }
         store = std::move(loaded);
     }
-    // 本会话快照给它挂着几件(disable 回执注明"在跑的照旧")。
+    // 本会话快照给它挂着几件(disable 回执注明"在跑的照旧")。挂载账从
+    // provider 现取现行快照(HC-06 第三小批:reload 后旧快照会释放,不冻
+    // 指针;本函数持 shared_ptr 期间保活)。
     int mounted_count = -1;
-    if (ctx.package_mount != nullptr) {
-        if (const auto* mounted = ctx.package_mount->Find(inventory.package_id)) {
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot =
+        ctx.package_snapshot_provider ? ctx.package_snapshot_provider() : nullptr;
+    if (snapshot != nullptr) {
+        if (const auto* mounted = snapshot->mount().Find(inventory.package_id)) {
             mounted_count = static_cast<int>(mounted->mounted_canonical_ids.size());
         } else {
             mounted_count = 0;
@@ -832,12 +836,19 @@ CommandFlow HandleSlashPackage(const PackageCommandContext& ctx,
     const ParsedPackageCommand command = ParsePackageCommand(parsed.args);
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     const std::vector<lubancode::package::PackageCandidate> candidates = ScanAllLayers(ctx, options);
+    // 挂载账从 provider 现取现行快照(HC-06 第三小批:reload 换档后旧快照
+    // 会释放,冻指针会悬垂;本函数持 shared_ptr 期间保活,与旧"会话侧重
+    // 指"口径一致)。空 = 没有包。
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot =
+        ctx.package_snapshot_provider ? ctx.package_snapshot_provider() : nullptr;
+    const lubancode::package::PackageMount* const package_mount =
+        package_snapshot != nullptr ? &package_snapshot->mount() : nullptr;
     switch (command.action) {
         case PackageCommandAction::List:
-            RunPackageList(options, command.scope_filter, ctx.package_mount, candidates);
+            RunPackageList(options, command.scope_filter, package_mount, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Show:
-            RunPackageShow(options, command.target, ctx.package_mount, candidates);
+            RunPackageShow(options, command.target, package_mount, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Doctor:
             RunPackageDoctor(options, BuildExternalNamespaces(ctx), command.target, candidates);
