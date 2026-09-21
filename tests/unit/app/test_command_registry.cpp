@@ -12,16 +12,16 @@
 //      58:ContextWindow 交互面板单添 /context-window 一案(同屏调窗口
 //         与思考强度的面板,本会话生效);
 //   2. 枚举无重复、无遗漏(死案 Image/NotSlash 也留名,handler 为空);
-//   3. 活案(有 handler)的名字与 cli::AllSlashCommands 的帮助面逐一对应
-//      ——已知差异如实记:/effort 是 /think 的别名(帮助面有、分派面归
-//      think),/hooks 与 /trace 分派面有、帮助面没有(帮助面的旧缺口,
-//      本单不动);
+//   3. 活案(有 handler)在 cli 词汇表都有主名,展示规则与帮助面
+//      (cli::AllSlashCommands,同出词汇表)对得上——已知差异如实记:
+//      /effort 是 /think 的别名(帮助面有、分派面归 think),/hooks 与
+//      /trace 分派面有、帮助面没有(帮助面的旧缺口,展示修复随 HC-05
+//      行为提交单独验收);
 //   4. 死案的分派兜底(Continue)与旧 switch 的 break 同语义。
 #include <doctest/doctest.h>
 
 #include <set>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "app/commands/command_registry.hpp"
@@ -79,8 +79,8 @@ TEST_CASE("命令注册表:58 案齐整,枚举可对") {
     SUBCASE("枚举逐一在表,无重复") {
         std::set<int> seen;
         for (const lubancode::app::SlashCommandSpec& spec : table) {
-            const int value = static_cast<int>(spec.command);
-            CHECK_MESSAGE(seen.insert(value).second, spec.name);
+            CHECK_MESSAGE(seen.insert(static_cast<int>(spec.command)).second,
+                          std::to_string(static_cast<int>(spec.command)));
         }
         CHECK(seen.size() == table.size());
         // 旧 switch 的每一案都能在表上查到。
@@ -103,7 +103,7 @@ TEST_CASE("命令注册表:58 案齐整,枚举可对") {
                 ++dead;
                 const bool is_dead_case = spec.command == lubancode::cli::SlashCommand::Image ||
                                           spec.command == lubancode::cli::SlashCommand::NotSlash;
-                CHECK_MESSAGE(is_dead_case, spec.name);
+                CHECK_MESSAGE(is_dead_case, "意外的死案");
             }
         }
         CHECK(dead == 2);
@@ -112,42 +112,48 @@ TEST_CASE("命令注册表:58 案齐整,枚举可对") {
 
 TEST_CASE("命令注册表:活案名字与帮助面对账") {
     const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
-    // 帮助面(cli::AllSlashCommands,Tab 补全与 /help 同源)。
+    // 帮助面(cli::AllSlashCommands,Tab 补全与 /help 同源,均出词汇表)。
     std::set<std::string> help_names;
     for (const lubancode::cli::SlashCommandInfo& info : lubancode::cli::AllSlashCommands()) {
         help_names.insert(info.name);
     }
-    // 已知差异(帮助面 ↔ 分派面):
-    //   /effort 是 /think 的别名——帮助面单列,分派面归 think 一案;
-    //   /image 的正戏在图片附件路(ProcessLine 截走),分派面是死案;
-    //   /hooks 与 /trace 分派面有,帮助面没有(帮助面的旧缺口,本单不动)。
+    // 正向:活案(有 handler)在词汇表都有主名,desc_key 定展示——非空的
+    // 名字必在帮助面,空的必不在。已知差异如实记:/unknown 是兜底案,不是
+    // 用户词汇;/hooks 与 /trace 词汇表 desc_key 为空(帮助面旧缺口,展示
+    // 修复随 HC-05 行为提交单独验收)。
     for (const lubancode::app::SlashCommandSpec& spec : table) {
         if (spec.handler == nullptr) {
             continue;  // 死案
         }
-        // spec.name 是 const char*:按内容比,不比指针(链接器合并字面量与否
-        // 不该左右对账结果)。
-        const std::string_view bare_name = spec.name;
-        const std::string full_name = std::string("/") + spec.name;
-        if (bare_name == "unknown") {
-            continue;  // 兜底案,不是用户命令
-        }
-        if (bare_name == "hooks" || bare_name == "trace") {
+        const lubancode::cli::SlashCommandDescriptor* descriptor =
+            lubancode::cli::FindSlashCommandDescriptor(spec.command);
+        REQUIRE_MESSAGE(descriptor != nullptr, "活案在词汇表上没有主名");
+        const std::string full_name = std::string("/") + descriptor->word;
+        if (descriptor->desc_key == nullptr) {
             CHECK_MESSAGE(help_names.count(full_name) == 0, full_name);
-            continue;  // 帮助面缺口,如实记录
+            continue;  // 不展示的主命令(现状:/hooks、/trace)
         }
         CHECK_MESSAGE(help_names.count(full_name) == 1, full_name);
     }
-    // 反向:帮助面的每个名字在分派面都有落点。例外如实记:/image 是死案
-    //(正戏在图片附件路),/effort 在 parser 层折给 Think(分派面不单列)。
+    // 反向:帮助面的每个名字都落得到词汇表行,且对应枚举在分派面有案。
+    // 例外如实记:/image 是死案(正戏在图片附件路),/effort 是 /think 的
+    // 别名行(解析层折给 Think,分派面不单列)。
     for (const std::string& name : help_names) {
-        if (name == "/image" || name == "/effort") {
+        const lubancode::cli::SlashCommandDescriptor* listed = nullptr;
+        for (const lubancode::cli::SlashCommandDescriptor& descriptor :
+             lubancode::cli::SlashCommandDescriptors()) {
+            if (name == std::string("/") + descriptor.word && descriptor.desc_key != nullptr) {
+                listed = &descriptor;
+                break;
+            }
+        }
+        REQUIRE_MESSAGE(listed != nullptr, name);
+        if (listed->command == lubancode::cli::SlashCommand::Image) {
             continue;
         }
-        const std::string bare = name.substr(1);
         bool found = false;
         for (const lubancode::app::SlashCommandSpec& spec : table) {
-            if (std::string_view(spec.name) == bare) {
+            if (spec.command == listed->command && spec.handler != nullptr) {
                 found = true;
                 break;
             }
