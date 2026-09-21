@@ -365,10 +365,12 @@ bool TelemetryService::Start() {
     std::error_code ec;
     std::filesystem::create_directories(options_.telemetry_root, ec);
     if (ec) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         degraded_reason_ = "telemetry.root_unwritable";
         return false;
     }
     if (!LoadState()) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         degraded_reason_ = "telemetry.state_unwritable";
         // 状态开不出仍继续开 spool:投影能跑就跑,状态面报 degraded。
     }
@@ -378,8 +380,13 @@ bool TelemetryService::Start() {
                                                   options_.telemetry_root / "quarantine",
                                                   options_.spool);
         recovery_ = spool_->OpenAndRecover(platform::WallClockNowMs());
-        if (!recovery_.error_code.empty() && degraded_reason_.empty()) {
-            degraded_reason_ = recovery_.error_code;
+        if (!recovery_.error_code.empty()) {
+            // FD-10:健康面写口走 state_mutex_(此刻 worker 尚未起,锁无
+            // 争用,纪律照走——首错优先)。
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (degraded_reason_.empty()) {
+                degraded_reason_ = recovery_.error_code;
+            }
         }
     }
     // T2 出口(§26.1 "start exporter"):endpoint 配了且 spool 在(durable
@@ -1057,10 +1064,15 @@ void TelemetryService::DrainQueue() {
             advanced.projection_generation = projection_generation_;
             advanced.updated_at_ms = now_ms;
             pending_cursor_advances_[key] = PendingAdvance{std::move(advanced), epoch};
-        } else if (degraded_reason_.empty()) {
+        } else {
             // 批被拒(spool 满盘/IO 坏):派生数据丢一窗,canonical 无损;
-            // cursor 不推,下趟重投同 id。状态面报降级。
-            degraded_reason_ = "telemetry.spool_rejected";
+            // cursor 不推,下趟重投同 id。状态面报降级——FD-10:健康面
+            // 唯一运行期写口,查空与赋值同一把 state_mutex_(与 Status 的
+            // 快照读同锁串行;首错优先的检查-赋值在锁内是一步,不是两步)。
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (degraded_reason_.empty()) {
+                degraded_reason_ = "telemetry.spool_rejected";
+            }
         }
     }
 }
@@ -1604,8 +1616,16 @@ std::optional<ExportAttempt> TelemetryService::ProbeEndpoint() const {
 TelemetryServiceStatus TelemetryService::Status() const {
     TelemetryServiceStatus status;
     status.running = running_.load();
-    status.degraded = !degraded_reason_.empty();
-    status.degraded_reason = degraded_reason_;
+    // FD-10:健康面快照先行。degraded_reason_ 运行期由 worker 拒批写
+    //(DrainQueue),此处并发读——degraded 布尔与 reason 字符串必须在
+    // 同一把 state_mutex_ 内取,两面才不撕。锁即取即放:后续 queue/
+    // spool/export 各自取快照,不与 state 锁嵌套(无 state->spool->
+    // export 反向持锁),Status 也不跨网络/磁盘。
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        status.degraded = !degraded_reason_.empty();
+        status.degraded_reason = degraded_reason_;
+    }
     status.projection_generation = projection_generation_;
     status.projector_version = std::string(kProjectorVersion);
     status.started_at_ms = started_at_ms_;
