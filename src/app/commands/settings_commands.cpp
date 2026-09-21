@@ -1634,7 +1634,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                       << "\n";
             return;
         }
-        case lubancode::cli::ProviderCommandAction::Remove:
+        case lubancode::cli::ProviderCommandAction::Remove: {
             if (!lubancode::cli::CanRemoveProvider(active_provider, command.name)) {
                 TermOut() << trf("cmd.provider.remove_active", command.name) << "\n";
                 return;
@@ -1657,6 +1657,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             }
             TermOut() << trf("cmd.provider.removed", command.name, removed->path) << "\n";
             return;
+        }
         case lubancode::cli::ProviderCommandAction::Edit: {
             // /provider edit <名字>(容错单):TTY、管道都进向导(向导自己在
             // 管道下退化为朴素逐行,自动化可脚本驱动);名字找不着时 TTY 开
