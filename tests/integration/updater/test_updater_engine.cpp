@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,7 @@
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "updater/engine.hpp"
+#include "updater/flat_handover.hpp"
 #include "updater/layout.hpp"
 #include "updater/manifest.hpp"
 #include "updater/probe.hpp"
@@ -444,6 +446,35 @@ bool StagingEmpty(const fs::path& root) {
     return true;
 }
 
+// 平铺备份的受管树与根级记录件排除表(与引擎/专用模块同表:python
+// install_plan.ROLE_TOP_DIRS / RECORD_FILES)。
+const std::vector<std::string>& FlatTrees() {
+    static const std::vector<std::string> kTrees = {
+        "skills", "docs", "web", "libexec", "licenses", "updater"};
+    return kTrees;
+}
+
+const std::vector<std::string>& FlatRecords() {
+    static const std::vector<std::string> kRecords = {"manifest.json", "install-state.json"};
+    return kRecords;
+}
+
+// 目录树下全部常规文件入账(相对路径 -> 内容),对拍用:只比文件集与
+// 内容,空目录/遍历序不作约定。
+std::map<std::string, std::string> TreeFiles(const fs::path& dir) {
+    std::map<std::string, std::string> files;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec) || ec) return files;
+    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (ec || !it->is_regular_file()) continue;
+        std::error_code rel_ec;
+        const fs::path rel = fs::relative(it->path(), dir, rel_ec);
+        if (rel_ec || rel.empty()) continue;
+        files[rel.generic_string()] = ReadFile(it->path());
+    }
+    return files;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -649,6 +680,86 @@ TEST_CASE("engine.update:平铺 -> 版本化端到端 + 幂等重跑免下载") 
     }
 }
 
+TEST_CASE("engine.update:平铺交接引擎路与专用模块路对拍——同输入同产物") {
+    // SV-03 合同钉:RunUpdaterEngine 全链(引擎主链)与 flat_handover 专用
+    // 三口(FlatFullBackup/HandoverFlatLauncher/RestoreFlatLegacy)吃同一
+    // 平铺输入,产物逐文件对账——收敛前钉住两路等价(无链接输入下),收
+    // 敛后钉住"引擎主链走的就是专用实现"不漂移。链接/reparse 的差异政策
+    // 由专用册显式钉(备份不复制不跟进),此处不掺链接输入。
+    const std::string old_exe_bytes = "old flat exe bytes";
+
+    // 场 A:引擎全链。包里带 updater 树文件,让交接同步有产物可对。
+    const fs::path root_a = TempRoot("parity-engine");
+    {
+        EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+        WriteFile(root_a / kExeName, old_exe_bytes);
+        WriteFile(root_a / "skills" / "user-note.md", "用户改动");
+        WriteFile(root_a / "config.toml", "user config");
+        const Package pkg = BuildPackage({.version = "2.0.0",
+                                          .extra_files = {{"updater/helper.txt", "UPD-NEW"},
+                                                          {"updater/sub/deep.txt", "UPD-DEEP"},
+                                                          {"README.md", "hello"}}});
+        const fs::path archive = root_a.parent_path() / (root_a.filename().string() + "-pkg.zip");
+        WriteFile(archive, pkg.bytes);
+        Lines out;
+        CHECK(RunUpdaterEngine(UpdateArgs(root_a, archive, "2.0.0", pkg.digest_hex), out.sink(),
+                               nullptr) == 0);
+        CHECK(out.contains("[backup] 平铺安装完整备份: "));
+        CHECK(out.contains("[commit] 2.0.0 已上线"));
+    }
+    const auto ledgers_a = LedgerFiles(root_a);
+    REQUIRE(ledgers_a.size() == 1);
+    const std::string txn_a = ledgers_a[0].stem().string();
+    const auto paths_a = lubancode::updater::MakeLayoutPaths(root_a);
+
+    // 场 B:专用模块直调,同输入手铺(版本目录带同样的 updater 树)。
+    const fs::path root_b = TempRoot("parity-direct");
+    const auto paths_b = lubancode::updater::MakeLayoutPaths(root_b);
+    const std::string txn_b = "20260921T000000Z-parity0";
+    WriteFile(root_b / kExeName, old_exe_bytes);
+    WriteFile(root_b / "skills" / "user-note.md", "用户改动");
+    WriteFile(root_b / "config.toml", "user config");
+    const fs::path version_b = root_b / "versions" / MakeVersionDir(root_b, "2.0.0");
+    WriteFile(version_b / "updater" / "helper.txt", "UPD-NEW");
+    WriteFile(version_b / "updater" / "sub" / "deep.txt", "UPD-DEEP");
+    const auto backed = lubancode::updater::FlatFullBackup(root_b, FlatTrees(), FlatRecords(), txn_b);
+    REQUIRE(backed.has_value());
+    REQUIRE(backed->has_value());
+    CHECK(**backed == root_b / "backups" / txn_b / "flat");
+    const auto handed = lubancode::updater::HandoverFlatLauncher(paths_b, txn_b, version_b);
+    REQUIRE(handed.has_value());
+
+    // 对拍:完整备份集逐文件对账(树+根级用户件+根位旧 EXE,记录件排除)。
+    CHECK(TreeFiles(root_a / "backups" / txn_a / "flat") ==
+          TreeFiles(root_b / "backups" / txn_b / "flat"));
+    CHECK(TreeFiles(root_a / "backups" / txn_a / "flat").size() == 3);  // exe+skills+config
+    // 对拍:交接产物——旧 EXE 进 legacy、根位落新 EXE、updater 树同步到根。
+    CHECK(ReadFile(root_a / "backups" / txn_a / "legacy" / kExeName) == old_exe_bytes);
+    CHECK(ReadFile(root_b / "backups" / txn_b / "legacy" / kExeName) == old_exe_bytes);
+    CHECK(ReadFile(root_a / kExeName) == StubExeBytes());
+    CHECK(ReadFile(root_b / kExeName) == StubExeBytes());
+    CHECK(TreeFiles(root_a / "updater") == TreeFiles(root_b / "updater"));
+    CHECK(TreeFiles(root_a / "updater").size() == 2);
+
+    // 对拍:恢复——引擎交接的现场由专用模块恢复(证明引擎产物与专用合同
+    // 互通),专用现场自恢复;两路恢复后根位同旧、新 EXE 同停 parked、
+    // current 同摘。
+    REQUIRE(fs::exists(paths_a.current));
+    const auto restore_a = lubancode::updater::RestoreFlatLegacy(paths_a, txn_a);
+    REQUIRE(restore_a.has_value());
+    CHECK(*restore_a);
+    const auto restore_b = lubancode::updater::RestoreFlatLegacy(paths_b, txn_b);
+    REQUIRE(restore_b.has_value());
+    CHECK(*restore_b);
+    CHECK(ReadFile(root_a / kExeName) == old_exe_bytes);
+    CHECK(ReadFile(root_b / kExeName) == old_exe_bytes);
+    const std::string parked = std::string("launcher-parked-") + kExeName;
+    CHECK(ReadFile(root_a / "backups" / txn_a / parked) == StubExeBytes());
+    CHECK(ReadFile(root_b / "backups" / txn_b / parked) == StubExeBytes());
+    CHECK_FALSE(fs::exists(paths_a.current));
+    CHECK_FALSE(fs::exists(paths_b.current));
+}
+
 TEST_CASE("engine.update:needs-review 停档续跑——同事务、不重下") {
     const fs::path root = TempRoot("needs-review");
     EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "3.0.0");
@@ -771,8 +882,10 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
     const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
     WriteFile(archive, pkg.bytes);
 
-    // 预置一笔已知 id 的在途账,堵住 backups/<id>(占成文件):平铺备份挪不
-    // 进事务名下(留原地),交接建不成 legacy 目录 -> needs-review。
+    // 预置一笔已知 id 的在途账;backups/<id>/legacy 占成文件:备份段照做
+    // (backups/<id>/ 是目录,staging 建得成),交接建不成 legacy 目录 ->
+    // needs-review。(整个 backups/<id> 被占的形态归备份段 failed,另有
+    // 专测——分级归引擎,SV-03 收敛后各管各的出口。)
     const std::string txn_id = "20260920T000000Z-cafe0001";
     {
         lubancode::updater::TxnTarget target;
@@ -785,15 +898,18 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
         lubancode::updater::Transaction txn(lubancode::updater::MakeLayoutPaths(root), txn_id);
         txn.Create(target);
     }
-    WriteFile(root / "backups" / txn_id, "占位文件,堵住目录名");
+    WriteFile(root / "backups" / txn_id / "legacy", "占位文件,堵住 legacy 目录名");
 
     Lines out;
     CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
                            nullptr) == 2);
     CHECK(out.contains("needs-review: "));
+    CHECK(out.contains("旧根 EXE 的备份目录建不成"));
     const auto pointer = ReadJson(root / "current.json");
     REQUIRE(pointer.has_value());  // 指针已换(python 同款:needs-review 不回滚)
     CHECK((*pointer)["current"] == pkg.dirname);
+    // 备份照做:txn 名下两步落位成功(守卫只堵 legacy 不堵 flat)。
+    CHECK(fs::is_regular_file(root / "backups" / txn_id / "flat" / "skills" / "keep.md"));
     // 账停在 activating(python 同款:交接的 needs-review 是退出码与报错,
     // 账面状态留在 activating,find_resumable 照样可续)。
     CHECK(LedgerField(root / "updates" / (txn_id + ".json"), "state") ==
@@ -801,7 +917,7 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
 
     // 清障:挪走占位文件,续跑收尾(版本目录已在,versioned 路径直进提交)。
     std::error_code ec;
-    fs::remove(root / "backups" / txn_id, ec);
+    fs::remove(root / "backups" / txn_id / "legacy", ec);
     Lines out2;
     CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out2.sink(),
                            nullptr) == 0);
@@ -809,6 +925,94 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
     CHECK(out2.contains("[stage] 版本目录 " + pkg.dirname + " 已在且核对通过,跳过下载"));
     CHECK(LedgerField(root / "updates" / (txn_id + ".json"), "state") ==
           std::optional<std::string>("committed"));
+}
+
+TEST_CASE("engine.update:平铺备份段被堵——failed 退 1,不动指针") {
+    // backups/<txn> 整个名被占位文件堵住:FlatFullBackup 的 staging 建不成
+    // -> failed(交接段被堵才是 needs-review,分级出口各归各)。
+    const fs::path root = TempRoot("backup-blocked");
+    EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+    WriteFile(root / kExeName, "old flat exe bytes");
+    WriteFile(root / "skills" / "keep.md", "用户文件");
+    const Package pkg = BuildPackage({.version = "2.0.0"});
+    const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
+    WriteFile(archive, pkg.bytes);
+
+    const std::string txn_id = "20260921T000000Z-babe0002";
+    {
+        lubancode::updater::TxnTarget target;
+        target.version = "2.0.0";
+        target.tag = "v2.0.0";
+        target.exe_version = "2.0.0";
+        target.platform = "test-x64";
+        target.dirname = pkg.dirname;
+        target.digest_hex = pkg.digest_hex;
+        lubancode::updater::Transaction txn(lubancode::updater::MakeLayoutPaths(root), txn_id);
+        txn.Create(target);
+    }
+    WriteFile(root / "backups" / txn_id, "占位文件,堵住整个事务备份目录");
+
+    Lines out;
+    CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
+                           nullptr) == 1);
+    CHECK(out.contains("备份 staging 建不成"));
+    CHECK_FALSE(fs::exists(root / "current.json"));  // 备份在激活前,指针未写
+    CHECK(StagingEmpty(root));
+    CHECK(LedgerField(root / "updates" / (txn_id + ".json"), "state") ==
+          std::optional<std::string>("failed"));
+    CHECK(ReadFile(root / kExeName) == "old flat exe bytes");  // 旧根 EXE 原样
+}
+
+TEST_CASE("engine.update:回滚恢复失败——needs-review 退 2,current 必摘") {
+    // 恢复链失败(launcher-parked 位被目录占住,park rename 挪不进):退
+    // needs-review 而非假报 rolled-back;current 指针必摘(必摘硬保证,
+    // python docstring 承诺未兑现的那条),根位现场保留给人工诊断。
+    const fs::path root = TempRoot("restore-failed");
+    EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+    WriteFile(root / kExeName, "old flat exe bytes");
+    WriteFile(root / "skills" / "keep.md", "用户文件");
+    const Package pkg = BuildPackage({.version = "2.0.0"});
+    const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
+    WriteFile(archive, pkg.bytes);
+
+    const std::string txn_id = "20260921T000000Z-dead0003";
+    {
+        lubancode::updater::TxnTarget target;
+        target.version = "2.0.0";
+        target.tag = "v2.0.0";
+        target.exe_version = "2.0.0";
+        target.platform = "test-x64";
+        target.dirname = pkg.dirname;
+        target.digest_hex = pkg.digest_hex;
+        lubancode::updater::Transaction txn(lubancode::updater::MakeLayoutPaths(root), txn_id);
+        txn.Create(target);
+    }
+    // parked 位占成目录:交接不碰它,恢复时 rename 才撞上。
+    fs::create_directories(root / "backups" / txn_id /
+                           (std::string("launcher-parked-") + kExeName));
+    // 健康探针(第 2 次)故意失败 -> 回滚 -> 平铺恢复链撞占位 -> needs-review。
+    const fs::path counter = root.parent_path() / (root.filename().string() + "-probe-count");
+    EnvVarGuard fail_on("LUBANCODE_PROBE_STUB_FAIL_ON", "2");
+    EnvVarGuard counter_path("LUBANCODE_PROBE_STUB_COUNTER", lubancode::platform::PathToUtf8(counter));
+
+    Lines out;
+    CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
+                           nullptr) == 2);
+    CHECK(out.contains("needs-review: "));
+    CHECK(out.contains("旧根 EXE 恢复失败"));
+    CHECK_FALSE(fs::exists(root / "current.json"));  // 必摘硬保证:失败也摘
+    const auto ledger = ReadJson(root / "updates" / (txn_id + ".json"));
+    REQUIRE(ledger.has_value());
+    CHECK((*ledger)["state"] == "rolled-back");
+    CHECK((*ledger)["restored_flat"] == false);
+    CHECK((*ledger)["flat_restore_error"].is_string());
+    CHECK((*ledger)["current_removed"] == true);
+    // 现场保留:根位还是交接顶上去的新 EXE,legacy 原件在,parked 占位在。
+    CHECK(ReadFile(root / kExeName) == StubExeBytes());
+    CHECK(ReadFile(root / "backups" / txn_id / "legacy" / kExeName) == "old flat exe bytes");
+    CHECK(fs::is_directory(root / "backups" / txn_id /
+                           (std::string("launcher-parked-") + kExeName)));
+    CHECK(StagingEmpty(root));
 }
 
 TEST_CASE("engine.rollback:切回 previous;无 previous 退 1") {

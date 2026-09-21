@@ -26,6 +26,7 @@
 #include "platform/sha256.hpp"
 #include "updater/archive.hpp"
 #include "updater/download.hpp"
+#include "updater/flat_handover.hpp"
 #include "updater/layout.hpp"
 #include "updater/lock.hpp"
 #include "updater/manifest.hpp"
@@ -54,8 +55,12 @@ constexpr const char* kRgName = "rg";
 constexpr std::uint64_t kDiskHeadroomBytes = 256ull << 20;      // DISK_HEADROOM_BYTES
 constexpr std::uint64_t kEstimateFallbackBytes = 512ull << 20;  // estimate_need 的缺省基数
 
-// 平铺迁移完整备份的受管树(python install_plan.ROLE_TOP_DIRS)。
-constexpr const char* kRoleTopDirs[] = {"skills", "docs", "web", "libexec", "licenses", "updater"};
+// 平铺迁移完整备份的受管树与根级记录件排除表(python install_plan.
+// ROLE_TOP_DIRS / RECORD_FILES)。文件机械唯一实现见 flat_handover(批三②,
+// SV-03 收敛),引擎只编排事务。
+const std::vector<std::string> kFlatManagedTrees = {
+    "skills", "docs", "web", "libexec", "licenses", "updater"};
+const std::vector<std::string> kFlatRecordFiles = {"manifest.json", "install-state.json"};
 
 std::vector<std::string> GcVersions(const LayoutPaths& paths, const ProgressSink& sink);
 
@@ -386,46 +391,9 @@ std::string GithubAssetUrl(const std::string& repo, std::int64_t asset_id) {
 // ---------------------------------------------------------------------------
 // 平铺完整备份与 gc
 // ---------------------------------------------------------------------------
-
-std::filesystem::path FullBackup(const std::filesystem::path& root) {
-    // 无基线时的完整备份(install_plan.full_backup):受管树全量 + 记录目录
-    // 顶层文件(记录件除外),全部原样进备份。
-    std::error_code ec;
-    const std::filesystem::path backup_root = root / "backups" / MakeTxnId();
-    std::filesystem::create_directories(backup_root, ec);
-    if (ec) throw UpdaterFailure("建备份目录失败: " + Utf8(backup_root) + ": " + ec.message());
-    for (const char* tree : kRoleTopDirs) {
-        const std::filesystem::path src = root / tree;
-        if (!std::filesystem::is_directory(src, ec) || ec || std::filesystem::is_symlink(src, ec)) {
-            ec.clear();
-            continue;
-        }
-        std::error_code copy_ec;
-        std::filesystem::copy(src, backup_root / tree,
-                              std::filesystem::copy_options::recursive |
-                                  std::filesystem::copy_options::copy_symlinks,
-                              copy_ec);
-        if (copy_ec) {
-            throw UpdaterFailure("平铺备份拷贝失败(" + std::string(tree) + "): " + copy_ec.message());
-        }
-    }
-    std::vector<std::string> names;
-    for (std::filesystem::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
-        if (!it->is_regular_file()) continue;
-        names.push_back(it->path().filename().string());
-    }
-    std::sort(names.begin(), names.end());
-    for (const std::string& name : names) {
-        if (name == "manifest.json" || name == "install-state.json") continue;  // RECORD_FILES
-        std::error_code copy_ec;
-        std::filesystem::copy_file(root / name, backup_root / name,
-                                   std::filesystem::copy_options::overwrite_existing, copy_ec);
-        if (copy_ec) {
-            throw UpdaterFailure("平铺备份拷贝失败(" + name + "): " + copy_ec.message());
-        }
-    }
-    return backup_root;
-}
+// 平铺完整备份/交接/恢复的文件机械自 SV-03 起唯一实现在 flat_handover
+// (FlatFullBackup/HandoverFlatLauncher/RestoreFlatLegacy),本文件不再留
+// copy_file 副本;引擎只把 FlatFailure 映射为引擎异常与退出码。
 
 // 版本目录在用吗(python version_in_use):Windows 主 EXE 独占写探测;POSIX
 // 扫 /proc,任何进程的 exe 是这棵目录里的主 EXE 或随包 rg 即算(macOS 无
@@ -544,104 +512,33 @@ std::vector<std::string> GcVersions(const LayoutPaths& paths, const ProgressSink
 // 激活 / 交接 / 回滚 / 提交
 // ---------------------------------------------------------------------------
 
-void SyncUpdaterTree(const LayoutPaths& paths, const std::filesystem::path& version_path) {
-    // 把版本目录里的 updater 树按清单文件覆盖同步到根(python sync_updater_tree:
-    // 不清不删——更新助手自己就住在那棵树里)。
-    std::error_code ec;
-    const std::filesystem::path src_tree = version_path / "updater";
-    if (!std::filesystem::is_directory(src_tree, ec) || ec) return;
-    for (std::filesystem::recursive_directory_iterator it(src_tree, ec), end; !ec && it != end;
-         it.increment(ec)) {
-        if (ec || !it->is_regular_file()) continue;
-        const std::filesystem::path rel = std::filesystem::relative(it->path(), src_tree, ec);
-        if (ec || rel.empty()) continue;
-        const std::filesystem::path dest = paths.updater / rel;
-        std::error_code make_ec;
-        std::filesystem::create_directories(dest.parent_path(), make_ec);
-        if (make_ec) throw UpdaterFailure("updater 树目录建不成: " + Utf8(dest.parent_path()));
-        std::error_code copy_ec;
-        std::filesystem::copy_file(it->path(), dest, std::filesystem::copy_options::overwrite_existing,
-                                   copy_ec);
-        if (copy_ec) {
-            throw UpdaterFailure("updater 树同步失败: " + Utf8(dest) + ": " + copy_ec.message());
-        }
+// flat_handover 的类型化失败 -> 引擎异常:NeedsReview(用户清障后重跑可
+// 续,staging 留档)停 needs-review 退 2,其余 failed 退 1。退出码语义在
+// 本层,文件机械层只给分类。
+[[noreturn]] void ThrowFlatFailure(const FlatFailure& failure) {
+    if (failure.kind == FlatHandoverError::NeedsReview) {
+        throw NeedsReviewFailure(failure.message);
     }
+    throw UpdaterFailure(failure.message);
 }
 
 void HandoverFlatLauncher(const LayoutPaths& paths, Transaction& txn, const TxnTarget& target) {
     // 平铺 -> 版本化交接(§六):不替换运行中的 EXE,不强杀——旧根 EXE 改名
     // 挪进 backups/<txn>/legacy/(Windows 对运行中映像允许改名,运行中的进程
     // 不受影响);新版 EXE 落根位当固定启动器;updater 树同步到根。挪不动
-    // (被锁)停 needs-review,等用户退出后重跑续上。
-    std::error_code ec;
-    const std::filesystem::path version_exe = paths.versions / target.dirname / kExeName;
-    if (std::filesystem::absolute(paths.exe).lexically_normal() ==
-        std::filesystem::absolute(version_exe).lexically_normal()) {
-        throw UpdaterFailure("安装根与版本目录重叠,拒绝交接");
+    // (被锁)停 needs-review,等用户退出后重跑续上。文件机械在 flat_handover
+    // (SV-03 收敛后的唯一实现),这里只把 FlatFailure 映射成引擎异常。
+    const auto handed = HandoverFlatLauncher(paths, txn.id(), paths.versions / target.dirname);
+    if (!handed.has_value()) {
+        ThrowFlatFailure(handed.error());
     }
-    const std::filesystem::path legacy_dir = paths.backups / txn.id() / "legacy";
-    std::filesystem::create_directories(legacy_dir, ec);
-    if (ec) {
-        throw NeedsReviewFailure("旧根 EXE 的备份目录建不成(" + Utf8(legacy_dir) + ": " + ec.message() +
-                                 ")。处理完再重跑 lubancode update 续上"
-                                 "(已下载核对的包不重下)。绝不强杀。");
-    }
-    const std::filesystem::path legacy_target = legacy_dir / kExeName;
-    if (std::filesystem::is_regular_file(paths.exe, ec) && !ec) {
-        std::error_code remove_ec;
-        std::filesystem::remove(legacy_target, remove_ec);
-        std::error_code rename_ec;
-        std::filesystem::rename(paths.exe, legacy_target, rename_ec);
-        if (rename_ec) {
-            throw NeedsReviewFailure(
-                "旧根 EXE 挪不进备份(" + rename_ec.message() +
-                ")——多半仍被运行中的进程/杀软锁着。"
-                "退出所有 lubancode 进程后重跑 lubancode update 续上(已下载核对的包不重下)。"
-                "绝不强杀。");
-        }
-    }
-    ec.clear();
-    std::filesystem::copy_file(version_exe, paths.exe,
-                               std::filesystem::copy_options::overwrite_existing, ec);
-    if (ec) throw UpdaterFailure("新版 EXE 落根位失败: " + Utf8(paths.exe) + ": " + ec.message());
-    MakeExecutable(paths.exe);
-    SyncUpdaterTree(paths, paths.versions / target.dirname);
-}
-
-bool RestoreFlatLegacy(const LayoutPaths& paths, Transaction& txn) {
-    // 从平铺交接的备份恢复旧根 EXE。恢复不成也要摘掉 current 指针——平铺
-    // 旧 EXE 不认指针,留着会把后续启动当启动器空转(必摘)。
-    std::error_code ec;
-    const std::filesystem::path legacy = paths.backups / txn.id() / "legacy" / kExeName;
-    bool restored = false;
-    if (std::filesystem::is_regular_file(legacy, ec) && !ec) {
-        if (std::filesystem::is_regular_file(paths.exe, ec) && !ec) {
-            // launcher-parked 挪移尽力而为(python 裸 rename,失败即炸恢复链;
-            // 这里吞错继续——必摘指针那条硬保证优先)。
-            std::error_code park_ec;
-            std::filesystem::rename(paths.exe,
-                                    paths.backups / txn.id() /
-                                        ("launcher-parked-" + std::string(kExeName)),
-                                    park_ec);
-        }
-        ec.clear();
-        std::filesystem::copy_file(legacy, paths.exe,
-                                   std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            throw UpdaterFailure("平铺旧 EXE 恢复失败: " + Utf8(paths.exe) + ": " + ec.message());
-        }
-        MakeExecutable(paths.exe);
-        restored = true;
-    }
-    std::error_code remove_ec;
-    std::filesystem::remove(paths.current, remove_ec);  // 必摘 current.json
-    return restored;
 }
 
 void RollbackAfterActivationFailure(const LayoutPaths& paths, Transaction& txn,
                                     const std::string& reason) {
     // 激活后失败:恢复旧指针,保留诊断(§七)。先试指回旧版本目录;平铺
-    // 来的就恢复旧根 EXE 并摘掉指针。
+    // 来的就恢复旧根 EXE 并摘掉指针(恢复链失败 -> needs-review,指针
+    // 已摘、现场保留,见 flat_handover 的必摘硬保证)。
     nlohmann::json detail = nlohmann::json::object();
     detail["reason"] = reason;
     detail["rolled_back_at_utc"] = UtcNowIso8601();
@@ -663,7 +560,22 @@ void RollbackAfterActivationFailure(const LayoutPaths& paths, Transaction& txn,
         }
     }
     if (!restored) {
-        detail["restored_flat"] = RestoreFlatLegacy(paths, txn);
+        const auto flat = RestoreFlatLegacy(paths, txn.id());
+        if (flat.has_value()) {
+            detail["restored_flat"] = *flat;
+        } else {
+            // 平铺恢复链失败:current 已被专用模块摘掉(必摘硬保证),根位
+            // 与备份现场保留给人工诊断——不吞成恢复成功,退 needs-review。
+            detail["restored_flat"] = false;
+            detail["flat_restore_error"] = flat.error().message;
+            detail["current_removed"] = true;
+            txn.Transition(kTxnRolledBack, std::move(detail));
+            CleanupStaging(paths, txn.id());
+            throw NeedsReviewFailure(
+                "回滚时旧根 EXE 恢复失败(" + flat.error().message +
+                "),current 指针已摘除,根位与备份现场保留;请人工检查 backups/" +
+                txn.id() + " 后再重跑 lubancode update。诊断: " + Utf8(txn.LedgerPath()));
+        }
     }
     txn.Transition(kTxnRolledBack, std::move(detail));
     CleanupStaging(paths, txn.id());
@@ -873,25 +785,18 @@ int RunUpdate(const EngineArgs& args, const ProgressSink& sink, const PrecheckFn
         }
 
         if (DetectLayout(paths.root) == LayoutKind::Flat) {
-            // 平铺迁移先完整备份(§五.4:宁可多备份),挪进本事务名下。
-            bool any_tree = false;
-            for (const char* tree : kRoleTopDirs) {
-                std::error_code tree_ec;
-                if (std::filesystem::is_directory(root / tree, tree_ec) && !tree_ec) {
-                    any_tree = true;
-                    break;
-                }
+            // 平铺迁移先完整备份(§五.4:宁可多备份)。文件机械唯一实现在
+            // flat_handover(SV-03 收敛):txn 名下 staging 再改名,挪不动留
+            // 原地,返回真实落点,账上照记;守卫从"任一棵受管树在"扩到
+            // "树或根级文件"(根位 EXE 也是平铺现场的一部分)。
+            const auto backed =
+                FlatFullBackup(root, kFlatManagedTrees, kFlatRecordFiles, txn->id());
+            if (!backed.has_value()) {
+                throw UpdaterFailure(backed.error().message);
             }
-            if (any_tree) {
-                std::filesystem::path backup_root = FullBackup(root);
-                const std::filesystem::path txn_backup = paths.backups / txn->id() / "flat";
-                std::error_code make_ec;
-                std::filesystem::create_directories(txn_backup.parent_path(), make_ec);
-                std::error_code rename_ec;
-                std::filesystem::rename(backup_root, txn_backup, rename_ec);
-                if (!rename_ec) backup_root = txn_backup;  // 挪不动就留原地,账上照记路径
-                txn->Note("平铺迁移完整备份: " + Utf8(backup_root));
-                Say(sink, "[backup] 平铺安装完整备份: " + Utf8(backup_root));
+            if (backed->has_value()) {
+                txn->Note("平铺迁移完整备份: " + Utf8(**backed));
+                Say(sink, "[backup] 平铺安装完整备份: " + Utf8(**backed));
             }
         }
 
