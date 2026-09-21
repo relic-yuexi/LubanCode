@@ -1,6 +1,6 @@
 # AR-09 Schema校验机制散落四个入口
 
-- 状态：待修；本次只审查，未改源码。
+- 状态：已修待合（PR #171，CI rollup 绿）；审查时未改源码，修复见勾账节。
 - 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
 
@@ -29,11 +29,17 @@
 2. 先保留四个领域入口与错误格式，抽共同类型/required/属性遍历原语；再将插件递归验证器下沉为独立schema核心，显式profile控制顶层object、null-as-missing、递归与关键字集合。最后迁移适配器。禁止直接把所有入口换成最严格档造成行为漂移。
 3. 小批提交，按下列门槛验收。
 
-- [ ] 为每种profile建立差异矩阵：required缺键/显式null、type、enum、const、array/items、additionalProperties。
-- [ ] 迁移首阶段错误码/路径/文案稳定。
-- [ ] 插件深度上限仍32。
-- [ ] 不新增runtime到agent反向依赖。
-- [ ] remote CI。
+- [x] 为每种profile建立差异矩阵：required缺键/显式null、type、enum、const、array/items、additionalProperties。（tests/unit/schema/test_schema_contract.cpp，逐格按现行为断言；workflow 两档经公共面观察——invalid_inputs 文案/编排账拒收件 validation.checks）
+- [x] 迁移首阶段错误码/路径/文案稳定。（含插件顶层空 path 的前导空格、workflow checks 全收序 required 先于 type，逐字钉死）
+- [x] 插件深度上限仍32。（30 层过/40 层拒，文案含"嵌套超过 32 层"）
+- [x] 不新增runtime到agent反向依赖。（src/schema 只依赖 nlohmann，落 lubancode_engine；workflow/runtime→schema 同层向下）
+- [x] remote CI。（PR #171，run 35552083756 conclusion=success：macos-clang/workflow-tsan/windows-msvc/linux-asan 全绿；另 9 枚 CANCELLED 是被 pull_request 事件顶掉的 push 旧 run 35552070061，同 head，不算数）
+
+## 勾账（2026-09-21）
+
+- 已修：四入口共吃 src/schema 核心（类型/required/属性遍历原语 + 插件递归验证器下沉），Profile 三档显式化（HookRewrite/PluginContract/WorkflowScan）；四入口只留顶层政策与人话适配层，错误码/路径/文案零漂移。
+- 提交：f70d1d79（合同测试先行）+ 04670e2a（核心与适配层）；净账：触及源码删 282 增 112（另新增核心 380 行、合同测试 444 行——审查单"净删90"按纯实现口径大致相当，注释与测试另账）。
+- 未合并：CI 绿后停在 PR #171 待点名合并。
 
 ## 删除量与旧账
 
