@@ -83,6 +83,10 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     bool status_known = false;
     bool cancelled = false;
     bool frame_overflow = false;
+    // 错误体超帽标志(FD-09):WriteCallback 里掐流置位,收场分型抢在
+    // 网络错之前落锤(cpr 把我们主动掐的流报成 ABORTED_BY_CALLBACK 一类
+    // 共用码,不抢在前面会被误分型成 Network 进重试环)。
+    bool error_body_cap_hit = false;
     // 有没有收到过响应体的第一个字节——网络错误发生时靠这个旁证分清
     // 是连接阶段就卡死了,还是流中途假死(见 ClassifyNetworkError 注释)。
     bool received_any_bytes = false;
@@ -112,8 +116,16 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
             }
             const bool is_success = status_known && status_code >= 200 && status_code < 300;
             if (!is_success) {
-                // 非 2xx:这不是 SSE 流,是普通的错误响应体,原样攒起来
-                // 好塞进 Error 里,不要喂给分帧器瞎解析。
+                // 非 2xx:这不是 SSE 流,是普通的错误响应体,攒起来好塞进
+                // Error 里,不要喂给分帧器瞎解析。攒量设帽(FD-09):时间
+                // 上限(硬墙钟/空闲超时)不等于字节上限,故障/恶意服务器回
+                // 无 Content-Length 的连接式错误体时,光靠时间闸内存照样涨。
+                // 这一段放进去就超 -> 不放,就地掐流;正好到帽不超(与
+                // net/http_transport 的响应体帽同一套语义)。
+                if (error_body.size() + data.size() > call.max_error_body_bytes) {
+                    error_body_cap_hit = true;
+                    return false;
+                }
                 error_body.append(data);
                 return true;
             }
@@ -180,7 +192,7 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
         write_cb,
         progress_cb);
 
-    // 收场分型,顺序有讲究:用户取消 > 帧溢出 > 网络错 > HTTP 状态。
+    // 收场分型,顺序有讲究:用户取消 > 帧溢出 > 错误体帽 > 网络错 > HTTP 状态。
     if (cancelled || (cancel != nullptr && cancel->load())) {
         // 取消误报 ESC 单 Bug 1:传输层只知道"取消信号升了",不知道谁升的
         // ——可能是用户按键,也可能是调用方的超时看门狗。文案保持中性,
@@ -190,6 +202,26 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
 
     if (frame_overflow) {
         return std::unexpected(Error{ErrorKind::Parse, "SSE 单帧超过大小上限(8MB),协议错误,已断开", 0});
+    }
+
+    if (error_body_cap_hit) {
+        // 错误体超帽是我们主动掐的流,必须抢在网络错分型之前落锤(顺序:
+        // 取消 > 帧溢出 > 错误体帽 > 网络错 > HTTP 状态)。错误摘要仍可
+        // 诊断:帽内前缀原样保留。截断说明拼在头部而不是尾部——下游
+        // SummarizeErrorBodyForUser/日志首行都只看开头,拼尾部会被 240 字节
+        // 截短吞掉,用户就不知道"这不是完整错误体"了;拼头部则 JSON 抽取
+        // 走原文路径,密钥打码(MaskSecrets)照样过,不新开口子。分型走
+        // HttpStatus(带已知状态码)不进 Network——重试环对 Network 一律
+        // 重试,大错误体不该被当成网络抖动再收一遍;429/5xx 既有重试语义
+        // 不变。
+        std::string message = "[错误响应体超过 " + std::to_string(call.max_error_body_bytes) +
+                              " 字节上限,接收已中止,以下为截断摘要]";
+        if (!error_body.empty()) {
+            message.push_back('\n');
+            message += error_body;
+        }
+        return std::unexpected(Error{ErrorKind::HttpStatus, std::move(message),
+                                     status_known ? status_code : static_cast<int>(response.status_code)});
     }
 
     if (response.error) {

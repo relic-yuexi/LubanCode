@@ -37,8 +37,10 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -46,6 +48,7 @@
 
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
+#include "api/http_stream_transport.hpp"
 #include "api/responses/client.hpp"
 #include "api/types.hpp"
 #include "cli/i18n.hpp"
@@ -131,6 +134,16 @@ int StartFakeServer(std::function<void(socket_t)> handler) {
 
 void SendAll(socket_t s, const std::string& data) {
     ::send(s, data.data(), static_cast<int>(data.size()), 0);
+}
+
+// 发送侧干净收尾(发 FIN):不带 Content-Length 的连接式响应体靠这个让
+// 客户端读到 EOF、流"正常结束"——区别于掐流和挂死两种非正常收场。
+void ShutdownSend(socket_t s) {
+#ifdef _WIN32
+    ::shutdown(s, SD_SEND);
+#else
+    ::shutdown(s, SHUT_WR);
+#endif
 }
 
 // 把客户端发来的请求排干(不关心内容)。不排干也不会死锁(TCP 收发缓冲区
@@ -452,4 +465,206 @@ TEST_CASE("硬墙钟关掉(0 = 不设),行为交还 idle/connect 两道闸,不�
     const auto missing = lubancode::config::ParseFileConfigJson(R"({})", "x.json");
     REQUIRE(missing.has_value());
     CHECK_FALSE(missing->request_hard_timeout_secs.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// FD-09(错误响应体接收帽):非 2xx 分支原先 `error_body.append(data)` 无
+// 上限——故障/恶意服务器回一份无 Content-Length 的连接式大错误体时,内存
+// 会一直涨到流结束/硬超时为止。时间闸(硬墙钟/空闲超时)不等于字节闸。
+// 这组用例直调 PostSseStream(绕开 backend,好给 HttpStreamCall.
+// max_error_body_bytes 注小帽钉边界值),fake 服务器一律不带
+// Content-Length——就是"连接式错误体"这个病灶形状本身。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PostSseStream: 连接式错误体超过接收帽,就地掐流并保留有界摘要(分型不归 Network)") {
+    constexpr std::size_t kCap = 16 * 1024;
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\n");
+        const std::string block(4 * 1024, 'x');
+        for (int i = 0; i < 1024; ++i) {  // 最多 4 MiB,远超 16 KiB 的帽
+            if (::send(client, block.data(), static_cast<int>(block.size()), 0) <= 0) {
+                break;  // 客户端已掐流:连接这头多半也断了,别死等
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(30));  // 不关连接:装作"还会一直发"
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.max_error_body_bytes = kCap;
+
+    const auto result =
+        lubancode::api::PostSseStream(call, [](std::string_view) { return true; });
+
+    REQUIRE_FALSE(result.has_value());
+    // 分型必须是 HttpStatus 而不是 Network:重试环(IsRetryableError)对
+    // Network 一律重试——超帽的大错误体不能被当成网络抖动再收六遍;
+    // 429/5xx 的既有重试语义在 HttpStatus 分型下原样保留。
+    CHECK(result.error().kind == lubancode::api::ErrorKind::HttpStatus);
+    CHECK(result.error().http_status == 500);
+    // 稳定截断说明在头部:一眼能看出"这不是完整错误体",截断原因是确定的。
+    // 拼头部是给下游留路——SummarizeErrorBodyForUser 和日志首行只看开头。
+    const std::string notice =
+        "[错误响应体超过 " + std::to_string(kCap) + " 字节上限,接收已中止,以下为截断摘要]";
+    CHECK(result.error().message.rfind(notice, 0) == 0);
+    // 内存保留量有界:帽内前缀 + 一行说明,总量不越过帽加说明文字。
+    CHECK(result.error().message.size() < kCap + 200);
+}
+
+TEST_CASE("PostSseStream: 错误体正好到帽不掐,完整保留且不带截断说明(边界)") {
+    constexpr std::size_t kCap = 4096;
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\n");
+        SendAll(client, std::string(kCap, 'a'));  // 恰好 kCap 字节:到帽不超
+        ShutdownSend(client);                     // 干净收尾:流正常结束,不是掐的
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.max_error_body_bytes = kCap;
+
+    const auto result =
+        lubancode::api::PostSseStream(call, [](std::string_view) { return true; });
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::HttpStatus);
+    CHECK(result.error().http_status == 400);
+    // 原样完整:不多一个字节的截断说明,也不少一个 'a'。
+    CHECK(result.error().message == std::string(kCap, 'a'));
+}
+
+TEST_CASE("PostSseStream: 错误体超帽一字节也掐,超限段整体不进摘要(边界)") {
+    constexpr std::size_t kCap = 100;
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\n");
+        SendAll(client, std::string(kCap, 'a'));
+        SendAll(client, std::string(50, 'b'));  // 帽后 50 字节:这一段放进去就超
+        ShutdownSend(client);
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.max_error_body_bytes = kCap;
+
+    const auto result =
+        lubancode::api::PostSseStream(call, [](std::string_view) { return true; });
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::HttpStatus);
+    CHECK(result.error().http_status == 403);
+    CHECK(result.error().message.find("[错误响应体超过 " + std::to_string(kCap) + " 字节上限") !=
+          std::string::npos);
+    // 超限的那一段整体不进("这一段放进去就超就不放"):帽后内容绝不混进摘要。
+    CHECK(result.error().message.find('b') == std::string::npos);
+    // 帽内前缀保留量有界:libcurl 回调分块粒度不定,混段时前缀可能短于
+    // kCap(比如 kCap 个 'a' 和 'b' 同段到达就整段丢弃),上界是稳的。
+    CHECK(std::count(result.error().message.begin(), result.error().message.end(), 'a') <=
+          static_cast<std::ptrdiff_t>(kCap));
+}
+
+TEST_CASE("PostSseStream: 零长度错误体不踩帽逻辑,兜底文案照旧(回归)") {
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\n");
+        ShutdownSend(client);  // 一个字节的体都不给,干净关
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.max_error_body_bytes = 8;
+
+    const auto result =
+        lubancode::api::PostSseStream(call, [](std::string_view) { return true; });
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::HttpStatus);
+    CHECK(result.error().http_status == 503);
+    CHECK(result.error().message == "服务端返回了非 200 状态码,但响应体是空的");
+}
+
+TEST_CASE("PostSseStream: 取消与超帽同拍,取消优先——收场报 Cancelled 不报错误体帽") {
+    constexpr std::size_t kCap = 8;
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\n\r\n");
+        SendAll(client, std::string(kCap, 'a'));  // 先发到帽:这一段在帽内,不触发
+        // 等 1s 再发超帽块:留足窗口让主线程的 cancel 先置位——同一次
+        // WriteCallback 里"取消检查在前、帽检查在后"这个顺序就是被钉的
+        // 合同(收场分型:取消 > 帧溢出 > 错误体帽 > 网络错 > 状态)。
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const std::string block(2048, 'c');
+        for (int i = 0; i < 50; ++i) {
+            if (::send(client, block.data(), static_cast<int>(block.size()), 0) <= 0) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.max_error_body_bytes = kCap;
+
+    std::atomic<bool> cancel{false};
+    std::thread cancel_thread([&cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        cancel.store(true);
+    });
+    const auto result =
+        lubancode::api::PostSseStream(call, [](std::string_view) { return true; }, &cancel);
+    cancel_thread.join();
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Cancelled);
+}
+
+TEST_CASE("PostSseStream: 错误体帽不碰 2xx 成功流——总量越过小帽的长 SSE 照常收完") {
+    constexpr std::size_t kCap = 1024;  // 故意小:成功流必须越过它
+    constexpr int kFrames = 24;
+    const std::string frame = "data: " + std::string(480, 'x') + "\n\n";  // 488 字节/帧
+    const int port = StartFakeServer([frame](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+        for (int i = 0; i < kFrames; ++i) {  // 总量 ~11.7 KiB,远超 1 KiB 的错误帽
+            SendAll(client, frame);
+        }
+        ShutdownSend(client);
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.max_error_body_bytes = kCap;
+
+    std::size_t sink_bytes = 0;
+    const auto result = lubancode::api::PostSseStream(
+        call, [&](std::string_view chunk) {
+            sink_bytes += chunk.size();
+            return true;
+        });
+
+    // 帽只管错误分支:成功流不存在"总量限制",一个字节都不少地过 sink
+    // (单帧粒度的容量仍归 SseFramer 的 8MiB 单帧帽管,不在这条路上)。
+    REQUIRE(result.has_value());
+    CHECK(sink_bytes == static_cast<std::size_t>(kFrames) * frame.size());
 }

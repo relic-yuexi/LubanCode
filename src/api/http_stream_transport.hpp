@@ -12,7 +12,9 @@
 //     steady_clock 期限掐流,收场文案优先走 hard_timeout 档;
 //   - OPERATION_TIMEDOUT 按"收到过响应体字节没有"分型成连接超时/流空闲
 //     超时(CURLOPT 两处共用同一个错误码,只能靠旁证分);
-//   - 非 2xx:响应体原样攒进 Error(不喂 sink,免得分帧器瞎解析);
+//   - 非 2xx:响应体攒进 Error(不喂 sink,免得分帧器瞎解析);攒量设帽
+//     max_error_body_bytes——这一段放进去就超就不放、就地掐流(正好到帽
+//     不超),留帽内前缀当截断摘要(FD-09);
 //   - sink 返回 false(单帧溢出这类协议绝境):掐流,报 Parse 错。
 // "流意外结束(没等到终止事件)"的完整性检查不在这——各家对"终止"的
 // 定义不同(MessageDone / parser.Finish()),留给调用方收尾。
@@ -20,6 +22,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <expected>
 #include <functional>
 #include <map>
@@ -36,6 +39,18 @@ namespace lubancode::api {
 // 一次流式 POST 的全部参数:四家 client 各自拼好递进来,传输层不认任何
 // 厂商形状。
 struct HttpStreamCall {
+    // 非 2xx 错误响应体的接收帽(字节),缺省 kMaxErrorBodyBytes。超帽行为
+    // 合同(FD-09):WriteCallback 入口先检查再追加——这一段放进去就超就
+    // 不放、就地掐流("正好到帽"不超,与 net/http_transport 的响应体帽同
+    // 一套语义);掐流后收场报 ErrorKind::HttpStatus(带已知状态码),
+    // message = 一条稳定截断说明(拼头部,日志首行与用户摘要都看得见)
+    // + 帽内已收前缀。分型绝不走 Network:
+    // 重试环(IsRetryableError)对 Network 一律重试,故障服务器回的无限大
+    // 错误体不该被当成网络抖动再收六遍;429/5xx 的既有重试语义不变。
+    // 帽只管错误分支——2xx 成功流的容量仍由 SseFramer 的单帧帽把着,
+    // 不存在"流总量"限制。
+    static constexpr std::size_t kMaxErrorBodyBytes = 1024 * 1024;
+
     std::string url;
     // 发送前翻成 cpr::Header(大小写不敏感,同名再赋值即覆盖)。
     std::map<std::string, std::string> headers;
@@ -43,6 +58,9 @@ struct HttpStreamCall {
     int connect_timeout_ms = 0;         // 连接阶段上限(毫秒)
     int stream_idle_timeout_secs = 0;   // 空闲读超时(秒,cpr::LowSpeed)
     int request_hard_timeout_secs = 0;  // 硬墙钟(秒),<= 0 不设
+    // 非 2xx 错误体接收帽(字节),合同见 kMaxErrorBodyBytes 注释。测试
+    // 注小帽钉边界值;线上用缺省。
+    std::size_t max_error_body_bytes = kMaxErrorBodyBytes;
 };
 
 // 2xx 响应体回调:吃到一段调一段。返回 false = 协议已不可信,掐流(分帧
