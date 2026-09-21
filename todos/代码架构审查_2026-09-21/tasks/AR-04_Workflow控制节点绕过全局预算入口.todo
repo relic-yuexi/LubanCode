@@ -1,0 +1,61 @@
+# AR-04 Workflow控制节点绕过全局预算入口
+
+- 状态：已修已验（PR #166，CI rollup 绿；证据见文末"完工勾账"）。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-04 | B | 高 | src/workflow/definition.hpp:41；src/workflow/runtime.cpp:582；src/workflow/runtime.cpp:1211；src/workflow/runtime.cpp:1400；src/workflow/runtime.cpp:1511；src/workflow/runtime.cpp:2066；src/workflow/runtime.cpp:2088 | map/reduce直接 `RunNode(ctx, body)`；控制分支在预算闸前 `continue`；`if (!result.ok) account.tool_calls += 1`。 | max_steps声明全局帽，但map/reduce每项不记全局steps；parallel只为各分支各数guard。控制节点还绕开主循环中的tokens/tool_calls/timeout准入。成功工具调用根本不增加tool_calls，失败的非工具节点却增加。长foreach/reduce能在单并发下持续越预算，不能用“在飞请求难精确预估”解释。 | 将所有真实节点attempt准入收进同一运行预算账户，按执行身份预留步数/工具调用并累计实际token；每项或重试开始前检查时限和已用量。保留BudgetGate纯判定件，删控制分支自数guard作为全局预算的替代。工具调用计数由实际Tool节点/工具执行回执驱动。 | 影响所有workflow控制节点；调整既有错误计数语义属于行为修复，须固定旧档读取规则。并发未完成请求可有已预留额度，不承诺预知实际token。 |
+
+## 证据与边界
+
+反例由代码直接推出：foreach含N项，每项返回大于token帽的用量，run_item仍继续下一项；本轮走map分支:2048后于:2066 continue，绕过:2088预算闸。工具计数:583-584仅在!ok自增，与definition.hpp:43“工具调用次数帽（重试也计）”不符。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/workflow/runtime.cpp`；`src/workflow/runtime.hpp`；`src/workflow/host_executors.hpp`；`src/workflow/host_executors.cpp`。
+- 前置：AR-03（以全局排期复核为准）。
+- 不得并行共改：AR-03、AR-09；同文件先后落单，或约定具体函数所有权。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 将所有真实节点attempt准入收进同一运行预算账户，按执行身份预留步数/工具调用并累计实际token；每项或重试开始前检查时限和已用量。保留BudgetGate纯判定件，删控制分支自数guard作为全局预算的替代。工具调用计数由实际Tool节点/工具执行回执驱动。
+3. 小批提交，按下列门槛验收。
+
+- [x] foreach第一项用量越帽后不再执行第二项。
+- [x] map/parallel只能派发已获额度的项。
+- [x] 成功Tool attempt也计数，失败LLM不冒充工具调用。
+- [x] reduce与重试消耗步数。
+- [x] 所有入口超时同码收口。
+- [x] 远程CI验证。
+
+## 完工勾账（2026-09-21）
+
+- PR：[#166](https://github.com/relic-yuexi/LubanCode/pull/166)，分支 worktree-agent-ab8a25624dc555ea9。
+- 提交：139204a3（合同册先行，八案钉病灶）；ad0ac29a（AdmitNodeAttempt/AdmitControlVisit 统一准入口、删旁路账、tool_calls 改 Tool attempt 预留）；50ac856a（TSan 首战实锤的夹具修正）。
+- 验收一（foreach 越帽停项）：test_workflow_budget_admission"foreach:第一项用量越帽后不再执行第二项"——tokens 帽 100、首项实报 150，第二项在准入口被拦；断言 calls==2、tokens_used==150、walk 节点账 Failed/budget_exhausted。
+- 验收二（map/parallel 只派获额度项）：两册 max_steps=4——map 步账 setup(1)+容器访问(1)+两项(2)，第 3 项拒派（calls==3 精确）；parallel 分支自数 guard 已删，3 条分支过全局闸（calls==3）；worker 见 budget_stopped 旗即不再领新项。
+- 验收三（工具计数）：两次成功 Tool attempt 都入账（tool_calls==2），失败 LLM 零冒充，第 3 次 Tool 在 Headroom 口拦下且计数不虚增。
+- 验收四（reduce/重试计步）：reduce 每项 attempt 预留一步（第 3 项拒跑）；重试每 attempt 一步（max_steps=2 下第三次尝试被拦，calls==2）。
+- 验收五（超时同码）：foreach 项间与 async 等待两入口同码（timeout）同话（"总时限越过 10s"）——async 旧私有文案"async 等待撞到 workflow 总时限"已删，RunAsync 监察与准入口同走 OverrunTotalTimeout。
+- 验收六（远程 CI）：首跑 run 35540271853 的 workflow-tsan 腿实锤一笔夹具竞争（StallExecutor 工作线程拨 FakeClock vs 等待壳读钟，八案断言全过、进程收尾红），50ac856a 计数改原子后复跑；终判 ci rollup conclusion=success（run 35542560017，macos-clang 与 workflow-tsan 两腿绿）。
+- 行为变更留痕：成功工具调用入账、非 Tool 失败不再 +1（summary.tool_calls 语义修正，外部消费仅诊断显示）；resume 的已完成节点跳过步不再烧步（原主循环每次访问记步）；悬置候选采纳不再二次收额度。旧档（workflow-runs/ journal 与编排账 v3）读取不受影响——预算计数是运行期状态，不落档。
+- 给 AR-09 的接缝：AdmitNodeAttempt/AdmitControlVisit/OverrunTotalTimeout 三口即预算门面，步数账在 ExecutionContext.steps（atomic）；后续收口（如 agent 节点按回执报 tool_calls）从准入口第 3 步进，勿另开旁路。
+
+## 删除量与旧账
+
+本项不以删行计收益；预计净删除 0 行。（实收：净增——删了旁路账，添了统一准入口与合同册。）
+
+关联 todos/Workflow接入SessionV3_编排账与节点恢复设计.todo 的并发与恢复验收。
+## 全局排期复核
+
+- 前置／文件接手次序：AR-03
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-03（src/workflow/runtime.cpp, src/workflow/runtime.hpp）；AR-09（src/workflow/runtime.cpp）。
