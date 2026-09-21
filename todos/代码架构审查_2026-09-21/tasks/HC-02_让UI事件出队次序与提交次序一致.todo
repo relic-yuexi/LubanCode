@@ -1,6 +1,6 @@
 # HC-02：让UI事件出队次序与提交次序一致
 
-状态：已修复，待 PR/CI 验收回填。
+状态：已修复。PR #177，CI run 35568060667 rollup 绿（macos-clang 全量 605/605 通过，unit.app.session_ui_dispatcher 与 unit.app.terminal_turn_sink_projection 两册含新题各 Passed）。
 
 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
 
