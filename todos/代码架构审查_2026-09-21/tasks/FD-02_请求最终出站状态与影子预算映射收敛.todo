@@ -39,10 +39,10 @@
 
 ## 验收门
 
-- [ ] 四协议逐项比较最终 JSON 与 effective limit，覆盖 null、字符串、负数、超 int、provider/request 双覆盖。
-- [ ] 覆盖消息容器替换，验证映射等于实际下标或明确 unavailable；不能维持旧图。
-- [ ] 正常请求序列化 golden 不变，输出收窄真正体现在发送体。
-- [ ] 主循环、SampleModel、摘要调用都用相同已解析合同；穿过RebuildableBackend和SpinnerBackend真实包装链验收（HC-08）。
+- [x] 四协议逐项比较最终 JSON 与 effective limit，覆盖 null、字符串、负数、超 int、provider/request 双覆盖。(test_four_role_kernel.cpp "FD-02 覆盖矩阵"案)
+- [x] 覆盖消息容器替换，验证映射等于实际下标或明确 unavailable；不能维持旧图。("FD-02 消息容器覆盖"案:请求级/provider 级替换出门原样、映射 nullopt;未被覆盖时 wire_element_count 与出门容器长度恒等)
+- [x] 正常请求序列化 golden 不变，输出收窄真正体现在发送体。("FD-02 PrepareWireRequest 出门体与直拼 BuildRequestJson 逐字节相等"案 + "ForceMaxOutputTokensOverride 非整数覆盖同样落笔"案)
+- [ ] 主循环、SampleModel、摘要调用都用相同已解析合同；穿过RebuildableBackend和SpinnerBackend真实包装链验收（HC-08）。(前三者走旧三口、语义逐点核对兼容,合同已立 PrepareWireRequest 接缝;包装链验收归 HC-08,不在本单)
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
 
