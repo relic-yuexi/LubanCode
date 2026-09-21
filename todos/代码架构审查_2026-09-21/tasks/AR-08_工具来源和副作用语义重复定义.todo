@@ -1,6 +1,6 @@
 # AR-08 工具来源和副作用语义重复定义
 
-- 状态：修复中；共同合同已下沉(tool_semantics.hpp),loop 三段同义映射已删,待 PR/CI 验收。
+- 状态：已修。PR #199,CI run 35662153814 rollup 绿(lane/macos-clang/linux-asan/install-scripts 双平台全过,2026-09-22)。
 - 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 主批次：第1批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
 
@@ -29,11 +29,11 @@ tools/tool.hpp:19-21说明复制是为避免tools依赖agent。正确收口方�
 2. 把来源及副作用等级移到无agent/tools依赖的共同领域合同头；两命名空间短期using兼容，trace保留现有字符串编解码及落盘标签。loop按值传递，删逐项同义转换。PlanToolOrigin含Unknown且缺Deferred，须另保显式投影。
 3. 小批提交，按下列门槛验收。
 
-- [ ] 逐个enum值往返现有持久化字符串。
-- [ ] 未知旧字符串仍按原失败策略。
-- [ ] 注册元数据及工具fallback产生同样trace。
-- [ ] 公共合同不得include runtime/app。
-- [ ] GitHub CI。
+- [x] 逐个enum值往返现有持久化字符串。(agent/tool_trace.cpp 编解码零改动;tests/unit/runtime/test_tool_trace.cpp 序列化/解析随 CI 过)
+- [x] 未知旧字符串仍按原失败策略。(Parse 函数体一字未动,失败路径原样)
+- [x] 注册元数据及工具fallback产生同样trace。(loop.cpp 两条路改按值直递,原逐项等值映射表整体删除,行为逐值等价)
+- [x] 公共合同不得include runtime/app。(src/tool_semantics.hpp 零 include、纯枚举)
+- [x] GitHub CI。(PR #199,run 35662153814 rollup success:lane/macos-clang/linux-asan/install-scripts(windows+ubuntu) 全绿)
 
 ## 删除量与旧账
 
