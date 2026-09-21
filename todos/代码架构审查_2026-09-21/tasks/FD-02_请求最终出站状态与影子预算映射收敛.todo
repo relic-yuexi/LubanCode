@@ -70,4 +70,4 @@
 - anthropic 手写两段 extra_body 合并换成共用件 api::MergeExtraBody(行为等价的归一)。
 - 接缝(后继单消费,不替实现):AR-10 compact 采用门禁、HC-08 包装层直接消费 Backend::PrepareWireRequest;包装后端不换皮时走基类默认(上限回退 Request::max_tokens 原值、映射 nullopt、body 空),与旧 GetEffectiveOutputLimit 默认一字不差;主循环/SampleModel/摘要调用的旧三口语义保持,GetEffectiveOutputLimit 在非整数覆盖下由"假旧值"改为"如实 unknown"(tokens=nullopt + overridden=true),消费方现有判空分支全部兼容。
 - 验收门前三项由合同测试钉住(test_four_role_kernel.cpp):覆盖矩阵案、容器覆盖案、golden 案(PrepareWireRequest().body 与直拼 BuildRequestJson 逐字节相等 + wire_element_count 恒等)、Force 非整数覆盖案、基类默认口回退案。第四项(HC-08 RebuildableBackend/SpinnerBackend 真实包装链)归 HC-08。
-- PR:待回填。CI:待回填。
+- PR:#174。CI:run 35561588045 rollup conclusion=success(2026-09-21,含 macos-clang/windows/ubuntu 全腿;前两轮红因分别为测试内命名空间遮蔽与断言写反,均已修)。
