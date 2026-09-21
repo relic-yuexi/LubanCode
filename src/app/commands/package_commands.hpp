@@ -19,6 +19,7 @@ struct Config;
 }
 namespace lubancode::package {
 struct PackageMount;
+struct PackageSnapshot;  // provider 现取的现行快照(定义在 package/mounting.hpp)
 }
 namespace lubancode::tools {
 struct SkillMeta;

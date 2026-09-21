@@ -13,6 +13,7 @@
 #include "cli/console_input.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/markdown.hpp"  // RenderMarkdown(原先经 turn_runner.hpp 间接带进,显式化)
+#include "cli/i18n.hpp"  // trf:/unknown 的"不认得"行(原先经注册表头间接带进)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 #include "cli/transcript.hpp"
 
