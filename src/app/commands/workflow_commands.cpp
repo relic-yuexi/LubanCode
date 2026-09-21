@@ -949,12 +949,10 @@ private:
 };
 
 std::vector<std::string> BuiltinSlashWords() {
-    std::vector<std::string> words;
-    words.reserve(64);
-    for (const auto& info : lubancode::cli::AllSlashCommands()) {
-        words.push_back(info.name);
-    }
-    return words;
+    // HC-05:内建保留词吃全量词汇表(主名+别名+不展示的隐藏词),不再复用
+    // 展示名单——/hooks 这类"能执行却不在帮助里"的词、/quit /lang /bg 这类
+    // 纯别名,用户拿它们起 alias 都会被内建命令压住,必须报冲突禁用直呼。
+    return lubancode::cli::AllSlashReservedWords();
 }
 
 lubancode::workflow::Catalog LoadCheckedCatalog(const WorkflowCommandContext& context) {

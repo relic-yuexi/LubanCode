@@ -14,9 +14,9 @@
 //   2. 枚举无重复、无遗漏(死案 Image/NotSlash 也留名,handler 为空);
 //   3. 活案(有 handler)在 cli 词汇表都有主名,展示规则与帮助面
 //      (cli::AllSlashCommands,同出词汇表)对得上——已知差异如实记:
-//      /effort 是 /think 的别名(帮助面有、分派面归 think),/hooks 与
-//      /trace 分派面有、帮助面没有(帮助面的旧缺口,展示修复随 HC-05
-//      行为提交单独验收);
+//      /effort 是 /think 的别名(帮助面有、分派面归 think),/hooks 的
+//      展示修复已随 HC-05 行为提交落账,/trace 仍显式不展示(帮助面
+//      旧缺口,展示修复不在 HC-05 单内);
 //   4. 死案的分派兜底(Continue)与旧 switch 的 break 同语义。
 #include <doctest/doctest.h>
 
@@ -26,6 +26,7 @@
 
 #include "app/commands/command_registry.hpp"
 #include "cli/slash_commands.hpp"
+#include "workflow/catalog.hpp"
 
 namespace {
 
@@ -119,8 +120,8 @@ TEST_CASE("命令注册表:活案名字与帮助面对账") {
     }
     // 正向:活案(有 handler)在词汇表都有主名,desc_key 定展示——非空的
     // 名字必在帮助面,空的必不在。已知差异如实记:/unknown 是兜底案,不是
-    // 用户词汇;/hooks 与 /trace 词汇表 desc_key 为空(帮助面旧缺口,展示
-    // 修复随 HC-05 行为提交单独验收)。
+    // 用户词汇;/hooks 展示修复已落账(desc_key 非空),/trace 仍显式
+    // 不展示(帮助面旧缺口,展示修复不在 HC-05 单内)。
     for (const lubancode::app::SlashCommandSpec& spec : table) {
         if (spec.handler == nullptr) {
             continue;  // 死案
@@ -131,7 +132,7 @@ TEST_CASE("命令注册表:活案名字与帮助面对账") {
         const std::string full_name = std::string("/") + descriptor->word;
         if (descriptor->desc_key == nullptr) {
             CHECK_MESSAGE(help_names.count(full_name) == 0, full_name);
-            continue;  // 不展示的主命令(现状:/hooks、/trace)
+            continue;  // 不展示的主命令(现状:/trace)
         }
         CHECK_MESSAGE(help_names.count(full_name) == 1, full_name);
     }
@@ -174,4 +175,38 @@ TEST_CASE("命令注册表:死案与查无的兜底同旧 switch") {
     // /exit 是纯路由案:空材料也该原样回 Exit。
     const lubancode::cli::ParsedSlashCommand exit_cmd = lubancode::cli::ParseSlashCommand("/exit");
     CHECK(lubancode::app::DispatchSessionSlashCommand(ctx, exit_cmd) == lubancode::app::CommandFlow::Exit);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow alias 的内建冲突检查口径(HC-05 行为提交):保留词吃全量词汇表
+// (主名+别名+隐藏词),不再复用展示名单。workflow_commands.cpp 的
+// BuiltinSlashWords 是文件内部件,这里按它的同一口径(AllSlashReservedWords)
+// 喂 DetectAliasConflicts,钉死"alias=hooks、alias=quit 被判内建冲突"。
+// ---------------------------------------------------------------------------
+TEST_CASE("Workflow alias 冲突: 保留词全量口径,/hooks 与隐藏别名 /quit 都判冲突") {
+    lubancode::workflow::Catalog catalog;
+    for (const char* alias : {"hooks", "quit", "sansheng-liubu"}) {
+        lubancode::workflow::CatalogEntry entry;
+        entry.definition.id = std::string("wf-") + alias;
+        entry.definition.alias = alias;
+        entry.definition.enabled = true;
+        catalog.entries.push_back(entry);
+    }
+    lubancode::workflow::DetectAliasConflicts(catalog, {}, lubancode::cli::AllSlashReservedWords());
+    // /hooks:能执行的主命令,曾被展示名单漏掉——全量口径下必禁用直呼。
+    CHECK(catalog.disabled_aliases.count("hooks") == 1);
+    CHECK(catalog.FindByAlias("hooks") == nullptr);
+    // /quit:/exit 的隐藏别名,内建照样压住,须报冲突。
+    CHECK(catalog.disabled_aliases.count("quit") == 1);
+    CHECK(catalog.FindByAlias("quit") == nullptr);
+    // 不撞内建的 alias 照旧直呼无阻。
+    CHECK(catalog.disabled_aliases.count("sansheng-liubu") == 0);
+    CHECK(catalog.FindByAlias("sansheng-liubu") != nullptr);
+    bool hooks_builtin_conflict = false;
+    for (const auto& conflict : catalog.conflicts) {
+        if (conflict.kind == "builtin" && conflict.alias == "hooks") {
+            hooks_builtin_conflict = true;
+        }
+    }
+    CHECK(hooks_builtin_conflict);
 }

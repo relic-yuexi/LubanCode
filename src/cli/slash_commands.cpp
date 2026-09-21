@@ -862,9 +862,9 @@ const std::vector<SlashCommandDescriptor>& SlashCommandDescriptors() {
         {SlashCommand::Agents, "agents", "slash.desc.agents", true},
         {SlashCommand::Agent, "agent", "slash.desc.agent", true},
         {SlashCommand::Tools, "tools", "slash.desc.tools", true},
-        // /hooks:hooks 来源/命令/信任/禁用/最近结果与运行记录。分派面有
-        // 处理器,展示面暂缺(帮助/补全旧缺口,展示修复单独行为提交)。
-        {SlashCommand::Hooks, "hooks", nullptr, true},
+        // /hooks:hooks 来源/命令/信任/禁用/最近结果与运行记录。分派面早有
+        // 处理器,展示面曾整表漏收(HC-05 病灶)——本行翻进帮助与补全。
+        {SlashCommand::Hooks, "hooks", "slash.desc.hooks", true},
         {SlashCommand::Memory, "memory", "slash.desc.memory", true},
         {SlashCommand::Sessions, "sessions", "slash.desc.sessions", true},
         {SlashCommand::Resume, "resume", "slash.desc.resume", true},
