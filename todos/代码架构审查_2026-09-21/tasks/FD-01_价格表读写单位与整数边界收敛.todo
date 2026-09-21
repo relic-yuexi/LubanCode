@@ -1,6 +1,6 @@
 # FD-01 价格表读写单位与整数边界收敛
 
-- 状态：已实现，待 CI；见文末勾账。
+- 状态：已实现；PR #198 CI rollup 绿，待合并；见文末勾账。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：B；严重度：中；重构批次：2。
@@ -53,7 +53,7 @@
 - 新增 `CostStatus::Overflow`（序列化名 `estimate_overflow`）：四桶任一乘积或加和装不下 int64 时 `micros=0`、不降 `not_priced`。usage_sample.cpp 补两行枚举映射（hpp 加枚举值的机械必要改动，边界外一行说明）。
 - 边界说明：`PriceMicrosToJsonUnits` 整数价任意大小精确；小数价 ≤1e9 单位、六位小数内逐 micros 互逆（现实价格远在界内），超界受 double 精度所限——v1 schema 只有数值一形，已是上限。
 - 不借题改邻接：usage_commands 展示层把超界样本计进"其余 not_priced"计数（标签略宽，属邻接面，本单不动）。
-- PR/CI 证据：待回填。
+- PR/CI 证据：PR #198（https://github.com/relic-yuexi/LubanCode/pull/198）。CI run 35661628592：首跑 unit.channelfeishu.feishu_adapter 时序 flaky（PumpUntil 等待超时，与本单 accounting 无涉，pricing_cost 52 号测试首跑即过），`gh run rerun --failed` 一次后全绿；rollup.conclusion = SUCCESS（首个被并发组取消的空壳 run 留 CANCELLED 假腿污染 rollup，已删 run 35661610123 后复核为 SUCCESS）。本 PR 非 Windows 敏感面，按 ci.yml lane 规则只跑 macos-clang 腿；windows-msvc 腿随合并后 push main 跑。绿后未合并，待点名。
 ## 全局排期复核
 
 - 前置／文件接手次序：无硬前置；共改文件须协调。
