@@ -1,6 +1,6 @@
 # SV-03 更新 C++ 引擎另写平铺交接，专用模块未进入引擎主链
 
-- 状态：已实施，待三平台 CI 验收（PR 见下方勾账）。
+- 状态：已实施并勾账——PR #185 CI run 35598487158 rollup=success（macos-clang 编译+全量测试绿，install-scripts windows/ubuntu 双平台绿；windows-msvc 编译腿按 CI 腿单规则不在 PR 出场，合并后 main push 双腿补验），绿了不合并，等点名。
 - 审查日期：2026-09-21。
 - 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`（实施基线：`21744099`，含 merge PR #181，批三①②/#140 均已在内）。
 - 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
@@ -46,11 +46,11 @@
 
 ## 验收门槛
 
-- [ ] 从 RunUpdaterEngine 的真实入口跑平铺升级、occupied rename、复制失败、探针失败及回滚；验收证据须穿过专用模块。
-- [ ] 同一受管树/根文件输入只有一份备份筛选规则；任何 reparse 语义差异留成显式策略与测试。
-- [ ] 验证 current 清理策略在所有恢复失败出口可执行且可观测；不把清理失败吞成恢复成功。
-- [ ] 现有专用测试保留，补 tests/integration/updater/test_updater_engine.cpp 引擎级失败注入；三平台远端 CI 验收，不以专用函数单测冒充接线完成。
-- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+- [x] 从 RunUpdaterEngine 的真实入口跑平铺升级、occupied rename、复制失败、探针失败及回滚；验收证据须穿过专用模块。（PR #185：e2e 平铺迁移既有册 + 新增对拍册"引擎路 vs 专用模块路同输入对拍"——引擎交接的现场由专用模块 RestoreFlatLegacy 直接恢复成功，证明主链走的就是专用实现；occupied rename=交接被堵册，复制失败=新增备份段被堵册，探针失败=健康探针两路既有册，回滚=版本化/平铺/新增恢复失败三路）
+- [x] 同一受管树/根文件输入只有一份备份筛选规则；任何 reparse 语义差异留成显式策略与测试。（engine.cpp 四段 copy_file 副本已删净，备份/交接/恢复唯一入口 flat_handover；reparse 政策"不复制不跟进"在专用册"备份不复制也不跟进链接件"测试显式钉死，链接造不出的平台 SKIP 留 CI）
+- [x] 验证 current 清理策略在所有恢复失败出口可执行且可观测；不把清理失败吞成恢复成功。（RestoreFlatLegacy 恢复链失败不早退、摘完 current 再返回失败；引擎级"回滚恢复失败——needs-review 退 2,current 必摘"册断言 current.json 不在 + 账面 flat_restore_error/current_removed，专用级"restore 恢复链失败——current 照摘"册同钉）
+- [x] 现有专用测试保留，补 tests/integration/updater/test_updater_engine.cpp 引擎级失败注入；三平台远端 CI 验收，不以专用函数单测冒充接线完成。（专用册 5 个 flat 测试全保留，错误断言随类型化接口 FlatFailure 同步并加 kind 断言；引擎册新增备份段被堵、回滚恢复失败两路注入；PR #185 CI run 35598487158 rollup=success：macos-clang 编译+全量测试绿、install-scripts windows/ubuntu 双平台绿。windows-msvc 编译腿按 CI 腿单规则（ci.yml lane：updater 域 PR 不在 windows 敏感清单）不在本 PR 出场，合并后 main push run 双腿补验——与 AR-10（PR #180）同款验收形态，如实记不冒充）
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。（只动 engine.cpp/engine.hpp/flat_handover.*/两测试册/本 todo；CMake 未动；行为变化/回滚方式/未验边界见 PR #185 描述"行为变化"表与"尚未验证边界"节：CLI 仍走 updater.py 属接线前状态、链接相关断言在造不出链接的机器 SKIP）
 
 ## 合并/删除口径
 
@@ -61,6 +61,8 @@
 建议保留：flat_handover.cpp 文件机械；engine.cpp 事务及退出码映射。
 
 预计净删 110 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+落地实数（PR #185，基线 `21744099`）：engine.cpp +51/-146 净删 95 行（四段 copy_file 副本删净，新增 ThrowFlatFailure 映射与 FlatFullBackup 调用胶水约 30 行）；flat_handover.cpp +54/-24（FlatFailure 类型化包装与恢复链重排，不算删除）。与静态估算同量级，测试新增与接口适配未计入。
 
 ## 既有工作关联
 
