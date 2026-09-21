@@ -1,0 +1,73 @@
+# SV-05 渠道入站账三套重放规则已产生不同状态
+
+- 状态：已实施。PR #184（分支 worktree-agent-ae3ea75893797f5b8），CI run 35597533907 rollup=success（macos-clang／windows-msvc 双腿绿；首跑两个域外 flaky：unit.app.agent_task_transcript、unit.channelfeishu.feishu_adapter，rerun --failed 后绿）。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-05 | A | 中 | src/channel/ingress_store.cpp:238<br>src/channel/ingress_store.cpp:267<br>src/channel/ingress_store.cpp:598<br>src/channel/ingress_store.cpp:619<br>src/channel/ingress_store.cpp:632<br>src/channel/ingress_store.cpp:656<br>src/gateway/status.cpp:190 | ReplayLocked 校验 schema 并只更新已存在 sid；ReadChannelIngressProjection 不验 schema，遇 tr 直接 states[sid] = *to；RecentChain 又按 index_by_sid 是否存在来跳过。 | 只含 {"t":"tr","sid":99,"to":"running"} 的坏账行，在运行恢复中被忽略，Gateway 状态投影却新增一枚 running。缺 schema 或缺合法 event 的 evt 也会计入诊断。状态页、最近来信链、恢复器可对同一本账给出不同结论；新增 journal 字段要维护三处。 | 从 ReplayLocked 提取只读行解析器及 sid 状态折叠核，三个消费者都使用。保留恢复器建立去重索引、状态页计数、最近链裁窗三个投影输出；删除独立 JSON/schema/state 解释分支。坏行策略由一个入口定义。 | 中：坏账兼容口径会收紧。当前完整合法账语义应不变；重复 sid、孤儿 tr 与未知 schema 需先列矩阵，不能为了共用结构把只读诊断改成开写账。 |
+
+### 应合并什么
+
+应合并：schema 校验、evt 解码、tr 目标识别、孤儿 sid 处理。不得合并：持久 writer、内存去重索引、只读汇总计数、最近链展示裁窗。`gateway/automation_store.cpp:433` 与 `gateway/reply_outbox.cpp:279` 已在 Open 中复用各自只读投影，不存在本条这份重复，应保持。
+
+最近链另补 dead-letter 时间属展示职责，可以继续后处理。当前状态投影 `states[sid] = *to` 旁的注释声称孤儿迁移等于没发生，实际 map 下标会建项，正文与注释在此处相反。
+
+预计净删约 70 行，取三段 JSON 行循环的共同验证/分支，扣除中立记录与输出回调。不存在精确净删承诺；实现后以 diff 重算。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：独占 ingress_store.*；可与 SV-07/SV-08 平台适配器任务并行。CLI 状态测试若宿主组正改同文件，合并验收提交前先对齐，不改其产品文案。
+- 允许修改的现有文件：
+
+- `src/channel/ingress_store.cpp`
+- `src/channel/ingress_store.hpp`
+- `tests/unit/channel/test_channel_ingress_store.cpp`
+- `tests/unit/cli/test_channel_status_command.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [x] 同一份合法、半行、坏 JSON、未知 schema、缺 event、孤儿 tr、重复 sid 夹具喂三条读取路径，事件数量及终态一致。（"SV-05 三路重放对账"册：合法 evt+tr 之外追加缺 schema tr、未知 schema tr、缺 event evt、孤儿 tr、dup、未知 t、半写行，喂 Open／ReadChannelIngressProjection／ReadChannelIngressRecentChain 三路，事件数均 1、终态均 routed、state_counts 无凭空第四项；"SV-05 重复 sid evt"册：三路均首笔为准，next_sid 不抬，重落行计坏行；"SV-05 行合同""SV-05 折叠核"两册直钉每形行的解析命运与折叠口径。收敛前同批断言红，收敛后绿）
+- [x] 只读 status/recent 路径不创建目录、不打开追加 writer、不修账。（"SV-05 只读投影：零建目录零写盘不修账"册：投影与链调用前后 journal 原文逐字节相等、ingress/ 文件集合相等；空目录调用不建 ingress/。实现面：两投影仍 is_regular_file 探测 + ifstream 只读，折叠核纯内存）
+- [x] 合法旧账重放的去重 tier、delivery_id、next_sid、reason 保持原值。（"SV-05 合法旧账重放"册：tier1 键 p:qqbot:main:pe-1、tier3 指纹键、FindByDeliveryId("in-1")==1、next_sid==3、last_transition_reason=="walk"，重投同 provider_event_id 仍 Duplicate 不开新账；既有 transition_replay／kill_before_ack／dead_letter／recent_chain 四册保留全绿）
+- [x] 状态页通过真实投影入口验收，而不是另造期待值副本。（"SV-05 状态页真实投影入口"册：pending=queued+running、dead_letter 计数均从 ReadChannelIngressProjection 真入口读出，追加缺 schema 的 running 坏行后计数不膨胀；连带把 tests/unit/gateway/test_gateway_status_sections.cpp 渠道栏夹具的空 event 补成过 FromJsonStrict 的合法最小事件——该册本就经 ProbeStatusSections 走真实投影，其夹具原吃旧投影不验 event 的病灶口径，清单例外缘由附 PR #184 评论）
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。（PR #184 四提交：c0acbd80 钉病灶合同测试、1a123473 收敛实现、f3cb1e15 gateway 夹具连带修复、勾账提交；行为变化五条与回滚方式（revert 收敛提交即回三套独立解释）见提交信息与 PR 描述。尚未验证边界：跨进程无锁并写读到半行为常态，合同同旧容错未动；真实旧账若存在重复 sid evt 行，重开后 OpenResult.skipped_lines 会由 0 变非零（诊断更可见，非数据损坏）；sanitizer 腿（linux-asan/workflow-tsan）按 CI 矩阵 skipped，未验）
+
+## 合并/删除口径
+
+职责：渠道 ingress journal 的行校验及状态折叠。
+
+现有：ChannelIngressStore::ReplayLocked；ReadChannelIngressProjection；ReadChannelIngressRecentChain。
+
+建议保留：从 ReplayLocked 提取的严格行合同与共享 reducer，保留三种投影。
+
+预计净删 70 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+落地重算（PR #184 diff）：产品码 src 两侧 +243/−175（净 +68）——三段行循环并掉省约 170 行，新行合同 ParseIngressJournalLine＋折叠核 IngressLedgerFold 及头文件声明 +243；测试 +203。审查估算的"净删 70"未兑现，差在行合同与折叠核作为公开中立层（供合同单测直钉）自身的体量；不为凑数把合同藏进匿名命名空间，如实记。
+
+## 既有工作关联
+
+- todos/多渠道消息接入与常驻ChannelPlugin设计.todo（ingress 持久状态合同）；todos/QQ机器人接入_Channel桥与SessionV3权限闭环.todo（状态与恢复边界）。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
+
+## 落地记录（SV-05）
+
+- 中立层：`ParseIngressJournalLine`（只读行合同：坏 JSON／缺 schema／版本不识／未知 t／evt 缺字段或事件不过 FromJsonStrict／tr 缺 sid-to 或状态名不识 → Bad；dup 旁注与空行不计坏行）＋ `IngressLedgerFold`（sid 折叠核：evt 建 durable、tr 只改已存在 sid、孤儿 tr 无声跳过、同 sid evt 重落首笔为准计坏行）。均在 ingress_store.hpp/cpp，未新增文件、未动 CMake。
+- 三个消费者换轨：ReplayLocked 建去重索引／账序、Projection 汇总计数（新增 skipped 诊断字段，带默认值不破消费点）、RecentChain 展示裁窗与 dead-letter 时间补齐各归各家。旧公开接口签名未变，gateway/status.cpp、cli/channel_status_command.cpp、app/assistant_channels.cpp 消费点零改动；旧符号无残留。
+- 行为变化（坏账兼容口径收紧，合法账语义不变）：状态页／最近链此后验 schema；孤儿 tr 在状态页不再凭空建项（修掉 map 下标建项与注释相反之病）；重复 sid 三处统一首笔为准；evt 行 dedupe/tier 补类型校验（旧裸 get 遇坏类型抛未捕获异常）；tr 命中未带 reason 时最近链与恢复器同口径置空。

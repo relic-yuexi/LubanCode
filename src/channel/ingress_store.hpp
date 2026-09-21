@@ -198,6 +198,72 @@ private:
     std::unordered_map<std::string, std::int64_t> delivery_ids_;    // delivery_id -> sid
 };
 
+// ---------------------------------------------------------------------------
+// SV-05:journal 行合同与 sid 折叠核
+// ---------------------------------------------------------------------------
+
+// 一行 ingress journal 的统一解析结果。此前 ReplayLocked /
+// ReadChannelIngressProjection / ReadChannelIngressRecentChain 三处各写一套
+// JSON/schema/state 分支,同一本坏账在三处得出不同结论(缺 schema 的 tr
+// 在状态页凭空建项、未知 schema 的 tr 改写合法 sid 终态、缺 event 的 evt
+// 计入诊断、重复 sid 口径不一)。自此行合同只此一份:
+//   - 空 行:崩溃尾部没写完换行,Kind::Empty,不计坏行。
+//   - 坏 JSON、非 object、缺 schema/schema 非整数/版本不识、缺 t/t 非串、
+//     未知 t:Kind::Bad。
+//   - evt:缺 sid/dedupe/tier/event、sid/tier 非整数、dedupe 非串、event
+//     不是 object 或解码不过 FromJsonStrict:Kind::Bad。
+//   - tr:缺 sid/to、sid 非整数、to 非串或状态名不识:Kind::Bad。
+//   - dup:重复投递旁注,Kind::Dup(不重建状态,不计坏行)。
+struct IngressJournalLine {
+    enum class Kind { Empty, Evt, Tr, Dup, Bad };
+    Kind kind = Kind::Empty;
+    std::int64_t sid = 0;       // Evt/Tr/Dup
+    // Evt:
+    std::string dedupe;
+    int tier = 0;
+    std::string parts_sha256;   // 旧账可缺
+    ChannelInboundEvent event;  // FromJsonStrict 已验
+    // Tr:
+    IngressEventState to = IngressEventState::Durable;
+    std::string reason;         // 可缺
+};
+
+// 解析一行 journal 文本(不含换行)。不抛:一切解码错误落 Kind::Bad。
+IngressJournalLine ParseIngressJournalLine(const std::string& text_line);
+
+// sid 状态折叠核:evt 建项(durable 起)、tr 只改已存在 sid、孤儿 tr
+// (sid 无对应 evt——崩溃时 evt 半写没落成,后面的 tr 指空号)无声跳过
+// 不计坏行、同 sid evt 重落首笔为准(账序破裂,计坏行)。恢复器
+// (ChannelIngressStore::Open)、状态页(ReadChannelIngressProjection)、
+// 最近链(ReadChannelIngressRecentChain)都经它重放,事件数量与终态天然
+// 一致;去重索引、汇总计数、展示裁窗各归各家,不在此。
+class IngressLedgerFold {
+public:
+    struct Entry {
+        std::int64_t sid = 0;
+        std::string dedupe;
+        int tier = 0;
+        std::string parts_sha256;
+        ChannelInboundEvent event;
+        IngressEventState state = IngressEventState::Durable;
+        std::string last_reason;  // 最近一次 tr 的 reason(可空)
+    };
+
+    // 值语义:行视图整体移入,evt 的完整事件不拷贝。
+    void Feed(IngressJournalLine line);
+
+    // 折叠终态:合法 evt 按账序,每枚一条(重复 sid 已并掉)。
+    const std::vector<Entry>& entries() const { return entries_; }
+    int skipped_lines() const { return skipped_; }
+    // 折叠后按 sid 查(最近链的 dead-letter 后处理用);无则 nullptr。
+    const Entry* FindBySid(std::int64_t sid) const;
+
+private:
+    std::vector<Entry> entries_;
+    std::unordered_map<std::int64_t, std::size_t> index_by_sid_;
+    int skipped_ = 0;
+};
+
 // 只读投影(QQ 接入单 Q2:gateway status 渠道栏用):从 account_dir 下的
 // ingress journal 重放状态计数,零建目录零写盘、不持写柄——别的进程持锁
 // 写账时读到半行属常态,跳过即可。文件不存在给空投影。
@@ -206,6 +272,7 @@ struct ChannelIngressProjection {
     std::size_t events = 0;                  // evt 行数(durable 过的事件)
     std::map<std::string, std::size_t> state_counts;  // 状态名 -> 数量
     std::size_t dead_letter = 0;             // dead-letter.jsonl 行数(在才有)
+    std::size_t skipped = 0;                 // 重放跳过的坏行数(SV-05;诊断用)
 };
 ChannelIngressProjection ReadChannelIngressProjection(const std::filesystem::path& account_dir);
 
