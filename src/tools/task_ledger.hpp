@@ -682,7 +682,11 @@ public:
     // 看门狗式强收(Failed/NoMeaningfulProgress):与 ForceFinalizeWallClock
     // 同一骨架,部分结果照旧留在台账(CheckpointFallback 带得走);终态
     // 翻页与投父邮箱同锁并做(强收终态缝单,同上)。
-    void ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task, int stale_rounds);
+    // AR-06(锁外读修正):不再接调用方传入的 stale_rounds——旧签名逼着
+    // 监督器在台账锁外读 TaskRecord::progress,与任务线程的轮次提交(锁内
+    // 自增同一枚 int)构成数据竞争。空转轮数在本口自己的台账锁事务内现读,
+    // 读值与终态提交同锁同刻。
+    void ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task);
     // 监督通知(去重由监督器按 task+epoch+reason 把):主会话空闲拍取走。
     void PushSupervisorNotice(std::string notice);
     // 去重版(单子 §十:同一 task_id + health_epoch + reason 只弹一次):

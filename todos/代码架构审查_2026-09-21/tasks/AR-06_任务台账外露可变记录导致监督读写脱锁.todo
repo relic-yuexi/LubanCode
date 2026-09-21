@@ -1,0 +1,47 @@
+# AR-06 任务台账外露可变记录导致监督读写脱锁
+
+- 状态：待修；本次只审查，未改源码。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第3批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-06 | C | 高 | src/tools/task_ledger.hpp:406；src/tools/task_ledger.hpp:429；src/tools/task_ledger.hpp:482；src/runtime/agent_supervisor.cpp:216；src/tools/task_ledger.cpp:1430；src/tools/task_ledger.cpp:1436；src/tools/task_ledger.cpp:1869 | `TaskRecord::progress`公开；`TaskLedger::mutex`公开；监督器锁外取 `task->progress.stale_rounds`，任务线程锁内自增。 | 台账将内部记录与锁纪律交给调用方。监督器已出现实际例外：宽限到期时先锁外取stale_rounds，再调用会加锁的ForceFinalizeNoProgress。正在收尾的模型回调仍可在另一线程更新该非原子int；数据竞争直接由这条访问链产生。修改进展模型还需遍查AgentTool与Supervisor手动锁段。 | 先把强收所需读值搬进TaskLedger同一事务，接口不再接外部读取的stale_rounds；再收紧TaskRecord为私有状态或受限句柄，按事件提供记录方法与不可变快照。保留已有原子取消旗的信号用途，逐项迁移AgentTool直改快照口。 | 影响子代理事件、监督和任务面板。不可把整个snapshot粗换atomic；不能把外层mutex锁再套进已有加锁API造成递归死锁。 |
+
+## 证据与边界
+
+本条不把只写一次的snapshot.id/title锁外读取列为竞争；有证据的可变字段仅stale_rounds，写点RecordMeaningfulProgressLocked:1416与RecordAssistantMessage:1436，读点FireNoProgressGrace:216。公共Locked接口本身有合同，缺陷在跨模块依赖调用方贯彻合同且当前已有漏口。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/tools/task_ledger.hpp`；`src/tools/task_ledger.cpp`；`src/runtime/agent_supervisor.cpp`；`src/tools/agent_tool.cpp`。
+- 前置：AR-01、AR-02（以全局排期复核为准）。
+- 不得并行共改：AR-01、AR-02；同文件先后落单，或约定具体函数所有权。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 先把强收所需读值搬进TaskLedger同一事务，接口不再接外部读取的stale_rounds；再收紧TaskRecord为私有状态或受限句柄，按事件提供记录方法与不可变快照。保留已有原子取消旗的信号用途，逐项迁移AgentTool直改快照口。
+3. 小批提交，按下列门槛验收。
+
+- [ ] ForceFinalizeNoProgress读取stale_rounds与终态提交共用台账锁。
+- [ ] 栅栏交错消息提交/宽限强收通过TSan。
+- [ ] AgentTool迁移每个写口时保住notify与投父邮箱顺序。
+- [ ] 面板快照内容和修订号不丢。
+- [ ] GitHub CI。
+
+## 删除量与旧账
+
+本项不以删行计收益；预计净删除 0 行。
+
+当前 todos 未找到直接承接此缺口的专单。
+## 全局排期复核
+
+- 前置／文件接手次序：AR-01、AR-02
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-01（src/tools/agent_tool.cpp）；AR-02（src/runtime/agent_supervisor.cpp）。
