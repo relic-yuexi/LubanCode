@@ -586,6 +586,16 @@ add_library(lubancode_engine STATIC
   src/memory/project_memory.cpp
   src/memory/frontmatter.cpp
   src/memory/memory_tool.cpp
+  # SV-09 ProjectMemory 按状态归属拆分:轻合同/共用小件/目录锁/召回引擎/
+  # 主题存储/候选审阅箱/写队列与 worker 监督/编辑器适配(门面只编排)。
+  src/memory/types.cpp
+  src/memory/internal.cpp
+  src/memory/owner_lock.cpp
+  src/memory/recall_engine.cpp
+  src/memory/topic_store.cpp
+  src/memory/candidate_store.cpp
+  src/memory/worker_queue.cpp
+  src/memory/editor_adapter.cpp
   # 存储 v2 P0-3:memory 落账口在 Trajectory 账上的桥(召回快照+写入因果边)。
   src/app/memory_ledger_bridge.cpp
   src/mcp/transport.cpp

@@ -36,7 +36,7 @@
 
 #include "agent/tool_trace.hpp"
 #include "evolution/observation.hpp"
-#include "memory/project_memory.hpp"
+#include "memory/types.hpp"  // SV-09:只要 MemoryEntry 轻合同,不拖 ProjectMemory 全接口
 #include "sessions/goal_session.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "workflow/journal.hpp"

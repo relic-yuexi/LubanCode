@@ -1,0 +1,70 @@
+# SV-09 ProjectMemory 将主题数据、召回、作业监督与交互管理绑在一只类
+
+- 状态：待实施，仅审查与方案。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：3。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-09 | C | 中 | src/memory/project_memory.hpp:259<br>src/memory/project_memory.hpp:484<br>src/memory/project_memory.hpp:735<br>src/memory/project_memory.cpp:477<br>src/memory/project_memory.cpp:2815<br>src/memory/project_memory.cpp:3930<br>src/memory/project_memory.cpp:4233<br>src/memory/frontmatter.hpp:13 | 同一 ProjectMemory 暴露 BuildTurnContext、EnsureWorkerRunning、ListCandidates、EditTopicInEditor、RunMigration；frontmatter.hpp 仅为 MemoryEntry 仍 include 整份 project_memory.hpp。 | 召回词法修改、worker 生命周期、编辑器启动、候选审批与 schema 迁移共享实现文件及大头。成员已分成 retrieval_hints_、supervisor_、tracked_writes_、accounting_/receipt sink 等几组；调用方即便只需 MemoryEntry 也取得整套运行接口。静态 include 闭包传递触及 40 份 src .cpp，改主题类型与改运行编排互相放大重编译及回归范围。 | 先拆 MemoryEntry/SaveRequest/Trace 等轻合同头；将 RecallEngine、TopicStore、CandidateStore、MemoryWriteQueue/WorkerSupervisor、管理命令适配分开。保留 ProjectMemory 薄门面维持现有调用，逐个成员群迁移；禁止拆出多个写真源或多份授权规则。 | 中：这是边界拆分，不是另起记忆实现。迁移时最易丢的是 user/project 授权、source_session、lifecycle_root 冻结、队列回执。SV-01 修锁后再搬相关代码，否则补丁交错难审。 |
+
+### 先划状态归属
+
+| 建议边界 | 状态/职责 | 现有证据 |
+| --- | --- | --- |
+| memory/types | 主题、保存请求、回执、召回结果 | project_memory.hpp:259 起 MemoryEntry；frontmatter 只需此合同 |
+| RecallEngine | 词法、索引装载、查询提示、排序、注入材料 | cpp:1049 起归一词法；2815 起召回 |
+| TopicStore | 主题读写、frontmatter、fingerprint、索引、迁移 | cpp:702 起 StoredEntry；4267 起迁移 |
+| CandidateStore | 审阅箱、拒绝主题去重、accept 入队 | cpp:3924 起候选路径与列表 |
+| MemoryWriteQueue / WorkerSupervisor | pending、锁、子进程、回执追踪 | cpp:477 起监督器；4464 起 worker 主循环 |
+| 外部管理适配 | 编辑器选择及进程启动 | cpp:4219 起 PickEditorProgram |
+
+只把“记忆管理”写成一句话并不能证明内聚。此处依据相互独立成员群与消费者头依赖列出边界，不据文件长短断言 bug。删行估算为 0：绝大部分应搬移，不能把搬到新文件算删掉。
+
+静态 include 计数只扫 src 的引号 include，未展开条件/PCH/生成头；不声称测得构建加速。
+
+## 交接边界
+
+- 前置：SV-01（以全局排期复核为准）。
+- 并行与禁止共改：SV-01 合入后独占 project_memory.*。不要与记忆功能迭代同时搬文件；其他模块 SV 项可并行。新轻合同头先独立提交，后续拆分保持同一负责人串行推进。
+- 允许修改的现有文件：
+
+- `src/memory/project_memory.hpp`
+- `src/memory/project_memory.cpp`
+- `src/memory/frontmatter.hpp`
+- `src/memory/frontmatter.cpp`
+- `src/memory/memory_tool.hpp`
+- `src/evolution/adapters.hpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [ ] 只需要 MemoryEntry 的 frontmatter/evolution 头能引用轻合同，不再 include ProjectMemory 全接口。
+- [ ] 每块只有一份身份与权限输入，读写层不自行重新 ResolveWorkspaceIdentity。
+- [ ] 原 ProjectMemory 门面结果在既有 memory、workspace、V3 recall、candidate、worker 测试中保持一致。
+- [ ] 锁与 worker 语义以 SV-01 为准；enqueue、launch、committed 三种状态不可重新混写。
+- [ ] 每次迁移一块，远端 CI 通过再移下一块；最终门面不再直接启动编辑器或管理词法分词内部状态。
+- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+
+## 合并/删除口径
+
+本条不是重复代码合并项；预计可删除行数记 0。职责拆分或修正合同带来的搬移，不当成删除收益。
+
+## 既有工作关联
+
+- todos/记忆自动入库误报与Windows后台Worker句柄早释修复.todo；todos/记忆写入调度_显式保存门控批处理与成本账.todo；todos/智能体记忆效果_个性化适配续接快照与在线评测.todo。
+## 全局排期复核
+
+- 前置／文件接手次序：SV-01
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：SV-01（src/memory/project_memory.cpp, src/memory/project_memory.hpp）。
