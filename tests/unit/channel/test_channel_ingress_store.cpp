@@ -308,8 +308,9 @@ TEST_CASE("SV-05 三路重放对账:坏账行在三处同命运") {
     CHECK(chain.entries[0].state == "routed");
     CHECK(chain.entries[0].reason == "route_ok");
     // 恢复器的坏行计数:缺 schema tr、未知 schema tr、缺 event evt、未知 t、
-    // 半写共 5 行;孤儿 tr 与 dup 不计。
+    // 半写共 5 行;孤儿 tr 与 dup 不计。状态页同一份计数。
     CHECK(result.skipped_lines == 5);
+    CHECK(projection.skipped == 5);
 }
 
 TEST_CASE("SV-05 重复 sid evt:三路首笔为准,重落行计坏行") {
@@ -342,6 +343,7 @@ TEST_CASE("SV-05 重复 sid evt:三路首笔为准,重落行计坏行") {
     }
     const auto projection = ReadChannelIngressProjection(dir);
     CHECK(projection.events == 1);  // 收敛前状态页计 2
+    CHECK(projection.skipped == 1);
     const auto chain = ReadChannelIngressRecentChain(dir, 8);
     REQUIRE(chain.entries.size() == 1);
     CHECK(chain.entries[0].sid == 1);
@@ -457,4 +459,203 @@ TEST_CASE("recent chain:重放最终状态/原因/死信时间,sid 降序,limit 
     const auto empty = ReadChannelIngressRecentChain(empty_dir, 8);
     CHECK_FALSE(empty.ledger_present);
     CHECK(empty.entries.empty());
+}
+
+// SV-05:行合同单测——每一形行的命运只由 ParseIngressJournalLine 一处定义。
+TEST_CASE("SV-05 行合同:各形行的解析命运") {
+    using Kind = IngressJournalLine::Kind;
+    // 空行(崩溃尾部没写完换行):不算坏行。
+    CHECK(ParseIngressJournalLine("").kind == Kind::Empty);
+    // 半写/坏 JSON。
+    CHECK(ParseIngressJournalLine("{\"schema\":1,\"t\":\"evt\",\"sid\":7,\"broken").kind == Kind::Bad);
+    // 缺 schema / 未知 schema / schema 非整数。
+    CHECK(ParseIngressJournalLine("{\"t\":\"tr\",\"sid\":1,\"to\":\"running\"}").kind == Kind::Bad);
+    CHECK(ParseIngressJournalLine("{\"schema\":2,\"t\":\"dup\",\"sid\":1}").kind == Kind::Bad);
+    CHECK(ParseIngressJournalLine("{\"schema\":\"1\",\"t\":\"dup\",\"sid\":1}").kind == Kind::Bad);
+    // 未知 t。
+    CHECK(ParseIngressJournalLine("{\"schema\":1,\"t\":\"weird\",\"sid\":1}").kind == Kind::Bad);
+    // dup 旁注:不计状态不计坏行。
+    const auto dup = ParseIngressJournalLine(
+        "{\"schema\":1,\"t\":\"dup\",\"sid\":3,\"reason\":\"delivery_replayed\"}");
+    CHECK(dup.kind == Kind::Dup);
+    CHECK(dup.sid == 3);
+    // tr:缺 to / to 非串 / 状态名不识 → Bad;合法 → Tr。
+    CHECK(ParseIngressJournalLine("{\"schema\":1,\"t\":\"tr\",\"sid\":1}").kind == Kind::Bad);
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"tr\",\"sid\":1,\"to\":123}").kind == Kind::Bad);
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"tr\",\"sid\":1,\"to\":\"nope\"}").kind == Kind::Bad);
+    const auto tr = ParseIngressJournalLine(
+        "{\"schema\":1,\"t\":\"tr\",\"sid\":2,\"to\":\"running\",\"reason\":\"exec\"}");
+    CHECK(tr.kind == Kind::Tr);
+    CHECK(tr.sid == 2);
+    CHECK(tr.to == IngressEventState::Running);
+    CHECK(tr.reason == "exec");
+    const auto tr_no_reason = ParseIngressJournalLine(
+        "{\"schema\":1,\"t\":\"tr\",\"sid\":2,\"to\":\"queued\"}");
+    CHECK(tr_no_reason.kind == Kind::Tr);
+    CHECK(tr_no_reason.reason.empty());
+    // evt:缺字段(dedupe/tier/event)→ Bad;dedupe 非串、tier 非整数 → Bad。
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"evt\",\"sid\":6,\"dedupe\":\"k\",\"tier\":1}").kind == Kind::Bad);
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"evt\",\"sid\":6,\"dedupe\":1,\"tier\":1,\"event\":{}}").kind ==
+          Kind::Bad);
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"evt\",\"sid\":6,\"dedupe\":\"k\",\"tier\":\"1\",\"event\":{}}").kind ==
+          Kind::Bad);
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"evt\",\"sid\":\"6\",\"dedupe\":\"k\",\"tier\":1,\"event\":{}}").kind ==
+          Kind::Bad);
+    // 合法 evt 行(产品写出的形状)→ Evt:经 store 落一枚再读回第一行。
+    const auto dir = MakeAccountDir("sv05_parse_evt");
+    {
+        auto store = OpenStore(dir);
+        REQUIRE(store->Ingest(MakeEvent("in-1", "pe-1", "m-1")).has_value());
+    }
+    std::ifstream journal(dir / "ingress" / "journal.jsonl");
+    std::string first_line;
+    REQUIRE(std::getline(journal, first_line));
+    const auto evt = ParseIngressJournalLine(first_line);
+    CHECK(evt.kind == Kind::Evt);
+    CHECK(evt.sid == 1);
+    CHECK(evt.tier == 1);
+    CHECK(evt.dedupe == "p:qqbot:main:pe-1");
+    CHECK(evt.event.delivery_id == "in-1");
+    CHECK_FALSE(evt.parts_sha256.empty());
+    // 事件不合法(evt 行的 event 解码不过 FromJsonStrict)→ Bad。
+    CHECK(ParseIngressJournalLine(
+              "{\"schema\":1,\"t\":\"evt\",\"sid\":6,\"dedupe\":\"k\",\"tier\":1,"
+              "\"event\":{\"schema\":1}}").kind == Kind::Bad);
+}
+
+// SV-05:折叠核单测——evt 建项、tr 只改已存在 sid、孤儿 tr 无声跳过、
+// 同 sid evt 重落首笔为准(计坏行)。
+TEST_CASE("SV-05 折叠核:evt/tr/孤儿/重复的统一口径") {
+    IngressLedgerFold fold;
+    auto tr_line = [](std::int64_t sid, IngressEventState to, const char* reason = "") {
+        IngressJournalLine line;
+        line.kind = IngressJournalLine::Kind::Tr;
+        line.sid = sid;
+        line.to = to;
+        line.reason = reason;
+        return line;
+    };
+    // 孤儿 tr:evt 没落成,迁移行指空号——无声跳过,不计坏行。
+    fold.Feed(tr_line(9, IngressEventState::Running));
+    CHECK(fold.entries().empty());
+    CHECK(fold.skipped_lines() == 0);
+
+    IngressJournalLine evt;
+    evt.kind = IngressJournalLine::Kind::Evt;
+    evt.sid = 1;
+    evt.tier = 1;
+    evt.dedupe = "p:qqbot:main:pe-1";
+    fold.Feed(evt);
+    fold.Feed(tr_line(1, IngressEventState::Queued, "queued"));
+    // 同 sid 重落:首笔为准(去重键保持首笔),这行计坏行。
+    IngressJournalLine evt_dup;
+    evt_dup.kind = IngressJournalLine::Kind::Evt;
+    evt_dup.sid = 1;
+    evt_dup.tier = 3;
+    evt_dup.dedupe = "f:other";
+    fold.Feed(evt_dup);
+    // dup 与空行:什么都不做。
+    IngressJournalLine dup;
+    dup.kind = IngressJournalLine::Kind::Dup;
+    dup.sid = 1;
+    fold.Feed(dup);
+    fold.Feed(IngressJournalLine{});
+    // 坏行:计数。
+    IngressJournalLine bad;
+    bad.kind = IngressJournalLine::Kind::Bad;
+    fold.Feed(bad);
+
+    REQUIRE(fold.entries().size() == 1);
+    CHECK(fold.entries()[0].sid == 1);
+    CHECK(fold.entries()[0].state == IngressEventState::Queued);
+    CHECK(fold.entries()[0].dedupe == "p:qqbot:main:pe-1");
+    CHECK(fold.entries()[0].last_reason == "queued");
+    CHECK(fold.skipped_lines() == 2);  // 重复 sid + 坏行
+    CHECK(fold.FindBySid(1) == &fold.entries()[0]);
+    CHECK(fold.FindBySid(9) == nullptr);
+}
+
+// SV-05:只读投影零建目录、零打开写柄、不修账——读前读后账原文与文件
+// 集合一字不差。
+TEST_CASE("SV-05 只读投影:零建目录零写盘不修账") {
+    const auto dir = MakeAccountDir("sv05_readonly");
+    {
+        auto store = OpenStore(dir);
+        const auto first = store->Ingest(MakeEvent("in-1", "pe-1", "m-1"));
+        REQUIRE(first.has_value());
+        REQUIRE_FALSE(store->Transition(first->sid, IngressEventState::Rejected, "dm_closed").has_value());
+    }
+    const auto journal = dir / "ingress" / "journal.jsonl";
+    const auto read_file = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto list_files = [](const std::filesystem::path& ingress_dir) {
+        std::vector<std::string> names;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(ingress_dir, ec)) {
+            names.push_back(entry.path().filename().generic_string());
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    };
+    const std::string journal_before = read_file(journal);
+    const auto files_before = list_files(dir / "ingress");
+
+    const auto projection = ReadChannelIngressProjection(dir);
+    const auto chain = ReadChannelIngressRecentChain(dir, 8);
+    CHECK(projection.events == 1);
+    CHECK(projection.ledger_present);
+    REQUIRE(chain.entries.size() == 1);
+
+    CHECK(read_file(journal) == journal_before);
+    CHECK(list_files(dir / "ingress") == files_before);
+    // 没账的目录:空投影,不建 ingress/。
+    const auto empty_dir = MakeAccountDir("sv05_readonly_empty");
+    const auto empty_projection = ReadChannelIngressProjection(empty_dir);
+    CHECK_FALSE(empty_projection.ledger_present);
+    CHECK(empty_projection.events == 0);
+    const auto empty_chain = ReadChannelIngressRecentChain(empty_dir, 8);
+    CHECK_FALSE(empty_chain.ledger_present);
+    CHECK(empty_chain.entries.empty());
+    CHECK_FALSE(std::filesystem::exists(empty_dir / "ingress"));
+}
+
+// SV-05:合法旧账重放,去重 tier、delivery_id、next_sid、reason 原值保持。
+TEST_CASE("SV-05 合法旧账重放:tier/delivery_id/next_sid/reason 保持原值") {
+    const auto dir = MakeAccountDir("sv05_legacy_replay");
+    {
+        auto store = OpenStore(dir);
+        const auto first = store->Ingest(MakeEvent("in-1", "pe-1", "m-1"));
+        REQUIRE(first.has_value());
+        for (const auto step : {IngressEventState::Authorized, IngressEventState::Routed,
+                                IngressEventState::Queued}) {
+            REQUIRE_FALSE(store->Transition(first->sid, step, "walk").has_value());
+        }
+        REQUIRE(store->Ingest(MakeEvent("in-2", "", "")).has_value());  // tier 3 指纹
+    }
+    auto store = OpenStore(dir);
+    const auto records = store->Records();
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].key.tier == 1);
+    CHECK(records[0].key.key == "p:qqbot:main:pe-1");
+    CHECK(records[0].event.delivery_id == "in-1");
+    CHECK(records[0].state == IngressEventState::Queued);
+    CHECK(records[0].last_transition_reason == "walk");
+    CHECK(records[1].key.tier == 3);
+    CHECK(store->FindByDeliveryId("in-1").has_value());
+    CHECK(store->FindByDeliveryId("in-1").value() == 1);
+    CHECK(store->next_sid() == 3);
+    // 去重索引照旧:重投同 provider_event_id 仍 duplicate,不开新账。
+    const auto replay = store->Ingest(MakeEvent("in-9", "pe-1", "m-1"));
+    REQUIRE(replay.has_value());
+    CHECK(replay->status == ChannelIngressStore::IngestOutcome::Status::Duplicate);
+    CHECK(store->Records().size() == 2);
+    CHECK(store->next_sid() == 3);
 }

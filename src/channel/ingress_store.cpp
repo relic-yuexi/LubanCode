@@ -185,6 +185,129 @@ nlohmann::json BuildDuplicateLine(std::int64_t sid, const std::string& reason) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// SV-05:行合同 + sid 折叠核(三处重放共用)
+// ---------------------------------------------------------------------------
+
+IngressJournalLine ParseIngressJournalLine(const std::string& text_line) {
+    IngressJournalLine view;
+    if (text_line.empty()) {
+        return view;  // 尾部空行(最后崩溃前没写完换行)不算坏行
+    }
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(text_line);
+    } catch (const nlohmann::json::exception&) {
+        // 崩溃半写行:容错跳过,不崩宿主。文件还能继续追加(append 模式
+        // 写在坏行之后;重建索引靠 evt/tr 行的 sid 对账,坏行等于没发生)。
+        view.kind = IngressJournalLine::Kind::Bad;
+        return view;
+    }
+    if (!parsed.is_object() || !parsed.contains("schema") || !parsed.contains("t") ||
+        !parsed["schema"].is_number_integer() ||
+        parsed["schema"].get<std::int64_t>() != kIngressJournalSchema ||
+        !parsed["t"].is_string()) {
+        view.kind = IngressJournalLine::Kind::Bad;
+        return view;
+    }
+    const std::string type = parsed["t"].get<std::string>();
+    const bool sid_ok = parsed.contains("sid") && parsed["sid"].is_number_integer();
+    if (type == "dup") {
+        // 重复投递旁注:不重建状态,不计坏行(账上可 grep,内存不建)。
+        if (sid_ok) {
+            view.sid = parsed["sid"].get<std::int64_t>();
+        }
+        view.kind = IngressJournalLine::Kind::Dup;
+        return view;
+    }
+    if (type == "evt") {
+        if (!sid_ok || !parsed.contains("dedupe") || !parsed.contains("tier") ||
+            !parsed.contains("event") || !parsed["dedupe"].is_string() ||
+            !parsed["tier"].is_number_integer() || !parsed["event"].is_object()) {
+            view.kind = IngressJournalLine::Kind::Bad;
+            return view;
+        }
+        std::string event_error;
+        auto event = ChannelInboundEvent::FromJsonStrict(parsed["event"], &event_error);
+        if (!event.has_value()) {
+            view.kind = IngressJournalLine::Kind::Bad;
+            return view;
+        }
+        view.kind = IngressJournalLine::Kind::Evt;
+        view.sid = parsed["sid"].get<std::int64_t>();
+        view.dedupe = parsed["dedupe"].get<std::string>();
+        view.tier = static_cast<int>(parsed["tier"].get<std::int64_t>());
+        view.parts_sha256 =
+            parsed.contains("parts_sha256") && parsed["parts_sha256"].is_string()
+                ? parsed["parts_sha256"].get<std::string>()
+                : std::string();
+        view.event = std::move(*event);
+        return view;
+    }
+    if (type == "tr") {
+        if (!sid_ok || !parsed.contains("to") || !parsed["to"].is_string()) {
+            view.kind = IngressJournalLine::Kind::Bad;
+            return view;
+        }
+        const auto to = IngressEventStateFromName(parsed["to"].get<std::string>());
+        if (!to.has_value()) {
+            view.kind = IngressJournalLine::Kind::Bad;
+            return view;
+        }
+        view.kind = IngressJournalLine::Kind::Tr;
+        view.sid = parsed["sid"].get<std::int64_t>();
+        view.to = *to;
+        view.reason = parsed.contains("reason") && parsed["reason"].is_string()
+                          ? parsed["reason"].get<std::string>()
+                          : std::string();
+        return view;
+    }
+    view.kind = IngressJournalLine::Kind::Bad;  // 未知 t
+    return view;
+}
+
+void IngressLedgerFold::Feed(IngressJournalLine line) {
+    switch (line.kind) {
+        case IngressJournalLine::Kind::Empty:
+        case IngressJournalLine::Kind::Dup:
+            return;
+        case IngressJournalLine::Kind::Bad:
+            ++skipped_;
+            return;
+        case IngressJournalLine::Kind::Evt: {
+            if (index_by_sid_.count(line.sid) > 0) {
+                // 同 sid evt 重落:首笔为准,这行算账序破裂的坏行。
+                ++skipped_;
+                return;
+            }
+            Entry entry;
+            entry.sid = line.sid;
+            entry.dedupe = std::move(line.dedupe);
+            entry.tier = line.tier;
+            entry.parts_sha256 = std::move(line.parts_sha256);
+            entry.event = std::move(line.event);
+            index_by_sid_[line.sid] = entries_.size();
+            entries_.push_back(std::move(entry));
+            return;
+        }
+        case IngressJournalLine::Kind::Tr: {
+            const auto found = index_by_sid_.find(line.sid);
+            if (found == index_by_sid_.end()) {
+                return;  // 孤儿 tr:evt 没落成(半写),迁移行指空号,跳过
+            }
+            Entry& entry = entries_[found->second];
+            entry.state = line.to;
+            entry.last_reason = std::move(line.reason);
+            return;
+        }
+    }
+}
+
+const IngressLedgerFold::Entry* IngressLedgerFold::FindBySid(std::int64_t sid) const {
+    const auto found = index_by_sid_.find(sid);
+    return found == index_by_sid_.end() ? nullptr : &entries_[found->second];
+}
+
 std::unique_ptr<ChannelIngressStore> ChannelIngressStore::Open(
     const std::filesystem::path& account_dir, std::string channel_id, std::string account_id,
     OpenResult* result) {
@@ -246,94 +369,30 @@ void ChannelIngressStore::ReplayLocked() {
         last_error_ = "journal 打不开: " + platform::PathToUtf8(journal_path_);
         return;
     }
-
-    // 记录在账的 sid 集合:tr 行可能指到 evt 行之前(不可能——evt 先落);
-    // 但半行 evt 之后的 tr 行仍要认(事件没落成,迁移行指空号,跳过)。
+    // 行合同与 sid 折叠走共享核(SV-05):与状态页、最近链对同一本账得出
+    // 同一份事件数与终态。恢复器在此之上重建自己的去重索引与账序。
+    IngressLedgerFold fold;
     std::string text_line;
-    int skipped = 0;
     while (std::getline(stream, text_line)) {
-        if (text_line.empty()) {
-            continue;  // 尾部空行(最后崩溃前没写完换行)不算坏行
-        }
-        nlohmann::json parsed;
-        try {
-            parsed = nlohmann::json::parse(text_line);
-        } catch (const nlohmann::json::exception&) {
-            // 崩溃半写行:容错跳过,不崩宿主。文件还能继续追加(append 模式
-            // 写在坏行之后;重建索引靠 evt/tr 行的 sid 对账,坏行等于没发生)。
-            ++skipped;
-            continue;
-        }
-        if (!parsed.is_object() || !parsed.contains("schema") || !parsed.contains("t") ||
-            !parsed["schema"].is_number_integer() ||
-            parsed["schema"].get<int>() != kIngressJournalSchema ||
-            !parsed["t"].is_string()) {
-            ++skipped;
-            continue;
-        }
-        const std::string type = parsed["t"].get<std::string>();
-        if (type == "dup") {
-            // 重复投递旁注:不重建状态,直接跳过(账上可 grep,内存不建)。
-            continue;
-        }
-        if (type == "evt") {
-            if (!parsed.contains("sid") || !parsed.contains("dedupe") ||
-                !parsed.contains("tier") || !parsed.contains("event") ||
-                !parsed["sid"].is_number_integer()) {
-                ++skipped;
-                continue;
-            }
-            std::string event_error;
-            auto event = ChannelInboundEvent::FromJsonStrict(parsed["event"], &event_error);
-            if (!event.has_value()) {
-                ++skipped;
-                continue;
-            }
-            Record record;
-            record.sid = parsed["sid"].get<std::int64_t>();
-            record.key.key = parsed["dedupe"].get<std::string>();
-            record.key.tier = parsed["tier"].get<int>();
-            record.parts_sha256 =
-                parsed.contains("parts_sha256") && parsed["parts_sha256"].is_string()
-                    ? parsed["parts_sha256"].get<std::string>()
-                    : std::string();
-            record.event = std::move(*event);
-            record.state = IngressEventState::Durable;
-            if (record.key.tier == 1 || record.key.tier == 2) {
-                permanent_keys_.emplace(record.key.key, record.sid);
-            }
-            delivery_ids_.emplace(record.event.delivery_id, record.sid);
-            next_sid_ = std::max(next_sid_, record.sid + 1);
-            records_.push_back(std::move(record));
-        } else if (type == "tr") {
-            if (!parsed.contains("sid") || !parsed.contains("to") || !parsed["sid"].is_number_integer() ||
-                !parsed["to"].is_string()) {
-                ++skipped;
-                continue;
-            }
-            const std::int64_t sid = parsed["sid"].get<std::int64_t>();
-            const auto to = IngressEventStateFromName(parsed["to"].get<std::string>());
-            if (!to.has_value()) {
-                ++skipped;
-                continue;
-            }
-            // 找到账上对应记录(线性账 sid 升序,倒着找最快;replay 中段
-            // 通常就是最后一条)。
-            for (auto it = records_.rbegin(); it != records_.rend(); ++it) {
-                if (it->sid == sid) {
-                    it->state = *to;
-                    it->last_transition_reason =
-                        parsed.contains("reason") && parsed["reason"].is_string()
-                            ? parsed["reason"].get<std::string>()
-                            : std::string();
-                    break;
-                }
-            }
-        } else {
-            ++skipped;
-        }
+        fold.Feed(ParseIngressJournalLine(text_line));
     }
-    replayed_bad_lines_ = skipped;
+    for (const auto& entry : fold.entries()) {
+        Record record;
+        record.sid = entry.sid;
+        record.key.key = entry.dedupe;
+        record.key.tier = entry.tier;
+        record.parts_sha256 = entry.parts_sha256;
+        record.event = entry.event;
+        record.state = entry.state;
+        record.last_transition_reason = entry.last_reason;
+        if (record.key.tier == 1 || record.key.tier == 2) {
+            permanent_keys_.emplace(record.key.key, record.sid);
+        }
+        delivery_ids_.emplace(record.event.delivery_id, record.sid);
+        next_sid_ = std::max(next_sid_, record.sid + 1);
+        records_.push_back(std::move(record));
+    }
+    replayed_bad_lines_ = fold.skipped_lines();
 }
 
 std::optional<std::string> ChannelIngressStore::AppendLine(const std::string& line) {
@@ -603,38 +662,19 @@ ChannelIngressProjection ReadChannelIngressProjection(const std::filesystem::pat
         return projection;
     }
     projection.ledger_present = true;
-    // sid -> 当前状态(replay 语义同 ReplayLocked:evt 起 durable,tr 覆盖;
-    // 坏行/半行跳过不猜)。
-    std::map<std::int64_t, IngressEventState> states;
+    // 与恢复器同一折叠核(SV-05):evt 起 durable、tr 只改已存在 sid(孤儿
+    // tr 不建项)、坏行/半行/缺 schema/缺 event 一律跳过——状态页对同一本
+    // 账的事件数与终态和恢复器、最近链一致。
+    IngressLedgerFold fold;
     std::ifstream stream(journal, std::ios::binary);
     std::string text_line;
     while (std::getline(stream, text_line)) {
-        if (text_line.empty()) continue;
-        nlohmann::json parsed;
-        try {
-            parsed = nlohmann::json::parse(text_line);
-        } catch (const nlohmann::json::exception&) {
-            continue;
-        }
-        if (!parsed.is_object() || !parsed.contains("t") || !parsed["t"].is_string() ||
-            !parsed.contains("sid") || !parsed["sid"].is_number_integer()) {
-            continue;
-        }
-        const std::string type = parsed["t"].get<std::string>();
-        const std::int64_t sid = parsed["sid"].get<std::int64_t>();
-        if (type == "evt") {
-            states[sid] = IngressEventState::Durable;
-            ++projection.events;
-        } else if (type == "tr") {
-            if (!parsed.contains("to") || !parsed["to"].is_string()) continue;
-            const auto to = IngressEventStateFromName(parsed["to"].get<std::string>());
-            if (to.has_value()) {
-                states[sid] = *to;  // 指空号的 tr 等于没发生(evt 没落成)
-            }
-        }
+        fold.Feed(ParseIngressJournalLine(text_line));
     }
-    for (const auto& [sid, state] : states) {
-        ++projection.state_counts[IngressEventStateName(state)];
+    projection.events = fold.entries().size();
+    projection.skipped = static_cast<std::size_t>(fold.skipped_lines());
+    for (const auto& entry : fold.entries()) {
+        ++projection.state_counts[IngressEventStateName(entry.state)];
     }
     const std::filesystem::path dead_letter = account_dir / "ingress" / "dead-letter.jsonl";
     if (std::filesystem::is_regular_file(dead_letter, ec) && !ec) {
@@ -665,66 +705,29 @@ ChannelIngressRecentChain ReadChannelIngressRecentChain(const std::filesystem::p
         return chain;
     }
     chain.ledger_present = true;
-    struct EntryState {
-        ChannelIngressRecentEntry entry;
-        bool seen = false;
-    };
-    // 全量重放(账可能很长,但状态机轻;只留最近 limit 枚的窗口裁剪在
-    // 收尾做——tr 行可能落在 evt 行之后很久,窗口须按最终态裁)。
-    std::vector<EntryState> records;
-    std::map<std::int64_t, std::size_t> index_by_sid;
+    // 与恢复器、状态页同一折叠核(SV-05):事件数与终态一致;展示条目从
+    // 折叠终态取(合法 evt 的事件已过 FromJsonStrict,展示字段直接读)。
+    // 只留最近 limit 枚的窗口裁剪在收尾做——tr 行可能落在 evt 行之后很久,
+    // 窗口须按最终态裁。
+    IngressLedgerFold fold;
     std::ifstream stream(journal, std::ios::binary);
     std::string text_line;
     while (std::getline(stream, text_line)) {
-        if (text_line.empty()) continue;
-        nlohmann::json parsed;
-        try {
-            parsed = nlohmann::json::parse(text_line);
-        } catch (const nlohmann::json::exception&) {
-            continue;  // 半行/坏行:与 replay 同一容错
-        }
-        if (!parsed.is_object() || !parsed.contains("t") || !parsed["t"].is_string() ||
-            !parsed.contains("sid") || !parsed["sid"].is_number_integer()) {
-            continue;
-        }
-        const std::string type = parsed["t"].get<std::string>();
-        const std::int64_t sid = parsed["sid"].get<std::int64_t>();
-        if (type == "evt") {
-            if (index_by_sid.count(sid) > 0) continue;  // 同 sid 重落:首笔为准
-            EntryState state;
-            state.seen = true;
-            state.entry.sid = sid;
-            state.entry.state = IngressEventStateName(IngressEventState::Durable);
-            if (parsed.contains("event") && parsed.at("event").is_object()) {
-                const nlohmann::json& event = parsed.at("event");
-                if (event.contains("received_at_ms") && event.at("received_at_ms").is_number_integer()) {
-                    state.entry.received_at_ms = event.at("received_at_ms").get<std::int64_t>();
-                }
-                if (event.contains("conversation") && event.at("conversation").is_object() &&
-                    event.at("conversation").contains("id") &&
-                    event.at("conversation").at("id").is_string()) {
-                    state.entry.conversation_id =
-                        event.at("conversation").at("id").get<std::string>();
-                }
-                if (event.contains("sender") && event.at("sender").is_object() &&
-                    event.at("sender").contains("id") &&
-                    event.at("sender").at("id").is_string()) {
-                    state.entry.sender_id = event.at("sender").at("id").get<std::string>();
-                }
-            }
-            index_by_sid[sid] = records.size();
-            records.push_back(std::move(state));
-        } else if (type == "tr") {
-            const auto found = index_by_sid.find(sid);
-            if (found == index_by_sid.end()) continue;
-            if (!parsed.contains("to") || !parsed["to"].is_string()) continue;
-            const auto to = IngressEventStateFromName(parsed["to"].get<std::string>());
-            if (!to.has_value()) continue;
-            records[found->second].entry.state = IngressEventStateName(*to);
-            if (parsed.contains("reason") && parsed["reason"].is_string()) {
-                records[found->second].entry.reason = parsed["reason"].get<std::string>();
-            }
-        }
+        fold.Feed(ParseIngressJournalLine(text_line));
+    }
+    std::vector<ChannelIngressRecentEntry> entries;
+    entries.reserve(fold.entries().size());
+    std::unordered_map<std::int64_t, std::size_t> index_by_sid;
+    for (const auto& entry : fold.entries()) {
+        ChannelIngressRecentEntry item;
+        item.sid = entry.sid;
+        item.state = IngressEventStateName(entry.state);
+        item.reason = entry.last_reason;
+        item.received_at_ms = entry.event.received_at_ms;
+        item.conversation_id = entry.event.conversation.id;
+        item.sender_id = entry.event.sender.id;
+        index_by_sid[entry.sid] = entries.size();
+        entries.push_back(std::move(item));
     }
     // dead-letter 旁路账:补死信时间(它才有 at_ms;journal 行不带时间戳)。
     const std::filesystem::path dead_letter = account_dir / "ingress" / "dead-letter.jsonl";
@@ -748,17 +751,15 @@ ChannelIngressRecentChain ReadChannelIngressRecentChain(const std::filesystem::p
             const auto found = index_by_sid.find(sid);
             if (found == index_by_sid.end()) continue;
             if (parsed.contains("at_ms") && parsed.at("at_ms").is_number_integer()) {
-                records[found->second].entry.dead_letter_at_ms = parsed.at("at_ms").get<std::int64_t>();
+                entries[found->second].dead_letter_at_ms = parsed.at("at_ms").get<std::int64_t>();
             }
         }
     }
     // 最近 limit 枚(sid 降序)。
     const std::size_t begin =
-        records.size() > limit ? records.size() - limit : 0;
-    for (std::size_t i = records.size(); i-- > begin;) {
-        if (records[i].seen) {
-            chain.entries.push_back(std::move(records[i].entry));
-        }
+        entries.size() > limit ? entries.size() - limit : 0;
+    for (std::size_t i = entries.size(); i-- > begin;) {
+        chain.entries.push_back(std::move(entries[i]));
     }
     return chain;
 }
