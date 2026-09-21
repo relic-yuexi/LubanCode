@@ -30,17 +30,30 @@ namespace lubancode::mcp {
 
 // 纯函数式增量分帧器:把陆续到达的字节流,按换行符切成一行一行,统一去掉
 // 行尾的 \r(不管来源是 \r\n 还是单纯 \n)。
+//
+// 分帧资源合同(与 lsp/transport.hpp 的 ContentLengthFramer 同一套框架,
+// 上限数值按各自 wire 格式各定各的,不合并两种 wire 格式):
+// 1. 协议声明上限:剥掉行尾 \r 后交给上层的单行长度 ≤ kMaxLineBytes。
+//    恰好等于上限通过,超过一字节拒绝。
+// 2. 切片粒度:Feed 怎么切不影响结论。同一字节流整片喂入、按任意边界
+//    分片、逐字节喂入,产出的行与 overflow 判定完全相同——行的准入只由
+//    行本身的长度决定,与管道切片无关(超限行在攒齐途中即可提前判死)。
+// 3. 超限行为:某行一旦超上限,分帧器进入报废状态——overflowed() 为真、
+//    丢弃缓冲、后续 Feed 不再产出任何行;同批先前已凑齐的合规行照常交出。
+//    传输层见 overflowed() 即杀进程断连,等待中的请求靠 IsAlive 轮询快速
+//    失败,不悬挂。内存上界即单行上限:等换行期间按"最小可能行长"核界,
+//    多条合规消息同批到达各自独立解出,不设整批总量帽。
 class LineFramer {
 public:
-    // 单行(未收到换行前的累积缓冲)上限:超过就置 overflowed、清空缓冲,
-    // 防止一个不换行狂写的坏服务器把内存吃光。
+    // 交给上层的单行(已剥行尾 \r)长度上限:超过就置 overflowed、清空
+    // 缓冲、报废,防止一个不换行狂写或狂吐超长行的坏服务器把内存吃光。
     static constexpr std::size_t kMaxLineBytes = 8 * 1024 * 1024;
 
     // 喂一段新到达的字节。返回这次新凑齐的完整行(可能是 0 行、1 行、多行)。
     // 一旦 overflowed() 为真,分帧器进入报废状态,后续 Feed 不再产出任何行。
     std::vector<std::string> Feed(std::string_view chunk);
 
-    // 单行累积超过 kMaxLineBytes,协议已不可信——调用方应当断连。
+    // 单行超过 kMaxLineBytes,协议已不可信——调用方应当断连。
     bool overflowed() const { return overflowed_; }
 
 private:

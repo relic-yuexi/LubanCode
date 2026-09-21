@@ -19,14 +19,30 @@ std::vector<std::string> LineFramer::Feed(std::string_view chunk) {
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
+        // 每条凑齐的完整行都在吐出前核界:上限管的是行本身,不看它跟换行
+        // 是不是同一批到的(旧实现只查残缓冲,超限行恰与换行同批到达就
+        // 整个放行,准入随管道切片漂移)。
+        if (line.size() > kMaxLineBytes) {
+            overflowed_ = true;
+            buffer_.clear();
+            buffer_.shrink_to_fit();
+            // 这一批先前已凑齐的合规行照常交出去,超限行起头的残句丢弃。
+            return out;
+        }
         out.emplace_back(line);
         start = newline_pos + 1;
     }
     buffer_.erase(0, start);
 
-    if (buffer_.size() > kMaxLineBytes) {
-        // 残行迟迟不见换行、还越攒越大:协议不对劲,报废,别把内存吃光。
-        // 这一批已经凑齐的完整行照常交出去,残行丢弃。
+    // 残行迟迟不见换行、还越攒越大:按"最小可能行长"核界——末位 \r 若恰
+    // 是行尾,凑齐时会被剥掉,先少算一字节,保证逐字节喂与整片喂同一结论。
+    std::size_t min_pending = buffer_.size();
+    if (min_pending > 0 && buffer_.back() == '\r') {
+        --min_pending;
+    }
+    if (min_pending > kMaxLineBytes) {
+        // 残行注定超限:协议不对劲,报废,别把内存吃光。这一批已经凑齐的
+        // 完整行照常交出去,残行丢弃。
         overflowed_ = true;
         buffer_.clear();
         buffer_.shrink_to_fit();

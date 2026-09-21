@@ -1,0 +1,62 @@
+# SV-04 stdio 分帧资源合同不一致，长度上限随协议与切片变化
+
+- 状态：已实施（本分支），验收见文末勾账。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-04 | B | 高 | src/lsp/transport.cpp:41<br>src/lsp/transport.cpp:57<br>src/lsp/transport.hpp:37<br>src/mcp/transport.cpp:9<br>src/mcp/transport.cpp:22<br>src/mcp/transport.cpp:27 | LSP 的 buffer_.append(chunk) 与 out = out * 10 + digit 均无上限检查；MCP 先 out.emplace_back(line)，erase 完整行后才检查剩余 buffer_ 是否超过 kMaxLineBytes。 | LSP 子进程可持续发无结束头或巨大声明长度，使宿主缓冲无界增长；十进制长度可发生有符号溢出。MCP 的“8MB 单行帽”只管残行：超限字节恰与换行同批到达就被交给 JSON 层，同一消息因管道切片不同而允许或拒绝。 | 保留 LineFramer 与 ContentLengthFramer 两套协议解码；分别定义头、单条正文及积压字节预算，提供一致的 fatal 状态与传输层断连处理。LSP 在数字累积和接受 Content-Length 前核界；MCP 在吐每条完整行前核其长度。不要合并两种 wire 格式。 | 高：容量上限会改变原先无界 LSP 的行为，需给合理默认与配置边界。完整消息大小限制不能误变成整批总量帽；保留正常多帧粘包。 |
+
+### 静态反例
+
+MCP：`Feed(string(kMaxLineBytes, 'x'))` 后再 `Feed("x\\n")`。第一拍未越帽，第二拍先吐 kMaxLineBytes+1 字节完整行，再清空残缓冲，overflowed 仍 false。若第二拍先只到 `x`，则触发 overflow。差别只来自切片。
+
+LSP：持续喂没有 `\\r\\n\\r\\n` 的头会一直 append；`Content-Length` 数字串逐位乘十却没有检查上限。这里报告的是本机子进程异常输出对宿主资源边界的影响，不声称外部网络可直接调用这些函数。
+
+当前 MCP/LSP 已共用 `platform::ChildProcess`。两者分帧、握手、环境变量及诊断合同有差别，暂不建议为了剩下几段胶水再建万能 transport。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：可与其余 SV 项并行；只独占两套 transport 及对应 framing 测试，不改 net、channel、app_server。
+- 允许修改的现有文件：
+
+- `src/mcp/transport.cpp`
+- `src/mcp/transport.hpp`
+- `src/lsp/transport.cpp`
+- `src/lsp/transport.hpp`
+- `tests/integration/protocols/test_mcp_transport.cpp`
+- `tests/integration/protocols/test_lsp_framing.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [ ] 同一 MCP 消息用一片、边界分片、逐字节喂入，准入结论完全相同；恰好上限通过，超过一字节拒绝。
+- [ ] LSP 超长头、超限 Content-Length、十进制溢出、持续不闭合正文均在受控内存内结束，传输层有稳定错误。
+- [ ] 多条均合规消息同批到达仍全部解出，不能把合计大小当单帧长度。
+- [ ] 异常后 pending 请求获得失败或断连结果，不留下等到长超时才结束的悬挂状态。
+- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+
+## 合并/删除口径
+
+本条不是重复代码合并项；预计可删除行数记 0。职责拆分或修正合同带来的搬移，不当成删除收益。
+
+## 既有工作关联
+
+- 现有测试 tests/integration/protocols/test_mcp_transport.cpp:78 只覆盖无换行残行超限；test_lsp_framing.cpp 覆盖正常 256KB 大消息，未钉异常资源边界。本轮未发现专门 TODO。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。

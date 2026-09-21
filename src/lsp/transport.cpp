@@ -8,6 +8,9 @@ namespace {
 
 // 在一整块头部文本(不含结尾的 \r\n\r\n)里找 Content-Length 的值。
 // 头名大小写不敏感,冒号后允许空格。找不到/不是数字返回 -1。
+// 数字累积带上帽:一旦越过 kMaxBodyBytes 就钳到"上限+1"当哨兵接着扫
+// (只为止住漏网的非数字)——几十位的十进制串也不会把 long long 乘爆
+// (旧实现逐位乘十无核界,有符号溢出是 UB)。
 long long ParseContentLength(std::string_view header_block) {
     std::size_t pos = 0;
     while (pos <= header_block.size()) {
@@ -39,6 +42,9 @@ long long ParseContentLength(std::string_view header_block) {
                         return -1;
                     }
                     out = out * 10 + (c - '0');
+                    if (out > static_cast<long long>(ContentLengthFramer::kMaxBodyBytes)) {
+                        out = static_cast<long long>(ContentLengthFramer::kMaxBodyBytes) + 1;
+                    }
                 }
                 return out;
             }
@@ -54,6 +60,9 @@ long long ParseContentLength(std::string_view header_block) {
 }  // namespace
 
 std::vector<std::string> ContentLengthFramer::Feed(std::string_view chunk) {
+    if (overflowed_) {
+        return {};
+    }
     buffer_.append(chunk);
 
     std::vector<std::string> out;
@@ -62,21 +71,43 @@ std::vector<std::string> ContentLengthFramer::Feed(std::string_view chunk) {
             // 正在等头:头部块以 \r\n\r\n 收尾。
             const std::size_t header_end = buffer_.find("\r\n\r\n");
             if (header_end == std::string::npos) {
-                break;  // 头还没到齐,残包留缓冲
+                // 头还没到齐:攒头期间同样核界,无界定界的垃圾不许无界增长。
+                // 恰在上限不误判;越帽即判死,这一批先前凑齐的消息照常交出。
+                if (buffer_.size() > kMaxHeaderBytes) {
+                    overflowed_ = true;
+                    buffer_.clear();
+                    buffer_.shrink_to_fit();
+                }
+                break;
+            }
+            if (header_end + 4 > kMaxHeaderBytes) {
+                // 凑齐的头块本身越帽:整片到达也判死,跟逐字节喂同一个结论。
+                overflowed_ = true;
+                buffer_.clear();
+                buffer_.shrink_to_fit();
+                break;
             }
             const long long length = ParseContentLength(std::string_view(buffer_.data(), header_end));
             buffer_.erase(0, header_end + 4);
             if (length < 0) {
                 // 坏头(没有 Content-Length/不是数字):丢掉这块头,继续找
-                // 下一条,不把整条流搞死。
+                // 下一条,不把整条流搞死,也不算资源超限。
                 continue;
+            }
+            if (static_cast<unsigned long long>(length) > kMaxBodyBytes) {
+                // 声明长度越帽(含十进制超长被钳住的):协议不可信,头凑齐
+                // 即判死,不等正文,内存不受声明值摆布。
+                overflowed_ = true;
+                buffer_.clear();
+                buffer_.shrink_to_fit();
+                break;
             }
             expected_ = static_cast<std::size_t>(length);
             in_body_ = true;
         }
         // 正在攒正文。
         if (buffer_.size() < expected_) {
-            break;  // 正文还没到齐,残包留缓冲
+            break;  // 正文还没到齐,残包留缓冲(上界 = 声明值 ≤ kMaxBodyBytes)
         }
         out.push_back(buffer_.substr(0, expected_));
         buffer_.erase(0, expected_);
@@ -96,13 +127,24 @@ TransportStartResult StdioTransport::Start(const std::string& command, const std
 
     const platform::SpawnResult spawn = child_.Start(
         command, args, {},
-        // stdout 读线程:按 Content-Length 分帧,逐条上交。
+        // stdout 读线程:按 Content-Length 分帧,逐条上交;头部块或声明长度
+        // 超上限就宣布协议报废、杀进程断连(返回 false 让读线程收工)。
+        // 进程一死,等待中的请求靠 IsAlive 轮询很快就能失败返回,不悬挂。
         [this](std::string_view chunk) {
             std::vector<std::string> messages = framer_.Feed(chunk);
             for (auto& message : messages) {
                 if (on_message_) {
                     on_message_(std::move(message));
                 }
+            }
+            if (framer_.overflowed()) {
+                {
+                    std::lock_guard<std::mutex> lock(stderr_mutex_);
+                    stderr_buffer_ +=
+                        "[lubancode] LSP 服务器输出超过分帧上限(头部块 8KB/单条正文 8MB),协议错误,已断开";
+                }
+                child_.Kill();
+                return false;
             }
             return true;
         },
