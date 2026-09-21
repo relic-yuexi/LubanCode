@@ -687,6 +687,10 @@ add_library(lubancode_engine STATIC
   # trajectory 同层(依赖 platform/hooks,不 include app/cli/runtime)。
   src/workspace/identity.cpp
   src/workspace/manifest.cpp
+  # SV-11:manifest 读改写的跨进程事务锁(PID+起始 token+owner token
+  # 身份核,陈锁隔离留证)——与 memory::OwnerLock 同范式,workspace 层
+  # 自持一份(不许反向 include trajectory)。
+  src/workspace/manifest_lock.cpp
   # 账本制(workspaces/index.json):路径为键、漂亮门牌为值的索引查找;
   # 查账→miss 开房记账→账坏扫房重建。门牌=路径slug+seed哈希前8。
   src/workspace/index.cpp

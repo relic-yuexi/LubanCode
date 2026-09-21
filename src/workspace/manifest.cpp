@@ -1,14 +1,17 @@
 // workspace v2 manifest 读写与对账的实现(P0-1)。
 #include "workspace/manifest.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
-#include "workspace/index.hpp"  // 账本制:查账/记账/门牌
+#include "workspace/index.hpp"          // 账本制:查账/记账/门牌
+#include "workspace/manifest_lock.hpp"  // SV-11:读改写事务锁(跨进程)
 #include "workspace/storage_contracts.hpp"
 
 namespace lubancode::workspace {
@@ -33,6 +36,13 @@ constexpr int kTransientReadAttempts = 10;
 constexpr int kTransientWriteAttempts = 10;
 constexpr std::chrono::milliseconds kTransientReadBackoff{10};
 constexpr std::chrono::milliseconds kTransientWriteBackoff{10};
+
+// SV-11:登记事务锁的有界等待档(20×100ms=2s)。对头活持有者放手要时间
+// ——锁内只做一份小 JSON 的读改写,常态毫秒级;开房是启动路径,烧完仍
+// 撞就如实回 workspace.locked,不无限等、不悄悄覆盖旧账(对齐 memory.lock
+// 的 20×100ms 纪律)。持有者暴毙不等钟:身份核判死即隔离接手。
+constexpr int kLockWaitAttempts = 20;
+constexpr int kLockWaitIntervalMs = 100;
 
 }  // namespace
 
@@ -236,6 +246,25 @@ std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
         *created_out = false;
     }
 
+    // SV-11:workspace.json 的读→校验→checkout upsert→写是跨进程临界区。
+    // 两个 linked worktree 同房并发开张,A 读 [main]、B 读 [main]、A 写
+    // [main,A]、B 写 [main,B]——四次操作都成功,A 的登记凭空消失;原子
+    // 替换只防半份文件,不防读改写交错。事务锁把整段串行:锁后重读,时间
+    // 戳取单调最大值。锁粒度=这一间房(不同 workspace 互不阻塞);持有者
+    // 暴毙走陈锁隔离留证;超时有界,如实回 workspace.locked。
+    ManifestLock manifest_lock;
+    const auto lock_result = ManifestLock::Acquire(workspace_dir, &manifest_lock, kLockWaitAttempts,
+                                                   kLockWaitIntervalMs);
+    if (lock_result.status != ManifestLock::Status::Acquired) {
+        // 活持有/在建窗口/owner 读不懂:一律拒,不悄悄覆盖旧账;真 IO 失败
+        // 照 open_failed 报,不冒充争用。
+        const std::string code = lock_result.status == ManifestLock::Status::IoError
+                                     ? std::string(contracts::kErrWorkspaceOpenFailed)
+                                     : std::string(contracts::kErrWorkspaceLocked);
+        return std::unexpected(code + ": workspace.json 登记事务锁取不上: " +
+                               lock_result.detail);
+    }
+
     const ManifestRead read = ReadWorkspaceManifest(workspace_dir);
     if (read.status == ManifestRead::Status::UnsupportedVersion ||
         read.status == ManifestRead::Status::Corrupt) {
@@ -266,13 +295,16 @@ std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
                                    " 与算法重算 key=" + identity.workspace_key +
                                    " 不合,已隔离;不自动改名合并,请跑 doctor 对账");
         }
-        manifest.last_opened_at_ms = now_ms;
-        // checkout upsert:按规范化 root 匹配;同 root 只更新 last_seen。
+        // 时间戳单调:对手的钟可能比盘上账慢(跨进程钟差/测试注入),旧值
+        // 不许被后写改回去(SV-11 验收:last_seen/last_opened 不倒退)。
+        manifest.last_opened_at_ms = std::max(manifest.last_opened_at_ms, now_ms);
+        // checkout upsert:按规范化 root 匹配;同 root 只更新 last_seen
+        //(单调最大),first_seen 永不改写。
         const std::string root_text = NormalizeIdentityPathText(identity.checkout_root);
         bool found = false;
         for (WorkspaceCheckout& checkout : manifest.checkouts) {
             if (NormalizeIdentityPathText(platform::Utf8ToPath(checkout.root)) == root_text) {
-                checkout.last_seen_at_ms = now_ms;
+                checkout.last_seen_at_ms = std::max(checkout.last_seen_at_ms, now_ms);
                 found = true;
                 break;
             }
@@ -287,17 +319,28 @@ std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
     }
     // manifest 落盘:Windows 上原子换名会被并发读者的句柄短拒(MoveFileExW
     // 对无 FILE_SHARE_DELETE 的打开方报错,identity 册 CI 实测 320 次换名
-    // 拒 48-57 次)。瞬态失败、整份重写幂等——有界重试,耗尽才如实落空
-    // (POSIX rename 原子,首次即成,重试路径零开销)。
+    // 拒 48-57 次)。未提交的失败(target 原样)、整份重写幂等——有界重试,
+    // 耗尽才如实落空(POSIX rename 原子,首次即成,重试路径零开销)。
+    // 提交阶段沿 FD-04 合同分账:换名已生效的失败只有"新内容可见、父目录
+    // 刷盘未确认"(CommittedDurabilityUnconfirmed)一种——不当没写过盲目
+    // 重写,也不当失败回滚;锁内下一只手会重读到新内容。AtomicVisibility
+    // 档不请求目录刷盘,这格是合同防御位,当前不产生。
+    const fs::path manifest_path = workspace_dir / "workspace.json";
     for (int attempt = 0;; ++attempt) {
-        if (const auto written = WriteWorkspaceManifestAtomic(workspace_dir, manifest);
-            written.has_value()) {
-            break;
-        } else if (attempt >= kTransientWriteAttempts) {
-            return std::unexpected(written.error());
-        } else {
-            std::this_thread::sleep_for(kTransientWriteBackoff);
+        const auto written = platform::AtomicWriteFile(manifest_path, manifest.ToJson().dump());
+        if (written.has_value()) {
+            break;  // CommittedDurabilityNotRequested:换名已生效
         }
+        const platform::AtomicWriteError& write_error = written.error();
+        if (write_error.outcome != platform::WriteOutcome::NotCommitted) {
+            break;  // 换名已生效:不当没写过(FD-04)
+        }
+        if (attempt >= kTransientWriteAttempts) {
+            return std::unexpected(
+                std::string("workspace.open_failed: workspace.json 原子写失败: ") +
+                write_error.code + ": " + write_error.message + ": " + PathToUtf8(manifest_path));
+        }
+        std::this_thread::sleep_for(kTransientWriteBackoff);
     }
     // 记账:房已开门、manifest 落盘,账本并这一笔(原子写)。失败不拦
     // 开张——账本是可重建缓存,房自描述在盘上,丢了靠重建/下次开张自愈。
