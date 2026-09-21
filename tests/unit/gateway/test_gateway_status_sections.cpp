@@ -162,7 +162,9 @@ TEST_CASE("channel 栏:读账号状态快照/入站水位/投递错误,不带密
         });
         std::ofstream status_file(account_dir / "account-status.json", std::ios::binary);
         status_file << status.dump();
-        // 入站账:一枚 queued(待处理)。
+        // 入站账:一枚 queued(待处理)。event 须是能过 FromJsonStrict 的
+        // 合法事件——SV-05 起状态投影与恢复器共用同一行合同,缺合法
+        // event 的 evt 行不再计入水位。
         std::ofstream journal(account_dir / "ingress" / "journal.jsonl", std::ios::binary);
         journal << nlohmann::json({{"schema", 1},
                                    {"t", "evt"},
@@ -170,7 +172,20 @@ TEST_CASE("channel 栏:读账号状态快照/入站水位/投递错误,不带密
                                    {"dedupe", "p:qqbot:main:pe-1"},
                                    {"tier", 1},
                                    {"parts_sha256", "x"},
-                                   {"event", nlohmann::json::object()}})
+                                   {"event", nlohmann::json::object({
+                                       {"schema", 1},
+                                       {"delivery_id", "in-1"},
+                                       {"provider_event_id", "pe-1"},
+                                       {"channel_id", "qqbot"},
+                                       {"account_id", "main"},
+                                       {"received_at_ms", 1724700000000},
+                                       {"conversation", nlohmann::json::object({
+                                           {"kind", "direct"},
+                                           {"id", "dm-1"},
+                                       })},
+                                       {"sender", nlohmann::json::object({{"id", "sender-1"}})},
+                                       {"message_id", "m-1"},
+                                   })}})
                        .dump()
                 << "\n";
         journal << nlohmann::json({{"schema", 1}, {"t", "tr"}, {"sid", 1},
