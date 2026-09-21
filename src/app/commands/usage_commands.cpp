@@ -11,7 +11,6 @@
 #include "accounting/cost_estimator.hpp"
 #include "accounting/purpose.hpp"
 #include "agent/model_router.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派位用)
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
@@ -413,10 +412,10 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     using lubancode::cli::TermOut;
     const ParsedUsageCommand parsed = ParseUsageCommand(args);
     if (parsed.invalid) {
-        TermOut() << context.theme.error << lubancode::cli::tr("cmd.usage.unknown_arg") << " ["
+        TermOut() << context.theme->error << lubancode::cli::tr("cmd.usage.unknown_arg") << " ["
                   << parsed.bad_word << "]\n"
                   << lubancode::cli::tr("cmd.usage.usage_line") << "\n"
-                  << context.theme.reset << "\n";
+                  << context.theme->reset << "\n";
         TermOut().flush();
         return;
     }
@@ -452,8 +451,8 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
             TermOut().flush();
             return;
         }
-        TermOut() << context.theme.stats << lubancode::cli::tr("cmd.usage.flag_off") << "\n"
-                  << context.theme.reset;
+        TermOut() << context.theme->stats << lubancode::cli::tr("cmd.usage.flag_off") << "\n"
+                  << context.theme->reset;
         if (context.memory_ledger != nullptr) {
             for (const auto& line : context.memory_ledger->ReportLines()) {
                 TermOut() << "  " << line << "\n";
@@ -469,10 +468,10 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     if (parsed.scope == ParsedUsageCommand::Scope::NamedSession) {
         session_dir = context.sessions_root / parsed.session_id;
         if (!std::filesystem::is_directory(session_dir)) {
-            TermOut() << context.theme.error
+            TermOut() << context.theme->error
                       << lubancode::cli::trf("cmd.usage.session_not_found", parsed.session_id)
                       << "\n"
-                      << context.theme.reset << "\n";
+                      << context.theme->reset << "\n";
             TermOut().flush();
             return;
         }
@@ -483,7 +482,7 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     lubancode::accounting::SessionUsageRead read =
         lubancode::accounting::ReadSessionUsage(session_dir);
     if (!read.ok) {
-        TermOut() << context.theme.error << read.message << "\n" << context.theme.reset << "\n";
+        TermOut() << context.theme->error << read.message << "\n" << context.theme->reset << "\n";
         TermOut().flush();
         return;
     }
@@ -515,20 +514,11 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     TermOut().flush();
 }
 
-// 命令分派注册制:/usage 的分派位。只装材料,正戏在上面。
-CommandFlow HandleSlashUsage(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    UsageCommandContext context{*ctx.theme};
-    context.trajectory = ctx.trajectory;
-    if (ctx.trajectory != nullptr) {
-        // sessions_root = active session 目录的上一层(sessions/);指定
-        // session 在同一 workspace 下找(跨 workspace 是 /usage all 的事)。
-        context.sessions_root = ctx.trajectory->session_dir().parent_path();
-    }
-    context.memory_ledger =
-        ctx.model_router != nullptr ? &ctx.model_router->ledger() : nullptr;
-    context.home_lubancode =
-        ctx.home_lubancode != nullptr ? *ctx.home_lubancode : std::optional<std::string>{};
-    HandleUsageCommand(parsed.args, context);
+// 命令分派注册制:/usage 的分派位。HC-06(材料收窄,第二小批)起只吃
+// 窄材料——装材料(sessions_root 派生、内存粗账递手)在组合根折好,
+// 正戏在上面。
+CommandFlow HandleSlashUsage(const UsageCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleUsageCommand(parsed.args, ctx);
     return CommandFlow::Continue;
 }
 

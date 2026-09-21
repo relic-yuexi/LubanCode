@@ -62,6 +62,8 @@
 #include "app/agent_panel_presenter.hpp"
 #include "app/commands/memory_commands.hpp"
 #include "app/commands/model_commands.hpp"
+#include "app/commands/package_commands.hpp"  // HC-06:/package 窄材料装配
+#include "app/commands/usage_commands.hpp"    // HC-06:/usage 窄材料装配
 #include "app/commands/trace_commands.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
@@ -1790,14 +1792,12 @@ void TerminalSessionController::AssembleDispatchContext() {
         AdoptResumedSessionSoul(resumed);
     };
     ctx.refresh_skills = [this]() { RefreshSkills(); };
-    ctx.reload_packages = [this]() { return ReloadPackages(); };
     ctx.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
     ctx.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
     // AGENTS.md 作用域单 P1-1:/instructions 与 /doctor instructions 用会话
     // 那只 Resolver(与写前闸、基线预登记同一份账)。
     ctx.instruction_resolver = stack_.instruction_resolver.get();
     ctx.sync_worktree_directory = [this](const std::string& reason) { SyncWorktreeDirectory(reason); };
-    ctx.ensure_memory_tool = [this]() { EnsureMemoryTool(); };
     ctx.ensure_goal_coordinator = [this]() { goal_wiring_.Ensure(config); };
     ctx.ensure_loop_scheduler = [this]() { loop_wiring_.Ensure(); };
     ctx.make_goal_wiring = [this]() {
@@ -1814,8 +1814,9 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.build_workflow_tool_options = [this]() { return BuildWorkflowToolOptions(); };
     ctx.build_workflow_agent_callbacks = [this]() { return BuildWorkflowAgentCallbacks(); };
     // HC-06(材料收窄):命令表在绑定期折好——已收窄域(Trace/Hook/
-    // Telemetry)捕获窄材料,过渡域仍指 ctx。表声明在 dispatch_ctx_ 之后
-    // = 析构先于它,闭包里的借用不悬垂。
+    // Telemetry + 第二小批 Model/Memory/Usage/Package)捕获窄材料,过渡域
+    // 仍指 ctx。表声明在 dispatch_ctx_ 之后 = 析构先于它,闭包里的借用不
+    // 悬垂。
     lubancode::app::SessionCommandMaterials materials;
     materials.dispatch = &ctx;
     materials.trace.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
@@ -1827,6 +1828,94 @@ void TerminalSessionController::AssembleDispatchContext() {
                                                       ? &config_result.global_config_file_path
                                                       : nullptr;
     materials.telemetry.theme = &theme;
+    // ---- HC-06 第二小批:Model/Memory/Usage/Package 窄材料 ------------------
+    // 装包段自各域分派位原样搬来:引用换成控制器成员(快照点与旧 dispatch
+    // 字段同点同源——指针字段即成员地址,shared_ptr 构造后不换新,行为
+    // 零变),闭包一律捕 this。
+    materials.model.config = &config;
+    materials.model.model_catalog = &model_catalog;
+    materials.model.theme = &theme;
+    materials.model.context_tracker = &context_tracker;
+    materials.model.current_model = current_model;
+    materials.model.current_think = current_think;
+    materials.model.current_model_instructions = current_model_instructions;
+    materials.model.model_router = model_router.get();
+    // /model 跨家收口:直切属别家的模型时连 provider 一起切。判定材料
+    //(活跃端、已配清单)与切换执行(ExecuteProviderSwitch,与 /provider
+    // switch 同一条路)都在这里装配;缺密钥如实提示并保持旧连接,不硬切。
+    materials.model.active_provider = &active_provider;
+    materials.model.providers = &config.providers;
+    materials.model.switch_provider = [this](const std::string& name) -> bool {
+        const lubancode::config::ProviderConfig* provider =
+            lubancode::config::FindProvider(config.providers, name);
+        if (provider == nullptr) {
+            TermOut() << trf("cmd.provider.not_found", name) << "\n";
+            return false;
+        }
+        if (lubancode::config::ResolveProviderAuth(*provider).status ==
+            lubancode::config::ProviderAuthResolution::Status::Missing) {
+            TermOut() << trf("cmd.model.provider_key_missing", name) << "\n";
+            return false;
+        }
+        return ExecuteProviderSwitch(name, "", config, active_provider, real_backend, wire_str,
+                                     current_model, current_think, current_think_history,
+                                     context_tracker, current_model_instructions, model_catalog,
+                                     prompt_options,
+                                     [this](bool preserve_history) { RebuildLoop(preserve_history); },
+                                     spinner_enabled, theme, active_provider_write_path,
+                                     config_result.sources.active_provider);
+    };
+    // 写回目标默认全局,没有全局文件退 merged 路径(只剩项目级)。
+    materials.model.config_file_path = config_result.global_config_file_path.has_value()
+                                           ? config_result.global_config_file_path
+                                           : config_file_path;
+    materials.model.apply_context_window = [this](std::size_t tokens) {
+        // 上下文预算单 §三:目录应用走配置来路。
+        context_tracker.SetWindowBudget(tokens, lubancode::cli::ContextWindowSource::Config);
+    };
+    materials.model.fetch_models = [this]()
+        -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
+        const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
+            config.extra_headers, config.auth_token);
+        auto listed = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token,
+                                                 config.connect_timeout_ms,
+                                                 config.request_timeout_secs, headers);
+        if (!listed.has_value()) {
+            return std::unexpected(listed.error().message);
+        }
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto& info : *listed) {
+            out.emplace_back(info.id, info.display_name);
+        }
+        return out;
+    };
+    // P1(Kimi 保留式思考):切模型后先重校验跨轮保留选择——新模型不认
+    // history all(或思考被目录默认关了)就回落 default 并明说,再刷新请求
+    // 档案。回落要影响的就是"下一份请求",所以校验得压在 sync 前头。
+    materials.model.sync_request_policy = [this]() {
+        lubancode::app::RevalidateThinkHistoryMode(
+            current_think_history, current_think,
+            model_catalog.FindByProviderAndSlug(active_provider, *current_model));
+        SyncAgentRequestPolicy();
+    };
+    materials.memory.project_memory = project_memory.get();
+    materials.memory.theme = &theme;
+    materials.memory.ensure_tool = [this]() { EnsureMemoryTool(); };
+    materials.usage.theme = &theme;
+    materials.usage.trajectory = session_runtime_.trajectory();
+    if (materials.usage.trajectory != nullptr) {
+        // sessions_root = active session 目录的上一层(sessions/);指定
+        // session 在同一 workspace 下找(跨 workspace 是 /usage all 的事)。
+        materials.usage.sessions_root = materials.usage.trajectory->session_dir().parent_path();
+    }
+    materials.usage.memory_ledger = model_router != nullptr ? &model_router->ledger() : nullptr;
+    materials.usage.home_lubancode = home_lubancode;
+    materials.package.home_lubancode = &home_lubancode;
+    materials.package.dev_package_dirs = &opts_.package_dirs;
+    materials.package.config = &config;
+    materials.package.skills = &skills;
+    materials.package.package_mount = &package_snapshot_view_->mount();
+    materials.package.reload_packages = [this]() { return ReloadPackages(); };
     slash_command_table_ = lubancode::app::BuildSessionSlashCommandTable(materials);
 }
 

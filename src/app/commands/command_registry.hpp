@@ -14,8 +14,9 @@
 //     由 handler 明说没起服务),不在表上另发明新门;
 //   - SlashDispatchContext 全是借用(指针/引用/回调),会话控制器构造时
 //     一次配齐,handler 不拥有会话资源。HC-06 起逐域收窄:各域 handler 改
-//     吃自己的窄材料(Trace/Hook/Telemetry 已迁,绑定单元在装配期折好),
-//     本结构降级为"尚未收窄域的过渡材料袋",后续批次迁完即删。
+//     吃自己的窄材料(Trace/Hook/Telemetry 与 Model/Memory/Usage/Package
+//     已迁,绑定单元在装配期折好),本结构降级为"尚未收窄域的过渡材料
+//     袋",后续批次迁完即删。
 #pragma once
 
 #include <filesystem>
@@ -118,17 +119,14 @@ struct SlashDispatchContext {
     const std::optional<std::string>* home_dir = nullptr;        // /skills 的扫描位
     const std::optional<std::string>* home_lubancode = nullptr;  // /keymap /workflow
     // Package 会话钉快照(统一封装单阶段 3/6):/agents、/agent doctor|inspect、
-    // /workflow、/package 的包层挂载材料都从这折;空 = 没有包(裸机照旧)。
+    // /workflow 的包层挂载材料都从这折(HC-06:/package 已迁窄材料
+    // PackageCommandContext);空 = 没有包(裸机照旧)。
     // 指向"现行快照"的挂载账本体——reload 换档后会话侧重指(命令都在主
     // 线程跑,没有并发窗口);活得比本指针久的账由会话侧的快照镜像持有。
     const lubancode::package::PackageMount* package_mount = nullptr;
     // 现行 Package 快照的供应商(阶段 6):拷一份 shared_ptr 出来用——
     // workflow 跑一趟钉一份(半场 reload 不换这趟的账)。空 = 没接。
     std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot_provider;
-    // /package reload 的会话侧执行体(阶段 6):重折快照、原子换档、刷
-    // 下游(技能清单/Profile 根/补全/agent 工具段),回执行逐行带回。
-    // 空 = 没接(纯函数装配),reload 明说接不上。
-    std::function<std::vector<std::string>()> reload_packages;
     const std::string* prompts_dir = nullptr;
     std::string* persona = nullptr;
     const std::filesystem::path* global_skills_root = nullptr;
@@ -193,7 +191,9 @@ struct SlashDispatchContext {
     std::string* session_title = nullptr;
     std::string* last_compact_line = nullptr;  // /context 的最近一次 compact 台账
     lubancode::agent::PromptOptions* prompt_options = nullptr;
-    lubancode::memory::ProjectMemory* project_memory = nullptr;  // /memory(可空)
+    // 项目记忆:/evolve 的分层账、doctor 的存储健康检查共用(HC-06:
+    // /memory 已迁窄材料 MemoryCommandContext)。
+    lubancode::memory::ProjectMemory* project_memory = nullptr;
     // AGENTS.md 作用域单 P1:/instructions 与 /doctor instructions 的解析口。
     // 与主代理/子代理/Workflow 同一只 Resolver(账口径一致);空 = 调用方
     // 没接(旧装配/单测),命令面自己按 SessionResolverOptions 现起一只。
@@ -216,7 +216,6 @@ struct SlashDispatchContext {
     std::function<void()> refresh_project_instructions;   // /init
     // /worktree 搬房善后(参数 = 搬房原因,进宿主目录通知与轨迹账)。
     std::function<void(const std::string& reason)> sync_worktree_directory;
-    std::function<void()> ensure_memory_tool;             // /memory on/learn 后补注册
     std::function<void()> ensure_goal_coordinator;
     std::function<void()> ensure_loop_scheduler;
     std::function<GoalWiring()> make_goal_wiring;

@@ -5,9 +5,9 @@
 
 #include "app/commands/model_commands.hpp"
 
-#include "api/models.hpp"                      // ListModels(裸敲菜单的远端清单)
-#include "app/commands/command_registry.hpp"   // SlashDispatchContext(分派注册制)
-#include "config/provider_catalog.hpp"         // ResolveProviderHeaderTemplates
+// HC-06 第二小批:装包段(活清单拉取/跨家切换)迁组合根后,ListModels
+// 的 include 随行搬走(底下那枚 provider_catalog 是
+// ModelProviderHopFor 等纯函数要的,与装包段无关,照留)。
 
 #include <cctype>
 
@@ -371,82 +371,14 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
 }
 
 // ---------------------------------------------------------------------------
-// 命令分派注册制(会话终章):/model 的分派位。case 体原样自
-// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// 命令分派注册制(会话终章):/model 的分派位。HC-06(材料收窄,第二小批)
+// 起只吃窄材料——装包段(跨家切换/活清单/同步三闭包)随材料在组合根
+// (interactive_session_assembly 的 AssembleDispatchContext)折好,行为与
+// 旧装包位一字不差。
 // ---------------------------------------------------------------------------
 
-CommandFlow HandleSlashModel(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
-    lubancode::app::ModelCommandContext model_ctx;
-    model_ctx.config = dispatch.config;
-    model_ctx.model_catalog = dispatch.model_catalog;
-    model_ctx.theme = dispatch.theme;
-    model_ctx.context_tracker = dispatch.context_tracker;
-    model_ctx.current_model = dispatch.current_model;
-    model_ctx.current_think = dispatch.current_think;
-    model_ctx.current_model_instructions = dispatch.current_model_instructions;
-    model_ctx.model_router = dispatch.model_router;
-    // /model 跨家收口:直切属别家的模型时连 provider 一起切。判定材料
-    //(活跃端、已配清单)与切换执行(ExecuteProviderSwitch,与 /provider
-    // switch 同一条路)都在这里装配;缺密钥如实提示并保持旧连接,不硬切。
-    model_ctx.active_provider = dispatch.active_provider;
-    model_ctx.providers = &dispatch.config->providers;
-    model_ctx.switch_provider = [&dispatch](const std::string& name) -> bool {
-        const lubancode::config::ProviderConfig* provider =
-            lubancode::config::FindProvider(dispatch.config->providers, name);
-        if (provider == nullptr) {
-            TermOut() << trf("cmd.provider.not_found", name) << "\n";
-            return false;
-        }
-        if (lubancode::config::ResolveProviderAuth(*provider).status ==
-            lubancode::config::ProviderAuthResolution::Status::Missing) {
-            TermOut() << trf("cmd.model.provider_key_missing", name) << "\n";
-            return false;
-        }
-        return ExecuteProviderSwitch(name, "", *dispatch.config, *dispatch.active_provider,
-                                     *dispatch.real_backend, *dispatch.wire_str, dispatch.current_model,
-                                     dispatch.current_think, dispatch.current_think_history,
-                                     *dispatch.context_tracker, dispatch.current_model_instructions,
-                                     *dispatch.model_catalog, *dispatch.prompt_options,
-                                     dispatch.rebuild_loop, dispatch.spinner_enabled, *dispatch.theme,
-                                     *dispatch.active_provider_write_path,
-                                     dispatch.config_result->sources.active_provider);
-    };
-    // 写回目标默认全局,没有全局文件退 merged 路径(只剩项目级)。
-    model_ctx.config_file_path = dispatch.config_result->global_config_file_path.has_value()
-                                     ? dispatch.config_result->global_config_file_path
-                                     : *dispatch.config_file_path;
-    model_ctx.apply_context_window = [tracker = dispatch.context_tracker](std::size_t tokens) {
-        // 上下文预算单 §三:目录应用走配置来路。
-        tracker->SetWindowBudget(tokens, lubancode::cli::ContextWindowSource::Config);
-    };
-    model_ctx.fetch_models = [config = dispatch.config]()
-        -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
-        const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
-            config->extra_headers, config->auth_token);
-        auto listed = lubancode::api::ListModels(config->wire, config->base_url, config->auth_token,
-                                                 config->connect_timeout_ms,
-                                                 config->request_timeout_secs, headers);
-        if (!listed.has_value()) {
-            return std::unexpected(listed.error().message);
-        }
-        std::vector<std::pair<std::string, std::string>> out;
-        for (const auto& info : *listed) {
-            out.emplace_back(info.id, info.display_name);
-        }
-        return out;
-    };
-    // P1(Kimi 保留式思考):切模型后先重校验跨轮保留选择——新模型不认
-    // history all(或思考被目录默认关了)就回落 default 并明说,再刷新请求
-    // 档案。回落要影响的就是"下一份请求",所以校验得压在 sync 前头。
-    model_ctx.sync_request_policy = [&dispatch]() {
-        lubancode::app::RevalidateThinkHistoryMode(
-            dispatch.current_think_history, dispatch.current_think,
-            dispatch.model_catalog->FindByProviderAndSlug(*dispatch.active_provider, *dispatch.current_model));
-        if (dispatch.sync_request_policy) {
-            dispatch.sync_request_policy();
-        }
-    };
-    HandleModelCommand(model_ctx, parsed.args);
+CommandFlow HandleSlashModel(const ModelCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleModelCommand(ctx, parsed.args);
     return CommandFlow::Continue;
 }
 

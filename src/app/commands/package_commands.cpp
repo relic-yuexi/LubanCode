@@ -5,9 +5,12 @@
 // 读。参数拆解是纯函数(ParsePackageCommand,单测钉),这一头只留扫描与
 // 打印。
 #include "app/commands/package_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
-#include "app/version.hpp"                     // kVersion:版本号唯一出处
+#include "app/version.hpp"  // kVersion:版本号唯一出处
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+// HC-06(材料收窄,第二小批):不再经注册表头传递,本域要的完整定义直接递。
+#include "config/config.hpp"        // Config::mcp_servers(包外命名空间)
+#include "package/mounting.hpp"     // PackageMount(会话钉快照)
+#include "tools/skill_loader.hpp"   // SkillMeta(包外 Skill 名)
 
 #include <cctype>
 
@@ -70,9 +73,9 @@ const char* CurrentPlatform() {
 }
 
 // 装配四层扫描的输入。user/project/official 三层各有出处,dev 层是
-// --package-dir 攒下的目录(cli_app 递进来)。当前版本/平台供 doctor 的
+// --package-dir 攒下的目录(组合根递进窄材料)。当前版本/平台供 doctor 的
 // compatibility 检查用。
-lubancode::package::ScanOptions BuildScanOptions(SlashDispatchContext& ctx) {
+lubancode::package::ScanOptions BuildScanOptions(const PackageCommandContext& ctx) {
     lubancode::package::ScanOptions options;
     if (ctx.home_lubancode != nullptr && ctx.home_lubancode->has_value()) {
         options.user_root = lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "packages";
@@ -82,8 +85,8 @@ lubancode::package::ScanOptions BuildScanOptions(SlashDispatchContext& ctx) {
         official.has_value()) {
         options.official_root = lubancode::platform::Utf8ToPath(*official);
     }
-    if (ctx.opts != nullptr) {
-        for (const std::string& dir : ctx.opts->package_dirs) {
+    if (ctx.dev_package_dirs != nullptr) {
+        for (const std::string& dir : *ctx.dev_package_dirs) {
             if (!dir.empty()) {
                 options.dev_roots.push_back(lubancode::platform::Utf8ToPath(dir));
             }
@@ -124,7 +127,7 @@ LoadStateStoreReadOnly() {
 // evolution store 的选中版本(阶段 4):active/canary 指针指到的那枚折成
 // scope=Store 的现成候选,并进 /package 的账面——四层扫描之外第五路,哈希
 // 验完好与 tamper 都在列(list 是发现账;挂载侧只收完好的)。
-std::vector<lubancode::package::PackageCandidate> BuildStoreCandidates(SlashDispatchContext& ctx) {
+std::vector<lubancode::package::PackageCandidate> BuildStoreCandidates(const PackageCommandContext& ctx) {
     if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
         return {};
     }
@@ -136,7 +139,7 @@ std::vector<lubancode::package::PackageCandidate> BuildStoreCandidates(SlashDisp
 // 四层扫描 + store 选中,按优先级从高到低稳排(dev > project > store >
 // user > official):list 的行序、LookupPackage 的胜者判定共用这一份。
 std::vector<lubancode::package::PackageCandidate> ScanAllLayers(
-    SlashDispatchContext& ctx, const lubancode::package::ScanOptions& options) {
+    const PackageCommandContext& ctx, const lubancode::package::ScanOptions& options) {
     std::vector<lubancode::package::PackageCandidate> candidates =
         lubancode::package::ScanPackages(options);
     std::vector<lubancode::package::PackageCandidate> store = BuildStoreCandidates(ctx);
@@ -286,7 +289,7 @@ PackageLookup LookupPackage(const std::vector<lubancode::package::PackageCandida
 
 // 引用解析的包外既有名(单子 §七:Resolver 先本包,再看外部命名空间)。
 // 有就喂:config.json 的 mcpServers 键、已扫到的 Skill、builtin Agent 两名。
-lubancode::package::ExternalNamespaces BuildExternalNamespaces(SlashDispatchContext& ctx) {
+lubancode::package::ExternalNamespaces BuildExternalNamespaces(const PackageCommandContext& ctx) {
     lubancode::package::ExternalNamespaces external;
     if (ctx.config != nullptr) {
         for (const auto& [name, server] : ctx.config->mcp_servers) {
@@ -719,7 +722,7 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options,
 // /package trust|untrust <id>(阶段 4):扫描定胜者 -> AnalyzePackage 出全份
 // 材料与状态 -> 账务(TrustPackage/UntrustPackage,回执逐行)。落账即时,
 // 生效在重启(会话钉快照,阶段 3 语义)。
-void RunPackageTrust(SlashDispatchContext& ctx, const std::string& target, bool trust_action) {
+void RunPackageTrust(const PackageCommandContext& ctx, const std::string& target, bool trust_action) {
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     const std::vector<lubancode::package::PackageCandidate> candidates =
         lubancode::package::ScanPackages(options);
@@ -762,7 +765,7 @@ void RunPackageTrust(SlashDispatchContext& ctx, const std::string& target, bool 
 // /package enable|disable <id>(阶段 6):扫描定胜者 -> 轻盘点出身份 ->
 // 账务(EnableDisablePackage,回执逐行)。落账即时,生效在下回装配(会话
 // 钉快照,不拆在跑的)——回执里如实说,另注明本会话快照还给它挂着几件。
-void RunPackageEnableDisable(SlashDispatchContext& ctx, const std::string& target, bool enable) {
+void RunPackageEnableDisable(const PackageCommandContext& ctx, const std::string& target, bool enable) {
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     const std::vector<lubancode::package::PackageCandidate> candidates =
         ScanAllLayers(ctx, options);
@@ -809,7 +812,7 @@ void RunPackageEnableDisable(SlashDispatchContext& ctx, const std::string& targe
 
 // /package reload(阶段 6):会话侧重折快照 + 原子换档 + 刷下游。回执行
 //(含折不动的诊断)逐行打印;没接会话执行体(纯函数装配)如实明说。
-void RunPackageReload(SlashDispatchContext& ctx) {
+void RunPackageReload(const PackageCommandContext& ctx) {
     if (ctx.reload_packages == nullptr) {
         TermOut() << "这个装配没接会话 reload 口(单发/无交互栈),折不了新快照。\n"
                      "重启会话即可按最新目录与启停账装配。\n";
@@ -824,7 +827,7 @@ void RunPackageReload(SlashDispatchContext& ctx) {
 
 }  // namespace
 
-CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
+CommandFlow HandleSlashPackage(const PackageCommandContext& ctx,
                                const lubancode::cli::ParsedSlashCommand& parsed) {
     const ParsedPackageCommand command = ParsePackageCommand(parsed.args);
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);

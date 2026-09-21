@@ -8,13 +8,42 @@
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 
+#include <functional>
 #include <optional>
 #include <string>
+#include <vector>
+
+namespace lubancode::config {
+struct Config;
+}
+namespace lubancode::package {
+struct PackageMount;
+}
+namespace lubancode::tools {
+struct SkillMeta;
+}
 
 namespace lubancode::app {
 
-// 定义在 command_registry.hpp(struct;前置声明与定义统一,防 MSVC C4099)。
-struct SlashDispatchContext;
+// HC-06(材料收窄,第二小批):/package 的窄材料——扫描五路的根、doctor/
+// trust 的包外命名空间来源、会话钉快照与 reload 口,全借用(组合根装配,
+// 命令期间由控制器保活);空 = 没递,各动作按旧口径如实降级。
+struct PackageCommandContext {
+    // <home_lubancode> 根(user 层扫描位 + package-store 选中版本折算)。
+    const std::optional<std::string>* home_lubancode = nullptr;
+    // --package-dir 攒下的 dev 层目录(InteractiveSessionOptions.package_dirs
+    // 的借用;不直接递 opts,域文件不进会话层头)。空 = 没有 dev 层。
+    const std::vector<std::string>* dev_package_dirs = nullptr;
+    // config 的 mcpServers 键(doctor/trust 的包外 MCP 命名空间)。空 = 跳过。
+    const lubancode::config::Config* config = nullptr;
+    // 会话技能清单(doctor/trust 的包外 Skill 名)。空 = 跳过。
+    const std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
+    // 会话钉快照(list/show/enable-disable 的挂载状态)。空 = 没有包。
+    const lubancode::package::PackageMount* package_mount = nullptr;
+    // /package reload 的会话侧执行体:重折快照、原子换档、刷下游,回执行
+    // 逐行带回。空 = 没接(纯函数装配),reload 明说接不上。
+    std::function<std::vector<std::string>()> reload_packages;
+};
 
 enum class PackageCommandAction {
     Invalid,
@@ -39,8 +68,9 @@ struct ParsedPackageCommand {
 // Invalid,由 handler 统一打用法。
 ParsedPackageCommand ParsePackageCommand(const std::string& args);
 
-// /package 的分派位(命令注册表登册用)。
-CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
+// /package 的分派位(命令注册表登册用)。HC-06(材料收窄,第二小批)起
+// 只吃本域窄材料——Package 域编译不再需要 SlashDispatchContext。
+CommandFlow HandleSlashPackage(const PackageCommandContext& ctx,
                                const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app
