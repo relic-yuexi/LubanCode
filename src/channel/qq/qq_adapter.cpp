@@ -138,53 +138,25 @@ void QqBotAdapter::SetSpoolAppendFaultForTest(bool fail) {
 }
 
 void QqBotAdapter::WriteToSidecar(const std::byte* data, std::size_t size) {
-    host_frame_decoder_.Feed(data, size);
-    while (true) {
-        auto next = host_frame_decoder_.TryDecodeNext();
-        if (!next.has_value()) {
-            // 宿主来向帧坏:Fatal 通知(协议错由宿主状态机处置)。
-            EmitNotification(BridgeMethod::Fatal,
-                             nlohmann::json{{"reason", "invalid_frame"},
-                                            {"detail", next.error().message}});
-            return;
-        }
-        if (!next->has_value()) {
-            return;  // 半帧,等更多字节
-        }
-        HandleHostFrame(**next);
-    }
+    // 帧收发机械在共用件(SV-08):坏帧的 Fatal 通知、半帧等待、整帧分派
+    // 全由 bridge_ 处置,这里只递业务分派口。
+    bridge_.Feed(data, size,
+                 [this](const nlohmann::json& frame) { HandleHostFrame(frame); });
 }
 
-std::vector<std::byte> QqBotAdapter::DrainFromSidecar() {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    std::vector<std::byte> out = std::move(to_host_);
-    to_host_.clear();
-    return out;
-}
+std::vector<std::byte> QqBotAdapter::DrainFromSidecar() { return bridge_.Drain(); }
 
 void QqBotAdapter::ReplyResult(std::int64_t id, const nlohmann::json& result) {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    if (const auto encoded = EncodeFrame(BuildResultResponseJson(id, result));
-        encoded.has_value()) {
-        to_host_.insert(to_host_.end(), encoded->begin(), encoded->end());
-    }
+    bridge_.ReplyResult(id, result);
 }
 
 void QqBotAdapter::ReplyDomainError(std::int64_t id, DomainErrorName name,
                                     const std::string& detail) {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    if (const auto encoded = EncodeFrame(BuildDomainErrorResponseJson(id, name, detail));
-        encoded.has_value()) {
-        to_host_.insert(to_host_.end(), encoded->begin(), encoded->end());
-    }
+    bridge_.ReplyDomainError(id, name, detail);
 }
 
 void QqBotAdapter::EmitNotification(BridgeMethod method, const nlohmann::json& params) {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    if (const auto encoded = EncodeFrame(BuildNotificationJson(method, params));
-        encoded.has_value()) {
-        to_host_.insert(to_host_.end(), encoded->begin(), encoded->end());
-    }
+    bridge_.Notify(method, params);
 }
 
 std::string QqBotAdapter::NextDeliveryId() {
@@ -352,7 +324,7 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 pending.request.outbound_delivery_id = NextDeliveryId();
             }
             {
-                const std::lock_guard<std::mutex> lock(host_mutex_);
+                const std::lock_guard<std::mutex> lock(send_mutex_);
                 send_queue_.push_back(std::move(pending));
             }
             sender_wake_.notify_all();
@@ -384,7 +356,7 @@ void QqBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 return;
             }
             {
-                const std::lock_guard<std::mutex> lock(host_mutex_);
+                const std::lock_guard<std::mutex> lock(send_mutex_);
                 ack_queue_.push_back(std::move(ack));
             }
             sender_wake_.notify_all();
@@ -744,7 +716,7 @@ void QqBotAdapter::SenderLoop() {
     // 退避重试(DeferredRetry):1s/2s/4s 三次,仍失败按稳定名回宿主。
     constexpr int kMaxAttempts = 3;
     while (true) {
-        std::unique_lock<std::mutex> lock(host_mutex_);
+        std::unique_lock<std::mutex> lock(send_mutex_);
         sender_wake_.wait(lock, [this]() {
             return !send_queue_.empty() || !ack_queue_.empty() || stop_.load();
         });
@@ -892,7 +864,7 @@ void QqBotAdapter::ProcessAcks() {
     while (true) {
         std::optional<PendingAck> ack;
         {
-            const std::lock_guard<std::mutex> lock(host_mutex_);
+            const std::lock_guard<std::mutex> lock(send_mutex_);
             if (ack_queue_.empty()) {
                 return;
             }

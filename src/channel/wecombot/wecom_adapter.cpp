@@ -108,52 +108,25 @@ void WecombotAdapter::SetSpoolAppendFaultForTest(bool fail) {
 }
 
 void WecombotAdapter::WriteToSidecar(const std::byte* data, std::size_t size) {
-    host_frame_decoder_.Feed(data, size);
-    while (true) {
-        auto next = host_frame_decoder_.TryDecodeNext();
-        if (!next.has_value()) {
-            EmitNotification(BridgeMethod::Fatal,
-                             nlohmann::json{{"reason", "invalid_frame"},
-                                            {"detail", next.error().message}});
-            return;
-        }
-        if (!next->has_value()) {
-            return;  // 半帧,等更多字节
-        }
-        HandleHostFrame(**next);
-    }
+    // 帧收发机械在共用件(SV-08):坏帧的 Fatal 通知、半帧等待、整帧分派
+    // 全由 bridge_ 处置,这里只递业务分派口。
+    bridge_.Feed(data, size,
+                 [this](const nlohmann::json& frame) { HandleHostFrame(frame); });
 }
 
-std::vector<std::byte> WecombotAdapter::DrainFromSidecar() {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    std::vector<std::byte> out = std::move(to_host_);
-    to_host_.clear();
-    return out;
-}
+std::vector<std::byte> WecombotAdapter::DrainFromSidecar() { return bridge_.Drain(); }
 
 void WecombotAdapter::ReplyResult(std::int64_t id, const nlohmann::json& result) {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    if (const auto encoded = EncodeFrame(BuildResultResponseJson(id, result));
-        encoded.has_value()) {
-        to_host_.insert(to_host_.end(), encoded->begin(), encoded->end());
-    }
+    bridge_.ReplyResult(id, result);
 }
 
 void WecombotAdapter::ReplyDomainError(std::int64_t id, DomainErrorName name,
                                        const std::string& detail) {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    if (const auto encoded = EncodeFrame(BuildDomainErrorResponseJson(id, name, detail));
-        encoded.has_value()) {
-        to_host_.insert(to_host_.end(), encoded->begin(), encoded->end());
-    }
+    bridge_.ReplyDomainError(id, name, detail);
 }
 
 void WecombotAdapter::EmitNotification(BridgeMethod method, const nlohmann::json& params) {
-    const std::lock_guard<std::mutex> lock(host_mutex_);
-    if (const auto encoded = EncodeFrame(BuildNotificationJson(method, params));
-        encoded.has_value()) {
-        to_host_.insert(to_host_.end(), encoded->begin(), encoded->end());
-    }
+    bridge_.Notify(method, params);
 }
 
 std::string WecombotAdapter::NextDeliveryId() {
@@ -322,7 +295,7 @@ void WecombotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
                 pending.outbound_delivery_id = NextDeliveryId();
             }
             {
-                const std::lock_guard<std::mutex> lock(host_mutex_);
+                const std::lock_guard<std::mutex> lock(send_mutex_);
                 send_queue_.push_back(std::move(pending));
             }
             sender_wake_.notify_all();
@@ -596,7 +569,7 @@ bool WecombotAdapter::SleepSendInterruptible(std::int64_t ms) {
 
 void WecombotAdapter::SenderLoop() {
     while (true) {
-        std::unique_lock<std::mutex> lock(host_mutex_);
+        std::unique_lock<std::mutex> lock(send_mutex_);
         sender_wake_.wait(lock, [this]() { return !send_queue_.empty() || stop_.load(); });
         if (stop_.load()) {
             // 停止收口:队列整批排空——未发的如实回 domain 错,不冒充送达。

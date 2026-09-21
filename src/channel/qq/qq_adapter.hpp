@@ -6,9 +6,10 @@
 // 线程组(一只网关线程 + 一只发送线程),无 spawn、无 stdio、无环境继承。
 //
 // 线程与锁:宿主在 ChannelManager 锁内调 WriteToSidecar/DrainFromSidecar,
-// 两条口只做入队/取队,绝不在锁内碰网络;IO 归内部线程。to_host_ 缓冲由
-// 自家 mutex 保护。凭据(ResolvedChannelCredential)只在进程内持有,不落
-// 日志、不进任何错误文案。
+// 两条口只做入队/取队,绝不在锁内碰网络;IO 归内部线程。Bridge 帧收发
+//(宿主来向解码 + to_host 出站缓冲)归共用件 InProcessBridgeEndpoint
+//(SV-08);发送队列由 send_mutex_ 保护。凭据(ResolvedChannelCredential)
+// 只在进程内持有,不落日志、不进任何错误文案。
 #pragma once
 
 #include <atomic>
@@ -22,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "channel/bridge_endpoint.hpp"
 #include "channel/channel_config.hpp"
 #include "channel/credentials.hpp"
 #include "channel/manager.hpp"
@@ -149,7 +151,7 @@ private:
         std::optional<QqOutboundMedia> media;
         int attempts = 0;
     };
-    std::vector<PendingSend> send_queue_;  // 由 host_mutex_ 保护(与 to_host 同锁)
+    std::vector<PendingSend> send_queue_;  // 由 send_mutex_ 保护(sender_wake_ 同锁)
     // Q6 互动回应队列(发送线程消费;与 send_queue_ 同锁同唤醒)。
     struct PendingAck {
         std::int64_t request_id = 0;
@@ -169,13 +171,14 @@ private:
     std::atomic<std::uint64_t> unsupported_dispatch_count_{0};
 
     // ConnectionState 的账(网关线程写/宿主线程读,独立小锁,不与
-    // host_mutex_ 交叉)。
+    // send_mutex_ 交叉)。
     mutable std::mutex connection_mutex_;
     ConnectionSnapshot connection_;
 
-    std::mutex host_mutex_;         // to_host_ 与 send_queue_ 的账
-    std::vector<std::byte> to_host_;
-    FrameDecoder host_frame_decoder_;  // 宿主来向帧解码(仅宿主线程喂)
+    // Bridge 帧收发机械(SV-08 共用件):解码循环/出站缓冲/输出锁全在
+    // bridge_;本类只剩 HandleHostFrame 业务分派与平台账。
+    InProcessBridgeEndpoint bridge_;
+    std::mutex send_mutex_;  // send_queue_ 与 ack_queue_ 的账
 
     std::mt19937 delivery_rng_{std::random_device{}()};
     std::atomic<std::uint64_t> delivery_counter_{0};
