@@ -27,6 +27,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "app_server/http_support.hpp"
 #include "app_server/local_web_server.hpp"
 #include "app_server/ws_frames.hpp"
 #include "app_server/ws_sockets.hpp"
@@ -573,4 +574,46 @@ TEST_CASE("local web:artifact 过会话门——401 在前,200 带字节与 CSP,
 
     std::error_code ec;
     std::filesystem::remove_all(artifact_root, ec);
+}
+
+TEST_CASE("local web:头部 16KiB 边界——恰在限内放行,越界拒断") {
+    WebServerHarness harness("lubancode_test_webui_headlimit");
+    harness.Start();
+    const int port = harness.port();
+
+    // 头部本体(含 \r\n\r\n 终止符)造到指定总长:固定部分之外用 X-Pad 填。
+    const auto make_request = [port](std::size_t total_head_bytes) {
+        const std::string fixed = "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:" +
+                                  std::to_string(port) + "\r\nConnection: close\r\n";
+        const std::size_t pad = total_head_bytes - fixed.size() - std::string("X-Pad: ").size() - 2 - 4;
+        return fixed + "X-Pad: " + std::string(pad, 'x') + "\r\n\r\n";
+    };
+
+    SUBCASE("头部本体恰 16KiB(含终止符):照常应答") {
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(make_request(app_server::kMaxHeaderBytes));
+        CHECK(reply.status == 200);
+    }
+    SUBCASE("头部本体 16KiB+1:含终止符的最后一块拉过限,拒——无应答") {
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(make_request(app_server::kMaxHeaderBytes + 1));
+        CHECK(reply.status == 0);
+        CHECK(reply.header.empty());
+    }
+    SUBCASE("超长流无终止符:到限即断,无应答") {
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(std::string(20 * 1024, 'x'));
+        CHECK(reply.status == 0);
+        CHECK(reply.header.empty());
+    }
+    SUBCASE("越界之后服务照常伺候下一条连接") {
+        {
+            RawHttpClient client(port);
+            const HttpReply reply = client.RoundTrip(make_request(app_server::kMaxHeaderBytes + 2048));
+            CHECK(reply.status == 0);
+        }
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(Get(port, "/healthz"));
+        CHECK(reply.status == 200);
+    }
 }

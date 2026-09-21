@@ -448,3 +448,49 @@ TEST_CASE("ws artifact 面:GET 之后 WS 升级照常(承载面互不搅)") {
     CHECK(session_future.get() != nullptr); // Accept 交出了升级 Session
     accept_thread.join();
 }
+
+// 公共读头(http_support,HC-03 行为批):上限只算头部本体,越界(含终止
+// 符的最后一块拉过限、或超长流无终止符)一律拒断——两套承载同一只读头,
+// local web 侧的对偶测试在 test_local_web_server.cpp。
+TEST_CASE("ws artifact 面:头部越 16KiB 拒断,承载面照常伺候下一条") {
+    const std::string dir = MakeTempDir("lubancode_test_ws_artifact_headlimit");
+    PlantFile(dir, "art-01234567.png", PngBytes("after-limit"));
+
+    ArtifactHarness harness(dir);
+    std::thread accept_thread([&] {
+        while (harness.transport->Accept() != nullptr) {
+        }
+    });
+
+    const std::string upgrade_head =
+        "GET /ws HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n";
+
+    // 头部本体越过 16KiB(填充头一行顶过限):拒断——无 101 无 400,连接
+    // 直接收线(修复前含终止符的最后一块会漏过上限检查照常升级)。
+    {
+        RawHttpClient client(harness.port());
+        const std::string padded =
+            upgrade_head + "X-Pad: " + std::string(17 * 1024, 'x') + "\r\n\r\n";
+        CHECK(client.SendRaw(padded).empty());
+    }
+    // 超长流无终止符:到限即断。
+    {
+        RawHttpClient client(harness.port());
+        CHECK(client.SendRaw(upgrade_head + "X-Pad: " + std::string(20 * 1024, 'x')).empty());
+    }
+    // 下一条正常连接照常伺候(承载面没被捣乱的拖垮)。
+    {
+        RawHttpClient client(harness.port());
+        const auto shape = ParseResponse(client.Get("/artifact/art-01234567.png"));
+        CHECK(shape.status == 200);
+        CHECK(shape.body == PngBytes("after-limit"));
+    }
+
+    harness.transport->Stop();
+    accept_thread.join();
+}

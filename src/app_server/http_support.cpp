@@ -13,8 +13,17 @@ namespace lubancode::app_server {
 
 bool ReadUntilHeaderEnd(net::Socket& socket, std::string& header) {
     char buffer[2048];
-    while (header.find("\r\n\r\n") == std::string::npos) {
-        if (header.size() > kMaxHeaderBytes) {
+    while (true) {
+        const std::size_t head_end = header.find("\r\n\r\n");
+        if (head_end != std::string::npos) {
+            // 上限只算头部本体(含 \r\n\r\n 终止符);终止符之后同包挤进来
+            // 的先头字节(POST body 前缀)不计——合法随包 POST 不误拒。
+            return head_end + 4 <= kMaxHeaderBytes;
+        }
+        // 还没见终止符:已收的字节全是头部本体,哪怕终止符紧随其后也至少
+        // 再进一字节——此时越界。检查放在每轮开头(原实现只在 Recv 之前
+        // 查,含终止符的最后一块把缓冲拉过上限时循环条件直接退出,漏过)。
+        if (header.size() >= kMaxHeaderBytes) {
             return false;
         }
         const long got = socket.Recv(buffer, sizeof(buffer));
@@ -23,7 +32,6 @@ bool ReadUntilHeaderEnd(net::Socket& socket, std::string& header) {
         }
         header.append(buffer, buffer + got);
     }
-    return true;
 }
 
 bool ConstantTimeEqual(std::string_view given, std::string_view expected) {

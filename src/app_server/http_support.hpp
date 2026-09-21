@@ -24,9 +24,10 @@ inline constexpr std::size_t kMaxHeaderBytes = 16 * 1024;
 // 约束;这里再兜一层,超了按"没有这枚"回,不当流媒体伺候。
 inline constexpr std::uintmax_t kMaxArtifactBytes = 64ull * 1024 * 1024;
 
-// 一口一口读到 \r\n\r\n 或断/超上限。返回 false = 断/坏。读到的一切都进
-// header——含终止符之后同一段 TCP 挤进来的先头字节(POST body 前缀),
-// 劈开是调用方的事。
+// 一口一口读到 \r\n\r\n 或断/超上限。返回 false = 断/坏。上限只算头部
+// 本体(含 \r\n\r\n 终止符):终止符之后同一段 TCP 挤进来的先头字节
+// (POST body 前缀)不计,合法随包 POST 不误拒;含终止符的最后一块把
+// 头部本体拉过上限也拒。读到的一切都进 header,劈开是调用方的事。
 bool ReadUntilHeaderEnd(net::Socket& socket, std::string& header);
 
 // 恒时比较:逐字节累积差,不短路——不给计时侧信道留口。长度不同直接
