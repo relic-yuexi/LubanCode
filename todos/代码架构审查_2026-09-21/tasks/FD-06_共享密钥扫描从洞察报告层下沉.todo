@@ -1,0 +1,51 @@
+# FD-06 共享密钥扫描从洞察报告层下沉
+
+- 状态：待实现；本次仅审查并建单。
+- 日期：2026-09-21。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：C；严重度：中；重构批次：3。
+- 前置：AR-11（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-06 | C | 中 | src/trajectory/export_projection.hpp:30；src/trajectory/export_projection.hpp:208；src/telemetry/redactor.cpp:9；src/insights/redaction.cpp:56；src/insights/redaction.cpp:204；src/insights/friction_classifier.cpp:7 | `trajectory/export_projection.hpp` include `insights/redaction.hpp` 并调用 `insights::ScanSecrets`；同一 redaction.cpp 后半又维护 report/session-summary 的 `WalkAllowlist`。 | 通用凭据识别规则与洞察报告 schema 放在同一实现件。轨迹导出本该给分析层供事实，却反向依赖洞察层；形成 insights↔trajectory 模块环。改报告字段白名单会触碰轨迹导出依赖对象，独立打包轨迹导出也须携带洞察实现。 | 保留当前 ScanSecrets/RedactSecrets 算法，原样搬到独立无业务依赖的 privacy/secret_scan 小库或等价公共层；insights 留报告字段允许表，telemetry 留其URL/路径/数据档规则，trajectory 留导出处置策略。各域旧符号短期委托后退役。 | 迁移必须保留命中范围、类型名与替换字节；检测和处置不要混成万能Redactor。移动约200行不等于删除200行。 |
+
+## 修改边界
+
+- `src/insights/redaction.hpp`
+- `src/insights/redaction.cpp`
+- `src/trajectory/export_projection.hpp`
+- `src/trajectory/harness_exporter.cpp`
+- `src/telemetry/redactor.cpp`
+- `CMakeLists.txt`
+
+## 实施顺序
+
+- [ ] 先抽纯检测类型与算法，保留旧入口委托。
+- [ ] 迁移三个消费者，最后收旧声明。
+
+## 验收门
+
+- [ ] 迁移前后同一secret语料逐字节输出相同。
+- [ ] trajectory不再include insights；insights仍可消费trajectory。
+- [ ] 报告字段允许表仍归insights，telemetry路径假名化规则不变。
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+
+## 合并取舍与估量
+
+应共享凭据检测；不合并三域各自的拒绝、替换、允许表策略。
+
+预计可删除行数：0。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：未要求合并既有总设计单。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：AR-11
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-11（src/telemetry/redactor.cpp）。
