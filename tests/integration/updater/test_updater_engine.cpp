@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,7 @@
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "updater/engine.hpp"
+#include "updater/flat_handover.hpp"
 #include "updater/layout.hpp"
 #include "updater/manifest.hpp"
 #include "updater/probe.hpp"
@@ -444,6 +446,35 @@ bool StagingEmpty(const fs::path& root) {
     return true;
 }
 
+// 平铺备份的受管树与根级记录件排除表(与引擎/专用模块同表:python
+// install_plan.ROLE_TOP_DIRS / RECORD_FILES)。
+const std::vector<std::string>& FlatTrees() {
+    static const std::vector<std::string> kTrees = {
+        "skills", "docs", "web", "libexec", "licenses", "updater"};
+    return kTrees;
+}
+
+const std::vector<std::string>& FlatRecords() {
+    static const std::vector<std::string> kRecords = {"manifest.json", "install-state.json"};
+    return kRecords;
+}
+
+// 目录树下全部常规文件入账(相对路径 -> 内容),对拍用:只比文件集与
+// 内容,空目录/遍历序不作约定。
+std::map<std::string, std::string> TreeFiles(const fs::path& dir) {
+    std::map<std::string, std::string> files;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec) || ec) return files;
+    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (ec || !it->is_regular_file()) continue;
+        std::error_code rel_ec;
+        const fs::path rel = fs::relative(it->path(), dir, rel_ec);
+        if (rel_ec || rel.empty()) continue;
+        files[rel.generic_string()] = ReadFile(it->path());
+    }
+    return files;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -647,6 +678,86 @@ TEST_CASE("engine.update:平铺 -> 版本化端到端 + 幂等重跑免下载") 
     for (const fs::path& ledger : ledgers2) {
         CHECK(LedgerField(ledger, "state") == std::optional<std::string>("committed"));
     }
+}
+
+TEST_CASE("engine.update:平铺交接引擎路与专用模块路对拍——同输入同产物") {
+    // SV-03 合同钉:RunUpdaterEngine 全链(引擎主链)与 flat_handover 专用
+    // 三口(FlatFullBackup/HandoverFlatLauncher/RestoreFlatLegacy)吃同一
+    // 平铺输入,产物逐文件对账——收敛前钉住两路等价(无链接输入下),收
+    // 敛后钉住"引擎主链走的就是专用实现"不漂移。链接/reparse 的差异政策
+    // 由专用册显式钉(备份不复制不跟进),此处不掺链接输入。
+    const std::string old_exe_bytes = "old flat exe bytes";
+
+    // 场 A:引擎全链。包里带 updater 树文件,让交接同步有产物可对。
+    const fs::path root_a = TempRoot("parity-engine");
+    {
+        EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+        WriteFile(root_a / kExeName, old_exe_bytes);
+        WriteFile(root_a / "skills" / "user-note.md", "用户改动");
+        WriteFile(root_a / "config.toml", "user config");
+        const Package pkg = BuildPackage({.version = "2.0.0",
+                                          .extra_files = {{"updater/helper.txt", "UPD-NEW"},
+                                                          {"updater/sub/deep.txt", "UPD-DEEP"},
+                                                          {"README.md", "hello"}}});
+        const fs::path archive = root_a.parent_path() / (root_a.filename().string() + "-pkg.zip");
+        WriteFile(archive, pkg.bytes);
+        Lines out;
+        CHECK(RunUpdaterEngine(UpdateArgs(root_a, archive, "2.0.0", pkg.digest_hex), out.sink(),
+                               nullptr) == 0);
+        CHECK(out.contains("[backup] 平铺安装完整备份: "));
+        CHECK(out.contains("[commit] 2.0.0 已上线"));
+    }
+    const auto ledgers_a = LedgerFiles(root_a);
+    REQUIRE(ledgers_a.size() == 1);
+    const std::string txn_a = ledgers_a[0].stem().string();
+    const auto paths_a = lubancode::updater::MakeLayoutPaths(root_a);
+
+    // 场 B:专用模块直调,同输入手铺(版本目录带同样的 updater 树)。
+    const fs::path root_b = TempRoot("parity-direct");
+    const auto paths_b = lubancode::updater::MakeLayoutPaths(root_b);
+    const std::string txn_b = "20260921T000000Z-parity0";
+    WriteFile(root_b / kExeName, old_exe_bytes);
+    WriteFile(root_b / "skills" / "user-note.md", "用户改动");
+    WriteFile(root_b / "config.toml", "user config");
+    const fs::path version_b = root_b / "versions" / MakeVersionDir(root_b, "2.0.0");
+    WriteFile(version_b / "updater" / "helper.txt", "UPD-NEW");
+    WriteFile(version_b / "updater" / "sub" / "deep.txt", "UPD-DEEP");
+    const auto backed = lubancode::updater::FlatFullBackup(root_b, FlatTrees(), FlatRecords(), txn_b);
+    REQUIRE(backed.has_value());
+    REQUIRE(backed->has_value());
+    CHECK(**backed == root_b / "backups" / txn_b / "flat");
+    const auto handed = lubancode::updater::HandoverFlatLauncher(paths_b, txn_b, version_b);
+    REQUIRE(handed.has_value());
+
+    // 对拍:完整备份集逐文件对账(树+根级用户件+根位旧 EXE,记录件排除)。
+    CHECK(TreeFiles(root_a / "backups" / txn_a / "flat") ==
+          TreeFiles(root_b / "backups" / txn_b / "flat"));
+    CHECK(TreeFiles(root_a / "backups" / txn_a / "flat").size() == 3);  // exe+skills+config
+    // 对拍:交接产物——旧 EXE 进 legacy、根位落新 EXE、updater 树同步到根。
+    CHECK(ReadFile(root_a / "backups" / txn_a / "legacy" / kExeName) == old_exe_bytes);
+    CHECK(ReadFile(root_b / "backups" / txn_b / "legacy" / kExeName) == old_exe_bytes);
+    CHECK(ReadFile(root_a / kExeName) == StubExeBytes());
+    CHECK(ReadFile(root_b / kExeName) == StubExeBytes());
+    CHECK(TreeFiles(root_a / "updater") == TreeFiles(root_b / "updater"));
+    CHECK(TreeFiles(root_a / "updater").size() == 2);
+
+    // 对拍:恢复——引擎交接的现场由专用模块恢复(证明引擎产物与专用合同
+    // 互通),专用现场自恢复;两路恢复后根位同旧、新 EXE 同停 parked、
+    // current 同摘。
+    REQUIRE(fs::exists(paths_a.current));
+    const auto restore_a = lubancode::updater::RestoreFlatLegacy(paths_a, txn_a);
+    REQUIRE(restore_a.has_value());
+    CHECK(*restore_a);
+    const auto restore_b = lubancode::updater::RestoreFlatLegacy(paths_b, txn_b);
+    REQUIRE(restore_b.has_value());
+    CHECK(*restore_b);
+    CHECK(ReadFile(root_a / kExeName) == old_exe_bytes);
+    CHECK(ReadFile(root_b / kExeName) == old_exe_bytes);
+    const std::string parked = std::string("launcher-parked-") + kExeName;
+    CHECK(ReadFile(root_a / "backups" / txn_a / parked) == StubExeBytes());
+    CHECK(ReadFile(root_b / "backups" / txn_b / parked) == StubExeBytes());
+    CHECK_FALSE(fs::exists(paths_a.current));
+    CHECK_FALSE(fs::exists(paths_b.current));
 }
 
 TEST_CASE("engine.update:needs-review 停档续跑——同事务、不重下") {
