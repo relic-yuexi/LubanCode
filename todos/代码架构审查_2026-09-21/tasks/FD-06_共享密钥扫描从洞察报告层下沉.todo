@@ -1,6 +1,6 @@
 # FD-06 共享密钥扫描从洞察报告层下沉
 
-- 状态：待实现；本次仅审查并建单。
+- 状态：已实现，PR #192 CI 全绿待合并（windows-msvc/macOS-clang 双平台腿全 success，rollup success，run 35637489811；首跑 macOS 腿挂 integration.updater.updater_lock 一枚真子进程锁时序 flaky，与本单无涉，重跑失败腿后 attempt 2 全绿）。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：C；严重度：中；重构批次：3。
@@ -24,16 +24,17 @@
 
 ## 实施顺序
 
-- [ ] 先抽纯检测类型与算法，保留旧入口委托。
-- [ ] 迁移三个消费者，最后收旧声明。
+- [x] 先抽纯检测类型与算法，保留旧入口委托。（commit 282ff5d0：ScanSecrets/RedactSecrets/SecretKind/SecretHit/SecretKindName 自 insights/redaction.cpp 逐字节原样搬 src/privacy/secret_scan.{hpp,cpp}，namespace lubancode::privacy，零业务依赖，挂 lubancode_engine；insights 旧符号改过渡委托（using + inline 转发），行为逐字节相同。）
+- [x] 迁移三个消费者，最后收旧声明。（commit a6677004：trajectory 三件（export_projection.hpp/harness_exporter.cpp/training_exporter.cpp，后者摘多余 include）、telemetry/redactor.cpp、insights/html_renderer.cpp、app 两命令（insights_commands/prompt_audit_commands）、runtime/headless_progress.cpp 全部换 privacy 入口；insights/redaction 只留报告字段允许表，旧扫描声明收口，全仓已无 insights::ScanSecrets/RedactSecrets/SecretKind/SecretHit/SecretKindName 引用（grep 证零残留）。）
 
 ## 验收门
 
-- [ ] 迁移前后同一secret语料逐字节输出相同。
-- [ ] trajectory不再include insights；insights仍可消费trajectory。
-- [ ] 报告字段允许表仍归insights，telemetry路径假名化规则不变。
+- [x] 迁移前后同一secret语料逐字节输出相同。（commit e9608fce 先立合同册 tests/unit/privacy/test_secret_scan_contract.cpp：期望值全部写死——ScanSecrets 钉命中枚数/kind 次序/offset+length 圈回的原文片段，RedactSecrets 钉整串输出；语料盖住 header 整行锚点、环境变量赋值（含"尾巴门槛量整串"现行怪癖）、前缀令牌（尾长门槛/大小写敏感/词边界/sk-ant- 重叠单报）、私钥块头、连接串（行内 @ 才报、https 不在表）、重叠取先到、无命中透传。下沉挪册只翻 include 与 using（git 相似度 98%），期望值一字不动。）
+- [x] trajectory不再include insights；insights仍可消费trajectory。（grep 证：src/trajectory 下 #include "insights/ 0 处；insights/friction_classifier.cpp 吃 trajectory/v3/envelope.hpp 的正路未动。新增守门册 tests/unit/trajectory/test_trajectory_dependency_gate.cpp 钉死——src/trajectory 任何源文件再现 insights include 即败，防环回来。）
+- [x] 报告字段允许表仍归insights，telemetry路径假名化规则不变。（IsAllowedReportFieldPath/WalkAllowlist 原样留 insights/redaction.{hpp,cpp}；telemetry/redactor.cpp 只换扫描入口为 privacy::，URL sanitizer/路径假名化/UTF-8 长度帽（AR-11 刀口）三道闸一字未动；skills::RedactSecrets（workflow_recorder 一系）词表未碰，统一归 SV-12，边界已写进 secret_scan.hpp 文件头。）
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+  - 本单证据：PR #192，run 35637489811——windows-msvc 与 macos-clang 双平台腿 success（src/telemetry/* 在 windows 敏感面名单，敏感腿绿），changes/lane/install-scripts(ubuntu,windows) 全 success，linux 系腿按设计 skipped，attempt 2 rollup conclusion success。首跑 macOS 腿 integration.updater.updater_lock（真子进程持锁时序册，test_updater_lock.cpp:286，与本单 diff 无涉）单枚红，gh run rerun --failed 后全绿；本单三册相关测试（unit.privacy.secret_scan_contract/unit.insights.redaction_canary/unit.telemetry.telemetry_redactor/unit.trajectory.trajectory_dependency_gate）双平台全 Passed。
 
 ## 合并取舍与估量
 
