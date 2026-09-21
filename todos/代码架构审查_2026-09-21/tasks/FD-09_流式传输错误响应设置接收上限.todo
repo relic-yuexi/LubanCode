@@ -1,0 +1,50 @@
+# FD-09 流式传输错误响应设置接收上限
+
+- 状态：已实现并验收。PR #179（CI run 35578085448 rollup success：windows-msvc + macos-clang 双绿；`integration.process.network_timeout` 在 windows 腿 Passed 27.18s，含新增 6 用例）。
+- 日期：2026-09-21。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：B；严重度：高；重构批次：2。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-09 | B | 高 | src/api/http_stream_transport.cpp:113；src/api/http_stream_transport.cpp:117；src/api/sse_framing.hpp:29；src/net/http_transport.cpp:477 | 非2xx分支：`error_body.append(data); return true;`；2xx进入有8MiB单帧帽的SseFramer；另一HTTP底座在append前检查 `limits.response_body_bytes`。 | 提供商错误响应绕开SSE容量门，持续大体积4xx/5xx响应会一直攒进string，直至传输结束/硬超时。时间上限不等于字节上限。同一传输件在成功与错误路径采用两套资源合同；没证据说已发生OOM，但无界增长路径明确。 | 在HttpStreamCall声明错误体最大字节数，在回调入口先检查再追加；记录截断/终止稳定原因，保留有限错误摘要。共享容量检查原语可复用，SSE与非流式接口仍各自保留。溢出不能归Network再自动重试六轮。 | 错误摘要必须仍可诊断、仍走密钥脱敏；不把成功流整体改成8MiB总量限制。 |
+
+## 修改边界
+
+- `src/api/http_stream_transport.hpp`
+- `src/api/http_stream_transport.cpp`
+- `tests/integration/process/test_network_timeout.cpp`
+
+## 实施顺序
+
+- [x] 先钉容量与错误分类合同。（`HttpStreamCall::kMaxErrorBodyBytes` = 1MiB + 头文件超帽行为合同；收场分型插入位：取消 > 帧溢出 > 错误体帽 > 网络错 > 状态，超帽报 `ErrorKind::HttpStatus` 不进 Network 重试环。）
+- [x] 给错误分支补接收帽，复用有限摘要。（WriteCallback 入口"这一段放进去就超就不放、就地掐流，正好到帽不超"，与 net/http_transport 同套语义；截断说明拼 message 头部，日志首行与 SummarizeErrorBodyForUser 都看得见，密钥打码同路径。）
+- [x] 用fake HTTP fixture验收成功/错误两条路径。（test_network_timeout.cpp 直调 PostSseStream 注小帽，fake socket 服务器一律不带 Content-Length。）
+
+## 验收门
+
+- [x] 本地fixture分块发超大错误体，断言回调在帽内停止且内存保留量有界。（用例"连接式错误体超过接收帽"：4KiB 分块发至 4MiB、帽 16KiB，断言 message.size() < 帽 + 200。）
+- [x] 覆盖正好到帽、零长度、chunk大于剩余容量、取消与超限同拍。（六用例：超大连接式错误体、正好到帽 4096/4096、超一字节 100 帽发 150、零长度兜底文案回归、取消与超帽同拍报 Cancelled、2xx 成功流越过 1KiB 小帽照常收完 11.7KiB。）
+- [x] 错误体超限不触发普通网络重试；正常长SSE仍按单帧限制。（超帽分型 HttpStatus 而非 Network——IsRetryableError 对 Network 一律重试；429/5xx 既有重试语义不变；成功流单帧粒度仍归 SseFramer 8MiB 帽，用例钉"总量越帽照常收完"。）
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+  - 勾账证据：PR #179，CI run 35578085448 rollup success（windows-msvc + macos-clang 双绿）。macos 首跑 SIGPIPE 炸测试进程（掐流后假服务器继续 send），修复 commit 346c9b50（SendIfAlive：Linux MSG_NOSIGNAL / macOS SO_NOSIGPIPE）后双绿。
+
+## 合并取舍与估量
+
+不合并SSE与非流式传输：前者增量帧、后者完整响应与DNS钉地址；只共享接收帽等低层机制。
+
+预计可删除行数：0。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：未要求合并既有总设计单。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
