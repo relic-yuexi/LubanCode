@@ -159,15 +159,16 @@ struct WebServerHarness {
     std::atomic<int> ws_sessions{0};
     std::atomic<bool> started{false};
 
-    explicit WebServerHarness(const char* name, int port = 0)
+    explicit WebServerHarness(const char* name, int port = 0, const std::string& artifact_dir = "")
         : assets(name),
-          server(MakeOptions(port)) {}
+          server(MakeOptions(port, artifact_dir)) {}
 
-    app_server::LocalWebOptions MakeOptions(int port) {
+    app_server::LocalWebOptions MakeOptions(int port, const std::string& artifact_dir) {
         app_server::LocalWebOptions options;
         options.port = port;
         options.assets_root = assets.root;
         options.manifest = app_server::AssistantWebManifest();
+        options.artifact_dir = artifact_dir;
         options.validate_session = [this](const std::string& value) {
             return auth.ValidateSession(value);
         };
@@ -489,4 +490,87 @@ TEST_CASE("local web:WS 升级过会话门——无 cookie 401,有 cookie 应 10
         }
         CHECK(harness.ws_sessions.load() == 1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 公共读头(http_support,HC-03):拆包与 artifact 正路径
+// ---------------------------------------------------------------------------
+
+TEST_CASE("local web:头部拆包到齐才处理(公共读头循环收)") {
+    WebServerHarness harness("lubancode_test_webui_split");
+    harness.Start();
+    const int port = harness.port();
+
+    app_server::net::Socket socket;
+    std::string error;
+    socket = app_server::net::ConnectTcp("127.0.0.1", port, error);
+    REQUIRE(socket.valid());
+    const std::string request = Get(port, "/healthz");
+    // 劈两段:第一段连请求行都没完,更没有 \r\n\r\n——服务端必须接着等。
+    const std::size_t split = 20;
+    REQUIRE(socket.SendAll(request.substr(0, split)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    REQUIRE(socket.SendAll(request.substr(split)));
+    socket.SetRecvTimeoutMs(2000);
+    std::string all;
+    char buffer[4096];
+    while (true) {
+        const long got = socket.Recv(buffer, sizeof(buffer));
+        if (got <= 0) {
+            break;
+        }
+        all.append(buffer, buffer + got);
+    }
+    CHECK(all.rfind("HTTP/1.1 200", 0) == 0);
+    CHECK(all.find("\"ok\":true") != std::string::npos);
+}
+
+TEST_CASE("local web:artifact 过会话门——401 在前,200 带字节与 CSP,404 同一只加载器") {
+    const std::filesystem::path artifact_root =
+        std::filesystem::temp_directory_path() / "lubancode_test_webui_artifact";
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(artifact_root, ec);
+        std::filesystem::create_directories(artifact_root, ec);
+    }
+    const std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + "gated-by-cookie";
+    {
+        std::ofstream out(artifact_root / tools::Utf8ToPath("art-01234567.png"), std::ios::binary);
+        out.write(png.data(), static_cast<std::streamsize>(png.size()));
+    }
+
+    WebServerHarness harness("lubancode_test_webui_artifact", 0, artifact_root.string());
+    harness.Start();
+    const int port = harness.port();
+
+    // 未授权:401(会话门在前),不碰文件系统。
+    {
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(Get(port, "/artifact/art-01234567.png"));
+        CHECK(reply.status == 401);
+    }
+    // 有会话:200,字节原样,Content-Type/CSP 头照旧(策略差异保留)。
+    const std::string cookie = ExchangeForCookie(port, harness.auth.bootstrap_secret);
+    {
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(
+            Get(port, "/artifact/art-01234567.png",
+                "Cookie: lubancode_assistant_session=" + cookie + "\r\n"));
+        CHECK(reply.status == 200);
+        CHECK(reply.header.find("Content-Type: image/png") != std::string::npos);
+        CHECK(reply.header.find("Content-Security-Policy:") != std::string::npos);
+        CHECK(reply.body == png);
+    }
+    // 形状对但没这枚:404,与 WS 承载同一只加载器、同一句话。
+    {
+        RawHttpClient client(port);
+        const HttpReply reply = client.RoundTrip(
+            Get(port, "/artifact/art-ffffffff.png",
+                "Cookie: lubancode_assistant_session=" + cookie + "\r\n"));
+        CHECK(reply.status == 404);
+        CHECK(reply.body.find("no such artifact") != std::string::npos);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(artifact_root, ec);
 }

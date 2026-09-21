@@ -16,6 +16,7 @@
 #include <string_view>
 #include <thread>
 
+#include "app_server/http_support.hpp"
 #include "app_server/ws_frames.hpp"
 #include "app_server/ws_sockets.hpp"
 #include "app_server/ws_transport.hpp"
@@ -244,6 +245,44 @@ TEST_CASE("artifact 面:HTTP 应答拼装(头与正文字节)") {
     CHECK(response.find("Content-Length: 4\r\n") != std::string::npos);
     CHECK(response.find("Access-Control-Allow-Origin: *\r\n") != std::string::npos);
     CHECK(response.substr(response.size() - 6) == "\r\n\x89PNG"); // 头收尾 + 正文原样
+}
+
+// 公共加载器(HC-03:两套承载同一份;WS 与助理 Web 的线上测试分别在
+// 本册与 test_local_web_server.cpp 钉行为,这里钉函数本身的返回口径)。
+TEST_CASE("artifact 加载器:好名字读出字节与 MIME,其余一律 ok=false") {
+    const std::string dir = MakeTempDir("lubancode_test_ws_artifact_loader");
+    const std::string png = PngBytes("loader");
+    PlantFile(dir, "art-01234567.png", png);
+    PlantFile(dir, "art-89abcdef.jpg", "jpg-bytes");
+    PlantFile(dir, "art-abcdef01.jpeg", "jpeg-bytes");
+    PlantFile(dir, "secret.txt", "TOP-SECRET-BYTES");
+
+    SUBCASE("ok:字节原样,MIME 三选一") {
+        const auto got_png = app_server::LoadArtifactBytes(dir, "art-01234567.png");
+        REQUIRE(got_png.ok);
+        CHECK(got_png.bytes == png);
+        CHECK(std::string_view(got_png.mime) == "image/png");
+
+        const auto got_jpg = app_server::LoadArtifactBytes(dir, "art-89abcdef.jpg");
+        REQUIRE(got_jpg.ok);
+        CHECK(got_jpg.bytes == "jpg-bytes");
+        CHECK(std::string_view(got_jpg.mime) == "image/jpeg");
+
+        const auto got_jpeg = app_server::LoadArtifactBytes(dir, "art-abcdef01.jpeg");
+        REQUIRE(got_jpeg.ok);
+        CHECK(got_jpeg.bytes == "jpeg-bytes");
+        CHECK(std::string_view(got_jpeg.mime) == "image/jpeg");
+    }
+    SUBCASE("坏名字/没这枚/没配目录:统一按没有这枚回") {
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "../secret.txt").ok);   // 穿越
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "secret.txt").ok);      // 非内容寻址名
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "art-ffffffff.png").ok); // 形状对但没这枚
+        CHECK_FALSE(app_server::LoadArtifactBytes("", "art-01234567.png").ok); // 口子没开
+    }
+    SUBCASE("超限:收窄上限走同一条 64MiB 路") {
+        CHECK(app_server::LoadArtifactBytes(dir, "art-01234567.png", png.size()).ok);
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "art-01234567.png", png.size() - 1).ok);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 // local_web_server.hpp 的实现:监听、同源门、静态资源、bootstrap 交换、
 // 健康探测、控制口、WS 升级交棒。头部/帧解析全走 ws_frames 纯函数,
-// socket 全走 ws_sockets;升级后的帧读写复用 WsTransport::Session。
+// socket 全走 ws_sockets;升级后的帧读写复用 WsTransport::Session;读头、
+// 恒时比较、artifact 加载走 http_support(与 WS 承载共用一份,HC-03)。
 #include "app_server/local_web_server.hpp"
 
 #include <algorithm>
@@ -12,8 +13,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "platform/paths.hpp"    // PathToUtf8:filesystem 路径进 UTF-8 人话
-#include "tools/path_utils.hpp"  // Utf8ToPath:UTF-8 路径进 filesystem
+#include "app_server/http_support.hpp"
+#include "platform/paths.hpp"  // PathToUtf8:filesystem 路径进 UTF-8 人话
 
 namespace lubancode::app_server {
 
@@ -23,29 +24,8 @@ void Diagnose(const std::string& text) {
     std::fprintf(stderr, "[assistant-web] %s\n", text.c_str());
 }
 
-// 头部读入上限(与 ws_transport 同尺):就几行,超了是来捣乱的,断。
-constexpr std::size_t kMaxHeaderBytes = 16 * 1024;
 // POST body 上限(auth/exchange 与 control/open 都是短凭据,不是文件上传)。
 constexpr std::size_t kMaxBodyBytes = 8 * 1024;
-// 单枚 artifact 的读入上限(与 ws_transport 的只读面同尺)。
-constexpr std::uintmax_t kMaxArtifactBytes = 64ull * 1024 * 1024;
-
-// 一口一口读到 \r\n\r\n 或断/超上限(与 ws_transport 同款;那边是匿名
-// namespace 的私有件,不跨单元借,这里同尺复制)。
-bool ReadUntilHeaderEnd(net::Socket& socket, std::string& header) {
-    char buffer[2048];
-    while (header.find("\r\n\r\n") == std::string::npos) {
-        if (header.size() > kMaxHeaderBytes) {
-            return false;
-        }
-        const long got = socket.Recv(buffer, sizeof(buffer));
-        if (got <= 0) {
-            return false;
-        }
-        header.append(buffer, buffer + got);
-    }
-    return true;
-}
 
 // 读 POST body(Content-Length 已知且 ≤ 上限)。头部读入的那一段 TCP 里
 // 可能已挤着 body 的前几个字节(preread),先消费它再继续收。false = 断/坏。
@@ -121,17 +101,6 @@ std::vector<WebAsset> AssistantWebManifest() {
         {"/assistant_core.js", "application/javascript; charset=utf-8"},
         {"/assistant_app.js", "application/javascript; charset=utf-8"},
     };
-}
-
-bool WebConstantTimeEqual(std::string_view given, std::string_view expected) {
-    if (given.size() != expected.size()) {
-        return false;
-    }
-    unsigned diff = 0;
-    for (std::size_t i = 0; i < given.size(); ++i) {
-        diff |= static_cast<unsigned char>(given[i]) ^ static_cast<unsigned char>(expected[i]);
-    }
-    return diff == 0;
 }
 
 bool LocalWebServer::HostIsLocalLoopback(const std::string& host_header, int port) {
@@ -308,7 +277,7 @@ bool LocalWebServer::HandleConnection(
     const bool session_ok =
         !cookie_value.empty() && options_.validate_session && options_.validate_session(cookie_value);
 
-    // artifact 字节口子(与 WS 承载同款名字形状;这里加会话门)。
+    // artifact 字节口子(与 WS 承载同一份加载器 http_support;这里加会话门)。
     if (head.method == "GET" && head.target.rfind("/artifact/", 0) == 0) {
         if (!session_ok) {
             SendResponse(socket, "401 Unauthorized", "text/html; charset=utf-8",
@@ -316,36 +285,13 @@ bool LocalWebServer::HandleConnection(
             return false;
         }
         const std::string name = head.target.substr(std::string_view("/artifact/").size());
-        if (options_.artifact_dir.empty() || !ws::IsValidArtifactName(name)) {
+        const ArtifactBytes artifact = LoadArtifactBytes(options_.artifact_dir, name);
+        if (!artifact.ok) {
             SendResponse(socket, "404 Not Found", "text/plain; charset=utf-8", "no such artifact",
                          SecurityHeaders(port));
             return false;
         }
-        const std::filesystem::path path =
-            tools::Utf8ToPath(options_.artifact_dir) / tools::Utf8ToPath(name);
-        std::error_code ec;
-        const std::uintmax_t size = std::filesystem::file_size(path, ec);
-        if (ec || size > kMaxArtifactBytes) {
-            SendResponse(socket, "404 Not Found", "text/plain; charset=utf-8", "no such artifact",
-                         SecurityHeaders(port));
-            return false;
-        }
-        std::ifstream file(path, std::ios::binary);
-        if (!file) {
-            SendResponse(socket, "404 Not Found", "text/plain; charset=utf-8", "no such artifact",
-                         SecurityHeaders(port));
-            return false;
-        }
-        std::string bytes(static_cast<std::size_t>(size), '\0');
-        file.read(bytes.data(), static_cast<std::streamsize>(size));
-        if (!file && file.gcount() != static_cast<std::streamsize>(size)) {
-            SendResponse(socket, "404 Not Found", "text/plain; charset=utf-8", "no such artifact",
-                         SecurityHeaders(port));
-            return false;
-        }
-        const char* mime =
-            name.compare(name.size() - 3, 3, "png") == 0 ? "image/png" : "image/jpeg";
-        SendResponse(socket, "200 OK", mime, bytes, SecurityHeaders(port));
+        SendResponse(socket, "200 OK", artifact.mime, artifact.bytes, SecurityHeaders(port));
         return false;
     }
 

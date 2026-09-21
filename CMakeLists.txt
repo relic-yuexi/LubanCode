@@ -1417,6 +1417,9 @@ add_library(lubancode_app STATIC
   src/app_server/ws_frames.cpp
   src/app_server/ws_sockets.cpp
   src/app_server/ws_transport.cpp
+  # HC-03:两套本地 HTTP 承载(WS/助理 Web)的公共机制件——有界读头、
+  # 恒时字节比较、只读 artifact 加载,共用一份(策略各归各宿主)。
+  src/app_server/http_support.cpp
   # 常驻助理 Web 主界面单 W1:本地 Web 承载(同源门/静态白名单/bootstrap
   # 交换/WS 升级交棒)与 assistant 子命令宿主(Detached 断线合同)。
   src/app_server/local_web_server.cpp
