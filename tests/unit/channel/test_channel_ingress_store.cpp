@@ -4,8 +4,12 @@
 // 唯一真源 docs/architecture/channels/message-contracts.md §3-4。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
 
 #include "channel/ingress_store.hpp"
 
@@ -251,6 +255,152 @@ TEST_CASE("dead letter:旁路终态 + 独立账档") {
 
 // QQBot 静默失败单 P1:最近来信链的只读投影——不手翻 JSONL 就能看见
 // 每枚来信的最终状态、死信原因与时间。
+// ---- SV-05:三套重放规则的合同测试 ------------------------------------------
+// 同一本账(合法行 + 各形坏行)喂三条读取路径(恢复器 Open、状态页投影
+// ReadChannelIngressProjection、最近链 ReadChannelIngressRecentChain),事件
+// 数量与终态必须一致。此前三处各写一套 JSON/schema/state 分支:缺 schema
+// 的 tr 在状态页凭空建项、未知 schema 的 tr 改写合法 sid 的终态、缺 event
+// 的 evt 计入事件数——恢复器却统统跳过,同一本账三处三个结论。先钉病灶,
+// 收敛(行合同 + sid 折叠核)后转绿。
+TEST_CASE("SV-05 三路重放对账:坏账行在三处同命运") {
+    const auto dir = MakeAccountDir("sv05_three_way");
+    const auto journal = dir / "ingress" / "journal.jsonl";
+    {
+        auto store = OpenStore(dir);
+        const auto first = store->Ingest(MakeEvent("in-1", "pe-1", "m-1"));
+        REQUIRE(first.has_value());
+        REQUIRE_FALSE(store->Transition(first->sid, IngressEventState::Authorized, "pass").has_value());
+        REQUIRE_FALSE(store->Transition(first->sid, IngressEventState::Routed, "route_ok").has_value());
+    }
+    // 手工追加各形坏账行:恢复器、状态页、最近链对每一行的命运必须一致。
+    {
+        std::ofstream stream(journal, std::ios::app);
+        stream << "{\"t\":\"tr\",\"sid\":99,\"to\":\"running\"}\n";  // 缺 schema:状态页曾凭空建 running
+        stream << "{\"schema\":2,\"t\":\"tr\",\"sid\":1,\"to\":\"delivered\"}\n";  // 未知 schema:曾改写合法 sid 终态
+        stream << "{\"schema\":1,\"t\":\"evt\",\"sid\":6,\"dedupe\":\"k\",\"tier\":1}\n";  // 缺 event:曾计入事件数
+        stream << "{\"schema\":1,\"t\":\"tr\",\"sid\":77,\"to\":\"rejected\",\"reason\":\"orphan\"}\n";  // 孤儿 tr:静默跳过
+        stream << "{\"schema\":1,\"t\":\"dup\",\"sid\":1,\"reason\":\"delivery_replayed\"}\n";  // 旁注:不重建状态
+        stream << "{\"schema\":1,\"t\":\"weird\",\"sid\":1}\n";  // 未知 t:坏行
+        stream << "{\"schema\":1,\"t\":\"evt\",\"sid\":7,\"broken";  // 半写行:坏行
+    }
+    // 恢复器:只有一枚合法事件,终态 routed。
+    ChannelIngressStore::OpenResult result;
+    {
+        auto store = ChannelIngressStore::Open(dir, "qqbot", "main", &result);
+        REQUIRE(store != nullptr);
+        REQUIRE_FALSE(store->write_blocked());
+        const auto records = store->Records();
+        REQUIRE(records.size() == 1);
+        CHECK(records[0].sid == 1);
+        CHECK(records[0].state == IngressEventState::Routed);
+        CHECK(records[0].last_transition_reason == "route_ok");
+    }
+    // 状态页投影:同一份事件数与终态,没有凭空建出的项。
+    const auto projection = ReadChannelIngressProjection(dir);
+    CHECK(projection.events == 1);
+    REQUIRE(projection.state_counts.size() == 1);
+    REQUIRE(projection.state_counts.count("routed") == 1);
+    CHECK(projection.state_counts.at("routed") == 1);
+    // 最近链:同一份事件数与终态。
+    const auto chain = ReadChannelIngressRecentChain(dir, 64);
+    REQUIRE(chain.entries.size() == 1);
+    CHECK(chain.entries[0].sid == 1);
+    CHECK(chain.entries[0].state == "routed");
+    CHECK(chain.entries[0].reason == "route_ok");
+    // 恢复器的坏行计数:缺 schema tr、未知 schema tr、缺 event evt、未知 t、
+    // 半写共 5 行;孤儿 tr 与 dup 不计。
+    CHECK(result.skipped_lines == 5);
+}
+
+TEST_CASE("SV-05 重复 sid evt:三路首笔为准,重落行计坏行") {
+    const auto dir = MakeAccountDir("sv05_dup_sid");
+    const auto journal = dir / "ingress" / "journal.jsonl";
+    {
+        auto store = OpenStore(dir);
+        REQUIRE(store->Ingest(MakeEvent("in-1", "pe-1", "m-1")).has_value());
+        REQUIRE(store->Ingest(MakeEvent("in-2", "pe-2", "m-2")).has_value());
+    }
+    // 手工拼坏账:把第二枚 evt 行的 sid 改成 1(同 sid 重落)。
+    {
+        std::ifstream in(journal);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto pos = text.find("\"sid\":2");
+        REQUIRE(pos != std::string::npos);
+        text.replace(pos, 7, "\"sid\":1");
+        std::ofstream out(journal, std::ios::trunc);
+        out << text;
+    }
+    ChannelIngressStore::OpenResult result;
+    {
+        auto store = ChannelIngressStore::Open(dir, "qqbot", "main", &result);
+        REQUIRE(store != nullptr);
+        const auto records = store->Records();
+        REQUIRE(records.size() == 1);  // 首笔为准(收敛前恢复器收两条)
+        CHECK(records[0].sid == 1);
+        CHECK(records[0].event.delivery_id == "in-1");
+        CHECK(store->next_sid() == 2);  // 重落行不抬账序
+    }
+    const auto projection = ReadChannelIngressProjection(dir);
+    CHECK(projection.events == 1);  // 收敛前状态页计 2
+    const auto chain = ReadChannelIngressRecentChain(dir, 8);
+    REQUIRE(chain.entries.size() == 1);
+    CHECK(chain.entries[0].sid == 1);
+    CHECK(result.skipped_lines == 1);  // 重落行是账序破裂的坏行
+}
+
+// 状态页(gateway/status.cpp 渠道栏)的 ingress_pending = queued + running、
+// dead_letter 计数,都出自 ReadChannelIngressProjection 这个真实投影入口;
+// 坏账行不得把状态页计数顶起来。
+TEST_CASE("SV-05 状态页真实投影入口:pending/死信计数,坏行不膨胀") {
+    const auto dir = MakeAccountDir("sv05_status_projection");
+    const auto journal = dir / "ingress" / "journal.jsonl";
+    {
+        auto store = OpenStore(dir);
+        const auto first = store->Ingest(MakeEvent("in-1", "pe-1", "m-1"));
+        REQUIRE(first.has_value());
+        for (const auto step : {IngressEventState::Authorized, IngressEventState::Routed,
+                                IngressEventState::Queued}) {
+            REQUIRE_FALSE(store->Transition(first->sid, step, "").has_value());
+        }
+        const auto second = store->Ingest(MakeEvent("in-2", "pe-2", "m-2"));
+        REQUIRE(second.has_value());
+        for (const auto step : {IngressEventState::Authorized, IngressEventState::Routed,
+                                IngressEventState::Queued, IngressEventState::Running}) {
+            REQUIRE_FALSE(store->Transition(second->sid, step, "").has_value());
+        }
+        const auto third = store->Ingest(MakeEvent("in-3", "pe-3", "m-3"));
+        REQUIRE(third.has_value());
+        REQUIRE_FALSE(store->MoveToDeadLetter(third->sid, "turn_failed", 1724700090000).has_value());
+    }
+    // 与 gateway/status.cpp 同一口径:pending = queued + running。
+    const auto count_pending = [](const ChannelIngressProjection& ingress) {
+        std::size_t pending = 0;
+        if (const auto found = ingress.state_counts.find("queued");
+            found != ingress.state_counts.end()) {
+            pending += found->second;
+        }
+        if (const auto found = ingress.state_counts.find("running");
+            found != ingress.state_counts.end()) {
+            pending += found->second;
+        }
+        return pending;
+    };
+    const auto before = ReadChannelIngressProjection(dir);
+    CHECK(before.events == 3);
+    CHECK(count_pending(before) == 2);
+    CHECK(before.dead_letter == 1);
+    // 尾上一笔缺 schema 的 running tr:正是审查记录里的病灶样本——状态页
+    // 曾对同一本账多报一枚 running。收敛后它与恢复器同命运(跳过)。
+    {
+        std::ofstream stream(journal, std::ios::app);
+        stream << "{\"t\":\"tr\",\"sid\":99,\"to\":\"running\"}\n";
+    }
+    const auto after = ReadChannelIngressProjection(dir);
+    CHECK(after.events == 3);
+    CHECK(count_pending(after) == 2);
+    CHECK(after.state_counts.size() == 3);  // queued/running/dead_letter,无凭空第四项
+}
+
 TEST_CASE("recent chain:重放最终状态/原因/死信时间,sid 降序,limit 裁剪") {
     const auto dir = MakeAccountDir("recent_chain");
     {
