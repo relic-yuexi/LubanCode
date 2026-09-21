@@ -308,7 +308,7 @@ TEST_CASE("refs:全名跨包引用须指向已存在包;指回本包也要真有
     PackageComponentSet other;
     other.package_id = "other.lib";
     other.package_root = tmp.Get() / "other";
-    other.skills.insert("helper");
+    other.names.Add(ComponentKind::Skill, "helper");
     index.packages["other.lib"] = other;
 
     SUBCASE("全名指到已存在包的组件,解析成功") {

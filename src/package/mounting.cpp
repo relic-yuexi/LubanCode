@@ -9,6 +9,7 @@
 #include <set>
 #include <utility>
 
+#include "package/component_name_index.hpp"
 #include "platform/paths.hpp"
 
 namespace lubancode::package {
@@ -24,30 +25,21 @@ std::string PackageSourceLevel(PackageScope scope) {
     return "包(" + ScopeToString(scope) + ")";
 }
 
-// 本包组件账(轻量:kind -> local id 集),折 canonical 用。
-struct OwnComponents {
-    std::set<std::string> agents, prompt_profiles, skills, workflows;
-
-    bool Has(ComponentKind kind, const std::string& local_id) const {
-        switch (kind) {
-            case ComponentKind::Agent: return agents.count(local_id) > 0;
-            case ComponentKind::PromptProfile: return prompt_profiles.count(local_id) > 0;
-            case ComponentKind::Skill: return skills.count(local_id) > 0;
-            case ComponentKind::Workflow: return workflows.count(local_id) > 0;
-            default: return false;  // plugin/mcp 不折 canonical 短名(阶段 4/5 再挂)
-        }
-    }
-};
-
-OwnComponents CollectOwn(const PackageRecord& record) {
-    OwnComponents own;
+// 本包内容组件名账(折 canonical 用):只收 Agent/Profile/Skill/Workflow
+// 四类——plugin/mcp/channel 不折 canonical 短名(code 组件阶段 4/5 再挂)。
+// 存储机械统一走 ComponentNameIndex(SV-10),过滤策略留在这处构建里。
+ComponentNameIndex CollectOwn(const PackageRecord& record) {
+    ComponentNameIndex own;
     for (const auto& component : record.components) {
         switch (component.kind) {
-            case ComponentKind::Agent: own.agents.insert(component.local_id); break;
-            case ComponentKind::PromptProfile: own.prompt_profiles.insert(component.local_id); break;
-            case ComponentKind::Skill: own.skills.insert(component.local_id); break;
-            case ComponentKind::Workflow: own.workflows.insert(component.local_id); break;
-            default: break;
+            case ComponentKind::Agent:
+            case ComponentKind::PromptProfile:
+            case ComponentKind::Skill:
+            case ComponentKind::Workflow:
+                own.Add(component.kind, component.local_id);
+                break;
+            default:
+                break;  // plugin/mcp/channel 不折 canonical 短名(阶段 4/5 再挂)
         }
     }
     return own;
@@ -56,7 +48,7 @@ OwnComponents CollectOwn(const PackageRecord& record) {
 // 包内短名折 canonical:本包有这件组件就折;没有(外部裸名、显式全名、
 // "default"/空)原样保留。引用闭合已在 AnalyzePackage 判过,这里只折名,
 // 不再报错。
-std::string CanonicalizeRef(const OwnComponents& own, const std::string& package_id,
+std::string CanonicalizeRef(const ComponentNameIndex& own, const std::string& package_id,
                             const std::string& raw, ComponentKind kind) {
     if (raw.empty() || raw == "default") return raw;
     if (raw.find(':') != std::string::npos) return raw;  // 显式全名,原样
@@ -424,7 +416,7 @@ std::vector<tools::PackagedSkillRoot> MountSkillRoots(const PackageMount& mount)
 std::vector<agent::PackagedAgentEntry> MountAgentEntries(const PackageMount& mount) {
     std::vector<agent::PackagedAgentEntry> entries;
     for (const auto& record : mount.records) {
-        const OwnComponents own = CollectOwn(record);
+        const ComponentNameIndex own = CollectOwn(record);
         const std::map<std::string, std::string> unavailable = UnavailableForUntrustedCode(record);
         const std::string& package_id = record.inventory.package_id;
         for (const auto& component : record.components) {
@@ -458,7 +450,7 @@ std::vector<agent::PackagedAgentEntry> MountAgentEntries(const PackageMount& mou
 std::vector<workflow::PackagedWorkflowSource> MountWorkflowSources(const PackageMount& mount) {
     std::vector<workflow::PackagedWorkflowSource> sources;
     for (const auto& record : mount.records) {
-        const OwnComponents own = CollectOwn(record);
+        const ComponentNameIndex own = CollectOwn(record);
         const std::map<std::string, std::string> unavailable = UnavailableForUntrustedCode(record);
         const std::string& package_id = record.inventory.package_id;
         for (const auto& component : record.components) {

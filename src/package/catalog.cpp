@@ -43,19 +43,6 @@ std::vector<std::string> DedupePreserveOrder(const std::vector<std::string>& ite
 // PackageRefIndex
 // ---------------------------------------------------------------------------
 
-bool PackageComponentSet::Has(ComponentKind kind, const std::string& local_id) const {
-    switch (kind) {
-        case ComponentKind::Agent: return agents.count(local_id) > 0;
-        case ComponentKind::PromptProfile: return prompt_profiles.count(local_id) > 0;
-        case ComponentKind::Skill: return skills.count(local_id) > 0;
-        case ComponentKind::Workflow: return workflows.count(local_id) > 0;
-        case ComponentKind::Plugin: return plugins.count(local_id) > 0;
-        case ComponentKind::McpServer: return mcp_servers.count(local_id) > 0;
-        case ComponentKind::Channel: return channels.count(local_id) > 0;
-    }
-    return false;
-}
-
 const PackageComponentSet* PackageRefIndex::Find(const std::string& package_id) const {
     const auto it = packages.find(package_id);
     return it == packages.end() ? nullptr : &it->second;
@@ -70,21 +57,14 @@ PackageRefIndex BuildPackageRefIndex(const std::vector<PackageCandidate>& candid
         set.package_root = candidate.package_root;
         for (const auto& component :
              ListPackageComponents(candidate.package_root, candidate.manifest->id)) {
+            // 目录段 -> ComponentKind 只认 ComponentKindDir 一张表(SV-10 前
+            // 这里另抄一份七分支 if/else,与那张表一字不差)。
             const std::string prefix = component.rel_path.substr(0, component.rel_path.find('/'));
-            if (prefix == "agents") {
-                set.agents.insert(component.local_id);
-            } else if (prefix == "prompts") {
-                set.prompt_profiles.insert(component.local_id);
-            } else if (prefix == "skills") {
-                set.skills.insert(component.local_id);
-            } else if (prefix == "workflows") {
-                set.workflows.insert(component.local_id);
-            } else if (prefix == "plugins") {
-                set.plugins.insert(component.local_id);
-            } else if (prefix == "mcp") {
-                set.mcp_servers.insert(component.local_id);
-            } else if (prefix == "channels") {
-                set.channels.insert(component.local_id);
+            for (const ComponentKind kind : kAllComponentKinds) {
+                if (prefix == ComponentKindDir(kind)) {
+                    set.names.Add(kind, component.local_id);
+                    break;
+                }
             }
         }
         // 同 id 多候选:ScanPackages 已按优先级从高到低排,先到的胜;后来
@@ -113,41 +93,13 @@ std::string ComponentRef::Format() const {
 
 namespace {
 
-// 本包组件账(解析阶段攒的;坏的也在——引用指得到,账上就有名)。
-struct OwnComponents {
-    std::set<std::string> agents, prompt_profiles, skills, workflows, plugins, mcp_servers, channels;
-
-    bool Has(ComponentKind kind, const std::string& local_id) const {
-        switch (kind) {
-            case ComponentKind::Agent: return agents.count(local_id) > 0;
-            case ComponentKind::PromptProfile: return prompt_profiles.count(local_id) > 0;
-            case ComponentKind::Skill: return skills.count(local_id) > 0;
-            case ComponentKind::Workflow: return workflows.count(local_id) > 0;
-            case ComponentKind::Plugin: return plugins.count(local_id) > 0;
-            case ComponentKind::McpServer: return mcp_servers.count(local_id) > 0;
-            case ComponentKind::Channel: return channels.count(local_id) > 0;
-        }
-        return false;
-    }
-
-    void Add(ComponentKind kind, const std::string& local_id) {
-        switch (kind) {
-            case ComponentKind::Agent: agents.insert(local_id); break;
-            case ComponentKind::PromptProfile: prompt_profiles.insert(local_id); break;
-            case ComponentKind::Skill: skills.insert(local_id); break;
-            case ComponentKind::Workflow: workflows.insert(local_id); break;
-            case ComponentKind::Plugin: plugins.insert(local_id); break;
-            case ComponentKind::McpServer: mcp_servers.insert(local_id); break;
-            case ComponentKind::Channel: channels.insert(local_id); break;
-        }
-    }
-};
-
 // 解析时共用的一束材料。
 struct ResolveCtx {
     std::string package_id;
     std::filesystem::path package_root;
-    OwnComponents own;
+    // 本包组件名账(SV-10 统一机械;解析阶段攒的,坏的也在——引用指得
+    // 到,账上就有名)。
+    ComponentNameIndex own;
     const PackageRefIndex* index = nullptr;
     const ExternalNamespaces* external = nullptr;
     std::vector<ComponentRef>* refs = nullptr;
