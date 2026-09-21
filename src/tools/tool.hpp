@@ -10,25 +10,15 @@
 #include <nlohmann/json.hpp>
 
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:结果正文出门前的编码关口
+#include "tool_semantics.hpp"          // EffectClass:来源/副作用共同合同(AR-08)
 #include "tools/tool_content.hpp"      // ToolResultPayload:富结果的唯一真账
 
 namespace lubancode::tools {
 
-// 副作用等级(逐枚追踪单"Effect class 与恢复策略")。声明是保守承诺:
-// 只影响崩溃后的恢复建议,不越过权限确认;未声明的注册按最危险档
-// InProcessUnknown。定义在 Tool 头而不是 agent/tool_trace.hpp,好让
-// tools 层注册元数据时不牵 agent 依赖(agent 侧另有一份同名枚举做
-// 持久化字符串映射,两侧语义一一对应,见 agent/tool_trace.hpp)。
-enum class EffectClass {
-    ReadOnlyLocal,       // read_file/search:可建议重试
-    ReadOnlyRemote,      // web_fetch/只读 MCP:不自动重试(费用/限流)
-    LocalReversible,     // write_file/edit_file:查 undo token 再询问
-    LocalProcessUnknown, // run_command:unknown,先核验
-    RemoteIdempotent,    // 带 idempotency key:按 key 查,不直接重发
-    RemoteCompensatable, // 支持 delete/cancel:可提补偿(另一枚可见调用)
-    RemoteIrreversible,  // 发信/付款/发布:只告警与人工核验
-    InProcessUnknown,    // 未声明的 native/Lua:按未知副作用处理
-};
+// 副作用等级:与 agent 侧共用同一枚枚举(AR-08 起下沉到中立合同头
+// tool_semantics.hpp,值域与语义一字未动)。持久化字符串编解码仍在
+// agent/tool_trace.cpp,本层照旧零 agent 依赖。
+using EffectClass = ::lubancode::EffectClass;
 
 // 幂等性声明(重试规矩用):工具自报"同参数重跑是否等价"。只服务恢复
 // 建议,不构成自动重试的许可——unknown_after_start 默认禁止一键重试。

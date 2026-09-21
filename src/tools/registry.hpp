@@ -14,13 +14,15 @@
 #include <string>
 #include <vector>
 
+#include "tool_semantics.hpp"  // ToolSourceKind:来源共同合同(AR-08)
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {
 
-// 工具来源。与 agent::ToolSourceKind 一一对应(那边做持久化字符串映射,
-// 这边零 agent 依赖)。
-enum class ToolSourceKind { Builtin, Mcp, Lsp, PluginLua, PluginNative, Agent, Ptc, Deferred };
+// 工具来源:与 agent 侧共用同一枚枚举(AR-08 起下沉到中立合同头
+// tool_semantics.hpp,值域一字未动)。持久化字符串映射在 agent/
+// tool_trace.cpp,本层照旧零 agent 依赖。
+using ToolSourceKind = ::lubancode::ToolSourceKind;
 
 // Package 来源账(统一封装单阶段 5 的 ToolOrigin 轻账):packaged 组件挂上
 // 的工具逐枚记这三样,/tools、/mcp、/plugins 展示 canonical 名 + 包版本都
