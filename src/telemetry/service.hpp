@@ -247,8 +247,13 @@ private:
     std::uint64_t durable_append_epoch_ = 0;
     std::uint64_t last_seen_seal_generation_ = 0;
     SpoolRecoveryReport recovery_;
-    std::string degraded_reason_;
-    std::int64_t started_at_ms_ = 0;
+    // 健康面(FD-10):degraded_reason_ 的唯一保护锁是 state_mutex_——
+    // worker 拒批写(DrainQueue)与 Status 快照读都持它过;别处给
+    // streams/spool 加锁护不住这枚字符串。不用 atomic<bool> 只遮降级旗
+    // 而让 reason 裸奔——两面须同一把锁内同取。启动期(Start 早期)
+    // 赋值虽发生在 worker 线程起身之前,也走同锁,纪律不分期。
+    std::string degraded_reason_;  // state_mutex_
+    std::int64_t started_at_ms_ = 0;  // 启动期定格,此后只读
     // ---- T2 出口面 ----
     // spool 并发面:投影 worker(落盘/seal/cursor)与出口线程(读段/ACK
     // 删段)各持此锁过;锁序 spool -> state,export 永不嵌在 spool 里。

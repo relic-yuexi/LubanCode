@@ -1225,6 +1225,86 @@ TEST_CASE("FD-03 probe 独立取消源:pause 在途期间 probe 不抹出口取�
     fixture.CloseRun();
 }
 
+// ---------------------------------------------------------------------------
+// FD-10:遥测降级状态纳入统一快照锁。degraded_reason_ 运行期由 worker
+// 拒批写(DrainQueue),状态面并发读;合同 = 读写同一把 state_mutex_,
+// Status 的 degraded 布尔与 reason 字符串同锁快照,两面不撕。交错靠
+// 栅栏:读者线程先落场(真读完一轮才放行主线程),写者后触发,不赌
+// sleep 时序。故障注入:占位目录堵 <root>/spool/active.tmp——fopen 对
+// 目录开不出写柄(Windows/POSIX 同败),worker 首趟 AppendBatch 必拒。
+// 注入时序也无赌注:注册 session 之前队列恒空,worker 每趟 DrainQueue
+// 都是空 pop,从不碰 active.tmp——占位必先于任何一次落盘尝试。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("FD-10 降级快照:拒批写 degraded_reason_ 与并发 Status 读同锁,两面不撕") {
+    JournalFixture fixture("fd10snap");
+    fixture.CompleteTurn("turn-0001");
+    fixture.CloseRun();
+
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       "lubancode-tel-e2e-fd10-snap";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    TelemetryServiceOptions options = MakeOptions(root, "");  // 本地模式:不起出口线程
+    TelemetryService service(options);
+    REQUIRE(service.Start());
+
+    // 故障注入:active.tmp 占成目录 -> OpenActive 的 fopen 必败 ->
+    // AppendBatch 回 false -> DrainQueue 走降级写口(写者在场)。
+    std::error_code block_ec;
+    REQUIRE(std::filesystem::create_directory(root / "spool" / "active.tmp", block_ec));
+    REQUIRE_FALSE(block_ec);
+
+    // 读者先落场:真读过一轮 Status 才放行主线程(栅栏)。
+    std::atomic<bool> reader_in{false};
+    std::atomic<bool> reader_stop{false};
+    std::atomic<bool> reader_saw_reason{false};
+    std::atomic<bool> face_torn{false};       // degraded 旗与 reason 两面不一致
+    std::atomic<bool> foreign_reason{false};  // 读到合同外的值(撕读形状)
+    std::thread reader([&] {
+        (void)service.Status();  // 先读一把:读者已在读路上
+        reader_in.store(true);   // 栅栏落栓:此后主线程才许触发写者
+        while (!reader_stop.load()) {
+            const TelemetryServiceStatus status = service.Status();
+            const bool empty = status.degraded_reason.empty();
+            if (status.degraded == empty) {
+                face_torn.store(true);
+            }
+            if (!empty) {
+                reader_saw_reason.store(true);
+                if (status.degraded_reason != "telemetry.spool_rejected") {
+                    foreign_reason.store(true);
+                }
+            }
+            std::this_thread::yield();  // 让写者有机会进场(热循环防饿)
+        }
+    });
+    REQUIRE(WaitUntil([&] { return reader_in.load(); }));
+
+    // 触发写者:投影出批 -> DrainQueue 拒批 -> degraded_reason_ 落笔。
+    service.RegisterSession(fixture.workspace_key, fixture.session_id, fixture.session_dir);
+    service.Notify(CommitWake{fixture.workspace_key, fixture.session_id, "main.jsonl"});
+
+    // 写者落地可观察:主线程自己也是并发读者(第二个)。
+    REQUIRE(WaitUntil([&] {
+        return service.Status().degraded_reason == "telemetry.spool_rejected";
+    }));
+    {
+        const TelemetryServiceStatus status = service.Status();
+        CHECK(status.degraded);  // 两面同源:降级旗与原因一起翻
+    }
+
+    reader_stop.store(true);
+    reader.join();
+    CHECK(reader_saw_reason.load());     // 读者在场期间亲眼见到降级面
+    CHECK_FALSE(face_torn.load());       // 布尔与字符串没撕开
+    CHECK_FALSE(foreign_reason.load());  // 没读到合同外的值
+
+    // 拒批的直接账面:spool 自己的 degraded 旗同源立着(§18.4 停收)。
+    CHECK(service.Status().spool.degraded);
+    service.Stop();
+}
+
 TEST_CASE("spool clear:两步删除后批账落 tombstone,cursor 对账不报孤儿(§24.2/§18.5)") {
     JournalFixture fixture("clear");
     fixture.CompleteTurn("turn-0001");

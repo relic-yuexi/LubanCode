@@ -1,0 +1,56 @@
+# FD-10 遥测降级状态纳入统一快照锁
+
+- 状态：源码已实施，PR #175 远端 CI 双平台腿绿（run 35565095605，rollup success）。
+- 日期：2026-09-21。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：B；严重度：高；重构批次：2。
+- 前置：FD-03（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-10 | B | 高 | src/telemetry/service.cpp:399；src/telemetry/service.cpp:1054；src/telemetry/service.cpp:1546；src/telemetry/service.hpp:225；src/app/commands/telemetry_commands.cpp:98 | worker的DrainQueue写 `degraded_reason_ = "telemetry.spool_rejected"`；Status先执行 `!degraded_reason_.empty()` 与字符串拷贝，没持state_mutex_。 | 后台投影线程可在写盘失败时改std::string；前台/测试轮询Status同时读。字符串非原子，别处给streams/spool加锁不能保护这一成员，构成具体读写竞争。 | 运行中健康状态统一由state_mutex_保护，Status先在同一锁内取值快照，随后再分别取queue/spool/export快照。不可用atomic<bool>只遮住degraded标志而让reason字符串裸奔。 | 必须审锁序，不持state锁再拿spool/export锁造成反向嵌套。与FD-03改同一实现件，排其后接手。 |
+
+## 修改边界
+
+- `src/telemetry/service.hpp`
+- `src/telemetry/service.cpp`
+- `tests/integration/telemetry/test_telemetry_otlp_export.cpp`
+
+## 实施顺序
+
+- [x] 列出健康字段的唯一保护锁。
+  - 证据：全仓 `degraded_reason_` 读写清点——写口三处全在 Start 启动期（root_unwritable/state_unwritable/recovery error）加 DrainQueue 运行期（spool_rejected）；读口唯一，在 Status。唯一保护锁定为 state_mutex_，hpp 成员处注明；未用 atomic<bool> 只遮降级旗而让 reason 字符串裸奔。
+- [x] 原地加快照边界，保持公开Status形状。
+  - 证据：Status 开头先在 state_mutex_ 一段 scope 内同取 degraded 布尔与 reason 字符串（即取即放），TelemetryServiceStatus 公开形状零改动；DrainQueue 拒批分支查空与赋值并进同一把锁（首错优先成一步）；Start 三处启动期写口同锁（worker 线程尚未起，纪律不分期）。
+- [x] 再验压力读取与故障路径。
+  - 证据：新册"FD-10 降级快照"——故障注入用占位目录堵 <root>/spool/active.tmp（fopen 对目录开不出写柄，Windows/POSIX 同败），worker 首趟 AppendBatch 必拒走降级写口；读者线程先真读一轮再放行主线程（栅栏），写者后触发；注入时序无赌注：注册 session 前队列恒空，worker 每趟 DrainQueue 空收队，从不碰 active.tmp。
+
+## 验收门
+
+- [x] 以可注入spool失败让worker写降级原因，同时反复Status读取；在支持平台跑TSan。
+  - 证据：上述册双读者（读者线程热循环 + 主线程轮询）并发 Status，断言 degraded 布尔与 reason 两面不撕、值域只有 {空, telemetry.spool_rejected}、读者在场期间亲见降级面。TSan 一节：仓库 CI 的 workflow-tsan 腿按路径门只覆盖 src/workflow/*（ci.yml :82-85），telemetry 路径不在其列，本单不改 ci.yml（超修改边界）——竞争的机器验证靠不上现有腿，合同面以栅栏夹具钉住，此为已知边界如实记下。
+- [x] 所有运行期degraded_reason读写遵同一锁；启动期赋值区分线程尚未开启。
+  - 证据：grep 复核 service.cpp 内 degraded_reason_ 六处出现（写口 369/374/387-388/1073-1074，读口 1626-1627）全部在 state_mutex_ scope 内；启动期赋值虽在 worker 起身前，也走同锁（hpp 注释"纪律不分期"）。
+- [x] Status不跨网络/磁盘阻塞，不引入state→spool→export嵌套锁。
+  - 证据：Status 的 state 快照 scope 即取即放，随后才分别取 queue（无锁 stats）/spool（spool_mutex_）/export（export_mutex_）快照，三锁互不嵌套；锁序维持 hpp 既有约定 spool -> state，新增两段 state 锁都是叶子 scope。
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+  - 本单证据：PR #175，head 6c818bbb，run 35565095605（run_number 1814）——windows-msvc pass（1h3m39s，integration.telemetry.telemetry_otlp_export Passed 16.85s、unit.telemetry.telemetry_service Passed 4.11s）、macos-clang pass（20m9s，integration.telemetry.telemetry_otlp_export Passed 18.01s），rollup conclusion success。src/telemetry/* 在 windows 敏感面，双平台腿由此出场且都绿。
+
+## 合并取舍与估量
+
+只处理本单钉住的合同，不借题改邻接模块。
+
+预计可删除行数：0。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：未要求合并既有总设计单。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：FD-03
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：FD-03（src/telemetry/service.cpp, src/telemetry/service.hpp, tests/integration/telemetry/test_telemetry_otlp_export.cpp）。
