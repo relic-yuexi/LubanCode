@@ -6,16 +6,19 @@
 //   - 提前刷新余量 refresh_margin_secs(生产 300s = 5 分钟,设计单钉死);
 //   - Invalidate()(发送侧收到 401)强制下次现取;
 //   - 泄露禁令:错误 detail 不带 secret/token 值。
+//
+// SV-06 起缓存状态机(token 值/到期时钟/互斥/invalidate)归共用件
+// channel::ExpiringTokenCache,本类是薄门面:只留飞书请求体构造、
+// expire 载荷解析与平台错误分型(SV-06 第一批行为等价归并)。
 #pragma once
 
 #include <cstdint>
 #include <expected>
 #include <functional>
-#include <mutex>
-#include <optional>
 #include <string>
 
 #include "channel/feishu/feishu_http.hpp"
+#include "channel/token_cache.hpp"
 
 namespace lubancode::channel::feishu {
 
@@ -43,7 +46,8 @@ public:
         std::int64_t refresh_margin_secs = 300;
     };
 
-    explicit FeishuTokenManager(Options options) : options_(std::move(options)) {}
+    explicit FeishuTokenManager(Options options)
+        : options_(std::move(options)), cache_(MakeCache()) {}
 
     // 取可用 token;到期/失效/首取都现刷。错误分型见 ErrorKind。
     std::expected<std::string, Error> GetValidToken();
@@ -52,12 +56,12 @@ public:
     void Invalidate();
 
 private:
-    std::expected<std::string, Error> RefreshLocked();
+    // 飞书 refresh 适配器:发取 token 请求、解析 expire 载荷、错误分型。
+    std::expected<ExpiringTokenCache<Error>::Refreshed, Error> Refresh();
+    ExpiringTokenCache<Error> MakeCache();
 
     Options options_;
-    std::mutex mutex_;  // 单飞:整个刷新在锁内,后来者等这一次结果
-    std::optional<std::string> token_;
-    std::int64_t expires_at_ms_ = 0;
+    ExpiringTokenCache<Error> cache_;  // 缓存状态机(SV-06 共用件)
 };
 
 }  // namespace lubancode::channel::feishu

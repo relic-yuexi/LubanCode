@@ -1,0 +1,69 @@
+# SV-06 QQ 与飞书令牌缓存复制整套失效及刷新规则
+
+- 状态：已实施并勾账——PR #187 两个 CI run 全绿：代码提交 run 35607586448（macos-clang 编译+全量 607 册测试绿，install-scripts windows/ubuntu 双平台绿，unit.channel.token_cache 与 unit.channelqq.qq_auth_messages 均 Passed）；勾账提交 run 35611620658（macos-clang + windows-msvc 双编译腿全量绿，本域两册在 MSVC 腿亦 Passed；windows-msvc 首跑炸在不相干的 integration.workspace.workspace_index_ledger 并发开房时序册，按已知 flaky 规矩重跑一次即绿，与本单零文件交集）。linux/asan/tsan 腿按 lane 门 skipped。绿了不合并，等点名。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`（实施基线：`1d88c7a2`，含 merge PR #185）。
+- 批次：1。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-06 | A | 中 | src/channel/qq/qq_auth.cpp:23<br>src/channel/qq/qq_auth.cpp:29<br>src/channel/qq/qq_auth.cpp:37<br>src/channel/feishu/feishu_auth.cpp:23<br>src/channel/feishu/feishu_auth.cpp:29<br>src/channel/feishu/feishu_auth.cpp:37 | 两份 GetValidToken 都 lock mutex_ → 检查 token_/expires_at_ms_ → RefreshLocked；两份 Invalidate 都 reset token_ 并清 expires_at_ms_。 | 刷新余量、并发等待、401 失效规则要同步改两处。头注承诺后来的调用“等同一次结果”，实际只缓存成功 token：第一次刷新失败后，已等待调用会各自再刷一遍，错误结果未共享；两平台会同步带着同一行为差异。 | 保留 QQ/Feishu 各自的请求体、响应字段和平台错误分类；抽取一个有代次的 ExpiringTokenCache，接收注入 refresh 函数并管理成功/失败刷新完成结果。平台 TokenManager 留薄门面。先无行为差异归并，再单独补齐同代等待者共享失败的合同。 | 中：锁持有期与失败缓存时长须明确。不能永久缓存失败，也不能让一次旧 401 清掉后来已刷新的 token。平台 expires_in/expire 字段不可硬并为同协议解析。 |
+
+### 合并边界
+
+共同职责只含 token 值、到期时钟、互斥、刷新代次、invalidate。QQ 的 access_token/expires_in 与飞书 tenant_access_token/expire 解析仍各归 qq_proto、feishu_proto；业务错误不能只按 HTTP 状态一刀切。
+
+失败放大不是对真实服务 QPS 的推测：两份 RefreshLocked 在返回 unexpected 时都未落刷新完成结果，等待 mutex 的后续调用只见 token 无效，再发 HTTP。该条并发合同修正应与抽取提交分开，便于分清行为变更。
+
+预计净删约 45 行，按双份失效/查缓存/刷新提交逻辑约 70 行减共享状态及门面约 25 行；不计平台 HTTP 载荷转换。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：第一批先做无行为变更合并，第二批另验失败共享合同。文件与 SV-07/SV-08 不重叠，可并行；新共享组件用独立 token_cache 名，不占 bridge/common_contract 文件。
+- 允许修改的现有文件：
+
+- `src/channel/qq/qq_auth.hpp`
+- `src/channel/qq/qq_auth.cpp`
+- `src/channel/feishu/feishu_auth.hpp`
+- `src/channel/feishu/feishu_auth.cpp`
+- `tests/unit/channelqq/test_qq_auth_messages.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [x] 第一提交保持现有成功、到期、401 及错误分类结果；两 TokenManager 的缓存规矩来自同一组件。（PR #187 提交 `eaf63187` 纯搬移：共用件 `src/channel/token_cache.hpp` 的 `ExpiringTokenCache<ErrorT>` 承 token 值/到期时钟/互斥单飞/invalidate，QQ/飞书门面化，公共 API 与 Options 逐字不动（适配器位置式聚合初始化不受影响）；既有册零改动全绿即回归证据——qq_auth_messages 既有案 + qq_menu/qq_media 401 刷 token 流 + feishu_messages/adapter 册，CI run 35607586448 全量绿）
+- [x] 后续合同提交用两并发请求夹具：共享一次成功，也共享同代失败；下一独立刷新允许重试。（PR #187 提交 `b15745a7` 单独分账：新增册 unit.channel.token_cache 直测共用件——两并发共享一次成功/共享同代失败（含三名等待者）/下一代独立重试；并经 QqTokenManager 门面在 unit.channelqq.qq_auth_messages 复钉成功共享与失败共享+独立重试两案。确定性手法：闸门回包扣住在途 + now_ms 进场探针计数（探针与条件变量等待同一临界区，计数可见即必已入队），不靠睡觉赌时序）
+- [x] 旧 token 的失效请求不误清新代 token；时间边界与 refresh_margin 各测恰好到期。（"刷新在途时 Invalidate 不阻不炸,新 token 不被旧失效清掉"册：在途刷新产出的新 token 窗口内直接命中、无第三次刷新；恰好到期 now==expires_at_ms 现刷（严格小于才命中）册；margin 边界 lifetime==margin 与 lifetime<margin 立即到期（0 帽）册。边界如实记：严格先后序的迟到 401（刷新完成之后才调 Invalidate）仍会触发一次多余刷新——Invalidate 无参可辨代次，须调用方传代才能修，见"尚未验证边界"）
+- [x] QQ/Feishu 平台载荷及错误码测试保持各自断言；不调用真实网络作唯一验收。（QQ 载荷/错误码断言（qq_auth_messages/qq_menu/qq_media）全保留且绿；飞书侧 tenant_access_token/expire 载荷与 401 刷 token 流经 feishu_messages/feishu_adapter 既有册覆盖且绿；全部夹具离线零网络，macos-clang 腿全量 607 册绿）
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。（只动 src/channel/token_cache.hpp（新增）、qq_auth.hpp/cpp、feishu_auth.hpp/cpp、tests/unit/channel/test_token_cache.cpp（新增）、test_qq_auth_messages.cpp、本 todo；CMake 未动（头文件模板零登记）。行为变化/回滚方式/尚未验证边界见 PR #187 描述：revert 第二笔即回行为等价归并态，revert 全 PR 回双份实现；未验边界=迟到 401 的多余刷新与真平台并发行为）
+
+## 合并/删除口径
+
+职责：账号令牌缓存、失效与同代刷新协调。
+
+现有：QqTokenManager；FeishuTokenManager。
+
+建议保留：共用 ExpiringTokenCache；两个平台 refresh 适配器。
+
+预计净删 45 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+落地实账（PR #187，实施基线 `1d88c7a2`）：四个 auth 文件 +51/-42（净 +9——两份缓存状态与刷新提交逻辑删除后，门面+平台 refresh 适配器回填）；新增共用件 token_cache.hpp +151（含合同注释；第一笔为锁内等价版，第二笔按合同重写为条件变量单飞+代次记账，复杂度高于纯搬移预估）；测试 +497（新册 271 + QQ 册并发夹具 112 等）。原估净删未达成，主因第二批合同把共用件从简单锁包升级为单飞状态机且注释占大头，如实记不冒充删除。
+
+## 既有工作关联
+
+- todos/飞书与企业微信接入_双长连接适配器设计.todo（飞书认证照 QQ 对齐）；todos/QQ机器人接入_Channel桥与SessionV3权限闭环.todo。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。

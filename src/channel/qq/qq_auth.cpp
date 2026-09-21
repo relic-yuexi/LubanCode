@@ -20,21 +20,24 @@ QqTokenManager::ErrorKind StatusToErrorKind(int status) {
 
 }  // namespace
 
+ExpiringTokenCache<QqTokenManager::Error> QqTokenManager::MakeCache() {
+    ExpiringTokenCache<Error>::Options cache_options;
+    cache_options.now_ms = options_.now_ms;
+    cache_options.refresh_margin_secs = options_.refresh_margin_secs;
+    cache_options.refresh = [this]() { return Refresh(); };
+    return ExpiringTokenCache<Error>(std::move(cache_options));
+}
+
 void QqTokenManager::Invalidate() {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    token_.reset();
-    expires_at_ms_ = 0;
+    cache_.Invalidate();
 }
 
 std::expected<std::string, QqTokenManager::Error> QqTokenManager::GetValidToken() {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    if (token_.has_value() && options_.now_ms() < expires_at_ms_) {
-        return *token_;
-    }
-    return RefreshLocked();
+    return cache_.GetValid();
 }
 
-std::expected<std::string, QqTokenManager::Error> QqTokenManager::RefreshLocked() {
+std::expected<ExpiringTokenCache<QqTokenManager::Error>::Refreshed, QqTokenManager::Error>
+QqTokenManager::Refresh() {
     QqHttpRequest request;
     request.method = "POST";
     request.url = options_.token_url;
@@ -62,11 +65,8 @@ std::expected<std::string, QqTokenManager::Error> QqTokenManager::RefreshLocked(
     if (!token.has_value()) {
         return std::unexpected(Error{ErrorKind::InvalidCredentials, parse_error});
     }
-    token_ = token->access_token;
-    const std::int64_t lifetime_ms =
-        (token->expires_in_secs - options_.refresh_margin_secs) * 1000;
-    expires_at_ms_ = options_.now_ms() + (lifetime_ms > 0 ? lifetime_ms : 0);
-    return *token_;
+    return ExpiringTokenCache<Error>::Refreshed{token->access_token,
+                                                token->expires_in_secs};
 }
 
 }  // namespace lubancode::channel::qq
