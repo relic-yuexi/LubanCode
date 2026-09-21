@@ -1,0 +1,49 @@
+# AR-10 compact采用门禁没有核完整主请求
+
+- 状态：已动刀（本单 worktree 修复完毕，CI 验收与勾账见文末）；原审查轮只审未改。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-10 | B | 中 | src/runtime/v3_compact_runtime.cpp:1072；src/runtime/v3_compact_runtime.cpp:1227；src/runtime/v3_compact_runtime.hpp:85；src/runtime/v3_compact_runtime.hpp:131；src/app/commands/session_commands.cpp:982；src/agent/loop.cpp:158 | post_compact_budget只检查 `tokens_after + main_output_reserve_tokens`；tokens_after来自bytes/4的system、摘要、保留消息，没有tools。 | 压缩前输入允许宿主estimate槽替换，采用候选时却绕回固定bytes/4；主请求还会带工具schema及真实输出预留。候选可能被记为预算通过并applied，下一主请求又因完整输入超窗被挡，形成额外压缩或反复回退。此处不声称服务端必超窗。 | 保留压缩专用请求估算口；另给采用门禁注入完整主请求预算评估口，使用同一份工具定义、最终system、候选历史、输出预留和估算版本。将benefit用于结构收益，post_compact_budget用于真实下一请求，两种统计标注清楚。 | 影响manual/auto compact、动态工具与用户自定义estimate。不能把原始持久消息序列化字节直接当provider输入，也不能把所有预算都换成主模型窗口。 |
+
+## 证据与边界
+
+V3CompactProfile仅有main_window与main_output_reserve字段；会话接线:982-984也只传两项。input.estimate仅用于压缩输入容量:665-669，:1072-1076与:1227未调用它。主循环EstimateRequestInputTokensForPreflight:161-163明确累加tools，证明两道主请求容量解释不同。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/runtime/v3_compact_runtime.hpp`；`src/runtime/v3_compact_runtime.cpp`；`src/app/commands/session_commands.cpp`。
+- 前置：FD-02（以全局排期复核为准）。
+- 不得并行共改：本组其余任务无同文件写入冲突。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 保留压缩专用请求估算口；另给采用门禁注入完整主请求预算评估口，使用同一份工具定义、最终system、候选历史、输出预留和估算版本。将benefit用于结构收益，post_compact_budget用于真实下一请求，两种统计标注清楚。
+3. 小批提交，按下列门槛验收。
+
+- [ ] 工具定义占主要窗口的夹具中，摘要本身虽小但完整主请求不合格时不得applied。
+- [ ] 替换estimate后采用门禁同版本。
+- [ ] ASCII/CJK/图片/工具结果均使用真实输入快照。
+- [ ] 失败保留候选且不改context链。
+- [ ] GitHub CI。
+
+## 删除量与旧账
+
+本项不以删行计收益；预计净删除 0 行。
+
+关联 todos/SessionV3旧设计清理_消费迁移缺口补齐与旧接口退役.todo 与 todos/session轨迹v3_消息主轴树链与四角色壳收敛设计.todo 的compact两道容量门禁。
+
+跨组接口：FD-02调整 backend/types 与协议适配的最终请求事实。本单不再自行解释extra_body或输出上限覆盖，只消费最终快照；避免再生一套容量真值。
+## 全局排期复核
+
+- 前置／文件接手次序：FD-02
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：HC-06（src/app/commands/session_commands.cpp）。

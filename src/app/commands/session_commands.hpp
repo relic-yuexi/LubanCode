@@ -39,6 +39,8 @@
 #include "platform/paths.hpp"
 #include "tools/tool.hpp"
 
+#include <nlohmann/json.hpp>
+
 namespace lubancode::app {
 
 using lubancode::cli::tr;
@@ -200,6 +202,20 @@ void ApplyResumedContextWindow(lubancode::cli::ContextTracker& tracker,
 // map_path_held(compact 切分劈开工具原子组单 §2.2):map 防线拒收一次后
 // 挂起,本会话自动压缩不再立刻重试 map 路(真机事故:拒收 → 原史重发 →
 // 预检再爆 → 再拒,死循环);手动 /compact 不受限,成功换账即解旗。
+// AR-10(采用门禁核完整主请求):v3 compact 采用门禁的主请求固定事实——
+// 与 loop 实发请求同一来源的最终 system 与工具定义(/context 的现场收集
+// 口径)。快照的可变半边(新摘要 + 保留尾部)由运行时递出;这份固定半边
+// 在接线层取,运行时不重复解释(跨组接口:FD-02 的最终出站快照在
+// session_commands 消费,不再生一套容量真值)。
+struct MainRequestFacts {
+    // 最终 system(叠层次序与 loop 拼请求一致:基座 + 延迟索引段 + 模型
+    // 目录指令 + 魂)。空串 = 没拼出来,评估口回退账本根 system。
+    std::string system;
+    // 会真进 tools 数组的工具定义(暴露谓词过滤后):{name, description,
+    // input_schema} 三键,与 BuildRequestSnapshotJson 的 tools 元素同形。
+    nlohmann::json tools = nlohmann::json::array();
+};
+
 struct CompactHysteresis {
     bool armed = false;                 // 本场是否已有一次压缩收口
     std::size_t last_post_tokens = 0;   // 上次收口时的压力口径估算
@@ -221,6 +237,12 @@ struct CompactSessionInputs {
     std::string* last_compact_line = nullptr;      // /context 的台账行(写出)
     // 压缩滞回活账(可空 = 单测/无状态场景,不设防)。
     CompactHysteresis* hysteresis = nullptr;
+    // AR-10(采用门禁核完整主请求):主请求固定事实的取用口——每次压缩
+    // 现场取(工具表/叠层可能刚变)。v3 分支把它铸进 RunV3CompactInput
+    // ::main_request_budget 的闭包,采用门禁据此核"完整主请求"而不是
+    // bytes/4 的部分请求。空 = 该装配没有这份事实(单测/未接线路径),
+    // 门禁走旧结构尺,行为一字不变。
+    std::function<lubancode::app::MainRequestFacts()> main_request_facts;
     // 压缩参数现场收集(compact 的窗口预算/守恒校验材料)。BuildCompactOptions
     // 的现算(路由声明/目录条目/活动待办守恒)全在里面。
     std::function<lubancode::agent::CompactOptions()> build_compact_options;

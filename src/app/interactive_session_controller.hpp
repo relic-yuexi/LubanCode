@@ -20,6 +20,7 @@
 
 #include "agent/agent.hpp"
 #include "agent/compact.hpp"
+#include "agent/prompts.hpp"  // AR-10:WithDeferredToolsIndex/WithModelInstructions/WithSoul(主请求事实的 system 叠层)
 #include "agent/prompt_assembler.hpp"
 #include "app/agent_panel_presenter.hpp"
 #include "app/agent_view_registry.hpp"  // 按代理状态投影单 P1:会话级视图登记簿
@@ -65,6 +66,7 @@
 #include "runtime/turn_ingress.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
+#include "tools/tool_search.hpp"  // AR-10:BuildDeferredToolsIndexSegment(延迟索引段)
 
 namespace lubancode::app {
 
@@ -293,6 +295,40 @@ private:
         in.route_compact = [this]() { return model_router->Route(lubancode::agent::TaskKind::Compact); };
         in.route_repair = [this]() { return model_router->Route(lubancode::agent::TaskKind::CompactRepair); };
         in.normal_backend = &real_backend;
+        // AR-10(采用门禁核完整主请求):主请求固定事实的现场收集——最终
+        // system 与工具定义,同一来源拼装(与 /context、loop 实发同一口径:
+        // AssembleSystemPrompt + 延迟索引段 + 目录指令 + 魂;暴露谓词过滤后
+        // 的 tools 数组)。每次压缩现取,工具表/叠层刚变也吃当下这份。
+        in.main_request_facts = [this]() {
+            lubancode::app::MainRequestFacts facts;
+            std::string system = lubancode::agent::AssembleSystemPrompt(prompt_options);
+            if (main_deferral) {
+                system = lubancode::agent::WithDeferredToolsIndex(
+                    system,
+                    lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools()));
+            }
+            if (current_model_instructions != nullptr) {
+                system = lubancode::agent::WithModelInstructions(system, *current_model_instructions);
+            }
+            if (soul_session != nullptr) {
+                system = lubancode::agent::WithSoul(system, soul_session->content);
+            } else if (current_soul != nullptr) {
+                system = lubancode::agent::WithSoul(system, *current_soul);
+            }
+            facts.system = std::move(system);
+            nlohmann::json tools = nlohmann::json::array();
+            const std::function<bool(const lubancode::tools::Tool&)>& filter = main_tool_filter();
+            for (const auto& tool : registry().All()) {
+                if (filter && !(*filter)(*tool)) {
+                    continue;  // 延迟未挂载:不进 tools 数组,与实发同形
+                }
+                tools.push_back(nlohmann::json{{"name", tool->name()},
+                                               {"description", tool->description()},
+                                               {"input_schema", tool->input_schema()}});
+            }
+            facts.tools = std::move(tools);
+            return facts;
+        };
         in.current_model = current_model.get();
         in.record_usage = [this](lubancode::agent::ModelRole role, const lubancode::agent::ModelRoute& route,
                                  const lubancode::agent::BackgroundCallAccounting& accounting) {

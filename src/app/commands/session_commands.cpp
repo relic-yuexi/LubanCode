@@ -1064,6 +1064,60 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
             return lubancode::runtime::EstimateBypassRequestTokens(middleware_dispatcher, snapshot,
                                                                    estimate_context);
         };
+        // AR-10(采用门禁核完整主请求):把主请求固定事实铸进采用门禁的
+        // 完整主请求预算评估口。估算走 PreRequest/estimate 同一只槽——
+        // 用户替换了估算器,这道门禁与压缩请求同版本;未替换回落槽内置
+        // bytes/4(按完整快照计,工具定义不再漏计)。输出预留只认 FD-02
+        // 最终出站快照(PrepareWireRequest 的有效上限,含 extra_body 覆盖),
+        // 本单不自行解释覆盖。facts 缺席(装配没接)则口留空,门禁走旧路。
+        if (in.main_request_facts) {
+            run_input.main_request_budget =
+                [middleware_dispatcher, facts_provider = in.main_request_facts,
+                 agent = in.agent, backend = in.normal_backend](const nlohmann::json& candidate)
+                -> std::expected<nlohmann::json, std::string> {
+                    const lubancode::app::MainRequestFacts facts =
+                        facts_provider ? facts_provider() : lubancode::app::MainRequestFacts{};
+                    nlohmann::json snapshot = nlohmann::json::object();
+                    snapshot["model"] = agent->request_profile().model;
+                    const std::string candidate_system = candidate.value("system", std::string());
+                    // 最终 system 叠层压过账本根基座;facts 没拼出来才回退。
+                    snapshot["system"] = facts.system.empty() ? candidate_system : facts.system;
+                    snapshot["messages"] =
+                        candidate.contains("messages") && candidate["messages"].is_array()
+                            ? candidate["messages"]
+                            : nlohmann::json::array();
+                    snapshot["tools"] = facts.tools;
+                    std::uint64_t reserve =
+                        static_cast<std::uint64_t>(
+                            agent->runtime_profile().max_output_tokens.value_or(0));
+                    if (backend != nullptr) {
+                        // FD-02:出门的最终事实只此一份——probe 与 loop 的请求
+                        // 整形同一份档案,真后端从最终 body 解析有效上限(含
+                        // extra_body 覆盖),桩后端原样回 max_tokens,都如实。
+                        lubancode::api::Request probe;
+                        probe.model = agent->request_profile().model;
+                        lubancode::api::ApplyRequestProfile(probe, agent->request_profile());
+                        probe.max_tokens = agent->runtime_profile().max_output_tokens;
+                        const lubancode::api::PreparedWireRequest prepared =
+                            backend->PrepareWireRequest(probe);
+                        if (prepared.output_limit.has_value() && *prepared.output_limit >= 0) {
+                            reserve = static_cast<std::uint64_t>(*prepared.output_limit);
+                        }
+                    }
+                    if (reserve > 0) {
+                        snapshot["control"]["maxOutputTokens"] = reserve;
+                    }
+                    lubancode::runtime::MiddlewareHookContext estimate_context;
+                    estimate_context.purpose = "compact";
+                    auto estimated = lubancode::runtime::EstimateBypassRequestTokens(
+                        middleware_dispatcher, snapshot, estimate_context);
+                    if (!estimated.has_value()) {
+                        return estimated;
+                    }
+                    (*estimated)["outputReserveTokens"] = reserve;
+                    return estimated;
+                };
+        }
     }
     const lubancode::runtime::V3CompactRunResult result =
         lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(run_input));

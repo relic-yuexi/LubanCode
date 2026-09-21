@@ -1842,3 +1842,473 @@ TEST_CASE("T12-C user steer 与中途压缩竞争:源变化拒收,steer 原样�
     }
     CHECK(VerifyV3File(harness.jsonl).ok);
 }
+
+// ---------------------------------------------------------------------------
+// AR-10(采用门禁核完整主请求):旧门禁只核 bytes/4 的部分请求(system +
+// 摘要 + 保留尾部),工具定义/最终 system 叠层/输出上限覆盖全不在账——
+// 摘要本身虽小,完整主请求装不下时照样 applied,下一主请求又被预检拦下。
+// 本组册钉新合同:门禁吃完整主请求评估口(input.main_request_budget)的
+// 数字;口吃到真实候选快照(新摘要 + 保留尾部原样载荷);口失败 fail
+// closed(候选保留、链一字不动);FD-02 最终快照的 outputReserveTokens
+// 压过 profile 缺省;未注口的调用方走旧路,行为一字不变。
+// ---------------------------------------------------------------------------
+namespace {
+
+// compact.validation.completed 的 checks 里按 code 找一枚;找不到给 nullptr。
+const nlohmann::json* FindValidationCheck(const std::vector<nlohmann::json>& lines,
+                                          const std::string& code) {
+    for (const nlohmann::json* event : EventsOf(lines, "compact.validation.completed")) {
+        const auto payload_it = event->find("payload");
+        if (payload_it == event->end() || !payload_it->is_object()) {
+            continue;
+        }
+        const auto checks_it = payload_it->find("checks");
+        if (checks_it == payload_it->end() || !checks_it->is_array()) {
+            continue;
+        }
+        for (const auto& check : *checks_it) {
+            if (check.value("code", std::string()) == code) {
+                return &check;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// 固定数字的完整主请求评估口桩:记录快照、回指定 estimatedInputTokens
+//(可选带 outputReserveTokens 与 estimator 名)。
+class StubMainRequestBudget {
+public:
+    std::vector<nlohmann::json> snapshots;
+    std::function<std::expected<nlohmann::json, std::string>()> answer = [] {
+        return std::expected<nlohmann::json, std::string>(
+            nlohmann::json{{"estimator", "stub-main-v1"}, {"estimatedInputTokens", 0}});
+    };
+
+    std::expected<nlohmann::json, std::string> operator()(const nlohmann::json& snapshot) {
+        snapshots.push_back(snapshot);
+        return answer();
+    }
+};
+
+}  // namespace
+
+TEST_CASE("AR-10 完整主请求不合格不得 applied:摘要虽小,工具占窗照样拦") {
+    Harness harness("ar10-tools-window");
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        harness.SeedTurn(*writer, "turn-two", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 200000;
+        profile.main_output_reserve_tokens = 8192;
+        StubMainRequestBudget port;
+        port.answer = [] {
+            // 工具定义占主要窗口的形状:完整主请求(工具 schema + system
+            // 叠层 + 候选历史)195000 tokens,结构尺的 tokens_after 远小于此。
+            return std::expected<nlohmann::json, std::string>(nlohmann::json{
+                {"estimator", "stub-main-v9"}, {"estimatedInputTokens", 195000}});
+        };
+        V3CompactRunInput input = ManualInput();
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) {
+            return port(snapshot);
+        };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        // 旧尺本来会放行:结构口径的 tokens_after + 预留远在窗口内。病就
+        // 病在这——部分请求合格被当成完整主请求合格。
+        REQUIRE(!result.applied);
+        CHECK(result.tokens_after + profile.main_output_reserve_tokens <=
+              profile.main_window_tokens);
+        CHECK(result.terminal_kind == "rejected");
+        CHECK(result.reason == "validation_failed");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const nlohmann::json* check = FindValidationCheck(lines, "post_compact_budget");
+        REQUIRE(check != nullptr);
+        CHECK(!check->value("passed", false));
+        const std::string detail = check->value("detail", std::string());
+        CHECK(detail.find("195000") != std::string::npos);
+        CHECK(detail.find("主请求评估口 stub-main-v9") != std::string::npos);
+        // 失败保留候选且不改 context 链:applied 不存在,链上五枚(1 system
+        // + 两轮各两条)原样。
+        CHECK(EventsOf(lines, "compact.applied").empty());
+        CHECK(writer->context().chain.size() == 5);
+        auto ledger = ReadV3Ledger(harness.jsonl);
+        REQUIRE(ledger.has_value());
+        const HistoryTimeline timeline = ProjectHistoryTimeline(*ledger);
+        bool candidate_visible = false;
+        for (const auto& item : timeline.items) {
+            if (item.kind == HistoryTimeline::Item::Kind::Message &&
+                item.message.purpose == MessagePurpose::Compact &&
+                item.message.role == MessageRole::Assistant) {
+                candidate_visible = true;
+            }
+        }
+        CHECK(candidate_visible);
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("AR-10 门禁吃评估口的数字:边界值一分不差,快照是真候选") {
+    // 边界:estimatedInputTokens = window - reserve 恰好放行,+1 拒收——
+    // 门禁必须逐字消费口的数字(替换估算器后采用门禁同版本)。
+    {
+        Harness harness("ar10-boundary-fit");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        profile.main_output_reserve_tokens = 8192;
+        StubMainRequestBudget port;
+        port.answer = [] {
+            return std::expected<nlohmann::json, std::string>(
+                nlohmann::json{{"estimator", "stub-main-v9"}, {"estimatedInputTokens", 91808}});
+        };
+        V3CompactRunInput input = ManualInput();
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) { return port(snapshot); };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        REQUIRE(result.applied);
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const auto applied = EventsOf(lines, "compact.applied");
+        REQUIRE(applied.size() == 1);
+        // 两笔统计分开标注:结构尺照旧进 estimator/tokenMetric,budgetGate
+        // 单列完整主请求口径(估算名/输入/预留/窗口)。
+        const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
+        CHECK(metric.value("estimator", std::string()) == "utf8_bytes_div4");
+        REQUIRE(metric.contains("budgetGate"));
+        CHECK(metric["budgetGate"].value("estimator", std::string()) == "stub-main-v9");
+        CHECK(metric["budgetGate"].value("estimatedInputTokens", std::uint64_t{0}) == 91808);
+        CHECK(metric["budgetGate"].value("outputReserveTokens", std::uint64_t{0}) == 8192);
+        CHECK(metric["budgetGate"].value("windowTokens", std::uint64_t{0}) == 100000);
+    }
+    {
+        Harness harness("ar10-boundary-over");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        profile.main_output_reserve_tokens = 8192;
+        StubMainRequestBudget port;
+        port.answer = [] {
+            return std::expected<nlohmann::json, std::string>(
+                nlohmann::json{{"estimatedInputTokens", 91809}});
+        };
+        V3CompactRunInput input = ManualInput();
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) { return port(snapshot); };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        CHECK(!result.applied);
+        CHECK(result.terminal_kind == "rejected");
+        const nlohmann::json* check =
+            FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
+        REQUIRE(check != nullptr);
+        CHECK(!check->value("passed", false));
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("AR-10 快照合同:ASCII/CJK/图片/工具结果全用真实输入快照") {
+    Harness harness("ar10-real-snapshot");
+    {
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        // 保留尾部:受保护轮装 CJK 用户输入、带图片块的 assistant、工具结果。
+        MessageDraft keep_user;
+        keep_user.turn_id = "turn-keep";
+        keep_user.origin = MessageOrigin::Human;
+        keep_user.message = {{"role", "user"}, {"content", "看看这张图,再查一下旧档。"}};
+        const WriteReceipt keep_user_receipt =
+            writer->AppendMessage(std::move(keep_user), Durability::PowerLoss);
+        REQUIRE(keep_user_receipt.status == WriteReceipt::Status::Committed);
+        MessageDraft keep_assistant;
+        keep_assistant.turn_id = "turn-keep";
+        keep_assistant.request_id = "request-keep";
+        keep_assistant.provider = "test";
+        keep_assistant.wire = "test";
+        keep_assistant.model = "test-model";
+        keep_assistant.response_model = nlohmann::json(nullptr);
+        keep_assistant.usage = nlohmann::json(nullptr);
+        keep_assistant.origin = MessageOrigin::SessionRuntime;
+        keep_assistant.message = nlohmann::json::object(
+            {{"role", "assistant"},
+             {"content", nlohmann::json::array(
+                              {nlohmann::json{{"type", "image"},
+                                              {"source", nlohmann::json{{"type", "base64"},
+                                                                        {"media_type", "image/png"},
+                                                                        {"data", "aGVsbG8gc2NhcHNob3Q="}}}},
+                               nlohmann::json{{"type", "text"}, {"text", "图里是登录页"}}})}});
+        const WriteReceipt keep_assistant_receipt =
+            writer->AppendMessage(std::move(keep_assistant), Durability::PowerLoss);
+        REQUIRE(keep_assistant_receipt.status == WriteReceipt::Status::Committed);
+        MessageDraft tool_result;
+        tool_result.turn_id = "turn-keep";
+        tool_result.action_id = "action-keep";
+        tool_result.origin = MessageOrigin::SessionRuntime;
+        tool_result.message = {{"role", "tool"}, {"tool_call_id", "action-keep"},
+                               {"content", "旧档查到三份,路径见上。"}};
+        const WriteReceipt tool_result_receipt =
+            writer->AppendMessage(std::move(tool_result), Durability::PowerLoss);
+        REQUIRE(tool_result_receipt.status == WriteReceipt::Status::Committed);
+        // 三枚都接纳进链(链序:user -> assistant(图片) -> tool)。
+        REQUIRE(writer
+                    ->AdmitMessages({keep_user_receipt.id, keep_assistant_receipt.id,
+                                     tool_result_receipt.id})
+                    .status == WriteReceipt::Status::Committed);
+        StubClient client;
+        const std::string summary_text = ManifestReply(BigText(200, 's'), {"continue"});
+        client.respond = [&summary_text] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = summary_text;
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        profile.main_output_reserve_tokens = 8192;
+        StubMainRequestBudget port;
+        port.answer = [] {
+            return std::expected<nlohmann::json, std::string>(
+                nlohmann::json{{"estimator", "stub-main-v9"}, {"estimatedInputTokens", 50000}});
+        };
+        V3CompactRunInput input = ManualInput();
+        input.protected_turn_ids = {"turn-keep"};
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) { return port(snapshot); };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        REQUIRE(result.applied);
+        REQUIRE(port.snapshots.size() == 1);
+        const nlohmann::json& snapshot = port.snapshots.front();
+        // system 是账本根的主 system(压缩专用 system 不得混进来)。
+        CHECK(snapshot.value("system", std::string()) == "你是 LubanCode。");
+        const auto messages_it = snapshot.find("messages");
+        REQUIRE(messages_it != snapshot.end());
+        REQUIRE(messages_it->is_array());
+        REQUIRE(messages_it->size() == 4);  // 摘要 + user + assistant(图片) + tool
+        // 链头新摘要:applied 同形(user 携带正文,逐字)。
+        CHECK((*messages_it)[0].value("role", std::string()) == "user");
+        CHECK((*messages_it)[0].value("content", std::string()) == summary_text);
+        // 保留尾部按链序原样:CJK 文本逐字在场。
+        CHECK((*messages_it)[1].value("content", std::string()) == "看看这张图,再查一下旧档。");
+        // 图片块与文字块保真(真实输入快照,不是合成字节数)。
+        const nlohmann::json& assistant_content = (*messages_it)[2]["content"];
+        REQUIRE(assistant_content.is_array());
+        REQUIRE(assistant_content.size() == 2);
+        CHECK(assistant_content[0].value("type", std::string()) == "image");
+        CHECK(assistant_content[0]["source"].value("data", std::string()) == "aGVsbG8gc2NhcHNob3Q=");
+        CHECK(assistant_content[1].value("text", std::string()) == "图里是登录页");
+        // 工具结果原样:tool_call_id 与正文逐字。
+        CHECK((*messages_it)[3].value("role", std::string()) == "tool");
+        CHECK((*messages_it)[3].value("tool_call_id", std::string()) == "action-keep");
+        CHECK((*messages_it)[3].value("content", std::string()) == "旧档查到三份,路径见上。");
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("AR-10 评估口失败:fail closed,候选保留,链一字不动") {
+    const auto run_with = [&](const char* tag,
+                              std::function<std::expected<nlohmann::json, std::string>()> answer,
+                              const std::string& expect_detail_fragment) {
+        Harness harness(tag);
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        profile.main_output_reserve_tokens = 8192;
+        StubMainRequestBudget port;
+        port.answer = std::move(answer);
+        V3CompactRunInput input = ManualInput();
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) { return port(snapshot); };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        CHECK(!result.applied);
+        CHECK(result.terminal_kind == "rejected");
+        CHECK(result.reason == "validation_failed");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const nlohmann::json* check = FindValidationCheck(lines, "post_compact_budget");
+        REQUIRE(check != nullptr);
+        CHECK(!check->value("passed", false));
+        CHECK(check->value("detail", std::string()).find(expect_detail_fragment) !=
+              std::string::npos);
+        CHECK(EventsOf(lines, "compact.applied").empty());
+        CHECK(writer->context().chain.size() == 3);  // system + 一轮两条,原样
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    };
+    // 槽报错(用户估算器失败):错误原样进 check,不回落旧尺假装核过。
+    run_with("ar10-port-error",
+             [] {
+                 return std::expected<nlohmann::json, std::string>(
+                     std::unexpected(std::string("compact.estimate_failed: 用户估算器炸了")));
+             },
+             "compact.estimate_failed: 用户估算器炸了");
+    // 形状不合:缺 estimatedInputTokens。
+    run_with("ar10-port-shape",
+             [] {
+                 return std::expected<nlohmann::json, std::string>(
+                     nlohmann::json{{"estimator", "stub-main-v9"}});
+             },
+             "compact.estimate_bad_shape");
+    // 形状不合:负数。
+    run_with("ar10-port-negative",
+             [] {
+                 return std::expected<nlohmann::json, std::string>(
+                     nlohmann::json{{"estimatedInputTokens", -5}});
+             },
+             "compact.estimate_bad_shape");
+}
+
+TEST_CASE("AR-10 最终快照的预留压过 profile:FD-02 接缝") {
+    // profile 预留 8192:口报 95000 时按 profile 必超(103192 > 100000),
+    // 按 FD-02 最终出站快照的真预留 4000 则放行(99000 <= 100000)。
+    {
+        Harness harness("ar10-reserve-override");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        profile.main_output_reserve_tokens = 8192;
+        StubMainRequestBudget port;
+        port.answer = [] {
+            return std::expected<nlohmann::json, std::string>(nlohmann::json{
+                {"estimatedInputTokens", 95000}, {"outputReserveTokens", 4000}});
+        };
+        V3CompactRunInput input = ManualInput();
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) { return port(snapshot); };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        REQUIRE(result.applied);
+        const auto applied = EventsOf(ReadJsonLines(harness.jsonl), "compact.applied");
+        REQUIRE(applied.size() == 1);
+        const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
+        REQUIRE(metric.contains("budgetGate"));
+        CHECK(metric["budgetGate"].value("outputReserveTokens", std::uint64_t{0}) == 4000);
+    }
+    // 镜像:口带窄输入但真预留大(95000 + 6000 > 100000)照样拦。
+    {
+        Harness harness("ar10-reserve-over");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        profile.main_output_reserve_tokens = 4000;
+        StubMainRequestBudget port;
+        port.answer = [] {
+            return std::expected<nlohmann::json, std::string>(nlohmann::json{
+                {"estimatedInputTokens", 95000}, {"outputReserveTokens", 6000}});
+        };
+        V3CompactRunInput input = ManualInput();
+        input.main_request_budget = [&port](const nlohmann::json& snapshot) { return port(snapshot); };
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
+        CHECK(!result.applied);
+        const nlohmann::json* check =
+            FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
+        REQUIRE(check != nullptr);
+        CHECK(!check->value("passed", false));
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("AR-10 未注口:旧路一字不变") {
+    // 没注 main_request_budget 的调用方:门禁走旧结构尺(失败文案不带
+    // "主请求评估口"),applied 的 tokenMetric 不带 budgetGate 键。
+    {
+        Harness harness("ar10-legacy-fail");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 50;  // 结构尺就装不下
+        profile.main_output_reserve_tokens = 8192;
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, ManualInput());
+        CHECK(!result.applied);
+        CHECK(result.reason == "validation_failed");
+        const nlohmann::json* check =
+            FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
+        REQUIRE(check != nullptr);
+        const std::string detail = check->value("detail", std::string());
+        CHECK(detail.find("压缩后上下文") != std::string::npos);
+        CHECK(detail.find("主请求评估口") == std::string::npos);
+    }
+    {
+        Harness harness("ar10-legacy-pass");
+        auto writer = harness.Start();
+        REQUIRE(writer.has_value());
+        harness.SeedTurn(*writer, "turn-one", BigText(600));
+        StubClient client;
+        client.respond = [] {
+            V3CompactModelReply reply;
+            reply.ok = true;
+            reply.text = ManifestReply(BigText(200, 's'), {"continue"});
+            return reply;
+        };
+        V3CompactProfile profile = BaseProfile();
+        profile.main_window_tokens = 100000;
+        const V3CompactRunResult result =
+            lubancode::runtime::RunV3Compact(*writer, client, profile, ManualInput());
+        REQUIRE(result.applied);
+        const auto applied = EventsOf(ReadJsonLines(harness.jsonl), "compact.applied");
+        REQUIRE(applied.size() == 1);
+        const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
+        CHECK_FALSE(metric.contains("budgetGate"));
+        CHECK(metric.value("estimator", std::string()) == "utf8_bytes_div4");
+    }
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}

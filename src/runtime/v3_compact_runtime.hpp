@@ -116,7 +116,10 @@ struct V3CompactProfile {
     // Mc:显式安全余量(协议头/估算误差边)。
     std::uint64_t compact_margin_tokens = 2048;
     // 主模型窗口/输出预留:applied 前的第二道门禁(S+Q新+K+O主<=C主,
-    // §4.64"前后两道容量门禁")。窗口 0 = 不做,如实标注。
+    // §4.64"前后两道容量门禁")。窗口 0 = 不做,如实标注。AR-10 起:注入
+    // 了 V3CompactRunInput::main_request_budget 时,这道门禁吃完整主请求
+    // 评估口的数字(工具定义/最终 system/输出预留都在口的闭包与快照里);
+    // 预留可被口的 outputReserveTokens 压过(FD-02 最终出站快照)。
     std::uint64_t main_window_tokens = 0;
     std::uint64_t main_output_reserve_tokens = 0;
     // 一次回退至少让出的 token(§4.64 首版建议 8192)。
@@ -176,6 +179,31 @@ struct V3CompactRunInput {
     //(§4.36 fail closed)。生产装配见 session_commands 的
     // runtime::EstimateBypassRequestTokens。
     std::function<std::expected<nlohmann::json, std::string>(const nlohmann::json&)> estimate;
+
+    // AR-10(采用门禁核完整主请求):applied 前第二道门禁(7.9
+    // post_compact_budget)的完整主请求预算评估口。病灶:压缩前输入允许
+    // 宿主 estimate 槽替换,旧门禁却绕回 bytes/4 的部分请求——system +
+    // 摘要 + 保留尾部,没有工具定义、没有最终 system 叠层、没有输出上限
+    // 覆盖;候选可能记为预算通过并 applied,下一主请求又因完整输入超窗
+    // 被挡,形成额外压缩或反复回退。本口补这一课:
+    //   入参 = 候选主请求快照(链序 JSON):
+    //     system —— 会话主 system(账本根消息正文;最终叠层由槽的闭包
+    //               持有真值,可覆盖这份基座);
+    //     messages —— 候选历史:链头新摘要(role=user 携带摘要正文,与
+    //               compact.applied 落账同形)+ 保留尾部账本原样消息
+    //              (签名/加密载荷保真——B 阶段回放的就是这份);
+    //   出参 = EST1 形状:estimatedInputTokens 必填(完整主请求的输入
+    //     估算——同一份工具定义、最终 system、输出预留都在槽的闭包里,
+    //     本运行时不重复解释,FD-02 的最终出站快照在接线层消费);可选
+    //     outputReserveTokens(最终快照的真预留),给了就压过
+    //     profile.main_output_reserve_tokens(最终事实只此一份)。
+    // 空 = 旧路(tokens_after bytes/4 + profile 预留),未接线调用方行为
+    // 一字不变。槽失败/形状不合 → post_compact_budget 落 failed(fail
+    // closed):候选保留、链一字不动,不假装核过。benefit(7.8)仍是
+    // 结构收益尺(bytes/4 前后对照),与这道门禁的真实下一请求口径分开
+    // 标注,不混一笔。
+    std::function<std::expected<nlohmann::json, std::string>(const nlohmann::json&)>
+        main_request_budget;
 
     // T12-B(V3-GAP-07,SessionV3 旧设计清理单):/compact --dry-run 的干跑位。
     // 同一候选范围与容量规划器只算不压:不开场(compact.requested 不落)、
