@@ -1,6 +1,6 @@
 # SV-07 渠道中立合同放在 QQ 实现头，其他平台反向依赖整只适配器
 
-- 状态：待实施，仅审查与方案。
+- 状态：已实施并 CI 验收通过(纯搬移/include 改道,零行为变更);证据见文末勾账。
 - 审查日期：2026-09-21。
 - 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
@@ -51,11 +51,11 @@
 
 ## 验收门槛
 
-- [ ] 飞书 adapter 头不再传递包含 qq_adapter.hpp；企微 gateway 头不再包含 qq_gateway.hpp。
-- [ ] 三平台使用同一连接快照字段合同；API 迁移期旧 using 不增加第二份状态数据。
-- [ ] 三平台各自成功/断线/退避/停止测试照旧，飞书及企微无需构造 QQ 适配器。
-- [ ] 编译层面核 include 闭包；远端 CI 验三平台，不把纯改名算功能变更。
-- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+- [x] 飞书 adapter 头不再传递包含 qq_adapter.hpp；企微 gateway 头不再包含 qq_gateway.hpp。（两头 grep 零引用；新册 tests/unit/channel/test_channel_neutral_contracts.cpp 只含各平台窄头即可编译——暗依赖直接编不过,include 闭包变成可执行断言。）
+- [x] 三平台使用同一连接快照字段合同；API 迁移期旧 using 不增加第二份状态数据。（channel::ConnectionSnapshot/ConnectionFailure 单一定义于 src/channel/connection_state.hpp;qq::/wecombot:: 旧名是 using 别名(新册 static_assert 钉 is_same);企微重复结构体与注册表逐字段手抄转换已删,净删约 46 行。）
+- [x] 三平台各自成功/断线/退避/停止测试照旧，飞书及企微无需构造 QQ 适配器。（CI run 35618362685 双平台:qq_adapter 5.26s/3.76s、feishu_adapter 0.36s/0.52s、wecom_adapter 1.95s/1.02s、qq_connection_reporter 0.05s/1.30s、wecom_gateway 2.62s/1.93s、三 wiring 册全 Passed;断言一字未改,仅 test_wecom_adapter.cpp 两处类型拼写改道(qq::GatewayConnectError→transport::,include 改道非行为变更)。）
+- [x] 编译层面核 include 闭包；远端 CI 验三平台，不把纯改名算功能变更。（run 35618362685 rollup success:macos-clang 608 册 100% 过、windows-msvc 607 册 100% 过;纯搬移零逻辑变化,两笔修复均只补 include。）
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。（见文末勾账。）
 
 ## 合并/删除口径
 
@@ -75,3 +75,12 @@
 - 前置／文件接手次序：SV-08
 - 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
 - 共改任务：SV-08（src/channel/feishu/feishu_adapter.cpp, src/channel/feishu/feishu_adapter.hpp, src/channel/qq/qq_adapter.hpp, src/channel/wecombot/wecom_adapter.cpp, src/channel/wecombot/wecom_adapter.hpp）。
+
+## 勾账（2026-09-21）
+
+- PR：#188（分支 worktree-agent-a65547784fb1176c6，base main）。提交三笔：dcee3d0a 主搬移（合同迁中立位 + 企微重复快照/注册表手抄转换删除 + 新合同册）；22fc88be 补 qq_gateway.hpp 缺的 connection_state.hpp include；960b32d3 补 registry.cpp 直含 qq_adapter.hpp。后两笔都是 hpp 收窄后"传递可见性断供"的编译红修复,产品码逻辑零改动。
+- CI：run 35618362685，rollup conclusion=success（判绿只认 rollup）。前两轮红各是编译错（run 35612224466：qq_gateway.hpp 迁移期别名引用的 ConnectionSnapshot 所在头未含;run 35614570642：registry.cpp 的 QqBotAdapter 传递可见性断供），修后第三轮编译双绿;windows 腿首次尝试在 Fetch bundled ripgrep 撞上游 504（基础设施抖,无码病），`gh run rerun --failed` 一次即绿。已知时序 flaky unit.channelfeishu.feishu_adapter 本轮双平台一次过,未动用重跑额度。
+- 关键证据行：unit.channel.channel_neutral_contracts（新册）macos 0.03s / windows 0.15s;feishu_adapter 0.36s/0.52s;qq_adapter 5.26s/3.76s;qq_connection_reporter 0.05s/1.30s;wecom_adapter 1.95s/1.02s;wecom_gateway 2.62s/1.93s;qq_gateway_diag windows 2.35s;feishu_wiring/qq_wiring/wecom_wiring 全 Passed。两腿总账:macos-clang 100% 608 册、windows-msvc 100% 607 册。
+- 行为变化：零。传输 seam（IGatewayTransport/GatewayConnectError/WsGatewayTransport/MakeWsTransportFactory）逐行原样搬移,Connect 失败 stage 由 kStageConnecting 换 "connecting" 字面量（同值）;企微快照手抄转换是恒等拷贝,删除后 reporter 消费同一类型同一字段。
+- 回滚方式：revert PR #188 三笔提交即回旧合同位（快照驻 qq_adapter.hpp、传输 seam 驻 qq_gateway.hpp、企微重复快照与手抄转换复现）,无数据/格式迁移。
+- 尚未验证边界：真平台联调（QQ/飞书/企微真网关）不在本条与 CI 范围。迁移期兼容件待后续小单退役：qq_gateway.hpp 的五枚别名+工厂转发、wecom_adapter.hpp 两枚别名、registry.hpp/reporter.hpp 为既有测试册保留的 qq_gateway.hpp 传递 include（退役条件=全仓改用中立名后 grep 零引用）。QqSpoolStore 仍驻 qq 命名空间（单内明示按原位借用,完整更名另列消费清单）。
