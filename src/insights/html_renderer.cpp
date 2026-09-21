@@ -11,7 +11,7 @@
 
 #include "hooks/hash.hpp"    // Sha256Hex(CSP 哈希的同一把尺)
 #include "platform/base64.hpp"  // Base64Encode:CSP hash-source 的公共内核(审计 P2)
-#include "insights/redaction.hpp"  // 防御性脱敏(§13.2 第二层,先于 escape)
+#include "privacy/secret_scan.hpp"  // 防御性脱敏(§13.2 第二层,先于 escape;FD-06 下沉的中立件)
 
 namespace lubancode::insights {
 namespace {
@@ -22,7 +22,7 @@ namespace {
 // [REDACTED:<kind>],不保留前后几位),再 HTML escape,最后剥控制字符。
 // Journal 侧已有 recorder 写前脱敏,这里是渲染层的第二道闸。
 std::string EscapeHtml(const std::string& raw) {
-    const std::string text = lubancode::insights::RedactSecrets(raw);
+    const std::string text = lubancode::privacy::RedactSecrets(raw);
     std::string out;
     out.reserve(text.size() + 16);
     for (const char c : text) {

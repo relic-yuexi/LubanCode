@@ -16,9 +16,9 @@
 #include <string_view>
 #include <vector>
 
-#include "insights/redaction.hpp"
+#include "privacy/secret_scan.hpp"
 
-using namespace lubancode::insights;
+using namespace lubancode::privacy;
 
 namespace {
 

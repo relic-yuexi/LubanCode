@@ -14,7 +14,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
-#include "insights/redaction.hpp"
+#include "privacy/secret_scan.hpp"
 #include "tools/registry.hpp"
 #include "trajectory/directory.hpp"  // ReadSessionJson(runtime 的封口口径)
 
@@ -620,7 +620,7 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
     }
 
     if (parsed.json) {
-        TermOut() << lubancode::insights::RedactSecrets(BuildPromptAuditJson(model).dump(2))
+        TermOut() << lubancode::privacy::RedactSecrets(BuildPromptAuditJson(model).dump(2))
                   << "\n";
         TermOut().flush();
         return;

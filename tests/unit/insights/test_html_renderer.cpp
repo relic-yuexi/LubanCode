@@ -12,7 +12,7 @@
 
 #include "hooks/hash.hpp"
 #include "insights/html_renderer.hpp"
-#include "insights/redaction.hpp"
+#include "privacy/secret_scan.hpp"
 
 using namespace lubancode;
 using namespace lubancode::insights;
@@ -156,7 +156,7 @@ TEST_CASE("七节锚点与筛选器在场;canary 不进页面") {
     leaked.prompt_findings[0].summary = "sk-CANARY-abcdef1234567890";
     const std::string leaked_html = RenderFixture(leaked);
     CHECK(leaked_html.find("sk-CANARY") == std::string::npos);
-    CHECK(lubancode::insights::RedactSecrets(leaked_html).find("sk-CANARY") ==
+    CHECK(lubancode::privacy::RedactSecrets(leaked_html).find("sk-CANARY") ==
           std::string::npos);
 }
 

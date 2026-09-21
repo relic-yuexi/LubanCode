@@ -7,9 +7,10 @@
 //   2. projection 共享层的 raw 扫——purpose/usage/工具细账/run relations/
 //      环境快照引用逐行取,与 training exporter 同一本底账。
 //
-// 隐私(单子 §四/§八):secret 扫描复用 insights 冻结的模式表,命中片段
-// 整段替换(RedactSecrets),记录侧留 privacy_findings 稳定码——与
-// training 的"整包扣下"不同,harness 要如实产出,处置面是脱敏不是丢行。
+// 隐私(单子 §四/§八):secret 扫描吃 privacy/secret_scan 中立件(FD-06
+// 下沉,原 insights 冻结的模式表),命中片段整段替换(RedactSecrets),
+// 记录侧留 privacy_findings 稳定码——与 training 的"整包扣下"不同,
+// harness 要如实产出,处置面是脱敏不是丢行。
 // 路径不脱敏:评测 harness 要认容器内路径,secret 才是红线。
 
 #include "trajectory/harness_exporter.hpp"
@@ -28,8 +29,8 @@
 #include <nlohmann/json.hpp>
 
 #include "hooks/hash.hpp"
-#include "insights/redaction.hpp"
 #include "platform/paths.hpp"
+#include "privacy/secret_scan.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/export_projection.hpp"
@@ -89,11 +90,11 @@ std::string CutUtf8(std::string_view text, std::size_t limit) {
 // "即便失败或 partial 也要如实产出")。stable codes 进 findings。
 std::string RedactSecretsAndReport(std::string_view text, const std::string& event_id,
                                    std::vector<PrivacyFinding>* findings) {
-    for (const auto& hit : insights::ScanSecrets(text)) {
+    for (const auto& hit : privacy::ScanSecrets(text)) {
         findings->push_back(PrivacyFinding{
-            std::string("privacy.secret.") + insights::SecretKindName(hit.kind), event_id});
+            std::string("privacy.secret.") + privacy::SecretKindName(hit.kind), event_id});
     }
-    return insights::RedactSecrets(text);
+    return privacy::RedactSecrets(text);
 }
 
 // JSON 值的脱敏:canonical dump -> RedactSecrets -> 回读。结构保住,命中

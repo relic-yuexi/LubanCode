@@ -12,8 +12,10 @@
 #include "insights/finding.hpp"
 #include "insights/redaction.hpp"
 #include "insights/report_model.hpp"
+#include "privacy/secret_scan.hpp"  // 扫描/替换已下沉中立件(FD-06)
 
 using namespace lubancode::insights;
+using namespace lubancode::privacy;
 
 namespace {
 

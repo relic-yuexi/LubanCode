@@ -6,8 +6,8 @@
 #include <string>
 #include <utility>
 
-#include "insights/redaction.hpp"
 #include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:长度帽刀口对齐码点边界
+#include "privacy/secret_scan.hpp"  // 共享密钥扫描(FD-06 下沉的中立件)
 
 namespace lubancode::telemetry {
 namespace {
@@ -117,9 +117,9 @@ nlohmann::json RedactionManifest::ToJson() const {
 }
 
 std::string SanitizeText(std::string_view text, RedactionManifest* manifest) {
-    // 1) secret key/name rules + token/credential detector:复用 insights
-    //    层的既有扫描器,命中片段整段替 [REDACTED:<kind>]。
-    std::string value = lubancode::insights::RedactSecrets(text);
+    // 1) secret key/name rules + token/credential detector:复用 privacy
+    //    中立件的共享扫描器(FD-06 下沉),命中片段整段替 [REDACTED:<kind>]。
+    std::string value = lubancode::privacy::RedactSecrets(text);
 
     // 2) URL sanitizer:打掉 userinfo 与 query/fragment。
     value = SanitizeUrl(value);
@@ -145,7 +145,7 @@ std::string SanitizeText(std::string_view text, RedactionManifest* manifest) {
 }
 
 bool LooksLikeSecret(std::string_view text) {
-    return !lubancode::insights::ScanSecrets(text).empty();
+    return !lubancode::privacy::ScanSecrets(text).empty();
 }
 
 RedactionResult RedactAttributes(const nlohmann::json& attributes, DataClass data_class,

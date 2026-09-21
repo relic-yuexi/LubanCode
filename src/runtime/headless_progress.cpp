@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "api/types.hpp"
-#include "insights/redaction.hpp"
+#include "privacy/secret_scan.hpp"
 
 namespace lubancode::runtime {
 namespace {
@@ -24,7 +24,7 @@ HeadlessProgressReporter::HeadlessProgressReporter(Emit emit, std::string label,
     : emit_(std::move(emit)), label_(std::move(label)), model_(std::move(model)) {}
 
 std::string HeadlessProgressReporter::Preview(const std::string& text, std::size_t cap) {
-    std::string clean = insights::RedactSecrets(text);
+    std::string clean = privacy::RedactSecrets(text);
     for (char& c : clean) {
         const auto byte = static_cast<unsigned char>(c);
         if (byte < 0x20 || byte == 0x7f) c = ' ';
