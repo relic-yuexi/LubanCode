@@ -1,6 +1,6 @@
 # HC-08：补齐Backend包装层的预算映射与出站能力转发
 
-状态：待修复。本次仅静态审查，未改源码、未编译、未跑测试。
+状态：已修复。实现走 PR #176（基线 8ca13f36，含 FD-02 的 merge PR #174），CI run 35567544571 rollup 绿（macos-clang 34m33s + linux-asan 1h07m56s 全过；windows-msvc 腿按 lane 规矩只对 memory_worker 路径/main push 起，本单与 FD-02 同判）。新册 unit.app.backend_wrapper_contract 两腿外另在 macos-clang 通过；unit.runtime.backend_stack 在 macos-clang 与 linux-asan 双腿通过。
 
 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。先完成职责表；本单来自对FD-02的调用链反证复核。
 
@@ -47,12 +47,12 @@
 
 ## 实施与验收
 
-- [ ] 第一提交补齐现有四接口委托，不重写Backend；先用能记录每个能力调用的fake inner验证单层及双层链。
-- [ ] RebuildableBackend取同一受锁shared_ptr快照后放锁再调用；const查询的同步方案显式说明，未装配时按接口合同返回错误/不可得。
-- [ ] 用真实Chat叶client装入两层包装，比对Serialize结果、有效上限、map及Force改写；动画关闭仍须通过。
-- [ ] 走Agent预算路径验证收窄值确实出现在最终extra_body，不只断言Request.max_tokens。
-- [ ] FD-02定稿后续接PreparedWireRequest；最终准备结果与发送绑定同一后端/配置代，避免分别快照恰逢Rebuild再次分叉。
-- [ ] 验证在途调用保住旧内芯，下一请求用新内芯；不为转发持锁跨流式网络调用。
+- [x] 第一提交补齐现有四接口委托，不重写Backend；先用能记录每个能力调用的fake inner验证单层及双层链。(0649c7f4:RebuildableBackend/SpinnerBackend 各补五口 override——SerializeForDiagnostics/PrepareWireRequest/BuildWireMessageMap/GetEffectiveOutputLimit/ForceMaxOutputTokensOverride,BuildBackend 与两壳职责零改;CapabilityProbeBackend 记账假内芯验单层(test_backend_stack.cpp"HC-08 单层合同"案)与双层(test_backend_wrapper_contract.cpp"HC-08 双层"案,Spinner(Rebuildable(probe)) 五口直达叶、六口各恰一笔))
+- [x] RebuildableBackend取同一受锁shared_ptr快照后放锁再调用；const查询的同步方案显式说明，未装配时按接口合同返回错误/不可得。(SnapshotInner() 私口:锁内拷 shared_ptr、放锁返回,send_stream 与五口 const 查询共用,mutable mutex 供 const 侧;同步方案写在 backend_stack.hpp 类注释。空快照逐口落回 Backend:: 基类默认——空串/不可得/回退 max_tokens/no-op/send 报"尚未装配","HC-08 未装配合同"案逐口断言)
+- [x] 用真实Chat叶client装入两层包装，比对Serialize结果、有效上限、map及Force改写；动画关闭仍须通过。(test_backend_wrapper_contract.cpp"HC-08 真叶比对"案:BuildBackend 自 Config 造真 Chat 叶(provider extra_body max_tokens=32800)装 Spinner(Rebuildable(·)),与裸叶逐口一字不差——序列化、{32800,true}、映射 container/计数/逐条下标、PrepareWireRequest 三字段、Force 写请求级覆盖位后读回 2048;全部 spinner_enabled=false 跑)
+- [x] 走Agent预算路径验证收窄值确实出现在最终extra_body，不只断言Request.max_tokens。(test_backend_wrapper_contract.cpp"HC-08 Agent 预算路径"案:真 Chat 叶两层包装 + 回环假 SSE 服务收真 POST body,窗 32768 读到覆盖 32800 进应急支,最终出门体 max_tokens==2048(32768/16)——对 wire 字节断言,不是 Request 字段;单册双断言链路含预算读侧 {32800,true} 先证)
+- [x] FD-02定稿后续接PreparedWireRequest；最终准备结果与发送绑定同一后端/配置代，避免分别快照恰逢Rebuild再次分叉。(五口含 PrepareWireRequest 转发,单层/双层/真叶三册都有印记断言。代绑定口径:每口一次 SnapshotInner、整段调用落同一代——单调用内无新旧分叉;跨调用(预算判定在前、发送在后)的代绑定 Backend 接口面上无把柄,是 FD-05 采用视图提交链的接缝,backend_stack.hpp 注释写明不另攒状态去猜)
+- [x] 验证在途调用保住旧内芯，下一请求用新内芯；不为转发持锁跨流式网络调用。(test_backend_stack.cpp"HC-08 换血"案:GateBackend send_stream 挂门闩,Rebuild 在流未完时立刻返回(持锁跨流即挂超时),放行后老流持旧内芯跑完,后续 SerializeForDiagnostics 落新内芯真 anthropic wire、不再是旧 tag)
 
 保留与删除：两个包装层各有独立职责，应保留。只补丢失合同，不新增万能包装层，不把Spinner搬成事件系统大工程。预计删除0行。
 
