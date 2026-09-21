@@ -43,6 +43,7 @@ nlohmann::json 的 `dump()` 遇到树里混着的**非法 UTF-8 字符串**会�
 | `SanitizeExternalText` | 成分判定:坏字节零星混在合法多字节之间只逐段换 U+FFFD,合法片段保留;整段是 ACP 才试转 | **外来文本的公共边界一律用这个** |
 | `Utf8DeltaGate` | 流式增量闸门:扣住疑似被截断的尾巴,拼齐再放行;真坏字节立即替换 | SSE 流式 delta 的显示路径 |
 | `Utf8PrefixBoundary` / `Utf8SuffixBoundary` | 按字节长度截 UTF-8 的两把安全尺,截短/截取先过它们 | 一切 `resize`/`substr` 裸砍多字节文本的地方 |
+| `TruncateUtf8Prefix` | 按字节帽截前缀的整刀:刀口退到码点边界,预算容不下首个码点时返回空串;尾缀与截断记账归消费者 | 各处"字节帽 + 手抄退续字节循环"的截短口统一走它 |
 
 ### JSON 序列化兜底(`src/platform/json_safe.hpp`)
 

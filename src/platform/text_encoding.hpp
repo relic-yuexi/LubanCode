@@ -66,9 +66,19 @@ std::string DescribeUtf8Issue(const std::string& field, const std::string& text)
 //     开头之前;拿 text.substr(0, 返回值) 做前缀不劈半个字。
 //   - Utf8SuffixBoundary(text, offset):offset 往推,推过悬着的续字节;
 //     拿 text.substr(返回值) 做尾段不劈半个字。
-// 输入越界按 0/size 收口,空串安全。
-std::size_t Utf8PrefixBoundary(const std::string& text, std::size_t offset);
-std::size_t Utf8SuffixBoundary(const std::string& text, std::size_t offset);
+// 输入越界按 0/size 收口,空串安全。入参收 string_view:边界查询不复制
+// 长文,std::string 实参隐式转换即可。
+std::size_t Utf8PrefixBoundary(std::string_view text, std::size_t offset);
+std::size_t Utf8SuffixBoundary(std::string_view text, std::size_t offset);
+
+// 按字节帽截前缀的整刀(AR-11 收口):等价于 text.substr(0,
+// Utf8PrefixBoundary(text, max_bytes)),外加一道"不超帽原样返回"的短路。
+// 刀口落进多字节序列就整字让掉,正文永不劈半个字;预算容不下首个码点时
+// 返回空串——宁可短一截,不放半截序列出去。长度帽、尾缀([TRUNCATED]/
+// "...(截短)")与截断记账是消费者自己的账,这里只管刀口对齐。各处手抄
+// 的"切点退续字节"循环一律收敛到这里,别再造副本;码点计数/显示列宽
+// 截断是另一把尺,不归这里管。
+std::string TruncateUtf8Prefix(std::string_view text, std::size_t max_bytes);
 
 // 流式增量闸门(宽窄转换异常单):中转把模型流的 text/thinking delta 按
 // 自己的块边界切,多字节序列(emoji、生僻字)会被拦腰劈开——半截字节

@@ -28,7 +28,7 @@
 
 #include "platform/log_sink.hpp"        // LogSink:rg 兜底命中的来源一行
 #include "platform/process.hpp"         // ChildProcess/WaitForExit:流式执行底座
-#include "platform/text_encoding.hpp"   // SanitizeExternalText:bytes 路与 glob 路径的编码关口
+#include "platform/text_encoding.hpp"   // SanitizeExternalText:bytes 路与 glob 路径的编码关口;TruncateUtf8Prefix:行预览字节帽刀口
 #include "tools/path_utils.hpp"         // PathToUtf8
 
 namespace lubancode::tools {
@@ -328,15 +328,9 @@ std::string NormalizeRipgrepPath(std::string_view path_utf8) {
 }
 
 std::string TruncateUtf8Boundary(std::string_view text, std::size_t max_bytes) {
-    if (text.size() <= max_bytes) {
-        return std::string(text);
-    }
-    std::size_t cut = max_bytes;
-    // 往回收敛,不切半个多字节字符: continuation 字节是 10xxxxxx。
-    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
-        --cut;
-    }
-    return std::string(text.substr(0, cut));
+    // 刀口收敛在 platform(AR-11):原先手抄的"退续字节"循环与公共原语
+    // 逐字节同义,这里只留转发。
+    return platform::TruncateUtf8Prefix(text, max_bytes);
 }
 
 ParsedGrepEvent ParseGrepEventLine(std::string_view line) {

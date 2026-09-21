@@ -222,6 +222,9 @@ TEST_CASE("UTF-8 边界截断: 不切半个多字节字符") {
     CHECK(TruncateUtf8Boundary("关键词", 4) == "\xe5\x85\xb3");
     CHECK(TruncateUtf8Boundary("关键词xyz", 12) == "关键词xyz");
     CHECK(TruncateUtf8Boundary("关键词xyz", 10) == "关键词x");
+    // 首码点大于预算:宁空勿半(AR-11 合同,渠道侧同钉)。
+    CHECK(TruncateUtf8Boundary("汉", 1).empty());
+    CHECK(TruncateUtf8Boundary("汉", 2).empty());
 }
 
 TEST_CASE("流式帽: max_results 只降不升,缺省走 100 硬帽") {

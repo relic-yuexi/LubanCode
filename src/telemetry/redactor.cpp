@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "insights/redaction.hpp"
+#include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:长度帽刀口对齐码点边界
 
 namespace lubancode::telemetry {
 namespace {
@@ -130,12 +131,14 @@ std::string SanitizeText(std::string_view text, RedactionManifest* manifest) {
         manifest->removed_fields += 1;
     }
 
-    // 4) content length cap。
+    // 4) content length cap:刀口对齐 UTF-8 码点边界(AR-11)。裸 resize
+    //    切进多字节序列会把 D1 文本变非法 UTF-8,出口 JSON 严格序列化
+    //    当场 type_error.316——帽内少带一两个字,也不能带坏字节出去。
     if (value.size() > kD1TextCap) {
         if (manifest != nullptr) {
             manifest->truncated_fields += 1;
         }
-        value.resize(kD1TextCap);
+        value.resize(lubancode::platform::Utf8PrefixBoundary(value, kD1TextCap));
         value += "[TRUNCATED]";
     }
     return value;

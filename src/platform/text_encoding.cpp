@@ -159,7 +159,7 @@ Utf8ScanStats ScanUtf8Stats(const std::string& text) {
 }  // namespace
 #endif  // _WIN32
 
-std::size_t Utf8PrefixBoundary(const std::string& text, std::size_t offset) {
+std::size_t Utf8PrefixBoundary(std::string_view text, std::size_t offset) {
     if (text.empty()) {
         return 0;
     }
@@ -173,7 +173,7 @@ std::size_t Utf8PrefixBoundary(const std::string& text, std::size_t offset) {
     return offset;
 }
 
-std::size_t Utf8SuffixBoundary(const std::string& text, std::size_t offset) {
+std::size_t Utf8SuffixBoundary(std::string_view text, std::size_t offset) {
     if (offset >= text.size()) {
         return text.size();
     }
@@ -182,6 +182,13 @@ std::size_t Utf8SuffixBoundary(const std::string& text, std::size_t offset) {
         ++offset;
     }
     return offset;
+}
+
+std::string TruncateUtf8Prefix(std::string_view text, std::size_t max_bytes) {
+    if (text.size() <= max_bytes) {
+        return std::string(text);
+    }
+    return std::string(text.substr(0, Utf8PrefixBoundary(text, max_bytes)));
 }
 
 std::string SanitizeExternalText(const std::string& text) {

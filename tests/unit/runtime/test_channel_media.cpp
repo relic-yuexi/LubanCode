@@ -15,6 +15,7 @@
 #include "runtime/channel_file_delivery.hpp"
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
+#include "platform/text_encoding.hpp"  // IsValidUtf8:半字符回归的合同断言
 
 using namespace lubancode;
 using namespace lubancode::runtime;
@@ -211,6 +212,28 @@ TEST_CASE("Ingest:长文本预览截断在 UTF-8 边界;二进制(含 NUL)不预
     REQUIRE(receipts[1].ready);
     CHECK(receipts[1].prompt_line.find("二进制") != std::string::npos);
     CHECK(receipts[1].prompt_line.find("read_file") != std::string::npos);
+}
+
+TEST_CASE("Ingest:预览帽容不下首个码点,宁空勿半(AR-11 半字符回归)") {
+    MediaDir dir("ingest-preview-narrow");
+    ChannelMediaService service;
+    REQUIRE(ChannelMediaService::Open(&service, dir.root));
+    ChannelMediaLimits limits;
+    limits.max_preview_bytes = 2;  // "汉"三字节,预算 2 装不下。
+
+    FakeDownload download;
+    download.bytes_by_url["https://x.qq.com/cjk"] = "汉";
+
+    auto event = MakeEvent();
+    event.parts.push_back(MakeAttachment("cjk.txt", "https://x.qq.com/cjk", "text/plain",
+                                         channel::ChannelPartType::File));
+    const auto receipts = service.Ingest(event, 1, download.Fn(), limits, 1'000);
+    REQUIRE(receipts.size() == 1);
+    REQUIRE(receipts[0].ready);
+    // 旧病:切点退到 0 后又回退到 max_bytes,放出一个首字节(半字符),
+    // prompt_line 随之变非法 UTF-8。修后预览为空,截断提示照给。
+    CHECK(platform::IsValidUtf8(receipts[0].prompt_line));
+    CHECK(receipts[0].prompt_line.find("预览截断") != std::string::npos);
 }
 
 TEST_CASE("Ingest:白名单外拒;下载失败如实记账;附件数帽") {
