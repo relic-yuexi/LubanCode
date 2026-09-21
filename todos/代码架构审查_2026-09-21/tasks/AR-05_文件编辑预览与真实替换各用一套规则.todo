@@ -1,6 +1,6 @@
 # AR-05 文件编辑预览与真实替换各用一套规则
 
-- 状态：修复中——EditPlan 已收敛(基线 d6bcb8a0/含 PR #169),PR 与 CI 证据待回填。
+- 状态：已修——PR #173 CI rollup 绿(run 35558435257:macos-clang/linux-asan/install-scripts 全 SUCCESS;unit.runtime.turn_item 与 unit.tools.write_edit 两平台 Passed),待合并。修复分支基线 d6bcb8a0(含前置 AR-11 的 PR #169)。
 - 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
 
@@ -29,17 +29,24 @@ BuildDiffTable:210-211仍写“真执行时工具自己会报错”，但execute
 2. 以EditFileTool现有匹配语义为准，提取不写盘的EditPlan(original,input)，返回命中范围、匹配模式、最终字节或拒绝原因。预览和执行共用计划；执行前用原件指纹复验，变化则重算或拒绝。保留diff渲染，删除预览侧Count/Replace替身。
 3. 小批提交，按下列门槛验收。
 
-- [ ] 精确/CRLF/LF/CR/统一缩进/尾空白/replace_all/多候选/空old逐例验证计划。
-- [ ] 预览重建的最终字节等于执行结果。
-- [ ] 重缩进后行号正确。
-- [ ] 计划后文件变化不能静默采用旧计划。
-- [ ] remote CI。
+- [x] 精确/CRLF/LF/CR/统一缩进/尾空白/replace_all/多候选/空old逐例验证计划。(tests/unit/tools/test_write_edit.cpp 新增 11 例 BuildEditPlan 用例)
+- [x] 预览重建的最终字节等于执行结果。(test_turn_item.cpp:行表==cli::ComputeLineDiff(原件,计划字节)、落盘字节==plan.updated、undo preimage 指纹同源)
+- [x] 重缩进后行号正确。(重缩进场景断言 Del old_no=2/3、Add new_no=2/3 为真实文件行号)
+- [x] 计划后文件变化不能静默采用旧计划。(预览后改盘,execute 按新盘如实拒绝、盘不动;执行永远对刚读到的原件现算)
+- [x] remote CI。(PR #173,run 35558435257 rollup 绿:macos-clang/linux-asan/install-scripts(windows+ubuntu) 全 SUCCESS;push 残影 run 35558419079 系建 PR 时顶掉的 cancelled,不计)
 
 ## 删除量与旧账
 
 预计净删约40行：turn_item.cpp:138-172的35行匹配替换helper，加:208-220约13行分支，扣共享计划调用约8行。移走EditFileTool现有算法不算删除。
 
 当前 todos 未找到直接承接此缺口的专单。
+
+## 修复纪要(2026-09-21,PR #173)
+
+- 接口：`tools::EditPlan{ok,error,updated,replaced_count,match_mode,original_sha256}` + `tools::BuildEditPlan(original,path_utf8,old_string,new_string,replace_all)`(src/tools/edit_file.hpp),不写盘的纯决策函数,匹配语义与文案逐字搬自 execute。
+- 消费者：`EditFileTool::execute`(校验/落盘/undo 记账,preimage 摘要用计划指纹)与 `runtime::BuildDiffTable` edit 分支(located 语义升级为"计划成立")一次切换完毕,全仓无其他引用。`cli::BuildEditDiff` 生产无调用(仅测试黄金对照),未动。
+- 提交：e05fa4ce(合同测试先钉病灶,修前三红)、796eca3b(EditPlan 收敛+逐例/合同测试,三红转绿)、8d536f7f(本单入库)。
+- 验证不在本地跑(仓库铁律),全交 CI:run 35558435257 两平台编译+测试真跑,`unit.runtime.turn_item`/`unit.tools.write_edit` Passed。
 ## 全局排期复核
 
 - 前置／文件接手次序：AR-11
