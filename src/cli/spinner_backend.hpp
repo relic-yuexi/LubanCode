@@ -15,12 +15,20 @@
 // 留一句实话:它至今仍是 Backend 包装而非 EventSink——引擎只在流事件里
 // "说话",没有"请求已发出、还没第一个字节"的事件可挂;等批四把请求
 // 管道收进 RequestProfile、事件流补上请求级起止,这只转轮再改吃事件。
+//
+// HC-08(包装层预算映射与出站能力转发):与 RebuildableBackend 同病——只
+// override send_stream,预算/映射/出站能力五口吃基类默认,单发与终端链
+// 包了这层壳就丢叶 client 合同。修法同款:逐项窄转发 inner_。这层握的
+// 是 Backend&(装配方保内芯活过自己),转发零加锁零状态;动画职责一分
+// 不变,spinner_enabled=false 时本就纯透传,转发不掺一个转轮字节。
 
 #pragma once
 
 #include <atomic>
 #include <expected>
 #include <functional>
+#include <optional>
+#include <string>
 
 #include "api/backend.hpp"
 #include "cli/theme.hpp"
@@ -35,6 +43,16 @@ public:
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
         const std::atomic<bool>* cancel = nullptr) override;
+
+    // HC-08 五口窄转发:这层不改协议、不攒状态,内芯说什么就是什么。
+    // 未装配/不可得的语义由内芯自己负责(它握引用,装配方保活)。
+    std::string SerializeForDiagnostics(const lubancode::api::Request& request) const override;
+    lubancode::api::PreparedWireRequest PrepareWireRequest(
+        const lubancode::api::Request& request) const override;
+    std::optional<lubancode::api::WireMessageMap> BuildWireMessageMap(
+        const lubancode::api::Request& request) const override;
+    EffectiveOutputLimit GetEffectiveOutputLimit(const lubancode::api::Request& request) const override;
+    void ForceMaxOutputTokensOverride(lubancode::api::Request& request, int tokens) const override;
 
 private:
     lubancode::api::Backend& inner_;

@@ -33,4 +33,29 @@ std::expected<void, lubancode::api::Error> SpinnerBackend::send_stream(
     // 转轮不会一直转着。
 }
 
+// HC-08 五口窄转发:直递 inner_,零状态零改写。这层是 UI 件,不是协议
+// 件——内芯的预算映射与出站能力是什么就转什么,不掺一个转轮字节。
+std::string SpinnerBackend::SerializeForDiagnostics(const lubancode::api::Request& request) const {
+    return inner_.SerializeForDiagnostics(request);
+}
+
+lubancode::api::PreparedWireRequest SpinnerBackend::PrepareWireRequest(
+    const lubancode::api::Request& request) const {
+    return inner_.PrepareWireRequest(request);
+}
+
+std::optional<lubancode::api::WireMessageMap> SpinnerBackend::BuildWireMessageMap(
+    const lubancode::api::Request& request) const {
+    return inner_.BuildWireMessageMap(request);
+}
+
+lubancode::api::Backend::EffectiveOutputLimit SpinnerBackend::GetEffectiveOutputLimit(
+    const lubancode::api::Request& request) const {
+    return inner_.GetEffectiveOutputLimit(request);
+}
+
+void SpinnerBackend::ForceMaxOutputTokensOverride(lubancode::api::Request& request, int tokens) const {
+    inner_.ForceMaxOutputTokensOverride(request, tokens);
+}
+
 }  // namespace lubancode::cli

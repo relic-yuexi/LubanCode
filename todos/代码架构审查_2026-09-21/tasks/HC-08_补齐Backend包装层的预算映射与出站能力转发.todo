@@ -1,0 +1,72 @@
+# HC-08：补齐Backend包装层的预算映射与出站能力转发
+
+状态：待修复。本次仅静态审查，未改源码、未编译、未跑测试。
+
+基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。先完成职责表；本单来自对FD-02的调用链反证复核。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象(最短代码证据) | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| HC-08 | B | 高 | src/api/backend.hpp:34、42、63、73；src/app/backend_stack.hpp:49；src/cli/spinner_backend.hpp:30；src/app/interactive_session_assembly.cpp:1465；src/app/one_shot.cpp:404 | 两个包装类只override `send_stream`；四个后加虚接口继承Backend默认值 | 真实终端/单发链拿不到叶后端wire映射及覆盖后的输出上限，预算收窄又被no-op截断 | 保留重建/动画职责，逐项窄转发；新PreparedWireRequest按FD-02接口续接 | 补齐后会启用原先回退的adapter预算路径，须验证实际包装链；不持重建锁跨网络 |
+
+## 职责与事实
+
+`RebuildableBackend`维持稳定Backend地址，重建时保住在途内芯；`SpinnerBackend`在首事件前显示等待动画。两层都不是模型协议适配器，不应改变内芯能提供的预算及映射合同。
+
+|Backend接口|基类默认结果|叶client已有实现|穿过当前包装的结果|
+|---|---|---|---|
+|SerializeForDiagnostics|空字符串|清洗请求后按真实参数序列化|空串，adapter_budget条件变false，wire字节诊断不可得|
+|BuildWireMessageMap|nullopt|构造协议消息映射|prepared只能记映射不可得；不是写错下标|
+|GetEffectiveOutputLimit|`{request.max_tokens, false}`|读取provider/request extra_body覆盖|忽略provider最终输出上限|
+|ForceMaxOutputTokensOverride|no-op|改请求级extra_body最后覆盖位|只改Request字段的收窄出不了最终wire|
+
+对应源码：Backend默认在`:34/42/63/73`；Chat叶实现`src/api/chat/client.cpp:80-111`。其他叶client也有同名override，但本单不泛化它们各自的格式正确性；FD-02负责叶实现本身的覆盖与映射分叉。
+
+真实接线：
+
+```text
+终端主Agent
+  interactive_session_assembly.cpp:1465 main_agent.emplace(wrapped_backend,...)
+  → session_stack.cpp:333 SpinnerBackend(real_backend,...)
+  → session_stack.cpp:316 RebuildableBackend(config)
+  → app::BuildBackend选出的叶client
+
+单发Agent
+  one_shot.cpp:404 Agent(wrapped_backend,...)
+  → one_shot.cpp:233 SpinnerBackend(*backend,...)
+  → one_shot.cpp:229 BuildBackend(config)
+```
+
+`spinner_enabled=false`只使动画不亮；对象仍在调用链中。`ModelRouterService`同Provider路由还返回`main_backend_`，SessionStack向它传`real_backend`，这条路也经过RebuildableBackend；detached与其他直接拿叶client的路不在本单结论内。
+
+实际消费者：
+- `agent/loop.cpp:1395`用SerializeForDiagnostics是否为空选adapter预算；包装空串使它走内部请求估算回退，不能写成“所有预算检查都没了”。
+- `:1663`读取有效输出上限；`:1709/:1750`调用Force收窄extra_body。包装默认no-op使Provider整数覆盖仍压过新Request.max_tokens。
+- `:2025`把BuildWireMessageMap交给prepared账。当前包装给nullopt，属于能力丢失，不能说它造出错误映射。
+
+可达反例：Chat Provider的extra_body.max_tokens高于Request.max_tokens；主循环按较小Request值预算，若容量要求收窄，包装的Force不改extra_body，叶BuildRequestJson最后仍用Provider值覆盖。这个反例只需正常整数，不依赖FD-02的null/字符串异常输入。
+
+## 实施与验收
+
+- [ ] 第一提交补齐现有四接口委托，不重写Backend；先用能记录每个能力调用的fake inner验证单层及双层链。
+- [ ] RebuildableBackend取同一受锁shared_ptr快照后放锁再调用；const查询的同步方案显式说明，未装配时按接口合同返回错误/不可得。
+- [ ] 用真实Chat叶client装入两层包装，比对Serialize结果、有效上限、map及Force改写；动画关闭仍须通过。
+- [ ] 走Agent预算路径验证收窄值确实出现在最终extra_body，不只断言Request.max_tokens。
+- [ ] FD-02定稿后续接PreparedWireRequest；最终准备结果与发送绑定同一后端/配置代，避免分别快照恰逢Rebuild再次分叉。
+- [ ] 验证在途调用保住旧内芯，下一请求用新内芯；不为转发持锁跨流式网络调用。
+
+保留与删除：两个包装层各有独立职责，应保留。只补丢失合同，不新增万能包装层，不把Spinner搬成事件系统大工程。预计删除0行。
+
+## 交接边界
+
+- 批次：第二批。
+- 前置：FD-02（以全局排期复核为准）。
+- 可并行：HC-01/02/03/04/05/07与本单源码互不相交；共用测试或CMake注册另协调。
+- 禁止共改：`src/app/backend_stack.hpp/.cpp`、`src/cli/spinner_backend.hpp/.cpp`、`tests/unit/runtime/test_backend_stack.cpp`归本单；新测试`tests/unit/app/test_backend_wrapper_contract.cpp`由本单创建。FD-02独占`src/api/backend.hpp`，接口先交再接，不各改一版。
+- 关联已有单：FD-02、`../../请求账实一致_采用视图提交链与版本串账.todo`；本单专修真实宿主包装链，不重复FD-02的叶协议最终状态问题。
+
+核证边界：全部结论来自现存声明、构造与调用分支；未跑模型请求、未跑回归，不把待验收方案称作已实现。
+## 全局排期复核
+
+- 前置／文件接手次序：FD-02
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
