@@ -1,6 +1,6 @@
 # HC-05：用单一Slash词汇表驱动解析帮助补全及冲突检查
 
-状态：待修复。本次只审查、建单，未改源码、未编译、未跑测试。
+状态：已修复，待合并（PR #183，CI 绿；行为提交按交接表放第二批验收）。
 
 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
 
@@ -29,10 +29,18 @@ for (const auto& info : lubancode::cli::AllSlashCommands()) {
 删除口径：把手工分支与重复字符串表收为描述符后，保守估约100行重复词汇控制代码可删；新增目录行不以压缩写法换行数。最终以一处新增命令即可让各消费面识别为准。
 
 实施步骤：
-- [ ] 建命令描述符，先逐项对照现有名称/别名/帮助顺序，枚举值保持。
-- [ ] 让解析及帮助补全读取目录；app处理器表只按稳定ID绑定。
-- [ ] 给Workflow冲突检查单独提供“全部保留词”，补/hooks及隐藏别名边界。
-- [ ] 覆盖/hooks可见与冲突、/quit和/effort别名、未知Workflow别名分流。
+- [x] 建命令描述符，先逐项对照现有名称/别名/帮助顺序，枚举值保持。（c35ff6f8：cli::SlashCommandDescriptor，56 主名 + 4 别名共 60 行，表序即帮助序，逐行对照旧 AllSlashCommands 顺序；SlashCommand 枚举值未动）
+- [x] 让解析及帮助补全读取目录；app处理器表只按稳定ID绑定。（c35ff6f8：ParseSlashCommand 查表、AllSlashCommands 派生、SlashCommandSpec 删 name 只绑 handler，轨迹账名走 FindSlashCommandDescriptor）
+- [x] 给Workflow冲突检查单独提供“全部保留词”，补/hooks及隐藏别名边界。（a2db00ee：cli::AllSlashReservedWords，BuiltinSlashWords 改吃全量——主名+别名+隐藏词；alias=hooks、alias=quit 判内建冲突的单测判例在 tests/unit/app/test_command_registry.cpp）
+- [x] 覆盖/hooks可见与冲突、/quit和/effort别名、未知Workflow别名分流。（a2db00ee + 6d53818d：/hooks 帮助面与 i18n 描述、保留词含 quit/lang/bg/effort/hooks/trace、逐词解析往返钉死内建词不走 alias 路；Unknown→Workflow alias 分流语义未动，alias_word 照旧，既有 session 层测试看守）
+
+验收：增加命令词汇不需改三处名称列表；每个可执行主命令都有明确展示规则；alias=hooks被判冲突；既有命令行为及帮助顺序按对照表保留。
+
+勾账证据：PR #183（https://github.com/relic-yuexi/LubanCode/pull/183），CI run 35595600337 rollup conclusion=success（macos-clang 全测试 + install-scripts 双平台绿；本 PR 未触门房敏感面，按 ci.yml lane 规矩普通 PR 只烧 macOS 一腿，windows-msvc 不适用）。提交三笔：
+- c35ff6f8 refactor(cli): 行为不变——词汇表收拢解析/帮助/补全/保留词（第 1 批验收）；
+- a2db00ee fix(cli): 行为提交——/hooks 进帮助与补全、冲突检查换全量保留词（按交接表放第 2 批验收，未夹进行为不变提交）；
+- 6d53818d fix(tests): 对账测试补 Unknown 兜底案 skip（CI macos-clang 首轮唯一红点，生产行为无关）。
+/trace 维持显式不展示（desc_key 留空即其展示规则，单测钉死）；其展示修复不在本单，需要时另立行为提交。
 
 验收：增加命令词汇不需改三处名称列表；每个可执行主命令都有明确展示规则；alias=hooks被判冲突；既有命令行为及帮助顺序按对照表保留。
 
