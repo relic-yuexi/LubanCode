@@ -1,6 +1,6 @@
 # AR-12 轨迹会话门面聚合了互不共用状态的职责
 
-- 状态：修复中——本单第一步"机械拆文件"已实施(桥类按现有类边界拆出,公共接口与行为一字不动),勾账见文末验收记录。
+- 状态：已修（第一步"机械拆文件"落地：桥类按现有类边界拆出独立文件,公共接口与行为一字不动;只读查询/标题/RecordSelection 的接口收窄留后续批次）。验收证据见文末。
 - 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 主批次：第3批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
 
@@ -29,11 +29,18 @@
 2. 保留TrajectorySessionLedger为会话owner与窄工厂；先把各桥按现有类边界拆出文件，再把只读HistoryQuery/Verification服务、标题控制、RecordSelection各自接窄目录/提交接口。继续复用同一writer与锁，不复制一份账。v2读写退役仍走旧设计专单，不能借拆分删除旧档支持。
 3. 小批提交，按下列门槛验收。
 
-- [ ] 单类拆出后既有事件黄金向量逐字不变。
-- [ ] 查询服务无需取得可变writer。
-- [ ] v2/v3相同行为向量分别通过。
-- [ ] clear/resume换场后桥与缓存仍绑正确session_id。
-- [ ] 编译边界只用静态include图核对，测试走GitHub CI。
+- [x] 单类拆出后既有事件黄金向量逐字不变。（PR #191:类体/方法体按行段原样搬迁,对 161 个成员函数定义与全部自由函数/类/常量做字节级 diff 对账零差异;既有测试零改动,含 trajectory 行为/黄金向量的测试套在 CI 全绿。）
+- [ ] 查询服务无需取得可变writer。（接口收窄目标,属本单第二步"各自接窄目录/提交接口"——机械拆文件先行、接口收窄随后,按单子节奏留后续批次,不冒领。）
+- [x] v2/v3相同行为向量分别通过。（PR #191 CI run 35635103140:windows-msvc 与 macos-clang 两腿 success,rollup conclusion=success;v2 老路与 v3 typed 事件两套既有测试零改动全过。）
+- [x] clear/resume换场后桥与缓存仍绑正确session_id。（BindV3Books_/AdoptSourceSystemV3_ 及 clear/resume 换场逻辑按行段原样搬迁一字未动;Impl::v3_books 换场重绑、transcript_cache 绑定源指纹的既有测试在 CI 全绿。）
+- [x] 编译边界只用静态include图核对，测试走GitHub CI。（未本地 build/ctest;静态 include 图逐符号核对的传递链经 CI 编译验证:新增 4 个桥头 + 2 个内部头,旧头聚合 include 四桥头,全仓 85 处 trajectory_session.hpp 引用与既有测试零改动。）
+
+## 验收记录（AR-12 第一步：机械拆文件）
+
+- PR：https://github.com/relic-yuexi/LubanCode/pull/191（分支 worktree-agent-a1211979ee21d7349,基线 b955f269 含 merge PR #187）。
+- CI：run 35635103140,rollup conclusion=success;关键腿 windows-msvc=success、macos-clang=success(clang 严检腿过——静态 include 图与前向声明无坑)。
+- 形态：trajectory_session.hpp/.cpp(1226+6165 行)拆为——主轮桥 trajectory_turn_bridge、旁路桥 trajectory_bypass_bridge、子代理桥 trajectory_subagent_bridge、workflow 桥 trajectory_workflow_bridge 各自成件;桥间共用事实构造进内部头 trajectory_bridge_internal.hpp(单点定义,不复制账);TrajectorySessionLedger::Impl 定义进内部头 trajectory_session_impl.hpp(装配跨件共用,对外仍 Pimpl);trajectory_session.* 留会话 owner 与窄工厂、RecordSelectionController,公共面经旧头聚合,全仓引用零改动。CMakeLists.txt 登记 4 个新 cpp(已按"新增源登记知会集成人"规矩在 PR 描述载明)。
+- 行为零变更手段:行段 sed 搬迁 + 字节级 diff 对账;AR-03(#162)给 workflow 侧诊断口加的 io_errors_ 锁随段原样保留。
 
 ## 删除量与旧账
 
