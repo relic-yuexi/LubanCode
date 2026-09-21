@@ -3969,8 +3969,8 @@ std::expected<std::vector<ProviderConfig>, std::string> ProvidersInConfigObject(
 
 }  // namespace
 
-std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& file_path,
-                                                               const std::vector<ProviderConfig>& providers) {
+std::expected<ProviderCommitReceipt, std::string> UpdateProvidersInConfigFile(
+    const std::string& file_path, const std::vector<ProviderConfig>& providers) {
     for (std::size_t i = 0; i < providers.size(); ++i) {
         const auto valid = ValidateProviderConfig(providers[i]);
         if (!valid.has_value()) {
@@ -3987,7 +3987,19 @@ std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& 
         return std::unexpected(root.error());
     }
     (*root)["providers"] = ProvidersToJson(providers);
-    return WriteConfigObject(file_path, *root);
+    // HC-07:providers 段提交统一走 FD-04 阶段原子写(此前是裸 ofstream
+    // 截断写,断电/盘满会留半截文件)。换名前失败 = 未提交,盘面原样;
+    // 换名后父目录刷盘失败,盘面已是新内容——按成功回执如实分档,调用方
+    // 照常发布内存,不得当未写盘回滚。
+    const auto written = WriteConfigObjectAtomicPhased(file_path, *root);
+    if (!written.has_value()) {
+        const platform::AtomicWriteError& error = written.error();
+        if (error.outcome == platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+            return ProviderCommitReceipt{platform::WriteOutcome::CommittedDurabilityUnconfirmed, file_path};
+        }
+        return std::unexpected("配置文件 " + file_path + " 写失败(" + error.code + "): " + error.message);
+    }
+    return ProviderCommitReceipt{written->outcome, file_path};
 }
 
 std::expected<void, std::string> UpdateActiveProviderInConfigFile(const std::string& file_path,
@@ -4035,7 +4047,7 @@ std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const st
     return path;
 }
 
-std::expected<std::string, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider) {
+std::expected<ProviderCommitReceipt, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider) {
     const auto valid = ValidateProviderConfig(provider);
     if (!valid.has_value()) {
         return std::unexpected(valid.error());
@@ -4057,14 +4069,10 @@ std::expected<std::string, std::string> AddProviderToGlobalConfig(const Provider
         return std::unexpected("provider 已存在: " + provider.name);
     }
     providers->push_back(provider);
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
-std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std::string& name) {
+std::expected<ProviderCommitReceipt, std::string> RemoveProviderFromGlobalConfig(const std::string& name) {
     const auto config_path = GlobalConfigFilePath();
     if (!config_path.has_value()) {
         return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
@@ -4085,15 +4093,11 @@ std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std
         return std::unexpected("provider 不存在: " + name);
     }
     providers->erase(it);
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
-std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig(const std::string& name,
-                                                                                   bool enabled) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderNativeWebSearchInGlobalConfig(
+    const std::string& name, bool enabled) {
     const auto config_path = GlobalConfigFilePath();
     if (!config_path.has_value()) {
         return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
@@ -4110,15 +4114,11 @@ std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig
     if (!SetProviderNativeWebSearch(*providers, name, enabled)) {
         return std::unexpected("provider 不存在: " + name);
     }
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
-std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const std::string& name,
-                                                                             const nlohmann::json& body) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderExtraBodyInGlobalConfig(
+    const std::string& name, const nlohmann::json& body) {
     const auto config_path = GlobalConfigFilePath();
     if (!config_path.has_value()) {
         return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
@@ -4135,15 +4135,11 @@ std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const
     if (!SetProviderExtraBody(*providers, name, body)) {
         return std::unexpected("provider 不存在: " + name);
     }
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
-std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(const std::string& name,
-                                                                               bool enabled) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderStreamUsageInGlobalConfig(
+    const std::string& name, bool enabled) {
     const auto config_path = GlobalConfigFilePath();
     if (!config_path.has_value()) {
         return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
@@ -4160,16 +4156,11 @@ std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(con
     if (!SetProviderStreamUsage(*providers, name, enabled)) {
         return std::unexpected("provider 不存在: " + name);
     }
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
-std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(const std::string& name,
-                                                                               const std::string& header_name,
-                                                                               const std::string& value) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderExtraHeaderInGlobalConfig(
+    const std::string& name, const std::string& header_name, const std::string& value) {
     const auto config_path = GlobalConfigFilePath();
     if (!config_path.has_value()) {
         return std::unexpected("找不到用户主目录,也没设 LUBANCODE_HOME,没法更新 provider 配置");
@@ -4186,11 +4177,7 @@ std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(con
     if (!SetProviderExtraHeader(*providers, name, header_name, value)) {
         return std::unexpected("provider 不存在: " + name);
     }
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
 namespace {
@@ -4198,7 +4185,7 @@ namespace {
 // /provider set auth 家族共用的底子:读全局配置 -> 找到 name 那条 -> mutate
 // 改字段 -> 校验(半截配置不落盘) -> 原样写回。找不到名字、校验不过都
 // 报错、不碰文件。
-std::expected<std::string, std::string> MutateProviderInGlobalConfig(
+std::expected<ProviderCommitReceipt, std::string> MutateProviderInGlobalConfig(
     const std::string& name, const std::function<void(ProviderConfig&)>& mutate) {
     const auto config_path = GlobalConfigFilePath();
     if (!config_path.has_value()) {
@@ -4223,17 +4210,13 @@ std::expected<std::string, std::string> MutateProviderInGlobalConfig(
     if (!valid.has_value()) {
         return std::unexpected(valid.error());
     }
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
 }  // namespace
 
-std::expected<std::string, std::string> SetProviderAuthModeInGlobalConfig(const std::string& name,
-                                                                          ProviderAuthMode mode) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderAuthModeInGlobalConfig(
+    const std::string& name, ProviderAuthMode mode) {
     return MutateProviderInGlobalConfig(name, [mode](ProviderConfig& provider) {
         provider.auth = mode;
         // 换成 none 顺带把空 key_env 收干净:变量名这会儿没用了,落盘不
@@ -4244,24 +4227,24 @@ std::expected<std::string, std::string> SetProviderAuthModeInGlobalConfig(const 
     });
 }
 
-std::expected<std::string, std::string> SetProviderAuthEnvInGlobalConfig(const std::string& name,
-                                                                         const std::string& key_env) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderAuthEnvInGlobalConfig(
+    const std::string& name, const std::string& key_env) {
     return MutateProviderInGlobalConfig(name, [&key_env](ProviderConfig& provider) {
         provider.auth = ProviderAuthMode::Env;
         provider.key_env = key_env;
     });
 }
 
-std::expected<std::string, std::string> SetProviderAuthInlineInGlobalConfig(const std::string& name,
-                                                                            const std::string& api_key) {
+std::expected<ProviderCommitReceipt, std::string> SetProviderAuthInlineInGlobalConfig(
+    const std::string& name, const std::string& api_key) {
     return MutateProviderInGlobalConfig(name, [&api_key](ProviderConfig& provider) {
         provider.auth = ProviderAuthMode::Inline;
         provider.api_key = api_key;
     });
 }
 
-std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std::string& name,
-                                                                      const ProviderConfig& provider) {
+std::expected<ProviderCommitReceipt, std::string> ReplaceProviderInGlobalConfig(
+    const std::string& name, const ProviderConfig& provider) {
     if (provider.name != name) {
         return std::unexpected("edit 不支持改名(新名字 " + provider.name + " != " + name +
                                ");要换名字,先删了再添。");
@@ -4288,11 +4271,7 @@ std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std:
     if (!ReplaceProvider(*providers, name, provider)) {
         return std::unexpected("provider 不存在: " + name);
     }
-    const auto written = UpdateProvidersInConfigFile(path, *providers);
-    if (!written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    return path;
+    return UpdateProvidersInConfigFile(path, *providers);
 }
 
 std::expected<ConfigResult, std::string> LoadFromEnv() {

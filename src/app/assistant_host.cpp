@@ -629,7 +629,12 @@ void RegisterAssistantMethods(app_server::Dispatcher& dispatcher,
             result["saved"] = true;
             result["provider"] = provider.name;
             result["model"] = provider.model;
-            result["savedTo"] = *saved;
+            result["savedTo"] = saved->path;
+            // HC-07:已替换未确认耐久照实带上(换名已生效,断电耐久没确认),
+            // 不冒充全绿也不冒充没写成。
+            if (saved->outcome == platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+                result["durability"] = "unconfirmed";
+            }
             return app_server::MakeResult(request.id, std::move(result));
         });
 

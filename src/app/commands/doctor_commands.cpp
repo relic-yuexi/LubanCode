@@ -1039,6 +1039,20 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
     TermOut().flush();
 }
 
+namespace {
+
+// stream_usage 探针写回的候选副本(HC-07):项目级路径要整份 providers 落
+// 盘,改只在副本上做——校验/落盘都不碰 live 列表,提交成了才由调用方把
+// 同样的改动发布进内存。
+std::vector<lubancode::config::ProviderConfig> MakeStreamUsageCandidate(
+    const std::vector<lubancode::config::ProviderConfig>& providers, const std::string& name, bool supported) {
+    std::vector<lubancode::config::ProviderConfig> candidate = providers;
+    lubancode::config::SetProviderStreamUsage(candidate, name, supported);
+    return candidate;
+}
+
+}  // namespace
+
 // /doctor cache usage:stream_usage 能力探针,结论写回 provider 配置。
 void RunStreamUsageProbe(const DoctorContext& context) {
     lubancode::config::Config& config = context.config;
@@ -1086,22 +1100,29 @@ void RunStreamUsageProbe(const DoctorContext& context) {
     }
     const bool supported = outcome.usage_reported;
     TermOut() << (supported ? tr("doctor.usage.supported") : tr("doctor.usage.unsupported")) << "\n";
-    // 写回:内存里的 providers 列表先改,再落到 active_provider 所在的配置
-    // 文件(项目级钉住写项目路径,否则写全局),当前生效的 config.stream_usage
-    // 一并同步(backend 由调用方 rebuild)。
-    lubancode::config::SetProviderStreamUsage(context.providers, context.active_provider, supported);
+    // 写回(HC-07 统一合同):先持久提交,提交成了内存才发布——盘上没有的
+    // 改动不许留在会话里。项目级钉住时写项目路径(改的是候选副本,校验/
+    // 落盘都不碰 live 列表),否则写全局;当前生效的 config.stream_usage 在
+    // 发布一步一并同步(backend 由调用方 rebuild)。
     const auto saved =
         context.provider_write_path.has_value()
-            ? lubancode::config::UpdateProvidersInConfigFile(*context.provider_write_path, context.providers)
-                  .transform([path = *context.provider_write_path]() { return path; })
+            ? lubancode::config::UpdateProvidersInConfigFile(*context.provider_write_path,
+                                                             MakeStreamUsageCandidate(context.providers,
+                                                                                      context.active_provider,
+                                                                                      supported))
             : lubancode::config::SetProviderStreamUsageInGlobalConfig(context.active_provider, supported);
     if (!saved.has_value()) {
         TermOut() << trf("doctor.usage.write_failed", saved.error()) << "\n";
         return;
     }
+    // 已提交:内存发布(含"已声明"标记与当前生效档)。
+    lubancode::config::SetProviderStreamUsage(context.providers, context.active_provider, supported);
     config.stream_usage = supported;
     config.stream_usage_declared = true;
-    TermOut() << trf("doctor.usage.written", context.active_provider, *saved) << "\n";
+    if (saved->outcome == lubancode::platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+        TermOut() << trf("cmd.provider.commit_unconfirmed", saved->path) << "\n";
+    }
+    TermOut() << trf("doctor.usage.written", context.active_provider, saved->path) << "\n";
     TermOut().flush();
 }
 
