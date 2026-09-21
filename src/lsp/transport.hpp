@@ -34,15 +34,45 @@ namespace lubancode::lsp {
 // 一条条完整的 JSON 正文。头部块以 \r\n\r\n 结尾,里面可能有多行头(比如
 // Content-Type),只认 Content-Length(大小写不敏感);头部块里找不到
 // Content-Length 就把这块头整个丢掉,继续找下一条——坏头不该把整条流搞死。
+//
+// 分帧资源合同(与 mcp/transport.hpp 的 LineFramer 同一套框架,上限数值
+// 按各自 wire 格式各定各的,不合并两种 wire 格式):
+// 1. 协议声明上限:头部块(含结尾 \r\n\r\n 定界)≤ kMaxHeaderBytes;
+//    Content-Length 声明的单条正文长度 ≤ kMaxBodyBytes。恰好等于上限通过,
+//    超过一字节拒绝。
+// 2. 切片粒度:Feed 怎么切不影响结论。同一字节流整片喂入、按任意边界
+//    分片、逐字节喂入,产出的消息与 overflow 判定完全相同(攒头/攒正文
+//    途中按"这块迟早超限"可提前判死,结论与凑齐时一致)。
+// 3. 超限行为:头部块或声明长度一旦超上限,分帧器进入报废状态——
+//    overflowed() 为真、丢弃缓冲、后续 Feed 不再产出任何消息;同批先前
+//    已凑齐的合规消息照常交出。坏头(缺 Content-Length/非数字)不算资源
+//    超限,跳过该头块继续,不报废。内存上界 = 头上限 + 正文上限:等头期
+//    间缓冲 ≤ kMaxHeaderBytes,攒正文期间 ≤ 声明值 ≤ kMaxBodyBytes,故不
+//    设整批总量帽——多条合规消息同批到达各自独立解出,合计大小不算数。
+//    声明合规但正文迟迟不闭合不算协议违规,分帧器有界等待;对端死活由
+//    传输层断连与客户端超时收线。
 class ContentLengthFramer {
 public:
+    // 头部块(从上一条消息结束到 \r\n\r\n 定界,含定界符)的字节上限。
+    // 真实 LSP 头不过几十字节,8KB 已容下多行头加足量余量;超了说明对面
+    // 在吐无界定界的垃圾,攒头期间即判死,不许无界增长。
+    static constexpr std::size_t kMaxHeaderBytes = 8 * 1024;
+
+    // Content-Length 声明的单条正文上限,与 MCP LineFramer 的单行上限对齐
+    // (8MB)。声明超限在头凑齐时即判死,不等正文到达,内存不受声明值摆布。
+    static constexpr std::size_t kMaxBodyBytes = 8 * 1024 * 1024;
+
     // 喂一段新到达的字节。返回这次新凑齐的完整消息正文(可能 0 条、1 条、多条)。
     std::vector<std::string> Feed(std::string_view chunk);
+
+    // 头部块或声明正文长度超上限,协议已不可信——调用方应当断连。
+    bool overflowed() const { return overflowed_; }
 
 private:
     std::string buffer_;          // 还没凑齐的残包
     std::size_t expected_ = 0;    // 当前这条消息还差多少字节的正文;0 = 正在等头
     bool in_body_ = false;        // true = 头已读完,正在攒正文
+    bool overflowed_ = false;     // 资源超限报废旗,置位后 Feed 不再产出
 };
 
 // 一次启动子进程的结果。
