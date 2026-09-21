@@ -176,7 +176,9 @@ struct AgentSupervisor::Loop : std::enable_shared_from_this<Loop> {
         if (task == nullptr || task->finalized.load(std::memory_order_acquire)) {
             return;
         }
-        ledger.ForceFinalizeNoProgress(task, task->progress.stale_rounds);
+        // AR-06(锁外读修正):stale_rounds 不再锁外取——强收口在台账锁内
+        // 现读,读值与终态提交同锁同刻,任务线程的轮次提交插不进缝。
+        ledger.ForceFinalizeNoProgress(task);
         PushNoticeDeduped(task, 1, "agent.no_meaningful_progress.finalized",
                           "[监督] #" + std::to_string(task->snapshot.id) + " " +
                               (task->snapshot.title.empty() ? "(未命名)" : task->snapshot.title) +

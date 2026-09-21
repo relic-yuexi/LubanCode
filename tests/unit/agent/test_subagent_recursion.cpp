@@ -973,6 +973,15 @@ TEST_CASE("强收道回流:空转强收的终态翻页与投递同锁,父必收 
         child_proto.delivery_target = tools::TaskDeliveryTarget::ParentTaskInbox;
         auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
         REQUIRE(child != nullptr);
+        // 生产形状(AR-06):空转强收前台账里已攒了空转轮——四笔同指纹,
+        // 首笔算新进展,后三笔空转到 3。强收口在台账锁内现读这枚计数,
+        // 调用方不再传值(旧签名正是监督器锁外读的那条竞争链)。
+        const std::string same_fp = agent::FingerprintOfParts("msg", "同样的回答");
+        ledger.RecordAssistantMessage(child, same_fp);
+        ledger.RecordAssistantMessage(child, same_fp);
+        ledger.RecordAssistantMessage(child, same_fp);
+        ledger.RecordAssistantMessage(child, same_fp);
+        REQUIRE(ledger.ProgressOf(child->snapshot.id).stale_rounds == 3);
 
         std::atomic<bool> parent_done{false};
         std::vector<std::string> absorbed;
@@ -1000,8 +1009,9 @@ TEST_CASE("强收道回流:空转强收的终态翻页与投递同锁,父必收 
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         std::thread child_thread([&] {
-            // 镜像监督器 FireNoProgressGrace 的强收落点。
-            ledger.ForceFinalizeNoProgress(child, /*stale_rounds=*/3);
+            // 镜像监督器 FireNoProgressGrace 的强收落点(AR-06:空转轮数由
+            // 台账锁内现读,调用方不再传)。
+            ledger.ForceFinalizeNoProgress(child);
             // 旧缝的延迟拍:任务线程晚到的收尾这拍之后才做(形状见上一册)。
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
             ledger.FinalizeFromToolResult(child, "任务线程晚到的收尾", /*cancelled_by_stop_signal=*/false,

@@ -1866,11 +1866,17 @@ void TaskLedger::RequestNoProgressStop(const std::shared_ptr<TaskRecord>& task) 
     Touch();
 }
 
-void TaskLedger::ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task, int stale_rounds) {
+void TaskLedger::ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task) {
     std::lock_guard<std::mutex> lock(mutex);
     if (task->finalized.load(std::memory_order_acquire) || !IsAliveTaskState(task->snapshot.state)) {
         return;
     }
+    // AR-06(锁外读修正):空转轮数在台账锁内现读。监督器旧形状是锁外取
+    // task->progress.stale_rounds 再传进来,任务线程的 RecordAssistantMessage
+    // 正在锁内自增同一枚 int——读后至拿锁之间落进一笔提交,读值就是过期的,
+    // 访问本身也是数据竞争。读值搬进这笔事务后,消息里的轮数与终态提交
+    // 同锁同刻,中间插不进任何一笔轮次账。
+    const int stale_rounds = task->progress.stale_rounds;
     task->force_finalized = true;
     task->snapshot.state = AgentTaskState::Failed;
     task->snapshot.end_time = std::chrono::steady_clock::now();

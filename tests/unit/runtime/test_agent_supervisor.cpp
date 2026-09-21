@@ -139,6 +139,9 @@ TEST_CASE("空转流程:两轮投 host notice,三轮停止信号,宽限后强收
     const auto detail = ledger.Detail(task->snapshot.id);
     REQUIRE(detail.has_value());
     CHECK(detail->result.find("已经干到一半的结论") != std::string::npos);  // 部分成果保留
+    // AR-06:强收消息里的空转轮数由台账锁内现读(四笔同指纹 -> 空转 3 轮),
+    // 监督器不再锁外读 stale_rounds 传值。
+    CHECK(detail->outcome.message.find("连续 3 个完整轮次") != std::string::npos);
     CHECK_FALSE(ledger.TakeSupervisorNotices().empty());
     supervisor.RequestStop();
 }

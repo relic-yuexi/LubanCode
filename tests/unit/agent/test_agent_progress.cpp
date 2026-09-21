@@ -7,8 +7,10 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <string>
+#include <thread>
 
 #include "agent/agent_progress.hpp"
 #include "tools/task_ledger.hpp"
@@ -245,4 +247,103 @@ TEST_CASE("健康翻页:epoch 递增,通知按代际去重的地基") {
     CHECK(epoch_same == 0);  // 同态不重复翻
     const std::uint64_t epoch2 = ledger.ApplyHealth(task, AgentHealthState::Healthy, "progress.resumed");
     CHECK(epoch2 > epoch1);
+}
+
+TEST_CASE("强收读值同锁:ForceFinalizeNoProgress 在台账事务内取空转轮数") {
+    // AR-06(任务台账外露可变记录导致监督读写脱锁)合同:强收口不再接
+    // 调用方传入的 stale_rounds——旧签名逼着监督器在台账锁外读
+    // TaskRecord::progress,与任务线程的轮次提交(锁内自增同一枚 int)
+    // 构成数据竞争。修法把读值搬进台账同一事务:消息里的轮数必须等于
+    // 台账锁内的那只值,终态之后轮次账封死。
+    tools::TaskLedger ledger;
+    const auto task = MakeTask(ledger, "空转强收");
+    const std::string same = agent::FingerprintOfParts("msg", "原地踏步");
+    for (int i = 0; i < 4; ++i) {
+        ledger.RecordAssistantMessage(task, same);  // 首笔算新进展,后三笔空转
+    }
+    REQUIRE(ledger.ProgressOf(task->snapshot.id).stale_rounds == 3);
+
+    const std::uint64_t revision_before = ledger.revision();
+    ledger.ForceFinalizeNoProgress(task);
+
+    const auto detail = ledger.Detail(task->snapshot.id);
+    REQUIRE(detail.has_value());
+    CHECK(detail->state == tools::AgentTaskState::Failed);
+    CHECK(detail->outcome.reason == tools::TaskOutcomeReason::NoMeaningfulProgress);
+    // 同锁读值:消息轮数就是台账锁内的值,不是调用方带来的旧读数。
+    CHECK(detail->outcome.message.find("连续 3 个完整轮次") != std::string::npos);
+    CHECK(ledger.ProgressOf(task->snapshot.id).stale_rounds == 3);
+    CHECK(ledger.ProgressOf(task->snapshot.id).stage == AgentSupervisionStage::Terminal);
+    // 面板快照内容和修订号不丢(AR-06 验收四):强收追了一笔 Failure 事件,
+    // 内容修订号与面板修订号都前进,详情里查得见。
+    const auto events = ledger.Events(task->snapshot.id);
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].kind == tools::AgentTaskEventKind::Failure);
+    CHECK(events[0].text == detail->outcome.message);
+    CHECK(detail->content_revision == 1);
+    CHECK(ledger.revision() > revision_before);
+    // 终态后轮次账封死:再提交同指纹消息不涨空转(晚到的回调不翻账)。
+    ledger.RecordAssistantMessage(task, same);
+    CHECK(ledger.ProgressOf(task->snapshot.id).stale_rounds == 3);
+    // 已收口的任务再强收是空操作(宽限与晚到收尾撞车时的幂等)。
+    ledger.ForceFinalizeNoProgress(task);
+    CHECK(ledger.Events(task->snapshot.id).size() == 1);
+}
+
+TEST_CASE("强收与轮次提交交错:栅栏钉住读值与终态提交同锁") {
+    // AR-06 故障夹具:监督器旧形状在台账锁外读 stale_rounds 再交给强收口,
+    // 任务线程的 RecordAssistantMessage 正在锁内自增同一枚 int——竞争窗口
+    // 就在"读值"与"强收拿锁"之间。夹具用 release/acquire 栅栏把两边逼到
+    // 同一扇门前撞(不靠 sleep)。修法落地后合同成立:强收消息里的轮数 ==
+    // 台账最终 stale_rounds(读值与终态提交同锁,中间插不进任何一笔轮次
+    // 账);旧形状在读后至拿锁间落进一笔提交时,消息轮数会小于台账终值,
+    // 这里必红。
+    // 交错窗有界:提交侧只补一小批(64 笔)就收手,不无限自旋。首跑
+    // macos-clang 180s 超时的教训:夹具停机条件盯了 task->finalized,而
+    // 那面旗归任务线程的收尾(FinalizeFromToolResult)置,强收口不置——
+    // 条件永假,提交侧就无限转。有界批次两头都稳:批内每笔都落在强收
+    // "拿锁前/拿锁后"的缝上,竞争窗口撞满;批尽则强收稳拿锁收口。
+    for (int round = 0; round < 20; ++round) {
+        tools::TaskLedger ledger;
+        const auto task = MakeTask(ledger, "交错" + std::to_string(round));
+        const std::string same = agent::FingerprintOfParts("msg", "同一句");
+
+        std::atomic<bool> stale_on_the_books{false};
+        std::thread submitter([&] {
+            // 任务线程形状:完整 assistant 消息提交(台账锁内自增空转轮)。
+            ledger.RecordAssistantMessage(task, same);  // 首笔:新指纹,算进展
+            ledger.RecordAssistantMessage(task, same);  // 第二笔:空转 +1
+            stale_on_the_books.store(true, std::memory_order_release);
+            // 交错窗:与强收的拿锁尝试正面抢一小批,抢完收手。不盯
+            // task->finalized 做停机条件——那面旗归任务线程的收尾
+            //(FinalizeFromToolResult)置,强收只翻台账终态;强收落锤后
+            // 批内余笔由写口自己的活态守卫拦停。
+            for (int i = 0; i < 64; ++i) {
+                ledger.RecordAssistantMessage(task, same);
+                std::this_thread::yield();
+            }
+        });
+        // 监督线程形状:等首枚空转轮落账(release/acquire 栅栏,不靠
+        // sleep),再落宽限强收锤。
+        while (!stale_on_the_books.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        ledger.ForceFinalizeNoProgress(task);
+        submitter.join();
+
+        // 判据盯台账终态账(finalized 是任务线程收尾的旗,强收不置它,
+        // 语义见 TaskRecord 注释;晚到收尾不翻案由 recursion 册盯)。
+        CHECK(task->force_finalized);
+        CHECK(task->snapshot.state == tools::AgentTaskState::Failed);
+        CHECK(task->snapshot.outcome.reason == tools::TaskOutcomeReason::NoMeaningfulProgress);
+        const int final_stale = ledger.ProgressOf(task->snapshot.id).stale_rounds;
+        CHECK(final_stale >= 1);
+        CHECK(task->snapshot.outcome.message.find("连续 " + std::to_string(final_stale) + " 个完整轮次") !=
+              std::string::npos);
+        // 面板账不丢:强收那笔 Failure 事件在账上,内容修订号照走。
+        CHECK(ledger.Events(task->snapshot.id).size() == 1);
+        const auto detail = ledger.Detail(task->snapshot.id);
+        REQUIRE(detail.has_value());
+        CHECK(detail->content_revision >= 1);
+    }
 }
