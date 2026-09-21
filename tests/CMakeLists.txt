@@ -168,6 +168,18 @@ add_dependencies(lubancode_tests gateway_lock_racer)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_GATEWAY_RACER_EXE="$<TARGET_FILE:gateway_lock_racer>")
 
+# ---- SV-01(记忆目录锁所有权):worker.lock 跨进程竞争/暴毙靶子 -------------
+# memory_lock_racer:真子进程占在 worker.lock 上(hold 等放行令/crash 暴毙
+# 不放锁),跑生产同一份 memory::OwnerLock::TryAcquire。tests/unit/memory
+# 的锁合同册经 platform::RunProcessBackground 起它,按 ready/release 文件
+# 屏障控制交错(照 gateway_lock_racer 的册写法)。
+add_executable(memory_lock_racer support/memory_lock_racer.cpp)
+target_link_libraries(memory_lock_racer PRIVATE lubancode_core)
+target_compile_features(memory_lock_racer PRIVATE cxx_std_23)
+add_dependencies(lubancode_tests memory_lock_racer)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_MEMORY_LOCK_RACER_EXE="$<TARGET_FILE:memory_lock_racer>")
+
 # ---- 更新器 C++ 化批二第③单:安装锁双进程竞争靶子 ------------------------
 # updater_lock_racer:真起两只并发抢同一把 updates/.lock 的可执行,跑生产
 # 同一份 InstallRootLock::TryAcquire。tests/integration/updater 的竞争册经

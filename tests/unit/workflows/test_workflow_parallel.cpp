@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -87,6 +89,158 @@ lubancode::workflow::WorkflowDefinition ParseOrDie(const char* yaml) {
     }
     REQUIRE(parsed.has_value());
     return *parsed;
+}
+
+// ---------------------------------------------------------------------------
+// AR-03 合同夹具(Workflow 并行项共写同一节点执行记录):交错全由栅栏钉死,
+// 不靠 sleep 赌时序。仓里没有 std::barrier 先例,mutex+condvar 手搓两只。
+// ---------------------------------------------------------------------------
+
+// 栅栏:N 方齐到才放行(把"两项同时在执行窗口里"钉成事实)。
+class Barrier {
+public:
+    explicit Barrier(int parties) : parties_(parties) {}
+
+    void Arrive() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (++arrived_ >= parties_) {
+            cv_.notify_all();
+            return;
+        }
+        cv_.wait(lock, [&] { return arrived_ >= parties_; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    int arrived_ = 0;
+    const int parties_;
+};
+
+// 门闩:一方给信号,另一方等到(把"item0 已推进到第 2 次尝试"钉在
+// item1 收尾之前)。
+class Latch {
+public:
+    void Signal() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            signaled_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    void Wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return signaled_; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool signaled_ = false;
+};
+
+// 交错重试执行器:map 两项按剧本走——
+//   item0 a1:与 item1 a1 在栅栏会齐(同时在场)后报 transient 失败;
+//   item0 a2:进门即给门闩信号(此刻它的 attempt 已推到 2),随后成功;
+//   item1 a1:等门闩(= item0 的第 2 次尝试已开跑)后成功。
+// 旧实现里共享槽 record.attempt 此刻已被 item0 写成 2,item1 的
+// completed 事件会顶着 -a2 发出去——事件身份串项,合同册当场抓红。
+class InterleavedRetryExecutor : public lubancode::workflow::NodeExecutor {
+public:
+    explicit InterleavedRetryExecutor(int parties) : attempt1_gate_(parties) {}
+
+    lubancode::workflow::NodeExecResult Execute(
+        const lubancode::workflow::NodeExecRequest& request) override {
+        const int index = request.resolved_input.value("index", 0);
+        lubancode::workflow::NodeExecResult result;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            trace_.push_back("i" + std::to_string(index) + ":a" +
+                             std::to_string(request.attempt) + ":in");
+        }
+        if (request.attempt == 1) {
+            attempt1_gate_.Arrive();  // 两项同时在执行窗口里(真并发)
+            if (index == 0) {
+                result.error_code = "transient";  // 默认白名单内的可重试码
+                result.error_message = "scripted transient failure";
+            } else {
+                item0_second_attempt_.Wait();  // 等 item0 的第 2 次尝试开跑
+                result.ok = true;
+                result.output = nlohmann::json{
+                    {"node", request.node->id},
+                    {"item", request.resolved_input.value("item", nlohmann::json())}};
+            }
+        } else {
+            // item0 的第 2 次尝试:放行 item1 收尾。
+            item0_second_attempt_.Signal();
+            result.ok = true;
+            result.output = nlohmann::json{
+                {"node", request.node->id},
+                {"item", request.resolved_input.value("item", nlohmann::json())}};
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            trace_.push_back("i" + std::to_string(index) + ":a" +
+                             std::to_string(request.attempt) + ":out");
+        }
+        return result;
+    }
+
+    Barrier attempt1_gate_;
+    Latch item0_second_attempt_;
+    std::mutex mutex_;
+    std::vector<std::string> trace_;
+};
+
+// 节点事件录音器:started/retrying/completed 三类,连 attempt 与
+// node_run_id 一并收(事件自称的身份)。
+struct NodeEventRecorder final : public lubancode::runtime::EventSink {
+    struct Rec {
+        std::string node_id;
+        std::string type;
+        int attempt = 0;
+        std::string node_run_id;
+    };
+
+    void Emit(const lubancode::runtime::ServerEvent& event) override {
+        if (!event.payload.is_object()) return;
+        const std::string type = event.payload.value("type", std::string());
+        if (type != lubancode::workflow::kEventNodeStarted &&
+            type != lubancode::workflow::kEventNodeRetrying &&
+            type != lubancode::workflow::kEventNodeCompleted) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex);
+        records.push_back(Rec{
+            event.payload.value("node_id", std::string()),
+            type,
+            event.payload.value("attempt", 0),
+            event.payload.value("node_run_id", std::string()),
+        });
+    }
+
+    std::mutex mutex;
+    std::vector<Rec> records;
+};
+
+// node_run_id 形如 <run>-<body>-i<下标>-d<派发号>-a<attempt>:路号与
+// attempt 都从 id 里读回来——事件自称的身份必须与账面一一对应。
+struct RunIdParts {
+    int item = -1;
+    int attempt = -1;
+};
+
+RunIdParts ParseNodeRunId(const std::string& id) {
+    RunIdParts parts;
+    const std::size_t a_pos = id.rfind("-a");
+    if (a_pos == std::string::npos) return parts;
+    parts.attempt = std::stoi(id.substr(a_pos + 2));
+    const std::size_t i_pos = id.rfind("-i");
+    if (i_pos != std::string::npos && i_pos < a_pos) {
+        parts.item = std::stoi(id.substr(i_pos + 2));
+    }
+    return parts;
 }
 
 // 四路并行 + all_settled 汇合的论文检索形(假工具)。
@@ -465,6 +619,90 @@ edges:
     // 三路互不相同:并发同跑不串线的基本盘。
     CHECK(body_ids[0] != body_ids[1]);
     CHECK(body_ids[1] != body_ids[2]);
+}
+
+TEST_CASE("map 两项栅栏交错重试:事件 attempt/node_run_id 一一对应(AR-03)") {
+    using namespace lubancode::workflow;
+    const char* yaml = R"YAML(
+schema_version: 1
+id: map-interleave
+version: 1.0.0
+name: mi
+entry: enrich
+limits:
+  max_concurrency: 2
+nodes:
+  enrich:
+    type: map
+    items: "${inputs.papers}"
+    body: read_one
+    max_concurrency: 2
+  read_one:
+    type: transform
+    operation: fetch
+    retry: { attempts: 2, backoff: fixed, initial: 0s }
+  fin:
+    type: end
+edges:
+  - { from: enrich, on: success, to: fin }
+result:
+  enriched: "${nodes.enrich.output.items}"
+)YAML";
+    const WorkflowDefinition def = ParseOrDie(yaml);
+    auto executor = std::make_shared<InterleavedRetryExecutor>(2);
+    NodeEventRecorder recorder;
+
+    RuntimeOptions options;
+    options.executors[NodeKind::Transform] = executor;
+    options.event_sink = &recorder;
+    WorkflowRuntime runtime(options);
+    const auto summary = runtime.Run(
+        def, RunInputs(nlohmann::json{{"papers", nlohmann::json::array({"p0", "p1"})}}));
+
+    REQUIRE(summary.state == RunState::Succeeded);
+    // map 输出保序(既有合同):两项都成功,顺序对回原数组。
+    const nlohmann::json& enriched = summary.result["enriched"];
+    REQUIRE(enriched.size() == 2);
+    CHECK(enriched[0]["item"] == "p0");
+    CHECK(enriched[1]["item"] == "p1");
+
+    // 栅栏确实把两项同时钉在第 1 次尝试的执行窗口里:两枚 a1:in 先于
+    // 任何 :out——同时在场,不是先后路过。
+    REQUIRE(executor->trace_.size() == 6);
+    CHECK(executor->trace_[0].find(":a1:in") != std::string::npos);
+    CHECK(executor->trace_[1].find(":a1:in") != std::string::npos);
+    CHECK(executor->trace_[0] != executor->trace_[1]);
+
+    // 事件账:i0 全程 a1→retry→a2;i1 只跑过 a1。每枚事件的 attempt 与它
+    // 自己 node_run_id 的 -a 段一致,且等于该 (item,type) 应有的值。
+    // 旧实现共享槽的 attempt 被 i0 推到 2,i1 的 completed 顶着 -a2 发出
+    // 去——身份串项,这里当场抓红。
+    std::map<std::pair<int, std::string>, std::vector<int>> seen;
+    std::map<int, std::map<std::string, std::string>> id_by_item_and_type;
+    for (const auto& rec : recorder.records) {
+        if (rec.node_id != "read_one") continue;
+        const RunIdParts parts = ParseNodeRunId(rec.node_run_id);
+        REQUIRE(parts.item >= 0);
+        REQUIRE(parts.attempt >= 1);
+        CHECK(rec.attempt == parts.attempt);  // payload 与 id 自称一致
+        seen[{parts.item, rec.type}].push_back(rec.attempt);
+        id_by_item_and_type[parts.item][rec.type] = rec.node_run_id;
+    }
+    const auto sorted = [](std::vector<int> v) {
+        std::sort(v.begin(), v.end());
+        return v;
+    };
+    CHECK(sorted(seen[{0, kEventNodeStarted}]) == std::vector<int>{1, 2});
+    CHECK(sorted(seen[{0, kEventNodeRetrying}]) == std::vector<int>{1});
+    CHECK(sorted(seen[{0, kEventNodeCompleted}]) == std::vector<int>{2});
+    CHECK(sorted(seen[{1, kEventNodeStarted}]) == std::vector<int>{1});
+    CHECK(sorted(seen[{1, kEventNodeCompleted}]) == std::vector<int>{1});
+    // i1 的 started 与 completed 必须同一个 node_run_id(同一次执行同一
+    // 个身份);串项时 completed 会换脸成 -a2。
+    CHECK(id_by_item_and_type[1][kEventNodeStarted] ==
+          id_by_item_and_type[1][kEventNodeCompleted]);
+    // 节点汇总投影只认终态:两项都成功,槽里必是 Succeeded。
+    CHECK(summary.nodes.at("read_one").state == NodeState::Succeeded);
 }
 
 TEST_CASE("map 展开越 max_nodes 拒跑") {

@@ -162,6 +162,21 @@ OutputValidation ValidateNodeOutput(const WorkflowNode& node, const nlohmann::js
     return out;
 }
 
+// AR-03(Workflow 并行项共写同一节点执行记录)提交口:account.nodes 降为
+// 派生投影——事实源是各执行自己的本地账与磁盘 execution 身份。全仓对共享
+// 槽的写都走这道门,持 nodes_mutex 整笔落(last write wins);map 并发项
+// 各交各的完整一笔,不再互相踩字段。锁为空(headless 单线程构造)不付
+// 锁钱。读侧规矩:调度线程在 worker 汇合(join)后读,或与写同锁。
+void PublishNodeRecord(WorkflowRunSummary& account, std::mutex* nodes_mutex,
+                       const std::string& node_id, const NodeRunRecord& record) {
+    if (nodes_mutex == nullptr) {
+        account.nodes[node_id] = record;
+        return;
+    }
+    std::lock_guard<std::mutex> lock(*nodes_mutex);
+    account.nodes[node_id] = record;
+}
+
 }  // namespace
 
 // ---- 状态机 -----------------------------------------------------------------
@@ -361,11 +376,25 @@ std::expected<nlohmann::json, ResolveError> WorkflowRuntime::BuildResult(const W
 std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
                                      nlohmann::json* committed_output, int item_index) {
     WorkflowRunSummary& account = *ctx.account;
-    // 并行分支共写 account.nodes:持锁落记录。单线程路径(顺序图)锁空着,
-    // 裸引用照旧——顺序图不为并行付锁钱。
-    std::unique_lock<std::mutex> nodes_lock;
-    if (ctx.nodes_mutex != nullptr) nodes_lock = std::unique_lock<std::mutex>(*ctx.nodes_mutex);
-    NodeRunRecord& record = account.nodes[node.id];
+    // AR-03(并行项共写同一节点执行记录):attempt/时间/错误收进本次调用的
+    // 本地执行账,共享 account.nodes 降为派生投影,只在提交口持 nodes_mutex
+    // 整笔落(PublishNodeRecord)。map 并发项共写同一 body.id 引用的旧账
+    // 没了:Execute 窗口与事件闭包不再碰共享槽,node_run_id 的 -a<attempt>
+    // 各跟各的执行,不串项。磁盘 execution 身份(node_run_id_base /
+    // NodeExecutionIdentity)原样不动。
+    NodeRunRecord local;
+    local.node_id = node.id;
+    const auto publish = [&]() { PublishNodeRecord(account, ctx.nodes_mutex, node.id, local); };
+    // journal 是裸 ofstream,并发 Append 会踩:旧实现靠长持 nodes_lock 顺带
+    // 串行,锁收短后由这道门接手——账本写仍串行,真活儿照旧锁外并发。
+    const auto with_nodes_lock = [&](auto&& fn) {
+        if (ctx.nodes_mutex == nullptr) {
+            fn();
+            return;
+        }
+        std::lock_guard<std::mutex> lock(*ctx.nodes_mutex);
+        fn();
+    };
     const std::string item_tag = item_index >= 0 ? "-i" + std::to_string(item_index) : std::string();
     // 派发序号(workflow 会话归属统一单):loop 重入同一 body 节点时 attempt
     // 恒从 1 起,无序号第二次派发撞名——node stream 独占创建当场失败。
@@ -375,8 +404,14 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             ? "-d" + std::to_string(ctx.dispatch_seq->fetch_add(1) + 1)
             : std::string();
     const std::string node_run_id_base = account.run_id + "-" + node.id + item_tag + dispatch_tag;
+    // 事件闭包只读本地账:显式 payload 的 attempt 优先,没有时用本次执行
+    // 自己的 attempt(起步前失败 = 1)。旧版 value() 的默认参先求值,锁外
+    // 读共享槽的 record.attempt——map 交错重试时事件身份串项,病灶在此。
     const auto emit_node_event = [&](const char* type, nlohmann::json payload) {
-        const int event_attempt = payload.value("attempt", (std::max)(1, record.attempt));
+        int event_attempt = local.attempt > 0 ? local.attempt : 1;
+        if (const auto it = payload.find("attempt"); it != payload.end() && it->is_number_integer()) {
+            event_attempt = it->get<int>();
+        }
         payload["node_id"] = node.id;
         payload["label"] = node.label;
         payload["kind"] = ToString(node.kind);
@@ -387,12 +422,13 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
 
     const auto executor_it = options_.executors.find(node.kind);
     if (executor_it == options_.executors.end()) {
-        record.state = NodeState::Failed;
-        record.error_code = "no_executor";
-        record.error_message = "节点种类 " + ToString(node.kind) + " 没配执行器";
+        local.state = NodeState::Failed;
+        local.error_code = "no_executor";
+        local.error_message = "节点种类 " + ToString(node.kind) + " 没配执行器";
+        publish();
         if (ctx.trajectory != nullptr) {
             (void)ctx.trajectory->RecordNodeFailed(node.id, node_run_id_base + "-a1", 1,
-                                                   record.error_code, record.error_message, 0, 0,
+                                                   local.error_code, local.error_message, 0, 0,
                                                    std::string());
         }
         if (ctx.v3_account != nullptr) {
@@ -400,18 +436,19 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             // = 账断,零派发(fail-closed)。
             const NodeExecutionIdentity identity =
                 ctx.v3_account->MintExecutionId(node.id, item_index);
-            if (!ctx.v3_account->RecordNodeFailed(identity, record.error_code, record.error_message,
+            if (!ctx.v3_account->RecordNodeFailed(identity, local.error_code, local.error_message,
                                                   0, 0)) {
                 return kOutcomeLedgerBroken;
             }
         }
         emit_node_event(kEventNodeCompleted,
-                        nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                        nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
         return "error";
     }
     NodeExecutor& executor = *executor_it->second;
 
-    record.state = NodeState::Ready;
+    local.state = NodeState::Ready;
+    publish();
     const int max_attempts = node.retry.has_value() ? std::max(1, node.retry->attempts) : 1;
     NodeExecResult result;
     // 末次 attempt 的 node 账终态 hash(成功/失败收口都引用它;attempt 循环
@@ -422,30 +459,33 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     // 输入快照也提前到执行之前(§五:reserve 携带输入)。
     auto resolved_input = ResolveTemplate(*ctx.store, node.input);
     if (!resolved_input.has_value()) {
-        record.state = NodeState::Failed;
-        record.error_code = "resolve_input";
-        record.error_message = resolved_input.error().path + ": " + resolved_input.error().message;
+        local.state = NodeState::Failed;
+        local.error_code = "resolve_input";
+        local.error_message = resolved_input.error().path + ": " + resolved_input.error().message;
+        publish();
         if (ctx.journal != nullptr) {
-            ctx.journal->Append(kEventNodeCompleted, node.id, 1,
-                                nlohmann::json{{"outcome", "error"},
-                                               {"code", record.error_code},
-                                               {"error", record.error_message}});
+            with_nodes_lock([&] {
+                ctx.journal->Append(kEventNodeCompleted, node.id, 1,
+                                    nlohmann::json{{"outcome", "error"},
+                                                   {"code", local.error_code},
+                                                   {"error", local.error_message}});
+            });
         }
         if (ctx.trajectory != nullptr) {
             (void)ctx.trajectory->RecordNodeFailed(node.id, node_run_id_base + "-a1", 1,
-                                                   record.error_code, record.error_message, 0,
+                                                   local.error_code, local.error_message, 0,
                                                    0, std::string());
         }
         if (ctx.v3_account != nullptr) {
             const NodeExecutionIdentity identity =
                 ctx.v3_account->MintExecutionId(node.id, item_index);
-            if (!ctx.v3_account->RecordNodeFailed(identity, record.error_code, record.error_message,
+            if (!ctx.v3_account->RecordNodeFailed(identity, local.error_code, local.error_message,
                                                   0, 0)) {
                 return kOutcomeLedgerBroken;
             }
         }
         emit_node_event(kEventNodeCompleted,
-                        nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                        nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
         return "error";
     }
 
@@ -457,21 +497,23 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         auto reserved = ctx.v3_account->ReserveNodeExecution(node.id, ToString(node.kind),
                                                              item_index, resolved_input->value);
         if (!reserved.has_value()) {
-            record.state = NodeState::Failed;
-            record.error_code = "account_reserve_failed";
-            record.error_message = "编排账 reserve 落不稳[" + reserved.error().stage + "]: " +
+            local.state = NodeState::Failed;
+            local.error_code = "account_reserve_failed";
+            local.error_message = "编排账 reserve 落不稳[" + reserved.error().stage + "]: " +
                                    reserved.error().error_code;
+            publish();
             emit_node_event(kEventNodeCompleted,
-                            nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                            nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
             return kOutcomeLedgerBroken;
         }
         identity = std::move(*reserved);
         if (!ctx.v3_account->RecordNodeDispatched(identity)) {
-            record.state = NodeState::Failed;
-            record.error_code = "account_dispatch_failed";
-            record.error_message = "编排账派发事实落不住,节点停跑(fail closed)";
+            local.state = NodeState::Failed;
+            local.error_code = "account_dispatch_failed";
+            local.error_message = "编排账派发事实落不住,节点停跑(fail closed)";
+            publish();
             emit_node_event(kEventNodeCompleted,
-                            nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                            nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
             return kOutcomeLedgerBroken;
         }
         // 悬置候选(保存原件后崩溃):到达本节点时采纳,不重跑执行(§十)。
@@ -487,11 +529,12 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     const bool adopted_candidate = !adopt_output_id.empty();
 
     for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        record.attempt = attempt;
+        local.attempt = attempt;
         identity.attempt = attempt;
         // 取消检查:每个 attempt 之前看一眼。
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
-            record.state = NodeState::Cancelled;
+            local.state = NodeState::Cancelled;
+            publish();
             if (ctx.v3_account != nullptr) {
                 (void)ctx.v3_account->RecordNodeCancelled(node.id, identity.node_execution_id,
                                                           "cancelled");
@@ -499,15 +542,18 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             emit_node_event(kEventNodeCompleted, nlohmann::json{{"outcome", "cancelled"}});
             return "cancelled";
         }
-        record.state = NodeState::Running;
-        record.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+        local.state = NodeState::Running;
+        local.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+        publish();
         if (ctx.journal != nullptr) {
             nlohmann::json journal_payload{{"kind", ToString(node.kind)}};
             if (item_index >= 0) journal_payload["item"] = item_index;
-            ctx.journal->Append(kEventNodeStarted, node.id, attempt, std::move(journal_payload));
+            with_nodes_lock([&] {
+                ctx.journal->Append(kEventNodeStarted, node.id, attempt, std::move(journal_payload));
+            });
         }
-        // Execute 不持账面锁:真活儿(工具/网络/模型)并发跑,只有账本串行。
-        if (nodes_lock.owns_lock()) nodes_lock.unlock();
+        // Execute 不持账面锁:真活儿(工具/网络/模型)并发跑,账本写经
+        // nodes_mutex 串行(提交口/收账口),本地执行账全程无锁。
 
         NodeExecRequest request;
         request.definition = ctx.definition;
@@ -529,15 +575,16 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             auto spawned = ctx.trajectory->SpawnNodeStream(node.id, request.node_run_id, attempt,
                                                            ToString(node.kind), item_index);
             if (!spawned.has_value()) {
-                record.state = NodeState::Failed;
-                record.error_code = "trajectory_node_start_failed";
-                record.error_message =
+                local.state = NodeState::Failed;
+                local.error_code = "trajectory_node_start_failed";
+                local.error_message =
                     "node 账开张失败[" + spawned.error().stage + "]: " + spawned.error().error_code;
+                publish();
                 (void)ctx.trajectory->RecordNodeFailed(node.id, request.node_run_id, attempt,
-                                                       record.error_code, record.error_message, 0,
+                                                       local.error_code, local.error_message, 0,
                                                        0, std::string());
                 emit_node_event(kEventNodeCompleted,
-                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                                nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
                 return "error";
             }
             node_trajectory = std::move(*spawned);
@@ -545,16 +592,17 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             if (!ctx.trajectory->RecordNodeDispatched(
                     node.id, request.node_run_id, attempt, ToString(node.kind), item_index,
                     hooks::Sha256Hex(request.resolved_input.dump()))) {
-                record.state = NodeState::Failed;
-                record.error_code = "trajectory_broken";
-                record.error_message = "编排账写不住派发事实,节点停跑(fail closed)";
+                local.state = NodeState::Failed;
+                local.error_code = "trajectory_broken";
+                local.error_message = "编排账写不住派发事实,节点停跑(fail closed)";
+                publish();
                 const std::string broken_hash =
-                    node_trajectory->Finish(false, false, record.error_code);
+                    node_trajectory->Finish(false, false, local.error_code);
                 (void)ctx.trajectory->RecordNodeFailed(node.id, request.node_run_id, attempt,
-                                                       record.error_code, record.error_message, 0,
+                                                       local.error_code, local.error_message, 0,
                                                        0, broken_hash);
                 emit_node_event(kEventNodeCompleted,
-                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                                nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
                 return "error";
             }
         }
@@ -576,15 +624,19 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                          result.ok ? std::string()
                                                                    : result.error_code);
         }
-        if (nodes_lock.owns_lock() == false && ctx.nodes_mutex != nullptr) {
-            nodes_lock.lock();
-        }
-        account.tokens_used += result.tokens_used;
-        if (!result.ok) {
-            account.tool_calls += 1;
-        }
-        record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
-        record.tokens_used += result.tokens_used;
+        local.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+        local.tokens_used += result.tokens_used;
+        // 收账口(run 级共账,持锁):tokens/tool_calls 在此累加,节点投影
+        // 一并整笔提交。AR-04(控制节点绕过全局预算入口)的接缝留在
+        // 这道口——run 共账的读改写都该从同一把锁下走,届时把预算闸
+        // 挪进来,旁路口一并收编。
+        with_nodes_lock([&] {
+            account.tokens_used += result.tokens_used;
+            if (!result.ok) {
+                account.tool_calls += 1;
+            }
+            account.nodes[node.id] = local;
+        });
 
         if (result.ok) break;
         // 可重试判定:稳定 code 白名单;空白名单认默认可重试档(超时/
@@ -601,12 +653,15 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             }
         }
         if (retryable) {
-            record.state = NodeState::RetryWait;
+            local.state = NodeState::RetryWait;
+            publish();
             if (ctx.journal != nullptr) {
-                ctx.journal->Append(kEventNodeRetrying, node.id, attempt,
-                                    nlohmann::json{{"code", result.error_code},
-                                                   {"attempt", attempt},
-                                                   {"max_attempts", max_attempts}});
+                with_nodes_lock([&] {
+                    ctx.journal->Append(kEventNodeRetrying, node.id, attempt,
+                                        nlohmann::json{{"code", result.error_code},
+                                                       {"attempt", attempt},
+                                                       {"max_attempts", max_attempts}});
+                });
             }
             // 编排账:重试是编排事实不是终态;本 attempt 的 node 账已自己
             // 收成 run.failed(新 attempt 新开文件,§3.6)。
@@ -640,17 +695,21 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                     (void)runtime::WaitBackoffCancellable(*wait, ctx.cancel);
                 }
             }
-            record.state = NodeState::Ready;
+            local.state = NodeState::Ready;
+            publish();
             continue;
         }
-        record.state = NodeState::Failed;
-        record.error_code = result.error_code;
-        record.error_message = result.error_message;
+        local.state = NodeState::Failed;
+        local.error_code = result.error_code;
+        local.error_message = result.error_message;
+        publish();
         if (ctx.journal != nullptr) {
-            ctx.journal->Append(kEventNodeCompleted, node.id, attempt,
-                                nlohmann::json{{"outcome", "error"},
-                                               {"code", result.error_code},
-                                               {"error", result.error_message}});
+            with_nodes_lock([&] {
+                ctx.journal->Append(kEventNodeCompleted, node.id, attempt,
+                                    nlohmann::json{{"outcome", "error"},
+                                                   {"code", result.error_code},
+                                                   {"error", result.error_message}});
+            });
         }
         if (ctx.trajectory != nullptr) {
             (void)ctx.trajectory->RecordNodeFailed(
@@ -686,30 +745,32 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             if (!validation.passed) {
                 ctx.v3_account->SaveRejectedCandidate(identity, result.output, validation,
                                                       adopt_output_id);
-                record.state = NodeState::Failed;
-                record.error_code = "output_validation_failed";
-                record.error_message = "产物不合 output_schema(" + node.id + ")";
-                if (!ctx.v3_account->RecordNodeFailed(identity, record.error_code,
-                                                      record.error_message, result.duration_ms,
+                local.state = NodeState::Failed;
+                local.error_code = "output_validation_failed";
+                local.error_message = "产物不合 output_schema(" + node.id + ")";
+                publish();
+                if (!ctx.v3_account->RecordNodeFailed(identity, local.error_code,
+                                                      local.error_message, result.duration_ms,
                                                       result.tokens_used)) {
                     emit_node_event(kEventNodeCompleted,
                                     nlohmann::json{{"outcome", "error"},
-                                                   {"code", record.error_code}});
+                                                   {"code", local.error_code}});
                     return kOutcomeLedgerBroken;
                 }
                 emit_node_event(kEventNodeCompleted,
-                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                                nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
                 return "error";
             }
             auto commit = ctx.v3_account->CommitNodeOutput(identity, result.output, validation,
                                                            adopt_output_id);
             if (!commit.has_value()) {
-                record.state = NodeState::Failed;
-                record.error_code = "account_commit_failed";
-                record.error_message = "产物提交落不稳[" + commit.error().stage + "]: " +
+                local.state = NodeState::Failed;
+                local.error_code = "account_commit_failed";
+                local.error_message = "产物提交落不稳[" + commit.error().stage + "]: " +
                                        commit.error().error_code;
+                publish();
                 emit_node_event(kEventNodeCompleted,
-                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                                nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
                 return kOutcomeLedgerBroken;  // 不发布成功、后继零派发
             }
             // 采纳件已消费:悬置候选出队,防 loop 重入误再采纳。
@@ -721,8 +782,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         // 本项产物当场交还调用方(map 并发用):store 的 body 键在并发下是
         // 共用垫,回头 GetOutput 取到的是"最后一只 commit 的",不是自己那份。
         if (committed_output != nullptr) *committed_output = result.output;
-        record.state = NodeState::Succeeded;
-        record.agent_name = result.agent_name;
+        local.state = NodeState::Succeeded;
+        local.agent_name = result.agent_name;
+        publish();
         // 回执身份(阶段 5):自定义 Agent 节点带 resolved 名,事件与
         // journal 不冒用户写的短名。
         if (ctx.journal != nullptr) {
@@ -731,11 +793,13 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                       {"tokens", result.tokens_used},
                                                       {"duration_ms", result.duration_ms}};
             if (!result.agent_name.empty()) completed["agent"] = result.agent_name;
-            ctx.journal->Append(kEventNodeCompleted, node.id, record.attempt, completed);
+            with_nodes_lock([&] {
+                ctx.journal->Append(kEventNodeCompleted, node.id, local.attempt, completed);
+            });
         }
         if (ctx.trajectory != nullptr) {
             (void)ctx.trajectory->RecordNodeCompleted(
-                node.id, node_run_id_base + "-a" + std::to_string(record.attempt), record.attempt,
+                node.id, node_run_id_base + "-a" + std::to_string(local.attempt), local.attempt,
                 result.empty ? "empty" : "success", result.duration_ms, result.tokens_used,
                 result.agent_name, hooks::Sha256Hex(result.output.dump()), node_terminal_hash);
         }
@@ -756,7 +820,8 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         emit_node_event(kEventNodeCompleted, event_payload);
         return result.empty ? "empty" : "success";
     }
-    record.state = NodeState::Failed;
+    local.state = NodeState::Failed;
+    publish();
     emit_node_event(kEventNodeCompleted, nlohmann::json{{"outcome", "error"}});
     return "error";
 }
@@ -952,15 +1017,20 @@ std::string WorkflowRuntime::EvaluateSwitch(const WorkflowDefinition& /*def*/, c
 std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const WorkflowNode& node) {
     WorkflowRunSummary& account = *ctx.account;
     const WorkflowDefinition& def = *ctx.definition;
-    NodeRunRecord& record = account.nodes[node.id];
-    record.node_id = node.id;
-    record.state = NodeState::Running;
-    record.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    // AR-03:同 RunNode——本地执行账 + 提交口。body 若含 parallel/map,
+    // worker 会并发经提交口写 account.nodes,这里不再长期持有共享槽引用。
+    NodeRunRecord local;
+    local.node_id = node.id;
+    local.state = NodeState::Running;
+    local.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    const auto publish = [&]() { PublishNodeRecord(account, ctx.nodes_mutex, node.id, local); };
+    publish();
 
     const auto fail = [&](const std::string& code, const std::string& message) {
-        record.state = NodeState::Failed;
-        record.error_code = code;
-        record.error_message = message;
+        local.state = NodeState::Failed;
+        local.error_code = code;
+        local.error_message = message;
+        publish();
         return std::string("error");
     };
     const auto resolve_bound = [&](const nlohmann::json& spec, const char* field)
@@ -997,18 +1067,21 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
         if (const auto it = saved->find("history"); it != saved->end() && it->is_array()) history = *it;
         if (const auto it = saved->find("last"); it != saved->end()) previous = *it;
         if (saved->value("condition_met", false) && completed >= *min_iterations) {
-            record.state = NodeState::Succeeded;
+            local.state = NodeState::Succeeded;
+            publish();
             return "success";
         }
         if (saved->value("exhausted", false) || completed >= *max_iterations) {
-            record.state = NodeState::Succeeded;
+            local.state = NodeState::Succeeded;
+            publish();
             return "exhausted";
         }
     }
 
     while (completed < *max_iterations) {
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
-            record.state = NodeState::Cancelled;
+            local.state = NodeState::Cancelled;
+            publish();
             return "cancelled";
         }
         const int iteration = completed + 1;
@@ -1034,7 +1107,8 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
         nlohmann::json outputs = nlohmann::json::object();
         for (const auto& body_id : node.loop_body) {
             if (ctx.cancel != nullptr && ctx.cancel->load()) {
-                record.state = NodeState::Cancelled;
+                local.state = NodeState::Cancelled;
+                publish();
                 return "cancelled";
             }
             if (ctx.steps != nullptr && ++*ctx.steps > def.limits.max_steps) {
@@ -1042,16 +1116,18 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
                 account.error_code = "max_steps";
                 account.error_message =
                     "步数越过 max_steps(" + std::to_string(def.limits.max_steps) + ")";
-                record.state = NodeState::Failed;
-                record.error_code = "max_steps";
-                record.error_message = account.error_message;
+                local.state = NodeState::Failed;
+                local.error_code = "max_steps";
+                local.error_message = account.error_message;
+                publish();
                 return "budget_exhausted";
             }
             if (!WithinBudget(def.limits, account)) {
                 account.state = RunState::BudgetExhausted;
                 account.error_code = "budget_exhausted";
                 account.error_message = "预算越帽(tool_calls/tokens)";
-                record.state = NodeState::Failed;
+                local.state = NodeState::Failed;
+                publish();
                 return "budget_exhausted";
             }
             const auto body = def.node_map.find(body_id);
@@ -1068,12 +1144,14 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
                 outcome = RunNode(ctx, body->second, &output);
             }
             if (outcome == kOutcomeLedgerBroken) {
-                record.state = NodeState::Failed;
-                record.error_code = "orchestration_ledger_broken";
+                local.state = NodeState::Failed;
+                local.error_code = "orchestration_ledger_broken";
+                publish();
                 return kOutcomeLedgerBroken;
             }
             if (outcome == "cancelled") {
-                record.state = NodeState::Cancelled;
+                local.state = NodeState::Cancelled;
+                publish();
                 return "cancelled";
             }
             if (outcome == "error" || outcome == "skipped") {
@@ -1122,16 +1200,18 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
             // 轮末 checkpoint 是恢复水位:文件+提交事件都落稳才继续(§十)。
             auto checkpoint = ctx.v3_account->CommitCheckpoint(ctx.store->ToJson());
             if (!checkpoint.has_value()) {
-                record.state = NodeState::Failed;
-                record.error_code = "checkpoint_commit_failed";
-                record.error_message = "轮末 checkpoint 落不稳[" + checkpoint.error().stage + "]: " +
+                local.state = NodeState::Failed;
+                local.error_code = "checkpoint_commit_failed";
+                local.error_message = "轮末 checkpoint 落不稳[" + checkpoint.error().stage + "]: " +
                                        checkpoint.error().error_code;
+                publish();
                 return kOutcomeLedgerBroken;
             }
         }
         if (condition_met && completed >= *min_iterations) {
-            record.state = NodeState::Succeeded;
-            record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+            local.state = NodeState::Succeeded;
+            local.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+            publish();
             if (ctx.journal != nullptr) {
                 ctx.journal->Append(kEventNodeCompleted, node.id, completed,
                                     nlohmann::json{{"outcome", "success"}, {"output", output}});
@@ -1140,8 +1220,9 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
         }
     }
 
-    record.state = NodeState::Succeeded;
-    record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    local.state = NodeState::Succeeded;
+    local.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    publish();
     if (ctx.journal != nullptr) {
         ctx.journal->Append(kEventNodeCompleted, node.id, completed,
                             nlohmann::json{{"outcome", "exhausted"},
@@ -1159,8 +1240,13 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     // 全局、节点两层帽取最小(provider/tool 层帽由各执行器自己再收)。
     const int effective_cap = std::min(global_cap, node_cap);
 
-    NodeRunRecord& record = account.nodes[node.id];
-    record.state = NodeState::Running;
+    // AR-03:本地执行账 + 提交口(同 RunNode)。join 判定都在 worker 汇合
+    // 之后,本地读即可;共享槽只在提交口碰。
+    NodeRunRecord local;
+    local.node_id = node.id;
+    local.state = NodeState::Running;
+    const auto publish = [&]() { PublishNodeRecord(account, ctx.nodes_mutex, node.id, local); };
+    publish();
     if (ctx.journal != nullptr) {
         ctx.journal->Append(kEventBranchStarted, node.id, 0,
                             nlohmann::json{{"branches", node.branches}, {"cap", effective_cap}});
@@ -1181,7 +1267,6 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     std::atomic<int> succeeded{0};
     std::atomic<int> failed{0};
     std::atomic<bool> cancelled{false};
-    std::mutex node_mutex;  // account.nodes 并行写互斥
 
     const auto worker = [&]() {
         while (true) {
@@ -1194,11 +1279,15 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
             const std::string& branch_id = node.branches[index];
             const auto branch_it = def.node_map.find(branch_id);
             if (branch_it == def.node_map.end()) {
-                std::lock_guard<std::mutex> lock(node_mutex);
-                NodeRunRecord& br = account.nodes[branch_id];
+                // AR-03:worker 对共享槽的写同样走提交口——旧实现这里用
+                // 一把本地 mutex,与 RunNode 的 nodes_mutex 各锁各的,守
+                // 不住同一张 std::map。
+                NodeRunRecord br;
+                br.node_id = branch_id;
                 br.state = NodeState::Failed;
                 br.error_code = "unknown_node";
                 br.error_message = "parallel 分支不存在";
+                PublishNodeRecord(account, ctx.nodes_mutex, branch_id, br);
                 results[index].outcome = "error";
                 failed.fetch_add(1);
                 continue;
@@ -1218,8 +1307,8 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
                     break;
                 }
                 const WorkflowNode& step = step_it->second;
-                // RunNode 内部只碰自己名下的 Store 分区与 account.nodes[自己]
-                //(std::map 写入互斥由 nodes_mutex_ 担着),分支间不互踩。
+                // RunNode 只碰自己名下的 Store 分区;account.nodes 的写经
+                // 提交口(nodes_mutex)串行,分支间不互踩。
                 const std::string outcome = RunNode(ctx, step);
                 if (outcome == kOutcomeLedgerBroken) {
                     branch_outcome = outcome;
@@ -1290,52 +1379,63 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     // 编排账断(任一分支 zero-dispatch 收场):整图停,不进 join 判定。
     for (const auto& result : results) {
         if (result.outcome == kOutcomeLedgerBroken) {
-            record.state = NodeState::Failed;
-            record.error_code = "orchestration_ledger_broken";
+            local.state = NodeState::Failed;
+            local.error_code = "orchestration_ledger_broken";
+            publish();
             return kOutcomeLedgerBroken;
         }
     }
 
     // join 政策(单子"并行与汇合规矩"五种)。
     if (cancelled.load()) {
-        record.state = NodeState::Cancelled;
+        local.state = NodeState::Cancelled;
+        publish();
         return "cancelled";
     }
     switch (node.join) {
         case JoinPolicy::All:
             if (failed.load() > 0 || static_cast<int>(count) != succeeded.load()) {
-                record.state = NodeState::Failed;
+                local.state = NodeState::Failed;
+                publish();
                 return "error";
             }
-            record.state = NodeState::Succeeded;
+            local.state = NodeState::Succeeded;
+            publish();
             return "success";
         case JoinPolicy::AllSettled:
             // 全等完,成功与失败一并交下游(论文多源检索缺一路的用法)。
-            record.state = NodeState::Succeeded;
+            local.state = NodeState::Succeeded;
+            publish();
             return "success";
         case JoinPolicy::Any:
             if (succeeded.load() > 0) {
-                record.state = NodeState::Succeeded;
+                local.state = NodeState::Succeeded;
+                publish();
                 return "success";
             }
-            record.state = NodeState::Failed;
+            local.state = NodeState::Failed;
+            publish();
             return "error";
         case JoinPolicy::Quorum: {
             const int needed = std::max(1, node.join_quorum);
             if (succeeded.load() >= needed) {
-                record.state = NodeState::Succeeded;
+                local.state = NodeState::Succeeded;
+                publish();
                 return "success";
             }
-            record.state = NodeState::Failed;
+            local.state = NodeState::Failed;
+            publish();
             return "error";
         }
         case JoinPolicy::Race:
             // 首个终态便过关,成功失败都算(实现上等全部回来再判;定义时
             // 明示用途窄,单子原文)。
-            record.state = succeeded.load() > 0 ? NodeState::Succeeded : NodeState::Failed;
+            local.state = succeeded.load() > 0 ? NodeState::Succeeded : NodeState::Failed;
+            publish();
             return succeeded.load() > 0 ? "success" : "error";
     }
-    record.state = NodeState::Succeeded;
+    local.state = NodeState::Succeeded;
+    publish();
     return "success";
 }
 
@@ -1343,32 +1443,40 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     WorkflowRunSummary& account = *ctx.account;
     const WorkflowDefinition& def = *ctx.definition;
 
-    NodeRunRecord& record = account.nodes[node.id];
-    record.state = NodeState::Running;
+    // AR-03:本地执行账 + 提交口(同 RunNode)。map 节点自身跑在调度
+    // 线程,但并发项的 RunNode 会经提交口写共享槽,这里不持裸引用。
+    NodeRunRecord local;
+    local.node_id = node.id;
+    local.state = NodeState::Running;
+    const auto publish = [&]() { PublishNodeRecord(account, ctx.nodes_mutex, node.id, local); };
+    publish();
 
     // items 展开。
     auto items = ResolveRef(*ctx.store, StripRefBraces(node.items_ref));
     if (!items.has_value() || !items->is_array()) {
-        record.state = NodeState::Failed;
-        record.error_code = "bad_items";
-        record.error_message = "map/foreach 的 items 不是数组: " + node.items_ref;
+        local.state = NodeState::Failed;
+        local.error_code = "bad_items";
+        local.error_message = "map/foreach 的 items 不是数组: " + node.items_ref;
+        publish();
         return "error";
     }
     const std::size_t count = items->size();
     // 展开上限(单子:展开后可能越过 max_nodes/max_steps,validator 已查
     // 静态形状;这里对运行时数据再收一道)。
     if (static_cast<int>(count) > def.limits.max_nodes) {
-        record.state = NodeState::Failed;
-        record.error_code = "map_too_large";
-        record.error_message = "map 展开 " + std::to_string(count) + " 项,越过 max_nodes(" +
-                               std::to_string(def.limits.max_nodes) + ")";
+        local.state = NodeState::Failed;
+        local.error_code = "map_too_large";
+        local.error_message = "map 展开 " + std::to_string(count) + " 项,越过 max_nodes(" +
+                              std::to_string(def.limits.max_nodes) + ")";
+        publish();
         return "error";
     }
     const auto body_it = def.node_map.find(node.map_body);
     if (body_it == def.node_map.end()) {
-        record.state = NodeState::Failed;
-        record.error_code = "unknown_body";
-        record.error_message = "map body 节点不存在: " + node.map_body;
+        local.state = NodeState::Failed;
+        local.error_code = "unknown_body";
+        local.error_message = "map body 节点不存在: " + node.map_body;
+        publish();
         return "error";
     }
 
@@ -1418,7 +1526,8 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         for (std::size_t i = 0; i < count; ++i) {
             if (!run_item(i)) {
                 if (ctx.cancel != nullptr && ctx.cancel->load()) {
-                    record.state = NodeState::Cancelled;
+                    local.state = NodeState::Cancelled;
+                    publish();
                     return "cancelled";
                 }
                 break;  // foreach 顺次:一项败就停(有依赖的活)
@@ -1446,12 +1555,14 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     }
 
     if (ctx.cancel != nullptr && ctx.cancel->load()) {
-        record.state = NodeState::Cancelled;
+        local.state = NodeState::Cancelled;
+        publish();
         return "cancelled";
     }
     if (ledger_broken) {
-        record.state = NodeState::Failed;
-        record.error_code = "orchestration_ledger_broken";
+        local.state = NodeState::Failed;
+        local.error_code = "orchestration_ledger_broken";
+        publish();
         return kOutcomeLedgerBroken;
     }
     // join 后拼装:预分配的 array,逐槽按下标落——不靠 operator[] 的
@@ -1462,14 +1573,20 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     }
     ctx.store->CommitOutputOverwrite(node.id,
                                      nlohmann::json{{"items", mapped}, {"failures", failures}});
-    record.state = failures > 0 && node.kind == NodeKind::Foreach ? NodeState::Failed : NodeState::Succeeded;
+    local.state = failures > 0 && node.kind == NodeKind::Foreach ? NodeState::Failed : NodeState::Succeeded;
+    publish();
     return failures > 0 && node.kind == NodeKind::Foreach ? "error" : "success";
 }
 
 std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const WorkflowNode& node) {
     WorkflowRunSummary& account = *ctx.account;
-    NodeRunRecord& record = account.nodes[node.id];
-    record.state = NodeState::Running;
+    // AR-03:本地执行账 + 提交口(同 RunNode;reduce 顺次跑,账仍走同一
+    // 道门,读写规矩全仓一致)。
+    NodeRunRecord local;
+    local.node_id = node.id;
+    local.state = NodeState::Running;
+    const auto publish = [&]() { PublishNodeRecord(account, ctx.nodes_mutex, node.id, local); };
+    publish();
 
     // reduce 的 items:node.items_ref 没写就找 input.items(定义可以两处写)。
     std::string items_ref = node.items_ref;
@@ -1479,16 +1596,18 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
     }
     auto items = ResolveRef(*ctx.store, StripRefBraces(items_ref));
     if (!items.has_value() || !items->is_array()) {
-        record.state = NodeState::Failed;
-        record.error_code = "bad_items";
-        record.error_message = "reduce 的 items 不是数组";
+        local.state = NodeState::Failed;
+        local.error_code = "bad_items";
+        local.error_message = "reduce 的 items 不是数组";
+        publish();
         return "error";
     }
     const auto body_it = ctx.definition->node_map.find(node.reduce_body);
     if (body_it == ctx.definition->node_map.end()) {
-        record.state = NodeState::Failed;
-        record.error_code = "unknown_body";
-        record.error_message = "reduce body 节点不存在: " + node.reduce_body;
+        local.state = NodeState::Failed;
+        local.error_code = "unknown_body";
+        local.error_message = "reduce body 节点不存在: " + node.reduce_body;
+        publish();
         return "error";
     }
     nlohmann::json acc = nlohmann::json();
@@ -1500,7 +1619,8 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
     // 稳定次序:items 顺序,不按完成时间(单子:reduce 按稳定次序汇总)。
     for (const auto& item : *items) {
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
-            record.state = NodeState::Cancelled;
+            local.state = NodeState::Cancelled;
+            publish();
             return "cancelled";
         }
         WorkflowNode body = body_it->second;
@@ -1510,13 +1630,15 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
         body.input = body_input;
         const std::string outcome = RunNode(ctx, body);
         if (outcome == kOutcomeLedgerBroken) {
-            record.state = NodeState::Failed;
-            record.error_code = "orchestration_ledger_broken";
+            local.state = NodeState::Failed;
+            local.error_code = "orchestration_ledger_broken";
+            publish();
             return kOutcomeLedgerBroken;
         }
         if (outcome != "success") {
-            record.state = NodeState::Failed;
-            record.error_code = "reduce_step_failed";
+            local.state = NodeState::Failed;
+            local.error_code = "reduce_step_failed";
+            publish();
             return "error";
         }
         if (auto output = ctx.store->GetOutput(body.id)) {
@@ -1524,7 +1646,8 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
         }
     }
     ctx.store->CommitOutputOverwrite(node.id, acc);
-    record.state = NodeState::Succeeded;
+    local.state = NodeState::Succeeded;
+    publish();
     return "success";
 }
 

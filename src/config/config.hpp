@@ -28,6 +28,10 @@
 // 依赖,不会把 hooks 层的执行逻辑拖进 config。
 #include "hooks/events.hpp"
 
+// FD-04 配置提交链:WriteConfigObjectAtomicPhased 的回执/错误类型(叶子
+// 头,只带 <expected>/<filesystem>/<string>,不给 config.hpp 添新依赖边)。
+#include "platform/atomic_write.hpp"
+
 // 渠道配置段(多渠道消息接入单阶段 2):channels 顶层段的结构体与严格
 // 解析住在 channel 纯合同库,这里只引用(依赖方向:config -> channel,
 // channel 不反向 include config)。
@@ -1139,6 +1143,13 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
 // 共用，免得一边漏 reasoning 字段、一边又被半套环境变量拆散。
 void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider);
 
+// Provider 条目的连接指纹(HC-01):把展开后会影响 BuildBackend 的字段
+// (ApplyProviderToRuntimeConfig 写到的连接与能力字段 + 解析后的鉴权值)
+// 折成一串稳定字节,当跨 provider 角色后端缓存的版本键。条目被编辑或
+// 删除后指纹对不上,缓存就地失效。model_reasoning_effort 这类不影响后端
+// 连接的字段不进来——改它不该动缓存。纯函数,单测钉口径。
+std::string ProviderConnectionFingerprint(const ProviderConfig& provider);
+
 // 把 Config::active_provider 指向的条目展开到当前运行配置。provider 条目
 // 所在配置层级只压过同级或更低字段；LUBANCODE_* 仍居最上。找不到名字
 // 时清掉本次运行态选择并返回 false，不让一条旧记录拦住启动。
@@ -1333,11 +1344,22 @@ std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& f
 
 // 渠道向导的定点更新口(QQBot Windows 修复单 §5.2):读整份原始 JSON
 //(文件不存在回空 object),供调用方只改 channels 子树后走原子写回。
-// WriteConfigObjectAtomic 走 AtomicWriteFile(同目录临时件 + 原子替换),
-// 失败时目标文件保持原样;其余字段(模型、其他账号、未知 JSON 字段)由
-// 调用方原样保留在 root 里,这两个函数不整段重排别人的配置。
+// WriteConfigObjectAtomic 走 AtomicWriteFile(同目录临时件 + 原子替换,
+// ProcessCrashDurability 档);失败分阶段(FD-04)——换名前失败目标文件
+// 保持原样;换名后的目录刷盘失败新内容已可见(错误 outcome ==
+// CommittedDurabilityUnconfirmed),不得按未写盘回滚内存。其余字段(模型、
+// 其他账号、未知 JSON 字段)由调用方原样保留在 root 里,这两个函数不整
+// 段重排别人的配置。
 std::expected<nlohmann::json, std::string> ReadConfigObjectForTargetedUpdate(
     const std::string& file_path);
+// 阶段性写口(FD-04 配置提交链头,HC-07 等后继消费):保留平台结构化
+// 回执——成功区分 CommittedDurable;失败带 outcome(NotCommitted /
+// CommittedDurabilityUnconfirmed)与短拒分类(failure_kind)。序列化失败
+// 发生在碰盘之前,按 NotCommitted 结构化上报(code = config.serialize_
+// failed,不冒充平台码)。新调用方一律走这里。
+std::expected<platform::AtomicWriteReceipt, platform::AtomicWriteError> WriteConfigObjectAtomicPhased(
+    const std::string& file_path, const nlohmann::json& root);
+// 兼容口:把阶段回执降成字符串(FD-04 收尾、调用方迁完 Phased 后删)。
 std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
                                                          const nlohmann::json& root);
 

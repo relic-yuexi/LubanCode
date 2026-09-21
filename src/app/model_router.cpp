@@ -8,6 +8,24 @@
 
 namespace lubancode::app {
 
+std::optional<lubancode::config::Config> DeriveProviderRuntimeConfig(lubancode::config::Config base,
+                                                                    const std::string& provider,
+                                                                    const std::string& active_provider) {
+    if (provider.empty() || provider == active_provider) {
+        return base;
+    }
+    const lubancode::config::ProviderConfig* entry = lubancode::config::FindProvider(base.providers, provider);
+    if (entry == nullptr) {
+        return std::nullopt;
+    }
+    // 显式选端的展开只走这一个口(HC-01):地址/wire/鉴权/capability 逐项
+    // 来自目标条目,不再另抄一份字段清单——旧手抄漏了 stream_usage/
+    // think_param/native_web_search,跨端路由第一次发请求会沿用活跃端的
+    // 值。超时等非连接全局项不归展开口管,从基础配置原样继承。
+    lubancode::config::ApplyProviderToRuntimeConfig(base, *entry);
+    return base;
+}
+
 std::vector<lubancode::agent::ModelRoleSpec> BuildRoleSpecs(const lubancode::config::ConfigResult& config_result) {
     // 优先级:高级段(model_roles.<role>.model 非空)> shorthand 三字段。
     // 高级段带 provider/effort/窗口/输出上限,信息严格覆盖 shorthand;两者
@@ -90,37 +108,12 @@ ModelRouterService::DetachedRouted ModelRouterService::RouteDetached(
     lubancode::agent::TaskKind kind) const {
     DetachedRouted routed;
     routed.route = RouteInfo(kind);
-    auto derived = ConfigForProvider(routed.route.provider);
+    auto derived = DeriveProviderRuntimeConfig(config_result_.config, routed.route.provider, active_provider_);
     if (!derived.has_value()) {
         return routed;
     }
     routed.backend = lubancode::app::BuildBackend(*derived);
     return routed;
-}
-
-std::optional<lubancode::config::Config> ModelRouterService::ConfigForProvider(
-    const std::string& provider) const {
-    lubancode::config::Config derived = config_result_.config;
-    if (provider.empty() || provider == active_provider_) {
-        return derived;
-    }
-    const lubancode::config::ProviderConfig* entry =
-        lubancode::config::FindProvider(config_result_.config.providers, provider);
-    if (entry == nullptr) {
-        return std::nullopt;
-    }
-    derived.wire = entry->wire;
-    derived.base_url = entry->base_url;
-    derived.auth_mode = entry->auth;
-    derived.auth_token = lubancode::config::ProviderApiKey(*entry).value_or(std::string());
-    derived.model = entry->model;
-    derived.context_window_tokens = entry->context_window_tokens;
-    derived.extra_body = entry->extra_body;
-    derived.extra_headers = entry->extra_headers;
-    derived.reasoning_replay = entry->reasoning_replay;
-    derived.reasoning_delta_field = entry->reasoning_delta_field;
-    derived.reasoning_replay_field = entry->reasoning_replay_field;
-    return derived;
 }
 
 ModelRouterService::SampleOutcome ModelRouterService::Sample(lubancode::agent::TaskKind kind,
@@ -152,21 +145,36 @@ lubancode::api::Backend* ModelRouterService::BackendForProvider(const std::strin
     if (provider.empty() || provider == active_provider_) {
         return &main_backend_;
     }
-    const auto cached = provider_backends_.find(provider);
-    if (cached != provider_backends_.end()) {
-        return cached->second.get();
-    }
-    auto derived = ConfigForProvider(provider);
-    if (!derived.has_value()) {
+    // 缓存失效合同(HC-01):命中之前先确认目标条目仍在、连接指纹没变。
+    // /provider set、/provider remove 落盘成功后改的就是 config_result_
+    // 引用的同一份内存,这里现查现比——条目没了先清缓存再交空指针,
+    // 已删除的 Provider 不再发新请求;指纹变了(编辑 extra_body/headers/
+    // 鉴权/capability)就地弃旧 client 重建,旧 client 由 shared_ptr 兜
+    // 底活到在途引用松手。
+    const lubancode::config::ProviderConfig* entry =
+        lubancode::config::FindProvider(config_result_.config.providers, provider);
+    if (entry == nullptr) {
+        provider_backends_.erase(provider);
         return nullptr;
     }
+    const std::string fingerprint = lubancode::config::ProviderConnectionFingerprint(*entry);
+    const auto cached = provider_backends_.find(provider);
+    if (cached != provider_backends_.end() && cached->second.fingerprint == fingerprint) {
+        return cached->second.backend.get();
+    }
+    provider_backends_.erase(provider);
     // 跨 provider:按条目展开一份运行配置再造裸 client(与
     // ApplyConfiguredActiveProvider 同一套展开,但这里是派生配置,不管
     // 来源记账)。展开后的 extra_body/extra_headers/鉴权全按目标端来,
     // 不把当前端的私货带过去。
+    auto derived = DeriveProviderRuntimeConfig(config_result_.config, provider, active_provider_);
+    if (!derived.has_value()) {
+        return nullptr;  // FindProvider 刚查过,理论到不了;保守留空。
+    }
     auto backend = lubancode::app::BuildBackend(*derived);
     lubancode::api::Backend* raw = backend.get();
-    provider_backends_.emplace(provider, std::move(backend));
+    provider_backends_.emplace(provider,
+                               ProviderBackendEntry{std::move(fingerprint), std::move(backend)});
     return raw;
 }
 

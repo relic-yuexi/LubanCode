@@ -540,3 +540,157 @@ TEST_CASE("ModelRouterService::Sample: SampleCall 透传 output_schema 到本地
     CHECK(checked.result.schema_error.find("合法 JSON") != std::string::npos);
     CHECK(backend.calls == 2);  // 两发都真到了 backend
 }
+
+// ---------------------------------------------------------------------------
+// HC-01(Provider 展开收口 + 角色后端缓存失效):两份合同。
+//   一、展开合同:角色路由指向另一 provider 时,派生运行配置的连接与
+//   能力字段逐项来自目标条目(走 config::ApplyProviderToRuntimeConfig
+//   公共口,不再手抄清单);超时这类非连接全局项按原规则继承。
+//   二、失效合同:跨 provider 的裸 client 缓存以连接指纹为版本键,目标
+//   条目被编辑或删除后就地弃缓存——已删除的 Provider 不再交旧 client
+//   发新请求。
+// ---------------------------------------------------------------------------
+TEST_CASE("HC-01 Provider 展开合同: 派生配置逐项来自目标端,非连接全局项继承") {
+    // 活跃 A(anthropic)+ 目标 B(chat_completions,能力字段各立一档)。
+    // 病灶口径:旧手抄展开漏了 stream_usage/think_param/native_web_search,
+    // B 明明声明了,第一次 Route(B) 仍带 A 的值。
+    auto result = MergeFromJson(R"({
+        "providers": [
+            {"name": "activeA", "base_url": "http://a.example", "wire": "anthropic", "model": "a-m"},
+            {"name": "targetB", "base_url": "http://b.example", "wire": "chat_completions", "model": "b-m",
+             "auth": "none", "stream_usage": true, "think_param": "effort_v2", "native_web_search": true,
+             "reasoning_replay": "tool_episode", "reasoning_delta_field": "rd", "reasoning_replay_field": "rr",
+             "extra_body": {"k": 1}, "extra_headers": {"X-B": "1"}, "context_window": 65536,
+             "max_output_tokens": 4096, "supported_think_levels": ["low", "high"]}
+        ],
+        "active_provider": "activeA"
+    })");
+    // 活跃端的运行值与 B 的声明刻意相反:串用立刻露馅。
+    result.config.stream_usage = false;
+    result.config.think_param = "param_from_A";
+    result.config.native_web_search = false;
+    // 非连接全局项设怪值:展开口不碰,派生配置须原样继承。
+    result.config.connect_timeout_ms = 12345;
+    result.config.stream_idle_timeout_secs = 77;
+    result.config.request_hard_timeout_secs = 321;
+
+    const auto derived = lubancode::app::DeriveProviderRuntimeConfig(result.config, "targetB", "activeA");
+    REQUIRE(derived.has_value());
+    CHECK(derived->wire == lubancode::config::Wire::ChatCompletions);
+    CHECK(derived->base_url == "http://b.example");
+    CHECK(derived->model == "b-m");
+    CHECK(derived->stream_usage == true);       // 来自 B,不再沿用 A 的 false
+    CHECK(derived->think_param == "effort_v2"); // 来自 B
+    CHECK(derived->native_web_search == true);  // 来自 B
+    CHECK(derived->reasoning_replay == "tool_episode");
+    CHECK(derived->reasoning_delta_field == "rd");
+    CHECK(derived->reasoning_replay_field == "rr");
+    CHECK(derived->extra_body == nlohmann::json{{"k", 1}});
+    CHECK(derived->extra_headers.at("X-B") == "1");
+    CHECK(derived->context_window_tokens == 65536);
+    CHECK(derived->provider_max_output_tokens.has_value());
+    CHECK(*derived->provider_max_output_tokens == 4096);
+    CHECK(derived->provider_think_levels == std::vector<std::string>{"low", "high"});
+    CHECK(derived->active_provider == "targetB");
+    // 非连接全局项按原规则继承(公共展开口不写这些字段)。
+    CHECK(derived->connect_timeout_ms == 12345);
+    CHECK(derived->stream_idle_timeout_secs == 77);
+    CHECK(derived->request_hard_timeout_secs == 321);
+
+    SUBCASE("目标即活跃端: 原样副本,不施加条目") {
+        // "原样" = 基础配置现状(测试的 MergeFromJson 不跑启动期的
+        // ApplyConfiguredActiveProvider,顶层 base_url 仍为空),不是
+        // 活跃条目 A 的值——重点是不施加任何条目、非连接全局项不动。
+        const auto same = lubancode::app::DeriveProviderRuntimeConfig(result.config, "activeA", "activeA");
+        REQUIRE(same.has_value());
+        CHECK(same->base_url == result.config.base_url);
+        CHECK(same->base_url != "http://b.example");  // 没拿 B 的条目
+        CHECK(same->wire == result.config.wire);
+        CHECK(same->stream_usage == false);  // 本测试改过的 A 侧运行值
+        CHECK(same->think_param == "param_from_A");
+        CHECK(same->connect_timeout_ms == 12345);
+    }
+    SUBCASE("目标名为空: 等同活跃端口径") {
+        const auto empty = lubancode::app::DeriveProviderRuntimeConfig(result.config, "", "activeA");
+        REQUIRE(empty.has_value());
+        CHECK(empty->stream_usage == false);
+    }
+    SUBCASE("找不到条目: nullopt,调用方按'暂不可发'处理") {
+        CHECK_FALSE(lubancode::app::DeriveProviderRuntimeConfig(result.config, "ghost", "activeA").has_value());
+    }
+}
+
+TEST_CASE("HC-01 缓存失效合同: 编辑/删除目标端就地弃缓存,指纹外字段不误伤") {
+    using lubancode::app::ModelRouterService;
+    struct NullBackend final : public lubancode::api::Backend {
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>&,
+            const std::atomic<bool>*) override {
+            return {};
+        }
+    };
+    NullBackend main_backend;
+    auto current_model = std::make_shared<std::string>("session-model");
+    std::string active_provider = "activeA";
+
+    // settings 命令(/provider set、/provider remove)落盘成功后改的是
+    //同一份 config_result 内存——测试直接动 providers 向量,等价于"已
+    // 提交的配置变更"。
+    auto result = MergeFromJson(R"({
+        "providers": [
+            {"name": "activeA", "base_url": "http://a.example", "wire": "anthropic", "model": "a-m"},
+            {"name": "targetB", "base_url": "http://b.example", "wire": "chat_completions", "model": "b-m"}
+        ],
+        "active_provider": "activeA",
+        "model_roles": {"cheap": {"provider": "targetB", "model": "b-m"}}
+    })");
+    ModelRouterService service(result, main_backend, current_model, active_provider);
+
+    const auto find_entry = [](lubancode::config::ConfigResult& config_result,
+                               const std::string& name) -> lubancode::config::ProviderConfig* {
+        for (auto& provider : config_result.config.providers) {
+            if (provider.name == name) {
+                return &provider;
+            }
+        }
+        return nullptr;
+    };
+
+    // 未变:按名称复用同一只 client(Route/Sample 共这份缓存,此处只测
+    // Route——Sample 会真发请求,不拿假域名练手)。
+    lubancode::api::Backend* first = service.Route(TaskKind::Compact).backend;
+    REQUIRE(first != nullptr);
+    CHECK(service.Route(TaskKind::Compact).backend == first);
+
+    // 编辑目标端(extra_body 变了 = /provider set 落盘成功后的形状)。
+    // "重建发生了"不以指针不等为证——弃旧 shared_ptr 后新分配常复用
+    // 同块内存(macOS 实测同址);这里钉三层:指纹函数本身认得这次编辑
+    // (版本键变)、编辑后路由仍可用、新指纹下缓存重新稳定。
+    lubancode::config::ProviderConfig* entry_b = find_entry(result, "targetB");
+    REQUIRE(entry_b != nullptr);
+    const std::string fingerprint_before = lubancode::config::ProviderConnectionFingerprint(*entry_b);
+    entry_b->extra_body = nlohmann::json{{"changed", true}};
+    CHECK(lubancode::config::ProviderConnectionFingerprint(*entry_b) != fingerprint_before);
+    lubancode::api::Backend* rebuilt = service.Route(TaskKind::Compact).backend;
+    REQUIRE(rebuilt != nullptr);
+    CHECK(service.Route(TaskKind::Compact).backend == rebuilt);  // 新指纹下稳定
+
+    // 指纹外字段(切端推理档位,不影响后端连接)不改指纹、不误伤缓存。
+    const std::string fingerprint_stable = lubancode::config::ProviderConnectionFingerprint(*entry_b);
+    entry_b->model_reasoning_effort = "high";
+    CHECK(lubancode::config::ProviderConnectionFingerprint(*entry_b) == fingerprint_stable);
+    CHECK(service.Route(TaskKind::Compact).backend == rebuilt);
+
+    // 删除目标端(/provider remove 落盘成功后的形状):不再交出旧 client
+    // 发新请求——缓存查询不得先于条目存在性。
+    auto& providers = result.config.providers;
+    providers.erase(std::remove_if(providers.begin(), providers.end(),
+                                   [](const lubancode::config::ProviderConfig& provider) {
+                                       return provider.name == "targetB";
+                                   }),
+                    providers.end());
+    CHECK(service.Route(TaskKind::Compact).backend == nullptr);
+    auto detached = service.RouteDetached(TaskKind::SessionTitle);
+    CHECK(detached.backend == nullptr);  // 独占路同样不再建
+}

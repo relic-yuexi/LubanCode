@@ -5,10 +5,12 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -19,12 +21,21 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <share.h>
+#endif
+
 #include "memory/frontmatter.hpp"
-#include "hooks/hash.hpp"  // Sha256Hex:召回快照与证据引用的指纹
+#include "hooks/hash.hpp"  // Sha256Hex:召回快照与证据引用的指纹 + owner token
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
-#include "trajectory/safety.hpp"    // P0-4:全局目录 user-only 收紧与越根检查
+#include "platform/wall_clock.hpp"
+#include "trajectory/safety.hpp"       // P0-4:全局目录 user-only 收紧与越根检查
+#include "trajectory/session_lock.hpp"  // SV-01:锁持有者身份核(PID+进程起始 token)
 #include "workspace/identity.hpp"   // P0-1:身份裁决唯一入口
 #include "workspace/manifest.hpp"   // P0-3:memory 根进 workspace 树,首仓原子写
 #include "platform/text_encoding.hpp"
@@ -397,43 +408,131 @@ std::expected<void, std::string> AtomicWrite(const fs::path& target, const std::
     return {};
 }
 
-class DirectoryLock {
-public:
-    explicit DirectoryLock(fs::path path, std::chrono::seconds stale_after = std::chrono::seconds(30))
-        : path_(std::move(path)) {
-        std::error_code ec;
-        fs::create_directories(path_.parent_path(), ec);
-        ec.clear();
-        acquired_ = fs::create_directory(path_, ec);
-        if (acquired_ || ec) {
-            return;
-        }
-        const auto modified = fs::last_write_time(path_, ec);
-        if (ec) {
-            return;
-        }
-        const auto age = fs::file_time_type::clock::now() - modified;
-        if (age <= stale_after) {
-            return;
-        }
-        fs::remove_all(path_, ec);
-        ec.clear();
-        acquired_ = fs::create_directory(path_, ec);
-    }
+// ---------------------------------------------------------------------------
+// SV-01(2026-09-21 架构审查):目录锁所有权。旧 DirectoryLock 按 mtime 年龄
+// 判死夺锁:活 worker 连续处理队列超过 30 秒,目录 mtime 不续期,宿主在
+// EnsureRunning 看它尚活却因 WorkerLockHeld 超龄判 false 再起一只;后者删
+// 旧锁取同一路径,旧句柄析构又删掉新持有者的锁——pending 队列被双扫,主题
+// 写入/终态回执/failed 归档全失独占。换成身份核所有权(合同见 hpp 的
+// OwnerLock):只认 PID+进程起始 token+随机 owner token,不认 mtime。
+// ---------------------------------------------------------------------------
 
-    ~DirectoryLock() {
-        if (acquired_) {
-            std::error_code ec;
-            fs::remove_all(path_, ec);
-        }
-    }
-
-    bool acquired() const { return acquired_; }
-
-private:
-    fs::path path_;
-    bool acquired_ = false;
+// owner 账:锁目录里的 owner 文件(JSON)。读侧宽容未知字段——新版本给
+// 账加字段,不把老二进制顶成"读不懂"。
+struct LockOwnerRecord {
+    unsigned long pid = 0;
+    std::string start_token;
+    std::string owner_token;
 };
+
+// 无 owner 的锁目录多老才算"旧格式/陈"——更年轻的视作对手"建目录与写
+// owner 账之间"的在建窗口,按持有保守拒(释放删一半的残迹也走这道门
+// 自愈)。取 2 秒:worker.lock 的等锁轮 50x50ms 撑得过整个窗口。
+constexpr auto kOwnerEstablishingWindow = std::chrono::seconds(2);
+
+// 读 owner 账。文件在但开不进来/读不懂 → nullopt + 人话(error 透出)。
+// Windows 防病毒/过滤驱动的短拒:同一拍有界重开,烧完才算真失败。
+std::optional<LockOwnerRecord> ReadLockOwner(const fs::path& owner_file, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) *error = message;
+        return std::optional<LockOwnerRecord>{};
+    };
+    std::string text;
+    bool opened = false;
+    for (int attempt = 0; attempt < 3 && !opened; ++attempt) {
+        std::ifstream file(owner_file, std::ios::binary);
+        if (file.is_open()) {
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            text = buffer.str();
+            opened = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (!opened) return fail("owner 文件开不进来(重试后仍失败): " + PathUtf8(owner_file));
+    const auto json = nlohmann::json::parse(text, nullptr, false);
+    if (json.is_discarded()) return fail("owner 不是合法 JSON: " + PathUtf8(owner_file));
+    if (!json.is_object() || !json.contains("pid") || !json.at("pid").is_number_unsigned()) {
+        return fail("owner 缺合格 pid: " + PathUtf8(owner_file));
+    }
+    LockOwnerRecord record;
+    record.pid = static_cast<unsigned long>(json.at("pid").get<std::uint64_t>());
+    if (record.pid == 0) return fail("owner 的 pid 不能是 0: " + PathUtf8(owner_file));
+    if (json.contains("process_start_token") && json.at("process_start_token").is_string()) {
+        record.start_token = json.at("process_start_token").get<std::string>();
+    }
+    if (json.contains("owner_token") && json.at("owner_token").is_string()) {
+        record.owner_token = json.at("owner_token").get<std::string>();
+    }
+    return record;
+}
+
+// 隔离留证:整目录改名 <名>.stale-<ms>,不猜死后直接删(旧格式无 owner
+// 的锁与死透持有者的陈锁同款待遇)。挪不动(真占用/瞬态短拒)有界重试,
+// 烧完认失败。
+bool QuarantineLockDir(const fs::path& dir, fs::path* moved_to, std::string* error) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const fs::path stale =
+            dir.parent_path() / Utf8Path(PathUtf8(dir.filename()) + ".stale-" +
+                                         std::to_string(platform::WallClockNowMs()));
+        std::error_code ec;
+        fs::rename(dir, stale, ec);
+        if (!ec) {
+            if (moved_to != nullptr) *moved_to = stale;
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (error != nullptr) {
+        *error = "陈锁隔离不成(改名有界重试后仍失败): " + PathUtf8(dir);
+    }
+    return false;
+}
+
+// 随机 owner token:同一进程先后两只句柄也分得开,释放核账靠它。
+std::string NewOwnerToken() {
+    static std::atomic<unsigned long long> token_sequence{0};
+    const std::string material =
+        std::to_string(platform::CurrentProcessId()) + "|" +
+        trajectory::CurrentProcessStartToken() + "|" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "|" +
+        std::to_string(token_sequence.fetch_add(1));
+    return hooks::Sha256Hex(material).substr(0, 16);
+}
+
+// 有界等锁:活持有者放手要时间,烧完仍撞才回失败;BrokenLock 是真失败,
+// 即刻回,不磨。worker.lock 的 50x50ms 轮在调用点自备,这把给 memory.lock
+// (跨工作区的用户层 job 会撞同一把)。
+OwnerLock::Result AcquireDirLockWithRetry(const fs::path& dir, OwnerLock* out, int attempts,
+                                          int interval_ms) {
+    OwnerLock::Result result;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        result = OwnerLock::TryAcquire(dir, out);
+        if (result.status == OwnerLock::Status::Acquired ||
+            result.status == OwnerLock::Status::BrokenLock) {
+            return result;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+    return result;
+}
+
+// 锁取不上的人话:持有者在 → 沿用"正由另一个 worker 更新"老口径(带
+// 细节);owner 读不懂 → 明报不敢动;其余原样端出来。
+std::string ProjectLockRefusal(const OwnerLock::Result& result, const char* what) {
+    switch (result.status) {
+    case OwnerLock::Status::HeldByLiveHolder:
+        return std::string(what) + "正由另一个 worker 更新(" + result.detail + ")";
+    case OwnerLock::Status::BrokenLock:
+        return std::string(what) + "锁 owner 账读不懂,不敢动: " + result.detail;
+    case OwnerLock::Status::Acquired:
+        return std::string();
+    case OwnerLock::Status::IoError:
+        break;
+    }
+    return std::string(what) + "锁取不上: " + result.detail;
+}
 
 // ---------------------------------------------------------------------------
 // worker 监督器(修复单 §五 A):按规范化 state_root 进程级共享。职责:
@@ -458,19 +557,234 @@ std::size_t CountPendingJobs(const fs::path& home) {
     return count;
 }
 
-// 只读探测 worker.lock 是否被持有(存在且未超 DirectoryLock 的 30s 陈旧
-// 线)。不创建、不删、不偷锁。
+// 只读探测 worker.lock 是否被持有(SV-01):与 OwnerLock::TryAcquire 共用
+// 同一份身份裁决——持有者活着就在,不认 mtime 年龄,活 worker 干满三十秒
+// 也不会被判死。不创建、不删、不偷锁。
 bool WorkerLockHeld(const fs::path& home) {
-    const fs::path lock = AbsoluteNormal(home) / "memory-jobs" / "worker.lock";
-    std::error_code ec;
-    if (!fs::exists(lock, ec)) return false;
-    const auto modified = fs::last_write_time(lock, ec);
-    if (ec) return true;  // 在但读不出时间:按持有处理(保守)
-    const auto age = fs::file_time_type::clock::now() - modified;
-    return age <= std::chrono::seconds(30);
+    std::string detail;
+    return OwnerLock::HolderAlive(AbsoluteNormal(home) / "memory-jobs" / "worker.lock", &detail);
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// OwnerLock(SV-01):声明与合同见 project_memory.hpp。
+// ---------------------------------------------------------------------------
+
+OwnerLock::Result OwnerLock::TryAcquire(const fs::path& dir, OwnerLock* out) {
+    Result result;
+    if (out == nullptr) {
+        result.detail = "out 指针为空";
+        return result;
+    }
+    out->Release();
+    std::string last_error = "反复撞(陈锁隔离后仍占不到位)";
+    std::string cleared_note;
+    // 每轮头一步都是 create_directory 原子占位——双进程同时走到这里,OS
+    // 保证至多一只成功,互斥不依赖读写的先后顺序。
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        // 尽力建锁的父目录(旧 DirectoryLock 同款;建不成由占位报真错)。
+        std::error_code parent_ec;
+        fs::create_directories(dir.parent_path(), parent_ec);
+        std::error_code ec;
+        const bool created = fs::create_directory(dir, ec);
+        if (!ec && created) {
+            const fs::path owner_file = dir / "owner";
+            const std::string token = NewOwnerToken();
+            nlohmann::json record = nlohmann::json::object();
+            record["schema_version"] = 1;
+            record["pid"] = platform::CurrentProcessId();
+            record["process_start_token"] = trajectory::CurrentProcessStartToken();
+            record["owner_token"] = token;
+            record["acquired_at_ms"] = platform::WallClockNowMs();
+            // AtomicVisibility 足够:进程崩了丢 owner 账,残留空目录走
+            // "无 owner 隔离"那道门自愈,不靠 fsync 保命。
+            const auto written = platform::AtomicWriteFile(owner_file, record.dump());
+            if (!written.has_value()) {
+                std::error_code remove_ec;
+                fs::remove_all(dir, remove_ec);  // 自己刚建的目录,拆掉不碰别人
+                result.detail = "owner 账写不进: " + written.error().message;
+                return result;
+            }
+            // Windows 上攥住 owner 的只读句柄,他者删不动这个文件、也就拆
+            // 不动整个锁目录(死持有者的句柄由内核回收,隔离照常走得通);
+            // POSIX 无此语义,开了也无害。开不上不影响所有权——账已落盘。
+            std::FILE* handle = nullptr;
+#ifdef _WIN32
+            handle = _wfsopen(owner_file.c_str(), L"rb", _SH_DENYNO);
+#else
+            handle = std::fopen(owner_file.c_str(), "rb");
+#endif
+            out->dir_ = dir;
+            out->file_ = handle;
+            out->owner_token_ = token;
+            result.status = Status::Acquired;
+            result.detail = std::move(cleared_note);
+            return result;
+        }
+        if (ec) {
+            std::error_code probe_ec;
+            if (!fs::exists(dir, probe_ec) || probe_ec) {
+                // 建目录真失败(权限/瞬态):有界重试。
+                last_error = "建锁目录失败: " + ec.message();
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                continue;
+            }
+            // 报错但目录在(或同名文件占着路径):落下去核 owner。
+        }
+        // 没占上:读 owner 账,核身份再定去留。
+        const fs::path owner_file = dir / "owner";
+        std::error_code owner_ec;
+        if (fs::exists(owner_file, owner_ec)) {
+            std::string read_error;
+            const auto record = ReadLockOwner(owner_file, &read_error);
+            if (!record.has_value()) {
+                // owner 在但读不懂:不敢动,明报(看不懂就更不能删)。
+                result.status = Status::BrokenLock;
+                result.detail = read_error;
+                return result;
+            }
+            const trajectory::SessionLockOwner probe{record->pid, record->start_token, 0};
+            if (trajectory::ProbeLockHolder(probe) == trajectory::LockHolderState::Alive) {
+                result.status = Status::HeldByLiveHolder;
+                result.detail = "持有者活着: pid " + std::to_string(record->pid);
+                return result;
+            }
+            // 死透/PID 被复用:陈锁,整目录隔离留证再抢,不直接删。
+            fs::path moved;
+            std::string quarantine_error;
+            if (!QuarantineLockDir(dir, &moved, &quarantine_error)) {
+                result.detail = quarantine_error;
+                return result;
+            }
+            cleared_note = "陈锁已隔离留证: " + PathUtf8(moved);
+            continue;
+        }
+        if (owner_ec) {
+            // 探不出有没有 owner:按活保守拒。
+            result.status = Status::HeldByLiveHolder;
+            result.detail = "锁目录在,探不出 owner: " + owner_ec.message();
+            return result;
+        }
+        // 没有 owner 文件:要么旧格式锁(老 DirectoryLock 留下的空目录),
+        // 要么对手刚占住目录还没写完账。年轻的按在建拒;老的按旧格式隔离
+        // 明报——都不猜死后直接删。
+        std::error_code mtime_ec;
+        const auto modified = fs::last_write_time(dir, mtime_ec);
+        if (mtime_ec) {
+            result.status = Status::HeldByLiveHolder;  // 在但读不出时间:按持有处理
+            result.detail = "锁目录在但读不出时间: " + mtime_ec.message();
+            return result;
+        }
+        if (fs::file_time_type::clock::now() - modified < kOwnerEstablishingWindow) {
+            result.status = Status::HeldByLiveHolder;
+            result.detail = "锁正在建立(占目录与写 owner 之间的窗口)";
+            return result;
+        }
+        fs::path moved;
+        std::string quarantine_error;
+        if (!QuarantineLockDir(dir, &moved, &quarantine_error)) {
+            result.detail = quarantine_error;
+            return result;
+        }
+        cleared_note = "旧格式锁(无 owner)已隔离留证: " + PathUtf8(moved);
+        continue;
+    }
+    result.detail = last_error + ": " + PathUtf8(dir);
+    return result;
+}
+
+bool OwnerLock::HolderAlive(const fs::path& dir, std::string* detail) {
+    const auto say = [detail](const std::string& note) {
+        if (detail != nullptr) *detail = note;
+    };
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || ec) {
+        say("锁目录不在");
+        return false;
+    }
+    const fs::path owner_file = dir / "owner";
+    std::error_code owner_ec;
+    const bool has_owner = fs::exists(owner_file, owner_ec);
+    if (owner_ec) {
+        say("锁目录在,探不出 owner,按持有保守");
+        return true;
+    }
+    if (!has_owner) {
+        std::error_code mtime_ec;
+        const auto modified = fs::last_write_time(dir, mtime_ec);
+        if (mtime_ec) {
+            say("锁目录在但读不出时间,按持有保守");
+            return true;
+        }
+        if (fs::file_time_type::clock::now() - modified < kOwnerEstablishingWindow) {
+            say("锁正在建立");
+            return true;
+        }
+        say("旧格式锁(无 owner)");
+        return false;  // 交给取锁路隔离
+    }
+    std::string read_error;
+    const auto record = ReadLockOwner(owner_file, &read_error);
+    if (!record.has_value()) {
+        say("owner 读不懂,按持有保守: " + read_error);
+        return true;
+    }
+    const trajectory::SessionLockOwner probe{record->pid, record->start_token, 0};
+    if (trajectory::ProbeLockHolder(probe) == trajectory::LockHolderState::Alive) {
+        say("持有者活着: pid " + std::to_string(record->pid));
+        return true;
+    }
+    say("持有者已死: pid " + std::to_string(record->pid));
+    return false;
+}
+
+OwnerLock::OwnerLock(OwnerLock&& other) noexcept
+    : dir_(std::move(other.dir_)),
+      file_(other.file_),
+      owner_token_(std::move(other.owner_token_)) {
+    other.file_ = nullptr;
+    other.dir_.clear();
+}
+
+OwnerLock& OwnerLock::operator=(OwnerLock&& other) noexcept {
+    if (this != &other) {
+        Release();
+        dir_ = std::move(other.dir_);
+        file_ = other.file_;
+        owner_token_ = std::move(other.owner_token_);
+        other.file_ = nullptr;
+        other.dir_.clear();
+    }
+    return *this;
+}
+
+OwnerLock::~OwnerLock() { Release(); }
+
+void OwnerLock::Release() {
+    if (file_ != nullptr) {
+        std::fclose(file_);
+        file_ = nullptr;
+    }
+    if (dir_.empty()) return;
+    // 释放前核 owner:pid+owner token 都对上才删。账被人接管过(陈锁被隔
+    // 离后他者重建、账被改写),这把锁已是别人的——旧句柄不得删掉新持有
+    // 者的锁。
+    const auto record = ReadLockOwner(dir_ / "owner", nullptr);
+    if (record.has_value() && record->pid == platform::CurrentProcessId() &&
+        !owner_token_.empty() && record->owner_token == owner_token_) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            std::error_code ec;
+            (void)fs::remove_all(dir_, ec);
+            if (!ec) break;
+            // Windows 瞬态(防病毒/过滤驱动短拒):有界重试。
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        // 删不动只剩留证;残留由下次 TryAcquire 的身份核收口。
+    }
+    dir_.clear();
+    owner_token_.clear();
+}
 
 // worker 监督器实现件(hpp 前向声明的 MemoryWorkerSupervisor;放匿名
 // 命名空间之外——类型在头文件里对全库可见,定义得在同一命名空间)。
@@ -2210,8 +2524,16 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
         if (!intent.has_value()) return std::unexpected(intent.error());
     }
 
-    DirectoryLock project_lock(memory_dir / ".state" / "memory.lock");
-    if (!project_lock.acquired()) return std::unexpected("项目记忆正由另一个 worker 更新");
+    // SV-01:项目层锁走所有权裁决——活持有者不因年龄被夺;死锁/旧格式锁
+    // 隔离后接手;owner 读不懂明报不动。跨工作区的用户层 job 会撞同一把
+    // 用户层锁,有界等一等对手放手,烧完仍撞才按失败归档,不叫偶发争用
+    // 污染 failed 账。
+    OwnerLock project_lock;
+    const auto lock_result = AcquireDirLockWithRetry(memory_dir / ".state" / "memory.lock",
+                                                     &project_lock, 20, 100);
+    if (lock_result.status != OwnerLock::Status::Acquired) {
+        return std::unexpected(ProjectLockRefusal(lock_result, "项目记忆"));
+    }
     // P0-4:全局层写后复紧 user-only(目录可能刚建出来)。
     if (user_job) {
         (void)trajectory::HardenDirectoryUserOnly(memory_dir);
@@ -4202,11 +4524,13 @@ std::expected<void, std::string> ProjectMemory::CommitTopicEdit(const TopicEditS
             return std::unexpected("编辑后的 paths 只许项目内相对路径: " + path);
         }
     }
-    // 校验通过:同一把项目锁里原子替换,再重建该层派生物。
-    DirectoryLock project_lock(session.dir / ".state" / "memory.lock");
-    if (!project_lock.acquired()) {
+    // 校验通过:同一把项目锁里原子替换,再重建该层派生物。SV-01:锁走
+    // 所有权裁决,活持有者在就明说稍后再试,不按年龄抢。
+    OwnerLock project_lock;
+    const auto lock_result = OwnerLock::TryAcquire(session.dir / ".state" / "memory.lock", &project_lock);
+    if (lock_result.status != OwnerLock::Status::Acquired) {
         discard();
-        return std::unexpected("该层记忆正由另一个 worker 更新,稍后再试");
+        return std::unexpected(ProjectLockRefusal(lock_result, "该层记忆") + ",稍后再试");
     }
     auto replaced = AtomicWrite(session.original, edited);
     discard();
@@ -4304,10 +4628,12 @@ std::expected<ProjectMemory::MigrationResult, std::string> ProjectMemory::RunMig
         return MigrationResult{0, std::string()};  // 没活干:重跑不重复
     }
 
-    // 与 worker 同一把项目锁:改名与写新内容须在同一把锁里完成。
-    DirectoryLock project_lock(memory_dir_ / ".state" / "memory.lock");
-    if (!project_lock.acquired()) {
-        return std::unexpected("项目记忆正由另一个 worker 更新,稍后再试");
+    // 与 worker 同一把项目锁:改名与写新内容须在同一把锁里完成。SV-01:
+    // 所有权裁决,不按年龄抢。
+    OwnerLock project_lock;
+    const auto lock_result = OwnerLock::TryAcquire(memory_dir_ / ".state" / "memory.lock", &project_lock);
+    if (lock_result.status != OwnerLock::Status::Acquired) {
+        return std::unexpected(ProjectLockRefusal(lock_result, "项目记忆") + ",稍后再试");
     }
 
     std::string stamp = NowIsoUtc();
@@ -4447,6 +4773,23 @@ std::vector<std::string> CheckGlobalMemoryHealth(const fs::path& home_lubancode)
         lines.push_back("[! ] memory job 失败积压 " + std::to_string(failed_jobs) +
                         " 笔(memory-jobs/failed,各带 .error.txt 回执)");
     }
+    // SV-01:所有权裁决隔离的陈锁/旧格式锁留证(memory-jobs 下的
+    // worker.lock.stale-*)。有数 = 近期有 worker 暴毙或旧版本残留,值得
+    // 看一眼再手清。
+    std::size_t quarantined_locks = 0;
+    ec.clear();
+    fs::directory_iterator stale_it(home / "memory-jobs", ec);
+    if (!ec) {
+        for (const auto& item : stale_it) {
+            if (PathUtf8(item.path().filename()).starts_with("worker.lock.stale-")) ++quarantined_locks;
+        }
+    }
+    if (quarantined_locks == 0) {
+        lines.push_back("[ok] memory worker 锁无隔离残迹");
+    } else {
+        lines.push_back("[! ] memory worker 锁隔离残迹 " + std::to_string(quarantined_locks) +
+                        " 处(worker.lock.stale-*;worker 暴毙或旧版残留的留证,可查后手删)");
+    }
     // 修复单 §五 C:doctor 也报待写账与 worker 事故——全只读,不拉进程。
     const std::size_t pending_jobs = CountPendingJobs(home);
     if (pending_jobs == 0) {
@@ -4466,16 +4809,22 @@ std::expected<std::size_t, std::string> RunPendingMemoryJobs(const fs::path& hom
     const fs::path pending = jobs_root / "pending";
     std::error_code ec;
     if (!fs::exists(pending, ec)) return std::size_t{0};
-    std::unique_ptr<DirectoryLock> worker_lock;
+    // SV-01:队列独占走所有权裁决。活持有者(别宿主的 worker)在 → 有界
+    // 等它放手;真失败(owner 读不懂)不磨轮数,明报上抛。
+    OwnerLock worker_lock;
+    OwnerLock::Result lock_result;
     for (int attempt = 0; attempt < 50; ++attempt) {
-        auto candidate = std::make_unique<DirectoryLock>(jobs_root / "worker.lock");
-        if (candidate->acquired()) {
-            worker_lock = std::move(candidate);
-            break;
+        lock_result = OwnerLock::TryAcquire(jobs_root / "worker.lock", &worker_lock);
+        if (lock_result.status == OwnerLock::Status::Acquired) break;
+        if (lock_result.status == OwnerLock::Status::BrokenLock) {
+            return std::unexpected("memory worker 锁 owner 账读不懂,不敢动: " +
+                                   lock_result.detail);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    if (worker_lock == nullptr) return std::unexpected("等待 memory worker 锁超时");
+    if (lock_result.status != OwnerLock::Status::Acquired) {
+        return std::unexpected("等待 memory worker 锁超时: " + lock_result.detail);
+    }
 
     std::size_t completed = 0;
     int empty_scans = 0;

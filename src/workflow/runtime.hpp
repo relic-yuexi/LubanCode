@@ -254,8 +254,13 @@ private:
         const std::atomic<bool>* cancel = nullptr;
         int* steps = nullptr;  // 主图与 loop body 共用同一把 max_steps 尺
         std::int64_t started_ms = 0;  // async 等待也守整场 run 的总时限
-        // 并行分支共写 account.nodes(std::map 并发写会坏):所有
-        // NodeRunRecord 的读改走这把锁。Store 自带锁,不归它管。
+        // 并行分支共写 account.nodes(std::map 并发写会坏)。AR-03 起
+        // 规矩:各执行把 attempt/时间/错误收在自己的本地 NodeRunRecord,
+        // 对共享槽的写只经提交口(PublishNodeRecord)持这把锁整笔落——
+        // 槽是派生投影(last write wins),不是执行状态的事实源;事件闭包
+        // 与 Execute 窗口不碰它。读侧:调度线程在 worker 汇合后读,或与写
+        // 同锁。run 级共账(tokens/tool_calls)与 journal(裸 ofstream)的
+        // 写也在这把锁下串行。Store 自带锁,不归它管。
         std::mutex* nodes_mutex = nullptr;
     };
 

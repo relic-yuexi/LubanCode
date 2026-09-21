@@ -417,6 +417,38 @@ void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider
     config.active_provider = provider.name;
 }
 
+std::string ProviderConnectionFingerprint(const ProviderConfig& provider) {
+    // 口径 = ApplyProviderToRuntimeConfig 的字段集 + 解析后的鉴权值:展开
+    // 会改到什么,指纹就认什么。key_env/api_key 不按原文单列,只认
+    // ResolveProviderAuth 折出来的实际生效那把——换变量名而生效值没变,
+    // 后端行为没变,不该动缓存。
+    const ProviderAuthResolution auth = ResolveProviderAuth(provider);
+    nlohmann::json fingerprint = nlohmann::json::object();
+    fingerprint["wire"] = static_cast<int>(provider.wire);
+    fingerprint["base_url"] = provider.base_url;
+    fingerprint["auth_mode"] = static_cast<int>(provider.auth);
+    fingerprint["auth_key"] =
+        auth.status == ProviderAuthResolution::Status::Ready ? *auth.key : std::string();
+    fingerprint["model"] = provider.model;
+    fingerprint["context_window_tokens"] = provider.context_window_tokens;
+    fingerprint["native_web_search"] = provider.native_web_search;
+    fingerprint["stream_usage"] = provider.stream_usage;
+    fingerprint["stream_usage_declared"] = provider.stream_usage_declared;
+    fingerprint["reasoning_replay"] = provider.reasoning_replay;
+    fingerprint["reasoning_delta_field"] = provider.reasoning_delta_field;
+    fingerprint["reasoning_replay_field"] = provider.reasoning_replay_field;
+    fingerprint["extra_body"] = provider.extra_body;
+    fingerprint["extra_headers"] = provider.extra_headers;
+    fingerprint["supported_think_levels"] = provider.supported_think_levels;
+    fingerprint["think_param"] = provider.think_param;
+    fingerprint["think_passthrough"] = provider.think_passthrough;
+    fingerprint["metrics_url"] = provider.metrics_url;
+    fingerprint["max_output_tokens"] = provider.max_output_tokens.has_value()
+                                           ? nlohmann::json(*provider.max_output_tokens)
+                                           : nlohmann::json(nullptr);
+    return fingerprint.dump();
+}
+
 bool ApplyConfiguredActiveProvider(ConfigResult& result) {
     if (result.config.active_provider.empty()) {
         return false;
@@ -3753,20 +3785,36 @@ std::expected<nlohmann::json, std::string> ReadConfigObjectForTargetedUpdate(
     return ReadConfigObjectForUpdate(file_path);
 }
 
-std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
-                                                         const nlohmann::json& root) {
+std::expected<platform::AtomicWriteReceipt, platform::AtomicWriteError> WriteConfigObjectAtomicPhased(
+    const std::string& file_path, const nlohmann::json& root) {
     std::string dump;
     try {
         dump = root.dump(2);
     } catch (const nlohmann::json::type_error& e) {
-        return std::unexpected("配置序列化失败: " + std::string(e.what()));
+        // 序列化失败发生在碰盘之前:按未提交结构化上报,code 用 config.
+        // 前缀,不冒充 atomic.* 平台码。
+        return std::unexpected(platform::AtomicWriteError{
+            "config.serialize_failed", "配置序列化失败: " + std::string(e.what()),
+            platform::WriteOutcome::NotCommitted, platform::WriteFailureKind::Permanent});
     }
     dump.push_back('\n');
-    const auto written = platform::AtomicWriteFile(
-        platform::Utf8ToPath(file_path), dump, platform::WriteDurability::ProcessCrashDurability);
-    if (!written.has_value()) {
-        return std::unexpected("配置文件 " + file_path + " 原子写失败(" + written.error().code +
-                               "): " + written.error().message);
+    return platform::AtomicWriteFile(platform::Utf8ToPath(file_path), dump,
+                                     platform::WriteDurability::ProcessCrashDurability);
+}
+
+std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
+                                                         const nlohmann::json& root) {
+    // FD-04 收尾前的兼容口:把结构化回执降成字符串。新调用方一律走
+    // WriteConfigObjectAtomicPhased 拿阶段;调用方迁完删此口。
+    const auto phased = WriteConfigObjectAtomicPhased(file_path, root);
+    if (!phased.has_value()) {
+        const platform::AtomicWriteError& error = phased.error();
+        std::string text = "配置文件 " + file_path + " 原子写失败(" + error.code + "): " + error.message;
+        if (error.outcome == platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+            // 给降级口的最后一点诚实:这格失败盘上已是新内容。
+            text += "(新内容已写进文件并可见,仅断电耐久未确认;不得按未写盘处理)";
+        }
+        return std::unexpected(std::move(text));
     }
     return {};
 }

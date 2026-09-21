@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -475,6 +476,61 @@ struct RecallTrace {
     std::vector<RecallTraceEntry> entries;  // 计分过的候选,含被拦与落选
     std::size_t injected_count = 0;
     std::size_t injected_bytes = 0;  // 去重后有效字节
+};
+
+// ---------------------------------------------------------------------------
+// SV-01(2026-09-21 架构审查):目录锁所有权。worker.lock(memory-jobs 队列
+// 独占)与 memory.lock(项目/用户层写互斥)共用。旧 DirectoryLock 按 mtime
+// 年龄判死夺锁——活 worker 连续处理队列超过 30 秒,宿主再唤醒就起第二只
+// worker 删旧锁取同一路径,旧句柄析构又删掉新持有者的锁。本锁只认所有权:
+//   - owner 账(锁目录里 owner 文件:PID+进程起始 token+随机 owner token)
+//     判持有者活死,范式同 GatewayLock/InstallRootLock 的身份核;活持有者
+//     不因时间长被夺锁;
+//   - 持有者死透/PID 被复用:整目录改名 *.stale-<ms> 隔离留证再重建,不猜
+//     死后直接删;无 owner 的旧格式锁(老 DirectoryLock 的空目录)同样
+//     隔离明报;
+//   - owner 在但读不懂:BrokenLock 明报,不敢动;
+//   - 释放前重读 owner 核 pid+owner token,不是自己这只句柄拿的锁不删。
+// 探测(HolderAlive)与取锁(TryAcquire)/释放(Release)共用同一份裁决。
+// Windows 瞬态(防病毒/过滤驱动短拒)在 owner 读、隔离改名、释放删除里
+// 都有界重试,烧完才算真失败。
+// ---------------------------------------------------------------------------
+class OwnerLock {
+public:
+    enum class Status {
+        Acquired,         // 占住,owner 账已落盘
+        HeldByLiveHolder, // 持有者活着(或在建窗口/探不出按活保守),拒绝
+        BrokenLock,       // owner 在但读不懂:不敢动,明报
+        IoError,          // 占位/隔离/写账真失败
+    };
+    struct Result {
+        Status status = Status::IoError;
+        std::string detail;  // 人话诊断(持有者 pid、隔离留证落点、失败原因)
+    };
+
+    // 取锁。out 之前持有的锁先释放。陈锁隔离后对手可能先占,内部有界
+    // 重试,撞满即报,不无限绕。
+    static Result TryAcquire(const std::filesystem::path& dir, OwnerLock* out);
+    // 只读探测:目录在且持有者活着(在建窗口/读不懂按活保守)。不创建、
+    // 不删、不偷锁——WorkerLockHeld 与取锁路共用这份裁决。
+    static bool HolderAlive(const std::filesystem::path& dir, std::string* detail = nullptr);
+
+    OwnerLock() = default;
+    ~OwnerLock();
+    OwnerLock(OwnerLock&& other) noexcept;
+    OwnerLock& operator=(OwnerLock&& other) noexcept;
+    OwnerLock(const OwnerLock&) = delete;
+    OwnerLock& operator=(const OwnerLock&) = delete;
+
+    bool holds() const { return !dir_.empty(); }
+    const std::filesystem::path& dir() const { return dir_; }
+    // 显式释放;析构也会做。只删 owner 账核得上的自己的锁。
+    void Release();
+
+private:
+    std::filesystem::path dir_;
+    std::FILE* file_ = nullptr;  // owner 的只读句柄:Windows 上挡他者删/改名
+    std::string owner_token_;    // 本次占位的随机 token,释放核账用
 };
 
 // worker 监督器的实现件(定义在 project_memory.cpp;这里只见前向声明,

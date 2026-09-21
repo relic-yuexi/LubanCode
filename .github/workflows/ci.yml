@@ -28,6 +28,7 @@ jobs:
       code: ${{ steps.c.outputs.code }}
       memory_worker: ${{ steps.c.outputs.memory_worker }}
       agent_lifetime: ${{ steps.c.outputs.agent_lifetime }}
+      workflow_threads: ${{ steps.c.outputs.workflow_threads }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -48,12 +49,14 @@ jobs:
             echo 'memory_worker=true' >> "$GITHUB_OUTPUT"
             echo 'agent_lifetime=true' >> "$GITHUB_OUTPUT"
             echo "base unreachable, run full" >&2
-            echo 'code=true' >> "$GITHUB_OUTPUT"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_threads=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           code=false
           memory_worker=false
           agent_lifetime=false
+          workflow_threads=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             # AR-01(子代理线程寿命)起:子代理派工/装配面改动跑 linux-asan
@@ -74,6 +77,12 @@ jobs:
               src/memory/*|src/platform/process_win.cpp|tests/support/memory_worker_fixture.cpp|CMakeLists.txt)
                 memory_worker=true ;;
             esac
+            # AR-03 起 workflow 并发面(节点执行账/并行调度)有 TSan 腿把关:
+            # 改到这些路径的 PR 加跑 workflow-tsan,其余 PR 不烧这笔钱。
+            case "$f" in
+              src/workflow/*|tests/unit/workflows/*)
+                workflow_threads=true ;;
+            esac
             # Windows 瞬态文件语义敏感面:gateway 控制/任务命令文件的换名短拒
             # 病灶(防病毒/索引过滤驱动,见 src/gateway/work_pump.cpp 注释)
             # 与助理任务/审批册(35403217677/35374324620 两案 windows 腿间歇
@@ -81,8 +90,11 @@ jobs:
             # telemetry 面(35411986773 案集成册 :1012 间歇红):cursor 原子
             # 替换会被并发读者句柄短拒、出口持锁整读段文件会被过滤驱动拖
             # 数秒,同为 windows 独有病灶,同列。
+            # 平台原子写本体(FD-04 提交阶段合同):MoveFileExW 换名、目录
+            # FlushFileBuffers 与过滤驱动短拒分类都在 windows 上显形,改到
+            # 这三个文件的 PR 须双平台验。
             case "$f" in
-              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*)
+              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*|src/platform/atomic_write.cpp|src/platform/atomic_write.hpp|tests/unit/platform/test_atomic_write.cpp)
                 memory_worker=true ;;
             esac
             case "$f" in
@@ -98,6 +110,7 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "memory_worker=$memory_worker" >> "$GITHUB_OUTPUT"
           echo "agent_lifetime=$agent_lifetime" >> "$GITHUB_OUTPUT"
+          echo "workflow_threads=$workflow_threads" >> "$GITHUB_OUTPUT"
 
   # 腿单预备(2026-09-06):job 级 if 不认 matrix 上下文(GitHub 上下文可用
   # 表没有它,写在 jobs.<id>.if 里整炉 0 秒死于 workflow file issue——
@@ -127,6 +140,56 @@ jobs:
   # 的所有权判定(备份/保留/冲突/needs-review)与 manifest 生成器,不依赖
   # 构建产物,一两分钟收工。windows 腿用 Windows PowerShell 5.1(真实装机
   # 环境),ubuntu 腿 pwsh + bash 双跑;install.sh 端到端仅 unix。
+  # AR-03(Workflow 并行项共写同一节点执行记录)起:workflow 并发面的
+  # ThreadSanitizer 腿。栅栏夹具钉得住事件交错合同,竞争本身靠 sanitizer
+  # 抓——node_run_id/attempt 串项、NodeRunRecord 锁外读写这类 UB,功能
+  # 断言看不见,TSan 看得见。只编测试靶、只跑 workflows 域,macos-clang
+  # (AppleClang 自带 TSan);门房按 workflow_threads 放行,不烧全量腿的钱。
+  workflow-tsan:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.workflow_threads == 'true'
+    name: workflow-tsan (macos-clang)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch bundled ripgrep (manifest-pinned)
+        shell: bash
+        run: bash scripts/fetch_ripgrep.sh --target rg-stage --platform macos-arm64 --cache rg-cache
+
+      # 复用 build-test 腿的依赖缓存键:FetchContent 产物不需重编,未插桩
+      # 的第三方静态链进 TSan 二进制是受支持形态(竞争检测面在自家代码)。
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-macos-clang-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-macos-clang-
+
+      - name: Configure (vcpkg first, FetchContent fallback, TSan)
+        shell: bash
+        run: |
+          set -x
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec -DCMAKE_CXX_FLAGS=-fsanitize=thread -DCMAKE_C_FLAGS=-fsanitize=thread"
+          if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
+               -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
+            echo "configured with vcpkg"
+          else
+            echo "vcpkg configure failed or unavailable, falling back to FetchContent"
+            rm -rf build/CMakeCache.txt build/CMakeFiles
+            cmake -B build -S . $COMMON_FLAGS
+          fi
+
+      - name: Build tests (TSan)
+        shell: bash
+        run: cmake --build build --config Release --target lubancode_tests -j 4
+
+      # 只跑 workflows 域(含并行/重试/账本恢复全册):TSan 出手即红,
+      # exitcode 非零被 ctest 原样上抛。
+      - name: Test workflows under TSan
+        shell: bash
+        run: ctest --test-dir build -C Release -R "unit\.workflows\." --parallel 4 --output-on-failure --no-tests=error
+
   install-scripts:
     needs: changes
     if: needs.changes.outputs.code == 'true'
