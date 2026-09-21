@@ -41,6 +41,8 @@ const char* CostStatusName(CostStatus status) {
             return "not_priced";
         case CostStatus::NotApplicable:
             return "not_applicable";
+        case CostStatus::Overflow:
+            return "estimate_overflow";
     }
     return "";
 }
@@ -50,6 +52,7 @@ std::optional<CostStatus> CostStatusFromName(std::string_view name) {
     if (name == "provider_reported") return CostStatus::ProviderReported;
     if (name == "not_priced") return CostStatus::NotPriced;
     if (name == "not_applicable") return CostStatus::NotApplicable;
+    if (name == "estimate_overflow") return CostStatus::Overflow;
     return std::nullopt;
 }
 

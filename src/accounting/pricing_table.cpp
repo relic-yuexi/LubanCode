@@ -4,10 +4,10 @@
 #include <string_view>
 
 namespace lubancode::accounting {
-namespace {
 
 // 单价 JSON 值 -> 整数 micros。整数当货币单位(3 -> 3'000'000);小数一次
 // llround(x * 1e6) 折完(1.25 -> 1'250'000),此后不再碰浮点。
+// 读侧唯一入口;负数、超 9e12 单位、非数 -> nullopt。
 std::optional<std::int64_t> ParsePriceMicros(const nlohmann::json& value) {
     if (value.is_number_integer()) {
         const std::int64_t units = value.get<std::int64_t>();
@@ -29,6 +29,18 @@ std::optional<std::int64_t> ParsePriceMicros(const nlohmann::json& value) {
     }
     return std::nullopt;
 }
+
+// 整数 micros -> JSON 货币单位数值,写侧唯一入口,与 ParsePriceMicros
+// 互逆。整百万 micros 出整数(0、3、10),任意大小精确;小数价折回单位
+// (1'250'000 -> 1.25)。
+nlohmann::json PriceMicrosToJsonUnits(std::int64_t micros) {
+    if (micros % 1'000'000 == 0) {
+        return nlohmann::json(micros / 1'000'000);
+    }
+    return nlohmann::json(static_cast<double>(micros) / 1e6);
+}
+
+namespace {
 
 // "YYYY-MM-DD" 形状 + 日历粗校验。
 bool IsValidDate(std::string_view date) {
@@ -70,7 +82,7 @@ std::optional<ModelPrice> ParseModelPrice(const nlohmann::json& json, std::strin
         }
         const auto micros = ParsePriceMicros(json.at(field.key));
         if (!micros.has_value()) {
-            *error = std::string("单价非数或为负: ") + field.key;
+            *error = std::string("单价非数、为负或超 9e12 单位: ") + field.key;
             return std::nullopt;
         }
         *field.out = *micros;
@@ -94,12 +106,14 @@ nlohmann::json PricingTable::ToJson() const {
     json["source"] = source;
     nlohmann::json models = nlohmann::json::object();
     for (const auto& [key, price] : this->models) {
-        // micros 折回货币单位只给人看;机器读一律 micros 整数。
+        // JSON 恒货币单位,与读侧同一对转换件;micros 只活在内存。
+        // 直放 micros 整数会让同字段两种单位,往返 ×1e6 漂移(FD-01)。
         nlohmann::json entry = nlohmann::json::object();
-        entry["input_per_million"] = price.input_per_million_micros;
-        entry["cache_read_per_million"] = price.cache_read_per_million_micros;
-        entry["cache_creation_per_million"] = price.cache_creation_per_million_micros;
-        entry["output_per_million"] = price.output_per_million_micros;
+        entry["input_per_million"] = PriceMicrosToJsonUnits(price.input_per_million_micros);
+        entry["cache_read_per_million"] = PriceMicrosToJsonUnits(price.cache_read_per_million_micros);
+        entry["cache_creation_per_million"] =
+            PriceMicrosToJsonUnits(price.cache_creation_per_million_micros);
+        entry["output_per_million"] = PriceMicrosToJsonUnits(price.output_per_million_micros);
         models[key] = std::move(entry);
     }
     json["models"] = std::move(models);

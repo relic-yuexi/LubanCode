@@ -36,8 +36,12 @@ enum class UsageSource { ProviderReported, Estimated, Unknown };
 const char* UsageSourceName(UsageSource source);
 std::optional<UsageSource> UsageSourceFromName(std::string_view name);
 
-// 费用四态(§6.1/§6.3):订阅档可写 not_applicable;没配价格表写 not_priced。
-enum class CostStatus { Estimated, ProviderReported, NotPriced, NotApplicable };
+// 费用五态(§6.1/§6.3 四态 + FD-01 超界态):订阅档可写 not_applicable;
+// 没配价格表写 not_priced。第五态 overflow(FD-01,2026-09):单价、token
+// 各自合法,但四桶乘积或加和装不进 int64 micros——micros 恒 0,不静默
+// 饱和、不降 not_priced,数值错误不能装成合法零价。序列化名
+// estimate_overflow;旧档不含此名,读旧不变形。
+enum class CostStatus { Estimated, ProviderReported, NotPriced, NotApplicable, Overflow };
 const char* CostStatusName(CostStatus status);
 std::optional<CostStatus> CostStatusFromName(std::string_view name);
 
@@ -45,7 +49,7 @@ std::optional<CostStatus> CostStatusFromName(std::string_view name);
 struct CostEstimate {
     CostStatus status = CostStatus::NotPriced;
     std::string currency;         // ISO 码,如 USD;not_priced 时可空
-    std::int64_t micros = 0;      // 1e-6 计价单位;not_priced 恒 0
+    std::int64_t micros = 0;      // 1e-6 计价单位;not_priced/overflow 恒 0
     std::string price_table_id;   // 命中的价格表 id;没配可空
 
     nlohmann::json ToJson() const;
