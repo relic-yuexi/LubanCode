@@ -1,7 +1,8 @@
 // settings_commands.hpp 的实现:模型/供应商/配置/语言/技能/更新命令的函数体。
 #include "app/commands/settings_commands.hpp"
 
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "agent/agent.hpp"  // /copy 的活对话账(ctx.main_agent->History)
+#include "agent/prompt_assembler.hpp"  // /provider 切换的请求档(prompt_options.wire)
 
 #include <algorithm>
 #include <cctype>
@@ -2336,10 +2337,11 @@ void HandleCopyCommand(const std::string& raw_args, const std::vector<lubancode:
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):设置域的分派位。case 体原样自
-// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// interactive_session 的大 switch 搬来;HC-06 第三小批起材料经设置域窄
+// context(SettingsCommandContext,settings_commands.hpp)递入。
 // ---------------------------------------------------------------------------
 
-CommandFlow HandleSlashProvider(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashProvider(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     HandleProviderCommand(parsed.args, *ctx.config, *ctx.active_provider, *ctx.real_backend, *ctx.wire_str,
                           ctx.current_model, ctx.current_think, ctx.current_think_history,
                           *ctx.context_tracker, ctx.current_model_instructions, *ctx.model_catalog,
@@ -2348,23 +2350,23 @@ CommandFlow HandleSlashProvider(SlashDispatchContext& ctx, const lubancode::cli:
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashConfig(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashConfig(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintConfigDiagnostics(*ctx.config_result, *ctx.current_model, ctx.model_catalog, ctx.settings_local);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashUpdate(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashUpdate(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     HandleUpdateCommand(parsed.args, ctx.config->connect_timeout_ms, ctx.config->request_timeout_secs);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashLanguage(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashLanguage(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     HandleLanguageCommand(parsed.args, *ctx.config_file_path);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashThink(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     // 目录条目按"此刻的会话模型"现查——/model 切过之后,/think 列的就是
     // 新模型声明的档位。目录没有声明再看当前 provider 配置的声明(Effort
     // 诊断单:未知模型至少列本 provider 配置,不只甩一句"以服务商为准")。
@@ -2433,13 +2435,13 @@ CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::Pa
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashSkills(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashSkills(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintSkillsCommand(*ctx.skills, lubancode::platform::CurrentDirUtf8(), *ctx.home_dir, *ctx.theme);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashSkill(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashSkill(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     if (HandleSkillCommand(parsed.args, *ctx.global_skills_root, *ctx.project_skills_root, *ctx.home_dir)) {
         ctx.refresh_skills();
         TermOut() << tr("cmd.skill.refreshed") << "\n";
@@ -2447,12 +2449,12 @@ CommandFlow HandleSlashSkill(SlashDispatchContext& ctx, const lubancode::cli::Pa
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashKeymap(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashKeymap(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     HandleKeymapCommand(parsed.args, *ctx.home_lubancode, *ctx.theme);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashCopy(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashCopy(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     // P0-3 轨迹档(§14.5:/copy 一律读 ReplayState):折叠本场 main.jsonl
     // 投影出 history,再走同一只复制口。flag 关照旧路。
     if (ctx.trajectory != nullptr) {

@@ -39,6 +39,14 @@
 #include "runtime/session_runtime.hpp"  // RecordThinkHistory:/think history 落会话账
 #include "tools/skill_loader.hpp"
 
+namespace lubancode::agent {
+class Agent;          // /copy 的活对话账(指针借用,定义在 agent/agent.hpp)
+struct PromptOptions;  // /provider 切换的请求档(定义在 agent/prompt_assembler.hpp)
+}  // namespace lubancode::agent
+namespace lubancode::runtime {
+class TrajectorySessionLedger;  // /copy 的 Replay 投影(定义在 runtime/trajectory_session.hpp)
+}  // namespace lubancode::runtime
+
 namespace lubancode::app {
 
 using lubancode::cli::tr;
@@ -252,20 +260,58 @@ void HandleCopyCommand(const std::string& raw_args, const std::vector<lubancode:
                        const lubancode::cli::Theme& theme);
 
 // ---------------------------------------------------------------------------
-// 命令分派注册制(会话终章):设置域的分派位(provider/model/config/
-// update/language/think/skills/skill/keymap/copy)。case 体原样自
-// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// 设置域窄材料(HC-06 第三小批):provider/model/config/update/language/
+// think/skills/skill/keymap/copy 的分派材料。字段与旧 SlashDispatchContext
+// 同名同型,全借用(指针/引用/回调),会话控制器在绑定期一次配齐。
 // ---------------------------------------------------------------------------
-struct SlashDispatchContext;
+struct SettingsCommandContext {
+    lubancode::config::ConfigResult* config_result = nullptr;
+    lubancode::config::Config* config = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;
+    const lubancode::config::SettingsLocal* settings_local = nullptr;
+    bool spinner_enabled = false;
+    std::string* wire_str = nullptr;
+    std::string* active_provider = nullptr;
+    const std::optional<std::string>* active_provider_write_path = nullptr;
+    std::optional<std::string>* config_file_path = nullptr;
+    const std::optional<std::string>* home_dir = nullptr;        // /skills 的扫描位
+    const std::optional<std::string>* home_lubancode = nullptr;  // /keymap
+    const std::filesystem::path* global_skills_root = nullptr;
+    const std::filesystem::path* project_skills_root = nullptr;
+    std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
+    RebuildableBackend* real_backend = nullptr;
+    std::shared_ptr<std::string> current_model;
+    std::shared_ptr<std::string> current_think;
+    std::shared_ptr<lubancode::api::ReasoningHistoryMode> current_think_history;
+    std::shared_ptr<std::string> current_model_instructions;
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
+    lubancode::agent::Agent* main_agent = nullptr;  // /copy 的活对话账
+    lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // /think history 落会话账
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;  // /copy 的 Replay 投影
+    lubancode::agent::PromptOptions* prompt_options = nullptr;
+    std::function<void(bool)> rebuild_loop;   // /provider 切换后的重建
+    std::function<void()> sync_request_policy;  // /think 的皮上刷新
+    std::function<void()> refresh_skills;       // /skill 安装后
+};
 
-CommandFlow HandleSlashProvider(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashConfig(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashUpdate(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashLanguage(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashSkills(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashSkill(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashKeymap(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashCopy(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashProvider(const SettingsCommandContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashConfig(const SettingsCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashUpdate(const SettingsCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashLanguage(const SettingsCommandContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashThink(const SettingsCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSkills(const SettingsCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSkill(const SettingsCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashKeymap(const SettingsCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashCopy(const SettingsCommandContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

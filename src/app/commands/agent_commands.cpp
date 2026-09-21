@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "agent/prompt_assembler.hpp"  // BuildPromptProfileLedger(阶段 2 来源账本)
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "app/tool_runtime.hpp"  // McpServerRuntime(/agent doctor 的 MCP 面材料)
 #include "cli/terminal_port.hpp"
 #include "config/config.hpp"                  // HomeLubancodeDir
 #include "config/project_instructions.hpp"    // FindProjectRoot(项目层根)
@@ -451,19 +451,29 @@ lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots(
     return roots;
 }
 
-// 会话钉快照折包层成品件(快照缺席 = 空表,行为与从前一致)。
-std::vector<lubancode::agent::PackagedAgentEntry> PackagedAgentsFromMount(SlashDispatchContext& ctx) {
-    if (ctx.package_mount == nullptr) {
+// 现行快照折包层成品件(快照缺席 = 空表,行为与从前一致)。HC-06 第三
+// 小批:改经 package_snapshot_provider 现取——reload 换档后旧快照会释放,
+// 冻指针会悬垂;provider 返回现行 shared_ptr,调用期间保活。
+std::vector<lubancode::agent::PackagedAgentEntry> PackagedAgentsFromMount(const AgentCommandContext& ctx) {
+    if (ctx.package_snapshot_provider == nullptr) {
         return {};
     }
-    return lubancode::package::MountAgentEntries(*ctx.package_mount);
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot = ctx.package_snapshot_provider();
+    if (snapshot == nullptr) {
+        return {};
+    }
+    return lubancode::package::MountAgentEntries(snapshot->mount());
 }
 
-std::vector<lubancode::agent::PackageProfileRoot> PackagedProfileRootsFromMount(SlashDispatchContext& ctx) {
-    if (ctx.package_mount == nullptr) {
+std::vector<lubancode::agent::PackageProfileRoot> PackagedProfileRootsFromMount(const AgentCommandContext& ctx) {
+    if (ctx.package_snapshot_provider == nullptr) {
         return {};
     }
-    return lubancode::package::MountProfileRoots(*ctx.package_mount);
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot = ctx.package_snapshot_provider();
+    if (snapshot == nullptr) {
+        return {};
+    }
+    return lubancode::package::MountProfileRoots(snapshot->mount());
 }
 
 // Prompt Profile 的项目层根(阶段 2):<项目根>/.lubancode/prompts,UTF-8
@@ -475,7 +485,8 @@ std::string ComputeProjectPromptsRoot() {
                                            ".lubancode" / "prompts");
 }
 
-CommandFlow HandleSlashAgents(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashAgents(const AgentCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
         ComputeAgentScanRoots(PackagedAgentsFromMount(ctx)));
@@ -485,7 +496,8 @@ CommandFlow HandleSlashAgents(SlashDispatchContext& ctx, const lubancode::cli::P
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashAgent(const AgentCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed) {
     // 拆子命令与名字(名可含连字符,不能按词数硬拆,取第一个词后全部当名字)。
     std::string sub = parsed.args;
     std::string rest;

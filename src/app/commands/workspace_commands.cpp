@@ -1,6 +1,5 @@
 // workspace_commands.hpp 的实现:工具清单/插件/MCP/LSP/worktree 命令的函数体。
 #include "app/commands/workspace_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/todo_render.hpp"                // /todos 的排版
 #include "config/project_instructions.hpp"    // /init 的建档
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
@@ -743,11 +742,12 @@ CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::strin
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):工作面域的分派位。case 体原样自
-// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// interactive_session 的大 switch 搬来;HC-06 第三小批起材料经工作面域
+// 窄 context(WorkspaceCommandContext,workspace_commands.hpp)递入。
 // (/background 的清单与子命令挪去 background_commands.cpp——管理面单。)
 // ---------------------------------------------------------------------------
 
-CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashInit(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     const lubancode::cli::Theme& theme = *ctx.theme;
     const auto result = lubancode::config::InitializeProjectInstructions(std::filesystem::current_path());
@@ -769,7 +769,7 @@ CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::Par
 // 显式重载(与 /init 同一条 refresh 线)后亮新基线。Resolver 用会话那只
 // (与写前闸同一份账);没接(旧装配/单测)按 SessionResolverOptions 现
 // 起一只,fallback 名单从当前配置来。
-CommandFlow HandleSlashInstructions(SlashDispatchContext& ctx,
+CommandFlow HandleSlashInstructions(const WorkspaceCommandContext& ctx,
                                     const lubancode::cli::ParsedSlashCommand& parsed) {
     const lubancode::cli::Theme& theme = *ctx.theme;
     const auto cmd = lubancode::cli::ParseInstructionsCommand(parsed.args);
@@ -827,36 +827,36 @@ CommandFlow HandleSlashInstructions(SlashDispatchContext& ctx,
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashWorktree(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashWorktree(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     WorkspaceCommandState worktree_state{*ctx.worktree_session, ctx.sync_worktree_directory};
     return HandleWorktreeCommand(worktree_state, parsed.args, *ctx.theme);
 }
 
-CommandFlow HandleSlashMcp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashMcp(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintMcpCommand(*ctx.mcp_servers);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashLsp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashLsp(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintLspCommand(*ctx.lsp_manager);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashTodos(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashTodos(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     TermOut() << lubancode::cli::FormatTodoList((*ctx.todo_state)->items, *ctx.theme);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashPlugins(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashPlugins(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintPluginsCommand(*ctx.plugin_mounted, *ctx.plugin_warnings);
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashPlugin(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     HandlePluginCommand(parsed.args, *ctx.plugin_mounted,
                         ctx.tool_runtime != nullptr
                             ? ctx.tool_runtime->process_manifests()
@@ -866,7 +866,7 @@ CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::P
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow HandleSlashTools(const WorkspaceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintToolsCommand(*ctx.registry, **ctx.loaded_tools, ctx.main_deferral, ctx.tool_search_threshold,
                       ctx.tool_search_token_floor,

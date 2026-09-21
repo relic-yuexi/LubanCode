@@ -32,6 +32,7 @@
 #include "app/commands/loop_commands.hpp"
 #include "app/commands/memory_commands.hpp"  // SessionTailContext(会话尾款材料)
 #include "app/commands/session_commands.hpp"
+#include "workflow/host_executors.hpp"  // ToolExecutor::Options(BuildWorkflowToolOptions 的返回型;原先经注册表头捎带)
 #include "app/interactive_session.hpp"
 #include "app/memory_extract.hpp"
 #include "app/turn_memory_extractor.hpp"  // TurnMemoryExtractor(回合总结异步化)
@@ -427,9 +428,9 @@ private:
     // ---- 借用:调用方在 RunInteractiveSession 返回前保证存活 ----
     const InteractiveSessionOptions& opts_;
 
-    // 分派材料包(命令注册制,会话终章):构造尾一次配齐,尚未收窄的域
-    // handler 经它取料,不摸控制器本体。HC-06 起逐域收窄(Trace/Hook/
-    // Telemetry 已迁窄材料,经下表的闭包捕获)。
+    // 过渡材料袋(命令注册制,会话终章):HC-06 三小批后只剩 /insights 与
+    // /prompt(audit 委托)两枚 FD-06 占件在吃——那两域文件在跑单占着,
+    // 合入迁走后整束删除。其余各域经下表闭包捕获自己域头的窄材料。
     lubancode::app::SlashDispatchContext dispatch_ctx_;
     // 命令表(HC-06 材料收窄):构造尾由绑定单元(session_command_
     // bindings)从 dispatch_ctx_ 与各域窄材料构造,执行器闭包捕获借用。
@@ -537,9 +538,10 @@ private:
     //(§五 A)。启动时初始化,每次搬房善后更新;宿主目录通知的"原目录"
     // 从这取。与 pending_directory_notice_ 同纪律:只主线程读写。
     std::string session_current_cwd_utf8_;
-    // Package 快照镜像(阶段 6):命令面 ctx.package_mount 借用的那份账的
-    // 拥有者——reload 换档时先换镜像再重指 ctx,借用在会话内永不悬垂。
-    // 与 stack_.package_snapshot(原子槽)同折同换,由 ReloadPackages 维护。
+    // Package 快照镜像(阶段 6):prompt_options 包层 Profile 根借用的那份
+    // 账的拥有者——reload 换档时先换镜像再重灌根。命令面的挂载账不再从
+    // 这借(HC-06 第三小批改经 package_snapshot_provider 现取,与
+    // stack_.package_snapshot 原子槽同折同换,由 ReloadPackages 维护)。
     std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot_view_;
     std::function<void()> reapply_peer_inbox;  // loop 重建后重灌收件点
     // loop 持 registry 引用,声明在后 = 先死,引用不悬垂。

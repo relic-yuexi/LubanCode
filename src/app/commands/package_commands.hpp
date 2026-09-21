@@ -9,6 +9,7 @@
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@ struct Config;
 }
 namespace lubancode::package {
 struct PackageMount;
+struct PackageSnapshot;  // provider 现取的现行快照(定义在 package/mounting.hpp)
 }
 namespace lubancode::tools {
 struct SkillMeta;
@@ -38,8 +40,11 @@ struct PackageCommandContext {
     const lubancode::config::Config* config = nullptr;
     // 会话技能清单(doctor/trust 的包外 Skill 名)。空 = 跳过。
     const std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
-    // 会话钉快照(list/show/enable-disable 的挂载状态)。空 = 没有包。
-    const lubancode::package::PackageMount* package_mount = nullptr;
+    // 现行快照的供应商(list/show/enable-disable 的挂载状态从这现取)。
+    // HC-06 第三小批改口:reload 换档后旧快照会被释放,冻死的挂载指针会
+    // 悬垂;provider 每次返回现行 shared_ptr,命令期间由持有者保活(与
+    // workflow/agent 域同一纪律)。空 = 没接,各动作按"没有包"降级。
+    std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot_provider;
     // /package reload 的会话侧执行体:重折快照、原子换档、刷下游,回执行
     // 逐行带回。空 = 没接(纯函数装配),reload 明说接不上。
     std::function<std::vector<std::string>()> reload_packages;

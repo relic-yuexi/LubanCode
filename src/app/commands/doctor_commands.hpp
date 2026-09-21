@@ -23,6 +23,7 @@
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -44,7 +45,17 @@ namespace lubancode::runtime {
 class TrajectorySessionLedger;
 }
 
+namespace lubancode::agent {
+class Agent;  // /doctor 的运行档案来源(指针借用,定义在 agent/agent.hpp)
+}  // namespace lubancode::agent
+namespace lubancode::runtime {
+class SessionRuntime;  // /doctor 的 wire 名(定义在 runtime/session_runtime.hpp)
+}  // namespace lubancode::runtime
 namespace lubancode::app {
+class RebuildableBackend;  // 探针写回后的重建口(定义在 app/backend_stack.hpp)
+class ToolRuntime;         // explore_registry(定义在 app/tool_runtime.hpp)
+
+
 
 // ---------------- 纯函数(单测钉住) ----------------
 
@@ -251,9 +262,34 @@ struct DoctorContext {
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);
 
+// ---------------------------------------------------------------------------
+// /doctor 域窄材料(HC-06 第三小批):健康巡检的分派材料。字段与旧
+// SlashDispatchContext 同名同型,全借用(指针/引用/回调),会话控制器在
+// 绑定期一次配齐。
+// ---------------------------------------------------------------------------
+struct DoctorCommandContext {
+    lubancode::config::Config* config = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+    std::string* active_provider = nullptr;
+    const std::optional<std::string>* active_provider_write_path = nullptr;
+    const std::optional<std::string>* home_lubancode = nullptr;
+    RebuildableBackend* real_backend = nullptr;  // 探针写回 config 后的重建口
+    std::shared_ptr<std::string> current_model;
+    std::shared_ptr<std::string> current_think;
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
+    lubancode::tools::ToolRegistry* registry = nullptr;      // 主表
+    lubancode::tools::ToolRegistry* sub_registry = nullptr;  // 子代理表
+    lubancode::app::ToolRuntime* tool_runtime = nullptr;     // explore_registry;可空
+    lubancode::agent::Agent* main_agent = nullptr;           // 运行档案;可空
+    lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // wire 名;可空
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;  // 旁路桥;可空
+    lubancode::telemetry::TelemetryService* telemetry_service = nullptr;  // 状态面;可空
+    const lubancode::config::ProjectInstructionResolver* instruction_resolver = nullptr;  // 可空
+};
+
 // 命令分派注册制(会话终章):/doctor 的分派位(case 体原样搬自大 switch;
 // 探针写回 config 后顺手重建会话 backend)。
-struct SlashDispatchContext;
-CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashDoctor(const DoctorCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

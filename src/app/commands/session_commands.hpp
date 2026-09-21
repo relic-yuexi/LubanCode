@@ -10,9 +10,12 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+
+#include <set>
 
 #include "agent/compact.hpp"
 #include "agent/context_budget.hpp"
@@ -21,6 +24,9 @@
 #include "agent/token_calibrator.hpp"  // TokenCalibrationStatus:/context 的校准行材料
 #include "agent/loop.hpp"
 #include "agent/prompt_assembler.hpp"  // PromptOptions(/context 的系统提示估算)
+#include "config/model_catalog.hpp"  // SessionQuery/Lifecycle 的目录(带参分支身份校验)
+#include "runtime/session_runtime.hpp"  // SessionRuntime/CollaborationMode(生命周期面模式档)
+#include "runtime/session_soul.hpp"  // SessionSoulSnapshot(查询面/魂恢复口)
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:P0-2 compact typed 状态机
 #include "tools/session_utils.hpp"  // 时间戳/截断/引用消歧/Markdown 导出(P0-6 自 sessions 迁来)
 #include "api/backend.hpp"
@@ -38,6 +44,11 @@
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
 #include "tools/tool.hpp"
+
+namespace lubancode::tools {
+class ToolRegistry;   // 查询面的能力表(指针借用,定义在 tools/registry.hpp)
+class AgentTool;      // 生命周期面的子代理收口(定义在 tools/agent_tool.hpp)
+}  // namespace lubancode::tools
 
 #include <nlohmann/json.hpp>
 
@@ -466,15 +477,82 @@ struct SessionCommandState {
 // sessions_dir 与 queue/mode/think 恢复回调一并退场。)
 
 // ---------------------------------------------------------------------------
-// 命令分派注册制(会话终章):会话域的分派位。旧 interactive_session 大
-// switch 的会话类 case 原样搬来,材料经 SlashDispatchContext(定义在
-// command_registry.hpp)递入;行为一字未改。
+// 会话域窄材料(HC-06 第三小批:Session/Workflow 宽域收束)。按查询/运行/
+// 生命周期三面拆开——handler 只见自己那面的材料,不再摸整束会话上下文。
+// 全借用(指针/引用/回调),会话控制器在绑定期一次配齐;字段名与旧
+// SlashDispatchContext 同名同型,分派位行为一字未改。
 // ---------------------------------------------------------------------------
-struct SlashDispatchContext;
 
-CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// 查询面:/context 与 /context-window。现场收集 token 估算与面板校验,
+// 只读会话真值(改窗口/effort 经 tracker 与 current_think 的既有口,不是
+// 这里的职责)。
+struct SessionQueryContext {
+    lubancode::config::Config* config = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;
+    std::string* active_provider = nullptr;
+    std::shared_ptr<std::string> current_model;
+    std::shared_ptr<std::string> current_think;
+    std::shared_ptr<lubancode::api::ReasoningHistoryMode> current_think_history;
+    std::shared_ptr<std::string> current_model_instructions;
+    std::shared_ptr<std::string> current_soul;
+    lubancode::runtime::SessionSoulSnapshot* soul_session = nullptr;
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
+    lubancode::app::ModelRouterService* model_router = nullptr;
+    lubancode::tools::ToolRegistry* registry = nullptr;
+    const std::shared_ptr<std::set<std::string>>* loaded_tools = nullptr;
+    const std::function<bool(const lubancode::tools::Tool&)>* main_tool_filter = nullptr;
+    bool main_deferral = false;
+    bool main_proxy_reference = false;
+    bool main_native_reference = false;
+    lubancode::agent::Agent* main_agent = nullptr;
+    std::string* last_compact_line = nullptr;  // /context 的最近一次 compact 台账
+    lubancode::agent::PromptOptions* prompt_options = nullptr;
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+    // effort 落定后的皮上刷新(/context-window 保存时)。
+    std::function<void()> sync_request_policy;
+};
+
+// 运行面:/compact 的接线材料与 /record 的录制接线器。
+struct SessionRunContext {
+    const lubancode::cli::Theme* theme = nullptr;
+    class RecordSessionWiring* record_wiring = nullptr;  // /record(可空 = 没接录制)
+    std::function<CompactSessionInputs()> make_compact_inputs;
+};
+
+// 生命周期面:/clear /sessions /archive /delete /resume /export /title
+// /exit /help 与 /plan(正戏在 Plan 接线器,这里只递参数)。
+struct SessionLifecycleContext {
+    lubancode::config::Config* config = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;
+    bool spinner_enabled = false;
+    std::string* active_provider = nullptr;
+    std::shared_ptr<std::string> current_model;
+    lubancode::agent::Agent* main_agent = nullptr;
+    lubancode::tools::AgentTool* agent_tool = nullptr;  // 会话级 agent 工具(可空)
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
+    lubancode::app::ModelRouterService* model_router = nullptr;
+    lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // 模式档/thread id
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+    std::string* session_title = nullptr;
+    std::string* last_compact_line = nullptr;
+    lubancode::cli::WorktreeSession* worktree_session = nullptr;
+    // /resume 的会话魂恢复口(§5.3):换场即换魂。
+    std::function<void(const std::optional<lubancode::runtime::SessionSoulSnapshot>&)> adopt_resumed_soul;
+    std::function<SessionCommandState()> make_session_command_state;
+    // /plan 的分派位:正戏在 Plan 接线器(控制器/接线器递进来)。
+    std::function<CommandFlow(const std::string&)> handle_plan_command;
+    std::function<void(lubancode::runtime::CollaborationMode, const std::string&)> switch_collaboration_mode;
+    std::function<void()> reset_plan_review;  // /clear /plan off 的悬稿翻篇
+};
+
+CommandFlow HandleSlashHelp(const SessionLifecycleContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashClear(const SessionLifecycleContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashContext(const SessionQueryContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed);
 
 // ---------------------------------------------------------------------------
 // /context-window(ContextWindow交互面板单):同屏调当前模型的窗口预算与
@@ -514,16 +592,25 @@ ContextWindowPanelValidation ValidateContextWindowPanelSelection(
     lubancode::api::ReasoningHistoryMode think_history,
     const ContextWindowPanelSelection& selection);
 
-CommandFlow HandleSlashContextWindow(SlashDispatchContext& ctx,
+CommandFlow HandleSlashContextWindow(const SessionQueryContext& ctx,
                                      const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashSessions(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashArchive(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashDelete(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashTitle(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashExit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashCompact(const SessionRunContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashRecord(const SessionRunContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSessions(const SessionLifecycleContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashArchive(const SessionLifecycleContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashDelete(const SessionLifecycleContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashResume(const SessionLifecycleContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashExport(const SessionLifecycleContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashTitle(const SessionLifecycleContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashExit(const SessionLifecycleContext& ctx,
+                            const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

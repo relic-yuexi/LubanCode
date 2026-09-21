@@ -20,12 +20,10 @@
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"         // ParsedSlashCommand(分派注册制)
+#include "cli/theme.hpp"                  // /background 的画面材料
 #include "tools/background_tasks.hpp"     // BackgroundTaskInfo(状态段折数)
 
 namespace lubancode::app {
-
-// 定义在 command_registry.hpp(struct;前置声明与定义统一,防 MSVC C4099)。
-struct SlashDispatchContext;
 
 enum class BackgroundCommandAction {
     Invalid,
@@ -52,8 +50,13 @@ ParsedBackgroundCommand ParseBackgroundCommand(const std::string& args);
 // (完成/失败/已停止/停止失败)算"完成"。一只任务都没有返回空串(段收起)。
 std::string BuildBackgroundStatusSegment(const std::vector<lubancode::tools::BackgroundTaskInfo>& tasks);
 
-// /background 的分派位(命令注册表登册用)。
-CommandFlow HandleSlashBackground(SlashDispatchContext& ctx,
+// /background 的分派位(命令注册表登册用)。HC-06 第三小批起材料经
+// background 域窄 context 递入(全借用,绑定期一次配齐)。
+struct BackgroundCommandContext {
+    const lubancode::cli::Theme* theme = nullptr;
+};
+
+CommandFlow HandleSlashBackground(const BackgroundCommandContext& ctx,
                                   const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

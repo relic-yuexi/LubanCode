@@ -26,9 +26,12 @@
 #include "channel/manager.hpp"
 #include "cli/slash_commands.hpp"
 
+namespace lubancode::config {
+struct Config;  // 配置侧账号表(指针借用,定义在 config/config.hpp)
+}  // namespace lubancode::config
+
 namespace lubancode::app {
 
-struct SlashDispatchContext;
 
 // ---------------- 二级解析(纯函数,单测钉) ----------------
 
@@ -80,9 +83,19 @@ std::vector<std::string> FormatChannelPairingList(
 
 // ---------------- 执行(handler) ----------------
 
-CommandFlow HandleSlashChannels(SlashDispatchContext& ctx,
+// 渠道域窄材料(HC-06 第三小批):/channels 与 /channel 的分派材料。全
+// 借用,绑定期一次配齐。
+struct ChannelCommandContext {
+    lubancode::config::Config* config = nullptr;  // 配置侧账号表;可空
+    // 运行态来源。空 = 本进程没挂 ChannelManager(普通交互形态的铁律,
+    // configuration.md §3),命令面只显示配置侧与 gateway 引导,不产生任何
+    // 后台动作。Gateway 装配(阶段 9)与测试 wiring 才填这个口。
+    lubancode::channel::ChannelManager* channel_manager = nullptr;
+};
+
+CommandFlow HandleSlashChannels(const ChannelCommandContext& ctx,
                                 const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashChannel(SlashDispatchContext& ctx,
+CommandFlow HandleSlashChannel(const ChannelCommandContext& ctx,
                                const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

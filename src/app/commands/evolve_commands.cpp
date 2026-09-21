@@ -6,7 +6,7 @@
 // 候选,否则最小 Skill-only),diff/show 分档展示,批准页亮复杂度代价——
 // 迁移全走 EvolutionCoordinator(唯一写口),这里只递材料、只打印。
 #include "app/commands/evolve_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "memory/project_memory.hpp"  // /evolve 的分层账(ctx.project_memory)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:统一走输出端口
 
 #include <algorithm>
@@ -59,7 +59,7 @@ std::string ToLowerAscii(std::string_view s) {
 }
 
 // 观察账根:<home>/.lubancode/evolution/observations(README"观察账"节)。
-std::filesystem::path BuildStoreRoot(SlashDispatchContext& ctx) {
+std::filesystem::path BuildStoreRoot(const EvolveCommandContext& ctx) {
     if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
         return std::filesystem::path();
     }
@@ -68,7 +68,7 @@ std::filesystem::path BuildStoreRoot(SlashDispatchContext& ctx) {
 
 // evolution 根:<home>/.lubancode/evolution——观察账在它的 observations/
 // 里,阶段 7 的开关账(suggest.json)与命中账(suggest.jsonl)落在它根上。
-std::filesystem::path BuildEvolutionRoot(SlashDispatchContext& ctx) {
+std::filesystem::path BuildEvolutionRoot(const EvolveCommandContext& ctx) {
     if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
         return std::filesystem::path();
     }
@@ -78,7 +78,7 @@ std::filesystem::path BuildEvolutionRoot(SlashDispatchContext& ctx) {
 // 候选仓根:<home>/.lubancode/package-candidates(README"候选目录"节)。
 // 与正式 Package 目录(packages/、package-store/)分开——四层扫描不扫这里,
 // /package list 天然看不见候选(防偷装靠的是目录分仓,不是名单过滤)。
-std::filesystem::path BuildCandidateRoot(SlashDispatchContext& ctx) {
+std::filesystem::path BuildCandidateRoot(const EvolveCommandContext& ctx) {
     if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
         return std::filesystem::path();
     }
@@ -88,7 +88,7 @@ std::filesystem::path BuildCandidateRoot(SlashDispatchContext& ctx) {
 // version store 根:<home>/.lubancode/package-store(README"晋升、灰度与
 // 回滚"节)。批准后版本原子落这里;active/canary 指针在 channels.json。
 // (与上面的 BuildStoreRoot 是两处账:那边是观察账,这边是版本仓。)
-std::filesystem::path BuildVersionStoreRoot(SlashDispatchContext& ctx) {
+std::filesystem::path BuildVersionStoreRoot(const EvolveCommandContext& ctx) {
     if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
         return std::filesystem::path();
     }
@@ -96,7 +96,7 @@ std::filesystem::path BuildVersionStoreRoot(SlashDispatchContext& ctx) {
 }
 
 // 五路账本的输入装配:全从分派材料借,缺哪路就空着哪路(采集器对空根自然跳过)。
-lubancode::evolution::CollectSources BuildCollectSources(SlashDispatchContext& ctx) {
+lubancode::evolution::CollectSources BuildCollectSources(const EvolveCommandContext& ctx) {
     lubancode::evolution::CollectSources sources;
     if (ctx.recordings_root != nullptr) {
         sources.recordings_root = *ctx.recordings_root;
@@ -169,7 +169,7 @@ void PrintUsage() {
 // 开着才跑:聚同指纹簇 -> 挡门指纹集(观察账拒绝指纹 + 候选仓既有候选)
 // -> 五门判定 -> 过门的亮一行建议、记一笔 shown。只有本次采集真进了
 // 新观察的簇才提示——没新材料不唠叨;关着的时候这本账一字不写。
-void RunSuggestionPass(SlashDispatchContext& ctx,
+void RunSuggestionPass(const EvolveCommandContext& ctx,
                        const std::vector<std::string>& new_observation_ids) {
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     const std::filesystem::path evolution_root = BuildEvolutionRoot(ctx);
@@ -228,7 +228,7 @@ void RunSuggestionPass(SlashDispatchContext& ctx,
 }
 
 // ---- status:采集 + 落账 + 账面(+ 阶段 7:开着时顺手提示一回) ----
-void RunEvolveStatus(SlashDispatchContext& ctx) {
+void RunEvolveStatus(const EvolveCommandContext& ctx) {
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     if (store_root.empty()) {
         TermOut() << "没有主目录(.lubancode),观察账无处落。\n";
@@ -296,7 +296,7 @@ void RunEvolveStatus(SlashDispatchContext& ctx) {
 }
 
 // ---- suggest:看/开关有限自动建议(阶段 7;缺省关闭是铁律) ----
-void RunEvolveSuggest(SlashDispatchContext& ctx, const std::string& arg) {
+void RunEvolveSuggest(const EvolveCommandContext& ctx, const std::string& arg) {
     const std::filesystem::path evolution_root = BuildEvolutionRoot(ctx);
     if (evolution_root.empty()) {
         TermOut() << "没有主目录(.lubancode),建议开关无处落。\n";
@@ -367,7 +367,7 @@ void RunEvolveSuggest(SlashDispatchContext& ctx, const std::string& arg) {
 }
 
 // ---- list:按指纹聚类 ----
-void RunEvolveList(SlashDispatchContext& ctx, const std::string& source_filter) {
+void RunEvolveList(const EvolveCommandContext& ctx, const std::string& source_filter) {
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     lubancode::evolution::ObservationStore store(store_root);
     const std::vector<lubancode::evolution::EvolutionObservation> ledger = store.Load();
@@ -442,8 +442,8 @@ void RunEvolveList(SlashDispatchContext& ctx, const std::string& source_filter) 
 }
 
 // ---- show:一条观察的全文与证据指回;候选则回指来源 ----
-void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target);
-void RunEvolveShow(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolveShowCandidate(const EvolveCommandContext& ctx, const std::string& target);
+void RunEvolveShow(const EvolveCommandContext& ctx, const std::string& target) {
     // 候选 id(cand- 起头)走候选页;其余按观察 id 查。
     if (target.rfind("cand-", 0) == 0) {
         RunEvolveShowCandidate(ctx, target);
@@ -535,7 +535,7 @@ void PrintEvalSummary(const lubancode::evolution::EvalSummary& summary, const ch
 }
 
 // ---- show 候选页:演化账 + 批准账 + 状态 + 来源回指 ----
-void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolveShowCandidate(const EvolveCommandContext& ctx, const std::string& target) {
     lubancode::evolution::CandidateStore store(BuildCandidateRoot(ctx));
     const auto found = store.Find(target);
     if (!found.has_value()) {
@@ -650,7 +650,7 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
 // 阶段 5:先按观察账聚同 fingerprint 簇(>=2 场独立任务),再交
 // ProposeFromCluster——两把尺(成功路序列同形/全场工具面同形)在起草器里
 // 判;账上没有同类或只有这一场,簇就只有点名场,照旧 Skill-only。
-void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target) {
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     const std::filesystem::path candidate_root = BuildCandidateRoot(ctx);
     if (store_root.empty() || candidate_root.empty()) {
@@ -834,7 +834,7 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
 }
 
 // ---- diff:与父版或空对照 ----
-void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolveDiff(const EvolveCommandContext& ctx, const std::string& target) {
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr);
     const auto result = coordinator.Diff(target);
     if (!result.has_value()) {
@@ -896,7 +896,7 @@ void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
 }
 
 // ---- reject:落 rejected,指纹进拒绝账 ----
-void RunEvolveReject(SlashDispatchContext& ctx, const std::string& target, const std::string& reason) {
+void RunEvolveReject(const EvolveCommandContext& ctx, const std::string& target, const std::string& reason) {
     lubancode::evolution::ObservationStore observations(BuildStoreRoot(ctx));
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), &observations);
     const auto result = coordinator.Reject(target, reason);
@@ -912,7 +912,7 @@ void RunEvolveReject(SlashDispatchContext& ctx, const std::string& target, const
 }
 
 // ---- test:跑评测五道门,账只追加,状态经 Coordinator 迁移(阶段 3)----
-void RunEvolveTest(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolveTest(const EvolveCommandContext& ctx, const std::string& target) {
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr);
     const auto result = coordinator.Test(target);
     if (!result.has_value()) {
@@ -983,7 +983,7 @@ void RunEvolveTest(SlashDispatchContext& ctx, const std::string& target) {
 }
 
 // ---- approve:出批准页,验门装 store(阶段 4) ----
-void RunEvolveApprove(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolveApprove(const EvolveCommandContext& ctx, const std::string& target) {
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
                                                            BuildVersionStoreRoot(ctx));
     const auto result = coordinator.Approve(target);
@@ -1057,7 +1057,7 @@ void RunEvolveApprove(SlashDispatchContext& ctx, const std::string& target) {
 }
 
 // ---- use:点名 canary(阶段 4) ----
-void RunEvolveUse(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolveUse(const EvolveCommandContext& ctx, const std::string& target) {
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
                                                            BuildVersionStoreRoot(ctx));
     const auto result = coordinator.Use(target);
@@ -1075,7 +1075,7 @@ void RunEvolveUse(SlashDispatchContext& ctx, const std::string& target) {
 }
 
 // ---- promote:canary -> active(阶段 4) ----
-void RunEvolvePromote(SlashDispatchContext& ctx, const std::string& target) {
+void RunEvolvePromote(const EvolveCommandContext& ctx, const std::string& target) {
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
                                                            BuildVersionStoreRoot(ctx));
     const auto result = coordinator.Promote(target);
@@ -1093,7 +1093,7 @@ void RunEvolvePromote(SlashDispatchContext& ctx, const std::string& target) {
 }
 
 // ---- rollback:切回父版或指定版(阶段 4) ----
-void RunEvolveRollback(SlashDispatchContext& ctx, const std::string& target,
+void RunEvolveRollback(const EvolveCommandContext& ctx, const std::string& target,
                        const std::string& version) {
     lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
                                                            BuildVersionStoreRoot(ctx));
@@ -1239,7 +1239,7 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args) {
 
 // ---------------- 执行 ----------------
 
-CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
+CommandFlow HandleSlashEvolve(const EvolveCommandContext& ctx,
                               const lubancode::cli::ParsedSlashCommand& parsed) {
     const ParsedEvolveCommand command = ParseEvolveCommand(parsed.args);
     switch (command.action) {

@@ -4,7 +4,7 @@
 #include <chrono>
 #include <sstream>
 
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext 完整定义
+#include "config/config.hpp"  // Config::channels(账号表;原先经注册表头间接带进)
 #include "channel/account_state.hpp"
 #include "channel/ingress_store.hpp"
 #include "cli/terminal_port.hpp"
@@ -391,7 +391,7 @@ void PrintChannelUsage() {
 
 }  // namespace
 
-CommandFlow HandleSlashChannels(SlashDispatchContext& ctx,
+CommandFlow HandleSlashChannels(const ChannelCommandContext& ctx,
                                 const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     const auto* channels = ctx.config != nullptr && ctx.config->channels.empty()
@@ -404,7 +404,7 @@ CommandFlow HandleSlashChannels(SlashDispatchContext& ctx,
     return CommandFlow::Continue;
 }
 
-CommandFlow HandleSlashChannel(SlashDispatchContext& ctx,
+CommandFlow HandleSlashChannel(const ChannelCommandContext& ctx,
                                const lubancode::cli::ParsedSlashCommand& parsed) {
     const ParsedChannelCommand command = ParseChannelCommand(parsed.args);
     const auto* channels = ctx.config != nullptr && !ctx.config->channels.empty()

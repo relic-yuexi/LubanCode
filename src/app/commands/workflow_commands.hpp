@@ -23,13 +23,17 @@
 #include <vector>
 
 #include "agent/agent.hpp"  // AgentProfile(批四自立门户)
+#include "agent/prompt_assembler.hpp"  // PromptOptions(子代理系统提示材料)
 #include "api/backend.hpp"
+#include "app/backend_stack.hpp"  // RebuildableBackend(执行器的主 backend)
+#include "app/model_router.hpp"    // ModelRouterService(节点按角色路由)
 #include "cli/theme.hpp"
 #include "config/model_catalog.hpp"
 #include "package/mounting.hpp"  // PackageSnapshot(阶段 6:跑一趟钉一份)
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "runtime/session_runtime.hpp"  // SessionRuntime(thread id/ids)
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger(编排账接线)
 #include "tools/registry.hpp"
 #include "tools/skill_loader.hpp"
@@ -37,6 +41,10 @@
 #include "workflow/host_executors.hpp"  // ToolExecutor::Options(执行器装配)
 #include "workflow/runtime.hpp"
 #include "workflow/validator.hpp"
+
+namespace lubancode::tools {
+class AgentTool;  // 会话级 agent 工具(指针借用,定义在 tools/agent_tool.hpp)
+}  // namespace lubancode::tools
 
 namespace lubancode::app {
 
@@ -181,12 +189,45 @@ struct WorkflowExecutorContext {
 // 材料包。调用方(workflow_commands.cpp 与单测)include 那只头。
 
 // ---------------------------------------------------------------------------
-// 命令分派注册制(会话终章):workflow 域的分派位(/workflow 正门与
-// /<alias> 直呼的 Unknown 兜底)。case 体原样自 interactive_session 的大
-// switch 搬来,材料经 SlashDispatchContext 递入。
+// workflow 域窄材料(HC-06 第三小批):/workflow 正门与 /<alias> 直呼的
+// 分派材料——catalog 现扫与执行器装配从这取。字段与旧 SlashDispatchContext
+// 同名同型,唯包层挂载改经 package_snapshot_provider 现取现行快照(reload
+// 换档后旧快照会被释放,冻指针会悬垂;provider 每次返回现行 shared_ptr,
+// 命令期间由持有者保活,与执行器"跑一趟钉一份"同一纪律)。
 // ---------------------------------------------------------------------------
-struct SlashDispatchContext;
-CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashUnknown(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+struct WorkflowDispatchContext {
+    const lubancode::cli::Theme* theme = nullptr;
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;  // reasoning 档;可空
+    bool spinner_enabled = false;
+    std::string* active_provider = nullptr;
+    const std::optional<std::string>* home_dir = nullptr;        // user_root 锚点
+    const std::optional<std::string>* home_lubancode = nullptr;  // workflow-runs 落点
+    // 现行 Package 快照的供应商:跑一趟钉一份(半场 reload 不换这趟的账);
+    // catalog/能力面的包层材料也从这现取。空 = 没接(裸机照旧)。
+    std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot_provider;
+    const std::string* prompts_dir = nullptr;
+    std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
+    RebuildableBackend* real_backend = nullptr;
+    std::shared_ptr<std::string> current_model;
+    std::shared_ptr<std::string> current_think;
+    lubancode::app::ModelRouterService* model_router = nullptr;  // 节点按角色路由;可空
+    lubancode::tools::ToolRegistry* registry = nullptr;          // capability 快照
+    lubancode::tools::AgentTool* agent_tool = nullptr;           // 会话级 agent 工具;可空
+    lubancode::agent::Agent* main_agent = nullptr;               // 运行档案副本来源
+    lubancode::runtime::SessionRuntime* session_runtime = nullptr;
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;  // 编排账;可空
+    lubancode::runtime::FanoutEventSink* session_events = nullptr;      // 会话主视图;可空
+    lubancode::agent::PromptOptions* prompt_options = nullptr;          // 子代理提示材料
+    std::function<void()> refresh_workflow_completions;  // alias 目录/启停变化
+    std::function<lubancode::workflow::ToolExecutor::Options()> build_workflow_tool_options;
+    // workflow agent 节点的审批口(确认回调装配);空 = 该宿主没接审批,
+    // AgentExecutor 自守"needs_confirm 无门明拒"。
+    std::function<lubancode::agent::TurnWiring()> build_workflow_agent_callbacks;
+};
+
+CommandFlow HandleSlashWorkflow(const WorkflowDispatchContext& ctx,
+                                const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashUnknown(const WorkflowDispatchContext& ctx,
+                               const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

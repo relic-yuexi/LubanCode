@@ -8,6 +8,8 @@
 // i18n(slash.desc.agents / slash.desc.agent),补全与帮助不缺位。
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,9 +20,15 @@
 #include "tools/registry.hpp"
 #include "tools/skill_loader.hpp"  // SkillMeta
 
+namespace lubancode::package {
+struct PackageSnapshot;  // 现行包快照(provider 现取;定义在 package/mounting.hpp)
+}  // namespace lubancode::package
+namespace lubancode::app {
+struct McpServerRuntime;  // /agent doctor 的 MCP 面材料(定义在 app/tool_runtime.hpp)
+}  // namespace lubancode::app
+
 namespace lubancode::app {
 
-struct SlashDispatchContext;
 
 // /agent doctor 的静态预检材料(全部可空:没有就跳过那一节,不猜)。
 // 三层来源:
@@ -80,8 +88,24 @@ lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots(
 // 不各自猜 cwd。
 std::string ComputeProjectPromptsRoot();
 
+// ---------------------------------------------------------------------------
+// agent 域窄材料(HC-06 第三小批):/agents 与 /agent 的分派材料。字段与旧
+// SlashDispatchContext 同名同型,全借用;包层挂载改经 package_snapshot_
+// provider 现取现行快照(reload 换档后旧快照会释放,冻指针会悬垂;与
+// workflow 域同一纪律)。
+// ---------------------------------------------------------------------------
+struct AgentCommandContext {
+    // 现行 Package 快照的供应商;空 = 没接(裸机照旧,包层条目空表)。
+    std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot_provider;
+    std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
+    lubancode::tools::ToolRegistry* registry = nullptr;
+    const std::vector<McpServerRuntime>* mcp_servers = nullptr;
+};
+
 // 命令分派注册制:/agents 与 /agent 的分派位。
-CommandFlow HandleSlashAgents(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashAgents(const AgentCommandContext& ctx,
+                              const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashAgent(const AgentCommandContext& ctx,
+                             const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app
