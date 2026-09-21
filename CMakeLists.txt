@@ -825,6 +825,10 @@ add_library(lubancode_engine STATIC
   src/channel/transport/tcp_socket.cpp
   src/channel/transport/tls.cpp
   src/channel/transport/ws_client.cpp
+  # 架构审查 SV-08(三渠道 Bridge 收发机械合并):QQ/飞书/企微适配器共用
+  # 的进程内 Bridge 端点——宿主来向帧解码、to_host 出站缓冲与输出锁收拢
+  # 一只组合件,Feed/Drain/Reply/Notify 窄口(纯搬移,行为零变化)。
+  src/channel/bridge_endpoint.cpp
   # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件。
   # qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
   # qq_http(受控 GET/POST seam,生产走 net/http_transport)/

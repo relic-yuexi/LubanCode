@@ -14,7 +14,9 @@
 //     注册表的 connection_state 口也用它)。
 //
 // 线程与锁:宿主在 ChannelManager 锁内调 WriteToSidecar/DrainFromSidecar,
-// 两条口只入队/取队;IO 归内部线程;凭据只在进程内持有。
+// 两条口只入队/取队;IO 归内部线程;凭据只在进程内持有。Bridge 帧收发
+//(宿主来向解码 + to_host 出站缓冲)归共用件 InProcessBridgeEndpoint
+//(SV-08);发送队列由 send_mutex_ 保护。
 #pragma once
 
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <thread>
 #include <vector>
 
+#include "channel/bridge_endpoint.hpp"
 #include "channel/channel_config.hpp"
 #include "channel/credentials.hpp"
 #include "channel/feishu/feishu_auth.hpp"
@@ -122,7 +125,7 @@ private:
         FeishuReplyRequest request;
         int attempts = 0;
     };
-    std::vector<PendingSend> send_queue_;  // 由 host_mutex_ 保护(与 to_host 同锁)
+    std::vector<PendingSend> send_queue_;  // 由 send_mutex_ 保护(sender_wake_ 同锁)
     std::optional<FeishuMessageSender> sender_;
     std::optional<qq::QqSpoolStore> spool_;
 
@@ -136,9 +139,10 @@ private:
     mutable std::mutex connection_mutex_;
     qq::ConnectionSnapshot connection_;
 
-    std::mutex host_mutex_;         // to_host_ 与 send_queue_ 的账
-    std::vector<std::byte> to_host_;
-    FrameDecoder host_frame_decoder_;  // 宿主来向帧解码(仅宿主线程喂)
+    // Bridge 帧收发机械(SV-08 共用件):解码循环/出站缓冲/输出锁全在
+    // bridge_;本类只剩 HandleHostFrame 业务分派与平台账。
+    InProcessBridgeEndpoint bridge_;
+    std::mutex send_mutex_;  // send_queue_ 的账
 
     std::mt19937 delivery_rng_{std::random_device{}()};
     std::atomic<std::uint64_t> delivery_counter_{0};

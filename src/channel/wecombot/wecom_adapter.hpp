@@ -6,11 +6,12 @@
 //(一只网关线程 + 一只发送线程)。
 //
 // 线程与锁:宿主在 ChannelManager 锁内调 WriteToSidecar/DrainFromSidecar,
-// 两条口只做入队/取队,不碰网络;IO 归内部线程。to_host_ 由自家 mutex 保
-// 护。凭据(ResolvedChannelCredential)只在进程内持有,不落日志、不进
-// 错误文案。发送线程不碰 socket(一切帧由网关线程独占写,见 wecom_gateway
-// 头注);它管发送业务面:回话锚(req_id 透传)、markdown 分段、限流账、
-// 重试与回执分型。
+// 两条口只做入队/取队,不碰网络;IO 归内部线程。Bridge 帧收发(宿主来向
+// 解码 + to_host 出站缓冲)归共用件 InProcessBridgeEndpoint(SV-08);发送
+// 队列由 send_mutex_ 保护。凭据(ResolvedChannelCredential)只在进程内持
+// 有,不落日志、不进错误文案。发送线程不碰 socket(一切帧由网关线程独占
+// 写,见 wecom_gateway 头注);它管发送业务面:回话锚(req_id 透传)、
+// markdown 分段、限流账、重试与回执分型。
 #pragma once
 
 #include <atomic>
@@ -28,6 +29,7 @@
 #include <thread>
 #include <vector>
 
+#include "channel/bridge_endpoint.hpp"
 #include "channel/bridge_protocol.hpp"
 #include "channel/channel_config.hpp"
 #include "channel/credentials.hpp"
@@ -174,7 +176,7 @@ private:
     using SpoolStore = channel::qq::QqSpoolStore;
     std::optional<SpoolStore> spool_;
 
-    std::vector<PendingSend> send_queue_;  // host_mutex_ 保护
+    std::vector<PendingSend> send_queue_;  // send_mutex_ 保护(sender_wake_ 同锁)
     std::unique_ptr<WecomGatewaySession> session_;
     std::unique_ptr<std::thread> gateway_thread_;
     std::unique_ptr<std::thread> sender_thread_;
@@ -193,9 +195,10 @@ private:
     mutable std::mutex connection_mutex_;
     ConnectionSnapshot connection_;
 
-    std::mutex host_mutex_;
-    std::vector<std::byte> to_host_;
-    FrameDecoder host_frame_decoder_;
+    // Bridge 帧收发机械(SV-08 共用件):解码循环/出站缓冲/输出锁全在
+    // bridge_;本类只剩 HandleHostFrame 业务分派与平台账。
+    InProcessBridgeEndpoint bridge_;
+    std::mutex send_mutex_;  // send_queue_ 的账
 
     // delivery id 生成:原子计数 + 时钟拼法,不养 rng——NextDeliveryId 会
     // 被网关线程(入站)与宿主线程(出站兜底)并发调,rand 引擎不线程安全。

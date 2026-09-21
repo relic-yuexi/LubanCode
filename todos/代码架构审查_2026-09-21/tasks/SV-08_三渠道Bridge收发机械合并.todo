@@ -1,0 +1,68 @@
+# SV-08 三平台适配器各自实现同一套 Bridge 帧收发
+
+- 状态：已实施(纯搬移/委托,零行为变更),待 CI 验收;证据见文末勾账。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：1。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-08 | A | 中 | src/channel/qq/qq_adapter.cpp:140<br>src/channel/qq/qq_adapter.cpp:158<br>src/channel/feishu/feishu_adapter.cpp:126<br>src/channel/feishu/feishu_adapter.cpp:143<br>src/channel/wecombot/wecom_adapter.cpp:110<br>src/channel/wecombot/wecom_adapter.cpp:127 | 三份 WriteToSidecar 均 Feed→TryDecodeNext→Fatal/HandleHostFrame；三份 ReplyResult/ReplyDomainError/EmitNotification 均锁 host_mutex_、EncodeFrame、插入 to_host_。 | Bridge 帧错误处置、编码失败处理、出站缓冲或并发约定一旦变化，要同步改 QQ、飞书、企微。现有 EncodeFrame/FrameDecoder 已共用，但围绕它们的同一状态与机械仍复制三份，第三平台继续增加同一维护点。 | 从三份中提取组合型 InProcessBridgeEndpoint，独占 decoder、to_host_ 与输出 mutex，提供 Feed/Drain/Reply/Notify 窄口。平台 adapter 保留 HandleHostFrame 业务分支、启动停止、spool/ACK、网关重连及发送线程。删去三份机械副本。 | 中：Feed 回调可能同步触发回复，抽取时要保持原锁边界，不能持输出锁调用平台 handler。不要用万能基类吞并平台状态机，也不在这条顺手改缓冲政策。 |
+
+### 应合并与不应合并
+
+本条只移动已逐段核对相同的约 150 行机械：三份 decoder 收件循环、三份出站 drain、九个编码后入缓冲函数。保留现有编码失败行为到独立后续决策，不借抽取悄悄改变宿主合同。
+
+不合并 `HandleGatewayEvent`：QQ 有 seq/Resume；飞书使用 pbbp2 帧和 ACK；企微在同一 WS 上排队发送并等 req_id 回执。三者发送锚、重连及重试语义不同。`NextDeliveryId` 前缀与随机来源也不在这条抽取范围。
+
+预计净删约 95 行：三份约 150 行，保留共享约 45 行及门面约 10 行；测试新增不计删行。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：可与 SV-01/02/03/04/05/06/10/11/12 并行。与 SV-07 同改 adapter 头及飞书 cpp，故 SV-07 在本条之后；不得两人同时重排三份 adapter 类。
+- 允许修改的现有文件：
+
+- `src/channel/qq/qq_adapter.hpp`
+- `src/channel/qq/qq_adapter.cpp`
+- `src/channel/feishu/feishu_adapter.hpp`
+- `src/channel/feishu/feishu_adapter.cpp`
+- `src/channel/wecombot/wecom_adapter.hpp`
+- `src/channel/wecombot/wecom_adapter.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [ ] 三平台 Bridge 握手、半帧/粘帧/坏帧、请求响应及通知输出与抽取前相同。
+- [ ] Feed 同步回调调用 Reply 不死锁；后台线程 Notify 与宿主 Drain 保持正确队列内容。
+- [ ] 三只 adapter 不再各持 decoder/to_host_/host_mutex_ 的平行实现。
+- [ ] 只提取组合件，不增虚基类、平台分支或自动工厂；平台差异测试仍各自运行。
+- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+
+## 合并/删除口径
+
+职责：进程内 Channel Bridge 分帧与线程安全出站缓冲。
+
+现有：QqBotAdapter/FeishuBotAdapter/WecombotAdapter 的 WriteToSidecar、DrainFromSidecar、ReplyResult、ReplyDomainError、EmitNotification。
+
+建议保留：共用 InProcessBridgeEndpoint 组合件；保留三平台业务回调。
+
+预计净删 95 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+## 既有工作关联
+
+- todos/飞书与企业微信接入_双长连接适配器设计.todo；三份 cpp 均按同一 ChannelBridgeTransport 合同接线。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：SV-07（src/channel/feishu/feishu_adapter.cpp, src/channel/feishu/feishu_adapter.hpp, src/channel/qq/qq_adapter.hpp, src/channel/wecombot/wecom_adapter.cpp, src/channel/wecombot/wecom_adapter.hpp）。
