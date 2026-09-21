@@ -190,24 +190,17 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
     }
 
     // deferred_tools(动态工具 P3):模型级原生引用能力,与 providers.json
-    // 的段同一形状。校验从宽(目录是锦上添花:坏段跳条目并记警告,不拦
-    // 启动——与整个 ParseEntry 的规矩一致);mode 只认 native_reference。
+    // 的段同一形状、同一份字段合同——校验收敛进共享内核(FD-08)。本侧
+    // 上层政策不变:目录是锦上添花,坏段跳条目并记警告,不拦启动(与整
+    // 个 ParseEntry 的规矩一致);未知键从宽忽略。
     if (item.contains("deferred_tools")) {
-        const nlohmann::json& deferred = item["deferred_tools"];
-        if (!deferred.is_object()) {
-            error_out = "deferred_tools 字段必须是 object";
+        auto deferred = ParseDeferredToolsCapability(item["deferred_tools"], "deferred_tools",
+                                                     DeferredToolsUnknownKeys::Ignore);
+        if (!deferred.has_value()) {
+            error_out = deferred.error();
             return std::nullopt;
         }
-        const std::string mode = deferred.value("mode", std::string());
-        const std::string variant = deferred.value("server_tool_search", std::string());
-        const bool tool_reference = deferred.value("tool_reference", false);
-        if (mode != "native_reference" || (!variant.empty() && variant != "regex" && variant != "bm25")) {
-            error_out = "deferred_tools 段不合规(mode 须 native_reference,server_tool_search 须 regex|bm25)";
-            return std::nullopt;
-        }
-        entry.deferred_tools.declared = true;
-        entry.deferred_tools.tool_reference = tool_reference;
-        entry.deferred_tools.server_tool_search = variant;
+        entry.deferred_tools = std::move(*deferred);
     }
 
     return entry;

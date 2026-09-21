@@ -596,6 +596,52 @@ TEST_CASE("provider catalog: deferred_tools 声明逐字段解析,坏形状整�
         with_model(R"({"name":"A1","deferred_tools":[]})"), "p").has_value());
 }
 
+TEST_CASE("provider catalog: deferred_tools 错形走 expected 不抛,空搜索串放行(FD-08)") {
+    const std::string base = R"({"schema_version":2,"revision":"2026-07-25","providers":{"a":{
+      "name":"A","wire":"anthropic-messages","base_url":"https://api.a.test",
+      "key_env":"A_KEY","default_model":"a-1",
+      "models":{"a-1":{{MODEL}}}}}})";
+    const auto with_model = [&base](const std::string& model) {
+        std::string out = base;
+        out.replace(out.find("{{MODEL}}"), 9, model);
+        return out;
+    };
+
+    // 此前 mode 走 value(std::string) 直取:mode=3、server_tool_search=3/null
+    // 直接抛 nlohmann type_error 冲出 ParseProviderCatalogJson——入口只在
+    // JSON parse 周围接异常。收敛进共享内核后一律受控拒收(整份)。
+    for (const char* model : {
+             R"({"name":"A1","deferred_tools":{"mode":3}})",
+             R"({"name":"A1","deferred_tools":{"mode":"native_reference","server_tool_search":3}})",
+             R"({"name":"A1","deferred_tools":{"mode":"native_reference","server_tool_search":null}})",
+             R"({"name":"A1","deferred_tools":{"tool_reference":true}})",
+         }) {
+        CAPTURE(model);
+        CHECK_FALSE(config::ParseProviderCatalogJson(with_model(model), "p").has_value());
+    }
+
+    // 空搜索串 ≡ 没写:只声明引用能力,不声明服务端搜索(与
+    // DeferredToolsCapability 注释同一口径;schema 的 enum 管源表更严)。
+    const auto empty_search = config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"native_reference","tool_reference":true,"server_tool_search":""}})"),
+        "p");
+    REQUIRE(empty_search.has_value());
+    const auto* no_search = empty_search->FindProvider("a")->FindModel("a-1");
+    REQUIRE(no_search != nullptr);
+    CHECK(no_search->deferred_tools.declared);
+    CHECK(no_search->deferred_tools.tool_reference);
+    CHECK(no_search->deferred_tools.server_tool_search.empty());
+
+    // 最小合规:只写 mode(schema required),tool_reference 缺省 false。
+    const auto minimal = config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"native_reference"}})"), "p");
+    REQUIRE(minimal.has_value());
+    const auto* minimal_model = minimal->FindProvider("a")->FindModel("a-1");
+    REQUIRE(minimal_model != nullptr);
+    CHECK(minimal_model->deferred_tools.declared);
+    CHECK_FALSE(minimal_model->deferred_tools.tool_reference);
+}
+
 TEST_CASE("内置目录快照: 官方表确认的 Claude 模型带 deferred_tools,兼容端不带(P3)") {
     const auto catalog = config::ParseProviderCatalogJson(config::embedded::kProviderCatalogJson, "embedded");
     REQUIRE(catalog.has_value());
