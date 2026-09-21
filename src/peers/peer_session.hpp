@@ -13,8 +13,9 @@
 //
 // 收件时机与权限的规矩(规格"收件时机""权限"两节)落在这里:
 //   - 传输线程只做防线 + 入队(PeerMailbox),不碰 history、不碰终端;
-//   - hold 的信入队时记一笔,取走后由 main.cpp 弹确认,用户点头才交给
-//     模型;点头与否都不影响传输层已经回掉的 held;
+//   - hold 的信:接收决定随信封在 Offer 的同一临界区冻结入队,取走后由
+//     main.cpp 弹确认,用户点头才交给模型;点头与否都不影响传输层已经
+//     回掉的 held;
 //   - refuse 档直接回绝,不入队;
 //   - 默认档(auto)按两边权限模式与 cwd 距离算(DefaultReceiveTier)。
 #pragma once
@@ -26,7 +27,6 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <unordered_set>
 #include <vector>
 
 #include "approval_mode.hpp"
@@ -36,11 +36,8 @@
 
 namespace lubancode::peers {
 
-// 取走的一条来信:envelope + 它进来时是不是被扣住(hold)了。
-struct PeerIncoming {
-    PeerEnvelope envelope;
-    bool held = false;
-};
+// 取走的一条来信(envelope + 冻结的接收决定)见 peer_mailbox.hpp 的
+// PeerIncoming——决定在信箱入队时一次冻结,这里不再另记一本账。
 
 struct PeerRuntimeOptions {
     std::filesystem::path registry_dir;      // 名册目录(用户级)
@@ -76,7 +73,8 @@ public:
     PeerDelivery Send(const PeerCard& target, const std::string& text,
                       const std::optional<std::string>& reply_to = std::nullopt);
 
-    // 主线程取走待读的信(原顺序),内部清空。held 的信由调用方弹确认。
+    // 主线程取走待读的信(原顺序),内部清空。每封带着入队时冻结的接收
+    // 决定,held 的信由调用方弹确认。
     std::vector<PeerIncoming> DrainIncoming();
 
 private:
@@ -92,8 +90,6 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<PeerPermissionTier> tier_{PeerPermissionTier::Auto};
     mutable std::mutex card_mutex_;                   // own_ 的读写(心跳线程/主线程)
-    std::mutex held_mutex_;                           // held_ids_(传输线程写,Drain 读)
-    std::unordered_set<std::string> held_ids_;
 };
 
 // 平台默认 endpoint:Windows 是具名管道名,POSIX 是临时目录下的 socket 路径。

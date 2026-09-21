@@ -3,6 +3,7 @@
 #include "peers/peer_mailbox.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -94,12 +95,13 @@ PeerMailbox::PeerMailbox(std::size_t capacity, std::size_t rate_limit, int rate_
       rate_window_seconds_(rate_window_seconds),
       dup_text_window_seconds_(dup_text_window_seconds) {}
 
-PeerOfferStatus PeerMailbox::Offer(PeerEnvelope envelope, long long now_unix) {
+PeerOfferResult PeerMailbox::Offer(PeerEnvelope envelope, long long now_unix, bool held) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 1) message_id 去重:同一封信只收一次。
-    if (seen_ids_.count(envelope.message_id) != 0) {
-        return PeerOfferStatus::Duplicate;
+    // 1) message_id 去重:同一封信只收一次。重试的回执沿用首收时冻结的
+    //    决定——首收扣住的还回 held,不把扣住的信误报成已投递。
+    if (const auto seen = seen_held_.find(envelope.message_id); seen != seen_held_.end()) {
+        return PeerOfferResult{PeerOfferStatus::Duplicate, seen->second};
     }
 
     // 2) 同一发送方限速:窗口内超过 rate_limit_ 封就拦。
@@ -108,7 +110,7 @@ PeerOfferStatus PeerMailbox::Offer(PeerEnvelope envelope, long long now_unix) {
         times.pop_front();
     }
     if (times.size() >= rate_limit_) {
-        return PeerOfferStatus::RateLimited;
+        return PeerOfferResult{PeerOfferStatus::RateLimited, false};
     }
 
     // 3) 相同正文短窗去重:来回重发同一句话,只当一封。
@@ -119,32 +121,35 @@ PeerOfferStatus PeerMailbox::Offer(PeerEnvelope envelope, long long now_unix) {
     }
     for (const auto& [at, hash] : texts) {
         if (hash == text_hash) {
-            return PeerOfferStatus::DuplicateText;
+            return PeerOfferResult{PeerOfferStatus::DuplicateText, false};
         }
     }
 
     // 4) 队列硬上限:到了就不再收,发件方会拿到 expired。
     if (queue_.size() >= capacity_) {
-        return PeerOfferStatus::QueueFull;
+        return PeerOfferResult{PeerOfferStatus::QueueFull, false};
     }
 
-    queue_.push_back(std::move(envelope));
-    const PeerEnvelope& stored = queue_.back();
-    seen_ids_.insert(stored.message_id);
-    seen_order_.emplace_back(stored.message_id, now_unix);
+    // 决定随正文同一临界区入队:Offer 返回那一刻,队列项上已经带着完整
+    // 决定,后来者 Drain 到什么就是什么,没有中间态可夹。
+    queue_.push_back(PeerIncoming{std::move(envelope), held});
+    const std::string message_id = queue_.back().envelope.message_id;
+    seen_held_.emplace(message_id, held);
+    seen_order_.emplace_back(std::move(message_id), now_unix);
     // 去重账上限 256 条(远大于限速窗口能产生的量),防无限长。
     while (seen_order_.size() > 256) {
-        seen_ids_.erase(seen_order_.front().first);
+        seen_held_.erase(seen_order_.front().first);
         seen_order_.pop_front();
     }
     times.push_back(now_unix);
     texts.emplace_back(now_unix, text_hash);
-    return PeerOfferStatus::Accepted;
+    return PeerOfferResult{PeerOfferStatus::Accepted, held};
 }
 
-std::vector<PeerEnvelope> PeerMailbox::Drain() {
+std::vector<PeerIncoming> PeerMailbox::Drain() {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<PeerEnvelope> out(queue_.begin(), queue_.end());
+    std::vector<PeerIncoming> out(std::make_move_iterator(queue_.begin()),
+                                  std::make_move_iterator(queue_.end()));
     queue_.clear();
     return out;
 }

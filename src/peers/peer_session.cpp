@@ -213,20 +213,9 @@ PeerDelivery PeerRuntime::Send(const PeerCard& target, const std::string& text,
 }
 
 std::vector<PeerIncoming> PeerRuntime::DrainIncoming() {
-    std::vector<PeerEnvelope> envelopes = mailbox_.Drain();
-    std::vector<PeerIncoming> out;
-    out.reserve(envelopes.size());
-    {
-        std::lock_guard<std::mutex> lock(held_mutex_);
-        for (auto& envelope : envelopes) {
-            PeerIncoming incoming;
-            incoming.held = held_ids_.count(envelope.message_id) != 0;
-            held_ids_.erase(envelope.message_id);
-            incoming.envelope = std::move(envelope);
-            out.push_back(std::move(incoming));
-        }
-    }
-    return out;
+    // 接收决定随队列项在信箱一次冻结,这里直接交割——不再有第二本
+    // held 账要查,也就没有"正文先到、决定还没落账"的可乘之机。
+    return mailbox_.Drain();
 }
 
 std::string PeerRuntime::HandleRequestOnTransportThread(const std::string& payload) {
@@ -264,18 +253,17 @@ std::string PeerRuntime::HandleRequestOnTransportThread(const std::string& paylo
         return "{\"status\":\"refused\"}";
     }
 
-    const PeerOfferStatus offered = mailbox_.Offer(*parsed, NowUnix());
-    switch (offered) {
-        case PeerOfferStatus::Accepted: {
-            if (effective == PeerPermissionTier::Hold) {
-                std::lock_guard<std::mutex> lock(held_mutex_);
-                held_ids_.insert(parsed->message_id);
-                return "{\"status\":\"held\"}";
-            }
-            return "{\"status\":\"delivered\"}";
-        }
+    // 接收决定按权限档算好,随信封进 Offer 的同一临界区冻结——回执与
+    // 队列项同源,不存在"正文已入队、hold 还没记上"的窗口。
+    const bool hold = effective == PeerPermissionTier::Hold;
+    const PeerOfferResult offered = mailbox_.Offer(*parsed, NowUnix(), hold);
+    switch (offered.status) {
+        case PeerOfferStatus::Accepted:
+            return offered.held ? "{\"status\":\"held\"}" : "{\"status\":\"delivered\"}";
         case PeerOfferStatus::Duplicate:
-            return "{\"status\":\"delivered\"}";  // 同一封已收过,不重复入队也不算失败
+            // 同一封已收过,不重复入队也不算失败;回执沿用首收时冻结的
+            // 决定——首收是 held 就还回 held,不误报可读。
+            return offered.held ? "{\"status\":\"held\"}" : "{\"status\":\"delivered\"}";
         case PeerOfferStatus::RateLimited:
         case PeerOfferStatus::DuplicateText:
         case PeerOfferStatus::QueueFull:

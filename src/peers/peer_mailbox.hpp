@@ -6,6 +6,10 @@
 // 硬上限——过了才进线程安全的待读队列;主线程在轮次边界取走
 // (agent/loop 的安全收件点 + main.cpp 的空闲收件)。
 //
+// 接收决定(hold 与否)由调用方按权限档算好,随信封在 Offer 的同一临界
+// 区入队冻结:正文与决定一次发布,Drain 到手即定案——不存在"正文先落
+// 队、决定后补账"的窗口。
+//
 // 全部是纯逻辑(时钟由调用方注入),单测钉在 tests/unit/peer/test_peer_mailbox.cpp。
 #pragma once
 
@@ -18,7 +22,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -64,6 +67,23 @@ enum class PeerOfferStatus {
     QueueFull,      // 待读队列到了硬上限
 };
 
+// Offer 的回执:状态 + 这封信冻结的接收决定。
+//   - Accepted:held 回显随入参落账的决定;
+//   - Duplicate:held 是首收那一刻冻结的决定——重试回执沿用旧账,不把
+//     扣住的信误报成已投递可读;
+//   - 其余状态:held 无意义,恒 false。
+struct PeerOfferResult {
+    PeerOfferStatus status;
+    bool held = false;
+};
+
+// 取走的一条来信:正文 + 入队那一刻冻结的接收决定(hold 与否)。两者随
+// 队列项在同一临界区发布,Drain 到手即定案,不靠跨容器查表补决定。
+struct PeerIncoming {
+    PeerEnvelope envelope;
+    bool held = false;
+};
+
 class PeerMailbox {
 public:
     // capacity:待读队列硬上限;rate_limit/rate_window:同一发送方在窗口
@@ -71,12 +91,15 @@ public:
     explicit PeerMailbox(std::size_t capacity = 64, std::size_t rate_limit = 10, int rate_window_seconds = 30,
                          int dup_text_window_seconds = 10);
 
-    // 收件防线 + 入队。now_unix 由调用方注入(可测)。线程安全:传输线程
-    // Offer、主线程 Drain,一把互斥锁隔开。
-    PeerOfferStatus Offer(PeerEnvelope envelope, long long now_unix);
+    // 收件防线 + 入队。held 是调用方按权限档算好的有效接收决定,随信封
+    // 在同一临界区入队冻结——发布即定案,主线程 Drain 拿到的决定与正文
+    // 同时落地,没有"正文已入队、决定还没记上"的窗口。now_unix 由调用
+    // 方注入(可测)。线程安全:传输线程 Offer、主线程 Drain,一把互斥
+    // 锁隔开。
+    PeerOfferResult Offer(PeerEnvelope envelope, long long now_unix, bool held);
 
-    // 取走全部待读信(原顺序),内部清空。
-    std::vector<PeerEnvelope> Drain();
+    // 取走全部待读信(原顺序),内部清空。每封带着入队时冻结的决定。
+    std::vector<PeerIncoming> Drain();
 
     std::size_t pending() const;
 
@@ -87,9 +110,11 @@ private:
     long long dup_text_window_seconds_;
 
     mutable std::mutex mutex_;
-    std::deque<PeerEnvelope> queue_;
-    std::unordered_set<std::string> seen_ids_;                 // message_id 去重(带上限,防无限长)
-    std::deque<std::pair<std::string, long long>> seen_order_; // seen_ids_ 的淘汰账
+    std::deque<PeerIncoming> queue_;
+    // message_id 去重账(带上限,防无限长),值是首收时冻结的接收决定,
+    // 供重试回执沿用——扣住的信重发仍回 held,不误报可执行。
+    std::unordered_map<std::string, bool> seen_held_;
+    std::deque<std::pair<std::string, long long>> seen_order_; // seen_held_ 的淘汰账
     std::unordered_map<std::string, std::deque<long long>> send_times_;       // 限速窗
     std::unordered_map<std::string, std::deque<std::pair<long long, std::size_t>>> send_texts_;  // 正文去重窗
 };
