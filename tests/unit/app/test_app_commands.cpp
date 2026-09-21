@@ -902,6 +902,7 @@ TEST_CASE("HC-07 非活跃端编辑:providers 条目照改,当前后端镜像一
     lubancode::config::Config config;
     config.providers = {local, other};
     config.wire = lubancode::config::Wire::Responses;
+    config.base_url = local.base_url;  // 活跃端(local)的镜像基线
     config.model = "old-model";
     std::string active_provider = "local";
     RebuildableBackend backend(config);
