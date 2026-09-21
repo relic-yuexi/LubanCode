@@ -150,7 +150,11 @@ public:
     // 先落 retired watermark/tombstone(cursor 对账不报孤儿,§18.5),再删
     // 文件。回被清掉的 (段, 批) 数。
     std::pair<std::size_t, std::size_t> ClearSpool();
-    // 撤回:删 consent 记录;非回环出口立即关门(telemetry.consent_required)。
+    // 撤回:删 consent 记录;非回环出口关门(telemetry.consent_required),
+    // 回环门面不动(§8.4 回环免披露)。无论端点,撤回都收回发送资格:推进
+    // 出口授权代并取消在途传输;本调用返回后,再授权(GrantConsent)前
+    // 出口不再获得新发送资格。已发字节追不回——取消不等于服务端没收到,
+    // ACK 与重发仍守 at-least-once(FD-03)。
     bool RevokeConsent();
     // consent 状态:granted | not_required(回环) | required。
     std::string ConsentState() const;
@@ -196,8 +200,18 @@ private:
     // 赶一趟出口:按段序逐批 POST;Accepted/Partial(有收)→ ACK 删段;
     // Retryable → 退避记账(§19.2 双限);Permanent → 关 endpoint 代。
     // 回 true = 本趟把现存 sealed 批全部出清(无剩、无在等退避)。
+    // FD-03:门不再只在整趟入口判——每只批发起前都重取同代发送资格。
     bool RunExportPass();
     void EvaluateExportGateLocked();
+    // ---- 出口授权状态机(FD-03)----
+    // 以下两者均须已持 export_mutex_。授权/暂停/停止的闭门变化:推代并
+    // 取消在途传输(pause-on/revoke/stop 调用)。开门变化(grant/resume)
+    // 只推代,不碰取消——残留取消的清理点唯一,在 ExportPermitLocked。
+    void AdvanceExportGenerationLocked();
+    // 逐批发送资格:非暂停、未撤回、门开、未停止时清掉旧代取消残留并回
+    // true。闭门者与清理点同一把锁串行,且闭门必伴资格失效——重入循环
+    // 清不掉新代的取消标志。
+    bool ExportPermitLocked();
     // state.json 的读写(§14.2 三层账的第三层:ACK/tombstone/清理水位)。
     bool LoadState();
     bool PersistState();
@@ -252,7 +266,16 @@ private:
     std::map<std::string, BatchRetry> export_retry_;  // export_mutex_;键=batch_id
     ExportStatusFace export_stats_;                   // export_mutex_
     std::thread export_thread_;
-    mutable std::atomic<bool> export_cancel_{false};  // 在传输请求的取消(§26.4;probe 只读面也要能清残留)
+    // ---- 出口授权状态机(FD-03):授权/暂停/停止收成代际账 ----
+    // export_generation_(export_mutex_):每次授权面变化(pause on/off、
+    // grant、revoke、stop、永久错停代)推一;出口线程逐批取资格时读到
+    // 的代即该次在途请求的资格代。export_revoked_(export_mutex_):
+    // revoke 置、grant 清——撤回后未再授权,不发放新发送资格(回环端
+    // 点同样生效;门面 gate_reason 仍按端点推导,状态口径不变)。
+    std::uint64_t export_generation_ = 1;  // export_mutex_
+    bool export_revoked_ = false;          // export_mutex_
+    mutable std::atomic<bool> export_cancel_{false};  // 在传输请求的取消(§26.4);只在 ExportPermitLocked 清残留
+    mutable std::atomic<bool> probe_cancel_{false};   // probe 独立取消源(FD-03:不与出口互清)
     std::unique_ptr<OtlpHttpExporter> exporter_;
     std::optional<ConsentStore> consent_store_;
 };
