@@ -59,8 +59,9 @@ bool WaitForFile(const fs::path& path, int timeout_ms) {
 
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : std::string();
-    const bool usage_ok = (mode == "hold" && (argc == 5 || argc == 6)) ||
-                          (mode == "crash" && argc == 5) ||
+    // argc 数清楚:prog + mode + <按模式的参数>(hold 的 release 可省)。
+    const bool usage_ok = (mode == "hold" && (argc == 4 || argc == 5)) ||
+                          (mode == "crash" && argc == 4) ||
                           (mode == "register" && argc == 7);
     if (!usage_ok) {
         std::fprintf(stderr,
