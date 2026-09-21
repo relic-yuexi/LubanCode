@@ -1,6 +1,6 @@
 # FD-03 遥测逐批发送门与撤回授权收敛
 
-- 状态：源码已实施，远端 CI 验证中。
+- 状态：源码已实施，PR #168 远端 CI 双平台腿绿（run 35545229055）。
 - 日期：2026-09-21。实施：2026-09-21（worktree-agent-af8316276c5e9dfda，自 origin/main 分支）。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：B；严重度：高；重构批次：2。
@@ -21,18 +21,26 @@
 
 ## 实施顺序
 
-- [ ] 加确定时序的批中撤回用例。
-- [ ] 集中出口 gate/generation/cancel 所有权。
-- [ ] 逐批取得发送资格，再清理旧的入口一次性判定。
+- [x] 加确定时序的批中撤回用例。
+  - 证据：`tests/integration/telemetry/test_telemetry_otlp_export.cpp` 三册——批中撤回、批中暂停/恢复、probe 独立取消源。FakeCollector 加闩锁响应（hold_with_latch：请求照收照计数、响应扣住等放闸、accept 照接），交错定位靠闩锁与 in_flight/RequestCount 观察点，不赌 sleep。三册在旧码上均红（放闸后首批 Accepted、本趟继续发第二批），提交说明里写明。
+- [x] 集中出口 gate/generation/cancel 所有权。
+  - 证据：`AdvanceExportGenerationLocked`（闭门变化统一推代+取消在途）与 `ExportPermitLocked`（逐批资格+取消残留唯一清理点）全在 export_mutex_ 下；批内旧的无锁 `export_cancel_.store(false)` 已删；probe 换独立取消源 probe_cancel_。
+- [x] 逐批取得发送资格，再清理旧的入口一次性判定。
+  - 证据：RunExportPass 整趟入口一次性判定已拆，改为每只批发起前在锁内重验 pause/revoke/门/停止；Flush 的 blocked 判据补撤回同列。
 
 ## 验收门
 
-- [ ] 用闩锁阻住首批 fake export，期间 revoke，放开后确认第二批不启动。
-- [ ] 同场景覆盖 pause/resume；恢复仅发未确认批。
-- [ ] probe、stop、revoke 不得互相清掉取消。
-- [ ] 验证在途取消后的 ACK/重试账，不把取消当未发送证明。
+- [x] 用闩锁阻住首批 fake export，期间 revoke，放开后确认第二批不启动。
+  - 证据：册"批中撤回"——首批闩住、RevokeConsent、ReleaseHeld 后 RequestCount 恒 1；再授权后按同 batch id 重发+第二批出清。
+- [x] 同场景覆盖 pause/resume；恢复仅发未确认批。
+  - 证据：册"批中暂停"——pause 在途、放闸后第二批不启动；恢复后首批（cancel 后无 ACK）同 id 重发、第二批出清，出清后稳态不再发。
+- [x] probe、stop、revoke 不得互相清掉取消。
+  - 证据：册"probe 独立取消源"——pause 在途期间 ProbeEndpoint 不抹出口取消（第二批仍不启动）、自身请求无业务数据；实现上 probe 走 probe_cancel_，Stop 一并置位两旗，出口取消只在发送资格点清。
+- [x] 验证在途取消后的 ACK/重试账，不把取消当未发送证明。
+  - 证据：册"批中撤回"断言取消后 exported_batches_total==0、retried_batches_total==0（取消不算失败账）、批不 ACK 留在 spool；再授权后同 id 重发（服务端可能已收到，幂等去重）。
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+  - 本单证据：PR #168，head f6e33890，run 35545229055——windows-msvc pass（1h1m49s，integration.telemetry.telemetry_otlp_export Passed 15.23s）、macos-clang pass（22m20s，同册 Passed 17.77s），run conclusion success（debian 腿按设计 skipped）。src/telemetry/* 在 windows 敏感面，双平台腿由此出场且都绿。
 
 ## 合并取舍与估量
 
