@@ -5,7 +5,9 @@
 //   4) 同步口:RunSync 先排干余量再就地执行(调用线程即执行线程),
 //      等待中的命令先于 body 落笔;
 //   5) 统一提交锁:一切命令执行互斥(探针核并发上限);
-//   6) 关账:Stop 排干余量不丢;停表后 PostAction 就地执行。
+//   6) 关账:Stop 排干余量不丢;停表后 PostAction 就地执行;
+//   7) 顺序闸(HC-02):旧批"已出队、未提交"的病窗里,新批与 RunSync
+//      不许插队——屏障钉出确定性交错;多写者混跑下提交序即执行序。
 //
 // 屏面本身(事件渲染成什么样)不归这册管——投影册
 // (test_terminal_turn_sink_projection)钉。
@@ -14,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -224,4 +227,120 @@ TEST_CASE("SessionUiDispatcher: Stop 排干不丢;停表后 PostAction 就地执
     future.wait();
     CHECK(ran);
     CHECK(dispatcher.PendingApprox() == 0);
+}
+
+// ---------------------------------------------------------------------------
+// HC-02:出队次序与提交次序一致。病窗——消费线程把旧批搬出队列、还没拿
+// 提交锁,输入线程的 RunSync 领走新批先落笔。屏障钉窗,不靠 sleep。
+// ---------------------------------------------------------------------------
+TEST_CASE("SessionUiDispatcher: HC-02 顺序闸——旧批已出队未提交,后来者不许插队") {
+    Recorder recorder;
+    app::SessionUiDispatcher dispatcher;
+    const std::uint64_t renderer = dispatcher.AttachRenderer(recorder.MakeRenderer());
+
+    std::mutex order_mutex;
+    std::vector<std::string> order;  // 执行序录音
+    const auto record = [&](const std::string& tag) {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back(tag);
+    };
+
+    // 屏障:消费者"批已出队、一笔未提交"时钉住,测试放行才继续。只钉
+    // 第一批——后续批次照跑,别把测试自己挂在钉子上。
+    std::promise<void> stolen_p;
+    std::shared_future<void> stolen = stolen_p.get_future().share();
+    std::promise<void> open_p;
+    std::shared_future<void> open = open_p.get_future().share();
+    std::atomic<bool> pinned_once{false};
+    dispatcher.SetDebugHook([&](app::SessionUiDispatcher::DebugPoint point) {
+        if (point != app::SessionUiDispatcher::DebugPoint::ConsumerBatchStolen ||
+            pinned_once.exchange(true)) {
+            return;
+        }
+        stolen_p.set_value();
+        open.wait();  // 钉死:批已出队、一笔未提交
+    });
+
+    (void)dispatcher.PostAction([&] { record("start"); });  // 旧批(开始事件形)
+    REQUIRE(stolen.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    // 病窗敞着:提交方投新批(终态事件形)——旧款里它能被 RunSync 先领走。
+    (void)dispatcher.PostAction([&] { record("done"); });
+    // 输入监听形:换页事务那一路 RunSync 从同一起跑线上闸。
+    std::thread listener([&] {
+        dispatcher.RunSync([&] { record("body"); });
+    });
+    open_p.set_value();  // 放行消费者:旧批落定,闸按提交序交给下一个单元
+    listener.join();
+    dispatcher.Quiesce();
+
+    // 提交序 start -> done -> body,执行序一笔不倒。
+    REQUIRE(order.size() == 3);
+    CHECK(order[0] == "start");
+    CHECK(order[1] == "done");
+    CHECK(order[2] == "body");
+    dispatcher.DetachRenderer(renderer);
+}
+
+TEST_CASE("SessionUiDispatcher: HC-02 顺序闸——多写者混跑,提交序即执行序") {
+    app::SessionUiDispatcher dispatcher;
+    // 提交序账:记标签与投递同一把锁,标签序即提交序(投递侧 FIFO)。
+    std::mutex commit_log_mutex;
+    std::vector<std::string> committed;
+    std::mutex exec_log_mutex;
+    std::vector<std::string> executed;
+
+    // 事件(usage 形,不走 delta 合并)与动作共一条录音带。
+    const std::uint64_t renderer = dispatcher.AttachRenderer(
+        [&executed, &exec_log_mutex](const runtime::ServerEvent& event) {
+            std::lock_guard<std::mutex> lock(exec_log_mutex);
+            executed.push_back(event.text);
+        });
+    const auto record_exec = [&executed, &exec_log_mutex](const std::string& tag) {
+        std::lock_guard<std::mutex> lock(exec_log_mutex);
+        executed.push_back(tag);
+    };
+    const auto post = [&](const std::string& tag, bool as_event) {
+        std::lock_guard<std::mutex> lock(commit_log_mutex);
+        committed.push_back(tag);
+        if (as_event) {
+            runtime::ServerEvent event;
+            event.kind = runtime::ServerEventKind::UsageUpdated;
+            event.text = tag;
+            dispatcher.PostEvent(renderer, event);
+        } else {
+            (void)dispatcher.PostAction([tag, &record_exec] { record_exec(tag); });
+        }
+    };
+
+    std::vector<std::thread> writers;
+    for (int w = 0; w < 3; ++w) {
+        writers.emplace_back([&, w] {
+            for (int i = 0; i < 40; ++i) {
+                post("w" + std::to_string(w) + "-" + std::to_string(i), i % 2 == 0);
+            }
+        });
+    }
+    // 输入监听形:RunSync 的 body 也是一次提交,与事件/动作同序。记账与
+    // 调用同一把锁里做完(账序即队列序——松手再调,写入者插进来的账会
+    // 落在 body 之后、队里却排在 body 单元之前,断言就闪了)。
+    std::thread listener([&] {
+        for (int i = 0; i < 30; ++i) {
+            const std::string tag = "sync-" + std::to_string(i);
+            std::lock_guard<std::mutex> lock(commit_log_mutex);
+            committed.push_back(tag);
+            dispatcher.RunSync([tag, &record_exec] { record_exec(tag); });
+        }
+    });
+    for (std::thread& writer : writers) {
+        writer.join();
+    }
+    listener.join();
+    dispatcher.Quiesce();
+
+    // 提交序号单调应用:一枚不丢、一枚不倒。
+    REQUIRE(executed.size() == committed.size());
+    for (std::size_t i = 0; i < committed.size(); ++i) {
+        CHECK(executed[i] == committed[i]);
+    }
+    dispatcher.DetachRenderer(renderer);
 }

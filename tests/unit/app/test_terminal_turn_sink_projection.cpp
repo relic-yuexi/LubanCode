@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -928,6 +929,62 @@ TEST_CASE("P2 提交序: 正文先于工具卡——FIFO 保住旧 DispatchInlin
     CHECK(body_at != std::string::npos);
     CHECK(tool_at != std::string::npos);
     CHECK(body_at < tool_at);  // 正文先落笔
+    registry.DetachMainTurn();
+}
+
+// ---------------------------------------------------------------------------
+// HC-02:出队次序与提交次序一致。病窗——消费者领走 [tool.started]、还没
+// 落笔,工具线程的终态与输入监听的 RunSync 同时候到。旧款里终态被先执
+// 行,open_tools_ 空查整枚丢弃,开始/结束对就散了。屏障钉窗,不靠 sleep。
+// ---------------------------------------------------------------------------
+TEST_CASE("HC-02 顺序闸: 开始事件在消费者手里未落笔——终态不插队,配对完整") {
+    VirtualScreen screen;
+    app::AgentViewRegistry registry;
+    DispatchedHarness harness(&registry);
+    registry.BeginMainTurn(harness.turn.collector.get(), &harness.turn.sink->CommitMutex());
+
+    // 屏障钉住病窗:消费者领走第一批、第一枚未提交,窗口敞着。只钉第一
+    // 批,后续批次照跑。
+    std::promise<void> stolen_p;
+    std::shared_future<void> stolen = stolen_p.get_future().share();
+    std::promise<void> open_p;
+    std::shared_future<void> open = open_p.get_future().share();
+    std::atomic<bool> pinned_once{false};
+    harness.dispatcher.SetDebugHook([&](app::SessionUiDispatcher::DebugPoint point) {
+        if (point != app::SessionUiDispatcher::DebugPoint::ConsumerBatchStolen ||
+            pinned_once.exchange(true)) {
+            return;
+        }
+        stolen_p.set_value();
+        open.wait();
+    });
+
+    // 工具线程形:开始事件进队,被消费者领走,卡在落笔前。
+    harness.turn.sink->Emit(MakeToolStart("item-tool", "toolu_1", "read_file"));
+    REQUIRE(stolen.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    // 病窗敞着:终态提交进队(旧款里它随后到的 RunSync 先落笔,开始还没
+    // 记账,open_tools_ 查无此号,终态整枚丢弃)。
+    harness.turn.sink->Emit(MakeToolDone("item-tool", "toolu_1", "read_file", "pair kept"));
+    // 输入监听形:换页/菜单那一路 RunSync 同一起跑线上闸。
+    std::thread listener([&] { harness.dispatcher.RunSync([] {}); });
+    open_p.set_value();  // 放行消费者:开始事件落定,闸按提交序交给下一个单元
+    listener.join();
+    harness.dispatcher.Quiesce();
+
+    // 完整终态:开始/结束对上——视图账里工具条目收了口(先开始后结束,
+    // 终态没被空查丢弃),修订号恰两笔(开始、终态各一),一枚不丢。
+    CHECK(registry.MainRevision() == 2);
+    const runtime::TurnView& view = harness.turn.collector->view();
+    const runtime::TurnItemView* tool = nullptr;
+    for (const runtime::TurnItemView& item : view.items) {
+        if (item.tool_use_id == "toolu_1") {
+            tool = &item;
+        }
+    }
+    REQUIRE(tool != nullptr);
+    CHECK(tool->status == runtime::TurnItemViewState::Succeeded);
+    CHECK(tool->result_text == "pair kept");
+    harness.turn.sink->StopUiPump();
     registry.DetachMainTurn();
 }
 
