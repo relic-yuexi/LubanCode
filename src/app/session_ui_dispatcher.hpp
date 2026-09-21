@@ -10,12 +10,24 @@
 //   - 消费线程(UI 线程)按提交次序逐枚执行,每枚都握统一提交锁
 //     (commit_mutex_)。渲染闭包内部自拿 StdoutWriteMutex,锁序恒
 //     "commit -> stdout",无倒置。
+//   - 顺序闸(HC-02):出队与执行捆成一个闸单元。消费线程的每一批、
+//     RunSync/Flush 的"排干+body"、Stop 的收尾排干、停表后 PostAction
+//     的就地执行,一律先过闸(order_mutex_)再领队列,领完在闸内跑完才
+//     放闸。提交锁只保证不同时画,保证不了先后——旧批被领走还没落笔,
+//     新批照样先抢锁:工具终态赶在开始前头,open_tools_ 空查,对就散了。
+//     闸一收口,谁领走的批谁落笔,后来者(抢醒的消费循环、压上来的
+//     RunSync)在闸上等旧批落定,先提交先执行由此成立。闸递归:命令体内
+//     嵌 RunSync/Flush 合法,嵌套单元在持有者自己的单元内就地跑(闸开着
+//     的整个单元里队列只有持有者一个读者,旁人领不走)。锁序恒
+//     "顺序闸 -> 队列锁 -> 提交锁 -> stdout/登记簿",闸之外不许反拿。
 //   - 同步口 RunSync(换页事务/收口 chrome/插行这些调用方要"回来时已画
 //     完"的场合):先把队列里的余量在本线程排干,再在提交锁内就地执行。
-//     不跨线程等锁——调用方自持的锁(ConsoleReadMutex 一类)不会被 UI
-//     线程反等,锁序图无环。过渡批由此保留多名 writer(监听线程/composer
-//     主线程/RunTurn 收口),但全部在统一提交锁内核对身份,单子 §五
-//     "过渡批"条款的正路;P3 再把空闲路整帧也收成异步命令。
+//     调用线程就是执行线程的合同不变;过闸时可能等在飞的一批落定——与
+//     旧款等提交锁同一量级的有界等待(在飞批就是画屏),调用方自持的锁
+//     (ConsoleReadMutex 一类)仍不会被 UI 线程反等,锁序图无环。过渡批
+//     由此保留多名 writer(监听线程/composer 主线程/RunTurn 收口),但
+//     全部在统一提交锁内核对身份,单子 §五"过渡批"条款的正路;P3 再把
+//     空闲路整帧也收成异步命令。
 //
 // 事件命令带渲染方世代(renderer id):TerminalTurnSink 每轮登记一只渲染
 // 器,RunTurn 收口 Detach——迟到的命令查无此号,整枚丢弃,不留悬垂引用。
@@ -100,6 +112,17 @@ public:
     // 当前线程是不是消费线程(命令体内判断用;单测探针)。
     bool IsUiThread() const { return std::this_thread::get_id() == consumer_id_.load(); }
 
+    // ---- 测试钉子(HC-02) --------------------------------------------------
+    // 出队/提交边界的可控调度点。单测用它把消费线程钉在"批已出队、一笔
+    // 未提交"的病窗上,拿屏障造确定性交错,不靠 sleep 碰运气。生产恒空。
+    enum class DebugPoint {
+        ConsumerBatchStolen,  // 消费线程领走一批、第一枚还没提交(顺序闸内)
+    };
+
+    // 换钩线程安全。钩子在顺序闸内、队列/提交锁外被调,可以放心阻塞;
+    // 钩内抛异常不拖垮消费线程(stderr 留名后照跑)。
+    void SetDebugHook(std::function<void(DebugPoint)> hook);
+
     // ---- 生命周期 ---------------------------------------------------------
 
     void Start();  // 幂等;起消费线程
@@ -129,7 +152,11 @@ private:
     EventRenderer LookupRenderer(std::uint64_t renderer_id);
 
     void ConsumerMain();
+    void FireDebugHook(DebugPoint point);
 
+    // 顺序闸(HC-02):出队与执行捆成一个闸单元,谁领走的批谁落笔。
+    // 递归:命令体内嵌 RunSync/Flush 合法。恒为最外层锁,见文件头锁序。
+    std::recursive_mutex order_mutex_;
     std::mutex queue_mutex_;               // 只护 pending_,不跨渲染持有
     std::condition_variable wake_;         // 谓词 stopped_ || !pending_.empty()
     std::condition_variable idle_;         // Quiesce 用:一批跑完且队列空时叫
@@ -139,6 +166,8 @@ private:
     std::mutex renderers_mutex_;
     std::uint64_t next_renderer_id_ = 1;
     std::vector<std::pair<std::uint64_t, EventRenderer>> renderers_;  // 登记表(小,线性查)
+    std::mutex debug_hook_mutex_;
+    std::function<void(DebugPoint)> debug_hook_;  // 测试钉子(生产恒空)
     // stopped_ 须先于 consumer_ 声明(成员按声明序构造;消费线程一起跑就
     // 读 stopped_,构造序竞态的坑旧泵注释里写过,同款防御)。
     std::atomic<bool> stopped_{false};

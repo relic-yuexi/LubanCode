@@ -10,12 +10,14 @@
 
 | 锁 | 住处 | 管什么 |
 | --- | --- | --- |
+| 顺序闸 `SessionUiDispatcher::order_mutex_` | `app/session_ui_dispatcher.cpp`(HC-02,递归) | 出队与执行捆成一个闸单元:消费批次、RunSync/Flush 的"排干+body"、Stop 收尾排干、停表后就地执行都先过闸再领队列,谁领走的批谁落笔——先提交先执行(提交锁只保证不同时画,保证不了先后) |
 | `StdoutWriteMutex()` | `cli/console_input.cpp` | 终端字节流互斥(锁内只写字节,不等输入) |
 | 统一提交锁 `SessionUiDispatcher::commit_mutex()` | `app/session_ui_dispatcher.cpp`(P2,递归) | 一切落笔的核对位:调度命令逐枚执行、RunSync 就地执行、收口 chrome、确认菜单显示半边全握它 |
 | 登记簿锁 `AgentViewRegistry::mutex_` | `app/agent_view_registry.hpp`(P1) | main 活回合账(视图账/修订号/水位)、查看页身份、帧令牌(view_epoch/layout_revision) |
 | `ConsoleReadMutex()` | `platform/console.hpp` | 逐键输入权(composer 与监听线程错峰;与画屏路径只单向相交) |
 
-**锁序铁律**:统一提交锁 → StdoutWriteMutex(渲染闭包内拿 stdout,无倒置);
+**锁序铁律**:顺序闸 → 队列锁 → 统一提交锁(HC-02 后闸为最外层,闸之外
+不许反拿);统一提交锁 → StdoutWriteMutex(渲染闭包内拿 stdout,无倒置);
 统一提交锁 → 登记簿锁(事件应用);换页事务经 `RunUiSync` 持提交锁后经
 钩子再拿 stdout。旧泵(`UiEventPump`,无调度器的单发/单测路)的公共
 render_mutex 直通口已退役,泵内照旧全程握锁渲染。
@@ -28,8 +30,9 @@ render_mutex 直通口已退役,泵内照旧全程握锁渲染。
   事件的线程一个终端字节不写;旧 `DispatchInline` 的"画前排干"由队列
   FIFO 保序替代。停表(StopUiPump)后迟到的 Emit 退化就地(旧泵同款)。
 - **同步口 `RunSync`/`RunUiSync`**:换页事务、插行、footer 重画、确认
-  菜单的显示半边、空闲 composer 整帧(P3 收编)——先排干队列余量、再
-  在统一提交锁内就地执行(调用线程即执行线程,零跨线程等锁)。
+  菜单的显示半边、空闲 composer 整帧(P3 收编)——先过顺序闸等在飞批
+  落定,再排干队列余量、在统一提交锁内就地执行(调用线程即执行线程;
+  等闸与旧款等提交锁同一量级的有界等待)。
 - **异步口 `PostAction`/`PostUiCommand`(P3 收编)**:不需要"回来时已画
   完"的周期性屏面动作(footer 心跳)打包成命令投进队列,由消费线程在
   统一提交锁内执行;投递侧带丢拍闸(上一拍未消费则丢弃本拍),慢终端

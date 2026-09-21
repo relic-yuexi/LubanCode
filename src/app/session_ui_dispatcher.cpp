@@ -1,7 +1,8 @@
 // SessionUiDispatcher 的实现(按代理状态投影单 P2:收拢写者)。队列/
 // 消费/合并的机制自 UiEventPump 移植,三处 P2 的差:渲染器按世代登记
 // (sink 每轮一只,迟到命令不悬垂)、RunSync 在调用线程排干+就地执行
-// (不跨线程等锁)、统一提交锁成为一切落笔的核对位。
+// (不跨线程等锁)、统一提交锁成为一切落笔的核对位。HC-02 再补一道
+// 顺序闸:出队与执行捆成一个闸单元,先提交先执行——设计见头文件。
 
 #include "app/session_ui_dispatcher.hpp"
 
@@ -35,8 +36,12 @@ void SessionUiDispatcher::Stop() {
     if (consumer.joinable()) {
         consumer.join();
     }
-    // 停表后的余量(停表与消费的夹缝里进来的)就地排干,不丢事实。
-    RunEntriesOnCaller(StealPending());
+    // 停表后的余量(停表与消费的夹缝里进来的)就地排干,不丢事实。同样
+    // 过顺序闸(HC-02):并发还在跑的 RunSync 单元先落定,收尾排干不插队。
+    {
+        std::lock_guard<std::recursive_mutex> order(order_mutex_);
+        RunEntriesOnCaller(StealPending());
+    }
     consumer_id_.store(std::thread::id{});
     {
         std::lock_guard<std::mutex> lock(renderers_mutex_);
@@ -91,24 +96,32 @@ bool SessionUiDispatcher::PostEvent(std::uint64_t renderer_id, const runtime::Se
 std::future<void> SessionUiDispatcher::PostAction(std::function<void()> action) {
     auto done = std::make_shared<std::promise<void>>();
     std::future<void> future = done->get_future();
+    bool enqueue = false;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        if (stopped_.load() || !started_) {
-            // 停表:就地执行,回执即成。异常吞进 future(与异步路同貌)。
-            try {
-                action();
-                done->set_value();
-            } catch (...) {
-                done->set_exception(std::current_exception());
-            }
-            return future;
+        enqueue = !stopped_.load() && started_;
+        if (enqueue) {
+            Entry entry;
+            entry.done = std::move(done);
+            entry.action = std::move(action);
+            pending_.push_back(std::move(entry));
         }
-        Entry entry;
-        entry.done = std::move(done);
-        entry.action = std::move(action);
-        pending_.push_back(std::move(entry));
     }
-    wake_.notify_one();
+    if (enqueue) {
+        wake_.notify_one();
+        return future;
+    }
+    // 停表:就地执行,回执即成。异常吞进 future(与异步路同貌)。与一切
+    // 执行路同一道顺序闸+提交锁(HC-02)——收尾排干进行中也不插队;顺带
+    // 把旧款"在队锁里就地跑"修掉(嵌套投递在队锁上会自锁)。
+    std::lock_guard<std::recursive_mutex> order(order_mutex_);
+    std::lock_guard<std::recursive_mutex> commit(commit_mutex_);
+    try {
+        action();
+        done->set_value();
+    } catch (...) {
+        done->set_exception(std::current_exception());
+    }
     return future;
 }
 
@@ -128,17 +141,23 @@ std::vector<SessionUiDispatcher::Entry> SessionUiDispatcher::StealPending() {
 }
 
 void SessionUiDispatcher::RunSync(std::function<void()> body) {
-    // 排干余量(FIFO 保住"先提交的先落笔"),再在提交锁内就地执行——
-    // 调用线程即执行线程,跨线程零等待,见文件头。
     if (body == nullptr) {
         return;
     }
+    // 顺序闸(HC-02):"排干+body"是一个闸单元。在飞的旧批(已被消费
+    // 线程或另一路 RunSync 领走、还没落笔的)先落定,本单元才领队列——
+    // 不然新批先抢提交锁,先提交的后执行,开始/结束事件就配不上对。
+    // 排干余量(FIFO 保住"先提交的先落笔"),再在提交锁内就地执行:
+    // 调用线程即执行线程,见文件头。
+    std::lock_guard<std::recursive_mutex> order(order_mutex_);
     RunEntriesOnCaller(StealPending());
     std::lock_guard<std::recursive_mutex> commit(commit_mutex_);
     body();
 }
 
 void SessionUiDispatcher::Flush() {
+    // 排干也过顺序闸(HC-02):与在飞批互不插队,出队次序即提交次序。
+    std::lock_guard<std::recursive_mutex> order(order_mutex_);
     RunEntriesOnCaller(StealPending());
 }
 
@@ -217,7 +236,6 @@ SessionUiDispatcher::EventRenderer SessionUiDispatcher::LookupRenderer(std::uint
 
 void SessionUiDispatcher::ConsumerMain() {
     consumer_id_.store(std::this_thread::get_id());
-    std::vector<Entry> batch;
     while (true) {
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -229,15 +247,45 @@ void SessionUiDispatcher::ConsumerMain() {
                 }
                 continue;
             }
-            while (!pending_.empty()) {
-                batch.push_back(std::move(pending_.front()));
-                pending_.pop_front();
-            }
-            // 在飞记账与出队同锁(见 StealPending 同款注释)。
-            inflight_ += batch.size();
         }
+        // 有活:先过顺序闸(HC-02)再出队——出队与执行同在一个闸单元。
+        // 等闸时可能正有另一路(RunSync/Flush/Stop 排干)在执行自己的
+        // 单元:它领不走本线程已看见的命令,本线程也不抢它手里的批。
+        std::lock_guard<std::recursive_mutex> order(order_mutex_);
+        std::vector<Entry> batch = StealPending();
+        if (batch.empty()) {
+            continue;  // 队列被同在闸内的并发单元领走了,回去接着等
+        }
+        // 测试钉子:批已出队、第一枚未提交——正是 HC-02 的病窗,单测在
+        // 此拿屏障钉出确定性交错。
+        FireDebugHook(DebugPoint::ConsumerBatchStolen);
         RunEntriesOnCaller(std::move(batch));
-        batch.clear();
+    }
+}
+
+void SessionUiDispatcher::SetDebugHook(std::function<void(DebugPoint)> hook) {
+    std::lock_guard<std::mutex> lock(debug_hook_mutex_);
+    debug_hook_ = std::move(hook);
+}
+
+void SessionUiDispatcher::FireDebugHook(DebugPoint point) {
+    std::function<void(DebugPoint)> hook;
+    {
+        std::lock_guard<std::mutex> lock(debug_hook_mutex_);
+        hook = debug_hook_;
+    }
+    if (hook == nullptr) {
+        return;
+    }
+    try {
+        hook(point);
+    } catch (const std::exception& e) {
+        // 钉子只归测试用;钩内抛异常不该拖垮消费线程(与事件渲染同款兜底)。
+        std::fprintf(stderr, "[session-ui] debug hook failed: %s\n", e.what());
+        std::fflush(stderr);
+    } catch (...) {
+        std::fprintf(stderr, "[session-ui] debug hook failed\n");
+        std::fflush(stderr);
     }
 }
 
