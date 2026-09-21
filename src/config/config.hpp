@@ -1143,6 +1143,13 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
 // 共用，免得一边漏 reasoning 字段、一边又被半套环境变量拆散。
 void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider);
 
+// Provider 条目的连接指纹(HC-01):把展开后会影响 BuildBackend 的字段
+// (ApplyProviderToRuntimeConfig 写到的连接与能力字段 + 解析后的鉴权值)
+// 折成一串稳定字节,当跨 provider 角色后端缓存的版本键。条目被编辑或
+// 删除后指纹对不上,缓存就地失效。model_reasoning_effort 这类不影响后端
+// 连接的字段不进来——改它不该动缓存。纯函数,单测钉口径。
+std::string ProviderConnectionFingerprint(const ProviderConfig& provider);
+
 // 把 Config::active_provider 指向的条目展开到当前运行配置。provider 条目
 // 所在配置层级只压过同级或更低字段；LUBANCODE_* 仍居最上。找不到名字
 // 时清掉本次运行态选择并返回 false，不让一条旧记录拦住启动。

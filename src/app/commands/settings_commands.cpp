@@ -1410,18 +1410,21 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.set_failed", enabled.error()) << "\n";
                     return;
                 }
-                // 先改内存里这份:SetProviderNativeWebSearch 顺带当"名字存不存在"
-                // 的判断——找不到就原样不动、返回 false,不往下走落盘那一步。
-                if (!lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled)) {
+                if (lubancode::config::FindProvider(config.providers, command.name) == nullptr) {
                     TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
+                // 配置提交点(HC-01):全局配置落盘成功才算提交,之后才动会话
+                // 内存——失败提交不半改内存,角色后端缓存也就读不到半更新
+                // (缓存在下一次 Route 时按连接指纹惰性失效,这里不点名重建,
+                // 非活跃端交给路由层自己管)。auth 分支与 Remove 分支同序。
                 const auto saved =
                     lubancode::config::SetProviderNativeWebSearchInGlobalConfig(command.name, *enabled);
                 if (!saved.has_value()) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
+                lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled);
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
                           << "\n";
                 // 改的正好是当前活跃端:顶层镜像字段跟着同步、重建 backend,别让
@@ -1456,15 +1459,17 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     }
                     parsed = std::move(candidate);
                 }
-                if (!lubancode::config::SetProviderExtraBody(config.providers, command.name, parsed)) {
+                if (lubancode::config::FindProvider(config.providers, command.name) == nullptr) {
                     TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
+                // 配置提交点(HC-01):先落盘后内存,失败不半改(同 native_web_search 分支)。
                 const auto saved = lubancode::config::SetProviderExtraBodyInGlobalConfig(command.name, parsed);
                 if (!saved.has_value()) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
+                lubancode::config::SetProviderExtraBody(config.providers, command.name, parsed);
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.field,
                                   parsed.empty() ? tr("provider_wizard.extra_body.unset")
                                                   : trf("provider_wizard.extra_body.summary", parsed.size()),
@@ -1482,17 +1487,19 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.set_failed", tr("cmd.provider.extra_header_name_missing")) << "\n";
                     return;
                 }
-                if (!lubancode::config::SetProviderExtraHeader(config.providers, command.name, command.header_name,
-                                                                command.value)) {
+                if (lubancode::config::FindProvider(config.providers, command.name) == nullptr) {
                     TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
+                // 配置提交点(HC-01):先落盘后内存,失败不半改(同 native_web_search 分支)。
                 const auto saved = lubancode::config::SetProviderExtraHeaderInGlobalConfig(
                     command.name, command.header_name, command.value);
                 if (!saved.has_value()) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
+                lubancode::config::SetProviderExtraHeader(config.providers, command.name, command.header_name,
+                                                          command.value);
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.header_name,
                                   command.value.empty() ? tr("provider_wizard.extra_body.unset") : command.value,
                                   *saved)
