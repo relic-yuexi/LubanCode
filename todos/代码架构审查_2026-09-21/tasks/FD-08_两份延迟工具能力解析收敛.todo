@@ -1,0 +1,51 @@
+# FD-08 两份延迟工具能力解析收敛
+
+- 状态：已实现，PR 待建、CI 待跑（勾账证据随后补）。
+- 日期：2026-09-21。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：A/B；严重度：中；重构批次：2。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-08 | A/B | 中 | src/config/model_catalog.cpp:195；src/config/model_catalog.cpp:201；src/config/model_catalog.cpp:395；src/config/provider_catalog.cpp:422；src/config/provider_catalog.cpp:433；src/config/provider_catalog.cpp:437 | models侧：`deferred.value("tool_reference", false)`；providers侧：先 `is_boolean()` 再取值；两侧 `mode` 都直接 `value(..., std::string())`。 | 同一 deferred_tools 合同两次手抄：字段类型错时，一路返回受控错误，另一路抛 JSON type_error。两入口只在 JSON parse 周围 catch，后面的 ParseEntry/ParseProvider 不在保护内；坏条目因此越过“跳过并给warning”或 expected 错误合同。修改同一能力字段须改两套校验。 | 提取 ParseDeferredToolsCapability，返回结构化校验结果。保留provider整份拒收、user models逐条跳过这两种上层政策；未知键宽严策略显式传入。共享内核先查字段类型再取值，所有字段错形都走同一错误通道。 | 不可顺手把本地模型目录改成全量拒收；这两种失败范围有意不同。模型目录默认能力不能靠缺字段猜。 |
+
+## 修改边界
+
+- `src/config/model_catalog.cpp`
+- `src/config/provider_catalog.cpp`
+- `src/config/provider_catalog.hpp`
+- `tests/unit/config/test_model_catalog.cpp`
+- `tests/unit/config/test_provider_catalog.cpp`
+
+## 实施顺序
+
+- [x] 按两种入口建共同字段矩阵，钉住各自错误范围。（test_model_catalog.cpp "FD-08 对账"用例：同一 deferred_tools 段喂 providers/models 两路，错形两路同判、合法两路同收且解析体逐字段一致；分家只钉两处——未知键宽严、失败范围。）
+- [x] 抽typed解析器，入口负责加位置与选择拒收范围。（`ParseDeferredToolsCapability` 落 provider_catalog.cpp，字段一律 find() 迭代器先查类型再取值；未知键宽严由 `DeferredToolsUnknownKeys{Ignore,Reject}` 显式传入。providers 入口保留整份拒收，models 入口保留跳坏条+警告。）
+- [x] 删两处手抄字段规则。（provider_catalog.cpp ParseModel 与 model_catalog.cpp ParseEntry 的两段内联校验全部改为内核调用；全仓查证 deferred_tools JSON 解析仅此两处，其余命中都是吃结构体的消费方。）
+
+## 验收门
+
+- [ ] mode=3、tool_reference="yes"、server_tool_search=3/null 均不抛出目录入口。
+- [ ] providers返回expected错误；models只跳坏条、保留其余条与warning。
+- [ ] 新增合法字段只需改共享能力解析一次。
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+
+## 合并取舍与估量
+
+应合并字段校验；不合并整份拒收与单条跳过策略。
+
+预计可删除行数：约10–20行；现两段约48行，扣共享函数与两侧包装。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：未要求合并既有总设计单。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。

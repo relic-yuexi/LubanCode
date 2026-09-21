@@ -421,35 +421,13 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
     }
     if (value.contains("deferred_tools")) {
         // 动态工具 P3:模型级原生引用能力。字段形状严格(与 schema 的
-        // additionalProperties=false 同一口径):mode 只认 native_reference,
-        // server_tool_search 只认 regex/bm25——目录是能力事实源,写歪了整份
-        // 拒收,不带病生效。
-        const json& deferred = value["deferred_tools"];
-        if (!deferred.is_object()) return std::unexpected(where + ".deferred_tools 必须是 object");
-        if (auto known = RejectUnknown(deferred, {"mode", "tool_reference", "server_tool_search"},
-                                       where + ".deferred_tools");
-            !known.has_value())
-            return std::unexpected(known.error());
-        const std::string mode = deferred.value("mode", std::string());
-        if (mode != "native_reference") {
-            return std::unexpected(where + ".deferred_tools.mode 只认 native_reference(当前: " + mode + ")");
-        }
-        if (deferred.contains("tool_reference") && !deferred["tool_reference"].is_boolean()) {
-            return std::unexpected(where + ".deferred_tools.tool_reference 必须是布尔值");
-        }
-        if (deferred.contains("server_tool_search")) {
-            if (!deferred["server_tool_search"].is_string()) {
-                return std::unexpected(where + ".deferred_tools.server_tool_search 必须是字符串");
-            }
-            const std::string variant = deferred["server_tool_search"].get<std::string>();
-            if (variant != "regex" && variant != "bm25") {
-                return std::unexpected(where + ".deferred_tools.server_tool_search 只认 regex|bm25(当前: " +
-                                        variant + ")");
-            }
-            model.deferred_tools.server_tool_search = variant;
-        }
-        model.deferred_tools.declared = true;
-        model.deferred_tools.tool_reference = deferred.value("tool_reference", false);
+        // additionalProperties=false 同一口径)——目录是能力事实源,写歪了
+        // 整份拒收,不带病生效。字段校验收敛进共享内核(FD-08),此处只
+        // 选"未知键整段拒 + 整份拒收"这两条上层政策。
+        auto deferred = ParseDeferredToolsCapability(value["deferred_tools"], where + ".deferred_tools",
+                                                     DeferredToolsUnknownKeys::Reject);
+        if (!deferred.has_value()) return std::unexpected(deferred.error());
+        model.deferred_tools = std::move(*deferred);
     }
     if (value.contains("reasoning")) {
         auto reasoning = ParseReasoning(value["reasoning"], where + ".reasoning", provider_dialect);
@@ -649,6 +627,45 @@ json ReadMeta(const fs::path& cache) {
 }
 
 }  // namespace
+
+std::expected<DeferredToolsCapability, std::string> ParseDeferredToolsCapability(
+    const json& value, const std::string& where, DeferredToolsUnknownKeys unknown_keys) {
+    // 共享内核(FD-08):字段一律 find() 拿迭代器,先查类型再取值——
+    // value()/get() 的类型转换会抛 type_error,两处目录入口都只在 JSON
+    // parse 周围接异常,这里必须自己把错形兜进 expected。字段用迭代器取,
+    // 不走 const operator[](缺键是 UB)。
+    if (!value.is_object()) return std::unexpected(where + " 必须是 object");
+    if (unknown_keys == DeferredToolsUnknownKeys::Reject) {
+        if (auto known = RejectUnknown(value, {"mode", "tool_reference", "server_tool_search"}, where);
+            !known.has_value())
+            return std::unexpected(known.error());
+    }
+    std::string mode;
+    if (const auto mode_it = value.find("mode"); mode_it != value.end()) {
+        if (!mode_it->is_string()) return std::unexpected(where + ".mode 必须是字符串");
+        mode = mode_it->get<std::string>();
+    }
+    if (mode != "native_reference") {
+        return std::unexpected(where + ".mode 只认 native_reference(当前: " + mode + ")");
+    }
+    DeferredToolsCapability out;
+    if (const auto reference_it = value.find("tool_reference"); reference_it != value.end()) {
+        if (!reference_it->is_boolean()) return std::unexpected(where + ".tool_reference 必须是布尔值");
+        out.tool_reference = reference_it->get<bool>();
+    }
+    if (const auto search_it = value.find("server_tool_search"); search_it != value.end()) {
+        if (!search_it->is_string()) {
+            return std::unexpected(where + ".server_tool_search 必须是字符串");
+        }
+        const std::string variant = search_it->get<std::string>();
+        if (!variant.empty() && variant != "regex" && variant != "bm25") {
+            return std::unexpected(where + ".server_tool_search 只认 regex|bm25(当前: " + variant + ")");
+        }
+        out.server_tool_search = variant;
+    }
+    out.declared = true;
+    return out;
+}
 
 const ProviderCatalogModel* ProviderPreset::FindModel(const std::string& model_id) const {
     for (const auto& model : models) if (model.id == model_id) return &model;

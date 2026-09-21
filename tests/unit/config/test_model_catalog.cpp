@@ -14,6 +14,7 @@
 
 #include "agent/prompts.hpp"
 #include "config/model_catalog.hpp"
+#include "config/provider_catalog.hpp"  // FD-08 对账:两路目录入口同一份 deferred_tools 合同
 
 using namespace lubancode;
 
@@ -548,4 +549,132 @@ TEST_CASE("ClassifyNativeToolSearch:声明与 tool_reference 齐了才算,半截
     no_search.deferred_tools.declared = true;
     no_search.deferred_tools.tool_reference = true;
     CHECK(config::ClassifyNativeToolSearch(&no_search).server_tool_search.empty());
+}
+
+
+// ---------------------------------------------------------------------------
+// FD-08(两份延迟工具能力解析收敛):deferred_tools 的字段合同收敛进
+// ParseDeferredToolsCapability 一处,models.json 侧吃同一内核。此前本侧
+// value() 直取——mode=3、tool_reference="yes"、server_tool_search=3/null
+// 全抛 nlohmann type_error,而 ParseModelCatalogJson 只在 JSON parse 周围
+// 接异常,后半段没人兜;收敛后一律"跳坏条、留好条、记一条警告"。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("models.json: deferred_tools 字段错形跳条不抛,其余条目照收(FD-08)") {
+    const auto parse_with_bad_segment = [](const std::string& segment) {
+        return config::ParseModelCatalogJson(
+            R"({"models":[)"
+            R"({"slug":"good-before"},)"
+            R"({"slug":"bad","deferred_tools":)" +
+            segment +
+            R"(},)"
+            R"({"slug":"good-after"}]})",
+            "t.json");
+    };
+    // 共同字段矩阵的错形侧:两路合同同判(对账用例在下面),本路钉
+    // 失败范围——只跳该条,前后好条与警告一条不少。
+    for (const char* segment : {
+             R"({"mode":3})",
+             R"({"mode":"native_reference","tool_reference":"yes"})",
+             R"({"mode":"native_reference","server_tool_search":3})",
+             R"({"mode":"native_reference","server_tool_search":null})",
+             R"({"mode":"proxy"})",
+             R"({"mode":"native_reference","server_tool_search":"向量"})",
+             R"([])",
+         }) {
+        CAPTURE(segment);
+        const auto parsed = parse_with_bad_segment(segment);
+        REQUIRE(parsed.models.size() == 2);
+        CHECK(parsed.models[0].slug == "good-before");
+        CHECK(parsed.models[1].slug == "good-after");
+        REQUIRE(parsed.warnings.size() == 1);
+    }
+}
+
+TEST_CASE("models.json: deferred_tools 未知键从宽,空搜索串只算引用能力(FD-08)") {
+    const auto parsed = config::ParseModelCatalogJson(
+        R"({"models":[)"
+        R"({"slug":"junk-key","deferred_tools":{"mode":"native_reference","junk":1}},)"
+        R"({"slug":"no-search","deferred_tools":{"mode":"native_reference","server_tool_search":""}},)"
+        R"({"slug":"minimal","deferred_tools":{"mode":"native_reference"}},)"
+        R"({"slug":"full","deferred_tools":{"mode":"native_reference","tool_reference":true,"server_tool_search":"bm25"}})"
+        R"(]})",
+        "t.json");
+    REQUIRE(parsed.models.size() == 4);
+    CHECK(parsed.warnings.empty());
+    // 未知键忽略不罚——与 providers 侧 additionalProperties=false 整段拒
+    // 有意分家(用户手写目录从宽,能力事实源从严)。
+    CHECK(parsed.models[0].deferred_tools.declared);
+    CHECK_FALSE(parsed.models[0].deferred_tools.tool_reference);
+    // 空串 = 只声明引用能力、没声明服务端搜索(≡ 没写)。
+    CHECK(parsed.models[1].deferred_tools.declared);
+    CHECK(parsed.models[1].deferred_tools.server_tool_search.empty());
+    // 最小合规:只写 mode,tool_reference 缺省 false。
+    CHECK(parsed.models[2].deferred_tools.declared);
+    CHECK_FALSE(parsed.models[2].deferred_tools.tool_reference);
+    CHECK(parsed.models[3].deferred_tools.tool_reference);
+    CHECK(parsed.models[3].deferred_tools.server_tool_search == "bm25");
+}
+
+TEST_CASE("FD-08 对账: 同一 deferred_tools 段两路同判,分家只在政策") {
+    const std::string provider_prefix = R"({"schema_version":2,"revision":"2026-07-25","providers":{"a":{
+      "name":"A","wire":"anthropic-messages","base_url":"https://api.a.test",
+      "key_env":"A_KEY","default_model":"a-1",
+      "models":{"a-1":{"name":"A1","deferred_tools":)";
+    // providers 路:整份拒收或整份收下,能力体从模型条目里取。
+    const auto providers_capability = [&](const std::string& segment) {
+        std::optional<config::DeferredToolsCapability> out;
+        auto parsed = config::ParseProviderCatalogJson(provider_prefix + segment + R"(}}}}})", "p");
+        if (parsed.has_value()) out = parsed->FindProvider("a")->FindModel("a-1")->deferred_tools;
+        return out;
+    };
+    // models 路:跳条或收条,能力体从(唯一)条目里取。
+    const auto models_capability = [&](const std::string& segment) {
+        std::optional<config::DeferredToolsCapability> out;
+        const auto parsed = config::ParseModelCatalogJson(
+            R"({"models":[{"slug":"x","deferred_tools":)" + segment + R"(}]})", "t.json");
+        if (parsed.models.size() == 1) out = parsed.models[0].deferred_tools;
+        return out;
+    };
+    const auto same_verdict = [&](const std::optional<config::DeferredToolsCapability>& left,
+                                  const std::optional<config::DeferredToolsCapability>& right) {
+        if (left.has_value() != right.has_value()) return false;
+        if (!left.has_value()) return true;
+        return left->declared == right->declared && left->tool_reference == right->tool_reference &&
+               left->server_tool_search == right->server_tool_search;
+    };
+
+    // 字段错形:两路都拒,谁也不许抛。
+    for (const char* segment : {
+             R"({"mode":3})",
+             R"({"mode":"native_reference","tool_reference":"yes"})",
+             R"({"mode":"native_reference","server_tool_search":3})",
+             R"({"mode":"native_reference","server_tool_search":null})",
+             R"({"mode":"proxy"})",
+             R"({"mode":"native_reference","server_tool_search":"向量"})",
+             R"([])",
+         }) {
+        CAPTURE(segment);
+        const std::string text(segment);
+        CHECK_FALSE(providers_capability(text).has_value());
+        CHECK_FALSE(models_capability(text).has_value());
+    }
+    // 合同内合法:两路同收,解析体逐字段一致。
+    for (const char* segment : {
+             R"({"mode":"native_reference"})",
+             R"({"mode":"native_reference","tool_reference":false})",
+             R"({"mode":"native_reference","tool_reference":true})",
+             R"({"mode":"native_reference","server_tool_search":""})",
+             R"({"mode":"native_reference","tool_reference":true,"server_tool_search":"regex"})",
+             R"({"mode":"native_reference","tool_reference":true,"server_tool_search":"bm25"})",
+         }) {
+        CAPTURE(segment);
+        const std::string text(segment);
+        CHECK(same_verdict(providers_capability(text), models_capability(text)));
+        CHECK(providers_capability(text).has_value());
+    }
+    // 有意分家只有两处:未知键(providers 拒 / models 忽略)与失败范围
+    //(providers 整份拒收 / models 只跳该条——上面矩阵已钉)。
+    CHECK_FALSE(providers_capability(R"({"mode":"native_reference","junk":1})").has_value());
+    CHECK(models_capability(R"({"mode":"native_reference","junk":1})").has_value());
 }

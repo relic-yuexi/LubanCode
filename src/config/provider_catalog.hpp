@@ -33,6 +33,25 @@ struct DeferredToolsCapability {
     std::string server_tool_search;
 };
 
+// deferred_tools 段未知键的宽严(FD-08):providers.json 是能力事实源,
+// additionalProperties=false,见未知键整段拒;用户 models.json 从宽,未知
+// 键忽略不罚。至于坏段的失败范围(整份拒收 vs 只跳该条),那是入口的
+// 上层政策,内核不管,由两侧各自保留。
+enum class DeferredToolsUnknownKeys { Ignore, Reject };
+
+// deferred_tools 能力段的共享解析内核(FD-08):providers.json 与用户
+// models.json 同一份字段合同,此前两处手抄——一路 is_boolean() 先查再取,
+// 一路 value() 直取,字段错形时一路受控报错、一路抛 nlohmann
+// type_error,目录入口只在 JSON parse 周围接异常,后半段没人兜。收敛后
+// 字段一律先查类型再取值,所有错形走同一错误通道,不再依赖 value() 的
+// 类型转换。server_tool_search 空串按"只声明引用能力"放行(≡ 没写,
+// 与 DeferredToolsCapability 的注释同一口径;providers.schema 的
+// enum(regex|bm25)管源表更严,不冲突)。FD-05(模型协议窄合同从配置
+// 总头剥离)的搬场接缝:本函数与 DeferredToolsCapability 自包含,不拖
+// 本头里 Wire/ProviderConfig 那些配置总头类型。
+std::expected<DeferredToolsCapability, std::string> ParseDeferredToolsCapability(
+    const nlohmann::json& value, const std::string& where, DeferredToolsUnknownKeys unknown_keys);
+
 struct ProviderCatalogModel {
     std::string id;
     std::string name;
