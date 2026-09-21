@@ -10,7 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "memory/project_memory.hpp"
+#include "memory/types.hpp"  // SV-09:轻合同(MemoryEntry/MemoryKind),不拖 ProjectMemory 全接口
 
 namespace lubancode::memory::frontmatter {
 
