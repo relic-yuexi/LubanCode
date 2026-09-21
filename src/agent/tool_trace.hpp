@@ -30,30 +30,23 @@
 
 #include <nlohmann/json.hpp>
 
+#include "tool_semantics.hpp"  // ToolSourceKind/EffectClass:来源与副作用共同合同(AR-08)
+
 namespace lubancode::agent {
 
 // ---------------------------------------------------------------------------
 // 稳定枚举(线上是字符串,不是数字——数字重排就是账本破坏)
 // ---------------------------------------------------------------------------
 
-// 工具来源。注册时明写,不靠 RTTI 猜(单子"工具来源不能靠 RTTI 猜")。
-enum class ToolSourceKind { Builtin, Mcp, Lsp, PluginLua, PluginNative, Agent, Ptc, Deferred };
+// 工具来源/副作用等级:AR-08 起与 tools 侧共用同一枚枚举(下沉到中立
+// 合同头 tool_semantics.hpp,值域一字未动),本命名空间经 using 兼容。
+// 字符串编解码仍钉在下面的 ToString/Parse——落盘标签不动。
+using ToolSourceKind = ::lubancode::ToolSourceKind;
+using EffectClass = ::lubancode::EffectClass;
 std::string ToString(ToolSourceKind kind);
 bool ParseToolSourceKind(const std::string& s, ToolSourceKind& out);
-
-// 副作用等级(单子"Effect class 与恢复策略"表)。未声明按最危险档
-// (InProcessUnknown),声明不能放宽安全:manifest/metadata 声称 read-only
-// 只影响恢复建议,不越过权限确认。
-enum class EffectClass {
-    ReadOnlyLocal,       // read_file/search:可建议重试
-    ReadOnlyRemote,      // web_fetch/只读 MCP:不自动重试(费用/限流)
-    LocalReversible,     // write_file/edit_file:查 undo token 再询问
-    LocalProcessUnknown, // run_command:unknown,先核验
-    RemoteIdempotent,    // 带 idempotency key:按 key 查,不直接重发
-    RemoteCompensatable, // 支持 delete/cancel:可提补偿(另一枚可见调用)
-    RemoteIrreversible,  // 发信/付款/发布:只告警与人工核验
-    InProcessUnknown,    // 未声明的 native/Lua:按未知副作用处理
-};
+// 副作用等级未声明按最危险档(InProcessUnknown),声明不能放宽安全:
+// manifest/metadata 声称 read-only 只影响恢复建议,不越过权限确认。
 std::string ToString(EffectClass cls);
 bool ParseEffectClass(const std::string& s, EffectClass& out);
 

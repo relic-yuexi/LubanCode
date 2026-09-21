@@ -402,46 +402,19 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
     tools::Tool* tool = registry.Find(call.name);
     frame.tool = tool;
     // 来源/副作用档从注册元数据拿(逐枚追踪单:不靠 RTTI 猜);没带元数据
-    // 的注册按 builtin 记,副作用档取工具自己的保守声明。
+    // 的注册按 builtin 记,副作用档取工具自己的保守声明。tools 与 agent
+    // 两侧 AR-08 起共用同一枚枚举(tool_semantics.hpp),这里按值直接
+    // 递,不再逐项同义转换。
     const tools::ToolRegistration* registration = registry.RegistrationOf(call.name);
     ToolSourceKind source_kind = ToolSourceKind::Builtin;
     std::string source_instance;
     EffectClass effect_class = EffectClass::InProcessUnknown;
     if (registration != nullptr) {
-        switch (registration->source_kind) {
-            case tools::ToolSourceKind::Builtin: source_kind = ToolSourceKind::Builtin; break;
-            case tools::ToolSourceKind::Mcp: source_kind = ToolSourceKind::Mcp; break;
-            case tools::ToolSourceKind::Lsp: source_kind = ToolSourceKind::Lsp; break;
-            case tools::ToolSourceKind::PluginLua: source_kind = ToolSourceKind::PluginLua; break;
-            case tools::ToolSourceKind::PluginNative: source_kind = ToolSourceKind::PluginNative; break;
-            case tools::ToolSourceKind::Agent: source_kind = ToolSourceKind::Agent; break;
-            case tools::ToolSourceKind::Ptc: source_kind = ToolSourceKind::Ptc; break;
-            case tools::ToolSourceKind::Deferred: source_kind = ToolSourceKind::Deferred; break;
-        }
+        source_kind = registration->source_kind;
         source_instance = registration->source_instance;
-        // 两侧 EffectClass 枚举各自独立(tools 不牵 agent),语义一一对应,
-        // 这里显式映射(与下面的 tool->effect_class() 同一张表)。
-        switch (registration->effect_class) {
-            case tools::EffectClass::ReadOnlyLocal: effect_class = EffectClass::ReadOnlyLocal; break;
-            case tools::EffectClass::ReadOnlyRemote: effect_class = EffectClass::ReadOnlyRemote; break;
-            case tools::EffectClass::LocalReversible: effect_class = EffectClass::LocalReversible; break;
-            case tools::EffectClass::LocalProcessUnknown: effect_class = EffectClass::LocalProcessUnknown; break;
-            case tools::EffectClass::RemoteIdempotent: effect_class = EffectClass::RemoteIdempotent; break;
-            case tools::EffectClass::RemoteCompensatable: effect_class = EffectClass::RemoteCompensatable; break;
-            case tools::EffectClass::RemoteIrreversible: effect_class = EffectClass::RemoteIrreversible; break;
-            case tools::EffectClass::InProcessUnknown: effect_class = EffectClass::InProcessUnknown; break;
-        }
+        effect_class = registration->effect_class;
     } else if (tool != nullptr) {
-        switch (tool->effect_class()) {
-            case tools::EffectClass::ReadOnlyLocal: effect_class = EffectClass::ReadOnlyLocal; break;
-            case tools::EffectClass::ReadOnlyRemote: effect_class = EffectClass::ReadOnlyRemote; break;
-            case tools::EffectClass::LocalReversible: effect_class = EffectClass::LocalReversible; break;
-            case tools::EffectClass::LocalProcessUnknown: effect_class = EffectClass::LocalProcessUnknown; break;
-            case tools::EffectClass::RemoteIdempotent: effect_class = EffectClass::RemoteIdempotent; break;
-            case tools::EffectClass::RemoteCompensatable: effect_class = EffectClass::RemoteCompensatable; break;
-            case tools::EffectClass::RemoteIrreversible: effect_class = EffectClass::RemoteIrreversible; break;
-            case tools::EffectClass::InProcessUnknown: effect_class = EffectClass::InProcessUnknown; break;
-        }
+        effect_class = tool->effect_class();
     }
     frame.source_kind = source_kind;
     frame.source_instance = source_instance;
