@@ -263,10 +263,15 @@ std::optional<lubancode::config::ConfigResult> RunInitialSetupWizard(
     const lubancode::config::ProviderConfig& provider = provider_outcome->provider;
     const auto saved = lubancode::config::AddProviderToGlobalConfig(provider);
     if (saved.has_value()) {
-        std::cout << trf("cmd.provider.added", provider.name, *saved) << "\n";
-        result.global_config_file_path = *saved;
+        std::cout << trf("cmd.provider.added", provider.name, saved->path) << "\n";
+        // HC-07:已替换未确认耐久照实说一行(换名已生效,断电耐久没确认),
+        // 不冒充全绿也不冒充没写成。
+        if (saved->outcome == lubancode::platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+            std::cout << trf("cmd.provider.commit_unconfirmed", saved->path) << "\n";
+        }
+        result.global_config_file_path = saved->path;
         if (!result.project_config_file_path.has_value()) {
-            result.config_file_path = *saved;
+            result.config_file_path = saved->path;
         }
         result.sources.providers = lubancode::config::Source::GlobalConfigFile;
         const auto remembered = lubancode::config::SetActiveProviderInGlobalConfig(provider.name);
@@ -276,7 +281,7 @@ std::optional<lubancode::config::ConfigResult> RunInitialSetupWizard(
             std::cout << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
         }
         if (const auto language_saved =
-                lubancode::config::UpdateLanguageInConfigFile(*saved, result.config.language);
+                lubancode::config::UpdateLanguageInConfigFile(saved->path, result.config.language);
             !language_saved.has_value()) {
             std::cout << trf("wizard.save_failed", language_saved.error()) << "\n";
         } else {

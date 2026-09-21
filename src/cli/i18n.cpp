@@ -1844,6 +1844,8 @@ const Entry kZhCN[] = {
     {"cmd.provider.remove_failed", "删 provider 失败: {0}"},
     {"cmd.provider.set_ok", "已把 provider {0} 的 {1} 设为 {2},写进全局配置 {3}。"},
     {"cmd.provider.set_failed", "设置 provider 失败: {0}"},
+    {"cmd.provider.commit_unconfirmed",
+     "注意: {0} 的新内容已写进文件并可见,但断电耐久未确认(目录刷盘失败)——按已提交处理,不回滚。"},
     {"cmd.provider.set_unknown_field", "不认得的字段: {0}(眼下只认 native_web_search、extra_body、extra_header、auth)"},
     {"cmd.provider.set_active_applied", "provider {0} 正在用，已立即生效，不用再 /provider switch。"},
     {"cmd.provider.extra_body_invalid_json", "extra_body 不是合法 JSON: {0}"},
@@ -3717,6 +3719,9 @@ const Entry kEn[] = {
     {"cmd.provider.remove_failed", "Could not remove provider: {0}"},
     {"cmd.provider.set_ok", "Set {1} of provider {0} to {2}; saved to global config {3}."},
     {"cmd.provider.set_failed", "Could not set provider field: {0}"},
+    {"cmd.provider.commit_unconfirmed",
+     "Note: the new content of {0} is written and visible, but power-loss durability is unconfirmed (directory "
+     "flush failed) - treated as committed, not rolled back."},
     {"cmd.provider.set_unknown_field", "Unknown field: {0} (only native_web_search, extra_body, extra_header, "
                                         "auth are supported for now)"},
     {"cmd.provider.set_active_applied",

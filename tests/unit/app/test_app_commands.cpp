@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
@@ -24,6 +26,7 @@
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/settings_commands.hpp"
+#include "platform/atomic_write.hpp"  // HC-07 失败注入面:SetFileFlushFailureForTest 等
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/directory.hpp"
 #include "trajectory/session_index.hpp"
@@ -674,6 +677,287 @@ TEST_CASE("ExecuteProviderSwitch:整套连接字段连同 backend/会话状态�
     CHECK(session_wire == wire_before);
     CHECK(rebuild_count == 1);
 
+    std::filesystem::remove_all(home, ec);
+}
+
+// ---------------------------------------------------------------------------
+// HC-07:Provider 配置统一提交-发布合同(接 FD-04 阶段回执)。
+// 失败注入打在原子写两层栅栏上(同 tests/unit/platform/test_atomic_write.cpp
+// 的口子):换名前文件刷盘失败 = 未提交;换名后父目录刷盘失败 = 已替换
+// 未确认耐久(盘面已是新内容)。不靠 sleep,不碰真机 HOME。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 原子写失败注入旗的 RAII 还原:REQUIRE 半路炸了也不许把注入漏给后面的
+// 用例(同 test_atomic_write.cpp 的 HookGuard)。
+class AtomicWriteHookGuard {
+public:
+    ~AtomicWriteHookGuard() {
+        lubancode::platform::SetFileFlushFailureForTest(false);
+        lubancode::platform::SetDirectoryFlushFailureForTest(false);
+    }
+};
+
+std::string ReadFileText(const std::filesystem::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+// 整份配置 JSON 读回来(盘面断言用);读不成原样抛错让 REQUIRE 拦下。
+nlohmann::json ReadConfigJson(const std::filesystem::path& file) {
+    return nlohmann::json::parse(ReadFileText(file));
+}
+
+// HandleProviderCommand 的会话状态一次配齐(与 ExecuteProviderSwitch 用例
+// 同一套参数形状),输出从 TermOut(默认 std::cout)截下来给回执断言。
+void RunProviderCommandCapture(const std::string& args, lubancode::config::Config& config,
+                               std::string& active_provider, RebuildableBackend& backend,
+                               std::string& captured) {
+    std::string session_wire = lubancode::config::ProviderWireName(config.wire);
+    auto current_model = std::make_shared<std::string>(config.model);
+    auto current_think = std::make_shared<std::string>("low");
+    auto current_think_history = std::make_shared<lubancode::api::ReasoningHistoryMode>();
+    auto current_instructions = std::make_shared<std::string>();
+    lubancode::cli::ContextTracker tracker(128000);
+    lubancode::config::ModelCatalog catalog;
+    lubancode::agent::PromptOptions prompt_options;
+    const auto rebuild_loop = [](bool) {};
+    const lubancode::cli::Theme theme;
+    lubancode::config::Source source = lubancode::config::Source::Default;
+
+    std::ostringstream buffer;
+    std::streambuf* const old_buf = std::cout.rdbuf(buffer.rdbuf());
+    HandleProviderCommand(args, config, active_provider, backend, session_wire, current_model,
+                          current_think, current_think_history, tracker, current_instructions, catalog,
+                          prompt_options, rebuild_loop, /*is_console=*/false, theme,
+                          /*active_provider_write_path=*/std::nullopt, source);
+    std::cout.rdbuf(old_buf);
+    captured = buffer.str();
+}
+
+}  // namespace
+
+TEST_CASE("HC-07 /provider set:未提交(换名前失败)——内存一字不动,盘面原样") {
+    const auto home = TempDir("hc07_not_committed");
+    HomeEnvGuard guard(home);
+    AtomicWriteHookGuard hooks;
+
+    lubancode::config::ProviderConfig local{
+        .name = "local",
+        .base_url = "http://127.0.0.1:49822/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .key_env = "",
+        .api_key = "sk-local",
+        .model = "old-model",
+    };
+    local.auth = lubancode::config::ProviderAuthMode::Inline;
+    lubancode::config::ProviderConfig other{
+        .name = "other",
+        .base_url = "http://127.0.0.1:49823/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "other-model",
+    };
+    other.auth = lubancode::config::ProviderAuthMode::None;
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(local).has_value());
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(other).has_value());
+    const std::filesystem::path cfg = home / ".lubancode" / "config.json";
+    const std::string disk_before = ReadFileText(cfg);
+
+    lubancode::config::Config config;
+    config.providers = {local, other};
+    config.wire = lubancode::config::Wire::Responses;
+    config.model = "old-model";
+    std::string active_provider = "local";
+    RebuildableBackend backend(config);
+
+    // 换名前失败(文件刷盘在换名之前):回执=未提交。
+    lubancode::platform::SetFileFlushFailureForTest(true);
+    std::string out;
+    RunProviderCommandCapture("set local extra_body {\"k\":1}", config, active_provider, backend, out);
+    CHECK(out.find("设置 provider 失败") != std::string::npos);
+    CHECK(out.find("断电耐久未确认") == std::string::npos);
+    // 盘面原样(字节级),内存 providers 条目与顶层镜像都没动。
+    CHECK(ReadFileText(cfg) == disk_before);
+    CHECK(lubancode::config::FindProvider(config.providers, "local")->extra_body.empty());
+    CHECK(config.extra_body.empty());
+
+    // auth 分支同一条合同:未提交时鉴权字段连内存一起保持原样。
+    RunProviderCommandCapture("set local auth none", config, active_provider, backend, out);
+    CHECK(out.find("设置 provider 失败") != std::string::npos);
+    CHECK(ReadFileText(cfg) == disk_before);
+    CHECK(lubancode::config::FindProvider(config.providers, "local")->auth ==
+          lubancode::config::ProviderAuthMode::Inline);
+    CHECK(config.auth_token.empty());  // 顶层镜像没被半改
+
+    std::error_code ec;
+    std::filesystem::remove_all(home, ec);
+}
+
+TEST_CASE("HC-07 /provider set:已替换未确认耐久——盘面已新,内存照发,回执如实") {
+    const auto home = TempDir("hc07_unconfirmed");
+    HomeEnvGuard guard(home);
+    AtomicWriteHookGuard hooks;
+
+    lubancode::config::ProviderConfig local{
+        .name = "local",
+        .base_url = "http://127.0.0.1:49824/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "old-model",
+    };
+    local.auth = lubancode::config::ProviderAuthMode::None;
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(local).has_value());
+    const std::filesystem::path cfg = home / ".lubancode" / "config.json";
+
+    lubancode::config::Config config;
+    config.providers = {local};
+    config.wire = lubancode::config::Wire::Responses;
+    config.model = "old-model";
+    config.native_web_search = false;
+    std::string active_provider = "local";
+    RebuildableBackend backend(config);
+
+    // 换名后父目录刷盘失败:盘面已是新内容,回执=已替换未确认耐久——
+    // 内存照常发布对齐盘面,不许当未写盘回滚,也不冒充全绿。
+    lubancode::platform::SetDirectoryFlushFailureForTest(true);
+    std::string out;
+    RunProviderCommandCapture("set local native_web_search on", config, active_provider, backend, out);
+    CHECK(out.find("断电耐久未确认") != std::string::npos);
+    CHECK(out.find("已立即生效") != std::string::npos);
+
+    const nlohmann::json root = ReadConfigJson(cfg);
+    REQUIRE(root.contains("providers"));
+    REQUIRE(root["providers"].is_array());
+    REQUIRE(root["providers"].size() == 1);
+    REQUIRE(root["providers"][0].is_object());
+    CHECK(root["providers"][0].value("native_web_search", false));
+    // 内存三处同盘面:providers 条目、顶层镜像(活跃端)。
+    CHECK(lubancode::config::FindProvider(config.providers, "local")->native_web_search);
+    CHECK(config.native_web_search);
+
+    std::error_code ec;
+    std::filesystem::remove_all(home, ec);
+}
+
+TEST_CASE("HC-07 /provider set:耐久确认——正常成功一路,无耐久提示") {
+    const auto home = TempDir("hc07_durable");
+    HomeEnvGuard guard(home);
+
+    lubancode::config::ProviderConfig local{
+        .name = "local",
+        .base_url = "http://127.0.0.1:49825/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "old-model",
+    };
+    local.auth = lubancode::config::ProviderAuthMode::None;
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(local).has_value());
+    const std::filesystem::path cfg = home / ".lubancode" / "config.json";
+
+    lubancode::config::Config config;
+    config.providers = {local};
+    config.wire = lubancode::config::Wire::Responses;
+    config.model = "old-model";
+    std::string active_provider = "local";
+    RebuildableBackend backend(config);
+
+    std::string out;
+    RunProviderCommandCapture("set local extra_header X-Tag v1", config, active_provider, backend, out);
+    CHECK(out.find("写进全局配置") != std::string::npos);
+    CHECK(out.find("断电耐久未确认") == std::string::npos);
+
+    const nlohmann::json root = ReadConfigJson(cfg);
+    REQUIRE(root.contains("providers"));
+    REQUIRE(root["providers"][0].contains("extra_headers"));
+    CHECK(root["providers"][0]["extra_headers"].value("X-Tag", "") == "v1");
+    CHECK(lubancode::config::FindProvider(config.providers, "local")->extra_headers.count("X-Tag") == 1);
+    CHECK(config.extra_headers.count("X-Tag") == 1);  // 活跃端镜像跟着发布
+
+    std::error_code ec;
+    std::filesystem::remove_all(home, ec);
+}
+
+TEST_CASE("HC-07 非活跃端编辑:providers 条目照改,当前后端镜像一毫不动") {
+    const auto home = TempDir("hc07_inactive");
+    HomeEnvGuard guard(home);
+
+    lubancode::config::ProviderConfig local{
+        .name = "local",
+        .base_url = "http://127.0.0.1:49826/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "old-model",
+    };
+    local.auth = lubancode::config::ProviderAuthMode::None;
+    lubancode::config::ProviderConfig other{
+        .name = "other",
+        .base_url = "http://127.0.0.1:49827/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "other-model",
+    };
+    other.auth = lubancode::config::ProviderAuthMode::None;
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(local).has_value());
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(other).has_value());
+
+    lubancode::config::Config config;
+    config.providers = {local, other};
+    config.wire = lubancode::config::Wire::Responses;
+    config.model = "old-model";
+    std::string active_provider = "local";
+    RebuildableBackend backend(config);
+
+    std::string out;
+    RunProviderCommandCapture("set other extra_header X-Other 1", config, active_provider, backend, out);
+    CHECK(out.find("写进全局配置") != std::string::npos);
+    CHECK(out.find("已立即生效") == std::string::npos);  // 没悄悄动当前端
+    // 条目改了,当前活跃端的顶层镜像(base_url/model/headers)分毫不动。
+    CHECK(lubancode::config::FindProvider(config.providers, "other")->extra_headers.count("X-Other") == 1);
+    CHECK(config.extra_headers.empty());
+    CHECK(config.base_url == "http://127.0.0.1:49826/v1");
+    CHECK(config.model == "old-model");
+
+    std::error_code ec;
+    std::filesystem::remove_all(home, ec);
+}
+
+TEST_CASE("HC-07 /provider remove:未提交时内存列表保持,盘面原样") {
+    const auto home = TempDir("hc07_remove");
+    HomeEnvGuard guard(home);
+    AtomicWriteHookGuard hooks;
+
+    lubancode::config::ProviderConfig local{
+        .name = "local",
+        .base_url = "http://127.0.0.1:49828/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "old-model",
+    };
+    local.auth = lubancode::config::ProviderAuthMode::None;
+    lubancode::config::ProviderConfig other{
+        .name = "other",
+        .base_url = "http://127.0.0.1:49829/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "other-model",
+    };
+    other.auth = lubancode::config::ProviderAuthMode::None;
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(local).has_value());
+    REQUIRE(lubancode::config::AddProviderToGlobalConfig(other).has_value());
+    const std::filesystem::path cfg = home / ".lubancode" / "config.json";
+    const std::string disk_before = ReadFileText(cfg);
+
+    lubancode::config::Config config;
+    config.providers = {local, other};
+    config.wire = lubancode::config::Wire::Responses;
+    std::string active_provider = "local";
+    RebuildableBackend backend(config);
+
+    lubancode::platform::SetFileFlushFailureForTest(true);
+    std::string out;
+    RunProviderCommandCapture("remove other", config, active_provider, backend, out);
+    CHECK(out.find("删 provider 失败") != std::string::npos);
+    CHECK(ReadFileText(cfg) == disk_before);  // 盘面原样
+    CHECK(config.providers.size() == 2);      // 内存列表没少人
+
+    std::error_code ec;
     std::filesystem::remove_all(home, ec);
 }
 

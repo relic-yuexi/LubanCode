@@ -1363,13 +1363,26 @@ std::expected<platform::AtomicWriteReceipt, platform::AtomicWriteError> WriteCon
 std::expected<void, std::string> WriteConfigObjectAtomic(const std::string& file_path,
                                                          const nlohmann::json& root);
 
+// Provider 配置提交回执(HC-07 统一合同):providers 段提交链的统一收口。
+// 成功 = 换名已生效,outcome 如实分档:CommittedDurable(数据与父目录条目
+// 都确认落盘)或 CommittedDurabilityUnconfirmed(新内容已可见,断电耐久没
+// 确认——盘面已是新值,内存照常发布,不得冒充没变,也不得回滚)。path 是
+// 实际写入的配置文件,供回执打印去处。失败(unexpected 一律)= 未提交:
+// 换名没发生,盘面保持原样,调用方不得发布内存、不得把错误当成"盘面已换"
+// 反向处理。
+struct ProviderCommitReceipt {
+    platform::WriteOutcome outcome = platform::WriteOutcome::CommittedDurable;
+    std::string path;
+};
+
 // providers 段的纯解析与局部回写。回写只改 providers，其余用户字段原样
 // 保留；file_path 不存在时会按需建父目录并起一份 JSON object，便于单测和
-// /provider add 复用。
+// /provider add 复用。回写走 FD-04 阶段原子写,回执按 HC-07 统一合同:
+// 成功带提交阶段(含"已替换未确认耐久"),失败一律未提交、盘面未动。
 std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
     const nlohmann::json& providers_json, const std::string& file_path_for_error);
-std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& file_path,
-                                                               const std::vector<ProviderConfig>& providers);
+std::expected<ProviderCommitReceipt, std::string> UpdateProvidersInConfigFile(
+    const std::string& file_path, const std::vector<ProviderConfig>& providers);
 
 // 只改 active_provider 字段，其余 JSON 原样保留。前者供项目级固定选择，
 // 后者供 /provider switch 记住全局的上次选择。
@@ -1378,51 +1391,51 @@ std::expected<void, std::string> UpdateActiveProviderInConfigFile(const std::str
 std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const std::string& name);
 
 // /provider add/remove/set 永远改用户主目录的全局 config.json，不碰项目配置。
-// 成功时返回实际写入路径；删除/设置找不到名字时报错，不碰文件。
-std::expected<std::string, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider);
-std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std::string& name);
+// 回执按 HC-07 统一合同(见 ProviderCommitReceipt):成功 = 已换名(分档
+// 如实),失败 = 未提交、盘面未动;删除/设置找不到名字时报错,不碰文件。
+std::expected<ProviderCommitReceipt, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider);
+std::expected<ProviderCommitReceipt, std::string> RemoveProviderFromGlobalConfig(const std::string& name);
 
 // /provider set native_web_search 用:把全局配置里对应 provider 的
 // native_web_search 改掉再原样落盘(SetProviderNativeWebSearch 做实际改
-// 字段那一步),返回落盘路径。找不到这个 provider 名字就报错、不碰文件。
-std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig(const std::string& name,
-                                                                                   bool enabled);
+// 字段那一步)。找不到这个 provider 名字就报错、不碰文件。
+std::expected<ProviderCommitReceipt, std::string> SetProviderNativeWebSearchInGlobalConfig(
+    const std::string& name, bool enabled);
 
 // /provider set extra_body 用:整段替换全局配置里对应 provider 的
 // extra_body 再落盘。找不到这个 provider 名字就报错、不碰文件。
-std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const std::string& name,
-                                                                             const nlohmann::json& body);
+std::expected<ProviderCommitReceipt, std::string> SetProviderExtraBodyInGlobalConfig(
+    const std::string& name, const nlohmann::json& body);
 
 // /doctor cache usage 探针写回用:把全局配置里对应 provider 的 stream_usage
 // 连同"已声明"标记一起落盘。找不到名字报错、不碰文件。
-std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(const std::string& name,
-                                                                               bool enabled);
+std::expected<ProviderCommitReceipt, std::string> SetProviderStreamUsageInGlobalConfig(const std::string& name,
+                                                                                        bool enabled);
 
 // /provider set extra_header 用:设置(或者 value 为空串时删除)全局配置里
 // 对应 provider 的某一条 extra_headers,再落盘。找不到这个 provider 名字就
 // 报错、不碰文件。
-std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(const std::string& name,
-                                                                               const std::string& header_name,
-                                                                               const std::string& value);
+std::expected<ProviderCommitReceipt, std::string> SetProviderExtraHeaderInGlobalConfig(
+    const std::string& name, const std::string& header_name, const std::string& value);
 
 // /provider set auth 用:把全局配置里对应 provider 的鉴权模式换成 mode 再
 // 落盘(实际改字段那一步走 SetProviderAuthMode)。找不到名字报错、不碰文件。
-std::expected<std::string, std::string> SetProviderAuthModeInGlobalConfig(const std::string& name,
-                                                                          ProviderAuthMode mode);
+std::expected<ProviderCommitReceipt, std::string> SetProviderAuthModeInGlobalConfig(const std::string& name,
+                                                                                    ProviderAuthMode mode);
 
 // /provider set auth env/inline 补齐版:切模式的同时把缺的变量名/key 一并
 // 写上,不留半截配置(env 要求变量名非空、inline 要求 key 非空,校验兜底)。
-std::expected<std::string, std::string> SetProviderAuthEnvInGlobalConfig(const std::string& name,
-                                                                         const std::string& key_env);
-std::expected<std::string, std::string> SetProviderAuthInlineInGlobalConfig(const std::string& name,
-                                                                            const std::string& api_key);
+std::expected<ProviderCommitReceipt, std::string> SetProviderAuthEnvInGlobalConfig(const std::string& name,
+                                                                                   const std::string& key_env);
+std::expected<ProviderCommitReceipt, std::string> SetProviderAuthInlineInGlobalConfig(const std::string& name,
+                                                                                      const std::string& api_key);
 
 // /provider edit 用(容错单):把全局配置里 name 那条 provider 整条换成
 // provider 再落盘(实际替换那一步走 ReplaceProvider 纯函数,校验兜底)。
 // 找不到名字、或者想顺手改名(provider.name != name),都报错、不碰文件。
 // 其他条目原样保留。
-std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std::string& name,
-                                                                      const ProviderConfig& provider);
+std::expected<ProviderCommitReceipt, std::string> ReplaceProviderInGlobalConfig(const std::string& name,
+                                                                                const ProviderConfig& provider);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

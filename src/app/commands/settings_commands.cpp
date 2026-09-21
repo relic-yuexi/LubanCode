@@ -69,6 +69,29 @@ std::string TrimAscii(std::string value) {
     return value;
 }
 
+// HC-07 统一发布合同:Provider 配置变更一律"持久提交在前、内存发布在后",
+// 发布与否由 FD-04 的提交阶段一锤定音——
+//   未提交(回执无值):换名没发生,盘面原样,publish 不执行,内存一字
+//     不动,调用方各自报失败行;
+//   已替换未确认耐久(outcome = CommittedDurabilityUnconfirmed):盘面已是
+//     新内容,publish 照常执行对齐盘面,另打一行如实提示,不冒充没变;
+//   耐久确认(CommittedDurable):publish 执行,正常收尾。
+// publish 只在"盘面已换新"时被执行一次;/provider set 三分支、auth 家族、
+// add/edit/remove 全走这一个口,谁也不许再自己排次序。
+// 返回 true = 已提交(publish 已跑);false = 未提交(publish 没跑)。
+bool PublishCommittedProviderConfig(
+    const std::expected<lubancode::config::ProviderCommitReceipt, std::string>& commit,
+    const std::function<void()>& publish) {
+    if (!commit.has_value()) {
+        return false;
+    }
+    publish();
+    if (commit->outcome == lubancode::platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
+        TermOut() << trf("cmd.provider.commit_unconfirmed", commit->path) << "\n";
+    }
+    return true;
+}
+
 // WizardPanel 给选择菜单留 12 行。短菜单至多 11 项再带一行 hint；长菜单
 // 固定拿两行画搜索栏与 hint，中间十行翻页。三处共用一把尺，不能各算各的。
 constexpr int kWizardChoiceReserveRows = 12;
@@ -846,12 +869,12 @@ std::optional<std::string> RunProviderAddWizardInteractive(const std::string& na
     }
 
     const auto saved = lubancode::config::AddProviderToGlobalConfig(outcome->provider);
-    if (!saved.has_value()) {
+    // HC-07:同一条提交-发布合同——盘上添成了,内存列表才添。
+    if (!PublishCommittedProviderConfig(saved, [&] { config.providers.push_back(outcome->provider); })) {
         TermOut() << trf("cmd.provider.add_failed", saved.error()) << "\n";
         return std::nullopt;
     }
-    config.providers.push_back(outcome->provider);
-    TermOut() << trf("cmd.provider.added", outcome->provider.name, *saved) << "\n";
+    TermOut() << trf("cmd.provider.added", outcome->provider.name, saved->path) << "\n";
     return outcome->provider.name;
 }
 
@@ -1015,19 +1038,22 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     continue;
                 }
                 const bool persist = where_sel->selected_indices.front() == 1;
-                // 内存这份走语义化 setter(问题 4):与落盘侧
-                // SetProviderAuthInlineInGlobalConfig 同一套字段改法,不再
-                // find_if 之后逐字段直改。
-                lubancode::config::SetProviderAuthInline(config.providers, name, *key);
                 if (persist) {
+                    // HC-07:先持久提交后内存发布(与 /provider set 同一条
+                    // 合同);内存走语义化 setter(问题 4),与落盘侧同一套
+                    // 字段改法。
                     const auto saved = lubancode::config::SetProviderAuthInlineInGlobalConfig(name, *key);
-                    if (!saved.has_value()) {
+                    if (!PublishCommittedProviderConfig(
+                            saved,
+                            [&] { lubancode::config::SetProviderAuthInline(config.providers, name, *key); })) {
                         TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                         return false;
                     }
                     TermOut() << trf("provider_remedy.key_saved", name,
-                                     lubancode::config::MaskApiKey(*key), *saved) << "\n";
+                                     lubancode::config::MaskApiKey(*key), saved->path) << "\n";
                 } else {
+                    // 只供本次会话:没有持久提交这回事,内存直接改。
+                    lubancode::config::SetProviderAuthInline(config.providers, name, *key);
                     TermOut() << trf("provider_remedy.key_session_only",
                                      lubancode::config::MaskApiKey(*key)) << "\n";
                 }
@@ -1042,12 +1068,12 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     continue;
                 }
                 const auto saved = lubancode::config::SetProviderAuthEnvInGlobalConfig(name, *env_name);
-                if (!saved.has_value()) {
+                // HC-07:先持久提交后内存发布(setter 封字段改法,问题 4)。
+                if (!PublishCommittedProviderConfig(
+                        saved, [&] { lubancode::config::SetProviderAuthEnv(config.providers, name, *env_name); })) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return false;
                 }
-                // 内存这份同步换(问题 4:setter 封字段改法,不逐字段直改)。
-                lubancode::config::SetProviderAuthEnv(config.providers, name, *env_name);
                 const std::optional<std::string> value = lubancode::platform::GetEnvVar(env_name->c_str());
                 TermOut() << (value.has_value() && !value->empty()
                                   ? trf("provider_wizard.auth.env.note_set", *env_name)
@@ -1058,13 +1084,13 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 // 设为无需鉴权:明确写回 provider,重启仍认得,不是"忽略这次错误"。
                 const auto saved = lubancode::config::SetProviderAuthModeInGlobalConfig(
                     name, lubancode::config::ProviderAuthMode::None);
-                if (!saved.has_value()) {
+                // HC-07:先持久提交后内存发布(setter 封字段改法,问题 4)。
+                if (!PublishCommittedProviderConfig(
+                        saved, [&] { lubancode::config::SetProviderAuthNone(config.providers, name); })) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return false;
                 }
-                // 内存这份同步换(问题 4:setter 封字段改法,不逐字段直改)。
-                lubancode::config::SetProviderAuthNone(config.providers, name);
-                TermOut() << trf("provider_remedy.none_saved", name, *saved) << "\n";
+                TermOut() << trf("provider_remedy.none_saved", name, saved->path) << "\n";
                 continue;
             }
             if (pick == 3) {
@@ -1123,17 +1149,21 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return;
         }
         const auto saved = lubancode::config::ReplaceProviderInGlobalConfig(name, outcome->provider);
-        if (!saved.has_value()) {
+        // HC-07:同一条提交-发布合同——盘上换成了,内存里的这份才跟着换,
+        // 后续 execute_switch / list 看到的都是新值。
+        if (!PublishCommittedProviderConfig(saved, [&] {
+                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
+                                             [&](const lubancode::config::ProviderConfig& p) {
+                                                 return p.name == name;
+                                             });
+                if (it != config.providers.end()) {
+                    *it = outcome->provider;
+                }
+            })) {
             TermOut() << trf("cmd.provider.edit.save_failed", saved.error()) << "\n";
             return;
         }
-        // 内存里的这份跟着换,后续 execute_switch / list 看到的都是新值。
-        const auto it = std::find_if(config.providers.begin(), config.providers.end(),
-                                     [&](const lubancode::config::ProviderConfig& p) { return p.name == name; });
-        if (it != config.providers.end()) {
-            *it = outcome->provider;
-        }
-        TermOut() << trf("cmd.provider.edit.saved", name, *saved) << "\n";
+        TermOut() << trf("cmd.provider.edit.saved", name, saved->path) << "\n";
         if (active_provider == name) {
             execute_switch(name, "");  // 重新应用整套配置,立即生效
         }
@@ -1240,12 +1270,12 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 return;
             }
             const auto saved = lubancode::config::AddProviderToGlobalConfig(provider);
-            if (!saved.has_value()) {
+            // HC-07:同一条提交-发布合同——盘上添成了,内存列表才添。
+            if (!PublishCommittedProviderConfig(saved, [&] { config.providers.push_back(std::move(provider)); })) {
                 TermOut() << trf("cmd.provider.add_failed", saved.error()) << "\n";
                 return;
             }
-            config.providers.push_back(std::move(provider));
-            TermOut() << trf("cmd.provider.added", command.name, *saved) << "\n";
+            TermOut() << trf("cmd.provider.added", command.name, saved->path) << "\n";
             if (needs_connection) {
                 const lubancode::config::ProviderConfig* added =
                     lubancode::config::FindProvider(config.providers, command.name);
@@ -1414,18 +1444,20 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
-                // 配置提交点(HC-01):全局配置落盘成功才算提交,之后才动会话
-                // 内存——失败提交不半改内存,角色后端缓存也就读不到半更新
-                // (缓存在下一次 Route 时按连接指纹惰性失效,这里不点名重建,
-                // 非活跃端交给路由层自己管)。auth 分支与 Remove 分支同序。
+                // 配置提交点(HC-01/HC-07):全局配置落盘(按 FD-04 阶段回执)
+                // 成功才算提交,之后才动会话内存——失败提交不半改内存,角色
+                // 后端缓存也就读不到半更新(缓存在下一次 Route 时按连接指纹
+                // 惰性失效,这里不点名重建,非活跃端交给路由层自己管)。
                 const auto saved =
                     lubancode::config::SetProviderNativeWebSearchInGlobalConfig(command.name, *enabled);
-                if (!saved.has_value()) {
+                if (!PublishCommittedProviderConfig(
+                        saved,
+                        [&] { lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled); })) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled);
-                TermOut() << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
+                TermOut() << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off",
+                                 saved->path)
                           << "\n";
                 // 改的正好是当前活跃端:顶层镜像字段跟着同步、重建 backend,别让
                 // "刚改完当前端却要等下次 /provider switch 才生效"这种反直觉
@@ -1463,17 +1495,18 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
-                // 配置提交点(HC-01):先落盘后内存,失败不半改(同 native_web_search 分支)。
+                // 配置提交点(HC-01/HC-07):先落盘后内存,失败不半改(同
+                // native_web_search 分支,统一走 PublishCommittedProviderConfig)。
                 const auto saved = lubancode::config::SetProviderExtraBodyInGlobalConfig(command.name, parsed);
-                if (!saved.has_value()) {
+                if (!PublishCommittedProviderConfig(
+                        saved, [&] { lubancode::config::SetProviderExtraBody(config.providers, command.name, parsed); })) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                lubancode::config::SetProviderExtraBody(config.providers, command.name, parsed);
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.field,
                                   parsed.empty() ? tr("provider_wizard.extra_body.unset")
                                                   : trf("provider_wizard.extra_body.summary", parsed.size()),
-                                  *saved)
+                                  saved->path)
                           << "\n";
                 if (active_provider == command.name) {
                     config.extra_body = parsed;
@@ -1491,18 +1524,20 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
-                // 配置提交点(HC-01):先落盘后内存,失败不半改(同 native_web_search 分支)。
+                // 配置提交点(HC-01/HC-07):先落盘后内存,失败不半改(同
+                // native_web_search 分支,统一走 PublishCommittedProviderConfig)。
                 const auto saved = lubancode::config::SetProviderExtraHeaderInGlobalConfig(
                     command.name, command.header_name, command.value);
-                if (!saved.has_value()) {
+                if (!PublishCommittedProviderConfig(saved, [&] {
+                        lubancode::config::SetProviderExtraHeader(config.providers, command.name, command.header_name,
+                                                                  command.value);
+                    })) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                lubancode::config::SetProviderExtraHeader(config.providers, command.name, command.header_name,
-                                                          command.value);
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.header_name,
                                   command.value.empty() ? tr("provider_wizard.extra_body.unset") : command.value,
-                                  *saved)
+                                  saved->path)
                           << "\n";
                 if (active_provider == command.name) {
                     if (command.value.empty()) {
@@ -1532,7 +1567,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 }
                 std::string prompted_env;
                 std::string prompted_key;
-                std::expected<std::string, std::string> saved;
+                std::expected<lubancode::config::ProviderCommitReceipt, std::string> saved;
                 if (*mode == lubancode::config::ProviderAuthMode::Env && target->key_env.empty()) {
                     const std::optional<std::string> key_env =
                         lubancode::cli::ReadLine(tr("cmd.provider.auth_env_prompt"));
@@ -1554,37 +1589,41 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 } else {
                     saved = lubancode::config::SetProviderAuthModeInGlobalConfig(command.name, *mode);
                 }
-                if (!saved.has_value()) {
+                // HC-07:落盘按提交阶段收口,内存(含活跃端镜像与 backend
+                // 重建)只在盘面已换新时发布。
+                if (!PublishCommittedProviderConfig(saved, [&] {
+                        // 内存这份跟着换(补过的变量名/key 一并同步),活跃端
+                        // 立即生效。问题 4:按补了什么走对应 setter,auth+字段
+                        // 一次切齐,不再 SetProviderAuthMode 之后 find_if 逐字段
+                        // 补丁。四路与原先的终态逐一相同(env/inline 未补 =
+                        // 只换模式,其余连字段一起)。
+                        if (!prompted_env.empty()) {
+                            lubancode::config::SetProviderAuthEnv(config.providers, command.name, prompted_env);
+                        } else if (!prompted_key.empty()) {
+                            lubancode::config::SetProviderAuthInline(config.providers, command.name, prompted_key);
+                        } else if (*mode == lubancode::config::ProviderAuthMode::None) {
+                            lubancode::config::SetProviderAuthNone(config.providers, command.name);
+                        } else {
+                            lubancode::config::SetProviderAuthMode(config.providers, command.name, *mode);
+                        }
+                        const lubancode::config::ProviderConfig* fresh =
+                            lubancode::config::FindProvider(config.providers, command.name);
+                        if (fresh != nullptr && active_provider == command.name) {
+                            const lubancode::config::ProviderAuthResolution auth =
+                                lubancode::config::ResolveProviderAuth(*fresh);
+                            config.auth_mode = fresh->auth;
+                            config.auth_token =
+                                auth.status == lubancode::config::ProviderAuthResolution::Status::Ready
+                                    ? *auth.key
+                                    : std::string();
+                            real_backend.Rebuild(config);
+                        }
+                    })) {
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                // 内存这份跟着换(补过的变量名/key 一并同步),活跃端立即生效。
-                // 问题 4:按补了什么走对应 setter,auth+字段一次切齐,不再
-                // SetProviderAuthMode 之后 find_if 逐字段补丁。四路与原先的
-                // 终态逐一相同(env/inline 未补 = 只换模式,其余连字段一起)。
-                if (!prompted_env.empty()) {
-                    lubancode::config::SetProviderAuthEnv(config.providers, command.name, prompted_env);
-                } else if (!prompted_key.empty()) {
-                    lubancode::config::SetProviderAuthInline(config.providers, command.name, prompted_key);
-                } else if (*mode == lubancode::config::ProviderAuthMode::None) {
-                    lubancode::config::SetProviderAuthNone(config.providers, command.name);
-                } else {
-                    lubancode::config::SetProviderAuthMode(config.providers, command.name, *mode);
-                }
-                const lubancode::config::ProviderConfig* fresh =
-                    lubancode::config::FindProvider(config.providers, command.name);
-                if (fresh != nullptr && active_provider == command.name) {
-                    const lubancode::config::ProviderAuthResolution auth =
-                        lubancode::config::ResolveProviderAuth(*fresh);
-                    config.auth_mode = fresh->auth;
-                    config.auth_token =
-                        auth.status == lubancode::config::ProviderAuthResolution::Status::Ready
-                            ? *auth.key
-                            : std::string();
-                    real_backend.Rebuild(config);
-                }
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.field,
-                                 lubancode::config::ProviderAuthModeName(*mode), *saved)
+                                 lubancode::config::ProviderAuthModeName(*mode), saved->path)
                           << "\n";
                 if (active_provider == command.name) {
                     TermOut() << trf("cmd.provider.set_active_applied", command.name) << "\n";
@@ -1604,17 +1643,19 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                 return;
             }
-            if (const auto removed = lubancode::config::RemoveProviderFromGlobalConfig(command.name);
-                removed.has_value()) {
-                config.providers.erase(std::remove_if(config.providers.begin(), config.providers.end(),
-                                                      [&](const lubancode::config::ProviderConfig& provider) {
-                                                          return provider.name == command.name;
-                                                      }),
-                                       config.providers.end());
-                TermOut() << trf("cmd.provider.removed", command.name, *removed) << "\n";
-            } else {
+            // HC-07:删除同一条提交-发布合同——盘上删成了,内存列表才删。
+            const auto removed = lubancode::config::RemoveProviderFromGlobalConfig(command.name);
+            if (!PublishCommittedProviderConfig(removed, [&] {
+                    config.providers.erase(std::remove_if(config.providers.begin(), config.providers.end(),
+                                                          [&](const lubancode::config::ProviderConfig& provider) {
+                                                              return provider.name == command.name;
+                                                          }),
+                                           config.providers.end());
+                })) {
                 TermOut() << trf("cmd.provider.remove_failed", removed.error()) << "\n";
+                return;
             }
+            TermOut() << trf("cmd.provider.removed", command.name, removed->path) << "\n";
             return;
         case lubancode::cli::ProviderCommandAction::Edit: {
             // /provider edit <名字>(容错单):TTY、管道都进向导(向导自己在
