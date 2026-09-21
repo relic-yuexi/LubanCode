@@ -319,7 +319,7 @@ private:
             nlohmann::json tools = nlohmann::json::array();
             const std::function<bool(const lubancode::tools::Tool&)>& filter = main_tool_filter();
             for (const auto& tool : registry().All()) {
-                if (filter && !(*filter)(*tool)) {
+                if (filter && !filter(*tool)) {
                     continue;  // 延迟未挂载:不进 tools 数组,与实发同形
                 }
                 tools.push_back(nlohmann::json{{"name", tool->name()},
