@@ -1,6 +1,6 @@
 # FD-05 模型协议窄合同从配置总头剥离
 
-- 状态：已实现；PR 与 CI 证据见文末勾账。
+- 状态：已实现，PR #190 CI 全绿待合并（changes/lane/install-scripts 双平台 + macos-clang 全 success，rollup 0 failure，run 35627684566）。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：C；严重度：中；重构批次：3。
@@ -35,6 +35,7 @@
 - [x] 重跑静态include影响数，报告前后差额；实际编译收益交CI测。（直接引用数：src/ 85 → 80（-5，即四家 client.hpp + models.hpp），src/+tests/ 128 → 123；传递上界：原先凡 include 四家 client.hpp / models.hpp 的编译单元都拖配置总头（含 nlohmann 全量、hooks/events、channel_config、atomic_write），拆后 src/api/models.cpp、tests/unit/config/test_models.cpp 等独苗文件只剩零依赖小头。全仓排查转拖断粮：26 个无直接 config.hpp 的消费者逐一核对，config:: 符号仅 config::Wire（小头供给），hooks::/channel::/platform:: 命中各有自家直达 include；标准库转拖（<optional>/<vector>/<utility>）同查，唯一纯 client 头供给者 test_models.cpp 不涉。实际编译收益以 CI 全绿为准。）
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+  - 本单证据：PR #190，head de1be804，run 35627684566（pull_request 事件；同头 push 影子 run 35627654350 被并发组顶掉属常态）——changes/lane/install-scripts(ubuntu,windows)/macos-clang 全 success，linux 系腿按设计 skipped，run conclusion success，rollup 0 failure/0 pending。本单纯头文件搬移，未触平台敏感面过滤器，无 windows-msvc 腿，不适用"平台码分支须 windows 腿绿"门槛。
 
 ## 合并取舍与估量
 
