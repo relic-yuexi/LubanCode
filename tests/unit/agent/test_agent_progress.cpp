@@ -294,10 +294,14 @@ TEST_CASE("强收与轮次提交交错:栅栏钉住读值与终态提交同锁")
     // AR-06 故障夹具:监督器旧形状在台账锁外读 stale_rounds 再交给强收口,
     // 任务线程的 RecordAssistantMessage 正在锁内自增同一枚 int——竞争窗口
     // 就在"读值"与"强收拿锁"之间。夹具用 release/acquire 栅栏把两边逼到
-    // 同一扇门前反复撞(不靠 sleep)。修法落地后合同成立:强收消息里的
-    // 轮数 == 台账最终 stale_rounds(读值与终态提交同锁,中间插不进任何
-    // 一笔轮次账);旧形状在读后至拿锁间落进一笔提交时,消息轮数会小于
-    // 台账终值,这里必红。
+    // 同一扇门前撞(不靠 sleep)。修法落地后合同成立:强收消息里的轮数 ==
+    // 台账最终 stale_rounds(读值与终态提交同锁,中间插不进任何一笔轮次
+    // 账);旧形状在读后至拿锁间落进一笔提交时,消息轮数会小于台账终值,
+    // 这里必红。
+    // 交错窗有界:提交侧只补一小批(64 笔)就收手,不无限自旋——macOS 的
+    // os_unfair_lock 不保证先来后到,无限抢锁会把强收线程饿死在锁外
+    // (首跑 macos-clang 即 180s 超时的教训)。有界批次同样把竞争窗口撞满:
+    // 批内每笔都落在强收"拿锁前/拿锁后"的缝上,批尽则强收稳拿锁收口。
     for (int round = 0; round < 20; ++round) {
         tools::TaskLedger ledger;
         const auto task = MakeTask(ledger, "交错" + std::to_string(round));
@@ -305,18 +309,18 @@ TEST_CASE("强收与轮次提交交错:栅栏钉住读值与终态提交同锁")
 
         std::atomic<bool> stale_on_the_books{false};
         std::thread submitter([&] {
-            // 任务线程形状:完整 assistant 消息提交(台账锁内自增空转轮),
-            // 直到强收翻终态把写口拦停。
+            // 任务线程形状:完整 assistant 消息提交(台账锁内自增空转轮)。
             ledger.RecordAssistantMessage(task, same);  // 首笔:新指纹,算进展
             ledger.RecordAssistantMessage(task, same);  // 第二笔:空转 +1
             stale_on_the_books.store(true, std::memory_order_release);
-            while (!task->finalized.load(std::memory_order_acquire)) {
+            // 交错窗:与强收的拿锁尝试正面抢一小批,抢完收手。
+            for (int i = 0; i < 64 && !task->finalized.load(std::memory_order_acquire); ++i) {
                 ledger.RecordAssistantMessage(task, same);
                 std::this_thread::yield();
             }
         });
-        // 监督线程形状:等首枚空转轮落账(栅栏交错,不靠 sleep),再落
-        // 宽限强收锤。
+        // 监督线程形状:等首枚空转轮落账(release/acquire 栅栏,不靠
+        // sleep),再落宽限强收锤。
         while (!stale_on_the_books.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
