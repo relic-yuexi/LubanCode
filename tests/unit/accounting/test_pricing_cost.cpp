@@ -94,6 +94,38 @@ TEST_CASE("价格表坏形拒收") {
     CHECK(!PricingTable::FromJsonStrict(bad_date, &error).has_value());
 }
 
+TEST_CASE("价格表往返:JSON 恒货币单位,parse→serialize→parse micros 逐项相等") {
+    // FD-01 合同钉:读侧认货币单位(1.25 → 1'250'000 micros),写侧必须折回
+    // 货币单位。旧写侧直放 micros 整数,同字段两种单位,往返 ×1e6 漂移
+    // (1.25 → 1'250'000'000'000)。
+    const PricingTable table = MakeTable();
+    std::string error;
+    const auto reparsed =
+        PricingTable::FromJsonStrict(nlohmann::json::parse(table.ToJson().dump()), &error);
+    REQUIRE(reparsed.has_value());
+    // 钉数值,不是 has_value:1.25 / 0.1 / 2.5 / 整数价 10 / 零价各归各位。
+    const ModelPrice* exact = reparsed->Find("ccmoon", "gpt-5.6-sol");
+    REQUIRE(exact != nullptr);
+    CHECK(exact->input_per_million_micros == 1'250'000);
+    CHECK(exact->cache_read_per_million_micros == 100'000);
+    CHECK(exact->cache_creation_per_million_micros == 2'500'000);
+    CHECK(exact->output_per_million_micros == 10'000'000);
+    const ModelPrice* wildcard = reparsed->Find("anyone", "local-model");
+    REQUIRE(wildcard != nullptr);
+    CHECK(wildcard->input_per_million_micros == 0);
+    CHECK(wildcard->output_per_million_micros == 0);
+    // 两模型八桶全等。
+    for (const auto& [key, price] : table.models) {
+        const auto it = reparsed->models.find(key);
+        REQUIRE(it != reparsed->models.end());
+        CHECK(it->second.input_per_million_micros == price.input_per_million_micros);
+        CHECK(it->second.cache_read_per_million_micros == price.cache_read_per_million_micros);
+        CHECK(it->second.cache_creation_per_million_micros ==
+              price.cache_creation_per_million_micros);
+        CHECK(it->second.output_per_million_micros == price.output_per_million_micros);
+    }
+}
+
 TEST_CASE("整数 micros:拆段乘法无 float 漂移") {
     // 小数价:1.25/million,1 token = 1.25 micros,下取整 1。
     CHECK(MultiplyTokensByMicrosPrice(1, 1250000) == 1);
