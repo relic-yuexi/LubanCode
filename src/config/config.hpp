@@ -37,20 +37,17 @@
 // channel 不反向 include config)。
 #include "channel/channel_config.hpp"
 
+// 模型协议窄合同(FD-05):Wire 枚举与四枚网络超时默认值住在零依赖的
+// config/model_protocol.hpp——四家 API client 与 ListModels 只引那枚小头,
+// 不再拖整份配置合同。本头 include 它,下列 Config/ProviderConfig 的字段
+// 与默认值照旧可见(单一真源,不另抄常量)。
+#include "config/model_protocol.hpp"
+
 namespace lubancode::config {
 
-// 说哪种"方言"跟模型对话:Anthropic 的 Messages API、OpenAI 的 Responses
-// API、兼容面最广的 OpenAI Chat Completions,还是 Google Gemini 的
-// Generate Content API。默认 anthropic。
-//
-// 命名规范(wire 更名单,2026-08):配置里的规范名跟业内叫法
-// 对齐——anthropic-messages / openai-responses / openai-chat-completions /
-// google-generate-content,ProviderWireName 一律吐这四个;旧名(anthropic /
-// responses / chat_completions / chat)在 ParseProviderWire 里永久当别名
-// 认,老配置文件不许崩。枚举成员名保持 Anthropic/Responses/ChatCompletions
-// 原样不动——配置字符串层换规范名是一回事,源码里几十处 Wire:: 引用(含
-// provider_catalog 等旁人正在改的文件)没必要陪着翻一遍。
-enum class Wire { Anthropic, Responses, ChatCompletions, GoogleGenerateContent };
+// Wire(协议方言枚举)已随 FD-05 搬去 config/model_protocol.hpp(本头
+// include 它,config::Wire 照旧可见);规范名/别名的完整注释随定义在
+// 那边,配置字符串层的解析(ParseProviderWire/ProviderWireName)仍在本头。
 
 // 一个字段的值最终是从哪一级配置来的,--config 诊断输出用。
 // 配置文件分两级:项目级 <cwd>/.lubancode/config.json 压过全局
@@ -306,34 +303,11 @@ constexpr int kDefaultToolSearchThreshold = 20;
 // "实测有省"的区域多管闲事。0 = 关掉这道门,只看枚数(P4 之前的现状)。
 constexpr int kDefaultToolSearchTokenFloor = 1500;
 
-// M11(网络超时):两个 API 客户端(anthropic/responses)以及 ListModels 共用
-// 的超时默认值,毫秒/秒两种单位混用是因为对应的 cpr 选项本身单位不同
-// (ConnectTimeout 认毫秒,LowSpeed::time 和 cpr::Timeout 的语义按秒/毫秒
-// 分别处理更直观,这里 idle/request 两个字段存"秒",内部换算成毫秒喂给 cpr)。
-//
-// - kDefaultConnectTimeoutMs:TCP+TLS 握手阶段的上限。连不上时(DNS 解析
-//   不动、服务器不回包)靠这个及时报错,不干等。15 秒是"网络稍差也能连上,
-//   真连不上也不用等太久"的折中。
-// - kDefaultStreamIdleTimeoutSecs:流式(SSE)读空闲超时——不是总时长上限
-//   (流式回答本可以很长),是"连续这么多秒一个字节都没收到"就判定连接
-//   假死。60 秒给足模型长时间思考/工具调用间隙的余量,又不至于真断线时
-//   干等太久。
-// - kDefaultRequestTimeoutSecs:非流式请求(目前只有 ListModels 拉模型
-//   列表)的整体超时——这类请求响应体小,没有"回复很长"的顾虑,直接给
-//   总时长上限。30 秒跟 tools/web_search.cpp、tools/web_fetch.cpp 里已有的
-//   cpr::Timeout{30000} 保持一致的量级。
-// - kDefaultRequestHardTimeoutSecs(cpr 并发挂死单):每枚**流式**请求的
-//   硬墙钟——与上面三个是两码事。connect/idle 两道闸只管"连接阶段"与
-//   "连续无字节";真机现场(本机代理/TUN 截胡 127.0.0.1 回环)出现过
-//   请求进了 cpr::Post 再不返、两道闸都不触发的挂死,唯一兜底是给整枚
-//   请求一面不可穿透的墙:ProgressCallback 里对 steady_clock 比期限,
-//   超期返回 false 掐流(libcurl 周期性调它,连接死寂也醒)。不能用
-//   cpr::Timeout 实现——那是 CURLOPT_TIMEOUT,会把正常的长流拦腰砍断。
-//   默认 300s 给足长思考/长回复的余量;0 = 不设这道墙(回到旧行为)。
-constexpr int kDefaultConnectTimeoutMs = 15000;
-constexpr int kDefaultStreamIdleTimeoutSecs = 60;
-constexpr int kDefaultRequestTimeoutSecs = 30;
-constexpr int kDefaultRequestHardTimeoutSecs = 300;
+// M11(网络超时)的四枚默认值(kDefaultConnectTimeoutMs /
+// kDefaultStreamIdleTimeoutSecs / kDefaultRequestTimeoutSecs /
+// kDefaultRequestHardTimeoutSecs)已随 FD-05 搬去
+// config/model_protocol.hpp——四家 API client 与 ListModels 的小头引用,
+// 本头 include 它,下面 Config 字段默认值照旧取得到。
 
 // M9:一条钩子。matcher 只有 pre_tool/post_tool 才有意义——工具名精确匹配,
 // 或者 "*" 匹配所有工具;session_start/session_end 没有这个概念,解析时留

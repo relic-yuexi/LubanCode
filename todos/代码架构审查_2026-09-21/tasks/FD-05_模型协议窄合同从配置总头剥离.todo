@@ -1,0 +1,52 @@
+# FD-05 模型协议窄合同从配置总头剥离
+
+- 状态：已实现；PR 与 CI 证据见文末勾账。
+- 日期：2026-09-21。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：C；严重度：中；重构批次：3。
+- 前置：FD-02、FD-08、HC-01、HC-07（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-05 | C | 中 | src/api/anthropic/client.hpp:16；src/api/anthropic/client.hpp:73；src/api/models.hpp:24；src/config/config.hpp:49；src/config/config.hpp:329；src/config/config.hpp:618；src/config/config.hpp:891 | 四家 client.hpp 为 `config::kDefaultConnectTimeoutMs` 等常量 include `config/config.hpp`；Models 接口还用 `config::Wire`；同头定义 Config/FileConfig 与 hooks/channels/telemetry 配置。 | 模型后端调用者只需协议枚举与几个默认值，却跟着加载整份配置合同。配置总头有85份直接引用、139份传递 src .cpp 引用上界；加一项渠道配置也会失效模型接口相关编译单元。API↔config 形成目录层反向边。该数含互斥平台，不当成某次构建实测。 | 先把 Wire 与网络默认/TimeoutOptions 抽成独立小头，Config 消费它；四后端与 Models 只引小头。下一步按 provider/runtime/file-source 拆配置合同，保留聚合入口作兼容。类型/默认值保持单一真源，不另抄常量。 | 移动声明不是更改默认值；JSON持久字段、环境优先级不能随头文件重组一起改。这个大头收敛放第三批，等配置行为修复完再做。 |
+
+## 修改边界
+
+- `src/config/config.hpp`
+- `src/config/config.cpp`
+- `src/api/anthropic/client.hpp`
+- `src/api/chat/client.hpp`
+- `src/api/responses/client.hpp`
+- `src/api/gemini/client.hpp`
+- `src/api/models.hpp`
+
+## 实施顺序
+
+- [x] 先抽小头与兼容include，不改调用参数。（新建 src/config/model_protocol.hpp：Wire 枚举与四枚超时默认值连注释逐字节搬场，namespace 仍为 lubancode::config，头本身零 include；config.hpp 顶部 include 它当兼容转发，Config/ProviderConfig 字段默认值与全仓 config:: 引用照旧可见，不动任何调用参数。）
+- [x] 按使用者迁移include，再剥离大头中的非共享合同。（四家 client.hpp 与 api/models.hpp 的 #include "config/config.hpp" 全部改道 config/model_protocol.hpp；config.hpp 旧位置留指路注释。ParseProviderWire/ProviderWireName 是配置字符串层的解析，仍住总头 config.hpp/config.cpp，不随枚举搬。）
+
+## 验收门
+
+- [x] 四backend公共头不再引完整Config、channel配置与Hook loader。（grep 证：src/api/ 下 config/config.hpp 引用 0 处；anthropic/chat/responses/gemini 四家 client.hpp 与 models.hpp 只引 api/backend.hpp、api/types.hpp、自家 request.hpp、nlohmann 与零依赖的 model_protocol.hpp——Config/FileConfig、channel/channel_config.hpp、hooks/events.hpp、platform/atomic_write.hpp 全部出局。）
+- [x] Wire枚举值与配置别名不变，四类超时默认值不变。（枚举行与四枚 constexpr 行与搬场前逐字节一致（git show HEAD 对照）；解析与别名语义零触碰——ParseProviderWire/ProviderWireName 未动一行；既有合同测试（tests/unit/config/test_config.cpp 的 wire 别名矩阵、tests/unit/config/test_models.cpp、tests/integration/process/test_network_timeout.cpp）原样保绿。）
+- [x] 重跑静态include影响数，报告前后差额；实际编译收益交CI测。（直接引用数：src/ 85 → 80（-5，即四家 client.hpp + models.hpp），src/+tests/ 128 → 123；传递上界：原先凡 include 四家 client.hpp / models.hpp 的编译单元都拖配置总头（含 nlohmann 全量、hooks/events、channel_config、atomic_write），拆后 src/api/models.cpp、tests/unit/config/test_models.cpp 等独苗文件只剩零依赖小头。全仓排查转拖断粮：26 个无直接 config.hpp 的消费者逐一核对，config:: 符号仅 config::Wire（小头供给），hooks::/channel::/platform:: 命中各有自家直达 include；标准库转拖（<optional>/<vector>/<utility>）同查，唯一纯 client 头供给者 test_models.cpp 不涉。实际编译收益以 CI 全绿为准。）
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+
+## 合并取舍与估量
+
+只处理本单钉住的合同，不借题改邻接模块。
+
+预计可删除行数：0。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：未要求合并既有总设计单。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：FD-02、FD-08、HC-01、HC-07
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：FD-02（src/api/anthropic/client.hpp, src/api/chat/client.hpp, src/api/gemini/client.hpp, src/api/responses/client.hpp）；FD-04（src/config/config.cpp）；HC-01（src/config/config.cpp）。

@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "api/types.hpp"
-#include "config/config.hpp"
+// FD-05:本头只用 config::Wire 与两枚非流式超时默认值,来自
+// config/model_protocol.hpp 这枚零依赖小头,不再拖整份配置合同。
+#include "config/model_protocol.hpp"
 
 namespace lubancode::api {
 
