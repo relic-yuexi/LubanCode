@@ -48,10 +48,10 @@ public:
 
     explicit ScriptTransport(std::shared_ptr<Shared> shared) : shared_(std::move(shared)) {}
 
-    std::expected<void, channel::qq::GatewayConnectError> Connect(const std::string&) override {
+    std::expected<void, channel::transport::GatewayConnectError> Connect(const std::string&) override {
         const std::lock_guard<std::mutex> lock(shared_->mutex);
         if (shared_->fail_connect) {
-            return std::unexpected(channel::qq::GatewayConnectError{
+            return std::unexpected(channel::transport::GatewayConnectError{
                 kStageConnecting, "connect_refused", "connect refused"});
         }
         nlohmann::json ack = nlohmann::json::object();

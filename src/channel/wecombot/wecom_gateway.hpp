@@ -33,14 +33,15 @@
 
 #include <nlohmann/json.hpp>
 
-#include "channel/qq/qq_gateway.hpp"  // IGatewayTransport/MakeWsTransportFactory(R0 后传输 seam 仍驻 qq 头,平台无关)
+#include "channel/transport/gateway_transport.hpp"  // 传输 seam(SV-07 起中立位,平台无关)
 #include "channel/wecombot/wecom_proto.hpp"
 
 namespace lubancode::channel::wecombot {
 
-// 传输 seam 复用 QQ 的(R0 把帧/TCP/TLS/WS 四件升了共享层,网关传输
-// 适配器与工厂还驻 qq_gateway——平台无关,这里别名引用,中性化归后续)。
-using WecomTransport = channel::qq::IGatewayTransport;
+// 传输 seam(SV-07 自 qq_gateway.hpp 迁 channel/transport,平台无关,
+// 工厂底下同用共享层 WsClient)。WecomTransport 为迁移期别名,新代码可
+// 直接用 channel::transport::IGatewayTransport。
+using WecomTransport = channel::transport::IGatewayTransport;
 using WecomTransportFactory = std::function<std::unique_ptr<WecomTransport>()>;
 
 // 连接阶段稳定名(连接状态口径):connecting(TCP/TLS/WS 升级)→

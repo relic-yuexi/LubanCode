@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "channel/qq/qq_gateway.hpp"  // kStage*(阶段稳定名;StageText 消费)
 #include "platform/atomic_write.hpp"
 
 namespace lubancode::app {
@@ -83,9 +84,9 @@ void ChannelConnectionReporter::ObserveAccount(const Account& account,
                                                PerAccountState& state,
                                                const std::string& boot_id, unsigned long pid,
                                                std::int64_t now_ms) {
-    const channel::qq::ConnectionSnapshot snapshot = account.snapshot
+    const channel::ConnectionSnapshot snapshot = account.snapshot
                                                          ? account.snapshot()
-                                                         : channel::qq::ConnectionSnapshot{};
+                                                         : channel::ConnectionSnapshot{};
     const std::string prefix = "[" + account.channel_id + "/" + account.account_id + "] ";
     const auto emit_line = [&](const std::string& text) {
         if (deps_.emit) {
@@ -170,7 +171,7 @@ void ChannelConnectionReporter::ObserveAccount(const Account& account,
 }
 
 void ChannelConnectionReporter::WriteSnapshot(
-    const Account& account, const channel::qq::ConnectionSnapshot& snapshot,
+    const Account& account, const channel::ConnectionSnapshot& snapshot,
     PerAccountState& state, const std::string& boot_id, unsigned long pid,
     std::int64_t now_ms) {
     nlohmann::json body = nlohmann::json::object();

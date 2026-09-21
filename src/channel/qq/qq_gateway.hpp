@@ -24,8 +24,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "channel/connection_state.hpp"  // 快照合同(SV-07 迁中立位;别名见下)
 #include "channel/qq/qq_proto.hpp"  // kIntentGroupAndC2cEvent(默认 intents)
-#include "channel/transport/ws_client.hpp"
+#include "channel/transport/gateway_transport.hpp"  // 传输 seam(SV-07 迁中立位)
 
 namespace lubancode::channel::qq {
 
@@ -43,17 +44,21 @@ inline constexpr char kStageResuming[] = "resuming";
 inline constexpr char kStageConnected[] = "connected";
 inline constexpr char kStageStopped[] = "stopped";
 
-// 连接失败的稳定账:失败阶段 + 稳定错误码 + 脱敏说明。provider/transport
-// 的失败都折成它,适配器按它记"最近失败"(退避事件不改写)。
-struct GatewayConnectError {
-    std::string stage;       // kStage* 之一
-    std::string error_code;  // 稳定码(见 qq_gateway.cpp 的码表注释)
-    std::string detail;      // 脱敏人话(不带 token/secret/响应体)
-    // §四:服务端 Retry-After 的建议退避下限(毫秒;0 = 无)。RunLoop 的
-    // 退避取 max(阶梯值, retry_after_ms) 再封 max_backoff_ms 帽——429 服从
-    // 有效 Retry-After 且有上限。
-    std::int64_t retry_after_ms = 0;
-};
+// ---- 迁移期兼容别名(SV-07:连接快照与传输 seam 已升中立位——
+// channel/connection_state.hpp 与 channel/transport/gateway_transport.hpp,
+// 三平台同款;QQ/企微网关与 app 装配层共用)----
+// 旧调用方(channel::qq::ConnectionSnapshot/ConnectionFailure/
+// GatewayConnectError/IGatewayTransport/MakeWsTransportFactory,含既有
+// 测试册)照旧编译;新代码直接用 channel::/channel::transport:: 命名。
+// 全仓 grep 零引用后可删本段。
+using ConnectionFailure = channel::ConnectionFailure;
+using ConnectionSnapshot = channel::ConnectionSnapshot;
+using GatewayConnectError = transport::GatewayConnectError;
+using IGatewayTransport = transport::IGatewayTransport;
+inline std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
+    std::string ca_pem, transport::TlsTrustMode trust_mode = transport::TlsTrustMode::ExplicitCa) {
+    return transport::MakeWsTransportFactory(std::move(ca_pem), trust_mode);
+}
 
 // 网关 URL 查询的 HTTP 失败分类(网关 400 诊断单 §四):状态 + 有界 body
 // + 白名单诊断头投影 -> 稳定码 + 脱敏说明。纯函数供测试直钉全表。
@@ -117,23 +122,6 @@ enum class GatewayEventAck {
     Persisted,
     PersistFailed,
 };
-
-// 网关传输 seam(测试注入假流;生产 MakeWsTransportFactory)。
-class IGatewayTransport {
-public:
-    virtual ~IGatewayTransport() = default;
-    virtual std::expected<void, GatewayConnectError> Connect(const std::string& url) = 0;
-    virtual std::expected<void, std::string> SendText(const std::string& text) = 0;
-    virtual std::expected<std::string, transport::WsError> ReadMessage(int timeout_ms) = 0;
-    virtual void Cancel() = 0;
-    virtual void Close(std::uint16_t code, const std::string& reason) = 0;
-};
-
-// 生产传输工厂:真 WsClient(明文 ws:// 与 wss:// 同一路,ca_pem 供 wss;
-// trust_mode 透传 TLS 层,见 transport/tls.hpp)。
-std::function<std::unique_ptr<IGatewayTransport>()> MakeWsTransportFactory(
-    std::string ca_pem,
-    transport::TlsTrustMode trust_mode = transport::TlsTrustMode::ExplicitCa);
 
 class QqGatewaySession {
 public:

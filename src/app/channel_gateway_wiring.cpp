@@ -11,8 +11,8 @@
 #include "channel/credentials.hpp"
 #include "channel/feishu/feishu_gateway.hpp"
 #include "channel/feishu/feishu_http.hpp"
-#include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
+#include "channel/transport/gateway_transport.hpp"
 #include "channel/transport/tls.hpp"
 #include "config/config.hpp"
 #include "gateway/pairing_command.hpp"
@@ -137,7 +137,7 @@ std::unique_ptr<ChannelGatewayWiring> ChannelGatewayWiring::Create(Options optio
     const auto transport_factory =
         options.test_transport_factory
             ? std::move(options.test_transport_factory)
-            : channel::qq::MakeWsTransportFactory(ca_pem, trust_mode);
+            : channel::transport::MakeWsTransportFactory(ca_pem, trust_mode);
     // 飞书(F1)同款装配材料:HTTP seam 与 WS 传输工厂。信任根与 qq 共
     // 用同一次解析(都是 wss,锚一致)。
     const auto feishu_http = options.test_feishu_http

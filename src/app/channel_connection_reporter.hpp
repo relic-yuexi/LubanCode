@@ -20,7 +20,8 @@
 #include <string>
 #include <vector>
 
-#include "channel/qq/qq_adapter.hpp"
+#include "channel/connection_state.hpp"
+#include "channel/qq/qq_gateway.hpp"  // kStage*(阶段稳定名)与 qq:: 快照迁移期别名(StageText/既有测试册消费)
 
 namespace lubancode::app {
 
@@ -44,7 +45,7 @@ public:
         std::string channel_id;
         std::string account_id;
         // 取适配器快照(wiring 装配时包 adapter;测试注入手造快照)。
-        std::function<channel::qq::ConnectionSnapshot()> snapshot;
+        std::function<channel::ConnectionSnapshot()> snapshot;
     };
     struct Deps {
         std::vector<Account> accounts;
@@ -83,7 +84,7 @@ private:
 
     void ObserveAccount(const Account& account, PerAccountState& state,
                         const std::string& boot_id, unsigned long pid, std::int64_t now_ms);
-    void WriteSnapshot(const Account& account, const channel::qq::ConnectionSnapshot& snapshot,
+    void WriteSnapshot(const Account& account, const channel::ConnectionSnapshot& snapshot,
                        PerAccountState& state, const std::string& boot_id, unsigned long pid,
                        std::int64_t now_ms);
 
