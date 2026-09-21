@@ -27,13 +27,13 @@
 #include <vector>
 
 #include "app/channel_connection_reporter.hpp"
+#include "channel/connection_state.hpp"
 #include "channel/feishu/feishu_gateway.hpp"
 #include "channel/feishu/feishu_http.hpp"
 #include "channel/manager.hpp"
-#include "channel/qq/qq_adapter.hpp"
-#include "channel/qq/qq_gateway.hpp"
 #include "channel/qq/qq_http.hpp"
 #include "channel/qq/qq_menu.hpp"
+#include "channel/transport/gateway_transport.hpp"
 #include "gateway/work_pump.hpp"
 
 namespace lubancode::config {
@@ -79,7 +79,7 @@ public:
         // 测试注入位(生产恒空):网关传输工厂与 HTTP。空 = 生产件
         // (MakeWsTransportFactory/MakeDefaultHttpFunc)。装配后账号会起真
         // 网关线程——测试不注入即意味着真连生产端点,故必注入。
-        std::function<std::unique_ptr<channel::qq::IGatewayTransport>()>
+        std::function<std::unique_ptr<channel::transport::IGatewayTransport>()>
             test_transport_factory;
         channel::qq::QqHttpFunc test_http;
         // 飞书(F1)同款注入位(仅对 feishu 注册行生效)。
@@ -141,11 +141,11 @@ private:
     std::unique_ptr<channel::ChannelManager> manager_;
     std::vector<std::unique_ptr<channel::ChannelBridgeTransport>> adapters_;
     // adapter 的连接状态视图(所有权仍在 adapters_;注册行的装配产物递
-    // 来,reporter 取快照用)。
+    // 来,reporter 取快照用;快照是 channel 中立合同)。
     struct AdapterView {
         std::string channel_id;
         std::string account_id;
-        std::function<channel::qq::ConnectionSnapshot()> connection_state;
+        std::function<channel::ConnectionSnapshot()> connection_state;
     };
     std::vector<AdapterView> adapter_views_;
     std::vector<std::string> skipped_;

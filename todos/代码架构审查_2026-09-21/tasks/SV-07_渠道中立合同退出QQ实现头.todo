@@ -1,0 +1,77 @@
+# SV-07 渠道中立合同放在 QQ 实现头，其他平台反向依赖整只适配器
+
+- 状态：待实施，仅审查与方案。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-07 | C | 中 | src/channel/feishu/feishu_adapter.hpp:39<br>src/channel/feishu/feishu_adapter.hpp:89<br>src/channel/qq/qq_adapter.hpp:43<br>src/channel/wecombot/wecom_adapter.hpp:46<br>src/channel/wecombot/wecom_gateway.hpp:36<br>src/channel/wecombot/wecom_gateway.hpp:43<br>src/app/channel_adapter_registry.cpp:81 | Feishu 包含 qq_adapter.hpp 只取 qq::ConnectionSnapshot；企微 using WecomTransport = channel::qq::IGatewayTransport；企微另定义同字段 ConnectionSnapshot。 app/channel_adapter_registry.cpp 再把企微快照逐字段抄成 QQ 快照。 | 飞书头被迫连带纳入 QQ 认证、网关、消息与媒体头；改 QQ 具体适配器也会重编飞书消费者。连接快照一处复用、一处复制，增加字段要同步多处。静态 include 闭包中 qq_adapter.hpp 可传递影响 10 份 src .cpp，qq_gateway.hpp 影响 13 份；这是潜在编译面，不是实际构建时长。 | 把 ConnectionFailure/ConnectionSnapshot 放入 channel 中立状态合同；把平台无关 IGatewayTransport/工厂移入 channel/transport。QQ、飞书、企微直接依赖这些窄头。企微删重复快照；QQ 命名空间可保留短期 using 兼容，再迁移调用者。 | 中：引用路径与公开类型迁移会波及 app/cli 接线，但无需改变平台状态机。QQ READY、飞书 Connected、企微订阅成功的判定仍各归平台；不能用共用 bool 值抹掉这些语义。 |
+
+### 移动范围
+
+1. 连接状态 DTO 只保留中立字段及类型。QQ 平台成功事件的注释移回 QQ 消费点。
+2. IGatewayTransport/工厂迁入现有 channel/transport；企微不再 include qq_gateway.hpp。工厂底下本就使用共用 WsClient，无需另造网络栈。
+3. QqSpoolStore 已被三平台复用，这并非重复数据账。本条可给它中立别名；若完整更名须另列消费清单，避免让本次改名膨胀。
+
+静态 include 计数只扫 src 中引号形式 include，未展开宏条件、PCH、生成头或测试，不据此承诺加速比例。另有 app/channel_adapter_registry.cpp:81-105 的逐字段企微到 QQ 转换可删。预计净删约 40 行，计重复快照与手抄转换；文件搬移不算删行。
+
+## 交接边界
+
+- 前置：SV-08（以全局排期复核为准）。
+- 并行与禁止共改：与 token 缓存、ingress、workspace、peers 项可并行。与 SV-08 同改三份 adapter.hpp，故本条明确依赖 SV-08 合入；禁止两人并行重排这些头。
+- 允许修改的现有文件：
+
+- `src/channel/qq/qq_adapter.hpp`
+- `src/channel/feishu/feishu_adapter.hpp`
+- `src/channel/wecombot/wecom_adapter.hpp`
+- `src/channel/qq/qq_gateway.hpp`
+- `src/channel/qq/qq_gateway.cpp`
+- `src/channel/wecombot/wecom_gateway.hpp`
+- `src/channel/wecombot/wecom_gateway.cpp`
+- `src/channel/feishu/feishu_adapter.cpp`
+- `src/channel/wecombot/wecom_adapter.cpp`
+- `src/app/channel_adapter_registry.hpp`
+- `src/app/channel_adapter_registry.cpp`
+- `src/app/channel_connection_reporter.hpp`
+- `src/app/channel_connection_reporter.cpp`
+- `src/app/channel_gateway_wiring.hpp`
+- `src/app/channel_gateway_wiring.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [ ] 飞书 adapter 头不再传递包含 qq_adapter.hpp；企微 gateway 头不再包含 qq_gateway.hpp。
+- [ ] 三平台使用同一连接快照字段合同；API 迁移期旧 using 不增加第二份状态数据。
+- [ ] 三平台各自成功/断线/退避/停止测试照旧，飞书及企微无需构造 QQ 适配器。
+- [ ] 编译层面核 include 闭包；远端 CI 验三平台，不把纯改名算功能变更。
+- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+
+## 合并/删除口径
+
+职责：渠道连接状态快照数据合同。
+
+现有：qq::ConnectionFailure/ConnectionSnapshot；wecombot::ConnectionFailure/ConnectionSnapshot；Feishu 对 QQ 实现头的借用。
+
+建议保留：channel 中立 ConnectionSnapshot 合同与 transport 网关接缝。
+
+预计净删 40 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+## 既有工作关联
+
+- todos/飞书与企业微信接入_双长连接适配器设计.todo:48（传输层中立化 R0）；wecom_gateway.hpp 明记 seam 中性化留待后续。
+## 全局排期复核
+
+- 前置／文件接手次序：SV-08
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：SV-08（src/channel/feishu/feishu_adapter.cpp, src/channel/feishu/feishu_adapter.hpp, src/channel/qq/qq_adapter.hpp, src/channel/wecombot/wecom_adapter.cpp, src/channel/wecombot/wecom_adapter.hpp）。

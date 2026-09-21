@@ -829,6 +829,10 @@ add_library(lubancode_engine STATIC
   src/channel/transport/tcp_socket.cpp
   src/channel/transport/tls.cpp
   src/channel/transport/ws_client.cpp
+  # SV-07(渠道中立合同退出 QQ 实现头):平台无关网关传输 seam
+  #(IGatewayTransport/GatewayConnectError/MakeWsTransportFactory,纯搬自
+  # qq_gateway,行为零变化)。
+  src/channel/transport/gateway_transport.cpp
   # 架构审查 SV-08(三渠道 Bridge 收发机械合并):QQ/飞书/企微适配器共用
   # 的进程内 Bridge 端点——宿主来向帧解码、to_host 出站缓冲与输出锁收拢
   # 一只组合件,Feed/Drain/Reply/Notify 窄口(纯搬移,行为零变化)。

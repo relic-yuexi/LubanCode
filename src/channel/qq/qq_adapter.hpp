@@ -25,6 +25,7 @@
 
 #include "channel/bridge_endpoint.hpp"
 #include "channel/channel_config.hpp"
+#include "channel/connection_state.hpp"
 #include "channel/credentials.hpp"
 #include "channel/manager.hpp"
 #include "channel/qq/qq_auth.hpp"
@@ -40,26 +41,9 @@ namespace lubancode::channel::qq {
 // 不借全功能表虚报媒体/streaming)。
 nlohmann::json QqBotCapabilities();
 
-// 连接状态快照(连接状态单 §三:QQ session 独占平台连接状态,适配器透传
-// 结构化快照,宿主负责输出;不另养一份猜测状态)。
-struct ConnectionFailure {
-    std::string stage;       // 失败发生阶段(kStage*)
-    std::string error_code;  // 稳定码
-    std::string detail;      // 脱敏说明
-    std::int64_t at_ms = 0;
-    int attempt = 0;         // 尝试编号(与 BackoffScheduled.attempt 同轮,§四)
-};
-struct ConnectionSnapshot {
-    bool thread_alive = false;   // 网关线程存活(≠ connected)
-    bool connected = false;      // 只在 READY/RESUMED 后 true;断线/停止立即 false
-    std::string stage;           // 当前阶段(kStage*;未启动 = "idle")
-    std::optional<ConnectionFailure> last_failure;      // 当前最近失败(连接成功后清)
-    std::vector<ConnectionFailure> failure_history;     // 成功时归档(留最近 8 笔)
-    int retry_count = 0;             // BackoffScheduled 的 attempt
-    std::int64_t next_retry_at_ms = 0;
-    std::int64_t connected_since_ms = 0;  // 本轮在线起点(0 = 未在线)
-    std::int64_t updated_at_ms = 0;       // 快照记账时刻
-};
+// 连接快照合同(SV-07)已升 channel/connection_state.hpp(三平台同款);
+// qq::ConnectionSnapshot/ConnectionFailure 迁移期别名驻 qq_gateway.hpp
+//(本头含它,消费者照旧)。
 
 class QqBotAdapter final : public ChannelBridgeTransport {
 public:
@@ -107,7 +91,9 @@ public:
         return session_ ? session_->state_name() : std::string("idle");
     }
     // 平台连接状态快照(§三):线程存活/connected/阶段/最近失败/重试账。
-    // 脱敏口径:字段全部来自 GatewayEvent 的稳定账,不碰凭据。
+    // QQ 口径:connected 只在 READY/RESUMED 后 true,断线/停止立即 false;
+    // 失败在连接成功时归档 failure_history(留最近 8 笔)。脱敏口径:字段
+    // 全部来自 GatewayEvent 的稳定账,不碰凭据。
     ConnectionSnapshot ConnectionState() const;
     // A04:收到但未建模的 Dispatch 事件的明确终结记录(计数;Health 投影)。
     std::uint64_t unsupported_dispatch_count() const {

@@ -32,6 +32,7 @@
 #include "channel/bridge_endpoint.hpp"
 #include "channel/bridge_protocol.hpp"
 #include "channel/channel_config.hpp"
+#include "channel/connection_state.hpp"
 #include "channel/credentials.hpp"
 #include "channel/frame.hpp"
 #include "channel/manager.hpp"
@@ -43,26 +44,13 @@ namespace lubancode::channel::wecombot {
 // manifest 能力声明(W1 首版:文本进出,不虚报媒体/streaming/互动)。
 nlohmann::json WecombotCapabilities();
 
-// 连接状态快照(照 qq::ConnectionSnapshot 的口径:网关独占平台连接状态,
-// 适配器透传结构化快照;装配层把它平移给 reporter)。
-struct ConnectionFailure {
-    std::string stage;       // 失败发生阶段(kStage*)
-    std::string error_code;  // 稳定码
-    std::string detail;      // 脱敏说明
-    std::int64_t at_ms = 0;
-    int attempt = 0;
-};
-struct ConnectionSnapshot {
-    bool thread_alive = false;
-    bool connected = false;      // 只在订阅成功后 true;断线/停止立即 false
-    std::string stage;           // kStage*;未启动 = "idle"
-    std::optional<ConnectionFailure> last_failure;
-    std::vector<ConnectionFailure> failure_history;  // 成功时归档(留最近 8 笔)
-    int retry_count = 0;
-    std::int64_t next_retry_at_ms = 0;
-    std::int64_t connected_since_ms = 0;
-    std::int64_t updated_at_ms = 0;
-};
+// ---- 迁移期兼容别名(SV-07:本头原有的同字段重复快照已删,改用
+// channel/connection_state.hpp 的中立合同,三平台同一份类型,不另养
+// 第二份状态数据)----
+// 旧调用方(wecombot::ConnectionSnapshot/ConnectionFailure)照旧编译;
+// 全仓 grep 零引用后可删。
+using ConnectionFailure = channel::ConnectionFailure;
+using ConnectionSnapshot = channel::ConnectionSnapshot;
 
 // 发送侧限流账(§六 6.5:单会话回复+推送合计 30 条/分钟、1000 条/小时)。
 // 发送线程独占使用;纯账目,时钟由调用方递(now_ms 注入,测试可用假钟)。
@@ -131,6 +119,10 @@ public:
     std::string gateway_state() const {
         return session_ ? session_->state_name() : std::string("idle");
     }
+    // 平台连接状态快照(channel 中立合同):网关独占平台连接状态,适配器
+    // 透传结构化快照,装配层直出给 reporter(不再逐字段平移)。企微口径:
+    // connected 只在订阅成功后 true,断线/停止立即 false;stage 用企微
+    // 稳定名(connecting/subscribing/connected/stopped)。
     ConnectionSnapshot ConnectionState() const;
     // 只记日志不入模型的两本账(§六 6.4 事件回调 / 认不得的帧)。
     std::uint64_t ignored_event_count() const { return ignored_event_count_.load(); }

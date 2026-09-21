@@ -290,7 +290,7 @@ void FeishuBotAdapter::HandleHostFrame(const nlohmann::json& frame_json) {
             return;
         }
         case BridgeMethod::Health: {
-            const qq::ConnectionSnapshot snapshot = ConnectionState();
+            const channel::ConnectionSnapshot snapshot = ConnectionState();
             nlohmann::json result = nlohmann::json::object();
             result["state"] = session_ ? session_->state_name() : std::string("stopped");
             result["connected"] = snapshot.connected;
@@ -495,7 +495,7 @@ FeishuGatewayAck FeishuBotAdapter::HandleGatewayEvent(const FeishuGatewayEvent& 
                 const std::lock_guard<std::mutex> lock(connection_mutex_);
                 connection_.connected = false;
                 connection_.connected_since_ms = 0;
-                connection_.last_failure = qq::ConnectionFailure{
+                connection_.last_failure = channel::ConnectionFailure{
                     event.stage, event.error_code, event.detail, options_.now_ms(),
                     event.attempt};
                 connection_.updated_at_ms = options_.now_ms();
@@ -534,9 +534,9 @@ FeishuGatewayAck FeishuBotAdapter::HandleGatewayEvent(const FeishuGatewayEvent& 
     return FeishuGatewayAck::Ok;
 }
 
-qq::ConnectionSnapshot FeishuBotAdapter::ConnectionState() const {
+channel::ConnectionSnapshot FeishuBotAdapter::ConnectionState() const {
     const std::lock_guard<std::mutex> lock(connection_mutex_);
-    qq::ConnectionSnapshot snapshot = connection_;
+    channel::ConnectionSnapshot snapshot = connection_;
     snapshot.thread_alive = gateway_thread_ != nullptr;
     if (snapshot.stage.empty()) {
         snapshot.stage = snapshot.thread_alive ? std::string(kStageBootstrapping)

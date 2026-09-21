@@ -19,14 +19,15 @@
 #include <vector>
 
 #include "channel/channel_config.hpp"
+#include "channel/connection_state.hpp"
 #include "channel/credentials.hpp"
 #include "channel/feishu/feishu_gateway.hpp"
 #include "channel/feishu/feishu_http.hpp"
 #include "channel/manager.hpp"
-#include "channel/qq/qq_adapter.hpp"
-#include "channel/qq/qq_gateway.hpp"
+#include "channel/qq/qq_gateway.hpp"  // 迁移期:既有测试册仍拼 channel::qq::GatewayConnectError,经本头传递可见;SV-07 别名退役时一并删
 #include "channel/qq/qq_http.hpp"
 #include "channel/qq/qq_menu.hpp"
+#include "channel/transport/gateway_transport.hpp"
 #include "runtime/channel_media_service.hpp"
 
 namespace lubancode::app {
@@ -43,11 +44,11 @@ struct ChannelAccountAssembly {
     std::function<std::int64_t()> now_ms;
 };
 
-// 装配产物:适配器本体 + 连接状态取数口(reporter 用)+ QQ 菜单/面板
-// 发布器(Q7;渠道无此件则空)。
+// 装配产物:适配器本体 + 连接状态取数口(reporter 用;快照是 channel
+// 中立合同,三平台同一类型)+ QQ 菜单/面板发布器(Q7;渠道无此件则空)。
 struct ChannelAccountAssemblyResult {
     std::unique_ptr<channel::ChannelBridgeTransport> adapter;
-    std::function<channel::qq::ConnectionSnapshot()> connection_state;
+    std::function<channel::ConnectionSnapshot()> connection_state;
     std::unique_ptr<channel::qq::QqMenuPanelPublisher> menu_publisher;
 };
 
@@ -56,7 +57,10 @@ struct ChannelAccountAssemblyResult {
 // 渠道带新依赖只加字段,不动别家注册行。
 struct ChannelAssemblyDeps {
     channel::qq::QqHttpFunc qq_http;
-    std::function<std::unique_ptr<channel::qq::IGatewayTransport>()> qq_transport_factory;
+    // WS 传输工厂(SV-07 起中立 seam;qq_ 前缀是命名史遗留——QQ/企微
+    // 的网关传输同用这一件)。
+    std::function<std::unique_ptr<channel::transport::IGatewayTransport>()>
+        qq_transport_factory;
     std::string qq_ca_pem;
     std::string qq_trust_load_block_code;
     std::string qq_trust_load_block_detail;

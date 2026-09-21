@@ -56,7 +56,7 @@ std::optional<ChannelAccountAssemblyResult> AssembleQqAccount(
 }
 
 // wecom 注册行(W1,飞书与企业微信接入设计单 §六):WecombotAdapter 装配。
-// 传输工厂复用 deps 的 WS seam(R0 后仍以 qq_ 前缀递进——平台无关件,
+// 传输工厂复用 deps 的 WS seam(SV-07 起中立件,字段名沿用 qq_ 前缀——
 // 命名史遗留);无媒体 seam(W1 不收发媒体)、无菜单发布器。
 std::optional<ChannelAccountAssemblyResult> AssembleWecombotAccount(
     const ChannelAssemblyDeps& deps, const ChannelAccountAssembly& account,
@@ -76,35 +76,9 @@ std::optional<ChannelAccountAssemblyResult> AssembleWecombotAccount(
     auto* adapter_ptr = adapter.get();
 
     ChannelAccountAssemblyResult result;
-    // 连接状态取数口:reporter 的快照类型还驻 qq_adapter.hpp(Q1 落位,
-    // 字段通道无关),这里做字段平移——中性化泛化归后续小步。
-    result.connection_state = [adapter_ptr]() -> channel::qq::ConnectionSnapshot {
-        const channel::wecombot::ConnectionSnapshot wecom = adapter_ptr->ConnectionState();
-        channel::qq::ConnectionSnapshot out;
-        out.thread_alive = wecom.thread_alive;
-        out.connected = wecom.connected;
-        out.stage = wecom.stage;
-        out.retry_count = wecom.retry_count;
-        out.next_retry_at_ms = wecom.next_retry_at_ms;
-        out.connected_since_ms = wecom.connected_since_ms;
-        out.updated_at_ms = wecom.updated_at_ms;
-        if (wecom.last_failure.has_value()) {
-            channel::qq::ConnectionFailure failure;
-            failure.stage = wecom.last_failure->stage;
-            failure.error_code = wecom.last_failure->error_code;
-            failure.detail = wecom.last_failure->detail;
-            failure.at_ms = wecom.last_failure->at_ms;
-            failure.attempt = wecom.last_failure->attempt;
-            out.last_failure = std::move(failure);
-        }
-        out.failure_history.reserve(wecom.failure_history.size());
-        for (const auto& failure : wecom.failure_history) {
-            out.failure_history.push_back(channel::qq::ConnectionFailure{
-                failure.stage, failure.error_code, failure.detail, failure.at_ms,
-                failure.attempt});
-        }
-        return out;
-    };
+    // 连接状态取数口:快照合同已升 channel 中立(SV-07),企微适配器直出
+    // 同一份 ConnectionSnapshot——原先逐字段手抄 QQ 快照的转换已删。
+    result.connection_state = [adapter_ptr]() { return adapter_ptr->ConnectionState(); };
     result.adapter = std::move(adapter);
     return result;
 }
