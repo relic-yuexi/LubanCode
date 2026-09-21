@@ -11,6 +11,7 @@
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "platform/base64.hpp"
+#include "platform/text_encoding.hpp"  // TruncateUtf8Prefix:附件名/预览字节帽刀口
 #include "agent/model_image_store.hpp"
 
 namespace lubancode::runtime {
@@ -34,19 +35,12 @@ std::string_view StemOf(std::string_view name) {
     return dot == std::string_view::npos ? name : name.substr(0, dot);
 }
 
-// UTF-8 截断:切断点回退到不含 10xxxxxx 起始字节的位置。
+// UTF-8 截断:刀口收敛在 platform::TruncateUtf8Prefix(AR-11)。旧版手抄
+// "切点退续字节"循环之外还留了一条 end==0 回退到 max_bytes 的岔路——预
+// 算容不下首个码点时(如 TruncateUtf8("中",1))照样放出一个首字节,半
+// 字符就是这么漏出去的。公共原语宁可返回空串,不放半截序列。
 std::string TruncateUtf8(std::string_view text, std::size_t max_bytes) {
-    if (text.size() <= max_bytes) {
-        return std::string(text);
-    }
-    std::size_t end = max_bytes;
-    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
-        --end;
-    }
-    if (end == 0) {
-        end = max_bytes;  // 防御:切点落在超长序列头部(理论不可达)
-    }
-    return std::string(text.substr(0, end));
+    return platform::TruncateUtf8Prefix(text, max_bytes);
 }
 
 std::string ToLowerAscii(std::string_view text) {

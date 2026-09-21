@@ -10,6 +10,7 @@
 
 #include <string>
 
+#include "platform/text_encoding.hpp"  // IsValidUtf8:长度帽刀口的合同断言
 #include "telemetry/redactor.hpp"
 
 using namespace lubancode::telemetry;
@@ -100,6 +101,24 @@ TEST_CASE("长度帽: 超长截断记账") {
     CHECK(out.size() <= kD1TextCap + std::string("[TRUNCATED]").size());
     CHECK(out.find("[TRUNCATED]") != std::string::npos);
     CHECK(manifest.truncated_fields == 1);
+}
+
+TEST_CASE("长度帽: 刀口落在多字节序列上,出口仍合法 UTF-8 且可严格序列化(AR-11)") {
+    // 86 个汉字 258 字节:第 256 字节正落在第 86 个字的腰上。旧版裸
+    // resize 会留半截序列,出口过不了 JSON 严格序列化(type_error.316)。
+    std::string han_only;
+    for (int i = 0; i < 86; ++i) {
+        han_only += "汉";
+    }
+    REQUIRE(han_only.size() == 258);
+    RedactionManifest manifest;
+    const std::string out = SanitizeText(han_only, &manifest);
+    CHECK(lubancode::platform::IsValidUtf8(out));
+    CHECK(manifest.truncated_fields == 1);   // 记账照旧
+    CHECK(out.find("[TRUNCATED]") != std::string::npos);  // 尾缀照旧
+    // 整字让掉一个:85 字(255 字节)+ 尾缀,不超帽。
+    CHECK(out.size() == 85 * 3 + std::string("[TRUNCATED]").size());
+    CHECK_NOTHROW(nlohmann::json(out).dump());  // 严格序列化,坏 UTF-8 会抛
 }
 
 TEST_CASE("D1 整包: 塞满正文/密钥/路径的属性包,出口无一处原文") {
