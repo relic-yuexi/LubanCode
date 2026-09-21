@@ -481,6 +481,11 @@ add_library(lubancode_engine STATIC
   # QQBot Windows 修复单 §6.2:im 入口的最近选择偏好(独立可版本化小档,
   # 原子保存,只存标识)。
   src/config/im_preferences.cpp
+  # AR-09:JSON Schema 子集校验核心(类型/required/属性遍历原语 + 递归
+  # 验证器)。四个领域入口(钩子改参复验/插件合同/workflow 入参/产物)
+  # 只留顶层政策与文案适配层,全吃这一份。落 engine 层——tools/runtime/
+  # workflow 三处都要用,且不依赖任何上层。
+  src/schema/validate.cpp
   src/tools/registry.cpp
   src/tools/tool_content.cpp  # MCP 富结果:中立内容块/投影/序列化
   src/tools/tool_text.cpp

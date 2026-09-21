@@ -1,35 +1,24 @@
+// 轻量 JSON Schema 校验:PreToolUse 钩子的 updatedInput 改写工具入参后,
+// 必须重过一遍工具自己的 input_schema,不许钩子借改参绕过 schema(规格
+// "决策归并"与"不做"清单)。子集够用、语义从严:
+//   - 顶层 type(认 object);
+//   - required 键齐不齐;
+//   - properties 里声明的类型(string/number/integer/boolean/array/object)
+//     对不对;integer 额外要求是整数值;
+//   - enum 枚举值在不在表里。
+// 嵌套 schema(nested properties/items)不递归——工具入参基本都是一层
+// 平对象,深层的复杂校验交给工具自己的 execute 兜底;这里只拦"钩子把
+// 入参改成了明显不是这工具要的形状"。校验失败 = 改写打回,当次工具调用
+// 按拦截处理(钩子明确想改参,悄悄按原参数跑出去才是危险的那条路)。
+//
+// AR-09:扫描原语与档位收在 schema 核心(HookRewriteProfile:浅扫一层,
+// enum 也查);这里只剩顶层政策(只在声明 type:object 时强制入参是
+// object)与首错文案。档位差异矩阵见 tests/unit/schema/test_schema_contract.cpp。
 #include "tools/schema_check.hpp"
 
+#include "schema/validate.hpp"
+
 namespace lubancode::tools {
-
-namespace {
-
-bool JsonTypeMatches(const nlohmann::json& value, const std::string& expected) {
-    if (expected == "string") {
-        return value.is_string();
-    }
-    if (expected == "number") {
-        return value.is_number();
-    }
-    if (expected == "integer") {
-        return value.is_number_integer();
-    }
-    if (expected == "boolean") {
-        return value.is_boolean();
-    }
-    if (expected == "array") {
-        return value.is_array();
-    }
-    if (expected == "object") {
-        return value.is_object();
-    }
-    if (expected == "null") {
-        return value.is_null();
-    }
-    return true;  // 认不得的类型声明不拦(从严校验拦"值不对",不拦"声明怪")
-}
-
-}  // namespace
 
 std::optional<std::string> ValidateInputAgainstSchema(const nlohmann::json& input, const nlohmann::json& schema) {
     if (!schema.is_object()) {
@@ -43,43 +32,22 @@ std::optional<std::string> ValidateInputAgainstSchema(const nlohmann::json& inpu
     if (!input.is_object()) {
         return std::nullopt;  // 顶层类型没声明 object 时,其余键校验无从谈起
     }
-    if (schema.contains("required") && schema["required"].is_array()) {
-        for (const auto& key : schema["required"]) {
-            if (!key.is_string()) {
-                continue;
-            }
-            if (!input.contains(key.get<std::string>())) {
-                return "缺少必填字段: " + key.get<std::string>();
-            }
-        }
+    const auto findings = schema::CollectObjectFindings(input, schema, schema::HookRewriteProfile());
+    if (findings.empty()) {
+        return std::nullopt;
     }
-    if (schema.contains("properties") && schema["properties"].is_object()) {
-        for (auto it = input.begin(); it != input.end(); ++it) {
-            const auto props = schema["properties"].find(it.key());
-            if (props == schema["properties"].end()) {
-                continue;  // additionalProperties 默认放行(多数工具留了活口)
-            }
-            if (props.value().contains("type") && props.value()["type"].is_string()) {
-                const std::string expected = props.value()["type"].get<std::string>();
-                if (!JsonTypeMatches(it.value(), expected)) {
-                    return "字段 " + it.key() + " 的类型应是 " + expected;
-                }
-            }
-            if (props.value().contains("enum") && props.value()["enum"].is_array()) {
-                bool in_enum = false;
-                for (const auto& allowed : props.value()["enum"]) {
-                    if (it.value() == allowed) {
-                        in_enum = true;
-                        break;
-                    }
-                }
-                if (!in_enum) {
-                    return "字段 " + it.key() + " 的取值不在枚举表里";
-                }
-            }
-        }
+    const schema::Finding& first = findings.front();
+    switch (first.code) {
+        case schema::Finding::Code::MissingRequired:
+            return "缺少必填字段: " + first.field;
+        case schema::Finding::Code::TypeMismatch:
+            // 浅档顶层 path 即键名。
+            return "字段 " + first.path + " 的类型应是 " + first.expected;
+        case schema::Finding::Code::EnumMismatch:
+            return "字段 " + first.path + " 的取值不在枚举表里";
+        default:
+            return std::nullopt;  // 本档只开 required/type/enum,不会有别的码
     }
-    return std::nullopt;
 }
 
 }  // namespace lubancode::tools

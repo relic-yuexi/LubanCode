@@ -9,6 +9,7 @@
 
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"
+#include "schema/validate.hpp"  // AR-09:入参校验的递归核心与档位
 
 namespace lubancode::runtime {
 
@@ -1537,161 +1538,41 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
 }  // namespace plugin_protocol
 
 // ---------------------------------------------------------------------------
-// 入参校验(调用前统一跑的子集)
+// 入参校验(调用前统一跑的子集)。AR-09:递归验证器下沉 schema 核心
+// (PluginContractProfile:全关键字、递归、32 层深度帽),这里只剩顶层
+// 政策(入参必须是 object)与首错文案的适配层。
 // ---------------------------------------------------------------------------
 
 namespace {
 
-bool JsonTypeMatches(const nlohmann::json& value, const std::string& expected) {
-    if (expected == "string") {
-        return value.is_string();
-    }
-    if (expected == "number") {
-        return value.is_number();
-    }
-    if (expected == "integer") {
-        return value.is_number_integer();
-    }
-    if (expected == "boolean") {
-        return value.is_boolean();
-    }
-    if (expected == "array") {
-        return value.is_array();
-    }
-    if (expected == "object") {
-        return value.is_object();
-    }
-    if (expected == "null") {
-        return value.is_null();
-    }
-    return true;
-}
-
-// UTF-8 码点计数(长度界按码点算,与 JSON Schema 语义一致)。入参在协议
-// 层已保证合法 UTF-8,这里只数不验。
-std::size_t CodePointCount(std::string_view text) {
-    std::size_t count = 0;
-    for (const unsigned char c : text) {
-        if ((c & 0xC0) != 0x80) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-std::optional<std::string> ValidateValueAgainstSchema(const nlohmann::json& value, const nlohmann::json& schema,
-                                                      const std::string& path, int depth) {
-    if (depth > 32) {
-        return path + ": 嵌套超过 32 层";
-    }
-    if (!schema.is_object()) {
-        return std::nullopt;  // 没给 schema 的位置无从校验
-    }
-    if (schema.contains("type") && schema["type"].is_string()) {
-        const std::string expected = schema["type"].get<std::string>();
-        if (!JsonTypeMatches(value, expected)) {
-            return path + " 的类型应是 " + expected;
-        }
-    }
-    if (schema.contains("const")) {
-        if (value != schema["const"]) {
-            return path + " 必须恒等于 " + schema["const"].dump();
-        }
-    }
-    if (schema.contains("enum") && schema["enum"].is_array()) {
-        bool in_enum = false;
-        for (const auto& allowed : schema["enum"]) {
-            if (value == allowed) {
-                in_enum = true;
-                break;
-            }
-        }
-        if (!in_enum) {
-            return path + " 的取值不在枚举表里";
-        }
-    }
-    // 数值界。
-    if (value.is_number()) {
-        const double number = value.get<double>();
-        if (schema.contains("minimum") && schema["minimum"].is_number() &&
-            number < schema["minimum"].get<double>()) {
-            return path + " 小于最小值 " + schema["minimum"].dump();
-        }
-        if (schema.contains("maximum") && schema["maximum"].is_number() &&
-            number > schema["maximum"].get<double>()) {
-            return path + " 大于最大值 " + schema["maximum"].dump();
-        }
-    }
-    // 字符串长度界(码点)。
-    if (value.is_string()) {
-        const std::size_t length = CodePointCount(value.get_ref<const std::string&>());
-        if (schema.contains("minLength") && schema["minLength"].is_number_integer() &&
-            length < static_cast<std::size_t>(schema["minLength"].get<std::int64_t>())) {
-            return path + " 短于 minLength " + schema["minLength"].dump();
-        }
-        if (schema.contains("maxLength") && schema["maxLength"].is_number_integer() &&
-            length > static_cast<std::size_t>(schema["maxLength"].get<std::int64_t>())) {
-            return path + " 长于 maxLength " + schema["maxLength"].dump();
-        }
-    }
-    // 数组:items 逐项 + minItems/maxItems。
-    if (value.is_array()) {
-        const std::size_t size = value.size();
-        if (schema.contains("minItems") && schema["minItems"].is_number_integer() &&
-            size < static_cast<std::size_t>(schema["minItems"].get<std::int64_t>())) {
-            return path + " 的元素个数少于 minItems " + schema["minItems"].dump();
-        }
-        if (schema.contains("maxItems") && schema["maxItems"].is_number_integer() &&
-            size > static_cast<std::size_t>(schema["maxItems"].get<std::int64_t>())) {
-            return path + " 的元素个数多于 maxItems " + schema["maxItems"].dump();
-        }
-        if (schema.contains("items") && schema["items"].is_object()) {
-            for (std::size_t i = 0; i < size; ++i) {
-                if (auto problem = ValidateValueAgainstSchema(value[i], schema["items"],
-                                                               path + "[" + std::to_string(i) + "]", depth + 1);
-                    problem.has_value()) {
-                    return problem;
-                }
-            }
-        }
-    }
-    // 对象:required + properties 逐键 + additionalProperties。
-    if (value.is_object()) {
-        if (schema.contains("required") && schema["required"].is_array()) {
-            for (const auto& key : schema["required"]) {
-                if (key.is_string() && !value.contains(key.get<std::string>())) {
-                    return path + " 缺少必填字段: " + key.get<std::string>();
-                }
-            }
-        }
-        const bool has_properties = schema.contains("properties") && schema["properties"].is_object();
-        const bool ap_false = schema.contains("additionalProperties") && schema["additionalProperties"].is_boolean() &&
-                              !schema["additionalProperties"].get<bool>();
-        const bool ap_schema = schema.contains("additionalProperties") && schema["additionalProperties"].is_object();
-        for (auto it = value.begin(); it != value.end(); ++it) {
-            const std::string child_path = path.empty() ? it.key() : path + "." + it.key();
-            if (has_properties) {
-                const auto prop = schema["properties"].find(it.key());
-                if (prop != schema["properties"].end()) {
-                    if (auto problem =
-                            ValidateValueAgainstSchema(it.value(), prop.value(), child_path, depth + 1);
-                        problem.has_value()) {
-                        return problem;
-                    }
-                    continue;
-                }
-            }
-            if (ap_false) {
-                return child_path + " 不在声明的字段里(additionalProperties=false)";
-            }
-            if (ap_schema) {
-                if (auto problem = ValidateValueAgainstSchema(it.value(), schema["additionalProperties"], child_path,
-                                                               depth + 1);
-                    problem.has_value()) {
-                    return problem;
-                }
-            }
-        }
+// 核心 findings → 插件合同人话。首阶段文案/路径一个字不动:顶层 path
+// 是空串,拼出来带前导空格——旧码如此,照留。
+std::optional<std::string> FormatFinding(const schema::Finding& finding) {
+    switch (finding.code) {
+        case schema::Finding::Code::TypeMismatch:
+            return finding.path + " 的类型应是 " + finding.expected;
+        case schema::Finding::Code::ConstMismatch:
+            return finding.path + " 必须恒等于 " + finding.expected;
+        case schema::Finding::Code::EnumMismatch:
+            return finding.path + " 的取值不在枚举表里";
+        case schema::Finding::Code::BelowMinimum:
+            return finding.path + " 小于最小值 " + finding.expected;
+        case schema::Finding::Code::AboveMaximum:
+            return finding.path + " 大于最大值 " + finding.expected;
+        case schema::Finding::Code::BelowMinLength:
+            return finding.path + " 短于 minLength " + finding.expected;
+        case schema::Finding::Code::AboveMaxLength:
+            return finding.path + " 长于 maxLength " + finding.expected;
+        case schema::Finding::Code::BelowMinItems:
+            return finding.path + " 的元素个数少于 minItems " + finding.expected;
+        case schema::Finding::Code::AboveMaxItems:
+            return finding.path + " 的元素个数多于 maxItems " + finding.expected;
+        case schema::Finding::Code::MissingRequired:
+            return finding.path + " 缺少必填字段: " + finding.field;
+        case schema::Finding::Code::AdditionalProperty:
+            return finding.path + " 不在声明的字段里(additionalProperties=false)";
+        case schema::Finding::Code::DepthExceeded:
+            return finding.path + ": 嵌套超过 " + finding.expected + " 层";
     }
     return std::nullopt;
 }
@@ -1707,7 +1588,11 @@ std::optional<std::string> ValidateArgumentsAgainstSchema(const nlohmann::json& 
     if (!input.is_object()) {
         return "入参必须是 object";
     }
-    return ValidateValueAgainstSchema(input, schema, "", 0);
+    const auto findings = schema::CollectValueFindings(input, schema, schema::PluginContractProfile());
+    if (findings.empty()) {
+        return std::nullopt;
+    }
+    return FormatFinding(findings.front());
 }
 
 }  // namespace lubancode::runtime
