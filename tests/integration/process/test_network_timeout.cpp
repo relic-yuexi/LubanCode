@@ -23,6 +23,10 @@
 // 只在 Windows 下编译(项目当前只在 WIN32 下过测试;POSIX 分支的 socket API
 // 写法留了条件编译,但没有 CI 覆盖,谨慎起见别在非 WIN32 平台上悄悄跑一份
 // 没验证过的路径)。
+// [FD-09 修正]上面这段是老黄历:CI 的 macos-clang 腿实际一直在编译并运行
+// 本文件(POSIX 分支有 CI 覆盖)。写侧有一样 POSIX 特有的事得防:对端掐流
+// 后继续 send 默认递 SIGPIPE 杀整个测试进程——Linux 走 MSG_NOSIGNAL,
+// macOS 靠 accept 后的 SO_NOSIGPIPE(见 SendIfAlive/StartFakeServer)。
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -123,6 +127,14 @@ int StartFakeServer(std::function<void(socket_t)> handler) {
         socklen_t client_len = sizeof(client_addr);
         const socket_t client_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
         if (client_fd != kInvalidSocket) {
+#ifdef __APPLE__
+            // macOS 没有 MSG_NOSIGNAL:客户端掐流后再往这个 socket 写,默认
+            // 递 SIGPIPE 杀进程。socket 级关掉,让 send 走 EPIPE 错误返回
+            // (与 src/app_server/ws_sockets.cpp、channel/transport/tcp_socket.cpp
+            // 同一套章法)。
+            int nosigpipe = 1;
+            ::setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
             handler(client_fd);
             CloseSocket(client_fd);
         }
@@ -134,6 +146,17 @@ int StartFakeServer(std::function<void(socket_t)> handler) {
 
 void SendAll(socket_t s, const std::string& data) {
     ::send(s, data.data(), static_cast<int>(data.size()), 0);
+}
+
+// 往可能已被对端掐断的 socket 写一段,活着才继续(FD-09 用例:客户端掐流
+// 后假服务器还要接着发)。Linux 走 MSG_NOSIGNAL;macOS 靠 accept 后的
+// SO_NOSIGPIPE;Windows 没有这个信号,send 只回错误码。
+bool SendIfAlive(socket_t s, const char* data, int len) {
+#if !defined(_WIN32) && defined(MSG_NOSIGNAL)
+    return ::send(s, data, len, MSG_NOSIGNAL) > 0;
+#else
+    return ::send(s, data, len, 0) > 0;
+#endif
 }
 
 // 发送侧干净收尾(发 FIN):不带 Content-Length 的连接式响应体靠这个让
@@ -483,7 +506,7 @@ TEST_CASE("PostSseStream: 连接式错误体超过接收帽,就地掐流并保�
         SendAll(client, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\n");
         const std::string block(4 * 1024, 'x');
         for (int i = 0; i < 1024; ++i) {  // 最多 4 MiB,远超 16 KiB 的帽
-            if (::send(client, block.data(), static_cast<int>(block.size()), 0) <= 0) {
+            if (!SendIfAlive(client, block.data(), static_cast<int>(block.size()))) {
                 break;  // 客户端已掐流:连接这头多半也断了,别死等
             }
         }
@@ -609,7 +632,7 @@ TEST_CASE("PostSseStream: 取消与超帽同拍,取消优先——收场报 Canc
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const std::string block(2048, 'c');
         for (int i = 0; i < 50; ++i) {
-            if (::send(client, block.data(), static_cast<int>(block.size()), 0) <= 0) {
+            if (!SendIfAlive(client, block.data(), static_cast<int>(block.size()))) {
                 break;
             }
         }
