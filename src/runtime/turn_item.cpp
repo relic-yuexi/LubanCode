@@ -2,9 +2,11 @@
 //
 // diff 计算从 cli::ToolDisplay 的 BuildFileDiffPreview 里拆出来:那边留
 // "排版成终端预览块"(ANSI、宽度、缩进、截断),这边只算行级 LCS 与事实
-// 摘要。算法逐句搬自 cli/diff.cpp 的 ComputeLineDiff/BuildEditDiff/
-// BuildWriteDiff(语义一个字不改,单测两边同钉);cli 侧 FormatDiff 依旧
-// 吃自己那份 DiffLine,本文件不反过来 include cli/*。
+// 摘要。行级 LCS 逐句搬自 cli/diff.cpp 的 ComputeLineDiff/BuildWriteDiff
+// (语义一个字不改,单测两边同钉);edit 的定位语义自 AR-05 起不再跟
+// cli::BuildEditDiff 那份只会精确匹配的旧账,改吃 tools::BuildEditPlan
+// ——与真实执行同一颗决策源。cli 侧 FormatDiff 依旧吃自己那份
+// DiffLine,本文件不反过来 include cli/*。
 
 #include "runtime/turn_item.hpp"
 
@@ -17,6 +19,7 @@
 #include <utility>
 
 #include "platform/text_encoding.hpp"  // TruncateUtf8Prefix:字节帽截断的公共刀口
+#include "tools/edit_file.hpp"         // BuildEditPlan:edit 预览与执行共用的决策源(AR-05)
 
 namespace lubancode::runtime {
 
@@ -137,42 +140,6 @@ std::optional<std::string> ReadFileBytes(const std::string& path_utf8) {
     return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
-std::size_t CountOccurrences(const std::string& haystack, const std::string& needle) {
-    if (needle.empty()) {
-        return 0;
-    }
-    std::size_t count = 0;
-    std::size_t pos = 0;
-    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
-        ++count;
-        pos += needle.size();
-    }
-    return count;
-}
-
-std::string ReplaceOccurrences(const std::string& text, const std::string& old_s, const std::string& new_s,
-                               bool all) {
-    std::string result;
-    result.reserve(text.size());
-    std::size_t pos = 0;
-    bool replaced_once = false;
-    while (pos < text.size()) {
-        if (!replaced_once || all) {
-            const std::size_t found = text.find(old_s, pos);
-            if (found != std::string::npos) {
-                result.append(text, pos, found - pos);
-                result.append(new_s);
-                pos = found + old_s.size();
-                replaced_once = true;
-                continue;
-            }
-        }
-        result.append(text, pos, text.size() - pos);
-        break;
-    }
-    return result;
-}
-
 }  // namespace
 
 std::uint64_t DiffTable::added_lines() const {
@@ -207,19 +174,30 @@ std::optional<DiffTable> BuildDiffTable(const std::string& tool_name, const nloh
         const std::string old_string = input.value("old_string", std::string());
         const std::string new_string = input.value("new_string", std::string());
         const bool replace_all = input.value("replace_all", false);
-        const std::size_t occurrences = CountOccurrences(old_content.value_or(std::string()), old_string);
-        if (occurrences == 0) {
-            // 定位失败(文件读不出来 / old_string 不在里头):只比新旧两段,
-            // 行号是段内行号——真执行时工具自己会报错。
+        // 单一决策源(AR-05):预览与执行共用 tools::BuildEditPlan——预览
+        // 显示的字节就是真落盘的字节,CRLF/缩进容错与"多处不唯一拒绝"
+        // 两边同一套规则。原先这里的 CountOccurrences/ReplaceOccurrences
+        // 替身只会精确匹配,与执行各算各的账,已删。
+        if (!old_content.has_value()) {
+            // 文件读不出来:真执行会在门口报"文件不存在",预览按未定位走
+            // 段内回退,行号是段内行号。
             table.located = false;
             table.replaced_count = 0;
             table.rows = ComputeLineDiff(SplitLines(old_string), SplitLines(new_string));
         } else {
-            table.located = true;
-            table.replaced_count = replace_all ? occurrences : 1;
-            const std::string updated =
-                ReplaceOccurrences(*old_content, old_string, new_string, replace_all);
-            table.rows = ComputeLineDiff(SplitLines(*old_content), SplitLines(updated));
+            const lubancode::tools::EditPlan plan =
+                lubancode::tools::BuildEditPlan(*old_content, table.path, old_string, new_string, replace_all);
+            if (!plan.ok) {
+                // 计划被拒(找不到 / 多处不唯一 / 空 old):执行会原样报
+                // plan.error,预览同判未定位,只比新旧两段。
+                table.located = false;
+                table.replaced_count = 0;
+                table.rows = ComputeLineDiff(SplitLines(old_string), SplitLines(new_string));
+            } else {
+                table.located = true;
+                table.replaced_count = plan.replaced_count;
+                table.rows = ComputeLineDiff(SplitLines(*old_content), SplitLines(plan.updated));
+            }
         }
     } else {
         const std::string content = input.value("content", std::string());

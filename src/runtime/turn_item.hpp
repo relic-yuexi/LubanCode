@@ -51,10 +51,11 @@ struct DiffRow {
 struct DiffTable {
     std::string path;                    // 目标文件(工具入参原样)
     std::vector<DiffRow> rows;
-    bool located = true;                 // edit_file:old_string 在文件里找到了
-    std::uint64_t replaced_count = 0;    // edit_file:预计替换几处
+    bool located = true;                 // edit_file:编辑计划成立(与执行同判,AR-05)
+    std::uint64_t replaced_count = 0;    // edit_file:预计替换几处(=执行实际处数)
     bool old_exists = true;              // write_file:目标文件原已存在
-    // edit_file 的段内回退(没找到 old_string)也照样给行表,前端不须特判。
+    // edit_file 的段内回退(计划被拒:找不到/多处不唯一)也照样给行表,
+    // 前端不须特判。
     std::uint64_t added_lines() const;
     std::uint64_t removed_lines() const;
 };
@@ -63,6 +64,8 @@ struct DiffTable {
 // BuildFileDiffPreview 的取舍一致:只有这两个工具有"改动预览"的领域语义)。
 // 读旧文件在这一层做(单子原文:diff 计算移出 ToolDisplay)——磁盘真值
 // 是领域数据,不是画面数据。path 读不出/不存在按新文件处理,不因此崩。
+// edit 分支的匹配语义与 EditFileTool::execute 同源:走 tools::BuildEditPlan
+// 这颗不写盘的计划(AR-05)——预览显示的改动就是会落盘的改动。
 std::optional<DiffTable> BuildDiffTable(const std::string& tool_name, const nlohmann::json& input);
 
 // ---------------------------------------------------------------------------
