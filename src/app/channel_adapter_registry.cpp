@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "channel/feishu/feishu_adapter.hpp"
+#include "channel/qq/qq_adapter.hpp"  // QqBotAdapter 装配(SV-07 起 hpp 不再传递含它)
 #include "channel/qq/qq_media.hpp"
 #include "channel/wecombot/wecom_adapter.hpp"
 
