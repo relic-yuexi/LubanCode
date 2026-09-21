@@ -298,10 +298,11 @@ TEST_CASE("强收与轮次提交交错:栅栏钉住读值与终态提交同锁")
     // 台账最终 stale_rounds(读值与终态提交同锁,中间插不进任何一笔轮次
     // 账);旧形状在读后至拿锁间落进一笔提交时,消息轮数会小于台账终值,
     // 这里必红。
-    // 交错窗有界:提交侧只补一小批(64 笔)就收手,不无限自旋——macOS 的
-    // os_unfair_lock 不保证先来后到,无限抢锁会把强收线程饿死在锁外
-    // (首跑 macos-clang 即 180s 超时的教训)。有界批次同样把竞争窗口撞满:
-    // 批内每笔都落在强收"拿锁前/拿锁后"的缝上,批尽则强收稳拿锁收口。
+    // 交错窗有界:提交侧只补一小批(64 笔)就收手,不无限自旋。首跑
+    // macos-clang 180s 超时的教训:夹具停机条件盯了 task->finalized,而
+    // 那面旗归任务线程的收尾(FinalizeFromToolResult)置,强收口不置——
+    // 条件永假,提交侧就无限转。有界批次两头都稳:批内每笔都落在强收
+    // "拿锁前/拿锁后"的缝上,竞争窗口撞满;批尽则强收稳拿锁收口。
     for (int round = 0; round < 20; ++round) {
         tools::TaskLedger ledger;
         const auto task = MakeTask(ledger, "交错" + std::to_string(round));
@@ -313,8 +314,11 @@ TEST_CASE("强收与轮次提交交错:栅栏钉住读值与终态提交同锁")
             ledger.RecordAssistantMessage(task, same);  // 首笔:新指纹,算进展
             ledger.RecordAssistantMessage(task, same);  // 第二笔:空转 +1
             stale_on_the_books.store(true, std::memory_order_release);
-            // 交错窗:与强收的拿锁尝试正面抢一小批,抢完收手。
-            for (int i = 0; i < 64 && !task->finalized.load(std::memory_order_acquire); ++i) {
+            // 交错窗:与强收的拿锁尝试正面抢一小批,抢完收手。不盯
+            // task->finalized 做停机条件——那面旗归任务线程的收尾
+            //(FinalizeFromToolResult)置,强收只翻台账终态;强收落锤后
+            // 批内余笔由写口自己的活态守卫拦停。
+            for (int i = 0; i < 64; ++i) {
                 ledger.RecordAssistantMessage(task, same);
                 std::this_thread::yield();
             }
@@ -327,7 +331,9 @@ TEST_CASE("强收与轮次提交交错:栅栏钉住读值与终态提交同锁")
         ledger.ForceFinalizeNoProgress(task);
         submitter.join();
 
-        CHECK(task->finalized.load(std::memory_order_acquire));
+        // 判据盯台账终态账(finalized 是任务线程收尾的旗,强收不置它,
+        // 语义见 TaskRecord 注释;晚到收尾不翻案由 recursion 册盯)。
+        CHECK(task->force_finalized);
         CHECK(task->snapshot.state == tools::AgentTaskState::Failed);
         CHECK(task->snapshot.outcome.reason == tools::TaskOutcomeReason::NoMeaningfulProgress);
         const int final_stale = ledger.ProgressOf(task->snapshot.id).stale_rounds;
