@@ -119,7 +119,7 @@ struct WorkspaceCommandContext {
     const lubancode::cli::Theme* theme = nullptr;
     lubancode::tools::ToolRegistry* registry = nullptr;
     const std::shared_ptr<lubancode::tools::TodoListState>* todo_state = nullptr;
-    const std::vector<std::string>* loaded_tools = nullptr;
+    const std::shared_ptr<std::set<std::string>>* loaded_tools = nullptr;
     const std::vector<McpServerRuntime>* mcp_servers = nullptr;
     std::optional<lubancode::lsp::Manager>* lsp_manager = nullptr;
     const std::vector<PluginMountInfo>* plugin_mounted = nullptr;
