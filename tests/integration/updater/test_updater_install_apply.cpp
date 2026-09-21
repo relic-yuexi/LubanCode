@@ -14,7 +14,9 @@
 //   - 交接:平铺备份完整性(树+根件,记录件排除;无可备返回空)、旧
 //     EXE 挪 legacy + 新 EXE 落根位 + updater 树同步、重叠守卫、Windows
 //     自持句柄锁死旧 EXE 明报"绝不强杀"松手重试成功、restore 回根位 +
-//     摘 current.json(无 legacy 只摘指针)。
+//     摘 current.json(无 legacy 只摘指针)、失败分类(NeedsReview=清障
+//     可续/Failed)与恢复链失败也必摘 current(SV-03 硬保证)、备份不
+//     复制不跟进链接件(reparse 政策)。
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -570,10 +572,11 @@ TEST_CASE("flat: 旧 EXE 挪 legacy,新 EXE 落根位,updater 树同步;重叠�
     CHECK(ReadBytes(paths.updater / "u.txt").value() == "UPDATER-TREE");
     CHECK(ReadBytes(paths.updater / "sub" / "v.txt").value() == "UPDATER-SUB");
 
-    // 安装根与版本目录重叠:拒绝交接(python 同款守卫)
+    // 安装根与版本目录重叠:拒绝交接(python 同款守卫;硬失败不是清障可续)
     const auto refused = HandoverFlatLauncher(paths, "txn-h", root);
     REQUIRE_FALSE(refused.has_value());
-    CHECK(refused.error().find("重叠") != std::string::npos);
+    CHECK(refused.error().message.find("重叠") != std::string::npos);
+    CHECK(refused.error().kind == FlatHandoverError::Failed);
 }
 
 #ifdef _WIN32
@@ -590,7 +593,8 @@ TEST_CASE("flat: Windows 自持句柄锁死旧 EXE——明报不强杀,松手�
     REQUIRE(held != INVALID_HANDLE_VALUE);
     const auto blocked = HandoverFlatLauncher(paths, "txn-l", version_dir);
     REQUIRE_FALSE(blocked.has_value());
-    CHECK(blocked.error().find("绝不强杀") != std::string::npos);
+    CHECK(blocked.error().message.find("绝不强杀") != std::string::npos);
+    CHECK(blocked.error().kind == FlatHandoverError::NeedsReview);  // 清障后重跑可续
     // 句柄还攥着:读口也吃 sharing violation,内容读不出(空串不是证据),
     // 只验尸位还在与 legacy 未动;内容账等松手后对
     CHECK(fs::exists(paths.exe));
@@ -635,4 +639,80 @@ TEST_CASE("flat: restore 回根位并摘 current.json;无 legacy 只摘指针") 
     CHECK_FALSE(*again);
     CHECK(ReadBytes(paths.exe).value() == "OLD-EXE");
     CHECK_FALSE(fs::exists(paths.current));
+}
+
+TEST_CASE("flat: 交接失败分类——legacy 目录被占是 NeedsReview,清障可续") {
+    const fs::path root = TempRoot("flat_blocked_legacy");
+    const auto paths = MakeLayoutPaths(root);
+    WriteBytes(paths.exe, "OLD-EXE");
+    const fs::path version_dir = root / "versions" / "0.1.0";
+    WriteBytes(version_dir / paths.exe.filename(), "NEW-EXE");
+    // legacy 名被文件占住:create_directories 建不成。这是"用户清障后重跑
+    // 可续"的形态(NeedsReview),引擎据此退 2;区别于重叠守卫的 Failed。
+    WriteBytes(paths.backups / "txn-b" / "legacy", "占位文件");
+
+    const auto blocked = HandoverFlatLauncher(paths, "txn-b", version_dir);
+    REQUIRE_FALSE(blocked.has_value());
+    CHECK(blocked.error().kind == FlatHandoverError::NeedsReview);
+    CHECK(blocked.error().message.find("旧根 EXE 的备份目录建不成") != std::string::npos);
+    CHECK(blocked.error().message.find("绝不强杀") != std::string::npos);
+    CHECK(ReadBytes(paths.exe).value() == "OLD-EXE");  // 让位未成,原样
+}
+
+TEST_CASE("flat: restore 恢复链失败——current 照摘,失败明报不吞") {
+    // SV-03 硬保证:park/copy 任一步失败也不早退,摘完 current 再返回
+    // unexpected;根位现场保留给人工诊断(python docstring 承诺"恢复不成
+    // 也要摘掉指针"、实现未兑现,这里钉死)。
+    const fs::path root = TempRoot("flat_restore_failed");
+    const auto paths = MakeLayoutPaths(root);
+    WriteBytes(paths.exe, "OLD-EXE");
+    const fs::path version_dir = root / "versions" / "0.1.0";
+    WriteBytes(version_dir / paths.exe.filename(), "NEW-EXE");
+    REQUIRE(HandoverFlatLauncher(paths, "txn-f", version_dir).has_value());
+    WriteCurrent(paths, "0.1.0", std::nullopt, "txn-f");
+    REQUIRE(fs::exists(paths.current));
+
+    // parked 位占成目录:park rename 挪不进 -> 恢复链失败。
+    fs::create_directories(paths.backups / "txn-f" /
+                           ("launcher-parked-" + PathToUtf8(paths.exe.filename())));
+    const auto failed = RestoreFlatLegacy(paths, "txn-f");
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().kind == FlatHandoverError::Failed);
+    CHECK(failed.error().message.find("停不进备份") != std::string::npos);
+    CHECK_FALSE(fs::exists(paths.current));               // 必摘:失败也摘
+    CHECK(ReadBytes(paths.exe).value() == "NEW-EXE");     // 根位现场保留
+    CHECK(fs::is_regular_file(paths.backups / "txn-f" / "legacy" /
+                              paths.exe.filename()));     // legacy 原件未动
+}
+
+TEST_CASE("flat: 备份不复制也不跟进链接件——reparse 政策显式钉") {
+    // SV-03 冻结的 reparse 政策:受管树/根级里的链接件(reparse/symlink)
+    // 不复制也不跟进(旧引擎副本走 copy_symlinks 保链接,收敛后整仓只剩
+    // 本政策——引擎路与专用路对拍见引擎册,链接差异在此钉)。
+    const fs::path root = TempRoot("flat_backup_link");
+    fs::create_directories(root / "outside");
+    WriteBytes(root / "outside" / "secret.txt", "S");
+    WriteBytes(root / "skills" / "plain.md", "P");
+
+    fs::path link = root / "skills" / "link";
+    bool made = false;
+#ifdef _WIN32
+    made = MakeJunction(link, root / "outside");
+#else
+    made = MakeDirSymlink(link, root / "outside");
+#endif
+    if (!made) {
+        MESSAGE("SKIP: 链接造不出(特权/平台),本机此腿留 CI");
+        return;
+    }
+
+    const auto backed = FlatFullBackup(root, Trees(), Records(), "txn-s");
+    REQUIRE(backed.has_value());
+    REQUIRE(backed->has_value());
+    const fs::path flat = **backed;
+    CHECK(ReadBytes(flat / "skills" / "plain.md").value() == "P");
+    // 链接件本身不进备份(任何形态);对面的内容绝不跟进。
+    CHECK_FALSE(fs::exists(flat / "skills" / "link"));
+    CHECK_FALSE(fs::exists(flat / "skills" / "link" / "secret.txt"));
+    CHECK(ReadBytes(root / "outside" / "secret.txt").value() == "S");  // 原件未动
 }

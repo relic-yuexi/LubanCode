@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -134,7 +135,7 @@ std::string PidToken() {
 
 }  // namespace
 
-std::expected<std::optional<fs::path>, std::string> FlatFullBackup(
+std::expected<std::optional<fs::path>, FlatFailure> FlatFullBackup(
     const fs::path& install_root,
     const std::vector<std::string>& managed_trees,
     const std::vector<std::string>& record_files,
@@ -190,8 +191,9 @@ std::expected<std::optional<fs::path>, std::string> FlatFullBackup(
     std::error_code mk_ec;
     fs::create_directories(staging, mk_ec);
     if (mk_ec) {
-        return std::unexpected("备份 staging 建不成: " + PathToUtf8(staging) +
-                               "(" + mk_ec.message() + ")");
+        return std::unexpected(FlatFailure{
+            FlatHandoverError::Failed,
+            "备份 staging 建不成: " + PathToUtf8(staging) + "(" + mk_ec.message() + ")"});
     }
 
     for (const std::string& tree : managed_trees) {
@@ -204,7 +206,8 @@ std::expected<std::optional<fs::path>, std::string> FlatFullBackup(
             continue;
         }
         if (auto sub = BackupTree(tree_root, staging / tree); !sub.has_value()) {
-            return std::unexpected(sub.error());
+            return std::unexpected(
+                FlatFailure{FlatHandoverError::Failed, std::move(sub.error())});
         }
     }
     for (const fs::path& entry : SortedEntries(install_root)) {
@@ -222,7 +225,9 @@ std::expected<std::optional<fs::path>, std::string> FlatFullBackup(
         }
         if (auto copied = CopyFileDurable(entry, staging / entry.filename());
             !copied.has_value()) {
-            return std::unexpected("备份失败(" + PathToUtf8(entry) + "): " + copied.error());
+            return std::unexpected(FlatFailure{
+                FlatHandoverError::Failed,
+                "备份失败(" + PathToUtf8(entry) + "): " + copied.error()});
         }
     }
 
@@ -236,7 +241,7 @@ std::expected<std::optional<fs::path>, std::string> FlatFullBackup(
     return flat;
 }
 
-std::expected<void, std::string> HandoverFlatLauncher(const LayoutPaths& paths,
+std::expected<void, FlatFailure> HandoverFlatLauncher(const LayoutPaths& paths,
                                                       const std::string& txn_id,
                                                       const fs::path& version_dir) {
     const fs::path exe_name = paths.exe.filename();
@@ -247,15 +252,19 @@ std::expected<void, std::string> HandoverFlatLauncher(const LayoutPaths& paths,
     const fs::path root_exe_full = fs::weakly_canonical(paths.exe, ec);
     const fs::path version_exe_full = fs::weakly_canonical(version_exe, ec);
     if (root_exe_full == version_exe_full) {
-        return std::unexpected("安装根与版本目录重叠,拒绝交接");
+        return std::unexpected(
+            FlatFailure{FlatHandoverError::Failed, "安装根与版本目录重叠,拒绝交接"});
     }
 
     const fs::path legacy_dir = paths.backups / txn_id / "legacy";
     std::error_code mk_ec;
     fs::create_directories(legacy_dir, mk_ec);
     if (mk_ec) {
-        return std::unexpected("legacy 备份目录建不成: " + PathToUtf8(legacy_dir) +
-                               "(" + mk_ec.message() + ")");
+        return std::unexpected(FlatFailure{
+            FlatHandoverError::NeedsReview,
+            "旧根 EXE 的备份目录建不成(" + PathToUtf8(legacy_dir) + ": " + mk_ec.message() +
+                ")。处理完再重跑 lubancode update 续上(已下载核对的包不重下)。"
+                "绝不强杀。"});
     }
     const fs::path legacy_target = legacy_dir / exe_name;
 
@@ -268,30 +277,43 @@ std::expected<void, std::string> HandoverFlatLauncher(const LayoutPaths& paths,
         std::error_code ren_ec;
         fs::rename(paths.exe, legacy_target, ren_ec);
         if (ren_ec) {
-            return std::unexpected("旧根 EXE 挪不进备份(" + ren_ec.message() +
-                                   ")——多半仍被运行中的进程/杀软锁着。"
-                                   "退出所有 lubancode 进程后重跑 lubancode update 续上"
-                                   "(已下载核对的包不重下)。绝不强杀。");
+            return std::unexpected(FlatFailure{
+                FlatHandoverError::NeedsReview,
+                "旧根 EXE 挪不进备份(" + ren_ec.message() +
+                    ")——多半仍被运行中的进程/杀软锁着。"
+                    "退出所有 lubancode 进程后重跑 lubancode update 续上"
+                    "(已下载核对的包不重下)。绝不强杀。"});
         }
     }
 
     if (!fs::is_regular_file(version_exe, exe_ec) || exe_ec) {
-        return std::unexpected("版本目录里没有启动器: " + PathToUtf8(version_exe));
+        return std::unexpected(FlatFailure{FlatHandoverError::Failed,
+                                           "版本目录里没有启动器: " + PathToUtf8(version_exe)});
     }
     if (auto copied = CopyFileDurable(version_exe, paths.exe); !copied.has_value()) {
-        return std::unexpected("新版启动器落根位失败: " + copied.error());
+        return std::unexpected(FlatFailure{FlatHandoverError::Failed,
+                                           "新版启动器落根位失败: " + copied.error()});
     }
 #ifndef _WIN32
     MakeExecutable(paths.exe);
 #endif
-    return SyncUpdaterTree(version_dir / "updater", paths.updater);
+    if (auto synced = SyncUpdaterTree(version_dir / "updater", paths.updater);
+        !synced.has_value()) {
+        return std::unexpected(
+            FlatFailure{FlatHandoverError::Failed, std::move(synced.error())});
+    }
+    return {};
 }
 
-std::expected<bool, std::string> RestoreFlatLegacy(const LayoutPaths& paths,
+std::expected<bool, FlatFailure> RestoreFlatLegacy(const LayoutPaths& paths,
                                                    const std::string& txn_id) {
     const fs::path exe_name = paths.exe.filename();
     const fs::path legacy = paths.backups / txn_id / "legacy" / exe_name;
     bool restored = false;
+    // 恢复链失败不早退:记下失败,摘完 current 再返回——"恢复不成也要摘掉
+    // 指针"是硬保证(python docstring 承诺、实现未兑现的那条,这里兑现),
+    // 根位现场留给人工诊断。
+    std::optional<FlatFailure> failure;
     std::error_code ec;
     if (fs::is_regular_file(legacy, ec) && !ec) {
         std::error_code root_ec;
@@ -301,22 +323,30 @@ std::expected<bool, std::string> RestoreFlatLegacy(const LayoutPaths& paths,
             std::error_code ren_ec;
             fs::rename(paths.exe, parked, ren_ec);
             if (ren_ec) {
-                return std::unexpected("根位启动器停不进备份(" + ren_ec.message() +
-                                       "),旧 EXE 未恢复");
+                failure = FlatFailure{FlatHandoverError::Failed,
+                                      "根位启动器停不进备份(" + ren_ec.message() +
+                                          "),旧 EXE 未恢复"};
             }
         }
-        if (auto copied = CopyFileDurable(legacy, paths.exe); !copied.has_value()) {
-            return std::unexpected("旧 EXE 恢复失败: " + copied.error());
-        }
+        if (!failure.has_value()) {
+            if (auto copied = CopyFileDurable(legacy, paths.exe); !copied.has_value()) {
+                failure = FlatFailure{FlatHandoverError::Failed,
+                                      "旧 EXE 恢复失败: " + copied.error()};
+            } else {
 #ifndef _WIN32
-        MakeExecutable(paths.exe);
+                MakeExecutable(paths.exe);
 #endif
-        restored = true;
+                restored = true;
+            }
+        }
     }
     // current.json 无条件摘(不在也 silently 过——python 的 except OSError:
     // pass;平铺旧 EXE 不认指针,留着会把后续启动当启动器空转)。
     std::error_code rm_ec;
     fs::remove(paths.current, rm_ec);
+    if (failure.has_value()) {
+        return std::unexpected(std::move(*failure));
+    }
     return restored;
 }
 

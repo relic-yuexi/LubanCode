@@ -41,8 +41,16 @@
 //     "updater.py")——账面身份如实,谁装的写谁;
 //   - needs-review 报错文案把 python 的冲突计数换成 seam 错串直陈
 //     (seam 只回一份详情,计数归③);
-//   - restore_flat_legacy 的 launcher-parked 挪移是尽力而为(python 裸
-//     rename,失败会炸恢复链;这里吞错继续,必摘指针那条硬保证不变);
+//   - 平铺交接(完整备份/让位/恢复)的文件机械自 SV-03 起唯一实现在
+//     flat_handover(FlatFullBackup/HandoverFlatLauncher/RestoreFlatLegacy),
+//     引擎只编排事务并把 FlatFailure 映射为退出码(NeedsReview->2,其余
+//     failed->1;回滚时恢复链失败 -> needs-review 退 2)。由此对 python 的
+//     三处行为差:备份守卫从"任一棵受管树在"扩到"树或根级文件",落点
+//     改 txn 名下 staging 两步改名;树备份不复制也不跟进链接件(copy_
+//     symlinks 副本已删,reparse 政策见 flat_handover 头注);restore 的
+//     launcher-parked 挪移失败不再吞错续拷——恢复链任一步失败也先摘
+//     current 再报 needs-review(python 裸 rename 失败炸恢复链且指针
+//     不摘,docstring"恢复不成也要摘掉指针"未兑现,这里兑现);
 //   - gc 读不懂旧版本目录里的 manifest.json 时按"全清单外"处理——
 //     清单外文件全部抢救后才删(python read_manifest_file 直接退程,
 //     这里选保守)。

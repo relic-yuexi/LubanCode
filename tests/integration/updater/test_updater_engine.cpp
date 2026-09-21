@@ -882,8 +882,10 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
     const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
     WriteFile(archive, pkg.bytes);
 
-    // 预置一笔已知 id 的在途账,堵住 backups/<id>(占成文件):平铺备份挪不
-    // 进事务名下(留原地),交接建不成 legacy 目录 -> needs-review。
+    // 预置一笔已知 id 的在途账;backups/<id>/legacy 占成文件:备份段照做
+    // (backups/<id>/ 是目录,staging 建得成),交接建不成 legacy 目录 ->
+    // needs-review。(整个 backups/<id> 被占的形态归备份段 failed,另有
+    // 专测——分级归引擎,SV-03 收敛后各管各的出口。)
     const std::string txn_id = "20260920T000000Z-cafe0001";
     {
         lubancode::updater::TxnTarget target;
@@ -896,15 +898,18 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
         lubancode::updater::Transaction txn(lubancode::updater::MakeLayoutPaths(root), txn_id);
         txn.Create(target);
     }
-    WriteFile(root / "backups" / txn_id, "占位文件,堵住目录名");
+    WriteFile(root / "backups" / txn_id / "legacy", "占位文件,堵住 legacy 目录名");
 
     Lines out;
     CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
                            nullptr) == 2);
     CHECK(out.contains("needs-review: "));
+    CHECK(out.contains("旧根 EXE 的备份目录建不成"));
     const auto pointer = ReadJson(root / "current.json");
     REQUIRE(pointer.has_value());  // 指针已换(python 同款:needs-review 不回滚)
     CHECK((*pointer)["current"] == pkg.dirname);
+    // 备份照做:txn 名下两步落位成功(守卫只堵 legacy 不堵 flat)。
+    CHECK(fs::is_regular_file(root / "backups" / txn_id / "flat" / "skills" / "keep.md"));
     // 账停在 activating(python 同款:交接的 needs-review 是退出码与报错,
     // 账面状态留在 activating,find_resumable 照样可续)。
     CHECK(LedgerField(root / "updates" / (txn_id + ".json"), "state") ==
@@ -912,7 +917,7 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
 
     // 清障:挪走占位文件,续跑收尾(版本目录已在,versioned 路径直进提交)。
     std::error_code ec;
-    fs::remove(root / "backups" / txn_id, ec);
+    fs::remove(root / "backups" / txn_id / "legacy", ec);
     Lines out2;
     CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out2.sink(),
                            nullptr) == 0);
@@ -920,6 +925,94 @@ TEST_CASE("engine.update:交接被堵——needs-review 退 2,清障续跑收尾
     CHECK(out2.contains("[stage] 版本目录 " + pkg.dirname + " 已在且核对通过,跳过下载"));
     CHECK(LedgerField(root / "updates" / (txn_id + ".json"), "state") ==
           std::optional<std::string>("committed"));
+}
+
+TEST_CASE("engine.update:平铺备份段被堵——failed 退 1,不动指针") {
+    // backups/<txn> 整个名被占位文件堵住:FlatFullBackup 的 staging 建不成
+    // -> failed(交接段被堵才是 needs-review,分级出口各归各)。
+    const fs::path root = TempRoot("backup-blocked");
+    EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+    WriteFile(root / kExeName, "old flat exe bytes");
+    WriteFile(root / "skills" / "keep.md", "用户文件");
+    const Package pkg = BuildPackage({.version = "2.0.0"});
+    const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
+    WriteFile(archive, pkg.bytes);
+
+    const std::string txn_id = "20260921T000000Z-babe0002";
+    {
+        lubancode::updater::TxnTarget target;
+        target.version = "2.0.0";
+        target.tag = "v2.0.0";
+        target.exe_version = "2.0.0";
+        target.platform = "test-x64";
+        target.dirname = pkg.dirname;
+        target.digest_hex = pkg.digest_hex;
+        lubancode::updater::Transaction txn(lubancode::updater::MakeLayoutPaths(root), txn_id);
+        txn.Create(target);
+    }
+    WriteFile(root / "backups" / txn_id, "占位文件,堵住整个事务备份目录");
+
+    Lines out;
+    CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
+                           nullptr) == 1);
+    CHECK(out.contains("备份 staging 建不成"));
+    CHECK_FALSE(fs::exists(root / "current.json"));  // 备份在激活前,指针未写
+    CHECK(StagingEmpty(root));
+    CHECK(LedgerField(root / "updates" / (txn_id + ".json"), "state") ==
+          std::optional<std::string>("failed"));
+    CHECK(ReadFile(root / kExeName) == "old flat exe bytes");  // 旧根 EXE 原样
+}
+
+TEST_CASE("engine.update:回滚恢复失败——needs-review 退 2,current 必摘") {
+    // 恢复链失败(launcher-parked 位被目录占住,park rename 挪不进):退
+    // needs-review 而非假报 rolled-back;current 指针必摘(必摘硬保证,
+    // python docstring 承诺未兑现的那条),根位现场保留给人工诊断。
+    const fs::path root = TempRoot("restore-failed");
+    EnvVarGuard stub_version("LUBANCODE_PROBE_STUB_VERSION", "2.0.0");
+    WriteFile(root / kExeName, "old flat exe bytes");
+    WriteFile(root / "skills" / "keep.md", "用户文件");
+    const Package pkg = BuildPackage({.version = "2.0.0"});
+    const fs::path archive = root.parent_path() / (root.filename().string() + "-pkg.zip");
+    WriteFile(archive, pkg.bytes);
+
+    const std::string txn_id = "20260921T000000Z-dead0003";
+    {
+        lubancode::updater::TxnTarget target;
+        target.version = "2.0.0";
+        target.tag = "v2.0.0";
+        target.exe_version = "2.0.0";
+        target.platform = "test-x64";
+        target.dirname = pkg.dirname;
+        target.digest_hex = pkg.digest_hex;
+        lubancode::updater::Transaction txn(lubancode::updater::MakeLayoutPaths(root), txn_id);
+        txn.Create(target);
+    }
+    // parked 位占成目录:交接不碰它,恢复时 rename 才撞上。
+    fs::create_directories(root / "backups" / txn_id /
+                           (std::string("launcher-parked-") + kExeName));
+    // 健康探针(第 2 次)故意失败 -> 回滚 -> 平铺恢复链撞占位 -> needs-review。
+    const fs::path counter = root.parent_path() / (root.filename().string() + "-probe-count");
+    EnvVarGuard fail_on("LUBANCODE_PROBE_STUB_FAIL_ON", "2");
+    EnvVarGuard counter_path("LUBANCODE_PROBE_STUB_COUNTER", lubancode::platform::PathToUtf8(counter));
+
+    Lines out;
+    CHECK(RunUpdaterEngine(UpdateArgs(root, archive, "2.0.0", pkg.digest_hex), out.sink(),
+                           nullptr) == 2);
+    CHECK(out.contains("needs-review: "));
+    CHECK(out.contains("旧根 EXE 恢复失败"));
+    CHECK_FALSE(fs::exists(root / "current.json"));  // 必摘硬保证:失败也摘
+    const auto ledger = ReadJson(root / "updates" / (txn_id + ".json"));
+    REQUIRE(ledger.has_value());
+    CHECK((*ledger)["state"] == "rolled-back");
+    CHECK((*ledger)["restored_flat"] == false);
+    CHECK((*ledger)["flat_restore_error"].is_string());
+    CHECK((*ledger)["current_removed"] == true);
+    // 现场保留:根位还是交接顶上去的新 EXE,legacy 原件在,parked 占位在。
+    CHECK(ReadFile(root / kExeName) == StubExeBytes());
+    CHECK(ReadFile(root / "backups" / txn_id / "legacy" / kExeName) == "old flat exe bytes");
+    CHECK(fs::is_directory(root / "backups" / txn_id /
+                           (std::string("launcher-parked-") + kExeName)));
+    CHECK(StagingEmpty(root));
 }
 
 TEST_CASE("engine.rollback:切回 previous;无 previous 退 1") {

@@ -1,0 +1,72 @@
+# SV-03 更新 C++ 引擎另写平铺交接，专用模块未进入引擎主链
+
+- 状态：已实施，待三平台 CI 验收（PR 见下方勾账）。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`（实施基线：`21744099`，含 merge PR #181，批三①②/#140 均已在内）。
+- 批次：2。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-03 | A | 中 | src/updater/engine.cpp:390<br>src/updater/engine.cpp:547<br>src/updater/engine.cpp:571<br>src/updater/engine.cpp:611<br>src/updater/engine.cpp:709<br>src/updater/flat_handover.cpp:137<br>src/updater/flat_handover.cpp:239<br>src/updater/flat_handover.cpp:290 | engine 内部 HandoverFlatLauncher 用 filesystem::copy_file；flat_handover::HandoverFlatLauncher 用 CopyFileDurable。Activate 调前者；两套 C++ 入口目前都仅由测试调用，CLI 仍调用 Python 更新助手。 | 同一平铺迁移需求要改两套函数。专用测试验证的耐久复制、路径守卫及 reparse 处理没有覆盖引擎实际调用。当前 CLI 未接 C++ 引擎，不能据此断言线上更新器已有该回归。两份 RestoreFlatLegacy 的失败路径也不一致：一份抛异常、一份提前 unexpected，均可能在到达 current.json 删除前退出，不能凭尾部注释认定“失败也摘指针”已兑现。 | 保留 flat_handover 专用模块为唯一文件操作实现，engine 只编排事务并把结构化失败映射为 needs-review/failed/rolled-back。先列清差异并补引擎入口验收，再删除 engine 的 FullBackup/SyncUpdaterTree/HandoverFlatLauncher/RestoreFlatLegacy 副本；回滚清理须返回实际结果。 | 高：安装根、备份、current 指针与回滚。不能直接按同名替换：备份 reparse 策略、落点、错误分类、恢复失败后的指针策略先冻结。禁止混入用户目录清理或改变包格式。 |
+
+### 语义差异与合并边界
+
+| 差异 | engine 路 | 专用模块路 | 裁决 |
+| --- | --- | --- | --- |
+| 新启动器/恢复复制 | copy_file | CopyFileDurable，检查提交与 close | 保留耐久复制机械；引擎调用同一口 |
+| updater 树同步 | recursive_directory_iterator + copy_file | SortedEntries + IsLinkLike + CopyFileDurable | 先冻结 reparse 政策，再共用 |
+| 完整备份 | FullBackup 再尝试挪入 txn/flat | FlatFullBackup 在 txn 下 staging 再改名 | 保留可核实真实落点的专用结果 |
+| 恢复失败 | 异常分类在 engine | expected<string> 早返 | 收敛为类型化文件结果；事务层掌握退出码 |
+
+`rg` 已核 `src` 全目录：专用三个公开函数只在 flat_handover 自身定义，测试直接调用；引擎内部调用在 engine 的匿名命名空间。再向上核查：RunUpdaterEngine 在 src 中只有声明/定义，调用在引擎集成测试；src/cli/update_command.cpp:68 仍解析 updater/updater.py。故本条是接线前须收敛的 C++ 双实现，不当成现网故障。CMake 两份文件都已编入。不是把历史 Python 兼容脚本也算一份生产重复。
+
+预计净删约 110 行：engine 四段现有约 136 行，扣掉结果转换及调用胶水约 26 行。只计 C++ 净重复，不计测试与注释搬迁。建议批次 2：接口返回及错误口径尚不同，不能把这项标为零行为变化。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：可与其余 SV 项并行；本条独占 engine.cpp/flat_handover.*。若另有人做更新助手接线，应并入同一 PR 或先后合入，不能各留一条平铺路径。
+- 允许修改的现有文件：
+
+- `src/updater/engine.cpp`
+- `src/updater/flat_handover.cpp`
+- `src/updater/flat_handover.hpp`
+- `tests/integration/updater/test_updater_install_apply.cpp`
+- `tests/integration/updater/test_updater_engine.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [ ] 从 RunUpdaterEngine 的真实入口跑平铺升级、occupied rename、复制失败、探针失败及回滚；验收证据须穿过专用模块。
+- [ ] 同一受管树/根文件输入只有一份备份筛选规则；任何 reparse 语义差异留成显式策略与测试。
+- [ ] 验证 current 清理策略在所有恢复失败出口可执行且可观测；不把清理失败吞成恢复成功。
+- [ ] 现有专用测试保留，补 tests/integration/updater/test_updater_engine.cpp 引擎级失败注入；三平台远端 CI 验收，不以专用函数单测冒充接线完成。
+- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+
+## 合并/删除口径
+
+职责：平铺安装备份、启动器交接及旧版恢复。
+
+现有：engine.cpp 的 FullBackup/SyncUpdaterTree/HandoverFlatLauncher/RestoreFlatLegacy；flat_handover.cpp 的同职责公开实现。
+
+建议保留：flat_handover.cpp 文件机械；engine.cpp 事务及退出码映射。
+
+预计净删 110 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+## 既有工作关联
+
+- todos/GitHubRelease自动更新_用户技能保护与整包回滚设计.todo:177（平铺迁移与回滚原合同）；代码注释标明 C++ 化批三，本条补主链与专用模块接线差异。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
