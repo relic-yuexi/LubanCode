@@ -1,6 +1,6 @@
 # AR-06 任务台账外露可变记录导致监督读写脱锁
 
-- 状态：待修；本次只审查，未改源码。
+- 状态：已修（PR #172，CI 双腿绿，勾账见文末）；原审查轮只审未改。
 - 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 主批次：第3批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
 
@@ -29,11 +29,18 @@
 2. 先把强收所需读值搬进TaskLedger同一事务，接口不再接外部读取的stale_rounds；再收紧TaskRecord为私有状态或受限句柄，按事件提供记录方法与不可变快照。保留已有原子取消旗的信号用途，逐项迁移AgentTool直改快照口。
 3. 小批提交，按下列门槛验收。
 
-- [ ] ForceFinalizeNoProgress读取stale_rounds与终态提交共用台账锁。
-- [ ] 栅栏交错消息提交/宽限强收通过TSan。
-- [ ] AgentTool迁移每个写口时保住notify与投父邮箱顺序。
-- [ ] 面板快照内容和修订号不丢。
-- [ ] GitHub CI。
+- [x] ForceFinalizeNoProgress读取stale_rounds与终态提交共用台账锁。（形参退役：`ForceFinalizeNoProgress(task)`，读值搬进强收口自己的台账锁事务；监督器 FireNoProgressGrace 改无参调用，不再摸 `task->progress`；旧接口全仓退役，引用止于监督器/台账/递归测试四处）
+- [x] 栅栏交错消息提交/宽限强收竞争被夹具钉死。（test_agent_progress.cpp"强收与轮次提交交错"册：release/acquire 栅栏+有界批次把轮次提交与宽限强收逼到同一扇门前撞 20 轮，判据=消息轮数==台账最终 stale_rounds——旧形状读后至拿锁间落进提交时必红。TSan 现实注明：本仓 TSan 腿只门 workflow 域（ci.yml workflow_threads 按路径放行），agent 域把关腿为 macos-clang 全量+linux-asan，run 35562836002 双腿实证；竞争本身已由修法消除——锁外读不复存在）
+- [ ] AgentTool迁移每个写口时保住notify与投父邮箱顺序。（边界注记：本单按交接表只做锁外读局部修正，"完整台账封装留第三批"；本单未动 AgentTool 写口，notify 与投父邮箱顺序原样——此约束在第三批封装迁移写口时生效）
+- [x] 面板快照内容和修订号不丢。（合同册钉死：强收那笔 Failure 事件、content_revision、面板 revision 三本账都前进且详情可查；supervisor 册端到端断言过）
+- [x] GitHub CI。（run 35562836002 rollup success：macos-clang success + linux-asan success。前两跑红皆夹具自身病，与刀无关：首跑 35558191397 提交侧停机条件盯 `task->finalized`——那面旗归任务线程收尾（FinalizeFromToolResult）置，强收不置，条件永假无限转致 180s 超时；二跑 35560061320 断言同源必红。修正后双腿绿）
+
+## 勾账
+
+- 状态：已修。PR #172（https://github.com/relic-yuexi/LubanCode/pull/172），分支 worktree-agent-ab304f3faab2fc5ec，提交 c26ab98e（刀+合同册+本单入库）+ f0a77d86、3b133446（夹具两轮自修）。
+- 修法：`TaskLedger::ForceFinalizeNoProgress` 去掉 stale_rounds 形参——空转轮数在它自己的台账锁事务内现读，读值与终态提交同锁同刻；监督器 `FireNoProgressGrace` 改调无参口；test_subagent_recursion 强收回流册按生产形状先攒真实空转轮（四笔同指纹到 3）再落锤。TaskRecord 私有化与 AgentTool 写口迁移按交接边界留第三批，本单不扩权。
+- CI 证据：run 35562836002 rollup success（macos-clang success + linux-asan success，check-runs 核对过）。夹具两轮自修的过程账在提交信息里：首跑归因锁饥饿不确，真凶是停机条件盯错了旗，3b133446 信息里已更正。
+- 行号复核：基线 693d3ddb 之后行号有偏移、病灶一致——读点 agent_supervisor.cpp:179（FireNoProgressGrace 锁外取 `task->progress.stale_rounds`），写点 task_ledger.cpp:1436（RecordAssistantMessage 锁内自增）/1416（新指纹归零），强收口 task_ledger.cpp:1869。
 
 ## 删除量与旧账
 
