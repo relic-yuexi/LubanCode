@@ -33,12 +33,16 @@ namespace lubancode::tools {
 
 class AgentMessageTool : public Tool {
 public:
-    // agent_tool:目标台账。空指针 = 运行时不可用(没配子代理通道的入口),
-    // execute 明确报 unavailable,不假报已通知。caller_task_id:0 = main
-    // (不限定,可投任意存活任务);非 0 = 只挂给某只子代理的窄实例,只能
-    // 投它自己的直接孩子。
-    explicit AgentMessageTool(AgentTool* agent_tool, int caller_task_id = 0)
-        : agent_tool_(agent_tool), caller_task_id_(caller_task_id) {}
+    // coordinator:目标台账的运行 owner(AR-01 起 scoped 实例持协调器强
+    // 引用,不持门面裸针——后台任务的私有表活到线程收尾,门面可能先亡)。
+    // 空 = 运行时不可用(没配子代理通道的入口),execute 明确报
+    // unavailable,不假报已通知。caller_task_id:0 = main(不限定,可投
+    // 任意存活任务);非 0 = 只挂给某只子代理的窄实例,只能投它自己的
+    // 直接孩子。
+    explicit AgentMessageTool(std::shared_ptr<AgentTaskCoordinator> coordinator, int caller_task_id = 0)
+        : coordinator_(std::move(coordinator)), caller_task_id_(caller_task_id) {}
+    // 旧装配口(门面转发):当场换出协调器,不保留门面指针。
+    explicit AgentMessageTool(AgentTool* agent_tool, int caller_task_id = 0);
 
     std::string name() const override;
     std::string description() const override;
@@ -47,7 +51,7 @@ public:
     Result execute(const nlohmann::json& input) override;
 
 private:
-    AgentTool* agent_tool_;
+    std::shared_ptr<AgentTaskCoordinator> coordinator_;
     int caller_task_id_ = 0;
 };
 

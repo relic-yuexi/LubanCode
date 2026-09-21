@@ -13,6 +13,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -39,6 +40,7 @@ namespace lubancode::tools {
 class AgentTool;
 class AgentTaskCoordinator;
 class AgentDispatchHandle;
+struct AgentRunState;  // AgentTool 侧定义(agent_tool.hpp):后台执行的冻结配置账
 
 // 后台子代理不能借主回合那条 Backend:主回合会重画 spinner,切 provider
 // 时还会替换内部 client。工厂在 launch 当口造一份独立快照,线程随后只
@@ -108,6 +110,12 @@ struct SubagentDispatchEnv {
     std::string effective_cwd;
     // 真 = 无 UI 的派工(后台父任务的孩子们):确认一律走放行账,不弹终端。
     bool headless = false;
+    // AR-01(子代理后台线程退场仍借用已析构门面):这只环境所属任务的冻结
+    // 运行态——后台 worker 与它的嵌套派工全认这份 shared 账(配置快照/服务/
+    // 工具租约/协调器强引用),不回 AgentTool 门面借活成员。门面先亡时
+    // worker 照跑:台账在协调器上,协调器被这份账钉活。空 = 旧路(main 直派
+    // 的活态,由门面现填)。
+    std::shared_ptr<const AgentRunState> run_state;
 };
 
 // 协调器 -> 引擎的 typed 派工请求:引擎(AgentTool)不再从一团 JSON 里一路
@@ -166,9 +174,12 @@ public:
     // 门面工具指针(AgentTool 自己):薄壳的 name/description/input_schema
     // 只读转发用——schema 的动态内容(agent 类型清单)与主路同源。execute
     // 不走它,派工规则全在协调器。寿命:AgentTool 与各表同注册表共存亡,
-    // 嵌套表的壳活不到协调器之后。
-    void SetFacadeTool(Tool* tool) { facade_tool_ = tool; }
-    Tool* facade_tool() const { return facade_tool_; }
+    // 嵌套表的壳活不到协调器之后。AR-01:门面析构时调 ClearFacadeTool 摘针,
+    // 晚归线程的壳不再悬垂借用(嵌套壳本来就走 env 里的冻结 run_state,
+    // 只有 env 为空的 main 兼容壳会问到这枚指针)。
+    void SetFacadeTool(Tool* tool) { facade_tool_.store(tool, std::memory_order_release); }
+    Tool* facade_tool() const { return facade_tool_.load(std::memory_order_acquire); }
+    void ClearFacadeTool();
 
     // 会话收场(单子 §6.2):进 Closing 后任何 handle 再派工都回稳定
     // session_closing,不新起线程。取消/收柄由 JoinAllBounded 办。
@@ -179,13 +190,25 @@ public:
     Tool::Result Dispatch(const AgentDispatchRequest& request);
 
     // ---- 后台线程表(单一 writer:协调器)--------------------------------
-    // 已收尾的线程在此收柄(join);析构兜底有界 join,detach 绝不冻退出。
-    void TrackThread(int task_id, std::thread thread);
-    void ReapSettledThreads();
+    // 已退场的线程在此收柄(join)。AR-01 立规矩:收柄只认线程退出回执
+    //(exit_receipt,worker 闭包最后一笔置位),不认业务终态——台账翻成
+    // Failed/Cancelled 只是账面收口,证明不了 OS 线程已经 return;拿业务
+    // 终态去 join 还在跑的线程,join 会无期限押死孵化路(监督器强收后正是
+    // 这个形状)。
+    void TrackThread(int task_id, std::thread thread,
+                     std::shared_ptr<std::atomic<bool>> exit_receipt);
+    void ReapExitedThreads();
 
-    // 退出兜底:广播取消 -> 逐线程有界 join(旧 ~AgentTool 的规矩,原样
-    // 迁来)——挂死绝境 detach 放行,台账已是终态,不丢账。
+    // 退出兜底:广播取消 -> 逐线程按退出回执有界等 -> 回执在手就 join,
+    // 等不到就 detach 放行——挂死绝境不冻退出;worker 闭包自持冻结
+    // run_state(协调器强引用)与 TaskRecord,晚归不悬垂、不丢账。
     void JoinAllBounded();
+
+    // 有界退出窗(缺省 10s,行为与旧 ~AgentTool 一致)。测试可收窄,把
+    // "关闭超时后才返回"的交错压进秒级,不靠真睡 10 秒。
+    void SetShutdownJoinWindow(std::chrono::milliseconds window) {
+        shutdown_join_window_ = window > std::chrono::milliseconds::zero() ? window : std::chrono::milliseconds(10);
+    }
 
 private:
     TaskLedger ledger_;
@@ -193,12 +216,14 @@ private:
     runtime::AgentSupervisor supervisor_;
     SubagentGovernance governance_{};
     Engine engine_;
-    Tool* facade_tool_ = nullptr;
+    std::atomic<Tool*> facade_tool_{nullptr};  // 门面指针:析构摘针与壳侧只读都原子,不悬垂借用
     std::atomic<bool> closing_{false};
     std::mutex threads_mutex_;
+    std::chrono::milliseconds shutdown_join_window_{10000};
     struct TaskThreadEntry {
         int task_id = 0;
         std::thread thread;
+        std::shared_ptr<std::atomic<bool>> exit_receipt;  // worker 最后一笔置位
     };
     std::vector<TaskThreadEntry> threads_;
 };

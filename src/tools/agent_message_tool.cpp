@@ -65,8 +65,12 @@ nlohmann::json AgentMessageTool::input_schema() const {
     return schema;
 }
 
+AgentMessageTool::AgentMessageTool(AgentTool* agent_tool, int caller_task_id)
+    : coordinator_(agent_tool != nullptr ? agent_tool->coordinator() : nullptr),
+      caller_task_id_(caller_task_id) {}
+
 Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
-    if (agent_tool_ == nullptr) {
+    if (coordinator_ == nullptr) {
         return {lubancode::cli::tr("agent_message.unavailable"), true};
     }
     const auto task_id_it = input.find("task_id");
@@ -81,7 +85,7 @@ Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
     // 任务不存在时让下面 SendTaskMessage 走它自己的 not_found 分支,不在
     // 这里抢答——两条错因不混着报。
     if (caller_task_id_ != 0) {
-        const std::optional<AgentTaskSnapshot> target = agent_tool_->TaskDetail(task_id);
+        const std::optional<AgentTaskSnapshot> target = coordinator_->ledger().Detail(task_id);
         if (target.has_value() && target->parent_task_id != caller_task_id_) {
             return {StatusJson("not_child", task_id, 0) + "\n" + lubancode::cli::trf("agent_message.not_child", task_id),
                     true};
@@ -102,11 +106,11 @@ Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
         message = message.substr(first, last - first + 1);
     }
 
-    switch (agent_tool_->SendTaskMessage(task_id, message, TaskMessageSource::MainAgent)) {
+    switch (coordinator_->ledger().SendMessage(task_id, message, TaskMessageSource::MainAgent)) {
         case TaskMessageStatus::Queued: {
             // 入账后的未送数(含本条):面板 queued 灯与 JSON 同源,都读
             // TaskRecord::inbox 这一本账。
-            const std::size_t pending = agent_tool_->PendingTaskMessages(task_id).size();
+            const std::size_t pending = coordinator_->ledger().PendingMessages(task_id).size();
             return {StatusJson("queued", task_id, pending) + "\n" +
                         lubancode::cli::trf("agent_message.queued", task_id),
                     false};
