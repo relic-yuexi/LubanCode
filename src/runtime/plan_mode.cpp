@@ -8,149 +8,36 @@
 #include <string_view>
 #include <vector>
 
-#include "tools/command_safety.hpp"  // HasUnquotedScriptBlock:与 command_safety 共用同一份
+#include "tools/shell_lexing.hpp"  // 词法件:与审批闸 command_safety 共用同一份(AR-07)
 
 namespace lubancode::runtime {
+
+// 词法件全吃 tools/shell_lexing(AR-07:原先这里与 command_safety 各写一套,
+// 只有函数名不同;合并后别再写第二份)。判词——Plan 只读白名单、探针、
+// git 只读子命令——仍在本文件,策略不外借。
+using tools::HasUnquotedRedirection;
+using tools::HasUnquotedScriptBlock;
+using tools::HasSubexpression;
+using tools::NormalizeWord;
+using tools::SplitSegments;
+using tools::ToLowerWord;
+using tools::Tokenize;
 
 namespace {
 
 constexpr std::string_view kOpenTag = "<proposed_plan>";
 constexpr std::string_view kCloseTag = "</proposed_plan>";
 
-std::string ToLower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
 // ---------------------------------------------------------------------------
-// Plan shell 分类(与 command_safety 的 Safe 不同表,单子明令另写)
+// Plan shell 分类(与 command_safety 的 Safe 不同表,单子明令另写)。
+// 拆段/引号/重定向/子表达式/脚本块/拆词/词形归一这些词法件全吃
+// tools/shell_lexing(AR-07 合并,见文件头 using 块),这里只写判词。
 // ---------------------------------------------------------------------------
-
-// 引号状态机拆段:引号外的 && || ; | & 换行都是分隔符。single_quotes:
-// powershell 单引号算引号,cmd 不算(与 command_safety 同取舍)。
-std::vector<std::string> SplitShellSegments(const std::string& command, bool single_quotes) {
-    std::vector<std::string> segments;
-    std::string current;
-    char quote = '\0';
-    for (const char c : command) {
-        if (quote != '\0') {
-            current.push_back(c);
-            if (c == quote) {
-                quote = '\0';
-            }
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            current.push_back(c);
-            continue;
-        }
-        if (c == '&' || c == '|' || c == ';' || c == '\n' || c == '\r') {
-            segments.push_back(current);
-            current.clear();
-            continue;
-        }
-        current.push_back(c);
-    }
-    segments.push_back(current);
-    return segments;
-}
-
-// 引号外有没有重定向(> >> <)——Plan 一律不认写盘。
-bool HasUnquotedRedirection(const std::string& segment, bool single_quotes) {
-    char quote = '\0';
-    for (const char c : segment) {
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            }
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            continue;
-        }
-        if (c == '>' || c == '<') {
-            return true;
-        }
-    }
-    return false;
-}
-
-// 引号外有没有子表达式 $((powershell 双引号里也执行,单引号外一律拦)。
-bool HasSubexpression(const std::string& segment, bool single_quotes) {
-    bool in_single = false;
-    char prev = '\0';
-    for (const char c : segment) {
-        if (single_quotes && c == '\'') {
-            in_single = !in_single;
-        } else if (!in_single && prev == '$' && c == '(') {
-            return true;
-        }
-        prev = c;
-    }
-    return false;
-}
 
 // 引号外有没有 PowerShell 脚本块起始 {(真机实测 P2-3 放行 Where-Object
-// 时补的闸):实现在 tools/command_safety,两档共用同一份,别写第二份。
+// 时补的闸):实现在 tools/shell_lexing,两档共用同一份,别写第二份。
 // 语义:脚本块体内是任意代码,静态证明不了只读,一律 Unknown;cmd 的
 // { } 没有执行语义,不查。
-
-// 按引号外空白拆词,词身上的引号剥掉。
-std::vector<std::string> TokenizeShell(const std::string& segment, bool single_quotes) {
-    std::vector<std::string> tokens;
-    std::string current;
-    bool in_token = false;
-    char quote = '\0';
-    for (const char c : segment) {
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            } else {
-                current.push_back(c);
-            }
-            in_token = true;
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            in_token = true;
-            continue;
-        }
-        if (c == ' ' || c == '\t' || c == '\v' || c == '\f') {
-            if (in_token) {
-                tokens.push_back(current);
-                current.clear();
-                in_token = false;
-            }
-            continue;
-        }
-        current.push_back(c);
-        in_token = true;
-    }
-    if (in_token) {
-        tokens.push_back(current);
-    }
-    return tokens;
-}
-
-// 词形归一:剥路径前缀取文件名、剥 .exe/.bat/.cmd/.com、小写化。
-std::string NormalizeShellWord(const std::string& token) {
-    std::string word = token;
-    if (const std::size_t pos = word.find_last_of("/\\"); pos != std::string::npos) {
-        word = word.substr(pos + 1);
-    }
-    word = ToLower(std::move(word));
-    for (const std::string_view ext : {".exe", ".bat", ".cmd", ".com"}) {
-        if (word.size() > ext.size() && word.ends_with(ext)) {
-            word.resize(word.size() - ext.size());
-            break;
-        }
-    }
-    return word;
-}
 
 template <std::size_t N>
 bool InList(const std::array<std::string_view, N>& list, std::string_view word) {
@@ -203,19 +90,19 @@ PlanShellClassification ClassifyPlanSegment(const std::string& segment, bool is_
     if (HasSubexpression(segment, single_quotes)) {
         return deny("段内含子表达式 $(,双引号里也执行");
     }
-    if (is_powershell && tools::HasUnquotedScriptBlock(segment, single_quotes)) {
+    if (is_powershell && HasUnquotedScriptBlock(segment, single_quotes)) {
         return deny("段内含 PowerShell 脚本块 { },体内是任意代码;请改用无脚本块写法"
                     "(如 Where-Object Name -eq 'x')");
     }
-    const std::vector<std::string> tokens = TokenizeShell(segment, single_quotes);
+    const std::vector<std::string> tokens = Tokenize(segment, single_quotes);
     if (tokens.empty()) {
         return deny("空命令");
     }
     // 环境赋值($env:X= / set X=)能改后续行为,不下 ReadOnly。
-    if (ToLower(tokens.front()).rfind("$env:", 0) == 0) {
+    if (ToLowerWord(tokens.front()).rfind("$env:", 0) == 0) {
         return deny("段内含环境变量赋值($env:...),能改后续行为");
     }
-    const std::string first = NormalizeShellWord(tokens.front());
+    const std::string first = NormalizeWord(tokens.front());
     if (first.empty()) {
         return deny("首词为空");
     }
@@ -225,7 +112,7 @@ PlanShellClassification ClassifyPlanSegment(const std::string& segment, bool is_
     if (tokens.size() >= 2) {
         bool all_probe = true;
         for (std::size_t i = 1; i < tokens.size(); ++i) {
-            if (!InList(kPlanProbeFlags, ToLower(tokens[i]))) {
+            if (!InList(kPlanProbeFlags, ToLowerWord(tokens[i]))) {
                 all_probe = false;
                 break;
             }
@@ -236,16 +123,16 @@ PlanShellClassification ClassifyPlanSegment(const std::string& segment, bool is_
     }
     // git:看第二词;git -C <主树> 这类全局选项照 Unknown(保守,单子同款)。
     if (first == "git") {
-        if (tokens.size() >= 2 && InList(kPlanGitReadOnly, ToLower(tokens[1]))) {
+        if (tokens.size() >= 2 && InList(kPlanGitReadOnly, ToLowerWord(tokens[1]))) {
             for (std::size_t i = 2; i < tokens.size(); ++i) {
-                if (InList(kGitExternalFlags, ToLower(tokens[i]))) {
-                    return deny("git 旗标 " + ToLower(tokens[i]) +
+                if (InList(kGitExternalFlags, ToLowerWord(tokens[i]))) {
+                    return deny("git 旗标 " + ToLowerWord(tokens[i]) +
                                 " 可起外部 diff driver/pager,不在 Plan 只读组合内");
                 }
             }
             return PlanShellClassification{PlanShellVerdict::ReadOnly, ""};
         }
-        return deny("git 子命令 " + (tokens.size() >= 2 ? ToLower(tokens[1]) : std::string("(缺)")) +
+        return deny("git 子命令 " + (tokens.size() >= 2 ? ToLowerWord(tokens[1]) : std::string("(缺)")) +
                     " 不在 Plan 只读子命令表(status/log/diff/show/ls-files/ls-tree/rev-parse 等)");
     }
     if (InList(kPlanSafeGeneric, first)) {
@@ -266,7 +153,7 @@ PlanShellClassification ClassifyPlanShellDetailed(const std::string& command, co
         return {PlanShellVerdict::Unknown, "不认识的 shell(" + shell + "),Plan 不猜"};  // 不认识的 shell,不猜
     }
     const bool single_quotes = is_powershell;
-    const std::vector<std::string> segments = SplitShellSegments(command, single_quotes);
+    const std::vector<std::string> segments = SplitSegments(command, single_quotes);
     bool any_segment = false;
     for (const std::string& segment : segments) {
         const bool blank = std::all_of(segment.begin(), segment.end(),
@@ -358,7 +245,7 @@ ModeVerdict EvaluateModePolicy(CollaborationMode mode, const PlanToolCapability&
         // read_only 档,契约 4.9——只读由 tools.allow 表达,装配层把判定
         // 结果经 agent_tools_readonly 递进来)。general-purpose 与工具面含
         // 写盘/命令工具的一概拒。
-        const std::string role = ToLower(input.agent_role);
+        const std::string role = ToLowerWord(input.agent_role);
         if (role == "explore" || input.agent_tools_readonly) {
             return verdict;
         }

@@ -495,6 +495,10 @@ add_library(lubancode_engine STATIC
   src/tools/shell_info.cpp
   src/tools/background_output.cpp
   src/tools/command_safety.cpp
+  # AR-07 审批与 Plan 重复 shell 词法合并:无策略词法件(拆段/拆词/引号
+  # 状态机/重定向/子表达式/脚本块/词形归一)自 command_safety 提炼,
+  # command_safety(审批闸)与 runtime/plan_mode(Plan 只读闸)同吃一份。
+  src/tools/shell_lexing.cpp
   src/tools/schema_check.cpp
   src/tools/isolation.cpp
   # AGENTS.md 作用域单 P0:写前作用域闸与已见指纹账。
