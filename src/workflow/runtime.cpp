@@ -26,6 +26,7 @@
 #include "runtime/id_authority.hpp"
 #include "runtime/retry_backoff.hpp"
 #include "runtime/trajectory_session.hpp"  // 编排账桥(workflow 会话归属统一单)
+#include "schema/validate.hpp"  // AR-09:入参/产物合同校验的扫描核心与档位
 #include "workflow/validator.hpp"
 
 namespace lubancode::workflow {
@@ -57,40 +58,23 @@ std::string DefaultRunId() {
 }
 
 // 输入对账(ValidateInputs):required 缺字段、类型不合在开跑前报,
-// 不跑到一半才炸(单子"运行时"测试清单)。
+// 不跑到一半才炸(单子"运行时"测试清单)。AR-09:扫描原语与 null-当
+// 缺失口径收在 schema 核心(WorkflowScanProfile),这里只排 workflow
+// 的人话(浅档顶层 path 即键名)。
 std::optional<std::string> ValidateInputsAgainstSchema(const nlohmann::json& values,
                                                        const nlohmann::json& schema) {
     if (!schema.is_object() || schema.empty()) return std::nullopt;
-    if (const auto required = schema.find("required"); required != schema.end() && required->is_array()) {
-        for (const auto& field : *required) {
-            if (!field.is_string()) continue;
-            if (!values.contains(field.get<std::string>()) || values[field.get<std::string>()].is_null()) {
-                return "inputs." + field.get<std::string>() + " 缺必填字段";
-            }
-        }
+    const auto findings = schema::CollectObjectFindings(values, schema, schema::WorkflowScanProfile());
+    if (findings.empty()) return std::nullopt;
+    const schema::Finding& first = findings.front();
+    switch (first.code) {
+        case schema::Finding::Code::MissingRequired:
+            return "inputs." + first.field + " 缺必填字段";
+        case schema::Finding::Code::TypeMismatch:
+            return "inputs." + first.path + " 期望 " + first.expected + ",给的是 " + first.actual;
+        default:
+            return std::nullopt;  // 本档只开 required/type,不会有别的码
     }
-    if (const auto props = schema.find("properties"); props != schema.end() && props->is_object()) {
-        for (auto it = props->begin(); it != props->end(); ++it) {
-            const auto value = values.find(it.key());
-            if (value == values.end() || value->is_null()) continue;
-            const std::string* type = nullptr;
-            if (const auto t = it->find("type"); t != it->end() && t->is_string()) {
-                type = &t->get_ref<const std::string&>();
-            }
-            if (type == nullptr) continue;
-            bool ok = true;
-            if (*type == "string") ok = value->is_string();
-            else if (*type == "integer") ok = value->is_number_integer();
-            else if (*type == "number") ok = value->is_number();
-            else if (*type == "boolean") ok = value->is_boolean();
-            else if (*type == "array") ok = value->is_array();
-            else if (*type == "object") ok = value->is_object();
-            if (!ok) {
-                return "inputs." + it.key() + " 期望 " + *type + ",给的是 " + value->type_name();
-            }
-        }
-    }
-    return std::nullopt;
 }
 
 nlohmann::json ApplyInputDefaults(const nlohmann::json& values, const nlohmann::json& schema) {
@@ -110,7 +94,9 @@ nlohmann::json ApplyInputDefaults(const nlohmann::json& values, const nlohmann::
 // ValidateInputsAgainstSchema 同口径)时,候选不是对象、缺必填字段、字段
 // 类型不合都判失败——"候选非空、JSON 能解析、工具退出码为 0"都不能代替
 // 完整产物合同;解析失败/截断的 content 外壳冒充不了合格产物。未声明
-// schema 的纯文本节点按声明输出文本,直接过。
+// schema 的纯文本节点按声明输出文本,直接过。AR-09:扫描收在 schema 核心
+// (WorkflowScanProfile,与入参同一档);checks 全收不只报首个,顺序
+// required 先于 type(核心产出序即此序)。
 OutputValidation ValidateNodeOutput(const WorkflowNode& node, const nlohmann::json& candidate) {
     OutputValidation out;
     const nlohmann::json& schema = node.output_schema;
@@ -123,40 +109,20 @@ OutputValidation ValidateNodeOutput(const WorkflowNode& node, const nlohmann::js
                                             {"actual", std::string(candidate.type_name())}});
         return out;
     }
-    const auto push = [&out](const char* code, const std::string& field, const std::string& expected,
-                             const std::string& actual) {
-        out.passed = false;
-        out.checks.push_back(nlohmann::json{
-            {"code", code}, {"field", field}, {"expected", expected}, {"actual", actual}});
-    };
-    if (const auto required = schema.find("required"); required != schema.end() && required->is_array()) {
-        for (const auto& field : *required) {
-            if (!field.is_string()) continue;
-            const std::string name = field.get<std::string>();
-            if (!candidate.contains(name) || candidate[name].is_null()) {
-                push("missing_required_field", name, "必填", "缺字段");
-            }
-        }
-    }
-    if (const auto props = schema.find("properties"); props != schema.end() && props->is_object()) {
-        for (auto it = props->begin(); it != props->end(); ++it) {
-            const auto value = candidate.find(it.key());
-            if (value == candidate.end() || value->is_null()) continue;
-            const std::string* type = nullptr;
-            if (const auto t = it->find("type"); t != it->end() && t->is_string()) {
-                type = &t->get_ref<const std::string&>();
-            }
-            if (type == nullptr) continue;
-            bool ok = true;
-            if (*type == "string") ok = value->is_string();
-            else if (*type == "integer") ok = value->is_number_integer();
-            else if (*type == "number") ok = value->is_number();
-            else if (*type == "boolean") ok = value->is_boolean();
-            else if (*type == "array") ok = value->is_array();
-            else if (*type == "object") ok = value->is_object();
-            if (!ok) {
-                push("type_mismatch", it.key(), *type, std::string(value->type_name()));
-            }
+    for (const schema::Finding& finding : schema::CollectObjectFindings(candidate, schema,
+                                                                       schema::WorkflowScanProfile())) {
+        if (finding.code == schema::Finding::Code::MissingRequired) {
+            out.passed = false;
+            out.checks.push_back(nlohmann::json{{"code", "missing_required_field"},
+                                                {"field", finding.field},
+                                                {"expected", "必填"},
+                                                {"actual", "缺字段"}});
+        } else if (finding.code == schema::Finding::Code::TypeMismatch) {
+            out.passed = false;
+            out.checks.push_back(nlohmann::json{{"code", "type_mismatch"},
+                                                {"field", finding.path},
+                                                {"expected", finding.expected},
+                                                {"actual", finding.actual}});
         }
     }
     return out;

@@ -10,6 +10,9 @@
 // 平对象,深层的复杂校验交给工具自己的 execute 兜底;这里只拦"钩子把
 // 入参改成了明显不是这工具要的形状"。校验失败 = 改写打回,当次工具调用
 // 按拦截处理(钩子明确想改参,悄悄按原参数跑出去才是危险的那条路)。
+// AR-09:扫描原语收在 schema 核心(档位 HookRewriteProfile),本文件只剩
+// 顶层政策与人话文案的适配层;与插件档/workflow 两档的差异矩阵见
+// tests/unit/schema/test_schema_contract.cpp。
 #pragma once
 
 #include <string>

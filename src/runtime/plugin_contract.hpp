@@ -414,6 +414,9 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
 // 子集(不拦声明怪);这份是插件工具的调用前统一验证,嵌套递归、子集全
 // 落,声明怪也拦(插件作者是外人,manifest 是合同,合同写岔了要在加载
 // 期和调用期都看得见)。
+// AR-09:递归验证器与档位差异收在 schema 核心(PluginContractProfile,
+// 32 层深度帽),本函数是顶层政策与人话文案的适配层;四档差异矩阵见
+// tests/unit/schema/test_schema_contract.cpp。
 // 返回 nullopt = 通过;有值 = 人话错误(第一个撞上的问题)。
 // ---------------------------------------------------------------------------
 std::optional<std::string> ValidateArgumentsAgainstSchema(const nlohmann::json& input, const nlohmann::json& schema);
