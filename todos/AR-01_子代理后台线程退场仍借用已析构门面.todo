@@ -1,6 +1,6 @@
 # AR-01 子代理后台线程退场仍借用已析构门面
 
-- 状态：待修；本次只审查，未改源码。
+- 状态：已修(AR-01 单销,PR #163);勾账证据见文末。
 - 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
 
@@ -29,11 +29,11 @@
 2. 保留协调器作为运行 owner，将后台实际执行所需配置、服务和工具租约收进独立共享 RunState；worker 不捕获 AgentTool裸this。另设线程退出回执，只依据该回执回收thread；业务终态只用于展示。明确关闭截止时间与后台资源归属，禁止以业务终态证明OS线程结束。
 3. 小批提交，按下列门槛验收。
 
-- [ ] 用可控阻塞Backend/工具在关闭超时后才返回，确认无悬空访问。
-- [ ] 先强收业务终态再延迟worker退出，确认主线程不提前join。
-- [ ] 并发关闭与递归派工只能稳定拒绝。
-- [ ] worktree收场仍保留待审改动。
-- [ ] 在GitHub CI运行ASan及生命周期用例，不跑本地CI。
+- [x] 用可控阻塞Backend/工具在关闭超时后才返回，确认无悬空访问。(tests/unit/agent/test_subagent_thread_lifetime.cpp 第一幕:挂死后端不理取消,析构百毫秒窗有界返回 detach;放闸后晚归 worker 靠冻结 RunState 跑完落账,CI 35543474458 macos-clang+linux-asan 双腿绿——ASan 下无 heap-use-after-free)
+- [x] 先强收业务终态再延迟worker退出，确认主线程不提前join。(同册第二幕:墙钟强收翻 Failed 后再派工与析构都即时返回;收柄改认线程退出回执,业务终态只用于展示)
+- [x] 并发关闭与递归派工只能稳定拒绝。(第三幕:RequestClose 后派工回"收场";门面析构后兼容壳 description/input_schema 退静态文案不摸亡门面;引擎路由摘针+closing 双门)
+- [x] worktree收场仍保留待审改动。(第四幕:晚归 worker 的 FinishIsolationRoom 走冻结 git_runner,有活房保留待审、结果附路径;后台写盘经预放行账)
+- [x] 在GitHub CI运行ASan及生命周期用例，不跑本地CI。(新增 linux-asan 腿:gcc+ASan 全量编测试二进制,跑 unit.agent/unit.runtime 两域,按改动路径点腿;run 35543474458 rollup=success,全流程未跑本地 build/ctest)
 
 ## 删除量与旧账
 
@@ -45,3 +45,23 @@
 - 前置／文件接手次序：无硬前置；共改文件须协调。
 - 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
 - 共改任务：AR-06（src/tools/agent_tool.cpp）。
+
+## 勾账(AR-01 收口)
+
+- PR:#163(fix(tools): 子代理后台线程改吃冻结 RunState)。
+- CI:run 35543474458(HEAD 11975cf6)rollup conclusion = success——macos-clang
+  全量 602 册 + linux-asan(unit.agent/unit.runtime,ASan)双绿;windows-msvc
+  留 main push 兜底(单腿规矩)。
+- 实施摘要:执行链(RunTask/LaunchBackground/ExecuteForeground)自 AgentTool
+  成员迁为自由函数,全吃独立共享 AgentRunState(门面活态/后台冻结份,协调器
+  被冻结份持强引用);worker 闭包不再捕 this;线程收柄只认退出回执
+  (ReapExitedThreads/JoinAllBounded),TrackThread 撞已收口会话直接 detach;
+  engine 经 AgentEngineRoute 取门面(递归锁,析构先摘针);SubagentDispatchEnv
+  携 run_state,嵌套派工全程走冻结份;scoped agent_message/agent_watch 改持
+  协调器强引用(旧 AgentTool* 口保留为转发重载);兼容壳 schema 退静态兜底。
+- 途中修掉的连带病:engine 平锁在"前台 main 直派嵌套兼容壳"下同线程重入
+  死锁(换递归锁);SetAgentTypesProvider 在持锁状态里翻新快照自锁死
+  (ToolRuntime 装配一族册全数挂死,翻新挪锁外);测试册与 AR-02 已落
+  main 的 runtime/test_agent_thread_lifetime 重名(改名 subagent_thread_lifetime)。
+- ASan 腿暂关泄漏门并除外 channel_menu_pump:GuardHook 83 字节陈账与
+  menu_pump 时序敏感均系既有账,另立单子,不混本单勾账。
