@@ -1093,7 +1093,7 @@ TEST_CASE("FD-02: 消息容器覆盖——出门原样,映射不可得") {
     const api::anthropic::AnthropicBackend anthropic("https://a", "t");
     CHECK(anthropic.PrepareWireRequest(request).body.at("messages") == replacement);
     CHECK_FALSE(anthropic.BuildWireMessageMap(request).has_value());
-    CHECK(anthropic::BuildMessageWireMap(request).container.empty());  // 纯函数同口径
+    CHECK(api::anthropic::BuildMessageWireMap(request).container.empty());  // 纯函数同口径
     const api::chat::ChatCompletionsBackend chat("https://c", "t");
     CHECK(chat.PrepareWireRequest(request).body.at("messages") == replacement);
     CHECK_FALSE(chat.BuildWireMessageMap(request).has_value());
