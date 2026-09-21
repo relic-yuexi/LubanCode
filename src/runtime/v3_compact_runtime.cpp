@@ -1206,8 +1206,13 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     // 收益/容量用同一把尺先算好(§4.11:同一时点、同一估算口径)。
     std::uint64_t system_message_tokens = 0;
+    std::string main_system_text;
     if (const MessageLine* system_line = ledger.FindMessage(writer.context().system_message_ref)) {
         system_message_tokens = EstimateMessageTokens(*system_line);
+        const auto content_it = system_line->message.find("content");
+        if (content_it != system_line->message.end() && content_it->is_string()) {
+            main_system_text = content_it->get<std::string>();
+        }
     }
     const std::uint64_t tokens_before = system_message_tokens + plan.RemovedTokens() +
                                         plan.RetainedTokens();
@@ -1363,14 +1368,102 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                   " tokens,候选没有严格变小");
     // 7.9 主请求预算:第二道门禁(S+Q新+K+O主<=C主,§4.64);窗口
     // 未知(0)时跳过并如实记 false 于 gate_checked——不假装核过。
+    // AR-10:注入了完整主请求评估口(input.main_request_budget)时,门禁
+    // 吃口的数字——同一份工具定义、最终 system、候选历史、输出预留都在
+    // 口的闭包与快照里,不再退回 bytes/4 的部分请求。口失败/形状不合同样
+    // 落 failed(fail closed),不回落部分请求的旧尺假装核过。口缺场 =
+    // 旧路(bytes/4 结构尺),未接线调用方行为一字不变。benefit(7.8)是
+    // 结构收益尺,这道门禁是真实下一请求尺——两种统计分开标注,不混一笔。
+    std::string budget_gate_estimator;
+    std::uint64_t budget_gate_input_tokens = 0;
+    std::uint64_t budget_gate_reserve_tokens = 0;
     if (profile.main_window_tokens > 0) {
-        const bool fits = tokens_after + profile.main_output_reserve_tokens <=
-                          profile.main_window_tokens;
-        add_check("post_compact_budget", fits,
-                  fits ? std::string()
-                       : "压缩后上下文 " + std::to_string(tokens_after) + " + 主输出预留 " +
-                             std::to_string(profile.main_output_reserve_tokens) + " 超主窗口 " +
-                             std::to_string(profile.main_window_tokens));
+        if (input.main_request_budget) {
+            // 候选主请求快照:新摘要(applied 同形:user 携带正文)+
+            // 保留尾部(链序账本原样,签名/加密载荷保真)。
+            nlohmann::json candidate_messages = nlohmann::json::array();
+            candidate_messages.push_back(
+                nlohmann::json::object({{"role", "user"}, {"content", reply.text}}));
+            const std::vector<std::string> retained_ids_now = plan.RetainedIds();
+            const std::set<std::string> retained_set_now(retained_ids_now.begin(),
+                                                          retained_ids_now.end());
+            for (const MessageLine* line : chain_messages) {
+                if (retained_set_now.count(line->message_id) > 0) {
+                    candidate_messages.push_back(line->message);
+                }
+            }
+            const auto estimated = input.main_request_budget(nlohmann::json::object(
+                {{"system", main_system_text}, {"messages", std::move(candidate_messages)}}));
+            bool port_usable = estimated.has_value();
+            std::string port_detail;
+            if (port_usable) {
+                const auto tokens_it = estimated->find("estimatedInputTokens");
+                if (tokens_it == estimated->end() ||
+                    (!tokens_it->is_number_unsigned() && !tokens_it->is_number_integer())) {
+                    port_usable = false;
+                    port_detail =
+                        "compact.estimate_bad_shape: 完整主请求评估口产出缺 estimatedInputTokens";
+                } else if (tokens_it->get<std::int64_t>() < 0) {
+                    port_usable = false;
+                    port_detail = "compact.estimate_bad_shape: estimatedInputTokens 为负";
+                } else {
+                    budget_gate_input_tokens =
+                        static_cast<std::uint64_t>(tokens_it->get<std::int64_t>());
+                    budget_gate_reserve_tokens = profile.main_output_reserve_tokens;
+                    const auto reserve_it = estimated->find("outputReserveTokens");
+                    if (reserve_it != estimated->end()) {
+                        if ((!reserve_it->is_number_unsigned() &&
+                             !reserve_it->is_number_integer()) ||
+                            reserve_it->get<std::int64_t>() < 0) {
+                            port_usable = false;
+                            port_detail =
+                                "compact.estimate_bad_shape: outputReserveTokens 形状不合";
+                        } else {
+                            // FD-02 最终出站快照的预留压过 profile 缺省。
+                            budget_gate_reserve_tokens =
+                                static_cast<std::uint64_t>(reserve_it->get<std::int64_t>());
+                        }
+                    }
+                }
+            } else {
+                port_detail = estimated.error();
+            }
+            if (!port_usable) {
+                add_check("post_compact_budget", false,
+                          port_detail.empty()
+                              ? std::string("完整主请求评估口未产出可用数字")
+                              : port_detail);
+            } else {
+                if (estimated->is_object()) {
+                    const auto name_it = estimated->find("estimator");
+                    if (name_it != estimated->end() && name_it->is_string()) {
+                        budget_gate_estimator = name_it->get<std::string>();
+                    }
+                }
+                if (budget_gate_estimator.empty()) {
+                    budget_gate_estimator = "main_request_budget_port";
+                }
+                const bool fits = budget_gate_input_tokens + budget_gate_reserve_tokens <=
+                                  profile.main_window_tokens;
+                add_check("post_compact_budget", fits,
+                          fits ? "完整主请求估 " + std::to_string(budget_gate_input_tokens) +
+                                     " + 输出预留 " + std::to_string(budget_gate_reserve_tokens) +
+                                     " 在主窗口 " + std::to_string(profile.main_window_tokens) +
+                                     " 内(口径:主请求评估口 " + budget_gate_estimator + ")"
+                               : "完整主请求估 " + std::to_string(budget_gate_input_tokens) +
+                                     " + 输出预留 " + std::to_string(budget_gate_reserve_tokens) +
+                                     " 超主窗口 " + std::to_string(profile.main_window_tokens) +
+                                     "(口径:主请求评估口 " + budget_gate_estimator + ")");
+            }
+        } else {
+            const bool fits = tokens_after + profile.main_output_reserve_tokens <=
+                              profile.main_window_tokens;
+            add_check("post_compact_budget", fits,
+                      fits ? std::string()
+                           : "压缩后上下文 " + std::to_string(tokens_after) + " + 主输出预留 " +
+                                 std::to_string(profile.main_output_reserve_tokens) + " 超主窗口 " +
+                                 std::to_string(profile.main_window_tokens));
+        }
     }
 
     const WriteReceipt validation_completed =
@@ -1396,6 +1489,15 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
          {"scope", "model_input"},
          {"includesSystem", true},
          {"includesOutputReserve", false}});
+    if (!budget_gate_estimator.empty()) {
+        // AR-10:第二道门禁的真实下一请求口径单列——与上面 tokens_after
+        // 的结构尺(bytes/4 前后对照)是两笔统计,各自标名,不互相冒充。
+        token_metric["budgetGate"] = nlohmann::json::object(
+            {{"estimator", budget_gate_estimator},
+             {"estimatedInputTokens", budget_gate_input_tokens},
+             {"outputReserveTokens", budget_gate_reserve_tokens},
+             {"windowTokens", profile.main_window_tokens}});
+    }
     const auto apply = session->Apply(writer, reply.text, tokens_before, tokens_after,
                                      std::move(token_metric));
     if (!apply.ok) {
