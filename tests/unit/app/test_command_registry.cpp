@@ -126,6 +126,9 @@ TEST_CASE("命令注册表:活案名字与帮助面对账") {
         if (spec.handler == nullptr) {
             continue;  // 死案
         }
+        if (spec.command == lubancode::cli::SlashCommand::Unknown) {
+            continue;  // 兜底案,不是用户词汇(词面留给 Workflow alias 分流)
+        }
         const lubancode::cli::SlashCommandDescriptor* descriptor =
             lubancode::cli::FindSlashCommandDescriptor(spec.command);
         REQUIRE_MESSAGE(descriptor != nullptr, "活案在词汇表上没有主名");
