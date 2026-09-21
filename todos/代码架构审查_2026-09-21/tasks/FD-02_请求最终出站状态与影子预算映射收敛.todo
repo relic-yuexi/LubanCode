@@ -1,0 +1,73 @@
+# FD-02 请求最终出站状态与影子预算映射收敛
+
+- 状态：待实现；本次仅审查并建单。
+- 日期：2026-09-21。
+- 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 类别：A/B；严重度：高；重构批次：2。
+- 前置：AR-11（以全局排期复核为准）。
+- 改动所有权：下列文件由本单负责人持有；不同单命中同一文件时，按总索引串行或先交共享接口。
+
+## 问题表
+
+| 编号 | 类别 | 严重度 | 位置 | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| FD-02 | A/B | 高 | src/api/types.cpp:331；src/api/types.hpp:662；src/api/chat/request.cpp:313；src/api/chat/request.cpp:322；src/api/chat/client.cpp:93；src/api/gemini/client.cpp:105；src/agent/loop.cpp:1663；src/agent/loop.cpp:2025 | `MergeExtraBody` 无条件 `body[it.key()] = it.value()`；`IntKeyFromExtraBody` 遇非整数直接 `return`；`BuildMessageWireMap` 以空 provider extra_body 重建，且在最终合并前记录 `wire_element_count`。 | 同一出站事实拆成请求体、输出预算、消息映射三路。provider 给 max_tokens=4096，request 覆盖为 null，在后续Force没有再改写时，线上 JSON 为 null，预算仍取4096；provider是否接受null不影响这处账实差异。配置允许 extra_body 任意 object；若 messages/input/contents 被替换，prepared 的映射仍指替换前数组，回放审计会拿错索引。此处不是四协议格式不同，而是同一协议中事实来源分叉。 | 各 backend 产出一份已清洗、已合并的 PreparedWireRequest，序列化、有效上限、映射共享该结果。保留协议专属字段与 Gemini generationConfig 深合并。不可追溯的消息容器覆盖明确拒绝，或标映射不可得并保留实际快照；不能补造映射。非整数上限给明确校验错误或 unknown，不能继续取被覆盖旧值。 | 涉及主循环容量门、请求诊断与 V3 prepared 合同。不要四协议合成同一序列化器；迁移须逐协议维持当前正常输入字节。与现有请求账实一致设计关联，采用它的版本/提交边界。 |
+
+## 修改边界
+
+- `src/api/backend.hpp`
+- `src/api/types.cpp`
+- `src/api/types.hpp`
+- `src/api/anthropic/client.hpp`
+- `src/api/anthropic/client.cpp`
+- `src/api/chat/client.hpp`
+- `src/api/chat/client.cpp`
+- `src/api/chat/request.cpp`
+- `src/api/responses/client.hpp`
+- `src/api/responses/client.cpp`
+- `src/api/responses/request.cpp`
+- `src/api/gemini/client.hpp`
+- `src/api/gemini/client.cpp`
+- `src/api/gemini/request.cpp`
+- `tests/unit/api/test_four_role_kernel.cpp`
+
+## 实施顺序
+
+- [x] 冻结四协议覆盖矩阵与反例。(test_four_role_kernel.cpp "FD-02 覆盖矩阵"案:null/字符串/负数/超 int/provider-request 双覆盖逐项断言最终 JSON 与 effective limit 同源)
+- [x] 先增 PreparedWireRequest 窄口,旧接口临时委托。(types.hpp 立 PreparedWireRequest;Backend::PrepareWireRequest 虚口,默认给不可得形态;四家 send_stream/SerializeForDiagnostics/BuildWireMessageMap/GetEffectiveOutputLimit 全部委托该口)
+- [x] 迁预算/映射/诊断消费者,确认旧接口无使用者再退役。(IntKeyFromExtraBody 全仓引用清零后删除;gemini 匿名 MaxOutputTokensOverride 同步退役;四家 BuildMessageWireMap 公开函数保留为纯函数测试钉,client 侧不再经它取映射)
+
+## 验收门
+
+- [ ] 四协议逐项比较最终 JSON 与 effective limit，覆盖 null、字符串、负数、超 int、provider/request 双覆盖。
+- [ ] 覆盖消息容器替换，验证映射等于实际下标或明确 unavailable；不能维持旧图。
+- [ ] 正常请求序列化 golden 不变，输出收窄真正体现在发送体。
+- [ ] 主循环、SampleModel、摘要调用都用相同已解析合同；穿过RebuildableBackend和SpinnerBackend真实包装链验收（HC-08）。
+
+- CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+
+## 合并取舍与估量
+
+应合并同协议最终事实解析；不合并 Anthropic/Chat/Responses/Gemini 各自消息格式。
+
+预计可删除行数：约60–100行；影子提取与重建包装约140行，扣除新结果结构与适配；实现后以diff复算。0 表示本单不以删行为目标；移动行数不算删除。
+
+关联既有单：请求账实一致_采用视图提交链与版本串账.todo；本单证据在叶后端，HC-08另修包装层丢能力。包装层可能返回nullopt，不把叶后端错误映射泛化到所有终端请求。
+
+核证范围：静态调用链与源码分支核对；未编译、未运行产品测试，未声称线上复现。
+## 全局排期复核
+
+- 前置／文件接手次序：AR-11
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-11（src/api/types.cpp）；FD-05（src/api/anthropic/client.hpp, src/api/chat/client.hpp, src/api/gemini/client.hpp, src/api/responses/client.hpp）。
+
+## 实施记录(2026-09-21,FD-02)
+
+- 修法:各真后端一次拼出 PreparedWireRequest(已清洗、已合并的最终 body + 拍平映射 + 从 body 解析的有效上限 + 覆盖在场标志),send_stream、SerializeForDiagnostics、BuildWireMessageMap、GetEffectiveOutputLimit 四口全部从它取数;四协议消息格式不合并,gemini generationConfig 深合并特例保留在自家产路。
+- 覆盖判定与上限解析分家:ExtraBodyHasKey(键在场即覆盖,值类型不限)+ IntLimitFromBody(只认出门体上的整数,非整数如实 unknown,不回退 Request::max_tokens 旧值)。旧 IntKeyFromExtraBody(只认整数、非整数装没看见)与 gemini 匿名 MaxOutputTokensOverride 退役,全仓引用清零。
+- 消息容器(messages/input/contents)被任一级 extra_body 覆盖:出门体原样带用户数组(手笔不删改、不拒绝),拍平映射置不可得(Backend 侧 nullopt,纯函数 BuildMessageWireMap 返回空 container),不指替换前旧图、不补造映射;wire_element_count 与实际出门容器长度的恒等关系恢复成立(未被覆盖时)。
+- ForceMaxOutputTokensOverride 写侧条件改为键在场(值类型不限):字符串/null 的覆盖手笔同样被窄值压过——旧路当没覆盖、no-op,收窄出不了门,是同源病灶的写侧一半。
+- anthropic 手写两段 extra_body 合并换成共用件 api::MergeExtraBody(行为等价的归一)。
+- 接缝(后继单消费,不替实现):AR-10 compact 采用门禁、HC-08 包装层直接消费 Backend::PrepareWireRequest;包装后端不换皮时走基类默认(上限回退 Request::max_tokens 原值、映射 nullopt、body 空),与旧 GetEffectiveOutputLimit 默认一字不差;主循环/SampleModel/摘要调用的旧三口语义保持,GetEffectiveOutputLimit 在非整数覆盖下由"假旧值"改为"如实 unknown"(tokens=nullopt + overridden=true),消费方现有判空分支全部兼容。
+- 验收门前三项由合同测试钉住(test_four_role_kernel.cpp):覆盖矩阵案、容器覆盖案、golden 案(PrepareWireRequest().body 与直拼 BuildRequestJson 逐字节相等 + wire_element_count 恒等)、Force 非整数覆盖案、基类默认口回退案。第四项(HC-08 RebuildableBackend/SpinnerBackend 真实包装链)归 HC-08。
+- PR:待回填。CI:待回填。

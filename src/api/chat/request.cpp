@@ -312,13 +312,22 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
     // variant)后,同名顶层键后者压前者(共用件 api::MergeExtraBody)。
     MergeExtraBody(body, extra_body);
     MergeExtraBody(body, request.extra_body);
+    // FD-02:extra_body 覆盖了消息容器(messages)= 拍平对照不可得:出门
+    // 的数组已换,映射不能还指替换前那套下标,也不能对着用户数组补造
+    // 映射。置空 container 作不可得标记(Backend::PrepareWireRequest 侧
+    // 转 nullopt);extra_body 原样出门,不拒绝、不删改。
+    if (wire_map != nullptr && ExtraBodyHasKey(extra_body, request.extra_body, "messages")) {
+        *wire_map = WireMessageMap{};
+    }
     return body;
 }
 
 // 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
-// 产出(第四参传指针共用)。消息拍平与 options/extra_body 无关——
-// options 只动 assistant 消息内部字段,extra_body 只动顶层键,都动不了
-// messages 的条数与次序。
+// 产出(第四参传指针共用)。options 只动 assistant 消息内部字段,动不了
+// messages 的条数与次序;Request::extra_body 覆盖 messages 容器时出门
+// 数组已换,对照不可得——BuildRequestJson 置空 container 标记(FD-02),
+// 这里原样带回,消费方按不可得处理。provider 级 extra_body 不在本函数
+// 的职责里(签名只吃 request),经 Backend::PrepareWireRequest 走完整路。
 WireMessageMap BuildMessageWireMap(const Request& request) {
     WireMessageMap map;
     BuildRequestJson(request, json::object(), ChatRequestOptions{}, &map);

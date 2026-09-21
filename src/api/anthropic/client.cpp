@@ -322,24 +322,28 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     // 整个覆盖掉前面算出来的值——这样用户才能靠它压过内置的 thinking 字段
     // (比如 GLM 那种既要 thinking.type 又要自定义 reasoning_effort 档位的
     // 写法)。只做顶层浅合并,不做深合并(嵌套 object 整个替换,不逐键钻
-    // 进去比),保持行为简单、可预期。
-    if (extra_body.is_object()) {
-        for (auto it = extra_body.begin(); it != extra_body.end(); ++it) {
-            body[it.key()] = it.value();
-        }
-    }
-    if (request.extra_body.is_object()) {
-        for (auto it = request.extra_body.begin(); it != request.extra_body.end(); ++it) {
-            body[it.key()] = it.value();
-        }
+    // 进去比),保持行为简单、可预期。合并件与 chat/responses 同一枚
+    //(api::MergeExtraBody,批六共用件)。
+    MergeExtraBody(body, extra_body);
+    MergeExtraBody(body, request.extra_body);
+    // FD-02:extra_body 覆盖了消息容器(messages)= 拍平对照不可得:出门
+    // 的数组已换,映射不能还指替换前那套下标,也不能对着用户数组补造
+    // 映射。置空 container 作不可得标记(Backend::PrepareWireRequest 侧
+    // 转 nullopt);extra_body 原样出门,不拒绝、不删改。
+    if (wire_map != nullptr && ExtraBodyHasKey(extra_body, request.extra_body, "messages")) {
+        *wire_map = WireMessageMap{};
     }
 
     return body;
 }
 
 // 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
-// 产出(内部传指针共用,不另写影子逻辑),只读请求、不发网络。消息拍平
-// 与 native_web_search/extra_body 无关(那只动顶层键),签名只吃 request。
+// 产出(内部传指针共用,不另写影子逻辑),只读请求、不发网络。
+// native_web_search 只动顶层键,动不了 messages 的条数与次序;
+// Request::extra_body 覆盖 messages 容器时出门数组已换,对照不可得——
+// BuildRequestJson 置空 container 标记(FD-02),这里原样带回,消费方按
+// 不可得处理。provider 级 extra_body 不在本函数的职责里(签名只吃
+// request),经 Backend::PrepareWireRequest 走完整路。
 WireMessageMap BuildMessageWireMap(const Request& request) {
     WireMessageMap map;
     BuildRequestJson(request, /*native_web_search=*/false, json::object(), &map);
@@ -390,30 +394,26 @@ std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::
     return base;
 }
 
-// 差距清单 §8.2 第 7 条:边界账对账用,自家拍平就是真值。
+// 差距清单 §8.2 第 7 条:边界账对账用,从最终出站状态取(容器被
+// extra_body 覆盖时如实 nullopt,不指替换前的旧数组)。
 std::optional<WireMessageMap> AnthropicBackend::BuildWireMessageMap(const Request& request) const {
-    return BuildMessageWireMap(request);
+    return PrepareWireRequest(request).wire_map;
 }
 
-// 差距清单 §8.2 第 8 条:anthropic 的 max_tokens 必填——无 extra_body 覆盖
-// 时落公开兜底(与 BuildRequestJson 同一枚),估算侧拿到的永远是 wire 真
-// 带的值,不会是 nullopt。
+// 差距清单 §8.2 第 8 条(FD-02 收敛后):上限从最终 body 上解析——
+// anthropic 的 max_tokens 必填,body 恒带(无覆盖时就是公开兜底或
+// request.max_tokens,与 BuildRequestJson 同一枚),估算侧拿到的永远是
+// wire 真带的值;覆盖成了非整数(null/字符串)时 unknown,不回退旧值。
 Backend::EffectiveOutputLimit AnthropicBackend::GetEffectiveOutputLimit(const Request& request) const {
-    EffectiveOutputLimit out;
-    if (const std::optional<int> overridden = IntKeyFromExtraBody(extra_body_, request.extra_body, "max_tokens");
-        overridden.has_value()) {
-        out.tokens = *overridden;
-        out.overridden = true;
-        return out;
-    }
-    out.tokens = request.max_tokens.value_or(kRequiredMaxOutputTokensFallback);
-    return out;
+    const PreparedWireRequest prepared = PrepareWireRequest(request);
+    return {prepared.output_limit, prepared.output_limit_overridden};
 }
 
-// 差距清单 §8.2 第 8 条写侧:extra_body 写过 max_tokens 才动请求级键,
-// 压过 provider 级;没写过不造键,出口形状与从前逐字节一致。
+// 差距清单 §8.2 第 8 条写侧:extra_body 写过 max_tokens(值类型不限——
+// 整数、null、字符串都算覆盖在场)才动请求级键,压过 provider 级;没写
+// 过不造键,出口形状与从前逐字节一致。
 void AnthropicBackend::ForceMaxOutputTokensOverride(Request& request, int tokens) const {
-    if (IntKeyFromExtraBody(extra_body_, request.extra_body, "max_tokens").has_value()) {
+    if (ExtraBodyHasKey(extra_body_, request.extra_body, "max_tokens")) {
         request.extra_body["max_tokens"] = tokens;
     }
 }
@@ -437,8 +437,9 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     const std::atomic<bool>* cancel) {
     Request sanitized_request = request;
     SanitizeRequest(sanitized_request);
-    const json body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_);
-    const std::string body_str = DumpRequestBody("anthropic", body);
+    // FD-02:出门体从最终出站状态取——发送字节、有效上限、映射同源,
+    // 不再另拼一份。sanitized_request 只留给下面的解析开关判定。
+    const std::string body_str = DumpRequestBody("anthropic", PrepareWireRequest(request).body);
     // 动态工具 P3:本请求声明了 server_tool_search 才解析服务端搜索的原生块
     // (server_tool_use / tool_search_tool_result)——没声明的流照旧行为。
     const bool parse_server_tool_search = !sanitized_request.server_tool_search.empty();
@@ -528,13 +529,29 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     return {};
 }
 
-// 诊断模式的 wire 序列化(问题 9):与 send_stream 同一条拼装路(清洗 +
-// 同参数 BuildRequestJson + 同一只 dump)。只在 LUBANCODE_DEBUG_PREFIX
-// 打开时被调用。
+// 诊断模式的 wire 序列化(问题 9):与 send_stream 同一条拼装路
+//(PrepareWireRequest)。只在 LUBANCODE_DEBUG_PREFIX 打开时被调用。
 std::string AnthropicBackend::SerializeForDiagnostics(const Request& request) const {
+    return DumpRequestBody("anthropic", PrepareWireRequest(request).body);
+}
+
+// FD-02:最终出站状态一次拼成——清洗、拼装(带映射指针)、extra_body
+// 尾部合并、上限解析全在这条路上。send_stream 与三口诊断/预算/映射都
+// 从这份结果取数,同一请求的出站事实只有这一个来源。
+PreparedWireRequest AnthropicBackend::PrepareWireRequest(const Request& request) const {
     Request sanitized_request = request;
     SanitizeRequest(sanitized_request);
-    return DumpRequestBody("anthropic", BuildRequestJson(sanitized_request, native_web_search_, extra_body_));
+    PreparedWireRequest prepared;
+    WireMessageMap map;
+    prepared.body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_, &map);
+    // 容器被 extra_body 覆盖时 BuildRequestJson 把 map 置空(container 空
+    // 串)——不可得,不冒充。
+    if (!map.container.empty()) {
+        prepared.wire_map = std::move(map);
+    }
+    prepared.output_limit = IntLimitFromBody(prepared.body, "max_tokens");
+    prepared.output_limit_overridden = ExtraBodyHasKey(extra_body_, sanitized_request.extra_body, "max_tokens");
+    return prepared;
 }
 
 }  // namespace lubancode::api::anthropic

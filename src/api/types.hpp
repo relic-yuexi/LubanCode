@@ -695,20 +695,57 @@ struct WireMessageMap {
 };
 
 // ---------------------------------------------------------------------------
-// extra_body 覆盖后的输出上限取数(轨迹 v3 差距清单 §8.2 第 8 条)
+// 请求的最终出站状态(FD-02:请求最终出站状态与影子预算映射收敛)
 // ---------------------------------------------------------------------------
 
-// 顶层整数键按 extra_body 覆盖序取数:provider 级先、请求级
-// (Request::extra_body)后,后者压前者——与 MergeExtraBody 的合并序同一
-// 套。键不在场/不是整数 = 没覆盖(nullopt),调用方用请求字段原值。
-// 差距清单 §8.2 第 8 条(单子 §1.18):wire 拼装的 extra_body 尾部合并发生
-// 在所有内置字段之后,用户写在 extra_body 里的输出上限键
-// (anthropic/chat:max_tokens;responses:max_output_tokens)才是真正出门
-// 的值——容量/估算侧的输出预留须认它,不认 Request::max_tokens 的覆盖
-// 前原值。gemini 的 generationConfig.maxOutputTokens 深一层,在它自家
-// backend 里取,不走这只(中立层不带厂商字眼)。
-std::optional<int> IntKeyFromExtraBody(const nlohmann::json& provider_extra_body,
-                                       const nlohmann::json& request_extra_body, const char* key);
+// 同一协议的出站事实原先拆三路各算一份:出门体(BuildRequestJson 尾部
+// 合并 extra_body,同名键整个覆盖、值类型不限)、影子预算(只认整数的
+// 键提取,用户写 max_tokens: null / "8192" 时出门体已是那个值、影子却
+// 装没看见,预算照旧认覆盖前旧值)、消息映射(空 provider extra_body
+// 重建,容器被 extra_body 替换后映射还指旧数组)。现在各真后端一次拼出
+// 这份结果,序列化、有效上限、映射全从它取数——四协议消息格式不合
+// 并,变的只是"事实只有一个来源"。
+struct PreparedWireRequest {
+    // 已清洗(SanitizeRequest)、已合并(extra_body 尾部合并完)的最终
+    // 出站体:发送字节之源,出门 JSON 就是它。
+    nlohmann::json body;
+
+    // 消息拍平对照;nullopt = 不可得——消息容器(messages/input/
+    // contents)被 extra_body 覆盖,出门的数组已换,映射不能还指替换
+    // 前那套下标,也不能对着用户数组补造映射(差距清单 §8.2 第 7 条
+    // 的对账此时只能记"不可得",不冒充)。
+    std::optional<WireMessageMap> wire_map;
+
+    // 最终 body 上解析出的有效输出上限(协议键:anthropic/chat 的
+    // max_tokens、responses 的 max_output_tokens、gemini 的
+    // generationConfig.maxOutputTokens 深一层)。整数 = 真出门值(夹过
+    // int 域);nullopt = 键不在场(协议允许省略,交服务端默认)或覆盖
+    // 成了非整数(null/字符串/浮点)——如实 unknown,不回退
+    // Request::max_tokens 旧值:那个值没出门,冒充它是第二重假账。
+    // anthropic 家 max_tokens 必填,body 恒有整数,除非用户覆盖成非整数。
+    std::optional<int> output_limit;
+
+    // provider 级或请求级 extra_body 真写过输出上限键(值类型不限)。
+    // 真时容量侧的输出预留直接吃 output_limit(用户手笔,不受能力级
+    // 封顶);output_limit 为 nullopt 时是"用户覆盖成了不可解析形状",
+    // 预留退默认口径,不冒充旧值。
+    bool output_limit_overridden = false;
+};
+
+// extra_body 两级(provider 级、请求级)里顶层键是否在场——不论值是
+// 什么类型。覆盖判定与出门体同源:键写了就是覆盖,值能不能按整数解析
+// 是另一码事(IntLimitFromBody 管)。旧影子提取只认整数,非整数手笔被
+// 装没看见,是 FD-02 收拢的病根之一。非 object 的 extra_body 整个跳过
+// (MergeExtraBody 同款规矩)。
+bool ExtraBodyHasKey(const nlohmann::json& provider_extra_body,
+                     const nlohmann::json& request_extra_body, const char* key);
+
+// 最终出站体顶层键上的输出上限解析:是整数 → 夹 [0, INT_MAX] 返回;
+// 键不在场 → nullopt;键在场但非整数 → nullopt(unknown,口径见
+// PreparedWireRequest::output_limit)。这只管顶层键,gemini 的
+// generationConfig.maxOutputTokens 深一层在它自家 backend 里取(中立层
+// 不带厂商字眼)。
+std::optional<int> IntLimitFromBody(const nlohmann::json& body, const char* key);
 
 // 四条 wire 共用:关闭思考或显式关闭历史回传时停止发送,本地历史不删。
 inline bool ShouldReplayThinking(const Request& request) {
