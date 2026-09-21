@@ -307,13 +307,23 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     // api::MergeExtraBody,provider 级先、variant 级后)。
     MergeExtraBody(body, extra_body);
     MergeExtraBody(body, request.extra_body);
+    // FD-02:extra_body 覆盖了消息容器(input)= 拍平对照不可得:出门的
+    // 数组已换,映射不能还指替换前那套下标,也不能对着用户数组补造
+    // 映射。置空 container 作不可得标记(Backend::PrepareWireRequest 侧
+    // 转 nullopt);extra_body 原样出门,不拒绝、不删改。
+    if (wire_map != nullptr && ExtraBodyHasKey(extra_body, request.extra_body, "input")) {
+        *wire_map = WireMessageMap{};
+    }
 
     return body;
 }
 
 // 拍平对照(差距清单 §8.2 第 7 条):与 BuildRequestJson 同一条拼装路
-// 产出(第四参传指针共用)。消息拍平与 native_web_search/extra_body 无关
-//(那只动顶层键)。
+// 产出(第四参传指针共用)。native_web_search 只动顶层键,动不了 input
+// 的条数与次序;Request::extra_body 覆盖 input 容器时出门数组已换,
+// 对照不可得——BuildRequestJson 置空 container 标记(FD-02),这里原样
+// 带回,消费方按不可得处理。provider 级 extra_body 不在本函数的职责里
+//(签名只吃 request),经 Backend::PrepareWireRequest 走完整路。
 WireMessageMap BuildMessageWireMap(const Request& request) {
     WireMessageMap map;
     BuildRequestJson(request, /*native_web_search=*/false, json::object(), &map);

@@ -37,10 +37,9 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     const Request& request,
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    Request sanitized_request = request;
-    SanitizeRequest(sanitized_request);
-    const json body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_);
-    const std::string body_str = DumpRequestBody("responses", body);
+    // FD-02:出门体从最终出站状态取——发送字节、有效上限、映射同源,
+    // 不再另拼一份。
+    const std::string body_str = DumpRequestBody("responses", PrepareWireRequest(request).body);
 
     // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误/图片在途三枚标志给收尾
     // 那段检查(图片在途:单帧超限时报错要指名是图片帧超限,不甩含混的
@@ -129,38 +128,52 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     return {};
 }
 
-// 诊断模式的 wire 序列化(问题 9):与 send_stream 同一条拼装路(清洗 +
-// 同参数 BuildRequestJson + 同一只 dump),保证"公共前缀字节"对账量的
-// 就是真要上 wire 的字节。只在 LUBANCODE_DEBUG_PREFIX 打开时被调用。
-std::string ResponsesBackend::SerializeForDiagnostics(const Request& request) const {
+// FD-02:最终出站状态一次拼成——清洗、拼装(带映射指针)、extra_body
+// 尾部合并、上限解析全在这条路上。send_stream 与三口诊断/预算/映射都
+// 从这份结果取数,同一请求的出站事实只有这一个来源。
+PreparedWireRequest ResponsesBackend::PrepareWireRequest(const Request& request) const {
     Request sanitized_request = request;
     SanitizeRequest(sanitized_request);
-    return DumpRequestBody("responses", BuildRequestJson(sanitized_request, native_web_search_, extra_body_));
-}
-
-// 拍平对照(差距清单 §8.2 第 7 条):边界账对账用,自家拍平就是真值。
-std::optional<WireMessageMap> ResponsesBackend::BuildWireMessageMap(const Request& request) const {
-    return BuildMessageWireMap(request);
-}
-
-// 差距清单 §8.2 第 8 条:responses 的输出上限键叫 max_output_tokens
-//(不是 max_tokens),unset 交服务端默认,如实 nullopt。
-Backend::EffectiveOutputLimit ResponsesBackend::GetEffectiveOutputLimit(const Request& request) const {
-    EffectiveOutputLimit out;
-    if (const std::optional<int> overridden =
-            IntKeyFromExtraBody(extra_body_, request.extra_body, "max_output_tokens");
-        overridden.has_value()) {
-        out.tokens = *overridden;
-        out.overridden = true;
-        return out;
+    PreparedWireRequest prepared;
+    WireMessageMap map;
+    prepared.body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_, &map);
+    // 容器被 extra_body 覆盖时 BuildRequestJson 把 map 置空(container 空
+    // 串)——不可得,不冒充。
+    if (!map.container.empty()) {
+        prepared.wire_map = std::move(map);
     }
-    out.tokens = request.max_tokens;
-    return out;
+    prepared.output_limit = IntLimitFromBody(prepared.body, "max_output_tokens");
+    prepared.output_limit_overridden =
+        ExtraBodyHasKey(extra_body_, sanitized_request.extra_body, "max_output_tokens");
+    return prepared;
+}
+
+// 诊断模式的 wire 序列化(问题 9):与 send_stream 同一条拼装路
+//(PrepareWireRequest),保证"公共前缀字节"对账量的就是真要上 wire 的
+// 字节。只在 LUBANCODE_DEBUG_PREFIX 打开时被调用。
+std::string ResponsesBackend::SerializeForDiagnostics(const Request& request) const {
+    return DumpRequestBody("responses", PrepareWireRequest(request).body);
+}
+
+// 拍平对照(差距清单 §8.2 第 7 条):边界账对账用,从最终出站状态取
+//(容器被 extra_body 覆盖时如实 nullopt,不指替换前的旧数组)。
+std::optional<WireMessageMap> ResponsesBackend::BuildWireMessageMap(const Request& request) const {
+    return PrepareWireRequest(request).wire_map;
+}
+
+// 差距清单 §8.2 第 8 条(FD-02 收敛后):上限从最终 body 上解析——
+// responses 的键叫 max_output_tokens(不是 max_tokens),unset 交服务端
+// 默认,如实 nullopt;覆盖成了非整数时 unknown,不回退旧值。
+Backend::EffectiveOutputLimit ResponsesBackend::GetEffectiveOutputLimit(const Request& request) const {
+    const PreparedWireRequest prepared = PrepareWireRequest(request);
+    return {prepared.output_limit, prepared.output_limit_overridden};
 }
 
 // 差距清单 §8.2 第 8 条写侧:同自家键名写请求级覆盖位,没写过不造键。
+// 覆盖在场的判定与出门体同源(值类型不限):非整数的覆盖手笔同样要被
+// 窄值压过,不能因为解析不出整数就当没覆盖、让收窄出不了门。
 void ResponsesBackend::ForceMaxOutputTokensOverride(Request& request, int tokens) const {
-    if (IntKeyFromExtraBody(extra_body_, request.extra_body, "max_output_tokens").has_value()) {
+    if (ExtraBodyHasKey(extra_body_, request.extra_body, "max_output_tokens")) {
         request.extra_body["max_output_tokens"] = tokens;
     }
 }

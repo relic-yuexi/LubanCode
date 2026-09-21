@@ -905,18 +905,278 @@ TEST_CASE("差距7: 横切钉子——四家映射的元素计数与实际出口
 // 四家 backend 的有效上限/写侧覆盖
 // ---------------------------------------------------------------------------
 
-TEST_CASE("差距8: IntKeyFromExtraBody 覆盖序——provider 先、请求级后,非整数不算") {
+// FD-02 起共用件口径:覆盖判定(ExtraBodyHasKey,值类型不限)与上限
+// 解析(IntLimitFromBody,只认出门体上的整数)分家——旧影子提取
+// IntKeyFromExtraBody 把两件事混在"只认整数"里,非整数手笔被装没看见,
+// 已退役。
+TEST_CASE("差距8/FD-02: ExtraBodyHasKey 只看键在场,值类型不限") {
     const nlohmann::json none;
     const nlohmann::json provider = nlohmann::json{{"max_tokens", 4096}};
     const nlohmann::json request_level = nlohmann::json{{"max_tokens", 8192}};
     const nlohmann::json non_integer = nlohmann::json{{"max_tokens", "many"}};
+    const nlohmann::json null_value = nlohmann::json{{"max_tokens", nullptr}};
 
-    CHECK_FALSE(api::IntKeyFromExtraBody(none, none, "max_tokens").has_value());
-    CHECK(api::IntKeyFromExtraBody(provider, none, "max_tokens") == 4096);
-    CHECK(api::IntKeyFromExtraBody(none, request_level, "max_tokens") == 8192);
-    CHECK(api::IntKeyFromExtraBody(provider, request_level, "max_tokens") == 8192);  // 请求级压 provider
-    CHECK_FALSE(api::IntKeyFromExtraBody(non_integer, none, "max_tokens").has_value());
-    CHECK(api::IntKeyFromExtraBody(provider, nlohmann::json{{"别的键", 1}}, "max_tokens") == 4096);
+    CHECK_FALSE(api::ExtraBodyHasKey(none, none, "max_tokens"));
+    CHECK(api::ExtraBodyHasKey(provider, none, "max_tokens"));
+    CHECK(api::ExtraBodyHasKey(none, request_level, "max_tokens"));
+    CHECK(api::ExtraBodyHasKey(provider, request_level, "max_tokens"));
+    CHECK(api::ExtraBodyHasKey(non_integer, none, "max_tokens"));  // 字符串也算覆盖在场
+    CHECK(api::ExtraBodyHasKey(null_value, none, "max_tokens"));   // null 也算
+    CHECK_FALSE(api::ExtraBodyHasKey(nlohmann::json::array({1, 2}), none, "max_tokens"));  // 非 object 跳过
+    CHECK(api::ExtraBodyHasKey(nlohmann::json::array({1, 2}), provider, "max_tokens"));  // 单级非 object 不碍另一级
+}
+
+TEST_CASE("差距8/FD-02: IntLimitFromBody 只认出门体上的整数,缺键/非整数如实 nullopt") {
+    CHECK_FALSE(api::IntLimitFromBody(nlohmann::json{{"别的", 1}}, "max_tokens").has_value());
+    CHECK(api::IntLimitFromBody(nlohmann::json{{"max_tokens", 4096}}, "max_tokens") == 4096);
+    CHECK_FALSE(api::IntLimitFromBody(nlohmann::json{{"max_tokens", "many"}}, "max_tokens").has_value());
+    CHECK_FALSE(api::IntLimitFromBody(nlohmann::json{{"max_tokens", nullptr}}, "max_tokens").has_value());
+    CHECK_FALSE(api::IntLimitFromBody(nlohmann::json{{"max_tokens", 1.5}}, "max_tokens").has_value());
+    CHECK(api::IntLimitFromBody(nlohmann::json{{"max_tokens", -5}}, "max_tokens") == 0);  // 负数夹 0
+    CHECK(api::IntLimitFromBody(nlohmann::json{{"max_tokens", 3000000000LL}}, "max_tokens") ==
+          2147483647);  // 超 int 夹上限
+}
+
+// FD-02 覆盖矩阵(冻结):四协议的最终 JSON 与 effective limit 必须同源
+// ——出门体上是什么值,预算侧就认什么;非整数覆盖如实 unknown
+//(tokens=nullopt + overridden=true),不回退 Request::max_tokens 旧值。
+TEST_CASE("FD-02: 覆盖矩阵——最终 JSON 与有效上限同源,非整数覆盖如实 unknown") {
+    // chat 家:键 max_tokens,覆盖形状逐项过。
+    const std::vector<std::pair<nlohmann::json, nlohmann::json>> chat_matrix = {
+        {nlohmann::json{{"max_tokens", nullptr}}, nullptr},                    // null 覆盖
+        {nlohmann::json{{"max_tokens", "8192"}}, "8192"},                      // 字符串覆盖
+        {nlohmann::json{{"max_tokens", -5}}, -5},                              // 负数(出门原样,limit 夹 0)
+        {nlohmann::json{{"max_tokens", 3000000000LL}}, 3000000000LL},          // 超 int(出门原样,limit 夹 INT_MAX)
+    };
+    for (const auto& [provider_extra, wire_value] : chat_matrix) {
+        api::Request request;
+        request.model = "m";
+        request.max_tokens = 4096;
+        const api::chat::ChatCompletionsBackend backend("https://c", "t", 1000, 30, provider_extra);
+        const auto prepared = backend.PrepareWireRequest(request);
+        REQUIRE(prepared.body.contains("max_tokens"));
+        CHECK(prepared.body.at("max_tokens") == wire_value);  // 出门体 = 用户手笔原样
+        const auto limit = backend.GetEffectiveOutputLimit(request);
+        CHECK(limit.overridden);
+        if (wire_value.is_number_integer() && wire_value.get<long long>() >= 0 &&
+            wire_value.get<long long>() <= 2147483647LL) {
+            REQUIRE(limit.tokens.has_value());
+            CHECK(*limit.tokens == wire_value.get<int>());
+        } else if (wire_value.is_number_integer()) {
+            // 负数夹 0、超 int 夹上限:limit 与出门体同向,不冒充旧值 4096。
+            REQUIRE(limit.tokens.has_value());
+            CHECK(*limit.tokens != 4096);
+        } else {
+            // null/字符串:unknown,绝不回退 4096(旧影子会返回 4096 假账)。
+            CHECK_FALSE(limit.tokens.has_value());
+        }
+        CHECK(prepared.output_limit == limit.tokens);  // GetEffective 与 prepared 同源
+    }
+
+    // provider/request 双覆盖:请求级压 provider,出门与 limit 都认请求级。
+    api::Request request;
+    request.model = "m";
+    request.max_tokens = 4096;
+    request.extra_body = nlohmann::json{{"max_tokens", 8192}};
+    const api::chat::ChatCompletionsBackend dual(
+        "https://c", "t", 1000, 30, nlohmann::json{{"max_tokens", 12345}});
+    const auto prepared = dual.PrepareWireRequest(request);
+    CHECK(prepared.body.at("max_tokens") == 8192);
+    const auto limit = dual.GetEffectiveOutputLimit(request);
+    REQUIRE(limit.tokens.has_value());
+    CHECK(*limit.tokens == 8192);
+    CHECK(limit.overridden);
+
+    // responses 家:键 max_output_tokens,null 覆盖同样 unknown。
+    api::Request responses_request;
+    responses_request.model = "m";
+    responses_request.max_tokens = 4096;
+    const api::responses::ResponsesBackend responses_backend(
+        "https://r", "t", 1000, 30, false, nlohmann::json{{"max_output_tokens", nullptr}});
+    const auto responses_prepared = responses_backend.PrepareWireRequest(responses_request);
+    REQUIRE(responses_prepared.body.contains("max_output_tokens"));
+    CHECK(responses_prepared.body.at("max_output_tokens").is_null());
+    const auto responses_limit = responses_backend.GetEffectiveOutputLimit(responses_request);
+    CHECK(responses_limit.overridden);
+    CHECK_FALSE(responses_limit.tokens.has_value());
+
+    // anthropic 家:必填键被 null 覆盖——出门 null,limit 同样 unknown,
+    // 不落公开兜底冒充。
+    api::Request anthropic_request;
+    anthropic_request.model = "m";
+    const api::anthropic::AnthropicBackend anthropic_backend(
+        "https://a", "t", 1000, 30, false, nlohmann::json{{"max_tokens", nullptr}});
+    const auto anthropic_prepared = anthropic_backend.PrepareWireRequest(anthropic_request);
+    REQUIRE(anthropic_prepared.body.contains("max_tokens"));
+    CHECK(anthropic_prepared.body.at("max_tokens").is_null());
+    const auto anthropic_limit = anthropic_backend.GetEffectiveOutputLimit(anthropic_request);
+    CHECK(anthropic_limit.overridden);
+    CHECK_FALSE(anthropic_limit.tokens.has_value());
+
+    // gemini 家:深键 generationConfig.maxOutputTokens,null 覆盖同样 unknown。
+    api::Request gemini_request;
+    gemini_request.model = "gemini-3-flash";
+    gemini_request.max_tokens = 4096;
+    const api::gemini::GeminiBackend gemini_backend(
+        "https://g", "t", 1000, 30,
+        nlohmann::json{{"generationConfig", nlohmann::json{{"maxOutputTokens", nullptr}}}});
+    const auto gemini_prepared = gemini_backend.PrepareWireRequest(gemini_request);
+    REQUIRE(gemini_prepared.body.contains("generationConfig"));
+    CHECK(gemini_prepared.body.at("generationConfig").at("maxOutputTokens").is_null());
+    const auto gemini_limit = gemini_backend.GetEffectiveOutputLimit(gemini_request);
+    CHECK(gemini_limit.overridden);
+    CHECK_FALSE(gemini_limit.tokens.has_value());
+
+    // gemini 整块替换 generationConfig(null):内置 maxOutputTokens 被冲出门
+    // 外,同样算覆盖在场、limit unknown。
+    const api::gemini::GeminiBackend gemini_nuked(
+        "https://g", "t", 1000, 30, nlohmann::json{{"generationConfig", nullptr}});
+    const auto nuked_prepared = gemini_nuked.PrepareWireRequest(gemini_request);
+    REQUIRE(nuked_prepared.body.contains("generationConfig"));
+    CHECK(nuked_prepared.body.at("generationConfig").is_null());
+    const auto nuked_limit = gemini_nuked.GetEffectiveOutputLimit(gemini_request);
+    CHECK(nuked_limit.overridden);
+    CHECK_FALSE(nuked_limit.tokens.has_value());
+}
+
+// FD-02:正常请求 golden——PrepareWireRequest 的出门体与直拼
+// BuildRequestJson 逐字节相等(序列化、发送、诊断同一条路,不因收敛
+// 改变形状)。
+TEST_CASE("FD-02: PrepareWireRequest 出门体与直拼 BuildRequestJson 逐字节相等") {
+    const api::Request request = FourRoleConversation();
+    const api::anthropic::AnthropicBackend anthropic("https://a", "t", 1000, 30, true,
+                                                     nlohmann::json{{"anthropic_version", "beta"}});
+    CHECK(anthropic.PrepareWireRequest(request).body.dump() ==
+          api::anthropic::BuildRequestJson(request, true, nlohmann::json{{"anthropic_version", "beta"}}).dump());
+    const api::chat::ChatCompletionsBackend chat("https://c", "t", 1000, 30,
+                                                 nlohmann::json{{"top_k", 5}});
+    CHECK(chat.PrepareWireRequest(request).body.dump() ==
+          api::chat::BuildRequestJson(request, nlohmann::json{{"top_k", 5}}).dump());
+    const api::responses::ResponsesBackend responses("https://r", "t", 1000, 30, true,
+                                                     nlohmann::json{{"service_tier", "auto"}});
+    CHECK(responses.PrepareWireRequest(request).body.dump() ==
+          api::responses::BuildRequestJson(request, true, nlohmann::json{{"service_tier", "auto"}}).dump());
+    const api::gemini::GeminiBackend gemini(
+        "https://g", "t", 1000, 30,
+        nlohmann::json{{"generationConfig", nlohmann::json{{"temperature", 0.7}}}});
+    CHECK(gemini.PrepareWireRequest(request).body.dump() ==
+          api::gemini::BuildRequestJson(request,
+                                        nlohmann::json{{"generationConfig",
+                                                        nlohmann::json{{"temperature", 0.7}}}}).dump());
+
+    // 映射恒等性:没被覆盖时 wire_element_count == 出门容器的实际长度
+    //(对账的根基,劈了就是拍平和出门体分了家)。
+    const auto anthropic_map = anthropic.BuildWireMessageMap(request);
+    REQUIRE(anthropic_map.has_value());
+    CHECK(anthropic_map->wire_element_count ==
+          anthropic.PrepareWireRequest(request).body.at("messages").size());
+    const auto chat_map = chat.BuildWireMessageMap(request);
+    REQUIRE(chat_map.has_value());
+    CHECK(chat_map->wire_element_count == chat.PrepareWireRequest(request).body.at("messages").size());
+    const auto responses_map = responses.BuildWireMessageMap(request);
+    REQUIRE(responses_map.has_value());
+    CHECK(responses_map->wire_element_count == responses.PrepareWireRequest(request).body.at("input").size());
+    const auto gemini_map = gemini.BuildWireMessageMap(request);
+    REQUIRE(gemini_map.has_value());
+    CHECK(gemini_map->wire_element_count == gemini.PrepareWireRequest(request).body.at("contents").size());
+}
+
+// FD-02:消息容器被 extra_body 替换——出门体原样带用户数组(手笔不删
+// 改),拍平映射如实不可得(nullopt),不能还指替换前的旧图,也不能
+// 对着用户数组补造映射。
+TEST_CASE("FD-02: 消息容器覆盖——出门原样,映射不可得") {
+    const nlohmann::json replacement = nlohmann::json::array(
+        {nlohmann::json{{"role", "user"}, {"content", "用户自己拼的"}}, nlohmann::json{{"role", "assistant"}, {"content", "极简对话"}}});
+    api::Request request = FourRoleConversation();
+
+    // 请求级覆盖:四家全查。
+    request.extra_body = nlohmann::json{{"messages", replacement}};
+    const api::anthropic::AnthropicBackend anthropic("https://a", "t");
+    CHECK(anthropic.PrepareWireRequest(request).body.at("messages") == replacement);
+    CHECK_FALSE(anthropic.BuildWireMessageMap(request).has_value());
+    CHECK(api::anthropic::BuildMessageWireMap(request).container.empty());  // 纯函数同口径
+    const api::chat::ChatCompletionsBackend chat("https://c", "t");
+    CHECK(chat.PrepareWireRequest(request).body.at("messages") == replacement);
+    CHECK_FALSE(chat.BuildWireMessageMap(request).has_value());
+
+    request.extra_body = nlohmann::json{{"input", replacement}};
+    const api::responses::ResponsesBackend responses("https://r", "t");
+    CHECK(responses.PrepareWireRequest(request).body.at("input") == replacement);
+    CHECK_FALSE(responses.BuildWireMessageMap(request).has_value());
+
+    request.extra_body = nlohmann::json{{"contents", replacement}};
+    const api::gemini::GeminiBackend gemini("https://g", "t");
+    CHECK(gemini.PrepareWireRequest(request).body.at("contents") == replacement);
+    CHECK_FALSE(gemini.BuildWireMessageMap(request).has_value());
+
+    // provider 级覆盖:同样不可得(旧路 BuildMessageWireMap 空参重建,看
+    // 不见 provider 级——这就是影子映射的病根)。
+    api::Request plain = FourRoleConversation();
+    const api::chat::ChatCompletionsBackend chat_provider(
+        "https://c", "t", 1000, 30, nlohmann::json{{"messages", replacement}});
+    CHECK(chat_provider.PrepareWireRequest(plain).body.at("messages") == replacement);
+    CHECK_FALSE(chat_provider.BuildWireMessageMap(plain).has_value());
+
+    // 没被覆盖的请求照常有映射(回归钉子)。
+    CHECK(chat.BuildWireMessageMap(plain).has_value());
+}
+
+// FD-02 写侧:覆盖判定认"键在场"(值类型不限)——字符串/null 的覆盖
+// 手笔同样要被窄值压过,不能因为解析不出整数就当没覆盖、让收窄出不了门。
+TEST_CASE("FD-02: ForceMaxOutputTokensOverride 非整数覆盖同样落笔,收窄出得了门") {
+    api::Request request;
+    request.model = "m";
+    request.max_tokens = 2048;
+
+    const api::chat::ChatCompletionsBackend string_override(
+        "https://c", "t", 1000, 30, nlohmann::json{{"max_tokens", "8192"}});
+    string_override.ForceMaxOutputTokensOverride(request, 1024);
+    REQUIRE(request.extra_body.contains("max_tokens"));
+    CHECK(request.extra_body.at("max_tokens") == 1024);  // 旧路 no-op,出门仍是 "8192"
+    const auto after = string_override.GetEffectiveOutputLimit(request);
+    REQUIRE(after.tokens.has_value());
+    CHECK(*after.tokens == 1024);
+
+    api::Request null_request;
+    null_request.model = "m";
+    const api::responses::ResponsesBackend null_override(
+        "https://r", "t", 1000, 30, false, nlohmann::json{{"max_output_tokens", nullptr}});
+    null_override.ForceMaxOutputTokensOverride(null_request, 512);
+    REQUIRE(null_request.extra_body.contains("max_output_tokens"));
+    CHECK(null_request.extra_body.at("max_output_tokens") == 512);
+    const auto null_after = null_override.GetEffectiveOutputLimit(null_request);
+    REQUIRE(null_after.tokens.has_value());
+    CHECK(*null_after.tokens == 512);
+}
+
+// FD-02 默认口:不换皮的派生类(trace/桩/包装后端)拿基类默认
+// PrepareWireRequest——上限回退 Request::max_tokens 原值、映射不可得、
+// body 空,与旧 GetEffectiveOutputLimit 默认一字不差;HC-08 包装层换皮
+// 时这只口就是它的接缝。
+TEST_CASE("FD-02: 基类默认 PrepareWireRequest——回退语义与旧默认一字不差") {
+    class BareBackend final : public api::Backend {
+    public:
+        std::expected<void, api::Error> send_stream(
+            const api::Request&,
+            const std::function<void(const api::StreamEvent&)>&,
+            const std::atomic<bool>*) override {
+            return {};
+        }
+    };
+    BareBackend bare;
+    api::Request request;
+    request.model = "m";
+    request.max_tokens = 2048;
+    const auto prepared = bare.PrepareWireRequest(request);
+    CHECK(prepared.output_limit == 2048);
+    CHECK_FALSE(prepared.output_limit_overridden);
+    CHECK_FALSE(prepared.wire_map.has_value());
+    CHECK(prepared.body.is_null());
+    const auto limit = bare.GetEffectiveOutputLimit(request);
+    CHECK(limit.tokens == 2048);
+    CHECK_FALSE(limit.overridden);
+    request.max_tokens.reset();
+    CHECK_FALSE(bare.PrepareWireRequest(request).output_limit.has_value());
 }
 
 TEST_CASE("差距8: 四家 backend 有效上限——anthropic 必填兜底,键名各认各的") {
