@@ -1,6 +1,6 @@
 # SV-10 包组件集合用三种结构重复维护按类型查名
 
-- 状态：待实施，仅审查与方案。
+- 状态：已实施(2026-09-22,PR #197,CI run 35660447496 rollup 绿:changes/lane/install-scripts×2/macos-clang 俱 success)。轻合同 ComponentNameIndex 落 src/package/component_name_index.hpp(header-only,免登记 CMake),三份 set+switch 并一份;PackageComponentSet 组合索引只留包身份,catalog 与 mounting 各建各的值,挂载四类内容组件过滤留在构建处。行为零变更,既有测试册全保。
 - 审查日期：2026-09-21。
 - 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 批次：1。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
@@ -39,11 +39,11 @@
 
 ## 验收门槛
 
-- [ ] 七种 ComponentKind 查名都走同一存储机械，新增种类无需复制第三份 Has。
-- [ ] catalog 中坏组件仍可被引用定位并给诊断；未通过验证的包不因索引统一而挂载。
-- [ ] mounting 只对四类内容组件折 canonical，Plugin/MCP/Channel 规则不变。
-- [ ] 包内同名跨 kind、显式跨包名、外部裸名及空/default 引用夹具保持原输出。
-- [ ] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+- [x] 七种 ComponentKind 查名都走同一存储机械，新增种类无需复制第三份 Has。(ComponentNameIndex::Add/Has 一份机械,按声明序的 array 档位;PackageComponentSet::Has 一行转发;kAllComponentKinds 档位表配 static_assert,新增种类漏补即编译错)
+- [x] catalog 中坏组件仍可被引用定位并给诊断；未通过验证的包不因索引统一而挂载。(ResolveCtx::own 构建处只加不减,坏组件照 Add 进账;挂载的 rejected/disabled 分支一字未动;CI run 35660447496 全绿)
+- [x] mounting 只对四类内容组件折 canonical，Plugin/MCP/Channel 规则不变。(CollectOwn 显式四 case 入账,plugin/mcp/channel 档恒空,Has 同旧 default 分支返 false)
+- [x] 包内同名跨 kind、显式跨包名、外部裸名及空/default 引用夹具保持原输出。(test_package_catalog.cpp 既有夹具全保,仅 other.skills.insert 一行随组合迁移为 other.names.Add;CI run 35660447496 macos-clang 腿测试册全绿)
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。(单笔提交 060dd559 只碰 src/package 三件+新头+一处测试构造行;行为零变更,回滚 revert 即可;尚未验证边界=无,纯静态合并交远端 CI)
 
 ## 合并/删除口径
 
@@ -54,6 +54,8 @@
 建议保留：轻合同 ComponentNameIndex；各阶段独立构建的索引值。
 
 预计净删 50 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+落地实算(PR #197 提交 060dd559):既有文件 -92/+35,新立合同头 +47,合计净 -10 行。估算 50 未计入新立 header 的合同注释、档位表与 static_assert;真正删掉的是三份 Has switch、一份 Add switch、一份 CollectOwn switch 与七分支目录 if/else,机械 membership 语义只剩 ComponentNameIndex 一份。
 
 ## 既有工作关联
 
