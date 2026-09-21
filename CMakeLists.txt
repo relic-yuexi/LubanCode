@@ -1106,8 +1106,14 @@ add_library(lubancode_runtime STATIC
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
   # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
-  # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。
+  # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。AR-12 起
+  # 桥类按类边界分件:主轮/旁路/子代理/workflow 四桥各自成件,账本主体与
+  # 装配留 trajectory_session.cpp(公共面仍经 trajectory_session.hpp 聚合)。
   src/runtime/trajectory_session.cpp
+  src/runtime/trajectory_turn_bridge.cpp
+  src/runtime/trajectory_bypass_bridge.cpp
+  src/runtime/trajectory_subagent_bridge.cpp
+  src/runtime/trajectory_workflow_bridge.cpp
   # 异步工具单 P2:批次闸门/投递规划/能力闸/会话级总成——AgentLoop 的
   # 协议模式裁决 seam 实现 + ResultDeliveryPlanner + ProviderToolContract
   # Validator + AsyncToolRuntime(五宿主接线共用,不各造)。
