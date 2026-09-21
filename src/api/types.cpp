@@ -6,6 +6,7 @@
 #include <variant>
 
 #include "platform/json_safe.hpp"  // SanitizeJsonStrings:工具入参/结果这类 JSON 树字段的递归清洗
+#include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:截短刀口对齐码点边界
 
 namespace lubancode::api {
 
@@ -69,16 +70,13 @@ std::string MaskSecrets(std::string text) {
 }
 
 // 截短到约 240 字节(退到 UTF-8 码点边界),尾巴标 "...(截短)"。
+// 刀口收敛在 platform::Utf8PrefixBoundary(AR-11),不手抄退字节循环。
 std::string TruncateForUser(std::string text) {
     constexpr std::size_t kCap = 240;
     if (text.size() <= kCap) {
         return text;
     }
-    std::size_t cut = kCap;
-    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
-        --cut;  // 退到码点起点
-    }
-    text.resize(cut);
+    text.resize(platform::Utf8PrefixBoundary(text, kCap));
     text += "...(截短)";
     return text;
 }

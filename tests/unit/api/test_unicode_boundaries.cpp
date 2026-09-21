@@ -185,6 +185,40 @@ TEST_CASE("Utf8SuffixBoundary:尾段起点推过悬着的续字节") {
     }
 }
 
+// AR-11 收口的字节帽整刀:各消费者手抄的"切点退续字节"循环统一到
+// platform::TruncateUtf8Prefix 之后,合同在这里钉死。
+TEST_CASE("TruncateUtf8Prefix:字节帽截前缀,刀口永不劈半个字") {
+    CHECK(platform::TruncateUtf8Prefix("abc", 10) == "abc");  // 不超帽原样
+    CHECK(platform::TruncateUtf8Prefix("abc", 3) == "abc");
+    CHECK(platform::TruncateUtf8Prefix("abcdef", 3) == "abc");
+    CHECK(platform::TruncateUtf8Prefix("", 5).empty());
+    CHECK(platform::TruncateUtf8Prefix("abc", 0).empty());
+    // 预算容不下首个码点:宁可空,不放半截序列出去(渠道预览曾在这里
+    // 交出半字符——cut 退到 0 后又回退到 max_bytes 的旧病)。
+    CHECK(platform::TruncateUtf8Prefix("汉", 0).empty());
+    CHECK(platform::TruncateUtf8Prefix("汉", 1).empty());
+    CHECK(platform::TruncateUtf8Prefix("汉", 2).empty());
+    CHECK(platform::TruncateUtf8Prefix("汉", 3) == "汉");
+    CHECK(platform::TruncateUtf8Prefix(kEmoji, 0).empty());
+    CHECK(platform::TruncateUtf8Prefix(kEmoji, 3).empty());  // 四字节 emoji 只装得下 3
+    CHECK(platform::TruncateUtf8Prefix(kEmoji, 4) == kEmoji);
+    // 刀口落在序列腰上:整字让掉(与迁移前各消费者的 golden 逐字节一致)。
+    CHECK(platform::TruncateUtf8Prefix("关键词xyz", 4) == "\xe5\x85\xb3");
+    CHECK(platform::TruncateUtf8Prefix("关键词xyz", 10) == "关键词x");
+    CHECK(platform::TruncateUtf8Prefix("关键词xyz", 12) == "关键词xyz");
+}
+
+TEST_CASE("TruncateUtf8Prefix:任意字节帽切汉字/emoji 混排,出口永远合法且不超帽") {
+    const std::string mixed = "汉字" + std::string(kEmoji) + "ab" + "字";
+    for (std::size_t cap = 0; cap <= mixed.size() + 2; ++cap) {
+        const std::string cut = platform::TruncateUtf8Prefix(mixed, cap);
+        CAPTURE(cap);
+        CHECK(cut.size() <= cap);                          // 正文不超字节帽
+        CHECK(platform::IsValidUtf8(cut));                 // 永远合法 UTF-8
+        CHECK(mixed.rfind(cut, 0) == 0);                   // 永远是原串前缀
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1b. AgentLoop 集成:劈半 delta 流,显示回调只见完整 UTF-8,history 拼齐
 // ---------------------------------------------------------------------------

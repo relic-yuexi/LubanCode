@@ -82,8 +82,8 @@ enum class TurnItemKind { Tool, SubTool, Thinking, Text, Command, Diff, Todo, Su
 // cli::kFullOutputCapBytes 的职责);发送/预览上限由各前端自管。
 inline constexpr std::size_t kTurnItemOutputCapBytes = 256 * 1024;
 
-// UTF-8 安全截断(不劈多字节字符)——与 cli::TruncateUtf8Bytes 同一套解码,
-// runtime 侧独立一份,不 include cli/*。
+// UTF-8 安全截断(不劈多字节字符)——刀口收敛在 platform::TruncateUtf8Prefix,
+// 这里是 runtime 侧的转发壳(与 cli::TruncateUtf8Bytes 同一套语义);不 include cli/*。
 std::string TruncateUtf8Bytes(const std::string& text, std::size_t max_bytes);
 
 struct TurnItem {

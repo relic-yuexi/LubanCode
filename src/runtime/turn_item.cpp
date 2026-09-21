@@ -16,6 +16,8 @@
 #include <system_error>
 #include <utility>
 
+#include "platform/text_encoding.hpp"  // TruncateUtf8Prefix:字节帽截断的公共刀口
+
 namespace lubancode::runtime {
 
 namespace {
@@ -238,14 +240,9 @@ std::optional<DiffTable> BuildDiffTable(const std::string& tool_name, const nloh
 }
 
 std::string TruncateUtf8Bytes(const std::string& text, std::size_t max_bytes) {
-    if (text.size() <= max_bytes) {
-        return text;
-    }
-    std::size_t cut = max_bytes;
-    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
-        --cut;  // 别劈开多字节字符
-    }
-    return text.substr(0, cut);
+    // 刀口收敛在 platform(AR-11):原先手抄的"退续字节"循环与公共原语
+    // 逐字节同义,这里只留转发。
+    return platform::TruncateUtf8Prefix(text, max_bytes);
 }
 
 std::string ToString(TurnItemStatus status) {
