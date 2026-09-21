@@ -19,6 +19,7 @@
 
 using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
+using lubancode::cli::trf;  // /unknown 的"不认得"行(原先经注册表头间接带进)
 
 #include <atomic>
 #include <algorithm>
