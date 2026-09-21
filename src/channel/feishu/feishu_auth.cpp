@@ -20,21 +20,25 @@ FeishuTokenManager::ErrorKind StatusToErrorKind(int status) {
 
 }  // namespace
 
+ExpiringTokenCache<FeishuTokenManager::Error> FeishuTokenManager::MakeCache() {
+    ExpiringTokenCache<Error>::Options cache_options;
+    cache_options.now_ms = options_.now_ms;
+    cache_options.refresh_margin_secs = options_.refresh_margin_secs;
+    cache_options.refresh = [this]() { return Refresh(); };
+    return ExpiringTokenCache<Error>(std::move(cache_options));
+}
+
 void FeishuTokenManager::Invalidate() {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    token_.reset();
-    expires_at_ms_ = 0;
+    cache_.Invalidate();
 }
 
 std::expected<std::string, FeishuTokenManager::Error> FeishuTokenManager::GetValidToken() {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    if (token_.has_value() && options_.now_ms() < expires_at_ms_) {
-        return *token_;
-    }
-    return RefreshLocked();
+    return cache_.GetValid();
 }
 
-std::expected<std::string, FeishuTokenManager::Error> FeishuTokenManager::RefreshLocked() {
+std::expected<ExpiringTokenCache<FeishuTokenManager::Error>::Refreshed,
+              FeishuTokenManager::Error>
+FeishuTokenManager::Refresh() {
     FeishuHttpRequest request;
     request.method = "POST";
     request.url = options_.token_url;
@@ -62,11 +66,8 @@ std::expected<std::string, FeishuTokenManager::Error> FeishuTokenManager::Refres
     if (!token.has_value()) {
         return std::unexpected(Error{ErrorKind::InvalidCredentials, parse_error});
     }
-    token_ = token->tenant_access_token;
-    const std::int64_t lifetime_ms =
-        (token->expire_secs - options_.refresh_margin_secs) * 1000;
-    expires_at_ms_ = options_.now_ms() + (lifetime_ms > 0 ? lifetime_ms : 0);
-    return *token_;
+    return ExpiringTokenCache<Error>::Refreshed{token->tenant_access_token,
+                                                token->expire_secs};
 }
 
 }  // namespace lubancode::channel::feishu
