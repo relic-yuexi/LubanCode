@@ -20,6 +20,7 @@
 #include "cli/diff.hpp"
 #include "cli/transcript.hpp"
 #include "runtime/turn_item.hpp"
+#include "tools/edit_file.hpp"  // AR-05 合同对账:预览与执行同判
 
 namespace rt = lubancode::runtime;
 namespace cli = lubancode::cli;
@@ -216,4 +217,58 @@ TEST_CASE("TurnItem:finished() 只认终态四分") {
         item.status = status;
         CHECK(item.finished());
     }
+}
+
+// ---- AR-05 合同:预览与执行同一颗账 ----------------------------------------
+//
+// 病灶:预览(BuildDiffTable)只做精确字节匹配,真实编辑(EditFileTool)
+// 还有换行归一/缩进归一两层容错,多处候选时预览还替第一处。对账册只有
+// 一条铁律:同输入下,预览判的 located/replaced_count 必须与执行成败和
+// 实际替换处数一致——预览显示的改动就是会落盘的改动。
+// 先执行后预览会被落盘内容污染,故一律先预览(与真实确认流程同序)。
+
+TEST_CASE("AR-05 合同:CRLF 文件配 LF old_string——预览与执行同判换行归一") {
+    const TempFile old_file("alpha\r\nbeta\r\ngamma\r\n");
+    const nlohmann::json input = {
+        {"path", old_file.path()}, {"old_string", "alpha\nbeta"}, {"new_string", "one\ntwo"}};
+
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK(table->located);
+    CHECK(table->replaced_count == 1);
+
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+}
+
+TEST_CASE("AR-05 合同:多处精确匹配未开 replace_all——预览不得假装改了第一处") {
+    const TempFile old_file("foo foo foo");
+    const nlohmann::json input = {
+        {"path", old_file.path()}, {"old_string", "foo"}, {"new_string", "bar"}};
+
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK_FALSE(table->located);
+    CHECK(table->replaced_count == 0);
+
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK(result.is_error);
+}
+
+TEST_CASE("AR-05 合同:统一缩进不同仍可命中——预览与执行同判缩进归一") {
+    const TempFile old_file("void f() {\n    if (ready) {   \n        run();\t\n    }\n}\n");
+    const nlohmann::json input = {{"path", old_file.path()},
+                                  {"old_string", "if (ready) {\n    run();\n}"},
+                                  {"new_string", "if (ready) {\n    finish();\n}"}};
+
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK(table->located);
+    CHECK(table->replaced_count == 1);
+
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
 }
