@@ -48,7 +48,7 @@ std::vector<std::byte> RawFrame(const std::string& body) {
 // 把出站字节流整段解开(粘帧也全解);解不开 REQUIRE 红。
 std::vector<nlohmann::json> DecodeAll(const std::vector<std::byte>& bytes) {
     FrameDecoder decoder;
-    decoder.Feed(bytes);
+    decoder.Feed(bytes.data(), bytes.size());
     std::vector<nlohmann::json> frames;
     while (true) {
         auto next = decoder.TryDecodeNext();
@@ -61,9 +61,11 @@ std::vector<nlohmann::json> DecodeAll(const std::vector<std::byte>& bytes) {
     return frames;
 }
 
-// 通知帧的 method 名(缺键/错型直接红,nlohmann const 查缺键是 UB,先 contains)。
+// 通知帧的 method 名(缺键/错型直接红,nlohmann const 查缺键是 UB,先 contains;
+// doctest 断言里不许写 &&,逐条断)。
 std::string NotificationMethod(const nlohmann::json& frame) {
-    REQUIRE(frame.contains("method") && frame.at("method").is_string());
+    REQUIRE(frame.contains("method"));
+    REQUIRE(frame.at("method").is_string());
     return frame.at("method").get<std::string>();
 }
 
@@ -117,10 +119,11 @@ TEST_CASE("坏帧自发 Fatal 且解码器粘性错") {
     const auto fatal_frames = DecodeAll(endpoint.Drain());
     REQUIRE(fatal_frames.size() == 1);
     CHECK(NotificationMethod(fatal_frames[0]) == BridgeMethodName(BridgeMethod::Fatal));
-    REQUIRE(fatal_frames[0].contains("params") &&
-            fatal_frames[0].at("params").is_object());
+    REQUIRE(fatal_frames[0].contains("params"));
+    REQUIRE(fatal_frames[0].at("params").is_object());
     const auto& params = fatal_frames[0].at("params");
-    REQUIRE(params.contains("reason") && params.at("reason").is_string());
+    REQUIRE(params.contains("reason"));
+    REQUIRE(params.at("reason").is_string());
     CHECK(params.at("reason").get<std::string>() == "invalid_frame");
     CHECK(params.contains("detail"));  // 帧错说明在 detail(detail 非空)
 
@@ -189,9 +192,11 @@ TEST_CASE("后台线程 Notify 与宿主 Drain:内容不丢不重") {
     std::vector<int> seqs;
     seqs.reserve(frames.size());
     for (const auto& f : frames) {
-        REQUIRE(f.contains("params") && f.at("params").is_object());
+        REQUIRE(f.contains("params"));
+        REQUIRE(f.at("params").is_object());
         const auto& params = f.at("params");
-        REQUIRE(params.contains("seq") && params.at("seq").is_number_integer());
+        REQUIRE(params.contains("seq"));
+        REQUIRE(params.at("seq").is_number_integer());
         seqs.push_back(params.at("seq").get<int>());
     }
     std::sort(seqs.begin(), seqs.end());
