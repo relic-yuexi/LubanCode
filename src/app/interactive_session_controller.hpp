@@ -32,6 +32,7 @@
 #include "app/commands/loop_commands.hpp"
 #include "app/commands/memory_commands.hpp"  // SessionTailContext(会话尾款材料)
 #include "app/commands/session_commands.hpp"
+#include "workflow/host_executors.hpp"  // ToolExecutor::Options(BuildWorkflowToolOptions 的返回型;原先经注册表头捎带)
 #include "app/interactive_session.hpp"
 #include "app/memory_extract.hpp"
 #include "app/turn_memory_extractor.hpp"  // TurnMemoryExtractor(回合总结异步化)
