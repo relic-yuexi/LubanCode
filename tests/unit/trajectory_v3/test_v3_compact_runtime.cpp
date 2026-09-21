@@ -2025,8 +2025,8 @@ TEST_CASE("AR-10 门禁吃评估口的数字:边界值一分不差,快照是真�
             lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
         CHECK(!result.applied);
         CHECK(result.terminal_kind == "rejected");
-        const nlohmann::json* check =
-            FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const nlohmann::json* check = FindValidationCheck(lines, "post_compact_budget");
         REQUIRE(check != nullptr);
         CHECK(!check->value("passed", false));
         CHECK(VerifyV3File(harness.jsonl).ok);
@@ -2219,7 +2219,8 @@ TEST_CASE("AR-10 最终快照的预留压过 profile:FD-02 接缝") {
         const V3CompactRunResult result =
             lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
         REQUIRE(result.applied);
-        const auto applied = EventsOf(ReadJsonLines(harness.jsonl), "compact.applied");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const auto applied = EventsOf(lines, "compact.applied");
         REQUIRE(applied.size() == 1);
         const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
         REQUIRE(metric.contains("budgetGate"));
@@ -2252,8 +2253,8 @@ TEST_CASE("AR-10 最终快照的预留压过 profile:FD-02 接缝") {
         const V3CompactRunResult result =
             lubancode::runtime::RunV3Compact(*writer, client, profile, std::move(input));
         CHECK(!result.applied);
-        const nlohmann::json* check =
-            FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const nlohmann::json* check = FindValidationCheck(lines, "post_compact_budget");
         REQUIRE(check != nullptr);
         CHECK(!check->value("passed", false));
         CHECK(VerifyV3File(harness.jsonl).ok);
@@ -2282,8 +2283,8 @@ TEST_CASE("AR-10 未注口:旧路一字不变") {
             lubancode::runtime::RunV3Compact(*writer, client, profile, ManualInput());
         CHECK(!result.applied);
         CHECK(result.reason == "validation_failed");
-        const nlohmann::json* check =
-            FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const nlohmann::json* check = FindValidationCheck(lines, "post_compact_budget");
         REQUIRE(check != nullptr);
         const std::string detail = check->value("detail", std::string());
         CHECK(detail.find("压缩后上下文") != std::string::npos);
@@ -2307,7 +2308,8 @@ TEST_CASE("AR-10 未注口:旧路一字不变") {
         const V3CompactRunResult result =
             lubancode::runtime::RunV3Compact(*writer, client, profile, ManualInput());
         REQUIRE(result.applied);
-        const auto applied = EventsOf(ReadJsonLines(harness.jsonl), "compact.applied");
+        const auto lines = ReadJsonLines(harness.jsonl);
+        const auto applied = EventsOf(lines, "compact.applied");
         REQUIRE(applied.size() == 1);
         const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
         CHECK_FALSE(metric.contains("budgetGate"));
