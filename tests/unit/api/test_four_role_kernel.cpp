@@ -922,7 +922,8 @@ TEST_CASE("差距8/FD-02: ExtraBodyHasKey 只看键在场,值类型不限") {
     CHECK(api::ExtraBodyHasKey(provider, request_level, "max_tokens"));
     CHECK(api::ExtraBodyHasKey(non_integer, none, "max_tokens"));  // 字符串也算覆盖在场
     CHECK(api::ExtraBodyHasKey(null_value, none, "max_tokens"));   // null 也算
-    CHECK_FALSE(api::ExtraBodyHasKey(nlohmann::json::array({1, 2}), provider, "max_tokens"));  // 非 object 跳过
+    CHECK_FALSE(api::ExtraBodyHasKey(nlohmann::json::array({1, 2}), none, "max_tokens"));  // 非 object 跳过
+    CHECK(api::ExtraBodyHasKey(nlohmann::json::array({1, 2}), provider, "max_tokens"));  // 单级非 object 不碍另一级
 }
 
 TEST_CASE("差距8/FD-02: IntLimitFromBody 只认出门体上的整数,缺键/非整数如实 nullopt") {
