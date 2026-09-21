@@ -4,7 +4,6 @@
 // 行为一字不差——注释一并随行。
 
 #include "app/commands/memory_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 
 #include <algorithm>
 #include <cctype>
@@ -886,13 +885,10 @@ void SettleTurnMemory(const SessionTailContext& ctx, const TurnMemoryExtractor::
 // 删除,cheap 路由不再有 Microcompact 任务档。)
 
 // 命令分派注册制(会话终章):/memory 的分派位——命令与排版全在本文件,
-// 分派位只递会话状态(工具补注册走回调)。
-CommandFlow HandleSlashMemory(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
-    lubancode::app::MemoryCommandContext memory_ctx;
-    memory_ctx.project_memory = dispatch.project_memory;
-    memory_ctx.theme = dispatch.theme;
-    memory_ctx.ensure_tool = dispatch.ensure_memory_tool;
-    HandleMemoryCommand(memory_ctx, parsed.args);
+// 分派位只递会话状态(工具补注册走回调)。HC-06(材料收窄,第二小批)起
+// 只吃窄材料,材料在组合根折好。
+CommandFlow HandleSlashMemory(const MemoryCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleMemoryCommand(ctx, parsed.args);
     return CommandFlow::Continue;
 }
 

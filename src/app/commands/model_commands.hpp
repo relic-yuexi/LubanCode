@@ -101,9 +101,10 @@ std::optional<ModelProviderHop> ModelProviderHopFor(const lubancode::config::Mod
 // <id> 或裸敲(直切与菜单选,两条输入路合流)。
 void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args);
 
-// 命令分派注册制(会话终章):/model 的分派位(材料装包 + presenter),
-// 自 interactive_session 大 switch 原样搬来。
-struct SlashDispatchContext;
-CommandFlow HandleSlashModel(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// 命令分派注册制(会话终章):/model 的分派位。HC-06(材料收窄,第二小批)
+// 只吃本域窄材料——材料装包(含跨家切换/活清单/同步三闭包)随材料在组合根
+// 折好,Model 域编译不再需要 SlashDispatchContext,session/Agent 一类大头
+// 不进。
+CommandFlow HandleSlashModel(const ModelCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

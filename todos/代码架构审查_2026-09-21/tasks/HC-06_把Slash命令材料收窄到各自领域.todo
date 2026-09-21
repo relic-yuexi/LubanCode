@@ -1,6 +1,6 @@
 # HC-06：把Slash命令材料收窄到各自领域
 
-状态：修复中。第一小批已合入 PR #189(CI run 35621540215 rollup success,三腿全绿);第二小批(Model/Memory/Usage/Package)、第三小批(Session/Workflow 宽域)待做。
+状态：修复中。第一小批已合入 PR #189(CI run 35621540215 rollup success,三腿全绿);第二小批(Model/Memory/Usage/Package)已落待验收;第三小批(Session/Workflow 宽域)待做。
 
 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
 
@@ -29,7 +29,7 @@ trace_ctx.theme = dispatch.theme;
 
 实施步骤：
 - [x] 第一小批迁Trace、Hook、Telemetry等窄域，保留现有领域函数；新增命令绑定单元集中构造捕获材料的执行器。（2026-09-21：立 session_command_bindings 绑定单元,表改闭包执行器(SlashCommandHandler 只接命令参数);/trace、/hooks、/telemetry 分派位改吃窄材料,trace_commands.cpp/telemetry_commands.cpp/hook_commands.cpp 不再 include 注册表头;SlashDispatchContext 删 trace_hub、enable_telemetry_session 两字段与 tool_trace_hub.hpp include;路由与 TrajectoryCommandExecutor 改吃表,不再摸材料袋。telemetry_service/trajectory 字段保留——doctor 域仍共用,随 doctor 迁移批次退役。验收:Trace 域编译零会话头;三域 handler 只见窄 context;58 案对账与死案兜底测试照旧绿。证据:PR #189,CI run 35621540215 rollup success。）
-- [ ] 第二小批迁Model/Memory/Usage/Package等已有窄Context域，禁止反向给窄Context塞回整个SlashDispatchContext。
+- [x] 第二小批迁Model/Memory/Usage/Package等已有窄Context域，禁止反向给窄Context塞回整个SlashDispatchContext。（2026-09-22：Model/Memory/Usage 三域分派位改吃各自窄 context——装包段(/model 的跨家切换/活清单/同步三闭包、/usage 的 sessions_root 派生与内存粗账递手)随材料迁组合根 AssembleDispatchContext,闭包一律捕 this,快照点与旧 SlashDispatchContext 字段同点同源,行为零变;Package 域立 PackageCommandContext(home_lubancode/dev_package_dirs/config/skills/package_mount/reload_packages 六样,不递 InteractiveSessionOptions,域文件不进会话层头);model_commands/memory_commands/usage_commands/package_commands 四域文件不再 include 注册表头,Package 域补 config/config.hpp、package/mounting.hpp、tools/skill_loader.hpp 直递;UsageCommandContext.theme 引用改指针(与 Trace/Memory 窄材料同形态,manual smoke driver 构造处跟进);SlashDispatchContext 删 ensure_memory_tool、reload_packages 两枚域独占字段(全仓查证仅本域引用);model_catalog/project_memory/package_mount 等共用字段保留,随各自消费域迁移批次退役。窄 context 内无一枚 SlashDispatchContext,无反向塞回。）
 - [ ] 第三小批迁Session/Workflow等宽域，按查询/运行/生命周期材料拆开；公共表只保留命令ID与执行入口。
 - [ ] 删除未再使用的字段与include，更新组装和测试；每批都能单独合入。
 

@@ -111,8 +111,9 @@ TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::s
 void SettleTurnMemory(const SessionTailContext& ctx, const TurnMemoryExtractor::Outcome& outcome,
                       std::int64_t tail_wall_ms);
 
-// 命令分派注册制(会话终章):/memory 的分派位(case 体原样搬自大 switch)。
-struct SlashDispatchContext;
-CommandFlow HandleSlashMemory(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// 命令分派注册制(会话终章):/memory 的分派位。HC-06(材料收窄,第二
+// 小批)起只吃窄材料——材料在组合根折好,Memory 域编译不再需要
+// SlashDispatchContext。
+CommandFlow HandleSlashMemory(const MemoryCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

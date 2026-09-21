@@ -162,21 +162,21 @@ int main(int argc, char** argv) {
 
     std::printf("==================== 幕一:flag 开 /usage ====================\n");
     {
-        app::UsageCommandContext context{theme};
+        app::UsageCommandContext context{&theme};
         context.trajectory = &*ledger;
         context.sessions_root = ledger->session_dir().parent_path();
         app::HandleUsageCommand("", context);
     }
     std::printf("\n-------------- /usage --by purpose --------------\n");
     {
-        app::UsageCommandContext context{theme};
+        app::UsageCommandContext context{&theme};
         context.trajectory = &*ledger;
         context.sessions_root = ledger->session_dir().parent_path();
         app::HandleUsageCommand("--by purpose", context);
     }
     std::printf("\n-------------- /usage --json(节选核对数字) --------------\n");
     {
-        app::UsageCommandContext context{theme};
+        app::UsageCommandContext context{&theme};
         context.trajectory = &*ledger;
         context.sessions_root = ledger->session_dir().parent_path();
         app::HandleUsageCommand("--json", context);
@@ -223,7 +223,7 @@ int main(int argc, char** argv) {
         normal_usage.output_tokens = 120;
         memory.Record(agent::ModelRole::Normal, "test-model", normal_usage, /*duration_ms=*/0,
                       /*reported=*/true);
-        app::UsageCommandContext context{theme};
+        app::UsageCommandContext context{&theme};
         context.memory_ledger = &memory;
         app::HandleUsageCommand("", context);
     }

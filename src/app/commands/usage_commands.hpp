@@ -100,9 +100,10 @@ struct LoadedPricing {
 };
 LoadedPricing LoadPricingTable(const std::optional<std::string>& home_lubancode);
 
-// 会话侧材料包(handler 从 SlashDispatchContext 装好)。
+// 会话侧材料包(HC-06 第二小批起由组合根装好;theme 改指针,空 = 没递,
+// 与 Trace/Memory 等域窄材料同一形态,材料袋可默认构造)。
 struct UsageCommandContext {
-    const lubancode::cli::Theme& theme;
+    const lubancode::cli::Theme* theme = nullptr;
     // flag 开的会话递账本(active session 的 session_dir 从这取);
     // nullptr = 轨迹没开,走内存粗账降级。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
@@ -116,8 +117,8 @@ struct UsageCommandContext {
 // /usage 主入口(IO 侧):解析 -> 装报告模型 -> 渲染/JSON。
 void HandleUsageCommand(const std::string& args, const UsageCommandContext& context);
 
-// 命令分派注册制:/usage 的分派位。
-struct SlashDispatchContext;
-CommandFlow HandleSlashUsage(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// 命令分派注册制:/usage 的分派位。HC-06(材料收窄,第二小批)起只吃
+// 本域窄材料——材料在组合根折好,Usage 域编译不再需要 SlashDispatchContext。
+CommandFlow HandleSlashUsage(const UsageCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

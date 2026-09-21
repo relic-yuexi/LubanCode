@@ -51,15 +51,25 @@ std::vector<SlashCommandSpec> BuildSessionSlashCommandTable(const SessionCommand
         return SlashCommandHandler{
             [ctx, handler](const lubancode::cli::ParsedSlashCommand& parsed) { return handler(*ctx, parsed); }};
     };
-    // 已收窄域(HC-06 第一小批):窄材料按值捕获(全是指针/回调,浅拷贝
+    // 已收窄域(HC-06 第一小批:Trace/Hook/Telemetry;第二小批:
+    // Model/Memory/Usage/Package):窄材料按值捕获(全是指针/回调,浅拷贝
     // 与旧路读同一批借用)。
     const TraceCommandContext trace = materials.trace;
     const HookCommandContext hook = materials.hook;
     const TelemetryCommandContext telemetry = materials.telemetry;
+    const ModelCommandContext model = materials.model;
+    const MemoryCommandContext memory = materials.memory;
+    const UsageCommandContext usage = materials.usage;
+    const PackageCommandContext package = materials.package;
 
     table.push_back({lubancode::cli::SlashCommand::Image, SlashCommandHandler{}, false, false});
     table.push_back({lubancode::cli::SlashCommand::Help, via_dispatch(HandleSlashHelp), false, false});
-    table.push_back({lubancode::cli::SlashCommand::Model, via_dispatch(HandleSlashModel), false, false});
+    // HC-06 已收窄(第二小批):/model 只吃窄材料。
+    table.push_back({lubancode::cli::SlashCommand::Model,
+                     SlashCommandHandler{[model](const lubancode::cli::ParsedSlashCommand& parsed) {
+                         return HandleSlashModel(model, parsed);
+                     }},
+                     false, false});
     table.push_back({lubancode::cli::SlashCommand::Provider, via_dispatch(HandleSlashProvider), false, false});
     table.push_back({lubancode::cli::SlashCommand::Config, via_dispatch(HandleSlashConfig), false, false});
     table.push_back({lubancode::cli::SlashCommand::Update, via_dispatch(HandleSlashUpdate), false, false});
@@ -73,7 +83,12 @@ std::vector<SlashCommandSpec> BuildSessionSlashCommandTable(const SessionCommand
     // ContextWindow 交互面板单:同屏调当前模型窗口与思考强度(本会话)。
     table.push_back(
         {lubancode::cli::SlashCommand::ContextWindow, via_dispatch(HandleSlashContextWindow), false, false});
-    table.push_back({lubancode::cli::SlashCommand::Usage, via_dispatch(HandleSlashUsage), false, false});
+    // HC-06 已收窄(第二小批):/usage 只吃窄材料。
+    table.push_back({lubancode::cli::SlashCommand::Usage,
+                     SlashCommandHandler{[usage](const lubancode::cli::ParsedSlashCommand& parsed) {
+                         return HandleSlashUsage(usage, parsed);
+                     }},
+                     false, false});
     table.push_back({lubancode::cli::SlashCommand::Insights, via_dispatch(HandleSlashInsights), false, false});
     table.push_back({lubancode::cli::SlashCommand::Compact, via_dispatch(HandleSlashCompact), false, false});
     table.push_back({lubancode::cli::SlashCommand::Think, via_dispatch(HandleSlashThink), false, false});
@@ -100,7 +115,12 @@ std::vector<SlashCommandSpec> BuildSessionSlashCommandTable(const SessionCommand
                          return HandleSlashPlan(*ctx, parsed);
                      }},
                      false, true});
-    table.push_back({lubancode::cli::SlashCommand::Package, via_dispatch(HandleSlashPackage), false, false});
+    // HC-06 已收窄(第二小批):/package 只吃窄材料。
+    table.push_back({lubancode::cli::SlashCommand::Package,
+                     SlashCommandHandler{[package](const lubancode::cli::ParsedSlashCommand& parsed) {
+                         return HandleSlashPackage(package, parsed);
+                     }},
+                     false, false});
     // 多渠道消息接入单阶段 2:渠道账号面(只读 + 管理动作;普通交互
     // 进程没挂 ChannelManager 时 handler 只给 gateway 引导)。
     table.push_back({lubancode::cli::SlashCommand::Channels, via_dispatch(HandleSlashChannels), false, false});
@@ -121,7 +141,12 @@ std::vector<SlashCommandSpec> BuildSessionSlashCommandTable(const SessionCommand
                      false, false});
     table.push_back({lubancode::cli::SlashCommand::Goal, via_dispatch(HandleSlashGoal), false, false});
     table.push_back({lubancode::cli::SlashCommand::Loop, via_dispatch(HandleSlashLoop), false, false});
-    table.push_back({lubancode::cli::SlashCommand::Memory, via_dispatch(HandleSlashMemory), false, false});
+    // HC-06 已收窄(第二小批):/memory 只吃窄材料。
+    table.push_back({lubancode::cli::SlashCommand::Memory,
+                     SlashCommandHandler{[memory](const lubancode::cli::ParsedSlashCommand& parsed) {
+                         return HandleSlashMemory(memory, parsed);
+                     }},
+                     false, false});
     table.push_back({lubancode::cli::SlashCommand::Record, via_dispatch(HandleSlashRecord), true, false});
     table.push_back({lubancode::cli::SlashCommand::Sessions, via_dispatch(HandleSlashSessions), false, false});
     table.push_back({lubancode::cli::SlashCommand::Archive, via_dispatch(HandleSlashArchive), false, false});
