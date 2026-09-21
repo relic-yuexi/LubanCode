@@ -86,7 +86,8 @@ struct ParsedSlashCommand {
 
 // 纯函数:识别一行输入是不是 slash 命令、是哪一个、参数是什么。
 // 命令词大小写不敏感(/Model 和 /model 视为一样);命令词和参数之间按第一个
-// 空白切开。输入前后空白先剥掉。
+// 空白切开。输入前后空白先剥掉。认得的词只有 SlashCommandDescriptors() 那
+// 一份词汇表(HC-05):表上查无的 / 词一律 Unknown。
 ParsedSlashCommand ParseSlashCommand(const std::string& input);
 
 // /provider 的二级参数也收在 cli 层做纯解析，main.cpp 只接收已拆好的
@@ -293,10 +294,40 @@ ParsedPlanCommand ParsePlanCommand(const std::string& args);
 // "当前端不许删"这条规矩散在 main 的 IO 分支里。
 bool CanRemoveProvider(const std::string& active_provider, const std::string& name);
 
-// 一个命令一条:名字 + 一句话说明。/help 打印用的就是这份,line_editor 的
-// Tab 补全、实时提示行也是从这份转过去的候选——统共这一份定义,不重复写。
-// i18n:说明文字经 tr(slash.desc.*)取值,/language 切换后下一次调用重建,
-// 返回引用在下一次语言切换之前有效。
+// ---------------------------------------------------------------------------
+// 命令词汇表(HC-05):主名、别名、描述键、展示标记只在这一处。解析
+// (ParseSlashCommand)、帮助与 Tab 补全(AllSlashCommands)、Workflow alias
+// 的内建冲突检查(AllSlashReservedWords)全从这张表派生——新增命令只添
+// 一行,不再同步解析、帮助、补全、保留词多份名单。app 层只按枚举绑
+// handler,不重写词汇。
+// ---------------------------------------------------------------------------
+
+// 一行一个命令词。主名行(primary)每枚可执行枚举恰一行,是身份词——分派
+// 对账、轨迹账都用它;别名行指回同一枚举,解析同认。desc_key 为空 = 不进
+// 帮助与补全(隐藏命令或纯别名);带描述键的别名可单独列进帮助(如
+// /effort)。表序即帮助序。
+struct SlashCommandDescriptor {
+    SlashCommand command;   // 稳定内部标识(枚举值不动)
+    const char* word;       // 命令词,小写、不带 '/'
+    const char* desc_key;   // i18n 键(slash.desc.*);nullptr = 不展示
+    bool primary;           // 主名行还是别名行
+};
+
+// 词汇表本体(静态,进程内恒定)。
+const std::vector<SlashCommandDescriptor>& SlashCommandDescriptors();
+
+// 枚举 -> 主名行;Unknown/NotSlash 不是用户词汇,表上没有,返回 nullptr。
+const SlashCommandDescriptor* FindSlashCommandDescriptor(SlashCommand command);
+
+// 全部保留词(带 '/',主名 + 别名,含不进帮助的隐藏词)。Workflow alias 的
+// 内建冲突检查用这份——用户拿这些词起 alias 会被内建命令压住,必须报冲突;
+// 展示名单(AllSlashCommands)少谁,这份不能跟着少。
+std::vector<std::string> AllSlashReservedWords();
+
+// 一个命令一条:名字 + 一句话说明,从词汇表派生(desc_key 非空的行,按表
+// 序)。/help 打印用的就是这份,line_editor 的 Tab 补全、实时提示行也是从
+// 这份转过去的候选。i18n:说明文字经 tr(slash.desc.*)取值,/language 切换
+// 后下一次调用重建,返回引用在下一次语言切换之前有效。
 struct SlashCommandInfo {
     std::string name;
     std::string description;

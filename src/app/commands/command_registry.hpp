@@ -6,8 +6,9 @@
 //
 // 分层规矩:
 //   - SlashCommandSpec 是注册行:command 是 cli::SlashCommand 枚举(与
-//     cli::ParseSlashCommand 同源),name 是对账名(与 cli::AllSlashCommands
-//     的命令名一一对应),handler 是域文件的入口;
+//     cli::ParseSlashCommand 同源),handler 是域文件的入口。命令词汇
+//     (名字/别名/展示标记)不在这层重写——统一看 cli::
+//     SlashCommandDescriptors(),app 只按枚举绑 handler(HC-05);
 //   - needs_console/needs_idle 是权限/补全元数据,供分组展示与后续门用;
 //     现状拒绝语义仍在域 handler(如 loop 的非交互明拒、peer 组在管道下
 //     由 handler 明说没起服务),不在表上另发明新门;
@@ -67,7 +68,6 @@ using SlashHandler = CommandFlow (*)(SlashDispatchContext&, const lubancode::cli
 
 struct SlashCommandSpec {
     lubancode::cli::SlashCommand command;
-    const char* name;       // 对账名(与 cli::AllSlashCommands 同名)
     SlashHandler handler;   // 域文件入口;nullptr = 死案
     bool needs_console;     // 权限元数据:真控制台才有意义(peer 组等)
     bool needs_idle;        // 补全元数据:只在空闲 composer 生效(/plan)

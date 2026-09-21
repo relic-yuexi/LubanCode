@@ -41,70 +41,71 @@ CommandFlow HandleSlashPlan(SlashDispatchContext& ctx, const lubancode::cli::Par
 
 const std::vector<SlashCommandSpec>& SlashCommandTable() {
     // 案序照旧 switch(对账时按这序数):Image 进不来分派(ProcessLine 把
-    // 图片路径截走)、NotSlash 在上一层已分流——两案留名为死案。
+    // 图片路径截走)、NotSlash 在上一层已分流——两案留名为死案。行上只有
+    // 枚举与 handler:命令词汇在 cli::SlashCommandDescriptors(),这里不
+    // 重写名字(HC-05)。
     static const std::vector<SlashCommandSpec> table = {
-        {lubancode::cli::SlashCommand::Image, "image", nullptr, false, false},
-        {lubancode::cli::SlashCommand::Help, "help", HandleSlashHelp, false, false},
-        {lubancode::cli::SlashCommand::Model, "model", HandleSlashModel, false, false},
-        {lubancode::cli::SlashCommand::Provider, "provider", HandleSlashProvider, false, false},
-        {lubancode::cli::SlashCommand::Config, "config", HandleSlashConfig, false, false},
-        {lubancode::cli::SlashCommand::Update, "update", HandleSlashUpdate, false, false},
-        {lubancode::cli::SlashCommand::Init, "init", HandleSlashInit, false, false},
-        {lubancode::cli::SlashCommand::Instructions, "instructions", HandleSlashInstructions, false, false},
-        {lubancode::cli::SlashCommand::Language, "language", HandleSlashLanguage, false, false},
-        {lubancode::cli::SlashCommand::Worktree, "worktree", HandleSlashWorktree, false, false},
-        {lubancode::cli::SlashCommand::Clear, "clear", HandleSlashClear, false, false},
-        {lubancode::cli::SlashCommand::Context, "context", HandleSlashContext, false, false},
+        {lubancode::cli::SlashCommand::Image, nullptr, false, false},
+        {lubancode::cli::SlashCommand::Help, HandleSlashHelp, false, false},
+        {lubancode::cli::SlashCommand::Model, HandleSlashModel, false, false},
+        {lubancode::cli::SlashCommand::Provider, HandleSlashProvider, false, false},
+        {lubancode::cli::SlashCommand::Config, HandleSlashConfig, false, false},
+        {lubancode::cli::SlashCommand::Update, HandleSlashUpdate, false, false},
+        {lubancode::cli::SlashCommand::Init, HandleSlashInit, false, false},
+        {lubancode::cli::SlashCommand::Instructions, HandleSlashInstructions, false, false},
+        {lubancode::cli::SlashCommand::Language, HandleSlashLanguage, false, false},
+        {lubancode::cli::SlashCommand::Worktree, HandleSlashWorktree, false, false},
+        {lubancode::cli::SlashCommand::Clear, HandleSlashClear, false, false},
+        {lubancode::cli::SlashCommand::Context, HandleSlashContext, false, false},
         // ContextWindow 交互面板单:同屏调当前模型窗口与思考强度(本会话)。
-        {lubancode::cli::SlashCommand::ContextWindow, "context-window", HandleSlashContextWindow,
-         false, false},
-        {lubancode::cli::SlashCommand::Usage, "usage", HandleSlashUsage, false, false},
-        {lubancode::cli::SlashCommand::Insights, "insights", HandleSlashInsights, false, false},
-        {lubancode::cli::SlashCommand::Compact, "compact", HandleSlashCompact, false, false},
-        {lubancode::cli::SlashCommand::Think, "think", HandleSlashThink, false, false},
-        {lubancode::cli::SlashCommand::Skills, "skills", HandleSlashSkills, false, false},
-        {lubancode::cli::SlashCommand::Skill, "skill", HandleSlashSkill, false, false},
-        {lubancode::cli::SlashCommand::Mcp, "mcp", HandleSlashMcp, false, false},
-        {lubancode::cli::SlashCommand::Lsp, "lsp", HandleSlashLsp, false, false},
-        {lubancode::cli::SlashCommand::Todos, "todos", HandleSlashTodos, false, false},
-        {lubancode::cli::SlashCommand::Plugins, "plugins", HandleSlashPlugins, false, false},
-        {lubancode::cli::SlashCommand::Plugin, "plugin", HandleSlashPlugin, false, false},
-        {lubancode::cli::SlashCommand::Agents, "agents", HandleSlashAgents, false, false},
-        {lubancode::cli::SlashCommand::Agent, "agent", HandleSlashAgent, false, false},
-        {lubancode::cli::SlashCommand::Tools, "tools", HandleSlashTools, false, false},
-        {lubancode::cli::SlashCommand::Hooks, "hooks", HandleSlashHooks, false, false},
-        {lubancode::cli::SlashCommand::Background, "background", HandleSlashBackground, false, false},
-        {lubancode::cli::SlashCommand::Keymap, "keymap", HandleSlashKeymap, false, false},
-        {lubancode::cli::SlashCommand::Plan, "plan", HandleSlashPlan, false, true},
-        {lubancode::cli::SlashCommand::Package, "package", HandleSlashPackage, false, false},
+        {lubancode::cli::SlashCommand::ContextWindow, HandleSlashContextWindow, false, false},
+        {lubancode::cli::SlashCommand::Usage, HandleSlashUsage, false, false},
+        {lubancode::cli::SlashCommand::Insights, HandleSlashInsights, false, false},
+        {lubancode::cli::SlashCommand::Compact, HandleSlashCompact, false, false},
+        {lubancode::cli::SlashCommand::Think, HandleSlashThink, false, false},
+        {lubancode::cli::SlashCommand::Skills, HandleSlashSkills, false, false},
+        {lubancode::cli::SlashCommand::Skill, HandleSlashSkill, false, false},
+        {lubancode::cli::SlashCommand::Mcp, HandleSlashMcp, false, false},
+        {lubancode::cli::SlashCommand::Lsp, HandleSlashLsp, false, false},
+        {lubancode::cli::SlashCommand::Todos, HandleSlashTodos, false, false},
+        {lubancode::cli::SlashCommand::Plugins, HandleSlashPlugins, false, false},
+        {lubancode::cli::SlashCommand::Plugin, HandleSlashPlugin, false, false},
+        {lubancode::cli::SlashCommand::Agents, HandleSlashAgents, false, false},
+        {lubancode::cli::SlashCommand::Agent, HandleSlashAgent, false, false},
+        {lubancode::cli::SlashCommand::Tools, HandleSlashTools, false, false},
+        {lubancode::cli::SlashCommand::Hooks, HandleSlashHooks, false, false},
+        {lubancode::cli::SlashCommand::Background, HandleSlashBackground, false, false},
+        {lubancode::cli::SlashCommand::Keymap, HandleSlashKeymap, false, false},
+        {lubancode::cli::SlashCommand::Plan, HandleSlashPlan, false, true},
+        {lubancode::cli::SlashCommand::Package, HandleSlashPackage, false, false},
         // 多渠道消息接入单阶段 2:渠道账号面(只读 + 管理动作;普通交互
         // 进程没挂 ChannelManager 时 handler 只给 gateway 引导)。
-        {lubancode::cli::SlashCommand::Channels, "channels", HandleSlashChannels, false, false},
-        {lubancode::cli::SlashCommand::Channel, "channel", HandleSlashChannel, false, false},
-        {lubancode::cli::SlashCommand::Evolve, "evolve", HandleSlashEvolve, false, false},
-        {lubancode::cli::SlashCommand::Trace, "trace", HandleSlashTrace, false, false},
-        {lubancode::cli::SlashCommand::Doctor, "doctor", HandleSlashDoctor, false, false},
-        {lubancode::cli::SlashCommand::Telemetry, "telemetry", HandleSlashTelemetry, false, false},
-        {lubancode::cli::SlashCommand::Goal, "goal", HandleSlashGoal, false, false},
-        {lubancode::cli::SlashCommand::Loop, "loop", HandleSlashLoop, false, false},
-        {lubancode::cli::SlashCommand::Memory, "memory", HandleSlashMemory, false, false},
-        {lubancode::cli::SlashCommand::Record, "record", HandleSlashRecord, true, false},
-        {lubancode::cli::SlashCommand::Sessions, "sessions", HandleSlashSessions, false, false},
-        {lubancode::cli::SlashCommand::Archive, "archive", HandleSlashArchive, false, false},
-        {lubancode::cli::SlashCommand::Delete, "delete", HandleSlashDelete, false, false},
-        {lubancode::cli::SlashCommand::Resume, "resume", HandleSlashResume, false, false},
-        {lubancode::cli::SlashCommand::Export, "export", HandleSlashExport, false, false},
-        {lubancode::cli::SlashCommand::Copy, "copy", HandleSlashCopy, false, false},
-        {lubancode::cli::SlashCommand::Title, "title", HandleSlashTitle, false, false},
-        {lubancode::cli::SlashCommand::Soul, "soul", HandleSlashSoul, false, false},
-        {lubancode::cli::SlashCommand::Prompt, "prompt", HandleSlashPrompt, false, false},
-        {lubancode::cli::SlashCommand::Peers, "peers", HandleSlashPeers, true, false},
-        {lubancode::cli::SlashCommand::Send, "send", HandleSlashSend, true, false},
-        {lubancode::cli::SlashCommand::Peerperm, "peerperm", HandleSlashPeerperm, true, false},
-        {lubancode::cli::SlashCommand::Workflow, "workflow", HandleSlashWorkflow, false, false},
-        {lubancode::cli::SlashCommand::Exit, "exit", HandleSlashExit, false, false},
-        {lubancode::cli::SlashCommand::Unknown, "unknown", HandleSlashUnknown, false, false},
-        {lubancode::cli::SlashCommand::NotSlash, "notslash", nullptr, false, false},
+        {lubancode::cli::SlashCommand::Channels, HandleSlashChannels, false, false},
+        {lubancode::cli::SlashCommand::Channel, HandleSlashChannel, false, false},
+        {lubancode::cli::SlashCommand::Evolve, HandleSlashEvolve, false, false},
+        {lubancode::cli::SlashCommand::Trace, HandleSlashTrace, false, false},
+        {lubancode::cli::SlashCommand::Doctor, HandleSlashDoctor, false, false},
+        {lubancode::cli::SlashCommand::Telemetry, HandleSlashTelemetry, false, false},
+        {lubancode::cli::SlashCommand::Goal, HandleSlashGoal, false, false},
+        {lubancode::cli::SlashCommand::Loop, HandleSlashLoop, false, false},
+        {lubancode::cli::SlashCommand::Memory, HandleSlashMemory, false, false},
+        {lubancode::cli::SlashCommand::Record, HandleSlashRecord, true, false},
+        {lubancode::cli::SlashCommand::Sessions, HandleSlashSessions, false, false},
+        {lubancode::cli::SlashCommand::Archive, HandleSlashArchive, false, false},
+        {lubancode::cli::SlashCommand::Delete, HandleSlashDelete, false, false},
+        {lubancode::cli::SlashCommand::Resume, HandleSlashResume, false, false},
+        {lubancode::cli::SlashCommand::Export, HandleSlashExport, false, false},
+        {lubancode::cli::SlashCommand::Copy, HandleSlashCopy, false, false},
+        {lubancode::cli::SlashCommand::Title, HandleSlashTitle, false, false},
+        {lubancode::cli::SlashCommand::Soul, HandleSlashSoul, false, false},
+        {lubancode::cli::SlashCommand::Prompt, HandleSlashPrompt, false, false},
+        {lubancode::cli::SlashCommand::Peers, HandleSlashPeers, true, false},
+        {lubancode::cli::SlashCommand::Send, HandleSlashSend, true, false},
+        {lubancode::cli::SlashCommand::Peerperm, HandleSlashPeerperm, true, false},
+        {lubancode::cli::SlashCommand::Workflow, HandleSlashWorkflow, false, false},
+        {lubancode::cli::SlashCommand::Exit, HandleSlashExit, false, false},
+        {lubancode::cli::SlashCommand::Unknown, HandleSlashUnknown, false, false},
+        {lubancode::cli::SlashCommand::NotSlash, nullptr, false, false},
     };
     return table;
 }
@@ -171,12 +172,14 @@ CommandFlow ExecuteSessionCommand(SlashDispatchContext& ctx,
     if (ledger == nullptr) {
         return DispatchSessionSlashCommand(ctx, parsed);  // flag 关:零变透传
     }
-    std::string spec_name = "unknown";
-    for (const SlashCommandSpec& spec : SlashCommandTable()) {
-        if (spec.command == parsed.command) {
-            spec_name = spec.name;
-            break;
-        }
+    // 轨迹账的命令名从词汇表主名取(HC-05:app 不再自带一份名字)。Unknown/
+    // NotSlash 不是用户词汇,表上没有,落回这两个审计名。
+    std::string spec_name =
+        parsed.command == lubancode::cli::SlashCommand::NotSlash ? "notslash" : "unknown";
+    if (const lubancode::cli::SlashCommandDescriptor* descriptor =
+            lubancode::cli::FindSlashCommandDescriptor(parsed.command);
+        descriptor != nullptr) {
+        spec_name = descriptor->word;
     }
     // clear/resume 是跨 session 例外(§14.1):requested 落旧 main、terminal
     // 由新 main 的换账事务写(P0-3 的 SessionManager 八步/七步掌管),不走

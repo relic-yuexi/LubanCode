@@ -2,6 +2,8 @@
 
 #include <doctest/doctest.h>
 
+#include <set>
+#include <string>
 #include <vector>
 
 #include "cli/console_input.hpp"
@@ -632,6 +634,100 @@ TEST_CASE("三份名单一致:帮助行、AllSlashCommands、Tab 补全候选同
     CHECK(has_plan);
     CHECK(has_agents);
     CHECK(has_agent);
+}
+
+// ---------------------------------------------------------------------------
+// 词汇表对账(HC-05):主名、别名、隐藏词、展示规则只在
+// SlashCommandDescriptors() 一处。这里把"解析、帮助、补全、保留词全从表
+// 派生"折成可数的账——新增命令只添一行表,四处消费面自动跟上。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SlashCommandDescriptors: 词不重复,每枚枚举至多一个主名") {
+    const auto& descriptors = cli::SlashCommandDescriptors();
+    REQUIRE_FALSE(descriptors.empty());
+    std::set<std::string> words;
+    std::set<int> primaries;
+    for (const auto& descriptor : descriptors) {
+        CHECK_MESSAGE(words.insert(descriptor.word).second, descriptor.word);
+        if (descriptor.primary) {
+            CHECK_MESSAGE(primaries.insert(static_cast<int>(descriptor.command)).second,
+                          descriptor.word);
+        }
+    }
+    // 描述键只在展示行上:desc_key 非空必是可展示词汇(主名或单列别名)。
+    for (const auto& descriptor : descriptors) {
+        if (descriptor.desc_key != nullptr) {
+            CHECK(!cli::tr(descriptor.desc_key).empty());
+        }
+    }
+}
+
+TEST_CASE("SlashCommandDescriptors: 表上每个词都解到自己的枚举(解析读表)") {
+    for (const auto& descriptor : cli::SlashCommandDescriptors()) {
+        const auto parsed = cli::ParseSlashCommand(std::string("/") + descriptor.word);
+        CHECK_MESSAGE(parsed.command == descriptor.command, descriptor.word);
+        CHECK_MESSAGE(parsed.args.empty(), descriptor.word);
+        CHECK_MESSAGE(parsed.alias_word.empty(), descriptor.word);  // 内建词不走 alias 路
+    }
+}
+
+TEST_CASE("AllSlashReservedWords: 保留词覆盖帮助名单与全部隐藏词/别名") {
+    const auto reserved = cli::AllSlashReservedWords();
+    std::set<std::string> reserved_set(reserved.begin(), reserved.end());
+    // 帮助名单是保留词的子集:展示面只会少,不会多。
+    std::set<std::string> help_names;
+    for (const auto& command : cli::AllSlashCommands()) {
+        help_names.insert(command.name);
+        CHECK_MESSAGE(reserved_set.count(command.name) == 1, command.name);
+    }
+    // 别名与隐藏主命令都必须在保留词里——用户拿这些词起 Workflow alias
+    // 会被内建命令压住,冲突检查不能漏。/effort /hooks 帮助面单列,
+    // /quit /lang /bg 帮助面不列,/trace 暂不展示,保留词一律要收。
+    for (const char* word :
+         {"/hooks", "/trace", "/quit", "/lang", "/bg", "/effort"}) {
+        CHECK_MESSAGE(reserved_set.count(word) == 1, word);
+    }
+    // 纯别名不进帮助面。
+    for (const char* alias : {"/quit", "/lang", "/bg"}) {
+        CHECK_MESSAGE(help_names.count(alias) == 0, alias);
+    }
+}
+
+TEST_CASE("AllSlashCommands: /hooks 进列表(HC-05 补全修复),描述走 i18n 词条") {
+    // HC-05 病灶:/hooks 在分派面有处理器,却因词汇表没这行而不进帮助与
+    // Tab 补全。行为提交翻过 desc_key 之后,/help、Tab 候选都能看见它,
+    // 与 /help、--help 同一份名单,不另造。
+    const auto parsed = cli::ParseSlashCommand("/hooks");
+    CHECK(parsed.command == cli::SlashCommand::Hooks);
+    const auto& commands = cli::AllSlashCommands();
+    bool has_hooks = false;
+    for (const auto& c : commands) {
+        if (c.name == "/hooks") {
+            has_hooks = true;
+            CHECK(c.description == cli::tr("slash.desc.hooks"));
+            CHECK(!c.description.empty());
+        }
+    }
+    CHECK(has_hooks);
+}
+
+TEST_CASE("词汇表现状: /trace 解析认词、能执行,帮助面暂缺") {
+    // /trace 与 /hooks 同病(分派面有处理器、帮助面没有),但它的展示修复
+    // 不在 HC-05 单内:desc_key 显式留空是它的展示规则,钉住防悄悄变。
+    CHECK(cli::ParseSlashCommand("/trace").command == cli::SlashCommand::Trace);
+    std::set<std::string> help_names;
+    for (const auto& command : cli::AllSlashCommands()) {
+        help_names.insert(command.name);
+    }
+    CHECK(help_names.count("/trace") == 0);
+    const auto* trace = cli::FindSlashCommandDescriptor(cli::SlashCommand::Trace);
+    REQUIRE(trace != nullptr);
+    CHECK(trace->primary);
+    CHECK(std::string(trace->word) == "trace");
+    CHECK(trace->desc_key == nullptr);  // 显式不展示;要展示须另立行为提交
+    // Unknown/NotSlash 不是用户词汇,表上没有。
+    CHECK(cli::FindSlashCommandDescriptor(cli::SlashCommand::Unknown) == nullptr);
+    CHECK(cli::FindSlashCommandDescriptor(cli::SlashCommand::NotSlash) == nullptr);
 }
 
 TEST_CASE("ParseSlashCommand: /doctor 与子命令参数") {

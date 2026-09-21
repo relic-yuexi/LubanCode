@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -73,155 +74,23 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     parsed.raw_word = word;
     parsed.args = args;
 
+    // 认得的词只有词汇表这一份:主名、别名一视同仁,查表前先小写化(大小写
+    // 不敏感)。表上查无的 / 词仍是 Unknown(语义不变),把剥掉 / 的原词记在
+    // alias_word 里——会话层对 Unknown 先查 WorkflowCatalog,查着了走
+    // /<alias> 直呼,查不着照旧打"XXX 不认得"。内建词永远居首,这条路只兜
+    // "不认得"的尾巴(单子"Slash alias 与冲突规矩")。
+    static const std::map<std::string, SlashCommand> kWordLookup = [] {
+        std::map<std::string, SlashCommand> lookup;
+        for (const SlashCommandDescriptor& descriptor : SlashCommandDescriptors()) {
+            lookup["/" + std::string(descriptor.word)] = descriptor.command;
+        }
+        return lookup;
+    }();
     const std::string lower = ToLower(word);
-    if (lower == "/help") {
-        parsed.command = SlashCommand::Help;
-    } else if (lower == "/model") {
-        parsed.command = SlashCommand::Model;
-    } else if (lower == "/provider") {
-        parsed.command = SlashCommand::Provider;
-    } else if (lower == "/config") {
-        parsed.command = SlashCommand::Config;
-    } else if (lower == "/update") {
-        parsed.command = SlashCommand::Update;
-    } else if (lower == "/init") {
-        parsed.command = SlashCommand::Init;
-    } else if (lower == "/clear") {
-        parsed.command = SlashCommand::Clear;
-    } else if (lower == "/exit" || lower == "/quit") {
-        parsed.command = SlashCommand::Exit;
-    } else if (lower == "/context") {
-        parsed.command = SlashCommand::Context;
-    } else if (lower == "/context-window") {
-        // ContextWindow 交互面板单:裸敲开面板,同屏调当前模型的窗口预算
-        // 与思考强度;与 /context(占用分析/一行式改窗口)并存,不取代它。
-        parsed.command = SlashCommand::ContextWindow;
-    } else if (lower == "/usage") {
-        // Token 账本单 A2:/usage 只认词,二级参数(session/--by/--json)在
-        // ParseUsageCommand(app/commands/usage_commands)拆。
-        parsed.command = SlashCommand::Usage;
-    } else if (lower == "/insights") {
-        // Token 账本单 A5:/insights 只认词,二级参数(--since/--sessions/
-        // --all-workspaces/status/clean)在 ParseInsightsCommand
-        // (app/commands/insights_commands)拆。
-        parsed.command = SlashCommand::Insights;
-    } else if (lower == "/compact") {
-        parsed.command = SlashCommand::Compact;
-    } else if (lower == "/think" || lower == "/effort") {
-        // M10:/effort 是 /think 的别名,同一个命令枚举值——解析层面这俩
-        // 词天生等价,不用另开一个 SlashCommand::Effort 分叉出两套处理逻辑。
-        parsed.command = SlashCommand::Think;
-    } else if (lower == "/skills") {
-        parsed.command = SlashCommand::Skills;
-    } else if (lower == "/skill") {
-        parsed.command = SlashCommand::Skill;
-    } else if (lower == "/mcp") {
-        parsed.command = SlashCommand::Mcp;
-    } else if (lower == "/lsp") {
-        parsed.command = SlashCommand::Lsp;
-    } else if (lower == "/todos") {
-        parsed.command = SlashCommand::Todos;
-    } else if (lower == "/plugins") {
-        parsed.command = SlashCommand::Plugins;
-    } else if (lower == "/plugin") {
-        parsed.command = SlashCommand::Plugin;
-    } else if (lower == "/hooks") {
-        parsed.command = SlashCommand::Hooks;
-    } else if (lower == "/tools") {
-        parsed.command = SlashCommand::Tools;
-    } else if (lower == "/memory") {
-        parsed.command = SlashCommand::Memory;
-    } else if (lower == "/sessions") {
-        parsed.command = SlashCommand::Sessions;
-    } else if (lower == "/resume") {
-        parsed.command = SlashCommand::Resume;
-    } else if (lower == "/archive") {
-        parsed.command = SlashCommand::Archive;
-    } else if (lower == "/delete") {
-        parsed.command = SlashCommand::Delete;
-    } else if (lower == "/export") {
-        parsed.command = SlashCommand::Export;
-    } else if (lower == "/copy") {
-        parsed.command = SlashCommand::Copy;
-    } else if (lower == "/title") {
-        parsed.command = SlashCommand::Title;
-    } else if (lower == "/soul") {
-        parsed.command = SlashCommand::Soul;
-    } else if (lower == "/prompt") {
-        parsed.command = SlashCommand::Prompt;
-    } else if (lower == "/language" || lower == "/lang") {
-        // /lang 是 /language 的省事别名,跟 LUBANCODE_LANG 环境变量对得上口。
-        parsed.command = SlashCommand::Language;
-    } else if (lower == "/image") {
-        parsed.command = SlashCommand::Image;
-    } else if (lower == "/worktree") {
-        parsed.command = SlashCommand::Worktree;
-    } else if (lower == "/background" || lower == "/bg") {
-        // /bg 是省事别名,跟 /background 同义。
-        parsed.command = SlashCommand::Background;
-    } else if (lower == "/record") {
-        parsed.command = SlashCommand::Record;
-    } else if (lower == "/peers") {
-        parsed.command = SlashCommand::Peers;
-    } else if (lower == "/send") {
-        parsed.command = SlashCommand::Send;
-    } else if (lower == "/peerperm") {
-        parsed.command = SlashCommand::Peerperm;
-    } else if (lower == "/doctor") {
-        parsed.command = SlashCommand::Doctor;
-    } else if (lower == "/telemetry") {
-        // 端云协同可观测单 T1:只读状态面(裸敲 = status)。
-        parsed.command = SlashCommand::Telemetry;
-    } else if (lower == "/keymap") {
-        parsed.command = SlashCommand::Keymap;
-    } else if (lower == "/trace") {
-        parsed.command = SlashCommand::Trace;
-    } else if (lower == "/goal") {
-        // 持久目标单:/goal 是正门(objective/status/edit/pause/resume/clear
-        // 的二级解析在 ParseGoalCommand,这里只认词)。
-        parsed.command = SlashCommand::Goal;
-    } else if (lower == "/loop") {
-        // loop 单:/loop 是正门([interval] [prompt] 与
-        // list/status/pause/resume/stop/run 的二级解析在 ParseLoopCommand)。
-        parsed.command = SlashCommand::Loop;
-    } else if (lower == "/plan") {
-        // Plan 模式单:/plan 是正门(裸敲/status/off/review/带正文)。
-        parsed.command = SlashCommand::Plan;
-    } else if (lower == "/package") {
-        // 统一 Package 封装单阶段 1:/package 只读面(list/show/doctor,
-        // 二级解析在 ParsePackageCommand,这里只认词)。
-        parsed.command = SlashCommand::Package;
-    } else if (lower == "/evolve") {
-        // 自进化闭环阶段 1:/evolve 只读面(status/list/show,二级解析在
-        // ParseEvolveCommand,这里只认词)。
-        parsed.command = SlashCommand::Evolve;
-    } else if (lower == "/workflow") {
-        // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
-        // validate/run/...),子命令解析在 workflow 层,这里只认词。
-        parsed.command = SlashCommand::Workflow;
-    } else if (lower == "/agents") {
-        // 自定义 Agent 单阶段 1:/agents 只列 Agent Catalog(只读)。
-        parsed.command = SlashCommand::Agents;
-    } else if (lower == "/agent") {
-        // 自定义 Agent 单阶段 1:/agent 的子命令(doctor/...)在
-        // app/commands/agent_commands 拆,这里只认词。
-        parsed.command = SlashCommand::Agent;
-    } else if (lower == "/instructions") {
-        // AGENTS.md 作用域单 P1:/instructions 是正门(裸敲/path <路径>/
-        // reload 的二级解析在 ParseInstructionsCommand,这里只认词)。
-        parsed.command = SlashCommand::Instructions;
-    } else if (lower == "/channels") {
-        // 多渠道消息接入单阶段 2:/channels 只读列渠道账号(配置 × 运行态)。
-        parsed.command = SlashCommand::Channels;
-    } else if (lower == "/channel") {
-        // 多渠道消息接入单阶段 2:/channel 的子命令(show/doctor/start/
-        // stop/restart)在 app/commands/channel_commands 拆,这里只认词。
-        parsed.command = SlashCommand::Channel;
+    const auto found = kWordLookup.find(lower);
+    if (found != kWordLookup.end()) {
+        parsed.command = found->second;
     } else {
-        // 不认得的 / 词:仍是 Unknown(语义不变),但把剥掉 / 的原词记在
-        // alias_word 里——会话层对 Unknown 先查 WorkflowCatalog,查着了
-        // 走 /<alias> 直呼,查不着照旧打"XXX 不认得"。内建词永远居首,
-        // 这条路只兜"不认得"的尾巴(单子"Slash alias 与冲突规矩")。
         parsed.command = SlashCommand::Unknown;
         parsed.alias_word = word.substr(1);
     }
@@ -938,71 +807,149 @@ ParsedPlanCommand ParsePlanCommand(const std::string& args) {
     return parsed;
 }
 
+// ---------------------------------------------------------------------------
+// 命令词汇表(HC-05)
+// ---------------------------------------------------------------------------
+
+const std::vector<SlashCommandDescriptor>& SlashCommandDescriptors() {
+    // 表序即帮助序:desc_key 非空的行按出现顺序进 AllSlashCommands(帮助、
+    // Tab 补全同出那份)。隐藏行(desc_key 空)与纯别名行夹在相关命令旁,
+    // 不影响展示序。每枚可执行枚举恰一行主名;Unknown/NotSlash 不是用户
+    // 词汇,不进表。
+    static const std::vector<SlashCommandDescriptor> table = {
+        {SlashCommand::Help, "help", "slash.desc.help", true},
+        {SlashCommand::Model, "model", "slash.desc.model", true},
+        {SlashCommand::Provider, "provider", "slash.desc.provider", true},
+        {SlashCommand::Worktree, "worktree", "slash.desc.worktree", true},
+        {SlashCommand::Config, "config", "slash.desc.config", true},
+        {SlashCommand::Update, "update", "slash.desc.update", true},
+        {SlashCommand::Init, "init", "slash.desc.init", true},
+        // AGENTS.md 作用域单 P1:正门(裸敲/path <路径>/reload 的二级解析
+        // 在 ParseInstructionsCommand)。
+        {SlashCommand::Instructions, "instructions", "slash.desc.instructions", true},
+        {SlashCommand::Language, "language", "slash.desc.language", true},
+        // /lang 是 /language 的省事别名,跟 LUBANCODE_LANG 环境变量对得上口。
+        {SlashCommand::Language, "lang", nullptr, false},
+        {SlashCommand::Image, "image", "slash.desc.image", true},
+        {SlashCommand::Clear, "clear", "slash.desc.clear", true},
+        {SlashCommand::Exit, "exit", "slash.desc.exit", true},
+        // /quit 是 /exit 的别名,帮助里不单列(slash.desc.exit 已说明)。
+        {SlashCommand::Exit, "quit", nullptr, false},
+        {SlashCommand::Context, "context", "slash.desc.context", true},
+        // ContextWindow 交互面板单:裸敲开面板,同屏调当前模型的窗口预算
+        // 与思考强度;与 /context(占用分析/一行式改窗口)并存,不取代它。
+        {SlashCommand::ContextWindow, "context-window", "slash.desc.context_window", true},
+        // /usage 只认词,二级参数(session/--by/--json)在 ParseUsageCommand
+        // (app/commands/usage_commands)拆。
+        {SlashCommand::Usage, "usage", "slash.desc.usage", true},
+        // /insights 只认词,二级参数(--since/--sessions/--all-workspaces/
+        // status/clean)在 ParseInsightsCommand(app/commands/insights_commands)拆。
+        {SlashCommand::Insights, "insights", "slash.desc.insights", true},
+        {SlashCommand::Compact, "compact", "slash.desc.compact", true},
+        {SlashCommand::Think, "think", "slash.desc.think", true},
+        // M10:/effort 是 /think 的别名,同一个命令枚举值——解析层面这俩词
+        // 天生等价;帮助面单列一条(有自己的描述键)。
+        {SlashCommand::Think, "effort", "slash.desc.effort", false},
+        {SlashCommand::Skills, "skills", "slash.desc.skills", true},
+        {SlashCommand::Skill, "skill", "slash.desc.skill", true},
+        {SlashCommand::Mcp, "mcp", "slash.desc.mcp", true},
+        {SlashCommand::Lsp, "lsp", "slash.desc.lsp", true},
+        {SlashCommand::Todos, "todos", "slash.desc.todos", true},
+        {SlashCommand::Plugins, "plugins", "slash.desc.plugins", true},
+        {SlashCommand::Plugin, "plugin", "slash.desc.plugin", true},
+        // 自定义 Agent 单阶段 1:/agents 只列 Agent Catalog(只读);
+        // /agent 的子命令(doctor/...)在 app/commands/agent_commands 拆。
+        {SlashCommand::Agents, "agents", "slash.desc.agents", true},
+        {SlashCommand::Agent, "agent", "slash.desc.agent", true},
+        {SlashCommand::Tools, "tools", "slash.desc.tools", true},
+        // /hooks:hooks 来源/命令/信任/禁用/最近结果与运行记录。分派面早有
+        // 处理器,展示面曾整表漏收(HC-05 病灶)——本行翻进帮助与补全。
+        {SlashCommand::Hooks, "hooks", "slash.desc.hooks", true},
+        {SlashCommand::Memory, "memory", "slash.desc.memory", true},
+        {SlashCommand::Sessions, "sessions", "slash.desc.sessions", true},
+        {SlashCommand::Resume, "resume", "slash.desc.resume", true},
+        {SlashCommand::Archive, "archive", "slash.desc.archive", true},
+        {SlashCommand::Delete, "delete", "slash.desc.delete", true},
+        {SlashCommand::Export, "export", "slash.desc.export", true},
+        {SlashCommand::Copy, "copy", "slash.desc.copy", true},
+        {SlashCommand::Title, "title", "slash.desc.title", true},
+        {SlashCommand::Soul, "soul", "slash.desc.soul", true},
+        {SlashCommand::Prompt, "prompt", "slash.desc.prompt", true},
+        {SlashCommand::Background, "background", "slash.desc.background", true},
+        // /bg 是省事别名,跟 /background 同义。
+        {SlashCommand::Background, "bg", nullptr, false},
+        {SlashCommand::Record, "record", "slash.desc.record", true},
+        {SlashCommand::Peers, "peers", "slash.desc.peers", true},
+        {SlashCommand::Send, "send", "slash.desc.send", true},
+        {SlashCommand::Peerperm, "peerperm", "slash.desc.peerperm", true},
+        {SlashCommand::Doctor, "doctor", "slash.desc.doctor", true},
+        {SlashCommand::Keymap, "keymap", "slash.desc.keymap", true},
+        // /trace:工具逐枚追踪账(逐枚追踪单)。分派面有处理器,展示面暂缺
+        // (与 /hooks 同类的帮助面旧缺口;它的展示修复不在本单)。
+        {SlashCommand::Trace, "trace", nullptr, true},
+        // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
+        // validate/run/...),子命令解析在 workflow 层。
+        {SlashCommand::Workflow, "workflow", "slash.desc.workflow", true},
+        // 持久目标单:objective/status/edit/pause/resume/clear 的二级解析
+        // 在 ParseGoalCommand。
+        {SlashCommand::Goal, "goal", "slash.desc.goal", true},
+        // loop 单:[interval] [prompt] 与 list/status/pause/resume/stop/run
+        // 的二级解析在 ParseLoopCommand。
+        {SlashCommand::Loop, "loop", "slash.desc.loop", true},
+        // Plan 模式单:裸敲/status/off/review/带正文。
+        {SlashCommand::Plan, "plan", "slash.desc.plan", true},
+        // 统一 Package 封装单阶段 1:只读面(list/show/doctor,二级解析在
+        // ParsePackageCommand)。
+        {SlashCommand::Package, "package", "slash.desc.package", true},
+        // 自进化闭环阶段 1:只读面(status/list/show,二级解析在
+        // ParseEvolveCommand)。
+        {SlashCommand::Evolve, "evolve", "slash.desc.evolve", true},
+        // 多渠道消息接入单阶段 2:/channels 只读列渠道账号(配置 × 运行态);
+        // /channel 的子命令(show/doctor/start/stop/restart)在
+        // app/commands/channel_commands 拆。
+        {SlashCommand::Channels, "channels", "slash.desc.channels", true},
+        {SlashCommand::Channel, "channel", "slash.desc.channel", true},
+        // 端云协同可观测单 T1:只读状态面(裸敲 = status)。
+        {SlashCommand::Telemetry, "telemetry", "slash.desc.telemetry", true},
+    };
+    return table;
+}
+
+const SlashCommandDescriptor* FindSlashCommandDescriptor(SlashCommand command) {
+    for (const SlashCommandDescriptor& descriptor : SlashCommandDescriptors()) {
+        if (descriptor.command == command && descriptor.primary) {
+            return &descriptor;
+        }
+    }
+    return nullptr;  // Unknown/NotSlash 不在词汇表上
+}
+
+std::vector<std::string> AllSlashReservedWords() {
+    std::vector<std::string> words;
+    words.reserve(SlashCommandDescriptors().size());
+    for (const SlashCommandDescriptor& descriptor : SlashCommandDescriptors()) {
+        words.push_back("/" + std::string(descriptor.word));
+    }
+    return words;
+}
+
 const std::vector<SlashCommandInfo>& AllSlashCommands() {
-    // i18n:说明文字按当前语言现查(tr),语言切换后惰性重建——静态表 +
-    // 记住"上次是按哪种语言建的",不一致就重来一遍。交互循环是单线程消费
+    // 从词汇表现折:desc_key 非空的行才进帮助/补全,表序即展示序。i18n:
+    // 说明文字按当前语言现查(tr),语言切换后惰性重建——静态缓存 + 记住
+    // "上次是按哪种语言建的",不一致就重来一遍。交互循环是单线程消费
     // (Tab 补全、/help),不用加锁。
     static std::vector<SlashCommandInfo> commands;
     static std::string built_for;
     if (commands.empty() || built_for != CurrentLanguage()) {
         built_for = CurrentLanguage();
-        commands = {
-            {"/help", tr("slash.desc.help")},
-            {"/model", tr("slash.desc.model")},
-            {"/provider", tr("slash.desc.provider")},
-            {"/worktree", tr("slash.desc.worktree")},
-            {"/config", tr("slash.desc.config")},
-            {"/update", tr("slash.desc.update")},
-            {"/init", tr("slash.desc.init")},
-            {"/instructions", tr("slash.desc.instructions")},
-            {"/language", tr("slash.desc.language")},
-            {"/image", tr("slash.desc.image")},
-            {"/clear", tr("slash.desc.clear")},
-            {"/exit", tr("slash.desc.exit")},
-            {"/context", tr("slash.desc.context")},
-            {"/context-window", tr("slash.desc.context_window")},
-            {"/usage", tr("slash.desc.usage")},
-            {"/insights", tr("slash.desc.insights")},
-            {"/compact", tr("slash.desc.compact")},
-            {"/think", tr("slash.desc.think")},
-            {"/effort", tr("slash.desc.effort")},
-            {"/skills", tr("slash.desc.skills")},
-            {"/skill", tr("slash.desc.skill")},
-            {"/mcp", tr("slash.desc.mcp")},
-            {"/lsp", tr("slash.desc.lsp")},
-            {"/todos", tr("slash.desc.todos")},
-            {"/plugins", tr("slash.desc.plugins")},
-            {"/plugin", tr("slash.desc.plugin")},
-            {"/agents", tr("slash.desc.agents")},
-            {"/agent", tr("slash.desc.agent")},
-            {"/tools", tr("slash.desc.tools")},
-            {"/memory", tr("slash.desc.memory")},
-            {"/sessions", tr("slash.desc.sessions")},
-            {"/resume", tr("slash.desc.resume")},
-            {"/archive", tr("slash.desc.archive")},
-            {"/delete", tr("slash.desc.delete")},
-            {"/export", tr("slash.desc.export")},
-            {"/copy", tr("slash.desc.copy")},
-            {"/title", tr("slash.desc.title")},
-            {"/soul", tr("slash.desc.soul")},
-            {"/prompt", tr("slash.desc.prompt")},
-            {"/background", tr("slash.desc.background")},
-            {"/record", tr("slash.desc.record")},
-            {"/peers", tr("slash.desc.peers")},
-            {"/send", tr("slash.desc.send")},
-            {"/peerperm", tr("slash.desc.peerperm")},
-            {"/doctor", tr("slash.desc.doctor")},
-            {"/keymap", tr("slash.desc.keymap")},
-            {"/workflow", tr("slash.desc.workflow")},
-            {"/goal", tr("slash.desc.goal")},
-            {"/loop", tr("slash.desc.loop")},
-            {"/plan", tr("slash.desc.plan")},
-            {"/package", tr("slash.desc.package")},
-            {"/evolve", tr("slash.desc.evolve")},
-            {"/channels", tr("slash.desc.channels")},
-            {"/channel", tr("slash.desc.channel")},
-            {"/telemetry", tr("slash.desc.telemetry")},
-        };
+        commands.clear();
+        commands.reserve(SlashCommandDescriptors().size());
+        for (const SlashCommandDescriptor& descriptor : SlashCommandDescriptors()) {
+            if (descriptor.desc_key == nullptr) {
+                continue;
+            }
+            commands.push_back({"/" + std::string(descriptor.word), tr(descriptor.desc_key)});
+        }
     }
     return commands;
 }
