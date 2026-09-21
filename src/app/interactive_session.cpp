@@ -813,7 +813,8 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
 CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
     // P0-2:统一过 TrajectoryCommandExecutor(flag 开的会话记 command
     // lifecycle;flag 关零变透传)。
-    const CommandFlow flow = lubancode::app::ExecuteSessionCommand(dispatch_ctx_, parsed);
+    const CommandFlow flow =
+        lubancode::app::ExecuteSessionCommand(slash_command_table_, dispatch_ctx_.trajectory, parsed);
     // 会话边界命令(按代理状态投影单 P1/P3):clear/resume 换代——旧
     // session_generation 的视图账、每页 UI 状态整册作废,任务号重用也
     // 串不到旧页。命令本身成功与否都换(边界过了就是新会话)。

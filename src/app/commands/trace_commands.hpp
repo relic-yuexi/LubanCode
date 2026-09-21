@@ -32,7 +32,8 @@ struct TraceCommandContext {
 void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args);
 
 // 命令分派注册制(会话终章):/trace 的分派位(case 体原样搬自大 switch)。
-struct SlashDispatchContext;
-CommandFlow HandleSlashTrace(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// HC-06(材料收窄):分派位只吃本域窄材料——Trace 域编译不再需要
+// SlashDispatchContext,Agent/ToolRuntime/LSP/Memory 的完整定义一概不进。
+CommandFlow HandleSlashTrace(const TraceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

@@ -4,7 +4,6 @@
 // 行为一字不差——注释一并随行。
 
 #include "app/commands/trace_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 
 #include <fstream>
 #include <utility>
@@ -175,12 +174,9 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
 }
 
 // 命令分派注册制(会话终章):/trace 的分派位——四档诊断的命令与排版全在
-// 本文件,分派位只递 hub 与存档。
-CommandFlow HandleSlashTrace(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
-    lubancode::app::TraceCommandContext trace_ctx;
-    trace_ctx.trace_hub = dispatch.trace_hub;
-    trace_ctx.theme = dispatch.theme;
-    HandleTraceCommand(trace_ctx, parsed.args);
+// 本文件,分派位只递 hub 与主题(HC-06:窄材料由绑定单元在装配期折好)。
+CommandFlow HandleSlashTrace(const TraceCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleTraceCommand(ctx, parsed.args);
     return CommandFlow::Continue;
 }
 

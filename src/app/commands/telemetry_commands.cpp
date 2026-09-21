@@ -19,8 +19,10 @@
 #include <vector>
 
 #include "cli/terminal_port.hpp"
+#include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "telemetry/exporter.hpp"
+#include "telemetry/service.hpp"  // TelemetryService 完整定义(HC-06:不再经注册表头传递)
 #include "tools/path_utils.hpp"
 
 namespace lubancode::app {
@@ -50,10 +52,9 @@ std::vector<std::string> SplitWords(const std::string& args) {
 // 全局配置文件路径:优先 ConfigResult 记的现行路径,没有(还没建过配置)
 // 就落到 <主目录>/.lubancode/config.json(SetTelemetryFeatureInConfigFile
 // 支持从空文件起写)。
-std::optional<std::filesystem::path> GlobalConfigPath(SlashDispatchContext& ctx) {
-    if (ctx.config_result != nullptr &&
-        ctx.config_result->global_config_file_path.has_value()) {
-        return lubancode::tools::Utf8ToPath(*ctx.config_result->global_config_file_path);
+std::optional<std::filesystem::path> GlobalConfigPath(const TelemetryCommandContext& ctx) {
+    if (ctx.global_config_file_path != nullptr && ctx.global_config_file_path->has_value()) {
+        return lubancode::tools::Utf8ToPath(**ctx.global_config_file_path);
     }
     const auto home = lubancode::config::HomeLubancodeDir();
     if (!home.has_value()) {
@@ -62,7 +63,7 @@ std::optional<std::filesystem::path> GlobalConfigPath(SlashDispatchContext& ctx)
     return lubancode::tools::Utf8ToPath(*home) / "config.json";
 }
 
-void PrintEnableChoices(SlashDispatchContext& ctx) {
+void PrintEnableChoices(const TelemetryCommandContext& ctx) {
     TermOut() << ctx.theme->stats
               << "enable 只对当前进程还是写配置,须你挑一个(§24.2 不暗改文件):\n"
               << "  /telemetry enable session  当前进程内开遥测,不落盘,下场会话回到真值\n"
@@ -70,7 +71,7 @@ void PrintEnableChoices(SlashDispatchContext& ctx) {
               << ctx.theme->reset;
 }
 
-void PrintDisableChoices(SlashDispatchContext& ctx) {
+void PrintDisableChoices(const TelemetryCommandContext& ctx) {
     TermOut() << ctx.theme->stats
               << "disable 停在哪一档,须你挑一个:\n"
               << "  /telemetry disable session  当前进程停采停发,seal 并保留未 ACK 的 spool(§26.4)\n"
@@ -80,7 +81,9 @@ void PrintDisableChoices(SlashDispatchContext& ctx) {
 
 }  // namespace
 
-CommandFlow HandleSlashTelemetry(SlashDispatchContext& ctx,
+// HC-06(材料收窄):分派位只吃本域窄材料——绑定单元在装配期折好递进来,
+// handler 编译不再需要会话大上下文。
+CommandFlow HandleSlashTelemetry(const TelemetryCommandContext& ctx,
                                  const lubancode::cli::ParsedSlashCommand& parsed) {
     const std::vector<std::string> words = SplitWords(parsed.args);
     const std::string sub = words.empty() ? std::string("status") : words[0];
