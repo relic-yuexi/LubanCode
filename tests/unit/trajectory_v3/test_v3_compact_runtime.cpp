@@ -1997,6 +1997,7 @@ TEST_CASE("AR-10 门禁吃评估口的数字:边界值一分不差,快照是真�
         CHECK(metric["budgetGate"].value("estimatedInputTokens", std::uint64_t{0}) == 91808);
         CHECK(metric["budgetGate"].value("outputReserveTokens", std::uint64_t{0}) == 8192);
         CHECK(metric["budgetGate"].value("windowTokens", std::uint64_t{0}) == 100000);
+        CHECK(VerifyV3File(harness.jsonl).ok);
     }
     {
         Harness harness("ar10-boundary-over");
@@ -2028,8 +2029,8 @@ TEST_CASE("AR-10 门禁吃评估口的数字:边界值一分不差,快照是真�
             FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
         REQUIRE(check != nullptr);
         CHECK(!check->value("passed", false));
+        CHECK(VerifyV3File(harness.jsonl).ok);
     }
-    CHECK(VerifyV3File(harness.jsonl).ok);
 }
 
 TEST_CASE("AR-10 快照合同:ASCII/CJK/图片/工具结果全用真实输入快照") {
@@ -2223,6 +2224,7 @@ TEST_CASE("AR-10 最终快照的预留压过 profile:FD-02 接缝") {
         const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
         REQUIRE(metric.contains("budgetGate"));
         CHECK(metric["budgetGate"].value("outputReserveTokens", std::uint64_t{0}) == 4000);
+        CHECK(VerifyV3File(harness.jsonl).ok);
     }
     // 镜像:口带窄输入但真预留大(95000 + 6000 > 100000)照样拦。
     {
@@ -2254,8 +2256,8 @@ TEST_CASE("AR-10 最终快照的预留压过 profile:FD-02 接缝") {
             FindValidationCheck(ReadJsonLines(harness.jsonl), "post_compact_budget");
         REQUIRE(check != nullptr);
         CHECK(!check->value("passed", false));
+        CHECK(VerifyV3File(harness.jsonl).ok);
     }
-    CHECK(VerifyV3File(harness.jsonl).ok);
 }
 
 TEST_CASE("AR-10 未注口:旧路一字不变") {
@@ -2286,6 +2288,7 @@ TEST_CASE("AR-10 未注口:旧路一字不变") {
         const std::string detail = check->value("detail", std::string());
         CHECK(detail.find("压缩后上下文") != std::string::npos);
         CHECK(detail.find("主请求评估口") == std::string::npos);
+        CHECK(VerifyV3File(harness.jsonl).ok);
     }
     {
         Harness harness("ar10-legacy-pass");
@@ -2309,6 +2312,6 @@ TEST_CASE("AR-10 未注口:旧路一字不变") {
         const nlohmann::json& metric = (*applied.front())["payload"]["tokenMetric"];
         CHECK_FALSE(metric.contains("budgetGate"));
         CHECK(metric.value("estimator", std::string()) == "utf8_bytes_div4");
+        CHECK(VerifyV3File(harness.jsonl).ok);
     }
-    CHECK(VerifyV3File(harness.jsonl).ok);
 }
