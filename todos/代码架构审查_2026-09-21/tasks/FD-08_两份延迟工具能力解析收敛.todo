@@ -1,6 +1,6 @@
 # FD-08 两份延迟工具能力解析收敛
 
-- 状态：已实现，PR 待建、CI 待跑（勾账证据随后补）。
+- 状态：已实现，PR #186 CI 全绿待合并（macos-clang + changes/lane/install-scripts 双平台腿绿，rollup 0 failure，run 35606448356）。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：A/B；严重度：中；重构批次：2。
@@ -29,11 +29,12 @@
 
 ## 验收门
 
-- [ ] mode=3、tool_reference="yes"、server_tool_search=3/null 均不抛出目录入口。
-- [ ] providers返回expected错误；models只跳坏条、保留其余条与warning。
-- [ ] 新增合法字段只需改共享能力解析一次。
+- [x] mode=3、tool_reference="yes"、server_tool_search=3/null 均不抛出目录入口。（test_model_catalog.cpp 对账用例错形矩阵 + test_provider_catalog.cpp 严侧矩阵：两路 CHECK 直跑不抛，providers 一律 expected 拒收、models 一律跳坏条。此前这些输入在两侧或一侧抛 nlohmann type_error 冲出目录入口。）
+- [x] providers返回expected错误；models只跳坏条、保留其余条与warning。（错形跳条矩阵：坏条前后好条照收、警告恰一条；严侧矩阵：整份 expected 拒收。既有 P3 两侧用例原样保留全绿。）
+- [x] 新增合法字段只需改共享能力解析一次。（两处手抄删净，全仓 deferred_tools JSON 解析仅剩 ParseDeferredToolsCapability 一处；未知键宽严经 DeferredToolsUnknownKeys 显式传入，失败范围政策留两侧入口。）
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
+  - 本单证据：PR #186，head 4df78008，run 35606448356（pull_request 事件；同头 push 影子 run 35606410994 被并发组顶掉属常态）——changes/lane/install-scripts(ubuntu,windows)/macos-clang 全 success，linux 系腿按设计 skipped，run conclusion success，rollup 0 failure/0 pending（余 4 只 CANCELLED 皆影子 run 残影）。本单纯 config 改动，未触平台敏感面过滤器，无 windows-msvc 腿，不适用"平台码分支须 windows 腿绿"门槛。
 
 ## 合并取舍与估量
 
