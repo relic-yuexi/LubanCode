@@ -1447,6 +1447,9 @@ add_library(lubancode_app STATIC
   src/app/commands/insights_commands.cpp
   # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
   src/app/commands/command_registry.cpp
+  # HC-06 材料收窄:命令绑定单元——集中构造捕获各域窄材料的执行器表
+  #(Trace/Hook/Telemetry 已迁,其余域经 SlashDispatchContext 过渡)。
+  src/app/commands/session_command_bindings.cpp
   # 多渠道消息接入单阶段 2:/channels 与 /channel(show/doctor/start/
   # stop/restart)的域 handler;格式化走纯函数,单测直接钉。
   src/app/commands/channel_commands.cpp

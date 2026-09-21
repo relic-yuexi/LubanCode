@@ -26,8 +26,14 @@ namespace lubancode::app {
 void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatcher* dispatcher,
                          const lubancode::cli::Theme& theme);
 
+// HC-06(材料收窄):/hooks 的窄材料——分派位不再摸 SlashDispatchContext。
+// dispatcher 不快照进材料:与旧路一致,执行时现取 HookRuntime()(全局
+// 单例,重复 Setup 换档也不悬垂)。
+struct HookCommandContext {
+    const lubancode::cli::Theme* theme = nullptr;
+};
+
 // 命令分派注册制(会话终章):/hooks 的分派位(case 体原样搬自大 switch)。
-struct SlashDispatchContext;
-CommandFlow HandleSlashHooks(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashHooks(const HookCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

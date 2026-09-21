@@ -46,6 +46,7 @@
 #include "api/models.hpp"
 #include "app/backend_stack.hpp"
 #include "app/commands/command_registry.hpp"  // 命令注册制:47 案分派的注册表与路由
+#include "app/commands/session_command_bindings.hpp"  // HC-06:命令绑定单元(捕获材料的执行器表)
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章):控制器只收装好的件
 #include "app/tool_call_scope.hpp"  // ToolCallScopeTable:审批类别的逐调用账(P1 拆槽)
 // 子系统接线器(会话终章):goal/loop/plan/peer/录制各一只(状态+装配+
@@ -1770,13 +1771,11 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.worktree_session = &worktree_session;
     ctx.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
     ctx.session_runtime = &session_runtime_;
-    ctx.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
     // P0-2 轨迹:命令生命周期记账的账本(flag 开才有)。
     ctx.trajectory = session_runtime_.trajectory();
-    // T1 遥测:/telemetry 与 /doctor telemetry 的本地状态面(可空 = 未开)。
+    // T1 遥测:doctor 遥测健康检查的状态面(可空 = 未开)。/telemetry 已迁
+    // 窄材料(HC-06),经底下 SessionCommandMaterials 递。
     ctx.telemetry_service = telemetry_service_.get();
-    // T2:/telemetry enable session 的执行体(当前进程内装,§24.2)。
-    ctx.enable_telemetry_session = [this]() { return EnableTelemetryForSession(); };
     ctx.session_events = &session_events_;
     ctx.session_title = &session_title;
     ctx.last_compact_line = &last_compact_line;
@@ -1814,6 +1813,21 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.reset_plan_review = [this]() { plan_wiring_.DiscardReview(); };
     ctx.build_workflow_tool_options = [this]() { return BuildWorkflowToolOptions(); };
     ctx.build_workflow_agent_callbacks = [this]() { return BuildWorkflowAgentCallbacks(); };
+    // HC-06(材料收窄):命令表在绑定期折好——已收窄域(Trace/Hook/
+    // Telemetry)捕获窄材料,过渡域仍指 ctx。表声明在 dispatch_ctx_ 之后
+    // = 析构先于它,闭包里的借用不悬垂。
+    lubancode::app::SessionCommandMaterials materials;
+    materials.dispatch = &ctx;
+    materials.trace.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
+    materials.trace.theme = &theme;
+    materials.hook.theme = &theme;
+    materials.telemetry.telemetry_service = telemetry_service_.get();
+    materials.telemetry.enable_telemetry_session = [this]() { return EnableTelemetryForSession(); };
+    materials.telemetry.global_config_file_path = config_result.global_config_file_path.has_value()
+                                                      ? &config_result.global_config_file_path
+                                                      : nullptr;
+    materials.telemetry.theme = &theme;
+    slash_command_table_ = lubancode::app::BuildSessionSlashCommandTable(materials);
 }
 
 SessionCommandState TerminalSessionController::MakeSessionCommandState() {

@@ -13,7 +13,9 @@
 //     现状拒绝语义仍在域 handler(如 loop 的非交互明拒、peer 组在管道下
 //     由 handler 明说没起服务),不在表上另发明新门;
 //   - SlashDispatchContext 全是借用(指针/引用/回调),会话控制器构造时
-//     一次配齐,handler 不拥有会话资源。
+//     一次配齐,handler 不拥有会话资源。HC-06 起逐域收窄:各域 handler 改
+//     吃自己的窄材料(Trace/Hook/Telemetry 已迁,绑定单元在装配期折好),
+//     本结构降级为"尚未收窄域的过渡材料袋",后续批次迁完即删。
 #pragma once
 
 #include <filesystem>
@@ -49,11 +51,10 @@
 #include "memory/project_memory.hpp"  // ProjectMemory(/memory 的会话件)
 #include "package/mounting.hpp"       // PackageMount:会话钉快照(阶段 3 挂载)
 #include "peers/peer_session.hpp"
-#include "telemetry/service.hpp"  // TelemetryService(/telemetry status 的状态面)
+#include "telemetry/service.hpp"  // TelemetryService(doctor 遥测健康检查的状态面)
 #include "runtime/event_sinks.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0
-#include "runtime/tool_trace_hub.hpp"
 #include "workflow/host_executors.hpp"
 
 namespace lubancode::app {
@@ -62,31 +63,40 @@ namespace lubancode::app {
 // MSVC C4099,全仓前置声明与定义统一成 struct)。
 struct SlashDispatchContext;
 
+// HC-06(把Slash命令材料收窄到各自领域):执行器只接命令参数——各域材料
+// 在绑定期由闭包捕获(session_command_bindings 的绑定单元构造),handler
+// 不再统一摸整束 SlashDispatchContext。已收窄域吃自己的窄 context;尚未
+// 收窄的域由绑定单元包一层过渡,后续批次逐域迁走。
+using SlashCommandHandler =
+    std::function<CommandFlow(const lubancode::cli::ParsedSlashCommand&)>;
+
 // 一案一行。handler 为空 = 死案(Image 进不来分派、NotSlash 在上一层已
 // 分流),表上留名只为 47 案对账齐整。
-using SlashHandler = CommandFlow (*)(SlashDispatchContext&, const lubancode::cli::ParsedSlashCommand&);
-
 struct SlashCommandSpec {
     lubancode::cli::SlashCommand command;
-    SlashHandler handler;   // 域文件入口;nullptr = 死案
-    bool needs_console;     // 权限元数据:真控制台才有意义(peer 组等)
-    bool needs_idle;        // 补全元数据:只在空闲 composer 生效(/plan)
+    SlashCommandHandler handler;  // 域执行器;空 = 死案
+    bool needs_console;           // 权限元数据:真控制台才有意义(peer 组等)
+    bool needs_idle;              // 补全元数据:只在空闲 composer 生效(/plan)
 };
 
-// 注册表本体(命令注册制:案子按 switch 旧序登册,枚举可对)。
+// 注册表本体(命令注册制:案子按 switch 旧序登册,枚举可对)。HC-06:表
+// 由绑定单元构造,这只"空材料版"作为对账钉子(案序/枚举/死案口径与真表
+// 同源同构,测试与词汇面对账用)。
 const std::vector<SlashCommandSpec>& SlashCommandTable();
 
 // 会话控制器的路由入口:按枚举查表调 handler;查无(不可达)按 Continue
-// 兜底,与旧 switch 的完备性兜底同语义。
-CommandFlow DispatchSessionSlashCommand(SlashDispatchContext& ctx,
+// 兜底,与旧 switch 的完备性兜底同语义。HC-06:路由只吃表——材料已在
+// 绑定期闭包捕获,路由面不再摸 SlashDispatchContext。
+CommandFlow DispatchSessionSlashCommand(const std::vector<SlashCommandSpec>& table,
                                         const lubancode::cli::ParsedSlashCommand& parsed);
 
 // P0-2 TrajectoryCommandExecutor(§14.1/§15.7):terminal 与 app-server
 // 命令入口的统一包装——flag 开的会话先 durable 落 control.command.
 // requested(actor=user),handler 跑完落 completed。flag 关直接透传,
 // 行为零变。effect class 按命令名粗分表(动作级细分随 P0-4 注册表
-// 元数据落)。
-CommandFlow ExecuteSessionCommand(SlashDispatchContext& ctx,
+// 元数据落)。轨迹账本单独递参(HC-06:执行器包装不是域材料)。
+CommandFlow ExecuteSessionCommand(const std::vector<SlashCommandSpec>& table,
+                                  lubancode::runtime::TrajectorySessionLedger* trajectory,
                                   const lubancode::cli::ParsedSlashCommand& parsed);
 
 // 会话控制器递给各域 handler 的整束材料。全借用:会话(构造它的
@@ -172,17 +182,13 @@ struct SlashDispatchContext {
     // ---- 会话运行时 ----
     lubancode::agent::Agent* main_agent = nullptr;
     lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // 模式档/thread id
-    lubancode::runtime::ToolTraceHub* trace_hub = nullptr;          // 可空
-    // P0-2 轨迹:flag 开的会话递账本,TrajectoryCommandExecutor 包住分派
-    // 入口记 command lifecycle。空 = 旧路零变。
+    // P0-2 轨迹:flag 开的会话递账本,doctor 的旁路桥也吃它。空 = 旧路零变
+    //(HC-06:/trace 已迁窄材料;命令执行器包装单独递参,不经这字段)。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
-    // 端云协同可观测单 T1:本地遥测服务(/telemetry status 的状态面)。
-    // 空 = 遥测未开,命令面打"未开启",不发任何请求。
+    // 端云协同可观测单 T1:本地遥测服务。doctor 的遥测健康检查共用这份
+    //(HC-06:/telemetry 已迁窄材料 TelemetryCommandContext)。空 = 遥测
+    // 未开,doctor 面打"未开启",不发任何请求。
     lubancode::telemetry::TelemetryService* telemetry_service = nullptr;
-    // /telemetry enable session(端云协同可观测单 T2,§24.2):当前进程内装
-    // 遥测服务的执行体(控制器持有装配材料)。空 = 没接(非交互装配),
-    // 命令面明说接不上,不装样子。回一组要打印的行。
-    std::function<std::vector<std::string>()> enable_telemetry_session;
     lubancode::runtime::FanoutEventSink* session_events = nullptr;
     std::string* session_title = nullptr;
     std::string* last_compact_line = nullptr;  // /context 的最近一次 compact 台账

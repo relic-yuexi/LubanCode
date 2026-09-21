@@ -1,5 +1,4 @@
 #include "app/commands/hook_commands.hpp"
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -210,8 +209,9 @@ void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatche
     (void)theme;
 }
 
-// 命令分派注册制(会话终章):/hooks 的分派位。
-CommandFlow HandleSlashHooks(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+// 命令分派注册制(会话终章):/hooks 的分派位(HC-06:窄材料,dispatcher
+// 执行时现取,与旧路同源)。
+CommandFlow HandleSlashHooks(const HookCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     HandleHooksCommand(parsed.args, lubancode::app::HookRuntime(), *ctx.theme);
     return CommandFlow::Continue;
 }

@@ -167,17 +167,19 @@ TEST_CASE("命令注册表:活案名字与帮助面对账") {
 }
 
 TEST_CASE("命令注册表:死案与查无的兜底同旧 switch") {
-    lubancode::app::SlashDispatchContext ctx{};  // 全空材料:死案不该摸它
-    // Image:旧 case 是 break(Continue);表上 handler 为空,路由兜底 Continue。
+    // 空材料的对账表(HC-06:表由绑定单元构造,真表的材料在装配期闭包
+    // 捕获;死案不摸材料,/exit 是纯路由案,空材料也该原样回 Exit)。
+    const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
+    // Image:旧 case 是 break(Continue);表上执行器为空,路由兜底 Continue。
     const lubancode::cli::ParsedSlashCommand image = lubancode::cli::ParseSlashCommand("/image foo.png");
-    CHECK(lubancode::app::DispatchSessionSlashCommand(ctx, image) == lubancode::app::CommandFlow::Continue);
+    CHECK(lubancode::app::DispatchSessionSlashCommand(table, image) == lubancode::app::CommandFlow::Continue);
     // NotSlash:上一层已分流,进不来;兜底 Continue。
     const lubancode::cli::ParsedSlashCommand plain = lubancode::cli::ParseSlashCommand("hello");
     CHECK(plain.command == lubancode::cli::SlashCommand::NotSlash);
-    CHECK(lubancode::app::DispatchSessionSlashCommand(ctx, plain) == lubancode::app::CommandFlow::Continue);
+    CHECK(lubancode::app::DispatchSessionSlashCommand(table, plain) == lubancode::app::CommandFlow::Continue);
     // /exit 是纯路由案:空材料也该原样回 Exit。
     const lubancode::cli::ParsedSlashCommand exit_cmd = lubancode::cli::ParseSlashCommand("/exit");
-    CHECK(lubancode::app::DispatchSessionSlashCommand(ctx, exit_cmd) == lubancode::app::CommandFlow::Exit);
+    CHECK(lubancode::app::DispatchSessionSlashCommand(table, exit_cmd) == lubancode::app::CommandFlow::Exit);
 }
 
 // ---------------------------------------------------------------------------

@@ -62,6 +62,7 @@
 #include "runtime/idle_wake.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0
+#include "runtime/tool_trace_hub.hpp"  // trace_hub_ 成员(HC-06:注册表头不再传递此头)
 #include "runtime/session_work_scheduler.hpp"
 #include "runtime/turn_ingress.hpp"
 #include "tools/agent_tool.hpp"
@@ -377,7 +378,8 @@ private:
     CommandFlow ProcessLine(const std::string& content, bool* autosend_failed = nullptr);
     // slash 分派(命令注册制,会话终章):47 案 switch 已换成命令注册表
     // (commands/command_registry),这里只装材料(SlashDispatchContext,构造
-    // 尾一次配齐)并递给查表路由;路由与门在 DispatchSessionSlashCommand。
+    // 尾一次配齐)并经绑定单元折成命令表(HC-06);路由与门在
+    // DispatchSessionSlashCommand。
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
     void AssembleDispatchContext();
     // /workflow run 的 tool 执行器装配(骨架拆解批一·封暗道):工具节点走
@@ -425,9 +427,14 @@ private:
     // ---- 借用:调用方在 RunInteractiveSession 返回前保证存活 ----
     const InteractiveSessionOptions& opts_;
 
-    // 分派材料包(命令注册制,会话终章):构造尾一次配齐,域 handler 全经
-    // 它取料,不摸控制器本体。
+    // 分派材料包(命令注册制,会话终章):构造尾一次配齐,尚未收窄的域
+    // handler 经它取料,不摸控制器本体。HC-06 起逐域收窄(Trace/Hook/
+    // Telemetry 已迁窄材料,经下表的闭包捕获)。
     lubancode::app::SlashDispatchContext dispatch_ctx_;
+    // 命令表(HC-06 材料收窄):构造尾由绑定单元(session_command_
+    // bindings)从 dispatch_ctx_ 与各域窄材料构造,执行器闭包捕获借用。
+    // 声明在 dispatch_ctx_ 之后 = 析构先于它,闭包里的借用不悬垂。
+    std::vector<lubancode::app::SlashCommandSpec> slash_command_table_;
 
     // ---- 组合根装配件(会话终章):材料/后端栈/工具全栈在组合根装好
     //(cli_app 调 BuildSessionStack),控制器只收——下列引用别名指进

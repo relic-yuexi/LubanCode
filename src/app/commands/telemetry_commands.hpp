@@ -11,13 +11,37 @@
 //   policy                T4 未落地,明说
 #pragma once
 
-#include "app/commands/command_flow.hpp"   // CommandFlow
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext
+#include "app/commands/command_flow.hpp"  // CommandFlow
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand
+
+#include <functional>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace lubancode::telemetry {
+class TelemetryService;
+}
+namespace lubancode::cli {
+struct Theme;
+}
 
 namespace lubancode::app {
 
-CommandFlow HandleSlashTelemetry(SlashDispatchContext& ctx,
+// HC-06(材料收窄):/telemetry 的窄材料——handler 不再摸会话大上下文
+// (SlashDispatchContext),材料由绑定单元在装配期折好递进来。
+struct TelemetryCommandContext {
+    lubancode::telemetry::TelemetryService* telemetry_service = nullptr;  // 空 = 遥测未开
+    // /telemetry enable session(端云协同可观测单 T2,§24.2):当前进程内装
+    // 遥测服务的执行体。空 = 没接(非交互装配),命令面明说接不上。
+    std::function<std::vector<std::string>()> enable_telemetry_session;
+    // 全局配置文件现行路径(enable/disable config 写 features.telemetry 用;
+    // 空 = 还没建过配置,回落 <主目录>/.lubancode/config.json)。
+    const std::optional<std::string>* global_config_file_path = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+};
+
+CommandFlow HandleSlashTelemetry(const TelemetryCommandContext& ctx,
                                  const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app
