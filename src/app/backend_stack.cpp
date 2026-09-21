@@ -4,6 +4,8 @@
 
 #include "app/backend_stack.hpp"
 
+#include <utility>
+
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
 #include "api/gemini/client.hpp"
@@ -54,25 +56,78 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
 
 RebuildableBackend::RebuildableBackend(const lubancode::config::Config& config) { Rebuild(config); }
 
+RebuildableBackend::RebuildableBackend(std::shared_ptr<lubancode::api::Backend> inner)
+    : inner_(std::move(inner)) {}
+
 void RebuildableBackend::Rebuild(const lubancode::config::Config& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     inner_ = BuildBackend(config);
+}
+
+std::shared_ptr<lubancode::api::Backend> RebuildableBackend::SnapshotInner() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return inner_;
 }
 
 std::expected<void, lubancode::api::Error> RebuildableBackend::send_stream(
     const lubancode::api::Request& request,
     const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    std::shared_ptr<lubancode::api::Backend> inner;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        inner = inner_;
-    }
+    // HC-08:快照收进 SnapshotInner,与五口 const 查询同一条锁规矩——锁内
+    // 拷指针,放锁后调,在飞请求持旧内芯跑到完,不为发送持锁跨流式网络。
+    const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
     if (inner == nullptr) {
         return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Api,
                                                      "backend 尚未装配"});
     }
     return inner->send_stream(request, on_event, cancel);
+}
+
+// HC-08 五口窄转发。未装配(快照空)按接口合同返回错误/不可得:落回
+// 基类默认形态——空串/不可得/回退 Request::max_tokens/no-op,与
+// "trace/桩后端不提供"同一张脸,不冒充实数。
+std::string RebuildableBackend::SerializeForDiagnostics(const lubancode::api::Request& request) const {
+    const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
+    if (inner == nullptr) {
+        return Backend::SerializeForDiagnostics(request);
+    }
+    return inner->SerializeForDiagnostics(request);
+}
+
+lubancode::api::PreparedWireRequest RebuildableBackend::PrepareWireRequest(
+    const lubancode::api::Request& request) const {
+    const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
+    if (inner == nullptr) {
+        return Backend::PrepareWireRequest(request);
+    }
+    return inner->PrepareWireRequest(request);
+}
+
+std::optional<lubancode::api::WireMessageMap> RebuildableBackend::BuildWireMessageMap(
+    const lubancode::api::Request& request) const {
+    const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
+    if (inner == nullptr) {
+        return Backend::BuildWireMessageMap(request);
+    }
+    return inner->BuildWireMessageMap(request);
+}
+
+lubancode::api::Backend::EffectiveOutputLimit RebuildableBackend::GetEffectiveOutputLimit(
+    const lubancode::api::Request& request) const {
+    const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
+    if (inner == nullptr) {
+        return Backend::GetEffectiveOutputLimit(request);
+    }
+    return inner->GetEffectiveOutputLimit(request);
+}
+
+void RebuildableBackend::ForceMaxOutputTokensOverride(lubancode::api::Request& request, int tokens) const {
+    const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
+    if (inner == nullptr) {
+        Backend::ForceMaxOutputTokensOverride(request, tokens);
+        return;
+    }
+    inner->ForceMaxOutputTokensOverride(request, tokens);
 }
 
 }  // namespace lubancode::app
