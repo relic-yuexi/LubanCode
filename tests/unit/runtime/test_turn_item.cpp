@@ -20,6 +20,7 @@
 #include "cli/diff.hpp"
 #include "cli/transcript.hpp"
 #include "runtime/turn_item.hpp"
+#include "tools/edit_file.hpp"  // AR-05 合同对账:预览与执行同判
 
 namespace rt = lubancode::runtime;
 namespace cli = lubancode::cli;
@@ -216,4 +217,137 @@ TEST_CASE("TurnItem:finished() 只认终态四分") {
         item.status = status;
         CHECK(item.finished());
     }
+}
+
+// ---- AR-05 合同:预览与执行同一颗账 ----------------------------------------
+//
+// 病灶:预览(BuildDiffTable)只做精确字节匹配,真实编辑(EditFileTool)
+// 还有换行归一/缩进归一两层容错,多处候选时预览还替第一处。对账册只有
+// 一条铁律:同输入下,预览判的 located/replaced_count 必须与执行成败和
+// 实际替换处数一致——预览显示的改动就是会落盘的改动。
+// 先执行后预览会被落盘内容污染,故一律先预览(与真实确认流程同序)。
+
+TEST_CASE("AR-05 合同:CRLF 文件配 LF old_string——预览与执行同判换行归一") {
+    const TempFile old_file("alpha\r\nbeta\r\ngamma\r\n");
+    const nlohmann::json input = {
+        {"path", old_file.path()}, {"old_string", "alpha\nbeta"}, {"new_string", "one\ntwo"}};
+
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK(table->located);
+    CHECK(table->replaced_count == 1);
+
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+}
+
+TEST_CASE("AR-05 合同:多处精确匹配未开 replace_all——预览不得假装改了第一处") {
+    const TempFile old_file("foo foo foo");
+    const nlohmann::json input = {
+        {"path", old_file.path()}, {"old_string", "foo"}, {"new_string", "bar"}};
+
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK_FALSE(table->located);
+    CHECK(table->replaced_count == 0);
+
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK(result.is_error);
+}
+
+TEST_CASE("AR-05 合同:统一缩进不同仍可命中——预览与执行同判缩进归一") {
+    const TempFile old_file("void f() {\n    if (ready) {   \n        run();\t\n    }\n}\n");
+    const nlohmann::json input = {{"path", old_file.path()},
+                                  {"old_string", "if (ready) {\n    run();\n}"},
+                                  {"new_string", "if (ready) {\n    finish();\n}"}};
+
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK(table->located);
+    CHECK(table->replaced_count == 1);
+
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+}
+
+TEST_CASE("AR-05 合同:预览重建的最终字节等于执行落盘") {
+    const TempFile old_file("alpha\r\nbeta\r\ngamma\r\n");
+    const nlohmann::json input = {
+        {"path", old_file.path()}, {"old_string", "alpha\nbeta"}, {"new_string", "one\ntwo"}};
+
+    // 预览行表必须从"原件 vs 计划字节"算出——同一份计划喂两台机器。
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    REQUIRE(table->located);
+    const std::string original = *Slurp(old_file.path());
+    const lubancode::tools::EditPlan plan = lubancode::tools::BuildEditPlan(
+        original, old_file.path(), input.at("old_string").get<std::string>(),
+        input.at("new_string").get<std::string>(), false);
+    REQUIRE(plan.ok);
+    const auto expect =
+        cli::ComputeLineDiff(cli::SplitDiffLines(original), cli::SplitDiffLines(plan.updated));
+    CheckRowsMatch(table->rows, expect);
+
+    // 执行落盘字节与计划字节一笔不差;undo 账的 preimage 指纹与计划同源。
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(*Slurp(old_file.path()) == plan.updated);
+    CHECK(result.undo_preimage_sha256 == plan.original_sha256);
+}
+
+TEST_CASE("AR-05 合同:重缩进后行号按真实文件行起算") {
+    const TempFile old_file("void f() {\n    if (ready) {   \n        run();\t\n    }\n}\n");
+    const nlohmann::json input = {{"path", old_file.path()},
+                                  {"old_string", "if (ready) {\n    run();\n}"},
+                                  {"new_string", "if (ready) {\n    finish();\n}"}};
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    REQUIRE(table->located);
+
+    // 行2 因尾空白差异判删增、行3 run()->finish() 判删增:old_no/new_no
+    // 都是真实文件行号(2/3),不是段内行号;行4/5 原样是上下文。
+    const rt::DiffRow* del2 = nullptr;
+    const rt::DiffRow* del3 = nullptr;
+    const rt::DiffRow* add2 = nullptr;
+    const rt::DiffRow* add3 = nullptr;
+    for (const auto& row : table->rows) {
+        if (row.kind == rt::DiffRowKind::Del && row.old_no == 2) { del2 = &row; }
+        if (row.kind == rt::DiffRowKind::Del && row.old_no == 3) { del3 = &row; }
+        if (row.kind == rt::DiffRowKind::Add && row.new_no == 2) { add2 = &row; }
+        if (row.kind == rt::DiffRowKind::Add && row.new_no == 3) { add3 = &row; }
+    }
+    REQUIRE(del2 != nullptr);
+    REQUIRE(del3 != nullptr);
+    REQUIRE(add2 != nullptr);
+    REQUIRE(add3 != nullptr);
+    CHECK(del2->text == "    if (ready) {   ");   // 旧文行2原样(含尾空白)
+    CHECK(del3->text == "        run();\t");
+    CHECK(add2->text == "    if (ready) {");      // 落盘行2(重缩进后)
+    CHECK(add3->text == "        finish();");
+    CHECK(table->removed_lines() == 2);
+    CHECK(table->added_lines() == 2);
+}
+
+TEST_CASE("AR-05 合同:预览之后文件变了——执行按新盘重算,不套旧计划") {
+    const TempFile old_file("keep\nTARGET\nkeep2\n");
+    const nlohmann::json input = {
+        {"path", old_file.path()}, {"old_string", "TARGET"}, {"new_string", "NEW"}};
+    // 预览时计划成立。
+    const auto table = rt::BuildDiffTable("edit_file", input);
+    REQUIRE(table.has_value());
+    CHECK(table->located);
+    // 预览之后有人把目标行改掉了。
+    {
+        std::ofstream out(old_file.path(), std::ios::binary | std::ios::trunc);
+        out << "keep\ngone\ngone2\n";
+    }
+    lubancode::tools::EditFileTool tool;
+    const auto result = tool.execute(input);
+    CHECK(result.is_error);  // 按新盘如实拒绝,不拿旧计划静默落盘
+    CHECK(result.content.find("找不到 old_string") != std::string::npos);
+    CHECK(*Slurp(old_file.path()) == "keep\ngone\ngone2\n");
 }

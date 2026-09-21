@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "hooks/hash.hpp"  // Sha256Hex:计划指纹的单钉
 #include "tools/edit_file.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/write_file.hpp"
@@ -393,6 +394,110 @@ TEST_CASE("write_file: 陈年临时件不碍写,也不被越权收走") {
     CHECK(ReadFileRaw(orphan1) == "stale");
     CHECK(ReadFileRaw(orphan2) == "stale-too");
     CHECK(TempLeftovers(dir).size() == 2);
+}
+
+// ---- BuildEditPlan:不写盘的编辑计划(AR-05 预览/执行共用的决策源) --------
+//
+// 验收单逐例:精确/CRLF/LF/CR/统一缩进/尾空白/replace_all/多候选/空old。
+// 计划的 updated 就是 execute 落盘的那份字节,match_mode 就是结果文案的
+// 前缀,拒绝文案与 execute 逐字同源。
+
+TEST_CASE("BuildEditPlan: 精确唯一命中") {
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan("hello world", "x.txt", "world", "lubancode", false);
+    CHECK(plan.ok);
+    CHECK(plan.updated == "hello lubancode");
+    CHECK(plan.replaced_count == 1);
+    CHECK(plan.match_mode == "精确");
+}
+
+TEST_CASE("BuildEditPlan: replace_all 精确全换") {
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan("foo foo foo", "x.txt", "foo", "bar", true);
+    CHECK(plan.ok);
+    CHECK(plan.updated == "bar bar bar");
+    CHECK(plan.replaced_count == 3);
+    CHECK(plan.match_mode == "精确");
+}
+
+TEST_CASE("BuildEditPlan: 精确多处未开 replace_all——拒绝并报次数") {
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan("foo foo foo", "x.txt", "foo", "bar", false);
+    CHECK_FALSE(plan.ok);
+    CHECK(plan.error.find("3 次") != std::string::npos);
+    CHECK(plan.error.find("replace_all=true") != std::string::npos);
+}
+
+TEST_CASE("BuildEditPlan: CRLF 原件配 LF old——换行归一,新文保持 CRLF") {
+    const lubancode::tools::EditPlan plan = lubancode::tools::BuildEditPlan(
+        "alpha\r\nbeta\r\ngamma\r\n", "x.txt", "alpha\nbeta", "one\ntwo", false);
+    CHECK(plan.ok);
+    // new_string 的 LF 也按原件行尾风格转成 CRLF——预览看到的与落盘一致。
+    CHECK(plan.updated == "one\r\ntwo\r\ngamma\r\n");
+    CHECK(plan.replaced_count == 1);
+    CHECK(plan.match_mode == "换行归一");
+}
+
+TEST_CASE("BuildEditPlan: LF 原件配 CRLF old——换行归一反向也成立") {
+    const lubancode::tools::EditPlan plan = lubancode::tools::BuildEditPlan(
+        "alpha\nbeta\ngamma\n", "x.txt", "alpha\r\nbeta", "one\ntwo", false);
+    CHECK(plan.ok);
+    CHECK(plan.updated == "one\ntwo\ngamma\n");
+    CHECK(plan.replaced_count == 1);
+    CHECK(plan.match_mode == "换行归一");
+}
+
+TEST_CASE("BuildEditPlan: CR-only 原件——计划按 CR 落") {
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan("a\rb\rc\r", "x.txt", "a\nb", "x\ny", false);
+    CHECK(plan.ok);
+    CHECK(plan.updated == "x\ry\rc\r");
+    CHECK(plan.replaced_count == 1);
+    CHECK(plan.match_mode == "换行归一");
+}
+
+TEST_CASE("BuildEditPlan: 统一缩进与行尾空白不同——缩进归一并重排替换块") {
+    const lubancode::tools::EditPlan plan = lubancode::tools::BuildEditPlan(
+        "void f() {\n    if (ready) {   \n        run();\t\n    }\n}\n",
+        "x.txt", "if (ready) {\n    run();\n}", "if (ready) {\n    finish();\n}", false);
+    CHECK(plan.ok);
+    // 替换块重缩进到命中处的实缩进,尾空白不带回。
+    CHECK(plan.updated == "void f() {\n    if (ready) {\n        finish();\n    }\n}\n");
+    CHECK(plan.replaced_count == 1);
+    CHECK(plan.match_mode == "缩进/行尾空白归一");
+}
+
+TEST_CASE("BuildEditPlan: 宽松匹配多处——拒绝并报起始行") {
+    const lubancode::tools::EditPlan plan = lubancode::tools::BuildEditPlan(
+        "  call();  \n  next();\n\n    call();\t\n    next();\n",
+        "x.txt", "call();\nnext();", "done();\nnext();", false);
+    CHECK_FALSE(plan.ok);
+    CHECK(plan.error.find("2 处") != std::string::npos);
+    CHECK(plan.error.find("起始行") != std::string::npos);
+}
+
+TEST_CASE("BuildEditPlan: 空 old_string——拒绝,与执行同文案") {
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan("abc", "x.txt", "", "d", false);
+    CHECK_FALSE(plan.ok);
+    CHECK(plan.error.find("old_string 不能是空字符串") != std::string::npos);
+}
+
+TEST_CASE("BuildEditPlan: 三层都找不到——拒绝并指路 read_file") {
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan("content\n", "x.txt", "gone", "new", false);
+    CHECK_FALSE(plan.ok);
+    CHECK(plan.error.find("找不到 old_string") != std::string::npos);
+    CHECK(plan.error.find("read_file") != std::string::npos);
+    CHECK(plan.error.find("x.txt") != std::string::npos);  // path 只进错误文案
+}
+
+TEST_CASE("BuildEditPlan: 原件指纹是 sha256,与 undo 账同源") {
+    const std::string original = "hello world";
+    const lubancode::tools::EditPlan plan =
+        lubancode::tools::BuildEditPlan(original, "x.txt", "world", "lubancode", false);
+    CHECK(plan.ok);
+    CHECK(plan.original_sha256 == lubancode::hooks::Sha256Hex(original));
 }
 
 #ifdef _WIN32

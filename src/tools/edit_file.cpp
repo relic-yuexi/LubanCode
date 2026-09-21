@@ -19,6 +19,9 @@ namespace lubancode::tools {
 namespace {
 
 std::size_t CountOccurrences(const std::string& text, const std::string& needle) {
+    if (needle.empty()) {
+        return 0;
+    }
     std::size_t count = 0;
     std::size_t pos = 0;
     while ((pos = text.find(needle, pos)) != std::string::npos) {
@@ -225,6 +228,136 @@ std::string FirstMeaningfulLine(const std::string& text) {
 
 }  // namespace
 
+EditPlan BuildEditPlan(const std::string& original, const std::string& path_utf8,
+                       const std::string& old_string, const std::string& new_string, bool replace_all) {
+    // AR-05:这段匹配语义原先长在 EditFileTool::execute 里,预览侧
+    // (runtime::BuildDiffTable)另抄了一份只会精确匹配的替身,两边各算
+    // 各的账——CRLF 文件配 LF 片段时执行能成、预览却标未定位;多处候选
+    // 时预览替第一处、执行拒绝。现在收成这一颗决策源:预览显示的字节
+    // 就是执行落盘的字节,文案一字不动(测试钉着)。
+    EditPlan plan;
+    plan.original_sha256 = hooks::Sha256Hex(original);
+    if (old_string.empty()) {
+        plan.error = "old_string 不能是空字符串";
+        return plan;
+    }
+
+    std::size_t occurrences = CountOccurrences(original, old_string);
+    std::string updated;
+    std::string match_mode = "精确";
+    bool used_fuzzy_match = false;
+
+    if (occurrences == 0) {
+        // 第一层容错:只统一 CRLF/LF/CR，字面内容仍须完全一致。
+        const NormalizedText normalized_file = NormalizeLineEndingsWithOffsets(original);
+        const std::string normalized_old = NormalizeLineEndings(old_string);
+        std::vector<std::pair<std::size_t, std::size_t>> ranges;
+        for (std::size_t pos = 0; !normalized_old.empty() &&
+                                  (pos = normalized_file.text.find(normalized_old, pos)) != std::string::npos;) {
+            ranges.emplace_back(normalized_file.original_offsets[pos],
+                                normalized_file.original_offsets[pos + normalized_old.size()]);
+            pos += normalized_old.size();
+        }
+        if (!ranges.empty()) {
+            occurrences = ranges.size();
+            if (!replace_all && occurrences > 1) {
+                plan.error = "old_string 统一换行后在文件里出现了 " + std::to_string(occurrences) +
+                             " 次,仍不唯一。请带上更多前后文后再试。";
+                return plan;
+            }
+            if (!replace_all) {
+                ranges.resize(1);
+            }
+            updated = ReplaceRanges(original, ranges, UseLineEnding(new_string, FileLineEnding(original)));
+            match_mode = "换行归一";
+            used_fuzzy_match = true;
+        }
+    }
+
+    if (occurrences == 0) {
+        // 第二层容错:按完整行块比对，忽略统一外层缩进与行尾空白。
+        const NormalizedText normalized_file = NormalizeLineEndingsWithOffsets(original);
+        const std::string normalized_old = NormalizeLineEndings(old_string);
+        const std::vector<LineSpan> file_lines = SplitLines(normalized_file.text);
+        const std::vector<LineSpan> old_lines = SplitLines(normalized_old);
+        std::vector<std::pair<std::size_t, std::size_t>> ranges;
+        std::vector<std::string> replacements;
+        std::vector<std::size_t> line_numbers;
+        if (!old_lines.empty() && old_lines.size() <= file_lines.size()) {
+            const CanonicalBlock wanted = CanonicalizeLines(normalized_old, old_lines, 0, old_lines.size());
+            const bool old_ends_newline = !normalized_old.empty() && normalized_old.back() == '\n';
+            for (std::size_t i = 0; i + old_lines.size() <= file_lines.size();) {
+                const CanonicalBlock candidate = CanonicalizeLines(normalized_file.text, file_lines, i, old_lines.size());
+                if (candidate.text == wanted.text) {
+                    const std::size_t normalized_end = old_ends_newline
+                                                           ? file_lines[i + old_lines.size() - 1].end
+                                                           : file_lines[i + old_lines.size() - 1].content_end;
+                    ranges.emplace_back(normalized_file.original_offsets[file_lines[i].start],
+                                        normalized_file.original_offsets[normalized_end]);
+                    replacements.push_back(
+                        ReindentReplacement(new_string, candidate.indent, FileLineEnding(original)));
+                    line_numbers.push_back(i + 1);
+                    i += old_lines.size();
+                } else {
+                    ++i;
+                }
+            }
+        }
+        occurrences = ranges.size();
+        if (occurrences > 0) {
+            if (!replace_all && occurrences > 1) {
+                std::string where;
+                for (std::size_t i = 0; i < line_numbers.size() && i < 5; ++i) {
+                    where += (i == 0 ? "" : ", ") + std::to_string(line_numbers[i]);
+                }
+                plan.error = "old_string 宽松匹配到 " + std::to_string(occurrences) + " 处(起始行 " + where +
+                             "),不唯一。请补足前后文,不自动猜。";
+                return plan;
+            }
+            if (!replace_all) {
+                ranges.resize(1);
+                replacements.resize(1);
+            }
+            updated = ReplaceRanges(original, ranges, replacements);
+            match_mode = "缩进/行尾空白归一";
+            used_fuzzy_match = true;
+        }
+    }
+
+    if (occurrences == 0) {
+        const std::string first_line = FirstMeaningfulLine(old_string);
+        plan.error = "文件里找不到 old_string(精确、换行归一、缩进/行尾空白归一均未命中): " + path_utf8 +
+                     (first_line.empty() ? std::string() : "\nold_string 首行: " + first_line) +
+                     "\n文件可能已经变化。请先 read_file 读取最新片段,再用最新原文重试；不要原样重复调用。";
+        return plan;
+    }
+    if (!replace_all && occurrences > 1) {
+        plan.error = "old_string 在文件里出现了 " + std::to_string(occurrences) +
+                     " 次,不唯一,没法确定该改哪一处。要么把 old_string 写得更具体(带上前后文),"
+                     "要么显式传 replace_all=true 把所有出现的地方都换掉。";
+        return plan;
+    }
+
+    std::size_t replaced_count = 0;
+    if (used_fuzzy_match) {
+        replaced_count = replace_all ? occurrences : 1;
+    } else if (replace_all) {
+        updated = ReplaceAllOccurrences(original, old_string, new_string);
+        replaced_count = occurrences;
+    } else {
+        const std::size_t pos = original.find(old_string);
+        updated = original;
+        updated.replace(pos, old_string.size(), new_string);
+        replaced_count = 1;
+    }
+
+    plan.ok = true;
+    plan.updated = std::move(updated);
+    plan.replaced_count = replaced_count;
+    plan.match_mode = std::move(match_mode);
+    return plan;
+}
+
 std::string EditFileTool::name() const {
     return "edit_file";
 }
@@ -327,137 +460,37 @@ Tool::Result EditFileTool::execute(const nlohmann::json& input) {
     const std::string original = buf.str();
     in.close();
 
-    std::size_t occurrences = CountOccurrences(original, old_string);
-    std::string updated;
-    std::string match_mode = "精确";
-    bool used_fuzzy_match = false;
-
-    if (occurrences == 0) {
-        // 第一层容错:只统一 CRLF/LF/CR，字面内容仍须完全一致。
-        const NormalizedText normalized_file = NormalizeLineEndingsWithOffsets(original);
-        const std::string normalized_old = NormalizeLineEndings(old_string);
-        std::vector<std::pair<std::size_t, std::size_t>> ranges;
-        for (std::size_t pos = 0; !normalized_old.empty() &&
-                                  (pos = normalized_file.text.find(normalized_old, pos)) != std::string::npos;) {
-            ranges.emplace_back(normalized_file.original_offsets[pos],
-                                normalized_file.original_offsets[pos + normalized_old.size()]);
-            pos += normalized_old.size();
-        }
-        if (!ranges.empty()) {
-            occurrences = ranges.size();
-            if (!replace_all && occurrences > 1) {
-                return {"old_string 统一换行后在文件里出现了 " + std::to_string(occurrences) +
-                            " 次,仍不唯一。请带上更多前后文后再试。",
-                        true};
-            }
-            if (!replace_all) {
-                ranges.resize(1);
-            }
-            updated = ReplaceRanges(original, ranges, UseLineEnding(new_string, FileLineEnding(original)));
-            match_mode = "换行归一";
-            used_fuzzy_match = true;
-        }
-    }
-
-    if (occurrences == 0) {
-        // 第二层容错:按完整行块比对，忽略统一外层缩进与行尾空白。
-        const NormalizedText normalized_file = NormalizeLineEndingsWithOffsets(original);
-        const std::string normalized_old = NormalizeLineEndings(old_string);
-        const std::vector<LineSpan> file_lines = SplitLines(normalized_file.text);
-        const std::vector<LineSpan> old_lines = SplitLines(normalized_old);
-        std::vector<std::pair<std::size_t, std::size_t>> ranges;
-        std::vector<std::string> replacements;
-        std::vector<std::size_t> line_numbers;
-        if (!old_lines.empty() && old_lines.size() <= file_lines.size()) {
-            const CanonicalBlock wanted = CanonicalizeLines(normalized_old, old_lines, 0, old_lines.size());
-            const bool old_ends_newline = !normalized_old.empty() && normalized_old.back() == '\n';
-            for (std::size_t i = 0; i + old_lines.size() <= file_lines.size();) {
-                const CanonicalBlock candidate = CanonicalizeLines(normalized_file.text, file_lines, i, old_lines.size());
-                if (candidate.text == wanted.text) {
-                    const std::size_t normalized_end = old_ends_newline
-                                                           ? file_lines[i + old_lines.size() - 1].end
-                                                           : file_lines[i + old_lines.size() - 1].content_end;
-                    ranges.emplace_back(normalized_file.original_offsets[file_lines[i].start],
-                                        normalized_file.original_offsets[normalized_end]);
-                    replacements.push_back(
-                        ReindentReplacement(new_string, candidate.indent, FileLineEnding(original)));
-                    line_numbers.push_back(i + 1);
-                    i += old_lines.size();
-                } else {
-                    ++i;
-                }
-            }
-        }
-        occurrences = ranges.size();
-        if (occurrences > 0) {
-            if (!replace_all && occurrences > 1) {
-                std::string where;
-                for (std::size_t i = 0; i < line_numbers.size() && i < 5; ++i) {
-                    where += (i == 0 ? "" : ", ") + std::to_string(line_numbers[i]);
-                }
-                return {"old_string 宽松匹配到 " + std::to_string(occurrences) + " 处(起始行 " + where +
-                            "),不唯一。请补足前后文,不自动猜。",
-                        true};
-            }
-            if (!replace_all) {
-                ranges.resize(1);
-                replacements.resize(1);
-            }
-            updated = ReplaceRanges(original, ranges, replacements);
-            match_mode = "缩进/行尾空白归一";
-            used_fuzzy_match = true;
-        }
-    }
-
-    if (occurrences == 0) {
-        const std::string first_line = FirstMeaningfulLine(old_string);
-        return {"文件里找不到 old_string(精确、换行归一、缩进/行尾空白归一均未命中): " + path_str +
-                    (first_line.empty() ? std::string() : "\nold_string 首行: " + first_line) +
-                    "\n文件可能已经变化。请先 read_file 读取最新片段,再用最新原文重试；不要原样重复调用。",
-                true};
-    }
-    if (!replace_all && occurrences > 1) {
-        return {"old_string 在文件里出现了 " + std::to_string(occurrences) +
-                     " 次,不唯一,没法确定该改哪一处。要么把 old_string 写得更具体(带上前后文),"
-                     "要么显式传 replace_all=true 把所有出现的地方都换掉。",
-                true};
-    }
-
-    std::size_t replaced_count = 0;
-    if (used_fuzzy_match) {
-        replaced_count = replace_all ? occurrences : 1;
-    } else if (replace_all) {
-        updated = ReplaceAllOccurrences(original, old_string, new_string);
-        replaced_count = occurrences;
-    } else {
-        const std::size_t pos = original.find(old_string);
-        updated = original;
-        updated.replace(pos, old_string.size(), new_string);
-        replaced_count = 1;
+    // 单一决策源(AR-05):匹配、替换、拒绝全在 BuildEditPlan 里,与预览
+    // (runtime::BuildDiffTable)共用同一颗计划——执行永远对刚读到的原件
+    // 现算,预览之后文件变了就走新计划(或如实拒绝),不拿旧账套新盘。
+    const EditPlan plan = BuildEditPlan(original, path_str, old_string, new_string, replace_all);
+    if (!plan.ok) {
+        return {plan.error, true};
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out.is_open()) {
         return {"打不开文件写(权限不够或者被占用): " + path_str, true};
     }
-    out.write(updated.data(), static_cast<std::streamsize>(updated.size()));
+    out.write(plan.updated.data(), static_cast<std::streamsize>(plan.updated.size()));
     if (!out) {
         return {"写回文件失败: " + path_str, true};
     }
     out.close();
 
     // 逐枚追踪单:undo token(original 是 preimage,updated 是 postimage;
-    // 条件式撤销按这对哈希判"其后没人再改")。
+    // 条件式撤销按这对哈希判"其后没人再改")。preimage 摘要直接用计划
+    // 带的原件指纹——计划就是对着这份原件算的,一枚哈希两处同源。
     Tool::Result result;
-    result.SetText(match_mode + "匹配,替换了 " + std::to_string(replaced_count) + " 处: " + path_str);
+    result.SetText(plan.match_mode + "匹配,替换了 " + std::to_string(plan.replaced_count) + " 处: " + path_str);
     result.undo_path = path_str;
-    result.undo_preimage_sha256 = hooks::Sha256Hex(original);
-    result.undo_postimage_sha256 = hooks::Sha256Hex(updated);
+    result.undo_preimage_sha256 = plan.original_sha256;
+    result.undo_postimage_sha256 = hooks::Sha256Hex(plan.updated);
     result.undo_created_new_file = false;
     if (static_cast<std::uint64_t>(original.size()) <= Tool::kToolUndoPreimageCap) {
         result.undo_preimage = original;
     }
-    result.effect_summary = "edit " + path_str + " (" + std::to_string(replaced_count) + " 处)";
+    result.effect_summary = "edit " + path_str + " (" + std::to_string(plan.replaced_count) + " 处)";
     return result;
 }
 

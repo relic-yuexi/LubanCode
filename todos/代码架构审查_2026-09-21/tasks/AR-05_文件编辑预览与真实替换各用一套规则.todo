@@ -1,0 +1,54 @@
+# AR-05 文件编辑预览与真实替换各用一套规则
+
+- 状态：已修——PR #173 CI rollup 绿(run 35558435257:macos-clang/linux-asan/install-scripts 全 SUCCESS;unit.runtime.turn_item 与 unit.tools.write_edit 两平台 Passed),待合并。修复分支基线 d6bcb8a0(含前置 AR-11 的 PR #169)。
+- 审查基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 主批次：第2批（1=无行为变更合并；2=接口/合同收敛；3=职责拆分）。修复已证错误可在机械合并就绪后优先，不必等所有低风险清理。
+
+## 问题表
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短代码证据） | 为什么是问题 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| AR-05 | B | 高 | src/runtime/turn_item.cpp:138；src/runtime/turn_item.cpp:208；src/runtime/turn_item.cpp:218；src/tools/edit_file.cpp:330；src/tools/edit_file.cpp:356；src/tools/edit_file.cpp:383；src/tools/edit_file.cpp:419；src/cli/tool_display.hpp:113；src/app_server/server.cpp:414 | 预览只 `CountOccurrences(..., old_string)`；真实编辑还能换行/缩进归一；多匹配时预览替第一处，执行拒绝。 | CRLF文件配LF片段或缩进变化时，编辑能成功，预览却标为未定位、只画段内行号，漏掉实际落点与重缩进。反向情形中多处精确匹配而replace_all=false，预览显示第一处修改，真实工具拒绝。工具需求一改必须同步两份算法，当前已分叉。 | 以EditFileTool现有匹配语义为准，提取不写盘的EditPlan(original,input)，返回命中范围、匹配模式、最终字节或拒绝原因。预览和执行共用计划；执行前用原件指纹复验，变化则重算或拒绝。保留diff渲染，删除预览侧Count/Replace替身。 | 影响终端与app-server编辑展示、undo哈希。不能为了对齐预览退掉已支持的CRLF/缩进兼容；计划与实际落盘之间须处理文件变化。 |
+
+## 证据与边界
+
+BuildDiffTable:210-211仍写“真执行时工具自己会报错”，但execute:335-408已有两层兼容匹配。此项不把文本diff算法与编辑匹配混为同一职责；只收敛“本次到底会改哪些字节”。
+
+代码证据来自当前源码静态核对；没有运行复现、编译或测试。上文后果是对应路径的推导，未声称观察到生产事故。
+
+## 交接范围
+
+- 负责文件：`src/tools/edit_file.cpp`；`src/tools/edit_file.hpp`；`src/runtime/turn_item.cpp`；`src/runtime/turn_item.hpp`。
+- 前置：AR-11（以全局排期复核为准）。
+- 不得并行共改：AR-11；同文件先后落单，或约定具体函数所有权。
+- 可并行：除上述依赖/共改任务外，其余审查任务可单独worktree推进；不要借本单批量格式化或重写无关代码。
+
+## 迁移与验收
+
+1. 固定本单触及合同与行为样例；对照当前源码重新确认行号。
+2. 以EditFileTool现有匹配语义为准，提取不写盘的EditPlan(original,input)，返回命中范围、匹配模式、最终字节或拒绝原因。预览和执行共用计划；执行前用原件指纹复验，变化则重算或拒绝。保留diff渲染，删除预览侧Count/Replace替身。
+3. 小批提交，按下列门槛验收。
+
+- [x] 精确/CRLF/LF/CR/统一缩进/尾空白/replace_all/多候选/空old逐例验证计划。(tests/unit/tools/test_write_edit.cpp 新增 11 例 BuildEditPlan 用例)
+- [x] 预览重建的最终字节等于执行结果。(test_turn_item.cpp:行表==cli::ComputeLineDiff(原件,计划字节)、落盘字节==plan.updated、undo preimage 指纹同源)
+- [x] 重缩进后行号正确。(重缩进场景断言 Del old_no=2/3、Add new_no=2/3 为真实文件行号)
+- [x] 计划后文件变化不能静默采用旧计划。(预览后改盘,execute 按新盘如实拒绝、盘不动;执行永远对刚读到的原件现算)
+- [x] remote CI。(PR #173,run 35558435257 rollup 绿:macos-clang/linux-asan/install-scripts(windows+ubuntu) 全 SUCCESS;push 残影 run 35558419079 系建 PR 时顶掉的 cancelled,不计)
+
+## 删除量与旧账
+
+预计净删约40行：turn_item.cpp:138-172的35行匹配替换helper，加:208-220约13行分支，扣共享计划调用约8行。移走EditFileTool现有算法不算删除。
+
+当前 todos 未找到直接承接此缺口的专单。
+
+## 修复纪要(2026-09-21,PR #173)
+
+- 接口：`tools::EditPlan{ok,error,updated,replaced_count,match_mode,original_sha256}` + `tools::BuildEditPlan(original,path_utf8,old_string,new_string,replace_all)`(src/tools/edit_file.hpp),不写盘的纯决策函数,匹配语义与文案逐字搬自 execute。
+- 消费者：`EditFileTool::execute`(校验/落盘/undo 记账,preimage 摘要用计划指纹)与 `runtime::BuildDiffTable` edit 分支(located 语义升级为"计划成立")一次切换完毕,全仓无其他引用。`cli::BuildEditDiff` 生产无调用(仅测试黄金对照),未动。
+- 提交：e05fa4ce(合同测试先钉病灶,修前三红)、796eca3b(EditPlan 收敛+逐例/合同测试,三红转绿)、8d536f7f(本单入库)。
+- 验证不在本地跑(仓库铁律),全交 CI:run 35558435257 两平台编译+测试真跑,`unit.runtime.turn_item`/`unit.tools.write_edit` Passed。
+## 全局排期复核
+
+- 前置／文件接手次序：AR-11
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 共改任务：AR-11（src/runtime/turn_item.cpp）。
