@@ -13,8 +13,9 @@ namespace lubancode::app {
 const std::vector<SlashCommandSpec>& SlashCommandTable() {
     // HC-06:真表由绑定单元从会话材料构造(控制器持有);这只"空材料版"
     // 是对账钉子——案序/枚举/死案口径与真表同源同构(同一个构造函数),
-    // 测试与词汇面对账用,不用于真分派。
-    static const SlashDispatchContext empty_dispatch{};
+    // 测试与词汇面对账用,不用于真分派。empty_dispatch 非 const:过渡域的
+    // 执行器签名吃非 const 借用(与真表同一纪律),对账表只读不写。
+    static SlashDispatchContext empty_dispatch{};
     static const std::vector<SlashCommandSpec> table =
         BuildSessionSlashCommandTable(SessionCommandMaterials{&empty_dispatch});
     return table;
