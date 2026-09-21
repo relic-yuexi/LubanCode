@@ -24,6 +24,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "channel/connection_state.hpp"  // 快照合同(SV-07 迁中立位;别名见下)
 #include "channel/qq/qq_proto.hpp"  // kIntentGroupAndC2cEvent(默认 intents)
 #include "channel/transport/gateway_transport.hpp"  // 传输 seam(SV-07 迁中立位)
 
