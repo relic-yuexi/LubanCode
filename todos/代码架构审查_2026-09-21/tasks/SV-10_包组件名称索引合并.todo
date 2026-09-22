@@ -1,0 +1,67 @@
+# SV-10 包组件集合用三种结构重复维护按类型查名
+
+- 状态：已实施(2026-09-22,PR #197。代码提交 run 35660447496 rollup 绿(macos-clang 腿);PR 头 run 35663459158 双平台 rollup 绿:windows-msvc 与 macos-clang 俱 success——windows 腿前两回环境抖挂 app_server/workspace 锁族与 project_memory worker 族,与本改动无涉的既有 flaky,同夜 main 自身 run 35667914349 亦挂同族 app_server_browser,第三次全绿)。轻合同 ComponentNameIndex 落 src/package/component_name_index.hpp(header-only,免登记 CMake),三份 set+switch 并一份;PackageComponentSet 组合索引只留包身份,catalog 与 mounting 各建各的值,挂载四类内容组件过滤留在构建处。行为零变更,既有测试册全保。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：1。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-10 | A | 中 | src/package/catalog.cpp:46<br>src/package/catalog.cpp:117<br>src/package/catalog.cpp:133<br>src/package/mounting.cpp:28<br>src/package/mounting.cpp:42<br>src/package/catalog.hpp:31 | PackageComponentSet::Has、catalog 内 OwnComponents::Has、mounting 内 OwnComponents::Has 均 switch(kind) 后查询同名 set；另各自写 Add/CollectOwn。 | 增加组件种类或调整同名隔离规则，要同时改跨包引用索引、包内校验索引与挂载折名索引。三个容器重复表达 kind→local_id membership，调用方还各自重建集合，容易漏某一阶段。 | 提取轻量 ComponentNameIndex，统一 Add/Has 机械。PackageComponentSet 组合该索引并保留 package_id/root；分析与挂载分别构建自己的值，挂载通过显式 kinds 过滤保留只折四类内容组件规则。删除两份 OwnComponents 实现，不共用跨阶段可变缓存。 | 中：三份集合来源不同，不能合成同一份全局数据。catalog 故意包含解析失败但有名字的组件；mounting 只折 Agent/Profile/Skill/Workflow。抽取存储机械时须保住这些差别。 |
+
+### 合并结论
+
+应该合并 `kind/local_id` 的容器与 Add/Has 机械；不应该合并三阶段数据及过滤策略。跨包引用要保留来源身份，解析阶段需诊断坏组件，挂载阶段对代码组件不做内容短名折叠。
+
+不把 `ComponentKindName`、`ComponentKindDir`、`MountTargetTable` 直接合成同一字符串函数：它们分别输出协议名称、目录名、展示目标，确有语义差别。若另做 traits 表，需保留各字段，不依赖名称推导。
+
+预计净删约 50 行：两份本地结构及重复 switch 约 64 行，扣共享集合门面与构建参数约 14 行。只计机械，不以减少实际校验为目标。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：独占 catalog.hpp/.cpp 与 mounting.cpp；与其他 SV 项可并行。若另有包热加载任务同改挂载逻辑，先用窄 PR 合并名称索引再接功能。
+- 允许修改的现有文件：
+
+- `src/package/catalog.hpp`
+- `src/package/catalog.cpp`
+- `src/package/mounting.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [x] 七种 ComponentKind 查名都走同一存储机械，新增种类无需复制第三份 Has。(ComponentNameIndex::Add/Has 一份机械,按声明序的 array 档位;PackageComponentSet::Has 一行转发;kAllComponentKinds 档位表配 static_assert,新增种类漏补即编译错)
+- [x] catalog 中坏组件仍可被引用定位并给诊断；未通过验证的包不因索引统一而挂载。(ResolveCtx::own 构建处只加不减,坏组件照 Add 进账;挂载的 rejected/disabled 分支一字未动;CI run 35660447496 全绿)
+- [x] mounting 只对四类内容组件折 canonical，Plugin/MCP/Channel 规则不变。(CollectOwn 显式四 case 入账,plugin/mcp/channel 档恒空,Has 同旧 default 分支返 false)
+- [x] 包内同名跨 kind、显式跨包名、外部裸名及空/default 引用夹具保持原输出。(test_package_catalog.cpp 既有夹具全保,仅 other.skills.insert 一行随组合迁移为 other.names.Add;CI run 35660447496 与 35663459158 测试册全绿)
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。(代码单笔提交 060dd559 只碰 src/package 三件+新头+一处测试构造行;行为零变更,回滚 revert 即可;尚未验证边界=无,纯静态合并交远端 CI——windows 腿两次红均为 app_server/workspace 锁与 memory worker 族环境抖,main 同夜同族亦红,非本改动所伤)
+
+## 合并/删除口径
+
+职责：按 ComponentKind 查询或插入本地组件名。
+
+现有：PackageComponentSet；catalog.cpp::OwnComponents；mounting.cpp::OwnComponents。
+
+建议保留：轻合同 ComponentNameIndex；各阶段独立构建的索引值。
+
+预计净删 50 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+落地实算(PR #197 提交 060dd559):既有文件 -92/+35,新立合同头 +47,合计净 -10 行。估算 50 未计入新立 header 的合同注释、档位表与 static_assert;真正删掉的是三份 Has switch、一份 Add switch、一份 CollectOwn switch 与七分支目录 if/else,机械 membership 语义只剩 ComponentNameIndex 一份。
+
+## 既有工作关联
+
+- docs/reference/packages.md（统一 Package 封装合同）；catalog.hpp 已提供同职责 PackageComponentSet，本条不另扩包格式。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。

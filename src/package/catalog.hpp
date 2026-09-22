@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "package/component.hpp"
+#include "package/component_name_index.hpp"
 #include "package/inventory.hpp"
 #include "package/mount_plan.hpp"
 
@@ -31,15 +32,13 @@ namespace lubancode::package {
 struct PackageComponentSet {
     std::string package_id;
     std::filesystem::path package_root;
-    std::set<std::string> agents;
-    std::set<std::string> prompt_profiles;
-    std::set<std::string> skills;
-    std::set<std::string> workflows;
-    std::set<std::string> plugins;
-    std::set<std::string> mcp_servers;
-    std::set<std::string> channels;
+    // kind -> local id 集(SV-10:存储机械统一进 ComponentNameIndex,这里
+    // 只留跨包引用账要带的包身份)。
+    ComponentNameIndex names;
 
-    bool Has(ComponentKind kind, const std::string& local_id) const;
+    bool Has(ComponentKind kind, const std::string& local_id) const {
+        return names.Has(kind, local_id);
+    }
 };
 
 struct PackageRefIndex {
