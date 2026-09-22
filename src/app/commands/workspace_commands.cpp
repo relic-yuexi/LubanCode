@@ -3,11 +3,12 @@
 #include "cli/todo_render.hpp"                // /todos 的排版
 #include "config/project_instructions.hpp"    // /init 的建档
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
-#include "cli/format_utils.hpp"   // WrapStatusRows:doctor 状态行的宽度折行(P3-3)
 
 using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
 
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 
 #include "cli/console_input.hpp"
@@ -17,11 +18,14 @@ using lubancode::cli::TermErr;
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "app/tool_runtime.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 2:/plugin 渲染段)
 #include "cli/theme.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:/plugin 的框宽同一把尺
 #include "runtime/worktree.hpp"
 #include "lsp/manager.hpp"
 #include "platform/process.hpp"
@@ -39,6 +43,89 @@ namespace lubancode::app {
 
 using lubancode::cli::tr;
 using lubancode::cli::trf;
+
+namespace {
+
+namespace frame = lubancode::cli::frame;
+
+// ---- TUI 排版批 2(/plugin 全族)的公共小件 ---------------------------------
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md);
+// 文案全是既有 tr()/trf() 键,i18n 不新增(单子合同第 5 条),句内冒号按
+// SentenceField 拆两列(批 1 裁量)。
+
+int PluginFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+// trf 结果里带换行的键(如 cmd.plugin.test.header 的"自测入口:...\n命令:
+// ...")先按行拆开再各进一 Field——基件吐的行内不许有换行符。
+std::vector<frame::Field> SentenceFields(const std::string& text,
+                                         frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        const std::size_t nl = text.find('\n', begin);
+        const std::string line = TrimAscii(
+            text.substr(begin, nl == std::string::npos ? std::string::npos : nl - begin));
+        if (!line.empty()) {
+            fields.push_back(SentenceField(line, accent));
+        }
+        if (nl == std::string::npos) {
+            break;
+        }
+        begin = nl + 1;
+    }
+    return fields;
+}
+
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), PluginFrameWidth()));
+}
+
+void PrintNoticeFields(const lubancode::cli::Theme& theme, std::vector<frame::Field> fields) {
+    EmitFrameLines(frame::RenderKeyValues({}, std::move(fields), theme, frame::Light(), PluginFrameWidth()));
+}
+
+// 句尾冒号剥掉(表格/列表标题用的既有短语自带":",那是旧平铺排版的引导
+// 符,进标题框就是废话——剥的是排版残留,不改文案本体)。
+std::string StripTrailingColon(std::string text) {
+    while (!text.empty() && (text.back() == ':' || text.back() == ' ')) {
+        text.pop_back();
+    }
+    return text;
+}
+
+}  // namespace
 
 // 各带计数。没启用延迟机制(总数没超阈值,或阈值是 0)时说明一句,不摆
 // 三态的空架子。
@@ -232,7 +319,11 @@ void HandlePluginCommand(const std::string& args,
                          const std::vector<PluginMountInfo>& mounted,
                          const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
                          const std::string& project_root_utf8,
-                         lubancode::config::PluginTrustStore* project_trust) {
+                         lubancode::config::PluginTrustStore* project_trust,
+                         const lubancode::cli::Theme* theme_ptr) {
+    // TUI 排版批 2:/plugin 渲染段走 frame 三助手。theme 空指针(旧装配/
+    // 既有测试的五参调用)降级 plain——零转义字节,信息一字不少。
+    const lubancode::cli::Theme theme = theme_ptr != nullptr ? *theme_ptr : lubancode::cli::Theme{};
     // 拆子命令与目标 id。
     std::string sub = args;
     std::string rest;
@@ -250,9 +341,9 @@ void HandlePluginCommand(const std::string& args,
     }
 
     if (sub.empty()) {
-        TermOut() << tr("cmd.plugin.usage") << "\n";
-        TermOut() << "另有信任流:/plugin trust <id>(批准项目级插件,重启后挂载)| "
-                     "/plugin untrust <id>(销账)。\n";
+        PrintNotice(theme, {tr("cmd.plugin.usage"),
+                            "另有信任流:/plugin trust <id>(批准项目级插件,重启后挂载)| "
+                            "/plugin untrust <id>(销账)。"});
         return;
     }
 
@@ -273,39 +364,34 @@ void HandlePluginCommand(const std::string& args,
 
     if (action == "inspect") {
         if (manifest != nullptr) {
-            TermOut() << trf("cmd.plugin.inspect.header", manifest->id, manifest->version,
-                             std::string(lubancode::runtime::RuntimeKindName(manifest->kind)),
-                             manifest->language.empty() ? std::string("-") : manifest->language)
-                      << "\n";
-            TermOut() << trf("cmd.plugin.inspect.dir", lubancode::tools::PathToUtf8(manifest->plugin_dir)) << "\n";
+            // 头部键值对框:标题用既有 header 句,身份字段按 "标签: 值" 句
+            // 式拆两列(目录/命令/超时/环境变量/v2 六行权限真账全在此)。
+            std::vector<frame::Field> fields;
+            fields.push_back(
+                SentenceField(trf("cmd.plugin.inspect.dir", lubancode::tools::PathToUtf8(manifest->plugin_dir))));
             if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
                 std::string argv_text;
                 for (const auto& a : manifest->argv) {
                     argv_text += argv_text.empty() ? a : (" " + a);
                 }
-                TermOut() << trf("cmd.plugin.inspect.argv", argv_text) << "\n";
-                TermOut() << trf("cmd.plugin.inspect.timeout", manifest->timeout_ms) << "\n";
+                fields.push_back(SentenceField(trf("cmd.plugin.inspect.argv", argv_text)));
+                fields.push_back(SentenceField(trf("cmd.plugin.inspect.timeout", manifest->timeout_ms)));
                 if (!manifest->env_allowlist.empty()) {
                     std::string env_names;
                     for (const auto& name : manifest->env_allowlist) {
                         env_names += env_names.empty() ? name : (", " + name);
                     }
-                    TermOut() << trf("cmd.plugin.inspect.env", env_names) << "\n";
+                    fields.push_back(SentenceField(trf("cmd.plugin.inspect.env", env_names)));
                 }
-            }
-            TermOut() << trf("cmd.plugin.inspect.tools", manifest->tools.size()) << "\n";
-            for (const auto& tool : manifest->tools) {
-                TermOut() << "  - " << tool.full_name << "\n";
             }
             // v2(manifest-backed Lua)的六行权限真账(§10.3:runtime/entry/
             // profile/network/secrets/limits)。只展示声明与状态:Secret 只报
             // 名字与来源类别,不写值、长度、前缀与 fingerprint。
             if (manifest->manifest_version == 2) {
-                TermOut() << trf("cmd.plugin.inspect.runtime",
-                                 std::string(lubancode::runtime::RuntimeKindName(manifest->kind)))
-                          << "\n";
-                TermOut() << trf("cmd.plugin.inspect.entry", manifest->runtime_entry) << "\n";
-                TermOut() << trf("cmd.plugin.inspect.profile", "pure + host-http") << "\n";
+                fields.push_back(SentenceField(trf("cmd.plugin.inspect.runtime",
+                                                   std::string(lubancode::runtime::RuntimeKindName(manifest->kind)))));
+                fields.push_back(SentenceField(trf("cmd.plugin.inspect.entry", manifest->runtime_entry)));
+                fields.push_back(SentenceField(trf("cmd.plugin.inspect.profile", "pure + host-http")));
                 if (!manifest->network_permissions.empty()) {
                     std::string network_text;
                     for (const auto& permission : manifest->network_permissions) {
@@ -317,9 +403,9 @@ void HandlePluginCommand(const std::string& args,
                                             std::to_string(permission.port);
                         }
                     }
-                    TermOut() << trf("cmd.plugin.inspect.network", network_text) << "\n";
+                    fields.push_back(SentenceField(trf("cmd.plugin.inspect.network", network_text)));
                 } else {
-                    TermOut() << trf("cmd.plugin.inspect.network", "(未声明,禁网)") << "\n";
+                    fields.push_back(SentenceField(trf("cmd.plugin.inspect.network", "(未声明,禁网)")));
                 }
                 if (!manifest->secret_declarations.empty()) {
                     // standalone 插件的数据目录(<home>/.lubancode/plugin-data/
@@ -335,33 +421,51 @@ void HandlePluginCommand(const std::string& args,
                         }
                         secrets_text += resolver.Describe(declaration).Format();
                     }
-                    TermOut() << trf("cmd.plugin.inspect.secrets", secrets_text) << "\n";
+                    fields.push_back(SentenceField(trf("cmd.plugin.inspect.secrets", secrets_text)));
                 }
                 const auto limits = lubancode::runtime::ApplyHttpLimits(manifest->http_limits);
-                TermOut() << trf("cmd.plugin.inspect.limits",
-                                 "request " + std::to_string(limits.request_body_bytes / 1024) + " KiB, response " +
-                                     std::to_string(limits.response_body_bytes / 1024) + " KiB, timeout " +
-                                     std::to_string(limits.timeout_ms / 1000) + " s")
-                          << "\n";
+                fields.push_back(SentenceField(
+                    trf("cmd.plugin.inspect.limits",
+                        "request " + std::to_string(limits.request_body_bytes / 1024) + " KiB, response " +
+                            std::to_string(limits.response_body_bytes / 1024) + " KiB, timeout " +
+                            std::to_string(limits.timeout_ms / 1000) + " s")));
+            }
+            EmitFrameLines(frame::RenderKeyValues(
+                trf("cmd.plugin.inspect.header", manifest->id, manifest->version,
+                    std::string(lubancode::runtime::RuntimeKindName(manifest->kind)),
+                    manifest->language.empty() ? std::string("-") : manifest->language),
+                fields, theme, frame::Light(), PluginFrameWidth()));
+            // 工具清单另起列表框(单子验收:长清单列对齐不破)。
+            if (!manifest->tools.empty()) {
+                std::vector<frame::ListRow> tool_rows;
+                for (const auto& tool : manifest->tools) {
+                    tool_rows.push_back(frame::ListRow{tool.full_name, {}, {}, frame::Bullet::Project});
+                }
+                EmitFrameLines(frame::RenderList(
+                    StripTrailingColon(trf("cmd.plugin.inspect.tools", manifest->tools.size())), tool_rows,
+                    theme, frame::Light(), PluginFrameWidth()));
             }
             return;
         }
         // native/Lua 的 inspect:mounted 里按前缀找。
         const std::string prefix = "plugin__" + target_id + "__";
-        bool found = false;
+        std::vector<frame::ListRow> legacy_rows;
+        std::string legacy_kind;
         for (const auto& info : mounted) {
             if (info.tool_name.rfind(prefix, 0) == 0) {
-                if (!found) {
-                    TermOut() << trf("cmd.plugin.inspect.legacy_header", target_id, info.kind) << "\n";
-                    found = true;
+                if (legacy_rows.empty()) {
+                    legacy_kind = info.kind;
                 }
-                TermOut() << "  - " << info.tool_name << "\n";
+                legacy_rows.push_back(frame::ListRow{info.tool_name, {}, {}, frame::Bullet::Project});
             }
         }
-        if (found) {
+        if (!legacy_rows.empty()) {
+            EmitFrameLines(frame::RenderList(
+                StripTrailingColon(trf("cmd.plugin.inspect.legacy_header", target_id, legacy_kind)),
+                legacy_rows, theme, frame::Light(), PluginFrameWidth()));
             return;
         }
-        TermOut() << trf("cmd.plugin.not_found", target_id) << "\n";
+        PrintNotice(theme, {trf("cmd.plugin.not_found", target_id)});
         return;
     }
 
@@ -373,7 +477,9 @@ void HandlePluginCommand(const std::string& args,
             if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
                 const auto result = lubancode::platform::RunProcess({manifest->argv[0], "--version"}, 15000);
                 // 版本串取输出首个非空行、剥首尾空白:--version 的尾巴多半
-                // 带换行,原样塞进格式串会把右括号顶到下一行(P3-3 的病根)。
+                // 带换行,原样塞进格式串会把右括号顶到下一行(P3-3 的病根;
+                // 排版批 2 起由键值对框的列帽接管防溢出,80 字节帽保留为
+                // 第一道防线)。
                 const auto first_line_trimmed = [](const std::string& output) {
                     std::size_t start = 0;
                     std::size_t end = output.size();
@@ -398,50 +504,48 @@ void HandlePluginCommand(const std::string& args,
                     }
                     return std::string();
                 };
-                const int wrap_width = lubancode::cli::DetectConsoleWidth().value_or(80);
                 if (result.spawn_failed || result.exit_code != 0) {
-                    const std::string line =
-                        trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
-                            result.spawn_failed ? result.spawn_error : std::to_string(result.exit_code));
-                    for (const std::string& row : lubancode::cli::WrapStatusRows(line, wrap_width)) {
-                        TermOut() << row << "\n";
-                    }
+                    PrintNotice(theme, {trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
+                                            result.spawn_failed ? result.spawn_error
+                                                                : std::to_string(result.exit_code))},
+                                frame::FieldAccent::Error);
                 } else {
                     std::string version = first_line_trimmed(result.output);
                     if (version.size() > 80) {
                         version = version.substr(0, 80) + "...";
                     }
-                    // 折行口径(P3-3):宽度算 ANSI 与中文宽字,"node(v24.0.0)"
-                    // 整段留在本行或整段挪下一行,右括号不独自掉行。
-                    const std::string line = trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version);
-                    for (const std::string& row : lubancode::cli::WrapStatusRows(line, wrap_width)) {
-                        TermOut() << row << "\n";
-                    }
+                    PrintNotice(theme, {trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version)});
                 }
             } else {
                 // v2(manifest-backed Lua)的 doctor(§10.4):默认只读,不带
                 // Secret 发网。清单:Lua 编译与 handler 对账(顶层零副作用
                 // 探针)、Pure 画像、网络目的地 DNS 安全检查、Secret 声明
                 // (只报名字与来源)、生效帽。真网自测不在此做——doctor 不拿
-                // 用户 Key 偷打一枪。
-                TermOut() << trf("cmd.plugin.doctor.embedded_lua", manifest->runtime_entry,
-                                 lubancode::tools::PathToUtf8(manifest->plugin_dir))
-                          << "\n";
+                // 用户 Key 偷打一枪。批 2:各 "- 项: 结果" 行按冒号拆进
+                // 键值对框,编译失败/DNS 失败/禁连段上语义色。
+                std::vector<frame::Field> fields;
                 const auto probe = lubancode::runtime::DoctorProbeManifestLua(*manifest);
                 if (!probe.has_value()) {
-                    TermOut() << "  - Lua 编译与 handler 对账: 通过(顶层零副作用探针,未触发网络与 Secret 解析)\n";
+                    fields.push_back(SentenceField(
+                        "Lua 编译与 handler 对账: 通过(顶层零副作用探针,未触发网络与 Secret 解析)",
+                        frame::FieldAccent::Pass));
                 } else {
-                    TermOut() << "  - Lua 编译与 handler 对账: 失败——" << *probe << "\n";
+                    fields.push_back(SentenceField("Lua 编译与 handler 对账: 失败——" + *probe,
+                                                   frame::FieldAccent::Error));
                 }
-                TermOut() << "  - profile: pure(io/os.execute 关门)+ host-http(仅声明目的地)\n";
+                fields.push_back(SentenceField(
+                    "profile: pure(io/os.execute 关门)+ host-http(仅声明目的地)"));
                 for (const auto& permission : manifest->network_permissions) {
                     // DNS 安全检查(§10.4):只解析不定连接,不带 Secret。
                     lubancode::net::SystemDnsResolver dns;
                     const auto addresses = dns.Resolve(permission.host);
                     if (!addresses.has_value()) {
-                        TermOut() << "  - network " << permission.scheme << "://" << permission.host << ":"
-                                  << permission.port << " DNS 解析失败(" << addresses.error()
-                                  << ";网络不可用时此项无结论,doctor 不发请求)\n";
+                        fields.push_back(SentenceField("network " + permission.scheme + "://" +
+                                                           permission.host + ":" +
+                                                           std::to_string(permission.port) +
+                                                           " DNS 解析失败(" + addresses.error() +
+                                                           ";网络不可用时此项无结论,doctor 不发请求)",
+                                                       frame::FieldAccent::Error));
                         continue;
                     }
                     std::string address_text;
@@ -457,12 +561,15 @@ void HandlePluginCommand(const std::string& args,
                             address_text += "(落禁连段 " + *range + ")";
                         }
                     }
-                    TermOut() << "  - network " << permission.scheme << "://" << permission.host << ":"
-                              << permission.port << " -> " << address_text
-                              << (blocked ? " [禁连段:调用期会被拦]" : "") << "\n";
+                    fields.push_back(SentenceField(
+                        "network " + permission.scheme + "://" + permission.host + ":" +
+                            std::to_string(permission.port) + " -> " + address_text +
+                            (blocked ? " [禁连段:调用期会被拦]" : ""),
+                        blocked ? frame::FieldAccent::Stats : frame::FieldAccent::None));
                 }
                 if (manifest->network_permissions.empty()) {
-                    TermOut() << "  - network: 未声明(luban.http.request 一律 network_not_declared)\n";
+                    fields.push_back(
+                        SentenceField("network: 未声明(luban.http.request 一律 network_not_declared)"));
                 }
                 if (!manifest->secret_declarations.empty()) {
                     lubancode::runtime::SecretResolverOptions options;
@@ -470,27 +577,33 @@ void HandlePluginCommand(const std::string& args,
                     options.declarations = manifest->secret_declarations;
                     lubancode::runtime::EnvDotEnvSecretResolver resolver(std::move(options));
                     for (const auto& declaration : manifest->secret_declarations) {
-                        TermOut() << "  - " << resolver.Describe(declaration).Format() << "\n";
+                        fields.push_back(SentenceField(resolver.Describe(declaration).Format()));
                     }
                     if (!resolver.dotenv_healthy()) {
-                        TermOut() << "  - .env: " << resolver.dotenv_diagnostic() << "\n";
+                        fields.push_back(SentenceField(".env: " + resolver.dotenv_diagnostic(),
+                                                       frame::FieldAccent::Error));
                     }
                 }
                 const auto limits = lubancode::runtime::ApplyHttpLimits(manifest->http_limits);
-                TermOut() << "  - limits: request " << limits.request_body_bytes / 1024 << " KiB, response "
-                          << limits.response_body_bytes / 1024 << " KiB, timeout " << limits.timeout_ms / 1000
-                          << " s(解析期已核,不越宿主硬帽)\n";
+                fields.push_back(SentenceField(
+                    "limits: request " + std::to_string(limits.request_body_bytes / 1024) + " KiB, response " +
+                    std::to_string(limits.response_body_bytes / 1024) + " KiB, timeout " +
+                    std::to_string(limits.timeout_ms / 1000) + " s(解析期已核,不越宿主硬帽)"));
+                EmitFrameLines(frame::RenderKeyValues(
+                    StripTrailingColon(trf("cmd.plugin.doctor.embedded_lua", manifest->runtime_entry,
+                                           lubancode::tools::PathToUtf8(manifest->plugin_dir))),
+                    fields, theme, frame::Light(), PluginFrameWidth()));
             }
             return;
         }
         for (const auto& info : mounted) {
             const std::string prefix = "plugin__" + target_id + "__";
             if (info.tool_name.rfind(prefix, 0) == 0) {
-                TermOut() << trf("cmd.plugin.doctor.legacy_ok", info.kind) << "\n";
+                PrintNotice(theme, {trf("cmd.plugin.doctor.legacy_ok", info.kind)});
                 return;
             }
         }
-        TermOut() << trf("cmd.plugin.not_found", target_id) << "\n";
+        PrintNotice(theme, {trf("cmd.plugin.not_found", target_id)});
         return;
     }
 
@@ -500,9 +613,11 @@ void HandlePluginCommand(const std::string& args,
         // exit code、耗时、stdout/stderr 摘要;失败按层定位(起不来/超时/
         // 非零退出)。未声明自测入口的明说,不装样子。跑的是插件作者自己
         // 的测试脚本(不经模型调用链),所以没有确认流——同 /plugin doctor
-        // 探解释器一个待遇:只读式诊断动作。
+        // 探解释器一个待遇:只读式诊断动作。批 2:回执句进键值对框
+        //(通过 Pass 色/失败 Error 色),stdout/stderr 摘要是日志正文,框外
+        // 原样跟出(批 1"长正文不塞框"裁量)。
         if (target_id.empty()) {
-            TermOut() << "用法:/plugin test <id>(id 看 /plugins)\n";
+            PrintNotice(theme, {"用法:/plugin test <id>(id 看 /plugins)"});
             return;
         }
         if (manifest == nullptr) {
@@ -511,44 +626,51 @@ void HandlePluginCommand(const std::string& args,
             const std::string prefix = "plugin__" + target_id + "__";
             for (const auto& info : mounted) {
                 if (info.tool_name.rfind(prefix, 0) == 0) {
-                    TermOut() << tr("cmd.plugin.test.legacy_no_entry") << "\n";
+                    PrintNotice(theme, {tr("cmd.plugin.test.legacy_no_entry")});
                     return;
                 }
             }
-            TermOut() << trf("cmd.plugin.not_found", target_id) << "\n";
+            PrintNotice(theme, {trf("cmd.plugin.not_found", target_id)});
             return;
         }
         const auto plan = lubancode::runtime::ResolvePluginSelfTest(*manifest);
         if (!plan.has_value()) {
-            TermOut() << tr("cmd.plugin.test.no_entry") << "\n";
+            PrintNotice(theme, {tr("cmd.plugin.test.no_entry")});
             return;
         }
         std::string argv_text;
         for (const auto& a : plan->argv) {
             argv_text += argv_text.empty() ? a : (" " + a);
         }
-        TermOut() << trf("cmd.plugin.test.header", lubancode::tools::PathToUtf8(plan->script), argv_text)
-                  << "\n";
         // 自测墙钟:manifest.timeout_ms 是单次工具调用的预算,测试整包可以
         // 比它慢;manifest 没设(0)时给 120s 兜底,设了就照它的来。
         const lubancode::runtime::PluginSelfTestReport report =
             lubancode::runtime::RunPluginSelfTest(*plan, 120000);
+        std::vector<frame::Field> fields =
+            SentenceFields(trf("cmd.plugin.test.header", lubancode::tools::PathToUtf8(plan->script), argv_text));
         if (report.spawn_failed) {
-            TermOut() << trf("cmd.plugin.test.spawn_failed", report.spawn_error, target_id) << "\n";
+            fields.push_back(SentenceField(trf("cmd.plugin.test.spawn_failed", report.spawn_error, target_id),
+                                           frame::FieldAccent::Error));
+            PrintNoticeFields(theme, std::move(fields));
             return;
         }
         if (report.timed_out) {
-            TermOut() << trf("cmd.plugin.test.timed_out",
-                             plan->timeout_ms > 0 ? std::to_string(plan->timeout_ms) : std::string("120000"))
-                      << "\n";
+            fields.push_back(SentenceField(
+                trf("cmd.plugin.test.timed_out",
+                    plan->timeout_ms > 0 ? std::to_string(plan->timeout_ms) : std::string("120000")),
+                frame::FieldAccent::Error));
         } else if (report.exit_code == 0) {
-            TermOut() << trf("cmd.plugin.test.ok", report.exit_code, report.elapsed_ms) << "\n";
+            fields.push_back(
+                SentenceField(trf("cmd.plugin.test.ok", report.exit_code, report.elapsed_ms),
+                              frame::FieldAccent::Pass));
         } else {
-            TermOut() << trf("cmd.plugin.test.failed", report.exit_code, report.elapsed_ms) << "\n";
+            fields.push_back(SentenceField(trf("cmd.plugin.test.failed", report.exit_code, report.elapsed_ms),
+                                           frame::FieldAccent::Error));
         }
         if (report.output_truncated) {
-            TermOut() << tr("cmd.plugin.test.truncated") << "\n";
+            fields.push_back(SentenceField(tr("cmd.plugin.test.truncated"), frame::FieldAccent::Stats));
         }
+        PrintNoticeFields(theme, std::move(fields));
         // stdout/stderr 摘要:留末尾 15 行、每路至多 1600 字节(测试输出的
         // 败因总在尾巴上:unittest 的 FAILED 段、node:test 的汇总)。
         const auto print_summary = [](const char* key, const std::string& text) {
@@ -594,11 +716,12 @@ void HandlePluginCommand(const std::string& args,
         // 拆参数、打回执。子命令式,不在启动路径加 y/n 问询——管道模式
         // 没法答。
         if (target_id.empty()) {
-            TermOut() << "用法:/plugin " << action << " <id>(id 看启动警告或 /plugins)\n";
+            PrintNotice(theme, {"用法:/plugin " + action + " <id>(id 看启动警告或 /plugins)"});
             return;
         }
         if (project_trust == nullptr || project_root_utf8.empty()) {
-            TermOut() << "信任账不可用(找不到用户主目录或会话没有项目根),这条子命令记不了账。\n";
+            PrintNotice(theme, {"信任账不可用(找不到用户主目录或会话没有项目根),这条子命令记不了账。"},
+                        frame::FieldAccent::Error);
             return;
         }
         const std::filesystem::path project_root = lubancode::tools::Utf8ToPath(project_root_utf8);
@@ -606,26 +729,30 @@ void HandlePluginCommand(const std::string& args,
                                 ? lubancode::runtime::TrustProjectPluginById(project_root, project_trust, target_id)
                                 : lubancode::runtime::UntrustProjectPluginById(project_root, project_trust, target_id);
         if (!report.ok) {
-            TermOut() << report.error << "\n";
+            PrintNotice(theme, {report.error}, frame::FieldAccent::Error);
             return;
         }
+        std::vector<frame::Field> fields;
         for (const auto& line : report.lines) {
-            TermOut() << line << "\n";
+            for (frame::Field& field : SentenceFields(line)) {
+                fields.push_back(std::move(field));
+            }
         }
+        PrintNoticeFields(theme, std::move(fields));
         return;
     }
 
     if (action == "reload") {
-        TermOut() << tr("cmd.plugin.reload.hint") << "\n";
+        PrintNotice(theme, {tr("cmd.plugin.reload.hint")});
         return;
     }
     if (action == "enable" || action == "disable") {
-        TermOut() << tr("cmd.plugin.toggle.hint") << "\n";
+        PrintNotice(theme, {tr("cmd.plugin.toggle.hint")});
         return;
     }
 
-    TermOut() << trf("cmd.plugin.unknown_sub", sub) << "\n";
-    TermOut() << tr("cmd.plugin.usage") << "\n";
+    PrintNotice(theme, {trf("cmd.plugin.unknown_sub", sub), tr("cmd.plugin.usage")},
+                frame::FieldAccent::Error);
 }
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
@@ -862,7 +989,8 @@ CommandFlow HandleSlashPlugin(const WorkspaceCommandContext& ctx, const lubancod
                             ? ctx.tool_runtime->process_manifests()
                             : std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>{},
                         ctx.tool_runtime != nullptr ? ctx.tool_runtime->project_root_utf8() : std::string(),
-                        ctx.tool_runtime != nullptr ? ctx.tool_runtime->project_plugin_trust() : nullptr);
+                        ctx.tool_runtime != nullptr ? ctx.tool_runtime->project_plugin_trust() : nullptr,
+                        ctx.theme);
     return CommandFlow::Continue;
 }
 

@@ -1,16 +1,27 @@
 // LuaHook 单 P1-D 的 hook 子命令实现。validate/test 是纯递材料 + 打印:
 // 引擎(runtime::RunHookPackageCheck)四档分账,这里不添第二套判据;init
 // 落官方 scaffold(与 examples/hooks/prompt-clean 同款形状,生成即可跑)。
+//
+// TUI 排版批 2:非 --json 的报告走 cli::frame::* 三助手(表格 pass/FAIL/
+// SKIP 三态色);--json 分支只收口输出端口(std::cout -> TermOut,单子合同
+// 第 4 条点名的旧账),落盘字节级不变。CLI 子命令没有会话主题,按
+// ManageSession 先例现起一只(管道/重定向自然降 plain)。
 #include "app/commands/hook_check_commands.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
 
-#include "cli/terminal_port.hpp"  // TermOut/TermErr
-#include "platform/paths.hpp"     // Utf8ToPath
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 2:报告渲染段)
+#include "cli/terminal_port.hpp"   // TermOut/TermErr
+#include "cli/theme.hpp"           // ResolveTheme:CLI 侧主题
+#include "platform/console.hpp"    // GetScreenInfo:框宽同一把尺
+#include "platform/paths.hpp"      // Utf8ToPath
 #include "runtime/hook_package_check.hpp"
 
 namespace lubancode::app {
@@ -18,6 +29,46 @@ namespace lubancode::app {
 namespace {
 using cli::TermErr;
 using cli::TermOut;
+
+namespace frame = lubancode::cli::frame;
+
+int HookCliFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), HookCliFrameWidth()));
+}
 
 bool WriteFileIfAbsent(const std::filesystem::path& path, const std::string& content, std::string& error) {
     std::error_code ec;
@@ -148,39 +199,71 @@ int RunHookCheckCommand(const HookCliArgs& args) {
     const runtime::HookCheckReport report =
         runtime::RunHookPackageCheck(platform::Utf8ToPath(args.package_dir), options);
     if (args.json) {
-        std::cout << report.ToJson().dump(2) << "\n";
-        std::cout.flush();
+        // 机器面(--json):输出字节级不变,只收口输出端口——std::cout 的
+        // 直写违规是单子合同第 4 条点名的旧账,本批收口。TermOut 默认落
+        // stdout,与 std::cout 同一目的地。
+        TermOut() << report.ToJson().dump(2) << "\n";
+        TermOut().flush();
         return report.exit_code();
     }
+    const lubancode::cli::Theme theme = lubancode::cli::ResolveTheme(
+        std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
 
+    // 命令回显一行照旧(非报告正文,不进框;与批 1 "/memory show 正文框外
+    // 原样"同一裁量)。
     TermOut() << "hook " << args.verb << " " << args.package_dir << "\n";
-    TermOut() << "静态检查:\n";
-    for (const runtime::HookCheckReport::Check& check : report.checks) {
-        TermOut() << "  [" << (check.pass ? "pass" : "FAIL") << "] " << check.item << "  " << check.detail
-                  << "\n";
+    // 静态检查表:result 列 pass=Pass 色、FAIL=Fail 色(单子批 2 三态色的
+    // 前两档;SKIP 只出现在 fixtures)。
+    if (!report.checks.empty()) {
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"result"});
+        columns.push_back({"item"});
+        columns.push_back({"detail"});
+        std::vector<frame::TableRow> rows;
+        for (const runtime::HookCheckReport::Check& check : report.checks) {
+            rows.push_back(frame::TableRow{{check.pass ? "pass" : "FAIL", check.item, check.detail},
+                                           {check.pass ? frame::CellTone::Pass : frame::CellTone::Fail}});
+        }
+        EmitFrameLines(
+            frame::RenderTable("静态检查", columns, rows, theme, frame::Light(), HookCliFrameWidth()));
     }
     if (args.verb == "test") {
-        TermOut() << "fixtures(fake adapter,真实 Lua runtime):\n";
         if (report.fixtures.empty()) {
-            TermOut() << "  (无用例;行为未验)\n";
-        }
-        for (const runtime::HookCheckReport::Fixture& fixture : report.fixtures) {
-            TermOut() << "  [" << (!fixture.ran ? "SKIP" : fixture.pass ? "pass" : "FAIL") << "] "
-                      << fixture.name << "  " << fixture.detail << "\n";
+            PrintNotice(theme, {"(无用例;行为未验)"});
+        } else {
+            // fixtures 表:SKIP=Skip 色、pass=Pass 色、FAIL=Fail 色——三态
+            // 齐了(单子批 2 验收点)。
+            std::vector<frame::TableColumn> columns;
+            columns.push_back({"result"});
+            columns.push_back({"name"});
+            columns.push_back({"detail"});
+            std::vector<frame::TableRow> rows;
+            for (const runtime::HookCheckReport::Fixture& fixture : report.fixtures) {
+                const char* result = !fixture.ran ? "SKIP" : fixture.pass ? "pass" : "FAIL";
+                const frame::CellTone tone =
+                    !fixture.ran ? frame::CellTone::Skip : fixture.pass ? frame::CellTone::Pass : frame::CellTone::Fail;
+                rows.push_back(frame::TableRow{{result, fixture.name, fixture.detail}, {tone}});
+            }
+            EmitFrameLines(frame::RenderTable("fixtures(fake adapter,真实 Lua runtime)", columns, rows, theme,
+                                              frame::Light(), HookCliFrameWidth()));
         }
     }
     if (!report.unverified.empty()) {
-        TermOut() << "未验项(明列,不冒充):\n";
+        std::vector<frame::ListRow> rows;
         for (const std::string& item : report.unverified) {
-            TermOut() << "  - " << item << "\n";
+            rows.push_back(frame::ListRow{item, {}, {}, frame::Bullet::None});
         }
+        EmitFrameLines(
+            frame::RenderList("未验项(明列,不冒充)", rows, theme, frame::Light(), HookCliFrameWidth()));
     }
-    TermOut() << "退出码 " << report.exit_code() << "(0 全过 / 1 有 fail / 2 包读不到)\n";
+    PrintNotice(theme, {"退出码 " + std::to_string(report.exit_code()) + "(0 全过 / 1 有 fail / 2 包读不到)"});
     TermOut().flush();
     return report.exit_code();
 }
 
 int RunHookInitCommand(const HookCliArgs& args) {
+    const lubancode::cli::Theme theme = lubancode::cli::ResolveTheme(
+        std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
     if (!IsValidHookId(args.name)) {
         TermErr() << "hook 名字只认字母/数字/-/_(最长 64): " << args.name << "\n";
         return 2;
@@ -215,10 +298,12 @@ int RunHookInitCommand(const HookCliArgs& args) {
             return 2;
         }
     }
-    TermOut() << "scaffold 已生成: " << package_dir.string() << "\n";
-    TermOut() << "下一步:\n";
-    TermOut() << "  lubancode hook test " << package_dir.string() << "\n";
-    TermOut() << "手册: docs/features/hooks/(挂点 / 中间件配置 / Host API)\n";
+    // 成功提示进键值对框("scaffold 已生成"/"下一步"/"手册"按冒号拆两列;
+    // 下一步的命令行并进 value,信息一字不丢)。错误仍走 TermErr 原样
+    // (CLI 错误流,端口不切换)。
+    PrintNotice(theme, {"scaffold 已生成: " + package_dir.string(),
+                        "下一步: lubancode hook test " + package_dir.string(),
+                        "手册: docs/features/hooks/(挂点 / 中间件配置 / Host API)"});
     TermOut().flush();
     return 0;
 }

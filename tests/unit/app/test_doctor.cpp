@@ -703,3 +703,21 @@ TEST_CASE("FormatRipgrepDoctorSection: 三层账/命中层与版本/全缺指引
         CHECK(lines[5].find("fetch_ripgrep.sh") != std::string::npos);  // 修复指引
     }
 }
+
+// ---------------------------------------------------------------------------
+// TUI 排版批 2(/doctor cache probe):分型判词 -> 语义色映射,形状测试钉
+// (探针本体要真网络,不进单测;渲染段的框/表格形状由 test_hook_check/
+// test_hooks_commands 的同族册承载)。
+// ---------------------------------------------------------------------------
+TEST_CASE("CacheProbeVerdictAccent: 分型判词上语义色,好坏不糊") {
+    CHECK(app::CacheProbeVerdictAccent(app::CacheProbeVerdict::StableHit) ==
+          cli::frame::FieldAccent::Pass);
+    CHECK(app::CacheProbeVerdictAccent(app::CacheProbeVerdict::FixedQuantumHit) ==
+          cli::frame::FieldAccent::Stats);  // 部分可用:黄,不冒充绿
+    CHECK(app::CacheProbeVerdictAccent(app::CacheProbeVerdict::IntermittentMiss) ==
+          cli::frame::FieldAccent::Error);
+    CHECK(app::CacheProbeVerdictAccent(app::CacheProbeVerdict::NoHit) ==
+          cli::frame::FieldAccent::Error);
+    CHECK(app::CacheProbeVerdictAccent(app::CacheProbeVerdict::NotReported) ==
+          cli::frame::FieldAccent::Muted);  // 无法判定:淡色,不冒充结论
+}

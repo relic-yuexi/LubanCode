@@ -125,3 +125,30 @@ plain 主题(`theme.reset` 空串——全仓既有探针,覆盖 `--no-color`、
 `show.header` 四枚既有键的**信息**(标题、失败原因、日志路径、所在目录)
 并进了新排版,键本身保留在 i18n 表里不删——信息一个不丢,只是不再逐句
 成行。
+
+## 批 2 落地时补的裁量(高频资源类,后续批次照办)
+
+批 2(`/hooks`、`lubancode hook validate/test/init`、`/doctor cache
+probe/usage`、`/plugin` 一族,2026-09-23)落地时的五条裁量:
+
+1. **硬编码中文的老文件按"不添不改一个字"办**。`hook_commands.cpp` 的
+   文案从来是硬编码中文(不走 i18n 表),"i18n 键不新增"合同在此读作:
+   既有句子原样进 frame,一字不添不改;SentenceField 拆的还是句内冒号。
+   后续批次遇同款老文件照此办理,不趁机补 i18n 化(那是另一笔账)。
+2. **流式进度行不进框**。探针类命令(`/doctor cache probe` 的逐轮轮号
+   行、`/doctor cache usage` 的"发探针"行)每轮一发 HTTP,进度必须即时
+   可见——流式行保持 TermOut 原样,轮**结果**收集进收尾的汇总表。
+   框只装结论,不装等待。
+3. **引导下文的尾冒号剥掉**。旧平铺排版的 "静态检查:"/"已装载 N 条
+   hook 定义(...):" 这类句子自带尾冒号(引导下一行),进 frame 标题
+   就是废话——标题化时剥掉;SentenceField 拆列吃冒号是同一条裁量的
+   逐句版。
+4. **CLI 子命令没有会话主题,按 ManageSession 先例现起**:
+   `ResolveTheme(std::string(), DetectConsoleCapability().colors_enabled)`
+   ——管道/重定向自然降 plain,测试进程里钉的就是 plain 形状。--json
+   机器面只收口输出端口(std::cout -> TermOut),落盘字节级不变。
+5. **命令族名勘误**:单子"现状证据"表的 `/workspace`(行号 274/368/
+   497/592/618/622)实为 `workspace_commands.cpp` 里的 `/plugin` 一族
+   (inspect/doctor/test/trust-untrust/reload/enable-disable)——全仓没有
+   /workspace 命令,行号精确对应 /plugin 分支。批 2 按实际命令族办;
+   `src/workspace/`(manifest_lock 等)是另一单的领地,一字未碰。
