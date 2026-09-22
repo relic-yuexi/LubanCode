@@ -15,6 +15,7 @@
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "privacy/secret_scan.hpp"
+#include "tool_semantics.hpp"  // ToolSourceKindName:来源标签唯一真源(AR-08 尾巴收敛)
 #include "tools/registry.hpp"
 #include "trajectory/directory.hpp"  // ReadSessionJson(runtime 的封口口径)
 
@@ -56,22 +57,6 @@ std::string EvidenceLine(const EvidenceItem& item) {
         line += " @event " + *item.event_id;
     }
     return line;
-}
-
-// tools 层来源枚举 -> 稳定名(与 agent::ToString(ToolSourceKind) 同表;
-// 不引 agent 层,防 insights 面反向耦合)。
-std::string ToolSourceName(lubancode::tools::ToolSourceKind kind) {
-    switch (kind) {
-        case lubancode::tools::ToolSourceKind::Builtin: return "builtin";
-        case lubancode::tools::ToolSourceKind::Mcp: return "mcp";
-        case lubancode::tools::ToolSourceKind::Lsp: return "lsp";
-        case lubancode::tools::ToolSourceKind::PluginLua: return "plugin-lua";
-        case lubancode::tools::ToolSourceKind::PluginNative: return "plugin-native";
-        case lubancode::tools::ToolSourceKind::Agent: return "agent";
-        case lubancode::tools::ToolSourceKind::Ptc: return "ptc";
-        case lubancode::tools::ToolSourceKind::Deferred: return "deferred";
-    }
-    return "builtin";
 }
 
 }  // namespace
@@ -415,10 +400,10 @@ bool BuildStaticInput(const PromptAuditContext& context,
             definition.input_schema = tool->input_schema();
             const auto* registration = context.registry->RegistrationOf(tool->name());
             if (registration != nullptr) {
-                definition.source_kind = ToolSourceName(registration->source_kind);
+                definition.source_kind = ToolSourceKindName(registration->source_kind);
                 definition.source_instance = registration->source_instance;
             } else {
-                definition.source_kind = "builtin";
+                definition.source_kind = ToolSourceKindName(lubancode::ToolSourceKind::Builtin);
             }
             input.tools.push_back(std::move(definition));
         }

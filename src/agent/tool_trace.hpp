@@ -40,7 +40,8 @@ namespace lubancode::agent {
 
 // 工具来源/副作用等级:AR-08 起与 tools 侧共用同一枚枚举(下沉到中立
 // 合同头 tool_semantics.hpp,值域一字未动),本命名空间经 using 兼容。
-// 字符串编解码仍钉在下面的 ToString/Parse——落盘标签不动。
+// 来源字符串编解码的唯一真源也去了 tool_semantics.hpp(AR-08 尾巴收敛
+// 单),下面的 ToString/Parse 是薄委托——落盘标签不动。
 using ToolSourceKind = ::lubancode::ToolSourceKind;
 using EffectClass = ::lubancode::EffectClass;
 std::string ToString(ToolSourceKind kind);

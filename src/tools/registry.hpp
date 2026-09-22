@@ -20,8 +20,8 @@
 namespace lubancode::tools {
 
 // 工具来源:与 agent 侧共用同一枚枚举(AR-08 起下沉到中立合同头
-// tool_semantics.hpp,值域一字未动)。持久化字符串映射在 agent/
-// tool_trace.cpp,本层照旧零 agent 依赖。
+// tool_semantics.hpp,值域一字未动)。持久化字符串映射(ToolSourceKindName)
+// 也在那枚中立头,本层照旧零 agent 依赖。
 using ToolSourceKind = ::lubancode::ToolSourceKind;
 
 // Package 来源账(统一封装单阶段 5 的 ToolOrigin 轻账):packaged 组件挂上
