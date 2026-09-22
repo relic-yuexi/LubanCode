@@ -1401,9 +1401,9 @@ TEST_CASE("compact 材料工具配对:双号换算保真,孤儿按文本投影,�
         orphan.message = {{"role", "tool"}, {"tool_call_id", "action-ghost"},
                           {"content", "孤儿结果"}};
         const auto orphan_receipt =
-            writer.AppendMessage(std::move(orphan), Durability::PowerLoss);
+            writer->AppendMessage(std::move(orphan), Durability::PowerLoss);
         REQUIRE(orphan_receipt.status == WriteReceipt::Status::Committed);
-        REQUIRE(writer.AdmitMessages({orphan_receipt.id}).status == WriteReceipt::Status::Committed);
+        REQUIRE(writer->AdmitMessages({orphan_receipt.id}).status == WriteReceipt::Status::Committed);
         harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
         auto client = StepSummaryClient();
         auto input = ManualInput();
@@ -1442,9 +1442,9 @@ TEST_CASE("compact 材料工具配对:双号换算保真,孤儿按文本投影,�
         filler.origin = MessageOrigin::Human;
         filler.message = {{"role", "user"}, {"content", BigText(800, 'z')}};
         const auto filler_receipt =
-            writer.AppendMessage(std::move(filler), Durability::PowerLoss);
+            writer->AppendMessage(std::move(filler), Durability::PowerLoss);
         REQUIRE(filler_receipt.status == WriteReceipt::Status::Committed);
-        REQUIRE(writer.AdmitMessages({filler_receipt.id}).status == WriteReceipt::Status::Committed);
+        REQUIRE(writer->AdmitMessages({filler_receipt.id}).status == WriteReceipt::Status::Committed);
         harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
         auto client = StepSummaryClient();
         auto input = ManualInput();
