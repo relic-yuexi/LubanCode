@@ -186,7 +186,7 @@ int RunCheck(bool prerelease, bool json) {
         return 0;
     }
 
-    std::printf("当前版本: %s\n", app::kVersion);
+    std::printf("当前版本: %s\n", std::string(app::kVersion).c_str());
     PrintLayoutLine(layout);
     std::printf("远端 %s 通道: %s(%s)%s\n", target->channel.c_str(),
                 target->release.tag_name.c_str(), target->release.version.c_str(),
@@ -203,7 +203,7 @@ int RunCheck(bool prerelease, bool json) {
     } else {
         std::printf("结论: 已是最新(本地 %s,远端 %s)。本地不低于 Latest,不降级;"
                     "回退用 lubancode update --rollback。\n",
-                    app::kVersion, target->release.version.c_str());
+                    std::string(app::kVersion).c_str(), target->release.version.c_str());
     }
     return 0;
 }
@@ -384,7 +384,7 @@ int RunUpdateCommand(const UpdateCommandArgs& args) {
     if (comparison.has_value() && *comparison <= 0) {
         std::printf("已是最新(本地 %s,远端 %s)。本地不低于远端,不降级;"
                     "回退用 lubancode update --rollback。\n",
-                    app::kVersion, target->release.version.c_str());
+                    std::string(app::kVersion).c_str(), target->release.version.c_str());
         return 0;
     }
     // 最低更新器版本门槛:update-meta.json 里声明了就得过,过不了先走包内
@@ -402,7 +402,7 @@ int RunUpdateCommand(const UpdateCommandArgs& args) {
                          "[update] 本机 %s 低于该 Release 要求的最低更新器版本 %s。"
                          "先下载发行包运行包内安装脚本升级一次,"
                          "之后 lubancode update 恢复一键更新。\n",
-                         app::kVersion, minimum_updater_version.c_str());
+                         std::string(app::kVersion).c_str(), minimum_updater_version.c_str());
             return 1;
         }
     }
